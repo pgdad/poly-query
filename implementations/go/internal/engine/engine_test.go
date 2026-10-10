@@ -120,6 +120,62 @@ func TestQueryErrors(t *testing.T) {
 	}
 }
 
+func TestPhase2Queries(t *testing.T) {
+	e := newEngine(t)
+	data := "pid,city\n1,Helsinki\n2,Tampere\n4,Oulu\n9,Turku\n"
+	if _, err := e.Load(LoadRequest{Table: "home", Data: &data, Options: ingest.DefaultOptions(ingest.CSV)}); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"SELECT p.name, h.city FROM people p JOIN home h ON h.pid = p.id ORDER BY p.id":                "name:STRING,city:STRING|Alice,Helsinki|Bob,Tampere|dave,Oulu",
+		"SELECT p.id, h.city FROM people p LEFT JOIN home h ON h.pid = p.id ORDER BY 1":                "id:INT64,city:STRING|1,Helsinki|2,Tampere|3,null|4,Oulu",
+		"SELECT COUNT(*) FROM people, home":                                                            "_col1:INT64|16",
+		"SELECT age > 30 AS old, COUNT(*) AS n FROM people GROUP BY 1 ORDER BY 1":                      "old:BOOLEAN,n:INT64|null,1|false,1|true,2",
+		"SELECT name FROM people WHERE id IN (SELECT pid FROM home) AND name LIKE '%a%' ORDER BY name": "name:STRING|dave",
+		"SELECT name FROM people p WHERE NOT EXISTS (SELECT 1 FROM home h WHERE h.pid = p.id)":         "name:STRING|Carol",
+		"WITH t AS (SELECT city FROM home WHERE pid < 5) SELECT COUNT(*) AS n FROM t":                  "n:INT64|3",
+		"SELECT DISTINCT LENGTH(city) AS l FROM home ORDER BY l":                                       "l:INT64|4|5|7|8",
+		"SELECT CASE WHEN age IS NULL THEN 'n/a' ELSE CONCAT(age) END AS a FROM people ORDER BY id":    "a:STRING|34|28|n/a|52",
+		"SELECT name, (SELECT city FROM home WHERE pid = p.id) AS c FROM people p WHERE id = 2":        "name:STRING,c:STRING|Bob,Tampere",
+		"SELECT x.c FROM (SELECT COUNT(*) AS c FROM people GROUP BY age IS NULL) x ORDER BY c":         "c:INT64|1|3",
+		"SELECT UPPER(SUBSTR(name, 1, 1)) || LOWER(SUBSTR(name, 2)) AS n FROM people WHERE id = 4":     "n:STRING|Dave",
+		"SELECT ROUND(AVG(score), 1) AS a, SUM(age) FILTERED FROM people":                              "a:FLOAT64,FILTERED:INT64|83.9,114",
+	}
+	for sql, want := range cases {
+		res, err := e.Query(context.Background(), sql, QueryOptions{MaxRows: -1})
+		if err != nil {
+			t.Errorf("%s: %v", sql, err)
+			continue
+		}
+		if got := render(res); got != want {
+			t.Errorf("%s:\n got %s\nwant %s", sql, got, want)
+		}
+	}
+	res, err := e.Query(context.Background(), "EXPLAIN SELECT name FROM people WHERE id = 1", QueryOptions{MaxRows: -1})
+	if err != nil || len(res.Rows) != 1 || !strings.Contains(res.Rows[0][0].S, `"op":"TableScan"`) {
+		t.Errorf("EXPLAIN: %v %+v", err, res)
+	}
+	if _, err := e.Explain("SELECT nope FROM people", QueryOptions{}); !errs.Is(err, errs.SemanticError) {
+		t.Errorf("explain error: %v", err)
+	}
+}
+
+func TestJoinRowLimit(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MaxJoinRows = 20
+	e := New(cfg)
+	data := people
+	if _, err := e.Load(LoadRequest{Table: "people", Data: &data, Options: ingest.DefaultOptions(ingest.CSV)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Query(context.Background(), "SELECT COUNT(*) FROM people a, people b", QueryOptions{MaxRows: -1}); err != nil {
+		t.Errorf("16 rows are within the limit: %v", err)
+	}
+	if _, err := e.Query(context.Background(), "SELECT COUNT(*) FROM people a, people b, people c", QueryOptions{MaxRows: -1}); !errs.Is(err, errs.ResourceLimit) {
+		t.Errorf("join limit: %v", err)
+	}
+}
+
 func TestLimits(t *testing.T) {
 	e := newEngine(t)
 	if _, err := e.Query(context.Background(), "SELECT id FROM people", QueryOptions{MaxRows: 3}); !errs.Is(err, errs.ResourceLimit) {
