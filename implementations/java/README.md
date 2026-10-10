@@ -148,7 +148,7 @@ column. Constants of another DECIMAL scale (or TIMESTAMP constants against a DAT
 are converted exactly with rational floor/ceil, so `int_col > 2.5` becomes `int_col >= 3`.
 Selectivity follows the spec: equality ≈ k/distinct, ranges by linear interpolation between
 min and max (1/3 for strings). The most selective usable index is chosen when its
-selectivity is ≤ 10% — or when it is expected to return at most 4 rows (on tiny tables a
+selectivity is ≤ 10% — or when it is expected to return at most 3 rows (on tiny tables a
 lookup returning a handful of rows is never worse than a scan); otherwise a table scan is
 used, which skips row groups whose min/max exclude a sargable predicate. The complete filter
 is still evaluated above the access path, so results never depend on the choice.

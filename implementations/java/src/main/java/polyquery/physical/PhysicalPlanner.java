@@ -27,7 +27,7 @@ public final class PhysicalPlanner {
     /** An index scan is chosen when at most this fraction of the table's rows is expected to match. */
     static final double INDEX_SELECTIVITY_THRESHOLD = 0.10;
     /** ... or when at most this many rows are expected (a lookup this small never loses to a scan). */
-    static final double INDEX_ROWS_THRESHOLD = 4;
+    static final double INDEX_ROWS_THRESHOLD = 3;
 
     private final JoinStrategy joinStrategy;
     private final boolean useIndexes;
