@@ -1,0 +1,41 @@
+{
+ "seconds": 1.5,
+ "status": {
+  "build_exit": "0",
+  "conformance_exit": "1"
+ },
+ "phases": [
+  1
+ ],
+ "summary": {
+  "by_phase": {
+   "1": {
+    "total": 249,
+    "pass": 247,
+    "fail": 2,
+    "error": 0,
+    "not_implemented": 0
+   }
+  },
+  "total": {
+   "total": 249,
+   "pass": 247,
+   "fail": 2,
+   "error": 0,
+   "not_implemented": 0
+  }
+ },
+ "phase_passed": {
+  "1": false
+ },
+ "capabilities": [
+  "ingest.csv",
+  "ingest.json",
+  "ingest.jsonl",
+  "phase1",
+  "sql.basic",
+  "test.functions"
+ ],
+ "extra": {},
+ "outcome": "tests_failed"
+}
