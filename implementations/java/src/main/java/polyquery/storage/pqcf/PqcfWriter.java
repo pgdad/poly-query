@@ -21,6 +21,7 @@ import java.util.zip.CRC32;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.index.Index;
+import polyquery.json.JsonWriter;
 import polyquery.storage.ColumnCursor;
 import polyquery.storage.ColumnSchema;
 import polyquery.storage.Table;
@@ -164,7 +165,7 @@ public final class PqcfWriter {
             group.put("chunks", chunks);
             groups.add(group);
         }
-        byte[] meta = polyquery.json.JsonWriter.write(metadata(table, writer, groups)).getBytes(StandardCharsets.UTF_8);
+        byte[] meta = JsonWriter.write(metadata(table, writer, groups)).getBytes(StandardCharsets.UTF_8);
         out.write(meta);
         CRC32 crc = new CRC32();
         crc.update(meta);

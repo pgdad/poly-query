@@ -1,6 +1,7 @@
 package polyquery.storage.pqcf;
 
 import polyquery.types.DataType;
+import polyquery.types.TypeKind;
 
 /** Column chunk encodings of PQCF v1 (pqcf-v1.md §3). */
 public enum Encoding {
@@ -14,7 +15,7 @@ public enum Encoding {
     public boolean appliesTo(DataType type) {
         return switch (this) {
             case PLAIN -> true;
-            case DICT -> type.kind() == polyquery.types.TypeKind.STRING;
+            case DICT -> type.kind() == TypeKind.STRING;
             case RLE -> switch (type.kind()) {
                 case BOOLEAN, INT64, DECIMAL, DATE, TIMESTAMP -> true;
                 default -> false;
