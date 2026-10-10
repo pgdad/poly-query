@@ -1,0 +1,10 @@
+#!/bin/sh
+# PolyQuery launcher: runs the engine binary built by `make build`, building
+# it first if necessary. Works from any current directory.
+set -e
+here=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+bin="$here/build/polyquery"
+if [ ! -x "$bin" ]; then
+    make -s -C "$here" build >&2
+fi
+exec "$bin" "$@"
