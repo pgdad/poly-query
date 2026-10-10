@@ -41,21 +41,21 @@
   [rows]
   (ops/reducible
    (fn [f init]
-     (let [buf (volatile! (object-array b/capacity))
+     (let [state (object-array [(object-array b/capacity)]) ; the current buffer
            cnt (long-array 1)
            flush (fn [acc]
                    (let [n (aget cnt 0)
-                         ^objects rows @buf]
+                         ^objects rows (aget state 0)]
                      (if (zero? n)
                        acc
                        (let [rows (if (= n b/capacity) rows (java.util.Arrays/copyOf rows (int n)))
                              width (alength ^objects (aget rows 0))]
-                         (vreset! buf (object-array b/capacity))
+                         (aset state 0 (object-array b/capacity))
                          (aset cnt 0 0)
                          (f acc (b/rows->batch rows n width))))))
            acc (reduce (fn [acc row]
                          (let [n (aget cnt 0)]
-                           (aset ^objects @buf n row)
+                           (aset ^objects (aget state 0) n row)
                            (aset cnt 0 (inc n))
                            (if (= (inc n) b/capacity) (flush acc) acc)))
                        init rows)]

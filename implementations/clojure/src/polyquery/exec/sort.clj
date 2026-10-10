@@ -237,6 +237,17 @@
             (System/arraycopy nulls 0 out nn (alength nulls))))
       out)))
 
+(defn long-order
+  "Stable ascending permutation of signed long keys (radix sort)."
+  ^ints [^longs ks qctx]
+  (let [n (alength ks)
+        us (long-array n)
+        idx (int-array n)]
+    (dotimes [i n]
+      (aset us i (bit-xor (aget ks i) Long/MIN_VALUE))
+      (aset idx i (int i)))
+    (radix-order us idx qctx)))
+
 ;; ---------------------------------------------------------------------------
 
 (defn sort-rows

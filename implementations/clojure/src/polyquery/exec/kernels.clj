@@ -124,7 +124,7 @@
   are evaluated, then yield an all-NULL BoolVec."
   [env e]
   (let [k (compile-kernel env e)]
-    (if (= :boolean (t/kind (:type e)))
+    (if-not (= :null (t/kind (:type e)))
       k
       (let [nul (b/constant-vec :boolean nil)]
         (reify Kernel (eval [_ bt sel n] (ev k bt sel n) nul))))))

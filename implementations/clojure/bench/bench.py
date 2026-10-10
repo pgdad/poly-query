@@ -49,6 +49,7 @@ QUERIES = {
 }
 
 CONFIGS = {
+    "default": {},
     "baseline": {"mode": "row", "threads": 1, "optimize": False},
     "row": {"mode": "row", "threads": 1},
     "vec1": {"mode": "vectorized", "threads": 1},
@@ -58,9 +59,9 @@ CONFIGS = {
 
 
 class Session:
-    def __init__(self, data_dir: str, java_opts: str):
+    def __init__(self, data_dir: str, java_opts: str, launcher: str):
         env = dict(os.environ, POLYQUERY_JAVA_OPTS=java_opts)
-        self.proc = subprocess.Popen([str(LAUNCHER), "session", "--data-dir", data_dir],
+        self.proc = subprocess.Popen([launcher, "session", "--data-dir", data_dir],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env)
         self.n = 0
 
@@ -87,10 +88,11 @@ def main() -> int:
     ap.add_argument("--only")
     ap.add_argument("--configs", default="baseline,row,vec1,vec8")
     ap.add_argument("--java-opts", default="-Xmx24g")
+    ap.add_argument("--engine", default=str(LAUNCHER), help="launcher to benchmark (default: this engine)")
     ap.add_argument("--verify", action="store_true", help="compare result digests instead of timing")
     args = ap.parse_args()
 
-    s = Session(args.data_dir, args.java_opts)
+    s = Session(args.data_dir, args.java_opts, args.engine)
     for t, f in TABLES.items():
         schema = json.loads((Path(args.data_dir) / f"{f}.schema.json").read_text())
         t0 = time.monotonic()

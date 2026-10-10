@@ -4,8 +4,8 @@
       right input of LEFT joins), probed with the other input's rows; the
       table can be built once and shared by the partitions of a parallel
       probe (:prebuilt);
-    * sort-merge join — both inputs sorted on their key values, equal-key
-      runs joined pairwise;
+    * sort-merge join — both inputs sorted on their key values (radix sort
+      for integer keys), equal-key runs joined pairwise;
     * nested-loop join — every pair of rows; for equi-joins the key
       equalities are tested first and the residual condition only on pairs
       with equal keys, exactly like the other algorithms.
@@ -18,6 +18,7 @@
             [polyquery.exec.context :as ctx]
             [polyquery.exec.expr :as expr]
             [polyquery.exec.operators :as ops]
+            [polyquery.exec.sort :as sort]
             [polyquery.util.text :as text]
             [polyquery.values :as v])
   (:import (java.math BigInteger)
@@ -212,19 +213,31 @@
   [rows key-of env]
   (let [qctx (:ctx env)
         keyed (ArrayList.)
-        unkeyed (ArrayList.)]
-    (reduce (fn [^long n ^objects r]
-              (when (zero? (rem n 4096))
-                (ctx/check! qctx)
-                (ctx/reserve! qctx (* 4096 (ctx/row-bytes (+ 2 (alength r))))))
+        unkeyed (ArrayList.)
+        cnt (long-array 1)]
+    (reduce (fn [_ ^objects r]
+              (let [n (aget cnt 0)]
+                (aset cnt 0 (inc n))
+                (when (zero? (rem n 4096))
+                  (ctx/check! qctx)
+                  (ctx/reserve! qctx (* 4096 (ctx/row-bytes (+ 2 (alength r)))))))
               (if-some [k (key-of r)]
                 (.add keyed (object-array [k r]))
                 (.add unkeyed r))
-              (inc n))
-            0 rows)
-    (let [arr (.toArray keyed)]
-      (Arrays/sort arr ^Comparator entry-comparator)
-      [arr unkeyed])))
+              nil)
+            nil rows)
+    (let [arr (.toArray keyed)
+          n (alength arr)]
+      (if (every? #(instance? Long (aget ^objects % 0)) arr)
+        ;; integer keys: stable radix sort of the extracted keys
+        (let [ks (long-array n)]
+          (dotimes [i n] (aset ks i (long (aget ^objects (aget arr i) 0))))
+          (let [^ints order (sort/long-order ks qctx)
+                out (object-array n)]
+            (dotimes [i n] (aset out i (aget arr (aget order i))))
+            [out unkeyed]))
+        (do (Arrays/sort arr ^Comparator entry-comparator)
+            [arr unkeyed])))))
 
 (defmethod ops/build :merge-join [plan env]
   (let [left (ops/build-input (:left plan) env)
