@@ -45,6 +45,7 @@ QUERIES = {
     "Q8 full sort": "SELECT id, uniq_key FROM sk ORDER BY uniq_key",
     "Q9 sensor agg": "SELECT sensor_id, AVG(temperature), MAX(humidity), COUNT(*) FROM sensor WHERE status = 'ok' GROUP BY sensor_id",
     "Q10 3-way join (comma)": "SELECT COUNT(*), SUM(i.quantity) FROM items i, products p, orders o WHERE o.order_id = i.order_id AND p.product_id = i.product_id AND p.category = 'books'",
+    "Q12 3-way join (bad order)": "SELECT COUNT(*), SUM(i.quantity) FROM orders o, products p, items i WHERE o.order_id = i.order_id AND p.product_id = i.product_id AND p.category = 'books'",
     "Q11 CASE/strings": "SELECT currency, SUM(CASE WHEN status = 'approved' THEN amount ELSE 0 END), COUNT(*) FROM tx WHERE category LIKE 'g%' OR category IN ('travel', 'utilities') GROUP BY currency",
 }
 

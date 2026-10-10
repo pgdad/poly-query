@@ -378,7 +378,95 @@ thousands of queries without a mismatch).
 
 ### Measurements
 
-MEASUREMENTS_PLACEHOLDER
+Setup: 32-core x86-64 machine, OpenJDK 27, `POLYQUERY_JAVA_OPTS=-Xmx24g`,
+datasets from `pqgen.py generate --scale 1m` (transactions, order_items,
+sensor_readings, sort_keys: 1M rows; orders 250K; customers 100K; products
+20K), loaded as CSV with their schemas (column layout). `bench/bench.py`:
+one session, every query 3× warm-up then the median of 9 runs, wall clock
+measured by the client (including the protocol round trip), `result:
+count` (no row serialization). Queries:
+
+| id | query |
+|---|---|
+| Q1 | `SELECT COUNT(*) FROM tx WHERE amount > 500 AND status = 'approved'` |
+| Q2 | `SELECT category, COUNT(*), SUM(amount), AVG(fee), MIN(ts), MAX(ts) FROM tx GROUP BY category` |
+| Q3 | `SELECT customer_id, SUM(amount), COUNT(*) FROM tx GROUP BY customer_id` (80K groups) |
+| Q4 | `SELECT tx_id, amount * 2 + fee, bucket % 7 FROM tx WHERE bucket < 200 AND NOT is_fraud` (200K rows) |
+| Q5 | `SELECT c.segment, COUNT(*), SUM(t.amount) FROM tx t JOIN cust c ON c.customer_id = t.customer_id GROUP BY c.segment` |
+| Q6 | `SELECT o.status, SUM(i.quantity), COUNT(*) FROM items i JOIN orders o ON o.order_id = i.order_id GROUP BY o.status` |
+| Q7 | `SELECT tx_id, amount FROM tx ORDER BY amount DESC, tx_id LIMIT 10` |
+| Q8 | `SELECT id, uniq_key FROM sk ORDER BY uniq_key` (1M rows) |
+| Q9 | `SELECT sensor_id, AVG(temperature), MAX(humidity), COUNT(*) FROM sensor WHERE status = 'ok' GROUP BY sensor_id` |
+| Q10 | `SELECT COUNT(*), SUM(i.quantity) FROM items i, products p, orders o WHERE o.order_id = i.order_id AND p.product_id = i.product_id AND p.category = 'books'` |
+| Q11 | `SELECT currency, SUM(CASE WHEN status = 'approved' THEN amount ELSE 0 END), COUNT(*) FROM tx WHERE category LIKE 'g%' OR category IN ('travel', 'utilities') GROUP BY currency` |
+| Q12 | Q10 with `FROM orders o, products p, items i` (the FROM order starts with a cross product) |
+
+**Before / after (default options).** "Before" is the accepted Phase 4
+engine (commit `a091351`: row-at-a-time, single-threaded, predicate
+pushdown only); "after" is this engine with default options (`mode: auto`
+= vectorized, 8 threads, all optimizations):
+
+| query | before | after | speed-up |
+|---|---:|---:|---:|
+| Q1 filter + count | 23 ms | 3 ms | 7.7× |
+| Q2 group by, 20 groups | 49 ms | 3 ms | 16× |
+| Q3 group by, 80K groups | 87 ms | 14 ms | 6.2× |
+| Q4 projection + filter | 47 ms | 6 ms | 7.8× |
+| Q5 join 1M × 100K + group by | 82 ms | 10 ms | 8.2× |
+| Q6 join 1M × 250K + group by | 50 ms | 15 ms | 3.3× |
+| Q7 top-10 of 1M | 776 ms | 3 ms | 259× |
+| Q8 full sort of 1M rows | 686 ms | 48 ms | 14× |
+| Q9 filter + group by | 52 ms | 3 ms | 17× |
+| Q10 3-way join | 44 ms | 15 ms | 2.9× |
+| Q11 CASE/LIKE/IN + group by | 86 ms | 5 ms | 17× |
+| Q12 3-way join, bad FROM order | fails (`RESOURCE_LIMIT`: cross product > 100M rows) | 32 ms | — |
+
+**By option (this engine).** `baseline` = `{"mode":"row","threads":1,
+"optimize":false}`; `row` = `{"mode":"row","threads":1}`; `vec1` =
+`{"mode":"vectorized","threads":1}`; `vec8` = `{"mode":"vectorized",
+"threads":8}`; `merge8` = vec8 with `"join":"merge"`:
+
+| query | baseline | row | vec1 | vec8 | merge8 |
+|---|---:|---:|---:|---:|---:|
+| Q1 | 22 ms | 22 ms | 8 ms | 2 ms | 2 ms |
+| Q2 | 48 ms | 47 ms | 12 ms | 3 ms | 2 ms |
+| Q3 | 77 ms | 76 ms | 14 ms | 13 ms | 13 ms |
+| Q4 | 45 ms | 45 ms | 18 ms | 6 ms | 5 ms |
+| Q5 | 79 ms | 75 ms | 31 ms | 10 ms | 229 ms |
+| Q6 | 51 ms | 50 ms | 30 ms | 15 ms | 104 ms |
+| Q7 | 300 ms | 25 ms | 11 ms | 3 ms | 3 ms |
+| Q8 | 311 ms | 322 ms | 44 ms | 49 ms | 48 ms |
+| Q9 | 54 ms | 55 ms | 11 ms | 2 ms | 2 ms |
+| Q10 | fails (cross product) | 43 ms | 28 ms | 14 ms | 130 ms |
+| Q11 | 83 ms | 82 ms | 20 ms | 4 ms | 3 ms |
+
+Reading the table: vectorization alone (row → vec1) gives 2.5–7× on
+scans, filters and aggregations; parallelism (vec1 → vec8) another 2–5×
+where the work is a scan pipeline (Q3 is dominated by its 80K-group merge,
+Q8 by the single sort). The optimizer is what makes Q10/Q12 run at all
+(pushdown turns the comma joins into hash joins, reordering avoids the
+cross product) and top-N turns Q7's full sort into a 10-row heap
+(baseline → row). The sort-merge join is the slowest join algorithm here
+(row-at-a-time, both sides materialized and sorted; integer keys are radix
+sorted); hash join is the automatic choice.
+
+**Individual optimizations** (measured while developing, same setup;
+before → after the change):
+
+| change | query / config | before | after |
+|---|---|---:|---:|
+| kernels split below HotSpot's 8,000-byte compilation limit | Q1 vec1 | 77 ms | 11 ms |
+| comparator without per-comparison allocation | Q8 vec1 | 626 ms | 300 ms |
+| primitive-column sort (radix sort) | Q8 vec1 | 300 ms | 52 ms |
+| merge of partial aggregates with a group-id mapping | Q3 vec8 | 47 ms | 16 ms |
+| vectorized join probe + primitive join table | Q5 vec1 | 63 ms | 33 ms |
+| per-scan buffer arena (`PQ_SCAN_ARENA=0` → default) | Q4 vec8 | 7 ms | 5 ms |
+| per-scan buffer arena | Q9 vec8 | 6 ms | 4 ms |
+
+Results are identical across all configurations: `bench/bench.py --verify`
+compares the full results of every query under every configuration above
+(sorted unless ordered, FLOAT64 to 6 significant digits) — all match
+(Q10's baseline fails with `RESOURCE_LIMIT` instead).
 
 ## Design decisions (where the spec is silent or open)
 
