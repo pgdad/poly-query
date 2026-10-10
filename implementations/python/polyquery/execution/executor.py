@@ -1,11 +1,11 @@
-"""Runs a query plan to completion and collects its result rows."""
+"""Runs a physical plan to completion and collects its result rows."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from .. import errors
-from ..planner.plan import QueryPlan
+from ..planner.physical import PhysicalPlan
 from ..storage.catalog import Column
 from .context import ExecutionContext
 from .operators import execute
@@ -17,7 +17,8 @@ class QueryResult:
     rows: list[tuple]
 
 
-def run_plan(plan: QueryPlan, ctx: ExecutionContext, *, max_rows: int | None = None) -> QueryResult:
+def run_plan(plan: PhysicalPlan, ctx: ExecutionContext, *, max_rows: int | None = None) -> QueryResult:
+    ctx.subplans = plan.subplans
     rows: list[tuple] = []
     width = len(plan.columns)
     for batch in execute(plan.root, ctx):

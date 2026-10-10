@@ -1,19 +1,23 @@
 """Compiles bound expressions into Python closures ``fn(row) -> value``.
 
-Rows are tuples; NULL is ``None``. Every closure implements SQL NULL
-propagation and the runtime error rules of types.md §4.
+Rows are tuples; NULL is ``None``. A *layout* maps column keys to row slots;
+column keys that are not in the layout are correlation parameters, read from
+the execution context. Every closure implements SQL NULL propagation and the
+runtime error rules of types.md §4.
 """
 
 from __future__ import annotations
 
 import operator
+import re
 from typing import Any, Callable
 
 from .. import errors, values
 from ..analysis import bound as b
 from ..datatypes import TypeKind
-from .casts import cast_function
+from .casts import cast_function, identity
 from .context import ExecutionContext
+from .functions import compile_function
 
 RowFn = Callable[[tuple], Any]
 
@@ -156,9 +160,30 @@ def _binary(left: RowFn, right: RowFn, kernel: Callable[[Any, Any], Any]) -> Row
     return fn
 
 
+Layout = dict[b.ColumnKey, int]
+
+
+def _not3(v: Any) -> Any:
+    return None if v is None else not v
+
+
+def like_regex(pattern: str) -> re.Pattern[str]:
+    """Translates a LIKE pattern (``%``, ``_``; no escape character) to a regex."""
+    parts = []
+    for c in pattern:
+        if c == "%":
+            parts.append(".*")
+        elif c == "_":
+            parts.append(".")
+        else:
+            parts.append(re.escape(c))
+    return re.compile("".join(parts), re.DOTALL)
+
+
 class Compiler:
-    def __init__(self, ctx: ExecutionContext):
+    def __init__(self, ctx: ExecutionContext, layout: Layout):
         self.ctx = ctx
+        self.layout = layout
 
     def compile(self, expr: b.Expr) -> RowFn:
         return getattr(self, "_c_" + type(expr).__name__)(expr)
@@ -167,11 +192,12 @@ class Compiler:
         value = e.value
         return lambda row: value
 
-    def _c_ColumnSlot(self, e: b.ColumnSlot) -> RowFn:
-        return operator.itemgetter(e.slot)
-
-    def _c_AggRef(self, e: b.AggRef) -> RowFn:
-        return operator.itemgetter(e.index)
+    def _c_ColumnRef(self, e: b.ColumnRef) -> RowFn:
+        slot = self.layout.get(e.key)
+        if slot is not None:
+            return operator.itemgetter(slot)
+        params, key = self.ctx.params, e.key
+        return lambda row: params[key]
 
     def _c_Unary(self, e: b.Unary) -> RowFn:
         operand = self.compile(e.operand)
@@ -250,12 +276,7 @@ class Compiler:
 
     def _c_Not(self, e: b.Not) -> RowFn:
         operand = self.compile(e.operand)
-
-        def not_(row: tuple) -> Any:
-            v = operand(row)
-            return None if v is None else not v
-
-        return not_
+        return lambda row: _not3(operand(row))
 
     def _c_IsNull(self, e: b.IsNull) -> RowFn:
         operand = self.compile(e.operand)
@@ -271,6 +292,8 @@ class Compiler:
         if e.operand.type.is_null:
             return lambda row: None
         convert = cast_function(e.operand.type, e.type)
+        if convert is identity:
+            return operand
 
         def cast(row: tuple) -> Any:
             v = operand(row)
@@ -278,41 +301,228 @@ class Compiler:
 
         return cast
 
+    def _c_Like(self, e: b.Like) -> RowFn:
+        operand = self.compile(e.operand)
+        negated = e.negated
+        if isinstance(e.pattern, b.Literal):
+            if e.pattern.value is None:
+                return lambda row: None
+            match = like_regex(e.pattern.value).fullmatch
+
+            def like_const(row: tuple) -> Any:
+                v = operand(row)
+                if v is None:
+                    return None
+                return (match(v) is None) if negated else (match(v) is not None)
+
+            return like_const
+        pattern = self.compile(e.pattern)
+        cache: dict[str, re.Pattern[str]] = {}
+
+        def like(row: tuple) -> Any:
+            v = operand(row)
+            if v is None:
+                return None
+            p = pattern(row)
+            if p is None:
+                return None
+            regex = cache.get(p)
+            if regex is None:
+                if len(cache) > 1024:
+                    cache.clear()
+                regex = cache[p] = like_regex(p)
+            return (regex.fullmatch(v) is None) if negated else (regex.fullmatch(v) is not None)
+
+        return like
+
+    def _c_Between(self, e: b.Between) -> RowFn:
+        operand, low, high = (self.compile(x) for x in (e.operand, e.low, e.high))
+        negated = e.negated
+
+        def between(row: tuple) -> Any:
+            v = operand(row)
+            if v is None:
+                return None
+            lo, hi = low(row), high(row)
+            ge = None if lo is None else v >= lo
+            le = None if hi is None else v <= hi
+            if ge is False or le is False:
+                result: Any = False
+            elif ge is None or le is None:
+                result = None
+            else:
+                result = True
+            return _not3(result) if negated else result
+
+        return between
+
+    def _c_InList(self, e: b.InList) -> RowFn:
+        operand = self.compile(e.operand)
+        negated = e.negated
+        if all(b.is_constant(item) for item in e.items):
+            consts = [self.compile(item)(()) for item in e.items]
+            members = frozenset(v for v in consts if v is not None)
+            has_null = any(v is None for v in consts)
+
+            def in_const(row: tuple) -> Any:
+                v = operand(row)
+                if v is None:
+                    return None
+                if v in members:
+                    result: Any = True
+                else:
+                    result = None if has_null else False
+                return _not3(result) if negated else result
+
+            return in_const
+        items = [self.compile(item) for item in e.items]
+
+        def in_list(row: tuple) -> Any:
+            v = operand(row)
+            if v is None:
+                return None
+            result: Any = False
+            for item in items:
+                w = item(row)
+                if w is None:
+                    result = None
+                elif w == v:
+                    result = True
+                    break
+            return _not3(result) if negated else result
+
+        return in_list
+
+    def _c_Case(self, e: b.Case) -> RowFn:
+        whens = [(self.compile(c), self.compile(r)) for c, r in e.whens]
+        else_ = self.compile(e.else_) if e.else_ is not None else (lambda row: None)
+
+        def case(row: tuple) -> Any:
+            for cond, result in whens:
+                if cond(row) is True:
+                    return result(row)
+            return else_(row)
+
+        return case
+
     def _c_Function(self, e: b.Function) -> RowFn:
         args = [self.compile(a) for a in e.args]
-        if e.name == "PQ_SLEEP":
-            ctx = self.ctx
-            arg = args[0]
-
-            def pq_sleep(row: tuple) -> Any:
-                ms = arg(row)
-                if ms is None:
-                    return None
-                ctx.sleep(max(ms, 0) / 1000.0)
-                return ms
-
-            return pq_sleep
-        raise errors.unsupported(f"function {e.name} is not supported")
+        return compile_function(e, args, self.ctx, evaluate_constant)
 
     def _c_AggCall(self, e: b.AggCall) -> RowFn:
-        raise AssertionError("aggregate calls are evaluated by the Aggregate operator")
+        raise AssertionError("aggregate calls are evaluated by the aggregate operator")
+
+    # ------------------------------------------------------------ subqueries
+
+    def _subquery_rows(self, e: b.SubqueryExpr, limit: int | None) -> Callable[[tuple], list[tuple]]:
+        """Returns ``fn(row)`` running the subquery (with its correlation
+        parameters taken from ``row``) and returning up to ``limit`` rows.
+        Results are cached per distinct parameter values."""
+        from .operators import execute  # local import: operators depend on this module
+
+        ctx = self.ctx
+        plan = ctx.subplans[e.subquery.id]
+        keys = e.subquery.outer_keys
+        arg_fns = [self.compile(a) for a in e.args]
+        params = ctx.params
+        cache: dict[tuple, list[tuple]] = {}
+
+        def run(row: tuple) -> list[tuple]:
+            args = tuple(f(row) for f in arg_fns)
+            rows = cache.get(args)
+            if rows is None:
+                for key, value in zip(keys, args):
+                    params[key] = value
+                rows = []
+                for batch in execute(plan, ctx):
+                    rows.extend(batch)
+                    if limit is not None and len(rows) >= limit:
+                        del rows[limit:]
+                        break
+                cache[args] = rows
+            return rows
+
+        return run
+
+    def _c_ScalarSubquery(self, e: b.ScalarSubquery) -> RowFn:
+        run = self._subquery_rows(e, 2)
+
+        def scalar(row: tuple) -> Any:
+            rows = run(row)
+            if not rows:
+                return None
+            if len(rows) > 1:
+                raise errors.PolyQueryError(
+                    errors.SUBQUERY_CARDINALITY, "scalar subquery returned more than one row"
+                )
+            return rows[0][0]
+
+        return scalar
+
+    def _c_Exists(self, e: b.Exists) -> RowFn:
+        run = self._subquery_rows(e, 1)
+        return lambda row: bool(run(row))
+
+    def _c_InSubquery(self, e: b.InSubquery) -> RowFn:
+        run = self._subquery_rows(e, None)
+        operand = self.compile(e.operand)
+        negated = e.negated
+        column_type = e.subquery.query.outputs[0].expr.type
+        target = e.operand.type
+        convert = None
+        if not column_type.is_null and not target.is_null and column_type != target:
+            convert = cast_function(column_type, target)
+        sets: dict[int, tuple[frozenset, bool, bool]] = {}
+
+        def value_set(row: tuple) -> tuple[frozenset, bool, bool]:
+            rows = run(row)
+            found = sets.get(id(rows))
+            if found is None:
+                vals = [r[0] for r in rows]
+                has_null = any(v is None for v in vals)
+                non_null = [v for v in vals if v is not None]
+                if convert is not None:
+                    non_null = [convert(v) for v in non_null]
+                found = (frozenset(non_null), has_null, bool(vals))
+                sets[id(rows)] = found
+            return found
+
+        def in_subquery(row: tuple) -> Any:
+            members, has_null, non_empty = value_set(row)
+            v = operand(row)
+            if not non_empty:
+                result: Any = False
+            elif v is None:
+                result = None
+            elif v in members:
+                result = True
+            else:
+                result = None if has_null else False
+            return _not3(result) if negated else result
+
+        return in_subquery
 
 
-def compile_expr(expr: b.Expr, ctx: ExecutionContext) -> RowFn:
-    return Compiler(ctx).compile(expr)
+def compile_expr(expr: b.Expr, ctx: ExecutionContext, layout: Layout | None = None) -> RowFn:
+    return Compiler(ctx, layout or {}).compile(expr)
 
 
-def compile_row(exprs: list[b.Expr], ctx: ExecutionContext) -> Callable[[tuple], tuple]:
+def compile_row(exprs: list[b.Expr], ctx: ExecutionContext, layout: Layout) -> Callable[[tuple], tuple]:
     """Compiles a list of expressions into one function producing a row tuple."""
-    if all(isinstance(e, b.ColumnSlot) for e in exprs):
-        slots = [e.slot for e in exprs]  # type: ignore[attr-defined]
+    if all(isinstance(e, b.ColumnRef) and e.key in layout for e in exprs):
+        slots = [layout[e.key] for e in exprs]  # type: ignore[attr-defined]
         if not slots:
             return lambda row: ()
         if len(slots) == 1:
             s = slots[0]
             return lambda row: (row[s],)
         return operator.itemgetter(*slots)
-    fns = [compile_expr(e, ctx) for e in exprs]
+    fns = [compile_expr(e, ctx, layout) for e in exprs]
     namespace = {f"f{i}": fn for i, fn in enumerate(fns)}
     source = "lambda row: (" + "".join(f"f{i}(row)," for i in range(len(fns))) + ")"
     return eval(source, namespace)  # noqa: S307 - generated from trusted names only
+
+
+def evaluate_constant(expr: b.Expr) -> Any:
+    """Evaluates a constant expression (no columns, aggregates or subqueries)."""
+    return compile_expr(expr, ExecutionContext())(())

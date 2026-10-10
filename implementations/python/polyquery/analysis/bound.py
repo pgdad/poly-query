@@ -1,17 +1,37 @@
 """Bound (resolved and typed) expressions and queries.
 
 Bound expressions are immutable value objects: structural equality (``==``)
-compares resolved column slots, literal values, operators and function names,
-which is what ORDER BY / GROUP BY matching needs (semantics.md §5, §6).
+compares resolved column bindings, literal values, operators and function
+names, which is what GROUP BY / ORDER BY matching needs (semantics.md §5, §6).
+
+A column is identified by a *column key* ``(rel, index)``: ``rel`` is a
+statement-wide unique id of a relation (a range variable of a FROM clause,
+the output of an aggregation or of a projection) and ``index`` the column's
+position in it. Plan operators describe their output rows as a list of
+column keys, which is how expressions are mapped to row slots at execution.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import itertools
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, Iterator
 
 from ..datatypes import DataType
 from ..storage.catalog import Table
+
+ColumnKey = tuple[int, int]
+
+
+class IdGenerator:
+    """Statement-wide source of unique relation / subquery ids."""
+
+    def __init__(self) -> None:
+        self._counter = itertools.count(1)
+
+    def next(self) -> int:
+        return next(self._counter)
 
 
 @dataclass(frozen=True)
@@ -28,11 +48,14 @@ class Literal(Expr):
 
 
 @dataclass(frozen=True)
-class ColumnSlot(Expr):
-    """Position ``slot`` in the operator's input row."""
-
-    slot: int
+class ColumnRef(Expr):
+    rel: int
+    index: int
     name: str = field(compare=False)
+
+    @property
+    def key(self) -> ColumnKey:
+        return (self.rel, self.index)
 
 
 @dataclass(frozen=True)
@@ -122,7 +145,22 @@ class Like(Expr):
 
 
 @dataclass(frozen=True)
+class Between(Expr):
+    """``operand BETWEEN low AND high``; all three promoted to a common type."""
+
+    operand: Expr
+    low: Expr
+    high: Expr
+    negated: bool
+
+    def children(self) -> tuple[Expr, ...]:
+        return (self.operand, self.low, self.high)
+
+
+@dataclass(frozen=True)
 class InList(Expr):
+    """``operand IN (items)``; operand and items promoted to a common type."""
+
     operand: Expr
     items: tuple[Expr, ...]
     negated: bool
@@ -170,21 +208,106 @@ class AggCall(Expr):
         return () if self.arg is None else (self.arg,)
 
 
+# ------------------------------------------------------------------ subqueries
+
+
+@dataclass(eq=False)
+class Subquery:
+    """A bound subquery used inside an expression.
+
+    ``outer_keys`` are the column keys of enclosing queries the subquery reads
+    (empty for an uncorrelated subquery). Compared by identity.
+    """
+
+    id: int
+    query: BoundQuery
+    outer_keys: tuple[ColumnKey, ...]
+
+    @property
+    def correlated(self) -> bool:
+        return bool(self.outer_keys)
+
+
 @dataclass(frozen=True)
-class AggRef(Expr):
-    """Reference to the ``index``-th output of an Aggregate operator."""
+class SubqueryExpr(Expr):
+    """Base of subquery expressions. ``args`` evaluate the subquery's outer
+    column keys in the context of the enclosing query (initially plain column
+    references; GROUP BY substitution may rewrite them)."""
 
-    index: int
+    subquery: Subquery
+    args: tuple[Expr, ...]
 
 
-def walk(expr: Expr):
+@dataclass(frozen=True)
+class ScalarSubquery(SubqueryExpr):
+    def children(self) -> tuple[Expr, ...]:
+        return self.args
+
+
+@dataclass(frozen=True)
+class Exists(SubqueryExpr):
+    def children(self) -> tuple[Expr, ...]:
+        return self.args
+
+
+@dataclass(frozen=True)
+class InSubquery(SubqueryExpr):
+    """``operand IN (subquery)``; the subquery's values are converted to
+    ``operand.type`` (the common comparison type) when they differ."""
+
+    operand: Expr = field(kw_only=True)
+    negated: bool = field(kw_only=True)
+
+    def children(self) -> tuple[Expr, ...]:
+        return (self.operand, *self.args)
+
+
+# ------------------------------------------------------------------ helpers
+
+
+def walk(expr: Expr) -> Iterator[Expr]:
     yield expr
     for child in expr.children():
         yield from walk(child)
 
 
+def map_children(expr: Expr, fn: Callable[[Expr], Expr]) -> Expr:
+    """Returns ``expr`` with ``fn`` applied to each direct child expression."""
+    changes: dict[str, Any] = {}
+    for f in dataclasses.fields(expr):
+        if f.name == "type":
+            continue
+        value = getattr(expr, f.name)
+        if isinstance(value, Expr):
+            new: Any = fn(value)
+        elif isinstance(value, tuple) and value and isinstance(value[0], Expr):
+            new = tuple(fn(v) for v in value)
+        elif isinstance(value, tuple) and value and isinstance(value[0], tuple):
+            new = tuple(tuple(fn(v) for v in pair) for pair in value)
+        else:
+            continue
+        if new != value:
+            changes[f.name] = new
+    return dataclasses.replace(expr, **changes) if changes else expr
+
+
+def column_keys(expr: Expr) -> set[ColumnKey]:
+    """All column keys referenced by an expression (including subquery args)."""
+    return {e.key for e in walk(expr) if isinstance(e, ColumnRef)}
+
+
 def is_constant(expr: Expr) -> bool:
-    return not any(isinstance(e, (ColumnSlot, AggRef, AggCall)) for e in walk(expr))
+    return not any(isinstance(e, (ColumnRef, AggCall, SubqueryExpr)) for e in walk(expr))
+
+
+def contains_subquery(expr: Expr) -> bool:
+    return any(isinstance(e, SubqueryExpr) for e in walk(expr))
+
+
+def subqueries(expr: Expr) -> Iterator[Subquery]:
+    for e in walk(expr):
+        if isinstance(e, SubqueryExpr):
+            yield e.subquery
 
 
 # ------------------------------------------------------------------ queries
@@ -203,18 +326,67 @@ class SortKey:
     nulls_first: bool
 
 
-@dataclass
-class BoundQuery:
-    """A single-table SELECT after name resolution and type checking."""
+@dataclass(eq=False)
+class Relation:
+    """A FROM clause item after binding."""
 
-    table: Table | None
-    scan_columns: list[int]  # table column indexes, in input-slot order
-    where: Expr | None
-    aggregated: bool
+
+@dataclass(eq=False)
+class TableRelation(Relation):
+    rel: int
+    table: Table
+    name: str  # range variable name
+    used: set[int] = field(default_factory=set)  # referenced column indexes
+
+
+@dataclass(eq=False)
+class DerivedRelation(Relation):
+    """A derived table or CTE reference: the output of ``query`` as relation ``rel``."""
+
+    rel: int
+    query: BoundQuery
+    name: str
+    cte: str | None = None
+
+
+@dataclass(eq=False)
+class JoinRelation(Relation):
+    kind: str  # INNER, LEFT, CROSS
+    left: Relation
+    right: Relation
+    condition: Expr | None
+
+
+@dataclass
+class Aggregation:
+    """Grouping keys and aggregate calls; outputs ``keys + aggregates`` as ``rel``."""
+
+    rel: int
+    keys: list[Expr]
     aggregates: list[AggCall]
+
+
+@dataclass(eq=False)
+class BoundQuery:
+    """A SELECT after name resolution and type checking."""
+
+    from_: Relation | None
+    where: Expr | None
+    aggregation: Aggregation | None
+    having: Expr | None
     outputs: list[OutputColumn]
     hidden: list[Expr]  # ORDER BY keys that are not output columns
     order: list[SortKey]
     distinct: bool
-    limit: int | None
-    offset: int
+    limit: Expr | None
+    offset: Expr | None
+
+    @property
+    def column_types(self) -> list[DataType]:
+        return [o.expr.type for o in self.outputs]
+
+
+@dataclass(eq=False)
+class BoundStatement:
+    query: BoundQuery
+    ids: IdGenerator
