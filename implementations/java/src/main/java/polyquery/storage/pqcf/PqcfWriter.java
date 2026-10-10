@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
+import java.nio.file.DirectoryStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -54,8 +55,10 @@ public final class PqcfWriter {
         if (Files.isDirectory(target)) {
             throw new PolyQueryException(ErrorCode.IO_ERROR, "target path is a directory");
         }
-        Path tmp = dir.resolve("." + target.getFileName() + ".tmp-" + ProcessHandle.current().pid() + "-"
-                + System.nanoTime() + "-" + COUNTER.incrementAndGet());
+        String tmpPrefix = "." + target.getFileName() + ".tmp-";
+        removeStaleTemporaries(dir, tmpPrefix);
+        Path tmp = dir.resolve(tmpPrefix + ProcessHandle.current().pid() + "-" + System.nanoTime() + "-"
+                + COUNTER.incrementAndGet());
         try {
             long size;
             try (FileChannel ch = FileChannel.open(tmp, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
@@ -79,6 +82,30 @@ public final class PqcfWriter {
             } catch (IOException ignored) {
                 // best effort: readers ignore temporary files
             }
+        }
+    }
+
+    /**
+     * Deletes temporary files of earlier saves to the same target whose writing process no
+     * longer exists (left behind by a crash). Temporaries of live processes are kept.
+     */
+    private static void removeStaleTemporaries(Path dir, String prefix) {
+        try (DirectoryStream<Path> files = Files.newDirectoryStream(dir, p -> p.getFileName().toString().startsWith(prefix))) {
+            for (Path f : files) {
+                String rest = f.getFileName().toString().substring(prefix.length());
+                int dash = rest.indexOf('-');
+                long pid;
+                try {
+                    pid = Long.parseLong(dash < 0 ? rest : rest.substring(0, dash));
+                } catch (NumberFormatException e) {
+                    continue;
+                }
+                if (ProcessHandle.of(pid).isEmpty()) {
+                    Files.deleteIfExists(f);
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            // best effort only
         }
     }
 

@@ -168,7 +168,37 @@ public final class PqcfReader {
         if (!(json instanceof Map<?, ?> root)) {
             throw corrupt("metadata is not a JSON object");
         }
-        return parseMeta(root, metaStart);
+        FileMeta meta = parseMeta(root, metaStart);
+        checkPadding(file, meta, metaStart);
+        return meta;
+    }
+
+    /**
+     * Bytes between the header and the metadata that belong to no chunk may only be zero
+     * padding (§1). Checking them means a damaged padding byte cannot go unnoticed.
+     */
+    private static void checkPadding(MemorySegment file, FileMeta meta, long metaStart) {
+        List<long[]> ranges = new ArrayList<>();
+        for (FileMeta.GroupMeta g : meta.groups()) {
+            for (FileMeta.ChunkMeta c : g.chunks()) {
+                ranges.add(new long[] {c.offset(), c.offset() + c.length()});
+            }
+        }
+        ranges.sort((a, b) -> Long.compare(a[0], b[0]));
+        long pos = HEADER_SIZE;
+        for (long[] r : ranges) {
+            checkZero(file, pos, r[0]);
+            pos = Math.max(pos, r[1]);
+        }
+        checkZero(file, pos, metaStart);
+    }
+
+    private static void checkZero(MemorySegment file, long from, long to) {
+        for (long i = from; i < to; i++) {
+            if (file.get(ValueLayout.JAVA_BYTE, i) != 0) {
+                throw corrupt("non-zero bytes outside column chunks");
+            }
+        }
     }
 
     private static boolean hasMagic(MemorySegment file, long offset) {
