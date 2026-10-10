@@ -276,13 +276,29 @@ def telemetry(run_id: str) -> dict:
     assistant_turns = 0
     init = None
     result = None
+    msg_usage: dict[str, dict] = {}
+    thinking_est = 0
+    rate_limits: list[dict] = []
     for e in events:
         ev, t = e.get("event") or {}, e.get("_t", 0.0)
         typ = ev.get("type")
         if typ == "system" and ev.get("subtype") == "init":
             init = ev
+        elif typ == "system" and ev.get("subtype") == "thinking_tokens":
+            thinking_est += int(ev.get("estimated_tokens_delta") or 0)
+        elif typ == "rate_limit_event":
+            info = ev.get("rate_limit_info") or {}
+            rate_limits.append({"t": t, "status": info.get("status"),
+                                "windows": {k: (w or {}).get("utilization") for k, w in (info.get("unifiedWindows") or {}).items()}})
         elif typ == "assistant":
             assistant_turns += 1
+            msg = ev.get("message") or {}
+            if msg.get("id") and isinstance(msg.get("usage"), dict):
+                cur = msg_usage.setdefault(msg["id"], {})
+                for k in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+                    v = msg["usage"].get(k)
+                    if isinstance(v, int):
+                        cur[k] = max(cur.get(k, 0), v)
             for block in (ev.get("message") or {}).get("content") or []:
                 if block.get("type") == "tool_use":
                     name = block.get("name", "?")
@@ -307,7 +323,7 @@ def telemetry(run_id: str) -> dict:
                                 build_cmds += 1
                                 if BUILD_ERR.search(text):
                                     build_failures += 1
-                            if "runner.py" in cmd:
+                            if re.search(r"runner\.py[^\n]*--engine", cmd):
                                 runner_runs += 1
                                 mm = RUNNER_TOTAL.findall(text)
                                 if mm:
@@ -315,6 +331,14 @@ def telemetry(run_id: str) -> dict:
         elif typ == "result":
             result = ev
     usage = (result or {}).get("usage") or {}
+    usage_source = "result event"
+    if not usage:
+        # Run was killed before the final result event: sum per-message usage
+        # (deduplicated by message id). Cost is not derivable without the platform's
+        # pricing and is left null.
+        usage_source = "summed per-message usage (no final result event; output tokens are a lower bound)"
+        usage = {k: sum(u.get(k, 0) for u in msg_usage.values()) for k in
+                 ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")} if msg_usage else {}
     ws = rd / "workspace"
     commits = git(["rev-list", "--count", f"{m['baseline_commit']}..HEAD"], ws, check=False)
     numstat = git(["diff", "--numstat", m["baseline_commit"], "HEAD", "--", f"implementations/{m['language']}"], ws, check=False)
@@ -340,7 +364,14 @@ def telemetry(run_id: str) -> dict:
             "cache_read": usage.get("cache_read_input_tokens"),
             "cache_creation": usage.get("cache_creation_input_tokens"),
             "thinking": (usage.get("output_tokens_details") or {}).get("thinking_tokens"),
+            "thinking_estimated": thinking_est,
+            "source": usage_source,
+            "api_messages": len(msg_usage),
         },
+        "rate_limit": {"events": len(rate_limits),
+                       "max_utilization": {k: max((r["windows"].get(k) or 0) for r in rate_limits)
+                                           for k in {k for r in rate_limits for k in r["windows"]}},
+                       "statuses": sorted({str(r["status"]) for r in rate_limits})},
         "cost_usd": (result or {}).get("total_cost_usd"),
         "cost_basis": "platform-reported list price (total_cost_usd)",
         "agent_turns": (result or {}).get("num_turns"),

@@ -55,6 +55,26 @@ ro_if_exists() {
   done
 }
 
+# Emit --dir args (mode 0755) for every ancestor of $2 strictly below $1.
+mkparents() {
+  local root=$1 path=$2 rel acc part
+  rel=${path#"$root"/}; acc=$root
+  IFS=/ read -ra parts <<<"$rel"
+  for part in "${parts[@]:0:${#parts[@]}-1}"; do
+    acc=$acc/$part
+    printf -- '--perms\0%s\0--dir\0%s\0' 0755 "$acc"
+  done
+}
+
+# /srv holds every run's workspace: hide it and re-bind only this run's paths.
+SRV_BINDS=()
+for pair in "$M2:$H/.m2/repository" "$CFG:$CFG" "$WS:$WS" "$SCR:$SCR"; do
+  src=${pair%%:*}; dst=${pair#*:}
+  if [[ $dst == /srv/* ]]; then
+    mapfile -d '' -O "${#SRV_BINDS[@]}" SRV_BINDS < <(mkparents /srv "$dst")
+  fi
+done
+
 mapfile -d '' TOOLBINDS < <(ro_if_exists \
   "$H/.cargo" "$H/.rustup" "$H/.local/bin" "$H/.local/share/claude" \
   "$H/.clojure" "$H/.local/share/uv")
@@ -66,7 +86,8 @@ for d in /snap/go/current/bin /usr/local/go/bin; do [[ -x "$d/go" ]] && { GO_BIN
 exec sudo -n bwrap \
   --ro-bind / / \
   --dev /dev --proc /proc \
-  --tmpfs "$H" --tmpfs /root --tmpfs /run/user --tmpfs /var/tmp --tmpfs /mnt --tmpfs /media \
+  --tmpfs "$H" --tmpfs /root --tmpfs /run/user --tmpfs /var/tmp --tmpfs /mnt --tmpfs /media --tmpfs /srv \
+  "${SRV_BINDS[@]}" \
   "${TOOLBINDS[@]}" \
   --bind "$SCR/tmp" /tmp \
   --bind "$SCR/cache" "$H/.cache" \
@@ -74,6 +95,7 @@ exec sudo -n bwrap \
   --perms 0755 --dir "$H/.m2" --bind "$M2" "$H/.m2/repository" \
   --bind "$CFG" "$CFG" \
   --bind "$WS" "$WS" \
+  --bind "$SCR" "$SCR" \
   --chdir "$WS" \
   --unshare-pid --unshare-ipc --unshare-uts --hostname pq-sandbox \
   --die-with-parent \
