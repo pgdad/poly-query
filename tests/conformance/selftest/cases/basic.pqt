@@ -1,0 +1,23 @@
+@phase 1
+@requires phase1
+
+query
+SELECT 1
+----
+x INT64
+[1]
+
+query
+SELECT f
+----
+f FLOAT64
+[1.0]
+[0.3]
+
+error SEMANTIC_ERROR
+SELECT nope
+
+query
+SELECT boom
+----
+-

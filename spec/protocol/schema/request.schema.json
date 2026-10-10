@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://polyquery.invalid/schema/request.json",
+  "title": "PolyQuery protocol v1 request",
+  "type": "object",
+  "required": ["op"],
+  "properties": {
+    "op": {"enum": ["load", "query", "explain", "tables", "schema", "drop", "save", "open", "stats", "capabilities", "version", "reset", "sleep"]},
+    "id": {}
+  },
+  "allOf": [
+    {"if": {"properties": {"op": {"const": "load"}}}, "then": {
+      "required": ["table", "format"],
+      "properties": {
+        "table": {"type": "string", "minLength": 1},
+        "format": {"enum": ["csv", "json", "jsonl"]},
+        "path": {"type": "string"}, "data": {"type": "string"},
+        "schema": {"type": "array", "items": {"type": "object", "required": ["name", "type"],
+                   "properties": {"name": {"type": "string"}, "type": {"type": "string"}}}},
+        "options": {"type": "object", "properties": {
+          "header": {"type": "boolean"}, "delimiter": {"type": "string", "minLength": 1, "maxLength": 1},
+          "layout": {"enum": ["row", "column"]}, "dictionary": {"type": "boolean"}}},
+        "replace": {"type": "boolean"}},
+      "oneOf": [{"required": ["path"]}, {"required": ["data"]}]}},
+    {"if": {"properties": {"op": {"enum": ["query", "explain"]}}}, "then": {
+      "required": ["sql"],
+      "properties": {"sql": {"type": "string"}, "options": {"$ref": "#/$defs/queryOptions"}}}},
+    {"if": {"properties": {"op": {"enum": ["schema", "drop", "stats"]}}}, "then": {
+      "required": ["table"], "properties": {"table": {"type": "string"}}}},
+    {"if": {"properties": {"op": {"enum": ["save", "open"]}}}, "then": {
+      "required": ["table", "path"],
+      "properties": {"table": {"type": "string"}, "path": {"type": "string"}, "replace": {"type": "boolean"},
+                     "options": {"type": "object", "properties": {
+                       "mmap": {"type": "boolean"}, "row_group_size": {"type": "integer", "minimum": 1},
+                       "encoding": {"enum": ["auto", "plain", "dict", "rle"]}, "layout": {"enum": ["row", "column"]}}}}}},
+    {"if": {"properties": {"op": {"const": "sleep"}}}, "then": {
+      "required": ["ms"], "properties": {"ms": {"type": "integer", "minimum": 0}}}}
+  ],
+  "$defs": {
+    "queryOptions": {"type": "object", "properties": {
+      "max_rows": {"type": "integer", "minimum": 0},
+      "timeout_ms": {"type": "integer", "minimum": 0},
+      "result": {"enum": ["rows", "count"]},
+      "mode": {"type": "string"}, "threads": {"type": "integer", "minimum": 1},
+      "join": {"type": "string"}, "optimize": {"type": "boolean"}, "use_indexes": {"type": "boolean"},
+      "native": {"type": "boolean"}, "query_id": {"type": "string"}}}
+  }
+}

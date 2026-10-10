@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://polyquery.invalid/schema/response.json",
+  "title": "PolyQuery protocol v1 response",
+  "type": "object",
+  "required": ["id", "ok"],
+  "properties": {"id": {}, "ok": {"type": "boolean"}},
+  "if": {"properties": {"ok": {"const": false}}},
+  "then": {
+    "required": ["error"],
+    "properties": {"error": {"type": "object", "required": ["code", "message"],
+      "properties": {"code": {"type": "string", "pattern": "^[A-Z_]+$"}, "message": {"type": "string"},
+                     "details": {"type": "object"}}}}
+  },
+  "else": {
+    "properties": {
+      "columns": {"type": "array", "items": {"type": "object", "required": ["name", "type"],
+        "properties": {"name": {"type": "string"},
+                       "type": {"type": "string", "pattern": "^(BOOLEAN|INT64|FLOAT64|STRING|DATE|TIMESTAMP|DECIMAL\\([0-9]{1,2},[0-9]{1,2}\\))$"}}}},
+      "rows": {"type": "array", "items": {"type": "array"}},
+      "row_count": {"type": "integer", "minimum": 0},
+      "plan": {"$ref": "#/$defs/planNode"},
+      "stats": {"type": "object"}
+    }
+  },
+  "$defs": {
+    "planNode": {"type": "object", "required": ["op", "children"],
+      "properties": {"op": {"type": "string"}, "children": {"type": "array", "items": {"$ref": "#/$defs/planNode"}}}}
+  }
+}
