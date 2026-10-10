@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"polyquery/internal/errs"
@@ -169,7 +170,7 @@ func (pf *File) load(md *metadata, dataEnd int, maxRows int64) error {
 		if ix.Name == nil || *ix.Name == "" || ix.Column == nil || ix.Kind == nil {
 			return corrupt("index entry lacks name, column or kind")
 		}
-		kind := index.Kind(*ix.Kind)
+		kind := index.Kind(strings.ToUpper(*ix.Kind))
 		if kind != index.Hash && kind != index.BTree {
 			return corrupt("index %q has unknown kind %q", *ix.Name, *ix.Kind)
 		}
