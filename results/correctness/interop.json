@@ -1,0 +1,260 @@
+{
+ "schema": "polyquery-interop/1",
+ "summary": {
+  "engines": [
+   "clojure"
+  ],
+  "files_written": 29,
+  "write_errors": 0,
+  "read_failures": 0,
+  "passed": true
+ },
+ "files": [
+  {
+   "writer": "clojure",
+   "table": "people",
+   "mode": "plain",
+   "path": "out/clojure__people__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "people",
+   "mode": "dict",
+   "path": "out/clojure__people__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "people",
+   "mode": "rle",
+   "path": "out/clojure__people__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "people",
+   "mode": "auto",
+   "path": "out/clojure__people__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "ledger",
+   "mode": "plain",
+   "path": "out/clojure__ledger__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "ledger",
+   "mode": "dict",
+   "path": "out/clojure__ledger__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "ledger",
+   "mode": "rle",
+   "path": "out/clojure__ledger__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "ledger",
+   "mode": "auto",
+   "path": "out/clojure__ledger__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "strings",
+   "mode": "plain",
+   "path": "out/clojure__strings__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "strings",
+   "mode": "dict",
+   "path": "out/clojure__strings__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "strings",
+   "mode": "rle",
+   "path": "out/clojure__strings__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "strings",
+   "mode": "auto",
+   "path": "out/clojure__strings__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "dates",
+   "mode": "plain",
+   "path": "out/clojure__dates__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "dates",
+   "mode": "dict",
+   "path": "out/clojure__dates__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "dates",
+   "mode": "rle",
+   "path": "out/clojure__dates__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "dates",
+   "mode": "auto",
+   "path": "out/clojure__dates__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "tx",
+   "mode": "plain",
+   "path": "out/clojure__tx__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "tx",
+   "mode": "dict",
+   "path": "out/clojure__tx__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "tx",
+   "mode": "rle",
+   "path": "out/clojure__tx__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "tx",
+   "mode": "auto",
+   "path": "out/clojure__tx__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "nulls",
+   "mode": "plain",
+   "path": "out/clojure__nulls__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "nulls",
+   "mode": "dict",
+   "path": "out/clojure__nulls__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "nulls",
+   "mode": "rle",
+   "path": "out/clojure__nulls__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "nulls",
+   "mode": "auto",
+   "path": "out/clojure__nulls__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "events",
+   "mode": "plain",
+   "path": "out/clojure__events__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "events",
+   "mode": "dict",
+   "path": "out/clojure__events__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "events",
+   "mode": "rle",
+   "path": "out/clojure__events__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "clojure",
+   "table": "events",
+   "mode": "auto",
+   "path": "out/clojure__events__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "reference",
+   "table": "people",
+   "mode": "auto",
+   "path": "out/reference__people__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  }
+ ],
+ "matrix": {
+  "clojure": {
+   "clojure": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "reference": {
+    "ok": 1,
+    "fail": 0,
+    "failures": []
+   }
+  }
+ }
+}

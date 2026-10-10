@@ -58,7 +58,7 @@ test-interop:
 
 # Crash-consistency suite for one language
 test-crash lang:
-    {{sbx}} {{py}} tests/integration/storage_crash.py --engine implementations/{{lang}}/bin/polyquery
+    {{sbx}} {{py}} tests/integration/storage_crash.py --engine implementations/{{lang}}/bin/polyquery --report results/correctness/{{lang}}-crash.json
 
 # Robustness fuzzing / randomized differential testing for one language
 fuzz lang seconds="120":
