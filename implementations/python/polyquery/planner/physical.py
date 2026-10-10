@@ -58,6 +58,38 @@ class TableScan(PhysicalNode):
 
 
 @dataclass(eq=False)
+class LookupScan(PhysicalNode):
+    """Scan of the rows whose ``key_column`` equals ``key`` (an expression over
+    correlation parameters), through a hash table built once per statement.
+    Used for ``inner_col = outer_col`` predicates of correlated subqueries."""
+
+    table: Table
+    rel: int
+    columns: list[int]
+    alias: str
+    key_column: int
+    key: b.Expr
+    residual: b.Expr | None
+
+    @property
+    def layout(self) -> list[b.ColumnKey]:
+        return [(self.rel, i) for i in self.columns]
+
+    def expressions(self) -> list[b.Expr]:
+        return [self.key] + ([self.residual] if self.residual is not None else [])
+
+    def describe(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "table": self.table.name,
+            "columns": [self.table.columns[i].name for i in self.columns],
+            "lookup": f"{self.table.columns[self.key_column].name} = {render_expr(self.key)}",
+        }
+        if self.residual is not None:
+            out["residual"] = render_expr(self.residual)
+        return out
+
+
+@dataclass(eq=False)
 class Values(PhysicalNode):
     """One row without columns."""
 
@@ -338,6 +370,10 @@ class PhysicalPlanner:
         if isinstance(node, lp.SubqueryScan):
             return SubqueryScan(self.plan(node.input), node.rel, node.width, node.name)
         if isinstance(node, lp.Filter):
+            if isinstance(node.input, lp.Scan):
+                lookup = _lookup_scan(node.input, node.predicate)
+                if lookup is not None:
+                    return lookup
             return Filter(self.plan(node.input), node.predicate)
         if isinstance(node, lp.Join):
             return self._plan_join(node)
@@ -379,6 +415,27 @@ class PhysicalPlanner:
         if not left_keys:
             return NestedLoopJoin(join_type, left, right, node.condition)
         return HashJoin(join_type, left, right, left_keys, right_keys, conjunction(residual))
+
+
+def _lookup_scan(scan: lp.Scan, predicate: b.Expr) -> LookupScan | None:
+    """A LookupScan if a conjunct equates a scanned column with an expression
+    over correlation parameters only (column keys of enclosing queries)."""
+    layout = set(scan.layout)
+    parts = conjuncts(predicate)
+    for i, p in enumerate(parts):
+        if not (isinstance(p, b.Compare) and p.op == "="):
+            continue
+        for column, other in ((p.left, p.right), (p.right, p.left)):
+            if not (isinstance(column, b.ColumnRef) and column.key in layout):
+                continue
+            keys = b.column_keys(other)
+            if not keys or keys & layout or b.contains_subquery(other) or column.type != other.type:
+                continue
+            residual = conjunction(parts[:i] + parts[i + 1 :])
+            return LookupScan(
+                scan.table, scan.rel, scan.columns, scan.name, column.index, other, residual
+            )
+    return None
 
 
 def plan_statement(statement: b.BoundStatement, options: PlanOptions) -> PhysicalPlan:

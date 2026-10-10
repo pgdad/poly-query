@@ -44,6 +44,46 @@ def _table_scan(node: pp.TableScan, ctx: ExecutionContext) -> Iterator[Batch]:
         yield batch
 
 
+def _lookup_table(node: pp.LookupScan, ctx: ExecutionContext) -> dict[Any, list[tuple]]:
+    cache_key = (id(node.table), node.key_column, tuple(node.columns))
+    table = ctx.lookup_tables.get(cache_key)
+    if table is None:
+        table = {}
+        position = node.columns.index(node.key_column)
+        for row in node.table.scan(node.columns):
+            key = row[position]
+            if key is None:
+                continue
+            bucket = table.get(key)
+            if bucket is None:
+                table[key] = [row]
+            else:
+                bucket.append(row)
+        ctx.reserve_rows(node.table.row_count, len(node.columns))
+        ctx.lookup_tables[cache_key] = table
+    return table
+
+
+def _lookup_scan(node: pp.LookupScan, ctx: ExecutionContext) -> Iterator[Batch]:
+    table = _lookup_table(node, ctx)
+    key, residual = ctx.cached(node, "lookup", lambda: _compile_lookup(node, ctx))
+    value = key(())
+    rows = table.get(value, ()) if value is not None else ()
+    if residual is not None:
+        rows = [row for row in rows if residual(row) is True]
+    for i in range(0, len(rows), BATCH_SIZE):
+        yield list(rows[i : i + BATCH_SIZE])
+    ctx.check()
+
+
+def _compile_lookup(node: pp.LookupScan, ctx: ExecutionContext) -> tuple:
+    key = compile_expr(node.key, ctx)
+    residual = (
+        compile_expr(node.residual, ctx, layout_of(node)) if node.residual is not None else None
+    )
+    return key, residual
+
+
 def _values(node: pp.Values, ctx: ExecutionContext) -> Iterator[Batch]:
     yield [()]
 
@@ -53,7 +93,9 @@ def _subquery_scan(node: pp.SubqueryScan, ctx: ExecutionContext) -> Iterator[Bat
 
 
 def _filter(node: pp.Filter, ctx: ExecutionContext) -> Iterator[Batch]:
-    predicate = compile_expr(node.predicate, ctx, layout_of(node.input))
+    predicate = ctx.cached(
+        node, "predicate", lambda: compile_expr(node.predicate, ctx, layout_of(node.input))
+    )
     for batch in execute(node.input, ctx):
         out = [row for row in batch if predicate(row) is True]
         if out:
@@ -62,7 +104,7 @@ def _filter(node: pp.Filter, ctx: ExecutionContext) -> Iterator[Batch]:
 
 
 def _project(node: pp.Project, ctx: ExecutionContext) -> Iterator[Batch]:
-    make_row = compile_row(node.exprs, ctx, layout_of(node.input))
+    make_row = ctx.cached(node, "row", lambda: compile_row(node.exprs, ctx, layout_of(node.input)))
     for batch in execute(node.input, ctx):
         yield list(map(make_row, batch))
         ctx.check()
@@ -114,15 +156,18 @@ def _aligned_keys(left: list[b.Expr], right: list[b.Expr]) -> tuple[list[b.Expr]
     return out_left, out_right
 
 
-def _hash_join(node: pp.HashJoin, ctx: ExecutionContext) -> Iterator[Batch]:
+def _compile_hash_join(node: pp.HashJoin, ctx: ExecutionContext) -> tuple:
     left_keys, right_keys = _aligned_keys(node.left_keys, node.right_keys)
     left_key = compile_row(left_keys, ctx, layout_of(node.left))
     right_key = compile_row(right_keys, ctx, layout_of(node.right))
     residual = (
-        compile_expr(node.residual, ctx, layout_of(node))
-        if node.residual is not None
-        else None
+        compile_expr(node.residual, ctx, layout_of(node)) if node.residual is not None else None
     )
+    return left_key, right_key, residual
+
+
+def _hash_join(node: pp.HashJoin, ctx: ExecutionContext) -> Iterator[Batch]:
+    left_key, right_key, residual = ctx.cached(node, "join", lambda: _compile_hash_join(node, ctx))
     table: dict[tuple, list[tuple]] = {}
     width = len(node.right.layout)
     for batch in execute(node.right, ctx):
@@ -168,10 +213,10 @@ def _hash_join(node: pp.HashJoin, ctx: ExecutionContext) -> Iterator[Batch]:
 
 def _nested_loop_join(node: pp.NestedLoopJoin, ctx: ExecutionContext) -> Iterator[Batch]:
     right_rows = _materialize(node.right, ctx)
-    condition = (
-        compile_expr(node.condition, ctx, layout_of(node))
-        if node.condition is not None
-        else None
+    condition = ctx.cached(
+        node,
+        "condition",
+        lambda: None if node.condition is None else compile_expr(node.condition, ctx, layout_of(node)),
     )
     is_left = node.join_type == "LEFT"
     padding = (None,) * len(node.right.layout)
@@ -225,7 +270,7 @@ def _accumulate(accumulators: list, getters: list, rows: list[tuple]) -> None:
 
 def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Iterator[Batch]:
     layout = layout_of(node.input)
-    getters = _argument_getters(node, ctx, layout)
+    getters = ctx.cached(node, "args", lambda: _argument_getters(node, ctx, layout))
     if not node.keys:
         # one group over the whole input (also for empty input)
         accumulators = [make_accumulator(call) for call in node.aggregates]
@@ -235,7 +280,7 @@ def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Iterator[B
         yield [tuple(acc.result() for acc in accumulators)]
         return
 
-    key_fn = compile_row(node.keys, ctx, layout)
+    key_fn = ctx.cached(node, "keys", lambda: compile_row(node.keys, ctx, layout))
     groups: dict[tuple, list[tuple]] = {}
     width = len(node.input.layout)
     for batch in execute(node.input, ctx):
@@ -344,6 +389,7 @@ def _limit(node: pp.Limit, ctx: ExecutionContext) -> Iterator[Batch]:
 _HANDLERS: dict[type, Callable[[Any, ExecutionContext], Iterator[Batch]]] = {
     pp.TableScan: _table_scan,
     pp.Values: _values,
+    pp.LookupScan: _lookup_scan,
     pp.SubqueryScan: _subquery_scan,
     pp.Filter: _filter,
     pp.Project: _project,

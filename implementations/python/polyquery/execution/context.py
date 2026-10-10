@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from .. import errors
 
@@ -26,6 +26,18 @@ class ExecutionContext:
     # correlation parameters (by column key)
     subplans: dict[int, Any] = field(default_factory=dict, init=False)
     params: dict[tuple[int, int], Any] = field(default_factory=dict, init=False)
+    # statement-lifetime caches: compiled operator closures (subplans of
+    # correlated subqueries run many times) and LookupScan hash tables
+    compiled: dict[tuple[int, str], Any] = field(default_factory=dict, init=False)
+    lookup_tables: dict[tuple, dict[Any, list[tuple]]] = field(default_factory=dict, init=False)
+
+    def cached(self, owner: object, tag: str, factory: Callable[[], Any]) -> Any:
+        """Returns the value cached for ``(owner, tag)``, creating it on first use."""
+        key = (id(owner), tag)
+        value = self.compiled.get(key)
+        if value is None:
+            value = self.compiled[key] = factory()
+        return value
 
     @classmethod
     def create(
