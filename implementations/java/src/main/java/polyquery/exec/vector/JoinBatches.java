@@ -79,9 +79,7 @@ final class JoinBatches {
     static final class JoinTable {
         private final List<ColumnSchema> schema;
         private final ExecContext ctx;
-        private Vec[] store;
-        private int rows;
-        private int capacity;
+        private ColumnStore store;
         private GroupKeys keys;
         private int[] first;
         private int[] last;
@@ -94,7 +92,7 @@ final class JoinBatches {
         }
 
         Vec column(int slot) {
-            return store[slot];
+            return store.column(slot);
         }
 
         GroupKeys keys() {
@@ -112,17 +110,11 @@ final class JoinBatches {
         /** Consumes the build input completely (raising its deferred error, if any, at the end). */
         void build(BatchOperator input, BatchExprs keyExprs, long[] factors, DataType[] keyTypes) {
             keys = new GroupKeys(keyTypes);
-            rows = 0;
-            capacity = 64;
-            store = new Vec[schema.size()];
-            for (int c = 0; c < store.length; c++) {
-                store[c] = new Vec(schema.get(c).type(), capacity);
-                store[c].nullMask(capacity);
-            }
+            store = new ColumnStore(schema);
             first = new int[16];
             Arrays.fill(first, -1);
             last = new int[16];
-            next = new int[capacity];
+            next = new int[64];
             Vec[] scratch = new Vec[factors.length];
             int[] gids = new int[0];
             int[] keep = new int[0];
@@ -157,24 +149,9 @@ final class JoinBatches {
         }
 
         private void append(Batch b, int[] keep, int m, int[] gids) {
-            int need = rows + m;
-            if (need > capacity) {
-                capacity = Math.max(need, capacity * 2);
-                next = Arrays.copyOf(next, capacity);
-                for (Vec v : store) {
-                    v.grow(capacity);
-                }
-            }
-            for (int c = 0; c < store.length; c++) {
-                Vec dst = store[c];
-                Vec src = b.cols[c];
-                for (int k = 0; k < m; k++) {
-                    if (src == null) {
-                        dst.nulls[rows + k] = true; // a slot nobody reads
-                    } else {
-                        dst.copyFrom(src, keep[k], rows + k);
-                    }
-                }
+            int start = store.append(b, keep, m);
+            if (next.length < store.rows()) {
+                next = Arrays.copyOf(next, Math.max(store.rows(), next.length * 2));
             }
             int groups = keys.groupCount();
             if (first.length < groups) {
@@ -185,7 +162,7 @@ final class JoinBatches {
                 Arrays.fill(first, old, cap, -1);
             }
             for (int k = 0; k < m; k++) {
-                int r = rows + k;
+                int r = start + k;
                 int g = gids[keep[k]];
                 next[r] = -1;
                 if (first[g] < 0) {
@@ -195,8 +172,7 @@ final class JoinBatches {
                 }
                 last[g] = r;
             }
-            rows = need;
-            long bytes = (long) m * (16 + 12L * schema.size());
+            long bytes = ColumnStore.estimate(b, keep, m) + 32L * m;
             ctx.reserve(bytes);
             reserved += bytes;
         }
@@ -402,9 +378,7 @@ final class JoinBatches {
                 }
                 Vec dst = outVec(slot);
                 dst.nullMask(capacity);
-                for (int e = 0; e < m; e++) {
-                    dst.copyFrom(src, entryPos[e], e);
-                }
+                ColumnStore.gather(src, entryPos, m, dst, 0);
                 out.cols[slot] = dst;
             }
             for (int c = 0; c < buildWidth; c++) {
@@ -412,16 +386,20 @@ final class JoinBatches {
                 int slot = buildSlot(c);
                 Vec dst = outVec(slot);
                 boolean[] nm = dst.nullMask(capacity);
-                for (int e = 0; e < m; e++) {
-                    int r = entryRow[e];
-                    if (r < 0) {
-                        nm[e] = true;
-                        if (dst.kind == Vec.Kind.OBJECT) {
-                            dst.objects[e] = null;
+                if (leftOuter) {
+                    for (int e = 0; e < m; e++) {
+                        int r = entryRow[e];
+                        if (r < 0) {
+                            nm[e] = true;
+                            if (dst.kind == Vec.Kind.OBJECT) {
+                                dst.objects[e] = null;
+                            }
+                        } else {
+                            dst.copyFrom(src, r, e);
                         }
-                    } else {
-                        dst.copyFrom(src, r, e);
                     }
+                } else {
+                    ColumnStore.gather(src, entryRow, m, dst, 0);
                 }
                 out.cols[slot] = dst;
             }

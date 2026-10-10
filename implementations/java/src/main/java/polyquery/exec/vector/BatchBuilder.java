@@ -11,9 +11,9 @@ import polyquery.types.DataType;
 
 /**
  * Turns a physical plan into batch operators. Scans, filters, projections, hash aggregation,
- * DISTINCT, hash joins and LIMIT run vectorized; the remaining operators (sorts, top-N,
- * merge and nested-loop joins, correlated lookups) are the row engine's, connected through
- * row/batch adapters. Pipelines over large tables are executed by parallel workers when the
+ * DISTINCT, hash joins, sorts, top-N and LIMIT run vectorized; the remaining operators (merge
+ * and nested-loop joins, correlated lookups) are the row engine's, connected through row/batch
+ * adapters. Pipelines over large tables are executed by parallel workers when the
  * query may use several threads (see {@link Parallel}).
  */
 public final class BatchBuilder {
@@ -48,6 +48,8 @@ public final class BatchBuilder {
             case PhysicalPlan.HashDistinct d -> true;
             case PhysicalPlan.HashJoin j -> true;
             case PhysicalPlan.Limit l -> true;
+            case PhysicalPlan.Sort s -> true;
+            case PhysicalPlan.TopN t -> true;
             default -> false;
         };
     }
@@ -90,6 +92,16 @@ public final class BatchBuilder {
                 long offset = l.offset() == null ? 0 : rows.constant(l.offset(), "OFFSET", 0);
                 long limit = l.limit() == null ? -1 : rows.constant(l.limit(), "LIMIT", -1);
                 yield new BatchOperators.Limit(build(l.input()), offset, limit, l.schema().size());
+            }
+            case PhysicalPlan.Sort s -> new SortBatches.Sort(build(s.input()), s.keys(), s.schema(), ctx, BATCH_SIZE,
+                    0, -1);
+            case PhysicalPlan.TopN t -> {
+                long offset = t.offset() == null ? 0 : rows.constant(t.offset(), "OFFSET", 0);
+                long limit = rows.constant(t.limit(), "LIMIT", -1);
+                BatchOperator sorted = new SortBatches.Sort(build(t.input()), t.keys(), t.schema(), ctx, BATCH_SIZE,
+                        limit < 0 ? 0 : offset, limit);
+                yield limit < 0 && offset > 0 ? new BatchOperators.Limit(sorted, offset, -1, t.schema().size())
+                        : sorted;
             }
             default -> new BatchOperators.RowToBatch(rows.buildNode(plan), plan.schema(), BATCH_SIZE);
         };
