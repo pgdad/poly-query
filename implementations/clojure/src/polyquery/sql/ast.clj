@@ -4,6 +4,7 @@
   Expressions ({:node … :pos {:line :col}}):
     :literal   {:kind :number|:string|:bool|:null|:date|:timestamp, :text|:value}
     :column    {:table (nil|name) :name}
+    :resolved-column {:name :type :index}     ; produced by `*` expansion
     :unary     {:op \"-\"|\"+\" :arg}
     :binary    {:op \"+\" \"-\" \"*\" \"/\" \"%\" \"||\" \"=\" \"<>\" \"<\" \"<=\" \">\" \">=\" \"AND\" \"OR\"
                 :left :right}

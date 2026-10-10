@@ -101,16 +101,16 @@
      (fn [f init]
        (let [table (HashMap.)
              emit (output-counter env)]
-         (reduce (fn [_ ^objects r]
+         (reduce (fn [^long n ^objects r]
+                   (when (zero? (rem n 4096))
+                     (ctx/check! qctx)
+                     (ctx/reserve! qctx (* 4096 (ctx/row-bytes (alength r)))))
                    (when-let [k (rkey r)]
                      (let [^ArrayList bucket (or (.get table k)
                                                  (let [b (ArrayList. 2)] (.put table k b) b))]
-                       (when (zero? (rem (.size table) 4096))
-                         (ctx/check! qctx)
-                         (ctx/reserve! qctx (* 4096 (ctx/row-bytes (alength r)))))
                        (.add bucket r)))
-                   nil)
-                 nil right)
+                   (inc n))
+                 0 right)
          (reduce
           (fn [acc l]
             (let [k (lkey l)
