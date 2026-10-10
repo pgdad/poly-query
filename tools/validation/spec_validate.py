@@ -5,6 +5,8 @@
 * error-codes.json is valid; every error code used in tests is defined;
 * every capability required by a test file is defined in spec/phases/README.md;
 * every .pqt file parses; every fixture path referenced exists;
+* Phase-1 files expect success only for `sql.basic` syntax (Phase-2 constructs
+  may appear only in cases that expect an error);
 * golden PQCF files validate and corrupt ones are rejected by the reference reader.
 """
 from __future__ import annotations
@@ -45,6 +47,8 @@ def main() -> int:
     codes = set(json.loads((ROOT / "spec/errors/error-codes.json").read_text())["codes"])
     caps = set(re.findall(r"^\| `([a-z0-9_.]+)` \|", (ROOT / "spec/phases/README.md").read_text(), re.M))
 
+    phase2_syntax = re.compile(r"\b(BETWEEN|LIKE|CASE|IN|GROUP|HAVING|DISTINCT|JOIN|EXISTS|WITH|UNION|EXPLAIN)\b|\|\||"
+                               r"\b(?!(?:COUNT|SUM|MIN|MAX|AVG|CAST|PQ_SLEEP|NOT|AND|OR|DECIMAL|NUMERIC|VARCHAR|CHAR)\s*\()[A-Z_]+\s*\(", re.I)
     files = sorted((ROOT / "tests/conformance/cases").rglob("*.pqt")) + \
         sorted((ROOT / "tests/conformance/hidden/cases").rglob("*.pqt"))
     ncases = 0
@@ -64,6 +68,10 @@ def main() -> int:
             for kind, arg in st.expectations:
                 if kind == "error":
                     code = arg
+            if f.phase == 1 and st.sql and not code:
+                bare = re.sub(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"", "''", st.sql)
+                if m := phase2_syntax.search(bare):
+                    problems.append(f"{p.relative_to(ROOT)}:{st.line}: Phase-2 syntax {m.group(0)!r} in a Phase-1 case")
             if code and code not in codes:
                 problems.append(f"{p.relative_to(ROOT)}:{st.line}: unknown error code {code}")
             path = (st.request or {}).get("path")

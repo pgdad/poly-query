@@ -51,7 +51,7 @@ id INT64 | dup_key INT64 | str_key STRING
 [1263, 105, "zzakk"]
 
 query ordered oracle
-SELECT id, float_key FROM k WHERE float_key BETWEEN -0.5 AND 0.5 ORDER BY float_key, id
+SELECT id, float_key FROM k WHERE float_key >= -0.5 AND float_key <= 0.5 ORDER BY float_key, id
 ----
 id INT64 | float_key FLOAT64
 [1744, 0.4233]
