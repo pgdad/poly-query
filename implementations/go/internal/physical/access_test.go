@@ -37,7 +37,7 @@ func planWith(t *testing.T, cat *catalog.Catalog, sql string, useIndexes bool) [
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := physical.Build(optimizer.Optimize(logical), physical.Options{
+	p, err := physical.Build(optimizer.Optimize(logical, optimizer.Options{EvalConst: exec.EvalConstant}), physical.Options{
 		UseIndexes: useIndexes, Indexes: snap.IndexesOf, EvalConst: exec.EvalConstant,
 	})
 	if err != nil {

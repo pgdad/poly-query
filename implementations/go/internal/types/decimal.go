@@ -279,6 +279,18 @@ func (s *BigDecimalSum) Add(v int64) {
 	s.small = c
 }
 
+// AddSmall adds v if the sum stays within int64 (the common case; small
+// enough to be inlined into aggregation loops) and reports whether it did;
+// otherwise the caller uses Add.
+func (s *BigDecimalSum) AddSmall(v int64) bool {
+	c := s.small + v
+	if s.big != nil || (c > s.small) != (v > 0) {
+		return false
+	}
+	s.small = c
+	return true
+}
+
 // Merge adds another partial sum.
 func (s *BigDecimalSum) Merge(o *BigDecimalSum) {
 	if o.big == nil {

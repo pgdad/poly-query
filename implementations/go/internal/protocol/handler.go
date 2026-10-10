@@ -597,6 +597,9 @@ func ParseQueryOptions(req *Request) (engine.QueryOptions, error) {
 	return parseQueryOptions(req)
 }
 
+// maxThreads caps the threads option (more workers than this never help).
+const maxThreads = 256
+
 func parseQueryOptions(req *request) (engine.QueryOptions, error) {
 	qo := engine.QueryOptions{MaxRows: -1}
 	opts, err := req.object("options")
@@ -639,9 +642,10 @@ func parseQueryOptions(req *request) (engine.QueryOptions, error) {
 			_ = json.Unmarshal(raw, &s)
 			qo.CountOnly = s == "count"
 		case "mode":
-			if err := enum(name, "auto", "row"); err != nil {
+			if err := enum(name, "auto", "row", "vectorized"); err != nil {
 				return qo, err
 			}
+			_ = json.Unmarshal(raw, &qo.Mode)
 		case "join":
 			if err := enum(name, "auto", "hash", "merge", "nested_loop"); err != nil {
 				return qo, err
@@ -652,6 +656,7 @@ func parseQueryOptions(req *request) (engine.QueryOptions, error) {
 			if err != nil || n < 1 {
 				return qo, invalid("option \"threads\" must be a positive integer")
 			}
+			qo.Threads = int(min(n, maxThreads))
 		case "optimize":
 			b, err := decodeBool(raw, name)
 			if err != nil {

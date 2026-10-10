@@ -86,6 +86,18 @@ type HashJoin struct {
 	BuildLeft   bool
 }
 
+// MergeJoin is a sort-merge equi-join: both inputs are sorted by their
+// join keys and merged; rows match when LeftKeys equal RightKeys (NULL keys
+// never match) and Residual (if any) is TRUE. Output rows are left columns
+// then right columns.
+type MergeJoin struct {
+	Kind        plan.JoinKind
+	Left, Right Node
+	LeftKeys    []plan.Expr
+	RightKeys   []plan.Expr
+	Residual    plan.Expr
+}
+
 // NestedLoopJoin evaluates Cond (nil: always true) for every pair of rows;
 // the right input is materialized.
 type NestedLoopJoin struct {
@@ -144,6 +156,9 @@ func (n *HashAggregate) Schema() []plan.Column {
 func (n *HashJoin) Schema() []plan.Column {
 	return append(append([]plan.Column(nil), n.Left.Schema()...), n.Right.Schema()...)
 }
+func (n *MergeJoin) Schema() []plan.Column {
+	return append(append([]plan.Column(nil), n.Left.Schema()...), n.Right.Schema()...)
+}
 func (n *NestedLoopJoin) Schema() []plan.Column {
 	return append(append([]plan.Column(nil), n.Left.Schema()...), n.Right.Schema()...)
 }
@@ -162,6 +177,7 @@ func (n *Project) Children() []Node        { return []Node{n.Input} }
 func (n *HashAggregate) Children() []Node  { return []Node{n.Input} }
 func (n *HashJoin) Children() []Node       { return []Node{n.Left, n.Right} }
 func (n *NestedLoopJoin) Children() []Node { return []Node{n.Left, n.Right} }
+func (n *MergeJoin) Children() []Node      { return []Node{n.Left, n.Right} }
 func (n *Sort) Children() []Node           { return []Node{n.Input} }
 func (n *Limit) Children() []Node          { return []Node{n.Input} }
 func (n *HashDistinct) Children() []Node   { return []Node{n.Input} }
@@ -188,6 +204,12 @@ func Exprs(n Node) []plan.Expr {
 		}
 		return out
 	case *HashJoin:
+		out := append(append([]plan.Expr(nil), x.LeftKeys...), x.RightKeys...)
+		if x.Residual != nil {
+			out = append(out, x.Residual)
+		}
+		return out
+	case *MergeJoin:
 		out := append(append([]plan.Expr(nil), x.LeftKeys...), x.RightKeys...)
 		if x.Residual != nil {
 			out = append(out, x.Residual)
@@ -231,7 +253,9 @@ type Plan struct {
 
 // Options influence physical planning.
 type Options struct {
-	// Join forces a join algorithm: "", "auto", "hash" or "nested_loop".
+	// Join forces a join algorithm: "", "auto", "hash", "merge" or
+	// "nested_loop". Joins without an equality conjunct between the inputs
+	// always use a nested loop.
 	Join string
 	// UseIndexes enables index selection.
 	UseIndexes bool

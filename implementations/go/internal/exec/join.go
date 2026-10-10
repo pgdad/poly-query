@@ -1,28 +1,50 @@
 package exec
 
 import (
+	"sync"
+	"sync/atomic"
+
 	"polyquery/internal/errs"
+	"polyquery/internal/physical"
 	"polyquery/internal/plan"
 	"polyquery/internal/types"
 )
 
-// joinCounter enforces --max-join-rows on a join's output.
+// joinCounter enforces --max-join-rows on a join's output (shared by the
+// probe instances of a parallel hash join).
 type joinCounter struct {
 	ec      *Context
-	emitted int64
+	emitted *atomic.Int64
 }
 
+func newJoinCounter(ec *Context) joinCounter { return joinCounter{ec: ec, emitted: new(atomic.Int64)} }
+
 func (c *joinCounter) emit() error {
-	c.emitted++
-	if c.ec.MaxJoinRows > 0 && c.emitted > c.ec.MaxJoinRows {
+	if n := c.emitted.Add(1); c.ec.MaxJoinRows > 0 && n > c.ec.MaxJoinRows {
 		return errs.New(errs.ResourceLimit, "join produced more than %d rows", c.ec.MaxJoinRows)
 	}
 	return nil
 }
 
+// rowArena hands out row copies carved from larger slabs of values (one
+// allocation per slab instead of one per row).
+type rowArena struct{ slab []types.Value }
+
+func (a *rowArena) copy(row types.Row) types.Row {
+	n := len(row)
+	if len(a.slab) < n || n == 0 {
+		a.slab = make([]types.Value, max(256*n, 1))
+	}
+	cp := a.slab[:n:n]
+	a.slab = a.slab[n:]
+	copy(cp, row)
+	return cp
+}
+
 // materialize copies all rows of an operator, accounting their memory.
 func materialize(ec *Context, op Operator) ([]types.Row, error) {
 	var rows []types.Row
+	var arena rowArena
 	for n := 0; ; n++ {
 		row, err := op.Next()
 		if err != nil {
@@ -36,7 +58,7 @@ func materialize(ec *Context, op Operator) ([]types.Row, error) {
 				return nil, err
 			}
 		}
-		cp := append(types.Row(nil), row...)
+		cp := arena.copy(row)
 		if err := ec.Mem.Reserve(RowSize(cp)); err != nil {
 			return nil, err
 		}
@@ -46,23 +68,86 @@ func materialize(ec *Context, op Operator) ([]types.Row, error) {
 
 // ---------------------------------------------------------------- hash join
 
-// hashJoinOp implements INNER and LEFT equi-joins. The build input is
-// materialized into a hash table keyed by the join keys (rows with a NULL
-// key are dropped: NULL never matches); the probe input is streamed. Output
-// rows are always left columns then right columns.
+// rowJoinBuild is the build side of a row-mode hash join: materialized
+// into a hash table keyed by the join keys (rows with a NULL key are
+// dropped: NULL never matches) on first use, then shared read-only by all
+// probe instances.
+type rowJoinBuild struct {
+	ec      *Context
+	input   Operator
+	keys    []evalFn
+	types   []types.Type
+	once    sync.Once
+	table   map[string][]int32
+	rows    []types.Row
+	err     error
+	emitted atomic.Int64
+}
+
+func newRowJoinBuild(ec *Context, x *physical.HashJoin, vec bool) (*rowJoinBuild, error) {
+	buildNode, _, buildKeys, _ := buildSide(x)
+	in, err := input(ec, buildNode, vec)
+	if err != nil {
+		return nil, err
+	}
+	s := &rowJoinBuild{ec: ec, input: in, types: exprTypes(buildKeys)}
+	if s.keys, err = compileAll(ec, layoutOf(buildNode.Schema()), buildKeys); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *rowJoinBuild) get() error {
+	s.once.Do(func() { s.err = s.build() })
+	return s.err
+}
+
+func (s *rowJoinBuild) build() error {
+	s.table = map[string][]int32{}
+	var key []byte
+	for n := 0; ; n++ {
+		row, err := s.input.Next()
+		if err != nil {
+			return err
+		}
+		if row == nil {
+			return nil
+		}
+		if n%checkEvery == 0 {
+			if err := s.ec.Check(); err != nil {
+				return err
+			}
+		}
+		k, ok, err := joinKey(key[:0], s.keys, s.types, row)
+		key = k
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		cp := append(types.Row(nil), row...)
+		if err := s.ec.Mem.Reserve(RowSize(cp) + int64(len(key)) + 16); err != nil {
+			return err
+		}
+		s.rows = append(s.rows, cp)
+		s.table[string(key)] = append(s.table[string(key)], int32(len(s.rows)-1))
+	}
+}
+
+// hashJoinOp implements INNER and LEFT equi-joins by probing the build
+// table with every row of the streamed probe input. Output rows are always
+// left columns then right columns.
 type hashJoinOp struct {
 	joinCounter
 	kind             plan.JoinKind
-	build, probe     Operator
-	buildKeys        []evalFn
+	shared           *rowJoinBuild
+	probe            Operator
 	probeKeys        []evalFn
-	buildTypes       []types.Type
 	probeTypes       []types.Type
 	residual         evalFn // over the combined row; nil if none
 	buildLeft        bool
 	leftW, rightW    int
-	table            map[string][]int32
-	rows             []types.Row
 	built            bool
 	cur              types.Row // current probe row
 	matches          []int32
@@ -73,36 +158,24 @@ type hashJoinOp struct {
 	steps            int
 }
 
-func (j *hashJoinOp) buildTable() error {
-	j.table = map[string][]int32{}
-	for n := 0; ; n++ {
-		row, err := j.build.Next()
-		if err != nil {
-			return err
-		}
-		if row == nil {
-			return nil
-		}
-		if n%checkEvery == 0 {
-			if err := j.ec.Check(); err != nil {
-				return err
-			}
-		}
-		key, ok, err := joinKey(j.key[:0], j.buildKeys, j.buildTypes, row)
-		j.key = key
-		if err != nil {
-			return err
-		}
-		if !ok {
-			continue
-		}
-		cp := append(types.Row(nil), row...)
-		if err := j.ec.Mem.Reserve(RowSize(cp) + int64(len(key)) + 16); err != nil {
-			return err
-		}
-		j.rows = append(j.rows, cp)
-		j.table[string(key)] = append(j.table[string(key)], int32(len(j.rows)-1))
+func newHashJoinProbe(ec *Context, x *physical.HashJoin, shared *rowJoinBuild, probe Operator) (*hashJoinOp, error) {
+	_, probeNode, _, probeKeys := buildSide(x)
+	op := &hashJoinOp{
+		joinCounter: joinCounter{ec: ec, emitted: &shared.emitted}, kind: x.Kind, buildLeft: x.BuildLeft,
+		shared: shared, probe: probe, probeTypes: exprTypes(probeKeys),
+		leftW: len(x.Left.Schema()), rightW: len(x.Right.Schema()),
 	}
+	op.out = make(types.Row, op.leftW+op.rightW)
+	var err error
+	if op.probeKeys, err = compileAll(ec, layoutOf(probeNode.Schema()), probeKeys); err != nil {
+		return nil, err
+	}
+	if x.Residual != nil {
+		if op.residual, err = compile(ec, layoutOf(x.Schema()), x.Residual); err != nil {
+			return nil, err
+		}
+	}
+	return op, nil
 }
 
 // joinKey encodes the key of a row; ok is false if any key value is NULL.
@@ -134,14 +207,14 @@ func (j *hashJoinOp) combine(probe, build types.Row) types.Row {
 func (j *hashJoinOp) Next() (types.Row, error) {
 	if !j.built {
 		j.built = true
-		if err := j.buildTable(); err != nil {
+		if err := j.shared.get(); err != nil {
 			return nil, err
 		}
 	}
 	for {
 		if j.pending {
 			for j.mi < len(j.matches) {
-				b := j.rows[j.matches[j.mi]]
+				b := j.shared.rows[j.matches[j.mi]]
 				j.mi++
 				out := j.combine(j.cur, b)
 				if j.residual != nil {
@@ -183,7 +256,7 @@ func (j *hashJoinOp) Next() (types.Row, error) {
 		j.cur, j.mi, j.matched, j.pending = row, 0, false, true
 		j.matches = nil
 		if ok {
-			j.matches = j.table[string(key)]
+			j.matches = j.shared.table[string(key)]
 		}
 	}
 }

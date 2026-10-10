@@ -27,7 +27,7 @@ options:
   --max-ingest-bytes N        ingestion size limit (default 4 GiB)
   --max-table-rows N          maximum rows per table (default 500000000)
   --max-join-rows N           maximum join rows (default 100000000)
-  --threads N                 worker threads per query (default 1)
+  --threads N                 worker threads per query (default: min(4, CPU count))
   --log-level LEVEL           debug, info, warn, error, off (default info)
   --native-kernels PATH       native kernel library (unused)
   --request FILE|-            exec mode: request file, or - for stdin
@@ -64,6 +64,10 @@ func parseArgs(mode string, args []string) options {
 		ShutdownGrace:   10 * time.Second,
 		MaxRequestBytes: 1 << 30,
 	}}
+	// Testing aid: tiny morsels make small tables use parallel execution.
+	if v, err := strconv.Atoi(os.Getenv("POLYQUERY_MORSEL_ROWS")); err == nil && v > 0 {
+		o.cfg.MorselRows = v
+	}
 	for i := 0; i < len(args); i++ {
 		name, value, hasValue := strings.Cut(args[i], "=")
 		next := func() string {
@@ -102,6 +106,9 @@ func parseArgs(mode string, args []string) options {
 			o.cfg.MaxJoinRows = number()
 		case "--threads":
 			o.cfg.Threads = int(number())
+			if o.cfg.Threads < 1 {
+				usageError("--threads must be at least 1")
+			}
 		case "--log-level":
 			o.level = next()
 			switch o.level {

@@ -25,7 +25,7 @@ func build(t *testing.T, sql string, opts physical.Options) *physical.Plan {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := physical.Build(optimizer.Optimize(logical), opts)
+	p, err := physical.Build(optimizer.Optimize(logical, optimizer.Options{EvalConst: exec.EvalConstant}), opts)
 	if err != nil {
 		t.Fatal(err)
 	}

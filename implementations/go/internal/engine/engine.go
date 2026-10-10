@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -44,6 +45,7 @@ var Capabilities = []string{
 	"phase2", "sql.groupby", "sql.join", "sql.functions", "sql.subquery", "sql.cte", "sql.correlated_subquery",
 	"phase3", "storage.pqcf", "storage.mmap", "index.hash", "index.btree",
 	"phase4", "http.streaming",
+	"phase5", "exec.row", "exec.vectorized", "exec.parallel", "join.hash", "join.merge", "join.nested_loop",
 }
 
 // Config holds engine-wide settings (CLI options).
@@ -55,7 +57,11 @@ type Config struct {
 	MaxTableRows     int64
 	MaxJoinRows      int64
 	Threads          int
-	Logger           *slog.Logger
+	// MorselRows is the number of rows per parallel work unit (0: the
+	// executor default; small values are useful to test parallelism on
+	// small tables).
+	MorselRows int
+	Logger     *slog.Logger
 }
 
 // DefaultConfig returns the default configuration.
@@ -66,7 +72,7 @@ func DefaultConfig() Config {
 		MaxIngestBytes:   4 << 30,
 		MaxTableRows:     500_000_000,
 		MaxJoinRows:      100_000_000,
-		Threads:          1,
+		Threads:          min(4, runtime.NumCPU()),
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
@@ -198,7 +204,9 @@ type QueryOptions struct {
 	CountOnly  bool   // do not retain rows (result: "count")
 	NoOptimize bool   // skip logical optimization (optimize: false)
 	NoIndexes  bool   // never use indexes (use_indexes: false)
-	Join       string // forced join algorithm ("", "auto", "hash", "nested_loop")
+	Join       string // forced join algorithm ("", "auto", "hash", "merge", "nested_loop")
+	Mode       string // execution model ("", "auto", "row", "vectorized")
+	Threads    int    // worker threads (0: the engine default)
 	QueryID    string // client-assigned query id (HTTP cancellation)
 }
 
@@ -218,6 +226,23 @@ func (e *Engine) Query(ctx context.Context, sql string, opts QueryOptions) (*Res
 	}
 	defer cur.Close()
 	res := &Result{Columns: cur.Columns}
+	if opts.CountOnly && cur.op != nil {
+		// Vectorized plans are counted batch by batch.
+		n, ok, err := exec.CountRows(cur.op, cur.maxRows)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			if cur.maxRows >= 0 && n > cur.maxRows {
+				return nil, errs.New(errs.ResourceLimit, "result exceeds max_rows (%d)", cur.maxRows)
+			}
+			if err := cur.ctx.Err(); err != nil {
+				return nil, exec.ContextError(err)
+			}
+			res.RowCount = n
+			return res, nil
+		}
+	}
 	for {
 		row, err := cur.Next()
 		if err != nil {
@@ -301,22 +326,58 @@ func staticCursor(cols []plan.Column, rows []types.Row) *Cursor {
 
 // open builds the operator tree of a physical plan.
 func (e *Engine) open(ctx context.Context, p *physical.Plan, opts QueryOptions) (*Cursor, error) {
-	cancel := context.CancelFunc(func() {})
+	var cancel context.CancelFunc
 	if opts.Timeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
+	} else {
+		// Closing the cursor stops parallel workers of unfinished queries.
+		ctx, cancel = context.WithCancel(ctx)
+	}
+	threads := opts.Threads
+	if threads <= 0 {
+		threads = e.cfg.Threads
 	}
 	ec := &exec.Context{
 		Ctx:         ctx,
 		Mem:         &exec.MemTracker{Limit: e.cfg.MaxQueryMemoryMB << 20},
 		MaxJoinRows: e.cfg.MaxJoinRows,
 		Plan:        p,
+		Vectorized:  opts.Mode != "row" && !callsSleep(p),
+		Threads:     threads,
+		MorselRows:  e.cfg.MorselRows,
 	}
-	op, err := exec.Build(ec, p.Root)
+	op, err := exec.BuildRoot(ec, p.Root)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
 	return &Cursor{Columns: p.Root.Schema(), ctx: ctx, cancel: cancel, ec: ec, op: op, maxRows: opts.MaxRows}, nil
+}
+
+// callsSleep reports whether a plan evaluates PQ_SLEEP. Such (test-only)
+// queries always run row-at-a-time: PQ_SLEEP's per-row evaluation count is
+// observable through timing, and batch execution would evaluate it for rows
+// a LIMIT never needs.
+func callsSleep(p *physical.Plan) bool {
+	found := false
+	var visit func(n physical.Node)
+	visit = func(n physical.Node) {
+		for _, e := range physical.Exprs(n) {
+			plan.Walk(e, func(x plan.Expr) {
+				if f, ok := x.(*plan.Func); ok && f.Name == "PQ_SLEEP" {
+					found = true
+				}
+			})
+		}
+		for _, c := range n.Children() {
+			visit(c)
+		}
+	}
+	visit(p.Root)
+	for _, sub := range p.Subplans {
+		visit(sub)
+	}
+	return found
 }
 
 // Next returns the next result row, or nil at the end. The row is only
@@ -399,7 +460,7 @@ func (e *Engine) plan(q *ast.Query, opts QueryOptions) (*physical.Plan, error) {
 		return nil, err
 	}
 	if !opts.NoOptimize {
-		logical = optimizer.Optimize(logical)
+		logical = optimizer.Optimize(logical, optimizer.Options{EvalConst: exec.EvalConstant})
 	}
 	return physical.Build(logical, physical.Options{
 		Join:       opts.Join,

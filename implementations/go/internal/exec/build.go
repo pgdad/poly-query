@@ -7,11 +7,36 @@ import (
 	"polyquery/internal/types"
 )
 
-// Build turns a physical plan node into an executable operator tree.
-func Build(ec *Context, n physical.Node) (Operator, error) {
+// Build turns a physical plan node into a row-at-a-time (Volcano) operator
+// tree.
+func Build(ec *Context, n physical.Node) (Operator, error) { return build(ec, n, false) }
+
+// BuildRoot builds the operator tree of a query in the execution mode
+// selected by ec.Vectorized.
+func BuildRoot(ec *Context, n physical.Node) (Operator, error) { return input(ec, n, ec.Vectorized) }
+
+// input builds the operator of a child node: vectorized children are read
+// row by row through an adapter.
+func input(ec *Context, n physical.Node, vec bool) (Operator, error) {
+	if !vec {
+		return build(ec, n, false)
+	}
+	b, err := BuildBatch(ec, n)
+	if err != nil {
+		return nil, err
+	}
+	return newRowReader(b, schemaTypes(n.Schema())), nil
+}
+
+// build builds the row operator of n; its inputs are vectorized if vec is
+// set.
+func build(ec *Context, n physical.Node, vec bool) (Operator, error) {
 	switch x := n.(type) {
 	case *physical.TableScan:
-		return &scanOp{ec: ec, table: x.Table, ords: x.Ords, filters: x.Filters, buf: make(types.Row, len(x.Ords))}, nil
+		if op, ok, err := parallelRowPipeline(ec, x); ok || err != nil {
+			return op, err
+		}
+		return newScan(ec, x, nil), nil
 	case *physical.IndexScan:
 		return &indexScanOp{ec: ec, node: x, buf: make(types.Row, len(x.Ords))}, nil
 	case *physical.Values:
@@ -25,7 +50,10 @@ func Build(ec *Context, n physical.Node) (Operator, error) {
 		}
 		return op, nil
 	case *physical.Filter:
-		in, err := Build(ec, x.Input)
+		if op, ok, err := parallelRowPipeline(ec, x); ok || err != nil {
+			return op, err
+		}
+		in, err := input(ec, x.Input, vec)
 		if err != nil {
 			return nil, err
 		}
@@ -35,7 +63,10 @@ func Build(ec *Context, n physical.Node) (Operator, error) {
 		}
 		return &filterOp{ec: ec, input: in, pred: pred}, nil
 	case *physical.Project:
-		in, err := Build(ec, x.Input)
+		if op, ok, err := parallelRowPipeline(ec, x); ok || err != nil {
+			return op, err
+		}
+		in, err := input(ec, x.Input, vec)
 		if err != nil {
 			return nil, err
 		}
@@ -45,20 +76,22 @@ func Build(ec *Context, n physical.Node) (Operator, error) {
 		}
 		return &projectOp{input: in, exprs: fns, buf: make(types.Row, len(fns))}, nil
 	case *physical.HashAggregate:
-		return buildAggregate(ec, x)
+		return buildAggregate(ec, x, vec)
 	case *physical.HashJoin:
-		return buildHashJoin(ec, x)
+		return buildHashJoin(ec, x, vec)
+	case *physical.MergeJoin:
+		return buildMergeJoin(ec, x, vec)
 	case *physical.NestedLoopJoin:
-		left, err := Build(ec, x.Left)
+		left, err := input(ec, x.Left, vec)
 		if err != nil {
 			return nil, err
 		}
-		right, err := Build(ec, x.Right)
+		right, err := input(ec, x.Right, vec)
 		if err != nil {
 			return nil, err
 		}
 		op := &nestedLoopJoinOp{
-			joinCounter: joinCounter{ec: ec}, kind: x.Kind, left: left, right: right,
+			joinCounter: newJoinCounter(ec), kind: x.Kind, left: left, right: right,
 			leftW: len(x.Left.Schema()), rightW: len(x.Right.Schema()),
 		}
 		op.out = make(types.Row, op.leftW+op.rightW)
@@ -69,26 +102,17 @@ func Build(ec *Context, n physical.Node) (Operator, error) {
 		}
 		return op, nil
 	case *physical.Sort:
-		in, err := Build(ec, x.Input)
+		in, err := input(ec, x.Input, vec)
 		if err != nil {
 			return nil, err
 		}
-		lay := layoutOf(x.Input.Schema())
-		keys := make([]sortKey, len(x.Keys))
-		for i, k := range x.Keys {
-			ref, ok := k.Expr.(*plan.ColumnRef)
-			if !ok {
-				return nil, errs.New(errs.InternalError, "sort key is not a column")
-			}
-			idx, ok := lay[ref.ID]
-			if !ok {
-				return nil, errs.New(errs.InternalError, "unbound sort key %s", ref)
-			}
-			keys[i] = sortKey{index: idx, typ: ref.T, desc: k.Desc, nullsFirst: k.NullsFirst}
+		keys, err := sortKeys(x)
+		if err != nil {
+			return nil, err
 		}
 		return &sortOp{ec: ec, input: in, keys: keys, limit: x.Limit}, nil
 	case *physical.Limit:
-		return buildLimit(ec, x)
+		return buildLimit(ec, x, vec)
 	case *physical.Materialize:
 		rows, err := ec.materialized(x)
 		if err != nil {
@@ -111,7 +135,7 @@ func Build(ec *Context, n physical.Node) (Operator, error) {
 		}
 		return op, nil
 	case *physical.HashDistinct:
-		in, err := Build(ec, x.Input)
+		in, err := input(ec, x.Input, vec)
 		if err != nil {
 			return nil, err
 		}
@@ -125,73 +149,56 @@ func Build(ec *Context, n physical.Node) (Operator, error) {
 	return nil, errs.New(errs.InternalError, "cannot execute plan node %T", n)
 }
 
-func buildAggregate(ec *Context, x *physical.HashAggregate) (Operator, error) {
-	in, err := Build(ec, x.Input)
+func buildAggregate(ec *Context, x *physical.HashAggregate, vec bool) (Operator, error) {
+	if !vec {
+		if op, ok, err := parallelRowAggregate(ec, x); ok || err != nil {
+			return op, err
+		}
+	}
+	in, err := input(ec, x.Input, vec)
 	if err != nil {
 		return nil, err
 	}
-	lay := layoutOf(x.Input.Schema())
-	op := &hashAggregateOp{ec: ec, input: in, calls: x.Aggs, args: make([]evalFn, len(x.Aggs))}
-	if op.keys, err = compileAll(ec, lay, x.Keys); err != nil {
+	agg, err := newRowAggInput(ec, x)
+	if err != nil {
 		return nil, err
 	}
-	for _, k := range x.Keys {
-		op.keyTypes = append(op.keyTypes, k.Type())
+	return &hashAggregateOp{ec: ec, input: in, in: agg, keyTypes: exprTypes(x.Keys), calls: x.Aggs}, nil
+}
+
+func newRowAggInput(ec *Context, x *physical.HashAggregate) (*rowAggInput, error) {
+	lay := layoutOf(x.Input.Schema())
+	in := &rowAggInput{args: make([]evalFn, len(x.Aggs)), vals: make(types.Row, len(x.Keys))}
+	var err error
+	if in.keys, err = compileAll(ec, lay, x.Keys); err != nil {
+		return nil, err
 	}
 	for i, c := range x.Aggs {
 		if c.Arg != nil {
-			if op.args[i], err = compile(ec, lay, c.Arg); err != nil {
+			if in.args[i], err = compile(ec, lay, c.Arg); err != nil {
 				return nil, err
 			}
 		}
 	}
-	return op, nil
+	return in, nil
 }
 
-func buildHashJoin(ec *Context, x *physical.HashJoin) (Operator, error) {
-	left, err := Build(ec, x.Left)
-	if err != nil {
-		return nil, err
-	}
-	right, err := Build(ec, x.Right)
-	if err != nil {
-		return nil, err
-	}
-	lk, err := compileAll(ec, layoutOf(x.Left.Schema()), x.LeftKeys)
-	if err != nil {
-		return nil, err
-	}
-	rk, err := compileAll(ec, layoutOf(x.Right.Schema()), x.RightKeys)
-	if err != nil {
-		return nil, err
-	}
-	keyTypes := func(es []plan.Expr) []types.Type {
-		ts := make([]types.Type, len(es))
-		for i, e := range es {
-			ts[i] = e.Type()
-		}
-		return ts
-	}
-	op := &hashJoinOp{
-		joinCounter: joinCounter{ec: ec}, kind: x.Kind, buildLeft: x.BuildLeft,
-		leftW: len(x.Left.Schema()), rightW: len(x.Right.Schema()),
-	}
-	op.out = make(types.Row, op.leftW+op.rightW)
-	if x.BuildLeft {
-		op.build, op.probe = left, right
-		op.buildKeys, op.probeKeys = lk, rk
-		op.buildTypes, op.probeTypes = keyTypes(x.LeftKeys), keyTypes(x.RightKeys)
-	} else {
-		op.build, op.probe = right, left
-		op.buildKeys, op.probeKeys = rk, lk
-		op.buildTypes, op.probeTypes = keyTypes(x.RightKeys), keyTypes(x.LeftKeys)
-	}
-	if x.Residual != nil {
-		if op.residual, err = compile(ec, layoutOf(x.Schema()), x.Residual); err != nil {
-			return nil, err
+func buildHashJoin(ec *Context, x *physical.HashJoin, vec bool) (Operator, error) {
+	if !vec {
+		if op, ok, err := parallelRowPipeline(ec, x); ok || err != nil {
+			return op, err
 		}
 	}
-	return op, nil
+	shared, err := newRowJoinBuild(ec, x, vec)
+	if err != nil {
+		return nil, err
+	}
+	_, probeNode, _, _ := buildSide(x)
+	probe, err := input(ec, probeNode, vec)
+	if err != nil {
+		return nil, err
+	}
+	return newHashJoinProbe(ec, x, shared, probe)
 }
 
 // limitValue evaluates a constant LIMIT/OFFSET expression; NULL or absent
@@ -213,7 +220,7 @@ func limitValue(ec *Context, e plan.Expr, def int64) (int64, error) {
 	return v.I, nil
 }
 
-func buildLimit(ec *Context, x *physical.Limit) (Operator, error) {
+func buildLimit(ec *Context, x *physical.Limit, vec bool) (Operator, error) {
 	count, err := limitValue(ec, x.Count, -1)
 	if err != nil {
 		return nil, err
@@ -222,7 +229,7 @@ func buildLimit(ec *Context, x *physical.Limit) (Operator, error) {
 	if err != nil {
 		return nil, err
 	}
-	in, err := Build(ec, x.Input)
+	in, err := input(ec, x.Input, vec)
 	if err != nil {
 		return nil, err
 	}

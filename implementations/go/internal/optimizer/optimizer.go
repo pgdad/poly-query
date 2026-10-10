@@ -1,25 +1,46 @@
-// Package optimizer applies result-preserving rewrites to logical plans:
-// predicate pushdown through joins (WHERE conjuncts that reference a single
-// join input are evaluated below the join, conjuncts spanning both inputs of
-// an inner/cross join become join conditions), through projections (derived
-// tables and CTEs; output columns are replaced by their defining
-// expressions), sorts and DISTINCT, and merging of stacked filters, so that
-// predicates reach the table scans. Subquery plans are optimized
-// recursively.
+// Package optimizer applies result-preserving rewrites to logical plans
+// (all of them are skipped with the query option optimize: false):
+//
+//   - constant folding and boolean predicate simplification (fold.go);
+//   - predicate pushdown through joins (WHERE conjuncts that reference a
+//     single join input are evaluated below the join, conjuncts spanning
+//     both inputs of an inner/cross join become join conditions), through
+//     projections (derived tables and CTEs; output columns are replaced by
+//     their defining expressions), sorts and DISTINCT, and merging of
+//     stacked filters, so that predicates reach the table scans;
+//   - join reordering for chains of inner joins (reorder.go).
+//
+// Subquery plans are optimized recursively. Projection pushdown (column
+// pruning) is done by the physical planner.
 package optimizer
 
 import (
 	"polyquery/internal/plan"
+	"polyquery/internal/types"
 )
 
+// EvalFunc evaluates a constant expression.
+type EvalFunc func(plan.Expr) (types.Value, error)
+
+// Options configure the optimizer.
+type Options struct {
+	// EvalConst evaluates constant expressions (nil disables folding).
+	EvalConst EvalFunc
+}
+
 // Optimize returns an optimized copy of the plan.
-func Optimize(n plan.Node) plan.Node {
-	n = push(n, nil)
+func Optimize(n plan.Node, opts Options) plan.Node {
+	n = foldPlan(n, opts.EvalConst)
+	return optimize(n)
+}
+
+func optimize(n plan.Node) plan.Node {
+	n = reorder(push(n, nil))
 	return plan.MapExprs(n, func(e plan.Expr) plan.Expr {
 		if sq, ok := e.(*plan.Subquery); ok {
 			c := *sq
 			c.X = optimizeExpr(sq.X)
-			c.Plan = Optimize(sq.Plan)
+			c.Plan = optimize(sq.Plan)
 			return &c
 		}
 		return nil
@@ -31,7 +52,7 @@ func optimizeExpr(e plan.Expr) plan.Expr {
 		if sq, ok := x.(*plan.Subquery); ok {
 			c := *sq
 			c.X = optimizeExpr(sq.X)
-			c.Plan = Optimize(sq.Plan)
+			c.Plan = optimize(sq.Plan)
 			return &c
 		}
 		return nil
@@ -43,7 +64,12 @@ func optimizeExpr(e plan.Expr) plan.Expr {
 func push(n plan.Node, preds []plan.Expr) plan.Node {
 	switch x := n.(type) {
 	case *plan.Filter:
-		return push(x.Input, append(preds, plan.Conjuncts(x.Pred)...))
+		for _, c := range plan.Conjuncts(x.Pred) {
+			if !isTrue(c) {
+				preds = append(preds, c)
+			}
+		}
+		return push(x.Input, preds)
 	case *plan.Join:
 		return pushJoin(x, preds)
 	case *plan.Project:
