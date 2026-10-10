@@ -1,5 +1,6 @@
 package polyquery.types;
 
+import polyquery.common.Names;
 import java.math.BigInteger;
 
 /**
@@ -32,10 +33,10 @@ public final class TextParsers {
     }
 
     public static Boolean parseBoolean(String s) {
-        if (s.equalsIgnoreCase("true")) {
+        if (Names.equal(s, "true")) {
             return Boolean.TRUE;
         }
-        if (s.equalsIgnoreCase("false")) {
+        if (Names.equal(s, "false")) {
             return Boolean.FALSE;
         }
         return null;

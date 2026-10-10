@@ -1,5 +1,6 @@
 package polyquery.sql.analyzer;
 
+import polyquery.common.Names;
 import java.util.ArrayList;
 import java.util.List;
 import polyquery.common.ErrorCode;
@@ -196,7 +197,7 @@ public final class Analyzer {
         if (expr instanceof Expr.ColumnRef c && c.qualifier() == null) {
             int match = -1;
             for (int i = 0; i < visible; i++) {
-                if (names.get(i).equalsIgnoreCase(c.name())) {
+                if (Names.equal(names.get(i), c.name())) {
                     if (match >= 0 && !projections.get(match).equals(projections.get(i))) {
                         throw semantic("ORDER BY name '%s' is ambiguous", c.name());
                     }

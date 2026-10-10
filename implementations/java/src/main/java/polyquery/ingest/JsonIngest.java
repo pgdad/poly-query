@@ -40,7 +40,7 @@ public final class JsonIngest {
     public static Table loadArray(String name, String text, IngestOptions opts) {
         JsonIngest ing = new JsonIngest(opts);
         try {
-            JsonParser p = JsonParser.forArray(text);
+            JsonParser p = JsonParser.forArray(!text.isEmpty() && text.charAt(0) == '\uFEFF' ? text.substring(1) : text);
             long record = 0;
             while (true) {
                 Object el = p.nextElement();

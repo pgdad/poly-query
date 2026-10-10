@@ -1,7 +1,7 @@
 package polyquery.storage;
 
+import polyquery.common.Names;
 import java.util.List;
-import java.util.Locale;
 import polyquery.types.DataType;
 
 /** An immutable in-memory table stored column-wise. */
@@ -45,7 +45,7 @@ public final class Table {
     /** Index of a column by case-insensitive name, or -1. */
     public int findColumn(String columnName) {
         for (int i = 0; i < columns.size(); i++) {
-            if (columns.get(i).name().equalsIgnoreCase(columnName)) {
+            if (Names.equal(columns.get(i).name(), columnName)) {
                 return i;
             }
         }
@@ -58,6 +58,6 @@ public final class Table {
     }
 
     public static String key(String name) {
-        return name.toLowerCase(Locale.ROOT);
+        return Names.key(name);
     }
 }

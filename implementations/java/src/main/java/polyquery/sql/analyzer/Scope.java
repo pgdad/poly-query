@@ -1,5 +1,6 @@
 package polyquery.sql.analyzer;
 
+import polyquery.common.Names;
 import java.util.ArrayList;
 import java.util.List;
 import polyquery.common.ErrorCode;
@@ -24,7 +25,7 @@ final class Scope {
 
     void add(String name, List<ColumnSchema> columns) {
         for (RangeVar rv : rangeVars) {
-            if (rv.name().equalsIgnoreCase(name)) {
+            if (Names.equal(rv.name(), name)) {
                 throw PolyQueryException.of(ErrorCode.SEMANTIC_ERROR, "duplicate range variable '%s'", name);
             }
         }
@@ -42,7 +43,7 @@ final class Scope {
 
     RangeVar find(String name) {
         for (RangeVar rv : rangeVars) {
-            if (rv.name().equalsIgnoreCase(name)) {
+            if (Names.equal(rv.name(), name)) {
                 return rv;
             }
         }
@@ -82,7 +83,7 @@ final class Scope {
         BoundExpr.ColumnRef found = null;
         for (int i = 0; i < rv.columns().size(); i++) {
             ColumnSchema c = rv.columns().get(i);
-            if (c.name().equalsIgnoreCase(name)) {
+            if (Names.equal(c.name(), name)) {
                 if (found != null) {
                     throw PolyQueryException.of(ErrorCode.SEMANTIC_ERROR, "ambiguous column '%s'", name);
                 }

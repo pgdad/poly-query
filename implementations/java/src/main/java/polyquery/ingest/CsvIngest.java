@@ -1,5 +1,6 @@
 package polyquery.ingest;
 
+import polyquery.common.Names;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -50,7 +51,7 @@ public final class CsvIngest {
                     throw IngestErrors.ingest("header has " + names.size() + " columns but schema has " + schema.size(), 1);
                 }
                 for (int i = 0; i < names.size(); i++) {
-                    if (!names.get(i).equalsIgnoreCase(schema.get(i).name())) {
+                    if (!Names.equal(names.get(i), schema.get(i).name())) {
                         throw IngestErrors.ingest("header column '" + names.get(i) + "' does not match schema column '"
                                 + schema.get(i).name() + "'", 1);
                     }
