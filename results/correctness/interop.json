@@ -2,15 +2,240 @@
  "schema": "polyquery-interop/1",
  "summary": {
   "engines": [
+   "java",
    "clojure",
    "go"
   ],
-  "files_written": 57,
+  "files_written": 85,
   "write_errors": 0,
   "read_failures": 0,
   "passed": true
  },
  "files": [
+  {
+   "writer": "java",
+   "table": "people",
+   "mode": "plain",
+   "path": "out/java__people__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "people",
+   "mode": "dict",
+   "path": "out/java__people__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "people",
+   "mode": "rle",
+   "path": "out/java__people__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "people",
+   "mode": "auto",
+   "path": "out/java__people__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "ledger",
+   "mode": "plain",
+   "path": "out/java__ledger__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "ledger",
+   "mode": "dict",
+   "path": "out/java__ledger__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "ledger",
+   "mode": "rle",
+   "path": "out/java__ledger__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "ledger",
+   "mode": "auto",
+   "path": "out/java__ledger__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "strings",
+   "mode": "plain",
+   "path": "out/java__strings__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "strings",
+   "mode": "dict",
+   "path": "out/java__strings__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "strings",
+   "mode": "rle",
+   "path": "out/java__strings__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "strings",
+   "mode": "auto",
+   "path": "out/java__strings__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "dates",
+   "mode": "plain",
+   "path": "out/java__dates__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "dates",
+   "mode": "dict",
+   "path": "out/java__dates__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "dates",
+   "mode": "rle",
+   "path": "out/java__dates__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "dates",
+   "mode": "auto",
+   "path": "out/java__dates__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "tx",
+   "mode": "plain",
+   "path": "out/java__tx__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "tx",
+   "mode": "dict",
+   "path": "out/java__tx__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "tx",
+   "mode": "rle",
+   "path": "out/java__tx__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "tx",
+   "mode": "auto",
+   "path": "out/java__tx__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "nulls",
+   "mode": "plain",
+   "path": "out/java__nulls__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "nulls",
+   "mode": "dict",
+   "path": "out/java__nulls__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "nulls",
+   "mode": "rle",
+   "path": "out/java__nulls__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "nulls",
+   "mode": "auto",
+   "path": "out/java__nulls__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "events",
+   "mode": "plain",
+   "path": "out/java__events__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "events",
+   "mode": "dict",
+   "path": "out/java__events__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "events",
+   "mode": "rle",
+   "path": "out/java__events__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "java",
+   "table": "events",
+   "mode": "auto",
+   "path": "out/java__events__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
   {
    "writer": "clojure",
    "table": "people",
@@ -469,7 +694,34 @@
   }
  ],
  "matrix": {
+  "java": {
+   "java": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "clojure": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "go": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "reference": {
+    "ok": 1,
+    "fail": 0,
+    "failures": []
+   }
+  },
   "clojure": {
+   "java": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
    "clojure": {
     "ok": 28,
     "fail": 0,
@@ -487,6 +739,11 @@
    }
   },
   "go": {
+   "java": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
    "clojure": {
     "ok": 28,
     "fail": 0,
