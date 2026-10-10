@@ -1,0 +1,25 @@
+{
+ "wave_id": "wave-a-phase4-a1-20261010T195932Z",
+ "task": "phase4",
+ "track": "A",
+ "attempt": 1,
+ "seed": 5050,
+ "order": [
+  "clojure"
+ ],
+ "run_ids": [
+  "a-phase4-clojure-a1-20261010T195932Z"
+ ],
+ "started": "2026-10-10T19:59:33+00:00",
+ "parallel": 1,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  3.615234375,
+  2.40087890625,
+  2.06298828125
+ ]
+}
