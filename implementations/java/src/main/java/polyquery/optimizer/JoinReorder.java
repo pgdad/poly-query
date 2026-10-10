@@ -13,9 +13,9 @@ import polyquery.storage.Table;
 
 /**
  * Join reordering for trees of inner (and cross) joins over three or more inputs: a greedy
- * order that starts with the smallest input and repeatedly adds the connected input giving the
- * smallest estimated intermediate result (equi-join estimates use distinct counts from table
- * statistics), building a left-deep tree; each join condition conjunct is placed at the
+ * order that starts with the connected pair of inputs with the smallest estimated join result
+ * and repeatedly adds the connected input giving the smallest estimated intermediate result
+ * (equi-join estimates use distinct counts from table statistics), building a left-deep tree; each join condition conjunct is placed at the
  * lowest join where all its inputs are available, and a projection on top restores the
  * original column order.
  *
@@ -144,55 +144,98 @@ final class JoinReorder {
         return 0;
     }
 
-    /** Greedy join order: smallest input first, then the connected input with the smallest estimated result. */
+    /** Estimated rows of joining a result of {@code rows} rows over inputs {@code have} with input {@code next}. */
+    private static double joinRows(double rows, BitSet have, int next, List<Leaf> leaves, List<Pred> preds) {
+        double estimate = rows * leaves.get(next).rows();
+        for (Pred p : preds) {
+            if (!p.leaves().get(next) || p.leaves().cardinality() < 2) {
+                continue;
+            }
+            BitSet missing = (BitSet) p.leaves().clone();
+            missing.clear(next);
+            missing.andNot(have);
+            if (missing.isEmpty()) {
+                estimate *= selectivity(p, leaves);
+            }
+        }
+        return estimate;
+    }
+
+    /** True if some conjunct joins input {@code next} with inputs in {@code have} only. */
+    private static boolean connected(BitSet have, int next, List<Pred> preds) {
+        for (Pred p : preds) {
+            if (!p.leaves().get(next) || p.leaves().cardinality() < 2) {
+                continue;
+            }
+            BitSet others = (BitSet) p.leaves().clone();
+            others.clear(next);
+            BitSet missing = (BitSet) others.clone();
+            missing.andNot(have);
+            if (missing.isEmpty() && !others.isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Greedy join order: the connected pair of inputs with the smallest estimated join result
+     * first, then repeatedly the connected input giving the smallest estimated result (cross
+     * products only when nothing is connected; ties keep the original order).
+     */
     private static int[] greedyOrder(List<Leaf> leaves, List<Pred> preds) {
         int n = leaves.size();
         int[] order = new int[n];
         BitSet chosen = new BitSet();
-        int first = 0;
-        for (int i = 1; i < n; i++) {
-            if (leaves.get(i).rows() < leaves.get(first).rows()) {
-                first = i;
+        int bestA = -1;
+        int bestB = -1;
+        double bestRows = Double.MAX_VALUE;
+        for (int a = 0; a < n; a++) {
+            BitSet have = new BitSet();
+            have.set(a);
+            for (int b = a + 1; b < n; b++) {
+                if (!connected(have, b, preds)) {
+                    continue;
+                }
+                double rows = joinRows(leaves.get(a).rows(), have, b, leaves, preds);
+                if (rows < bestRows) {
+                    bestRows = rows;
+                    bestA = a;
+                    bestB = b;
+                }
             }
         }
-        order[0] = first;
-        chosen.set(first);
-        double current = leaves.get(first).rows();
-        for (int k = 1; k < n; k++) {
+        if (bestA < 0) {
+            for (int i = 0; i < n; i++) {
+                order[i] = i; // no join predicates at all: keep the written order
+            }
+            return order;
+        }
+        order[0] = bestA;
+        order[1] = bestB;
+        chosen.set(bestA);
+        chosen.set(bestB);
+        double current = Math.max(1, bestRows);
+        for (int k = 2; k < n; k++) {
             int best = -1;
-            double bestRows = Double.MAX_VALUE;
+            double bestEstimate = Double.MAX_VALUE;
             boolean bestConnected = false;
             for (int i = 0; i < n; i++) {
                 if (chosen.get(i)) {
                     continue;
                 }
-                double estimate = current * leaves.get(i).rows();
-                boolean connected = false;
-                for (Pred p : preds) {
-                    if (!p.leaves().get(i) || p.leaves().cardinality() < 2) {
-                        continue;
-                    }
-                    BitSet others = (BitSet) p.leaves().clone();
-                    others.clear(i);
-                    BitSet missing = (BitSet) others.clone();
-                    missing.andNot(chosen);
-                    if (!missing.isEmpty()) {
-                        continue; // needs an input not joined yet
-                    }
-                    connected = true;
-                    estimate *= selectivity(p, leaves);
-                }
-                // prefer connected inputs (no cross products), then the smallest estimate
-                if (best < 0 || connected && !bestConnected
-                        || connected == bestConnected && estimate < bestRows) {
+                boolean isConnected = connected(chosen, i, preds);
+                double estimate = joinRows(current, chosen, i, leaves, preds);
+                if (best < 0 || isConnected && !bestConnected
+                        || isConnected == bestConnected && estimate < bestEstimate) {
                     best = i;
-                    bestRows = estimate;
-                    bestConnected = connected;
+                    bestEstimate = estimate;
+                    bestConnected = isConnected;
                 }
             }
             order[k] = best;
             chosen.set(best);
-            current = Math.max(1, bestRows);
+            current = Math.max(1, bestEstimate);
         }
         return order;
     }
