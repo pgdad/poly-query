@@ -127,19 +127,20 @@ func TestPhase2Queries(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]string{
-		"SELECT p.name, h.city FROM people p JOIN home h ON h.pid = p.id ORDER BY p.id":                "name:STRING,city:STRING|Alice,Helsinki|Bob,Tampere|dave,Oulu",
-		"SELECT p.id, h.city FROM people p LEFT JOIN home h ON h.pid = p.id ORDER BY 1":                "id:INT64,city:STRING|1,Helsinki|2,Tampere|3,null|4,Oulu",
-		"SELECT COUNT(*) FROM people, home":                                                            "_col1:INT64|16",
-		"SELECT age > 30 AS old, COUNT(*) AS n FROM people GROUP BY 1 ORDER BY 1":                      "old:BOOLEAN,n:INT64|null,1|false,1|true,2",
-		"SELECT name FROM people WHERE id IN (SELECT pid FROM home) AND name LIKE '%a%' ORDER BY name": "name:STRING|dave",
-		"SELECT name FROM people p WHERE NOT EXISTS (SELECT 1 FROM home h WHERE h.pid = p.id)":         "name:STRING|Carol",
-		"WITH t AS (SELECT city FROM home WHERE pid < 5) SELECT COUNT(*) AS n FROM t":                  "n:INT64|3",
-		"SELECT DISTINCT LENGTH(city) AS l FROM home ORDER BY l":                                       "l:INT64|4|5|7|8",
-		"SELECT CASE WHEN age IS NULL THEN 'n/a' ELSE CONCAT(age) END AS a FROM people ORDER BY id":    "a:STRING|34|28|n/a|52",
-		"SELECT name, (SELECT city FROM home WHERE pid = p.id) AS c FROM people p WHERE id = 2":        "name:STRING,c:STRING|Bob,Tampere",
-		"SELECT x.c FROM (SELECT COUNT(*) AS c FROM people GROUP BY age IS NULL) x ORDER BY c":         "c:INT64|1|3",
-		"SELECT UPPER(SUBSTR(name, 1, 1)) || LOWER(SUBSTR(name, 2)) AS n FROM people WHERE id = 4":     "n:STRING|Dave",
-		"SELECT ROUND(AVG(score), 1) AS a, SUM(age) FILTERED FROM people":                              "a:FLOAT64,FILTERED:INT64|83.9,114",
+		"SELECT p.name, h.city FROM people p JOIN home h ON h.pid = p.id ORDER BY p.id":                         "name:STRING,city:STRING|Alice,Helsinki|Bob,Tampere|dave,Oulu",
+		"SELECT p.id, h.city FROM people p LEFT JOIN home h ON h.pid = p.id ORDER BY 1":                         "id:INT64,city:STRING|1,Helsinki|2,Tampere|3,null|4,Oulu",
+		"SELECT COUNT(*) FROM people, home":                                                                     "_col1:INT64|16",
+		"SELECT age > 30 AS old, COUNT(*) AS n FROM people GROUP BY 1 ORDER BY 1":                               "old:BOOLEAN,n:INT64|null,1|false,1|true,2",
+		"SELECT name FROM people WHERE id IN (SELECT pid FROM home) AND name LIKE '%a%' ORDER BY name":          "name:STRING|dave",
+		"SELECT name FROM people p WHERE NOT EXISTS (SELECT 1 FROM home h WHERE h.pid = p.id)":                  "name:STRING|Carol",
+		"WITH t AS (SELECT city FROM home WHERE pid < 5) SELECT COUNT(*) AS n FROM t":                           "n:INT64|3",
+		"SELECT DISTINCT LENGTH(city) AS l FROM home ORDER BY l":                                                "l:INT64|4|5|7|8",
+		"SELECT CASE WHEN age IS NULL THEN 'n/a' ELSE CONCAT(age) END AS a FROM people ORDER BY id":             "a:STRING|34|28|n/a|52",
+		"SELECT name, (SELECT city FROM home WHERE pid = p.id) AS c FROM people p WHERE id = 2":                 "name:STRING,c:STRING|Bob,Tampere",
+		"SELECT x.c FROM (SELECT COUNT(*) AS c FROM people GROUP BY age IS NULL) x ORDER BY c":                  "c:INT64|1|3",
+		"SELECT UPPER(SUBSTR(name, 1, 1)) || LOWER(SUBSTR(name, 2)) AS n FROM people WHERE id = 4":              "n:STRING|Dave",
+		"SELECT 9 IN (1,2,3,4,5,6,7,NULL) AS a, 1.0 IN (1,2,3,4,5,6,7,8) AS b, 2 NOT IN (1,3,4,5,6,7,8,9) AS c": "a:BOOLEAN,b:BOOLEAN,c:BOOLEAN|null,true,true",
+		"SELECT ROUND(AVG(score), 1) AS a, SUM(age) FILTERED FROM people":                                       "a:FLOAT64,FILTERED:INT64|83.9,114",
 	}
 	for sql, want := range cases {
 		res, err := e.Query(context.Background(), sql, QueryOptions{MaxRows: -1})

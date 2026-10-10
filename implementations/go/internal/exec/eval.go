@@ -505,6 +505,9 @@ func compileInList(ec *Context, lay layout, x *plan.InList) (evalFn, error) {
 	if err != nil {
 		return nil, err
 	}
+	if f := constantInSet(ec, vf, x); f != nil {
+		return f, nil
+	}
 	list, err := compileAll(ec, lay, x.List)
 	if err != nil {
 		return nil, err
@@ -543,6 +546,64 @@ func compileInList(ec *Context, lay layout, x *plan.InList) (evalFn, error) {
 		}
 		return result, nil
 	}, nil
+}
+
+// constantInSet compiles `x IN (constants…)` with a hash set when the list
+// is long, all elements are constants and share one comparison type; it
+// returns nil if that does not apply.
+func constantInSet(ec *Context, vf evalFn, x *plan.InList) evalFn {
+	if len(x.List) < 8 {
+		return nil
+	}
+	ct := x.CmpTypes[0]
+	set := map[string]struct{}{}
+	hasNull := false
+	var key []byte
+	for i, e := range x.List {
+		if x.CmpTypes[i] != ct || !plan.IsConstant(e) {
+			return nil
+		}
+		v, err := evalConstant(ec, e)
+		if err != nil {
+			return nil
+		}
+		if v.Null {
+			hasNull = true
+			continue
+		}
+		cast, eff := caster(e.Type(), ct)
+		if v, err = cast(v); err != nil {
+			return nil
+		}
+		key = appendKey(key[:0], v, eff)
+		set[string(key)] = struct{}{}
+	}
+	cast, eff := caster(x.X.Type(), ct)
+	not := x.Not
+	return func(row types.Row) (types.Value, error) {
+		v, err := vf(row)
+		if err != nil {
+			return v, err
+		}
+		result := falseVal
+		if v.Null {
+			result = null
+		} else {
+			if v, err = cast(v); err != nil {
+				return null, err
+			}
+			key = appendKey(key[:0], v, eff)
+			if _, ok := set[string(key)]; ok {
+				result = trueVal
+			} else if hasNull {
+				result = null
+			}
+		}
+		if not {
+			result = not3(result)
+		}
+		return result, nil
+	}
 }
 
 // evalConstant evaluates a constant expression.
