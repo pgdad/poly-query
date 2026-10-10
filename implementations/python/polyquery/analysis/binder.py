@@ -59,6 +59,8 @@ class _SelectEntry:
     expr_ast: ast.Expr | None  # None for columns produced by '*'
     alias: str | None
     star_column: b.ColumnRef | None = None
+    # bound expression when the item is referenced by GROUP BY alias/ordinal
+    group_expr: b.Expr | None = None
 
 
 class Binder:
@@ -216,7 +218,9 @@ class Binder:
         if entry.star_column is not None:
             return entry.star_column
         assert entry.expr_ast is not None
-        return self.bind_expr(entry.expr_ast, ctx)
+        if entry.group_expr is None:
+            entry.group_expr = self.bind_expr(entry.expr_ast, ctx)
+        return entry.group_expr
 
     @staticmethod
     def _resolves_locally(node: ast.ColumnRef, scope: Scope) -> bool:
@@ -310,7 +314,9 @@ class Binder:
         if entry.star_column is not None:
             return b.OutputColumn(entry.star_column.name, entry.star_column)
         assert entry.expr_ast is not None
-        expr = self.bind_expr(entry.expr_ast, ctx)
+        # reuse the GROUP BY binding so that the item matches its grouping key
+        # even if it contains subqueries (which compare by identity)
+        expr = entry.group_expr or self.bind_expr(entry.expr_ast, ctx)
         if entry.alias is not None:
             name = entry.alias
         elif isinstance(entry.expr_ast, ast.ColumnRef) and isinstance(expr, b.ColumnRef):
