@@ -1,0 +1,25 @@
+{
+ "wave_id": "wave-a-phase2-a1-20261010T201523Z",
+ "task": "phase2",
+ "track": "A",
+ "attempt": 1,
+ "seed": 5925,
+ "order": [
+  "rust"
+ ],
+ "run_ids": [
+  "a-phase2-rust-a1-20261010T201523Z"
+ ],
+ "started": "2026-10-10T20:15:24+00:00",
+ "parallel": 1,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  4.10888671875,
+  3.21728515625,
+  2.43994140625
+ ]
+}
