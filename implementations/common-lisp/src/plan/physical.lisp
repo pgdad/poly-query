@@ -247,13 +247,14 @@ enclosing correlated subquery (no correlation parameters anywhere)."
 ;;; ------------------------------------------------------------------
 ;;; EXPLAIN rendering (indexes-and-planning.md §4)
 
-(defun expression-subquery-plans (exprs)
-  (let ((plans '()))
-    (dolist (e exprs (nreverse plans))
+(defun expression-subqueries (exprs)
+  "The planned SUBQUERY descriptors used in EXPRS, in order of appearance."
+  (let ((found '()))
+    (dolist (e exprs (nreverse found))
       (when e
         (bexpr-walk (lambda (x)
                       (when (and (subquery-op-p x) (subquery-plan (b-op-info x)))
-                        (pushnew (subquery-plan (b-op-info x)) plans)))
+                        (pushnew (b-op-info x) found)))
                     e)))))
 
 (defun node-expressions (node)
@@ -336,10 +337,19 @@ enclosing correlated subquery (no correlation parameters anywhere)."
                       "offset" (maybe (pp-top-n-offset node)))))))
 
 (defun explain-plan-json (node)
-  "The EXPLAIN JSON object of physical plan NODE. Subquery plans are listed
-under \"subqueries\" (not as children: they are separate executions)."
-  (let ((subplans (expression-subquery-plans (node-expressions node))))
-    (apply #'jobj (append (explain-properties node)
-                          (when subplans
-                            (list "subqueries" (mapcar #'explain-plan-json subplans)))
-                          (list "children" (mapcar #'explain-plan-json (pnode-children node)))))))
+  "The EXPLAIN JSON object of physical plan NODE. The plans of subqueries
+evaluated by NODE follow its input children, each wrapped in a `Subquery`
+node (they are separate executions, not inputs)."
+  (apply #'jobj
+         (append (explain-properties node)
+                 (list "children"
+                       (append (mapcar #'explain-plan-json (pnode-children node))
+                               (mapcar (lambda (sq)
+                                         (jobj "op" "Subquery"
+                                               "kind" (string-downcase
+                                                       (symbol-name (subquery-kind sq)))
+                                               "correlated" (if (plusp (subquery-param-count sq))
+                                                                :true :false)
+                                               "children" (list (explain-plan-json
+                                                                 (subquery-plan sq)))))
+                                       (expression-subqueries (node-expressions node))))))))

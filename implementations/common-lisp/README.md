@@ -1,11 +1,15 @@
 # PolyQuery — Common Lisp implementation
 
 An in-memory analytical SQL engine implementing the PolyQuery specification
-(`spec/`) in ANSI Common Lisp on SBCL. Current scope: **Phases 1 and 2**
+(`spec/`) in ANSI Common Lisp on SBCL. Current scope: **Phases 1–3**
 (protocol, catalog, CSV/JSON/JSONL ingestion, all data types, the complete
 SQL grammar and semantics — joins, grouping, DISTINCT, all scalar functions,
 CASE/LIKE/BETWEEN/IN, uncorrelated *and correlated* subqueries, derived
-tables, CTEs, EXPLAIN — resource limits, test functions).
+tables, CTEs, EXPLAIN — resource limits, test functions; row and column
+layouts, dictionary encoding, null bitmaps, the PQCF v1 file format with
+memory-mapped reads, statistics, hash and ordered indexes, index selection,
+predicate pushdown with row-group skipping, column pruning and cost-based
+join build sides).
 
 ## Build prerequisites
 
@@ -30,14 +34,16 @@ SBCL's runtime does not interpret any command-line arguments; the heap
 ## Libraries
 
 None. Only ANSI Common Lisp, SBCL extensions (`sb-ext`, `sb-sys`, `sb-int`,
-`sb-impl`, `sb-thread`, `sb-unix`) and the bundled `asdf`/`uiop`/`sb-rt`
-contribs are used (`ENGINE.json` lists no libraries).
+`sb-impl`, `sb-kernel`, `sb-thread`, `sb-unix`) and the bundled
+`asdf`/`uiop`/`sb-posix`/`sb-rt` contribs are used (`ENGINE.json` lists no
+libraries). `sb-posix` provides `mmap`, `fsync`, `rename` and `fstat`.
 
 ## Capabilities
 
 `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`, `sql.basic`,
 `test.functions`, `phase2`, `sql.groupby`, `sql.join`, `sql.functions`,
-`sql.subquery`, `sql.cte`, `sql.correlated_subquery`.
+`sql.subquery`, `sql.cte`, `sql.correlated_subquery`, `phase3`,
+`storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`.
 
 ## Architecture
 
@@ -54,11 +60,11 @@ SQL text --lexer--> tokens --parser--> AST --binder--> BOUND-QUERY
 |---|---|---|
 | util | `errors`, `numbers`, `json` | `pq-error` condition with stable codes; exact numeric text parsing, correctly rounded float parsing, shortest round-trip float printing; strict RFC 8259 JSON reader/writer |
 | types | `types`, `temporal`, `values`, `compare` | type representation, aliases, promotion lattice and result-type unification; DATE/TIMESTAMP calendar math; text conversion, `CAST`, canonical serialization; total ordering |
-| storage | `table`, `catalog` | immutable column-oriented tables; case-insensitive catalog with atomic publish (mutex-protected) |
+| storage | `columns`, `table`, `stats`, `index`, `catalog`, `binary`, `files`, `pqcf-write`, `pqcf-read` | typed column vectors with validity bitmaps and dictionary encoding; immutable tables in row or column layout split into segments; lazily computed column statistics; hash and sorted-permutation (B-tree equivalent) indexes; catalog of tables and global index names with atomic publish (mutex-protected); little-endian codec, CRC-32, strict UTF-8; crash-safe file replacement and mmap/buffered file sources; PQCF v1 writer and validating reader |
 | ingest | `common`, `csv`, `json` | CSV parsing on raw UTF-8 octets, JSON/JSONL; type inference and explicit-schema conversion |
 | sql | `lexer`, `ast`, `parser` | tokenizer with line/column positions; AST structures; recursive-descent parser for the full grammar of `grammar.md` (`PARSE_ERROR` carries `details.line`/`column`) |
 | analyzer | `bound`, `functions`, `binder`, `query` | semantic validation. `bound`: bound expression nodes and the analysed-query representation; `functions`: the scalar function registry (typing + implementation per function); `binder`: expressions — name resolution through nested scopes, typing, implicit promotions, CASE/LIKE/BETWEEN/IN, subqueries; `query`: CTEs, FROM/joins/derived tables, `*` expansion, output naming, GROUP BY alias/ordinal resolution, the structural grouping rewrite, HAVING, DISTINCT, ORDER BY resolution, constant LIMIT/OFFSET |
-| plan | `logical`, `optimizer`, `physical` | logical plan construction (`Scan`, `Values`, `Filter`, `Join`, `Aggregate`, `Project`, `Distinct`, `Sort`, `Limit`); logical rewrites (predicate pushdown, column pruning); physical operator selection and EXPLAIN JSON rendering |
+| plan | `logical`, `optimizer`, `access`, `physical` | logical plan construction (`Scan`, `Values`, `Filter`, `Join`, `Aggregate`, `Project`, `Distinct`, `Sort`, `Limit`); logical rewrites (predicate pushdown, column pruning); access paths (predicate analysis, selectivity and cardinality estimates, index choice, segment skipping); physical operator selection and EXPLAIN JSON rendering |
 | exec | `context`, `expressions`, `aggregates`, `operators` | query context (deadline, cancellation flag, memory budget, join row limit); expression compiler to closures (incl. subquery evaluation); aggregate accumulators; Volcano-style operators |
 | protocol | `requests`, `cli` | JSON-lines request dispatch (`query`, `explain`, catalog ops), validation and responses; CLI modes `version`, `capabilities`, `session`, `exec` |
 
@@ -91,16 +97,30 @@ at compile time.
   NULL-supplying side of a LEFT JOIN stay above it. *Column pruning*
   propagates the set of required columns top-down and renumbers column
   positions, so every `TableScan` reads only referenced columns.
+* **Access paths.** A filter directly above a scan (where pushdown puts
+  every single-table conjunct) is analysed into `column op constant`,
+  `column IN (constants)` and `column BETWEEN constant AND constant`
+  predicates. Every index of the table proposes an access (HASH: `=`/`IN`;
+  BTREE: `=`/`IN` and all range predicates on its column combined); the
+  estimated selectivity is 1/distinct per value for equality and linear
+  interpolation between the index's min and max for ranges on
+  numeric/temporal columns (1/3 per bound otherwise). The most selective
+  access becomes an `IndexScan` when it selects ≤ 10% of the rows; the
+  conjuncts it answers exactly are removed and the rest stay in a `Filter`
+  above it. Otherwise the `TableScan` receives the predicates for segment
+  skipping (see Storage).
 * **Physical plan.** Joins with equality conjuncts between the two sides
-  become `HashJoin` (build side: the right input; remaining conjuncts form a
-  residual), others `NestedLoopJoin` (`join_type` INNER/LEFT/CROSS);
+  become `HashJoin` (remaining conjuncts form a residual; inner joins build
+  on the input with the smaller estimated cardinality, LEFT joins on the
+  right input), others `NestedLoopJoin` (`join_type` INNER/LEFT/CROSS);
   aggregation and DISTINCT are hash based; `ORDER BY … LIMIT n` with a
   literal limit becomes a bounded `TopN`; inside correlated subqueries a
   filter `column = outer value` over a scan becomes a `HashLookupScan` (the
   table is hashed once and probed per evaluation).
 * **EXPLAIN** (statement and `explain` op) renders the physical plan as JSON
-  (indexes-and-planning.md §4). Plans of subqueries appear under a node's
-  `"subqueries"` key, not under `"children"`.
+  (indexes-and-planning.md §4). The plan of a subquery appears after the
+  input children of the node that evaluates it, wrapped in a `Subquery`
+  node (`kind`, `correlated`), so plan walkers see every scan.
 
 ### Execution
 
@@ -111,6 +131,54 @@ subtree does not depend on correlation parameters are built once and reused
 across re-executions of a correlated subquery. Timeouts/cancellation are
 checked every few thousand rows in every loop; materialized state is charged
 against the memory budget.
+
+### Storage (Phase 3)
+
+* **Layouts.** A table is immutable and split into *segments* (one for
+  loaded tables, one per row group for tables opened from PQCF). In the
+  *column* layout (default) a segment holds one typed vector per column —
+  `(signed-byte 64)` for INT64/DECIMAL/DATE/TIMESTAMP, `double-float` for
+  FLOAT64, a bit vector for BOOLEAN, strings or dictionary codes for STRING —
+  plus a validity bitmap (absent when the column has no NULLs). In the *row*
+  layout a segment holds row tuples. Scans, statistics, indexes and the PQCF
+  writer read both through the same per-column reader functions, so results
+  are identical.
+* **Dictionary encoding** is used for STRING columns in the column layout
+  when the input has at least 16 rows and fewer than n/2 distinct values, or
+  always with `{"dictionary": true}` (`false` disables it).
+* **Statistics** (`stats`): null count, exact distinct count, min and max
+  per column, computed from the data on first use and cached per column.
+* **Indexes.** `HASH`: hash table from value to the ascending row ids;
+  `BTREE`: a sorted permutation (non-NULL values in order with their row
+  ids) searched by binary search with the SQL comparator between the column
+  type and the constant's type, so cross-type predicates (`int_col > 2.5`,
+  `date_col < TIMESTAMP '…'`) are exact. Hash lookups convert the constant to
+  the column's representation exactly; when that is impossible (e.g. a FLOAT64
+  constant beyond 2^53 against INT64) the hash index is not used. Index
+  scans return rows in table order. Index names are global; indexes belong
+  to the table object they were built on and disappear when it is dropped or
+  replaced.
+* **PQCF writing** (`save`): row-group-major chunks at 8-byte aligned
+  offsets (zero padding), metadata with min/max for every type except
+  STRING, indexes of the table. Encodings with `auto`: RLE when the run count
+  is below n/4 (BOOLEAN, INT64, DECIMAL, DATE, TIMESTAMP), DICT when the
+  distinct count is below n/2 (STRING), else PLAIN; forced `dict`/`rle` fall
+  back to PLAIN for types they do not apply to. Default row group size 65536.
+  The file is written to `.<name>.tmp-<pid>-<n>` in the target directory,
+  fsynced, renamed over the target and the directory is fsynced; temporaries
+  of crashed processes (dead pid) are removed by the next save of the target.
+* **PQCF reading** (`open`): header, footer, metadata CRC, metadata structure
+  and value rules are validated; every column chunk is CRC-checked and
+  validated before use. With `mmap: true` the file is mapped read-only
+  (`sb-posix:mmap`) and each chunk is verified and decoded on first access
+  (a corrupt chunk fails the query that touches it with `STORAGE_CORRUPT`);
+  otherwise the file is read and every chunk is verified and decoded during
+  `open`. Bytes of the data area not covered by any chunk must be zero
+  padding (so bit flips in padding are detected). With `layout: "row"`
+  everything is decoded into row tuples. Chunk min/max statistics are used
+  only to skip row groups: a `TableScan` skips a segment when its
+  statistics prove a pushed `column op constant` / `IN` / `BETWEEN`
+  predicate false for every row (or the column is entirely NULL there).
 
 ### Subqueries and correlation
 
@@ -137,16 +205,16 @@ before the whole statement has been analysed.
   index scan can absorb them.
 * The catalog is mutex-protected and tables are immutable, matching the
   snapshot isolation model of concurrency.md; all query state lives in the
-  query context and in per-statement compiled closures.
+  query context and in per-statement compiled closures. Lazily decoded
+  chunks and cached statistics are written idempotently (a race only
+  duplicates work).
 
 ## Decisions on points the spec leaves open
 
 ### General
 
-* `UNION`, `RIGHT`/`FULL` joins answer `UNSUPPORTED` (reserved syntax).
-  `CREATE INDEX` / `DROP INDEX` are parsed and answer `UNSUPPORTED` (indexes
-  are Phase 3). Ops `save`, `open`, `stats` answer `UNSUPPORTED`; `serve`
-  exits 1.
+* `UNION`, `RIGHT`/`FULL` joins answer `UNSUPPORTED` (reserved syntax);
+  `serve` exits 1.
 * A NULL literal combined with a typed operand takes that operand's role
   (`NULL + 1` is INT64, `NULL / 0` is NULL); when nothing determines a type
   (`-NULL`, `NULL + NULL`, `SUM(NULL)`) the expression keeps the null type and
@@ -178,8 +246,8 @@ before the whole statement has been analysed.
 * Query option values (for `query` and `explain`): `mode` accepts
   `auto`/`row` (`vectorized` is `UNSUPPORTED`), `threads` ≥ 1 is accepted
   (execution is single-threaded, results are identical),
-  `join`/`optimize`/`use_indexes`/`native` are validated and otherwise have
-  no effect yet.
+  `use_indexes: false` disables index scans; `join`/`optimize`/`native` are
+  validated and otherwise have no effect yet.
 * Default limits: query memory budget 2048 MB (approximate accounting of
   materialized rows, hash tables, sort buffers), ingestion 4 GiB,
   200,000,000 table rows, 100,000,000 rows produced by any single join
@@ -244,6 +312,32 @@ before the whole statement has been analysed.
 * **max-join-rows** limits the number of rows produced by each join
   operator.
 
+### Storage and indexes (Phase 3)
+
+* **Index choice on tiny tables.** Besides the 10% selectivity rule, a table
+  with at most 100 rows uses an applicable index whatever the estimate (both
+  access paths cost nothing there; the public suite expects an `IndexScan`
+  for an equality on an 8-row table with 4 distinct values).
+* `CREATE INDEX` without `USING` creates a BTREE index. Indexes may be built
+  on columns of any type. An existing index name is `ALREADY_EXISTS` (no-op
+  with `IF NOT EXISTS`, even if the existing index differs); unknown table or
+  column is `SEMANTIC_ERROR`; `DROP INDEX` of an unknown name is `NOT_FOUND`.
+* `IndexScan.columns` lists the same (pruned) columns the `TableScan` would
+  read, including the indexed column used by the predicate.
+* `save`: `encoding` must be `auto`/`plain`/`dict`/`rle` and `row_group_size`
+  a positive integer, else `INVALID_REQUEST`. `open` of a missing file is
+  `NOT_FOUND`, of a directory `IO_ERROR`. The table name inside the file is
+  ignored (the request's `table` names the table). `load`/`open` with an
+  unknown `layout` is `INVALID_REQUEST`.
+* **Reader leniency/strictness.** Column type names are parsed like schema
+  types (aliases and spaces accepted). Index entries of unknown `kind` are
+  skipped; duplicate index names or indexes on unknown columns are
+  `STORAGE_CORRUPT`. Unparsable min/max statistics are ignored (treated as
+  unknown). An encoding that is not valid for the column type (DICT on
+  INT64, RLE on STRING/FLOAT64) is `STORAGE_CORRUPT`; an unknown encoding
+  name is `STORAGE_VERSION_UNSUPPORTED`. Values in NULL slots are ignored.
+* `stats` and `schema` responses also report the table's `layout`.
+
 ## Testing
 
 * `make test` — unit tests (sb-rt) for numeric parsing/formatting, temporal
@@ -251,13 +345,28 @@ before the whole statement has been analysed.
   evaluation, and Phase 2 analysis/planning/execution (joins, pushdown and
   pruning visible in EXPLAIN, grouping, DISTINCT, subqueries, correlation,
   CTEs, functions).
+  Storage tests cover CRC-32, strict UTF-8, column stores in every type,
+  row/column layout equivalence, statistics, hash/B-tree lookups, PQCF round
+  trips for every encoding and row-group size (buffered and mmap), empty
+  tables, corruption detection, index selection and save/open requests.
 * Conformance: `python3 tests/conformance/runner.py --engine
-  implementations/common-lisp/bin/polyquery --phase 1 --phase 2`.
+  implementations/common-lisp/bin/polyquery --phase 1 --phase 2 --phase 3`.
+* During development, written files were additionally cross-checked with an
+  independent strict decoder, the reader was fuzzed with bit flips,
+  truncations and checksum-consistent structural mutations, and `save` was
+  killed with SIGKILL at random points (the target was always absent or
+  complete).
 
 ## Known limitations
 
-* Indexes, persistent storage, statistics (Phase 3), the HTTP server
-  (Phase 4) and the Phase 5 execution options are not implemented yet.
+* The HTTP server (Phase 4) and the Phase 5 execution options are not
+  implemented yet.
+* Indexes are not used to produce ordered output, for joins, or for
+  disjunctions (`a = 1 OR a = 2` is not rewritten to `IN`).
+* Loaded (CSV/JSON) tables form a single segment, so row-group skipping
+  only applies to tables opened from PQCF files.
+* Distinct counts are exact (a hash set per column), which costs memory on
+  very large high-cardinality columns the first time statistics are needed.
 * Execution is single-threaded and row-at-a-time.
 * Correlated subqueries are executed per distinct outer value (memoized);
   only equality correlations directly on a base-table scan use a hash lookup,
