@@ -1,11 +1,12 @@
 //! Validation of protocol requests into typed values (protocol.md §4–§5).
 
-use crate::engine::{LoadRequest, QueryOptions, Source};
+use crate::engine::{LoadRequest, OpenRequest, QueryOptions, SaveRequest, Source};
 use crate::error::{Error, Result};
 use crate::ingest::Format;
 use crate::json::Json;
 use crate::planner::physical::JoinStrategy;
-use crate::storage::Field;
+use crate::storage::pqcf::write::{EncodingChoice, SaveOptions};
+use crate::storage::{Field, Layout};
 use crate::types::DataType;
 
 #[derive(Debug)]
@@ -17,6 +18,9 @@ pub enum Request {
     Drop { table: String },
     Reset,
     Load(LoadRequest),
+    Save(SaveRequest),
+    Open(OpenRequest),
+    Stats { table: String },
     Query { sql: String, options: QueryOptions },
     Explain { sql: String, options: QueryOptions },
     Sleep { ms: u64 },
@@ -119,11 +123,11 @@ impl Request {
                 sql: required_str(req, "sql")?,
                 options: parse_query_options(req)?,
             },
-            "save" | "open" | "stats" => {
-                return Err(Error::unsupported(format!(
-                    "operation '{op}' is not supported by this engine"
-                )));
-            }
+            "save" => Request::Save(parse_save(req)?),
+            "open" => Request::Open(parse_open(req)?),
+            "stats" => Request::Stats {
+                table: table_name(req)?,
+            },
             other => return Err(invalid(format!("unknown op '{other}'"))),
         })
     }
@@ -161,7 +165,11 @@ fn parse_load(req: &Json) -> Result<LoadRequest> {
     };
     let mut header = true;
     let mut delimiter = b',';
+    let mut layout = Layout::default();
+    let mut dictionary = None;
     if let Some(opts) = optional_object(req, "options")? {
+        layout = parse_layout(opts)?.unwrap_or_default();
+        dictionary = optional_bool(opts, "dictionary")?;
         if let Some(h) = optional_bool(opts, "header")? {
             header = h;
         }
@@ -185,6 +193,60 @@ fn parse_load(req: &Json) -> Result<LoadRequest> {
         header,
         delimiter,
         replace,
+        layout,
+        dictionary,
+    })
+}
+
+/// The `layout` option (`"row"` | `"column"`).
+fn parse_layout(opts: &Json) -> Result<Option<Layout>> {
+    match optional_str(opts, "layout")? {
+        None => Ok(None),
+        Some(l) => Layout::parse(l)
+            .map(Some)
+            .ok_or_else(|| invalid(format!("unknown layout '{l}'"))),
+    }
+}
+
+fn parse_save(req: &Json) -> Result<SaveRequest> {
+    let table = table_name(req)?;
+    let path = required_str(req, "path")?;
+    let mut options = SaveOptions::default();
+    if let Some(opts) = optional_object(req, "options")? {
+        if let Some(n) = optional_uint(opts, "row_group_size")? {
+            if n == 0 {
+                return Err(invalid("row_group_size must be at least 1"));
+            }
+            options.row_group_size = usize::try_from(n).unwrap_or(usize::MAX);
+        }
+        if let Some(e) = optional_str(opts, "encoding")? {
+            options.encoding = EncodingChoice::parse(e)
+                .ok_or_else(|| invalid(format!("unknown encoding '{e}'")))?;
+        }
+    }
+    Ok(SaveRequest {
+        table,
+        path,
+        options,
+    })
+}
+
+fn parse_open(req: &Json) -> Result<OpenRequest> {
+    let table = table_name(req)?;
+    let path = required_str(req, "path")?;
+    let (mut mmap, mut layout, mut dictionary) = (false, None, None);
+    if let Some(opts) = optional_object(req, "options")? {
+        mmap = optional_bool(opts, "mmap")?.unwrap_or(false);
+        layout = parse_layout(opts)?;
+        dictionary = optional_bool(opts, "dictionary")?;
+    }
+    Ok(OpenRequest {
+        table,
+        path,
+        mmap,
+        layout,
+        dictionary,
+        replace: optional_bool(req, "replace")?.unwrap_or(false),
     })
 }
 
@@ -228,7 +290,9 @@ fn parse_query_options(req: &Json) -> Result<QueryOptions> {
         return Err(invalid("threads must be at least 1"));
     }
     optional_bool(opts, "optimize")?;
-    optional_bool(opts, "use_indexes")?;
+    if let Some(u) = optional_bool(opts, "use_indexes")? {
+        o.use_indexes = u;
+    }
     optional_bool(opts, "native")?;
     optional_str(opts, "query_id")?;
     Ok(o)

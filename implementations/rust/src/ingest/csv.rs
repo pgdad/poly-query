@@ -286,9 +286,9 @@ mod tests {
         assert_eq!(t.fields[0].data_type, DataType::Int64);
         assert_eq!(t.fields[1].data_type, DataType::String);
         assert_eq!(t.fields[2].data_type, DataType::Date);
-        assert!(t.columns[0].value(1).is_null());
-        assert_eq!(t.columns[1].value(0), Value::str(" x "));
-        assert_eq!(t.columns[1].value(1), Value::str(""));
+        assert!(t.value(1, 0).unwrap().is_null());
+        assert_eq!(t.value(0, 1).unwrap(), Value::str(" x "));
+        assert_eq!(t.value(1, 1).unwrap(), Value::str(""));
     }
 
     #[test]

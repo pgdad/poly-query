@@ -13,9 +13,12 @@ use crate::ingest::{self, Format, IngestOptions};
 use crate::json::Json;
 use crate::planner::physical::{self, JoinStrategy};
 use crate::planner::{BindContext, PhysicalOptions, PhysicalPlan, optimizer, plan_query};
+use crate::sql::ast::Ident;
 use crate::sql::ast::{Query, Statement};
 use crate::sql::parse_statement;
-use crate::storage::{Field, Table};
+use crate::storage::pqcf::write::SaveOptions;
+use crate::storage::pqcf::{self, IndexMeta};
+use crate::storage::{Field, Index, IndexKind, Layout, Table, TableStats};
 use crate::types::{DataType, Value};
 
 /// Where load input comes from.
@@ -36,9 +39,35 @@ pub struct LoadRequest {
     pub header: bool,
     pub delimiter: u8,
     pub replace: bool,
+    /// In-memory representation (`options.layout`).
+    pub layout: Layout,
+    /// `options.dictionary`: Some(true) forces dictionary encoding of STRING
+    /// columns; None applies it where beneficial.
+    pub dictionary: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default)]
+/// `save` request (protocol.md §5.7).
+#[derive(Debug, Clone)]
+pub struct SaveRequest {
+    pub table: String,
+    pub path: String,
+    pub options: SaveOptions,
+}
+
+/// `open` request (protocol.md §5.7).
+#[derive(Debug, Clone)]
+pub struct OpenRequest {
+    pub table: String,
+    pub path: String,
+    /// Memory-map the file and decode chunks lazily.
+    pub mmap: bool,
+    /// Convert to this layout (None keeps the columnar file representation).
+    pub layout: Option<Layout>,
+    pub dictionary: Option<bool>,
+    pub replace: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct QueryOptions {
     /// Result rows above this ⇒ RESOURCE_LIMIT.
     pub max_rows: Option<u64>,
@@ -48,11 +77,28 @@ pub struct QueryOptions {
     pub count_only: bool,
     /// Join algorithm preference.
     pub join: JoinStrategy,
+    /// `use_indexes: false` ⇒ never use indexes.
+    pub use_indexes: bool,
+}
+
+impl Default for QueryOptions {
+    fn default() -> Self {
+        QueryOptions {
+            max_rows: None,
+            timeout_ms: 0,
+            count_only: false,
+            join: JoinStrategy::Auto,
+            use_indexes: true,
+        }
+    }
 }
 
 impl QueryOptions {
     fn physical(&self) -> PhysicalOptions {
-        PhysicalOptions { join: self.join }
+        PhysicalOptions {
+            join: self.join,
+            use_indexes: self.use_indexes,
+        }
     }
 }
 
@@ -62,6 +108,17 @@ pub struct QueryResult {
     /// Empty when `count_only` was requested.
     pub rows: Vec<Row>,
     pub row_count: u64,
+}
+
+impl QueryResult {
+    /// The result of a statement: no columns, no rows.
+    fn empty() -> Self {
+        QueryResult {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            row_count: 0,
+        }
+    }
 }
 
 pub struct Engine {
@@ -159,8 +216,112 @@ impl Engine {
             schema: req.schema.clone(),
             max_rows: usize::try_from(self.config.max_table_rows).unwrap_or(usize::MAX),
         };
-        let table = ingest::ingest(&req.table, req.format, &text, &opts)?;
+        let table = ingest::ingest(&req.table, req.format, &text, &opts)?
+            .into_layout(req.layout, req.dictionary)?;
         self.catalog.insert(table, req.replace)
+    }
+
+    fn max_rows(&self) -> usize {
+        usize::try_from(self.config.max_table_rows).unwrap_or(usize::MAX)
+    }
+
+    /// Writes a table as a PQCF file atomically; returns the file size.
+    pub fn save(&self, req: &SaveRequest) -> Result<u64> {
+        let table = self.table(&req.table)?;
+        let path = self.resolve_path(&req.path)?;
+        let indexes: Vec<IndexMeta> = self
+            .catalog
+            .indexes_for(&table)
+            .iter()
+            .map(|ix| IndexMeta {
+                name: ix.name.clone(),
+                column: ix.column_name().to_string(),
+                kind: ix.kind,
+            })
+            .collect();
+        pqcf::write::save(&table, &indexes, &path, &req.path, &req.options)
+    }
+
+    /// Opens a PQCF file as a table, recreating the indexes it lists.
+    pub fn open(&mut self, req: &OpenRequest) -> Result<Arc<Table>> {
+        if !req.replace && self.catalog.contains(&req.table) {
+            return Err(Error::new(
+                ErrorCode::AlreadyExists,
+                format!("table '{}' already exists", req.table),
+            ));
+        }
+        let path = self.resolve_path(&req.path)?;
+        let opened = pqcf::read::open(&path, &req.path, &req.table, req.mmap, self.max_rows())?;
+        let mut table = opened.table;
+        if let Some(layout) = req.layout {
+            table = table.into_layout(layout, req.dictionary)?;
+        } else if req.dictionary == Some(true) {
+            table = table.into_layout(Layout::Column, Some(true))?;
+        }
+        self.catalog
+            .insert_with_indexes(table, req.replace, &opened.indexes)
+    }
+
+    /// Statistics of a table (`stats` op).
+    pub fn stats(&self, name: &str) -> Result<(Arc<Table>, TableStats)> {
+        let table = self.table(name)?;
+        let stats = table.stats()?;
+        Ok((table, stats))
+    }
+
+    /// Indexes on a table, in creation order.
+    pub fn indexes(&self, table: &Arc<Table>) -> Vec<Arc<Index>> {
+        self.catalog.indexes_for(table)
+    }
+
+    /// `CREATE INDEX` (semantics.md §14).
+    fn create_index(
+        &mut self,
+        name: &Ident,
+        if_not_exists: bool,
+        table: &Ident,
+        column: &Ident,
+        using: Option<&Ident>,
+    ) -> Result<()> {
+        let t = self.catalog.get(&table.value).ok_or_else(|| {
+            table
+                .pos
+                .error(Error::semantic(format!("unknown table '{}'", table.value)))
+        })?;
+        let col = t.column_index(&column.value).ok_or_else(|| {
+            column.pos.error(Error::semantic(format!(
+                "unknown column '{}'",
+                column.value
+            )))
+        })?;
+        let kind = match using {
+            None => IndexKind::Btree,
+            Some(k) => IndexKind::parse(&k.value).ok_or_else(|| {
+                Error::unsupported(format!("index kind '{}' is not supported", k.value))
+            })?,
+        };
+        if self.catalog.index(&name.value).is_some() {
+            if if_not_exists {
+                return Ok(());
+            }
+            return Err(Error::new(
+                ErrorCode::AlreadyExists,
+                format!("index '{}' already exists", name.value),
+            ));
+        }
+        self.catalog.create_index(&name.value, &t, col, kind)
+    }
+
+    /// `DROP INDEX` (semantics.md §14).
+    fn drop_index(&mut self, name: &Ident, if_exists: bool) -> Result<()> {
+        if self.catalog.drop_index(&name.value) || if_exists {
+            Ok(())
+        } else {
+            Err(Error::not_found(format!(
+                "index '{}' does not exist",
+                name.value
+            )))
+        }
     }
 
     pub fn drop_table(&mut self, name: &str) -> Result<()> {
@@ -192,13 +353,13 @@ impl Engine {
         match parse_statement(sql)? {
             Statement::Query(q) | Statement::Explain(q) => Ok(self.plan_query(&q, opts)?.to_json()),
             Statement::CreateIndex { .. } | Statement::DropIndex { .. } => {
-                Err(Error::unsupported("indexes are not supported"))
+                Err(Error::unsupported("only queries can be explained"))
             }
         }
     }
 
     /// Executes a SQL statement.
-    pub fn query(&self, sql: &str, opts: &QueryOptions) -> Result<QueryResult> {
+    pub fn query(&mut self, sql: &str, opts: &QueryOptions) -> Result<QueryResult> {
         match parse_statement(sql)? {
             Statement::Query(q) => {
                 let plan = self.plan_query(&q, opts)?;
@@ -217,8 +378,19 @@ impl Engine {
                     row_count: 1,
                 })
             }
-            Statement::CreateIndex { .. } | Statement::DropIndex { .. } => {
-                Err(Error::unsupported("indexes are not supported"))
+            Statement::CreateIndex {
+                name,
+                if_not_exists,
+                table,
+                column,
+                using,
+            } => {
+                self.create_index(&name, if_not_exists, &table, &column, using.as_ref())?;
+                Ok(QueryResult::empty())
+            }
+            Statement::DropIndex { name, if_exists } => {
+                self.drop_index(&name, if_exists)?;
+                Ok(QueryResult::empty())
             }
         }
     }
@@ -278,20 +450,11 @@ mod tests {
 
     fn engine() -> Engine {
         let mut e = Engine::new(Config::default());
-        e.load(LoadRequest {
-            table: "t".into(),
-            format: Format::Csv,
-            source: Source::Data("id,name,amt\n1,a,1.5\n2,b,\n3,c,0.25\n".into()),
-            schema: None,
-            header: true,
-            delimiter: b',',
-            replace: false,
-        })
-        .unwrap();
+        load(&mut e, "t", "id,name,amt\n1,a,1.5\n2,b,\n3,c,0.25\n");
         e
     }
 
-    fn rows(e: &Engine, sql: &str) -> Vec<Row> {
+    fn rows(e: &mut Engine, sql: &str) -> Vec<Row> {
         e.query(sql, &QueryOptions::default())
             .unwrap_or_else(|err| panic!("{sql}: {err}"))
             .rows
@@ -312,13 +475,13 @@ mod tests {
 
     #[test]
     fn select_filter_order_limit() {
-        let e = engine();
+        let mut e = engine();
         let r = rows(
-            &e,
+            &mut e,
             "SELECT name FROM t WHERE id > 1 ORDER BY id DESC LIMIT 1",
         );
         assert_eq!(r, vec![vec![Value::str("c")]]);
-        let r = rows(&e, "SELECT id FROM t ORDER BY amt NULLS LAST, id");
+        let r = rows(&mut e, "SELECT id FROM t ORDER BY amt NULLS LAST, id");
         assert_eq!(
             r,
             vec![
@@ -331,8 +494,11 @@ mod tests {
 
     #[test]
     fn aggregates() {
-        let e = engine();
-        let r = rows(&e, "SELECT COUNT(*), COUNT(amt), SUM(id), MAX(name) FROM t");
+        let mut e = engine();
+        let r = rows(
+            &mut e,
+            "SELECT COUNT(*), COUNT(amt), SUM(id), MAX(name) FROM t",
+        );
         assert_eq!(
             r,
             vec![vec![
@@ -346,8 +512,8 @@ mod tests {
 
     #[test]
     fn errors() {
-        let e = engine();
-        let code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
+        let mut e = engine();
+        let mut code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
         assert_eq!(code("SELECT nope FROM t"), ErrorCode::SemanticError);
         assert_eq!(
             code("SELECT id FROM t WHERE name = 1"),
@@ -377,6 +543,8 @@ mod tests {
             header: true,
             delimiter: b',',
             replace: false,
+            layout: Layout::Column,
+            dictionary: None,
         })
         .unwrap();
     }
@@ -394,9 +562,9 @@ mod tests {
 
     #[test]
     fn joins() {
-        let e = engine2();
+        let mut e = engine2();
         let r = rows(
-            &e,
+            &mut e,
             "SELECT t.id, u.tag FROM t JOIN u ON t.id = u.id ORDER BY u.tag",
         );
         assert_eq!(
@@ -408,14 +576,14 @@ mod tests {
             ]
         );
         let r = rows(
-            &e,
+            &mut e,
             "SELECT t.id FROM t LEFT JOIN u ON u.id = t.id WHERE u.tag IS NULL",
         );
         assert_eq!(r, ints(&[2]));
-        let r = rows(&e, "SELECT COUNT(*) FROM t, u");
+        let r = rows(&mut e, "SELECT COUNT(*) FROM t, u");
         assert_eq!(r, ints(&[15]));
         // Non-equi join (nested loop) and the explicit nested-loop strategy.
-        let r = rows(&e, "SELECT COUNT(*) FROM t JOIN u ON t.id < u.id");
+        let r = rows(&mut e, "SELECT COUNT(*) FROM t JOIN u ON t.id < u.id");
         assert_eq!(r, ints(&[5]));
         let nl = QueryOptions {
             join: JoinStrategy::NestedLoop,
@@ -430,13 +598,13 @@ mod tests {
 
     #[test]
     fn grouping_and_distinct() {
-        let e = engine2();
+        let mut e = engine2();
         let r = rows(
-            &e,
+            &mut e,
             "SELECT id, COUNT(*) AS n FROM u GROUP BY id HAVING COUNT(*) > 1",
         );
         assert_eq!(r, vec![vec![Value::Int(1), Value::Int(2)]]);
-        let r = rows(&e, "SELECT DISTINCT id FROM u ORDER BY id NULLS LAST");
+        let r = rows(&mut e, "SELECT DISTINCT id FROM u ORDER BY id NULLS LAST");
         assert_eq!(
             r,
             vec![
@@ -447,11 +615,11 @@ mod tests {
             ]
         );
         let r = rows(
-            &e,
+            &mut e,
             "SELECT id + 1 AS k FROM u GROUP BY 1 ORDER BY k DESC LIMIT 1",
         );
         assert_eq!(r, ints(&[10]));
-        let code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
+        let mut code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
         assert_eq!(
             code("SELECT tag FROM u GROUP BY id"),
             ErrorCode::SemanticError
@@ -464,18 +632,21 @@ mod tests {
 
     #[test]
     fn subqueries_and_ctes() {
-        let e = engine2();
+        let mut e = engine2();
         let r = rows(
-            &e,
+            &mut e,
             "SELECT id FROM t WHERE id IN (SELECT id FROM u) ORDER BY id",
         );
         assert_eq!(r, ints(&[1, 3]));
         // NOT IN over a set containing NULL is never TRUE.
-        let r = rows(&e, "SELECT id FROM t WHERE id NOT IN (SELECT id FROM u)");
+        let r = rows(
+            &mut e,
+            "SELECT id FROM t WHERE id NOT IN (SELECT id FROM u)",
+        );
         assert!(r.is_empty());
         // Correlated scalar subquery.
         let r = rows(
-            &e,
+            &mut e,
             "SELECT t.id, (SELECT COUNT(*) FROM u WHERE u.id = t.id) FROM t ORDER BY 1",
         );
         assert_eq!(
@@ -487,12 +658,12 @@ mod tests {
             ]
         );
         let r = rows(
-            &e,
+            &mut e,
             "WITH a AS (SELECT id FROM t WHERE id > 1), b(x) AS (SELECT id * 10 FROM a) \
              SELECT x FROM b ORDER BY x",
         );
         assert_eq!(r, ints(&[20, 30]));
-        let code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
+        let mut code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
         assert_eq!(
             code("SELECT (SELECT id FROM u)"),
             ErrorCode::SubqueryCardinality
@@ -509,7 +680,7 @@ mod tests {
 
     #[test]
     fn explain() {
-        let e = engine2();
+        let mut e = engine2();
         let plan = e
             .explain(
                 "SELECT t.name FROM t JOIN u ON t.id = u.id WHERE u.tag = 'x'",

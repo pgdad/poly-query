@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crate::engine::Engine;
 use crate::error::{Error, Result};
 use crate::json::{self, Json};
-use crate::storage::{Field, Table};
+use crate::storage::{ColumnStats, Field, Table};
 use request::Request;
 
 pub const ENGINE_NAME: &str = "polyquery-rust";
@@ -33,6 +33,11 @@ pub const CAPABILITIES: &[&str] = &[
     "sql.subquery",
     "sql.cte",
     "sql.correlated_subquery",
+    "phase3",
+    "storage.pqcf",
+    "storage.mmap",
+    "index.hash",
+    "index.btree",
 ];
 
 /// The `version` response body (without id).
@@ -87,6 +92,28 @@ fn table_json(t: &Table) -> Vec<(&'static str, Json)> {
         ("row_count", Json::uint(t.row_count as u64)),
         ("columns", columns_json(&t.fields)),
     ]
+}
+
+fn value_json(v: &Option<crate::types::Value>, f: &Field) -> Json {
+    match v {
+        None => Json::Null,
+        Some(v) => {
+            let mut s = String::new();
+            v.write_json(f.data_type, &mut s);
+            Json::Raw(s)
+        }
+    }
+}
+
+fn column_stats_json(f: &Field, s: &ColumnStats) -> Json {
+    Json::object(vec![
+        ("name", Json::str(&f.name)),
+        ("type", Json::String(f.data_type.name())),
+        ("null_count", Json::uint(s.null_count as u64)),
+        ("distinct_count", Json::uint(s.distinct_count as u64)),
+        ("min", value_json(&s.min, f)),
+        ("max", value_json(&s.max, f)),
+    ])
 }
 
 /// Prefixes a response body object with the request id.
@@ -177,7 +204,62 @@ fn execute(engine: &mut Engine, req: Request, started: Instant) -> Result<Json> 
             let t = engine.table(&table)?;
             let mut body = vec![ok()];
             body.extend(table_json(&t));
-            body.push(("indexes", Json::Array(Vec::new())));
+            let indexes = engine
+                .indexes(&t)
+                .iter()
+                .map(|ix| {
+                    Json::object(vec![
+                        ("name", Json::str(&ix.name)),
+                        ("column", Json::str(ix.column_name())),
+                        ("kind", Json::str(ix.kind.name())),
+                    ])
+                })
+                .collect();
+            body.push(("indexes", Json::Array(indexes)));
+            body.push(("layout", Json::str(t.layout().name())));
+            body
+        }
+        Request::Stats { table } => {
+            let (t, stats) = engine.stats(&table)?;
+            let columns = t
+                .fields
+                .iter()
+                .zip(&stats.columns)
+                .map(|(f, s)| column_stats_json(f, s))
+                .collect();
+            vec![
+                ok(),
+                ("table", Json::str(&t.name)),
+                ("row_count", Json::uint(stats.row_count as u64)),
+                ("columns", Json::Array(columns)),
+            ]
+        }
+        Request::Save(save) => {
+            let bytes = engine.save(&save)?;
+            crate::log::info(
+                "table saved",
+                vec![
+                    ("table", Json::str(&save.table)),
+                    ("bytes", Json::uint(bytes)),
+                ],
+            );
+            vec![
+                ok(),
+                ("path", Json::str(&save.path)),
+                ("bytes", Json::uint(bytes)),
+            ]
+        }
+        Request::Open(open) => {
+            let t = engine.open(&open)?;
+            crate::log::info(
+                "table opened",
+                vec![
+                    ("table", Json::str(&t.name)),
+                    ("rows", Json::uint(t.row_count as u64)),
+                ],
+            );
+            let mut body = vec![ok()];
+            body.extend(table_json(&t));
             body
         }
         Request::Drop { table } => {

@@ -189,6 +189,7 @@ fn prune(plan: LogicalPlan, required: &[usize]) -> (LogicalPlan, Vec<usize>) {
             table,
             columns,
             schema,
+            indexes,
         } => {
             let mut map = vec![DROPPED; columns.len()];
             for (new, &old) in required.iter().enumerate() {
@@ -198,6 +199,7 @@ fn prune(plan: LogicalPlan, required: &[usize]) -> (LogicalPlan, Vec<usize>) {
                 table,
                 columns: required.iter().map(|&i| columns[i]).collect(),
                 schema: required.iter().map(|&i| schema[i].clone()).collect(),
+                indexes,
             };
             (plan, map)
         }

@@ -1,10 +1,13 @@
-//! Typed column vectors with a validity (non-null) bitmap.
+//! Typed column vectors with a validity (non-null) bitmap, including the
+//! dictionary-encoded representation of STRING columns.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::types::{DataType, Value};
 
-/// Packed bitmap; bit set = value present (non-null).
+/// Packed bitmap, LSB-first within 64-bit words; bit set = value present
+/// (non-null).
 #[derive(Debug, Clone, Default)]
 pub struct Bitmap {
     words: Vec<u64>,
@@ -12,6 +15,44 @@ pub struct Bitmap {
 }
 
 impl Bitmap {
+    /// A bitmap of `len` set bits.
+    pub fn all_set(len: usize) -> Self {
+        let mut words = vec![u64::MAX; len.div_ceil(64)];
+        if !len.is_multiple_of(64)
+            && let Some(last) = words.last_mut()
+        {
+            *last = (1u64 << (len % 64)) - 1;
+        }
+        Bitmap { words, len }
+    }
+
+    /// Reads `len` bits from LSB-first bytes (bit `i` is bit `i % 8` of byte
+    /// `i / 8`); bits beyond `len` are ignored. `bytes` must hold at least
+    /// `ceil(len / 8)` bytes.
+    pub fn from_lsb_bytes(bytes: &[u8], len: usize) -> Self {
+        let mut words = vec![0u64; len.div_ceil(64)];
+        for (i, &b) in bytes.iter().take(len.div_ceil(8)).enumerate() {
+            words[i / 8] |= (b as u64) << ((i % 8) * 8);
+        }
+        if !len.is_multiple_of(64)
+            && let Some(last) = words.last_mut()
+        {
+            *last &= (1u64 << (len % 64)) - 1;
+        }
+        Bitmap { words, len }
+    }
+
+    /// Writes bits `[start, start + n)` as LSB-first bytes (trailing bits 0).
+    pub fn write_lsb_bytes(&self, start: usize, n: usize, out: &mut Vec<u8>) {
+        let base = out.len();
+        out.resize(base + n.div_ceil(8), 0);
+        for i in 0..n {
+            if self.get(start + i) {
+                out[base + i / 8] |= 1 << (i % 8);
+            }
+        }
+    }
+
     pub fn push(&mut self, bit: bool) {
         if self.len.is_multiple_of(64) {
             self.words.push(0);
@@ -49,6 +90,12 @@ pub enum ColumnData {
     /// Unscaled values; the scale comes from the column type.
     Decimal(Vec<i64>),
     String(Vec<Arc<str>>),
+    /// Dictionary-encoded STRING: `codes[i]` indexes `dict` (codes of NULL
+    /// slots are 0 and ignored).
+    Dict {
+        codes: Vec<u32>,
+        dict: Vec<Arc<str>>,
+    },
     Date(Vec<i32>),
     Timestamp(Vec<i64>),
 }
@@ -74,6 +121,14 @@ impl Column {
         self.len() - self.validity.count_ones()
     }
 
+    pub fn is_null(&self, row: usize) -> bool {
+        !self.validity.get(row)
+    }
+
+    pub fn is_dictionary(&self) -> bool {
+        matches!(self.data, ColumnData::Dict { .. })
+    }
+
     /// The value at `row` as a runtime value.
     pub fn value(&self, row: usize) -> Value {
         if !self.validity.get(row) {
@@ -91,9 +146,81 @@ impl Column {
                 Value::Decimal(v[row], scale)
             }
             ColumnData::String(v) => Value::Str(v[row].clone()),
+            ColumnData::Dict { codes, dict } => Value::Str(dict[codes[row] as usize].clone()),
             ColumnData::Date(v) => Value::Date(v[row]),
             ColumnData::Timestamp(v) => Value::Timestamp(v[row]),
         }
+    }
+
+    /// The string at `row` of a STRING column (None for NULL).
+    pub fn str_at(&self, row: usize) -> Option<&str> {
+        if !self.validity.get(row) {
+            return None;
+        }
+        match &self.data {
+            ColumnData::String(v) => Some(&v[row]),
+            ColumnData::Dict { codes, dict } => Some(&dict[codes[row] as usize]),
+            _ => None,
+        }
+    }
+
+    /// Integer representation of a fixed-width non-null slot (BOOLEAN as
+    /// 0/1, DATE days widened); None for FLOAT64 and STRING columns.
+    pub fn int_repr(&self, row: usize) -> Option<i64> {
+        match &self.data {
+            ColumnData::Boolean(v) => Some(v[row] as i64),
+            ColumnData::Int64(v) | ColumnData::Decimal(v) | ColumnData::Timestamp(v) => {
+                Some(v[row])
+            }
+            ColumnData::Date(v) => Some(v[row] as i64),
+            _ => None,
+        }
+    }
+
+    /// Converts a plain STRING column to dictionary encoding (other columns
+    /// are returned unchanged).
+    pub fn into_dictionary(self) -> Column {
+        let ColumnData::String(values) = self.data else {
+            return self;
+        };
+        let mut lookup: HashMap<Arc<str>, u32> = HashMap::new();
+        let mut dict = Vec::new();
+        let mut codes = Vec::with_capacity(values.len());
+        for (i, s) in values.into_iter().enumerate() {
+            if !self.validity.get(i) {
+                codes.push(0);
+                continue;
+            }
+            let code = *lookup.entry(s.clone()).or_insert_with(|| {
+                dict.push(s);
+                (dict.len() - 1) as u32
+            });
+            codes.push(code);
+        }
+        Column {
+            data_type: self.data_type,
+            data: ColumnData::Dict { codes, dict },
+            validity: self.validity,
+        }
+    }
+
+    /// Dictionary-encodes a STRING column if that saves space: at least 64
+    /// rows and at most half as many distinct values as rows.
+    pub fn maybe_dictionary(self) -> Column {
+        let ColumnData::String(values) = &self.data else {
+            return self;
+        };
+        if values.len() < 64 {
+            return self;
+        }
+        let limit = values.len() / 2;
+        let mut distinct = std::collections::HashSet::new();
+        for (i, s) in values.iter().enumerate() {
+            if self.validity.get(i) && distinct.insert(&**s) && distinct.len() > limit {
+                return self;
+            }
+        }
+        self.into_dictionary()
     }
 }
 
@@ -107,14 +234,18 @@ pub struct ColumnBuilder {
 
 impl ColumnBuilder {
     pub fn new(data_type: DataType) -> Self {
+        Self::with_capacity(data_type, 0)
+    }
+
+    pub fn with_capacity(data_type: DataType, n: usize) -> Self {
         let data = match data_type {
-            DataType::Boolean => ColumnData::Boolean(Vec::new()),
-            DataType::Int64 => ColumnData::Int64(Vec::new()),
-            DataType::Float64 => ColumnData::Float64(Vec::new()),
-            DataType::Decimal { .. } => ColumnData::Decimal(Vec::new()),
-            DataType::String | DataType::Null => ColumnData::String(Vec::new()),
-            DataType::Date => ColumnData::Date(Vec::new()),
-            DataType::Timestamp => ColumnData::Timestamp(Vec::new()),
+            DataType::Boolean => ColumnData::Boolean(Vec::with_capacity(n)),
+            DataType::Int64 => ColumnData::Int64(Vec::with_capacity(n)),
+            DataType::Float64 => ColumnData::Float64(Vec::with_capacity(n)),
+            DataType::Decimal { .. } => ColumnData::Decimal(Vec::with_capacity(n)),
+            DataType::String | DataType::Null => ColumnData::String(Vec::with_capacity(n)),
+            DataType::Date => ColumnData::Date(Vec::with_capacity(n)),
+            DataType::Timestamp => ColumnData::Timestamp(Vec::with_capacity(n)),
         };
         let data_type = data_type.result_type();
         ColumnBuilder {
@@ -136,6 +267,7 @@ impl ColumnBuilder {
             ColumnData::Float64(v) => v.push(0.0),
             ColumnData::Decimal(v) => v.push(0),
             ColumnData::String(v) => v.push(Arc::from("")),
+            ColumnData::Dict { codes, .. } => codes.push(0),
             ColumnData::Date(v) => v.push(0),
             ColumnData::Timestamp(v) => v.push(0),
         }
@@ -192,5 +324,35 @@ mod tests {
         assert_eq!(b.count_ones(), 67);
         assert!(b.get(198));
         assert!(!b.get(199));
+        let mut bytes = Vec::new();
+        b.write_lsb_bytes(0, 200, &mut bytes);
+        assert_eq!(bytes.len(), 25);
+        let back = Bitmap::from_lsb_bytes(&bytes, 200);
+        assert_eq!(back.count_ones(), 67);
+        assert!((0..200).all(|i| back.get(i) == b.get(i)));
+        assert_eq!(Bitmap::all_set(70).count_ones(), 70);
+    }
+
+    #[test]
+    fn bitmap_ignores_trailing_bits() {
+        let b = Bitmap::from_lsb_bytes(&[0xFF], 3);
+        assert_eq!(b.count_ones(), 3);
+    }
+
+    #[test]
+    fn dictionary_encoding() {
+        let mut b = ColumnBuilder::new(DataType::String);
+        for s in ["a", "b", "a"] {
+            b.push(Value::str(s));
+        }
+        b.push_null();
+        let c = b.finish().into_dictionary();
+        assert!(c.is_dictionary());
+        assert_eq!(c.value(2), Value::str("a"));
+        assert!(c.value(3).is_null());
+        let ColumnData::Dict { dict, .. } = &c.data else {
+            panic!()
+        };
+        assert_eq!(dict.len(), 2);
     }
 }
