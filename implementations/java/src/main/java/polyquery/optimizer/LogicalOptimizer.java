@@ -21,7 +21,8 @@ import polyquery.types.TypeKind;
  *       {@code x OR FALSE → x}, …, filters that are always TRUE disappear;</li>
  *   <li><b>predicate pushdown</b> — WHERE conjuncts and join conditions are moved as close to
  *       the scans as semantics allow, and cross joins with a pushed-down join predicate become
- *       inner joins.</li>
+ *       inner joins;</li>
+ *   <li><b>join reordering</b> of inner-join trees ({@link JoinReorder}).</li>
  * </ul>
  *
  * <p>Every rewrite preserves results <em>and errors</em>: a predicate is only moved if no
@@ -34,7 +35,7 @@ public final class LogicalOptimizer {
     }
 
     public static LogicalPlan optimize(LogicalPlan plan) {
-        return pushdown(fold(plan));
+        return JoinReorder.reorder(pushdown(fold(plan)));
     }
 
     // ------------------------------------------------------------------ folding & simplification

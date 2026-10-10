@@ -176,28 +176,36 @@ class Gen:
 
     def from_clause(self):
         r = self.r
-        c = r.randint(0, 9)
+        c = r.randint(0, 11)
+        if c == 10:
+            return ("items i JOIN products p ON p.product_id = i.product_id JOIN orders o ON i.order_id = o.order_id",
+                    [("i", "items"), ("p", "products"), ("o", "orders")], True, None)
+        if c == 11:
+            return ("tx t JOIN cust c ON t.customer_id = c.customer_id JOIN orders o ON o.customer_id = c.customer_id"
+                    " AND o.order_id < 60", [("t", "tx"), ("c", "cust"), ("o", "orders")], True, None)
         if c <= 3:
             t = r.choice(["tx", "cust", "nh", "sk", "tx_p", "nh_p", "items_r", "products"])
-            return f"{t} a", [("a", t)], False
+            return f"{t} a", [("a", t)], False, None
         if c <= 6:
             kind = r.choice(["JOIN", "LEFT JOIN"])
             extra = f" AND {self.pred([('i', 'items')], 2)}" if r.random() < 0.4 else ""
             return (f"orders o {kind} items i ON o.order_id = i.order_id{extra}", [("o", "orders"), ("i", "items")],
-                    True)
+                    True, None)
         if c == 7:
             return ("orders o JOIN items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id",
-                    [("o", "orders"), ("i", "items"), ("p", "products")], True)
+                    [("o", "orders"), ("i", "items"), ("p", "products")], True, None)
         if c == 8:
             kind = r.choice(["JOIN", "LEFT JOIN"])
-            return (f"tx t {kind} cust c ON c.customer_id = t.customer_id", [("t", "tx"), ("c", "cust")], True)
+            return (f"tx t {kind} cust c ON c.customer_id = t.customer_id", [("t", "tx"), ("c", "cust")], True, None)
         return ("tx_p t JOIN cust c ON t.customer_id = c.customer_id AND c.segment <> 'enterprise'",
-                [("t", "tx_p"), ("c", "cust")], True)
+                [("t", "tx_p"), ("c", "cust")], True, None)
 
     def query(self):
         r = self.r
-        frm, scope, join = self.from_clause()
+        frm, scope, join, required = self.from_clause()
         where = f" WHERE {self.pred(scope)}" if r.random() < 0.7 else ""
+        if required:
+            where = f" WHERE {required}" + (f" AND {self.pred(scope)}" if where else "")
         shape = r.randint(0, 9)
         if shape <= 3:
             n = r.randint(1, 3)
