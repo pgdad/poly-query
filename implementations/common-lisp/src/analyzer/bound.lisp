@@ -1,10 +1,12 @@
 ;;;; bound.lisp — bound (resolved and typed) expressions produced by the binder.
 ;;;;
-;;;; Three node kinds keep tree walking uniform:
+;;;; Node kinds keep tree walking uniform:
 ;;;;   B-LITERAL  constant value of a static type
 ;;;;   B-COLUMN   reference to position INDEX of the operator's input row
+;;;;   B-PARAM    reference to a correlation parameter of the enclosing
+;;;;              subquery (an outer-query value, constant per evaluation)
 ;;;;   B-OP       operator/function application: OP keyword, ARGS list and
-;;;;              op-specific INFO (e.g. the function descriptor)
+;;;;              op-specific INFO (function descriptor, SUBQUERY, ...)
 ;;;;   B-AGG      aggregate call (only before aggregation is planned)
 
 (in-package #:polyquery)
@@ -19,11 +21,44 @@
   (index 0 :type fixnum)
   name)
 
+(defstruct (param-env (:constructor make-param-env ()))
+  "Runtime cell holding the current correlation parameter values of one
+subquery; set before each evaluation of the subquery."
+  (values #() :type simple-vector))
+
+(defstruct (b-param (:include bexpr) (:constructor make-b-param (type env index name)))
+  env
+  (index 0 :type fixnum)
+  name)
+
 (defstruct (b-op (:include bexpr) (:constructor make-b-op (type op args &optional info)))
   op args info)
 
 (defstruct (b-agg (:include bexpr) (:constructor make-b-agg (type fn args distinct)))
   fn args distinct)
+
+(defstruct scalar-function
+  "A scalar function of the registry (functions.lisp); INFO of a :CALL B-OP."
+  name
+  (min-args 0) (max-args 0)
+  typer
+  builder
+  (null-aware nil)
+  (test-only nil))
+
+(defstruct subquery
+  "Descriptor of a subquery used as an expression (INFO of a :SUBQUERY B-OP).
+The B-OP's ARGS are the IN operand (for :IN) followed by the correlation
+parameter expressions, which are evaluated in the enclosing row."
+  kind                                  ; :SCALAR, :EXISTS or :IN
+  query                                 ; BOUND-QUERY
+  (param-env (make-param-env))
+  (param-count 0)
+  (cacheable t)                         ; NIL if results depend on foreign parameters
+  plan)                                 ; physical plan, filled in by the planner
+
+(defun subquery-op-p (e)
+  (and (b-op-p e) (eq (b-op-op e) :subquery)))
 
 (defun bexpr-children (e)
   (typecase e
@@ -45,7 +80,10 @@
   (bexpr-some #'b-agg-p e))
 
 (defun bexpr-constant-p (e)
-  (not (bexpr-some (lambda (x) (or (b-column-p x) (b-agg-p x))) e)))
+  "True if E depends on nothing but literals (no columns, parameters,
+aggregates or subqueries)."
+  (not (bexpr-some (lambda (x) (or (b-column-p x) (b-agg-p x) (b-param-p x) (subquery-op-p x)))
+                   e)))
 
 (defun bexpr-equal (a b)
   "Structural equality: same operators, literal values, column bindings and types."
@@ -54,6 +92,9 @@
               (equal (b-literal-value a) (b-literal-value b))))
         ((and (b-column-p a) (b-column-p b))
          (= (b-column-index a) (b-column-index b)))
+        ((and (b-param-p a) (b-param-p b))
+         (and (eq (b-param-env a) (b-param-env b))
+              (= (b-param-index a) (b-param-index b))))
         ((and (b-op-p a) (b-op-p b))
          (and (eq (b-op-op a) (b-op-op b))
               (equal (b-op-info a) (b-op-info b))
@@ -87,20 +128,102 @@
                                     (b-column-name x))))
                  e))
 
+(defun bexpr-shift-columns (e delta)
+  "Copy of E with every column index increased by DELTA."
+  (if (zerop delta) e (bexpr-remap-columns e (lambda (i) (+ i delta)))))
+
 (defun bexpr-column-indexes (e)
   "List of distinct column indexes referenced by E."
   (let ((acc '()))
     (bexpr-walk (lambda (x) (when (b-column-p x) (pushnew (b-column-index x) acc))) e)
     acc))
 
+(defun split-conjuncts (e)
+  "Flatten a tree of ANDs into the list of its conjuncts."
+  (if (and (b-op-p e) (eq (b-op-op e) :and))
+      (mapcan #'split-conjuncts (copy-list (b-op-args e)))
+      (list e)))
+
+(defun conjoin (conjuncts)
+  "Inverse of SPLIT-CONJUNCTS: AND the CONJUNCTS together (NIL if none)."
+  (when conjuncts
+    (reduce (lambda (a b) (make-b-op :boolean :and (list a b))) conjuncts)))
+
+;;; ------------------------------------------------------------------
+;;; Analysed query representation
+
+(defstruct bound-query
+  "A fully analysed query. Input-side expressions (WHERE, join conditions,
+GROUP BY, aggregate arguments) index the FROM row: the concatenation of the
+columns of all range variables in FROM order. Output-side expressions
+(OUTPUTS, HIDDEN, HAVING) index the FROM row, or — when AGGREGATED-P — the
+aggregation row [group keys..., aggregate values...]."
+  from                     ; BF-* tree or NIL (SELECT without FROM)
+  (from-width 0)
+  where                    ; BEXPR or NIL
+  aggregated-p
+  group-by                 ; list of BEXPR
+  aggregates               ; list of B-AGG
+  having                   ; BEXPR or NIL
+  outputs                  ; list of BEXPR, one per result column
+  hidden                   ; list of BEXPR: extra sort keys after the outputs
+  distinct
+  order                    ; list of (position descending nulls-first)
+  limit offset             ; constant BEXPRs or NIL
+  columns)                 ; list of COLUMN-DEF describing the result
+
+(defstruct (bf-node (:constructor nil))
+  relation-list            ; RELATIONs of this subtree, in FROM order
+  (offset 0)               ; position of the subtree's first column in the FROM row
+  (width 0))
+
+(defstruct (bf-table (:include bf-node))
+  relation table)
+
+(defstruct (bf-derived (:include bf-node))
+  relation query)
+
+(defstruct (bf-join (:include bf-node))
+  kind left right condition)   ; kind :INNER :LEFT :CROSS; condition over the FROM row
+
+;;; ------------------------------------------------------------------
+;;; Rendering (EXPLAIN and error messages)
+
+(defparameter *infix-operators*
+  '((:+ . "+") (:- . "-") (:* . "*") (:/ . "/") (:% . "%") (:concat . "||")
+    (:= . "=") (:<> . "<>") (:< . "<") (:<= . "<=") (:> . ">") (:>= . ">=")
+    (:and . "AND") (:or . "OR")))
+
 (defun bexpr-describe (e)
-  "Compact human-readable rendering (used by EXPLAIN and error messages)."
+  "Compact SQL-like rendering of a bound expression."
   (typecase e
-    (b-literal (if (null-value-p (b-literal-value e))
-                   "NULL"
-                   (value-to-text (b-literal-value e) (bexpr-type e))))
+    (b-literal (cond ((null-value-p (b-literal-value e)) "NULL")
+                     ((member (type-kind (bexpr-type e)) '(:string :date :timestamp))
+                      (format nil "'~A'" (value-to-text (b-literal-value e) (bexpr-type e))))
+                     (t (value-to-text (b-literal-value e) (bexpr-type e)))))
     (b-column (or (b-column-name e) (format nil "#~D" (b-column-index e))))
-    (b-op (format nil "~(~A~)(~{~A~^, ~})" (b-op-op e) (mapcar #'bexpr-describe (b-op-args e))))
-    (b-agg (format nil "~(~A~)(~:[~;DISTINCT ~]~{~A~^, ~})" (b-agg-fn e) (b-agg-distinct e)
+    (b-param (format nil "outer.~A" (or (b-param-name e) (b-param-index e))))
+    (b-op
+     (let ((op (b-op-op e))
+           (args (mapcar #'bexpr-describe (b-op-args e))))
+       (cond
+         ((assoc op *infix-operators*)
+          (format nil "(~A ~A ~A)" (first args) (cdr (assoc op *infix-operators*)) (second args)))
+         (t (case op
+              (:neg (format nil "-~A" (first args)))
+              (:not (format nil "NOT ~A" (first args)))
+              (:is-null (format nil "~A IS NULL" (first args)))
+              (:is-not-null (format nil "~A IS NOT NULL" (first args)))
+              (:cast (format nil "CAST(~A AS ~A)" (first args) (type-name-string (bexpr-type e))))
+              (:call (format nil "~A(~{~A~^, ~})" (scalar-function-name (b-op-info e)) args))
+              (:subquery (let ((sq (b-op-info e)))
+                           (ecase (subquery-kind sq)
+                             (:scalar "(subquery)")
+                             (:exists "EXISTS(subquery)")
+                             (:in (format nil "~A IN (subquery)" (first args))))))
+              (t (format nil "~(~A~)(~{~A~^, ~})" op args)))))))
+    (b-agg (format nil "~:@(~A~)(~:[~;DISTINCT ~]~:[~{~A~^, ~}~;*~])"
+                   (if (eq (b-agg-fn e) :count-star) :count (b-agg-fn e))
+                   (b-agg-distinct e) (eq (b-agg-fn e) :count-star)
                    (mapcar #'bexpr-describe (b-agg-args e))))
     (t "?")))

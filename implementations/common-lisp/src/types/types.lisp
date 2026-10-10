@@ -125,14 +125,16 @@ types are not comparable. The null type is compatible with everything."
         (t nil)))
 
 (defun unify-result-types (types)
-  "Common type of several branch results (CASE/COALESCE rules, semantics §13).
-Returns NIL when they cannot be unified."
+  "Common type of several branch results (CASE/COALESCE rules, semantics §13):
+NULLs are ignored, numeric types combine by the promotion table of types.md
+§2, other types must be equal. Returns NIL when they cannot be unified."
   (let ((result :null))
     (dolist (ty types result)
       (cond ((null-type-p ty))
             ((null-type-p result) (setf result ty))
             ((and (numeric-type-p result) (numeric-type-p ty))
-             (unless (type-equal result ty)
-               (setf result (common-numeric-type result ty))))
+             ;; The promotion table applies even to equal DECIMAL types:
+             ;; DECIMAL(p,s) with DECIMAL(p,s) is DECIMAL(18,s).
+             (setf result (common-numeric-type result ty)))
             ((type-equal result ty))
             (t (return nil))))))

@@ -7,6 +7,7 @@
   (deadline nil)                    ; internal real time, or NIL
   (cancelled nil)                   ; set asynchronously to request cancellation
   (memory-budget (* 2048 1024 1024))
+  (max-join-rows nil)               ; limit on rows produced by one join, or NIL
   (memory-used 0))
 
 (defvar *query-context* nil
