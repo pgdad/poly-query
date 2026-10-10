@@ -383,6 +383,9 @@ class Binder:
             raise errors.semantic_error(f"{clause} must be a constant expression", **pos(expr))
         if bound_expr.type.kind not in (TypeKind.INT64, TypeKind.NULL):
             raise errors.type_error(f"{clause} must be an INT64 expression", **pos(expr))
+        value = self.evaluate_constant(bound_expr)
+        if value is not None and value < 0:
+            raise errors.invalid_argument(f"{clause} must not be negative", **pos(expr))
         return bound_expr
 
     # ------------------------------------------------------------ expressions
@@ -535,7 +538,9 @@ class Binder:
 
     def _bind_subquery(self, query: ast.Query, ctx: ExprContext) -> tuple[b.Subquery, tuple]:
         bound, scope = self.bind_query(query, ctx.scope, ctx.scope.ctes)
-        subquery = b.Subquery(self.ids.next(), bound, tuple(scope.outer_refs))
+        subquery = b.Subquery(
+            self.ids.next(), bound, tuple(scope.outer_refs), ast.fingerprint(query)
+        )
         return subquery, tuple(scope.outer_refs.values())
 
     def _bind_ScalarSubquery(self, node: ast.ScalarSubquery, ctx: ExprContext) -> b.Expr:

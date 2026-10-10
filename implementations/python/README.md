@@ -164,6 +164,11 @@ any remaining reference to a FROM column is a grouping violation
   `AVG` over INT64/DECIMAL sums exactly before the single final division;
   float `SUM`/`AVG` use `math.fsum`.
 * **LIMIT/OFFSET** must be constant INT64 expressions; `NULL` means "no limit".
+  They are evaluated during validation, so a negative value is
+  `INVALID_ARGUMENT` also for `EXPLAIN`.
+* Subqueries compare structurally (same SQL text modulo positions, same
+  correlation), so `GROUP BY <expr with subquery>` matches the identical
+  select-list expression.
 * **Query options**: `mode` accepts `auto` and `row` (this engine is
   row/batch based); `vectorized` and unknown values of known enum options are
   `UNSUPPORTED`; ill-typed option values are `INVALID_REQUEST`. `threads`,
@@ -182,8 +187,9 @@ any remaining reference to a FROM column is a grouping violation
   are (two `DECIMAL(3,2)` stay `DECIMAL(3,2)`); otherwise numeric promotion
   (two different DECIMALs → `DECIMAL(18,max(s))`), DATE+TIMESTAMP → TIMESTAMP.
   IN lists and BETWEEN promote the operand and all items to one common type.
-* **Function argument typing**: an untyped `NULL` argument of a numeric
-  function makes it behave as INT64 (`ABS(NULL)` is an INT64 NULL);
+* **Function argument typing**: `ABS`/`ROUND`/`FLOOR`/`CEIL` return "the same
+  type" as their argument, so an untyped `NULL` argument stays the null type
+  (reported as STRING); other functions have fixed result types;
   `NULLIF(a, b)` has the type of `a` and compares in the common type.
   `ROUND`'s digits and the `DATE_TRUNC`/`DATE_DIFF` unit must be constant
   (`SEMANTIC_ERROR` otherwise) and are evaluated during validation, so an

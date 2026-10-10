@@ -212,6 +212,18 @@ class Query(Node):
     offset: Expr | None = None
 
 
+def fingerprint(node: object) -> object:
+    """A hashable structural representation of an AST subtree (positions
+    ignored): two subtrees with equal fingerprints are textually equivalent."""
+    if isinstance(node, Node):
+        return (type(node).__name__,) + tuple(
+            (k, fingerprint(v)) for k, v in vars(node).items() if k != "pos"
+        )
+    if isinstance(node, (list, tuple)):
+        return tuple(fingerprint(v) for v in node)
+    return node
+
+
 # ------------------------------------------------------------------ statements
 
 

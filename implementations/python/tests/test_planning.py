@@ -158,6 +158,17 @@ class Phase2QueryTests(EngineTestMixin, unittest.TestCase):
         self.assertEqual(self.error_code("SELECT SQRT(-1)"), "INVALID_ARGUMENT")
         self.assertEqual(self.error_code("SELECT CONCAT(1.5e0)"), "TYPE_ERROR")
 
+    def test_group_by_expression_with_subquery(self):
+        sql = (
+            "SELECT (SELECT COUNT(*) FROM orders o WHERE o.pid = p.id) AS n, COUNT(*) FROM people p "
+            "GROUP BY (SELECT COUNT(*) FROM orders o WHERE o.pid = p.id) ORDER BY 1"
+        )
+        self.assertEqual(self.rows(sql), [[0, 1], [1, 1], [2, 1]])
+
+    def test_round_extreme_digits_and_limit_validation(self):
+        self.assertEqual(self.rows("SELECT ROUND(1.5, -100), ROUND(5, -100000000), ROUND(1e0, -5000)"), [["0", 0, 0.0]])
+        self.assertEqual(self.request(op="explain", sql="SELECT 1 LIMIT -1")["error"]["code"], "INVALID_ARGUMENT")
+
     def test_case_typing(self):
         resp = self.query("SELECT CASE WHEN id > 1 THEN 1 ELSE 2.5 END FROM people WHERE id = 1")
         self.assertEqual(resp["columns"][0]["type"], "DECIMAL(18,1)")

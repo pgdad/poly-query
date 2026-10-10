@@ -216,12 +216,26 @@ class Subquery:
     """A bound subquery used inside an expression.
 
     ``outer_keys`` are the column keys of enclosing queries the subquery reads
-    (empty for an uncorrelated subquery). Compared by identity.
+    (empty for an uncorrelated subquery). Two subqueries are equal if they
+    were bound from structurally identical SQL (``fingerprint``) with the same
+    correlation, so that e.g. a GROUP BY expression containing a subquery
+    matches the identical SELECT expression.
     """
 
     id: int
     query: BoundQuery
     outer_keys: tuple[ColumnKey, ...]
+    fingerprint: object = None
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Subquery):
+            return NotImplemented
+        if self.fingerprint is None or other.fingerprint is None:
+            return self is other
+        return self.fingerprint == other.fingerprint and self.outer_keys == other.outer_keys
+
+    def __hash__(self) -> int:
+        return hash((self.fingerprint, self.outer_keys))
 
     @property
     def correlated(self) -> bool:

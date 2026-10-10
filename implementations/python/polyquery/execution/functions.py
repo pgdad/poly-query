@@ -97,6 +97,8 @@ def _abs(e: b.Function) -> Callable[[Any], Any]:
 def _round_float(v: float, n: int) -> float:
     if n >= 17 or not math.isfinite(v):
         return v
+    if n < -400:
+        return 0.0  # |v| < 1.8e308
     with decimal.localcontext() as dctx:
         dctx.prec = 800
         d = decimal.Decimal(repr(v)).quantize(
@@ -115,11 +117,15 @@ def _round(e: b.Function, n: int) -> Callable[[Any], Any]:
             return lambda v: v
         if n >= 0:
             return lambda v: values.rescale(v, s, n)
-        divisor, factor = values.POW10[s - n], values.POW10[-n]
+        if n < -19:
+            return lambda v: 0  # |value| < 10**18
+        divisor, factor = 10 ** (s - n), 10 ** (-n)
         return lambda v: values.check_decimal(values.round_div(v, divisor) * factor)
-    # INT64
+    # INT64 (|v| < 10**19, so rounding to 10**20 or coarser gives 0)
     if n >= 0:
         return lambda v: v
+    if n < -19:
+        return lambda v: 0
     m = 10 ** (-n)
     return lambda v: values.check_int64(values.round_div(v, m) * m)
 

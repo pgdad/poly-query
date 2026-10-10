@@ -58,8 +58,8 @@ def _constant(arg: b.Expr, fname: str, evaluate: ConstEvaluator) -> Any:
 
 
 def _numeric_type(arg: b.Expr) -> DataType:
-    # an untyped NULL argument behaves like INT64 (as in arithmetic)
-    return INT64 if arg.type.is_null else arg.type
+    # "same type" as the argument: an untyped NULL stays the null type
+    return arg.type
 
 
 def _same_numeric(fname: str) -> Callable:
