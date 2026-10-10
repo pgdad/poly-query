@@ -714,6 +714,7 @@ FUNC pqk_x86_avx2_sum_i64
 
 .Lsv:
         SZERO
+        vpxor   %xmm15, %xmm15, %xmm15
         xor     %r12d, %r12d
 .Lsv_blk:
         cmp     $64, %r10
@@ -722,7 +723,8 @@ FUNC pqk_x86_avx2_sum_i64
         .set g, 0
         .rept 16
         vpsllvq shc+g*32(%rip), %ymm12, %ymm13
-        vpmaskmovq g*32(%rdi), %ymm13, %ymm6
+        vpcmpgtq %ymm13, %ymm15, %ymm13         /* 0 > m: full lane mask */
+        vpand   g*32(%rdi), %ymm13, %ymm6
         SACC    %ymm6, (g % 2), %ymm10
         .set g, g + 1
         .endr
@@ -810,13 +812,16 @@ FUNC pqk_x86_avx2_sum_f64
         dec     %r10
         jmp     3b
 .Lfv:
+        vpxor   %xmm15, %xmm15, %xmm15
+.Lfv_blk:
         cmp     $64, %r10
         jb      .Lfv_part
         vpbroadcastq (%rsi), %ymm12
         .set g, 0
         .rept 16
         vpsllvq shc+g*32(%rip), %ymm12, %ymm13
-        vmaskmovpd g*32(%rdi), %ymm13, %ymm6
+        vpcmpgtq %ymm13, %ymm15, %ymm13         /* 0 > m: full lane mask */
+        vandpd  g*32(%rdi), %ymm13, %ymm6       /* invalid -> +0.0 */
         .if g % 4 == 0
         vaddpd  %ymm6, %ymm0, %ymm0
         .elseif g % 4 == 1
@@ -831,7 +836,7 @@ FUNC pqk_x86_avx2_sum_f64
         add     $512, %rdi
         add     $8, %rsi
         sub     $64, %r10
-        jmp     .Lfv
+        jmp     .Lfv_blk
 .Lfv_part:
         test    %r10, %r10
         jz      .Lf_red

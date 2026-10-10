@@ -93,31 +93,62 @@ ENDF lvp
 /* ------------------------------------------------------------------------
  * Predicate mask routines for x op (a, b).
  * in:  rdi = pointer to first row of the block, esi = len (1..64),
- *      r8 = a, r9 = b.
+ *      r8 = a, r9 = b (sop_bt: r9 = b - a with a <= b, see PRED_DRIVER).
  * out: rax = mask, bit j set iff predicate holds for row j (bits >= len 0).
- * clobbers rcx, rdx, rdi, r10, r11.
- * Algorithm: walk the block backwards, mask = 2*mask + pred(x) (lea).
+ * clobbers rcx, rdx, rdi, rsi, r10, r11.
+ * Algorithm: forward walk (prefetch friendly), 8 rows per step with fixed
+ * shifts (independent setcc chains), the byte is then shifted into place by
+ * cl = row offset; 1..7 leftover rows one at a time.
+ * BETWEEN uses the unsigned range trick (x - a) <=u (b - a).
  * ---------------------------------------------------------------------- */
-.macro SOP name, cc1, cc2=none
-LFUNC \name
-        lea     -8(%rdi,%rsi,8), %rdi
-        mov     %esi, %ecx
-        xor     %eax, %eax
-1:      mov     (%rdi), %rdx
-        xor     %r10d, %r10d
+.macro SPRED cc
+.ifc \cc, bt
+        sub     %r8, %rdx
+        cmp     %r9, %rdx
+        setbe   %r10b
+.else
         cmp     %r8, %rdx               /* flags of x - a */
-        set\cc1 %r10b
-.ifnc \cc2, none
-        xor     %r11d, %r11d
-        cmp     %r9, %rdx               /* flags of x - b */
-        set\cc2 %r11b
-        and     %r11d, %r10d
+        set\cc  %r10b
 .endif
-        lea     (%r10,%rax,2), %rax
-        sub     $8, %rdi
-        dec     %ecx
-        jnz     1b
-        ret
+.endm
+
+.macro SOP name, cc
+LFUNC \name
+        xor     %eax, %eax
+        xor     %ecx, %ecx
+        cmp     $8, %esi
+        jb      3f
+1:      xor     %r11d, %r11d
+        .set j, 0
+        .rept 8
+        mov     j*8(%rdi), %rdx
+        xor     %r10d, %r10d
+        SPRED   \cc
+        .if j
+        shl     $j, %r10d
+        .endif
+        or      %r10d, %r11d
+        .set j, j + 1
+        .endr
+        shl     %cl, %r11
+        or      %r11, %rax
+        add     $64, %rdi
+        add     $8, %ecx
+        sub     $8, %esi
+        cmp     $8, %esi
+        jae     1b
+3:      test    %esi, %esi
+        jz      5f
+4:      mov     (%rdi), %rdx
+        xor     %r10d, %r10d
+        SPRED   \cc
+        shl     %cl, %r10
+        or      %r10, %rax
+        add     $8, %rdi
+        inc     %ecx
+        dec     %esi
+        jnz     4b
+5:      ret
 ENDF \name
 .endm
 
@@ -127,28 +158,60 @@ ENDF \name
         SOP sop_le, le
         SOP sop_gt, g
         SOP sop_ge, ge
-        SOP sop_bt, ge, le              /* a <= x && x <= b */
+        SOP sop_bt, bt
+
+/* BETWEEN with a > b: empty predicate. */
+LFUNC sop_false
+        xor     %eax, %eax
+        ret
+ENDF sop_false
 
 /* Element-wise compare routines for a[i] op b[i].
  * in:  rdi = &a[block], rsi = &b[block], edx = len (1..64).
  * out: rax = mask (bits >= len 0).
- * clobbers rcx, rdx, rdi, rsi, r10. */
+ * clobbers rcx, rdx, rdi, rsi, r9, r10, r11. Same forward 8-row scheme. */
 .macro SCMP name, cc
 LFUNC \name
-        mov     %edx, %ecx
-        lea     -8(%rdi,%rcx,8), %rdi
-        lea     -8(%rsi,%rcx,8), %rsi
         xor     %eax, %eax
-1:      mov     (%rdi), %rdx
+        xor     %ecx, %ecx
+        mov     %edx, %r9d
+        cmp     $8, %r9d
+        jb      3f
+1:      xor     %r11d, %r11d
+        .set j, 0
+        .rept 8
+        mov     j*8(%rdi), %rdx
         xor     %r10d, %r10d
-        cmp     (%rsi), %rdx            /* flags of a[i] - b[i] */
+        cmp     j*8(%rsi), %rdx         /* flags of a[i] - b[i] */
         set\cc  %r10b
-        lea     (%r10,%rax,2), %rax
-        sub     $8, %rdi
-        sub     $8, %rsi
-        dec     %ecx
-        jnz     1b
-        ret
+        .if j
+        shl     $j, %r10d
+        .endif
+        or      %r10d, %r11d
+        .set j, j + 1
+        .endr
+        shl     %cl, %r11
+        or      %r11, %rax
+        add     $64, %rdi
+        add     $64, %rsi
+        add     $8, %ecx
+        sub     $8, %r9d
+        cmp     $8, %r9d
+        jae     1b
+3:      test    %r9d, %r9d
+        jz      5f
+4:      mov     (%rdi), %rdx
+        xor     %r10d, %r10d
+        cmp     (%rsi), %rdx
+        set\cc  %r10b
+        shl     %cl, %r10
+        or      %r10, %rax
+        add     $8, %rdi
+        add     $8, %rsi
+        inc     %ecx
+        dec     %r9d
+        jnz     4b
+5:      ret
 ENDF \name
 .endm
 
@@ -193,6 +256,13 @@ scmp_table:
         lea     sop_table(%rip), %rax
         movslq  (%rax,%rcx,4), %r15
         add     %rax, %r15
+        cmp     $6, %ecx                /* BETWEEN: r9 = b - a, or empty */
+        jne     .Lnotbt\@
+        lea     sop_false(%rip), %rax
+        cmp     %r9, %r8
+        cmovg   %rax, %r15
+        sub     %r8, %r9
+.Lnotbt\@:
         mov     %rdi, %r12
         mov     %rsi, %r13
         mov     %rdx, %r14
