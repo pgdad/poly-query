@@ -3,6 +3,7 @@
 //! EXPLAIN plan JSON (indexes-and-planning.md §4).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::expr::{AggregateCall, Expr, KeyDomain};
 use super::logical::{JoinType, LogicalPlan, SortKey};
@@ -77,6 +78,17 @@ pub enum PhysicalPlan {
     Distinct {
         input: Box<PhysicalPlan>,
     },
+    /// Correlated-subquery filter `key = <outer parameter expression>` over a
+    /// parameter-independent input: the input is hashed on the keys once per
+    /// query (cached under `id`) and each execution probes it. In `keys`,
+    /// `left` is evaluated on input rows and `right` (no columns) on the
+    /// current parameters.
+    ParamLookup {
+        id: usize,
+        input: Box<PhysicalPlan>,
+        keys: Vec<JoinKey>,
+        residual: Option<Expr>,
+    },
     /// Sort; with `top = Some(n)` only the first n rows are produced.
     Sort {
         input: Box<PhysicalPlan>,
@@ -104,10 +116,11 @@ pub fn lower(plan: &LogicalPlan, opts: PhysicalOptions) -> PhysicalPlan {
             columns: columns.clone(),
             schema: schema.clone(),
         },
-        LogicalPlan::Filter { input, predicate } => PhysicalPlan::Filter {
-            input: boxed(input),
-            predicate: predicate.clone(),
-        },
+        LogicalPlan::Filter { input, predicate } => param_lookup(input, predicate, opts)
+            .unwrap_or_else(|| PhysicalPlan::Filter {
+                input: boxed(input),
+                predicate: predicate.clone(),
+            }),
         LogicalPlan::Project {
             input,
             exprs,
@@ -217,6 +230,69 @@ fn lower_join(
     }
 }
 
+fn has_param(e: &Expr) -> bool {
+    e.any(&|x| matches!(x, Expr::Param { .. }))
+}
+
+/// Lowers `Filter(input, … AND key = param-expr AND …)` to a ParamLookup when
+/// `input` does not depend on correlation parameters.
+fn param_lookup(
+    input: &LogicalPlan,
+    predicate: &Expr,
+    opts: PhysicalOptions,
+) -> Option<PhysicalPlan> {
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+    if !has_param(predicate) {
+        return None;
+    }
+    let mut input_has_param = false;
+    input.visit_exprs(&mut |e| input_has_param |= has_param(e));
+    if input_has_param {
+        return None;
+    }
+    let mut conjuncts = Vec::new();
+    predicate.clone().into_conjuncts(&mut conjuncts);
+    let mut keys = Vec::new();
+    let mut residual = Vec::new();
+    for c in conjuncts {
+        let key = match &c {
+            Expr::Compare {
+                op: BinaryOp::Eq,
+                left,
+                right,
+            } => {
+                let is_inner = |e: &Expr| !e.columns().is_empty() && !has_param(e);
+                let is_outer = |e: &Expr| e.columns().is_empty() && has_param(e);
+                if is_inner(left) && is_outer(right) {
+                    Some((left, right))
+                } else if is_inner(right) && is_outer(left) {
+                    Some((right, left))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        match key {
+            Some((inner, outer)) => keys.push(JoinKey {
+                domain: KeyDomain::of(inner.data_type(), outer.data_type()),
+                left: (**inner).clone(),
+                right: (**outer).clone(),
+            }),
+            None => residual.push(c),
+        }
+    }
+    if keys.is_empty() {
+        return None;
+    }
+    Some(PhysicalPlan::ParamLookup {
+        id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+        input: Box::new(lower(input, opts)),
+        keys,
+        residual: Expr::conjunction(residual),
+    })
+}
+
 /// Recognizes `l = r` where one side reads only left columns and the other
 /// only right columns (each side reading at least one column).
 fn equi_key(c: &Expr, lw: usize) -> Option<JoinKey> {
@@ -303,6 +379,7 @@ impl PhysicalPlan {
             | PhysicalPlan::HashJoin { schema, .. }
             | PhysicalPlan::NestedLoopJoin { schema, .. } => schema,
             PhysicalPlan::Filter { input, .. }
+            | PhysicalPlan::ParamLookup { input, .. }
             | PhysicalPlan::Distinct { input }
             | PhysicalPlan::Sort { input, .. }
             | PhysicalPlan::Limit { input, .. } => input.schema(),
@@ -422,6 +499,31 @@ impl PhysicalPlan {
                 vec![left, right],
             ),
             PhysicalPlan::Distinct { input } => node("Distinct", vec![], vec![input]),
+            PhysicalPlan::ParamLookup {
+                input,
+                keys,
+                residual,
+                ..
+            } => node(
+                "ParamLookup",
+                vec![
+                    (
+                        "keys",
+                        Json::Array(
+                            keys.iter()
+                                .map(|k| Json::String(format!("{} = {}", k.left, k.right)))
+                                .collect(),
+                        ),
+                    ),
+                    (
+                        "residual",
+                        residual
+                            .as_ref()
+                            .map_or(Json::Null, |r| Json::String(r.to_string())),
+                    ),
+                ],
+                vec![input],
+            ),
             PhysicalPlan::Sort { input, keys, top } => node(
                 "Sort",
                 vec![

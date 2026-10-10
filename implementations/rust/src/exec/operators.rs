@@ -2,10 +2,11 @@
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use super::aggregate::AggState;
-use super::context::ExecContext;
+use super::context::{ExecContext, LookupTable};
 use super::eval::{eval, eval_predicate, normalize_key};
 use crate::error::Result;
 use crate::planner::expr::{AggregateCall, Expr, KeyDomain};
@@ -100,6 +101,19 @@ pub fn build(plan: PhysicalPlan) -> Box<dyn Operator> {
                 out: VecDeque::new(),
             })
         }
+        PhysicalPlan::ParamLookup {
+            id,
+            input,
+            keys,
+            residual,
+        } => Box::new(ParamLookupOp {
+            id,
+            input: Some(input),
+            keys,
+            residual,
+            matches: None,
+            pos: 0,
+        }),
         PhysicalPlan::Distinct { input } => Box::new(DistinctOp {
             input: build(*input),
             seen: HashSet::new(),
@@ -288,6 +302,75 @@ impl Operator for NestedLoopJoinOp {
                 self.out.push_back(padded);
             }
         }
+    }
+}
+
+/// Probes a per-query hash table of a parameter-independent input with the
+/// current correlation parameters (see `PhysicalPlan::ParamLookup`).
+struct ParamLookupOp {
+    id: usize,
+    input: Option<Box<PhysicalPlan>>,
+    keys: Vec<JoinKey>,
+    residual: Option<Expr>,
+    /// The table and probe key, once computed (None key: a NULL parameter).
+    matches: Option<(Rc<LookupTable>, Option<Vec<Value>>)>,
+    pos: usize,
+}
+
+impl ParamLookupOp {
+    fn table(&mut self, ctx: &ExecContext) -> Result<Rc<LookupTable>> {
+        if let Some(t) = ctx.cached_lookup(self.id) {
+            return Ok(t);
+        }
+        let mut table = LookupTable::new();
+        if let Some(plan) = self.input.take() {
+            let mut input = build(*plan);
+            while let Some(row) = input.next(ctx)? {
+                let key = join_key(
+                    &mut self.keys.iter().map(|k| (&k.left, k.domain)),
+                    &row,
+                    ctx,
+                )?;
+                if let Some(key) = key {
+                    ctx.reserve(row_size(&row) + row_size(&key))?;
+                    table.entry(key).or_default().push(row);
+                }
+            }
+        }
+        let table = Rc::new(table);
+        ctx.cache_lookup(self.id, table.clone());
+        Ok(table)
+    }
+}
+
+impl Operator for ParamLookupOp {
+    fn next(&mut self, ctx: &ExecContext) -> Result<Option<Row>> {
+        if self.matches.is_none() {
+            let table = self.table(ctx)?;
+            let key = join_key(
+                &mut self.keys.iter().map(|k| (&k.right, k.domain)),
+                &[],
+                ctx,
+            )?;
+            self.matches = Some((table, key));
+        }
+        let Some((table, Some(key))) = &self.matches else {
+            return Ok(None);
+        };
+        let Some(rows) = table.get(key) else {
+            return Ok(None);
+        };
+        while self.pos < rows.len() {
+            let row = &rows[self.pos];
+            self.pos += 1;
+            if let Some(r) = &self.residual
+                && !eval_predicate(r, row, ctx)?
+            {
+                continue;
+            }
+            return Ok(Some(row.clone()));
+        }
+        Ok(None)
     }
 }
 

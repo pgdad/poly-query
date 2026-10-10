@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use super::operators::Row;
 use super::subquery::SubqueryResult;
 use crate::error::{Error, ErrorCode, Result};
 use crate::planner::{PhysicalOptions, PhysicalPlan};
@@ -16,6 +17,9 @@ use crate::types::Value;
 
 /// Maximum number of memoized subquery results per query.
 const MAX_CACHED_SUBQUERY_RESULTS: usize = 100_000;
+
+/// Hash table of a ParamLookup input: normalized key values → rows.
+pub type LookupTable = HashMap<Vec<Value>, Vec<Row>>;
 
 /// Cache key of a subquery execution: (subquery id, parameter values).
 type SubqueryKey = (usize, Vec<Value>);
@@ -39,6 +43,8 @@ pub struct ExecContext {
     plans: RefCell<HashMap<usize, Rc<PhysicalPlan>>>,
     /// Subquery results by (subquery id, parameter values).
     results: RefCell<HashMap<SubqueryKey, Rc<SubqueryResult>>>,
+    /// ParamLookup hash tables by node id.
+    lookups: RefCell<HashMap<usize, Rc<LookupTable>>>,
 }
 
 impl Default for ExecContext {
@@ -61,6 +67,7 @@ impl ExecContext {
             params: RefCell::new(Vec::new()),
             plans: RefCell::new(HashMap::new()),
             results: RefCell::new(HashMap::new()),
+            lookups: RefCell::new(HashMap::new()),
         }
     }
 
@@ -172,5 +179,13 @@ impl ExecContext {
         if results.len() < MAX_CACHED_SUBQUERY_RESULTS {
             results.insert(key, result);
         }
+    }
+
+    pub fn cached_lookup(&self, id: usize) -> Option<Rc<LookupTable>> {
+        self.lookups.borrow().get(&id).cloned()
+    }
+
+    pub fn cache_lookup(&self, id: usize, table: Rc<LookupTable>) {
+        self.lookups.borrow_mut().insert(id, table);
     }
 }
