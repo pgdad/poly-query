@@ -4,10 +4,11 @@
   "engines": [
    "java",
    "clojure",
+   "rust",
    "python",
    "go"
   ],
-  "files_written": 113,
+  "files_written": 141,
   "write_errors": 0,
   "read_failures": 0,
   "passed": true
@@ -458,6 +459,230 @@
    "table": "events",
    "mode": "auto",
    "path": "out/clojure__events__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "people",
+   "mode": "plain",
+   "path": "out/rust__people__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "people",
+   "mode": "dict",
+   "path": "out/rust__people__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "people",
+   "mode": "rle",
+   "path": "out/rust__people__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "people",
+   "mode": "auto",
+   "path": "out/rust__people__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "ledger",
+   "mode": "plain",
+   "path": "out/rust__ledger__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "ledger",
+   "mode": "dict",
+   "path": "out/rust__ledger__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "ledger",
+   "mode": "rle",
+   "path": "out/rust__ledger__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "ledger",
+   "mode": "auto",
+   "path": "out/rust__ledger__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "strings",
+   "mode": "plain",
+   "path": "out/rust__strings__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "strings",
+   "mode": "dict",
+   "path": "out/rust__strings__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "strings",
+   "mode": "rle",
+   "path": "out/rust__strings__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "strings",
+   "mode": "auto",
+   "path": "out/rust__strings__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "dates",
+   "mode": "plain",
+   "path": "out/rust__dates__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "dates",
+   "mode": "dict",
+   "path": "out/rust__dates__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "dates",
+   "mode": "rle",
+   "path": "out/rust__dates__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "dates",
+   "mode": "auto",
+   "path": "out/rust__dates__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "tx",
+   "mode": "plain",
+   "path": "out/rust__tx__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "tx",
+   "mode": "dict",
+   "path": "out/rust__tx__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "tx",
+   "mode": "rle",
+   "path": "out/rust__tx__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "tx",
+   "mode": "auto",
+   "path": "out/rust__tx__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "nulls",
+   "mode": "plain",
+   "path": "out/rust__nulls__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "nulls",
+   "mode": "dict",
+   "path": "out/rust__nulls__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "nulls",
+   "mode": "rle",
+   "path": "out/rust__nulls__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "nulls",
+   "mode": "auto",
+   "path": "out/rust__nulls__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "events",
+   "mode": "plain",
+   "path": "out/rust__events__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "events",
+   "mode": "dict",
+   "path": "out/rust__events__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "events",
+   "mode": "rle",
+   "path": "out/rust__events__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "rust",
+   "table": "events",
+   "mode": "auto",
+   "path": "out/rust__events__auto.pqcf",
    "valid": true,
    "content_ok": true
   },
@@ -930,6 +1155,11 @@
     "fail": 0,
     "failures": []
    },
+   "rust": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
    "python": {
     "ok": 28,
     "fail": 0,
@@ -953,6 +1183,43 @@
     "failures": []
    },
    "clojure": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "rust": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "python": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "go": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "reference": {
+    "ok": 1,
+    "fail": 0,
+    "failures": []
+   }
+  },
+  "rust": {
+   "java": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "clojure": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "rust": {
     "ok": 28,
     "fail": 0,
     "failures": []
@@ -984,6 +1251,11 @@
     "fail": 0,
     "failures": []
    },
+   "rust": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
    "python": {
     "ok": 28,
     "fail": 0,
@@ -1007,6 +1279,11 @@
     "failures": []
    },
    "clojure": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "rust": {
     "ok": 28,
     "fail": 0,
     "failures": []
