@@ -1,19 +1,22 @@
 # PolyQuery — Python engine
 
 An analytical database engine implementing the PolyQuery specification
-(`spec/`) in pure Python. Current status: **Phase 2** (complete SQL v1 query
-engine on in-memory tables).
+(`spec/`) in pure Python. Current status: **Phase 3** (SQL v1 query engine
+with row/column in-memory layouts, persistent PQCF v1 storage, statistics,
+hash and ordered indexes and cost-based access-path selection).
 
 Capabilities reported: `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`,
 `sql.basic`, `test.functions`, `phase2`, `sql.groupby`, `sql.join`,
-`sql.functions`, `sql.subquery`, `sql.cte`, `sql.correlated_subquery`.
+`sql.functions`, `sql.subquery`, `sql.cte`, `sql.correlated_subquery`,
+`phase3`, `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`.
 
 ## Build prerequisites
 
 * CPython 3.14 (`python3` on `PATH`). No other dependencies.
 * **Libraries:** none. Only the Python standard library is used
   (`json`, `csv`, `decimal`-free integer arithmetic, `datetime`, `argparse`,
-  `unittest`, …). `sqlite3` is not used.
+  `array`, `mmap`, `zlib` (CRC-32), `struct`, `bisect`, `unittest`, …).
+  `sqlite3` is not used.
 
 ```sh
 make build    # byte-compiles the package and smoke-tests the launcher
@@ -39,15 +42,89 @@ logical plan → optimizer → physical plan → execution**.
 | Package | Responsibility |
 |---|---|
 | `polyquery/datatypes.py`, `values.py`, `names.py` | SQL types, runtime value representation, exact decimal / date / timestamp helpers, ASCII identifier folding |
-| `polyquery/storage/` | `Catalog` and immutable column-oriented `Table`s (one Python list per column) |
+| `polyquery/storage/` | `table.py` (immutable `RowTable` / `ColumnTable` with row groups, lazily computed column statistics), `vectors.py` (typed column vectors, null bitmaps, dictionary encoding), `indexes.py` (hash and ordered indexes), `catalog.py` (tables + globally named indexes), `pqcf.py` (PQCF v1 writer with atomic replace, validating reader, lazy memory-mapped decoding) |
 | `polyquery/ingest/` | CSV (stdlib `csv` reader in `QUOTE_NOTNULL` mode to distinguish `""` from empty) and JSON/JSONL ingestion, type inference, explicit-schema conversion, ingestion limits |
 | `polyquery/sql/` | `lexer.py` (tokens with line/column), `parser.py` (recursive descent, complete v1 grammar), `ast.py` |
 | `polyquery/analysis/` | `binder.py` (name resolution, CTE/derived-table/subquery binding, aggregate extraction, GROUP BY validation, ORDER BY resolution), `scope.py` (range variables, correlation tracking, CTE environments), `typing_rules.py` (promotion lattice, CAST matrix, CASE/IN/BETWEEN/LIKE typing), `functions.py` (function signatures & result types), `bound.py` (bound expression / query model) |
-| `polyquery/planner/` | `planner.py` (bound query → logical plan), `logical.py` (Scan, Values, SubqueryScan, Filter, Join, Aggregate, Project, Distinct, Sort, Limit), `optimizer.py` (predicate pushdown, join-condition extraction), `physical.py` (algorithm choice: TableScan, LookupScan, HashJoin, NestedLoopJoin, HashAggregate, … and the EXPLAIN JSON), `explain.py` (expression rendering) |
+| `polyquery/planner/` | `planner.py` (bound query → logical plan), `logical.py` (Scan, Values, SubqueryScan, Filter, Join, Aggregate, Project, Distinct, Sort, Limit), `optimizer.py` (predicate pushdown, join-condition extraction), `physical.py` (algorithm and access-path choice: TableScan, IndexScan, LookupScan, HashJoin, NestedLoopJoin, HashAggregate, … with cardinality estimates, and the EXPLAIN JSON), `access.py` (index-usable predicates, selectivity estimation, index selection, row-group skipping), `explain.py` (expression rendering) |
 | `polyquery/execution/` | `compiler.py` (bound expression → Python closure, incl. subquery evaluation), `functions.py` (scalar function kernels), `operators.py` (batch-at-a-time physical operators), `aggregates.py` (accumulators), `casts.py`, `context.py` (timeout / cancellation / memory budget / join-row limit, correlation parameters, per-statement caches) |
 | `polyquery/service.py` | `Engine` facade: owns the catalog, runs `load`, SQL and `explain` |
 | `polyquery/protocol/` | Transport-independent request handler (validation, path safety, responses), JSON-lines session loop, exec mode, canonical value serialization |
 | `polyquery/cli.py` | Command line (`version`, `capabilities`, `session`, `exec`) |
+
+### Storage (Phase 3)
+
+* **Layouts.** `load`/`open` accept `{"options":{"layout":"row"|"column"}}`
+  (default `column`; anything else is `INVALID_REQUEST`). A `RowTable` keeps a
+  list of row tuples. A `ColumnTable` keeps row groups of typed vectors:
+  `array('q')` for INT64 / DECIMAL (unscaled) / TIMESTAMP, `array('i')` for
+  DATE, `array('d')` for FLOAT64, a 0/1 `bytearray` for BOOLEAN, and STRING
+  either as a list of `str` or dictionary-encoded (`array('I')` codes + the
+  distinct strings); NULLs are tracked in an LSB-first validity bitmap that
+  is omitted when a vector has no NULLs. Both layouts implement the same
+  `scan` / `fetch` / `column_values` interface, so query results are
+  identical. `schema` reports `"layout"`.
+* **Dictionary encoding** of STRING columns is applied automatically in the
+  column layout when a column has fewer than n/2 distinct non-NULL values, and
+  always with `{"options":{"dictionary":true}}`.
+* **Statistics** (`stats` op and the planner): row count; per column NULL
+  count, exact distinct count, min and max — computed on first use per column
+  and cached (tables are immutable).
+* **PQCF writer.** Row groups of `row_group_size` rows (default 65,536);
+  chunks start 8-byte aligned; min/max are written for every type except
+  STRING. Encoding `auto` chooses DICT for STRING columns with fewer than n/2
+  distinct values and RLE for BOOLEAN/INT64/DECIMAL/DATE/TIMESTAMP chunks with
+  fewer than n/4 runs, else PLAIN; `plain`/`dict`/`rle` force the encoding
+  where it applies (PLAIN otherwise). In RLE, NULL slots continue the current
+  run (their values are ignored by readers). The file is written to
+  `.<target>.tmp-<pid>-<random>` in the target directory, fsynced, renamed
+  over the target, and the directory is fsynced. Temporary files of earlier
+  crashed saves (their pid no longer exists) are removed by the next save to
+  the same target. A symlinked target is followed; a directory target or a
+  missing parent directory is `IO_ERROR`. The table's indexes are recorded in
+  the metadata.
+* **PQCF reader.** `open` always validates header, version/flags, footer,
+  metadata checksum, JSON and every structural rule of pqcf-v1.md §2 (unknown
+  keys are ignored; type names are parsed like explicit schemas). Without
+  `mmap` every chunk is then verified (CRC, exact size, bitmap/null_count,
+  offsets, UTF-8, value ranges of §3.4) and decoded at `open`. With
+  `{"options":{"mmap":true}}` the file is memory-mapped (`mmap` module) and
+  each chunk is verified and decoded on first access, so a corrupt chunk
+  makes the first query touching it fail with `STORAGE_CORRUPT` (nothing
+  derived from it is returned). Indexes listed in the file are rebuilt; all
+  index-name conflicts are checked before anything changes.
+* **Indexes.** `HASH`: dict value → row positions. `BTREE`: the sorted
+  permutation of the non-NULL rows (parallel key / row-id lists searched with
+  `bisect`) supporting equality, IN and ranges. NULLs are never indexed.
+  Index names are global and case-insensitive; dropping or replacing a table
+  drops its indexes.
+
+### Planning with statistics (Phase 3)
+
+* **Index-usable predicates** are pushed-down conjuncts `col op constant`
+  (`=`, `<`, `<=`, `>`, `>=`, `BETWEEN`, `IN` lists; constant on either side)
+  where the column is not wrapped in a promotion and the constant (evaluated
+  at planning time) is exactly representable in the column's type (e.g.
+  `int_col = 1.5` or `dec2_col = 1.005` are left to the Filter).
+* **Index selection.** Candidates are equality/IN lookups (hash or btree) and
+  per-column ranges combining all range conjuncts (btree only). Selectivity:
+  equality 1/distinct, IN k/distinct, ranges by linear interpolation between
+  min and max for numeric/temporal types and 1/3 otherwise. The most
+  selective candidate is used when its selectivity is ≤ 10%, or when it is
+  expected to return at most 2 rows (a lookup that small never loses to a
+  scan; this makes equality lookups on tiny tables use their index). The
+  conjuncts the lookup implements are removed; the rest stay in a Filter.
+  `use_indexes:false` never uses indexes.
+* **Row-group skipping.** For tables opened from PQCF, the same predicates
+  are checked against each row group's chunk min/max/null_count and groups
+  that cannot contain a match are not read (EXPLAIN: `row_groups`,
+  `row_group_filter` on the `TableScan`). The Filter above still evaluates
+  every predicate.
+* **Column pruning.** Scans read only the columns the query references.
+* **Cardinality estimates** (every EXPLAIN node has `estimated_rows`) use the
+  same selectivity rules; hash joins build on the input with the smaller
+  estimate for INNER joins and on the right input for LEFT joins (EXPLAIN:
+  `build`).
 
 ### Runtime value representation
 
@@ -107,7 +184,7 @@ any remaining reference to a FROM column is a grouping violation
   conditions. For LEFT joins, WHERE conjuncts on the preserved side and ON
   conjuncts on the nullable side are pushed. (Disabled by `optimize:false`.)
 * Join algorithm: equality conjuncts whose sides reference disjoint inputs
-  become hash-join keys (build on the right input; DECIMAL keys of different
+  become hash-join keys (build side chosen by estimated size, see above; DECIMAL keys of different
   scales are aligned; NULL keys never match), the remaining conjuncts are a
   residual predicate; otherwise a nested-loop join. `join:"nested_loop"`
   forces nested loops. `--max-join-rows` is enforced per join.
@@ -171,12 +248,22 @@ any remaining reference to a FROM column is a grouping violation
   select-list expression.
 * **Query options**: `mode` accepts `auto` and `row` (this engine is
   row/batch based); `vectorized` and unknown values of known enum options are
-  `UNSUPPORTED`; ill-typed option values are `INVALID_REQUEST`. `threads`,
-  `join`, `optimize`, `use_indexes`, `native` are validated and otherwise ignored.
-* Protocol ops of later phases (`explain`, `save`, `open`, `stats`) answer
-  `UNSUPPORTED`; unknown ops `INVALID_REQUEST`.
-* `CREATE INDEX` / `DROP INDEX` parse but answer `UNSUPPORTED` (indexes are
-  Phase 3). `FULL`/`RIGHT` joins and `UNION` answer `UNSUPPORTED`.
+  `UNSUPPORTED`; ill-typed option values are `INVALID_REQUEST`. `optimize`,
+  `use_indexes` and `join:"nested_loop"` are honoured; `threads`,
+  `join:"hash"|"merge"` and `native` are validated and otherwise ignored.
+* Unknown ops are `INVALID_REQUEST`. `FULL`/`RIGHT` joins and `UNION` answer
+  `UNSUPPORTED`.
+* **CREATE INDEX** validates table and column first (`SEMANTIC_ERROR`), then
+  the name (`ALREADY_EXISTS` unless `IF NOT EXISTS`). Explaining a
+  `CREATE`/`DROP INDEX` statement with the `explain` op is `UNSUPPORTED`.
+* **save/open options**: `encoding` must be `auto`/`plain`/`dict`/`rle`
+  (case-insensitive) and `row_group_size` a positive integer, else
+  `INVALID_REQUEST`. `open` answers the table's schema and indexes. A file
+  with zero columns, duplicate index names or an unknown index kind is
+  `STORAGE_CORRUPT`; min/max statistics that cannot be interpreted are
+  ignored (they only serve row-group skipping). Opening a file with more rows
+  than `--max-table-rows` is `RESOURCE_LIMIT`. OS permission errors are
+  `ACCESS_DENIED`, other OS errors `IO_ERROR`.
 * **UPPER / LOWER**: only ASCII letters are case-mapped, and a word (a run of
   non-whitespace characters) that contains a non-ASCII character is left
   unchanged as a whole. functions.md only says "ASCII letters only are
@@ -209,7 +296,15 @@ any remaining reference to a FROM column is a grouping violation
 
 ## Known limitations
 
-* No persistent storage, indexes, statistics or HTTP server yet (Phases 3–4).
+* No HTTP server yet (Phase 4).
+* In-memory tables loaded from CSV/JSON are a single row group without
+  min/max zone maps, so row-group skipping applies to PQCF-backed tables only.
+* Decoded vectors of memory-mapped files are cached once read, so a fully
+  scanned mmap table ends up resident like an eagerly opened one.
+* `save` materializes each column of the table as a Python list while
+  writing (memory ≈ one decoded copy of the table).
+* Indexes are used for single-table predicates only (no index nested-loop
+  joins) and never to produce ordered output.
 * Correlated subqueries are executed per distinct parameter tuple (with the
   LookupScan optimisation for equality correlation); correlation through
   non-equality predicates is evaluated by re-running the subquery and can be
