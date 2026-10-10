@@ -1,35 +1,80 @@
 {
-  "schema": "polyquery-project-state/1",
-  "updated": "2026-10-10T19:00:00Z",
-  "current_milestone": "M3",
-  "milestones": {
-    "M0": {"status": "complete", "evidence": "spec/, docs/, AGENTS.md, ADR-0001..0015; just spec-validate passes"},
-    "M1": {"status": "complete", "evidence": "tests/conformance runner + 554 public / 69 hidden cases; oracle_check: 0 problems; harness selftests pass"},
-    "M2": {"status": "complete_pending_engine_validation", "evidence": "pqgen deterministic (verify OK); bench.py, report.py, orchestrator + sandbox exercised end-to-end with a smoke run",
-           "open": ["bench.py and http_suite.py have not yet run against a real engine (no engine existed); validate on first Phase 1/4 engines"]},
-    "M3": {"status": "in_progress", "detail": "Track A wave phase1 attempt 1 running for all 6 languages (started 2026-10-10T18:29Z)"},
-    "M4": {"status": "not_started"}, "M5": {"status": "not_started"}, "M6": {"status": "not_started"},
-    "M7": {"status": "not_started"},
-    "M8": {"status": "in_progress", "detail": "C17 reference + dispatch + differential tests done (pass natively, ASan/UBSan, AArch64 under qemu); Track A wave kernels attempt 1 running for x86_64-asm and arm64-asm"},
-    "M9": {"status": "not_started"}, "M10": {"status": "not_started"}
+ "schema": "polyquery-project-state/1",
+ "updated": "2026-10-10T19:03:25+00:00",
+ "current_milestone": "M3",
+ "milestones": {
+  "M0": {
+   "status": "complete",
+   "evidence": "spec/, docs/, AGENTS.md, ADR-0001..0015; just spec-validate passes"
   },
-  "outstanding_tasks": [
-    "Collect results of wave phase1/a1 and kernels/a1; import successful runs; retry failed languages (attempt 2)",
-    "Validate benchmarks/harness/bench.py against the first engines; run 1m benchmark",
-    "Run phase2..phase5 waves",
-    "Generate dataset manifests for 10k..10m (and 100m) with checksums",
-    "Native integration (M9), Track B, later experiment families",
-    "Run kernels on native AArch64 hardware (unavailable on this host)"
-  ],
-  "known_defects": [],
-  "blockers": [
-    "No native AArch64 hardware on the host: AArch64 kernels can be validated only functionally (qemu) until run on ARM hardware"
-  ],
-  "risks": [
-    "Agent runs consume the operator's Claude subscription quota (observed ~9% of the 5-hour window per 25 min with 8 parallel agents); runs are capped to the OAuth token lifetime"
-  ],
-  "test_results": {"spec_validate": "pass", "oracle_check": "pass (164 oracle queries)", "harness_selftest": "pass (9 tests)",
-                   "kernels_reference": "pass (native, asan, aarch64-qemu)", "engines": "none yet"},
-  "last_successful_commit": null,
-  "next_recommended_action": "Wait for wave phase1/a1 completion notifications; run `python3 tools/orchestration/pq_orchestrate.py status`, inspect validation.json per run, import successful runs with `import <run_id> --merge`, then run the benchmark harness at 100k to validate it."
+  "M1": {
+   "status": "complete",
+   "evidence": "tests/conformance runner + 554 public / 69 hidden cases; oracle_check: 0 problems; harness selftests pass"
+  },
+  "M2": {
+   "status": "complete",
+   "evidence": "bench.py validated at 100k on java/go/clojure (results/performance/20261010T190017Z-100k-harness-validation; digests agree); datasets 10k..10m manifests committed",
+   "open": [
+    "http_suite.py not yet run against a Phase 4 engine"
+   ]
+  },
+  "M3": {
+   "status": "in_progress",
+   "detail": "phase1/a1: java, go, clojure accepted (249/249 incl. hidden; merged; results/correctness). python, rust, common-lisp still running. phase2/a1 started 19:02Z for java, go, clojure."
+  },
+  "M4": {
+   "status": "not_started"
+  },
+  "M5": {
+   "status": "not_started"
+  },
+  "M6": {
+   "status": "not_started"
+  },
+  "M7": {
+   "status": "not_started"
+  },
+  "M8": {
+   "status": "in_progress",
+   "detail": "C17 reference + dispatch + differential tests done (pass natively, ASan/UBSan, AArch64 under qemu); Track A wave kernels attempt 1 running for x86_64-asm and arm64-asm"
+  },
+  "M9": {
+   "status": "not_started"
+  },
+  "M10": {
+   "status": "not_started"
+  }
+ },
+ "outstanding_tasks": [
+  "When python/rust/common-lisp phase1 runs and kernel runs finish: re-validate with `pq_orchestrate.py validate <run>` (wave process predates harness fixes HI-002/HI-003), record, import --merge, `just test-language <lang>`; attempt 2 for failures",
+  "Phase 2 for java/go/clojure running; then phase 2 for the rest, phases 3-5",
+  "Run 1m benchmark on a quiet host (no agents running)",
+  "Resolve SPEC-Q-001 (INT64 vs DECIMAL comparison overflow) via change control after the current waves",
+  "Run http_suite against first Phase 4 engine",
+  "Native integration (M9), Track B, later experiment families",
+  "Run kernels on native AArch64 hardware (unavailable on this host)"
+ ],
+ "known_defects": [
+  "See experiments/telemetry/harness-incidents.jsonl (HI-001..003 fixed; SPEC-Q-001 open)"
+ ],
+ "blockers": [
+  "No native AArch64 hardware on the host: AArch64 kernels can be validated only functionally (qemu) until run on ARM hardware"
+ ],
+ "risks": [
+  "Agent runs consume the operator's Claude subscription (phase1 wave: ~22% of the 5-hour window and 5% weekly within ~35 min, 8 agents). Mitigated by usage gate (start <60% 5h, <80% 7d) and guard/watchdog that stops agents at 95% 5h or on any overage.",
+  "Runs are capped to the OAuth access-token lifetime (no refresh inside sandbox)"
+ ],
+ "test_results": {
+  "spec_validate": "pass (incl. Phase-1 syntax lint)",
+  "oracle_check": "pass (177 oracle queries)",
+  "harness_selftest": "pass (10 tests)",
+  "kernels_reference": "pass (native, asan, aarch64-qemu)",
+  "engines": {
+   "java": "phase1 225/225 public, 249/249 incl. hidden",
+   "go": "phase1 225/225 public, 249/249 incl. hidden",
+   "clojure": "phase1 225/225 public, 249/249 incl. hidden"
+  }
+ },
+ "last_successful_commit": "7f7295e",
+ "next_recommended_action": "Wait for remaining phase1/kernels runs and phase2 (java/go/clojure); re-validate each finished phase1/kernels run with the current orchestrator, then import --merge and run `just test-language <lang>`."
 }
