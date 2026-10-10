@@ -330,11 +330,23 @@
               (if (zero? r) (recur (next cs)) (int r)))
             0))))))
 
+(defn- checking-comparator
+  "Wraps cmp so that a long sort observes timeout/cancellation (checked
+  every 65,536 comparisons)."
+  ^Comparator [^Comparator cmp qctx]
+  (let [n (long-array 1)]
+    (reify Comparator
+      (compare [_ a b]
+        (let [k (aget n 0)]
+          (aset n 0 (inc k))
+          (when (zero? (bit-and k 0xFFFF)) (ctx/check! qctx)))
+        (.compare cmp a b)))))
+
 (defmethod build :sort [plan env]
   (let [input (build (:input plan) env)
         cmp (row-comparator (:keys plan))]
     (reducible
      (fn [f init]
        (let [rows (materialize input env)]
-         (.sort rows cmp)
+         (.sort rows (checking-comparator cmp (:ctx env)))
          (reduce-list rows f init))))))

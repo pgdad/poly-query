@@ -1,7 +1,7 @@
 # PolyQuery — Clojure engine
 
 An analytical database engine implementing the PolyQuery specification
-(`spec/`) in Clojure. Status: **Phase 3** — Phase 1 (protocol, catalog,
+(`spec/`) in Clojure. Status: **Phase 4** — Phase 1 (protocol, catalog,
 CSV/JSON/JSONL ingestion, all data types, resource limits, test functions),
 Phase 2 (the complete SQL language: GROUP BY/HAVING, DISTINCT,
 INNER/LEFT/CROSS joins, all scalar functions, CASE/LIKE/BETWEEN/IN,
@@ -10,12 +10,17 @@ Phase 3 (row- and column-oriented in-memory layouts with null bitmaps and
 dictionary encoding, the PQCF v1 file format with PLAIN/DICT/RLE encodings,
 CRC-32 checksums, atomic crash-safe writes and memory-mapped reads, table
 statistics, HASH and BTREE indexes, index selection, predicate pushdown with
-row-group skipping, column pruning and cost-based hash-join build sides).
+row-group skipping, column pruning and cost-based hash-join build sides) and
+Phase 4 (the `serve` HTTP/1.1 server with every endpoint of protocol.md §7,
+NDJSON streaming with backpressure, Prometheus metrics, structured JSON logs,
+snapshot-isolated concurrent readers, worker limits with a bounded FIFO
+queue and `OVERLOADED` rejection, query timeouts, cancellation, client
+disconnect detection and graceful shutdown).
 
 Reported capabilities: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic
 test.functions phase2 sql.groupby sql.join sql.functions sql.subquery sql.cte
 sql.correlated_subquery phase3 storage.pqcf storage.mmap index.hash
-index.btree`.
+index.btree phase4 http.streaming`.
 
 ## Prerequisites and build
 
@@ -30,6 +35,7 @@ make lint     # compiles with *warn-on-reflection*; fails on reflection warnings
 make fmt      # whitespace normalisation (no third-party formatter is allowed)
 make clean
 bin/polyquery session --data-dir DIR    # JSON-lines protocol on stdin/stdout
+bin/polyquery serve --port 0 --data-dir DIR [--workers N --queue-depth Q ...]
 ```
 
 `bin/polyquery` works from any directory; extra JVM flags can be passed via
@@ -55,6 +61,7 @@ SQL text ─lexer→ tokens ─parser→ AST ─analyzer/binder→ bound query
 | Layer | Namespaces | Responsibility |
 |---|---|---|
 | CLI / protocol | `polyquery.main`, `polyquery.protocol` | argument parsing, session/exec loops, request validation, op dispatch (`handle-op` multimethod), response objects |
+| HTTP server (Phase 4) | `polyquery.server`, `polyquery.server.http`, `polyquery.server.admission`, `polyquery.server.metrics` | endpoints and routing, query lifecycle (registry, admission, timeouts, cancellation, streaming), graceful shutdown; HTTP/1.1 wire format; worker limit + FIFO queue; Prometheus exposition |
 | Engine pipeline | `polyquery.engine` | drives the stages per statement, EXPLAIN, result serialization |
 | Lexer | `polyquery.sql.lexer` | tokens with line/column positions, comments, quoted identifiers, reserved words |
 | Parser / AST | `polyquery.sql.parser`, `polyquery.sql.ast` | recursive descent over the full v1 grammar producing a plain-map AST |
@@ -160,10 +167,72 @@ timeout/cancellation checks.
   `STORAGE_CORRUPT`. Fixed-width PLAIN chunks of mapped files are read in
   place (zero copy). Indexes listed in the metadata are rebuilt at `open`.
 
+### HTTP server and concurrency (Phase 4)
+
+* **Wire layer** (`polyquery.server.http`): blocking sockets, HTTP/1.1 with
+  keep-alive (HTTP/1.0 only with `Connection: keep-alive`), `Content-Length`
+  and chunked request bodies, `Expect: 100-continue`. A body larger than
+  `--max-request-bytes` is answered with `413 RESOURCE_LIMIT`; it is read and
+  discarded (up to 64 MiB, so the connection can stay open) or the connection
+  is closed. Malformed requests get `400 INVALID_REQUEST` and the connection
+  is closed.
+* **Threads**: one platform thread per connection parses requests and
+  writes responses, so `/health`, `/metrics`, `/v1/queries` and cancellation
+  stay responsive however busy the workers are. Queries run on separate
+  worker threads; the connection thread waits for the result in 10 ms steps
+  and in between peeks at the socket (1 ms read timeout) to detect a client
+  disconnect, which cancels the query.
+* **Query lifecycle** (`/v1/query`, `/v1/query/stream` and `/v1/request` with
+  `op: "query"`): the query is registered under its `query_id` (client's
+  `options.query_id` or a generated `pq-<uuid>`; an id in use by a queued or
+  running query ⇒ `409 ALREADY_EXISTS`), then admitted by
+  `polyquery.server.admission`: a free worker is taken immediately, otherwise
+  the query waits in a FIFO queue of `--queue-depth` entries (a released
+  worker is handed directly to the oldest waiter), otherwise it is rejected
+  at once with `503 OVERLOADED`. Its deadline is fixed at arrival
+  (`options.timeout_ms`, else `--query-timeout-ms`), so queueing time counts.
+  Cancellation (`DELETE /v1/queries/{id}`, disconnect, shutdown) and the
+  deadline are an `AtomicBoolean` and an absolute deadline shared with the
+  query context, observed while queued and by the operators' periodic checks
+  (every 4,096 rows, every 65,536 sort comparisons; `PQ_SLEEP` every ≤ 5 ms).
+  Other requests (loads, DDL via `/v1/request`, explain, catalog reads) run
+  directly on the connection thread and are not subject to the worker limit.
+* **Snapshot isolation** comes from the immutable catalog value: a query
+  analyzes and plans against `@catalog` once, so its plan holds the table
+  values it started with; loads parse first and publish with one `swap!`.
+* **Streaming**: the worker thread pushes `[:header]`, `[:rows batch]` (1,000
+  rows per line), `[:end n]`/`[:error e]` into an `ArrayBlockingQueue` of 8
+  batches; the connection thread writes one chunk per message. A client that
+  stops reading blocks the socket write, the queue fills up and the producer
+  waits (still observing cancellation/timeout). The header is sent as soon as
+  the statement is planned, so errors detectable before execution (and
+  admission errors) are normal error responses; runtime errors after the
+  header become a final `{"type":"error"}` line without an `end` line.
+* **Metrics**: `polyquery_queries_total{status}` counts every query request
+  that reached the query path (rejections, duplicate ids and shutdown
+  refusals count as `error`); the duration summary covers admitted queries,
+  including queueing time.
+* **Logs**: JSON lines on stderr (`ts`, `level`, `msg`, plus fields); every
+  query completion logs `query_id`, `status` (`ok`/`error`), `error_code`,
+  `duration_ms` and `rows`. SQL text, data values and request bodies are
+  never logged at `info`.
+* **Shutdown**: a JVM shutdown hook (SIGTERM/SIGINT) closes the listening
+  socket (new connections are refused), answers new queries on existing
+  connections with `503 SHUTTING_DOWN` (`/health` ⇒ 503, responses carry
+  `Connection: close`), waits up to `--shutdown-grace-ms` for in-progress
+  requests and queued/running queries, then cancels the remaining queries
+  (`CANCELLED`), gives them up to 2 s to answer, closes all connections and
+  halts the JVM with status 0.
+* **Defaults**: `--workers` = number of CPUs (0 means the default),
+  `--queue-depth` 64, `--query-timeout-ms` 0, `--shutdown-grace-ms` 10000,
+  `--max-request-bytes` 1 GiB. `PUT /v1/tables/{name}` accepts the query
+  parameters `format`, `replace`, `header`, and additionally `delimiter`,
+  `layout` and `dictionary` (as in `load`).
+
 ## Design decisions (where the spec is silent or open)
 
 * **Unsupported features.** `UNION`, `RIGHT`/`FULL` joins answer
-  `UNSUPPORTED`; `serve` (Phase 4) exits 1.
+  `UNSUPPORTED`.
 * **CASE/COALESCE result type.** Types are combined pairwise in order; any two
   DECIMAL types (even identical ones) combine to `DECIMAL(18,max(s1,s2))` as
   semantics.md §13 states, INT64 with DECIMAL(p,s) to `DECIMAL(18,s)`, NULL
@@ -284,11 +353,19 @@ timeout/cancellation checks.
   PQCF round trips for every encoding/row-group size/mmap, corrupt and
   unsupported files; Phase 3 planning (pruning, index selection, build side).
 * Conformance: `python3 tests/conformance/runner.py --engine
-  implementations/clojure/bin/polyquery --phase 1 --phase 2 --phase 3`.
+  implementations/clojure/bin/polyquery --phase 1 --phase 2 --phase 3`
+  (add `--transport http` to run the same cases through `serve`), and
+  `python3 tests/concurrency/http_suite.py --engine
+  implementations/clojure/bin/polyquery`.
 
 ## Known limitations
 
-* No HTTP server (Phase 4) or Phase 5 execution modes.
+* No Phase 5 execution modes (vectorized/parallel execution, forced join
+  algorithms, native kernels).
+* HTTP: one platform thread per open connection (no NIO multiplexing);
+  no TLS, no HTTP/2, no compression. Request bodies are held in memory
+  (bounded by `--max-request-bytes`). Loads are not cancellable and do not
+  observe timeouts.
 * Rows flowing between operators are boxed `Object[]` tuples (typed columnar
   storage is converted per value at the scan); very large inputs need a
   correspondingly large heap (`POLYQUERY_JAVA_OPTS=-Xmx…`). JSON (array)
@@ -298,5 +375,3 @@ timeout/cancellation checks.
 * A PQCF chunk must be smaller than 2 GiB (Java buffer limit).
 * Correlated subqueries other than equality lookups over a single table scan
   are re-executed per outer row (correct, but O(outer × inner)).
-* Sorting is not interruptible once the in-memory sort has started (rows are
-  checked for timeout/cancellation while being collected).

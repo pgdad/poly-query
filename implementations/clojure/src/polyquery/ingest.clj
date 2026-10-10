@@ -4,7 +4,7 @@
   (:require [polyquery.errors :as err]
             [polyquery.ingest.csv :as csv]
             [polyquery.ingest.json :as json])
-  (:import (java.io File FileInputStream InputStreamReader Reader StringReader IOException
+  (:import (java.io ByteArrayInputStream File FileInputStream InputStreamReader Reader StringReader IOException
                     FileNotFoundException)
            (java.nio.charset CharacterCodingException CodingErrorAction StandardCharsets)))
 
@@ -34,9 +34,15 @@
                                      (:max-ingest-bytes limits) " bytes"))))
 
 (defn- open-source
-  "Returns a Reader for {:file File} or {:text String}."
-  ^Reader [{:keys [^File file ^String text]} limits]
-  (if file
+  "Returns a Reader for {:file File}, {:text String} or {:bytes byte[]}
+  (UTF-8, e.g. an HTTP request body)."
+  ^Reader [{:keys [^File file ^String text ^bytes bytes]} limits]
+  (cond
+    bytes
+    (do (check-size! (alength bytes) limits)
+        (utf8-reader (ByteArrayInputStream. bytes)))
+
+    file
     (do
       (when-not (.exists file)
         (err/fail! "NOT_FOUND" (str "file not found: " (.getName file))))
@@ -46,12 +52,14 @@
       (try (utf8-reader (FileInputStream. file))
            (catch FileNotFoundException e
              (err/fail! "IO_ERROR" (str "cannot open file: " (.getMessage e))))))
+
+    :else
     (do (check-size! (utf8-length text) limits)
         (StringReader. text))))
 
 (defn load-table
   "Parses a table. spec keys: :name :format (\"csv\"|\"json\"|\"jsonl\")
-  :source ({:file f} or {:text s}) :schema (vector of Column or nil)
+  :source ({:file f}, {:text s} or {:bytes b}) :schema (vector of Column or nil)
   :header? :delimiter :limits."
   [{:keys [format source limits] :as spec}]
   (with-open [r (open-source source limits)]
