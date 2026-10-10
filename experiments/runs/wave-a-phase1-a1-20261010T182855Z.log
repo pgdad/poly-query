@@ -20,3 +20,7 @@
 2026-10-10T19:52:09+00:00 [a-phase1-common-lisp-a1-20261010T182901Z] agent finished; collecting telemetry
 2026-10-10T19:52:09+00:00 [a-phase1-common-lisp-a1-20261010T182901Z] validating (clean clone, public + hidden suites)
 2026-10-10T19:52:11+00:00 [a-phase1-common-lisp-a1-20261010T182901Z] outcome=tests_failed cost=$16.7564782 turns=9 wall=4962.1s
+2026-10-10T20:15:04+00:00 [a-phase1-rust-a1-20261010T182857Z] agent finished; collecting telemetry
+2026-10-10T20:15:04+00:00 [a-phase1-rust-a1-20261010T182857Z] validating (clean clone, public + hidden suites)
+2026-10-10T20:15:07+00:00 [a-phase1-rust-a1-20261010T182857Z] outcome=tests_failed cost=$14.525043400000001 turns=1 wall=6351.8s
+2026-10-10T20:15:07+00:00 wave wave-a-phase1-a1-20261010T182855Z finished: java=tests_failed, go=tests_failed, clojure=tests_failed, python=tests_failed, common=tests_failed, rust=tests_failed

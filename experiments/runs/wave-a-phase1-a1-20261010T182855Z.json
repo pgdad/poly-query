@@ -31,5 +31,37 @@
   1.07080078125,
   1.103515625,
   1.07080078125
+ ],
+ "finished": "2026-10-10T20:15:07+00:00",
+ "loadavg_end": [
+  5.22314453125,
+  3.3544921875,
+  2.46630859375
+ ],
+ "results": [
+  {
+   "run_id": "a-phase1-java-a1-20261010T182856Z",
+   "outcome": "tests_failed"
+  },
+  {
+   "run_id": "a-phase1-go-a1-20261010T182859Z",
+   "outcome": "tests_failed"
+  },
+  {
+   "run_id": "a-phase1-clojure-a1-20261010T182858Z",
+   "outcome": "tests_failed"
+  },
+  {
+   "run_id": "a-phase1-python-a1-20261010T182855Z",
+   "outcome": "tests_failed"
+  },
+  {
+   "run_id": "a-phase1-common-lisp-a1-20261010T182901Z",
+   "outcome": "tests_failed"
+  },
+  {
+   "run_id": "a-phase1-rust-a1-20261010T182857Z",
+   "outcome": "tests_failed"
+  }
  ]
 }

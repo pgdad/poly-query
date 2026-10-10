@@ -1,0 +1,25 @@
+{
+ "wave_id": "wave-a-phase5-a1-20261010T201442Z",
+ "task": "phase5",
+ "track": "A",
+ "attempt": 1,
+ "seed": 11817,
+ "order": [
+  "clojure"
+ ],
+ "run_ids": [
+  "a-phase5-clojure-a1-20261010T201442Z"
+ ],
+ "started": "2026-10-10T20:14:43+00:00",
+ "parallel": 1,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  4.04296875,
+  3.0576171875,
+  2.35498046875
+ ]
+}
