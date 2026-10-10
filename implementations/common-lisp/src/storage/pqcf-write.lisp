@@ -139,13 +139,14 @@ encodings that do not apply to TYPE fall back to PLAIN."
 
 (defun chunk-min-max (values type)
   "Exact (values min max) of the non-NULL VALUES, or NILs if there are none."
-  (let ((cmp (make-comparator type)) (lo nil) (hi nil))
+  (let ((cmp (make-comparator type)) (lo nil) (hi nil) (found nil))
     (declare (type function cmp))
     (loop for v across values
           unless (null-value-p v)
-            do (when (or (null lo) (minusp (the fixnum (funcall cmp v lo)))) (setf lo v))
-               (when (or (null hi) (plusp (the fixnum (funcall cmp v hi)))) (setf hi v)))
-    (values lo hi)))
+            do (when (or (not found) (minusp (the fixnum (funcall cmp v lo)))) (setf lo v))
+               (when (or (not found) (plusp (the fixnum (funcall cmp v hi)))) (setf hi v))
+               (setf found t))
+    (values lo hi found)))
 
 (defun encode-chunk (values type mode)
   "Encode one column chunk. Returns (values octets encoding null-count)."
@@ -213,14 +214,14 @@ STREAM. Returns the number of bytes written."
                               (pad)
                               (let ((offset position))
                                 (emit octets)
-                                (multiple-value-bind (lo hi)
+                                (multiple-value-bind (lo hi found)
                                     (if (eq (type-kind type) :string)
-                                        (values nil nil)
+                                        (values nil nil nil)
                                         (chunk-min-max values type))
                                   (push (apply #'jobj "offset" offset "length" (length octets)
                                                "crc32" (crc32 octets) "encoding" encoding
                                                "null_count" null-count
-                                               (when lo
+                                               (when found
                                                  (list "min" (value-to-json lo type)
                                                        "max" (value-to-json hi type))))
                                         chunks))))))

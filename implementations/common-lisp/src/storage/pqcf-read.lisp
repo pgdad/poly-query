@@ -208,7 +208,28 @@ absent or not understood (statistics are only an optimization)."
           (multiple-value-bind (groups total) (parse-metadata-row-groups meta columns meta-start)
             (unless (= total row-count)
               (storage-corrupt "row_count ~D does not match the row groups (~D)" row-count total))
+            (check-padding source groups meta-start)
             (make-pqcf-file :columns columns :indexes indexes :row-groups groups)))))))
+
+(defun check-padding (source groups data-end)
+  "Bytes of the data area [8, DATA-END) not covered by any chunk may only be
+zero padding; anything else is damage no checksum would catch."
+  (let ((ranges (sort (loop for (nil . chunks) in groups
+                            nconc (loop for (desc . nil) in chunks
+                                        collect (cons (chunk-desc-offset desc)
+                                                      (chunk-desc-length desc))))
+                      #'< :key #'car))
+        (pos 8))
+    (flet ((check-zero (start end)
+             (when (< start end)
+               (multiple-value-bind (buf base) (source-range source start (- end start))
+                 (unless (loop for i from base below (+ base (- end start))
+                               always (zerop (aref buf i)))
+                   (storage-corrupt "non-zero bytes outside the column chunks"))))))
+      (loop for (offset . length) in ranges
+            do (check-zero pos offset)
+               (setf pos (max pos (+ offset length))))
+      (check-zero pos data-end))))
 
 ;;; ------------------------------------------------------------------
 ;;; Chunk decoding

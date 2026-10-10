@@ -28,6 +28,26 @@
           (native-directory-of native-path) (native-file-name-of native-path)
           (sb-posix:getpid) (sb-ext:atomic-incf (car **temp-counter**))))
 
+(defun process-alive-p (pid)
+  (handler-case (progn (sb-posix:kill pid 0) t)
+    (sb-posix:syscall-error (e) (/= (sb-posix:syscall-errno e) sb-posix:esrch))))
+
+(defun remove-stale-temporaries (native-path)
+  "Delete temporary files of earlier saves to NATIVE-PATH whose writing
+process no longer exists (left behind by a crash)."
+  (let ((prefix (format nil ".~A.tmp-" (native-file-name-of native-path)))
+        (directory (native-directory-of native-path)))
+    (ignore-errors
+     (dolist (entry (directory (merge-pathnames (make-pathname :name :wild :type :wild)
+                                                (sb-ext:parse-native-namestring directory))
+                               :resolve-symlinks nil))
+       (let* ((name (native-file-name-of (sb-ext:native-namestring entry)))
+              (pid (and (> (length name) (length prefix))
+                        (string= prefix name :end2 (length prefix))
+                        (parse-integer name :start (length prefix) :junk-allowed t))))
+         (when (and pid (/= pid (sb-posix:getpid)) (not (process-alive-p pid)))
+           (ignore-errors (sb-posix:unlink (sb-ext:native-namestring entry)))))))))
+
 (defun fsync-directory (directory)
   "Flush the directory entry changes of DIRECTORY (best effort)."
   (handler-case
@@ -39,6 +59,7 @@
 (defun write-file-atomically (native-path writer)
   "Replace the file at NATIVE-PATH with the octets WRITER (a function of an
 octet output stream) produces. Returns WRITER's value. Failures are IO_ERROR."
+  (remove-stale-temporaries native-path)
   (let ((temp (temporary-path-for native-path))
         (done nil))
     (unwind-protect

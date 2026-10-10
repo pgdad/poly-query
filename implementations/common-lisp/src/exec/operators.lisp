@@ -315,6 +315,11 @@ each bucket keeps its rows in input order."
     (maphash (lambda (k rows) (setf (gethash k h) (nreverse rows))) h)
     h))
 
+(defmethod compile-operator ((node pp-hash-join))
+  (if (eq (pp-hash-join-build node) :left)
+      (compile-left-build-hash-join node)
+      (compile-right-build-hash-join node)))
+
 (defun compile-left-build-hash-join (node)
   "Inner hash join that hashes the LEFT input and probes it with right rows."
   (destructuring-bind (left right) (pnode-children node)
@@ -336,30 +341,28 @@ each bucket keeps its rows in input order."
               (counter (join-row-counter)))
           (declare (type function counter))
           (lambda ()
-           (block next-row
-            (unless table
-              (setf table (build-hash-table (funcall open-left) left-key))
-              (when invariant (setf cached table)))
-            (unless probe (setf probe (funcall open-right)))
-            (loop
-              (loop while candidates
-                    do (let* ((l (pop candidates))
-                              (row (concat-rows l current)))
-                         (when (or (null residual) (eq (funcall (the function residual) row) t))
-                           (funcall counter)
-                           (return-from next-row row))))
-              (let ((r (funcall (the function probe))))
-                (unless r (return-from next-row nil))
-                (let ((k (funcall right-key r)))
-                  (setf current r
-                        candidates (and k (gethash k table)))))))))))))
-
-(defmethod compile-operator ((node pp-hash-join))
-  (if (eq (pp-hash-join-build node) :left)
-      (compile-left-build-hash-join node)
-      (compile-right-build-hash-join node)))
+            (block emit
+              (unless table
+                (setf table (build-hash-table (funcall open-left) left-key))
+                (when invariant (setf cached table)))
+              (unless probe
+                (setf probe (funcall open-right)))
+              (loop
+                ;; Emit the pending matches of the current right row ...
+                (loop while candidates
+                      do (let ((row (concat-rows (pop candidates) current)))
+                           (when (or (null residual) (eq (funcall (the function residual) row) t))
+                             (funcall counter)
+                             (return-from emit row))))
+                ;; ... then advance to the next right row.
+                (let ((r (funcall (the function probe))))
+                  (unless r (return-from emit nil))
+                  (let ((k (funcall right-key r)))
+                    (setf current r
+                          candidates (and k (gethash k table)))))))))))))
 
 (defun compile-right-build-hash-join (node)
+  "Hash join that hashes the RIGHT input (INNER or LEFT) and streams the left."
   (destructuring-bind (left right) (pnode-children node)
     (let* ((open-left (compile-operator left))
            (open-right (compile-operator right))
@@ -377,21 +380,7 @@ each bucket keeps its rows in input order."
         (let ((table (and invariant cached))
               (probes 0))
           (declare (type fixnum probes))
-          (flet ((build ()
-                   (let ((h (make-hash-table :test 'equal))
-                         (next (funcall open-right))
-                         (n 0))
-                     (declare (type function next) (type fixnum n))
-                     (loop for row = (funcall next)
-                           while row
-                           do (when (zerop (logand (incf n) 4095))
-                                (check-interrupts)
-                                (charge-memory (* 4096 (row-footprint (+ 4 (length row))))))
-                              (let ((k (funcall right-key row)))
-                                (when k (push row (gethash k h)))))
-                     ;; Keep build rows in input order.
-                     (maphash (lambda (k rows) (setf (gethash k h) (nreverse rows))) h)
-                     h)))
+          (flet ((build () (build-hash-table (funcall open-right) right-key)))
             (make-join-iterator
              kind (funcall open-left)
              (lambda (lrow)
