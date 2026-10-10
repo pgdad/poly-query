@@ -130,22 +130,30 @@ final class AggregateBatches {
     }
 
     /**
-     * Produces the output rows of an aggregation table (group keys then aggregate results) in
-     * a given group order, in batches. A failing aggregate result (e.g. SUM overflow) is
-     * deferred to the group that raises it, like the row engine's lazy output.
+     * Produces the output rows of aggregation tables (group keys then aggregate results) in a
+     * given group order, in batches. A failing aggregate result (e.g. SUM overflow) is deferred
+     * to the group that raises it, like the row engine's lazy output.
      */
     static final class Emitter {
-        private final Table table;
-        private final int[] order;
+        private final Table[] tables;
+        private final int[] tableOf;
+        private final int[] groupOf;
         private final Batch out;
         private final int batchSize;
         private int next;
         private boolean failed;
 
-        /** @param order group ids in output order (null = ascending ids, i.e. first appearance) */
-        Emitter(Table table, int[] order, List<BoundExpr> groupKeys, List<AggregateCall> calls, int batchSize) {
-            this.table = table;
-            this.order = order;
+        /** Groups of one table in id order (i.e. order of first appearance). */
+        Emitter(Table table, List<BoundExpr> groupKeys, List<AggregateCall> calls, int batchSize) {
+            this(new Table[] {table}, null, null, groupKeys, calls, batchSize);
+        }
+
+        /** The groups {@code (tables[tableOf[i]], groupOf[i])} in order of i. */
+        Emitter(Table[] tables, int[] tableOf, int[] groupOf, List<BoundExpr> groupKeys, List<AggregateCall> calls,
+                int batchSize) {
+            this.tables = tables;
+            this.tableOf = tableOf;
+            this.groupOf = groupOf;
             this.batchSize = batchSize;
             int k = groupKeys.size();
             this.out = new Batch(k + calls.size());
@@ -158,7 +166,7 @@ final class AggregateBatches {
         }
 
         Batch next() {
-            int groups = table.groupCount();
+            int groups = groupOf == null ? tables[0].groupCount() : groupOf.length;
             if (failed || next >= groups) {
                 return null;
             }
@@ -166,11 +174,12 @@ final class AggregateBatches {
             for (Vec v : out.cols) {
                 v.nullMask(batchSize);
             }
-            int k = table.keys.keyCount();
             RuntimeException error = null;
             int produced = 0;
             for (int r = 0; r < n; r++) {
-                int g = order == null ? next + r : order[next + r];
+                Table table = groupOf == null ? tables[0] : tables[tableOf[next + r]];
+                int g = groupOf == null ? next + r : groupOf[next + r];
+                int k = table.keys.keyCount();
                 try {
                     for (int a = 0; a < table.states.length; a++) {
                         out.cols[k + a].set(r, table.states[a].result(g));
@@ -238,7 +247,7 @@ final class AggregateBatches {
                     throw b.error;
                 }
             }
-            emitter = new Emitter(table, null, groupKeys, calls, batchSize);
+            emitter = new Emitter(table, groupKeys, calls, batchSize);
         }
 
         @Override

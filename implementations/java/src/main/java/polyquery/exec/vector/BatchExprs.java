@@ -51,8 +51,8 @@ final class BatchExprs {
     }
 
     /**
-     * Evaluates all expressions at the active rows of {@code b}; may truncate {@code b} (see the
-     * class comment). The returned array and vectors are reused by the next call.
+     * Evaluates all expressions at the active rows of {@code b} (at least one); may truncate
+     * {@code b} (see the class comment). The returned array and vectors are reused by the next call.
      */
     Vec[] eval(Batch b) {
         try {

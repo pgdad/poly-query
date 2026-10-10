@@ -34,6 +34,17 @@ final class BatchOperators {
         public Batch next() {
             Batch in;
             while ((in = input.next()) != null) {
+                if (in.count == 0) {
+                    if (in.error == null) {
+                        continue;
+                    }
+                    out.cols = in.cols;
+                    out.size = in.size;
+                    out.sel = null;
+                    out.count = 0;
+                    out.error = in.error;
+                    return out;
+                }
                 Vec p = predicate.eval(in)[0];
                 if (sel.length < in.size) {
                     sel = new int[Math.max(in.size, 16)];
@@ -96,8 +107,10 @@ final class BatchOperators {
                 if (in.count == 0 && in.error == null) {
                     continue;
                 }
-                Vec[] r = exprs.eval(in);
-                System.arraycopy(r, 0, out.cols, 0, r.length);
+                if (in.count > 0) {
+                    Vec[] r = exprs.eval(in);
+                    System.arraycopy(r, 0, out.cols, 0, r.length);
+                }
                 out.size = in.size;
                 out.sel = in.sel;
                 out.count = in.count;

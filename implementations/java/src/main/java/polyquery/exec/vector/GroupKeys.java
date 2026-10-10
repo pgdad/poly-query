@@ -14,7 +14,9 @@ import polyquery.types.DataType;
  * <p>Cache-conscious layout: every key column value is encoded as a {@code long} (INT64 and
  * friends as is, FLOAT64 as the bits of the value with -0.0 normalized, STRING as an id of an
  * interning dictionary, with a per-dictionary code→id cache for dictionary-encoded input), plus
- * null bits. Tuples are stored flat in a {@code long[]} (struct of arrays), the open-addressing
+ * null bits. Hashes are computed from the values (strings by {@link String#hashCode}), so
+ * equal keys have equal hashes in all tables — partial tables of parallel workers can be
+ * partitioned by hash and merged partition by partition. Tuples are stored flat in a {@code long[]} (struct of arrays), the open-addressing
  * index ({@code int[]}, linear probing) holds only group ids, and the full hash of each group is
  * kept so most mismatches are rejected without touching the keys. Equality is that of GROUP BY
  * and DISTINCT: NULLs are equal to each other.
@@ -40,6 +42,9 @@ final class GroupKeys {
     private final int[][] dictIds;
     // per-batch scratch
     private long[][] codes;
+    /** Per column, the values hashed: the codes, except for STRING columns (String.hashCode). */
+    private long[][] hashIn;
+    private int[][] dictHashes;
     private long[][] nulls;
     private long[] rowHash;
     private final long[] tupleCodes;
@@ -65,10 +70,17 @@ final class GroupKeys {
         this.index = new int[64];
         this.mask = 63;
         this.codes = new long[k][0];
+        this.hashIn = new long[k][0];
+        this.dictHashes = new int[k][];
         this.nulls = new long[nullWords][0];
         this.rowHash = new long[0];
         this.tupleCodes = new long[k];
         this.tupleNulls = new long[nullWords];
+    }
+
+    /** Hash of group g's key values (independent of the table: equal keys hash equally in every table). */
+    long hash(int g) {
+        return hashes[g];
     }
 
     /** A view sharing this (no longer modified) table with its own scratch space, for concurrent lookups. */
@@ -88,6 +100,8 @@ final class GroupKeys {
         this.seenDict = new String[k][];
         this.dictIds = new int[k][];
         this.codes = new long[k][0];
+        this.hashIn = new long[k][0];
+        this.dictHashes = new int[k][];
         this.nulls = new long[nullWords][0];
         this.rowHash = new long[0];
         this.tupleCodes = new long[k];
@@ -169,8 +183,14 @@ final class GroupKeys {
                     seenDict[j] = v.dict;
                     dictIds[j] = new int[v.dict.length];
                     Arrays.fill(dictIds[j], -2);
+                    dictHashes[j] = new int[v.dict.length];
+                    for (int d = 0; d < v.dict.length; d++) {
+                        dictHashes[j][d] = v.dict[d].hashCode();
+                    }
                 }
                 int[] ids = dictIds[j];
+                int[] hashes = dictHashes[j];
+                long[] h = hashIn[j];
                 for (int kk = 0; kk < n; kk++) {
                     int i = sel == null ? kk : sel[kk];
                     if (nullable && v.nulls[i]) {
@@ -183,9 +203,11 @@ final class GroupKeys {
                         ids[code] = id;
                     }
                     c[i] = id;
+                    h[i] = hashes[code];
                 }
             }
             case OBJECT -> {
+                long[] h = hashIn[j];
                 for (int kk = 0; kk < n; kk++) {
                     int i = sel == null ? kk : sel[kk];
                     if (nullable && v.nulls[i]) {
@@ -196,6 +218,7 @@ final class GroupKeys {
                         continue;
                     }
                     c[i] = insert ? internId(j, s) : lookupId(j, s);
+                    h[i] = s.hashCode();
                 }
             }
         }
@@ -204,6 +227,7 @@ final class GroupKeys {
             if (v.isNull(i) || v.kind == Vec.Kind.OBJECT && v.objects[i] == null) {
                 nw[i] |= bit;
                 c[i] = 0;
+                hashIn[j][i] = 0;
             }
         }
     }
@@ -212,6 +236,7 @@ final class GroupKeys {
         if (rowHash.length < size) {
             for (int j = 0; j < k; j++) {
                 codes[j] = new long[size];
+                hashIn[j] = kinds[j] == Vec.Kind.OBJECT ? new long[size] : codes[j];
             }
             for (int w = 0; w < nullWords; w++) {
                 nulls[w] = new long[size];
@@ -236,7 +261,7 @@ final class GroupKeys {
             int i = sel == null ? kk : sel[kk];
             long h = M2;
             for (int j = 0; j < k; j++) {
-                h = mix(h, codes[j][i]);
+                h = mix(h, hashIn[j][i]);
             }
             for (int w = 0; w < nullWords; w++) {
                 h = mix(h, nulls[w][i]);
@@ -407,13 +432,7 @@ final class GroupKeys {
             }
             tupleCodes[j] = c;
         }
-        long h = M2;
-        for (int j = 0; j < k; j++) {
-            h = mix(h, tupleCodes[j]);
-        }
-        for (int w = 0; w < nullWords; w++) {
-            h = mix(h, tupleNulls[w]);
-        }
+        long h = other.hashes[g]; // value-based, so equal across tables
         int slot = fold(h) & mask;
         while (true) {
             int found = index[slot] - 1;

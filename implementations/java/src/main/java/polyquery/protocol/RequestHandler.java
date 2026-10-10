@@ -105,6 +105,11 @@ public final class RequestHandler {
             return failure(id, exchange.queryId, new PolyQueryException(ErrorCode.RESOURCE_LIMIT, "out of memory"));
         } catch (RuntimeException e) {
             log.error("internal error: " + e);
+            if (log.enabled(Logger.Level.DEBUG)) {
+                java.io.StringWriter trace = new java.io.StringWriter();
+                e.printStackTrace(new java.io.PrintWriter(trace));
+                log.debug("stack trace: " + trace);
+            }
             return failure(id, exchange.queryId, new PolyQueryException(ErrorCode.INTERNAL_ERROR,
                     "internal error: " + e.getClass().getSimpleName()));
         }

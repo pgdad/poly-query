@@ -312,7 +312,7 @@ final class Parallel {
         private final PhysicalPlan.HashAggregate plan;
         private final ExecContext ctx;
         private final int threads;
-        private AggregateBatches.Table merged;
+        private final List<AggregateBatches.Table> merged = new ArrayList<>();
         private AggregateBatches.Emitter emitter;
         private final List<AggregateBatches.Table> partials = new ArrayList<>();
 
@@ -425,36 +425,95 @@ final class Parallel {
             return new Partial(table, first);
         }
 
+        /** Partition (of {@code parts}) of a group hash. */
+        private static int partition(long hash, int parts) {
+            return (int) (((hash >>> 32) * parts) >>> 32);
+        }
+
+        /** A merged partition: table and first positions of its groups (ascending by group id). */
+        private record Merged(AggregateBatches.Table table, long[] first) {
+        }
+
+        /**
+         * Merges the partial tables. Groups are split into hash partitions merged in parallel;
+         * within a partition, the partials' groups are merged in order of first position (a
+         * k-way merge, as each partial lists its groups in that order), so merged group ids are
+         * in first-appearance order; the output interleaves the partitions the same way.
+         */
         private void merge(List<Partial> results) {
-            merged = new AggregateBatches.Table(plan.groupKeys(), plan.aggregates(), ctx);
-            long[] first = new long[16];
-            Arrays.fill(first, Long.MAX_VALUE);
+            long total = 0;
             for (Partial p : results) {
-                AggregateBatches.Table t = p.table();
-                for (int g = 0; g < t.groupCount(); g++) {
-                    int to = merged.merge(t, g);
-                    if (first.length <= to) {
-                        int old = first.length;
-                        first = Arrays.copyOf(first, Math.max(to + 1, old * 2));
-                        Arrays.fill(first, old, first.length, Long.MAX_VALUE);
-                    }
-                    first[to] = Math.min(first[to], p.first()[g]);
-                }
-                ctx.checkNow();
+                total += p.table().groupCount();
             }
-            int groups = merged.groupCount();
-            Integer[] order = new Integer[groups];
-            for (int g = 0; g < groups; g++) {
-                order[g] = g;
+            int parts = plan.groupKeys().isEmpty() || total < 16_384 ? 1 : Math.min(64, Math.max(1, threads));
+            List<Future<Merged>> futures = new ArrayList<>();
+            for (int part = 1; part < parts; part++) {
+                int pp = part;
+                futures.add(POOL.submit(() -> mergePartition(results, pp, parts)));
             }
-            long[] firstPos = first;
-            Arrays.sort(order, (a, b) -> Long.compare(firstPos[a], firstPos[b]));
-            int[] perm = new int[groups];
-            for (int g = 0; g < groups; g++) {
-                perm[g] = order[g];
+            List<Merged> merged = new ArrayList<>();
+            merged.add(mergePartition(results, 0, parts));
+            for (Future<Merged> f : futures) {
+                merged.add(await(f, ctx));
             }
-            emitter = new AggregateBatches.Emitter(merged, perm, plan.groupKeys(), plan.aggregates(),
+            AggregateBatches.Table[] tables = new AggregateBatches.Table[parts];
+            long[][] firsts = new long[parts][];
+            int groups = 0;
+            for (int part = 0; part < parts; part++) {
+                tables[part] = merged.get(part).table();
+                firsts[part] = merged.get(part).first();
+                this.merged.add(tables[part]);
+                groups += tables[part].groupCount();
+            }
+            int[] tableOf = new int[groups];
+            int[] groupOf = new int[groups];
+            int[] sizes = new int[parts];
+            for (int part = 0; part < parts; part++) {
+                sizes[part] = tables[part].groupCount();
+            }
+            kWayMerge(firsts, sizes, (src, g, i) -> {
+                tableOf[i] = src;
+                groupOf[i] = g;
+            });
+            emitter = new AggregateBatches.Emitter(tables, tableOf, groupOf, plan.groupKeys(), plan.aggregates(),
                     BatchBuilder.BATCH_SIZE);
+        }
+
+        private Merged mergePartition(List<Partial> results, int part, int parts) {
+            AggregateBatches.Table table = new AggregateBatches.Table(plan.groupKeys(), plan.aggregates(), ctx);
+            int k = results.size();
+            int[][] members = new int[k][];
+            long[][] firsts = new long[k][];
+            int[] sizes = new int[k];
+            for (int w = 0; w < k; w++) {
+                AggregateBatches.Table t = results.get(w).table();
+                int[] ids = new int[t.groupCount()];
+                long[] first = new long[t.groupCount()];
+                int n = 0;
+                for (int g = 0; g < t.groupCount(); g++) {
+                    if (parts == 1 || partition(t.keys.hash(g), parts) == part) {
+                        ids[n] = g;
+                        first[n] = results.get(w).first()[g];
+                        n++;
+                    }
+                }
+                members[w] = ids;
+                firsts[w] = first;
+                sizes[w] = n;
+            }
+            long[][] out = {new long[16]};
+            kWayMerge(firsts, sizes, (w, idx, i) -> {
+                int before = table.groupCount();
+                int to = table.merge(results.get(w).table(), members[w][idx]);
+                if (table.groupCount() > before) {
+                    if (out[0].length <= to) {
+                        out[0] = Arrays.copyOf(out[0], Math.max(to + 1, out[0].length * 2));
+                    }
+                    out[0][to] = firsts[w][idx];
+                }
+            });
+            ctx.checkNow();
+            return new Merged(table, out[0]);
         }
 
         @Override
@@ -468,12 +527,82 @@ final class Parallel {
                 t.release();
             }
             partials.clear();
-            if (merged != null) {
-                merged.release();
-                merged = null;
+            for (AggregateBatches.Table t : merged) {
+                t.release();
             }
+            merged.clear();
             emitter = null;
             shared.release();
+        }
+    }
+
+    /** Receives the elements of a k-way merge: source, index within the source, output position. */
+    interface MergeSink {
+        void accept(int source, int index, int position);
+    }
+
+    /**
+     * Merges k ascending sequences of positions ({@code keys[s][0 .. sizes[s])}) and passes the
+     * elements to {@code sink} in ascending order (ties: lower source first).
+     */
+    static void kWayMerge(long[][] keys, int[] sizes, MergeSink sink) {
+        int k = keys.length;
+        int[] heap = new int[k];
+        int[] cursor = new int[k];
+        int n = 0;
+        for (int s = 0; s < k; s++) {
+            if (sizes[s] > 0) {
+                heap[n++] = s;
+                siftUp(heap, n - 1, keys, cursor);
+            }
+        }
+        int out = 0;
+        while (n > 0) {
+            int s = heap[0];
+            sink.accept(s, cursor[s], out++);
+            if (++cursor[s] < sizes[s]) {
+                siftDown(heap, n, keys, cursor);
+            } else {
+                heap[0] = heap[--n];
+                siftDown(heap, n, keys, cursor);
+            }
+        }
+    }
+
+    private static boolean less(int a, int b, long[][] keys, int[] cursor) {
+        long x = keys[a][cursor[a]];
+        long y = keys[b][cursor[b]];
+        return x < y || x == y && a < b;
+    }
+
+    private static void siftUp(int[] heap, int i, long[][] keys, int[] cursor) {
+        while (i > 0) {
+            int parent = (i - 1) >>> 1;
+            if (!less(heap[i], heap[parent], keys, cursor)) {
+                return;
+            }
+            int t = heap[i];
+            heap[i] = heap[parent];
+            heap[parent] = t;
+            i = parent;
+        }
+    }
+
+    private static void siftDown(int[] heap, int n, long[][] keys, int[] cursor) {
+        int i = 0;
+        while (true) {
+            int l = 2 * i + 1;
+            if (l >= n) {
+                return;
+            }
+            int c = l + 1 < n && less(heap[l + 1], heap[l], keys, cursor) ? l + 1 : l;
+            if (!less(heap[c], heap[i], keys, cursor)) {
+                return;
+            }
+            int t = heap[i];
+            heap[i] = heap[c];
+            heap[c] = t;
+            i = c;
         }
     }
 
