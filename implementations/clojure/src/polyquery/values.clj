@@ -363,6 +363,49 @@
   [v]
   (if (and (instance? Double v) (== 0.0 (double v))) 0.0 v))
 
+(defn ->double-fn
+  "Function converting a non-null value of numeric type t to double."
+  [t]
+  (case (t/kind t)
+    :int64 (fn ^double [x] (double (long x)))
+    :float64 (fn ^double [x] (double x))
+    :decimal (let [s (t/scale t)] (fn ^double [x] (dec->double (long x) s)))
+    :null (fn ^double [_] 0.0)))
+
+(defn comparator-fn
+  "Returns (fn [a b]) → negative/zero/positive for non-null operands of
+  types lt and rt compared in their comparison type cmp-type (§2, §5)."
+  [cmp-type lt rt]
+  (case (t/kind cmp-type)
+    :int64 (fn [a b] (Long/compare (long a) (long b)))
+    :float64 (let [dl (->double-fn lt) dr (->double-fn rt)]
+               (fn [a b] (let [x (double (dl a)) y (double (dr b))]
+                           (cond (< x y) -1 (> x y) 1 :else 0))))
+    :decimal (let [sl (t/scale lt) sr (t/scale rt)]
+               (fn [a b] (dec-compare (long a) sl (long b) sr)))
+    :timestamp (let [conv (fn [t] (if (= t :date)
+                                    (fn ^long [x] (* (long x) micros-per-day))
+                                    (fn ^long [x] (long x))))
+                     cl (conv lt) cr (conv rt)]
+                 (fn [a b] (Long/compare (long (cl a)) (long (cr b)))))
+    (let [^Comparator cmp (value-comparator cmp-type)]
+      (fn [a b] (.compare cmp a b)))))
+
+(defn key-fn
+  "Returns a function mapping a non-null value of type `from` to a hashable
+  key such that values equal in comparison type cmp-type (§5) have equal keys
+  (hash joins, IN subqueries)."
+  [from cmp-type]
+  (case (t/kind cmp-type)
+    :float64 (let [d (->double-fn from)]
+               (fn [x] (let [v (double (d x))] (if (== v 0.0) 0.0 v))))
+    :decimal (let [k (- (t/scale cmp-type) (t/scale from))]
+               (fn [x] (dec-rescale-up (long x) k)))
+    :timestamp (if (= from :date)
+                 (fn [x] (* (long x) micros-per-day))
+                 identity)
+    identity))
+
 ;; ---------------------------------------------------------------------------
 ;; CAST (types.md §8)
 

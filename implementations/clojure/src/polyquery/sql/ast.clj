@@ -53,5 +53,11 @@
     []))
 
 (defn contains-aggregate?
+  "True if e contains an aggregate call outside nested subqueries."
   [e]
   (boolean (or (aggregate-call? e) (some contains-aggregate? (children e)))))
+
+(defn contains-subquery?
+  [e]
+  (boolean (or (#{:in-query :exists :subquery} (:node e))
+               (some contains-subquery? (children e)))))

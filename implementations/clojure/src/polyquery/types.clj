@@ -118,4 +118,14 @@
       (and (temporal? a) (temporal? b))
       (= (kind a) (kind b))))
 
+(defn comparison-type
+  "Type in which two comparable operands are compared."
+  [lt rt]
+  (cond
+    (= lt :null) rt
+    (= rt :null) lt
+    (and (numeric? lt) (numeric? rt)) (if (= lt rt) lt (common-numeric-type lt rt))
+    (and (temporal? lt) (temporal? rt)) (if (= lt rt) lt :timestamp)
+    :else lt))
+
 (defn describe [t] (if (= t :null) "NULL" (type-name t)))

@@ -1,50 +1,98 @@
 (ns polyquery.exec.operators
-  "Row-at-a-time execution of plan trees (polyquery.sql.planner). Every
-  operator evaluates to a reducible (clojure.lang.IReduceInit) of rows, each
-  row an Object array; pipelines are built from transducers so rows stream
-  through filter/project/limit without intermediate collections."
-  (:require [polyquery.exec.aggregate :as agg]
+  "Row-at-a-time (Volcano-style, push-based via reduce) execution of
+  physical plans (polyquery.plan.physical). `build` compiles a plan node once
+  into a *re-reducible*: an IReduceInit of rows (Object arrays) that
+  recomputes its result every time it is reduced. Correlated subqueries rely
+  on this: their plan is built once and reduced once per outer row.
+
+  Execution environment `env` (see also polyquery.exec.expr):
+    :ctx            QueryContext
+    :cells          correlation cells
+    :build          this namespace's build function
+    :max-join-rows  join output row limit"
+  (:require [polyquery.errors :as err]
+            [polyquery.exec.aggregate :as agg]
             [polyquery.exec.context :as ctx]
             [polyquery.exec.expr :as expr]
             [polyquery.values :as v])
-  (:import (java.util ArrayList Comparator HashMap)
+  (:import (java.util ArrayList Comparator HashMap HashSet)
            (polyquery.exec.aggregate Accumulator)))
 
 (set! *warn-on-reflection* true)
 
 (def ^:private check-interval 4096)
 
-(defmulti execute
-  "Returns a reducible of rows for plan node `plan` in environment `env`
-  ({:ctx QueryContext})."
+(defmulti build
+  "Compiles physical plan node `plan` into a re-reducible of rows."
   (fn [plan _env] (:op plan)))
 
-(defmethod execute :values [plan _env]
-  (mapv object-array (:rows plan)))
+(defn- reducible
+  "A re-reducible whose rows are produced by calling (produce f init), which
+  must honour `reduced`."
+  [produce]
+  (reify clojure.lang.IReduceInit
+    (reduce [_ f init] (produce f init))))
 
-(defmethod execute :scan [plan env]
+(defn- reduce-list
+  "Reduces f over a java.util.List of rows, honouring reduced."
+  [^java.util.List rows f init]
+  (let [n (.size rows)]
+    (loop [i 0 acc init]
+      (if (or (= i n) (reduced? acc))
+        (unreduced acc)
+        (recur (inc i) (f acc (.get rows i)))))))
+
+(defn materialize
+  "Collects the rows of a re-reducible into an ArrayList, checking for
+  timeouts and accounting memory."
+  ^ArrayList [rows env]
+  (let [qctx (:ctx env)
+        out (ArrayList.)]
+    (reduce (fn [_ ^objects row]
+              (when (zero? (rem (.size out) check-interval))
+                (ctx/check! qctx)
+                (ctx/reserve! qctx (* check-interval (ctx/row-bytes (alength row)))))
+              (.add out row)
+              nil)
+            nil rows)
+    out))
+
+;; ---------------------------------------------------------------------------
+;; Leaves
+
+(defmethod build :values [plan _env]
+  (let [rows (mapv object-array (:rows plan))]
+    (reducible (fn [f init] (reduce-list rows f init)))))
+
+(defmethod build :table-scan [plan env]
   (let [table (:table plan)
         ^objects cols (into-array Object (map #(nth (:data table) %) (:columns plan)))
         ncols (alength cols)
         n (long (:row-count table))
         qctx (:ctx env)]
-    (reify clojure.lang.IReduceInit
-      (reduce [_ f init]
-        (loop [r 0 acc init]
-          (if (or (= r n) (reduced? acc))
-            (unreduced acc)
-            (do
-              (when (zero? (rem r check-interval)) (ctx/check! qctx))
-              (let [row (object-array ncols)]
-                (dotimes [c ncols]
-                  (aset row c (aget ^objects (aget cols c) r)))
-                (recur (inc r) (f acc row))))))))))
+    (reducible
+     (fn [f init]
+       (loop [r 0 acc init]
+         (if (or (= r n) (reduced? acc))
+           (unreduced acc)
+           (do
+             (when (zero? (rem r check-interval)) (ctx/check! qctx))
+             (let [row (object-array ncols)]
+               (dotimes [c ncols]
+                 (aset row c (aget ^objects (aget cols c) r)))
+               (recur (inc r) (f acc row))))))))))
 
-(defmethod execute :filter [plan env]
+(defmethod build :subquery-scan [plan env]
+  (build (:input plan) env))
+
+;; ---------------------------------------------------------------------------
+;; Row-wise operators
+
+(defmethod build :filter [plan env]
   (let [pred (expr/compile-predicate env (:predicate plan))]
-    (eduction (filter pred) (execute (:input plan) env))))
+    (eduction (filter pred) (build (:input plan) env))))
 
-(defmethod execute :project [plan env]
+(defmethod build :project [plan env]
   (let [^objects fs (into-array Object (map #(expr/compile-expr env %) (:exprs plan)))
         n (alength fs)]
     (eduction (map (fn [row]
@@ -52,50 +100,100 @@
                        (dotimes [i n]
                          (aset out i ((aget fs i) row)))
                        out)))
-              (execute (:input plan) env))))
+              (build (:input plan) env))))
 
-(defn- new-accumulators ^objects [factories]
-  (let [^objects fs factories
-        accs (object-array (alength fs))]
-    (dotimes [i (alength fs)] (aset accs i ((aget fs i))))
+(defn- eval-count-clause
+  "Evaluates a constant LIMIT/OFFSET expression to a non-negative long or nil."
+  [env e what]
+  (when e
+    (let [x (expr/eval-constant env e)]
+      (when (and (some? x) (neg? (long x)))
+        (err/fail! "INVALID_ARGUMENT" (str what " must not be negative")))
+      x)))
+
+(defmethod build :limit [plan env]
+  (let [limit (eval-count-clause env (:limit plan) "LIMIT")
+        offset (eval-count-clause env (:offset plan) "OFFSET")
+        xf (cond-> (drop (long (or offset 0)))
+             limit (comp (take (long limit))))]
+    (eduction xf (build (:input plan) env))))
+
+;; ---------------------------------------------------------------------------
+;; Aggregation, DISTINCT, sorting
+
+(defn- new-accumulators ^objects [^objects factories]
+  (let [accs (object-array (alength factories))]
+    (dotimes [i (alength factories)] (aset accs i ((aget factories i))))
     accs))
 
-(defmethod execute :aggregate [plan env]
+(defn- row-key
+  "Hashable key of a row's values (NULLs equal, -0.0 = 0.0)."
+  [^objects vals]
+  (let [n (alength vals)]
+    (if (= n 1)
+      [(v/normalize-key (aget vals 0))]
+      (let [out (object-array n)]
+        (dotimes [i n] (aset out i (v/normalize-key (aget vals i))))
+        (vec out)))))
+
+(defmethod build :hash-aggregate [plan env]
   (let [qctx (:ctx env)
         specs (:aggregates plan)
         factories (into-array Object (map agg/accumulator-factory specs))
-        arg-fns (into-array Object (map #(if-let [a (:arg %)] (expr/compile-expr env a) (constantly nil))
-                                        specs))
-        key-fns (mapv #(expr/compile-expr env %) (:group-keys plan))
-        nkeys (count key-fns)
+        ^objects arg-fns (into-array Object (map #(if-let [a (:arg %)] (expr/compile-expr env a) (constantly nil))
+                                                 specs))
+        ^objects key-fns (into-array Object (map #(expr/compile-expr env %) (:group-keys plan)))
+        nkeys (alength key-fns)
         naggs (count specs)
+        input (build (:input plan) env)
         feed (fn [^objects accs row]
                (dotimes [i naggs]
-                 (.add ^Accumulator (aget accs i) ((aget ^objects arg-fns i) row))))
-        finish (fn [key-vals ^objects accs]
+                 (.add ^Accumulator (aget accs i) ((aget arg-fns i) row))))
+        finish (fn [^objects key-vals ^objects accs]
                  (let [out (object-array (+ nkeys naggs))]
-                   (dotimes [i nkeys] (aset out i (nth key-vals i)))
+                   (dotimes [i nkeys] (aset out i (aget key-vals i)))
                    (dotimes [i naggs] (aset out (+ nkeys i) (.result ^Accumulator (aget accs i))))
-                   out))
-        input (execute (:input plan) env)]
-    (if (zero? nkeys)
-      (let [accs (new-accumulators factories)]
-        (reduce (fn [_ row] (feed accs row) nil) nil input)
-        [(finish [] accs)])
-      (let [groups (HashMap.)
-            order (ArrayList.)]
-        (reduce (fn [_ row]
-                  (let [k (mapv #(v/normalize-key (% row)) key-fns)
-                        accs (or (.get groups k)
-                                 (let [a (new-accumulators factories)]
-                                   (ctx/reserve! qctx (ctx/row-bytes (+ nkeys naggs)))
-                                   (.put groups k a)
-                                   (.add order k)
-                                   a))]
-                    (feed accs row)
-                    nil))
-                nil input)
-        (mapv #(finish % (.get groups %)) order)))))
+                   out))]
+    (reducible
+     (fn [f init]
+       (if (zero? nkeys)
+         (let [accs (new-accumulators factories)]
+           (reduce (fn [_ row] (feed accs row) nil) nil input)
+           (reduce-list [(finish (object-array 0) accs)] f init))
+         (let [groups (HashMap.)
+               order (ArrayList.)]
+           (reduce (fn [_ row]
+                     (let [vals (object-array nkeys)
+                           _ (dotimes [i nkeys] (aset vals i ((aget key-fns i) row)))
+                           k (row-key vals)
+                           ^objects entry (or (.get groups k)
+                                              (let [e (object-array [vals (new-accumulators factories)])]
+                                                (when (zero? (rem (.size order) 1024))
+                                                  (ctx/check! qctx)
+                                                  (ctx/reserve! qctx (* 1024 (ctx/row-bytes (+ nkeys naggs)))))
+                                                (.put groups k e)
+                                                (.add order e)
+                                                e))]
+                       (feed (aget entry 1) row)
+                       nil))
+                   nil input)
+           (reduce-list (ArrayList. ^java.util.Collection
+                                    (map (fn [^objects e] (finish (aget e 0) (aget e 1))) order))
+                        f init)))))))
+
+(defmethod build :distinct [plan env]
+  (let [input (build (:input plan) env)
+        qctx (:ctx env)]
+    (reducible
+     (fn [f init]
+       (let [seen (HashSet.)]
+         (reduce (fn [acc ^objects row]
+                   (if (.add seen (row-key row))
+                     (do (when (zero? (rem (.size seen) check-interval))
+                           (ctx/reserve! qctx (* check-interval (ctx/row-bytes (alength row)))))
+                         (f acc row))
+                     acc))
+                 init input))))))
 
 (defn- row-comparator
   ^Comparator [keys]
@@ -118,21 +216,11 @@
               (if (zero? r) (recur (next cs)) (int r)))
             0))))))
 
-(defmethod execute :sort [plan env]
-  (let [qctx (:ctx env)
-        rows (ArrayList.)]
-    (reduce (fn [_ ^objects row]
-              (when (zero? (rem (.size rows) check-interval))
-                (ctx/check! qctx)
-                (ctx/reserve! qctx (* check-interval (ctx/row-bytes (alength row)))))
-              (.add rows row)
-              nil)
-            nil (execute (:input plan) env))
-    (.sort rows (row-comparator (:keys plan)))
-    rows))
-
-(defmethod execute :limit [plan env]
-  (let [{:keys [limit offset]} plan
-        xf (cond-> (drop (long offset))
-             limit (comp (take (long limit))))]
-    (eduction xf (execute (:input plan) env))))
+(defmethod build :sort [plan env]
+  (let [input (build (:input plan) env)
+        cmp (row-comparator (:keys plan))]
+    (reducible
+     (fn [f init]
+       (let [rows (materialize input env)]
+         (.sort rows cmp)
+         (reduce-list rows f init))))))
