@@ -28,6 +28,7 @@ import os
 import random
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -217,6 +218,7 @@ def run(run_id: str, timeout_min: int, budget_usd: float, max_turns: int | None)
     m = load_manifest(run_id)
     ws, cfg, scr = rd / "workspace", rd / "config", rd / "scratch"
     creds = Path.home() / ".claude/.credentials.json"
+    usage_gate(run_id)
     # Fresh copy of the OAuth credential at run start (never the rest of ~/.claude).
     # The run is capped to the access token's remaining lifetime so the agent never
     # needs to refresh it (refresh-token rotation across copies could invalidate the
@@ -254,18 +256,142 @@ def run(run_id: str, timeout_min: int, budget_usd: float, max_turns: int | None)
     with open(transcript, "w") as out, open(rd / "agent.stderr", "w") as err:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True, env=env)
         assert proc.stdout
+        guard_reason = None
         for line in proc.stdout:
+            ev = _safe_json(line)
             # Prefix each event with the orchestrator's receive time (seconds since start).
-            out.write(json.dumps({"_t": round(time.monotonic() - t_mono, 3), "event": _safe_json(line)}) + "\n")
+            out.write(json.dumps({"_t": round(time.monotonic() - t_mono, 3), "event": ev}) + "\n")
             out.flush()
+            if guard_reason is None and (guard_reason := usage_violation(ev)):
+                print(f"[{run_id}] usage guard: {guard_reason}; stopping agent", flush=True)
+                proc.terminate()
         rc = proc.wait()
     m = load_manifest(run_id)
+    if guard_reason:
+        m["termination_reason"] = "usage_guard"
+        m["usage_guard"] = guard_reason
     m["finished"] = now()
     m["wall_seconds"] = round(time.time() - t0, 1)
     m["agent_exit_code"] = rc
     m["status"] = "ran"
     save_manifest(run_id, m)
     return m
+
+
+# Subscription usage protection: never start runs near the 5-hour limit and never let
+# a run continue into paid overage (thresholds overridable via environment).
+MAX_5H_START = float(os.environ.get("PQ_MAX_5H_UTIL_START", "0.6"))
+MAX_5H_RUN = float(os.environ.get("PQ_MAX_5H_UTIL_RUN", "0.95"))
+MAX_7D_START = float(os.environ.get("PQ_MAX_7D_UTIL_START", "0.8"))
+
+
+def usage_violation(ev: dict) -> str | None:
+    if not isinstance(ev, dict) or ev.get("type") != "rate_limit_event":
+        return None
+    info = ev.get("rate_limit_info") or {}
+    if info.get("isUsingOverage"):
+        return "agent is using paid overage"
+    if info.get("status") not in (None, "allowed"):
+        return f"rate-limit status {info.get('status')}"
+    five = ((info.get("unifiedWindows") or {}).get("five_hour") or {}).get("utilization")
+    if five is not None and five >= MAX_5H_RUN:
+        return f"five_hour utilization {five:.2f} >= {MAX_5H_RUN}"
+    return None
+
+
+def latest_usage() -> dict:
+    """Most recent rate-limit windows observed in any run transcript (windows already reset count as 0)."""
+    best: tuple[float, dict] | None = None
+    for t in RUN_ROOT.glob("*/transcript.jsonl"):
+        mt = t.stat().st_mtime
+        if time.time() - mt > 6 * 3600 or (best and mt < best[0]):
+            continue
+        last = None
+        with open(t, errors="replace") as fh:
+            for line in fh:
+                if '"rate_limit_event"' in line:
+                    last = line
+        if last:
+            ev = (json.loads(last).get("event") or {}).get("rate_limit_info") or {}
+            best = (mt, ev.get("unifiedWindows") or {})
+    out = {}
+    for k, w in (best[1] if best else {}).items():
+        out[k] = {"utilization": 0.0 if w.get("resetsAt", 0) < time.time() else w.get("utilization", 0.0),
+                  "resetsAt": w.get("resetsAt")}
+    return out
+
+
+def usage_gate(run_id: str) -> None:
+    while True:
+        u = latest_usage()
+        five = (u.get("five_hour") or {}).get("utilization", 0.0)
+        week = (u.get("seven_day") or {}).get("utilization", 0.0)
+        if five < MAX_5H_START and week < MAX_7D_START:
+            return
+        print(f"[{run_id}] usage gate: five_hour={five:.2f} seven_day={week:.2f}; waiting", flush=True)
+        time.sleep(300)
+
+
+def _descendants(pid: int) -> list[int]:
+    out, stack = [], [pid]
+    while stack:
+        p = stack.pop()
+        out.append(p)
+        try:
+            for t in os.listdir(f"/proc/{p}/task"):
+                stack.extend(int(c) for c in Path(f"/proc/{p}/task/{t}/children").read_text().split())
+        except OSError:
+            pass
+    return out
+
+
+def watchdog(interval: float = 30.0) -> None:
+    """Applies the in-run usage guard to every running agent (also runs started by an older orchestrator)."""
+    pos: dict[Path, int] = {}
+    stopped: set[str] = set()
+    while True:
+        active = [d for d in RUN_ROOT.iterdir() if (d / "manifest.json").exists()
+                  and json.loads((d / "manifest.json").read_text()).get("status") == "running"]
+        for d in active:
+            t = d / "transcript.jsonl"
+            if not t.exists() or d.name in stopped:
+                continue
+            with open(t, errors="replace") as fh:
+                fh.seek(pos.get(t, 0))
+                chunk = fh.read()
+                pos[t] = fh.tell()
+            for line in chunk.splitlines():
+                if '"rate_limit_event"' not in line:
+                    continue
+                reason = usage_violation((_safe_json(line) or {}).get("event") or {})
+                if not reason:
+                    continue
+                m = json.loads((d / "manifest.json").read_text())
+                m["usage_guard"] = reason
+                m["termination_reason"] = "usage_guard"
+                (d / "manifest.json").write_text(json.dumps(m, indent=1) + "\n")
+                # The run's sandbox root (sudo) carries the workspace path on its command line.
+                for pid in os.listdir("/proc"):
+                    if not pid.isdigit():
+                        continue
+                    try:
+                        cmd = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+                    except OSError:
+                        continue
+                    if cmd[:1] == [b"sudo"] and str(d / "workspace").encode() in cmd:
+                        for c in _descendants(int(pid)):
+                            try:
+                                if Path(f"/proc/{c}/comm").read_text().strip() == "claude":
+                                    os.kill(c, signal.SIGTERM)
+                            except OSError:
+                                pass
+                print(f"{now()} [{d.name}] usage guard: {reason}; agent stopped", flush=True)
+                stopped.add(d.name)
+                break
+        if not active:
+            print(f"{now()} watchdog: no running agents; exiting", flush=True)
+            return
+        time.sleep(interval)
 
 
 def _safe_json(line: str):
@@ -791,6 +917,7 @@ def main() -> int:
     w.add_argument("--max-turns", type=int)
     w.add_argument("--parallel", type=int, default=6)
     sub.add_parser("status")
+    sub.add_parser("watchdog", help="stop running agents that approach the usage limit or use overage")
     a = ap.parse_args()
     if a.cmd == "prepare":
         prepare(a.lang, a.task, a.track, a.attempt, a.base_ref, None)
@@ -810,6 +937,8 @@ def main() -> int:
         wave(a.task, a.langs.split(","), a.track, a.attempt, a.seed, a.timeout_min, a.budget_usd, a.max_turns, a.parallel)
     elif a.cmd == "status":
         status()
+    elif a.cmd == "watchdog":
+        watchdog()
     return 0
 
 
