@@ -1,7 +1,6 @@
 (ns polyquery.ingest.json
   "JSON array and JSON Lines loading (ingestion.md §2)."
   (:require [clojure.string :as str]
-            [polyquery.errors :as err]
             [polyquery.ingest.common :as c]
             [polyquery.storage.table :as table]
             [polyquery.types :as t]
@@ -9,7 +8,7 @@
             [polyquery.util.text :as text]
             [polyquery.values :as v])
   (:import (java.io BufferedReader Reader)
-           (java.util ArrayList HashMap LinkedHashMap)
+           (java.util ArrayList LinkedHashMap)
            (polyquery.util.json JsonNumber)))
 
 (set! *warn-on-reflection* true)

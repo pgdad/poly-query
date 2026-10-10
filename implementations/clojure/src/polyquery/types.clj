@@ -13,8 +13,7 @@
     :string    String
     :date      Long, days since 1970-01-01
     :timestamp Long, microseconds since 1970-01-01 00:00:00"
-  (:require [clojure.string :as str]
-            [polyquery.errors :as err]
+  (:require [polyquery.errors :as err]
             [polyquery.util.text :as text]))
 
 (set! *warn-on-reflection* true)
@@ -120,5 +119,3 @@
       (= (kind a) (kind b))))
 
 (defn describe [t] (if (= t :null) "NULL" (type-name t)))
-
-(defn type-list-str [ts] (str/join ", " (map describe ts)))
