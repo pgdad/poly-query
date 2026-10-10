@@ -1,0 +1,736 @@
+{
+ "base_rows": 10000,
+ "format": "csv",
+ "generator": "pqgen",
+ "generator_version": "1.0.0",
+ "scale": "10k",
+ "seed": 20261010,
+ "tables": {
+  "customers": {
+   "bytes": 101174,
+   "columns": [
+    {
+     "name": "customer_id",
+     "type": "INT64"
+    },
+    {
+     "name": "name",
+     "type": "STRING"
+    },
+    {
+     "name": "email",
+     "type": "STRING"
+    },
+    {
+     "name": "country",
+     "type": "STRING"
+    },
+    {
+     "name": "city",
+     "type": "STRING"
+    },
+    {
+     "name": "segment",
+     "type": "STRING"
+    },
+    {
+     "name": "signup_date",
+     "type": "DATE"
+    },
+    {
+     "name": "birth_year",
+     "type": "INT64"
+    },
+    {
+     "name": "credit_limit",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "is_active",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "loyalty_points",
+     "type": "INT64"
+    }
+   ],
+   "family": "customers",
+   "file": "customers.csv",
+   "rows": 1000,
+   "schema_file": "customers.schema.json",
+   "sha256": "b74f0c94edfe8e82575154f16ab98f4f5d812d818c56ceb768c857c75bef2091"
+  },
+  "nulls_heavy": {
+   "bytes": 162238,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INT64"
+    },
+    {
+     "name": "n50",
+     "type": "INT64"
+    },
+    {
+     "name": "n90",
+     "type": "INT64"
+    },
+    {
+     "name": "s70",
+     "type": "STRING"
+    },
+    {
+     "name": "f95",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "b60",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "d99",
+     "type": "DATE"
+    }
+   ],
+   "family": "nulls",
+   "file": "nulls_heavy.csv",
+   "rows": 10000,
+   "schema_file": "nulls_heavy.schema.json",
+   "sha256": "8359c390403622ca669ea8939672143157e8ab4bc41efd3eba648c0ae1c528eb"
+  },
+  "order_items": {
+   "bytes": 195622,
+   "columns": [
+    {
+     "name": "order_id",
+     "type": "INT64"
+    },
+    {
+     "name": "line_no",
+     "type": "INT64"
+    },
+    {
+     "name": "product_id",
+     "type": "INT64"
+    },
+    {
+     "name": "quantity",
+     "type": "INT64"
+    },
+    {
+     "name": "unit_price",
+     "type": "DECIMAL(10,2)"
+    },
+    {
+     "name": "discount",
+     "type": "DECIMAL(10,2)"
+    }
+   ],
+   "family": "join",
+   "file": "order_items.csv",
+   "rows": 10000,
+   "schema_file": "order_items.schema.json",
+   "sha256": "9346cf8b61cd30b1a446a18ac903e9957dff7b4bc0a31117f2b4c6763a5acf8a"
+  },
+  "orders": {
+   "bytes": 71898,
+   "columns": [
+    {
+     "name": "order_id",
+     "type": "INT64"
+    },
+    {
+     "name": "customer_id",
+     "type": "INT64"
+    },
+    {
+     "name": "order_date",
+     "type": "DATE"
+    },
+    {
+     "name": "status",
+     "type": "STRING"
+    },
+    {
+     "name": "item_count",
+     "type": "INT64"
+    }
+   ],
+   "family": "join",
+   "file": "orders.csv",
+   "rows": 2500,
+   "schema_file": "orders.schema.json",
+   "sha256": "396667e78fcdda26d94c166633a7fa9a95f1def7aa21bde6a0fc7861b9402566"
+  },
+  "products": {
+   "bytes": 11961,
+   "columns": [
+    {
+     "name": "product_id",
+     "type": "INT64"
+    },
+    {
+     "name": "name",
+     "type": "STRING"
+    },
+    {
+     "name": "category",
+     "type": "STRING"
+    },
+    {
+     "name": "brand",
+     "type": "STRING"
+    },
+    {
+     "name": "price",
+     "type": "DECIMAL(10,2)"
+    },
+    {
+     "name": "weight_kg",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "released",
+     "type": "DATE"
+    }
+   ],
+   "family": "join",
+   "file": "products.csv",
+   "rows": 200,
+   "schema_file": "products.schema.json",
+   "sha256": "1fb6e7dbacd84d29afaa4b6ce5b32c72b88626c90fe4e8ac16c3a58598122c0f"
+  },
+  "sensor_readings": {
+   "bytes": 450927,
+   "columns": [
+    {
+     "name": "sensor_id",
+     "type": "INT64"
+    },
+    {
+     "name": "ts",
+     "type": "TIMESTAMP"
+    },
+    {
+     "name": "temperature",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "humidity",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "pressure",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "status",
+     "type": "STRING"
+    }
+   ],
+   "family": "timeseries",
+   "file": "sensor_readings.csv",
+   "rows": 10000,
+   "schema_file": "sensor_readings.schema.json",
+   "sha256": "6a3cecd2757bccf0895721e1553db3bfdf438bebc27ce7ae9fd33b44edaec205"
+  },
+  "sort_keys": {
+   "bytes": 454918,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INT64"
+    },
+    {
+     "name": "dup_key",
+     "type": "INT64"
+    },
+    {
+     "name": "uniq_key",
+     "type": "INT64"
+    },
+    {
+     "name": "str_key",
+     "type": "STRING"
+    },
+    {
+     "name": "float_key",
+     "type": "FLOAT64"
+    }
+   ],
+   "family": "sort",
+   "file": "sort_keys.csv",
+   "rows": 10000,
+   "schema_file": "sort_keys.schema.json",
+   "sha256": "3c9dcec69a3d00f7b2ddcbbb49af05a95bc09afa933337bbe86ee0452c81724e"
+  },
+  "transactions": {
+   "bytes": 800372,
+   "columns": [
+    {
+     "name": "tx_id",
+     "type": "INT64"
+    },
+    {
+     "name": "customer_id",
+     "type": "INT64"
+    },
+    {
+     "name": "merchant_id",
+     "type": "INT64"
+    },
+    {
+     "name": "amount",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "currency",
+     "type": "STRING"
+    },
+    {
+     "name": "category",
+     "type": "STRING"
+    },
+    {
+     "name": "ts",
+     "type": "TIMESTAMP"
+    },
+    {
+     "name": "status",
+     "type": "STRING"
+    },
+    {
+     "name": "is_fraud",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "fee",
+     "type": "DECIMAL(10,2)"
+    },
+    {
+     "name": "bucket",
+     "type": "INT64"
+    }
+   ],
+   "family": "financial",
+   "file": "transactions.csv",
+   "rows": 10000,
+   "schema_file": "transactions.schema.json",
+   "sha256": "081bc66be8c5fe5b8df684ceb73fa462b7017e9b2d6720859279e63a266b211b"
+  },
+  "wide": {
+   "bytes": 711728,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INT64"
+    },
+    {
+     "name": "c000",
+     "type": "INT64"
+    },
+    {
+     "name": "c001",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c002",
+     "type": "STRING"
+    },
+    {
+     "name": "c003",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c004",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c005",
+     "type": "INT64"
+    },
+    {
+     "name": "c006",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c007",
+     "type": "STRING"
+    },
+    {
+     "name": "c008",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c009",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c010",
+     "type": "INT64"
+    },
+    {
+     "name": "c011",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c012",
+     "type": "STRING"
+    },
+    {
+     "name": "c013",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c014",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c015",
+     "type": "INT64"
+    },
+    {
+     "name": "c016",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c017",
+     "type": "STRING"
+    },
+    {
+     "name": "c018",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c019",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c020",
+     "type": "INT64"
+    },
+    {
+     "name": "c021",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c022",
+     "type": "STRING"
+    },
+    {
+     "name": "c023",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c024",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c025",
+     "type": "INT64"
+    },
+    {
+     "name": "c026",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c027",
+     "type": "STRING"
+    },
+    {
+     "name": "c028",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c029",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c030",
+     "type": "INT64"
+    },
+    {
+     "name": "c031",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c032",
+     "type": "STRING"
+    },
+    {
+     "name": "c033",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c034",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c035",
+     "type": "INT64"
+    },
+    {
+     "name": "c036",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c037",
+     "type": "STRING"
+    },
+    {
+     "name": "c038",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c039",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c040",
+     "type": "INT64"
+    },
+    {
+     "name": "c041",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c042",
+     "type": "STRING"
+    },
+    {
+     "name": "c043",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c044",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c045",
+     "type": "INT64"
+    },
+    {
+     "name": "c046",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c047",
+     "type": "STRING"
+    },
+    {
+     "name": "c048",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c049",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c050",
+     "type": "INT64"
+    },
+    {
+     "name": "c051",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c052",
+     "type": "STRING"
+    },
+    {
+     "name": "c053",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c054",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c055",
+     "type": "INT64"
+    },
+    {
+     "name": "c056",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c057",
+     "type": "STRING"
+    },
+    {
+     "name": "c058",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c059",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c060",
+     "type": "INT64"
+    },
+    {
+     "name": "c061",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c062",
+     "type": "STRING"
+    },
+    {
+     "name": "c063",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c064",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c065",
+     "type": "INT64"
+    },
+    {
+     "name": "c066",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c067",
+     "type": "STRING"
+    },
+    {
+     "name": "c068",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c069",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c070",
+     "type": "INT64"
+    },
+    {
+     "name": "c071",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c072",
+     "type": "STRING"
+    },
+    {
+     "name": "c073",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c074",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c075",
+     "type": "INT64"
+    },
+    {
+     "name": "c076",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c077",
+     "type": "STRING"
+    },
+    {
+     "name": "c078",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c079",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c080",
+     "type": "INT64"
+    },
+    {
+     "name": "c081",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c082",
+     "type": "STRING"
+    },
+    {
+     "name": "c083",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c084",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c085",
+     "type": "INT64"
+    },
+    {
+     "name": "c086",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c087",
+     "type": "STRING"
+    },
+    {
+     "name": "c088",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c089",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c090",
+     "type": "INT64"
+    },
+    {
+     "name": "c091",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c092",
+     "type": "STRING"
+    },
+    {
+     "name": "c093",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c094",
+     "type": "DECIMAL(12,2)"
+    },
+    {
+     "name": "c095",
+     "type": "INT64"
+    },
+    {
+     "name": "c096",
+     "type": "FLOAT64"
+    },
+    {
+     "name": "c097",
+     "type": "STRING"
+    },
+    {
+     "name": "c098",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "c099",
+     "type": "DECIMAL(12,2)"
+    }
+   ],
+   "family": "wide",
+   "file": "wide.csv",
+   "rows": 1000,
+   "schema_file": "wide.schema.json",
+   "sha256": "0b776032aba24b77d470fa4e8b3d10cfed2af42480a0d5db5635c083b4cffdf3"
+  }
+ }
+}

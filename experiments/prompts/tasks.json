@@ -40,5 +40,40 @@
     "done": "`make -C native-kernels {{TEST_TARGET}}` passes with both required variants reporting `16/16 kernels  PASS`, every source file has a header comment describing the register usage and algorithm, `{{WORK_DIR}}/README.md` documents design decisions and (for native runs) benchmark results from `make -C native-kernels bench`, and all work is committed.",
     "phase_file": "native-kernels.md",
     "runner_args": ""
+  },
+  "change-union-all": {
+    "title": "Architectural change \u2014 UNION ALL",
+    "phase_file": "phase-2.md",
+    "runner_args": "",
+    "goal": "Requirement change (identical for every language): add `UNION ALL` to the engine as specified in `spec/changes/union-all.md`. The new public cases in `tests/conformance/cases/changes/union_all.pqt` must pass.",
+    "done": "The `changes/union_all` cases pass. All public conformance phases the engine previously passed still pass (`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery`), plus the task-specific criteria above; `make build test` succeed; all work is committed."
+  },
+  "change-decimal38": {
+    "title": "Architectural change \u2014 DECIMAL precision 38",
+    "phase_file": "phase-1.md",
+    "runner_args": "",
+    "goal": "Requirement change (identical for every language): raise the maximum DECIMAL precision from 18 to 38 digits as specified in `spec/changes/decimal38.md` (storage format PQCF v2 for wide decimals included). New cases: `tests/conformance/cases/changes/decimal38.pqt`.",
+    "done": "The `changes/decimal38` cases pass. All public conformance phases the engine previously passed still pass (`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery`), plus the task-specific criteria above; `make build test` succeed; all work is committed."
+  },
+  "refactor-plan-separation": {
+    "title": "Refactoring \u2014 logical/physical plan separation",
+    "phase_file": "phase-2.md",
+    "runner_args": "",
+    "goal": "Behaviour-preserving refactoring (identical for every language): ensure the engine has an explicit, inspectable logical plan representation, a rule-based optimizer operating only on it, and a separate physical planning step, as described in `spec/changes/refactor-plan-separation.md`. No externally visible behaviour may change.",
+    "done": "Every conformance case that passed before still passes, no new capabilities are claimed, and README.md documents the new structure with a before/after module map. All public conformance phases the engine previously passed still pass (`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery`), plus the task-specific criteria above; `make build test` succeed; all work is committed."
+  },
+  "debug-mutant": {
+    "title": "Debugging \u2014 injected defect",
+    "phase_file": "phase-1.md",
+    "runner_args": "",
+    "goal": "A defect has been introduced into the engine in `implementations/{{LANG_DIR}}/` (a single small source change). The following conformance cases now fail: see `DEFECT.md` in the workspace root. Find and fix the root cause with a minimal change. Do not rewrite unrelated code.",
+    "done": "All conformance cases pass again with a minimal diff; your summary names the root cause and location. All public conformance phases the engine previously passed still pass (`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery`), plus the task-specific criteria above; `make build test` succeed; all work is committed."
+  },
+  "optimize-latency": {
+    "title": "Optimization \u2014 benchmark latency",
+    "phase_file": "phase-5.md",
+    "runner_args": "",
+    "goal": "Improve the engine's query latency on the benchmark workload `benchmarks/workloads/analytics.json` at scale 1m (generate with `python3 datasets/generators/pqgen.py generate --scale 1m`) while preserving correctness. Measure before/after with your own timing of the workload queries through `bin/polyquery session` and report results in README.md.",
+    "done": "Conformance is unchanged (no regressions) and README.md contains a before/after table for every workload query. All public conformance phases the engine previously passed still pass (`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery`), plus the task-specific criteria above; `make build test` succeed; all work is committed."
   }
 }
