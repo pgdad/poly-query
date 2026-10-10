@@ -1,10 +1,12 @@
 # PolyQuery — Go engine
 
 An analytical database engine implementing the PolyQuery specification
-(`spec/`), currently **Phase 3**: the complete SQL v1 query language over
+(`spec/`), currently **Phase 4**: the complete SQL v1 query language over
 row- or column-oriented in-memory tables, persistent PQCF v1 columnar files,
 statistics, hash and ordered indexes and a planner with predicate pushdown,
-row-group skipping, column pruning and index selection.
+row-group skipping, column pruning and index selection — served over
+HTTP/1.1 with streamed results, admission control, timeouts, cancellation,
+metrics, structured logs and graceful shutdown.
 
 ## Build prerequisites
 
@@ -19,6 +21,7 @@ make lint       # go vet + gofmt check
 make fmt        # gofmt -w
 make clean
 bin/polyquery session --data-dir DIR    # launcher; builds on first use if needed
+bin/polyquery serve --port 8080 --data-dir DIR --workers 8 --queue-depth 64
 ```
 
 ## Libraries
@@ -30,7 +33,8 @@ None. Only the Go standard library is used (`ENGINE.json` lists no libraries).
 `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`, `sql.basic`,
 `test.functions`, `phase2`, `sql.groupby`, `sql.join`, `sql.functions`,
 `sql.subquery`, `sql.cte`, `sql.correlated_subquery`, `phase3`,
-`storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`.
+`storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`, `phase4`,
+`http.streaming`.
 
 `storage.mmap` uses real memory mapping (`syscall.Mmap`, standard library)
 on all Unix platforms; on other platforms `open` falls back to reading the
@@ -47,9 +51,10 @@ SQL text ─lexer→ tokens ─parser→ AST ─analyzer→ logical plan ─opti
 
 | Package | Responsibility |
 |---|---|
-| `cmd/polyquery` | CLI: modes `version`, `capabilities`, `session`, `exec` (`serve` is reserved for Phase 4), option parsing, JSON logs on stderr |
-| `internal/protocol` | JSON request decoding/validation, op dispatch (incl. `explain`, `save`, `open`, `stats`), single-line JSON response writer, session loop and exec mode |
-| `internal/engine` | Facade owning config + catalog: path safety, file loading with limits, the query pipeline, `EXPLAIN`, `CREATE/DROP INDEX`, `save`/`open`/`stats`, `max_rows`, timeouts |
+| `cmd/polyquery` | CLI: modes `version`, `capabilities`, `session`, `exec`, `serve`; option parsing, JSON logs on stderr, SIGTERM/SIGINT handling |
+| `internal/server` | HTTP API (protocol.md §7): router, admission control (workers + bounded FIFO queue), query registry (listing, cancellation, duplicate ids), timeouts, NDJSON streaming with backpressure, Prometheus metrics, completion logs, graceful shutdown |
+| `internal/protocol` | JSON request decoding/validation, context-aware op dispatch (incl. `explain`, `save`, `open`, `stats`), single-line JSON response writer, NDJSON stream lines, session loop and exec mode |
+| `internal/engine` | Facade owning config + catalog: path safety, file loading with limits, the query pipeline (statements run through a `Cursor` so results can be consumed incrementally), `EXPLAIN`, `CREATE/DROP INDEX`, `save`/`open`/`stats`, `max_rows`, timeouts |
 | `internal/sql/lexer` | Tokens with 1-based line/column positions; comments, quoted identifiers, reserved keywords |
 | `internal/sql/ast`, `internal/sql/parser` | Recursive-descent parser for the full v1 grammar producing an AST; `PARSE_ERROR` carries `line`/`column` |
 | `internal/analyzer` | Semantic validation: scopes and range variables, CTE environments, name resolution (incl. outer scopes for correlation), typing with implicit promotions, function signatures, aggregate/grouping rules, ORDER BY resolution; produces the logical plan |
@@ -198,6 +203,66 @@ canonical byte encoding in which equal values per types.md §7 encode equally
   = all columns the query reads from the table, including the indexed one,
   `condition`, `lookup`).
 
+### HTTP server and concurrency (Phase 4)
+
+* **Snapshot isolation** comes from the copy-on-write catalog: a query takes
+  the current immutable catalog snapshot when it starts executing (after
+  admission) and plans and runs against exactly those table and index
+  versions; tables are immutable, so concurrent replaces/drops never affect
+  running queries and readers never lock each other. Loads parse outside the
+  mutation lock and publish with one atomic pointer swap.
+* **Admission control**: `--workers` slots and a FIFO queue of
+  `--queue-depth` waiters (`internal/server/admission.go`). A freed slot is
+  handed directly to the oldest waiter; a query arriving with all slots busy
+  and a full queue is rejected immediately with `OVERLOADED` (503).
+  Non-query endpoints never wait for a worker.
+* **Query lifecycle**: every query (`/v1/query`, `/v1/query/stream`, or
+  `op: "query"` through `/v1/request`) is registered under its
+  `options.query_id` (or a server-assigned `q-N`) before it queues; an id
+  that is still queued/running is `409 ALREADY_EXISTS`. Its context is
+  cancelled by `DELETE /v1/queries/{id}`, client disconnect, or shutdown
+  after the grace period, and carries the effective timeout measured from
+  arrival (queueing counts). Operators check the context every 4,096 rows
+  (also every 4,096 comparisons inside sorts) and `PQ_SLEEP` waits on it, so
+  `CANCELLED`/`TIMEOUT` are reported within milliseconds. A query is removed
+  from the registry and its slot is released *before* its final response
+  bytes are written, so a client that has its answer never sees the query
+  in `/v1/queries` any more.
+* **Streaming**: execution runs in its own goroutine and hands batches of up
+  to 1,000 rows (or whatever accumulated within 100 ms) to the writer over a
+  channel of capacity 4, so at most ~6 batches exist ahead of the client;
+  each line is flushed as a chunk. The header is sent together with the
+  first batch, so an error before any row exists (including runtime errors
+  inside a sort) is a normal error response with its HTTP status; later
+  errors end the stream with an `error` line and no `end` line. A failed
+  write (client gone) cancels the query.
+* **Metrics** (`/metrics`, text format 0.0.4): all required families plus
+  HELP/TYPE lines. `polyquery_queries_total` counts every query request by
+  final status (rejections included as `error`); the duration summary covers
+  all of them except `OVERLOADED` rejections (time from arrival to end).
+* **Logs** are JSON lines on stderr (`ts` RFC 3339 UTC, `level`, `msg`, …)
+  via `log/slog`; each query emits `query finished` with `query_id`,
+  `status`, `code` (on error), `duration_ms` and `rows`. SQL text and data
+  are never logged at `info`. `net/http` internal errors are routed through
+  the same JSON logger.
+* **Shutdown** (SIGTERM/SIGINT): the listener is closed (new connections are
+  refused), requests on existing keep-alive connections get `503
+  SHUTTING_DOWN` (`/health` → `503 {"status":"shutting_down"}`; metrics,
+  `/v1/queries` and cancellation keep working), and the server waits until
+  no connection has a request in progress (tracked with `ConnState`, so
+  streamed responses are completely written) or `--shutdown-grace-ms`
+  passes. Then remaining queries are cancelled (`CANCELLED`), the handlers
+  get up to 2 s to answer, all connections are closed and the process exits 0.
+* **HTTP details**: unknown paths are `404 NOT_FOUND`, a known path with the
+  wrong method `405 INVALID_REQUEST`; bodies above `--max-request-bytes` are
+  `413 RESOURCE_LIMIT` (the rest of the body is drained, up to 256 MiB, so
+  the client reliably receives the response). `PUT /v1/tables/{name}`
+  accepts `format`, `replace`, `header` and, as extensions, `delimiter` and
+  `schema` (a URL-encoded JSON schema array as in the `load` op, needed for
+  `header=false`). Path segments are URL-decoded. Responses of the protocol
+  endpoints are the protocol objects (with `"id": null` where no request id
+  exists).
+
 ## Decisions on points the spec leaves open
 
 * **INT64 ↔ DECIMAL comparison** follows types.md §2 literally: the INT64 side
@@ -231,8 +296,7 @@ canonical byte encoding in which equal values per types.md §7 encode equally
   `threads`, `use_indexes`, `native`, `query_id` are validated and accepted
   (single-threaded execution, no indexes yet). Ill-typed option values ⇒
   `INVALID_REQUEST`.
-* **Unknown ops** answer `INVALID_REQUEST`. `serve` (Phase 4) exits with
-  status 1.
+* **Unknown ops** answer `INVALID_REQUEST`.
 * **Storage options**: an invalid `layout`, non-boolean `dictionary`/`mmap`,
   non-positive `row_group_size` or unknown `encoding` value is
   `INVALID_REQUEST`. `open` answers like `load` (`table`, `row_count`,
@@ -273,13 +337,20 @@ canonical byte encoding in which equal values per types.md §7 encode equally
 
 ## Known limitations
 
-* Phase 4+ features (HTTP server, execution modes) are not implemented yet.
+* Phase 5 features (execution modes, intra-query parallelism, forced join
+  algorithms other than nested loop, native kernels) are not implemented.
 * Execution is single-threaded and row-at-a-time.
+* Streaming backpressure blocks query execution once the bounded batch
+  buffer and the kernel socket buffers are full; on Linux loopback the
+  kernel may accept a lot of data into a non-reading client's receive queue
+  before that happens.
+* Only `query` operations go through admission control; `load`, `open`,
+  `explain` and the other catalog operations run directly (loads parse
+  outside any lock and publish atomically, so they never block queries).
 * Indexes are not used for `OR` predicates, `NOT IN`/`<>`, expressions over
   the column (e.g. `col + 1 = 5`) or INT64/DECIMAL columns compared with
   FLOAT64 values, and not to produce ordered output. Predicates are not
   pushed through GROUP BY or LIMIT.
 * Correlated subqueries whose correlation is not an equality (e.g.
   `q.age < p.age`) rescan their input per distinct outer value.
-* Sorting is not interruptible by a timeout while the in-memory sort itself
-  runs (input consumption is).
+

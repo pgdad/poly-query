@@ -49,8 +49,6 @@ type Server struct {
 	// and long-running request is cancelled with it.
 	base  context.Context
 	abort context.CancelFunc
-	// active counts requests being handled.
-	active sync.WaitGroup
 }
 
 // New creates a server for an engine.
@@ -89,14 +87,18 @@ func ListeningEvent(host string, ln net.Listener) []byte {
 }
 
 // Serve handles connections on ln until stop is closed, then shuts down
-// gracefully (concurrency.md §5): new connections are refused, running and
-// queued queries get the grace period to finish, the rest are cancelled.
+// gracefully (concurrency.md §5): the listener is closed, requests on
+// existing connections are answered SHUTTING_DOWN (/health 503), running
+// and queued queries get the grace period to finish, and whatever is still
+// running afterwards is cancelled before all connections are closed.
 func (s *Server) Serve(ln net.Listener, stop <-chan struct{}) error {
+	conns := newConnTracker()
 	srv := &http.Server{
 		Handler:           s,
 		ErrorLog:          slog.NewLogLogger(s.log.Handler(), slog.LevelWarn),
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       2 * time.Minute,
+		ConnState:         conns.track,
 	}
 	s.log.Info("server listening", "addr", ln.Addr().String(), "workers", s.cfg.Workers, "queue_depth", s.cfg.QueueDepth)
 	served := make(chan error, 1)
@@ -109,31 +111,58 @@ func (s *Server) Serve(ln net.Listener, stop <-chan struct{}) error {
 
 	s.shutting.Store(true)
 	s.log.Info("shutdown started", "grace_ms", s.cfg.ShutdownGrace.Milliseconds())
-	graceCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownGrace)
-	defer cancel()
-	if err := srv.Shutdown(graceCtx); err != nil {
-		// Grace period expired: cancel what is still running, give the
-		// handlers a moment to answer CANCELLED, then close connections.
+	_ = ln.Close()
+	if !conns.waitIdle(s.cfg.ShutdownGrace) {
+		// Grace period expired: cancel what is still running and give the
+		// handlers a moment to answer CANCELLED.
 		s.log.Warn("shutdown grace period expired; cancelling queries", "queries", len(s.reg.list()))
 		s.abort()
 		s.reg.cancelAll()
-		waitTimeout(&s.active, 2*time.Second)
-		srv.Close()
+		conns.waitIdle(2 * time.Second)
 	}
 	s.abort()
+	_ = srv.Close()
 	s.log.Info("shutdown complete")
 	return nil
 }
 
-func waitTimeout(wg *sync.WaitGroup, d time.Duration) {
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(d):
+// connTracker counts connections with a request in progress (including
+// the final write of its response, which happens after the handler
+// returns).
+type connTracker struct {
+	mu     sync.Mutex
+	active map[net.Conn]struct{}
+}
+
+func newConnTracker() *connTracker {
+	return &connTracker{active: map[net.Conn]struct{}{}}
+}
+
+func (c *connTracker) track(conn net.Conn, state http.ConnState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if state == http.StateActive {
+		c.active[conn] = struct{}{}
+	} else {
+		delete(c.active, conn)
+	}
+}
+
+// waitIdle waits up to d for all connections to become idle and reports
+// whether they did.
+func (c *connTracker) waitIdle(d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		c.mu.Lock()
+		n := len(c.active)
+		c.mu.Unlock()
+		if n == 0 {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -166,8 +195,6 @@ var routes = []route{
 
 // ServeHTTP dispatches a request to its route.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.active.Add(1)
-	defer s.active.Done()
 	segs, ok := splitPath(r.URL.EscapedPath())
 	if ok {
 		for _, rt := range routes {
