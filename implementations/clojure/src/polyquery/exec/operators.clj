@@ -17,6 +17,7 @@
             [polyquery.exec.skipping :as skipping]
             [polyquery.storage.index :as index]
             [polyquery.storage.table :as table]
+            [polyquery.types :as t]
             [polyquery.values :as v])
   (:import (java.util ArrayList Comparator HashMap HashSet PriorityQueue)
            (polyquery.exec.aggregate Accumulator)
@@ -366,27 +367,44 @@
                      acc))
                  init input))))))
 
+(defn- key-comparator
+  "Comparator of rows by one sort key (NULLs placed as requested)."
+  ^Comparator [{:keys [index type desc? nulls-first?]}]
+  (let [i (int index)
+        sign (if desc? -1 1)
+        null-x (if nulls-first? -1 1)
+        long-kind? (#{:int64 :decimal :date :timestamp} (t/kind type))
+        ^Comparator c (v/value-comparator type)]
+    (if long-kind?
+      (reify Comparator
+        (compare [_ a b]
+          (let [x (aget ^objects a i) y (aget ^objects b i)]
+            (cond
+              (nil? x) (if (nil? y) 0 null-x)
+              (nil? y) (- null-x)
+              :else (* sign (Long/compare (long x) (long y)))))))
+      (reify Comparator
+        (compare [_ a b]
+          (let [x (aget ^objects a i) y (aget ^objects b i)]
+            (cond
+              (nil? x) (if (nil? y) 0 null-x)
+              (nil? y) (- null-x)
+              :else (* sign (Integer/signum (.compare c x y))))))))))
+
 (defn row-comparator
   "Comparator of rows by sort keys (ORDER BY semantics)."
   ^Comparator [keys]
-  (let [cmps (mapv (fn [{:keys [index type desc? nulls-first?]}]
-                     (let [c (v/value-comparator type)
-                           i (int index)]
-                       (fn ^long [^objects a ^objects b]
-                         (let [x (aget a i) y (aget b i)]
-                           (cond
-                             (and (nil? x) (nil? y)) 0
-                             (nil? x) (if nulls-first? -1 1)
-                             (nil? y) (if nulls-first? 1 -1)
-                             :else (let [r (.compare c x y)] (if desc? (- r) r)))))))
-                   keys)]
-    (reify Comparator
-      (compare [_ a b]
-        (loop [cs cmps]
-          (if-let [cf (first cs)]
-            (let [r (long (cf a b))]
-              (if (zero? r) (recur (next cs)) (int r)))
-            0))))))
+  (let [^objects cmps (into-array Comparator (map key-comparator keys))
+        n (alength cmps)]
+    (if (= 1 n)
+      (aget cmps 0)
+      (reify Comparator
+        (compare [_ a b]
+          (loop [i 0]
+            (if (< i n)
+              (let [r (.compare ^Comparator (aget cmps i) a b)]
+                (if (zero? r) (recur (inc i)) r))
+              0)))))))
 
 (defn checking-comparator
   "Wraps cmp so that a long sort observes timeout/cancellation (checked

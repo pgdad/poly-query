@@ -14,7 +14,8 @@
                     order (so groups keep their serial order of first
                     appearance; INT64/DECIMAL sums stay exact)
     sort            partitions materialized in parallel, concatenated in
-                    order, then a stable parallel merge sort
+                    order, then sorted (polyquery.exec.sort: radix sort or
+                    parallel merge sort; stable)
     top-n           a bounded heap per partition, merged (ties by input
                     position, as in a stable sort)
     gather          streaming: morsels of rows are processed by up to N
@@ -27,6 +28,7 @@
   (:require [polyquery.exec.context :as ctx]
             [polyquery.exec.join :as join]
             [polyquery.exec.operators :as ops]
+            [polyquery.exec.sort :as sort]
             [polyquery.exec.vectorized :as vec])
   (:import (java.util ArrayDeque ArrayList Arrays Comparator)
            (java.util.concurrent Callable ExecutionException ExecutorService Executors Future
@@ -148,16 +150,15 @@
                           f init))))))
 
 (defn- sort-rows [plan env]
-  (let [cmp (ops/row-comparator (:keys plan))]
-    (ops/reducible
-     (fn [f init]
-       (let [input (share-builds (:input plan) env)
-             parts (run-all (mapv (fn [r] #(ops/materialize (rows-of (with-range input r) env) env))
-                                  (partitions input (:partitions plan))))
-             ^objects all (.toArray ^java.util.Collection (into [] cat parts))]
-         ;; stable: equal rows keep their input (= serial) order
-         (Arrays/parallelSort all ^Comparator (ops/checking-comparator cmp (:ctx env)))
-         (ops/reduce-list (Arrays/asList all) f init))))))
+  (ops/reducible
+   (fn [f init]
+     (let [input (share-builds (:input plan) env)
+           ranges (partitions input (:partitions plan))
+           parts (run-all (mapv (fn [r] #(ops/materialize (rows-of (with-range input r) env) env))
+                                ranges))
+           all (ArrayList. ^java.util.Collection (into [] cat parts))]
+       (ops/reduce-list (sort/sort-rows all (:keys plan) (:ctx env) run-all (:partitions plan))
+                        f init)))))
 
 (defn- top-n [plan env]
   (let [cmp (ops/row-comparator (:keys plan))]

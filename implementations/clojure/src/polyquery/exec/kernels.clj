@@ -204,45 +204,70 @@
          (let [~a (aget la# i#) ~c (aget ra# i#)] (aset out# i# (long ~body)))))
      (LongVec. out# nulls#)))
 
-(defn- int-arith [op ^Vec lv ^Vec rv ^ints sel n]
-  (case op
-    "+" (long-op lv rv sel n [a c] (let [r (unchecked-add a c)]
-                                     (when (neg? (bit-and (bit-xor a r) (bit-xor c r))) (overflow!))
-                                     r))
-    "-" (long-op lv rv sel n [a c] (let [r (unchecked-subtract a c)]
-                                     (when (neg? (bit-and (bit-xor a c) (bit-xor a r))) (overflow!))
-                                     r))
-    "*" (long-op lv rv sel n [a c] (let [hi (Math/multiplyHigh a c)
-                                         r (unchecked-multiply a c)]
-                                     (when-not (== hi (bit-shift-right r 63)) (overflow!))
-                                     r))
-    "/" (long-op lv rv sel n [a c] (do (when (zero? c) (div-zero!))
-                                       (when (and (== a Long/MIN_VALUE) (== c -1)) (overflow!))
-                                       (quot a c)))
-    "%" (long-op lv rv sel n [a c] (do (when (zero? c) (div-zero!))
-                                       (rem a c)))))
+;; one function per operator keeps every method small enough for the JIT
 
-(defn- decimal-arith [op lt rt ^Vec lv ^Vec rv ^ints sel n]
-  (let [sl (t/scale lt) sr (t/scale rt)
-        max-u v/max-unscaled
-        check (fn ^long [^long r]
-                (when (or (> r max-u) (< r (- max-u)))
-                  (v/overflow! "decimal arithmetic"))
-                r)]
+(defn- add-longs [lv rv sel n]
+  (long-op lv rv sel n [a c] (let [r (unchecked-add a c)]
+                               (when (neg? (bit-and (bit-xor a r) (bit-xor c r))) (overflow!))
+                               r)))
+
+(defn- sub-longs [lv rv sel n]
+  (long-op lv rv sel n [a c] (let [r (unchecked-subtract a c)]
+                               (when (neg? (bit-and (bit-xor a c) (bit-xor a r))) (overflow!))
+                               r)))
+
+(defn- mul-longs [lv rv sel n]
+  (long-op lv rv sel n [a c] (let [hi (Math/multiplyHigh a c)
+                                   r (unchecked-multiply a c)]
+                               (when-not (== hi (bit-shift-right r 63)) (overflow!))
+                               r)))
+
+(defn- div-longs [lv rv sel n]
+  (long-op lv rv sel n [a c] (do (when (zero? c) (div-zero!))
+                                 (when (and (== a Long/MIN_VALUE) (== c -1)) (overflow!))
+                                 (quot a c))))
+
+(defn- rem-longs [lv rv sel n]
+  (long-op lv rv sel n [a c] (do (when (zero? c) (div-zero!))
+                                 (rem a c))))
+
+(defn- int-arith [op]
+  (case op "+" add-longs "-" sub-longs "*" mul-longs "/" div-longs "%" rem-longs))
+
+(defn- check-dec18 ^long [^long r]
+  (when (or (> r v/max-unscaled) (< r (- v/max-unscaled)))
+    (v/overflow! "decimal arithmetic"))
+  r)
+
+(defn- add-decimals [lv rv sel n]
+  (long-op lv rv sel n [a c] (let [r (unchecked-add a c)]
+                               (when (neg? (bit-and (bit-xor a r) (bit-xor c r)))
+                                 (v/overflow! "decimal addition"))
+                               (check-dec18 r))))
+
+(defn- sub-decimals [lv rv sel n]
+  (long-op lv rv sel n [a c] (let [r (unchecked-subtract a c)]
+                               (when (neg? (bit-and (bit-xor a c) (bit-xor a r)))
+                                 (v/overflow! "decimal addition"))
+                               (check-dec18 r))))
+
+(defn- add-rescaled [sl sr lv rv sel n]
+  (let [sl (long sl) sr (long sr)]
+    (long-op lv rv sel n [a c] (v/dec-add a sl c sr))))
+
+(defn- sub-rescaled [sl sr lv rv sel n]
+  (let [sl (long sl) sr (long sr)]
+    (long-op lv rv sel n [a c] (v/dec-add a sl (- c) sr))))
+
+(defn- mul-decimals [lv rv sel n]
+  (long-op lv rv sel n [a c] (v/dec-mul a c)))
+
+(defn- decimal-arith [op lt rt]
+  (let [sl (t/scale lt) sr (t/scale rt)]
     (case op
-      "+" (if (= sl sr)
-            (long-op lv rv sel n [a c] (let [r (unchecked-add a c)]
-                                         (when (neg? (bit-and (bit-xor a r) (bit-xor c r)))
-                                           (v/overflow! "decimal addition"))
-                                         (check r)))
-            (long-op lv rv sel n [a c] (v/dec-add a sl c sr)))
-      "-" (if (= sl sr)
-            (long-op lv rv sel n [a c] (let [r (unchecked-subtract a c)]
-                                         (when (neg? (bit-and (bit-xor a c) (bit-xor a r)))
-                                           (v/overflow! "decimal addition"))
-                                         (check r)))
-            (long-op lv rv sel n [a c] (v/dec-add a sl (- c) sr)))
-      "*" (long-op lv rv sel n [a c] (v/dec-mul a c)))))
+      "+" (if (= sl sr) add-decimals (partial add-rescaled sl sr))
+      "-" (if (= sl sr) sub-decimals (partial sub-rescaled sl sr))
+      "*" mul-decimals)))
 
 (defmacro ^:private double-op
   "DoubleVec of (body a b) over two double arrays, skipping NULL rows."
@@ -261,16 +286,17 @@
   (when (or (Double/isInfinite d) (Double/isNaN d)) (float-overflow!))
   d)
 
-(defn- float-arith [op lt rt ^Vec lv ^Vec rv ^ints sel n]
-  (let [la (as-doubles lv lt sel n)
-        ra (as-doubles rv rt sel n)
-        nulls (union-nulls (nulls-of lv sel n) (nulls-of rv sel n) sel n)]
-    (case op
-      "+" (double-op la ra nulls sel n [a c] (finite (+ a c)))
-      "-" (double-op la ra nulls sel n [a c] (finite (- a c)))
-      "*" (double-op la ra nulls sel n [a c] (finite (* a c)))
-      "/" (double-op la ra nulls sel n [a c] (do (when (== c 0.0) (div-zero!))
-                                                 (finite (/ a c)))))))
+(defn- add-doubles [la ra nulls sel n] (double-op la ra nulls sel n [a c] (finite (+ a c))))
+(defn- sub-doubles [la ra nulls sel n] (double-op la ra nulls sel n [a c] (finite (- a c))))
+(defn- mul-doubles [la ra nulls sel n] (double-op la ra nulls sel n [a c] (finite (* a c))))
+(defn- div-doubles [la ra nulls sel n] (double-op la ra nulls sel n [a c] (do (when (== c 0.0) (div-zero!))
+                                                                              (finite (/ a c)))))
+
+(defn- float-arith [op lt rt]
+  (let [f (case op "+" add-doubles "-" sub-doubles "*" mul-doubles "/" div-doubles)]
+    (fn [lv rv sel n]
+      (f (as-doubles lv lt sel n) (as-doubles rv rt sel n)
+         (union-nulls (nulls-of lv sel n) (nulls-of rv sel n) sel n) sel n))))
 
 (defn- arith-kernel [env e]
   (let [{:keys [op type left right]} e
@@ -279,9 +305,9 @@
         rk (compile-kernel env right)
         fail? (may-fail? right)
         f (case (t/kind type)
-            :int64 (fn [lv rv sel n] (int-arith op lv rv sel n))
-            :float64 (fn [lv rv sel n] (float-arith op lt rt lv rv sel n))
-            :decimal (fn [lv rv sel n] (decimal-arith op lt rt lv rv sel n))
+            :int64 (int-arith op)
+            :float64 (float-arith op lt rt)
+            :decimal (decimal-arith op lt rt)
             nil)]
     (if (and f (not= :null (t/kind lt)) (not= :null (t/kind rt)))
       (reify Kernel
@@ -327,24 +353,30 @@
 (defn- flip-op [op]
   (case op "<" ">" ">" "<" "<=" ">=" ">=" "<=" op))
 
+(def ^:private op-tables
+  "Per comparison operator, its result for a comparison outcome of -1, 0, 1
+  (index outcome + 1): one branch-free loop serves every operator."
+  (into {} (map (fn [[op v]] [op (boolean-array v)]))
+        {"=" [false true false] "<>" [true false true] "<" [true false false]
+         "<=" [true true false] ">" [false false true] ">=" [false true true]}))
+
 (defmacro ^:private bool-loop
-  "BoolVec of (test (cmp-expr i)) at the selected positions; `nulls` rows
-  are NULL (their value is not computed)."
+  "BoolVec of `op` applied to (cmp-expr i) (a negative/zero/positive long) at
+  the selected positions; rows NULL in `nulls` are NULL (cmp-expr is not
+  evaluated for them)."
   [op nulls sel n [i] cmp-expr]
-  (let [c (gensym "c") nl (gensym "nulls") sl (gensym "sel") cnt (gensym "n") out (gensym "out")
-        tests {"=" `(== ~c 0) "<>" `(not (== ~c 0)) "<" `(< ~c 0) "<=" `(<= ~c 0)
-               ">" `(> ~c 0) ">=" `(>= ~c 0)}]
-    `(let [~nl ~nulls ~sl ~sel ~cnt (long ~n)
+  (let [tbl (with-meta (gensym "tbl") {:tag "[Z"})
+        nl (with-meta (gensym "nulls") {:tag "[Z"})
+        sl (gensym "sel") cnt (gensym "n")
+        out (with-meta (gensym "out") {:tag "[Z"})]
+    `(let [~tbl (op-tables ~op) ~nl ~nulls ~sl ~sel ~cnt (long ~n)
            ~out (boolean-array cap)]
-       (case ~op
-         ~@(mapcat (fn [[o test]]
-                     [o `(if ~nl
-                           (each-sel [~i ~sl ~cnt]
-                             (when-not (aget ~(with-meta nl {:tag "[Z"}) ~i)
-                               (let [~c (long ~cmp-expr)] (aset ~out ~i ~test))))
-                           (each-sel [~i ~sl ~cnt]
-                             (let [~c (long ~cmp-expr)] (aset ~out ~i ~test))))])
-                   tests))
+       (if ~nl
+         (each-sel [~i ~sl ~cnt]
+           (when-not (aget ~nl ~i)
+             (aset ~out ~i (aget ~tbl (inc (Long/signum (long ~cmp-expr)))))))
+         (each-sel [~i ~sl ~cnt]
+           (aset ~out ~i (aget ~tbl (inc (Long/signum (long ~cmp-expr)))))))
        (BoolVec. ~out ~nl))))
 
 (defn- dec-cmp

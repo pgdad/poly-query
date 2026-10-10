@@ -9,7 +9,9 @@
   aggregation assigns group ids per batch and updates column-wise aggregate
   states (polyquery.exec.grouping).
 
-  Operators without a vectorized implementation (joins, sorting, DISTINCT,
+  ORDER BY sorts extracted primitive key columns (polyquery.exec.sort).
+
+  Operators without a vectorized implementation (joins, DISTINCT,
   LIMIT, index scans, …) are the row operators: their input batches are
   converted to rows, and their output rows are wrapped into batches whose
   columns are converted to typed vectors only when a kernel reads them.
@@ -21,6 +23,7 @@
             [polyquery.exec.grouping :as g]
             [polyquery.exec.kernels :as k]
             [polyquery.exec.operators :as ops]
+            [polyquery.exec.sort :as sort]
             [polyquery.storage.table :as table])
   (:import (java.util ArrayList)
            (polyquery.exec.batch Batch)
@@ -171,16 +174,13 @@
   "Merges Partial `other` into `into` (new groups appended in their order
   in `other`). Returns `into`."
   [^Partial into ^Partial other]
-  (let [^GroupTable t (:table into)
-        ^GroupTable o (:table other)
-        states (:states into)
-        ostates (:states other)
-        n (.size o)]
-    (dotimes [gid n]
-      (let [to (.findOrAdd t (.keyAt o gid))]
-        (doseq [[^AggState st ^AggState os] (map vector states ostates)]
-          (.grow st (inc to))
-          (.mergeFrom st os gid to))))
+  (let [^ints mapping (g/merge-mapping (:table into) (:table other))
+        size (.size ^GroupTable (:table into))
+        n (alength mapping)]
+    (doseq [[^AggState st ^AggState os] (map vector (:states into) (:states other))]
+      (.grow st size)
+      (dotimes [gid n]
+        (.mergeFrom st os gid (aget mapping gid))))
     into))
 
 (defn aggregate-rows
@@ -217,3 +217,12 @@
     (ops/reducible
      (fn [f init]
        (ops/reduce-list (aggregate-rows (aggregate-partial plan input env)) f init)))))
+
+(defmethod build-rows :sort [plan env]
+  ;; ORDER BY on primitive key columns (polyquery.exec.sort)
+  (let [input (ops/build-input (:input plan) env)]
+    (ops/reducible
+     (fn [f init]
+       (ops/reduce-list (sort/sort-rows (ops/materialize input env) (:keys plan) (:ctx env)
+                                        (fn [thunks] (mapv #(%) thunks)) 1)
+                        f init)))))

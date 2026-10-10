@@ -66,6 +66,8 @@
 
 (definterface LongLookup
   (^long lookup [^long k] "Group id of non-NULL key k (added if new).")
+  (^long keyLong [^long gid] "The key of a group (not the NULL group).")
+  (^long nullGid [] "Group id of the NULL key, -1 if none.")
   (rehash []))
 
 (deftype LongKeyTable [^:unsynchronized-mutable ^longs slot-keys
@@ -99,6 +101,8 @@
           (aset gids i (int (.lookup this (aget vals i))))))))
 
   LongLookup
+  (keyLong [_ gid] (aget gid-keys gid))
+  (nullGid [_] null-gid)
   (lookup [this k]
     (loop [s (bit-and (mix k) mask)]
       (let [g (aget slot-gids s)]
@@ -412,3 +416,20 @@
       (DoubleExtremeState. (if (= f :min) 1 -1) (double-array 16) (boolean-array 16))
 
       :else (AccState. (agg/accumulator-factory spec) (object-array 16)))))
+
+(defn merge-mapping
+  "int[] mapping every group of table `from` to its group in table `into`
+  (added there if new, in from's order)."
+  ^ints [^GroupTable into ^GroupTable from]
+  (let [n (.size from)
+        out (int-array n)]
+    (if (and (instance? LongKeyTable into) (instance? LongKeyTable from))
+      (let [^LongKeyTable t into ^LongKeyTable f from
+            null-gid (.nullGid f)]
+        (dotimes [g n]
+          (aset out g (int (if (= g null-gid)
+                             (.findOrAdd t (object-array 1))
+                             (.lookup t (.keyLong f g)))))))
+      (dotimes [g n]
+        (aset out g (int (.findOrAdd into (.keyAt from g))))))
+    out))
