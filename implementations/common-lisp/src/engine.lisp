@@ -170,7 +170,8 @@ lists. The catalog is only changed if everything succeeds."
     (when (and (not replace) (catalog-table-exists-p catalog name))
       (signal-pq-error "ALREADY_EXISTS" "table ~A already exists" name))
     (multiple-value-bind (table index-specs)
-        (load-pqcf-table native-path name :mmap mmap :layout layout)
+        (load-pqcf-table native-path name :mmap mmap :layout layout
+                         :max-rows (engine-config-max-table-rows (session-config session)))
       (let ((indexes (loop for (index-name column-name kind) in index-specs
                            collect (build-table-index index-name table
                                                       (find-column-index table column-name)

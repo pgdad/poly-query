@@ -170,8 +170,9 @@ absent or not understood (statistics are only an optimization)."
                                                   :max (parse-stat-value (json-get obj "max") type))))))))
      total)))
 
-(defun read-pqcf (source)
-  "Validate the structure of the PQCF file in SOURCE. Returns a PQCF-FILE."
+(defun read-pqcf (source &key max-rows)
+  "Validate the structure of the PQCF file in SOURCE. Returns a PQCF-FILE.
+Files with more than MAX-ROWS rows are refused with RESOURCE_LIMIT."
   (let ((size (file-source-size source)))
     (when (< size 8) (storage-corrupt "file too short for a PQCF header"))
     (let ((header (source-copy source 0 8)))
@@ -208,6 +209,9 @@ absent or not understood (statistics are only an optimization)."
           (multiple-value-bind (groups total) (parse-metadata-row-groups meta columns meta-start)
             (unless (= total row-count)
               (storage-corrupt "row_count ~D does not match the row groups (~D)" row-count total))
+            (when (and max-rows (> row-count max-rows))
+              (resource-limit-error "table of ~D rows exceeds the maximum of ~D rows"
+                                    row-count max-rows))
             (check-padding source groups meta-start)
             (make-pqcf-file :columns columns :indexes indexes :row-groups groups)))))))
 
@@ -411,7 +415,9 @@ first access; otherwise all chunks are verified and decoded now."
                               :columns (map 'simple-vector
                                             (lambda (chunk type)
                                               (let ((desc (car chunk)) (n n))
-                                                (if lazy
+                                                ;; Empty chunks are verified at once:
+                                                ;; no scan would ever touch them.
+                                                (if (and lazy (plusp n))
                                                     (make-lazy-chunk
                                                      (lambda () (decode-chunk source desc n type)))
                                                     (decode-chunk source desc n type))))
@@ -435,11 +441,11 @@ first access; otherwise all chunks are verified and decoded now."
                             :stats (segment-stats seg))))
           segments))
 
-(defun load-pqcf-table (native-path name &key mmap (layout :column))
+(defun load-pqcf-table (native-path name &key mmap (layout :column) max-rows)
   "Open the PQCF file at NATIVE-PATH as a table called NAME. Returns
 (values table index-specs) where INDEX-SPECS are (name column-name kind)."
   (let* ((source (open-file-source native-path :mmap mmap))
-         (file (read-pqcf source))
+         (file (read-pqcf source :max-rows max-rows))
          (columns (pqcf-file-columns file))
          (segments (pqcf-segments source file :lazy (and mmap (eq layout :column)))))
     (values (make-table-from-segments name columns
