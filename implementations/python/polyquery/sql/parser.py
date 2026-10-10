@@ -1,0 +1,490 @@
+"""Recursive-descent parser for PolyQuery SQL v1 (spec/sql/grammar.md §2)."""
+
+from __future__ import annotations
+
+from .. import errors
+from . import ast
+from .lexer import Token, TokenKind, tokenize
+
+_COMPARISON_OPS = ("=", "<>", "!=", "<", "<=", ">", ">=")
+
+
+class Parser:
+    def __init__(self, text: str):
+        self.tokens = tokenize(text)
+        self.i = 0
+
+    # ------------------------------------------------------------ helpers
+
+    @property
+    def tok(self) -> Token:
+        return self.tokens[self.i]
+
+    def peek(self, offset: int = 1) -> Token:
+        j = min(self.i + offset, len(self.tokens) - 1)
+        return self.tokens[j]
+
+    def advance(self) -> Token:
+        t = self.tokens[self.i]
+        if t.kind is not TokenKind.EOF:
+            self.i += 1
+        return t
+
+    def error(self, message: str, tok: Token | None = None) -> errors.PolyQueryError:
+        tok = tok or self.tok
+        return errors.parse_error(
+            f"{message} at line {tok.line}, column {tok.column} (found {tok.describe()})",
+            line=tok.line,
+            column=tok.column,
+        )
+
+    def unsupported(self, tok: Token) -> errors.PolyQueryError:
+        return errors.unsupported(f"{tok.value} is not supported", line=tok.line, column=tok.column)
+
+    def accept_keyword(self, *words: str) -> Token | None:
+        if self.tok.is_keyword(*words):
+            return self.advance()
+        return None
+
+    def expect_keyword(self, word: str) -> Token:
+        if not self.tok.is_keyword(word):
+            raise self.error(f"expected {word}")
+        return self.advance()
+
+    def accept_op(self, *ops: str) -> Token | None:
+        if self.tok.is_op(*ops):
+            return self.advance()
+        return None
+
+    def expect_op(self, op: str) -> Token:
+        if not self.tok.is_op(op):
+            raise self.error(f"expected '{op}'")
+        return self.advance()
+
+    def expect_ident(self, what: str = "identifier") -> str:
+        if self.tok.kind is not TokenKind.IDENT:
+            raise self.error(f"expected {what}")
+        return self.advance().value
+
+    @staticmethod
+    def pos(tok: Token) -> ast.Pos:
+        return (tok.line, tok.column)
+
+    # ------------------------------------------------------------ statements
+
+    def parse_statement(self) -> ast.Statement:
+        start = self.tok
+        if self.accept_keyword("EXPLAIN"):
+            stmt: ast.Statement = ast.Explain(self.pos(start), self.parse_query())
+        elif start.is_keyword("CREATE"):
+            stmt = self.parse_create_index()
+        elif start.is_keyword("DROP"):
+            stmt = self.parse_drop_index()
+        elif start.is_keyword("SELECT", "WITH"):
+            stmt = ast.QueryStatement(self.pos(start), self.parse_query())
+        else:
+            raise self.error("expected SELECT, WITH, EXPLAIN, CREATE INDEX or DROP INDEX")
+        self.accept_op(";")
+        if self.tok.kind is not TokenKind.EOF:
+            raise self.error("unexpected token after end of statement")
+        return stmt
+
+    def parse_create_index(self) -> ast.CreateIndex:
+        start = self.expect_keyword("CREATE")
+        self.expect_keyword("INDEX")
+        if_not_exists = False
+        if self.accept_keyword("IF"):
+            self.expect_keyword("NOT")
+            self.expect_keyword("EXISTS")
+            if_not_exists = True
+        name = self.expect_ident("index name")
+        self.expect_keyword("ON")
+        table = self.expect_ident("table name")
+        self.expect_op("(")
+        column = self.expect_ident("column name")
+        self.expect_op(")")
+        kind = "BTREE"
+        if self.accept_keyword("USING"):
+            tok = self.tok
+            if tok.kind is not TokenKind.IDENT or tok.value.upper() not in ("HASH", "BTREE"):
+                raise self.error("expected HASH or BTREE")
+            kind = self.advance().value.upper()
+        return ast.CreateIndex(self.pos(start), name, table, column, kind, if_not_exists)
+
+    def parse_drop_index(self) -> ast.DropIndex:
+        start = self.expect_keyword("DROP")
+        self.expect_keyword("INDEX")
+        if_exists = False
+        if self.accept_keyword("IF"):
+            self.expect_keyword("EXISTS")
+            if_exists = True
+        name = self.expect_ident("index name")
+        return ast.DropIndex(self.pos(start), name, if_exists)
+
+    # ------------------------------------------------------------ queries
+
+    def parse_query(self) -> ast.Query:
+        start = self.tok
+        ctes: list[ast.CommonTableExpr] = []
+        if self.accept_keyword("WITH"):
+            ctes.append(self.parse_cte())
+            while self.accept_op(","):
+                ctes.append(self.parse_cte())
+        body = self.parse_select_core()
+        if self.tok.is_keyword("UNION"):
+            raise self.unsupported(self.tok)
+        query = ast.Query(self.pos(start), body, ctes)
+        if self.accept_keyword("ORDER"):
+            self.expect_keyword("BY")
+            query.order_by.append(self.parse_order_item())
+            while self.accept_op(","):
+                query.order_by.append(self.parse_order_item())
+        if self.accept_keyword("LIMIT"):
+            query.limit = self.parse_expr()
+            if self.accept_keyword("OFFSET"):
+                query.offset = self.parse_expr()
+        elif self.accept_keyword("OFFSET"):
+            query.offset = self.parse_expr()
+            if self.accept_keyword("LIMIT"):
+                query.limit = self.parse_expr()
+        return query
+
+    def parse_cte(self) -> ast.CommonTableExpr:
+        start = self.tok
+        name = self.expect_ident("CTE name")
+        columns = None
+        if self.accept_op("("):
+            columns = [self.expect_ident("column name")]
+            while self.accept_op(","):
+                columns.append(self.expect_ident("column name"))
+            self.expect_op(")")
+        self.expect_keyword("AS")
+        self.expect_op("(")
+        query = self.parse_query()
+        self.expect_op(")")
+        return ast.CommonTableExpr(self.pos(start), name, columns, query)
+
+    def parse_select_core(self) -> ast.Select:
+        start = self.expect_keyword("SELECT")
+        distinct = False
+        if self.accept_keyword("DISTINCT"):
+            distinct = True
+        else:
+            self.accept_keyword("ALL")
+        items = [self.parse_select_item()]
+        while self.accept_op(","):
+            items.append(self.parse_select_item())
+        select = ast.Select(self.pos(start), items, distinct)
+        if self.accept_keyword("FROM"):
+            select.from_ = self.parse_from_item()
+        if self.accept_keyword("WHERE"):
+            select.where = self.parse_expr()
+        if self.accept_keyword("GROUP"):
+            self.expect_keyword("BY")
+            select.group_by.append(self.parse_expr())
+            while self.accept_op(","):
+                select.group_by.append(self.parse_expr())
+        if self.accept_keyword("HAVING"):
+            select.having = self.parse_expr()
+        return select
+
+    def parse_select_item(self) -> ast.SelectItem:
+        start = self.tok
+        if self.accept_op("*"):
+            return ast.SelectItem(self.pos(start), None, is_star=True)
+        if (
+            start.kind is TokenKind.IDENT
+            and self.peek().is_op(".")
+            and self.peek(2).is_op("*")
+        ):
+            self.i += 3
+            return ast.SelectItem(self.pos(start), None, star_qualifier=start.value, is_star=True)
+        expr = self.parse_expr()
+        alias = None
+        if self.accept_keyword("AS"):
+            alias = self.expect_ident("alias")
+        elif self.tok.kind is TokenKind.IDENT:
+            alias = self.advance().value
+        return ast.SelectItem(self.pos(start), expr, alias)
+
+    def parse_from_item(self) -> ast.FromItem:
+        item = self.parse_table_ref()
+        while True:
+            start = self.tok
+            if self.accept_op(","):
+                item = ast.Join(self.pos(start), "CROSS", item, self.parse_table_ref(), None)
+            elif self.accept_keyword("CROSS"):
+                self.expect_keyword("JOIN")
+                item = ast.Join(self.pos(start), "CROSS", item, self.parse_table_ref(), None)
+            elif self.tok.is_keyword("INNER", "JOIN"):
+                if self.accept_keyword("INNER"):
+                    self.expect_keyword("JOIN")
+                else:
+                    self.advance()
+                right = self.parse_table_ref()
+                self.expect_keyword("ON")
+                item = ast.Join(self.pos(start), "INNER", item, right, self.parse_expr())
+            elif self.accept_keyword("LEFT"):
+                self.accept_keyword("OUTER")
+                self.expect_keyword("JOIN")
+                right = self.parse_table_ref()
+                self.expect_keyword("ON")
+                item = ast.Join(self.pos(start), "LEFT", item, right, self.parse_expr())
+            elif self.tok.is_keyword("FULL", "RIGHT"):
+                raise self.unsupported(self.tok)
+            else:
+                return item
+
+    def parse_table_ref(self) -> ast.FromItem:
+        start = self.tok
+        if self.accept_op("("):
+            if self.tok.is_keyword("SELECT", "WITH"):
+                query = self.parse_query()
+                self.expect_op(")")
+                self.accept_keyword("AS")
+                alias = self.expect_ident("derived table alias")
+                return ast.DerivedTable(self.pos(start), query, alias)
+            item = self.parse_from_item()
+            self.expect_op(")")
+            return item
+        name = self.expect_ident("table name")
+        alias = None
+        if self.accept_keyword("AS"):
+            alias = self.expect_ident("table alias")
+        elif self.tok.kind is TokenKind.IDENT:
+            alias = self.advance().value
+        return ast.TableRef(self.pos(start), name, alias)
+
+    def parse_order_item(self) -> ast.OrderItem:
+        start = self.tok
+        expr = self.parse_expr()
+        item = ast.OrderItem(self.pos(start), expr)
+        if self.accept_keyword("DESC"):
+            item.descending = True
+        else:
+            self.accept_keyword("ASC")
+        if self.accept_keyword("NULLS"):
+            if self.accept_keyword("FIRST"):
+                item.nulls_first = True
+            else:
+                self.expect_keyword("LAST")
+                item.nulls_first = False
+        return item
+
+    # ------------------------------------------------------------ expressions
+
+    def parse_expr(self) -> ast.Expr:
+        return self.parse_or()
+
+    def parse_or(self) -> ast.Expr:
+        left = self.parse_and()
+        while self.tok.is_keyword("OR"):
+            tok = self.advance()
+            left = ast.BinaryOp(self.pos(tok), "OR", left, self.parse_and())
+        return left
+
+    def parse_and(self) -> ast.Expr:
+        left = self.parse_not()
+        while self.tok.is_keyword("AND"):
+            tok = self.advance()
+            left = ast.BinaryOp(self.pos(tok), "AND", left, self.parse_not())
+        return left
+
+    def parse_not(self) -> ast.Expr:
+        if self.tok.is_keyword("NOT"):
+            tok = self.advance()
+            return ast.UnaryOp(self.pos(tok), "NOT", self.parse_not())
+        return self.parse_predicate()
+
+    def parse_predicate(self) -> ast.Expr:
+        left = self.parse_concat()
+        tok = self.tok
+        pos = self.pos(tok)
+        if tok.kind is TokenKind.OP and tok.value in _COMPARISON_OPS:
+            self.advance()
+            op = "<>" if tok.value == "!=" else tok.value
+            return ast.BinaryOp(pos, op, left, self.parse_concat())
+        if self.accept_keyword("IS"):
+            negated = self.accept_keyword("NOT") is not None
+            self.expect_keyword("NULL")
+            return ast.IsNull(pos, left, negated)
+        negated = False
+        if tok.is_keyword("NOT") and self.peek().is_keyword("BETWEEN", "IN", "LIKE"):
+            self.advance()
+            negated = True
+        if self.accept_keyword("BETWEEN"):
+            low = self.parse_concat()
+            self.expect_keyword("AND")
+            high = self.parse_concat()
+            return ast.Between(pos, left, low, high, negated)
+        if self.accept_keyword("IN"):
+            self.expect_op("(")
+            if self.tok.is_keyword("SELECT", "WITH"):
+                query = self.parse_query()
+                self.expect_op(")")
+                return ast.InSubquery(pos, left, query, negated)
+            items = [self.parse_expr()]
+            while self.accept_op(","):
+                items.append(self.parse_expr())
+            self.expect_op(")")
+            return ast.InList(pos, left, items, negated)
+        if self.accept_keyword("LIKE"):
+            return ast.Like(pos, left, self.parse_concat(), negated)
+        return left
+
+    def parse_concat(self) -> ast.Expr:
+        left = self.parse_additive()
+        while self.tok.is_op("||"):
+            tok = self.advance()
+            left = ast.BinaryOp(self.pos(tok), "||", left, self.parse_additive())
+        return left
+
+    def parse_additive(self) -> ast.Expr:
+        left = self.parse_multiplicative()
+        while self.tok.is_op("+", "-"):
+            tok = self.advance()
+            left = ast.BinaryOp(self.pos(tok), tok.value, left, self.parse_multiplicative())
+        return left
+
+    def parse_multiplicative(self) -> ast.Expr:
+        left = self.parse_unary()
+        while self.tok.is_op("*", "/", "%"):
+            tok = self.advance()
+            left = ast.BinaryOp(self.pos(tok), tok.value, left, self.parse_unary())
+        return left
+
+    def parse_unary(self) -> ast.Expr:
+        tok = self.tok
+        if tok.is_op("-", "+"):
+            self.advance()
+            if tok.value == "-" and self.tok.kind is TokenKind.NUMBER:
+                # fold the sign into the literal so that INT64_MIN is accepted
+                num = self.advance()
+                return ast.NumberLit(self.pos(tok), "-" + num.value)
+            return ast.UnaryOp(self.pos(tok), tok.value, self.parse_unary())
+        return self.parse_primary()
+
+    def parse_primary(self) -> ast.Expr:
+        tok = self.tok
+        pos = self.pos(tok)
+        kind = tok.kind
+        if kind is TokenKind.NUMBER:
+            self.advance()
+            return ast.NumberLit(pos, tok.value)
+        if kind is TokenKind.STRING:
+            self.advance()
+            return ast.StringLit(pos, tok.value)
+        if kind is TokenKind.KEYWORD:
+            word = tok.value
+            if word in ("TRUE", "FALSE"):
+                self.advance()
+                return ast.BoolLit(pos, word == "TRUE")
+            if word == "NULL":
+                self.advance()
+                return ast.NullLit(pos)
+            if word in ("DATE", "TIMESTAMP"):
+                self.advance()
+                if self.tok.kind is not TokenKind.STRING:
+                    raise self.error(f"expected string literal after {word}")
+                return ast.TypedLit(pos, word, self.advance().value)
+            if word == "CAST":
+                return self.parse_cast()
+            if word == "CASE":
+                return self.parse_case()
+            if word == "EXISTS":
+                self.advance()
+                self.expect_op("(")
+                query = self.parse_query()
+                self.expect_op(")")
+                return ast.Exists(pos, query)
+            raise self.error("unexpected keyword in expression")
+        if kind is TokenKind.IDENT:
+            self.advance()
+            if self.tok.is_op("(") and not tok.quoted:
+                return self.parse_function_call(tok)
+            if self.accept_op("."):
+                name = self.expect_ident("column name")
+                return ast.ColumnRef(pos, tok.value, name)
+            return ast.ColumnRef(pos, None, tok.value)
+        if tok.is_op("("):
+            self.advance()
+            if self.tok.is_keyword("SELECT", "WITH"):
+                query = self.parse_query()
+                self.expect_op(")")
+                return ast.ScalarSubquery(pos, query)
+            expr = self.parse_expr()
+            self.expect_op(")")
+            return expr
+        raise self.error("expected expression")
+
+    def parse_function_call(self, name_tok: Token) -> ast.FunctionCall:
+        pos = self.pos(name_tok)
+        self.expect_op("(")
+        call = ast.FunctionCall(pos, name_tok.value, [])
+        if self.accept_op("*"):
+            call.star = True
+            self.expect_op(")")
+            return call
+        if self.accept_op(")"):
+            return call
+        if self.accept_keyword("DISTINCT"):
+            call.distinct = True
+        else:
+            self.accept_keyword("ALL")
+        call.args.append(self.parse_expr())
+        while self.accept_op(","):
+            call.args.append(self.parse_expr())
+        self.expect_op(")")
+        return call
+
+    def parse_cast(self) -> ast.Cast:
+        start = self.expect_keyword("CAST")
+        self.expect_op("(")
+        operand = self.parse_expr()
+        self.expect_keyword("AS")
+        type_tok = self.tok
+        if type_tok.kind not in (TokenKind.IDENT, TokenKind.KEYWORD):
+            raise self.error("expected type name")
+        self.advance()
+        params: list[int] = []
+        if self.accept_op("("):
+            params.append(self.parse_type_param())
+            while self.accept_op(","):
+                params.append(self.parse_type_param())
+            self.expect_op(")")
+        self.expect_op(")")
+        target = ast.TypeName(self.pos(type_tok), type_tok.value, params)
+        return ast.Cast(self.pos(start), operand, target)
+
+    def parse_type_param(self) -> int:
+        tok = self.tok
+        if tok.kind is not TokenKind.NUMBER or not tok.value.isdigit():
+            raise self.error("expected integer type parameter")
+        self.advance()
+        return int(tok.value)
+
+    def parse_case(self) -> ast.Case:
+        start = self.expect_keyword("CASE")
+        operand = None
+        if not self.tok.is_keyword("WHEN"):
+            operand = self.parse_expr()
+        whens = []
+        while self.accept_keyword("WHEN"):
+            cond = self.parse_expr()
+            self.expect_keyword("THEN")
+            whens.append((cond, self.parse_expr()))
+        if not whens:
+            raise self.error("expected WHEN")
+        else_ = None
+        if self.accept_keyword("ELSE"):
+            else_ = self.parse_expr()
+        self.expect_keyword("END")
+        return ast.Case(self.pos(start), operand, whens, else_)
+
+
+def parse(text: str) -> ast.Statement:
+    """Parses one SQL statement (optionally followed by a single ';')."""
+    try:
+        return Parser(text).parse_statement()
+    except RecursionError:
+        raise errors.parse_error("statement is too deeply nested") from None
