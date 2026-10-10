@@ -1,0 +1,107 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase2-java-a1-20261010T190217Z",
+ "language": "java",
+ "task": "phase2",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase2",
+ "prompt_sha256": "5e954bb7c23429bfc51b934db0869d2628731b9dd15e74414a15ecfdcc414ca9",
+ "session_id": "78ebc293-acac-4e61-9349-d6206d95eae7",
+ "tokens": {
+  "input": 192,
+  "output": 189989,
+  "cache_read": 24928187,
+  "cache_creation": 381966,
+  "thinking": null,
+  "thinking_estimated": 75593,
+  "source": "result events",
+  "api_messages": 96
+ },
+ "rate_limit": {
+  "events": 15,
+  "max_utilization": {
+   "five_hour": 0.37,
+   "seven_day": 0.07
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 11.841913400000001,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 102,
+ "result_segments": 1,
+ "assistant_messages": 202,
+ "tool_calls": {
+  "Bash": 87,
+  "Read": 3,
+  "Write": 11
+ },
+ "tool_calls_total": 101,
+ "tool_failures": 1,
+ "build_invocations": 20,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 8,
+ "conformance_progress": [
+  [
+   225,
+   411
+  ],
+  [
+   410,
+   411
+  ],
+  [
+   54,
+   55
+  ],
+  [
+   411,
+   411
+  ],
+  [
+   411,
+   411
+  ],
+  [
+   411,
+   411
+  ],
+  [
+   411,
+   411
+  ]
+ ],
+ "repair_iterations": 7,
+ "time": {
+  "wall_seconds": 1685.1,
+  "model_api_seconds": 1587.4,
+  "tool_seconds": 97.9,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 4,
+  "files_changed": 40,
+  "lines_added": 3830,
+  "lines_removed": 585,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 2 is done: the conformance runner reports 100% pass for Phases 1 and 2, including the optional correlated-subquery file, and everything is committed.\n\n**Test results** (from a clean build)\n```\nphase 1: 225/225 pass, 0 fail, 0 error, 0 not implemented\nphase 2: 186/186 pass, 0 fail, 0 error, 0 not implemented\nTOTAL: 411/411 pass\n```\n- `make build test`: 33 unit tests passed, 0 failed. `make lint` (warnings as errors) is clean.\n- I also re-ran the whole suite with `optimize: false`, with nested-loop joins forced, and with hash joins forced and optimization off. All 411 passed each time.\n- About 30,000 randomly generated queries (joins, GROUP BY/HAVING, DISTINCT, IN/EXISTS/scalar subqueries, correlated or not, derived tables, CTEs) gave the same results as SQLite. These only use integer and text columns with NULLs.\n\n**What I implemented**\n- **Pipeline:** each stage is its own class: lexer \u2192 parser \u2192 semantic analysis \u2192 logical plan \u2192 optimizer \u2192 physical plan \u2192 operators.\n- **SQL features:** GROUP BY (including aliases, positions and expressions) with HAVING, DISTINCT, and `COUNT/SUM/AVG(DISTINCT \u2026)`. INNER, LEFT and CROSS joins, comma joins and parenthesized joins.\n- **Functions:** every scalar function in the spec, plus CASE, LIKE, BETWEEN and IN lists.\n- **Subqueries:** scalar, `IN`, `EXISTS`, derived tables and CTEs (column renaming, shadowing, no recursion), uncorrelated and correlated. Correlated subqueries also work inside grouped queries.\n- **EXPLAIN** works both as a statement and as the `explain` op. `CREATE/DROP INDEX` answer UNSUPPORTED, as do `UNION` and RIGHT/FULL joins.\n- **Capabilities claimed:** all of Phase 2, including the optional `sql.correlated_subquery`.\n\n**Main design decisions**\n- **Correlation:** each query level has an id. A column found in an outer level is recorded as a reference to that level's current row, so every subquery knows exactly which outer values it depends on.\n- **Subquery speed:** uncorrelated subqueries run once. Correlated ones remember results per outer value. When a correlated subquery filters on `inner = outer`, its input is hashed once and then looked up per outer row. On a 100k-row dataset this took one query from 37 s to about 0.1 s, and another from 3.7 s to 41 ms.\n- **Optimizer:** WHERE and ON conditions are pushed down to the tables where that doesn't change results. A comma join with a matching WHERE condition becomes an inner join. Equality joins use a hash join; anything else uses a nested loop. `--max-join-rows` is enforced.\n\n**Known limitations and judgement calls**\n- **UPPER/LOWER:** the spec says only ASCII letters change case, but the public test expects `UPPER('abc \u00dcn\u00ef')` = `'ABC \u00dcn\u00ef'`, where the plain `n` stays lowercase. I implemented \"a word containing any non-ASCII character is left unchanged\". This is my best guess at the intended rule, and hidden tests on mixed strings could expect something else.\n- **Not yet built (Phase 3+):** indexes, statistics, PQCF storage, the HTTP server, column pruning (scans read all columns and EXPLAIN lists them all), choosing which side of a hash join to build, and multi-threaded or vectorized execution.\n- **Rare cases answered UNSUPPORTED:** a parenthesized join on the right whose ON condition refers to tables outside the parentheses.\n- **Error priority:** a runtime error in a constant argument, such as `ROUND(x, 1/0)`, is raised during analysis and can take precedence over a semantic error elsewhere in the same query.\n\nThese interpretations are documented in `implementations/java/README.md`.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

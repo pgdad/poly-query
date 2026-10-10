@@ -1,0 +1,59 @@
+{
+ "seconds": 1.7,
+ "status": {
+  "build_exit": "0",
+  "conformance_exit": "0"
+ },
+ "phases": [
+  1,
+  2
+ ],
+ "summary": {
+  "by_phase": {
+   "1": {
+    "total": 249,
+    "pass": 249,
+    "fail": 0,
+    "error": 0,
+    "not_implemented": 0
+   },
+   "2": {
+    "total": 202,
+    "pass": 202,
+    "fail": 0,
+    "error": 0,
+    "not_implemented": 0
+   }
+  },
+  "total": {
+   "total": 451,
+   "pass": 451,
+   "fail": 0,
+   "error": 0,
+   "not_implemented": 0
+  }
+ },
+ "phase_passed": {
+  "1": true,
+  "2": true
+ },
+ "capabilities": [
+  "ingest.csv",
+  "ingest.json",
+  "ingest.jsonl",
+  "phase1",
+  "phase2",
+  "sql.basic",
+  "sql.correlated_subquery",
+  "sql.cte",
+  "sql.functions",
+  "sql.groupby",
+  "sql.join",
+  "sql.subquery",
+  "test.functions"
+ ],
+ "extra": {},
+ "outcome": "success",
+ "validated_at": "2026-10-10T19:30:35+00:00",
+ "harness_commit": "c001127"
+}
