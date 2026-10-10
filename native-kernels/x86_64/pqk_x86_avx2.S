@@ -1382,51 +1382,115 @@ ENDF pqk_x86_avx2_hash_i64
 
 /* ------------------------------------------------------------------------
  * void pqk_x86_avx2_compare_fixed(a=rdi, b=rsi, width=rdx, n=rcx, out=r8)
- * Per record, 32-byte chunks: vpcmpeqb + vpmovmskb, mask limited to the
- * record (bzhi), tzcnt finds the first differing byte. A 32-byte load is
- * only issued when at least 32 bytes remain before the END OF THE WHOLE
- * buffer (r9 - offset), so loads may run into the next record but never past
- * a + width*n. Otherwise: 8-byte bswap compares, then bytes.
+ * Records of width <= 32 (common case) use a dedicated one-chunk loop with
+ * the record byte mask precomputed. Otherwise, per record, 32-byte chunks: vpcmpeqb + vpmovmskb -> "differs" mask (the
+ * record's last chunk limited to the record with bzhi). Branch-free per
+ * record: every chunk is scanned (fixed trip count per width, so the loop is
+ * predictable) and pos = min(offset + tzcnt(mask)) is tracked with cmovc
+ * (tzcnt sets CF for an empty mask) / cmova. If nothing differs pos becomes
+ * 0, whose bytes are equal, so the same byte compare (seta/sbb -> -1/0/1)
+ * yields 0. A 32-byte load is issued only if >= 32 bytes remain before the
+ * END OF THE WHOLE BUFFER (r9 - offset): loads may run into the next record
+ * but never past a + width*n; otherwise (last few records) the rest of the
+ * record is compared with 8-byte bswap compares and single bytes.
  * r9 = bytes from current record start to buffer end, r10 = offset in
- * record, r11 = bytes left in record, rbx/r12 = byte or qword operands.
+ * record, r11 = bytes left in record, r13 = first differing offset (-1 =
+ * none yet), r14 = -1, rbx/r12 = byte or qword operands.
  * ---------------------------------------------------------------------- */
 FUNC pqk_x86_avx2_compare_fixed
         test    %rcx, %rcx
         jz      .Lcf_ret0
+        test    %rdx, %rdx
+        jz      .Lcf_zero
         push    %rbx
         push    %r12
+        push    %r13
+        push    %r14
+        mov     $-1, %r14
         mov     %rdx, %r9
         imul    %rcx, %r9
-.Lcf_rec:
-        xor     %r10d, %r10d
-.Lcf_vec:
-        mov     %rdx, %r11
-        sub     %r10, %r11
-        jz      .Lcf_eq
-        mov     %r9, %rax
-        sub     %r10, %rax
-        cmp     $32, %rax
-        jb      .Lcf_q
-        vmovdqu (%rdi,%r10), %ymm0
-        vpcmpeqb (%rsi,%r10), %ymm0, %ymm0
+        cmp     $32, %rdx
+        ja      .Lcf_rec
+        /* width <= 32: one chunk per record, r13d = record byte mask */
+        mov     $-1, %r13d
+        bzhi    %edx, %r13d, %r13d
+.Lcf_fast:
+        cmp     $32, %r9
+        jb      .Lcf_rec                        /* last records: general path */
+        vmovdqu (%rdi), %ymm0
+        vpcmpeqb (%rsi), %ymm0, %ymm0
         vpmovmskb %ymm0, %eax
-        not     %eax
-        cmp     $32, %r11
-        jae     1f
-        bzhi    %r11d, %eax, %eax
-1:      test    %eax, %eax
-        jnz     .Lcf_vdiff
-        add     $32, %r10
-        cmp     $32, %r11
-        ja      .Lcf_vec
-        jmp     .Lcf_eq
-.Lcf_vdiff:
+        andn    %r13d, %eax, %eax               /* differs & in record */
         tzcnt   %eax, %eax
-        add     %r10, %rax
+        and     $31, %eax                       /* none -> byte 0 (equal) */
         movzbl  (%rdi,%rax), %ebx
         movzbl  (%rsi,%rax), %r12d
         cmp     %r12d, %ebx
-        jmp     .Lcf_diff
+        seta    %al
+        sbb     $0, %al
+        mov     %al, (%r8)
+        inc     %r8
+        add     %rdx, %rdi
+        add     %rdx, %rsi
+        sub     %rdx, %r9
+        dec     %rcx
+        jnz     .Lcf_fast
+        jmp     .Lcf_done
+.Lcf_rec:
+        xor     %r10d, %r10d
+        mov     %r14, %r13
+.Lcf_chunk:
+        mov     %rdx, %r11
+        sub     %r10, %r11                      /* > 0 */
+        mov     %r9, %rax
+        sub     %r10, %rax
+        cmp     $32, %rax
+        jb      .Lcf_tail
+        vmovdqu (%rdi,%r10), %ymm0
+        vpcmpeqb (%rsi,%r10), %ymm0, %ymm0
+        vpmovmskb %ymm0, %eax
+        not     %eax                            /* differs mask */
+        cmp     $32, %r11
+        ja      1f
+        bzhi    %r11d, %eax, %eax
+1:
+        tzcnt   %eax, %eax                      /* CF = (mask == 0) */
+        lea     (%rax,%r10), %rax
+        cmovc   %r14, %rax
+        cmp     %rax, %r13
+        cmova   %rax, %r13
+        add     $32, %r10
+        cmp     $32, %r11
+        ja      .Lcf_chunk
+.Lcf_res:
+        xor     %eax, %eax
+        cmp     %r14, %r13
+        cmove   %rax, %r13                      /* none: byte 0 (equal) */
+        movzbl  (%rdi,%r13), %ebx
+        movzbl  (%rsi,%r13), %r12d
+        cmp     %r12d, %ebx
+.Lcf_sign:
+        seta    %al
+        sbb     $0, %al                         /* (a > b) - (a < b) */
+.Lcf_store:
+        mov     %al, (%r8)
+        inc     %r8
+        add     %rdx, %rdi
+        add     %rdx, %rsi
+        sub     %rdx, %r9
+        dec     %rcx
+        jnz     .Lcf_rec
+.Lcf_done:
+        pop     %r14
+        pop     %r13
+        pop     %r12
+        pop     %rbx
+        vzeroupper
+.Lcf_ret0:
+        ret
+.Lcf_tail:                                      /* near the buffer end */
+        cmp     %r14, %r13
+        jne     .Lcf_res                        /* already found earlier */
 .Lcf_q:
         lea     8(%r10), %rax
         cmp     %rdx, %rax
@@ -1443,31 +1507,22 @@ FUNC pqk_x86_avx2_compare_fixed
         movzbl  (%rdi,%r10), %ebx
         movzbl  (%rsi,%r10), %r12d
         cmp     %r12d, %ebx
-        jne     .Lcf_diff
+        jne     .Lcf_sign
         inc     %r10
         jmp     .Lcf_b
 .Lcf_qdiff:
         bswap   %rbx
         bswap   %r12
         cmp     %r12, %rbx
-.Lcf_diff:
-        sbb     %eax, %eax
-        or      $1, %eax
-        jmp     .Lcf_store
+        jmp     .Lcf_sign
 .Lcf_eq:
         xor     %eax, %eax
-.Lcf_store:
-        mov     %al, (%r8)
+        jmp     .Lcf_store
+.Lcf_zero:                                      /* width 0: all equal */
+        movb    $0, (%r8)
         inc     %r8
-        add     %rdx, %rdi
-        add     %rdx, %rsi
-        sub     %rdx, %r9
         dec     %rcx
-        jnz     .Lcf_rec
-        pop     %r12
-        pop     %rbx
-        vzeroupper
-.Lcf_ret0:
+        jnz     .Lcf_zero
         ret
 ENDF pqk_x86_avx2_compare_fixed
 

@@ -22,7 +22,9 @@
  *    no mispredict on varying selectivity. The 64-byte store stays inside
  *    out_idx[0..n) because outputs-so-far <= rows consumed.
  *  - Validity: kmovb/kmovw load validity bytes straight into k registers and
- *    are used as (merge or zero) write masks.
+ *    are used as merge write masks on arithmetic. Hot loops use plain loads:
+ *    zero-masked loads measured up to 2.5x slower when streaming from DRAM
+ *    on Zen 5, so masked loads appear only in tails (once per call/record).
  *  - sum_i64 exact: vpsraq exists, so per lane S = sum(x) mod 2^64 and
  *    H = sum(x >> 32) (arithmetic). sum(x) = H*2^32 + L, L = sum of low
  *    halves = (S - H*2^32) mod 2^64 (exact while < 2^64); chunks of <= 2^28
@@ -473,7 +475,9 @@ ENDF pqk_x86_avx512_compare_i64
  * int pqk_x86_avx512_sum_i64(data=rdi, validity=rsi, n=rdx, out_sum=rcx)
  * Accumulators: S zmm0/zmm1, H zmm2/zmm3 (two sets, 16 rows per step);
  * zmm6/zmm7 data, zmm10/zmm11 temps. Validity: kmovb of the row group's
- * byte as zero-mask on the load. r8/r9 = 128-bit total (lo/hi),
+ * byte as merge mask on the adds (plain loads: zero-masked loads were ~2.5x
+ * slower when streaming from DRAM on Zen 5; masked loads are only used for
+ * the final < 16 rows). r8/r9 = 128-bit total (lo/hi),
  * r10 = rows remaining in the call, r12 = rows left in chunk, r11 = out.
  * ---------------------------------------------------------------------- */
 #ifndef SUM_CHUNK_ROWS
@@ -520,14 +524,14 @@ FUNC pqk_x86_avx512_sum_i64
         jb      .Ls_tail
         kmovb   (%rsi), %k1
         kmovb   1(%rsi), %k2
-        vmovdqu64 (%rdi), %zmm6{%k1}{z}
-        vmovdqu64 64(%rdi), %zmm7{%k2}{z}
-        vpaddq  %zmm6, %zmm0, %zmm0
-        vpaddq  %zmm7, %zmm1, %zmm1
+        vmovdqu64 (%rdi), %zmm6
+        vmovdqu64 64(%rdi), %zmm7
+        vpaddq  %zmm6, %zmm0, %zmm0{%k1}
+        vpaddq  %zmm7, %zmm1, %zmm1{%k2}
         vpsraq  $32, %zmm6, %zmm6
         vpsraq  $32, %zmm7, %zmm7
-        vpaddq  %zmm6, %zmm2, %zmm2
-        vpaddq  %zmm7, %zmm3, %zmm3
+        vpaddq  %zmm6, %zmm2, %zmm2{%k1}
+        vpaddq  %zmm7, %zmm3, %zmm3{%k2}
         sub     $-128, %rdi
         add     $2, %rsi
         sub     $16, %r12
@@ -583,8 +587,9 @@ ENDF pqk_x86_avx512_sum_i64
 /* ------------------------------------------------------------------------
  * double pqk_x86_avx512_sum_f64(data=rdi, validity=rsi, n=rdx)
  * 32 lane partial sums in zmm0-zmm3 (+0.0 init, so a lane is never -0.0
- * and zero-masked +0.0 lanes are exact no-ops); 32 rows per step, then
- * masked 8-row groups. r10 = rows remaining.
+ * and zero-masked +0.0 lanes are exact no-ops); 32 rows per step with the
+ * validity bytes as merge masks on the adds, then masked 8-row groups.
+ * r10 = rows remaining.
  * ---------------------------------------------------------------------- */
 FUNC pqk_x86_avx512_sum_f64
         vpxorq  %zmm0, %zmm0, %zmm0
@@ -611,14 +616,14 @@ FUNC pqk_x86_avx512_sum_f64
         kmovb   1(%rsi), %k2
         kmovb   2(%rsi), %k3
         kmovb   3(%rsi), %k4
-        vmovupd (%rdi), %zmm4{%k1}{z}
-        vmovupd 64(%rdi), %zmm5{%k2}{z}
-        vmovupd 128(%rdi), %zmm6{%k3}{z}
-        vmovupd 192(%rdi), %zmm7{%k4}{z}
-        vaddpd  %zmm4, %zmm0, %zmm0
-        vaddpd  %zmm5, %zmm1, %zmm1
-        vaddpd  %zmm6, %zmm2, %zmm2
-        vaddpd  %zmm7, %zmm3, %zmm3
+        vmovupd (%rdi), %zmm4                   /* plain loads: a masked */
+        vmovupd 64(%rdi), %zmm5                 /* memory operand behaves */
+        vmovupd 128(%rdi), %zmm6                /* like a slow masked load */
+        vmovupd 192(%rdi), %zmm7
+        vaddpd  %zmm4, %zmm0, %zmm0{%k1}
+        vaddpd  %zmm5, %zmm1, %zmm1{%k2}
+        vaddpd  %zmm6, %zmm2, %zmm2{%k3}
+        vaddpd  %zmm7, %zmm3, %zmm3{%k4}
         add     $256, %rdi
         add     $4, %rsi
         sub     $32, %r10
@@ -1061,59 +1066,125 @@ ENDF pqk_x86_avx512_hash_i64
 
 /* ------------------------------------------------------------------------
  * void pqk_x86_avx512_compare_fixed(a=rdi, b=rsi, width=rdx, n=rcx, out=r8)
- * Per record, 64-byte chunks loaded with byte masks limited to the record
- * (vmovdqu8 {z}; masked-off bytes are never accessed), vpcmpb NEQ -> k2,
- * tzcnt gives the first differing byte, compared as unsigned in scalar.
- * r10 = offset in record, r11 = bytes left in record, r9 = byte mask,
- * rbx/r12 = differing bytes.
+ * Records of width <= 64 (common case) use a dedicated one-chunk loop with
+ * the record byte mask precomputed. Otherwise, per record, 64-byte chunks: vpcmpb NEQ -> k2 -> "differs" mask (the
+ * record's last chunk limited to the record with bzhi). Branch-free per
+ * record: every chunk is scanned (fixed trip count per width) and
+ * pos = min(offset + tzcnt(mask)) is tracked with cmovc (tzcnt sets CF for
+ * an empty mask) / cmova. If nothing differs pos becomes 0, whose bytes are
+ * equal, so the same byte compare (seta/sbb -> -1/0/1) yields 0. Plain loads
+ * (which may run into the next record) are used while >= 64 bytes remain
+ * before the end of the whole buffer; within the last 64 bytes the loads are
+ * byte-masked to the record (vmovdqu8 {z}, fault suppressing).
+ * r9 = bytes from current record start to buffer end, r10 = offset in
+ * record, r11 = bytes left in record, r13 = first differing offset (-1 =
+ * none yet), r14 = -1, rbx/r12 = differing bytes.
  * ---------------------------------------------------------------------- */
 FUNC pqk_x86_avx512_compare_fixed
         test    %rcx, %rcx
         jz      .Lcf_ret0
+        test    %rdx, %rdx
+        jz      .Lcf_zero
         push    %rbx
         push    %r12
-.Lcf_rec:
-        xor     %r10d, %r10d
-.Lcf_chunk:
-        mov     %rdx, %r11
-        sub     %r10, %r11
-        jz      .Lcf_eq
-        mov     $-1, %r9
-        cmp     $64, %r11
-        jae     1f
-        bzhi    %r11, %r9, %r9                  /* (bzhi only reads index[7:0]) */
-1:      kmovq   %r9, %k1
-        vmovdqu8 (%rdi,%r10), %zmm0{%k1}{z}
-        vmovdqu8 (%rsi,%r10), %zmm1{%k1}{z}
-        vpcmpb  $4, %zmm1, %zmm0, %k2
+        push    %r13
+        push    %r14
+        mov     $-1, %r14
+        mov     %rdx, %r9
+        imul    %rcx, %r9
+        cmp     $64, %rdx
+        ja      .Lcf_rec
+        /* width <= 64: one chunk per record, r13 = record byte mask */
+        mov     $-1, %r13
+        bzhi    %rdx, %r13, %r13
+.Lcf_fast:
+        cmp     $64, %r9
+        jb      .Lcf_rec                        /* last records: general path */
+        vmovdqu64 (%rdi), %zmm0
+        vpcmpb  $4, (%rsi), %zmm0, %k2
         kmovq   %k2, %rax
-        test    %rax, %rax
-        jnz     .Lcf_diff
-        add     $64, %r10
-        cmp     $64, %r11
-        ja      .Lcf_chunk
-.Lcf_eq:
-        xor     %eax, %eax
-        jmp     .Lcf_store
-.Lcf_diff:
+        and     %r13, %rax                      /* differs & in record */
         tzcnt   %rax, %rax
-        add     %r10, %rax
+        and     $63, %eax                       /* none -> byte 0 (equal) */
         movzbl  (%rdi,%rax), %ebx
         movzbl  (%rsi,%rax), %r12d
         cmp     %r12d, %ebx
-        sbb     %eax, %eax
-        or      $1, %eax
+        seta    %al
+        sbb     $0, %al
+        mov     %al, (%r8)
+        inc     %r8
+        add     %rdx, %rdi
+        add     %rdx, %rsi
+        sub     %rdx, %r9
+        dec     %rcx
+        jnz     .Lcf_fast
+        jmp     .Lcf_done
+.Lcf_rec:
+        xor     %r10d, %r10d
+        mov     %r14, %r13
+.Lcf_chunk:
+        mov     %rdx, %r11
+        sub     %r10, %r11                      /* > 0 */
+        mov     %r9, %rax
+        sub     %r10, %rax
+        cmp     $64, %rax
+        jb      .Lcf_tail
+        vmovdqu64 (%rdi,%r10), %zmm0
+        vpcmpb  $4, (%rsi,%r10), %zmm0, %k2
+        kmovq   %k2, %rax                       /* differs mask */
+.Lcf_got:
+        cmp     $64, %r11
+        ja      1f
+        bzhi    %r11, %rax, %rax
+1:
+        tzcnt   %rax, %rax                      /* CF = (mask == 0) */
+        lea     (%rax,%r10), %rax
+        cmovc   %r14, %rax
+        cmp     %rax, %r13
+        cmova   %rax, %r13
+        add     $64, %r10
+        cmp     $64, %r11
+        ja      .Lcf_chunk
+.Lcf_res:
+        xor     %eax, %eax
+        cmp     %r14, %r13
+        cmove   %rax, %r13                      /* none: byte 0 (equal) */
+        movzbl  (%rdi,%r13), %ebx
+        movzbl  (%rsi,%r13), %r12d
+        cmp     %r12d, %ebx
+.Lcf_sign:
+        seta    %al
+        sbb     $0, %al                         /* (a > b) - (a < b) */
 .Lcf_store:
         mov     %al, (%r8)
         inc     %r8
         add     %rdx, %rdi
         add     %rdx, %rsi
+        sub     %rdx, %r9
         dec     %rcx
         jnz     .Lcf_rec
+.Lcf_done:
+        pop     %r14
+        pop     %r13
         pop     %r12
         pop     %rbx
         vzeroupper
 .Lcf_ret0:
+        ret
+.Lcf_tail:                                      /* within 64 B of the end: r11 < 64 */
+        mov     $-1, %rax
+        bzhi    %r11, %rax, %rax
+        kmovq   %rax, %k1
+        vmovdqu8 (%rdi,%r10), %zmm0{%k1}{z}
+        vmovdqu8 (%rsi,%r10), %zmm1{%k1}{z}
+        vpcmpb  $4, %zmm1, %zmm0, %k2
+        kmovq   %k2, %rax
+        jmp     .Lcf_got
+.Lcf_zero:                                      /* width 0: all equal */
+        movb    $0, (%r8)
+        inc     %r8
+        dec     %rcx
+        jnz     .Lcf_zero
         ret
 ENDF pqk_x86_avx512_compare_fixed
 
@@ -1178,7 +1249,8 @@ FUNC pqk_x86_avx512_group_sum_i64
         mov     %r10, %rax
         shr     $3, %rax
         kmovw   (%rdx,%rax), %k4
-        vpcmpud $2, (%rdi,%r10,4), %zmm1, %k1{%k4}
+        vmovdqu32 (%rdi,%r10,4), %zmm0
+        vpcmpud $2, %zmm0, %zmm1, %k1{%k4}
         kortestw %k1, %k1
         jnz     .Lg_einval
         add     $16, %r10
