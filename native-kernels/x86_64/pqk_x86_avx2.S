@@ -75,20 +75,38 @@
         .p2align 5
 /* vpsllvq counts: group g (rows 4g..4g+3) lane j -> 63-(4g+j), moving
  * validity bit 4g+j into the sign bit of lane j. */
+        .type   shc, @object
 shc:
         .set r, 0
         .rept 64
         .quad 63 - r
         .set r, r + 1
         .endr
+        .size   shc, . - shc
+        .type   c_eight_d, @object
 c_eight_d:      .long 8
+        .size   c_eight_d, . - c_eight_d
+        .type   c_sign_d, @object
 c_sign_d:       .long 0x80000000
+        .size   c_sign_d, . - c_sign_d
+        .type   c_fmix1_lo, @object
 c_fmix1_lo:     .quad 0xed558ccd
+        .size   c_fmix1_lo, . - c_fmix1_lo
+        .type   c_fmix1_hi, @object
 c_fmix1_hi:     .quad 0xff51afd7
+        .size   c_fmix1_hi, . - c_fmix1_hi
+        .type   c_fmix2_lo, @object
 c_fmix2_lo:     .quad 0x1a85ec53
+        .size   c_fmix2_lo, . - c_fmix2_lo
+        .type   c_fmix2_hi, @object
 c_fmix2_hi:     .quad 0xc4ceb9fe
+        .size   c_fmix2_hi, . - c_fmix2_hi
+        .type   c_pinf, @object
 c_pinf:         .quad 0x7ff0000000000000
+        .size   c_pinf, . - c_pinf
+        .type   c_ninf, @object
 c_ninf:         .quad 0xfff0000000000000
+        .size   c_ninf, . - c_ninf
         .text
 
 /* ------------------------------------------------------------------------
@@ -261,16 +279,22 @@ ENDF \name
 
         .section .rodata
         .p2align 2
+        .type   vop_table, @object
 vop_table:
         .long   vop_eq - vop_table, vop_ne - vop_table, vop_lt - vop_table
         .long   vop_le - vop_table, vop_gt - vop_table, vop_ge - vop_table
         .long   vop_bt - vop_table
+        .size   vop_table, . - vop_table
+        .type   vcnt_table, @object
 vcnt_table:
         .long   vcnt_k0 - vcnt_table, vcnt_k0 - vcnt_table, vcnt_k1 - vcnt_table
         .long   vcnt_k2 - vcnt_table, vcnt_k2 - vcnt_table, vcnt_k1 - vcnt_table
         .long   vcnt_k3 - vcnt_table
+        .size   vcnt_table, . - vcnt_table
+        .type   vop_inv, @object
 vop_inv:
         .byte   0, 1, 0, 1, 0, 1, 1
+        .size   vop_inv, . - vop_inv
         .text
 
 /* ------------------------------------------------------------------------
@@ -546,9 +570,11 @@ ENDF \name
 
         .section .rodata
         .p2align 2
+        .type   vcmp_table, @object
 vcmp_table:
         .long   vcmp_eq - vcmp_table, vcmp_ne - vcmp_table, vcmp_lt - vcmp_table
         .long   vcmp_le - vcmp_table, vcmp_gt - vcmp_table, vcmp_ge - vcmp_table
+        .size   vcmp_table, . - vcmp_table
         .text
 
 /* ------------------------------------------------------------------------

@@ -224,13 +224,17 @@ ENDF \name
 
         .section .rodata
         .p2align 2
+        .type   sop_table, @object
 sop_table:
         .long   sop_eq - sop_table, sop_ne - sop_table, sop_lt - sop_table
         .long   sop_le - sop_table, sop_gt - sop_table, sop_ge - sop_table
         .long   sop_bt - sop_table
+        .size   sop_table, . - sop_table
+        .type   scmp_table, @object
 scmp_table:
         .long   scmp_eq - scmp_table, scmp_ne - scmp_table, scmp_lt - scmp_table
         .long   scmp_le - scmp_table, scmp_gt - scmp_table, scmp_ge - scmp_table
+        .size   scmp_table, . - scmp_table
         .text
 
 /* ------------------------------------------------------------------------

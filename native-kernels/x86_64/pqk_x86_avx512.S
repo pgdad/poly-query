@@ -65,19 +65,35 @@
 
         .section .rodata
         .p2align 6
+        .type   iota16, @object
 iota16:
         .set r, 0
         .rept 16
         .long r
         .set r, r + 1
         .endr
+        .size   iota16, . - iota16
+        .type   c_sixteen_d, @object
 c_sixteen_d:    .long 16
+        .size   c_sixteen_d, . - c_sixteen_d
+        .type   c_fmix1, @object
 c_fmix1:        .quad 0xff51afd7ed558ccd
+        .size   c_fmix1, . - c_fmix1
+        .type   c_fmix2, @object
 c_fmix2:        .quad 0xc4ceb9fe1a85ec53
+        .size   c_fmix2, . - c_fmix2
+        .type   c_pinf, @object
 c_pinf:         .quad 0x7ff0000000000000
+        .size   c_pinf, . - c_pinf
+        .type   c_ninf, @object
 c_ninf:         .quad 0xfff0000000000000
+        .size   c_ninf, . - c_ninf
+        .type   c_i64max, @object
 c_i64max:       .quad 0x7fffffffffffffff
+        .size   c_i64max, . - c_i64max
+        .type   c_i64min, @object
 c_i64min:       .quad 0x8000000000000000
+        .size   c_i64min, . - c_i64min
         .text
 
 /* ------------------------------------------------------------------------
@@ -175,10 +191,12 @@ ENDF \name
 
         .section .rodata
         .p2align 2
+        .type   kop_table, @object
 kop_table:
         .long   kop_eq - kop_table, kop_ne - kop_table, kop_lt - kop_table
         .long   kop_le - kop_table, kop_gt - kop_table, kop_ge - kop_table
         .long   kop_bt - kop_table
+        .size   kop_table, . - kop_table
         .text
 
 /* ------------------------------------------------------------------------
@@ -386,9 +404,11 @@ ENDF \name
 
         .section .rodata
         .p2align 2
+        .type   kcmp_table, @object
 kcmp_table:
         .long   kcmp_eq - kcmp_table, kcmp_ne - kcmp_table, kcmp_lt - kcmp_table
         .long   kcmp_le - kcmp_table, kcmp_gt - kcmp_table, kcmp_ge - kcmp_table
+        .size   kcmp_table, . - kcmp_table
         .text
 
 /* ------------------------------------------------------------------------
@@ -941,31 +961,35 @@ ENDF \name
  * VPOPCNTQ is not part of F/BW/VL/DQ, so: Mula nibble lookup with vpshufb
  * on zmm (BW), byte counts summed per qword with vpsadbw, 256 bytes per
  * iteration into zmm accumulators; remaining whole qwords with POPCNT and
- * the last 0..63 bits via lvp + bzhi. zmm16 = nibble LUT, zmm17 = 0x0f,
- * zmm18 = zero, zmm0/zmm1 = accumulators, rcx = 256-byte blocks / words.
+ * the last 0..63 bits via lvp + bzhi. zmm10 = nibble LUT, zmm11 = 0x0f,
+ * zmm12 = zero, zmm0/zmm1 = accumulators, rcx = 256-byte blocks / words.
  * ---------------------------------------------------------------------- */
 .macro MULA src, acc
-        vpandq  \src, %zmm17, %zmm20
-        vpsrlw  $4, \src, %zmm21
-        vpandq  %zmm21, %zmm17, %zmm21
-        vpshufb %zmm20, %zmm16, %zmm20
-        vpshufb %zmm21, %zmm16, %zmm21
-        vpaddb  %zmm21, %zmm20, %zmm20
-        vpsadbw %zmm18, %zmm20, %zmm20
-        vpaddq  %zmm20, \acc, \acc
+        vpandq  \src, %zmm11, %zmm13
+        vpsrlw  $4, \src, %zmm14
+        vpandq  %zmm14, %zmm11, %zmm14
+        vpshufb %zmm13, %zmm10, %zmm13
+        vpshufb %zmm14, %zmm10, %zmm14
+        vpaddb  %zmm14, %zmm13, %zmm13
+        vpsadbw %zmm12, %zmm13, %zmm13
+        vpaddq  %zmm13, \acc, \acc
 .endm
 
         .section .rodata
         .p2align 4
+        .type   nib_lut, @object
 nib_lut:
         .byte 0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4
+        .size   nib_lut, . - nib_lut
+        .type   c_0f, @object
 c_0f:   .byte 0x0f
+        .size   c_0f, . - c_0f
         .text
 
 FUNC pqk_x86_avx512_bitmap_popcount
-        vbroadcasti32x4 nib_lut(%rip), %zmm16
-        vpbroadcastb c_0f(%rip), %zmm17
-        vpxorq  %zmm18, %zmm18, %zmm18
+        vbroadcasti32x4 nib_lut(%rip), %zmm10
+        vpbroadcastb c_0f(%rip), %zmm11
+        vpxorq  %zmm12, %zmm12, %zmm12
         vpxorq  %zmm0, %zmm0, %zmm0
         vpxorq  %zmm1, %zmm1, %zmm1
         mov     %rsi, %rcx
