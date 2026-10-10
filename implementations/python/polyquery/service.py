@@ -3,18 +3,18 @@ owns the catalog and runs loads and SQL statements."""
 
 from __future__ import annotations
 
+import json
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
-
-import json
 
 from . import errors
 from .analysis.binder import Binder
 from .datatypes import STRING
 from .execution.compiler import evaluate_constant
 from .execution.context import ExecutionContext
-from .execution.executor import QueryResult, run_plan
+from .execution.executor import QueryResult, run_plan, stream_plan
 from .ingest.limits import DEFAULT_MAX_INGEST_BYTES, DEFAULT_MAX_TABLE_ROWS, IngestLimits
 from .ingest.loader import load_table
 from .planner.physical import PhysicalPlan, PlanOptions, plan_statement
@@ -51,11 +51,22 @@ class EngineConfig:
 class QueryOptions:
     max_rows: int | None = None
     timeout_ms: int = 0
+    # absolute time.monotonic() deadline; overrides timeout_ms (the server
+    # starts the clock when the query arrives, so queueing time counts)
+    deadline: float | None = None
     cancel_event: threading.Event | None = None
     optimize: bool = True
     join: str = "auto"
     use_indexes: bool = True
     extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class QueryCursor:
+    """A started statement whose result rows are produced on demand."""
+
+    columns: list[Column]
+    batches: Iterator[list[tuple]]
 
 
 class Engine:
@@ -133,7 +144,25 @@ class Engine:
     # ------------------------------------------------------------ SQL
 
     def query(self, sql: str, options: QueryOptions) -> QueryResult:
+        """Runs a statement to completion."""
         statement = parse(sql)
+        if not isinstance(statement, ast.QueryStatement):
+            return self._run_statement(statement, options)
+        plan, ctx = self._prepare(statement.query, options)
+        return run_plan(plan, ctx, max_rows=options.max_rows)
+
+    def open_cursor(self, sql: str, options: QueryOptions) -> QueryCursor:
+        """Parses, binds and plans a statement (raising errors found up to
+        that point) and returns a cursor that executes it incrementally."""
+        statement = parse(sql)
+        if not isinstance(statement, ast.QueryStatement):
+            result = self._run_statement(statement, options)
+            return QueryCursor(result.columns, iter([result.rows] if result.rows else []))
+        plan, ctx = self._prepare(statement.query, options)
+        return QueryCursor(plan.columns, stream_plan(plan, ctx, max_rows=options.max_rows))
+
+    def _run_statement(self, statement: ast.Statement, options: QueryOptions) -> QueryResult:
+        """EXPLAIN, CREATE INDEX and DROP INDEX."""
         if isinstance(statement, ast.Explain):
             plan = self._plan(statement.query, options)
             text = json.dumps(plan.to_json(), ensure_ascii=False)
@@ -141,19 +170,21 @@ class Engine:
         if isinstance(statement, ast.CreateIndex):
             self.create_index(statement)
             return QueryResult([], [])
-        if isinstance(statement, ast.DropIndex):
-            self.drop_index(statement)
-            return QueryResult([], [])
-        assert isinstance(statement, ast.QueryStatement)
-        plan = self._plan(statement.query, options)
+        assert isinstance(statement, ast.DropIndex)
+        self.drop_index(statement)
+        return QueryResult([], [])
+
+    def _prepare(self, query: ast.Query, options: QueryOptions) -> tuple[PhysicalPlan, ExecutionContext]:
+        plan = self._plan(query, options)
         ctx = ExecutionContext.create(
             timeout_ms=options.timeout_ms,
+            deadline=options.deadline,
             max_memory_mb=self.config.max_query_memory_mb,
             test_functions=self.config.test_functions,
             cancel_event=options.cancel_event,
             max_join_rows=self.config.max_join_rows,
         )
-        return run_plan(plan, ctx, max_rows=options.max_rows)
+        return plan, ctx
 
     def create_index(self, statement: ast.CreateIndex) -> None:
         table = self.catalog.get(statement.table)
@@ -192,16 +223,16 @@ class Engine:
         return self._plan(statement.query, options).to_json()
 
     def _plan(self, query: ast.Query, options: QueryOptions) -> PhysicalPlan:
-        """Semantic analysis, logical and physical planning of a query."""
-        binder = Binder(
-            self.catalog, evaluate_constant, test_functions=self.config.test_functions
-        )
+        """Semantic analysis, logical and physical planning of a query
+        against a snapshot of the catalog."""
+        snapshot = self.catalog.snapshot()
+        binder = Binder(snapshot, evaluate_constant, test_functions=self.config.test_functions)
         bound = binder.bind_statement(query)
         plan_options = PlanOptions(
             optimize=options.optimize,
             join=options.join,
             use_indexes=options.use_indexes,
-            indexes_of=self.catalog.indexes_of,
+            indexes_of=snapshot.indexes_of,
             evaluate=evaluate_constant,
         )
         return plan_statement(bound, plan_options)

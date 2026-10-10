@@ -13,7 +13,8 @@ from .serialize import dumps
 log = logging.getLogger("polyquery")
 
 
-def _encode(response: dict[str, Any]) -> bytes:
+def encode_response(response: dict[str, Any]) -> bytes:
+    """One response as a JSON line (never fails: falls back to INTERNAL_ERROR)."""
     try:
         text = dumps(response)
     except (ValueError, TypeError):
@@ -49,14 +50,20 @@ def decode_request(text: str) -> Any:
     return json.loads(text, parse_constant=_reject_constant)
 
 
-def handle_request(handler: RequestHandler, request: Any) -> dict[str, Any]:
+def precheck_request(request: Any) -> dict[str, Any] | None:
+    """The error response for a decoded request that cannot be handled at
+    all (not an object, or an id that cannot be echoed); None if it can."""
     if not isinstance(request, dict):
         return _invalid("request must be a JSON object")
     if not _json_safe(request.get("id")):
         # e.g. a number beyond the FLOAT64 range: it could not be echoed, so the
         # request is rejected before it can have any effect
         return _invalid("request id cannot be echoed")
-    return handler.handle(request)
+    return None
+
+
+def handle_request(handler: RequestHandler, request: Any) -> dict[str, Any]:
+    return precheck_request(request) or handler.handle(request)
 
 
 def handle_line(handler: RequestHandler, line: bytes) -> dict[str, Any] | None:
@@ -75,7 +82,7 @@ def run_session(handler: RequestHandler, stdin: BinaryIO, stdout: BinaryIO) -> N
         response = handle_line(handler, line)
         if response is None:
             continue
-        stdout.write(_encode(response))
+        stdout.write(encode_response(response))
         stdout.flush()
 
 
@@ -84,10 +91,10 @@ def run_exec(handler: RequestHandler, payload: bytes, stdout: BinaryIO) -> None:
     try:
         doc = decode_request(payload.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError):
-        stdout.write(_encode(_invalid("request is not valid JSON")))
+        stdout.write(encode_response(_invalid("request is not valid JSON")))
         stdout.flush()
         return
     requests: Iterable[Any] = doc if isinstance(doc, list) else [doc]
     for request in requests:
-        stdout.write(_encode(handle_request(handler, request)))
+        stdout.write(encode_response(handle_request(handler, request)))
         stdout.flush()

@@ -44,12 +44,16 @@ class ExecutionContext:
         cls,
         *,
         timeout_ms: int = 0,
+        deadline: float | None = None,
         max_memory_mb: int = 4096,
         test_functions: bool = False,
         cancel_event: threading.Event | None = None,
         max_join_rows: int = 100_000_000,
     ) -> ExecutionContext:
-        deadline = time.monotonic() + timeout_ms / 1000.0 if timeout_ms else None
+        """``deadline`` (a time.monotonic() value) takes precedence over
+        ``timeout_ms``, which counts from now."""
+        if deadline is None and timeout_ms:
+            deadline = time.monotonic() + timeout_ms / 1000.0
         return cls(
             deadline, cancel_event, max_memory_mb * 1024 * 1024, test_functions, max_join_rows
         )

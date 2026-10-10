@@ -2,7 +2,8 @@
 
 :class:`RequestHandler` validates request objects, dispatches them to the
 engine and builds response objects. It is transport-independent (used by the
-session and exec CLI modes).
+session and exec CLI modes and by the HTTP server, which passes a
+:class:`QueryControl` to make queries cancellable and to impose deadlines).
 """
 
 from __future__ import annotations
@@ -10,7 +11,10 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import threading
 import time
+from collections.abc import Generator
+from dataclasses import dataclass
 from typing import Any
 
 from .. import ENGINE_NAME, ENGINE_VERSION, PROTOCOL_VERSION, SPEC_VERSION, errors
@@ -20,7 +24,7 @@ from ..service import Engine, QueryOptions, StorageOptions
 from ..storage import pqcf
 from ..storage.catalog import Column
 from ..storage.table import LAYOUTS
-from .serialize import serialize_rows, serialize_value
+from .serialize import row_serializer, serialize_rows, serialize_value
 
 log = logging.getLogger("polyquery")
 
@@ -43,6 +47,8 @@ CAPABILITIES = [
     "storage.mmap",
     "index.hash",
     "index.btree",
+    "phase4",
+    "http.streaming",
 ]
 
 
@@ -199,12 +205,45 @@ def _read_file(full_path: str, max_bytes: int) -> bytes:
 # ------------------------------------------------------------ handler
 
 
+def error_of(exc: Exception) -> errors.PolyQueryError:
+    """The protocol error reported for an exception raised by an operation."""
+    if isinstance(exc, errors.PolyQueryError):
+        return exc
+    if isinstance(exc, RecursionError):
+        return errors.resource_limit("statement is too deeply nested")
+    if isinstance(exc, MemoryError):
+        return errors.resource_limit("out of memory")
+    log.error("internal error while handling request", exc_info=exc)
+    return errors.PolyQueryError(errors.INTERNAL_ERROR, "internal error")
+
+
+@dataclass
+class QueryControl:
+    """Server-side control of one query: cancellation and an absolute
+    ``time.monotonic()`` deadline (None = no timeout)."""
+
+    cancel_event: threading.Event
+    deadline: float | None = None
+
+
+@dataclass
+class QueryStream:
+    """An executing query whose rows are produced incrementally."""
+
+    columns: list[dict[str, str]]
+    batches: Generator[list[Any]]  # serialized row batches
+
+
+# ops that honour a QueryControl
+CONTROLLED_OPS = frozenset({"query"})
+
+
 class RequestHandler:
     def __init__(self, engine: Engine):
         self.engine = engine
         self.config = engine.config
 
-    def handle(self, request: Any) -> dict[str, Any]:
+    def handle(self, request: Any, control: QueryControl | None = None) -> dict[str, Any]:
         """Handles one decoded request; never raises."""
         req_id = request.get("id") if isinstance(request, dict) else None
         started = time.perf_counter()
@@ -217,33 +256,14 @@ class RequestHandler:
             method = getattr(self, "op_" + op, None)
             if method is None:
                 raise errors.invalid_request(f"unknown op '{op}'")
-            body = method(request)
+            body = method(request, control) if op in CONTROLLED_OPS else method(request)
             response: dict[str, Any] = {"id": req_id, "ok": True}
             response.update(body)
             if "stats" in response:
                 response["stats"]["elapsed_us"] = int((time.perf_counter() - started) * 1e6)
             return response
-        except errors.PolyQueryError as e:
-            return {"id": req_id, "ok": False, "error": e.to_json()}
-        except RecursionError:
-            return {
-                "id": req_id,
-                "ok": False,
-                "error": {"code": errors.RESOURCE_LIMIT, "message": "statement is too deeply nested"},
-            }
-        except MemoryError:
-            return {
-                "id": req_id,
-                "ok": False,
-                "error": {"code": errors.RESOURCE_LIMIT, "message": "out of memory"},
-            }
-        except Exception:  # noqa: BLE001 - must never crash the session
-            log.exception("internal error while handling request")
-            return {
-                "id": req_id,
-                "ok": False,
-                "error": {"code": errors.INTERNAL_ERROR, "message": "internal error"},
-            }
+        except Exception as e:  # noqa: BLE001 - must never crash the session
+            return {"id": req_id, "ok": False, "error": error_of(e).to_json()}
 
     # ---------------------------------------------------------------- ops
 
@@ -334,7 +354,9 @@ class RequestHandler:
             )
         return {"table": table.name, "row_count": table.row_count, "columns": columns}
 
-    def _query_request(self, req: dict) -> tuple[str, QueryOptions, bool]:
+    def _query_request(
+        self, req: dict, control: QueryControl | None = None
+    ) -> tuple[str, QueryOptions, bool]:
         sql = req.get("sql")
         if not isinstance(sql, str):
             raise errors.invalid_request("field 'sql' must be a string")
@@ -343,6 +365,9 @@ class RequestHandler:
             max_rows=_optional_nonneg_int(raw, "max_rows"),
             timeout_ms=_optional_nonneg_int(raw, "timeout_ms") or 0,
         )
+        if control is not None:
+            options.cancel_event = control.cancel_event
+            options.deadline = control.deadline
         count_only = self._validate_query_options(raw)
         options.optimize = _optional_bool(raw, "optimize", True)
         options.use_indexes = _optional_bool(raw, "use_indexes", True)
@@ -353,8 +378,8 @@ class RequestHandler:
         sql, options, _ = self._query_request(req)
         return {"plan": self.engine.explain(sql, options)}
 
-    def op_query(self, req: dict) -> dict[str, Any]:
-        sql, options, count_only = self._query_request(req)
+    def op_query(self, req: dict, control: QueryControl | None = None) -> dict[str, Any]:
+        sql, options, count_only = self._query_request(req, control)
         result = self.engine.query(sql, options)
         body: dict[str, Any] = {"columns": [c.to_json() for c in result.columns]}
         if not count_only:
@@ -362,6 +387,18 @@ class RequestHandler:
         body["row_count"] = len(result.rows)
         body["stats"] = {}
         return body
+
+    def open_stream(self, req: dict, control: QueryControl | None = None) -> QueryStream:
+        """Starts a query for streaming. Errors found before execution starts
+        (validation, parsing, binding, planning) are raised as PolyQueryError;
+        later errors are raised while iterating the batches."""
+        sql, options, _ = self._query_request(req, control)
+        cursor = self.engine.open_cursor(sql, options)
+        convert = row_serializer(cursor.columns)
+        return QueryStream(
+            [c.to_json() for c in cursor.columns],
+            (convert(batch) for batch in cursor.batches),
+        )
 
     @staticmethod
     def _validate_query_options(raw: dict) -> bool:
