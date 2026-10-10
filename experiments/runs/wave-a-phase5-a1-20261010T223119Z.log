@@ -1,2 +1,6 @@
 2026-10-10T22:31:20+00:00 wave wave-a-phase5-a1-20261010T223119Z: order=['python']
 2026-10-10T22:31:20+00:00 [a-phase5-python-a1-20261010T223119Z] agent queued (usage gate, then launch)
+2026-10-10T23:37:03+00:00 [a-phase5-python-a1-20261010T223119Z] agent finished; collecting telemetry
+2026-10-10T23:37:03+00:00 [a-phase5-python-a1-20261010T223119Z] validating (clean clone, sandboxed)
+2026-10-10T23:37:30+00:00 [a-phase5-python-a1-20261010T223119Z] outcome=success cost=$16.423817000000003 turns=158 wall=3943.1s
+2026-10-10T23:37:30+00:00 wave wave-a-phase5-a1-20261010T223119Z finished: python=success
