@@ -1,7 +1,7 @@
 {
  "schema": "polyquery-project-state/1",
- "updated": "2026-10-10T20:15:35+00:00",
- "current_milestone": "M4",
+ "updated": "2026-10-10T21:09:21+00:00",
+ "current_milestone": "M5",
  "milestones": {
   "M0": {
    "status": "complete",
@@ -20,20 +20,20 @@
    "evidence": "All 6 Track A phase1 a1 runs pass 249/249 (public+hidden) in clean sandboxed validation and 225/225 public after merge (results/correctness/*.json). Telemetry (cost USD list price, turns, minutes): {\"go\": [8.25, 70, 25], \"python\": [15.28, 119, 37], \"java\": [8.63, 76, 24], \"common-lisp\": [16.76, 114, 83], \"clojure\": [8.98, 102, 27], \"rust\": [14.53, 103, 106]}"
   },
   "M4": {
-   "status": "in_progress",
-   "detail": "accepted: clojure, java, go. running: python, common-lisp, rust"
+   "status": "complete",
+   "evidence": "All 6 phase2 a1 runs pass 451/451 (public+hidden, all incl. optional correlated subqueries); 411/411 public after merge. Telemetry (USD list, turns, min): {\"java\": [11.84, 102, 28], \"common-lisp\": [18.15, 117, 77], \"clojure\": [9.68, 83, 26], \"rust\": [10.74, 93, 26], \"python\": [13.43, 89, 69], \"go\": [12.87, 114, 35]}"
   },
   "M5": {
    "status": "in_progress",
-   "detail": "accepted: clojure, go (interop clojure<->go 28/28 both ways, crash 0 violations). running: java"
+   "detail": "accepted: clojure, go, java, python (4x4 interop 28/28 each, crash 0 violations). queued: rust, common-lisp"
   },
   "M6": {
    "status": "in_progress",
-   "detail": "accepted: clojure (HTTP suite 18/18). running: go"
+   "detail": "accepted: clojure, go (HTTP 18/18). queued: java, python"
   },
   "M7": {
    "status": "in_progress",
-   "detail": "running: clojure phase5"
+   "detail": "running: clojure, go"
   },
   "M8": {
    "status": "complete",
@@ -76,6 +76,6 @@
   "kernels_arm64_native": "pass on spark (scalar, neon, sve; native + asan)",
   "kernels_x86_native": "pass (scalar, avx2, avx512)"
  },
- "last_successful_commit": "bcac8d6",
+ "last_successful_commit": "edc7a80",
  "next_recommended_action": "Keep accepting finished runs with accept.sh (launching the next phase); when all engines reach phase 5, run 1m benchmarks on a quiet host and generate reports."
 }
