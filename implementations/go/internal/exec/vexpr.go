@@ -88,7 +88,7 @@ func (c *vcompiler) compile(e plan.Expr) (vexpr, error) {
 		}
 		return c.arithmetic(x)
 	case *plan.Unary:
-		if x.Op == plan.OpNot {
+		if x.Op == plan.OpNot && x.X.Type().Kind != types.KindNull {
 			in, err := c.compile(x.X)
 			if err != nil {
 				return nil, err
@@ -934,7 +934,9 @@ func (v *velementwise) evalDict(in *Vec, n int) (*Vec, bool) {
 			v.dictOut[k] = r
 		}
 		if !v.dictErr && v.cls == vStr {
-			v.dictStr = grow(v.dictStr, len(in.Dict))
+			// A fresh slice: output dictionaries are immutable (consumers
+			// such as parallel gathers may retain them).
+			v.dictStr = make([]string, len(in.Dict))
 			for k, r := range v.dictOut[:len(in.Dict)] {
 				v.dictStr[k] = r.S
 			}

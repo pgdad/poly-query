@@ -443,7 +443,7 @@ func (e *Engine) plan(q *ast.Query, opts QueryOptions) (*physical.Plan, error) {
 		return nil, err
 	}
 	if !opts.NoOptimize {
-		logical = optimizer.Optimize(logical)
+		logical = optimizer.Optimize(logical, optimizer.Options{EvalConst: exec.EvalConstant})
 	}
 	return physical.Build(logical, physical.Options{
 		Join:       opts.Join,

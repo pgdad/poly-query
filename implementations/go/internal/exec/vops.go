@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"polyquery/internal/errs"
 	"polyquery/internal/physical"
 	"polyquery/internal/plan"
 	"polyquery/internal/storage"
@@ -309,6 +310,8 @@ func (f *vfilterOp) NextBatch() (*Batch, error) {
 		sel := f.sel[:0]
 		if err := f.pred.eval(b, b.Sel, f.res); err != nil {
 			sel, f.pending = f.filterRows(b, sel)
+		} else if f.pred.out[0] != vInt {
+			// A NULL-typed predicate is never TRUE.
 		} else {
 			v := f.res[0]
 			if v.Nulls == nil {
@@ -564,7 +567,10 @@ func BuildBatch(ec *Context, n physical.Node) (BatchOperator, error) {
 	case *physical.HashAggregate:
 		return buildVAggregate(ec, x)
 	case *physical.HashJoin:
-		return buildVHashJoin(ec, x)
+		if op, ok, err := parallelBatchPipeline(ec, x); ok || err != nil {
+			return op, err
+		}
+		return buildVHashJoin(ec, x, nil)
 	case *physical.Limit:
 		count, err := limitValue(ec, x.Count, -1)
 		if err != nil {
@@ -599,10 +605,41 @@ func BuildBatch(ec *Context, n physical.Node) (BatchOperator, error) {
 	return newBatchWriter(op, schemaTypes(n.Schema())), nil
 }
 
-// buildVFilter builds a filter; leaf (if non-nil) builds the operator of
-// the scan at the bottom of a parallel pipeline.
-func buildVFilter(ec *Context, x *physical.Filter, leaf func(physical.Node) (BatchOperator, error)) (BatchOperator, error) {
-	in, err := buildPipelineInput(ec, x.Input, leaf)
+// pipelineCtx carries what the instances of a parallel pipeline share:
+// the construction of the worker's leaf scan and the hash join builds.
+type pipelineCtx struct {
+	leaf     func(*physical.TableScan) (BatchOperator, error)
+	rowLeaf  func(*physical.TableScan) Operator
+	joins    map[*physical.HashJoin]*joinBuild
+	rowJoins map[*physical.HashJoin]*rowJoinBuild
+}
+
+func (pc *pipelineCtx) joinBuild(ec *Context, x *physical.HashJoin) (*joinBuild, error) {
+	if b, ok := pc.joins[x]; ok {
+		return b, nil
+	}
+	b, err := newJoinBuild(ec, x)
+	if err == nil {
+		pc.joins[x] = b
+	}
+	return b, err
+}
+
+func (pc *pipelineCtx) rowJoinBuild(ec *Context, x *physical.HashJoin) (*rowJoinBuild, error) {
+	if b, ok := pc.rowJoins[x]; ok {
+		return b, nil
+	}
+	b, err := newRowJoinBuild(ec, x, false)
+	if err == nil {
+		pc.rowJoins[x] = b
+	}
+	return b, err
+}
+
+// buildVFilter builds a filter (as part of a parallel pipeline if pc is
+// non-nil).
+func buildVFilter(ec *Context, x *physical.Filter, pc *pipelineCtx) (BatchOperator, error) {
+	in, err := buildPipelineInput(ec, x.Input, pc)
 	if err != nil {
 		return nil, err
 	}
@@ -613,8 +650,8 @@ func buildVFilter(ec *Context, x *physical.Filter, leaf func(physical.Node) (Bat
 	return &vfilterOp{ec: ec, input: in, pred: pred, res: make([]*Vec, 1)}, nil
 }
 
-func buildVProject(ec *Context, x *physical.Project, leaf func(physical.Node) (BatchOperator, error)) (BatchOperator, error) {
-	in, err := buildPipelineInput(ec, x.Input, leaf)
+func buildVProject(ec *Context, x *physical.Project, pc *pipelineCtx) (BatchOperator, error) {
+	in, err := buildPipelineInput(ec, x.Input, pc)
 	if err != nil {
 		return nil, err
 	}
@@ -627,15 +664,21 @@ func buildVProject(ec *Context, x *physical.Project, leaf func(physical.Node) (B
 	return p, nil
 }
 
-func buildPipelineInput(ec *Context, n physical.Node, leaf func(physical.Node) (BatchOperator, error)) (BatchOperator, error) {
-	if leaf == nil {
+// buildPipelineInput builds the input of a pipeline operator: outside a
+// parallel pipeline any operator, inside one the next pipeline operator.
+func buildPipelineInput(ec *Context, n physical.Node, pc *pipelineCtx) (BatchOperator, error) {
+	if pc == nil {
 		return BuildBatch(ec, n)
 	}
 	switch x := n.(type) {
 	case *physical.Filter:
-		return buildVFilter(ec, x, leaf)
+		return buildVFilter(ec, x, pc)
 	case *physical.Project:
-		return buildVProject(ec, x, leaf)
+		return buildVProject(ec, x, pc)
+	case *physical.HashJoin:
+		return buildVHashJoin(ec, x, pc)
+	case *physical.TableScan:
+		return pc.leaf(x)
 	}
-	return leaf(n)
+	return nil, errs.New(errs.InternalError, "%T is not a pipeline operator", n)
 }

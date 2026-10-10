@@ -59,7 +59,7 @@ func buildMergeJoin(ec *Context, x *physical.MergeJoin, vec bool) (Operator, err
 		return nil, err
 	}
 	op := &mergeJoinOp{
-		joinCounter: joinCounter{ec: ec}, kind: x.Kind, left: left, right: right,
+		joinCounter: newJoinCounter(ec), kind: x.Kind, left: left, right: right,
 		leftW: len(x.Left.Schema()), rightW: len(x.Right.Schema()),
 		leftTypes: exprTypes(x.LeftKeys), rightTypes: exprTypes(x.RightKeys),
 	}

@@ -95,9 +95,11 @@ func columnIDs(cols []plan.Column) map[plan.ColumnID]bool {
 	return m
 }
 
-// pipelineScan returns the table scan at the bottom of a pipeline (a chain
-// of filters and projections over a scan whose expressions are parallel
-// safe).
+// pipelineScan returns the table scan at the bottom of a pipeline: a
+// chain of filters, projections and hash join probes over a scan, whose
+// expressions are parallel safe. (The build sides of the joins are
+// computed once and shared; they must not evaluate subqueries either,
+// since they are consumed by a worker.)
 func pipelineScan(n physical.Node) (*physical.TableScan, bool) {
 	switch x := n.(type) {
 	case *physical.TableScan:
@@ -115,8 +117,47 @@ func pipelineScan(n physical.Node) (*physical.TableScan, bool) {
 			}
 		}
 		return pipelineScan(x.Input)
+	case *physical.HashJoin:
+		ids := columnIDs(x.Schema())
+		for _, e := range physical.Exprs(x) {
+			if !parallelSafe(e, ids) {
+				return nil, false
+			}
+		}
+		build, probe, _, _ := buildSide(x)
+		if !subtreeParallelSafe(build) {
+			return nil, false
+		}
+		return pipelineScan(probe)
 	}
 	return nil, false
+}
+
+// subtreeParallelSafe reports whether no operator of a subtree evaluates
+// subqueries or PQ_SLEEP.
+func subtreeParallelSafe(n physical.Node) bool {
+	for _, e := range physical.Exprs(n) {
+		ok := true
+		plan.Walk(e, func(x plan.Expr) {
+			switch y := x.(type) {
+			case *plan.Subquery:
+				ok = false
+			case *plan.Func:
+				if y.Name == "PQ_SLEEP" {
+					ok = false
+				}
+			}
+		})
+		if !ok {
+			return false
+		}
+	}
+	for _, c := range n.Children() {
+		if !subtreeParallelSafe(c) {
+			return false
+		}
+	}
+	return true
 }
 
 // parallelMorsels decides whether the pipeline rooted at n runs in
@@ -280,16 +321,17 @@ func (o *gatherRowOp) Next() (types.Row, error) {
 }
 
 // batchPipelines builds one vectorized pipeline instance per worker, each
-// reading from its own single-range source.
+// reading from its own single-range source; hash join builds are shared.
 func batchPipelines(ec *Context, n physical.Node, nw int) ([]BatchOperator, []*singleRange, error) {
 	ops := make([]BatchOperator, nw)
 	srcs := make([]*singleRange, nw)
+	joins := map[*physical.HashJoin]*joinBuild{}
 	for w := range ops {
 		src := &singleRange{done: true}
-		leaf := func(m physical.Node) (BatchOperator, error) {
-			return newVScan(ec, m.(*physical.TableScan), src), nil
-		}
-		op, err := buildPipelineInput(ec, n, leaf)
+		pc := &pipelineCtx{joins: joins, leaf: func(m *physical.TableScan) (BatchOperator, error) {
+			return newVScan(ec, m, src), nil
+		}}
+		op, err := buildPipelineInput(ec, n, pc)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -302,9 +344,13 @@ func batchPipelines(ec *Context, n physical.Node, nw int) ([]BatchOperator, []*s
 func rowPipelines(ec *Context, n physical.Node, nw int) ([]Operator, []*singleRange, error) {
 	ops := make([]Operator, nw)
 	srcs := make([]*singleRange, nw)
+	joins := map[*physical.HashJoin]*rowJoinBuild{}
 	for w := range ops {
 		src := &singleRange{done: true}
-		op, err := rowPipeline(ec, n, src)
+		pc := &pipelineCtx{rowJoins: joins, rowLeaf: func(m *physical.TableScan) Operator {
+			return newScan(ec, m, src)
+		}}
+		op, err := rowPipeline(ec, n, pc)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -313,13 +359,13 @@ func rowPipelines(ec *Context, n physical.Node, nw int) ([]Operator, []*singleRa
 	return ops, srcs, nil
 }
 
-// rowPipeline builds the row operators of a pipeline over src.
-func rowPipeline(ec *Context, n physical.Node, src rangeSource) (Operator, error) {
+// rowPipeline builds the row operators of a pipeline instance.
+func rowPipeline(ec *Context, n physical.Node, pc *pipelineCtx) (Operator, error) {
 	switch x := n.(type) {
 	case *physical.TableScan:
-		return newScan(ec, x, src), nil
+		return pc.rowLeaf(x), nil
 	case *physical.Filter:
-		in, err := rowPipeline(ec, x.Input, src)
+		in, err := rowPipeline(ec, x.Input, pc)
 		if err != nil {
 			return nil, err
 		}
@@ -329,7 +375,7 @@ func rowPipeline(ec *Context, n physical.Node, src rangeSource) (Operator, error
 		}
 		return &filterOp{ec: ec, input: in, pred: pred}, nil
 	case *physical.Project:
-		in, err := rowPipeline(ec, x.Input, src)
+		in, err := rowPipeline(ec, x.Input, pc)
 		if err != nil {
 			return nil, err
 		}
@@ -338,6 +384,17 @@ func rowPipeline(ec *Context, n physical.Node, src rangeSource) (Operator, error
 			return nil, err
 		}
 		return &projectOp{input: in, exprs: fns, buf: make(types.Row, len(fns))}, nil
+	case *physical.HashJoin:
+		shared, err := pc.rowJoinBuild(ec, x)
+		if err != nil {
+			return nil, err
+		}
+		_, probeNode, _, _ := buildSide(x)
+		probe, err := rowPipeline(ec, probeNode, pc)
+		if err != nil {
+			return nil, err
+		}
+		return newHashJoinProbe(ec, x, shared, probe)
 	}
 	return nil, errs.New(errs.InternalError, "%T is not a pipeline operator", n)
 }

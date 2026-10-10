@@ -91,7 +91,7 @@ func build(ec *Context, n physical.Node, vec bool) (Operator, error) {
 			return nil, err
 		}
 		op := &nestedLoopJoinOp{
-			joinCounter: joinCounter{ec: ec}, kind: x.Kind, left: left, right: right,
+			joinCounter: newJoinCounter(ec), kind: x.Kind, left: left, right: right,
 			leftW: len(x.Left.Schema()), rightW: len(x.Right.Schema()),
 		}
 		op.out = make(types.Row, op.leftW+op.rightW)
@@ -193,43 +193,21 @@ func newRowAggInput(ec *Context, x *physical.HashAggregate) (*rowAggInput, error
 }
 
 func buildHashJoin(ec *Context, x *physical.HashJoin, vec bool) (Operator, error) {
-	left, err := input(ec, x.Left, vec)
-	if err != nil {
-		return nil, err
-	}
-	right, err := input(ec, x.Right, vec)
-	if err != nil {
-		return nil, err
-	}
-	lk, err := compileAll(ec, layoutOf(x.Left.Schema()), x.LeftKeys)
-	if err != nil {
-		return nil, err
-	}
-	rk, err := compileAll(ec, layoutOf(x.Right.Schema()), x.RightKeys)
-	if err != nil {
-		return nil, err
-	}
-	keyTypes := exprTypes
-	op := &hashJoinOp{
-		joinCounter: joinCounter{ec: ec}, kind: x.Kind, buildLeft: x.BuildLeft,
-		leftW: len(x.Left.Schema()), rightW: len(x.Right.Schema()),
-	}
-	op.out = make(types.Row, op.leftW+op.rightW)
-	if x.BuildLeft {
-		op.build, op.probe = left, right
-		op.buildKeys, op.probeKeys = lk, rk
-		op.buildTypes, op.probeTypes = keyTypes(x.LeftKeys), keyTypes(x.RightKeys)
-	} else {
-		op.build, op.probe = right, left
-		op.buildKeys, op.probeKeys = rk, lk
-		op.buildTypes, op.probeTypes = keyTypes(x.RightKeys), keyTypes(x.LeftKeys)
-	}
-	if x.Residual != nil {
-		if op.residual, err = compile(ec, layoutOf(x.Schema()), x.Residual); err != nil {
-			return nil, err
+	if !vec {
+		if op, ok, err := parallelRowPipeline(ec, x); ok || err != nil {
+			return op, err
 		}
 	}
-	return op, nil
+	shared, err := newRowJoinBuild(ec, x, vec)
+	if err != nil {
+		return nil, err
+	}
+	_, probeNode, _, _ := buildSide(x)
+	probe, err := input(ec, probeNode, vec)
+	if err != nil {
+		return nil, err
+	}
+	return newHashJoinProbe(ec, x, shared, probe)
 }
 
 // limitValue evaluates a constant LIMIT/OFFSET expression; NULL or absent

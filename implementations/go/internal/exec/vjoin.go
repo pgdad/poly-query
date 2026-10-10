@@ -3,6 +3,8 @@ package exec
 import (
 	"hash/maphash"
 	"math/bits"
+	"sync"
+	"sync/atomic"
 
 	"polyquery/internal/errs"
 	"polyquery/internal/physical"
@@ -116,28 +118,107 @@ func (t *joinTable) index() {
 	}
 }
 
-// vhashJoinOp is the vectorized hash join (INNER and LEFT).
+// joinBuild is the build side of a hash join: consumed and hashed once, on
+// first use, and then shared read-only by every probe operator instance
+// (parallel workers probe the same table).
+type joinBuild struct {
+	ec       *Context
+	input    BatchOperator
+	keys     *exprSet
+	keyTypes []types.Type
+	classes  []vclass
+	intKey   bool
+	once     sync.Once
+	table    *joinTable
+	err      error
+	emitted  atomic.Int64 // output rows of all probe instances (--max-join-rows)
+}
+
+// buildSide returns the build input, keys and key types of a hash join.
+func buildSide(x *physical.HashJoin) (build, probe physical.Node, buildKeys, probeKeys []plan.Expr) {
+	if x.BuildLeft {
+		return x.Left, x.Right, x.LeftKeys, x.RightKeys
+	}
+	return x.Right, x.Left, x.RightKeys, x.LeftKeys
+}
+
+func newJoinBuild(ec *Context, x *physical.HashJoin) (*joinBuild, error) {
+	buildNode, _, buildKeys, probeKeys := buildSide(x)
+	input, err := BuildBatch(ec, buildNode)
+	if err != nil {
+		return nil, err
+	}
+	s := &joinBuild{ec: ec, input: input, keyTypes: exprTypes(buildKeys)}
+	if s.keys, err = newExprSet(ec, buildNode.Schema(), buildKeys); err != nil {
+		return nil, err
+	}
+	for _, c := range buildNode.Schema() {
+		s.classes = append(s.classes, classOf(c.Type))
+	}
+	kb, kp := s.keyTypes[0], probeKeys[0].Type()
+	s.intKey = len(buildKeys) == 1 && classOf(kb) == vInt && kb.Kind == kp.Kind && kb.Scale == kp.Scale
+	return s, nil
+}
+
+func (s *joinBuild) get() (*joinTable, error) {
+	s.once.Do(func() { s.table, s.err = s.build() })
+	return s.table, s.err
+}
+
+func (s *joinBuild) build() (*joinTable, error) {
+	t := &joinTable{seed: maphash.MakeSeed(), classes: s.classes, intKey: s.intKey}
+	t.cols = make([]Vec, len(t.classes))
+	keys := make([]*Vec, len(s.keyTypes))
+	var keyBuf []byte
+	for {
+		b, err := s.input.NextBatch()
+		if err != nil {
+			return nil, err
+		}
+		if b == nil {
+			break
+		}
+		if err := s.ec.Check(); err != nil {
+			return nil, err
+		}
+		if err := s.keys.eval(b, b.Sel, keys); err != nil {
+			if rowErr := s.keys.firstError(b); rowErr != nil {
+				return nil, rowErr
+			}
+			return nil, errs.New(errs.InternalError, "vectorized join key evaluation failed: %v", err)
+		}
+		bytes, err := t.appendRows(b, keys, s.keyTypes, &keyBuf)
+		if err != nil {
+			return nil, err
+		}
+		width := int64(len(t.classes))
+		if err := s.ec.Mem.Reserve(int64(b.Len())*(40+16*width) + bytes); err != nil {
+			return nil, err
+		}
+	}
+	t.index()
+	return t, nil
+}
+
+// vhashJoinOp probes a hash join's build table with batches of its probe
+// input (INNER and LEFT joins).
 type vhashJoinOp struct {
 	ec        *Context
-	node      *physical.HashJoin
 	kind      plan.JoinKind
 	buildLeft bool
-	build     BatchOperator
+	shared    *joinBuild
 	probe     BatchOperator
-	buildKeys *exprSet
 	probeKeys *exprSet
-	keyTypesB []types.Type
 	keyTypesP []types.Type
 	residual  *exprSet // over the output layout; nil if none
 	table     *joinTable
-	built     bool
 
 	// probe state
 	pb         *Batch
 	pbuf       Batch
 	pkeys      []*Vec
-	active     int  // number of active probe rows to process
-	pos        int  // index (into the active rows) of the current probe row
+	active     int // number of active probe rows to process
+	pos        int // index (into the active rows) of the current probe row
 	chain      int32
 	inChain    bool
 	matchedRow bool
@@ -152,48 +233,38 @@ type vhashJoinOp struct {
 	codes        [][]uint32
 	out          Batch
 	sel          []int32
-	emitted      int64
 	pending      error
 }
 
-func buildVHashJoin(ec *Context, x *physical.HashJoin) (BatchOperator, error) {
-	left, err := BuildBatch(ec, x.Left)
+// buildVHashJoin builds a hash join; inside a parallel pipeline (pc
+// non-nil) the probe input continues the pipeline and the build side is
+// shared by all workers.
+func buildVHashJoin(ec *Context, x *physical.HashJoin, pc *pipelineCtx) (BatchOperator, error) {
+	var shared *joinBuild
+	var err error
+	if pc != nil {
+		shared, err = pc.joinBuild(ec, x)
+	} else {
+		shared, err = newJoinBuild(ec, x)
+	}
 	if err != nil {
 		return nil, err
 	}
-	right, err := BuildBatch(ec, x.Right)
+	_, probeNode, _, probeKeys := buildSide(x)
+	probe, err := buildPipelineInput(ec, probeNode, pc)
 	if err != nil {
 		return nil, err
 	}
-	op := &vhashJoinOp{ec: ec, node: x, kind: x.Kind, buildLeft: x.BuildLeft}
-	buildNode, probeNode := x.Right, x.Left
-	buildKeys, probeKeys := x.RightKeys, x.LeftKeys
-	op.build, op.probe = right, left
-	if x.BuildLeft {
-		buildNode, probeNode = x.Left, x.Right
-		buildKeys, probeKeys = x.LeftKeys, x.RightKeys
-		op.build, op.probe = left, right
-	}
-	if op.buildKeys, err = newExprSet(ec, buildNode.Schema(), buildKeys); err != nil {
-		return nil, err
-	}
+	op := &vhashJoinOp{ec: ec, kind: x.Kind, buildLeft: x.BuildLeft, shared: shared, probe: probe}
 	if op.probeKeys, err = newExprSet(ec, probeNode.Schema(), probeKeys); err != nil {
 		return nil, err
 	}
-	op.keyTypesB, op.keyTypesP = exprTypes(buildKeys), exprTypes(probeKeys)
+	op.keyTypesP = exprTypes(probeKeys)
 	if x.Residual != nil {
 		if op.residual, err = newExprSet(ec, x.Schema(), []plan.Expr{x.Residual}); err != nil {
 			return nil, err
 		}
 	}
-	t := &joinTable{seed: maphash.MakeSeed()}
-	for _, c := range buildNode.Schema() {
-		t.classes = append(t.classes, classOf(c.Type))
-	}
-	t.cols = make([]Vec, len(t.classes))
-	kb, kp := op.keyTypesB[0], op.keyTypesP[0]
-	t.intKey = len(buildKeys) == 1 && classOf(kb) == vInt && kb.Kind == kp.Kind && kb.Scale == kp.Scale
-	op.table = t
 	for _, c := range x.Schema() {
 		op.outCols = append(op.outCols, classOf(c.Type))
 	}
@@ -202,38 +273,6 @@ func buildVHashJoin(ec *Context, x *physical.HashJoin) (BatchOperator, error) {
 	op.out.Cols = make([]*Vec, len(op.outCols))
 	op.pkeys = make([]*Vec, len(probeKeys))
 	return op, nil
-}
-
-func (j *vhashJoinOp) buildTable() error {
-	keys := make([]*Vec, len(j.keyTypesB))
-	for {
-		b, err := j.build.NextBatch()
-		if err != nil {
-			return err
-		}
-		if b == nil {
-			break
-		}
-		if err := j.ec.Check(); err != nil {
-			return err
-		}
-		if err := j.buildKeys.eval(b, b.Sel, keys); err != nil {
-			if rowErr := j.buildKeys.firstError(b); rowErr != nil {
-				return rowErr
-			}
-			return errs.New(errs.InternalError, "vectorized join key evaluation failed: %v", err)
-		}
-		bytes, err := j.table.appendRows(b, keys, j.keyTypesB, &j.keyBuf)
-		if err != nil {
-			return err
-		}
-		width := int64(len(j.table.classes))
-		if err := j.ec.Mem.Reserve(int64(b.Len())*(40+16*width) + bytes); err != nil {
-			return err
-		}
-	}
-	j.table.index()
-	return nil
 }
 
 // nextProbeBatch fetches and prepares the next probe batch; false at end.
@@ -468,7 +507,7 @@ func (j *vhashJoinOp) applyResidual(b *Batch) {
 				sel = append(sel, int32(i))
 			}
 		}
-	} else {
+	} else if j.residual.out[0] == vInt {
 		r := res[0]
 		for i := 0; i < b.N; i++ {
 			if r.I[i] != 0 && (r.Nulls == nil || !r.Nulls[i]) {
@@ -504,11 +543,12 @@ func (j *vhashJoinOp) NextBatch() (*Batch, error) {
 		j.pending = nil
 		return nil, err
 	}
-	if !j.built {
-		j.built = true
-		if err := j.buildTable(); err != nil {
+	if j.table == nil {
+		t, err := j.shared.get()
+		if err != nil {
 			return nil, err
 		}
+		j.table = t
 	}
 	for {
 		if j.pb == nil {
@@ -558,8 +598,9 @@ func (j *vhashJoinOp) NextBatch() (*Batch, error) {
 // is returned, the error follows on the next call.
 func (j *vhashJoinOp) emit(b *Batch) (*Batch, error) {
 	n := int64(b.Len())
-	if limit := j.ec.MaxJoinRows; limit > 0 && j.emitted+n > limit {
-		allowed := limit - j.emitted
+	emitted := j.shared.emitted.Load()
+	if limit := j.ec.MaxJoinRows; limit > 0 && emitted+n > limit {
+		allowed := limit - emitted
 		j.pending = errs.New(errs.ResourceLimit, "join produced more than %d rows", limit)
 		if allowed <= 0 {
 			err := j.pending
@@ -577,6 +618,6 @@ func (j *vhashJoinOp) emit(b *Batch) (*Batch, error) {
 		}
 		n = allowed
 	}
-	j.emitted += n
+	j.shared.emitted.Add(n)
 	return b, nil
 }
