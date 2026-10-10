@@ -8,8 +8,6 @@ import polyquery.plan.AggregateCall;
 import polyquery.plan.BoundExpr;
 import polyquery.plan.BoundExprs;
 import polyquery.plan.LogicalPlan;
-import polyquery.types.DataType;
-import polyquery.types.TypeKind;
 
 /**
  * Rule-based logical optimization (disabled by {@code optimize: false}):
@@ -25,10 +23,12 @@ import polyquery.types.TypeKind;
  *   <li><b>join reordering</b> of inner-join trees ({@link JoinReorder}).</li>
  * </ul>
  *
- * <p>Every rewrite preserves results <em>and errors</em>: a predicate is only moved if no
- * predicate involved can raise an error ({@link #canFail}), because moving it changes the rows
- * other predicates are evaluated on. Predicates containing correlated subqueries are never
- * moved: their correlation frame is the row layout of the operator they were bound against.
+ * <p>Every rewrite preserves results <em>and errors</em>. Moving a predicate changes the rows
+ * the others are evaluated on, so conjuncts move only if they precede every conjunct that may
+ * raise an error — and, when such a conjunct exists, only if they can never be NULL (both
+ * decided by {@link ExprSafety}, with column statistics). Predicates containing correlated
+ * subqueries are never moved: their correlation frame is the row layout of the operator they
+ * were bound against.
  */
 public final class LogicalOptimizer {
     private LogicalOptimizer() {
@@ -124,87 +124,39 @@ public final class LogicalOptimizer {
 
     // ------------------------------------------------------------------ error analysis
 
-    /** Scalar functions that never raise an error for valid arguments. */
-    private static final List<String> TOTAL_FUNCTIONS = List.of("UPPER", "LOWER", "TRIM", "LTRIM", "RTRIM", "LENGTH",
-            "REPLACE", "CONCAT", "COALESCE", "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND");
-
     /**
      * Conservative: false only if evaluating {@code e} can never raise an error (overflow,
-     * division by zero, conversion, subquery cardinality, …) on any row.
+     * division by zero, conversion, subquery cardinality, …) on any row. Without statistics;
+     * see {@link ExprSafety} for the statistics-aware analysis used by predicate pushdown.
      */
     public static boolean canFail(BoundExpr e) {
-        boolean self = switch (e) {
-            case BoundExpr.ColumnRef c -> false;
-            case BoundExpr.OuterRef o -> false;
-            case BoundExpr.Placeholder p -> false;
-            case BoundExpr.Literal l -> false;
-            case BoundExpr.AggregateRef a -> false;
-            case BoundExpr.Not n -> false;
-            case BoundExpr.IsNull n -> false;
-            case BoundExpr.And a -> false;
-            case BoundExpr.Or o -> false;
-            case BoundExpr.Comparison c -> false;
-            case BoundExpr.Concat c -> false;
-            case BoundExpr.Like l -> false;
-            case BoundExpr.InList i -> false;
-            case BoundExpr.Between b -> false;
-            case BoundExpr.Case c -> false;
-            case BoundExpr.NullIf n -> false;
-            case BoundExpr.Negate n -> n.type().kind() == TypeKind.INT64;
-            case BoundExpr.Cast c -> castCanFail(c.input().type(), c.type());
-            case BoundExpr.Arithmetic a -> arithmeticCanFail(a);
-            case BoundExpr.Function f -> !TOTAL_FUNCTIONS.contains(f.name());
-            case BoundExpr.ScalarSubquery s -> true;
-            case BoundExpr.Exists x -> true;
-            case BoundExpr.InSubquery i -> true;
-        };
-        if (self) {
-            return true;
-        }
-        for (BoundExpr c : BoundExprs.children(e)) {
-            if (canFail(c)) {
-                return true;
+        return new ExprSafety(null).canFail(e);
+    }
+
+    /** Index of the first conjunct that may fail, or {@code preds.size()}. */
+    private static int firstFailing(List<BoundExpr> preds, ExprSafety safety) {
+        for (int i = 0; i < preds.size(); i++) {
+            if (safety.canFail(preds.get(i))) {
+                return i;
             }
         }
-        return false;
+        return preds.size();
     }
 
-    private static boolean arithmeticCanFail(BoundExpr.Arithmetic a) {
-        if (a.type().kind() == TypeKind.INT64 && (a.op() == BoundExpr.ArithOp.DIV || a.op() == BoundExpr.ArithOp.MOD)
-                && a.right() instanceof BoundExpr.Literal l && l.value() instanceof Long d) {
-            return d == 0 || d == -1 && a.op() == BoundExpr.ArithOp.DIV; // x / c, x % c with a safe constant
+    /**
+     * Conjuncts that may be evaluated earlier, on fewer or other rows, without changing results
+     * or errors: those before the first conjunct that may fail — and, if one may fail, only
+     * conjuncts that are never NULL (a NULL conjunct does not stop the evaluation of the
+     * following ones, a pushed-down filter would).
+     */
+    private static boolean[] movableConjuncts(List<BoundExpr> preds, ExprSafety safety) {
+        int fail = firstFailing(preds, safety);
+        boolean[] out = new boolean[preds.size()];
+        for (int i = 0; i < fail; i++) {
+            out[i] = !BoundExprs.containsCorrelatedSubquery(preds.get(i))
+                    && (fail == preds.size() || safety.neverNull(preds.get(i)));
         }
-        return !a.type().isNull();
-    }
-
-    private static boolean castCanFail(DataType from, DataType to) {
-        TypeKind f = from.kind();
-        TypeKind t = to.kind();
-        if (from.equals(to) || f == TypeKind.NULL || t == TypeKind.STRING) {
-            return false;
-        }
-        return switch (f) {
-            case INT64 -> t != TypeKind.FLOAT64 && t != TypeKind.BOOLEAN;
-            case BOOLEAN -> t != TypeKind.INT64;
-            case DECIMAL -> switch (t) {
-                case FLOAT64, INT64 -> false;
-                case DECIMAL -> !(to.scale() >= from.scale()
-                        && to.precision() - to.scale() >= from.precision() - from.scale());
-                default -> true;
-            };
-            case DATE -> t != TypeKind.TIMESTAMP;
-            case TIMESTAMP -> t != TypeKind.DATE;
-            default -> true;
-        };
-    }
-
-    private static boolean anyCanFail(List<BoundExpr> exprs) {
-        for (BoundExpr e : exprs) {
-            if (canFail(e)) {
-                return true;
-            }
-        }
-        return false;
+        return out;
     }
 
     // ------------------------------------------------------------------ predicate pushdown
@@ -225,33 +177,31 @@ public final class LogicalOptimizer {
         };
     }
 
-    private static boolean movable(BoundExpr e) {
-        return !BoundExprs.containsCorrelatedSubquery(e);
-    }
-
     /** Applies the conjunctive predicates to {@code node}, pushing them below it where possible. */
     private static LogicalPlan pushInto(LogicalPlan node, List<BoundExpr> preds) {
         if (node instanceof LogicalPlan.Filter f) {
-            if (anyCanFail(preds)) {
-                // merged, they would also be evaluated on rows the lower filter rejects (NULL)
+            // Merged into one conjunction, the outer predicates would also be evaluated on rows
+            // where the inner one is NULL: only if that cannot raise an error.
+            List<BoundExpr> inner = BoundExprs.conjuncts(f.predicate());
+            ExprSafety safety = new ExprSafety(ExprSafety.origins(f.input()));
+            if (firstFailing(preds, safety) < preds.size() && !inner.stream().allMatch(safety::neverNull)) {
                 return filter(node, preds);
             }
-            List<BoundExpr> all = new ArrayList<>(BoundExprs.conjuncts(f.predicate()));
+            List<BoundExpr> all = new ArrayList<>(inner);
             all.addAll(preds);
             return pushInto(f.input(), all);
         }
         if (!(node instanceof LogicalPlan.Join j)) {
             return filter(node, preds);
         }
+        ExprSafety safety = new ExprSafety(ExprSafety.origins(j));
         List<BoundExpr> condition = j.condition() == null ? List.of() : BoundExprs.conjuncts(j.condition());
-        if (anyCanFail(preds)) {
-            // Moving any predicate would change the rows the failing ones are evaluated on; the
-            // join's own condition may still be pushed into its inputs (the join output is the same).
-            return filter(preds.isEmpty() ? j : pushInto(j, List.of()), preds);
-        }
-        if (anyCanFail(condition)) {
-            return j;
-        }
+        boolean[] condMovable = movableConjuncts(condition, safety);
+        boolean conditionCanFail = firstFailing(condition, safety) < condition.size();
+        // A join condition that may fail must keep seeing the same row pairs: then nothing from
+        // above may move into or below the join.
+        boolean[] predMovable = conditionCanFail ? new boolean[preds.size()] : movableConjuncts(preds, safety);
+
         int leftWidth = j.left().schema().size();
         boolean left = j.kind() == LogicalPlan.JoinKind.LEFT;
         List<BoundExpr> toLeft = new ArrayList<>();
@@ -260,9 +210,10 @@ public final class LogicalOptimizer {
         List<BoundExpr> above = new ArrayList<>();
 
         // Conjuncts of the join condition itself.
-        for (BoundExpr c : condition) {
+        for (int i = 0; i < condition.size(); i++) {
+            BoundExpr c = condition.get(i);
             int[] range = BoundExprs.columnRange(c);
-            if (!movable(c) || range[1] < 0) {
+            if (!condMovable[i] || range[1] < 0) {
                 joinPreds.add(c);
             } else if (range[0] >= leftWidth) {
                 toRight.add(BoundExprs.shiftColumns(c, -leftWidth));
@@ -273,9 +224,10 @@ public final class LogicalOptimizer {
             }
         }
         // Conjuncts of a filter above the join.
-        for (BoundExpr c : preds) {
+        for (int i = 0; i < preds.size(); i++) {
+            BoundExpr c = preds.get(i);
             int[] range = BoundExprs.columnRange(c);
-            if (!movable(c) || range[1] < 0) {
+            if (!predMovable[i] || range[1] < 0) {
                 above.add(c);
             } else if (range[1] < leftWidth) {
                 toLeft.add(c);

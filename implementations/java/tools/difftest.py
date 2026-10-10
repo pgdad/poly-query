@@ -174,9 +174,32 @@ class Gen:
         a = self.expr(scope, "INT64", depth + 1)
         return f"({a} / ({self.expr(scope, 'INT64', depth + 1)} - 2)) > 0"
 
+    def failing(self, scope):
+        """A predicate that raises an error on some rows (division by zero, overflow)."""
+        r = self.r
+        a = r.choice([c for al, t in scope for c in self.cols(al, t, "INT64")])
+        b = r.choice([c for al, t in scope for c in self.cols(al, t, "INT64")])
+        return r.choice([f"({a} / ({b} - {r.randint(0, 3)})) >= 0",
+                         f"({a} * 4611686018427387) > 0",
+                         f"{a} % ({b} - {r.randint(1, 2)}) = 0"])
+
     def from_clause(self):
         r = self.r
-        c = r.randint(0, 11)
+        c = r.randint(0, 14)
+        if c == 12:
+            extra = self.failing([("i", "items")])
+            return (f"orders o JOIN items i ON o.order_id = i.order_id AND {extra}",
+                    [("o", "orders"), ("i", "items")], True, None)
+        if c == 13:
+            preds = [self.pred([("c", "cust"), ("o", "orders")], 2), "c.customer_id = o.customer_id",
+                     self.failing([("c", "cust"), ("o", "orders")])]
+            r.shuffle(preds)
+            return ("cust c, orders o", [("c", "cust"), ("o", "orders")], True, " AND ".join(preds))
+        if c == 14:
+            preds = ["p.product_id = i.product_id", self.pred([("p", "products")], 2),
+                     self.failing([("p", "products"), ("i", "items")])]
+            r.shuffle(preds)
+            return ("products p, items i", [("p", "products"), ("i", "items")], True, " AND ".join(preds))
         if c == 10:
             return ("items i JOIN products p ON p.product_id = i.product_id JOIN orders o ON i.order_id = o.order_id",
                     [("i", "items"), ("p", "products"), ("o", "orders")], True, None)
@@ -310,6 +333,10 @@ def main():
                 same = close(got, base)
                 if not same and count_only and got[0] == base[0] == "ok":
                     same = len(got[2]) == len(base[2])
+                if not same and join and got[0] == base[0] == "error":
+                    # several failing rows: which fails first depends on the join output order
+                    # (left-major for nested loops, right-major for a hash join built on the left)
+                    same = True
                 if not same and count_only and join and "error" in (got[0], base[0]):
                     # LIMIT without ORDER BY over a join: which rows (and so which errors) are
                     # reached first depends on the join algorithm's output order

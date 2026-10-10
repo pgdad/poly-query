@@ -98,9 +98,10 @@ final class JoinReorder {
         if (inputs.size() < 3) {
             return unchanged;
         }
+        ExprSafety safety = new ExprSafety(ExprSafety.origins(root));
         for (BoundExpr c : conds) {
             if (BoundExprs.containsSubquery(c) || BoundExprs.any(c, x -> x instanceof BoundExpr.OuterRef)
-                    || LogicalOptimizer.canFail(c)) {
+                    || safety.canFail(c)) {
                 return unchanged;
             }
         }

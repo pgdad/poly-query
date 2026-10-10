@@ -66,6 +66,11 @@ final class Phase5Test {
         "SELECT grp, SUM(val) FROM t GROUP BY grp HAVING SUM(val) > 0",
         "SELECT UPPER(name) || '-' || CAST(id AS STRING), COALESCE(val, -1) FROM t WHERE id % 50 = 0",
         "SELECT x, COUNT(*) FROM (SELECT grp + 1 AS x FROM t WHERE val IS NOT NULL) s GROUP BY x",
+        // a join condition that may fail (SUBSTR with a column length): nothing moves across it
+        "SELECT COUNT(*), SUM(t.val) FROM t JOIN d ON d.grp = t.grp AND SUBSTR(t.name, 1, t.grp) <> 'zz' "
+                + "WHERE t.flag AND d.weight > 2",
+        "SELECT t.id, d.label FROM t, d WHERE t.grp = d.grp AND t.id / (d.grp - 3) > 0 ORDER BY 1, 2",
+        "SELECT t.id FROM t, d WHERE t.grp = d.grp AND d.weight * 1000000 > 1 AND t.val + 1 > 0 ORDER BY 1",
     };
 
     /** A result: column list and rows (sorted unless the query orders them), or an error code. */

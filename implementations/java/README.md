@@ -351,10 +351,15 @@ pipeline over fewer than two morsels is not parallelized.
 * **Predicate simplification**: `TRUE AND x → x`, `FALSE AND x → FALSE`, `x OR FALSE → x`,
   `NOT NOT x → x`, … (`x AND FALSE → FALSE` only when `x` cannot fail), always-TRUE filters vanish.
 * **Predicate pushdown** into join inputs and scans (also enabling index scans and row-group
-  skipping), CROSS→INNER join conversion. **Error-preserving**: a predicate is moved only if no
-  predicate involved can raise an error (`LogicalOptimizer.canFail`: overflow-prone arithmetic,
-  division, narrowing casts, most functions, subqueries…), because moving a predicate changes
-  the rows the others are evaluated on. So `optimize: true` and `false` agree on errors too.
+  skipping), CROSS→INNER join conversion. **Error-preserving**: moving a predicate changes the
+  rows the others are evaluated on, so a conjunct moves only if it precedes every conjunct that
+  may raise an error — and, when such a conjunct exists, only if it can never be NULL (a NULL
+  conjunct does not stop the evaluation of the following ones; a pushed-down filter would) —
+  and nothing moves across a join condition that may fail. `ExprSafety` decides both, using
+  column statistics: interval arithmetic over min/max proves e.g. that `price * 2` cannot
+  overflow or that a divisor range excludes 0; null counts prove columns non-NULL. So
+  `optimize: true` and `false` agree on errors too, while the usual shapes (comma joins with
+  the join condition first, arithmetic on stored values) are still fully optimized.
 * **Join reordering** (`JoinReorder`) of inner-join trees with ≥ 3 inputs: start with the
   connected pair with the smallest estimated join result, then repeatedly add the connected
   input with the smallest estimated result (equi-join selectivity 1/max(distinct counts) from
