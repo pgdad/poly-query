@@ -26,14 +26,16 @@ import polyquery.types.DataType;
  * {@code POST /v1/query/stream} (protocol.md §7.2). The query runs on a worker thread that
  * serializes rows into NDJSON batches; the connection thread writes them as HTTP chunks. At most
  * {@link #MAX_PENDING_BATCHES} batches may be pending, so a client that stops reading blocks
- * query execution (backpressure). The header line is deferred until the first batch (or the
- * end), so errors raised before any row is produced get a normal error response.
+ * query execution (backpressure). The header line is deferred until the first batch, the end,
+ * or {@link #HEADER_DELAY_NANOS} after execution started, so errors raised early (before any
+ * row is produced) get a normal error response while slow queries still show their header promptly.
  */
 final class QueryStream {
     static final int MAX_PENDING_BATCHES = 16;
     private static final int BATCH_ROWS = 4096;
     private static final int BATCH_BYTES = 1 << 20;
     private static final long BATCH_MAX_DELAY_NANOS = 50_000_000L;
+    private static final long HEADER_DELAY_NANOS = 100_000_000L;
     private static final int POLL_MS = 5;
 
     /** Messages from the producing worker to the connection thread. */
@@ -68,7 +70,8 @@ final class QueryStream {
             throws IOException {
         Future<?> producer = pool.submit(() -> produce(engine, manager));
         boolean headerSent = false;
-        List<ColumnSchema> columns = List.of();
+        List<ColumnSchema> columns = null;
+        long columnsAt = 0;
         try {
             while (true) {
                 Event ev = events.poll(POLL_MS, TimeUnit.MILLISECONDS);
@@ -77,10 +80,17 @@ final class QueryStream {
                         abandon(producer, "client disconnected");
                         return false;
                     }
+                    if (!headerSent && columns != null && System.nanoTime() - columnsAt >= HEADER_DELAY_NANOS) {
+                        sendHeader(conn, columns, keepAlive);
+                        headerSent = true;
+                    }
                     continue;
                 }
                 switch (ev) {
-                    case Columns c -> columns = c.columns();
+                    case Columns c -> {
+                        columns = c.columns();
+                        columnsAt = System.nanoTime();
+                    }
                     case Rows r -> {
                         if (!headerSent) {
                             sendHeader(conn, columns, keepAlive);
@@ -136,7 +146,7 @@ final class QueryStream {
         StringBuilder sb = new StringBuilder("{\"type\":\"header\",\"query_id\":");
         JsonWriter.writeString(sb, queryId);
         sb.append(",\"columns\":");
-        ResultWriter.writeColumns(sb, columns);
+        ResultWriter.writeColumns(sb, columns == null ? List.of() : columns);
         conn.writeChunk(line(sb.append('}').toString()));
     }
 
@@ -183,7 +193,8 @@ final class QueryStream {
         private DataType[] types = new DataType[0];
         private final StringBuilder batch = new StringBuilder();
         private int rows;
-        private long batchStart;
+        private long lastFlush;
+        private boolean flushedAny;
 
         @Override
         public void columns(List<ColumnSchema> columns) {
@@ -202,7 +213,6 @@ final class QueryStream {
             if (rows == 0) {
                 batch.setLength(0);
                 batch.append("{\"type\":\"rows\",\"rows\":[");
-                batchStart = System.nanoTime();
             } else {
                 batch.append(',');
             }
@@ -215,8 +225,9 @@ final class QueryStream {
             }
             batch.append(']');
             rows++;
-            if (rows >= BATCH_ROWS || batch.length() >= BATCH_BYTES
-                    || System.nanoTime() - batchStart >= BATCH_MAX_DELAY_NANOS) {
+            // The first row goes out at once; later batches when full or 50 ms after the previous one.
+            if (rows >= BATCH_ROWS || batch.length() >= BATCH_BYTES || !flushedAny
+                    || System.nanoTime() - lastFlush >= BATCH_MAX_DELAY_NANOS) {
                 flush();
             }
         }
@@ -237,6 +248,8 @@ final class QueryStream {
             control.check();
             events.add(new Rows(line(batch.append("]}").toString())));
             rows = 0;
+            flushedAny = true;
+            lastFlush = System.nanoTime();
         }
     }
 }

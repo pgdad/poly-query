@@ -122,7 +122,10 @@ public final class Operators {
                 rows.add(row);
             }
             ctx.checkNow();
-            rows.sort(comparator);
+            rows.sort((a, b) -> {
+                ctx.checkpoint(); // keeps long sorts cancellable
+                return comparator.compare(a, b);
+            });
             pos = 0;
         }
 

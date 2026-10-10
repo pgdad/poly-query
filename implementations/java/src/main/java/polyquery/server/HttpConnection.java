@@ -208,7 +208,7 @@ final class HttpConnection implements Closeable {
             if (length < 0) {
                 throw bad("invalid Content-Length");
             }
-            if (length > maxBodyBytes) {
+            if (length > maxBodyBytes || length > Integer.MAX_VALUE - 16) {
                 throw tooLarge(maxBodyBytes);
             }
         }
@@ -268,7 +268,7 @@ final class HttpConnection implements Closeable {
                 }
                 return body.toByteArray();
             }
-            if (body.size() + size > maxBodyBytes) {
+            if (body.size() + size > maxBodyBytes || body.size() + size > Integer.MAX_VALUE - 16) {
                 throw tooLarge(maxBodyBytes);
             }
             byte[] chunk = new byte[(int) size];

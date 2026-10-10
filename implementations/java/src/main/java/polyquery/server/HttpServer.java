@@ -128,7 +128,6 @@ public final class HttpServer {
                     activeExchanges.decrementAndGet();
                 }
                 if (!keep) {
-                    conn.closeGracefully();
                     return;
                 }
             }
