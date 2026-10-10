@@ -276,8 +276,8 @@ mod tests {
         let names: Vec<_> = t.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["a", "b", "c"]);
         assert_eq!(t.fields[0].data_type, DataType::Int64);
-        assert!(t.columns[1].value(0).is_null());
-        assert_eq!(t.columns[1].value(1), Value::str("x"));
+        assert!(t.value(0, 1).unwrap().is_null());
+        assert_eq!(t.value(1, 1).unwrap(), Value::str("x"));
     }
 
     #[test]
@@ -338,9 +338,9 @@ mod tests {
             &o,
         )
         .unwrap();
-        assert_eq!(t.columns[1].value(0), Value::Decimal(12500, 3));
-        assert_eq!(t.columns[1].value(1), Value::Decimal(-125, 3));
-        assert!(t.columns[1].value(2).is_null());
+        assert_eq!(t.value(0, 1).unwrap(), Value::Decimal(12500, 3));
+        assert_eq!(t.value(1, 1).unwrap(), Value::Decimal(-125, 3));
+        assert!(t.value(2, 1).unwrap().is_null());
         let e = load("t", Format::JsonLines, "{\"id\": 1.5}", &o).unwrap_err();
         assert_eq!(e.code, ErrorCode::ConversionError);
         let e = load("t", Format::JsonLines, "{\"id\": 1, \"zzz\": 2}", &o).unwrap_err();

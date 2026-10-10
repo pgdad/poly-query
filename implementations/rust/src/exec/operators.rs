@@ -9,10 +9,11 @@ use super::aggregate::AggState;
 use super::context::{ExecContext, LookupTable};
 use super::eval::{eval, eval_predicate, normalize_key};
 use crate::error::Result;
+use crate::planner::access::IndexLookup;
 use crate::planner::expr::{AggregateCall, Expr, KeyDomain};
 use crate::planner::logical::{JoinType, SortKey};
 use crate::planner::physical::{JoinKey, PhysicalPlan};
-use crate::storage::Table;
+use crate::storage::{Index, Table};
 use crate::types::Value;
 
 pub type Row = Vec<Value>;
@@ -29,10 +30,33 @@ pub trait Operator {
 pub fn build(plan: PhysicalPlan) -> Box<dyn Operator> {
     match plan {
         PhysicalPlan::Values => Box::new(SingleRowOp { done: false }),
-        PhysicalPlan::TableScan { table, columns, .. } => Box::new(ScanOp {
+        PhysicalPlan::TableScan {
             table,
             columns,
+            groups,
+            ..
+        } => Box::new(ScanOp {
+            table,
+            columns,
+            groups,
+            group: 0,
             pos: 0,
+            batch: Vec::new().into_iter(),
+        }),
+        PhysicalPlan::IndexScan {
+            table,
+            index,
+            lookup,
+            columns,
+            ..
+        } => Box::new(IndexScanOp {
+            table,
+            index,
+            lookup,
+            columns,
+            ids: None,
+            pos: 0,
+            batch: Vec::new().into_iter(),
         }),
         PhysicalPlan::Filter { input, predicate } => Box::new(FilterOp {
             input: build(*input),
@@ -407,27 +431,72 @@ impl Operator for SingleRowOp {
     }
 }
 
+/// Full scan of selected row groups, materializing rows in batches.
 struct ScanOp {
     table: Arc<Table>,
     columns: Vec<usize>,
+    /// Row groups to read, in order.
+    groups: Vec<usize>,
+    /// Position in `groups`.
+    group: usize,
+    /// Next row within the current group.
     pos: usize,
+    batch: std::vec::IntoIter<Row>,
 }
 
 impl Operator for ScanOp {
     fn next(&mut self, ctx: &ExecContext) -> Result<Option<Row>> {
-        if self.pos >= self.table.row_count {
-            return Ok(None);
-        }
-        if self.pos.is_multiple_of(CHECK_INTERVAL) {
+        loop {
+            if let Some(row) = self.batch.next() {
+                return Ok(Some(row));
+            }
+            let Some(&g) = self.groups.get(self.group) else {
+                return Ok(None);
+            };
+            let len = self.table.row_groups()[g].len;
+            if self.pos >= len {
+                self.group += 1;
+                self.pos = 0;
+                continue;
+            }
             ctx.check_interrupt()?;
+            let to = (self.pos + CHECK_INTERVAL).min(len);
+            let mut rows = Vec::with_capacity(to - self.pos);
+            self.table
+                .read_group(g, &self.columns, self.pos, to, &mut rows)?;
+            self.pos = to;
+            self.batch = rows.into_iter();
         }
-        let row = self
-            .columns
-            .iter()
-            .map(|&c| self.table.columns[c].value(self.pos))
-            .collect();
-        self.pos += 1;
-        Ok(Some(row))
+    }
+}
+
+/// Rows located through an index lookup (ascending row ids).
+struct IndexScanOp {
+    table: Arc<Table>,
+    index: Arc<Index>,
+    lookup: IndexLookup,
+    columns: Vec<usize>,
+    ids: Option<Vec<u32>>,
+    pos: usize,
+    batch: std::vec::IntoIter<Row>,
+}
+
+impl Operator for IndexScanOp {
+    fn next(&mut self, ctx: &ExecContext) -> Result<Option<Row>> {
+        loop {
+            if let Some(row) = self.batch.next() {
+                return Ok(Some(row));
+            }
+            let ids = self.ids.get_or_insert_with(|| self.lookup.run(&self.index));
+            if self.pos >= ids.len() {
+                return Ok(None);
+            }
+            ctx.check_interrupt()?;
+            let to = (self.pos + CHECK_INTERVAL).min(ids.len());
+            let rows = self.table.read_rows(&ids[self.pos..to], &self.columns)?;
+            self.pos = to;
+            self.batch = rows.into_iter();
+        }
     }
 }
 

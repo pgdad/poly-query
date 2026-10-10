@@ -208,6 +208,7 @@ impl Binder<'_> {
                 let plan = LogicalPlan::Scan {
                     columns: (0..fields.len()).collect(),
                     schema: fields.clone(),
+                    indexes: self.ctx.catalog.indexes_for(&table),
                     table,
                 };
                 Ok((plan, Scope::single(var, fields)))

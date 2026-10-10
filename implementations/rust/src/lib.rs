@@ -2,7 +2,7 @@
 //!
 //! Layers, bottom-up:
 //! * [`types`]    — data types, values, casts, decimal/date arithmetic
-//! * [`storage`]  — immutable columnar tables
+//! * [`storage`]  — immutable tables (row/column/PQCF), statistics, indexes, PQCF files
 //! * [`ingest`]   — CSV / JSON / JSONL readers with schema inference
 //! * [`catalog`]  — named tables
 //! * [`sql`]      — lexer, AST, parser

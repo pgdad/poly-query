@@ -3,6 +3,7 @@
 //!
 //! `AST → binder → LogicalPlan → optimizer → physical::lower → PhysicalPlan`
 
+pub mod access;
 pub mod binder;
 pub mod expr;
 pub mod logical;

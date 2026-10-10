@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use super::expr::{AggregateCall, Expr};
-use crate::storage::{Field, Table};
+use crate::storage::{Field, Index, Table};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SortKey {
@@ -35,11 +35,14 @@ impl JoinType {
 pub enum LogicalPlan {
     /// A single row with no columns (`SELECT` without `FROM`).
     SingleRow,
-    /// Scan of a table, producing the listed columns in order.
+    /// Scan of a table, producing the listed columns in order. `indexes`
+    /// are the catalog's indexes on this table version (for access-path
+    /// selection).
     Scan {
         table: Arc<Table>,
         columns: Vec<usize>,
         schema: Vec<Field>,
+        indexes: Vec<Arc<Index>>,
     },
     Filter {
         input: Box<LogicalPlan>,

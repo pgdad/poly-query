@@ -5,11 +5,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use super::access::{self, IndexLookup};
 use super::expr::{AggregateCall, Expr, KeyDomain};
 use super::logical::{JoinType, LogicalPlan, SortKey};
 use crate::json::Json;
 use crate::sql::ast::BinaryOp;
-use crate::storage::{Field, Table};
+use crate::storage::{Field, Index, Table};
 
 /// Join algorithm preference (query option `join`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -20,9 +21,20 @@ pub enum JoinStrategy {
     NestedLoop,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct PhysicalOptions {
     pub join: JoinStrategy,
+    /// Query option `use_indexes` (false ⇒ never use indexes).
+    pub use_indexes: bool,
+}
+
+impl Default for PhysicalOptions {
+    fn default() -> Self {
+        PhysicalOptions {
+            join: JoinStrategy::Auto,
+            use_indexes: true,
+        }
+    }
 }
 
 /// Equi-join key pair: `left` is evaluated on left rows, `right` on right rows.
@@ -37,10 +49,22 @@ pub struct JoinKey {
 pub enum PhysicalPlan {
     /// One empty row.
     Values,
+    /// Full scan of the row groups `groups` (the others were excluded by
+    /// their min/max statistics).
     TableScan {
         table: Arc<Table>,
         columns: Vec<usize>,
         schema: Vec<Field>,
+        groups: Vec<usize>,
+    },
+    /// Rows located through an index, in table order.
+    IndexScan {
+        table: Arc<Table>,
+        index: Arc<Index>,
+        lookup: IndexLookup,
+        columns: Vec<usize>,
+        schema: Vec<Field>,
+        estimated_rows: f64,
     },
     Filter {
         input: Box<PhysicalPlan>,
@@ -111,15 +135,25 @@ pub fn lower(plan: &LogicalPlan, opts: PhysicalOptions) -> PhysicalPlan {
             table,
             columns,
             schema,
+            ..
         } => PhysicalPlan::TableScan {
             table: table.clone(),
             columns: columns.clone(),
             schema: schema.clone(),
+            groups: (0..table.row_groups().len()).collect(),
         },
         LogicalPlan::Filter { input, predicate } => param_lookup(input, predicate, opts)
-            .unwrap_or_else(|| PhysicalPlan::Filter {
-                input: boxed(input),
-                predicate: predicate.clone(),
+            .unwrap_or_else(|| match &**input {
+                LogicalPlan::Scan {
+                    table,
+                    columns,
+                    schema,
+                    indexes,
+                } => lower_filtered_scan(table, columns, schema, indexes, predicate, opts),
+                _ => PhysicalPlan::Filter {
+                    input: boxed(input),
+                    predicate: predicate.clone(),
+                },
             }),
         LogicalPlan::Project {
             input,
@@ -176,6 +210,56 @@ pub fn lower(plan: &LogicalPlan, opts: PhysicalOptions) -> PhysicalPlan {
                 limit: *limit,
             }
         }
+    }
+}
+
+/// Access path of a scan with pushed-down conjuncts: an index scan (plus a
+/// residual filter) if an index is selective enough, otherwise a filtered
+/// table scan reading only row groups whose statistics admit a match.
+fn lower_filtered_scan(
+    table: &Arc<Table>,
+    columns: &[usize],
+    schema: &[Field],
+    indexes: &[Arc<Index>],
+    predicate: &Expr,
+    opts: PhysicalOptions,
+) -> PhysicalPlan {
+    let mut conjuncts = Vec::new();
+    predicate.clone().into_conjuncts(&mut conjuncts);
+    if opts.use_indexes
+        && let Some(choice) = access::choose_index(table, columns, indexes, &conjuncts)
+    {
+        let residual: Vec<Expr> = conjuncts
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !choice.used.contains(i))
+            .map(|(_, c)| c)
+            .collect();
+        let scan = PhysicalPlan::IndexScan {
+            table: table.clone(),
+            index: choice.index,
+            lookup: choice.lookup,
+            columns: columns.to_vec(),
+            schema: schema.to_vec(),
+            estimated_rows: choice.selectivity * table.row_count as f64,
+        };
+        return match Expr::conjunction(residual) {
+            Some(predicate) => PhysicalPlan::Filter {
+                input: Box::new(scan),
+                predicate,
+            },
+            None => scan,
+        };
+    }
+    let groups = access::select_row_groups(table, columns, &conjuncts);
+    PhysicalPlan::Filter {
+        input: Box::new(PhysicalPlan::TableScan {
+            table: table.clone(),
+            columns: columns.to_vec(),
+            schema: schema.to_vec(),
+            groups,
+        }),
+        predicate: predicate.clone(),
     }
 }
 
@@ -335,7 +419,14 @@ pub fn estimate_rows(plan: &LogicalPlan) -> f64 {
     match plan {
         LogicalPlan::SingleRow => 1.0,
         LogicalPlan::Scan { table, .. } => table.row_count as f64,
-        LogicalPlan::Filter { input, .. } => estimate_rows(input) / 3.0,
+        LogicalPlan::Filter { input, predicate } => match &**input {
+            LogicalPlan::Scan { table, columns, .. } => {
+                let mut conjuncts = Vec::new();
+                predicate.clone().into_conjuncts(&mut conjuncts);
+                table.row_count as f64 * access::filter_selectivity(table, columns, &conjuncts)
+            }
+            _ => estimate_rows(input) * access::DEFAULT_SELECTIVITY,
+        },
         LogicalPlan::Project { input, .. }
         | LogicalPlan::Sort { input, .. }
         | LogicalPlan::Distinct { input } => estimate_rows(input),
@@ -374,6 +465,7 @@ impl PhysicalPlan {
         match self {
             PhysicalPlan::Values => &[],
             PhysicalPlan::TableScan { schema, .. }
+            | PhysicalPlan::IndexScan { schema, .. }
             | PhysicalPlan::Project { schema, .. }
             | PhysicalPlan::HashAggregate { schema, .. }
             | PhysicalPlan::HashJoin { schema, .. }
@@ -403,11 +495,40 @@ impl PhysicalPlan {
         };
         match self {
             PhysicalPlan::Values => node("Values", vec![("rows", Json::int(1))], vec![]),
-            PhysicalPlan::TableScan { table, schema, .. } => node(
-                "TableScan",
-                vec![
+            PhysicalPlan::TableScan {
+                table,
+                schema,
+                groups,
+                ..
+            } => {
+                let mut props = vec![
                     ("table", Json::str(&table.name)),
                     ("columns", names(schema)),
+                    ("layout", Json::str(table.layout().name())),
+                ];
+                if table.is_file_backed() {
+                    props.push(("row_groups", Json::uint(table.row_groups().len() as u64)));
+                    props.push(("row_groups_read", Json::uint(groups.len() as u64)));
+                }
+                node("TableScan", props, vec![])
+            }
+            PhysicalPlan::IndexScan {
+                table,
+                index,
+                lookup,
+                schema,
+                estimated_rows,
+                ..
+            } => node(
+                "IndexScan",
+                vec![
+                    ("table", Json::str(&table.name)),
+                    ("index", Json::str(&index.name)),
+                    ("kind", Json::str(index.kind.name())),
+                    ("column", Json::str(index.column_name())),
+                    ("lookup", Json::String(lookup.to_string())),
+                    ("columns", names(schema)),
+                    ("estimated_rows", Json::uint(estimated_rows.round() as u64)),
                 ],
                 vec![],
             ),
