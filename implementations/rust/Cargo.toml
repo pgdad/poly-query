@@ -1,0 +1,23 @@
+[package]
+name = "polyquery"
+version = "0.1.0"
+edition = "2024"
+description = "PolyQuery analytical database engine (Rust, Track A, std only)"
+publish = false
+
+[dependencies]
+
+[[bin]]
+name = "polyquery"
+path = "src/main.rs"
+
+[lib]
+name = "polyquery"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3
+debug = false
+codegen-units = 4
+lto = "thin"
+panic = "unwind"

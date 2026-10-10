@@ -1,0 +1,18 @@
+#!/bin/sh
+# PolyQuery launcher: resolves its own location so it works from any directory.
+set -e
+SELF="$0"
+while [ -L "$SELF" ]; do
+    LINK=$(readlink "$SELF")
+    case "$LINK" in
+        /*) SELF="$LINK" ;;
+        *) SELF="$(dirname "$SELF")/$LINK" ;;
+    esac
+done
+ROOT=$(cd "$(dirname "$SELF")/.." && pwd)
+BIN="$ROOT/target/release/polyquery"
+if [ ! -x "$BIN" ]; then
+    echo "polyquery: engine binary not built; run 'make -C $ROOT build'" >&2
+    exit 1
+fi
+exec "$BIN" "$@"
