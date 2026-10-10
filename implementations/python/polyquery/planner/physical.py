@@ -497,7 +497,7 @@ class PhysicalPlanner:
     def plan_query(self, query: b.BoundQuery) -> PhysicalNode:
         logical = LogicalPlanner(self.ids).plan_query(query)
         if self.options.optimize:
-            logical = prune_columns(optimize(logical))
+            logical = prune_columns(optimize(logical, self.options.evaluate))
         return self.plan(logical)
 
     def plan(self, node: lp.LogicalNode) -> PhysicalNode:

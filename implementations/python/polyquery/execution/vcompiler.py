@@ -76,16 +76,6 @@ def true_positions(mask: Sequence[Any]) -> list[int]:
     return list(compress(range(len(mask)), map(_is_true, mask)))
 
 
-def may_fail(expr: b.Expr) -> bool:
-    """Conservatively: can evaluating ``expr`` raise an error or have a side
-    effect (``PQ_SLEEP``)?"""
-    return any(isinstance(e, (b.Arith, b.Unary, b.Cast, b.Function, b.SubqueryExpr)) for e in b.walk(expr))
-
-
-def _is_volatile(expr: b.Expr) -> bool:
-    return any(isinstance(e, b.Function) and e.name == "PQ_SLEEP" for e in b.walk(expr))
-
-
 def _overflow() -> errors.PolyQueryError:
     return errors.numeric_overflow("numeric overflow")
 
@@ -166,7 +156,7 @@ class VectorCompiler:
         self.layout = layout
 
     def compile(self, expr: b.Expr) -> VecFn:
-        if not isinstance(expr, b.Literal) and b.is_constant(expr) and not _is_volatile(expr):
+        if not isinstance(expr, b.Literal) and b.is_constant(expr) and not b.has_side_effects(expr):
             return self._constant(expr)
         method = getattr(self, "_v_" + type(expr).__name__, None)
         if method is None:
@@ -320,7 +310,7 @@ class VectorCompiler:
         fast = operator.and_ if is_and else operator.or_
         undecided = _is_not_false if is_and else _is_not_true
         right_all = self.compile(e.right)
-        right_some = self._selective(e.right) if may_fail(e.right) else None
+        right_some = self._selective(e.right) if b.may_fail(e.right) else None
 
         def logical(cols: Columns, n: int) -> Sequence[Any]:
             a = left(cols, n)

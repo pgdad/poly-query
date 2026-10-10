@@ -250,9 +250,12 @@ class Distinct(Accumulator):
 def make_accumulator(call: b.AggCall) -> Accumulator:
     if call.arg is None:
         return CountStar()
-    arg_type: DataType = call.arg.type
+    return accumulator_for(call.name, call.arg.type, call.distinct)
+
+
+def accumulator_for(name: str, arg_type: DataType, distinct: bool) -> Accumulator:
+    """The accumulator of aggregate ``name`` over an argument of ``arg_type``."""
     acc: Accumulator
-    name = call.name
     if name == "COUNT":
         acc = Count()
     elif name in ("MIN", "MAX"):
@@ -269,7 +272,7 @@ def make_accumulator(call: b.AggCall) -> Accumulator:
             acc = AvgFloat()
         else:
             acc = AvgExact(arg_type.scale if arg_type.kind is TypeKind.DECIMAL else 0)
-    return Distinct(acc) if call.distinct else acc
+    return Distinct(acc) if distinct else acc
 
 
 def accumulator_factory(calls: list[b.AggCall]):

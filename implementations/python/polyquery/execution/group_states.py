@@ -30,7 +30,7 @@ from typing import Any, Sequence
 from .. import errors, values
 from ..analysis import bound as b
 from ..datatypes import TypeKind
-from .aggregates import make_accumulator, non_null
+from .aggregates import accumulator_for, non_null
 
 Runs = list[tuple[int, int, int]]
 _is_not_none = partial(operator.is_not, None)
@@ -279,7 +279,9 @@ class DistinctState(GroupState):
     """Aggregates over DISTINCT values: per group the set of values."""
 
     def __init__(self, call: b.AggCall) -> None:
-        self.call = call
+        assert call.arg is not None
+        # only picklable parts of the call (partial states go to other processes)
+        self.name, self.arg_type = call.name, call.arg.type
         self.sets: list[set[Any]] = []
 
     def grow(self, n: int) -> None:
@@ -304,7 +306,7 @@ class DistinctState(GroupState):
     def results(self) -> list[Any]:
         out = []
         for seen in self.sets:
-            acc = make_accumulator(self.call)
+            acc = accumulator_for(self.name, self.arg_type, distinct=True)
             acc.add_batch(list(seen))  # the Distinct accumulator drops NULL
             out.append(acc.result())
         return out

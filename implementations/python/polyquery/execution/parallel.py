@@ -134,7 +134,11 @@ def _worker(
             payload = (False, errors.resource_limit("out of memory in a parallel worker"))
         except Exception as e:
             payload = (False, errors.PolyQueryError(errors.INTERNAL_ERROR, f"parallel worker failed: {e!r}"))
-        data = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+        try:
+            data = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception as e:
+            failure = errors.PolyQueryError(errors.INTERNAL_ERROR, f"parallel worker result not picklable: {e!r}")
+            data = pickle.dumps((False, failure))
         view = memoryview(data)
         while view:
             written = os.write(fd, view)

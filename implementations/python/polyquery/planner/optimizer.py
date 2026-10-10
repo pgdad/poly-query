@@ -1,4 +1,5 @@
-"""Logical rewrites: predicate pushdown (indexes-and-planning.md §3).
+"""Logical rewrites: expression simplification (``rewrite``), predicate
+pushdown (indexes-and-planning.md §3) and column pruning.
 
 ``WHERE`` / ``ON`` conjuncts are moved as close to the scans as the join
 semantics allow; conjuncts referencing both sides of an inner join become join
@@ -10,23 +11,12 @@ are treated as constants.
 from __future__ import annotations
 
 from ..analysis import bound as b
-from ..datatypes import BOOLEAN
 from . import logical as lp
+from .rewrite import Evaluator, simplify_plan
 
 
-def conjuncts(expr: b.Expr | None) -> list[b.Expr]:
-    if expr is None:
-        return []
-    if isinstance(expr, b.Logical) and expr.op == "AND":
-        return conjuncts(expr.left) + conjuncts(expr.right)
-    return [expr]
-
-
-def conjunction(exprs: list[b.Expr]) -> b.Expr | None:
-    result: b.Expr | None = None
-    for e in exprs:
-        result = e if result is None else b.Logical(BOOLEAN, "AND", result, e)
-    return result
+conjuncts = b.conjuncts
+conjunction = b.conjunction
 
 
 def _rels(expr: b.Expr, within: set[int]) -> set[int]:
@@ -38,8 +28,10 @@ def _wrap(node: lp.LogicalNode, predicates: list[b.Expr]) -> lp.LogicalNode:
     return node if predicate is None else lp.Filter(node, predicate)
 
 
-def optimize(node: lp.LogicalNode) -> lp.LogicalNode:
-    return _push(node, [])
+def optimize(node: lp.LogicalNode, evaluate: Evaluator | None = None) -> lp.LogicalNode:
+    """Expression simplification (constant folding needs ``evaluate``), then
+    predicate pushdown."""
+    return _push(simplify_plan(node, evaluate), [])
 
 
 def _push(node: lp.LogicalNode, predicates: list[b.Expr]) -> lp.LogicalNode:
