@@ -22,7 +22,10 @@ fn main() -> ExitCode {
     // Keep panic output off the protocol channel; panics are reported as
     // INTERNAL_ERROR responses and logged.
     std::panic::set_hook(Box::new(|info| {
-        polyquery::log::error("panic", vec![("detail", polyquery::json::Json::String(info.to_string()))]);
+        polyquery::log::error(
+            "panic",
+            vec![("detail", polyquery::json::Json::String(info.to_string()))],
+        );
     }));
 
     match cli.mode {
@@ -40,20 +43,24 @@ fn main() -> ExitCode {
         }
         Mode::Session | Mode::Exec { .. } => {
             if !cli.config.data_dir.is_dir() {
-                eprintln!("polyquery: data directory '{}' does not exist", cli.config.data_dir.display());
+                eprintln!(
+                    "polyquery: data directory '{}' does not exist",
+                    cli.config.data_dir.display()
+                );
                 return ExitCode::from(1);
             }
             let mode = cli.mode.clone();
             let config = cli.config;
-            let worker = std::thread::Builder::new().name("session".into()).stack_size(WORKER_STACK_BYTES).spawn(
-                move || {
+            let worker = std::thread::Builder::new()
+                .name("session".into())
+                .stack_size(WORKER_STACK_BYTES)
+                .spawn(move || {
                     let mut engine = Engine::new(config);
                     match &mode {
                         Mode::Exec { request } => session::run_exec(&mut engine, request),
                         _ => session::run_session(&mut engine),
                     }
-                },
-            );
+                });
             match worker.map(|h| h.join()) {
                 Ok(Ok(Ok(()))) => ExitCode::SUCCESS,
                 Ok(Ok(Err(e))) => {

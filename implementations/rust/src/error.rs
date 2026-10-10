@@ -97,7 +97,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Error { code, message: message.into(), details: Vec::new() }
+        Error {
+            code,
+            message: message.into(),
+            details: Vec::new(),
+        }
     }
 
     pub fn with_detail(mut self, key: &str, value: Json) -> Self {

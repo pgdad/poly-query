@@ -9,14 +9,15 @@ pub fn cast_allowed(from: DataType, to: DataType) -> bool {
     if from == Null || from == to || to == String || from == String {
         return true;
     }
-    match (from, to) {
-        (Boolean, Int64) => true,
-        (Int64, Boolean | Decimal { .. } | Float64) => true,
-        (Decimal { .. }, Int64 | Decimal { .. } | Float64) => true,
-        (Float64, Int64 | Decimal { .. }) => true,
-        (Date, Timestamp) | (Timestamp, Date) => true,
-        _ => false,
-    }
+    matches!(
+        (from, to),
+        (Boolean, Int64)
+            | (Int64, Boolean | Decimal { .. } | Float64)
+            | (Decimal { .. }, Int64 | Decimal { .. } | Float64)
+            | (Float64, Int64 | Decimal { .. })
+            | (Date, Timestamp)
+            | (Timestamp, Date)
+    )
 }
 
 /// Error from parsing numeric text.
@@ -70,7 +71,8 @@ pub fn cast_value(v: &Value, to: DataType) -> Result<Value> {
             Value::Bool(_) => v.clone(),
             Value::Int(i) => Value::Bool(*i != 0),
             Value::Str(s) => Value::Bool(
-                parse_bool_text(trim(s)).ok_or_else(|| Error::conversion(format!("cannot convert '{s}' to BOOLEAN")))?,
+                parse_bool_text(trim(s))
+                    .ok_or_else(|| Error::conversion(format!("cannot convert '{s}' to BOOLEAN")))?,
             ),
             _ => return Err(fail()),
         },
@@ -109,16 +111,22 @@ pub fn cast_value(v: &Value, to: DataType) -> Result<Value> {
                     Value::Decimal(r as i64, scale)
                 }
                 Value::Int(i) => {
-                    let r = (*i as i128).checked_mul(decimal::pow10(scale as u32)).ok_or_else(overflow)?;
+                    let r = (*i as i128)
+                        .checked_mul(decimal::pow10(scale as u32))
+                        .ok_or_else(overflow)?;
                     if !decimal::fits_precision(r, precision) {
                         return Err(overflow());
                     }
                     Value::Decimal(r as i64, scale)
                 }
-                Value::Float(f) => Value::Decimal(float::f64_to_decimal(*f, precision, scale).ok_or_else(overflow)?, scale),
+                Value::Float(f) => Value::Decimal(
+                    float::f64_to_decimal(*f, precision, scale).ok_or_else(overflow)?,
+                    scale,
+                ),
                 Value::Str(s) => {
-                    let t = decimal::parse_text(trim(s))
-                        .ok_or_else(|| Error::conversion(format!("cannot convert '{s}' to {to}")))?;
+                    let t = decimal::parse_text(trim(s)).ok_or_else(|| {
+                        Error::conversion(format!("cannot convert '{s}' to {to}"))
+                    })?;
                     match decimal::text_to_unscaled(&t, precision, scale, false) {
                         decimal::TextToDecimal::Ok(u) => Value::Decimal(u, scale),
                         _ => return Err(overflow()),
@@ -131,17 +139,19 @@ pub fn cast_value(v: &Value, to: DataType) -> Result<Value> {
             Value::Date(_) => v.clone(),
             Value::Timestamp(t) => Value::Date(datetime::timestamp_to_date(*t)),
             Value::Str(s) => Value::Date(
-                datetime::parse_date(trim(s)).ok_or_else(|| Error::conversion(format!("cannot convert '{s}' to DATE")))?,
+                datetime::parse_date(trim(s))
+                    .ok_or_else(|| Error::conversion(format!("cannot convert '{s}' to DATE")))?,
             ),
             _ => return Err(fail()),
         },
         T::Timestamp => match v {
             Value::Timestamp(_) => v.clone(),
             Value::Date(d) => Value::Timestamp(datetime::date_to_timestamp(*d)),
-            Value::Str(s) => Value::Timestamp(
-                datetime::parse_timestamp(trim(s))
-                    .ok_or_else(|| Error::conversion(format!("cannot convert '{s}' to TIMESTAMP")))?,
-            ),
+            Value::Str(s) => {
+                Value::Timestamp(datetime::parse_timestamp(trim(s)).ok_or_else(|| {
+                    Error::conversion(format!("cannot convert '{s}' to TIMESTAMP"))
+                })?)
+            }
             _ => return Err(fail()),
         },
     })
@@ -153,7 +163,10 @@ pub fn float_to_int(f: f64) -> Result<i64> {
     if (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&t) {
         Ok(t as i64)
     } else {
-        Err(Error::overflow(format!("{} is out of range for INT64", float::format_f64(f))))
+        Err(Error::overflow(format!(
+            "{} is out of range for INT64",
+            float::format_f64(f)
+        )))
     }
 }
 
@@ -168,27 +181,72 @@ mod tests {
 
     #[test]
     fn numeric_casts() {
-        assert_eq!(c(Value::Decimal(-375, 2), DataType::Int64).unwrap(), Value::Int(-3));
-        assert_eq!(c(Value::Decimal(2345, 3), DataType::decimal(5, 2)).unwrap(), Value::Decimal(235, 2));
-        assert_eq!(c(Value::Decimal(-2345, 3), DataType::decimal(5, 2)).unwrap(), Value::Decimal(-235, 2));
-        assert_eq!(c(Value::Int(1000), DataType::decimal(3, 0)).unwrap_err().code, ErrorCode::NumericOverflow);
-        assert_eq!(c(Value::Float(1e19), DataType::Int64).unwrap_err().code, ErrorCode::NumericOverflow);
-        assert_eq!(c(Value::Float(7.9), DataType::Int64).unwrap(), Value::Int(7));
+        assert_eq!(
+            c(Value::Decimal(-375, 2), DataType::Int64).unwrap(),
+            Value::Int(-3)
+        );
+        assert_eq!(
+            c(Value::Decimal(2345, 3), DataType::decimal(5, 2)).unwrap(),
+            Value::Decimal(235, 2)
+        );
+        assert_eq!(
+            c(Value::Decimal(-2345, 3), DataType::decimal(5, 2)).unwrap(),
+            Value::Decimal(-235, 2)
+        );
+        assert_eq!(
+            c(Value::Int(1000), DataType::decimal(3, 0))
+                .unwrap_err()
+                .code,
+            ErrorCode::NumericOverflow
+        );
+        assert_eq!(
+            c(Value::Float(1e19), DataType::Int64).unwrap_err().code,
+            ErrorCode::NumericOverflow
+        );
+        assert_eq!(
+            c(Value::Float(7.9), DataType::Int64).unwrap(),
+            Value::Int(7)
+        );
     }
 
     #[test]
     fn string_casts() {
-        assert_eq!(c(Value::str(" 12 "), DataType::Int64).unwrap(), Value::Int(12));
-        assert_eq!(c(Value::str("abc"), DataType::Int64).unwrap_err().code, ErrorCode::ConversionError);
         assert_eq!(
-            c(Value::str("9223372036854775808"), DataType::Int64).unwrap_err().code,
+            c(Value::str(" 12 "), DataType::Int64).unwrap(),
+            Value::Int(12)
+        );
+        assert_eq!(
+            c(Value::str("abc"), DataType::Int64).unwrap_err().code,
+            ErrorCode::ConversionError
+        );
+        assert_eq!(
+            c(Value::str("9223372036854775808"), DataType::Int64)
+                .unwrap_err()
+                .code,
             ErrorCode::NumericOverflow
         );
-        assert_eq!(c(Value::str("1.005"), DataType::decimal(4, 2)).unwrap(), Value::Decimal(101, 2));
-        assert_eq!(c(Value::str("  TRUE "), DataType::Boolean).unwrap(), Value::Bool(true));
-        assert_eq!(c(Value::str("yes"), DataType::Boolean).unwrap_err().code, ErrorCode::ConversionError);
-        assert_eq!(c(Value::str("2024-13-01"), DataType::Date).unwrap_err().code, ErrorCode::ConversionError);
-        assert_eq!(c(Value::Decimal(-5, 2), DataType::String).unwrap(), Value::str("-0.05"));
+        assert_eq!(
+            c(Value::str("1.005"), DataType::decimal(4, 2)).unwrap(),
+            Value::Decimal(101, 2)
+        );
+        assert_eq!(
+            c(Value::str("  TRUE "), DataType::Boolean).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            c(Value::str("yes"), DataType::Boolean).unwrap_err().code,
+            ErrorCode::ConversionError
+        );
+        assert_eq!(
+            c(Value::str("2024-13-01"), DataType::Date)
+                .unwrap_err()
+                .code,
+            ErrorCode::ConversionError
+        );
+        assert_eq!(
+            c(Value::Decimal(-5, 2), DataType::String).unwrap(),
+            Value::str("-0.05")
+        );
     }
 
     #[test]

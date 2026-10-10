@@ -51,7 +51,9 @@ pub fn enabled(level: LogLevel) -> bool {
 
 /// RFC 3339 UTC timestamp with millisecond precision.
 pub fn now_rfc3339() -> String {
-    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     let micros = d.as_micros() as i64;
     let text = datetime::format_timestamp(micros - micros % 1000);
     let (date, time) = text.split_at(10);
@@ -65,7 +67,11 @@ pub fn log(level: LogLevel, msg: &str, fields: Vec<(&str, Json)>) {
     if !enabled(level) {
         return;
     }
-    let mut all = vec![("ts", Json::String(now_rfc3339())), ("level", Json::str(level.name())), ("msg", Json::str(msg))];
+    let mut all = vec![
+        ("ts", Json::String(now_rfc3339())),
+        ("level", Json::str(level.name())),
+        ("msg", Json::str(msg)),
+    ];
     all.extend(fields);
     let line = Json::object(all).to_string_compact();
     let mut err = std::io::stderr().lock();

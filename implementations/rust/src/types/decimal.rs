@@ -121,7 +121,11 @@ pub fn parse_text(s: &str) -> Option<DecimalText<'_>> {
     if int.is_empty() && !body.starts_with('.') {
         return None;
     }
-    Some(DecimalText { negative, int_digits: int.trim_start_matches('0'), frac_digits: frac })
+    Some(DecimalText {
+        negative,
+        int_digits: int.trim_start_matches('0'),
+        frac_digits: frac,
+    })
 }
 
 /// Outcome of converting decimal text to a fixed scale.
@@ -137,7 +141,12 @@ pub enum TextToDecimal {
 /// Converts parsed decimal text to an unscaled value at `scale`, checking
 /// `precision`. With `exact`, extra fractional digits are an error
 /// (ingestion); otherwise they are rounded half away from zero (CAST).
-pub fn text_to_unscaled(t: &DecimalText<'_>, precision: u8, scale: u8, exact: bool) -> TextToDecimal {
+pub fn text_to_unscaled(
+    t: &DecimalText<'_>,
+    precision: u8,
+    scale: u8,
+    exact: bool,
+) -> TextToDecimal {
     let scale_us = scale as usize;
     if t.int_digits.len() > precision as usize {
         return TextToDecimal::Overflow;

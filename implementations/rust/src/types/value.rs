@@ -60,7 +60,11 @@ impl Value {
             (Timestamp(a), Timestamp(b)) => a.cmp(b),
             (Date(a), Timestamp(b)) => datetime::date_to_timestamp(*a).cmp(b),
             (Timestamp(a), Date(b)) => a.cmp(&datetime::date_to_timestamp(*b)),
-            _ => return Err(Error::internal(format!("cannot compare {self:?} with {other:?}"))),
+            _ => {
+                return Err(Error::internal(format!(
+                    "cannot compare {self:?} with {other:?}"
+                )));
+            }
         })
     }
 
@@ -71,8 +75,12 @@ impl Value {
             (Value::Null, Value::Null) => Ordering::Equal,
             (Value::Null, _) => Ordering::Less,
             (_, Value::Null) => Ordering::Greater,
-            (Value::Int(a), Value::Decimal(b, s)) => (*a as i128 * decimal::pow10(*s as u32)).cmp(&(*b as i128)),
-            (Value::Decimal(a, s), Value::Int(b)) => (*a as i128).cmp(&(*b as i128 * decimal::pow10(*s as u32))),
+            (Value::Int(a), Value::Decimal(b, s)) => {
+                (*a as i128 * decimal::pow10(*s as u32)).cmp(&(*b as i128))
+            }
+            (Value::Decimal(a, s), Value::Int(b)) => {
+                (*a as i128).cmp(&(*b as i128 * decimal::pow10(*s as u32)))
+            }
             _ => self.compare(other).unwrap_or(Ordering::Equal),
         }
     }
@@ -140,7 +148,9 @@ pub fn promote_int(v: i64, scale: u8) -> Result<i128> {
     if decimal::fits18(scaled) {
         Ok(scaled)
     } else {
-        Err(Error::overflow(format!("{v} does not fit DECIMAL(18,{scale})")))
+        Err(Error::overflow(format!(
+            "{v} does not fit DECIMAL(18,{scale})"
+        )))
     }
 }
 
@@ -155,7 +165,10 @@ impl PartialEq for Value {
         match (self, other) {
             (Value::Null, Value::Null) => true,
             (Value::Null, _) | (_, Value::Null) => false,
-            _ => self.compare(other).map(|o| o == Ordering::Equal).unwrap_or(false),
+            _ => self
+                .compare(other)
+                .map(|o| o == Ordering::Equal)
+                .unwrap_or(false),
         }
     }
 }
@@ -193,9 +206,20 @@ mod tests {
 
     #[test]
     fn mixed_numeric_comparison() {
-        assert_eq!(Value::Int(1).compare(&Value::Decimal(10, 1)).unwrap(), Ordering::Equal);
-        assert_eq!(Value::Int(1).compare(&Value::Float(1.5)).unwrap(), Ordering::Less);
-        assert_eq!(Value::Decimal(15, 1).compare(&Value::Decimal(150, 2)).unwrap(), Ordering::Equal);
+        assert_eq!(
+            Value::Int(1).compare(&Value::Decimal(10, 1)).unwrap(),
+            Ordering::Equal
+        );
+        assert_eq!(
+            Value::Int(1).compare(&Value::Float(1.5)).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            Value::Decimal(15, 1)
+                .compare(&Value::Decimal(150, 2))
+                .unwrap(),
+            Ordering::Equal
+        );
         assert!(Value::Int(i64::MAX).compare(&Value::Decimal(1, 1)).is_err());
     }
 

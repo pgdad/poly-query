@@ -19,7 +19,14 @@ pub const PROTOCOL_VERSION: i64 = 1;
 pub const SPEC_VERSION: &str = "1.0.0";
 
 /// Capability strings claimed by this engine (phases/README.md).
-pub const CAPABILITIES: &[&str] = &["phase1", "ingest.csv", "ingest.json", "ingest.jsonl", "sql.basic", "test.functions"];
+pub const CAPABILITIES: &[&str] = &[
+    "phase1",
+    "ingest.csv",
+    "ingest.json",
+    "ingest.jsonl",
+    "sql.basic",
+    "test.functions",
+];
 
 /// The `version` response body (without id).
 pub fn version_json() -> Json {
@@ -46,7 +53,10 @@ pub fn capabilities_json() -> Json {
     Json::object(vec![
         ("ok", Json::Bool(true)),
         ("protocol_version", Json::int(PROTOCOL_VERSION)),
-        ("capabilities", Json::Array(CAPABILITIES.iter().map(|c| Json::str(c)).collect())),
+        (
+            "capabilities",
+            Json::Array(CAPABILITIES.iter().map(|c| Json::str(c)).collect()),
+        ),
     ])
 }
 
@@ -54,7 +64,12 @@ fn columns_json(fields: &[Field]) -> Json {
     Json::Array(
         fields
             .iter()
-            .map(|f| Json::object(vec![("name", Json::str(&f.name)), ("type", Json::String(f.data_type.name()))]))
+            .map(|f| {
+                Json::object(vec![
+                    ("name", Json::str(&f.name)),
+                    ("type", Json::String(f.data_type.name())),
+                ])
+            })
             .collect(),
     )
 }
@@ -78,14 +93,20 @@ fn with_id(id: Json, body: Json) -> Json {
 
 /// Builds an error response.
 pub fn error_response(id: Json, err: &Error) -> Json {
-    with_id(id, Json::object(vec![("ok", Json::Bool(false)), ("error", err.to_json())]))
+    with_id(
+        id,
+        Json::object(vec![("ok", Json::Bool(false)), ("error", err.to_json())]),
+    )
 }
 
 /// Handles one raw request line and returns the single-line response.
 pub fn handle_line(engine: &mut Engine, line: &str) -> String {
     let resp = match json::parse(line) {
         Ok(v) => handle_json(engine, &v),
-        Err(e) => error_response(Json::Null, &Error::invalid_request(format!("invalid JSON: {e}"))),
+        Err(e) => error_response(
+            Json::Null,
+            &Error::invalid_request(format!("invalid JSON: {e}")),
+        ),
     };
     resp.to_string_compact()
 }
@@ -94,7 +115,10 @@ pub fn handle_line(engine: &mut Engine, line: &str) -> String {
 pub fn handle_json(engine: &mut Engine, req: &Json) -> Json {
     let id = req.get("id").cloned().unwrap_or(Json::Null);
     if !req.is_object() {
-        return error_response(Json::Null, &Error::invalid_request("request must be a JSON object"));
+        return error_response(
+            Json::Null,
+            &Error::invalid_request("request must be a JSON object"),
+        );
     }
     let started = Instant::now();
     let result = catch_unwind(AssertUnwindSafe(|| {
@@ -109,7 +133,9 @@ pub fn handle_json(engine: &mut Engine, req: &Json) -> Json {
                 .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
                 .unwrap_or_else(|| "unknown panic".to_string());
             crate::log::error("internal error", vec![("detail", Json::String(msg))]);
-            Err(Error::internal("internal error while processing the request"))
+            Err(Error::internal(
+                "internal error while processing the request",
+            ))
         }
     };
     match result {
@@ -131,7 +157,12 @@ fn execute(engine: &mut Engine, req: Request, started: Instant) -> Result<Json> 
             let tables = engine
                 .catalog()
                 .tables()
-                .map(|t| Json::object(vec![("name", Json::str(&t.name)), ("row_count", Json::uint(t.row_count as u64))]))
+                .map(|t| {
+                    Json::object(vec![
+                        ("name", Json::str(&t.name)),
+                        ("row_count", Json::uint(t.row_count as u64)),
+                    ])
+                })
                 .collect();
             vec![ok(), ("tables", Json::Array(tables))]
         }
@@ -154,7 +185,10 @@ fn execute(engine: &mut Engine, req: Request, started: Instant) -> Result<Json> 
             let t = engine.load(load)?;
             crate::log::info(
                 "table loaded",
-                vec![("table", Json::str(&t.name)), ("rows", Json::uint(t.row_count as u64))],
+                vec![
+                    ("table", Json::str(&t.name)),
+                    ("rows", Json::uint(t.row_count as u64)),
+                ],
             );
             let mut body = vec![ok()];
             body.extend(table_json(&t));
@@ -183,7 +217,13 @@ fn execute(engine: &mut Engine, req: Request, started: Instant) -> Result<Json> 
                 body.push(("rows", Json::Raw(out)));
             }
             body.push(("row_count", Json::uint(result.row_count)));
-            body.push(("stats", Json::object(vec![("elapsed_us", Json::uint(started.elapsed().as_micros() as u64))])));
+            body.push((
+                "stats",
+                Json::object(vec![(
+                    "elapsed_us",
+                    Json::uint(started.elapsed().as_micros() as u64),
+                )]),
+            ));
             body
         }
         Request::Sleep { ms } => {

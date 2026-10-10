@@ -50,7 +50,12 @@ impl Json {
     }
 
     pub fn object(fields: Vec<(&str, Json)>) -> Json {
-        Json::Object(fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+        Json::Object(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        )
     }
 
     /// First member with the given key (objects only).
@@ -84,7 +89,11 @@ impl Json {
                     return Some(v);
                 }
                 let f: f64 = text.parse().ok()?;
-                if f.fract() == 0.0 && f.abs() < 9.0e15 { Some(f as i64) } else { None }
+                if f.fract() == 0.0 && f.abs() < 9.0e15 {
+                    Some(f as i64)
+                } else {
+                    None
+                }
             }
             _ => None,
         }
@@ -175,7 +184,11 @@ pub fn write_escaped(out: &mut String, s: &str) {
 
 /// Parses a complete JSON document (surrounding whitespace allowed).
 pub fn parse(text: &str) -> Result<Json, JsonError> {
-    let mut p = Parser { src: text.as_bytes(), text, pos: 0 };
+    let mut p = Parser {
+        src: text.as_bytes(),
+        text,
+        pos: 0,
+    };
     p.skip_ws();
     let v = p.value(0)?;
     p.skip_ws();
@@ -193,7 +206,10 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn err(&self, msg: &str) -> JsonError {
-        JsonError { message: msg.to_string(), offset: self.pos }
+        JsonError {
+            message: msg.to_string(),
+            offset: self.pos,
+        }
     }
 
     fn skip_ws(&mut self) {
@@ -391,7 +407,9 @@ impl<'a> Parser<'a> {
                             } else {
                                 hi
                             };
-                            out.push(char::from_u32(cp).ok_or_else(|| self.err("invalid code point"))?);
+                            out.push(
+                                char::from_u32(cp).ok_or_else(|| self.err("invalid code point"))?,
+                            );
                         }
                         _ => return Err(self.err("invalid escape")),
                     }
@@ -411,12 +429,27 @@ mod tests {
         let v = parse(r#" {"a": [1, -2.5e3, true, null], "b": "x\"yé\n"} "#).unwrap();
         assert_eq!(v.get("a").unwrap().as_array().unwrap().len(), 4);
         assert_eq!(v.get("b").unwrap().as_str().unwrap(), "x\"y\u{e9}\n");
-        assert_eq!(v.to_string_compact(), r#"{"a":[1,-2.5e3,true,null],"b":"x\"yé\n"}"#);
+        assert_eq!(
+            v.to_string_compact(),
+            r#"{"a":[1,-2.5e3,true,null],"b":"x\"yé\n"}"#
+        );
     }
 
     #[test]
     fn rejects_invalid() {
-        for bad in ["", "[1,]", "{\"a\":1,}", "NaN", "01", "1.", ".5", "\"a", "{'a':1}", "[1] x", "\"\u{1}\""] {
+        for bad in [
+            "",
+            "[1,]",
+            "{\"a\":1,}",
+            "NaN",
+            "01",
+            "1.",
+            ".5",
+            "\"a",
+            "{'a':1}",
+            "[1] x",
+            "\"\u{1}\"",
+        ] {
             assert!(parse(bad).is_err(), "{bad} should fail");
         }
     }

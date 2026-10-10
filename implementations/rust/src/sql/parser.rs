@@ -10,7 +10,11 @@ const MAX_DEPTH: usize = 200;
 /// Parses one SQL statement (an optional single trailing `;` is allowed).
 pub fn parse_statement(sql: &str) -> Result<Statement> {
     let tokens = tokenize(sql)?;
-    let mut p = Parser { tokens, i: 0, depth: 0 };
+    let mut p = Parser {
+        tokens,
+        i: 0,
+        depth: 0,
+    };
     let stmt = p.statement()?;
     p.eat_symbol(Symbol::Semicolon);
     if !p.at_eof() {
@@ -79,19 +83,31 @@ impl Parser {
 
     fn unexpected(&self, expected: &str) -> Error {
         let t = &self.tokens[self.i];
-        t.pos.error(Error::parse(format!("expected {expected}, found {}", t.kind.describe())))
+        t.pos.error(Error::parse(format!(
+            "expected {expected}, found {}",
+            t.kind.describe()
+        )))
     }
 
     fn expect_keyword(&mut self, k: Keyword) -> Result<()> {
-        if self.eat_keyword(k) { Ok(()) } else { Err(self.unexpected(k.as_str())) }
+        if self.eat_keyword(k) {
+            Ok(())
+        } else {
+            Err(self.unexpected(k.as_str()))
+        }
     }
 
     fn expect_symbol(&mut self, s: Symbol) -> Result<()> {
-        if self.eat_symbol(s) { Ok(()) } else { Err(self.unexpected(&format!("'{}'", s.as_str()))) }
+        if self.eat_symbol(s) {
+            Ok(())
+        } else {
+            Err(self.unexpected(&format!("'{}'", s.as_str())))
+        }
     }
 
     fn unsupported(&self, what: &str) -> Error {
-        self.pos().error(Error::unsupported(format!("{what} is not supported")))
+        self.pos()
+            .error(Error::unsupported(format!("{what} is not supported")))
     }
 
     fn ident(&mut self) -> Result<Ident> {
@@ -99,7 +115,11 @@ impl Parser {
             TokenKind::Ident { name, quoted } => {
                 let pos = self.pos();
                 self.advance();
-                Ok(Ident { value: name, quoted, pos })
+                Ok(Ident {
+                    value: name,
+                    quoted,
+                    pos,
+                })
             }
             _ => Err(self.unexpected("identifier")),
         }
@@ -108,7 +128,9 @@ impl Parser {
     fn enter(&mut self) -> Result<()> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
-            return Err(self.pos().error(Error::parse("statement is nested too deeply")));
+            return Err(self
+                .pos()
+                .error(Error::parse("statement is nested too deeply")));
         }
         Ok(())
     }
@@ -147,7 +169,13 @@ impl Parser {
             } else {
                 None
             };
-            return Ok(Statement::CreateIndex { name, if_not_exists, table, column, using });
+            return Ok(Statement::CreateIndex {
+                name,
+                if_not_exists,
+                table,
+                column,
+                using,
+            });
         }
         if self.eat_keyword(Keyword::DROP) {
             self.expect_keyword(Keyword::INDEX)?;
@@ -184,7 +212,11 @@ impl Parser {
                 self.expect_symbol(Symbol::LParen)?;
                 let query = Box::new(self.query()?);
                 self.expect_symbol(Symbol::RParen)?;
-                with.push(Cte { name, columns, query });
+                with.push(Cte {
+                    name,
+                    columns,
+                    query,
+                });
                 if !self.eat_symbol(Symbol::Comma) {
                     break;
                 }
@@ -216,7 +248,11 @@ impl Parser {
                 } else {
                     None
                 };
-                order_by.push(OrderItem { expr, descending, nulls_first });
+                order_by.push(OrderItem {
+                    expr,
+                    descending,
+                    nulls_first,
+                });
                 if !self.eat_symbol(Symbol::Comma) {
                     break;
                 }
@@ -238,7 +274,14 @@ impl Parser {
             return Err(self.unsupported("UNION"));
         }
         self.leave();
-        Ok(Query { with, body, order_by, limit, offset, pos })
+        Ok(Query {
+            with,
+            body,
+            order_by,
+            limit,
+            offset,
+            pos,
+        })
     }
 
     fn select_core(&mut self) -> Result<SelectCore> {
@@ -256,8 +299,16 @@ impl Parser {
                 break;
             }
         }
-        let from = if self.eat_keyword(Keyword::FROM) { Some(self.from_item()?) } else { None };
-        let where_clause = if self.eat_keyword(Keyword::WHERE) { Some(self.expr()?) } else { None };
+        let from = if self.eat_keyword(Keyword::FROM) {
+            Some(self.parse_from()?)
+        } else {
+            None
+        };
+        let where_clause = if self.eat_keyword(Keyword::WHERE) {
+            Some(self.expr()?)
+        } else {
+            None
+        };
         let mut group_by = Vec::new();
         if self.eat_keyword(Keyword::GROUP) {
             self.expect_keyword(Keyword::BY)?;
@@ -268,8 +319,19 @@ impl Parser {
                 }
             }
         }
-        let having = if self.eat_keyword(Keyword::HAVING) { Some(self.expr()?) } else { None };
-        Ok(SelectCore { distinct, items, from, where_clause, group_by, having })
+        let having = if self.eat_keyword(Keyword::HAVING) {
+            Some(self.expr()?)
+        } else {
+            None
+        };
+        Ok(SelectCore {
+            distinct,
+            items,
+            from,
+            where_clause,
+            group_by,
+            having,
+        })
     }
 
     fn select_item(&mut self) -> Result<SelectItem> {
@@ -296,10 +358,14 @@ impl Parser {
         if self.eat_keyword(Keyword::AS) {
             return Ok(Some(self.ident()?));
         }
-        if matches!(self.peek(), TokenKind::Ident { .. }) { Ok(Some(self.ident()?)) } else { Ok(None) }
+        if matches!(self.peek(), TokenKind::Ident { .. }) {
+            Ok(Some(self.ident()?))
+        } else {
+            Ok(None)
+        }
     }
 
-    fn from_item(&mut self) -> Result<FromItem> {
+    fn parse_from(&mut self) -> Result<FromItem> {
         let mut left = self.table_ref()?;
         loop {
             let pos = self.pos();
@@ -329,7 +395,13 @@ impl Parser {
                 self.expect_keyword(Keyword::ON)?;
                 Some(self.expr()?)
             };
-            left = FromItem::Join { left: Box::new(left), right: Box::new(right), kind, on, pos };
+            left = FromItem::Join {
+                left: Box::new(left),
+                right: Box::new(right),
+                kind,
+                on,
+                pos,
+            };
         }
         Ok(left)
     }
@@ -344,7 +416,7 @@ impl Parser {
                 let alias = self.ident()?;
                 FromItem::Derived { query, alias }
             } else {
-                let inner = self.from_item()?;
+                let inner = self.parse_from()?;
                 self.expect_symbol(Symbol::RParen)?;
                 inner
             };
@@ -371,7 +443,14 @@ impl Parser {
             let pos = self.pos();
             self.advance();
             let right = self.and_expr()?;
-            left = Expr { kind: ExprKind::Binary { op: BinaryOp::Or, left: Box::new(left), right: Box::new(right) }, pos };
+            left = Expr {
+                kind: ExprKind::Binary {
+                    op: BinaryOp::Or,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                pos,
+            };
         }
         Ok(left)
     }
@@ -382,7 +461,14 @@ impl Parser {
             let pos = self.pos();
             self.advance();
             let right = self.not_expr()?;
-            left = Expr { kind: ExprKind::Binary { op: BinaryOp::And, left: Box::new(left), right: Box::new(right) }, pos };
+            left = Expr {
+                kind: ExprKind::Binary {
+                    op: BinaryOp::And,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                pos,
+            };
         }
         Ok(left)
     }
@@ -394,7 +480,13 @@ impl Parser {
             self.enter()?;
             let inner = self.not_expr()?;
             self.leave();
-            return Ok(Expr { kind: ExprKind::Unary { op: UnaryOp::Not, expr: Box::new(inner) }, pos });
+            return Ok(Expr {
+                kind: ExprKind::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(inner),
+                },
+                pos,
+            });
         }
         self.predicate()
     }
@@ -414,12 +506,25 @@ impl Parser {
         if let Some(op) = comp {
             self.advance();
             let right = self.concat_expr()?;
-            return Ok(Expr { kind: ExprKind::Binary { op, left: Box::new(left), right: Box::new(right) }, pos });
+            return Ok(Expr {
+                kind: ExprKind::Binary {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                pos,
+            });
         }
         if self.eat_keyword(Keyword::IS) {
             let negated = self.eat_keyword(Keyword::NOT);
             self.expect_keyword(Keyword::NULL)?;
-            return Ok(Expr { kind: ExprKind::IsNull { expr: Box::new(left), negated }, pos });
+            return Ok(Expr {
+                kind: ExprKind::IsNull {
+                    expr: Box::new(left),
+                    negated,
+                },
+                pos,
+            });
         }
         let negated = if self.is_keyword(Keyword::NOT)
             && matches!(
@@ -436,7 +541,12 @@ impl Parser {
             self.expect_keyword(Keyword::AND)?;
             let high = self.concat_expr()?;
             return Ok(Expr {
-                kind: ExprKind::Between { expr: Box::new(left), low: Box::new(low), high: Box::new(high), negated },
+                kind: ExprKind::Between {
+                    expr: Box::new(left),
+                    low: Box::new(low),
+                    high: Box::new(high),
+                    negated,
+                },
                 pos,
             });
         }
@@ -445,7 +555,14 @@ impl Parser {
             if self.is_keyword(Keyword::SELECT) || self.is_keyword(Keyword::WITH) {
                 let query = Box::new(self.query()?);
                 self.expect_symbol(Symbol::RParen)?;
-                return Ok(Expr { kind: ExprKind::InSubquery { expr: Box::new(left), query, negated }, pos });
+                return Ok(Expr {
+                    kind: ExprKind::InSubquery {
+                        expr: Box::new(left),
+                        query,
+                        negated,
+                    },
+                    pos,
+                });
             }
             let mut list = Vec::new();
             loop {
@@ -455,11 +572,25 @@ impl Parser {
                 }
             }
             self.expect_symbol(Symbol::RParen)?;
-            return Ok(Expr { kind: ExprKind::InList { expr: Box::new(left), list, negated }, pos });
+            return Ok(Expr {
+                kind: ExprKind::InList {
+                    expr: Box::new(left),
+                    list,
+                    negated,
+                },
+                pos,
+            });
         }
         if self.eat_keyword(Keyword::LIKE) {
             let pattern = self.concat_expr()?;
-            return Ok(Expr { kind: ExprKind::Like { expr: Box::new(left), pattern: Box::new(pattern), negated }, pos });
+            return Ok(Expr {
+                kind: ExprKind::Like {
+                    expr: Box::new(left),
+                    pattern: Box::new(pattern),
+                    negated,
+                },
+                pos,
+            });
         }
         Ok(left)
     }
@@ -470,7 +601,14 @@ impl Parser {
             let pos = self.pos();
             self.advance();
             let right = self.additive()?;
-            left = Expr { kind: ExprKind::Binary { op: BinaryOp::Concat, left: Box::new(left), right: Box::new(right) }, pos };
+            left = Expr {
+                kind: ExprKind::Binary {
+                    op: BinaryOp::Concat,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                pos,
+            };
         }
         Ok(left)
     }
@@ -486,7 +624,14 @@ impl Parser {
             let pos = self.pos();
             self.advance();
             let right = self.multiplicative()?;
-            left = Expr { kind: ExprKind::Binary { op, left: Box::new(left), right: Box::new(right) }, pos };
+            left = Expr {
+                kind: ExprKind::Binary {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                pos,
+            };
         }
     }
 
@@ -502,7 +647,14 @@ impl Parser {
             let pos = self.pos();
             self.advance();
             let right = self.unary()?;
-            left = Expr { kind: ExprKind::Binary { op, left: Box::new(left), right: Box::new(right) }, pos };
+            left = Expr {
+                kind: ExprKind::Binary {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                pos,
+            };
         }
     }
 
@@ -517,7 +669,13 @@ impl Parser {
         self.enter()?;
         let inner = self.unary()?;
         self.leave();
-        Ok(Expr { kind: ExprKind::Unary { op, expr: Box::new(inner) }, pos })
+        Ok(Expr {
+            kind: ExprKind::Unary {
+                op,
+                expr: Box::new(inner),
+            },
+            pos,
+        })
     }
 
     fn primary(&mut self) -> Result<Expr> {
@@ -548,7 +706,11 @@ impl Parser {
                 match self.peek().clone() {
                     TokenKind::Str(s) => {
                         self.advance();
-                        ExprKind::Literal(if k == Keyword::DATE { Literal::Date(s) } else { Literal::Timestamp(s) })
+                        ExprKind::Literal(if k == Keyword::DATE {
+                            Literal::Date(s)
+                        } else {
+                            Literal::Timestamp(s)
+                        })
                     }
                     _ => return Err(self.unexpected("string literal")),
                 }
@@ -560,7 +722,10 @@ impl Parser {
                 self.expect_keyword(Keyword::AS)?;
                 let type_name = self.type_name()?;
                 self.expect_symbol(Symbol::RParen)?;
-                ExprKind::Cast { expr: Box::new(expr), type_name }
+                ExprKind::Cast {
+                    expr: Box::new(expr),
+                    type_name,
+                }
             }
             TokenKind::Keyword(Keyword::CASE) => {
                 self.advance();
@@ -592,9 +757,15 @@ impl Parser {
                 } else if self.is_symbol(Symbol::Dot) {
                     self.advance();
                     let col = self.ident()?;
-                    ExprKind::Column { qualifier: Some(name), name: col }
+                    ExprKind::Column {
+                        qualifier: Some(name),
+                        name: col,
+                    }
                 } else {
-                    ExprKind::Column { qualifier: None, name }
+                    ExprKind::Column {
+                        qualifier: None,
+                        name,
+                    }
                 }
             }
             _ => return Err(self.unexpected("expression")),
@@ -605,10 +776,20 @@ impl Parser {
     fn function_call(&mut self, name: Ident) -> Result<ExprKind> {
         if self.eat_symbol(Symbol::Star) {
             self.expect_symbol(Symbol::RParen)?;
-            return Ok(ExprKind::Function { name, args: Vec::new(), distinct: false, star: true });
+            return Ok(ExprKind::Function {
+                name,
+                args: Vec::new(),
+                distinct: false,
+                star: true,
+            });
         }
         if self.eat_symbol(Symbol::RParen) {
-            return Ok(ExprKind::Function { name, args: Vec::new(), distinct: false, star: false });
+            return Ok(ExprKind::Function {
+                name,
+                args: Vec::new(),
+                distinct: false,
+                star: false,
+            });
         }
         let distinct = self.eat_keyword(Keyword::DISTINCT);
         let mut args = Vec::new();
@@ -619,11 +800,20 @@ impl Parser {
             }
         }
         self.expect_symbol(Symbol::RParen)?;
-        Ok(ExprKind::Function { name, args, distinct, star: false })
+        Ok(ExprKind::Function {
+            name,
+            args,
+            distinct,
+            star: false,
+        })
     }
 
     fn case_expr(&mut self) -> Result<ExprKind> {
-        let operand = if self.is_keyword(Keyword::WHEN) { None } else { Some(Box::new(self.expr()?)) };
+        let operand = if self.is_keyword(Keyword::WHEN) {
+            None
+        } else {
+            Some(Box::new(self.expr()?))
+        };
         let mut whens = Vec::new();
         while self.eat_keyword(Keyword::WHEN) {
             let cond = self.expr()?;
@@ -634,9 +824,17 @@ impl Parser {
         if whens.is_empty() {
             return Err(self.unexpected("WHEN"));
         }
-        let else_expr = if self.eat_keyword(Keyword::ELSE) { Some(Box::new(self.expr()?)) } else { None };
+        let else_expr = if self.eat_keyword(Keyword::ELSE) {
+            Some(Box::new(self.expr()?))
+        } else {
+            None
+        };
         self.expect_keyword(Keyword::END)?;
-        Ok(ExprKind::Case { operand, whens, else_expr })
+        Ok(ExprKind::Case {
+            operand,
+            whens,
+            else_expr,
+        })
     }
 
     fn type_name(&mut self) -> Result<TypeName> {
@@ -688,7 +886,9 @@ mod tests {
 
     #[test]
     fn simple_select() {
-        let q = q("SELECT a, b AS c, t.* FROM t x WHERE a > 1 ORDER BY 1 DESC NULLS FIRST LIMIT 3 OFFSET 1;");
+        let q = q(
+            "SELECT a, b AS c, t.* FROM t x WHERE a > 1 ORDER BY 1 DESC NULLS FIRST LIMIT 3 OFFSET 1;",
+        );
         assert_eq!(q.body.items.len(), 3);
         assert!(q.body.where_clause.is_some());
         assert_eq!(q.order_by.len(), 1);
@@ -700,17 +900,47 @@ mod tests {
     #[test]
     fn precedence() {
         let q = q("SELECT -2 * 3 + 4");
-        let SelectItem::Expr { expr, .. } = &q.body.items[0] else { panic!() };
-        let ExprKind::Binary { op: BinaryOp::Add, left, .. } = &expr.kind else { panic!("{expr:?}") };
-        let ExprKind::Binary { op: BinaryOp::Mul, left: neg, .. } = &left.kind else { panic!() };
-        assert!(matches!(neg.kind, ExprKind::Unary { op: UnaryOp::Neg, .. }));
+        let SelectItem::Expr { expr, .. } = &q.body.items[0] else {
+            panic!()
+        };
+        let ExprKind::Binary {
+            op: BinaryOp::Add,
+            left,
+            ..
+        } = &expr.kind
+        else {
+            panic!("{expr:?}")
+        };
+        let ExprKind::Binary {
+            op: BinaryOp::Mul,
+            left: neg,
+            ..
+        } = &left.kind
+        else {
+            panic!()
+        };
+        assert!(matches!(
+            neg.kind,
+            ExprKind::Unary {
+                op: UnaryOp::Neg,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn not_binds_looser_than_comparison() {
         let q = q("SELECT NOT a = b");
-        let SelectItem::Expr { expr, .. } = &q.body.items[0] else { panic!() };
-        assert!(matches!(expr.kind, ExprKind::Unary { op: UnaryOp::Not, .. }));
+        let SelectItem::Expr { expr, .. } = &q.body.items[0] else {
+            panic!()
+        };
+        assert!(matches!(
+            expr.kind,
+            ExprKind::Unary {
+                op: UnaryOp::Not,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -719,10 +949,16 @@ mod tests {
         assert_eq!(code("SELEC name FROM people"), ErrorCode::ParseError);
         assert_eq!(code("SELECT name FROM people WHERE"), ErrorCode::ParseError);
         assert_eq!(code("SELECT 1; SELECT 2"), ErrorCode::ParseError);
-        assert_eq!(code("SELECT COUNT(*, id) FROM people"), ErrorCode::ParseError);
+        assert_eq!(
+            code("SELECT COUNT(*, id) FROM people"),
+            ErrorCode::ParseError
+        );
         assert_eq!(code("SELECT a < b IS NULL"), ErrorCode::ParseError);
         assert_eq!(code("SELECT 1 UNION SELECT 2"), ErrorCode::Unsupported);
-        assert_eq!(code("SELECT * FROM a RIGHT JOIN b ON a.x = b.x"), ErrorCode::Unsupported);
+        assert_eq!(
+            code("SELECT * FROM a RIGHT JOIN b ON a.x = b.x"),
+            ErrorCode::Unsupported
+        );
     }
 
     #[test]

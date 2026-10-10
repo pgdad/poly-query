@@ -13,7 +13,7 @@ pub struct Bitmap {
 
 impl Bitmap {
     pub fn push(&mut self, bit: bool) {
-        if self.len % 64 == 0 {
+        if self.len.is_multiple_of(64) {
             self.words.push(0);
         }
         if bit {
@@ -117,7 +117,11 @@ impl ColumnBuilder {
             DataType::Timestamp => ColumnData::Timestamp(Vec::new()),
         };
         let data_type = data_type.result_type();
-        ColumnBuilder { data_type, data, validity: Bitmap::default() }
+        ColumnBuilder {
+            data_type,
+            data,
+            validity: Bitmap::default(),
+        }
     }
 
     pub fn data_type(&self) -> DataType {
@@ -155,7 +159,11 @@ impl ColumnBuilder {
     }
 
     pub fn finish(self) -> Column {
-        Column { data_type: self.data_type, data: self.data, validity: self.validity }
+        Column {
+            data_type: self.data_type,
+            data: self.data,
+            validity: self.validity,
+        }
     }
 }
 

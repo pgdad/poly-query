@@ -34,7 +34,10 @@ impl Catalog {
     pub fn insert(&mut self, table: Table, replace: bool) -> Result<Arc<Table>> {
         let k = key(&table.name);
         if !replace && self.tables.contains_key(&k) {
-            return Err(Error::new(ErrorCode::AlreadyExists, format!("table '{}' already exists", table.name)));
+            return Err(Error::new(
+                ErrorCode::AlreadyExists,
+                format!("table '{}' already exists", table.name),
+            ));
         }
         let t = Arc::new(table);
         self.tables.insert(k, t.clone());

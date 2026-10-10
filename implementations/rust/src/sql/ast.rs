@@ -20,8 +20,17 @@ impl Ident {
 pub enum Statement {
     Query(Box<Query>),
     Explain(Box<Query>),
-    CreateIndex { name: Ident, if_not_exists: bool, table: Ident, column: Ident, using: Option<Ident> },
-    DropIndex { name: Ident, if_exists: bool },
+    CreateIndex {
+        name: Ident,
+        if_not_exists: bool,
+        table: Ident,
+        column: Ident,
+        using: Option<Ident>,
+    },
+    DropIndex {
+        name: Ident,
+        if_exists: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,7 +66,10 @@ pub enum SelectItem {
     Wildcard(Pos),
     /// `r.*`
     QualifiedWildcard(Ident),
-    Expr { expr: Expr, alias: Option<Ident> },
+    Expr {
+        expr: Expr,
+        alias: Option<Ident>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,9 +81,21 @@ pub enum JoinKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FromItem {
-    Table { name: Ident, alias: Option<Ident> },
-    Derived { query: Box<Query>, alias: Ident },
-    Join { left: Box<FromItem>, right: Box<FromItem>, kind: JoinKind, on: Option<Expr>, pos: Pos },
+    Table {
+        name: Ident,
+        alias: Option<Ident>,
+    },
+    Derived {
+        query: Box<Query>,
+        alias: Ident,
+    },
+    Join {
+        left: Box<FromItem>,
+        right: Box<FromItem>,
+        kind: JoinKind,
+        on: Option<Expr>,
+        pos: Pos,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -115,11 +139,22 @@ pub enum BinaryOp {
 
 impl BinaryOp {
     pub fn is_comparison(self) -> bool {
-        matches!(self, BinaryOp::Eq | BinaryOp::NotEq | BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq)
+        matches!(
+            self,
+            BinaryOp::Eq
+                | BinaryOp::NotEq
+                | BinaryOp::Lt
+                | BinaryOp::LtEq
+                | BinaryOp::Gt
+                | BinaryOp::GtEq
+        )
     }
 
     pub fn is_arithmetic(self) -> bool {
-        matches!(self, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod)
+        matches!(
+            self,
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod
+        )
     }
 
     pub fn symbol(self) -> &'static str {
@@ -163,17 +198,59 @@ pub struct TypeName {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     Literal(Literal),
-    Column { qualifier: Option<Ident>, name: Ident },
-    Unary { op: UnaryOp, expr: Box<Expr> },
-    Binary { op: BinaryOp, left: Box<Expr>, right: Box<Expr> },
-    IsNull { expr: Box<Expr>, negated: bool },
-    Between { expr: Box<Expr>, low: Box<Expr>, high: Box<Expr>, negated: bool },
-    InList { expr: Box<Expr>, list: Vec<Expr>, negated: bool },
-    InSubquery { expr: Box<Expr>, query: Box<Query>, negated: bool },
-    Like { expr: Box<Expr>, pattern: Box<Expr>, negated: bool },
-    Function { name: Ident, args: Vec<Expr>, distinct: bool, star: bool },
-    Cast { expr: Box<Expr>, type_name: TypeName },
-    Case { operand: Option<Box<Expr>>, whens: Vec<(Expr, Expr)>, else_expr: Option<Box<Expr>> },
+    Column {
+        qualifier: Option<Ident>,
+        name: Ident,
+    },
+    Unary {
+        op: UnaryOp,
+        expr: Box<Expr>,
+    },
+    Binary {
+        op: BinaryOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    IsNull {
+        expr: Box<Expr>,
+        negated: bool,
+    },
+    Between {
+        expr: Box<Expr>,
+        low: Box<Expr>,
+        high: Box<Expr>,
+        negated: bool,
+    },
+    InList {
+        expr: Box<Expr>,
+        list: Vec<Expr>,
+        negated: bool,
+    },
+    InSubquery {
+        expr: Box<Expr>,
+        query: Box<Query>,
+        negated: bool,
+    },
+    Like {
+        expr: Box<Expr>,
+        pattern: Box<Expr>,
+        negated: bool,
+    },
+    Function {
+        name: Ident,
+        args: Vec<Expr>,
+        distinct: bool,
+        star: bool,
+    },
+    Cast {
+        expr: Box<Expr>,
+        type_name: TypeName,
+    },
+    Case {
+        operand: Option<Box<Expr>>,
+        whens: Vec<(Expr, Expr)>,
+        else_expr: Option<Box<Expr>>,
+    },
     Exists(Box<Query>),
     Subquery(Box<Query>),
 }

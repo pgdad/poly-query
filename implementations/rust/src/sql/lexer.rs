@@ -12,7 +12,8 @@ pub struct Pos {
 
 impl Pos {
     pub fn error(self, err: Error) -> Error {
-        err.with_detail("line", Json::uint(self.line as u64)).with_detail("column", Json::uint(self.column as u64))
+        err.with_detail("line", Json::uint(self.line as u64))
+            .with_detail("column", Json::uint(self.column as u64))
     }
 }
 
@@ -40,10 +41,10 @@ macro_rules! keywords {
 #[allow(clippy::upper_case_acronyms)]
 mod kw {
     keywords!(
-        ALL, AND, AS, ASC, BETWEEN, BY, CASE, CAST, CREATE, CROSS, DATE, DESC, DISTINCT, DROP, ELSE, END, EXISTS,
-        EXPLAIN, FALSE, FIRST, FROM, FULL, GROUP, HAVING, IF, IN, INDEX, INNER, IS, JOIN, LAST, LEFT, LIKE, LIMIT,
-        NOT, NULL, NULLS, OFFSET, ON, OR, ORDER, OUTER, RIGHT, SELECT, THEN, TIMESTAMP, TRUE, UNION, USING, WHEN,
-        WHERE, WITH,
+        ALL, AND, AS, ASC, BETWEEN, BY, CASE, CAST, CREATE, CROSS, DATE, DESC, DISTINCT, DROP,
+        ELSE, END, EXISTS, EXPLAIN, FALSE, FIRST, FROM, FULL, GROUP, HAVING, IF, IN, INDEX, INNER,
+        IS, JOIN, LAST, LEFT, LIKE, LIMIT, NOT, NULL, NULLS, OFFSET, ON, OR, ORDER, OUTER, RIGHT,
+        SELECT, THEN, TIMESTAMP, TRUE, UNION, USING, WHEN, WHERE, WITH,
     );
 }
 pub use kw::Keyword;
@@ -96,7 +97,10 @@ impl Symbol {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     /// Identifier (unquoted or double-quoted).
-    Ident { name: String, quoted: bool },
+    Ident {
+        name: String,
+        quoted: bool,
+    },
     Keyword(Keyword),
     /// Numeric literal text (digits, optional fraction and exponent).
     Number(String),
@@ -135,13 +139,22 @@ struct Lexer<'a> {
 
 /// Splits SQL text into tokens, ending with `Eof`.
 pub fn tokenize(src: &str) -> Result<Vec<Token>> {
-    let mut lx = Lexer { chars: src.chars().collect(), i: 0, line: 1, col: 1, _src: src };
+    let mut lx = Lexer {
+        chars: src.chars().collect(),
+        i: 0,
+        line: 1,
+        col: 1,
+        _src: src,
+    };
     let mut out = Vec::new();
     loop {
         lx.skip_trivia()?;
         let pos = lx.pos();
         let Some(c) = lx.peek(0) else {
-            out.push(Token { kind: TokenKind::Eof, pos });
+            out.push(Token {
+                kind: TokenKind::Eof,
+                pos,
+            });
             return Ok(out);
         };
         let kind = if c.is_ascii_alphabetic() || c == '_' {
@@ -156,9 +169,13 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
             }
             match Keyword::lookup(&word) {
                 Some(k) => TokenKind::Keyword(k),
-                None => TokenKind::Ident { name: word, quoted: false },
+                None => TokenKind::Ident {
+                    name: word,
+                    quoted: false,
+                },
             }
-        } else if c.is_ascii_digit() || (c == '.' && lx.peek(1).is_some_and(|d| d.is_ascii_digit())) {
+        } else if c.is_ascii_digit() || (c == '.' && lx.peek(1).is_some_and(|d| d.is_ascii_digit()))
+        {
             lx.number(pos)?
         } else if c == '\'' {
             TokenKind::Str(lx.quoted('\'', pos, "unterminated string literal")?)
@@ -210,7 +227,10 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
 
 impl Lexer<'_> {
     fn pos(&self) -> Pos {
-        Pos { line: self.line, column: self.col }
+        Pos {
+            line: self.line,
+            column: self.col,
+        }
     }
 
     fn peek(&self, k: usize) -> Option<char> {
@@ -258,7 +278,9 @@ impl Lexer<'_> {
                     self.bump();
                     loop {
                         match self.peek(0) {
-                            None => return Err(pos.error(Error::parse("unterminated block comment"))),
+                            None => {
+                                return Err(pos.error(Error::parse("unterminated block comment")));
+                            }
                             Some('*') if self.peek(1) == Some('/') => {
                                 self.bump();
                                 self.bump();
@@ -311,8 +333,13 @@ impl Lexer<'_> {
                 self.digits(&mut text);
             }
         }
-        if self.peek(0).is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
-            return Err(pos.error(Error::parse(format!("malformed numeric literal near '{text}'"))));
+        if self
+            .peek(0)
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        {
+            return Err(pos.error(Error::parse(format!(
+                "malformed numeric literal near '{text}'"
+            ))));
         }
         Ok(TokenKind::Number(text))
     }
@@ -347,11 +374,24 @@ mod tests {
 
     #[test]
     fn basic_tokens() {
-        let k = kinds("SELECT a1, 'it''s', \"Q \"\"x\"\"\" FROM t -- c\n WHERE x<>1.5e3 /* b */ || .5");
+        let k =
+            kinds("SELECT a1, 'it''s', \"Q \"\"x\"\"\" FROM t -- c\n WHERE x<>1.5e3 /* b */ || .5");
         assert_eq!(k[0], TokenKind::Keyword(Keyword::SELECT));
-        assert_eq!(k[1], TokenKind::Ident { name: "a1".into(), quoted: false });
+        assert_eq!(
+            k[1],
+            TokenKind::Ident {
+                name: "a1".into(),
+                quoted: false
+            }
+        );
         assert_eq!(k[3], TokenKind::Str("it's".into()));
-        assert_eq!(k[5], TokenKind::Ident { name: "Q \"x\"".into(), quoted: true });
+        assert_eq!(
+            k[5],
+            TokenKind::Ident {
+                name: "Q \"x\"".into(),
+                quoted: true
+            }
+        );
         assert!(k.contains(&TokenKind::Symbol(Symbol::NotEq)));
         assert!(k.contains(&TokenKind::Number("1.5e3".into())));
         assert!(k.contains(&TokenKind::Number(".5".into())));

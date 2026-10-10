@@ -58,7 +58,9 @@ fn optional_uint(obj: &Json, key: &str) -> Result<Option<u64>> {
         None => Ok(None),
         Some(v) => match v.as_i64() {
             Some(n) if n >= 0 => Ok(Some(n as u64)),
-            _ => Err(invalid(format!("field '{key}' must be a non-negative integer"))),
+            _ => Err(invalid(format!(
+                "field '{key}' must be a non-negative integer"
+            ))),
         },
     }
 }
@@ -92,19 +94,29 @@ impl Request {
             "capabilities" => Request::Capabilities,
             "tables" => Request::Tables,
             "reset" => Request::Reset,
-            "schema" => Request::Schema { table: table_name(req)? },
-            "drop" => Request::Drop { table: table_name(req)? },
+            "schema" => Request::Schema {
+                table: table_name(req)?,
+            },
+            "drop" => Request::Drop {
+                table: table_name(req)?,
+            },
             "load" => Request::Load(parse_load(req)?),
-            "query" => Request::Query { sql: required_str(req, "sql")?, options: parse_query_options(req)? },
+            "query" => Request::Query {
+                sql: required_str(req, "sql")?,
+                options: parse_query_options(req)?,
+            },
             "sleep" => {
                 if !test_functions {
                     return Err(invalid("the sleep op requires --enable-test-functions"));
                 }
-                let ms = optional_uint(req, "ms")?.ok_or_else(|| invalid("missing required field 'ms'"))?;
+                let ms = optional_uint(req, "ms")?
+                    .ok_or_else(|| invalid("missing required field 'ms'"))?;
                 Request::Sleep { ms }
             }
             "explain" | "save" | "open" | "stats" => {
-                return Err(Error::unsupported(format!("operation '{op}' is not supported by this engine")));
+                return Err(Error::unsupported(format!(
+                    "operation '{op}' is not supported by this engine"
+                )));
             }
             other => return Err(invalid(format!("unknown op '{other}'"))),
         })
@@ -114,7 +126,8 @@ impl Request {
 fn parse_load(req: &Json) -> Result<LoadRequest> {
     let table = table_name(req)?;
     let format_name = required_str(req, "format")?;
-    let format = Format::parse(&format_name).ok_or_else(|| invalid(format!("unknown format '{format_name}'")))?;
+    let format = Format::parse(&format_name)
+        .ok_or_else(|| invalid(format!("unknown format '{format_name}'")))?;
     let path = optional_str(req, "path")?;
     let data = optional_str(req, "data")?;
     let source = match (path, data) {
@@ -128,9 +141,12 @@ fn parse_load(req: &Json) -> Result<LoadRequest> {
         Some(Json::Array(items)) => {
             let mut fields = Vec::with_capacity(items.len());
             for item in items {
-                let name = required_str(item, "name").map_err(|_| invalid("schema entries need a string 'name'"))?;
-                let ty = required_str(item, "type").map_err(|_| invalid("schema entries need a string 'type'"))?;
-                let ty = DataType::parse(&ty).map_err(|e| invalid(format!("schema column '{name}': {}", e.message)))?;
+                let name = required_str(item, "name")
+                    .map_err(|_| invalid("schema entries need a string 'name'"))?;
+                let ty = required_str(item, "type")
+                    .map_err(|_| invalid("schema entries need a string 'type'"))?;
+                let ty = DataType::parse(&ty)
+                    .map_err(|e| invalid(format!("schema column '{name}': {}", e.message)))?;
                 fields.push(Field::new(name, ty));
             }
             Some(fields)
@@ -155,31 +171,53 @@ fn parse_load(req: &Json) -> Result<LoadRequest> {
         return Err(invalid("header=false requires an explicit schema"));
     }
     let replace = optional_bool(req, "replace")?.unwrap_or(false);
-    Ok(LoadRequest { table, format, source, schema, header, delimiter, replace })
+    Ok(LoadRequest {
+        table,
+        format,
+        source,
+        schema,
+        header,
+        delimiter,
+        replace,
+    })
 }
 
 fn parse_query_options(req: &Json) -> Result<QueryOptions> {
     let mut o = QueryOptions::default();
-    let Some(opts) = optional_object(req, "options")? else { return Ok(o) };
+    let Some(opts) = optional_object(req, "options")? else {
+        return Ok(o);
+    };
     o.max_rows = optional_uint(opts, "max_rows")?;
     o.timeout_ms = optional_uint(opts, "timeout_ms")?.unwrap_or(0);
     match optional_str(opts, "result")? {
         None | Some("rows") => {}
         Some("count") => o.count_only = true,
-        Some(other) => return Err(Error::unsupported(format!("result mode '{other}' is not supported"))),
+        Some(other) => {
+            return Err(Error::unsupported(format!(
+                "result mode '{other}' is not supported"
+            )));
+        }
     }
     match optional_str(opts, "mode")? {
         None | Some("auto") | Some("row") => {}
-        Some(other) => return Err(Error::unsupported(format!("execution mode '{other}' is not supported"))),
+        Some(other) => {
+            return Err(Error::unsupported(format!(
+                "execution mode '{other}' is not supported"
+            )));
+        }
     }
     match optional_str(opts, "join")? {
         None | Some("auto") | Some("hash") | Some("merge") | Some("nested_loop") => {}
-        Some(other) => return Err(Error::unsupported(format!("join algorithm '{other}' is not supported"))),
-    }
-    if let Some(t) = optional_uint(opts, "threads")? {
-        if t == 0 {
-            return Err(invalid("threads must be at least 1"));
+        Some(other) => {
+            return Err(Error::unsupported(format!(
+                "join algorithm '{other}' is not supported"
+            )));
         }
+    }
+    if let Some(t) = optional_uint(opts, "threads")?
+        && t == 0
+    {
+        return Err(invalid("threads must be at least 1"));
     }
     optional_bool(opts, "optimize")?;
     optional_bool(opts, "use_indexes")?;
@@ -202,12 +240,27 @@ mod tests {
     fn invalid_requests() {
         assert_eq!(code(r#"{"op":"frobnicate"}"#), ErrorCode::InvalidRequest);
         assert_eq!(code(r#"{"op":"query"}"#), ErrorCode::InvalidRequest);
-        assert_eq!(code(r#"{"op":"query","sql":42}"#), ErrorCode::InvalidRequest);
-        assert_eq!(code(r#"{"op":"load","table":"t","format":"xml","path":"a"}"#), ErrorCode::InvalidRequest);
-        assert_eq!(code(r#"{"op":"load","table":"t","format":"csv"}"#), ErrorCode::InvalidRequest);
+        assert_eq!(
+            code(r#"{"op":"query","sql":42}"#),
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            code(r#"{"op":"load","table":"t","format":"xml","path":"a"}"#),
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            code(r#"{"op":"load","table":"t","format":"csv"}"#),
+            ErrorCode::InvalidRequest
+        );
         assert_eq!(code(r#"{"op":"sleep","ms":5}"#), ErrorCode::InvalidRequest);
-        assert_eq!(code(r#"{"op":"query","sql":"x","options":{"mode":"vectorized"}}"#), ErrorCode::Unsupported);
-        assert_eq!(code(r#"{"op":"query","sql":"x","options":{"max_rows":-1}}"#), ErrorCode::InvalidRequest);
+        assert_eq!(
+            code(r#"{"op":"query","sql":"x","options":{"mode":"vectorized"}}"#),
+            ErrorCode::Unsupported
+        );
+        assert_eq!(
+            code(r#"{"op":"query","sql":"x","options":{"max_rows":-1}}"#),
+            ErrorCode::InvalidRequest
+        );
     }
 
     #[test]

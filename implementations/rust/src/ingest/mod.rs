@@ -45,7 +45,12 @@ pub struct IngestOptions {
 
 impl Default for IngestOptions {
     fn default() -> Self {
-        IngestOptions { header: true, delimiter: b',', schema: None, max_rows: usize::MAX }
+        IngestOptions {
+            header: true,
+            delimiter: b',',
+            schema: None,
+            max_rows: usize::MAX,
+        }
     }
 }
 
@@ -76,7 +81,9 @@ pub fn validate_names<'a>(names: impl Iterator<Item = &'a str>) -> Result<()> {
 
 pub fn check_row_limit(rows: usize, max: usize) -> Result<()> {
     if rows > max {
-        Err(Error::resource_limit(format!("input exceeds the maximum of {max} rows")))
+        Err(Error::resource_limit(format!(
+            "input exceeds the maximum of {max} rows"
+        )))
     } else {
         Ok(())
     }
@@ -101,12 +108,18 @@ pub fn convert_text(text: &str, ty: DataType) -> Result<Value> {
             }
         }
         DataType::Date => Value::Date(datetime::parse_date(text).ok_or_else(bad)?),
-        DataType::Timestamp => Value::Timestamp(datetime::parse_date_or_timestamp(text).ok_or_else(bad)?),
+        DataType::Timestamp => {
+            Value::Timestamp(datetime::parse_date_or_timestamp(text).ok_or_else(bad)?)
+        }
     })
 }
 
 fn truncate(s: &str) -> String {
-    if s.chars().count() > 40 { format!("{}…", s.chars().take(40).collect::<String>()) } else { s.to_string() }
+    if s.chars().count() > 40 {
+        format!("{}…", s.chars().take(40).collect::<String>())
+    } else {
+        s.to_string()
+    }
 }
 
 /// Adds record/column context to a conversion error.
@@ -134,7 +147,14 @@ pub struct TextInference {
 
 impl Default for TextInference {
     fn default() -> Self {
-        TextInference { boolean: true, int: true, float: true, date: true, timestamp: true, seen: false }
+        TextInference {
+            boolean: true,
+            int: true,
+            float: true,
+            date: true,
+            timestamp: true,
+            seen: false,
+        }
     }
 }
 
@@ -197,7 +217,10 @@ mod tests {
         assert_eq!(infer(&["1", "2.5"]), DataType::Float64);
         assert_eq!(infer(&["9223372036854775808"]), DataType::Float64);
         assert_eq!(infer(&["2024-01-01"]), DataType::Date);
-        assert_eq!(infer(&["2024-01-01", "2024-01-01 10:00:00"]), DataType::Timestamp);
+        assert_eq!(
+            infer(&["2024-01-01", "2024-01-01 10:00:00"]),
+            DataType::Timestamp
+        );
         assert_eq!(infer(&["2023-02-29"]), DataType::String);
         assert_eq!(infer(&[]), DataType::String);
         assert_eq!(infer(&["NaN"]), DataType::String);
@@ -205,9 +228,20 @@ mod tests {
 
     #[test]
     fn explicit_conversion() {
-        assert_eq!(convert_text("10.005", DataType::decimal(10, 2)).unwrap_err().code, ErrorCode::ConversionError);
-        assert_eq!(convert_text("0.5", DataType::decimal(4, 2)).unwrap(), Value::Decimal(50, 2));
-        assert_eq!(convert_text("2024-01-01", DataType::Timestamp).unwrap(), Value::Timestamp(19723 * 86_400_000_000));
+        assert_eq!(
+            convert_text("10.005", DataType::decimal(10, 2))
+                .unwrap_err()
+                .code,
+            ErrorCode::ConversionError
+        );
+        assert_eq!(
+            convert_text("0.5", DataType::decimal(4, 2)).unwrap(),
+            Value::Decimal(50, 2)
+        );
+        assert_eq!(
+            convert_text("2024-01-01", DataType::Timestamp).unwrap(),
+            Value::Timestamp(19723 * 86_400_000_000)
+        );
         assert!(convert_text("1e999", DataType::Float64).is_err());
     }
 }

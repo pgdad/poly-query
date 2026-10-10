@@ -2,7 +2,10 @@
 
 use std::borrow::Cow;
 
-use super::{IngestOptions, MAX_FIELD_BYTES, TextInference, at_record, check_row_limit, convert_text, validate_names};
+use super::{
+    IngestOptions, MAX_FIELD_BYTES, TextInference, at_record, check_row_limit, convert_text,
+    validate_names,
+};
 use crate::error::{Error, Result};
 use crate::storage::{ColumnBuilder, Field, Table};
 use crate::types::{DataType, Value};
@@ -41,11 +44,15 @@ pub fn parse_records(text: &str, delimiter: u8) -> Result<Vec<Vec<RawField<'_>>>
                 let mut seg_start = pos;
                 loop {
                     let Some(off) = b[pos..].iter().position(|&c| c == b'"') else {
-                        return Err(Error::ingest(format!("record {record_no}: unterminated quoted field")));
+                        return Err(Error::ingest(format!(
+                            "record {record_no}: unterminated quoted field"
+                        )));
                     };
                     let q = pos + off;
                     if q + 1 < n && b[q + 1] == b'"' {
-                        owned.get_or_insert_with(String::new).push_str(&text[seg_start..=q]);
+                        owned
+                            .get_or_insert_with(String::new)
+                            .push_str(&text[seg_start..=q]);
                         pos = q + 2;
                         seg_start = pos;
                         continue;
@@ -58,7 +65,10 @@ pub fn parse_records(text: &str, delimiter: u8) -> Result<Vec<Vec<RawField<'_>>>
                         None => Cow::Borrowed(&text[seg_start..q]),
                     };
                     pos = q + 1;
-                    break RawField { text: value, quoted: true };
+                    break RawField {
+                        text: value,
+                        quoted: true,
+                    };
                 }
             } else {
                 let start = pos;
@@ -69,10 +79,15 @@ pub fn parse_records(text: &str, delimiter: u8) -> Result<Vec<Vec<RawField<'_>>>
                 if end > start && b[end - 1] == b'\r' && (pos == n || b[pos] == b'\n') {
                     end -= 1;
                 }
-                RawField { text: Cow::Borrowed(&text[start..end]), quoted: false }
+                RawField {
+                    text: Cow::Borrowed(&text[start..end]),
+                    quoted: false,
+                }
             };
             if field.text.len() > MAX_FIELD_BYTES {
-                return Err(Error::ingest(format!("record {record_no}: field exceeds 16 MiB")));
+                return Err(Error::ingest(format!(
+                    "record {record_no}: field exceeds 16 MiB"
+                )));
             }
             record.push(field);
             if pos >= n {
@@ -111,19 +126,28 @@ pub fn load(name: &str, text: &str, opts: &IngestOptions) -> Result<Table> {
     let mut records = parse_records(text, opts.delimiter)?.into_iter();
 
     // Determine column names and (optionally) declared types.
-    let (names, declared): (Vec<String>, Option<Vec<DataType>>) = match (&opts.schema, opts.header) {
+    let (names, declared): (Vec<String>, Option<Vec<DataType>>) = match (&opts.schema, opts.header)
+    {
         (Some(schema), header) => {
             if header {
                 let Some(head) = records.next() else {
                     return Err(Error::ingest("missing header record"));
                 };
                 if head.len() != schema.len()
-                    || head.iter().zip(schema).any(|(h, f)| !h.text.eq_ignore_ascii_case(&f.name))
+                    || head
+                        .iter()
+                        .zip(schema)
+                        .any(|(h, f)| !h.text.eq_ignore_ascii_case(&f.name))
                 {
-                    return Err(Error::ingest("CSV header does not match the explicit schema"));
+                    return Err(Error::ingest(
+                        "CSV header does not match the explicit schema",
+                    ));
                 }
             }
-            (schema.iter().map(|f| f.name.clone()).collect(), Some(schema.iter().map(|f| f.data_type).collect()))
+            (
+                schema.iter().map(|f| f.name.clone()).collect(),
+                Some(schema.iter().map(|f| f.data_type).collect()),
+            )
         }
         (None, true) => {
             let Some(head) = records.next() else {
@@ -133,7 +157,11 @@ pub fn load(name: &str, text: &str, opts: &IngestOptions) -> Result<Table> {
             validate_names(names.iter().map(|s| s.as_str()))?;
             (names, None)
         }
-        (None, false) => return Err(Error::invalid_request("header=false requires an explicit schema")),
+        (None, false) => {
+            return Err(Error::invalid_request(
+                "header=false requires an explicit schema",
+            ));
+        }
     };
     let ncols = names.len();
     let first_data_record = if opts.header { 2 } else { 1 };
@@ -162,30 +190,36 @@ pub fn load(name: &str, text: &str, opts: &IngestOptions) -> Result<Table> {
         let ty = match &declared {
             Some(types) => types[c],
             None => {
+                // Whitespace-only fields are empty for the non-string
+                // candidates; if nothing remains the column is STRING.
                 let mut inf = TextInference::default();
-                for f in raw.iter().filter(|f| !f.text.is_empty()) {
-                    inf.observe(f.text.trim_matches(is_blank));
+                for f in &raw {
+                    let t = f.text.trim_matches(is_blank);
+                    if !t.is_empty() {
+                        inf.observe(t);
+                    }
                 }
                 inf.result()
             }
         };
         let mut builder = ColumnBuilder::new(ty);
         for (r, f) in raw.iter().enumerate() {
-            if f.text.is_empty() {
-                // Unquoted empty is NULL; quoted empty is '' for STRING only.
-                if f.quoted && ty == DataType::String {
-                    builder.push(Value::str(""));
-                } else {
+            if ty == DataType::String {
+                // Unquoted empty is NULL; quoted empty is ''; text is kept raw.
+                if f.text.is_empty() && !f.quoted {
                     builder.push_null();
+                } else {
+                    builder.push(Value::str(&f.text));
                 }
                 continue;
             }
-            let v = if ty == DataType::String {
-                Value::str(&f.text)
-            } else {
-                convert_text(f.text.trim_matches(is_blank), ty)
-                    .map_err(|e| at_record(e, r + first_data_record, &names[c]))?
-            };
+            let t = f.text.trim_matches(is_blank);
+            if t.is_empty() {
+                builder.push_null();
+                continue;
+            }
+            let v =
+                convert_text(t, ty).map_err(|e| at_record(e, r + first_data_record, &names[c]))?;
             builder.push(v);
         }
         fields.push(Field::new(names[c].clone(), ty.result_type()));
@@ -200,13 +234,19 @@ mod tests {
     use crate::error::ErrorCode;
 
     fn texts(recs: &[Vec<RawField<'_>>]) -> Vec<Vec<String>> {
-        recs.iter().map(|r| r.iter().map(|f| f.text.to_string()).collect()).collect()
+        recs.iter()
+            .map(|r| r.iter().map(|f| f.text.to_string()).collect())
+            .collect()
     }
 
     #[test]
     fn quoting_and_terminators() {
-        let recs = parse_records("a,b\r\n\"x,\"\"y\"\"\",\"multi\nline\"\r\n\n,\"\"\n", b',').unwrap();
-        assert_eq!(texts(&recs), vec![vec!["a", "b"], vec!["x,\"y\"", "multi\nline"], vec!["", ""]]);
+        let recs =
+            parse_records("a,b\r\n\"x,\"\"y\"\"\",\"multi\nline\"\r\n\n,\"\"\n", b',').unwrap();
+        assert_eq!(
+            texts(&recs),
+            vec![vec!["a", "b"], vec!["x,\"y\"", "multi\nline"], vec!["", ""]]
+        );
         assert!(!recs[2][0].quoted && recs[2][1].quoted);
     }
 
@@ -224,13 +264,24 @@ mod tests {
 
     #[test]
     fn bad_quotes() {
-        assert_eq!(parse_records("a\n\"abc", b',').unwrap_err().code, ErrorCode::IngestError);
-        assert_eq!(parse_records("a\n\"abc\"x", b',').unwrap_err().code, ErrorCode::IngestError);
+        assert_eq!(
+            parse_records("a\n\"abc", b',').unwrap_err().code,
+            ErrorCode::IngestError
+        );
+        assert_eq!(
+            parse_records("a\n\"abc\"x", b',').unwrap_err().code,
+            ErrorCode::IngestError
+        );
     }
 
     #[test]
     fn load_with_inference() {
-        let t = load("t", "n,s,d\n1, x ,2024-01-01\n\"\",\"\",\n", &IngestOptions::default()).unwrap();
+        let t = load(
+            "t",
+            "n,s,d\n1, x ,2024-01-01\n\"\",\"\",\n",
+            &IngestOptions::default(),
+        )
+        .unwrap();
         assert_eq!(t.row_count, 2);
         assert_eq!(t.fields[0].data_type, DataType::Int64);
         assert_eq!(t.fields[1].data_type, DataType::String);

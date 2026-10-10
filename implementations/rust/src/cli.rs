@@ -23,8 +23,29 @@ pub struct Cli {
 
 pub const USAGE: &str = "usage: polyquery (version | capabilities | session [options] | exec [options] --request FILE|- | serve [options] --port N)";
 
+const KNOWN_OPTIONS: &[&str] = &[
+    "data-dir",
+    "enable-test-functions",
+    "max-query-memory-mb",
+    "max-ingest-bytes",
+    "max-table-rows",
+    "max-join-rows",
+    "threads",
+    "log-level",
+    "native-kernels",
+    "request",
+    "host",
+    "port",
+    "workers",
+    "queue-depth",
+    "query-timeout-ms",
+    "shutdown-grace-ms",
+    "max-request-bytes",
+];
+
 fn number<T: std::str::FromStr>(opt: &str, v: &str) -> Result<T, String> {
-    v.parse().map_err(|_| format!("invalid value '{v}' for {opt}"))
+    v.parse()
+        .map_err(|_| format!("invalid value '{v}' for {opt}"))
 }
 
 /// Parses arguments (excluding the program name). Errors are usage errors.
@@ -43,11 +64,18 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
             Some((n, v)) => (n.to_string(), Some(v.to_string())),
             None => (opt.to_string(), None),
         };
+        if !KNOWN_OPTIONS.contains(&name.as_str()) {
+            return Err(format!("unknown option --{name}"));
+        }
         let takes_value = name != "enable-test-functions";
         let value = if takes_value {
             match inline {
                 Some(v) => Some(v),
-                None => Some(it.next().ok_or_else(|| format!("option --{name} requires a value"))?.clone()),
+                None => Some(
+                    it.next()
+                        .ok_or_else(|| format!("option --{name} requires a value"))?
+                        .clone(),
+                ),
             }
         } else {
             if inline.is_some() {
@@ -73,16 +101,25 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
                     return Err("--threads must be at least 1".to_string());
                 }
             }
-            "log-level" => config.log_level = LogLevel::parse(&v).ok_or_else(|| format!("invalid log level '{v}'"))?,
+            "log-level" => {
+                config.log_level =
+                    LogLevel::parse(&v).ok_or_else(|| format!("invalid log level '{v}'"))?
+            }
             "native-kernels" => config.native_kernels = Some(PathBuf::from(v)),
             "request" if mode_name == "exec" => request = Some(v),
             "host" if mode_name == "serve" => serve.host = v,
             "port" if mode_name == "serve" => serve.port = Some(number(&opt, &v)?),
             "workers" if mode_name == "serve" => serve.workers = Some(number(&opt, &v)?),
             "queue-depth" if mode_name == "serve" => serve.queue_depth = number(&opt, &v)?,
-            "query-timeout-ms" if mode_name == "serve" => serve.query_timeout_ms = number(&opt, &v)?,
-            "shutdown-grace-ms" if mode_name == "serve" => serve.shutdown_grace_ms = number(&opt, &v)?,
-            "max-request-bytes" if mode_name == "serve" => serve.max_request_bytes = number(&opt, &v)?,
+            "query-timeout-ms" if mode_name == "serve" => {
+                serve.query_timeout_ms = number(&opt, &v)?
+            }
+            "shutdown-grace-ms" if mode_name == "serve" => {
+                serve.shutdown_grace_ms = number(&opt, &v)?
+            }
+            "max-request-bytes" if mode_name == "serve" => {
+                serve.max_request_bytes = number(&opt, &v)?
+            }
             _ => return Err(format!("unknown option {opt}")),
         }
     }
@@ -90,7 +127,9 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
         "version" => Mode::Version,
         "capabilities" => Mode::Capabilities,
         "session" => Mode::Session,
-        "exec" => Mode::Exec { request: request.ok_or_else(|| "exec requires --request FILE|-".to_string())? },
+        "exec" => Mode::Exec {
+            request: request.ok_or_else(|| "exec requires --request FILE|-".to_string())?,
+        },
         "serve" => {
             if serve.port.is_none() {
                 return Err("serve requires --port N".to_string());
@@ -99,7 +138,11 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
         }
         other => return Err(format!("unknown command '{other}'")),
     };
-    Ok(Cli { mode, config, serve })
+    Ok(Cli {
+        mode,
+        config,
+        serve,
+    })
 }
 
 #[cfg(test)]
@@ -112,7 +155,10 @@ mod tests {
 
     #[test]
     fn parses_session_options() {
-        let cli = parse_args(&args("session --data-dir /tmp --enable-test-functions --max-table-rows=10")).unwrap();
+        let cli = parse_args(&args(
+            "session --data-dir /tmp --enable-test-functions --max-table-rows=10",
+        ))
+        .unwrap();
         assert_eq!(cli.mode, Mode::Session);
         assert!(cli.config.test_functions);
         assert_eq!(cli.config.max_table_rows, 10);

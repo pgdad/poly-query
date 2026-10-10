@@ -28,7 +28,9 @@ impl Default for Config {
             max_ingest_bytes: 4 * 1024 * 1024 * 1024,
             max_table_rows: 500_000_000,
             max_join_rows: 100_000_000,
-            threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+            threads: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
             log_level: LogLevel::Info,
             native_kernels: None,
         }

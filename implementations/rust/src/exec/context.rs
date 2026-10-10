@@ -47,15 +47,15 @@ impl ExecContext {
 
     /// Fails with TIMEOUT or CANCELLED if the query must stop.
     pub fn check_interrupt(&self) -> Result<()> {
-        if let Some(flag) = &self.cancel {
-            if flag.load(Ordering::Relaxed) {
-                return Err(Error::new(ErrorCode::Cancelled, "query was cancelled"));
-            }
+        if let Some(flag) = &self.cancel
+            && flag.load(Ordering::Relaxed)
+        {
+            return Err(Error::new(ErrorCode::Cancelled, "query was cancelled"));
         }
-        if let Some(d) = self.deadline {
-            if Instant::now() >= d {
-                return Err(Error::new(ErrorCode::Timeout, "query exceeded its timeout"));
-            }
+        if let Some(d) = self.deadline
+            && Instant::now() >= d
+        {
+            return Err(Error::new(ErrorCode::Timeout, "query exceeded its timeout"));
         }
         Ok(())
     }
@@ -87,6 +87,7 @@ impl ExecContext {
     }
 
     pub fn release(&self, bytes: usize) {
-        self.memory_used.set(self.memory_used.get().saturating_sub(bytes));
+        self.memory_used
+            .set(self.memory_used.get().saturating_sub(bytes));
     }
 }

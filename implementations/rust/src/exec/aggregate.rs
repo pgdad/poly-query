@@ -32,7 +32,11 @@ pub struct AggState {
 
 impl AggState {
     pub fn new(call: &AggregateCall) -> AggState {
-        let input_ty = call.arg.as_ref().map(|a| a.data_type()).unwrap_or(DataType::Null);
+        let input_ty = call
+            .arg
+            .as_ref()
+            .map(|a| a.data_type())
+            .unwrap_or(DataType::Null);
         let scale = match input_ty {
             DataType::Decimal { scale, .. } => scale,
             _ => 0,
@@ -47,18 +51,28 @@ impl AggState {
             AggFunc::Min => Acc::Min(None),
             AggFunc::Max => Acc::Max(None),
         };
-        let distinct = if call.distinct { Some(HashSet::new()) } else { None };
-        AggState { func: call.func, acc, count: 0, scale, distinct }
+        let distinct = if call.distinct {
+            Some(HashSet::new())
+        } else {
+            None
+        };
+        AggState {
+            func: call.func,
+            acc,
+            count: 0,
+            scale,
+            distinct,
+        }
     }
 
     /// Adds one input value (`Value::Null` for COUNT(*) rows is fine).
     /// Returns the approximate number of bytes newly retained.
     pub fn update(&mut self, v: &Value) -> Result<usize> {
-        if let Acc::Count(n) = &mut self.acc {
-            if self.func == AggFunc::CountStar {
-                *n += 1;
-                return Ok(0);
-            }
+        if let Acc::Count(n) = &mut self.acc
+            && self.func == AggFunc::CountStar
+        {
+            *n += 1;
+            return Ok(0);
         }
         if v.is_null() {
             return Ok(0);
@@ -147,7 +161,12 @@ mod tests {
     use crate::planner::expr::Expr;
 
     fn call(func: AggFunc, ty: DataType, distinct: bool) -> AggregateCall {
-        AggregateCall { func, arg: Some(Expr::Column { index: 0, ty }), distinct, ty }
+        AggregateCall {
+            func,
+            arg: Some(Expr::Column { index: 0, ty }),
+            distinct,
+            ty,
+        }
     }
 
     #[test]
@@ -171,7 +190,12 @@ mod tests {
         }
         assert_eq!(s.finish().unwrap(), Value::Float(1.5));
         let mut c = AggState::new(&call(AggFunc::Count, DataType::decimal(10, 2), true));
-        for v in [Value::Decimal(150, 2), Value::Decimal(150, 2), Value::Null, Value::Decimal(1, 2)] {
+        for v in [
+            Value::Decimal(150, 2),
+            Value::Decimal(150, 2),
+            Value::Null,
+            Value::Decimal(1, 2),
+        ] {
             c.update(&v).unwrap();
         }
         assert_eq!(c.finish().unwrap(), Value::Int(2));

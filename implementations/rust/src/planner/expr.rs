@@ -28,19 +28,48 @@ impl ScalarFunc {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    Literal { value: Value, ty: DataType },
+    Literal {
+        value: Value,
+        ty: DataType,
+    },
     /// Reference to column `index` of the input row.
-    Column { index: usize, ty: DataType },
-    Negate { expr: Box<Expr>, ty: DataType },
+    Column {
+        index: usize,
+        ty: DataType,
+    },
+    Negate {
+        expr: Box<Expr>,
+        ty: DataType,
+    },
     Not(Box<Expr>),
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
-    Arith { op: BinaryOp, kind: ArithKind, left: Box<Expr>, right: Box<Expr>, ty: DataType },
-    Compare { op: BinaryOp, left: Box<Expr>, right: Box<Expr> },
+    Arith {
+        op: BinaryOp,
+        kind: ArithKind,
+        left: Box<Expr>,
+        right: Box<Expr>,
+        ty: DataType,
+    },
+    Compare {
+        op: BinaryOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
     Concat(Box<Expr>, Box<Expr>),
-    IsNull { expr: Box<Expr>, negated: bool },
-    Cast { expr: Box<Expr>, to: DataType },
-    Function { func: ScalarFunc, args: Vec<Expr>, ty: DataType },
+    IsNull {
+        expr: Box<Expr>,
+        negated: bool,
+    },
+    Cast {
+        expr: Box<Expr>,
+        to: DataType,
+    },
+    Function {
+        func: ScalarFunc,
+        args: Vec<Expr>,
+        ty: DataType,
+    },
 }
 
 impl Expr {
@@ -51,9 +80,11 @@ impl Expr {
             | Expr::Negate { ty, .. }
             | Expr::Arith { ty, .. }
             | Expr::Function { ty, .. } => *ty,
-            Expr::Not(_) | Expr::And(..) | Expr::Or(..) | Expr::Compare { .. } | Expr::IsNull { .. } => {
-                DataType::Boolean
-            }
+            Expr::Not(_)
+            | Expr::And(..)
+            | Expr::Or(..)
+            | Expr::Compare { .. }
+            | Expr::IsNull { .. } => DataType::Boolean,
             Expr::Concat(..) => DataType::String,
             Expr::Cast { to, .. } => *to,
         }
@@ -63,11 +94,16 @@ impl Expr {
     pub fn children(&self) -> Vec<&Expr> {
         match self {
             Expr::Literal { .. } | Expr::Column { .. } => vec![],
-            Expr::Negate { expr, .. } | Expr::Not(expr) | Expr::IsNull { expr, .. } | Expr::Cast { expr, .. } => {
+            Expr::Negate { expr, .. }
+            | Expr::Not(expr)
+            | Expr::IsNull { expr, .. }
+            | Expr::Cast { expr, .. } => {
                 vec![expr]
             }
             Expr::And(l, r) | Expr::Or(l, r) | Expr::Concat(l, r) => vec![l, r],
-            Expr::Arith { left, right, .. } | Expr::Compare { left, right, .. } => vec![left, right],
+            Expr::Arith { left, right, .. } | Expr::Compare { left, right, .. } => {
+                vec![left, right]
+            }
             Expr::Function { args, .. } => args.iter().collect(),
         }
     }
@@ -75,11 +111,16 @@ impl Expr {
     fn children_mut(&mut self) -> Vec<&mut Expr> {
         match self {
             Expr::Literal { .. } | Expr::Column { .. } => vec![],
-            Expr::Negate { expr, .. } | Expr::Not(expr) | Expr::IsNull { expr, .. } | Expr::Cast { expr, .. } => {
+            Expr::Negate { expr, .. }
+            | Expr::Not(expr)
+            | Expr::IsNull { expr, .. }
+            | Expr::Cast { expr, .. } => {
                 vec![expr]
             }
             Expr::And(l, r) | Expr::Or(l, r) | Expr::Concat(l, r) => vec![l, r],
-            Expr::Arith { left, right, .. } | Expr::Compare { left, right, .. } => vec![left, right],
+            Expr::Arith { left, right, .. } | Expr::Compare { left, right, .. } => {
+                vec![left, right]
+            }
             Expr::Function { args, .. } => args.iter_mut().collect(),
         }
     }
@@ -124,12 +165,19 @@ impl Expr {
             Expr::Not(e) => format!("(NOT {})", e.display()),
             Expr::And(l, r) => format!("({} AND {})", l.display(), r.display()),
             Expr::Or(l, r) => format!("({} OR {})", l.display(), r.display()),
-            Expr::Arith { op, left, right, .. } | Expr::Compare { op, left, right } => {
+            Expr::Arith {
+                op, left, right, ..
+            }
+            | Expr::Compare { op, left, right } => {
                 format!("({} {} {})", left.display(), op.symbol(), right.display())
             }
             Expr::Concat(l, r) => format!("({} || {})", l.display(), r.display()),
             Expr::IsNull { expr, negated } => {
-                format!("({} IS {}NULL)", expr.display(), if *negated { "NOT " } else { "" })
+                format!(
+                    "({} IS {}NULL)",
+                    expr.display(),
+                    if *negated { "NOT " } else { "" }
+                )
             }
             Expr::Cast { expr, to } => format!("CAST({} AS {to})", expr.display()),
             Expr::Function { func, args, .. } => {
@@ -189,7 +237,12 @@ impl AggregateCall {
     pub fn display(&self) -> String {
         match &self.arg {
             None => "COUNT(*)".to_string(),
-            Some(a) => format!("{}({}{})", self.func.name(), if self.distinct { "DISTINCT " } else { "" }, a.display()),
+            Some(a) => format!(
+                "{}({}{})",
+                self.func.name(),
+                if self.distinct { "DISTINCT " } else { "" },
+                a.display()
+            ),
         }
     }
 }

@@ -96,7 +96,11 @@ pub fn parse_timestamp(s: &str) -> Option<i64> {
         }
         micros = digits(frac)? as i64 * 10i64.pow(6 - frac.len() as u32);
     }
-    Some(days * MICROS_PER_DAY + ((h as i64 * 60 + mi as i64) * 60 + sec as i64) * MICROS_PER_SECOND + micros)
+    Some(
+        days * MICROS_PER_DAY
+            + ((h as i64 * 60 + mi as i64) * 60 + sec as i64) * MICROS_PER_SECOND
+            + micros,
+    )
 }
 
 /// Parses timestamp text, also accepting a bare date (midnight).
@@ -159,7 +163,10 @@ mod tests {
         assert_eq!(format_date(parse_date("0001-01-01").unwrap()), "0001-01-01");
         let ts = parse_timestamp("2024-02-29 13:14:15.5").unwrap();
         assert_eq!(format_timestamp(ts), "2024-02-29 13:14:15.500000");
-        assert_eq!(format_timestamp(parse_timestamp("2024-01-01T00:00:00").unwrap()), "2024-01-01 00:00:00");
+        assert_eq!(
+            format_timestamp(parse_timestamp("2024-01-01T00:00:00").unwrap()),
+            "2024-01-01 00:00:00"
+        );
         assert!(parse_timestamp("2023-01-01 25:00:00").is_none());
         assert!(parse_timestamp("2023-01-01 10:00:00.").is_none());
         assert!(parse_timestamp("2023-01-01 10:00:00.1234567").is_none());
@@ -167,7 +174,13 @@ mod tests {
             format_timestamp(parse_timestamp("9999-12-31 23:59:59.999999").unwrap()),
             "9999-12-31 23:59:59.999999"
         );
-        assert_eq!(format_timestamp(parse_timestamp("1969-12-31 23:59:59.5").unwrap()), "1969-12-31 23:59:59.500000");
-        assert_eq!(timestamp_to_date(parse_timestamp("1969-12-31 23:59:59").unwrap()), -1);
+        assert_eq!(
+            format_timestamp(parse_timestamp("1969-12-31 23:59:59.5").unwrap()),
+            "1969-12-31 23:59:59.500000"
+        );
+        assert_eq!(
+            timestamp_to_date(parse_timestamp("1969-12-31 23:59:59").unwrap()),
+            -1
+        );
     }
 }

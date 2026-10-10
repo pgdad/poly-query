@@ -35,7 +35,10 @@ impl DataType {
     }
 
     pub fn is_numeric(self) -> bool {
-        matches!(self, DataType::Int64 | DataType::Float64 | DataType::Decimal { .. })
+        matches!(
+            self,
+            DataType::Int64 | DataType::Float64 | DataType::Decimal { .. }
+        )
     }
 
     pub fn is_temporal(self) -> bool {
@@ -44,7 +47,11 @@ impl DataType {
 
     /// The type reported in result metadata (the null type is reported as STRING).
     pub fn result_type(self) -> DataType {
-        if self == DataType::Null { DataType::String } else { self }
+        if self == DataType::Null {
+            DataType::String
+        } else {
+            self
+        }
     }
 
     /// Canonical type name (`DECIMAL(18,2)`, `INT64`, ...).
@@ -60,7 +67,9 @@ impl DataType {
             if params.is_empty() {
                 Ok(t)
             } else {
-                Err(Error::semantic(format!("type {upper} does not take parameters")))
+                Err(Error::semantic(format!(
+                    "type {upper} does not take parameters"
+                )))
             }
         };
         match upper.as_str() {
@@ -78,7 +87,9 @@ impl DataType {
                     _ => return Err(Error::semantic("DECIMAL takes at most two parameters")),
                 };
                 if p < 1 || p > MAX_DECIMAL_PRECISION as u64 || s > p {
-                    return Err(Error::semantic(format!("invalid DECIMAL parameters ({p},{s})")));
+                    return Err(Error::semantic(format!(
+                        "invalid DECIMAL parameters ({p},{s})"
+                    )));
                 }
                 Ok(DataType::decimal(p as u8, s as u8))
             }
@@ -103,7 +114,10 @@ impl DataType {
                     if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
                         return Err(Error::semantic(format!("invalid type '{text}'")));
                     }
-                    params.push(part.parse::<u64>().map_err(|_| Error::semantic(format!("invalid type '{text}'")))?);
+                    params.push(
+                        part.parse::<u64>()
+                            .map_err(|_| Error::semantic(format!("invalid type '{text}'")))?,
+                    );
                 }
                 (text[..open].trim(), params)
             }
@@ -136,10 +150,22 @@ mod tests {
     #[test]
     fn aliases() {
         assert_eq!(DataType::parse("bigint").unwrap(), DataType::Int64);
-        assert_eq!(DataType::parse("NUMERIC(4,2)").unwrap(), DataType::decimal(4, 2));
-        assert_eq!(DataType::parse("decimal").unwrap(), DataType::decimal(18, 0));
-        assert_eq!(DataType::parse("DECIMAL(7)").unwrap(), DataType::decimal(7, 0));
-        assert_eq!(DataType::parse("Decimal( 10 , 2 )").unwrap().to_string(), "DECIMAL(10,2)");
+        assert_eq!(
+            DataType::parse("NUMERIC(4,2)").unwrap(),
+            DataType::decimal(4, 2)
+        );
+        assert_eq!(
+            DataType::parse("decimal").unwrap(),
+            DataType::decimal(18, 0)
+        );
+        assert_eq!(
+            DataType::parse("DECIMAL(7)").unwrap(),
+            DataType::decimal(7, 0)
+        );
+        assert_eq!(
+            DataType::parse("Decimal( 10 , 2 )").unwrap().to_string(),
+            "DECIMAL(10,2)"
+        );
         assert!(DataType::parse("DECIMAL(19,2)").is_err());
         assert!(DataType::parse("DECIMAL(2,3)").is_err());
         assert!(DataType::parse("WIDGET").is_err());

@@ -47,11 +47,15 @@ impl Columns {
                     i
                 }
                 None => {
-                    return Err(Error::ingest(format!("record {record}: key '{key}' is not in the schema")));
+                    return Err(Error::ingest(format!(
+                        "record {record}: key '{key}' is not in the schema"
+                    )));
                 }
             };
             if seen[idx] {
-                return Err(Error::ingest(format!("record {record}: duplicate key '{key}'")));
+                return Err(Error::ingest(format!(
+                    "record {record}: duplicate key '{key}'"
+                )));
             }
             seen[idx] = true;
             let scalar = match value {
@@ -60,7 +64,9 @@ impl Columns {
                 Json::Number(n) => Scalar::Number(n),
                 Json::String(s) => Scalar::String(s),
                 Json::Array(_) | Json::Object(_) | Json::Raw(_) => {
-                    return Err(Error::ingest(format!("record {record}: nested value for key '{key}'")));
+                    return Err(Error::ingest(format!(
+                        "record {record}: nested value for key '{key}'"
+                    )));
                 }
             };
             self.values[idx].push(scalar);
@@ -78,16 +84,25 @@ impl Columns {
 fn record_object(v: Json, record: usize) -> Result<Vec<(String, Json)>> {
     match v {
         Json::Object(fields) => Ok(fields),
-        _ => Err(Error::ingest(format!("record {record} is not a JSON object"))),
+        _ => Err(Error::ingest(format!(
+            "record {record} is not a JSON object"
+        ))),
     }
 }
 
 /// Loads JSON (array of objects) or JSON Lines text into a table.
 pub fn load(name: &str, format: Format, text: &str, opts: &IngestOptions) -> Result<Table> {
-    let mut cols = Columns { names: Vec::new(), index: HashMap::new(), values: Vec::new(), open: true, rows: 0 };
+    let mut cols = Columns {
+        names: Vec::new(),
+        index: HashMap::new(),
+        values: Vec::new(),
+        open: true,
+        rows: 0,
+    };
     if let Some(schema) = &opts.schema {
         for f in schema {
-            cols.index.insert(f.name.to_ascii_lowercase(), cols.names.len());
+            cols.index
+                .insert(f.name.to_ascii_lowercase(), cols.names.len());
             cols.names.push(f.name.clone());
             cols.values.push(Vec::new());
         }
@@ -111,8 +126,9 @@ pub fn load(name: &str, format: Format, text: &str, opts: &IngestOptions) -> Res
                 if line.is_empty() {
                     continue;
                 }
-                let v = json::parse(line)
-                    .map_err(|e| Error::ingest(format!("line {}: invalid JSON: {e}", lineno + 1)))?;
+                let v = json::parse(line).map_err(|e| {
+                    Error::ingest(format!("line {}: invalid JSON: {e}", lineno + 1))
+                })?;
                 let record = cols.rows + 1;
                 cols.add_record(record_object(v, record)?, record)?;
                 check_row_limit(cols.rows, opts.max_rows)?;
@@ -120,7 +136,10 @@ pub fn load(name: &str, format: Format, text: &str, opts: &IngestOptions) -> Res
         }
     }
 
-    let declared: Option<Vec<DataType>> = opts.schema.as_ref().map(|s| s.iter().map(|f| f.data_type).collect());
+    let declared: Option<Vec<DataType>> = opts
+        .schema
+        .as_ref()
+        .map(|s| s.iter().map(|f| f.data_type).collect());
     let mut fields = Vec::with_capacity(cols.names.len());
     let mut columns = Vec::with_capacity(cols.names.len());
     for (c, values) in cols.values.into_iter().enumerate() {
@@ -206,7 +225,11 @@ fn convert(v: Scalar, ty: DataType, explicit: bool) -> Result<Value> {
             DataType::Float64 => match float::parse_float(&n) {
                 Ok(f) => Value::Float(f),
                 Err(_) if explicit => return Err(mismatch("number")),
-                Err(_) => return Err(Error::ingest(format!("number {n} is out of range for FLOAT64"))),
+                Err(_) => {
+                    return Err(Error::ingest(format!(
+                        "number {n} is out of range for FLOAT64"
+                    )));
+                }
             },
             _ => return Err(mismatch("number")),
         },
@@ -230,7 +253,13 @@ mod tests {
 
     #[test]
     fn jsonl_union_of_keys() {
-        let t = load("t", Format::JsonLines, "{\"a\": 1}\n\n{\"b\": \"x\", \"a\": 2}\n{\"c\": true}\n", &opts()).unwrap();
+        let t = load(
+            "t",
+            Format::JsonLines,
+            "{\"a\": 1}\n\n{\"b\": \"x\", \"a\": 2}\n{\"c\": true}\n",
+            &opts(),
+        )
+        .unwrap();
         assert_eq!(t.row_count, 3);
         let names: Vec<_> = t.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["a", "b", "c"]);
@@ -241,8 +270,13 @@ mod tests {
 
     #[test]
     fn json_array_inference() {
-        let t = load("t", Format::Json, r#"[{"x": 1.5, "d": "2024-01-01"}, {"x": 2, "d": "2024-01-01T10:00:00"}]"#, &opts())
-            .unwrap();
+        let t = load(
+            "t",
+            Format::Json,
+            r#"[{"x": 1.5, "d": "2024-01-01"}, {"x": 2, "d": "2024-01-01T10:00:00"}]"#,
+            &opts(),
+        )
+        .unwrap();
         assert_eq!(t.fields[0].data_type, DataType::Float64);
         assert_eq!(t.fields[1].data_type, DataType::Timestamp);
     }
@@ -251,19 +285,39 @@ mod tests {
     fn errors() {
         let code = |f, s: &str| load("t", f, s, &opts()).unwrap_err().code;
         assert_eq!(code(Format::Json, "{\"a\": 1}"), ErrorCode::IngestError);
-        assert_eq!(code(Format::Json, "[{\"a\": 1}, 2]"), ErrorCode::IngestError);
-        assert_eq!(code(Format::JsonLines, "{\"a\": 1, \"a\": 2}"), ErrorCode::IngestError);
-        assert_eq!(code(Format::JsonLines, "{\"a\": [1]}"), ErrorCode::IngestError);
-        assert_eq!(code(Format::Json, "[{\"a\":1},{\"a\":\"x\"}]"), ErrorCode::IngestError);
+        assert_eq!(
+            code(Format::Json, "[{\"a\": 1}, 2]"),
+            ErrorCode::IngestError
+        );
+        assert_eq!(
+            code(Format::JsonLines, "{\"a\": 1, \"a\": 2}"),
+            ErrorCode::IngestError
+        );
+        assert_eq!(
+            code(Format::JsonLines, "{\"a\": [1]}"),
+            ErrorCode::IngestError
+        );
+        assert_eq!(
+            code(Format::Json, "[{\"a\":1},{\"a\":\"x\"}]"),
+            ErrorCode::IngestError
+        );
         assert_eq!(code(Format::JsonLines, "{\"a\":1,"), ErrorCode::IngestError);
     }
 
     #[test]
     fn explicit_schema() {
         let mut o = opts();
-        o.schema = Some(vec![Field::new("id", DataType::Int64), Field::new("amt", DataType::decimal(8, 3))]);
-        let t = load("t", Format::Json, r#"[{"id": 1, "amt": 12.5}, {"id": 2, "amt": "-0.125"}, {"id": 3}]"#, &o)
-            .unwrap();
+        o.schema = Some(vec![
+            Field::new("id", DataType::Int64),
+            Field::new("amt", DataType::decimal(8, 3)),
+        ]);
+        let t = load(
+            "t",
+            Format::Json,
+            r#"[{"id": 1, "amt": 12.5}, {"id": 2, "amt": "-0.125"}, {"id": 3}]"#,
+            &o,
+        )
+        .unwrap();
         assert_eq!(t.columns[1].value(0), Value::Decimal(12500, 3));
         assert_eq!(t.columns[1].value(1), Value::Decimal(-125, 3));
         assert!(t.columns[1].value(2).is_null());

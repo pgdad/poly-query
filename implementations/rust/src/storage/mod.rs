@@ -15,7 +15,10 @@ pub struct Field {
 
 impl Field {
     pub fn new(name: impl Into<String>, data_type: DataType) -> Self {
-        Field { name: name.into(), data_type }
+        Field {
+            name: name.into(),
+            data_type,
+        }
     }
 }
 
@@ -29,15 +32,27 @@ pub struct Table {
 }
 
 impl Table {
-    pub fn new(name: impl Into<String>, fields: Vec<Field>, columns: Vec<Column>, row_count: usize) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        fields: Vec<Field>,
+        columns: Vec<Column>,
+        row_count: usize,
+    ) -> Self {
         debug_assert_eq!(fields.len(), columns.len());
         debug_assert!(columns.iter().all(|c| c.len() == row_count));
-        Table { name: name.into(), fields, columns, row_count }
+        Table {
+            name: name.into(),
+            fields,
+            columns,
+            row_count,
+        }
     }
 
     /// Index of a column by case-insensitive name.
     pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.fields.iter().position(|f| f.name.eq_ignore_ascii_case(name))
+        self.fields
+            .iter()
+            .position(|f| f.name.eq_ignore_ascii_case(name))
     }
 
     pub fn with_name(mut self, name: &str) -> Self {

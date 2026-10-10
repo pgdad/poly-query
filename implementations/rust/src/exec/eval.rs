@@ -23,7 +23,10 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
         Expr::Column { index, .. } => row[*index].clone(),
         Expr::Negate { expr, .. } => match eval(expr, row, ctx)? {
             Value::Null => Value::Null,
-            Value::Int(i) => Value::Int(i.checked_neg().ok_or_else(|| Error::overflow("integer overflow in negation"))?),
+            Value::Int(i) => Value::Int(
+                i.checked_neg()
+                    .ok_or_else(|| Error::overflow("integer overflow in negation"))?,
+            ),
             Value::Float(f) => Value::Float(float::normalize(-f)),
             Value::Decimal(u, s) => Value::Decimal(-u, s),
             v => return Err(Error::internal(format!("cannot negate {v:?}"))),
@@ -54,7 +57,13 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
                 _ => Value::Null,
             }
         }
-        Expr::Arith { op, kind, left, right, .. } => {
+        Expr::Arith {
+            op,
+            kind,
+            left,
+            right,
+            ..
+        } => {
             let l = eval(left, row, ctx)?;
             let r = eval(right, row, ctx)?;
             if l.is_null() || r.is_null() {
@@ -113,7 +122,9 @@ fn as_decimal(v: &Value) -> Result<(i128, u8)> {
     match v {
         Value::Decimal(u, s) => Ok((*u as i128, *s)),
         Value::Int(i) => Ok((promote_int(*i, 0)?, 0)),
-        _ => Err(Error::internal(format!("expected a decimal operand, got {v:?}"))),
+        _ => Err(Error::internal(format!(
+            "expected a decimal operand, got {v:?}"
+        ))),
     }
 }
 
@@ -164,8 +175,12 @@ pub fn arithmetic(op: BinaryOp, kind: ArithKind, l: &Value, r: &Value) -> Result
             Ok(Value::Decimal(v as i64, s))
         }
         ArithKind::Float => {
-            let a = l.to_f64().ok_or_else(|| Error::internal("expected numeric operand"))?;
-            let b = r.to_f64().ok_or_else(|| Error::internal("expected numeric operand"))?;
+            let a = l
+                .to_f64()
+                .ok_or_else(|| Error::internal("expected numeric operand"))?;
+            let b = r
+                .to_f64()
+                .ok_or_else(|| Error::internal("expected numeric operand"))?;
             let v = match op {
                 BinaryOp::Add => a + b,
                 BinaryOp::Sub => a - b,
@@ -195,7 +210,9 @@ fn call_scalar(func: ScalarFunc, args: &[Value], ctx: &ExecContext) -> Result<Va
                     return Err(Error::semantic("PQ_SLEEP requires --enable-test-functions"));
                 }
                 if *ms < 0 {
-                    return Err(Error::invalid_argument("PQ_SLEEP duration must not be negative"));
+                    return Err(Error::invalid_argument(
+                        "PQ_SLEEP duration must not be negative",
+                    ));
                 }
                 ctx.sleep(Duration::from_millis(*ms as u64))?;
                 Ok(Value::Int(*ms))
@@ -217,24 +234,52 @@ mod tests {
         assert_eq!(a(BinaryOp::Mod, -7, 3).unwrap(), Value::Int(-1));
         assert_eq!(a(BinaryOp::Mod, 7, -3).unwrap(), Value::Int(1));
         assert_eq!(a(BinaryOp::Mod, i64::MIN, -1).unwrap(), Value::Int(0));
-        assert_eq!(a(BinaryOp::Div, i64::MIN, -1).unwrap_err().code, ErrorCode::NumericOverflow);
-        assert_eq!(a(BinaryOp::Div, 1, 0).unwrap_err().code, ErrorCode::DivisionByZero);
+        assert_eq!(
+            a(BinaryOp::Div, i64::MIN, -1).unwrap_err().code,
+            ErrorCode::NumericOverflow
+        );
+        assert_eq!(
+            a(BinaryOp::Div, 1, 0).unwrap_err().code,
+            ErrorCode::DivisionByZero
+        );
     }
 
     #[test]
     fn decimal_semantics() {
         let d = |op, l: Value, r: Value| arithmetic(op, ArithKind::Decimal, &l, &r).unwrap();
-        assert_eq!(d(BinaryOp::Add, Value::Decimal(125, 2), Value::Decimal(25, 1)), Value::Decimal(375, 2));
-        assert_eq!(d(BinaryOp::Mul, Value::Decimal(125, 2), Value::Decimal(25, 1)), Value::Decimal(3125, 3));
-        assert_eq!(d(BinaryOp::Sub, Value::Int(2), Value::Decimal(75, 2)), Value::Decimal(125, 2));
-        let e = arithmetic(BinaryOp::Add, ArithKind::Decimal, &Value::Decimal(999_999_999_999_999_999, 1), &Value::Decimal(1, 1));
+        assert_eq!(
+            d(BinaryOp::Add, Value::Decimal(125, 2), Value::Decimal(25, 1)),
+            Value::Decimal(375, 2)
+        );
+        assert_eq!(
+            d(BinaryOp::Mul, Value::Decimal(125, 2), Value::Decimal(25, 1)),
+            Value::Decimal(3125, 3)
+        );
+        assert_eq!(
+            d(BinaryOp::Sub, Value::Int(2), Value::Decimal(75, 2)),
+            Value::Decimal(125, 2)
+        );
+        let e = arithmetic(
+            BinaryOp::Add,
+            ArithKind::Decimal,
+            &Value::Decimal(999_999_999_999_999_999, 1),
+            &Value::Decimal(1, 1),
+        );
         assert_eq!(e.unwrap_err().code, ErrorCode::NumericOverflow);
     }
 
     #[test]
     fn float_semantics() {
-        let f = |op, x: f64, y: f64| arithmetic(op, ArithKind::Float, &Value::Float(x), &Value::Float(y));
-        assert_eq!(f(BinaryOp::Div, 0.0, 0.0).unwrap_err().code, ErrorCode::DivisionByZero);
-        assert_eq!(f(BinaryOp::Mul, 1e308, 10.0).unwrap_err().code, ErrorCode::NumericOverflow);
+        let f = |op, x: f64, y: f64| {
+            arithmetic(op, ArithKind::Float, &Value::Float(x), &Value::Float(y))
+        };
+        assert_eq!(
+            f(BinaryOp::Div, 0.0, 0.0).unwrap_err().code,
+            ErrorCode::DivisionByZero
+        );
+        assert_eq!(
+            f(BinaryOp::Mul, 1e308, 10.0).unwrap_err().code,
+            ErrorCode::NumericOverflow
+        );
     }
 }

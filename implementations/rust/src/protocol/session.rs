@@ -22,7 +22,10 @@ pub fn run_session(engine: &mut Engine) -> io::Result<()> {
         let line = match std::str::from_utf8(&buf) {
             Ok(s) => s.trim_end_matches(['\n', '\r']),
             Err(_) => {
-                let resp = error_response(Json::Null, &Error::invalid_request("request is not valid UTF-8"));
+                let resp = error_response(
+                    Json::Null,
+                    &Error::invalid_request("request is not valid UTF-8"),
+                );
                 writeln!(out, "{}", resp.to_string_compact())?;
                 out.flush()?;
                 continue;
@@ -62,7 +65,10 @@ pub fn run_exec(engine: &mut Engine, source: &str) -> io::Result<()> {
             writeln!(out, "{}", handle_json(engine, &v).to_string_compact())?;
         }
         Err(e) => {
-            let resp = error_response(Json::Null, &Error::invalid_request(format!("invalid JSON: {e}")));
+            let resp = error_response(
+                Json::Null,
+                &Error::invalid_request(format!("invalid JSON: {e}")),
+            );
             writeln!(out, "{}", resp.to_string_compact())?;
         }
     }

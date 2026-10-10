@@ -50,7 +50,11 @@ pub fn parse_float(s: &str) -> Result<f64, bool> {
     }
     // Rust's parser accepts this syntax (including "1." and ".5").
     let v: f64 = s.parse().map_err(|_| false)?;
-    if v.is_finite() { Ok(normalize(v)) } else { Err(true) }
+    if v.is_finite() {
+        Ok(normalize(v))
+    } else {
+        Err(true)
+    }
 }
 
 /// Normalizes -0.0 to 0.0.
@@ -97,12 +101,20 @@ pub fn f64_to_decimal(v: f64, precision: u8, scale: u8) -> Option<i64> {
         m
     } else {
         let down = (-shift) as u32;
-        if down > 38 { 0 } else { decimal::div_pow10_round(m, down) }
+        if down > 38 {
+            0
+        } else {
+            decimal::div_pow10_round(m, down)
+        }
     };
     if !decimal::fits_precision(unscaled, precision) {
         return None;
     }
-    Some(if v < 0.0 { -(unscaled as i64) } else { unscaled as i64 })
+    Some(if v < 0.0 {
+        -(unscaled as i64)
+    } else {
+        unscaled as i64
+    })
 }
 
 #[cfg(test)]
