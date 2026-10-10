@@ -1,2 +1,6 @@
 2026-10-10T19:59:33+00:00 wave wave-a-phase4-a1-20261010T195932Z: order=['clojure']
 2026-10-10T19:59:33+00:00 [a-phase4-clojure-a1-20261010T195932Z] agent started
+2026-10-10T20:13:50+00:00 [a-phase4-clojure-a1-20261010T195932Z] agent finished; collecting telemetry
+2026-10-10T20:13:50+00:00 [a-phase4-clojure-a1-20261010T195932Z] validating (clean clone, sandboxed)
+2026-10-10T20:14:16+00:00 [a-phase4-clojure-a1-20261010T195932Z] outcome=success cost=$3.9724168000000004 turns=42 wall=857.1s
+2026-10-10T20:14:16+00:00 wave wave-a-phase4-a1-20261010T195932Z finished: clojure=success

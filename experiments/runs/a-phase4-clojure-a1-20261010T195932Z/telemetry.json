@@ -1,0 +1,90 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase4-clojure-a1-20261010T195932Z",
+ "language": "clojure",
+ "task": "phase4",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase4",
+ "prompt_sha256": "635f5a639ba1690c7b2bb36c97c61ccf0f00359be8f279d0cddb743d13fb3731",
+ "session_id": "f83b11fb-3366-4e15-9ce3-d25243706dac",
+ "tokens": {
+  "input": 80,
+  "output": 83163,
+  "cache_read": 4736624,
+  "cache_creation": 170189,
+  "thinking": null,
+  "thinking_estimated": 40771,
+  "source": "result events",
+  "api_messages": 40
+ },
+ "rate_limit": {
+  "events": 6,
+  "max_utilization": {
+   "seven_day": 0.1,
+   "five_hour": 0.53
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 3.9724168000000004,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 42,
+ "result_segments": 1,
+ "assistant_messages": 92,
+ "tool_calls": {
+  "Bash": 36,
+  "Write": 5
+ },
+ "tool_calls_total": 41,
+ "tool_failures": 0,
+ "build_invocations": 24,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 3,
+ "conformance_progress": [
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ]
+ ],
+ "repair_iterations": 2,
+ "time": {
+  "wall_seconds": 857.1,
+  "model_api_seconds": 732.7,
+  "tool_seconds": 123.6,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 2,
+  "files_changed": 13,
+  "lines_added": 1415,
+  "lines_removed": 81,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 4 is finished and committed, and the definition of done is met: every required suite reports 0 failures.\n\n## Test results\n- **HTTP/concurrency suite:** `http suite: 18/18 passed`, the same in three separate runs.\n- **Conformance over HTTP** (`--transport http`) and **over session** (the default) give identical results:\n  ```\n  phase 1: 225/225 pass, 0 fail, 0 error, 0 not implemented\n  phase 2: 186/186 pass, 0 fail, 0 error, 0 not implemented\n  phase 3: 143/143 pass, 0 fail, 0 error, 0 not implemented\n  phase 5: 0/15 pass, 0 fail, 0 error, 15 not implemented\n  TOTAL: 554/569 pass\n  ```\n  The 15 Phase 5 cases are reported as not implemented because the engine doesn't claim that capability. Phase 5 is outside this task, but the runner without `--ci` still exits non-zero because of them.\n- **`make build test`:** passes from a clean checkout (62 tests, 0 failures); `make lint` shows no reflection warnings.\n\n## What I implemented\n- **`serve` mode** with every endpoint in protocol.md \u00a77, error-to-status mapping, keep-alive, chunked uploads, `Expect: 100-continue`, the request size limit (413), and the `listening` line on stdout.\n- **Admission control:** at most `--workers` queries run at once, up to `--queue-depth` more wait in order, and anything beyond that is rejected immediately with `OVERLOADED`.\n- **Queries are tracked by id:** the client's `query_id` or a generated one, with 409 for an id already in use.\n- **Timeouts** are fixed when the query arrives, so time spent queued counts. A query stops on a timeout, a `DELETE /v1/queries/{id}`, a client disconnect or shutdown.\n- **Streaming** sends results as NDJSON lines with at most 8 batches buffered. If the client stops reading, the query blocks until it reads again; I checked this with 300k rows.\n- **Metrics, logs and snapshot isolation:** Prometheus metrics and JSON logs on stderr. Each query reads the version of its tables that existed when it started; a load parses fully before replacing a table.\n- **Graceful shutdown on SIGTERM/SIGINT:** stops accepting connections, lets running work finish within the grace period, cancels whatever is left, and exits 0.\n- **Engine changes:** results can now be streamed as they are produced, and the query context accepts an outside cancel flag and deadline. Sorting now checks for cancellation and timeouts too; a 150 ms timeout on a 1.5M-row sort returned in 0.153 s.\n- **Code and tests:** the new namespaces are `polyquery.server` plus `server.http`, `server.admission` and `server.metrics`. New unit and in-process end-to-end tests are in `test/polyquery/server_test.clj`.\n\n## Main design decisions\n- **Threads:** one platform thread per connection, with queries running on separate worker threads. This keeps `/health`, `/metrics` and cancellation responsive even when every worker is busy. While a query runs, the connection thread checks every ~10 ms whether the client has disconnected.\n- **Shutdown exit code:** shutdown runs in a JVM shutdown hook that ends by forcing the process to exit with status 0. Without that, the JVM would exit with 143 after SIGTERM.\n- **What goes through the worker limit:** only queries (`/v1/query`, `/v1/query/stream`, and `/v1/request` with `op: \"query\"`). Loads, index statements, explain and catalog reads run directly on the connection thread.\n\n## Known limitations\nThese are also listed in the README.\n- No Phase 5 execution modes.\n- One thread per open connection; no TLS or HTTP/2.\n- Request bodies are held in memory, up to `--max-request-bytes`.\n- Loads can't be cancelled and ignore timeouts.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
