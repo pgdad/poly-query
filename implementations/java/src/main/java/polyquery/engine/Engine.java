@@ -18,7 +18,9 @@ import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.exec.ExecContext;
 import polyquery.exec.Executor;
+import polyquery.exec.QueryControl;
 import polyquery.exec.QueryResult;
+import polyquery.exec.ResultSink;
 import polyquery.index.Index;
 import polyquery.index.IndexKind;
 import polyquery.ingest.CsvIngest;
@@ -157,48 +159,85 @@ public final class Engine {
 
     // ---------------------------------------------------------------- SQL
 
-    /** Executes one SQL statement: lex → parse → analyze → logical plan → optimize → physical plan → execute. */
+    /** Executes one SQL statement with the timeout of {@code opts} and collects its result. */
     public QueryResult query(String sql, QueryOptions opts) {
+        return query(sql, opts, QueryControl.withTimeout(opts.timeoutMs()));
+    }
+
+    /** Executes one SQL statement under {@code control} and collects its result. */
+    public QueryResult query(String sql, QueryOptions opts, QueryControl control) {
+        List<Object[]> rows = opts.countOnly() ? null : new ArrayList<>();
+        List<List<ColumnSchema>> columns = new ArrayList<>(1);
+        long count = execute(sql, opts, control, ctx -> new ResultSink() {
+            @Override
+            public void columns(List<ColumnSchema> cols) {
+                columns.add(cols);
+            }
+
+            @Override
+            public void row(Object[] row) {
+                if (rows != null) {
+                    ctx.reserve(ExecContext.estimateRow(row));
+                    rows.add(row);
+                }
+            }
+        });
+        return new QueryResult(columns.getFirst(), rows, count);
+    }
+
+    /**
+     * Executes one SQL statement under {@code control}, passing the result to {@code sink}
+     * incrementally (rows are passed even when {@code opts.countOnly()}); returns the row count.
+     */
+    public long stream(String sql, QueryOptions opts, QueryControl control, ResultSink sink) {
+        return execute(sql, opts, control, ctx -> sink);
+    }
+
+    /**
+     * lex → parse → analyze (against a catalog snapshot) → logical plan → optimize → physical
+     * plan → execute.
+     */
+    private long execute(String sql, QueryOptions opts, QueryControl control,
+                         Function<ExecContext, ResultSink> sinkFactory) {
+        control.check();
         Statement stmt = Parser.parse(sql);
+        ExecContext ctx = newContext(opts, control);
+        ResultSink sink = sinkFactory.apply(ctx);
         return switch (stmt) {
             case Statement.QueryStatement qs -> {
                 Function<LogicalPlan, PhysicalPlan> planner = planner(opts);
-                PhysicalPlan plan = planner.apply(analyze(qs.query()));
-                yield Executor.run(plan, newContext(opts), !opts.countOnly(), planner);
+                PhysicalPlan plan = planner.apply(analyze(qs.query(), catalog.snapshot()));
+                yield Executor.stream(plan, ctx, planner, sink);
             }
             case Statement.Explain e -> {
-                String text = JsonWriter.write(explainQuery(e.query(), opts));
+                String text = JsonWriter.write(explainQuery(e.query(), opts, catalog.snapshot()));
+                sink.columns(List.of(new ColumnSchema("plan", DataType.STRING)));
                 if (opts.maxRows() == 0) {
                     throw new PolyQueryException(ErrorCode.RESOURCE_LIMIT, "result exceeds max_rows (0)");
                 }
-                List<Object[]> rows = new ArrayList<>();
-                rows.add(new Object[] {text});
-                yield new QueryResult(List.of(new ColumnSchema("plan", DataType.STRING)),
-                        opts.countOnly() ? null : rows, 1);
+                sink.row(new Object[] {text});
+                yield 1;
             }
             case Statement.CreateIndex c -> {
                 catalog.createIndex(c.name(), c.ifNotExists(), c.table(), c.column(),
                         IndexKind.valueOf(c.kind().toUpperCase(Locale.ROOT)));
-                yield emptyResult(opts);
+                sink.columns(List.of());
+                yield 0;
             }
             case Statement.DropIndex d -> {
                 catalog.dropIndex(d.name(), d.ifExists());
-                yield emptyResult(opts);
+                sink.columns(List.of());
+                yield 0;
             }
         };
-    }
-
-    /** Result of a statement: no columns, no rows. */
-    private static QueryResult emptyResult(QueryOptions opts) {
-        return new QueryResult(List.of(), opts.countOnly() ? null : List.of(), 0);
     }
 
     /** The EXPLAIN plan tree of a query (or of the query of an EXPLAIN statement). */
     public Map<String, Object> explain(String sql, QueryOptions opts) {
         Statement stmt = Parser.parse(sql);
         return switch (stmt) {
-            case Statement.QueryStatement qs -> explainQuery(qs.query(), opts);
-            case Statement.Explain e -> explainQuery(e.query(), opts);
+            case Statement.QueryStatement qs -> explainQuery(qs.query(), opts, catalog.snapshot());
+            case Statement.Explain e -> explainQuery(e.query(), opts, catalog.snapshot());
             case Statement.CreateIndex c -> throw new PolyQueryException(ErrorCode.SEMANTIC_ERROR,
                     "only queries can be explained");
             case Statement.DropIndex d -> throw new PolyQueryException(ErrorCode.SEMANTIC_ERROR,
@@ -206,13 +245,14 @@ public final class Engine {
         };
     }
 
-    private Map<String, Object> explainQuery(Query query, QueryOptions opts) {
+    private Map<String, Object> explainQuery(Query query, QueryOptions opts, Catalog.Snapshot snapshot) {
         Function<LogicalPlan, PhysicalPlan> planner = planner(opts);
-        return new PlanExplainer(planner).explain(planner.apply(analyze(query)));
+        return new PlanExplainer(planner).explain(planner.apply(analyze(query, snapshot)));
     }
 
-    private LogicalPlan analyze(Query query) {
-        return new Analyzer(catalog, functions).analyze(query);
+    /** Name resolution sees exactly the table versions of {@code snapshot} (concurrency.md §1). */
+    private LogicalPlan analyze(Query query, Catalog.Snapshot snapshot) {
+        return new Analyzer(snapshot, functions).analyze(query);
     }
 
     /** Logical optimization (unless disabled) followed by physical planning; also used for subqueries. */
@@ -221,7 +261,7 @@ public final class Engine {
         return logical -> physical.plan(opts.optimize() ? LogicalOptimizer.optimize(logical) : logical);
     }
 
-    private ExecContext newContext(QueryOptions opts) {
-        return new ExecContext(opts.timeoutMs(), config.maxQueryMemoryBytes(), opts.maxRows(), config.maxJoinRows());
+    private ExecContext newContext(QueryOptions opts, QueryControl control) {
+        return new ExecContext(control, config.maxQueryMemoryBytes(), opts.maxRows(), config.maxJoinRows());
     }
 }
