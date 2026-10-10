@@ -35,7 +35,9 @@
                  (:file "binder")
                  (:file "query")))
    (:module "plan" :serial t
-    :components ((:file "planner")))
+    :components ((:file "logical")
+                 (:file "optimizer")
+                 (:file "physical")))
    (:module "exec" :serial t
     :components ((:file "expressions")
                  (:file "aggregates")
