@@ -1,6 +1,6 @@
 {
  "schema": "polyquery-project-state/1",
- "updated": "2026-10-10T19:03:25+00:00",
+ "updated": "2026-10-10T19:22:23+00:00",
  "current_milestone": "M3",
  "milestones": {
   "M0": {
@@ -35,8 +35,8 @@
    "status": "not_started"
   },
   "M8": {
-   "status": "in_progress",
-   "detail": "C17 reference + dispatch + tests done. arm64-asm a1 accepted and merged: scalar/NEON/SVE 16/16 natively on spark (incl. ASan/UBSan), SVE VL sweep 128-2048 under qemu, native bench pinned to X925. x86_64-asm a1 running."
+   "status": "complete",
+   "evidence": "C reference: unit + differential + ASan/UBSan. x86_64-asm a1 (scalar/avx2/avx512 16/16, native x86-64) and arm64-asm a1 (scalar/neon/sve 16/16 native on spark incl. ASan/UBSan; SVE VL 128-2048 under qemu). Runs: experiments/runs/a-kernels-*-a1-*. x86 bench numbers taken under concurrent agent load: re-run on a quiet host."
   },
   "M9": {
    "status": "not_started"
@@ -52,7 +52,8 @@
   "Resolve SPEC-Q-001 (INT64 vs DECIMAL comparison overflow) via change control after the current waves",
   "Run http_suite against first Phase 4 engine",
   "Native integration (M9), Track B, later experiment families",
-  "M9: kernel dispatch default should follow measured performance (on spark NEON beats SVE at VL=128 for 11/13 kernels)"
+  "M9: kernel dispatch default should follow measured performance (on spark NEON beats SVE at VL=128 for 11/13 kernels)",
+  "Re-run kernel benchmarks (x86 and spark) on quiet hosts for reporting"
  ],
  "known_defects": [
   "See experiments/telemetry/harness-incidents.jsonl (HI-001..003 fixed; SPEC-Q-001 open)"
@@ -72,7 +73,8 @@
    "go": "phase1 225/225 public, 249/249 incl. hidden",
    "clojure": "phase1 225/225 public, 249/249 incl. hidden"
   },
-  "kernels_arm64_native": "pass on spark (scalar, neon, sve; native + asan)"
+  "kernels_arm64_native": "pass on spark (scalar, neon, sve; native + asan)",
+  "kernels_x86_native": "pass (scalar, avx2, avx512)"
  },
  "last_successful_commit": "7f7295e",
  "next_recommended_action": "Wait for remaining phase1/kernels runs and phase2 (java/go/clojure); re-validate each finished phase1/kernels run with the current orchestrator, then import --merge and run `just test-language <lang>`."
