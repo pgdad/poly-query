@@ -43,6 +43,7 @@ var Capabilities = []string{
 	"phase1", "ingest.csv", "ingest.json", "ingest.jsonl", "sql.basic", "test.functions",
 	"phase2", "sql.groupby", "sql.join", "sql.functions", "sql.subquery", "sql.cte", "sql.correlated_subquery",
 	"phase3", "storage.pqcf", "storage.mmap", "index.hash", "index.btree",
+	"phase4", "http.streaming",
 }
 
 // Config holds engine-wide settings (CLI options).
@@ -198,6 +199,7 @@ type QueryOptions struct {
 	NoOptimize bool   // skip logical optimization (optimize: false)
 	NoIndexes  bool   // never use indexes (use_indexes: false)
 	Join       string // forced join algorithm ("", "auto", "hash", "nested_loop")
+	QueryID    string // client-assigned query id (HTTP cancellation)
 }
 
 // Result is a query result.
@@ -207,8 +209,55 @@ type Result struct {
 	RowCount int64
 }
 
-// Query parses, analyzes, plans and executes a SQL statement.
+// Query parses, analyzes, plans and executes a SQL statement and collects
+// its whole result.
 func (e *Engine) Query(ctx context.Context, sql string, opts QueryOptions) (*Result, error) {
+	cur, err := e.Start(ctx, sql, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close()
+	res := &Result{Columns: cur.Columns}
+	for {
+		row, err := cur.Next()
+		if err != nil {
+			return nil, err
+		}
+		if row == nil {
+			break
+		}
+		if !opts.CountOnly {
+			cp := append(types.Row(nil), row...)
+			if err := cur.ec.Mem.Reserve(exec.RowSize(cp)); err != nil {
+				return nil, err
+			}
+			res.Rows = append(res.Rows, cp)
+		}
+	}
+	res.RowCount = cur.RowCount()
+	return res, nil
+}
+
+// Cursor iterates over the result of a statement. The catalog snapshot the
+// statement reads is fixed when the cursor is created.
+type Cursor struct {
+	// Columns describes the result columns.
+	Columns []plan.Column
+
+	ctx     context.Context
+	cancel  context.CancelFunc
+	ec      *exec.Context
+	op      exec.Operator
+	rows    []types.Row // precomputed result (EXPLAIN, DDL statements)
+	maxRows int64
+	count   int64
+	done    bool
+}
+
+// Start parses, analyzes and plans a SQL statement and returns a cursor
+// over its result. Statements without a row result (CREATE/DROP INDEX) are
+// executed immediately. The caller must Close the cursor.
+func (e *Engine) Start(ctx context.Context, sql string, opts QueryOptions) (*Cursor, error) {
 	stmt, err := parser.Parse(sql)
 	if err != nil {
 		return nil, err
@@ -219,14 +268,14 @@ func (e *Engine) Query(ctx context.Context, sql string, opts QueryOptions) (*Res
 		if err != nil {
 			return nil, err
 		}
-		return e.execute(ctx, p, opts)
+		return e.open(ctx, p, opts)
 	case *ast.Explain:
 		p, err := e.plan(s.Query, opts)
 		if err != nil {
 			return nil, err
 		}
 		text := types.StringValue(physical.ExplainText(p))
-		return &Result{Columns: []plan.Column{{Name: "plan", Type: types.String}}, Rows: []types.Row{{text}}, RowCount: 1}, nil
+		return staticCursor([]plan.Column{{Name: "plan", Type: types.String}}, []types.Row{{text}}), nil
 	case *ast.CreateIndex:
 		kind := index.BTree
 		if s.Using == "HASH" {
@@ -236,14 +285,79 @@ func (e *Engine) Query(ctx context.Context, sql string, opts QueryOptions) (*Res
 		if err := e.catalog.CreateIndex(def, s.Table, s.IfNotExists); err != nil {
 			return nil, err
 		}
-		return &Result{Columns: []plan.Column{}, Rows: []types.Row{}}, nil
+		return staticCursor([]plan.Column{}, nil), nil
 	case *ast.DropIndex:
 		if err := e.catalog.DropIndex(s.Name, s.IfExists); err != nil {
 			return nil, err
 		}
-		return &Result{Columns: []plan.Column{}, Rows: []types.Row{}}, nil
+		return staticCursor([]plan.Column{}, nil), nil
 	}
 	return nil, unsupportedStatement(stmt)
+}
+
+func staticCursor(cols []plan.Column, rows []types.Row) *Cursor {
+	return &Cursor{Columns: cols, rows: rows, maxRows: -1, ctx: context.Background(), ec: &exec.Context{}}
+}
+
+// open builds the operator tree of a physical plan.
+func (e *Engine) open(ctx context.Context, p *physical.Plan, opts QueryOptions) (*Cursor, error) {
+	cancel := context.CancelFunc(func() {})
+	if opts.Timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
+	}
+	ec := &exec.Context{
+		Ctx:         ctx,
+		Mem:         &exec.MemTracker{Limit: e.cfg.MaxQueryMemoryMB << 20},
+		MaxJoinRows: e.cfg.MaxJoinRows,
+		Plan:        p,
+	}
+	op, err := exec.Build(ec, p.Root)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	return &Cursor{Columns: p.Root.Schema(), ctx: ctx, cancel: cancel, ec: ec, op: op, maxRows: opts.MaxRows}, nil
+}
+
+// Next returns the next result row, or nil at the end. The row is only
+// valid until the next call. Exceeding max_rows is RESOURCE_LIMIT.
+func (c *Cursor) Next() (types.Row, error) {
+	if c.done {
+		return nil, nil
+	}
+	var row types.Row
+	if c.op != nil {
+		var err error
+		if row, err = c.op.Next(); err != nil {
+			c.done = true
+			return nil, err
+		}
+	} else if c.count < int64(len(c.rows)) {
+		row = c.rows[c.count]
+	}
+	if row == nil {
+		c.done = true
+		if err := c.ctx.Err(); err != nil {
+			return nil, exec.ContextError(err)
+		}
+		return nil, nil
+	}
+	c.count++
+	if c.maxRows >= 0 && c.count > c.maxRows {
+		c.done = true
+		return nil, errs.New(errs.ResourceLimit, "result exceeds max_rows (%d)", c.maxRows)
+	}
+	return row, nil
+}
+
+// RowCount returns the number of rows returned so far.
+func (c *Cursor) RowCount() int64 { return c.count }
+
+// Close releases the cursor's resources.
+func (c *Cursor) Close() {
+	if c.cancel != nil {
+		c.cancel()
+	}
 }
 
 // Explain plans a query and returns its EXPLAIN plan tree.
@@ -293,50 +407,6 @@ func (e *Engine) plan(q *ast.Query, opts QueryOptions) (*physical.Plan, error) {
 		Indexes:    snap.IndexesOf,
 		EvalConst:  exec.EvalConstant,
 	})
-}
-
-// execute runs a physical plan and collects its result.
-func (e *Engine) execute(ctx context.Context, p *physical.Plan, opts QueryOptions) (*Result, error) {
-	if opts.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
-		defer cancel()
-	}
-	ec := &exec.Context{
-		Ctx:         ctx,
-		Mem:         &exec.MemTracker{Limit: e.cfg.MaxQueryMemoryMB << 20},
-		MaxJoinRows: e.cfg.MaxJoinRows,
-		Plan:        p,
-	}
-	op, err := exec.Build(ec, p.Root)
-	if err != nil {
-		return nil, err
-	}
-	res := &Result{Columns: p.Root.Schema()}
-	for {
-		row, err := op.Next()
-		if err != nil {
-			return nil, err
-		}
-		if row == nil {
-			break
-		}
-		res.RowCount++
-		if opts.MaxRows >= 0 && res.RowCount > opts.MaxRows {
-			return nil, errs.New(errs.ResourceLimit, "result exceeds max_rows (%d)", opts.MaxRows)
-		}
-		if !opts.CountOnly {
-			cp := append(types.Row(nil), row...)
-			if err := ec.Mem.Reserve(exec.RowSize(cp)); err != nil {
-				return nil, err
-			}
-			res.Rows = append(res.Rows, cp)
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, exec.ContextError(err)
-	}
-	return res, nil
 }
 
 // ---------------------------------------------------------------- storage

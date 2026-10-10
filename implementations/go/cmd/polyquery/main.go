@@ -6,12 +6,16 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"polyquery/internal/engine"
 	"polyquery/internal/protocol"
+	"polyquery/internal/server"
 )
 
 const usage = `usage: polyquery (version | capabilities | session | exec | serve) [options]
@@ -27,10 +31,21 @@ options:
   --log-level LEVEL           debug, info, warn, error, off (default info)
   --native-kernels PATH       native kernel library (unused)
   --request FILE|-            exec mode: request file, or - for stdin
+
+serve options:
+  --host HOST                 listen address (default 127.0.0.1)
+  --port N                    listen port, 0 = any free port (required)
+  --workers N                 max concurrently executing queries (default: CPU count)
+  --queue-depth N             max queries waiting for a worker (default 64)
+  --query-timeout-ms N        default query timeout, 0 = none (default 0)
+  --shutdown-grace-ms N       grace period for running queries on shutdown (default 10000)
+  --max-request-bytes N       max HTTP request body size (default 1 GiB)
 `
 
 type options struct {
 	cfg     engine.Config
+	serve   server.Config
+	hasPort bool
 	request string
 	level   string
 }
@@ -42,9 +57,13 @@ func usageError(format string, args ...any) {
 }
 
 func parseArgs(mode string, args []string) options {
-	o := options{cfg: engine.DefaultConfig(), level: "info"}
-	serveOnly := map[string]bool{"--host": true, "--port": true, "--workers": true, "--queue-depth": true,
-		"--query-timeout-ms": true, "--shutdown-grace-ms": true, "--max-request-bytes": true}
+	o := options{cfg: engine.DefaultConfig(), level: "info", serve: server.Config{
+		Host:            "127.0.0.1",
+		Workers:         runtime.NumCPU(),
+		QueueDepth:      64,
+		ShutdownGrace:   10 * time.Second,
+		MaxRequestBytes: 1 << 30,
+	}}
 	for i := 0; i < len(args); i++ {
 		name, value, hasValue := strings.Cut(args[i], "=")
 		next := func() string {
@@ -98,14 +117,41 @@ func parseArgs(mode string, args []string) options {
 			}
 			o.request = next()
 		default:
-			if mode == "serve" && serveOnly[name] {
-				next()
-				continue
+			if mode != "serve" {
+				usageError("unknown option %q", args[i])
 			}
-			usageError("unknown option %q", args[i])
+			parseServeOption(&o, name, next, number)
 		}
 	}
 	return o
+}
+
+// parseServeOption handles the options only valid in serve mode.
+func parseServeOption(o *options, name string, next func() string, number func() int64) {
+	switch name {
+	case "--host":
+		o.serve.Host = next()
+	case "--port":
+		n := number()
+		if n > 65535 {
+			usageError("invalid port %d", n)
+		}
+		o.serve.Port, o.hasPort = int(n), true
+	case "--workers":
+		if o.serve.Workers = int(number()); o.serve.Workers < 1 {
+			usageError("--workers must be at least 1")
+		}
+	case "--queue-depth":
+		o.serve.QueueDepth = int(number())
+	case "--query-timeout-ms":
+		o.serve.QueryTimeout = time.Duration(number()) * time.Millisecond
+	case "--shutdown-grace-ms":
+		o.serve.ShutdownGrace = time.Duration(number()) * time.Millisecond
+	case "--max-request-bytes":
+		o.serve.MaxRequestBytes = number()
+	default:
+		usageError("unknown option %q", name)
+	}
 }
 
 func logger(level string, w io.Writer) *slog.Logger {
@@ -181,7 +227,32 @@ func main() {
 			os.Exit(1)
 		}
 	case "serve":
-		fmt.Fprintln(os.Stderr, "polyquery: serve mode (HTTP, Phase 4) is not implemented yet")
-		os.Exit(1)
+		if !o.hasPort {
+			usageError("serve mode requires --port N")
+		}
+		if err := serve(o); err != nil {
+			o.cfg.Logger.Error("server failed", "error", err.Error())
+			os.Exit(1)
+		}
 	}
+}
+
+// serve runs the HTTP server until SIGTERM or SIGINT.
+func serve(o options) error {
+	srv := server.New(engine.New(o.cfg), o.serve)
+	ln, err := srv.Listen()
+	if err != nil {
+		return err
+	}
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	stop := make(chan struct{})
+	go func() {
+		<-signals
+		close(stop)
+	}()
+	if _, err := os.Stdout.Write(append(server.ListeningEvent(o.serve.Host, ln), '\n')); err != nil {
+		return err
+	}
+	return srv.Serve(ln, stop)
 }

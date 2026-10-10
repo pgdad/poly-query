@@ -15,6 +15,7 @@ import (
 
 	"polyquery/internal/engine"
 	"polyquery/internal/errs"
+	"polyquery/internal/exec"
 	"polyquery/internal/ingest"
 	"polyquery/internal/storage"
 	"polyquery/internal/types"
@@ -37,12 +38,14 @@ type request struct {
 	fields map[string]json.RawMessage
 }
 
-// HandleLine executes one request given as JSON text and returns the
-// single-line JSON response (without trailing newline).
-func (h *Handler) HandleLine(line []byte) []byte {
+// Request is a decoded protocol request (protocol.md §4).
+type Request = request
+
+// DecodeRequest decodes a request object given as JSON text.
+func DecodeRequest(line []byte) (*Request, *errs.Error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(line, &fields); err != nil || fields == nil {
-		return errorResponse(nil, errs.New(errs.InvalidRequest, "request is not a JSON object"))
+		return nil, errs.New(errs.InvalidRequest, "request is not a JSON object")
 	}
 	req := &request{id: []byte("null"), fields: fields}
 	if raw, ok := fields["id"]; ok {
@@ -51,29 +54,88 @@ func (h *Handler) HandleLine(line []byte) []byte {
 			req.id = buf.Bytes()
 		}
 	}
-	return h.handle(req)
+	return req, nil
 }
 
-func (h *Handler) handle(req *request) (resp []byte) {
-	start := time.Now()
-	op, _ := req.str("op")
-	defer func() {
-		if r := recover(); r != nil {
-			h.log.Error("internal error", "op", op, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
-			resp = errorResponse(req.id, errs.New(errs.InternalError, "internal error: %v", r))
-		}
-	}()
-	resp, err := h.dispatch(req)
-	if err != nil {
-		e := errs.From(err)
-		h.log.Debug("request failed", "op", op, "code", string(e.Code), "duration_ms", time.Since(start).Milliseconds())
-		return errorResponse(req.id, e)
+// NewRequest creates a request for op with the given string fields.
+func NewRequest(op string, fields map[string]string) *Request {
+	req := &request{id: []byte("null"), fields: map[string]json.RawMessage{}}
+	for k, v := range fields {
+		req.Set(k, v)
 	}
-	h.log.Debug("request done", "op", op, "duration_ms", time.Since(start).Milliseconds())
+	req.Set("op", op)
+	return req
+}
+
+// Set sets a field of the request to a JSON-encoded value.
+func (r *request) Set(name string, v any) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	r.fields[name] = raw
+}
+
+// ID returns the request's id as JSON text.
+func (r *request) ID() []byte { return r.id }
+
+// Op returns the request's operation (empty if missing or not a string).
+func (r *request) Op() string {
+	op, _ := r.str("op")
+	return op
+}
+
+// HandleLine executes one request given as JSON text and returns the
+// single-line JSON response (without trailing newline).
+func (h *Handler) HandleLine(line []byte) []byte {
+	req, e := DecodeRequest(line)
+	if e != nil {
+		return ErrorResponse(nil, e)
+	}
+	resp, _ := h.Execute(context.Background(), req)
 	return resp
 }
 
-func (h *Handler) dispatch(req *request) ([]byte, error) {
+// Execute runs a request and returns its single-line JSON response. If the
+// request failed, the error is returned as well (the response then is the
+// matching error response). ctx cancels long-running operations.
+func (h *Handler) Execute(ctx context.Context, req *Request) ([]byte, *errs.Error) {
+	return h.guard(req, func() ([]byte, error) { return h.dispatch(ctx, req) })
+}
+
+// RunQuery executes a "query" request like Execute and also returns the
+// number of result rows.
+func (h *Handler) RunQuery(ctx context.Context, req *Request) (resp []byte, rows int64, failure *errs.Error) {
+	resp, failure = h.guard(req, func() ([]byte, error) {
+		var err error
+		resp, rows, err = h.query(ctx, req)
+		return resp, err
+	})
+	return resp, rows, failure
+}
+
+// guard runs fn, converting errors and panics into error responses.
+func (h *Handler) guard(req *Request, fn func() ([]byte, error)) (resp []byte, failure *errs.Error) {
+	start := time.Now()
+	op := req.Op()
+	defer func() {
+		if r := recover(); r != nil {
+			h.log.Error("internal error", "op", op, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			failure = errs.New(errs.InternalError, "internal error: %v", r)
+			resp = ErrorResponse(req.id, failure)
+		}
+	}()
+	resp, err := fn()
+	if err != nil {
+		e := errs.From(err)
+		h.log.Debug("request failed", "op", op, "code", string(e.Code), "duration_ms", time.Since(start).Milliseconds())
+		return ErrorResponse(req.id, e), e
+	}
+	h.log.Debug("request done", "op", op, "duration_ms", time.Since(start).Milliseconds())
+	return resp, nil
+}
+
+func (h *Handler) dispatch(ctx context.Context, req *request) ([]byte, error) {
 	op, err := req.requiredStr("op")
 	if err != nil {
 		return nil, err
@@ -106,9 +168,10 @@ func (h *Handler) dispatch(req *request) ([]byte, error) {
 	case "load":
 		return h.load(req)
 	case "query":
-		return h.query(req)
+		resp, _, err := h.query(ctx, req)
+		return resp, err
 	case "sleep":
-		return h.sleep(req)
+		return h.sleep(ctx, req)
 	case "explain":
 		return h.explain(req)
 	case "save":
@@ -200,17 +263,7 @@ func finish(w *writer) []byte {
 	return w.b
 }
 
-func errorResponse(id []byte, e *errs.Error) []byte {
-	if id == nil {
-		id = []byte("null")
-	}
-	w := &writer{}
-	w.beginObject()
-	w.key("id")
-	w.raw(id)
-	w.key("ok")
-	w.bool(false)
-	w.key("error")
+func writeError(w *writer, e *errs.Error) {
 	w.beginObject()
 	w.key("code")
 	w.str(string(e.Code))
@@ -221,6 +274,22 @@ func errorResponse(id []byte, e *errs.Error) []byte {
 		w.any(e.Details)
 	}
 	w.endObject()
+}
+
+// ErrorResponse renders an error response with the given request id
+// (JSON text; nil means null).
+func ErrorResponse(id []byte, e *errs.Error) []byte {
+	if id == nil {
+		id = []byte("null")
+	}
+	w := &writer{}
+	w.beginObject()
+	w.key("id")
+	w.raw(id)
+	w.key("ok")
+	w.bool(false)
+	w.key("error")
+	writeError(w, e)
 	w.endObject()
 	return w.b
 }
@@ -469,44 +538,26 @@ func decodeSchema(raw json.RawMessage) ([]storage.ColumnDef, error) {
 
 // ---------------------------------------------------------------- query
 
-func (h *Handler) query(req *request) ([]byte, error) {
+func (h *Handler) query(ctx context.Context, req *request) ([]byte, int64, error) {
 	sql, err := req.requiredStr("sql")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	qo, err := parseQueryOptions(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	start := time.Now()
-	res, err := h.eng.Query(context.Background(), sql, qo)
+	res, err := h.eng.Query(ctx, sql, qo)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	elapsed := time.Since(start)
 	w := req.ok()
-	w.key("columns")
-	w.beginArray()
-	for _, c := range res.Columns {
-		w.beginObject()
-		w.key("name")
-		w.str(c.Name)
-		w.key("type")
-		w.str(c.Type.ResultName())
-		w.endObject()
-	}
-	w.endArray()
+	writeResultColumns(w, res.Columns)
 	if !qo.CountOnly {
 		w.key("rows")
-		w.beginArray()
-		for _, row := range res.Rows {
-			w.beginArray()
-			for i, v := range row {
-				w.value(v, res.Columns[i].Type)
-			}
-			w.endArray()
-		}
-		w.endArray()
+		writeRows(w, res.Rows, res.Columns)
 	}
 	w.key("row_count")
 	w.int(res.RowCount)
@@ -515,7 +566,7 @@ func (h *Handler) query(req *request) ([]byte, error) {
 	w.key("elapsed_us")
 	w.int(elapsed.Microseconds())
 	w.endObject()
-	return finish(w), nil
+	return finish(w), res.RowCount, nil
 }
 
 func (h *Handler) explain(req *request) ([]byte, error) {
@@ -539,6 +590,11 @@ func (h *Handler) explain(req *request) ([]byte, error) {
 	w.key("plan")
 	w.raw(text)
 	return finish(w), nil
+}
+
+// ParseQueryOptions validates the "options" object of a query request.
+func ParseQueryOptions(req *Request) (engine.QueryOptions, error) {
+	return parseQueryOptions(req)
 }
 
 func parseQueryOptions(req *request) (engine.QueryOptions, error) {
@@ -617,6 +673,7 @@ func parseQueryOptions(req *request) (engine.QueryOptions, error) {
 			if json.Unmarshal(raw, &s) != nil || len(raw) == 0 || raw[0] != '"' {
 				return qo, invalid("option \"query_id\" must be a string")
 			}
+			qo.QueryID = s
 		}
 	}
 	return qo, nil
@@ -624,7 +681,7 @@ func parseQueryOptions(req *request) (engine.QueryOptions, error) {
 
 // ---------------------------------------------------------------- sleep
 
-func (h *Handler) sleep(req *request) ([]byte, error) {
+func (h *Handler) sleep(ctx context.Context, req *request) ([]byte, error) {
 	if !h.eng.Config().TestFunctions {
 		return nil, invalid("the sleep operation requires --enable-test-functions")
 	}
@@ -636,7 +693,13 @@ func (h *Handler) sleep(req *request) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	time.Sleep(time.Duration(ms) * time.Millisecond)
+	timer := time.NewTimer(time.Duration(ms) * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		return nil, exec.ContextError(ctx.Err())
+	}
 	return finish(req.ok()), nil
 }
 
@@ -757,4 +820,56 @@ func (h *Handler) stats(req *request) ([]byte, error) {
 	}
 	w.endArray()
 	return finish(w), nil
+}
+
+// ---------------------------------------------------------------- raw loads
+
+// RawLoad describes a load whose data is a raw HTTP request body.
+type RawLoad struct {
+	Table     string
+	Format    string
+	Data      []byte
+	Replace   bool
+	Header    bool
+	Delimiter string // empty = default
+	Schema    string // optional JSON schema array (as in the load op)
+}
+
+// LoadRaw loads raw data as a table (HTTP PUT /v1/tables/{name}) and
+// returns the load response.
+func (h *Handler) LoadRaw(rl RawLoad) ([]byte, *errs.Error) {
+	req := NewRequest("load", map[string]string{"table": rl.Table})
+	return h.guard(req, func() ([]byte, error) {
+		if rl.Table == "" {
+			return nil, invalid("table name must not be empty")
+		}
+		f := ingest.Format(rl.Format)
+		if f != ingest.CSV && f != ingest.JSON && f != ingest.JSONL {
+			return nil, invalid("unknown format %q", rl.Format)
+		}
+		data := string(rl.Data)
+		lr := engine.LoadRequest{Table: rl.Table, Options: ingest.DefaultOptions(f), Data: &data, Replace: rl.Replace}
+		lr.Options.Header = rl.Header
+		if rl.Delimiter != "" {
+			d := rl.Delimiter
+			if len(d) != 1 || d[0] >= 0x80 || d[0] == '"' || d[0] == '\n' || d[0] == '\r' {
+				return nil, invalid("delimiter must be a single ASCII character")
+			}
+			lr.Options.Delimiter = d[0]
+		}
+		if rl.Schema != "" {
+			var err error
+			if lr.Options.Schema, err = decodeSchema(json.RawMessage(rl.Schema)); err != nil {
+				return nil, err
+			}
+		}
+		if f == ingest.CSV && !lr.Options.Header && lr.Options.Schema == nil {
+			return nil, invalid("header=false requires an explicit schema")
+		}
+		t, err := h.eng.Load(lr)
+		if err != nil {
+			return nil, err
+		}
+		return tableResponse(req, t), nil
+	})
 }
