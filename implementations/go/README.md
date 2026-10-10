@@ -415,6 +415,96 @@ mode × join × threads × optimize combination with the row-mode baseline;
 `internal/engine/modes_test.go` does the same for fixed queries; the race
 detector runs over the unit tests and the conformance suite.
 
+### Performance measurements
+
+Measured on the generated `1m` datasets (`python3
+datasets/generators/pqgen.py generate --scale 1m --out /tmp/pqdata --jobs 1`:
+1M transactions, sensor readings, order items and sort keys; 250k orders;
+100k customers) on an AMD Ryzen 9 9950X3D (16 cores / 32 threads, AVX-512)
+with `scripts/bench.py` (session protocol, column layout, `result:
+"count"`, median of 5 runs, client-side milliseconds incl. the protocol
+round trip; queries are listed in the script). *Before* is the Phase 4
+engine (commit `606b0d1`, row-at-a-time, serial); `row1` is today's row mode
+(the retained baseline), `vecN` vectorized execution with N threads.
+
+| query | before | row1 | row8 | vec1 | vec4 | vec8 | before → vec8 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| filter_count (scan, 2 predicates) | 85 | 60 | 12 | 2 | 1 | <1 | >85× |
+| agg_lowcard (GROUP BY category, 5 aggregates) | 111 | 108 | 22 | 7 | 2 | 1 | 111× |
+| agg_highcard (GROUP BY customer_id, 100k groups) | 95 | 91 | 78 | 20 | 16 | 13 | 7× |
+| agg_expr (GROUP BY bucket % 10, arithmetic) | 172 | 139 | 28 | 13 | 4 | 2 | 86× |
+| sensor_agg (filter + GROUP BY, FLOAT64) | 144 | 119 | 22 | 8 | 3 | 2 | 72× |
+| items_sum (SUM(quantity * unit_price)) | 109 | 95 | 16 | 26 | 7 | 4 | 27× |
+| join_agg (1M ⋈ 100k, GROUP BY) | 159 | 120 | 49 | 26 | 9 | 6 | 26× |
+| join_big (1M ⋈ 250k, GROUP BY) | 168 | 148 | 88 | 22 | 11 | 9 | 19× |
+| join_filter (250k ⋈ 100k, filters) | 21 | 20 | 9 | 1 | 1 | 1 | 21× |
+| topn (ORDER BY … LIMIT 10) | 38 | 40 | 20 | 11 | 3 | 2 | 19× |
+| sort_full (1M rows by string, int) | 1077 | ~1000 | ~980 | 204 | 101 | 89 | 12× |
+| distinct (DISTINCT merchant_id) | 43 | 44 | 30 | 6 | 3 | 3 | 14× |
+| const_fold (constant expressions in WHERE) | 140 | 63 | 16 | 3 | 1 | 1 | 140× |
+| join3_reorder (3-way comma join, bad FROM order) | RESOURCE_LIMIT¹ | 66 | 29 | 10 | 4 | 4 | — |
+
+¹ The Phase 4 engine joins the first two FROM items (1M × 100k, no join
+condition between them) as a cross product and exceeds `--max-join-rows`.
+
+Where the gains come from:
+
+* **Vectorization** (`row1` → `vec1`): 3.6–30× — typed column loops instead of
+  per-row interface calls and `Value` boxing, zero-copy scans, dictionary
+  codes for string predicates and grouping, batch-resolved group IDs. The
+  smallest gains are top-N (3.6×, dominated by heap maintenance) and
+  items_sum (3.7×: DECIMAL multiplication checks every product for 18-digit
+  overflow).
+* **Parallelism** (`vec1` → `vec8`): 4–7× for scans, filters,
+  low-cardinality aggregation, join_agg and top-N; 2–2.5× for join_big,
+  DISTINCT and the full sort (parallel runs + merge); 1.5× for 100k-group
+  aggregation, where every worker sees most groups and the partial tables
+  must be merged. Row mode profits from the same pipelines (`row1` → `row8`,
+  up to 6×).
+* **Logical optimizer** (`optimize: true` vs `false`, same engine):
+
+  | query | row1 | row1, optimize off | vec1 | vec1, optimize off |
+  |---|---:|---:|---:|---:|
+  | join_filter (pushdown below the join) | 21 | 47 | 1 | 6 |
+  | join_small (filter below the join: 2,000 instead of 250k probe rows) | 7 | 48 | 1 | 4 |
+  | const_fold (folding, `1 = 1` removed) | 60 | 131 | 3 | 4 |
+  | join3_reorder (pushdown + join reordering) | 82 | RESOURCE_LIMIT | 12 | RESOURCE_LIMIT |
+
+  Folding matters most in row mode, where every constant subexpression was
+  re-evaluated per row; vectorized execution already evaluates constant
+  subtrees once per query.
+* **Join algorithms** (`join` option, ms):
+
+  | query | vec1 hash | vec1 merge | vec1 nested loop | row1 hash | row1 merge |
+  |---|---:|---:|---:|---:|---:|
+  | join_small (2,000 ⋈ 100k) | 1 | 6 | 9,960 | 7 | 10 |
+  | join_filter (filtered 250k ⋈ 100k) | 1 | 8 | 30,477 | 21 | 24 |
+  | join_agg (1M ⋈ 100k) | 28 | 374 | timeout (60 s) | 171 | 412 |
+  | join_big (1M ⋈ 250k) | 22 | 122 | timeout (60 s) | 203 | 136 |
+
+  The vectorized hash join (flat bucket arrays, batch probing) is 6–20×
+  faster than the row-mode hash join; sort-merge pays for materializing and
+  sorting both inputs; nested loops are quadratic.
+* **Explicit SIMD** (`go test ./internal/exec -bench Kernel`, ns per
+  2,048-value vector, portable loop → AVX2 kernel): INT64 compare with a
+  constant 549 → 285 (1.9×), FLOAT64 compare 734 → 237 (3.1×), FLOAT64
+  multiply incl. finiteness check 1,800 → 1,380 (1.3×). End to end the
+  difference is within measurement noise (filter_count 1.9–2.1 ms either
+  way): after vectorization these kernels are a small part of query time.
+* **Memory**: reusing operator-owned vectors avoids per-batch allocation;
+  slab allocation of group keys and materialized rows, batched memory
+  reservations (one atomic update per 64 KiB instead of per group — the
+  shared counter was 16% of the CPU profile of parallel 100k-group
+  aggregation), and counting `result: "count"` results batch-wise (sort_full
+  spent 48 ms per query converting 1M rows only to count them) are
+  measurable in the profiles.
+
+Reproduce with `python3 implementations/go/scripts/bench.py --data
+/tmp/pqdata/1m --configs row1,row8,vec1,vec4,vec8` (`--engine` selects
+another binary, e.g. a build of the baseline commit), or with Go benchmarks:
+`POLYQUERY_BENCH_DATA=/tmp/pqdata/1m go test ./internal/engine -run - -bench
+Queries`.
+
 ## Decisions on points the spec leaves open
 
 * **INT64 ↔ DECIMAL comparison** follows types.md §2 literally: the INT64 side
