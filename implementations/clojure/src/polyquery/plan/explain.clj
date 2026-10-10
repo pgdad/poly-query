@@ -22,6 +22,7 @@
   [node]
   (case (:op node)
     :filter [(:predicate node)]
+    :lookup-scan (concat (map :expr (:keys node)) (map :probe (:keys node)) [(:residual node)])
     :hash-join (concat (map :expr (:left-keys node)) (map :expr (:right-keys node)) [(:residual node)])
     :nested-loop-join [(:condition node)]
     :hash-aggregate (concat (:group-keys node) (keep :arg (:aggregates node)))
@@ -36,6 +37,10 @@
     :table-scan {"op" "TableScan" "table" (:name (:table node)) "alias" (:alias node)
                  "columns" (mapv #(:name (nth (:columns (:table node)) %)) (:columns node))}
     :subquery-scan {"op" "SubqueryScan" "alias" (:alias node)}
+    :lookup-scan (cond-> {"op" "HashLookup"
+                          "keys" (mapv (fn [k] (str (b/->sql (:expr k)) " = " (b/->sql (:probe k))))
+                                       (:keys node))}
+                   (:residual node) (assoc "residual" (b/->sql (:residual node))))
     :filter {"op" "Filter" "predicate" (b/->sql (:predicate node))}
     :hash-join (cond-> {"op" "HashJoin" "join_type" (join-type (:join-type node))
                         "build" "right"
@@ -59,6 +64,7 @@
 
 (defn- children [node]
   (case (:op node)
+    :lookup-scan [(assoc node :op :table-scan)]
     (:hash-join :nested-loop-join) [(:left node) (:right node)]
     (if (:input node) [(:input node)] [])))
 
@@ -67,5 +73,5 @@
   (let [subs (subplans (node-exprs node))]
     (cond-> (assoc (props node) "children" (mapv plan->json (children node)))
       (seq subs) (assoc "subqueries" subs)
-      (:columns node) (assoc "output" (mapv (fn [c] (str (:name c) " " (t/type-name (:type c))))
+      (and (:columns node) (not= :table-scan (:op node))) (assoc "output" (mapv (fn [c] (str (:name c) " " (t/type-name (:type c))))
                                             (filter map? (:columns node)))))))

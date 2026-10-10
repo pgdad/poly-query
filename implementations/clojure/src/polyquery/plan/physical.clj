@@ -9,6 +9,11 @@
     {:op :table-scan :table T :alias a :columns [i …]}
     {:op :subquery-scan :alias a :input P}
     {:op :filter :input P :predicate e}
+    {:op :lookup-scan :table T :alias a :columns [i …] :keys [{:expr e :probe e :cmp-type T}]
+     :residual e|nil}
+        ; scan restricted to rows whose key expressions equal the probe
+        ; expressions, which depend only on enclosing queries' rows
+        ; (correlated subqueries): executed through a hash table built once
     {:op :hash-join :join-type :inner|:left :left P :right P
      :left-keys [k …] :right-keys [k …] :residual e|nil :left-width n :right-width n}
         ; k = {:expr e :cmp-type T}; right key expressions are over the right row
@@ -58,6 +63,32 @@
         [:right :left] (key right left)
         nil))))
 
+(defn- correlated-key
+  "For a conjunct `x = y` where x references only the scanned row and y only
+  enclosing queries' rows, returns the lookup key, else nil."
+  [e]
+  (when (and (= :compare (:node e)) (= "=" (:op e))
+             (not= :null (:cmp-type e))
+             (not-any? #(= :subquery (:node %)) (b/nodes e)))
+    (let [inner? #(and (seq (b/column-indices %)) (not-any? (comp #{:outer-column} :node) (b/nodes %)))
+          outer? #(and (empty? (b/column-indices %)) (some (comp #{:outer-column} :node) (b/nodes %)))
+          {:keys [left right cmp-type]} e]
+      (cond
+        (and (inner? left) (outer? right)) {:expr left :probe right :cmp-type cmp-type}
+        (and (inner? right) (outer? left)) {:expr right :probe left :cmp-type cmp-type}))))
+
+(defn- plan-filter
+  [{:keys [input predicate]} options phys]
+  (let [conjuncts (b/conjuncts (plan-expr options predicate))
+        keyed (when (= :scan (:op input))
+                (keep #(when-let [k (correlated-key %)] [% k]) conjuncts))]
+    (if (seq keyed)
+      (let [keyed-set (set (map first keyed))]
+        {:op :lookup-scan :table (:table input) :alias (:alias input) :columns (:columns input)
+         :keys (mapv second keyed)
+         :residual (b/conjoin (remove keyed-set conjuncts))})
+      {:op :filter :input (phys input) :predicate (b/conjoin conjuncts)})))
+
 (defn- plan-join
   [{:keys [kind left right condition]} options phys]
   (let [l (phys left)
@@ -83,7 +114,7 @@
       :scan {:op :table-scan :table (:table node) :alias (:alias node) :columns (:columns node)}
       :derived {:op :subquery-scan :alias (:alias node) :input (phys (:input node))}
       :join (plan-join node options phys)
-      :filter {:op :filter :input (phys (:input node)) :predicate (px (:predicate node))}
+      :filter (plan-filter node options phys)
       :aggregate {:op :hash-aggregate :input (phys (:input node))
                   :group-keys (mapv px (:group-keys node))
                   :aggregates (mapv #(if (:arg %) (update % :arg px) %) (:aggregates node))}

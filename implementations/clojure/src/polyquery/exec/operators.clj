@@ -82,6 +82,60 @@
                  (aset row c (aget ^objects (aget cols c) r)))
                (recur (inc r) (f acc row))))))))))
 
+(defn- scan-rows
+  "Materializes the selected columns of a table as row arrays."
+  ^ArrayList [table columns]
+  (let [^objects cols (into-array Object (map #(nth (:data table) %) columns))
+        ncols (alength cols)
+        n (long (:row-count table))
+        out (ArrayList. n)]
+    (dotimes [r n]
+      (let [row (object-array ncols)]
+        (dotimes [c ncols]
+          (aset row c (aget ^objects (aget cols c) r)))
+        (.add out row)))
+    out))
+
+(defmethod build :lookup-scan [plan env]
+  ;; The probe expressions only read enclosing queries' rows (correlation
+  ;; cells), so the hash table over the scanned rows is built once and
+  ;; probed on every reduce.
+  (let [keys (:keys plan)
+        key-of (fn [fs]
+                 (let [fs (vec fs)]
+                   (fn [row]
+                     (loop [i 0 acc (transient [])]
+                       (if (< i (count fs))
+                         (when-some [x ((nth fs i) row)]
+                           (recur (inc i) (conj! acc x)))
+                         (persistent! acc))))))
+        inner-key (key-of (map (fn [{e :expr ct :cmp-type}]
+                                 (let [f (expr/compile-expr env e) k (v/key-fn (:type e) ct)]
+                                   #(some-> (f %) k)))
+                               keys))
+        probe-key (key-of (map (fn [{e :probe ct :cmp-type}]
+                                 (let [f (expr/compile-expr env e) k (v/key-fn (:type e) ct)]
+                                   #(some-> (f %) k)))
+                               keys))
+        residual (if-let [r (:residual plan)] (expr/compile-predicate env r) (constantly true))
+        table (delay
+                (let [m (HashMap.)
+                      rows (scan-rows (:table plan) (:columns plan))]
+                  (ctx/reserve! (:ctx env) (* (.size rows) (ctx/row-bytes (count (:columns plan)))))
+                  (doseq [row rows]
+                    (when-let [k (inner-key row)]
+                      (let [^ArrayList b (or (.get m k) (let [b (ArrayList.)] (.put m k b) b))]
+                        (.add b row))))
+                  m))
+        empty-row (object-array 0)]
+    (reducible
+     (fn [f init]
+       (let [k (probe-key empty-row)
+             bucket (when k (.get ^HashMap @table k))]
+         (if bucket
+           (reduce-list bucket (fn [acc row] (if (residual row) (f acc row) acc)) init)
+           init))))))
+
 (defmethod build :subquery-scan [plan env]
   (build (:input plan) env))
 
