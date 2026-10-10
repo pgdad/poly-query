@@ -22,9 +22,23 @@ from .serialize import serialize_rows
 
 log = logging.getLogger("polyquery")
 
-CAPABILITIES = ["phase1", "ingest.csv", "ingest.json", "ingest.jsonl", "sql.basic", "test.functions"]
+CAPABILITIES = [
+    "phase1",
+    "ingest.csv",
+    "ingest.json",
+    "ingest.jsonl",
+    "sql.basic",
+    "test.functions",
+    "phase2",
+    "sql.groupby",
+    "sql.join",
+    "sql.functions",
+    "sql.subquery",
+    "sql.cte",
+    "sql.correlated_subquery",
+]
 
-_LATER_PHASE_OPS = frozenset({"explain", "save", "open", "stats"})
+_LATER_PHASE_OPS = frozenset({"save", "open", "stats"})
 
 
 def version_info() -> dict[str, Any]:
@@ -244,7 +258,7 @@ class RequestHandler:
         table = self.engine.load(name, fmt, text, schema, options, replace)
         return {"table": table.name, "row_count": table.row_count, "columns": table.schema_json()}
 
-    def op_query(self, req: dict) -> dict[str, Any]:
+    def _query_request(self, req: dict) -> tuple[str, QueryOptions, bool]:
         sql = req.get("sql")
         if not isinstance(sql, str):
             raise errors.invalid_request("field 'sql' must be a string")
@@ -254,6 +268,16 @@ class RequestHandler:
             timeout_ms=_optional_nonneg_int(raw, "timeout_ms") or 0,
         )
         count_only = self._validate_query_options(raw)
+        options.optimize = _optional_bool(raw, "optimize", True)
+        options.join = raw.get("join") or "auto"
+        return sql, options, count_only
+
+    def op_explain(self, req: dict) -> dict[str, Any]:
+        sql, options, _ = self._query_request(req)
+        return {"plan": self.engine.explain(sql, options)}
+
+    def op_query(self, req: dict) -> dict[str, Any]:
+        sql, options, count_only = self._query_request(req)
         result = self.engine.query(sql, options)
         body: dict[str, Any] = {"columns": [c.to_json() for c in result.columns]}
         if not count_only:

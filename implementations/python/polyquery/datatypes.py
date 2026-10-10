@@ -173,7 +173,7 @@ def common_type(types: list[DataType]) -> DataType | None:
     for t in types:
         if t.is_null:
             continue
-        if result.is_null:
+        if result.is_null or result == t:
             result = t
         elif result.is_numeric and t.is_numeric:
             result = common_numeric_type(result, t)

@@ -66,7 +66,9 @@ class QueryTests(EngineTestMixin, unittest.TestCase):
             "SELECT id FROM people LIMIT id": "SEMANTIC_ERROR",
             "SELECT id FROM people ORDER BY 5": "SEMANTIC_ERROR",
             "SELECT CAST(1 AS WIDGET)": "SEMANTIC_ERROR",
-            "SELECT a FROM people GROUP BY a": "UNSUPPORTED",
+            "SELECT a FROM people GROUP BY a": "SEMANTIC_ERROR",
+            "SELECT id FROM people FULL JOIN people q ON TRUE": "UNSUPPORTED",
+            "CREATE INDEX i ON people (id)": "UNSUPPORTED",
         }
         for sql, code in cases.items():
             self.assertEqual(self.error_code(sql), code, sql)

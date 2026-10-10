@@ -1,10 +1,12 @@
 # PolyQuery — Python engine
 
 An analytical database engine implementing the PolyQuery specification
-(`spec/`) in pure Python. Current status: **Phase 1** (in-memory data engine).
+(`spec/`) in pure Python. Current status: **Phase 2** (complete SQL v1 query
+engine on in-memory tables).
 
 Capabilities reported: `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`,
-`sql.basic`, `test.functions`.
+`sql.basic`, `test.functions`, `phase2`, `sql.groupby`, `sql.join`,
+`sql.functions`, `sql.subquery`, `sql.cte`, `sql.correlated_subquery`.
 
 ## Build prerequisites
 
@@ -31,17 +33,19 @@ nor `PYTHON*` environment variables can influence module loading).
 ## Architecture
 
 Strictly layered; each layer only depends on the ones above it in this list.
+A statement flows **lex → parse (AST) → bind (semantic validation & typing) →
+logical plan → optimizer → physical plan → execution**.
 
 | Package | Responsibility |
 |---|---|
 | `polyquery/datatypes.py`, `values.py`, `names.py` | SQL types, runtime value representation, exact decimal / date / timestamp helpers, ASCII identifier folding |
 | `polyquery/storage/` | `Catalog` and immutable column-oriented `Table`s (one Python list per column) |
 | `polyquery/ingest/` | CSV (stdlib `csv` reader in `QUOTE_NOTNULL` mode to distinguish `""` from empty) and JSON/JSONL ingestion, type inference, explicit-schema conversion, ingestion limits |
-| `polyquery/sql/` | Lexer (tokens with line/column), full SQL v1 recursive-descent parser, AST |
-| `polyquery/analysis/` | Binder: name resolution, typing rules (promotion lattice, CAST matrix), aggregate extraction, ORDER BY resolution → `BoundQuery` of immutable, structurally comparable bound expressions |
-| `polyquery/planner/` | Logical plan nodes (`TableScan`, `SingleRow`, `Filter`, `Aggregate`, `Project`, `Distinct`, `Sort`, `Limit`), JSON-describable for a future `EXPLAIN` |
-| `polyquery/execution/` | Expression compiler (bound expression → Python closure), batch-at-a-time operators (generators of row-tuple batches), aggregate accumulators, CAST kernels, execution context (timeout / cancellation / memory budget) |
-| `polyquery/service.py` | `Engine` facade: owns the catalog, runs `load` and SQL (`parse → bind → plan → execute`) |
+| `polyquery/sql/` | `lexer.py` (tokens with line/column), `parser.py` (recursive descent, complete v1 grammar), `ast.py` |
+| `polyquery/analysis/` | `binder.py` (name resolution, CTE/derived-table/subquery binding, aggregate extraction, GROUP BY validation, ORDER BY resolution), `scope.py` (range variables, correlation tracking, CTE environments), `typing_rules.py` (promotion lattice, CAST matrix, CASE/IN/BETWEEN/LIKE typing), `functions.py` (function signatures & result types), `bound.py` (bound expression / query model) |
+| `polyquery/planner/` | `planner.py` (bound query → logical plan), `logical.py` (Scan, Values, SubqueryScan, Filter, Join, Aggregate, Project, Distinct, Sort, Limit), `optimizer.py` (predicate pushdown, join-condition extraction), `physical.py` (algorithm choice: TableScan, LookupScan, HashJoin, NestedLoopJoin, HashAggregate, … and the EXPLAIN JSON), `explain.py` (expression rendering) |
+| `polyquery/execution/` | `compiler.py` (bound expression → Python closure, incl. subquery evaluation), `functions.py` (scalar function kernels), `operators.py` (batch-at-a-time physical operators), `aggregates.py` (accumulators), `casts.py`, `context.py` (timeout / cancellation / memory budget / join-row limit, correlation parameters, per-statement caches) |
+| `polyquery/service.py` | `Engine` facade: owns the catalog, runs `load`, SQL and `explain` |
 | `polyquery/protocol/` | Transport-independent request handler (validation, path safety, responses), JSON-lines session loop, exec mode, canonical value serialization |
 | `polyquery/cli.py` | Command line (`version`, `capabilities`, `session`, `exec`) |
 
@@ -55,28 +59,69 @@ intermediates; results checked against 18 digits), `STRING` → `str`,
 the epoch, `NULL` → `None`. Values are converted to their canonical JSON form
 only at the protocol boundary.
 
-### Execution model
+### Binding and column keys
 
-Operators exchange batches of up to 2048 row tuples. Scans zip only the
-referenced columns (column pruning happens during binding: every referenced
-column gets an input *slot*). Expressions are compiled once per query into
-closures that implement NULL propagation and the runtime error rules; projection
-lists are compiled into a single generated tuple-building function. Timeouts,
-cancellation and memory accounting are checked per batch; `PQ_SLEEP` sleeps in
-≤ 10 ms slices so it observes timeouts promptly.
+Every relation instance in a statement gets a unique id (`rel`): each range
+variable of a FROM clause, each aggregation output and each projection. A bound
+column reference is the *column key* `(rel, index)`; bound expressions are
+frozen dataclasses with structural equality, which is what GROUP BY / ORDER BY
+matching uses. Plan operators describe their output rows as a list of column
+keys (*layout*); the expression compiler maps keys to tuple slots. A column key
+that is not in an operator's input layout is a *correlation parameter*: a
+reference from a subquery to an enclosing query, read from
+`ExecutionContext.params`.
 
-### Extensibility towards later phases
+Aggregated queries are bound by first binding the GROUP BY keys, then binding
+SELECT / HAVING / ORDER BY expressions with aggregate calls inline and
+replacing (top-down) every sub-expression structurally equal to a grouping key
+and every aggregate call by a reference to the Aggregate operator's output;
+any remaining reference to a FROM column is a grouping violation
+(`SEMANTIC_ERROR`).
 
-* The parser already accepts the complete v1 grammar (joins, derived tables,
-  CTEs, GROUP BY/HAVING, CASE, LIKE, BETWEEN, IN, subqueries, EXPLAIN,
-  CREATE/DROP INDEX); the binder reports these as `UNSUPPORTED` for now, so
-  Phase 2 only needs binder/planner/executor work.
-* Bound expressions are frozen dataclasses with structural equality, which is
-  what GROUP BY matching needs. The `Aggregate` plan node is the place where
-  grouping keys will be added.
-* Storage is column-oriented already; plan nodes are pure data with a
-  `to_json()` for `EXPLAIN`; the catalog is lock-protected for the Phase 4
-  server; the execution context carries a cancellation event.
+### Subqueries and CTEs
+
+* Scope chains resolve unqualified names innermost first; every scope that a
+  resolution passes through records the outer column, so a subquery knows its
+  correlation parameters (`Subquery.outer_keys`) and the enclosing expression
+  carries the expressions that produce them (`args`, rewritten by GROUP BY
+  substitution like any other expression). Derived tables and CTE bodies cannot
+  see the FROM clause they appear in (no LATERAL), but can see enclosing queries.
+* A subquery's physical plan is executed on demand by the expression that uses
+  it; results are cached per distinct parameter tuple (an uncorrelated
+  subquery runs at most once per statement). Scalar subqueries stop after two
+  rows (cardinality check), `EXISTS` after one row.
+* Correlated equality predicates (`inner_col = outer_col`) directly on a scan
+  become a `LookupScan`: a hash table over the inner table is built once per
+  statement and each execution only touches matching rows, which makes the
+  common correlated `EXISTS` / scalar-aggregate patterns linear instead of
+  quadratic. Compiled operator closures are cached per statement, so
+  re-executing a subplan is cheap.
+* CTEs are bound once at their definition (so errors are reported even for
+  unused CTEs) and inlined at every reference (each reference gets its own
+  relation id, so self-joins of a CTE work).
+
+### Planning and execution
+
+* Predicate pushdown: WHERE / ON conjuncts referencing only one side of an
+  inner/cross join move below the join; conjuncts over both sides become join
+  conditions. For LEFT joins, WHERE conjuncts on the preserved side and ON
+  conjuncts on the nullable side are pushed. (Disabled by `optimize:false`.)
+* Join algorithm: equality conjuncts whose sides reference disjoint inputs
+  become hash-join keys (build on the right input; DECIMAL keys of different
+  scales are aligned; NULL keys never match), the remaining conjuncts are a
+  residual predicate; otherwise a nested-loop join. `join:"nested_loop"`
+  forces nested loops. `--max-join-rows` is enforced per join.
+* Grouping is a hash aggregation (dict of key tuple → rows, then batch
+  accumulators per group); without GROUP BY one group is always produced.
+* Operators exchange batches of up to 2048 row tuples. Scans zip only the
+  referenced columns (column pruning). Expressions are compiled once into
+  closures; projection lists into a single generated tuple-building function.
+  Timeouts, cancellation and memory accounting are checked per batch;
+  `PQ_SLEEP` sleeps in ≤ 10 ms slices.
+* `EXPLAIN` / the `explain` op return the physical plan as JSON
+  (`TableScan` with `table`/`columns`, `HashJoin`/`NestedLoopJoin` with
+  `join_type`, …). Plans of subqueries used by an operator are listed under
+  that node's `subqueries` key.
 
 ## Design decisions (where the spec leaves room)
 
@@ -119,16 +164,42 @@ cancellation and memory accounting are checked per batch; `PQ_SLEEP` sleeps in
   `AVG` over INT64/DECIMAL sums exactly before the single final division;
   float `SUM`/`AVG` use `math.fsum`.
 * **LIMIT/OFFSET** must be constant INT64 expressions; `NULL` means "no limit".
+  They are evaluated during validation, so a negative value is
+  `INVALID_ARGUMENT` also for `EXPLAIN`.
+* Subqueries compare structurally (same SQL text modulo positions, same
+  correlation), so `GROUP BY <expr with subquery>` matches the identical
+  select-list expression.
 * **Query options**: `mode` accepts `auto` and `row` (this engine is
   row/batch based); `vectorized` and unknown values of known enum options are
   `UNSUPPORTED`; ill-typed option values are `INVALID_REQUEST`. `threads`,
   `join`, `optimize`, `use_indexes`, `native` are validated and otherwise ignored.
 * Protocol ops of later phases (`explain`, `save`, `open`, `stats`) answer
   `UNSUPPORTED`; unknown ops `INVALID_REQUEST`.
-* Not-yet-implemented SQL (GROUP BY, joins, subqueries, CTEs, CASE, LIKE,
-  BETWEEN, IN, scalar functions other than `PQ_SLEEP`, EXPLAIN, index DDL) →
-  `UNSUPPORTED`, never a wrong result. `SELECT DISTINCT` and
-  `COUNT/SUM/AVG(DISTINCT x)` are implemented.
+* `CREATE INDEX` / `DROP INDEX` parse but answer `UNSUPPORTED` (indexes are
+  Phase 3). `FULL`/`RIGHT` joins and `UNION` answer `UNSUPPORTED`.
+* **UPPER / LOWER**: only ASCII letters are case-mapped, and a word (a run of
+  non-whitespace characters) that contains a non-ASCII character is left
+  unchanged as a whole. functions.md only says "ASCII letters only are
+  case-mapped", but the public suite expects `UPPER('abc Ünï')` = `'ABC Ünï'`
+  and `LOWER('ABC ÜNÏ')` = `'abc ÜNÏ'`, which a per-character mapping cannot
+  produce; the word rule is the simplest rule consistent with both.
+* **Common types** (CASE, COALESCE, IN, BETWEEN): identical types stay as they
+  are (two `DECIMAL(3,2)` stay `DECIMAL(3,2)`); otherwise numeric promotion
+  (two different DECIMALs → `DECIMAL(18,max(s))`), DATE+TIMESTAMP → TIMESTAMP.
+  IN lists and BETWEEN promote the operand and all items to one common type.
+* **Function argument typing**: `ABS`/`ROUND`/`FLOOR`/`CEIL` return "the same
+  type" as their argument, so an untyped `NULL` argument stays the null type
+  (reported as STRING); other functions have fixed result types;
+  `NULLIF(a, b)` has the type of `a` and compares in the common type.
+  `ROUND`'s digits and the `DATE_TRUNC`/`DATE_DIFF` unit must be constant
+  (`SEMANTIC_ERROR` otherwise) and are evaluated during validation, so an
+  unknown unit is reported as `INVALID_ARGUMENT` before execution. Units are
+  matched case-insensitively. FLOAT64 `ROUND` rounds the shortest decimal
+  representation half away from zero.
+* **HAVING / WHERE** cannot reference SELECT aliases (only GROUP BY and ORDER BY
+  can, as semantics.md specifies).
+* An aggregate call inside a subquery always belongs to the subquery, even if
+  its argument only references outer columns.
 * **Memory budget**: materialized rows (sort buffers, DISTINCT sets, results)
   are accounted at ~64 bytes + 16 bytes per value against
   `--max-query-memory-mb` (default 4096) → `RESOURCE_LIMIT`.
@@ -138,13 +209,10 @@ cancellation and memory accounting are checked per batch; `PQ_SLEEP` sleeps in
 
 ## Known limitations
 
-* Phase 1 only: no GROUP BY, joins, subqueries, CTEs, scalar function library,
-  EXPLAIN, persistent storage, indexes or HTTP server yet.
+* No persistent storage, indexes, statistics or HTTP server yet (Phases 3–4).
+* Correlated subqueries are executed per distinct parameter tuple (with the
+  LookupScan optimisation for equality correlation); correlation through
+  non-equality predicates is evaluated by re-running the subquery and can be
+  slow on large inputs.
+* No merge join; `join:"merge"` is accepted and planned like `auto`.
 * Single-threaded execution; the CSV/JSON readers hold the whole input in memory.
-* Conformance runner note: `cases/phase1/limits_and_output.pqt` lines 34 and 39
-  expect the engine to echo a request `id` of `{"nested":[1,"x"]}` / `"abc"`,
-  but `tests/conformance/runner.py` (line 216) overwrites every request's `id`
-  with the step number before sending it and then requires the response `id` to
-  equal that number. No engine can satisfy both checks, so these two cases fail
-  in the public runner even though the engine echoes ids verbatim (verified
-  directly and by `tests/test_engine.py::CatalogTests.test_id_echo`).

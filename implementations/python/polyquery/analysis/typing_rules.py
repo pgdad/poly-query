@@ -144,3 +144,48 @@ def unify(exprs: list[b.Expr], what: str) -> tuple[DataType, list[b.Expr]]:
     if result is None:
         raise errors.type_error(f"incompatible types in {what}")
     return result, [promote(e, result) for e in exprs]
+
+
+def _common_comparison_type(exprs: list[b.Expr], what: str) -> DataType:
+    types = [e.type for e in exprs]
+    for i, t in enumerate(types):
+        for u in types[i + 1 :]:
+            if not comparable(t, u):
+                raise errors.type_error(f"cannot compare {t.name} with {u.name} in {what}")
+    result = common_type(types)
+    assert result is not None
+    return result
+
+
+def between(operand: b.Expr, low: b.Expr, high: b.Expr, negated: bool) -> b.Expr:
+    t = _common_comparison_type([operand, low, high], "BETWEEN")
+    return b.Between(
+        BOOLEAN, promote(operand, t), promote(low, t), promote(high, t), negated
+    )
+
+
+def in_list(operand: b.Expr, items: list[b.Expr], negated: bool) -> b.Expr:
+    t = _common_comparison_type([operand, *items], "IN")
+    return b.InList(BOOLEAN, promote(operand, t), tuple(promote(i, t) for i in items), negated)
+
+
+def in_subquery_type(operand: b.Expr, column_type: DataType) -> DataType:
+    """Common type in which ``operand IN (subquery)`` compares values."""
+    return _common_comparison_type([operand, b.Literal(column_type, None)], "IN")
+
+
+def like(operand: b.Expr, pattern: b.Expr, negated: bool) -> b.Expr:
+    for e in (operand, pattern):
+        if e.type.kind not in (TypeKind.STRING, TypeKind.NULL):
+            raise errors.type_error(f"LIKE requires STRING operands, got {e.type.name}")
+    return b.Like(BOOLEAN, operand, pattern, negated)
+
+
+def case(whens: list[tuple[b.Expr, b.Expr]], else_: b.Expr | None) -> b.Expr:
+    for cond, _ in whens:
+        require_boolean(cond, "CASE WHEN condition")
+    results = [r for _, r in whens] + ([else_] if else_ is not None else [])
+    result_type, promoted = unify(results, "CASE")
+    new_whens = tuple((cond, promoted[i]) for i, (cond, _) in enumerate(whens))
+    new_else = promoted[-1] if else_ is not None else None
+    return b.Case(result_type, new_whens, new_else)

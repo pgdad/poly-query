@@ -14,7 +14,7 @@ CastFn = Callable[[Any], Any]
 _STRIP = " \t\r\n\f\v"
 
 
-def _identity(v: Any) -> Any:
+def identity(v: Any) -> Any:
     return v
 
 
@@ -125,7 +125,7 @@ def cast_function(source: DataType, target: DataType) -> CastFn:
     s, t = source.kind, target.kind
     K = TypeKind
     if s is t and s is not K.DECIMAL:
-        return _identity
+        return identity
     if s is K.BOOLEAN:
         if t is K.INT64:
             return int
@@ -143,7 +143,7 @@ def cast_function(source: DataType, target: DataType) -> CastFn:
     elif s is K.DECIMAL:
         if t is K.DECIMAL:
             if source.scale == target.scale and source.precision <= target.precision:
-                return _identity
+                return identity
             return _decimal_to_decimal(source, target)
         if t is K.INT64:
             return _decimal_to_int(source)
