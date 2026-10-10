@@ -1,0 +1,65 @@
+(ns polyquery.plan.pruning
+  "Column pruning (spec/storage/indexes-and-planning.md §3.2): restricts
+  every scan of a logical plan to the table columns the query references.
+
+  Rows keep their full width (expressions address FROM-row positions), but a
+  scan only reads and fills the referenced columns; the others stay NULL and
+  are never looked at.
+
+  A node's required input columns are the columns its own expressions use
+  plus, for pass-through nodes (filter, join), the columns required from it.
+  Expressions containing subqueries also require the columns of this row
+  that correlated references inside the subqueries read (outer-column nodes
+  of the subquery's correlation cell, at any nesting depth)."
+  (:require [polyquery.sql.bound :as b]))
+
+(set! *warn-on-reflection* true)
+
+(defn- outer-refs
+  "Row indices read through correlation cell `cell` anywhere inside x (a
+  bound query or part of one). Tables (records) are not descended into."
+  [x cell]
+  (into #{}
+        (keep #(when (and (map? %) (= :outer-column (:node %)) (= cell (:cell %))) (:index %)))
+        (tree-seq #(and (coll? %) (not (record? %)))
+                  #(if (map? %) (vals %) (seq %))
+                  x)))
+
+(defn expr-columns
+  "Indices of the row an expression is evaluated on that it reads."
+  [e]
+  (if (nil? e)
+    #{}
+    (into (b/column-indices e)
+          (mapcat #(outer-refs (:query %) (:cell %)))
+          (filter #(= :subquery (:node %)) (b/nodes e)))))
+
+(defn- all-columns [node] (set (range (:width node))))
+
+(declare prune)
+
+(defn prune-query
+  "Prunes the scans of a (logical) query plan whose outputs are all needed."
+  [plan]
+  (prune plan (all-columns plan)))
+
+(defn prune
+  "Prunes the scans below node, of which the output columns `required` (a
+  set of indices) are needed."
+  [node required]
+  (case (:op node)
+    :scan (assoc node :columns (vec (sort (filter #(< (long %) (long (:width node))) required))))
+    :values node
+    :derived (update node :input prune-query)
+    :filter (update node :input prune (into required (expr-columns (:predicate node))))
+    :join (let [lw (long (:width (:left node)))
+                cols (into required (expr-columns (:condition node)))]
+            (assoc node
+                   :left (prune (:left node) (set (filter #(< (long %) lw) cols)))
+                   :right (prune (:right node) (set (keep #(when (>= (long %) lw) (- (long %) lw)) cols)))))
+    :aggregate (update node :input prune
+                       (into (into #{} (mapcat expr-columns) (:group-keys node))
+                             (mapcat (comp expr-columns :arg))
+                             (:aggregates node)))
+    :project (update node :input prune (into #{} (mapcat expr-columns) (:exprs node)))
+    (:distinct :sort :limit) (update node :input #(prune % (all-columns %)))))

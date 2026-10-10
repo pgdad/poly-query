@@ -1,6 +1,6 @@
 (ns polyquery.exec.join
-  "Join operators (spec/sql/semantics.md §7): hash join (build side = right
-  input) for joins with equality keys and nested-loop join otherwise. Both
+  "Join operators (spec/sql/semantics.md §7): hash join (built on the input
+  chosen by the planner; always the right input of LEFT joins) for joins with equality keys and nested-loop join otherwise. Both
   support INNER and LEFT joins; nested loops also CROSS joins. Joined rows are
   the left row's columns followed by the right row's; unmatched left rows of
   a LEFT join are padded with NULLs. The number of produced rows is checked
@@ -87,42 +87,68 @@
                   (recur (inc i)))
                 (vec out)))))))))
 
+(defn- hash-table
+  "Hash table key → ArrayList of rows over the rows of a build input."
+  ^HashMap [rows key-of env]
+  (let [table (HashMap.)
+        qctx (:ctx env)]
+    (reduce (fn [^long n ^objects r]
+              (when (zero? (rem n 4096))
+                (ctx/check! qctx)
+                (ctx/reserve! qctx (* 4096 (ctx/row-bytes (alength r)))))
+              (when-let [k (key-of r)]
+                (let [^ArrayList bucket (or (.get table k)
+                                            (let [b (ArrayList. 2)] (.put table k b) b))]
+                  (.add bucket r)))
+              (inc n))
+            0 rows)
+    table))
+
 (defmethod ops/build :hash-join [plan env]
   (let [left (ops/build (:left plan) env)
         right (ops/build (:right plan) env)
         lw (long (:left-width plan))
         rw (long (:right-width plan))
         left-join? (= :left (:join-type plan))
+        build-left? (= :left (:build plan))
         lkey (key-extractor env (:left-keys plan))
         rkey (key-extractor env (:right-keys plan))
-        residual (if-let [c (:residual plan)] (expr/compile-predicate env c) (constantly true))
-        qctx (:ctx env)]
+        residual (if-let [c (:residual plan)] (expr/compile-predicate env c) (constantly true))]
     (reducible
-     (fn [f init]
-       (let [table (HashMap.)
-             emit (output-counter env)]
-         (reduce (fn [^long n ^objects r]
-                   (when (zero? (rem n 4096))
-                     (ctx/check! qctx)
-                     (ctx/reserve! qctx (* 4096 (ctx/row-bytes (alength r)))))
-                   (when-let [k (rkey r)]
-                     (let [^ArrayList bucket (or (.get table k)
-                                                 (let [b (ArrayList. 2)] (.put table k b) b))]
-                       (.add bucket r)))
-                   (inc n))
-                 0 right)
-         (reduce
-          (fn [acc l]
-            (let [k (lkey l)
-                  ^ArrayList bucket (when (some? k) (.get table k))
-                  n (if bucket (.size bucket) 0)]
-              (loop [i 0 acc acc matched? false]
-                (cond
-                  (reduced? acc) acc
-                  (< i n) (let [row (joined l (.get bucket i) lw rw)]
-                            (if (residual row)
-                              (do (emit) (recur (inc i) (f acc row) true))
-                              (recur (inc i) acc matched?)))
-                  (and left-join? (not matched?)) (do (emit) (f acc (joined l nil lw rw)))
-                  :else acc))))
-          init left))))))
+     (if build-left?
+       ;; inner joins only: build on the left input, probe with the right rows
+       (fn [f init]
+         (let [table (hash-table left lkey env)
+               emit (output-counter env)]
+           (reduce
+            (fn [acc r]
+              (let [k (rkey r)
+                    ^ArrayList bucket (when (some? k) (.get table k))
+                    n (if bucket (.size bucket) 0)]
+                (loop [i 0 acc acc]
+                  (cond
+                    (reduced? acc) acc
+                    (< i n) (let [row (joined (.get bucket i) r lw rw)]
+                              (if (residual row)
+                                (do (emit) (recur (inc i) (f acc row)))
+                                (recur (inc i) acc)))
+                    :else acc))))
+            init right)))
+       (fn [f init]
+         (let [table (hash-table right rkey env)
+               emit (output-counter env)]
+           (reduce
+            (fn [acc l]
+              (let [k (lkey l)
+                    ^ArrayList bucket (when (some? k) (.get table k))
+                    n (if bucket (.size bucket) 0)]
+                (loop [i 0 acc acc matched? false]
+                  (cond
+                    (reduced? acc) acc
+                    (< i n) (let [row (joined l (.get bucket i) lw rw)]
+                              (if (residual row)
+                                (do (emit) (recur (inc i) (f acc row) true))
+                                (recur (inc i) acc matched?)))
+                    (and left-join? (not matched?)) (do (emit) (f acc (joined l nil lw rw)))
+                    :else acc))))
+            init left)))))))

@@ -30,7 +30,6 @@
   concatenation of the columns of all range variables in FROM order (after
   aggregation: GROUP BY keys followed by aggregate values)."
   (:require [polyquery.catalog :as catalog]
-            [polyquery.errors :as err]
             [polyquery.sql.ast :as ast]
             [polyquery.sql.binder :as binder :refer [semantic!]]))
 
@@ -254,14 +253,26 @@
   {:catalog catalog :options options :ctes () :outer [] :free [] :ids (atom 0)
    :analyze-query analyze-query})
 
+(defn- analyze-create-index
+  "Validates CREATE INDEX: the table and column must exist."
+  [catalog {:keys [name table column kind if-not-exists? pos]}]
+  (let [tbl (or (catalog/lookup catalog table)
+                (semantic! (str "unknown table '" table "'") pos))
+        ci (or (first (keep-indexed (fn [i c] (when (binder/same-name? column (:name c)) i))
+                                    (:columns tbl)))
+               (semantic! (str "unknown column '" column "' in table '" (:name tbl) "'") pos))]
+    {:kind :create-index :index-name name :table (:name tbl) :column-index ci
+     :index-kind kind :if-not-exists? if-not-exists?}))
+
 (defn analyze-statement
   "Analyzes a parsed statement against a catalog snapshot. Returns
-  {:kind :query|:explain :query bound-query}."
+  {:kind :query|:explain :query bound-query}, or for index statements
+  {:kind :create-index :index-name :table :column-index :index-kind
+  :if-not-exists?} / {:kind :drop-index :index-name :if-exists?}."
   [catalog stmt options]
   (let [env (root-env catalog options)]
     (case (:node stmt)
       :select {:kind :query :query (analyze-query env (:query stmt))}
       :explain {:kind :explain :query (analyze-query env (:query stmt))}
-      (:create-index :drop-index)
-      (err/fail! "UNSUPPORTED" "CREATE/DROP INDEX is not supported (no index support)"
-                 (binder/details (:pos stmt))))))
+      :create-index (analyze-create-index catalog stmt)
+      :drop-index {:kind :drop-index :index-name (:name stmt) :if-exists? (:if-exists? stmt)})))
