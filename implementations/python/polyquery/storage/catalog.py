@@ -8,6 +8,7 @@ from typing import Any, Iterator, Sequence
 
 from .. import errors
 from ..datatypes import DataType
+from ..names import fold
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,10 +31,10 @@ class Table:
     _index: dict[str, int] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._index = {c.name.lower(): i for i, c in enumerate(self.columns)}
+        self._index = {fold(c.name): i for i, c in enumerate(self.columns)}
 
     def column_index(self, name: str) -> int | None:
-        return self._index.get(name.lower())
+        return self._index.get(fold(name))
 
     def scan(self, column_indexes: Sequence[int]) -> Iterator[tuple]:
         """Yields row tuples restricted to the given columns."""
@@ -54,7 +55,7 @@ class Catalog:
 
     def get(self, name: str) -> Table | None:
         with self._lock:
-            return self._tables.get(name.lower())
+            return self._tables.get(fold(name))
 
     def require(self, name: str) -> Table:
         table = self.get(name)
@@ -67,7 +68,7 @@ class Catalog:
 
     def put(self, table: Table, *, replace: bool) -> None:
         """Adds a table atomically; fails with ALREADY_EXISTS unless ``replace``."""
-        key = table.name.lower()
+        key = fold(table.name)
         with self._lock:
             if key in self._tables and not replace:
                 raise errors.already_exists(f"table '{table.name}' already exists", table=table.name)
@@ -75,7 +76,7 @@ class Catalog:
 
     def drop(self, name: str) -> None:
         with self._lock:
-            if self._tables.pop(name.lower(), None) is None:
+            if self._tables.pop(fold(name), None) is None:
                 raise errors.not_found(f"table '{name}' does not exist", table=name)
 
     def reset(self) -> None:
@@ -84,4 +85,4 @@ class Catalog:
 
     def tables(self) -> list[Table]:
         with self._lock:
-            return sorted(self._tables.values(), key=lambda t: (t.name.lower(), t.name))
+            return sorted(self._tables.values(), key=lambda t: (fold(t.name), t.name))

@@ -107,14 +107,14 @@ def _string_to_decimal(target: DataType) -> CastFn:
 
 
 def _string_to_date(v: str) -> int:
-    r = values.parse_date(v.strip(_STRIP))
+    r = values.parse_date(v)
     if r is None:
         raise errors.conversion_error(f"cannot convert '{v[:100]}' to DATE")
     return r
 
 
 def _string_to_timestamp(v: str) -> int:
-    r = values.parse_timestamp(v.strip(_STRIP), allow_date=True)
+    r = values.parse_timestamp(v, allow_date=False)
     if r is None:
         raise errors.conversion_error(f"cannot convert '{v[:100]}' to TIMESTAMP")
     return r

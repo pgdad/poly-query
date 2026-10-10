@@ -19,6 +19,7 @@ from ..datatypes import (
     TypeKind,
     resolve_type,
 )
+from ..names import same_name
 from ..sql import ast
 from ..storage.catalog import Catalog, Table
 from . import bound as b
@@ -54,7 +55,7 @@ class Scope:
         full = f"{ref.qualifier}.{ref.name}" if ref.qualifier else ref.name
         if self.table is None or self.range_name is None:
             raise errors.semantic_error(f"unknown column '{full}'", **_pos(ref))
-        if ref.qualifier is not None and ref.qualifier.lower() != self.range_name.lower():
+        if ref.qualifier is not None and not same_name(ref.qualifier, self.range_name):
             raise errors.semantic_error(f"unknown table or alias '{ref.qualifier}'", **_pos(ref))
         index = self.table.column_index(ref.name)
         if index is None:
@@ -167,7 +168,7 @@ class Binder:
                 if scope.table is None:
                     raise errors.semantic_error("SELECT * requires a FROM clause", **_pos(item))
                 if item.star_qualifier is not None and (
-                    item.star_qualifier.lower() != (scope.range_name or "").lower()
+                    not same_name(item.star_qualifier, scope.range_name or "")
                 ):
                     raise errors.semantic_error(
                         f"unknown table or alias '{item.star_qualifier}'", **_pos(item)
@@ -209,7 +210,7 @@ class Binder:
                 raise errors.semantic_error(f"ORDER BY position {k} is out of range", **_pos(expr))
             position = k - 1
         elif isinstance(expr, ast.ColumnRef) and expr.qualifier is None:
-            matches = [i for i, o in enumerate(outputs) if o.name.lower() == expr.name.lower()]
+            matches = [i for i, o in enumerate(outputs) if same_name(o.name, expr.name)]
             if matches:
                 first = outputs[matches[0]].expr
                 if any(outputs[i].expr != first for i in matches[1:]):
@@ -299,7 +300,7 @@ class Binder:
             if days is None:
                 raise errors.conversion_error(f"invalid DATE literal '{node.text}'")
             return b.Literal(DATE, days)
-        micros = values.parse_timestamp(node.text, allow_date=True)
+        micros = values.parse_timestamp(node.text, allow_date=False)
         if micros is None:
             raise errors.conversion_error(f"invalid TIMESTAMP literal '{node.text}'")
         return b.Literal(TIMESTAMP, micros)

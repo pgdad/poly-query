@@ -11,6 +11,7 @@ import math
 import re
 
 from . import errors
+from .names import fold
 
 INT64_MIN = -(2**63)
 INT64_MAX = 2**63 - 1
@@ -225,4 +226,4 @@ def date_to_timestamp(days: int) -> int:
 
 
 def parse_bool(text: str) -> bool | None:
-    return BOOL_TEXT.get(text.lower())
+    return BOOL_TEXT.get(fold(text))

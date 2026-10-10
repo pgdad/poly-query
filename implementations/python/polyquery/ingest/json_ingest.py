@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from .. import errors, values
+from ..names import fold
 from ..storage.catalog import Column
 from ..datatypes import BOOLEAN, DATE, FLOAT64, INT64, STRING, TIMESTAMP, DataType, TypeKind
 from .convert import TRIM_CHARS, InvalidText, converter_for
@@ -186,7 +187,7 @@ def ingest_json(
 
     if schema is not None:
         names = [c.name for c in schema]
-        positions = {c.name.lower(): i for i, c in enumerate(schema)}
+        positions = {fold(c.name): i for i, c in enumerate(schema)}
     else:
         names = []
         positions = {}
@@ -198,14 +199,14 @@ def ingest_json(
         for key, value in rec:
             _check_string(key, n)
             _validate_value(value, n)
-            pos = positions.get(key.lower())
+            pos = positions.get(fold(key))
             if pos is None:
                 if schema is not None:
                     raise errors.ingest_error(f"key '{key}' (record {n}) is not in the schema", record=n)
                 if key == "":
                     raise errors.ingest_error("empty column name", record=n)
                 pos = len(names)
-                positions[key.lower()] = pos
+                positions[fold(key)] = pos
                 names.append(key)
             elif pos in row or (schema is None and names[pos] != key):
                 # duplicate key in one object, or a key that collides

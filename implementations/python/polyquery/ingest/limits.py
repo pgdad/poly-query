@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .. import errors
+from ..names import fold
 
 MAX_FIELD_CHARS = 16 * 1024 * 1024
 DEFAULT_MAX_INGEST_BYTES = 4 * 1024**3
@@ -35,7 +36,7 @@ def check_column_names(names: list[str]) -> None:
     for name in names:
         if name == "":
             raise errors.ingest_error("empty column name")
-        key = name.lower()
+        key = fold(name)
         if key in seen:
             raise errors.ingest_error(f"duplicate column name '{name}'", column_name=name)
         seen.add(key)

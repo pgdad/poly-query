@@ -7,6 +7,7 @@ import io
 from typing import Any
 
 from .. import errors
+from ..names import same_name
 from ..storage.catalog import Column
 from ..datatypes import DataType, TypeKind
 from .convert import TRIM_CHARS, InvalidText, converter_for, infer_text_type
@@ -128,7 +129,7 @@ def ingest_csv(
         check_column_names(names)
         if schema is not None:
             if len(schema) != len(names) or any(
-                c.name.lower() != n.lower() for c, n in zip(schema, names)
+                not same_name(c.name, n) for c, n in zip(schema, names)
             ):
                 raise errors.ingest_error("CSV header does not match the explicit schema")
     else:
