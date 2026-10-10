@@ -4,6 +4,7 @@ use crate::engine::{LoadRequest, QueryOptions, Source};
 use crate::error::{Error, Result};
 use crate::ingest::Format;
 use crate::json::Json;
+use crate::planner::physical::JoinStrategy;
 use crate::storage::Field;
 use crate::types::DataType;
 
@@ -17,6 +18,7 @@ pub enum Request {
     Reset,
     Load(LoadRequest),
     Query { sql: String, options: QueryOptions },
+    Explain { sql: String, options: QueryOptions },
     Sleep { ms: u64 },
 }
 
@@ -113,7 +115,11 @@ impl Request {
                     .ok_or_else(|| invalid("missing required field 'ms'"))?;
                 Request::Sleep { ms }
             }
-            "explain" | "save" | "open" | "stats" => {
+            "explain" => Request::Explain {
+                sql: required_str(req, "sql")?,
+                options: parse_query_options(req)?,
+            },
+            "save" | "open" | "stats" => {
                 return Err(Error::unsupported(format!(
                     "operation '{op}' is not supported by this engine"
                 )));
@@ -207,7 +213,9 @@ fn parse_query_options(req: &Json) -> Result<QueryOptions> {
         }
     }
     match optional_str(opts, "join")? {
-        None | Some("auto") | Some("hash") | Some("merge") | Some("nested_loop") => {}
+        None | Some("auto") | Some("merge") => {}
+        Some("hash") => o.join = JoinStrategy::Hash,
+        Some("nested_loop") => o.join = JoinStrategy::NestedLoop,
         Some(other) => {
             return Err(Error::unsupported(format!(
                 "join algorithm '{other}' is not supported"

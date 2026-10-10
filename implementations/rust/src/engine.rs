@@ -10,10 +10,13 @@ use crate::config::Config;
 use crate::error::{Error, ErrorCode, Result};
 use crate::exec::{ExecContext, Row, build};
 use crate::ingest::{self, Format, IngestOptions};
-use crate::planner::{BindContext, LogicalPlan, plan_query};
-use crate::sql::ast::Statement;
+use crate::json::Json;
+use crate::planner::physical::{self, JoinStrategy};
+use crate::planner::{BindContext, PhysicalOptions, PhysicalPlan, optimizer, plan_query};
+use crate::sql::ast::{Query, Statement};
 use crate::sql::parse_statement;
 use crate::storage::{Field, Table};
+use crate::types::{DataType, Value};
 
 /// Where load input comes from.
 #[derive(Debug, Clone)]
@@ -43,6 +46,14 @@ pub struct QueryOptions {
     pub timeout_ms: u64,
     /// Count rows only, without materializing them.
     pub count_only: bool,
+    /// Join algorithm preference.
+    pub join: JoinStrategy,
+}
+
+impl QueryOptions {
+    fn physical(&self) -> PhysicalOptions {
+        PhysicalOptions { join: self.join }
+    }
 }
 
 #[derive(Debug)]
@@ -166,30 +177,64 @@ impl Engine {
             .ok_or_else(|| Error::not_found(format!("table '{name}' does not exist")))
     }
 
-    /// Parses and plans a SQL statement.
-    pub fn plan(&self, sql: &str) -> Result<LogicalPlan> {
-        let stmt = parse_statement(sql)?;
+    /// Binds, optimizes and physically plans a query.
+    fn plan_query(&self, q: &Query, opts: &QueryOptions) -> Result<PhysicalPlan> {
         let ctx = BindContext {
             catalog: &self.catalog,
             test_functions: self.config.test_functions,
         };
-        match stmt {
-            Statement::Query(q) => plan_query(&q, &ctx),
-            Statement::Explain(_) => Err(Error::unsupported("EXPLAIN is not supported")),
+        let logical = optimizer::optimize(plan_query(q, &ctx)?);
+        Ok(physical::lower(&logical, opts.physical()))
+    }
+
+    /// The physical plan of a query (`explain` op; also accepts `EXPLAIN …`).
+    pub fn explain(&self, sql: &str, opts: &QueryOptions) -> Result<Json> {
+        match parse_statement(sql)? {
+            Statement::Query(q) | Statement::Explain(q) => Ok(self.plan_query(&q, opts)?.to_json()),
             Statement::CreateIndex { .. } | Statement::DropIndex { .. } => {
                 Err(Error::unsupported("indexes are not supported"))
             }
         }
     }
 
-    /// Executes a query.
+    /// Executes a SQL statement.
     pub fn query(&self, sql: &str, opts: &QueryOptions) -> Result<QueryResult> {
-        let plan = self.plan(sql)?;
-        let columns = plan.schema().to_vec();
+        match parse_statement(sql)? {
+            Statement::Query(q) => {
+                let plan = self.plan_query(&q, opts)?;
+                self.execute(plan, opts)
+            }
+            Statement::Explain(q) => {
+                let plan = self.plan_query(&q, opts)?;
+                let text = plan.to_json().to_string_compact();
+                Ok(QueryResult {
+                    columns: vec![Field::new("plan", DataType::String)],
+                    rows: if opts.count_only {
+                        Vec::new()
+                    } else {
+                        vec![vec![Value::str(&text)]]
+                    },
+                    row_count: 1,
+                })
+            }
+            Statement::CreateIndex { .. } | Statement::DropIndex { .. } => {
+                Err(Error::unsupported("indexes are not supported"))
+            }
+        }
+    }
+
+    fn execute(&self, plan: PhysicalPlan, opts: &QueryOptions) -> Result<QueryResult> {
+        let columns = plan
+            .schema()
+            .iter()
+            .map(|f| Field::new(f.name.clone(), f.data_type.result_type()))
+            .collect();
         let timeout = (opts.timeout_ms > 0).then(|| Duration::from_millis(opts.timeout_ms));
         let memory = usize::try_from(self.config.max_query_memory_mb.saturating_mul(1024 * 1024))
             .unwrap_or(usize::MAX);
-        let ctx = ExecContext::new(timeout, memory, self.config.test_functions);
+        let ctx = ExecContext::new(timeout, memory, self.config.test_functions)
+            .with_max_join_rows(self.config.max_join_rows)
+            .with_physical_options(opts.physical());
         let mut root = build(plan);
         let mut rows = Vec::new();
         let mut row_count: u64 = 0;

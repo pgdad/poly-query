@@ -1,15 +1,16 @@
 //! Physical operators (pull-based, row-at-a-time iterator model).
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use super::aggregate::AggState;
 use super::context::ExecContext;
-use super::eval::{eval, eval_predicate};
+use super::eval::{eval, eval_predicate, normalize_key};
 use crate::error::Result;
-use crate::planner::expr::{AggregateCall, Expr};
-use crate::planner::logical::{LogicalPlan, SortKey};
+use crate::planner::expr::{AggregateCall, Expr, KeyDomain};
+use crate::planner::logical::{JoinType, SortKey};
+use crate::planner::physical::{JoinKey, PhysicalPlan};
 use crate::storage::Table;
 use crate::types::Value;
 
@@ -23,24 +24,24 @@ pub trait Operator {
     fn next(&mut self, ctx: &ExecContext) -> Result<Option<Row>>;
 }
 
-/// Builds the operator tree for a logical plan.
-pub fn build(plan: LogicalPlan) -> Box<dyn Operator> {
+/// Builds the operator tree for a physical plan.
+pub fn build(plan: PhysicalPlan) -> Box<dyn Operator> {
     match plan {
-        LogicalPlan::SingleRow => Box::new(SingleRowOp { done: false }),
-        LogicalPlan::Scan { table, columns, .. } => Box::new(ScanOp {
+        PhysicalPlan::Values => Box::new(SingleRowOp { done: false }),
+        PhysicalPlan::TableScan { table, columns, .. } => Box::new(ScanOp {
             table,
             columns,
             pos: 0,
         }),
-        LogicalPlan::Filter { input, predicate } => Box::new(FilterOp {
+        PhysicalPlan::Filter { input, predicate } => Box::new(FilterOp {
             input: build(*input),
             predicate,
         }),
-        LogicalPlan::Project { input, exprs, .. } => Box::new(ProjectOp {
+        PhysicalPlan::Project { input, exprs, .. } => Box::new(ProjectOp {
             input: build(*input),
             exprs,
         }),
-        LogicalPlan::Aggregate {
+        PhysicalPlan::HashAggregate {
             input,
             group_by,
             aggregates,
@@ -51,26 +52,261 @@ pub fn build(plan: LogicalPlan) -> Box<dyn Operator> {
             aggregates,
             output: Vec::new().into_iter(),
         }),
-        LogicalPlan::Sort { input, keys } => Box::new(SortOp::new(build(*input), keys, None)),
-        LogicalPlan::Limit {
+        PhysicalPlan::HashJoin {
+            left,
+            right,
+            join_type,
+            keys,
+            residual,
+            build_left,
+            ..
+        } => {
+            let left_width = left.schema().len();
+            let right_width = right.schema().len();
+            let (probe, build_side) = if build_left {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            Box::new(HashJoinOp {
+                probe: build(*probe),
+                build_input: Some(build(*build_side)),
+                keys,
+                residual,
+                left_join: join_type == JoinType::Left,
+                build_left,
+                left_width,
+                right_width,
+                table: HashMap::new(),
+                build_rows: Vec::new(),
+                out: VecDeque::new(),
+            })
+        }
+        PhysicalPlan::NestedLoopJoin {
+            left,
+            right,
+            join_type,
+            predicate,
+            ..
+        } => {
+            let right_width = right.schema().len();
+            Box::new(NestedLoopJoinOp {
+                left: build(*left),
+                right_input: Some(build(*right)),
+                right_rows: Vec::new(),
+                predicate,
+                left_join: join_type == JoinType::Left,
+                right_width,
+                out: VecDeque::new(),
+            })
+        }
+        PhysicalPlan::Distinct { input } => Box::new(DistinctOp {
+            input: build(*input),
+            seen: HashSet::new(),
+        }),
+        PhysicalPlan::Sort { input, keys, top } => Box::new(SortOp::new(build(*input), keys, top)),
+        PhysicalPlan::Limit {
             input,
             offset,
             limit,
-        } => {
-            let input = match (*input, limit) {
-                // ORDER BY … LIMIT: only the first offset+limit rows are needed.
-                (LogicalPlan::Sort { input, keys }, Some(n)) => {
-                    let top = usize::try_from(offset.saturating_add(n)).unwrap_or(usize::MAX);
-                    Box::new(SortOp::new(build(*input), keys, Some(top)))
-                }
-                (other, _) => build(other),
-            };
-            Box::new(LimitOp {
-                input,
-                offset,
-                remaining: limit,
-            })
+        } => Box::new(LimitOp {
+            input: build(*input),
+            offset,
+            remaining: limit,
+        }),
+    }
+}
+
+/// Approximate retained size of a materialized row.
+fn row_size(row: &[Value]) -> usize {
+    row.iter().map(|v| v.approx_size()).sum::<usize>() + 24
+}
+
+/// Evaluates join key expressions; None if any key is NULL (never matches).
+fn join_key(
+    exprs: &mut dyn Iterator<Item = (&Expr, KeyDomain)>,
+    row: &[Value],
+    ctx: &ExecContext,
+) -> Result<Option<Vec<Value>>> {
+    let mut key = Vec::new();
+    for (e, domain) in exprs {
+        let v = eval(e, row, ctx)?;
+        if v.is_null() {
+            return Ok(None);
         }
+        key.push(normalize_key(v, domain));
+    }
+    Ok(Some(key))
+}
+
+/// Hash equi-join. The build side is materialized into a hash table on its
+/// key values; the probe side streams. For LEFT joins the probe side is the
+/// left input and unmatched probe rows are padded with NULLs.
+struct HashJoinOp {
+    probe: Box<dyn Operator>,
+    build_input: Option<Box<dyn Operator>>,
+    keys: Vec<JoinKey>,
+    residual: Option<Expr>,
+    left_join: bool,
+    /// The build side is the left input (output columns stay left ++ right).
+    build_left: bool,
+    left_width: usize,
+    right_width: usize,
+    table: HashMap<Vec<Value>, Vec<usize>>,
+    build_rows: Vec<Row>,
+    out: VecDeque<Row>,
+}
+
+impl HashJoinOp {
+    fn build_keys(&self) -> impl Iterator<Item = (&Expr, KeyDomain)> {
+        self.keys
+            .iter()
+            .map(move |k| (if self.build_left { &k.left } else { &k.right }, k.domain))
+    }
+
+    fn probe_keys(&self) -> impl Iterator<Item = (&Expr, KeyDomain)> {
+        self.keys
+            .iter()
+            .map(move |k| (if self.build_left { &k.right } else { &k.left }, k.domain))
+    }
+
+    fn build_table(&mut self, mut input: Box<dyn Operator>, ctx: &ExecContext) -> Result<()> {
+        while let Some(row) = input.next(ctx)? {
+            let key = join_key(&mut self.build_keys(), &row, ctx)?;
+            if let Some(key) = key {
+                ctx.reserve(row_size(&row) + row_size(&key))?;
+                self.table
+                    .entry(key)
+                    .or_default()
+                    .push(self.build_rows.len());
+                self.build_rows.push(row);
+            }
+        }
+        Ok(())
+    }
+
+    /// Joins one probe row, queueing the output rows.
+    fn probe_row(&mut self, row: Row, ctx: &ExecContext) -> Result<()> {
+        let key = join_key(&mut self.probe_keys(), &row, ctx)?;
+        let mut matched = false;
+        if let Some(candidates) = key.as_ref().and_then(|k| self.table.get(k)) {
+            for &i in candidates {
+                let other = &self.build_rows[i];
+                let mut combined = Vec::with_capacity(self.left_width + self.right_width);
+                if self.build_left {
+                    combined.extend_from_slice(other);
+                    combined.extend_from_slice(&row);
+                } else {
+                    combined.extend_from_slice(&row);
+                    combined.extend_from_slice(other);
+                }
+                if let Some(r) = &self.residual
+                    && !eval_predicate(r, &combined, ctx)?
+                {
+                    continue;
+                }
+                matched = true;
+                ctx.count_join_rows(1)?;
+                self.out.push_back(combined);
+            }
+        }
+        if !matched && self.left_join {
+            let mut padded = row;
+            padded.resize(self.left_width + self.right_width, Value::Null);
+            ctx.count_join_rows(1)?;
+            self.out.push_back(padded);
+        }
+        Ok(())
+    }
+}
+
+impl Operator for HashJoinOp {
+    fn next(&mut self, ctx: &ExecContext) -> Result<Option<Row>> {
+        if let Some(input) = self.build_input.take() {
+            self.build_table(input, ctx)?;
+        }
+        loop {
+            if let Some(row) = self.out.pop_front() {
+                return Ok(Some(row));
+            }
+            match self.probe.next(ctx)? {
+                Some(row) => self.probe_row(row, ctx)?,
+                None => return Ok(None),
+            }
+        }
+    }
+}
+
+/// Nested-loop join (any predicate, CROSS joins). The right input is
+/// materialized once.
+struct NestedLoopJoinOp {
+    left: Box<dyn Operator>,
+    right_input: Option<Box<dyn Operator>>,
+    right_rows: Vec<Row>,
+    predicate: Option<Expr>,
+    left_join: bool,
+    right_width: usize,
+    out: VecDeque<Row>,
+}
+
+impl Operator for NestedLoopJoinOp {
+    fn next(&mut self, ctx: &ExecContext) -> Result<Option<Row>> {
+        if let Some(mut input) = self.right_input.take() {
+            while let Some(row) = input.next(ctx)? {
+                ctx.reserve(row_size(&row))?;
+                self.right_rows.push(row);
+            }
+        }
+        loop {
+            if let Some(row) = self.out.pop_front() {
+                return Ok(Some(row));
+            }
+            let Some(left) = self.left.next(ctx)? else {
+                return Ok(None);
+            };
+            let mut matched = false;
+            for (i, right) in self.right_rows.iter().enumerate() {
+                if i % CHECK_INTERVAL == CHECK_INTERVAL - 1 {
+                    ctx.check_interrupt()?;
+                }
+                let mut combined = Vec::with_capacity(left.len() + right.len());
+                combined.extend_from_slice(&left);
+                combined.extend_from_slice(right);
+                if let Some(p) = &self.predicate
+                    && !eval_predicate(p, &combined, ctx)?
+                {
+                    continue;
+                }
+                matched = true;
+                ctx.count_join_rows(1)?;
+                self.out.push_back(combined);
+            }
+            if !matched && self.left_join {
+                let mut padded = left;
+                padded.resize(padded.len() + self.right_width, Value::Null);
+                ctx.count_join_rows(1)?;
+                self.out.push_back(padded);
+            }
+        }
+    }
+}
+
+/// Streams the first occurrence of each distinct row.
+struct DistinctOp {
+    input: Box<dyn Operator>,
+    seen: HashSet<Row>,
+}
+
+impl Operator for DistinctOp {
+    fn next(&mut self, ctx: &ExecContext) -> Result<Option<Row>> {
+        while let Some(row) = self.input.next(ctx)? {
+            if !self.seen.contains(&row) {
+                ctx.reserve(row_size(&row) * 2)?;
+                self.seen.insert(row.clone());
+                return Ok(Some(row));
+            }
+        }
+        Ok(None)
     }
 }
 

@@ -11,7 +11,12 @@ pub struct Pos {
 }
 
 impl Pos {
+    /// Attaches this position to `err` unless it already carries one (the
+    /// innermost, most precise position wins).
     pub fn error(self, err: Error) -> Error {
+        if err.details.iter().any(|(k, _)| k == "line") {
+            return err;
+        }
         err.with_detail("line", Json::uint(self.line as u64))
             .with_detail("column", Json::uint(self.column as u64))
     }
