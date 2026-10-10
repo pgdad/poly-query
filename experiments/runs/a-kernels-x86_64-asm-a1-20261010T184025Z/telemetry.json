@@ -1,0 +1,78 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-kernels-x86_64-asm-a1-20261010T184025Z",
+ "language": "x86_64-asm",
+ "task": "kernels",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-kernels",
+ "prompt_sha256": "743b07514dc44b1a489730414d3e36aac9e758001bad7db6550dcdbc734d5bb4",
+ "session_id": "f57ac8b0-3156-440c-a06e-b358e7c1d834",
+ "tokens": {
+  "input": 162,
+  "output": 274268,
+  "cache_read": 18488912,
+  "cache_creation": 350092,
+  "thinking": null,
+  "thinking_estimated": 133177,
+  "source": "result events",
+  "api_messages": 81
+ },
+ "rate_limit": {
+  "events": 20,
+  "max_utilization": {
+   "seven_day": 0.07,
+   "five_hour": 0.33
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 11.984526399999998,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 83,
+ "result_segments": 1,
+ "assistant_messages": 229,
+ "tool_calls": {
+  "Bash": 77,
+  "Write": 4,
+  "Edit": 1
+ },
+ "tool_calls_total": 82,
+ "tool_failures": 2,
+ "build_invocations": 50,
+ "build_failures_heuristic": 3,
+ "conformance_runs": 0,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 2468.0,
+  "model_api_seconds": 2342.9,
+  "tool_seconds": 124.7,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 11,
+  "files_changed": 10,
+  "lines_added": 5290,
+  "lines_removed": 0,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "All 16 kernels are now written in x86-64 assembly as three complete variants: scalar, AVX2 and the optional AVX-512. `make -C native-kernels test` passes, with all three variants reporting `16/16 kernels PASS`, both natively and in the ASan/UBSan build. Everything is committed, nothing outside `native-kernels/x86_64/` was changed, and the working tree is clean.\n\n**What was built**\n- **`pqk_x86_scalar.S`**: plain x86-64 only (no POPCNT/BMI/AVX), so it runs on any x86-64 CPU. Every kernel gives exactly the reference's results, including floating-point sum and min/max.\n- **`pqk_x86_avx2.S`**: the required SIMD variant (AVX2 + BMI1/BMI2 + POPCNT).\n  - Predicates turn each 64-row block into a bit mask; `filter_i64` writes its indices branch-free with `pdep`/`pext`.\n  - `sum_i64` is exact: it keeps three per-lane sums and folds them into a 128-bit total.\n  - `hash_i64` emulates the 64-bit multiply.\n  - `compare_fixed` is branch-free per record.\n- **`pqk_x86_avx512.S`**: the optional variant. It uses only F/BW/VL/DQ, because those are the only features the dispatcher checks. It uses k-masks, `vpcompressd`, native 64-bit min/max and multiply, fault-safe masked tails, and aligns the main loop for 64-byte loads.\n\n**Extra verification** (`x86_64/verify/run.sh`; test tools only, not linked into the library)\n- **Buffer bounds:** every buffer ends or starts at an inaccessible memory page, which catches out-of-bounds reads that ASan can't see in assembly.\n- **Edge cases:** wide `compare_fixed` records, `ngroups` of 0 and 2^33, extreme sums, and the `sum_i64` chunk-fold path built with tiny chunks.\n- **Calling convention:** checks callee-saved registers, stack pointer, direction flag and that `vzeroupper` ran; a deliberately broken control function is caught.\n\nAll of these pass.\n\n**Speedups vs the C reference** (4M rows, ns per row). The CPU has one core group with 96 MB of cache, where the 32 MB test columns stay in cache, and one with 32 MB, where they come from main memory. The unpinned official `make bench` run landed on the main-memory side.\n\n| kernel | AVX2 (in cache / from memory) | AVX-512 (in cache / from memory) |\n|---|---|---|\n| filter_i64 (10% selected) | 5.2\u00d7 / 3.8\u00d7 | 8.2\u00d7 / 4.8\u00d7 |\n| filter_i64_bitmap | 34\u00d7 / 19\u00d7 | 43\u00d7 / 20\u00d7 |\n| count_i64 (BETWEEN) | 3.9\u00d7 / 2.8\u00d7 | 6.1\u00d7 / 2.8\u00d7 |\n| sum_i64 (with validity) | 3.0\u00d7 / 2.3\u00d7 | 6.5\u00d7 / 2.8\u00d7 |\n| sum_f64 | 6.7\u00d7 / 3.0\u00d7 | 7.2\u00d7 / 3.7\u00d7 |\n| minmax_i64 | 5.2\u00d7 / 3.5\u00d7 | 11\u00d7 / 4.7\u00d7 |\n| bitmap_popcount | 57\u00d7 | 113\u2013128\u00d7 |\n| compare_i64 | 21\u00d7 / 8.9\u00d7 | 18\u00d7 / 9.0\u00d7 |\n| hash_i64 | 1.75\u00d7 / 1.3\u00d7 | 5.1\u00d7 / 1.4\u00d7 |\n| group_sum_i64 | 1.6\u00d7 / 1.45\u00d7 | 1.6\u00d7 / 1.45\u00d7 |\n| gather_i64 | ~1.0\u20131.3\u00d7 | ~1.2\u20131.3\u00d7 |\n\n`compare_fixed` isn't in the benchmark; measured separately it is 3.4\u20135\u00d7 faster than the reference for records up to 32 bytes.\n\n**Measurement findings that changed the design** (all documented in the README):\n- **Masked loads:** loads that skip lanes by mask were up to 4\u00d7 slower when data comes from main memory, so hot loops use plain loads and apply the mask afterwards.\n- **Scalar loop direction:** my first scalar predicate loop walked each block backwards. That defeated the hardware prefetcher (2.3+ ns/row from memory), so it now walks forward (~0.3 ns/row).\n- **Gather instruction:** it was slower than plain loads when data comes from main memory, so it isn't used.\n\n**Limitations**\n- Scalar `bitmap_and/or/andnot` run at about 0.75\u00d7 the reference, because the compiler auto-vectorizes the reference and the scalar variant avoids SIMD by design.\n- `sum_f64` in the SIMD variants adds in a different order, so it isn't bit-identical to the reference; the header allows this.\n- `gather_i64` and `group_sum_i64` are limited by memory latency and scattered updates, so they gain only modestly.\n- There is no software prefetch and no non-temporal stores.\n- All tuning was done on this one AMD Zen 5 machine (`perf` was broken here, so I used wall-clock benchmarks). Choices about masked loads, gathers and popcount may need revisiti",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

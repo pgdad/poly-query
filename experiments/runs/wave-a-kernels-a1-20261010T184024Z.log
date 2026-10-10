@@ -4,3 +4,7 @@
 2026-10-10T19:08:45+00:00 [a-kernels-arm64-asm-a1-20261010T184024Z] agent finished; collecting telemetry
 2026-10-10T19:08:45+00:00 [a-kernels-arm64-asm-a1-20261010T184024Z] validating (clean clone, sandboxed)
 2026-10-10T19:08:46+00:00 [a-kernels-arm64-asm-a1-20261010T184024Z] outcome=success cost=$4.7987362 turns=26 wall=1698.6s
+2026-10-10T19:21:39+00:00 [a-kernels-x86_64-asm-a1-20261010T184025Z] agent finished; collecting telemetry
+2026-10-10T19:21:39+00:00 [a-kernels-x86_64-asm-a1-20261010T184025Z] validating (clean clone, sandboxed)
+2026-10-10T19:21:43+00:00 [a-kernels-x86_64-asm-a1-20261010T184025Z] outcome=success cost=$11.984526399999998 turns=83 wall=2468.0s
+2026-10-10T19:21:43+00:00 wave wave-a-kernels-a1-20261010T184024Z finished: arm64=success, x86_64=success

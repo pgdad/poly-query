@@ -1,0 +1,551 @@
+{
+ "seconds": 4.0,
+ "status": {
+  "test_exit": "0",
+  "bench_exit": "0"
+ },
+ "variants": {
+  "x86_scalar": {
+   "kernels": 16,
+   "status": "PASS"
+  },
+  "x86_avx2": {
+   "kernels": 16,
+   "status": "PASS"
+  },
+  "x86_avx512": {
+   "kernels": 16,
+   "status": "PASS"
+  }
+ },
+ "required": [
+  "x86_scalar",
+  "x86_avx2"
+ ],
+ "emulated": false,
+ "bench": [
+  {
+   "variant": "reference",
+   "kernel": "filter_i64_sel10",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 3124057,
+   "min_ns": 3091735,
+   "max_ns": 3547015,
+   "ns_per_elem": 0.7448
+  },
+  {
+   "variant": "reference",
+   "kernel": "filter_i64_bitmap",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 11376560,
+   "min_ns": 11113929,
+   "max_ns": 11429451,
+   "ns_per_elem": 2.7124
+  },
+  {
+   "variant": "reference",
+   "kernel": "count_i64_between",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1495025,
+   "min_ns": 1470308,
+   "max_ns": 1581330,
+   "ns_per_elem": 0.3564
+  },
+  {
+   "variant": "reference",
+   "kernel": "sum_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 970103,
+   "min_ns": 959583,
+   "max_ns": 1091906,
+   "ns_per_elem": 0.2313
+  },
+  {
+   "variant": "reference",
+   "kernel": "sum_i64_validity",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1492390,
+   "min_ns": 1470409,
+   "max_ns": 1545803,
+   "ns_per_elem": 0.3558
+  },
+  {
+   "variant": "reference",
+   "kernel": "sum_f64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1555081,
+   "min_ns": 1527878,
+   "max_ns": 1705137,
+   "ns_per_elem": 0.3708
+  },
+  {
+   "variant": "reference",
+   "kernel": "minmax_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 2240319,
+   "min_ns": 2233687,
+   "max_ns": 2365689,
+   "ns_per_elem": 0.5341
+  },
+  {
+   "variant": "reference",
+   "kernel": "bitmap_and",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 10440,
+   "min_ns": 10149,
+   "max_ns": 17644,
+   "ns_per_elem": 0.0025
+  },
+  {
+   "variant": "reference",
+   "kernel": "bitmap_popcount",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 466301,
+   "min_ns": 462824,
+   "max_ns": 471300,
+   "ns_per_elem": 0.1112
+  },
+  {
+   "variant": "reference",
+   "kernel": "hash_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 2535543,
+   "min_ns": 2514994,
+   "max_ns": 3986685,
+   "ns_per_elem": 0.6045
+  },
+  {
+   "variant": "reference",
+   "kernel": "compare_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 12449249,
+   "min_ns": 12345841,
+   "max_ns": 12591200,
+   "ns_per_elem": 2.9681
+  },
+  {
+   "variant": "reference",
+   "kernel": "group_sum_i64_1024",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 2884569,
+   "min_ns": 2857208,
+   "max_ns": 3012173,
+   "ns_per_elem": 0.6877
+  },
+  {
+   "variant": "reference",
+   "kernel": "gather_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 12173803,
+   "min_ns": 11844675,
+   "max_ns": 14216474,
+   "ns_per_elem": 2.9025
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "filter_i64_sel10",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1466641,
+   "min_ns": 1457183,
+   "max_ns": 1511136,
+   "ns_per_elem": 0.3497
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "filter_i64_bitmap",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1025739,
+   "min_ns": 1003937,
+   "max_ns": 1206264,
+   "ns_per_elem": 0.2446
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "count_i64_between",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1170726,
+   "min_ns": 1161549,
+   "max_ns": 1205091,
+   "ns_per_elem": 0.2791
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "sum_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 919406,
+   "min_ns": 906050,
+   "max_ns": 949994,
+   "ns_per_elem": 0.2192
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "sum_i64_validity",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1380477,
+   "min_ns": 1376409,
+   "max_ns": 1450812,
+   "ns_per_elem": 0.3291
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "sum_f64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1554499,
+   "min_ns": 1537397,
+   "max_ns": 1588604,
+   "ns_per_elem": 0.3706
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "minmax_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 2232634,
+   "min_ns": 2224940,
+   "max_ns": 2271159,
+   "ns_per_elem": 0.5323
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "bitmap_and",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 14879,
+   "min_ns": 13546,
+   "max_ns": 21371,
+   "ns_per_elem": 0.0035
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "bitmap_popcount",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 56588,
+   "min_ns": 56528,
+   "max_ns": 58712,
+   "ns_per_elem": 0.0135
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "hash_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 2432606,
+   "min_ns": 2405945,
+   "max_ns": 2629012,
+   "ns_per_elem": 0.58
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "compare_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1808084,
+   "min_ns": 1781533,
+   "max_ns": 2038614,
+   "ns_per_elem": 0.4311
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "group_sum_i64_1024",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 2517779,
+   "min_ns": 2499704,
+   "max_ns": 2665602,
+   "ns_per_elem": 0.6003
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "gather_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 10574629,
+   "min_ns": 10448798,
+   "max_ns": 11430834,
+   "ns_per_elem": 2.5212
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "filter_i64_sel10",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 807983,
+   "min_ns": 790170,
+   "max_ns": 844543,
+   "ns_per_elem": 0.1926
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "filter_i64_bitmap",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 544921,
+   "min_ns": 533539,
+   "max_ns": 560099,
+   "ns_per_elem": 0.1299
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "count_i64_between",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 523399,
+   "min_ns": 507349,
+   "max_ns": 561102,
+   "ns_per_elem": 0.1248
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "sum_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 566031,
+   "min_ns": 550071,
+   "max_ns": 588664,
+   "ns_per_elem": 0.135
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "sum_i64_validity",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 654540,
+   "min_ns": 622178,
+   "max_ns": 710868,
+   "ns_per_elem": 0.1561
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "sum_f64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 511918,
+   "min_ns": 459848,
+   "max_ns": 682213,
+   "ns_per_elem": 0.1221
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "minmax_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 625104,
+   "min_ns": 599344,
+   "max_ns": 732058,
+   "ns_per_elem": 0.149
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "bitmap_and",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 9288,
+   "min_ns": 9188,
+   "max_ns": 10289,
+   "ns_per_elem": 0.0022
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "bitmap_popcount",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 7624,
+   "min_ns": 7324,
+   "max_ns": 7655,
+   "ns_per_elem": 0.0018
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "hash_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1942741,
+   "min_ns": 1904067,
+   "max_ns": 2058902,
+   "ns_per_elem": 0.4632
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "compare_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1374615,
+   "min_ns": 1339198,
+   "max_ns": 1521126,
+   "ns_per_elem": 0.3277
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "group_sum_i64_1024",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1984210,
+   "min_ns": 1956257,
+   "max_ns": 2056378,
+   "ns_per_elem": 0.4731
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "gather_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 9658950,
+   "min_ns": 9443638,
+   "max_ns": 11381149,
+   "ns_per_elem": 2.3029
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "filter_i64_sel10",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 760733,
+   "min_ns": 714194,
+   "max_ns": 899388,
+   "ns_per_elem": 0.1814
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "filter_i64_bitmap",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 643038,
+   "min_ns": 597732,
+   "max_ns": 747568,
+   "ns_per_elem": 0.1533
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "count_i64_between",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 570349,
+   "min_ns": 546704,
+   "max_ns": 642547,
+   "ns_per_elem": 0.136
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "sum_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 504494,
+   "min_ns": 483514,
+   "max_ns": 580198,
+   "ns_per_elem": 0.1203
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "sum_i64_validity",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 576040,
+   "min_ns": 531956,
+   "max_ns": 1082127,
+   "ns_per_elem": 0.1373
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "sum_f64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 394434,
+   "min_ns": 332335,
+   "max_ns": 528730,
+   "ns_per_elem": 0.094
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "minmax_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 461772,
+   "min_ns": 417217,
+   "max_ns": 638029,
+   "ns_per_elem": 0.1101
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "bitmap_and",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 9057,
+   "min_ns": 9007,
+   "max_ns": 14418,
+   "ns_per_elem": 0.0022
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "bitmap_popcount",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 4248,
+   "min_ns": 4168,
+   "max_ns": 4369,
+   "ns_per_elem": 0.001
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "hash_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1775120,
+   "min_ns": 1702492,
+   "max_ns": 3133345,
+   "ns_per_elem": 0.4232
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "compare_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1431965,
+   "min_ns": 1393431,
+   "max_ns": 1497019,
+   "ns_per_elem": 0.3414
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "group_sum_i64_1024",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1998738,
+   "min_ns": 1975433,
+   "max_ns": 2087848,
+   "ns_per_elem": 0.4765
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "gather_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 9579918,
+   "min_ns": 9392461,
+   "max_ns": 12714796,
+   "ns_per_elem": 2.284
+  }
+ ],
+ "sve_vector_lengths_bits": null,
+ "native_arm": null,
+ "outcome": "success"
+}
