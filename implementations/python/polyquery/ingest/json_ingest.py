@@ -103,7 +103,7 @@ def _infer_json_type(column: list[Any], name: str) -> DataType:
         return BOOLEAN
     if kind is JsonNumber:
         if all(
-            v.is_integral and values.INT64_MIN <= int(v.text) <= values.INT64_MAX
+            v.is_integral and values.INT64_MIN <= values.int_from_digits(v.text) <= values.INT64_MAX
             for v in column
             if v is not None
         ):

@@ -23,6 +23,7 @@ MIN_DATE = datetime.date(1, 1, 1).toordinal() - _EPOCH_ORDINAL
 MAX_DATE = datetime.date(9999, 12, 31).toordinal() - _EPOCH_ORDINAL
 
 POW10 = [10**i for i in range(40)]
+MAX_DECIMAL_DIGITS = 18
 
 INT_RE = re.compile(r"[+-]?[0-9]+")
 FLOAT_RE = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
@@ -43,11 +44,20 @@ def check_int64(v: int) -> int:
     return v
 
 
+def int_from_digits(text: str) -> int:
+    """Converts ``[+-]?[0-9]+`` text to an int. Values with more than 19
+    significant digits (certainly outside INT64) map to INT64_MAX + 1 or
+    INT64_MIN - 1, which avoids unbounded conversions of huge inputs."""
+    if len(text.lstrip("+-").lstrip("0")) > 19:
+        return INT64_MIN - 1 if text.startswith("-") else INT64_MAX + 1
+    return int(text)
+
+
 def parse_int64(text: str) -> int | None:
     """Parses ``[+-]?[0-9]+``; returns None on syntax error. May be out of range."""
     if INT_RE.fullmatch(text) is None:
         return None
-    return int(text)
+    return int_from_digits(text)
 
 
 # ---------------------------------------------------------------- floats
@@ -135,11 +145,18 @@ def parse_decimal_text(text: str, scale: int, *, exact: bool) -> int | None:
         return None
     sign, body = m.groups()
     int_part, _, frac = body.partition(".")
+    int_part = int_part.lstrip("0")
     if len(frac) > scale:
         if exact:
             raise errors.conversion_error(
                 f"'{text}' has more than {scale} fractional digits"
             )
+        # rounding half away from zero only depends on the first dropped digit
+        frac = frac[: scale + 1]
+    if len(int_part) > MAX_DECIMAL_DIGITS:
+        # does not fit any DECIMAL precision; avoid converting huge digit strings
+        unscaled = POW10[MAX_DECIMAL_DIGITS + scale]
+    elif len(frac) > scale:
         unscaled = round_div(int((int_part or "0") + frac), POW10[len(frac) - scale])
     else:
         unscaled = int((int_part or "0") + frac) * POW10[scale - len(frac)]

@@ -270,19 +270,22 @@ class Binder:
         if "e" in digits or "E" in digits:
             value = float(text)
             if value in (float("inf"), float("-inf")):
-                raise errors.numeric_overflow(f"numeric literal {text} is out of range")
+                raise errors.numeric_overflow(f"numeric literal {text[:40]} is out of range")
             return b.Literal(FLOAT64, value)
         if "." in digits:
             info = values.decimal_literal_type(digits)
             if info is None:
-                return b.Literal(FLOAT64, float(text))
+                value = float(text)
+                if value in (float("inf"), float("-inf")):
+                    raise errors.numeric_overflow(f"numeric literal {text[:40]} is out of range")
+                return b.Literal(FLOAT64, value)
             unscaled, precision, scale = info
             return b.Literal(
                 DataType(TypeKind.DECIMAL, precision, scale), -unscaled if negative else unscaled
             )
-        value = int(text)
+        value = values.int_from_digits(text)
         if not values.INT64_MIN <= value <= values.INT64_MAX:
-            raise errors.numeric_overflow(f"integer literal {text} is out of range")
+            raise errors.numeric_overflow(f"integer literal {text[:40]} is out of range")
         return b.Literal(INT64, value)
 
     def _bind_StringLit(self, node: ast.StringLit, ctx: ExprContext) -> b.Expr:
