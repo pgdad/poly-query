@@ -118,6 +118,14 @@ final class AggregateBatches {
             return 64 + 48L * states.length + 16 + 24L * keys.keyCount();
         }
 
+        /** Makes room for {@code groups} groups (avoids growing while merging). */
+        void ensureCapacity(int groups) {
+            keys.ensureCapacity(groups);
+            for (AggState s : states) {
+                s.grow(groups);
+            }
+        }
+
         /** Merges group g of a partial table into this one; returns the group id here. */
         int merge(Table partial, int g) {
             int before = keys.groupCount();

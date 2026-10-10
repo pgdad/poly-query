@@ -688,7 +688,12 @@ final class Parallel {
                 firsts[w] = first;
                 sizes[w] = ids.length;
             }
-            long[][] out = {new long[16]};
+            int bound = 0;
+            for (int size : sizes) {
+                bound += size;
+            }
+            table.ensureCapacity(bound);
+            long[][] out = {new long[Math.max(16, bound)]};
             kWayMerge(firsts, sizes, (w, idx, i) -> {
                 int before = table.groupCount();
                 int to = table.merge(results.get(w).table(), members[w][idx]);

@@ -394,6 +394,20 @@ final class GroupKeys {
         return groups++;
     }
 
+    /** Makes room for {@code n} groups without further growth or rehashing. */
+    void ensureCapacity(int n) {
+        if (hashes.length < n) {
+            hashes = Arrays.copyOf(hashes, n);
+            keys = Arrays.copyOf(keys, n * Math.max(1, k));
+            nullBits = Arrays.copyOf(nullBits, n * nullWords);
+        }
+        if (index.length < 2L * n) {
+            int cap = Integer.highestOneBit(Math.max(64, 2 * n - 1)) << 1;
+            index = new int[cap / 2];
+            rehash();
+        }
+    }
+
     private void rehash() {
         int cap = index.length * 2;
         index = new int[cap];
