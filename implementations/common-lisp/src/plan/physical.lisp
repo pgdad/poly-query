@@ -3,13 +3,18 @@
 ;;;;
 ;;;; Operator choices:
 ;;;;   Scan       -> TableScan (reads only the pruned columns)
+;;;;   Filter(Scan) -> IndexScan (+ Filter for the remaining conjuncts) when
+;;;;              an index answers a selective conjunct (access.lisp);
+;;;;              otherwise Filter over a TableScan that skips segments whose
+;;;;              statistics exclude a `column op constant` conjunct
 ;;;;   Filter(Scan) with a conjunct `scan-expr = parameter-expr` (a correlated
 ;;;;              subquery's equality with an outer column) -> HashLookupScan:
 ;;;;              the scan is hashed on scan-expr once and probed per evaluation
 ;;;;   Join       -> HashJoin when the condition has equi-join conjuncts
 ;;;;                 (left expr = right expr), the remaining conjuncts being a
-;;;;                 residual; otherwise NestedLoopJoin. The right input is
-;;;;                 the build side.
+;;;;                 residual; otherwise NestedLoopJoin. Inner hash joins
+;;;;                 build on the input with the smaller estimated
+;;;;                 cardinality, LEFT joins on the right input.
 ;;;;   Aggregate  -> HashAggregate
 ;;;;   Distinct   -> HashDistinct
 ;;;;   Sort+Limit -> TopN when the limit is a small constant, else Sort, Limit
@@ -22,7 +27,13 @@
 
 (defstruct (pp-table-scan (:include pnode))
   table label
-  (column-indexes #() :type simple-vector))
+  (column-indexes #() :type simple-vector)
+  (skips '()))                           ; SKIP-PREDICATEs for segment skipping
+
+(defstruct (pp-index-scan (:include pnode))
+  table label
+  (column-indexes #() :type simple-vector)
+  access)                                ; INDEX-ACCESS
 
 (defstruct (pp-lookup-scan (:include pnode))
   table label
@@ -44,6 +55,7 @@
 
 (defstruct (pp-hash-join (:include pnode))
   kind
+  (build :right)                         ; input hashed: :RIGHT or :LEFT (inner joins)
   left-keys                              ; BEXPRs over the left row
   right-keys                             ; BEXPRs over the right row
   residual)                              ; BEXPR over left ++ right, or NIL
@@ -121,7 +133,8 @@ residual-conjuncts); right keys index the right input."
         (lp-values (make-pp-values :columns columns))
         (lp-filter
          (plan-expression-subqueries (list (lp-filter-predicate node)))
-         (or (and (lp-scan-p (lnode-child node)) (plan-lookup-scan node))
+         (or (and (lp-scan-p (lnode-child node))
+                  (or (plan-lookup-scan node) (plan-filtered-scan node)))
              (make-pp-filter :children (list (child)) :predicate (lp-filter-predicate node)
                              :columns columns)))
         (lp-project
@@ -173,6 +186,31 @@ residual-conjuncts); right keys index the right input."
                            :residual (conjoin (nreverse residual))
                            :columns (lnode-columns node)))))
 
+(defun plan-filtered-scan (node)
+  "IndexScan or segment-skipping TableScan (with the residual Filter above)
+for a Filter directly over a Scan."
+  (let* ((scan (lnode-child node))
+         (table (lp-scan-table scan))
+         (column-indexes (lp-scan-column-indexes scan))
+         (conjuncts (split-conjuncts (lp-filter-predicate node)))
+         (preds (analyse-conjuncts conjuncts))
+         (access (choose-index-access table column-indexes preds))
+         (residual (conjoin (if access
+                                (remove-if (lambda (c) (member c (index-access-conjuncts access)))
+                                           conjuncts)
+                                conjuncts)))
+         (input (if access
+                    (make-pp-index-scan :table table :label (lp-scan-label scan)
+                                        :column-indexes column-indexes :access access
+                                        :columns (lnode-columns scan))
+                    (make-pp-table-scan :table table :label (lp-scan-label scan)
+                                        :column-indexes column-indexes
+                                        :skips (make-skip-predicates preds column-indexes)
+                                        :columns (lnode-columns scan)))))
+    (if residual
+        (make-pp-filter :children (list input) :predicate residual :columns (lnode-columns node))
+        input)))
+
 (defun plan-invariant-p (node)
   "True if the rows NODE produces cannot change between executions of an
 enclosing correlated subquery (no correlation parameters anywhere)."
@@ -197,6 +235,10 @@ enclosing correlated subquery (no correlation parameters anywhere)."
           (equi-join-keys condition (lnode-width left) (lnode-width node))
         (if lkeys
             (make-pp-hash-join :kind kind :children (list pleft pright) :columns (lnode-columns node)
+                               :build (if (and (eq kind :inner)
+                                               (< (estimate-rows left) (estimate-rows right)))
+                                          :left
+                                          :right)
                                :left-keys lkeys :right-keys rkeys :residual (conjoin residual))
             (make-pp-nested-loop-join :kind (if (and (null condition) (eq kind :inner)) :cross kind)
                                       :children (list pleft pright)
@@ -205,13 +247,14 @@ enclosing correlated subquery (no correlation parameters anywhere)."
 ;;; ------------------------------------------------------------------
 ;;; EXPLAIN rendering (indexes-and-planning.md §4)
 
-(defun expression-subquery-plans (exprs)
-  (let ((plans '()))
-    (dolist (e exprs (nreverse plans))
+(defun expression-subqueries (exprs)
+  "The planned SUBQUERY descriptors used in EXPRS, in order of appearance."
+  (let ((found '()))
+    (dolist (e exprs (nreverse found))
       (when e
         (bexpr-walk (lambda (x)
                       (when (and (subquery-op-p x) (subquery-plan (b-op-info x)))
-                        (pushnew (subquery-plan (b-op-info x)) plans)))
+                        (pushnew (b-op-info x) found)))
                     e)))))
 
 (defun node-expressions (node)
@@ -234,6 +277,15 @@ enclosing correlated subquery (no correlation parameters anywhere)."
                         (column-def-name (nth pos (pnode-columns (pnode-child node))))
                         desc nulls-first)))
 
+(defun describe-skips (node)
+  (let ((table (pp-table-scan-table node)))
+    (loop for s in (pp-table-scan-skips node)
+          collect (format nil "~A ~(~A~) ~{~A~^, ~}"
+                          (column-def-name (svref (table-columns table) (skip-predicate-column s)))
+                          (skip-predicate-op s)
+                          (mapcar (lambda (v ty) (value-to-text v ty))
+                                  (skip-predicate-constants s) (skip-predicate-constant-types s))))))
+
 (defun join-type-name (kind)
   (ecase kind (:inner "INNER") (:left "LEFT") (:cross "CROSS")))
 
@@ -241,9 +293,20 @@ enclosing correlated subquery (no correlation parameters anywhere)."
   (flet ((describe-all (exprs) (mapcar #'bexpr-describe exprs))
          (maybe (e) (if e (bexpr-describe e) :null)))
     (etypecase node
-      (pp-table-scan (list "op" "TableScan" "table" (table-name (pp-table-scan-table node))
-                           "alias" (pp-table-scan-label node)
-                           "columns" (mapcar #'column-def-name (pnode-columns node))))
+      (pp-table-scan (list* "op" "TableScan" "table" (table-name (pp-table-scan-table node))
+                            "alias" (pp-table-scan-label node)
+                            "columns" (mapcar #'column-def-name (pnode-columns node))
+                            "layout" (table-layout-name (pp-table-scan-table node))
+                            (when (pp-table-scan-skips node)
+                              (list "segment_skipping" (describe-skips node)))))
+      (pp-index-scan (let ((access (pp-index-scan-access node)))
+                       (list "op" "IndexScan" "table" (table-name (pp-index-scan-table node))
+                             "alias" (pp-index-scan-label node)
+                             "index" (table-index-name (index-access-index access))
+                             "kind" (table-index-kind-name (index-access-index access))
+                             "columns" (mapcar #'column-def-name (pnode-columns node))
+                             "lookup" (describe-all (index-access-conjuncts access))
+                             "selectivity" (coerce (index-access-selectivity access) 'double-float))))
       (pp-lookup-scan (list "op" "HashLookupScan" "table" (table-name (pp-lookup-scan-table node))
                             "alias" (pp-lookup-scan-label node)
                             "columns" (mapcar #'column-def-name (pnode-columns node))
@@ -258,7 +321,7 @@ enclosing correlated subquery (no correlation parameters anywhere)."
                                  "join_type" (join-type-name (pp-nested-loop-join-kind node))
                                  "condition" (maybe (pp-nested-loop-join-condition node))))
       (pp-hash-join (list "op" "HashJoin" "join_type" (join-type-name (pp-hash-join-kind node))
-                          "build" "right"
+                          "build" (string-downcase (symbol-name (pp-hash-join-build node)))
                           "left_keys" (describe-all (pp-hash-join-left-keys node))
                           "right_keys" (describe-all (pp-hash-join-right-keys node))
                           "residual" (maybe (pp-hash-join-residual node))))
@@ -274,10 +337,19 @@ enclosing correlated subquery (no correlation parameters anywhere)."
                       "offset" (maybe (pp-top-n-offset node)))))))
 
 (defun explain-plan-json (node)
-  "The EXPLAIN JSON object of physical plan NODE. Subquery plans are listed
-under \"subqueries\" (not as children: they are separate executions)."
-  (let ((subplans (expression-subquery-plans (node-expressions node))))
-    (apply #'jobj (append (explain-properties node)
-                          (when subplans
-                            (list "subqueries" (mapcar #'explain-plan-json subplans)))
-                          (list "children" (mapcar #'explain-plan-json (pnode-children node)))))))
+  "The EXPLAIN JSON object of physical plan NODE. The plans of subqueries
+evaluated by NODE follow its input children, each wrapped in a `Subquery`
+node (they are separate executions, not inputs)."
+  (apply #'jobj
+         (append (explain-properties node)
+                 (list "children"
+                       (append (mapcar #'explain-plan-json (pnode-children node))
+                               (mapcar (lambda (sq)
+                                         (jobj "op" "Subquery"
+                                               "kind" (string-downcase
+                                                       (symbol-name (subquery-kind sq)))
+                                               "correlated" (if (plusp (subquery-param-count sq))
+                                                                :true :false)
+                                               "children" (list (explain-plan-json
+                                                                 (subquery-plan sq)))))
+                                       (expression-subqueries (node-expressions node))))))))
