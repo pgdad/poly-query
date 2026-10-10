@@ -1,9 +1,9 @@
-//! Logical query plans.
+//! Logical query plans: the relational algebra produced by semantic analysis
+//! and rewritten by the optimizer.
 
 use std::sync::Arc;
 
 use super::expr::{AggregateCall, Expr};
-use crate::json::Json;
 use crate::storage::{Field, Table};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -13,11 +13,29 @@ pub struct SortKey {
     pub nulls_first: bool,
 }
 
+/// Join types of the logical plan (semantics.md §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinType {
+    Inner,
+    Left,
+    Cross,
+}
+
+impl JoinType {
+    pub fn name(self) -> &'static str {
+        match self {
+            JoinType::Inner => "INNER",
+            JoinType::Left => "LEFT",
+            JoinType::Cross => "CROSS",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
     /// A single row with no columns (`SELECT` without `FROM`).
     SingleRow,
-    /// Full scan of a table, producing the listed columns in order.
+    /// Scan of a table, producing the listed columns in order.
     Scan {
         table: Arc<Table>,
         columns: Vec<usize>,
@@ -32,13 +50,25 @@ pub enum LogicalPlan {
         exprs: Vec<Expr>,
         schema: Vec<Field>,
     },
-    /// Output: group keys followed by aggregate values.
+    /// Output: group keys followed by aggregate values. Without group keys
+    /// there is exactly one output row.
     Aggregate {
         input: Box<LogicalPlan>,
         group_by: Vec<Expr>,
         aggregates: Vec<AggregateCall>,
         schema: Vec<Field>,
     },
+    /// Output: left columns followed by right columns. `on` is evaluated over
+    /// that combined row.
+    Join {
+        left: Box<LogicalPlan>,
+        right: Box<LogicalPlan>,
+        join_type: JoinType,
+        on: Option<Expr>,
+        schema: Vec<Field>,
+    },
+    /// Removes duplicate rows (NULLs equal).
+    Distinct { input: Box<LogicalPlan> },
     Sort {
         input: Box<LogicalPlan>,
         keys: Vec<SortKey>,
@@ -56,98 +86,96 @@ impl LogicalPlan {
             LogicalPlan::SingleRow => &[],
             LogicalPlan::Scan { schema, .. }
             | LogicalPlan::Project { schema, .. }
-            | LogicalPlan::Aggregate { schema, .. } => schema,
+            | LogicalPlan::Aggregate { schema, .. }
+            | LogicalPlan::Join { schema, .. } => schema,
             LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Distinct { input }
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::Limit { input, .. } => input.schema(),
         }
     }
 
-    /// Plan as a JSON tree (indexes-and-planning.md §4 node format).
-    pub fn to_json(&self) -> Json {
-        let names =
-            |fields: &[Field]| Json::Array(fields.iter().map(|f| Json::str(&f.name)).collect());
-        let node = |op: &str, mut props: Vec<(&str, Json)>, children: Vec<&LogicalPlan>| {
-            let mut fields = vec![("op", Json::str(op))];
-            fields.append(&mut props);
-            fields.push((
-                "children",
-                Json::Array(children.into_iter().map(|c| c.to_json()).collect()),
-            ));
-            Json::object(fields)
-        };
+    pub fn width(&self) -> usize {
+        self.schema().len()
+    }
+
+    /// Builds a join node, deriving its schema.
+    pub fn join(
+        left: LogicalPlan,
+        right: LogicalPlan,
+        join_type: JoinType,
+        on: Option<Expr>,
+    ) -> LogicalPlan {
+        let schema = left
+            .schema()
+            .iter()
+            .chain(right.schema())
+            .cloned()
+            .collect();
+        LogicalPlan::Join {
+            left: Box::new(left),
+            right: Box::new(right),
+            join_type,
+            on,
+            schema,
+        }
+    }
+
+    pub fn filter(input: LogicalPlan, predicate: Option<Expr>) -> LogicalPlan {
+        match predicate {
+            Some(predicate) => LogicalPlan::Filter {
+                input: Box::new(input),
+                predicate,
+            },
+            None => input,
+        }
+    }
+
+    /// Calls `f` for every expression of this plan tree (not descending into
+    /// subquery plans).
+    pub fn visit_exprs(&self, f: &mut dyn FnMut(&Expr)) {
         match self {
-            LogicalPlan::SingleRow => node("Values", vec![("rows", Json::int(1))], vec![]),
-            LogicalPlan::Scan { table, schema, .. } => node(
-                "TableScan",
-                vec![
-                    ("table", Json::str(&table.name)),
-                    ("columns", names(schema)),
-                ],
-                vec![],
-            ),
-            LogicalPlan::Filter { input, predicate } => node(
-                "Filter",
-                vec![("predicate", Json::String(predicate.display()))],
-                vec![input],
-            ),
-            LogicalPlan::Project { input, schema, .. } => {
-                node("Project", vec![("columns", names(schema))], vec![input])
+            LogicalPlan::SingleRow | LogicalPlan::Scan { .. } => {}
+            LogicalPlan::Filter { input, predicate } => {
+                f(predicate);
+                input.visit_exprs(f);
+            }
+            LogicalPlan::Project { input, exprs, .. } => {
+                exprs.iter().for_each(&mut *f);
+                input.visit_exprs(f);
             }
             LogicalPlan::Aggregate {
                 input,
                 group_by,
                 aggregates,
                 ..
-            } => node(
-                "Aggregate",
-                vec![
-                    (
-                        "group_by",
-                        Json::Array(group_by.iter().map(|e| Json::String(e.display())).collect()),
-                    ),
-                    (
-                        "aggregates",
-                        Json::Array(
-                            aggregates
-                                .iter()
-                                .map(|a| Json::String(a.display()))
-                                .collect(),
-                        ),
-                    ),
-                ],
-                vec![input],
-            ),
-            LogicalPlan::Sort { input, keys } => node(
-                "Sort",
-                vec![(
-                    "keys",
-                    Json::Array(
-                        keys.iter()
-                            .map(|k| {
-                                Json::String(format!(
-                                    "{} {}",
-                                    k.expr.display(),
-                                    if k.descending { "DESC" } else { "ASC" }
-                                ))
-                            })
-                            .collect(),
-                    ),
-                )],
-                vec![input],
-            ),
-            LogicalPlan::Limit {
-                input,
-                offset,
-                limit,
-            } => node(
-                "Limit",
-                vec![
-                    ("offset", Json::uint(*offset)),
-                    ("limit", limit.map(Json::uint).unwrap_or(Json::Null)),
-                ],
-                vec![input],
-            ),
+            } => {
+                group_by.iter().for_each(&mut *f);
+                for a in aggregates {
+                    if let Some(arg) = &a.arg {
+                        f(arg);
+                    }
+                }
+                input.visit_exprs(f);
+            }
+            LogicalPlan::Join {
+                left, right, on, ..
+            } => {
+                if let Some(on) = on {
+                    f(on);
+                }
+                left.visit_exprs(f);
+                right.visit_exprs(f);
+            }
+            LogicalPlan::Distinct { input } | LogicalPlan::Limit { input, .. } => {
+                input.visit_exprs(f)
+            }
+            LogicalPlan::Sort { input, keys } => {
+                for k in keys {
+                    f(&k.expr);
+                }
+                input.visit_exprs(f);
+            }
         }
     }
 }

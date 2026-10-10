@@ -26,6 +26,13 @@ pub const CAPABILITIES: &[&str] = &[
     "ingest.jsonl",
     "sql.basic",
     "test.functions",
+    "phase2",
+    "sql.groupby",
+    "sql.join",
+    "sql.functions",
+    "sql.subquery",
+    "sql.cte",
+    "sql.correlated_subquery",
 ];
 
 /// The `version` response body (without id).
@@ -225,6 +232,9 @@ fn execute(engine: &mut Engine, req: Request, started: Instant) -> Result<Json> 
                 )]),
             ));
             body
+        }
+        Request::Explain { sql, options } => {
+            vec![ok(), ("plan", engine.explain(&sql, &options)?)]
         }
         Request::Sleep { ms } => {
             std::thread::sleep(Duration::from_millis(ms));

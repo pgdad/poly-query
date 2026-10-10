@@ -10,10 +10,13 @@ use crate::config::Config;
 use crate::error::{Error, ErrorCode, Result};
 use crate::exec::{ExecContext, Row, build};
 use crate::ingest::{self, Format, IngestOptions};
-use crate::planner::{BindContext, LogicalPlan, plan_query};
-use crate::sql::ast::Statement;
+use crate::json::Json;
+use crate::planner::physical::{self, JoinStrategy};
+use crate::planner::{BindContext, PhysicalOptions, PhysicalPlan, optimizer, plan_query};
+use crate::sql::ast::{Query, Statement};
 use crate::sql::parse_statement;
 use crate::storage::{Field, Table};
+use crate::types::{DataType, Value};
 
 /// Where load input comes from.
 #[derive(Debug, Clone)]
@@ -43,6 +46,14 @@ pub struct QueryOptions {
     pub timeout_ms: u64,
     /// Count rows only, without materializing them.
     pub count_only: bool,
+    /// Join algorithm preference.
+    pub join: JoinStrategy,
+}
+
+impl QueryOptions {
+    fn physical(&self) -> PhysicalOptions {
+        PhysicalOptions { join: self.join }
+    }
 }
 
 #[derive(Debug)]
@@ -166,30 +177,64 @@ impl Engine {
             .ok_or_else(|| Error::not_found(format!("table '{name}' does not exist")))
     }
 
-    /// Parses and plans a SQL statement.
-    pub fn plan(&self, sql: &str) -> Result<LogicalPlan> {
-        let stmt = parse_statement(sql)?;
+    /// Binds, optimizes and physically plans a query.
+    fn plan_query(&self, q: &Query, opts: &QueryOptions) -> Result<PhysicalPlan> {
         let ctx = BindContext {
             catalog: &self.catalog,
             test_functions: self.config.test_functions,
         };
-        match stmt {
-            Statement::Query(q) => plan_query(&q, &ctx),
-            Statement::Explain(_) => Err(Error::unsupported("EXPLAIN is not supported")),
+        let logical = optimizer::optimize(plan_query(q, &ctx)?);
+        Ok(physical::lower(&logical, opts.physical()))
+    }
+
+    /// The physical plan of a query (`explain` op; also accepts `EXPLAIN …`).
+    pub fn explain(&self, sql: &str, opts: &QueryOptions) -> Result<Json> {
+        match parse_statement(sql)? {
+            Statement::Query(q) | Statement::Explain(q) => Ok(self.plan_query(&q, opts)?.to_json()),
             Statement::CreateIndex { .. } | Statement::DropIndex { .. } => {
                 Err(Error::unsupported("indexes are not supported"))
             }
         }
     }
 
-    /// Executes a query.
+    /// Executes a SQL statement.
     pub fn query(&self, sql: &str, opts: &QueryOptions) -> Result<QueryResult> {
-        let plan = self.plan(sql)?;
-        let columns = plan.schema().to_vec();
+        match parse_statement(sql)? {
+            Statement::Query(q) => {
+                let plan = self.plan_query(&q, opts)?;
+                self.execute(plan, opts)
+            }
+            Statement::Explain(q) => {
+                let plan = self.plan_query(&q, opts)?;
+                let text = plan.to_json().to_string_compact();
+                Ok(QueryResult {
+                    columns: vec![Field::new("plan", DataType::String)],
+                    rows: if opts.count_only {
+                        Vec::new()
+                    } else {
+                        vec![vec![Value::str(&text)]]
+                    },
+                    row_count: 1,
+                })
+            }
+            Statement::CreateIndex { .. } | Statement::DropIndex { .. } => {
+                Err(Error::unsupported("indexes are not supported"))
+            }
+        }
+    }
+
+    fn execute(&self, plan: PhysicalPlan, opts: &QueryOptions) -> Result<QueryResult> {
+        let columns = plan
+            .schema()
+            .iter()
+            .map(|f| Field::new(f.name.clone(), f.data_type.result_type()))
+            .collect();
         let timeout = (opts.timeout_ms > 0).then(|| Duration::from_millis(opts.timeout_ms));
         let memory = usize::try_from(self.config.max_query_memory_mb.saturating_mul(1024 * 1024))
             .unwrap_or(usize::MAX);
-        let ctx = ExecContext::new(timeout, memory, self.config.test_functions);
+        let ctx = ExecContext::new(timeout, memory, self.config.test_functions)
+            .with_max_join_rows(self.config.max_join_rows)
+            .with_physical_options(opts.physical());
         let mut root = build(plan);
         let mut rows = Vec::new();
         let mut row_count: u64 = 0;
@@ -321,5 +366,169 @@ mod tests {
             e.query("SELECT id FROM t", &max).unwrap_err().code,
             ErrorCode::ResourceLimit
         );
+    }
+
+    fn load(e: &mut Engine, table: &str, csv: &str) {
+        e.load(LoadRequest {
+            table: table.into(),
+            format: Format::Csv,
+            source: Source::Data(csv.into()),
+            schema: None,
+            header: true,
+            delimiter: b',',
+            replace: false,
+        })
+        .unwrap();
+    }
+
+    /// `t` plus `u(id, tag)` with a NULL key and an unmatched key.
+    fn engine2() -> Engine {
+        let mut e = engine();
+        load(&mut e, "u", "id,tag\n1,x\n1,y\n3,z\n,w\n9,q\n");
+        e
+    }
+
+    fn ints(v: &[i64]) -> Vec<Row> {
+        v.iter().map(|&i| vec![Value::Int(i)]).collect()
+    }
+
+    #[test]
+    fn joins() {
+        let e = engine2();
+        let r = rows(
+            &e,
+            "SELECT t.id, u.tag FROM t JOIN u ON t.id = u.id ORDER BY u.tag",
+        );
+        assert_eq!(
+            r,
+            vec![
+                vec![Value::Int(1), Value::str("x")],
+                vec![Value::Int(1), Value::str("y")],
+                vec![Value::Int(3), Value::str("z")],
+            ]
+        );
+        let r = rows(
+            &e,
+            "SELECT t.id FROM t LEFT JOIN u ON u.id = t.id WHERE u.tag IS NULL",
+        );
+        assert_eq!(r, ints(&[2]));
+        let r = rows(&e, "SELECT COUNT(*) FROM t, u");
+        assert_eq!(r, ints(&[15]));
+        // Non-equi join (nested loop) and the explicit nested-loop strategy.
+        let r = rows(&e, "SELECT COUNT(*) FROM t JOIN u ON t.id < u.id");
+        assert_eq!(r, ints(&[5]));
+        let nl = QueryOptions {
+            join: JoinStrategy::NestedLoop,
+            ..Default::default()
+        };
+        let r = e
+            .query("SELECT COUNT(*) FROM t JOIN u ON t.id = u.id", &nl)
+            .unwrap()
+            .rows;
+        assert_eq!(r, ints(&[3]));
+    }
+
+    #[test]
+    fn grouping_and_distinct() {
+        let e = engine2();
+        let r = rows(
+            &e,
+            "SELECT id, COUNT(*) AS n FROM u GROUP BY id HAVING COUNT(*) > 1",
+        );
+        assert_eq!(r, vec![vec![Value::Int(1), Value::Int(2)]]);
+        let r = rows(&e, "SELECT DISTINCT id FROM u ORDER BY id NULLS LAST");
+        assert_eq!(
+            r,
+            vec![
+                vec![Value::Int(1)],
+                vec![Value::Int(3)],
+                vec![Value::Int(9)],
+                vec![Value::Null]
+            ]
+        );
+        let r = rows(
+            &e,
+            "SELECT id + 1 AS k FROM u GROUP BY 1 ORDER BY k DESC LIMIT 1",
+        );
+        assert_eq!(r, ints(&[10]));
+        let code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
+        assert_eq!(
+            code("SELECT tag FROM u GROUP BY id"),
+            ErrorCode::SemanticError
+        );
+        assert_eq!(
+            code("SELECT DISTINCT id FROM u ORDER BY tag"),
+            ErrorCode::SemanticError
+        );
+    }
+
+    #[test]
+    fn subqueries_and_ctes() {
+        let e = engine2();
+        let r = rows(
+            &e,
+            "SELECT id FROM t WHERE id IN (SELECT id FROM u) ORDER BY id",
+        );
+        assert_eq!(r, ints(&[1, 3]));
+        // NOT IN over a set containing NULL is never TRUE.
+        let r = rows(&e, "SELECT id FROM t WHERE id NOT IN (SELECT id FROM u)");
+        assert!(r.is_empty());
+        // Correlated scalar subquery.
+        let r = rows(
+            &e,
+            "SELECT t.id, (SELECT COUNT(*) FROM u WHERE u.id = t.id) FROM t ORDER BY 1",
+        );
+        assert_eq!(
+            r,
+            vec![
+                vec![Value::Int(1), Value::Int(2)],
+                vec![Value::Int(2), Value::Int(0)],
+                vec![Value::Int(3), Value::Int(1)],
+            ]
+        );
+        let r = rows(
+            &e,
+            "WITH a AS (SELECT id FROM t WHERE id > 1), b(x) AS (SELECT id * 10 FROM a) \
+             SELECT x FROM b ORDER BY x",
+        );
+        assert_eq!(r, ints(&[20, 30]));
+        let code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
+        assert_eq!(
+            code("SELECT (SELECT id FROM u)"),
+            ErrorCode::SubqueryCardinality
+        );
+        assert_eq!(
+            code("SELECT (SELECT id, tag FROM u)"),
+            ErrorCode::SemanticError
+        );
+        assert_eq!(
+            code("WITH a AS (SELECT * FROM a) SELECT 1"),
+            ErrorCode::SemanticError
+        );
+    }
+
+    #[test]
+    fn explain() {
+        let e = engine2();
+        let plan = e
+            .explain(
+                "SELECT t.name FROM t JOIN u ON t.id = u.id WHERE u.tag = 'x'",
+                &QueryOptions::default(),
+            )
+            .unwrap()
+            .to_string_compact();
+        assert!(
+            plan.contains(r#""op":"HashJoin","join_type":"INNER""#),
+            "{plan}"
+        );
+        assert!(
+            plan.contains(r#""table":"t","columns":["id","name"]"#),
+            "{plan}"
+        );
+        let r = e
+            .query("EXPLAIN SELECT 1", &QueryOptions::default())
+            .unwrap();
+        assert_eq!(r.columns, vec![Field::new("plan", DataType::String)]);
+        assert_eq!(r.row_count, 1);
     }
 }

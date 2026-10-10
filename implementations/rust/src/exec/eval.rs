@@ -1,19 +1,81 @@
 //! Row-at-a-time evaluation of bound expressions.
 
 use std::cmp::Ordering;
-use std::time::Duration;
 
 use super::context::ExecContext;
+use super::{functions, subquery};
 use crate::error::{Error, Result};
-use crate::planner::expr::{ArithKind, Expr, ScalarFunc};
+use crate::planner::expr::{ArithKind, Expr, KeyDomain};
 use crate::sql::ast::BinaryOp;
 use crate::types::cast::cast_value;
 use crate::types::value::promote_int;
-use crate::types::{Value, decimal, float};
+use crate::types::{Value, datetime, decimal, float};
 
 /// Evaluates an expression that references no columns.
 pub fn eval_constant(e: &Expr) -> Result<Value> {
     eval(e, &[], &ExecContext::default())
+}
+
+fn bool_value(b: Option<bool>) -> Value {
+    b.map_or(Value::Null, Value::Bool)
+}
+
+fn truth(v: &Value) -> Option<bool> {
+    match v {
+        Value::Bool(b) => Some(*b),
+        _ => None,
+    }
+}
+
+/// Three-valued negation.
+fn not3(b: Option<bool>) -> Option<bool> {
+    b.map(|b| !b)
+}
+
+/// Three-valued comparison of two values (None if either is NULL).
+pub fn compare3(op: BinaryOp, l: &Value, r: &Value) -> Result<Option<bool>> {
+    if l.is_null() || r.is_null() {
+        return Ok(None);
+    }
+    Ok(Some(compare_op(op, l.compare(r)?)))
+}
+
+/// Normalizes a non-null value for hashing in comparison domain `domain`, so
+/// that values equal under SQL comparison hash and compare equal.
+pub fn normalize_key(v: Value, domain: KeyDomain) -> Value {
+    match (domain, &v) {
+        (KeyDomain::Decimal, Value::Int(i)) => Value::Decimal(*i, 0),
+        (KeyDomain::Float, Value::Int(_) | Value::Decimal(..)) => {
+            Value::Float(float::normalize(v.to_f64().unwrap_or(0.0)))
+        }
+        (KeyDomain::Timestamp, Value::Date(d)) => Value::Timestamp(datetime::date_to_timestamp(*d)),
+        _ => v,
+    }
+}
+
+/// `%` / `_` pattern matching over code points (semantics.md §11).
+pub fn like_match(s: &str, pattern: &str) -> bool {
+    let s: Vec<char> = s.chars().collect();
+    let p: Vec<char> = pattern.chars().collect();
+    let (mut i, mut j) = (0usize, 0usize);
+    // Position of the last '%' in the pattern and the text index it matched up to.
+    let mut star: Option<(usize, usize)> = None;
+    while i < s.len() {
+        if j < p.len() && (p[j] == '_' || (p[j] != '%' && p[j] == s[i])) {
+            i += 1;
+            j += 1;
+        } else if j < p.len() && p[j] == '%' {
+            star = Some((j, i));
+            j += 1;
+        } else if let Some((sj, si)) = star {
+            j = sj + 1;
+            i = si + 1;
+            star = Some((sj, si + 1));
+        } else {
+            return false;
+        }
+    }
+    p[j..].iter().all(|&c| c == '%')
 }
 
 /// Evaluates `e` against one input row.
@@ -21,6 +83,8 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
     Ok(match e {
         Expr::Literal { value, .. } => value.clone(),
         Expr::Column { index, .. } => row[*index].clone(),
+        Expr::Param { index, .. } => ctx.param(*index)?,
+        Expr::AggRef { .. } => return Err(Error::internal("unresolved aggregate reference")),
         Expr::Negate { expr, .. } => match eval(expr, row, ctx)? {
             Value::Null => Value::Null,
             Value::Int(i) => Value::Int(
@@ -31,10 +95,7 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
             Value::Decimal(u, s) => Value::Decimal(-u, s),
             v => return Err(Error::internal(format!("cannot negate {v:?}"))),
         },
-        Expr::Not(inner) => match eval(inner, row, ctx)? {
-            Value::Bool(b) => Value::Bool(!b),
-            _ => Value::Null,
-        },
+        Expr::Not(inner) => bool_value(not3(truth(&eval(inner, row, ctx)?))),
         Expr::And(l, r) => {
             let lv = eval(l, row, ctx)?;
             if let Value::Bool(false) = lv {
@@ -74,10 +135,7 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
         Expr::Compare { op, left, right } => {
             let l = eval(left, row, ctx)?;
             let r = eval(right, row, ctx)?;
-            if l.is_null() || r.is_null() {
-                return Ok(Value::Null);
-            }
-            Value::Bool(compare_op(*op, l.compare(&r)?))
+            bool_value(compare3(*op, &l, &r)?)
         }
         Expr::Concat(l, r) => match (eval(l, row, ctx)?, eval(r, row, ctx)?) {
             (Value::Str(a), Value::Str(b)) => {
@@ -95,7 +153,88 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
             for a in args {
                 vals.push(eval(a, row, ctx)?);
             }
-            call_scalar(*func, &vals, ctx)?
+            functions::call(*func, vals, ctx)?
+        }
+        Expr::Case {
+            operand,
+            whens,
+            else_expr,
+            ..
+        } => {
+            let subject = match operand {
+                Some(o) => Some(eval(o, row, ctx)?),
+                None => None,
+            };
+            for (w, t) in whens {
+                let c = eval(w, row, ctx)?;
+                let hit = match &subject {
+                    Some(s) => compare3(BinaryOp::Eq, s, &c)? == Some(true),
+                    None => truth(&c) == Some(true),
+                };
+                if hit {
+                    return eval(t, row, ctx);
+                }
+            }
+            match else_expr {
+                Some(e) => eval(e, row, ctx)?,
+                None => Value::Null,
+            }
+        }
+        Expr::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => {
+            let x = eval(expr, row, ctx)?;
+            let ge = compare3(BinaryOp::GtEq, &x, &eval(low, row, ctx)?)?;
+            let le = compare3(BinaryOp::LtEq, &x, &eval(high, row, ctx)?)?;
+            let r = match (ge, le) {
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                (Some(true), Some(true)) => Some(true),
+                _ => None,
+            };
+            bool_value(if *negated { not3(r) } else { r })
+        }
+        Expr::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            let x = eval(expr, row, ctx)?;
+            let mut r = Some(false);
+            for item in list {
+                match compare3(BinaryOp::Eq, &x, &eval(item, row, ctx)?)? {
+                    Some(true) => {
+                        r = Some(true);
+                        break;
+                    }
+                    Some(false) => {}
+                    None => r = None,
+                }
+            }
+            bool_value(if *negated { not3(r) } else { r })
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            negated,
+        } => match (eval(expr, row, ctx)?, eval(pattern, row, ctx)?) {
+            (Value::Str(s), Value::Str(p)) => Value::Bool(like_match(&s, &p) != *negated),
+            _ => Value::Null,
+        },
+        Expr::ScalarSubquery { sub, params, .. } => subquery::scalar(sub, params, row, ctx)?,
+        Expr::Exists { sub, params } => Value::Bool(subquery::exists(sub, params, row, ctx)?),
+        Expr::InSubquery {
+            expr,
+            sub,
+            params,
+            negated,
+            domain,
+        } => {
+            let x = eval(expr, row, ctx)?;
+            let r = subquery::in_subquery(&x, sub, params, *domain, row, ctx)?;
+            bool_value(if *negated { not3(r) } else { r })
         }
     })
 }
@@ -201,27 +340,6 @@ pub fn arithmetic(op: BinaryOp, kind: ArithKind, l: &Value, r: &Value) -> Result
     }
 }
 
-fn call_scalar(func: ScalarFunc, args: &[Value], ctx: &ExecContext) -> Result<Value> {
-    match func {
-        ScalarFunc::PqSleep => match &args[0] {
-            Value::Null => Ok(Value::Null),
-            Value::Int(ms) => {
-                if !ctx.test_functions {
-                    return Err(Error::semantic("PQ_SLEEP requires --enable-test-functions"));
-                }
-                if *ms < 0 {
-                    return Err(Error::invalid_argument(
-                        "PQ_SLEEP duration must not be negative",
-                    ));
-                }
-                ctx.sleep(Duration::from_millis(*ms as u64))?;
-                Ok(Value::Int(*ms))
-            }
-            v => Err(Error::internal(format!("PQ_SLEEP argument {v:?}"))),
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +384,32 @@ mod tests {
             &Value::Decimal(1, 1),
         );
         assert_eq!(e.unwrap_err().code, ErrorCode::NumericOverflow);
+    }
+
+    #[test]
+    fn like_patterns() {
+        assert!(like_match("abc", "a%"));
+        assert!(like_match("abc", "%c"));
+        assert!(like_match("abc", "a_c"));
+        assert!(!like_match("ac", "a_c"));
+        assert!(like_match("", "%"));
+        assert!(like_match("éa", "_a"));
+        assert!(!like_match("abc", "b"));
+        assert!(like_match("aXbXc", "%b%c"));
+        assert!(like_match("mississippi", "%iss%ppi"));
+        assert!(!like_match("abc", "ABC"));
+    }
+
+    #[test]
+    fn key_normalization() {
+        assert_eq!(
+            normalize_key(Value::Int(1), KeyDomain::Decimal),
+            Value::Decimal(10, 1)
+        );
+        assert_eq!(
+            normalize_key(Value::Decimal(15, 1), KeyDomain::Float),
+            Value::Float(1.5)
+        );
     }
 
     #[test]
