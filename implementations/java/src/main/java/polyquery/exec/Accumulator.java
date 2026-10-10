@@ -122,25 +122,46 @@ public abstract class Accumulator {
 
         @Override
         public Object result() {
-            if (count == 0) {
-                return null;
-            }
-            if (average) {
-                BigDecimal total = big != null ? new BigDecimal(big, scale) : BigDecimal.valueOf(sum, scale);
-                return total.divide(BigDecimal.valueOf(count), MathContext.DECIMAL128).doubleValue();
-            }
-            if (decimal) {
-                // DECIMAL: final result limited to 18 digits.
-                return big != null ? Decimals.check18(big) : Decimals.check18(sum);
-            }
-            if (big != null) {
-                if (big.bitLength() > 63) {
-                    throw overflow();
-                }
-                return big.longValue();
-            }
-            return sum;
+            return exactSumResult(average, scale, decimal, sum, big, count);
         }
+    }
+
+    /**
+     * Final value of an exact SUM/AVG over INT64 or DECIMAL inputs: {@code big} (if non-null)
+     * or {@code sum} is the exact total of {@code count} non-null values.
+     */
+    public static Object exactSumResult(boolean average, int scale, boolean decimal, long sum, BigInteger big,
+                                        long count) {
+        if (count == 0) {
+            return null;
+        }
+        if (average) {
+            BigDecimal total = big != null ? new BigDecimal(big, scale) : BigDecimal.valueOf(sum, scale);
+            return total.divide(BigDecimal.valueOf(count), MathContext.DECIMAL128).doubleValue();
+        }
+        if (decimal) {
+            // DECIMAL: final result limited to 18 digits.
+            return big != null ? Decimals.check18(big) : Decimals.check18(sum);
+        }
+        if (big != null) {
+            if (big.bitLength() > 63) {
+                throw overflow();
+            }
+            return big.longValue();
+        }
+        return sum;
+    }
+
+    /** Final value of a FLOAT64 SUM/AVG of {@code count} non-null values. */
+    public static Object floatSumResult(boolean average, double sum, long count) {
+        if (count == 0) {
+            return null;
+        }
+        double r = average ? sum / count : sum;
+        if (Double.isInfinite(r) || Double.isNaN(r)) {
+            throw overflow();
+        }
+        return r;
     }
 
     static final class FloatSum extends Accumulator {
@@ -162,14 +183,7 @@ public abstract class Accumulator {
 
         @Override
         public Object result() {
-            if (count == 0) {
-                return null;
-            }
-            double r = average ? sum / count : sum;
-            if (Double.isInfinite(r) || Double.isNaN(r)) {
-                throw overflow();
-            }
-            return r;
+            return floatSumResult(average, sum, count);
         }
     }
 

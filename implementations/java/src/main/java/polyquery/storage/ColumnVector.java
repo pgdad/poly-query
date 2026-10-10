@@ -52,6 +52,16 @@ public abstract sealed class ColumnVector {
             return values[row];
         }
 
+        /** The backing array (read-only for callers). */
+        public long[] values() {
+            return values;
+        }
+
+        /** The null bitmap (set bit = NULL; read-only for callers). */
+        public BitSet nulls() {
+            return nulls;
+        }
+
         @Override
         public boolean isNull(int row) {
             return nulls.get(row);
@@ -80,6 +90,16 @@ public abstract sealed class ColumnVector {
 
         public double getDouble(int row) {
             return values[row];
+        }
+
+        /** The backing array (read-only for callers). */
+        public double[] values() {
+            return values;
+        }
+
+        /** The null bitmap (set bit = NULL; read-only for callers). */
+        public BitSet nulls() {
+            return nulls;
         }
 
         @Override
@@ -113,6 +133,16 @@ public abstract sealed class ColumnVector {
             return values[row];
         }
 
+        /** The backing array (read-only for callers). */
+        public int[] values() {
+            return values;
+        }
+
+        /** The null bitmap (set bit = NULL; read-only for callers). */
+        public BitSet nulls() {
+            return nulls;
+        }
+
         @Override
         public boolean isNull(int row) {
             return nulls.get(row);
@@ -143,6 +173,16 @@ public abstract sealed class ColumnVector {
             return values.get(row);
         }
 
+        /** The value bits (read-only for callers). */
+        public BitSet bits() {
+            return values;
+        }
+
+        /** The null bitmap (set bit = NULL; read-only for callers). */
+        public BitSet nulls() {
+            return nulls;
+        }
+
         @Override
         public boolean isNull(int row) {
             return nulls.get(row);
@@ -165,6 +205,11 @@ public abstract sealed class ColumnVector {
         StringVector(DataType type, String[] values, int size) {
             super(type, size);
             this.values = values;
+        }
+
+        /** The backing array, null elements are NULL (read-only for callers). */
+        public String[] values() {
+            return values;
         }
 
         @Override
@@ -215,6 +260,21 @@ public abstract sealed class ColumnVector {
 
         public int code(int row) {
             return codes[row];
+        }
+
+        /** The distinct strings (read-only for callers). */
+        public String[] dictionary() {
+            return dictionary;
+        }
+
+        /** The per-row codes (read-only for callers). */
+        public int[] codes() {
+            return codes;
+        }
+
+        /** The null bitmap (set bit = NULL; read-only for callers). */
+        public BitSet nulls() {
+            return nulls;
         }
 
         @Override

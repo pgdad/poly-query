@@ -17,10 +17,12 @@ import java.util.function.Function;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.exec.ExecContext;
+import polyquery.exec.ExecMode;
 import polyquery.exec.Executor;
 import polyquery.exec.QueryControl;
 import polyquery.exec.QueryResult;
 import polyquery.exec.ResultSink;
+import polyquery.exec.vector.VectorExecutor;
 import polyquery.index.Index;
 import polyquery.index.IndexKind;
 import polyquery.ingest.CsvIngest;
@@ -181,6 +183,11 @@ public final class Engine {
                     rows.add(row);
                 }
             }
+
+            @Override
+            public boolean wantsRows() {
+                return rows != null;
+            }
         });
         return new QueryResult(columns.getFirst(), rows, count);
     }
@@ -207,7 +214,8 @@ public final class Engine {
             case Statement.QueryStatement qs -> {
                 Function<LogicalPlan, PhysicalPlan> planner = planner(opts);
                 PhysicalPlan plan = planner.apply(analyze(qs.query(), catalog.snapshot()));
-                yield Executor.stream(plan, ctx, planner, sink);
+                yield opts.mode() == ExecMode.ROW ? Executor.stream(plan, ctx, planner, sink)
+                        : VectorExecutor.stream(plan, ctx, planner, sink, threads(opts));
             }
             case Statement.Explain e -> {
                 String text = JsonWriter.write(explainQuery(e.query(), opts, catalog.snapshot()));
@@ -257,8 +265,13 @@ public final class Engine {
 
     /** Logical optimization (unless disabled) followed by physical planning; also used for subqueries. */
     private static Function<LogicalPlan, PhysicalPlan> planner(QueryOptions opts) {
-        PhysicalPlanner physical = new PhysicalPlanner(opts.joinStrategy(), opts.useIndexes());
+        PhysicalPlanner physical = new PhysicalPlanner(opts.joinStrategy(), opts.useIndexes(), opts.optimize());
         return logical -> physical.plan(opts.optimize() ? LogicalOptimizer.optimize(logical) : logical);
+    }
+
+    /** Worker threads a query may use: its {@code threads} option, else the engine's {@code --threads}. */
+    private int threads(QueryOptions opts) {
+        return opts.threads() > 0 ? opts.threads() : Math.max(1, config.threads());
     }
 
     private ExecContext newContext(QueryOptions opts, QueryControl control) {

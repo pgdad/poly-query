@@ -4,14 +4,14 @@ package polyquery.exec;
  * SQL LIKE matching (semantics.md §11): {@code %} matches any sequence of code points,
  * {@code _} exactly one; case-sensitive, whole string, no escape character.
  */
-final class LikeMatcher {
+public final class LikeMatcher {
     private final int[] pattern;
 
-    LikeMatcher(String pattern) {
+    public LikeMatcher(String pattern) {
         this.pattern = pattern.codePoints().toArray();
     }
 
-    boolean matches(String s) {
+    public boolean matches(String s) {
         int[] str = s.codePoints().toArray();
         int n = str.length;
         int m = pattern.length;

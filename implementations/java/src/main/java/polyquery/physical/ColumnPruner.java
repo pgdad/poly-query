@@ -15,8 +15,15 @@ import polyquery.plan.Subquery;
  * Row layouts are unchanged (pruned slots are simply left null), so no expression needs to
  * be rewritten.
  */
-final class ColumnPruner {
+public final class ColumnPruner {
     private ColumnPruner() {
+    }
+
+    /** Input slots read when evaluating {@code e} on a row (see {@link #addReferences}), ascending. */
+    public static int[] references(BoundExpr e) {
+        BitSet out = new BitSet();
+        addReferences(e, out);
+        return out.stream().toArray();
     }
 
     /** Prunes a plan whose output rows are fully consumed. */
@@ -81,7 +88,24 @@ final class ColumnPruner {
                 }
                 yield new PhysicalPlan.Sort(prune(s.input(), need), s.keys());
             }
+            case PhysicalPlan.TopN t -> {
+                BitSet need = (BitSet) required.clone();
+                for (SortKey k : t.keys()) {
+                    need.set(k.column());
+                }
+                yield new PhysicalPlan.TopN(prune(t.input(), need), t.keys(), t.offset(), t.limit());
+            }
             case PhysicalPlan.Limit l -> new PhysicalPlan.Limit(prune(l.input(), required), l.offset(), l.limit());
+            case PhysicalPlan.MergeJoin j -> {
+                int leftWidth = j.left().schema().size();
+                BitSet need = j.residual() == null ? required : union(required, j.residual());
+                BitSet left = need.get(0, leftWidth);
+                BitSet right = shifted(need, leftWidth);
+                j.leftKeys().forEach(e -> addReferences(e, left));
+                j.rightKeys().forEach(e -> addReferences(e, right));
+                yield new PhysicalPlan.MergeJoin(prune(j.left(), left), prune(j.right(), right), j.kind(),
+                        j.leftKeys(), j.rightKeys(), j.residual());
+            }
             case PhysicalPlan.HashJoin j -> {
                 int leftWidth = j.left().schema().size();
                 BitSet need = j.residual() == null ? required : union(required, j.residual());

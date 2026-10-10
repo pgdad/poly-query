@@ -108,6 +108,14 @@ public final class ExpressionCompiler {
         };
     }
 
+    /**
+     * Compiles an expression whose {@link BoundExpr.Placeholder}s read {@code cell[0]} (used to
+     * apply row-level code to values computed elsewhere, e.g. by vectorized execution).
+     */
+    public Evaluator compileWithOperand(BoundExpr e, Object[] cell) {
+        return withPlaceholder(cell, List.of(e))[0];
+    }
+
     /** Compiles {@code exprs} that read the shared operand through placeholders. */
     private Evaluator[] withPlaceholder(Object[] cell, List<BoundExpr> exprs) {
         Object[] saved = placeholderCell;

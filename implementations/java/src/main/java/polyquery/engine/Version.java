@@ -14,7 +14,8 @@ public final class Version {
             "phase1", "ingest.csv", "ingest.json", "ingest.jsonl", "sql.basic", "test.functions",
             "phase2", "sql.groupby", "sql.join", "sql.functions", "sql.subquery", "sql.cte", "sql.correlated_subquery",
             "phase3", "storage.pqcf", "storage.mmap", "index.hash", "index.btree",
-            "phase4", "http.streaming");
+            "phase4", "http.streaming",
+            "phase5", "exec.row", "exec.vectorized", "exec.parallel", "join.hash", "join.merge", "join.nested_loop");
 
     private Version() {
     }

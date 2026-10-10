@@ -4,6 +4,7 @@ import java.util.Map;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.engine.QueryOptions;
+import polyquery.exec.ExecMode;
 import polyquery.physical.PhysicalPlanner.JoinStrategy;
 
 /**
@@ -12,6 +13,8 @@ import polyquery.physical.PhysicalPlanner.JoinStrategy;
  * @param queryId the client-assigned {@code options.query_id}, or null
  */
 public record QueryRequest(String sql, QueryOptions options, String queryId) {
+    /** Upper bound of the {@code threads} option. */
+    public static final int MAX_THREADS = 1024;
 
     /** Validates {@code sql} and {@code options}; INVALID_REQUEST / UNSUPPORTED on bad input. */
     public static QueryRequest parse(Map<String, Object> req) {
@@ -40,14 +43,18 @@ public record QueryRequest(String sql, QueryOptions options, String queryId) {
                 default -> throw PolyQueryException.of(ErrorCode.UNSUPPORTED, "result mode '%s' is not supported", rs);
             }
         }
+        ExecMode execMode = ExecMode.VECTORIZED;
         Object mode = o.get("mode");
         if (mode != null) {
             if (!(mode instanceof String ms)) {
                 throw RequestException.invalid("'mode' must be a string");
             }
-            if (!ms.equals("auto") && !ms.equals("row")) {
-                throw PolyQueryException.of(ErrorCode.UNSUPPORTED, "execution mode '%s' is not supported", ms);
-            }
+            execMode = switch (ms) {
+                case "auto", "vectorized" -> ExecMode.VECTORIZED;
+                case "row" -> ExecMode.ROW;
+                default -> throw PolyQueryException.of(ErrorCode.UNSUPPORTED, "execution mode '%s' is not supported",
+                        ms);
+            };
         }
         JoinStrategy joinStrategy = JoinStrategy.AUTO;
         Object join = o.get("join");
@@ -56,20 +63,21 @@ public record QueryRequest(String sql, QueryOptions options, String queryId) {
                 throw RequestException.invalid("'join' must be a string");
             }
             joinStrategy = switch (js) {
-                case "auto", "merge" -> JoinStrategy.AUTO;
+                case "auto" -> JoinStrategy.AUTO;
+                case "merge" -> JoinStrategy.MERGE;
                 case "hash" -> JoinStrategy.HASH;
                 case "nested_loop" -> JoinStrategy.NESTED_LOOP;
                 default -> throw PolyQueryException.of(ErrorCode.UNSUPPORTED, "join algorithm '%s' is not supported", js);
             };
         }
         Long threads = RequestHandler.optionalNonNegativeLong(o, "threads");
-        if (threads != null && threads < 1) {
-            throw RequestException.invalid("'threads' must be >= 1");
+        if (threads != null && (threads < 1 || threads > MAX_THREADS)) {
+            throw RequestException.invalid("'threads' must be between 1 and " + MAX_THREADS);
         }
         boolean optimize = RequestHandler.optionalBoolean(o, "optimize", true);
         boolean useIndexes = RequestHandler.optionalBoolean(o, "use_indexes", true);
         RequestHandler.optionalBoolean(o, "native", false);
         return new QueryOptions(maxRows == null ? -1 : maxRows, timeout == null ? 0 : timeout, countOnly, optimize,
-                joinStrategy, useIndexes);
+                joinStrategy, useIndexes, execMode, threads == null ? 0 : threads.intValue());
     }
 }

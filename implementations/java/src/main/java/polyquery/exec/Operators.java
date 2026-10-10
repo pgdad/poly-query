@@ -3,6 +3,7 @@ package polyquery.exec;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.PriorityQueue;
 
 /** Basic physical operators. */
 public final class Operators {
@@ -140,6 +141,86 @@ public final class Operators {
         @Override
         public void close() {
             input.close();
+            rows = null;
+            ctx.release(reserved);
+            reserved = 0;
+        }
+    }
+
+    /**
+     * {@code ORDER BY … OFFSET offset LIMIT limit} with a bounded max-heap of the best
+     * {@code offset + limit} rows. Ties on the sort keys are broken by input position, so the
+     * result equals that of the stable full sort followed by OFFSET/LIMIT.
+     */
+    public static final class TopN implements Operator {
+        private record Ranked(Object[] row, long seq) {
+        }
+
+        private final Operator input;
+        private final Comparator<Object[]> comparator;
+        private final long offset;
+        private final long limit;
+        private final ExecContext ctx;
+        private List<Ranked> rows;
+        private long reserved;
+        private int pos;
+
+        public TopN(Operator input, Comparator<Object[]> comparator, long offset, long limit, ExecContext ctx) {
+            this.input = input;
+            this.comparator = comparator;
+            this.offset = offset;
+            this.limit = limit;
+            this.ctx = ctx;
+        }
+
+        @Override
+        public void open() {
+            rows = new ArrayList<>();
+            pos = 0;
+            if (limit == 0) {
+                return; // like LIMIT 0 over a sort: the input is never read
+            }
+            long keep = offset + limit < 0 ? Long.MAX_VALUE : offset + limit;
+            Comparator<Ranked> order = (a, b) -> {
+                int c = comparator.compare(a.row(), b.row());
+                return c != 0 ? c : Long.compare(a.seq(), b.seq());
+            };
+            PriorityQueue<Ranked> heap = new PriorityQueue<>(order.reversed());
+            input.open();
+            Object[] row;
+            long seq = 0;
+            while ((row = input.next()) != null) {
+                ctx.checkpoint();
+                Ranked r = new Ranked(row, seq++);
+                if (heap.size() < keep) {
+                    long size = ExecContext.estimateRow(row) + 32;
+                    ctx.reserve(size);
+                    reserved += size;
+                    heap.add(r);
+                } else if (order.compare(r, heap.peek()) < 0) {
+                    heap.poll();
+                    heap.add(r);
+                }
+            }
+            ctx.checkNow();
+            rows = new ArrayList<>(heap);
+            rows.sort(order);
+            pos = (int) Math.min(offset, rows.size());
+        }
+
+        @Override
+        public Object[] next() {
+            if (pos >= rows.size()) {
+                return null;
+            }
+            return rows.get(pos++).row();
+        }
+
+        @Override
+        public void close() {
+            if (limit != 0) {
+                input.close();
+            }
             rows = null;
             ctx.release(reserved);
             reserved = 0;

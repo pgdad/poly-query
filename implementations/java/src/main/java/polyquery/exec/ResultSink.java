@@ -8,4 +8,9 @@ public interface ResultSink {
     void columns(List<ColumnSchema> columns);
 
     void row(Object[] row);
+
+    /** False if the sink only counts rows (they need not be materialized). */
+    default boolean wantsRows() {
+        return true;
+    }
 }
