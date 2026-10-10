@@ -106,18 +106,9 @@ func build(ec *Context, n physical.Node, vec bool) (Operator, error) {
 		if err != nil {
 			return nil, err
 		}
-		lay := layoutOf(x.Input.Schema())
-		keys := make([]sortKey, len(x.Keys))
-		for i, k := range x.Keys {
-			ref, ok := k.Expr.(*plan.ColumnRef)
-			if !ok {
-				return nil, errs.New(errs.InternalError, "sort key is not a column")
-			}
-			idx, ok := lay[ref.ID]
-			if !ok {
-				return nil, errs.New(errs.InternalError, "unbound sort key %s", ref)
-			}
-			keys[i] = sortKey{index: idx, typ: ref.T, desc: k.Desc, nullsFirst: k.NullsFirst}
+		keys, err := sortKeys(x)
+		if err != nil {
+			return nil, err
 		}
 		return &sortOp{ec: ec, input: in, keys: keys, limit: x.Limit}, nil
 	case *physical.Limit:

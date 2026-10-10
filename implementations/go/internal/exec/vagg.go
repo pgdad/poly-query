@@ -1,8 +1,10 @@
 package exec
 
 import (
+	"hash/maphash"
 	"math"
 	"slices"
+	"sync"
 
 	"polyquery/internal/errs"
 	"polyquery/internal/physical"
@@ -596,28 +598,114 @@ func (t *aggTable) update(keys, args []*Vec, n int, sel []int32, pos int64) erro
 	return nil
 }
 
-// mergeFrom folds all groups of o into t.
-func (t *aggTable) mergeFrom(o *aggTable) error {
-	for sg, key := range o.keys {
+// findOrAdd returns the group of a key (created at position pos if new;
+// otherwise its first position is lowered to pos if earlier).
+func (t *aggTable) findOrAdd(key types.Row, pos int64) (int32, error) {
+	var g int32
+	var ok bool
+	var put func(int32)
+	if len(key) == 1 {
+		v := key[0]
+		switch {
+		case v.Null:
+			g, ok = t.nullGroup, t.nullGroup >= 0
+			put = func(g int32) { t.nullGroup = g }
+		case t.keyClasses[0] == vInt:
+			g, ok = t.intMap[v.I]
+			put = func(g int32) { t.intMap[v.I] = g }
+		case t.keyClasses[0] == vFloat:
+			f := v.F
+			if f == 0 {
+				f = 0
+			}
+			k := math.Float64bits(f)
+			g, ok = t.floatMap[k]
+			put = func(g int32) { t.floatMap[k] = g }
+		default:
+			g, ok = t.strMap[v.S]
+			put = func(g int32) { t.strMap[v.S] = g }
+		}
+	} else {
 		t.key = t.key[:0]
 		for k, v := range key {
 			t.key = appendKey(t.key, v, t.keyTypes[k])
 		}
-		g, ok := t.strMap[string(t.key)]
-		if !ok {
-			var err error
-			if g, err = t.newGroup(key, o.first[sg]); err != nil {
-				return err
-			}
-			t.strMap[string(t.key)] = g
-		} else if o.first[sg] < t.first[g] {
-			t.first[g] = o.first[sg]
+		g, ok = t.strMap[string(t.key)]
+		k := string(t.key)
+		put = func(g int32) { t.strMap[k] = g }
+	}
+	if ok {
+		if pos < t.first[g] {
+			t.first[g] = pos
+		}
+		return g, nil
+	}
+	g, err := t.newGroup(key, pos)
+	put(g)
+	return g, err
+}
+
+// mergeFrom folds the groups of o for which take(group) holds (nil: all)
+// into t.
+func (t *aggTable) mergeFrom(o *aggTable, take func(int) bool) error {
+	for sg, key := range o.keys {
+		if take != nil && !take(sg) {
+			continue
+		}
+		g, err := t.findOrAdd(key, o.first[sg])
+		if err != nil {
+			return err
 		}
 		for i, s := range t.states {
 			s.merge(g, o.states[i], int32(sg))
 		}
 	}
 	return nil
+}
+
+// keyHashes hashes the key of every group (merge partitioning).
+func (t *aggTable) keyHashes(seed maphash.Seed) []uint64 {
+	out := make([]uint64, len(t.keys))
+	var buf []byte
+	for g, key := range t.keys {
+		if len(key) == 1 && !key[0].Null && t.keyClasses[0] == vInt {
+			out[g] = uint64(key[0].I) * 0x9E3779B97F4A7C15
+			continue
+		}
+		buf = buf[:0]
+		for k, v := range key {
+			buf = appendKey(buf, v, t.keyTypes[k])
+		}
+		out[g] = maphash.Bytes(seed, buf)
+	}
+	return out
+}
+
+// results computes the output rows of all groups (keys then aggregates)
+// with their first positions. If results fail, err is the failure of the
+// group that appears first (as in serial execution) and errPos its
+// position.
+func (t *aggTable) results() (rows []types.Row, first []int64, errPos int64, err error) {
+	width := len(t.keyTypes) + len(t.states)
+	cells := make([]types.Value, len(t.keys)*width)
+	rows = make([]types.Row, len(t.keys))
+	errPos = math.MaxInt64
+	for g := range t.keys {
+		row := cells[g*width : (g+1)*width : (g+1)*width]
+		copy(row, t.keys[g])
+		for k, s := range t.states {
+			v, e := s.result(g)
+			if e != nil {
+				if t.first[g] < errPos {
+					errPos, err = t.first[g], e
+				}
+				break
+			}
+			row[len(t.keyTypes)+k] = v
+		}
+		rows[g] = row
+	}
+	return rows, t.first, errPos, err
 }
 
 // rows computes the output rows (keys then aggregates) ordered by first
@@ -628,39 +716,112 @@ func (t *aggTable) rows() ([]types.Row, error) {
 			return nil, err
 		}
 	}
-	order := make([]int32, len(t.keys))
+	rows, first, _, err := t.results()
+	if err != nil {
+		return nil, err
+	}
+	return orderByFirst(rows, first), nil
+}
+
+// orderByFirst sorts rows by their first positions.
+func orderByFirst(rows []types.Row, first []int64) []types.Row {
+	order := make([]int32, len(rows))
 	for i := range order {
 		order[i] = int32(i)
 	}
-	if !slices.IsSortedFunc(order, t.byFirst) {
-		slices.SortFunc(order, t.byFirst)
-	}
-	out := make([]types.Row, len(order))
-	width := len(t.keyTypes) + len(t.states)
-	cells := make([]types.Value, len(order)*width)
-	for i, g := range order {
-		row := cells[i*width : (i+1)*width : (i+1)*width]
-		copy(row, t.keys[g])
-		for k, s := range t.states {
-			v, err := s.result(int(g))
-			if err != nil {
-				return nil, err
-			}
-			row[len(t.keyTypes)+k] = v
+	cmp := func(a, b int32) int {
+		switch x, y := first[a], first[b]; {
+		case x < y:
+			return -1
+		case x > y:
+			return 1
 		}
-		out[i] = row
+		return 0
 	}
-	return out, nil
+	if slices.IsSortedFunc(order, cmp) {
+		return rows
+	}
+	slices.SortFunc(order, cmp)
+	out := make([]types.Row, len(rows))
+	for i, g := range order {
+		out[i] = rows[g]
+	}
+	return out
 }
 
-func (t *aggTable) byFirst(a, b int32) int {
-	switch x, y := t.first[a], t.first[b]; {
-	case x < y:
-		return -1
-	case x > y:
-		return 1
+// minPartitionedMerge is the number of partial groups from which partial
+// tables are merged by several goroutines.
+const minPartitionedMerge = 1 << 13
+
+// mergeTables merges the partial tables of parallel workers and returns
+// the result rows in first-appearance order. Large merges are partitioned
+// by key hash: partition p of every partial table is merged into final
+// table p by its own goroutine.
+func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls []*plan.AggCall) ([]types.Row, error) {
+	total := 0
+	for _, t := range tables {
+		total += t.groups()
 	}
-	return 0
+	parts := min(ec.Threads, len(tables))
+	if parts <= 1 || total < minPartitionedMerge || len(keyTypes) == 0 {
+		final := newAggTable(ec, keyTypes, calls)
+		for _, t := range tables {
+			if err := final.mergeFrom(t, nil); err != nil {
+				return nil, err
+			}
+		}
+		return final.rows()
+	}
+	seed := maphash.MakeSeed()
+	hashes := make([][]uint64, len(tables))
+	var wg sync.WaitGroup
+	for i, t := range tables {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			hashes[i] = t.keyHashes(seed)
+		}()
+	}
+	wg.Wait()
+	type partResult struct {
+		rows   []types.Row
+		first  []int64
+		errPos int64
+		err    error
+	}
+	results := make([]partResult, parts)
+	for p := 0; p < parts; p++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			final := newAggTable(ec, keyTypes, calls)
+			for i, t := range tables {
+				h := hashes[i]
+				if err := final.mergeFrom(t, func(g int) bool { return int(h[g]%uint64(parts)) == p }); err != nil {
+					results[p] = partResult{errPos: math.MinInt64, err: err}
+					return
+				}
+			}
+			r := &results[p]
+			r.rows, r.first, r.errPos, r.err = final.results()
+		}()
+	}
+	wg.Wait()
+	var rows []types.Row
+	var first []int64
+	var err error
+	errPos := int64(math.MaxInt64)
+	for _, r := range results {
+		if r.err != nil && r.errPos < errPos {
+			errPos, err = r.errPos, r.err
+		}
+		rows = append(rows, r.rows...)
+		first = append(first, r.first...)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return orderByFirst(rows, first), nil
 }
 
 // ---------------------------------------------------------------- operator

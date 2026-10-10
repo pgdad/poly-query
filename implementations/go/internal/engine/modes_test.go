@@ -176,3 +176,46 @@ func TestOptimizerFoldsConstants(t *testing.T) {
 		t.Errorf("1/0 over no rows: %v %v", res, err)
 	}
 }
+
+// TestParallelHighCardinality covers the hash-partitioned merge of partial
+// aggregation tables (many groups) and the choice of the error of the
+// first-appearing failing group.
+func TestParallelHighCardinality(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.MorselRows = 1000
+	e := New(cfg)
+	var sb strings.Builder
+	sb.WriteString("id,v,s\n")
+	for i := 1; i <= 40000; i++ {
+		v := int64(i % 17)
+		if i == 30001 || i == 30001+12000 {
+			v = 4611686018427387904 // SUM overflows in group 6001 only
+		}
+		fmt.Fprintf(&sb, "%d,%d,k%d\n", i, v, i%9001)
+	}
+	data := sb.String()
+	if _, err := e.Load(LoadRequest{Table: "h", Data: &data, Options: ingest.DefaultOptions(ingest.CSV)}); err != nil {
+		t.Fatal(err)
+	}
+	queries := []string{
+		"SELECT id % 12000 AS g, COUNT(*), SUM(v), MIN(s), MAX(v) FROM h WHERE id <> 30001 GROUP BY id % 12000",
+		"SELECT s, COUNT(*), AVG(v) FROM h WHERE v < 100 GROUP BY s",
+		"SELECT s, id % 3, COUNT(DISTINCT v) FROM h WHERE v < 100 GROUP BY s, id % 3",
+		"SELECT DISTINCT s FROM h",
+		"SELECT id % 12000 AS g, SUM(v) + SUM(v) FROM h GROUP BY id % 12000",
+	}
+	for _, q := range queries {
+		want := canonical(e, q, modeConfig{"row", "hash", 1, true})
+		for _, c := range modeMatrix {
+			if got := canonical(e, q, c); got != want {
+				t.Errorf("%s\n  %+v:\n  got  %.300s\n  want %.300s", q, c, got, want)
+			}
+		}
+	}
+	// First-appearance order is kept by parallel aggregation.
+	res, err := e.Query(context.Background(), "SELECT s FROM h GROUP BY s LIMIT 3", QueryOptions{MaxRows: -1, Mode: "vectorized", Threads: 8})
+	if err != nil || render(res) != "s:STRING|k1|k2|k3" {
+		t.Errorf("group order: %v %v", res, err)
+	}
+}

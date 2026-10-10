@@ -586,17 +586,15 @@ func parallelAggregate(ec *Context, x *physical.HashAggregate, _ bool) (BatchOpe
 		if err != nil {
 			return nil, err
 		}
-		final := newAggTable(ec, keyTypes, x.Aggs)
-		for _, t := range tables {
-			if err := final.mergeFrom(t); err != nil {
-				return nil, err
-			}
-		}
-		ec.Mem.Reset(mark)
-		if err := ec.Mem.Reserve(int64(final.groups()) * int64(64+48*len(x.Aggs))); err != nil {
+		rows, err := mergeTables(ec, tables, keyTypes, x.Aggs)
+		if err != nil {
 			return nil, err
 		}
-		return final.rows()
+		ec.Mem.Reset(mark)
+		if err := ec.Mem.Reserve(int64(len(rows)) * int64(64+48*len(x.Aggs))); err != nil {
+			return nil, err
+		}
+		return rows, nil
 	}
 	return &lazyRows{run: run, types: schemaTypes(x.Schema())}, true, nil
 }

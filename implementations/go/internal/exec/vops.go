@@ -484,56 +484,6 @@ func (l *vlimitOp) NextBatch() (*Batch, error) {
 	}
 }
 
-// ---------------------------------------------------------------- distinct
-
-type vdistinctOp struct {
-	ec      *Context
-	input   BatchOperator
-	types   []types.Type
-	classes []vclass
-	seen    map[string]struct{}
-	key     []byte
-	sel     []int32
-	out     Batch
-}
-
-func (d *vdistinctOp) NextBatch() (*Batch, error) {
-	for {
-		b, err := d.input.NextBatch()
-		if b == nil || err != nil {
-			return nil, err
-		}
-		if err := d.ec.Check(); err != nil {
-			return nil, err
-		}
-		sel := d.sel[:0]
-		var memErr error
-		forActive(b.N, b.Sel, func(i int) {
-			d.key = d.key[:0]
-			for k, v := range b.Cols {
-				d.key = appendKey(d.key, v.value(i, d.classes[k]), d.types[k])
-			}
-			if _, ok := d.seen[string(d.key)]; ok {
-				return
-			}
-			d.seen[string(d.key)] = struct{}{}
-			if memErr == nil {
-				memErr = d.ec.Mem.Reserve(int64(len(d.key)) + 48)
-			}
-			sel = append(sel, int32(i))
-		})
-		if memErr != nil {
-			return nil, memErr
-		}
-		d.sel = sel
-		if len(sel) == 0 {
-			continue
-		}
-		d.out.N, d.out.Cols, d.out.Sel = b.N, b.Cols, sel
-		return &d.out, nil
-	}
-}
-
 // ---------------------------------------------------------------- builder
 
 func schemaTypes(cols []plan.Column) []types.Type {
@@ -586,17 +536,18 @@ func BuildBatch(ec *Context, n physical.Node) (BatchOperator, error) {
 		}
 		return &vlimitOp{input: in, offset: offset, count: count}, nil
 	case *physical.HashDistinct:
-		in, err := BuildBatch(ec, x.Input)
-		if err != nil {
-			return nil, err
+		// DISTINCT is a grouping by all columns without aggregates (same
+		// first-appearance order; parallel when the input is a pipeline).
+		cols := x.Input.Schema()
+		keys := make([]plan.Expr, len(cols))
+		for i, c := range cols {
+			keys[i] = c.Ref()
 		}
-		d := &vdistinctOp{ec: ec, input: in, types: schemaTypes(x.Schema()), seen: map[string]struct{}{}}
-		for _, t := range d.types {
-			d.classes = append(d.classes, classOf(t))
-		}
-		return d, nil
+		return buildVAggregate(ec, &physical.HashAggregate{Input: x.Input, Keys: keys, KeyCols: cols})
+	case *physical.Sort:
+		return buildVSort(ec, x)
 	}
-	// Row-at-a-time island (sort, nested-loop and merge joins, index scans,
+	// Row-at-a-time island (nested-loop and merge joins, index scans,
 	// VALUES, correlated-subquery nodes).
 	op, err := build(ec, n, true)
 	if err != nil {
