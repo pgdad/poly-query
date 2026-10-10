@@ -1,0 +1,94 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase4-java-a1-20261010T203751Z",
+ "language": "java",
+ "task": "phase4",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase4",
+ "prompt_sha256": "5e219a2ef2aba40398a97b7c36637456f63b45b75331736eaf29ac22c3104653",
+ "session_id": "361c8ad6-d4b6-4a7a-9ef3-7264163124c5",
+ "tokens": {
+  "input": 112,
+  "output": 98433,
+  "cache_read": 7494615,
+  "cache_creation": 207030,
+  "thinking": null,
+  "thinking_estimated": 40845,
+  "source": "result events",
+  "api_messages": 56
+ },
+ "rate_limit": {
+  "events": 8,
+  "max_utilization": {
+   "seven_day": 0.14,
+   "five_hour": 0.79
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 5.124270999999999,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 59,
+ "result_segments": 1,
+ "assistant_messages": 114,
+ "tool_calls": {
+  "Bash": 57,
+  "Write": 1
+ },
+ "tool_calls_total": 58,
+ "tool_failures": 1,
+ "build_invocations": 12,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 5,
+ "conformance_progress": [
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ]
+ ],
+ "repair_iterations": 4,
+ "time": {
+  "wall_seconds": 932.1,
+  "model_api_seconds": 832.2,
+  "tool_seconds": 99.4,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 3,
+  "files_changed": 27,
+  "lines_added": 2348,
+  "lines_removed": 154,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 4 is finished and committed. Both definition-of-done suites report 0 failures, and Phases 1\u20133 still pass over both the session and HTTP transports.\n\n## Test results\n- **HTTP transport** (`runner.py --transport http`):\n  ```\n  phase 1: 225/225 pass, 0 fail, 0 error, 0 not implemented\n  phase 2: 186/186 pass, 0 fail, 0 error, 0 not implemented\n  phase 3: 143/143 pass, 0 fail, 0 error, 0 not implemented\n  phase 5: 0/15 pass, 0 fail, 0 error, 15 not implemented\n  ```\n- **Session transport:** the same numbers.\n- **HTTP/concurrency suite:** `http suite: 18/18 passed`. I ran it 3 more times while a full conformance run was going in parallel, and it passed every time, so the timing-sensitive checks look stable.\n- **Build and tests:** `make clean build test` gives `47 passed, 0 failed`, and `make lint` (warnings treated as errors) is clean.\n\nThe 15 \"not implemented\" cases are Phase 5 tests. Phase 5 isn't part of this task, so the engine doesn't claim those capabilities.\n\n## What I implemented (`implementations/java`)\n- **`serve` command:** an HTTP/1.1 server built directly on `ServerSocket`, with every endpoint in protocol \u00a77. It supports keep-alive, chunked request bodies, `Expect: 100-continue`, the 413 body-size limit, 404/405 handling, the error-to-HTTP-status table and the `X-PolyQuery-Query-Id` header. Queries sent through `/v1/request` are handled exactly like `/v1/query`.\n- **Concurrency:**\n  - A per-query `QueryControl` holds the deadline and a cancel flag. Time spent queued counts toward the timeout.\n  - At most `--workers` queries run at once; up to `--queue-depth` more wait in order, and anything beyond that is rejected immediately with `OVERLOADED`.\n  - Running queries are listed in a registry, which drives `/v1/queries` and cancellation by `DELETE`.\n  - If the client disconnects, the server notices within a few milliseconds and cancels the query.\n  - Long sorts can now be cancelled too.\n- **Snapshot isolation:** the catalog is now an immutable map that is replaced as a whole on every change. Each query takes one snapshot before analysis, so it keeps seeing the same table versions even if tables are replaced or dropped meanwhile. Loads parse first and only then publish.\n- **Streaming:** NDJSON results with at most 16 batches waiting to be sent, so a client that stops reading pauses the query. Errors that happen before the header line get a normal HTTP error response; later errors end the stream with an `error` line.\n- **Metrics, logs and shutdown:** Prometheus metrics; JSON log lines with a completion event per query that contains no SQL or data; and graceful shutdown on SIGTERM/SIGINT with the grace period, cancellation of anything left, and exit status 0.\n\n## Main design decisions\n- **Hand-written HTTP server** rather than the JDK's built-in one. It was the only way to detect client disconnects, control chunked output and enforce the body limit exactly.\n- **Thread model:** a platform thread per connection plus a separate pool for running queries, both with large stacks like session mode. The connection thread watches the socket while the query runs.\n- **Exit status on shutdown:** the shutdown hook ends with `Runtime.halt(0)` so SIGTERM exits with 0. The alternative signal API triggers a compiler warning that would break `make lint`.\n- **Stream header timing:** the header line is sent with the first batch, at the end, or 100 ms after execution starts, whichever comes first. Quick failures get proper HTTP status codes, and slow queries still show their header promptly.\n\n## Known limitations (also in the README)\n- One thread per connection, which suits tens to hundreds of clients rather than thousands. Idle keep-alive connections are closed after 5 minutes.\n- Non-streamed query responses and request bodies are built in memory.\n- `CREATE INDEX` and data loading can't be cancelled.\n- Phase 5 features (vectorized/parallel execution, merge join) are not implemented.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

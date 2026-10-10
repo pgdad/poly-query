@@ -1,0 +1,25 @@
+{
+ "wave_id": "wave-a-phase5-a1-20261010T223119Z",
+ "task": "phase5",
+ "track": "A",
+ "attempt": 1,
+ "seed": 24593,
+ "order": [
+  "python"
+ ],
+ "run_ids": [
+  "a-phase5-python-a1-20261010T223119Z"
+ ],
+ "started": "2026-10-10T22:31:20+00:00",
+ "parallel": 1,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  1.58251953125,
+  0.84228515625,
+  0.90234375
+ ]
+}
