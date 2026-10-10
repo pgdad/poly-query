@@ -36,30 +36,53 @@
 
 (defn- all-columns [node] (set (range (:width node))))
 
+(defn- null-literal
+  "Replacement of an output expression nobody reads."
+  [e]
+  {:node :literal :type (:type e) :value nil})
+
+(defn- unused-aggregate
+  "Replacement of an aggregate nobody reads (needs no argument column)."
+  [spec]
+  {:fn :count-star :type (:type spec) :distinct? false})
+
 (declare prune)
 
 (defn prune-query
-  "Prunes the scans of a (logical) query plan whose outputs are all needed."
-  [plan]
-  (prune plan (all-columns plan)))
+  "Prunes the scans of a (logical) query plan of which the outputs
+  `required` (default: all) are needed."
+  ([plan] (prune plan (all-columns plan)))
+  ([plan required] (prune plan (or required (all-columns plan)))))
 
 (defn prune
   "Prunes the scans below node, of which the output columns `required` (a
-  set of indices) are needed."
+  set of indices) are needed. Output expressions and aggregates that are not
+  required are replaced by constants, so that the columns only they read are
+  not scanned."
   [node required]
   (case (:op node)
     :scan (assoc node :columns (vec (sort (filter #(< (long %) (long (:width node))) required))))
     :values node
-    :derived (update node :input prune-query)
+    :derived (update node :input prune required)
     :filter (update node :input prune (into required (expr-columns (:predicate node))))
     :join (let [lw (long (:width (:left node)))
                 cols (into required (expr-columns (:condition node)))]
             (assoc node
                    :left (prune (:left node) (set (filter #(< (long %) lw) cols)))
                    :right (prune (:right node) (set (keep #(when (>= (long %) lw) (- (long %) lw)) cols)))))
-    :aggregate (update node :input prune
-                       (into (into #{} (mapcat expr-columns) (:group-keys node))
-                             (mapcat (comp expr-columns :arg))
-                             (:aggregates node)))
-    :project (update node :input prune (into #{} (mapcat expr-columns) (:exprs node)))
-    (:distinct :sort :limit) (update node :input #(prune % (all-columns %)))))
+    :aggregate (let [nk (count (:group-keys node))
+                     aggs (vec (map-indexed (fn [j a] (if (contains? required (+ nk j)) a (unused-aggregate a)))
+                                            (:aggregates node)))]
+                 (-> node
+                     (assoc :aggregates aggs)
+                     (update :input prune (into (into #{} (mapcat expr-columns) (:group-keys node))
+                                                (mapcat (comp expr-columns :arg))
+                                                aggs))))
+    :project (let [exprs (vec (map-indexed (fn [i e] (if (contains? required i) e (null-literal e)))
+                                           (:exprs node)))]
+               (-> node
+                   (assoc :exprs exprs)
+                   (update :input prune (into #{} (mapcat expr-columns) exprs))))
+    :distinct (update node :input #(prune % (all-columns %)))
+    :sort (update node :input prune (into required (map :index) (:keys node)))
+    :limit (update node :input prune required)))

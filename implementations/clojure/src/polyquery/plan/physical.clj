@@ -49,7 +49,12 @@
   (when e
     (b/transform (fn [x]
                    (if (and (= :subquery (:node x)) (:query x))
-                     (-> x (assoc :plan (plan-query (:query x) options)) (dissoc :query))
+                     ;; EXISTS only needs to know whether there are rows
+                     (-> x
+                         (assoc :plan (plan-query (:query x) (cond-> options
+                                                               (= :exists (:kind x))
+                                                               (assoc :required-outputs #{}))))
+                         (dissoc :query))
                      x))
                  e)))
 
@@ -164,8 +169,11 @@
 (defn plan-query
   "Plans a bound query: logical plan → optimization → physical plan.
   options: {:optimize bool (default true), :join \"auto\"|\"hash\"|…,
-  :use-indexes bool (default true)}."
+  :use-indexes bool (default true), :required-outputs #{i …} (default: all;
+  outputs not in the set are never read)}."
   [bq options]
-  (let [logical (logical/plan-query bq)
+  (let [required (:required-outputs options)
+        options (dissoc options :required-outputs)
+        logical (logical/plan-query bq)
         optimized (if (false? (:optimize options)) logical (optimizer/optimize logical))]
-    (assoc (to-physical (pruning/prune-query optimized) options) :columns (:columns bq))))
+    (assoc (to-physical (pruning/prune-query optimized required) options) :columns (:columns bq))))
