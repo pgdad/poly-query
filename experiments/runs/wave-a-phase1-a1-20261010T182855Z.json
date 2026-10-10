@@ -1,0 +1,35 @@
+{
+ "wave_id": "wave-a-phase1-a1-20261010T182855Z",
+ "task": "phase1",
+ "track": "A",
+ "attempt": 1,
+ "seed": 1010,
+ "order": [
+  "python",
+  "java",
+  "rust",
+  "clojure",
+  "go",
+  "common-lisp"
+ ],
+ "run_ids": [
+  "a-phase1-python-a1-20261010T182855Z",
+  "a-phase1-java-a1-20261010T182856Z",
+  "a-phase1-rust-a1-20261010T182857Z",
+  "a-phase1-clojure-a1-20261010T182858Z",
+  "a-phase1-go-a1-20261010T182859Z",
+  "a-phase1-common-lisp-a1-20261010T182901Z"
+ ],
+ "started": "2026-10-10T18:29:02+00:00",
+ "parallel": 6,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 150.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  1.07080078125,
+  1.103515625,
+  1.07080078125
+ ]
+}

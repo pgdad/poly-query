@@ -1,0 +1,120 @@
+# HIDDEN acceptance — Phase 1 (never copied into agent workspaces)
+@phase 1
+@requires phase1 ingest.csv ingest.jsonl sql.basic
+
+data inv csv schema=sku:STRING;qty:INT64;price:DECIMAL(10,3);weight:FLOAT64;listed:DATE;seen:TIMESTAMP;ok:BOOLEAN
+sku,qty,price,weight,listed,seen,ok
+X1,10,1.250,0.5,2021-12-31,2022-01-01 00:00:00.000001,true
+X2,0,0.001,12.25,2000-02-29,1999-12-31 23:59:59,false
+X3,-5,-99.999,0,1970-01-01,1970-01-01 00:00:00,
+X4,,,,,,
+X5,7,1000000.000,1e-3,2038-01-19,2038-01-19 03:14:08,TRUE
+.
+
+query ordered
+SELECT sku, qty, price, weight, listed, seen, ok FROM inv ORDER BY sku
+----
+sku STRING | qty INT64 | price DECIMAL(10,3) | weight FLOAT64 | listed DATE | seen TIMESTAMP | ok BOOLEAN
+["X1", 10, "1.250", 0.5, "2021-12-31", "2022-01-01 00:00:00.000001", true]
+["X2", 0, "0.001", 12.25, "2000-02-29", "1999-12-31 23:59:59", false]
+["X3", -5, "-99.999", 0.0, "1970-01-01", "1970-01-01 00:00:00", null]
+["X4", null, null, null, null, null, null]
+["X5", 7, "1000000.000", 0.001, "2038-01-19", "2038-01-19 03:14:08", true]
+
+query
+SELECT SUM(price) AS s, MIN(price) AS lo, MAX(seen) AS last_seen, COUNT(ok) AS c, AVG(qty) AS a FROM inv
+----
+s DECIMAL(18,3) | lo DECIMAL(10,3) | last_seen TIMESTAMP | c INT64 | a FLOAT64
+["999901.252", "-99.999", "2038-01-19 03:14:08", 3, 3.0]
+
+query ordered
+SELECT sku, price * qty AS ext, price + 0.0005 AS bumped, qty * 2 - 1 AS q FROM inv WHERE qty IS NOT NULL ORDER BY ext DESC
+----
+sku STRING | ext DECIMAL(18,3) | bumped DECIMAL(18,4) | q INT64
+["X5", "7000000.000", "1000000.0005", 13]
+["X3", "499.995", "-99.9985", -11]
+["X1", "12.500", "1.2505", 19]
+["X2", "0.000", "0.0015", -1]
+
+query ordered
+SELECT sku FROM inv WHERE listed < DATE '2000-03-01' OR seen >= TIMESTAMP '2038-01-01 00:00:00' ORDER BY sku DESC
+----
+sku STRING
+["X5"]
+["X3"]
+["X2"]
+
+query ordered
+SELECT sku, ok FROM inv WHERE NOT ok OR ok IS NULL ORDER BY sku
+----
+sku STRING | ok BOOLEAN
+["X2", false]
+["X3", null]
+["X4", null]
+
+query ordered
+SELECT CAST(price AS INT64) AS i, CAST(weight AS DECIMAL(6,2)) AS w, CAST(qty AS FLOAT64) AS f FROM inv WHERE sku = 'X3'
+----
+i INT64 | w DECIMAL(6,2) | f FLOAT64
+[-99, "0.00", -5.0]
+
+error NUMERIC_OVERFLOW
+SELECT CAST(price AS DECIMAL(6,3)) FROM inv
+
+error TYPE_ERROR
+SELECT sku FROM inv WHERE listed = seen + 1
+
+error SEMANTIC_ERROR
+SELECT inv.nope FROM inv
+
+query ordered
+SELECT sku FROM inv ORDER BY qty DESC NULLS LAST, sku LIMIT 2 OFFSET 1
+----
+sku STRING
+["X5"]
+["X2"]
+
+data ev jsonl
+{"k": 3, "tag": "c", "v": 0.25}
+{"k": 1, "tag": "a"}
+{"tag": "b", "k": 2, "v": -1e2, "extra": false}
+.
+
+query ordered
+SELECT * FROM ev ORDER BY k
+----
+k INT64 | tag STRING | v FLOAT64 | extra BOOLEAN
+[1, "a", null, null]
+[2, "b", -100.0, false]
+[3, "c", 0.25, null]
+
+query
+SELECT MIN(v) AS lo, MAX(tag) AS hi, COUNT(extra) AS e, SUM(k) AS s FROM ev
+----
+lo FLOAT64 | hi STRING | e INT64 | s INT64
+[-100.0, "c", 1, 6]
+
+query
+SELECT 17 / 5 * 5 + 17 % 5 AS a, -17 / 5 AS b, 2.50 * -2 AS c, (1 + 2) * (3 - 5) AS d
+----
+a INT64 | b INT64 | c DECIMAL(18,2) | d INT64
+[17, -3, "-5.00", -6]
+
+error DIVISION_BY_ZERO
+SELECT qty / (qty - qty) FROM inv WHERE sku = 'X1'
+
+query
+SELECT qty / (qty - qty) AS z FROM inv WHERE sku = 'X4'
+----
+z INT64
+[null]
+
+request
+{"op":"load","table":"inv","format":"jsonl","data":"{\"a\":1}\n"}
+----
+error ALREADY_EXISTS
+
+request
+{"op":"load","table":"t2","format":"csv","path":"fixtures/../fixtures/people.csv"}
+----
+error ACCESS_DENIED

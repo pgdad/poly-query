@@ -1,0 +1,142 @@
+# HIDDEN acceptance — Phase 3
+@phase 3
+@requires phase3 storage.pqcf index.hash index.btree ingest.csv sql.groupby sql.join
+
+load s fixtures/gen/sensor_readings.csv schemafile=fixtures/gen/sensor_readings.schema.json
+load k fixtures/gen/sort_keys.csv
+load o fixtures/gen/orders.csv schemafile=fixtures/gen/orders.schema.json layout=row
+load i fixtures/gen/order_items.csv schemafile=fixtures/gen/order_items.schema.json layout=column
+
+save s out/s.pqcf row_group_size=97 encoding=auto
+save k out/k.pqcf encoding=dict
+save i out/i.pqcf encoding=rle row_group_size=1024
+open s2 out/s.pqcf mmap=true
+open k2 out/k.pqcf
+open i2 out/i.pqcf
+
+query ordered oracle
+SELECT status, COUNT(*) AS n, COUNT(humidity) AS h, SUM(temperature) AS t, MIN(ts) AS t0 FROM s2 GROUP BY status ORDER BY status
+----
+status STRING | n INT64 | h INT64 | t FLOAT64 | t0 TIMESTAMP
+["error", 284, 274, 7126.86, "2023-01-01 00:01:01"]
+["ok", 1477, 1415, 37096.99, "2023-01-01 00:00:00"]
+["warn", 239, 227, 5862.34, "2023-01-01 00:00:00"]
+
+query ordered oracle
+SELECT str_key, COUNT(*) AS n FROM k2 GROUP BY str_key HAVING COUNT(*) > 1 ORDER BY n DESC, str_key LIMIT 5
+----
+str_key STRING | n INT64
+["d", 9]
+["h", 9]
+["t", 9]
+["l", 8]
+["m", 8]
+
+query oracle
+SELECT COUNT(*) AS n, SUM(quantity) AS q, SUM(unit_price) AS up, COUNT(discount) AS d FROM i2
+----
+n INT64 | q INT64 | up DECIMAL(18,2) | d INT64
+[2000, 10694, "206854.43", 406]
+
+statement ok
+CREATE INDEX s2_ts ON s2 (ts) USING BTREE
+
+statement ok
+CREATE INDEX k2_uniq ON k2 (uniq_key) USING HASH
+
+statement ok
+CREATE INDEX i2_order ON i2 (order_id)
+
+query ordered oracle
+SELECT sensor_id, ts, temperature FROM s2 WHERE ts BETWEEN TIMESTAMP '2023-01-01 00:05:00' AND TIMESTAMP '2023-01-01 00:06:59' ORDER BY sensor_id, ts
+----
+sensor_id INT64 | ts TIMESTAMP | temperature FLOAT64
+[1, "2023-01-01 00:05:03", 29.95]
+[1, "2023-01-01 00:06:00", 23.02]
+[2, "2023-01-01 00:05:04", 29.76]
+[2, "2023-01-01 00:06:01", 26.4]
+[3, "2023-01-01 00:05:00", 24.68]
+[3, "2023-01-01 00:06:04", 31.8]
+[4, "2023-01-01 00:05:02", 26.52]
+[4, "2023-01-01 00:06:03", 26.88]
+[5, "2023-01-01 00:05:01", 20.58]
+[5, "2023-01-01 00:06:01", 21.2]
+[6, "2023-01-01 00:05:03", 21.69]
+[6, "2023-01-01 00:06:03", 30.71]
+[7, "2023-01-01 00:05:04", 21.04]
+[7, "2023-01-01 00:06:03", 18.34]
+[8, "2023-01-01 00:05:01", 27.84]
+[8, "2023-01-01 00:06:03", 17.03]
+[9, "2023-01-01 00:05:04", 26.89]
+[9, "2023-01-01 00:06:02", 21.25]
+[10, "2023-01-01 00:05:00", 22.7]
+[10, "2023-01-01 00:06:04", 23.31]
+
+query ordered oracle
+SELECT i2.order_id, i2.line_no, o.status FROM i2 JOIN o ON o.order_id = i2.order_id WHERE i2.order_id IN (7, 250, 499) ORDER BY i2.order_id, i2.line_no
+----
+order_id INT64 | line_no INT64 | status STRING
+[7, 1, "shipped"]
+[7, 2, "shipped"]
+[7, 3, "shipped"]
+[7, 4, "shipped"]
+[250, 1, "cancelled"]
+[250, 2, "cancelled"]
+[250, 3, "cancelled"]
+[250, 4, "cancelled"]
+[499, 1, "placed"]
+[499, 2, "placed"]
+[499, 3, "placed"]
+[499, 4, "placed"]
+
+explain
+SELECT * FROM i2 WHERE order_id = 250
+----
+index-scan i2_order
+
+explain
+SELECT sensor_id FROM s2 WHERE ts > TIMESTAMP '2023-01-01 00:30:00' AND ts < TIMESTAMP '2023-01-01 00:31:00'
+----
+index-scan s2_ts
+
+explain options={"use_indexes": false}
+SELECT * FROM i2 WHERE order_id = 250
+----
+no-index-scan
+
+explain
+SELECT dup_key FROM k2 WHERE id > 5
+----
+scan-columns k2 dup_key,id
+
+request
+{"op":"stats","table":"i2"}
+----
+match {"ok":true,"row_count":2000,"columns":[{"name":"order_id","null_count":0,"min":1,"max":500},{"name":"line_no","null_count":0,"min":1,"max":4},{"name":"product_id"},{"name":"quantity","min":1,"max":10},{"name":"unit_price"},{"name":"discount"}]}
+
+save i2 out/i_idx.pqcf
+open i3 out/i_idx.pqcf expect=ALREADY_EXISTS
+
+statement ok
+DROP INDEX i2_order
+
+open i3 out/i_idx.pqcf
+
+request
+{"op":"schema","table":"i3"}
+----
+match {"ok":true,"row_count":2000,"indexes":[{"name":"i2_order","column":"order_id","kind":"BTREE"}]}
+
+open g fixtures/pqcf/types_rle.pqcf
+
+query ordered oracle
+SELECT flag, COUNT(*) AS n, MIN(at) AS a, MAX(day) AS d FROM g GROUP BY flag ORDER BY flag
+----
+flag BOOLEAN | n INT64 | a TIMESTAMP | d DATE
+[null, 181, "2024-01-01 11:00:11.000011", "2022-06-12"]
+[false, 1213, "2024-01-01 01:00:01.000001", "2022-06-18"]
+[true, 606, "2024-01-01 03:00:03.000003", "2022-06-16"]
+
+corrupt bad1 fixtures/pqcf/corrupt/chunk_bitflip.pqcf STORAGE_CORRUPT
+corrupt bad2 fixtures/pqcf/corrupt/invalid_utf8.pqcf STORAGE_CORRUPT
+corrupt bad3 fixtures/people.csv STORAGE_CORRUPT

@@ -1,0 +1,63 @@
+# HIDDEN acceptance — Phase 1, generated sensor data (oracle-derived)
+@phase 1
+@requires phase1 ingest.csv sql.basic
+
+load s fixtures/gen/sensor_readings.csv schemafile=fixtures/gen/sensor_readings.schema.json
+load k fixtures/gen/sort_keys.csv
+
+query oracle
+SELECT COUNT(*) AS n, COUNT(humidity) AS h, MIN(ts) AS t0, MAX(ts) AS t1, AVG(temperature) AS t, SUM(sensor_id) AS sid FROM s
+----
+n INT64 | h INT64 | t0 TIMESTAMP | t1 TIMESTAMP | t FLOAT64 | sid INT64
+[2000, 1916, "2023-01-01 00:00:00", "2023-01-01 03:19:04", 25.043095, 11000]
+
+query ordered oracle
+SELECT sensor_id, ts, temperature FROM s WHERE status = 'error' AND temperature > 28.5 ORDER BY ts DESC, sensor_id LIMIT 7
+----
+sensor_id INT64 | ts TIMESTAMP | temperature FLOAT64
+[10, "2023-01-01 03:18:04", 30.42]
+[6, "2023-01-01 03:16:04", 30.53]
+[10, "2023-01-01 03:14:02", 28.57]
+[1, "2023-01-01 03:12:01", 29.49]
+[4, "2023-01-01 03:10:01", 31.83]
+[1, "2023-01-01 03:09:01", 29.91]
+[6, "2023-01-01 03:09:01", 29.37]
+
+query ordered oracle
+SELECT sensor_id, humidity FROM s WHERE humidity IS NULL ORDER BY sensor_id, ts LIMIT 5 OFFSET 3
+----
+sensor_id INT64 | humidity FLOAT64
+[1, null]
+[1, null]
+[1, null]
+[2, null]
+[2, null]
+
+query oracle
+SELECT MIN(pressure) AS lo, MAX(pressure) AS hi, SUM(temperature * 2 - 1) AS x FROM s WHERE NOT (status = 'ok')
+----
+lo FLOAT64 | hi FLOAT64 | x FLOAT64
+[9801.1, 10298.2, 25455.4]
+
+query ordered oracle
+SELECT id, dup_key, str_key FROM k ORDER BY str_key DESC, id LIMIT 6
+----
+id INT64 | dup_key INT64 | str_key STRING
+[59, 124, "zzuawuoini"]
+[1711, 141, "zzpsgliw"]
+[324, 55, "zzlvudaenrc"]
+[332, 8, "zzfbybaxwib"]
+[1001, 126, "zzf"]
+[1263, 105, "zzakk"]
+
+query ordered oracle
+SELECT id, float_key FROM k WHERE float_key BETWEEN -0.5 AND 0.5 ORDER BY float_key, id
+----
+id INT64 | float_key FLOAT64
+[1744, 0.4233]
+
+query oracle
+SELECT COUNT(*) AS n, MIN(uniq_key) AS lo, MAX(uniq_key) AS hi, MIN(str_key) AS s FROM k WHERE dup_key < 50
+----
+n INT64 | lo INT64 | hi INT64 | s STRING
+[501, 6892361788468114, 9217235128895502226, "a"]

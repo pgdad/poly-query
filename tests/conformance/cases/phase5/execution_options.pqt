@@ -1,0 +1,126 @@
+# Phase 5 execution options — phase-5.md. (The `--modes` runner additionally re-runs
+# all Phase 1-3 cases under a matrix of these options.)
+@phase 5
+@requires phase5 exec.row exec.vectorized exec.parallel join.hash join.merge join.nested_loop ingest.csv sql.join sql.groupby
+
+load tx fixtures/gen/transactions.csv schemafile=fixtures/gen/transactions.schema.json
+load cust fixtures/gen/customers.csv schemafile=fixtures/gen/customers.schema.json
+load items fixtures/gen/order_items.csv schemafile=fixtures/gen/order_items.schema.json
+load orders fixtures/gen/orders.csv schemafile=fixtures/gen/orders.schema.json
+
+explain options={"join": "hash"}
+SELECT c.segment, COUNT(*) FROM tx t JOIN cust c ON c.customer_id = t.customer_id GROUP BY c.segment
+----
+node HashJoin
+no-node MergeJoin
+no-node NestedLoopJoin
+
+explain options={"join": "merge"}
+SELECT c.segment, COUNT(*) FROM tx t JOIN cust c ON c.customer_id = t.customer_id GROUP BY c.segment
+----
+node MergeJoin
+no-node HashJoin
+
+explain options={"join": "nested_loop"}
+SELECT c.segment, COUNT(*) FROM tx t JOIN cust c ON c.customer_id = t.customer_id GROUP BY c.segment
+----
+node NestedLoopJoin
+no-node HashJoin
+
+explain options={"join": "merge"}
+SELECT o.order_id FROM orders o LEFT JOIN items i ON i.order_id = o.order_id
+----
+node MergeJoin
+
+query ordered oracle options={"join": "hash", "mode": "vectorized", "threads": 4}
+SELECT c.segment, COUNT(*) AS n, SUM(t.amount) AS total FROM tx t JOIN cust c ON c.customer_id = t.customer_id GROUP BY c.segment ORDER BY c.segment
+----
+segment STRING | n INT64 | total DECIMAL(18,2)
+["consumer", 1293, "9366963.66"]
+["enterprise", 390, "3180108.25"]
+["public_sector", 124, "67517.97"]
+["small_business", 193, "1867196.32"]
+
+query ordered oracle options={"join": "merge", "mode": "row", "threads": 1}
+SELECT c.segment, COUNT(*) AS n, SUM(t.amount) AS total FROM tx t JOIN cust c ON c.customer_id = t.customer_id GROUP BY c.segment ORDER BY c.segment
+----
+segment STRING | n INT64 | total DECIMAL(18,2)
+["consumer", 1293, "9366963.66"]
+["enterprise", 390, "3180108.25"]
+["public_sector", 124, "67517.97"]
+["small_business", 193, "1867196.32"]
+
+query ordered oracle options={"join": "nested_loop", "mode": "vectorized", "threads": 2, "optimize": false}
+SELECT c.segment, COUNT(*) AS n, SUM(t.amount) AS total FROM tx t JOIN cust c ON c.customer_id = t.customer_id GROUP BY c.segment ORDER BY c.segment
+----
+segment STRING | n INT64 | total DECIMAL(18,2)
+["consumer", 1293, "9366963.66"]
+["enterprise", 390, "3180108.25"]
+["public_sector", 124, "67517.97"]
+["small_business", 193, "1867196.32"]
+
+query ordered oracle options={"join": "merge", "mode": "vectorized", "threads": 8}
+SELECT o.status, COUNT(i.order_id) AS lines, SUM(i.quantity) AS q FROM orders o LEFT JOIN items i ON i.order_id = o.order_id AND i.quantity > 8 GROUP BY o.status ORDER BY o.status
+----
+status STRING | lines INT64 | q INT64
+["cancelled", 65, 620]
+["delivered", 64, 610]
+["paid", 44, 424]
+["placed", 61, 576]
+["returned", 57, 540]
+["shipped", 72, 682]
+
+# parallel aggregation is exact for INT64 and DECIMAL
+query ordered oracle options={"mode": "vectorized", "threads": 16}
+SELECT bucket % 10 AS b, COUNT(*) AS n, SUM(amount) AS s, SUM(merchant_id) AS m, MIN(ts) AS t0, MAX(category) AS c FROM tx GROUP BY bucket % 10 ORDER BY b
+----
+b INT64 | n INT64 | s DECIMAL(18,2) | m INT64 | t0 TIMESTAMP | c STRING
+[0, 196, "172373.75", 4816, "2023-01-01 18:16:13.668000", "utilities"]
+[1, 181, "367731.20", 4508, "2023-01-06 03:17:32.376000", "utilities"]
+[2, 207, "2461939.45", 5227, "2023-01-06 22:59:09.984000", "utilities"]
+[3, 207, "3691433.79", 5549, "2023-01-01 07:07:28.922000", "utilities"]
+[4, 198, "903548.72", 5262, "2023-01-02 01:49:06.179000", "utilities"]
+[5, 200, "1850388.31", 5277, "2023-01-01 23:45:00.452000", "utilities"]
+[6, 205, "1646549.34", 5500, "2023-01-11 23:31:36.547000", "utilities"]
+[7, 194, "1634499.15", 4796, "2023-01-04 04:43:14.863000", "utilities"]
+[8, 198, "1300148.58", 4932, "2023-01-02 07:15:07.791000", "utilities"]
+[9, 214, "453173.91", 5402, "2023-01-10 13:38:30.688000", "utilities"]
+
+query ordered oracle options={"mode": "row", "threads": 1, "optimize": false}
+SELECT bucket % 10 AS b, COUNT(*) AS n, SUM(amount) AS s, SUM(merchant_id) AS m, MIN(ts) AS t0, MAX(category) AS c FROM tx GROUP BY bucket % 10 ORDER BY b
+----
+b INT64 | n INT64 | s DECIMAL(18,2) | m INT64 | t0 TIMESTAMP | c STRING
+[0, 196, "172373.75", 4816, "2023-01-01 18:16:13.668000", "utilities"]
+[1, 181, "367731.20", 4508, "2023-01-06 03:17:32.376000", "utilities"]
+[2, 207, "2461939.45", 5227, "2023-01-06 22:59:09.984000", "utilities"]
+[3, 207, "3691433.79", 5549, "2023-01-01 07:07:28.922000", "utilities"]
+[4, 198, "903548.72", 5262, "2023-01-02 01:49:06.179000", "utilities"]
+[5, 200, "1850388.31", 5277, "2023-01-01 23:45:00.452000", "utilities"]
+[6, 205, "1646549.34", 5500, "2023-01-11 23:31:36.547000", "utilities"]
+[7, 194, "1634499.15", 4796, "2023-01-04 04:43:14.863000", "utilities"]
+[8, 198, "1300148.58", 4932, "2023-01-02 07:15:07.791000", "utilities"]
+[9, 214, "453173.91", 5402, "2023-01-10 13:38:30.688000", "utilities"]
+
+# top-N with parallel scans
+query ordered oracle options={"mode": "vectorized", "threads": 4}
+SELECT tx_id, amount FROM tx WHERE status = 'approved' ORDER BY amount DESC, tx_id LIMIT 5
+----
+tx_id INT64 | amount DECIMAL(12,2)
+[1360, "854943.05"]
+[1508, "835846.29"]
+[1171, "812969.73"]
+[1462, "794411.60"]
+[1764, "588106.94"]
+
+error UNSUPPORTED options={"mode": "quantum"}
+SELECT 1
+
+error UNSUPPORTED options={"join": "teleport"}
+SELECT 1
+
+# errors are raised identically in every mode
+error NUMERIC_OVERFLOW options={"mode": "vectorized", "threads": 4}
+SELECT SUM(tx_id * 4611686018427387) FROM tx
+
+error DIVISION_BY_ZERO options={"mode": "vectorized", "threads": 4}
+SELECT tx_id / (bucket - bucket) FROM tx
