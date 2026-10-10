@@ -197,8 +197,9 @@ any remaining reference to a FROM column is a grouping violation
   `PQ_SLEEP` sleeps in ≤ 10 ms slices.
 * `EXPLAIN` / the `explain` op return the physical plan as JSON
   (`TableScan` with `table`/`columns`, `HashJoin`/`NestedLoopJoin` with
-  `join_type`, …). Plans of subqueries used by an operator are listed under
-  that node's `subqueries` key.
+  `join_type`, `IndexScan` with `table`/`index`/`columns`, …). Plans of
+  subqueries used by an operator follow its inputs in `children`, marked
+  `"subquery": true`, so every scan of the statement appears in the tree.
 
 ## Design decisions (where the spec leaves room)
 

@@ -381,6 +381,9 @@ class PhysicalPlan:
 
 
 def _node_json(node: PhysicalNode, subplans: dict[int, PhysicalNode]) -> dict[str, Any]:
+    """A plan node as JSON. The plans of subqueries evaluated by the node's
+    expressions follow its inputs in ``children``, marked ``"subquery": true``
+    (so that every scan of the statement is part of the tree)."""
     out: dict[str, Any] = {"op": node.op, **node.describe()}
     out["estimated_rows"] = round(node.estimated_rows)
     used: list[int] = []
@@ -388,9 +391,10 @@ def _node_json(node: PhysicalNode, subplans: dict[int, PhysicalNode]) -> dict[st
         for sq in b.subqueries(expr):
             if sq.id not in used:
                 used.append(sq.id)
-    if used:
-        out["subqueries"] = [_node_json(subplans[i], subplans) for i in used]
-    out["children"] = [_node_json(child, subplans) for child in node.inputs()]
+    children = [_node_json(child, subplans) for child in node.inputs()]
+    for i in used:
+        children.append({**_node_json(subplans[i], subplans), "subquery": True})
+    out["children"] = children
     return out
 
 
