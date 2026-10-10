@@ -330,8 +330,17 @@ def _with_unmatched(li: list[int], ri: list[int], n: int, pad: int) -> tuple[lis
     return take(all_l, order), take(all_r, order)
 
 
-def _emit_pairs(left: Columns, right: Columns, li: list[int], ri: list[int]) -> Batches:
-    """Output batches of the pairs: left columns gathered at ``li``, right at ``ri``."""
+def _emit_pairs(
+    left: Columns, right: Columns, li: list[int], ri: list[int], identity: str | None = None
+) -> Batches:
+    """Output batches of the pairs: left columns gathered at ``li``, right at
+    ``ri``. ``identity`` ("left" / "right") says that the positions of that
+    side are exactly 0, 1, …, n-1, so its columns are passed on as they are."""
+    if identity is not None and len(li) <= VECTOR_BATCH_ROWS:
+        out_left = list(left) if identity == "left" else [take(c, li) for c in left]
+        out_right = list(right) if identity == "right" else [take(c, ri) for c in right]
+        yield out_left + out_right, len(li)
+        return
     for lo in range(0, len(li), VECTOR_BATCH_ROWS):
         cl, cr = li[lo : lo + VECTOR_BATCH_ROWS], ri[lo : lo + VECTOR_BATCH_ROWS]
         yield [take(c, cl) for c in left] + [take(c, cr) for c in right], len(cl)
@@ -347,7 +356,8 @@ def _hash_join(node: pp.HashJoin, ctx: ExecutionContext) -> Batches:
             pi, bi = _probe(side, _key_vector(right_fns, cols, n), n)
             bi, pi = _filter_pairs(residual, side.cols, cols, bi, pi)
             counter.add(len(pi))
-            yield from _emit_pairs(side.cols, cols, bi, pi)
+            # a unique build side matches each probe row at most once
+            yield from _emit_pairs(side.cols, cols, bi, pi, "right" if side.unique and len(pi) == n else None)
             ctx.check()
         return
     is_left = node.join_type == "LEFT"
@@ -357,7 +367,7 @@ def _hash_join(node: pp.HashJoin, ctx: ExecutionContext) -> Batches:
         if is_left:
             pi, bi = _with_unmatched(pi, bi, n, side.n)
         counter.add(len(pi))
-        yield from _emit_pairs(cols, side.cols, pi, bi)
+        yield from _emit_pairs(cols, side.cols, pi, bi, "left" if side.unique and len(pi) == n else None)
         ctx.check()
 
 

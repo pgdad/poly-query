@@ -187,8 +187,7 @@ def lookup_table(node: pp.LookupScan, ctx: ExecutionContext) -> dict[Any, list[t
 
 def lookup_rows(node: pp.LookupScan, ctx: ExecutionContext) -> list[tuple]:
     """The rows of a LookupScan for the current correlation parameters."""
-    table = lookup_table(node, ctx)
-    key, residual = ctx.cached(node, "lookup", lambda: _compile_lookup(node, ctx))
+    table, key, residual = ctx.cached(node, "lookup", lambda: (lookup_table(node, ctx), *_compile_lookup(node, ctx)))
     value = key(())
     rows = table.get(value, ()) if value is not None else ()
     if residual is not None:

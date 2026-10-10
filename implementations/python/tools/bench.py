@@ -43,6 +43,8 @@ QUERIES = {
     "WHERE o.status = 'delivered' GROUP BY p.category",
     "Q7": "SELECT SUM(amount * 2 + fee), COUNT(*) FROM tx WHERE bucket < 500",
     "Q8": "SELECT id, float_key FROM sk ORDER BY float_key, id",
+    "Q9": "SELECT tx_id, amount, fee FROM tx WHERE amount > 10",
+    "Q10": "SELECT tx_id, amount FROM tx WHERE status = 'approved' AND amount > 5000",
 }
 
 PRESETS = {

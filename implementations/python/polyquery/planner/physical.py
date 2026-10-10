@@ -764,15 +764,23 @@ def pipeline_path(node: PhysicalNode) -> list[PhysicalNode] | None:
 _PARTIAL_CONSUMERS = (HashAggregate, Sort, TopN, Distinct)
 
 
+# a pipeline at the root is parallelized only if it is expected to return at
+# most this fraction of the rows it scans: every result row of a worker
+# process has to be pickled back to the parent
+ROOT_GATHER_MAX_SELECTIVITY = 0.25
+
+
 def parallelize(root: PhysicalNode, partitions: int) -> PhysicalNode:
     """Inserts Gathers below the operators that can merge partial results
     (aggregation, sort, top-N, distinct) and at the root when it is a
-    pipeline that filters or joins (so that there is work to split)."""
+    selective pipeline that filters or joins."""
     _parallelize_inputs(root, partitions)
     path = pipeline_path(root)
-    if path is not None and any(isinstance(n, (Filter, _Join)) for n in path):
-        return _estimated(Gather(root, partitions, path[-1]), root.estimated_rows)
-    return root
+    if path is None or not any(isinstance(n, (Filter, _Join)) for n in path):
+        return root
+    if root.estimated_rows > ROOT_GATHER_MAX_SELECTIVITY * max(path[-1].estimated_rows, 1.0):
+        return root
+    return _estimated(Gather(root, partitions, path[-1]), root.estimated_rows)
 
 
 def _parallelize_inputs(node: PhysicalNode, partitions: int) -> None:
