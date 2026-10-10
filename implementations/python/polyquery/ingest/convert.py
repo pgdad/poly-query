@@ -8,7 +8,7 @@ from typing import Any, Callable
 from .. import errors, values
 from ..datatypes import BOOLEAN, DATE, FLOAT64, INT64, STRING, TIMESTAMP, DataType, TypeKind
 
-# A converter maps trimmed field text to a value, or raises _Invalid.
+# A converter maps trimmed field text to a value, or raises InvalidText.
 Converter = Callable[[str], Any]
 
 TRIM_CHARS = " \t"
@@ -85,26 +85,24 @@ def converter_for(dtype: DataType) -> Converter:
     return _CONVERTERS[dtype.kind]
 
 
-def _matches(texts: set[str], convert: Converter) -> bool:
+def convert_all(texts: set[str], convert: Converter) -> dict[str, Any] | None:
+    """Converts every text; returns None if any of them is not acceptable."""
     try:
-        for t in texts:
-            convert(t)
+        return {t: convert(t) for t in texts}
     except InvalidText:
-        return False
-    return True
+        return None
 
 
-def infer_text_type(texts: set[str]) -> DataType:
-    """Infers a CSV column type from its distinct, trimmed, non-empty texts (§1.1)."""
-    if not texts:
-        return STRING
-    for dtype in (BOOLEAN, INT64, FLOAT64, DATE):
-        if _matches(texts, _CONVERTERS[dtype.kind]):
-            return dtype
-    if _matches(texts, _convert_timestamp):
-        return TIMESTAMP
-    return STRING
+_INFERENCE_ORDER = (BOOLEAN, INT64, FLOAT64, DATE, TIMESTAMP)
 
 
-def is_date_or_timestamp_text(text: str) -> bool:
-    return values.parse_timestamp(text, allow_date=True) is not None
+def infer_text_type(texts: set[str]) -> tuple[DataType, dict[str, Any] | None]:
+    """Infers a CSV column type from its distinct, trimmed, non-empty texts
+    (§1.1). Returns the type and, unless it is STRING, the converted value of
+    every text."""
+    if texts:
+        for dtype in _INFERENCE_ORDER:
+            converted = convert_all(texts, _CONVERTERS[dtype.kind])
+            if converted is not None:
+                return dtype, converted
+    return STRING, None

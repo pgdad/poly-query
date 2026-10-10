@@ -41,7 +41,9 @@ def _read_records(text: str, delimiter: str) -> list[list[str | None]]:
     return records
 
 
-def _check_field_lengths(records: list[list[str | None]]) -> None:
+def _check_field_lengths(text: str, records: list[list[str | None]]) -> None:
+    if len(text) <= MAX_FIELD_CHARS:
+        return
     for n, record in enumerate(records, 1):
         for field in record:
             if field is not None and len(field) > MAX_FIELD_CHARS:
@@ -64,48 +66,47 @@ def _to_columns(records: list[list[str | None]], width: int, first_record: int) 
     return list(zip(*records))
 
 
-def _convert_column(
-    raw: tuple, dtype: DataType, name: str, first_record: int
-) -> list[Any]:
+def _distinct_texts(raw: tuple) -> dict[str, str]:
+    """Maps each distinct non-empty raw field (in order of first appearance)
+    to its trimmed text."""
+    return {f: f.strip(TRIM_CHARS) for f in dict.fromkeys(raw) if f}
+
+
+def _materialize(raw: tuple, trimmed: dict[str, str], converted: dict[str, Any]) -> list[Any]:
+    """Builds the column from per-distinct-text conversions. Unquoted empty,
+    quoted empty and blank fields become NULL."""
+    lookup = {f: converted.get(t) for f, t in trimmed.items()}
+    return list(map(lookup.get, raw))
+
+
+def _convert_column(raw: tuple, dtype: DataType, name: str, first_record: int) -> list[Any]:
     """Converts raw field texts to values of ``dtype`` (raises CONVERSION_ERROR)."""
     if dtype.kind is TypeKind.STRING:
         return list(raw)
+    trimmed = _distinct_texts(raw)
     convert = converter_for(dtype)
-    cache: dict[str, Any] = {}
-    out: list[Any] = []
-    append = out.append
-    for n, field in enumerate(raw):
-        if not field:
-            append(None)
+    converted: dict[str, Any] = {}
+    for field, text in trimmed.items():
+        if not text or text in converted:
             continue
-        v = cache.get(field)
-        if v is None:
-            text = field.strip(TRIM_CHARS)
-            if not text:
-                append(None)
-                continue
-            try:
-                v = convert(text)
-            except InvalidText:
-                rec_no = n + first_record
-                raise errors.conversion_error(
-                    f"cannot convert '{text[:100]}' to {dtype.name} (record {rec_no}, column '{name}')",
-                    record=rec_no,
-                    column_name=name,
-                ) from None
-            cache[field] = v
-        append(v)
-    return out
+        try:
+            converted[text] = convert(text)
+        except InvalidText:
+            rec_no = raw.index(field) + first_record
+            raise errors.conversion_error(
+                f"cannot convert '{text[:100]}' to {dtype.name} (record {rec_no}, column '{name}')",
+                record=rec_no,
+                column_name=name,
+            ) from None
+    return _materialize(raw, trimmed, converted)
 
 
-def _infer_column(raw: tuple) -> DataType:
-    texts = set()
-    for field in set(raw):
-        if field:
-            t = field.strip(TRIM_CHARS)
-            if t:
-                texts.add(t)
-    return infer_text_type(texts)
+def _infer_column(raw: tuple) -> tuple[DataType, list[Any]]:
+    trimmed = _distinct_texts(raw)
+    dtype, converted = infer_text_type({t for t in trimmed.values() if t})
+    if converted is None:
+        return dtype, list(raw)
+    return dtype, _materialize(raw, trimmed, converted)
 
 
 def ingest_csv(
@@ -118,7 +119,7 @@ def ingest_csv(
     delimiter = options.get("delimiter", ",")
     header = options.get("header", True)
     records = _read_records(text, delimiter)
-    _check_field_lengths(records)
+    _check_field_lengths(text, records)
 
     if header:
         if not records:
@@ -143,11 +144,14 @@ def ingest_csv(
 
     if schema is not None:
         columns = schema
+        data = [
+            _convert_column(raw, col.type, col.name, first_record)
+            for raw, col in zip(raw_columns, columns)
+        ]
     else:
-        columns = [Column(n, _infer_column(raw)) for n, raw in zip(names, raw_columns)]
-
-    data = [
-        _convert_column(raw, col.type, col.name, first_record)
-        for raw, col in zip(raw_columns, columns)
-    ]
+        columns, data = [], []
+        for name, raw in zip(names, raw_columns):
+            dtype, column_values = _infer_column(raw)
+            columns.append(Column(name, dtype))
+            data.append(column_values)
     return columns, data, len(body)

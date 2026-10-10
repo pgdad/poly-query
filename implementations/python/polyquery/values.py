@@ -185,12 +185,22 @@ def _date_days(y: int, m: int, d: int) -> int | None:
         return None
 
 
+_DATE_CACHE: dict[str, int | None] = {}
+_DATE_CACHE_LIMIT = 1 << 16
+_MISSING = object()
+
+
 def parse_date(text: str) -> int | None:
     """Parses ``YYYY-MM-DD``; None if syntactically or calendrically invalid."""
+    days = _DATE_CACHE.get(text, _MISSING)
+    if days is not _MISSING:
+        return days  # type: ignore[return-value]
     m = DATE_RE.fullmatch(text)
-    if m is None:
-        return None
-    return _date_days(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    days = None if m is None else _date_days(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    if len(_DATE_CACHE) >= _DATE_CACHE_LIMIT:
+        _DATE_CACHE.clear()
+    _DATE_CACHE[text] = days
+    return days
 
 
 def parse_timestamp(text: str, *, allow_date: bool = True) -> int | None:
@@ -201,15 +211,15 @@ def parse_timestamp(text: str, *, allow_date: bool = True) -> int | None:
             days = parse_date(text)
             return None if days is None else days * MICROS_PER_DAY
         return None
-    days = _date_days(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    days = parse_date(text[:10])
     if days is None:
         return None
-    hh, mm, ss = int(m.group(4)), int(m.group(5)), int(m.group(6))
-    if hh > 23 or mm > 59 or ss > 59:
+    _, _, _, hh, mm, ss, frac = m.groups()
+    h, mi, se = int(hh), int(mm), int(ss)
+    if h > 23 or mi > 59 or se > 59:
         return None
-    frac = m.group(7) or ""
     micros = int(frac.ljust(6, "0")) if frac else 0
-    return days * MICROS_PER_DAY + ((hh * 60 + mm) * 60 + ss) * MICROS_PER_SECOND + micros
+    return days * MICROS_PER_DAY + ((h * 60 + mi) * 60 + se) * MICROS_PER_SECOND + micros
 
 
 def is_date_text(text: str) -> bool:
