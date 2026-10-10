@@ -73,7 +73,15 @@ def main():
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--jvm", default="")
     ap.add_argument("--only", help="comma-separated query name prefixes")
+    ap.add_argument("--config", action="append", metavar="NAME=JSON",
+                    help="replace the configurations, e.g. 'default={}' (repeatable)")
     args = ap.parse_args()
+    configs = CONFIGS
+    if args.config:
+        configs = []
+        for c in args.config:
+            name, _, opts = c.partition("=")
+            configs.append((name, json.loads(opts)))
     s = Session(args.engine, args.data, args.jvm)
     for name, base in TABLES.items():
         schema = json.load(open(f"{args.data}/{args.scale}/{base}.schema.json"))
@@ -86,12 +94,12 @@ def main():
     if args.only:
         prefixes = args.only.split(",")
         queries = [q for q in QUERIES if any(q[0].startswith(p + " ") for p in prefixes)]
-    header = "| query | " + " | ".join(c[0] for c in CONFIGS) + " |"
-    lines = [header, "|" + "---|" * (len(CONFIGS) + 1)]
+    header = "| query | " + " | ".join(c[0] for c in configs) + " |"
+    lines = [header, "|" + "---|" * (len(configs) + 1)]
     for qname, sql in queries:
         cells = []
         counts = set()
-        for cname, opts in CONFIGS:
+        for cname, opts in configs:
             o = dict(opts)
             o["result"] = "count"
             times = []

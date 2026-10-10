@@ -53,6 +53,18 @@ final class Parallel {
 
     /** A pipeline: a table scan and the streaming operators above it (bottom-up). */
     record Chain(PhysicalPlan.TableScan scan, List<PhysicalPlan> stages) {
+        /** True if some expression of the pipeline may raise a data error. */
+        boolean canFail() {
+            for (PhysicalPlan stage : stages) {
+                for (BoundExpr e : PhysicalPlan.expressions(stage)) {
+                    if (polyquery.optimizer.LogicalOptimizer.canFail(e)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
         /** The hash joins of the chain, outermost first (the order the row engine builds them). */
         List<PhysicalPlan.HashJoin> joinsTopDown() {
             List<PhysicalPlan.HashJoin> out = new ArrayList<>();
@@ -130,11 +142,154 @@ final class Parallel {
         if (plan instanceof PhysicalPlan.TableScan) {
             return null; // a bare scan is just copying: no gain from threads
         }
+        if (plan instanceof PhysicalPlan.HashDistinct d) {
+            Chain c = chain(d.input());
+            if (c == null || !worthIt(c, builder.morselRows())) {
+                return null;
+            }
+            if (!c.canFail() && c.scan().table().data() instanceof polyquery.storage.ColumnarData) {
+                // Nothing can fail, so a blocking DISTINCT is indistinguishable from the streaming
+                // one: a keys-only parallel aggregation (groups in order of first appearance).
+                List<BoundExpr> keys = new ArrayList<>();
+                List<polyquery.storage.ColumnSchema> in = d.input().schema();
+                for (int i = 0; i < in.size(); i++) {
+                    keys.add(new BoundExpr.ColumnRef(i, in.get(i).type(), in.get(i).name()));
+                }
+                return new Aggregate(builder, c, new PhysicalPlan.HashAggregate(d.input(), keys, List.of()));
+            }
+            // workers drop duplicates within their morsels; the final DISTINCT streams over the rest
+            return new AggregateBatches.Distinct(new Gather(builder, c, new DistinctReducer(
+                    BatchBuilder.types(d.schema()))), BatchBuilder.types(d.schema()), builder.context());
+        }
+        if (plan instanceof PhysicalPlan.TopN t) {
+            // workers keep the best rows of their morsels; the final top-N picks among them
+            Chain c = chain(t.input());
+            if (c == null || !worthIt(c, builder.morselRows())) {
+                return null;
+            }
+            long offset = t.offset() == null ? 0 : builder.rows().constant(t.offset(), "OFFSET", 0);
+            long limit = builder.rows().constant(t.limit(), "LIMIT", -1);
+            if (limit < 0 || offset + limit > MAX_PARALLEL_TOP_N) {
+                return null;
+            }
+            return new SortBatches.Sort(new Gather(builder, c, new TopNReducer(t.keys(), t.input().schema(),
+                    (int) (offset + limit))), t.keys(), t.schema(), builder.context(), builder.batchSize(), offset,
+                    limit);
+        }
         Chain c = chain(plan);
         if (c != null && worthIt(c, builder.morselRows())) {
-            return new Gather(builder, c);
+            return new Gather(builder, c, null);
         }
         return null;
+    }
+
+    /** Largest OFFSET + LIMIT for which top-N is pre-computed per morsel. */
+    private static final long MAX_PARALLEL_TOP_N = 100_000;
+
+    /**
+     * An order-preserving reduction of one morsel's output, applied by the worker before the
+     * batches are handed to the (sequential) consumer.
+     */
+    interface Reducer {
+        /** Fresh per-morsel state. */
+        MorselReduction start(int width, ExecContext ctx);
+    }
+
+    /** The reduction state of one morsel: fed with the pipeline's batches, then finished. */
+    interface MorselReduction {
+        void add(Batch b);
+
+        List<Batch> finish();
+    }
+
+    /** Keeps the first occurrence of every row within the morsel. */
+    private record DistinctReducer(polyquery.types.DataType[] types) implements Reducer {
+        @Override
+        public MorselReduction start(int width, ExecContext ctx) {
+            GroupKeys seen = new GroupKeys(types);
+            List<Batch> out = new ArrayList<>();
+            return new MorselReduction() {
+                private int[] gids = new int[0];
+                private int[] keep = new int[0];
+
+                @Override
+                public void add(Batch b) {
+                    if (gids.length < b.size) {
+                        gids = new int[b.size];
+                        keep = new int[b.size];
+                    }
+                    int before = seen.groupCount();
+                    seen.groupIds(b.cols, b.sel, b.count, b.size, gids);
+                    int m = 0;
+                    for (int k = 0; k < b.count; k++) {
+                        int i = b.pos(k);
+                        if (gids[i] == before + m) {
+                            keep[m++] = i;
+                        }
+                    }
+                    if (m > 0) {
+                        Batch copy = new Batch(width);
+                        for (int c = 0; c < width; c++) {
+                            if (b.cols[c] != null) {
+                                copy.cols[c] = Vec.compact(b.cols[c], keep, m);
+                            }
+                        }
+                        copy.reset(m);
+                        out.add(copy);
+                    }
+                }
+
+                @Override
+                public List<Batch> finish() {
+                    return out;
+                }
+            };
+        }
+    }
+
+    /** Keeps the best {@code keep} rows of the morsel (stable: ties in morsel order), in sort order. */
+    private record TopNReducer(List<polyquery.plan.SortKey> keys, List<polyquery.storage.ColumnSchema> schema,
+                               int keep) implements Reducer {
+        @Override
+        public MorselReduction start(int width, ExecContext ctx) {
+            ColumnStore store = new ColumnStore(schema);
+            return new MorselReduction() {
+                private int[] all = new int[0];
+
+                @Override
+                public void add(Batch b) {
+                    if (all.length < b.count) {
+                        all = new int[b.count];
+                    }
+                    for (int k = 0; k < b.count; k++) {
+                        all[k] = b.pos(k);
+                    }
+                    store.append(b, all, b.count);
+                }
+
+                @Override
+                public List<Batch> finish() {
+                    int[] perm = SortBatches.sort(store, keys, ctx);
+                    int n = Math.min(keep, perm.length);
+                    if (n == 0) {
+                        return List.of();
+                    }
+                    Batch out = new Batch(width);
+                    for (int c = 0; c < width; c++) {
+                        Vec src = store.column(c);
+                        if (src != null) {
+                            Vec dst = new Vec(src.type, n);
+                            dst.nullMask(n);
+                            ColumnStore.gather(src, perm, 0, n, dst, 0);
+                            dst.hasNulls = src.hasNulls;
+                            out.cols[c] = dst;
+                        }
+                    }
+                    out.reset(n);
+                    return List.of(out);
+                }
+            };
+        }
     }
 
     private static boolean aggregatesSafe(List<AggregateCall> calls) {
@@ -324,8 +479,36 @@ final class Parallel {
             this.threads = builder.threads();
         }
 
-        /** A worker's result: partial table and first positions of its groups. */
-        private record Partial(AggregateBatches.Table table, long[] first) {
+        /**
+         * A worker's result: partial table, first positions of its groups and, per merge
+         * partition, its group ids in ascending order.
+         */
+        private record Partial(AggregateBatches.Table table, long[] first, int[][] byPartition) {
+        }
+
+        /** Number of hash partitions merged in parallel. */
+        private int partitions() {
+            return plan.groupKeys().isEmpty() ? 1 : Math.min(64, Math.max(1, threads));
+        }
+
+        /** Group ids of a partial table per merge partition (each list ascending, i.e. in first-position order). */
+        private int[][] partitionGroups(AggregateBatches.Table table, int parts) {
+            int groups = table.groupCount();
+            int[] partOf = new int[groups];
+            int[] counts = new int[parts];
+            for (int g = 0; g < groups; g++) {
+                partOf[g] = parts == 1 ? 0 : partition(table.keys.hash(g), parts);
+                counts[partOf[g]]++;
+            }
+            int[][] out = new int[parts][];
+            for (int p = 0; p < parts; p++) {
+                out[p] = new int[counts[p]];
+            }
+            int[] fill = new int[parts];
+            for (int g = 0; g < groups; g++) {
+                out[partOf[g]][fill[partOf[g]]++] = g;
+            }
+            return out;
         }
 
         @Override
@@ -423,7 +606,7 @@ final class Parallel {
                 errors.fatal(e);
                 throw e;
             }
-            return new Partial(table, first);
+            return new Partial(table, first, partitionGroups(table, partitions()));
         }
 
         /** Partition (of {@code parts}) of a group hash. */
@@ -446,7 +629,7 @@ final class Parallel {
             for (Partial p : results) {
                 total += p.table().groupCount();
             }
-            int parts = plan.groupKeys().isEmpty() || total < 16_384 ? 1 : Math.min(64, Math.max(1, threads));
+            int parts = total < 16_384 ? 1 : partitions();
             List<Future<Merged>> futures = new ArrayList<>();
             for (int part = 1; part < parts; part++) {
                 int pp = part;
@@ -487,20 +670,23 @@ final class Parallel {
             long[][] firsts = new long[k][];
             int[] sizes = new int[k];
             for (int w = 0; w < k; w++) {
-                AggregateBatches.Table t = results.get(w).table();
-                int[] ids = new int[t.groupCount()];
-                long[] first = new long[t.groupCount()];
-                int n = 0;
-                for (int g = 0; g < t.groupCount(); g++) {
-                    if (parts == 1 || partition(t.keys.hash(g), parts) == part) {
-                        ids[n] = g;
-                        first[n] = results.get(w).first()[g];
-                        n++;
+                Partial p = results.get(w);
+                int[] ids;
+                if (parts == 1) {
+                    ids = new int[p.table().groupCount()];
+                    for (int g = 0; g < ids.length; g++) {
+                        ids[g] = g;
                     }
+                } else {
+                    ids = p.byPartition()[part];
+                }
+                long[] first = new long[ids.length];
+                for (int i = 0; i < ids.length; i++) {
+                    first[i] = p.first()[ids[i]];
                 }
                 members[w] = ids;
                 firsts[w] = first;
-                sizes[w] = n;
+                sizes[w] = ids.length;
             }
             long[][] out = {new long[16]};
             kWayMerge(firsts, sizes, (w, idx, i) -> {
@@ -628,11 +814,15 @@ final class Parallel {
         private final AtomicLong reservedBytes = new AtomicLong();
         private boolean done;
 
-        Gather(BatchBuilder builder, Chain chain) {
+        private final Reducer reducer;
+
+        /** @param reducer per-morsel reduction applied by the workers, or null */
+        Gather(BatchBuilder builder, Chain chain, Reducer reducer) {
             this.shared = new Shared(builder, chain);
             this.ctx = builder.context();
             this.threads = builder.threads();
             this.width = widthOf(chain);
+            this.reducer = reducer;
         }
 
         private static int widthOf(Chain c) {
@@ -678,12 +868,15 @@ final class Parallel {
             List<Batch> out = new ArrayList<>();
             RuntimeException error = null;
             long bytes = 0;
+            MorselReduction reduction = reducer == null ? null : reducer.start(width, ctx);
             pipe.start(m);
             try {
                 Batch b;
                 while (!stop.get() && (b = pipe.top().next()) != null) {
                     ctx.checkNow();
-                    if (b.count > 0) {
+                    if (b.count > 0 && reduction != null) {
+                        reduction.add(b);
+                    } else if (b.count > 0) {
                         Batch copy = new Batch(width);
                         for (int c = 0; c < width; c++) {
                             if (b.cols[c] != null) {
@@ -710,6 +903,14 @@ final class Parallel {
                 pipe.top().close();
             }
             idle.add(pipe);
+            if (reduction != null) {
+                out = reduction.finish();
+                for (Batch r : out) {
+                    long size = 16L + (long) r.count * 9 * width;
+                    ctx.reserve(size);
+                    bytes += size;
+                }
+            }
             reservedBytes.addAndGet(bytes);
             return new MorselOutput(out, error, bytes);
         }
