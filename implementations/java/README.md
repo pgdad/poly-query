@@ -277,13 +277,16 @@ Every query runs in one of two execution models, selected per query (`mode`):
 
 Both run the same physical plan, so `EXPLAIN` is identical; `optimize` and `join` act on
 planning and apply to both. Every combination of `mode` × `join` × `threads` × `optimize`
-returns the same rows (multiset; ordered queries in the same order) **and the same errors**.
+returns the same rows (multiset; ordered queries in the same order; FLOAT64 sums within
+rounding) **and the same errors** — the one exception being queries whose outcome depends on
+the unspecified row order of a join (see Known limitations).
 
 ### Vectorized execution
 
 * **Batches** (`Batch`, 2048 rows by default) hold one `Vec` per slot of the operator's row
   layout plus a **selection vector** of active positions; filters only narrow the selection
-  (no copying). A `Vec` is struct-of-arrays: `long[]` (INT64, DECIMAL unscaled, DATE, TIMESTAMP,
+  (no copying), evaluating the conjuncts of a WHERE one after the other on the rows still
+  undecided, so most rows are discarded by the first, cheapest loops. A `Vec` is struct-of-arrays: `long[]` (INT64, DECIMAL unscaled, DATE, TIMESTAMP,
   BOOLEAN 0/1), `double[]` or `Object[]`, a `boolean[]` null mask, or — for dictionary-encoded
   STRING columns — `int[]` codes into the table's dictionary, which flow through scans, joins,
   sorts and parallel exchange unchanged, so string predicates (`=`, `LIKE`, `IN`) are evaluated
