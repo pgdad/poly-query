@@ -219,6 +219,7 @@ def run(run_id: str, timeout_min: int, budget_usd: float, max_turns: int | None)
     ws, cfg, scr = rd / "workspace", rd / "config", rd / "scratch"
     creds = Path.home() / ".claude/.credentials.json"
     usage_gate(run_id)
+    print(f"{now()} [{run_id}] agent launched", flush=True)
     # Fresh copy of the OAuth credential at run start (never the rest of ~/.claude).
     # The run is capped to the access token's remaining lifetime so the agent never
     # needs to refresh it (refresh-token rotation across copies could invalidate the
@@ -886,7 +887,7 @@ def import_run(run_id: str, merge: bool) -> str:
 # ------------------------------------------------------------------ wave
 
 def full_cycle(run_id: str, timeout_min: int, budget: float, max_turns: int | None, log) -> dict:
-    log(f"[{run_id}] agent started")
+    log(f"[{run_id}] agent queued (usage gate, then launch)")
     run(run_id, timeout_min, budget, max_turns)
     log(f"[{run_id}] agent finished; collecting telemetry")
     tel = telemetry(run_id)
