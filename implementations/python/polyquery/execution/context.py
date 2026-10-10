@@ -13,6 +13,12 @@ from .. import errors
 ROW_OVERHEAD_BYTES = 64
 VALUE_BYTES = 16
 
+ROW = "row"
+VECTORIZED = "vectorized"
+# parallel pipelines whose driving scan has fewer rows run their partitions
+# one after the other in the calling thread instead of in worker processes
+DEFAULT_PARALLEL_MIN_ROWS = 200_000
+
 
 @dataclass
 class ExecutionContext:
@@ -21,7 +27,15 @@ class ExecutionContext:
     max_memory_bytes: int = 4 * 1024**3
     test_functions: bool = False
     max_join_rows: int = 100_000_000
+    mode: str = VECTORIZED  # ROW (Volcano iterators) or VECTORIZED (column batches)
+    threads: int = 1
+    parallel_min_rows: int = DEFAULT_PARALLEL_MIN_ROWS
     memory_used: int = field(default=0, init=False)
+    # partition (index, count) of each partitioned driver scan of a parallel
+    # pipeline, by id() of the scan node; ``in_worker`` is set in worker
+    # processes (which never fork again)
+    partitions: dict[int, tuple[int, int]] = field(default_factory=dict, init=False)
+    in_worker: bool = field(default=False, init=False)
     # physical plans of subqueries (by Subquery.id) and the current values of
     # correlation parameters (by column key)
     subplans: dict[int, Any] = field(default_factory=dict, init=False)
@@ -30,6 +44,8 @@ class ExecutionContext:
     # correlated subqueries run many times) and LookupScan hash tables
     compiled: dict[tuple[int, str], Any] = field(default_factory=dict, init=False)
     lookup_tables: dict[tuple, dict[Any, list[tuple]]] = field(default_factory=dict, init=False)
+    # join build sides prepared once for all partitions of a parallel pipeline
+    prepared: dict[tuple[int, str], Any] = field(default_factory=dict, init=False)
 
     def cached(self, owner: object, tag: str, factory: Callable[[], Any]) -> Any:
         """Returns the value cached for ``(owner, tag)``, creating it on first use."""
@@ -38,6 +54,18 @@ class ExecutionContext:
         if value is None:
             value = self.compiled[key] = factory()
         return value
+
+    def shared(self, owner: object, tag: str, factory: Callable[[], Any]) -> Any:
+        """The value prepared for ``(owner, tag)`` by :meth:`prepare`, else a
+        fresh ``factory()`` (operator state that depends on correlation
+        parameters must not be cached across executions)."""
+        value = self.prepared.get((id(owner), tag))
+        return factory() if value is None else value
+
+    def prepare(self, owner: object, tag: str, factory: Callable[[], Any]) -> None:
+        key = (id(owner), tag)
+        if key not in self.prepared:
+            self.prepared[key] = factory()
 
     @classmethod
     def create(
@@ -49,13 +77,23 @@ class ExecutionContext:
         test_functions: bool = False,
         cancel_event: threading.Event | None = None,
         max_join_rows: int = 100_000_000,
+        mode: str = VECTORIZED,
+        threads: int = 1,
+        parallel_min_rows: int = DEFAULT_PARALLEL_MIN_ROWS,
     ) -> ExecutionContext:
         """``deadline`` (a time.monotonic() value) takes precedence over
         ``timeout_ms``, which counts from now."""
         if deadline is None and timeout_ms:
             deadline = time.monotonic() + timeout_ms / 1000.0
         return cls(
-            deadline, cancel_event, max_memory_mb * 1024 * 1024, test_functions, max_join_rows
+            deadline,
+            cancel_event,
+            max_memory_mb * 1024 * 1024,
+            test_functions,
+            max_join_rows,
+            mode,
+            threads,
+            parallel_min_rows,
         )
 
     def check(self) -> None:

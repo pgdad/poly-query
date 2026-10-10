@@ -1,22 +1,47 @@
 """Runs a physical plan: either to completion, collecting its result rows,
-or incrementally as a stream of row batches."""
+or incrementally as a stream of row batches. The execution model is chosen
+per statement by ``ExecutionContext.mode``: the row-at-a-time iterator
+engine (``row``) or the vectorized engine (``vectorized``)."""
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Iterator
 from dataclasses import dataclass
 
 from .. import errors
-from ..planner.physical import PhysicalPlan
+from ..planner.physical import PhysicalNode, PhysicalPlan
 from ..storage.catalog import Column
-from .context import ExecutionContext
-from .operators import execute
+from . import row_engine, vector_engine
+from .common import OUTPUT_BATCH_ROWS
+from .context import ROW, ExecutionContext
 
 
 @dataclass
 class QueryResult:
     columns: list[Column]
     rows: list[tuple]
+
+
+def subplan_rows(node: PhysicalNode, ctx: ExecutionContext) -> Iterator[tuple]:
+    """The output rows of a (sub)plan in the statement's execution mode."""
+    if ctx.mode == ROW:
+        return row_engine.execute(node, ctx)
+    return vector_engine.rows(node, ctx)
+
+
+def _row_batches(node: PhysicalNode, ctx: ExecutionContext) -> Iterator[list[tuple]]:
+    if ctx.mode == ROW:
+        rows = row_engine.execute(node, ctx)
+        while True:
+            batch = list(itertools.islice(rows, OUTPUT_BATCH_ROWS))
+            if not batch:
+                return
+            yield batch
+    else:
+        for batch in vector_engine.execute(node, ctx):
+            if batch[1]:
+                yield vector_engine.to_rows(batch)
 
 
 def stream_plan(
@@ -26,9 +51,7 @@ def stream_plan(
     consumed (the consumer provides backpressure)."""
     ctx.subplans = plan.subplans
     produced = 0
-    for batch in execute(plan.root, ctx):
-        if not batch:
-            continue
+    for batch in _row_batches(plan.root, ctx):
         produced += len(batch)
         if max_rows is not None and produced > max_rows:
             raise errors.resource_limit(f"result exceeds max_rows ({max_rows})")

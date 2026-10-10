@@ -86,16 +86,25 @@ class ColumnVector:
     null_count: int
     validity: bytes | None  # LSB-first, 1 = non-NULL; None when null_count == 0
 
-    def to_list(self) -> list[Any]:
+    def to_list(self, start: int = 0, stop: int | None = None) -> list[Any]:
+        """The runtime values of rows ``start`` .. ``stop`` (default: all)."""
         raise NotImplementedError
 
     def take(self, positions: Iterable[int]) -> list[Any]:
         raise NotImplementedError
 
-    def _null_positions(self) -> list[int]:
+    def _null_positions(self, start: int = 0, stop: int | None = None) -> list[int]:
+        """Positions (relative to ``start``) of the NULL rows in ``start`` .. ``stop``;
+        only the bitmap bytes covering the range are expanded."""
         if self.validity is None:
             return []
-        return null_positions(bits_to_flags(self.validity, self.length))
+        stop = self.length if stop is None else min(stop, self.length)
+        if start >= stop:
+            return []
+        first = start >> 3
+        flags = bits_to_flags(self.validity[first : (stop + 7) >> 3], stop - (first << 3))
+        skip = start - (first << 3)
+        return null_positions(flags[skip:])
 
     def _is_valid(self, i: int) -> bool:
         validity = self.validity
@@ -114,15 +123,16 @@ class PlainVector(ColumnVector):
         self.validity = validity
         self.null_count = null_count
 
-    def to_list(self) -> list[Any]:
-        data = self.data
+    def to_list(self, start: int = 0, stop: int | None = None) -> list[Any]:
+        whole = start == 0 and (stop is None or stop >= self.length)
+        data = self.data if whole else self.data[start:stop]
         if self.dtype.kind is TypeKind.BOOLEAN:
             values = list(map(bool, data))
         elif isinstance(data, list):
-            values = list(data)
+            values = list(data) if whole else data
         else:
             values = data.tolist()
-        for i in self._null_positions():
+        for i in self._null_positions(start, stop):
             values[i] = None
         return values
 
@@ -155,9 +165,10 @@ class DictVector(ColumnVector):
         self.validity = validity
         self.null_count = null_count
 
-    def to_list(self) -> list[Any]:
-        values = list(map(self.dictionary.__getitem__, self.codes))
-        for i in self._null_positions():
+    def to_list(self, start: int = 0, stop: int | None = None) -> list[Any]:
+        codes = self.codes if start == 0 and stop is None else self.codes[start:stop]
+        values = list(map(self.dictionary.__getitem__, codes))
+        for i in self._null_positions(start, stop):
             values[i] = None
         return values
 

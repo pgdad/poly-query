@@ -47,6 +47,10 @@ class PolyQueryError(Exception):
     def __repr__(self) -> str:
         return f"PolyQueryError({self.code!r}, {self.message!r})"
 
+    def __reduce__(self) -> tuple:
+        # picklable (errors of parallel workers are sent to the parent process)
+        return (PolyQueryError, (self.code, self.message, self.details))
+
 
 def _factory(code: str):
     def make(message: str, **details: Any) -> PolyQueryError:

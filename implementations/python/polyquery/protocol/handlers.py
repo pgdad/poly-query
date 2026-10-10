@@ -49,6 +49,13 @@ CAPABILITIES = [
     "index.btree",
     "phase4",
     "http.streaming",
+    "phase5",
+    "exec.row",
+    "exec.vectorized",
+    "exec.parallel",
+    "join.hash",
+    "join.merge",
+    "join.nested_loop",
 ]
 
 
@@ -372,6 +379,8 @@ class RequestHandler:
         options.optimize = _optional_bool(raw, "optimize", True)
         options.use_indexes = _optional_bool(raw, "use_indexes", True)
         options.join = raw.get("join") or "auto"
+        options.mode = raw.get("mode") or "auto"
+        options.threads = raw.get("threads")
         return sql, options, count_only
 
     def op_explain(self, req: dict) -> dict[str, Any]:
@@ -411,7 +420,7 @@ class RequestHandler:
         mode = raw.get("mode", "auto")
         if not isinstance(mode, str):
             raise errors.invalid_request("option 'mode' must be a string")
-        if mode not in ("auto", "row"):
+        if mode not in ("auto", "row", "vectorized"):
             raise errors.unsupported(f"execution mode '{mode}' is not supported")
         threads = raw.get("threads")
         if threads is not None and (not _is_int(threads) or threads < 1):

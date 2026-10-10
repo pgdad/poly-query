@@ -91,10 +91,29 @@ class Table:
     # ------------------------------------------------------------ data access
 
     def scan(
-        self, column_indexes: Sequence[int], keep_group: Callable[[RowGroup], bool] | None = None
+        self,
+        column_indexes: Sequence[int],
+        keep_group: Callable[[RowGroup], bool] | None = None,
+        start: int = 0,
+        stop: int | None = None,
     ) -> Iterator[tuple]:
-        """Yields row tuples restricted to the given columns. ``keep_group``
-        lets the caller skip row groups (only meaningful for column tables)."""
+        """Yields row tuples restricted to the given columns, for the rows at
+        positions ``start`` .. ``stop`` (default: all; parallel scans read
+        disjoint ranges). ``keep_group`` lets the caller skip row groups
+        (only meaningful for column tables)."""
+        raise NotImplementedError
+
+    def scan_columns(
+        self,
+        column_indexes: Sequence[int],
+        batch_size: int,
+        keep_group: Callable[[RowGroup], bool] | None = None,
+        start: int = 0,
+        stop: int | None = None,
+    ) -> Iterator[tuple[list[Sequence[Any]], int]]:
+        """Like :meth:`scan`, but yields ``(columns, length)`` batches of at
+        most ``batch_size`` rows, one value sequence per requested column
+        (vectorized execution)."""
         raise NotImplementedError
 
     def fetch(self, row_ids: Sequence[int], column_indexes: Sequence[int]) -> list[tuple]:
@@ -129,13 +148,39 @@ class RowTable(Table):
         self.rows = rows
 
     def scan(
-        self, column_indexes: Sequence[int], keep_group: Callable[[RowGroup], bool] | None = None
+        self,
+        column_indexes: Sequence[int],
+        keep_group: Callable[[RowGroup], bool] | None = None,
+        start: int = 0,
+        stop: int | None = None,
     ) -> Iterator[tuple]:
+        rows = self.rows if start == 0 and stop is None else self.rows[start:stop]
         if not column_indexes:
-            return itertools.repeat((), self.row_count)
+            return itertools.repeat((), len(rows))
         if list(column_indexes) == list(range(len(self.columns))):
-            return iter(self.rows)
-        return map(_row_getter(column_indexes), self.rows)
+            return iter(rows)
+        return map(_row_getter(column_indexes), rows)
+
+    def scan_columns(
+        self,
+        column_indexes: Sequence[int],
+        batch_size: int,
+        keep_group: Callable[[RowGroup], bool] | None = None,
+        start: int = 0,
+        stop: int | None = None,
+    ) -> Iterator[tuple[list[Sequence[Any]], int]]:
+        stop = self.row_count if stop is None else min(stop, self.row_count)
+        rows = self.rows
+        for lo in range(start, stop, batch_size):
+            chunk = rows[lo : min(lo + batch_size, stop)]
+            if not column_indexes:
+                yield [], len(chunk)
+            elif len(column_indexes) == 1:
+                (only,) = column_indexes
+                yield [[row[only] for row in chunk]], len(chunk)
+            else:
+                columns = list(zip(*chunk))
+                yield [columns[i] for i in column_indexes], len(chunk)
 
     def fetch(self, row_ids: Sequence[int], column_indexes: Sequence[int]) -> list[tuple]:
         rows = self.rows
@@ -193,15 +238,48 @@ class ColumnTable(Table):
         return self.groups
 
     def scan(
-        self, column_indexes: Sequence[int], keep_group: Callable[[RowGroup], bool] | None = None
+        self,
+        column_indexes: Sequence[int],
+        keep_group: Callable[[RowGroup], bool] | None = None,
+        start: int = 0,
+        stop: int | None = None,
     ) -> Iterator[tuple]:
-        for group in self.groups:
-            if group.row_count == 0 or (keep_group is not None and not keep_group(group)):
-                continue
+        for group, lo, hi in self._ranges(keep_group, start, stop):
             if not column_indexes:
-                yield from itertools.repeat((), group.row_count)
+                yield from itertools.repeat((), hi - lo)
             else:
-                yield from zip(*[group.vector(i).to_list() for i in column_indexes])
+                yield from zip(*[group.vector(i).to_list(lo, hi) for i in column_indexes])
+
+    def scan_columns(
+        self,
+        column_indexes: Sequence[int],
+        batch_size: int,
+        keep_group: Callable[[RowGroup], bool] | None = None,
+        start: int = 0,
+        stop: int | None = None,
+    ) -> Iterator[tuple[list[Sequence[Any]], int]]:
+        for group, lo, hi in self._ranges(keep_group, start, stop):
+            # decode each chunk range once, then hand out slices of it
+            data = [group.vector(i).to_list(lo, hi) for i in column_indexes]
+            n = hi - lo
+            if n <= batch_size:
+                yield data, n
+                continue
+            for k in range(0, n, batch_size):
+                yield [values[k : k + batch_size] for values in data], min(batch_size, n - k)
+
+    def _ranges(
+        self, keep_group: Callable[[RowGroup], bool] | None, start: int, stop: int | None
+    ) -> Iterator[tuple[RowGroup, int, int]]:
+        """(group, first, end) local row ranges of the groups overlapping
+        ``start`` .. ``stop`` that are not skipped."""
+        stop = self.row_count if stop is None else stop
+        for group in self.groups:
+            lo = max(start - group.start, 0)
+            hi = min(stop - group.start, group.row_count)
+            if lo >= hi or (keep_group is not None and not keep_group(group)):
+                continue
+            yield group, lo, hi
 
     def fetch(self, row_ids: Sequence[int], column_indexes: Sequence[int]) -> list[tuple]:
         if not column_indexes:
