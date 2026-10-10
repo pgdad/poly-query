@@ -384,7 +384,82 @@ Several thousand queries were run without a mismatch. It found two bugs
 along the way: an unpicklable partial state, and an eagerly evaluated
 overflowing constant.
 
-MEASUREMENTS_PLACEHOLDER
+### Measurements (Phase 5)
+
+Setup: `python3 datasets/generators/pqgen.py generate --scale 1m` (1M
+transactions, 100k customers, 250k orders, 1M order items, 20k products,
+1M sort keys; CSV with the generated schemas, column layout), CPython 3.14
+(GIL build) on a 32-core Linux machine that was shared with other jobs
+(about ±20% run-to-run noise). Times are medians of 5 runs of
+`tools/bench.py` in ms, wall clock per `query` request with
+`result: "count"`, so serialization is excluded. *Before* is the accepted
+Phase 4 engine (commit `053c137`), the same machine and data. Its executor
+passed batches of row tuples and grouped by collecting rows per group.
+
+| query | what | before | row | vectorized | vect. 2 thr | vect. 4 thr | vect. 8 thr |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Q1 | `COUNT(*)` with 2-predicate filter | 221 | 129 | 96 | 75 | 58 | 65 |
+| Q2 | GROUP BY category (8 groups), 5 aggregates | 2864 | 446 | 217 | 159 | 121 | 100 |
+| Q3 | GROUP BY customer_id (100k groups) | 1923 | 486 | 212 | 190 | 179 | 199 |
+| Q4 | 1M ⋈ 100k hash join + GROUP BY | 1655 | 580 | 241 | 173 | 132 | 140 |
+| Q5 | filter + `ORDER BY … LIMIT 10` (TopN) | 566 | 185 | 121 | 115 | 95 | 109 |
+| Q6 | 3-way join + filter + GROUP BY | 604 | 603 | 268 | 202 | 162 | 182 |
+| Q7 | `SUM(amount * 2 + fee)` with filter | 318 | 339 | 190 | 145 | 121 | 134 |
+| Q8 | full sort of 1M rows on 2 keys | 3798 | 985 | 727 | — | 728¹ | — |
+| Q9 | non-selective filter returning 840k rows | 2096 | 341 | 205 | 200 | 207 | 200 |
+| Q10 | selective filter returning few rows | 301 | 255 | 151 | 117 | 71 | 106 |
+| R1 | comma join `products, orders, items` + GROUP BY | fails² | 520 | 258 | — | 165 | — |
+
+¹ Measured after the change that makes full sorts parallelize only selective
+pipelines. Before that change, local sorts plus the merge re-sort made
+Q8 slower with threads (971 ms at 4). ² `RESOURCE_LIMIT`: without join
+reordering, the first join is the 20k × 250k cross product
+(`--max-join-rows`).
+
+Main effects, in order of impact:
+
+* **GC pause** (all modes). Q8 vectorized went from 2,878 to 775 ms, row
+  mode Q2 from 783 to 456 ms. Most of the old engine's Q8 / Q9 time was
+  garbage collection.
+* **Vectorized execution** is 1.4–2.5× faster than row mode, and up to
+  13× faster than the old engine (Q2). The gains come from C-level kernels,
+  columnar group state and positional joins.
+* **Parallel pipelines** (forked workers) give a further 1.5–2.4× at 4–8
+  threads for scans, filters, joins and low-cardinality aggregation (Q1,
+  Q2, Q4, Q6, Q7, Q10). They give little for high-cardinality grouping
+  (Q3: merging 100k-group partial states in the parent is serial), full
+  sorts (Q8) and non-selective scans (Q9). The last two are therefore not
+  parallelized. Beyond 4–8 workers, fork and pickle overheads dominate on
+  1M rows.
+* **Optimizer** (`optimize: true` vs `false`, vectorized). Q5 121 vs 245 ms
+  (TopN instead of a full sort). Q6 268 vs 346 ms (pushdown of
+  `o.status = 'delivered'` below the joins). Q4 241 vs 282 ms. R1 on the
+  fixture-scale tables (50 products, 500 orders, 2,000 items): 1 ms vs
+  7,647 ms (join reordering + pushdown versus a cross product filtered
+  afterwards).
+
+Join algorithms (100k scale: 100k transactions ⋈ 10k customers (J1),
+8k items ⋈ 2k products (J2), 25k orders ⟕ 100k items (J3); ms):
+
+| query | row hash | row merge | vectorized hash | vectorized merge | row nested loop | vectorized nested loop |
+|---|---:|---:|---:|---:|---:|---:|
+| J1 | 38 | 79 | 19 | 36 | — | — |
+| J2 | 13 | 15 | 6 | 8 | 1003 | 723 |
+| J3 | 21 | 29 | 15 | 17 | — | — |
+
+Hash joins beat sort-merge joins by 1.1–2× in both modes, since no input
+arrives sorted and the merge join pays two sorts. This is why `auto`
+picks hash joins. Nested loops are quadratic: the vectorized block nested
+loop evaluates 16M pairs of J2 in 0.7 s.
+
+Reproduce with:
+
+```sh
+python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pqdata
+python3 tools/bench.py --data /tmp/pqdata/1m --repeat 5 \
+    --variant row --variant vectorized --variant vec4 --variant '{"mode":"vectorized","threads":8}'
+python3 tools/bench.py --data /tmp/pqdata/1m --repeat 5 --variant auto --engine <phase-4 checkout>/bin/polyquery
+```
 
 ### HTTP server (Phase 4)
 
