@@ -490,7 +490,7 @@ class PhysicalPlanner:
             root.names = [o.name for o in query.outputs]
         if self.options.threads > 1:
             # subquery plans (executed per outer row) stay serial
-            root = parallelize(root, self.options.threads)
+            root = parallelize(root, min(self.options.threads, MAX_PARTITIONS))
         columns = [Column(o.name, o.expr.type) for o in query.outputs]
         return PhysicalPlan(root, columns, self.subplans)
 
@@ -764,6 +764,8 @@ def pipeline_path(node: PhysicalNode) -> list[PhysicalNode] | None:
 _PARTIAL_CONSUMERS = (HashAggregate, Sort, TopN, Distinct)
 
 
+# partitions of a parallel pipeline (``threads`` beyond this add no parallelism)
+MAX_PARTITIONS = 64
 # a pipeline at the root is parallelized only if it is expected to return at
 # most this fraction of the rows it scans: every result row of a worker
 # process has to be pickled back to the parent

@@ -575,7 +575,8 @@ def _sorted_partition(batches: Batches, node: pp.Sort | pp.TopN, ctx: ExecutionC
         if keep is None:
             ctx.reserve_rows(batch[1], width)
         elif buffer.n >= limit:  # type: ignore[operator]
-            buffer.cols, buffer.n = _sorted(buffer.cols, buffer.n, node, keep)
+            cols, buffer.n = _sorted(buffer.cols, buffer.n, node, keep)
+            buffer.cols = [list(c) for c in cols]
         ctx.check()
     cols, n = _sorted(buffer.cols, buffer.n, node, keep)
     if keep is not None:
@@ -583,7 +584,7 @@ def _sorted_partition(batches: Batches, node: pp.Sort | pp.TopN, ctx: ExecutionC
     return cols, n
 
 
-def _sorted(cols: list[list[Any]], n: int, node: pp.Sort | pp.TopN, keep: int | None) -> tuple[list[list[Any]], int]:
+def _sorted(cols: Columns, n: int, node: pp.Sort | pp.TopN, keep: int | None) -> tuple[Columns, int]:
     perm = sort_permutation(cols, n, node.keys)
     if keep is not None:
         del perm[keep:]

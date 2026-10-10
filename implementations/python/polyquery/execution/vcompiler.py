@@ -16,9 +16,11 @@ NULL-aware comprehension. Semantics are exactly those of the row closures in
 without a dedicated vector kernel (subqueries, non-constant LIKE patterns,
 …) evaluate their row closure over just the columns they reference.
 
-AND, OR and CASE evaluate operands that may raise errors only for the rows
-that need them (``b <> 0 AND a / b > 1`` never divides by zero), like the
-short-circuiting row closures.
+Operands that may raise an error are evaluated only for the rows whose
+result depends on them, exactly like the short-circuiting row closures: the
+right operand of AND / OR, CASE branches, and the right operand of
+NULL-propagating operators (``b <> 0 AND a / b > 1`` never divides by
+zero, ``NULL * <overflowing constant>`` is NULL).
 """
 
 from __future__ import annotations
@@ -66,9 +68,12 @@ _COMPARE_OPS = {
 }
 
 
-def take(values: Sequence[Any], positions: Sequence[int]) -> list[Any]:
-    """Gathers ``values[i]`` for every ``i`` in ``positions``."""
-    return list(map(values.__getitem__, positions))
+def take(values: Sequence[Any], positions: Sequence[int]) -> Sequence[Any]:
+    """Gathers ``values[i]`` for every ``i`` in ``positions`` (a list or a
+    tuple). ``itemgetter`` gathers in one C loop without a call per value."""
+    if len(positions) < 2:
+        return [values[i] for i in positions]
+    return operator.itemgetter(*positions)(values)
 
 
 def true_positions(mask: Sequence[Any]) -> list[int]:
@@ -200,6 +205,27 @@ class VectorCompiler:
 
         return run
 
+    def _operands(self, left_expr: b.Expr, right_expr: b.Expr) -> Callable[[Columns, int], tuple]:
+        """The operand vectors of a NULL-propagating binary operator. Like the
+        row closures, an operand on the right that may raise an error is only
+        evaluated for the rows whose left operand is not NULL."""
+        left = self.compile(left_expr)
+        right_all = self.compile(right_expr)
+        right_some = self._selective(right_expr) if b.may_fail(right_expr) else None
+
+        def operands(cols: Columns, n: int) -> tuple:
+            a = left(cols, n)
+            if right_some is None or None not in a:
+                return a, right_all(cols, n)
+            positions = list(compress(range(n), map(_is_not_none, a)))
+            c: list[Any] = [None] * n
+            if positions:
+                for i, v in zip(positions, right_some(cols, positions)):
+                    c[i] = v
+            return a, c
+
+        return operands
+
     # ------------------------------------------------------------ leaves
 
     def _v_Literal(self, e: b.Literal) -> VecFn:
@@ -232,7 +258,7 @@ class VectorCompiler:
         return neg
 
     def _v_Arith(self, e: b.Arith) -> VecFn:
-        left, right = self.compile(e.left), self.compile(e.right)
+        operands = self._operands(e.left, e.right)
         kernel = arith_kernel(e)
         lt, rt = e.left.type.kind, e.right.type.kind
         fast: Callable[[Any, Any], Any] | None = None
@@ -248,8 +274,7 @@ class VectorCompiler:
                 fast, check = _FAST_OPS[e.op], _check_decimal
 
         def arith(cols: Columns, n: int) -> Sequence[Any]:
-            a = left(cols, n)
-            c = right(cols, n)
+            a, c = operands(cols, n)
             if None in a or None in c:
                 return [None if x is None or y is None else kernel(x, y) for x, y in zip(a, c)]
             if fast is None:
@@ -259,11 +284,10 @@ class VectorCompiler:
         return arith
 
     def _v_Concat(self, e: b.Concat) -> VecFn:
-        left, right = self.compile(e.left), self.compile(e.right)
+        operands = self._operands(e.left, e.right)
 
         def concat(cols: Columns, n: int) -> Sequence[Any]:
-            a = left(cols, n)
-            c = right(cols, n)
+            a, c = operands(cols, n)
             if None in a or None in c:
                 return [None if x is None or y is None else x + y for x, y in zip(a, c)]
             return list(map(operator.add, a, c))
@@ -289,12 +313,11 @@ class VectorCompiler:
     # ------------------------------------------------------------ predicates
 
     def _v_Compare(self, e: b.Compare) -> VecFn:
-        left, right = self.compile(e.left), self.compile(e.right)
+        operands = self._operands(e.left, e.right)
         cmp = compare_kernel(e)
 
         def compare(cols: Columns, n: int) -> Sequence[Any]:
-            a = left(cols, n)
-            c = right(cols, n)
+            a, c = operands(cols, n)
             if None in a or None in c:
                 return [None if x is None or y is None else cmp(x, y) for x, y in zip(a, c)]
             return list(map(cmp, a, c))
@@ -364,6 +387,8 @@ class VectorCompiler:
         return like
 
     def _v_Between(self, e: b.Between) -> VecFn:
+        if b.may_fail(e.low) or b.may_fail(e.high):
+            return self._row_fallback(e)  # bounds are only evaluated for non-NULL operands
         operand, low, high = (self.compile(x) for x in (e.operand, e.low, e.high))
         negated = e.negated
 
@@ -436,7 +461,12 @@ class VectorCompiler:
         return case
 
     def _v_Function(self, e: b.Function) -> VecFn:
-        """Arguments are evaluated as vectors; the scalar kernel is mapped over them."""
+        """Arguments are evaluated as vectors; the scalar kernel is mapped over
+        them. Function kernels evaluate their arguments lazily (strict
+        functions stop at the first NULL, COALESCE at the first non-NULL), so
+        a call with a later argument that may fail runs its row closure."""
+        if any(b.may_fail(a) for a in e.args[1:]):
+            return self._row_fallback(e)
         args = [self.compile(a) for a in e.args]
         getters = [operator.itemgetter(i) for i in range(len(args))]
         scalar = compile_function(e, getters, self.ctx, evaluate_constant)  # type: ignore[arg-type]
