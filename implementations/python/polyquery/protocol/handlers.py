@@ -16,9 +16,11 @@ from typing import Any
 from .. import ENGINE_NAME, ENGINE_VERSION, PROTOCOL_VERSION, SPEC_VERSION, errors
 from ..datatypes import InvalidTypeError, parse_type
 from ..ingest.loader import FORMATS
-from ..service import Engine, QueryOptions
+from ..service import Engine, QueryOptions, StorageOptions
+from ..storage import pqcf
 from ..storage.catalog import Column
-from .serialize import serialize_rows
+from ..storage.table import LAYOUTS
+from .serialize import serialize_rows, serialize_value
 
 log = logging.getLogger("polyquery")
 
@@ -36,9 +38,12 @@ CAPABILITIES = [
     "sql.subquery",
     "sql.cte",
     "sql.correlated_subquery",
+    "phase3",
+    "storage.pqcf",
+    "storage.mmap",
+    "index.hash",
+    "index.btree",
 ]
-
-_LATER_PHASE_OPS = frozenset({"save", "open", "stats"})
 
 
 def version_info() -> dict[str, Any]:
@@ -119,6 +124,33 @@ def _parse_schema(raw: Any) -> list[Column] | None:
     return columns
 
 
+def _storage_options(raw: dict) -> StorageOptions:
+    """The in-memory layout options of ``load`` / ``open``."""
+    layout = raw.get("layout")
+    if layout is None:
+        layout = "column"
+    if not isinstance(layout, str) or layout not in LAYOUTS:
+        raise errors.invalid_request("option 'layout' must be 'row' or 'column'")
+    dictionary = raw.get("dictionary")
+    if dictionary is not None and not isinstance(dictionary, bool):
+        raise errors.invalid_request("option 'dictionary' must be a boolean")
+    return StorageOptions(layout, dictionary, _optional_bool(raw, "mmap", False))
+
+
+def _save_options(raw: dict) -> pqcf.SaveOptions:
+    size = raw.get("row_group_size")
+    if size is None:
+        size = pqcf.DEFAULT_ROW_GROUP_SIZE
+    if not _is_int(size) or size < 1:
+        raise errors.invalid_request("option 'row_group_size' must be a positive integer")
+    encoding = raw.get("encoding")
+    if encoding is None:
+        encoding = "auto"
+    if not isinstance(encoding, str) or encoding.lower() not in pqcf.FORCED_ENCODINGS:
+        raise errors.invalid_request("option 'encoding' must be one of auto, plain, dict, rle")
+    return pqcf.SaveOptions(size, encoding.lower())
+
+
 def _csv_options(raw: dict) -> dict[str, Any]:
     header = _optional_bool(raw, "header", True)
     delimiter = raw.get("delimiter", ",")
@@ -184,8 +216,6 @@ class RequestHandler:
                 raise errors.invalid_request("field 'op' must be a string")
             method = getattr(self, "op_" + op, None)
             if method is None:
-                if op in _LATER_PHASE_OPS:
-                    raise errors.unsupported(f"operation '{op}' is not supported")
                 raise errors.invalid_request(f"unknown op '{op}'")
             body = method(request)
             response: dict[str, Any] = {"id": req_id, "ok": True}
@@ -236,7 +266,9 @@ class RequestHandler:
         if (path is None) == (data is None):
             raise errors.invalid_request("exactly one of 'path' or 'data' is required")
         schema = _parse_schema(req.get("schema"))
-        options = _csv_options(_optional_object(req, "options")) if fmt == "csv" else {}
+        raw_options = _optional_object(req, "options")
+        storage = _storage_options(raw_options)
+        options = _csv_options(raw_options) if fmt == "csv" else {}
         if fmt == "csv" and not options["header"] and schema is None:
             raise errors.invalid_request("header=false requires an explicit schema")
         replace = _optional_bool(req, "replace", False)
@@ -255,8 +287,52 @@ class RequestHandler:
                 raise errors.invalid_request("field 'data' must be a string")
             limits.check_bytes(len(data.encode("utf-8", "surrogatepass")))
             text = data
-        table = self.engine.load(name, fmt, text, schema, options, replace)
+        table = self.engine.load(name, fmt, text, schema, options, replace, storage)
         return {"table": table.name, "row_count": table.row_count, "columns": table.schema_json()}
+
+    def _path(self, req: dict) -> tuple[str, str]:
+        path = req.get("path")
+        if not isinstance(path, str):
+            raise errors.invalid_request("field 'path' must be a string")
+        return path, resolve_data_path(self.config.data_dir, path)
+
+    def op_save(self, req: dict) -> dict[str, Any]:
+        name = _require_str(req, "table")
+        path, full_path = self._path(req)
+        options = _save_options(_optional_object(req, "options"))
+        table, size = self.engine.save(name, full_path, options)
+        return {"table": table.name, "path": path, "bytes": size}
+
+    def op_open(self, req: dict) -> dict[str, Any]:
+        name = _require_str(req, "table")
+        path, full_path = self._path(req)
+        storage = _storage_options(_optional_object(req, "options"))
+        replace = _optional_bool(req, "replace", False)
+        table = self.engine.open(name, full_path, storage, replace)
+        return {
+            "table": table.name,
+            "path": path,
+            "row_count": table.row_count,
+            "columns": table.schema_json(),
+            "indexes": [i.to_json() for i in self.engine.indexes_of(table)],
+        }
+
+    def op_stats(self, req: dict) -> dict[str, Any]:
+        table = self.engine.catalog.require(_require_str(req, "table"))
+        columns = []
+        for i, column in enumerate(table.columns):
+            stats = table.column_stats(i)
+            columns.append(
+                {
+                    "name": column.name,
+                    "type": column.type.name,
+                    "null_count": stats.null_count,
+                    "distinct_count": stats.distinct_count,
+                    "min": serialize_value(stats.min, column.type),
+                    "max": serialize_value(stats.max, column.type),
+                }
+            )
+        return {"table": table.name, "row_count": table.row_count, "columns": columns}
 
     def _query_request(self, req: dict) -> tuple[str, QueryOptions, bool]:
         sql = req.get("sql")
@@ -269,6 +345,7 @@ class RequestHandler:
         )
         count_only = self._validate_query_options(raw)
         options.optimize = _optional_bool(raw, "optimize", True)
+        options.use_indexes = _optional_bool(raw, "use_indexes", True)
         options.join = raw.get("join") or "auto"
         return sql, options, count_only
 
@@ -325,7 +402,8 @@ class RequestHandler:
             "table": table.name,
             "row_count": table.row_count,
             "columns": table.schema_json(),
-            "indexes": [],
+            "indexes": [i.to_json() for i in self.engine.indexes_of(table)],
+            "layout": table.layout,
         }
 
     def op_drop(self, req: dict) -> dict[str, Any]:

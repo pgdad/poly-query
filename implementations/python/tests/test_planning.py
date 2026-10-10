@@ -1,6 +1,7 @@
 """Unit tests for semantic analysis, logical/physical planning and EXPLAIN."""
 
 import json
+import tempfile
 import unittest
 
 from polyquery.analysis import bound as b
@@ -173,6 +174,103 @@ class Phase2QueryTests(EngineTestMixin, unittest.TestCase):
         resp = self.query("SELECT CASE WHEN id > 1 THEN 1 ELSE 2.5 END FROM people WHERE id = 1")
         self.assertEqual(resp["columns"][0]["type"], "DECIMAL(18,1)")
         self.assertEqual(resp["rows"], [["2.5"]])
+
+
+def _plan_nodes(plan: dict):
+    yield plan
+    for child in plan.get("children", []):
+        yield from _plan_nodes(child)
+
+
+class AccessPathTests(EngineTestMixin, unittest.TestCase):
+    """Index selection, column pruning, row-group skipping, build sides."""
+
+    def setUp(self):
+        super().setUp()
+        rows = "\n".join(f"{i},{i % 7},{i * 0.5:.2f},c{i % 3}" for i in range(1, 1001))
+        self.load_csv("t", "id,g,amount,cat\n" + rows + "\n")
+        self.load_csv("small", "id,v\n1,x\n2,y\n")
+        for sql in (
+            "CREATE INDEX t_id ON t (id) USING HASH",
+            "CREATE INDEX t_amount ON t (amount)",
+            "CREATE INDEX t_g ON t (g) USING BTREE",
+        ):
+            self.assertTrue(self.query(sql)["ok"], sql)
+
+    def explain(self, sql: str, **options) -> list[dict]:
+        req = {"op": "explain", "sql": sql}
+        if options:
+            req["options"] = options
+        resp = self.handler.handle(req)
+        self.assertTrue(resp["ok"], resp)
+        return list(_plan_nodes(resp["plan"]))
+
+    def index_used(self, sql: str, **options) -> str | None:
+        scans = [n for n in self.explain(sql, **options) if n["op"] == "IndexScan"]
+        return scans[0]["index"] if scans else None
+
+    def test_index_selection_by_selectivity(self):
+        self.assertEqual(self.index_used("SELECT * FROM t WHERE id = 5"), "t_id")
+        self.assertEqual(self.index_used("SELECT * FROM t WHERE id IN (1, 2)"), "t_id")
+        self.assertIsNone(self.index_used("SELECT * FROM t WHERE id > 5"))  # hash: no ranges
+        self.assertEqual(self.index_used("SELECT * FROM t WHERE amount BETWEEN 10 AND 20"), "t_amount")
+        self.assertIsNone(self.index_used("SELECT * FROM t WHERE amount > 10"))  # ~98% of the rows
+        self.assertIsNone(self.index_used("SELECT * FROM t WHERE g = 3"))  # 1/7 > 10%
+        self.assertIsNone(self.index_used("SELECT * FROM t WHERE id = 5", use_indexes=False))
+
+    def test_index_results_match_full_scans(self):
+        for where in ("id = 5", "id IN (3, 999, NULL)", "amount >= 499.5", "amount < 1",
+                      "amount BETWEEN 10 AND 12.25 AND cat = 'c1'", "id = 5.0", "id = 5.5"):
+            sql = f"SELECT * FROM t WHERE {where} ORDER BY id"
+            self.assertEqual(self.query(sql)["rows"], self.query(sql, use_indexes=False)["rows"], where)
+
+    def test_index_lifecycle_statements(self):
+        self.assertEqual(self.error_code("CREATE INDEX t_id ON small (id)"), "ALREADY_EXISTS")
+        self.assertTrue(self.query("CREATE INDEX IF NOT EXISTS t_id ON small (id)")["ok"])
+        self.assertTrue(self.query("DROP INDEX T_ID")["ok"])
+        self.assertIsNone(self.index_used("SELECT * FROM t WHERE id = 5"))
+        self.assertTrue(self.query("DROP INDEX IF EXISTS t_id")["ok"])
+        schema = self.request(op="schema", table="t")
+        self.assertEqual([i["name"] for i in schema["indexes"]], ["t_amount", "t_g"])
+
+    def test_column_pruning(self):
+        scans = [n for n in self.explain("SELECT COUNT(*) FROM t WHERE g = 1") if n["op"] == "TableScan"]
+        self.assertEqual([s["columns"] for s in scans], [["g"]])
+
+    def test_column_pruning_through_derived_tables(self):
+        sql = "WITH w AS (SELECT * FROM t) SELECT id FROM (SELECT * FROM w) d WHERE g = 1 ORDER BY amount"
+        scans = [n for n in self.explain(sql) if n["op"] == "TableScan"]
+        self.assertEqual([sorted(s["columns"]) for s in scans], [["amount", "g", "id"]])
+        self.assertEqual(self.rows(sql)[:2], [[1], [8]])
+        scans = [n for n in self.explain("SELECT COUNT(*) FROM (SELECT DISTINCT g, cat FROM t) d") if n["op"] == "TableScan"]
+        self.assertEqual([sorted(s["columns"]) for s in scans], [["cat", "g"]])
+
+    def test_build_side_is_the_smaller_input(self):
+        sql = "SELECT * FROM t JOIN small s ON s.id = t.id"
+        join = next(n for n in self.explain(sql) if n["op"] == "HashJoin")
+        self.assertEqual(join["build"], "right")
+        sql = "SELECT * FROM small s JOIN t ON s.id = t.id"
+        join = next(n for n in self.explain(sql) if n["op"] == "HashJoin")
+        self.assertEqual(join["build"], "left")
+        self.assertEqual(sorted(map(tuple, self.rows(sql))), [(1, "x", 1, 1, 0.5, "c1"), (2, "y", 2, 2, 1.0, "c2")])
+        left = next(n for n in self.explain("SELECT * FROM small s LEFT JOIN t ON s.id = t.id") if n["op"] == "HashJoin")
+        self.assertEqual(left["build"], "right")
+
+    def test_row_group_skipping_on_pqcf_tables(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.handler.config.data_dir = d
+            self.assertTrue(self.request(op="save", table="t", path="t.pqcf", options={"row_group_size": 100})["ok"])
+            self.assertEqual(self.request(op="open", table="tf", path="t.pqcf")["error"]["code"], "ALREADY_EXISTS")
+            for name in ("t_id", "t_amount", "t_g"):
+                self.query(f"DROP INDEX {name}")
+            self.assertTrue(self.request(op="open", table="tf", path="t.pqcf", options={"mmap": True})["ok"])
+            scan = next(n for n in self.explain("SELECT id FROM tf WHERE id > 950") if n["op"] == "TableScan")
+            self.assertEqual(scan["row_groups"], 10)
+            self.assertEqual(scan["row_group_filter"], ["id > 950"])
+            for where in ("id > 950", "id BETWEEN 120 AND 130", "id IN (5, 905)", "id < 0", "amount = 250.5"):
+                sql = f"SELECT id FROM tf WHERE {where} ORDER BY id"
+                expected = self.query(sql.replace("tf", "t"), use_indexes=False)["rows"]
+                self.assertEqual(self.query(sql)["rows"], expected, where)
 
 
 if __name__ == "__main__":

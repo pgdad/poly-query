@@ -16,6 +16,7 @@ from .. import errors
 from ..analysis import bound as b
 from ..datatypes import MAX_DECIMAL_PRECISION, DataType, TypeKind
 from ..planner import physical as pp
+from ..planner.access import group_may_match
 from .aggregates import CountStar, make_accumulator
 from .compiler import Layout, compile_expr, compile_row
 from .context import ExecutionContext
@@ -34,14 +35,27 @@ def layout_of(node: pp.PhysicalNode) -> Layout:
     return {key: i for i, key in enumerate(node.layout)}
 
 
-def _table_scan(node: pp.TableScan, ctx: ExecutionContext) -> Iterator[Batch]:
-    rows = node.table.scan(node.columns)
+def _batches(rows: Iterator[tuple], ctx: ExecutionContext) -> Iterator[Batch]:
     while True:
         ctx.check()
         batch = list(itertools.islice(rows, BATCH_SIZE))
         if not batch:
             return
         yield batch
+
+
+def _table_scan(node: pp.TableScan, ctx: ExecutionContext) -> Iterator[Batch]:
+    skip = node.skip
+    keep = (lambda group: group_may_match(group, skip)) if skip else None
+    return _batches(node.table.scan(node.columns, keep), ctx)
+
+
+def _index_scan(node: pp.IndexScan, ctx: ExecutionContext) -> Iterator[Batch]:
+    row_ids = node.lookup.row_ids(node.index)
+    ctx.check()
+    for i in range(0, len(row_ids), BATCH_SIZE):
+        yield node.table.fetch(row_ids[i : i + BATCH_SIZE], node.columns)
+        ctx.check()
 
 
 def _lookup_table(node: pp.LookupScan, ctx: ExecutionContext) -> dict[Any, list[tuple]]:
@@ -168,12 +182,20 @@ def _compile_hash_join(node: pp.HashJoin, ctx: ExecutionContext) -> tuple:
 
 def _hash_join(node: pp.HashJoin, ctx: ExecutionContext) -> Iterator[Batch]:
     left_key, right_key, residual = ctx.cached(node, "join", lambda: _compile_hash_join(node, ctx))
+    if node.build == "left":
+        return _hash_join_build_left(node, ctx, left_key, right_key, residual)
+    return _hash_join_build_right(node, ctx, left_key, right_key, residual)
+
+
+def _build_hash_table(
+    node: pp.PhysicalNode, key_fn: Callable[[tuple], tuple], ctx: ExecutionContext
+) -> dict[tuple, list[tuple]]:
     table: dict[tuple, list[tuple]] = {}
-    width = len(node.right.layout)
-    for batch in execute(node.right, ctx):
+    width = len(node.layout)
+    for batch in execute(node, ctx):
         ctx.reserve_rows(len(batch), width)
         for row in batch:
-            key = right_key(row)
+            key = key_fn(row)
             if None in key:
                 continue  # NULL keys never match
             bucket = table.get(key)
@@ -182,9 +204,15 @@ def _hash_join(node: pp.HashJoin, ctx: ExecutionContext) -> Iterator[Batch]:
             else:
                 bucket.append(row)
         ctx.check()
+    return table
 
+
+def _hash_join_build_right(
+    node: pp.HashJoin, ctx: ExecutionContext, left_key: Any, right_key: Any, residual: Any
+) -> Iterator[Batch]:
+    table = _build_hash_table(node.right, right_key, ctx)
     is_left = node.join_type == "LEFT"
-    padding = (None,) * width
+    padding = (None,) * len(node.right.layout)
     counter = _JoinCounter(ctx)
     for batch in execute(node.left, ctx):
         out: Batch = []
@@ -205,6 +233,33 @@ def _hash_join(node: pp.HashJoin, ctx: ExecutionContext) -> Iterator[Batch]:
                     continue
             if is_left:
                 out.append(lrow + padding)
+        if out:
+            counter.add(len(out))
+            yield out
+        ctx.check()
+
+
+def _hash_join_build_left(
+    node: pp.HashJoin, ctx: ExecutionContext, left_key: Any, right_key: Any, residual: Any
+) -> Iterator[Batch]:
+    """Inner join with the hash table on the left input (the smaller one)."""
+    assert node.join_type == "INNER"
+    table = _build_hash_table(node.left, left_key, ctx)
+    counter = _JoinCounter(ctx)
+    for batch in execute(node.right, ctx):
+        out: Batch = []
+        for rrow in batch:
+            key = right_key(rrow)
+            matches = None if None in key else table.get(key)
+            if not matches:
+                continue
+            if residual is None:
+                out.extend([lrow + rrow for lrow in matches])
+            else:
+                for lrow in matches:
+                    row = lrow + rrow
+                    if residual(row) is True:
+                        out.append(row)
         if out:
             counter.add(len(out))
             yield out
@@ -388,6 +443,7 @@ def _limit(node: pp.Limit, ctx: ExecutionContext) -> Iterator[Batch]:
 
 _HANDLERS: dict[type, Callable[[Any, ExecutionContext], Iterator[Batch]]] = {
     pp.TableScan: _table_scan,
+    pp.IndexScan: _index_scan,
     pp.Values: _values,
     pp.LookupScan: _lookup_scan,
     pp.SubqueryScan: _subquery_scan,

@@ -1,58 +1,27 @@
-"""In-memory catalog of immutable, column-oriented tables."""
+"""The catalog: tables and (globally named) indexes, case-insensitive names."""
 
 from __future__ import annotations
 
-import itertools
 import threading
-from dataclasses import dataclass, field
-from typing import Any, Iterator, Sequence
 
 from .. import errors
-from ..datatypes import DataType
 from ..names import fold
+from .indexes import Index
+from .table import Column, Table
 
-
-@dataclass(frozen=True, slots=True)
-class Column:
-    name: str
-    type: DataType
-
-    def to_json(self) -> dict[str, str]:
-        return {"name": self.name, "type": self.type.name}
-
-
-@dataclass(eq=False)
-class Table:
-    """An immutable table stored column-wise: ``data[i]`` holds column i's values."""
-
-    name: str
-    columns: list[Column]
-    data: list[list[Any]]
-    row_count: int
-    _index: dict[str, int] = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        self._index = {fold(c.name): i for i, c in enumerate(self.columns)}
-
-    def column_index(self, name: str) -> int | None:
-        return self._index.get(fold(name))
-
-    def scan(self, column_indexes: Sequence[int]) -> Iterator[tuple]:
-        """Yields row tuples restricted to the given columns."""
-        if not column_indexes:
-            return itertools.repeat((), self.row_count)
-        return zip(*(self.data[i] for i in column_indexes))
-
-    def schema_json(self) -> list[dict[str, str]]:
-        return [c.to_json() for c in self.columns]
+__all__ = ["Catalog", "Column", "Table"]
 
 
 class Catalog:
-    """Name -> table mapping with case-insensitive lookup. Thread-safe."""
+    """Name -> table and name -> index mappings. Thread-safe; every mutation
+    is atomic (all checks happen before anything is changed)."""
 
     def __init__(self) -> None:
         self._tables: dict[str, Table] = {}
+        self._indexes: dict[str, Index] = {}
         self._lock = threading.RLock()
+
+    # ------------------------------------------------------------ tables
 
     def get(self, name: str) -> Table | None:
         with self._lock:
@@ -67,23 +36,70 @@ class Catalog:
     def exists(self, name: str) -> bool:
         return self.get(name) is not None
 
-    def put(self, table: Table, *, replace: bool) -> None:
-        """Adds a table atomically; fails with ALREADY_EXISTS unless ``replace``."""
+    def put(self, table: Table, *, replace: bool, indexes: list[Index] | None = None) -> None:
+        """Adds a table (and indexes built on it) atomically. Fails with
+        ALREADY_EXISTS if the table exists and not ``replace``, or if one of
+        the index names is taken by an index that would survive the
+        replacement. A replaced table's indexes are dropped."""
         key = fold(table.name)
+        indexes = indexes or []
         with self._lock:
-            if key in self._tables and not replace:
+            old = self._tables.get(key)
+            if old is not None and not replace:
                 raise errors.already_exists(f"table '{table.name}' already exists", table=table.name)
+            for index in indexes:
+                existing = self._indexes.get(fold(index.name))
+                if existing is not None and existing.table is not old:
+                    raise errors.already_exists(
+                        f"index '{index.name}' already exists", index=index.name
+                    )
+            if old is not None:
+                self._drop_indexes_of(old)
             self._tables[key] = table
+            for index in indexes:
+                self._indexes[fold(index.name)] = index
 
     def drop(self, name: str) -> None:
         with self._lock:
-            if self._tables.pop(fold(name), None) is None:
+            table = self._tables.pop(fold(name), None)
+            if table is None:
                 raise errors.not_found(f"table '{name}' does not exist", table=name)
+            self._drop_indexes_of(table)
 
     def reset(self) -> None:
         with self._lock:
             self._tables.clear()
+            self._indexes.clear()
 
     def tables(self) -> list[Table]:
         with self._lock:
             return sorted(self._tables.values(), key=lambda t: (fold(t.name), t.name))
+
+    # ------------------------------------------------------------ indexes
+
+    def get_index(self, name: str) -> Index | None:
+        with self._lock:
+            return self._indexes.get(fold(name))
+
+    def add_index(self, index: Index) -> None:
+        """Registers an index on a table that must still be in the catalog."""
+        with self._lock:
+            if fold(index.name) in self._indexes:
+                raise errors.already_exists(f"index '{index.name}' already exists", index=index.name)
+            if self._tables.get(fold(index.table.name)) is not index.table:
+                raise errors.not_found(f"table '{index.table.name}' does not exist")
+            self._indexes[fold(index.name)] = index
+
+    def drop_index(self, name: str) -> bool:
+        """Removes an index; False if it does not exist."""
+        with self._lock:
+            return self._indexes.pop(fold(name), None) is not None
+
+    def indexes_of(self, table: Table) -> list[Index]:
+        """The indexes of a table, in creation order."""
+        with self._lock:
+            return [i for i in self._indexes.values() if i.table is table]
+
+    def _drop_indexes_of(self, table: Table) -> None:
+        for key in [k for k, i in self._indexes.items() if i.table is table]:
+            del self._indexes[key]
