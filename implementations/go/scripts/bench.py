@@ -41,6 +41,8 @@ QUERIES = {
     "sort_full": "SELECT id, str_key FROM sk ORDER BY str_key, id",
     "distinct": "SELECT DISTINCT merchant_id FROM tx",
     "const_fold": "SELECT COUNT(*) FROM tx WHERE amount > 100 * 5 + 0 AND 1 = 1 AND fee >= CAST('0.50' AS DECIMAL(10,2))",
+    "join_small": "SELECT COUNT(*), SUM(c.credit_limit) FROM orders o JOIN cust c ON c.customer_id = o.customer_id WHERE o.order_id <= 2000",
+    "join3_reorder": "SELECT COUNT(*) FROM items i, cust c, orders o WHERE i.order_id = o.order_id AND o.customer_id = c.customer_id AND c.segment = 'enterprise'",
 }
 
 CONFIGS = {
@@ -53,12 +55,18 @@ CONFIGS = {
     "vec8_hash": {"mode": "vectorized", "threads": 8, "join": "hash"},
     "vec8_merge": {"mode": "vectorized", "threads": 8, "join": "merge"},
     "row1_merge": {"mode": "row", "threads": 1, "join": "merge"},
+    "vec1_hash": {"mode": "vectorized", "threads": 1, "join": "hash"},
+    "vec1_merge": {"mode": "vectorized", "threads": 1, "join": "merge"},
+    "vec1_nl": {"mode": "vectorized", "threads": 1, "join": "nested_loop"},
+    "vec1_noopt": {"mode": "vectorized", "threads": 1, "optimize": False},
+    "vec8_noopt": {"mode": "vectorized", "threads": 8, "optimize": False},
+    "default": {},
 }
 
 
 class Session:
-    def __init__(self, data):
-        self.p = subprocess.Popen([str(ENGINE), "session", "--data-dir", str(data)],
+    def __init__(self, data, engine=ENGINE):
+        self.p = subprocess.Popen([str(engine), "session", "--data-dir", str(data)],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         self.n = 0
 
@@ -81,8 +89,10 @@ def main():
     ap.add_argument("--queries", default=",".join(QUERIES))
     ap.add_argument("--repeat", type=int, default=3)
     ap.add_argument("--layout", default="column")
+    ap.add_argument("--engine", default=str(ENGINE), help="engine executable (e.g. a build without SIMD)")
+    ap.add_argument("--timeout-ms", type=int, default=120000)
     args = ap.parse_args()
-    s = Session(args.data)
+    s = Session(args.data, args.engine)
     for t, f in TABLES.items():
         schema = json.loads((Path(args.data) / f"{f}.schema.json").read_text())
         t0 = time.monotonic()
@@ -101,7 +111,7 @@ def main():
             rc = None
             for _ in range(args.repeat):
                 t0 = time.monotonic()
-                r = s.req({"op": "query", "sql": QUERIES[q], "options": {**CONFIGS[c], "result": "count", "timeout_ms": 120000}})
+                r = s.req({"op": "query", "sql": QUERIES[q], "options": {**CONFIGS[c], "result": "count", "timeout_ms": args.timeout_ms}})
                 times.append((time.monotonic() - t0) * 1000)
                 if not r.get("ok"):
                     rc = r["error"]["code"]

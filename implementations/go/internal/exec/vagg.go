@@ -465,6 +465,9 @@ type aggTable struct {
 	keys  []types.Row // key values per group
 	first []int64     // position of each group's first row (ordering)
 	gids  []int32
+
+	slab       []types.Value // storage for key rows
+	unreserved int64         // memory accounted but not yet reserved
 }
 
 func newAggTable(ec *Context, keyTypes []types.Type, calls []*plan.AggCall) *aggTable {
@@ -489,12 +492,48 @@ func (t *aggTable) newGroup(key types.Row, pos int64) (int32, error) {
 	for _, s := range t.states {
 		s.grow(len(t.keys))
 	}
-	return g, t.ec.Mem.Reserve(RowSize(key) + int64(48*len(t.states)))
+	// Reservations are batched: the budget is shared (atomically) by
+	// parallel workers.
+	t.unreserved += RowSize(key) + int64(48*len(t.states))
+	if t.unreserved >= reserveChunk {
+		n := t.unreserved
+		t.unreserved = 0
+		return g, t.ec.Mem.Reserve(n)
+	}
+	return g, nil
+}
+
+// reserveChunk is the amount of memory a table accounts locally before
+// reserving it from the query budget.
+const reserveChunk = 64 << 10
+
+// flushReservation reserves the locally accounted memory.
+func (t *aggTable) flushReservation() error {
+	n := t.unreserved
+	t.unreserved = 0
+	return t.ec.Mem.Reserve(n)
+}
+
+// newKey returns a key row of n values carved from a slab.
+func (t *aggTable) newKey(n int) types.Row {
+	if len(t.slab) < n {
+		t.slab = make([]types.Value, max(256*n, n))
+	}
+	r := t.slab[:n:n]
+	t.slab = t.slab[n:]
+	return r
+}
+
+// key1 returns a single-value key row.
+func (t *aggTable) key1(v types.Value) types.Row {
+	r := t.newKey(1)
+	r[0] = v
+	return r
 }
 
 // keyRow extracts the key values of row i.
 func (t *aggTable) keyRow(keys []*Vec, i int) types.Row {
-	r := make(types.Row, len(keys))
+	r := t.newKey(len(keys))
 	for k, v := range keys {
 		r[k] = v.value(i, t.keyClasses[k])
 	}
@@ -551,7 +590,7 @@ func (t *aggTable) resolveInt(v *Vec, n int, sel []int32, pos int64) error {
 		g, ok := t.intMap[k]
 		if !ok {
 			var err error
-			if g, err = t.newGroup(types.Row{types.IntValue(k)}, pos+int64(i)); err != nil {
+			if g, err = t.newGroup(t.key1(types.IntValue(k)), pos+int64(i)); err != nil {
 				return err
 			}
 			t.intMap[k] = g
@@ -587,7 +626,7 @@ func (t *aggTable) resolveString(v *Vec, n int, sel []int32, pos int64) error {
 		g, ok := t.strMap[s]
 		if !ok {
 			var err error
-			if g, err = t.newGroup(types.Row{types.StringValue(s)}, pos+int64(i)); err != nil {
+			if g, err = t.newGroup(t.key1(types.StringValue(s)), pos+int64(i)); err != nil {
 				return err
 			}
 			t.strMap[s] = g
@@ -633,7 +672,7 @@ func (t *aggTable) resolveDict(v *Vec, n int, sel []int32, pos int64) error {
 		g, ok := t.strMap[s]
 		if !ok {
 			var err error
-			if g, err = t.newGroup(types.Row{types.StringValue(s)}, pos+int64(i)); err != nil {
+			if g, err = t.newGroup(t.key1(types.StringValue(s)), pos+int64(i)); err != nil {
 				return err
 			}
 			t.strMap[s] = g
@@ -803,6 +842,9 @@ func (t *aggTable) keyHashes(seed maphash.Seed) []uint64 {
 // group that appears first (as in serial execution) and errPos its
 // position.
 func (t *aggTable) results() (rows []types.Row, first []int64, errPos int64, err error) {
+	if err := t.flushReservation(); err != nil {
+		return nil, nil, math.MinInt64, err
+	}
 	width := len(t.keyTypes) + len(t.states)
 	cells := make([]types.Value, len(t.keys)*width)
 	rows = make([]types.Row, len(t.keys))
@@ -840,7 +882,8 @@ func (t *aggTable) rows() ([]types.Row, error) {
 	return orderByFirst(rows, first), nil
 }
 
-// orderByFirst sorts rows by their first positions.
+// orderByFirst sorts rows by their first positions (which it reorders
+// accordingly).
 func orderByFirst(rows []types.Row, first []int64) []types.Row {
 	order := make([]int32, len(rows))
 	for i := range order {
@@ -860,8 +903,31 @@ func orderByFirst(rows []types.Row, first []int64) []types.Row {
 	}
 	slices.SortFunc(order, cmp)
 	out := make([]types.Row, len(rows))
+	firsts := make([]int64, len(rows))
 	for i, g := range order {
-		out[i] = rows[g]
+		out[i], firsts[i] = rows[g], first[g]
+	}
+	copy(first, firsts)
+	return out
+}
+
+// mergeByFirst merges row lists that are each ordered by first position.
+func mergeByFirst(rows [][]types.Row, first [][]int64) []types.Row {
+	total := 0
+	for _, r := range rows {
+		total += len(r)
+	}
+	out := make([]types.Row, 0, total)
+	pos := make([]int, len(rows))
+	for len(out) < total {
+		best := -1
+		for p := range rows {
+			if pos[p] < len(rows[p]) && (best < 0 || first[p][pos[p]] < first[best][pos[best]]) {
+				best = p
+			}
+		}
+		out = append(out, rows[best][pos[best]])
+		pos[best]++
 	}
 	return out
 }
@@ -921,24 +987,26 @@ func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls [
 			}
 			r := &results[p]
 			r.rows, r.first, r.errPos, r.err = final.results()
+			if r.err == nil {
+				r.rows = orderByFirst(r.rows, r.first)
+			}
 		}()
 	}
 	wg.Wait()
-	var rows []types.Row
-	var first []int64
 	var err error
 	errPos := int64(math.MaxInt64)
-	for _, r := range results {
+	rows := make([][]types.Row, parts)
+	first := make([][]int64, parts)
+	for p, r := range results {
 		if r.err != nil && r.errPos < errPos {
 			errPos, err = r.errPos, r.err
 		}
-		rows = append(rows, r.rows...)
-		first = append(first, r.first...)
+		rows[p], first[p] = r.rows, r.first
 	}
 	if err != nil {
 		return nil, err
 	}
-	return orderByFirst(rows, first), nil
+	return mergeByFirst(rows, first), nil
 }
 
 // ---------------------------------------------------------------- operator
