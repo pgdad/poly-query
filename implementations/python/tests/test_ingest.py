@@ -25,14 +25,14 @@ class CsvTests(unittest.TestCase):
     def test_inference(self):
         t = load("csv", "b,i,f,d,ts,s,n\ntrue,1,1,2024-01-01,2024-01-01,x,\nFALSE,-2,2.5,2024-02-29,2024-01-01 10:00:00,1,\n")
         self.assertEqual([c.type for c in t.columns], [BOOLEAN, INT64, FLOAT64, DATE, TIMESTAMP, STRING, STRING])
-        self.assertEqual(t.data[1], [1, -2])
-        self.assertEqual(t.data[6], [None, None])
+        self.assertEqual(t.column_values(1), [1, -2])
+        self.assertEqual(t.column_values(6), [None, None])
 
     def test_quoting_and_nulls(self):
         t = load("csv", '﻿n,s\n"",""\n,\n" 7 ","a,""b""\nc"\n')
         self.assertEqual(t.columns[0].type, INT64)
-        self.assertEqual(t.data[0], [None, None, 7])
-        self.assertEqual(t.data[1], ["", None, 'a,"b"\nc'])
+        self.assertEqual(t.column_values(0), [None, None, 7])
+        self.assertEqual(t.column_values(1), ["", None, 'a,"b"\nc'])
 
     def test_int_overflow_infers_float(self):
         self.assertEqual(load("csv", "n\n9223372036854775808\n").columns[0].type, FLOAT64)
@@ -40,7 +40,7 @@ class CsvTests(unittest.TestCase):
     def test_explicit_schema(self):
         schema = [Column("a", decimal(5, 2)), Column("b", TIMESTAMP)]
         t = load("csv", "A,B\n1.5,2024-01-01\n-0.25,\n", schema)
-        self.assertEqual(t.data[0], [150, -25])
+        self.assertEqual(t.column_values(0), [150, -25])
         self.assertEqual(t.columns[0].name, "a")
 
     def test_header_false(self):
@@ -63,7 +63,7 @@ class JsonTests(unittest.TestCase):
     def test_jsonl_union_of_keys(self):
         t = load("jsonl", '{"a": 1}\n\n{"b": "x", "a": 2}\n{"c": true}\n')
         self.assertEqual([(c.name, c.type) for c in t.columns], [("a", INT64), ("b", STRING), ("c", BOOLEAN)])
-        self.assertEqual(t.data[0], [1, 2, None])
+        self.assertEqual(t.column_values(0), [1, 2, None])
 
     def test_json_inference(self):
         t = load("json", '[{"i": 1, "f": 1, "d": "2024-01-01", "ts": "2024-01-01", "n": null},'
@@ -73,7 +73,7 @@ class JsonTests(unittest.TestCase):
     def test_json_schema_conversion(self):
         schema = [Column("amt", decimal(8, 3)), Column("day", DATE)]
         t = load("json", '[{"amt": 12.5, "day": "2024-01-31"}, {"amt": "-0.125"}]', schema)
-        self.assertEqual(t.data[0], [12500, -125])
+        self.assertEqual(t.column_values(0), [12500, -125])
         self.assertEqual(code_of(load, "jsonl", '{"amt": true}\n', schema), errors.CONVERSION_ERROR)
         self.assertEqual(code_of(load, "jsonl", '{"x": 1}\n', schema), errors.INGEST_ERROR)
 
