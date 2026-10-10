@@ -1,0 +1,25 @@
+{
+ "wave_id": "wave-a-phase3-a1-20261010T201612Z",
+ "task": "phase3",
+ "track": "A",
+ "attempt": 1,
+ "seed": 23031,
+ "order": [
+  "python"
+ ],
+ "run_ids": [
+  "a-phase3-python-a1-20261010T201612Z"
+ ],
+ "started": "2026-10-10T20:16:13+00:00",
+ "parallel": 1,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  3.1201171875,
+  3.07666015625,
+  2.43310546875
+ ]
+}

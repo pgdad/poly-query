@@ -1,0 +1,115 @@
+{
+ "seconds": 14.7,
+ "status": {
+  "build_exit": "0",
+  "conformance_exit": "0",
+  "http_exit": "0",
+  "http_suite_exit": "0"
+ },
+ "phases": [
+  1,
+  2,
+  3
+ ],
+ "summary": {
+  "by_phase": {
+   "1": {
+    "total": 249,
+    "pass": 249,
+    "fail": 0,
+    "error": 0,
+    "not_implemented": 0
+   },
+   "2": {
+    "total": 202,
+    "pass": 202,
+    "fail": 0,
+    "error": 0,
+    "not_implemented": 0
+   },
+   "3": {
+    "total": 172,
+    "pass": 172,
+    "fail": 0,
+    "error": 0,
+    "not_implemented": 0
+   }
+  },
+  "total": {
+   "total": 623,
+   "pass": 623,
+   "fail": 0,
+   "error": 0,
+   "not_implemented": 0
+  }
+ },
+ "phase_passed": {
+  "1": true,
+  "2": true,
+  "3": true
+ },
+ "capabilities": [
+  "http.streaming",
+  "index.btree",
+  "index.hash",
+  "ingest.csv",
+  "ingest.json",
+  "ingest.jsonl",
+  "phase1",
+  "phase2",
+  "phase3",
+  "phase4",
+  "sql.basic",
+  "sql.correlated_subquery",
+  "sql.cte",
+  "sql.functions",
+  "sql.groupby",
+  "sql.join",
+  "sql.subquery",
+  "storage.mmap",
+  "storage.pqcf",
+  "test.functions"
+ ],
+ "extra": {
+  "conformance-http.json": {
+   "by_phase": {
+    "1": {
+     "total": 249,
+     "pass": 249,
+     "fail": 0,
+     "error": 0,
+     "not_implemented": 0
+    },
+    "2": {
+     "total": 202,
+     "pass": 202,
+     "fail": 0,
+     "error": 0,
+     "not_implemented": 0
+    },
+    "3": {
+     "total": 172,
+     "pass": 172,
+     "fail": 0,
+     "error": 0,
+     "not_implemented": 0
+    }
+   },
+   "total": {
+    "total": 623,
+    "pass": 623,
+    "fail": 0,
+    "error": 0,
+    "not_implemented": 0
+   }
+  },
+  "http-suite.json": {
+   "total": 18,
+   "passed": 18,
+   "failed": 0
+  }
+ },
+ "outcome": "success",
+ "validated_at": "2026-10-10T20:18:23+00:00",
+ "harness_commit": "0ed99c5"
+}

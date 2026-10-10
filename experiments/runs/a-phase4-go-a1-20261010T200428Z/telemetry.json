@@ -1,0 +1,90 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase4-go-a1-20261010T200428Z",
+ "language": "go",
+ "task": "phase4",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase4",
+ "prompt_sha256": "6d42c2c8b26ecb7c417015952b4b3c9351e1cb3339246b4a71c8bc432f19f1c8",
+ "session_id": "9ae686dd-4be1-4ac7-9c47-b5eb64002a3c",
+ "tokens": {
+  "input": 114,
+  "output": 78045,
+  "cache_read": 6582515,
+  "cache_creation": 170344,
+  "thinking": null,
+  "thinking_estimated": 31128,
+  "source": "result events",
+  "api_messages": 57
+ },
+ "rate_limit": {
+  "events": 7,
+  "max_utilization": {
+   "five_hour": 0.55,
+   "seven_day": 0.1
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 4.2406109999999995,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 61,
+ "result_segments": 1,
+ "assistant_messages": 126,
+ "tool_calls": {
+  "Bash": 57,
+  "Write": 3
+ },
+ "tool_calls_total": 60,
+ "tool_failures": 1,
+ "build_invocations": 25,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 3,
+ "conformance_progress": [
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ]
+ ],
+ "repair_iterations": 2,
+ "time": {
+  "wall_seconds": 818.6,
+  "model_api_seconds": 680.1,
+  "tool_seconds": 138.1,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 2,
+  "files_changed": 13,
+  "lines_added": 1909,
+  "lines_removed": 128,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 4 is finished and committed: the Go engine now has a working `serve` HTTP server, and both required test suites report 0 failures.\n\n## Test results\n- **Conformance over HTTP** (`--transport http`): phase 1 225/225, phase 2 186/186, phase 3 143/143 pass, 0 fail, 0 error. `TOTAL: 554/569 pass`; the other 15 are phase 5 tests, reported as not implemented because the engine doesn't claim those capabilities.\n- **Conformance over session**: identical results.\n- **HTTP/concurrency suite**: `http suite: 18/18 passed`. It also passed 3 times in a row, 4 copies running in parallel at once, and once against a build with Go's data-race detector on, which found no races.\n- **`make clean build test lint`**: all succeed.\n\n## What I implemented\n- **Engine:** queries now return rows one at a time instead of building the whole result first, so results can be streamed. Requests can be cancelled mid-run, and sorts now check for cancellation while sorting too.\n- **New server package (`internal/server`):** all the endpoints in the spec, the error-to-HTTP-status mapping, and the request size limit (413).\n  - **Worker limit and queue:** a fixed number of queries run at once and a bounded first-in-first-out queue waits behind them. When both are full, new queries are rejected immediately with `OVERLOADED`.\n  - **Query tracking:** queued and running queries can be listed and cancelled, and reusing an active query id returns 409.\n  - **Streaming** sends NDJSON results in batches of up to 1,000 rows. At most about 6 batches are held ahead of a slow client.\n  - **Also included:** Prometheus metrics, JSON logs on stderr, and graceful shutdown on SIGTERM/SIGINT.\n- **CLI:** `serve` with all the options the spec lists, and the engine now reports the `phase4` and `http.streaming` capabilities.\n\n## Main design decisions\n- **Snapshot isolation** uses the existing copy-on-write catalog: a query reads the catalog version current when it starts executing, after it leaves the queue. Readers never lock each other, and loads parse their data before publishing it in one atomic step.\n- **Timeouts are measured from arrival**, so time spent queued counts, as the spec requires. A query is removed from `/v1/queries` and frees its worker before its final response is sent, so a client that has its answer never still sees the query listed.\n- **The stream header is sent with the first batch of rows.** An error before any row exists therefore gets a normal error response with the right HTTP status. Later errors end the stream with an error line.\n- **Shutdown closes only the listener** rather than using Go's built-in shutdown, which drops idle keep-alive connections. Existing connections keep getting `503 SHUTTING_DOWN` (and `/health` 503). The server waits until every in-progress response has been fully written or the grace period ends, then cancels what's left and exits 0.\n- **Timeouts and cancellation are fast:** on a 2M-row table, sorts, joins, grouping and DISTINCT stopped within 1\u201318 ms of the deadline.\n\n## Known limitations (also in the README)\n- Phase 5 features are not implemented: execution modes, parallelism, the other forced join algorithms, and native kernels.\n- On this machine's loopback network, the kernel accepted about 143 MB into a client socket that had stopped reading, even though its buffer was capped at 128 KB. The server's own buffering stays bounded, but query execution only blocks once the kernel stops accepting data. A hidden test that pauses a client and expects the query to stall could see it finish early unless the result is very large.\n- Only `query` operations go through the worker limit. Loads, explain and the other catalog operations run directly.\n- I added two small optional parameters on `PUT /v1/tables/{name}`: `delimiter`, and `schema`, which is needed for `header=false`.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

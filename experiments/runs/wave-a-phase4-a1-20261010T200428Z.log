@@ -1,2 +1,6 @@
 2026-10-10T20:04:29+00:00 wave wave-a-phase4-a1-20261010T200428Z: order=['go']
 2026-10-10T20:04:29+00:00 [a-phase4-go-a1-20261010T200428Z] agent started
+2026-10-10T20:18:08+00:00 [a-phase4-go-a1-20261010T200428Z] agent finished; collecting telemetry
+2026-10-10T20:18:08+00:00 [a-phase4-go-a1-20261010T200428Z] validating (clean clone, sandboxed)
+2026-10-10T20:18:23+00:00 [a-phase4-go-a1-20261010T200428Z] outcome=success cost=$4.2406109999999995 turns=61 wall=818.6s
+2026-10-10T20:18:23+00:00 wave wave-a-phase4-a1-20261010T200428Z finished: go=success
