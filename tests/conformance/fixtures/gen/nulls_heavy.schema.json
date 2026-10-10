@@ -1,0 +1,1 @@
+[{"name": "id", "type": "INT64"}, {"name": "n50", "type": "INT64"}, {"name": "n90", "type": "INT64"}, {"name": "s70", "type": "STRING"}, {"name": "f95", "type": "FLOAT64"}, {"name": "b60", "type": "BOOLEAN"}, {"name": "d99", "type": "DATE"}]

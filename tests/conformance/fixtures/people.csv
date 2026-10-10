@@ -1,0 +1,9 @@
+id,name,age,city,score,active,joined
+1,Alice,34,Helsinki,88.5,true,2020-01-15
+2,Bob,28,Tampere,72.25,false,2021-03-01
+3,Carol,45,Helsinki,91.0,true,2019-07-30
+4,Dave,,Oulu,65.5,true,2022-11-11
+5,Eve,28,,79.75,false,
+6,Frank,52,Tampere,,true,2018-02-28
+7,Grace,34,Helsinki,95.5,,2020-01-15
+8,heidi,41,Espoo,58.0,false,2023-05-05

@@ -1,0 +1,240 @@
+# CSV ingestion (ingestion.md §1)
+@phase 1
+@requires phase1 ingest.csv sql.basic
+
+load people fixtures/people.csv
+
+request
+{"op":"schema","table":"people"}
+----
+match {"ok":true,"table":"people","row_count":8,"columns":[{"name":"id","type":"INT64"},{"name":"name","type":"STRING"},{"name":"age","type":"INT64"},{"name":"city","type":"STRING"},{"name":"score","type":"FLOAT64"},{"name":"active","type":"BOOLEAN"},{"name":"joined","type":"DATE"}]}
+
+query ordered oracle
+SELECT * FROM people ORDER BY id
+----
+id INT64 | name STRING | age INT64 | city STRING | score FLOAT64 | active BOOLEAN | joined DATE
+[1, "Alice", 34, "Helsinki", 88.5, true, "2020-01-15"]
+[2, "Bob", 28, "Tampere", 72.25, false, "2021-03-01"]
+[3, "Carol", 45, "Helsinki", 91.0, true, "2019-07-30"]
+[4, "Dave", null, "Oulu", 65.5, true, "2022-11-11"]
+[5, "Eve", 28, null, 79.75, false, null]
+[6, "Frank", 52, "Tampere", null, true, "2018-02-28"]
+[7, "Grace", 34, "Helsinki", 95.5, null, "2020-01-15"]
+[8, "heidi", 41, "Espoo", 58.0, false, "2023-05-05"]
+
+# unquoted empty field = NULL in every type, including STRING
+query ordered oracle
+SELECT id FROM people WHERE city IS NULL OR age IS NULL OR score IS NULL OR active IS NULL OR joined IS NULL ORDER BY id
+----
+id INT64
+[4]
+[5]
+[6]
+[7]
+
+# --- quoting, embedded delimiters/newlines, quoted empty vs NULL, whitespace
+load strings fixtures/strings.csv
+
+query ordered oracle
+SELECT id, s FROM strings ORDER BY id
+----
+id INT64 | s STRING
+[1, "plain"]
+[2, "with, comma"]
+[3, "with \"quote\""]
+[4, ""]
+[5, null]
+[6, "multi\nline"]
+[7, "  spaced  "]
+[8, "Ünïcödé"]
+
+# --- delimiter option, CRLF, case-insensitive booleans
+load semi fixtures/semicolon.csv delimiter=;
+
+query ordered
+SELECT a, b, c FROM semi ORDER BY a
+----
+a INT64 | b STRING | c BOOLEAN
+[1, "x", true]
+[2, "y", false]
+[3, null, true]
+
+# --- BOM and missing final newline
+load bom fixtures/bom_noeol.csv
+
+query ordered
+SELECT x, y FROM bom ORDER BY x
+----
+x INT64 | y INT64
+[1, 2]
+[3, 4]
+
+# --- inference: integer overflow falls through to FLOAT64
+load big fixtures/int_overflow.csv
+
+request
+{"op":"schema","table":"big"}
+----
+match {"ok":true,"columns":[{"name":"n","type":"FLOAT64"}]}
+
+# --- inference: invalid calendar date is a STRING
+load bd fixtures/bad_date.csv
+
+request
+{"op":"schema","table":"bd"}
+----
+match {"ok":true,"columns":[{"name":"v","type":"STRING"}]}
+
+# --- dates and timestamps
+load dates fixtures/dates.csv
+
+request
+{"op":"schema","table":"dates"}
+----
+match {"ok":true,"columns":[{"name":"d","type":"DATE"},{"name":"t","type":"TIMESTAMP"}]}
+
+query ordered
+SELECT d, t FROM dates ORDER BY d
+----
+d DATE | t TIMESTAMP
+["0001-01-01", "9999-12-31 23:59:59"]
+["2023-12-31", "2023-12-31 23:59:59.999999"]
+["2024-02-29", "2024-02-29 00:00:00"]
+
+# --- explicit schema: DECIMAL, renamed types/aliases
+load ledger fixtures/ledger.csv schema=id:INT64;account:STRING;amount:DECIMAL(10,2);fee:NUMERIC(4,2)
+
+request
+{"op":"schema","table":"ledger"}
+----
+match {"ok":true,"columns":[{"name":"id","type":"INT64"},{"name":"account","type":"STRING"},{"name":"amount","type":"DECIMAL(10,2)"},{"name":"fee","type":"DECIMAL(4,2)"}]}
+
+query ordered
+SELECT id, amount, fee FROM ledger ORDER BY id
+----
+id INT64 | amount DECIMAL(10,2) | fee DECIMAL(4,2)
+[1, "100.25", "0.50"]
+[2, "-40.10", "0.25"]
+[3, "0.05", "0.00"]
+[4, "999999.99", "1.75"]
+[5, null, "0.10"]
+[6, "12.00", null]
+
+load ledger2 fixtures/ledger.csv schema=id:BIGINT;account:TEXT;amount:DOUBLE;fee:REAL
+
+request
+{"op":"schema","table":"ledger2"}
+----
+match {"ok":true,"columns":[{"name":"id","type":"INT64"},{"name":"account","type":"STRING"},{"name":"amount","type":"FLOAT64"},{"name":"fee","type":"FLOAT64"}]}
+
+# schema forces STRING for numeric-looking text
+load people_s fixtures/customers.csv schema=customer_id:STRING;name:STRING;country:STRING;tier:STRING
+
+query ordered
+SELECT customer_id FROM people_s ORDER BY customer_id DESC LIMIT 2
+----
+customer_id STRING
+["5"]
+["4"]
+
+# header=false requires and uses the schema names
+data nh csv header=false schema=x:INT64;y:STRING
+1,a
+2,b
+.
+
+query ordered
+SELECT y FROM nh ORDER BY x
+----
+y STRING
+["a"]
+["b"]
+
+# --- errors
+load e1 fixtures/bad_arity.csv expect=INGEST_ERROR
+load e2 fixtures/dup_header.csv expect=INGEST_ERROR
+load e3 fixtures/bad_quote.csv expect=INGEST_ERROR
+load e4 fixtures/too_precise.csv schema=id:INT64;amount:DECIMAL(10,2) expect=CONVERSION_ERROR
+load e5 fixtures/bad_date.csv schema=v:DATE expect=CONVERSION_ERROR
+load e6 fixtures/int_overflow.csv schema=n:INT64 expect=CONVERSION_ERROR
+load e7 fixtures/people.csv schema=id:INT64;name:STRING expect=INGEST_ERROR
+load e8 fixtures/people.csv schema=id:INT64;nm:STRING;age:INT64;city:STRING;score:FLOAT64;active:BOOLEAN;joined:DATE expect=INGEST_ERROR
+load e9 fixtures/people.csv schema=id:INT64;name:INT64;age:INT64;city:STRING;score:FLOAT64;active:BOOLEAN;joined:DATE expect=CONVERSION_ERROR
+
+data e10 csv schema=v:DECIMAL(3,1) expect=CONVERSION_ERROR
+v
+123.4
+.
+
+data ok11 csv schema=v:DECIMAL(4,1)
+v
+123.4
+-0.5
++7
+.
+
+query ordered
+SELECT v FROM ok11 ORDER BY v
+----
+v DECIMAL(4,1)
+["-0.5"]
+["7.0"]
+["123.4"]
+
+data e12 csv schema=v:FLOAT64 expect=CONVERSION_ERROR
+v
+NaN
+.
+
+data e13 csv schema=v:BOOLEAN expect=CONVERSION_ERROR
+v
+yes
+.
+
+# failed loads must not create tables
+request
+{"op":"schema","table":"e1"}
+----
+error NOT_FOUND
+
+# empty column name
+data e14 csv expect=INGEST_ERROR
+a,,c
+1,2,3
+.
+
+# quoted empty is NULL for non-string columns
+data qe csv
+n,s
+"",""
+1,x
+.
+
+query ordered
+SELECT n, s FROM qe ORDER BY n
+----
+n INT64 | s STRING
+[null, ""]
+[1, "x"]
+
+# a header-only file yields an empty table with STRING columns
+data empty csv
+a,b
+.
+
+request
+{"op":"schema","table":"empty"}
+----
+match {"ok":true,"row_count":0,"columns":[{"name":"a","type":"STRING"},{"name":"b","type":"STRING"}]}
+
+# whitespace is trimmed for non-string types, kept for strings
+data ws csv
+n,s
+ 5 , x 
+.
+
+query
+SELECT n + 1 AS m, s FROM ws
+----
+m INT64 | s STRING
+[6, " x "]

@@ -1,0 +1,1 @@
+[{"name": "id", "type": "INT64"}, {"name": "dup_key", "type": "INT64"}, {"name": "uniq_key", "type": "INT64"}, {"name": "str_key", "type": "STRING"}, {"name": "float_key", "type": "FLOAT64"}]

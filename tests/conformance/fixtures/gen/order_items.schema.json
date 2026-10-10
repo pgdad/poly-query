@@ -1,0 +1,1 @@
+[{"name": "order_id", "type": "INT64"}, {"name": "line_no", "type": "INT64"}, {"name": "product_id", "type": "INT64"}, {"name": "quantity", "type": "INT64"}, {"name": "unit_price", "type": "DECIMAL(10,2)"}, {"name": "discount", "type": "DECIMAL(10,2)"}]

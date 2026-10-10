@@ -1,0 +1,324 @@
+# Scalar functions, CASE, LIKE, BETWEEN, IN lists — functions.md, semantics.md §11-13
+@phase 2
+@requires phase2 sql.functions ingest.csv
+
+load people fixtures/people.csv
+load strings fixtures/strings.csv
+load events fixtures/events.json
+load ledger fixtures/ledger.csv schema=id:INT64;account:STRING;amount:DECIMAL(10,2);fee:DECIMAL(4,2)
+
+# --- numeric
+query
+SELECT ABS(-5) AS a, ABS(-2.50) AS b, ABS(-1.5e0) AS c
+----
+a INT64 | b DECIMAL(3,2) | c FLOAT64
+[5, "2.50", 1.5]
+
+error NUMERIC_OVERFLOW
+SELECT ABS(-9223372036854775808)
+
+query
+SELECT ROUND(2.5) AS a, ROUND(-2.5) AS b, ROUND(2.345, 2) AS c, ROUND(-2.345, 2) AS d, ROUND(1234.5678, -2) AS e, ROUND(15, -1) AS f, ROUND(-15, -1) AS g, ROUND(7) AS h, ROUND(1.26e0, 1) AS i, ROUND(2.5, 5) AS j
+----
+a DECIMAL(18,0) | b DECIMAL(18,0) | c DECIMAL(18,2) | d DECIMAL(18,2) | e DECIMAL(18,0) | f INT64 | g INT64 | h INT64 | i FLOAT64 | j DECIMAL(18,1)
+["3", "-3", "2.35", "-2.35", "1200", 20, -20, 7, 1.3, "2.5"]
+
+query
+SELECT FLOOR(2.7) AS a, FLOOR(-2.7) AS b, CEIL(2.1) AS c, CEILING(-2.1) AS d, FLOOR(5) AS e, CEIL(-0.5e0) AS f, FLOOR(2.5e0) AS g
+----
+a DECIMAL(18,0) | b DECIMAL(18,0) | c DECIMAL(18,0) | d DECIMAL(18,0) | e INT64 | f FLOAT64 | g FLOAT64
+["2", "-3", "3", "-2", 5, 0.0, 2.0]
+
+query
+SELECT SQRT(16) AS a, SQRT(2.25) AS b, POWER(2, 10) AS c, POWER(2.0, -1) AS d, MOD(17, 5) AS e, MOD(-17, 5) AS f
+----
+a FLOAT64 | b FLOAT64 | c FLOAT64 | d FLOAT64 | e INT64 | f INT64
+[4.0, 1.5, 1024.0, 0.5, 2, -2]
+
+error INVALID_ARGUMENT
+SELECT SQRT(-1)
+
+error DIVISION_BY_ZERO
+SELECT POWER(0, -1)
+
+error INVALID_ARGUMENT
+SELECT POWER(-8, 0.5)
+
+error NUMERIC_OVERFLOW
+SELECT POWER(10, 400)
+
+error DIVISION_BY_ZERO
+SELECT MOD(1, 0)
+
+error SEMANTIC_ERROR
+SELECT ROUND(1.5, id) FROM people
+
+# --- string
+query
+SELECT LENGTH('héllo') AS a, UPPER('abc Ünï') AS b, LOWER('ABC ÜNÏ') AS c, SUBSTR('hello', 2, 3) AS d, SUBSTR('hello', 3) AS e, SUBSTR('hello', 0, 2) AS f, SUBSTR('hello', 10) AS g, SUBSTRING('héllo', 2, 2) AS h
+----
+a INT64 | b STRING | c STRING | d STRING | e STRING | f STRING | g STRING | h STRING
+[5, "ABC Ünï", "abc ÜNÏ", "ell", "llo", "h", "", "él"]
+
+query
+SELECT TRIM('  a b  ') AS a, LTRIM('  a ') AS b, RTRIM('  a ') AS c, TRIM('	x	') AS d, REPLACE('banana', 'an', 'AN') AS e, REPLACE('aaa', 'aa', 'b') AS f, REPLACE('abc', '', 'x') AS g
+----
+a STRING | b STRING | c STRING | d STRING | e STRING | f STRING | g STRING
+["a b", "a ", "  a", "\tx\t", "bANANa", "ba", "abc"]
+
+query
+SELECT 'a' || 'b' || 'c' AS a, 'x' || NULL AS b, CONCAT('a', NULL, 1, TRUE, 2.50, DATE '2024-01-02') AS c, CONCAT(NULL) AS d
+----
+a STRING | b STRING | c STRING | d STRING
+["abc", null, "a1true2.502024-01-02", ""]
+
+error INVALID_ARGUMENT
+SELECT SUBSTR('abc', 1, -1)
+
+error TYPE_ERROR
+SELECT 'a' || 1
+
+error TYPE_ERROR
+SELECT LENGTH(5)
+
+error TYPE_ERROR
+SELECT CONCAT('a', 1.5e0)
+
+error SEMANTIC_ERROR
+SELECT LENGTH('a', 'b')
+
+error SEMANTIC_ERROR
+SELECT NO_SUCH_FUNCTION(1)
+
+query ordered
+SELECT id, LENGTH(s) AS n FROM strings WHERE s IS NOT NULL ORDER BY id
+----
+id INT64 | n INT64
+[1, 5]
+[2, 11]
+[3, 12]
+[4, 0]
+[6, 10]
+[7, 10]
+[8, 7]
+
+# --- COALESCE / NULLIF
+query
+SELECT COALESCE(NULL, 2, 3) AS a, COALESCE(NULL, NULL) AS b, COALESCE(1, 2.5) AS c, NULLIF(1, 1) AS d, NULLIF(1, 2) AS e, NULLIF(NULL, 1) AS f
+----
+a INT64 | b STRING | c DECIMAL(18,1) | d INT64 | e INT64 | f STRING
+[2, null, "1.0", null, 1, null]
+
+query ordered
+SELECT id, COALESCE(city, 'unknown') AS city, COALESCE(age, -1) AS age FROM people WHERE id IN (4, 5) ORDER BY id
+----
+id INT64 | city STRING | age INT64
+[4, "Oulu", -1]
+[5, "unknown", 28]
+
+error TYPE_ERROR
+SELECT COALESCE(1, 'a')
+
+# --- dates
+query
+SELECT YEAR(DATE '2024-02-29') AS y, MONTH(DATE '2024-02-29') AS m, DAY(DATE '2024-02-29') AS d, HOUR(TIMESTAMP '2024-01-01 13:14:15.9') AS h, MINUTE(TIMESTAMP '2024-01-01 13:14:15.9') AS mi, SECOND(TIMESTAMP '2024-01-01 13:14:15.9') AS s, YEAR(TIMESTAMP '0001-12-31 00:00:00') AS y2
+----
+y INT64 | m INT64 | d INT64 | h INT64 | mi INT64 | s INT64 | y2 INT64
+[2024, 2, 29, 13, 14, 15, 1]
+
+query
+SELECT DATE_TRUNC('month', DATE '2024-02-29') AS a, DATE_TRUNC('year', TIMESTAMP '2024-07-04 10:11:12') AS b, DATE_TRUNC('hour', TIMESTAMP '2024-07-04 10:11:12.5') AS c, DATE_TRUNC('minute', TIMESTAMP '2024-07-04 10:11:12') AS d, DATE_TRUNC('day', TIMESTAMP '2024-07-04 10:11:12') AS e
+----
+a TIMESTAMP | b TIMESTAMP | c TIMESTAMP | d TIMESTAMP | e TIMESTAMP
+["2024-02-01 00:00:00", "2024-01-01 00:00:00", "2024-07-04 10:00:00", "2024-07-04 10:11:00", "2024-07-04 00:00:00"]
+
+query
+SELECT DATE_DIFF('day', DATE '2024-01-01', DATE '2024-03-01') AS a, DATE_DIFF('day', TIMESTAMP '2024-01-01 23:59:59', TIMESTAMP '2024-01-02 00:00:01') AS b, DATE_DIFF('day', DATE '2024-03-01', DATE '2024-01-01') AS c
+----
+a INT64 | b INT64 | c INT64
+[60, 1, -60]
+
+error INVALID_ARGUMENT
+SELECT DATE_TRUNC('week', DATE '2024-01-01')
+
+error TYPE_ERROR
+SELECT HOUR(DATE '2024-01-01')
+
+error TYPE_ERROR
+SELECT YEAR('2024-01-01')
+
+query ordered oracle
+SELECT YEAR(joined) AS y, COUNT(*) AS n FROM people WHERE joined IS NOT NULL GROUP BY YEAR(joined) ORDER BY y
+----
+y INT64 | n INT64
+[2018, 1]
+[2019, 1]
+[2020, 2]
+[2021, 1]
+[2022, 1]
+[2023, 1]
+
+query ordered
+SELECT id, MONTH(ts) AS m, DAY(ts) AS d, HOUR(ts) AS h FROM events ORDER BY id
+----
+id INT64 | m INT64 | d INT64 | h INT64
+[1, 5, 1, 12]
+[2, 5, 1, 12]
+[3, 5, 2, 0]
+[4, 5, 3, 8]
+
+# --- CASE
+query ordered oracle
+SELECT id, CASE WHEN age < 30 THEN 'young' WHEN age < 45 THEN 'mid' ELSE 'senior' END AS band FROM people ORDER BY id
+----
+id INT64 | band STRING
+[1, "mid"]
+[2, "young"]
+[3, "senior"]
+[4, "senior"]
+[5, "young"]
+[6, "senior"]
+[7, "mid"]
+[8, "mid"]
+
+query ordered oracle
+SELECT id, CASE city WHEN 'Helsinki' THEN 1 WHEN 'Tampere' THEN 2 END AS c FROM people ORDER BY id
+----
+id INT64 | c INT64
+[1, 1]
+[2, 2]
+[3, 1]
+[4, null]
+[5, null]
+[6, 2]
+[7, 1]
+[8, null]
+
+query
+SELECT CASE WHEN FALSE THEN 1 WHEN NULL THEN 2 ELSE 3.5 END AS a, CASE WHEN TRUE THEN NULL ELSE 1 END AS b, CASE 1 WHEN NULL THEN 'n' ELSE 'e' END AS c
+----
+a DECIMAL(18,1) | b INT64 | c STRING
+["3.5", null, "e"]
+
+query
+SELECT CASE WHEN 1 = 1 THEN 1.5e0 ELSE 2 END AS a
+----
+a FLOAT64
+[1.5]
+
+error TYPE_ERROR
+SELECT CASE WHEN TRUE THEN 1 ELSE 'x' END
+
+error TYPE_ERROR
+SELECT CASE WHEN 1 THEN 1 END
+
+query ordered
+SELECT account, SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS credits FROM ledger GROUP BY account ORDER BY account
+----
+account STRING | credits DECIMAL(18,2)
+["A", "112.25"]
+["B", "1000000.04"]
+["C", "0.00"]
+
+# --- LIKE (case-sensitive, whole string)
+query ordered oracle
+SELECT name FROM people WHERE name LIKE '%a%' ORDER BY name
+----
+name STRING
+["Carol"]
+["Dave"]
+["Frank"]
+["Grace"]
+
+query ordered oracle
+SELECT name FROM people WHERE name LIKE 'A%' OR name LIKE '_ve' ORDER BY name
+----
+name STRING
+["Alice"]
+["Eve"]
+
+query ordered oracle
+SELECT name FROM people WHERE name NOT LIKE '%e%' ORDER BY name
+----
+name STRING
+["Bob"]
+["Carol"]
+["Frank"]
+
+query
+SELECT 'abc' LIKE 'ABC' AS a, 'a%c' LIKE 'a%' AS b, 'abc' LIKE 'a_c' AS c, 'ac' LIKE 'a_c' AS d, '' LIKE '%' AS e, NULL LIKE 'a' AS f, 'éa' LIKE '_a' AS g, 'a.c' LIKE 'a.c' AS h, 'abc' LIKE 'b' AS i
+----
+a BOOLEAN | b BOOLEAN | c BOOLEAN | d BOOLEAN | e BOOLEAN | f BOOLEAN | g BOOLEAN | h BOOLEAN | i BOOLEAN
+[false, true, true, false, true, null, true, true, false]
+
+error TYPE_ERROR
+SELECT 1 LIKE '1'
+
+# --- BETWEEN / IN lists
+query ordered oracle
+SELECT id FROM people WHERE age BETWEEN 30 AND 45 ORDER BY id
+----
+id INT64
+[1]
+[3]
+[7]
+[8]
+
+query ordered oracle
+SELECT id FROM people WHERE age NOT BETWEEN 30 AND 45 ORDER BY id
+----
+id INT64
+[2]
+[5]
+[6]
+
+query ordered oracle
+SELECT id FROM people WHERE joined BETWEEN DATE '2019-01-01' AND DATE '2020-12-31' ORDER BY id
+----
+id INT64
+[1]
+[3]
+[7]
+
+query ordered oracle
+SELECT id FROM people WHERE city IN ('Oulu', 'Espoo', 'Nowhere') ORDER BY id
+----
+id INT64
+[4]
+[8]
+
+query ordered oracle
+SELECT id FROM people WHERE age NOT IN (28, 34) ORDER BY id
+----
+id INT64
+[3]
+[6]
+[8]
+
+query
+SELECT 1 IN (1, NULL) AS a, 2 IN (1, NULL) AS b, 2 NOT IN (1, NULL) AS c, NULL IN (1, 2) AS d, 3 BETWEEN 5 AND 1 AS e, NULL BETWEEN 1 AND 2 AS f, 1 IN (1.0, 2) AS g
+----
+a BOOLEAN | b BOOLEAN | c BOOLEAN | d BOOLEAN | e BOOLEAN | f BOOLEAN | g BOOLEAN
+[true, null, null, null, false, null, true]
+
+error TYPE_ERROR
+SELECT 1 IN ('a', 'b')
+
+error TYPE_ERROR
+SELECT 'a' BETWEEN 1 AND 2
+
+# --- precedence & nesting
+query
+SELECT NOT 1 = 2 AND 2 > 1 OR FALSE AS a, 1 + 2 * 3 - 4 / 2 AS b, -(1 + 2) * 3 AS c, 'a' || 'b' = 'ab' AS d, 2 * (3 + (4 - 1)) AS e, NOT NOT TRUE AS f, TRUE OR FALSE AND FALSE AS g
+----
+a BOOLEAN | b INT64 | c INT64 | d BOOLEAN | e INT64 | f BOOLEAN | g BOOLEAN
+[true, 5, -9, true, 12, true, true]
+
+query
+SELECT ABS(ROUND(-2.567, 1)) + LENGTH(UPPER(SUBSTR('abcdef', 2, 3))) AS x, COALESCE(NULLIF(LENGTH(''), 0), 99) AS y
+----
+x DECIMAL(18,1) | y INT64
+["5.6", 99]
+
+error PARSE_ERROR
+SELECT 1 < 2 = TRUE

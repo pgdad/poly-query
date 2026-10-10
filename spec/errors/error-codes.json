@@ -1,0 +1,28 @@
+{
+  "spec_version": "1.0.0",
+  "codes": {
+    "PARSE_ERROR":                 {"http": 400, "phase": 2, "description": "Lexical or syntactic error in SQL text."},
+    "SEMANTIC_ERROR":              {"http": 400, "phase": 1, "description": "Unknown/ambiguous table or column, misuse of aggregates, grouping violation, wrong function arity, invalid statement structure."},
+    "TYPE_ERROR":                  {"http": 400, "phase": 1, "description": "Operand or argument types are incompatible (detected at validation)."},
+    "NUMERIC_OVERFLOW":            {"http": 400, "phase": 1, "description": "Integer/decimal overflow, out-of-range literal or cast, non-finite float result."},
+    "DIVISION_BY_ZERO":            {"http": 400, "phase": 1, "description": "Division or modulo by zero."},
+    "CONVERSION_ERROR":            {"http": 400, "phase": 1, "description": "A value could not be converted (CAST, ingestion with schema, invalid DATE/TIMESTAMP literal)."},
+    "INVALID_ARGUMENT":            {"http": 400, "phase": 1, "description": "Argument value outside the function's domain (e.g. SQRT(-1), negative LIMIT)."},
+    "SUBQUERY_CARDINALITY":        {"http": 400, "phase": 2, "description": "A scalar subquery returned more than one row."},
+    "INVALID_REQUEST":             {"http": 400, "phase": 1, "description": "Malformed protocol request (bad JSON, unknown op, missing/ill-typed fields)."},
+    "INGEST_ERROR":                {"http": 400, "phase": 1, "description": "Malformed input data (CSV structure, JSON syntax, inconsistent JSON types, duplicate columns)."},
+    "UNSUPPORTED":                 {"http": 400, "phase": 1, "description": "Syntactically valid feature or option this engine does not implement."},
+    "ACCESS_DENIED":               {"http": 403, "phase": 1, "description": "Path outside the data directory or otherwise not permitted."},
+    "NOT_FOUND":                   {"http": 404, "phase": 1, "description": "Protocol-level reference to a missing table, index, query id or file."},
+    "ALREADY_EXISTS":              {"http": 409, "phase": 1, "description": "Table/index/query id already exists."},
+    "CANCELLED":                   {"http": 409, "phase": 4, "description": "Query was cancelled by a client or by shutdown."},
+    "RESOURCE_LIMIT":              {"http": 413, "phase": 1, "description": "A configured resource limit (rows, memory, input size, join size) was exceeded."},
+    "IO_ERROR":                    {"http": 500, "phase": 1, "description": "Operating-system level I/O failure."},
+    "STORAGE_CORRUPT":             {"http": 500, "phase": 3, "description": "Storage file failed validation (magic, checksum, truncation, structural inconsistency)."},
+    "STORAGE_VERSION_UNSUPPORTED": {"http": 500, "phase": 3, "description": "Storage file format version is newer than supported."},
+    "INTERNAL_ERROR":              {"http": 500, "phase": 1, "description": "Bug or unexpected condition. Conformance tests never expect this code."},
+    "OVERLOADED":                  {"http": 503, "phase": 4, "description": "Worker pool and queue are full (backpressure)."},
+    "SHUTTING_DOWN":               {"http": 503, "phase": 4, "description": "Server is draining and not accepting new queries."},
+    "TIMEOUT":                     {"http": 504, "phase": 1, "description": "Query exceeded its timeout."}
+  }
+}

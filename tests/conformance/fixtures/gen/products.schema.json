@@ -1,0 +1,1 @@
+[{"name": "product_id", "type": "INT64"}, {"name": "name", "type": "STRING"}, {"name": "category", "type": "STRING"}, {"name": "brand", "type": "STRING"}, {"name": "price", "type": "DECIMAL(10,2)"}, {"name": "weight_kg", "type": "FLOAT64"}, {"name": "released", "type": "DATE"}]

@@ -1,0 +1,154 @@
+# Catalog and protocol operations (protocol.md §4-§6)
+@phase 1
+@requires phase1 ingest.csv
+
+request
+{"op":"capabilities"}
+----
+ok
+
+request
+{"op":"version"}
+----
+match {"ok":true,"protocol_version":1,"spec_version":"1.0.0"}
+
+request
+{"op":"tables"}
+----
+match {"ok":true,"tables":[]}
+
+request
+{"op":"load","table":"people","format":"csv","path":"fixtures/people.csv"}
+----
+match {"ok":true,"table":"people","row_count":8}
+
+request
+{"op":"load","table":"Customers","format":"csv","path":"fixtures/customers.csv"}
+----
+match {"ok":true,"table":"Customers","row_count":5,"columns":[{"name":"customer_id","type":"INT64"},{"name":"name","type":"STRING"},{"name":"country","type":"STRING"},{"name":"tier","type":"STRING"}]}
+
+# table names are sorted case-insensitively and keep their spelling
+request
+{"op":"tables"}
+----
+match {"ok":true,"tables":[{"name":"Customers","row_count":5},{"name":"people","row_count":8}]}
+
+# case-insensitive lookup, original spelling reported
+request
+{"op":"schema","table":"CUSTOMERS"}
+----
+match {"ok":true,"table":"Customers","row_count":5}
+
+request
+{"op":"schema","table":"nope"}
+----
+error NOT_FOUND
+
+# loading an existing name without replace fails and leaves the table intact
+request
+{"op":"load","table":"PEOPLE","format":"csv","path":"fixtures/customers.csv"}
+----
+error ALREADY_EXISTS
+
+request
+{"op":"schema","table":"people"}
+----
+match {"ok":true,"row_count":8}
+
+request
+{"op":"load","table":"people","format":"csv","path":"fixtures/customers.csv","replace":true}
+----
+match {"ok":true,"row_count":5}
+
+request
+{"op":"schema","table":"people"}
+----
+match {"ok":true,"table":"people","row_count":5}
+
+request
+{"op":"drop","table":"people"}
+----
+ok
+
+request
+{"op":"drop","table":"people"}
+----
+error NOT_FOUND
+
+error SEMANTIC_ERROR
+SELECT * FROM people
+
+request
+{"op":"reset"}
+----
+ok
+
+request
+{"op":"tables"}
+----
+match {"ok":true,"tables":[]}
+
+# --- id echoing and invalid requests
+request
+{"op":"frobnicate"}
+----
+error INVALID_REQUEST
+
+request
+{"op":"query"}
+----
+error INVALID_REQUEST
+
+request
+{"op":"query","sql":42}
+----
+error INVALID_REQUEST
+
+request
+{"op":"load","table":"t","format":"xml","path":"fixtures/people.csv"}
+----
+error INVALID_REQUEST
+
+request
+{"op":"load","table":"t","format":"csv"}
+----
+error INVALID_REQUEST
+
+# --- path safety
+request
+{"op":"load","table":"t","format":"csv","path":"/etc/passwd"}
+----
+error ACCESS_DENIED
+
+request
+{"op":"load","table":"t","format":"csv","path":"../fixtures/people.csv"}
+----
+error ACCESS_DENIED
+
+request
+{"op":"load","table":"t","format":"csv","path":"fixtures/../../etc/passwd"}
+----
+error ACCESS_DENIED
+
+request
+{"op":"load","table":"t","format":"csv","path":""}
+----
+error ACCESS_DENIED
+
+request
+{"op":"load","table":"t","format":"csv","path":"fixtures/does_not_exist.csv"}
+----
+error NOT_FOUND
+
+# inline data
+request
+{"op":"load","table":"inline","format":"csv","data":"a,b\n1,x\n2,y\n"}
+----
+match {"ok":true,"table":"inline","row_count":2,"columns":[{"name":"a","type":"INT64"},{"name":"b","type":"STRING"}]}
+
+query ordered
+SELECT b, a FROM inline ORDER BY a DESC
+----
+b STRING | a INT64
+["y", 2]
+["x", 1]

@@ -1,0 +1,6 @@
+[
+  {"id": 1, "kind": "click", "ts": "2024-05-01T12:00:00", "value": 1.5, "ok": true},
+  {"id": 2, "kind": "view", "ts": "2024-05-01 12:00:01.250", "value": null, "ok": false},
+  {"id": 3, "kind": "click", "ts": "2024-05-02", "value": -2, "ok": true},
+  {"id": 4, "kind": "buy", "ts": "2024-05-03T08:30:00", "value": 100, "ok": null}
+]

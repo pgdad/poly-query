@@ -1,0 +1,142 @@
+# JSON / JSON Lines ingestion (ingestion.md §2)
+@phase 1
+@requires phase1 ingest.json ingest.jsonl sql.basic
+
+load products fixtures/products.jsonl
+
+request
+{"op":"schema","table":"products"}
+----
+match {"ok":true,"row_count":5,"columns":[{"name":"sku","type":"STRING"},{"name":"name","type":"STRING"},{"name":"price","type":"FLOAT64"},{"name":"stock","type":"INT64"},{"name":"released","type":"DATE"}]}
+
+query ordered oracle
+SELECT * FROM products ORDER BY sku
+----
+sku STRING | name STRING | price FLOAT64 | stock INT64 | released DATE
+["A-1", "Widget", 9.99, 120, "2023-01-01"]
+["A-2", "Gadget", 24.5, 0, "2023-06-15"]
+["B-1", "Doohickey", 3.0, 55, null]
+["B-2", "Thingamajig", null, 7, "2024-02-29"]
+["C-1", "Ünïcödé", 100.0, 1, "2022-12-31"]
+
+load events fixtures/events.json
+
+request
+{"op":"schema","table":"events"}
+----
+match {"ok":true,"row_count":4,"columns":[{"name":"id","type":"INT64"},{"name":"kind","type":"STRING"},{"name":"ts","type":"TIMESTAMP"},{"name":"value","type":"FLOAT64"},{"name":"ok","type":"BOOLEAN"}]}
+
+query ordered
+SELECT id, ts, value, ok FROM events ORDER BY id
+----
+id INT64 | ts TIMESTAMP | value FLOAT64 | ok BOOLEAN
+[1, "2024-05-01 12:00:00", 1.5, true]
+[2, "2024-05-01 12:00:01.250000", null, false]
+[3, "2024-05-02 00:00:00", -2.0, true]
+[4, "2024-05-03 08:30:00", 100.0, null]
+
+# union of keys in first-appearance order; missing keys are NULL
+data sparse jsonl
+{"a": 1}
+{"b": "x", "a": 2}
+{"c": true}
+.
+
+request
+{"op":"schema","table":"sparse"}
+----
+match {"ok":true,"row_count":3,"columns":[{"name":"a","type":"INT64"},{"name":"b","type":"STRING"},{"name":"c","type":"BOOLEAN"}]}
+
+query ordered
+SELECT a, b, c FROM sparse ORDER BY a
+----
+a INT64 | b STRING | c BOOLEAN
+[null, null, true]
+[1, null, null]
+[2, "x", null]
+
+# explicit schema converts JSON numbers and strings
+data money json schema=id:INT64;amt:DECIMAL(8,3);day:DATE
+[{"id": 1, "amt": 12.5, "day": "2024-01-31"}, {"id": 2, "amt": "-0.125", "day": null}, {"id": 3, "amt": 7}]
+.
+
+query ordered
+SELECT id, amt, day FROM money ORDER BY id
+----
+id INT64 | amt DECIMAL(8,3) | day DATE
+[1, "12.500", "2024-01-31"]
+[2, "-0.125", null]
+[3, "7.000", null]
+
+# all-null column is STRING; numbers with exponent are FLOAT64
+data misc jsonl
+{"n": null, "x": 1e3}
+{"n": null, "x": 2}
+.
+
+request
+{"op":"schema","table":"misc"}
+----
+match {"ok":true,"columns":[{"name":"n","type":"STRING"},{"name":"x","type":"FLOAT64"}]}
+
+# unicode escapes in JSON input
+data uni jsonl
+{"s": "café \"q\" \\ /"}
+.
+
+query
+SELECT s FROM uni
+----
+s STRING
+["café \"q\" \\ /"]
+
+# --- errors
+load j1 fixtures/mixed_types.json expect=INGEST_ERROR
+load j2 fixtures/nested.jsonl expect=INGEST_ERROR
+load j3 fixtures/broken.jsonl expect=INGEST_ERROR
+
+data j4 json expect=INGEST_ERROR
+{"a": 1}
+.
+
+data j5 json expect=INGEST_ERROR
+[{"a": 1}, 2]
+.
+
+data j6 jsonl expect=INGEST_ERROR
+{"a": 1, "a": 2}
+.
+
+data j7 jsonl expect=INGEST_ERROR
+{"a": NaN}
+.
+
+data j8 jsonl expect=INGEST_ERROR
+{"a": [1, 2]}
+.
+
+data j9 jsonl schema=a:INT64 expect=INGEST_ERROR
+{"a": 1, "b": 2}
+.
+
+data j10 jsonl schema=a:INT64 expect=CONVERSION_ERROR
+{"a": 1.5}
+.
+
+data j11 jsonl schema=a:BOOLEAN expect=CONVERSION_ERROR
+{"a": "true"}
+.
+
+data j12 json expect=INGEST_ERROR
+[{"a": 1},]
+.
+
+# empty array: empty table
+data j13 json
+[]
+.
+
+request
+{"op":"schema","table":"j13"}
+----
+match {"ok":true,"row_count":0,"columns":[]}

@@ -1,0 +1,147 @@
+# Statistics, row/column layouts, dictionary encoding, column pruning — indexes-and-planning.md
+@phase 3
+@requires phase3 ingest.csv sql.groupby sql.join
+
+load people fixtures/people.csv
+load ledger fixtures/ledger.csv schema=id:INT64;account:STRING;amount:DECIMAL(10,2);fee:DECIMAL(4,2)
+load prow fixtures/people.csv layout=row
+load pcol fixtures/people.csv layout=column
+load trow fixtures/gen/transactions.csv schemafile=fixtures/gen/transactions.schema.json layout=row
+load tcol fixtures/gen/transactions.csv schemafile=fixtures/gen/transactions.schema.json layout=column
+load wide fixtures/gen/wide.csv schemafile=fixtures/gen/wide.schema.json
+
+# --- stats (exact row_count, null_count, min, max; distinct_count may be approximate and is not checked here)
+request
+{"op":"stats","table":"people"}
+----
+match {"ok":true,"table":"people","row_count":8,"columns":[{"name":"id","type":"INT64","null_count":0,"min":1,"max":8},{"name":"name","type":"STRING","null_count":0,"min":"Alice","max":"heidi"},{"name":"age","type":"INT64","null_count":1,"min":28,"max":52},{"name":"city","type":"STRING","null_count":1,"min":"Espoo","max":"Tampere"},{"name":"score","type":"FLOAT64","null_count":1,"min":58.0,"max":95.5},{"name":"active","type":"BOOLEAN","null_count":1,"min":false,"max":true},{"name":"joined","type":"DATE","null_count":1,"min":"2018-02-28","max":"2023-05-05"}]}
+
+request
+{"op":"stats","table":"ledger"}
+----
+match {"ok":true,"row_count":6,"columns":[{"name":"id","null_count":0},{"name":"account","null_count":0},{"name":"amount","type":"DECIMAL(10,2)","null_count":1,"min":"-40.10","max":"999999.99"},{"name":"fee","null_count":1,"min":"0.00","max":"1.75"}]}
+
+request
+{"op":"stats","table":"nope"}
+----
+error NOT_FOUND
+
+data allnull csv schema=x:INT64;y:INT64
+x,y
+,1
+.
+
+request
+{"op":"stats","table":"allnull"}
+----
+match {"ok":true,"row_count":1,"columns":[{"name":"x","null_count":1,"min":null,"max":null},{"name":"y","null_count":0,"min":1,"max":1}]}
+
+# --- identical results in row and column layouts
+query ordered oracle
+SELECT city, COUNT(*) AS n, MAX(score) AS s FROM prow GROUP BY city ORDER BY city
+----
+city STRING | n INT64 | s FLOAT64
+[null, 1, 79.75]
+["Espoo", 1, 58.0]
+["Helsinki", 3, 95.5]
+["Oulu", 1, 65.5]
+["Tampere", 2, 72.25]
+
+query ordered oracle
+SELECT city, COUNT(*) AS n, MAX(score) AS s FROM pcol GROUP BY city ORDER BY city
+----
+city STRING | n INT64 | s FLOAT64
+[null, 1, 79.75]
+["Espoo", 1, 58.0]
+["Helsinki", 3, 95.5]
+["Oulu", 1, 65.5]
+["Tampere", 2, 72.25]
+
+query ordered oracle
+SELECT a.name, b.name AS other FROM prow a JOIN pcol b ON a.age = b.age AND a.id <> b.id ORDER BY a.name, other
+----
+name STRING | other STRING
+["Alice", "Grace"]
+["Bob", "Eve"]
+["Eve", "Bob"]
+["Grace", "Alice"]
+
+query ordered oracle
+SELECT category, COUNT(*) AS n, SUM(amount) AS total, AVG(bucket) AS b FROM trow WHERE status <> 'declined' GROUP BY category ORDER BY total DESC LIMIT 5
+----
+category STRING | n INT64 | total DECIMAL(18,2) | b FLOAT64
+["groceries", 409, "2186120.97", 506.60635696821515]
+["electronics", 213, "1831642.04", 498.5962441314554]
+["clothing", 75, "1737467.32", 512.1466666666666]
+["travel", 150, "1015003.32", 507.38666666666666]
+["education", 39, "943286.53", 629.6153846153846]
+
+query ordered oracle
+SELECT category, COUNT(*) AS n, SUM(amount) AS total, AVG(bucket) AS b FROM tcol WHERE status <> 'declined' GROUP BY category ORDER BY total DESC LIMIT 5
+----
+category STRING | n INT64 | total DECIMAL(18,2) | b FLOAT64
+["groceries", 409, "2186120.97", 506.60635696821515]
+["electronics", 213, "1831642.04", 498.5962441314554]
+["clothing", 75, "1737467.32", 512.1466666666666]
+["travel", 150, "1015003.32", 507.38666666666666]
+["education", 39, "943286.53", 629.6153846153846]
+
+request
+{"op":"load","table":"bad_layout","format":"csv","path":"fixtures/people.csv","options":{"layout":"diagonal"}}
+----
+error INVALID_REQUEST
+
+# dictionary encoding forced on a string-heavy table
+request
+{"op":"load","table":"pdict","format":"csv","path":"fixtures/gen/transactions.csv","schema":[{"name":"tx_id","type":"INT64"},{"name":"customer_id","type":"INT64"},{"name":"merchant_id","type":"INT64"},{"name":"amount","type":"DECIMAL(12,2)"},{"name":"currency","type":"STRING"},{"name":"category","type":"STRING"},{"name":"ts","type":"TIMESTAMP"},{"name":"status","type":"STRING"},{"name":"is_fraud","type":"BOOLEAN"},{"name":"fee","type":"DECIMAL(10,2)"},{"name":"bucket","type":"INT64"}],"options":{"layout":"column","dictionary":true}}
+----
+match {"ok":true,"row_count":2000}
+
+query ordered oracle
+SELECT currency, status, COUNT(*) AS n FROM pdict WHERE category LIKE '%e%' GROUP BY currency, status ORDER BY currency, status
+----
+currency STRING | status STRING | n INT64
+["EUR", "approved", 190]
+["EUR", "declined", 184]
+["EUR", "pending", 203]
+["EUR", "refunded", 185]
+["GBP", "approved", 58]
+["GBP", "declined", 59]
+["GBP", "pending", 71]
+["GBP", "refunded", 73]
+["JPY", "approved", 45]
+["JPY", "declined", 46]
+["JPY", "pending", 28]
+["JPY", "refunded", 35]
+["SEK", "approved", 51]
+["SEK", "declined", 39]
+["SEK", "pending", 46]
+["SEK", "refunded", 47]
+["USD", "approved", 98]
+["USD", "declined", 115]
+["USD", "pending", 109]
+["USD", "refunded", 105]
+
+# --- column pruning: scans read only referenced columns
+explain
+SELECT id, c003 FROM wide WHERE c010 > 5
+----
+scan-columns wide id,c003,c010
+
+explain
+SELECT COUNT(*) FROM wide WHERE c000 = 1
+----
+scan-columns wide c000
+
+explain
+SELECT a.id FROM wide a JOIN people p ON p.id = a.id WHERE p.age > 30
+----
+scan-columns wide id
+scan-columns people id,age
+
+query oracle
+SELECT COUNT(*) AS n, SUM(c000) AS s, MAX(c099) AS m FROM wide WHERE c003 = true
+----
+n INT64 | s INT64 | m DECIMAL(12,2)
+[493, 237287895, "99981.83"]
+

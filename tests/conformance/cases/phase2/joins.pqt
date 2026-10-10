@@ -1,0 +1,258 @@
+# INNER / LEFT / CROSS joins — semantics.md §7
+@phase 2
+@requires phase2 sql.join sql.groupby sql.functions ingest.csv
+
+load customers fixtures/customers.csv
+load orders fixtures/orders.csv schema=order_id:INT64;customer_id:INT64;amount:DECIMAL(10,2);status:STRING;ordered_at:TIMESTAMP
+load people fixtures/people.csv
+load gcust fixtures/gen/customers.csv schemafile=fixtures/gen/customers.schema.json
+load gorders fixtures/gen/orders.csv schemafile=fixtures/gen/orders.schema.json
+load items fixtures/gen/order_items.csv schemafile=fixtures/gen/order_items.schema.json
+load products fixtures/gen/products.csv schemafile=fixtures/gen/products.schema.json
+
+query ordered oracle
+SELECT o.order_id, c.name, o.amount FROM orders o INNER JOIN customers c ON o.customer_id = c.customer_id ORDER BY o.order_id
+----
+order_id INT64 | name STRING | amount DECIMAL(10,2)
+[101, "Alice", "250.00"]
+[102, "Bob", "99.99"]
+[103, "Alice", "15.50"]
+[104, "Carol", "1200.00"]
+[105, "Dave", "0.99"]
+[107, "Bob", "300.10"]
+[109, "Carol", null]
+[110, "Alice", "500.00"]
+
+query ordered oracle
+SELECT o.order_id, c.name FROM orders o JOIN customers c ON c.customer_id = o.customer_id WHERE c.country = 'FI' ORDER BY o.order_id
+----
+order_id INT64 | name STRING
+[101, "Alice"]
+[103, "Alice"]
+[104, "Carol"]
+[109, "Carol"]
+[110, "Alice"]
+
+# LEFT JOIN keeps unmatched left rows (NULL key and missing customer 9)
+query ordered oracle
+SELECT o.order_id, o.customer_id, c.name, c.tier FROM orders o LEFT JOIN customers c ON o.customer_id = c.customer_id ORDER BY o.order_id
+----
+order_id INT64 | customer_id INT64 | name STRING | tier STRING
+[101, 1, "Alice", "gold"]
+[102, 2, "Bob", "silver"]
+[103, 1, "Alice", "gold"]
+[104, 3, "Carol", null]
+[105, 4, "Dave", "bronze"]
+[106, null, null, null]
+[107, 2, "Bob", "silver"]
+[108, 9, null, null]
+[109, 3, "Carol", null]
+[110, 1, "Alice", "gold"]
+
+query ordered oracle
+SELECT c.customer_id, c.name, o.order_id FROM customers c LEFT OUTER JOIN orders o ON o.customer_id = c.customer_id ORDER BY c.customer_id, o.order_id
+----
+customer_id INT64 | name STRING | order_id INT64
+[1, "Alice", 101]
+[1, "Alice", 103]
+[1, "Alice", 110]
+[2, "Bob", 102]
+[2, "Bob", 107]
+[3, "Carol", 104]
+[3, "Carol", 109]
+[4, "Dave", 105]
+[5, "Erin", null]
+
+# anti-join via LEFT JOIN ... IS NULL
+query ordered oracle
+SELECT c.name FROM customers c LEFT JOIN orders o ON o.customer_id = c.customer_id WHERE o.order_id IS NULL ORDER BY c.name
+----
+name STRING
+["Erin"]
+
+# ON with additional non-equi conditions: filter in ON vs WHERE differs for LEFT JOIN
+query ordered oracle
+SELECT c.customer_id, o.order_id FROM customers c LEFT JOIN orders o ON o.customer_id = c.customer_id AND o.status = 'shipped' ORDER BY c.customer_id, o.order_id
+----
+customer_id INT64 | order_id INT64
+[1, 101]
+[1, 103]
+[1, 110]
+[2, 107]
+[3, null]
+[4, 105]
+[5, null]
+
+query ordered oracle
+SELECT c.customer_id, o.order_id FROM customers c LEFT JOIN orders o ON o.customer_id = c.customer_id WHERE o.status = 'shipped' ORDER BY c.customer_id, o.order_id
+----
+customer_id INT64 | order_id INT64
+[1, 101]
+[1, 103]
+[1, 110]
+[2, 107]
+[4, 105]
+
+# non-equi join
+query ordered oracle
+SELECT a.id AS a_id, b.id AS b_id FROM people a JOIN people b ON a.age < b.age AND b.id <= 3 ORDER BY a_id, b_id
+----
+a_id INT64 | b_id INT64
+[1, 3]
+[2, 1]
+[2, 3]
+[5, 1]
+[5, 3]
+[7, 3]
+[8, 3]
+
+# CROSS JOIN and comma join
+query oracle
+SELECT COUNT(*) AS n FROM customers CROSS JOIN orders
+----
+n INT64
+[50]
+
+query ordered oracle
+SELECT c.customer_id, p.id FROM customers c, people p WHERE c.customer_id = p.id AND p.id < 3 ORDER BY c.customer_id
+----
+customer_id INT64 | id INT64
+[1, 1]
+[2, 2]
+
+# self join with aliases; join on expressions
+query ordered oracle
+SELECT a.name, b.name AS same_age FROM people a JOIN people b ON a.age = b.age AND a.id < b.id ORDER BY a.name
+----
+name STRING | same_age STRING
+["Alice", "Grace"]
+["Bob", "Eve"]
+
+query ordered oracle
+SELECT p.name, c.name AS cname FROM people p JOIN customers c ON UPPER(SUBSTR(p.name, 1, 1)) = SUBSTR(c.name, 1, 1) ORDER BY p.name, cname
+----
+name STRING | cname STRING
+["Alice", "Alice"]
+["Bob", "Bob"]
+["Carol", "Carol"]
+["Dave", "Dave"]
+["Eve", "Erin"]
+
+# three-way joins, aggregation over joins
+query ordered oracle
+SELECT c.name, COUNT(o.order_id) AS orders, SUM(o.amount) AS total FROM customers c LEFT JOIN orders o ON o.customer_id = c.customer_id GROUP BY c.name ORDER BY c.name
+----
+name STRING | orders INT64 | total DECIMAL(18,2)
+["Alice", 3, "765.50"]
+["Bob", 2, "400.09"]
+["Carol", 2, "1200.00"]
+["Dave", 1, "0.99"]
+["Erin", 0, null]
+
+query ordered oracle
+SELECT p.category, COUNT(*) AS lines, SUM(i.quantity) AS qty FROM gorders o JOIN items i ON i.order_id = o.order_id JOIN products p ON p.product_id = i.product_id WHERE o.status = 'delivered' GROUP BY p.category ORDER BY qty DESC, p.category LIMIT 8
+----
+category STRING | lines INT64 | qty INT64
+["automotive", 92, 502]
+["health", 47, 261]
+["beauty", 27, 158]
+["home", 33, 136]
+["restaurants", 20, 119]
+["education", 18, 108]
+["fuel", 20, 99]
+["insurance", 18, 93]
+
+query ordered oracle
+SELECT c.segment, COUNT(DISTINCT o.order_id) AS orders, COUNT(DISTINCT c.customer_id) AS customers FROM gcust c JOIN gorders o ON o.customer_id = c.customer_id GROUP BY c.segment ORDER BY c.segment
+----
+segment STRING | orders INT64 | customers INT64
+["consumer", 338, 67]
+["enterprise", 86, 18]
+["public_sector", 32, 14]
+["small_business", 44, 22]
+
+query oracle
+SELECT COUNT(*) AS n FROM gcust c LEFT JOIN gorders o ON o.customer_id = c.customer_id WHERE o.order_id IS NULL
+----
+n INT64
+[79]
+
+query ordered oracle
+SELECT o.order_id, SUM(i.quantity * i.unit_price) AS gross FROM gorders o JOIN items i ON i.order_id = o.order_id WHERE o.order_id <= 5 GROUP BY o.order_id ORDER BY o.order_id
+----
+order_id INT64 | gross DECIMAL(18,2)
+[1, "2791.28"]
+[2, "1826.40"]
+[3, "2792.83"]
+[4, "5812.02"]
+[5, "2606.99"]
+
+# parenthesized join
+query ordered oracle
+SELECT o.order_id, c.name FROM (orders o JOIN customers c ON o.customer_id = c.customer_id) WHERE o.amount > 200 ORDER BY o.order_id
+----
+order_id INT64 | name STRING
+[101, "Alice"]
+[104, "Carol"]
+[107, "Bob"]
+[110, "Alice"]
+
+# NULL keys never match
+data l csv
+k,v
+1,a
+,b
+.
+data r csv
+k,w
+1,x
+,y
+.
+
+query ordered
+SELECT l.v, r.w FROM l JOIN r ON l.k = r.k
+----
+v STRING | w STRING
+["a", "x"]
+
+query ordered
+SELECT l.v, r.w FROM l LEFT JOIN r ON l.k = r.k ORDER BY l.v
+----
+v STRING | w STRING
+["a", "x"]
+["b", null]
+
+# SELECT * over a join: left columns then right columns
+query ordered
+SELECT * FROM l JOIN r ON l.k = r.k
+----
+k INT64 | v STRING | k INT64 | w STRING
+[1, "a", 1, "x"]
+
+query ordered
+SELECT r.*, l.v FROM l JOIN r ON l.k = r.k
+----
+k INT64 | w STRING | v STRING
+[1, "x", "a"]
+
+# errors
+error SEMANTIC_ERROR
+SELECT k FROM l JOIN r ON l.k = r.k
+
+error SEMANTIC_ERROR
+SELECT * FROM l JOIN l ON l.k = l.k
+
+error SEMANTIC_ERROR
+SELECT * FROM l a JOIN r b ON a.k = c.k
+
+error TYPE_ERROR
+SELECT * FROM l JOIN r ON l.k = r.w
+
+error TYPE_ERROR
+SELECT * FROM l JOIN r ON l.k
+
+error PARSE_ERROR
+SELECT * FROM l JOIN r
+
+error UNSUPPORTED
+SELECT * FROM l FULL JOIN r ON l.k = r.k

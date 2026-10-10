@@ -1,0 +1,380 @@
+# Single-table SELECT: projection, filtering, sorting, LIMIT/OFFSET (sql.basic)
+@phase 1
+@requires phase1 ingest.csv sql.basic
+
+load people fixtures/people.csv
+
+query oracle
+SELECT name FROM people
+----
+name STRING
+["Alice"]
+["Bob"]
+["Carol"]
+["Dave"]
+["Eve"]
+["Frank"]
+["Grace"]
+["heidi"]
+
+query ordered oracle
+SELECT name, age FROM people WHERE age > 30 ORDER BY age, name
+----
+name STRING | age INT64
+["Alice", 34]
+["Grace", 34]
+["heidi", 41]
+["Carol", 45]
+["Frank", 52]
+
+query ordered oracle
+SELECT id FROM people WHERE age >= 28 AND age <= 34 ORDER BY id
+----
+id INT64
+[1]
+[2]
+[5]
+[7]
+
+query ordered oracle
+SELECT id FROM people WHERE city = 'Helsinki' OR active = false ORDER BY id
+----
+id INT64
+[1]
+[2]
+[3]
+[5]
+[7]
+[8]
+
+query ordered oracle
+SELECT id FROM people WHERE NOT (city = 'Helsinki') ORDER BY id
+----
+id INT64
+[2]
+[4]
+[6]
+[8]
+
+query ordered oracle
+SELECT id FROM people WHERE city <> 'Helsinki' ORDER BY id DESC
+----
+id INT64
+[8]
+[6]
+[4]
+[2]
+
+query ordered oracle
+SELECT id FROM people WHERE city != 'Helsinki' ORDER BY id DESC
+----
+id INT64
+[8]
+[6]
+[4]
+[2]
+
+query ordered oracle
+SELECT id, city FROM people WHERE city IS NULL OR city IS NOT NULL ORDER BY id
+----
+id INT64 | city STRING
+[1, "Helsinki"]
+[2, "Tampere"]
+[3, "Helsinki"]
+[4, "Oulu"]
+[5, null]
+[6, "Tampere"]
+[7, "Helsinki"]
+[8, "Espoo"]
+
+# booleans directly as predicates
+query ordered oracle
+SELECT id FROM people WHERE active ORDER BY id
+----
+id INT64
+[1]
+[3]
+[4]
+[6]
+
+query ordered oracle
+SELECT id FROM people WHERE NOT active ORDER BY id
+----
+id INT64
+[2]
+[5]
+[8]
+
+# NULLs sort first ascending, last descending
+query ordered oracle
+SELECT id, age FROM people ORDER BY age, id
+----
+id INT64 | age INT64
+[4, null]
+[2, 28]
+[5, 28]
+[1, 34]
+[7, 34]
+[8, 41]
+[3, 45]
+[6, 52]
+
+query ordered oracle
+SELECT id, age FROM people ORDER BY age DESC, id DESC
+----
+id INT64 | age INT64
+[6, 52]
+[3, 45]
+[8, 41]
+[7, 34]
+[1, 34]
+[5, 28]
+[2, 28]
+[4, null]
+
+query ordered oracle
+SELECT id, score FROM people ORDER BY score NULLS LAST, id
+----
+id INT64 | score FLOAT64
+[8, 58.0]
+[4, 65.5]
+[2, 72.25]
+[5, 79.75]
+[1, 88.5]
+[3, 91.0]
+[7, 95.5]
+[6, null]
+
+query ordered oracle
+SELECT id, score FROM people ORDER BY score DESC NULLS FIRST, id
+----
+id INT64 | score FLOAT64
+[6, null]
+[7, 95.5]
+[3, 91.0]
+[1, 88.5]
+[5, 79.75]
+[2, 72.25]
+[4, 65.5]
+[8, 58.0]
+
+# string ordering is by code point: uppercase before lowercase
+query ordered oracle
+SELECT name FROM people ORDER BY name
+----
+name STRING
+["Alice"]
+["Bob"]
+["Carol"]
+["Dave"]
+["Eve"]
+["Frank"]
+["Grace"]
+["heidi"]
+
+query ordered oracle
+SELECT name FROM people ORDER BY name DESC LIMIT 3
+----
+name STRING
+["heidi"]
+["Grace"]
+["Frank"]
+
+query ordered oracle
+SELECT id FROM people ORDER BY id LIMIT 3 OFFSET 2
+----
+id INT64
+[3]
+[4]
+[5]
+
+query ordered oracle
+SELECT id FROM people ORDER BY id LIMIT 0
+----
+id INT64
+
+query ordered oracle
+SELECT id FROM people ORDER BY id LIMIT 100 OFFSET 6
+----
+id INT64
+[7]
+[8]
+
+query ordered
+SELECT id FROM people ORDER BY id OFFSET 7
+----
+id INT64
+[8]
+
+query ordered
+SELECT id FROM people ORDER BY id OFFSET 7 LIMIT 5
+----
+id INT64
+[8]
+
+query ordered oracle
+SELECT id FROM people ORDER BY id LIMIT 2 + 1
+----
+id INT64
+[1]
+[2]
+[3]
+
+# date ordering and comparison with date literals
+query ordered oracle
+SELECT id, joined FROM people WHERE joined >= DATE '2020-01-15' ORDER BY joined, id
+----
+id INT64 | joined DATE
+[1, "2020-01-15"]
+[7, "2020-01-15"]
+[2, "2021-03-01"]
+[4, "2022-11-11"]
+[8, "2023-05-05"]
+
+# aliases, expressions, ORDER BY alias and ordinal
+query ordered oracle
+SELECT name AS who, age + 1 AS next_age FROM people WHERE age IS NOT NULL ORDER BY next_age DESC, who
+----
+who STRING | next_age INT64
+["Frank", 53]
+["Carol", 46]
+["heidi", 42]
+["Alice", 35]
+["Grace", 35]
+["Bob", 29]
+["Eve", 29]
+
+query ordered oracle
+SELECT name, age FROM people WHERE age IS NOT NULL ORDER BY 2, 1
+----
+name STRING | age INT64
+["Bob", 28]
+["Eve", 28]
+["Alice", 34]
+["Grace", 34]
+["heidi", 41]
+["Carol", 45]
+["Frank", 52]
+
+# alias without AS; table alias
+query ordered
+SELECT p.name nm FROM people p WHERE p.id = 3
+----
+nm STRING
+["Carol"]
+
+query ordered
+SELECT people.id FROM people WHERE people.id < 3 ORDER BY people.id
+----
+id INT64
+[1]
+[2]
+
+# case-insensitive identifiers and keywords
+query ordered
+select NAME from PEOPLE where ID = 2
+----
+name STRING
+["Bob"]
+
+# quoted identifiers
+query ordered
+SELECT "name" AS "Full Name" FROM people WHERE "id" = 1
+----
+"Full Name" STRING
+["Alice"]
+
+# unaliased expressions are named _colN; * and t.* expand
+query ordered
+SELECT id, id * 2, age FROM people WHERE id = 1
+----
+id INT64 | _col2 INT64 | age INT64
+[1, 2, 34]
+
+query ordered
+SELECT *, id FROM people WHERE id = 2
+----
+id INT64 | name STRING | age INT64 | city STRING | score FLOAT64 | active BOOLEAN | joined DATE | id INT64
+[2, "Bob", 28, "Tampere", 72.25, false, "2021-03-01", 2]
+
+query ordered
+SELECT p.*, 1 FROM people AS p WHERE p.id = 2
+----
+id INT64 | name STRING | age INT64 | city STRING | score FLOAT64 | active BOOLEAN | joined DATE | _col8 INT64
+[2, "Bob", 28, "Tampere", 72.25, false, "2021-03-01", 1]
+
+# ORDER BY an expression not in the select list
+query ordered
+SELECT name FROM people WHERE age IS NOT NULL ORDER BY age * -1, id
+----
+name STRING
+["Frank"]
+["Carol"]
+["heidi"]
+["Alice"]
+["Grace"]
+["Bob"]
+["Eve"]
+
+# SELECT without FROM
+query
+SELECT 1 AS one, 'two' AS two, NULL AS three
+----
+one INT64 | two STRING | three STRING
+[1, "two", null]
+
+query
+SELECT 1 WHERE 1 = 2
+----
+_col1 INT64
+
+query
+SELECT 2 WHERE TRUE
+----
+_col1 INT64
+[2]
+
+# a trailing semicolon is allowed; comments are ignored
+query
+SELECT /* block */ 7 AS x -- line comment
+;
+----
+x INT64
+[7]
+
+# --- errors
+error SEMANTIC_ERROR
+SELECT nope FROM people
+
+error SEMANTIC_ERROR
+SELECT name FROM nope
+
+error SEMANTIC_ERROR
+SELECT q.name FROM people p
+
+error SEMANTIC_ERROR
+SELECT * 
+
+error PARSE_ERROR
+SELEC name FROM people
+
+error PARSE_ERROR
+SELECT name FROM people WHERE
+
+error PARSE_ERROR
+SELECT 'unterminated FROM people
+
+error PARSE_ERROR
+SELECT 1; SELECT 2
+
+error PARSE_ERROR
+SELECT name FROM people LIMIT
+
+error INVALID_ARGUMENT
+SELECT id FROM people LIMIT -1
+
+error SEMANTIC_ERROR
+SELECT id FROM people ORDER BY 9
+
+error SEMANTIC_ERROR
+SELECT id FROM people LIMIT id

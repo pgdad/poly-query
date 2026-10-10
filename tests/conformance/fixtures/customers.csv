@@ -1,0 +1,6 @@
+customer_id,name,country,tier
+1,Alice,FI,gold
+2,Bob,SE,silver
+3,Carol,FI,
+4,Dave,NO,bronze
+5,Erin,DK,silver

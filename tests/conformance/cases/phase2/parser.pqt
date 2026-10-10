@@ -1,0 +1,122 @@
+# Lexer/parser edge cases and structured errors — grammar.md
+@phase 2
+@requires phase2 sql.functions ingest.csv
+
+load people fixtures/people.csv
+
+# keywords are case-insensitive; whitespace and comments anywhere
+query ordered
+sElEcT   id
+  -- comment between clauses
+  FrOm /* inline */ people
+  wHeRe id
+   <= 2 OrDeR bY id
+----
+id INT64
+[1]
+[2]
+
+# quoted identifiers may be keywords and contain spaces / quotes
+data q csv
+select,from,"a ""b"""
+1,2,3
+.
+
+query
+SELECT "select", "FROM", "a ""b""" FROM q
+----
+select INT64 | from INT64 | "a \"b\"" INT64
+[1, 2, 3]
+
+error PARSE_ERROR
+SELECT select FROM q
+
+# numeric literal forms
+query
+SELECT 1.e2 AS a, .5e1 AS b, 1E-2 AS c
+----
+a FLOAT64 | b FLOAT64 | c FLOAT64
+[100.0, 5.0, 0.01]
+
+# string literal with doubled quote and unicode
+query
+SELECT 'Ünï''code' AS s, '' AS e
+----
+s STRING | e STRING
+["Ünï'code", ""]
+
+error PARSE_ERROR
+SELECT 1 +
+
+error PARSE_ERROR
+SELECT (1 + 2
+
+error PARSE_ERROR
+SELECT 1 + 2)
+
+error PARSE_ERROR
+SELECT id FROM people WHERE id = = 1
+
+error PARSE_ERROR
+SELECT id, FROM people
+
+error PARSE_ERROR
+SELECT id FROM people ORDER id
+
+error PARSE_ERROR
+SELECT id FROM people GROUP id
+
+error PARSE_ERROR
+SELECT * FROM people /* unterminated
+
+error PARSE_ERROR
+SELECT @ FROM people
+
+error PARSE_ERROR
+SELECT "unterminated FROM people
+
+error PARSE_ERROR
+FROM people SELECT id
+
+error PARSE_ERROR
+SELECT CASE WHEN TRUE THEN 1
+
+error PARSE_ERROR
+SELECT CAST(1 AS) 
+
+error PARSE_ERROR
+SELECT id FROM people LIMIT 1 LIMIT 2
+
+error PARSE_ERROR
+SELECT id FROM people WHERE id BETWEEN 1
+
+error PARSE_ERROR
+SELECT id FROM people WHERE id IN ()
+
+error UNSUPPORTED
+SELECT id FROM people UNION SELECT id FROM people
+
+error PARSE_ERROR
+INSERT INTO people VALUES (1)
+
+# PARSE_ERROR should carry a position (line/column); only the code is required
+request
+{"op":"query","sql":"SELECT id\nFROM people\nWHERE id = = 1"}
+----
+match {"ok":false,"error":{"code":"PARSE_ERROR"}}
+
+# EXPLAIN statement returns a single STRING column named plan
+query
+EXPLAIN SELECT COUNT(*) FROM people WHERE id = 1
+----
+rowcount 1
+
+request
+{"op":"explain","sql":"SELECT name FROM people WHERE id = 1"}
+----
+ok
+
+request
+{"op":"explain","sql":"SELECT nope FROM people"}
+----
+error SEMANTIC_ERROR

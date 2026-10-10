@@ -1,0 +1,71 @@
+# Resource limits, result modes, output serialization, test functions
+@phase 1
+@requires phase1 sql.basic ingest.csv test.functions
+@engine-args --enable-test-functions
+
+load people fixtures/people.csv
+
+error RESOURCE_LIMIT options={"max_rows": 3}
+SELECT id FROM people
+
+query options={"max_rows": 8}
+SELECT id FROM people
+----
+rowcount 8
+
+query options={"max_rows": 0}
+SELECT id FROM people WHERE id > 100
+----
+id INT64
+
+request
+{"op":"query","sql":"SELECT id FROM people","options":{"result":"count"}}
+----
+match {"ok":true,"row_count":8,"columns":[{"name":"id","type":"INT64"}]}
+
+# unknown options are ignored
+query options={"some_future_option": 1}
+SELECT COUNT(*) AS n FROM people
+----
+n INT64
+[8]
+
+# id is echoed verbatim, any JSON type
+request
+{"op":"query","id":{"nested":[1,"x"]},"sql":"SELECT 1 AS one"}
+----
+match {"id":{"nested":[1,"x"]},"ok":true,"rows":[[1]]}
+
+request
+{"op":"query","id":"abc","sql":"SELECT nope"}
+----
+match {"id":"abc","ok":false,"error":{"code":"SEMANTIC_ERROR"}}
+
+# -0.0 is normalized; large and tiny floats round-trip
+query
+SELECT -0.0e0 AS z, 1.5e300 AS big, 2.5e-300 AS tiny, 0.1e0 AS tenth
+----
+z FLOAT64 | big FLOAT64 | tiny FLOAT64 | tenth FLOAT64
+[0.0, 1.5e300, 2.5e-300, 0.1]
+
+# strings with characters that require escaping
+query
+SELECT 'tab	quote" backslash\ end' AS s
+----
+s STRING
+["tab\tquote\" backslash\\ end"]
+
+# PQ_SLEEP (test function) and the sleep op
+query
+SELECT PQ_SLEEP(10) AS slept
+----
+slept INT64
+[10]
+
+request
+{"op":"sleep","ms":5}
+----
+ok
+
+error TIMEOUT options={"timeout_ms": 50}
+SELECT PQ_SLEEP(5000)

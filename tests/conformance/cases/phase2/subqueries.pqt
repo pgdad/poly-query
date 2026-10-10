@@ -1,0 +1,156 @@
+# Uncorrelated subqueries and derived tables — semantics.md §8
+@phase 2
+@requires phase2 sql.subquery sql.groupby sql.join sql.functions ingest.csv
+
+load people fixtures/people.csv
+load customers fixtures/customers.csv
+load orders fixtures/orders.csv schema=order_id:INT64;customer_id:INT64;amount:DECIMAL(10,2);status:STRING;ordered_at:TIMESTAMP
+load tx fixtures/gen/transactions.csv schemafile=fixtures/gen/transactions.schema.json
+
+# scalar subqueries
+query ordered oracle
+SELECT name, age FROM people WHERE age > (SELECT AVG(age) FROM people) ORDER BY name
+----
+name STRING | age INT64
+["Carol", 45]
+["Frank", 52]
+["heidi", 41]
+
+query
+SELECT (SELECT MAX(age) FROM people) AS oldest, (SELECT COUNT(*) FROM customers) + 1 AS c
+----
+oldest INT64 | c INT64
+[52, 6]
+
+query
+SELECT (SELECT age FROM people WHERE id = 999) AS none
+----
+none INT64
+[null]
+
+error SUBQUERY_CARDINALITY
+SELECT (SELECT age FROM people) AS many
+
+error SEMANTIC_ERROR
+SELECT (SELECT id, age FROM people WHERE id = 1) AS two_cols
+
+query ordered oracle
+SELECT id, age - (SELECT MIN(age) FROM people) AS above_min FROM people WHERE age IS NOT NULL ORDER BY id
+----
+id INT64 | above_min INT64
+[1, 6]
+[2, 0]
+[3, 17]
+[5, 0]
+[6, 24]
+[7, 6]
+[8, 13]
+
+# IN / NOT IN subqueries (with NULL semantics)
+query ordered oracle
+SELECT name FROM customers WHERE customer_id IN (SELECT customer_id FROM orders WHERE status = 'shipped') ORDER BY name
+----
+name STRING
+["Alice"]
+["Bob"]
+["Dave"]
+
+query ordered oracle
+SELECT name FROM customers WHERE customer_id NOT IN (SELECT customer_id FROM orders WHERE customer_id IS NOT NULL) ORDER BY name
+----
+name STRING
+["Erin"]
+
+# orders.customer_id contains a NULL: NOT IN yields no rows
+query
+SELECT name FROM customers WHERE customer_id NOT IN (SELECT customer_id FROM orders)
+----
+name STRING
+
+query
+SELECT 1 IN (SELECT customer_id FROM orders) AS a, 5 IN (SELECT customer_id FROM orders) AS b, 5 IN (SELECT customer_id FROM orders WHERE customer_id IS NOT NULL) AS c, NULL IN (SELECT customer_id FROM orders WHERE order_id < 0) AS d
+----
+a BOOLEAN | b BOOLEAN | c BOOLEAN | d BOOLEAN
+[true, null, false, false]
+
+error SEMANTIC_ERROR
+SELECT name FROM customers WHERE customer_id IN (SELECT customer_id, name FROM customers)
+
+error TYPE_ERROR
+SELECT name FROM customers WHERE customer_id IN (SELECT name FROM customers)
+
+# EXISTS
+query
+SELECT EXISTS (SELECT 1 FROM orders WHERE amount > 1000) AS a, EXISTS (SELECT 1 FROM orders WHERE amount > 100000) AS b, NOT EXISTS (SELECT * FROM people WHERE id < 0) AS c
+----
+a BOOLEAN | b BOOLEAN | c BOOLEAN
+[true, false, true]
+
+query ordered
+SELECT name FROM customers WHERE EXISTS (SELECT 1 FROM orders WHERE status = 'cancelled') AND customer_id < 3 ORDER BY name
+----
+name STRING
+["Alice"]
+["Bob"]
+
+# derived tables
+query ordered oracle
+SELECT t.city, t.n FROM (SELECT city, COUNT(*) AS n FROM people GROUP BY city) AS t WHERE t.n > 1 ORDER BY t.city
+----
+city STRING | n INT64
+["Helsinki", 3]
+["Tampere", 2]
+
+query ordered oracle
+SELECT big.order_id, c.name FROM (SELECT * FROM orders WHERE amount >= 250) big JOIN customers c ON c.customer_id = big.customer_id ORDER BY big.order_id
+----
+order_id INT64 | name STRING
+[101, "Alice"]
+[104, "Carol"]
+[107, "Bob"]
+[110, "Alice"]
+
+query oracle
+SELECT AVG(n) AS avg_orders FROM (SELECT customer_id, COUNT(*) AS n FROM tx GROUP BY customer_id) x
+----
+avg_orders FLOAT64
+[10.638297872340425]
+
+query ordered oracle
+SELECT * FROM (SELECT id, name FROM people ORDER BY id DESC LIMIT 3) AS last3 ORDER BY id
+----
+id INT64 | name STRING
+[6, "Frank"]
+[7, "Grace"]
+[8, "heidi"]
+
+# nested subqueries three levels deep
+query oracle
+SELECT COUNT(*) AS n FROM (SELECT * FROM (SELECT id, age FROM people WHERE age IS NOT NULL) a WHERE a.age > (SELECT MIN(age) FROM (SELECT age FROM people WHERE city = 'Helsinki') h)) b
+----
+n INT64
+[3]
+
+# derived table columns are named like output columns (_colN for expressions)
+query
+SELECT d._col1, d.x FROM (SELECT 1 + 1, 2 AS x) d
+----
+_col1 INT64 | x INT64
+[2, 2]
+
+error PARSE_ERROR
+SELECT * FROM (SELECT id FROM people)
+
+error SEMANTIC_ERROR
+SELECT t.nope FROM (SELECT id FROM people) t
+
+# subquery in HAVING and in the select list of a grouped query
+query ordered oracle
+SELECT city, COUNT(*) AS n FROM people GROUP BY city HAVING COUNT(*) >= (SELECT COUNT(*) FROM people WHERE city = 'Tampere') ORDER BY city
+----
+city STRING | n INT64
+["Helsinki", 3]
+["Tampere", 2]
+
+# correlated subqueries must not silently produce wrong results:
+# engines without sql.correlated_subquery answer UNSUPPORTED (tested in correlated.pqt).

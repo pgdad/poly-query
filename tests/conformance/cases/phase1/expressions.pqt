@@ -1,0 +1,253 @@
+# Expressions: literals, arithmetic, typing, null semantics, CAST (types.md)
+@phase 1
+@requires phase1 sql.basic ingest.csv
+
+# --- literal types
+query
+SELECT 1 AS i, 1.50 AS d, 0.05 AS d2, .5 AS d3, 1e3 AS f, 'x' AS s, TRUE AS b, DATE '2024-02-29' AS dt, TIMESTAMP '2024-02-29 13:14:15.5' AS ts
+----
+i INT64 | d DECIMAL(3,2) | d2 DECIMAL(2,2) | d3 DECIMAL(1,1) | f FLOAT64 | s STRING | b BOOLEAN | dt DATE | ts TIMESTAMP
+[1, "1.50", "0.05", "0.5", 1000.0, "x", true, "2024-02-29", "2024-02-29 13:14:15.500000"]
+
+query
+SELECT TIMESTAMP '2024-01-01T00:00:00' AS a, 00012.5 AS b, 3. AS c
+----
+a TIMESTAMP | b DECIMAL(3,1) | c DECIMAL(1,0)
+["2024-01-01 00:00:00", "12.5", "3"]
+
+query
+SELECT -9223372036854775808 AS lo, 9223372036854775807 AS hi
+----
+lo INT64 | hi INT64
+[-9223372036854775808, 9223372036854775807]
+
+error NUMERIC_OVERFLOW
+SELECT 9223372036854775808
+
+error CONVERSION_ERROR
+SELECT DATE '2023-02-29'
+
+error CONVERSION_ERROR
+SELECT TIMESTAMP '2023-01-01 25:00:00'
+
+query
+SELECT 'it''s' AS s
+----
+s STRING
+["it's"]
+
+# --- integer arithmetic
+query
+SELECT 7 / 2 AS a, -7 / 2 AS b, 7 % 3 AS c, -7 % 3 AS d, 7 % -3 AS e, 2 + 3 * 4 AS f, (2 + 3) * 4 AS g, - - 1 AS h, -2 * 3 AS i
+----
+a INT64 | b INT64 | c INT64 | d INT64 | e INT64 | f INT64 | g INT64 | h INT64 | i INT64
+[3, -3, 1, -1, 1, 14, 20, 1, -6]
+
+error DIVISION_BY_ZERO
+SELECT 1 / 0
+
+error DIVISION_BY_ZERO
+SELECT 1 % 0
+
+error NUMERIC_OVERFLOW
+SELECT 9223372036854775807 + 1
+
+error NUMERIC_OVERFLOW
+SELECT -9223372036854775808 - 1
+
+error NUMERIC_OVERFLOW
+SELECT 4611686018427387904 * 2
+
+error NUMERIC_OVERFLOW
+SELECT -9223372036854775808 / -1
+
+error NUMERIC_OVERFLOW
+SELECT -(-9223372036854775808)
+
+query
+SELECT -9223372036854775808 % -1 AS z
+----
+z INT64
+[0]
+
+# NULL propagates before division by zero is checked
+query
+SELECT NULL / 0 AS a, 1 + NULL AS b
+----
+a INT64 | b INT64
+[null, null]
+
+# --- decimal arithmetic
+query
+SELECT 1.25 + 2.5 AS a, 1.25 - 2.5 AS b, 1.25 * 2.5 AS c, 1.5 * 2 AS d, 2 - 0.75 AS e, 10.00 / 4 AS f
+----
+a DECIMAL(18,2) | b DECIMAL(18,2) | c DECIMAL(18,3) | d DECIMAL(18,1) | e DECIMAL(18,2) | f FLOAT64
+["3.75", "-1.25", "3.125", "3.0", "1.25", 2.5]
+
+query
+SELECT 0.1 + 0.2 = 0.3 AS exact, 0.10 = 0.1 AS scale_insensitive
+----
+exact BOOLEAN | scale_insensitive BOOLEAN
+[true, true]
+
+error NUMERIC_OVERFLOW
+SELECT 999999999999999999 * 10.0
+
+error NUMERIC_OVERFLOW
+SELECT 99999999999999999.9 + 0.1
+
+error DIVISION_BY_ZERO
+SELECT 1.5 / 0
+
+error TYPE_ERROR
+SELECT 1.5 % 2
+
+error TYPE_ERROR
+SELECT 0.000000001 * 0.0000000001
+
+# --- float arithmetic
+query
+SELECT 1e0 / 4 AS a, 1.5 + 1e0 AS b, 2 * 1e1 AS c
+----
+a FLOAT64 | b FLOAT64 | c FLOAT64
+[0.25, 2.5, 20.0]
+
+error DIVISION_BY_ZERO
+SELECT 1e0 / 0
+
+error DIVISION_BY_ZERO
+SELECT 0e0 / 0e0
+
+error NUMERIC_OVERFLOW
+SELECT 1e308 * 10
+
+error TYPE_ERROR
+SELECT 1e0 % 2
+
+# --- comparison & typing
+query
+SELECT 1 = 1.0 AS a, 1 < 1.5 AS b, 2 > 1e0 AS c, 'a' < 'b' AS d, 'B' < 'a' AS e, FALSE < TRUE AS f, DATE '2024-01-01' < TIMESTAMP '2024-01-01 00:00:01' AS g, DATE '2024-01-01' = TIMESTAMP '2024-01-01 00:00:00' AS h
+----
+a BOOLEAN | b BOOLEAN | c BOOLEAN | d BOOLEAN | e BOOLEAN | f BOOLEAN | g BOOLEAN | h BOOLEAN
+[true, true, true, true, true, true, true, true]
+
+error TYPE_ERROR
+SELECT 1 = '1'
+
+error TYPE_ERROR
+SELECT 'a' + 1
+
+error TYPE_ERROR
+SELECT TRUE + 1
+
+error TYPE_ERROR
+SELECT DATE '2024-01-01' + 1
+
+error TYPE_ERROR
+SELECT DATE '2024-01-01' = '2024-01-01'
+
+error TYPE_ERROR
+SELECT 1 AND TRUE
+
+error TYPE_ERROR
+SELECT NOT 'x'
+
+error PARSE_ERROR
+SELECT 1 = 1 = 1
+
+# --- three-valued logic
+query
+SELECT NULL AND FALSE AS a, NULL AND TRUE AS b, NULL OR TRUE AS c, NULL OR FALSE AS d, NOT NULL AS e, NULL = NULL AS f, NULL IS NULL AS g, 1 IS NOT NULL AS h
+----
+a BOOLEAN | b BOOLEAN | c BOOLEAN | d BOOLEAN | e BOOLEAN | f BOOLEAN | g BOOLEAN | h BOOLEAN
+[false, null, true, null, null, null, true, true]
+
+load people fixtures/people.csv
+
+query ordered
+SELECT id, active AND age > 30 AS x FROM people ORDER BY id
+----
+id INT64 | x BOOLEAN
+[1, true]
+[2, false]
+[3, true]
+[4, null]
+[5, false]
+[6, true]
+[7, null]
+[8, false]
+
+query ordered
+SELECT id FROM people WHERE NOT (age > 30) ORDER BY id
+----
+id INT64
+[2]
+[5]
+
+query ordered
+SELECT id, age * 2 + 1 AS x, score * 2 AS y, score + age AS z FROM people WHERE id <= 4 ORDER BY id
+----
+id INT64 | x INT64 | y FLOAT64 | z FLOAT64
+[1, 69, 177.0, 122.5]
+[2, 57, 144.5, 100.25]
+[3, 91, 182.0, 136.0]
+[4, null, 131.0, null]
+
+# a WHERE condition must be BOOLEAN
+error TYPE_ERROR
+SELECT id FROM people WHERE age
+
+error TYPE_ERROR
+SELECT id FROM people WHERE name = 1
+
+# --- CAST
+query
+SELECT CAST(TRUE AS INT64) AS a, CAST(0 AS BOOLEAN) AS b, CAST(42 AS STRING) AS c, CAST(-3.75 AS INT64) AS d, CAST(3.75 AS INT64) AS e, CAST(2 AS DECIMAL(5,2)) AS f, CAST(2.345 AS DECIMAL(5,2)) AS g, CAST(-2.345 AS DECIMAL(5,2)) AS h
+----
+a INT64 | b BOOLEAN | c STRING | d INT64 | e INT64 | f DECIMAL(5,2) | g DECIMAL(5,2) | h DECIMAL(5,2)
+[1, false, "42", -3, 3, "2.00", "2.35", "-2.35"]
+
+query
+SELECT CAST(' 12 ' AS INT64) AS a, CAST('-1.5e2' AS FLOAT64) AS b, CAST('  TRUE ' AS BOOLEAN) AS c, CAST('2024-03-01' AS DATE) AS d, CAST('2024-03-01 10:00:00' AS TIMESTAMP) AS e, CAST('1.005' AS DECIMAL(4,2)) AS f, CAST(DATE '2024-03-01' AS TIMESTAMP) AS g, CAST(TIMESTAMP '2024-03-01 23:59:59' AS DATE) AS h
+----
+a INT64 | b FLOAT64 | c BOOLEAN | d DATE | e TIMESTAMP | f DECIMAL(4,2) | g TIMESTAMP | h DATE
+[12, -150.0, true, "2024-03-01", "2024-03-01 10:00:00", "1.01", "2024-03-01 00:00:00", "2024-03-01"]
+
+query
+SELECT CAST(1.50 AS STRING) AS a, CAST(-0.05 AS STRING) AS b, CAST(DATE '0099-01-02' AS STRING) AS c, CAST(TIMESTAMP '2024-01-01 00:00:00.25' AS STRING) AS d, CAST(FALSE AS STRING) AS e, CAST(NULL AS INT64) AS f, CAST(7.9e0 AS INT64) AS g, CAST(2.5e0 AS DECIMAL(3,0)) AS h
+----
+a STRING | b STRING | c STRING | d STRING | e STRING | f INT64 | g INT64 | h DECIMAL(3,0)
+["1.50", "-0.05", "0099-01-02", "2024-01-01 00:00:00.250000", "false", null, 7, "3"]
+
+query
+SELECT CAST(1 AS INTEGER) AS a, CAST(1 AS BIGINT) AS b, CAST(1 AS DOUBLE) AS c, CAST(1 AS VARCHAR) AS d, CAST(1 AS NUMERIC(4,1)) AS e, CAST(1 AS DECIMAL) AS f
+----
+a INT64 | b INT64 | c FLOAT64 | d STRING | e DECIMAL(4,1) | f DECIMAL(18,0)
+[1, 1, 1.0, "1", "1.0", "1"]
+
+error CONVERSION_ERROR
+SELECT CAST('abc' AS INT64)
+
+error CONVERSION_ERROR
+SELECT CAST('2024-13-01' AS DATE)
+
+error CONVERSION_ERROR
+SELECT CAST('yes' AS BOOLEAN)
+
+error NUMERIC_OVERFLOW
+SELECT CAST(1e19 AS INT64)
+
+error NUMERIC_OVERFLOW
+SELECT CAST(1000 AS DECIMAL(3,0))
+
+error NUMERIC_OVERFLOW
+SELECT CAST('9223372036854775808' AS INT64)
+
+error TYPE_ERROR
+SELECT CAST(DATE '2024-01-01' AS INT64)
+
+error TYPE_ERROR
+SELECT CAST(1 AS DATE)
+
+error SEMANTIC_ERROR
+SELECT CAST(1 AS WIDGET)

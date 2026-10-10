@@ -1,0 +1,134 @@
+# Whole-table aggregates (no GROUP BY) — functions.md §2
+@phase 1
+@requires phase1 sql.basic ingest.csv
+
+load people fixtures/people.csv
+load ledger fixtures/ledger.csv schema=id:INT64;account:STRING;amount:DECIMAL(10,2);fee:DECIMAL(4,2)
+load numbers fixtures/numbers.csv
+
+query oracle
+SELECT COUNT(*) AS n, COUNT(age) AS n_age, COUNT(city) AS n_city, SUM(age) AS s, MIN(age) AS lo, MAX(age) AS hi, AVG(age) AS av FROM people
+----
+n INT64 | n_age INT64 | n_city INT64 | s INT64 | lo INT64 | hi INT64 | av FLOAT64
+[8, 7, 7, 262, 28, 52, 37.42857142857143]
+
+query oracle
+SELECT SUM(score) AS s, MIN(score) AS lo, MAX(score) AS hi, AVG(score) AS av FROM people
+----
+s FLOAT64 | lo FLOAT64 | hi FLOAT64 | av FLOAT64
+[550.5, 58.0, 95.5, 78.64285714285714]
+
+query oracle
+SELECT MIN(name) AS a, MAX(name) AS b, MIN(joined) AS c, MAX(joined) AS d FROM people
+----
+a STRING | b STRING | c DATE | d DATE
+["Alice", "heidi", "2018-02-28", "2023-05-05"]
+
+query
+SELECT MIN(active) AS a, MAX(active) AS b FROM people
+----
+a BOOLEAN | b BOOLEAN
+[false, true]
+
+query oracle
+SELECT COUNT(*) AS n, SUM(age) AS s, AVG(age) AS a, MIN(age) AS m FROM people WHERE age > 100
+----
+n INT64 | s INT64 | a FLOAT64 | m INT64
+[0, null, null, null]
+
+query oracle
+SELECT COUNT(*) AS n, COUNT(score) AS c, SUM(score) AS s FROM people WHERE score IS NULL
+----
+n INT64 | c INT64 | s FLOAT64
+[1, 0, null]
+
+# aggregate over expressions; expressions over aggregates
+query oracle
+SELECT SUM(age * 2) AS a, MAX(age) - MIN(age) AS spread, COUNT(*) + 1 AS c FROM people
+----
+a INT64 | spread INT64 | c INT64
+[524, 24, 9]
+
+# unaliased aggregates are _colN
+query
+SELECT COUNT(*), MAX(id) FROM people
+----
+_col1 INT64 | _col2 INT64
+[8, 8]
+
+# decimal aggregates are exact; SUM keeps the scale, AVG is FLOAT64
+query
+SELECT SUM(amount) AS s, MIN(amount) AS lo, MAX(amount) AS hi, AVG(amount) AS av, SUM(fee) AS f, COUNT(amount) AS n FROM ledger
+----
+s DECIMAL(18,2) | lo DECIMAL(10,2) | hi DECIMAL(10,2) | av FLOAT64 | f DECIMAL(18,2) | n INT64
+["1000072.19", "-40.10", "999999.99", 200014.438, "2.60", 5]
+
+query
+SELECT SUM(amount) AS s FROM ledger WHERE account = 'A'
+----
+s DECIMAL(18,2)
+["72.15"]
+
+# INT64 SUM overflow is an error; MIN/MAX of extremes are fine
+error NUMERIC_OVERFLOW
+SELECT SUM(i) FROM numbers WHERE i > 0 OR k = 4
+
+query
+SELECT MIN(i) AS lo, MAX(i) AS hi, SUM(i) AS s FROM numbers
+----
+lo INT64 | hi INT64 | s INT64
+[-9223372036854775808, 9223372036854775807, -1]
+
+# float aggregates
+query
+SELECT SUM(f) AS s, MIN(f) AS lo, MAX(f) AS hi FROM numbers
+----
+s FLOAT64 | lo FLOAT64 | hi FLOAT64
+[10000000001.0025, -0.5, 10000000000.0]
+
+# aggregates are not allowed in WHERE
+error SEMANTIC_ERROR
+SELECT id FROM people WHERE COUNT(*) > 1
+
+# nested aggregates are invalid
+error SEMANTIC_ERROR
+SELECT SUM(COUNT(*)) FROM people
+
+# mixing aggregates and bare columns without GROUP BY
+error SEMANTIC_ERROR
+SELECT name, COUNT(*) FROM people
+
+error TYPE_ERROR
+SELECT SUM(name) FROM people
+
+error TYPE_ERROR
+SELECT AVG(joined) FROM people
+
+error PARSE_ERROR
+SELECT COUNT(*, id) FROM people
+
+error SEMANTIC_ERROR
+SELECT SUM(*) FROM people
+
+# aggregate over an empty table always yields one row
+data empty csv schema=x:INT64
+x
+.
+
+query
+SELECT COUNT(*) AS n, COUNT(x) AS c, SUM(x) AS s, MIN(x) AS m, AVG(x) AS a FROM empty
+----
+n INT64 | c INT64 | s INT64 | m INT64 | a FLOAT64
+[0, 0, null, null, null]
+
+# ORDER BY / LIMIT on the single aggregate row
+query ordered
+SELECT COUNT(*) AS n FROM people ORDER BY n LIMIT 1 OFFSET 0
+----
+n INT64
+[8]
+
+query ordered
+SELECT COUNT(*) AS n FROM people LIMIT 1 OFFSET 1
+----
+n INT64

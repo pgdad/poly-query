@@ -1,0 +1,87 @@
+# Common table expressions — semantics.md §9
+@phase 2
+@requires phase2 sql.cte sql.subquery sql.groupby sql.join ingest.csv
+
+load people fixtures/people.csv
+load customers fixtures/customers.csv
+load orders fixtures/orders.csv schema=order_id:INT64;customer_id:INT64;amount:DECIMAL(10,2);status:STRING;ordered_at:TIMESTAMP
+
+query ordered oracle
+WITH helsinki AS (SELECT * FROM people WHERE city = 'Helsinki')
+SELECT name FROM helsinki ORDER BY name
+----
+name STRING
+["Alice"]
+["Carol"]
+["Grace"]
+
+query ordered oracle
+WITH totals AS (SELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id),
+     ranked AS (SELECT customer_id, total FROM totals WHERE total > 100)
+SELECT c.name, r.total FROM ranked r JOIN customers c ON c.customer_id = r.customer_id ORDER BY r.total DESC
+----
+name STRING | total DECIMAL(18,2)
+["Carol", "1200.00"]
+["Alice", "765.50"]
+["Bob", "400.09"]
+
+# column list renames
+query ordered
+WITH t(a, b) AS (SELECT id, name FROM people WHERE id <= 2)
+SELECT b, a FROM t ORDER BY a
+----
+b STRING | a INT64
+["Alice", 1]
+["Bob", 2]
+
+# a CTE may be referenced multiple times and shadows a catalog table
+query ordered
+WITH people AS (SELECT id, age FROM people WHERE age IS NOT NULL)
+SELECT a.id AS x, b.id AS y FROM people a JOIN people b ON a.age = b.age AND a.id < b.id ORDER BY x
+----
+x INT64 | y INT64
+[1, 7]
+[2, 5]
+
+# CTE inside a subquery, and CTE used in a scalar subquery
+query ordered oracle
+SELECT name FROM people WHERE age = (WITH m AS (SELECT MAX(age) AS a FROM people) SELECT a FROM m)
+----
+name STRING
+["Frank"]
+
+query ordered oracle
+WITH s AS (SELECT status, COUNT(*) AS n FROM orders GROUP BY status)
+SELECT status FROM s WHERE n = (SELECT MAX(n) FROM s)
+----
+status STRING
+["shipped"]
+
+# later CTEs see earlier ones
+query
+WITH a AS (SELECT 1 AS v), b AS (SELECT v + 1 AS v FROM a), c AS (SELECT v * 10 AS v FROM b)
+SELECT v FROM c
+----
+v INT64
+[20]
+
+# ORDER BY / LIMIT inside a CTE
+query ordered
+WITH top2 AS (SELECT name, age FROM people WHERE age IS NOT NULL ORDER BY age DESC, name LIMIT 2)
+SELECT name FROM top2 ORDER BY name
+----
+name STRING
+["Carol"]
+["Frank"]
+
+error SEMANTIC_ERROR
+WITH a AS (SELECT * FROM a) SELECT * FROM a
+
+error SEMANTIC_ERROR
+WITH a AS (SELECT * FROM b), b AS (SELECT 1 AS x) SELECT * FROM a
+
+error SEMANTIC_ERROR
+WITH t(a, b) AS (SELECT id FROM people) SELECT * FROM t
+
+error SEMANTIC_ERROR
+WITH a AS (SELECT 1 AS x), a AS (SELECT 2 AS x) SELECT * FROM a

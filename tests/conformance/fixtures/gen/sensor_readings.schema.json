@@ -1,0 +1,1 @@
+[{"name": "sensor_id", "type": "INT64"}, {"name": "ts", "type": "TIMESTAMP"}, {"name": "temperature", "type": "FLOAT64"}, {"name": "humidity", "type": "FLOAT64"}, {"name": "pressure", "type": "FLOAT64"}, {"name": "status", "type": "STRING"}]

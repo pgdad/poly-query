@@ -1,0 +1,17 @@
+# generated data & build outputs
+/datasets/generated/
+/benchmarks/runs/
+/results/**/raw-tmp/
+**/target/
+**/build/
+**/out/
+**/.cpcache/
+**/__pycache__/
+*.pyc
+*.o
+*.so
+*.dylib
+*.fasl
+.venv/
+/native-kernels/build/
+/.pq-scratch/

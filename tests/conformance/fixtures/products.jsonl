@@ -1,0 +1,6 @@
+{"sku":"A-1","name":"Widget","price":9.99,"stock":120,"released":"2023-01-01"}
+{"sku":"A-2","name":"Gadget","price":24.5,"stock":0,"released":"2023-06-15"}
+
+{"sku":"B-1","name":"Doohickey","price":3,"stock":55}
+{"sku":"B-2","name":"Thingamajig","price":null,"stock":7,"released":"2024-02-29"}
+{"sku":"C-1","name":"Ünïcödé","price":100.0,"stock":1,"released":"2022-12-31"}

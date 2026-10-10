@@ -1,0 +1,138 @@
+# Reading PQCF files written by the independent reference writer — interoperability
+@phase 3
+@requires phase3 storage.pqcf sql.groupby
+
+open tp fixtures/pqcf/types_plain.pqcf
+open ta fixtures/pqcf/types_auto.pqcf
+open td fixtures/pqcf/types_dict.pqcf
+open tr fixtures/pqcf/types_rle.pqcf mmap=true
+
+request
+{"op":"schema","table":"ta"}
+----
+match {"ok":true,"row_count":2000,"columns":[{"name":"id","type":"INT64"},{"name":"flag","type":"BOOLEAN"},{"name":"qty","type":"INT64"},{"name":"price","type":"DECIMAL(10,2)"},{"name":"ratio","type":"FLOAT64"},{"name":"label","type":"STRING"},{"name":"day","type":"DATE"},{"name":"at","type":"TIMESTAMP"}],"indexes":[{"name":"types_id_idx","column":"id","kind":"BTREE"},{"name":"types_label_idx","column":"label","kind":"HASH"}]}
+
+query ordered oracle
+SELECT label, COUNT(*) AS n, COUNT(flag) AS flags, SUM(qty) AS q, SUM(price) AS p, MIN(day) AS d0, MAX(at) AS t1, SUM(ratio) AS r FROM tp GROUP BY label ORDER BY label
+----
+label STRING | n INT64 | flags INT64 | q INT64 | p DECIMAL(18,2) | d0 DATE | t1 TIMESTAMP | r FLOAT64
+[null, 333, 303, 2910, "13002.99", "2020-01-04", "2024-03-24 03:33:15.000995", 1857.125]
+["", 333, 302, 2929, "13286.21", "2020-01-06", "2024-03-24 05:33:17.000997", 1878.625]
+["blue", 334, 304, 2933, "13141.80", "2020-01-03", "2024-03-24 08:33:20", 1865.75]
+["green", 334, 304, 2929, "13282.01", "2020-01-02", "2024-03-24 07:33:19.000999", 1878.875]
+["red", 333, 303, 2932, "13142.22", "2020-01-01", "2024-03-24 06:33:18.000998", 1879.875]
+["ünïcödé", 333, 303, 2932, "13144.60", "2020-01-05", "2024-03-24 04:33:16.000996", 1877.375]
+
+query ordered oracle
+SELECT label, COUNT(*) AS n, COUNT(flag) AS flags, SUM(qty) AS q, SUM(price) AS p, MIN(day) AS d0, MAX(at) AS t1, SUM(ratio) AS r FROM ta GROUP BY label ORDER BY label
+----
+label STRING | n INT64 | flags INT64 | q INT64 | p DECIMAL(18,2) | d0 DATE | t1 TIMESTAMP | r FLOAT64
+[null, 333, 303, 2910, "13002.99", "2020-01-04", "2024-03-24 03:33:15.000995", 1857.125]
+["", 333, 302, 2929, "13286.21", "2020-01-06", "2024-03-24 05:33:17.000997", 1878.625]
+["blue", 334, 304, 2933, "13141.80", "2020-01-03", "2024-03-24 08:33:20", 1865.75]
+["green", 334, 304, 2929, "13282.01", "2020-01-02", "2024-03-24 07:33:19.000999", 1878.875]
+["red", 333, 303, 2932, "13142.22", "2020-01-01", "2024-03-24 06:33:18.000998", 1879.875]
+["ünïcödé", 333, 303, 2932, "13144.60", "2020-01-05", "2024-03-24 04:33:16.000996", 1877.375]
+
+query ordered oracle
+SELECT label, COUNT(*) AS n, COUNT(flag) AS flags, SUM(qty) AS q, SUM(price) AS p, MIN(day) AS d0, MAX(at) AS t1, SUM(ratio) AS r FROM td GROUP BY label ORDER BY label
+----
+label STRING | n INT64 | flags INT64 | q INT64 | p DECIMAL(18,2) | d0 DATE | t1 TIMESTAMP | r FLOAT64
+[null, 333, 303, 2910, "13002.99", "2020-01-04", "2024-03-24 03:33:15.000995", 1857.125]
+["", 333, 302, 2929, "13286.21", "2020-01-06", "2024-03-24 05:33:17.000997", 1878.625]
+["blue", 334, 304, 2933, "13141.80", "2020-01-03", "2024-03-24 08:33:20", 1865.75]
+["green", 334, 304, 2929, "13282.01", "2020-01-02", "2024-03-24 07:33:19.000999", 1878.875]
+["red", 333, 303, 2932, "13142.22", "2020-01-01", "2024-03-24 06:33:18.000998", 1879.875]
+["ünïcödé", 333, 303, 2932, "13144.60", "2020-01-05", "2024-03-24 04:33:16.000996", 1877.375]
+
+query ordered oracle
+SELECT label, COUNT(*) AS n, COUNT(flag) AS flags, SUM(qty) AS q, SUM(price) AS p, MIN(day) AS d0, MAX(at) AS t1, SUM(ratio) AS r FROM tr GROUP BY label ORDER BY label
+----
+label STRING | n INT64 | flags INT64 | q INT64 | p DECIMAL(18,2) | d0 DATE | t1 TIMESTAMP | r FLOAT64
+[null, 333, 303, 2910, "13002.99", "2020-01-04", "2024-03-24 03:33:15.000995", 1857.125]
+["", 333, 302, 2929, "13286.21", "2020-01-06", "2024-03-24 05:33:17.000997", 1878.625]
+["blue", 334, 304, 2933, "13141.80", "2020-01-03", "2024-03-24 08:33:20", 1865.75]
+["green", 334, 304, 2929, "13282.01", "2020-01-02", "2024-03-24 07:33:19.000999", 1878.875]
+["red", 333, 303, 2932, "13142.22", "2020-01-01", "2024-03-24 06:33:18.000998", 1879.875]
+["ünïcödé", 333, 303, 2932, "13144.60", "2020-01-05", "2024-03-24 04:33:16.000996", 1877.375]
+
+query ordered oracle
+SELECT * FROM ta WHERE id IN (1, 2, 3, 11, 13, 17, 19, 23, 29, 30, 299, 300, 301, 1999, 2000) ORDER BY id
+----
+id INT64 | flag BOOLEAN | qty INT64 | price DECIMAL(10,2) | ratio FLOAT64 | label STRING | day DATE | at TIMESTAMP
+[1, false, 0, "0.07", 0.125, "green", "2020-01-02", "2024-01-01 01:00:01.000001"]
+[2, false, 0, "0.14", 0.25, "blue", "2020-01-03", "2024-01-01 02:00:02.000002"]
+[3, true, 0, "0.21", 0.375, null, "2020-01-04", "2024-01-01 03:00:03.000003"]
+[11, null, 0, "0.77", 1.375, "", "2020-01-12", "2024-01-01 11:00:11.000011"]
+[13, false, null, "0.91", 1.625, "green", "2020-01-14", "2024-01-01 13:00:13.000013"]
+[17, false, 0, null, 2.125, "", "2020-01-18", "2024-01-01 17:00:17.000017"]
+[19, false, 0, "1.33", null, "green", "2020-01-20", "2024-01-01 19:00:19.000019"]
+[23, false, 0, "1.61", 2.875, "", null, "2024-01-01 23:00:23.000023"]
+[29, false, 0, "2.03", 3.625, "", "2020-01-30", null]
+[30, true, 0, "-2.10", 3.75, "red", "2020-01-31", "2024-01-02 06:00:30.000030"]
+[299, false, null, "20.93", 1.0, "", null, "2024-01-13 11:04:59.000299"]
+[300, true, 3, "-21.00", 1.125, "red", "2020-10-27", "2024-01-13 12:05:00.000300"]
+[301, false, 3, "21.07", 1.25, "green", "2020-10-28", "2024-01-13 13:05:01.000301"]
+[1999, false, 19, "139.93", 7.375, "green", "2020-07-18", "2024-03-24 07:33:19.000999"]
+[2000, false, 20, "-140.00", 7.5, "blue", "2020-07-19", "2024-03-24 08:33:20"]
+
+# index metadata in the file is honored: the index can be dropped
+statement ok
+DROP INDEX types_id_idx
+
+open people fixtures/pqcf/people.pqcf
+
+query ordered oracle
+SELECT * FROM people ORDER BY id
+----
+id INT64 | name STRING | age INT64 | city STRING | score FLOAT64 | active BOOLEAN | joined DATE
+[1, "Alice", 34, "Helsinki", 88.5, true, "2020-01-15"]
+[2, "Bob", 28, "Tampere", 72.25, false, "2021-03-01"]
+[3, "Carol", 45, "Helsinki", 91.0, true, "2019-07-30"]
+[4, "Dave", null, "Oulu", 65.5, true, "2022-11-11"]
+[5, "Eve", 28, null, 79.75, false, null]
+[6, "Frank", 52, "Tampere", null, true, "2018-02-28"]
+[7, "Grace", 34, "Helsinki", 95.5, null, "2020-01-15"]
+[8, "heidi", 41, "Espoo", 58.0, false, "2023-05-05"]
+
+open empty fixtures/pqcf/empty.pqcf
+
+query
+SELECT COUNT(*) AS n, MAX(a) AS m FROM empty
+----
+n INT64 | m INT64
+[0, null]
+
+# unknown metadata keys are ignored
+open fc fixtures/pqcf/forward_compat.pqcf
+
+query ordered
+SELECT a FROM fc ORDER BY a
+----
+a INT64
+[1]
+[2]
+
+# corrupted and unsupported files
+corrupt c1 fixtures/pqcf/corrupt/bad_header_magic.pqcf STORAGE_CORRUPT
+corrupt c2 fixtures/pqcf/corrupt/bad_trailer_magic.pqcf STORAGE_CORRUPT
+corrupt c3 fixtures/pqcf/corrupt/bad_type.pqcf STORAGE_CORRUPT
+corrupt c4 fixtures/pqcf/corrupt/chunk_bitflip.pqcf STORAGE_CORRUPT
+corrupt c5 fixtures/pqcf/corrupt/chunk_out_of_bounds.pqcf STORAGE_CORRUPT
+corrupt c6 fixtures/pqcf/corrupt/empty_file.pqcf STORAGE_CORRUPT
+corrupt c7 fixtures/pqcf/corrupt/flags.pqcf STORAGE_VERSION_UNSUPPORTED
+corrupt c8 fixtures/pqcf/corrupt/invalid_utf8.pqcf STORAGE_CORRUPT
+corrupt c9 fixtures/pqcf/corrupt/meta_bitflip.pqcf STORAGE_CORRUPT
+corrupt c10 fixtures/pqcf/corrupt/missing_chunk.pqcf STORAGE_CORRUPT
+corrupt c11 fixtures/pqcf/corrupt/not_json_meta.pqcf STORAGE_CORRUPT
+corrupt c12 fixtures/pqcf/corrupt/row_count_mismatch.pqcf STORAGE_CORRUPT
+corrupt c13 fixtures/pqcf/corrupt/truncated_half.pqcf STORAGE_CORRUPT
+corrupt c14 fixtures/pqcf/corrupt/truncated_tail.pqcf STORAGE_CORRUPT
+corrupt c15 fixtures/pqcf/corrupt/unknown_encoding.pqcf STORAGE_VERSION_UNSUPPORTED
+corrupt c16 fixtures/pqcf/corrupt/version2.pqcf STORAGE_VERSION_UNSUPPORTED
+
+# failed opens leave no table behind
+request
+{"op":"schema","table":"c1"}
+----
+error NOT_FOUND

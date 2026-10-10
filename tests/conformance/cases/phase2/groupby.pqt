@@ -1,0 +1,301 @@
+# GROUP BY, HAVING, DISTINCT, COUNT(DISTINCT) — semantics.md §5, §10
+@phase 2
+@requires phase2 sql.groupby ingest.csv
+
+load people fixtures/people.csv
+load tx fixtures/gen/transactions.csv schemafile=fixtures/gen/transactions.schema.json
+load cust fixtures/gen/customers.csv schemafile=fixtures/gen/customers.schema.json
+
+query ordered oracle
+SELECT city, COUNT(*) AS n, AVG(score) AS avg_score FROM people GROUP BY city ORDER BY city
+----
+city STRING | n INT64 | avg_score FLOAT64
+[null, 1, 79.75]
+["Espoo", 1, 58.0]
+["Helsinki", 3, 91.66666666666667]
+["Oulu", 1, 65.5]
+["Tampere", 2, 72.25]
+
+# NULL keys form one group
+query oracle
+SELECT age, COUNT(*) AS n FROM people GROUP BY age
+----
+age INT64 | n INT64
+[null, 1]
+[28, 2]
+[34, 2]
+[41, 1]
+[45, 1]
+[52, 1]
+
+query ordered oracle
+SELECT city, active, COUNT(*) AS n FROM people GROUP BY city, active ORDER BY city, active
+----
+city STRING | active BOOLEAN | n INT64
+[null, false, 1]
+["Espoo", false, 1]
+["Helsinki", null, 1]
+["Helsinki", true, 2]
+["Oulu", true, 1]
+["Tampere", false, 1]
+["Tampere", true, 1]
+
+query ordered oracle
+SELECT city, COUNT(*) AS n FROM people GROUP BY city HAVING COUNT(*) > 1 ORDER BY n DESC, city
+----
+city STRING | n INT64
+["Helsinki", 3]
+["Tampere", 2]
+
+# HAVING may use aggregates not in the select list
+query ordered oracle
+SELECT city FROM people GROUP BY city HAVING MAX(age) >= 45 ORDER BY city
+----
+city STRING
+["Helsinki"]
+["Tampere"]
+
+# GROUP BY alias, ordinal, and expression; expression over grouped expression
+query ordered oracle
+SELECT age / 10 AS decade, COUNT(*) AS n FROM people WHERE age IS NOT NULL GROUP BY decade ORDER BY decade
+----
+decade INT64 | n INT64
+[2, 2]
+[3, 2]
+[4, 2]
+[5, 1]
+
+query ordered oracle
+SELECT age / 10 AS decade, COUNT(*) AS n FROM people WHERE age IS NOT NULL GROUP BY 1 ORDER BY 1 DESC
+----
+decade INT64 | n INT64
+[5, 1]
+[4, 2]
+[3, 2]
+[2, 2]
+
+query ordered oracle
+SELECT (age / 10) * 10 AS decade_start, MIN(name) AS first_name FROM people WHERE age IS NOT NULL GROUP BY age / 10 ORDER BY decade_start
+----
+decade_start INT64 | first_name STRING
+[20, "Bob"]
+[30, "Alice"]
+[40, "Carol"]
+[50, "Frank"]
+
+# GROUP BY a column not selected
+query ordered oracle
+SELECT COUNT(*) AS n FROM people GROUP BY city ORDER BY n DESC, 1
+----
+n INT64
+[3]
+[2]
+[1]
+[1]
+[1]
+
+# ORDER BY an aggregate not in the select list
+query ordered oracle
+SELECT city FROM people WHERE city IS NOT NULL GROUP BY city ORDER BY SUM(score) DESC, city
+----
+city STRING
+["Helsinki"]
+["Tampere"]
+["Oulu"]
+["Espoo"]
+
+# HAVING without GROUP BY: one group
+query oracle
+SELECT COUNT(*) AS n FROM people HAVING COUNT(*) > 5
+----
+n INT64
+[8]
+
+query oracle
+SELECT COUNT(*) AS n FROM people HAVING COUNT(*) > 50
+----
+n INT64
+
+# GROUP BY on empty input yields no rows
+query oracle
+SELECT city, COUNT(*) AS n FROM people WHERE id > 100 GROUP BY city
+----
+city STRING | n INT64
+
+# DISTINCT
+query ordered oracle
+SELECT DISTINCT city FROM people ORDER BY city
+----
+city STRING
+[null]
+["Espoo"]
+["Helsinki"]
+["Oulu"]
+["Tampere"]
+
+query ordered oracle
+SELECT DISTINCT age, active FROM people ORDER BY age, active
+----
+age INT64 | active BOOLEAN
+[null, true]
+[28, false]
+[34, null]
+[34, true]
+[41, false]
+[45, true]
+[52, true]
+
+query oracle
+SELECT ALL age FROM people WHERE age = 28
+----
+age INT64
+[28]
+[28]
+
+query ordered oracle
+SELECT COUNT(DISTINCT city) AS cities, COUNT(DISTINCT age) AS ages, COUNT(city) AS c FROM people
+----
+cities INT64 | ages INT64 | c INT64
+[4, 5, 7]
+
+query ordered oracle
+SELECT active, COUNT(DISTINCT age) AS ages, SUM(DISTINCT age) AS sd FROM people GROUP BY active ORDER BY active
+----
+active BOOLEAN | ages INT64 | sd INT64
+[null, 1, 34]
+[false, 2, 69]
+[true, 3, 131]
+
+query ordered
+SELECT AVG(DISTINCT age) AS a FROM people
+----
+a FLOAT64
+[40.0]
+
+# DISTINCT with ORDER BY on a non-selected expression is invalid
+error SEMANTIC_ERROR
+SELECT DISTINCT city FROM people ORDER BY age
+
+# grouping violations
+error SEMANTIC_ERROR
+SELECT name, COUNT(*) FROM people GROUP BY city
+
+error SEMANTIC_ERROR
+SELECT city, age FROM people GROUP BY city
+
+error SEMANTIC_ERROR
+SELECT age / 10 AS d FROM people GROUP BY age + 1
+
+error SEMANTIC_ERROR
+SELECT city FROM people GROUP BY city HAVING age > 3
+
+error SEMANTIC_ERROR
+SELECT city FROM people GROUP BY 5
+
+error SEMANTIC_ERROR
+SELECT COUNT(DISTINCT city, age) FROM people
+
+query ordered
+SELECT age + 0 AS a FROM people WHERE age IS NOT NULL GROUP BY age ORDER BY a
+----
+a INT64
+[28]
+[34]
+[41]
+[45]
+[52]
+
+# --- larger generated data (oracle-derived)
+query ordered oracle
+SELECT currency, COUNT(*) AS n, SUM(amount) AS total, MIN(amount) AS lo, MAX(amount) AS hi FROM tx GROUP BY currency ORDER BY currency
+----
+currency STRING | n INT64 | total DECIMAL(18,2) | lo DECIMAL(12,2) | hi DECIMAL(12,2)
+["EUR", 855, "4946296.70", "1.19", "981513.68"]
+["GBP", 291, "2725881.11", "1.32", "915024.28"]
+["JPY", 176, "1547375.93", "2.71", "812969.73"]
+["SEK", 206, "2149257.77", "1.30", "877758.05"]
+["USD", 472, "3112974.69", "1.62", "992991.96"]
+
+query ordered oracle
+SELECT category, status, COUNT(*) AS n FROM tx GROUP BY category, status HAVING COUNT(*) >= 30 ORDER BY n DESC, category, status
+----
+category STRING | status STRING | n INT64
+["groceries", "refunded", 146]
+["groceries", "pending", 138]
+["groceries", "declined", 133]
+["groceries", "approved", 125]
+["electronics", "approved", 77]
+["electronics", "pending", 68]
+["electronics", "refunded", 68]
+["electronics", "declined", 62]
+["travel", "declined", 54]
+["travel", "approved", 53]
+["travel", "refunded", 52]
+["travel", "pending", 45]
+["restaurants", "approved", 43]
+["restaurants", "refunded", 38]
+["fuel", "declined", 34]
+["restaurants", "declined", 33]
+["fuel", "pending", 32]
+["restaurants", "pending", 31]
+
+query ordered oracle
+SELECT customer_id, COUNT(*) AS n FROM tx GROUP BY customer_id ORDER BY n DESC, customer_id LIMIT 10
+----
+customer_id INT64 | n INT64
+[1, 324]
+[2, 166]
+[3, 124]
+[4, 91]
+[5, 75]
+[6, 56]
+[7, 55]
+[9, 46]
+[8, 44]
+[10, 39]
+
+query ordered oracle
+SELECT bucket % 7 AS b, COUNT(DISTINCT customer_id) AS customers, AVG(amount) AS avg_amount FROM tx GROUP BY bucket % 7 ORDER BY b
+----
+b INT64 | customers INT64 | avg_amount FLOAT64
+[0, 85, 11586.19304347826]
+[1, 94, 11716.336337579618]
+[2, 93, 3811.950609318996]
+[3, 98, 1845.8041296928327]
+[4, 88, 8473.70818815331]
+[5, 99, 10774.657137931035]
+[6, 89, 1701.5619157088124]
+
+query ordered oracle
+SELECT is_fraud, COUNT(*) AS n, COUNT(fee) AS with_fee, SUM(fee) AS fees FROM tx GROUP BY is_fraud ORDER BY is_fraud
+----
+is_fraud BOOLEAN | n INT64 | with_fee INT64 | fees DECIMAL(18,2)
+[false, 1999, 1414, "105436.72"]
+[true, 1, 1, "1.11"]
+
+query oracle
+SELECT COUNT(DISTINCT merchant_id) AS merchants FROM tx
+----
+merchants INT64
+[50]
+
+query ordered oracle
+SELECT segment, country, COUNT(*) AS n, MAX(credit_limit) AS max_limit FROM cust GROUP BY segment, country HAVING COUNT(*) >= 5 ORDER BY segment, n DESC, country
+----
+segment STRING | country STRING | n INT64 | max_limit DECIMAL(12,2)
+["consumer", "US", 25, "48254.00"]
+["consumer", "FI", 12, "48617.00"]
+["consumer", "GB", 12, "49511.00"]
+["consumer", "DE", 8, "44734.00"]
+["consumer", "AU", 5, "49442.00"]
+["enterprise", "FI", 6, "35230.00"]
+["public_sector", "US", 8, "48626.00"]
+["public_sector", "DE", 5, "36518.00"]
+["small_business", "US", 10, "36644.00"]
+
+query ordered oracle
+SELECT is_active, COUNT(loyalty_points) AS with_points, SUM(loyalty_points) AS points FROM cust GROUP BY is_active ORDER BY is_active
+----
+is_active BOOLEAN | with_points INT64 | points INT64
+[false, 19, 1077199]
+[true, 101, 4903067]

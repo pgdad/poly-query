@@ -1,0 +1,1 @@
+[{"name": "order_id", "type": "INT64"}, {"name": "customer_id", "type": "INT64"}, {"name": "order_date", "type": "DATE"}, {"name": "status", "type": "STRING"}, {"name": "item_count", "type": "INT64"}]

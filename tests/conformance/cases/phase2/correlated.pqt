@@ -1,0 +1,48 @@
+# Correlated subqueries (optional capability) — semantics.md §8
+@phase 2
+@requires phase2 sql.correlated_subquery sql.subquery sql.groupby ingest.csv
+
+load people fixtures/people.csv
+load customers fixtures/customers.csv
+load orders fixtures/orders.csv schema=order_id:INT64;customer_id:INT64;amount:DECIMAL(10,2);status:STRING;ordered_at:TIMESTAMP
+
+query ordered oracle
+SELECT c.name, (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.customer_id) AS n FROM customers c ORDER BY c.name
+----
+name STRING | n INT64
+["Alice", 3]
+["Bob", 2]
+["Carol", 2]
+["Dave", 1]
+["Erin", 0]
+
+query ordered oracle
+SELECT c.name FROM customers c WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.customer_id AND o.amount > 200) ORDER BY c.name
+----
+name STRING
+["Alice"]
+["Bob"]
+["Carol"]
+
+query ordered oracle
+SELECT c.name FROM customers c WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.customer_id) ORDER BY c.name
+----
+name STRING
+["Erin"]
+
+query ordered oracle
+SELECT p.name, p.age FROM people p WHERE p.age > (SELECT AVG(q.age) FROM people q WHERE q.city = p.city) ORDER BY p.name
+----
+name STRING | age INT64
+["Carol", 45]
+["Frank", 52]
+
+query ordered oracle
+SELECT o.order_id FROM orders o WHERE o.amount = (SELECT MAX(o2.amount) FROM orders o2 WHERE o2.customer_id = o.customer_id) ORDER BY o.order_id
+----
+order_id INT64
+[104]
+[105]
+[107]
+[108]
+[110]

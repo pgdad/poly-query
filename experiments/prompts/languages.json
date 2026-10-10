@@ -1,0 +1,38 @@
+{
+  "java": {
+    "language": "Java",
+    "lang_dir": "java",
+    "toolchain": "Java 27 (OpenJDK 27 at $JAVA_HOME=/usr/lib/jvm/jdk-27; `java`/`javac`/`jar` are on PATH). Build with plain `javac`/`jar` from the Makefile or with Maven (`mvn`, offline; plugins already cached may be used, but no dependencies). Target release 27.",
+    "stdlib_note": "The JDK (java.*, javax.*, jdk.* modules incl. com.sun.net.httpserver, java.util.concurrent, java.nio, the Foreign Function & Memory API and the incubating Vector API) is the standard library. JUnit is NOT available: write tests with plain Java (e.g. a small test main) or `assert`."
+  },
+  "clojure": {
+    "language": "Clojure",
+    "lang_dir": "clojure",
+    "toolchain": "Clojure 1.12.3 via the `clojure`/`clj` CLI and tools.deps (deps.edn), running on OpenJDK 27 ($JAVA_HOME=/usr/lib/jvm/jdk-27). The only allowed dependency coordinate is org.clojure/clojure itself (already in the local Maven cache; there is no network).",
+    "stdlib_note": "clojure.core and the namespaces shipped inside the Clojure jar (clojure.string, clojure.set, clojure.java.io, clojure.test, clojure.walk, clojure.edn, …) plus the entire JDK via Java interop are the standard library. NOT allowed: clojure.data.json, data.csv, core.async, http-kit, ring, cheshire or any other library outside the Clojure jar."
+  },
+  "rust": {
+    "language": "Rust",
+    "lang_dir": "rust",
+    "toolchain": "Rust 1.96.0 stable with Cargo (offline; `CARGO_NET_OFFLINE=true`). Use edition 2024. Release builds for the launcher.",
+    "stdlib_note": "Only `std` (and `core`/`alloc`). No crates.io dependencies at all (no serde, no libc crate, no regex). If you need OS functionality std lacks (e.g. mmap, signals), declare the needed C functions yourself with `extern \"C\"` against the system libc."
+  },
+  "python": {
+    "language": "Python",
+    "lang_dir": "python",
+    "toolchain": "CPython 3.14 (`python3` on PATH is 3.14). No virtualenv or pip installs are possible or needed.",
+    "stdlib_note": "Only the Python standard library (json, csv, http.server, socketserver, threading, concurrent.futures, mmap, zlib, struct, decimal, datetime, unittest, …). No third-party packages (no numpy, pandas, pyarrow, sqlite-based query execution is NOT allowed: the `sqlite3` module must not be used)."
+  },
+  "go": {
+    "language": "Go",
+    "lang_dir": "go",
+    "toolchain": "Go 1.27.1 (`go` on PATH; GOTOOLCHAIN=local, GOPROXY=off — no module downloads). Use a go.mod with no requirements.",
+    "stdlib_note": "Only the Go standard library (net/http, encoding/json, encoding/csv, sync, context, hash/crc32, syscall, testing, …). No external modules, including golang.org/x/*."
+  },
+  "common-lisp": {
+    "language": "Common Lisp",
+    "lang_dir": "common-lisp",
+    "toolchain": "SBCL 2.6.9 (`sbcl` on PATH, /opt/sbcl) with ASDF (bundled). Build a standalone executable or a core image via the Makefile (e.g. `sb-ext:save-lisp-and-die`); `bin/polyquery` may also start sbcl with a prebuilt core.",
+    "stdlib_note": "Only ANSI Common Lisp, SBCL's own extensions (sb-ext, sb-sys, sb-alien, sb-unix, sb-int, sb-impl, sb-thread, sb-kernel) and the contribs bundled with SBCL (asdf, uiop, sb-bsd-sockets, sb-posix, sb-concurrency, sb-rotate-byte, sb-md5, sb-cltl2, sb-introspect, sb-simd, sb-sprof, sb-rt). No Quicklisp, no third-party systems (no alexandria, cl-json, hunchentoot, cl-ppcre, bordeaux-threads)."
+  }
+}
