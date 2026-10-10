@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"polyquery/internal/engine"
 	"polyquery/internal/protocol"
@@ -121,7 +122,15 @@ func logger(level string, w io.Writer) *slog.Logger {
 	default:
 		l = slog.LevelInfo
 	}
-	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: l}))
+	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{
+		Level: l,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey {
+				return slog.String("ts", a.Value.Time().UTC().Format(time.RFC3339Nano))
+			}
+			return a
+		},
+	}))
 }
 
 func main() {

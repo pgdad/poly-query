@@ -2,6 +2,7 @@ package exec
 
 import (
 	"container/heap"
+	"slices"
 	"sort"
 
 	"polyquery/internal/storage"
@@ -237,8 +238,29 @@ func (s *sortOp) sortAll() error {
 		}
 		s.rows = append(s.rows, cp)
 	}
-	sort.SliceStable(s.rows, func(i, j int) bool { return compareRows(s.keys, s.rows[i], s.rows[j]) < 0 })
+	s.rows = sortStable(s.keys, s.rows)
 	return nil
+}
+
+// sortStable sorts rows by keys, keeping arrival order among equal rows. It
+// uses pattern-defeating quicksort over row positions (O(n log n)) with the
+// original position as the final tie-breaker.
+func sortStable(keys []sortKey, rows []types.Row) []types.Row {
+	idx := make([]int32, len(rows))
+	for i := range idx {
+		idx[i] = int32(i)
+	}
+	slices.SortFunc(idx, func(a, b int32) int {
+		if c := compareRows(keys, rows[a], rows[b]); c != 0 {
+			return c
+		}
+		return int(a - b)
+	})
+	out := make([]types.Row, len(rows))
+	for i, k := range idx {
+		out[i] = rows[k]
+	}
+	return out
 }
 
 // topHeap is a max-heap (by sort order, ties broken by arrival) holding the
