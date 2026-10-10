@@ -264,7 +264,8 @@
         file (resolve-path (:data-dir config) path)
         _ (when (and (not replace?) (catalog/lookup @catalog tname))
             (err/fail! "ALREADY_EXISTS" (str "table '" tname "' already exists") {"table" tname}))
-        contents (pqcf/open file {:mmap? (and mmap? (= :column (:layout storage)))})
+        contents (pqcf/open file {:mmap? (and mmap? (= :column (:layout storage)))
+                                  :max-rows (:max-table-rows (:limits config))})
         _ (catalog/check-index-names! @catalog (map :name (:indexes contents)) (when replace? tname))
         tbl (open-table tname contents storage)]
     (swap! catalog catalog/add-table tbl replace?)

@@ -577,7 +577,7 @@
                       cols)
         _ (when-not (apply distinct? (cons ::none (map (comp text/ascii-lower :name) columns)))
             (corrupt! "duplicate column names"))
-        idx-meta (get meta "indexes" [])
+        idx-meta (or (get meta "indexes") [])
         _ (when-not (vector? idx-meta) (corrupt! "metadata indexes is not an array"))
         indexes (mapv (fn [x]
                         (let [nm (get x "name") cname (get x "column") kind (get x "kind")
@@ -662,15 +662,23 @@
         (recur (next gs) (+ start n) (conj acc (table/->Segment start n vectors stats))))
       acc)))
 
+(def ^:private max-row-group-rows
+  "Largest row group this reader can hold in Java arrays."
+  (- Integer/MAX_VALUE 64))
+
 (defn open
-  "Reads PQCF file f. opts: {:mmap? b}. Returns {:columns :row-count
-  :segments :indexes [{:name :column-index :kind}]}."
-  [^File f {:keys [mmap?]}]
+  "Reads PQCF file f. opts: {:mmap? b, :max-rows n (RESOURCE_LIMIT above)}.
+  Returns {:columns :row-count :segments :indexes [{:name :column-index
+  :kind}]}."
+  [^File f {:keys [mmap? max-rows]}]
   (when-not (.exists f) (err/fail! "NOT_FOUND" (str "file not found: " (.getName f))))
   (when (.isDirectory f) (err/fail! "IO_ERROR" (str "path is a directory: " (.getName f))))
   (try
     (with-open [ch (FileChannel/open (.toPath f) (into-array OpenOption [StandardOpenOption/READ]))]
       (let [[meta] (read-metadata ch)]
+        (when (or (and max-rows (> (long (:row-count meta)) (long max-rows)))
+                  (some #(> (long (:row-count %)) (long max-row-group-rows)) (:row-groups meta)))
+          (err/fail! "RESOURCE_LIMIT" (str "table of " (:row-count meta) " rows exceeds the row limit")))
         (assoc (select-keys meta [:columns :row-count :indexes])
                :segments (segments ch meta mmap?))))
     (catch IOException e
