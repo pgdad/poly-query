@@ -7,10 +7,6 @@
 
 (in-package #:polyquery)
 
-(defun distinct-key (value)
-  "Hash key under which equal values of one type collide (-0.0 equals 0.0)."
-  (if (and (floatp value) (zerop value)) 0d0 value))
-
 (defun make-accumulator-factory (agg)
   (let* ((fn (b-agg-fn agg))
          (arg-type (if (b-agg-args agg) (bexpr-type (first (b-agg-args agg))) :int64))

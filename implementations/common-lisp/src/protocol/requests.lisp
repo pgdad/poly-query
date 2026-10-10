@@ -103,11 +103,14 @@
          (sleep (/ ms 1000))
          (success-response id)))
       ((string= op "explain")
-       (let ((sql (request-field request "sql" :required t :type :string)))
-         (validate-query-options (or (request-field request "options" :type :object) (jobj)))
-         (success-response id "plan" (explain-sql session sql))))
-      ((member op '("save" "open" "stats") :test #'string=)
-       (unsupported-error "operation ~A is not supported by this engine" op))
+       (let ((sql (request-field request "sql" :required t :type :string))
+             (options (or (request-field request "options" :type :object) (jobj))))
+         (validate-query-options options)
+         (success-response id "plan" (explain-sql session sql
+                                                  :use-indexes (use-indexes-option options)))))
+      ((string= op "save") (op-save session id request))
+      ((string= op "open") (op-open session id request))
+      ((string= op "stats") (op-stats session id request))
       (t (invalid-request-error "unknown op ~S" op)))))
 
 (defun version-response (id)
@@ -139,7 +142,14 @@
                       "table" (table-name table)
                       "row_count" (table-row-count table)
                       "columns" (columns-json (table-columns table))
-                      "indexes" '())))
+                      "indexes" (mapcar #'table-index-json
+                                        (catalog-table-indexes (session-catalog session) table))
+                      "layout" (table-layout-name table))))
+
+(defun op-stats (session id request)
+  (let ((table (find-table-or-404 session (request-field request "table" :required t :type :string)))
+        (*query-context* (make-context-for session nil)))
+    (apply #'success-response id (table-stats-json table))))
 
 ;;; ------------------------------------------------------------------
 ;;; query
@@ -159,9 +169,14 @@
     (when (and threads (< threads 1))
       (invalid-request-error "option threads must be >= 1")))
   (request-field options "optimize" :type :boolean)
-  (request-field options "use_indexes" :type :boolean)
+  (use-indexes-option options)
   (request-field options "native" :type :boolean)
   (request-field options "query_id" :type :string))
+
+(defun use-indexes-option (options)
+  (if (nth-value 1 (json-get options "use_indexes"))
+      (request-field options "use_indexes" :type :boolean)
+      t))
 
 (defun op-query (session id request)
   (let* ((sql (request-field request "sql" :required t :type :string))
@@ -173,7 +188,8 @@
     (let* ((start (get-internal-real-time))
            (count-only (string= result-mode "count"))
            (result (execute-sql session sql :max-rows max-rows :timeout-ms timeout-ms
-                                            :collect-rows (not count-only)))
+                                            :collect-rows (not count-only)
+                                            :use-indexes (use-indexes-option options)))
            (elapsed-us (floor (* (- (get-internal-real-time) start) 1000000)
                               internal-time-units-per-second)))
       (success-response id
@@ -269,7 +285,11 @@
                                   (not (find (char d 0) (list #\" #\Newline #\Return))))
                              (char d 0))
                             (t (invalid-request-error "delimiter must be a single ASCII character")))))
-         (schema (when schema-json (parse-schema-field schema-json))))
+         (schema (when schema-json (parse-schema-field schema-json)))
+         (layout (layout-option options))
+         (dictionary (if (nth-value 1 (json-get options "dictionary"))
+                         (request-field options "dictionary" :type :boolean)
+                         :auto)))
     (when (zerop (length name))
       (invalid-request-error "table name must not be empty"))
     (when (or (and path data) (and (null path) (null data)))
@@ -289,8 +309,58 @@
         (resource-limit-error "input exceeds the ingestion limit of ~D bytes" max-bytes))
       (let ((table (load-table session spec
                                (if (eq format :csv) octets (octets-to-text octets))
-                               :replace replace)))
+                               :replace replace :layout layout :dictionary dictionary)))
         (success-response id
                           "table" (table-name table)
                           "row_count" (table-row-count table)
                           "columns" (columns-json (table-columns table)))))))
+
+(defun layout-option (options)
+  "The table layout requested by a load/open \"layout\" option."
+  (let ((layout (request-field options "layout" :type :string)))
+    (cond ((null layout) :column)
+          ((string= layout "column") :column)
+          ((string= layout "row") :row)
+          (t (invalid-request-error "unknown layout ~S (expected \"row\" or \"column\")" layout)))))
+
+;;; ------------------------------------------------------------------
+;;; save / open (protocol.md §5.7)
+
+(defun op-save (session id request)
+  (let* ((config (session-config session))
+         (name (request-field request "table" :required t :type :string))
+         (path (request-field request "path" :required t :type :string))
+         (options (or (request-field request "options" :type :object) (jobj)))
+         (row-group-size (or (request-field options "row_group_size" :type :integer)
+                             *default-row-group-size*))
+         (encoding-name (or (request-field options "encoding" :type :string) "auto"))
+         (encoding (cond ((string= encoding-name "auto") :auto)
+                         ((string= encoding-name "plain") :plain)
+                         ((string= encoding-name "dict") :dict)
+                         ((string= encoding-name "rle") :rle)
+                         (t (invalid-request-error "unknown encoding ~S" encoding-name))))
+         (native (resolve-data-path config path)))
+    (unless (plusp row-group-size)
+      (invalid-request-error "row_group_size must be positive"))
+    (unless (catalog-table-exists-p (session-catalog session) name)
+      (signal-pq-error "NOT_FOUND" "table ~A not found" name))
+    (let ((bytes (save-table session name native :row-group-size row-group-size
+                                                 :encoding encoding)))
+      (success-response id "path" path "bytes" bytes))))
+
+(defun op-open (session id request)
+  (let* ((config (session-config session))
+         (name (request-field request "table" :required t :type :string))
+         (path (request-field request "path" :required t :type :string))
+         (options (or (request-field request "options" :type :object) (jobj)))
+         (mmap (request-field options "mmap" :type :boolean))
+         (layout (layout-option options))
+         (replace (request-field request "replace" :type :boolean))
+         (native (resolve-data-path config path)))
+    (when (zerop (length name))
+      (invalid-request-error "table name must not be empty"))
+    (let ((table (open-table session name native :replace replace :mmap mmap :layout layout)))
+      (success-response id
+                        "table" (table-name table)
+                        "row_count" (table-row-count table)
+                        "columns" (columns-json (table-columns table))))))

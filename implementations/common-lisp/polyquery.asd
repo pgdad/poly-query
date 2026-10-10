@@ -4,10 +4,12 @@
   :description "PolyQuery analytical database engine (Common Lisp implementation)"
   :version "0.1.0"
   :license "MIT"
+  :depends-on ("sb-posix")
   :serial t
   :pathname "src/"
   :components
   ((:file "package")
+   (:file "version")
    (:module "util" :serial t
     :components ((:file "errors")
                  (:file "numbers")
@@ -17,9 +19,17 @@
                  (:file "temporal")
                  (:file "values")
                  (:file "compare")))
+   (:file "exec/context")
    (:module "storage" :serial t
-    :components ((:file "table")
-                 (:file "catalog")))
+    :components ((:file "columns")
+                 (:file "table")
+                 (:file "stats")
+                 (:file "index")
+                 (:file "catalog")
+                 (:file "binary")
+                 (:file "files")
+                 (:file "pqcf-write")
+                 (:file "pqcf-read")))
    (:module "ingest" :serial t
     :components ((:file "common")
                  (:file "csv")
@@ -28,7 +38,6 @@
     :components ((:file "lexer")
                  (:file "ast")
                  (:file "parser")))
-   (:file "exec/context")
    (:module "analyzer" :serial t
     :components ((:file "bound")
                  (:file "functions")
@@ -37,6 +46,7 @@
    (:module "plan" :serial t
     :components ((:file "logical")
                  (:file "optimizer")
+                 (:file "access")
                  (:file "physical")))
    (:module "exec" :serial t
     :components ((:file "expressions")
