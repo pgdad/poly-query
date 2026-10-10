@@ -1,0 +1,17 @@
+#!/bin/sh
+# PolyQuery launcher: runs the AOT-compiled engine (build with `make build`).
+set -e
+HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(dirname -- "$HERE")"
+CP_FILE="$ROOT/target/classpath"
+if [ ! -f "$CP_FILE" ] || [ ! -d "$ROOT/target/classes" ]; then
+  echo "polyquery: engine is not built; run 'make -C $ROOT build'" >&2
+  exit 1
+fi
+JAVA="${JAVA_HOME:+$JAVA_HOME/bin/}java"
+CDS=""
+if [ -f "$ROOT/target/polyquery.jsa" ]; then
+  CDS="-XX:SharedArchiveFile=$ROOT/target/polyquery.jsa"
+fi
+exec "$JAVA" -Xss16m -XX:+UseParallelGC -XX:TieredStopAtLevel=4 $CDS -Xlog:disable -Xlog:all=warning:stderr \
+  ${POLYQUERY_JAVA_OPTS:-} -cp "$ROOT/target/classes:$(cat "$CP_FILE")" polyquery.main "$@"
