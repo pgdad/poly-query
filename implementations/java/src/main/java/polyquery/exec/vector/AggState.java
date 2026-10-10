@@ -5,7 +5,6 @@ import java.util.Arrays;
 import polyquery.exec.Accumulator;
 import polyquery.plan.AggregateCall;
 import polyquery.types.DataType;
-import polyquery.types.TypeKind;
 import polyquery.types.Values;
 
 /**
@@ -568,9 +567,5 @@ abstract class AggState {
         Object result(int g) {
             return acc(g).result();
         }
-    }
-
-    static boolean isNullType(DataType t) {
-        return t != null && t.kind() == TypeKind.NULL;
     }
 }

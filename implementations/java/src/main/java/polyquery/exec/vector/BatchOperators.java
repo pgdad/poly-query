@@ -2,7 +2,6 @@ package polyquery.exec.vector;
 
 import java.util.List;
 import polyquery.common.PolyQueryException;
-import polyquery.exec.ExecContext;
 import polyquery.exec.Operator;
 import polyquery.plan.BoundExpr;
 import polyquery.storage.ColumnSchema;
@@ -382,10 +381,5 @@ final class BatchOperators {
         public void close() {
             input.close();
         }
-    }
-
-    /** Checks cancellation between batches of a long-running blocking operator. */
-    static void checkpoint(ExecContext ctx) {
-        ctx.checkNow();
     }
 }
