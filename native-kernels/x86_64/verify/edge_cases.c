@@ -1,0 +1,48 @@
+/* TEST TOOL (not part of libpqkernels): edge cases the stock tests do not reach:
+ * compare_fixed widths up to 300 bytes, group_sum with ngroups = 0, 3 and 2^33,
+ * counts == NULL, large n (300001) with extreme sums / ranges and BETWEEN with
+ * a > b. Build with -DSUM_CHUNK_ROWS=24 -DSUM_CHUNK_BLOCKS=1 to exercise the
+ * sum_i64 chunk-fold path. Build: see run.sh. */
+#include "pq_kernels_internal.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+static uint64_t rs = 777;
+static uint64_t rnd(void){uint64_t z=(rs+=0x9E3779B97F4A7C15ULL);z=(z^(z>>30))*0xBF58476D1CE4E5B9ULL;z=(z^(z>>27))*0x94D049BB133111EBULL;return z^(z>>31);}
+static int fails;
+#define CK(c, ...) do{ if(!(c)){ fails++; if(fails<30){fprintf(stderr,"FAIL %s: ",vn);fprintf(stderr,__VA_ARGS__);fputc('\n',stderr);} } }while(0)
+int main(void){
+  pqk_table ref, v; pqk_variant_table("reference",&ref);
+  const char *vars[] = {"x86_scalar","x86_avx2","x86_avx512"};
+  for (int vi=0; vi<3; vi++){ const char *vn = vars[vi]; if (!pqk_variant_table(vn,&v)) continue;
+    /* compare_fixed: wide records */
+    for (int it=0; it<400; it++){ size_t w = rnd()%300, m = 1 + rnd()%20; uint8_t *a=malloc(w*m+1),*b=malloc(w*m+1); int8_t o1[32],o2[32];
+      for(size_t i=0;i<w*m;i++){a[i]=(uint8_t)rnd(); b[i]=a[i];}
+      for(size_t r=0;r<m;r++) if (w && rnd()%4) b[r*w + rnd()%w] = (uint8_t)rnd();
+      ref.compare_fixed(a,b,w,m,o1); v.compare_fixed(a,b,w,m,o2); CK(!memcmp(o1,o2,m),"cfixed w=%zu",w); free(a); free(b); }
+    /* group_sum special ngroups */
+    for (int it=0; it<200; it++){ size_t n = rnd()%200; uint32_t *g=malloc(n*4+4); int64_t *x=malloc(n*8+8); uint8_t val[32]; for(int i=0;i<32;i++) val[i]=(uint8_t)rnd();
+      for(size_t i=0;i<n;i++){ g[i]=(uint32_t)rnd(); x[i]=(int64_t)rnd()>>(rnd()%64); }
+      int64_t s1[4]={0},s2[4]={0},c1[4]={0},c2[4]={0};
+      int r1=ref.group_sum_i64(g,x,(it&1)?val:NULL,n,s1,c1,0), r2=v.group_sum_i64(g,x,(it&1)?val:NULL,n,s2,c2,0); CK(r1==r2,"ng=0 n=%zu %d %d",n,r1,r2);
+      /* ngroups huge: ids all valid; need big arrays -> use ids < 4 but ngroups = 2^33 */
+      for(size_t i=0;i<n;i++) g[i]&=3;
+      r1=ref.group_sum_i64(g,x,(it&1)?val:NULL,n,s1,(it&2)?NULL:c1,(size_t)1<<33); r2=v.group_sum_i64(g,x,(it&1)?val:NULL,n,s2,(it&2)?NULL:c2,(size_t)1<<33);
+      CK(r1==r2 && !memcmp(s1,s2,32) && !memcmp(c1,c2,32),"ng=2^33 n=%zu",n);
+      /* ngroups = 3 -> some ids==3 invalid */
+      r1=ref.group_sum_i64(g,x,(it&1)?val:NULL,n,s1,c1,3); r2=v.group_sum_i64(g,x,(it&1)?val:NULL,n,s2,c2,3); CK(r1==r2,"ng=3 n=%zu %d %d",n,r1,r2);
+      free(g); free(x); }
+    /* big n with validity, sums at extremes */
+    size_t n = 300001; int64_t *d=malloc(n*8); uint8_t *val=malloc(n/8+1);
+    for (int mode=0; mode<4; mode++){
+      for(size_t i=0;i<n;i++) d[i] = mode==0? INT64_MAX : mode==1 ? INT64_MIN : mode==2 ? (int64_t)rnd() : ((i&1)?INT64_MAX:INT64_MIN+1);
+      for(size_t i=0;i<n/8+1;i++) val[i]=(uint8_t)(mode==3?0xff:rnd());
+      for (int k=0;k<2;k++){ uint8_t *vv = k?val:NULL; int64_t s1=0,s2=0; int r1=ref.sum_i64(d,vv,n,&s1), r2=v.sum_i64(d,vv,n,&s2); CK(r1==r2&&(r1||s1==s2),"bigsum mode=%d k=%d",mode,k);
+        int64_t l1,h1,l2,h2; size_t c1=ref.minmax_i64(d,vv,n,&l1,&h1), c2=v.minmax_i64(d,vv,n,&l2,&h2); CK(c1==c2&&l1==l2&&h1==h2,"bigminmax");
+        for(int op=0;op<7;op++){ CK(ref.count_i64(d,vv,n,op,0,INT64_MAX)==v.count_i64(d,vv,n,op,0,INT64_MAX),"bigcount op=%d",op);
+          CK(ref.count_i64(d,vv,n,op,INT64_MIN,INT64_MAX)==v.count_i64(d,vv,n,op,INT64_MIN,INT64_MAX),"bigcount2 op=%d",op);
+          CK(ref.count_i64(d,vv,n,op,5,-5)==v.count_i64(d,vv,n,op,5,-5),"bigcount3 op=%d",op); } } }
+    free(d); free(val);
+    printf("edge %s: %s\n", vn, fails?"FAIL":"ok");
+  }
+  return fails!=0; }
