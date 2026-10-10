@@ -3,8 +3,10 @@ package polyquery.storage;
 import java.util.Arrays;
 import java.util.BitSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import polyquery.types.TypeKind;
 
 /** Conversions between physical table representations. */
@@ -81,6 +83,9 @@ public final class Layouts {
             return v;
         }
         int n = v.size();
+        if (policy == Dictionary.AUTO && n > 4 * SAMPLE && mostlyDistinct(v)) {
+            return v;
+        }
         Map<String, Integer> codes = new HashMap<>();
         String[] dict = new String[Math.max(16, Math.min(n, 1024))];
         int[] rowCodes = new int[n];
@@ -107,6 +112,22 @@ public final class Layouts {
             rowCodes[i] = code;
         }
         return ColumnVector.ofDictionary(Arrays.copyOf(dict, codes.size()), rowCodes, nulls);
+    }
+
+    private static final int SAMPLE = 10_000;
+
+    /** True if more than half of a prefix sample of the column is distinct (encoding will not pay off). */
+    private static boolean mostlyDistinct(ColumnVector v) {
+        Set<Object> seen = new HashSet<>();
+        int nonNull = 0;
+        for (int i = 0; i < SAMPLE; i++) {
+            Object s = v.get(i);
+            if (s != null) {
+                nonNull++;
+                seen.add(s);
+            }
+        }
+        return seen.size() > nonNull / 2;
     }
 
     private static ColumnVector plainStrings(ColumnVector v) {
