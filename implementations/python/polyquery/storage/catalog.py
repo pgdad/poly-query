@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Sequence
@@ -39,7 +40,7 @@ class Table:
     def scan(self, column_indexes: Sequence[int]) -> Iterator[tuple]:
         """Yields row tuples restricted to the given columns."""
         if not column_indexes:
-            return iter([()] * self.row_count)
+            return itertools.repeat((), self.row_count)
         return zip(*(self.data[i] for i in column_indexes))
 
     def schema_json(self) -> list[dict[str, str]]:

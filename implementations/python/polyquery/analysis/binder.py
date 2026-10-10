@@ -389,7 +389,9 @@ class Binder:
         else:
             if len(node.args) != 1:
                 raise errors.semantic_error(f"{name} takes exactly one argument")
-            inner = ExprContext(ctx.scope, ctx.clause, ctx.aggregates, True, in_aggregate=True)
+            inner = ExprContext(
+                ctx.scope, ctx.clause, ctx.aggregates, aggregates_allowed=True, in_aggregate=True
+            )
             arg = self.bind_expr(node.args[0], inner)
         call = b.AggCall(aggregate_result_type(name, arg), name, arg, node.distinct)
         assert ctx.aggregates is not None
