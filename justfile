@@ -3,6 +3,8 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 langs := "java clojure rust python go common-lisp"
 py := "python3"
+# Engines and merged kernels are AI-generated code: always execute them sandboxed.
+sbx := "tools/orchestration/sandboxed.sh"
 
 default:
     @just --list
@@ -30,16 +32,16 @@ oracle-check:
 
 # Build one engine
 build lang:
-    make -C implementations/{{lang}} build
+    {{sbx}} make -C implementations/{{lang}} build
 
 # Build all engines that exist
 build-all:
-    for l in {{langs}}; do if [ -f implementations/$l/Makefile ]; then make -C implementations/$l build; fi; done
+    for l in {{langs}}; do if [ -f implementations/$l/Makefile ]; then {{sbx}} make -C implementations/$l build; fi; done
 
 # Conformance for one language (public suite, all phases the engine claims)
 test-language lang *args:
-    make -C implementations/{{lang}} build
-    {{py}} tests/conformance/runner.py --engine implementations/{{lang}}/bin/polyquery --report results/correctness/{{lang}}.json {{args}}
+    {{sbx}} make -C implementations/{{lang}} build
+    {{sbx}} {{py}} tests/conformance/runner.py --engine implementations/{{lang}}/bin/polyquery --claimed --report results/correctness/{{lang}}.json {{args}}
 
 # Conformance for all languages; writes results/correctness/*.json
 test-all:
@@ -48,27 +50,27 @@ test-all:
 
 # Phase 4 HTTP suite for one language
 test-http lang:
-    {{py}} tests/concurrency/http_suite.py --engine implementations/{{lang}}/bin/polyquery --report results/correctness/{{lang}}-http.json
+    {{sbx}} {{py}} tests/concurrency/http_suite.py --engine implementations/{{lang}}/bin/polyquery --report results/correctness/{{lang}}-http.json
 
 # Cross-engine PQCF interoperability matrix (+ reference validator)
 test-interop:
-    {{py}} tests/integration/storage_interop.py --report results/correctness/interop.json
+    {{sbx}} {{py}} tests/integration/storage_interop.py --report results/correctness/interop.json
 
 # Crash-consistency suite for one language
 test-crash lang:
-    {{py}} tests/integration/storage_crash.py --engine implementations/{{lang}}/bin/polyquery
+    {{sbx}} {{py}} tests/integration/storage_crash.py --engine implementations/{{lang}}/bin/polyquery
 
 # Robustness fuzzing / randomized differential testing for one language
 fuzz lang seconds="120":
-    {{py}} tests/fuzz/sql_fuzz.py --engine implementations/{{lang}}/bin/polyquery --seconds {{seconds}}
-    {{py}} tests/property-based/differential.py --engine implementations/{{lang}}/bin/polyquery --cases 300
+    {{sbx}} {{py}} tests/fuzz/sql_fuzz.py --engine implementations/{{lang}}/bin/polyquery --seconds {{seconds}}
+    {{sbx}} {{py}} tests/property-based/differential.py --engine implementations/{{lang}}/bin/polyquery --cases 300
 
 # Native kernels: build + differential tests (x86-64 natively, AArch64 under qemu = functional only)
 test-kernels:
-    make -C native-kernels test
+    {{sbx}} make -C native-kernels test
 
 benchmark-kernels:
-    make -C native-kernels bench
+    {{sbx}} make -C native-kernels bench
 
 # Generate datasets for a scale factor (10k, 100k, 1m, 10m, 100m)
 datasets scale="100k":

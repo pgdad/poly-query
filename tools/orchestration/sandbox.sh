@@ -69,10 +69,20 @@ mkparents() {
 # /srv holds every run's workspace: hide it and re-bind only this run's paths.
 SRV_BINDS=()
 for pair in "$M2:$H/.m2/repository" "$CFG:$CFG" "$WS:$WS" "$SCR:$SCR"; do
-  src=${pair%%:*}; dst=${pair#*:}
+  dst=${pair#*:}
   if [[ $dst == /srv/* ]]; then
     mapfile -d '' -O "${#SRV_BINDS[@]}" SRV_BINDS < <(mkparents /srv "$dst")
+  elif [[ $dst == "$H"/* ]]; then
+    mapfile -d '' -O "${#SRV_BINDS[@]}" SRV_BINDS < <(mkparents "$H" "$dst")
   fi
+done
+
+# Optional read-only overlays inside the workspace (colon-separated absolute
+# paths), e.g. the repository's .git when host-side tools run engine code.
+RO_OVERLAYS=()
+IFS=: read -ra _ro <<<"${PQ_RO_PATHS:-}"
+for p in "${_ro[@]}"; do
+  [[ -n $p && -e $p ]] && RO_OVERLAYS+=(--ro-bind "$p" "$p")
 done
 
 mapfile -d '' TOOLBINDS < <(ro_if_exists \
@@ -95,6 +105,7 @@ exec sudo -n bwrap \
   --perms 0755 --dir "$H/.m2" --bind "$M2" "$H/.m2/repository" \
   --bind "$CFG" "$CFG" \
   --bind "$WS" "$WS" \
+  "${RO_OVERLAYS[@]}" \
   --bind "$SCR" "$SCR" \
   --chdir "$WS" \
   --unshare-pid --unshare-ipc --unshare-uts --hostname pq-sandbox \

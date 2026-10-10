@@ -269,6 +269,9 @@ def summarize(files: list[dict]) -> dict:
     return {"by_phase": by_phase, "total": total}
 
 
+OPTIONAL_CAPS = {"sql.correlated_subquery"}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--engine", required=True, help="path to bin/polyquery launcher")
@@ -282,6 +285,9 @@ def main() -> int:
     ap.add_argument("--timeout", type=float, default=30.0, help="per-request timeout seconds")
     ap.add_argument("--report", help="write JSON report here")
     ap.add_argument("--logs", help="directory for engine stderr logs")
+    ap.add_argument("--claimed", action="store_true",
+                    help="restrict to the phases the engine claims (capability phaseN); not_implemented is "
+                         "tolerated only in files that need an optional capability the engine does not claim")
     ap.add_argument("--ci", action="store_true",
                     help="exit status ignores not_implemented cases (still reported); fails on fail/error")
     ap.add_argument("--verbose", "-v", action="store_true")
@@ -300,7 +306,11 @@ def main() -> int:
     dirs = [] if args.hidden_only else [PUBLIC_CASES]
     if args.include_hidden or args.hidden_only:
         dirs.append(HIDDEN_CASES)
-    found = discover(dirs, set(args.phase) if args.phase else None, args.filter)
+    phases = set(args.phase) if args.phase else None
+    if args.claimed:
+        claimed = {n for n in range(1, 6) if f"phase{n}" in caps}
+        phases = claimed & phases if phases else claimed
+    found = discover(dirs, phases, args.filter)
 
     syntax_errors = [{"file": str(p), "error": str(e)} for p, e in found if isinstance(e, Exception)]
     files = [f for _, f in found if not isinstance(f, Exception)]
@@ -377,6 +387,10 @@ def main() -> int:
                         print("       " + c["sql"].replace("\n", "\n       "))
     if args.ci:
         return 0 if t["fail"] == 0 and t["error"] == 0 and not syntax_errors else 1
+    if args.claimed:
+        bad = [c for r in results for c in r["cases"] if c["status"] in ("fail", "error") or
+               (c["status"] == "not_implemented" and not (set(r["requires"]) & OPTIONAL_CAPS - caps))]
+        return 0 if t["total"] > 0 and not bad and not syntax_errors else 1
     return 0 if t["total"] > 0 and t["pass"] == t["total"] and not syntax_errors else 1
 
 
