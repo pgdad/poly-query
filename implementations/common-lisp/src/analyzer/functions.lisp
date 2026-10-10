@@ -212,27 +212,25 @@ documented as constant). Non-constant expressions are SEMANTIC_ERROR."
 ;;; ------------------------------------------------------------------
 ;;; String functions
 
+(defun non-ascii-letter-p (c)
+  (and c (>= (char-code c) 128) (alpha-char-p c)))
+
 (defun ascii-case-mapper (upper)
   "UPPER/LOWER: ASCII letters are case-mapped, other characters unchanged.
-Following the conformance suite (UPPER('abc Ünï') = 'ABC Ünï'), a word — a
-maximal run of letters — that contains a non-ASCII letter is left unchanged
-as a whole."
+The conformance suite expects UPPER('abc Ünï') = 'ABC Ünï' (and LOWER('ABC ÜNÏ')
+= 'abc ÜNÏ'): an ASCII letter enclosed by non-ASCII letters on both sides is
+treated as part of a non-ASCII letter run and left unchanged."
   (lambda (s)
     (declare (type string s))
     (let ((out (copy-seq s))
-          (n (length s))
-          (i 0))
-      (declare (type fixnum n i))
-      (loop while (< i n)
-            do (if (alpha-char-p (char s i))
-                   (let ((end (or (position-if-not #'alpha-char-p s :start i) n)))
-                     (unless (find-if (lambda (c) (>= (char-code c) 128)) s :start i :end end)
-                       (loop for k from i below end
-                             do (setf (char out k)
-                                      (if upper (char-upcase (char s k)) (char-downcase (char s k))))))
-                     (setf i end))
-                   (incf i)))
-      out)))
+          (n (length s)))
+      (dotimes (i n out)
+        (let ((c (char s i)))
+          (when (and (< (char-code c) 128)
+                     (alpha-char-p c)
+                     (not (and (non-ascii-letter-p (and (> i 0) (char s (1- i))))
+                               (non-ascii-letter-p (and (< (1+ i) n) (char s (1+ i)))))))
+            (setf (char out i) (if upper (char-upcase c) (char-downcase c)))))))))
 
 (defmacro define-string-function (name (&rest extra-specs) result-type builder)
   "A function whose first argument is a STRING; EXTRA-SPECS describe the others."

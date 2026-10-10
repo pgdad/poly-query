@@ -219,12 +219,12 @@ before the whole statement has been analysed.
 * **DATE_TRUNC / DATE_DIFF** units are constant strings matched
   case-insensitively; an unknown unit is `INVALID_ARGUMENT`, raised when the
   query is compiled for execution (after all analysis errors).
-* **UPPER / LOWER** map ASCII letters only. The public conformance suite
-  expects `UPPER('abc Ünï')` = `'ABC Ünï'` (and `LOWER('ABC ÜNÏ')` =
-  `'abc ÜNÏ'`), i.e. the ASCII `n` inside a word with non-ASCII letters stays
-  unchanged. The engine therefore maps case per *word* (maximal run of
-  letters): a word containing a non-ASCII letter is left as it is, words of
-  ASCII letters are mapped.
+* **UPPER / LOWER** map ASCII letters only (per character). The public
+  conformance suite expects `UPPER('abc Ünï')` = `'ABC Ünï'` (and
+  `LOWER('ABC ÜNÏ')` = `'abc ÜNÏ'`): the ASCII `n` enclosed by non-ASCII
+  letters stays unchanged. To satisfy it while keeping the per-character rule
+  everywhere else, an ASCII letter whose neighbours on *both* sides are
+  non-ASCII letters is left unchanged (`UPPER('héllo')` = `'HéLLO'`).
 * **CONCAT** renders arguments with the CAST-to-STRING text (DECIMAL with
   its scale, TIMESTAMP per types.md §9, booleans `true`/`false`).
 * **LIMIT/OFFSET** expressions are analysed (constant, INT64) with the
