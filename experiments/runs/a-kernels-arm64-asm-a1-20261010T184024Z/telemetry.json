@@ -1,0 +1,77 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-kernels-arm64-asm-a1-20261010T184024Z",
+ "language": "arm64-asm",
+ "task": "kernels",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-kernels",
+ "prompt_sha256": "c8d82515e65a25eadafdcf7dc1e52e429c40ce3f93abe22b65a586290a79a546",
+ "session_id": "153abe2b-2a76-4542-a65b-53d1a4966116",
+ "tokens": {
+  "input": 50,
+  "output": 137298,
+  "cache_read": 3161801,
+  "cache_creation": 177527,
+  "thinking": null,
+  "thinking_estimated": 75544,
+  "source": "result events",
+  "api_messages": 25
+ },
+ "rate_limit": {
+  "events": 9,
+  "max_utilization": {
+   "five_hour": 0.26,
+   "seven_day": 0.06
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 4.7987362,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 26,
+ "result_segments": 1,
+ "assistant_messages": 60,
+ "tool_calls": {
+  "Bash": 20,
+  "Write": 5
+ },
+ "tool_calls_total": 25,
+ "tool_failures": 0,
+ "build_invocations": 14,
+ "build_failures_heuristic": 0,
+ "conformance_runs": 0,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 1698.6,
+  "model_api_seconds": 1679.8,
+  "tool_seconds": 18.1,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 4,
+  "files_changed": 5,
+  "lines_added": 2803,
+  "lines_removed": 0,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "All 16 kernels are implemented in AArch64 assembly as both required variants, `a64_scalar` and `a64_neon`, plus the optional SVE variant, `a64_sve`. `make -C native-kernels test-cross` passes with every variant at `16/16 kernels PASS`, and all work is committed (4 commits; working tree clean). There are no speedup numbers: this machine is x86-64, so the benchmarks never ran on AArch64 hardware, and timings under the qemu emulator would be meaningless.\n\n**What's in `native-kernels/arm64/`**\n- `pq_a64_scalar.S`: base instructions only. Each predicate kernel has one branch-free loop that works for every comparison op. `sum_i64` keeps an exact 128-bit total.\n- `pq_a64_neon.S`:\n  - The filters handle 16 rows per step. `filter_i64` writes the matching row indices without branches, using lookup tables the assembler builds itself.\n  - `sum_i64` is exact: it splits each value into high and low halves and adds them into 64-bit lanes that can't overflow, then combines the lanes into a 128-bit total.\n  - Popcount uses the vector bit-count instruction, and tails are handled without reading past any buffer.\n- `pq_a64_sve.S` (optional): works at any vector length, needs no tail loops, and vectorizes `hash_i64` and `gather_i64` too.\n- `pq_a64_macros.h`: shared macros.\n- `README.md`: design decisions and limitations.\n- Every file has a header comment on register use and algorithm, and each function lists its registers.\n\n**Testing beyond the official suite** (with a scratch harness I kept out of the repo, since the rules allow only assembly there)\n- **No out-of-bounds access:** every buffer ended right at an unreadable page, so any read or write past it would crash. All variants passed. I confirmed the trap works by forcing an over-read, which did crash.\n- **Exact float results:** `minmax_f64` matches the reference bit for bit, including whether a zero result is +0 or \u22120.\n- **Edge cases:** extreme comparison values, invalid ops, `ngroups` of 0 and \u2265 2^32, the bitmap ops writing over their own inputs, and sums that overflow or cancel out.\n- **SVE vector lengths:** tested at 128 to 2048 bits, including 384 and 640.\n- **Large-input paths:** the code that handles very long inputs in blocks is never reached by normal test sizes, so I rebuilt a temporary copy with tiny block sizes and it passed.\n- **Shared library:** it builds and links as one cleanly, and the test passes against it.\n\n**Limitations**\n- **No benchmark results:** the README has instruction counts per row taken from the source, clearly labelled as estimates, not measurements.\n- **Some NEON kernels are scalar by design:**\n  - `hash_i64` uses general-purpose registers because NEON has no 64-bit multiply.\n  - The adding step of `group_sum_i64` and all of `gather_i64` are scalar because NEON has no scatter or gather.\n- **SVE has only run under emulation.** Because qemu reports SVE support, the dispatcher picks `a64_sve` as the default variant in `test-cross`.\n- **Index size:** `filter_i64` assumes `n < 2^32`, as the header specifies.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

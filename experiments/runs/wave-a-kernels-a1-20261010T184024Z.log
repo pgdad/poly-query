@@ -1,3 +1,6 @@
 2026-10-10T18:40:26+00:00 wave wave-a-kernels-a1-20261010T184024Z: order=['arm64-asm', 'x86_64-asm']
 2026-10-10T18:40:26+00:00 [a-kernels-arm64-asm-a1-20261010T184024Z] agent started
 2026-10-10T18:40:31+00:00 [a-kernels-x86_64-asm-a1-20261010T184025Z] agent started
+2026-10-10T19:08:45+00:00 [a-kernels-arm64-asm-a1-20261010T184024Z] agent finished; collecting telemetry
+2026-10-10T19:08:45+00:00 [a-kernels-arm64-asm-a1-20261010T184024Z] validating (clean clone, sandboxed)
+2026-10-10T19:08:46+00:00 [a-kernels-arm64-asm-a1-20261010T184024Z] outcome=success cost=$4.7987362 turns=26 wall=1698.6s

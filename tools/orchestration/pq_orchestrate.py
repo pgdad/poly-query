@@ -673,6 +673,12 @@ make -C native-kernels clean >/dev/null 2>&1
 ( make -C native-kernels {target} ) > validate-kernels.log 2>&1; echo "test_exit=$?" > validate-status
 if [ "{target}" = "test" ]; then ( make -C native-kernels bench ) > validate-bench.log 2>&1; echo "bench_exit=$?" >> validate-status; fi
 """
+    if L["variant_prefix"] == "a64_":
+        # SVE code must be vector-length agnostic: sweep 128..2048-bit vectors under qemu.
+        script += """for vl in 16 32 64 128 256; do echo "VL=$vl"; \
+  qemu-aarch64-static -cpu max,sve-default-vector-length=$vl -L /usr/aarch64-linux-gnu \
+  native-kernels/build/aarch64-cross/kernel_test 800 2>&1 | grep -E 'kernels +(PASS|FAIL)'; done > validate-sve.log 2>&1
+"""
     (vscr / "validate.sh").write_text(script)
     t0 = time.time()
     sh([str(SANDBOX), str(vd), str(rd / "config"), str(vscr), "--", "bash", str(vscr / "validate.sh")], check=False,
@@ -691,11 +697,19 @@ if [ "{target}" = "test" ]; then ( make -C native-kernels bench ) > validate-ben
     bf = vd / "native-kernels/build/x86_64/bench.jsonl"
     if bf.exists():
         bench = [json.loads(l) for l in bf.read_text().splitlines() if l.strip().startswith("{")]
-    for f in ["validate-kernels.log", "validate-bench.log"]:
+    sve_vl: dict[str, bool] = {}
+    if (vd / "validate-sve.log").exists():
+        vl = None
+        for line in (vd / "validate-sve.log").read_text().splitlines():
+            if line.startswith("VL="):
+                vl = str(int(line[3:]) * 8)
+            elif vl and "a64_sve" in line:
+                sve_vl[vl] = "PASS" in line
+    for f in ["validate-kernels.log", "validate-bench.log", "validate-sve.log"]:
         if (vd / f).exists():
             shutil.copy(vd / f, rd / f)
     out = {"seconds": round(time.time() - t0, 1), "status": status, "variants": variants, "required": required,
-           "emulated": prefix == "a64_", "bench": bench}
+           "emulated": prefix == "a64_", "bench": bench, "sve_vector_lengths_bits": sve_vl or None}
     out["outcome"] = "success" if ok else ("build_failed" if not variants else "tests_failed")
     tel_path = rd / "telemetry.json"
     if tel_path.exists() and (json.loads(tel_path.read_text()).get("git") or {}).get("paths_outside_language_dir"):

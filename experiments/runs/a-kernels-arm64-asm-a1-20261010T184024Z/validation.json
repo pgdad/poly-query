@@ -1,0 +1,34 @@
+{
+ "seconds": 1.9,
+ "status": {
+  "test_exit": "0"
+ },
+ "variants": {
+  "a64_scalar": {
+   "kernels": 16,
+   "status": "PASS"
+  },
+  "a64_neon": {
+   "kernels": 16,
+   "status": "PASS"
+  },
+  "a64_sve": {
+   "kernels": 16,
+   "status": "PASS"
+  }
+ },
+ "required": [
+  "a64_scalar",
+  "a64_neon"
+ ],
+ "emulated": true,
+ "bench": [],
+ "sve_vector_lengths_bits": {
+  "128": true,
+  "256": true,
+  "512": true,
+  "1024": true,
+  "2048": true
+ },
+ "outcome": "success"
+}
