@@ -1,0 +1,144 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase5-go-a1-20261010T201830Z",
+ "language": "go",
+ "task": "phase5",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase5",
+ "prompt_sha256": "622b6a640c0fbbd519a0361b39d14dad9e53ea77c39c02040ff1810c9d733de4",
+ "session_id": "931d9c7f-35e9-490b-abb9-06c8f79e5ee4",
+ "tokens": {
+  "input": 412,
+  "output": 306580,
+  "cache_read": 68892457,
+  "cache_creation": 517499,
+  "thinking": null,
+  "thinking_estimated": 125287,
+  "source": "result events (summed over 3 segments)",
+  "api_messages": 206
+ },
+ "rate_limit": {
+  "events": 21,
+  "max_utilization": {
+   "seven_day": 0.13,
+   "five_hour": 0.73
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 24.051731400000012,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 210,
+ "result_segments": 3,
+ "assistant_messages": 450,
+ "tool_calls": {
+  "Bash": 190,
+  "Write": 15,
+  "Read": 1,
+  "ToolSearch": 1
+ },
+ "tool_calls_total": 207,
+ "tool_failures": 5,
+ "build_invocations": 71,
+ "build_failures_heuristic": 3,
+ "conformance_runs": 18,
+ "conformance_progress": [
+  [
+   0,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3323,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ]
+ ],
+ "repair_iterations": 17,
+ "time": {
+  "wall_seconds": 5583.3,
+  "model_api_seconds": 2719.3,
+  "tool_seconds": 1700.2,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 12,
+  "files_changed": 36,
+  "lines_added": 7790,
+  "lines_removed": 262,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "A background helper I'd started to wait for the large-data fuzz run was stopped at its time limit. It never exited because its process search matched its own command line. It needs no restart: the run it was waiting for had already finished and reported 0 mismatches on 120 queries, and I read that result directly before the final check. Nothing changes from the summary above, and everything is committed.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
