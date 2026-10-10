@@ -13,6 +13,7 @@ from ..datatypes import (
     TIMESTAMP,
     DataType,
     TypeKind,
+    common_numeric_type,
     common_type,
     comparable,
 )
@@ -52,19 +53,20 @@ def promote(expr: b.Expr, target: DataType) -> b.Expr:
     return b.Cast(target, expr, implicit=True)
 
 
-def _numeric_operand(expr: b.Expr, op: str) -> DataType:
-    """Type of an arithmetic operand; the null type acts as INT64."""
+def _numeric_operand(expr: b.Expr, op: str, other: DataType | None = None) -> DataType:
+    """Type of an arithmetic operand. The untyped NULL literal takes the type of
+    the other operand (INT64 if that is NULL, too)."""
     t = expr.type
     if t.is_null:
-        return INT64
+        return other if other is not None and other.is_numeric else INT64
     if not t.is_numeric:
         raise errors.type_error(f"operator {op} requires numeric operands, got {t.name}")
     return t
 
 
 def arithmetic(op: str, left: b.Expr, right: b.Expr) -> b.Expr:
-    lt = _numeric_operand(left, op)
-    rt = _numeric_operand(right, op)
+    lt = _numeric_operand(left, op, right.type)
+    rt = _numeric_operand(right, op, left.type)
     if TypeKind.FLOAT64 in (lt.kind, rt.kind):
         if op == "%":
             raise errors.type_error("operator % requires INT64 operands")
@@ -91,7 +93,8 @@ def arithmetic(op: str, left: b.Expr, right: b.Expr) -> b.Expr:
 
 
 def negate(op: str, operand: b.Expr) -> b.Expr:
-    t = _numeric_operand(operand, op)
+    """Unary minus/plus; preserves the operand's type (also the null type)."""
+    t = operand.type if operand.type.is_null else _numeric_operand(operand, op)
     return b.Unary(t, "neg" if op == "-" else "pos", operand)
 
 
@@ -99,14 +102,18 @@ def comparison(op: str, left: b.Expr, right: b.Expr) -> b.Expr:
     lt, rt = left.type, right.type
     if not comparable(lt, rt):
         raise errors.type_error(f"cannot compare {lt.name} with {rt.name}")
-    if lt.is_numeric and rt.is_numeric and lt.kind is not rt.kind:
-        if TypeKind.FLOAT64 in (lt.kind, rt.kind):
+    if lt.is_numeric and rt.is_numeric and lt != rt:
+        common = common_numeric_type(lt, rt)
+        if common.kind is TypeKind.FLOAT64:
             left, right = promote(left, FLOAT64), promote(right, FLOAT64)
-        else:  # INT64 vs DECIMAL
+        elif common.kind is TypeKind.DECIMAL:
+            # an INT64 operand is promoted to DECIMAL(18, s) of the other side and
+            # overflows if it then needs more than 18 digits (types.md §2);
+            # two DECIMALs are compared exactly by value
             if lt.kind is TypeKind.INT64:
-                left = promote(left, DECIMAL_18_0)
-            else:
-                right = promote(right, DECIMAL_18_0)
+                left = promote(left, common)
+            if rt.kind is TypeKind.INT64:
+                right = promote(right, common)
     elif lt.is_temporal and rt.is_temporal and lt.kind is not rt.kind:
         left, right = promote(left, TIMESTAMP), promote(right, TIMESTAMP)
     return b.Compare(BOOLEAN, op, left, right)

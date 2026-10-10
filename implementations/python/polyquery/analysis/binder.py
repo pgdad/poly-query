@@ -204,7 +204,9 @@ class Binder:
         nulls_first = (not item.descending) if item.nulls_first is None else item.nulls_first
         expr = item.expr
         position: int | None = None
-        if isinstance(expr, ast.NumberLit) and values.INT_RE.fullmatch(expr.text):
+        if isinstance(expr, ast.NumberLit) and values.INT_RE.fullmatch(expr.text) and expr.text[0] != "-":
+            # an unsigned integer literal is an ordinal; a folded negative
+            # literal is an ordinary (constant) expression
             k = int(expr.text)
             if not 1 <= k <= len(outputs):
                 raise errors.semantic_error(f"ORDER BY position {k} is out of range", **_pos(expr))

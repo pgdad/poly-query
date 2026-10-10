@@ -71,6 +71,19 @@ class QueryTests(EngineTestMixin, unittest.TestCase):
         for sql, code in cases.items():
             self.assertEqual(self.error_code(sql), code, sql)
 
+    def test_int_decimal_comparison_promotion(self):
+        self.assertEqual(self.rows("SELECT 1 = 1.0, 2 > 1.5, 0.10 = 0.1, 99999999999999999.9 > 0.01"),
+                         [[True, True, True, True]])
+        self.assertEqual(self.error_code("SELECT 100000000000000000 > 0.5"), "NUMERIC_OVERFLOW")
+
+    def test_null_literal_typing(self):
+        resp = self.query("SELECT -NULL, NULL * 1.5, NULL / 0")
+        self.assertEqual([c["type"] for c in resp["columns"]], ["STRING", "DECIMAL(18,2)", "INT64"])
+
+    def test_signed_order_by_literal_is_constant(self):
+        self.assertEqual(self.rows("SELECT id FROM people ORDER BY -1, id DESC"), [[3], [2], [1]])
+        self.assertEqual(self.error_code("SELECT id FROM people ORDER BY 0"), "SEMANTIC_ERROR")
+
     def test_limits(self):
         self.assertEqual(self.error_code("SELECT id FROM people", max_rows=2), "RESOURCE_LIMIT")
         self.assertEqual(self.error_code("SELECT PQ_SLEEP(2000)", timeout_ms=20), "TIMEOUT")

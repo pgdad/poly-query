@@ -20,6 +20,10 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(responses[2]["id"])
         self.assertEqual(responses[3]["rows"], [["a\nb"]])
 
+    def test_non_json_constants_and_unechoable_ids(self):
+        responses = self.run_lines('{"op":"reset","id":NaN}', '{"op":"tables","id":1e999}')
+        self.assertEqual([r["error"]["code"] for r in responses], ["INVALID_REQUEST", "INVALID_REQUEST"])
+
     def test_exec_array(self):
         out = io.BytesIO()
         run_exec(make_handler(), b'[{"op":"tables"},{"op":"bogus"}]', out)

@@ -103,11 +103,18 @@ cancellation and memory accounting are checked per batch; `PQ_SLEEP` sleeps in
   ASCII whitespace for BOOLEAN/INT64/DECIMAL/FLOAT64 (as the CAST table says)
   but not for DATE/TIMESTAMP. FLOAT64 → STRING uses Python's shortest
   round-trip `repr` (`-0.0` → `0.0`).
-* **Promotion**: an INT64 operand combined with a DECIMAL is promoted to
-  `DECIMAL(18,0)`; values with more than 18 digits raise `NUMERIC_OVERFLOW`
-  (also in comparisons, as types.md §2 states). Arithmetic involving the
-  untyped `NULL` literal types the NULL as INT64 (`NULL / 0` is an INT64 NULL).
-  `SUM(NULL)` is INT64, `AVG(NULL)` FLOAT64.
+* **Promotion**: in arithmetic an INT64 operand combined with a DECIMAL keeps
+  scale 0 (`DECIMAL(18,0)`, as `1.5 * 2` → `DECIMAL(18,1)` requires); in
+  comparisons an INT64 operand is promoted to `DECIMAL(18, s)` of the DECIMAL
+  side; if it then needs more than 18 digits that raises `NUMERIC_OVERFLOW`
+  (types.md §2). Two DECIMALs compare exactly by value. The untyped `NULL` literal in arithmetic
+  takes the other operand's type (INT64 if both are NULL); unary minus keeps the
+  null type. `SUM(NULL)` is INT64, `AVG(NULL)` FLOAT64.
+* **ORDER BY**: only an unsigned integer literal is an ordinal (`0` is out of
+  range); `ORDER BY -1` is a constant sort key.
+* **Requests**: `NaN`/`Infinity` make a request line invalid JSON; a request
+  whose `id` cannot be echoed (a number beyond the FLOAT64 range) is rejected
+  with `INVALID_REQUEST` before it is executed.
 * **Decimal division** computes the exact quotient and rounds once to FLOAT64.
   `AVG` over INT64/DECIMAL sums exactly before the single final division;
   float `SUM`/`AVG` use `math.fsum`.
