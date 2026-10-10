@@ -1,0 +1,119 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase2-common-lisp-a1-20261010T195221Z",
+ "language": "common-lisp",
+ "task": "phase2",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase2",
+ "prompt_sha256": "dd5fd46f9d58e1a25f44d0dd9491d7d9422e118ee0c16e3b403d43e12e2ea0ae",
+ "session_id": "b84d962a-2601-4c6f-aa79-6561b1f83e99",
+ "tokens": {
+  "input": 210,
+  "output": 204235,
+  "cache_read": 28973521,
+  "cache_creation": 400072,
+  "thinking": null,
+  "thinking_estimated": 85806,
+  "source": "result events (summed over 5 segments)",
+  "api_messages": 157
+ },
+ "rate_limit": {
+  "events": 24,
+  "max_utilization": {
+   "seven_day": 0.13,
+   "five_hour": 0.71
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 18.151204200000006,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 117,
+ "result_segments": 5,
+ "assistant_messages": 329,
+ "tool_calls": {
+  "Bash": 147,
+  "Write": 10,
+  "Agent": 1,
+  "ScheduleWakeup": 3,
+  "ListAgents": 1,
+  "ToolSearch": 1,
+  "SendMessage": 1
+ },
+ "tool_calls_total": 164,
+ "tool_failures": 0,
+ "build_invocations": 24,
+ "build_failures_heuristic": 2,
+ "conformance_runs": 12,
+ "conformance_progress": [
+  [
+   225,
+   411
+  ],
+  [
+   384,
+   411
+  ],
+  [
+   411,
+   411
+  ],
+  [
+   411,
+   411
+  ],
+  [
+   411,
+   411
+  ],
+  [
+   411,
+   411
+  ],
+  [
+   411,
+   411
+  ],
+  [
+   411,
+   411
+  ],
+  [
+   411,
+   411
+  ]
+ ],
+ "repair_iterations": 11,
+ "time": {
+  "wall_seconds": 4603.0,
+  "model_api_seconds": 2350.7,
+  "tool_seconds": 68.2,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 8,
+  "files_changed": 17,
+  "lines_added": 2765,
+  "lines_removed": 543,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Nothing is left to do: the review findings have been handled and the work is committed (latest commit `4967732`, working tree clean).\n\n- **The one confirmed bug is fixed.** `COALESCE` returned NULL when its answer was FALSE. It now returns FALSE, and a unit test covers it.\n- **Tests pass.** The conformance runner shows 225/225 for Phase 1 and 186/186 for Phase 2, with no failures, errors or not-implemented cases. `make test` also passes.\n- **The rest of the reviewer's list needed no code change.** Those items were behaviours the spec leaves open; I kept them and recorded the reasoning in the README. One new note there: an unused derived-table column is never evaluated, so `SELECT COUNT(*) FROM (SELECT 1/0 AS x FROM t) d` returns the row count instead of a division-by-zero error.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

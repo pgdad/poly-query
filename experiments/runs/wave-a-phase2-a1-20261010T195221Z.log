@@ -1,2 +1,6 @@
 2026-10-10T19:52:22+00:00 wave wave-a-phase2-a1-20261010T195221Z: order=['common-lisp']
 2026-10-10T19:52:22+00:00 [a-phase2-common-lisp-a1-20261010T195221Z] agent started
+2026-10-10T21:09:05+00:00 [a-phase2-common-lisp-a1-20261010T195221Z] agent finished; collecting telemetry
+2026-10-10T21:09:05+00:00 [a-phase2-common-lisp-a1-20261010T195221Z] validating (clean clone, sandboxed)
+2026-10-10T21:09:07+00:00 [a-phase2-common-lisp-a1-20261010T195221Z] outcome=success cost=$18.151204200000006 turns=117 wall=4603.0s
+2026-10-10T21:09:07+00:00 wave wave-a-phase2-a1-20261010T195221Z finished: common=success
