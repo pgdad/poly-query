@@ -4,8 +4,8 @@
     * nodes the planner marked for parallel execution (:partitions) run
       partitioned (polyquery.exec.parallel);
     * in `mode: vectorized` filters, projections and hash aggregation run on
-      column batches, sorts on primitive key columns
-      (polyquery.exec.vectorized);
+      column batches, hash joins probe batches (polyquery.exec.vjoin),
+      sorts use primitive key columns (polyquery.exec.vectorized);
     * everything else — and every node in `mode: row`, the unoptimized
       baseline — runs row at a time (polyquery.exec.operators,
       polyquery.exec.join).
@@ -14,11 +14,12 @@
   (:require [polyquery.exec.join]
             [polyquery.exec.operators :as ops]
             [polyquery.exec.parallel :as parallel]
-            [polyquery.exec.vectorized :as vectorized]))
+            [polyquery.exec.vectorized :as vectorized]
+            [polyquery.exec.vjoin]))
 
 (set! *warn-on-reflection* true)
 
-(def ^:private vectorized-ops #{:filter :project :hash-aggregate :sort})
+(def ^:private vectorized-ops #{:filter :project :hash-aggregate :sort :hash-join})
 
 (defn build
   "Compiles a physical plan node into a re-reducible of rows."

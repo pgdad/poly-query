@@ -66,6 +66,7 @@
 
 (definterface LongLookup
   (^long lookup [^long k] "Group id of non-NULL key k (added if new).")
+  (^long find [^long k] "Group id of key k, -1 if absent.")
   (^long keyLong [^long gid] "The key of a group (not the NULL group).")
   (^long nullGid [] "Group id of the NULL key, -1 if none.")
   (rehash []))
@@ -103,6 +104,13 @@
   LongLookup
   (keyLong [_ gid] (aget gid-keys gid))
   (nullGid [_] null-gid)
+  (find [_ k]
+    (loop [s (bit-and (mix k) mask)]
+      (let [g (aget slot-gids s)]
+        (cond
+          (zero? g) -1
+          (== k (aget slot-keys s)) (dec g)
+          :else (recur (bit-and (inc s) mask))))))
   (lookup [this k]
     (loop [s (bit-and (mix k) mask)]
       (let [g (aget slot-gids s)]
@@ -136,7 +144,9 @@
       (set! mask nmask)
       nil)))
 
-(defn- long-key-table []
+(defn long-key-table
+  "An empty LongKeyTable."
+  ^polyquery.exec.grouping.LongKeyTable []
   (LongKeyTable. (long-array 1024) (int-array 1024) 1023 (long-array 256) 0 -1))
 
 (definterface ObjLookup

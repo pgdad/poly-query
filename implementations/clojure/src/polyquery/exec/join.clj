@@ -80,7 +80,7 @@
                 :else acc)))
           init left))))))
 
-(defn- key-extractor
+(defn key-extractor
   "Compiles join keys into (fn [row]) → hashable key, or nil if any key
   value is NULL (NULL keys never match)."
   [env keys]
@@ -102,7 +102,7 @@
                   (recur (inc i)))
                 (vec out)))))))))
 
-(defn- hash-table
+(defn hash-table
   "Hash table key → ArrayList of rows over the rows of a build input."
   ^HashMap [rows key-of env]
   (let [table (HashMap.)

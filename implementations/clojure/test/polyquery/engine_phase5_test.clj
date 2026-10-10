@@ -46,6 +46,13 @@
               (maybe rnd 5 (str "n" (mod i 37)))
               (maybe rnd 5 (format "%.1f" (* 10.0 (.nextDouble rnd))))])))
 
+(def s-csv
+  (gen-csv ["k" "name" "w"] 60
+           (fn [^Random rnd i]
+             [(maybe rnd 5 (.nextInt rnd 40))
+              (maybe rnd 5 (str "n" (mod i 7)))
+              (maybe rnd 5 (format "%.1f" (* 10.0 (.nextDouble rnd))))])))
+
 (def t-schema
   [["id" :int64] ["g" :int64] ["k" :int64] ["d" (t/decimal 10 2)] ["f" :float64]
    ["s" :string] ["u" :string] ["b" :boolean] ["dt" :date] ["ts" :timestamp]])
@@ -65,7 +72,9 @@
   (delay (atom (-> catalog/empty-catalog
                    (load-table "t" t-csv t-schema {})
                    (load-table "trow" t-csv t-schema {:layout :row})
-                   (load-table "r" r-csv r-schema {})))))
+                   (load-table "r" r-csv r-schema {})
+                   (load-table "s" s-csv r-schema {})
+                   (load-table "small" (str/join "\n" (take 151 (str/split-lines t-csv))) t-schema {})))))
 
 (def configs
   [{:mode "row" :join "nested_loop" :threads 1 :optimize false}
@@ -124,6 +133,16 @@
    ["SELECT id FROM t WHERE g <> 0 AND k / g > 100" false]
    ["SELECT id, CASE WHEN g = 0 THEN NULL ELSE k / g END FROM t" false]
    ["SELECT id FROM t LIMIT 5" false]
+   ;; join reordering, constant folding, predicate simplification
+   ["SELECT a.id, b.k, s.name FROM small a, s, small b WHERE a.k % 40 = s.k AND b.id = a.id + 1 AND s.w > 8" false]
+   ["SELECT COUNT(*), SUM(small.d) FROM s x, s y, small WHERE small.k % 40 = x.k AND small.g = y.k" false]
+   ["SELECT x.k, y.k, z.w FROM s x, s y, s z WHERE x.k = z.k AND z.w > 5 AND y.name = x.name" false]
+   ["SELECT a.id, s.name, b.u FROM small a JOIN small b ON b.id = a.id LEFT JOIN s ON s.k = a.g WHERE a.g = 2" false]
+   ["SELECT COUNT(*) FROM s x CROSS JOIN s y WHERE x.w > 9" false]
+   ["SELECT small.id, x.n FROM small, (SELECT k, name AS n FROM s) x, s WHERE x.k = small.g AND s.k = small.g AND s.name = x.n" false]
+   ["SELECT id, 1 + 2 * 3, CASE WHEN 1 = 1 THEN 'a' END, ABS(-4.5) FROM t WHERE 2 > 1 AND (g = 1 OR 1 = 0)" false]
+   ["SELECT id FROM t WHERE TRUE AND NOT NOT (g = 3) AND (g = 3 OR FALSE) AND g = 3" false]
+   ["SELECT id FROM t WHERE k / 0 = 1 AND FALSE" false]
    ;; runtime errors
    ["SELECT id, k / g FROM t" false]
    ["SELECT SUM(k * 4611686018427387) FROM t" false]

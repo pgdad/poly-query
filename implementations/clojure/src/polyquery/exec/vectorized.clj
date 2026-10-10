@@ -36,7 +36,7 @@
   "Compiles plan node `plan` into a re-reducible of Batches."
   (fn [plan _env] (:op plan)))
 
-(defn- rows->batches
+(defn rows->batches
   "Batches over a re-reducible of rows."
   [rows]
   (ops/reducible

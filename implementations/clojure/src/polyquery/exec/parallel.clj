@@ -29,7 +29,8 @@
             [polyquery.exec.join :as join]
             [polyquery.exec.operators :as ops]
             [polyquery.exec.sort :as sort]
-            [polyquery.exec.vectorized :as vec])
+            [polyquery.exec.vectorized :as vec]
+            [polyquery.exec.vjoin :as vjoin])
   (:import (java.util ArrayDeque ArrayList Arrays Comparator)
            (java.util.concurrent Callable ExecutionException ExecutorService Executors Future
                                  ThreadFactory)
@@ -103,7 +104,9 @@
     :table-scan node
     (:filter :project :subquery-scan) (update node :input share-builds env)
     :hash-join (-> node
-                   (assoc :prebuilt (join/build-hash-table node env))
+                   (assoc :prebuilt (if (and (= :vectorized (:mode env)) (vjoin/vectorizable? node))
+                                      (vjoin/build-table node env)
+                                      (join/build-hash-table node env)))
                    (update (probe-side node) share-builds env))))
 
 (defn- split-ranges
