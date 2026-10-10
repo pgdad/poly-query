@@ -29,6 +29,11 @@
  *    H = sum(x >> 32) (arithmetic). sum(x) = H*2^32 + L, L = sum of low
  *    halves = (S - H*2^32) mod 2^64 (exact while < 2^64); chunks of <= 2^28
  *    rows are folded into a 128-bit scalar total.
+ *  - count_i64 without validity: direct loop, vpcmpq -> k and merge-masked
+ *    "acc -= -1" per 8 rows (no kmov/popcnt), see KCNT.
+ *  - No-validity streaming loops (count, sum_i64, sum_f64, minmax) peel up to
+ *    7 leading rows so the main loop's 64-byte loads are cache-line aligned
+ *    (malloc returns 16 mod 64; split loads cost up to 25% from DRAM).
  *  - hash_i64 uses vpmullq (DQ) directly.
  *
  * Internal helpers use custom conventions (documented at each helper) and do
@@ -119,6 +124,26 @@ ENDF lvp
         bzhi    \cnt, \dst, \dst
 .endm
 
+/* Alignment peel (no-validity streaming loops): \h = number of leading rows
+ * (0..7) until rdi is 64-byte aligned, capped at \rem; 0 if rdi is not
+ * 8-byte aligned (then no row boundary is 64-byte aligned). k1 = lanes < h.
+ * Aligned 64-byte loads measured up to 25% faster when streaming from DRAM.
+ * clobbers \h, \t (32-bit regs) and flags; ZF set iff h == 0. */
+.macro PEELMASK rem, h, h32, t
+        mov     %edi, \h32
+        neg     \h32
+        and     $63, \h32
+        shr     $3, \h32
+        test    $7, %dil
+        cmovnz  \t, \h32               /* \t must hold 0 */
+        cmp     \rem, \h
+        cmova   \rem, \h
+        mov     $0xff, \t
+        bzhi    \h32, \t, \t
+        kmovb   \t, %k1
+        test    \h32, \h32
+.endm
+
 /* ------------------------------------------------------------------------
  * Predicate mask routines kop_*: in rdi = block ptr, esi = len (1..64),
  * zmm8/zmm9 = bcast a/b. out rax = mask with exactly len bits.
@@ -202,6 +227,76 @@ kop_table:
         .size   kop_table, . - kop_table
         .text
 
+/* Direct counters for count_i64 without validity: in rdi = data,
+ * rdx = rows (>= 1), zmm8/zmm9 = bcast a/b. out rax = count.
+ * Alignment peel (masked), 32 rows per step: vpcmpq -> k, merge-masked
+ * "acc -= -1" (no kmov/popcnt), then masked 8-row tail groups.
+ * clobbers rcx, rdx, rdi, r10, r11, zmm0, zmm3-zmm7, k1-k4. */
+.macro KCNT name, imm
+LFUNC \name
+        vpxorq  %zmm4, %zmm4, %zmm4
+        vpxorq  %zmm5, %zmm5, %zmm5
+        vpxorq  %zmm6, %zmm6, %zmm6
+        vpxorq  %zmm7, %zmm7, %zmm7
+        vpternlogd $0xff, %zmm3, %zmm3, %zmm3   /* all ones = -1 */
+        xor     %r11d, %r11d
+        PEELMASK %rdx, %rcx, %ecx, %r11d
+        jz      1f
+        vmovdqu64 (%rdi), %zmm0{%k1}{z}
+        kmovb   %k1, %k4
+        KPRED   \imm, %zmm0, %k1, {%k4}
+        vpsubq  %zmm3, %zmm4, %zmm4{%k1}
+        lea     (%rdi,%rcx,8), %rdi
+        sub     %rcx, %rdx
+1:      cmp     $32, %rdx
+        jb      2f
+        KPRED   \imm, 0(%rdi), %k1
+        KPRED   \imm, 64(%rdi), %k2
+        KPRED   \imm, 128(%rdi), %k3
+        KPRED   \imm, 192(%rdi), %k4
+        vpsubq  %zmm3, %zmm4, %zmm4{%k1}
+        vpsubq  %zmm3, %zmm5, %zmm5{%k2}
+        vpsubq  %zmm3, %zmm6, %zmm6{%k3}
+        vpsubq  %zmm3, %zmm7, %zmm7{%k4}
+        add     $256, %rdi
+        sub     $32, %rdx
+        jmp     1b
+2:      test    %rdx, %rdx
+        jz      3f
+        LANES8  %edx, %r10d
+        kmovb   %r10d, %k4
+        vmovdqu64 (%rdi), %zmm0{%k4}{z}
+        KPRED   \imm, %zmm0, %k1, {%k4}
+        vpsubq  %zmm3, %zmm5, %zmm5{%k1}
+        add     $64, %rdi
+        sub     $8, %rdx
+        jg      2b
+3:      vpaddq  %zmm5, %zmm4, %zmm4
+        vpaddq  %zmm7, %zmm6, %zmm6
+        vpaddq  %zmm6, %zmm4, %zmm4
+        HSUMZ   %zmm4, %ymm4, %xmm4, %ymm0, %xmm0, %rax
+        ret
+ENDF \name
+.endm
+
+        KCNT kcnt_eq, 0
+        KCNT kcnt_ne, 4
+        KCNT kcnt_lt, 6
+        KCNT kcnt_le, 5
+        KCNT kcnt_gt, 1
+        KCNT kcnt_ge, 2
+        KCNT kcnt_bt, 99
+
+        .section .rodata
+        .p2align 2
+        .type   kcnt_table, @object
+kcnt_table:
+        .long   kcnt_eq - kcnt_table, kcnt_ne - kcnt_table, kcnt_lt - kcnt_table
+        .long   kcnt_le - kcnt_table, kcnt_gt - kcnt_table, kcnt_ge - kcnt_table
+        .long   kcnt_bt - kcnt_table
+        .size   kcnt_table, . - kcnt_table
+        .text
+
 /* ------------------------------------------------------------------------
  * Predicate driver: mode 0 filter_i64, 1 filter_i64_bitmap, 2 count_i64.
  * Args: rdi=data rsi=validity rdx=n ecx=op r8=a r9=b [rsp+8]=out.
@@ -234,6 +329,21 @@ kop_table:
 .if \mode == 0
         vmovdqu32 iota16(%rip), %zmm5
         vpbroadcastd c_sixteen_d(%rip), %zmm6
+.endif
+.if \mode == 2
+        test    %r13, %r13
+        jnz     .Lstart\@
+        test    %r14, %r14
+        jz      .Lstart\@
+        lea     kcnt_table(%rip), %rax
+        movslq  (%rax,%rcx,4), %r10
+        add     %rax, %r10
+        mov     %r12, %rdi
+        mov     %r14, %rdx
+        call    *%r10
+        mov     %rax, %rbx
+        jmp     .Ldone\@
+.Lstart\@:
 .endif
         test    %r14, %r14
         jz      .Ldone\@
@@ -514,6 +624,19 @@ FUNC pqk_x86_avx512_sum_i64
         xor     %r9d, %r9d
         mov     %rcx, %r11
         mov     %rdx, %r10
+        test    %rsi, %rsi
+        jnz     .Ls_chunk
+        xor     %edx, %edx
+        PEELMASK %r10, %rcx, %ecx, %edx         /* scalar head to 64B alignment */
+        jz      .Ls_chunk
+        sub     %rcx, %r10
+1:      mov     (%rdi), %rax
+        cqo
+        add     %rax, %r8
+        adc     %rdx, %r9
+        add     $8, %rdi
+        dec     %ecx
+        jnz     1b
 .Ls_chunk:
         test    %r10, %r10
         jz      .Ls_fin
@@ -622,6 +745,13 @@ FUNC pqk_x86_avx512_sum_f64
         mov     %rdx, %r10
         test    %rsi, %rsi
         jnz     .Lf_v32
+        xor     %edx, %edx
+        PEELMASK %r10, %rcx, %ecx, %edx
+        jz      .Lf_n32
+        vmovupd (%rdi), %zmm4{%k1}{z}
+        vaddpd  %zmm4, %zmm0, %zmm0
+        lea     (%rdi,%rcx,8), %rdi
+        sub     %rcx, %r10
 .Lf_n32:
         cmp     $32, %r10
         jb      .Lf_tail
@@ -694,6 +824,14 @@ FUNC pqk_x86_avx512_minmax_i64
         test    %rsi, %rsi
         jnz     .Lm_v16
         mov     %rdx, %r9
+        xor     %edx, %edx
+        PEELMASK %r10, %rax, %eax, %edx
+        jz      .Lm_n16
+        vmovdqu64 (%rdi), %zmm4{%k1}{z}
+        vpminsq %zmm4, %zmm0, %zmm0{%k1}
+        vpmaxsq %zmm4, %zmm1, %zmm1{%k1}
+        lea     (%rdi,%rax,8), %rdi
+        sub     %rax, %r10
 .Lm_n16:
         cmp     $16, %r10
         jb      .Lm_tail
@@ -789,6 +927,14 @@ FUNC pqk_x86_avx512_minmax_f64
         test    %rsi, %rsi
         jnz     .Lfm_v16
         mov     %rdx, %r9
+        xor     %edx, %edx
+        PEELMASK %r10, %rax, %eax, %edx
+        jz      .Lfm_n16
+        vmovupd (%rdi), %zmm4{%k1}{z}
+        vminpd  %zmm0, %zmm4, %zmm0{%k1}
+        vmaxpd  %zmm1, %zmm4, %zmm1{%k1}
+        lea     (%rdi,%rax,8), %rdi
+        sub     %rax, %r10
 .Lfm_n16:
         cmp     $16, %r10
         jb      .Lfm_tail
