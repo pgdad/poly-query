@@ -1,0 +1,223 @@
+package polyquery;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import polyquery.common.ErrorCode;
+import polyquery.common.PolyQueryException;
+import polyquery.engine.Engine;
+import polyquery.engine.EngineConfig;
+import polyquery.engine.Version;
+import polyquery.json.JsonException;
+import polyquery.json.JsonParser;
+import polyquery.json.JsonWriter;
+import polyquery.protocol.Logger;
+import polyquery.protocol.RequestHandler;
+
+/** Command-line entry point (protocol.md §2). */
+public final class Main {
+    private static final Set<String> VALUE_OPTIONS = Set.of(
+            "--data-dir", "--max-query-memory-mb", "--max-ingest-bytes", "--max-table-rows", "--max-join-rows",
+            "--threads", "--log-level", "--native-kernels", "--request", "--host", "--port", "--workers",
+            "--queue-depth", "--query-timeout-ms", "--shutdown-grace-ms", "--max-request-bytes");
+    private static final Set<String> FLAG_OPTIONS = Set.of("--enable-test-functions");
+    private static final long STACK_SIZE = 512L << 20;
+
+    private Main() {
+    }
+
+    private static final class UsageException extends Exception {
+        UsageException(String msg) {
+            super(msg);
+        }
+    }
+
+    public static void main(String[] args) {
+        int[] exit = {0};
+        Thread t = new Thread(null, () -> exit[0] = run(args), "polyquery-main", STACK_SIZE);
+        t.start();
+        try {
+            t.join();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        System.exit(exit[0]);
+    }
+
+    static int run(String[] args) {
+        PrintStream stdout = new PrintStream(System.out, false, StandardCharsets.UTF_8);
+        if (args.length == 0) {
+            System.err.println("usage: polyquery (version|capabilities|session|exec|serve) [options]");
+            return 2;
+        }
+        String mode = args[0];
+        Map<String, String> opts;
+        try {
+            opts = parseOptions(args);
+            if (!List.of("version", "capabilities", "session", "exec", "serve").contains(mode)) {
+                throw new UsageException("unknown command '" + mode + "'");
+            }
+            switch (mode) {
+                case "version" -> {
+                    stdout.println(JsonWriter.write(withOk(Version.versionFields())));
+                    stdout.flush();
+                    return 0;
+                }
+                case "capabilities" -> {
+                    stdout.println(JsonWriter.write(withOk(Version.capabilityFields())));
+                    stdout.flush();
+                    return 0;
+                }
+                case "serve" -> {
+                    System.err.println("serve: the HTTP server (Phase 4) is not implemented by this engine");
+                    return 1;
+                }
+                default -> {
+                }
+            }
+            Logger.Level level = Logger.parseLevel(opts.getOrDefault("--log-level", "info"));
+            if (level == null) {
+                throw new UsageException("invalid --log-level");
+            }
+            Logger log = new Logger(level, System.err);
+            EngineConfig config = config(opts);
+            if (!Files.isDirectory(config.dataDir())) {
+                System.err.println("data directory does not exist: " + config.dataDir());
+                return 1;
+            }
+            RequestHandler handler = new RequestHandler(new Engine(config), log);
+            if (mode.equals("session")) {
+                return session(handler, stdout);
+            }
+            String request = opts.get("--request");
+            if (request == null) {
+                throw new UsageException("exec requires --request FILE");
+            }
+            return exec(handler, request, stdout);
+        } catch (UsageException e) {
+            System.err.println("polyquery: " + e.getMessage());
+            return 2;
+        }
+    }
+
+    private static Map<String, Object> withOk(Map<String, Object> fields) {
+        Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("ok", true);
+        m.putAll(fields);
+        return m;
+    }
+
+    private static Map<String, String> parseOptions(String[] args) throws UsageException {
+        Map<String, String> opts = new HashMap<>();
+        for (int i = 1; i < args.length; i++) {
+            String a = args[i];
+            String value = null;
+            int eq = a.indexOf('=');
+            if (a.startsWith("--") && eq > 0) {
+                value = a.substring(eq + 1);
+                a = a.substring(0, eq);
+            }
+            if (FLAG_OPTIONS.contains(a)) {
+                if (value != null) {
+                    throw new UsageException("option " + a + " takes no value");
+                }
+                opts.put(a, "true");
+            } else if (VALUE_OPTIONS.contains(a)) {
+                if (value == null) {
+                    if (i + 1 >= args.length) {
+                        throw new UsageException("option " + a + " requires a value");
+                    }
+                    value = args[++i];
+                }
+                opts.put(a, value);
+            } else {
+                throw new UsageException("unknown option '" + args[i] + "'");
+            }
+        }
+        return opts;
+    }
+
+    private static long longOpt(Map<String, String> opts, String name, long dflt, long min) throws UsageException {
+        String v = opts.get(name);
+        if (v == null) {
+            return dflt;
+        }
+        try {
+            long x = Long.parseLong(v.trim());
+            if (x < min) {
+                throw new UsageException("option " + name + " must be >= " + min);
+            }
+            return x;
+        } catch (NumberFormatException e) {
+            throw new UsageException("option " + name + " requires an integer");
+        }
+    }
+
+    private static EngineConfig config(Map<String, String> opts) throws UsageException {
+        Path dataDir = Path.of(opts.getOrDefault("--data-dir", ".")).toAbsolutePath().normalize();
+        long memMb = longOpt(opts, "--max-query-memory-mb", EngineConfig.DEFAULT_QUERY_MEMORY_MB, 1);
+        long memBytes = Math.min(memMb << 20, (long) (Runtime.getRuntime().maxMemory() * 0.7));
+        return new EngineConfig(dataDir, opts.containsKey("--enable-test-functions"), memBytes,
+                longOpt(opts, "--max-ingest-bytes", EngineConfig.DEFAULT_INGEST_BYTES, 0),
+                longOpt(opts, "--max-table-rows", EngineConfig.DEFAULT_TABLE_ROWS, 0),
+                longOpt(opts, "--max-join-rows", EngineConfig.DEFAULT_JOIN_ROWS, 0),
+                (int) longOpt(opts, "--threads", Runtime.getRuntime().availableProcessors(), 1));
+    }
+
+    private static int session(RequestHandler handler, PrintStream out) {
+        try (BufferedReader in = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8), 1 << 16)) {
+            String line;
+            while ((line = in.readLine()) != null) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                writeLine(out, handler.handleLine(line));
+            }
+        } catch (IOException e) {
+            System.err.println("polyquery: I/O error on stdin: " + e.getMessage());
+            return 1;
+        }
+        return 0;
+    }
+
+    private static int exec(RequestHandler handler, String request, PrintStream out) {
+        String text;
+        try {
+            byte[] bytes = request.equals("-") ? System.in.readAllBytes() : Files.readAllBytes(Path.of(request));
+            text = new String(bytes, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            System.err.println("polyquery: cannot read request: " + e.getMessage());
+            return 1;
+        }
+        Object parsed;
+        try {
+            parsed = JsonParser.parse(text);
+        } catch (JsonException e) {
+            writeLine(out, RequestHandler.error(null,
+                    new PolyQueryException(ErrorCode.INVALID_REQUEST, "malformed JSON: " + e.getMessage())));
+            return 0;
+        }
+        if (parsed instanceof List<?> list) {
+            for (Object req : list) {
+                writeLine(out, handler.handle(req));
+            }
+        } else {
+            writeLine(out, handler.handle(parsed));
+        }
+        return 0;
+    }
+
+    private static void writeLine(PrintStream out, String line) {
+        out.print(line);
+        out.print('\n');
+        out.flush();
+    }
+}
