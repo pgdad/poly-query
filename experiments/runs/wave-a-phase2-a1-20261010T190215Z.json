@@ -25,5 +25,25 @@
   1.2421875,
   1.72216796875,
   2.07470703125
+ ],
+ "finished": "2026-10-10T19:37:13+00:00",
+ "loadavg_end": [
+  2.18115234375,
+  2.20849609375,
+  2.0546875
+ ],
+ "results": [
+  {
+   "run_id": "a-phase2-clojure-a1-20261010T190215Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-phase2-java-a1-20261010T190217Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-phase2-go-a1-20261010T190216Z",
+   "outcome": "success"
+  }
  ]
 }

@@ -8,3 +8,7 @@
 2026-10-10T19:30:34+00:00 [a-phase2-java-a1-20261010T190217Z] agent finished; collecting telemetry
 2026-10-10T19:30:34+00:00 [a-phase2-java-a1-20261010T190217Z] validating (clean clone, sandboxed)
 2026-10-10T19:30:36+00:00 [a-phase2-java-a1-20261010T190217Z] outcome=success cost=$11.841913400000001 turns=102 wall=1685.1s
+2026-10-10T19:37:11+00:00 [a-phase2-go-a1-20261010T190216Z] agent finished; collecting telemetry
+2026-10-10T19:37:11+00:00 [a-phase2-go-a1-20261010T190216Z] validating (clean clone, sandboxed)
+2026-10-10T19:37:13+00:00 [a-phase2-go-a1-20261010T190216Z] outcome=success cost=$12.865657600000006 turns=114 wall=2086.9s
+2026-10-10T19:37:13+00:00 wave wave-a-phase2-a1-20261010T190215Z finished: clojure=success, java=success, go=success
