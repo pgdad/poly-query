@@ -15,12 +15,15 @@ import (
 	"time"
 
 	"polyquery/internal/analyzer"
+	"polyquery/internal/catalog"
 	"polyquery/internal/errs"
 	"polyquery/internal/exec"
+	"polyquery/internal/index"
 	"polyquery/internal/ingest"
 	"polyquery/internal/optimizer"
 	"polyquery/internal/physical"
 	"polyquery/internal/plan"
+	"polyquery/internal/pqcf"
 	"polyquery/internal/sql/ast"
 	"polyquery/internal/sql/parser"
 	"polyquery/internal/storage"
@@ -30,7 +33,7 @@ import (
 // Version information.
 const (
 	Name            = "polyquery-go"
-	Version         = "0.1.0"
+	Version         = "0.3.0"
 	ProtocolVersion = 1
 	SpecVersion     = "1.0.0"
 )
@@ -39,6 +42,7 @@ const (
 var Capabilities = []string{
 	"phase1", "ingest.csv", "ingest.json", "ingest.jsonl", "sql.basic", "test.functions",
 	"phase2", "sql.groupby", "sql.join", "sql.functions", "sql.subquery", "sql.cte", "sql.correlated_subquery",
+	"phase3", "storage.pqcf", "storage.mmap", "index.hash", "index.btree",
 }
 
 // Config holds engine-wide settings (CLI options).
@@ -69,7 +73,7 @@ func DefaultConfig() Config {
 // Engine is a PolyQuery database instance.
 type Engine struct {
 	cfg     Config
-	catalog *storage.Catalog
+	catalog *catalog.Catalog
 }
 
 // New creates an engine with an empty catalog.
@@ -77,14 +81,14 @@ func New(cfg Config) *Engine {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Engine{cfg: cfg, catalog: storage.NewCatalog()}
+	return &Engine{cfg: cfg, catalog: catalog.New()}
 }
 
 // Config returns the engine configuration.
 func (e *Engine) Config() Config { return e.cfg }
 
 // Catalog returns the engine catalog.
-func (e *Engine) Catalog() *storage.Catalog { return e.catalog }
+func (e *Engine) Catalog() *catalog.Catalog { return e.catalog }
 
 // ---------------------------------------------------------------- loading
 
@@ -95,6 +99,7 @@ type LoadRequest struct {
 	Data    *string
 	Replace bool
 	Options ingest.Options
+	Build   storage.BuildOptions
 }
 
 // Load ingests data and publishes it atomically as a table.
@@ -117,11 +122,12 @@ func (e *Engine) Load(req LoadRequest) (*storage.Table, error) {
 	opts := req.Options
 	opts.MaxRows = e.cfg.MaxTableRows
 	start := time.Now()
-	t, err := ingest.Load(req.Table, data, opts)
+	d, err := ingest.Load(data, opts)
 	if err != nil {
 		return nil, err
 	}
-	if err := e.catalog.Put(t, req.Replace); err != nil {
+	t := storage.Build(req.Table, d, req.Build)
+	if err := e.catalog.Put(t, nil, req.Replace); err != nil {
 		return nil, err
 	}
 	e.cfg.Logger.Info("table loaded", "table", t.Name, "rows", t.Rows, "duration_ms", time.Since(start).Milliseconds())
@@ -190,6 +196,7 @@ type QueryOptions struct {
 	Timeout    time.Duration
 	CountOnly  bool   // do not retain rows (result: "count")
 	NoOptimize bool   // skip logical optimization (optimize: false)
+	NoIndexes  bool   // never use indexes (use_indexes: false)
 	Join       string // forced join algorithm ("", "auto", "hash", "nested_loop")
 }
 
@@ -220,6 +227,21 @@ func (e *Engine) Query(ctx context.Context, sql string, opts QueryOptions) (*Res
 		}
 		text := types.StringValue(physical.ExplainText(p))
 		return &Result{Columns: []plan.Column{{Name: "plan", Type: types.String}}, Rows: []types.Row{{text}}, RowCount: 1}, nil
+	case *ast.CreateIndex:
+		kind := index.BTree
+		if s.Using == "HASH" {
+			kind = index.Hash
+		}
+		def := index.Def{Name: s.Name, Column: s.Column, Kind: kind}
+		if err := e.catalog.CreateIndex(def, s.Table, s.IfNotExists); err != nil {
+			return nil, err
+		}
+		return &Result{Columns: []plan.Column{}, Rows: []types.Row{}}, nil
+	case *ast.DropIndex:
+		if err := e.catalog.DropIndex(s.Name, s.IfExists); err != nil {
+			return nil, err
+		}
+		return &Result{Columns: []plan.Column{}, Rows: []types.Row{}}, nil
 	}
 	return nil, unsupportedStatement(stmt)
 }
@@ -246,17 +268,16 @@ func (e *Engine) Explain(sql string, opts QueryOptions) (*physical.Object, error
 
 func unsupportedStatement(stmt ast.Statement) error {
 	switch stmt.(type) {
-	case *ast.CreateIndex:
-		return errs.New(errs.Unsupported, "CREATE INDEX is not supported (no index capability)")
-	case *ast.DropIndex:
-		return errs.New(errs.Unsupported, "DROP INDEX is not supported (no index capability)")
+	case *ast.CreateIndex, *ast.DropIndex:
+		return errs.New(errs.InvalidRequest, "only queries can be explained")
 	}
 	return errs.New(errs.Unsupported, "statement %T is not supported", stmt)
 }
 
 // plan runs semantic analysis, logical optimization and physical planning.
 func (e *Engine) plan(q *ast.Query, opts QueryOptions) (*physical.Plan, error) {
-	logical, err := analyzer.AnalyzeQuery(q, e.catalog, analyzer.Config{
+	snap := e.catalog.Snapshot()
+	logical, err := analyzer.AnalyzeQuery(q, snap, analyzer.Config{
 		TestFunctions: e.cfg.TestFunctions,
 		EvalConst:     exec.EvalConstant,
 	})
@@ -266,7 +287,12 @@ func (e *Engine) plan(q *ast.Query, opts QueryOptions) (*physical.Plan, error) {
 	if !opts.NoOptimize {
 		logical = optimizer.Optimize(logical)
 	}
-	return physical.Build(logical, physical.Options{Join: opts.Join})
+	return physical.Build(logical, physical.Options{
+		Join:       opts.Join,
+		UseIndexes: !opts.NoIndexes,
+		Indexes:    snap.IndexesOf,
+		EvalConst:  exec.EvalConstant,
+	})
 }
 
 // execute runs a physical plan and collects its result.
@@ -311,4 +337,101 @@ func (e *Engine) execute(ctx context.Context, p *physical.Plan, opts QueryOption
 		return nil, exec.ContextError(err)
 	}
 	return res, nil
+}
+
+// ---------------------------------------------------------------- storage
+
+// OpenRequest describes an open operation (a PQCF file becomes a table).
+type OpenRequest struct {
+	Table      string
+	Path       string
+	Replace    bool
+	Mmap       bool
+	Layout     storage.Layout
+	Dictionary bool
+}
+
+// Open reads a PQCF file, rebuilds the indexes listed in it and publishes
+// the table atomically.
+func (e *Engine) Open(req OpenRequest) (*storage.Table, error) {
+	if !req.Replace && e.catalog.Exists(req.Table) {
+		return nil, errs.New(errs.AlreadyExists, "table %q already exists", req.Table)
+	}
+	full, err := e.ResolvePath(req.Path)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(full)
+	if err != nil {
+		return nil, fileError(req.Path, err)
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err == nil && st.IsDir() {
+		return nil, errs.New(errs.IOError, "%q is a directory", req.Path)
+	}
+	start := time.Now()
+	t, defs, err := pqcf.Read(f, req.Table, pqcf.ReadOptions{
+		Mmap: req.Mmap, Layout: req.Layout, Dictionary: req.Dictionary, MaxRows: e.cfg.MaxTableRows,
+	})
+	if err != nil {
+		return nil, err
+	}
+	indexes := make([]*index.Index, 0, len(defs))
+	for _, def := range defs {
+		ix, err := index.Build(def, t)
+		if err != nil {
+			return nil, err
+		}
+		indexes = append(indexes, ix)
+	}
+	if err := e.catalog.Put(t, indexes, req.Replace); err != nil {
+		return nil, err
+	}
+	e.cfg.Logger.Info("table opened", "table", t.Name, "rows", t.Rows, "duration_ms", time.Since(start).Milliseconds())
+	return t, nil
+}
+
+// SaveRequest describes a save operation.
+type SaveRequest struct {
+	Table        string
+	Path         string
+	RowGroupSize int
+	Encoding     string
+}
+
+// Save writes a table (and its index definitions) as a PQCF file,
+// atomically replacing any existing file. It returns the file size.
+func (e *Engine) Save(req SaveRequest) (int64, error) {
+	entry, ok := e.catalog.Snapshot().Entry(req.Table)
+	if !ok {
+		return 0, errs.New(errs.NotFound, "table %q not found", req.Table)
+	}
+	full, err := e.ResolvePath(req.Path)
+	if err != nil {
+		return 0, err
+	}
+	defs := make([]index.Def, len(entry.Indexes))
+	for i, ix := range entry.Indexes {
+		defs[i] = ix.Def
+	}
+	return pqcf.Write(full, entry.Table, defs, pqcf.WriteOptions{
+		RowGroupSize: req.RowGroupSize, Encoding: req.Encoding, Writer: Name + " " + Version,
+	})
+}
+
+// Stats returns a table and the statistics of all its columns.
+func (e *Engine) Stats(name string) (*storage.Table, []storage.ColumnStats, error) {
+	t, ok := e.catalog.Get(name)
+	if !ok {
+		return nil, nil, errs.New(errs.NotFound, "table %q not found", name)
+	}
+	out := make([]storage.ColumnStats, len(t.Columns))
+	for i := range t.Columns {
+		st, err := t.ColumnStats(i)
+		if err != nil {
+			return nil, nil, err
+		}
+		out[i] = st
+	}
+	return t, out, nil
 }

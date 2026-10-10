@@ -109,17 +109,14 @@ func (p *planner) node(n plan.Node, req idset) (Node, error) {
 	}
 	switch x := n.(type) {
 	case *plan.Scan:
-		s := &TableScan{Table: x.Table}
-		for i, c := range x.Cols {
-			if req[c.ID] {
-				s.Ords = append(s.Ords, i)
-				s.Cols = append(s.Cols, c)
-			}
-		}
-		return s, nil
+		ords, cols := scanColumns(x, req)
+		return &TableScan{Table: x.Table, Ords: ords, Cols: cols}, nil
 	case *plan.Values:
 		return &Values{Rows: x.Rows, Cols: x.Cols}, nil
 	case *plan.Filter:
+		if scan, ok := x.Input.(*plan.Scan); ok {
+			return p.scanFilter(x, scan, req), nil
+		}
 		in, err := p.node(x.Input, with(req, x.Pred))
 		if err != nil {
 			return nil, err
@@ -301,7 +298,7 @@ func (p *planner) join(j *plan.Join, req idset) (Node, error) {
 		return &NestedLoopJoin{Kind: j.Kind, Left: left, Right: right, Cond: j.Cond}, nil
 	}
 	hj.Residual = plan.And(residual)
-	hj.BuildLeft = j.Kind == plan.JoinInner && estimate(j.Left) < estimate(j.Right)
+	hj.BuildLeft = j.Kind == plan.JoinInner && p.estimate(j.Left) < p.estimate(j.Right)
 	return hj, nil
 }
 
@@ -343,17 +340,22 @@ func sideOf(e plan.Expr, left, right idset) int {
 }
 
 // estimate is a coarse cardinality estimate used to pick the hash join
-// build side.
-func estimate(n plan.Node) float64 {
+// build side; filters directly above scans are estimated from statistics.
+func (p *planner) estimate(n plan.Node) float64 {
 	switch x := n.(type) {
 	case *plan.Scan:
 		return float64(x.Table.Rows)
 	case *plan.Values:
 		return float64(len(x.Rows))
 	case *plan.Filter:
-		return estimate(x.Input) / 3
+		if s, ok := x.Input.(*plan.Scan); ok {
+			conj := plan.Conjuncts(x.Pred)
+			sel := p.filterSelectivity(s.Table, conj, p.sargs(conj, scanOrds(s)))
+			return float64(s.Table.Rows) * sel
+		}
+		return p.estimate(x.Input) * defaultSelectivity
 	case *plan.Join:
-		l, r := estimate(x.Left), estimate(x.Right)
+		l, r := p.estimate(x.Left), p.estimate(x.Right)
 		if x.Kind == plan.JoinCross {
 			return l * r
 		}
@@ -362,10 +364,64 @@ func estimate(n plan.Node) float64 {
 		if len(x.Keys) == 0 {
 			return 1
 		}
-		return estimate(x.Input) / 2
+		return p.estimate(x.Input) / 2
 	}
 	if c := n.Children(); len(c) == 1 {
-		return estimate(c[0])
+		return p.estimate(c[0])
 	}
 	return 1
+}
+
+// scanOrds maps a scan's column IDs to table column ordinals.
+func scanOrds(s *plan.Scan) map[plan.ColumnID]int {
+	ords := make(map[plan.ColumnID]int, len(s.Cols))
+	for i, c := range s.Cols {
+		ords[c.ID] = i
+	}
+	return ords
+}
+
+// scanColumns selects the table columns of a scan that are in req (column
+// pruning).
+func scanColumns(s *plan.Scan, req idset) ([]int, []plan.Column) {
+	var ords []int
+	var cols []plan.Column
+	for i, c := range s.Cols {
+		if req[c.ID] {
+			ords = append(ords, i)
+			cols = append(cols, c)
+		}
+	}
+	return ords, cols
+}
+
+// scanFilter plans a filter directly above a table scan: it uses an index
+// when one is selective enough (the conjuncts the lookup answers are
+// dropped, the rest stay in a filter above the index scan); otherwise the
+// table is scanned with row-group skipping driven by the search arguments.
+func (p *planner) scanFilter(f *plan.Filter, s *plan.Scan, req idset) Node {
+	conj := plan.Conjuncts(f.Pred)
+	sargs := p.sargs(conj, scanOrds(s))
+	if a := p.chooseIndex(s.Table, sargs); a != nil {
+		var residual, used []plan.Expr
+		for i, c := range conj {
+			if a.consumed[i] {
+				used = append(used, c)
+			} else {
+				residual = append(residual, c)
+			}
+		}
+		ords, cols := scanColumns(s, with(req, residual...))
+		var out Node = &IndexScan{
+			Table: s.Table, Index: a.ix, Ords: ords, Cols: cols,
+			Point: a.point, Points: a.points, Range: a.rng, Empty: a.empty, Cond: plan.And(used),
+		}
+		if len(residual) > 0 {
+			out = &Filter{Input: out, Pred: plan.And(residual)}
+		}
+		return out
+	}
+	ords, cols := scanColumns(s, with(req, f.Pred))
+	scan := &TableScan{Table: s.Table, Ords: ords, Cols: cols, Filters: columnFilters(sargs, s.Table)}
+	return &Filter{Input: scan, Pred: f.Pred}
 }

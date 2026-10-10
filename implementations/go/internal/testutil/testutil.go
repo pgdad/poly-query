@@ -5,6 +5,7 @@ package testutil
 import (
 	"testing"
 
+	"polyquery/internal/catalog"
 	"polyquery/internal/ingest"
 	"polyquery/internal/storage"
 )
@@ -26,15 +27,15 @@ hr,Human Resources
 }
 
 // Catalog returns a catalog holding the fixture tables.
-func Catalog(t testing.TB) *storage.Catalog {
+func Catalog(t testing.TB) *catalog.Catalog {
 	t.Helper()
-	cat := storage.NewCatalog()
+	cat := catalog.New()
 	for name, data := range Fixtures {
-		tab, err := ingest.Load(name, []byte(data), ingest.DefaultOptions(ingest.CSV))
+		d, err := ingest.Load([]byte(data), ingest.DefaultOptions(ingest.CSV))
 		if err != nil {
 			t.Fatalf("load %s: %v", name, err)
 		}
-		if err := cat.Put(tab, false); err != nil {
+		if err := cat.Put(storage.Build(name, d, storage.BuildOptions{}), nil, false); err != nil {
 			t.Fatal(err)
 		}
 	}
