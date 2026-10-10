@@ -9,6 +9,10 @@ import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.exec.ExecContext;
@@ -17,15 +21,21 @@ import polyquery.exec.QueryResult;
 import polyquery.ingest.CsvIngest;
 import polyquery.ingest.IngestOptions;
 import polyquery.ingest.JsonIngest;
+import polyquery.json.JsonWriter;
+import polyquery.optimizer.LogicalOptimizer;
+import polyquery.physical.PhysicalPlan;
+import polyquery.physical.PhysicalPlanner;
+import polyquery.physical.PlanExplainer;
 import polyquery.plan.LogicalPlan;
 import polyquery.sql.analyzer.Analyzer;
-import polyquery.sql.analyzer.BoundQuery;
 import polyquery.sql.analyzer.FunctionRegistry;
-import polyquery.sql.analyzer.LogicalPlanner;
+import polyquery.sql.ast.Query;
 import polyquery.sql.ast.Statement;
 import polyquery.sql.parser.Parser;
 import polyquery.storage.Catalog;
+import polyquery.storage.ColumnSchema;
 import polyquery.storage.Table;
+import polyquery.types.DataType;
 
 /**
  * The engine core shared by all front-ends: catalog operations, ingestion and the SQL
@@ -105,18 +115,57 @@ public final class Engine {
 
     // ---------------------------------------------------------------- SQL
 
+    /** Executes one SQL statement: lex → parse → analyze → logical plan → optimize → physical plan → execute. */
     public QueryResult query(String sql, QueryOptions opts) {
         Statement stmt = Parser.parse(sql);
         return switch (stmt) {
             case Statement.QueryStatement qs -> {
-                BoundQuery bound = new Analyzer(catalog, functions).analyze(qs.query());
-                LogicalPlan plan = LogicalPlanner.plan(bound);
-                ExecContext ctx = new ExecContext(opts.timeoutMs(), config.maxQueryMemoryBytes(), opts.maxRows());
-                yield Executor.run(plan, ctx, !opts.countOnly());
+                Function<LogicalPlan, PhysicalPlan> planner = planner(opts);
+                PhysicalPlan plan = planner.apply(analyze(qs.query()));
+                yield Executor.run(plan, newContext(opts), !opts.countOnly(), planner);
             }
-            case Statement.Explain e -> throw new PolyQueryException(ErrorCode.UNSUPPORTED, "EXPLAIN is not supported");
+            case Statement.Explain e -> {
+                String text = JsonWriter.write(explainQuery(e.query(), opts));
+                if (opts.maxRows() == 0) {
+                    throw new PolyQueryException(ErrorCode.RESOURCE_LIMIT, "result exceeds max_rows (0)");
+                }
+                List<Object[]> rows = new ArrayList<>();
+                rows.add(new Object[] {text});
+                yield new QueryResult(List.of(new ColumnSchema("plan", DataType.STRING)),
+                        opts.countOnly() ? null : rows, 1);
+            }
             case Statement.CreateIndex c -> throw new PolyQueryException(ErrorCode.UNSUPPORTED, "indexes are not supported");
             case Statement.DropIndex d -> throw new PolyQueryException(ErrorCode.UNSUPPORTED, "indexes are not supported");
         };
+    }
+
+    /** The EXPLAIN plan tree of a query (or of the query of an EXPLAIN statement). */
+    public Map<String, Object> explain(String sql, QueryOptions opts) {
+        Statement stmt = Parser.parse(sql);
+        return switch (stmt) {
+            case Statement.QueryStatement qs -> explainQuery(qs.query(), opts);
+            case Statement.Explain e -> explainQuery(e.query(), opts);
+            case Statement.CreateIndex c -> throw new PolyQueryException(ErrorCode.UNSUPPORTED, "indexes are not supported");
+            case Statement.DropIndex d -> throw new PolyQueryException(ErrorCode.UNSUPPORTED, "indexes are not supported");
+        };
+    }
+
+    private Map<String, Object> explainQuery(Query query, QueryOptions opts) {
+        Function<LogicalPlan, PhysicalPlan> planner = planner(opts);
+        return new PlanExplainer(planner).explain(planner.apply(analyze(query)));
+    }
+
+    private LogicalPlan analyze(Query query) {
+        return new Analyzer(catalog, functions).analyze(query);
+    }
+
+    /** Logical optimization (unless disabled) followed by physical planning; also used for subqueries. */
+    private static Function<LogicalPlan, PhysicalPlan> planner(QueryOptions opts) {
+        PhysicalPlanner physical = new PhysicalPlanner(opts.joinStrategy());
+        return logical -> physical.plan(opts.optimize() ? LogicalOptimizer.optimize(logical) : logical);
+    }
+
+    private ExecContext newContext(QueryOptions opts) {
+        return new ExecContext(opts.timeoutMs(), config.maxQueryMemoryBytes(), opts.maxRows(), config.maxJoinRows());
     }
 }

@@ -12,7 +12,7 @@ public final class TestMain {
     public static void main(String[] args) throws Exception {
         List<Class<?>> suites = List.of(
                 LexerTest.class, ParserTest.class, TypesTest.class, IngestTest.class,
-                EngineTest.class, ProtocolTest.class);
+                EngineTest.class, QueryTest.class, ProtocolTest.class);
         int passed = 0;
         int failed = 0;
         for (Class<?> suite : suites) {

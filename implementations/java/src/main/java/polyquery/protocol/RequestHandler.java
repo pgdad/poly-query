@@ -15,6 +15,7 @@ import polyquery.json.JsonException;
 import polyquery.json.JsonNumber;
 import polyquery.json.JsonParser;
 import polyquery.json.JsonWriter;
+import polyquery.physical.PhysicalPlanner.JoinStrategy;
 import polyquery.storage.ColumnSchema;
 import polyquery.storage.Table;
 import polyquery.types.DataType;
@@ -87,7 +88,12 @@ public final class RequestHandler {
             case "load" -> load(id, req);
             case "query" -> query(id, req, start);
             case "sleep" -> sleep(id, req);
-            case "explain", "save", "open", "stats" ->
+            case "explain" -> {
+                String sql = requireString(req, "sql");
+                QueryOptions opts = parseQueryOptions(optionalObject(req, "options"));
+                yield ok(id, Map.of("plan", engine.explain(sql, opts)));
+            }
+            case "save", "open", "stats" ->
                     throw PolyQueryException.of(ErrorCode.UNSUPPORTED, "operation '%s' is not supported", opName);
             default -> throw RequestException.invalid("unknown op '%s'", opName);
         };
@@ -286,27 +292,32 @@ public final class RequestHandler {
                 throw PolyQueryException.of(ErrorCode.UNSUPPORTED, "execution mode '%s' is not supported", ms);
             }
         }
+        JoinStrategy joinStrategy = JoinStrategy.AUTO;
         Object join = o.get("join");
         if (join != null) {
             if (!(join instanceof String js)) {
                 throw RequestException.invalid("'join' must be a string");
             }
-            if (!List.of("auto", "hash", "merge", "nested_loop").contains(js)) {
-                throw PolyQueryException.of(ErrorCode.UNSUPPORTED, "join algorithm '%s' is not supported", js);
-            }
+            joinStrategy = switch (js) {
+                case "auto", "merge" -> JoinStrategy.AUTO;
+                case "hash" -> JoinStrategy.HASH;
+                case "nested_loop" -> JoinStrategy.NESTED_LOOP;
+                default -> throw PolyQueryException.of(ErrorCode.UNSUPPORTED, "join algorithm '%s' is not supported", js);
+            };
         }
         Long threads = optionalNonNegativeLong(o, "threads");
         if (threads != null && threads < 1) {
             throw RequestException.invalid("'threads' must be >= 1");
         }
-        optionalBoolean(o, "optimize", true);
+        boolean optimize = optionalBoolean(o, "optimize", true);
         optionalBoolean(o, "use_indexes", true);
         optionalBoolean(o, "native", false);
         Object queryId = o.get("query_id");
         if (queryId != null && !(queryId instanceof String)) {
             throw RequestException.invalid("'query_id' must be a string");
         }
-        return new QueryOptions(maxRows == null ? -1 : maxRows, timeout == null ? 0 : timeout, countOnly);
+        return new QueryOptions(maxRows == null ? -1 : maxRows, timeout == null ? 0 : timeout, countOnly, optimize,
+                joinStrategy);
     }
 
     private String sleep(Object id, Map<String, Object> req) {

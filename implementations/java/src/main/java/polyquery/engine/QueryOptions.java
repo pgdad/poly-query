@@ -1,12 +1,22 @@
 package polyquery.engine;
 
+import polyquery.physical.PhysicalPlanner.JoinStrategy;
+
 /**
  * Per-query options (protocol.md §5.2).
  *
- * @param maxRows   -1 = unlimited
- * @param timeoutMs 0 = none
- * @param countOnly omit rows from the result
+ * @param maxRows      -1 = unlimited
+ * @param timeoutMs    0 = none
+ * @param countOnly    omit rows from the result
+ * @param optimize     apply logical optimizations
+ * @param joinStrategy preferred join algorithm
  */
-public record QueryOptions(long maxRows, long timeoutMs, boolean countOnly) {
+public record QueryOptions(long maxRows, long timeoutMs, boolean countOnly, boolean optimize,
+                           JoinStrategy joinStrategy) {
     public static final QueryOptions DEFAULT = new QueryOptions(-1, 0, false);
+
+    /** Options with default optimization and join settings. */
+    public QueryOptions(long maxRows, long timeoutMs, boolean countOnly) {
+        this(maxRows, timeoutMs, countOnly, true, JoinStrategy.AUTO);
+    }
 }

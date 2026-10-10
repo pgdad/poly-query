@@ -13,6 +13,8 @@ public final class ExecContext {
     private final long deadlineNanos;
     private final long memoryBudget;
     private final long maxResultRows;
+    private final long maxJoinRows;
+    private Object[][] frames = new Object[8][];
     private long memoryUsed;
     private int counter;
     private volatile boolean cancelled;
@@ -21,15 +23,36 @@ public final class ExecContext {
      * @param timeoutMillis 0 = no timeout
      * @param memoryBudget  bytes
      * @param maxResultRows -1 = unlimited
+     * @param maxJoinRows   maximum number of rows produced by one join operator
      */
-    public ExecContext(long timeoutMillis, long memoryBudget, long maxResultRows) {
+    public ExecContext(long timeoutMillis, long memoryBudget, long maxResultRows, long maxJoinRows) {
         this.deadlineNanos = timeoutMillis > 0 ? System.nanoTime() + timeoutMillis * 1_000_000L : 0;
         this.memoryBudget = memoryBudget;
         this.maxResultRows = maxResultRows;
+        this.maxJoinRows = maxJoinRows;
     }
 
     public long maxResultRows() {
         return maxResultRows;
+    }
+
+    public long maxJoinRows() {
+        return maxJoinRows;
+    }
+
+    /** Current row of correlation frame {@code id} (the row an enclosing query level is evaluating). */
+    public Object[] frame(int id) {
+        return frames[id];
+    }
+
+    /** Sets the current row of a correlation frame and returns the previous one (for restoring). */
+    public Object[] setFrame(int id, Object[] row) {
+        if (id >= frames.length) {
+            frames = java.util.Arrays.copyOf(frames, Math.max(id + 1, frames.length * 2));
+        }
+        Object[] previous = frames[id];
+        frames[id] = row;
+        return previous;
     }
 
     public void cancel() {
