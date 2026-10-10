@@ -281,7 +281,7 @@ def run(run_id: str, timeout_min: int, budget_usd: float, max_turns: int | None)
 
 # Subscription usage protection: never start runs near the 5-hour limit and never let
 # a run continue into paid overage (thresholds overridable via environment).
-MAX_5H_START = float(os.environ.get("PQ_MAX_5H_UTIL_START", "0.6"))
+MAX_5H_START = float(os.environ.get("PQ_MAX_5H_UTIL_START", "0.8"))
 MAX_5H_RUN = float(os.environ.get("PQ_MAX_5H_UTIL_RUN", "0.95"))
 MAX_7D_START = float(os.environ.get("PQ_MAX_7D_UTIL_START", "0.8"))
 

@@ -59,7 +59,7 @@
  ],
  "blockers": [],
  "risks": [
-  "Agent runs consume the operator's Claude subscription (phase1 wave: ~22% of the 5-hour window and 5% weekly within ~35 min, 8 agents). Mitigated by usage gate (start <60% 5h, <80% 7d) and guard/watchdog that stops agents at 95% 5h or on any overage.",
+  "Agent runs consume the operator's Claude subscription (phase1 wave: ~22% of the 5-hour window and 5% weekly within ~35 min, 8 agents). Mitigated by usage gate (start <80% 5h, <80% 7d; raised from 60% on operator request 2026-10-10) and guard/watchdog that stops agents at 95% 5h or on any overage.",
   "Runs are capped to the OAuth access-token lifetime (no refresh inside sandbox)"
  ],
  "test_results": {
