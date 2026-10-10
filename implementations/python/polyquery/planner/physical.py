@@ -19,7 +19,7 @@ from .access import (
     selectivity,
 )
 from .explain import render_expr
-from .optimizer import conjunction, conjuncts, optimize
+from .optimizer import conjunction, conjuncts, optimize, prune_columns
 from .planner import LogicalPlanner
 
 
@@ -416,7 +416,7 @@ class PhysicalPlanner:
     def plan_query(self, query: b.BoundQuery) -> PhysicalNode:
         logical = LogicalPlanner(self.ids).plan_query(query)
         if self.options.optimize:
-            logical = optimize(logical)
+            logical = prune_columns(optimize(logical))
         return self.plan(logical)
 
     def plan(self, node: lp.LogicalNode) -> PhysicalNode:

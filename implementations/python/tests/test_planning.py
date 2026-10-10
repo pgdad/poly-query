@@ -237,6 +237,14 @@ class AccessPathTests(EngineTestMixin, unittest.TestCase):
         scans = [n for n in self.explain("SELECT COUNT(*) FROM t WHERE g = 1") if n["op"] == "TableScan"]
         self.assertEqual([s["columns"] for s in scans], [["g"]])
 
+    def test_column_pruning_through_derived_tables(self):
+        sql = "WITH w AS (SELECT * FROM t) SELECT id FROM (SELECT * FROM w) d WHERE g = 1 ORDER BY amount"
+        scans = [n for n in self.explain(sql) if n["op"] == "TableScan"]
+        self.assertEqual([sorted(s["columns"]) for s in scans], [["amount", "g", "id"]])
+        self.assertEqual(self.rows(sql)[:2], [[1], [8]])
+        scans = [n for n in self.explain("SELECT COUNT(*) FROM (SELECT DISTINCT g, cat FROM t) d") if n["op"] == "TableScan"]
+        self.assertEqual([sorted(s["columns"]) for s in scans], [["cat", "g"]])
+
     def test_build_side_is_the_smaller_input(self):
         sql = "SELECT * FROM t JOIN small s ON s.id = t.id"
         join = next(n for n in self.explain(sql) if n["op"] == "HashJoin")

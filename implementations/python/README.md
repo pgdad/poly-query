@@ -120,7 +120,10 @@ logical plan → optimizer → physical plan → execution**.
   that cannot contain a match are not read (EXPLAIN: `row_groups`,
   `row_group_filter` on the `TableScan`). The Filter above still evaluates
   every predicate.
-* **Column pruning.** Scans read only the columns the query references.
+* **Column pruning.** Scans read only the columns the query references; a
+  top-down pass also removes derived-table / CTE output columns the enclosing
+  query never reads (when they are plain column references or literals), so
+  `WITH w AS (SELECT * FROM t) SELECT a FROM w` reads only `a`.
 * **Cardinality estimates** (every EXPLAIN node has `estimated_rows`) use the
   same selectivity rules; hash joins build on the input with the smaller
   estimate for INNER joins and on the right input for LEFT joins (EXPLAIN:
