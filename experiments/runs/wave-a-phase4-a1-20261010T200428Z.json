@@ -1,0 +1,25 @@
+{
+ "wave_id": "wave-a-phase4-a1-20261010T200428Z",
+ "task": "phase4",
+ "track": "A",
+ "attempt": 1,
+ "seed": 13677,
+ "order": [
+  "go"
+ ],
+ "run_ids": [
+  "a-phase4-go-a1-20261010T200428Z"
+ ],
+ "started": "2026-10-10T20:04:29+00:00",
+ "parallel": 1,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  1.22802734375,
+  1.6689453125,
+  1.84619140625
+ ]
+}

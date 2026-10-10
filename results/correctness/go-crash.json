@@ -1,0 +1,189 @@
+{
+ "summary": {
+  "iterations": 25,
+  "violations": 0,
+  "engine_can_open_survivor": true,
+  "temp_files_left": 0,
+  "states": [
+   "A",
+   "B"
+  ]
+ },
+ "iterations": [
+  {
+   "iteration": 0,
+   "writing": "A",
+   "kill_after_s": 0.081,
+   "target_state": "A",
+   "ok": true
+  },
+  {
+   "iteration": 1,
+   "writing": "B",
+   "kill_after_s": 0.038,
+   "target_state": "B",
+   "ok": true
+  },
+  {
+   "iteration": 2,
+   "writing": "A",
+   "kill_after_s": 0.391,
+   "target_state": "A",
+   "ok": true
+  },
+  {
+   "iteration": 3,
+   "writing": "B",
+   "kill_after_s": 0.043,
+   "target_state": "B",
+   "ok": true
+  },
+  {
+   "iteration": 4,
+   "writing": "A",
+   "kill_after_s": 0.322,
+   "target_state": "A",
+   "ok": true
+  },
+  {
+   "iteration": 5,
+   "writing": "B",
+   "kill_after_s": 0.219,
+   "target_state": "B",
+   "ok": true
+  },
+  {
+   "iteration": 6,
+   "writing": "A",
+   "kill_after_s": 0.035,
+   "target_state": "B",
+   "ok": true
+  },
+  {
+   "iteration": 7,
+   "writing": "B",
+   "kill_after_s": 0.304,
+   "target_state": "B",
+   "ok": true
+  },
+  {
+   "iteration": 8,
+   "writing": "A",
+   "kill_after_s": 0.022,
+   "target_state": "B",
+   "ok": true
+  },
+  {
+   "iteration": 9,
+   "writing": "B",
+   "kill_after_s": 0.26,
+   "target_state": "B",
+   "ok": true
+  },
+  {
+   "iteration": 10,
+   "writing": "A",
+   "kill_after_s": 0.042,
+   "target_state": "B",
+   "ok": true
+  },
+  {
+   "iteration": 11,
+   "writing": "B",
+   "kill_after_s": 0.054,
+   "target_state": "B",
+   "ok": true
+  },
+  {
+   "iteration": 12,
+   "writing": "A",
+   "kill_after_s": 0.255,
+   "target_state": "A",
+   "ok": true
+  },
+  {
+   "iteration": 13,
+   "writing": "B",
+   "kill_after_s": 0.496,
+   "target_state": "B",
+   "ok": true
+  },
+  {
+   "iteration": 14,
+   "writing": "A",
+   "kill_after_s": 0.074,
+   "target_state": "A",
+   "ok": true
+  },
+  {
+   "iteration": 15,
+   "writing": "B",
+   "kill_after_s": 0.134,
+   "target_state": "B",
+   "ok": true
+  },
+  {
+   "iteration": 16,
+   "writing": "A",
+   "kill_after_s": 0.376,
+   "target_state": "A",
+   "ok": true
+  },
+  {
+   "iteration": 17,
+   "writing": "B",
+   "kill_after_s": 0.569,
+   "target_state": "B",
+   "ok": true
+  },
+  {
+   "iteration": 18,
+   "writing": "A",
+   "kill_after_s": 0.346,
+   "target_state": "A",
+   "ok": true
+  },
+  {
+   "iteration": 19,
+   "writing": "B",
+   "kill_after_s": 0.238,
+   "target_state": "B",
+   "ok": true
+  },
+  {
+   "iteration": 20,
+   "writing": "A",
+   "kill_after_s": 0.586,
+   "target_state": "A",
+   "ok": true
+  },
+  {
+   "iteration": 21,
+   "writing": "B",
+   "kill_after_s": 0.028,
+   "target_state": "A",
+   "ok": true
+  },
+  {
+   "iteration": 22,
+   "writing": "A",
+   "kill_after_s": 0.515,
+   "target_state": "A",
+   "ok": true
+  },
+  {
+   "iteration": 23,
+   "writing": "B",
+   "kill_after_s": 0.174,
+   "target_state": "B",
+   "ok": true
+  },
+  {
+   "iteration": 24,
+   "writing": "A",
+   "kill_after_s": 0.087,
+   "target_state": "A",
+   "ok": true
+  }
+ ]
+}

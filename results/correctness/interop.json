@@ -2,9 +2,10 @@
  "schema": "polyquery-interop/1",
  "summary": {
   "engines": [
-   "clojure"
+   "clojure",
+   "go"
   ],
-  "files_written": 29,
+  "files_written": 57,
   "write_errors": 0,
   "read_failures": 0,
   "passed": true
@@ -235,6 +236,230 @@
    "content_ok": true
   },
   {
+   "writer": "go",
+   "table": "people",
+   "mode": "plain",
+   "path": "out/go__people__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "people",
+   "mode": "dict",
+   "path": "out/go__people__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "people",
+   "mode": "rle",
+   "path": "out/go__people__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "people",
+   "mode": "auto",
+   "path": "out/go__people__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "ledger",
+   "mode": "plain",
+   "path": "out/go__ledger__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "ledger",
+   "mode": "dict",
+   "path": "out/go__ledger__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "ledger",
+   "mode": "rle",
+   "path": "out/go__ledger__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "ledger",
+   "mode": "auto",
+   "path": "out/go__ledger__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "strings",
+   "mode": "plain",
+   "path": "out/go__strings__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "strings",
+   "mode": "dict",
+   "path": "out/go__strings__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "strings",
+   "mode": "rle",
+   "path": "out/go__strings__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "strings",
+   "mode": "auto",
+   "path": "out/go__strings__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "dates",
+   "mode": "plain",
+   "path": "out/go__dates__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "dates",
+   "mode": "dict",
+   "path": "out/go__dates__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "dates",
+   "mode": "rle",
+   "path": "out/go__dates__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "dates",
+   "mode": "auto",
+   "path": "out/go__dates__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "tx",
+   "mode": "plain",
+   "path": "out/go__tx__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "tx",
+   "mode": "dict",
+   "path": "out/go__tx__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "tx",
+   "mode": "rle",
+   "path": "out/go__tx__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "tx",
+   "mode": "auto",
+   "path": "out/go__tx__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "nulls",
+   "mode": "plain",
+   "path": "out/go__nulls__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "nulls",
+   "mode": "dict",
+   "path": "out/go__nulls__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "nulls",
+   "mode": "rle",
+   "path": "out/go__nulls__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "nulls",
+   "mode": "auto",
+   "path": "out/go__nulls__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "events",
+   "mode": "plain",
+   "path": "out/go__events__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "events",
+   "mode": "dict",
+   "path": "out/go__events__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "events",
+   "mode": "rle",
+   "path": "out/go__events__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "go",
+   "table": "events",
+   "mode": "auto",
+   "path": "out/go__events__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
    "writer": "reference",
    "table": "people",
    "mode": "auto",
@@ -246,6 +471,28 @@
  "matrix": {
   "clojure": {
    "clojure": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "go": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "reference": {
+    "ok": 1,
+    "fail": 0,
+    "failures": []
+   }
+  },
+  "go": {
+   "clojure": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "go": {
     "ok": 28,
     "fail": 0,
     "failures": []
