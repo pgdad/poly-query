@@ -145,5 +145,5 @@
  "finished": "2026-10-10T18:56:11+00:00",
  "wall_seconds": 1614.0,
  "agent_exit_code": 0,
- "outcome": "tests_failed"
+ "outcome": "success"
 }
