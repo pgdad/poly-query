@@ -162,11 +162,12 @@ are later replaced by _colN."
 ;;; ------------------------------------------------------------------
 ;;; Grouping and aggregation (semantics.md §5)
 
-(defun positive-integer-literal (node)
-  "The value of NODE if it is a positive integer literal, else NIL."
-  (when (and (ast-literal-p node) (eq (ast-literal-kind node) :integer))
-    (let ((k (parse-int-text (ast-literal-value node))))
-      (and k (plusp k) k))))
+(defun ordinal-literal (node)
+  "The value of NODE if it is an unsigned integer literal (an ordinal
+reference in GROUP BY / ORDER BY), else NIL."
+  (when (and (ast-literal-p node) (eq (ast-literal-kind node) :integer)
+             (char/= (char (ast-literal-value node) 0) #\-))
+    (parse-int-text (ast-literal-value node))))
 
 (defun bind-group-by-item (node env outputs)
   "A GROUP BY item: an ordinal, a select alias, or an expression over the input."
@@ -174,9 +175,9 @@ are later replaced by _colN."
            (when (bexpr-contains-aggregate-p e)
              (bind-error-at node "SEMANTIC_ERROR" "GROUP BY cannot refer to an aggregate"))
            e))
-    (let ((k (positive-integer-literal node)))
+    (let ((k (ordinal-literal node)))
       (cond
-        (k (unless (<= k (length outputs))
+        (k (unless (<= 1 k (length outputs))
              (bind-error-at node "SEMANTIC_ERROR" "GROUP BY position ~D is out of range" k))
            (select-expr (cdr (nth (1- k) outputs))))
         ((and (ast-column-ref-p node)
@@ -197,13 +198,13 @@ references to (deduplicated) aggregate slots collected in AGGREGATES-CELL
      (lambda (x)
        (let ((k (position x group-by :test #'bexpr-equal)))
          (cond
-           (k (make-b-column (bexpr-type x) k (when (b-column-p x) (b-column-name x))))
+           (k (make-b-column (bexpr-type x) k (bexpr-describe x)))
            ((b-agg-p x)
             (let ((j (position x (car aggregates-cell) :test #'bexpr-equal)))
               (unless j
                 (setf (car aggregates-cell) (append (car aggregates-cell) (list x))
                       j (1- (length (car aggregates-cell)))))
-              (make-b-column (bexpr-type x) (+ ngroups j) nil)))
+              (make-b-column (bexpr-type x) (+ ngroups j) (bexpr-describe x))))
            ((b-column-p x)
             (semantic-error "column ~A must appear in GROUP BY or be used in an aggregate function"
                             (b-column-name x)))
@@ -216,9 +217,9 @@ references to (deduplicated) aggregate slots collected in AGGREGATES-CELL
 (defun resolve-order-item (item outputs env distinct)
   "Returns (values output-position-or-NIL bound-expression)."
   (let ((expr (ast-order-item-expr item))
-        (k (positive-integer-literal (ast-order-item-expr item))))
+        (k (ordinal-literal (ast-order-item-expr item))))
     (cond
-      (k (unless (<= k (length outputs))
+      (k (unless (<= 1 k (length outputs))
            (bind-error-at expr "SEMANTIC_ERROR" "ORDER BY position ~D is out of range" k))
          (values (1- k) nil))
       ((and (ast-column-ref-p expr) (null (ast-column-ref-qualifier expr))

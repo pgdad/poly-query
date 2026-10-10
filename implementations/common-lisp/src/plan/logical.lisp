@@ -134,7 +134,8 @@
     (when hidden
       (setf node (make-project node
                                (loop for e in outputs
+                                     for name in names
                                      for i from 0
-                                     collect (make-b-column (bexpr-type e) i nil))
+                                     collect (make-b-column (bexpr-type e) i name))
                                names)))
     node))

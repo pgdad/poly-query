@@ -3,6 +3,9 @@
 ;;;;
 ;;;; Operator choices:
 ;;;;   Scan       -> TableScan (reads only the pruned columns)
+;;;;   Filter(Scan) with a conjunct `scan-expr = parameter-expr` (a correlated
+;;;;              subquery's equality with an outer column) -> HashLookupScan:
+;;;;              the scan is hashed on scan-expr once and probed per evaluation
 ;;;;   Join       -> HashJoin when the condition has equi-join conjuncts
 ;;;;                 (left expr = right expr), the remaining conjuncts being a
 ;;;;                 residual; otherwise NestedLoopJoin. The right input is
@@ -20,6 +23,13 @@
 (defstruct (pp-table-scan (:include pnode))
   table label
   (column-indexes #() :type simple-vector))
+
+(defstruct (pp-lookup-scan (:include pnode))
+  table label
+  (column-indexes #() :type simple-vector)
+  key-exprs                              ; BEXPRs over the scan row
+  probe-exprs                            ; parameter-only BEXPRs, compared with KEY-EXPRS
+  residual)                              ; remaining filter conjuncts, or NIL
 
 (defstruct (pp-values (:include pnode)))
 
@@ -111,8 +121,9 @@ residual-conjuncts); right keys index the right input."
         (lp-values (make-pp-values :columns columns))
         (lp-filter
          (plan-expression-subqueries (list (lp-filter-predicate node)))
-         (make-pp-filter :children (list (child)) :predicate (lp-filter-predicate node)
-                         :columns columns))
+         (or (and (lp-scan-p (lnode-child node)) (plan-lookup-scan node))
+             (make-pp-filter :children (list (child)) :predicate (lp-filter-predicate node)
+                             :columns columns)))
         (lp-project
          (plan-expression-subqueries (lp-project-exprs node))
          (make-pp-project :children (list (child)) :exprs (lp-project-exprs node) :columns columns))
@@ -136,6 +147,44 @@ residual-conjuncts); right keys index the right input."
                               :offset (lp-limit-offset node) :columns columns)
                (make-pp-limit :children (list (child)) :limit (lp-limit-limit node)
                               :offset (lp-limit-offset node) :columns columns))))))))
+
+(defun parameter-only-p (e)
+  "True if E reads no columns but depends on correlation parameters."
+  (and (null (bexpr-column-indexes e))
+       (bexpr-some #'b-param-p e)
+       (not (bexpr-some #'subquery-op-p e))))
+
+(defun plan-lookup-scan (node)
+  "HashLookupScan for a Filter over a Scan with `expr = parameter` conjuncts, or NIL."
+  (let ((scan (lnode-child node))
+        (keys '()) (probes '()) (residual '()))
+    (dolist (c (split-conjuncts (lp-filter-predicate node)))
+      (let ((a (and (b-op-p c) (eq (b-op-op c) :=) (first (b-op-args c))))
+            (b (and (b-op-p c) (eq (b-op-op c) :=) (second (b-op-args c)))))
+        (flet ((key-side-p (e) (and (bexpr-column-indexes e) (not (bexpr-some #'b-param-p e))
+                                    (not (bexpr-some #'subquery-op-p e)))))
+          (cond ((and a (key-side-p a) (parameter-only-p b)) (push a keys) (push b probes))
+                ((and a (key-side-p b) (parameter-only-p a)) (push b keys) (push a probes))
+                (t (push c residual))))))
+    (when keys
+      (make-pp-lookup-scan :table (lp-scan-table scan) :label (lp-scan-label scan)
+                           :column-indexes (lp-scan-column-indexes scan)
+                           :key-exprs (nreverse keys) :probe-exprs (nreverse probes)
+                           :residual (conjoin (nreverse residual))
+                           :columns (lnode-columns node)))))
+
+(defun plan-invariant-p (node)
+  "True if the rows NODE produces cannot change between executions of an
+enclosing correlated subquery (no correlation parameters anywhere)."
+  (and (every (lambda (e)
+                (or (null e)
+                    (not (bexpr-some (lambda (x)
+                                       (or (b-param-p x)
+                                           (and (subquery-op-p x)
+                                                (not (subquery-cacheable (b-op-info x))))))
+                                     e))))
+              (node-expressions node))
+       (every #'plan-invariant-p (pnode-children node))))
 
 (defun physical-join (node)
   (destructuring-bind (left right) (lnode-children node)
@@ -173,6 +222,10 @@ residual-conjuncts); right keys index the right input."
     (pp-hash-join (append (pp-hash-join-left-keys node) (pp-hash-join-right-keys node)
                           (list (pp-hash-join-residual node))))
     (pp-hash-aggregate (append (pp-hash-aggregate-group-by node) (pp-hash-aggregate-aggregates node)))
+    (pp-lookup-scan (append (pp-lookup-scan-key-exprs node) (pp-lookup-scan-probe-exprs node)
+                            (list (pp-lookup-scan-residual node))))
+    (pp-limit (list (pp-limit-limit node) (pp-limit-offset node)))
+    (pp-top-n (list (pp-top-n-limit node) (pp-top-n-offset node)))
     (t nil)))
 
 (defun describe-sort-keys (node keys)
@@ -191,6 +244,12 @@ residual-conjuncts); right keys index the right input."
       (pp-table-scan (list "op" "TableScan" "table" (table-name (pp-table-scan-table node))
                            "alias" (pp-table-scan-label node)
                            "columns" (mapcar #'column-def-name (pnode-columns node))))
+      (pp-lookup-scan (list "op" "HashLookupScan" "table" (table-name (pp-lookup-scan-table node))
+                            "alias" (pp-lookup-scan-label node)
+                            "columns" (mapcar #'column-def-name (pnode-columns node))
+                            "keys" (describe-all (pp-lookup-scan-key-exprs node))
+                            "probes" (describe-all (pp-lookup-scan-probe-exprs node))
+                            "residual" (maybe (pp-lookup-scan-residual node))))
       (pp-values (list "op" "Values" "rows" 1))
       (pp-filter (list "op" "Filter" "predicate" (bexpr-describe (pp-filter-predicate node))))
       (pp-project (list "op" "Project" "columns" (mapcar #'column-def-name (pnode-columns node))
