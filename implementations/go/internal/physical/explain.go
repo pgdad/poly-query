@@ -137,6 +137,17 @@ func explainNode(p *Plan, n Node) *Object {
 		}
 	case *HashDistinct:
 		o.Set("op", "Distinct").Set("algorithm", "hash")
+	case *ParamLookup:
+		keys := make([]string, len(x.InnerKeys))
+		for i := range keys {
+			keys[i] = plan.Display(x.InnerKeys[i]) + " = " + plan.Display(x.OuterKeys[i])
+		}
+		o.Set("op", "ParamLookup").Set("keys", keys)
+		if x.Residual != nil {
+			o.Set("residual", plan.Display(x.Residual))
+		}
+	case *Materialize:
+		o.Set("op", "Materialize")
 	default:
 		o.Set("op", "Unknown")
 	}

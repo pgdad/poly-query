@@ -25,6 +25,10 @@ type Context struct {
 	params map[plan.ColumnID]*types.Value
 	// subCache memoizes uncorrelated subquery results.
 	subCache map[*plan.Subquery]*subResult
+	// lookups and cached hold the per-query state of ParamLookup and
+	// Materialize nodes of correlated subquery plans.
+	lookups map[*physical.ParamLookup]*lookupTable
+	cached  map[*physical.Materialize][]types.Row
 }
 
 // checkEvery is how many rows operators process between cancellation checks.

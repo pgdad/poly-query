@@ -252,3 +252,131 @@ func collectSubquery(ec *Context, x *plan.Subquery, sub physical.Node) (*subResu
 	}
 	return r, nil
 }
+
+// ---------------------------------------------------------------- correlated subplans
+
+// lookupTable is the hashed input of a ParamLookup, built once per query.
+type lookupTable struct {
+	rows  []types.Row
+	index map[string][]int32
+}
+
+// paramLookupOp returns the cached input rows matching the current outer
+// values (see physical.ParamLookup).
+type paramLookupOp struct {
+	ec       *Context
+	node     *physical.ParamLookup
+	outer    []evalFn
+	outTypes []types.Type
+	residual evalFn
+	matches  []int32
+	table    *lookupTable
+	pos      int
+	started  bool
+}
+
+func (o *paramLookupOp) Next() (types.Row, error) {
+	if !o.started {
+		o.started = true
+		t, err := o.ec.lookupTable(o.node)
+		if err != nil {
+			return nil, err
+		}
+		o.table = t
+		key, ok, err := joinKey(nil, o.outer, o.outTypes, nil)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			o.matches = t.index[string(key)]
+		}
+	}
+	for o.pos < len(o.matches) {
+		row := o.table.rows[o.matches[o.pos]]
+		o.pos++
+		if o.residual != nil {
+			v, err := o.residual(row)
+			if err != nil {
+				return nil, err
+			}
+			if !v.IsTrue() {
+				continue
+			}
+		}
+		return row, nil
+	}
+	return nil, nil
+}
+
+func (ec *Context) lookupTable(n *physical.ParamLookup) (*lookupTable, error) {
+	if t, ok := ec.lookups[n]; ok {
+		return t, nil
+	}
+	in, err := Build(ec, n.Input)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := compileAll(ec, layoutOf(n.Input.Schema()), n.InnerKeys)
+	if err != nil {
+		return nil, err
+	}
+	ts := make([]types.Type, len(n.InnerKeys))
+	for i, k := range n.InnerKeys {
+		ts[i] = k.Type()
+	}
+	rows, err := materialize(ec, in)
+	if err != nil {
+		return nil, err
+	}
+	t := &lookupTable{index: map[string][]int32{}}
+	var key []byte
+	for _, row := range rows {
+		k, ok, err := joinKey(key[:0], keys, ts, row)
+		key = k
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			t.rows = append(t.rows, row)
+			t.index[string(k)] = append(t.index[string(k)], int32(len(t.rows)-1))
+		}
+	}
+	if ec.lookups == nil {
+		ec.lookups = map[*physical.ParamLookup]*lookupTable{}
+	}
+	ec.lookups[n] = t
+	return t, nil
+}
+
+// replayOp returns the cached rows of a Materialize node.
+type replayOp struct {
+	rows []types.Row
+	pos  int
+}
+
+func (r *replayOp) Next() (types.Row, error) {
+	if r.pos >= len(r.rows) {
+		return nil, nil
+	}
+	r.pos++
+	return r.rows[r.pos-1], nil
+}
+
+func (ec *Context) materialized(n *physical.Materialize) ([]types.Row, error) {
+	if rows, ok := ec.cached[n]; ok {
+		return rows, nil
+	}
+	in, err := Build(ec, n.Input)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := materialize(ec, in)
+	if err != nil {
+		return nil, err
+	}
+	if ec.cached == nil {
+		ec.cached = map[*physical.Materialize][]types.Row{}
+	}
+	ec.cached[n] = rows
+	return rows, nil
+}

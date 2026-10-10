@@ -21,6 +21,9 @@ func Build(root plan.Node, opts Options) (*Plan, error) {
 type planner struct {
 	opts     Options
 	subplans map[*plan.Subquery]Node
+	// params holds the outer columns available while planning a correlated
+	// subquery (empty at top level).
+	params idset
 }
 
 type idset = map[plan.ColumnID]bool
@@ -59,10 +62,18 @@ func (p *planner) subqueries(exprs ...plan.Expr) error {
 			if _, done := p.subplans[sq]; done {
 				return
 			}
+			saved := p.params
+			if len(sq.Correlated) > 0 {
+				p.params = with(saved)
+				for _, c := range sq.Correlated {
+					p.params[c.ID] = true
+				}
+			}
 			var n Node
 			if n, err = p.node(sq.Plan, idSet(sq.Plan.Schema())); err == nil {
 				p.subplans[sq] = n
 			}
+			p.params = saved
 		})
 	}
 	return err
@@ -70,6 +81,28 @@ func (p *planner) subqueries(exprs ...plan.Expr) error {
 
 // node plans n; req is the set of n's output columns its consumer needs.
 func (p *planner) node(n plan.Node, req idset) (Node, error) {
+	if len(p.params) > 0 {
+		// Inside a correlated subquery: compute uncorrelated subtrees once
+		// and turn correlation equalities into hash lookups.
+		if _, isScan := n.(*plan.Scan); !isScan && len(plan.FreeColumns(n)) == 0 {
+			saved := p.params
+			p.params = nil
+			in, err := p.node(n, req)
+			p.params = saved
+			if err != nil {
+				return nil, err
+			}
+			if _, isValues := n.(*plan.Values); isValues {
+				return in, nil
+			}
+			return &Materialize{Input: in}, nil
+		}
+		if f, ok := n.(*plan.Filter); ok {
+			if lookup, err := p.paramLookup(f, req); lookup != nil || err != nil {
+				return lookup, err
+			}
+		}
+	}
 	if err := p.subqueries(plan.NodeExprs(n)...); err != nil {
 		return nil, err
 	}
@@ -137,6 +170,77 @@ func (p *planner) node(n plan.Node, req idset) (Node, error) {
 		return &HashDistinct{Input: in}, nil
 	}
 	return nil, errs.New(errs.InternalError, "cannot plan logical node %T", n)
+}
+
+// paramLookup plans a filter of a correlated subquery whose input is
+// uncorrelated and whose predicate equates input expressions with outer
+// values; it returns nil if the filter does not have that shape.
+func (p *planner) paramLookup(f *plan.Filter, req idset) (Node, error) {
+	if len(plan.FreeColumns(f.Input)) > 0 {
+		return nil, nil
+	}
+	inputIDs := idSet(f.Input.Schema())
+	pl := &ParamLookup{}
+	var residual []plan.Expr
+	for _, c := range plan.Conjuncts(f.Pred) {
+		if in, out, ok := paramKey(c, inputIDs, p.params); ok {
+			pl.InnerKeys = append(pl.InnerKeys, in)
+			pl.OuterKeys = append(pl.OuterKeys, out)
+		} else {
+			residual = append(residual, c)
+		}
+	}
+	if len(pl.InnerKeys) == 0 {
+		return nil, nil
+	}
+	pl.Residual = plan.And(residual)
+	if err := p.subqueries(f.Pred); err != nil {
+		return nil, err
+	}
+	saved := p.params
+	p.params = nil
+	in, err := p.node(f.Input, with(req, f.Pred))
+	p.params = saved
+	if err != nil {
+		return nil, err
+	}
+	pl.Input = in
+	return pl, nil
+}
+
+// paramKey recognizes `a = b` where one side references only input columns
+// and the other only outer parameters.
+func paramKey(c plan.Expr, input, params idset) (plan.Expr, plan.Expr, bool) {
+	b, ok := c.(*plan.Binary)
+	if !ok || b.Op != plan.OpEq || b.L.Type().Kind == types.KindNull || b.R.Type().Kind == types.KindNull {
+		return nil, nil, false
+	}
+	only := func(e plan.Expr, set idset) bool {
+		refs := plan.RefSet(e)
+		for id := range refs {
+			if !set[id] {
+				return false
+			}
+		}
+		return len(refs) > 0 && !hasSubquery(e)
+	}
+	switch {
+	case only(b.L, input) && only(b.R, params):
+		return b.L, b.R, true
+	case only(b.R, input) && only(b.L, params):
+		return b.R, b.L, true
+	}
+	return nil, nil, false
+}
+
+func hasSubquery(e plan.Expr) bool {
+	found := false
+	plan.Walk(e, func(x plan.Expr) {
+		if _, ok := x.(*plan.Subquery); ok {
+			found = true
+		}
+	})
+	return found
 }
 
 // topN returns count+offset when both are literal (the number of sorted rows

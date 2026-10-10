@@ -87,6 +87,27 @@ func Build(ec *Context, n physical.Node) (Operator, error) {
 		return &sortOp{ec: ec, input: in, keys: keys, limit: x.Limit}, nil
 	case *physical.Limit:
 		return buildLimit(ec, x)
+	case *physical.Materialize:
+		rows, err := ec.materialized(x)
+		if err != nil {
+			return nil, err
+		}
+		return &replayOp{rows: rows}, nil
+	case *physical.ParamLookup:
+		op := &paramLookupOp{ec: ec, node: x}
+		var err error
+		if op.outer, err = compileAll(ec, nil, x.OuterKeys); err != nil {
+			return nil, err
+		}
+		for _, k := range x.OuterKeys {
+			op.outTypes = append(op.outTypes, k.Type())
+		}
+		if x.Residual != nil {
+			if op.residual, err = compile(ec, layoutOf(x.Input.Schema()), x.Residual); err != nil {
+				return nil, err
+			}
+		}
+		return op, nil
 	case *physical.HashDistinct:
 		in, err := Build(ec, x.Input)
 		if err != nil {

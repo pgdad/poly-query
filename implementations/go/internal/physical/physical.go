@@ -94,6 +94,23 @@ type HashDistinct struct {
 	Input Node
 }
 
+// ParamLookup appears inside correlated subquery plans: it returns the rows
+// of its uncorrelated input whose InnerKeys equal the OuterKeys (expressions
+// over outer-query values) and that satisfy Residual. The input is hashed
+// by InnerKeys once per query and probed on every evaluation.
+type ParamLookup struct {
+	Input     Node
+	InnerKeys []plan.Expr
+	OuterKeys []plan.Expr
+	Residual  plan.Expr
+}
+
+// Materialize appears inside correlated subquery plans: its uncorrelated
+// input is computed once per query and replayed on every evaluation.
+type Materialize struct {
+	Input Node
+}
+
 // Schema implementations.
 func (n *TableScan) Schema() []plan.Column { return n.Cols }
 func (n *Values) Schema() []plan.Column    { return n.Cols }
@@ -111,6 +128,8 @@ func (n *NestedLoopJoin) Schema() []plan.Column {
 func (n *Sort) Schema() []plan.Column         { return n.Input.Schema() }
 func (n *Limit) Schema() []plan.Column        { return n.Input.Schema() }
 func (n *HashDistinct) Schema() []plan.Column { return n.Input.Schema() }
+func (n *ParamLookup) Schema() []plan.Column  { return n.Input.Schema() }
+func (n *Materialize) Schema() []plan.Column  { return n.Input.Schema() }
 
 // Children implementations.
 func (n *TableScan) Children() []Node      { return nil }
@@ -123,6 +142,8 @@ func (n *NestedLoopJoin) Children() []Node { return []Node{n.Left, n.Right} }
 func (n *Sort) Children() []Node           { return []Node{n.Input} }
 func (n *Limit) Children() []Node          { return []Node{n.Input} }
 func (n *HashDistinct) Children() []Node   { return []Node{n.Input} }
+func (n *ParamLookup) Children() []Node    { return []Node{n.Input} }
+func (n *Materialize) Children() []Node    { return []Node{n.Input} }
 
 // Exprs returns the expressions evaluated by node n itself.
 func Exprs(n Node) []plan.Expr {
@@ -157,6 +178,12 @@ func Exprs(n Node) []plan.Expr {
 		out := make([]plan.Expr, len(x.Keys))
 		for i, k := range x.Keys {
 			out[i] = k.Expr
+		}
+		return out
+	case *ParamLookup:
+		out := append(append([]plan.Expr(nil), x.InnerKeys...), x.OuterKeys...)
+		if x.Residual != nil {
+			out = append(out, x.Residual)
 		}
 		return out
 	case *Limit:

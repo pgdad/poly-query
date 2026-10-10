@@ -134,9 +134,9 @@ func (n *Filter) Children() []Node    { return []Node{n.Input} }
 func (n *Project) Children() []Node   { return []Node{n.Input} }
 func (n *Aggregate) Children() []Node { return []Node{n.Input} }
 func (n *Join) Children() []Node      { return []Node{n.Left, n.Right} }
-func (n *Sort) Children() []Node     { return []Node{n.Input} }
-func (n *Limit) Children() []Node    { return []Node{n.Input} }
-func (n *Distinct) Children() []Node { return []Node{n.Input} }
+func (n *Sort) Children() []Node      { return []Node{n.Input} }
+func (n *Limit) Children() []Node     { return []Node{n.Input} }
+func (n *Distinct) Children() []Node  { return []Node{n.Input} }
 
 // NodeExprs returns the expressions evaluated by node n itself.
 func NodeExprs(n Node) []Expr {
