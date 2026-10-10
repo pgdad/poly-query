@@ -310,7 +310,9 @@ max(start,1) <= i and, if LEN is given, i < start + len."
   :builder (lambda (args type)
              (declare (ignore args type))
              (lambda (&rest values)
-               (or (find-if-not #'null-value-p values) +null+))))
+               ;; FALSE is NIL, so test membership rather than the found value.
+               (let ((tail (member-if-not #'null-value-p values)))
+                 (if tail (first tail) +null+)))))
 
 (define-scalar-function "NULLIF" (:min 2 :null-aware t)
   :typer (lambda (args)

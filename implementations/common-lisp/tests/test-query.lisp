@@ -143,6 +143,7 @@
 (deftest fn.substr (query-rows "SELECT SUBSTR('hello', 0, 2), SUBSTR('hello', 4)") (("h" "lo")))
 (deftest fn.concat (query-rows "SELECT CONCAT('a', NULL, 1, TRUE)") (("a1true")))
 (deftest fn.coalesce (query-rows "SELECT COALESCE(NULL, 2, 3), COALESCE(1, 2.5)") ((2 10)))
+(deftest fn.coalesce-false (query-rows "SELECT COALESCE(NULL, FALSE, TRUE), COALESCE(NULL)") ((nil :null)))
 (deftest fn.date-diff (query-rows "SELECT DATE_DIFF('day', DATE '2024-01-01', DATE '2024-03-01')") ((60)))
 (deftest fn.power-errors
     (list (query-rows "SELECT POWER(0, -1)") (query-rows "SELECT POWER(-8, 0.5)"))

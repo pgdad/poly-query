@@ -236,6 +236,11 @@ before the whole statement has been analysed.
   EXISTS after the first.
 * **Aggregates inside subqueries** always belong to the subquery, even if
   their arguments only reference outer columns.
+* **Column pruning** also removes unused output columns of derived tables
+  and CTEs, so an expression that is never referenced is never evaluated
+  (`SELECT COUNT(*) FROM (SELECT 1/0 AS x FROM t) d` returns the count); the
+  spec leaves errors in operands that need not be evaluated
+  implementation-defined (types.md §6).
 * **max-join-rows** limits the number of rows produced by each join
   operator.
 
