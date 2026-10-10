@@ -97,7 +97,7 @@ final class AggregateBatches {
             int created = keys.groupCount() - before;
             if (created > 0) {
                 growStates();
-                long bytes = created * (keys.bytesPerGroup() + 24L * states.length);
+                long bytes = created * groupBytes();
                 ctx.reserve(bytes);
                 reserved += bytes;
             }
@@ -113,13 +113,18 @@ final class AggregateBatches {
             return gids;
         }
 
+        /** Memory accounted per group, as the row engine estimates it (group entry, accumulators, key row). */
+        private long groupBytes() {
+            return 64 + 48L * states.length + 16 + 24L * keys.keyCount();
+        }
+
         /** Merges group g of a partial table into this one; returns the group id here. */
         int merge(Table partial, int g) {
             int before = keys.groupCount();
             int to = keys.addFrom(partial.keys, g);
             if (keys.groupCount() > before) {
                 growStates();
-                long bytes = keys.bytesPerGroup() + 24L * states.length;
+                long bytes = groupBytes();
                 ctx.reserve(bytes);
                 reserved += bytes;
             }
@@ -316,7 +321,7 @@ final class AggregateBatches {
                             expect++;
                         }
                     }
-                    long bytes = (long) m * (seen.bytesPerGroup() + 32);
+                    long bytes = ColumnStore.estimate(in, sel, m) + 32L * m; // as the row engine estimates rows
                     ctx.reserve(bytes);
                     reserved += bytes;
                 }

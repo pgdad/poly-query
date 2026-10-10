@@ -36,6 +36,8 @@ QUERIES = [
     ("Q10 string filter", "SELECT COUNT(*) FROM cust WHERE email LIKE '%1@example.com' AND country IN ('US', 'GB')"),
     ("Q11 projection", "SELECT tx_id, amount * 2 + fee, UPPER(currency) FROM tx WHERE bucket < 500"),
     ("Q12 nulls", "SELECT n50 % 10, COUNT(*), SUM(n90), COUNT(f95) FROM nh GROUP BY 1"),
+    ("Q14 conjunctive filter", "SELECT COUNT(*) FROM tx WHERE bucket < 500 AND merchant_id > 10 AND customer_id <> 7"),
+    ("Q15 reductions", "SELECT SUM(tx_id), MIN(bucket), MAX(merchant_id), COUNT(*) FROM tx"),
     ("Q13 join order", "SELECT COUNT(*), SUM(i.quantity) FROM items i JOIN orders o ON o.order_id = i.order_id "
                        "JOIN products p ON p.product_id = i.product_id JOIN cust c ON c.customer_id = o.customer_id "
                        "WHERE c.country = 'FI' AND p.category = 'books'"),
@@ -114,7 +116,7 @@ def main():
                 counts.add(r["row_count"])
                 if rep >= 2:
                     times.append(dt)
-            cells.append(f"{statistics.median(times):.0f}")
+            cells.append(f"{statistics.median(times):.1f}")
         assert len(counts) == 1, (qname, counts)
         lines.append(f"| {qname} | " + " | ".join(cells) + " |")
         print(lines[-1], flush=True)

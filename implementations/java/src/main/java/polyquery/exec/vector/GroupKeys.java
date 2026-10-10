@@ -121,11 +121,6 @@ final class GroupKeys {
         return k;
     }
 
-    /** Approximate bytes retained per group. */
-    long bytesPerGroup() {
-        return 8L * k + 8L * nullWords + 8 + 8;
-    }
-
     private static long mix(long h, long v) {
         h = (h ^ v) * M1;
         return h ^ (h >>> 31);
