@@ -171,11 +171,29 @@
 ;; ---------------------------------------------------------------------------
 ;; Table segments → batches
 
+(defn arena
+  "Per-column buffer arena of a scan: the scan's batches reuse the same
+  arrays (a consumer never retains a scan batch past its reduction step:
+  rows, aggregate states and join tables copy the values they keep), which
+  removes per-batch allocation and zeroing."
+  ^objects []
+  (object-array 6))
+
+(defmacro ^:private buffer
+  "Array in slot `slot` of arena a (nil: a fresh array), created by ctor."
+  [a slot ctor tag]
+  (let [x (gensym "a") y (gensym "buf")]
+    `(let [~x ~a]
+       (if (nil? ~x)
+         ~ctor
+         (or (aget ~(with-meta x {:tag "[Ljava.lang.Object;"}) ~slot)
+             (let [~y ~ctor] (aset ~(with-meta x {:tag "[Ljava.lang.Object;"}) ~slot ~y) ~y))))))
+
 (defn- copy-nulls
   "Null mask of rows [start, start+n) from a validity bitmap (nil if none)."
-  ^booleans [^longs validity ^long start ^long n]
+  ^booleans [^longs validity ^long start ^long n a]
   (when validity
-    (let [out (boolean-array capacity)]
+    (let [^booleans out (buffer a 5 (boolean-array capacity) "[Z")]
       (loop [i 0 any? false]
         (if (< i n)
           (let [nul (not (col/bit-set? validity (+ start i)))]
@@ -191,67 +209,69 @@
     out))
 
 (defn segment-vec
-  "Vector of rows [start, start+n) of a column vector of the given type. The
-  in-memory typed vectors are copied with System/arraycopy; dictionary
-  vectors keep their codes."
-  ^polyquery.exec.batch.Vec [^ColumnVector cv type ^long start ^long n]
-  (cond
-    (instance? LongVector cv)
-    (let [^LongVector lv cv
-          out (long-array capacity)]
-      (System/arraycopy ^longs (.-values lv) start out 0 n)
-      (LongVec. out (copy-nulls (.-validity lv) start n)))
+  "Vector of rows [start, start+n) of a column vector of the given type,
+  with its arrays taken from arena a (nil: fresh arrays). The in-memory
+  typed vectors are copied with System/arraycopy; dictionary vectors keep
+  their codes."
+  ^polyquery.exec.batch.Vec [^ColumnVector cv type start n a]
+  (let [start (long start) n (long n)]
+    (cond
+      (instance? LongVector cv)
+      (let [^LongVector lv cv
+            ^longs out (buffer a 0 (long-array capacity) "[J")]
+        (System/arraycopy ^longs (.-values lv) start out 0 n)
+        (LongVec. out (copy-nulls (.-validity lv) start n a)))
 
-    (instance? DoubleVector cv)
-    (let [^DoubleVector dv cv
-          out (double-array capacity)]
-      (System/arraycopy ^doubles (.-values dv) start out 0 n)
-      (DoubleVec. out (copy-nulls (.-validity dv) start n)))
+      (instance? DoubleVector cv)
+      (let [^DoubleVector dv cv
+            ^doubles out (buffer a 1 (double-array capacity) "[D")]
+        (System/arraycopy ^doubles (.-values dv) start out 0 n)
+        (DoubleVec. out (copy-nulls (.-validity dv) start n a)))
 
-    (instance? DictVector cv)
-    (let [^DictVector dv cv
-          out (int-array capacity)]
-      (System/arraycopy ^ints (.-codes dv) start out 0 n)
-      (DictVec. out (.-dict dv) (copy-nulls (.-validity dv) start n)))
+      (instance? DictVector cv)
+      (let [^DictVector dv cv
+            ^ints out (buffer a 2 (int-array capacity) "[I")]
+        (System/arraycopy ^ints (.-codes dv) start out 0 n)
+        (DictVec. out (.-dict dv) (copy-nulls (.-validity dv) start n a)))
 
-    (instance? StringVector cv)
-    (let [^StringVector sv cv
-          out (object-array capacity)]
-      (System/arraycopy ^objects (.-values sv) start out 0 n)
-      (ObjVec. out))
+      (instance? StringVector cv)
+      (let [^StringVector sv cv
+            ^objects out (buffer a 3 (object-array capacity) "[Ljava.lang.Object;")]
+        (System/arraycopy ^objects (.-values sv) start out 0 n)
+        (ObjVec. out))
 
-    (instance? BooleanVector cv)
-    (let [^BooleanVector bv cv
-          bits ^longs (.-bits bv)
-          out (boolean-array capacity)]
-      (dotimes [i n] (aset out i (boolean (col/bit-set? bits (+ start i)))))
-      (BoolVec. out (copy-nulls (.-validity bv) start n)))
+      (instance? BooleanVector cv)
+      (let [^BooleanVector bv cv
+            bits ^longs (.-bits bv)
+            ^booleans out (buffer a 4 (boolean-array capacity) "[Z")]
+        (dotimes [i n] (aset out i (boolean (col/bit-set? bits (+ start i)))))
+        (BoolVec. out (copy-nulls (.-validity bv) start n a)))
 
-    (instance? BufferLongVector cv)
-    (let [^BufferLongVector bv cv
-          ^ByteBuffer buf (.-buf bv)
-          base (+ (.-base bv) (* 8 start))
-          out (long-array capacity)]
-      (dotimes [i n] (aset out i (.getLong buf (int (+ base (* 8 i))))))
-      (LongVec. out (copy-nulls (.-validity bv) start n)))
+      (instance? BufferLongVector cv)
+      (let [^BufferLongVector bv cv
+            ^ByteBuffer buf (.-buf bv)
+            base (+ (.-base bv) (* 8 start))
+            ^longs out (buffer a 0 (long-array capacity) "[J")]
+        (dotimes [i n] (aset out i (.getLong buf (int (+ base (* 8 i))))))
+        (LongVec. out (copy-nulls (.-validity bv) start n a)))
 
-    (instance? BufferIntVector cv)
-    (let [^BufferIntVector bv cv
-          ^ByteBuffer buf (.-buf bv)
-          base (+ (.-base bv) (* 4 start))
-          out (long-array capacity)]
-      (dotimes [i n] (aset out i (long (.getInt buf (int (+ base (* 4 i)))))))
-      (LongVec. out (copy-nulls (.-validity bv) start n)))
+      (instance? BufferIntVector cv)
+      (let [^BufferIntVector bv cv
+            ^ByteBuffer buf (.-buf bv)
+            base (+ (.-base bv) (* 4 start))
+            ^longs out (buffer a 0 (long-array capacity) "[J")]
+        (dotimes [i n] (aset out i (long (.getInt buf (int (+ base (* 4 i)))))))
+        (LongVec. out (copy-nulls (.-validity bv) start n a)))
 
-    (instance? BufferDoubleVector cv)
-    (let [^BufferDoubleVector bv cv
-          ^ByteBuffer buf (.-buf bv)
-          base (+ (.-base bv) (* 8 start))
-          out (double-array capacity)]
-      (dotimes [i n] (aset out i (.getDouble buf (int (+ base (* 8 i))))))
-      (DoubleVec. out (copy-nulls (.-validity bv) start n)))
+      (instance? BufferDoubleVector cv)
+      (let [^BufferDoubleVector bv cv
+            ^ByteBuffer buf (.-buf bv)
+            base (+ (.-base bv) (* 8 start))
+            ^doubles out (buffer a 1 (double-array capacity) "[D")]
+        (dotimes [i n] (aset out i (.getDouble buf (int (+ base (* 8 i))))))
+        (DoubleVec. out (copy-nulls (.-validity bv) start n a)))
 
-    :else (generic-vec cv type start n)))
+      :else (generic-vec cv type start n))))
 
 ;; ---------------------------------------------------------------------------
 ;; Rows ↔ batches

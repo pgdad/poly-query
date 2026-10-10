@@ -7,10 +7,12 @@ option combinations, printing median wall-clock times (client side, results
 requested with result=count so serialization of large results is excluded).
 
 usage: bench.py DATA_DIR [--runs N] [--only Q1,Q2] [--configs baseline,vec1,...]
+       bench.py DATA_DIR --verify     # compare full results across configurations
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import statistics
@@ -85,6 +87,7 @@ def main() -> int:
     ap.add_argument("--only")
     ap.add_argument("--configs", default="baseline,row,vec1,vec8")
     ap.add_argument("--java-opts", default="-Xmx24g")
+    ap.add_argument("--verify", action="store_true", help="compare result digests instead of timing")
     args = ap.parse_args()
 
     s = Session(args.data_dir, args.java_opts)
@@ -99,6 +102,27 @@ def main() -> int:
 
     configs = args.configs.split(",")
     only = set(args.only.split(",")) if args.only else None
+    if args.verify:
+        bad = 0
+        for name, sql in QUERIES.items():
+            if only and name.split()[0] not in only:
+                continue
+            digests = {}
+            for c in CONFIGS:
+                r = s.request({"op": "query", "sql": sql, "options": CONFIGS[c]})
+                if not r.get("ok"):
+                    digests[c] = "error " + r["error"]["code"]
+                    continue
+                norm = lambda v: f"{v:.6g}" if isinstance(v, float) else json.dumps(v)
+                rows = sorted("|".join(norm(v) for v in row) for row in r["rows"])
+                if "ORDER BY" in sql:
+                    rows = ["|".join(norm(v) for v in row) for row in r["rows"]]
+                digests[c] = hashlib.sha256("\n".join(rows).encode()).hexdigest()[:12] + f" ({len(rows)} rows)"
+            ok = len({d for c, d in digests.items() if not (c == "baseline" and d.startswith("error"))}) == 1
+            bad += not ok
+            print(("ok   " if ok else "DIFF ") + name + "  " + json.dumps(digests), flush=True)
+        s.close()
+        return 1 if bad else 0
     print("| query | " + " | ".join(configs) + " |")
     print("|---|" + "---:|" * len(configs))
     for name, sql in QUERIES.items():

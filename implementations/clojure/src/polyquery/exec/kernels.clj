@@ -476,6 +476,40 @@
                   (when (some? s) (aset out i (boolean (test s))))))
               (BoolVec. out nulls))))))))
 
+(defmacro ^:private op-loops
+  "One plain loop per operator over positions 0..n-1 storing (op lhs rhs):
+  straight-line array code that C2 compiles to SIMD instructions."
+  [code n [i] lhs rhs out]
+  `(case (int ~code)
+     0 (dotimes [~i ~n] (aset ~out ~i (== ~lhs ~rhs)))
+     1 (dotimes [~i ~n] (aset ~out ~i (not (== ~lhs ~rhs))))
+     2 (dotimes [~i ~n] (aset ~out ~i (< ~lhs ~rhs)))
+     3 (dotimes [~i ~n] (aset ~out ~i (<= ~lhs ~rhs)))
+     4 (dotimes [~i ~n] (aset ~out ~i (> ~lhs ~rhs)))
+     5 (dotimes [~i ~n] (aset ~out ~i (>= ~lhs ~rhs)))))
+
+(def ^:private op-codes {"=" 0 "<>" 1 "<" 2 "<=" 3 ">" 4 ">=" 5})
+
+(defn- compare-long-const
+  "BoolVec of `x op c` for long values xa (identity selection fast path)."
+  [op ^longs xa c ^booleans nulls ^ints sel n]
+  (let [c (long c) n (long n)]
+    (if (and (nil? nulls) (identical? sel b/identity-sel))
+      (let [out (boolean-array cap)]
+        (op-loops (op-codes op) n [i] (aget xa i) c out)
+        (BoolVec. out nil))
+      (bool-loop op nulls sel n [i] (Long/compare (aget xa i) c)))))
+
+(defn- compare-double-const
+  "BoolVec of `x op d` for double values xa (identity selection fast path)."
+  [op ^doubles xa d ^booleans nulls ^ints sel n]
+  (let [d (double d) n (long n)]
+    (if (and (nil? nulls) (identical? sel b/identity-sel))
+      (let [out (boolean-array cap)]
+        (op-loops (op-codes op) n [i] (aget xa i) d out)
+        (BoolVec. out nil))
+      (bool-loop op nulls sel n [i] (let [y (aget xa i)] (cond (< y d) -1 (> y d) 1 :else 0))))))
+
 (defn- const-compare-kernel
   "Kernel of `x op c` for a constant non-NULL c of type ct (x of type xt)."
   [env op cmp-type xe xt c ct]
@@ -487,8 +521,8 @@
       (let [c (long c)]
         (reify Kernel
           (eval [_ bt sel n]
-            (let [x ^LongVec (ev xk bt sel n) xa ^longs (.-v x)]
-              (bool-loop op ^booleans (.-nulls x) sel n [i] (Long/compare (aget xa i) c))))))
+            (let [x ^LongVec (ev xk bt sel n)]
+              (compare-long-const op (.-v x) c (.-nulls x) sel n)))))
 
       (and (= :decimal k) (= :decimal (t/kind xt)) (<= (t/scale ct) (t/scale xt))
            (instance? Long (v/dec-rescale-up (long c) (- (t/scale xt) (t/scale ct)))))
@@ -496,17 +530,15 @@
       (let [c (long (v/dec-rescale-up (long c) (- (t/scale xt) (t/scale ct))))]
         (reify Kernel
           (eval [_ bt sel n]
-            (let [x ^LongVec (ev xk bt sel n) xa ^longs (.-v x)]
-              (bool-loop op ^booleans (.-nulls x) sel n [i] (Long/compare (aget xa i) c))))))
+            (let [x ^LongVec (ev xk bt sel n)]
+              (compare-long-const op (.-v x) c (.-nulls x) sel n)))))
 
       (and (= :float64 k) (#{:float64 :int64} (t/kind xt)))
       (let [d (double ((v/->double-fn ct) c))]
         (reify Kernel
           (eval [_ bt sel n]
-            (let [x (ev xk bt sel n)
-                  xa (as-doubles x xt sel n)]
-              (bool-loop op (nulls-of x sel n) sel n [i]
-                         (let [y (aget xa i)] (cond (< y d) -1 (> y d) 1 :else 0)))))))
+            (let [x (ev xk bt sel n)]
+              (compare-double-const op (as-doubles x xt sel n) d (nulls-of x sel n) sel n)))))
 
       (= :string k)
       (let [^String c c

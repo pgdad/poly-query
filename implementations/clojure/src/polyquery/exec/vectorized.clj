@@ -74,6 +74,10 @@
 ;; ---------------------------------------------------------------------------
 ;; Scan, filter, project
 
+(def ^:private pooled?
+  "Scan buffer reuse (PQ_SCAN_ARENA=0 disables it, for measurements)."
+  (not= "0" (System/getenv "PQ_SCAN_ARENA")))
+
 (defmethod build-batches :table-scan [plan env]
   (let [tbl (:table plan)
         width (count (:columns tbl))
@@ -82,6 +86,7 @@
         qctx (:ctx env)]
     (ops/reducible
      (fn [f init]
+       (let [arenas (mapv (fn [_] (b/arena)) columns)]
        (loop [segs (seq (ops/scan-segments plan)) acc init]
          (if (or (nil? segs) (reduced? acc))
            (unreduced acc)
@@ -96,9 +101,10 @@
                            (ctx/check! qctx)
                            (dotimes [c (count columns)]
                              (let [ci (long (nth columns c))]
-                               (aset cols ci (b/segment-vec (nth vectors c) (nth types ci) start n))))
+                               (aset cols ci (b/segment-vec (nth vectors c) (nth types ci) start n
+                                                          (when pooled? (nth arenas c))))))
                            (recur (+ start n) (f acc (Batch. cols b/identity-sel n))))))]
-             (recur (next segs) acc))))))))
+             (recur (next segs) acc)))))))))
 
 (defmethod build-batches :filter [plan env]
   (let [pred (k/compile-filter env (:predicate plan))
