@@ -6,6 +6,7 @@ import struct
 import tempfile
 import unittest
 import zlib
+from pathlib import Path
 
 from polyquery import errors
 from polyquery.datatypes import BOOLEAN, DATE, FLOAT64, INT64, STRING, TIMESTAMP, decimal
@@ -153,7 +154,7 @@ class PqcfTests(unittest.TestCase):
     def test_layout_and_metadata(self):
         table = make_table("t", COLUMNS, DATA, 7)
         self.save(table, "plain", indexes=[{"name": "ix", "column": "s", "kind": "HASH"}])
-        data = open(self.path, "rb").read()
+        data = Path(self.path).read_bytes()
         self.assertEqual(data[:8], b"PQCF\x01\x00\x00\x00")
         self.assertEqual(data[-4:], b"PQCF")
         file, _ = self.reopen()
@@ -171,7 +172,7 @@ class PqcfTests(unittest.TestCase):
 
     def test_corruption_is_detected(self):
         self.save(make_table("t", COLUMNS, DATA, 7))
-        original = open(self.path, "rb").read()
+        original = Path(self.path).read_bytes()
 
         def status(data, lazy=False):
             with open(self.path, "wb") as f:

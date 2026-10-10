@@ -13,6 +13,7 @@ from typing import Any
 from .protocol.handlers import RequestHandler, capabilities_info, version_info
 from .protocol.serialize import dumps
 from .protocol.session import run_exec, run_session
+from .server.app import ServerConfig, default_workers, run_server
 from .service import Engine, EngineConfig
 
 MODES = ("version", "capabilities", "session", "exec", "serve")
@@ -52,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--log-level", choices=sorted(LOG_LEVELS), default="info")
     ap.add_argument("--native-kernels")
     ap.add_argument("--request", help="exec mode: request file, or - for stdin")
-    # serve (Phase 4) options are accepted for forward compatibility
+    # serve (Phase 4)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=_positive_int)
     ap.add_argument("--workers", type=_positive_int)
@@ -64,16 +65,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 class _JsonLogFormatter(logging.Formatter):
+    """One JSON object per line: ts (RFC 3339 UTC), level, msg, plus the
+    structured fields passed as ``extra={"fields": {...}}``."""
+
+    LEVEL_NAMES = {"WARNING": "warn", "CRITICAL": "error"}
+
     def format(self, record: logging.LogRecord) -> str:
         entry: dict[str, Any] = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(record.created))
             + f".{int(record.msecs):03d}Z",
-            "level": record.levelname.lower(),
+            "level": self.LEVEL_NAMES.get(record.levelname, record.levelname.lower()),
             "msg": record.getMessage(),
         }
+        fields = getattr(record, "fields", None)
+        if isinstance(fields, dict):
+            for key, value in fields.items():
+                entry.setdefault(key, value)
         if record.exc_info:
             entry["exception"] = self.formatException(record.exc_info)
-        return json.dumps(entry)
+        return json.dumps(entry, default=str)
 
 
 def _setup_logging(level: str) -> None:
@@ -96,10 +106,6 @@ def main(argv: list[str]) -> int:
     if args.mode == "capabilities":
         print(dumps(capabilities_info()), flush=True)
         return 0
-    if args.mode == "serve":
-        print("polyquery: serve mode is not implemented by this engine", file=sys.stderr)
-        return 1
-
     data_dir = os.path.abspath(args.data_dir)
     if not os.path.isdir(data_dir):
         print(f"polyquery: data directory does not exist: {args.data_dir}", file=sys.stderr)
@@ -115,6 +121,26 @@ def main(argv: list[str]) -> int:
         log_level=args.log_level,
     )
     handler = RequestHandler(Engine(config))
+
+    if args.mode == "serve":
+        if args.port is None:
+            print("polyquery: serve requires --port N", file=sys.stderr)
+            return 2
+        if args.port > 65535:
+            print("polyquery: --port must be between 0 and 65535", file=sys.stderr)
+            return 2
+        return run_server(
+            handler,
+            ServerConfig(
+                host=args.host,
+                port=args.port,
+                workers=args.workers or default_workers(),
+                queue_depth=args.queue_depth,
+                query_timeout_ms=args.query_timeout_ms,
+                shutdown_grace_ms=args.shutdown_grace_ms,
+                max_request_bytes=args.max_request_bytes,
+            ),
+        )
 
     if args.mode == "session":
         try:

@@ -1,14 +1,17 @@
 # PolyQuery — Python engine
 
 An analytical database engine implementing the PolyQuery specification
-(`spec/`) in pure Python. Current status: **Phase 3** (SQL v1 query engine
+(`spec/`) in pure Python. Current status: **Phase 4** (SQL v1 query engine
 with row/column in-memory layouts, persistent PQCF v1 storage, statistics,
-hash and ordered indexes and cost-based access-path selection).
+hash and ordered indexes, cost-based access-path selection, and an HTTP/1.1
+server with streaming results, admission control, timeouts, cancellation,
+Prometheus metrics, structured logs and graceful shutdown).
 
 Capabilities reported: `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`,
 `sql.basic`, `test.functions`, `phase2`, `sql.groupby`, `sql.join`,
 `sql.functions`, `sql.subquery`, `sql.cte`, `sql.correlated_subquery`,
-`phase3`, `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`.
+`phase3`, `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`,
+`phase4`, `http.streaming`.
 
 ## Build prerequisites
 
@@ -26,6 +29,7 @@ make fmt      # whitespace normalisation (tools/fmt.py); no third-party formatte
 make clean
 bin/polyquery session --data-dir DIR     # JSON-lines protocol on stdin/stdout
 bin/polyquery exec --request FILE|-      # one request or an array of requests
+bin/polyquery serve --port N [--workers N --queue-depth Q --query-timeout-ms T ...]
 bin/polyquery version | capabilities
 ```
 
@@ -49,8 +53,9 @@ logical plan → optimizer → physical plan → execution**.
 | `polyquery/planner/` | `planner.py` (bound query → logical plan), `logical.py` (Scan, Values, SubqueryScan, Filter, Join, Aggregate, Project, Distinct, Sort, Limit), `optimizer.py` (predicate pushdown, join-condition extraction), `physical.py` (algorithm and access-path choice: TableScan, IndexScan, LookupScan, HashJoin, NestedLoopJoin, HashAggregate, … with cardinality estimates, and the EXPLAIN JSON), `access.py` (index-usable predicates, selectivity estimation, index selection, row-group skipping), `explain.py` (expression rendering) |
 | `polyquery/execution/` | `compiler.py` (bound expression → Python closure, incl. subquery evaluation), `functions.py` (scalar function kernels), `operators.py` (batch-at-a-time physical operators), `aggregates.py` (accumulators), `casts.py`, `context.py` (timeout / cancellation / memory budget / join-row limit, correlation parameters, per-statement caches) |
 | `polyquery/service.py` | `Engine` facade: owns the catalog, runs `load`, SQL and `explain` |
-| `polyquery/protocol/` | Transport-independent request handler (validation, path safety, responses), JSON-lines session loop, exec mode, canonical value serialization |
-| `polyquery/cli.py` | Command line (`version`, `capabilities`, `session`, `exec`) |
+| `polyquery/protocol/` | Transport-independent request handler (validation, path safety, responses, streaming cursor), JSON-lines session loop, exec mode, canonical value serialization |
+| `polyquery/server/` | `serve` mode: `http.py` (HTTP/1.1 routing, bodies, JSON / NDJSON responses, query lifecycle), `queries.py` (query registry + admission control), `watcher.py` (client-disconnect detection), `metrics.py` (Prometheus text), `app.py` (server lifecycle, signals, graceful shutdown) |
+| `polyquery/cli.py` | Command line (`version`, `capabilities`, `session`, `exec`, `serve`), JSON-lines log formatter |
 
 ### Storage (Phase 3)
 
@@ -204,6 +209,60 @@ any remaining reference to a FROM column is a grouping violation
   subqueries used by an operator follow its inputs in `children`, marked
   `"subquery": true`, so every scan of the statement appears in the tree.
 
+### HTTP server (Phase 4)
+
+* **Threads.** `http.server.ThreadingHTTPServer` with one (daemon) thread
+  per connection, HTTP/1.1 keep-alive. A query executes in its connection's
+  thread; Python threads share the GIL, so concurrency gives responsiveness
+  and overlap of waiting (e.g. `PQ_SLEEP`, socket I/O), not CPU parallelism.
+* **Snapshot isolation.** Tables and indexes are immutable values. Every
+  query binds and plans against `Catalog.snapshot()` (a copy of the name →
+  table / index maps taken under the catalog lock), and the physical plan
+  holds direct references to the table objects, so a query keeps reading the
+  versions it started with even if they are replaced or dropped meanwhile.
+  `load`/`open` parse outside the lock and publish with one atomic
+  `Catalog.put`; all catalog mutations are serialized by that lock.
+* **Admission control** (`server/queries.py`). Each query is registered under
+  its `query_id` (client-supplied or `q-<n>`; a duplicate of an active id is
+  `409 ALREADY_EXISTS`), then admitted: it runs immediately if fewer than
+  `--workers` queries run and nobody is waiting, else it waits in a FIFO queue
+  of at most `--queue-depth` entries, else it is rejected immediately with
+  `503 OVERLOADED`. Waiting observes cancellation and the deadline. Queries
+  are the `query` op (from `/v1/query`, `/v1/query/stream` and
+  `/v1/request`); all other requests (catalog ops, `/health`, `/metrics`,
+  `/v1/queries`, cancellation, `explain`) bypass admission and stay
+  responsive.
+* **Timeouts.** The deadline is fixed when the query arrives
+  (`options.timeout_ms`, else `--query-timeout-ms`), so queueing time counts.
+  It is passed to the execution context as an absolute monotonic time.
+* **Cancellation.** `DELETE /v1/queries/{id}` sets the query's cancel event
+  (waking it if queued). Operators check cancel/deadline per batch (≤ 2048
+  rows) and, inside nested-loop joins and per-group aggregation, at least
+  every 65,536 rows; `PQ_SLEEP` sleeps in 10 ms slices. A single background
+  thread (`server/watcher.py`) polls the sockets of connections with an
+  executing query and cancels the query when the peer hangs up (EOF / HUP).
+* **Streaming.** `/v1/query/stream` parses, plans and pulls the first batch
+  before committing to `200`, so errors up to that point get a normal error
+  response with its HTTP status. Afterwards the result is written as chunked
+  NDJSON (`header`, `rows` lines of ≤ 10,000 rows, `end`, or a final `error`
+  line). Execution is a pull-based generator pipeline driven by the writer:
+  exactly one batch is in flight, writes are non-blocking sends that wait for
+  socket writability, and while waiting the writer still observes
+  cancellation and the deadline. A send failure cancels the query.
+* **Metrics** (`/metrics`): the required families plus
+  `polyquery_http_requests_total{code}`. `polyquery_queries_total` counts
+  every finished query request by outcome (rejected, timed-out and cancelled
+  ones are `error`); the duration summary includes queueing time.
+* **Logs**: JSON lines on stderr (`ts`, `level`, `msg` + structured fields).
+  Every query emits `query finished` at `info` with `query_id`, `status`
+  (`ok`/`error`), `error_code`, `duration_ms`, `rows` — never SQL text,
+  values or bodies. Per-request access logs are at `debug`.
+* **Shutdown** on SIGTERM/SIGINT: new queries get `503 SHUTTING_DOWN`,
+  `/health` answers `503`, the listening socket is closed, active (running
+  and queued) queries get `--shutdown-grace-ms` to finish; the rest are
+  cancelled and given up to 2 s to deliver their `CANCELLED` responses; the
+  process exits with status 0.
+
 ## Design decisions (where the spec leaves room)
 
 * **CSV**: completely empty lines (also `\r\n`-only lines) are skipped.
@@ -295,12 +354,31 @@ any remaining reference to a FROM column is a grouping violation
   are accounted at ~64 bytes + 16 bytes per value against
   `--max-query-memory-mb` (default 4096) → `RESOURCE_LIMIT`.
 * Default limits: `--max-ingest-bytes` 4 GiB, `--max-table-rows` 200,000,000.
+* **HTTP**: `PUT /v1/tables/{name}` accepts the query parameters `format`,
+  `replace`, `header`, `delimiter` and `layout` (booleans as
+  `true`/`false`/`1`/`0`); a body that is not UTF-8 is `INGEST_ERROR`.
+  Successful `/v1/request` responses are `200` regardless of the op. Request
+  bodies may use `Content-Length` or chunked transfer encoding; an oversized
+  body (> `--max-request-bytes`) is answered `413 RESOURCE_LIMIT` (bodies up to
+  64 MiB are drained first so the client sees the response). Unknown HTTP
+  methods are answered like wrong methods (`405 INVALID_REQUEST`). JSON
+  responses of the REST endpoints carry `"id": null`. `--workers 0` is
+  treated as 1.
 * Responses are serialized with ASCII escaping (`\uXXXX`) so the output is always
   valid UTF-8 JSON on one line.
 
 ## Known limitations
 
-* No HTTP server yet (Phase 4).
+* The GIL serializes CPU work: concurrent queries interleave rather than run
+  in parallel, so throughput does not scale with `--workers`.
+* A single in-memory sort (`ORDER BY`) runs `list.sort` without interruption,
+  so cancellation/timeouts take effect only after the sort of a large input
+  finishes; all other operators check at least every 65,536 rows.
+* Backpressure for streams relies on TCP: the server never buffers more than
+  the batch being written, but whatever the kernel accepts into socket
+  buffers is produced ahead of the client (in this sandbox, loopback sockets
+  accept very large amounts before blocking).
+* The `sleep` protocol op is not cancellable.
 * In-memory tables loaded from CSV/JSON are a single row group without
   min/max zone maps, so row-group skipping applies to PQCF-backed tables only.
 * Decoded vectors of memory-mapped files are cached once read, so a fully

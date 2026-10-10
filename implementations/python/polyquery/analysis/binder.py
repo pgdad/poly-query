@@ -23,7 +23,7 @@ from ..datatypes import (
 )
 from ..names import fold, same_name
 from ..sql import ast
-from ..storage.catalog import Catalog
+from ..storage.catalog import Catalog, CatalogSnapshot
 from . import bound as b
 from . import typing_rules as tr
 from .functions import (
@@ -66,7 +66,7 @@ class _SelectEntry:
 class Binder:
     def __init__(
         self,
-        catalog: Catalog,
+        catalog: Catalog | CatalogSnapshot,
         evaluate_constant: ConstEvaluator,
         *,
         test_functions: bool = False,

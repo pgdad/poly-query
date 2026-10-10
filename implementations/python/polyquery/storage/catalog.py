@@ -9,7 +9,7 @@ from ..names import fold
 from .indexes import Index
 from .table import Column, Table
 
-__all__ = ["Catalog", "Column", "Table"]
+__all__ = ["Catalog", "CatalogSnapshot", "Column", "Table"]
 
 
 class Catalog:
@@ -100,6 +100,30 @@ class Catalog:
         with self._lock:
             return [i for i in self._indexes.values() if i.table is table]
 
+    def snapshot(self) -> CatalogSnapshot:
+        """An immutable view of the current tables and indexes: a query binds
+        and plans against one snapshot, so it sees exactly one version of
+        every table it references (concurrency.md §1)."""
+        with self._lock:
+            return CatalogSnapshot(dict(self._tables), dict(self._indexes))
+
     def _drop_indexes_of(self, table: Table) -> None:
         for key in [k for k, i in self._indexes.items() if i.table is table]:
             del self._indexes[key]
+
+
+class CatalogSnapshot:
+    """Read-only catalog state captured at one instant (see Catalog.snapshot)."""
+
+    def __init__(self, tables: dict[str, Table], indexes: dict[str, Index]):
+        self._tables = tables
+        self._indexes = indexes
+
+    def get(self, name: str) -> Table | None:
+        return self._tables.get(fold(name))
+
+    def get_index(self, name: str) -> Index | None:
+        return self._indexes.get(fold(name))
+
+    def indexes_of(self, table: Table) -> list[Index]:
+        return [i for i in self._indexes.values() if i.table is table]

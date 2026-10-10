@@ -37,20 +37,29 @@ def serialize_value(v: Any, dtype: DataType) -> Any:
     return v if convert is None else convert(v)
 
 
-def serialize_rows(columns: list[Column], rows: list[tuple]) -> list[Any]:
+def row_serializer(columns: list[Column]) -> Callable[[list[tuple]], list[Any]]:
+    """Returns a function serializing batches of rows of the given columns."""
     converters = [value_serializer(c.type) for c in columns]
-    if all(c is None for c in converters):
-        return rows  # tuples serialize as JSON arrays
     plan = [(i, c) for i, c in enumerate(converters) if c is not None]
-    out = []
-    for row in rows:
-        r = list(row)
-        for i, convert in plan:
-            v = r[i]
-            if v is not None:
-                r[i] = convert(v)
-        out.append(r)
-    return out
+    if not plan:
+        return lambda rows: rows  # tuples serialize as JSON arrays
+
+    def serialize(rows: list[tuple]) -> list[Any]:
+        out = []
+        for row in rows:
+            r = list(row)
+            for i, convert in plan:
+                v = r[i]
+                if v is not None:
+                    r[i] = convert(v)
+            out.append(r)
+        return out
+
+    return serialize
+
+
+def serialize_rows(columns: list[Column], rows: list[tuple]) -> list[Any]:
+    return row_serializer(columns)(rows)
 
 
 def dumps(obj: Any) -> str:
