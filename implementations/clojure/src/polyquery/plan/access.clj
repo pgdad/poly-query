@@ -87,42 +87,7 @@
                conjuncts)))
 
 ;; ---------------------------------------------------------------------------
-;; Row-group skipping
-
-(defn- compare-fn
-  "(fn [column-value constant]) → int for a predicate value."
-  [col-type {:keys [type cmp-type]}]
-  (v/comparator-fn cmp-type col-type type))
-
-(defn- value-may-match?
-  [op cmp mn mx value]
-  (let [lo (long (cmp mn value))
-        hi (long (cmp mx value))]
-    (case op
-      ("=" :in) (and (<= lo 0) (>= hi 0))
-      "<>" (not (and (zero? lo) (zero? hi)))
-      "<" (neg? lo)
-      "<=" (<= lo 0)
-      ">" (pos? hi)
-      ">=" (>= hi 0))))
-
-(defn segment-may-match?
-  "False when the chunk statistics {:min :max :null-count} of a segment with
-  `rows` rows prove that no row satisfies column predicate p."
-  [p chunk-stats ^long rows]
-  (let [{:keys [min max null-count]} chunk-stats
-        nulls (long (or null-count 0))
-        op (:op p)]
-    (case op
-      :is-null (or (nil? null-count) (pos? nulls))
-      :not-null (or (nil? null-count) (< nulls rows))
-      (cond
-        (and null-count (= nulls rows)) false
-        (some #(nil? (:value %)) (:values p)) (boolean (seq (remove #(nil? (:value %)) (:values p))))
-        (or (nil? min) (nil? max)) true
-        :else (boolean (some (fn [pv]
-                               (value-may-match? op (compare-fn (:type p) pv) min max (:value pv)))
-                             (:values p)))))))
+;; Row-group skipping (evaluated by polyquery.exec.skipping)
 
 (defn skip-predicates
   "Column predicates usable for row-group skipping (all but <>, which is
@@ -247,6 +212,6 @@
         :not-null (- 1.0 (/ (double null-count) rows))
         ("=" :in) (equality-selectivity distinct-count (count (:values p)))
         "<>" (- 1.0 (equality-selectivity distinct-count 1))
-        (if (every? #(usable-value? (first (:values %))) [p])
+        (if (usable-value? (first (:values p)))
           (range-selectivity (:type p) min max [p])
-          (/ 1.0 3.0))))))
+          0.0)))))

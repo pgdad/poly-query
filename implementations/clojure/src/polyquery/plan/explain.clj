@@ -83,9 +83,11 @@
     (if (:input node) [(:input node)] [])))
 
 (defn plan->json
+  "EXPLAIN tree of a physical plan. The plans of subqueries evaluated by a
+  node follow its input(s) among its children (marked with \"subquery\")."
   [node]
   (let [subs (subplans (node-exprs node))]
-    (cond-> (assoc (props node) "children" (mapv plan->json (children node)))
-      (seq subs) (assoc "subqueries" subs)
-      (and (:columns node) (not (#{:table-scan :index-scan} (:op node)))) (assoc "output" (mapv (fn [c] (str (:name c) " " (t/type-name (:type c))))
-                                            (filter map? (:columns node)))))))
+    (cond-> (assoc (props node) "children" (into (mapv plan->json (children node)) subs))
+      (and (:columns node) (not (#{:table-scan :index-scan} (:op node))))
+      (assoc "output" (mapv (fn [c] (str (:name c) " " (t/type-name (:type c))))
+                            (filter map? (:columns node)))))))

@@ -14,7 +14,7 @@
             [polyquery.exec.aggregate :as agg]
             [polyquery.exec.context :as ctx]
             [polyquery.exec.expr :as expr]
-            [polyquery.plan.access :as access]
+            [polyquery.exec.skipping :as skipping]
             [polyquery.storage.index :as index]
             [polyquery.storage.table :as table]
             [polyquery.values :as v])
@@ -78,7 +78,7 @@
   [seg skip]
   (let [stats (:chunk-stats seg)]
     (or (nil? stats)
-        (every? #(access/segment-may-match? % (nth stats (:column %)) (:row-count seg)) skip))))
+        (every? #(skipping/segment-may-match? % (nth stats (:column %)) (:row-count seg)) skip))))
 
 (defn- fill-row!
   "Copies row r of the vectors into the given positions of row."
