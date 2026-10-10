@@ -5,7 +5,7 @@ use super::lexer::{Keyword, Pos, Symbol, Token, TokenKind, tokenize};
 use crate::error::{Error, Result};
 
 /// Maximum expression/query nesting depth (protects the stack).
-const MAX_DEPTH: usize = 200;
+const MAX_DEPTH: usize = 1000;
 
 /// Parses one SQL statement (an optional single trailing `;` is allowed).
 pub fn parse_statement(sql: &str) -> Result<Statement> {
@@ -439,9 +439,12 @@ impl Parser {
 
     fn or_expr(&mut self) -> Result<Expr> {
         let mut left = self.and_expr()?;
+        // Each chained operator deepens the (left-leaning) tree.
+        let saved = self.depth;
         while self.is_keyword(Keyword::OR) {
             let pos = self.pos();
             self.advance();
+            self.enter()?;
             let right = self.and_expr()?;
             left = Expr {
                 kind: ExprKind::Binary {
@@ -452,14 +455,18 @@ impl Parser {
                 pos,
             };
         }
+        self.depth = saved;
         Ok(left)
     }
 
     fn and_expr(&mut self) -> Result<Expr> {
         let mut left = self.not_expr()?;
+        // Each chained operator deepens the (left-leaning) tree.
+        let saved = self.depth;
         while self.is_keyword(Keyword::AND) {
             let pos = self.pos();
             self.advance();
+            self.enter()?;
             let right = self.not_expr()?;
             left = Expr {
                 kind: ExprKind::Binary {
@@ -470,6 +477,7 @@ impl Parser {
                 pos,
             };
         }
+        self.depth = saved;
         Ok(left)
     }
 
@@ -597,9 +605,12 @@ impl Parser {
 
     fn concat_expr(&mut self) -> Result<Expr> {
         let mut left = self.additive()?;
+        // Each chained operator deepens the (left-leaning) tree.
+        let saved = self.depth;
         while self.is_symbol(Symbol::Concat) {
             let pos = self.pos();
             self.advance();
+            self.enter()?;
             let right = self.additive()?;
             left = Expr {
                 kind: ExprKind::Binary {
@@ -610,19 +621,26 @@ impl Parser {
                 pos,
             };
         }
+        self.depth = saved;
         Ok(left)
     }
 
     fn additive(&mut self) -> Result<Expr> {
         let mut left = self.multiplicative()?;
+        // Each chained operator deepens the (left-leaning) tree.
+        let saved = self.depth;
         loop {
             let op = match self.peek() {
                 TokenKind::Symbol(Symbol::Plus) => BinaryOp::Add,
                 TokenKind::Symbol(Symbol::Minus) => BinaryOp::Sub,
-                _ => return Ok(left),
+                _ => {
+                    self.depth = saved;
+                    return Ok(left);
+                }
             };
             let pos = self.pos();
             self.advance();
+            self.enter()?;
             let right = self.multiplicative()?;
             left = Expr {
                 kind: ExprKind::Binary {
@@ -637,15 +655,21 @@ impl Parser {
 
     fn multiplicative(&mut self) -> Result<Expr> {
         let mut left = self.unary()?;
+        // Each chained operator deepens the (left-leaning) tree.
+        let saved = self.depth;
         loop {
             let op = match self.peek() {
                 TokenKind::Symbol(Symbol::Star) => BinaryOp::Mul,
                 TokenKind::Symbol(Symbol::Slash) => BinaryOp::Div,
                 TokenKind::Symbol(Symbol::Percent) => BinaryOp::Mod,
-                _ => return Ok(left),
+                _ => {
+                    self.depth = saved;
+                    return Ok(left);
+                }
             };
             let pos = self.pos();
             self.advance();
+            self.enter()?;
             let right = self.unary()?;
             left = Expr {
                 kind: ExprKind::Binary {
@@ -963,10 +987,22 @@ mod tests {
 
     #[test]
     fn deep_nesting_is_an_error_not_a_crash() {
-        let sql = format!("SELECT {}1{}", "(".repeat(5000), ")".repeat(5000));
-        assert_eq!(code(&sql), ErrorCode::ParseError);
-        let sql = format!("SELECT {}1", "-".repeat(5000));
-        assert_eq!(code(&sql), ErrorCode::ParseError);
+        // The engine parses on a thread with a large stack; mirror that here.
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let sql = format!("SELECT {}1{}", "(".repeat(5000), ")".repeat(5000));
+                assert_eq!(code(&sql), ErrorCode::ParseError);
+                let sql = format!("SELECT {}1", "-".repeat(5000));
+                assert_eq!(code(&sql), ErrorCode::ParseError);
+                let sql = format!("SELECT 1{}", " + 1".repeat(100_000));
+                assert_eq!(code(&sql), ErrorCode::ParseError);
+                let sql = format!("SELECT 1{}", " + 1".repeat(500));
+                assert!(parse_statement(&sql).is_ok());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
