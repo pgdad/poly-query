@@ -19,7 +19,9 @@
 (def spec-version "1.0.0")
 
 (def capabilities
-  ["phase1" "ingest.csv" "ingest.json" "ingest.jsonl" "sql.basic" "test.functions"])
+  ["phase1" "ingest.csv" "ingest.json" "ingest.jsonl" "sql.basic" "test.functions"
+   "phase2" "sql.groupby" "sql.join" "sql.functions" "sql.subquery" "sql.cte"
+   "sql.correlated_subquery"])
 
 (defn version-info []
   {"ok" true
@@ -151,16 +153,23 @@
     (invalid! "option 'query_id' must be a string"))
   {:max-rows (field opts "max_rows" non-neg-int? "an integer >= 0" false)
    :timeout-ms (field opts "timeout_ms" non-neg-int? "an integer >= 0" false)
-   :count-only? (= "count" (get opts "result"))})
+   :count-only? (= "count" (get opts "result"))
+   :optimize (get opts "optimize" true)
+   :join (get opts "join" "auto")})
+
+(defn- engine-options
+  "Engine options of a query/explain request."
+  [config req]
+  (assoc (query-options (or (field req "options" map? "an object" false) {}))
+         :test-functions? (:test-functions? config)
+         :max-join-rows (:max-join-rows (:limits config))
+         :memory-budget-bytes (* 1024 1024 (long (:max-query-memory-mb (:limits config))))))
 
 (defmethod handle-op "query" [{:keys [config catalog]} req]
   (let [sql (field req "sql" string? "a string" true)
-        opts (query-options (or (field req "options" map? "an object" false) {}))
+        opts (engine-options config req)
         started (System/nanoTime)
-        result (engine/run-query @catalog sql
-                                 (assoc opts
-                                        :test-functions? (:test-functions? config)
-                                        :memory-budget-bytes (* 1024 1024 (long (:max-query-memory-mb (:limits config))))))
+        result (engine/run-query @catalog sql opts)
         elapsed-us (quot (- (System/nanoTime) started) 1000)]
     (cond-> {"columns" (:columns result)}
       (not (:count-only? opts)) (assoc "rows" (:rows result))
@@ -198,7 +207,11 @@
     (Thread/sleep (long ms))
     {}))
 
-(doseq [op ["explain" "save" "open" "stats"]]
+(defmethod handle-op "explain" [{:keys [config catalog]} req]
+  (let [sql (field req "sql" string? "a string" true)]
+    {"plan" (engine/explain-plan @catalog sql (engine-options config req))}))
+
+(doseq [op ["save" "open" "stats"]]
   (defmethod handle-op op [_ _]
     (err/fail! "UNSUPPORTED" (str "operation '" op "' is not supported by this engine"))))
 

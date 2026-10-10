@@ -54,7 +54,7 @@
                       ["SELECT 9223372036854775808" "NUMERIC_OVERFLOW"]
                       ["SELECT DATE '2023-02-29'" "CONVERSION_ERROR"]
                       ["SELECT 0.000000001 * 0.0000000001" "TYPE_ERROR"]
-                      ["SELECT UPPER(name) FROM people" "UNSUPPORTED"]
+                      ["SELECT UPPER(id) FROM people" "TYPE_ERROR"]
                       ["SELECT FROBNICATE(1)" "SEMANTIC_ERROR"]
                       ["SELECT PQ_SLEEP(1)" "SEMANTIC_ERROR"]]]
     (testing sql (is (= code (error-code (analyze sql)))))))

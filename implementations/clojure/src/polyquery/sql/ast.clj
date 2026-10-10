@@ -4,6 +4,7 @@
   Expressions ({:node … :pos {:line :col}}):
     :literal   {:kind :number|:string|:bool|:null|:date|:timestamp, :text|:value}
     :column    {:table (nil|name) :name}
+    :resolved-column {:name :type :index}     ; produced by `*` expansion
     :unary     {:op \"-\"|\"+\" :arg}
     :binary    {:op \"+\" \"-\" \"*\" \"/\" \"%\" \"||\" \"=\" \"<>\" \"<\" \"<=\" \">\" \">=\" \"AND\" \"OR\"
                 :left :right}
@@ -53,5 +54,11 @@
     []))
 
 (defn contains-aggregate?
+  "True if e contains an aggregate call outside nested subqueries."
   [e]
   (boolean (or (aggregate-call? e) (some contains-aggregate? (children e)))))
+
+(defn contains-subquery?
+  [e]
+  (boolean (or (#{:in-query :exists :subquery} (:node e))
+               (some contains-subquery? (children e)))))

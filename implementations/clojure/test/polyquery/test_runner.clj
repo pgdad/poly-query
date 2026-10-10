@@ -10,7 +10,10 @@
     polyquery.sql.analyzer-test
     polyquery.ingest.csv-test
     polyquery.ingest.json-test
+    polyquery.plan.planner-test
+    polyquery.exec.functions-test
     polyquery.engine-test
+    polyquery.engine-phase2-test
     polyquery.protocol-test])
 
 (defn -main [& _]

@@ -1,9 +1,16 @@
 (ns polyquery.exec.expr
-  "Compiles bound expressions (polyquery.sql.analyzer) into closures
+  "Compiles bound expressions (polyquery.sql.bound) into closures
   `(fn [^objects row] value)`, specialised on the static operand types
-  (spec/data-types/types.md §4-§6, §8)."
+  (spec/data-types/types.md §4-§8, spec/sql/semantics.md §8, §11-13).
+
+  The compilation environment `c` holds:
+    :ctx    the QueryContext (timeouts, cancellation)
+    :cells  atom of cell id → Object[1] holding the current row of an
+            enclosing query (correlated subqueries)
+    :build  (fn [physical-plan c]) → re-reducible of rows; used to compile
+            the nested plans of subquery expressions"
   (:require [polyquery.errors :as err]
-            [polyquery.exec.context :as ctx]
+            [polyquery.exec.functions :as functions]
             [polyquery.types :as t]
             [polyquery.values :as v]))
 
@@ -13,18 +20,6 @@
 (defn- div-zero! [] (err/fail! "DIVISION_BY_ZERO" "division by zero"))
 
 (declare compile-expr)
-
-;; ---------------------------------------------------------------------------
-;; Operand conversions
-
-(defn- ->double-fn
-  "Function converting a non-null value of numeric type t to double."
-  [t]
-  (case (t/kind t)
-    :int64 (fn ^double [x] (double (long x)))
-    :float64 (fn ^double [x] (double x))
-    :decimal (let [s (t/scale t)] (fn ^double [x] (v/dec->double (long x) s)))
-    :null (fn ^double [_] 0.0)))
 
 (defn- binary-op
   "Wraps a two-argument function on non-null operands with NULL propagation."
@@ -54,7 +49,7 @@
             (if (zero? b) (div-zero!) (rem a b))))))
 
 (defn- float-arith [op lt rt]
-  (let [dl (->double-fn lt) dr (->double-fn rt)
+  (let [dl (v/->double-fn lt) dr (v/->double-fn rt)
         finite (fn [^double d] (if (or (Double/isInfinite d) (Double/isNaN d))
                                  (err/fail! "NUMERIC_OVERFLOW" "floating point overflow")
                                  d))]
@@ -96,35 +91,68 @@
 ;; ---------------------------------------------------------------------------
 ;; Comparison
 
-(defn- comparator-fn
-  "Returns (fn [a b]) → negative/zero/positive for non-null operands of the
-  given types compared as cmp-type."
-  [cmp-type lt rt]
-  (case (t/kind cmp-type)
-    :int64 (fn [a b] (Long/compare (long a) (long b)))
-    :float64 (let [dl (->double-fn lt) dr (->double-fn rt)]
-               (fn [a b] (let [x (double (dl a)) y (double (dr b))]
-                           (cond (< x y) -1 (> x y) 1 :else 0))))
-    :decimal (let [sl (t/scale lt) sr (t/scale rt)]
-               (fn [a b] (v/dec-compare (long a) sl (long b) sr)))
-    :timestamp (let [conv (fn [t] (if (= t :date)
-                                    (fn ^long [x] (* (long x) v/micros-per-day))
-                                    (fn ^long [x] (long x))))
-                     cl (conv lt) cr (conv rt)]
-                 (fn [a b] (Long/compare (long (cl a)) (long (cr b)))))
-    (let [cmp (v/value-comparator cmp-type)]
-      (fn [a b] (.compare cmp a b)))))
+(defn- cmp-test [op]
+  (case op
+    "=" zero? "<>" (complement zero?) "<" neg? "<=" (complement pos?)
+    ">" pos? ">=" (complement neg?)))
 
 (defn- compile-compare [c e]
   (let [{:keys [op cmp-type left right]} e
-        cmp (comparator-fn cmp-type (:type left) (:type right))
-        test (case op
-               "=" zero? "<>" (complement zero?) "<" neg? "<=" (complement pos?)
-               ">" pos? ">=" (complement neg?))]
+        cmp (v/comparator-fn cmp-type (:type left) (:type right))
+        test (cmp-test op)]
     (if (= cmp-type :null)
       (constantly nil)
       (binary-op (compile-expr c left) (compile-expr c right)
                  (fn [a b] (boolean (test (long (cmp a b)))))))))
+
+(defn- three-valued-cmp
+  "(fn [x y]) → nil if either is NULL, else (test (cmp x y))."
+  [cmp-type lt rt test]
+  (if (= cmp-type :null)
+    (constantly nil)
+    (let [cmp (v/comparator-fn cmp-type lt rt)]
+      (fn [x y] (when (and (some? x) (some? y)) (boolean (test (long (cmp x y)))))))))
+
+(defn- and3 [a b]
+  (cond (or (false? a) (false? b)) false
+        (or (nil? a) (nil? b)) nil
+        :else true))
+
+(defn- not3 [x] (when (some? x) (not x)))
+
+(defn- compile-between [c e]
+  (let [xt (:type (:arg e))
+        xf (compile-expr c (:arg e))
+        lf (compile-expr c (:low e))
+        hf (compile-expr c (:high e))
+        ge (three-valued-cmp (:low-type e) xt (:type (:low e)) (complement neg?))
+        le (three-valued-cmp (:high-type e) xt (:type (:high e)) (complement pos?))
+        not? (:not? e)]
+    (fn [row]
+      (let [x (xf row)
+            r (and3 (ge x (lf row)) (le x (hf row)))]
+        (if not? (not3 r) r)))))
+
+(defn- compile-in-list [c e]
+  (let [xt (:type (:arg e))
+        xf (compile-expr c (:arg e))
+        items (mapv (fn [item ct]
+                      [(compile-expr c item)
+                       (if (= ct :null) nil (v/comparator-fn ct xt (:type item)))])
+                    (:items e) (:cmp-types e))
+        not? (:not? e)]
+    (fn [row]
+      (let [x (xf row)
+            r (when (some? x)
+                (loop [items items saw-null? false]
+                  (if-let [[f cmp] (first items)]
+                    (let [y (f row)]
+                      (cond
+                        (or (nil? y) (nil? cmp)) (recur (rest items) true)
+                        (zero? (long (cmp x y))) true
+                        :else (recur (rest items) saw-null?)))
+                    (if saw-null? nil false))))]
+        (if not? (not3 r) r)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Logic
@@ -152,28 +180,119 @@
                   :else false)))))))
 
 ;; ---------------------------------------------------------------------------
-;; Functions
+;; CASE / LIKE
 
-(defn- compile-call [c e]
-  (let [args (mapv #(compile-expr c %) (:args e))]
-    (case (:fn e)
-      "PQ_SLEEP" (let [af (first args) qctx (:ctx c)]
-                   (fn [row]
-                     (when-let [ms (af row)]
-                       (when (neg? (long ms))
-                         (err/fail! "INVALID_ARGUMENT" "PQ_SLEEP expects a non-negative duration"))
-                       (ctx/sleep! qctx (long ms))
-                       ms))))))
+(defn- compile-case [c e]
+  (let [whens (mapv (fn [[w r]] [(compile-expr c w) (compile-expr c r)]) (:whens e))
+        else-f (if (:else e) (compile-expr c (:else e)) (constantly nil))]
+    (fn [row]
+      (loop [ws whens]
+        (if-let [[w r] (first ws)]
+          (if (true? (w row)) (r row) (recur (rest ws)))
+          (else-f row))))))
+
+(defn- compile-like [c e]
+  (let [xf (compile-expr c (:arg e))
+        pat (:pattern e)
+        not? (:not? e)
+        matcher (if (= :literal (:node pat))
+                  (let [m (when (some? (:value pat)) (functions/like-matcher (:value pat)))]
+                    (fn [_] m))
+                  (let [pf (compile-expr c pat)
+                        cache (volatile! nil)]
+                    (fn [row]
+                      (when-let [p (pf row)]
+                        (let [[cp m] @cache]
+                          (if (= cp p)
+                            m
+                            (let [m (functions/like-matcher p)]
+                              (vreset! cache [p m])
+                              m)))))))]
+    (fn [row]
+      (let [x (xf row)
+            m (when (some? x) (matcher row))]
+        (when (and (some? x) m)
+          (let [r (boolean (m x))]
+            (if not? (not r) r)))))))
+
+;; ---------------------------------------------------------------------------
+;; Correlation cells and subqueries
+
+(defn cell-holder
+  "The Object[1] holding the current outer row for correlation cell id."
+  ^objects [c id]
+  (let [cells (:cells c)]
+    (or (get @cells id)
+        (get (swap! cells (fn [m] (if (contains? m id) m (assoc m id (object-array 1))))) id))))
+
+(defn- once
+  "Memoizes a function of the row for uncorrelated subqueries: computed on
+  first use, then reused."
+  [f]
+  (let [result (volatile! ::unset)]
+    (fn [row]
+      (let [r @result]
+        (if (identical? r ::unset)
+          (let [x (f row)] (vreset! result x) x)
+          r)))))
+
+(defn- scalar-value [plan]
+  (let [r (reduce (fn [acc ^objects row]
+                    (if (identical? acc ::none)
+                      (aget row 0)
+                      (err/fail! "SUBQUERY_CARDINALITY" "scalar subquery returned more than one row")))
+                  ::none plan)]
+    (when-not (identical? r ::none) r)))
+
+(defn- value-set
+  "[java.util.HashSet of keys, has-null?] of the single column of plan."
+  [plan key-fn]
+  (let [s (java.util.HashSet.)
+        has-null (volatile! false)]
+    (reduce (fn [_ ^objects row]
+              (let [x (aget row 0)]
+                (if (nil? x) (vreset! has-null true) (.add s (key-fn x))))
+              nil)
+            nil plan)
+    [s @has-null]))
+
+(defn- compile-subquery [c e]
+  (let [^objects holder (cell-holder c (:cell e))
+        plan ((:build c) (:plan e) c)
+        with-row (fn [f] (fn [row] (aset holder 0 row) (f)))
+        memo (if (:correlated? e) identity once)]
+    (case (:kind e)
+      :scalar (memo (with-row #(scalar-value plan)))
+      :exists (memo (with-row #(reduce (fn [_ _] (reduced true)) false plan)))
+      :in (let [ct (:cmp-type e)
+                col-type (:type (first (:columns (:plan e))))
+                xt (:type (:arg e))
+                xf (compile-expr c (:arg e))
+                set-of (memo (with-row #(value-set plan (v/key-fn col-type ct))))
+                xkey (v/key-fn xt ct)
+                not? (:not? e)]
+            (fn [row]
+              (let [x (xf row)
+                    [^java.util.HashSet s has-null?] (set-of row)
+                    r (cond
+                        (.isEmpty s) (if has-null? nil false)
+                        (nil? x) nil
+                        (.contains s (xkey x)) true
+                        has-null? nil
+                        :else false)]
+                (if not? (not3 r) r)))))))
 
 ;; ---------------------------------------------------------------------------
 
 (defn compile-expr
-  "Compiles bound expression e. `c` is the compilation environment
-  {:ctx QueryContext}."
+  "Compiles bound expression e in environment c."
   [c e]
   (case (:node e)
     :literal (let [x (:value e)] (fn [_] x))
     :column (let [i (int (:index e))] (fn [^objects row] (aget row i)))
+    :outer-column (let [^objects holder (cell-holder c (:cell e))
+                        i (int (:index e))]
+                    (fn [_] (aget ^objects (aget holder 0) i)))
     :neg (compile-neg c e)
     :arith (compile-arith c e)
     :concat (binary-op (compile-expr c (:left e)) (compile-expr c (:right e))
@@ -182,13 +301,18 @@
     :and (compile-and c e)
     :or (compile-or c e)
     :not (let [af (compile-expr c (:arg e))]
-           (fn [row] (let [x (af row)] (when (some? x) (not x)))))
+           (fn [row] (not3 (af row))))
     :is-null (let [af (compile-expr c (:arg e)) not? (boolean (:not? e))]
                (fn [row] (if not? (some? (af row)) (nil? (af row)))))
     :cast (let [af (compile-expr c (:arg e))
                 f (v/cast-fn (:type (:arg e)) (:type e))]
             (fn [row] (let [x (af row)] (when (some? x) (f x)))))
-    :call (compile-call c e)))
+    :call (functions/compile-call e (mapv #(compile-expr c %) (:args e)) (:ctx c))
+    :case (compile-case c e)
+    :like (compile-like c e)
+    :between (compile-between c e)
+    :in-list (compile-in-list c e)
+    :subquery (compile-subquery c e)))
 
 (defn compile-predicate
   "Compiles a boolean expression into a function returning true only when

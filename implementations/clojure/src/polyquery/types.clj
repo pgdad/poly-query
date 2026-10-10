@@ -107,7 +107,9 @@
   (cond
     (= a :null) b
     (= b :null) a
-    (and (numeric? a) (numeric? b)) (if (= a b) a (common-numeric-type a b))
+    ;; numeric promotion (§2); two DECIMALs always give DECIMAL(18,max(s1,s2))
+    ;; (semantics.md §13)
+    (and (numeric? a) (numeric? b)) (common-numeric-type a b)
     (= a b) a
     :else nil))
 
@@ -117,5 +119,15 @@
       (and (numeric? a) (numeric? b))
       (and (temporal? a) (temporal? b))
       (= (kind a) (kind b))))
+
+(defn comparison-type
+  "Type in which two comparable operands are compared."
+  [lt rt]
+  (cond
+    (= lt :null) rt
+    (= rt :null) lt
+    (and (numeric? lt) (numeric? rt)) (if (= lt rt) lt (common-numeric-type lt rt))
+    (and (temporal? lt) (temporal? rt)) (if (= lt rt) lt :timestamp)
+    :else lt))
 
 (defn describe [t] (if (= t :null) "NULL" (type-name t)))
