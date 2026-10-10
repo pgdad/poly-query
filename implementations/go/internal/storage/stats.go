@@ -9,7 +9,8 @@ import (
 
 // ColumnStats are table-level statistics of one column. Min and Max are
 // NULL if the column has no non-NULL values. Distinct counts distinct
-// non-NULL values exactly.
+// non-NULL values (exactly for small counts, approximately beyond
+// exactDistinctLimit).
 type ColumnStats struct {
 	NullCount int
 	Distinct  int
@@ -33,9 +34,10 @@ func (t *Table) ColumnStats(ord int) (ColumnStats, error) {
 func (t *Table) computeStats(ord int) (ColumnStats, error) {
 	typ := t.Columns[ord].Type
 	st := ColumnStats{Min: types.NullValue, Max: types.NullValue}
-	ints := map[int64]struct{}{}
-	floats := map[uint64]struct{}{}
-	strs := map[string]struct{}{}
+	// Keys of different storage classes never mix within one column. Exact
+	// counting hashes 64-bit keys too; with mix64 being a bijection, integer
+	// and float keys are counted exactly, strings up to hash collisions.
+	distinct := newDistinctCounter()
 	err := t.ScanColumn(ord, func(_ int, v types.Value) {
 		if v.Null {
 			st.NullCount++
@@ -47,11 +49,11 @@ func (t *Table) computeStats(ord int) (ColumnStats, error) {
 			if f == 0 {
 				f = 0 // -0.0 and 0.0 are one value
 			}
-			floats[math.Float64bits(f)] = struct{}{}
+			distinct.add(mix64(math.Float64bits(f)))
 		case classString:
-			strs[v.S] = struct{}{}
+			distinct.add(hashString(v.S))
 		default:
-			ints[v.I] = struct{}{}
+			distinct.add(mix64(uint64(v.I)))
 		}
 		if st.Min.Null || types.Compare(typ, v, typ, st.Min) < 0 {
 			st.Min = v
@@ -60,6 +62,6 @@ func (t *Table) computeStats(ord int) (ColumnStats, error) {
 			st.Max = v
 		}
 	})
-	st.Distinct = len(ints) + len(floats) + len(strs)
+	st.Distinct = distinct.count()
 	return st, err
 }

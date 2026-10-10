@@ -48,6 +48,7 @@ func Write(path string, t *storage.Table, indexes []index.Def, opts WriteOptions
 	tmpName := tmp.Name()
 	inFlight.Store(tmpName, true)
 	defer inFlight.Delete(tmpName)
+	_ = tmp.Chmod(0o644) // CreateTemp uses 0600; saved tables are ordinary files
 	size, err := writeFile(tmp, t, indexes, opts)
 	if err == nil {
 		err = tmp.Sync()

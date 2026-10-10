@@ -1,12 +1,14 @@
 package pqcf
 
 import (
+	"cmp"
 	"encoding/binary"
 	"encoding/json"
 	"hash/crc32"
 	"io"
 	"math"
 	"os"
+	"slices"
 	"strconv"
 	"unicode/utf8"
 
@@ -234,7 +236,37 @@ func (pf *File) load(md *metadata, dataEnd int, maxRows int64) error {
 		return corrupt("row_count %d differs from the sum of row group sizes %d", *md.RowCount, total)
 	}
 	pf.Rows = int(total)
-	return nil
+	return pf.checkPadding(dataEnd)
+}
+
+// checkPadding verifies that the bytes between the header and the metadata
+// not covered by any chunk are zero (the format only allows zero padding).
+// Chunk checksums do not cover them, so this detects damage there too.
+func (pf *File) checkPadding(dataEnd int) error {
+	type span struct{ from, to int }
+	var spans []span
+	for _, g := range pf.groups {
+		for _, c := range g.chunks {
+			spans = append(spans, span{c.offset, c.offset + c.length})
+		}
+	}
+	slices.SortFunc(spans, func(a, b span) int { return cmp.Compare(a.from, b.from) })
+	pos := headerSize
+	check := func(to int) error {
+		for ; pos < to; pos++ {
+			if pf.data[pos] != 0 {
+				return corrupt("non-zero byte at offset %d outside any chunk", pos)
+			}
+		}
+		return nil
+	}
+	for _, sp := range spans {
+		if err := check(sp.from); err != nil {
+			return err
+		}
+		pos = max(pos, sp.to)
+	}
+	return check(dataEnd)
 }
 
 // statValue decodes a min/max statistic; malformed or absent statistics are
