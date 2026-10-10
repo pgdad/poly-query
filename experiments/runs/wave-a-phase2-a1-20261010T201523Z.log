@@ -1,2 +1,6 @@
 2026-10-10T20:15:24+00:00 wave wave-a-phase2-a1-20261010T201523Z: order=['rust']
 2026-10-10T20:15:24+00:00 [a-phase2-rust-a1-20261010T201523Z] agent started
+2026-10-10T20:41:04+00:00 [a-phase2-rust-a1-20261010T201523Z] agent finished; collecting telemetry
+2026-10-10T20:41:04+00:00 [a-phase2-rust-a1-20261010T201523Z] validating (clean clone, sandboxed)
+2026-10-10T20:41:08+00:00 [a-phase2-rust-a1-20261010T201523Z] outcome=success cost=$10.743264000000003 turns=93 wall=1540.2s
+2026-10-10T20:41:08+00:00 wave wave-a-phase2-a1-20261010T201523Z finished: rust=success
