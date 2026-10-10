@@ -1,0 +1,11 @@
+cc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -std=c17 -Wall -Wextra -Werror -Wno-unused-parameter -Iinclude -Ireference-c -o build/aarch64/kernel_test_asan tests/kernel_test.c reference-c/pq_kernels_ref.c reference-c/pq_dispatch.c arm64/pq_a64_neon.S arm64/pq_a64_scalar.S arm64/pq_a64_sve.S -lm
+build/aarch64/kernel_test_asan 1500
+tests/kernel_test.c:69:70: runtime error: load of misaligned address 0x51d000004387 for type 'int64_t', which requires 8 byte alignment
+0x51d000004387: note: pointer points here
+ ff ff ff 7f 01  00 00 00 00 00 00 00 01  00 00 00 00 00 00 80 00  00 00 00 00 00 00 00 01  00 00 00
+             ^ 
+available variants: reference,a64_sve,a64_neon,a64_scalar (default: a64_sve)
+  a64_scalar  16/16 kernels  PASS
+  a64_neon    16/16 kernels  PASS
+  a64_sve     16/16 kernels  PASS
+kernel tests: 3 variant(s) tested, 0 failure(s)

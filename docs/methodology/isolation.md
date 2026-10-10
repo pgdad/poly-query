@@ -66,3 +66,18 @@ Validation of a run (`pq_orchestrate.py validate`) takes only the agent's own
 work directory from the workspace; `tests/`, `spec/` and the kernel scaffolding
 come from the trusted repository, so an agent cannot influence its own verdict
 by editing the harness.
+
+## Native AArch64 host (spark)
+
+Native ARM testing and benchmarking runs on `spark` (NVIDIA GB10: 10× Cortex-X925
++ 10× Cortex-A725, SVE2 with a 128-bit vector length, Ubuntu 24.04) through
+`tools/remote/arm_native.sh`. The kernel tree is copied to the host and executed
+as the unprivileged system user `pqrunner` in a transient systemd unit:
+`PrivateNetwork`, `IPAddressDeny=any`, `ProtectHome`, `ProtectSystem=strict`,
+`PrivateTmp`, `PrivateDevices`, `NoNewPrivileges`, an empty capability set,
+`MemoryMax=16G`, and write access only to the job directory (removed afterwards).
+Tests use the X925 cores; benchmarks are pinned to one X925 core (CPU 9) with the
+`performance` governor. Host identification is stored with every result
+(`native-arm/arm-host.json`). qemu runs remain as an additional functional check
+(and for the SVE vector-length sweep); only spark results count as ARM
+performance evidence. Set `PQ_ARM_HOST=` (empty) to disable, or another host name.

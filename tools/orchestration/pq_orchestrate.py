@@ -705,11 +705,20 @@ if [ "{target}" = "test" ]; then ( make -C native-kernels bench ) > validate-ben
                 vl = str(int(line[3:]) * 8)
             elif vl and "a64_sve" in line:
                 sve_vl[vl] = "PASS" in line
+    native_arm = None
+    if prefix == "a64_":
+        native_arm = run_native_arm(vd / "native-kernels", rd / "native-arm")
+        if native_arm.get("available"):
+            ok = ok and native_arm["ok"]
+            if native_arm["bench"]:
+                bench = native_arm["bench"]
     for f in ["validate-kernels.log", "validate-bench.log", "validate-sve.log"]:
         if (vd / f).exists():
             shutil.copy(vd / f, rd / f)
     out = {"seconds": round(time.time() - t0, 1), "status": status, "variants": variants, "required": required,
-           "emulated": prefix == "a64_", "bench": bench, "sve_vector_lengths_bits": sve_vl or None}
+           "emulated": prefix == "a64_" and not (native_arm or {}).get("available"),
+           "bench": bench, "sve_vector_lengths_bits": sve_vl or None,
+           "native_arm": {k: v for k, v in (native_arm or {}).items() if k != "bench"} or None}
     out["outcome"] = "success" if ok else ("build_failed" if not variants else "tests_failed")
     tel_path = rd / "telemetry.json"
     if tel_path.exists() and (json.loads(tel_path.read_text()).get("git") or {}).get("paths_outside_language_dir"):
@@ -722,6 +731,40 @@ if [ "{target}" = "test" ]; then ( make -C native-kernels bench ) > validate-ben
     mm_["status"] = "validated"
     save_manifest(run_id, mm_)
     return out
+
+
+ARM_NATIVE = ROOT / "tools/remote/arm_native.sh"
+
+
+def run_native_arm(kernels_dir: Path, out_dir: Path) -> dict:
+    """Native AArch64 tests (+ASan/UBSan) and a pinned benchmark on the remote ARM host (PQ_ARM_HOST)."""
+    host = os.environ.get("PQ_ARM_HOST", "spark")
+    if os.environ.get("PQ_ARM_HOST") == "":
+        return {"available": False, "reason": "disabled (PQ_ARM_HOST empty)"}
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    r = subprocess.run([str(ARM_NATIVE), str(kernels_dir), str(out_dir), "--bench", "--asan"],
+                       capture_output=True, text=True, timeout=3 * 3600)
+    st_file = out_dir / "arm-status"
+    if not st_file.exists():
+        return {"available": False, "host": host, "reason": (r.stderr or r.stdout)[-500:]}
+    st = dict(l.split("=", 1) for l in st_file.read_text().split() if "=" in l)
+    variants: dict[str, dict] = {}
+    for log, key in (("arm-test.log", "native"), ("arm-asan.log", "asan")):
+        p = out_dir / log
+        if p.exists():
+            for mm in re.finditer(r"^\s+(\w+)\s+(\d+)/16 kernels\s+(PASS|FAIL)", p.read_text(errors="replace"), re.M):
+                variants.setdefault(mm.group(1), {})[key] = f"{mm.group(2)}/16 {mm.group(3)}"
+    bf = out_dir / "bench.jsonl"
+    bench = [json.loads(l) for l in bf.read_text().splitlines() if l.strip().startswith("{")] if bf.exists() else []
+    host_info = json.loads((out_dir / "arm-host.json").read_text()) if (out_dir / "arm-host.json").exists() else {}
+    ok = st.get("test_exit") == "0" and st.get("asan_exit") == "0" and \
+        all(v.get("native", "").startswith("16/16 PASS") and v.get("asan", "").startswith("16/16 PASS")
+            for v in variants.values()) and bool(variants)
+    return {"available": True, "host": host, "status": st, "variants": variants, "ok": ok, "bench": bench,
+            "bench_cpu": os.environ.get("PQ_ARM_BENCH_CPU", "9"),
+            "host_info": {k: host_info.get(k) for k in ("hostname", "kernel", "os", "gcc",
+                                                         "sve_default_vector_length_bytes", "governor")}}
 
 
 def classify(m: dict, v: dict) -> str:
@@ -787,6 +830,9 @@ def record(run_id: str) -> Path:
               "conformance-modes.json", "http-suite.json", "kernel-bench.json"]:
         if (rd / f).exists():
             shutil.copy(rd / f, dest / f)
+    if (rd / "native-arm").is_dir():
+        shutil.copytree(rd / "native-arm", dest / "native-arm", dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("arm-remote.log"))
     if (rd / "validation-history").is_dir():
         shutil.copytree(rd / "validation-history", dest / "validation-history", dirs_exist_ok=True)
     if (rd / "transcript.jsonl").exists():

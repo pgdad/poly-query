@@ -36,7 +36,7 @@
   },
   "M8": {
    "status": "in_progress",
-   "detail": "C17 reference + dispatch + differential tests done (pass natively, ASan/UBSan, AArch64 under qemu); Track A wave kernels attempt 1 running for x86_64-asm and arm64-asm"
+   "detail": "C17 reference + dispatch + tests done. arm64-asm a1 accepted and merged: scalar/NEON/SVE 16/16 natively on spark (incl. ASan/UBSan), SVE VL sweep 128-2048 under qemu, native bench pinned to X925. x86_64-asm a1 running."
   },
   "M9": {
    "status": "not_started"
@@ -52,14 +52,12 @@
   "Resolve SPEC-Q-001 (INT64 vs DECIMAL comparison overflow) via change control after the current waves",
   "Run http_suite against first Phase 4 engine",
   "Native integration (M9), Track B, later experiment families",
-  "Run kernels on native AArch64 hardware (unavailable on this host)"
+  "M9: kernel dispatch default should follow measured performance (on spark NEON beats SVE at VL=128 for 11/13 kernels)"
  ],
  "known_defects": [
   "See experiments/telemetry/harness-incidents.jsonl (HI-001..003 fixed; SPEC-Q-001 open)"
  ],
- "blockers": [
-  "No native AArch64 hardware on the host: AArch64 kernels can be validated only functionally (qemu) until run on ARM hardware"
- ],
+ "blockers": [],
  "risks": [
   "Agent runs consume the operator's Claude subscription (phase1 wave: ~22% of the 5-hour window and 5% weekly within ~35 min, 8 agents). Mitigated by usage gate (start <60% 5h, <80% 7d) and guard/watchdog that stops agents at 95% 5h or on any overage.",
   "Runs are capped to the OAuth access-token lifetime (no refresh inside sandbox)"
@@ -73,7 +71,8 @@
    "java": "phase1 225/225 public, 249/249 incl. hidden",
    "go": "phase1 225/225 public, 249/249 incl. hidden",
    "clojure": "phase1 225/225 public, 249/249 incl. hidden"
-  }
+  },
+  "kernels_arm64_native": "pass on spark (scalar, neon, sve; native + asan)"
  },
  "last_successful_commit": "7f7295e",
  "next_recommended_action": "Wait for remaining phase1/kernels runs and phase2 (java/go/clojure); re-validate each finished phase1/kernels run with the current orchestrator, then import --merge and run `just test-language <lang>`."
