@@ -12,7 +12,8 @@ def main(argv: list[str]) -> int:
         p = Path(root)
         for path in sorted(p.rglob("*.py")) if p.is_dir() else [p]:
             text = path.read_text(encoding="utf-8")
-            formatted = "\n".join(line.rstrip() for line in text.splitlines()).rstrip("\n") + "\n"
+            formatted = "\n".join(line.rstrip() for line in text.splitlines()).rstrip("\n")
+            formatted = formatted + "\n" if formatted else ""
             if formatted != text:
                 path.write_text(formatted, encoding="utf-8")
                 print(f"formatted {path}")

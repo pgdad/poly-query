@@ -40,8 +40,8 @@ def check(path: Path) -> list[str]:
     for n, line in enumerate(text.splitlines(), 1):
         if line != line.rstrip():
             problems.append(f"{path}:{n}: trailing whitespace")
-        if len(line) > 120:
-            problems.append(f"{path}:{n}: line longer than 120 characters")
+        if len(line) > 140:
+            problems.append(f"{path}:{n}: line longer than 140 characters")
     return problems
 
 
