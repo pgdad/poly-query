@@ -545,7 +545,7 @@ func morselPos(i int, k int64) int64 { return int64(i)<<32 | k }
 
 // parallelAggregate builds a parallel vectorized aggregation if
 // parallelism applies to its input.
-func parallelAggregate(ec *Context, x *physical.HashAggregate, _ bool) (BatchOperator, bool, error) {
+func parallelAggregate(ec *Context, x *physical.HashAggregate) (BatchOperator, bool, error) {
 	if !aggParallelSafe(x) {
 		return nil, false, nil
 	}

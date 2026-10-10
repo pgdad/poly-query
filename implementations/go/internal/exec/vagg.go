@@ -1071,7 +1071,7 @@ type vaggregateOp struct {
 }
 
 func buildVAggregate(ec *Context, x *physical.HashAggregate) (BatchOperator, error) {
-	if op, ok, err := parallelAggregate(ec, x, true); ok || err != nil {
+	if op, ok, err := parallelAggregate(ec, x); ok || err != nil {
 		return op, err
 	}
 	input, err := BuildBatch(ec, x.Input)

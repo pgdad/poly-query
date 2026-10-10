@@ -41,8 +41,9 @@ func (t *joinTable) bucketOfString(s []byte) uint64 {
 	return maphash.Bytes(t.seed, s) >> t.shift
 }
 
-// appendRows appends the active rows of b with their keys to the table.
-func (t *joinTable) appendRows(b *Batch, keys []*Vec, keyTypes []types.Type, keyBuf *[]byte) (int64, error) {
+// appendRows appends the active rows of b with their keys to the table and
+// returns the bytes of string data added.
+func (t *joinTable) appendRows(b *Batch, keys []*Vec, keyTypes []types.Type, keyBuf *[]byte) int64 {
 	var bytes int64
 	keyClasses := make([]vclass, len(keys))
 	for k, kt := range keyTypes {
@@ -91,7 +92,7 @@ func (t *joinTable) appendRows(b *Batch, keys []*Vec, keyTypes []types.Type, key
 		}
 		t.n++
 	})
-	return bytes, nil
+	return bytes
 }
 
 // index builds the bucket chains.
@@ -187,10 +188,7 @@ func (s *joinBuild) build() (*joinTable, error) {
 			}
 			return nil, errs.New(errs.InternalError, "vectorized join key evaluation failed: %v", err)
 		}
-		bytes, err := t.appendRows(b, keys, s.keyTypes, &keyBuf)
-		if err != nil {
-			return nil, err
-		}
+		bytes := t.appendRows(b, keys, s.keyTypes, &keyBuf)
 		width := int64(len(t.classes))
 		if err := s.ec.Mem.Reserve(int64(b.Len())*(40+16*width) + bytes); err != nil {
 			return nil, err
@@ -203,15 +201,16 @@ func (s *joinBuild) build() (*joinTable, error) {
 // vhashJoinOp probes a hash join's build table with batches of its probe
 // input (INNER and LEFT joins).
 type vhashJoinOp struct {
-	ec        *Context
-	kind      plan.JoinKind
-	buildLeft bool
-	shared    *joinBuild
-	probe     BatchOperator
-	probeKeys *exprSet
-	keyTypesP []types.Type
-	residual  *exprSet // over the output layout; nil if none
-	table     *joinTable
+	ec          *Context
+	kind        plan.JoinKind
+	buildLeft   bool
+	shared      *joinBuild
+	probe       BatchOperator
+	probeKeys   *exprSet
+	keyTypesP   []types.Type
+	keyClassesP []vclass
+	residual    *exprSet // over the output layout; nil if none
+	table       *joinTable
 
 	// probe state
 	pb         *Batch
@@ -260,6 +259,9 @@ func buildVHashJoin(ec *Context, x *physical.HashJoin, pc *pipelineCtx) (BatchOp
 		return nil, err
 	}
 	op.keyTypesP = exprTypes(probeKeys)
+	for _, t := range op.keyTypesP {
+		op.keyClassesP = append(op.keyClassesP, classOf(t))
+	}
 	if x.Residual != nil {
 		if op.residual, err = newExprSet(ec, x.Schema(), []plan.Expr{x.Residual}); err != nil {
 			return nil, err
@@ -359,7 +361,7 @@ func (j *vhashJoinOp) fillPairs() {
 				} else {
 					j.keyBuf = j.keyBuf[:0]
 					for k, kv := range j.pkeys {
-						j.keyBuf = appendKey(j.keyBuf, kv.value(i, classOf(j.keyTypesP[k])), j.keyTypesP[k])
+						j.keyBuf = appendKey(j.keyBuf, kv.value(i, j.keyClassesP[k]), j.keyTypesP[k])
 					}
 					j.chain = t.heads[t.bucketOfString(j.keyBuf)]
 				}
