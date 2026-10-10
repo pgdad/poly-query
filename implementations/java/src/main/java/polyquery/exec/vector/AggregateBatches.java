@@ -81,10 +81,13 @@ final class AggregateBatches {
             }
         }
 
-        /** Adds the active rows of {@code b}; {@code v} = evaluated keys followed by arguments. */
-        void add(Batch b, Vec[] v) {
+        /**
+         * Adds the active rows of {@code b}; {@code v} = evaluated keys followed by arguments.
+         * Returns the group ids of the rows (indexed by position; valid until the next call).
+         */
+        int[] add(Batch b, Vec[] v) {
             if (b.count == 0) {
-                return;
+                return gids;
             }
             if (gids.length < b.size) {
                 gids = new int[Math.max(b.size, 16)];
@@ -101,6 +104,7 @@ final class AggregateBatches {
             for (int a = 0; a < states.length; a++) {
                 states[a].update(argSlot[a] < 0 ? null : v[argSlot[a]], b.sel, b.count, gids);
             }
+            return gids;
         }
 
         /** Merges group g of a partial table into this one; returns the group id here. */

@@ -183,6 +183,36 @@ public final class Vec {
         }
     }
 
+    /** A new vector with the values of {@code src} at {@code sel[0..n)} (null: 0..n-1) at positions 0..n-1. */
+    static Vec compact(Vec src, int[] sel, int n) {
+        Vec v = new Vec(src.type, Math.max(n, 1));
+        if (src.kind == Kind.DICT) {
+            v.toDict(src.dict, Math.max(n, 1));
+            for (int k = 0; k < n; k++) {
+                v.codes[k] = src.codes[sel == null ? k : sel[k]];
+            }
+        } else {
+            for (int k = 0; k < n; k++) {
+                int i = sel == null ? k : sel[k];
+                switch (src.kind) {
+                    case LONG -> v.longs[k] = src.longs[i];
+                    case DOUBLE -> v.doubles[k] = src.doubles[i];
+                    default -> v.objects[k] = src.objects[i];
+                }
+            }
+        }
+        if (src.hasNulls) {
+            boolean[] m = v.nullMask(Math.max(n, 1));
+            boolean any = false;
+            for (int k = 0; k < n; k++) {
+                m[k] = src.nulls[sel == null ? k : sel[k]];
+                any |= m[k];
+            }
+            v.hasNulls = any;
+        }
+        return v;
+    }
+
     /** A vector holding {@code value} at every position {@code 0 .. capacity-1}. */
     static Vec constant(DataType type, Object value, int capacity) {
         Vec v = new Vec(type, capacity);
