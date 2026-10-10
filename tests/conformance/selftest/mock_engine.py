@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Deliberately tiny fake engine for harness self-tests. Behaviour is selected
-with the MOCK_MODE environment variable: ok | wrong | crash | hang | garbage."""
+with the MOCK_MODE environment variable: ok | wrong | crash | hang | garbage | badid."""
 import json
 import os
 import sys
@@ -33,4 +33,6 @@ for line in sys.stdin:
     else:
         resp = {"ok": True, "columns": [], "rows": [], "row_count": 0}
     resp["id"] = req.get("id")
+    if MODE == "badid" and not isinstance(resp["id"], int):
+        resp["id"] = 0
     print(json.dumps(resp), flush=True)

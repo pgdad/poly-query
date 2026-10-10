@@ -1,0 +1,8 @@
+@phase 1
+@requires phase1
+
+# explicit ids in request steps are sent verbatim and must be echoed
+request
+{"op":"query","id":{"nested":[1,"x"]},"sql":"SELECT 1"}
+----
+match {"id":{"nested":[1,"x"]},"ok":true,"rows":[[1]]}

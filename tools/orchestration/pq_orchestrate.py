@@ -68,6 +68,16 @@ WORKSPACE_PATHS = [
 ]
 
 
+TRUSTED_PATHS = ["tests", "spec"]
+TRUSTED_KERNEL_PATHS = ["spec", "native-kernels/Makefile", "native-kernels/include", "native-kernels/reference-c",
+                        "native-kernels/tests"]
+
+
+def git_head() -> str | None:
+    r = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], capture_output=True, text=True)
+    return r.stdout.strip() or None
+
+
 def now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
@@ -434,9 +444,20 @@ def validate(run_id: str, phases: list[int] | None = None) -> dict:
     if vd.exists():
         shutil.rmtree(vd)
     sh(["git", "clone", "-q", str(rd / "workspace"), str(vd)])
-    hidden_src = ROOT / "tests/conformance/hidden"
-    if hidden_src.exists():
-        shutil.copytree(hidden_src, vd / "tests/conformance/hidden")
+    # Only the agent's own work directory is taken from the workspace; the harness, spec and kernel
+    # test scaffolding come from the trusted repository (incl. hidden tests), so edits an agent made
+    # to them cannot influence its verdict.
+    for rel in TRUSTED_KERNEL_PATHS if m["task"] == "kernels" else TRUSTED_PATHS:
+        dst = vd / rel
+        if dst.is_dir():
+            shutil.rmtree(dst)
+        elif dst.exists():
+            dst.unlink()
+        src = ROOT / rel
+        if src.is_dir():
+            shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "build"))
+        elif src.exists():
+            shutil.copy2(src, dst)
     if m["task"] == "kernels":
         return validate_kernels(run_id, m, vd)
     task_phase = {"phase1": [1], "phase2": [1, 2], "phase3": [1, 2, 3], "phase4": [1, 2, 3], "phase5": [1, 2, 3]}
@@ -483,12 +504,24 @@ python3 tests/concurrency/http_suite.py --engine implementations/{lang}/bin/poly
         if (vd / f).exists():
             shutil.copy(vd / f, rd / f)
     out["outcome"] = classify(m, out)
+    out["validated_at"] = now()
+    out["harness_commit"] = git_head()
+    archive_validation(rd)
     (rd / "validation.json").write_text(json.dumps(out, indent=1) + "\n")
     m = load_manifest(run_id)
     m["outcome"] = out["outcome"]
     m["status"] = "validated"
     save_manifest(run_id, m)
     return out
+
+
+def archive_validation(rd: Path) -> None:
+    """Re-validation (e.g. after a harness fix) keeps every earlier verdict."""
+    prev = rd / "validation.json"
+    if prev.exists():
+        hist = rd / "validation-history"
+        hist.mkdir(exist_ok=True)
+        shutil.copy(prev, hist / f"validation-{len(list(hist.glob('*.json'))) + 1}.json")
 
 
 def validate_kernels(run_id: str, m: dict, vd: Path) -> dict:
@@ -603,6 +636,8 @@ def record(run_id: str) -> Path:
               "conformance-modes.json", "http-suite.json", "kernel-bench.json"]:
         if (rd / f).exists():
             shutil.copy(rd / f, dest / f)
+    if (rd / "validation-history").is_dir():
+        shutil.copytree(rd / "validation-history", dest / "validation-history", dirs_exist_ok=True)
     if (rd / "transcript.jsonl").exists():
         with open(rd / "transcript.jsonl", "rb") as src, gzip.open(dest / "transcript.jsonl.gz", "wb") as dst:
             shutil.copyfileobj(src, dst)

@@ -66,7 +66,7 @@ class ComparisonTests(unittest.TestCase):
 class RunnerTests(unittest.TestCase):
     def test_ok_engine(self):
         rep = run_runner("ok")
-        self.assertEqual(statuses(rep), ["pass", "pass", "pass", "pass", "not_implemented"])
+        self.assertEqual(statuses(rep), ["pass", "pass", "pass", "pass", "pass", "not_implemented"])
         self.assertTrue(rep["phase_passed"]["1"])
         self.assertFalse(rep["phase_passed"]["2"])
 
@@ -78,6 +78,9 @@ class RunnerTests(unittest.TestCase):
 
     def test_hang_detected(self):
         self.assertEqual(statuses(run_runner("hang"))[3], "error")
+
+    def test_explicit_id_echo(self):
+        self.assertEqual(statuses(run_runner("badid"))[4], "fail")
 
     def test_garbage_detected(self):
         self.assertEqual(statuses(run_runner("garbage"))[3], "error")

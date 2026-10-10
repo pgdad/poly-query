@@ -5,3 +5,12 @@
 2026-10-10T18:29:17+00:00 [a-phase1-clojure-a1-20261010T182858Z] agent started
 2026-10-10T18:29:22+00:00 [a-phase1-go-a1-20261010T182859Z] agent started
 2026-10-10T18:29:27+00:00 [a-phase1-common-lisp-a1-20261010T182901Z] agent started
+2026-10-10T18:53:30+00:00 [a-phase1-java-a1-20261010T182856Z] agent finished; collecting telemetry
+2026-10-10T18:53:30+00:00 [a-phase1-java-a1-20261010T182856Z] validating (clean clone, public + hidden suites)
+2026-10-10T18:53:32+00:00 [a-phase1-java-a1-20261010T182856Z] outcome=tests_failed cost=$8.625029999999997 turns=76 wall=1463.6s
+2026-10-10T18:54:32+00:00 [a-phase1-go-a1-20261010T182859Z] agent finished; collecting telemetry
+2026-10-10T18:54:32+00:00 [a-phase1-go-a1-20261010T182859Z] validating (clean clone, public + hidden suites)
+2026-10-10T18:54:35+00:00 [a-phase1-go-a1-20261010T182859Z] outcome=tests_failed cost=$8.245643799999996 turns=70 wall=1510.4s
+2026-10-10T18:56:11+00:00 [a-phase1-clojure-a1-20261010T182858Z] agent finished; collecting telemetry
+2026-10-10T18:56:11+00:00 [a-phase1-clojure-a1-20261010T182858Z] validating (clean clone, public + hidden suites)
+2026-10-10T18:56:14+00:00 [a-phase1-clojure-a1-20261010T182858Z] outcome=tests_failed cost=$8.979488800000002 turns=102 wall=1614.0s

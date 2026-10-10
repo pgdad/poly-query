@@ -1,0 +1,85 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase1-go-a1-20261010T182859Z",
+ "language": "go",
+ "task": "phase1",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase1",
+ "prompt_sha256": "748b660f561281247bd0083b4d3eca21a913f9f9bebe5176a57372628f3c1498",
+ "session_id": "33f0cad4-6021-405f-8c85-c44155209c5f",
+ "tokens": {
+  "input": 120,
+  "output": 180066,
+  "cache_read": 11953899,
+  "cache_creation": 281633,
+  "thinking": 56384,
+  "thinking_estimated": 57164,
+  "source": "result event",
+  "api_messages": 60
+ },
+ "rate_limit": {
+  "events": 18,
+  "max_utilization": {
+   "seven_day": 0.04,
+   "five_hour": 0.18
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 8.245643799999996,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 70,
+ "assistant_messages": 149,
+ "tool_calls": {
+  "Bash": 67,
+  "Write": 2
+ },
+ "tool_calls_total": 69,
+ "tool_failures": 1,
+ "build_invocations": 24,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 2,
+ "conformance_progress": [
+  [
+   223,
+   225
+  ],
+  [
+   223,
+   225
+  ]
+ ],
+ "repair_iterations": 1,
+ "time": {
+  "wall_seconds": 1510.4,
+  "model_api_seconds": 1446.4,
+  "tool_seconds": 63.9,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 3,
+  "files_changed": 40,
+  "lines_added": 8310,
+  "lines_removed": 0,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The Phase 1 Go engine is built and committed, but the conformance runner reports **223/225**, not the required 100%. The two failing cases can't pass with the runner as written, so I stopped there.\n\n**Test results**\n```\nphase 1: 223/225 pass, 2 fail, 0 error, 0 not implemented\nTOTAL: 223/225 pass\n```\n- `make -C implementations/go build test` succeeds, including from a fresh clone with no network.\n- The two failures are `limits_and_output.pqt` lines 34 and 39. The runner replaces every request's `id` with the step number before sending it (`runner.py:216`, `req[\"id\"] = k`). It then checks the engine echoed that number. The test also expects the original id (`{\"nested\":[1,\"x\"]}` / `\"abc\"`) in the same field, so no response can satisfy both.\n- When I send those two exact requests directly, the engine returns what the tests expect.\n- I didn't modify the runner or tests, as the rules require.\n\n**Other checks**\n- 1,500 random filter, sort and aggregate queries on a NULL-heavy dataset gave the same results as SQLite.\n- 4,000 random malformed or mixed-type queries produced only proper error codes: no crashes and no `INTERNAL_ERROR`.\n- On 1M rows: CSV load about 0.5s, whole-table aggregates 0.05s, top-10 sort 0.13s, full sort 0.8s.\n\n**What's implemented**\n- **CLI:** `version`, `capabilities`, `session` and `exec`; unknown options exit with code 2.\n- **Protocol ops:** `load`, `query`, `tables`, `schema`, `drop`, `reset`, `version`, `capabilities` and `sleep`. Ids are echoed verbatim and bad requests get `INVALID_REQUEST`.\n- **Ingestion:** CSV, JSON and JSON Lines, with type inference or an explicit schema, plus path safety and size/row limits.\n- **Types:** all of them, including exact DECIMAL arithmetic, DATE/TIMESTAMP, three-valued NULL logic, the full CAST table and the required output formats.\n- **SQL:** single-table `SELECT` with `WHERE`, `ORDER BY` (positions, aliases, `NULLS FIRST/LAST`), `LIMIT`/`OFFSET`, whole-table aggregates, `CAST` and `PQ_SLEEP`.\n- **Limits:** `max_rows`, `timeout_ms` and a per-query memory budget.\n- **Capabilities claimed:** `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`, `sql.basic`, `test.functions`.\n\n**Design decisions**\n- There is one package per stage: lexer, parser/AST, analyzer, plan, execution, storage, ingestion, protocol.\n- The parser already handles the full SQL grammar. Phase 2 features (GROUP BY, joins, subqueries, CTEs, CASE, scalar functions, EXPLAIN, index statements) are parsed and answered with `UNSUPPORTED`, never a wrong result.\n- Tables are immutable and stored by column; the catalog is safe for concurrent readers, which Phase 4 will need.\n- Execution compiles expressions once per query and pulls rows through operators. `ORDER BY \u2026 LIMIT` uses a heap so it doesn't sort everything.\n- Where the spec was ambiguous I chose and documented a behaviour. The main ones:\n  - Comparing a large INT64 with a DECIMAL raises `NUMERIC_OVERFLOW`, following the spec's promotion rule literally.\n  - An unknown type in a `load` schema returns `INVALID_REQUEST`.\n  - `CAST('2024-01-01' AS TIMESTAMP)` without a time part is rejected.\n\n  The full list is in `implementations/go/README.md`.\n\n**Known limitations**\n- No Phase 2+ SQL and no `serve`/HTTP mode yet (it exits with status 1).\n- Execution is single-threaded and row-at-a-time.\n- A timeout isn't checked during the in-memory sort step itself, only while rows are being read.\n- `COUNT(DISTINCT \u2026)` and similar aggregates work even though they officially belong to Phase 2.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

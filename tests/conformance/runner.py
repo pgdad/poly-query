@@ -213,7 +213,10 @@ def run_file(f: PqtFile, launcher: str, caps: set[str], args: argparse.Namespace
                     result["cases"].append({**entry, "status": "error", "message": broken})
                 continue
             req = step_request(step, overlay)
-            req["id"] = k
+            # A request step may test id echoing with its own id (any JSON value); keep it.
+            if not (step.kind == "request" and step.request and "id" in step.request):
+                req["id"] = k
+            expect_id = req["id"]
             t0 = time.monotonic()
             try:
                 resp = engine.request(req)
@@ -223,16 +226,17 @@ def run_file(f: PqtFile, launcher: str, caps: set[str], args: argparse.Namespace
                     result["cases"].append({**entry, "status": "error", "message": str(e),
                                             "elapsed_ms": round((time.monotonic() - t0) * 1000, 2)})
                 continue
-            if step.kind == "corrupt" and resp.get("ok") is True and resp.get("id") == k:
+            if step.kind == "corrupt" and resp.get("ok") is True and resp.get("id") == expect_id:
                 try:
-                    resp = engine.request({"op": "query", "id": k, "sql": f'SELECT * FROM "{step.request["table"]}"'})
+                    resp = engine.request({"op": "query", "id": expect_id,
+                                           "sql": f'SELECT * FROM "{step.request["table"]}"'})
                 except EngineError as e:
                     broken = f"engine failure at line {step.line}: {e}"
                     result["cases"].append({**entry, "status": "error", "message": str(e)})
                     continue
             elapsed = round((time.monotonic() - t0) * 1000, 2)
-            if resp.get("id") != k:
-                status, msg = "fail", f"response id {resp.get('id')!r} != request id {k}"
+            if resp.get("id") != expect_id:
+                status, msg = "fail", f"response id {resp.get('id')!r} != request id {expect_id!r}"
             else:
                 status, msg = check_step(step, resp)
             if step.setup:

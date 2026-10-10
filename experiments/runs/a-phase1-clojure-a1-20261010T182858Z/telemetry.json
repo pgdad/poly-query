@@ -1,0 +1,97 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase1-clojure-a1-20261010T182858Z",
+ "language": "clojure",
+ "task": "phase1",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase1",
+ "prompt_sha256": "2dca72e49a7e00b82696aee939f490eac7822d47450c6b8fdcc12a988e1ad79f",
+ "session_id": "d08bfe99-94e0-445c-8a45-78468ae0f938",
+ "tokens": {
+  "input": 172,
+  "output": 173966,
+  "cache_read": 16290884,
+  "cache_creation": 280163,
+  "thinking": 66365,
+  "thinking_estimated": 67747,
+  "source": "result event",
+  "api_messages": 86
+ },
+ "rate_limit": {
+  "events": 20,
+  "max_utilization": {
+   "seven_day": 0.04,
+   "five_hour": 0.19
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 8.979488800000002,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 102,
+ "assistant_messages": 192,
+ "tool_calls": {
+  "Bash": 74,
+  "Write": 27
+ },
+ "tool_calls_total": 101,
+ "tool_failures": 4,
+ "build_invocations": 44,
+ "build_failures_heuristic": 7,
+ "conformance_runs": 6,
+ "conformance_progress": [
+  [
+   223,
+   225
+  ],
+  [
+   223,
+   225
+  ],
+  [
+   223,
+   225
+  ],
+  [
+   223,
+   225
+  ],
+  [
+   223,
+   225
+  ]
+ ],
+ "repair_iterations": 5,
+ "time": {
+  "wall_seconds": 1614.0,
+  "model_api_seconds": 1501.3,
+  "tool_seconds": 112.8,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 4,
+  "files_changed": 42,
+  "lines_added": 4315,
+  "lines_removed": 0,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 1 is done, but the conformance runner does not report 100%: it shows 223 of 225 passing. The 2 failures cannot pass for any engine, because the runner itself breaks them.\n\n**Test results**\n```\nphase 1: 223/225 pass, 2 fail, 0 error, 0 not implemented\nTOTAL: 223/225 pass\n```\n- **The 2 failures:** `limits_and_output.pqt` lines 34 and 39 expect the request's own `id` (`{\"nested\":[1,\"x\"]}` and `\"abc\"`) to come back in the response. But `runner.py` (around line 216) replaces every request's `id` with the step number before sending it. It then fails any response whose `id` isn't that number. So the engine never sees the original id, and the two checks contradict each other. The engine echoes ids exactly as received, which is what the protocol spec asks for; I checked this by hand with both requests. I did not modify the tests or the runner.\n- **Unit tests:** `make build test` succeeds (35 tests, 193 assertions, 0 failures).\n- **Other checks:** `make lint` is clean, and a fresh clone builds and gives the same 223/225 with no network access.\n- **Commits:** all work is committed in four commits on `main`.\n\n**What I implemented** (all under `implementations/clojure/`)\n- **Command line and protocol:** `version`, `capabilities`, `session`, `exec`, and the operations `load`, `query`, `tables`, `schema`, `drop`, `reset`, `version`, `capabilities` and `sleep`. Request checking, path safety and query options (`max_rows`, `timeout_ms`, `result: \"count\"`) are in place.\n- **Loading data:** a streaming CSV reader and a strict JSON reader, written from scratch. Type inference and explicit schemas follow the spec, with errors that include the record number. Size and row limits are enforced.\n- **Types:** all of them, including exact DECIMAL arithmetic, DATE/TIMESTAMP on the proleptic Gregorian calendar, the full CAST table, NULL handling, the required output formats, and string ordering by Unicode code point.\n- **SQL:** a separate lexer, parser, analyzer, planner and executor. The parser already accepts the whole grammar, so Phase 2 work goes into the analyzer and executor rather than a rewrite.\n- **Limits and test functions:** `max_rows`, an approximate per-query memory budget, timeouts (`PQ_SLEEP` stops within about 5 ms of the deadline), and the `sleep` operation.\n\n**Main design decisions**\n- Values are stored as plain Java objects with types fixed at analysis time. DECIMAL is kept as a scaled long, with an exact fallback whenever an intermediate result could overflow.\n- Expressions are compiled into functions specialised for their types, so nothing is checked type-by-type per row.\n- The catalog is an immutable value replaced atomically, so a failed load never leaves partial changes and each query sees a consistent snapshot.\n- Where the spec is silent I made a choice and listed it in the README. For example, a whitespace-only CSV field in a non-text column loads as NULL. Timestamp literals and casts require the time part. An empty CSV with a header expected is an error.\n\n**Known limitations**\n- Only Phase 1. Valid Phase 2+ syntax (joins, GROUP BY, DISTINCT, subqueries, CTEs, CASE/LIKE/BETWEEN/IN, the scalar functions, EXPLAIN, index statements) returns `UNSUPPORTED`. `serve` exits with code 1.\n- Tables hold boxed values, so very large inputs need a bigger heap (set it via `POLYQUERY_JAVA_OPTS`). JSON-array files are read into one in-memory string.\n- An in-memory sort can't be interrupted by a timeout once it has started.\n- Rough performance on 1 million rows: loading an 85 MB CSV takes about 2.3 s, a full-scan aggregate about 60 ms, a two-key sort about 1.2 s. Startup is about 0.3 s.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
