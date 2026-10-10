@@ -7,9 +7,13 @@
             [polyquery.engine :as engine]
             [polyquery.errors :as err]
             [polyquery.ingest :as ingest]
+            [polyquery.storage.index :as index]
+            [polyquery.storage.pqcf :as pqcf]
+            [polyquery.storage.stats :as stats]
             [polyquery.storage.table :as table]
             [polyquery.types :as t]
-            [polyquery.util.log :as log])
+            [polyquery.util.log :as log]
+            [polyquery.values :as v])
   (:import (java.io File)))
 
 (set! *warn-on-reflection* true)
@@ -21,7 +25,8 @@
 (def capabilities
   ["phase1" "ingest.csv" "ingest.json" "ingest.jsonl" "sql.basic" "test.functions"
    "phase2" "sql.groupby" "sql.join" "sql.functions" "sql.subquery" "sql.cte"
-   "sql.correlated_subquery"])
+   "sql.correlated_subquery"
+   "phase3" "storage.pqcf" "storage.mmap" "index.hash" "index.btree"])
 
 (defn version-info []
   {"ok" true
@@ -98,6 +103,17 @@
   (mapv (fn [c] (table/->Column (get c "name") (t/parse-type-string (get c "type") "INVALID_REQUEST")))
         schema))
 
+(defn- storage-options
+  "Table layout options of a load/open request (indexes-and-planning.md §1)."
+  [options]
+  (let [layout (get options "layout" "column")
+        dictionary (get options "dictionary" :auto)]
+    (when-not (#{"row" "column"} layout)
+      (invalid! "option 'layout' must be \"row\" or \"column\""))
+    (when-not (or (boolean? dictionary) (= :auto dictionary))
+      (invalid! "option 'dictionary' must be a boolean"))
+    {:layout (keyword layout) :dictionary dictionary}))
+
 (defmethod handle-op "load" [{:keys [config catalog]} req]
   (let [tname (field req "table" non-empty-string? "a non-empty string" true)
         fmt (field req "format" string? "a string" true)
@@ -117,6 +133,7 @@
                       (first d)
                       (invalid! "option 'delimiter' must be a single ASCII character")))
         replace? (boolean (field req "replace" boolean? "a boolean" false))
+        storage (storage-options options)
         _ (when (and (= fmt "csv") (not header?) (nil? schema))
             (invalid! "CSV without header requires an explicit schema"))
         source (if path
@@ -124,8 +141,10 @@
                  {:text data})
         _ (when (and (not replace?) (catalog/lookup @catalog tname))
             (err/fail! "ALREADY_EXISTS" (str "table '" tname "' already exists") {"table" tname}))
-        tbl (ingest/load-table {:name tname :format fmt :source source :schema schema
-                                :header? header? :delimiter delimiter :limits (:limits config)})]
+        tbl (stats/with-stats
+              (ingest/load-table {:name tname :format fmt :source source :schema schema
+                                  :header? header? :delimiter delimiter :limits (:limits config)
+                                  :storage storage}))]
     (swap! catalog catalog/add-table tbl replace?)
     {"table" (:name tbl)
      "row_count" (:row-count tbl)
@@ -155,6 +174,7 @@
    :timeout-ms (field opts "timeout_ms" non-neg-int? "an integer >= 0" false)
    :count-only? (= "count" (get opts "result"))
    :optimize (get opts "optimize" true)
+   :use-indexes (get opts "use_indexes" true)
    :join (get opts "join" "auto")})
 
 (defn- engine-options
@@ -169,7 +189,7 @@
   (let [sql (field req "sql" string? "a string" true)
         opts (engine-options config req)
         started (System/nanoTime)
-        result (engine/run-query @catalog sql opts)
+        result (engine/execute! catalog sql opts)
         elapsed-us (quot (- (System/nanoTime) started) 1000)]
     (cond-> {"columns" (:columns result)}
       (not (:count-only? opts)) (assoc "rows" (:rows result))
@@ -180,12 +200,78 @@
   {"tables" (mapv (fn [tbl] {"name" (:name tbl) "row_count" (:row-count tbl)})
                   (catalog/tables @catalog))})
 
+(defn- indexes-json [tbl]
+  (mapv (fn [idx] {"name" (:name idx) "column" (:column idx) "kind" (index/kind-name (:kind idx))})
+        (:indexes tbl)))
+
 (defmethod handle-op "schema" [{:keys [catalog]} req]
   (let [tbl (catalog/lookup! @catalog (field req "table" string? "a string" true))]
     {"table" (:name tbl)
      "row_count" (:row-count tbl)
      "columns" (table/columns-json (:columns tbl))
-     "indexes" []}))
+     "indexes" (indexes-json tbl)
+     "layout" (name (:layout tbl))
+     "dictionary_columns" (table/dictionary-columns tbl)}))
+
+(defmethod handle-op "stats" [{:keys [catalog]} req]
+  (let [tbl (catalog/lookup! @catalog (field req "table" string? "a string" true))]
+    {"table" (:name tbl)
+     "row_count" (:row-count tbl)
+     "columns" (vec (map-indexed
+                     (fn [i c]
+                       (let [{:keys [null-count distinct-count min max]} (stats/column-stats tbl i)
+                             t (:type c)]
+                         {"name" (:name c) "type" (t/type-name t)
+                          "null_count" null-count "distinct_count" distinct-count
+                          "min" (v/value->json t min) "max" (v/value->json t max)}))
+                     (:columns tbl)))}))
+
+;; ---------------------------------------------------------------------------
+;; PQCF storage (protocol.md §5.7)
+
+(defmethod handle-op "save" [{:keys [config catalog]} req]
+  (let [tname (field req "table" string? "a string" true)
+        path (field req "path" string? "a string" true)
+        options (or (field req "options" map? "an object" false) {})
+        rg (field options "row_group_size" #(and (int-value? %) (pos? (long %))) "an integer >= 1" false)
+        encoding (or (field options "encoding" string? "a string" false) "auto")
+        _ (when-not (#{"auto" "plain" "dict" "rle"} encoding)
+            (err/fail! "UNSUPPORTED" (str "encoding '" encoding "' is not supported")))
+        file (resolve-path (:data-dir config) path)
+        tbl (catalog/lookup! @catalog tname)
+        size (pqcf/save! tbl file {:row-group-size rg :encoding encoding})]
+    {"path" path "bytes" size}))
+
+(defn- open-table
+  "Builds the catalog table of an opened PQCF file, recreating its indexes."
+  [tname {:keys [columns row-count segments indexes]} storage]
+  (let [tbl (table/->Table tname columns row-count :column segments [] nil)
+        tbl (if (= :row (:layout storage))
+              (table/make-table tname columns (mapv #(table/column-array tbl %) (range (count columns)))
+                                row-count storage)
+              tbl)
+        tbl (stats/with-stats tbl)]
+    (assoc tbl :indexes (mapv (fn [{:keys [name column-index kind]}] (index/build tbl name column-index kind))
+                              indexes))))
+
+(defmethod handle-op "open" [{:keys [config catalog]} req]
+  (let [tname (field req "table" non-empty-string? "a non-empty string" true)
+        path (field req "path" string? "a string" true)
+        options (or (field req "options" map? "an object" false) {})
+        mmap? (boolean (field options "mmap" boolean? "a boolean" false))
+        storage (storage-options options)
+        replace? (boolean (field req "replace" boolean? "a boolean" false))
+        file (resolve-path (:data-dir config) path)
+        _ (when (and (not replace?) (catalog/lookup @catalog tname))
+            (err/fail! "ALREADY_EXISTS" (str "table '" tname "' already exists") {"table" tname}))
+        contents (pqcf/open file {:mmap? (and mmap? (= :column (:layout storage)))
+                                  :max-rows (:max-table-rows (:limits config))})
+        _ (catalog/check-index-names! @catalog (map :name (:indexes contents)) (when replace? tname))
+        tbl (open-table tname contents storage)]
+    (swap! catalog catalog/add-table tbl replace?)
+    {"table" (:name tbl)
+     "row_count" (:row-count tbl)
+     "columns" (table/columns-json (:columns tbl))}))
 
 (defmethod handle-op "drop" [{:keys [catalog]} req]
   (let [tname (field req "table" string? "a string" true)]
@@ -210,10 +296,6 @@
 (defmethod handle-op "explain" [{:keys [config catalog]} req]
   (let [sql (field req "sql" string? "a string" true)]
     {"plan" (engine/explain-plan @catalog sql (engine-options config req))}))
-
-(doseq [op ["save" "open" "stats"]]
-  (defmethod handle-op op [_ _]
-    (err/fail! "UNSUPPORTED" (str "operation '" op "' is not supported by this engine"))))
 
 (defmethod handle-op :default [_ req]
   (invalid! (str "unknown op '" (get req "op") "'")))

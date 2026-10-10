@@ -106,7 +106,7 @@
           (if (identical? r ::c/invalid) (fail) r))))))
 
 (defn- build-table
-  [name objects schema limits]
+  [name objects schema limits storage]
   (let [[ks cols nrows] (collect objects limits)
         nrows (long nrows)]
     (if schema
@@ -124,7 +124,7 @@
                   (when (some? (aget dst r))
                     (c/ingest-error! (str "record " (inc r) ": duplicate key '" k "'")))
                   (aset dst r (convert-value x (:type col) (inc r) (:name col))))))))
-        (table/make-table name schema data nrows))
+        (table/make-table name schema data nrows storage))
       (do
         (c/validate-column-names! ks)
         (let [types (mapv infer-type cols ks)
@@ -134,17 +134,17 @@
                                (aset dst r (convert-value (aget src r) type (inc r) k)))
                              dst))
                          cols types ks)]
-          (table/make-table name (c/make-columns ks types) data nrows))))))
+          (table/make-table name (c/make-columns ks types) data nrows storage))))))
 
 (defn load-json
-  [^Reader reader {:keys [name schema limits]}]
+  [^Reader reader {:keys [name schema limits storage]}]
   (let [doc (parse-json (slurp reader) "JSON")]
     (when-not (vector? doc)
       (c/ingest-error! "JSON document must be an array of objects"))
-    (build-table name doc schema limits)))
+    (build-table name doc schema limits storage)))
 
 (defn load-jsonl
-  [^Reader reader {:keys [name schema limits]}]
+  [^Reader reader {:keys [name schema limits storage]}]
   (let [br (BufferedReader. reader)
         objects (loop [acc (transient []) line-no 1]
                   (if-let [line (.readLine br)]
@@ -156,4 +156,4 @@
                             (c/ingest-error! (str "line " line-no " is not a JSON object") {"line" line-no}))
                           (recur (conj! acc obj) (inc line-no)))))
                     (persistent! acc)))]
-    (build-table name objects schema limits)))
+    (build-table name objects schema limits storage)))

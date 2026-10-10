@@ -106,8 +106,9 @@
 
 (defn load-csv
   "Loads CSV from a Reader. opts: :name :schema (vector of Column or nil)
-  :header? :delimiter (char) :limits."
-  [^Reader reader {:keys [name schema header? delimiter limits]}]
+  :header? :delimiter (char) :limits :storage (table layout options, see
+  polyquery.storage.table/make-table)."
+  [^Reader reader {:keys [name schema header? delimiter limits storage]}]
   (let [src (char-source reader)
         _ (when (= (.peek src) 0xFEFF) (.next src))
         delim (long (int delimiter))
@@ -141,4 +142,4 @@
                 (mapv :type schema)
                 (mapv c/infer-text-type buffers))
         data (mapv #(c/convert-text-column %1 %2 %3 first-record) buffers types names)]
-    (table/make-table name (c/make-columns names types) data rows)))
+    (table/make-table name (c/make-columns names types) data rows storage)))

@@ -1,15 +1,21 @@
 # PolyQuery — Clojure engine
 
-An analytical in-memory database engine implementing the PolyQuery
-specification (`spec/`) in Clojure. Status: **Phase 2** — Phase 1 (protocol,
-catalog, CSV/JSON/JSONL ingestion, all data types, resource limits, test
-functions) plus the complete SQL language: GROUP BY/HAVING, DISTINCT,
+An analytical database engine implementing the PolyQuery specification
+(`spec/`) in Clojure. Status: **Phase 3** — Phase 1 (protocol, catalog,
+CSV/JSON/JSONL ingestion, all data types, resource limits, test functions),
+Phase 2 (the complete SQL language: GROUP BY/HAVING, DISTINCT,
 INNER/LEFT/CROSS joins, all scalar functions, CASE/LIKE/BETWEEN/IN,
-uncorrelated **and correlated** subqueries, derived tables, CTEs and EXPLAIN.
+uncorrelated **and correlated** subqueries, derived tables, CTEs, EXPLAIN) and
+Phase 3 (row- and column-oriented in-memory layouts with null bitmaps and
+dictionary encoding, the PQCF v1 file format with PLAIN/DICT/RLE encodings,
+CRC-32 checksums, atomic crash-safe writes and memory-mapped reads, table
+statistics, HASH and BTREE indexes, index selection, predicate pushdown with
+row-group skipping, column pruning and cost-based hash-join build sides).
 
 Reported capabilities: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic
 test.functions phase2 sql.groupby sql.join sql.functions sql.subquery sql.cte
-sql.correlated_subquery`.
+sql.correlated_subquery phase3 storage.pqcf storage.mmap index.hash
+index.btree`.
 
 ## Prerequisites and build
 
@@ -54,10 +60,11 @@ SQL text ─lexer→ tokens ─parser→ AST ─analyzer/binder→ bound query
 | Parser / AST | `polyquery.sql.parser`, `polyquery.sql.ast` | recursive descent over the full v1 grammar producing a plain-map AST |
 | Semantic analysis | `polyquery.sql.analyzer` (queries: FROM/CTE/derived-table resolution, `*` expansion, GROUP BY/ORDER BY rules, output names), `polyquery.sql.binder` (expressions: name resolution incl. correlation, typing, coercions, aggregates), `polyquery.sql.functions` (scalar function signatures), `polyquery.sql.bound` (bound-expression shapes and helpers) | produces a *bound query*: typed expressions whose column references are row indices |
 | Logical planning | `polyquery.plan.logical` | relational operator tree: values/scan/derived/join → filter → aggregate → filter (HAVING) → project → distinct → sort → limit → project |
-| Optimization | `polyquery.plan.optimizer` | predicate pushdown below joins, WHERE equalities of comma joins become join conditions (`optimize: false` disables it) |
-| Physical planning | `polyquery.plan.physical`, `polyquery.plan.explain` | hash join vs nested-loop join, hash lookup for correlated equality predicates, planning of nested subquery plans; EXPLAIN JSON |
-| Execution | `polyquery.exec.operators`, `polyquery.exec.join`, `polyquery.exec.expr`, `polyquery.exec.functions`, `polyquery.exec.aggregate`, `polyquery.exec.context` | operators compiled once into re-reducible row sources; expression compiler (bound expr → specialised closure); scalar functions and LIKE; aggregate accumulators; query context (timeout, cancellation, memory budget) |
-| Storage / catalog | `polyquery.storage.table`, `polyquery.catalog` | immutable column-wise tables, immutable catalog value held in an atom (snapshot per query, atomic publication of loads) |
+| Optimization | `polyquery.plan.optimizer`, `polyquery.plan.pruning` | predicate pushdown below joins, WHERE equalities of comma joins become join conditions (`optimize: false` disables it); column pruning |
+| Physical planning | `polyquery.plan.physical`, `polyquery.plan.access`, `polyquery.plan.cost`, `polyquery.plan.explain` | access paths (index selection, row-group skip predicates), hash join vs nested-loop join and hash-join build side (cardinality estimates), hash lookup for correlated equality predicates, planning of nested subquery plans; EXPLAIN JSON |
+| Execution | `polyquery.exec.operators`, `polyquery.exec.join`, `polyquery.exec.skipping`, `polyquery.exec.expr`, `polyquery.exec.functions`, `polyquery.exec.aggregate`, `polyquery.exec.context` | operators compiled once into re-reducible row sources (table/index scans over segments); row-group skipping; expression compiler (bound expr → specialised closure); scalar functions and LIKE; aggregate accumulators; query context (timeout, cancellation, memory budget) |
+| Storage | `polyquery.storage.column`, `polyquery.storage.table`, `polyquery.storage.stats`, `polyquery.storage.index`, `polyquery.storage.pqcf` | typed column vectors with validity bitmaps, dictionary-encoded strings, row-layout views; tables split into segments; statistics; HASH/BTREE indexes; the PQCF v1 writer and validating reader |
+| Catalog | `polyquery.catalog` | immutable catalog value held in an atom (snapshot per query, atomic publication of loads, opens and index changes); global index namespace |
 | Ingestion | `polyquery.ingest`, `polyquery.ingest.{csv,json,common}` | streaming RFC 4180 reader, strict JSON reader, inference, explicit-schema conversion |
 | Values / types | `polyquery.types`, `polyquery.values` | type model and promotion, exact DECIMAL arithmetic, proleptic Gregorian calendar, CAST matrix, canonical serialization, total order, hash keys |
 | Utilities | `polyquery.util.{json,text,log}` | JSON reader/writer, ASCII case folding, code-point string order, stderr JSON logs |
@@ -107,12 +114,56 @@ timeout/cancellation checks.
   hash lookup built once, so the common correlated patterns are O(n + m).
 * **CTEs** are analyzed once per definition and inlined at each reference.
 
+### Storage (Phase 3)
+
+* **Tables** are immutable values split into *segments* (one per in-memory
+  table, one per PQCF row group). A segment holds one `ColumnVector` per
+  column (an interface with `valueAt`/`isNull`), optionally behind a `delay`
+  for lazily decoded chunks, plus optional chunk statistics.
+* **Layouts** (`load`/`open` option `layout`, default `column`):
+  `column` stores typed vectors (`long[]` for INT64/DECIMAL/DATE/TIMESTAMP,
+  `double[]`, bit-packed BOOLEAN, `String[]` or a dictionary vector
+  (`int[]` codes + dictionary) for STRING) each with a validity bitmap
+  (`long[]` words, nil when there are no NULLs); `row` stores an array of row
+  tuples and exposes columns as views over it. Both are read through the same
+  interface, so results never depend on the layout. STRING columns are
+  dictionary-encoded automatically when at most half of the values are
+  distinct (tables of ≥ 16 rows), always with `dictionary: true`, never with
+  `dictionary: false`.
+* **Statistics** (`stats`): row count and per column null count, min, max and
+  distinct count, computed lazily on first use and cached in the table value.
+  Distinct values are counted exactly up to 65,536, then with a HyperLogLog
+  sketch (2^14 registers, ~1% error).
+* **Indexes** are built from a sorted permutation of the column's non-null
+  values (ties by row id). BTREE answers equality and ranges by binary
+  search; HASH maps each normalized value to its run in the permutation.
+  Lookups return sorted row ids, so index scans produce rows in table order.
+  Indexes live in their table value (dropping/replacing a table drops them);
+  their names are global and case-insensitive.
+* **PQCF writer**: chunks are written column by column, 8-byte aligned;
+  default row group size 65,536 (`row_group_size` option). With
+  `encoding: auto` each chunk uses the smallest applicable encoding (RLE for
+  BOOLEAN/INT64/DECIMAL/DATE/TIMESTAMP, DICT for STRING, else PLAIN); forced
+  encodings fall back to PLAIN where not applicable. NULL slots are written
+  as zero / empty / extending the current run. `min`/`max` are written for
+  all types except STRING. Atomic save: temporary file
+  `.<target>.tmp-<pid>-<nanos>-<n>` in the target directory → `fsync` →
+  atomic rename → directory `fsync`; stale temporary files of the same target
+  are removed by the next save.
+* **PQCF reader**: header, footer, metadata checksum, metadata structure and
+  every consistency rule of pqcf-v1.md §2 are validated at `open`; unknown
+  encodings and versions are `STORAGE_VERSION_UNSUPPORTED`. Without `mmap`
+  every chunk is read, checksummed, validated (§3.4) and decoded at `open`.
+  **With `mmap: true` the file is memory-mapped** (`FileChannel.map`, one
+  mapping per chunk) and each chunk is checksummed, validated and decoded
+  lazily on first access; a corrupt chunk makes that query fail with
+  `STORAGE_CORRUPT`. Fixed-width PLAIN chunks of mapped files are read in
+  place (zero copy). Indexes listed in the metadata are rebuilt at `open`.
+
 ## Design decisions (where the spec is silent or open)
 
-* **Unsupported features.** `CREATE INDEX`/`DROP INDEX` parse but answer
-  `UNSUPPORTED` (no Phase 3 indexes); `UNION`, `RIGHT`/`FULL` joins answer
-  `UNSUPPORTED`. Protocol ops of later phases (`save`, `open`, `stats`) answer
-  `UNSUPPORTED`; `serve` exits 1.
+* **Unsupported features.** `UNION`, `RIGHT`/`FULL` joins answer
+  `UNSUPPORTED`; `serve` (Phase 4) exits 1.
 * **CASE/COALESCE result type.** Types are combined pairwise in order; any two
   DECIMAL types (even identical ones) combine to `DECIMAL(18,max(s1,s2))` as
   semantics.md §13 states, INT64 with DECIMAL(p,s) to `DECIMAL(18,s)`, NULL
@@ -139,12 +190,54 @@ timeout/cancellation checks.
   reference must be a GROUP BY column (else `SEMANTIC_ERROR`). Aggregates
   inside a subquery always aggregate over the subquery's rows.
 * **EXPLAIN.** The plan JSON uses `TableScan` (with `table`, `alias`,
-  `columns`), `Filter`, `HashJoin`/`NestedLoopJoin` (with `join_type`),
-  `HashLookup` (correlated hash lookup over its `TableScan` child),
-  `SubqueryScan`, `Aggregate`, `Project`, `Distinct`, `Sort`, `Limit`,
-  `Values`; subquery plans appear under a node's `subqueries` property. The
-  `explain` op accepts the same SQL as `query` (an `EXPLAIN` prefix is
-  allowed). Scans currently read all columns (column pruning is Phase 3).
+  `columns` actually read, `layout`, and `skip_predicates` for row-group
+  skipping), `IndexScan` (`table`, `index`, `kind`, `columns`, `lookup`),
+  `Filter`, `HashJoin` (`join_type`, `build` side)/`NestedLoopJoin`
+  (`join_type`), `HashLookup` (correlated hash lookup over its `TableScan`
+  child), `SubqueryScan`, `Aggregate`, `Project`, `Distinct`, `Sort`, `Limit`,
+  `Values`. The plans of subqueries evaluated by a node are appended to its
+  `children` (marked `"subquery": "scalar"|"exists"|"in"`). The `explain` op
+  accepts the same SQL as `query` (an `EXPLAIN` prefix is allowed).
+* **Column pruning.** Rows keep the full FROM-row width (expressions address
+  positions), but scans only read and fill referenced columns. Required
+  columns are propagated top-down: outputs of derived tables/CTEs that the
+  enclosing query does not use, unused aggregates and the select list of
+  `EXISTS` subqueries are replaced by constants, and correlated references
+  from subqueries count as references of the enclosing row.
+* **Predicate pushdown / row-group skipping.** WHERE conjuncts are pushed to
+  the scans (Phase 2 optimizer). Conjuncts of the form `col <op> constant`,
+  `col BETWEEN c1 AND c2`, `col IN (constants)`, `col IS [NOT] NULL` (constants
+  are folded at planning time) skip PQCF row groups whose `min`/`max`/
+  `null_count` exclude them. The complete predicate is always re-evaluated
+  on the remaining rows.
+* **Index selection.** For the same predicate forms on an indexed column the
+  planner estimates selectivity from the index (equality/IN: values /
+  distinct; ranges on numeric/temporal columns: linear interpolation between
+  the index's min and max, else 1/3; several range bounds on one column are
+  combined) and uses the most selective index whose selectivity is ≤ 10%. In
+  addition an equality/IN lookup estimated to return at most 16 rows is
+  always used (a point lookup of a handful of rows is never more expensive
+  than a scan; this makes indexes effective on small tables). HASH indexes
+  serve equality/IN when the comparison type has the column's key domain;
+  BTREE indexes serve equality, IN and ranges with any comparable constant
+  type. `use_indexes: false` disables index scans. The filter above an
+  index scan re-checks the whole predicate.
+* **Join build side.** Inner hash joins build on the input with the smaller
+  estimated cardinality (scans: row count; filters over scans: product of
+  per-predicate selectivities from table statistics, 0.5 for other
+  conjuncts; joins: max of the inputs; aggregates: 10%); LEFT joins build on
+  the right input.
+* **Index statements.** `CREATE INDEX` without `USING` creates a BTREE index.
+  Unknown table/column ⇒ `SEMANTIC_ERROR`, an existing index name ⇒
+  `ALREADY_EXISTS` (no-op with `IF NOT EXISTS`); `DROP INDEX` of an unknown
+  name ⇒ `NOT_FOUND` (no-op with `IF EXISTS`).
+* **save/open options.** `encoding` other than `auto|plain|dict|rle` ⇒
+  `UNSUPPORTED`; `row_group_size` must be an integer ≥ 1. `open` accepts
+  `layout`/`dictionary` like `load` (a `row` layout decodes eagerly, so `mmap`
+  only applies to the column layout). `open` responds like `load` (`table`,
+  `row_count`, `columns`). Index entries in PQCF metadata must name an
+  existing column and kind `HASH`/`BTREE` (case-insensitive), otherwise the
+  file is `STORAGE_CORRUPT`.
 * **CSV whitespace.** For non-STRING columns a field that is empty after
   trimming spaces/tabs is treated like an empty field: it is not considered
   during inference and loads as NULL.
@@ -187,17 +280,22 @@ timeout/cancellation checks.
   parser, analyzer, planner/optimizer, scalar functions and LIKE, CSV/JSON
   ingestion, the engine pipeline (Phase 1 and Phase 2 features) and the
   protocol.
+* Storage unit tests: column vectors and layouts, statistics, index lookups,
+  PQCF round trips for every encoding/row-group size/mmap, corrupt and
+  unsupported files; Phase 3 planning (pruning, index selection, build side).
 * Conformance: `python3 tests/conformance/runner.py --engine
-  implementations/clojure/bin/polyquery --phase 1 --phase 2`.
+  implementations/clojure/bin/polyquery --phase 1 --phase 2 --phase 3`.
 
 ## Known limitations
 
-* No indexes, PQCF storage, statistics, HTTP server (Phases 3-5).
-* Scans materialize all table columns (no column pruning yet); the hash join
-  always builds on the right input.
-* Tables are held as boxed values in `Object[]` columns; very large inputs
-  need a correspondingly large heap (`POLYQUERY_JAVA_OPTS=-Xmx…`). JSON (array)
+* No HTTP server (Phase 4) or Phase 5 execution modes.
+* Rows flowing between operators are boxed `Object[]` tuples (typed columnar
+  storage is converted per value at the scan); very large inputs need a
+  correspondingly large heap (`POLYQUERY_JAVA_OPTS=-Xmx…`). JSON (array)
   inputs are parsed from a single in-memory string.
+* Indexes are used for single-table scans only (no index nested-loop joins,
+  no index use for `OR`/`NOT IN`/`<>`, no ordered output from BTREE indexes).
+* A PQCF chunk must be smaller than 2 GiB (Java buffer limit).
 * Correlated subqueries other than equality lookups over a single table scan
   are re-executed per outer row (correct, but O(outer × inner)).
 * Sorting is not interruptible once the in-memory sort has started (rows are

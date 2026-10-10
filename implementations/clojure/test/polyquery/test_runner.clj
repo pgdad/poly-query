@@ -14,6 +14,9 @@
     polyquery.exec.functions-test
     polyquery.engine-test
     polyquery.engine-phase2-test
+    polyquery.engine-phase3-test
+    polyquery.storage.storage-test
+    polyquery.storage.pqcf-test
     polyquery.protocol-test])
 
 (defn -main [& _]

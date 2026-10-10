@@ -14,9 +14,13 @@
             [polyquery.exec.aggregate :as agg]
             [polyquery.exec.context :as ctx]
             [polyquery.exec.expr :as expr]
+            [polyquery.exec.skipping :as skipping]
+            [polyquery.storage.index :as index]
+            [polyquery.storage.table :as table]
             [polyquery.values :as v])
   (:import (java.util ArrayList Comparator HashMap HashSet)
-           (polyquery.exec.aggregate Accumulator)))
+           (polyquery.exec.aggregate Accumulator)
+           (polyquery.storage.column ColumnVector)))
 
 (set! *warn-on-reflection* true)
 
@@ -64,37 +68,94 @@
   (let [rows (mapv object-array (:rows plan))]
     (reducible (fn [f init] (reduce-list rows f init)))))
 
+(defn- scan-vectors
+  "The ColumnVectors of the given columns in a segment."
+  ^objects [seg columns]
+  (into-array ColumnVector (map #(table/segment-vector seg %) columns)))
+
+(defn- segment-selected?
+  "False when the segment's chunk statistics exclude a skip predicate."
+  [seg skip]
+  (let [stats (:chunk-stats seg)]
+    (or (nil? stats)
+        (every? #(skipping/segment-may-match? % (nth stats (:column %)) (:row-count seg)) skip))))
+
+(defn- fill-row!
+  "Copies row r of the vectors into the given positions of row."
+  [^objects row ^objects vectors ^longs positions ^long r]
+  (dotimes [c (alength vectors)]
+    (aset row (aget positions c) (.valueAt ^ColumnVector (aget vectors c) r))))
+
 (defmethod build :table-scan [plan env]
+  ;; Rows have the table's full width; only the scanned columns are filled.
   (let [table (:table plan)
-        ^objects cols (into-array Object (map #(nth (:data table) %) (:columns plan)))
-        ncols (alength cols)
-        n (long (:row-count table))
+        width (count (:columns table))
+        columns (:columns plan)
+        positions (long-array columns)
+        skip (:skip plan)
         qctx (:ctx env)]
     (reducible
      (fn [f init]
-       (loop [r 0 acc init]
-         (if (or (= r n) (reduced? acc))
+       (loop [segs (seq (:segments table)) acc init]
+         (if (or (nil? segs) (reduced? acc))
            (unreduced acc)
-           (do
-             (when (zero? (rem r check-interval)) (ctx/check! qctx))
-             (let [row (object-array ncols)]
-               (dotimes [c ncols]
-                 (aset row c (aget ^objects (aget cols c) r)))
-               (recur (inc r) (f acc row))))))))))
+           (let [seg (first segs)]
+             (if-not (segment-selected? seg skip)
+               (recur (next segs) acc)
+               (let [vectors (scan-vectors seg columns)
+                     n (long (:row-count seg))
+                     acc (loop [r 0 acc acc]
+                           (if (or (= r n) (reduced? acc))
+                             acc
+                             (do
+                               (when (zero? (rem r check-interval)) (ctx/check! qctx))
+                               (let [row (object-array width)]
+                                 (fill-row! row vectors positions r)
+                                 (recur (inc r) (f acc row))))))]
+                 (recur (next segs) acc))))))))))
+
+(defn- fetch-rows
+  "Reduces f over the rows with the given (ascending) row ids."
+  [table columns ^ints row-ids qctx f init]
+  (let [width (count (:columns table))
+        positions (long-array columns)
+        segs (:segments table)
+        n (alength row-ids)]
+    (loop [k 0 seg-idx -1 ^objects vectors nil acc init]
+      (if (or (= k n) (reduced? acc))
+        (unreduced acc)
+        (let [r (aget row-ids k)
+              si (table/segment-index table r)
+              seg (nth segs si)
+              vectors (if (= si seg-idx) vectors (scan-vectors seg columns))
+              row (object-array width)]
+          (when (zero? (rem k check-interval)) (ctx/check! qctx))
+          (fill-row! row vectors positions (- r (long (:start seg))))
+          (recur (inc k) si vectors (f acc row)))))))
+
+(defn- index-row-ids
+  "Row ids found by an index lookup (see polyquery.plan.access)."
+  ^ints [table idx lookup]
+  (case (:kind lookup)
+    :keys (index/lookup-equal idx (:keys lookup))
+    :ranges (let [col-type (:type (nth (:columns table) (:column-index idx)))
+                  ->bound (fn [b] {:cmp (v/comparator-fn (:cmp-type b) col-type (:type b))
+                                   :value (:value b) :inclusive? (:inclusive? b)})]
+              (index/lookup-ranges idx (mapv (fn [r] {:lowers (mapv ->bound (:lowers r))
+                                                      :uppers (mapv ->bound (:uppers r))})
+                                             (:ranges lookup))))))
+
+(defmethod build :index-scan [plan env]
+  (let [table (:table plan)]
+    (reducible
+     (fn [f init]
+       (fetch-rows table (:columns plan) (index-row-ids table (:index plan) (:lookup plan))
+                   (:ctx env) f init)))))
 
 (defn- scan-rows
-  "Materializes the selected columns of a table as row arrays."
-  ^ArrayList [table columns]
-  (let [^objects cols (into-array Object (map #(nth (:data table) %) columns))
-        ncols (alength cols)
-        n (long (:row-count table))
-        out (ArrayList. n)]
-    (dotimes [r n]
-      (let [row (object-array ncols)]
-        (dotimes [c ncols]
-          (aset row c (aget ^objects (aget cols c) r)))
-        (.add out row)))
-    out))
+  "Materializes the selected columns of a table as (full-width) rows."
+  ^ArrayList [table columns env]
+  (materialize (build {:op :table-scan :table table :columns columns} env) env))
 
 (defmethod build :lookup-scan [plan env]
   ;; The probe expressions only read enclosing queries' rows (correlation
@@ -120,8 +181,7 @@
         residual (if-let [r (:residual plan)] (expr/compile-predicate env r) (constantly true))
         table (delay
                 (let [m (HashMap.)
-                      rows (scan-rows (:table plan) (:columns plan))]
-                  (ctx/reserve! (:ctx env) (* (.size rows) (ctx/row-bytes (count (:columns plan)))))
+                      rows (scan-rows (:table plan) (:columns plan) env)]
                   (doseq [row rows]
                     (when-let [k (inner-key row)]
                       (let [^ArrayList b (or (.get m k) (let [b (ArrayList.)] (.put m k b) b))]
