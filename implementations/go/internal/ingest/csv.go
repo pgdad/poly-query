@@ -127,7 +127,7 @@ func (r *csvReader) quotedField() (string, error) {
 	}
 }
 
-func loadCSV(s string, opts Options) (*storage.Table, error) {
+func loadCSV(s string, opts Options) (*storage.Data, error) {
 	r := &csvReader{s: s, delim: opts.Delimiter}
 	var names []string
 	var schema []storage.ColumnDef = opts.Schema
@@ -194,7 +194,7 @@ func loadCSV(s string, opts Options) (*storage.Table, error) {
 	if opts.Header {
 		firstRecord = 2
 	}
-	t := &storage.Table{Rows: rows}
+	t := &storage.Data{Rows: rows}
 	for i, name := range names {
 		var typ types.Type
 		if schema != nil {
@@ -208,7 +208,7 @@ func loadCSV(s string, opts Options) (*storage.Table, error) {
 		}
 		cols[i] = csvColumn{} // release raw texts early
 		t.Columns = append(t.Columns, storage.ColumnDef{Name: name, Type: typ})
-		t.Data = append(t.Data, vec)
+		t.Vectors = append(t.Vectors, vec)
 	}
 	return t, nil
 }

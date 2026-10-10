@@ -111,8 +111,12 @@ func (h *Handler) dispatch(req *request) ([]byte, error) {
 		return h.sleep(req)
 	case "explain":
 		return h.explain(req)
-	case "save", "open", "stats":
-		return nil, errs.New(errs.Unsupported, "operation %q is not supported by this engine", op)
+	case "save":
+		return h.save(req)
+	case "open":
+		return h.open(req)
+	case "stats":
+		return h.stats(req)
 	}
 	return nil, errs.New(errs.InvalidRequest, "unknown op %q", op)
 }
@@ -311,10 +315,11 @@ func (h *Handler) schema(req *request) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	t, ok := h.eng.Catalog().Get(name)
+	entry, ok := h.eng.Catalog().Snapshot().Entry(name)
 	if !ok {
 		return nil, errs.New(errs.NotFound, "table %q not found", name)
 	}
+	t := entry.Table
 	w := req.ok()
 	w.key("table")
 	w.str(t.Name)
@@ -323,7 +328,19 @@ func (h *Handler) schema(req *request) ([]byte, error) {
 	writeColumns(w, t.Columns)
 	w.key("indexes")
 	w.beginArray()
+	for _, ix := range entry.Indexes {
+		w.beginObject()
+		w.key("name")
+		w.str(ix.Name)
+		w.key("column")
+		w.str(ix.Column)
+		w.key("kind")
+		w.str(string(ix.Kind))
+		w.endObject()
+	}
 	w.endArray()
+	w.key("layout")
+	w.str(t.Layout.String())
 	return finish(w), nil
 }
 
@@ -385,11 +402,8 @@ func (h *Handler) load(req *request) ([]byte, error) {
 		}
 		lr.Options.Delimiter = d[0]
 	}
-	if raw, ok := opts["layout"]; ok {
-		var l string
-		if json.Unmarshal(raw, &l) != nil || (l != "row" && l != "column") {
-			return nil, invalid("layout must be \"row\" or \"column\"")
-		}
+	if lr.Build, err = buildOptions(opts); err != nil {
+		return nil, err
 	}
 	if f == ingest.CSV && !lr.Options.Header && lr.Options.Schema == nil {
 		return nil, invalid("header=false requires an explicit schema")
@@ -398,13 +412,39 @@ func (h *Handler) load(req *request) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return tableResponse(req, t), nil
+}
+
+func tableResponse(req *request, t *storage.Table) []byte {
 	w := req.ok()
 	w.key("table")
 	w.str(t.Name)
 	w.key("row_count")
 	w.int(int64(t.Rows))
 	writeColumns(w, t.Columns)
-	return finish(w), nil
+	return finish(w)
+}
+
+// buildOptions decodes the in-memory layout options of load/open.
+func buildOptions(opts map[string]json.RawMessage) (storage.BuildOptions, error) {
+	var bo storage.BuildOptions
+	if raw, ok := opts["layout"]; ok {
+		var l string
+		var valid bool
+		if json.Unmarshal(raw, &l) == nil {
+			bo.Layout, valid = storage.ParseLayout(l)
+		}
+		if !valid {
+			return bo, invalid("layout must be \"row\" or \"column\"")
+		}
+	}
+	if raw, ok := opts["dictionary"]; ok {
+		var err error
+		if bo.Dictionary, err = decodeBool(raw, "dictionary"); err != nil {
+			return bo, err
+		}
+	}
+	return bo, nil
 }
 
 func decodeSchema(raw json.RawMessage) ([]storage.ColumnDef, error) {
@@ -562,7 +602,13 @@ func parseQueryOptions(req *request) (engine.QueryOptions, error) {
 				return qo, err
 			}
 			qo.NoOptimize = !b
-		case "use_indexes", "native":
+		case "use_indexes":
+			b, err := decodeBool(raw, name)
+			if err != nil {
+				return qo, err
+			}
+			qo.NoIndexes = !b
+		case "native":
 			if _, err := decodeBool(raw, name); err != nil {
 				return qo, err
 			}
@@ -592,4 +638,123 @@ func (h *Handler) sleep(req *request) ([]byte, error) {
 	}
 	time.Sleep(time.Duration(ms) * time.Millisecond)
 	return finish(req.ok()), nil
+}
+
+// ---------------------------------------------------------------- storage
+
+func (h *Handler) open(req *request) ([]byte, error) {
+	name, err := req.requiredStr("table")
+	if err != nil {
+		return nil, err
+	}
+	if name == "" {
+		return nil, invalid("table name must not be empty")
+	}
+	or := engine.OpenRequest{Table: name}
+	if or.Path, err = req.requiredStr("path"); err != nil {
+		return nil, err
+	}
+	if raw, ok := req.fields["replace"]; ok && string(raw) != "null" {
+		if or.Replace, err = decodeBool(raw, "replace"); err != nil {
+			return nil, err
+		}
+	}
+	opts, err := req.object("options")
+	if err != nil {
+		return nil, err
+	}
+	bo, err := buildOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+	or.Layout, or.Dictionary = bo.Layout, bo.Dictionary
+	if raw, ok := opts["mmap"]; ok {
+		if or.Mmap, err = decodeBool(raw, "mmap"); err != nil {
+			return nil, err
+		}
+	}
+	t, err := h.eng.Open(or)
+	if err != nil {
+		return nil, err
+	}
+	return tableResponse(req, t), nil
+}
+
+func (h *Handler) save(req *request) ([]byte, error) {
+	name, err := req.requiredStr("table")
+	if err != nil {
+		return nil, err
+	}
+	sr := engine.SaveRequest{Table: name}
+	if sr.Path, err = req.requiredStr("path"); err != nil {
+		return nil, err
+	}
+	opts, err := req.object("options")
+	if err != nil {
+		return nil, err
+	}
+	if raw, ok := opts["row_group_size"]; ok {
+		n, err := decodeCount(raw, "row_group_size")
+		if err != nil || n < 1 || n > 1<<31 {
+			return nil, invalid("option \"row_group_size\" must be a positive integer")
+		}
+		sr.RowGroupSize = int(n)
+	}
+	if raw, ok := opts["encoding"]; ok {
+		if json.Unmarshal(raw, &sr.Encoding) != nil || len(raw) == 0 || raw[0] != '"' {
+			return nil, invalid("option \"encoding\" must be a string")
+		}
+		switch sr.Encoding {
+		case "auto", "plain", "dict", "rle":
+		default:
+			return nil, invalid("unknown encoding %q", sr.Encoding)
+		}
+	}
+	n, err := h.eng.Save(sr)
+	if err != nil {
+		return nil, err
+	}
+	w := req.ok()
+	w.key("path")
+	w.str(sr.Path)
+	w.key("bytes")
+	w.int(n)
+	return finish(w), nil
+}
+
+func (h *Handler) stats(req *request) ([]byte, error) {
+	name, err := req.requiredStr("table")
+	if err != nil {
+		return nil, err
+	}
+	t, stats, err := h.eng.Stats(name)
+	if err != nil {
+		return nil, err
+	}
+	w := req.ok()
+	w.key("table")
+	w.str(t.Name)
+	w.key("row_count")
+	w.int(int64(t.Rows))
+	w.key("columns")
+	w.beginArray()
+	for i, c := range t.Columns {
+		st := stats[i]
+		w.beginObject()
+		w.key("name")
+		w.str(c.Name)
+		w.key("type")
+		w.str(c.Type.ResultName())
+		w.key("null_count")
+		w.int(int64(st.NullCount))
+		w.key("distinct_count")
+		w.int(int64(st.Distinct))
+		w.key("min")
+		w.value(st.Min, c.Type)
+		w.key("max")
+		w.value(st.Max, c.Type)
+		w.endObject()
+	}
+	w.endArray()
+	return finish(w), nil
 }

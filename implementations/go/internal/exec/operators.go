@@ -5,6 +5,7 @@ import (
 	"slices"
 	"sort"
 
+	"polyquery/internal/physical"
 	"polyquery/internal/storage"
 	"polyquery/internal/types"
 )
@@ -18,18 +19,86 @@ type Operator interface {
 
 // ---------------------------------------------------------------- scan
 
-// scanOp reads the selected columns (ords) of a table; output rows contain
-// only those columns.
+// scanOp reads the selected columns (ords) of a table group by group,
+// skipping row groups excluded by the scan's column filters; output rows
+// contain only the selected columns.
 type scanOp struct {
-	ec    *Context
-	table *storage.Table
-	ords  []int
-	pos   int
-	buf   types.Row
+	ec      *Context
+	table   *storage.Table
+	ords    []int
+	filters []physical.ColumnFilter
+	group   int
+	reader  *storage.GroupReader
+	pos     int
+	rows    int
+	n       int
+	buf     types.Row
+}
+
+func (s *scanOp) skip(g *storage.RowGroup) bool {
+	for i := range s.filters {
+		f := &s.filters[i]
+		if f.Skips(g.Stats[f.Ord], g.Rows) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *scanOp) Next() (types.Row, error) {
-	if s.pos >= s.table.Rows {
+	for s.reader == nil || s.pos >= s.rows {
+		if s.group >= len(s.table.Groups) {
+			return nil, nil
+		}
+		g := s.table.Groups[s.group]
+		s.group++
+		if s.skip(g) {
+			continue
+		}
+		r, err := g.Reader(s.ords)
+		if err != nil {
+			return nil, err
+		}
+		s.reader, s.pos, s.rows = r, 0, g.Rows
+	}
+	if s.n%checkEvery == 0 {
+		if err := s.ec.Check(); err != nil {
+			return nil, err
+		}
+	}
+	s.n++
+	s.reader.Read(s.pos, s.buf)
+	s.pos++
+	return s.buf, nil
+}
+
+// indexScanOp returns the selected columns of the rows found by an index
+// lookup, in row-ID order.
+type indexScanOp struct {
+	ec      *Context
+	node    *physical.IndexScan
+	ids     []uint32
+	started bool
+	pos     int
+	group   int
+	reader  *storage.GroupReader
+	buf     types.Row
+}
+
+func (s *indexScanOp) Next() (types.Row, error) {
+	if !s.started {
+		s.started = true
+		n := s.node
+		switch {
+		case n.Empty:
+		case n.Point:
+			s.ids = n.Index.Lookup(n.Points)
+		default:
+			s.ids = n.Index.Range(n.Range)
+		}
+		s.group = -1
+	}
+	if s.pos >= len(s.ids) {
 		return nil, nil
 	}
 	if s.pos%checkEvery == 0 {
@@ -37,10 +106,18 @@ func (s *scanOp) Next() (types.Row, error) {
 			return nil, err
 		}
 	}
-	for i, c := range s.ords {
-		s.buf[i] = s.table.Data[c].Get(s.pos)
-	}
+	t := s.node.Table
+	id := int(s.ids[s.pos])
 	s.pos++
+	if s.group < 0 || id >= t.Groups[s.group].Start+t.Groups[s.group].Rows || id < t.Groups[s.group].Start {
+		s.group = t.GroupOf(id)
+		r, err := t.Groups[s.group].Reader(s.node.Ords)
+		if err != nil {
+			return nil, err
+		}
+		s.reader = r
+	}
+	s.reader.Read(id-t.Groups[s.group].Start, s.buf)
 	return s.buf, nil
 }
 

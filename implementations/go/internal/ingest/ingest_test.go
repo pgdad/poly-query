@@ -8,14 +8,14 @@ import (
 	"polyquery/internal/types"
 )
 
-func load(t *testing.T, f Format, data string, schema []storage.ColumnDef) (*storage.Table, error) {
+func load(t *testing.T, f Format, data string, schema []storage.ColumnDef) (*storage.Data, error) {
 	t.Helper()
 	opts := DefaultOptions(f)
 	opts.Schema = schema
-	return Load("t", []byte(data), opts)
+	return Load([]byte(data), opts)
 }
 
-func colTypes(tb *storage.Table) []string {
+func colTypes(tb *storage.Data) []string {
 	var out []string
 	for _, c := range tb.Columns {
 		out = append(out, c.Type.String())
@@ -34,7 +34,7 @@ func TestCSVInference(t *testing.T) {
 			t.Errorf("column %d: %s, want %s", i, typ, want[i])
 		}
 	}
-	if tb.Rows != 2 || tb.Data[5].Get(1).S != "y, z" || !tb.Data[6].IsNull(0) {
+	if tb.Rows != 2 || tb.Vectors[5].Get(1).S != "y, z" || !tb.Vectors[6].IsNull(0) {
 		t.Errorf("unexpected data")
 	}
 }
@@ -44,16 +44,16 @@ func TestCSVQuotingAndNulls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tb.Columns[0].Type != types.Int64 || !tb.Data[0].IsNull(0) {
+	if tb.Columns[0].Type != types.Int64 || !tb.Vectors[0].IsNull(0) {
 		t.Errorf("quoted empty should be NULL for INT64")
 	}
-	if v := tb.Data[1].Get(0); v.Null || v.S != "" {
+	if v := tb.Vectors[1].Get(0); v.Null || v.S != "" {
 		t.Errorf("quoted empty should be '' for STRING")
 	}
-	if v := tb.Data[1].Get(1); v.S != "a \"q\"\nline" {
+	if v := tb.Vectors[1].Get(1); v.S != "a \"q\"\nline" {
 		t.Errorf("escaped field = %q", v.S)
 	}
-	if !tb.Data[1].IsNull(2) {
+	if !tb.Vectors[1].IsNull(2) {
 		t.Errorf("unquoted empty should be NULL")
 	}
 }
@@ -89,14 +89,14 @@ func TestJSON(t *testing.T) {
 	if len(got) != 3 || got[0] != "FLOAT64" || got[1] != "TIMESTAMP" || got[2] != "STRING" {
 		t.Errorf("types = %v", got)
 	}
-	if tb.Data[2].Get(1).S != "xé" || !tb.Data[2].IsNull(0) {
+	if tb.Vectors[2].Get(1).S != "xé" || !tb.Vectors[2].IsNull(0) {
 		t.Errorf("unexpected values")
 	}
 	tb, err = load(t, JSONL, "{\"n\": 7}\n\n{\"n\": null}\n", []storage.ColumnDef{{Name: "N", Type: types.Decimal(5, 2)}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v := tb.Data[0].Get(0); v.I != 700 {
+	if v := tb.Vectors[0].Get(0); v.I != 700 {
 		t.Errorf("decimal from JSON number = %d", v.I)
 	}
 }

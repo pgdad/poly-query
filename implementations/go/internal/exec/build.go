@@ -11,7 +11,9 @@ import (
 func Build(ec *Context, n physical.Node) (Operator, error) {
 	switch x := n.(type) {
 	case *physical.TableScan:
-		return &scanOp{ec: ec, table: x.Table, ords: x.Ords, buf: make(types.Row, len(x.Ords))}, nil
+		return &scanOp{ec: ec, table: x.Table, ords: x.Ords, filters: x.Filters, buf: make(types.Row, len(x.Ords))}, nil
+	case *physical.IndexScan:
+		return &indexScanOp{ec: ec, node: x, buf: make(types.Row, len(x.Ords))}, nil
 	case *physical.Values:
 		op := &valuesOp{buf: make(types.Row, 0, len(x.Cols))}
 		for _, r := range x.Rows {

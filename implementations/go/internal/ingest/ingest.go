@@ -38,8 +38,8 @@ func DefaultOptions(f Format) Options {
 	return Options{Format: f, Header: true, Delimiter: ','}
 }
 
-// Load parses data into a new table called name.
-func Load(name string, data []byte, opts Options) (*storage.Table, error) {
+// Load parses data into materialized column data.
+func Load(data []byte, opts Options) (*storage.Data, error) {
 	data = bytes.TrimPrefix(data, []byte("\xEF\xBB\xBF"))
 	if !utf8.Valid(data) {
 		return nil, errs.New(errs.IngestError, "input is not valid UTF-8")
@@ -50,7 +50,7 @@ func Load(name string, data []byte, opts Options) (*storage.Table, error) {
 		}
 	}
 	var (
-		t   *storage.Table
+		t   *storage.Data
 		err error
 	)
 	switch opts.Format {
@@ -64,7 +64,6 @@ func Load(name string, data []byte, opts Options) (*storage.Table, error) {
 	if err != nil {
 		return nil, err
 	}
-	t.Name = name
 	return t, nil
 }
 

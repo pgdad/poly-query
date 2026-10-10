@@ -6,8 +6,10 @@
 package physical
 
 import (
+	"polyquery/internal/index"
 	"polyquery/internal/plan"
 	"polyquery/internal/storage"
+	"polyquery/internal/types"
 )
 
 // Node is a physical plan operator. Its output rows follow Schema().
@@ -16,11 +18,30 @@ type Node interface {
 	Children() []Node
 }
 
-// TableScan reads the listed table columns (by ordinal) of every row.
+// TableScan reads the listed table columns (by ordinal) of every row. Row
+// groups whose statistics show that they cannot satisfy one of Filters
+// (derived from the WHERE conjuncts evaluated directly above the scan) are
+// skipped.
 type TableScan struct {
-	Table *storage.Table
-	Ords  []int
-	Cols  []plan.Column
+	Table   *storage.Table
+	Ords    []int
+	Cols    []plan.Column
+	Filters []ColumnFilter
+}
+
+// IndexScan reads the listed columns of the rows an index lookup returns,
+// in row-ID order: rows equal to one of Points (Point lookups) or within
+// Range (BTREE range lookups). Cond is the predicate the lookup answers.
+type IndexScan struct {
+	Table  *storage.Table
+	Index  *index.Index
+	Ords   []int
+	Cols   []plan.Column
+	Point  bool
+	Points []types.Value
+	Range  index.Range
+	Empty  bool // the lookup provably returns no rows
+	Cond   plan.Expr
 }
 
 // Values produces constant rows.
@@ -113,6 +134,7 @@ type Materialize struct {
 
 // Schema implementations.
 func (n *TableScan) Schema() []plan.Column { return n.Cols }
+func (n *IndexScan) Schema() []plan.Column { return n.Cols }
 func (n *Values) Schema() []plan.Column    { return n.Cols }
 func (n *Filter) Schema() []plan.Column    { return n.Input.Schema() }
 func (n *Project) Schema() []plan.Column   { return n.Cols }
@@ -133,6 +155,7 @@ func (n *Materialize) Schema() []plan.Column  { return n.Input.Schema() }
 
 // Children implementations.
 func (n *TableScan) Children() []Node      { return nil }
+func (n *IndexScan) Children() []Node      { return nil }
 func (n *Values) Children() []Node         { return nil }
 func (n *Filter) Children() []Node         { return []Node{n.Input} }
 func (n *Project) Children() []Node        { return []Node{n.Input} }
@@ -210,4 +233,10 @@ type Plan struct {
 type Options struct {
 	// Join forces a join algorithm: "", "auto", "hash" or "nested_loop".
 	Join string
+	// UseIndexes enables index selection.
+	UseIndexes bool
+	// Indexes returns the indexes of a table version (nil: none).
+	Indexes func(*storage.Table) []*index.Index
+	// EvalConst evaluates constant expressions (search arguments).
+	EvalConst func(plan.Expr) (types.Value, error)
 }

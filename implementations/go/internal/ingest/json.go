@@ -70,7 +70,7 @@ func (p *jsonParser) peek() byte {
 	return 0
 }
 
-func loadJSON(s string, opts Options) (*storage.Table, error) {
+func loadJSON(s string, opts Options) (*storage.Data, error) {
 	ld := &jsonLoader{index: map[string]int{}, opts: opts}
 	if opts.Format == JSON {
 		p := &jsonParser{s: s}
@@ -373,8 +373,8 @@ func (p *jsonParser) str() (string, error) {
 	return "", p.fail("unterminated string")
 }
 
-func (ld *jsonLoader) build() (*storage.Table, error) {
-	t := &storage.Table{Rows: ld.rows}
+func (ld *jsonLoader) build() (*storage.Data, error) {
+	t := &storage.Data{Rows: ld.rows}
 	if ld.opts.Schema != nil {
 		byName := map[string]*jsonColumn{}
 		for _, c := range ld.cols {
@@ -392,7 +392,7 @@ func (ld *jsonLoader) build() (*storage.Table, error) {
 				return nil, err
 			}
 			t.Columns = append(t.Columns, def)
-			t.Data = append(t.Data, vec)
+			t.Vectors = append(t.Vectors, vec)
 		}
 		return t, nil
 	}
@@ -415,7 +415,7 @@ func (ld *jsonLoader) build() (*storage.Table, error) {
 			return nil, errs.New(errs.IngestError, "%s", errs.From(err).Message)
 		}
 		t.Columns = append(t.Columns, defs[i])
-		t.Data = append(t.Data, vec)
+		t.Vectors = append(t.Vectors, vec)
 	}
 	return t, nil
 }

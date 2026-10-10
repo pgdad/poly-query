@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"polyquery/internal/plan"
+	"polyquery/internal/storage"
 )
 
 // Object is a JSON object that preserves key order.
@@ -68,15 +69,38 @@ func names(cols []plan.Column) []string {
 	return out
 }
 
+func tableColumns(t *storage.Table, ords []int) []string {
+	cols := make([]string, len(ords))
+	for i, ord := range ords {
+		cols[i] = t.Columns[ord].Name
+	}
+	return cols
+}
+
 func explainNode(p *Plan, n Node) *Object {
 	o := &Object{}
 	switch x := n.(type) {
 	case *TableScan:
-		cols := make([]string, len(x.Ords))
-		for i, ord := range x.Ords {
-			cols[i] = x.Table.Columns[ord].Name
+		o.Set("op", "TableScan").Set("table", x.Table.Name).Set("columns", tableColumns(x.Table, x.Ords))
+		o.Set("layout", x.Table.Layout.String()).Set("row_groups", len(x.Table.Groups))
+		if len(x.Filters) > 0 {
+			skip := make([]string, len(x.Filters))
+			for i, f := range x.Filters {
+				skip[i] = f.describe(x.Table.Columns[f.Ord].Name)
+			}
+			o.Set("row_group_filters", skip)
 		}
-		o.Set("op", "TableScan").Set("table", x.Table.Name).Set("columns", cols)
+	case *IndexScan:
+		o.Set("op", "IndexScan").Set("table", x.Table.Name).Set("index", x.Index.Name).Set("kind", string(x.Index.Kind))
+		o.Set("columns", tableColumns(x.Table, x.Ords))
+		if x.Cond != nil {
+			o.Set("condition", plan.Display(x.Cond))
+		}
+		lookup := "range"
+		if x.Point {
+			lookup = "point"
+		}
+		o.Set("lookup", lookup)
 	case *Values:
 		o.Set("op", "Values").Set("rows", len(x.Rows))
 	case *Filter:
