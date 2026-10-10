@@ -29,12 +29,22 @@
   (case (:op node)
     :filter [(:predicate node)]
     :lookup-scan (concat (map :expr (:keys node)) (map :probe (:keys node)) [(:residual node)])
-    :hash-join (concat (map :expr (:left-keys node)) (map :expr (:right-keys node)) [(:residual node)])
-    :nested-loop-join [(:condition node)]
+    (:hash-join :merge-join) (concat (map :expr (:left-keys node)) (map :expr (:right-keys node))
+                                     [(:residual node)])
+    :nested-loop-join [(:key-condition node) (:condition node)]
     :hash-aggregate (concat (:group-keys node) (keep :arg (:aggregates node)))
     :project (:exprs node)
-    :limit [(:limit node) (:offset node)]
+    (:limit :top-n) [(:limit node) (:offset node)]
     []))
+
+(defn- join-keys [node]
+  (mapv (fn [l r] (str (b/->sql (:expr l)) " = " (b/->sql (:expr r))))
+        (:left-keys node) (:right-keys node)))
+
+(defn- sort-keys [node]
+  (mapv (fn [k] (str "#" (:index k) (if (:desc? k) " DESC" " ASC")
+                     (if (:nulls-first? k) " NULLS FIRST" " NULLS LAST")))
+        (:keys node)))
 
 (defn- props
   [node]
@@ -58,10 +68,13 @@
     :filter {"op" "Filter" "predicate" (b/->sql (:predicate node))}
     :hash-join (cond-> {"op" "HashJoin" "join_type" (join-type (:join-type node))
                         "build" (name (or (:build node) :right))
-                        "keys" (mapv (fn [l r] (str (b/->sql (:expr l)) " = " (b/->sql (:expr r))))
-                                     (:left-keys node) (:right-keys node))}
+                        "keys" (join-keys node)}
                  (:residual node) (assoc "residual" (b/->sql (:residual node))))
+    :merge-join (cond-> {"op" "MergeJoin" "join_type" (join-type (:join-type node))
+                         "keys" (join-keys node)}
+                  (:residual node) (assoc "residual" (b/->sql (:residual node))))
     :nested-loop-join (cond-> {"op" "NestedLoopJoin" "join_type" (join-type (:join-type node))}
+                        (:key-condition node) (assoc "keys" (b/->sql (:key-condition node)))
                         (:condition node) (assoc "condition" (b/->sql (:condition node))))
     :hash-aggregate {"op" "Aggregate" "algorithm" "hash"
                      "group_by" (mapv b/->sql (:group-keys node))
@@ -69,9 +82,10 @@
     :project {"op" "Project" "columns" (vec (:names node))
               "exprs" (mapv b/->sql (:exprs node))}
     :distinct {"op" "Distinct"}
-    :sort {"op" "Sort" "keys" (mapv (fn [k] (str "#" (:index k) (if (:desc? k) " DESC" " ASC")
-                                                  (if (:nulls-first? k) " NULLS FIRST" " NULLS LAST")))
-                                    (:keys node))}
+    :sort {"op" "Sort" "keys" (sort-keys node)}
+    :top-n (cond-> {"op" "TopN" "keys" (sort-keys node) "limit" (b/->sql (:limit node))}
+             (:offset node) (assoc "offset" (b/->sql (:offset node))))
+    :gather {"op" "Gather"}
     :limit (cond-> {"op" "Limit"}
              (:limit node) (assoc "limit" (b/->sql (:limit node)))
              (:offset node) (assoc "offset" (b/->sql (:offset node))))))
@@ -79,7 +93,7 @@
 (defn- children [node]
   (case (:op node)
     :lookup-scan [(assoc node :op :table-scan)]
-    (:hash-join :nested-loop-join) [(:left node) (:right node)]
+    (:hash-join :merge-join :nested-loop-join) [(:left node) (:right node)]
     (if (:input node) [(:input node)] [])))
 
 (defn plan->json
@@ -88,6 +102,7 @@
   [node]
   (let [subs (subplans (node-exprs node))]
     (cond-> (assoc (props node) "children" (into (mapv plan->json (children node)) subs))
+      (:partitions node) (assoc "partitions" (:partitions node))
       (and (:columns node) (not (#{:table-scan :index-scan} (:op node))))
       (assoc "output" (mapv (fn [c] (str (:name c) " " (t/type-name (:type c))))
                             (filter map? (:columns node)))))))

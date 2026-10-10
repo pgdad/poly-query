@@ -222,7 +222,8 @@
                          (let [x (f row)]
                            (when (some? x) (.append sb (v/value->string t x)))))
                        (.toString sb))))
-        "COALESCE" (fn [row] (some (fn [f] (f row)) arg-fns))
+        "COALESCE" (fn [row] (reduce (fn [_ f] (let [x (f row)] (when (some? x) (reduced x))))
+                                     nil arg-fns))
         "NULLIF" (let [cmp (v/comparator-fn (:cmp-type e) t1 t2)]
                    (if (= :null t1)
                      (constantly nil)

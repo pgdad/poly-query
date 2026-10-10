@@ -28,7 +28,8 @@
    "phase2" "sql.groupby" "sql.join" "sql.functions" "sql.subquery" "sql.cte"
    "sql.correlated_subquery"
    "phase3" "storage.pqcf" "storage.mmap" "index.hash" "index.btree"
-   "phase4" "http.streaming"])
+   "phase4" "http.streaming"
+   "phase5" "exec.row" "exec.vectorized" "exec.parallel" "join.hash" "join.merge" "join.nested_loop"])
 
 (defn version-info []
   {"ok" true
@@ -159,7 +160,7 @@
 
 (def ^:private enum-options
   {"result" #{"rows" "count"}
-   "mode" #{"auto" "row"}
+   "mode" #{"auto" "row" "vectorized"}
    "join" #{"auto" "hash" "merge" "nested_loop"}})
 
 (defn- query-options [opts]
@@ -182,7 +183,9 @@
    :count-only? (= "count" (get opts "result"))
    :optimize (get opts "optimize" true)
    :use-indexes (get opts "use_indexes" true)
-   :join (get opts "join" "auto")})
+   :join (get opts "join" "auto")
+   :mode (get opts "mode" "auto")
+   :threads (get opts "threads")})
 
 (defn- engine-options
   "Engine options of a query/explain request. A server controlling the query
@@ -191,6 +194,7 @@
   [{:keys [config query-control]} req]
   (merge (query-options (or (field req "options" map? "an object" false) {}))
          {:test-functions? (:test-functions? config)
+          :default-threads (:threads config)
           :max-join-rows (:max-join-rows (:limits config))
           :memory-budget-bytes (* 1024 1024 (long (:max-query-memory-mb (:limits config))))}
          query-control))
