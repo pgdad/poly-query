@@ -17,7 +17,9 @@
  *    scalar compares for the last 1..3 rows, then bzhi to len bits; nothing
  *    beyond the last element is ever loaded.
  *  - filter_i64 emits indices adaptively per 64-row block: sparse masks via
- *    tzcnt/blsr; dense masks (>= 16 hits) via an 8-row "compress" step:
+ *    tzcnt/blsr only for partial blocks / empty blocks; every full block with
+ *    a hit uses an 8-row "compress" step (branch-free, so its cost does not
+ *    depend on selectivity; measured flattest vs. thresholds 2..16):
  *    pdep/imul/pext turn the 8-bit mask into packed byte positions, which are
  *    widened (vpmovzxbd), offset by the row base and stored as 8 dwords; the
  *    output pointer then advances by popcnt. The 32-byte store never passes
@@ -279,7 +281,7 @@ vop_inv:
  * rbp = output ptr; (%rsp) = output start. ymm8/9 = bcast a/b,
  * ymm4 = row-base dwords and ymm5 = bcast(8) for the compress step.
  * ---------------------------------------------------------------------- */
-#define DENSE_MIN 16
+#define DENSE_MIN 1
 
 .macro PRED_DRIVER mode
         cmp     $6, %ecx
