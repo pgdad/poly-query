@@ -17,7 +17,10 @@
                  :in-agg   — inside an aggregate argument
     :agg-error   message used when an aggregate appears in :plain mode
     :aggs        volatile vector of aggregate specs (post-agg mode)
-    :group-keys  bound GROUP BY expressions (post-agg mode)"
+    :group-keys  bound GROUP BY expressions (post-agg mode)
+
+  Constant arguments (ROUND digits, DATE_TRUNC/DATE_DIFF units) are folded
+  during validation with the expression compiler (polyquery.exec.expr)."
   (:require [clojure.string :as str]
             [polyquery.errors :as err]
             [polyquery.exec.context :as ctx]
