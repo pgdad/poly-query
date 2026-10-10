@@ -32,6 +32,21 @@ public sealed interface LogicalPlan {
         }
     }
 
+    enum JoinKind { INNER, LEFT, CROSS }
+
+    /**
+     * Join of two inputs; output rows are the left columns followed by the right columns.
+     * {@code condition} (null for CROSS) is evaluated over such a combined row.
+     */
+    record Join(LogicalPlan left, LogicalPlan right, JoinKind kind, BoundExpr condition) implements LogicalPlan {
+        @Override
+        public List<ColumnSchema> schema() {
+            List<ColumnSchema> out = new ArrayList<>(left.schema());
+            out.addAll(right.schema());
+            return out;
+        }
+    }
+
     /** Output row: group keys followed by aggregate results. */
     record Aggregate(LogicalPlan input, List<BoundExpr> groupKeys, List<AggregateCall> aggregates)
             implements LogicalPlan {
@@ -56,6 +71,14 @@ public sealed interface LogicalPlan {
                 out.add(new ColumnSchema(names.get(i), expressions.get(i).type()));
             }
             return out;
+        }
+    }
+
+    /** Removes duplicate rows (NULLs equal). */
+    record Distinct(LogicalPlan input) implements LogicalPlan {
+        @Override
+        public List<ColumnSchema> schema() {
+            return input.schema();
         }
     }
 

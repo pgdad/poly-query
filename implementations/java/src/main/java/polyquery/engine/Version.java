@@ -11,7 +11,8 @@ public final class Version {
     public static final int PROTOCOL_VERSION = 1;
     public static final String SPEC_VERSION = "1.0.0";
     public static final List<String> CAPABILITIES = List.of(
-            "phase1", "ingest.csv", "ingest.json", "ingest.jsonl", "sql.basic", "test.functions");
+            "phase1", "ingest.csv", "ingest.json", "ingest.jsonl", "sql.basic", "test.functions",
+            "phase2", "sql.groupby", "sql.join", "sql.functions", "sql.subquery", "sql.cte", "sql.correlated_subquery");
 
     private Version() {
     }

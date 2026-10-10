@@ -1,11 +1,14 @@
 package polyquery.sql.analyzer;
 
-import polyquery.common.Names;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import polyquery.common.ErrorCode;
+import polyquery.common.Names;
 import polyquery.common.PolyQueryException;
 import polyquery.plan.BoundExpr;
+import polyquery.plan.BoundExprs;
 import polyquery.plan.LogicalPlan;
 import polyquery.plan.SortKey;
 import polyquery.sql.ast.Expr;
@@ -13,13 +16,42 @@ import polyquery.sql.ast.Query;
 import polyquery.storage.Catalog;
 import polyquery.storage.ColumnSchema;
 import polyquery.storage.Table;
-import polyquery.types.DataType;
 import polyquery.types.TypeKind;
 
-/** Semantic analysis of a query: name resolution, typing and clause validation (semantics.md). */
+/**
+ * Semantic analysis (semantics.md): name resolution over nested scopes, typing, aggregation
+ * and ORDER BY validation. Each query level is bound into a {@link BoundQuery}, which
+ * {@link LogicalPlanner} turns into a logical plan; nested levels (derived tables, CTEs,
+ * subqueries) are analyzed recursively.
+ */
 public final class Analyzer {
+    /** An analyzed and planned query: its plan, visible output columns and correlated references. */
+    public record PlannedQuery(LogicalPlan plan, List<ColumnSchema> columns, List<BoundExpr.OuterRef> externalRefs) {
+    }
+
+    private record CteDef(LogicalPlan plan, List<ColumnSchema> columns, List<BoundExpr.OuterRef> externalRefs) {
+    }
+
+    /** CTEs visible at some point of the query, innermost WITH first. */
+    private record CteEnv(CteEnv parent, Map<String, CteDef> defs) {
+        CteDef find(String name) {
+            for (CteEnv e = this; e != null; e = e.parent) {
+                CteDef d = e.defs.get(Names.key(name));
+                if (d != null) {
+                    return d;
+                }
+            }
+            return null;
+        }
+    }
+
+    /** One select-list entry after {@code *} expansion. */
+    private record SelectEntry(Expr expr, String alias, BoundExpr.ColumnRef star) {
+    }
+
     private final Catalog catalog;
     private final FunctionRegistry functions;
+    private int nextFrame;
 
     public Analyzer(Catalog catalog, FunctionRegistry functions) {
         this.catalog = catalog;
@@ -30,79 +62,160 @@ public final class Analyzer {
         return PolyQueryException.of(ErrorCode.SEMANTIC_ERROR, fmt, args);
     }
 
-    private static PolyQueryException unsupported(String feature) {
-        return PolyQueryException.of(ErrorCode.UNSUPPORTED, "%s is not supported by this engine", feature);
+    /** Analyzes a top-level query and returns its logical plan. */
+    public LogicalPlan analyze(Query q) {
+        return planQuery(q, null, false, null).plan();
     }
 
-    public BoundQuery analyze(Query q) {
-        if (!q.with().isEmpty()) {
-            throw unsupported("WITH");
+    private PlannedQuery planQuery(Query q, Scope parent, boolean barrier, CteEnv env) {
+        Scope scope = new Scope(parent, barrier, nextFrame++);
+        CteEnv inner = bindWith(q.with(), scope, env);
+        BoundQuery bound = bindQuery(q, scope, inner);
+        List<ColumnSchema> columns = new ArrayList<>();
+        for (int i = 0; i < bound.visibleCount(); i++) {
+            columns.add(new ColumnSchema(bound.names().get(i), bound.projections().get(i).type()));
         }
-        Query.Select sel = q.select();
-        if (sel.distinct()) {
-            throw unsupported("SELECT DISTINCT");
-        }
-        if (!sel.groupBy().isEmpty()) {
-            throw unsupported("GROUP BY");
-        }
-        if (sel.having() != null) {
-            throw unsupported("HAVING");
-        }
+        return new PlannedQuery(LogicalPlanner.plan(bound), columns, scope.externalRefs());
+    }
 
-        // FROM
-        Scope scope = Scope.empty();
-        LogicalPlan source;
-        if (sel.from() == null) {
-            source = new LogicalPlan.SingleRow();
-        } else if (sel.from() instanceof Query.TableRef ref) {
-            Table table = catalog.find(ref.name());
-            if (table == null) {
-                throw semantic("unknown table '%s'", ref.name());
+    private ExpressionBinder.SubqueryPlanner subqueryPlanner(CteEnv env) {
+        return (q, parent) -> planQuery(q, parent, false, env);
+    }
+
+    private ExpressionBinder binder(Scope scope, AggregateCollector aggs, String clause, CteEnv env) {
+        return new ExpressionBinder(scope, functions, aggs, clause, subqueryPlanner(env));
+    }
+
+    // ---------------------------------------------------------------- WITH
+
+    private CteEnv bindWith(List<Query.Cte> ctes, Scope scope, CteEnv env) {
+        if (ctes.isEmpty()) {
+            return env;
+        }
+        CteEnv out = new CteEnv(env, new HashMap<>());
+        for (Query.Cte cte : ctes) {
+            String key = Names.key(cte.name());
+            if (out.defs().containsKey(key)) {
+                throw semantic("duplicate CTE name '%s'", cte.name());
             }
-            String rangeName = ref.alias() != null ? ref.alias() : ref.name();
-            scope.add(rangeName, table.columns());
-            source = new LogicalPlan.Scan(table, rangeName);
-        } else if (sel.from() instanceof Query.Join) {
-            throw unsupported("JOIN");
-        } else {
-            throw unsupported("derived tables");
+            // The CTE body sees earlier CTEs of this WITH (already in 'out'), but not itself.
+            PlannedQuery pq = planQuery(cte.query(), scope, true, out);
+            List<ColumnSchema> columns = pq.columns();
+            if (cte.columnNames() != null) {
+                if (cte.columnNames().size() != columns.size()) {
+                    throw semantic("CTE '%s' has %d columns but %d column names were given", cte.name(),
+                            columns.size(), cte.columnNames().size());
+                }
+                List<ColumnSchema> renamed = new ArrayList<>();
+                for (int i = 0; i < columns.size(); i++) {
+                    renamed.add(new ColumnSchema(cte.columnNames().get(i), columns.get(i).type()));
+                }
+                columns = renamed;
+            }
+            out.defs().put(key, new CteDef(pq.plan(), List.copyOf(columns), pq.externalRefs()));
         }
+        return out;
+    }
 
-        // WHERE
+    // ---------------------------------------------------------------- FROM
+
+    private LogicalPlan bindFrom(Query.FromItem item, Scope scope, CteEnv env) {
+        return switch (item) {
+            case Query.TableRef ref -> {
+                String rangeName = ref.alias() != null ? ref.alias() : ref.name();
+                CteDef cte = env == null ? null : env.find(ref.name());
+                if (cte != null) {
+                    scope.add(rangeName, cte.columns());
+                    for (BoundExpr.OuterRef r : cte.externalRefs()) {
+                        scope.markExternal(r);
+                    }
+                    yield cte.plan();
+                }
+                Table table = catalog.find(ref.name());
+                if (table == null) {
+                    throw semantic("unknown table '%s'", ref.name());
+                }
+                scope.add(rangeName, table.columns());
+                yield new LogicalPlan.Scan(table, rangeName);
+            }
+            case Query.DerivedTable dt -> {
+                PlannedQuery pq = planQuery(dt.query(), scope, true, env);
+                scope.add(dt.alias(), pq.columns());
+                yield pq.plan();
+            }
+            case Query.Join join -> bindJoin(join, scope, env);
+        };
+    }
+
+    private LogicalPlan bindJoin(Query.Join join, Scope scope, CteEnv env) {
+        int start = scope.width();
+        LogicalPlan left = bindFrom(join.left(), scope, env);
+        LogicalPlan right = bindFrom(join.right(), scope, env);
+        if (join.kind() == Query.JoinKind.CROSS) {
+            return new LogicalPlan.Join(left, right, LogicalPlan.JoinKind.CROSS, null);
+        }
+        BoundExpr cond = binder(scope, null, "ON", env).bind(join.condition());
+        requireCondition(cond, "ON");
+        if (start > 0) {
+            // A parenthesized join nested on the right: its rows start at 'start' in the scope layout.
+            if (BoundExprs.columnRange(cond)[0] < start) {
+                throw PolyQueryException.of(ErrorCode.UNSUPPORTED,
+                        "a nested join condition cannot reference tables outside the parenthesized join");
+            }
+            if (BoundExprs.dependsOnFrame(cond, scope.frame())) {
+                throw PolyQueryException.of(ErrorCode.UNSUPPORTED,
+                        "correlated subqueries in a nested join condition are not supported");
+            }
+            cond = BoundExprs.shiftColumns(cond, -start);
+        }
+        LogicalPlan.JoinKind kind = join.kind() == Query.JoinKind.LEFT ? LogicalPlan.JoinKind.LEFT
+                : LogicalPlan.JoinKind.INNER;
+        return new LogicalPlan.Join(left, right, kind, cond);
+    }
+
+    // ---------------------------------------------------------------- query level
+
+    private BoundQuery bindQuery(Query q, Scope scope, CteEnv env) {
+        Query.Select sel = q.select();
+        LogicalPlan source = sel.from() == null ? new LogicalPlan.SingleRow() : bindFrom(sel.from(), scope, env);
+
         BoundExpr where = null;
         if (sel.where() != null) {
-            where = new ExpressionBinder(scope, functions, null, "WHERE").bind(sel.where());
+            where = binder(scope, null, "WHERE", env).bind(sel.where());
             requireCondition(where, "WHERE");
         }
 
-        boolean aggregated = containsAggregate(sel, q.orderBy());
-        AggregateCollector aggs = aggregated ? new AggregateCollector(0) : null;
-        ExpressionBinder selectBinder = new ExpressionBinder(scope, functions, aggs, "SELECT");
+        List<SelectEntry> entries = expandSelectList(sel, scope);
+        boolean aggregated = !sel.groupBy().isEmpty() || sel.having() != null || containsAggregate(sel, q.orderBy());
 
-        // SELECT list (with * expansion)
+        List<BoundExpr> keys = new ArrayList<>();
+        for (Expr g : sel.groupBy()) {
+            keys.add(bindGroupKey(g, entries, scope, env));
+        }
+        AggregateCollector aggs = aggregated ? new AggregateCollector(keys.size()) : null;
+        ExpressionBinder selectBinder = binder(scope, aggs, "SELECT", env);
+
         List<BoundExpr> projections = new ArrayList<>();
         List<String> names = new ArrayList<>();
-        for (Query.SelectItem item : sel.items()) {
-            switch (item) {
-                case Query.Star star -> expandStar(star, scope, projections, names);
-                case Query.ExprItem ei -> {
-                    BoundExpr e = selectBinder.bind(ei.expr());
-                    projections.add(e);
-                    names.add(outputName(ei, e, projections.size()));
-                }
-            }
-        }
-        if (aggregated) {
-            for (BoundExpr e : projections) {
-                checkNoBareColumns(e);
-            }
+        for (SelectEntry entry : entries) {
+            BoundExpr e = entry.star() != null ? entry.star() : selectBinder.bind(entry.expr());
+            names.add(outputName(entry, e, projections.size() + 1));
+            projections.add(aggregated ? finishAggregated(e, keys, scope) : e);
         }
         int visible = projections.size();
 
-        // ORDER BY
+        BoundExpr having = null;
+        if (sel.having() != null) {
+            having = binder(scope, aggs, "HAVING", env).bind(sel.having());
+            requireCondition(having, "HAVING");
+            having = finishAggregated(having, keys, scope);
+        }
+
+        ExpressionBinder orderBinder = binder(scope, aggs, "ORDER BY", env);
         List<SortKey> orderBy = new ArrayList<>();
         for (Query.OrderItem item : q.orderBy()) {
-            int column = resolveOrderItem(item.expr(), projections, names, visible, selectBinder, aggregated);
+            int column = resolveOrderItem(item.expr(), projections, names, visible, orderBinder, keys, scope,
+                    aggregated, sel.distinct());
             boolean nullsFirst = item.nullsFirst() != null ? item.nullsFirst() : !item.descending();
             orderBy.add(new SortKey(column, item.descending(), nullsFirst));
         }
@@ -110,148 +223,120 @@ public final class Analyzer {
         BoundExpr limit = q.limit() == null ? null : constantInt(q.limit(), "LIMIT");
         BoundExpr offset = q.offset() == null ? null : constantInt(q.offset(), "OFFSET");
 
-        return new BoundQuery(source, where, aggregated, List.of(),
-                aggs == null ? List.of() : List.copyOf(aggs.calls()), null,
-                projections, names, visible, orderBy, limit, offset);
+        return new BoundQuery(source, where, aggregated, List.copyOf(keys),
+                aggs == null ? List.of() : List.copyOf(aggs.calls()), having, projections, names, visible,
+                sel.distinct(), orderBy, limit, offset);
     }
 
-    private static void requireCondition(BoundExpr e, String clause) {
+    static void requireCondition(BoundExpr e, String clause) {
         TypeKind k = e.type().kind();
         if (k != TypeKind.BOOLEAN && k != TypeKind.NULL) {
             throw PolyQueryException.of(ErrorCode.TYPE_ERROR, "%s condition must be BOOLEAN, got %s", clause, e.type());
         }
     }
 
-    private static void expandStar(Query.Star star, Scope scope, List<BoundExpr> projections, List<String> names) {
-        if (scope.isEmpty()) {
-            throw semantic("SELECT * requires a FROM clause");
-        }
-        List<Scope.RangeVar> vars;
-        if (star.qualifier() != null) {
-            Scope.RangeVar rv = scope.find(star.qualifier());
-            if (rv == null) {
-                throw semantic("unknown table or alias '%s'", star.qualifier());
+    private static List<SelectEntry> expandSelectList(Query.Select sel, Scope scope) {
+        List<SelectEntry> entries = new ArrayList<>();
+        for (Query.SelectItem item : sel.items()) {
+            switch (item) {
+                case Query.ExprItem ei -> entries.add(new SelectEntry(ei.expr(), ei.alias(), null));
+                case Query.Star star -> {
+                    if (scope.isEmpty()) {
+                        throw semantic("SELECT * requires a FROM clause");
+                    }
+                    List<Scope.RangeVar> vars;
+                    if (star.qualifier() != null) {
+                        Scope.RangeVar rv = scope.find(star.qualifier());
+                        if (rv == null) {
+                            throw semantic("unknown table or alias '%s'", star.qualifier());
+                        }
+                        vars = List.of(rv);
+                    } else {
+                        vars = scope.rangeVars();
+                    }
+                    for (Scope.RangeVar rv : vars) {
+                        for (int i = 0; i < rv.columns().size(); i++) {
+                            ColumnSchema c = rv.columns().get(i);
+                            entries.add(new SelectEntry(null, null,
+                                    new BoundExpr.ColumnRef(rv.offset() + i, c.type(), c.name())));
+                        }
+                    }
+                }
             }
-            vars = List.of(rv);
-        } else {
-            vars = scope.rangeVars();
         }
-        for (Scope.RangeVar rv : vars) {
-            for (int i = 0; i < rv.columns().size(); i++) {
-                ColumnSchema c = rv.columns().get(i);
-                projections.add(new BoundExpr.ColumnRef(rv.offset() + i, c.type(), c.name()));
-                names.add(c.name());
-            }
-        }
+        return entries;
     }
 
-    private static String outputName(Query.ExprItem item, BoundExpr bound, int position) {
-        if (item.alias() != null) {
-            return item.alias();
+    private static String outputName(SelectEntry entry, BoundExpr bound, int position) {
+        if (entry.alias() != null) {
+            return entry.alias();
         }
-        if (item.expr() instanceof Expr.ColumnRef && bound instanceof BoundExpr.ColumnRef ref) {
-            return ref.name();
+        if (entry.star() != null) {
+            return entry.star().name();
+        }
+        if (entry.expr() instanceof Expr.ColumnRef) {
+            if (bound instanceof BoundExpr.ColumnRef ref) {
+                return ref.name();
+            }
+            if (bound instanceof BoundExpr.OuterRef ref) {
+                return ref.name();
+            }
         }
         return "_col" + position;
     }
 
-    /** In an aggregated query without GROUP BY no input column may appear outside aggregates. */
-    private static void checkNoBareColumns(BoundExpr e) {
-        if (containsColumnRef(e)) {
-            throw semantic("column must appear in GROUP BY or be used in an aggregate function");
-        }
-    }
+    // ---------------------------------------------------------------- aggregation
 
-    private static boolean containsColumnRef(BoundExpr e) {
-        return switch (e) {
-            case BoundExpr.ColumnRef c -> true;
-            case BoundExpr.Literal l -> false;
-            case BoundExpr.AggregateRef a -> false;
-            case BoundExpr.Cast c -> containsColumnRef(c.input());
-            case BoundExpr.Negate n -> containsColumnRef(n.input());
-            case BoundExpr.Not n -> containsColumnRef(n.input());
-            case BoundExpr.IsNull n -> containsColumnRef(n.input());
-            case BoundExpr.Arithmetic a -> containsColumnRef(a.left()) || containsColumnRef(a.right());
-            case BoundExpr.Comparison c -> containsColumnRef(c.left()) || containsColumnRef(c.right());
-            case BoundExpr.And a -> containsColumnRef(a.left()) || containsColumnRef(a.right());
-            case BoundExpr.Or o -> containsColumnRef(o.left()) || containsColumnRef(o.right());
-            case BoundExpr.Concat c -> containsColumnRef(c.left()) || containsColumnRef(c.right());
-            case BoundExpr.Function f -> f.args().stream().anyMatch(Analyzer::containsColumnRef);
-        };
-    }
-
-    private int resolveOrderItem(Expr expr, List<BoundExpr> projections, List<String> names, int visible,
-                                 ExpressionBinder binder, boolean aggregated) {
-        if (expr instanceof Expr.NumberLiteral n && n.text().chars().allMatch(Character::isDigit)) {
-            long k;
-            try {
-                k = Long.parseLong(n.text());
-            } catch (NumberFormatException e) {
-                k = -1;
+    private BoundExpr bindGroupKey(Expr g, List<SelectEntry> entries, Scope scope, CteEnv env) {
+        ExpressionBinder b = binder(scope, null, "GROUP BY", env);
+        Integer ordinal = ordinal(g);
+        if (ordinal != null) {
+            if (ordinal < 1 || ordinal > entries.size()) {
+                throw semantic("GROUP BY position %d is out of range", ordinal);
             }
-            if (k < 1 || k > visible) {
-                throw semantic("ORDER BY position %s is out of range", n.text());
-            }
-            return (int) (k - 1);
+            SelectEntry entry = entries.get(ordinal - 1);
+            return entry.star() != null ? entry.star() : b.bind(entry.expr());
         }
-        if (expr instanceof Expr.ColumnRef c && c.qualifier() == null) {
-            int match = -1;
-            for (int i = 0; i < visible; i++) {
-                if (Names.equal(names.get(i), c.name())) {
-                    if (match >= 0 && !projections.get(match).equals(projections.get(i))) {
-                        throw semantic("ORDER BY name '%s' is ambiguous", c.name());
-                    }
-                    if (match < 0) {
-                        match = i;
-                    }
+        if (g instanceof Expr.ColumnRef c && c.qualifier() == null && scope.resolveLocal(null, c.name()) == null) {
+            for (SelectEntry entry : entries) {
+                if (entry.alias() != null && Names.equal(entry.alias(), c.name())) {
+                    return b.bind(entry.expr());
                 }
             }
-            if (match >= 0) {
-                return match;
+        }
+        return b.bind(g);
+    }
+
+    /** Positive or zero integer literal used as an ordinal, else null. */
+    private static Integer ordinal(Expr e) {
+        if (e instanceof Expr.NumberLiteral n && n.text().chars().allMatch(Character::isDigit)) {
+            try {
+                return Integer.parseInt(n.text());
+            } catch (NumberFormatException ex) {
+                return Integer.MAX_VALUE;
             }
         }
-        BoundExpr e = binder.bind(expr);
-        if (aggregated) {
-            checkNoBareColumns(e);
-        }
-        int existing = projections.indexOf(e);
-        if (existing >= 0) {
-            return existing;
-        }
-        projections.add(e);
-        return projections.size() - 1;
+        return null;
     }
 
-    private BoundExpr constantInt(Expr expr, String clause) {
-        BoundExpr e = new ExpressionBinder(Scope.empty(), functions, null, clause).bind(expr);
-        if (!isConstant(e)) {
-            throw semantic("%s requires a constant expression", clause);
+    /**
+     * Rewrites an expression of an aggregated query over the aggregation output: GROUP BY
+     * expressions become key slots; any remaining input column is a grouping violation.
+     */
+    private static BoundExpr finishAggregated(BoundExpr e, List<BoundExpr> keys, Scope scope) {
+        BoundExpr r = BoundExprs.rewrite(e, x -> {
+            int i = keys.indexOf(x);
+            return i >= 0 ? new BoundExpr.AggregateRef(i, x.type()) : null;
+        });
+        if (BoundExprs.containsColumnRef(r)) {
+            throw semantic("column must appear in GROUP BY or be used in an aggregate function");
         }
-        if (e.type().kind() != TypeKind.INT64 && !e.type().isNull()) {
-            throw PolyQueryException.of(ErrorCode.TYPE_ERROR, "%s requires an INT64 expression, got %s", clause, e.type());
+        if (BoundExprs.dependsOnFrame(r, scope.frame())) {
+            throw PolyQueryException.of(ErrorCode.UNSUPPORTED,
+                    "correlated subqueries over grouped rows are not supported");
         }
-        return e;
+        return r;
     }
-
-    private static boolean isConstant(BoundExpr e) {
-        return switch (e) {
-            case BoundExpr.ColumnRef c -> false;
-            case BoundExpr.AggregateRef a -> false;
-            case BoundExpr.Function f -> false;
-            case BoundExpr.Literal l -> true;
-            case BoundExpr.Cast c -> isConstant(c.input());
-            case BoundExpr.Negate n -> isConstant(n.input());
-            case BoundExpr.Not n -> isConstant(n.input());
-            case BoundExpr.IsNull n -> isConstant(n.input());
-            case BoundExpr.Arithmetic a -> isConstant(a.left()) && isConstant(a.right());
-            case BoundExpr.Comparison c -> isConstant(c.left()) && isConstant(c.right());
-            case BoundExpr.And a -> isConstant(a.left()) && isConstant(a.right());
-            case BoundExpr.Or o -> isConstant(o.left()) && isConstant(o.right());
-            case BoundExpr.Concat c -> isConstant(c.left()) && isConstant(c.right());
-        };
-    }
-
-    // ---------------------------------------------------------------- aggregate detection
 
     private static boolean containsAggregate(Query.Select sel, List<Query.OrderItem> orderBy) {
         for (Query.SelectItem item : sel.items()) {
@@ -287,13 +372,58 @@ public final class Analyzer {
         };
     }
 
-    /** Output schema helper for callers. */
-    public static List<ColumnSchema> outputSchema(BoundQuery q) {
-        List<ColumnSchema> out = new ArrayList<>();
-        for (int i = 0; i < q.visibleCount(); i++) {
-            DataType t = q.projections().get(i).type();
-            out.add(new ColumnSchema(q.names().get(i), t));
+    // ---------------------------------------------------------------- ORDER BY / LIMIT
+
+    private static int resolveOrderItem(Expr expr, List<BoundExpr> projections, List<String> names, int visible,
+                                        ExpressionBinder binder, List<BoundExpr> keys, Scope scope,
+                                        boolean aggregated, boolean distinct) {
+        Integer ordinal = ordinal(expr);
+        if (ordinal != null) {
+            if (ordinal < 1 || ordinal > visible) {
+                throw semantic("ORDER BY position %d is out of range", ordinal);
+            }
+            return ordinal - 1;
         }
-        return out;
+        if (expr instanceof Expr.ColumnRef c && c.qualifier() == null) {
+            int match = -1;
+            for (int i = 0; i < visible; i++) {
+                if (Names.equal(names.get(i), c.name())) {
+                    if (match >= 0 && !projections.get(match).equals(projections.get(i))) {
+                        throw semantic("ORDER BY name '%s' is ambiguous", c.name());
+                    }
+                    if (match < 0) {
+                        match = i;
+                    }
+                }
+            }
+            if (match >= 0) {
+                return match;
+            }
+        }
+        BoundExpr e = binder.bind(expr);
+        if (aggregated) {
+            e = finishAggregated(e, keys, scope);
+        }
+        int existing = projections.indexOf(e);
+        if (distinct && (existing < 0 || existing >= visible)) {
+            throw semantic("ORDER BY expressions must appear in the select list of a SELECT DISTINCT");
+        }
+        if (existing >= 0) {
+            return existing;
+        }
+        projections.add(e);
+        return projections.size() - 1;
+    }
+
+    private BoundExpr constantInt(Expr expr, String clause) {
+        BoundExpr e = binder(Scope.empty(), null, clause, null).bind(expr);
+        if (!BoundExprs.isConstant(e)) {
+            throw semantic("%s requires a constant expression", clause);
+        }
+        if (e.type().kind() != TypeKind.INT64 && !e.type().isNull()) {
+            throw PolyQueryException.of(ErrorCode.TYPE_ERROR, "%s requires an INT64 expression, got %s", clause,
+                    e.type());
+        }
+        return e;
     }
 }

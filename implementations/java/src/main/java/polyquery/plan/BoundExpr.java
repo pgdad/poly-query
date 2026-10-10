@@ -14,6 +14,20 @@ public sealed interface BoundExpr {
     record ColumnRef(int index, DataType type, String name) implements BoundExpr {
     }
 
+    /**
+     * Correlated reference to slot {@code index} of the current row of an enclosing query
+     * level, identified by its correlation {@code frame}.
+     */
+    record OuterRef(int frame, int index, DataType type, String name) implements BoundExpr {
+    }
+
+    /**
+     * The value of the operand shared by the comparisons of an {@link InList}, {@link Between},
+     * {@link Case} (simple form), {@link NullIf} or the subquery values of an {@link InSubquery}.
+     */
+    record Placeholder(DataType type) implements BoundExpr {
+    }
+
     record Literal(Object value, DataType type) implements BoundExpr {
     }
 
@@ -74,11 +88,81 @@ public sealed interface BoundExpr {
         }
     }
 
+    /** {@code operand [NOT] LIKE pattern}; both STRING. */
+    record Like(BoundExpr operand, BoundExpr pattern, boolean negated) implements BoundExpr {
+        @Override
+        public DataType type() {
+            return DataType.BOOLEAN;
+        }
+    }
+
+    /**
+     * {@code operand [NOT] IN (items)}: {@code comparisons} are equality comparisons of a
+     * {@link Placeholder} (the operand, evaluated once) with each item.
+     */
+    record InList(BoundExpr operand, List<BoundExpr> comparisons, boolean negated) implements BoundExpr {
+        @Override
+        public DataType type() {
+            return DataType.BOOLEAN;
+        }
+    }
+
+    /**
+     * {@code operand [NOT] BETWEEN low AND high} with the operand evaluated once: {@code lower} is
+     * {@code placeholder >= low}, {@code upper} is {@code placeholder <= high}.
+     */
+    record Between(BoundExpr operand, BoundExpr lower, BoundExpr upper, boolean negated) implements BoundExpr {
+        @Override
+        public DataType type() {
+            return DataType.BOOLEAN;
+        }
+    }
+
+    /**
+     * CASE expression. For the simple form {@code operand} is non-null and the conditions
+     * compare a {@link Placeholder} with the WHEN values. Results are already cast to {@code type}.
+     */
+    record Case(BoundExpr operand, List<BoundExpr> conditions, List<BoundExpr> results, BoundExpr elseResult,
+                DataType type) implements BoundExpr {
+    }
+
+    /** {@code NULLIF(operand, b)}: {@code equality} compares a {@link Placeholder} with b. */
+    record NullIf(BoundExpr operand, BoundExpr equality) implements BoundExpr {
+        @Override
+        public DataType type() {
+            return operand.type();
+        }
+    }
+
     /** Scalar function call (name upper-case). */
     record Function(String name, List<BoundExpr> args, DataType type) implements BoundExpr {
     }
 
     /** Reference to an aggregate result / group key slot of an aggregation's output row. */
     record AggregateRef(int index, DataType type) implements BoundExpr {
+    }
+
+    /** Scalar subquery: its single output column; NULL for no rows. */
+    record ScalarSubquery(Subquery subquery, DataType type) implements BoundExpr {
+    }
+
+    /** {@code EXISTS (subquery)}. */
+    record Exists(Subquery subquery) implements BoundExpr {
+        @Override
+        public DataType type() {
+            return DataType.BOOLEAN;
+        }
+    }
+
+    /**
+     * {@code operand [NOT] IN (subquery)}. {@code valueCast} converts a subquery value (as a
+     * {@link Placeholder}) to the comparison type of {@code operand}.
+     */
+    record InSubquery(BoundExpr operand, Subquery subquery, BoundExpr valueCast, boolean negated)
+            implements BoundExpr {
+        @Override
+        public DataType type() {
+            return DataType.BOOLEAN;
+        }
     }
 }

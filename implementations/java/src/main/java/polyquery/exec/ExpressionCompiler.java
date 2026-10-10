@@ -1,9 +1,13 @@
 package polyquery.exec;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.function.Function;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.plan.BoundExpr;
+import polyquery.plan.LogicalPlan;
 import polyquery.types.Casts;
 import polyquery.types.DataType;
 import polyquery.types.Decimals;
@@ -13,16 +17,23 @@ import polyquery.types.Values;
 /** Compiles {@link BoundExpr} trees into closures (types.md §4–§6 runtime semantics). */
 public final class ExpressionCompiler {
     private final ExecContext ctx;
+    private final Function<LogicalPlan, Operator> subqueryBuilder;
+    /** Holder of the current shared operand while compiling the comparisons that use it. */
+    private Object[] placeholderCell;
 
-    public ExpressionCompiler(ExecContext ctx) {
+    /**
+     * @param subqueryBuilder builds an executable operator tree for a subquery's logical plan
+     */
+    public ExpressionCompiler(ExecContext ctx, Function<LogicalPlan, Operator> subqueryBuilder) {
         this.ctx = ctx;
+        this.subqueryBuilder = subqueryBuilder;
     }
 
-    private static PolyQueryException overflow() {
+    static PolyQueryException overflow() {
         return new PolyQueryException(ErrorCode.NUMERIC_OVERFLOW, "numeric overflow");
     }
 
-    private static PolyQueryException divisionByZero() {
+    static PolyQueryException divisionByZero() {
         return new PolyQueryException(ErrorCode.DIVISION_BY_ZERO, "division by zero");
     }
 
@@ -36,6 +47,18 @@ public final class ExpressionCompiler {
                 int i = a.index();
                 yield row -> row[i];
             }
+            case BoundExpr.OuterRef o -> {
+                int f = o.frame();
+                int i = o.index();
+                yield row -> ctx.frame(f)[i];
+            }
+            case BoundExpr.Placeholder p -> {
+                Object[] cell = placeholderCell;
+                if (cell == null) {
+                    throw new IllegalStateException("placeholder outside of its operand context");
+                }
+                yield row -> cell[0];
+            }
             case BoundExpr.Literal l -> {
                 Object v = l.value();
                 yield row -> v;
@@ -44,10 +67,7 @@ public final class ExpressionCompiler {
             case BoundExpr.Negate n -> negate(n);
             case BoundExpr.Not n -> {
                 Evaluator in = compile(n.input());
-                yield row -> {
-                    Object v = in.eval(row);
-                    return v == null ? null : !(Boolean) v;
-                };
+                yield row -> not(in.eval(row));
             }
             case BoundExpr.IsNull n -> {
                 Evaluator in = compile(n.input());
@@ -71,7 +91,40 @@ public final class ExpressionCompiler {
             case BoundExpr.Arithmetic a -> arithmetic(a);
             case BoundExpr.Comparison c -> comparison(c);
             case BoundExpr.Function f -> function(f);
+            case BoundExpr.Like l -> like(l);
+            case BoundExpr.InList i -> inList(i);
+            case BoundExpr.Between b -> between(b);
+            case BoundExpr.Case c -> caseExpr(c);
+            case BoundExpr.NullIf n -> nullIf(n);
+            case BoundExpr.ScalarSubquery s -> {
+                SubqueryRunner runner = new SubqueryRunner(s.subquery(), subqueryBuilder, ctx);
+                yield runner::scalar;
+            }
+            case BoundExpr.Exists x -> {
+                SubqueryRunner runner = new SubqueryRunner(x.subquery(), subqueryBuilder, ctx);
+                yield runner::exists;
+            }
+            case BoundExpr.InSubquery i -> inSubquery(i);
         };
+    }
+
+    /** Compiles {@code exprs} that read the shared operand through placeholders. */
+    private Evaluator[] withPlaceholder(Object[] cell, List<BoundExpr> exprs) {
+        Object[] saved = placeholderCell;
+        placeholderCell = cell;
+        try {
+            Evaluator[] out = new Evaluator[exprs.size()];
+            for (int i = 0; i < out.length; i++) {
+                out[i] = compile(exprs.get(i));
+            }
+            return out;
+        } finally {
+            placeholderCell = saved;
+        }
+    }
+
+    private static Object not(Object v) {
+        return v == null ? null : !(Boolean) v;
     }
 
     private Evaluator cast(BoundExpr.Cast c) {
@@ -111,17 +164,18 @@ public final class ExpressionCompiler {
     }
 
     private static Evaluator and(Evaluator l, Evaluator r) {
-        return row -> {
-            Object a = l.eval(row);
-            if (Boolean.FALSE.equals(a)) {
-                return Boolean.FALSE;
-            }
-            Object b = r.eval(row);
-            if (Boolean.FALSE.equals(b)) {
-                return Boolean.FALSE;
-            }
-            return a == null || b == null ? null : Boolean.TRUE;
-        };
+        return row -> and(l.eval(row), r, row);
+    }
+
+    private static Object and(Object a, Evaluator r, Object[] row) {
+        if (Boolean.FALSE.equals(a)) {
+            return Boolean.FALSE;
+        }
+        Object b = r.eval(row);
+        if (Boolean.FALSE.equals(b)) {
+            return Boolean.FALSE;
+        }
+        return a == null || b == null ? null : Boolean.TRUE;
     }
 
     private static Evaluator or(Evaluator l, Evaluator r) {
@@ -256,6 +310,16 @@ public final class ExpressionCompiler {
         int compare(Object a, Object b);
     }
 
+    /** Comparator for operands of the given (comparable) types. */
+    private static Comparer comparer(DataType lt, DataType rt) {
+        if (lt.kind() == TypeKind.DECIMAL && rt.kind() == TypeKind.DECIMAL && lt.scale() != rt.scale()) {
+            int s1 = lt.scale();
+            int s2 = rt.scale();
+            return (a, b) -> Decimals.compare((Long) a, s1, (Long) b, s2);
+        }
+        return (a, b) -> Values.compare(a, b, lt);
+    }
+
     private Evaluator comparison(BoundExpr.Comparison c) {
         Evaluator l = compile(c.left());
         Evaluator r = compile(c.right());
@@ -264,14 +328,7 @@ public final class ExpressionCompiler {
         if (lt.isNull() || rt.isNull()) {
             return row -> null;
         }
-        Comparer cmp;
-        if (lt.kind() == TypeKind.DECIMAL && rt.kind() == TypeKind.DECIMAL && lt.scale() != rt.scale()) {
-            int s1 = lt.scale();
-            int s2 = rt.scale();
-            cmp = (a, b) -> Decimals.compare((Long) a, s1, (Long) b, s2);
-        } else {
-            cmp = (a, b) -> Values.compare(a, b, lt);
-        }
+        Comparer cmp = comparer(lt, rt);
         return switch (c.op()) {
             case EQ -> compareWith(l, r, cmp, x -> x == 0);
             case NEQ -> compareWith(l, r, cmp, x -> x != 0);
@@ -300,49 +357,196 @@ public final class ExpressionCompiler {
         };
     }
 
-    // ---------------------------------------------------------------- functions
+    // ---------------------------------------------------------------- predicates
 
-    private Evaluator function(BoundExpr.Function f) {
-        List<BoundExpr> args = f.args();
-        if (f.name().equals("PQ_SLEEP")) {
-            Evaluator arg = compile(args.get(0));
+    private Evaluator like(BoundExpr.Like l) {
+        Evaluator s = compile(l.operand());
+        boolean neg = l.negated();
+        if (l.pattern() instanceof BoundExpr.Literal lit) {
+            if (lit.value() == null) {
+                return row -> null;
+            }
+            LikeMatcher m = new LikeMatcher((String) lit.value());
             return row -> {
-                Object v = arg.eval(row);
+                Object v = s.eval(row);
+                return v == null ? null : m.matches((String) v) != neg;
+            };
+        }
+        Evaluator p = compile(l.pattern());
+        return new Evaluator() {
+            private String lastPattern;
+            private LikeMatcher matcher;
+
+            @Override
+            public Object eval(Object[] row) {
+                Object v = s.eval(row);
                 if (v == null) {
                     return null;
                 }
-                long ms = (Long) v;
-                if (ms < 0) {
-                    throw new PolyQueryException(ErrorCode.INVALID_ARGUMENT, "PQ_SLEEP requires a non-negative argument");
+                Object pv = p.eval(row);
+                if (pv == null) {
+                    return null;
                 }
-                sleep(ms);
-                return ms;
-            };
-        }
-        throw new PolyQueryException(ErrorCode.UNSUPPORTED, "function " + f.name() + " is not supported");
+                if (!pv.equals(lastPattern)) {
+                    lastPattern = (String) pv;
+                    matcher = new LikeMatcher(lastPattern);
+                }
+                return matcher.matches((String) v) != neg;
+            }
+        };
     }
 
-    /** Sleeps in small slices so that timeouts/cancellation are observed within a few ms. */
-    private void sleep(long ms) {
-        long end = System.nanoTime() + ms * 1_000_000L;
-        while (true) {
-            ctx.checkNow();
-            long left = end - System.nanoTime();
-            if (left <= 0) {
-                return;
-            }
-            // Wake up at most every 5 ms, and just after the deadline if one is near.
-            long untilDeadline = Math.max(ctx.remainingNanos(), 0);
-            long slice = Math.min(left, 5_000_000L);
-            if (untilDeadline < slice) {
-                slice = untilDeadline + 100_000L;
-            }
-            try {
-                Thread.sleep(slice / 1_000_000L, (int) (slice % 1_000_000L));
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new PolyQueryException(ErrorCode.CANCELLED, "query was interrupted");
-            }
+    private Evaluator inList(BoundExpr.InList in) {
+        Evaluator x = compile(in.operand());
+        boolean neg = in.negated();
+        Set<Object> constants = constantSet(in);
+        if (constants != null) {
+            boolean hasNull = constants.remove(null);
+            DataType t = in.operand().type();
+            return row -> {
+                Object v = x.eval(row);
+                if (v == null) {
+                    return null;
+                }
+                if (constants.contains(HashKeys.normalize(v, t))) {
+                    return !neg;
+                }
+                return hasNull ? null : neg;
+            };
         }
+        Object[] cell = new Object[1];
+        Evaluator[] cmps = withPlaceholder(cell, in.comparisons());
+        return row -> {
+            cell[0] = x.eval(row);
+            boolean sawNull = false;
+            for (Evaluator c : cmps) {
+                Object r = c.eval(row);
+                if (Boolean.TRUE.equals(r)) {
+                    return !neg;
+                }
+                sawNull |= r == null;
+            }
+            return sawNull ? null : neg;
+        };
+    }
+
+    /**
+     * Hash set of the list's values if every item is a literal of the operand's own type (no
+     * coercion involved), else null. Contains null if the list contains NULL.
+     */
+    private static Set<Object> constantSet(BoundExpr.InList in) {
+        DataType t = in.operand().type();
+        if (t.isNull()) {
+            return null;
+        }
+        Set<Object> out = new HashSet<>();
+        for (BoundExpr c : in.comparisons()) {
+            if (!(c instanceof BoundExpr.Comparison cmp && cmp.left() instanceof BoundExpr.Placeholder
+                    && cmp.right() instanceof BoundExpr.Literal lit)) {
+                return null;
+            }
+            if (lit.value() == null) {
+                out.add(null);
+                continue;
+            }
+            if (lit.type().kind() != t.kind() || lit.type().scale() != t.scale()) {
+                return null;
+            }
+            out.add(HashKeys.normalize(lit.value(), t));
+        }
+        return out;
+    }
+
+    private Evaluator between(BoundExpr.Between b) {
+        Evaluator x = compile(b.operand());
+        Object[] cell = new Object[1];
+        Evaluator[] bounds = withPlaceholder(cell, List.of(b.lower(), b.upper()));
+        boolean neg = b.negated();
+        return row -> {
+            cell[0] = x.eval(row);
+            Object r = and(bounds[0].eval(row), bounds[1], row);
+            return neg ? not(r) : r;
+        };
+    }
+
+    private Evaluator caseExpr(BoundExpr.Case c) {
+        Evaluator[] results = compileAll(c.results());
+        Evaluator otherwise = c.elseResult() == null ? row -> null : compile(c.elseResult());
+        if (c.operand() == null) {
+            Evaluator[] conds = compileAll(c.conditions());
+            return row -> {
+                for (int i = 0; i < conds.length; i++) {
+                    if (Boolean.TRUE.equals(conds[i].eval(row))) {
+                        return results[i].eval(row);
+                    }
+                }
+                return otherwise.eval(row);
+            };
+        }
+        Evaluator x = compile(c.operand());
+        Object[] cell = new Object[1];
+        Evaluator[] conds = withPlaceholder(cell, c.conditions());
+        return row -> {
+            cell[0] = x.eval(row);
+            for (int i = 0; i < conds.length; i++) {
+                if (Boolean.TRUE.equals(conds[i].eval(row))) {
+                    return results[i].eval(row);
+                }
+            }
+            return otherwise.eval(row);
+        };
+    }
+
+    private Evaluator nullIf(BoundExpr.NullIf n) {
+        Evaluator a = compile(n.operand());
+        Object[] cell = new Object[1];
+        Evaluator eq = withPlaceholder(cell, List.of(n.equality()))[0];
+        return row -> {
+            Object v = a.eval(row);
+            cell[0] = v;
+            return Boolean.TRUE.equals(eq.eval(row)) ? null : v;
+        };
+    }
+
+    private Evaluator inSubquery(BoundExpr.InSubquery in) {
+        Evaluator x = compile(in.operand());
+        Object[] cell = new Object[1];
+        Evaluator valueCast = withPlaceholder(cell, List.of(in.valueCast()))[0];
+        DataType t = in.operand().type();
+        DataType vt = in.valueCast().type();
+        SubqueryRunner runner = new SubqueryRunner(in.subquery(), subqueryBuilder, ctx);
+        boolean neg = in.negated();
+        return row -> {
+            Object v = x.eval(row);
+            SubqueryRunner.ValueSet set = runner.valueSet(row, value -> {
+                cell[0] = value;
+                Object c = valueCast.eval(row);
+                return c == null ? null : HashKeys.normalize(c, vt);
+            });
+            if (set.isEmpty()) {
+                return neg;
+            }
+            if (v == null) {
+                return null;
+            }
+            if (set.contains(HashKeys.normalize(v, t))) {
+                return !neg;
+            }
+            return set.hasNull() ? null : neg;
+        };
+    }
+
+    private Evaluator[] compileAll(List<BoundExpr> exprs) {
+        Evaluator[] out = new Evaluator[exprs.size()];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = compile(exprs.get(i));
+        }
+        return out;
+    }
+
+    // ---------------------------------------------------------------- functions
+
+    private Evaluator function(BoundExpr.Function f) {
+        return ScalarFunctions.compile(f, compileAll(f.args()), ctx);
     }
 }

@@ -86,11 +86,11 @@ final class EngineTest {
         Assert.check(System.nanoTime() - t0 < 1_000_000_000L, "timeout honoured promptly");
     }
 
-    static void testUnsupportedPhase2Syntax() {
+    static void testUnsupportedSyntax() {
         Engine e = engine();
-        for (String sql : List.of("SELECT DISTINCT id FROM people", "SELECT id FROM people GROUP BY id",
-                "SELECT a.id FROM people a JOIN people b ON a.id = b.id", "SELECT UPPER(name) FROM people",
-                "SELECT id FROM people WHERE id IN (1, 2)", "EXPLAIN SELECT 1")) {
+        for (String sql : List.of("CREATE INDEX i ON people (id)", "DROP INDEX i",
+                "SELECT * FROM people a RIGHT JOIN people b ON a.id = b.id",
+                "SELECT id FROM people UNION SELECT id FROM people")) {
             Assert.fails(ErrorCode.UNSUPPORTED, () -> e.query(sql, QueryOptions.DEFAULT));
         }
     }

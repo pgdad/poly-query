@@ -3,6 +3,8 @@ package polyquery.exec;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.MathContext;
+import java.util.HashSet;
+import java.util.Set;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.plan.AggregateCall;
@@ -18,6 +20,11 @@ public abstract class Accumulator {
     public abstract Object result();
 
     public static Accumulator create(AggregateCall call) {
+        Accumulator acc = createPlain(call);
+        return call.distinct() ? new Distinct(acc) : acc;
+    }
+
+    private static Accumulator createPlain(AggregateCall call) {
         DataType in = call.argument() == null ? null : call.argument().type();
         return switch (call.function()) {
             case COUNT_STAR, COUNT -> new Count();
@@ -38,6 +45,28 @@ public abstract class Accumulator {
 
     private static PolyQueryException overflow() {
         return new PolyQueryException(ErrorCode.NUMERIC_OVERFLOW, "aggregate result out of range");
+    }
+
+    /** Feeds only the first occurrence of each distinct non-NULL value to the wrapped accumulator. */
+    static final class Distinct extends Accumulator {
+        private final Accumulator inner;
+        private final Set<Object> seen = new HashSet<>();
+
+        Distinct(Accumulator inner) {
+            this.inner = inner;
+        }
+
+        @Override
+        public void add(Object v) {
+            if (v != null && seen.add(HashKeys.normalizeZero(v))) {
+                inner.add(v);
+            }
+        }
+
+        @Override
+        public Object result() {
+            return inner.result();
+        }
     }
 
     /** COUNT(x); COUNT(*) feeds a non-null marker for every row. */

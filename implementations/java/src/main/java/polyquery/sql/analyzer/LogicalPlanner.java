@@ -5,7 +5,7 @@ import java.util.List;
 import polyquery.plan.BoundExpr;
 import polyquery.plan.LogicalPlan;
 
-/** Builds the canonical logical plan of an analyzed query (semantics.md §4 clause order). */
+/** Builds the canonical logical plan of an analyzed query level (semantics.md §4 clause order). */
 public final class LogicalPlanner {
     private LogicalPlanner() {
     }
@@ -25,7 +25,10 @@ public final class LogicalPlanner {
         for (int i = q.visibleCount(); i < q.projections().size(); i++) {
             names.add("_sort" + (i - q.visibleCount() + 1));
         }
-        p = new LogicalPlan.Project(p, q.projections(), names);
+        p = new LogicalPlan.Project(p, List.copyOf(q.projections()), names);
+        if (q.distinct()) {
+            p = new LogicalPlan.Distinct(p);
+        }
         if (!q.orderBy().isEmpty()) {
             p = new LogicalPlan.Sort(p, q.orderBy());
         }
