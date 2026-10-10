@@ -8,7 +8,9 @@ build: target/classes/polyquery/main.class
 
 target/classes/polyquery/main.class: $(SRC) deps.edn script/compile.clj
 	@mkdir -p target/classes
-	$(CLOJURE) -Spath > target/classpath
+	@# runtime classpath: dependencies only (the relative "src" entry would let a
+	@# launcher started in this directory load sources instead of the AOT classes)
+	$(CLOJURE) -Spath | tr ':' '\n' | grep -v '^src$$' | paste -sd: - > target/classpath
 	$(CLOJURE) -M -i script/compile.clj
 	@touch $@
 

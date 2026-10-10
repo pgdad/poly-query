@@ -25,6 +25,12 @@
                   (long (or memory-budget-bytes Long/MAX_VALUE))
                   (AtomicLong. 0)))
 
+(defn derive-context
+  "A fresh context for re-executing the same query: same deadline and
+  cancellation flag, empty memory account."
+  [^QueryContext ctx]
+  (->QueryContext (.-deadline-ns ctx) (.-cancelled ctx) (.-memory-budget ctx) (AtomicLong. 0)))
+
 (defn cancel! [^QueryContext ctx] (.set ^AtomicBoolean (.-cancelled ctx) true))
 
 (defn check!

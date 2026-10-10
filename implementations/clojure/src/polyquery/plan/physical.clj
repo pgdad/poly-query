@@ -1,8 +1,12 @@
 (ns polyquery.plan.physical
   "Physical planning: chooses operator implementations for an (optimized)
-  logical plan — hash joins for joins with equality conjuncts between the two
-  inputs, nested-loop joins otherwise — and plans the nested queries of
-  subquery expressions through the whole pipeline.
+  logical plan — for joins with equality conjuncts between the two inputs a
+  hash join (default and `join: auto`/`hash`), a sort-merge join (`join:
+  merge`) or a nested-loop join (`join: nested_loop`); nested-loop joins
+  otherwise — replaces ORDER BY … LIMIT by a top-N operator (unless
+  `optimize: false`), marks parallelizable operators (`threads` > 1,
+  polyquery.plan.parallel) and plans the nested queries of subquery
+  expressions through the whole pipeline.
 
   Physical nodes ({:op …}):
     {:op :values :rows [[…]]}
@@ -24,18 +28,29 @@
      :left-keys [k …] :right-keys [k …] :residual e|nil :left-width n :right-width n}
         ; k = {:expr e :cmp-type T}; right key expressions are over the right row;
         ; the hash table is built on the :build input
+    {:op :merge-join :join-type :inner|:left :left P :right P
+     :left-keys [k …] :right-keys [k …] :residual e|nil :left-width n :right-width n}
+        ; both inputs sorted on their keys, equal-key runs joined
     {:op :nested-loop-join :join-type :inner|:left|:cross :left P :right P
-     :condition e|nil :left-width n :right-width n}
+     :key-condition e|nil :condition e|nil :left-width n :right-width n}
+        ; :key-condition (equi-join keys) is tested before :condition
     {:op :hash-aggregate :input P :group-keys [e] :aggregates [spec]}
     {:op :project :input P :exprs [e] :names [n]}
     {:op :distinct :input P}
     {:op :sort :input P :keys [{:index :type :desc? :nulls-first?}]}
+    {:op :top-n :input P :keys [...] :limit e :offset e|nil}
+        ; ORDER BY … LIMIT: sort keeping only the first LIMIT+OFFSET rows
     {:op :limit :input P :limit e|nil :offset e|nil}
+    {:op :gather :input P :partitions n}
+        ; parallel execution of a partitionable pipeline (polyquery.plan.parallel)
+  :hash-aggregate, :sort and :top-n may carry :partitions n (parallel
+  partial aggregation / sorting of a partitionable input).
   Subquery expressions carry :plan (a physical plan) instead of :query."
   (:require [polyquery.plan.access :as access]
             [polyquery.plan.cost :as cost]
             [polyquery.plan.logical :as logical]
             [polyquery.plan.optimizer :as optimizer]
+            [polyquery.plan.parallel :as parallel]
             [polyquery.plan.pruning :as pruning]
             [polyquery.sql.bound :as b]))
 
@@ -49,11 +64,14 @@
   (when e
     (b/transform (fn [x]
                    (if (and (= :subquery (:node x)) (:query x))
-                     ;; EXISTS only needs to know whether there are rows
+                     ;; EXISTS only needs to know whether there are rows;
+                     ;; correlated subqueries run once per outer row: serially
                      (-> x
                          (assoc :plan (plan-query (:query x) (cond-> options
                                                                (= :exists (:kind x))
-                                                               (assoc :required-outputs #{}))))
+                                                               (assoc :required-outputs #{})
+                                                               (:correlated? x)
+                                                               (assoc :threads 1))))
                          (dissoc :query))
                      x))
                  e)))
@@ -134,17 +152,37 @@
         lw (long (:width left))
         conjuncts (b/conjuncts (plan-expr options condition))
         keyed (keep #(when-let [k (equi-key % lw)] [% k]) conjuncts)
-        base {:left l :right r :left-width lw :right-width (:width right)}]
-    (if (or (= kind :cross) (empty? keyed) (= "nested_loop" (:join options)))
+        keyed-set (set (map first keyed))
+        residual (b/conjoin (remove keyed-set conjuncts))
+        base {:left l :right r :left-width lw :right-width (:width right)}
+        keys {:left-keys (mapv (comp first second) keyed)
+              :right-keys (mapv (comp second second) keyed)
+              :residual residual}]
+    (cond
+      (or (= kind :cross) (empty? keyed))
       (merge base {:op :nested-loop-join :join-type kind :condition (b/conjoin conjuncts)})
-      (let [keyed-set (set (map first keyed))]
-        (merge base {:op :hash-join :join-type kind
-                     :build (if (and (= kind :inner) (< (cost/estimate left) (cost/estimate right)))
-                              :left
-                              :right)
-                     :left-keys (mapv (comp first second) keyed)
-                     :right-keys (mapv (comp second second) keyed)
-                     :residual (b/conjoin (remove keyed-set conjuncts))})))))
+
+      (= "nested_loop" (:join options))
+      (merge base {:op :nested-loop-join :join-type kind
+                   :key-condition (b/conjoin (map first keyed)) :condition residual})
+
+      (= "merge" (:join options))
+      (merge base keys {:op :merge-join :join-type kind})
+
+      ;; auto / hash: hash join, built on the smaller input
+      :else
+      (merge base keys {:op :hash-join :join-type kind
+                        :build (if (and (= kind :inner) (< (cost/estimate left) (cost/estimate right)))
+                                 :left
+                                 :right)}))))
+
+(defn- plan-limit
+  [node options phys px]
+  (let [input (:input node)]
+    (if (and (= :sort (:op input)) (:limit node) (not (false? (:optimize options))))
+      {:op :top-n :input (phys (:input input)) :keys (:keys input)
+       :limit (px (:limit node)) :offset (px (:offset node))}
+      {:op :limit :input (phys input) :limit (px (:limit node)) :offset (px (:offset node))})))
 
 (defn- to-physical
   [node options]
@@ -163,17 +201,18 @@
                 :names (:names node)}
       :distinct {:op :distinct :input (phys (:input node))}
       :sort {:op :sort :input (phys (:input node)) :keys (:keys node)}
-      :limit {:op :limit :input (phys (:input node)) :limit (px (:limit node))
-              :offset (px (:offset node))})))
+      :limit (plan-limit node options phys px))))
 
 (defn plan-query
   "Plans a bound query: logical plan → optimization → physical plan.
-  options: {:optimize bool (default true), :join \"auto\"|\"hash\"|…,
-  :use-indexes bool (default true), :required-outputs #{i …} (default: all;
-  outputs not in the set are never read)}."
+  options: {:optimize bool (default true), :join \"auto\"|\"hash\"|\"merge\"|
+  \"nested_loop\", :use-indexes bool (default true), :threads n (default 1),
+  :required-outputs #{i …} (default: all; outputs not in the set are never
+  read)}."
   [bq options]
   (let [required (:required-outputs options)
         options (dissoc options :required-outputs)
         logical (logical/plan-query bq)
-        optimized (if (false? (:optimize options)) logical (optimizer/optimize logical))]
-    (assoc (to-physical (pruning/prune-query optimized required) options) :columns (:columns bq))))
+        optimized (if (false? (:optimize options)) logical (optimizer/optimize logical))
+        physical (to-physical (pruning/prune-query optimized required) options)]
+    (assoc (parallel/parallelize physical (or (:threads options) 1)) :columns (:columns bq))))

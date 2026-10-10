@@ -12,17 +12,24 @@
 
 (definterface Accumulator
   (add [x] "Feeds one (possibly NULL) input value.")
-  (result [] "Returns the aggregate value."))
+  (result [] "Returns the aggregate value.")
+  (state [] "The partial state, as consumed by merge.")
+  (merge [other] "Adds the partial state of another accumulator of the same
+  kind (parallel aggregation)."))
 
 (deftype CountStar [^:unsynchronized-mutable ^long n]
   Accumulator
   (add [_ _] (set! n (inc n)) nil)
-  (result [_] n))
+  (result [_] n)
+  (state [_] n)
+  (merge [_ other] (set! n (+ n (long (.state ^Accumulator other)))) nil))
 
 (deftype CountValues [^:unsynchronized-mutable ^long n]
   Accumulator
   (add [_ x] (when (some? x) (set! n (inc n))) nil)
-  (result [_] n))
+  (result [_] n)
+  (state [_] n)
+  (merge [_ other] (set! n (+ n (long (.state ^Accumulator other)))) nil))
 
 (definterface Counted
   (^long valueCount []))
@@ -44,6 +51,23 @@
     nil)
   (result [_]
     (when (pos? n) (or big sum)))
+  (state [_] (object-array [(or big sum) n]))
+  (merge [_ other]
+    (let [^objects st (.state ^Accumulator other)
+          x (aget st 0)
+          m (long (aget st 1))]
+      (when (pos? m)
+        (set! n (+ n m))
+        (if (or big (instance? BigInteger x))
+          (let [^BigInteger acc (if big big (BigInteger/valueOf sum))
+                ^BigInteger y (if (instance? BigInteger x) x (BigInteger/valueOf (long x)))]
+            (set! big (.add acc y)))
+          (let [y (long x)
+                s (unchecked-add sum y)]
+            (if (neg? (bit-and (bit-xor sum s) (bit-xor y s)))
+              (set! big (.add (BigInteger/valueOf sum) (BigInteger/valueOf y)))
+              (set! sum s))))))
+    nil)
   Counted
   (valueCount [_] n))
 
@@ -59,7 +83,13 @@
       (let [r (if avg? (/ sum n) sum)]
         (if (or (Double/isInfinite r) (Double/isNaN r))
           (err/fail! "NUMERIC_OVERFLOW" "floating point overflow in SUM")
-          r)))))
+          r))))
+  (state [_] (object-array [sum n]))
+  (merge [_ other]
+    (let [^objects st (.state ^Accumulator other)]
+      (set! sum (+ sum (double (aget st 0))))
+      (set! n (+ n (long (aget st 1)))))
+    nil))
 
 (deftype Extreme [^Comparator cmp ^long sign ^:unsynchronized-mutable best]
   Accumulator
@@ -67,12 +97,16 @@
     (when (and (some? x) (or (nil? best) (neg? (* sign (.compare cmp x best)))))
       (set! best x))
     nil)
-  (result [_] best))
+  (result [_] best)
+  (state [_] best)
+  (merge [this other] (.add this (.state ^Accumulator other))))
 
 (deftype Wrapped [^Accumulator inner finish]
   Accumulator
   (add [_ x] (.add inner x))
-  (result [_] (finish inner)))
+  (result [_] (finish inner))
+  (state [_] inner)
+  (merge [_ other] (.merge inner (.state ^Accumulator other))))
 
 (deftype DistinctValues [^HashSet seen make-inner]
   Accumulator
@@ -80,9 +114,13 @@
   (result [_]
     (let [^Accumulator inner (make-inner)]
       (doseq [x seen] (.add inner x))
-      (.result inner))))
+      (.result inner)))
+  (state [_] seen)
+  (merge [_ other] (.addAll seen ^HashSet (.state ^Accumulator other)) nil))
 
-(defn- int-sum-result [x]
+(defn int-sum-result
+  "Final INT64 SUM of an exact sum (Long or BigInteger; nil for no values)."
+  [x]
   (cond
     (nil? x) nil
     (instance? BigInteger x) (if (< (.bitLength ^BigInteger x) 64)
@@ -90,16 +128,24 @@
                                (err/fail! "NUMERIC_OVERFLOW" "SUM overflows INT64"))
     :else x))
 
-(defn- dec-sum-result [x]
+(defn dec-sum-result
+  "Final DECIMAL SUM of an exact unscaled sum (nil for no values)."
+  [x]
   (when (some? x)
     (let [l (int-sum-result x)]
       (v/check-dec18 (long l) "SUM"))))
 
-(defn- exact-avg [^ExactSum acc ^long scale]
-  (when-let [s (.result acc)]
+(defn exact-avg-result
+  "AVG of INT64/DECIMAL values from their exact unscaled sum s (Long or
+  BigInteger, nil for no values) and count."
+  [s cnt scale]
+  (when (some? s)
     (let [bd (BigDecimal. (if (instance? BigInteger s) ^BigInteger s (BigInteger/valueOf (long s)))
                           (int scale))]
-      (.doubleValue (.divide bd (BigDecimal/valueOf (sum-count acc)) MathContext/DECIMAL128)))))
+      (.doubleValue (.divide bd (BigDecimal/valueOf (long cnt)) MathContext/DECIMAL128)))))
+
+(defn- exact-avg [^ExactSum acc ^long scale]
+  (exact-avg-result (.result acc) (sum-count acc) scale))
 
 (defn accumulator-factory
   "Returns a no-arg function creating a fresh accumulator for agg spec."

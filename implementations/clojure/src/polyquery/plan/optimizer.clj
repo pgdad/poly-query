@@ -1,17 +1,25 @@
 (ns polyquery.plan.optimizer
-  "Logical optimization (spec/storage/indexes-and-planning.md §3): predicate
-  pushdown. WHERE conjuncts and ON conjuncts are moved as close to the scans
-  as their column references allow; WHERE conjuncts spanning both sides of an
-  inner/cross join become join conditions (enabling hash joins).
+  "Logical optimization (spec/storage/indexes-and-planning.md §3,
+  spec/phases/phase-5.md), skipped entirely for `optimize: false`:
+    1. constant folding and predicate simplification (polyquery.plan.rewrite);
+    2. predicate pushdown: WHERE conjuncts and ON conjuncts are moved as close
+       to the scans as their column references allow; WHERE conjuncts
+       spanning both sides of an inner/cross join become join conditions
+       (enabling hash joins);
+    3. join reordering of inner-join chains (polyquery.plan.reorder).
+  Projection pushdown (column pruning, polyquery.plan.pruning) and the
+  top-N rewrite of ORDER BY … LIMIT (polyquery.plan.physical) follow.
 
   Conjuncts containing correlated subqueries are never moved: their
   subqueries read the row they are evaluated on, which must keep the layout
   it was bound against."
-  (:require [polyquery.sql.bound :as b]))
+  (:require [polyquery.plan.reorder :as reorder]
+            [polyquery.plan.rewrite :as rewrite]
+            [polyquery.sql.bound :as b]))
 
 (set! *warn-on-reflection* true)
 
-(declare optimize push-down)
+(declare optimize pushdown push-down)
 
 (defn- with-filter [node preds]
   (if (seq preds)
@@ -73,8 +81,8 @@
 
 (defn- from-node? [node] (#{:scan :values :derived :join} (:op node)))
 
-(defn optimize
-  "Optimizes a logical plan."
+(defn- pushdown
+  "Predicate pushdown over a logical plan."
   [node]
   (cond
     (and (= :filter (:op node)) (from-node? (:input node)))
@@ -82,6 +90,11 @@
 
     (from-node? node) (push-down node [])
 
-    (:input node) (update node :input optimize)
+    (:input node) (update node :input pushdown)
 
     :else node))
+
+(defn optimize
+  "Optimizes a logical plan (derived tables included, through pushdown)."
+  [node]
+  (-> node rewrite/simplify-plan pushdown reorder/reorder-joins))

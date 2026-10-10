@@ -12,9 +12,11 @@
     polyquery.ingest.json-test
     polyquery.plan.planner-test
     polyquery.exec.functions-test
+    polyquery.exec.vectorized-test
     polyquery.engine-test
     polyquery.engine-phase2-test
     polyquery.engine-phase3-test
+    polyquery.engine-phase5-test
     polyquery.storage.storage-test
     polyquery.storage.pqcf-test
     polyquery.protocol-test
