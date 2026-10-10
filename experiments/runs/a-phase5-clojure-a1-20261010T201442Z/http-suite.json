@@ -1,0 +1,120 @@
+{
+ "schema": "polyquery-http-suite/1",
+ "engine": "/srv/polyquery/runs/a-phase5-clojure-a1-20261010T201442Z/validate/implementations/clojure/bin/polyquery",
+ "summary": {
+  "total": 18,
+  "passed": 18,
+  "failed": 0
+ },
+ "checks": [
+  {
+   "check": "health_version_capabilities",
+   "status": "pass",
+   "seconds": 0.36
+  },
+  {
+   "check": "table_lifecycle",
+   "status": "pass",
+   "seconds": 0.39
+  },
+  {
+   "check": "query_and_error_mapping",
+   "status": "pass",
+   "seconds": 0.43
+  },
+  {
+   "check": "keep_alive",
+   "status": "pass",
+   "seconds": 0.37
+  },
+  {
+   "check": "streaming",
+   "status": "pass",
+   "seconds": 0.58
+  },
+  {
+   "check": "metrics",
+   "status": "pass",
+   "seconds": 0.45
+  },
+  {
+   "check": "timeout",
+   "status": "pass",
+   "seconds": 0.62
+  },
+  {
+   "check": "server_default_timeout",
+   "status": "pass",
+   "seconds": 0.73
+  },
+  {
+   "check": "cancellation",
+   "status": "pass",
+   "seconds": 0.45
+  },
+  {
+   "check": "backpressure_overloaded",
+   "status": "pass",
+   "seconds": 4.4
+  },
+  {
+   "check": "queued_time_counts_toward_timeout",
+   "status": "pass",
+   "seconds": 1.9
+  },
+  {
+   "check": "snapshot_isolation",
+   "status": "pass",
+   "seconds": 1.88
+  },
+  {
+   "check": "concurrent_readers",
+   "status": "pass",
+   "seconds": 0.47
+  },
+  {
+   "check": "client_disconnect_cancels",
+   "status": "pass",
+   "seconds": 0.87
+  },
+  {
+   "check": "request_size_limit",
+   "status": "pass",
+   "seconds": 0.39
+  },
+  {
+   "check": "structured_logs",
+   "status": "pass",
+   "seconds": 0.69
+  },
+  {
+   "check": "graceful_shutdown",
+   "status": "pass",
+   "seconds": 1.88
+  },
+  {
+   "check": "grace_expiry",
+   "status": "pass",
+   "seconds": 1.0
+  }
+ ],
+ "startup_seconds": [
+  0.3340574680478312,
+  0.3396252049715258,
+  0.36026646400569007,
+  0.35129919898463413,
+  0.34691082197241485,
+  0.38444848300423473,
+  0.3864776359987445,
+  0.38624462200095877,
+  0.36666152300313115,
+  0.3567172219627537,
+  0.3614907550509088,
+  0.37446838698815554,
+  0.370094068988692,
+  0.3489202929777093,
+  0.37050620501395315,
+  0.35924442001851276
+ ],
+ "logs": "/tmp/pqhttp-logs-m7aa4evx"
+}

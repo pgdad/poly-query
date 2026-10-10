@@ -1,0 +1,135 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase5-clojure-a1-20261010T201442Z",
+ "language": "clojure",
+ "task": "phase5",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase5",
+ "prompt_sha256": "79ffea50a3965fa86a6b246575cbf46bc26095e45543d66d95ef7bf427b093bd",
+ "session_id": "c4397746-18dc-4fcb-b487-556f0ed439ab",
+ "tokens": {
+  "input": 370,
+  "output": 317457,
+  "cache_read": 58612438,
+  "cache_creation": 504859,
+  "thinking": null,
+  "thinking_estimated": 141058,
+  "source": "result events",
+  "api_messages": 185
+ },
+ "rate_limit": {
+  "events": 22,
+  "max_utilization": {
+   "seven_day": 0.13,
+   "five_hour": 0.73
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 22.11197959999999,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 195,
+ "result_segments": 1,
+ "assistant_messages": 411,
+ "tool_calls": {
+  "Bash": 177,
+  "Write": 16,
+  "ToolSearch": 1
+ },
+ "tool_calls_total": 194,
+ "tool_failures": 6,
+ "build_invocations": 118,
+ "build_failures_heuristic": 17,
+ "conformance_runs": 14,
+ "conformance_progress": [
+  [
+   554,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ]
+ ],
+ "repair_iterations": 13,
+ "time": {
+  "wall_seconds": 4109.4,
+  "model_api_seconds": 2869.2,
+  "tool_seconds": 1241.0,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 9,
+  "files_changed": 29,
+  "lines_added": 4845,
+  "lines_removed": 220,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 5 is finished and committed (9 commits on `main`, clean tree). The definition of done is met: every suite below reports 0 failures, 0 errors and 0 not-implemented.\n\n**Test results**\n- Conformance, all phases: `TOTAL: 569/569 pass` (phase 1 225/225, phase 2 186/186, phase 3 143/143, phase 5 15/15).\n- `--modes` option matrix: `TOTAL: 3324/3324 pass`.\n- The same 569 cases through the HTTP server: 569/569. HTTP suite: `18/18 passed`.\n- `make build` from clean, `make test` (70 tests, 999 assertions) and `make lint` (no reflection warnings) all succeed.\n\n**What I implemented**\n- **Row mode** (`mode: row`) is kept as the baseline.\n- **Vectorized mode** (`mode: vectorized`, also the default `auto`):\n  - Rows are processed in batches of 1,024, stored as typed column arrays plus a list of the rows still selected.\n  - Filters, projections and hash aggregation run on these batches, with fast paths for comparisons against constants and for dictionary-encoded strings.\n  - Hash joins probe a whole batch at a time, and integer join keys use a hash table built on plain arrays.\n  - Sorting uses a radix sort for a single integer key and a merge sort otherwise.\n- **Parallelism** (`threads`), in both modes:\n  - Scans and the pipelines above them are split into row ranges that run on worker threads.\n  - Aggregates are computed per range and merged in order, so groups come out in the same order as single-threaded.\n  - Sorts and ORDER BY \u2026 LIMIT run in parallel, and other parallel scans stream rows back in table order.\n- **Join algorithms** (`join`): hash, a new sort-merge join, and nested loop.\n- **Optimizer** (`optimize: false` turns all of it off): constant folding, predicate simplification, predicate pushdown, join reordering, and a top-N operator for ORDER BY \u2026 LIMIT.\n- **Low-level work**:\n  - Loops the JIT can turn into SIMD instructions.\n  - Hot code split into small methods, because the JVM won't compile methods over 8,000 bytes; this alone made filters about 6\u00d7 faster.\n  - Scan buffers reused across batches.\n  - Hash tables built on plain arrays.\n\n**Measurements** (1M-row datasets, median wall-clock time; full tables are in the README):\n\n| Query | Before (Phase 4 engine) | After (defaults) |\n|---|---:|---:|\n| Filter + count | 23 ms | 3 ms |\n| Group by | 49 ms | 3 ms |\n| Join + group by | 82 ms | 10 ms |\n| Top-10 of 1M rows | 776 ms | 3 ms |\n| Full sort of 1M rows | 686 ms | 48 ms |\n| 3-way join written in a bad FROM order | fails (join row limit) | 32 ms |\n\n**How I checked that every option combination gives identical results**\n- A differential unit test runs about 60 queries under seven option combinations. The tables have NULLs everywhere, include memory-mapped files split into row groups, and are larger than a batch.\n- `bench/bench.py --verify` compares full results on the 1M-row data.\n- A random-query fuzzer (`bench/fuzz.py`) ran about 5,000 queries. It found one real mismatch, which I fixed: top-N with `LIMIT 0` skipped evaluating its input, so it missed an error the full sort raised.\n\n**Main design decisions**\n- **Retry in row mode after a runtime error.** Vectorized and parallel execution can evaluate rows the row engine never reaches, such as rows past a LIMIT. When they fail with a runtime error or an unexpected exception, the query is re-run row-at-a-time on one thread, and that outcome is returned. Setting `PQ_STRICT_EXECUTION=1` turns off the retry for unexpected exceptions, so bugs aren't hidden during testing.\n- **`threads: 0` returns UNSUPPORTED.** The spec is ambiguous here. I chose UNSUPPORTED from the wording \"unsupported values of known options\"; a non-integer value returns INVALID_REQUEST.\n- **Default threads.** The default is the `--threads` CLI value, otherwise min(8, CPUs). Row mode without an explicit `threads` stays single-threaded.\n\n**Known limitations**\n- `native: true` is accepted and ignored; no native kernels are loaded, which the spec allows.\n- No explicit SIMD. I measured the JDK Vector API at only about",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
