@@ -33,7 +33,7 @@
   },
   "M7": {
    "status": "in_progress",
-   "detail": "running: clojure, go"
+   "detail": "accepted: clojure, go (modes 3738/3738, HTTP 18/18). First quiet-host 1m benchmark: results/performance/20261010T215430Z-1m-phase5-quiet (20/20 queries, results agree)."
   },
   "M8": {
    "status": "complete",
@@ -52,8 +52,7 @@
   "Resolve SPEC-Q-001 (INT64 vs DECIMAL comparison overflow) via change control after the current waves",
   "Run http_suite against first Phase 4 engine",
   "Native integration (M9), Track B, later experiment families",
-  "M9: kernel dispatch default should follow measured performance (on spark NEON beats SVE at VL=128 for 11/13 kernels)",
-  "Re-run kernel benchmarks (x86 and spark) on quiet hosts for reporting"
+  "M9: kernel dispatch default should follow measured performance (on spark NEON beats SVE at VL=128 for 11/13 kernels)"
  ],
  "known_defects": [
   "See experiments/telemetry/harness-incidents.jsonl (HI-001..003 fixed; SPEC-Q-001 open)"
@@ -77,5 +76,8 @@
   "kernels_x86_native": "pass (scalar, avx2, avx512)"
  },
  "last_successful_commit": "edc7a80",
- "next_recommended_action": "Keep accepting finished runs with accept.sh (launching the next phase); when all engines reach phase 5, run 1m benchmarks on a quiet host and generate reports."
+ "next_recommended_action": "Keep accepting finished runs with accept.sh (launching the next phase); when all engines reach phase 5, run 1m benchmarks on a quiet host and generate reports.",
+ "findings": [
+  "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) \u2014 report as engine quality finding; clojure p95 16 ms"
+ ]
 }
