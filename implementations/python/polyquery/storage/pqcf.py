@@ -100,7 +100,12 @@ def save_table(
 
 
 def write_atomic(path: str, write: Callable[[BinaryIO], None]) -> int:
-    """Writes a file via a temporary file + fsync + rename + directory fsync."""
+    """Writes a file via a temporary file + fsync + rename + directory fsync.
+    A symbolic link as target is followed (the link's target is replaced)."""
+    if os.path.islink(path):
+        path = os.path.realpath(path)
+    if os.path.isdir(path):
+        raise errors.io_error("the target path is a directory")
     directory = os.path.dirname(path) or "."
     base = os.path.basename(path)
     if not base:
