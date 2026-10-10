@@ -22,6 +22,9 @@ from .compiler import Layout, compile_expr, compile_row
 from .context import ExecutionContext
 
 BATCH_SIZE = 2048
+# operators whose work is not proportional to their batches check for
+# cancellation / timeout after at most this many rows (concurrency.md §4)
+CHECK_INTERVAL_ROWS = 65_536
 
 Batch = list[tuple]
 
@@ -276,9 +279,14 @@ def _nested_loop_join(node: pp.NestedLoopJoin, ctx: ExecutionContext) -> Iterato
     is_left = node.join_type == "LEFT"
     padding = (None,) * len(node.right.layout)
     counter = _JoinCounter(ctx)
+    work = 0  # row pairs examined since the last cancellation check
     for batch in execute(node.left, ctx):
         out: Batch = []
         for lrow in batch:
+            work += len(right_rows)
+            if work >= CHECK_INTERVAL_ROWS:
+                ctx.check()
+                work = 0
             if condition is None:
                 if right_rows:
                     out.extend([lrow + r for r in right_rows])
@@ -350,10 +358,15 @@ def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Iterator[B
         ctx.check()
 
     out: Batch = []
+    work = 0  # rows aggregated since the last cancellation check
     for key, rows in groups.items():
         accumulators = [make_accumulator(call) for call in node.aggregates]
         _accumulate(accumulators, getters, rows)
         out.append(key + tuple(acc.result() for acc in accumulators))
+        work += len(rows)
+        if work >= CHECK_INTERVAL_ROWS:
+            ctx.check()
+            work = 0
         if len(out) >= BATCH_SIZE:
             yield out
             out = []
@@ -376,6 +389,7 @@ def _distinct(node: pp.Distinct, ctx: ExecutionContext) -> Iterator[Batch]:
         if out:
             ctx.reserve_rows(len(out), len(out[0]))
             yield out
+        ctx.check()
 
 
 def _sort_rows(rows: list[tuple], keys: list[b.SortKey]) -> None:
