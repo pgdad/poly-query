@@ -132,10 +132,12 @@ void pqk_compare_fixed(const uint8_t *a, const uint8_t *b, size_t width, size_t 
 /* ---- 8. Vectorized aggregation primitives ------------------------------ */
 
 /* For valid rows i: sums[group_ids[i]] += values[i], counts[group_ids[i]] += 1.
- * sums/counts (length ngroups) are accumulated into (not zeroed). Returns
- * PQK_EINVAL if some valid row has group_ids[i] >= ngroups (no partial
- * guarantee on outputs), PQK_OVERFLOW if any final group sum overflows
- * int64 (outputs then unspecified), else PQK_OK. counts may be NULL. */
+ * sums/counts (length ngroups) are accumulated into (not zeroed); additions use
+ * two's-complement wrapping arithmetic. Returns PQK_EINVAL (outputs untouched)
+ * if some valid row has group_ids[i] >= ngroups. Otherwise returns PQK_OVERFLOW
+ * if an addition wrapped in the variant's evaluation order (a conservative
+ * "may have overflowed" flag: callers must then recompute exactly), else PQK_OK,
+ * which guarantees every group sum is exact. counts may be NULL. */
 int pqk_group_sum_i64(const uint32_t *group_ids, const int64_t *values, const uint8_t *validity,
                       size_t n, int64_t *sums, int64_t *counts, size_t ngroups);
 

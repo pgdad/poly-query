@@ -40,6 +40,12 @@ SANDBOX = ROOT / "tools/orchestration/sandbox.sh"
 PROMPTS = ROOT / "experiments/prompts"
 RECORDS = ROOT / "experiments/runs"
 LANGS = ["java", "clojure", "rust", "python", "go", "common-lisp"]
+ASM_LANGS = ["x86_64-asm", "arm64-asm"]
+KERNEL_WORKSPACE_PATHS = [
+    "spec/README.md", "spec/phases/native-kernels.md",
+    "native-kernels/include", "native-kernels/reference-c", "native-kernels/tests", "native-kernels/Makefile",
+    "LICENSE",
+]
 DEFAULT_MODEL = os.environ.get("PQ_MODEL", "claude-opus-5-5")
 DEFAULT_EFFORT = os.environ.get("PQ_EFFORT", "high")
 
@@ -121,10 +127,12 @@ def tool_versions() -> dict:
 # ------------------------------------------------------------------ prepare
 
 def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None, wave: str | None) -> str:
-    if lang not in LANGS:
-        raise SystemExit(f"unknown language {lang}")
     tasks = json.loads((PROMPTS / "tasks.json").read_text())
     langs = json.loads((PROMPTS / "languages.json").read_text())
+    if lang not in langs:
+        raise SystemExit(f"unknown language {lang}")
+    if (lang in ASM_LANGS) != (task == "kernels"):
+        raise SystemExit(f"task {task} does not apply to {lang}")
     if task not in tasks:
         raise SystemExit(f"unknown task {task}")
     t, L = tasks[task], langs[lang]
@@ -138,15 +146,18 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
 
     ref = base_ref or git(["rev-parse", "HEAD"], ROOT)
     # Export the allowed paths at `ref` (committed state only) into the workspace.
-    impl_path = f"implementations/{lang}"
-    export = WORKSPACE_PATHS + [impl_path]
+    impl_path = L["work_dir"]
+    export = (KERNEL_WORKSPACE_PATHS if task == "kernels" else WORKSPACE_PATHS) + [impl_path]
     present = [p for p in export if sh(["git", "cat-file", "-e", f"{ref}:{p}"], cwd=ROOT, check=False).returncode == 0]
     archive = subprocess.run(["git", "archive", "--format=tar", ref, *present], cwd=ROOT, check=True, capture_output=True)
     subprocess.run(["tar", "-x", "-C", str(ws)], input=archive.stdout, check=True)
     (ws / impl_path).mkdir(parents=True, exist_ok=True)
 
-    template = (PROMPTS / "track-a-implementation.md").read_text()
+    template = (PROMPTS / L["template"]).read_text()
     values = {
+        "WORK_DIR": L["work_dir"], "VARIANT_PREFIX": L["variant_prefix"], "ABI": L["abi"],
+        "TEST_NOTE": L["test_note"], "SIMD_NAME": L["simd_name"], "OPTIONAL_SIMD": L["optional_simd"],
+        "TEST_TARGET": L["test_target"],
         "TASK_TITLE": t["title"], "TASK_GOAL": t["goal"], "PHASE_FILE": t["phase_file"],
         "RUNNER_ARGS": t["runner_args"], "DONE_CRITERIA": t["done"],
         "LANGUAGE": L["language"], "LANG_DIR": L["lang_dir"], "TOOLCHAIN": L["toolchain"],
@@ -173,7 +184,7 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
         "run_id": run_id, "wave": wave, "language": lang, "task": task, "track": track, "attempt": attempt,
         "created": now(), "repo_ref": ref, "baseline_commit": baseline,
         "spec_hash": tree_hash([ROOT / "spec"]),
-        "prompt_template": "experiments/prompts/track-a-implementation.md",
+        "prompt_template": f"experiments/prompts/{L['template']}", "work_dir": L["work_dir"],
         "prompt_id": f"track-{track.lower()}-{task}", "prompt_sha256": prompt_hash,
         "model": DEFAULT_MODEL, "effort": DEFAULT_EFFORT,
         "agent_harness": None, "limits": {}, "status": "prepared",
@@ -319,7 +330,7 @@ def telemetry(run_id: str) -> dict:
                         tool_time += max(0.0, t - started[0])
                         name, cmd = started[1], started[2]
                         if name == "Bash":
-                            if re.search(r"\bmake\b|cargo (build|test)|go (build|test|vet)|javac|mvn|clojure|sbcl", cmd):
+                            if re.search(r"\bmake\b|cargo (build|test)|go (build|test|vet)|javac|mvn|clojure|sbcl|gcc|\bas\b", cmd):
                                 build_cmds += 1
                                 if BUILD_ERR.search(text):
                                     build_failures += 1
@@ -341,14 +352,15 @@ def telemetry(run_id: str) -> dict:
                  ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")} if msg_usage else {}
     ws = rd / "workspace"
     commits = git(["rev-list", "--count", f"{m['baseline_commit']}..HEAD"], ws, check=False)
-    numstat = git(["diff", "--numstat", m["baseline_commit"], "HEAD", "--", f"implementations/{m['language']}"], ws, check=False)
+    wd = m.get("work_dir") or f"implementations/{m['language']}"
+    numstat = git(["diff", "--numstat", m["baseline_commit"], "HEAD", "--", wd], ws, check=False)
     added = removed = files = 0
     for line in numstat.splitlines():
         a, r, _ = (line.split("\t") + ["", "", ""])[:3]
         files += 1
         added += int(a) if a.isdigit() else 0
         removed += int(r) if r.isdigit() else 0
-    outside = git(["diff", "--name-only", m["baseline_commit"], "HEAD", "--", ".", f":(exclude)implementations/{m['language']}"], ws, check=False)
+    outside = git(["diff", "--name-only", m["baseline_commit"], "HEAD", "--", ".", f":(exclude){wd}"], ws, check=False)
     dirty = git(["status", "--porcelain"], ws, check=False)
     first_fail = next((i for i, (p, n) in enumerate(runner_results) if p < n), None)
     tel = {
@@ -425,6 +437,8 @@ def validate(run_id: str, phases: list[int] | None = None) -> dict:
     hidden_src = ROOT / "tests/conformance/hidden"
     if hidden_src.exists():
         shutil.copytree(hidden_src, vd / "tests/conformance/hidden")
+    if m["task"] == "kernels":
+        return validate_kernels(run_id, m, vd)
     task_phase = {"phase1": [1], "phase2": [1, 2], "phase3": [1, 2, 3], "phase4": [1, 2, 3], "phase5": [1, 2, 3]}
     phases = phases or task_phase.get(m["task"], [1])
     phase_args = " ".join(f"--phase {p}" for p in phases)
@@ -474,6 +488,55 @@ python3 tests/concurrency/http_suite.py --engine implementations/{lang}/bin/poly
     m["outcome"] = out["outcome"]
     m["status"] = "validated"
     save_manifest(run_id, m)
+    return out
+
+
+def validate_kernels(run_id: str, m: dict, vd: Path) -> dict:
+    rd = run_dir(run_id)
+    L = json.loads((PROMPTS / "languages.json").read_text())[m["language"]]
+    vscr = rd / "vscratch"
+    vscr.mkdir(exist_ok=True)
+    target = L["test_target"]
+    script = f"""set -u
+cd {vd}
+make -C native-kernels clean >/dev/null 2>&1
+( make -C native-kernels {target} ) > validate-kernels.log 2>&1; echo "test_exit=$?" > validate-status
+if [ "{target}" = "test" ]; then ( make -C native-kernels bench ) > validate-bench.log 2>&1; echo "bench_exit=$?" >> validate-status; fi
+"""
+    (vscr / "validate.sh").write_text(script)
+    t0 = time.time()
+    sh([str(SANDBOX), str(vd), str(rd / "config"), str(vscr), "--", "bash", str(vscr / "validate.sh")], check=False,
+       timeout=3 * 3600)
+    status = dict(l.split("=", 1) for l in (vd / "validate-status").read_text().split() if "=" in l) \
+        if (vd / "validate-status").exists() else {}
+    log = (vd / "validate-kernels.log").read_text(errors="replace") if (vd / "validate-kernels.log").exists() else ""
+    variants = {mm.group(1): {"kernels": int(mm.group(2)), "status": mm.group(3)}
+                for mm in re.finditer(r"^\s+(\w+)\s+(\d+)/16 kernels\s+(PASS|FAIL)", log, re.M)}
+    prefix = L["variant_prefix"]
+    simd = "x86_avx2" if prefix == "x86_" else "a64_neon"
+    required = [f"{prefix}scalar", simd]
+    ok = status.get("test_exit") == "0" and all(variants.get(v, {}).get("kernels") == 16 and
+                                                 variants.get(v, {}).get("status") == "PASS" for v in required)
+    bench = []
+    bf = vd / "native-kernels/build/x86_64/bench.jsonl"
+    if bf.exists():
+        bench = [json.loads(l) for l in bf.read_text().splitlines() if l.strip().startswith("{")]
+    for f in ["validate-kernels.log", "validate-bench.log"]:
+        if (vd / f).exists():
+            shutil.copy(vd / f, rd / f)
+    out = {"seconds": round(time.time() - t0, 1), "status": status, "variants": variants, "required": required,
+           "emulated": prefix == "a64_", "bench": bench}
+    out["outcome"] = "success" if ok else ("build_failed" if not variants else "tests_failed")
+    tel_path = rd / "telemetry.json"
+    if tel_path.exists() and (json.loads(tel_path.read_text()).get("git") or {}).get("paths_outside_language_dir"):
+        out["outcome"] = "isolation_violation"
+    (rd / "validation.json").write_text(json.dumps(out, indent=1) + "\n")
+    if bench:
+        (rd / "kernel-bench.json").write_text(json.dumps(bench, indent=1) + "\n")
+    mm_ = load_manifest(run_id)
+    mm_["outcome"] = out["outcome"]
+    mm_["status"] = "validated"
+    save_manifest(run_id, mm_)
     return out
 
 
@@ -537,7 +600,7 @@ def record(run_id: str) -> Path:
     dest = RECORDS / run_id
     dest.mkdir(parents=True, exist_ok=True)
     for f in ["manifest.json", "telemetry.json", "validation.json", "conformance.json", "conformance-http.json",
-              "conformance-modes.json", "http-suite.json"]:
+              "conformance-modes.json", "http-suite.json", "kernel-bench.json"]:
         if (rd / f).exists():
             shutil.copy(rd / f, dest / f)
     if (rd / "transcript.jsonl").exists():
@@ -558,7 +621,8 @@ def import_run(run_id: str, merge: bool) -> str:
     if patches.exists():
         shutil.rmtree(patches)
     patches.mkdir()
-    sh(["git", "format-patch", "-q", "-o", str(patches), f"{m['baseline_commit']}..HEAD", "--", f"implementations/{lang}"], cwd=ws)
+    wd = m.get("work_dir") or f"implementations/{lang}"
+    sh(["git", "format-patch", "-q", "-o", str(patches), f"{m['baseline_commit']}..HEAD", "--", wd], cwd=ws)
     branch = f"track-{m['track'].lower()}/{lang}/{m['task']}/a{m['attempt']}"
     current = git(["rev-parse", "--abbrev-ref", "HEAD"], ROOT)
     if git(["status", "--porcelain"], ROOT):
@@ -571,7 +635,7 @@ def import_run(run_id: str, merge: bool) -> str:
             sh(["git", "am", "-q", "--committer-date-is-author-date", *map(str, files)], cwd=ROOT)
         # Squash-safe check: the branch must differ from repo_ref only inside the language dir.
         changed = git(["diff", "--name-only", m["repo_ref"], "HEAD"], ROOT).splitlines()
-        bad = [c for c in changed if not c.startswith(f"implementations/{lang}/")]
+        bad = [c for c in changed if not c.startswith(wd + "/")]
         if bad:
             raise SystemExit(f"isolation violation: {bad[:5]}")
     except BaseException:
@@ -594,7 +658,7 @@ def full_cycle(run_id: str, timeout_min: int, budget: float, max_turns: int | No
     run(run_id, timeout_min, budget, max_turns)
     log(f"[{run_id}] agent finished; collecting telemetry")
     tel = telemetry(run_id)
-    log(f"[{run_id}] validating (clean clone, public + hidden suites)")
+    log(f"[{run_id}] validating (clean clone, sandboxed)")
     v = validate(run_id)
     record(run_id)
     log(f"[{run_id}] outcome={v['outcome']} cost=${tel.get('cost_usd')} turns={tel.get('agent_turns')} wall={tel['time']['wall_seconds']}s")

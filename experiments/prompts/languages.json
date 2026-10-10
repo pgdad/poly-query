@@ -3,36 +3,112 @@
     "language": "Java",
     "lang_dir": "java",
     "toolchain": "Java 27 (OpenJDK 27 at $JAVA_HOME=/usr/lib/jvm/jdk-27; `java`/`javac`/`jar` are on PATH). Build with plain `javac`/`jar` from the Makefile or with Maven (`mvn`, offline; plugins already cached may be used, but no dependencies). Target release 27.",
-    "stdlib_note": "The JDK (java.*, javax.*, jdk.* modules incl. com.sun.net.httpserver, java.util.concurrent, java.nio, the Foreign Function & Memory API and the incubating Vector API) is the standard library. JUnit is NOT available: write tests with plain Java (e.g. a small test main) or `assert`."
+    "stdlib_note": "The JDK (java.*, javax.*, jdk.* modules incl. com.sun.net.httpserver, java.util.concurrent, java.nio, the Foreign Function & Memory API and the incubating Vector API) is the standard library. JUnit is NOT available: write tests with plain Java (e.g. a small test main) or `assert`.",
+    "work_dir": "implementations/java",
+    "template": "track-a-implementation.md",
+    "variant_prefix": "",
+    "abi": "",
+    "test_note": "",
+    "simd_name": "",
+    "optional_simd": "",
+    "test_target": ""
   },
   "clojure": {
     "language": "Clojure",
     "lang_dir": "clojure",
     "toolchain": "Clojure 1.12.3 via the `clojure`/`clj` CLI and tools.deps (deps.edn), running on OpenJDK 27 ($JAVA_HOME=/usr/lib/jvm/jdk-27). The only allowed dependency coordinate is org.clojure/clojure itself (already in the local Maven cache; there is no network).",
-    "stdlib_note": "clojure.core and the namespaces shipped inside the Clojure jar (clojure.string, clojure.set, clojure.java.io, clojure.test, clojure.walk, clojure.edn, …) plus the entire JDK via Java interop are the standard library. NOT allowed: clojure.data.json, data.csv, core.async, http-kit, ring, cheshire or any other library outside the Clojure jar."
+    "stdlib_note": "clojure.core and the namespaces shipped inside the Clojure jar (clojure.string, clojure.set, clojure.java.io, clojure.test, clojure.walk, clojure.edn, \u2026) plus the entire JDK via Java interop are the standard library. NOT allowed: clojure.data.json, data.csv, core.async, http-kit, ring, cheshire or any other library outside the Clojure jar.",
+    "work_dir": "implementations/clojure",
+    "template": "track-a-implementation.md",
+    "variant_prefix": "",
+    "abi": "",
+    "test_note": "",
+    "simd_name": "",
+    "optional_simd": "",
+    "test_target": ""
   },
   "rust": {
     "language": "Rust",
     "lang_dir": "rust",
     "toolchain": "Rust 1.96.0 stable with Cargo (offline; `CARGO_NET_OFFLINE=true`). Use edition 2024. Release builds for the launcher.",
-    "stdlib_note": "Only `std` (and `core`/`alloc`). No crates.io dependencies at all (no serde, no libc crate, no regex). If you need OS functionality std lacks (e.g. mmap, signals), declare the needed C functions yourself with `extern \"C\"` against the system libc."
+    "stdlib_note": "Only `std` (and `core`/`alloc`). No crates.io dependencies at all (no serde, no libc crate, no regex). If you need OS functionality std lacks (e.g. mmap, signals), declare the needed C functions yourself with `extern \"C\"` against the system libc.",
+    "work_dir": "implementations/rust",
+    "template": "track-a-implementation.md",
+    "variant_prefix": "",
+    "abi": "",
+    "test_note": "",
+    "simd_name": "",
+    "optional_simd": "",
+    "test_target": ""
   },
   "python": {
     "language": "Python",
     "lang_dir": "python",
     "toolchain": "CPython 3.14 (`python3` on PATH is 3.14). No virtualenv or pip installs are possible or needed.",
-    "stdlib_note": "Only the Python standard library (json, csv, http.server, socketserver, threading, concurrent.futures, mmap, zlib, struct, decimal, datetime, unittest, …). No third-party packages (no numpy, pandas, pyarrow, sqlite-based query execution is NOT allowed: the `sqlite3` module must not be used)."
+    "stdlib_note": "Only the Python standard library (json, csv, http.server, socketserver, threading, concurrent.futures, mmap, zlib, struct, decimal, datetime, unittest, \u2026). No third-party packages (no numpy, pandas, pyarrow, sqlite-based query execution is NOT allowed: the `sqlite3` module must not be used).",
+    "work_dir": "implementations/python",
+    "template": "track-a-implementation.md",
+    "variant_prefix": "",
+    "abi": "",
+    "test_note": "",
+    "simd_name": "",
+    "optional_simd": "",
+    "test_target": ""
   },
   "go": {
     "language": "Go",
     "lang_dir": "go",
-    "toolchain": "Go 1.27.1 (`go` on PATH; GOTOOLCHAIN=local, GOPROXY=off — no module downloads). Use a go.mod with no requirements.",
-    "stdlib_note": "Only the Go standard library (net/http, encoding/json, encoding/csv, sync, context, hash/crc32, syscall, testing, …). No external modules, including golang.org/x/*."
+    "toolchain": "Go 1.27.1 (`go` on PATH; GOTOOLCHAIN=local, GOPROXY=off \u2014 no module downloads). Use a go.mod with no requirements.",
+    "stdlib_note": "Only the Go standard library (net/http, encoding/json, encoding/csv, sync, context, hash/crc32, syscall, testing, \u2026). No external modules, including golang.org/x/*.",
+    "work_dir": "implementations/go",
+    "template": "track-a-implementation.md",
+    "variant_prefix": "",
+    "abi": "",
+    "test_note": "",
+    "simd_name": "",
+    "optional_simd": "",
+    "test_target": ""
   },
   "common-lisp": {
     "language": "Common Lisp",
     "lang_dir": "common-lisp",
     "toolchain": "SBCL 2.6.9 (`sbcl` on PATH, /opt/sbcl) with ASDF (bundled). Build a standalone executable or a core image via the Makefile (e.g. `sb-ext:save-lisp-and-die`); `bin/polyquery` may also start sbcl with a prebuilt core.",
-    "stdlib_note": "Only ANSI Common Lisp, SBCL's own extensions (sb-ext, sb-sys, sb-alien, sb-unix, sb-int, sb-impl, sb-thread, sb-kernel) and the contribs bundled with SBCL (asdf, uiop, sb-bsd-sockets, sb-posix, sb-concurrency, sb-rotate-byte, sb-md5, sb-cltl2, sb-introspect, sb-simd, sb-sprof, sb-rt). No Quicklisp, no third-party systems (no alexandria, cl-json, hunchentoot, cl-ppcre, bordeaux-threads)."
+    "stdlib_note": "Only ANSI Common Lisp, SBCL's own extensions (sb-ext, sb-sys, sb-alien, sb-unix, sb-int, sb-impl, sb-thread, sb-kernel) and the contribs bundled with SBCL (asdf, uiop, sb-bsd-sockets, sb-posix, sb-concurrency, sb-rotate-byte, sb-md5, sb-cltl2, sb-introspect, sb-simd, sb-sprof, sb-rt). No Quicklisp, no third-party systems (no alexandria, cl-json, hunchentoot, cl-ppcre, bordeaux-threads).",
+    "work_dir": "implementations/common-lisp",
+    "template": "track-a-implementation.md",
+    "variant_prefix": "",
+    "abi": "",
+    "test_note": "",
+    "simd_name": "",
+    "optional_simd": "",
+    "test_target": ""
+  },
+  "x86_64-asm": {
+    "language": "x86-64 assembly",
+    "lang_dir": "x86_64",
+    "work_dir": "native-kernels/x86_64",
+    "template": "track-a-kernels.md",
+    "variant_prefix": "x86_",
+    "toolchain": "GNU assembler (binutils 2.42) driven by gcc 13.3 on the native x86-64 host (AMD Zen 5: AVX2, BMI2, POPCNT and AVX-512F/BW/VL/DQ are available). NASM is installed but the build uses GNU `as` (`.S` files, AT&T or `.intel_syntax noprefix`).",
+    "abi": "System V AMD64",
+    "test_note": " (runs natively, plus ASan/UBSan build)",
+    "stdlib_note": "",
+    "simd_name": "`x86_avx2` (AVX2 with BMI1/BMI2/POPCNT)",
+    "optional_simd": "Optionally add a third variant `x86_avx512` (AVX-512F/BW/VL/DQ) \u2014 the host supports it.",
+    "test_target": "test"
+  },
+  "arm64-asm": {
+    "language": "AArch64 assembly",
+    "lang_dir": "arm64",
+    "work_dir": "native-kernels/arm64",
+    "template": "track-a-kernels.md",
+    "variant_prefix": "a64_",
+    "toolchain": "aarch64-linux-gnu-gcc 13.3 cross toolchain (GNU as). There is NO native AArch64 hardware: tests run under qemu-aarch64 user-mode emulation (`make -C native-kernels test-cross`), which verifies correctness only \u2014 emulated timings are meaningless, do not report them as performance.",
+    "abi": "AAPCS64 (Procedure Call Standard for the Arm 64-bit Architecture)",
+    "test_note": " (AArch64 runs under qemu emulation: functional only)",
+    "stdlib_note": "",
+    "simd_name": "`a64_neon` (Advanced SIMD / NEON)",
+    "optional_simd": "Optionally add a third variant `a64_sve` (SVE, vector-length agnostic); note that it can only be validated under emulation.",
+    "test_target": "test-cross"
   }
 }
