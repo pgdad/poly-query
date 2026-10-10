@@ -11,6 +11,7 @@ import polyquery.plan.BoundExpr;
 import polyquery.plan.BoundExprs;
 import polyquery.plan.LogicalPlan;
 import polyquery.plan.SortKey;
+import polyquery.plan.Subquery;
 import polyquery.sql.ast.Expr;
 import polyquery.sql.ast.Query;
 import polyquery.storage.Catalog;
@@ -322,20 +323,49 @@ public final class Analyzer {
     /**
      * Rewrites an expression of an aggregated query over the aggregation output: GROUP BY
      * expressions become key slots; any remaining input column is a grouping violation.
+     * Correlated subqueries that read this level's row get a frame map that rebuilds that row
+     * from the group keys (they may only use grouped columns).
      */
     private static BoundExpr finishAggregated(BoundExpr e, List<BoundExpr> keys, Scope scope) {
-        BoundExpr r = BoundExprs.rewrite(e, x -> {
-            int i = keys.indexOf(x);
-            return i >= 0 ? new BoundExpr.AggregateRef(i, x.type()) : null;
-        });
+        BoundExpr r = BoundExprs.rewrite(e, x -> groupedNode(x, keys, scope));
         if (BoundExprs.containsColumnRef(r)) {
             throw semantic("column must appear in GROUP BY or be used in an aggregate function");
         }
-        if (BoundExprs.dependsOnFrame(r, scope.frame())) {
-            throw PolyQueryException.of(ErrorCode.UNSUPPORTED,
-                    "correlated subqueries over grouped rows are not supported");
-        }
         return r;
+    }
+
+    private static BoundExpr groupedNode(BoundExpr x, List<BoundExpr> keys, Scope scope) {
+        int i = keys.indexOf(x);
+        if (i >= 0) {
+            return new BoundExpr.AggregateRef(i, x.type());
+        }
+        Subquery sq = BoundExprs.subqueryOf(x);
+        if (sq == null || !sq.refersTo(scope.frame())) {
+            return null;
+        }
+        int[] map = new int[scope.width()];
+        java.util.Arrays.fill(map, -1);
+        for (BoundExpr.OuterRef ref : sq.outerRefs()) {
+            if (ref.frame() != scope.frame()) {
+                continue;
+            }
+            int slot = -1;
+            for (int k = 0; k < keys.size() && slot < 0; k++) {
+                if (keys.get(k) instanceof BoundExpr.ColumnRef c && c.index() == ref.index()) {
+                    slot = k;
+                }
+            }
+            if (slot < 0) {
+                throw semantic("column '%s' used in a subquery must appear in GROUP BY", ref.name());
+            }
+            map[ref.index()] = slot;
+        }
+        BoundExpr out = BoundExprs.withSubquery(x, sq.withFrameMap(map));
+        if (out instanceof BoundExpr.InSubquery in) {
+            BoundExpr operand = BoundExprs.rewrite(in.operand(), y -> groupedNode(y, keys, scope));
+            out = new BoundExpr.InSubquery(operand, in.subquery(), in.valueCast(), in.negated());
+        }
+        return out;
     }
 
     private static boolean containsAggregate(Query.Select sel, List<Query.OrderItem> orderBy) {

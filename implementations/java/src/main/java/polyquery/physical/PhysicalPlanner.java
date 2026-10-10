@@ -21,7 +21,7 @@ public final class PhysicalPlanner {
         return switch (plan) {
             case LogicalPlan.Scan s -> new PhysicalPlan.TableScan(s.table(), s.alias());
             case LogicalPlan.SingleRow s -> new PhysicalPlan.Values();
-            case LogicalPlan.Filter f -> new PhysicalPlan.Filter(plan(f.input()), f.predicate());
+            case LogicalPlan.Filter f -> filter(plan(f.input()), f.predicate());
             case LogicalPlan.Project p -> new PhysicalPlan.Project(plan(p.input()), p.expressions(), p.names());
             case LogicalPlan.Aggregate a -> new PhysicalPlan.HashAggregate(plan(a.input()), a.groupKeys(), a.aggregates());
             case LogicalPlan.Distinct d -> new PhysicalPlan.HashDistinct(plan(d.input()));
@@ -29,6 +29,70 @@ public final class PhysicalPlanner {
             case LogicalPlan.Limit l -> new PhysicalPlan.Limit(plan(l.input()), l.offset(), l.limit());
             case LogicalPlan.Join j -> join(j);
         };
+    }
+
+    /**
+     * A filter inside a correlated subquery that equates input expressions with outer
+     * references becomes a hash lookup, so the input is processed once instead of once per
+     * outer row.
+     */
+    private static PhysicalPlan filter(PhysicalPlan input, BoundExpr predicate) {
+        List<BoundExpr> innerKeys = new ArrayList<>();
+        List<BoundExpr> outerKeys = new ArrayList<>();
+        List<BoundExpr> staticPreds = new ArrayList<>();
+        List<BoundExpr> dynamicPreds = new ArrayList<>();
+        for (BoundExpr c : BoundExprs.conjuncts(predicate)) {
+            if (c instanceof BoundExpr.Comparison cmp && cmp.op() == BoundExpr.CompareOp.EQ
+                    && !BoundExprs.containsSubquery(c)) {
+                if (isInner(cmp.left()) && isOuter(cmp.right())) {
+                    innerKeys.add(cmp.left());
+                    outerKeys.add(cmp.right());
+                    continue;
+                }
+                if (isOuter(cmp.left()) && isInner(cmp.right())) {
+                    innerKeys.add(cmp.right());
+                    outerKeys.add(cmp.left());
+                    continue;
+                }
+            }
+            if (BoundExprs.any(c, x -> x instanceof BoundExpr.OuterRef) || BoundExprs.containsCorrelatedSubquery(c)) {
+                dynamicPreds.add(c);
+            } else {
+                staticPreds.add(c);
+            }
+        }
+        if (innerKeys.isEmpty() || isCorrelated(input)) {
+            return new PhysicalPlan.Filter(input, predicate);
+        }
+        return new PhysicalPlan.HashLookupFilter(input, innerKeys, outerKeys, BoundExprs.and(staticPreds),
+                BoundExprs.and(dynamicPreds));
+    }
+
+    /** Reads input columns only (no outer references, no subqueries). */
+    private static boolean isInner(BoundExpr e) {
+        return BoundExprs.containsColumnRef(e) && !BoundExprs.any(e, x -> x instanceof BoundExpr.OuterRef)
+                && !BoundExprs.containsSubquery(e);
+    }
+
+    /** Reads outer references only (constant for one execution of the subquery). */
+    private static boolean isOuter(BoundExpr e) {
+        return !BoundExprs.containsColumnRef(e) && BoundExprs.any(e, x -> x instanceof BoundExpr.OuterRef)
+                && !BoundExprs.containsSubquery(e) && !BoundExprs.any(e, x -> x instanceof BoundExpr.AggregateRef);
+    }
+
+    /** True if some expression of the plan depends on outer references. */
+    private static boolean isCorrelated(PhysicalPlan p) {
+        for (BoundExpr e : PhysicalPlan.expressions(p)) {
+            if (BoundExprs.any(e, x -> x instanceof BoundExpr.OuterRef) || BoundExprs.containsCorrelatedSubquery(e)) {
+                return true;
+            }
+        }
+        for (PhysicalPlan c : p.children()) {
+            if (isCorrelated(c)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private PhysicalPlan join(LogicalPlan.Join j) {

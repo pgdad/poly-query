@@ -52,6 +52,38 @@ public sealed interface PhysicalPlan {
         }
     }
 
+    /**
+     * Filter of a correlated subquery whose predicate equates input expressions with outer
+     * references: the (uncorrelated) input is hashed once on {@code innerKeys} after applying
+     * {@code staticPredicate}; each execution returns the rows whose keys equal the current
+     * values of {@code outerKeys}, filtered by {@code dynamicPredicate}. Predicates may be null.
+     */
+    record HashLookupFilter(PhysicalPlan input, List<BoundExpr> innerKeys, List<BoundExpr> outerKeys,
+                            BoundExpr staticPredicate, BoundExpr dynamicPredicate) implements PhysicalPlan {
+        @Override
+        public List<ColumnSchema> schema() {
+            return input.schema();
+        }
+
+        @Override
+        public List<PhysicalPlan> children() {
+            return List.of(input);
+        }
+
+        /** Expressions of a node, for correlation analysis. */
+        public List<BoundExpr> expressions() {
+            List<BoundExpr> out = new ArrayList<>(innerKeys);
+            out.addAll(outerKeys);
+            if (staticPredicate != null) {
+                out.add(staticPredicate);
+            }
+            if (dynamicPredicate != null) {
+                out.add(dynamicPredicate);
+            }
+            return out;
+        }
+    }
+
     record Project(PhysicalPlan input, List<BoundExpr> expressions, List<String> names) implements PhysicalPlan {
         @Override
         public List<ColumnSchema> schema() {
@@ -149,6 +181,49 @@ public sealed interface PhysicalPlan {
         public List<PhysicalPlan> children() {
             return List.of(input);
         }
+    }
+
+    /** The expressions evaluated by a node itself (not its children). */
+    static List<BoundExpr> expressions(PhysicalPlan p) {
+        List<BoundExpr> out = new ArrayList<>();
+        switch (p) {
+            case TableScan t -> { }
+            case Values v -> { }
+            case HashDistinct d -> { }
+            case Sort s -> { }
+            case Filter f -> out.add(f.predicate());
+            case HashLookupFilter h -> out.addAll(h.expressions());
+            case Project pr -> out.addAll(pr.expressions());
+            case HashAggregate a -> {
+                out.addAll(a.groupKeys());
+                for (AggregateCall c : a.aggregates()) {
+                    if (c.argument() != null) {
+                        out.add(c.argument());
+                    }
+                }
+            }
+            case HashJoin j -> {
+                out.addAll(j.leftKeys());
+                out.addAll(j.rightKeys());
+                if (j.residual() != null) {
+                    out.add(j.residual());
+                }
+            }
+            case NestedLoopJoin j -> {
+                if (j.condition() != null) {
+                    out.add(j.condition());
+                }
+            }
+            case Limit l -> {
+                if (l.offset() != null) {
+                    out.add(l.offset());
+                }
+                if (l.limit() != null) {
+                    out.add(l.limit());
+                }
+            }
+        }
+        return out;
     }
 
     private static List<ColumnSchema> concat(PhysicalPlan left, PhysicalPlan right) {

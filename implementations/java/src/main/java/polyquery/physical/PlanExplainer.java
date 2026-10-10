@@ -38,6 +38,19 @@ public final class PlanExplainer {
                 node.put("predicate", ExprFormatter.format(f.predicate()));
                 exprs.add(f.predicate());
             }
+            case PhysicalPlan.HashLookupFilter h -> {
+                node.put("op", "HashLookupFilter");
+                node.put("inner_keys", formatAll(h.innerKeys()));
+                node.put("outer_keys", formatAll(h.outerKeys()));
+                if (h.staticPredicate() != null) {
+                    node.put("predicate", ExprFormatter.format(h.staticPredicate()));
+                    exprs.add(h.staticPredicate());
+                }
+                if (h.dynamicPredicate() != null) {
+                    node.put("correlated_predicate", ExprFormatter.format(h.dynamicPredicate()));
+                    exprs.add(h.dynamicPredicate());
+                }
+            }
             case PhysicalPlan.Project p -> {
                 node.put("op", "Project");
                 node.put("columns", p.names());

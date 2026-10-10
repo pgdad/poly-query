@@ -10,9 +10,31 @@ import java.util.List;
  * @param outerRefs references to enclosing query levels made anywhere inside the subquery; the
  *                  subquery is correlated iff this is non-empty, and its result depends only on
  *                  the values of these references
+ * @param frameMap  null if the expression is evaluated on rows of the level's FROM clause; for
+ *                  expressions over aggregation output rows, maps each FROM column index to the
+ *                  group-key slot holding its value (-1 if not grouped), so the frame row can be
+ *                  reconstructed
  */
-public record Subquery(LogicalPlan plan, int frame, List<BoundExpr.OuterRef> outerRefs) {
+public record Subquery(LogicalPlan plan, int frame, List<BoundExpr.OuterRef> outerRefs, int[] frameMap) {
+    public Subquery(LogicalPlan plan, int frame, List<BoundExpr.OuterRef> outerRefs) {
+        this(plan, frame, outerRefs, null);
+    }
+
     public boolean correlated() {
         return !outerRefs.isEmpty();
+    }
+
+    /** True if the subquery depends on the current row of correlation frame {@code id}. */
+    public boolean refersTo(int id) {
+        for (BoundExpr.OuterRef r : outerRefs) {
+            if (r.frame() == id) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public Subquery withFrameMap(int[] map) {
+        return new Subquery(plan, frame, outerRefs, map);
     }
 }

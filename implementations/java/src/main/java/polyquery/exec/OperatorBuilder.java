@@ -35,6 +35,10 @@ public final class OperatorBuilder {
             case PhysicalPlan.TableScan s -> new Operators.Scan(s.table(), ctx);
             case PhysicalPlan.Values v -> new Operators.SingleRow();
             case PhysicalPlan.Filter f -> new Operators.Filter(build(f.input()), compiler.compile(f.predicate()), ctx);
+            case PhysicalPlan.HashLookupFilter h -> new HashLookupFilter(build(h.input()), compileAll(h.innerKeys()),
+                    compileAll(h.outerKeys()), types(h.innerKeys()), types(h.outerKeys()),
+                    h.staticPredicate() == null ? null : compiler.compile(h.staticPredicate()),
+                    h.dynamicPredicate() == null ? null : compiler.compile(h.dynamicPredicate()), ctx);
             case PhysicalPlan.Project p -> new Operators.Project(build(p.input()), compileAll(p.expressions()));
             case PhysicalPlan.HashAggregate a -> {
                 Evaluator[] args = new Evaluator[a.aggregates().size()];
@@ -83,6 +87,14 @@ public final class OperatorBuilder {
         Evaluator[] out = new Evaluator[exprs.size()];
         for (int i = 0; i < out.length; i++) {
             out[i] = compiler.compile(exprs.get(i));
+        }
+        return out;
+    }
+
+    private static DataType[] types(List<BoundExpr> exprs) {
+        DataType[] out = new DataType[exprs.size()];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = exprs.get(i).type();
         }
         return out;
     }

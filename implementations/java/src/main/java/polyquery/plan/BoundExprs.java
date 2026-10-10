@@ -161,12 +161,27 @@ public final class BoundExprs {
     }
 
     private static boolean refersTo(Subquery s, int frame) {
-        for (BoundExpr.OuterRef r : s.outerRefs()) {
-            if (r.frame() == frame) {
-                return true;
-            }
-        }
-        return false;
+        return s.refersTo(frame);
+    }
+
+    /** The subquery of a subquery expression node, else null. */
+    public static Subquery subqueryOf(BoundExpr e) {
+        return switch (e) {
+            case BoundExpr.ScalarSubquery s -> s.subquery();
+            case BoundExpr.Exists s -> s.subquery();
+            case BoundExpr.InSubquery s -> s.subquery();
+            default -> null;
+        };
+    }
+
+    /** Copy of a subquery expression node with its subquery replaced. */
+    public static BoundExpr withSubquery(BoundExpr e, Subquery sq) {
+        return switch (e) {
+            case BoundExpr.ScalarSubquery s -> new BoundExpr.ScalarSubquery(sq, s.type());
+            case BoundExpr.Exists s -> new BoundExpr.Exists(sq);
+            case BoundExpr.InSubquery s -> new BoundExpr.InSubquery(s.operand(), sq, s.valueCast(), s.negated());
+            default -> throw new IllegalArgumentException("not a subquery expression");
+        };
     }
 
     /** True if the expression has no row inputs (columns, aggregates, subqueries, functions with effects). */

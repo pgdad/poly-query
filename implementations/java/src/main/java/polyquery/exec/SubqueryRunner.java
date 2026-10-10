@@ -88,7 +88,7 @@ final class SubqueryRunner {
             }
             return cached;
         }
-        Object[] previous = ctx.setFrame(subquery.frame(), row);
+        Object[] previous = ctx.setFrame(subquery.frame(), frameRow(row));
         try {
             List<Object> key = new ArrayList<>(subquery.outerRefs().size());
             for (BoundExpr.OuterRef ref : subquery.outerRefs()) {
@@ -109,6 +109,21 @@ final class SubqueryRunner {
         } finally {
             ctx.setFrame(subquery.frame(), previous);
         }
+    }
+
+    /** The row of the enclosing level as the subquery sees it (rebuilt from group keys if needed). */
+    private Object[] frameRow(Object[] row) {
+        int[] map = subquery.frameMap();
+        if (map == null) {
+            return row;
+        }
+        Object[] out = new Object[map.length];
+        for (int i = 0; i < map.length; i++) {
+            if (map[i] >= 0) {
+                out[i] = row[map[i]];
+            }
+        }
+        return out;
     }
 
     private Object run(Function<Operator, Object> compute) {
