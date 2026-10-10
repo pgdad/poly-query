@@ -1,0 +1,112 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase3-java-a1-20261010T193056Z",
+ "language": "java",
+ "task": "phase3",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase3",
+ "prompt_sha256": "4a4a2780a1e8a411897a3b3a517b2d7fd14c4c2fc55f667178033ae91865107f",
+ "session_id": "cb4d06ce-20dd-4a9a-b6b5-36765c7ff3af",
+ "tokens": {
+  "input": 250,
+  "output": 190353,
+  "cache_read": 29827237,
+  "cache_creation": 356695,
+  "thinking": null,
+  "thinking_estimated": 73351,
+  "source": "result events (summed over 3 segments)",
+  "api_messages": 180
+ },
+ "rate_limit": {
+  "events": 21,
+  "max_utilization": {
+   "five_hour": 0.64,
+   "seven_day": 0.12
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 15.812226800000005,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 130,
+ "result_segments": 3,
+ "assistant_messages": 348,
+ "tool_calls": {
+  "Bash": 178,
+  "Agent": 1,
+  "ScheduleWakeup": 2,
+  "ListAgents": 1
+ },
+ "tool_calls_total": 182,
+ "tool_failures": 5,
+ "build_invocations": 30,
+ "build_failures_heuristic": 3,
+ "conformance_runs": 9,
+ "conformance_progress": [
+  [
+   411,
+   554
+  ],
+  [
+   554,
+   554
+  ],
+  [
+   554,
+   554
+  ],
+  [
+   143,
+   143
+  ],
+  [
+   554,
+   554
+  ],
+  [
+   0,
+   15
+  ],
+  [
+   0,
+   3324
+  ],
+  [
+   554,
+   554
+  ]
+ ],
+ "repair_iterations": 8,
+ "time": {
+  "wall_seconds": 4004.8,
+  "model_api_seconds": 2097.8,
+  "tool_seconds": 359.1,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 7,
+  "files_changed": 54,
+  "lines_added": 4374,
+  "lines_removed": 132,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 3 is finished and the definition of done is met: the conformance runner passes every case in phases 1\u20133, `make build test` succeeds from a clean build (43 unit tests), and all work is committed.\n\n```\nphase 1: 225/225 pass, 0 fail, 0 error, 0 not implemented\nphase 2: 186/186 pass, 0 fail, 0 error, 0 not implemented\nphase 3: 143/143 pass, 0 fail, 0 error, 0 not implemented\nTOTAL: 554/554 pass\n```\n\n## What I implemented\n- **In-memory layouts:** tables can be stored as rows or as columns (the default), chosen with the `layout` option on `load`/`open`. Columns use typed arrays with null bitmaps. String columns are dictionary-encoded automatically when at most half the values are distinct, or always with `dictionary:true`.\n- **PQCF v1 files (`save`/`open`):**\n  - The writer supports PLAIN, DICT and RLE with automatic or forced choice, CRC-32 checksums, 8-byte-aligned chunks and min/max statistics per chunk.\n  - Saves are crash-safe: write a temp file in the same directory, fsync, rename over the target, fsync the directory. Temp files left by crashed processes are cleaned up on the next save.\n  - The reader validates everything in the spec and returns the right error codes. It also rejects non-zero bytes outside chunks, so a bit flip in padding is still caught.\n  - With `mmap:true` the file is memory-mapped and each chunk is checked and decoded on first use; without it, everything is checked and decoded at `open`.\n  - Indexes recorded in a file are rebuilt on `open`.\n- **Statistics (`stats`):** row count, plus per column the null count, min, max and distinct count. Distinct counts are exact up to 100k values, then estimated.\n- **Indexes:** hash indexes and ordered (sorted-array, B-tree equivalent) indexes, with `CREATE INDEX [IF NOT EXISTS]` and `DROP INDEX [IF EXISTS]`. Index names are global, and indexes are dropped along with their table.\n- **Planner:**\n  - Usable filter conditions (`=`, ranges, `BETWEEN`, `IN`) are converted exactly to index lookups. Mixed decimal scales and date-vs-timestamp comparisons are handled correctly.\n  - The most selective index is chosen by the spec's estimates and 10% rule. Otherwise a table scan skips PQCF row groups whose min/max rule out the filter.\n  - The full filter is always re-applied, so results never depend on which path was chosen.\n  - Scans read only the columns the query uses, including through derived tables and CTEs.\n  - INNER hash joins build on the smaller estimated input.\n  - EXPLAIN reports `TableScan`/`IndexScan` with the columns actually read and the index used.\n\n## Testing beyond the suite\n- **Format checks:** an independent Python reader confirmed our files are byte-exact to the spec and decode to the same values. Files from an independent writer with unusual but valid layouts read back correctly.\n- **Corrupt files:** random bit flips, truncations and targeted structural corruptions were all rejected with the correct error code.\n- **Crash safety:** killing the engine with SIGKILL during repeated saves always left the target either absent or complete.\n- **Result consistency:** 1,500 random queries agreed across every layout, index type, PQCF-backed tables and with indexes or the optimizer turned off.\n- **Background review:** a reviewer was interrupted before writing a report. Its completed checks found nothing: about 2,900 queries matched the pre-Phase-3 engine, and about 950k single-bit flips were all rejected.\n\n## Known limitations\n- Indexes are only used for filters sitting directly on a table scan. There are no index joins and no index-ordered output.\n- OR conditions don't use indexes or row-group skipping.\n- Tables loaded into memory form a single row group, so row-group skipping only helps PQCF-backed tables.\n- String min/max are read from files but not written.\n- No HTTP server or vectorized/parallel execution yet (those are Phase 4\u20135).\n\n## Decisions worth knowing\n- **Extra index-selection rule:** an index is also chosen when it is expected to return at most 3 rows.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

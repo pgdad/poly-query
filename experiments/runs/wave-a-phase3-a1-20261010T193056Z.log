@@ -1,2 +1,6 @@
 2026-10-10T19:30:58+00:00 wave wave-a-phase3-a1-20261010T193056Z: order=['java']
 2026-10-10T19:30:58+00:00 [a-phase3-java-a1-20261010T193056Z] agent started
+2026-10-10T20:37:42+00:00 [a-phase3-java-a1-20261010T193056Z] agent finished; collecting telemetry
+2026-10-10T20:37:42+00:00 [a-phase3-java-a1-20261010T193056Z] validating (clean clone, sandboxed)
+2026-10-10T20:37:45+00:00 [a-phase3-java-a1-20261010T193056Z] outcome=success cost=$15.812226800000005 turns=130 wall=4004.8s
+2026-10-10T20:37:45+00:00 wave wave-a-phase3-a1-20261010T193056Z finished: java=success
