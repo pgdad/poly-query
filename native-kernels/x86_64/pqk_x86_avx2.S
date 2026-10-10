@@ -26,10 +26,12 @@
  *    (vpsubq of all-ones lanes) — no movmsk needed.
  *  - Validity in vector loops: the 64-bit validity word of a full block is
  *    broadcast and shifted per lane with vpsllvq so that the row's bit lands in
- *    the lane's sign bit; that sign mask feeds vpmaskmovq / vmaskmovpd /
- *    vblendvpd directly. Masked loads are only used on full in-bounds blocks
- *    (AMD documents masked-off-element fault behaviour as implementation
- *    dependent, so tails never rely on it).
+ *    the lane's sign bit. vblendvpd consumes that sign mask directly; for
+ *    sums it is widened to a full lane mask (vpcmpgtq against zero) and ANDed
+ *    with a plain load. vpmaskmovq/vmaskmovpd are deliberately NOT used: on
+ *    Zen 5 they were up to 4x slower when streaming from DRAM, and AMD
+ *    documents fault behaviour of masked-off elements as implementation
+ *    dependent. Final partial blocks (< 64 rows) run scalar code.
  *  - sum_i64 is exact: per lane we accumulate S = sum(x) mod 2^64,
  *    HU = sum(x >>> 32) and N = number of negative x. With LU = sum of the low
  *    32-bit halves, sum(x) = HU*2^32 + LU - N*2^64 and LU = S - HU*2^32
@@ -617,7 +619,7 @@ ENDF pqk_x86_avx2_compare_i64
  * int pqk_x86_avx2_sum_i64(data=rdi, validity=rsi, n=rdx, out_sum=rcx)
  * Lane accumulators (two sets for ILP): S ymm0/ymm1, HU ymm2/ymm3,
  * N ymm4/ymm5; temps ymm6/ymm7/ymm10/ymm11; ymm12 = bcast validity word,
- * ymm13 = per-group sign mask. Scalar 128-bit total r9:r8 (hi:lo).
+ * ymm13 = per-group lane mask, ymm15 = zero. Scalar 128-bit total r9:r8 (hi:lo).
  * r10 = rows remaining, r11 = out_sum, r12 = rows/blocks left in chunk.
  * ---------------------------------------------------------------------- */
 #ifndef SUM_CHUNK_ROWS                  /* overridable to test the fold path */
@@ -775,10 +777,10 @@ ENDF pqk_x86_avx2_sum_i64
 /* ------------------------------------------------------------------------
  * double pqk_x86_avx2_sum_f64(data=rdi, validity=rsi, n=rdx)
  * 16 lane-wise partial sums in ymm0-ymm3 (+0.0 init), scalar tail sum in
- * xmm4. Invalid rows: vmaskmovpd with the vpsllvq sign mask loads +0.0
- * (full blocks); in the partial block the row is ANDed to +0.0 bits.
+ * xmm4. Invalid rows are ANDed to +0.0 bits (full vpcmpgtq lane mask from
+ * the vpsllvq sign mask in full blocks, sbb mask in the partial block).
  * Final: ((ymm0+ymm1)+(ymm2+ymm3)) lanes, then + xmm4.
- * r10 = rows remaining, ymm12/13 validity, ymm6 temp.
+ * r10 = rows remaining, ymm12/13 validity, ymm15 zero, ymm6 temp.
  * ---------------------------------------------------------------------- */
 FUNC pqk_x86_avx2_sum_f64
         vxorpd  %xmm0, %xmm0, %xmm0
@@ -1478,9 +1480,9 @@ ENDF pqk_x86_avx2_compare_fixed
  * ANDed with the row's validity byte. ngroups > UINT32_MAX skips the check;
  * ngroups == 0 and the < 8 row tail use the scalar check.
  * Pass 2 (scalar scatter-add in row order, so the overflow flag is exactly
- * the reference's): no validity -> straight loop; with validity -> per 64
- * rows iterate the set validity bits with tzcnt/blsr. Overflow -> jo to a
- * cold path setting r12d. r10 = row, r11 = ngroups / group id,
+ * the reference's): no validity -> straight loop that, after the first jo,
+ * continues in a copy without overflow checks; with validity -> per 64 rows
+ * iterate the set validity bits with tzcnt/blsr, seto/or into r12b. r10 = row, r11 = ngroups / group id,
  * r13 = rows left, r14 = row base, r15 = validity bits, rbp = validity ptr.
  * ---------------------------------------------------------------------- */
 FUNC pqk_x86_avx2_group_sum_i64
@@ -1568,34 +1570,58 @@ FUNC pqk_x86_avx2_group_sum_i64
         jnz     .Lg_p2v
         xor     %r10d, %r10d
         test    %r9, %r9
-        jz      .Lg_p2nc
+        jz      .Lg_p2n
+        /* With counts. After the first wrap the flag is final, so the loop
+         * continues in a variant without the jo check (no mispredicts on
+         * overflow-heavy data). */
 .Lg_p2c:
         mov     (%rdi,%r10,4), %eax
         mov     (%rsi,%r10,8), %rbx
         add     %rbx, (%r8,%rax,8)
-        jo      .Lg_of_c
-.Lg_p2c_b:
+        jo      .Lg_p2c_of
         incq    (%r9,%rax,8)
         inc     %r10
         cmp     %rcx, %r10
         jb      .Lg_p2c
         jmp     .Lg_ok
-.Lg_of_c:
+.Lg_p2c_of:
         mov     $1, %r12d
-        jmp     .Lg_p2c_b
-.Lg_p2nc:
+        incq    (%r9,%rax,8)
+        inc     %r10
+        cmp     %rcx, %r10
+        jae     .Lg_ok
+.Lg_p2c_nc:
         mov     (%rdi,%r10,4), %eax
         mov     (%rsi,%r10,8), %rbx
         add     %rbx, (%r8,%rax,8)
-        jo      .Lg_of_nc
-.Lg_p2nc_b:
+        incq    (%r9,%rax,8)
         inc     %r10
         cmp     %rcx, %r10
-        jb      .Lg_p2nc
+        jb      .Lg_p2c_nc
         jmp     .Lg_ok
-.Lg_of_nc:
+        /* Without counts, same scheme. */
+.Lg_p2n:
+        mov     (%rdi,%r10,4), %eax
+        mov     (%rsi,%r10,8), %rbx
+        add     %rbx, (%r8,%rax,8)
+        jo      .Lg_p2n_of
+        inc     %r10
+        cmp     %rcx, %r10
+        jb      .Lg_p2n
+        jmp     .Lg_ok
+.Lg_p2n_of:
         mov     $1, %r12d
-        jmp     .Lg_p2nc_b
+        inc     %r10
+        cmp     %rcx, %r10
+        jae     .Lg_ok
+.Lg_p2n_nc:
+        mov     (%rdi,%r10,4), %eax
+        mov     (%rsi,%r10,8), %rbx
+        add     %rbx, (%r8,%rax,8)
+        inc     %r10
+        cmp     %rcx, %r10
+        jb      .Lg_p2n_nc
+        jmp     .Lg_ok
 
 .Lg_p2v:
         mov     %rcx, %r13
@@ -1622,8 +1648,8 @@ FUNC pqk_x86_avx2_group_sum_i64
         mov     (%rdi,%r10,4), %r11d
         mov     (%rsi,%r10,8), %rbx
         add     %rbx, (%r8,%r11,8)
-        jo      .Lg_of_v
-.Lg_vrow_b:
+        seto    %al
+        or      %al, %r12b
         test    %r9, %r9
         jz      1f
         incq    (%r9,%r11,8)
@@ -1634,13 +1660,9 @@ FUNC pqk_x86_avx2_group_sum_i64
         add     $8, %rbp
         sub     $64, %r13
         ja      .Lg_vblk
-        jmp     .Lg_ok
-.Lg_of_v:
-        mov     $1, %r12d
-        jmp     .Lg_vrow_b
 
 .Lg_ok:
-        mov     %r12d, %eax
+        movzbl  %r12b, %eax
         jmp     .Lg_ret
 .Lg_einval:
         mov     $2, %eax
@@ -1657,21 +1679,40 @@ ENDF pqk_x86_avx2_group_sum_i64
 
 /* ------------------------------------------------------------------------
  * void pqk_x86_avx2_gather_i64(data=rdi, idx=rsi, m=rdx, out=rcx)
- * 8 rows per iteration: indices zero-extended to qwords (vpmovzxdq, so
- * indices >= 2^31 stay correct) and two vpgatherqq with all-ones masks
- * (ymm2/ymm3, consumed by the gather). Remaining rows scalar.
+ * 8 independent scalar load pairs per iteration (idx zero-extended by the
+ * 32-bit mov, so indices >= 2^31 are fine). vpgatherqq was measured: ~5%
+ * faster when data is cache resident, but 15-20% slower when the gathered
+ * column comes from DRAM (random access is latency bound; the gather
+ * instruction exposes less memory-level parallelism on Zen 5), so plain
+ * loads are used. rax/r8-r11 scratch.
  * ---------------------------------------------------------------------- */
 FUNC pqk_x86_avx2_gather_i64
         cmp     $8, %rdx
         jb      2f
-1:      vpmovzxdq (%rsi), %ymm0
-        vpmovzxdq 16(%rsi), %ymm1
-        vpcmpeqq %ymm2, %ymm2, %ymm2
-        vpcmpeqq %ymm3, %ymm3, %ymm3
-        vpgatherqq %ymm2, (%rdi,%ymm0,8), %ymm4
-        vpgatherqq %ymm3, (%rdi,%ymm1,8), %ymm5
-        vmovdqu %ymm4, (%rcx)
-        vmovdqu %ymm5, 32(%rcx)
+1:      mov     (%rsi), %eax
+        mov     4(%rsi), %r8d
+        mov     8(%rsi), %r9d
+        mov     12(%rsi), %r10d
+        mov     (%rdi,%rax,8), %rax
+        mov     (%rdi,%r8,8), %r8
+        mov     (%rdi,%r9,8), %r9
+        mov     (%rdi,%r10,8), %r10
+        mov     %rax, (%rcx)
+        mov     %r8, 8(%rcx)
+        mov     %r9, 16(%rcx)
+        mov     %r10, 24(%rcx)
+        mov     16(%rsi), %eax
+        mov     20(%rsi), %r8d
+        mov     24(%rsi), %r9d
+        mov     28(%rsi), %r10d
+        mov     (%rdi,%rax,8), %rax
+        mov     (%rdi,%r8,8), %r8
+        mov     (%rdi,%r9,8), %r9
+        mov     (%rdi,%r10,8), %r10
+        mov     %rax, 32(%rcx)
+        mov     %r8, 40(%rcx)
+        mov     %r9, 48(%rcx)
+        mov     %r10, 56(%rcx)
         add     $32, %rsi
         add     $64, %rcx
         sub     $8, %rdx
@@ -1686,8 +1727,7 @@ FUNC pqk_x86_avx2_gather_i64
         add     $8, %rcx
         dec     %rdx
         jnz     3b
-4:      vzeroupper
-        ret
+4:      ret
 ENDF pqk_x86_avx2_gather_i64
 
         .section .note.GNU-stack, "", @progbits

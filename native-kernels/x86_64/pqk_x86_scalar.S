@@ -733,29 +733,51 @@ ENDF pqk_x86_scalar_minmax_f64
 
 /* ------------------------------------------------------------------------
  * Bitmap and/or/andnot(a=rdi, b=rsi, out=rdx, nbytes=rcx)
- * 8 bytes per step (both inputs loaded before the store, so out may alias a
- * or b), then single bytes. rax/r8 scratch.
+ * 32 bytes per iteration (4 qwords; all loads of a step precede its stores,
+ * and positions coincide, so out may alias a or b), then 8-byte steps, then
+ * single bytes. rax, r8-r11 scratch.
  * ---------------------------------------------------------------------- */
+.macro BQ op, neg, off, ra, rb
+        mov     \off(%rsi), \rb
+.if \neg
+        not     \rb
+.endif
+        mov     \off(%rdi), \ra
+        \op     \rb, \ra
+.endm
+
 .macro BITOP name, op, neg
 FUNC \name
-        cmp     $8, %rcx
+        push    %rbx
+        push    %rbp
+        cmp     $32, %rcx
         jb      2f
-1:      mov     (%rsi), %r8
-.if \neg
-        not     %r8
-.endif
-        mov     (%rdi), %rax
-        \op     %r8, %rax
+1:      BQ      \op, \neg, 0, %rax, %r8
+        BQ      \op, \neg, 8, %r9, %r10
+        BQ      \op, \neg, 16, %r11, %rbx
+        BQ      \op, \neg, 24, %rbp, %r8
+        mov     %rax, (%rdx)
+        mov     %r9, 8(%rdx)
+        mov     %r11, 16(%rdx)
+        mov     %rbp, 24(%rdx)
+        add     $32, %rdi
+        add     $32, %rsi
+        add     $32, %rdx
+        sub     $32, %rcx
+        cmp     $32, %rcx
+        jae     1b
+2:      cmp     $8, %rcx
+        jb      3f
+        BQ      \op, \neg, 0, %rax, %r8
         mov     %rax, (%rdx)
         add     $8, %rdi
         add     $8, %rsi
         add     $8, %rdx
         sub     $8, %rcx
-        cmp     $8, %rcx
-        jae     1b
-2:      test    %rcx, %rcx
-        jz      4f
-3:      movzbl  (%rsi), %r8d
+        jmp     2b
+3:      test    %rcx, %rcx
+        jz      5f
+4:      movzbl  (%rsi), %r8d
 .if \neg
         not     %r8d
 .endif
@@ -766,8 +788,10 @@ FUNC \name
         inc     %rsi
         inc     %rdx
         dec     %rcx
-        jnz     3b
-4:      ret
+        jnz     4b
+5:      pop     %rbp
+        pop     %rbx
+        ret
 ENDF \name
 .endm
 
@@ -918,70 +942,162 @@ ENDF pqk_x86_scalar_compare_fixed
 /* ------------------------------------------------------------------------
  * int pqk_x86_scalar_group_sum_i64(gid=rdi, values=rsi, validity=rdx, n=rcx,
  *                                  sums=r8, counts=r9, ngroups=[rsp+8])
- * Pass 1 validates every valid row's group id (outputs untouched on error).
- * Pass 2 adds in row order; seto/or collects signed wrap-around.
- * r10 = row index, r11 = ngroups, ebx = current validity byte (shifted right
- * once per row; reloaded every 8 rows, 0xff when validity == NULL),
- * r12b = overflow flag, rax = group id / scratch, r13 = value.
+ * Pass 1 validates every valid row's group id (outputs untouched on error):
+ * straight loop without validity, else per row with the validity byte.
+ * Pass 2 adds in row order (so the overflow flag equals the reference's):
+ *  - no validity: straight loop; the first jo sets the flag and continues in
+ *    a copy of the loop without the check (flag is final by then);
+ *  - validity: per 64 rows, iterate set validity bits (bsf, x &= x-1),
+ *    seto/or collects wrap-around.
+ * r10 = row, r11 = ngroups / group id, r12b = overflow flag, rbx = value or
+ * validity byte, r13 = rows left, r14 = row base, r15 = validity bits,
+ * rbp = validity ptr.
  * ---------------------------------------------------------------------- */
-.macro GS_VALID_BYTE
-        test    $7, %r10b
-        jnz     1f
-        mov     $0xff, %ebx
-        test    %rdx, %rdx
-        jz      1f
-        mov     %r10, %rax
-        shr     $3, %rax
-        movzbl  (%rdx,%rax), %ebx
-1:
-.endm
-
 FUNC pqk_x86_scalar_group_sum_i64
         push    %rbx
+        push    %rbp
         push    %r12
         push    %r13
-        mov     32(%rsp), %r11          /* ngroups */
+        push    %r14
+        push    %r15
+        mov     56(%rsp), %r11          /* ngroups */
         xor     %r12d, %r12d
         xor     %r10d, %r10d
-.Lgs_p1:
-        cmp     %rcx, %r10
-        jae     .Lgs_p2init
-        GS_VALID_BYTE
-        shr     $1, %ebx                /* CF = valid */
-        jnc     3f
+        test    %rcx, %rcx
+        jz      .Lgs_ok
+        test    %rdx, %rdx
+        jnz     .Lgs_p1v
+.Lgs_p1n:
         mov     (%rdi,%r10,4), %eax
         cmp     %r11, %rax
         jae     .Lgs_einval
-3:      inc     %r10
-        jmp     .Lgs_p1
-.Lgs_p2init:
-        xor     %r10d, %r10d
-.Lgs_p2:
+        inc     %r10
         cmp     %rcx, %r10
-        jae     .Lgs_done
-        GS_VALID_BYTE
-        shr     $1, %ebx
-        jnc     3f
-        mov     (%rdi,%r10,4), %eax
-        mov     (%rsi,%r10,8), %r13
-        add     %r13, (%r8,%rax,8)
-        seto    %r13b
-        or      %r13b, %r12b
-        test    %r9, %r9
-        jz      3f
-        incq    (%r9,%rax,8)
-3:      inc     %r10
+        jb      .Lgs_p1n
         jmp     .Lgs_p2
-.Lgs_done:
+.Lgs_p1v:
+        test    $7, %r10b
+        jnz     1f
+        mov     %r10, %rax
+        shr     $3, %rax
+        movzbl  (%rdx,%rax), %ebx
+1:      shr     $1, %ebx                /* CF = valid */
+        jnc     2f
+        mov     (%rdi,%r10,4), %eax
+        cmp     %r11, %rax
+        jae     .Lgs_einval
+2:      inc     %r10
+        cmp     %rcx, %r10
+        jb      .Lgs_p1v
+
+.Lgs_p2:
+        test    %rdx, %rdx
+        jnz     .Lgs_p2v
+        xor     %r10d, %r10d
+        test    %r9, %r9
+        jz      .Lgs_p2n
+.Lgs_p2c:
+        mov     (%rdi,%r10,4), %eax
+        mov     (%rsi,%r10,8), %rbx
+        add     %rbx, (%r8,%rax,8)
+        jo      .Lgs_p2c_of
+        incq    (%r9,%rax,8)
+        inc     %r10
+        cmp     %rcx, %r10
+        jb      .Lgs_p2c
+        jmp     .Lgs_ok
+.Lgs_p2c_of:
+        mov     $1, %r12d
+        incq    (%r9,%rax,8)
+        inc     %r10
+        cmp     %rcx, %r10
+        jae     .Lgs_ok
+.Lgs_p2c_nc:
+        mov     (%rdi,%r10,4), %eax
+        mov     (%rsi,%r10,8), %rbx
+        add     %rbx, (%r8,%rax,8)
+        incq    (%r9,%rax,8)
+        inc     %r10
+        cmp     %rcx, %r10
+        jb      .Lgs_p2c_nc
+        jmp     .Lgs_ok
+.Lgs_p2n:
+        mov     (%rdi,%r10,4), %eax
+        mov     (%rsi,%r10,8), %rbx
+        add     %rbx, (%r8,%rax,8)
+        jo      .Lgs_p2n_of
+        inc     %r10
+        cmp     %rcx, %r10
+        jb      .Lgs_p2n
+        jmp     .Lgs_ok
+.Lgs_p2n_of:
+        mov     $1, %r12d
+        inc     %r10
+        cmp     %rcx, %r10
+        jae     .Lgs_ok
+.Lgs_p2n_nc:
+        mov     (%rdi,%r10,4), %eax
+        mov     (%rsi,%r10,8), %rbx
+        add     %rbx, (%r8,%rax,8)
+        inc     %r10
+        cmp     %rcx, %r10
+        jb      .Lgs_p2n_nc
+        jmp     .Lgs_ok
+
+.Lgs_p2v:
+        mov     %rcx, %r13
+        xor     %r14d, %r14d
+        mov     %rdx, %rbp
+.Lgs_vblk:
+        cmp     $64, %r13
+        jb      .Lgs_vpart
+        mov     (%rbp), %r15
+        jmp     .Lgs_vbits
+.Lgs_vpart:
+        push    %rsi
+        mov     %rbp, %rsi
+        mov     %r13d, %ecx
+        call    lvp
+        pop     %rsi
+        mov     %r13d, %ecx
+        mov     $1, %edx
+        shl     %cl, %rdx
+        dec     %rdx
+        and     %rax, %rdx
+        mov     %rdx, %r15
+.Lgs_vbits:
+        test    %r15, %r15
+        jz      .Lgs_vnext
+.Lgs_vrow:
+        bsf     %r15, %r10
+        add     %r14, %r10
+        mov     (%rdi,%r10,4), %r11d
+        mov     (%rsi,%r10,8), %rbx
+        add     %rbx, (%r8,%r11,8)
+        seto    %al
+        or      %al, %r12b
+        test    %r9, %r9
+        jz      1f
+        incq    (%r9,%r11,8)
+1:      lea     -1(%r15), %rax
+        and     %rax, %r15
+        jnz     .Lgs_vrow
+.Lgs_vnext:
+        add     $64, %r14
+        add     $8, %rbp
+        sub     $64, %r13
+        ja      .Lgs_vblk
+.Lgs_ok:
         movzbl  %r12b, %eax
-        pop     %r13
-        pop     %r12
-        pop     %rbx
-        ret
+        jmp     .Lgs_ret
 .Lgs_einval:
         mov     $2, %eax
+.Lgs_ret:
+        pop     %r15
+        pop     %r14
         pop     %r13
         pop     %r12
+        pop     %rbp
         pop     %rbx
         ret
 ENDF pqk_x86_scalar_group_sum_i64
