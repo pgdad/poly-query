@@ -5,7 +5,7 @@ use super::lexer::{Keyword, Pos, Symbol, Token, TokenKind, tokenize};
 use crate::error::{Error, Result};
 
 /// Maximum expression/query nesting depth (protects the stack).
-const MAX_DEPTH: usize = 1000;
+const MAX_DEPTH: usize = 10_000;
 
 /// Parses one SQL statement (an optional single trailing `;` is allowed).
 pub fn parse_statement(sql: &str) -> Result<Statement> {
@@ -991,13 +991,13 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
             .spawn(|| {
-                let sql = format!("SELECT {}1{}", "(".repeat(5000), ")".repeat(5000));
+                let sql = format!("SELECT {}1{}", "(".repeat(20_000), ")".repeat(20_000));
                 assert_eq!(code(&sql), ErrorCode::ParseError);
-                let sql = format!("SELECT {}1", "-".repeat(5000));
+                let sql = format!("SELECT {}1", "-".repeat(20_000));
                 assert_eq!(code(&sql), ErrorCode::ParseError);
                 let sql = format!("SELECT 1{}", " + 1".repeat(100_000));
                 assert_eq!(code(&sql), ErrorCode::ParseError);
-                let sql = format!("SELECT 1{}", " + 1".repeat(500));
+                let sql = format!("SELECT 1{}", " + 1".repeat(5_000));
                 assert!(parse_statement(&sql).is_ok());
             })
             .unwrap()

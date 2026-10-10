@@ -42,8 +42,8 @@ impl Value {
     }
 
     /// Compares two non-null values of comparable types (types.md §5).
-    /// INT64 vs DECIMAL promotes the integer to DECIMAL(18,s), which can
-    /// overflow (types.md §2).
+    /// Numeric values compare by exact mathematical value (INT64 vs DECIMAL
+    /// uses i128, so no promotion overflow can occur).
     pub fn compare(&self, other: &Value) -> Result<Ordering> {
         use Value::*;
         Ok(match (self, other) {
@@ -51,8 +51,8 @@ impl Value {
             (Int(a), Int(b)) => a.cmp(b),
             (Float(a), Float(b)) => cmp_f64(*a, *b),
             (Decimal(a, sa), Decimal(b, sb)) => decimal::compare(*a, *sa, *b, *sb),
-            (Int(a), Decimal(b, s)) => promote_int(*a, *s)?.cmp(&(*b as i128)),
-            (Decimal(a, s), Int(b)) => (*a as i128).cmp(&promote_int(*b, *s)?),
+            (Int(a), Decimal(b, s)) => (*a as i128 * decimal::pow10(*s as u32)).cmp(&(*b as i128)),
+            (Decimal(a, s), Int(b)) => (*a as i128).cmp(&(*b as i128 * decimal::pow10(*s as u32))),
             (Int(_) | Decimal(..), Float(b)) => cmp_f64(self.to_f64().unwrap_or(0.0), *b),
             (Float(a), Int(_) | Decimal(..)) => cmp_f64(*a, other.to_f64().unwrap_or(0.0)),
             (Str(a), Str(b)) => a.as_bytes().cmp(b.as_bytes()),
@@ -220,7 +220,14 @@ mod tests {
                 .unwrap(),
             Ordering::Equal
         );
-        assert!(Value::Int(i64::MAX).compare(&Value::Decimal(1, 1)).is_err());
+        assert_eq!(
+            Value::Int(i64::MAX).compare(&Value::Decimal(1, 1)).unwrap(),
+            Ordering::Greater
+        );
+        assert_eq!(
+            Value::Int(1).compare(&Value::Decimal(1, 18)).unwrap(),
+            Ordering::Greater
+        );
     }
 
     #[test]

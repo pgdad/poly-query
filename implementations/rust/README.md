@@ -80,9 +80,10 @@ type) are reported without executing anything.
   `CAST(float AS STRING)` uses the same text.
 * **FLOAT64 → DECIMAL** rounds half away from zero based on the shortest
   round-trip decimal representation of the float (so `1.005e0` → `1.01`).
-* **INT64 vs DECIMAL comparison** promotes the integer to `DECIMAL(18,s)` as
-  types.md §2 states, which raises `NUMERIC_OVERFLOW` for integers that do not
-  fit; DECIMAL vs DECIMAL comparisons are exact.
+* **Numeric comparisons** are exact by mathematical value (types.md §5); INT64
+  vs DECIMAL is compared in i128, so `0.000000000000000001 < 1` is TRUE rather
+  than a promotion overflow. Arithmetic still applies the promotion rule
+  (an INT64 operand of DECIMAL arithmetic must fit 18 digits).
 * **Null type**: in arithmetic a `NULL` operand takes the other operand's type
   (`NULL / 0` is INT64); `SUM(NULL)` is INT64, `AVG(NULL)` FLOAT64, `MIN/MAX(NULL)`
   are reported as STRING.
@@ -94,8 +95,10 @@ type) are reported without executing anything.
   Header names are used verbatim; with an explicit schema the schema's
   spelling is reported. A lone `"` inside an unquoted field is literal text;
   characters after a closing quote are `INGEST_ERROR`.
-* **JSON**: keys are matched case-insensitively to columns (`{"a":1,"A":2}`
-  is a duplicate key). An integer literal outside INT64 makes the column
+* **JSON**: without a schema, columns are the union of the exact keys, so
+  keys differing only in case (in the same or different objects) are
+  duplicate column names ⇒ `INGEST_ERROR`; with a schema, keys match column
+  names case-insensitively. An integer literal outside INT64 makes the column
   FLOAT64. With an explicit schema, JSON numbers/booleans into STRING columns
   are `CONVERSION_ERROR` (ingestion.md §2.2 "any other combination").
 * **Load requests**: `format` is required; unknown schema type names are
@@ -108,7 +111,8 @@ type) are reported without executing anything.
 * **Ops of later phases** (`explain`, `save`, `open`, `stats`) answer
   `UNSUPPORTED`; `serve` exits with status 1.
 * **Robustness**: requests are processed on a thread with a 256 MiB stack;
-  the parser limits nesting depth (200) and the JSON parser depth (512);
+  the parser limits nesting depth and operator-chain length (10,000) and the
+  JSON parser depth (512);
   panics are caught and reported as `INTERNAL_ERROR` (logged to stderr).
 * **Defaults**: `--max-query-memory-mb 4096`, `--max-ingest-bytes 4 GiB`,
   `--max-table-rows 500,000,000`; memory accounting is approximate and covers

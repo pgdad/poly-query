@@ -32,16 +32,28 @@ impl Columns {
     fn add_record(&mut self, obj: Vec<(String, Json)>, record: usize) -> Result<()> {
         let mut seen = vec![false; self.names.len()];
         for (key, value) in obj {
-            let lower = key.to_ascii_lowercase();
-            let idx = match self.index.get(&lower) {
+            // Without a schema the columns are the union of the (exact) keys;
+            // keys differing only in case would yield duplicate column names.
+            // With a schema, keys match column names case-insensitively.
+            let lookup = if self.open {
+                key.clone()
+            } else {
+                key.to_ascii_lowercase()
+            };
+            let idx = match self.index.get(&lookup) {
                 Some(&i) => i,
                 None if self.open => {
                     if key.is_empty() {
                         return Err(Error::ingest(format!("record {record}: empty column name")));
                     }
+                    if self.names.iter().any(|n| n.eq_ignore_ascii_case(&key)) {
+                        return Err(Error::ingest(format!(
+                            "record {record}: key '{key}' duplicates a column name (case-insensitive)"
+                        )));
+                    }
                     let i = self.names.len();
                     self.names.push(key.clone());
-                    self.index.insert(lower, i);
+                    self.index.insert(lookup, i);
                     self.values.push(vec![Scalar::Null; self.rows]);
                     seen.push(false);
                     i
@@ -291,6 +303,14 @@ mod tests {
         );
         assert_eq!(
             code(Format::JsonLines, "{\"a\": 1, \"a\": 2}"),
+            ErrorCode::IngestError
+        );
+        assert_eq!(
+            code(Format::JsonLines, "{\"a\": 1, \"A\": 2}"),
+            ErrorCode::IngestError
+        );
+        assert_eq!(
+            code(Format::JsonLines, "{\"a\": 1}\n{\"A\": 2}"),
             ErrorCode::IngestError
         );
         assert_eq!(
