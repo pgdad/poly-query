@@ -42,5 +42,6 @@
                    [{"op" "sleep" "ms" 1} "INVALID_REQUEST"]
                    [{"op" "query" "sql" "SELECT 1" "options" {"mode" "quantum"}} "UNSUPPORTED"]
                    [{"op" "query" "sql" "SELECT 1" "options" {"join" "teleport"}} "UNSUPPORTED"]
-                   [{"op" "query" "sql" "SELECT 1" "options" {"threads" 0}} "INVALID_REQUEST"]]]
+                   [{"op" "query" "sql" "SELECT 1" "options" {"threads" 0}} "UNSUPPORTED"]
+                   [{"op" "query" "sql" "SELECT 1" "options" {"threads" "4"}} "INVALID_REQUEST"]]]
       (testing (pr-str r) (is (= c (code r)))))))

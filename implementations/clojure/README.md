@@ -584,7 +584,8 @@ compares the full results of every query under every configuration above
   and the top-N rewrite (column pruning stays: it never changes results).
   `native: true` is accepted and ignored (no native kernels are loaded,
   which spec/phases/native-kernels.md allows). Other values of known
-  options are `UNSUPPORTED`, ill-typed values `INVALID_REQUEST`.
+  options (including `threads` < 1) are `UNSUPPORTED`, ill-typed values
+  `INVALID_REQUEST`.
 * **Limits.** Defaults: `--max-ingest-bytes` 4 GiB, `--max-table-rows`
   200,000,000, `--max-query-memory-mb` 4096 (approximate accounting of
   materialised rows in sort/aggregation/result), `--max-join-rows`

@@ -173,9 +173,11 @@
   (doseq [k ["optimize" "use_indexes" "native"]]
     (when (and (contains? opts k) (not (boolean? (get opts k))))
       (invalid! (str "option '" k "' must be a boolean"))))
-  (when (and (contains? opts "threads")
-             (not (and (int-value? (get opts "threads")) (pos? (long (get opts "threads"))))))
-    (invalid! "option 'threads' must be an integer >= 1"))
+  (when (contains? opts "threads")
+    (let [n (get opts "threads")]
+      (cond
+        (not (int-value? n)) (invalid! "option 'threads' must be an integer >= 1")
+        (not (pos? (long n))) (err/fail! "UNSUPPORTED" (str "option threads=" n " is not supported")))))
   (when (and (contains? opts "query_id") (not (string? (get opts "query_id"))))
     (invalid! "option 'query_id' must be a string"))
   {:max-rows (field opts "max_rows" non-neg-int? "an integer >= 0" false)
