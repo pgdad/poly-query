@@ -12,15 +12,29 @@ final class BatchOperators {
     private BatchOperators() {
     }
 
-    /** Keeps the rows whose predicate is TRUE by narrowing the selection vector (no copying). */
+    /**
+     * Keeps the rows whose predicate is TRUE by narrowing the selection vector (no copying). The
+     * conjuncts of the predicate are evaluated one after the other, each only on the rows no
+     * earlier conjunct made FALSE — exactly the rows the row engine's short-circuit AND
+     * evaluates — so most rows are discarded by the first, cheapest loops. A data error falls
+     * back to row-by-row evaluation of the whole predicate ({@link BatchExprs}).
+     */
     static final class Filter implements BatchOperator {
         private final BatchOperator input;
+        private final VecExpr[] conjuncts;
         private final BatchExprs predicate;
         private final Batch out;
         private int[] sel = new int[0];
+        private int[] tmp = new int[0];
+        private boolean[] sawNull = new boolean[0];
 
         Filter(BatchOperator input, VecCompiler compiler, BoundExpr predicate, int width) {
             this.input = input;
+            List<BoundExpr> parts = polyquery.plan.BoundExprs.conjuncts(predicate);
+            this.conjuncts = new VecExpr[parts.size()];
+            for (int i = 0; i < conjuncts.length; i++) {
+                conjuncts[i] = compiler.compile(parts.get(i));
+            }
             this.predicate = new BatchExprs(compiler, List.of(predicate));
             this.out = new Batch(width);
         }
@@ -28,6 +42,66 @@ final class BatchOperators {
         @Override
         public void open() {
             input.open();
+        }
+
+        /** Selects the rows where every conjunct is TRUE into {@code sel}; returns their number. */
+        private int select(Batch in) {
+            int[] cur = in.sel;
+            int n = in.count;
+            int[] dst = sel;
+            boolean anyNull = false;
+            for (VecExpr c : conjuncts) {
+                Vec r = c.eval(in, cur, n);
+                long[] v = r.longs;
+                int m = 0;
+                if (!r.hasNulls) {
+                    if (cur == null) {
+                        for (int i = 0; i < n; i++) {
+                            dst[m] = i;
+                            m += (int) v[i];
+                        }
+                    } else {
+                        for (int k = 0; k < n; k++) {
+                            int i = cur[k];
+                            dst[m] = i;
+                            m += (int) v[i];
+                        }
+                    }
+                } else {
+                    // NULL rows stay for the later conjuncts (AND continues on NULL) but never pass
+                    for (int k = 0; k < n; k++) {
+                        int i = cur == null ? k : cur[k];
+                        if (r.nulls[i]) {
+                            sawNull[i] = true;
+                            anyNull = true;
+                            dst[m++] = i;
+                        } else if (v[i] == 1) {
+                            dst[m++] = i;
+                        }
+                    }
+                }
+                cur = dst;
+                dst = dst == sel ? tmp : sel;
+                n = m;
+                if (n == 0) {
+                    break;
+                }
+            }
+            if (cur != sel) {
+                System.arraycopy(cur, 0, sel, 0, n);
+            }
+            if (anyNull) {
+                int m = 0;
+                for (int k = 0; k < n; k++) {
+                    int i = sel[k];
+                    if (!sawNull[i]) {
+                        sel[m++] = i;
+                    }
+                }
+                n = m;
+                java.util.Arrays.fill(sawNull, false);
+            }
+            return n;
         }
 
         @Override
@@ -45,22 +119,24 @@ final class BatchOperators {
                     out.error = in.error;
                     return out;
                 }
-                Vec p = predicate.eval(in)[0];
                 if (sel.length < in.size) {
                     sel = new int[Math.max(in.size, 16)];
+                    tmp = new int[sel.length];
+                    sawNull = new boolean[sel.length];
                 }
-                int m = 0;
-                int n = in.count;
-                long[] v = p.longs;
-                if (in.sel == null && !p.hasNulls) {
-                    for (int i = 0; i < n; i++) {
-                        sel[m] = i;
-                        m += (int) v[i];
+                int m;
+                try {
+                    m = select(in);
+                } catch (PolyQueryException e) {
+                    if (!BatchExprs.deferrable(e)) {
+                        throw e;
                     }
-                } else {
-                    for (int k = 0; k < n; k++) {
+                    java.util.Arrays.fill(sawNull, false);
+                    Vec p = predicate.evalRows(in)[0]; // exact: finds the failing row, truncates `in`
+                    m = 0;
+                    for (int k = 0; k < in.count; k++) {
                         int i = in.pos(k);
-                        if (v[i] == 1 && !p.isNull(i)) {
+                        if (!p.isNull(i) && p.longs[i] == 1) {
                             sel[m++] = i;
                         }
                     }

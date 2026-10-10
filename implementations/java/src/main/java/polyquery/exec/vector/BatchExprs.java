@@ -68,7 +68,8 @@ final class BatchExprs {
         return evalRows(b);
     }
 
-    private Vec[] evalRows(Batch b) {
+    /** Row-by-row evaluation (see the class comment); may truncate {@code b}. */
+    Vec[] evalRows(Batch b) {
         if (rowCode == null) {
             rowCode = new Evaluator[exprs.size()];
             fallback = new Vec[exprs.size()];

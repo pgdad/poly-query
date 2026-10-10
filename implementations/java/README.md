@@ -1,7 +1,7 @@
 # PolyQuery — Java engine
 
-An analytical database engine implementing the PolyQuery specification (`spec/`), currently
-at **Phase 4**: protocol, catalog, CSV/JSON/JSONL ingestion, all data types, the complete
+An analytical database engine implementing the PolyQuery specification (`spec/`), at
+**Phase 5**: protocol, catalog, CSV/JSON/JSONL ingestion, all data types, the complete
 SQL v1 grammar (GROUP BY/HAVING, DISTINCT, INNER/LEFT/CROSS joins, all scalar functions,
 CASE/LIKE/BETWEEN/IN, uncorrelated **and correlated** subqueries, derived tables, CTEs,
 EXPLAIN), structured errors, resource limits and test functions; row- and column-oriented
@@ -12,11 +12,17 @@ skipping, column pruning and cost-based join build-side selection; and the `serv
 server with every endpoint of protocol.md §7, streaming NDJSON results with backpressure,
 Prometheus metrics, structured JSON logs, snapshot-isolated concurrent readers, a worker
 limit with a bounded FIFO queue (`OVERLOADED` beyond it), query timeouts, cancellation
-(explicit and on client disconnect) and graceful shutdown.
+(explicit and on client disconnect) and graceful shutdown; and (Phase 5) a retained
+row-at-a-time baseline plus a **vectorized** batch engine with **morsel-driven parallel** scans,
+aggregation, DISTINCT and top-N, hash / sort-merge / nested-loop joins selectable per query, an
+error-preserving logical optimizer (constant folding, predicate simplification and pushdown,
+join reordering), top-N sorting, SIMD-friendly kernels and cache-conscious data structures —
+see [Phase 5: optimization](#phase-5-optimization).
 
 Capabilities: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic test.functions phase2
 sql.groupby sql.join sql.functions sql.subquery sql.cte sql.correlated_subquery phase3
-storage.pqcf storage.mmap index.hash index.btree phase4 http.streaming`.
+storage.pqcf storage.mmap index.hash index.btree phase4 http.streaming phase5 exec.row
+exec.vectorized exec.parallel join.hash join.merge join.nested_loop`.
 
 ## Prerequisites and build
 
@@ -59,9 +65,10 @@ Source lives in `src/main/java/polyquery/`, one package per layer:
 | `sql.parser` | Recursive-descent parser (WITH, joins, subqueries, CASE, IN, LIKE, BETWEEN, EXPLAIN, CREATE/DROP INDEX); `PARSE_ERROR` carries `line`/`column` |
 | `sql.analyzer` | Semantic validation: `Scope` (range variables, correlation), `ExpressionBinder` + `TypeCoercion` + `ScalarFunctionBinder` (typing), `Analyzer` (per query level: FROM/joins/derived tables/CTEs, GROUP BY rewriting, ORDER BY resolution → `BoundQuery`), `LogicalPlanner` (`BoundQuery` → logical plan) |
 | `plan` | Bound (typed) expressions (`BoundExpr`, `BoundExprs` traversal), aggregate calls, subqueries, logical plan nodes, expression formatter |
-| `optimizer` | `LogicalOptimizer`: predicate pushdown into joins and scans, CROSS→INNER join conversion (disabled by `optimize: false`) |
-| `physical` | `PhysicalPlan` nodes, `PhysicalPlanner` (table vs index scans, hash vs nested-loop joins and build side, hash lookup for correlated filters), `ColumnPredicates` (sargable conjuncts → key predicates), `Cardinality` (estimates from statistics), `ColumnPruner`, `PlanExplainer` (EXPLAIN JSON) |
-| `exec` | Volcano operators (table/index scans, filter, project, hash aggregate, distinct, hash/nested-loop join, sort, limit, hash-lookup filter), `OperatorBuilder` (physical plan → operators), `ExpressionCompiler` (bound expression → closures), `ScalarFunctions`, `SubqueryRunner`, `ExecContext` (timeout, memory budget, row/join limits, correlation frames) |
+| `optimizer` | `LogicalOptimizer`: constant folding, predicate simplification, error-preserving predicate pushdown into joins and scans, CROSS→INNER join conversion; `JoinReorder` (inner-join trees). All disabled by `optimize: false` |
+| `physical` | `PhysicalPlan` nodes, `PhysicalPlanner` (table vs index scans, hash / merge / nested-loop joins and build side, top-N, hash lookup for correlated filters), `ColumnPredicates` (sargable conjuncts → key predicates), `Cardinality` (estimates from statistics), `ColumnPruner`, `PlanExplainer` (EXPLAIN JSON) |
+| `exec` | Row engine (`mode: row`): Volcano operators (table/index scans, filter, project, hash aggregate, distinct, hash/merge/nested-loop joins, sort, top-N, limit, hash-lookup filter), `OperatorBuilder` (physical plan → operators), `ExpressionCompiler` (bound expression → closures), `ScalarFunctions`, `SubqueryRunner`, `ExecContext` (timeout, memory budget, row/join limits, correlation frames) |
+| `exec.vector` | Vectorized engine (`mode: vectorized`): `Vec`/`Batch` (column vectors + selection vectors), `VecCompiler` + `Kernels` (batch expression kernels), `BatchExprs` (row-exact error semantics), scan/filter/project/limit, `AggregateBatches` + `GroupKeys` + `AggState` (hash aggregation, DISTINCT), `JoinBatches` (hash join), `SortBatches` (sort, top-N), `ColumnStore`, `Parallel` (morsel-driven workers), `BatchBuilder` (plan → batch operators), `VectorExecutor` |
 | `storage` | Immutable table snapshots (`Table` = schema + `TableData` + indexes + statistics); `ColumnarData` (`ColumnVector`s: primitive arrays + null bitmaps, dictionary-encoded strings), `RowData` (row tuples), `Layouts` (conversions, dictionary policy), `TableStatistics`/`DistinctCounter`, thread-safe `Catalog` (tables and global index names) |
 | `storage.pqcf` | PQCF v1: `PqcfWriter` (atomic save), `ChunkEncoder`, `PqcfReader` (header/footer/metadata validation), `ChunkDecoder` (CRC + value validation), `PqcfTableData` (row groups, lazy chunks over a memory-mapped file) |
 | `index` | `HashIndex`, `OrderedIndex` (sorted permutation), `KeyDomain`/`KeyPredicate` (typed lookup keys and predicates) |
@@ -77,13 +84,15 @@ Query pipeline (each stage is a separate class and data structure):
 SQL text ─Lexer→ tokens ─Parser→ AST (Statement/Query/Expr)
    ─Analyzer/ExpressionBinder→ BoundQuery per query level (typed BoundExpr, resolved names)
    ─LogicalPlanner→ LogicalPlan ─LogicalOptimizer→ LogicalPlan
-   ─PhysicalPlanner→ PhysicalPlan ─OperatorBuilder/ExpressionCompiler→ Operator tree ─Executor→ rows
+   ─PhysicalPlanner→ PhysicalPlan ─┬─ OperatorBuilder/ExpressionCompiler→ Operator tree ─Executor→ rows      (mode: row)
+                                   └─ BatchBuilder/VecCompiler→ BatchOperator tree ─VectorExecutor→ rows   (mode: vectorized)
 ```
 
 `EXPLAIN` renders the physical plan (`TableScan`/`IndexScan` with `table`, `index`, `kind` and
 the `columns` actually read, `Filter`, `Project`, `Aggregate`, `Distinct`,
-`HashJoin`/`NestedLoopJoin` with `join_type` and `build_side`, `Sort`, `Limit`, `Values`,
-`HashLookupFilter`); plans of subqueries appear under a `subqueries` property of the node that
+`HashJoin`/`MergeJoin`/`NestedLoopJoin` with `join_type` (and `build_side` for hash joins),
+`Sort`, `TopN`, `Limit`, `Values`, `HashLookupFilter`); the physical plan is the same in both
+execution modes; plans of subqueries appear under a `subqueries` property of the node that
 evaluates them. Scans also show `row_group_filters` (predicates used to skip row groups),
 `layout` and `estimated_rows`.
 
@@ -187,12 +196,14 @@ from the group keys; referencing an ungrouped column there is a `SEMANTIC_ERROR`
 ### Joins
 
 Joins associate left to right. ON conditions are split into equi-join keys
-(`left_expr = right_expr`) and a residual; with at least one key a hash join is used (hash
-table on the right input; for LEFT JOIN the right side must be the build side), otherwise a
-nested-loop join over the materialized right input. NULL keys never match. Equal values of
-different DECIMAL scales hash identically. Every join operator counts its output rows against
-`--max-join-rows` (`RESOURCE_LIMIT`). The `join` query option `hash`/`nested_loop` forces an
-algorithm where applicable (`merge` and `auto` currently mean "choose").
+(`left_expr = right_expr`) and a residual. With at least one key the join is a hash join (hash
+table on the input with the smaller estimated cardinality; for LEFT JOIN the right side must be
+the build side) — or, with `join: "merge"`, a sort-merge join (both inputs materialized with
+their key tuples, sorted stably, runs of equal keys paired; LEFT JOIN pads unmatched rows,
+including rows with NULL keys) — or, with `join: "nested_loop"`, a nested-loop join. Joins
+without equi keys (and CROSS joins) are always nested-loop joins. `auto` (default) picks a
+hash join. NULL keys never match. Equal values of different DECIMAL scales match. Every join
+operator counts its output rows against `--max-join-rows` (`RESOURCE_LIMIT`).
 
 ### HTTP server and concurrency (Phase 4)
 
@@ -314,12 +325,14 @@ Where the spec leaves room, these choices were made:
   Inferred FLOAT64 numbers that overflow are `INGEST_ERROR`.
 * An invalid type name in a `load` schema is `INVALID_REQUEST`; duplicate or empty
   schema column names are `INGEST_ERROR`.
-* Query options: `mode` accepts `auto`/`row` (this engine is row-at-a-time);
-  `vectorized` is `UNSUPPORTED`. `optimize: false` disables logical optimization; `join`
-  selects the join algorithm (see Joins); `use_indexes: false` disables index scans.
-  `threads` and `native` are validated and otherwise ignored; `query_id` names the query in
-  the HTTP server (session mode only echoes it in the response's `query_id`). Ill-typed option values are
-  `INVALID_REQUEST`; unknown values of known enum options are `UNSUPPORTED`.
+* Query options: `mode` is `auto` (= `vectorized`), `row` or `vectorized`; `threads` (1–1024,
+  default `--threads`, which defaults to the number of CPUs) bounds the worker threads of a
+  query; `optimize: false` disables logical optimization and top-N; `join` selects the join
+  algorithm (see Joins); `use_indexes: false` disables index scans; `native` is validated and
+  ignored (the engine does not load native kernels and does not claim `native.kernels`);
+  `query_id` names the query in the HTTP server (session mode only echoes it in the response's
+  `query_id`). Ill-typed option values (and `threads` outside 1–1024) are `INVALID_REQUEST`;
+  unknown values of known enum options are `UNSUPPORTED`.
 * The per-query memory budget (`--max-query-memory-mb`, default 4096, capped at 70% of
   the JVM heap) is enforced approximately for sort buffers, aggregation groups and
   result materialization. `OutOfMemoryError` and `StackOverflowError` are reported as
