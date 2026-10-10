@@ -22,6 +22,8 @@ import polyquery.json.JsonParser;
 import polyquery.json.JsonWriter;
 import polyquery.protocol.Logger;
 import polyquery.protocol.RequestHandler;
+import polyquery.server.HttpServer;
+import polyquery.server.ServerConfig;
 
 /** Command-line entry point (protocol.md §2). */
 public final class Main {
@@ -77,10 +79,6 @@ public final class Main {
                     stdout.flush();
                     return 0;
                 }
-                case "serve" -> {
-                    System.err.println("serve: the HTTP server (Phase 4) is not implemented by this engine");
-                    return 1;
-                }
                 default -> {
                 }
             }
@@ -93,6 +91,9 @@ public final class Main {
             if (!Files.isDirectory(config.dataDir())) {
                 System.err.println("data directory does not exist: " + config.dataDir());
                 return 1;
+            }
+            if (mode.equals("serve")) {
+                return serve(new Engine(config), serverConfig(opts), log, stdout);
             }
             RequestHandler handler = new RequestHandler(new Engine(config), log);
             if (mode.equals("session")) {
@@ -171,6 +172,54 @@ public final class Main {
                 longOpt(opts, "--max-table-rows", EngineConfig.DEFAULT_TABLE_ROWS, 0),
                 longOpt(opts, "--max-join-rows", EngineConfig.DEFAULT_JOIN_ROWS, 0),
                 (int) longOpt(opts, "--threads", Runtime.getRuntime().availableProcessors(), 1));
+    }
+
+    private static ServerConfig serverConfig(Map<String, String> opts) throws UsageException {
+        if (!opts.containsKey("--port")) {
+            throw new UsageException("serve requires --port N");
+        }
+        long port = longOpt(opts, "--port", 0, 0);
+        if (port > 65535) {
+            throw new UsageException("option --port must be <= 65535");
+        }
+        long workers = longOpt(opts, "--workers", Runtime.getRuntime().availableProcessors(), 1);
+        long queueDepth = longOpt(opts, "--queue-depth", ServerConfig.DEFAULT_QUEUE_DEPTH, 0);
+        return new ServerConfig(opts.getOrDefault("--host", "127.0.0.1"), (int) port,
+                (int) Math.min(workers, 1 << 16), (int) Math.min(queueDepth, 1 << 20),
+                longOpt(opts, "--query-timeout-ms", 0, 0),
+                longOpt(opts, "--shutdown-grace-ms", ServerConfig.DEFAULT_SHUTDOWN_GRACE_MS, 0),
+                longOpt(opts, "--max-request-bytes", ServerConfig.DEFAULT_MAX_REQUEST_BYTES, 0));
+    }
+
+    /** {@code serve}: runs the HTTP server until SIGTERM/SIGINT, then shuts down gracefully and exits 0. */
+    private static int serve(Engine engine, ServerConfig serverConfig, Logger log, PrintStream out) {
+        HttpServer server = new HttpServer(serverConfig, engine, log, STACK_SIZE);
+        int port;
+        try {
+            port = server.start();
+        } catch (IOException | IllegalArgumentException | SecurityException e) {
+            log.error("cannot listen on " + serverConfig.host() + ":" + serverConfig.port() + ": " + e.getMessage());
+            return 1;
+        }
+        // The JVM runs shutdown hooks on SIGTERM/SIGINT; halting from the hook makes the exit status 0.
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            server.shutdown();
+            out.flush();
+            System.err.flush();
+            Runtime.getRuntime().halt(0);
+        }, "polyquery-shutdown"));
+        Map<String, Object> listening = new LinkedHashMap<>();
+        listening.put("event", "listening");
+        listening.put("host", serverConfig.host());
+        listening.put("port", (long) port);
+        writeLine(out, JsonWriter.write(listening));
+        while (true) {
+            try {
+                Thread.sleep(Long.MAX_VALUE);
+            } catch (InterruptedException e) {
+                // keep serving until a signal triggers the shutdown hook
+            }
+        }
     }
 
     private static int session(RequestHandler handler, PrintStream out) {
