@@ -1,0 +1,18 @@
+#!/bin/sh
+# PolyQuery Java engine launcher. Works from any current directory.
+SELF=$0
+if command -v readlink >/dev/null 2>&1; then
+    RESOLVED=$(readlink -f "$0" 2>/dev/null) && SELF=$RESOLVED
+fi
+HERE=$(cd "$(dirname "$SELF")/.." && pwd)
+JAR="$HERE/build/polyquery.jar"
+if [ ! -f "$JAR" ]; then
+    echo "polyquery: $JAR not found; run 'make -C $HERE build' first" >&2
+    exit 1
+fi
+if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+    JAVA="$JAVA_HOME/bin/java"
+else
+    JAVA=java
+fi
+exec "$JAVA" -XX:+UseParallelGC -XX:-UsePerfData -Xshare:auto $POLYQUERY_JAVA_OPTS -jar "$JAR" "$@"
