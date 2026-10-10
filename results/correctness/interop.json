@@ -4,9 +4,10 @@
   "engines": [
    "java",
    "clojure",
+   "python",
    "go"
   ],
-  "files_written": 85,
+  "files_written": 113,
   "write_errors": 0,
   "read_failures": 0,
   "passed": true
@@ -461,6 +462,230 @@
    "content_ok": true
   },
   {
+   "writer": "python",
+   "table": "people",
+   "mode": "plain",
+   "path": "out/python__people__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "people",
+   "mode": "dict",
+   "path": "out/python__people__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "people",
+   "mode": "rle",
+   "path": "out/python__people__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "people",
+   "mode": "auto",
+   "path": "out/python__people__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "ledger",
+   "mode": "plain",
+   "path": "out/python__ledger__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "ledger",
+   "mode": "dict",
+   "path": "out/python__ledger__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "ledger",
+   "mode": "rle",
+   "path": "out/python__ledger__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "ledger",
+   "mode": "auto",
+   "path": "out/python__ledger__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "strings",
+   "mode": "plain",
+   "path": "out/python__strings__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "strings",
+   "mode": "dict",
+   "path": "out/python__strings__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "strings",
+   "mode": "rle",
+   "path": "out/python__strings__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "strings",
+   "mode": "auto",
+   "path": "out/python__strings__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "dates",
+   "mode": "plain",
+   "path": "out/python__dates__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "dates",
+   "mode": "dict",
+   "path": "out/python__dates__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "dates",
+   "mode": "rle",
+   "path": "out/python__dates__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "dates",
+   "mode": "auto",
+   "path": "out/python__dates__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "tx",
+   "mode": "plain",
+   "path": "out/python__tx__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "tx",
+   "mode": "dict",
+   "path": "out/python__tx__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "tx",
+   "mode": "rle",
+   "path": "out/python__tx__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "tx",
+   "mode": "auto",
+   "path": "out/python__tx__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "nulls",
+   "mode": "plain",
+   "path": "out/python__nulls__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "nulls",
+   "mode": "dict",
+   "path": "out/python__nulls__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "nulls",
+   "mode": "rle",
+   "path": "out/python__nulls__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "nulls",
+   "mode": "auto",
+   "path": "out/python__nulls__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "events",
+   "mode": "plain",
+   "path": "out/python__events__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "events",
+   "mode": "dict",
+   "path": "out/python__events__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "events",
+   "mode": "rle",
+   "path": "out/python__events__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "python",
+   "table": "events",
+   "mode": "auto",
+   "path": "out/python__events__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
    "writer": "go",
    "table": "people",
    "mode": "plain",
@@ -705,6 +930,11 @@
     "fail": 0,
     "failures": []
    },
+   "python": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
    "go": {
     "ok": 28,
     "fail": 0,
@@ -727,6 +957,38 @@
     "fail": 0,
     "failures": []
    },
+   "python": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "go": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "reference": {
+    "ok": 1,
+    "fail": 0,
+    "failures": []
+   }
+  },
+  "python": {
+   "java": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "clojure": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "python": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
    "go": {
     "ok": 28,
     "fail": 0,
@@ -745,6 +1007,11 @@
     "failures": []
    },
    "clojure": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "python": {
     "ok": 28,
     "fail": 0,
     "failures": []
