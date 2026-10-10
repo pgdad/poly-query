@@ -116,19 +116,23 @@ type-specialised closures (e.g. INT64 `+` uses `Math/addExact`, DECIMAL
 comparison rescales by the static scale difference), so there is no dynamic
 type dispatch per row.
 
-### Execution
+### Execution (row engine)
 
-Each physical operator is compiled once into a *re-reducible*
+This describes the row-at-a-time engine (`mode: row`, and the operators the
+vectorized mode reuses); see [Phase 5](#phase-5-optimization) for vectorized
+and parallel execution. Each physical operator is compiled once into a *re-reducible*
 (`clojure.lang.IReduceInit` that recomputes its rows on every `reduce`); rows
 are pushed through transducers (`filter`, `map`, `drop`/`take`) without
 intermediate collections. Blocking operators (sort, hash aggregate, distinct,
 hash-join build) materialize with memory accounting and periodic
 timeout/cancellation checks.
 
-* **Joins**: hash join (build side = right input; NULL keys never match;
+* **Joins**: hash join (build side chosen by cardinality estimates, always
+  the right input of LEFT joins; NULL keys never match;
   INT64/DECIMAL/FLOAT64/DATE/TIMESTAMP keys are hashed in their comparison
   type) whenever the ON condition (after pushdown) has an equality between
-  the two inputs, else nested loops. LEFT joins pad unmatched rows with
+  the two inputs, else nested loops; the `join` option can force sort-merge
+  or nested-loop joins. LEFT joins pad unmatched rows with
   NULLs. Output rows are counted against `--max-join-rows`.
 * **Subqueries**: uncorrelated scalar/IN/EXISTS subqueries are evaluated once
   (lazily) and cached; IN builds a hash set. A correlated subquery references
