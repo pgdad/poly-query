@@ -1151,18 +1151,32 @@ final class Kernels {
      */
     static final class BoxedUnary implements VecExpr {
         private static final Object[] NO_ROW = new Object[0];
+        private static final Object UNKNOWN = new Object();
         private final VecExpr input;
         private final Object[] cell;
         private final Evaluator fn;
         private final boolean strict;
+        private final boolean deterministic;
         private final Vec out;
+        private String[] cachedDict;
+        private Object[] cache;
 
-        BoxedUnary(VecExpr input, Object[] cell, Evaluator fn, boolean strict, DataType type) {
+        /** @param deterministic the result depends only on the argument (results may be memoized) */
+        BoxedUnary(VecExpr input, Object[] cell, Evaluator fn, boolean strict, boolean deterministic, DataType type) {
             this.input = input;
             this.cell = cell;
             this.fn = fn;
             this.strict = strict;
+            this.deterministic = deterministic;
             this.out = new Vec(type, 16);
+        }
+
+        private Object apply(Object v) {
+            if (v == null && strict) {
+                return null;
+            }
+            cell[0] = v;
+            return fn.eval(NO_ROW);
         }
 
         @Override
@@ -1170,15 +1184,32 @@ final class Kernels {
             Vec a = input.eval(b, sel, n);
             out.ensure(b.size);
             out.nullMask(b.size);
-            for (int k = 0; k < n; k++) {
-                int i = sel == null ? k : sel[k];
-                Object v = a.get(i);
-                if (v == null && strict) {
-                    out.set(i, null);
-                    continue;
+            if (deterministic && a.kind == Vec.Kind.DICT) {
+                // once per distinct dictionary entry
+                if (cachedDict != a.dict) {
+                    cachedDict = a.dict;
+                    cache = new Object[a.dict.length];
+                    java.util.Arrays.fill(cache, UNKNOWN);
                 }
-                cell[0] = v;
-                out.set(i, fn.eval(NO_ROW));
+                for (int k = 0; k < n; k++) {
+                    int i = sel == null ? k : sel[k];
+                    if (a.isNull(i)) {
+                        out.set(i, apply(null));
+                        continue;
+                    }
+                    int code = a.codes[i];
+                    Object r = cache[code];
+                    if (r == UNKNOWN) {
+                        r = apply(a.dict[code]);
+                        cache[code] = r;
+                    }
+                    out.set(i, r);
+                }
+            } else {
+                for (int k = 0; k < n; k++) {
+                    int i = sel == null ? k : sel[k];
+                    out.set(i, apply(a.get(i)));
+                }
             }
             cell[0] = null;
             return out;

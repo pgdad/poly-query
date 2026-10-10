@@ -116,7 +116,10 @@ final class VecCompiler {
      */
     private VecExpr boxedUnary(BoundExpr input, BoundExpr template, boolean strict, DataType type) {
         Object[] cell = new Object[1];
-        return new Kernels.BoxedUnary(compile(input), cell, rows.compileWithOperand(template, cell), strict, type);
+        boolean deterministic = !BoundExprs.any(template, x -> x instanceof BoundExpr.Function f
+                && f.name().equals("PQ_SLEEP"));
+        return new Kernels.BoxedUnary(compile(input), cell, rows.compileWithOperand(template, cell), strict,
+                deterministic, type);
     }
 
     private VecExpr cast(BoundExpr.Cast c) {

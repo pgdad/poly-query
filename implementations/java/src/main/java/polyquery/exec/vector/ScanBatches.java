@@ -97,10 +97,12 @@ final class ScanBatches {
             return;
         }
         boolean[] m = v.nullMask(cap);
-        Arrays.fill(m, 0, n, false);
-        for (int b = first; b >= 0 && b < from + n; b = nulls.nextSetBit(b + 1)) {
-            m[b - from] = true;
+        long[] words = nulls.get(from, from + n).toLongArray(); // the range's bits, word by word
+        int full = Math.min(n, words.length * 64);
+        for (int i = 0; i < full; i++) {
+            m[i] = ((words[i >>> 6] >>> i) & 1) != 0;
         }
+        java.util.Arrays.fill(m, full, n, false);
     }
 
     /**
