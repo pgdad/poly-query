@@ -4,6 +4,8 @@
  * Baseline x86-64 only (no POPCNT/BMI/AVX; SSE2 scalar double ops only), so
  * this variant runs on every x86-64 CPU. All 16 kernels of pq_kernels.h are
  * provided as global symbols pqk_x86_scalar_<kernel>, System V AMD64 ABI.
+ * Every kernel is bit-identical to the reference, including sum_f64 (same
+ * sequential addition order) and the sign of zero in minmax_f64.
  *
  * Common structure of the predicate kernels (filter_i64, filter_i64_bitmap,
  * count_i64, compare_i64):

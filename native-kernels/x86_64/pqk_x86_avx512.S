@@ -127,12 +127,15 @@ ENDF lvp
  * ---------------------------------------------------------------------- */
 .macro KPRED imm, src, k, wm=none
 .if \imm == 99
+  .ifnc \src, %zmm0
+        vmovdqu64 \src, %zmm0                  /* load once: a k-masked compare */
+  .endif                                        /* with a memory operand is slow */
   .ifc \wm, none
-        vpcmpq  $2, \src, %zmm8, \k
+        vpcmpq  $2, %zmm0, %zmm8, \k
   .else
-        vpcmpq  $2, \src, %zmm8, \k\wm
+        vpcmpq  $2, %zmm0, %zmm8, \k\wm
   .endif
-        vpcmpq  $5, \src, %zmm9, \k{\k}
+        vpcmpq  $5, %zmm0, %zmm9, \k{\k}
 .else
   .ifc \wm, none
         vpcmpq  $\imm, \src, %zmm8, \k
