@@ -284,20 +284,26 @@ func (p *planner) join(j *plan.Join, req idset) (Node, error) {
 	if j.Cond == nil || p.opts.Join == "nested_loop" {
 		return &NestedLoopJoin{Kind: j.Kind, Left: left, Right: right, Cond: j.Cond}, nil
 	}
-	hj := &HashJoin{Kind: j.Kind, Left: left, Right: right}
-	var residual []plan.Expr
+	var leftKeys, rightKeys, residual []plan.Expr
 	for _, c := range plan.Conjuncts(j.Cond) {
 		if l, r, ok := equiKey(c, leftIDs, rightIDs); ok {
-			hj.LeftKeys = append(hj.LeftKeys, l)
-			hj.RightKeys = append(hj.RightKeys, r)
+			leftKeys = append(leftKeys, l)
+			rightKeys = append(rightKeys, r)
 		} else {
 			residual = append(residual, c)
 		}
 	}
-	if len(hj.LeftKeys) == 0 {
+	if len(leftKeys) == 0 {
 		return &NestedLoopJoin{Kind: j.Kind, Left: left, Right: right, Cond: j.Cond}, nil
 	}
-	hj.Residual = plan.And(residual)
+	if p.opts.Join == "merge" {
+		return &MergeJoin{Kind: j.Kind, Left: left, Right: right,
+			LeftKeys: leftKeys, RightKeys: rightKeys, Residual: plan.And(residual)}, nil
+	}
+	// "hash" and the cost-based default: a hash join (build O(n), probe
+	// O(m)) beats sorting both inputs for unsorted equi-join inputs.
+	hj := &HashJoin{Kind: j.Kind, Left: left, Right: right,
+		LeftKeys: leftKeys, RightKeys: rightKeys, Residual: plan.And(residual)}
 	hj.BuildLeft = j.Kind == plan.JoinInner && p.estimate(j.Left) < p.estimate(j.Right)
 	return hj, nil
 }

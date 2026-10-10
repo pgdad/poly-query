@@ -126,6 +126,15 @@ func explainNode(p *Plan, n Node) *Object {
 		if x.Residual != nil {
 			o.Set("residual", plan.Display(x.Residual))
 		}
+	case *MergeJoin:
+		keys := make([]string, len(x.LeftKeys))
+		for i := range keys {
+			keys[i] = plan.Display(x.LeftKeys[i]) + " = " + plan.Display(x.RightKeys[i])
+		}
+		o.Set("op", "MergeJoin").Set("join_type", x.Kind.String()).Set("keys", keys)
+		if x.Residual != nil {
+			o.Set("residual", plan.Display(x.Residual))
+		}
 	case *NestedLoopJoin:
 		o.Set("op", "NestedLoopJoin").Set("join_type", x.Kind.String())
 		if x.Cond != nil {

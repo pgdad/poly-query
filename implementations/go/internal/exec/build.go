@@ -48,6 +48,8 @@ func Build(ec *Context, n physical.Node) (Operator, error) {
 		return buildAggregate(ec, x)
 	case *physical.HashJoin:
 		return buildHashJoin(ec, x)
+	case *physical.MergeJoin:
+		return buildMergeJoin(ec, x)
 	case *physical.NestedLoopJoin:
 		left, err := Build(ec, x.Left)
 		if err != nil {

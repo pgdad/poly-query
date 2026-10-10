@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -44,6 +45,7 @@ var Capabilities = []string{
 	"phase2", "sql.groupby", "sql.join", "sql.functions", "sql.subquery", "sql.cte", "sql.correlated_subquery",
 	"phase3", "storage.pqcf", "storage.mmap", "index.hash", "index.btree",
 	"phase4", "http.streaming",
+	"phase5", "exec.row", "exec.vectorized", "exec.parallel", "join.hash", "join.merge", "join.nested_loop",
 }
 
 // Config holds engine-wide settings (CLI options).
@@ -66,7 +68,7 @@ func DefaultConfig() Config {
 		MaxIngestBytes:   4 << 30,
 		MaxTableRows:     500_000_000,
 		MaxJoinRows:      100_000_000,
-		Threads:          1,
+		Threads:          min(4, runtime.NumCPU()),
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
@@ -198,7 +200,9 @@ type QueryOptions struct {
 	CountOnly  bool   // do not retain rows (result: "count")
 	NoOptimize bool   // skip logical optimization (optimize: false)
 	NoIndexes  bool   // never use indexes (use_indexes: false)
-	Join       string // forced join algorithm ("", "auto", "hash", "nested_loop")
+	Join       string // forced join algorithm ("", "auto", "hash", "merge", "nested_loop")
+	Mode       string // execution model ("", "auto", "row", "vectorized")
+	Threads    int    // worker threads (0: the engine default)
 	QueryID    string // client-assigned query id (HTTP cancellation)
 }
 
