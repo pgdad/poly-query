@@ -247,12 +247,26 @@ class Gen:
 def canon(resp, ordered):
     if not resp.get("ok"):
         return ("error", resp["error"]["code"])
-    rows = []
-    for row in resp["rows"]:
-        rows.append(tuple(("%.9g" % v) if isinstance(v, float) else json.dumps(v) for v in row))
+    rows = [tuple(row) for row in resp["rows"]]
     if not ordered:
-        rows.sort()
+        rows.sort(key=lambda r: [("%.5g" % v) if isinstance(v, float) else json.dumps(v) for v in r])
     return ("ok", [c["type"] for c in resp["columns"]], rows)
+
+
+def close(a, b):
+    """Results equal with FLOAT64 tolerance |a-b| <= 1e-9 * max(1, |a|, |b|)."""
+    if a[0] != b[0] or a[0] == "error":
+        return a == b
+    if a[1] != b[1] or len(a[2]) != len(b[2]):
+        return False
+    for ra, rb in zip(a[2], b[2]):
+        for x, y in zip(ra, rb):
+            if isinstance(x, float) and isinstance(y, float):
+                if abs(x - y) > 1e-9 * max(1.0, abs(x), abs(y)):
+                    return False
+            elif x != y:
+                return False
+    return True
 
 
 def main():
@@ -284,9 +298,13 @@ def main():
         for ei, e in enumerate(engines):
             for c in combos:
                 got = canon(e.req({"op": "query", "sql": sql, "options": c}), ordered)
-                same = got == base
+                same = close(got, base)
                 if not same and count_only and got[0] == base[0] == "ok":
                     same = len(got[2]) == len(base[2])
+                if not same and count_only and join and "error" in (got[0], base[0]):
+                    # LIMIT without ORDER BY over a join: which rows (and so which errors) are
+                    # reached first depends on the join algorithm's output order
+                    same = True
                 if not same:
                     failures += 1
                     print(f"MISMATCH q{qi} engine{ei} {c}\n  {sql}\n  base={str(base)[:300]}\n  got ={str(got)[:300]}")

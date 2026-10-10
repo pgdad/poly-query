@@ -20,6 +20,14 @@ abstract class AggState {
     /** Adds the values of {@code arg} (null for COUNT(*)) at the active positions to their groups. */
     abstract void update(Vec arg, int[] sel, int n, int[] gids);
 
+    /**
+     * Adds the values at the active positions to group 0 (aggregation without GROUP BY).
+     * Implementations use reduction loops the JIT can vectorize.
+     */
+    void updateSingle(Vec arg, int[] sel, int n, int[] zeros) {
+        update(arg, sel, n, zeros);
+    }
+
     /** Adds the state of {@code other}'s group {@code from} to group {@code to}. */
     abstract void merge(AggState other, int from, int to);
 
@@ -85,6 +93,20 @@ abstract class AggState {
                     c[gids[i]]++;
                 }
             }
+        }
+
+        @Override
+        void updateSingle(Vec arg, int[] sel, int n, int[] zeros) {
+            if (!nonNull || !arg.hasNulls) {
+                counts[0] += n;
+                return;
+            }
+            long c = 0;
+            boolean[] nulls = arg.nulls;
+            for (int k = 0; k < n; k++) {
+                c += nulls[sel == null ? k : sel[k]] ? 0 : 1;
+            }
+            counts[0] += c;
         }
 
         @Override
@@ -162,6 +184,49 @@ abstract class AggState {
             }
         }
 
+        @Override
+        void updateSingle(Vec arg, int[] sel, int n, int[] zeros) {
+            if (arg.hasNulls) {
+                update(arg, sel, n, zeros);
+                return;
+            }
+            // Exact sum as high and low 32-bit halves: two overflow-free reductions (|n| < 2^31).
+            long[] x = arg.longs;
+            long lo = 0;
+            long hi = 0;
+            if (sel == null) {
+                for (int i = 0; i < n; i++) {
+                    long v = x[i];
+                    lo += v & 0xFFFFFFFFL;
+                    hi += v >> 32;
+                }
+            } else {
+                for (int k = 0; k < n; k++) {
+                    long v = x[sel[k]];
+                    lo += v & 0xFFFFFFFFL;
+                    hi += v >> 32;
+                }
+            }
+            counts[0] += n;
+            long hiShifted = hi << 32;
+            long total = hiShifted + lo;
+            boolean exact = (hiShifted >> 32) == hi && ((hiShifted ^ total) & (lo ^ total)) >= 0;
+            if (exact && (big == null || big[0] == null)) {
+                long s0 = sums[0];
+                long r = s0 + total;
+                if (((s0 ^ r) & (total ^ r)) >= 0) {
+                    sums[0] = r;
+                    return;
+                }
+            }
+            BigInteger add = BigInteger.valueOf(hi).shiftLeft(32).add(BigInteger.valueOf(lo));
+            if (big == null) {
+                big = new BigInteger[sums.length];
+            }
+            big[0] = total(0).add(add);
+            sums[0] = 0;
+        }
+
         /** Exact sum of a group as BigInteger. */
         private BigInteger total(int g) {
             return big != null && big[g] != null ? big[g] : BigInteger.valueOf(sums[g]);
@@ -231,6 +296,21 @@ abstract class AggState {
         }
 
         @Override
+        void updateSingle(Vec arg, int[] sel, int n, int[] zeros) {
+            if (arg.hasNulls) {
+                update(arg, sel, n, zeros);
+                return;
+            }
+            double[] x = arg.doubles;
+            double sum = sums[0];
+            for (int k = 0; k < n; k++) {
+                sum += x[sel == null ? k : sel[k]];
+            }
+            sums[0] = sum;
+            counts[0] += n;
+        }
+
+        @Override
         void merge(AggState other, int from, int to) {
             DoubleSum o = (DoubleSum) other;
             sums[to] += o.sums[from];
@@ -283,6 +363,32 @@ abstract class AggState {
                     offer(gids[i], x[i]);
                 }
             }
+        }
+
+        @Override
+        void updateSingle(Vec arg, int[] sel, int n, int[] zeros) {
+            if (arg.hasNulls || n == 0) {
+                update(arg, sel, n, zeros);
+                return;
+            }
+            long[] x = arg.longs;
+            long b = min ? Long.MAX_VALUE : Long.MIN_VALUE;
+            if (sel == null) {
+                if (min) {
+                    for (int i = 0; i < n; i++) {
+                        b = Math.min(b, x[i]);
+                    }
+                } else {
+                    for (int i = 0; i < n; i++) {
+                        b = Math.max(b, x[i]);
+                    }
+                }
+            } else {
+                for (int k = 0; k < n; k++) {
+                    b = min ? Math.min(b, x[sel[k]]) : Math.max(b, x[sel[k]]);
+                }
+            }
+            offer(0, b);
         }
 
         @Override

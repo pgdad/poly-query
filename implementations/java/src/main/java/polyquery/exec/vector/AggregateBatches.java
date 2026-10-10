@@ -101,8 +101,14 @@ final class AggregateBatches {
                 ctx.reserve(bytes);
                 reserved += bytes;
             }
+            boolean single = keys.keyCount() == 0;
             for (int a = 0; a < states.length; a++) {
-                states[a].update(argSlot[a] < 0 ? null : v[argSlot[a]], b.sel, b.count, gids);
+                Vec arg = argSlot[a] < 0 ? null : v[argSlot[a]];
+                if (single) {
+                    states[a].updateSingle(arg, b.sel, b.count, gids);
+                } else {
+                    states[a].update(arg, b.sel, b.count, gids);
+                }
             }
             return gids;
         }

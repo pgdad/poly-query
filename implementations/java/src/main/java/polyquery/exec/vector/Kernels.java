@@ -385,6 +385,12 @@ final class Kernels {
         };
     }
 
+    /** 1 if {@code x < y} (signed), else 0 — without branches (Hacker's Delight 2-12). */
+    static long less(long x, long y) {
+        long d = x - y;
+        return (d ^ ((x ^ y) & (d ^ x))) >>> 63;
+    }
+
     /** Comparison of LONG-represented values of one scale (INT64, DECIMAL, DATE, TIMESTAMP, BOOLEAN). */
     static final class LongCompare implements VecExpr {
         private final CompareOp op;
@@ -408,35 +414,38 @@ final class Kernels {
             long[] y = c.longs;
             long[] r = out.longs;
             if (sel == null) {
+                // Branch-free 0/1 results (bit arithmetic; the JIT turns these loops into SIMD code).
                 switch (op) {
                     case EQ -> {
                         for (int i = 0; i < n; i++) {
-                            r[i] = x[i] == y[i] ? 1 : 0;
+                            long d = x[i] ^ y[i];
+                            r[i] = ((d | -d) >>> 63) ^ 1;
                         }
                     }
                     case NEQ -> {
                         for (int i = 0; i < n; i++) {
-                            r[i] = x[i] != y[i] ? 1 : 0;
+                            long d = x[i] ^ y[i];
+                            r[i] = (d | -d) >>> 63;
                         }
                     }
                     case LT -> {
                         for (int i = 0; i < n; i++) {
-                            r[i] = x[i] < y[i] ? 1 : 0;
+                            r[i] = less(x[i], y[i]);
                         }
                     }
                     case LE -> {
                         for (int i = 0; i < n; i++) {
-                            r[i] = x[i] <= y[i] ? 1 : 0;
+                            r[i] = less(y[i], x[i]) ^ 1;
                         }
                     }
                     case GT -> {
                         for (int i = 0; i < n; i++) {
-                            r[i] = x[i] > y[i] ? 1 : 0;
+                            r[i] = less(y[i], x[i]);
                         }
                     }
                     case GE -> {
                         for (int i = 0; i < n; i++) {
-                            r[i] = x[i] >= y[i] ? 1 : 0;
+                            r[i] = less(x[i], y[i]) ^ 1;
                         }
                     }
                 }

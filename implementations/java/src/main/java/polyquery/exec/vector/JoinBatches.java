@@ -92,7 +92,11 @@ final class JoinBatches {
             this.ctx = ctx;
         }
 
-        /** Stored values of a build slot, or null if no consumer reads it. */
+        int rows() {
+            return store.rows();
+        }
+
+        /** Stored values of a build slot, or null if no row was stored or no consumer reads it. */
         Vec column(int slot) {
             return store.column(slot);
         }
@@ -510,7 +514,20 @@ final class JoinBatches {
                 Vec src = table.column(c);
                 int slot = buildSlot(c);
                 if (src == null) {
-                    out.cols[slot] = null;
+                    if (table.rows() > 0) {
+                        out.cols[slot] = null; // a slot nobody reads
+                    } else {
+                        // empty build side (only LEFT JOIN pads): its columns are all NULL
+                        Vec dst = outVec(slot);
+                        java.util.Arrays.fill(dst.nullMask(capacity), 0, m, true);
+                        if (dst.kind == Vec.Kind.DICT) {
+                            dst.toObjects(capacity);
+                        }
+                        if (dst.kind == Vec.Kind.OBJECT) {
+                            java.util.Arrays.fill(dst.objects, 0, m, null);
+                        }
+                        out.cols[slot] = dst;
+                    }
                     continue;
                 }
                 Vec dst = outVec(slot);
