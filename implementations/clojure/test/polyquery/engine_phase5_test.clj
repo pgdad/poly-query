@@ -9,9 +9,12 @@
             [polyquery.catalog :as catalog]
             [polyquery.engine :as engine]
             [polyquery.ingest.csv :as csv]
+            [polyquery.protocol :as protocol]
             [polyquery.storage.table :as table]
             [polyquery.types :as t])
   (:import (java.io StringReader)
+           (java.nio.file Files)
+           (java.nio.file.attribute FileAttribute)
            (java.util Random)))
 
 (defn- gen-csv
@@ -68,13 +71,26 @@
                                     :storage storage})
                      false))
 
+(defn- with-pqcf-copy
+  "Adds table `tp`: t saved as PQCF with row groups of 700 rows (so that
+  row-group skipping and parallel ranges cross segments) and memory-mapped."
+  [cat]
+  (let [dir (.toFile (Files/createTempDirectory "pq-p5" (make-array FileAttribute 0)))
+        st (protocol/make-state {:data-dir dir :limits {:max-table-rows 100000 :max-query-memory-mb 512}})
+        req #(protocol/handle-request st %)]
+    (reset! (:catalog st) cat)
+    (assert (get (req {"op" "save" "table" "t" "path" "t.pqcf" "options" {"row_group_size" 700}}) "ok"))
+    (assert (get (req {"op" "open" "table" "tp" "path" "t.pqcf" "options" {"mmap" true}}) "ok"))
+    @(:catalog st)))
+
 (def the-catalog
   (delay (atom (-> catalog/empty-catalog
                    (load-table "t" t-csv t-schema {})
                    (load-table "trow" t-csv t-schema {:layout :row})
                    (load-table "r" r-csv r-schema {})
                    (load-table "s" s-csv r-schema {})
-                   (load-table "small" (str/join "\n" (take 151 (str/split-lines t-csv))) t-schema {})))))
+                   (load-table "small" (str/join "\n" (take 151 (str/split-lines t-csv))) t-schema {})
+                   with-pqcf-copy))))
 
 (def configs
   [{:mode "row" :join "nested_loop" :threads 1 :optimize false}
@@ -91,6 +107,10 @@
   ;; [sql ordered?]
   [["SELECT * FROM t" false]
    ["SELECT * FROM trow WHERE g = 3 OR s IS NULL" false]
+   ["SELECT * FROM tp WHERE id > 650 AND id < 2200 AND g <> 4" false]
+   ["SELECT g, COUNT(*), SUM(d), MIN(s), MAX(f) FROM tp WHERE id BETWEEN 1000 AND 2900 GROUP BY g" false]
+   ["SELECT tp.id, r.name FROM tp JOIN r ON r.k = tp.k WHERE tp.id >= 1400" false]
+   ["SELECT id, ts FROM tp WHERE dt IS NOT NULL ORDER BY ts, id LIMIT 30" true]
    ["SELECT id, d * 2 + 1, f / 3, k % 7, -d, -f FROM t WHERE d > 10.5 AND f < 50" false]
    ["SELECT id FROM t WHERE NOT (b AND g > 4) OR d BETWEEN -5 AND 5" false]
    ["SELECT id, g IN (1, 2, NULL), s IN ('red', 'blue'), s NOT IN ('red', NULL) FROM t" false]

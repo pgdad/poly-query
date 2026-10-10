@@ -453,21 +453,24 @@
         heap (PriorityQueue. (int (max 1 (min k 4096))) (.reversed ccmp))
         qctx (:ctx env)
         n (long-array 1)]
-    (when (pos? k)
-      (reduce (fn [_ row]
-                (let [i (aget n 0)]
-                  (aset n 0 (inc i))
-                  (when (zero? (rem i check-interval)) (ctx/check! qctx))
-                  (if (< (.size heap) k)
-                    (do (when (zero? (rem (.size heap) check-interval))
-                          (ctx/reserve! qctx (* check-interval (ctx/row-bytes (alength ^objects row)))))
-                        (.add heap (Candidate. row (+ base i))))
-                    ;; a later row only replaces the current maximum when strictly smaller
-                    (when (neg? (.compare cmp row (.-row ^Candidate (.peek heap))))
-                      (.poll heap)
+    ;; the input is consumed completely even for LIMIT 0: its expressions
+    ;; are evaluated (and may fail) exactly as for a full sort
+    (reduce (fn [_ row]
+              (let [i (aget n 0)]
+                (aset n 0 (inc i))
+                (when (zero? (rem i check-interval)) (ctx/check! qctx))
+                (cond
+                  (zero? k) nil
+                  (< (.size heap) k)
+                  (do (when (zero? (rem (.size heap) check-interval))
+                        (ctx/reserve! qctx (* check-interval (ctx/row-bytes (alength ^objects row)))))
+                      (.add heap (Candidate. row (+ base i))))
+                  ;; a later row only replaces the current maximum when strictly smaller
+                  (neg? (.compare cmp row (.-row ^Candidate (.peek heap))))
+                  (do (.poll heap)
                       (.add heap (Candidate. row (+ base i))))))
-                nil)
-              nil input))
+              nil)
+            nil input)
     (let [out (ArrayList. heap)]
       (.sort out ccmp)
       out)))
