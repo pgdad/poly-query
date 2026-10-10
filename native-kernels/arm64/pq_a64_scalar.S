@@ -4,7 +4,7 @@
  * (no Advanced SIMD vector instructions).
  *
  * ABI / register conventions (all functions):
- *   - Arguments arrive in x0..x7 (d0.. for none here), results in x0/w0/d0.
+ *   - Arguments arrive in x0..x6 (no FP arguments), results in x0/w0/d0.
  *   - Only caller-saved registers are used: x0-x17 and v0-v7 (d0-d7). No
  *     callee-saved register (x19-x28, d8-d15) is touched, no stack frame is
  *     needed (every function is a leaf), sp is never modified, so stack
