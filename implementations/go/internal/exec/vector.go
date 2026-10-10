@@ -208,6 +208,26 @@ func (r *rowReader) Next() (types.Row, error) {
 	return r.buf, nil
 }
 
+// CountRows counts the remaining rows of a root operator without
+// materializing them when it reads a vectorized plan (ok is false
+// otherwise). Counting stops once more than limit rows (limit ≥ 0) exist.
+func CountRows(op Operator, limit int64) (n int64, ok bool, err error) {
+	r, isReader := op.(*rowReader)
+	if !isReader || r.b != nil {
+		return 0, false, nil
+	}
+	for {
+		b, err := r.input.NextBatch()
+		if b == nil || err != nil {
+			return n, true, err
+		}
+		n += int64(b.Len())
+		if limit >= 0 && n > limit {
+			return n, true, nil
+		}
+	}
+}
+
 // batchWriter accumulates rows into batches: it adapts a row Operator to
 // the BatchOperator interface.
 type batchWriter struct {

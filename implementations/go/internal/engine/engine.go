@@ -226,6 +226,23 @@ func (e *Engine) Query(ctx context.Context, sql string, opts QueryOptions) (*Res
 	}
 	defer cur.Close()
 	res := &Result{Columns: cur.Columns}
+	if opts.CountOnly && cur.op != nil {
+		// Vectorized plans are counted batch by batch.
+		n, ok, err := exec.CountRows(cur.op, cur.maxRows)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			if cur.maxRows >= 0 && n > cur.maxRows {
+				return nil, errs.New(errs.ResourceLimit, "result exceeds max_rows (%d)", cur.maxRows)
+			}
+			if err := cur.ctx.Err(); err != nil {
+				return nil, exec.ContextError(err)
+			}
+			res.RowCount = n
+			return res, nil
+		}
+	}
 	for {
 		row, err := cur.Next()
 		if err != nil {

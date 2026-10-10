@@ -2,6 +2,7 @@ package exec
 
 import (
 	"container/heap"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -188,14 +189,74 @@ func (s *vsortOp) run() error {
 			return err
 		}
 	}
-	s.perm = make([]int32, s.store.n)
-	for i := range s.perm {
-		s.perm[i] = int32(i)
-	}
 	cmp := newColComparator(s.store, s.keys)
-	var err error
-	s.perm, err = parallelSort(s.ec, s.perm, cmp, s.threads)
-	return err
+	items := cmp.items(s.store.n)
+	sorted, err := parallelSort(s.ec, items, cmp, s.threads)
+	if err != nil {
+		return err
+	}
+	s.perm = make([]int32, len(sorted))
+	for i, it := range sorted {
+		s.perm[i] = it.row
+	}
+	return nil
+}
+
+// sortItem is a row to sort with its first sort key normalized to an
+// unsigned integer whose order is the key order (contiguous, so most
+// comparisons touch no other memory); equal normalized keys are resolved
+// by the full comparator.
+type sortItem struct {
+	key uint64
+	row int32
+}
+
+// items builds the sort items of rows 0..n-1.
+func (c *colComparator) items(n int) []sortItem {
+	items := make([]sortItem, n)
+	k := &c.keys[0]
+	for i := range items {
+		items[i].row = int32(i)
+		if k.nulls != nil && k.nulls[i] {
+			if !k.nullsFirst {
+				items[i].key = math.MaxUint64
+			}
+			continue
+		}
+		var u uint64
+		switch k.cls {
+		case vInt:
+			u = uint64(k.ints[i]) ^ 1<<63
+		case vFloat:
+			f := k.floats[i]
+			if f == 0 {
+				f = 0 // -0 equals 0
+			}
+			u = math.Float64bits(f)
+			if u&(1<<63) != 0 {
+				u = ^u
+			} else {
+				u |= 1 << 63
+			}
+		default:
+			u = k.prefix[i]
+		}
+		if k.desc {
+			u = ^u
+		}
+		items[i].key = u
+	}
+	return items
+}
+
+func (c *colComparator) compareItems(a, b sortItem) int {
+	switch {
+	case a.key < b.key:
+		return -1
+	case a.key > b.key:
+		return 1
+	}
+	return c.compare(a.row, b.row)
 }
 
 // colComparator compares rows of a colStore by the sort keys, ties broken
@@ -209,20 +270,41 @@ type colKey struct {
 	ints       []int64
 	floats     []float64
 	strs       []string
+	prefix     []uint64 // STRING keys: first 8 bytes, big-endian (byte order)
 	nulls      []bool
 	desc       bool
 	nullsFirst bool
-	scale      int
 }
 
 func newColComparator(s *colStore, keys []sortKey) *colComparator {
 	c := &colComparator{}
 	for _, k := range keys {
 		col := &s.cols[k.index]
-		c.keys = append(c.keys, colKey{cls: s.classes[k.index], ints: col.I, floats: col.F, strs: col.S,
-			nulls: col.Nulls, desc: k.desc, nullsFirst: k.nullsFirst})
+		ck := colKey{cls: s.classes[k.index], ints: col.I, floats: col.F, strs: col.S,
+			nulls: col.Nulls, desc: k.desc, nullsFirst: k.nullsFirst}
+		if ck.cls == vStr {
+			ck.prefix = make([]uint64, len(col.S))
+			for i, str := range col.S {
+				ck.prefix[i] = stringPrefix(str)
+			}
+		}
+		c.keys = append(c.keys, ck)
 	}
 	return c
+}
+
+// stringPrefix packs the first 8 bytes of s big-endian, zero-padded:
+// prefixes order like the strings, and equal prefixes need a full
+// comparison.
+func stringPrefix(s string) uint64 {
+	var p uint64
+	for i := 0; i < 8; i++ {
+		p <<= 8
+		if i < len(s) {
+			p |= uint64(s[i])
+		}
+	}
+	return p
 }
 
 func (c *colComparator) compare(a, b int32) int {
@@ -257,7 +339,13 @@ func (c *colComparator) compare(a, b int32) int {
 				r = 1
 			}
 		default:
-			r = strings.Compare(k.strs[a], k.strs[b])
+			if x, y := k.prefix[a], k.prefix[b]; x < y {
+				r = -1
+			} else if x > y {
+				r = 1
+			} else {
+				r = strings.Compare(k.strs[a], k.strs[b])
+			}
 		}
 		if r != 0 {
 			if k.desc {
@@ -273,9 +361,9 @@ func (c *colComparator) compare(a, b int32) int {
 // goroutines.
 const minParallelSort = 1 << 14
 
-// parallelSort sorts perm by cmp: in parallel runs merged pairwise when
+// parallelSort sorts items by cmp: in parallel runs merged pairwise when
 // threads > 1. It checks for cancellation every checkEvery comparisons.
-func parallelSort(ec *Context, perm []int32, c *colComparator, threads int) ([]int32, error) {
+func parallelSort(ec *Context, perm []sortItem, c *colComparator, threads int) ([]sortItem, error) {
 	runs := 1
 	if threads > 1 && len(perm) >= minParallelSort {
 		runs = min(threads, len(perm)/(minParallelSort/2))
@@ -300,7 +388,7 @@ func parallelSort(ec *Context, perm []int32, c *colComparator, threads int) ([]i
 		}
 	}
 	// Merge rounds: runs (lo, mid, hi) pairs merged in parallel.
-	src, dst := perm, make([]int32, len(perm))
+	src, dst := perm, make([]sortItem, len(perm))
 	for len(bounds) > 2 {
 		var next []int
 		var wg sync.WaitGroup
@@ -328,7 +416,7 @@ func parallelSort(ec *Context, perm []int32, c *colComparator, threads int) ([]i
 	return src, nil
 }
 
-func sortRun(ec *Context, run []int32, c *colComparator) (err error) {
+func sortRun(ec *Context, run []sortItem, c *colComparator) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			abort, ok := r.(sortAborted)
@@ -339,21 +427,21 @@ func sortRun(ec *Context, run []int32, c *colComparator) (err error) {
 		}
 	}()
 	n := 0
-	slices.SortFunc(run, func(a, b int32) int {
+	slices.SortFunc(run, func(a, b sortItem) int {
 		if n++; n%checkEvery == 0 {
 			if err := ec.Check(); err != nil {
 				panic(sortAborted{err})
 			}
 		}
-		return c.compare(a, b)
+		return c.compareItems(a, b)
 	})
 	return nil
 }
 
-func mergeRuns(dst, a, b []int32, c *colComparator) {
+func mergeRuns(dst, a, b []sortItem, c *colComparator) {
 	i, j, k := 0, 0, 0
 	for i < len(a) && j < len(b) {
-		if c.compare(a[i], b[j]) <= 0 {
+		if c.compareItems(a[i], b[j]) <= 0 {
 			dst[k] = a[i]
 			i++
 		} else {
