@@ -193,12 +193,12 @@ def should_dictionary_encode(values: list[Any]) -> bool:
     n = len(values)
     if n < 2:
         return False
-    limit = n // 2
     seen: set[Any] = set()
     for v in values:
-        seen.add(v)
-        if len(seen) >= limit:
-            return False
+        if v is not None:
+            seen.add(v)
+            if 2 * len(seen) >= n:
+                return False
     return True
 
 

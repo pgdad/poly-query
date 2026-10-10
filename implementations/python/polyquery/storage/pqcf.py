@@ -105,6 +105,7 @@ def write_atomic(path: str, write: Callable[[BinaryIO], None]) -> int:
     base = os.path.basename(path)
     if not base:
         raise errors.io_error("path names a directory")
+    _remove_stale_temporaries(directory, base)
     tmp = os.path.join(directory, f".{base}.tmp-{os.getpid()}-{secrets.token_hex(6)}")
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
@@ -131,6 +132,36 @@ def write_atomic(path: str, write: Callable[[BinaryIO], None]) -> int:
         raise
     _fsync_directory(directory)
     return size
+
+
+def _remove_stale_temporaries(directory: str, base: str) -> None:
+    """Removes temporary files of earlier saves to the same target whose
+    writing process no longer exists (left behind by a crash)."""
+    prefix = f".{base}.tmp-"
+    try:
+        names = [n for n in os.listdir(directory) if n.startswith(prefix)]
+    except OSError:
+        return
+    for name in names:
+        pid_text = name[len(prefix) :].partition("-")[0]
+        if not pid_text.isdigit() or _process_alive(int(pid_text)):
+            continue
+        try:
+            os.unlink(os.path.join(directory, name))
+        except OSError:
+            pass
+
+
+def _process_alive(pid: int) -> bool:
+    if pid == os.getpid():
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
 
 
 def _fsync_directory(directory: str) -> None:

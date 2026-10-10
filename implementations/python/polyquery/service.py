@@ -94,11 +94,12 @@ class Engine:
 
     # ------------------------------------------------------------ storage
 
-    def save(self, name: str, path: str, options: pqcf.SaveOptions) -> int:
-        """Writes table ``name`` (with its index definitions) to a PQCF file."""
+    def save(self, name: str, path: str, options: pqcf.SaveOptions) -> tuple[Table, int]:
+        """Writes table ``name`` (with its index definitions) to a PQCF file;
+        returns the table and the file size."""
         table = self.catalog.require(name)
         indexes = [index.to_json() for index in self.catalog.indexes_of(table)]
-        return pqcf.save_table(path, table, indexes, options)
+        return table, pqcf.save_table(path, table, indexes, options)
 
     def open(self, name: str, path: str, storage: StorageOptions, replace: bool) -> Table:
         """Opens a PQCF file as table ``name`` and recreates its indexes."""

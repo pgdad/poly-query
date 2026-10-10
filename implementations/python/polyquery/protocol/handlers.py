@@ -300,8 +300,8 @@ class RequestHandler:
         name = _require_str(req, "table")
         path, full_path = self._path(req)
         options = _save_options(_optional_object(req, "options"))
-        size = self.engine.save(name, full_path, options)
-        return {"table": self.engine.catalog.require(name).name, "path": path, "bytes": size}
+        table, size = self.engine.save(name, full_path, options)
+        return {"table": table.name, "path": path, "bytes": size}
 
     def op_open(self, req: dict) -> dict[str, Any]:
         name = _require_str(req, "table")
