@@ -185,15 +185,23 @@
   (format nil "id,grp~%~{~A~%~}" (loop for i from 1 to 1000 collect (format nil "~D,~D" i (mod i 3)))))
 
 (deftest storage.index-selection
-    (let ((session (storage-session)))
-      (request session "op" "load" "table" "n" "format" "csv" "data" *numbers-csv*)
-      (execute-sql session "CREATE INDEX n_id ON n (id) USING HASH")
-      (execute-sql session "CREATE INDEX n_grp ON n (grp)")
-      (list (and (member "IndexScan" (explain-ops session "SELECT * FROM n WHERE id = 5") :test #'equal) t)
-            (and (member "IndexScan" (explain-ops session "SELECT * FROM n WHERE grp = 1") :test #'equal) t)
-            (polyquery::query-result-rows (execute-sql session "SELECT grp FROM n WHERE id IN (4, 2000)"))
-            (polyquery::query-result-row-count
-             (execute-sql session "SELECT * FROM n WHERE id BETWEEN 10 AND 20 AND id < 15.5"))))
+    (multiple-value-bind (session dir) (storage-session)
+      (unwind-protect
+           (progn
+             (request session "op" "load" "table" "n" "format" "csv" "data" *numbers-csv*)
+             (execute-sql session "CREATE INDEX n_id ON n (id) USING HASH")
+             (execute-sql session "CREATE INDEX n_grp ON n (grp)")
+             (list (and (member "IndexScan" (explain-ops session "SELECT * FROM n WHERE id = 5")
+                                :test #'equal)
+                        t)
+                   (and (member "IndexScan" (explain-ops session "SELECT * FROM n WHERE grp = 1")
+                                :test #'equal)
+                        t)
+                   (polyquery::query-result-rows
+                    (execute-sql session "SELECT grp FROM n WHERE id IN (4, 2000)"))
+                   (polyquery::query-result-row-count
+                    (execute-sql session "SELECT * FROM n WHERE id BETWEEN 10 AND 20 AND id < 15.5"))))
+        (uiop:delete-directory-tree (pathname dir) :validate t)))
   (t nil (#(1)) 6))
 
 (deftest storage.save-open-protocol
