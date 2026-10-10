@@ -2,6 +2,7 @@ package exec
 
 import (
 	"math"
+	"sort"
 
 	"polyquery/internal/errs"
 	"polyquery/internal/plan"
@@ -11,6 +12,9 @@ import (
 // accumulator computes one aggregate over a group.
 type accumulator interface {
 	add(v types.Value) error
+	// merge folds another accumulator of the same aggregate (partial
+	// aggregation of parallel workers) into this one.
+	merge(o accumulator)
 	result() (types.Value, error)
 }
 
@@ -63,11 +67,13 @@ func (a *countAcc) add(v types.Value) error {
 	}
 	return nil
 }
+func (a *countAcc) merge(o accumulator)          { a.n += o.(*countAcc).n }
 func (a *countAcc) result() (types.Value, error) { return types.IntValue(a.n), nil }
 
 type nullAcc struct{}
 
 func (nullAcc) add(types.Value) error        { return nil }
+func (nullAcc) merge(accumulator)            {}
 func (nullAcc) result() (types.Value, error) { return types.NullValue, nil }
 
 // exactSumAcc sums INT64 values or unscaled DECIMALs without intermediate
@@ -85,6 +91,14 @@ func (a *exactSumAcc) add(v types.Value) error {
 		a.any = true
 	}
 	return nil
+}
+
+func (a *exactSumAcc) merge(o accumulator) {
+	b := o.(*exactSumAcc)
+	if b.any {
+		a.sum.Merge(&b.sum)
+		a.any = true
+	}
 }
 
 func (a *exactSumAcc) result() (types.Value, error) {
@@ -111,6 +125,14 @@ func (a *floatSumAcc) add(v types.Value) error {
 	return nil
 }
 
+func (a *floatSumAcc) merge(o accumulator) {
+	b := o.(*floatSumAcc)
+	if b.any {
+		a.sum += b.sum
+		a.any = true
+	}
+}
+
 func (a *floatSumAcc) result() (types.Value, error) {
 	if !a.any {
 		return types.NullValue, nil
@@ -135,6 +157,12 @@ func (a *exactAvgAcc) add(v types.Value) error {
 	return nil
 }
 
+func (a *exactAvgAcc) merge(o accumulator) {
+	b := o.(*exactAvgAcc)
+	a.sum.Merge(&b.sum)
+	a.n += b.n
+}
+
 func (a *exactAvgAcc) result() (types.Value, error) {
 	if a.n == 0 {
 		return types.NullValue, nil
@@ -153,6 +181,12 @@ func (a *floatAvgAcc) add(v types.Value) error {
 		a.n++
 	}
 	return nil
+}
+
+func (a *floatAvgAcc) merge(o accumulator) {
+	b := o.(*floatAvgAcc)
+	a.sum += b.sum
+	a.n += b.n
 }
 
 func (a *floatAvgAcc) result() (types.Value, error) {
@@ -184,6 +218,12 @@ func (a *minMaxAcc) add(v types.Value) error {
 	return nil
 }
 
+func (a *minMaxAcc) merge(o accumulator) {
+	if b := o.(*minMaxAcc); b.any {
+		_ = a.add(b.best)
+	}
+}
+
 func (a *minMaxAcc) result() (types.Value, error) {
 	if !a.any {
 		return types.NullValue, nil
@@ -195,6 +235,7 @@ func (a *minMaxAcc) result() (types.Value, error) {
 type distinctAcc struct {
 	inner accumulator
 	seen  map[types.Value]struct{}
+	order []types.Value // distinct values in insertion order
 }
 
 func (a *distinctAcc) add(v types.Value) error {
@@ -208,10 +249,148 @@ func (a *distinctAcc) add(v types.Value) error {
 		return nil
 	}
 	a.seen[v] = struct{}{}
+	a.order = append(a.order, v)
 	return a.inner.add(v)
 }
 
+// merge adds the other accumulator's distinct values in their insertion
+// order (so FLOAT64 sums do not depend on map iteration order).
+func (a *distinctAcc) merge(o accumulator) {
+	for _, v := range o.(*distinctAcc).order {
+		_ = a.add(v)
+	}
+}
+
 func (a *distinctAcc) result() (types.Value, error) { return a.inner.result() }
+
+// rowAggTable is the hash table of row-mode aggregation: groups by
+// encoded key, with one accumulator per aggregate and group. Groups
+// remember the position of their first row so that partial tables of
+// parallel workers can be merged into first-appearance order.
+type rowAggTable struct {
+	ec       *Context
+	keyTypes []types.Type
+	calls    []*plan.AggCall
+	groups   map[string]int
+	keyRows  []types.Row
+	accs     [][]accumulator
+	first    []int64
+	key      []byte
+}
+
+func newRowAggTable(ec *Context, keyTypes []types.Type, calls []*plan.AggCall) *rowAggTable {
+	return &rowAggTable{ec: ec, keyTypes: keyTypes, calls: calls, groups: map[string]int{}}
+}
+
+// group returns the group of the given key values (encoded in t.key),
+// creating it if necessary.
+func (t *rowAggTable) group(vals types.Row, pos int64) (int, error) {
+	g, ok := t.groups[string(t.key)]
+	if ok {
+		if pos < t.first[g] {
+			t.first[g] = pos
+		}
+		return g, nil
+	}
+	g = len(t.keyRows)
+	t.groups[string(t.key)] = g
+	kr := append(types.Row(nil), vals...)
+	accs := make([]accumulator, len(t.calls))
+	for i, c := range t.calls {
+		accs[i] = newAccumulator(c)
+	}
+	t.keyRows = append(t.keyRows, kr)
+	t.accs = append(t.accs, accs)
+	t.first = append(t.first, pos)
+	return g, t.ec.Mem.Reserve(RowSize(kr) + int64(64*len(accs)))
+}
+
+// mergeFrom folds the groups of o into t.
+func (t *rowAggTable) mergeFrom(o *rowAggTable) error {
+	for g, kr := range o.keyRows {
+		t.key = t.key[:0]
+		for i, v := range kr {
+			t.key = appendKey(t.key, v, t.keyTypes[i])
+		}
+		dst, err := t.group(kr, o.first[g])
+		if err != nil {
+			return err
+		}
+		for i, acc := range o.accs[g] {
+			t.accs[dst][i].merge(acc)
+		}
+	}
+	return nil
+}
+
+// rows computes the result rows in first-appearance order; without keys
+// there is exactly one row, even for empty input.
+func (t *rowAggTable) rows() ([]types.Row, error) {
+	if len(t.keyTypes) == 0 && len(t.keyRows) == 0 {
+		t.key = t.key[:0]
+		if _, err := t.group(types.Row{}, 0); err != nil {
+			return nil, err
+		}
+	}
+	order := make([]int, len(t.keyRows))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return t.first[order[a]] < t.first[order[b]] })
+	out := make([]types.Row, len(order))
+	for i, g := range order {
+		kr := t.keyRows[g]
+		row := make(types.Row, len(kr), len(kr)+len(t.calls))
+		copy(row, kr)
+		for _, acc := range t.accs[g] {
+			v, err := acc.result()
+			if err != nil {
+				return nil, err
+			}
+			row = append(row, v)
+		}
+		out[i] = row
+	}
+	return out, nil
+}
+
+// rowAggInput evaluates the keys and arguments of an aggregation for one
+// row and folds it into a table.
+type rowAggInput struct {
+	keys []evalFn
+	args []evalFn // nil for COUNT(*)
+	vals types.Row
+}
+
+var one = types.IntValue(1)
+
+func (in *rowAggInput) add(t *rowAggTable, row types.Row, pos int64) error {
+	t.key = t.key[:0]
+	for i, f := range in.keys {
+		v, err := f(row)
+		if err != nil {
+			return err
+		}
+		in.vals[i] = v
+		t.key = appendKey(t.key, v, t.keyTypes[i])
+	}
+	g, err := t.group(in.vals, pos)
+	if err != nil {
+		return err
+	}
+	for i, f := range in.args {
+		v := one
+		if f != nil {
+			if v, err = f(row); err != nil {
+				return err
+			}
+		}
+		if err := t.accs[g][i].add(v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // hashAggregateOp groups its input by the key expressions in a hash table
 // and computes the aggregates per group. Groups are emitted in order of first
@@ -219,10 +398,9 @@ func (a *distinctAcc) result() (types.Value, error) { return a.inner.result() }
 type hashAggregateOp struct {
 	ec       *Context
 	input    Operator
-	keys     []evalFn
+	in       *rowAggInput
 	keyTypes []types.Type
 	calls    []*plan.AggCall
-	args     []evalFn // nil for COUNT(*)
 	out      []types.Row
 	pos      int
 	done     bool
@@ -244,21 +422,8 @@ func (a *hashAggregateOp) Next() (types.Row, error) {
 	return row, nil
 }
 
-func (a *hashAggregateOp) newGroup(keys types.Row) ([]accumulator, error) {
-	accs := make([]accumulator, len(a.calls))
-	for i, c := range a.calls {
-		accs[i] = newAccumulator(c)
-	}
-	return accs, a.ec.Mem.Reserve(RowSize(keys) + int64(64*len(accs)))
-}
-
 func (a *hashAggregateOp) run() error {
-	groups := map[string]int{}
-	var keyRows []types.Row
-	var accs [][]accumulator
-	var key []byte
-	vals := make(types.Row, len(a.keys))
-	one := types.IntValue(1)
+	t := newRowAggTable(a.ec, a.keyTypes, a.calls)
 	for n := 0; ; n++ {
 		row, err := a.input.Next()
 		if err != nil {
@@ -272,57 +437,11 @@ func (a *hashAggregateOp) run() error {
 				return err
 			}
 		}
-		key = key[:0]
-		for i, f := range a.keys {
-			if vals[i], err = f(row); err != nil {
-				return err
-			}
-			key = appendKey(key, vals[i], a.keyTypes[i])
-		}
-		g, ok := groups[string(key)]
-		if !ok {
-			g = len(keyRows)
-			groups[string(key)] = g
-			kr := append(types.Row(nil), vals...)
-			ga, err := a.newGroup(kr)
-			if err != nil {
-				return err
-			}
-			keyRows = append(keyRows, kr)
-			accs = append(accs, ga)
-		}
-		for i, f := range a.args {
-			v := one
-			if f != nil {
-				if v, err = f(row); err != nil {
-					return err
-				}
-			}
-			if err := accs[g][i].add(v); err != nil {
-				return err
-			}
-		}
-	}
-	if len(a.keys) == 0 && len(keyRows) == 0 {
-		ga, err := a.newGroup(nil)
-		if err != nil {
+		if err := a.in.add(t, row, int64(n)); err != nil {
 			return err
 		}
-		keyRows = append(keyRows, types.Row{})
-		accs = append(accs, ga)
 	}
-	a.out = make([]types.Row, len(keyRows))
-	for g, kr := range keyRows {
-		out := make(types.Row, len(kr), len(kr)+len(a.calls))
-		copy(out, kr)
-		for _, acc := range accs[g] {
-			v, err := acc.result()
-			if err != nil {
-				return err
-			}
-			out = append(out, v)
-		}
-		a.out[g] = out
-	}
-	return nil
+	var err error
+	a.out, err = t.rows()
+	return err
 }

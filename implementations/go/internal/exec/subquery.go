@@ -202,6 +202,11 @@ func runSubquery(ec *Context, x *plan.Subquery, sub physical.Node) (*subResult, 
 }
 
 func collectSubquery(ec *Context, x *plan.Subquery, sub physical.Node) (*subResult, error) {
+	if len(x.Correlated) > 0 {
+		// Evaluated per outer row: never worth parallel workers.
+		ec.serial++
+		defer func() { ec.serial-- }()
+	}
 	op, err := Build(ec, sub)
 	if err != nil {
 		return nil, err

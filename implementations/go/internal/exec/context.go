@@ -6,6 +6,7 @@ package exec
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 
 	"polyquery/internal/errs"
 	"polyquery/internal/physical"
@@ -19,6 +20,17 @@ type Context struct {
 	Mem         *MemTracker
 	MaxJoinRows int64 // ≤ 0 = unlimited
 	Plan        *physical.Plan
+	// Vectorized selects batch execution (mode "vectorized").
+	Vectorized bool
+	// Threads is the number of worker goroutines for parallel scans and
+	// aggregations (≤ 1: serial execution).
+	Threads int
+	// MorselRows is the number of rows per parallel work unit (0: default).
+	MorselRows int
+
+	// serial > 0 while building plans evaluated per outer row (correlated
+	// subqueries), which never use parallel workers.
+	serial int
 
 	// params holds the current values of outer columns referenced by the
 	// correlated subquery being built (column ID → cell).
@@ -50,10 +62,11 @@ func ContextError(err error) error {
 	return errs.New(errs.Cancelled, "query was cancelled")
 }
 
-// MemTracker approximates the memory retained by a query's operators.
+// MemTracker approximates the memory retained by a query's operators. It
+// is safe for concurrent use by parallel workers.
 type MemTracker struct {
 	Limit int64 // bytes; ≤ 0 = unlimited
-	used  int64
+	used  atomic.Int64
 }
 
 // Reserve accounts n more bytes, failing with RESOURCE_LIMIT past the budget.
@@ -61,8 +74,7 @@ func (m *MemTracker) Reserve(n int64) error {
 	if m == nil {
 		return nil
 	}
-	m.used += n
-	if m.Limit > 0 && m.used > m.Limit {
+	if used := m.used.Add(n); m.Limit > 0 && used > m.Limit {
 		return errs.New(errs.ResourceLimit, "query exceeded its memory budget of %d MiB", m.Limit>>20)
 	}
 	return nil
@@ -73,13 +85,13 @@ func (m *MemTracker) Mark() int64 {
 	if m == nil {
 		return 0
 	}
-	return m.used
+	return m.used.Load()
 }
 
 // Reset restores the usage recorded by Mark (memory of finished operators).
 func (m *MemTracker) Reset(mark int64) {
 	if m != nil {
-		m.used = mark
+		m.used.Store(mark)
 	}
 }
 

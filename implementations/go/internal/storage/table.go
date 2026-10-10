@@ -139,6 +139,10 @@ func (g *RowGroup) Column(ord int) (*Vector, error) {
 	return g.chunks[ord].Vector()
 }
 
+// Tuples returns the rows of a row-oriented group (nil for column-oriented
+// groups). The rows must not be modified.
+func (g *RowGroup) Tuples() []types.Row { return g.tuples }
+
 // GroupReader reads selected columns of one row group.
 type GroupReader struct {
 	ords   []int

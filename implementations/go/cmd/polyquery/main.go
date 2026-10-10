@@ -64,6 +64,10 @@ func parseArgs(mode string, args []string) options {
 		ShutdownGrace:   10 * time.Second,
 		MaxRequestBytes: 1 << 30,
 	}}
+	// Testing aid: tiny morsels make small tables use parallel execution.
+	if v, err := strconv.Atoi(os.Getenv("POLYQUERY_MORSEL_ROWS")); err == nil && v > 0 {
+		o.cfg.MorselRows = v
+	}
 	for i := 0; i < len(args); i++ {
 		name, value, hasValue := strings.Cut(args[i], "=")
 		next := func() string {

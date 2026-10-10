@@ -49,12 +49,12 @@ type mergeJoinOp struct {
 	steps      int
 }
 
-func buildMergeJoin(ec *Context, x *physical.MergeJoin) (Operator, error) {
-	left, err := Build(ec, x.Left)
+func buildMergeJoin(ec *Context, x *physical.MergeJoin, vec bool) (Operator, error) {
+	left, err := input(ec, x.Left, vec)
 	if err != nil {
 		return nil, err
 	}
-	right, err := Build(ec, x.Right)
+	right, err := input(ec, x.Right, vec)
 	if err != nil {
 		return nil, err
 	}

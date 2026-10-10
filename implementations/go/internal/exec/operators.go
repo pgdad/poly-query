@@ -19,47 +19,40 @@ type Operator interface {
 
 // ---------------------------------------------------------------- scan
 
-// scanOp reads the selected columns (ords) of a table group by group,
-// skipping row groups excluded by the scan's column filters; output rows
-// contain only the selected columns.
+// scanOp reads the selected columns (ords) of a table row by row from the
+// ranges its source yields (by default every row group not excluded by the
+// scan's column filters); output rows contain only the selected columns.
 type scanOp struct {
-	ec      *Context
-	table   *storage.Table
-	ords    []int
-	filters []physical.ColumnFilter
-	group   int
-	reader  *storage.GroupReader
-	pos     int
-	rows    int
-	n       int
-	buf     types.Row
+	ec     *Context
+	table  *storage.Table
+	ords   []int
+	src    rangeSource
+	reader *storage.GroupReader
+	pos    int
+	end    int
+	n      int
+	buf    types.Row
 }
 
-func (s *scanOp) skip(g *storage.RowGroup) bool {
-	for i := range s.filters {
-		f := &s.filters[i]
-		if f.Skips(g.Stats[f.Ord], g.Rows) {
-			return true
-		}
+func newScan(ec *Context, x *physical.TableScan, src rangeSource) *scanOp {
+	if src == nil {
+		src = &groupRanges{table: x.Table, filters: x.Filters}
 	}
-	return false
+	return &scanOp{ec: ec, table: x.Table, ords: x.Ords, src: src, buf: make(types.Row, len(x.Ords))}
 }
 
 func (s *scanOp) Next() (types.Row, error) {
-	for s.reader == nil || s.pos >= s.rows {
-		if s.group >= len(s.table.Groups) {
+	for s.reader == nil || s.pos >= s.end {
+		r, ok := s.src.next()
+		if !ok {
 			return nil, nil
 		}
-		g := s.table.Groups[s.group]
-		s.group++
-		if s.skip(g) {
-			continue
-		}
-		r, err := g.Reader(s.ords)
+		g := s.table.Groups[r.group]
+		reader, err := g.Reader(s.ords)
 		if err != nil {
 			return nil, err
 		}
-		s.reader, s.pos, s.rows = r, 0, g.Rows
+		s.reader, s.pos, s.end = reader, r.start, r.end
 	}
 	if s.n%checkEvery == 0 {
 		if err := s.ec.Check(); err != nil {
