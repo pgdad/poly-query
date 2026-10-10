@@ -11,5 +11,5 @@ if [ ! -f "$CP_FILE" ] || [ ! -d "$ROOT/target/classes" ]; then
 fi
 JAVA="${JAVA_HOME:+$JAVA_HOME/bin/}java"
 # -Xlog settings keep JVM warnings off stdout, which carries the protocol.
-exec "$JAVA" -Xss16m -XX:+UseParallelGC -Xlog:disable -Xlog:all=warning:stderr \
+exec "$JAVA" -Xss16m -XX:+UseParallelGC -XX:+DisplayVMOutputToStderr -Xlog:disable -Xlog:all=warning:stderr \
   ${POLYQUERY_JAVA_OPTS:-} -cp "$ROOT/target/classes:$(cat "$CP_FILE")" polyquery.main "$@"

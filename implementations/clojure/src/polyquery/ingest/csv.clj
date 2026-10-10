@@ -83,7 +83,11 @@
                 (cond
                   (= end delim) (recur false)
                   (or (= end LF) (= end -1)) true
-                  (and (= end CR) (= (.peek src) LF)) (do (.next src) true)
+                  (= end CR) (case (.peek src)
+                               10 (do (.next src) true)
+                               -1 true
+                               (c/ingest-error! (str "record " record ": unexpected character after closing quote")
+                                                {"record" record}))
                   :else (c/ingest-error! (str "record " record ": unexpected character after closing quote")
                                          {"record" record})))
               ;; unquoted field
@@ -91,6 +95,7 @@
                           (cond
                             (or (= ch delim) (= ch LF) (= ch -1)) ch
                             (and (= ch CR) (= (.peek src) LF)) (do (.next src) LF)
+                            (and (= ch CR) (= (.peek src) -1)) LF
                             :else (do (.append sb (char ch))
                                       (when (> (.length sb) c/max-field-chars) (field-too-long! record))
                                       (recur (.next src)))))]

@@ -101,7 +101,14 @@
   (let [n (.size values)
         out (object-array n)]
     (if (= type :string)
-      (dotimes [i n] (aset out i (.get values i)))
+      ;; share equal strings (low-cardinality columns repeat values a lot);
+      ;; give up when the column turns out to be mostly distinct
+      (let [canon (java.util.HashMap.)]
+        (dotimes [i n]
+          (let [s (.get values i)]
+            (aset out i (if (and (some? s) (< (.size canon) 65536))
+                          (or (.putIfAbsent canon s s) s)
+                          s)))))
       (let [parse (text-parser type)]
         (dotimes [i n]
           (when-let [raw (.get values i)]

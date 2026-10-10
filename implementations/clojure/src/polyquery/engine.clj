@@ -24,8 +24,9 @@
       x)))
 
 (defn- collect-rows
-  "Reduces the plan into a vector of JSON-ready rows, enforcing max-rows."
-  [plan env max-rows]
+  "Reduces the plan into a vector of JSON-ready rows, enforcing max-rows.
+  With count-only? the rows are counted but not serialized."
+  [plan env max-rows count-only?]
   (let [types (mapv :type (:columns plan))
         ncols (count types)
         qctx (:ctx env)
@@ -36,10 +37,12 @@
                  (err/fail! "RESOURCE_LIMIT" (str "result exceeds max_rows (" max-rows ")")))
                (when (zero? (rem (count acc) 4096))
                  (ctx/reserve! qctx (* 4096 (ctx/row-bytes ncols))))
-               (conj! acc (let [out (object-array ncols)]
-                            (dotimes [i ncols]
-                              (aset out i (v/value->json (nth types i) (aget row i))))
-                            out)))
+               (conj! acc (if count-only?
+                            nil
+                            (let [out (object-array ncols)]
+                              (dotimes [i ncols]
+                                (aset out i (v/value->json (nth types i) (aget row i))))
+                              out))))
              (transient [])
              (ops/execute plan env)))))
 
@@ -55,7 +58,7 @@
         limit (eval-count-clause env (:limit query) "LIMIT")
         offset (eval-count-clause env (:offset query) "OFFSET")
         plan (planner/plan-query query limit offset)
-        rows (collect-rows plan env (:max-rows opts))]
+        rows (collect-rows plan env (:max-rows opts) (:count-only? opts))]
     {:columns (table/columns-json (:columns plan))
      :rows rows
      :row-count (count rows)}))
