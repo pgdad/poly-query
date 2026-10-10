@@ -16,9 +16,9 @@
   "output": 182356,
   "cache_read": 13228830,
   "cache_creation": 291448,
-  "thinking": 54116,
+  "thinking": null,
   "thinking_estimated": 55996,
-  "source": "result event",
+  "source": "result events",
   "api_messages": 70
  },
  "rate_limit": {
@@ -34,6 +34,7 @@
  "cost_usd": 8.625029999999997,
  "cost_basis": "platform-reported list price (total_cost_usd)",
  "agent_turns": 76,
+ "result_segments": 1,
  "assistant_messages": 158,
  "tool_calls": {
   "Bash": 74,
@@ -41,7 +42,7 @@
  },
  "tool_calls_total": 75,
  "tool_failures": 1,
- "build_invocations": 10,
+ "build_invocations": 14,
  "build_failures_heuristic": 2,
  "conformance_runs": 6,
  "conformance_progress": [

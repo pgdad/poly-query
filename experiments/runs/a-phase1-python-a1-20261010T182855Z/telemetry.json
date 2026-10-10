@@ -1,0 +1,122 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase1-python-a1-20261010T182855Z",
+ "language": "python",
+ "task": "phase1",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase1",
+ "prompt_sha256": "cba1c1635adbd9171d549ebdc9d061d16ce5d172c7296a24176c3d0e2109fea2",
+ "session_id": "cbbab0bf-88aa-4ccd-bf3f-dc84242388ea",
+ "tokens": {
+  "input": 206,
+  "output": 203773,
+  "cache_read": 22671345,
+  "cache_creation": 328713,
+  "thinking": null,
+  "thinking_estimated": 79109,
+  "source": "result events (summed over 2 segments)",
+  "api_messages": 144
+ },
+ "rate_limit": {
+  "events": 27,
+  "max_utilization": {
+   "five_hour": 0.25,
+   "seven_day": 0.05
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 15.281845200000001,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 119,
+ "result_segments": 2,
+ "assistant_messages": 327,
+ "tool_calls": {
+  "Bash": 122,
+  "Write": 32,
+  "Edit": 2,
+  "Agent": 1,
+  "Read": 1,
+  "ScheduleWakeup": 2
+ },
+ "tool_calls_total": 160,
+ "tool_failures": 4,
+ "build_invocations": 22,
+ "build_failures_heuristic": 2,
+ "conformance_runs": 10,
+ "conformance_progress": [
+  [
+   223,
+   225
+  ],
+  [
+   223,
+   225
+  ],
+  [
+   223,
+   225
+  ],
+  [
+   223,
+   225
+  ],
+  [
+   223,
+   225
+  ],
+  [
+   223,
+   225
+  ],
+  [
+   223,
+   225
+  ],
+  [
+   223,
+   225
+  ],
+  [
+   223,
+   225
+  ],
+  [
+   223,
+   225
+  ]
+ ],
+ "repair_iterations": 9,
+ "time": {
+  "wall_seconds": 2242.9,
+  "model_api_seconds": 2401.5,
+  "tool_seconds": 75.2,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 8,
+  "files_changed": 52,
+  "lines_added": 5525,
+  "lines_removed": 0,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The Phase 1 engine is implemented and committed, but the definition of done (0 failures) is not met: the runner reports 223 of 225 passing. The two failures come from a bug in the conformance runner, and I don't think any engine can pass them. `make build test` succeeds (49 unit tests pass) and the working tree is clean.\n\n## Test results\n```\nphase 1: 223/225 pass, 2 fail, 0 error, 0 not implemented\nTOTAL: 223/225 pass\n```\nThe two failures are `limits_and_output.pqt` lines 34 and 39. At `tests/conformance/runner.py:216` the runner replaces every request's `id` with the step number before sending it. It then requires the response `id` to equal that number, while these two cases expect the original `{\"nested\":[1,\"x\"]}` or `\"abc\"` back. No response can satisfy both checks. I didn't change the test files; driven directly, the engine echoes these ids unchanged, and a unit test covers it. This is recorded in the README.\n\n## What's implemented\n- **Command line and protocol:** `version`, `capabilities`, `session` and `exec`. All operations work: `load`, `query`, `tables`, `schema`, `drop`, `reset`, `version`, `capabilities`, and `sleep` when test functions are enabled. It also covers request validation, path safety, `max_rows`, `timeout_ms`, the memory budget, and the ingest size and row limits.\n- **Ingestion:** CSV, JSON and JSONL, with type inference and explicit schemas, following the ingestion spec.\n- **Types:** all of them, including exact DECIMAL using integer arithmetic, DATE and TIMESTAMP stored as integers, NULL behaviour, the full CAST table, and the type-promotion rules.\n- **SQL:**\n  - Separate lexer, parser and AST that accept the whole SQL grammar.\n  - A binder resolves names and types; a planner and a batch-based executor run the query.\n  - `sql.basic` is complete, plus `SELECT DISTINCT` and `COUNT/SUM/AVG(DISTINCT \u2026)`.\n  - Features from later phases (GROUP BY, joins, subqueries, CASE, scalar functions, EXPLAIN, indexes) return `UNSUPPORTED`, never a wrong result.\n- **Speed:** loading 100k CSV rows takes about 0.5 s and 100k JSONL rows about 0.9 s; a full scan, filter or sort takes 40\u2013370 ms.\n\n## Verification\nI had a separate agent check the engine against the spec with about 600 hand-written queries plus randomized comparisons. It found two real violations, both now fixed:\n- **INT64 vs DECIMAL comparisons** skipped the overflow check. The integer is now scaled to the other side's scale and overflows past 18 digits, as the spec requires.\n- **`NaN`/`Infinity` in a request line** gave INTERNAL_ERROR after the request had already run. It is now rejected as invalid JSON before anything executes.\n\nThe randomized comparisons now show 0 mismatches and fuzzing produces no internal errors.\n\n## Main design decisions\nFull details are in `implementations/python/README.md`.\n- **Layering:** separate packages for SQL parsing, semantic analysis, planning, execution, storage, ingestion and protocol, behind one engine object shared by every command-line mode.\n- **Storage:** tables are stored column by column. Expressions are compiled into Python functions, and operators pass batches of 2048 rows, checking timeouts and memory per batch.\n- **Spec gaps I decided myself:**\n  - SQL `TIMESTAMP` literals and casts require the full date-and-time format; only file loading accepts a bare date.\n  - Blank CSV fields in non-text columns are NULL.\n  - An unknown type in a load schema is `INVALID_REQUEST`.\n  - Two DECIMALs compare exactly; only the INT64\u2192DECIMAL overflow rule is enforced.\n\n## Known limitations\n- Phase 1 only: no GROUP BY, joins, subqueries, scalar function library, saved storage, indexes or HTTP server yet.\n- Single-threaded, and input files are read fully into memory.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

@@ -421,6 +421,7 @@ def telemetry(run_id: str) -> dict:
     runner_runs = 0
     runner_results: list[tuple[int, int]] = []
     assistant_turns = 0
+    results: list[dict] = []
     init = None
     result = None
     msg_usage: dict[str, dict] = {}
@@ -476,9 +477,16 @@ def telemetry(run_id: str) -> dict:
                                 if mm:
                                     runner_results.append(tuple(map(int, mm[-1])))
         elif typ == "result":
-            result = ev
-    usage = (result or {}).get("usage") or {}
-    usage_source = "result event"
+            results.append(ev)
+    # A session may emit several result events (e.g. after ScheduleWakeup resumes it):
+    # num_turns and usage are per segment and are summed; cost and API time are cumulative.
+    result = results[-1] if results else None
+    usage = {}
+    for r in results:
+        for k, v in (r.get("usage") or {}).items():
+            if isinstance(v, int) and not isinstance(v, bool):
+                usage[k] = usage.get(k, 0) + v
+    usage_source = "result events" + (f" (summed over {len(results)} segments)" if len(results) > 1 else "")
     if not usage:
         # Run was killed before the final result event: sum per-message usage
         # (deduplicated by message id). Cost is not derivable without the platform's
@@ -520,9 +528,11 @@ def telemetry(run_id: str) -> dict:
                        "max_utilization": {k: max((r["windows"].get(k) or 0) for r in rate_limits)
                                            for k in {k for r in rate_limits for k in r["windows"]}},
                        "statuses": sorted({str(r["status"]) for r in rate_limits})},
-        "cost_usd": (result or {}).get("total_cost_usd"),
+        "cost_usd": max((r["total_cost_usd"] for r in results if isinstance(r.get("total_cost_usd"), (int, float))),
+                        default=None),
         "cost_basis": "platform-reported list price (total_cost_usd)",
-        "agent_turns": (result or {}).get("num_turns"),
+        "agent_turns": sum(r.get("num_turns") or 0 for r in results) if results else None,
+        "result_segments": len(results),
         "assistant_messages": assistant_turns,
         "tool_calls": tool_calls,
         "tool_calls_total": sum(tool_calls.values()),
@@ -534,7 +544,8 @@ def telemetry(run_id: str) -> dict:
         "repair_iterations": (runner_runs - first_fail - 1) if first_fail is not None else 0,
         "time": {
             "wall_seconds": m.get("wall_seconds"),
-            "model_api_seconds": round(((result or {}).get("duration_api_ms") or 0) / 1000, 1) or None,
+            "model_api_seconds": round(max((r.get("duration_api_ms") or 0) for r in results) / 1000, 1)
+            if results else None,
             "tool_seconds": round(tool_time, 1),
             "waiting_seconds": None,
             "human_seconds": 0,

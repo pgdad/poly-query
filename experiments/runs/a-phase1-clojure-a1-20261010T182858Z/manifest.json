@@ -145,5 +145,7 @@
  "finished": "2026-10-10T18:56:11+00:00",
  "wall_seconds": 1614.0,
  "agent_exit_code": 0,
- "outcome": "success"
+ "outcome": "success",
+ "import_branch": "track-a/clojure/phase1/a1",
+ "merged_into": "master"
 }

@@ -1,0 +1,4 @@
+2026-10-10T19:02:19+00:00 wave wave-a-phase2-a1-20261010T190215Z: order=['clojure', 'go', 'java']
+2026-10-10T19:02:19+00:00 [a-phase2-clojure-a1-20261010T190215Z] agent started
+2026-10-10T19:02:24+00:00 [a-phase2-go-a1-20261010T190216Z] agent started
+2026-10-10T19:02:29+00:00 [a-phase2-java-a1-20261010T190217Z] agent started
