@@ -154,6 +154,33 @@ fn push_conjuncts(plan: LogicalPlan, preds: Vec<Expr>) -> LogicalPlan {
             let join = LogicalPlan::join(left, right, join_type, on);
             LogicalPlan::filter(join, Expr::conjunction(above))
         }
+        // Through a projection (derived table, CTE): conjuncts that only read
+        // pass-through columns are rewritten onto the projection's input.
+        LogicalPlan::Project {
+            input,
+            exprs,
+            schema,
+        } => {
+            let source = |i: usize| match &exprs[i] {
+                Expr::Column { index, .. } => Some(*index),
+                _ => None,
+            };
+            let (mut below, mut above) = (Vec::new(), Vec::new());
+            for mut p in preds {
+                if p.columns().into_iter().all(|i| source(i).is_some()) {
+                    p.remap_columns(&|i| source(i).unwrap_or(i));
+                    below.push(p);
+                } else {
+                    above.push(p);
+                }
+            }
+            let project = LogicalPlan::Project {
+                input: Box::new(push_conjuncts(*input, below)),
+                exprs,
+                schema,
+            };
+            LogicalPlan::filter(project, Expr::conjunction(above))
+        }
         other => LogicalPlan::filter(other, Expr::conjunction(preds)),
     }
 }

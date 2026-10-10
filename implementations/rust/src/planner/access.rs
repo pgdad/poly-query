@@ -337,6 +337,9 @@ pub fn choose_index(
     let mut best: Option<IndexChoice> = None;
     for ix in indexes {
         let ty = table.fields[ix.column].data_type;
+        if !analyzed.iter().flatten().any(|(col, _)| *col == ix.column) {
+            continue;
+        }
         let Ok(stats) = table.column_stats(ix.column) else {
             continue;
         };
