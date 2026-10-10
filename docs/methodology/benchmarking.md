@@ -40,3 +40,20 @@ through the protocol). Workload: `benchmarks/workloads/analytics.json`.
   from different hosts are reported in separate tables.
 * Performance reports are produced only from runs that were actually executed;
   missing measurements are shown as missing.
+
+## Sandboxed execution of engines
+
+Engines are AI-generated code, so the benchmark harness runs on the host (it
+needs `sudo` for `drop_caches` and a user systemd scope for `MemoryMax`) but
+launches every engine process through
+`systemd-run --scope → taskset → tools/orchestration/sandboxed.sh`.
+
+* **Startup** is measured *inside* that chain by `benchmarks/harness/startup_probe.py`
+  (spawn → first `version` response), so the sandbox launch itself
+  (`meta.isolation.sandbox_launch_seconds`, ≈ 50 ms on the reference host,
+  identical for all engines) is excluded.
+* **Memory/CPU** sampling excludes the wrapper processes (`sudo`, `bwrap`,
+  `setpriv`, `env`, `taskset`, `systemd-run`); figures cover engine processes only.
+* Query latency is measured over the already-running session and is unaffected.
+* `--no-sandbox` exists for trusted engines only and is recorded as
+  `meta.isolation.sandboxed = false`.

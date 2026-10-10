@@ -35,6 +35,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "tests/conformance"))
 from engine import EngineError, HttpEngine, SessionEngine, engine_info  # noqa: E402
 
@@ -57,6 +58,23 @@ def tree_pids(root: int) -> list[int]:
         except OSError:
             pass
     return out
+
+
+# Launcher/sandbox plumbing processes in an engine's tree; excluded from engine RSS/CPU.
+WRAPPER_COMMS = {"sudo", "bwrap", "setpriv", "env", "taskset", "systemd-run"}
+SANDBOX = ROOT / "tools/orchestration/sandboxed.sh"
+
+
+def proc_comm(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/comm") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def engine_pids(root: int) -> list[int]:
+    return [p for p in tree_pids(root) if proc_comm(p) not in WRAPPER_COMMS]
 
 
 def proc_cpu(pid: int) -> float:
@@ -97,7 +115,7 @@ class Sampler:
     def _run(self) -> None:
         while not self._stop.is_set():
             total = 0
-            for p in tree_pids(self.pid):
+            for p in engine_pids(self.pid):
                 rss, hwm = proc_rss(p)
                 total += rss
                 self.max_hwm = max(self.max_hwm, hwm)
@@ -105,7 +123,7 @@ class Sampler:
             self._stop.wait(0.05)
 
     def cpu(self) -> float:
-        return sum(proc_cpu(p) for p in tree_pids(self.pid))
+        return sum(proc_cpu(p) for p in engine_pids(self.pid))
 
     def stop(self) -> dict:
         self._stop.set()
@@ -155,7 +173,18 @@ def drop_caches() -> bool:
     return r.returncode == 0
 
 
-def wrap_cmd(cpus: str | None, mem_gb: float | None) -> list[str]:
+def sandbox_launch_seconds(prefix: list[str], n: int = 5) -> float | None:
+    """Median wall time to start and exit `true` through the same wrapper chain as an engine."""
+    xs = []
+    for _ in range(n):
+        t0 = time.monotonic()
+        if subprocess.run([*prefix, "true"], capture_output=True).returncode != 0:
+            return None
+        xs.append(time.monotonic() - t0)
+    return sorted(xs)[len(xs) // 2]
+
+
+def wrap_cmd(cpus: str | None, mem_gb: float | None, sandbox: bool = True) -> list[str]:
     pre = []
     if mem_gb and shutil.which("systemd-run"):
         test = subprocess.run(["systemd-run", "--user", "--scope", "--quiet", "-p", "MemoryMax=1G", "true"],
@@ -165,6 +194,8 @@ def wrap_cmd(cpus: str | None, mem_gb: float | None) -> list[str]:
                     "-p", "MemorySwapMax=0"]
     if cpus and shutil.which("taskset"):
         pre += ["taskset", "-c", cpus]
+    if sandbox:
+        pre.append(str(SANDBOX))
     return pre
 
 
@@ -209,21 +240,20 @@ def bench_engine(lang: str, launcher: str, info: dict, workload: dict, scale: st
     caps = set(info["capability_set"])
     ctx = {"engine": lang, "scale": scale}
     res: dict = {"engine": lang, "capabilities": sorted(caps), "version": info.get("version")}
-    prefix = wrap_cmd(args.cpus, args.mem_limit_gb)
+    prefix = wrap_cmd(args.cpus, args.mem_limit_gb, args.sandbox)
     wl = WrappedLauncher(launcher, prefix, workdir, lang)
 
-    # 1. startup (process spawn -> first protocol response), cold-ish and repeated
-    startups = []
-    for k in range(args.startup_reps):
-        t0 = time.monotonic()
-        e = SessionEngine(str(wl.path), scale_dir, timeout=120)
-        try:
-            e.request({"op": "version"}, timeout=120)
-            startups.append(time.monotonic() - t0)
-        finally:
-            e.close()
+    # 1. startup (process spawn -> first protocol response), measured inside the wrapper chain
+    #    so sandbox launch time is excluded (see startup_probe.py)
+    startups: list[float] = []
+    probe = subprocess.run([*prefix, "python3", str(HERE / "startup_probe.py"), launcher, str(scale_dir),
+                            str(args.startup_reps)], capture_output=True, text=True, timeout=1800)
+    try:
+        startups = [x for x in json.loads(probe.stdout.strip().splitlines()[-1]) if x is not None]
+    except (json.JSONDecodeError, IndexError):
+        res["startup_error"] = (probe.stderr or probe.stdout)[-500:]
     raw.extend({**ctx, "kind": "startup", "seconds": s, "rep": k} for k, s in enumerate(startups))
-    res["startup_seconds"] = summarize(startups, rng)
+    res["startup_seconds"] = summarize(startups, rng) if startups else None
 
     # 2. main session: ingestion, indexes, queries
     extra = ["--enable-test-functions"] if "test.functions" in caps else []
@@ -436,6 +466,8 @@ def main() -> int:
     ap.add_argument("--http", action="store_true")
     ap.add_argument("--http-clients", type=lambda s: [int(x) for x in s.split(",")], default=[1, 4, 16])
     ap.add_argument("--http-seconds", type=float, default=20)
+    ap.add_argument("--no-sandbox", dest="sandbox", action="store_false",
+                    help="run engines unsandboxed (only for trusted engines; recorded in the results)")
     ap.add_argument("--label", default="")
     ap.add_argument("--track", default="A")
     args = ap.parse_args()
@@ -462,7 +494,11 @@ def main() -> int:
             "workload": workload["name"], "workload_version": workload["version"], "args": vars(args),
             "engine_order": order, "started": dt.datetime.now(dt.timezone.utc).isoformat(),
             "isolation": {"taskset": args.cpus or None, "memory_limit_gb": args.mem_limit_gb,
-                          "cgroup_wrapper": wrap_cmd(None, args.mem_limit_gb)[:3],
+                          "cgroup_wrapper": wrap_cmd(None, args.mem_limit_gb, False)[:3],
+                          "sandboxed": args.sandbox,
+                          # included in every startup sample; identical for all engines
+                          "sandbox_launch_seconds": sandbox_launch_seconds(wrap_cmd(args.cpus, args.mem_limit_gb,
+                                                                                     args.sandbox)),
                           "cold_cache_supported": drop_caches()},
             "dataset_manifest": json.loads((scale_dir / "manifest.json").read_text()),
             "git_commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip(),
@@ -475,7 +511,8 @@ def main() -> int:
             results[lang] = {"engine": lang, "status": "not_built"}
             print(f"[{lang}] not built", flush=True)
             continue
-        info = engine_info(str(launcher))
+        info = engine_info(str(WrappedLauncher(str(launcher), wrap_cmd(args.cpus, args.mem_limit_gb, args.sandbox),
+                                               workdir, f"{lang}-info").path), timeout=120)
         engine_json = ROOT / "implementations" / lang / "ENGINE.json"
         print(f"[{lang}] benchmarking ({len(info['capability_set'])} capabilities)", flush=True)
         try:

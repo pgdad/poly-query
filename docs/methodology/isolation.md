@@ -53,3 +53,16 @@ reference tooling; instructions alone are not sufficient.
   agent starts. This requires sudo rights for the orchestrating user.
 * Agents in the same wave run concurrently on one host and can observe host
   load, but not each other's files.
+
+## Host-side execution of merged engines
+
+After merging, engines and assembly kernels still run only sandboxed:
+`tools/orchestration/sandboxed.sh` (used by every `just` recipe that executes
+engine or kernel code, and by the benchmark harness) binds the repository as the
+only writable tree, overlays `.git` read-only, gives an empty agent config dir
+(no credentials), clears the environment and drops all privileges.
+
+Validation of a run (`pq_orchestrate.py validate`) takes only the agent's own
+work directory from the workspace; `tests/`, `spec/` and the kernel scaffolding
+come from the trusted repository, so an agent cannot influence its own verdict
+by editing the harness.

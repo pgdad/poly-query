@@ -1,0 +1,2334 @@
+{
+ "meta": {
+  "schema": "polyquery-benchmark/1",
+  "bench_id": "20261010T190017Z-100k-harness-validation",
+  "track": "A",
+  "scale": "100k",
+  "workload": "analytics",
+  "workload_version": 1,
+  "args": {
+   "engines": "java,go,clojure",
+   "scale": "100k",
+   "workload": "/home/esa/git/poly-query/benchmarks/workloads/analytics.json",
+   "reps": 5,
+   "warmup": 2,
+   "startup_reps": 5,
+   "seed": 1,
+   "cpus": "0-15",
+   "mem_limit_gb": 96,
+   "query_timeout": 600,
+   "queries": null,
+   "indexes": true,
+   "http": false,
+   "http_clients": [
+    1,
+    4,
+    16
+   ],
+   "http_seconds": 20,
+   "sandbox": true,
+   "label": "harness-validation",
+   "track": "A"
+  },
+  "engine_order": [
+   "go",
+   "clojure",
+   "java"
+  ],
+  "started": "2026-10-10T19:00:17.905807+00:00",
+  "isolation": {
+   "taskset": "0-15",
+   "memory_limit_gb": 96,
+   "cgroup_wrapper": [
+    "systemd-run",
+    "--user",
+    "--scope"
+   ],
+   "sandboxed": true,
+   "sandbox_launch_seconds": 0.047670201980508864,
+   "cold_cache_supported": true
+  },
+  "dataset_manifest": {
+   "generator": "pqgen",
+   "generator_version": "1.0.0",
+   "seed": 20261010,
+   "scale": "100k",
+   "base_rows": 100000,
+   "format": "csv",
+   "tables": {
+    "customers": {
+     "family": "customers",
+     "file": "customers.csv",
+     "schema_file": "customers.schema.json",
+     "rows": 10000,
+     "bytes": 1030654,
+     "sha256": "503f2e84a16e6bf6d60ca1fd540acc9bcbc920c82539e6668ef570520acce783",
+     "columns": [
+      {
+       "name": "customer_id",
+       "type": "INT64"
+      },
+      {
+       "name": "name",
+       "type": "STRING"
+      },
+      {
+       "name": "email",
+       "type": "STRING"
+      },
+      {
+       "name": "country",
+       "type": "STRING"
+      },
+      {
+       "name": "city",
+       "type": "STRING"
+      },
+      {
+       "name": "segment",
+       "type": "STRING"
+      },
+      {
+       "name": "signup_date",
+       "type": "DATE"
+      },
+      {
+       "name": "birth_year",
+       "type": "INT64"
+      },
+      {
+       "name": "credit_limit",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "is_active",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "loyalty_points",
+       "type": "INT64"
+      }
+     ]
+    },
+    "transactions": {
+     "family": "financial",
+     "file": "transactions.csv",
+     "schema_file": "transactions.schema.json",
+     "rows": 100000,
+     "bytes": 8250054,
+     "sha256": "9fa12731ddea954f7a0f145a6a59d414f842b6d87630ea812f7b68221968a4fa",
+     "columns": [
+      {
+       "name": "tx_id",
+       "type": "INT64"
+      },
+      {
+       "name": "customer_id",
+       "type": "INT64"
+      },
+      {
+       "name": "merchant_id",
+       "type": "INT64"
+      },
+      {
+       "name": "amount",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "currency",
+       "type": "STRING"
+      },
+      {
+       "name": "category",
+       "type": "STRING"
+      },
+      {
+       "name": "ts",
+       "type": "TIMESTAMP"
+      },
+      {
+       "name": "status",
+       "type": "STRING"
+      },
+      {
+       "name": "is_fraud",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "fee",
+       "type": "DECIMAL(10,2)"
+      },
+      {
+       "name": "bucket",
+       "type": "INT64"
+      }
+     ]
+    },
+    "sensor_readings": {
+     "family": "timeseries",
+     "file": "sensor_readings.csv",
+     "schema_file": "sensor_readings.schema.json",
+     "rows": 100000,
+     "bytes": 4588947,
+     "sha256": "164a0dd1a0e133fb1e2ec969f864c3245328dd16e4e8e859b668939adc45a098",
+     "columns": [
+      {
+       "name": "sensor_id",
+       "type": "INT64"
+      },
+      {
+       "name": "ts",
+       "type": "TIMESTAMP"
+      },
+      {
+       "name": "temperature",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "humidity",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "pressure",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "status",
+       "type": "STRING"
+      }
+     ]
+    },
+    "products": {
+     "family": "join",
+     "file": "products.csv",
+     "schema_file": "products.schema.json",
+     "rows": 2000,
+     "bytes": 122072,
+     "sha256": "705ef601210cfbcb72e4f8ea61fb43013ded74852745922234f5d3353d033b04",
+     "columns": [
+      {
+       "name": "product_id",
+       "type": "INT64"
+      },
+      {
+       "name": "name",
+       "type": "STRING"
+      },
+      {
+       "name": "category",
+       "type": "STRING"
+      },
+      {
+       "name": "brand",
+       "type": "STRING"
+      },
+      {
+       "name": "price",
+       "type": "DECIMAL(10,2)"
+      },
+      {
+       "name": "weight_kg",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "released",
+       "type": "DATE"
+      }
+     ]
+    },
+    "orders": {
+     "family": "join",
+     "file": "orders.csv",
+     "schema_file": "orders.schema.json",
+     "rows": 25000,
+     "bytes": 753771,
+     "sha256": "d7156f30c716aed133398a5d22c00e5305de6059d700bf3eb5b496690a975dc3",
+     "columns": [
+      {
+       "name": "order_id",
+       "type": "INT64"
+      },
+      {
+       "name": "customer_id",
+       "type": "INT64"
+      },
+      {
+       "name": "order_date",
+       "type": "DATE"
+      },
+      {
+       "name": "status",
+       "type": "STRING"
+      },
+      {
+       "name": "item_count",
+       "type": "INT64"
+      }
+     ]
+    },
+    "order_items": {
+     "family": "join",
+     "file": "order_items.csv",
+     "schema_file": "order_items.schema.json",
+     "rows": 100000,
+     "bytes": 2103199,
+     "sha256": "e3c33b35ea13f190c74025e06ad44d5484ab047b9b391000534675ca41f60759",
+     "columns": [
+      {
+       "name": "order_id",
+       "type": "INT64"
+      },
+      {
+       "name": "line_no",
+       "type": "INT64"
+      },
+      {
+       "name": "product_id",
+       "type": "INT64"
+      },
+      {
+       "name": "quantity",
+       "type": "INT64"
+      },
+      {
+       "name": "unit_price",
+       "type": "DECIMAL(10,2)"
+      },
+      {
+       "name": "discount",
+       "type": "DECIMAL(10,2)"
+      }
+     ]
+    },
+    "nulls_heavy": {
+     "family": "nulls",
+     "file": "nulls_heavy.csv",
+     "schema_file": "nulls_heavy.schema.json",
+     "rows": 100000,
+     "bytes": 1718314,
+     "sha256": "805b3b3a8a7168a58984bcf1b97a123d694b7388aed2757753fce12e01a83d7d",
+     "columns": [
+      {
+       "name": "id",
+       "type": "INT64"
+      },
+      {
+       "name": "n50",
+       "type": "INT64"
+      },
+      {
+       "name": "n90",
+       "type": "INT64"
+      },
+      {
+       "name": "s70",
+       "type": "STRING"
+      },
+      {
+       "name": "f95",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "b60",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "d99",
+       "type": "DATE"
+      }
+     ]
+    },
+    "wide": {
+     "family": "wide",
+     "file": "wide.csv",
+     "schema_file": "wide.schema.json",
+     "rows": 10000,
+     "bytes": 7123687,
+     "sha256": "be0af2f32214f388491b8edfceabdf366e29c639d190a0d0cdfd64694c5735af",
+     "columns": [
+      {
+       "name": "id",
+       "type": "INT64"
+      },
+      {
+       "name": "c000",
+       "type": "INT64"
+      },
+      {
+       "name": "c001",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c002",
+       "type": "STRING"
+      },
+      {
+       "name": "c003",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c004",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c005",
+       "type": "INT64"
+      },
+      {
+       "name": "c006",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c007",
+       "type": "STRING"
+      },
+      {
+       "name": "c008",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c009",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c010",
+       "type": "INT64"
+      },
+      {
+       "name": "c011",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c012",
+       "type": "STRING"
+      },
+      {
+       "name": "c013",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c014",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c015",
+       "type": "INT64"
+      },
+      {
+       "name": "c016",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c017",
+       "type": "STRING"
+      },
+      {
+       "name": "c018",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c019",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c020",
+       "type": "INT64"
+      },
+      {
+       "name": "c021",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c022",
+       "type": "STRING"
+      },
+      {
+       "name": "c023",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c024",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c025",
+       "type": "INT64"
+      },
+      {
+       "name": "c026",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c027",
+       "type": "STRING"
+      },
+      {
+       "name": "c028",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c029",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c030",
+       "type": "INT64"
+      },
+      {
+       "name": "c031",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c032",
+       "type": "STRING"
+      },
+      {
+       "name": "c033",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c034",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c035",
+       "type": "INT64"
+      },
+      {
+       "name": "c036",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c037",
+       "type": "STRING"
+      },
+      {
+       "name": "c038",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c039",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c040",
+       "type": "INT64"
+      },
+      {
+       "name": "c041",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c042",
+       "type": "STRING"
+      },
+      {
+       "name": "c043",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c044",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c045",
+       "type": "INT64"
+      },
+      {
+       "name": "c046",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c047",
+       "type": "STRING"
+      },
+      {
+       "name": "c048",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c049",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c050",
+       "type": "INT64"
+      },
+      {
+       "name": "c051",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c052",
+       "type": "STRING"
+      },
+      {
+       "name": "c053",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c054",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c055",
+       "type": "INT64"
+      },
+      {
+       "name": "c056",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c057",
+       "type": "STRING"
+      },
+      {
+       "name": "c058",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c059",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c060",
+       "type": "INT64"
+      },
+      {
+       "name": "c061",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c062",
+       "type": "STRING"
+      },
+      {
+       "name": "c063",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c064",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c065",
+       "type": "INT64"
+      },
+      {
+       "name": "c066",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c067",
+       "type": "STRING"
+      },
+      {
+       "name": "c068",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c069",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c070",
+       "type": "INT64"
+      },
+      {
+       "name": "c071",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c072",
+       "type": "STRING"
+      },
+      {
+       "name": "c073",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c074",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c075",
+       "type": "INT64"
+      },
+      {
+       "name": "c076",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c077",
+       "type": "STRING"
+      },
+      {
+       "name": "c078",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c079",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c080",
+       "type": "INT64"
+      },
+      {
+       "name": "c081",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c082",
+       "type": "STRING"
+      },
+      {
+       "name": "c083",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c084",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c085",
+       "type": "INT64"
+      },
+      {
+       "name": "c086",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c087",
+       "type": "STRING"
+      },
+      {
+       "name": "c088",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c089",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c090",
+       "type": "INT64"
+      },
+      {
+       "name": "c091",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c092",
+       "type": "STRING"
+      },
+      {
+       "name": "c093",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c094",
+       "type": "DECIMAL(12,2)"
+      },
+      {
+       "name": "c095",
+       "type": "INT64"
+      },
+      {
+       "name": "c096",
+       "type": "FLOAT64"
+      },
+      {
+       "name": "c097",
+       "type": "STRING"
+      },
+      {
+       "name": "c098",
+       "type": "BOOLEAN"
+      },
+      {
+       "name": "c099",
+       "type": "DECIMAL(12,2)"
+      }
+     ]
+    },
+    "sort_keys": {
+     "family": "sort",
+     "file": "sort_keys.csv",
+     "schema_file": "sort_keys.schema.json",
+     "rows": 100000,
+     "bytes": 4745161,
+     "sha256": "fa85b50715286c977622110a92fa7afb3b947109974e75f3a0297cccd7c9421b",
+     "columns": [
+      {
+       "name": "id",
+       "type": "INT64"
+      },
+      {
+       "name": "dup_key",
+       "type": "INT64"
+      },
+      {
+       "name": "uniq_key",
+       "type": "INT64"
+      },
+      {
+       "name": "str_key",
+       "type": "STRING"
+      },
+      {
+       "name": "float_key",
+       "type": "FLOAT64"
+      }
+     ]
+    }
+   }
+  },
+  "git_commit": "21af0b23ebb969858030f1081d7202611edbd7c3",
+  "environment_file": "environment.json",
+  "doctor_exit": 0,
+  "finished": "2026-10-10T19:00:26.712478+00:00"
+ },
+ "results": {
+  "go": {
+   "engine": "go",
+   "capabilities": [
+    "ingest.csv",
+    "ingest.json",
+    "ingest.jsonl",
+    "phase1",
+    "sql.basic",
+    "test.functions"
+   ],
+   "version": {
+    "ok": true,
+    "engine": "polyquery-go",
+    "engine_version": "0.1.0",
+    "language": "go",
+    "protocol_version": 1,
+    "spec_version": "1.0.0",
+    "runtime": "go1.27.1",
+    "build": {
+     "profile": "release",
+     "flags": "-trimpath"
+    }
+   },
+   "startup_seconds": {
+    "n": 5,
+    "median": 0.0018644219962880015,
+    "mean": 0.001752241188660264,
+    "stdev": 0.00030785868356842495,
+    "min": 0.0013823100016452372,
+    "max": 0.0021084079635329545,
+    "p50": 0.0018644219962880015,
+    "p95": 0.002071599569171667,
+    "p99": 0.002101046284660697,
+    "ci95_median": [
+     0.0013823100016452372,
+     0.0021084079635329545
+    ],
+    "outliers": 0
+   },
+   "ingest": {
+    "transactions": {
+     "engine": "go",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "transactions",
+     "seconds": 0.08976480300771073,
+     "bytes": 8250054,
+     "mb_per_s": 91.90744839367973,
+     "ok": true,
+     "rows": 100000,
+     "error": null
+    },
+    "customers": {
+     "engine": "go",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "customers",
+     "seconds": 0.0030550360097549856,
+     "bytes": 1030654,
+     "mb_per_s": 337.3623082376232,
+     "ok": true,
+     "rows": 10000,
+     "error": null
+    },
+    "orders": {
+     "engine": "go",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "orders",
+     "seconds": 0.004797564004547894,
+     "bytes": 753771,
+     "mb_per_s": 157.11536089679177,
+     "ok": true,
+     "rows": 25000,
+     "error": null
+    },
+    "order_items": {
+     "engine": "go",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "order_items",
+     "seconds": 0.02125331899151206,
+     "bytes": 2103199,
+     "mb_per_s": 98.95861445640348,
+     "ok": true,
+     "rows": 100000,
+     "error": null
+    },
+    "products": {
+     "engine": "go",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "products",
+     "seconds": 0.0004647279856726527,
+     "bytes": 122072,
+     "mb_per_s": 262.6740884203725,
+     "ok": true,
+     "rows": 2000,
+     "error": null
+    },
+    "sensor_readings": {
+     "engine": "go",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "sensor_readings",
+     "seconds": 0.02573643298819661,
+     "bytes": 4588947,
+     "mb_per_s": 178.30547854493312,
+     "ok": true,
+     "rows": 100000,
+     "error": null
+    },
+    "sort_keys": {
+     "engine": "go",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "sort_keys",
+     "seconds": 0.020001076976768672,
+     "bytes": 4745161,
+     "mb_per_s": 237.245274617538,
+     "ok": true,
+     "rows": 100000,
+     "error": null
+    },
+    "wide": {
+     "engine": "go",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "wide",
+     "seconds": 0.03662098600761965,
+     "bytes": 7123687,
+     "mb_per_s": 194.52471865497532,
+     "ok": true,
+     "rows": 10000,
+     "error": null
+    },
+    "nulls_heavy": {
+     "engine": "go",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "nulls_heavy",
+     "seconds": 0.02188616804778576,
+     "bytes": 1718314,
+     "mb_per_s": 78.5114139783754,
+     "ok": true,
+     "rows": 100000,
+     "error": null
+    }
+   },
+   "ingest_cpu_seconds": 0.27,
+   "index_build": {},
+   "queries": {
+    "q05_groupby_low_card": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby"
+     ]
+    },
+    "q06_groupby_high_card": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby"
+     ]
+    },
+    "q07_groupby_skewed": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby"
+     ]
+    },
+    "q08_groupby_uniform_multi": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby"
+     ]
+    },
+    "q09_distinct_count": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby"
+     ]
+    },
+    "q10_join_customers": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby",
+      "sql.join"
+     ]
+    },
+    "q11_join_star": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby",
+      "sql.join"
+     ]
+    },
+    "q12_left_join_anti": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby",
+      "sql.join"
+     ]
+    },
+    "q16_timeseries_hourly": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.functions",
+      "sql.groupby"
+     ]
+    },
+    "q19_cte_subquery": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.cte",
+      "sql.groupby",
+      "sql.subquery"
+     ]
+    },
+    "q20_string_functions": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.functions"
+     ]
+    },
+    "q01_filter_selective": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.0038954810006543994,
+      "mean": 0.004173542221542448,
+      "stdev": 0.00041256473664011704,
+      "min": 0.0038520180387422442,
+      "max": 0.004664861015044153,
+      "p50": 0.0038954810006543994,
+      "p95": 0.004648541822098196,
+      "p99": 0.004661597176454962,
+      "ci95_median": [
+       0.0038520180387422442,
+       0.004664861015044153
+      ],
+      "outliers": 0
+     },
+     "warmup_seconds": [
+      0.0044599699904210865,
+      0.004537929024081677
+     ],
+     "digests": [
+      "9c1814aa18cacd85"
+     ]
+    },
+    "q02_filter_low_selectivity": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.006472673965618014,
+      "mean": 0.0064816173864528535,
+      "stdev": 0.00012798964980225165,
+      "min": 0.006356211961247027,
+      "max": 0.006678398000076413,
+      "p50": 0.006472673965618014,
+      "p95": 0.006646250409539789,
+      "p99": 0.006671968481969088,
+      "ci95_median": [
+       0.006356211961247027,
+       0.006678398000076413
+      ],
+      "outliers": 0
+     },
+     "warmup_seconds": [
+      0.00641886203084141,
+      0.006676052988041192
+     ],
+     "digests": [
+      "d005901d4c53c070"
+     ]
+    },
+    "q03_range_filter_time": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.0059049500268884,
+      "mean": 0.005923679808620364,
+      "stdev": 0.00025295329840295343,
+      "min": 0.005593926005531102,
+      "max": 0.00628184003289789,
+      "p50": 0.0059049500268884,
+      "p95": 0.006228490022476762,
+      "p99": 0.0062711700308136645,
+      "ci95_median": [
+       0.005593926005531102,
+       0.00628184003289789
+      ],
+      "outliers": 0
+     },
+     "warmup_seconds": [
+      0.006183232006151229,
+      0.005670380953233689
+     ],
+     "digests": [
+      "78c3e04fda7bc4c9"
+     ]
+    },
+    "q04_arith_aggregate": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.010868602024856955,
+      "mean": 0.01081867639441043,
+      "stdev": 0.0001736912370238581,
+      "min": 0.010525315999984741,
+      "max": 0.010969163966365159,
+      "p50": 0.010868602024856955,
+      "p95": 0.01095851557329297,
+      "p99": 0.010967034287750721,
+      "ci95_median": [
+       0.010525315999984741,
+       0.010969163966365159
+      ],
+      "outliers": 1
+     },
+     "warmup_seconds": [
+      0.011010082031134516,
+      0.010684119013603777
+     ],
+     "digests": [
+      "ea7af5be307defbe"
+     ]
+    },
+    "q13_sort_topn": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.0033340990194119513,
+      "mean": 0.003380868409294635,
+      "stdev": 0.0001592114543593691,
+      "min": 0.003270748013164848,
+      "max": 0.0036600420135073364,
+      "p50": 0.0033340990194119513,
+      "p95": 0.0035977490129880606,
+      "p99": 0.0036475834134034814,
+      "ci95_median": [
+       0.003270748013164848,
+       0.0036600420135073364
+      ],
+      "outliers": 1
+     },
+     "warmup_seconds": [
+      0.003847719985060394,
+      0.003409573982935399
+     ],
+     "digests": [
+      "4a8876df39f4ceb2"
+     ]
+    },
+    "q14_sort_full_string": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.04000512999482453,
+      "mean": 0.03960990880150348,
+      "stdev": 0.0010771763610970939,
+      "min": 0.03776447899872437,
+      "max": 0.040457313996739686,
+      "p50": 0.04000512999482453,
+      "p95": 0.04040805379627273,
+      "p99": 0.040447461956646294,
+      "ci95_median": [
+       0.03776447899872437,
+       0.040457313996739686
+      ],
+      "outliers": 1
+     },
+     "warmup_seconds": [
+      0.04019987100036815,
+      0.04208229703363031
+     ],
+     "digests": []
+    },
+    "q15_sort_multi_key": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.03826449502957985,
+      "mean": 0.038140137202572075,
+      "stdev": 0.0010766653437930937,
+      "min": 0.03698990005068481,
+      "max": 0.03978953795740381,
+      "p50": 0.03826449502957985,
+      "p95": 0.03948487396119162,
+      "p99": 0.03972860515816137,
+      "ci95_median": [
+       0.03698990005068481,
+       0.03978953795740381
+      ],
+      "outliers": 1
+     },
+     "warmup_seconds": [
+      0.04173847002675757,
+      0.037354776985011995
+     ],
+     "digests": []
+    },
+    "q17_wide_projection": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.0009902510209940374,
+      "mean": 0.0010238218004815281,
+      "stdev": 0.00026477570902594714,
+      "min": 0.0007672350038774312,
+      "max": 0.0013300709542818367,
+      "p50": 0.0009902510209940374,
+      "p95": 0.0013161083683371545,
+      "p99": 0.0013272784370929004,
+      "ci95_median": [
+       0.0007672350038774312,
+       0.0013300709542818367
+      ],
+      "outliers": 0
+     },
+     "warmup_seconds": [
+      0.0007489009876735508,
+      0.0012401989661157131
+     ],
+     "digests": [
+      "05e9fc0c3c05b534"
+     ]
+    },
+    "q18_nulls": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.005977027001790702,
+      "mean": 0.0060578698059543966,
+      "stdev": 0.00021632171217900875,
+      "min": 0.0059315209509804845,
+      "max": 0.006441455043386668,
+      "p50": 0.005977027001790702,
+      "p95": 0.006353400635998696,
+      "p99": 0.0064238441619090736,
+      "ci95_median": [
+       0.0059315209509804845,
+       0.006441455043386668
+      ],
+      "outliers": 1
+     },
+     "warmup_seconds": [
+      0.006436435040086508,
+      0.005966718017589301
+     ],
+     "digests": [
+      "b0e60618ebf18ef9"
+     ]
+    }
+   },
+   "query_phase_cpu_seconds": 0.8500000000000001,
+   "query_phase_wall_seconds": 0.8185645000194199,
+   "thread_scaling": {
+    "status": "not_applicable"
+   },
+   "modes": {
+    "status": "not_applicable"
+   },
+   "joins": {
+    "status": "not_applicable"
+   },
+   "memory": {
+    "peak_tree_rss_bytes": 188100608,
+    "max_process_hwm_bytes": 188100608
+   },
+   "http": {
+    "status": "not_applicable"
+   },
+   "status": "ok",
+   "engine_json": {
+    "language": "go",
+    "track": "A",
+    "libraries": []
+   }
+  },
+  "clojure": {
+   "engine": "clojure",
+   "capabilities": [
+    "ingest.csv",
+    "ingest.json",
+    "ingest.jsonl",
+    "phase1",
+    "sql.basic",
+    "test.functions"
+   ],
+   "version": {
+    "ok": true,
+    "engine": "polyquery-clojure",
+    "engine_version": "0.1.0",
+    "language": "clojure",
+    "protocol_version": 1,
+    "spec_version": "1.0.0",
+    "runtime": "Clojure 1.12.3 on Java 27",
+    "build": {
+     "profile": "release",
+     "flags": "aot,direct-linking"
+    }
+   },
+   "startup_seconds": {
+    "n": 5,
+    "median": 0.27717903000302613,
+    "mean": 0.27101340221706777,
+    "stdev": 0.018303645137618618,
+    "min": 0.24129819904919714,
+    "max": 0.28628365200711414,
+    "p50": 0.27717903000302613,
+    "p95": 0.2857989782118239,
+    "p99": 0.2861867172480561,
+    "ci95_median": [
+     0.24129819904919714,
+     0.28628365200711414
+    ],
+    "outliers": 0
+   },
+   "ingest": {
+    "transactions": {
+     "engine": "clojure",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "transactions",
+     "seconds": 0.6999685519840568,
+     "bytes": 8250054,
+     "mb_per_s": 11.786320937726803,
+     "ok": true,
+     "rows": 100000,
+     "error": null
+    },
+    "customers": {
+     "engine": "clojure",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "customers",
+     "seconds": 0.03945513896178454,
+     "bytes": 1030654,
+     "mb_per_s": 26.122173869372777,
+     "ok": true,
+     "rows": 10000,
+     "error": null
+    },
+    "orders": {
+     "engine": "clojure",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "orders",
+     "seconds": 0.02582146500935778,
+     "bytes": 753771,
+     "mb_per_s": 29.19164345349232,
+     "ok": true,
+     "rows": 25000,
+     "error": null
+    },
+    "order_items": {
+     "engine": "clojure",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "order_items",
+     "seconds": 0.11418539297301322,
+     "bytes": 2103199,
+     "mb_per_s": 18.419159800037416,
+     "ok": true,
+     "rows": 100000,
+     "error": null
+    },
+    "products": {
+     "engine": "clojure",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "products",
+     "seconds": 0.008005673007573932,
+     "bytes": 122072,
+     "mb_per_s": 15.248187114876071,
+     "ok": true,
+     "rows": 2000,
+     "error": null
+    },
+    "sensor_readings": {
+     "engine": "clojure",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "sensor_readings",
+     "seconds": 0.11160994303645566,
+     "bytes": 4588947,
+     "mb_per_s": 41.1159335374008,
+     "ok": true,
+     "rows": 100000,
+     "error": null
+    },
+    "sort_keys": {
+     "engine": "clojure",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "sort_keys",
+     "seconds": 0.12055379804223776,
+     "bytes": 4745161,
+     "mb_per_s": 39.361356316102665,
+     "ok": true,
+     "rows": 100000,
+     "error": null
+    },
+    "wide": {
+     "engine": "clojure",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "wide",
+     "seconds": 0.23630859795957804,
+     "bytes": 7123687,
+     "mb_per_s": 30.145695338679758,
+     "ok": true,
+     "rows": 10000,
+     "error": null
+    },
+    "nulls_heavy": {
+     "engine": "clojure",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "nulls_heavy",
+     "seconds": 0.05427721299929544,
+     "bytes": 1718314,
+     "mb_per_s": 31.658110375385426,
+     "ok": true,
+     "rows": 100000,
+     "error": null
+    }
+   },
+   "ingest_cpu_seconds": 3.5,
+   "index_build": {},
+   "queries": {
+    "q05_groupby_low_card": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby"
+     ]
+    },
+    "q06_groupby_high_card": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby"
+     ]
+    },
+    "q07_groupby_skewed": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby"
+     ]
+    },
+    "q08_groupby_uniform_multi": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby"
+     ]
+    },
+    "q09_distinct_count": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby"
+     ]
+    },
+    "q10_join_customers": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby",
+      "sql.join"
+     ]
+    },
+    "q11_join_star": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby",
+      "sql.join"
+     ]
+    },
+    "q12_left_join_anti": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby",
+      "sql.join"
+     ]
+    },
+    "q16_timeseries_hourly": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.functions",
+      "sql.groupby"
+     ]
+    },
+    "q19_cte_subquery": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.cte",
+      "sql.groupby",
+      "sql.subquery"
+     ]
+    },
+    "q20_string_functions": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.functions"
+     ]
+    },
+    "q01_filter_selective": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.0028385419864207506,
+      "mean": 0.0030351920053362847,
+      "stdev": 0.000443132479122597,
+      "min": 0.002712732006330043,
+      "max": 0.003765342989936471,
+      "p50": 0.0028385419864207506,
+      "p95": 0.003640023595653474,
+      "p99": 0.003740279111079872,
+      "ci95_median": [
+       0.002712732006330043,
+       0.003765342989936471
+      ],
+      "outliers": 0
+     },
+     "warmup_seconds": [
+      0.005650223989505321,
+      0.003961196984164417
+     ],
+     "digests": [
+      "9c1814aa18cacd85"
+     ]
+    },
+    "q02_filter_low_selectivity": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.005200424988288432,
+      "mean": 0.0052710832096636295,
+      "stdev": 0.00019975427899490372,
+      "min": 0.005124318005982786,
+      "max": 0.005621188029181212,
+      "p50": 0.005200424988288432,
+      "p95": 0.005543728021439165,
+      "p99": 0.005605696027632803,
+      "ci95_median": [
+       0.005124318005982786,
+       0.005621188029181212
+      ],
+      "outliers": 1
+     },
+     "warmup_seconds": [
+      0.010244468983728439,
+      0.004688446002546698
+     ],
+     "digests": [
+      "d005901d4c53c070"
+     ]
+    },
+    "q03_range_filter_time": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.003134918981231749,
+      "mean": 0.0035445189918391407,
+      "stdev": 0.000810169841501482,
+      "min": 0.0029934679623693228,
+      "max": 0.004928915004711598,
+      "p50": 0.003134918981231749,
+      "p95": 0.00466401920421049,
+      "p99": 0.004875935844611377,
+      "ci95_median": [
+       0.0029934679623693228,
+       0.004928915004711598
+      ],
+      "outliers": 1
+     },
+     "warmup_seconds": [
+      0.01849728502565995,
+      0.0035706209600903094
+     ],
+     "digests": [
+      "78c3e04fda7bc4c9"
+     ]
+    },
+    "q04_arith_aggregate": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.006187500024680048,
+      "mean": 0.006505068205296993,
+      "stdev": 0.0012558340403777627,
+      "min": 0.004879761021584272,
+      "max": 0.008292741025798023,
+      "p50": 0.006187500024680048,
+      "p95": 0.008035365422256292,
+      "p99": 0.008241265905089676,
+      "ci95_median": [
+       0.004879761021584272,
+       0.008292741025798023
+      ],
+      "outliers": 2
+     },
+     "warmup_seconds": [
+      0.016138167993631214,
+      0.006093139003496617
+     ],
+     "digests": [
+      "ea7af5be307defbe"
+     ]
+    },
+    "q13_sort_topn": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.032908121997024864,
+      "mean": 0.035889794013928625,
+      "stdev": 0.00493500498850279,
+      "min": 0.03183334902860224,
+      "max": 0.042129348032176495,
+      "p50": 0.032908121997024864,
+      "p95": 0.04177149223396555,
+      "p99": 0.04205777687253431,
+      "ci95_median": [
+       0.03183334902860224,
+       0.042129348032176495
+      ],
+      "outliers": 0
+     },
+     "warmup_seconds": [
+      0.07058228901587427,
+      0.04018258902942762
+     ],
+     "digests": [
+      "4a8876df39f4ceb2"
+     ]
+    },
+    "q14_sort_full_string": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.048211495974101126,
+      "mean": 0.052150069607887414,
+      "stdev": 0.007000253835107402,
+      "min": 0.04706807201728225,
+      "max": 0.06311807100428268,
+      "p50": 0.048211495974101126,
+      "p95": 0.06153572840848937,
+      "p99": 0.06280160248512402,
+      "ci95_median": [
+       0.04706807201728225,
+       0.06311807100428268
+      ],
+      "outliers": 0
+     },
+     "warmup_seconds": [
+      0.06272155401529744,
+      0.052418752980884165
+     ],
+     "digests": []
+    },
+    "q15_sort_multi_key": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.04586333001498133,
+      "mean": 0.0503158254083246,
+      "stdev": 0.008955141220864089,
+      "min": 0.04032060201279819,
+      "max": 0.060491173004265875,
+      "p50": 0.04586333001498133,
+      "p95": 0.060212887404486534,
+      "p99": 0.06043551588431001,
+      "ci95_median": [
+       0.04032060201279819,
+       0.060491173004265875
+      ],
+      "outliers": 0
+     },
+     "warmup_seconds": [
+      0.06468435301212594,
+      0.04662709898548201
+     ],
+     "digests": []
+    },
+    "q17_wide_projection": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.003265929000917822,
+      "mean": 0.0033975102007389067,
+      "stdev": 0.0005178357269168911,
+      "min": 0.002888187998905778,
+      "max": 0.004212937026750296,
+      "p50": 0.003265929000917822,
+      "p95": 0.0040805122116580606,
+      "p99": 0.004186452063731849,
+      "ci95_median": [
+       0.002888187998905778,
+       0.004212937026750296
+      ],
+      "outliers": 0
+     },
+     "warmup_seconds": [
+      0.004701420955825597,
+      0.004278703010641038
+     ],
+     "digests": [
+      "05e9fc0c3c05b534"
+     ]
+    },
+    "q18_nulls": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.0032145800068974495,
+      "mean": 0.0032679808093234895,
+      "stdev": 0.0002592551404100534,
+      "min": 0.0030716280452907085,
+      "max": 0.003717641986440867,
+      "p50": 0.0032145800068974495,
+      "p95": 0.003617985593155026,
+      "p99": 0.003697710707783699,
+      "ci95_median": [
+       0.0030716280452907085,
+       0.003717641986440867
+      ],
+      "outliers": 1
+     },
+     "warmup_seconds": [
+      0.018834849004633725,
+      0.003840085002593696
+     ],
+     "digests": [
+      "b0e60618ebf18ef9"
+     ]
+    }
+   },
+   "query_phase_cpu_seconds": 2.2,
+   "query_phase_wall_seconds": 1.2567027610493824,
+   "thread_scaling": {
+    "status": "not_applicable"
+   },
+   "modes": {
+    "status": "not_applicable"
+   },
+   "joins": {
+    "status": "not_applicable"
+   },
+   "memory": {
+    "peak_tree_rss_bytes": 999497728,
+    "max_process_hwm_bytes": 999497728
+   },
+   "http": {
+    "status": "not_applicable"
+   },
+   "status": "ok",
+   "engine_json": {
+    "language": "clojure",
+    "track": "A",
+    "libraries": []
+   }
+  },
+  "java": {
+   "engine": "java",
+   "capabilities": [
+    "ingest.csv",
+    "ingest.json",
+    "ingest.jsonl",
+    "phase1",
+    "sql.basic",
+    "test.functions"
+   ],
+   "version": {
+    "ok": true,
+    "engine": "polyquery-java",
+    "engine_version": "0.1.0",
+    "language": "java",
+    "protocol_version": 1,
+    "spec_version": "1.0.0",
+    "runtime": "OpenJDK 64-Bit Server VM 27+35-2325",
+    "build": {
+     "profile": "release",
+     "flags": "javac --release 27"
+    }
+   },
+   "startup_seconds": {
+    "n": 5,
+    "median": 0.0244761859648861,
+    "mean": 0.0253830537898466,
+    "stdev": 0.003319550035789784,
+    "min": 0.021968805987853557,
+    "max": 0.03080523497192189,
+    "p50": 0.0244761859648861,
+    "p95": 0.0297891259775497,
+    "p99": 0.030602013173047452,
+    "ci95_median": [
+     0.021968805987853557,
+     0.03080523497192189
+    ],
+    "outliers": 1
+   },
+   "ingest": {
+    "transactions": {
+     "engine": "java",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "transactions",
+     "seconds": 0.2923442390165292,
+     "bytes": 8250054,
+     "mb_per_s": 28.220340608571192,
+     "ok": true,
+     "rows": 100000,
+     "error": null
+    },
+    "customers": {
+     "engine": "java",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "customers",
+     "seconds": 0.025278999004513025,
+     "bytes": 1030654,
+     "mb_per_s": 40.77115552779597,
+     "ok": true,
+     "rows": 10000,
+     "error": null
+    },
+    "orders": {
+     "engine": "java",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "orders",
+     "seconds": 0.014909329998772591,
+     "bytes": 753771,
+     "mb_per_s": 50.55700021812208,
+     "ok": true,
+     "rows": 25000,
+     "error": null
+    },
+    "order_items": {
+     "engine": "java",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "order_items",
+     "seconds": 0.07940922101261094,
+     "bytes": 2103199,
+     "mb_per_s": 26.485576526005612,
+     "ok": true,
+     "rows": 100000,
+     "error": null
+    },
+    "products": {
+     "engine": "java",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "products",
+     "seconds": 0.003074612992350012,
+     "bytes": 122072,
+     "mb_per_s": 39.70320827490454,
+     "ok": true,
+     "rows": 2000,
+     "error": null
+    },
+    "sensor_readings": {
+     "engine": "java",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "sensor_readings",
+     "seconds": 0.060182122979313135,
+     "bytes": 4588947,
+     "mb_per_s": 76.25099901473057,
+     "ok": true,
+     "rows": 100000,
+     "error": null
+    },
+    "sort_keys": {
+     "engine": "java",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "sort_keys",
+     "seconds": 0.0903755190083757,
+     "bytes": 4745161,
+     "mb_per_s": 52.50493775377638,
+     "ok": true,
+     "rows": 100000,
+     "error": null
+    },
+    "wide": {
+     "engine": "java",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "wide",
+     "seconds": 0.10270079399924725,
+     "bytes": 7123687,
+     "mb_per_s": 69.36350462930416,
+     "ok": true,
+     "rows": 10000,
+     "error": null
+    },
+    "nulls_heavy": {
+     "engine": "java",
+     "scale": "100k",
+     "kind": "ingest",
+     "table": "nulls_heavy",
+     "seconds": 0.03336131799733266,
+     "bytes": 1718314,
+     "mb_per_s": 51.506178507017744,
+     "ok": true,
+     "rows": 100000,
+     "error": null
+    }
+   },
+   "ingest_cpu_seconds": 1.66,
+   "index_build": {},
+   "queries": {
+    "q05_groupby_low_card": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby"
+     ]
+    },
+    "q06_groupby_high_card": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby"
+     ]
+    },
+    "q07_groupby_skewed": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby"
+     ]
+    },
+    "q08_groupby_uniform_multi": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby"
+     ]
+    },
+    "q09_distinct_count": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby"
+     ]
+    },
+    "q10_join_customers": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby",
+      "sql.join"
+     ]
+    },
+    "q11_join_star": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby",
+      "sql.join"
+     ]
+    },
+    "q12_left_join_anti": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.groupby",
+      "sql.join"
+     ]
+    },
+    "q16_timeseries_hourly": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.functions",
+      "sql.groupby"
+     ]
+    },
+    "q19_cte_subquery": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.cte",
+      "sql.groupby",
+      "sql.subquery"
+     ]
+    },
+    "q20_string_functions": {
+     "status": "not_applicable",
+     "missing": [
+      "sql.functions"
+     ]
+    },
+    "q01_filter_selective": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.004828092991374433,
+      "mean": 0.006101256795227527,
+      "stdev": 0.002069695190772032,
+      "min": 0.004624774039257318,
+      "max": 0.009334071015473455,
+      "p50": 0.004828092991374433,
+      "p95": 0.008874384604860097,
+      "p99": 0.009242133733350782,
+      "ci95_median": [
+       0.004624774039257318,
+       0.009334071015473455
+      ],
+      "outliers": 0
+     },
+     "warmup_seconds": [
+      0.004696140997111797,
+      0.007510807015933096
+     ],
+     "digests": [
+      "9c1814aa18cacd85"
+     ]
+    },
+    "q02_filter_low_selectivity": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.007085175020620227,
+      "mean": 0.00782466100063175,
+      "stdev": 0.0012932760670341284,
+      "min": 0.00676331901922822,
+      "max": 0.0092951959813945,
+      "p50": 0.007085175020620227,
+      "p95": 0.009270759182982147,
+      "p99": 0.00929030862171203,
+      "ci95_median": [
+       0.00676331901922822,
+       0.0092951959813945
+      ],
+      "outliers": 0
+     },
+     "warmup_seconds": [
+      0.026785116002429277,
+      0.00671012798557058
+     ],
+     "digests": [
+      "d005901d4c53c070"
+     ]
+    },
+    "q03_range_filter_time": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.005342825956176966,
+      "mean": 0.005775785387959332,
+      "stdev": 0.0010238131051180457,
+      "min": 0.005262263002805412,
+      "max": 0.007604766986332834,
+      "p50": 0.005342825956176966,
+      "p95": 0.007162584387697279,
+      "p99": 0.007516330466605723,
+      "ci95_median": [
+       0.005262263002805412,
+       0.007604766986332834
+      ],
+      "outliers": 1
+     },
+     "warmup_seconds": [
+      0.01653271197574213,
+      0.005486249981913716
+     ],
+     "digests": [
+      "78c3e04fda7bc4c9"
+     ]
+    },
+    "q04_arith_aggregate": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.006818976020440459,
+      "mean": 0.007302499609068036,
+      "stdev": 0.0011808957234996165,
+      "min": 0.006613734003622085,
+      "max": 0.009400397015269846,
+      "p50": 0.006818976020440459,
+      "p95": 0.008916652807965874,
+      "p99": 0.009303648173809052,
+      "ci95_median": [
+       0.006613734003622085,
+       0.009400397015269846
+      ],
+      "outliers": 1
+     },
+     "warmup_seconds": [
+      0.029085410002153367,
+      0.007005681982263923
+     ],
+     "digests": [
+      "ea7af5be307defbe"
+     ]
+    },
+    "q13_sort_topn": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.018803198996465653,
+      "mean": 0.020102628995664416,
+      "stdev": 0.0029662793481659844,
+      "min": 0.017762700968887657,
+      "max": 0.02493173599941656,
+      "p50": 0.018803198996465653,
+      "p95": 0.024129904201254247,
+      "p99": 0.0247713696397841,
+      "ci95_median": [
+       0.017762700968887657,
+       0.02493173599941656
+      ],
+      "outliers": 0
+     },
+     "warmup_seconds": [
+      0.04289514000993222,
+      0.019172112981323153
+     ],
+     "digests": [
+      "4a8876df39f4ceb2"
+     ]
+    },
+    "q14_sort_full_string": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.028507545997854322,
+      "mean": 0.032334871613420545,
+      "stdev": 0.008150906314189653,
+      "min": 0.02676821401109919,
+      "max": 0.04617937398143113,
+      "p50": 0.028507545997854322,
+      "p95": 0.04357434179401025,
+      "p99": 0.04565836754394695,
+      "ci95_median": [
+       0.02676821401109919,
+       0.04617937398143113
+      ],
+      "outliers": 1
+     },
+     "warmup_seconds": [
+      0.03427786903921515,
+      0.03460963297402486
+     ],
+     "digests": []
+    },
+    "q15_sort_multi_key": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.02113506296882406,
+      "mean": 0.021109167370013893,
+      "stdev": 0.0015372256958784347,
+      "min": 0.01944162795552984,
+      "max": 0.023060550971422344,
+      "p50": 0.02113506296882406,
+      "p95": 0.022876577568240464,
+      "p99": 0.023023756290785968,
+      "ci95_median": [
+       0.01944162795552984,
+       0.023060550971422344
+      ],
+      "outliers": 0
+     },
+     "warmup_seconds": [
+      0.04580452700611204,
+      0.021728396008256823
+     ],
+     "digests": []
+    },
+    "q17_wide_projection": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.008564480987843126,
+      "mean": 0.00849866857752204,
+      "stdev": 0.0012095697875508925,
+      "min": 0.007268083980306983,
+      "max": 0.010409784968942404,
+      "p50": 0.008564480987843126,
+      "p95": 0.010042669775430113,
+      "p99": 0.010336361930239946,
+      "ci95_median": [
+       0.007268083980306983,
+       0.010409784968942404
+      ],
+      "outliers": 1
+     },
+     "warmup_seconds": [
+      0.009670081955846399,
+      0.009575310978107154
+     ],
+     "digests": [
+      "05e9fc0c3c05b534"
+     ]
+    },
+    "q18_nulls": {
+     "status": "ok",
+     "latency_seconds": {
+      "n": 5,
+      "median": 0.004977758042514324,
+      "mean": 0.00539309021551162,
+      "stdev": 0.0006890671197931114,
+      "min": 0.004804829019121826,
+      "max": 0.006402690953109413,
+      "p50": 0.004977758042514324,
+      "p95": 0.006285186565946788,
+      "p99": 0.006379190075676888,
+      "ci95_median": [
+       0.004804829019121826,
+       0.006402690953109413
+      ],
+      "outliers": 0
+     },
+     "warmup_seconds": [
+      0.009506358997896314,
+      0.004858701024204493
+     ],
+     "digests": [
+      "b0e60618ebf18ef9"
+     ]
+    }
+   },
+   "query_phase_cpu_seconds": 1.53,
+   "query_phase_wall_seconds": 0.9109325040481053,
+   "thread_scaling": {
+    "status": "not_applicable"
+   },
+   "modes": {
+    "status": "not_applicable"
+   },
+   "joins": {
+    "status": "not_applicable"
+   },
+   "memory": {
+    "peak_tree_rss_bytes": 643006464,
+    "max_process_hwm_bytes": 643006464
+   },
+   "http": {
+    "status": "not_applicable"
+   },
+   "status": "ok",
+   "engine_json": {
+    "language": "java",
+    "track": "A",
+    "libraries": []
+   }
+  }
+ },
+ "result_agreement": {
+  "q01_filter_selective": {
+   "distinct_results": 1,
+   "by_engine": {
+    "go": [
+     "9c1814aa18cacd85"
+    ],
+    "clojure": [
+     "9c1814aa18cacd85"
+    ],
+    "java": [
+     "9c1814aa18cacd85"
+    ]
+   }
+  },
+  "q02_filter_low_selectivity": {
+   "distinct_results": 1,
+   "by_engine": {
+    "go": [
+     "d005901d4c53c070"
+    ],
+    "clojure": [
+     "d005901d4c53c070"
+    ],
+    "java": [
+     "d005901d4c53c070"
+    ]
+   }
+  },
+  "q03_range_filter_time": {
+   "distinct_results": 1,
+   "by_engine": {
+    "go": [
+     "78c3e04fda7bc4c9"
+    ],
+    "clojure": [
+     "78c3e04fda7bc4c9"
+    ],
+    "java": [
+     "78c3e04fda7bc4c9"
+    ]
+   }
+  },
+  "q04_arith_aggregate": {
+   "distinct_results": 1,
+   "by_engine": {
+    "go": [
+     "ea7af5be307defbe"
+    ],
+    "clojure": [
+     "ea7af5be307defbe"
+    ],
+    "java": [
+     "ea7af5be307defbe"
+    ]
+   }
+  },
+  "q13_sort_topn": {
+   "distinct_results": 1,
+   "by_engine": {
+    "go": [
+     "4a8876df39f4ceb2"
+    ],
+    "clojure": [
+     "4a8876df39f4ceb2"
+    ],
+    "java": [
+     "4a8876df39f4ceb2"
+    ]
+   }
+  },
+  "q17_wide_projection": {
+   "distinct_results": 1,
+   "by_engine": {
+    "go": [
+     "05e9fc0c3c05b534"
+    ],
+    "clojure": [
+     "05e9fc0c3c05b534"
+    ],
+    "java": [
+     "05e9fc0c3c05b534"
+    ]
+   }
+  },
+  "q18_nulls": {
+   "distinct_results": 1,
+   "by_engine": {
+    "go": [
+     "b0e60618ebf18ef9"
+    ],
+    "clojure": [
+     "b0e60618ebf18ef9"
+    ],
+    "java": [
+     "b0e60618ebf18ef9"
+    ]
+   }
+  }
+ }
+}
