@@ -19,7 +19,7 @@
             [polyquery.server.metrics :as metrics]
             [polyquery.util.json :as json]
             [polyquery.util.log :as log])
-  (:import (java.io IOException PrintStream)
+  (:import (java.io FileDescriptor FileOutputStream IOException PrintStream)
            (java.net InetAddress InetSocketAddress ServerSocket Socket SocketException)
            (java.nio.charset StandardCharsets)
            (java.util ArrayList UUID)
@@ -553,35 +553,49 @@
 (defn- announce!
   "Prints the single `listening` line on stdout (protocol.md §2)."
   [host port]
-  (let [out (PrintStream. (java.io.FileOutputStream. java.io.FileDescriptor/out) true "UTF-8")]
+  (let [out (PrintStream. (FileOutputStream. FileDescriptor/out) true "UTF-8")]
     (.print out (str (json/write-str {"event" "listening" "host" host "port" port}) "\n"))
     (.flush out)))
 
-(defn run-server
-  "Runs the HTTP server until SIGTERM/SIGINT; never returns normally (the
-  shutdown hook halts the JVM with status 0 after the graceful shutdown)."
+(defn start!
+  "Binds the server socket and starts accepting connections on a background
+  thread. Returns the server (with :server-socket and :port)."
   [engine-state {:keys [host port] :as opts}]
   (let [srv (make-server engine-state opts)
         ss (ServerSocket.)]
     (.setReuseAddress ss true)
     (.bind ss (InetSocketAddress. (InetAddress/getByName host) (int port)) 1024)
+    (let [^ExecutorService pool (:connection-pool srv)]
+      (doto (Thread. ^Runnable (fn []
+                                 (loop []
+                                   (when-let [socket (try (.accept ss) (catch SocketException _ nil))]
+                                     (.execute pool #(serve-connection srv socket))
+                                     (recur))))
+                     "pq-accept")
+        (.setDaemon true)
+        (.start)))
+    (assoc srv :server-socket ss :port (.getLocalPort ss))))
+
+(defn stop!
+  "Graceful shutdown of a server returned by start!."
+  [srv]
+  (shutdown! srv (:server-socket srv)))
+
+(defn run-server
+  "Runs the HTTP server until SIGTERM/SIGINT; never returns (the shutdown
+  hook halts the JVM with status 0 after the graceful shutdown)."
+  [engine-state {:keys [host] :as opts}]
+  (let [srv (start! engine-state opts)]
     (.addShutdownHook (Runtime/getRuntime)
                       (Thread. ^Runnable (fn []
-                                           (try (shutdown! srv ss)
+                                           (try (stop! srv)
                                                 (catch Throwable t
                                                   (log/error "shutdown failed" {"exception" (str t)}))
                                                 (finally
                                                   (.flush System/err)
                                                   (.halt (Runtime/getRuntime) 0))))
                                "pq-shutdown"))
-    (log/info "server listening" {"host" host "port" (.getLocalPort ss)
+    (log/info "server listening" {"host" host "port" (:port srv)
                                   "workers" (:workers opts) "queue_depth" (:queue-depth opts)})
-    (announce! host (.getLocalPort ss))
-    (let [^ExecutorService pool (:connection-pool srv)]
-      (loop []
-        (when-let [socket (try (.accept ss) (catch SocketException _ nil))]
-          (.execute pool #(serve-connection srv socket))
-          (recur))))
-    ;; the server socket was closed by the shutdown hook, which ends the JVM
-    (Thread/sleep Long/MAX_VALUE)
-    0))
+    (announce! host (:port srv))
+    @(promise)))

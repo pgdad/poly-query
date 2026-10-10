@@ -17,7 +17,8 @@
     polyquery.engine-phase3-test
     polyquery.storage.storage-test
     polyquery.storage.pqcf-test
-    polyquery.protocol-test])
+    polyquery.protocol-test
+    polyquery.server-test])
 
 (defn -main [& _]
   (apply require test-namespaces)
