@@ -18,7 +18,7 @@ import itertools
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
 
-from ..datatypes import DataType
+from ..datatypes import BOOLEAN, DataType
 from ..storage.catalog import Table
 
 ColumnKey = tuple[int, int]
@@ -312,6 +312,35 @@ def column_keys(expr: Expr) -> set[ColumnKey]:
 
 def is_constant(expr: Expr) -> bool:
     return not any(isinstance(e, (ColumnRef, AggCall, SubqueryExpr)) for e in walk(expr))
+
+
+def conjuncts(expr: Expr | None) -> list[Expr]:
+    """The operands of a chain of ANDs (``[]`` for None)."""
+    if expr is None:
+        return []
+    if isinstance(expr, Logical) and expr.op == "AND":
+        return conjuncts(expr.left) + conjuncts(expr.right)
+    return [expr]
+
+
+def conjunction(exprs: list[Expr]) -> Expr | None:
+    """``e1 AND e2 AND …`` (None for no expressions)."""
+    result: Expr | None = None
+    for e in exprs:
+        result = e if result is None else Logical(BOOLEAN, "AND", result, e)
+    return result
+
+
+def has_side_effects(expr: Expr) -> bool:
+    """``PQ_SLEEP`` must run once per evaluation (never folded or skipped)."""
+    return any(isinstance(e, Function) and e.name == "PQ_SLEEP" for e in walk(expr))
+
+
+def may_fail(expr: Expr) -> bool:
+    """Conservatively: can evaluating ``expr`` raise an error (overflow,
+    division by zero, conversion, subquery cardinality, …) or have a side
+    effect? Column references, literals, comparisons and boolean logic cannot."""
+    return any(isinstance(e, (Arith, Unary, Cast, Function, SubqueryExpr)) for e in walk(expr))
 
 
 def contains_subquery(expr: Expr) -> bool:

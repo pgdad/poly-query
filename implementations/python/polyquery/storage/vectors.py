@@ -18,7 +18,10 @@ Vectors are immutable. ``to_list`` materializes the runtime values (with
 from __future__ import annotations
 
 import array
+import bisect
+import collections
 import itertools
+import operator
 from typing import Any, Iterable, Sequence
 
 from ..datatypes import DataType, TypeKind
@@ -85,17 +88,42 @@ class ColumnVector:
     length: int
     null_count: int
     validity: bytes | None  # LSB-first, 1 = non-NULL; None when null_count == 0
+    _nulls: Sequence[int] | None
 
-    def to_list(self) -> list[Any]:
+    def to_list(self, start: int = 0, stop: int | None = None) -> list[Any]:
+        """The runtime values of rows ``start`` .. ``stop`` (default: all)."""
         raise NotImplementedError
 
     def take(self, positions: Iterable[int]) -> list[Any]:
         raise NotImplementedError
 
-    def _null_positions(self) -> list[int]:
+    def null_rows(self) -> Sequence[int]:
+        """Positions of the NULL rows, ascending (expanded from the bitmap once
+        and cached: vectors are immutable)."""
         if self.validity is None:
-            return []
-        return null_positions(bits_to_flags(self.validity, self.length))
+            return ()
+        nulls = self._nulls
+        if nulls is None:
+            nulls = self._nulls = array.array("i", null_positions(bits_to_flags(self.validity, self.length)))
+        return nulls
+
+    def _null_positions(self, start: int = 0, stop: int | None = None) -> Iterable[int]:
+        """Positions (relative to ``start``) of the NULL rows in ``start`` .. ``stop``."""
+        nulls = self.null_rows()
+        if not nulls:
+            return ()
+        stop = self.length if stop is None else min(stop, self.length)
+        if start == 0 and stop == self.length:
+            return nulls
+        lo, hi = bisect.bisect_left(nulls, start), bisect.bisect_left(nulls, stop)
+        return map(operator.sub, nulls[lo:hi], itertools.repeat(start))
+
+    def _set_nulls(self, values: list[Any], start: int, stop: int | None) -> list[Any]:
+        """Sets the NULL slots of decoded values (C-level loop)."""
+        positions = self._null_positions(start, stop)
+        if positions:
+            collections.deque(map(values.__setitem__, positions, itertools.repeat(None)), maxlen=0)
+        return values
 
     def _is_valid(self, i: int) -> bool:
         validity = self.validity
@@ -105,7 +133,7 @@ class ColumnVector:
 class PlainVector(ColumnVector):
     """Values stored one per row (array / bytearray / list of str)."""
 
-    __slots__ = ("dtype", "length", "null_count", "validity", "data")
+    __slots__ = ("dtype", "length", "null_count", "validity", "data", "_nulls")
 
     def __init__(self, dtype: DataType, data: Any, validity: bytes | None, null_count: int):
         self.dtype = dtype
@@ -113,18 +141,18 @@ class PlainVector(ColumnVector):
         self.length = len(data)
         self.validity = validity
         self.null_count = null_count
+        self._nulls: Sequence[int] | None = None
 
-    def to_list(self) -> list[Any]:
-        data = self.data
+    def to_list(self, start: int = 0, stop: int | None = None) -> list[Any]:
+        whole = start == 0 and (stop is None or stop >= self.length)
+        data = self.data if whole else self.data[start:stop]
         if self.dtype.kind is TypeKind.BOOLEAN:
             values = list(map(bool, data))
         elif isinstance(data, list):
-            values = list(data)
+            values = list(data) if whole else data
         else:
             values = data.tolist()
-        for i in self._null_positions():
-            values[i] = None
-        return values
+        return self._set_nulls(values, start, stop)
 
     def take(self, positions: Iterable[int]) -> list[Any]:
         data, valid = self.data, self._is_valid
@@ -138,7 +166,7 @@ class PlainVector(ColumnVector):
 class DictVector(ColumnVector):
     """Dictionary-encoded STRING vector: ``dictionary[codes[i]]`` is row i's value."""
 
-    __slots__ = ("dtype", "length", "null_count", "validity", "dictionary", "codes")
+    __slots__ = ("dtype", "length", "null_count", "validity", "dictionary", "codes", "_nulls")
 
     def __init__(
         self,
@@ -154,12 +182,12 @@ class DictVector(ColumnVector):
         self.length = len(codes)
         self.validity = validity
         self.null_count = null_count
+        self._nulls: Sequence[int] | None = None
 
-    def to_list(self) -> list[Any]:
-        values = list(map(self.dictionary.__getitem__, self.codes))
-        for i in self._null_positions():
-            values[i] = None
-        return values
+    def to_list(self, start: int = 0, stop: int | None = None) -> list[Any]:
+        codes = self.codes if start == 0 and stop is None else self.codes[start:stop]
+        values = list(map(self.dictionary.__getitem__, codes))
+        return self._set_nulls(values, start, stop)
 
     def take(self, positions: Iterable[int]) -> list[Any]:
         dictionary, codes, valid = self.dictionary, self.codes, self._is_valid

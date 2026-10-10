@@ -19,6 +19,7 @@ from typing import Any
 
 from .. import ENGINE_NAME, ENGINE_VERSION, PROTOCOL_VERSION, SPEC_VERSION, errors
 from ..datatypes import InvalidTypeError, parse_type
+from ..execution.context import gc_paused, gc_paused_iter
 from ..ingest.loader import FORMATS
 from ..service import Engine, QueryOptions, StorageOptions
 from ..storage import pqcf
@@ -49,6 +50,13 @@ CAPABILITIES = [
     "index.btree",
     "phase4",
     "http.streaming",
+    "phase5",
+    "exec.row",
+    "exec.vectorized",
+    "exec.parallel",
+    "join.hash",
+    "join.merge",
+    "join.nested_loop",
 ]
 
 
@@ -256,7 +264,8 @@ class RequestHandler:
             method = getattr(self, "op_" + op, None)
             if method is None:
                 raise errors.invalid_request(f"unknown op '{op}'")
-            body = method(request, control) if op in CONTROLLED_OPS else method(request)
+            with gc_paused():
+                body = method(request, control) if op in CONTROLLED_OPS else method(request)
             response: dict[str, Any] = {"id": req_id, "ok": True}
             response.update(body)
             if "stats" in response:
@@ -372,6 +381,8 @@ class RequestHandler:
         options.optimize = _optional_bool(raw, "optimize", True)
         options.use_indexes = _optional_bool(raw, "use_indexes", True)
         options.join = raw.get("join") or "auto"
+        options.mode = raw.get("mode") or "auto"
+        options.threads = raw.get("threads")
         return sql, options, count_only
 
     def op_explain(self, req: dict) -> dict[str, Any]:
@@ -397,7 +408,7 @@ class RequestHandler:
         convert = row_serializer(cursor.columns)
         return QueryStream(
             [c.to_json() for c in cursor.columns],
-            (convert(batch) for batch in cursor.batches),
+            gc_paused_iter(convert(batch) for batch in cursor.batches),
         )
 
     @staticmethod
@@ -411,7 +422,7 @@ class RequestHandler:
         mode = raw.get("mode", "auto")
         if not isinstance(mode, str):
             raise errors.invalid_request("option 'mode' must be a string")
-        if mode not in ("auto", "row"):
+        if mode not in ("auto", "row", "vectorized"):
             raise errors.unsupported(f"execution mode '{mode}' is not supported")
         threads = raw.get("threads")
         if threads is not None and (not _is_int(threads) or threads < 1):

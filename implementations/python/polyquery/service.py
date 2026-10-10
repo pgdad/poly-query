@@ -13,7 +13,7 @@ from . import errors
 from .analysis.binder import Binder
 from .datatypes import STRING
 from .execution.compiler import evaluate_constant
-from .execution.context import ExecutionContext
+from .execution.context import DEFAULT_PARALLEL_MIN_ROWS, ROW, VECTORIZED, ExecutionContext
 from .execution.executor import QueryResult, run_plan, stream_plan
 from .ingest.limits import DEFAULT_MAX_INGEST_BYTES, DEFAULT_MAX_TABLE_ROWS, IngestLimits
 from .ingest.loader import load_table
@@ -43,7 +43,9 @@ class EngineConfig:
     max_ingest_bytes: int = DEFAULT_MAX_INGEST_BYTES
     max_table_rows: int = DEFAULT_MAX_TABLE_ROWS
     max_join_rows: int = 100_000_000
-    threads: int = 1
+    threads: int = 1  # default parallelism of queries without a ``threads`` option
+    # parallel pipelines over fewer rows run their partitions in-process
+    parallel_min_rows: int = DEFAULT_PARALLEL_MIN_ROWS
     log_level: str = "info"
 
 
@@ -58,6 +60,8 @@ class QueryOptions:
     optimize: bool = True
     join: str = "auto"
     use_indexes: bool = True
+    mode: str = "auto"  # auto (= vectorized), row, vectorized
+    threads: int | None = None  # None: the engine's --threads
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -183,8 +187,14 @@ class Engine:
             test_functions=self.config.test_functions,
             cancel_event=options.cancel_event,
             max_join_rows=self.config.max_join_rows,
+            mode=ROW if options.mode == ROW else VECTORIZED,
+            threads=self._threads(options),
+            parallel_min_rows=self.config.parallel_min_rows,
         )
         return plan, ctx
+
+    def _threads(self, options: QueryOptions) -> int:
+        return options.threads if options.threads is not None else self.config.threads
 
     def create_index(self, statement: ast.CreateIndex) -> None:
         table = self.catalog.get(statement.table)
@@ -232,6 +242,7 @@ class Engine:
             optimize=options.optimize,
             join=options.join,
             use_indexes=options.use_indexes,
+            threads=self._threads(options),
             indexes_of=snapshot.indexes_of,
             evaluate=evaluate_constant,
         )

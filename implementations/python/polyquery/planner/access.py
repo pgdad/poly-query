@@ -54,15 +54,11 @@ class ColumnPredicate:
         return f"{name} {self.op} {self.values[0]!r}"
 
 
-def _has_side_effects(expr: b.Expr) -> bool:
-    return any(isinstance(e, b.Function) and e.name == "PQ_SLEEP" for e in b.walk(expr))
-
-
 def _constant(expr: b.Expr, column_type: DataType, evaluate: Evaluator) -> tuple[bool, Any]:
     """(usable, value): ``expr`` evaluated and converted to the column's
     representation; unusable if not constant, failing, or not exactly
     representable."""
-    if not b.is_constant(expr) or _has_side_effects(expr):
+    if not b.is_constant(expr) or b.has_side_effects(expr):
         return False, None
     try:
         value = evaluate(expr)

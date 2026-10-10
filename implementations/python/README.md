@@ -1,17 +1,21 @@
 # PolyQuery — Python engine
 
 An analytical database engine implementing the PolyQuery specification
-(`spec/`) in pure Python. Current status: **Phase 4** (SQL v1 query engine
+(`spec/`) in pure Python. Current status: **Phase 5** (SQL v1 query engine
 with row/column in-memory layouts, persistent PQCF v1 storage, statistics,
-hash and ordered indexes, cost-based access-path selection, and an HTTP/1.1
+hash and ordered indexes, cost-based access-path selection, an HTTP/1.1
 server with streaming results, admission control, timeouts, cancellation,
-Prometheus metrics, structured logs and graceful shutdown).
+Prometheus metrics, structured logs and graceful shutdown; plus two execution
+engines — row-at-a-time and vectorized —, hash / sort-merge / nested-loop
+joins, parallel partitioned pipelines and a switchable logical optimizer).
 
 Capabilities reported: `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`,
 `sql.basic`, `test.functions`, `phase2`, `sql.groupby`, `sql.join`,
 `sql.functions`, `sql.subquery`, `sql.cte`, `sql.correlated_subquery`,
 `phase3`, `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`,
-`phase4`, `http.streaming`.
+`phase4`, `http.streaming`, `phase5`, `exec.row`, `exec.vectorized`,
+`exec.parallel`, `join.hash`, `join.merge`, `join.nested_loop`
+(`native.kernels` is not claimed, see Phase 5 below).
 
 ## Build prerequisites
 
@@ -31,7 +35,13 @@ bin/polyquery session --data-dir DIR     # JSON-lines protocol on stdin/stdout
 bin/polyquery exec --request FILE|-      # one request or an array of requests
 bin/polyquery serve --port N [--workers N --queue-depth Q --query-timeout-ms T ...]
 bin/polyquery version | capabilities
+python3 tools/bench.py --data DIR       # Phase 5 benchmarks over pqgen.py datasets
+python3 tools/difftest.py --seed N      # random queries under the whole option matrix
 ```
+
+Engine-specific flag: `--parallel-min-rows N` (default 200,000): parallel
+pipelines whose driving scan has fewer rows run their partitions in-process
+(see Phase 5).
 
 `bin/polyquery` is a POSIX shell launcher that resolves its own location and
 runs `entry.py` with `python3 -I` (isolated mode: neither the current directory
@@ -50,8 +60,8 @@ logical plan → optimizer → physical plan → execution**.
 | `polyquery/ingest/` | CSV (stdlib `csv` reader in `QUOTE_NOTNULL` mode to distinguish `""` from empty) and JSON/JSONL ingestion, type inference, explicit-schema conversion, ingestion limits |
 | `polyquery/sql/` | `lexer.py` (tokens with line/column), `parser.py` (recursive descent, complete v1 grammar), `ast.py` |
 | `polyquery/analysis/` | `binder.py` (name resolution, CTE/derived-table/subquery binding, aggregate extraction, GROUP BY validation, ORDER BY resolution), `scope.py` (range variables, correlation tracking, CTE environments), `typing_rules.py` (promotion lattice, CAST matrix, CASE/IN/BETWEEN/LIKE typing), `functions.py` (function signatures & result types), `bound.py` (bound expression / query model) |
-| `polyquery/planner/` | `planner.py` (bound query → logical plan), `logical.py` (Scan, Values, SubqueryScan, Filter, Join, Aggregate, Project, Distinct, Sort, Limit), `optimizer.py` (predicate pushdown, join-condition extraction), `physical.py` (algorithm and access-path choice: TableScan, IndexScan, LookupScan, HashJoin, NestedLoopJoin, HashAggregate, … with cardinality estimates, and the EXPLAIN JSON), `access.py` (index-usable predicates, selectivity estimation, index selection, row-group skipping), `explain.py` (expression rendering) |
-| `polyquery/execution/` | `compiler.py` (bound expression → Python closure, incl. subquery evaluation), `functions.py` (scalar function kernels), `operators.py` (batch-at-a-time physical operators), `aggregates.py` (accumulators), `casts.py`, `context.py` (timeout / cancellation / memory budget / join-row limit, correlation parameters, per-statement caches) |
+| `polyquery/planner/` | `planner.py` (bound query → logical plan), `logical.py` (Scan, Values, SubqueryScan, Filter, Join, Aggregate, Project, Distinct, Sort, Limit), `optimizer.py` (expression rewrites, predicate pushdown, join-condition extraction, column pruning), `rewrite.py` (constant folding, predicate simplification), `physical.py` (algorithm and access-path choice: TableScan, IndexScan, LookupScan, HashJoin, MergeJoin, NestedLoopJoin, HashAggregate, TopN, Gather, … with cardinality estimates, join reordering, parallel pipelines, and the EXPLAIN JSON), `access.py` (index-usable predicates, selectivity estimation, index selection, row-group skipping), `explain.py` (expression rendering) |
+| `polyquery/execution/` | `compiler.py` (bound expression → row closure, incl. subquery evaluation), `vcompiler.py` (bound expression → vector function over column batches), `row_engine.py` (row-at-a-time Volcano operators, `mode:"row"`), `vector_engine.py` (column-batch operators, `mode:"vectorized"`/`auto`), `parallel.py` (partitioned execution of `Gather` pipelines, in-process or in forked workers), `common.py` (algorithms shared by both engines: merge pairing, sort orders, join limits, LookupScan tables), `group_states.py` (columnar aggregation state of the vectorized engine), `aggregates.py` (accumulators of the row engine), `functions.py` (scalar function kernels), `casts.py`, `executor.py` (mode dispatch, result streaming), `context.py` (timeout / cancellation / memory budget / join-row limit, correlation parameters, per-statement caches, GC pausing) |
 | `polyquery/service.py` | `Engine` facade: owns the catalog, runs `load`, SQL and `explain` |
 | `polyquery/protocol/` | Transport-independent request handler (validation, path safety, responses, streaming cursor), JSON-lines session loop, exec mode, canonical value serialization |
 | `polyquery/server/` | `serve` mode: `http.py` (HTTP/1.1 routing, bodies, JSON / NDJSON responses, query lifecycle), `queries.py` (query registry + admission control), `watcher.py` (client-disconnect detection), `metrics.py` (Prometheus text), `app.py` (server lifecycle, signals, graceful shutdown) |
@@ -191,23 +201,265 @@ any remaining reference to a FROM column is a grouping violation
   inner/cross join move below the join; conjuncts over both sides become join
   conditions. For LEFT joins, WHERE conjuncts on the preserved side and ON
   conjuncts on the nullable side are pushed. (Disabled by `optimize:false`.)
-* Join algorithm: equality conjuncts whose sides reference disjoint inputs
-  become hash-join keys (build side chosen by estimated size, see above; DECIMAL keys of different
-  scales are aligned; NULL keys never match), the remaining conjuncts are a
-  residual predicate; otherwise a nested-loop join. `join:"nested_loop"`
-  forces nested loops. `--max-join-rows` is enforced per join.
-* Grouping is a hash aggregation (dict of key tuple → rows, then batch
-  accumulators per group); without GROUP BY one group is always produced.
-* Operators exchange batches of up to 2048 row tuples. Scans zip only the
-  referenced columns (column pruning). Expressions are compiled once into
-  closures; projection lists into a single generated tuple-building function.
-  Timeouts, cancellation and memory accounting are checked per batch;
-  `PQ_SLEEP` sleeps in ≤ 10 ms slices.
+* Join keys: equality conjuncts whose sides reference disjoint inputs become
+  equi-join keys (DECIMAL keys of different scales are aligned; NULL keys
+  never match), the remaining conjuncts are a residual predicate; joins
+  without keys are nested-loop joins. The algorithm is chosen as described
+  in Phase 5 below. `--max-join-rows` is enforced per join.
+* Grouping is a hash aggregation; without GROUP BY one group is always
+  produced. Groups are emitted in the order of their first appearance.
+* Expressions are compiled once per statement (row closures or vector
+  functions); compiled operator state is cached per statement, so
+  re-executed subplans (correlated subqueries) are cheap. Timeouts,
+  cancellation and memory accounting are checked per batch (vectorized) or
+  every 4,096 rows (row mode); `PQ_SLEEP` sleeps in ≤ 10 ms slices.
 * `EXPLAIN` / the `explain` op return the physical plan as JSON
-  (`TableScan` with `table`/`columns`, `HashJoin`/`NestedLoopJoin` with
-  `join_type`, `IndexScan` with `table`/`index`/`columns`, …). Plans of
-  subqueries used by an operator follow its inputs in `children`, marked
+  (`TableScan` with `table`/`columns`, `HashJoin`/`MergeJoin`/
+  `NestedLoopJoin` with `join_type`, `IndexScan` with
+  `table`/`index`/`columns`, `TopN`, `Gather` with `partitions`, …). Plans
+  of subqueries used by an operator follow its inputs in `children`, marked
   `"subquery": true`, so every scan of the statement appears in the tree.
+
+### Execution modes and optimization (Phase 5)
+
+All options of protocol.md §5.2 are honoured per query; every combination
+returns the same rows (the order of rows is only defined by ORDER BY) and
+raises the same errors.
+
+**`mode: "row"` — the baseline** (`execution/row_engine.py`). A classic
+Volcano engine: every operator is a Python iterator yielding one row tuple
+at a time, expressions are row closures (`compiler.py`), aggregates are one
+accumulator object per group and aggregate fed one value at a time.
+
+**`mode: "vectorized"`** (also `auto`; `execution/vector_engine.py`,
+`vcompiler.py`). Operators exchange column batches `(columns, n)` of up to
+4,096 rows; row tuples are only built for the result.
+
+* *Scans* decode only the referenced columns and only the row range they
+  read (`ColumnVector.to_list(start, stop)`), then hand out slices.
+* *Expressions* compile to vector functions whose per-row work happens in
+  C-implemented builtins: `map` over `operator` functions, `compress`,
+  `itemgetter` gathers, `list.count`/`in`, `min`/`max`. Each kernel has a
+  branch-free fast path for batches without NULLs. Overflow checks run once
+  per batch with `min`/`max`, the same way division-by-zero is found with
+  `in`. This is the CPython analogue of SIMD-friendly loops (see
+  *SIMD* below). Constant subexpressions are evaluated once per batch;
+  constant `LIKE` prefixes/suffixes/infixes use `str` methods instead of
+  regexes. Expressions without a vector kernel (subqueries, non-constant
+  LIKE patterns) run their row closure over just the columns they
+  reference.
+* *Short-circuit parity*: operands that may raise an error are evaluated
+  only for the rows that need them, exactly like the row closures. This
+  covers the right side of AND/OR, CASE branches (each WHEN is evaluated
+  only on the still-undecided rows), and the right operand of
+  NULL-propagating operators. A function call whose later arguments may
+  fail uses its row closure. So `b <> 0 AND a / b > 1` never divides by
+  zero, in any mode.
+* *Filters* compute a boolean vector and compact every column with
+  `compress`.
+* *Hash joins* materialize the build side column-wise and map key →
+  position. When the build keys are unique (the common primary-key join),
+  probing a whole batch is `map(table.get, keys)` + `compress`. If every
+  probe row matched once, the probe columns are passed on without a gather.
+* *Aggregation* uses columnar group state (`group_states.py`): per
+  aggregate, flat lists of totals/counts/minima indexed by a dense group id
+  instead of an accumulator object per group. A batch's new keys are found
+  with `dict.fromkeys`, group ids with `map(index.__getitem__)`. Batches
+  with few groups are sorted by group id (a C-level sort of positions) and
+  each group's slice is reduced with one `sum`/`min`/… call; batches with
+  many groups update the state lists row by row.
+* *Sorts* compute a permutation with C-level keys (`column.__getitem__`),
+  one stable pass per key with NULLs split off. The columns are then
+  gathered once.
+
+**`join`**: `hash` → `HashJoin`, `merge` → `MergeJoin` (sort-merge: both
+inputs materialized, positions sorted by key, equal-key runs paired;
+inner and LEFT), `nested_loop` → `NestedLoopJoin` (vectorized: block
+nested loops evaluating the condition over blocks of ~4,096 row pairs).
+Joins without equality keys always use nested loops. `auto` is cost-based
+over the algorithms' work: a hash join is linear in both inputs, a merge
+join must first sort both inputs (no input arrives sorted in this engine),
+so equi-joins get a `HashJoin` built on the smaller input (the right input
+for LEFT joins).
+
+**`threads: N`** (default `--threads`, 1). With N > 1 the planner wraps
+every *pipeline* in a `Gather(partitions = min(N, 64))`. A pipeline is a
+chain of streaming operators (Filter, Project, SubqueryScan, join probe
+sides) driven by one TableScan or IndexScan. Gathers are inserted below
+the operators that can merge partial results, and at the root when the
+pipeline is selective (estimated ≤ 25% of the scanned rows). Each
+partition reads a disjoint row range of the driving scan:
+* `HashAggregate`: partial aggregation per partition, then merge;
+* `Sort`: local sort, then a stable re-sort of the concatenated runs;
+* `TopN`: local top-N, then merge;
+* `Distinct`: local, then global deduplication;
+* root: partitions concatenated in order.
+
+Join build sides on the path are built once before the partitions run.
+Partial results are merged in partition order, so group order, ties and
+float sums (`fsum`-based) do not depend on the partitioning. Subquery
+plans stay serial.
+
+*Why processes:* CPython's GIL serializes threads, so threads cannot make
+CPU-bound operators faster. When the driving scan has at least
+`--parallel-min-rows` rows (default 200,000), the partitions run in forked
+worker processes (`execution/parallel.py`): at most one per CPU, each
+handling every k-th partition. A child inherits a copy-on-write snapshot
+of the immutable tables, the compiled plan and the prepared build sides.
+It sends its partial result back through a pipe as a pickle. Columnar
+group states, plain value lists and row lists all pickle cheaply. The
+parent waits with `selectors`, observing cancellation and the deadline,
+and kills all workers on error, cancel or timeout. Smaller inputs run
+their partitions one after the other in the calling thread, through the
+same partial/merge code, so the conformance matrix (`threads: 4` on small
+tables) exercises the parallel logic. A unit test and `tools/difftest.py`
+cover the forked path.
+
+**`optimize: false`** disables all logical rewrites:
+* constant folding (constant subexpressions become literals; a constant
+  whose evaluation fails, like `1/0`, is left alone, so the error is
+  raised exactly when a row evaluates it);
+* predicate simplification (`TRUE AND x` → `x`, `FALSE OR x` → `x`,
+  absorbing literals, `NOT NOT x`, comparisons with NULL, CASE branches
+  with constant conditions, duplicate conjuncts, always-true filters
+  removed; operands that may raise errors are never dropped);
+* predicate pushdown;
+* projection pushdown (column pruning through derived tables);
+* greedy join reordering for chains of ≥ 3 inner/cross joins (start with
+  the smallest input, then repeatedly add the connected input giving the
+  smallest estimated result; cross products last);
+* `ORDER BY … LIMIT` as a `TopN`, which keeps at most ~2·(limit+offset)
+  rows in memory and never sorts the whole input.
+
+Index selection, scan column lists and the join algorithm choice are
+physical decisions and stay active.
+
+**Memory and allocation.**
+* The cyclic GC is paused while engine work runs (`context.gc_paused`:
+  nesting across concurrent queries, re-enabled when the last one ends).
+  Operators allocate millions of short-lived acyclic objects that
+  reference counting frees anyway. The collections those allocations
+  trigger traverse every live object, including the millions held by
+  loaded tables. That made a 1M-row sort 3.7× slower (2.9 s → 0.78 s)
+  and row mode about 1.7× slower.
+* Aggregation state is flat lists per aggregate, not objects per group.
+* NULL positions of a column chunk are expanded from its bitmap once and
+  cached (as `array('i')`); NULLs are applied to decoded values with a
+  C-level `map(list.__setitem__, …)`.
+* Parallel partitions decode only their row range.
+
+**Cache-aware layouts.** In CPython the dominant cost of memory access is
+pointer chasing to boxed values. Gathering 1M floats in random order costs
+~130 ms, against ~7 ms in sequential order. So the vectorized engine:
+* keeps data columnar end to end;
+* gathers by position lists in ascending order wherever the algorithm
+  allows (probe order, partition order);
+* passes columns through without a gather when positions are the
+  identity;
+* sorts permutations rather than row tuples (measured 677 ms vs 860 ms for
+  a 1M-row, 2-key sort, since tuple comparisons chase pointers).
+
+Radix-partitioned hash tables were not implemented: Python dicts already
+hash in C, and partitioning would add a Python-level pass per row that
+costs more than the cache misses it saves.
+
+**SIMD.** The standard library offers no SIMD API. The vectorized kernels
+are written so that each batch is processed by one tight C loop over
+homogeneous values (`map(operator.add, a, b)`, `compress`, `sum`,
+`min`/`max`), which is the closest CPython equivalent. Explicit SIMD would
+need the optional native kernels.
+
+**`native: true`** is accepted (boolean, else `INVALID_REQUEST`) and has
+no effect: no native kernel library is built or loaded (`--native-kernels`
+is accepted and ignored), so `native.kernels` is not claimed. That is
+allowed, since native kernels are optional (native-kernels.md).
+
+**Verification.** `tools/difftest.py` generates random queries (joins of
+all kinds, grouping, DISTINCT, ORDER BY/LIMIT/OFFSET, IN/EXISTS/scalar/
+correlated subqueries, CTEs, NULL-heavy data, row- and column-layout
+tables, and expressions that overflow or divide by zero). It checks that
+all 32 combinations of `mode` × `join` × `threads ∈ {1, 4}` × `optimize`,
+plus forced worker processes, return the baseline's rows or error code.
+Several thousand queries were run without a mismatch. It found two bugs
+along the way: an unpicklable partial state, and an eagerly evaluated
+overflowing constant.
+
+### Measurements (Phase 5)
+
+Setup: `python3 datasets/generators/pqgen.py generate --scale 1m` (1M
+transactions, 100k customers, 250k orders, 1M order items, 20k products,
+1M sort keys; CSV with the generated schemas, column layout), CPython 3.14
+(GIL build) on a 32-core Linux machine that was shared with other jobs
+(about ±20% run-to-run noise). Times are medians of 5 runs of
+`tools/bench.py` in ms, wall clock per `query` request with
+`result: "count"`, so serialization is excluded. *Before* is the accepted
+Phase 4 engine (commit `053c137`), the same machine and data. Its executor
+passed batches of row tuples and grouped by collecting rows per group.
+
+| query | what | before | row | vectorized | vect. 2 thr | vect. 4 thr | vect. 8 thr |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Q1 | `COUNT(*)` with 2-predicate filter | 221 | 129 | 96 | 75 | 58 | 65 |
+| Q2 | GROUP BY category (8 groups), 5 aggregates | 2864 | 446 | 217 | 159 | 121 | 100 |
+| Q3 | GROUP BY customer_id (100k groups) | 1923 | 486 | 212 | 190 | 179 | 199 |
+| Q4 | 1M ⋈ 100k hash join + GROUP BY | 1655 | 580 | 241 | 173 | 132 | 140 |
+| Q5 | filter + `ORDER BY … LIMIT 10` (TopN) | 566 | 185 | 121 | 115 | 95 | 109 |
+| Q6 | 3-way join + filter + GROUP BY | 604 | 603 | 268 | 202 | 162 | 182 |
+| Q7 | `SUM(amount * 2 + fee)` with filter | 318 | 339 | 190 | 145 | 121 | 134 |
+| Q8 | full sort of 1M rows on 2 keys | 3798 | 985 | 727 | — | 728¹ | — |
+| Q9 | non-selective filter returning 840k rows | 2096 | 341 | 205 | 200 | 207 | 200 |
+| Q10 | selective filter returning few rows | 301 | 255 | 151 | 117 | 71 | 106 |
+| R1 | comma join `products, orders, items` + GROUP BY | fails² | 520 | 258 | — | 165 | — |
+
+¹ Measured after the change that makes full sorts parallelize only selective
+pipelines. Before that change, local sorts plus the merge re-sort made
+Q8 slower with threads (971 ms at 4). ² `RESOURCE_LIMIT`: without join
+reordering, the first join is the 20k × 250k cross product
+(`--max-join-rows`).
+
+Main effects, in order of impact:
+
+* **GC pause** (all modes). Q8 vectorized went from 2,878 to 775 ms, row
+  mode Q2 from 783 to 456 ms. Most of the old engine's Q8 / Q9 time was
+  garbage collection.
+* **Vectorized execution** is 1.3–2.4× faster than row mode, and up to
+  13× faster than the old engine (Q2). The gains come from C-level kernels,
+  columnar group state and positional joins.
+* **Parallel pipelines** (forked workers) give a further 1.6–2.2× at 4–8
+  threads for scans, filters, joins and low-cardinality aggregation (Q1,
+  Q2, Q4, Q6, Q7, Q10). They give little for high-cardinality grouping
+  (Q3: merging 100k-group partial states in the parent is serial), full
+  sorts (Q8) and non-selective scans (Q9). The last two are therefore not
+  parallelized. Beyond 4–8 workers, fork and pickle overheads dominate on
+  1M rows.
+* **Optimizer** (`optimize: true` vs `false`, vectorized). Q5 121 vs 245 ms
+  (TopN instead of a full sort). Q6 268 vs 346 ms (pushdown of
+  `o.status = 'delivered'` below the joins). Q4 241 vs 282 ms. R1 on the
+  fixture-scale tables (50 products, 500 orders, 2,000 items): 1 ms vs
+  7,647 ms (join reordering + pushdown versus a cross product filtered
+  afterwards).
+
+Join algorithms (100k scale: 100k transactions ⋈ 10k customers (J1),
+8k items ⋈ 2k products (J2), 25k orders ⟕ 100k items (J3); ms):
+
+| query | row hash | row merge | vectorized hash | vectorized merge | row nested loop | vectorized nested loop |
+|---|---:|---:|---:|---:|---:|---:|
+| J1 | 38 | 79 | 19 | 36 | — | — |
+| J2 | 13 | 15 | 6 | 8 | 1003 | 723 |
+| J3 | 21 | 29 | 15 | 17 | — | — |
+
+Hash joins beat sort-merge joins by 1.1–2× in both modes, since no input
+arrives sorted and the merge join pays two sorts. This is why `auto`
+picks hash joins. Nested loops are quadratic: the vectorized block nested
+loop evaluates 16M pairs of J2 in 0.7 s.
+
+Reproduce with:
+
+```sh
+python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pqdata
+python3 tools/bench.py --data /tmp/pqdata/1m --repeat 5 \
+    --variant row --variant vectorized --variant vec4 --variant '{"mode":"vectorized","threads":8}'
+python3 tools/bench.py --data /tmp/pqdata/1m --repeat 5 --variant auto --engine <phase-4 checkout>/bin/polyquery
+```
 
 ### HTTP server (Phase 4)
 
@@ -309,11 +561,16 @@ any remaining reference to a FROM column is a grouping violation
 * Subqueries compare structurally (same SQL text modulo positions, same
   correlation), so `GROUP BY <expr with subquery>` matches the identical
   select-list expression.
-* **Query options**: `mode` accepts `auto` and `row` (this engine is
-  row/batch based); `vectorized` and unknown values of known enum options are
-  `UNSUPPORTED`; ill-typed option values are `INVALID_REQUEST`. `optimize`,
-  `use_indexes` and `join:"nested_loop"` are honoured; `threads`,
-  `join:"hash"|"merge"` and `native` are validated and otherwise ignored.
+* **Query options**: `mode` is `auto` (= `vectorized`), `row` or
+  `vectorized`; `join` is `auto`, `hash`, `merge` or `nested_loop`; unknown
+  values of these enum options are `UNSUPPORTED`; ill-typed option values
+  (also `threads` < 1) are `INVALID_REQUEST`. A query without `threads`
+  uses the engine's `--threads`. `native` is validated and has no effect
+  (no native kernels).
+* **Phase 5 result order**: without ORDER BY the row order may differ
+  between join algorithms (a merge join emits in key order); for a given
+  plan it is the same in row and vectorized mode and with any number of
+  threads (partitions are merged in scan order).
 * Unknown ops are `INVALID_REQUEST`. `FULL`/`RIGHT` joins and `UNION` answer
   `UNSUPPORTED`.
 * **CREATE INDEX** validates table and column first (`SEMANTIC_ERROR`), then
@@ -370,7 +627,19 @@ any remaining reference to a FROM column is a grouping violation
 ## Known limitations
 
 * The GIL serializes CPU work: concurrent queries interleave rather than run
-  in parallel, so throughput does not scale with `--workers`.
+  in parallel, so throughput does not scale with `--workers`. Intra-query
+  parallelism (`threads`) uses forked worker processes instead, which needs
+  `os.fork` (POSIX) and pays a fork plus a pickle round-trip per pipeline
+  (hence `--parallel-min-rows`).
+* Parallel speedups are limited by the serial parts: the merge of partial
+  results in the parent (high-cardinality GROUP BY), returning many rows
+  from workers (non-selective scans are therefore not parallelized at the
+  root), and full sorts, whose re-sort of the merged runs is serial.
+  Hash-join build sides and subquery plans are always built serially.
+* Worker processes each enforce `--max-query-memory-mb` on their own
+  partition, so a parallel query may use up to (workers + 1) × the budget.
+* No native kernels (`native: true` has no effect) and no explicit SIMD:
+  the standard library provides neither.
 * A single in-memory sort (`ORDER BY`) runs `list.sort` without interruption,
   so cancellation/timeouts take effect only after the sort of a large input
   finishes; all other operators check at least every 65,536 rows.
@@ -391,5 +660,9 @@ any remaining reference to a FROM column is a grouping violation
   LookupScan optimisation for equality correlation); correlation through
   non-equality predicates is evaluated by re-running the subquery and can be
   slow on large inputs.
-* No merge join; `join:"merge"` is accepted and planned like `auto`.
-* Single-threaded execution; the CSV/JSON readers hold the whole input in memory.
+* The CSV/JSON readers hold the whole input in memory.
+* Errors are identical across modes for every query whose rows raise at
+  most one kind of error. When different rows would raise *different*
+  errors, the one reported can depend on the mode, because row mode
+  evaluates row by row and vectorized mode expression by expression
+  (the spec leaves this open).

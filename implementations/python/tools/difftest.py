@@ -1,0 +1,316 @@
+"""Differential tester for the Phase 5 option matrix.
+
+Generates random queries over small random tables and checks that every
+combination of ``mode`` × ``join`` × ``threads`` × ``optimize`` (plus
+parallel pipelines forced into worker processes) returns the same result
+(as a multiset; floats compared to 9 significant digits) or the same error
+code as the baseline (``mode: row``, ``optimize: false``).
+
+    python3 tools/difftest.py [--seed N] [--queries N] [--verbose]
+"""
+
+from __future__ import annotations
+
+import argparse
+import itertools
+import random
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from polyquery import errors  # noqa: E402
+from polyquery.datatypes import parse_type  # noqa: E402
+from polyquery.service import Engine, EngineConfig, QueryOptions, StorageOptions  # noqa: E402
+from polyquery.storage.catalog import Column  # noqa: E402
+
+COMBOS = [
+    {"mode": mode, "join": join, "threads": threads, "optimize": optimize}
+    for mode, join, threads, optimize in itertools.product(
+        ("row", "vectorized"), ("auto", "hash", "merge", "nested_loop"), (1, 4), (True, False)
+    )
+]
+
+
+def _csv_value(v: object) -> str:
+    if v is None:
+        return ""
+    if v is True:
+        return "true"
+    if v is False:
+        return "false"
+    return str(v)
+
+
+def make_tables(rng: random.Random) -> dict[str, tuple[list[tuple[str, str]], list[list[object]]]]:
+    def maybe(v: object, p: float = 0.15) -> object:
+        return None if rng.random() < p else v
+
+    t1 = []
+    for i in range(1, 61):
+        t1.append([
+            i,
+            maybe(rng.randint(-5, 9)),
+            maybe(f"{rng.randint(-9999, 9999) / 100:.2f}"),
+            maybe(round(rng.uniform(-50, 50), 3)),
+            maybe(rng.choice(["ab", "abc", "b", "xyz", "", "Ab"])),
+            maybe(f"2024-0{rng.randint(1, 9)}-1{rng.randint(0, 9)}"),
+            maybe(rng.choice([True, False])),
+        ])
+    t2 = []
+    for i in range(1, 81):
+        t2.append([i, maybe(rng.randint(1, 70)), rng.randint(0, 4), maybe(rng.choice(["ab", "b", "q"]))])
+    t3 = [[k, rng.choice(["one", "two", "three"])] for k in range(-2, 9)]
+    return {
+        "t1": ([("id", "INT64"), ("a", "INT64"), ("b", "DECIMAL(10,2)"), ("c", "FLOAT64"),
+                ("s", "STRING"), ("d", "DATE"), ("f", "BOOLEAN")], t1),
+        "t2": ([("id", "INT64"), ("t1_id", "INT64"), ("x", "INT64"), ("s", "STRING")], t2),
+        "t3": ([("k", "INT64"), ("v", "STRING")], t3),
+    }
+
+
+class QueryGen:
+    """Random queries over t1 (alias r: row layout copy), t2 and t3."""
+
+    NUM = {"t1": ["id", "a", "b", "c"], "t2": ["id", "t1_id", "x"], "t3": ["k"]}
+    STR = {"t1": ["s"], "t2": ["s"], "t3": ["v"]}
+
+    def __init__(self, rng: random.Random):
+        self.rng = rng
+
+    def pick(self, seq):  # noqa: ANN001
+        return self.rng.choice(seq)
+
+    def num_expr(self, aliases: dict[str, str], depth: int = 0) -> str:
+        alias = self.pick(list(aliases))
+        col = f"{alias}.{self.pick(self.NUM[aliases[alias]])}"
+        r = self.rng.random()
+        if depth > 1 or r < 0.45:
+            return col
+        if r < 0.65:
+            return f"({col} {self.pick(['+', '-', '*'])} {self.rng.randint(-3, 3)})"
+        if r < 0.75:
+            return f"({col} / {self.pick(['2', '3', '(' + col + ' - ' + col + ' + 1)'])})"
+        if r < 0.85:
+            return f"ABS({self.num_expr(aliases, depth + 1)})"
+        if r < 0.92:
+            return f"COALESCE({col}, {self.rng.randint(0, 5)})"
+        if r < 0.93:  # errors: every option combination must report the same code
+            return self.pick([f"({col} / ({col} - {col}))", f"({col} * 4611686018427387904)"])
+        if r < 0.95:
+            return self.pick([f"ROUND({col}, 1)", f"CAST({col} AS INT64)", f"NULLIF({col}, 1)", f"({col} % 3)"])
+        if r < 0.97 and aliases[alias] == "t1":
+            return f"(SELECT COUNT(*) FROM t2 z WHERE z.t1_id = {alias}.id)"
+        if r < 0.98:
+            return "(SELECT MAX(k) FROM t3)"
+        return f"CASE WHEN {self.predicate(aliases, depth + 1)} THEN {col} ELSE {self.rng.randint(0, 9)} END"
+
+    def str_expr(self, aliases: dict[str, str]) -> str:
+        alias = self.pick(list(aliases))
+        col = f"{alias}.{self.pick(self.STR[aliases[alias]])}"
+        r = self.rng.random()
+        if r < 0.6:
+            return col
+        if r < 0.75:
+            return f"UPPER({col})"
+        if r < 0.85:
+            return f"({col} || 'z')"
+        return f"SUBSTR({col}, 1, 2)"
+
+    def predicate(self, aliases: dict[str, str], depth: int = 0) -> str:
+        r = self.rng.random()
+        if depth < 2 and r < 0.2:
+            op = self.pick(["AND", "OR"])
+            return f"({self.predicate(aliases, depth + 1)} {op} {self.predicate(aliases, depth + 1)})"
+        if depth < 2 and r < 0.27:
+            return f"NOT ({self.predicate(aliases, depth + 1)})"
+        if r < 0.55:
+            op = self.pick(["=", "<>", "<", "<=", ">", ">="])
+            rhs = self.pick([str(self.rng.randint(-3, 9)), self.num_expr(aliases, 2), "1.5", "NULL"])
+            return f"{self.num_expr(aliases, depth + 1)} {op} {rhs}"
+        if r < 0.65:
+            return f"{self.str_expr(aliases)} {self.pick(['LIKE', 'NOT LIKE'])} '{self.pick(['a%', '%b', '%b%', '_b%', 'ab'])}'"
+        if r < 0.72:
+            return f"{self.num_expr(aliases, 2)} IS {self.pick(['', 'NOT '])}NULL"
+        if r < 0.8:
+            return f"{self.num_expr(aliases, 2)} BETWEEN {self.rng.randint(-5, 2)} AND {self.rng.randint(2, 9)}"
+        if r < 0.86:
+            items = ", ".join(str(self.rng.randint(-2, 6)) for _ in range(3))
+            return f"{self.num_expr(aliases, 2)} {self.pick(['IN', 'NOT IN'])} ({items}{self.pick(['', ', NULL'])})"
+        if r < 0.88:
+            return self.pick(["TRUE", "FALSE", "1 = 1", "NULL IS NULL", "1 = 0 AND 2 = 2", "1 + 1 = 2"])
+        if r < 0.9 and "t1" in aliases.values():
+            a = [k for k, v in aliases.items() if v == "t1"][0]
+            return self.pick([f"{a}.d >= DATE '2024-05-01'", f"{a}.f", f"NOT {a}.f", f"{a}.f IS NULL",
+                              f"LENGTH({a}.s) > 1", f"LOWER({a}.s) = 'ab'"])
+        if r < 0.95 and "t2" not in aliases.values():
+            return f"{self.num_expr(aliases, 2)} IN (SELECT x FROM t2 WHERE x > {self.rng.randint(0, 3)})"
+        alias = self.pick(list(aliases))
+        if aliases[alias] == "t1":
+            return f"EXISTS (SELECT 1 FROM t2 z WHERE z.t1_id = {alias}.id AND z.x > {self.rng.randint(0, 3)})"
+        return f"{self.str_expr(aliases)} = {self.pick(['ab', 'b', 'q', 'one'])!r}".replace('"', "'")
+
+    def from_clause(self) -> tuple[str, dict[str, str]]:
+        r = self.rng.random()
+        t1 = self.pick(["t1", "r"])
+        if r < 0.3:
+            return f"{t1} p", {"p": "t1"}
+        kind = self.pick(["JOIN", "LEFT JOIN", "JOIN", "LEFT JOIN", "CROSS JOIN"])
+        cond = self.pick([
+            "q.t1_id = p.id",
+            "q.t1_id = p.id AND q.x > 1",
+            "q.t1_id = p.a",
+            "q.x = p.a AND q.s = p.s",
+            "q.t1_id > p.id + 60",
+            "q.s = p.s",
+        ])
+        two = f"{t1} p {kind} t2 q" + ("" if kind == "CROSS JOIN" else f" ON {cond}")
+        aliases = {"p": "t1", "q": "t2"}
+        if r < 0.75:
+            return two, aliases
+        kind3 = self.pick(["JOIN", "LEFT JOIN"])
+        cond3 = self.pick(["w.k = q.x", "w.k = p.a", "w.k = q.x AND w.v <> 'two'"])
+        aliases["w"] = "t3"
+        if self.rng.random() < 0.5:
+            return f"{two} {kind3} t3 w ON {cond3}", aliases
+        # comma joins with the conditions in WHERE (join reordering)
+        return f"{t1} p, t2 q, t3 w WHERE {cond.split(' AND ')[0]} AND {cond3.split(' AND ')[0]}", aliases
+
+    TEMPLATES = [
+        "SELECT p.id, YEAR(p.d), MONTH(p.d), DAY(p.d), DATE_TRUNC('month', p.d), "
+        "DATE_DIFF('day', p.d, DATE '2024-06-01') FROM {t1} p",
+        "SELECT CONCAT(p.s, p.a, p.b, p.f), REPLACE(p.s, 'b', 'xx'), TRIM(p.s), LENGTH(p.s), LOWER(p.s) FROM {t1} p",
+        "SELECT p.id, CASE p.a WHEN 1 THEN 'one' WHEN {n} THEN 'n' ELSE 'many' END FROM {t1} p",
+        "SELECT p.id FROM {t1} p WHERE p.a NOT IN (SELECT q.x FROM t2 q WHERE q.t1_id < {n}0)",
+        "SELECT p.id FROM {t1} p WHERE p.a NOT IN (SELECT q.t1_id FROM t2 q)",
+        "SELECT p.id, (SELECT q.s FROM t2 q WHERE q.id = p.id) FROM {t1} p",
+        "SELECT p.id, (SELECT q.s FROM t2 q WHERE q.x = p.a) FROM {t1} p WHERE p.id < {n}",
+        "SELECT p.a, SUM(p.b) FROM {t1} p GROUP BY p.a HAVING SUM(p.b) > {n} ORDER BY SUM(p.b) DESC, p.a NULLS FIRST",
+        "SELECT p.s, COUNT(DISTINCT p.a), SUM(DISTINCT p.a), AVG(DISTINCT p.c), MAX(DISTINCT p.d) FROM {t1} p GROUP BY p.s",
+        "SELECT -p.a, ABS(p.c), ROUND(p.b, 1), FLOOR(p.c), CEIL(p.b), SQRT(ABS(p.c)), POWER(p.a, 2), MOD(p.id, 7) FROM {t1} p",
+        "SELECT DISTINCT p.c * 0, p.f FROM {t1} p",
+        "SELECT x.s, x.n, q.id FROM (SELECT p.s, COUNT(*) AS n FROM {t1} p GROUP BY p.s) x JOIN t2 q ON q.s = x.s",
+        "WITH a AS (SELECT id, a FROM {t1} WHERE a > {n}) SELECT x.id, y.id FROM a x JOIN a y ON x.a = y.a",
+        "SELECT p.id FROM {t1} p WHERE EXISTS (SELECT 1 FROM t3 WHERE k > {n})",
+        "SELECT p.id FROM {t1} p WHERE p.a > (SELECT AVG(x) FROM t2)",
+        "SELECT p.id, p.c FROM {t1} p WHERE p.c > (SELECT MIN(z.c) FROM t1 z WHERE z.a = p.a AND z.id < p.id)",
+        "SELECT 1 + {n}, 'x', NULL, CAST('2024-01-01' AS DATE), {n} / 0.5",
+        "SELECT COUNT(*) FROM {t1} p WHERE p.f AND p.a > {n} OR NOT p.f",
+        "SELECT p.id FROM {t1} p ORDER BY p.c DESC, p.id LIMIT {n} OFFSET 3",
+        "SELECT p.s, MAX(p.id) FROM {t1} p GROUP BY p.s ORDER BY 2 DESC LIMIT 2",
+        "SELECT CAST(p.a AS STRING), CAST(p.b AS FLOAT64), CAST(p.c AS DECIMAL(10,3)) FROM {t1} p",
+        "SELECT CAST(p.s AS INT64) FROM {t1} p WHERE p.id < {n}",
+        "SELECT p.id FROM {t1} p WHERE p.s BETWEEN 'a' AND 'b'",
+        "SELECT p.a, COUNT(*) FROM {t1} p LEFT JOIN t2 q ON q.t1_id = p.id GROUP BY p.a HAVING COUNT(q.id) = 0",
+        "SELECT p.id FROM {t1} p WHERE p.a IN (1, {n}) AND p.id IN (SELECT t1_id FROM t2 WHERE s = 'b')",
+        "SELECT p.id, p.a / 2, p.a % 3, p.b / 3, p.c / 7 FROM {t1} p WHERE p.a <> 0",
+        "SELECT SUM(p.a), COUNT(*), MIN(p.s) FROM {t1} p WHERE FALSE",
+        "SELECT p.a, COUNT(*) FROM {t1} p GROUP BY p.a ORDER BY COUNT(*) DESC, p.a LIMIT {n}",
+        "SELECT q.x, w.v, COUNT(*) FROM t2 q LEFT JOIN t3 w ON w.k = q.x AND w.v <> 'one' GROUP BY q.x, w.v",
+        "SELECT p.id, q.id FROM {t1} p JOIN t2 q ON q.t1_id = p.id AND q.x * 2 > p.a OR q.id = p.id",
+    ]
+
+    def query(self) -> str:
+        if self.rng.random() < 0.35:
+            sql = self.pick(self.TEMPLATES)
+            return sql.replace("{t1}", self.pick(["t1", "r"])).replace("{n}", str(self.rng.randint(0, 6)))
+        frm, aliases = self.from_clause()
+        has_where = " WHERE " in frm
+        where = ""
+        if self.rng.random() < 0.6:
+            where = (" AND " if has_where else " WHERE ") + self.predicate(aliases)
+        r = self.rng.random()
+        if r < 0.4:
+            keys = [self.pick([self.str_expr(aliases), self.num_expr(aliases, 2)]) for _ in range(self.rng.randint(1, 2))]
+            arg = self.num_expr(aliases, 1)
+            aggs = [
+                "COUNT(*)",
+                f"SUM({arg})",
+                f"MIN({self.str_expr(aliases)})",
+                f"MAX({arg})",
+                f"AVG({arg})",
+                f"COUNT(DISTINCT {arg})",
+                f"COUNT({arg})",
+            ]
+            items = keys + self.rng.sample(aggs, self.rng.randint(1, 4))
+            having = ""
+            if self.rng.random() < 0.3:
+                having = f" HAVING COUNT(*) > {self.rng.randint(0, 2)}"
+            sql = f"SELECT {', '.join(items)} FROM {frm}{where} GROUP BY {', '.join(keys)}{having}"
+        elif r < 0.5:
+            items = self.rng.sample(["COUNT(*)", f"SUM({self.num_expr(aliases, 1)})", f"MAX({self.str_expr(aliases)})"], 2)
+            sql = f"SELECT {', '.join(items)} FROM {frm}{where}"
+        else:
+            items = [self.pick([self.num_expr(aliases), self.str_expr(aliases)]) for _ in range(self.rng.randint(1, 3))]
+            distinct = "DISTINCT " if self.rng.random() < 0.15 else ""
+            sql = f"SELECT {distinct}{', '.join(items)} FROM {frm}{where}"
+            if self.rng.random() < 0.4:
+                order = ", ".join(f"{i + 1} {self.pick(['ASC', 'DESC'])}{self.pick(['', ' NULLS FIRST', ' NULLS LAST'])}"
+                                  for i in range(len(items)))
+                sql += f" ORDER BY {order}"
+                if self.rng.random() < 0.6:
+                    sql += f" LIMIT {self.rng.randint(0, 12)}"
+                    if self.rng.random() < 0.3:
+                        sql += f" OFFSET {self.rng.randint(0, 5)}"
+        if self.rng.random() < 0.1:
+            sql = f"WITH cte AS ({sql}) SELECT * FROM cte"
+        return sql
+
+
+def normalize(rows: list[tuple]) -> list[tuple]:
+    def norm(v: object) -> object:
+        if isinstance(v, float):
+            return float(f"{v:.9g}")
+        return v
+
+    return sorted((tuple(norm(v) for v in row) for row in rows), key=repr)
+
+
+def run(engine: Engine, sql: str, options: dict) -> tuple[str, object]:
+    try:
+        result = engine.query(sql, QueryOptions(**options))
+    except errors.PolyQueryError as e:
+        return "error", e.code
+    return "ok", normalize(result.rows)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--queries", type=int, default=300)
+    ap.add_argument("--verbose", "-v", action="store_true")
+    args = ap.parse_args()
+    rng = random.Random(args.seed)
+
+    engines = [Engine(EngineConfig()), Engine(EngineConfig(parallel_min_rows=1))]  # 2nd: forked workers
+    for engine in engines:
+        for name, (schema, rows) in make_tables(random.Random(args.seed)).items():
+            text = ",".join(n for n, _ in schema) + "\n" + "".join(",".join(map(_csv_value, r)) + "\n" for r in rows)
+            columns = [Column(n, parse_type(t)) for n, t in schema]
+            engine.load(name, "csv", text, columns, {}, False)
+            if name == "t1":
+                engine.load("r", "csv", text, columns, {}, False, StorageOptions(layout="row"))
+
+    gen = QueryGen(rng)
+    failures = 0
+    for qi in range(args.queries):
+        sql = gen.query()
+        base = run(engines[0], sql, {"mode": "row", "optimize": False})
+        if args.verbose:
+            print(f"[{qi}] {base[0]} {sql}")
+        checks = [(engines[0], c) for c in COMBOS] + [
+            (engines[1], {"mode": m, "threads": 4}) for m in ("row", "vectorized")
+        ]
+        for engine, options in checks:
+            got = run(engine, sql, options)
+            if got != base:
+                failures += 1
+                fork = " (forked workers)" if engine is engines[1] else ""
+                print(f"MISMATCH{fork} {options}\n  {sql}\n  base={str(base)[:300]}\n  got ={str(got)[:300]}")
+                break
+    print(f"{args.queries} queries, {failures} mismatches")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

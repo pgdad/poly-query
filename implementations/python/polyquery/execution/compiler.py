@@ -8,6 +8,7 @@ runtime error rules of types.md §4.
 
 from __future__ import annotations
 
+import itertools
 import operator
 import re
 from typing import Any, Callable
@@ -147,6 +148,30 @@ _COMPARE = {
 }
 
 
+def arith_kernel(e: b.Arith) -> Callable[[Any, Any], Any]:
+    """The kernel of an arithmetic operator for two non-NULL operands."""
+    lt, rt = e.left.type, e.right.type
+    if e.type.kind is TypeKind.FLOAT64 and TypeKind.DECIMAL not in (lt.kind, rt.kind):
+        return _FLOAT_KERNELS[e.op]
+    if TypeKind.DECIMAL in (lt.kind, rt.kind):
+        s1 = lt.scale if lt.kind is TypeKind.DECIMAL else 0
+        s2 = rt.scale if rt.kind is TypeKind.DECIMAL else 0
+        return _decimal_kernel(e.op, s1, s2)
+    return _INT_KERNELS[e.op]
+
+
+def compare_kernel(e: b.Compare) -> Callable[[Any, Any], Any]:
+    """The kernel of a comparison for two non-NULL operands (DECIMALs of
+    different scales are compared exactly by value)."""
+    cmp = _COMPARE[e.op]
+    lt, rt = e.left.type, e.right.type
+    if lt.kind is TypeKind.DECIMAL and rt.kind is TypeKind.DECIMAL and lt.scale != rt.scale:
+        scale = max(lt.scale, rt.scale)
+        f1, f2 = values.POW10[scale - lt.scale], values.POW10[scale - rt.scale]
+        return lambda a, c: cmp(a * f1, c * f2)
+    return cmp
+
+
 def _binary(left: RowFn, right: RowFn, kernel: Callable[[Any, Any], Any]) -> RowFn:
     def fn(row: tuple) -> Any:
         a = left(row)
@@ -222,27 +247,10 @@ class Compiler:
         return neg
 
     def _c_Arith(self, e: b.Arith) -> RowFn:
-        left, right = self.compile(e.left), self.compile(e.right)
-        lt, rt = e.left.type, e.right.type
-        if e.type.kind is TypeKind.FLOAT64 and TypeKind.DECIMAL not in (lt.kind, rt.kind):
-            kernel = _FLOAT_KERNELS[e.op]
-        elif TypeKind.DECIMAL in (lt.kind, rt.kind):
-            s1 = lt.scale if lt.kind is TypeKind.DECIMAL else 0
-            s2 = rt.scale if rt.kind is TypeKind.DECIMAL else 0
-            kernel = _decimal_kernel(e.op, s1, s2)
-        else:
-            kernel = _INT_KERNELS[e.op]
-        return _binary(left, right, kernel)
+        return _binary(self.compile(e.left), self.compile(e.right), arith_kernel(e))
 
     def _c_Compare(self, e: b.Compare) -> RowFn:
-        left, right = self.compile(e.left), self.compile(e.right)
-        cmp = _COMPARE[e.op]
-        lt, rt = e.left.type, e.right.type
-        if lt.kind is TypeKind.DECIMAL and rt.kind is TypeKind.DECIMAL and lt.scale != rt.scale:
-            scale = max(lt.scale, rt.scale)
-            f1, f2 = values.POW10[scale - lt.scale], values.POW10[scale - rt.scale]
-            return _binary(left, right, lambda a, c: cmp(a * f1, c * f2))
-        return _binary(left, right, cmp)
+        return _binary(self.compile(e.left), self.compile(e.right), compare_kernel(e))
 
     def _c_Logical(self, e: b.Logical) -> RowFn:
         left, right = self.compile(e.left), self.compile(e.right)
@@ -418,7 +426,7 @@ class Compiler:
         """Returns ``fn(row)`` running the subquery (with its correlation
         parameters taken from ``row``) and returning up to ``limit`` rows.
         Results are cached per distinct parameter values."""
-        from .operators import execute  # local import: operators depend on this module
+        from .executor import subplan_rows  # local import: the executors depend on this module
 
         ctx = self.ctx
         plan = ctx.subplans[e.subquery.id]
@@ -433,12 +441,7 @@ class Compiler:
             if rows is None:
                 for key, value in zip(keys, args):
                     params[key] = value
-                rows = []
-                for batch in execute(plan, ctx):
-                    rows.extend(batch)
-                    if limit is not None and len(rows) >= limit:
-                        del rows[limit:]
-                        break
+                rows = list(itertools.islice(subplan_rows(plan, ctx), limit))
                 cache[args] = rows
             return rows
 

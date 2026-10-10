@@ -246,6 +246,32 @@ class NestedLoopJoin(_Join):
 
 
 @dataclass(eq=False)
+class MergeJoin(_Join):
+    """Sort-merge equi-join: both inputs are sorted on their keys (NULL keys
+    never match) and merged; ``residual`` filters the matching pairs."""
+
+    left_keys: list[b.Expr] = field(default_factory=list)
+    right_keys: list[b.Expr] = field(default_factory=list)
+    residual: b.Expr | None = None
+
+    def expressions(self) -> list[b.Expr]:
+        out = self.left_keys + self.right_keys
+        return out + [self.residual] if self.residual is not None else out
+
+    def describe(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "join_type": self.join_type,
+            "keys": [
+                f"{render_expr(lk)} = {render_expr(rk)}"
+                for lk, rk in zip(self.left_keys, self.right_keys)
+            ],
+        }
+        if self.residual is not None:
+            out["residual"] = render_expr(self.residual)
+        return out
+
+
+@dataclass(eq=False)
 class HashAggregate(PhysicalNode):
     """Groups by ``keys`` (one group overall when there are none)."""
 
@@ -334,6 +360,57 @@ class Sort(PhysicalNode):
 
 
 @dataclass(eq=False)
+class TopN(PhysicalNode):
+    """The first ``limit + offset`` rows of the input in sort order (``ORDER BY
+    … LIMIT``), keeping only that many rows in memory; the Limit above it
+    applies the offset."""
+
+    input: PhysicalNode
+    keys: list[b.SortKey]
+    limit: b.Expr
+    offset: b.Expr | None
+
+    def inputs(self) -> list[PhysicalNode]:
+        return [self.input]
+
+    @property
+    def layout(self) -> list[b.ColumnKey]:
+        return self.input.layout
+
+    def describe(self) -> dict[str, Any]:
+        out = Sort.describe(self)  # type: ignore[arg-type]
+        out["limit"] = render_expr(self.limit)
+        if self.offset is not None:
+            out["offset"] = render_expr(self.offset)
+        return out
+
+
+@dataclass(eq=False)
+class Gather(PhysicalNode):
+    """Parallel pipeline: ``input`` runs once per partition, each run reading
+    a disjoint row range of the ``driver`` scan (the other inputs of joins in
+    the pipeline are prepared once and shared). The consumer of a Gather
+    (HashAggregate, TopN, Distinct) does its partial work per partition and
+    merges the partial results; otherwise (also below a full Sort) the
+    partition outputs are concatenated in partition order, i.e. in the order
+    of a serial scan."""
+
+    input: PhysicalNode
+    partitions: int
+    driver: PhysicalNode
+
+    def inputs(self) -> list[PhysicalNode]:
+        return [self.input]
+
+    @property
+    def layout(self) -> list[b.ColumnKey]:
+        return self.input.layout
+
+    def describe(self) -> dict[str, Any]:
+        return {"partitions": self.partitions, "driver": self.driver.table.name}  # type: ignore[attr-defined]
+
+
+@dataclass(eq=False)
 class Limit(PhysicalNode):
     input: PhysicalNode
     limit: b.Expr | None
@@ -363,6 +440,7 @@ class PlanOptions:
     optimize: bool = True
     join: str = "auto"  # auto, hash, merge, nested_loop
     use_indexes: bool = True
+    threads: int = 1  # > 1: parallel pipelines (Gather)
     # the indexes of a table (catalog lookup)
     indexes_of: Callable[[Table], list[Index]] = lambda table: []
     # evaluates a constant expression (for index lookups / row-group skipping)
@@ -410,13 +488,16 @@ class PhysicalPlanner:
         root = self.plan_query(query)
         if isinstance(root, Project):
             root.names = [o.name for o in query.outputs]
+        if self.options.threads > 1:
+            # subquery plans (executed per outer row) stay serial
+            root = parallelize(root, min(self.options.threads, MAX_PARTITIONS))
         columns = [Column(o.name, o.expr.type) for o in query.outputs]
         return PhysicalPlan(root, columns, self.subplans)
 
     def plan_query(self, query: b.BoundQuery) -> PhysicalNode:
         logical = LogicalPlanner(self.ids).plan_query(query)
         if self.options.optimize:
-            logical = prune_columns(optimize(logical))
+            logical = prune_columns(optimize(logical, self.options.evaluate))
         return self.plan(logical)
 
     def plan(self, node: lp.LogicalNode) -> PhysicalNode:
@@ -456,12 +537,23 @@ class PhysicalPlanner:
             child = self.plan(node.input)
             return _estimated(Sort(child, node.keys), child.estimated_rows)
         if isinstance(node, lp.Limit):
+            if self.options.optimize and isinstance(node.input, lp.Sort) and node.limit is not None:
+                return self._top_n(node, node.input)
             child = self.plan(node.input)
             rows = child.estimated_rows
             if isinstance(node.limit, b.Literal) and isinstance(node.limit.value, int):
                 rows = min(rows, node.limit.value)
             return _estimated(Limit(child, node.limit, node.offset), rows)
         raise AssertionError(f"unknown logical node {type(node).__name__}")
+
+    def _top_n(self, limit: lp.Limit, sort: lp.Sort) -> PhysicalNode:
+        """``ORDER BY … LIMIT`` as a TopN (the Limit applies the offset)."""
+        child = self.plan(sort.input)
+        rows = child.estimated_rows
+        if isinstance(limit.limit, b.Literal) and isinstance(limit.limit.value, int):
+            rows = min(rows, limit.limit.value)
+        top = _estimated(TopN(child, sort.keys, limit.limit, limit.offset), rows)  # type: ignore[arg-type]
+        return _estimated(Limit(top, limit.limit, limit.offset), rows)
 
     # ------------------------------------------------------------ scans
 
@@ -525,27 +617,93 @@ class PhysicalPlanner:
     # ------------------------------------------------------------ joins
 
     def _plan_join(self, node: lp.Join) -> PhysicalNode:
+        if self.options.optimize and node.kind in ("INNER", "CROSS"):
+            leaves, conditions = _inner_join_chain(node)
+            if len(leaves) > 2:
+                return self._reorder_joins(leaves, conditions)
         left, right = self.plan(node.left), self.plan(node.right)
-        join = self._join(node, left, right)
+        return self._make_join(node.kind, node.condition, left, right, node.left.rels(), node.right.rels())
+
+    def _make_join(
+        self,
+        kind: str,
+        condition: b.Expr | None,
+        left: PhysicalNode,
+        right: PhysicalNode,
+        left_rels: set[int],
+        right_rels: set[int],
+    ) -> PhysicalNode:
+        join = self._join(kind, condition, left, right, left_rels, right_rels)
+        return _estimated(join, self._join_rows(join.join_type, condition, left, right))
+
+    def _join_rows(
+        self, kind: str, condition: b.Expr | None, left: PhysicalNode, right: PhysicalNode
+    ) -> float:
         rows_l, rows_r = left.estimated_rows, right.estimated_rows
-        if node.condition is None:
+        if condition is None:
             rows = rows_l * rows_r
         else:
-            rows = rows_l * rows_r * self._selectivity(node.condition)
-        if join.join_type == "LEFT":
-            rows = max(rows, rows_l)
-        return _estimated(join, rows)
+            rows = rows_l * rows_r * self._selectivity(condition)
+        return max(rows, rows_l) if kind == "LEFT" else rows
 
-    def _join(self, node: lp.Join, left: PhysicalNode, right: PhysicalNode) -> _Join:
-        join_type = node.kind if node.condition is not None or node.kind != "INNER" else "CROSS"
-        if node.condition is None or self.options.join == "nested_loop":
-            return NestedLoopJoin(join_type, left, right, node.condition)
-        left_rels, right_rels = node.left.rels(), node.right.rels()
+    def _reorder_joins(self, leaves: list[lp.LogicalNode], conditions: list[b.Expr]) -> PhysicalNode:
+        """Greedy join ordering for a chain of inner/cross joins: start with
+        the smallest input, then repeatedly join the input that produces
+        the fewest rows, preferring inputs connected by a join condition
+        (cross products come last). Each conjunct is evaluated by the first
+        join that sees all the relations it references."""
+        chain_rels = set().union(*(leaf.rels() for leaf in leaves))
+        planned = [(self.plan(leaf), leaf.rels()) for leaf in leaves]
+        pending = list(conditions)
+        first = min(range(len(planned)), key=lambda i: planned[i][0].estimated_rows)
+        current, current_rels = planned[first]
+        remaining = [i for i in range(len(planned)) if i != first]
+        while remaining:
+            best = None
+            for i in remaining:
+                node, rels = planned[i]
+                usable = [p for p in pending if _rels_within(p, chain_rels) <= current_rels | rels]
+                connected = any(
+                    _rels_within(p, chain_rels) & rels and _rels_within(p, chain_rels) & current_rels
+                    for p in usable
+                )
+                rows = self._join_rows("INNER", conjunction(usable), current, node)
+                rank = (not connected, rows)
+                if best is None or rank < best[0]:
+                    best = (rank, i, usable)
+            assert best is not None
+            _, i, usable = best
+            node, rels = planned[i]
+            pending = [p for p in pending if not any(p is u for u in usable)]
+            kind = "INNER" if usable else "CROSS"
+            current = self._make_join(kind, conjunction(usable), current, node, current_rels, rels)
+            current_rels = current_rels | rels
+            remaining.remove(i)
+        if pending:  # conjuncts not referencing any relation of the chain
+            current = self._filter(current, conjunction(pending))  # type: ignore[arg-type]
+        return current
+
+    def _join(
+        self,
+        kind: str,
+        condition: b.Expr | None,
+        left: PhysicalNode,
+        right: PhysicalNode,
+        left_rels: set[int],
+        right_rels: set[int],
+    ) -> _Join:
+        """The join algorithm: ``join`` forces hash / merge / nested-loop for
+        equi-joins (non-equi joins always use nested loops); ``auto`` picks a
+        hash join for equi-joins, whose cost is linear in both inputs (a
+        merge join must sort both inputs first, as no input arrives sorted)."""
+        join_type = kind if condition is not None or kind != "INNER" else "CROSS"
+        if condition is None or self.options.join == "nested_loop":
+            return NestedLoopJoin(join_type, left, right, condition)
         both = left_rels | right_rels
         left_keys: list[b.Expr] = []
         right_keys: list[b.Expr] = []
         residual: list[b.Expr] = []
-        for p in conjuncts(node.condition):
+        for p in conjuncts(condition):
             if isinstance(p, b.Compare) and p.op == "=":
                 lr = {k[0] for k in b.column_keys(p.left)} & both
                 rr = {k[0] for k in b.column_keys(p.right)} & both
@@ -559,10 +717,85 @@ class PhysicalPlanner:
                     continue
             residual.append(p)
         if not left_keys:
-            return NestedLoopJoin(join_type, left, right, node.condition)
+            return NestedLoopJoin(join_type, left, right, condition)
+        if self.options.join == "merge":
+            return MergeJoin(join_type, left, right, left_keys, right_keys, conjunction(residual))
         # build on the smaller input (inner joins); LEFT joins build on the right
         build = "left" if join_type == "INNER" and left.estimated_rows < right.estimated_rows else "right"
         return HashJoin(join_type, left, right, left_keys, right_keys, conjunction(residual), build)
+
+
+def _inner_join_chain(node: lp.LogicalNode) -> tuple[list[lp.LogicalNode], list[b.Expr]]:
+    """The inputs and conjuncts of a maximal tree of inner/cross joins."""
+    if isinstance(node, lp.Join) and node.kind in ("INNER", "CROSS"):
+        left, lc = _inner_join_chain(node.left)
+        right, rc = _inner_join_chain(node.right)
+        return left + right, lc + rc + conjuncts(node.condition)
+    return [node], []
+
+
+def _rels_within(expr: b.Expr, rels: set[int]) -> set[int]:
+    return {key[0] for key in b.column_keys(expr)} & rels
+
+
+# ------------------------------------------------------------ parallel pipelines
+
+
+def pipeline_path(node: PhysicalNode) -> list[PhysicalNode] | None:
+    """The nodes from ``node`` down to the scan driving it, if ``node`` is a
+    pipeline that can run partitioned: only streaming operators on the path
+    (Filter, Project, SubqueryScan, and joins through their probe / outer
+    input), ending in a TableScan or IndexScan."""
+    path: list[PhysicalNode] = []
+    while True:
+        path.append(node)
+        if isinstance(node, (TableScan, IndexScan)):
+            return path
+        if isinstance(node, (Filter, Project, SubqueryScan)):
+            node = node.input
+        elif isinstance(node, HashJoin):
+            node = node.left if node.build == "right" else node.right
+        elif isinstance(node, (NestedLoopJoin, MergeJoin)):
+            node = node.left
+        else:
+            return None
+
+
+# partitions of a parallel pipeline (``threads`` beyond this add no parallelism)
+MAX_PARTITIONS = 64
+# a pipeline whose rows all go back to the parent (at the root, below a full
+# sort) is parallelized only if it is expected to return at most this
+# fraction of the rows it scans: every row of a worker process is pickled
+ROOT_GATHER_MAX_SELECTIVITY = 0.25
+
+
+def parallelize(root: PhysicalNode, partitions: int) -> PhysicalNode:
+    """Inserts Gathers below the operators that merge partial results
+    (aggregation, top-N, distinct), and above selective pipelines that
+    filter or join at the root or below a full sort (whose input rows are
+    all returned to the parent anyway)."""
+    _parallelize_inputs(root, partitions)
+    return _gather_selective(root, partitions)
+
+
+def _gather_selective(node: PhysicalNode, partitions: int) -> PhysicalNode:
+    path = pipeline_path(node)
+    if path is None or not any(isinstance(n, (Filter, _Join)) for n in path):
+        return node
+    if node.estimated_rows > ROOT_GATHER_MAX_SELECTIVITY * max(path[-1].estimated_rows, 1.0):
+        return node
+    return _estimated(Gather(node, partitions, path[-1]), node.estimated_rows)
+
+
+def _parallelize_inputs(node: PhysicalNode, partitions: int) -> None:
+    for child in node.inputs():
+        _parallelize_inputs(child, partitions)
+    if isinstance(node, (HashAggregate, TopN, Distinct)):
+        path = pipeline_path(node.input)
+        if path is not None:
+            node.input = _estimated(Gather(node.input, partitions, path[-1]), node.input.estimated_rows)
+    elif isinstance(node, Sort):
+        node.input = _gather_selective(node.input, partitions)
 
 
 def _estimated(node: PhysicalNode, rows: float) -> PhysicalNode:
