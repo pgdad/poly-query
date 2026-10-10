@@ -66,4 +66,18 @@ public final class ResultWriter {
             case NULL -> sb.append("null");
         }
     }
+
+    /** A value as a JSON-serializable object (for {@link JsonWriter}), per types.md §9. */
+    public static Object jsonValue(Object v, DataType type) {
+        if (v == null) {
+            return null;
+        }
+        return switch (type.kind()) {
+            case DECIMAL -> Decimals.toString((Long) v, type.scale());
+            case DATE -> DateTimes.formatDate((Integer) v);
+            case TIMESTAMP -> DateTimes.formatTimestamp((Long) v);
+            case NULL -> null;
+            default -> v;
+        };
+    }
 }

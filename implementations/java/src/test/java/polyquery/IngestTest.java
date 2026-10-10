@@ -21,10 +21,10 @@ final class IngestTest {
         Table t = CsvIngest.load("t", "﻿id,s\r\n1,\"a,\"\"b\"\"\"\n2,\"\"\n3,\n\n4,\"x\ny\"", infer());
         Assert.eq(4, t.rowCount());
         Assert.eq(DataType.INT64, t.columnType(0));
-        Assert.eq("a,\"b\"", t.column(1).get(0));
-        Assert.eq("", t.column(1).get(1));
-        Assert.eq(null, t.column(1).get(2));
-        Assert.eq("x\ny", t.column(1).get(3));
+        Assert.eq("a,\"b\"", t.data().chunk(0, 1).get(0));
+        Assert.eq("", t.data().chunk(0, 1).get(1));
+        Assert.eq(null, t.data().chunk(0, 1).get(2));
+        Assert.eq("x\ny", t.data().chunk(0, 1).get(3));
     }
 
     static void testCsvInference() {
@@ -48,7 +48,7 @@ final class IngestTest {
     static void testCsvExplicitSchema() {
         List<ColumnSchema> schema = List.of(new ColumnSchema("v", DataType.decimal(4, 1)));
         Table t = CsvIngest.load("t", "v\n123.4\n-0.5\n+7\n", new IngestOptions(schema, true, ',', 100));
-        Assert.eq(70L, t.column(0).get(2));
+        Assert.eq(70L, t.data().chunk(0, 0).get(2));
         Assert.fails(ErrorCode.CONVERSION_ERROR,
                 () -> CsvIngest.load("t", "v\n1.25\n", new IngestOptions(schema, true, ',', 100)));
         Assert.fails(ErrorCode.CONVERSION_ERROR,
@@ -62,7 +62,7 @@ final class IngestTest {
         Assert.eq(List.of("a", "b", "c"), t.columns().stream().map(ColumnSchema::name).toList());
         Assert.eq(DataType.FLOAT64, t.columnType(0));
         Assert.eq(DataType.DATE, t.columnType(1));
-        Assert.eq(null, t.column(2).get(0));
+        Assert.eq(null, t.data().chunk(0, 2).get(0));
         Table l = JsonIngest.loadLines("t", "{\"x\":null}\n\n{\"x\":null}\n", infer());
         Assert.eq(DataType.STRING, l.columnType(0));
         Assert.eq(2, l.rowCount());

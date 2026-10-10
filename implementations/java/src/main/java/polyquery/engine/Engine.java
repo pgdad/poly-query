@@ -11,6 +11,7 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.Function;
 import polyquery.common.ErrorCode;
@@ -18,6 +19,8 @@ import polyquery.common.PolyQueryException;
 import polyquery.exec.ExecContext;
 import polyquery.exec.Executor;
 import polyquery.exec.QueryResult;
+import polyquery.index.Index;
+import polyquery.index.IndexKind;
 import polyquery.ingest.CsvIngest;
 import polyquery.ingest.IngestOptions;
 import polyquery.ingest.JsonIngest;
@@ -34,7 +37,12 @@ import polyquery.sql.ast.Statement;
 import polyquery.sql.parser.Parser;
 import polyquery.storage.Catalog;
 import polyquery.storage.ColumnSchema;
+import polyquery.storage.Layout;
+import polyquery.storage.Layouts;
 import polyquery.storage.Table;
+import polyquery.storage.TableData;
+import polyquery.storage.pqcf.PqcfReader;
+import polyquery.storage.pqcf.PqcfWriter;
 import polyquery.types.DataType;
 
 /**
@@ -74,14 +82,48 @@ public final class Engine {
             text = req.data();
         }
         IngestOptions opts = new IngestOptions(req.schema(), req.header(), req.delimiter(), config.maxTableRows());
-        Table table = switch (req.format()) {
+        Table ingested = switch (req.format()) {
             case "csv" -> CsvIngest.load(req.table(), text, opts);
             case "json" -> JsonIngest.loadArray(req.table(), text, opts);
             case "jsonl" -> JsonIngest.loadLines(req.table(), text, opts);
             default -> throw PolyQueryException.of(ErrorCode.INVALID_REQUEST, "unknown format '%s'", req.format());
         };
+        Table table = new Table(ingested.name(), ingested.columns(),
+                Layouts.convert(ingested.data(), ingested.columns(), req.layout(), req.dictionary()));
         catalog.put(table, req.replace());
         return table;
+    }
+
+    // ---------------------------------------------------------------- PQCF storage
+
+    /** {@code open}: loads a PQCF file as a table and recreates the indexes recorded in it. */
+    public Table open(OpenRequest req) {
+        Path path = paths.resolve(req.path());
+        catalog.checkAvailable(req.table(), List.of(), req.replace());
+        PqcfReader.OpenedFile file = PqcfReader.open(path, req.mmap(), config.maxTableRows());
+        List<String> indexNames = new ArrayList<>();
+        for (PqcfReader.IndexDefinition d : file.indexes()) {
+            indexNames.add(d.name());
+        }
+        catalog.checkAvailable(req.table(), indexNames, req.replace());
+        TableData data = req.layout() == Layout.ROW
+                ? Layouts.convert(file.data(), file.columns(), Layout.ROW, Layouts.Dictionary.NEVER) : file.data();
+        Table table = new Table(req.table(), file.columns(), data);
+        List<Index> indexes = new ArrayList<>();
+        for (PqcfReader.IndexDefinition d : file.indexes()) {
+            indexes.add(Index.build(d.name(), data, d.column(), table.columnType(d.column()), d.kind()));
+        }
+        table = table.withIndexes(indexes);
+        catalog.put(table, req.replace());
+        return table;
+    }
+
+    /** {@code save}: writes a table as a PQCF file atomically; returns the file size. */
+    public long save(SaveRequest req) {
+        Path path = paths.resolve(req.path());
+        Table table = catalog.require(req.table());
+        return PqcfWriter.save(table, path, Version.ENGINE + " " + Version.ENGINE_VERSION, req.rowGroupSize(),
+                req.encoding());
     }
 
     private String readFile(Path p) {
@@ -134,9 +176,21 @@ public final class Engine {
                 yield new QueryResult(List.of(new ColumnSchema("plan", DataType.STRING)),
                         opts.countOnly() ? null : rows, 1);
             }
-            case Statement.CreateIndex c -> throw new PolyQueryException(ErrorCode.UNSUPPORTED, "indexes are not supported");
-            case Statement.DropIndex d -> throw new PolyQueryException(ErrorCode.UNSUPPORTED, "indexes are not supported");
+            case Statement.CreateIndex c -> {
+                catalog.createIndex(c.name(), c.ifNotExists(), c.table(), c.column(),
+                        IndexKind.valueOf(c.kind().toUpperCase(Locale.ROOT)));
+                yield emptyResult(opts);
+            }
+            case Statement.DropIndex d -> {
+                catalog.dropIndex(d.name(), d.ifExists());
+                yield emptyResult(opts);
+            }
         };
+    }
+
+    /** Result of a statement: no columns, no rows. */
+    private static QueryResult emptyResult(QueryOptions opts) {
+        return new QueryResult(List.of(), opts.countOnly() ? null : List.of(), 0);
     }
 
     /** The EXPLAIN plan tree of a query (or of the query of an EXPLAIN statement). */
@@ -145,8 +199,10 @@ public final class Engine {
         return switch (stmt) {
             case Statement.QueryStatement qs -> explainQuery(qs.query(), opts);
             case Statement.Explain e -> explainQuery(e.query(), opts);
-            case Statement.CreateIndex c -> throw new PolyQueryException(ErrorCode.UNSUPPORTED, "indexes are not supported");
-            case Statement.DropIndex d -> throw new PolyQueryException(ErrorCode.UNSUPPORTED, "indexes are not supported");
+            case Statement.CreateIndex c -> throw new PolyQueryException(ErrorCode.SEMANTIC_ERROR,
+                    "only queries can be explained");
+            case Statement.DropIndex d -> throw new PolyQueryException(ErrorCode.SEMANTIC_ERROR,
+                    "only queries can be explained");
         };
     }
 
@@ -161,7 +217,7 @@ public final class Engine {
 
     /** Logical optimization (unless disabled) followed by physical planning; also used for subqueries. */
     private static Function<LogicalPlan, PhysicalPlan> planner(QueryOptions opts) {
-        PhysicalPlanner physical = new PhysicalPlanner(opts.joinStrategy());
+        PhysicalPlanner physical = new PhysicalPlanner(opts.joinStrategy(), opts.useIndexes());
         return logical -> physical.plan(opts.optimize() ? LogicalOptimizer.optimize(logical) : logical);
     }
 

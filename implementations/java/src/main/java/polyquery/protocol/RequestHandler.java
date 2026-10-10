@@ -8,16 +8,24 @@ import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.engine.Engine;
 import polyquery.engine.LoadRequest;
+import polyquery.engine.OpenRequest;
 import polyquery.engine.QueryOptions;
+import polyquery.engine.SaveRequest;
 import polyquery.engine.Version;
 import polyquery.exec.QueryResult;
+import polyquery.index.Index;
 import polyquery.json.JsonException;
 import polyquery.json.JsonNumber;
 import polyquery.json.JsonParser;
 import polyquery.json.JsonWriter;
 import polyquery.physical.PhysicalPlanner.JoinStrategy;
 import polyquery.storage.ColumnSchema;
+import polyquery.storage.ColumnStats;
+import polyquery.storage.Layout;
+import polyquery.storage.Layouts;
 import polyquery.storage.Table;
+import polyquery.storage.pqcf.PqcfWriter;
+import polyquery.storage.pqcf.SaveEncoding;
 import polyquery.types.DataType;
 
 /** Executes protocol requests (protocol.md §4–§5) and renders single-line JSON responses. */
@@ -93,8 +101,9 @@ public final class RequestHandler {
                 QueryOptions opts = parseQueryOptions(optionalObject(req, "options"));
                 yield ok(id, Map.of("plan", engine.explain(sql, opts)));
             }
-            case "save", "open", "stats" ->
-                    throw PolyQueryException.of(ErrorCode.UNSUPPORTED, "operation '%s' is not supported", opName);
+            case "save" -> save(id, req);
+            case "open" -> open(id, req);
+            case "stats" -> stats(id, req);
             default -> throw RequestException.invalid("unknown op '%s'", opName);
         };
     }
@@ -169,8 +178,103 @@ public final class RequestHandler {
         m.put("table", t.name());
         m.put("row_count", (long) t.rowCount());
         m.put("columns", columnsJson(t.columns()));
-        m.put("indexes", List.of());
+        m.put("indexes", indexesJson(t));
+        m.put("layout", t.layout().jsonName());
         return ok(id, m);
+    }
+
+    private static List<Object> indexesJson(Table t) {
+        List<Object> out = new ArrayList<>();
+        for (Index i : t.indexes()) {
+            Map<String, Object> e = new LinkedHashMap<>();
+            e.put("name", i.name());
+            e.put("column", t.columns().get(i.column()).name());
+            e.put("kind", i.kind().name());
+            out.add(e);
+        }
+        return out;
+    }
+
+    private String stats(Object id, Map<String, Object> req) {
+        Table t = engine.catalog().require(requireString(req, "table"));
+        List<Object> cols = new ArrayList<>();
+        for (int i = 0; i < t.columnCount(); i++) {
+            ColumnSchema c = t.columns().get(i);
+            ColumnStats s = t.stats().column(i);
+            Map<String, Object> e = new LinkedHashMap<>();
+            e.put("name", c.name());
+            e.put("type", c.type().toString());
+            e.put("null_count", s.nullCount());
+            e.put("distinct_count", s.distinctCount());
+            e.put("min", ResultWriter.jsonValue(s.min(), c.type()));
+            e.put("max", ResultWriter.jsonValue(s.max(), c.type()));
+            cols.add(e);
+        }
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("table", t.name());
+        m.put("row_count", (long) t.rowCount());
+        m.put("columns", cols);
+        return ok(id, m);
+    }
+
+    private static String requireTableName(Map<String, Object> req) {
+        String table = requireString(req, "table");
+        if (table.isEmpty()) {
+            throw RequestException.invalid("'table' must not be empty");
+        }
+        return table;
+    }
+
+    private String open(Object id, Map<String, Object> req) {
+        String table = requireTableName(req);
+        String path = requireString(req, "path");
+        Map<String, Object> options = optionalObject(req, "options");
+        boolean mmap = optionalBoolean(options, "mmap", false);
+        Layout layout = parseLayout(options);
+        boolean replace = optionalBoolean(req, "replace", false);
+        Table t = engine.open(new OpenRequest(table, path, mmap, replace, layout));
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("table", t.name());
+        m.put("row_count", (long) t.rowCount());
+        m.put("columns", columnsJson(t.columns()));
+        m.put("indexes", indexesJson(t));
+        return ok(id, m);
+    }
+
+    private String save(Object id, Map<String, Object> req) {
+        String table = requireString(req, "table");
+        String path = requireString(req, "path");
+        Map<String, Object> options = optionalObject(req, "options");
+        Long groupSize = optionalNonNegativeLong(options, "row_group_size");
+        if (groupSize != null && (groupSize < 1 || groupSize > Integer.MAX_VALUE)) {
+            throw RequestException.invalid("'row_group_size' must be between 1 and %d", Integer.MAX_VALUE);
+        }
+        SaveEncoding encoding = SaveEncoding.AUTO;
+        Object enc = options.get("encoding");
+        if (enc != null) {
+            if (!(enc instanceof String es) || (encoding = SaveEncoding.fromName(es)) == null) {
+                throw RequestException.invalid("'encoding' must be one of auto, plain, dict, rle");
+            }
+        }
+        long bytes = engine.save(new SaveRequest(table, path,
+                groupSize == null ? PqcfWriter.DEFAULT_ROW_GROUP_SIZE : groupSize.intValue(), encoding));
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("path", path);
+        m.put("bytes", bytes);
+        return ok(id, m);
+    }
+
+    /** The {@code layout} option of load/open (default: column). */
+    private static Layout parseLayout(Map<String, Object> options) {
+        Object v = options.get("layout");
+        if (v == null) {
+            return Layout.COLUMN;
+        }
+        Layout layout = v instanceof String s ? Layout.fromName(s) : null;
+        if (layout == null) {
+            throw RequestException.invalid("'layout' must be \"row\" or \"column\"");
+        }
+        return layout;
     }
 
     private static List<Object> columnsJson(List<ColumnSchema> cols) {
@@ -217,8 +321,15 @@ public final class RequestHandler {
             throw RequestException.invalid("header=false requires an explicit schema");
         }
         boolean replace = optionalBoolean(req, "replace", false);
+        Layout layout = parseLayout(options);
+        Object dict = options.get("dictionary");
+        if (dict != null && !(dict instanceof Boolean)) {
+            throw RequestException.invalid("'dictionary' must be a boolean");
+        }
+        Layouts.Dictionary dictionary = dict == null ? Layouts.Dictionary.AUTO
+                : (Boolean) dict ? Layouts.Dictionary.ALWAYS : Layouts.Dictionary.NEVER;
         Table t = engine.load(new LoadRequest(table, format, (String) path, (String) data, schema, header,
-                delimiter, replace));
+                delimiter, replace, layout, dictionary));
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("table", t.name());
         m.put("row_count", (long) t.rowCount());
@@ -310,14 +421,14 @@ public final class RequestHandler {
             throw RequestException.invalid("'threads' must be >= 1");
         }
         boolean optimize = optionalBoolean(o, "optimize", true);
-        optionalBoolean(o, "use_indexes", true);
+        boolean useIndexes = optionalBoolean(o, "use_indexes", true);
         optionalBoolean(o, "native", false);
         Object queryId = o.get("query_id");
         if (queryId != null && !(queryId instanceof String)) {
             throw RequestException.invalid("'query_id' must be a string");
         }
         return new QueryOptions(maxRows == null ? -1 : maxRows, timeout == null ? 0 : timeout, countOnly, optimize,
-                joinStrategy);
+                joinStrategy, useIndexes);
     }
 
     private String sleep(Object id, Map<String, Object> req) {

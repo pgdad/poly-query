@@ -90,7 +90,7 @@ public final class JoinOperators {
             return row;
         }
 
-        private static Object[] concat(Object[] a, Object[] b) {
+        static Object[] concat(Object[] a, Object[] b) {
             Object[] out = new Object[a.length + b.length];
             System.arraycopy(a, 0, out, 0, a.length);
             System.arraycopy(b, 0, out, a.length, b.length);
@@ -158,7 +158,7 @@ public final class JoinOperators {
             this.rightNorm = rightNorm;
         }
 
-        private static Object key(Object[] row, Evaluator[] keys, List<UnaryOperator<Object>> norm) {
+        static Object key(Object[] row, Evaluator[] keys, List<UnaryOperator<Object>> norm) {
             if (keys.length == 1) {
                 Object v = keys[0].eval(row);
                 return v == null ? null : norm.get(0).apply(v);
@@ -201,6 +201,96 @@ public final class JoinOperators {
         public void close() {
             super.close();
             table = null;
+        }
+    }
+
+    /**
+     * INNER equi-join that builds its hash table on the left input and probes it with the right
+     * input (chosen when the left input is estimated to be smaller). Output rows are still
+     * left columns followed by right columns.
+     */
+    public static final class HashJoinBuildLeft implements Operator {
+        private final Operator left;
+        private final Operator right;
+        private final Evaluator[] leftKeys;
+        private final Evaluator[] rightKeys;
+        private final List<UnaryOperator<Object>> leftNorm;
+        private final List<UnaryOperator<Object>> rightNorm;
+        private final Evaluator residual;
+        private final ExecContext ctx;
+        private Map<Object, List<Object[]>> table;
+        private long reserved;
+        private long produced;
+        private Object[] rightRow;
+        private List<Object[]> candidates = List.of();
+        private int next;
+
+        public HashJoinBuildLeft(Operator left, Operator right, Evaluator[] leftKeys, Evaluator[] rightKeys,
+                                 List<UnaryOperator<Object>> leftNorm, List<UnaryOperator<Object>> rightNorm,
+                                 Evaluator residual, ExecContext ctx) {
+            this.left = left;
+            this.right = right;
+            this.leftKeys = leftKeys;
+            this.rightKeys = rightKeys;
+            this.leftNorm = leftNorm;
+            this.rightNorm = rightNorm;
+            this.residual = residual;
+            this.ctx = ctx;
+        }
+
+        @Override
+        public void open() {
+            produced = 0;
+            candidates = List.of();
+            table = new HashMap<>();
+            left.open();
+            Object[] r;
+            while ((r = left.next()) != null) {
+                ctx.checkpoint();
+                Object k = HashJoin.key(r, leftKeys, leftNorm);
+                if (k == null) {
+                    continue;
+                }
+                long size = ExecContext.estimateRow(r) + 32;
+                ctx.reserve(size);
+                reserved += size;
+                table.computeIfAbsent(k, x -> new ArrayList<>(2)).add(r);
+            }
+            right.open();
+        }
+
+        @Override
+        public Object[] next() {
+            while (true) {
+                while (next < candidates.size()) {
+                    Object[] combined = JoinBase.concat(candidates.get(next++), rightRow);
+                    ctx.checkpoint();
+                    if (residual == null || Boolean.TRUE.equals(residual.eval(combined))) {
+                        if (++produced > ctx.maxJoinRows()) {
+                            throw new PolyQueryException(ErrorCode.RESOURCE_LIMIT,
+                                    "join produced more than " + ctx.maxJoinRows() + " rows");
+                        }
+                        return combined;
+                    }
+                }
+                rightRow = right.next();
+                if (rightRow == null) {
+                    return null;
+                }
+                Object k = HashJoin.key(rightRow, rightKeys, rightNorm);
+                candidates = k == null ? List.of() : table.getOrDefault(k, List.of());
+                next = 0;
+            }
+        }
+
+        @Override
+        public void close() {
+            left.close();
+            right.close();
+            ctx.release(reserved);
+            reserved = 0;
+            table = null;
+            candidates = List.of();
         }
     }
 }

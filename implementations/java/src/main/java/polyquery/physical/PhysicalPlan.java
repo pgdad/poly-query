@@ -2,6 +2,8 @@ package polyquery.physical;
 
 import java.util.ArrayList;
 import java.util.List;
+import polyquery.index.Index;
+import polyquery.index.KeyPredicate;
 import polyquery.plan.AggregateCall;
 import polyquery.plan.BoundExpr;
 import polyquery.plan.LogicalPlan;
@@ -15,7 +17,49 @@ public sealed interface PhysicalPlan {
 
     List<PhysicalPlan> children();
 
-    record TableScan(Table table, String alias) implements PhysicalPlan {
+    /**
+     * A sargable predicate on one column of a scan, used to skip row groups whose min/max
+     * statistics exclude it.
+     */
+    record ColumnFilter(int column, KeyPredicate predicate) {
+    }
+
+    /**
+     * Full scan. Output rows have the table's full width (positions are stable), but only the
+     * slots listed in {@code columns} (ascending; null = all) are read and filled — the others
+     * are null (column pruning). Row groups excluded by {@code skipFilters} are not read.
+     */
+    record TableScan(Table table, String alias, int[] columns, List<ColumnFilter> skipFilters)
+            implements PhysicalPlan {
+        public TableScan(Table table, String alias) {
+            this(table, alias, null, List.of());
+        }
+
+        public TableScan withColumns(int[] cols) {
+            return new TableScan(table, alias, cols, skipFilters);
+        }
+
+        @Override
+        public List<ColumnSchema> schema() {
+            return table.columns();
+        }
+
+        @Override
+        public List<PhysicalPlan> children() {
+            return List.of();
+        }
+    }
+
+    /**
+     * Rows of {@code table} whose {@code column} satisfies {@code lookup}, found through
+     * {@code index}, in ascending row order. Row layout and pruning as for {@link TableScan}.
+     */
+    record IndexScan(Table table, String alias, Index index, KeyPredicate lookup, String lookupText, int[] columns,
+                     double estimatedRows) implements PhysicalPlan {
+        public IndexScan withColumns(int[] cols) {
+            return new IndexScan(table, alias, index, lookup, lookupText, cols, estimatedRows);
+        }
+
         @Override
         public List<ColumnSchema> schema() {
             return table.columns();
@@ -127,12 +171,14 @@ public sealed interface PhysicalPlan {
     }
 
     /**
-     * Equi-join: builds a hash table on the right input keyed by {@code rightKeys} (over right
-     * rows), probes with {@code leftKeys} (over left rows); {@code residual} (over the combined
-     * row, may be null) filters candidate pairs.
+     * Equi-join: builds a hash table on one input (the right one unless {@code buildLeft}, which
+     * is only used for INNER joins) keyed by its join keys and probes it with the other;
+     * {@code leftKeys} are over left rows, {@code rightKeys} over right rows; {@code residual}
+     * (over the combined row, may be null) filters candidate pairs. Output rows are always the
+     * left columns followed by the right columns.
      */
     record HashJoin(PhysicalPlan left, PhysicalPlan right, LogicalPlan.JoinKind kind, List<BoundExpr> leftKeys,
-                    List<BoundExpr> rightKeys, BoundExpr residual) implements PhysicalPlan {
+                    List<BoundExpr> rightKeys, BoundExpr residual, boolean buildLeft) implements PhysicalPlan {
         @Override
         public List<ColumnSchema> schema() {
             return concat(left, right);
@@ -188,6 +234,7 @@ public sealed interface PhysicalPlan {
         List<BoundExpr> out = new ArrayList<>();
         switch (p) {
             case TableScan t -> { }
+            case IndexScan t -> { }
             case Values v -> { }
             case HashDistinct d -> { }
             case Sort s -> { }

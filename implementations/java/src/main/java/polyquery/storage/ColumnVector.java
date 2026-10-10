@@ -109,6 +109,10 @@ public abstract sealed class ColumnVector {
             this.nulls = nulls;
         }
 
+        public int getInt(int row) {
+            return values[row];
+        }
+
         @Override
         public boolean isNull(int row) {
             return nulls.get(row);
@@ -133,6 +137,10 @@ public abstract sealed class ColumnVector {
             super(type, size);
             this.values = values;
             this.nulls = nulls;
+        }
+
+        public boolean getBoolean(int row) {
+            return values.get(row);
         }
 
         @Override
@@ -179,6 +187,112 @@ public abstract sealed class ColumnVector {
             }
             return total;
         }
+    }
+
+    /**
+     * Dictionary-encoded STRING column: each row stores a code into a table of distinct
+     * strings (null rows are marked in the null bitmap; their codes are meaningless).
+     */
+    public static final class DictStringVector extends ColumnVector {
+        private final String[] dictionary;
+        private final int[] codes;
+        private final BitSet nulls;
+
+        DictStringVector(DataType type, String[] dictionary, int[] codes, BitSet nulls, int size) {
+            super(type, size);
+            this.dictionary = dictionary;
+            this.codes = codes;
+            this.nulls = nulls;
+        }
+
+        public int dictionarySize() {
+            return dictionary.length;
+        }
+
+        public String dictionaryEntry(int code) {
+            return dictionary[code];
+        }
+
+        public int code(int row) {
+            return codes[row];
+        }
+
+        @Override
+        public boolean isNull(int row) {
+            return nulls.get(row);
+        }
+
+        @Override
+        public Object get(int row) {
+            return nulls.get(row) ? null : dictionary[codes[row]];
+        }
+
+        @Override
+        public long estimatedBytes() {
+            long total = 4L * size + size / 8;
+            for (String s : dictionary) {
+                total += 40 + s.length();
+            }
+            return total;
+        }
+    }
+
+    /** Column {@code column} of a row-oriented table, viewed as a vector (no copy). */
+    public static final class RowColumnView extends ColumnVector {
+        private final Object[][] rows;
+        private final int column;
+
+        RowColumnView(DataType type, Object[][] rows, int column) {
+            super(type, rows.length);
+            this.rows = rows;
+            this.column = column;
+        }
+
+        @Override
+        public boolean isNull(int row) {
+            return rows[row][column] == null;
+        }
+
+        @Override
+        public Object get(int row) {
+            return rows[row][column];
+        }
+
+        @Override
+        public long estimatedBytes() {
+            return 0;
+        }
+    }
+
+    // ---------------------------------------------------------------- factories (null bitmap: set bit = NULL)
+
+    public static ColumnVector ofLongs(DataType type, long[] values, BitSet nulls) {
+        return new LongVector(type, values, nulls, values.length);
+    }
+
+    public static ColumnVector ofDoubles(double[] values, BitSet nulls) {
+        return new DoubleVector(DataType.FLOAT64, values, nulls, values.length);
+    }
+
+    public static ColumnVector ofInts(DataType type, int[] values, BitSet nulls) {
+        return new IntVector(type, values, nulls, values.length);
+    }
+
+    public static ColumnVector ofBooleans(BitSet values, BitSet nulls, int size) {
+        return new BooleanVector(DataType.BOOLEAN, values, nulls, size);
+    }
+
+    /** STRING vector; null array elements are NULL. */
+    public static ColumnVector ofStrings(String[] values) {
+        return new StringVector(DataType.STRING, values, values.length);
+    }
+
+    public static ColumnVector ofDictionary(String[] dictionary, int[] codes, BitSet nulls) {
+        return new DictStringVector(DataType.STRING, dictionary, codes, nulls, codes.length);
+    }
+
+    static ColumnVector rowView(DataType type, Object[][] rows, int column) {
+        return new RowColumnView(type, rows, column);
     }
 
     /** Append-only builder producing an immutable vector. */

@@ -2,32 +2,120 @@ package polyquery.physical;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import polyquery.index.Index;
+import polyquery.index.KeyPredicate;
 import polyquery.plan.BoundExpr;
 import polyquery.plan.BoundExprs;
 import polyquery.plan.LogicalPlan;
+import polyquery.storage.ColumnSchema;
+import polyquery.storage.Table;
+import polyquery.types.DataType;
+import polyquery.types.DateTimes;
+import polyquery.types.Decimals;
 
-/** Chooses physical algorithms for a logical plan. */
+/**
+ * Chooses physical algorithms for a logical plan: table vs index scans (with row-group
+ * skipping filters), hash vs nested-loop joins and the hash join build side (basic
+ * cost-based choices from table statistics), hash lookups for correlated filters; finally
+ * prunes the columns read by every scan.
+ */
 public final class PhysicalPlanner {
     /** Join algorithm preference (query option {@code join}). */
     public enum JoinStrategy { AUTO, HASH, NESTED_LOOP }
 
-    private final JoinStrategy joinStrategy;
+    /** An index scan is chosen when at most this fraction of the table's rows is expected to match. */
+    static final double INDEX_SELECTIVITY_THRESHOLD = 0.10;
+    /** ... or when at most this many rows are expected (a lookup this small never loses to a scan). */
+    static final double INDEX_ROWS_THRESHOLD = 3;
 
-    public PhysicalPlanner(JoinStrategy joinStrategy) {
+    private final JoinStrategy joinStrategy;
+    private final boolean useIndexes;
+
+    public PhysicalPlanner(JoinStrategy joinStrategy, boolean useIndexes) {
         this.joinStrategy = joinStrategy;
+        this.useIndexes = useIndexes;
     }
 
     public PhysicalPlan plan(LogicalPlan plan) {
+        return ColumnPruner.prune(build(plan));
+    }
+
+    private PhysicalPlan build(LogicalPlan plan) {
         return switch (plan) {
             case LogicalPlan.Scan s -> new PhysicalPlan.TableScan(s.table(), s.alias());
             case LogicalPlan.SingleRow s -> new PhysicalPlan.Values();
-            case LogicalPlan.Filter f -> filter(plan(f.input()), f.predicate());
-            case LogicalPlan.Project p -> new PhysicalPlan.Project(plan(p.input()), p.expressions(), p.names());
-            case LogicalPlan.Aggregate a -> new PhysicalPlan.HashAggregate(plan(a.input()), a.groupKeys(), a.aggregates());
-            case LogicalPlan.Distinct d -> new PhysicalPlan.HashDistinct(plan(d.input()));
-            case LogicalPlan.Sort s -> new PhysicalPlan.Sort(plan(s.input()), s.keys());
-            case LogicalPlan.Limit l -> new PhysicalPlan.Limit(plan(l.input()), l.offset(), l.limit());
+            case LogicalPlan.Filter f when f.input() instanceof LogicalPlan.Scan s -> filter(scan(s, f.predicate()),
+                    f.predicate());
+            case LogicalPlan.Filter f -> filter(build(f.input()), f.predicate());
+            case LogicalPlan.Project p -> new PhysicalPlan.Project(build(p.input()), p.expressions(), p.names());
+            case LogicalPlan.Aggregate a -> new PhysicalPlan.HashAggregate(build(a.input()), a.groupKeys(), a.aggregates());
+            case LogicalPlan.Distinct d -> new PhysicalPlan.HashDistinct(build(d.input()));
+            case LogicalPlan.Sort s -> new PhysicalPlan.Sort(build(s.input()), s.keys());
+            case LogicalPlan.Limit l -> new PhysicalPlan.Limit(build(l.input()), l.offset(), l.limit());
             case LogicalPlan.Join j -> join(j);
+        };
+    }
+
+    /**
+     * Access path for a scan with a filter directly above it: an index scan if some indexed
+     * column has a sargable predicate selective enough, else a table scan that skips row groups
+     * excluded by the sargable predicates. The filter itself is still applied above.
+     */
+    private PhysicalPlan scan(LogicalPlan.Scan s, BoundExpr predicate) {
+        Table table = s.table();
+        Map<Integer, KeyPredicate> sargs = ColumnPredicates.extract(predicate, table.columns()).columns();
+        if (useIndexes && !sargs.isEmpty()) {
+            Index best = null;
+            double bestSelectivity = Double.MAX_VALUE;
+            for (Index index : table.indexes()) {
+                KeyPredicate p = sargs.get(index.column());
+                if (p == null || !index.structure().supports(p)) {
+                    continue;
+                }
+                double sel = Cardinality.selectivity(table, index.column(), p);
+                if (sel < bestSelectivity) {
+                    best = index;
+                    bestSelectivity = sel;
+                }
+            }
+            double rows = bestSelectivity * table.rowCount();
+            if (best != null && (bestSelectivity <= INDEX_SELECTIVITY_THRESHOLD || rows <= INDEX_ROWS_THRESHOLD)) {
+                KeyPredicate lookup = sargs.get(best.column());
+                return new PhysicalPlan.IndexScan(table, s.alias(), best, lookup,
+                        describe(table.columns().get(best.column()), lookup), null, rows);
+            }
+        }
+        List<PhysicalPlan.ColumnFilter> skip = new ArrayList<>();
+        for (Map.Entry<Integer, KeyPredicate> e : sargs.entrySet()) {
+            skip.add(new PhysicalPlan.ColumnFilter(e.getKey(), e.getValue()));
+        }
+        return new PhysicalPlan.TableScan(table, s.alias(), null, skip);
+    }
+
+    /** Human-readable form of a key predicate on a column (EXPLAIN). */
+    static String describe(ColumnSchema col, KeyPredicate p) {
+        String column = col.name();
+        return switch (p) {
+            case KeyPredicate.Empty e -> "FALSE";
+            case KeyPredicate.Points pts -> {
+                List<String> keys = new ArrayList<>();
+                for (Object k : pts.keys()) {
+                    keys.add(formatKey(k, col.type()));
+                }
+                yield keys.size() == 1 ? column + " = " + keys.getFirst()
+                        : column + " IN (" + String.join(", ", keys) + ")";
+            }
+            case KeyPredicate.Range r -> {
+                List<String> parts = new ArrayList<>();
+                if (r.lower() != null) {
+                    parts.add(column + (r.lowerInclusive() ? " >= " : " > ") + formatKey(r.lower(), col.type()));
+                }
+                if (r.upper() != null) {
+                    parts.add(column + (r.upperInclusive() ? " <= " : " < ") + formatKey(r.upper(), col.type()));
+                }
+                yield parts.isEmpty() ? column + " IS NOT NULL" : String.join(" AND ", parts);
+            }
         };
     }
 
@@ -96,8 +184,8 @@ public final class PhysicalPlanner {
     }
 
     private PhysicalPlan join(LogicalPlan.Join j) {
-        PhysicalPlan left = plan(j.left());
-        PhysicalPlan right = plan(j.right());
+        PhysicalPlan left = build(j.left());
+        PhysicalPlan right = build(j.right());
         if (j.condition() == null || joinStrategy == JoinStrategy.NESTED_LOOP) {
             return new PhysicalPlan.NestedLoopJoin(left, right, j.kind(), j.condition());
         }
@@ -126,7 +214,23 @@ public final class PhysicalPlanner {
         if (leftKeys.isEmpty()) {
             return new PhysicalPlan.NestedLoopJoin(left, right, j.kind(), j.condition());
         }
-        return new PhysicalPlan.HashJoin(left, right, j.kind(), leftKeys, rightKeys, BoundExprs.and(residual));
+        // Build on the input with the smaller estimated cardinality (inner joins only; a LEFT
+        // join must build on its right input).
+        boolean buildLeft = j.kind() == LogicalPlan.JoinKind.INNER
+                && Cardinality.rows(j.left()) < Cardinality.rows(j.right());
+        return new PhysicalPlan.HashJoin(left, right, j.kind(), leftKeys, rightKeys, BoundExprs.and(residual),
+                buildLeft);
+    }
+
+    private static String formatKey(Object key, DataType type) {
+        return switch (type.kind()) {
+            case BOOLEAN -> ((Long) key) != 0 ? "TRUE" : "FALSE";
+            case INT64, FLOAT64 -> key.toString();
+            case DECIMAL -> Decimals.toString((Long) key, type.scale());
+            case DATE -> "DATE '" + DateTimes.formatDate((int) (long) (Long) key) + "'";
+            case TIMESTAMP -> "TIMESTAMP '" + DateTimes.formatTimestamp((Long) key) + "'";
+            default -> "'" + ((String) key).replace("'", "''") + "'";
+        };
     }
 
     /** -1 if {@code e} references only left columns, 1 if only right columns, 0 otherwise. */
