@@ -17,11 +17,13 @@ import polyquery.types.DataType;
  * query may use several threads (see {@link Parallel}).
  */
 public final class BatchBuilder {
-    /** Rows per batch (positions per vector). */
-    static final int BATCH_SIZE = Integer.getInteger("polyquery.batchSize", 2048);
-    /** Rows per morsel (unit of work of parallel scans). */
-    static final int MORSEL_ROWS = Integer.getInteger("polyquery.morselRows", 65536);
+    /** Default rows per batch (positions per vector); system property {@code polyquery.batchSize}. */
+    static final int DEFAULT_BATCH_SIZE = 2048;
+    /** Default rows per morsel (unit of work of parallel scans); property {@code polyquery.morselRows}. */
+    static final int DEFAULT_MORSEL_ROWS = 65536;
 
+    private final int batchSize = Math.max(1, Integer.getInteger("polyquery.batchSize", DEFAULT_BATCH_SIZE));
+    private final int morselRows = Math.max(1, Integer.getInteger("polyquery.morselRows", DEFAULT_MORSEL_ROWS));
     private final ExecContext ctx;
     private final OperatorBuilder rows;
     private final VecCompiler compiler;
@@ -76,15 +78,15 @@ public final class BatchBuilder {
     /** Batch operator for the root node of {@code plan} without parallelizing it (children may be). */
     BatchOperator buildSequential(PhysicalPlan plan) {
         return switch (plan) {
-            case PhysicalPlan.TableScan s -> new ScanBatches.TableScan(s, ctx, BATCH_SIZE,
+            case PhysicalPlan.TableScan s -> new ScanBatches.TableScan(s, ctx, batchSize,
                     Morsel.of(s, Integer.MAX_VALUE));
-            case PhysicalPlan.IndexScan s -> new ScanBatches.IndexScan(s, ctx, BATCH_SIZE);
+            case PhysicalPlan.IndexScan s -> new ScanBatches.IndexScan(s, ctx, batchSize);
             case PhysicalPlan.Values v -> new ScanBatches.SingleRow();
             case PhysicalPlan.Filter f -> new BatchOperators.Filter(build(f.input()), compiler, f.predicate(),
                     f.schema().size());
             case PhysicalPlan.Project p -> new BatchOperators.Project(build(p.input()), compiler, p.expressions());
             case PhysicalPlan.HashAggregate a -> new AggregateBatches.HashAggregate(build(a.input()), a.groupKeys(),
-                    a.aggregates(), compiler, ctx, BATCH_SIZE);
+                    a.aggregates(), compiler, ctx, batchSize);
             case PhysicalPlan.HashDistinct d -> new AggregateBatches.Distinct(build(d.input()), types(d.schema()), ctx);
             case PhysicalPlan.HashJoin j -> hashJoin(j, build(j.buildLeft() ? j.right() : j.left()), null, compiler,
                     new JoinBatches.JoinCounter(ctx.maxJoinRows()));
@@ -93,17 +95,17 @@ public final class BatchBuilder {
                 long limit = l.limit() == null ? -1 : rows.constant(l.limit(), "LIMIT", -1);
                 yield new BatchOperators.Limit(build(l.input()), offset, limit, l.schema().size());
             }
-            case PhysicalPlan.Sort s -> new SortBatches.Sort(build(s.input()), s.keys(), s.schema(), ctx, BATCH_SIZE,
+            case PhysicalPlan.Sort s -> new SortBatches.Sort(build(s.input()), s.keys(), s.schema(), ctx, batchSize,
                     0, -1);
             case PhysicalPlan.TopN t -> {
                 long offset = t.offset() == null ? 0 : rows.constant(t.offset(), "OFFSET", 0);
                 long limit = rows.constant(t.limit(), "LIMIT", -1);
-                BatchOperator sorted = new SortBatches.Sort(build(t.input()), t.keys(), t.schema(), ctx, BATCH_SIZE,
+                BatchOperator sorted = new SortBatches.Sort(build(t.input()), t.keys(), t.schema(), ctx, batchSize,
                         limit < 0 ? 0 : offset, limit);
                 yield limit < 0 && offset > 0 ? new BatchOperators.Limit(sorted, offset, -1, t.schema().size())
                         : sorted;
             }
-            default -> new BatchOperators.RowToBatch(rows.buildNode(plan), plan.schema(), BATCH_SIZE);
+            default -> new BatchOperators.RowToBatch(rows.buildNode(plan), plan.schema(), batchSize);
         };
     }
 
@@ -130,7 +132,7 @@ public final class BatchBuilder {
                 JoinBatches.scaleFactors(probeKeyExprs, buildKeyExprs),
                 j.residual() == null ? null : new BatchExprs(comp, List.of(j.residual())),
                 j.kind() == LogicalPlan.JoinKind.LEFT, buildLeft, j.schema(), probePlan.schema().size(), ctx,
-                counter, BATCH_SIZE);
+                counter, batchSize);
     }
 
     static DataType[] types(List<ColumnSchema> schema) {
@@ -155,5 +157,13 @@ public final class BatchBuilder {
 
     int threads() {
         return threads;
+    }
+
+    int batchSize() {
+        return batchSize;
+    }
+
+    int morselRows() {
+        return morselRows;
     }
 }

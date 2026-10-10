@@ -121,7 +121,8 @@ final class Parallel {
     static BatchOperator tryBuild(BatchBuilder builder, PhysicalPlan plan) {
         if (plan instanceof PhysicalPlan.HashAggregate a) {
             Chain c = chain(a.input());
-            if (c != null && safe(a.groupKeys()) && aggregatesSafe(a.aggregates()) && worthIt(c)) {
+            if (c != null && safe(a.groupKeys()) && aggregatesSafe(a.aggregates())
+                    && worthIt(c, builder.morselRows())) {
                 return new Aggregate(builder, c, a);
             }
             return null;
@@ -130,7 +131,7 @@ final class Parallel {
             return null; // a bare scan is just copying: no gain from threads
         }
         Chain c = chain(plan);
-        if (c != null && worthIt(c)) {
+        if (c != null && worthIt(c, builder.morselRows())) {
             return new Gather(builder, c);
         }
         return null;
@@ -148,8 +149,8 @@ final class Parallel {
         return true;
     }
 
-    private static boolean worthIt(Chain c) {
-        return Morsel.of(c.scan(), BatchBuilder.MORSEL_ROWS).size() >= 2;
+    private static boolean worthIt(Chain c, int morselRows) {
+        return Morsel.of(c.scan(), morselRows).size() >= 2;
     }
 
     /** Rethrows a worker's failure on the query thread. */
@@ -243,7 +244,7 @@ final class Parallel {
                 throw new IllegalStateException("subquery in a parallel pipeline");
             });
             VecCompiler comp = new VecCompiler(ctx, rowCompiler);
-            ScanBatches.TableScan scan = new ScanBatches.TableScan(chain.scan(), ctx, BatchBuilder.BATCH_SIZE,
+            ScanBatches.TableScan scan = new ScanBatches.TableScan(chain.scan(), ctx, builder.batchSize(),
                     List.of());
             BatchOperator op = scan;
             for (PhysicalPlan stage : chain.stages()) {
@@ -331,7 +332,7 @@ final class Parallel {
         public void open() {
             close();
             shared.open();
-            List<Morsel> morsels = Morsel.of(shared.chain.scan(), BatchBuilder.MORSEL_ROWS);
+            List<Morsel> morsels = Morsel.of(shared.chain.scan(), shared.builder.morselRows());
             AtomicInteger next = new AtomicInteger();
             Errors errors = new Errors();
             int workers = Math.max(1, Math.min(threads, morsels.size()));
@@ -476,7 +477,7 @@ final class Parallel {
                 groupOf[i] = g;
             });
             emitter = new AggregateBatches.Emitter(tables, tableOf, groupOf, plan.groupKeys(), plan.aggregates(),
-                    BatchBuilder.BATCH_SIZE);
+                    shared.builder.batchSize());
         }
 
         private Merged mergePartition(List<Partial> results, int part, int parts) {
@@ -649,7 +650,7 @@ final class Parallel {
             cancelled = new AtomicBoolean();
             shared.open();
             idle.clear();
-            morsels = Morsel.of(shared.chain.scan(), BatchBuilder.MORSEL_ROWS);
+            morsels = Morsel.of(shared.chain.scan(), shared.builder.morselRows());
             submitted = 0;
             current = null;
             index = 0;
