@@ -310,32 +310,9 @@ func (f *vfilterOp) NextBatch() (*Batch, error) {
 		sel := f.sel[:0]
 		if err := f.pred.eval(b, b.Sel, f.res); err != nil {
 			sel, f.pending = f.filterRows(b, sel)
-		} else if f.pred.out[0] != vInt {
-			// A NULL-typed predicate is never TRUE.
-		} else {
-			v := f.res[0]
-			if v.Nulls == nil {
-				if b.Sel == nil {
-					for i, x := range v.I[:b.N] {
-						if x != 0 {
-							sel = append(sel, int32(i))
-						}
-					}
-				} else {
-					for _, i := range b.Sel {
-						if v.I[i] != 0 {
-							sel = append(sel, i)
-						}
-					}
-				}
-			} else {
-				forActive(b.N, b.Sel, func(i int) {
-					if !v.Nulls[i] && v.I[i] != 0 {
-						sel = append(sel, int32(i))
-					}
-				})
-			}
-		}
+		} else if f.pred.out[0] == vInt {
+			sel = trueRows(sel, b.N, b.Sel, f.res[0])
+		} // else: a NULL-typed predicate is never TRUE
 		f.sel = sel
 		if len(sel) == 0 {
 			if f.pending != nil {
@@ -351,6 +328,38 @@ func (f *vfilterOp) NextBatch() (*Batch, error) {
 		}
 		return &f.out, nil
 	}
+}
+
+// trueRows lists the rows of sel (nil: 0..n-1) where the BOOLEAN vector v
+// is TRUE, appending to buf.
+func trueRows(buf []int32, n int, sel []int32, v *Vec) []int32 {
+	vals, nulls := v.I, v.Nulls
+	if sel == nil {
+		// Branch-free: always store, advance when the row qualifies.
+		buf = grow(buf, n)
+		k := 0
+		if nulls == nil {
+			for i, x := range vals[:n] {
+				buf[k] = int32(i)
+				k += int(x & 1)
+			}
+		} else {
+			for i, x := range vals[:n] {
+				buf[k] = int32(i)
+				if !nulls[i] {
+					k += int(x & 1)
+				}
+			}
+		}
+		return buf[:k]
+	}
+	out := buf[:0]
+	for _, i := range sel {
+		if vals[i] != 0 && (nulls == nil || !nulls[i]) {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 // filterRows evaluates the predicate row by row, stopping at the first

@@ -153,20 +153,34 @@ func (s *exactSumState) grow(g int) {
 
 func (s *exactSumState) update(gids []int32, n int, sel []int32, v *Vec) {
 	sums, cnt, vals, nulls := s.sums, s.n, v.I, v.Nulls
-	if sel == nil && nulls == nil {
-		for i, g := range gids[:n] {
-			sums[g].Add(vals[i])
-			cnt[g]++
+	add := func(g int32, x int64) {
+		if p := &sums[g]; !p.AddSmall(x) {
+			p.Add(x)
 		}
-		return
+		cnt[g]++
 	}
-	forActive(n, sel, func(i int) {
-		if nulls == nil || !nulls[i] {
-			g := gids[i]
-			sums[g].Add(vals[i])
-			cnt[g]++
+	switch {
+	case sel == nil && nulls == nil:
+		for i, g := range gids[:n] {
+			add(g, vals[i])
 		}
-	})
+	case sel == nil:
+		for i, g := range gids[:n] {
+			if !nulls[i] {
+				add(g, vals[i])
+			}
+		}
+	case nulls == nil:
+		for _, i := range sel {
+			add(gids[i], vals[i])
+		}
+	default:
+		for _, i := range sel {
+			if !nulls[i] {
+				add(gids[i], vals[i])
+			}
+		}
+	}
 }
 
 func (s *exactSumState) merge(g int32, src aggState, sg int32) {
@@ -203,20 +217,28 @@ func (s *floatSumState) grow(g int) {
 
 func (s *floatSumState) update(gids []int32, n int, sel []int32, v *Vec) {
 	sums, cnt, vals, nulls := s.sums, s.n, v.F, v.Nulls
-	if sel == nil && nulls == nil {
+	switch {
+	case sel == nil && nulls == nil:
 		for i, g := range gids[:n] {
 			sums[g] += vals[i]
 			cnt[g]++
 		}
-		return
-	}
-	forActive(n, sel, func(i int) {
-		if nulls == nil || !nulls[i] {
-			g := gids[i]
-			sums[g] += vals[i]
-			cnt[g]++
+	case sel == nil:
+		for i, g := range gids[:n] {
+			if !nulls[i] {
+				sums[g] += vals[i]
+				cnt[g]++
+			}
 		}
-	})
+	default:
+		for _, i := range sel {
+			if nulls == nil || !nulls[i] {
+				g := gids[i]
+				sums[g] += vals[i]
+				cnt[g]++
+			}
+		}
+	}
 }
 
 func (s *floatSumState) merge(g int32, src aggState, sg int32) {
@@ -258,16 +280,24 @@ func (s *intMinMax) grow(g int) {
 func (s *intMinMax) update(gids []int32, n int, sel []int32, v *Vec) {
 	best, any, vals, nulls := s.best, s.any, v.I, v.Nulls
 	lt := s.sign < 0
-	forActive(n, sel, func(i int) {
+	one := func(i int) {
 		if nulls != nil && nulls[i] {
 			return
 		}
-		g := gids[i]
-		x := vals[i]
+		g, x := gids[i], vals[i]
 		if !any[g] || (lt && x < best[g]) || (!lt && x > best[g]) {
 			best[g], any[g] = x, true
 		}
-	})
+	}
+	if sel == nil {
+		for i := 0; i < n; i++ {
+			one(i)
+		}
+		return
+	}
+	for _, i := range sel {
+		one(int(i))
+	}
 }
 
 func (s *intMinMax) merge(g int32, src aggState, sg int32) {
@@ -303,16 +333,24 @@ func (s *floatMinMax) grow(g int) {
 func (s *floatMinMax) update(gids []int32, n int, sel []int32, v *Vec) {
 	best, any, vals, nulls := s.best, s.any, v.F, v.Nulls
 	lt := s.sign < 0
-	forActive(n, sel, func(i int) {
+	one := func(i int) {
 		if nulls != nil && nulls[i] {
 			return
 		}
-		g := gids[i]
-		x := vals[i]
+		g, x := gids[i], vals[i]
 		if !any[g] || (lt && x < best[g]) || (!lt && x > best[g]) {
 			best[g], any[g] = x, true
 		}
-	})
+	}
+	if sel == nil {
+		for i := 0; i < n; i++ {
+			one(i)
+		}
+		return
+	}
+	for _, i := range sel {
+		one(int(i))
+	}
 }
 
 func (s *floatMinMax) merge(g int32, src aggState, sg int32) {
@@ -467,95 +505,115 @@ func (t *aggTable) keyRow(keys []*Vec, i int) types.Row {
 // the position of row 0 of the batch in the input (group ordering).
 func (t *aggTable) resolve(keys []*Vec, n int, sel []int32, pos int64) error {
 	t.gids = grow(t.gids, n)
-	gids := t.gids
 	if len(keys) == 0 {
 		if len(t.keys) == 0 {
 			if _, err := t.newGroup(types.Row{}, pos); err != nil {
 				return err
 			}
 		}
-		clear(gids)
+		clear(t.gids)
 		return nil
 	}
-	var err error
-	lookup := func(i int, g int32, ok bool, put func(int32)) {
-		if ok || err != nil {
+	if len(keys) > 1 {
+		return t.resolveEncoded(keys, n, sel, pos)
+	}
+	v := keys[0]
+	switch {
+	case t.keyClasses[0] == vInt:
+		return t.resolveInt(v, n, sel, pos)
+	case t.keyClasses[0] == vFloat:
+		return t.resolveEncoded(keys, n, sel, pos)
+	case v.Dict != nil:
+		return t.resolveDict(v, n, sel, pos)
+	}
+	return t.resolveString(v, n, sel, pos)
+}
+
+// nullKey returns the group of the NULL key (single key), creating it.
+func (t *aggTable) nullKey(pos int64) (int32, error) {
+	if t.nullGroup >= 0 {
+		return t.nullGroup, nil
+	}
+	g, err := t.newGroup(types.Row{null}, pos)
+	t.nullGroup = g
+	return g, err
+}
+
+func (t *aggTable) resolveInt(v *Vec, n int, sel []int32, pos int64) error {
+	gids, vals, nulls := t.gids, v.I, v.Nulls
+	one := func(i int) error {
+		if nulls != nil && nulls[i] {
+			g, err := t.nullKey(pos + int64(i))
 			gids[i] = g
-			return
+			return err
 		}
-		g, err = t.newGroup(t.keyRow(keys, i), pos+int64(i))
-		put(g)
+		k := vals[i]
+		g, ok := t.intMap[k]
+		if !ok {
+			var err error
+			if g, err = t.newGroup(types.Row{types.IntValue(k)}, pos+int64(i)); err != nil {
+				return err
+			}
+			t.intMap[k] = g
+		}
 		gids[i] = g
+		return nil
 	}
-	if len(keys) == 1 {
-		v := keys[0]
-		nulls := v.Nulls
-		nullKey := func(i int) bool {
-			if nulls == nil || !nulls[i] {
-				return false
+	if sel == nil {
+		for i := 0; i < n; i++ {
+			if err := one(i); err != nil {
+				return err
 			}
-			if t.nullGroup < 0 && err == nil {
-				t.nullGroup, err = t.newGroup(types.Row{null}, pos+int64(i))
-			}
-			gids[i] = t.nullGroup
-			return true
 		}
-		switch t.keyClasses[0] {
-		case vInt:
-			vals := v.I
-			forActive(n, sel, func(i int) {
-				if nullKey(i) {
-					return
-				}
-				k := vals[i]
-				g, ok := t.intMap[k]
-				lookup(i, g, ok, func(g int32) { t.intMap[k] = g })
-			})
-		case vFloat:
-			vals := v.F
-			forActive(n, sel, func(i int) {
-				if nullKey(i) {
-					return
-				}
-				f := vals[i]
-				if f == 0 {
-					f = 0 // -0.0 groups with 0.0
-				}
-				k := math.Float64bits(f)
-				g, ok := t.floatMap[k]
-				lookup(i, g, ok, func(g int32) { t.floatMap[k] = g })
-			})
-		default:
-			if v.Dict != nil {
-				t.resolveDict(v, n, sel, pos, nullKey, &err)
-				break
-			}
-			vals := v.S
-			forActive(n, sel, func(i int) {
-				if nullKey(i) {
-					return
-				}
-				s := vals[i]
-				g, ok := t.strMap[s]
-				lookup(i, g, ok, func(g int32) { t.strMap[s] = g })
-			})
-		}
-		return err
+		return nil
 	}
-	forActive(n, sel, func(i int) {
-		t.key = t.key[:0]
-		for k, v := range keys {
-			t.key = appendKey(t.key, v.value(i, t.keyClasses[k]), t.keyTypes[k])
+	for _, i := range sel {
+		if err := one(int(i)); err != nil {
+			return err
 		}
-		g, ok := t.strMap[string(t.key)]
-		lookup(i, g, ok, func(g int32) { t.strMap[string(t.key)] = g })
-	})
-	return err
+	}
+	return nil
+}
+
+func (t *aggTable) resolveString(v *Vec, n int, sel []int32, pos int64) error {
+	gids, vals, nulls := t.gids, v.S, v.Nulls
+	one := func(i int) error {
+		if nulls != nil && nulls[i] {
+			g, err := t.nullKey(pos + int64(i))
+			gids[i] = g
+			return err
+		}
+		s := vals[i]
+		g, ok := t.strMap[s]
+		if !ok {
+			var err error
+			if g, err = t.newGroup(types.Row{types.StringValue(s)}, pos+int64(i)); err != nil {
+				return err
+			}
+			t.strMap[s] = g
+		}
+		gids[i] = g
+		return nil
+	}
+	if sel == nil {
+		for i := 0; i < n; i++ {
+			if err := one(i); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, i := range sel {
+		if err := one(int(i)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // resolveDict resolves a dictionary-encoded STRING key through a
 // code→group cache kept per dictionary.
-func (t *aggTable) resolveDict(v *Vec, n int, sel []int32, pos int64, nullKey func(int) bool, errp *error) {
+func (t *aggTable) resolveDict(v *Vec, n int, sel []int32, pos int64) error {
 	if !sameDict(t.dict, v.Dict) {
 		t.dict = v.Dict
 		t.dictGids = grow(t.dictGids, len(v.Dict))
@@ -563,27 +621,86 @@ func (t *aggTable) resolveDict(v *Vec, n int, sel []int32, pos int64, nullKey fu
 			t.dictGids[i] = -1
 		}
 	}
-	cache, codes, gids := t.dictGids, v.Codes, t.gids
-	forActive(n, sel, func(i int) {
-		if nullKey(i) {
-			return
+	cache, codes, gids, nulls := t.dictGids, v.Codes, t.gids, v.Nulls
+	slow := func(i int) error {
+		if nulls != nil && nulls[i] {
+			g, err := t.nullKey(pos + int64(i))
+			gids[i] = g
+			return err
 		}
 		c := codes[i]
-		g := cache[c]
-		if g < 0 {
-			s := v.Dict[c]
-			var ok bool
-			if g, ok = t.strMap[s]; !ok {
-				var err error
-				if g, err = t.newGroup(types.Row{types.StringValue(s)}, pos+int64(i)); err != nil && *errp == nil {
-					*errp = err
-				}
-				t.strMap[s] = g
+		s := v.Dict[c]
+		g, ok := t.strMap[s]
+		if !ok {
+			var err error
+			if g, err = t.newGroup(types.Row{types.StringValue(s)}, pos+int64(i)); err != nil {
+				return err
 			}
-			cache[c] = g
+			t.strMap[s] = g
+		}
+		cache[c] = g
+		gids[i] = g
+		return nil
+	}
+	if sel == nil {
+		for i, c := range codes[:n] {
+			if g := cache[c]; g >= 0 && (nulls == nil || !nulls[i]) {
+				gids[i] = g
+			} else if err := slow(i); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, i := range sel {
+		if g := cache[codes[i]]; g >= 0 && (nulls == nil || !nulls[i]) {
+			gids[i] = g
+		} else if err := slow(int(i)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resolveEncoded resolves multi-column (and FLOAT64) keys by their
+// canonical encoding.
+func (t *aggTable) resolveEncoded(keys []*Vec, n int, sel []int32, pos int64) error {
+	gids := t.gids
+	one := func(i int) error {
+		t.key = t.key[:0]
+		for k, v := range keys {
+			t.key = appendKey(t.key, v.value(i, t.keyClasses[k]), t.keyTypes[k])
+		}
+		if len(keys) == 1 && t.key[0] == 0 {
+			g, err := t.nullKey(pos + int64(i))
+			gids[i] = g
+			return err
+		}
+		g, ok := t.strMap[string(t.key)]
+		if !ok {
+			var err error
+			if g, err = t.newGroup(t.keyRow(keys, i), pos+int64(i)); err != nil {
+				return err
+			}
+			t.strMap[string(t.key)] = g
 		}
 		gids[i] = g
-	})
+		return nil
+	}
+	if sel == nil {
+		for i := 0; i < n; i++ {
+			if err := one(i); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, i := range sel {
+		if err := one(int(i)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // update folds a batch into the table: keys and args are the evaluated key

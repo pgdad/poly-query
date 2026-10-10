@@ -4,6 +4,11 @@ BIN     := build/polyquery
 GOFLAGS := -trimpath
 export GOTOOLCHAIN := local
 export GOPROXY := off
+# Explicit SIMD kernels use the standard library's experimental
+# simd/archsimd package (amd64 only); elsewhere portable loops are used.
+ifeq ($(shell $(GO) env GOARCH),amd64)
+export GOEXPERIMENT := simd
+endif
 
 .PHONY: build test lint fmt clean
 

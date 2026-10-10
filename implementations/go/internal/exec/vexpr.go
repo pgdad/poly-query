@@ -295,13 +295,7 @@ func (v *vlogic) eval(b *Batch, sel []int32) (*Vec, error) {
 	if !v.and {
 		decided = 1
 	}
-	rest := v.sel[:0]
-	appendRow := func(i int) {
-		if (lv.Nulls != nil && lv.Nulls[i]) || lv.I[i] != decided {
-			rest = append(rest, int32(i))
-		}
-	}
-	forActive(b.N, sel, appendRow)
+	rest := undecided(v.sel, b.N, sel, lv, decided)
 	v.sel = rest
 	n := b.N
 	out := v.out.reset(n, vInt)
@@ -342,6 +336,37 @@ func (v *vlogic) eval(b *Batch, sel []int32) (*Vec, error) {
 		}
 	}
 	return out, nil
+}
+
+// undecided lists the rows of sel (nil: 0..n-1) whose value in v is NULL
+// or differs from decided, reusing buf.
+func undecided(buf []int32, n int, sel []int32, v *Vec, decided int64) []int32 {
+	vals, nulls := v.I, v.Nulls
+	if sel == nil && nulls == nil {
+		// Branch-free: always store, advance when the row is undecided.
+		buf = grow(buf, n)
+		k := 0
+		for i, x := range vals[:n] {
+			buf[k] = int32(i)
+			k += int((x ^ decided) & 1)
+		}
+		return buf[:k]
+	}
+	rest := buf[:0]
+	if sel == nil {
+		for i := 0; i < n; i++ {
+			if nulls[i] || vals[i] != decided {
+				rest = append(rest, int32(i))
+			}
+		}
+		return rest
+	}
+	for _, i := range sel {
+		if (nulls != nil && nulls[i]) || vals[i] != decided {
+			rest = append(rest, i)
+		}
+	}
+	return rest
 }
 
 // vnot is three-valued NOT.
@@ -571,13 +596,21 @@ func (v *vcmp) eval(b *Batch, sel []int32) (*Vec, error) {
 			out.I[i] = cmpResult(v.op, types.CompareDecimal(lv.I[i], v.scaleL, rv.I[i], v.scaleR))
 		}
 	case v.cls == vInt && v.rconst != nil:
-		cmpVC(v.op, lv.I[:n], v.rconst.val.I, out.I)
+		if !simdCmpVCInt(v.op, lv.I[:n], v.rconst.val.I, out.I) {
+			cmpVC(v.op, lv.I[:n], v.rconst.val.I, out.I)
+		}
 	case v.cls == vInt:
-		cmpVV(v.op, lv.I[:n], rv.I[:n], out.I)
+		if !simdCmpVVInt(v.op, lv.I[:n], rv.I[:n], out.I) {
+			cmpVV(v.op, lv.I[:n], rv.I[:n], out.I)
+		}
 	case v.cls == vFloat && v.rconst != nil:
-		cmpVC(v.op, lv.F[:n], v.rconst.val.F, out.I)
+		if !simdCmpVCFloat(v.op, lv.F[:n], v.rconst.val.F, out.I) {
+			cmpVC(v.op, lv.F[:n], v.rconst.val.F, out.I)
+		}
 	case v.cls == vFloat:
-		cmpVV(v.op, lv.F[:n], rv.F[:n], out.I)
+		if !simdCmpVVFloat(v.op, lv.F[:n], rv.F[:n], out.I) {
+			cmpVV(v.op, lv.F[:n], rv.F[:n], out.I)
+		}
 	case v.rconst != nil && lv.Dict != nil:
 		v.compareDict(lv, n, out.I)
 	case v.rconst != nil:
@@ -781,6 +814,9 @@ func (v *varith) fastIntOp(a, b, out []int64) bool {
 
 func (v *varith) floatOp(a, b, out []float64) bool {
 	b = b[:len(a)]
+	if simdFloatOp(v.op, a, b, out) {
+		return v.flagNonFinite(out)
+	}
 	switch v.op {
 	case plan.OpAdd:
 		for i := range out {
@@ -799,7 +835,12 @@ func (v *varith) floatOp(a, b, out []float64) bool {
 			out[i] = a[i] / b[i]
 		}
 	}
-	// Non-finite results (incl. division by zero) fail.
+	return v.flagNonFinite(out)
+}
+
+// flagNonFinite flags non-finite results (incl. division by zero) as
+// failed and reports whether there are any.
+func (v *varith) flagNonFinite(out []float64) bool {
 	bad := false
 	for _, x := range out {
 		if math.IsInf(x, 0) || math.IsNaN(x) {
