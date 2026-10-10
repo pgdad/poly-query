@@ -1,0 +1,46 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  infrastructure:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: spec and suites consistency
+        run: python3 tools/validation/spec_validate.py
+      - name: SQLite oracle cross-check
+        run: python3 tools/validation/oracle_check.py
+      - name: harness self-tests
+        run: python3 -m unittest discover -s tests/conformance/selftest
+      - name: dataset determinism
+        run: python3 datasets/generators/pqgen.py verify --scale 10k --jobs 2
+  kernels:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user-static
+      - run: make -C native-kernels test
+  kernels-arm64-native:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - run: make -C native-kernels test-native test-asan
+  engines:
+    # Partial completion is expected: an engine that does not exist yet is reported
+    # as "not built", never as passing. The job fails only if an existing engine fails
+    # cases of capabilities it claims.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        lang: [java, clojure, rust, python, go, common-lisp]
+    steps:
+      - uses: actions/checkout@v4
+      - name: build and conformance
+        run: |
+          if [ ! -f implementations/${{ matrix.lang }}/Makefile ]; then echo "not built (no implementation yet)"; exit 0; fi
+          docker build -t pqenv tools/environment
+          docker run --rm -v "$PWD":/work -w /work pqenv bash -c \
+            "make -C implementations/${{ matrix.lang }} build && python3 tests/conformance/runner.py --engine implementations/${{ matrix.lang }}/bin/polyquery --ci --report results/correctness/${{ matrix.lang }}.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: "conformance-${{ matrix.lang }}", path: "results/correctness/${{ matrix.lang }}.json", if-no-files-found: ignore}

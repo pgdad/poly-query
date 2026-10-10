@@ -1,0 +1,27 @@
+{
+ "wave_id": "wave-a-kernels-a1-20261010T184024Z",
+ "task": "kernels",
+ "track": "A",
+ "attempt": 1,
+ "seed": 2020,
+ "order": [
+  "arm64-asm",
+  "x86_64-asm"
+ ],
+ "run_ids": [
+  "a-kernels-arm64-asm-a1-20261010T184024Z",
+  "a-kernels-x86_64-asm-a1-20261010T184025Z"
+ ],
+ "started": "2026-10-10T18:40:26+00:00",
+ "parallel": 2,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 120.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  1.27294921875,
+  1.35009765625,
+  1.216796875
+ ]
+}

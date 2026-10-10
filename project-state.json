@@ -1,0 +1,35 @@
+{
+  "schema": "polyquery-project-state/1",
+  "updated": "2026-10-10T19:00:00Z",
+  "current_milestone": "M3",
+  "milestones": {
+    "M0": {"status": "complete", "evidence": "spec/, docs/, AGENTS.md, ADR-0001..0015; just spec-validate passes"},
+    "M1": {"status": "complete", "evidence": "tests/conformance runner + 554 public / 69 hidden cases; oracle_check: 0 problems; harness selftests pass"},
+    "M2": {"status": "complete_pending_engine_validation", "evidence": "pqgen deterministic (verify OK); bench.py, report.py, orchestrator + sandbox exercised end-to-end with a smoke run",
+           "open": ["bench.py and http_suite.py have not yet run against a real engine (no engine existed); validate on first Phase 1/4 engines"]},
+    "M3": {"status": "in_progress", "detail": "Track A wave phase1 attempt 1 running for all 6 languages (started 2026-10-10T18:29Z)"},
+    "M4": {"status": "not_started"}, "M5": {"status": "not_started"}, "M6": {"status": "not_started"},
+    "M7": {"status": "not_started"},
+    "M8": {"status": "in_progress", "detail": "C17 reference + dispatch + differential tests done (pass natively, ASan/UBSan, AArch64 under qemu); Track A wave kernels attempt 1 running for x86_64-asm and arm64-asm"},
+    "M9": {"status": "not_started"}, "M10": {"status": "not_started"}
+  },
+  "outstanding_tasks": [
+    "Collect results of wave phase1/a1 and kernels/a1; import successful runs; retry failed languages (attempt 2)",
+    "Validate benchmarks/harness/bench.py against the first engines; run 1m benchmark",
+    "Run phase2..phase5 waves",
+    "Generate dataset manifests for 10k..10m (and 100m) with checksums",
+    "Native integration (M9), Track B, later experiment families",
+    "Run kernels on native AArch64 hardware (unavailable on this host)"
+  ],
+  "known_defects": [],
+  "blockers": [
+    "No native AArch64 hardware on the host: AArch64 kernels can be validated only functionally (qemu) until run on ARM hardware"
+  ],
+  "risks": [
+    "Agent runs consume the operator's Claude subscription quota (observed ~9% of the 5-hour window per 25 min with 8 parallel agents); runs are capped to the OAuth token lifetime"
+  ],
+  "test_results": {"spec_validate": "pass", "oracle_check": "pass (164 oracle queries)", "harness_selftest": "pass (9 tests)",
+                   "kernels_reference": "pass (native, asan, aarch64-qemu)", "engines": "none yet"},
+  "last_successful_commit": null,
+  "next_recommended_action": "Wait for wave phase1/a1 completion notifications; run `python3 tools/orchestration/pq_orchestrate.py status`, inspect validation.json per run, import successful runs with `import <run_id> --merge`, then run the benchmark harness at 100k to validate it."
+}

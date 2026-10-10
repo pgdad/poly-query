@@ -278,6 +278,8 @@ def main() -> int:
     ap.add_argument("--timeout", type=float, default=30.0, help="per-request timeout seconds")
     ap.add_argument("--report", help="write JSON report here")
     ap.add_argument("--logs", help="directory for engine stderr logs")
+    ap.add_argument("--ci", action="store_true",
+                    help="exit status ignores not_implemented cases (still reported); fails on fail/error")
     ap.add_argument("--verbose", "-v", action="store_true")
     ap.add_argument("--quiet", "-q", action="store_true")
     args = ap.parse_args()
@@ -369,6 +371,8 @@ def main() -> int:
                     print(f"  FAIL {r['file']}:{c['line']} [{r['variant']}] {c.get('message', '')}")
                     if c.get("sql"):
                         print("       " + c["sql"].replace("\n", "\n       "))
+    if args.ci:
+        return 0 if t["fail"] == 0 and t["error"] == 0 and not syntax_errors else 1
     return 0 if t["total"] > 0 and t["pass"] == t["total"] and not syntax_errors else 1
 
 

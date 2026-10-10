@@ -1,0 +1,3 @@
+2026-10-10T18:40:26+00:00 wave wave-a-kernels-a1-20261010T184024Z: order=['arm64-asm', 'x86_64-asm']
+2026-10-10T18:40:26+00:00 [a-kernels-arm64-asm-a1-20261010T184024Z] agent started
+2026-10-10T18:40:31+00:00 [a-kernels-x86_64-asm-a1-20261010T184025Z] agent started

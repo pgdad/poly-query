@@ -1,0 +1,149 @@
+{
+ "generated": "2026-10-10T18:45:08.851727+00:00",
+ "weights": {
+  "correctness": 0.35,
+  "development_effort": 0.2,
+  "performance": 0.2,
+  "resources": 0.1,
+  "maintainability": 0.15
+ },
+ "git_commit": "f1fc90f7e0efc4ea7c8a09a19ae0e08047dc6095",
+ "runs": [],
+ "capability_matrix": {
+  "java": [],
+  "clojure": [],
+  "rust": [],
+  "python": [],
+  "go": [],
+  "common-lisp": []
+ },
+ "reports": {
+  "1_functional_correctness": {
+   "java": {
+    "summary": null
+   },
+   "clojure": {
+    "summary": null
+   },
+   "rust": {
+    "summary": null
+   },
+   "python": {
+    "summary": null
+   },
+   "go": {
+    "summary": null
+   },
+   "common-lisp": {
+    "summary": null
+   }
+  },
+  "2_development_effort": {},
+  "3_runtime_performance": [],
+  "4_resource_efficiency": [],
+  "5_code_quality": {
+   "java": {
+    "source_loc": 0,
+    "test_loc": 0,
+    "files": 0,
+    "comment_lines": 0,
+    "comment_density": null,
+    "largest_file_loc": 0
+   },
+   "clojure": {
+    "source_loc": 0,
+    "test_loc": 0,
+    "files": 0,
+    "comment_lines": 0,
+    "comment_density": null,
+    "largest_file_loc": 0
+   },
+   "rust": {
+    "source_loc": 0,
+    "test_loc": 0,
+    "files": 0,
+    "comment_lines": 0,
+    "comment_density": null,
+    "largest_file_loc": 0
+   },
+   "python": {
+    "source_loc": 0,
+    "test_loc": 0,
+    "files": 0,
+    "comment_lines": 0,
+    "comment_density": null,
+    "largest_file_loc": 0
+   },
+   "go": {
+    "source_loc": 0,
+    "test_loc": 0,
+    "files": 0,
+    "comment_lines": 0,
+    "comment_density": null,
+    "largest_file_loc": 0
+   },
+   "common-lisp": {
+    "source_loc": 0,
+    "test_loc": 0,
+    "files": 0,
+    "comment_lines": 0,
+    "comment_density": null,
+    "largest_file_loc": 0
+   },
+   "x86_64-asm": {
+    "source_loc": 0,
+    "test_loc": 0,
+    "files": 0,
+    "comment_lines": 0,
+    "comment_density": null,
+    "largest_file_loc": 0
+   },
+   "arm64-asm": {
+    "source_loc": 0,
+    "test_loc": 0,
+    "files": 0,
+    "comment_lines": 0,
+    "comment_density": null,
+    "largest_file_loc": 0
+   }
+  },
+  "6_optimization_effectiveness": [],
+  "7_architectural_adaptability": {},
+  "8_overall": {
+   "per_language": {
+    "java": {
+     "pass_rate": null,
+     "dev_cost_usd": null,
+     "correctness_gate": false
+    },
+    "clojure": {
+     "pass_rate": null,
+     "dev_cost_usd": null,
+     "correctness_gate": false
+    },
+    "rust": {
+     "pass_rate": null,
+     "dev_cost_usd": null,
+     "correctness_gate": false
+    },
+    "python": {
+     "pass_rate": null,
+     "dev_cost_usd": null,
+     "correctness_gate": false
+    },
+    "go": {
+     "pass_rate": null,
+     "dev_cost_usd": null,
+     "correctness_gate": false
+    },
+    "common-lisp": {
+     "pass_rate": null,
+     "dev_cost_usd": null,
+     "correctness_gate": false
+    }
+   },
+   "pareto_front": [],
+   "note": "Correctness-gated: a language without a 100% pass rate is never ranked above one with 100%. Track A and Track B are never combined."
+  }
+ }
+}

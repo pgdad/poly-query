@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PolyQuery agent-run telemetry",
+  "type": "object",
+  "required": ["schema", "run_id", "language", "task", "track", "attempt", "model", "tokens", "time", "git", "human_interventions"],
+  "properties": {
+    "schema": {"const": "polyquery-telemetry/1"},
+    "run_id": {"type": "string"}, "language": {"type": "string"}, "task": {"type": "string"},
+    "track": {"enum": ["A", "B"]}, "attempt": {"type": "integer"},
+    "model": {"type": ["string", "null"]}, "effort": {"type": ["string", "null"]},
+    "agent_harness_version": {"type": ["string", "null"]},
+    "prompt_id": {"type": "string"}, "prompt_sha256": {"type": "string"}, "session_id": {"type": ["string", "null"]},
+    "tokens": {"type": "object", "properties": {
+      "input": {"type": ["integer", "null"]}, "output": {"type": ["integer", "null"]},
+      "cache_read": {"type": ["integer", "null"]}, "cache_creation": {"type": ["integer", "null"]},
+      "thinking": {"type": ["integer", "null"]}, "thinking_estimated": {"type": ["integer", "null"]},
+      "source": {"type": "string"}, "api_messages": {"type": "integer"}}},
+    "cost_usd": {"type": ["number", "null"]},
+    "agent_turns": {"type": ["integer", "null"]},
+    "tool_calls": {"type": "object", "additionalProperties": {"type": "integer"}},
+    "tool_calls_total": {"type": "integer"}, "tool_failures": {"type": "integer"},
+    "build_invocations": {"type": "integer"}, "build_failures_heuristic": {"type": "integer"},
+    "conformance_runs": {"type": "integer"}, "repair_iterations": {"type": "integer"},
+    "time": {"type": "object", "properties": {
+      "wall_seconds": {"type": ["number", "null"]}, "model_api_seconds": {"type": ["number", "null"]},
+      "tool_seconds": {"type": ["number", "null"]}, "waiting_seconds": {"type": "null"},
+      "human_seconds": {"type": ["number", "null"]}}},
+    "human_interventions": {"type": "integer"},
+    "git": {"type": "object"},
+    "rate_limit": {"type": "object"},
+    "agent_exit_code": {"type": ["integer", "null"]},
+    "result_subtype": {"type": ["string", "null"]}
+  }
+}
