@@ -3,9 +3,10 @@ package polyquery.storage;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import polyquery.common.ErrorCode;
 import polyquery.common.Names;
 import polyquery.common.PolyQueryException;
@@ -13,15 +14,39 @@ import polyquery.index.Index;
 import polyquery.index.IndexKind;
 
 /**
- * Name → table mapping; each table snapshot carries its indexes. Tables are immutable;
- * mutations replace map entries atomically (under the catalog lock) so readers holding a
- * {@link Table} reference always see a consistent snapshot. Index names are global.
+ * Name → table mapping; each table snapshot carries its indexes. Tables are immutable and the
+ * mapping itself is copy-on-write: mutations are serialized under the catalog lock and publish
+ * a new immutable map with one volatile write, so they are atomic and linearizable, and a
+ * {@link Snapshot} taken by a query sees exactly one catalog version for its whole execution
+ * (concurrency.md §1). Index names are global.
  */
 public final class Catalog {
-    private final Map<String, Table> tables = new ConcurrentHashMap<>();
+    private volatile Map<String, Table> tables = Map.of();
+
+    /** An immutable view of the catalog at one point in time. */
+    public record Snapshot(Map<String, Table> tables) {
+        public Table find(String name) {
+            return tables.get(Table.key(name));
+        }
+    }
+
+    public Snapshot snapshot() {
+        return new Snapshot(tables);
+    }
 
     public Table find(String name) {
         return tables.get(Table.key(name));
+    }
+
+    public int size() {
+        return tables.size();
+    }
+
+    /** Publishes a modified copy of the mapping; callers hold the catalog lock. */
+    private void mutate(Consumer<Map<String, Table>> change) {
+        Map<String, Table> copy = new HashMap<>(tables);
+        change.accept(copy);
+        tables = Map.copyOf(copy);
     }
 
     public Table require(String name) {
@@ -39,7 +64,7 @@ public final class Catalog {
      */
     public synchronized void put(Table table, boolean replace) {
         checkAvailable(table.name(), indexNames(table.indexes()), replace);
-        tables.put(Table.key(table.name()), table);
+        mutate(m -> m.put(Table.key(table.name()), table));
     }
 
     /**
@@ -60,13 +85,14 @@ public final class Catalog {
     }
 
     public synchronized void drop(String name) {
-        if (tables.remove(Table.key(name)) == null) {
+        if (!tables.containsKey(Table.key(name))) {
             throw PolyQueryException.of(ErrorCode.NOT_FOUND, "table '%s' does not exist", name);
         }
+        mutate(m -> m.remove(Table.key(name)));
     }
 
     public synchronized void reset() {
-        tables.clear();
+        tables = Map.of();
     }
 
     /** All tables sorted by name, case-insensitively. */
@@ -103,7 +129,8 @@ public final class Catalog {
                 }
                 List<Index> indexes = new ArrayList<>(table.indexes());
                 indexes.add(index);
-                tables.put(Table.key(table.name()), table.withIndexes(indexes));
+                Table indexed = table.withIndexes(indexes);
+                mutate(m -> m.put(Table.key(indexed.name()), indexed));
                 return;
             }
         }
@@ -134,7 +161,8 @@ public final class Catalog {
                 remaining.add(i);
             }
         }
-        tables.put(Table.key(owner.name()), owner.withIndexes(remaining));
+        Table updated = owner.withIndexes(remaining);
+        mutate(m -> m.put(Table.key(updated.name()), updated));
     }
 
     private Table indexOwner(String indexName) {

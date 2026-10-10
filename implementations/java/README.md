@@ -1,18 +1,22 @@
 # PolyQuery — Java engine
 
 An analytical database engine implementing the PolyQuery specification (`spec/`), currently
-at **Phase 3**: protocol, catalog, CSV/JSON/JSONL ingestion, all data types, the complete
+at **Phase 4**: protocol, catalog, CSV/JSON/JSONL ingestion, all data types, the complete
 SQL v1 grammar (GROUP BY/HAVING, DISTINCT, INNER/LEFT/CROSS joins, all scalar functions,
 CASE/LIKE/BETWEEN/IN, uncorrelated **and correlated** subqueries, derived tables, CTEs,
 EXPLAIN), structured errors, resource limits and test functions; row- and column-oriented
 in-memory layouts with dictionary encoding and null bitmaps, the persistent PQCF v1 columnar
 file format (PLAIN/DICT/RLE, CRC-32, atomic crash-safe writes, memory-mapped reads), table
 statistics, hash and ordered indexes, index selection, predicate pushdown with row-group
-skipping, column pruning and cost-based join build-side selection.
+skipping, column pruning and cost-based join build-side selection; and the `serve` HTTP/1.1
+server with every endpoint of protocol.md §7, streaming NDJSON results with backpressure,
+Prometheus metrics, structured JSON logs, snapshot-isolated concurrent readers, a worker
+limit with a bounded FIFO queue (`OVERLOADED` beyond it), query timeouts, cancellation
+(explicit and on client disconnect) and graceful shutdown.
 
 Capabilities: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic test.functions phase2
 sql.groupby sql.join sql.functions sql.subquery sql.cte sql.correlated_subquery phase3
-storage.pqcf storage.mmap index.hash index.btree`.
+storage.pqcf storage.mmap index.hash index.btree phase4 http.streaming`.
 
 ## Prerequisites and build
 
@@ -33,6 +37,8 @@ own location). Extra JVM flags can be passed with `POLYQUERY_JAVA_OPTS`.
 bin/polyquery version | capabilities
 bin/polyquery session [--data-dir DIR] [--enable-test-functions] [--log-level LEVEL] ...
 bin/polyquery exec --request FILE|- [options]
+bin/polyquery serve --port N [--host H] [--workers N] [--queue-depth N] [--query-timeout-ms N]
+                    [--shutdown-grace-ms N] [--max-request-bytes N] [common options]
 ```
 
 ## Libraries
@@ -61,8 +67,9 @@ Source lives in `src/main/java/polyquery/`, one package per layer:
 | `index` | `HashIndex`, `OrderedIndex` (sorted permutation), `KeyDomain`/`KeyPredicate` (typed lookup keys and predicates) |
 | `ingest` | CSV parser + type inference, JSON / JSON Lines ingestion |
 | `engine` | `Engine` façade used by every front-end; config; path safety |
-| `protocol` | JSON request handling/validation, result serialization, structured logger |
-| `Main` | CLI (`version`, `capabilities`, `session`, `exec`) |
+| `protocol` | JSON request handling/validation (`RequestHandler`, `QueryRequest`), the `QueryRunner` policy hook, result serialization, structured logger |
+| `server` | HTTP/1.1 server (Phase 4): `HttpServer` (accept loop, connection threads, graceful shutdown), `HttpConnection` (request parsing, fixed/chunked responses, disconnect detection), `ApiRouter` (endpoints → protocol ops), `QueryStream` (NDJSON streaming with backpressure), `QueryManager` (query registry, timeouts, metrics, logs), `Admission` (worker limit + FIFO queue), `Metrics` (Prometheus text) |
+| `Main` | CLI (`version`, `capabilities`, `session`, `exec`, `serve`) |
 
 Query pipeline (each stage is a separate class and data structure):
 
@@ -187,6 +194,55 @@ different DECIMAL scales hash identically. Every join operator counts its output
 `--max-join-rows` (`RESOURCE_LIMIT`). The `join` query option `hash`/`nested_loop` forces an
 algorithm where applicable (`merge` and `auto` currently mean "choose").
 
+### HTTP server and concurrency (Phase 4)
+
+The server is written directly on `java.net.ServerSocket` (no `com.sun.net.httpserver`), which
+gives full control over keep-alive, chunked output, request size limits and — importantly —
+noticing a client disconnect while a query runs.
+
+* **Threads.** Each connection is served by its own platform thread; each query runs on a
+  thread of a separate cached pool (both with large stacks, as in session mode, for deeply
+  nested SQL). While a query runs, the connection thread polls the socket (1 ms reads between
+  5 ms waits on the query's future); end-of-stream means the client went away and the
+  query is cancelled. Bytes of a pipelined next request are simply buffered.
+* **Query lifetime.** A `QueryControl` (deadline + cancellation flag) is created per query and
+  checked by `ExecContext` (every 1024 operator calls, every 5 ms inside `PQ_SLEEP`, and on
+  every 1024th comparison of a sort). The deadline is set on arrival — `options.timeout_ms`
+  if > 0, else `--query-timeout-ms` — so queueing time counts.
+* **Admission** (`Admission`): at most `--workers` queries execute; up to `--queue-depth`
+  wait in FIFO order on a monitor (timed waits, so queued queries also observe timeouts and
+  `DELETE /v1/queries/{id}`); anything beyond is rejected at once with `OVERLOADED` (503).
+  Health, metrics, listing, cancellation and catalog requests never go through admission.
+* **Registry** (`QueryManager`): queued/running queries by `query_id` (client-assigned or a
+  generated UUID, returned in `X-PolyQuery-Query-Id` and in the response body's `query_id`);
+  an id in use ⇒ 409 `ALREADY_EXISTS`. Queries are unregistered before their response is
+  written, so cancelling a finished query is 404. Queries sent through `POST /v1/request`
+  (`op: query`) are treated exactly like `POST /v1/query`.
+* **Snapshot isolation.** The catalog is a copy-on-write immutable map behind a volatile
+  reference; mutations are serialized by a lock and publish a new map atomically. A query
+  takes one `Catalog.Snapshot` before analysis and resolves every table reference (including
+  subqueries and CTEs) against it; tables are immutable values, so replaced or dropped tables
+  stay readable by queries holding them. Loads parse outside the lock and only publish under it.
+* **Streaming** (`QueryStream`): the worker serializes rows into
+  `{"type":"rows",…}` lines (≤ 4096 rows or 1 MiB per batch; the first row, and later a batch
+  at least every 50 ms, is sent immediately) and hands them to the connection thread, which
+  writes one HTTP chunk per line. A semaphore of 16 credits bounds the batches in flight, so a
+  client that stops reading blocks the query (which still observes cancellation and its
+  timeout while blocked). The header line is sent with the first batch, at the end, or 100 ms
+  after execution started, whichever comes first: errors raised before that (parse, semantic,
+  admission, early runtime errors) get a normal HTTP error response; later errors end the
+  stream with an `{"type":"error",…}` line and no `end` line.
+* **Graceful shutdown.** SIGTERM/SIGINT run a JVM shutdown hook: close the listening socket,
+  reject new queries with `SHUTTING_DOWN` (503; `/health` answers 503 and responses carry
+  `Connection: close`), wait until all in-progress requests have completed or
+  `--shutdown-grace-ms` elapsed, then cancel the remaining queries (`CANCELLED`), give their
+  responses up to 3 s to be written, close all connections and `Runtime.halt(0)` (exit status 0).
+* **Metrics** (`GET /metrics`, Prometheus text 0.0.4): all required families plus
+  `polyquery_http_requests_total`. Every finished query (including rejected ones) counts in
+  `polyquery_queries_total{status="ok"|"error"}` and in the duration summary (measured from
+  arrival). **Logs** are JSON lines on stderr (`ts`, `level`, `msg`, + fields); each finished
+  query logs `query_id`, `status`, `error_code`, `duration_ms`, `rows` — never SQL text or data.
+
 ### Runtime value representation
 
 BOOLEAN → `Boolean`, INT64 → `Long`, DECIMAL(p,s) → `Long` unscaled value (scale from
@@ -261,24 +317,38 @@ Where the spec leaves room, these choices were made:
 * Query options: `mode` accepts `auto`/`row` (this engine is row-at-a-time);
   `vectorized` is `UNSUPPORTED`. `optimize: false` disables logical optimization; `join`
   selects the join algorithm (see Joins); `use_indexes: false` disables index scans.
-  `threads`, `native` and `query_id` are validated and otherwise ignored. Ill-typed option values are
+  `threads` and `native` are validated and otherwise ignored; `query_id` names the query in
+  the HTTP server (session mode only echoes it in the response's `query_id`). Ill-typed option values are
   `INVALID_REQUEST`; unknown values of known enum options are `UNSUPPORTED`.
 * The per-query memory budget (`--max-query-memory-mb`, default 4096, capped at 70% of
   the JVM heap) is enforced approximately for sort buffers, aggregation groups and
   result materialization. `OutOfMemoryError` and `StackOverflowError` are reported as
   `RESOURCE_LIMIT`. Requests run on a thread with a 512 MiB stack, and parser nesting is
   limited to depth 1000 (`PARSE_ERROR` beyond).
+* HTTP: `PUT /v1/tables/{name}` defaults to `format=csv`; `replace`/`header` accept
+  `true`/`false` (also `1`/`0`, `yes`/`no`), `delimiter` is passed through; the body must be
+  UTF-8 (`INGEST_ERROR` otherwise). A request body over `--max-request-bytes` is answered with
+  413 `RESOURCE_LIMIT` without reading it, and the connection is closed. Request bodies may be
+  `Content-Length` or chunked; `Expect: 100-continue` is honoured. Wrong methods get 405 with
+  an `Allow` header. Responses of non-`/v1/request` endpoints carry `"id": null`.
+* `/v1/queries` lists queries oldest first; `elapsed_ms` counts from arrival (including
+  queueing). Cancelling a queued query removes it from the queue at once (`CANCELLED`).
+* A query that is rejected (`OVERLOADED`, `ALREADY_EXISTS`, `SHUTTING_DOWN`) counts as an
+  error query in the metrics; non-query requests are not counted as queries.
 * Names (tables, columns, aliases) are matched with ASCII-only case folding.
 
 ## Testing
 
 ```
 make -C implementations/java build test
-python3 tests/conformance/runner.py --engine implementations/java/bin/polyquery --phase 1 --phase 2 --phase 3
+python3 tests/conformance/runner.py --engine implementations/java/bin/polyquery
+python3 tests/conformance/runner.py --engine implementations/java/bin/polyquery --transport http
+python3 tests/concurrency/http_suite.py --engine implementations/java/bin/polyquery
 ```
 
 Unit tests (`src/test/java`, run by `make test`) cover the lexer, parser, types, ingestion,
-protocol, and end-to-end SQL (grouping, joins with every join strategy and with optimization
+protocol, the HTTP layer (admission/queueing/timeouts, query control, metrics, endpoints
+over a real socket incl. streaming), and end-to-end SQL (grouping, joins with every join strategy and with optimization
 disabled, functions, subqueries, CTEs, EXPLAIN), PQCF round trips with every encoding and
 row-group size, corruption detection, layouts, statistics, index structures, key predicates,
 index selection, column pruning and build-side choice. During development the conformance suite was
@@ -294,8 +364,13 @@ and `use_indexes`/`optimize` off.
 
 ## Known limitations
 
-* No Phase 4+ features yet: HTTP server (`serve` exits with status 1), vectorized/parallel
-  execution, merge join.
+* No Phase 5 features yet: vectorized/parallel execution, merge join.
+* The HTTP server uses one platform thread per connection (plus one per running/queued
+  query); it is meant for tens to a few hundreds of concurrent clients, not tens of thousands.
+  Idle keep-alive connections are closed after 5 minutes.
+* Non-streamed query responses are built in memory before being sent (use
+  `/v1/query/stream` for large results). Request bodies are buffered in memory.
+* Index builds (`CREATE INDEX`) and ingestion are not cancellable.
 * Indexes are used only for filters directly over a scan (no index nested-loop joins, no
   index-ordered output); OR-ed predicates are not used for index lookups or row-group
   skipping. In-memory tables are a single row group, so row-group skipping applies to

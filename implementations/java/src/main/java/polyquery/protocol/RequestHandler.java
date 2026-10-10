@@ -9,16 +9,15 @@ import polyquery.common.PolyQueryException;
 import polyquery.engine.Engine;
 import polyquery.engine.LoadRequest;
 import polyquery.engine.OpenRequest;
-import polyquery.engine.QueryOptions;
 import polyquery.engine.SaveRequest;
 import polyquery.engine.Version;
+import polyquery.exec.QueryControl;
 import polyquery.exec.QueryResult;
 import polyquery.index.Index;
 import polyquery.json.JsonException;
 import polyquery.json.JsonNumber;
 import polyquery.json.JsonParser;
 import polyquery.json.JsonWriter;
-import polyquery.physical.PhysicalPlanner.JoinStrategy;
 import polyquery.storage.ColumnSchema;
 import polyquery.storage.ColumnStats;
 import polyquery.storage.Layout;
@@ -32,10 +31,34 @@ import polyquery.types.DataType;
 public final class RequestHandler {
     private final Engine engine;
     private final Logger log;
+    private final QueryRunner runner;
+
+    /** Per-request state that must survive failures (for the HTTP query id header). */
+    private static final class Exchange {
+        private final QueryControl control;
+        private String queryId;
+
+        Exchange(QueryControl control) {
+            this.control = control;
+        }
+    }
 
     public RequestHandler(Engine engine, Logger log) {
+        this(engine, log, QueryRunner.DIRECT);
+    }
+
+    public RequestHandler(Engine engine, Logger log, QueryRunner runner) {
         this.engine = engine;
         this.log = log;
+        this.runner = runner;
+    }
+
+    public Engine engine() {
+        return engine;
+    }
+
+    public QueryRunner runner() {
+        return runner;
     }
 
     /** Handles one raw request line. Never throws. */
@@ -53,29 +76,45 @@ public final class RequestHandler {
 
     /** Handles one parsed request value. Never throws. */
     public String handle(Object parsed) {
+        return handle(parsed, new QueryControl()).json();
+    }
+
+    /**
+     * Handles one parsed request value; a {@code query} request runs under {@code control}, so
+     * the caller can cancel it. Never throws.
+     */
+    public Response handle(Object parsed, QueryControl control) {
         if (!(parsed instanceof Map<?, ?> raw)) {
-            return error(null, new PolyQueryException(ErrorCode.INVALID_REQUEST, "request must be a JSON object"));
+            return failure(null, null,
+                    new PolyQueryException(ErrorCode.INVALID_REQUEST, "request must be a JSON object"));
         }
         @SuppressWarnings("unchecked")
         Map<String, Object> req = (Map<String, Object>) raw;
         Object id = req.get("id");
         long start = System.nanoTime();
+        Exchange exchange = new Exchange(control);
         try {
-            return dispatch(req, id, start);
+            return new Response(dispatch(req, id, start, exchange), null, exchange.queryId);
         } catch (PolyQueryException e) {
             log.debug("request failed: " + e.code() + ": " + e.getMessage());
-            return error(id, e);
+            return failure(id, exchange.queryId, e);
         } catch (StackOverflowError e) {
-            return error(id, new PolyQueryException(ErrorCode.RESOURCE_LIMIT, "statement too deeply nested"));
+            return failure(id, exchange.queryId,
+                    new PolyQueryException(ErrorCode.RESOURCE_LIMIT, "statement too deeply nested"));
         } catch (OutOfMemoryError e) {
-            return error(id, new PolyQueryException(ErrorCode.RESOURCE_LIMIT, "out of memory"));
+            return failure(id, exchange.queryId, new PolyQueryException(ErrorCode.RESOURCE_LIMIT, "out of memory"));
         } catch (RuntimeException e) {
             log.error("internal error: " + e);
-            return error(id, new PolyQueryException(ErrorCode.INTERNAL_ERROR, "internal error: " + e.getClass().getSimpleName()));
+            return failure(id, exchange.queryId, new PolyQueryException(ErrorCode.INTERNAL_ERROR,
+                    "internal error: " + e.getClass().getSimpleName()));
         }
     }
 
-    private String dispatch(Map<String, Object> req, Object id, long start) {
+    private static Response failure(Object id, String queryId, PolyQueryException e) {
+        return new Response(error(id, e), e.code(), queryId);
+    }
+
+    private String dispatch(Map<String, Object> req, Object id, long start, Exchange exchange) {
         Object op = req.get("op");
         if (!(op instanceof String opName)) {
             throw RequestException.invalid("missing or invalid 'op'");
@@ -94,12 +133,11 @@ public final class RequestHandler {
                 yield ok(id, Map.of());
             }
             case "load" -> load(id, req);
-            case "query" -> query(id, req, start);
+            case "query" -> query(id, req, start, exchange);
             case "sleep" -> sleep(id, req);
             case "explain" -> {
-                String sql = requireString(req, "sql");
-                QueryOptions opts = parseQueryOptions(optionalObject(req, "options"));
-                yield ok(id, Map.of("plan", engine.explain(sql, opts)));
+                QueryRequest q = QueryRequest.parse(req);
+                yield ok(id, Map.of("plan", engine.explain(q.sql(), q.options())));
             }
             case "save" -> save(id, req);
             case "open" -> open(id, req);
@@ -118,7 +156,7 @@ public final class RequestHandler {
         return s;
     }
 
-    private static Long optionalNonNegativeLong(Map<String, Object> m, String field) {
+    static Long optionalNonNegativeLong(Map<String, Object> m, String field) {
         if (!m.containsKey(field) || m.get(field) == null) {
             return null;
         }
@@ -136,7 +174,7 @@ public final class RequestHandler {
         throw RequestException.invalid("'%s' must be a non-negative integer", field);
     }
 
-    private static boolean optionalBoolean(Map<String, Object> m, String field, boolean dflt) {
+    static boolean optionalBoolean(Map<String, Object> m, String field, boolean dflt) {
         Object v = m.get(field);
         if (v == null) {
             return dflt;
@@ -148,7 +186,7 @@ public final class RequestHandler {
     }
 
     @SuppressWarnings("unchecked")
-    private static Map<String, Object> optionalObject(Map<String, Object> m, String field) {
+    static Map<String, Object> optionalObject(Map<String, Object> m, String field) {
         Object v = m.get(field);
         if (v == null) {
             return Map.of();
@@ -361,14 +399,18 @@ public final class RequestHandler {
         return out;
     }
 
-    private String query(Object id, Map<String, Object> req, long start) {
-        String sql = requireString(req, "sql");
-        QueryOptions opts = parseQueryOptions(optionalObject(req, "options"));
-        QueryResult r = engine.query(sql, opts);
+    private String query(Object id, Map<String, Object> req, long start, Exchange exchange) {
+        QueryRequest q = QueryRequest.parse(req);
+        String queryId = q.queryId() != null ? q.queryId() : runner.newQueryId();
+        exchange.queryId = queryId;
+        QueryResult r = runner.run(queryId, q.options(), exchange.control,
+                control -> engine.query(q.sql(), q.options(), control), QueryResult::rowCount);
         StringBuilder sb = new StringBuilder(256);
         sb.append("{\"id\":");
         JsonWriter.write(sb, id);
-        sb.append(",\"ok\":true,\"columns\":");
+        sb.append(",\"ok\":true,\"query_id\":");
+        JsonWriter.writeString(sb, queryId);
+        sb.append(",\"columns\":");
         ResultWriter.writeColumns(sb, r.columns());
         if (r.rows() != null) {
             sb.append(",\"rows\":");
@@ -377,58 +419,6 @@ public final class RequestHandler {
         sb.append(",\"row_count\":").append(r.rowCount());
         sb.append(",\"stats\":{\"elapsed_us\":").append((System.nanoTime() - start) / 1000).append("}}");
         return sb.toString();
-    }
-
-    private static QueryOptions parseQueryOptions(Map<String, Object> o) {
-        Long maxRows = optionalNonNegativeLong(o, "max_rows");
-        Long timeout = optionalNonNegativeLong(o, "timeout_ms");
-        boolean countOnly = false;
-        Object result = o.get("result");
-        if (result != null) {
-            if (!(result instanceof String rs)) {
-                throw RequestException.invalid("'result' must be a string");
-            }
-            switch (rs) {
-                case "rows" -> countOnly = false;
-                case "count" -> countOnly = true;
-                default -> throw PolyQueryException.of(ErrorCode.UNSUPPORTED, "result mode '%s' is not supported", rs);
-            }
-        }
-        Object mode = o.get("mode");
-        if (mode != null) {
-            if (!(mode instanceof String ms)) {
-                throw RequestException.invalid("'mode' must be a string");
-            }
-            if (!ms.equals("auto") && !ms.equals("row")) {
-                throw PolyQueryException.of(ErrorCode.UNSUPPORTED, "execution mode '%s' is not supported", ms);
-            }
-        }
-        JoinStrategy joinStrategy = JoinStrategy.AUTO;
-        Object join = o.get("join");
-        if (join != null) {
-            if (!(join instanceof String js)) {
-                throw RequestException.invalid("'join' must be a string");
-            }
-            joinStrategy = switch (js) {
-                case "auto", "merge" -> JoinStrategy.AUTO;
-                case "hash" -> JoinStrategy.HASH;
-                case "nested_loop" -> JoinStrategy.NESTED_LOOP;
-                default -> throw PolyQueryException.of(ErrorCode.UNSUPPORTED, "join algorithm '%s' is not supported", js);
-            };
-        }
-        Long threads = optionalNonNegativeLong(o, "threads");
-        if (threads != null && threads < 1) {
-            throw RequestException.invalid("'threads' must be >= 1");
-        }
-        boolean optimize = optionalBoolean(o, "optimize", true);
-        boolean useIndexes = optionalBoolean(o, "use_indexes", true);
-        optionalBoolean(o, "native", false);
-        Object queryId = o.get("query_id");
-        if (queryId != null && !(queryId instanceof String)) {
-            throw RequestException.invalid("'query_id' must be a string");
-        }
-        return new QueryOptions(maxRows == null ? -1 : maxRows, timeout == null ? 0 : timeout, countOnly, optimize,
-                joinStrategy, useIndexes);
     }
 
     private String sleep(Object id, Map<String, Object> req) {

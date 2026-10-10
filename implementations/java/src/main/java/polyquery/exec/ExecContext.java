@@ -4,20 +4,19 @@ import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 
 /**
- * Per-query execution state: deadline (timeout), memory budget accounting and row limits.
- * Operators call {@link #checkpoint()} regularly so long-running queries stop promptly.
+ * Per-query execution state: lifetime control (timeout, cancellation), memory budget accounting
+ * and row limits. Operators call {@link #checkpoint()} regularly so long-running queries stop promptly.
  */
 public final class ExecContext {
     private static final int CHECK_INTERVAL = 1024;
 
-    private final long deadlineNanos;
+    private final QueryControl control;
     private final long memoryBudget;
     private final long maxResultRows;
     private final long maxJoinRows;
     private Object[][] frames = new Object[8][];
     private long memoryUsed;
     private int counter;
-    private volatile boolean cancelled;
 
     /**
      * @param timeoutMillis 0 = no timeout
@@ -26,7 +25,11 @@ public final class ExecContext {
      * @param maxJoinRows   maximum number of rows produced by one join operator
      */
     public ExecContext(long timeoutMillis, long memoryBudget, long maxResultRows, long maxJoinRows) {
-        this.deadlineNanos = timeoutMillis > 0 ? System.nanoTime() + timeoutMillis * 1_000_000L : 0;
+        this(QueryControl.withTimeout(timeoutMillis), memoryBudget, maxResultRows, maxJoinRows);
+    }
+
+    public ExecContext(QueryControl control, long memoryBudget, long maxResultRows, long maxJoinRows) {
+        this.control = control;
         this.memoryBudget = memoryBudget;
         this.maxResultRows = maxResultRows;
         this.maxJoinRows = maxJoinRows;
@@ -55,8 +58,8 @@ public final class ExecContext {
         return previous;
     }
 
-    public void cancel() {
-        cancelled = true;
+    public QueryControl control() {
+        return control;
     }
 
     /** Cheap periodic check for timeout / cancellation. */
@@ -68,17 +71,12 @@ public final class ExecContext {
     }
 
     public void checkNow() {
-        if (cancelled) {
-            throw new PolyQueryException(ErrorCode.CANCELLED, "query was cancelled");
-        }
-        if (deadlineNanos != 0 && System.nanoTime() - deadlineNanos >= 0) {
-            throw new PolyQueryException(ErrorCode.TIMEOUT, "query exceeded its timeout");
-        }
+        control.check();
     }
 
     /** Nanoseconds until the deadline (Long.MAX_VALUE if none). */
     public long remainingNanos() {
-        return deadlineNanos == 0 ? Long.MAX_VALUE : deadlineNanos - System.nanoTime();
+        return control.remainingNanos();
     }
 
     /** Accounts for retained memory; RESOURCE_LIMIT when the budget is exceeded. */

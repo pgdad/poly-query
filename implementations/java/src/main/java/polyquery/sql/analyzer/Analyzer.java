@@ -50,11 +50,11 @@ public final class Analyzer {
     private record SelectEntry(Expr expr, String alias, BoundExpr.ColumnRef star) {
     }
 
-    private final Catalog catalog;
+    private final Catalog.Snapshot catalog;
     private final FunctionRegistry functions;
     private int nextFrame;
 
-    public Analyzer(Catalog catalog, FunctionRegistry functions) {
+    public Analyzer(Catalog.Snapshot catalog, FunctionRegistry functions) {
         this.catalog = catalog;
         this.functions = functions;
     }
