@@ -107,8 +107,10 @@ func TestQueryErrors(t *testing.T) {
 		"SELECT 9223372036854775808":               errs.NumericOverflow,
 		"SELECT 1 / 0":                             errs.DivisionByZero,
 		"SELECT DATE '2023-02-29'":                 errs.ConversionError,
-		"SELECT UPPER(name) FROM people":           errs.Unsupported,
-		"SELECT DISTINCT name FROM people":         errs.Unsupported,
+		"CREATE INDEX i ON people (id)":            errs.Unsupported,
+		"SELECT id FROM people UNION SELECT 1":     errs.Unsupported,
+		"SELECT (SELECT id FROM people)":           errs.SubqueryCardinality,
+		"SELECT name FROM people GROUP BY age":     errs.SemanticError,
 	}
 	for sql, code := range cases {
 		_, err := e.Query(context.Background(), sql, QueryOptions{MaxRows: -1})

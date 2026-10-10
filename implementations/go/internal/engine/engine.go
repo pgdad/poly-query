@@ -18,7 +18,10 @@ import (
 	"polyquery/internal/errs"
 	"polyquery/internal/exec"
 	"polyquery/internal/ingest"
+	"polyquery/internal/optimizer"
+	"polyquery/internal/physical"
 	"polyquery/internal/plan"
+	"polyquery/internal/sql/ast"
 	"polyquery/internal/sql/parser"
 	"polyquery/internal/storage"
 	"polyquery/internal/types"
@@ -33,7 +36,10 @@ const (
 )
 
 // Capabilities lists the capability strings this engine implements.
-var Capabilities = []string{"phase1", "ingest.csv", "ingest.json", "ingest.jsonl", "sql.basic", "test.functions"}
+var Capabilities = []string{
+	"phase1", "ingest.csv", "ingest.json", "ingest.jsonl", "sql.basic", "test.functions",
+	"phase2", "sql.groupby", "sql.join", "sql.functions", "sql.subquery", "sql.cte", "sql.correlated_subquery",
+}
 
 // Config holds engine-wide settings (CLI options).
 type Config struct {
@@ -180,9 +186,11 @@ func fileError(p string, err error) error {
 
 // QueryOptions are per-query execution options.
 type QueryOptions struct {
-	MaxRows   int64 // < 0 = unlimited
-	Timeout   time.Duration
-	CountOnly bool // do not retain rows (result: "count")
+	MaxRows    int64 // < 0 = unlimited
+	Timeout    time.Duration
+	CountOnly  bool   // do not retain rows (result: "count")
+	NoOptimize bool   // skip logical optimization (optimize: false)
+	Join       string // forced join algorithm ("", "auto", "hash", "nested_loop")
 }
 
 // Result is a query result.
@@ -192,27 +200,93 @@ type Result struct {
 	RowCount int64
 }
 
-// Query parses, analyzes and executes a SQL statement.
+// Query parses, analyzes, plans and executes a SQL statement.
 func (e *Engine) Query(ctx context.Context, sql string, opts QueryOptions) (*Result, error) {
 	stmt, err := parser.Parse(sql)
 	if err != nil {
 		return nil, err
 	}
-	root, err := analyzer.Analyze(stmt, e.catalog, analyzer.Config{TestFunctions: e.cfg.TestFunctions})
+	switch s := stmt.(type) {
+	case *ast.Query:
+		p, err := e.plan(s, opts)
+		if err != nil {
+			return nil, err
+		}
+		return e.execute(ctx, p, opts)
+	case *ast.Explain:
+		p, err := e.plan(s.Query, opts)
+		if err != nil {
+			return nil, err
+		}
+		text := types.StringValue(physical.ExplainText(p))
+		return &Result{Columns: []plan.Column{{Name: "plan", Type: types.String}}, Rows: []types.Row{{text}}, RowCount: 1}, nil
+	}
+	return nil, unsupportedStatement(stmt)
+}
+
+// Explain plans a query and returns its EXPLAIN plan tree.
+func (e *Engine) Explain(sql string, opts QueryOptions) (*physical.Object, error) {
+	stmt, err := parser.Parse(sql)
 	if err != nil {
 		return nil, err
 	}
+	q, ok := stmt.(*ast.Query)
+	if ex, isExplain := stmt.(*ast.Explain); isExplain {
+		q, ok = ex.Query, true
+	}
+	if !ok {
+		return nil, unsupportedStatement(stmt)
+	}
+	p, err := e.plan(q, opts)
+	if err != nil {
+		return nil, err
+	}
+	return physical.Explain(p), nil
+}
+
+func unsupportedStatement(stmt ast.Statement) error {
+	switch stmt.(type) {
+	case *ast.CreateIndex:
+		return errs.New(errs.Unsupported, "CREATE INDEX is not supported (no index capability)")
+	case *ast.DropIndex:
+		return errs.New(errs.Unsupported, "DROP INDEX is not supported (no index capability)")
+	}
+	return errs.New(errs.Unsupported, "statement %T is not supported", stmt)
+}
+
+// plan runs semantic analysis, logical optimization and physical planning.
+func (e *Engine) plan(q *ast.Query, opts QueryOptions) (*physical.Plan, error) {
+	logical, err := analyzer.AnalyzeQuery(q, e.catalog, analyzer.Config{
+		TestFunctions: e.cfg.TestFunctions,
+		EvalConst:     exec.EvalConstant,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !opts.NoOptimize {
+		logical = optimizer.Optimize(logical)
+	}
+	return physical.Build(logical, physical.Options{Join: opts.Join})
+}
+
+// execute runs a physical plan and collects its result.
+func (e *Engine) execute(ctx context.Context, p *physical.Plan, opts QueryOptions) (*Result, error) {
 	if opts.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
 		defer cancel()
 	}
-	ec := &exec.Context{Ctx: ctx, Mem: &exec.MemTracker{Limit: e.cfg.MaxQueryMemoryMB << 20}}
-	op, err := exec.Build(ec, root)
+	ec := &exec.Context{
+		Ctx:         ctx,
+		Mem:         &exec.MemTracker{Limit: e.cfg.MaxQueryMemoryMB << 20},
+		MaxJoinRows: e.cfg.MaxJoinRows,
+		Plan:        p,
+	}
+	op, err := exec.Build(ec, p.Root)
 	if err != nil {
 		return nil, err
 	}
-	res := &Result{Columns: root.Columns()}
+	res := &Result{Columns: p.Root.Schema()}
 	for {
 		row, err := op.Next()
 		if err != nil {

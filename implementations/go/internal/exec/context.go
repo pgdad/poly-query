@@ -1,5 +1,6 @@
-// Package exec executes logical plans with a pull-based (Volcano) operator
-// tree. Expressions are compiled into closures once per query.
+// Package exec executes physical plans with a pull-based (Volcano) operator
+// tree. Expressions are compiled into closures against the row layout of the
+// operator evaluating them.
 package exec
 
 import (
@@ -7,13 +8,23 @@ import (
 	"errors"
 
 	"polyquery/internal/errs"
+	"polyquery/internal/physical"
+	"polyquery/internal/plan"
 	"polyquery/internal/types"
 )
 
 // Context carries per-query execution state.
 type Context struct {
-	Ctx context.Context
-	Mem *MemTracker
+	Ctx         context.Context
+	Mem         *MemTracker
+	MaxJoinRows int64 // ≤ 0 = unlimited
+	Plan        *physical.Plan
+
+	// params holds the current values of outer columns referenced by the
+	// correlated subquery being built (column ID → cell).
+	params map[plan.ColumnID]*types.Value
+	// subCache memoizes uncorrelated subquery results.
+	subCache map[*plan.Subquery]*subResult
 }
 
 // checkEvery is how many rows operators process between cancellation checks.
@@ -53,6 +64,21 @@ func (m *MemTracker) Reserve(n int64) error {
 	return nil
 }
 
+// Mark returns the current usage, for a later Reset.
+func (m *MemTracker) Mark() int64 {
+	if m == nil {
+		return 0
+	}
+	return m.used
+}
+
+// Reset restores the usage recorded by Mark (memory of finished operators).
+func (m *MemTracker) Reset(mark int64) {
+	if m != nil {
+		m.used = mark
+	}
+}
+
 // RowSize estimates the retained size of a row in bytes.
 func RowSize(r types.Row) int64 {
 	n := int64(24 + 40*len(r))
@@ -60,4 +86,15 @@ func RowSize(r types.Row) int64 {
 		n += int64(len(r[i].S))
 	}
 	return n
+}
+
+// layout maps column IDs to positions in an operator's input row.
+type layout map[plan.ColumnID]int
+
+func layoutOf(cols []plan.Column) layout {
+	l := make(layout, len(cols))
+	for i, c := range cols {
+		l[c.ID] = i
+	}
+	return l
 }

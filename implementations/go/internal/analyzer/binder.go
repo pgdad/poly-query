@@ -12,18 +12,20 @@ import (
 	"polyquery/internal/types"
 )
 
-// binder resolves and type-checks one expression tree.
+// binder resolves and type-checks one expression tree of a query block.
 type binder struct {
-	a     *analyzer
-	scope *scope
+	a   *analyzer
+	sc  *scope
+	env *cteEnv
 	// aggs collects aggregate calls; nil means aggregates are not allowed
-	// (aggClause names the offending clause for the error message).
-	aggs      *[]*plan.AggCall
-	aggClause string
-	inAgg     bool
-	// bare is set when an input column is referenced outside aggregate
-	// arguments.
-	bare bool
+	// (clause names the offending clause for the error message).
+	aggs   *[]*plan.AggCall
+	clause string
+	inAgg  bool
+}
+
+func (a *analyzer) newBinder(sc *scope, env *cteEnv, aggs *[]*plan.AggCall, clause string) *binder {
+	return &binder{a: a, sc: sc, env: env, aggs: aggs, clause: clause}
 }
 
 func (b *binder) bind(e ast.Expr) (plan.Expr, error) {
@@ -47,21 +49,33 @@ func (b *binder) bind(e ast.Expr) (plan.Expr, error) {
 	case *ast.FuncCall:
 		return b.call(x)
 	case *ast.Case:
-		return nil, unsupportedAt(x.Pos, "CASE is not supported")
+		return b.caseExpr(x)
 	case *ast.Between:
-		return nil, unsupportedAt(x.Pos, "BETWEEN is not supported")
+		return b.between(x)
 	case *ast.InList:
-		return nil, unsupportedAt(x.Pos, "IN is not supported")
+		return b.inList(x)
 	case *ast.Like:
-		return nil, unsupportedAt(x.Pos, "LIKE is not supported")
+		return b.like(x)
 	case *ast.InSubquery:
-		return nil, unsupportedAt(x.Pos, "subqueries are not supported")
+		return b.inSubquery(x)
 	case *ast.Exists:
-		return nil, unsupportedAt(x.Pos, "subqueries are not supported")
+		return b.subquery(x.Pos, x.Query, plan.SubExists)
 	case *ast.Subquery:
-		return nil, unsupportedAt(x.Pos, "subqueries are not supported")
+		return b.subquery(x.Pos, x.Query, plan.SubScalar)
 	}
 	return nil, errs.New(errs.InternalError, "unknown expression %T", e)
+}
+
+func (b *binder) bindAll(list []ast.Expr) ([]plan.Expr, error) {
+	out := make([]plan.Expr, len(list))
+	for i, e := range list {
+		x, err := b.bind(e)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = x
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------- literals
@@ -99,7 +113,7 @@ func numberLiteral(x *ast.Literal, negate bool) (plan.Expr, error) {
 	overflow := func() error {
 		return errs.At(errs.NumericOverflow, x.Line, x.Col, "numeric literal %s is out of range", text)
 	}
-	if strings.ContainsAny(text, "eE") {
+	float := func() (plan.Expr, error) {
 		f, err := strconv.ParseFloat(text, 64)
 		if err != nil && math.IsInf(f, 0) {
 			return nil, overflow()
@@ -109,20 +123,16 @@ func numberLiteral(x *ast.Literal, negate bool) (plan.Expr, error) {
 		}
 		return &plan.Literal{Val: types.FloatValue(f), T: types.Float64}, nil
 	}
+	if strings.ContainsAny(text, "eE") {
+		return float()
+	}
 	if dot := strings.IndexByte(text, '.'); dot >= 0 {
 		intPart := strings.TrimLeft(text[:dot], "0")
 		frac := text[dot+1:]
 		s := len(frac)
 		p := max(len(intPart)+s, s, 1)
 		if p > types.MaxDecimalPrecision {
-			f, err := strconv.ParseFloat(text, 64)
-			if err != nil && math.IsInf(f, 0) {
-				return nil, overflow()
-			}
-			if negate {
-				f = -f
-			}
-			return &plan.Literal{Val: types.FloatValue(f), T: types.Float64}, nil
+			return float()
 		}
 		var u int64
 		if digits := intPart + frac; digits != "" {
@@ -145,39 +155,49 @@ func numberLiteral(x *ast.Literal, negate bool) (plan.Expr, error) {
 
 // ---------------------------------------------------------------- columns
 
+// column resolves a column reference in the current query block, then in
+// enclosing blocks (correlation, semantics.md §1).
 func (b *binder) column(x *ast.ColumnRef) (plan.Expr, error) {
-	var found *rangeVar
-	col := -1
-	for _, v := range b.scope.vars {
-		if x.Qualifier != "" && !storage.EqualFold(v.name, x.Qualifier) {
-			continue
+	for s := b.sc; s != nil; s = s.parent {
+		col, found, err := s.resolve(x)
+		if err != nil {
+			return nil, err
 		}
-		if i := v.table.ColumnIndex(x.Name); i >= 0 {
-			if found != nil {
-				return nil, semanticAt(x.Pos, "column %q is ambiguous", x.Name)
-			}
-			found, col = v, i
+		if found {
+			return col.Ref(), nil
 		}
 	}
-	if found == nil {
+	if x.Qualifier != "" {
+		return nil, semanticAt(x.Pos, "unknown table or alias %q", x.Qualifier)
+	}
+	return nil, semanticAt(x.Pos, "unknown column %q", x.Name)
+}
+
+func (s *scope) resolve(x *ast.ColumnRef) (plan.Column, bool, error) {
+	var found []plan.Column
+	qualified := false
+	for _, v := range s.vars {
 		if x.Qualifier != "" {
-			known := false
-			for _, v := range b.scope.vars {
-				known = known || storage.EqualFold(v.name, x.Qualifier)
+			if !storage.EqualFold(v.name, x.Qualifier) {
+				continue
 			}
-			if !known {
-				return nil, semanticAt(x.Pos, "unknown table or alias %q", x.Qualifier)
-			}
-			return nil, semanticAt(x.Pos, "unknown column %s.%s", x.Qualifier, x.Name)
+			qualified = true
 		}
-		return nil, semanticAt(x.Pos, "unknown column %q", x.Name)
+		for _, c := range v.cols {
+			if storage.EqualFold(c.Name, x.Name) {
+				found = append(found, c)
+			}
+		}
 	}
-	if !b.inAgg {
-		b.bare = true
+	switch {
+	case len(found) > 1:
+		return plan.Column{}, false, semanticAt(x.Pos, "column %q is ambiguous", x.Name)
+	case len(found) == 1:
+		return found[0], true, nil
+	case qualified:
+		return plan.Column{}, false, semanticAt(x.Pos, "unknown column %s.%s", x.Qualifier, x.Name)
 	}
-	b.scope.markUsed(found, col)
-	def := found.table.Columns[col]
-	return &plan.ColumnRef{Index: found.offset + col, Name: def.Name, T: def.Type}, nil
+	return plan.Column{}, false, nil
 }
 
 // ---------------------------------------------------------------- operators
@@ -195,12 +215,12 @@ func (b *binder) unary(x *ast.Unary) (plan.Expr, error) {
 	t := inner.Type()
 	switch x.Op {
 	case "NOT":
-		if t.Kind != types.KindBoolean && t.Kind != types.KindNull {
+		if !isBoolish(t) {
 			return nil, typeAt(x.Pos, "NOT requires a BOOLEAN operand, not %s", t)
 		}
 		return &plan.Unary{Op: plan.OpNot, X: inner, T: types.Boolean}, nil
 	case "+", "-":
-		if !t.IsNumeric() && t.Kind != types.KindNull {
+		if !isNumericOrNull(t) {
 			return nil, typeAt(x.Pos, "unary %s requires a numeric operand, not %s", x.Op, t)
 		}
 		if x.Op == "+" {
@@ -210,6 +230,8 @@ func (b *binder) unary(x *ast.Unary) (plan.Expr, error) {
 	}
 	return nil, errs.New(errs.InternalError, "unknown unary operator %s", x.Op)
 }
+
+func isNumericOrNull(t types.Type) bool { return t.IsNumeric() || t.Kind == types.KindNull }
 
 var binaryOps = map[string]plan.BinaryOp{
 	"+": plan.OpAdd, "-": plan.OpSub, "*": plan.OpMul, "/": plan.OpDiv, "%": plan.OpMod,
@@ -234,7 +256,7 @@ func (b *binder) binary(x *ast.Binary) (plan.Expr, error) {
 	switch {
 	case op == plan.OpAnd || op == plan.OpOr:
 		for _, t := range []types.Type{lt, rt} {
-			if t.Kind != types.KindBoolean && t.Kind != types.KindNull {
+			if !isBoolish(t) {
 				return nil, typeAt(x.Pos, "%s requires BOOLEAN operands, not %s", x.Op, t)
 			}
 		}
@@ -252,25 +274,44 @@ func (b *binder) binary(x *ast.Binary) (plan.Expr, error) {
 	return arithmetic(x.Pos, op, l, r)
 }
 
-// promote wraps e in a cast to t unless it already has that type.
+// promote wraps e in a cast to t unless it already has that type. DECIMAL
+// operands keep their scale (operators handle differing scales exactly).
 func promote(e plan.Expr, t types.Type) plan.Expr {
 	et := e.Type()
 	if et == t || et.Kind == types.KindNull {
 		return e
 	}
 	if et.Kind == types.KindDecimal && t.Kind == types.KindDecimal {
-		return e // decimal operators handle differing scales exactly
+		return e
 	}
 	return &plan.Cast{X: e, To: t}
 }
 
+// coerce converts e to exactly type t (used for CASE/COALESCE results).
+func coerce(e plan.Expr, t types.Type) plan.Expr {
+	if et := e.Type(); et == t || et.Kind == types.KindNull {
+		return e
+	}
+	return &plan.Cast{X: e, To: t}
+}
+
+// comparisonType checks that two types are comparable and returns the type in
+// which they are compared (types.md §2).
+func comparisonType(pos ast.Pos, lt, rt types.Type) (types.Type, error) {
+	if !types.Comparable(lt, rt) {
+		return types.Type{}, typeAt(pos, "cannot compare %s with %s", lt, rt)
+	}
+	common, _ := types.CommonType(lt, rt)
+	return common, nil
+}
+
 func comparison(pos ast.Pos, op plan.BinaryOp, l, r plan.Expr) (plan.Expr, error) {
 	lt, rt := l.Type(), r.Type()
-	if !types.Comparable(lt, rt) {
-		return nil, typeAt(pos, "cannot compare %s with %s", lt, rt)
+	common, err := comparisonType(pos, lt, rt)
+	if err != nil {
+		return nil, err
 	}
 	if lt.Kind != rt.Kind && lt.Kind != types.KindNull && rt.Kind != types.KindNull {
-		common, _ := types.CommonType(lt, rt)
 		l, r = promote(l, common), promote(r, common)
 	}
 	return &plan.Binary{Op: op, L: l, R: r, T: types.Boolean}, nil
@@ -279,7 +320,7 @@ func comparison(pos ast.Pos, op plan.BinaryOp, l, r plan.Expr) (plan.Expr, error
 func arithmetic(pos ast.Pos, op plan.BinaryOp, l, r plan.Expr) (plan.Expr, error) {
 	lt, rt := l.Type(), r.Type()
 	for _, t := range []types.Type{lt, rt} {
-		if !t.IsNumeric() && t.Kind != types.KindNull {
+		if !isNumericOrNull(t) {
 			return nil, typeAt(pos, "operator %s requires numeric operands, not %s", op, t)
 		}
 	}
@@ -337,102 +378,168 @@ func (b *binder) cast(x *ast.Cast) (plan.Expr, error) {
 	return &plan.Cast{X: inner, To: to}, nil
 }
 
-// ---------------------------------------------------------------- functions
+// ---------------------------------------------------------------- CASE etc.
 
-var aggregateFuncs = map[string]plan.AggFunc{
-	"COUNT": plan.AggCount, "SUM": plan.AggSum, "AVG": plan.AggAvg, "MIN": plan.AggMin, "MAX": plan.AggMax,
-}
-
-// phase2Functions are valid scalar functions this engine does not implement
-// yet; they are reported as UNSUPPORTED rather than unknown.
-var phase2Functions = map[string]bool{
-	"ABS": true, "ROUND": true, "FLOOR": true, "CEIL": true, "CEILING": true, "SQRT": true,
-	"POWER": true, "MOD": true, "LENGTH": true, "UPPER": true, "LOWER": true, "SUBSTR": true,
-	"SUBSTRING": true, "TRIM": true, "LTRIM": true, "RTRIM": true, "REPLACE": true, "CONCAT": true,
-	"COALESCE": true, "NULLIF": true, "YEAR": true, "MONTH": true, "DAY": true, "HOUR": true,
-	"MINUTE": true, "SECOND": true, "DATE_TRUNC": true, "DATE_DIFF": true,
-}
-
-func (b *binder) call(x *ast.FuncCall) (plan.Expr, error) {
-	name := strings.ToUpper(x.Name)
-	if fn, ok := aggregateFuncs[name]; ok {
-		return b.aggregate(x, name, fn)
-	}
-	if x.Star || x.Distinct {
-		return nil, semanticAt(x.Pos, "%s is not an aggregate function", name)
-	}
-	switch {
-	case name == "PQ_SLEEP" && b.a.cfg.TestFunctions:
-		if len(x.Args) != 1 {
-			return nil, semanticAt(x.Pos, "PQ_SLEEP takes exactly one argument")
+// unify computes the common result type of CASE branches / COALESCE
+// arguments (semantics.md §13): numeric promotion, otherwise identical types;
+// NULLs are ignored.
+func unify(pos ast.Pos, what string, ts []types.Type) (types.Type, error) {
+	t := types.Null
+	for _, u := range ts {
+		switch {
+		case u.Kind == types.KindNull || u == t:
+		case t.Kind == types.KindNull:
+			t = u
+		case t.IsNumeric() && u.IsNumeric():
+			t = types.CommonNumeric(t, u)
+		default:
+			return types.Type{}, typeAt(pos, "%s has incompatible types %s and %s", what, t, u)
 		}
-		arg, err := b.bind(x.Args[0])
+	}
+	return t, nil
+}
+
+func (b *binder) caseExpr(x *ast.Case) (plan.Expr, error) {
+	c := &plan.Case{}
+	var err error
+	if x.Operand != nil {
+		if c.Operand, err = b.bind(x.Operand); err != nil {
+			return nil, err
+		}
+	}
+	var results []types.Type
+	for _, w := range x.Whens {
+		cond, err := b.bind(w.Cond)
 		if err != nil {
 			return nil, err
 		}
-		if k := arg.Type().Kind; k != types.KindInt64 && k != types.KindNull {
-			return nil, typeAt(x.Pos, "PQ_SLEEP requires an INT64 argument, not %s", arg.Type())
+		if c.Operand != nil {
+			ct, err := comparisonType(w.Cond.Position(), c.Operand.Type(), cond.Type())
+			if err != nil {
+				return nil, err
+			}
+			c.CmpTypes = append(c.CmpTypes, ct)
+		} else if !isBoolish(cond.Type()) {
+			return nil, typeAt(w.Cond.Position(), "CASE WHEN condition must be BOOLEAN, not %s", cond.Type())
 		}
-		return &plan.Func{Name: name, Args: []plan.Expr{arg}, T: types.Int64}, nil
-	case phase2Functions[name]:
-		return nil, unsupportedAt(x.Pos, "function %s is not supported", name)
-	}
-	return nil, semanticAt(x.Pos, "unknown function %s", x.Name)
-}
-
-func (b *binder) aggregate(x *ast.FuncCall, name string, fn plan.AggFunc) (plan.Expr, error) {
-	if b.aggs == nil {
-		return nil, semanticAt(x.Pos, "aggregate function %s is not allowed in %s", name, b.aggClause)
-	}
-	if b.inAgg {
-		return nil, semanticAt(x.Pos, "aggregate functions cannot be nested")
-	}
-	call := &plan.AggCall{Func: fn, Distinct: x.Distinct}
-	if x.Star {
-		if fn != plan.AggCount {
-			return nil, semanticAt(x.Pos, "%s(*) is not allowed", name)
-		}
-		call.Func = plan.AggCountStar
-		call.T = types.Int64
-	} else {
-		if len(x.Args) != 1 {
-			return nil, semanticAt(x.Pos, "%s takes exactly one argument", name)
-		}
-		b.inAgg = true
-		arg, err := b.bind(x.Args[0])
-		b.inAgg = false
+		res, err := b.bind(w.Result)
 		if err != nil {
 			return nil, err
 		}
-		call.Arg = arg
-		t := arg.Type()
-		switch fn {
-		case plan.AggCount:
-			call.T = types.Int64
-		case plan.AggSum:
-			switch t.Kind {
-			case types.KindInt64, types.KindFloat64, types.KindNull:
-				call.T = t
-			case types.KindDecimal:
-				call.T = types.Decimal(18, t.Scale)
-			default:
-				return nil, typeAt(x.Pos, "SUM requires a numeric argument, not %s", t)
-			}
-		case plan.AggAvg:
-			if !t.IsNumeric() && t.Kind != types.KindNull {
-				return nil, typeAt(x.Pos, "AVG requires a numeric argument, not %s", t)
-			}
-			call.T = types.Float64
-		case plan.AggMin, plan.AggMax:
-			call.T = t
+		c.Whens = append(c.Whens, plan.When{Cond: cond, Result: res})
+		results = append(results, res.Type())
+	}
+	if x.Else != nil {
+		if c.Else, err = b.bind(x.Else); err != nil {
+			return nil, err
+		}
+		results = append(results, c.Else.Type())
+	}
+	if c.T, err = unify(x.Pos, "CASE", results); err != nil {
+		return nil, err
+	}
+	for i := range c.Whens {
+		c.Whens[i].Result = coerce(c.Whens[i].Result, c.T)
+	}
+	if c.Else != nil {
+		c.Else = coerce(c.Else, c.T)
+	}
+	return c, nil
+}
+
+func (b *binder) between(x *ast.Between) (plan.Expr, error) {
+	v, err := b.bind(x.X)
+	if err != nil {
+		return nil, err
+	}
+	lo, err := b.bind(x.Lo)
+	if err != nil {
+		return nil, err
+	}
+	hi, err := b.bind(x.Hi)
+	if err != nil {
+		return nil, err
+	}
+	bt := &plan.Between{X: v, Lo: lo, Hi: hi, Not: x.Not}
+	if bt.LoType, err = comparisonType(x.Pos, v.Type(), lo.Type()); err != nil {
+		return nil, err
+	}
+	if bt.HiType, err = comparisonType(x.Pos, v.Type(), hi.Type()); err != nil {
+		return nil, err
+	}
+	return bt, nil
+}
+
+func (b *binder) inList(x *ast.InList) (plan.Expr, error) {
+	v, err := b.bind(x.X)
+	if err != nil {
+		return nil, err
+	}
+	list, err := b.bindAll(x.List)
+	if err != nil {
+		return nil, err
+	}
+	in := &plan.InList{X: v, List: list, Not: x.Not}
+	for _, e := range list {
+		ct, err := comparisonType(x.Pos, v.Type(), e.Type())
+		if err != nil {
+			return nil, err
+		}
+		in.CmpTypes = append(in.CmpTypes, ct)
+	}
+	return in, nil
+}
+
+func (b *binder) like(x *ast.Like) (plan.Expr, error) {
+	v, err := b.bind(x.X)
+	if err != nil {
+		return nil, err
+	}
+	p, err := b.bind(x.Pattern)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range []types.Type{v.Type(), p.Type()} {
+		if t.Kind != types.KindString && t.Kind != types.KindNull {
+			return nil, typeAt(x.Pos, "LIKE requires STRING operands, not %s", t)
 		}
 	}
-	key := call.String()
-	for i, existing := range *b.aggs {
-		if existing.String() == key {
-			return &plan.ColumnRef{Index: i, Name: key, T: existing.T}, nil
+	return &plan.Like{X: v, Pattern: p, Not: x.Not}, nil
+}
+
+// ---------------------------------------------------------------- subqueries
+
+// subquery analyzes a nested query whose enclosing scope is the current one.
+func (b *binder) subquery(pos ast.Pos, q *ast.Query, kind plan.SubqueryKind) (*plan.Subquery, error) {
+	node, err := b.a.query(q, b.sc, b.env)
+	if err != nil {
+		return nil, err
+	}
+	b.a.subSeq++
+	sq := &plan.Subquery{Kind: kind, Plan: node, Seq: b.a.subSeq, Correlated: plan.FreeColumns(node), T: types.Boolean}
+	if kind != plan.SubExists {
+		if n := len(node.Schema()); n != 1 {
+			return nil, semanticAt(pos, "subquery must return exactly one column, not %d", n)
+		}
+		if kind == plan.SubScalar {
+			sq.T = node.Schema()[0].Type
 		}
 	}
-	*b.aggs = append(*b.aggs, call)
-	return &plan.ColumnRef{Index: len(*b.aggs) - 1, Name: key, T: call.T}, nil
+	return sq, nil
+}
+
+func (b *binder) inSubquery(x *ast.InSubquery) (plan.Expr, error) {
+	v, err := b.bind(x.X)
+	if err != nil {
+		return nil, err
+	}
+	sq, err := b.subquery(x.Pos, x.Query, plan.SubIn)
+	if err != nil {
+		return nil, err
+	}
+	sq.X, sq.Not = v, x.Not
+	if sq.CmpType, err = comparisonType(x.Pos, v.Type(), sq.Plan.Schema()[0].Type); err != nil {
+		return nil, err
+	}
+	return sq, nil
 }

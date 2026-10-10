@@ -213,58 +213,116 @@ func (a *distinctAcc) add(v types.Value) error {
 
 func (a *distinctAcc) result() (types.Value, error) { return a.inner.result() }
 
-// aggregateOp computes aggregates over its whole input (no grouping keys):
-// it always yields exactly one row.
-type aggregateOp struct {
-	ec    *Context
-	input Operator
-	calls []*plan.AggCall
-	args  []evalFn // nil for COUNT(*)
-	done  bool
+// hashAggregateOp groups its input by the key expressions in a hash table
+// and computes the aggregates per group. Groups are emitted in order of first
+// appearance; without keys exactly one row is produced, even for empty input.
+type hashAggregateOp struct {
+	ec       *Context
+	input    Operator
+	keys     []evalFn
+	keyTypes []types.Type
+	calls    []*plan.AggCall
+	args     []evalFn // nil for COUNT(*)
+	out      []types.Row
+	pos      int
+	done     bool
 }
 
-func (a *aggregateOp) Next() (types.Row, error) {
-	if a.done {
+func (a *hashAggregateOp) Next() (types.Row, error) {
+	if !a.done {
+		a.done = true
+		if err := a.run(); err != nil {
+			return nil, err
+		}
+	}
+	if a.pos >= len(a.out) {
 		return nil, nil
 	}
-	a.done = true
+	row := a.out[a.pos]
+	a.out[a.pos] = nil
+	a.pos++
+	return row, nil
+}
+
+func (a *hashAggregateOp) newGroup(keys types.Row) ([]accumulator, error) {
 	accs := make([]accumulator, len(a.calls))
 	for i, c := range a.calls {
 		accs[i] = newAccumulator(c)
 	}
+	return accs, a.ec.Mem.Reserve(RowSize(keys) + int64(64*len(accs)))
+}
+
+func (a *hashAggregateOp) run() error {
+	groups := map[string]int{}
+	var keyRows []types.Row
+	var accs [][]accumulator
+	var key []byte
+	vals := make(types.Row, len(a.keys))
 	one := types.IntValue(1)
 	for n := 0; ; n++ {
 		row, err := a.input.Next()
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if row == nil {
 			break
 		}
 		if n%checkEvery == 0 {
 			if err := a.ec.Check(); err != nil {
-				return nil, err
+				return err
 			}
+		}
+		key = key[:0]
+		for i, f := range a.keys {
+			if vals[i], err = f(row); err != nil {
+				return err
+			}
+			key = appendKey(key, vals[i], a.keyTypes[i])
+		}
+		g, ok := groups[string(key)]
+		if !ok {
+			g = len(keyRows)
+			groups[string(key)] = g
+			kr := append(types.Row(nil), vals...)
+			ga, err := a.newGroup(kr)
+			if err != nil {
+				return err
+			}
+			keyRows = append(keyRows, kr)
+			accs = append(accs, ga)
 		}
 		for i, f := range a.args {
 			v := one
 			if f != nil {
 				if v, err = f(row); err != nil {
-					return nil, err
+					return err
 				}
 			}
-			if err := accs[i].add(v); err != nil {
-				return nil, err
+			if err := accs[g][i].add(v); err != nil {
+				return err
 			}
 		}
 	}
-	out := make(types.Row, len(accs))
-	for i, acc := range accs {
-		v, err := acc.result()
+	if len(a.keys) == 0 && len(keyRows) == 0 {
+		ga, err := a.newGroup(nil)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		out[i] = v
+		keyRows = append(keyRows, types.Row{})
+		accs = append(accs, ga)
 	}
-	return out, nil
+	a.out = make([]types.Row, len(keyRows))
+	for g, kr := range keyRows {
+		out := make(types.Row, len(kr), len(kr)+len(a.calls))
+		copy(out, kr)
+		for _, acc := range accs[g] {
+			v, err := acc.result()
+			if err != nil {
+				return err
+			}
+			out = append(out, v)
+		}
+		a.out[g] = out
+	}
+	return nil
 }

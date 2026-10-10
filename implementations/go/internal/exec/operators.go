@@ -18,12 +18,14 @@ type Operator interface {
 
 // ---------------------------------------------------------------- scan
 
+// scanOp reads the selected columns (ords) of a table; output rows contain
+// only those columns.
 type scanOp struct {
-	ec     *Context
-	table  *storage.Table
-	needed []int
-	pos    int
-	buf    types.Row
+	ec    *Context
+	table *storage.Table
+	ords  []int
+	pos   int
+	buf   types.Row
 }
 
 func (s *scanOp) Next() (types.Row, error) {
@@ -35,8 +37,8 @@ func (s *scanOp) Next() (types.Row, error) {
 			return nil, err
 		}
 	}
-	for _, c := range s.needed {
-		s.buf[c] = s.table.Data[c].Get(s.pos)
+	for i, c := range s.ords {
+		s.buf[i] = s.table.Data[c].Get(s.pos)
 	}
 	s.pos++
 	return s.buf, nil
@@ -145,6 +147,45 @@ func (l *limitOp) Next() (types.Row, error) {
 	}
 	l.seen++
 	return row, nil
+}
+
+// ---------------------------------------------------------------- distinct
+
+// distinctOp streams rows whose full-row key has not been seen before.
+type distinctOp struct {
+	ec    *Context
+	input Operator
+	types []types.Type
+	seen  map[string]struct{}
+	key   []byte
+	n     int
+}
+
+func (d *distinctOp) Next() (types.Row, error) {
+	for {
+		row, err := d.input.Next()
+		if row == nil || err != nil {
+			return nil, err
+		}
+		d.n++
+		if d.n%checkEvery == 0 {
+			if err := d.ec.Check(); err != nil {
+				return nil, err
+			}
+		}
+		d.key = d.key[:0]
+		for i, v := range row {
+			d.key = appendKey(d.key, v, d.types[i])
+		}
+		if _, ok := d.seen[string(d.key)]; ok {
+			continue
+		}
+		d.seen[string(d.key)] = struct{}{}
+		if err := d.ec.Mem.Reserve(int64(len(d.key)) + 48); err != nil {
+			return nil, err
+		}
+		return row, nil
+	}
 }
 
 // ---------------------------------------------------------------- sort

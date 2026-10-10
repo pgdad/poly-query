@@ -109,7 +109,9 @@ func (h *Handler) dispatch(req *request) ([]byte, error) {
 		return h.query(req)
 	case "sleep":
 		return h.sleep(req)
-	case "explain", "save", "open", "stats":
+	case "explain":
+		return h.explain(req)
+	case "save", "open", "stats":
 		return nil, errs.New(errs.Unsupported, "operation %q is not supported by this engine", op)
 	}
 	return nil, errs.New(errs.InvalidRequest, "unknown op %q", op)
@@ -476,6 +478,29 @@ func (h *Handler) query(req *request) ([]byte, error) {
 	return finish(w), nil
 }
 
+func (h *Handler) explain(req *request) ([]byte, error) {
+	sql, err := req.requiredStr("sql")
+	if err != nil {
+		return nil, err
+	}
+	qo, err := parseQueryOptions(req)
+	if err != nil {
+		return nil, err
+	}
+	tree, err := h.eng.Explain(sql, qo)
+	if err != nil {
+		return nil, err
+	}
+	text, err := json.Marshal(tree)
+	if err != nil {
+		return nil, errs.New(errs.InternalError, "cannot render plan: %v", err)
+	}
+	w := req.ok()
+	w.key("plan")
+	w.raw(text)
+	return finish(w), nil
+}
+
 func parseQueryOptions(req *request) (engine.QueryOptions, error) {
 	qo := engine.QueryOptions{MaxRows: -1}
 	opts, err := req.object("options")
@@ -525,12 +550,19 @@ func parseQueryOptions(req *request) (engine.QueryOptions, error) {
 			if err := enum(name, "auto", "hash", "merge", "nested_loop"); err != nil {
 				return qo, err
 			}
+			_ = json.Unmarshal(raw, &qo.Join)
 		case "threads":
 			n, err := decodeCount(raw, name)
 			if err != nil || n < 1 {
 				return qo, invalid("option \"threads\" must be a positive integer")
 			}
-		case "optimize", "use_indexes", "native":
+		case "optimize":
+			b, err := decodeBool(raw, name)
+			if err != nil {
+				return qo, err
+			}
+			qo.NoOptimize = !b
+		case "use_indexes", "native":
 			if _, err := decodeBool(raw, name); err != nil {
 				return qo, err
 			}
