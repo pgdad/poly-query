@@ -1,0 +1,90 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase4-python-a1-20261010T203820Z",
+ "language": "python",
+ "task": "phase4",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase4",
+ "prompt_sha256": "c28eaca06792a0247d7b4d4a62fc95365d80ec3df0ad803ee5a2f5e173c47deb",
+ "session_id": "cc3a0497-0f0b-4a39-b8d8-4e9f916c2dbe",
+ "tokens": {
+  "input": 86,
+  "output": 80793,
+  "cache_read": 4906829,
+  "cache_creation": 168908,
+  "thinking": null,
+  "thinking_estimated": 40296,
+  "source": "result events",
+  "api_messages": 43
+ },
+ "rate_limit": {
+  "events": 7,
+  "max_utilization": {
+   "five_hour": 0.78,
+   "seven_day": 0.14
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 3.948833800000001,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 48,
+ "result_segments": 1,
+ "assistant_messages": 107,
+ "tool_calls": {
+  "Bash": 45,
+  "Write": 2
+ },
+ "tool_calls_total": 47,
+ "tool_failures": 1,
+ "build_invocations": 14,
+ "build_failures_heuristic": 0,
+ "conformance_runs": 3,
+ "conformance_progress": [
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ]
+ ],
+ "repair_iterations": 2,
+ "time": {
+  "wall_seconds": 825.2,
+  "model_api_seconds": 708.2,
+  "tool_seconds": 116.7,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 2,
+  "files_changed": 20,
+  "lines_added": 1578,
+  "lines_removed": 85,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 4 is done: the conformance runner and the HTTP concurrency suite both report 0 failures, `make build test` succeeds, and everything is committed.\n\n**Test results**\n- `runner.py --transport http`: phase 1 225/225, phase 2 186/186, phase 3 143/143, 0 fail, 0 error. `TOTAL: 554/569 pass`; the 15 not passing are the Phase 5 cases, reported as `not_implemented` because that phase isn't claimed.\n- `runner.py` over session: the same numbers.\n- `http_suite.py`: `http suite: 18/18 passed`. I ran it four times and it passed every time.\n- `make build test lint`: all pass, 96 unit tests including new server tests.\n\n**What I implemented** (new code is in `polyquery/server/`)\n- **`serve` mode:** all the HTTP/1.1 endpoints in protocol \u00a77, keep-alive, the error-to-status mapping, the 413 request-size limit, JSON error bodies (including 404/405), and the `X-PolyQuery-Query-Id` header.\n- **Streaming:** `/v1/query/stream` sends chunked NDJSON. Execution only advances as batches are written, so at most one batch is held in memory. A query that fails before its first rows gets a normal error response; one that fails later ends with an `error` line.\n- **Concurrency:**\n  - Each query reads from a snapshot of the catalog taken when it starts, so replacing or dropping a table doesn't affect queries already running on it.\n  - At most `--workers` queries run at once, up to `--queue-depth` more wait in order, and anything beyond that gets `OVERLOADED` immediately.\n  - The timeout clock starts when the query arrives, so time spent queued counts.\n  - Queries can be cancelled with `DELETE /v1/queries/{id}`; a client that disconnects has its query cancelled too.\n  - On SIGTERM or SIGINT the server refuses new queries, waits up to the grace period for running and queued ones, cancels the rest and exits with status 0.\n- **Observability:** Prometheus metrics, and JSON log lines on stderr. Each query logs a completion event with its id, status, duration and row count, but never the SQL or any data.\n- **Engine changes:** the catalog can now produce snapshots, queries take an absolute deadline, and results can be read incrementally. Nested-loop joins, per-group aggregation and `DISTINCT` now check for cancellation and timeouts regularly.\n\n**Main design decisions**\n- One thread per connection, using the standard library's threading HTTP server; a query runs in its connection's thread.\n- A single background thread watches the sockets of running queries to detect client disconnects.\n- Query, explain and other non-query requests skip the worker limit, so `/health`, `/metrics` and cancellation stay responsive when all workers are busy.\n\n**Known limitations** (listed in the README)\n- Python's global interpreter lock means concurrent queries take turns rather than running in parallel, so throughput doesn't grow with `--workers`.\n- A large `ORDER BY` sort can't be interrupted mid-sort: a cancel or timeout takes effect only once the sort finishes.\n- Backpressure is real in the engine, but this sandbox's network stack doesn't show it. In a direct test, a local socket accepted about 1.9 GB with nobody reading. So a client that stops reading doesn't stall the query here until the kernel refuses more data. The server's own memory stayed flat at 39 MB throughout.\n- The `sleep` protocol op can't be cancelled.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
