@@ -256,7 +256,9 @@ class Gen:
 
 class Session:
     def __init__(self, morsel):
-        env = dict(os.environ, POLYQUERY_MORSEL_ROWS=str(morsel), GOTRACEBACK="all")
+        env = dict(os.environ, GOTRACEBACK="all")
+        if morsel > 0:
+            env["POLYQUERY_MORSEL_ROWS"] = str(morsel)
         self.dir = tempfile.mkdtemp(prefix="pq-difftest-")
         os.symlink(FIXTURES, os.path.join(self.dir, "fixtures"))
         self.p = subprocess.Popen([str(ENGINE), "session", "--data-dir", self.dir],
@@ -286,12 +288,20 @@ def canon(resp):
 
 
 def main():
+    global FIXTURES, JOIN_OPT
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--queries", type=int, default=300)
-    ap.add_argument("--morsel-rows", type=int, default=37)
+    ap.add_argument("--morsel-rows", type=int, default=37, help="0: engine default")
+    ap.add_argument("--fixtures", default=None,
+                    help="directory with gen/<table>.csv (e.g. a pqgen output linked as gen/)")
+    ap.add_argument("--joins", default="hash,merge,nested_loop",
+                    help="join algorithms to test (nested_loop is slow on large data)")
     ap.add_argument("-v", action="store_true")
     args = ap.parse_args()
+    if args.fixtures:
+        FIXTURES = Path(args.fixtures)
+    JOIN_OPT = [(j, o) for j, o in JOIN_OPT if j in args.joins.split(",")]
     s = Session(args.morsel_rows)
     schemas = {}
     for t, (csv, sch) in TABLES.items():
