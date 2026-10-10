@@ -32,7 +32,6 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 from ..planner import physical as pp
 from ..planner.access import group_may_match
 from . import parallel
-from .aggregates import accumulator_factory
 from .common import (
     CHECK_INTERVAL_ROWS,
     VECTOR_BATCH_ROWS,
@@ -47,7 +46,7 @@ from .common import (
 )
 from .compiler import Layout
 from .context import ExecutionContext
-from .row_engine import merge_groups
+from .group_states import GroupState, make_state
 from .vcompiler import VecFn, _is_not_none, compile_vector, take
 
 Columns = list[Sequence[Any]]
@@ -426,9 +425,12 @@ def _merge_join(node: pp.MergeJoin, ctx: ExecutionContext) -> Batches:
 # ------------------------------------------------------------ aggregation
 
 
-def _aggregate_partition(node: pp.HashAggregate, ctx: ExecutionContext, batches: Batches) -> dict:
-    """Partial aggregation: group key -> accumulators, in first-seen order
-    (keys are values for one GROUP BY expression, else tuples)."""
+def _aggregate_partition(
+    node: pp.HashAggregate, ctx: ExecutionContext, batches: Batches
+) -> tuple[list[Any], list[GroupState]]:
+    """Partial aggregation: the group keys in first-seen order (values for
+    one GROUP BY expression, else tuples) and the columnar state of every
+    aggregate, indexed by group id."""
 
     def compile_() -> tuple[list[VecFn], list[VecFn | None]]:
         layout = layout_of(node.input)
@@ -436,19 +438,18 @@ def _aggregate_partition(node: pp.HashAggregate, ctx: ExecutionContext, batches:
         return _vectors(node.keys, ctx, layout), args
 
     key_fns, arg_fns = _compiled(node, "agg", ctx, compile_)
-    make = accumulator_factory(node.aggregates)
+    states = [make_state(call) for call in node.aggregates]
     if not node.keys:
-        accs = make()
+        for state in states:
+            state.grow(1)
         for cols, n in batches:
-            for acc, fn in zip(accs, arg_fns):
-                if fn is None:
-                    acc.add_rows(n)  # type: ignore[attr-defined]
-                else:
-                    acc.add_batch(fn(cols, n))  # type: ignore[arg-type]
-        return {(): accs}
+            runs = [(0, 0, n)]
+            for state, fn in zip(states, arg_fns):
+                state.update_runs(runs, None if fn is None else fn(cols, n))
+            ctx.check()
+        return [()], states
 
     index: dict[Any, int] = {}  # group key -> dense group id
-    by_agg: list[list[Any]] = [[] for _ in node.aggregates]  # accumulators by aggregate, by group id
     width = len(node.layout)
     for cols, n in batches:
         keys = _key_vector(key_fns, cols, n)
@@ -458,75 +459,74 @@ def _aggregate_partition(node: pp.HashAggregate, ctx: ExecutionContext, batches:
             if key not in index:
                 index[key] = len(index)
         if len(index) > before:
-            for _ in range(len(index) - before):
-                for acc, target in zip(make(), by_agg):
-                    target.append(acc)
+            for state in states:
+                state.grow(len(index) - before)
             ctx.reserve_rows(len(index) - before, width)
-        ids = list(map(index.__getitem__, keys))
         vectors = [None if fn is None else fn(cols, n) for fn in arg_fns]
-        if len(batch_keys) * 8 <= n:
-            _add_sorted(ids, vectors, by_agg)
+        if len(batch_keys) == 1:
+            runs = [(index[keys[0]], 0, n)]
+            for state, vector in zip(states, vectors):
+                state.update_runs(runs, vector)
+        elif len(batch_keys) * 8 <= n:
+            _update_sorted(list(map(index.__getitem__, keys)), vectors, states)
         else:
-            _add_rowwise(ids, vectors, by_agg)
+            ids = list(map(index.__getitem__, keys))
+            for state, vector in zip(states, vectors):
+                state.update_rows(ids, vector)
         ctx.check()
-    groups = {}
-    for key, gid in index.items():
-        groups[key] = [accs[gid] for accs in by_agg]
-    return groups
+    return list(index), states
 
 
-def _add_sorted(ids: list[int], vectors: list, by_agg: list[list[Any]]) -> None:
-    """Few groups in the batch: sort the positions by group id and feed each
-    group's slice to its accumulators in one call."""
+def _update_sorted(ids: list[int], vectors: list, states: list[GroupState]) -> None:
+    """Few groups in the batch: sort the positions by group id (C-level) and
+    reduce every group's slice with one call per aggregate."""
     order = sorted(range(len(ids)), key=ids.__getitem__)
     runs: list[tuple[int, int, int]] = []  # (group id, start, end) in sorted order
     start = 0
-    for gid, run in itertools.groupby(take(ids, order)):
-        end = start + sum(1 for _ in run)
+    counts = Counter(ids)
+    for gid in sorted(counts):
+        end = start + counts[gid]
         runs.append((gid, start, end))
         start = end
-    for vector, accs in zip(vectors, by_agg):
-        if vector is None:
-            for gid, s, e in runs:
-                accs[gid].add_rows(e - s)
-            continue
-        values = take(vector, order)
-        for gid, s, e in runs:
-            accs[gid].add_batch(values[s:e])
+    for state, vector in zip(states, vectors):
+        state.update_runs(runs, None if vector is None else take(vector, order))
 
 
-def _add_rowwise(ids: list[int], vectors: list, by_agg: list[list[Any]]) -> None:
-    """Many groups in the batch: update the accumulators row by row."""
-    for vector, accs in zip(vectors, by_agg):
-        if vector is None:
-            for gid, count in Counter(ids).items():
-                accs[gid].add_rows(count)
-            continue
-        for gid, value in zip(ids, vector):
-            accs[gid].add(value)
+def _merge_partials(partials: list[tuple[list[Any], list[GroupState]]]) -> tuple[list[Any], list[GroupState]]:
+    """Merges partial aggregation states in partition order (groups keep the
+    order of their first appearance in a serial scan)."""
+    keys, states = partials[0]
+    if len(partials) == 1:
+        return keys, states
+    index = dict(zip(keys, range(len(keys))))
+    for part_keys, part_states in partials[1:]:
+        before = len(index)
+        mapping = [index.setdefault(key, len(index)) for key in part_keys]
+        if len(index) > before:
+            for state in states:
+                state.grow(len(index) - before)
+        for state, other in zip(states, part_states):
+            state.merge(other, mapping)
+    return list(index), states
 
 
 def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Batches:
     partials = partition_batches(node.input, ctx, lambda batches: _aggregate_partition(node, ctx, batches))
-    groups = merge_groups(partials)
-    if not groups:
-        if node.keys:
-            return
-        groups[()] = accumulator_factory(node.aggregates)()
-    keys = list(groups)
-    results = [[acc.result() for acc in accs] for accs in groups.values()]
+    keys, states = _merge_partials(partials)
     n = len(keys)
+    if not n:
+        return
     if not node.keys:
         key_cols: Columns = []
     elif len(node.keys) == 1:
         key_cols = [keys]
     else:
         key_cols = [list(c) for c in zip(*keys)]
-    value_cols = [list(c) for c in zip(*results)] if node.aggregates else []
-    cols = key_cols + value_cols
+    cols = key_cols + [state.results() for state in states]
     if not cols:
         yield [], n
         return
+    ctx.check()
     yield from _rebatch(cols, n)
 
 

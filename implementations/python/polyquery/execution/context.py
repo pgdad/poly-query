@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
+import gc
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 from .. import errors
+
+T = TypeVar("T")
 
 # Approximate in-memory cost of one materialized row and of one value in it.
 ROW_OVERHEAD_BYTES = 64
@@ -121,3 +126,47 @@ class ExecutionContext:
         self.memory_used += rows * (ROW_OVERHEAD_BYTES + width * VALUE_BYTES)
         if self.memory_used > self.max_memory_bytes:
             raise errors.resource_limit("query exceeded its memory budget")
+
+
+# ------------------------------------------------------------ garbage collection
+
+_gc_lock = threading.Lock()
+_gc_pauses = 0
+_gc_was_enabled = False
+
+
+@contextlib.contextmanager
+def gc_paused() -> Iterator[None]:
+    """Suspends CPython's cyclic garbage collector while engine work runs.
+
+    Query operators allocate millions of short-lived, acyclic objects (row
+    tuples, lists, numbers) that reference counting frees immediately, but
+    every allocation burst also triggers collections that traverse all live
+    objects — including the millions held by loaded tables — which made
+    large sorts and loads several times slower. Pauses nest across
+    concurrent queries (threads); the collector runs again when the last one
+    ends."""
+    global _gc_pauses, _gc_was_enabled
+    with _gc_lock:
+        if _gc_pauses == 0:
+            _gc_was_enabled = gc.isenabled()
+            gc.disable()
+        _gc_pauses += 1
+    try:
+        yield
+    finally:
+        with _gc_lock:
+            _gc_pauses -= 1
+            if _gc_pauses == 0 and _gc_was_enabled:
+                gc.enable()
+
+
+def gc_paused_iter(items: Iterator[T]) -> Iterator[T]:
+    """Pauses the collector while each item of ``items`` is produced."""
+    while True:
+        with gc_paused():
+            try:
+                item = next(items)
+            except StopIteration:
+                return
+        yield item

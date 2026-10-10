@@ -19,6 +19,7 @@ from typing import Any
 
 from .. import ENGINE_NAME, ENGINE_VERSION, PROTOCOL_VERSION, SPEC_VERSION, errors
 from ..datatypes import InvalidTypeError, parse_type
+from ..execution.context import gc_paused, gc_paused_iter
 from ..ingest.loader import FORMATS
 from ..service import Engine, QueryOptions, StorageOptions
 from ..storage import pqcf
@@ -263,7 +264,8 @@ class RequestHandler:
             method = getattr(self, "op_" + op, None)
             if method is None:
                 raise errors.invalid_request(f"unknown op '{op}'")
-            body = method(request, control) if op in CONTROLLED_OPS else method(request)
+            with gc_paused():
+                body = method(request, control) if op in CONTROLLED_OPS else method(request)
             response: dict[str, Any] = {"id": req_id, "ok": True}
             response.update(body)
             if "stats" in response:
@@ -406,7 +408,7 @@ class RequestHandler:
         convert = row_serializer(cursor.columns)
         return QueryStream(
             [c.to_json() for c in cursor.columns],
-            (convert(batch) for batch in cursor.batches),
+            gc_paused_iter(convert(batch) for batch in cursor.batches),
         )
 
     @staticmethod
