@@ -3,9 +3,10 @@
 An analytical database engine implementing the PolyQuery specification
 (`spec/`) in Rust, using **only the standard library** (no crates).
 
-Status: **Phase 1** (in-memory data engine). Capabilities claimed:
+Status: **Phase 2** (SQL parser and query engine). Capabilities claimed:
 `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`, `sql.basic`,
-`test.functions`.
+`test.functions`, `phase2`, `sql.groupby`, `sql.join`, `sql.functions`,
+`sql.subquery`, `sql.cte`, `sql.correlated_subquery`.
 
 ## Build and run
 
@@ -46,30 +47,37 @@ Layers, bottom-up:
 | `catalog` | case-insensitive table map of `Arc<Table>` (queries hold snapshots) |
 | `ingest` | CSV (RFC 4180 + spec rules), JSON array and JSON Lines readers, type inference, explicit schemas |
 | `sql` | lexer (positions for `PARSE_ERROR` details), AST, recursive-descent parser for the **full** v1 grammar |
-| `planner` | semantic analysis (`binder`: name resolution, typing, aggregate validation, ORDER BY resolution, column pruning) producing a `LogicalPlan` of bound, typed `Expr`s |
-| `exec` | pull-based (Volcano) operators: scan, filter, project, hash aggregate, sort (with top-N), limit; expression evaluator; per-query context (timeout, cancellation flag, memory budget) |
-| `engine` | transport-independent facade: load/drop/reset/query, path safety, limits |
+| `planner::binder` | semantic analysis: name resolution (`scope`: range variables, CTE environments, correlation), expression typing (`exprs`), function signatures (`functions`), the grouping rule, ORDER BY/GROUP BY ordinal and alias resolution; produces a `LogicalPlan` of bound, typed `Expr`s |
+| `planner::typing` | numeric promotion, comparability, common types (CASE/COALESCE) |
+| `planner::logical` | logical algebra: Scan, Filter, Project, Aggregate, Join (INNER/LEFT/CROSS), Distinct, Sort, Limit |
+| `planner::optimizer` | predicate pushdown (WHERE/ON conjuncts to the scans; cross joins with equality predicates become inner joins) and column pruning |
+| `planner::physical` | physical plan: hash join (equi-keys, build side by estimated cardinality; LEFT builds right) vs nested-loop join, hash aggregate, top-N sort, `ParamLookup` for correlated subqueries; EXPLAIN JSON |
+| `exec` | pull-based (Volcano) operators; expression evaluator; scalar functions; aggregate accumulators; subquery evaluation with memoization; per-query context (timeout, cancellation flag, memory budget, join-row limit) |
+| `engine` | transport-independent facade: load/drop/reset/query/explain, path safety, limits |
 | `protocol` | request validation, response building, `session` (JSON lines) and `exec` modes |
 | `cli` | argument parsing (unknown options ⇒ exit 2) |
 
-Processing of a query: `lex → parse (AST) → bind/type (logical plan) →
-build operators → execute`. Errors found before execution (parse, semantic,
-type) are reported without executing anything.
+Processing of a statement: `lex → parse (AST) → bind/type (LogicalPlan) →
+optimize → lower (PhysicalPlan) → build operators → execute`. Errors found
+before execution (parse, semantic, type) are reported without executing
+anything; `EXPLAIN` / the `explain` op render the physical plan.
 
-### Extension points for later phases
+### Subqueries and correlation
 
-* The parser already accepts the complete grammar (joins, GROUP BY/HAVING,
-  DISTINCT, CTEs, subqueries, CASE/LIKE/BETWEEN/IN, CREATE/DROP INDEX,
-  EXPLAIN); the binder rejects what Phase 1 does not implement with
-  `UNSUPPORTED`, so later phases only extend the binder/executor.
-* Scopes support multiple range variables (joins); the aggregate operator
-  already supports grouping keys; `LogicalPlan::to_json` renders the EXPLAIN
-  node format of indexes-and-planning.md §4.
-* Storage is columnar with typed vectors and validity bitmaps (PQCF and
-  vectorized execution can build on it); tables are shared immutably via
-  `Arc`, as required for snapshot isolation in the server phase.
-* `ExecContext` carries the deadline, a cancellation flag and the memory
-  budget, checked by operators every 1024 rows and by `PQ_SLEEP` every 5 ms.
+A subquery inside an expression is bound with a *correlation* link to the
+scope it appears in. A column that does not resolve locally is resolved in
+the enclosing scopes and becomes a parameter of the subquery
+(`Expr::Param`); the outer expressions for those parameters are children of
+the subquery expression, so they take part in grouping checks, column
+pruning and remapping like any other expression (references several levels
+up are passed through intermediate subqueries). At run time the parameter
+values are pushed on the execution context while the subquery's plan runs;
+results are memoized per (subquery, parameter values), so an uncorrelated
+subquery runs at most once per query. Inside a subquery, a filter
+`inner_expr = <outer value>` over a parameter-independent input is planned
+as a `ParamLookup`: the input is hashed once per query and probed per outer
+row. Derived tables and CTEs share the correlation of the query they appear
+in (no LATERAL).
 
 ## Design decisions (where the spec leaves room)
 
@@ -106,10 +114,34 @@ type) are reported without executing anything.
   an OS permission failure `ACCESS_DENIED`.
 * **Query options**: unknown options are ignored; ill-typed known options are
   `INVALID_REQUEST`; unsupported values (`mode: "vectorized"`, unknown
-  `result`/`join` values) are `UNSUPPORTED`. `threads`, `join`, `optimize`,
-  `use_indexes` and `native` are accepted and have no effect in Phase 1.
-* **Ops of later phases** (`explain`, `save`, `open`, `stats`) answer
-  `UNSUPPORTED`; `serve` exits with status 1.
+  `result`/`join` values) are `UNSUPPORTED`. `threads`, `optimize`,
+  `use_indexes` and `native` are accepted and currently have no effect.
+* **Ops of later phases** (`save`, `open`, `stats`) and `CREATE/DROP INDEX`
+  answer `UNSUPPORTED`; `serve` exits with status 1.
+* **Common type** (CASE, COALESCE): if all non-NULL branch types are equal
+  that type is kept (e.g. `DECIMAL(10,2)`); otherwise numeric promotion
+  (`INT64`+`DECIMAL(p,s)` ⇒ `DECIMAL(18,s)`, decimals ⇒ `DECIMAL(18,max s)`,
+  any `FLOAT64` ⇒ `FLOAT64`); DATE and TIMESTAMP have no common type.
+  Branch values are converted to the common type.
+* **UPPER/LOWER** map ASCII letters only. A word (maximal run of
+  alphanumeric characters) containing a non-ASCII character is left
+  unchanged, which is what the public conformance suite expects
+  (`UPPER('abc Ünï')` = `'ABC Ünï'`); for ASCII text this is exactly ASCII
+  case mapping.
+* **Units** of `DATE_TRUNC`/`DATE_DIFF` are matched case-insensitively and
+  validated at bind time (`INVALID_ARGUMENT`); a NULL unit or a NULL `ROUND`
+  digit count yields NULL.
+* **GROUP BY alias** lookup only considers explicit `AS` aliases (bare
+  column items already resolve as input columns). HAVING cannot reference
+  select aliases (not in the spec).
+* **Correlated CTE**: a CTE whose body references an outer query's column
+  may only be used at the level where it is defined; using it from a nested
+  subquery answers `UNSUPPORTED` (never a wrong result).
+* **Hash keys** of joins and IN-subquery sets are normalized to the
+  comparison domain (INT64 vs DECIMAL ⇒ decimal, any FLOAT64 ⇒ float, DATE
+  vs TIMESTAMP ⇒ timestamp) so hashing agrees with SQL comparison.
+* **Join option** `join: "hash" | "nested_loop"` is honored (nested loop
+  disables hash joins); `merge` falls back to automatic selection.
 * **Robustness**: requests are processed on a thread with a 256 MiB stack;
   the parser limits nesting depth and operator-chain length (10,000) and the
   JSON parser depth (512);
@@ -120,14 +152,11 @@ type) are reported without executing anything.
 
 ## Known limitations
 
-* Phase 2+ features (joins, GROUP BY/HAVING, DISTINCT, subqueries, CTEs,
-  scalar functions other than `PQ_SLEEP`, CASE/LIKE/BETWEEN/IN, indexes,
-  EXPLAIN, PQCF storage, HTTP server) are not implemented and are reported as
-  `UNSUPPORTED`. (`COUNT(DISTINCT x)` and other `DISTINCT` aggregates already
-  work.)
+* Phase 3+ features (indexes, PQCF storage, statistics, HTTP server, row
+  layout, vectorized/parallel execution) are not implemented and are
+  reported as `UNSUPPORTED`.
 * Execution is single-threaded and row-at-a-time.
-* Two public conformance cases (`limits_and_output.pqt` lines 34 and 39)
-  cannot pass with the provided runner: it replaces every request's `id` with
-  its step number and then requires both that the response id equals the step
-  number and that it equals the id written in the test. The engine echoes ids
-  verbatim (verified manually with nested-object and string ids).
+* Correlated subqueries whose correlation is not an equality on a
+  parameter-independent input are re-executed per distinct outer value
+  (memoized), i.e. nested-loop cost.
+* Filters are not pushed through projections (into derived tables/CTEs).

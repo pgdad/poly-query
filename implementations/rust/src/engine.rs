@@ -367,4 +367,168 @@ mod tests {
             ErrorCode::ResourceLimit
         );
     }
+
+    fn load(e: &mut Engine, table: &str, csv: &str) {
+        e.load(LoadRequest {
+            table: table.into(),
+            format: Format::Csv,
+            source: Source::Data(csv.into()),
+            schema: None,
+            header: true,
+            delimiter: b',',
+            replace: false,
+        })
+        .unwrap();
+    }
+
+    /// `t` plus `u(id, tag)` with a NULL key and an unmatched key.
+    fn engine2() -> Engine {
+        let mut e = engine();
+        load(&mut e, "u", "id,tag\n1,x\n1,y\n3,z\n,w\n9,q\n");
+        e
+    }
+
+    fn ints(v: &[i64]) -> Vec<Row> {
+        v.iter().map(|&i| vec![Value::Int(i)]).collect()
+    }
+
+    #[test]
+    fn joins() {
+        let e = engine2();
+        let r = rows(
+            &e,
+            "SELECT t.id, u.tag FROM t JOIN u ON t.id = u.id ORDER BY u.tag",
+        );
+        assert_eq!(
+            r,
+            vec![
+                vec![Value::Int(1), Value::str("x")],
+                vec![Value::Int(1), Value::str("y")],
+                vec![Value::Int(3), Value::str("z")],
+            ]
+        );
+        let r = rows(
+            &e,
+            "SELECT t.id FROM t LEFT JOIN u ON u.id = t.id WHERE u.tag IS NULL",
+        );
+        assert_eq!(r, ints(&[2]));
+        let r = rows(&e, "SELECT COUNT(*) FROM t, u");
+        assert_eq!(r, ints(&[15]));
+        // Non-equi join (nested loop) and the explicit nested-loop strategy.
+        let r = rows(&e, "SELECT COUNT(*) FROM t JOIN u ON t.id < u.id");
+        assert_eq!(r, ints(&[5]));
+        let nl = QueryOptions {
+            join: JoinStrategy::NestedLoop,
+            ..Default::default()
+        };
+        let r = e
+            .query("SELECT COUNT(*) FROM t JOIN u ON t.id = u.id", &nl)
+            .unwrap()
+            .rows;
+        assert_eq!(r, ints(&[3]));
+    }
+
+    #[test]
+    fn grouping_and_distinct() {
+        let e = engine2();
+        let r = rows(
+            &e,
+            "SELECT id, COUNT(*) AS n FROM u GROUP BY id HAVING COUNT(*) > 1",
+        );
+        assert_eq!(r, vec![vec![Value::Int(1), Value::Int(2)]]);
+        let r = rows(&e, "SELECT DISTINCT id FROM u ORDER BY id NULLS LAST");
+        assert_eq!(
+            r,
+            vec![
+                vec![Value::Int(1)],
+                vec![Value::Int(3)],
+                vec![Value::Int(9)],
+                vec![Value::Null]
+            ]
+        );
+        let r = rows(
+            &e,
+            "SELECT id + 1 AS k FROM u GROUP BY 1 ORDER BY k DESC LIMIT 1",
+        );
+        assert_eq!(r, ints(&[10]));
+        let code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
+        assert_eq!(
+            code("SELECT tag FROM u GROUP BY id"),
+            ErrorCode::SemanticError
+        );
+        assert_eq!(
+            code("SELECT DISTINCT id FROM u ORDER BY tag"),
+            ErrorCode::SemanticError
+        );
+    }
+
+    #[test]
+    fn subqueries_and_ctes() {
+        let e = engine2();
+        let r = rows(
+            &e,
+            "SELECT id FROM t WHERE id IN (SELECT id FROM u) ORDER BY id",
+        );
+        assert_eq!(r, ints(&[1, 3]));
+        // NOT IN over a set containing NULL is never TRUE.
+        let r = rows(&e, "SELECT id FROM t WHERE id NOT IN (SELECT id FROM u)");
+        assert!(r.is_empty());
+        // Correlated scalar subquery.
+        let r = rows(
+            &e,
+            "SELECT t.id, (SELECT COUNT(*) FROM u WHERE u.id = t.id) FROM t ORDER BY 1",
+        );
+        assert_eq!(
+            r,
+            vec![
+                vec![Value::Int(1), Value::Int(2)],
+                vec![Value::Int(2), Value::Int(0)],
+                vec![Value::Int(3), Value::Int(1)],
+            ]
+        );
+        let r = rows(
+            &e,
+            "WITH a AS (SELECT id FROM t WHERE id > 1), b(x) AS (SELECT id * 10 FROM a) \
+             SELECT x FROM b ORDER BY x",
+        );
+        assert_eq!(r, ints(&[20, 30]));
+        let code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
+        assert_eq!(
+            code("SELECT (SELECT id FROM u)"),
+            ErrorCode::SubqueryCardinality
+        );
+        assert_eq!(
+            code("SELECT (SELECT id, tag FROM u)"),
+            ErrorCode::SemanticError
+        );
+        assert_eq!(
+            code("WITH a AS (SELECT * FROM a) SELECT 1"),
+            ErrorCode::SemanticError
+        );
+    }
+
+    #[test]
+    fn explain() {
+        let e = engine2();
+        let plan = e
+            .explain(
+                "SELECT t.name FROM t JOIN u ON t.id = u.id WHERE u.tag = 'x'",
+                &QueryOptions::default(),
+            )
+            .unwrap()
+            .to_string_compact();
+        assert!(
+            plan.contains(r#""op":"HashJoin","join_type":"INNER""#),
+            "{plan}"
+        );
+        assert!(
+            plan.contains(r#""table":"t","columns":["id","name"]"#),
+            "{plan}"
+        );
+        let r = e
+            .query("EXPLAIN SELECT 1", &QueryOptions::default())
+            .unwrap();
+        assert_eq!(r.columns, vec![Field::new("plan", DataType::String)]);
+        assert_eq!(r.row_count, 1);
+    }
 }
