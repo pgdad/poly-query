@@ -30,7 +30,26 @@ public final class PlanExplainer {
                 node.put("op", "TableScan");
                 node.put("table", s.table().name());
                 node.put("alias", s.alias());
-                node.put("columns", names(s.schema()));
+                node.put("columns", names(s.schema(), s.columns()));
+                node.put("layout", s.table().layout().jsonName());
+                if (!s.skipFilters().isEmpty()) {
+                    List<String> filters = new ArrayList<>();
+                    for (PhysicalPlan.ColumnFilter f : s.skipFilters()) {
+                        filters.add(PhysicalPlanner.describe(s.table().columns().get(f.column()), f.predicate()));
+                    }
+                    node.put("row_group_filters", filters);
+                }
+                node.put("estimated_rows", (long) s.table().rowCount());
+            }
+            case PhysicalPlan.IndexScan s -> {
+                node.put("op", "IndexScan");
+                node.put("table", s.table().name());
+                node.put("alias", s.alias());
+                node.put("index", s.index().name());
+                node.put("kind", s.index().kind().name());
+                node.put("lookup", s.lookupText());
+                node.put("columns", names(s.schema(), s.columns()));
+                node.put("estimated_rows", Math.round(s.estimatedRows()));
             }
             case PhysicalPlan.Values v -> node.put("op", "Values");
             case PhysicalPlan.Filter f -> {
@@ -68,7 +87,7 @@ public final class PlanExplainer {
                 node.put("join_type", j.kind().name());
                 node.put("left_keys", formatAll(j.leftKeys()));
                 node.put("right_keys", formatAll(j.rightKeys()));
-                node.put("build_side", "right");
+                node.put("build_side", j.buildLeft() ? "left" : "right");
                 if (j.residual() != null) {
                     node.put("residual", ExprFormatter.format(j.residual()));
                 }
@@ -141,10 +160,17 @@ public final class PlanExplainer {
         return out;
     }
 
-    private static List<String> names(List<ColumnSchema> schema) {
+    /** Names of the given slots of a schema (all slots if {@code slots} is null). */
+    private static List<String> names(List<ColumnSchema> schema, int[] slots) {
         List<String> out = new ArrayList<>();
-        for (ColumnSchema c : schema) {
-            out.add(c.name());
+        if (slots == null) {
+            for (ColumnSchema c : schema) {
+                out.add(c.name());
+            }
+        } else {
+            for (int i : slots) {
+                out.add(schema.get(i).name());
+            }
         }
         return out;
     }

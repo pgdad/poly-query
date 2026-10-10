@@ -3,48 +3,10 @@ package polyquery.exec;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import polyquery.storage.ColumnVector;
-import polyquery.storage.Table;
 
 /** Basic physical operators. */
 public final class Operators {
     private Operators() {
-    }
-
-    /** Full table scan producing rows of all columns. */
-    public static final class Scan implements Operator {
-        private final Table table;
-        private final ExecContext ctx;
-        private final ColumnVector[] columns;
-        private int row;
-
-        public Scan(Table table, ExecContext ctx) {
-            this.table = table;
-            this.ctx = ctx;
-            this.columns = new ColumnVector[table.columnCount()];
-            for (int i = 0; i < columns.length; i++) {
-                columns[i] = table.column(i);
-            }
-        }
-
-        @Override
-        public void open() {
-            row = 0;
-        }
-
-        @Override
-        public Object[] next() {
-            if (row >= table.rowCount()) {
-                return null;
-            }
-            ctx.checkpoint();
-            Object[] out = new Object[columns.length];
-            for (int i = 0; i < columns.length; i++) {
-                out[i] = columns[i].get(row);
-            }
-            row++;
-            return out;
-        }
     }
 
     /** One empty row (SELECT without FROM). */

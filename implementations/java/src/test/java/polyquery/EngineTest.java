@@ -88,8 +88,7 @@ final class EngineTest {
 
     static void testUnsupportedSyntax() {
         Engine e = engine();
-        for (String sql : List.of("CREATE INDEX i ON people (id)", "DROP INDEX i",
-                "SELECT * FROM people a RIGHT JOIN people b ON a.id = b.id",
+        for (String sql : List.of("SELECT * FROM people a RIGHT JOIN people b ON a.id = b.id",
                 "SELECT id FROM people UNION SELECT id FROM people")) {
             Assert.fails(ErrorCode.UNSUPPORTED, () -> e.query(sql, QueryOptions.DEFAULT));
         }

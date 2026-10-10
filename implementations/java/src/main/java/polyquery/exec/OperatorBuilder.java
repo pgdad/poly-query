@@ -32,7 +32,8 @@ public final class OperatorBuilder {
 
     public Operator build(PhysicalPlan plan) {
         return switch (plan) {
-            case PhysicalPlan.TableScan s -> new Operators.Scan(s.table(), ctx);
+            case PhysicalPlan.TableScan s -> new ScanOperators.TableScan(s, ctx);
+            case PhysicalPlan.IndexScan s -> new ScanOperators.IndexScan(s, ctx);
             case PhysicalPlan.Values v -> new Operators.SingleRow();
             case PhysicalPlan.Filter f -> new Operators.Filter(build(f.input()), compiler.compile(f.predicate()), ctx);
             case PhysicalPlan.HashLookupFilter h -> new HashLookupFilter(build(h.input()), compileAll(h.innerKeys()),
@@ -77,9 +78,13 @@ public final class OperatorBuilder {
                 rightNorm.add(HashKeys::normalizeZero);
             }
         }
+        Evaluator residual = j.residual() == null ? null : compiler.compile(j.residual());
+        if (j.buildLeft()) {
+            return new JoinOperators.HashJoinBuildLeft(build(j.left()), build(j.right()), compileAll(j.leftKeys()),
+                    compileAll(j.rightKeys()), leftNorm, rightNorm, residual, ctx);
+        }
         return new JoinOperators.HashJoin(build(j.left()), build(j.right()), compileAll(j.leftKeys()),
-                compileAll(j.rightKeys()), leftNorm, rightNorm,
-                j.residual() == null ? null : compiler.compile(j.residual()),
+                compileAll(j.rightKeys()), leftNorm, rightNorm, residual,
                 j.kind() == LogicalPlan.JoinKind.LEFT, j.right().schema().size(), ctx);
     }
 
