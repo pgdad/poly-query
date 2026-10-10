@@ -1,8 +1,11 @@
 // Package optimizer applies result-preserving rewrites to logical plans:
 // predicate pushdown through joins (WHERE conjuncts that reference a single
 // join input are evaluated below the join, conjuncts spanning both inputs of
-// an inner/cross join become join conditions) and merging of stacked
-// filters. Subquery plans are optimized recursively.
+// an inner/cross join become join conditions), through projections (derived
+// tables and CTEs; output columns are replaced by their defining
+// expressions), sorts and DISTINCT, and merging of stacked filters, so that
+// predicates reach the table scans. Subquery plans are optimized
+// recursively.
 package optimizer
 
 import (
@@ -44,19 +47,79 @@ func push(n plan.Node, preds []plan.Expr) plan.Node {
 	case *plan.Join:
 		return pushJoin(x, preds)
 	case *plan.Project:
-		return filter(&plan.Project{Input: push(x.Input, nil), Exprs: x.Exprs, Cols: x.Cols}, preds)
+		down, keep := throughProject(x, preds)
+		return filter(&plan.Project{Input: push(x.Input, down), Exprs: x.Exprs, Cols: x.Cols}, keep)
 	case *plan.Aggregate:
 		c := *x
 		c.Input = push(x.Input, nil)
 		return filter(&c, preds)
 	case *plan.Sort:
-		return filter(&plan.Sort{Input: push(x.Input, nil), Keys: x.Keys}, preds)
+		return &plan.Sort{Input: push(x.Input, preds), Keys: x.Keys}
 	case *plan.Limit:
 		return filter(&plan.Limit{Input: push(x.Input, nil), Count: x.Count, Offset: x.Offset}, preds)
 	case *plan.Distinct:
-		return filter(&plan.Distinct{Input: push(x.Input, nil)}, preds)
+		return &plan.Distinct{Input: push(x.Input, preds)}
 	}
 	return filter(n, preds)
+}
+
+// throughProject splits predicates over a projection's output into those
+// that can be evaluated below it (rewritten in terms of the projection's
+// input) and those that stay above. Predicates containing subqueries, or
+// referencing outputs computed with subqueries or PQ_SLEEP, stay above.
+func throughProject(p *plan.Project, preds []plan.Expr) (down, keep []plan.Expr) {
+	defs := make(map[plan.ColumnID]plan.Expr, len(p.Cols))
+	for i, c := range p.Cols {
+		defs[c.ID] = p.Exprs[i]
+	}
+	for _, pred := range preds {
+		ok := !hasSubquery(pred)
+		for id := range plan.RefSet(pred) {
+			if def, isOutput := defs[id]; isOutput && !movable(def) {
+				ok = false
+			}
+		}
+		if !ok {
+			keep = append(keep, pred)
+			continue
+		}
+		down = append(down, plan.Map(pred, func(e plan.Expr) plan.Expr {
+			if ref, isRef := e.(*plan.ColumnRef); isRef {
+				if def, isOutput := defs[ref.ID]; isOutput {
+					return def
+				}
+			}
+			return nil
+		}))
+	}
+	return down, keep
+}
+
+func hasSubquery(e plan.Expr) bool {
+	found := false
+	plan.Walk(e, func(x plan.Expr) {
+		if _, ok := x.(*plan.Subquery); ok {
+			found = true
+		}
+	})
+	return found
+}
+
+// movable reports whether an expression may be evaluated an additional
+// time below a projection.
+func movable(e plan.Expr) bool {
+	ok := true
+	plan.Walk(e, func(x plan.Expr) {
+		switch y := x.(type) {
+		case *plan.Subquery, *plan.AggCall:
+			ok = false
+		case *plan.Func:
+			if y.Name == "PQ_SLEEP" {
+				ok = false
+			}
+		}
+	})
+	return ok
 }
 
 func filter(n plan.Node, preds []plan.Expr) plan.Node {

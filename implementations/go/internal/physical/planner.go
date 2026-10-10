@@ -411,7 +411,9 @@ func (p *planner) scanFilter(f *plan.Filter, s *plan.Scan, req idset) Node {
 				residual = append(residual, c)
 			}
 		}
-		ords, cols := scanColumns(s, with(req, residual...))
+		// The index scan reads the columns of the whole predicate (the
+		// indexed column through the index) plus those required above.
+		ords, cols := scanColumns(s, with(req, f.Pred))
 		var out Node = &IndexScan{
 			Table: s.Table, Index: a.ix, Ords: ords, Cols: cols,
 			Point: a.point, Points: a.points, Range: a.rng, Empty: a.empty, Cond: plan.And(used),

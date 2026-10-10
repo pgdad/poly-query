@@ -10,11 +10,13 @@ import (
 // Index selection thresholds (indexes-and-planning.md §3): an index scan is
 // chosen when the estimated fraction of matching rows is at most
 // indexSelectivity. A point lookup (= or IN) expected to return at most
-// smallLookupRows rows is also always cheaper than a scan, which matters for
-// small tables where one key already exceeds 10% of the rows.
+// smallLookupRows rows is also chosen: probing an index for a handful of rows
+// never costs more than a scan, and on small tables (under 50 rows, where
+// this rule is the only one that can apply) a single key already exceeds 10%
+// of the rows.
 const (
 	indexSelectivity = 0.10
-	smallLookupRows  = 2
+	smallLookupRows  = 5
 	// defaultSelectivity is used for predicates without usable statistics
 	// (and for ranges over non-numeric, non-temporal columns).
 	defaultSelectivity = 1.0 / 3

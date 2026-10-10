@@ -78,7 +78,7 @@ func TestIndexSelection(t *testing.T) {
 func TestIndexScanColumnsAndResidual(t *testing.T) {
 	ns := planWith(t, indexed(t), "SELECT name FROM emp WHERE id = 3 AND dept = 'eng'", true)
 	ix := find(ns, "IndexScan")
-	if len(ix) != 1 || scanColumns(ix[0]) != "dept,name" {
+	if len(ix) != 1 || scanColumns(ix[0]) != "dept,id,name" {
 		t.Fatalf("index scan columns: %v", ix)
 	}
 	if f := find(ns, "Filter"); len(f) != 1 || f[0]["predicate"] != "(dept = 'eng')" {
@@ -95,5 +95,18 @@ func TestRowGroupFilters(t *testing.T) {
 	filters, _ := scan[0]["row_group_filters"].([]any)
 	if len(filters) != 2 || filters[0] != "salary >= 60 AND salary <= 90" || filters[1] != "dept IN (eng, ops)" {
 		t.Fatalf("row group filters: %v", filters)
+	}
+}
+
+func TestPushdownThroughDerivedTables(t *testing.T) {
+	cat := indexed(t)
+	for _, sql := range []string{
+		"WITH e AS (SELECT id, name, salary * 2 AS s FROM emp) SELECT name FROM e WHERE id = 3 AND s > 1",
+		"SELECT name FROM (SELECT DISTINCT id, name FROM emp ORDER BY name) d WHERE d.id IN (1, 2)",
+	} {
+		ix := find(planWith(t, cat, sql, true), "IndexScan")
+		if len(ix) != 1 || ix[0]["index"] != "emp_id" {
+			t.Errorf("%s: expected the predicate to reach the emp_id index", sql)
+		}
 	}
 }
