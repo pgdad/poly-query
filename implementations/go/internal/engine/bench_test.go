@@ -15,7 +15,8 @@ import (
 
 // Benchmarks over generated datasets. Set POLYQUERY_BENCH_DATA to a
 // directory produced by `pqgen.py generate --scale …` (e.g. /tmp/pqdata/1m);
-// without it the benchmarks are skipped. Profile with e.g.
+// without it the benchmarks are skipped. POLYQUERY_BENCH_JOIN forces a join
+// algorithm, POLYQUERY_BENCH_NOOPT=1 disables the optimizer. Profile with e.g.
 //
 //	POLYQUERY_BENCH_DATA=/tmp/pqdata/1m go test ./internal/engine -run - \
 //	    -bench 'Bench/agg_lowcard/vec1' -cpuprofile cpu.out
@@ -74,6 +75,7 @@ var benchQueries = []struct{ name, sql string }{
 	{"agg_lowcard", "SELECT category, COUNT(*), SUM(amount), AVG(fee), MIN(ts), MAX(merchant_id) FROM tx GROUP BY category"},
 	{"agg_highcard", "SELECT customer_id, COUNT(*), SUM(amount) FROM tx GROUP BY customer_id"},
 	{"agg_expr", "SELECT bucket % 10 AS b, COUNT(*), SUM(fee * 2), MAX(ts) FROM tx WHERE is_fraud = FALSE GROUP BY bucket % 10"},
+	{"join_agg", "SELECT c.segment, COUNT(*), SUM(t.amount) FROM tx t JOIN cust c ON c.customer_id = t.customer_id GROUP BY c.segment"},
 	{"join_big", "SELECT o.status, SUM(i.quantity), COUNT(*) FROM items i JOIN orders o ON o.order_id = i.order_id GROUP BY o.status"},
 	{"topn", "SELECT tx_id, amount FROM tx ORDER BY amount DESC, tx_id LIMIT 10"},
 	{"sort_full", "SELECT id, str_key FROM sk ORDER BY str_key, id"},
@@ -95,6 +97,8 @@ func BenchmarkQueries(b *testing.B) {
 			b.Run(q.name+"/"+c.name, func(b *testing.B) {
 				opts := c.opts
 				opts.MaxRows, opts.CountOnly = -1, true
+				opts.Join = os.Getenv("POLYQUERY_BENCH_JOIN") // e.g. merge
+				opts.NoOptimize = os.Getenv("POLYQUERY_BENCH_NOOPT") != ""
 				for b.Loop() {
 					if _, err := e.Query(context.Background(), q.sql, opts); err != nil {
 						b.Fatal(err)

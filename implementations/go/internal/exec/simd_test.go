@@ -94,3 +94,71 @@ func TestMul64Overflow(t *testing.T) {
 		}
 	}
 }
+
+// Kernel benchmarks: portable loops vs explicit SIMD (when compiled in).
+func benchVectors() ([]int64, []float64, []int64, []float64) {
+	r := rand.New(rand.NewPCG(3, 4))
+	a, f := make([]int64, BatchSize), make([]float64, BatchSize)
+	for i := range a {
+		a[i] = r.Int64N(1000)
+		f[i] = float64(a[i]) / 3
+	}
+	return a, f, make([]int64, BatchSize), make([]float64, BatchSize)
+}
+
+func BenchmarkKernelCmpIntScalar(b *testing.B) {
+	a, _, out, _ := benchVectors()
+	for b.Loop() {
+		cmpVC(plan.OpGt, a, 500, out)
+	}
+}
+
+func BenchmarkKernelCmpIntSIMD(b *testing.B) {
+	a, _, out, _ := benchVectors()
+	if !SIMDEnabled() {
+		b.Skip("SIMD kernels not compiled in")
+	}
+	for b.Loop() {
+		simdCmpVCInt(plan.OpGt, a, 500, out)
+	}
+}
+
+func BenchmarkKernelCmpFloatScalar(b *testing.B) {
+	_, f, out, _ := benchVectors()
+	for b.Loop() {
+		cmpVC(plan.OpLe, f, 100.5, out)
+	}
+}
+
+func BenchmarkKernelCmpFloatSIMD(b *testing.B) {
+	_, f, out, _ := benchVectors()
+	if !SIMDEnabled() {
+		b.Skip("SIMD kernels not compiled in")
+	}
+	for b.Loop() {
+		simdCmpVCFloat(plan.OpLe, f, 100.5, out)
+	}
+}
+
+func BenchmarkKernelFloatMulScalar(b *testing.B) {
+	_, f, _, out := benchVectors()
+	v := &varith{op: plan.OpMul}
+	for b.Loop() {
+		for i := range out {
+			out[i] = f[i] * f[i]
+		}
+		v.flagNonFinite(out)
+	}
+}
+
+func BenchmarkKernelFloatMulSIMD(b *testing.B) {
+	_, f, _, out := benchVectors()
+	if !SIMDEnabled() {
+		b.Skip("SIMD kernels not compiled in")
+	}
+	v := &varith{op: plan.OpMul}
+	for b.Loop() {
+		simdFloatOp(plan.OpMul, f, f, out)
+		v.flagNonFinite(out)
+	}
+}

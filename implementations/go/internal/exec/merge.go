@@ -133,6 +133,23 @@ func sortedInput(ec *Context, op Operator, fns []evalFn, ts []types.Type) (keyed
 		}
 		return 0
 	}
+	cmpRows := func(a, b int32) int { return compareKeys(in.key(int(a)), in.key(int(b))) }
+	if nk == 1 && classOf(ts[0]) == vInt {
+		// Single INT-class key (one scale per side): compare int64s.
+		ints := make([]int64, len(kept))
+		for i := range ints {
+			ints[i] = in.keys[i].I
+		}
+		cmpRows = func(a, b int32) int {
+			switch x, y := ints[a], ints[b]; {
+			case x < y:
+				return -1
+			case x > y:
+				return 1
+			}
+			return 0
+		}
+	}
 	comparisons := 0
 	var aborted error
 	func() {
@@ -145,13 +162,16 @@ func sortedInput(ec *Context, op Operator, fns []evalFn, ts []types.Type) (keyed
 				aborted = abort.err
 			}
 		}()
-		slices.SortStableFunc(idx, func(a, b int32) int {
+		slices.SortFunc(idx, func(a, b int32) int {
 			if comparisons++; comparisons%checkEvery == 0 {
 				if err := ec.Check(); err != nil {
 					panic(sortAborted{err})
 				}
 			}
-			return compareKeys(in.key(int(a)), in.key(int(b)))
+			if c := cmpRows(a, b); c != 0 {
+				return c
+			}
+			return int(a - b) // stable
 		})
 	}()
 	if aborted != nil {

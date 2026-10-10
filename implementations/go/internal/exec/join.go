@@ -26,9 +26,25 @@ func (c *joinCounter) emit() error {
 	return nil
 }
 
+// rowArena hands out row copies carved from larger slabs of values (one
+// allocation per slab instead of one per row).
+type rowArena struct{ slab []types.Value }
+
+func (a *rowArena) copy(row types.Row) types.Row {
+	n := len(row)
+	if len(a.slab) < n || n == 0 {
+		a.slab = make([]types.Value, max(256*n, 1))
+	}
+	cp := a.slab[:n:n]
+	a.slab = a.slab[n:]
+	copy(cp, row)
+	return cp
+}
+
 // materialize copies all rows of an operator, accounting their memory.
 func materialize(ec *Context, op Operator) ([]types.Row, error) {
 	var rows []types.Row
+	var arena rowArena
 	for n := 0; ; n++ {
 		row, err := op.Next()
 		if err != nil {
@@ -42,7 +58,7 @@ func materialize(ec *Context, op Operator) ([]types.Row, error) {
 				return nil, err
 			}
 		}
-		cp := append(types.Row(nil), row...)
+		cp := arena.copy(row)
 		if err := ec.Mem.Reserve(RowSize(cp)); err != nil {
 			return nil, err
 		}
