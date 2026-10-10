@@ -356,29 +356,49 @@ func (s *sortOp) sortAll() error {
 		}
 		s.rows = append(s.rows, cp)
 	}
-	s.rows = sortStable(s.keys, s.rows)
-	return nil
+	sorted, err := sortStable(s.ec, s.keys, s.rows)
+	s.rows = sorted
+	return err
 }
+
+// sortAborted carries a cancellation out of a running sort.
+type sortAborted struct{ err error }
 
 // sortStable sorts rows by keys, keeping arrival order among equal rows. It
 // uses pattern-defeating quicksort over row positions (O(n log n)) with the
-// original position as the final tie-breaker.
-func sortStable(keys []sortKey, rows []types.Row) []types.Row {
+// original position as the final tie-breaker. The sort checks for
+// cancellation every checkEvery comparisons.
+func sortStable(ec *Context, keys []sortKey, rows []types.Row) (out []types.Row, err error) {
 	idx := make([]int32, len(rows))
 	for i := range idx {
 		idx[i] = int32(i)
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			abort, ok := r.(sortAborted)
+			if !ok {
+				panic(r)
+			}
+			out, err = nil, abort.err
+		}
+	}()
+	comparisons := 0
 	slices.SortFunc(idx, func(a, b int32) int {
+		if comparisons++; comparisons%checkEvery == 0 {
+			if err := ec.Check(); err != nil {
+				panic(sortAborted{err})
+			}
+		}
 		if c := compareRows(keys, rows[a], rows[b]); c != 0 {
 			return c
 		}
 		return int(a - b)
 	})
-	out := make([]types.Row, len(rows))
+	out = make([]types.Row, len(rows))
 	for i, k := range idx {
 		out[i] = rows[k]
 	}
-	return out
+	return out, nil
 }
 
 // topHeap is a max-heap (by sort order, ties broken by arrival) holding the

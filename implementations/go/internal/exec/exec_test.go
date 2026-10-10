@@ -1,8 +1,10 @@
 package exec
 
 import (
+	"context"
 	"testing"
 
+	"polyquery/internal/errs"
 	"polyquery/internal/types"
 )
 
@@ -86,5 +88,27 @@ func TestKeyCanonicalization(t *testing.T) {
 	}
 	if string(appendKey(nil, types.NullValue, types.Int64)) == string(appendKey(nil, types.IntValue(0), types.Int64)) {
 		t.Error("NULL must differ from 0")
+	}
+}
+
+func TestSortStableCancellation(t *testing.T) {
+	rows := make([]types.Row, 50000)
+	for i := range rows {
+		rows[i] = types.Row{types.IntValue(int64((i * 7919) % 50000))}
+	}
+	keys := []sortKey{{index: 0, typ: types.Int64}}
+	sorted, err := sortStable(&Context{Ctx: context.Background()}, keys, rows)
+	if err != nil || len(sorted) != len(rows) {
+		t.Fatalf("sort: %v", err)
+	}
+	for i := 1; i < len(sorted); i++ {
+		if sorted[i-1][0].I > sorted[i][0].I {
+			t.Fatalf("not sorted at %d", i)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := sortStable(&Context{Ctx: ctx}, keys, rows); !errs.Is(err, errs.Cancelled) {
+		t.Fatalf("cancelled sort: got %v, want CANCELLED", err)
 	}
 }
