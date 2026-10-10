@@ -1,0 +1,107 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase3-python-a1-20261010T201612Z",
+ "language": "python",
+ "task": "phase3",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase3",
+ "prompt_sha256": "6ff7bf4fb6281e91af812790bddd8f5713482c8391ae951cfc73b98083063f09",
+ "session_id": "48be8ba8-c430-4c4b-a304-f8f284af7843",
+ "tokens": {
+  "input": 178,
+  "output": 139816,
+  "cache_read": 17569790,
+  "cache_creation": 284554,
+  "thinking": null,
+  "thinking_estimated": 65347,
+  "source": "result events",
+  "api_messages": 89
+ },
+ "rate_limit": {
+  "events": 12,
+  "max_utilization": {
+   "five_hour": 0.64,
+   "seven_day": 0.12
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 8.587422,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 94,
+ "result_segments": 1,
+ "assistant_messages": 196,
+ "tool_calls": {
+  "Bash": 85,
+  "Write": 7,
+  "Edit": 1
+ },
+ "tool_calls_total": 93,
+ "tool_failures": 1,
+ "build_invocations": 18,
+ "build_failures_heuristic": 4,
+ "conformance_runs": 7,
+ "conformance_progress": [
+  [
+   411,
+   554
+  ],
+  [
+   554,
+   554
+  ],
+  [
+   554,
+   554
+  ],
+  [
+   554,
+   554
+  ],
+  [
+   554,
+   554
+  ],
+  [
+   554,
+   554
+  ],
+  [
+   554,
+   554
+  ]
+ ],
+ "repair_iterations": 6,
+ "time": {
+  "wall_seconds": 1310.1,
+  "model_api_seconds": 1231.6,
+  "tool_seconds": 78.5,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 6,
+  "files_changed": 19,
+  "lines_added": 2682,
+  "lines_removed": 114,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 3 is done: the conformance runner reports 0 failures, 0 errors and 0 not-implemented cases for phases 1\u20133. `make build test` passes from a clean tree and everything is committed.\n\n## Test results\n```\nphase 1: 225/225 pass, 0 fail, 0 error, 0 not implemented\nphase 2: 186/186 pass, 0 fail, 0 error, 0 not implemented\nphase 3: 143/143 pass, 0 fail, 0 error, 0 not implemented\nTOTAL: 554/554 pass\n```\nThere are 87 unit tests in total; 22 are new, covering storage, indexes and planning. I also ran some one-off checks:\n- **Byte-exact interop:** re-saving the reference golden files gives byte-identical PLAIN and DICT chunks. RLE differs only in the values stored for NULL slots, which the spec says readers ignore.\n- **Round trips:** 420 save/open combinations (every generated fixture \u00d7 encoding \u00d7 row-group size \u00d7 eager/mmap/row layout) returned exactly the source rows, in order.\n- **Indexes and skipping:** 43 predicates gave identical results with indexes on and off, on in-memory tables, memory-mapped files and row-layout tables.\n- **Crash safety:** I killed the engine with SIGKILL at random points during repeated saves of a 100k-row table. The target always opened with exactly the expected contents.\n- **Corrupt files:** 2,000 randomly damaged files never caused an internal error or wrong data.\n\n## What I implemented (in `implementations/python/`)\n- **Row and column layouts:** selected with the `layout` option (default `column`). The column layout stores typed arrays with a null bitmap, and STRING columns are dictionary-encoded automatically when they have few distinct values, or always with `dictionary: true`.\n- **PQCF v1 files:**\n  - **Writer:** PLAIN, DICT and RLE encodings, CRC-32 checksums, and an atomic temp-file \u2192 fsync \u2192 rename \u2192 fsync-directory sequence.\n  - **Reader:** checks every structural and value rule in the spec. Without `mmap` it verifies all chunks at `open`; with `mmap` it decodes and verifies each chunk when it is first read.\n- **Statistics:** exact per-column null count, distinct count, min and max, computed when first needed; exposed by the `stats` op.\n- **Indexes:** `HASH` (a dictionary) and `BTREE` (a sorted list searched by bisection). Index names are global; indexes are saved in the file and rebuilt on `open`, and dropping or replacing a table drops its indexes.\n- **Planning:**\n  - **Index choice:** follows the spec's 10% selectivity rule; `use_indexes: false` turns indexes off.\n  - **Row-group skipping:** for tables opened from files, groups whose min/max rule out a match are not read.\n  - **Column pruning:** now also works through derived tables and CTEs.\n  - **Join build side:** hash joins build on the smaller estimated input.\n  - **EXPLAIN:** shows an `IndexScan` node and row estimates.\n\n## Decisions you should know about (documented in the README)\n- **Index rule on tiny tables:** I use an index when its estimated selectivity is \u226410%, **or** when it is expected to return at most 2 rows. The public suite expects an index for `city = 'Espoo'` on an 8-row table, where the plain 10% rule gives 25%. This is my guess at matching that; the reference engine's actual rule is unknown, so hidden tests could disagree on small tables.\n- **Subqueries in EXPLAIN:** subquery plans are now listed under `children` (marked `\"subquery\": true`) so that test assertions which walk the plan tree also see their scans.\n- **Save target paths:** saving to a symlink writes to the link's target; saving to a directory returns `IO_ERROR`. This fixes a bug I found where saving to a symlinked directory replaced the link itself.\n- **Leftover temp files:** temp files left by a crashed save are removed by the next save to the same file.\n\n## Known limitations\n- **Row-group skipping only for files:** tables loaded from CSV/JSON have no min/max per group, so skipping only happens for tables opened from PQCF files.\n- **Single-table index use:** indexes only help filters on one table. They are not used to speed up joins or to return rows in s",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
