@@ -6,9 +6,10 @@
    "clojure",
    "rust",
    "python",
-   "go"
+   "go",
+   "common-lisp"
   ],
-  "files_written": 141,
+  "files_written": 169,
   "write_errors": 0,
   "read_failures": 0,
   "passed": true
@@ -1135,6 +1136,230 @@
    "content_ok": true
   },
   {
+   "writer": "common-lisp",
+   "table": "people",
+   "mode": "plain",
+   "path": "out/common-lisp__people__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "people",
+   "mode": "dict",
+   "path": "out/common-lisp__people__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "people",
+   "mode": "rle",
+   "path": "out/common-lisp__people__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "people",
+   "mode": "auto",
+   "path": "out/common-lisp__people__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "ledger",
+   "mode": "plain",
+   "path": "out/common-lisp__ledger__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "ledger",
+   "mode": "dict",
+   "path": "out/common-lisp__ledger__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "ledger",
+   "mode": "rle",
+   "path": "out/common-lisp__ledger__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "ledger",
+   "mode": "auto",
+   "path": "out/common-lisp__ledger__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "strings",
+   "mode": "plain",
+   "path": "out/common-lisp__strings__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "strings",
+   "mode": "dict",
+   "path": "out/common-lisp__strings__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "strings",
+   "mode": "rle",
+   "path": "out/common-lisp__strings__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "strings",
+   "mode": "auto",
+   "path": "out/common-lisp__strings__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "dates",
+   "mode": "plain",
+   "path": "out/common-lisp__dates__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "dates",
+   "mode": "dict",
+   "path": "out/common-lisp__dates__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "dates",
+   "mode": "rle",
+   "path": "out/common-lisp__dates__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "dates",
+   "mode": "auto",
+   "path": "out/common-lisp__dates__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "tx",
+   "mode": "plain",
+   "path": "out/common-lisp__tx__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "tx",
+   "mode": "dict",
+   "path": "out/common-lisp__tx__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "tx",
+   "mode": "rle",
+   "path": "out/common-lisp__tx__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "tx",
+   "mode": "auto",
+   "path": "out/common-lisp__tx__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "nulls",
+   "mode": "plain",
+   "path": "out/common-lisp__nulls__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "nulls",
+   "mode": "dict",
+   "path": "out/common-lisp__nulls__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "nulls",
+   "mode": "rle",
+   "path": "out/common-lisp__nulls__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "nulls",
+   "mode": "auto",
+   "path": "out/common-lisp__nulls__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "events",
+   "mode": "plain",
+   "path": "out/common-lisp__events__plain.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "events",
+   "mode": "dict",
+   "path": "out/common-lisp__events__dict.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "events",
+   "mode": "rle",
+   "path": "out/common-lisp__events__rle.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "common-lisp",
+   "table": "events",
+   "mode": "auto",
+   "path": "out/common-lisp__events__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
    "writer": "reference",
    "table": "people",
    "mode": "auto",
@@ -1166,6 +1391,11 @@
     "failures": []
    },
    "go": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "common-lisp": {
     "ok": 28,
     "fail": 0,
     "failures": []
@@ -1202,6 +1432,11 @@
     "fail": 0,
     "failures": []
    },
+   "common-lisp": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
    "reference": {
     "ok": 1,
     "fail": 0,
@@ -1230,6 +1465,11 @@
     "failures": []
    },
    "go": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "common-lisp": {
     "ok": 28,
     "fail": 0,
     "failures": []
@@ -1266,6 +1506,11 @@
     "fail": 0,
     "failures": []
    },
+   "common-lisp": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
    "reference": {
     "ok": 1,
     "fail": 0,
@@ -1294,6 +1539,48 @@
     "failures": []
    },
    "go": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "common-lisp": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "reference": {
+    "ok": 1,
+    "fail": 0,
+    "failures": []
+   }
+  },
+  "common-lisp": {
+   "java": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "clojure": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "rust": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "python": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "go": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "common-lisp": {
     "ok": 28,
     "fail": 0,
     "failures": []
