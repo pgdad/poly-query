@@ -11,6 +11,7 @@ import polyquery.plan.BoundExprs;
 import polyquery.plan.ExprFormatter;
 import polyquery.plan.LogicalPlan;
 import polyquery.plan.SortKey;
+import polyquery.plan.Subquery;
 import polyquery.storage.ColumnSchema;
 
 /** Renders a physical plan as the EXPLAIN JSON tree (indexes-and-planning.md §4). */
@@ -24,7 +25,6 @@ public final class PlanExplainer {
 
     public Map<String, Object> explain(PhysicalPlan plan) {
         Map<String, Object> node = new LinkedHashMap<>();
-        List<BoundExpr> exprs = new ArrayList<>();
         switch (plan) {
             case PhysicalPlan.TableScan s -> {
                 node.put("op", "TableScan");
@@ -36,7 +36,6 @@ public final class PlanExplainer {
             case PhysicalPlan.Filter f -> {
                 node.put("op", "Filter");
                 node.put("predicate", ExprFormatter.format(f.predicate()));
-                exprs.add(f.predicate());
             }
             case PhysicalPlan.HashLookupFilter h -> {
                 node.put("op", "HashLookupFilter");
@@ -44,18 +43,15 @@ public final class PlanExplainer {
                 node.put("outer_keys", formatAll(h.outerKeys()));
                 if (h.staticPredicate() != null) {
                     node.put("predicate", ExprFormatter.format(h.staticPredicate()));
-                    exprs.add(h.staticPredicate());
                 }
                 if (h.dynamicPredicate() != null) {
                     node.put("correlated_predicate", ExprFormatter.format(h.dynamicPredicate()));
-                    exprs.add(h.dynamicPredicate());
                 }
             }
             case PhysicalPlan.Project p -> {
                 node.put("op", "Project");
                 node.put("columns", p.names());
                 node.put("expressions", formatAll(p.expressions()));
-                exprs.addAll(p.expressions());
             }
             case PhysicalPlan.HashAggregate a -> {
                 node.put("op", "Aggregate");
@@ -63,12 +59,8 @@ public final class PlanExplainer {
                 List<String> aggs = new ArrayList<>();
                 for (AggregateCall c : a.aggregates()) {
                     aggs.add(aggregate(c));
-                    if (c.argument() != null) {
-                        exprs.add(c.argument());
-                    }
                 }
                 node.put("aggregates", aggs);
-                exprs.addAll(a.groupKeys());
             }
             case PhysicalPlan.HashDistinct d -> node.put("op", "Distinct");
             case PhysicalPlan.HashJoin j -> {
@@ -79,7 +71,6 @@ public final class PlanExplainer {
                 node.put("build_side", "right");
                 if (j.residual() != null) {
                     node.put("residual", ExprFormatter.format(j.residual()));
-                    exprs.add(j.residual());
                 }
             }
             case PhysicalPlan.NestedLoopJoin j -> {
@@ -87,7 +78,6 @@ public final class PlanExplainer {
                 node.put("join_type", j.kind().name());
                 if (j.condition() != null) {
                     node.put("condition", ExprFormatter.format(j.condition()));
-                    exprs.add(j.condition());
                 }
             }
             case PhysicalPlan.Sort s -> {
@@ -111,7 +101,7 @@ public final class PlanExplainer {
             }
         }
         List<Object> subqueries = new ArrayList<>();
-        for (BoundExpr e : exprs) {
+        for (BoundExpr e : PhysicalPlan.expressions(plan)) {
             collectSubqueries(e, subqueries);
         }
         if (!subqueries.isEmpty()) {
@@ -127,14 +117,9 @@ public final class PlanExplainer {
 
     private void collectSubqueries(BoundExpr e, List<Object> out) {
         BoundExprs.any(e, x -> {
-            LogicalPlan sub = switch (x) {
-                case BoundExpr.ScalarSubquery s -> s.subquery().plan();
-                case BoundExpr.Exists s -> s.subquery().plan();
-                case BoundExpr.InSubquery s -> s.subquery().plan();
-                default -> null;
-            };
+            Subquery sub = BoundExprs.subqueryOf(x);
             if (sub != null) {
-                out.add(explain(subqueryPlanner.apply(sub)));
+                out.add(explain(subqueryPlanner.apply(sub.plan())));
             }
             return false;
         });
