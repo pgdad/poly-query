@@ -4,6 +4,7 @@
   (:require [clojure.string :as str]
             [polyquery.errors :as err]
             [polyquery.protocol :as protocol]
+            [polyquery.server :as server]
             [polyquery.util.json :as json]
             [polyquery.util.log :as log])
   (:import (java.io BufferedReader BufferedWriter File InputStreamReader OutputStreamWriter Writer)
@@ -126,6 +127,19 @@
       (json/write-line! out (respond state req)))
     0))
 
+(defn run-serve [cfg]
+  (when-not (:port cfg) (usage-error "serve requires --port N"))
+  (when (> (long (:port cfg)) 65535) (usage-error "--port must be at most 65535"))
+  (server/run-server (protocol/make-state (engine-config cfg))
+                     {:host (or (:host cfg) "127.0.0.1")
+                      :port (:port cfg)
+                      :workers (let [w (long (or (:workers cfg) 0))]
+                                 (if (pos? w) w (.availableProcessors (Runtime/getRuntime))))
+                      :queue-depth (or (:queue-depth cfg) 64)
+                      :query-timeout-ms (or (:query-timeout-ms cfg) 0)
+                      :shutdown-grace-ms (or (:shutdown-grace-ms cfg) 10000)
+                      :max-request-bytes (or (:max-request-bytes cfg) (* 1024 1024 1024))}))
+
 (defn- print-json [v]
   (let [out (stdout-writer)]
     (json/write-line! out v)
@@ -143,7 +157,7 @@
         "capabilities" (print-json (protocol/capabilities-info))
         "session" (run-session cfg)
         "exec" (run-exec cfg)
-        "serve" (do (log/error "serve mode (HTTP, Phase 4) is not implemented by this engine") 1)))
+        "serve" (run-serve cfg)))
     (catch clojure.lang.ExceptionInfo e
       (cond
         (::usage (ex-data e))

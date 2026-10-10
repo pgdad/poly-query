@@ -19,27 +19,23 @@
 
 (set! *warn-on-reflection* true)
 
-(defn- collect-rows
-  "Reduces the rows into a vector of JSON-ready rows, enforcing max-rows.
-  With count-only? the rows are counted but not serialized."
-  [rows columns qctx max-rows count-only?]
+(defn- serialized-rows
+  "Reducible of the result rows serialized per types.md §9 (one Object[]
+  per row, or nil per row with count-only?), enforcing max-rows."
+  [rows columns max-rows count-only?]
   (let [types (mapv :type columns)
         ncols (count types)
         max-rows (long (or max-rows Long/MAX_VALUE))]
-    (persistent!
-     (reduce (fn [acc ^objects row]
-               (when (>= (count acc) max-rows)
-                 (err/fail! "RESOURCE_LIMIT" (str "result exceeds max_rows (" max-rows ")")))
-               (when (zero? (rem (count acc) 4096))
-                 (ctx/reserve! qctx (* 4096 (ctx/row-bytes ncols))))
-               (conj! acc (if count-only?
-                            nil
-                            (let [out (object-array ncols)]
-                              (dotimes [i ncols]
-                                (aset out i (v/value->json (nth types i) (aget row i))))
-                              out))))
-             (transient [])
-             rows))))
+    (eduction
+     (map-indexed (fn [^long i ^objects row]
+                    (when (>= i max-rows)
+                      (err/fail! "RESOURCE_LIMIT" (str "result exceeds max_rows (" max-rows ")")))
+                    (when-not count-only?
+                      (let [out (object-array ncols)]
+                        (dotimes [i ncols]
+                          (aset out i (v/value->json (nth types i) (aget row i))))
+                        out))))
+     rows)))
 
 (defn- plan-options
   [opts]
@@ -70,19 +66,36 @@
   (let [env {:ctx qctx :cells (atom {}) :build ops/build :max-join-rows (:max-join-rows opts)}]
     (ops/build plan env)))
 
-(defn- run-plan
+(defn- open-plan
   [{:keys [kind plan]} opts]
   (let [qctx (ctx/make-context opts)]
     (if (= kind :explain)
-      (let [text (json/write-str (explain/plan->json plan))]
-        {:columns [{"name" "plan" "type" "STRING"}]
-         :rows (if (:count-only? opts) [nil] [[text]])
-         :row-count 1})
-      (let [rows (collect-rows (execute plan qctx opts) (:columns plan) qctx
-                               (:max-rows opts) (:count-only? opts))]
-        {:columns (table/columns-json (:columns plan))
-         :rows rows
-         :row-count (count rows)}))))
+      {:columns [{"name" "plan" "type" "STRING"}]
+       :rows (serialized-rows [(object-array [(json/write-str (explain/plan->json plan))])]
+                              [{:type :string}] (:max-rows opts) (:count-only? opts))
+       :ctx qctx}
+      {:columns (table/columns-json (:columns plan))
+       :rows (serialized-rows (execute plan qctx opts) (:columns plan)
+                              (:max-rows opts) (:count-only? opts))
+       :ctx qctx})))
+
+(defn collect
+  "Materializes an opened statement (see open-statement!) into
+  {:columns :rows [serialized rows] :row-count n}, accounting the result
+  against the query's memory budget."
+  [{:keys [columns rows ctx]}]
+  (let [ncols (count columns)
+        out (persistent!
+             (reduce (fn [acc row]
+                       (when (zero? (rem (count acc) 4096))
+                         (ctx/check! ctx)
+                         (ctx/reserve! ctx (* 4096 (ctx/row-bytes ncols))))
+                       (conj! acc row))
+                     (transient [])
+                     rows))]
+    {:columns columns :rows out :row-count (count out)}))
+
+(defn- run-plan [planned opts] (collect (open-plan planned opts)))
 
 (defn run-query
   "Executes one SQL query against a catalog snapshot. opts:
@@ -116,17 +129,26 @@
       catalog
       (catalog/drop-index catalog index-name))))
 
-(def ^:private statement-result {:columns [] :rows [] :row-count 0})
+(defn open-statement!
+  "Prepares one SQL statement against the catalog atom: index statements
+  update the catalog atomically (and yield an empty result), queries and
+  EXPLAIN are analyzed and planned on a snapshot of the catalog. Errors
+  detectable before execution are thrown here. Returns {:columns
+  [{\"name\" \"type\"}] :rows reducible-of-serialized-rows :ctx query-context};
+  the rows are computed while they are reduced. Same options as run-query
+  (plus :cancel-flag/:deadline-ns, see polyquery.exec.context)."
+  [catalog-atom ^String sql opts]
+  (let [analyzed (analyze @catalog-atom sql opts)
+        empty-result (fn [] {:columns [] :rows [] :ctx (ctx/make-context opts)})]
+    (case (:kind analyzed)
+      :create-index (do (catalog/update! catalog-atom (create-index analyzed)) (empty-result))
+      :drop-index (do (catalog/update! catalog-atom (drop-index analyzed)) (empty-result))
+      (open-plan {:kind (:kind analyzed)
+                  :plan (physical/plan-query (:query analyzed) (plan-options opts))}
+                 opts))))
 
 (defn execute!
-  "Executes one SQL statement against the catalog atom: index statements
-  update the catalog atomically, queries run on a snapshot. Same options and
-  result as run-query."
+  "Executes one SQL statement against the catalog atom (see open-statement!).
+  Same options and result as run-query."
   [catalog-atom ^String sql opts]
-  (let [analyzed (analyze @catalog-atom sql opts)]
-    (case (:kind analyzed)
-      :create-index (do (catalog/update! catalog-atom (create-index analyzed)) statement-result)
-      :drop-index (do (catalog/update! catalog-atom (drop-index analyzed)) statement-result)
-      (run-plan {:kind (:kind analyzed)
-                 :plan (physical/plan-query (:query analyzed) (plan-options opts))}
-                opts))))
+  (collect (open-statement! catalog-atom sql opts)))

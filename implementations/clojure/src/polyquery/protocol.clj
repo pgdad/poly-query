@@ -1,7 +1,8 @@
 (ns polyquery.protocol
   "Protocol request handling (spec/protocol/protocol.md §4-§6): request
   validation, dispatch of operations and construction of response objects.
-  Transport-independent: used by the session and exec CLI modes."
+  Transport-independent: used by the session and exec CLI modes and by the
+  HTTP server."
   (:require [clojure.string :as str]
             [polyquery.catalog :as catalog]
             [polyquery.engine :as engine]
@@ -26,7 +27,8 @@
   ["phase1" "ingest.csv" "ingest.json" "ingest.jsonl" "sql.basic" "test.functions"
    "phase2" "sql.groupby" "sql.join" "sql.functions" "sql.subquery" "sql.cte"
    "sql.correlated_subquery"
-   "phase3" "storage.pqcf" "storage.mmap" "index.hash" "index.btree"])
+   "phase3" "storage.pqcf" "storage.mmap" "index.hash" "index.btree"
+   "phase4" "http.streaming"])
 
 (defn version-info []
   {"ok" true
@@ -114,14 +116,18 @@
       (invalid! "option 'dictionary' must be a boolean"))
     {:layout (keyword layout) :dictionary dictionary}))
 
-(defmethod handle-op "load" [{:keys [config catalog]} req]
+(defmethod handle-op "load"
+  ;; Besides "path"/"data", the HTTP server passes a raw request body as
+  ;; ::data-bytes (a byte array; not expressible in JSON requests).
+  [{:keys [config catalog]} req]
   (let [tname (field req "table" non-empty-string? "a non-empty string" true)
         fmt (field req "format" string? "a string" true)
         _ (when-not (#{"csv" "json" "jsonl"} fmt)
             (invalid! (str "unknown format '" fmt "'")))
         path (field req "path" string? "a string" false)
         data (field req "data" string? "a string" false)
-        _ (when (= (some? path) (some? data))
+        data-bytes (get req ::data-bytes)
+        _ (when-not (= 1 (count (filter some? [path data data-bytes])))
             (invalid! "exactly one of 'path' or 'data' is required"))
         schema (some-> (field req "schema" vector? "an array" false) parse-schema)
         options (or (field req "options" map? "an object" false) {})
@@ -136,9 +142,10 @@
         storage (storage-options options)
         _ (when (and (= fmt "csv") (not header?) (nil? schema))
             (invalid! "CSV without header requires an explicit schema"))
-        source (if path
-                 {:file (resolve-path (:data-dir config) path)}
-                 {:text data})
+        source (cond
+                 path {:file (resolve-path (:data-dir config) path)}
+                 data-bytes {:bytes data-bytes}
+                 :else {:text data})
         _ (when (and (not replace?) (catalog/lookup @catalog tname))
             (err/fail! "ALREADY_EXISTS" (str "table '" tname "' already exists") {"table" tname}))
         tbl (stats/with-stats
@@ -178,21 +185,32 @@
    :join (get opts "join" "auto")})
 
 (defn- engine-options
-  "Engine options of a query/explain request."
-  [config req]
-  (assoc (query-options (or (field req "options" map? "an object" false) {}))
-         :test-functions? (:test-functions? config)
-         :max-join-rows (:max-join-rows (:limits config))
-         :memory-budget-bytes (* 1024 1024 (long (:max-query-memory-mb (:limits config))))))
+  "Engine options of a query/explain request. A server controlling the query
+  from outside puts :cancel-flag/:deadline-ns (polyquery.exec.context) into
+  the state's :query-control."
+  [{:keys [config query-control]} req]
+  (merge (query-options (or (field req "options" map? "an object" false) {}))
+         {:test-functions? (:test-functions? config)
+          :max-join-rows (:max-join-rows (:limits config))
+          :memory-budget-bytes (* 1024 1024 (long (:max-query-memory-mb (:limits config))))}
+         query-control))
 
-(defmethod handle-op "query" [{:keys [config catalog]} req]
+(defn open-query
+  "Validates a query request and opens its statement (engine/open-statement!):
+  returns {:columns :rows reducible :ctx :count-only?}. Throws for invalid
+  requests and for errors detectable before execution."
+  [{:keys [catalog] :as state} req]
   (let [sql (field req "sql" string? "a string" true)
-        opts (engine-options config req)
-        started (System/nanoTime)
-        result (engine/execute! catalog sql opts)
+        opts (engine-options state req)]
+    (assoc (engine/open-statement! catalog sql opts) :count-only? (:count-only? opts))))
+
+(defmethod handle-op "query" [state req]
+  (let [started (System/nanoTime)
+        opened (open-query state req)
+        result (engine/collect opened)
         elapsed-us (quot (- (System/nanoTime) started) 1000)]
     (cond-> {"columns" (:columns result)}
-      (not (:count-only? opts)) (assoc "rows" (:rows result))
+      (not (:count-only? opened)) (assoc "rows" (:rows result))
       true (assoc "row_count" (:row-count result)
                   "stats" {"elapsed_us" elapsed-us}))))
 
@@ -293,9 +311,9 @@
     (Thread/sleep (long ms))
     {}))
 
-(defmethod handle-op "explain" [{:keys [config catalog]} req]
+(defmethod handle-op "explain" [{:keys [catalog] :as state} req]
   (let [sql (field req "sql" string? "a string" true)]
-    {"plan" (engine/explain-plan @catalog sql (engine-options config req))}))
+    {"plan" (engine/explain-plan @catalog sql (engine-options state req))}))
 
 (defmethod handle-op :default [_ req]
   (invalid! (str "unknown op '" (get req "op") "'")))

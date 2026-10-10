@@ -11,12 +11,17 @@
                          ^AtomicLong memory-used])
 
 (defn make-context
-  "timeout-ms: 0 = none; memory-budget-bytes: per-query budget."
-  [{:keys [timeout-ms memory-budget-bytes]}]
-  (->QueryContext (if (and timeout-ms (pos? (long timeout-ms)))
+  "timeout-ms: 0 = none; memory-budget-bytes: per-query budget. A server
+  controlling the query from outside passes :cancel-flag (an AtomicBoolean
+  it may set) and :deadline-ns (absolute System/nanoTime deadline, 0 = none),
+  which take precedence over timeout-ms."
+  [{:keys [timeout-ms memory-budget-bytes cancel-flag deadline-ns]}]
+  (->QueryContext (cond
+                    deadline-ns (long deadline-ns)
+                    (and timeout-ms (pos? (long timeout-ms)))
                     (+ (System/nanoTime) (* 1000000 (long timeout-ms)))
-                    0)
-                  (AtomicBoolean. false)
+                    :else 0)
+                  (or cancel-flag (AtomicBoolean. false))
                   (long (or memory-budget-bytes Long/MAX_VALUE))
                   (AtomicLong. 0)))
 
