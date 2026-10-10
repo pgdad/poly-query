@@ -257,7 +257,8 @@ def canon(resp, ordered):
         return ("error", resp["error"]["code"])
     rows = [tuple(row) for row in resp["rows"]]
     if not ordered:
-        rows.sort(key=lambda r: [("%.5g" % v) if isinstance(v, float) else json.dumps(v) for v in r])
+        rows.sort(key=lambda r: [("%.5g" % v) if isinstance(v, float) else json.dumps(v) for v in r]
+                  + [json.dumps(v) for v in r])
     return ("ok", [c["type"] for c in resp["columns"]], rows)
 
 
