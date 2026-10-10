@@ -321,7 +321,10 @@ parameters. Returns (values SUBQUERY parameter-expressions)."
                              (setf params (append params (list e))
                                    k (1- (length params))))
                            (make-b-param (bexpr-type e) (subquery-param-env sq) k
-                                         (ast-column-ref-name node))))))))
+                                         (typecase e
+                                           (b-column (b-column-name e))
+                                           (b-param (b-param-name e))
+                                           (t (ast-column-ref-name node))))))))))
     (let ((bq (let ((*subquery-stack* (cons sq *subquery-stack*)))
                 (bind-query query-ast (env-with env :outer resolver :relations '())))))
       (setf (subquery-query sq) bq
