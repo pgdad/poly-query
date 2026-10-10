@@ -52,11 +52,6 @@ public final class Table {
         return -1;
     }
 
-    /** Same data under a different name. */
-    public Table renamed(String newName) {
-        return new Table(newName, columns, data, rowCount);
-    }
-
     public static String key(String name) {
         return Names.key(name);
     }

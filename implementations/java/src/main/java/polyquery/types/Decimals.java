@@ -151,10 +151,6 @@ public final class Decimals {
         return BigDecimal.valueOf(unscaled, scale).doubleValue();
     }
 
-    public static BigDecimal toBigDecimal(long unscaled, int scale) {
-        return BigDecimal.valueOf(unscaled, scale);
-    }
-
     /** Converts a finite double, rounding half away from zero, to the given precision/scale. */
     public static long fromDouble(double d, int precision, int scale) {
         BigDecimal bd = new BigDecimal(Double.toString(d)).setScale(scale, RoundingMode.HALF_UP);

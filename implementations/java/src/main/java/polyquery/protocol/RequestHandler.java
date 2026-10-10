@@ -52,8 +52,7 @@ public final class RequestHandler {
         Object id = req.get("id");
         long start = System.nanoTime();
         try {
-            String resp = dispatch(req, id, start);
-            return resp;
+            return dispatch(req, id, start);
         } catch (PolyQueryException e) {
             log.debug("request failed: " + e.code() + ": " + e.getMessage());
             return error(id, e);

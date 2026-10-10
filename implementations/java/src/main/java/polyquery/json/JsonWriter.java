@@ -23,7 +23,6 @@ public final class JsonWriter {
             case Integer i -> sb.append(i.intValue());
             case Double d -> sb.append(d == 0.0 ? "0.0" : Double.toString(d));
             case JsonNumber n -> sb.append(n.text());
-            case RawJson r -> sb.append(r.json());
             case Map<?, ?> m -> {
                 sb.append('{');
                 boolean first = true;
@@ -91,9 +90,5 @@ public final class JsonWriter {
         String h = Integer.toHexString(c);
         sb.repeat('0', 4 - h.length());
         sb.append(h);
-    }
-
-    /** Pre-serialized JSON fragment. */
-    public record RawJson(String json) {
     }
 }

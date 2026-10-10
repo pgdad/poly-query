@@ -1,6 +1,7 @@
 package polyquery.ingest;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -116,8 +117,8 @@ public final class JsonIngest {
                 throw IngestErrors.ingest("duplicate column name '" + key + "'", record);
             }
             if (col >= row.length) {
-                row = java.util.Arrays.copyOf(row, names.size());
-                seen = java.util.Arrays.copyOf(seen, names.size());
+                row = Arrays.copyOf(row, names.size());
+                seen = Arrays.copyOf(seen, names.size());
             }
             if (seen[col]) {
                 throw IngestErrors.ingest("duplicate key '" + key + "'", record);

@@ -2,6 +2,7 @@ package polyquery.sql.parser;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.sql.ast.Expr;
@@ -149,7 +150,7 @@ public final class Parser {
                 Token k = peek();
                 if (k.is(TokenType.IDENT) && (k.text().equalsIgnoreCase("HASH") || k.text().equalsIgnoreCase("BTREE"))) {
                     next();
-                    kind = k.text().toUpperCase(java.util.Locale.ROOT);
+                    kind = k.text().toUpperCase(Locale.ROOT);
                 } else {
                     throw error(k, "expected HASH or BTREE but found " + k.describe());
                 }

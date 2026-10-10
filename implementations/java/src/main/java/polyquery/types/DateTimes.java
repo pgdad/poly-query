@@ -89,10 +89,6 @@ public final class DateTimes {
         return day * MICROS_PER_DAY + ((hh * 60L + mm) * 60L + ss) * MICROS_PER_SECOND + micros;
     }
 
-    public static boolean isDateSyntax(String s) {
-        return parseDate(s) != null;
-    }
-
     public static String formatDate(int epochDay) {
         LocalDate d = LocalDate.ofEpochDay(epochDay);
         StringBuilder sb = new StringBuilder(10);
