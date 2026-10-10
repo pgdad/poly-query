@@ -17,8 +17,9 @@
 
 (let ((warnings 0))
   (handler-bind ((warning (lambda (w)
-                            (unless (typep w 'style-warning) (incf warnings))
-                            (format *error-output* "~&WARNING: ~A~%" w))))
+                            (unless (typep w 'sb-kernel:redefinition-warning)
+                              (unless (typep w 'style-warning) (incf warnings))
+                              (format *error-output* "~&WARNING: ~A~%" w)))))
     (asdf:load-system "polyquery"))
   (when (and (plusp warnings) (uiop:getenv "POLYQUERY_STRICT"))
     (format *error-output* "~&build failed: ~D warnings~%" warnings)

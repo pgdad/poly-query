@@ -66,11 +66,14 @@
         (t :string)))
 
 (defun infer-text-column-type (texts)
-  "Infer the type of a column from its non-null trimmed texts (a sequence)."
+  "Infer the type of a column from its field texts (a sequence of strings and
+NULL markers). Texts are trimmed; texts empty after trimming are not considered."
   (let ((mask +cand-all+) (any nil))
     (map nil (lambda (s)
                (when (and (stringp s) (plusp mask))
-                 (setf any t)
-                 (setf mask (text-candidates (trim-spaces-tabs s) mask))))
+                 (let ((text (trim-spaces-tabs s)))
+                   (when (plusp (length text))
+                     (setf any t)
+                     (setf mask (text-candidates text mask))))))
          texts)
     (if any (candidates-to-type mask) :string)))

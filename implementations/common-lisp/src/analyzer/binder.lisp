@@ -49,7 +49,10 @@
                 for i from 0
                 when (ascii-string-equal (column-def-name c) name)
                   do (push (cons rel i) matches))))
-    (cond ((null matches)
+    (cond ((and (null matches) (member (bind-env-clause env) '("LIMIT" "OFFSET") :test #'string=))
+           (bind-error-at node "SEMANTIC_ERROR" "~A must be a constant expression"
+                          (bind-env-clause env)))
+          ((null matches)
            (bind-error-at node "SEMANTIC_ERROR" "unknown column ~A" name))
           ((rest matches)
            (bind-error-at node "SEMANTIC_ERROR" "ambiguous column ~A" name))

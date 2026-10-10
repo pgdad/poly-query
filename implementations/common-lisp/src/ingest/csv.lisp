@@ -82,11 +82,14 @@ and its 1-based record number."
              (funcall fn (nreverse fields) record-no))))))))
 
 (defun field-text-for-type (field type)
-  "Text to convert for a non-NULL FIELD in a column of TYPE, or NIL for NULL."
+  "Text to convert for FIELD in a column of TYPE, or NIL for NULL. For
+non-STRING types the text is trimmed, and a field that is empty after
+trimming is NULL (consistent with inference, ingestion.md §1.1)."
   (cond ((null field) nil)
         ((eq field :quoted-empty) (if (eq type :string) "" nil))
         ((eq type :string) field)
-        (t (trim-spaces-tabs field))))
+        (t (let ((text (trim-spaces-tabs field)))
+             (if (zerop (length text)) nil text)))))
 
 (defun convert-text-column (fields type column-name first-record &key explicit)
   "Convert a vector of CSV fields to a SIMPLE-VECTOR of values of TYPE.
@@ -130,7 +133,6 @@ types always convert)."
          (cond
            ((and header-p (null header))
             (setf header (mapcar (lambda (f) (if (stringp f) f "")) fields))
-            (when (= record-no 1) (setf first-data-record 2))
             (init-columns (length header)))
            (t
             (unless (= (length fields) ncols)

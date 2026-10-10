@@ -78,8 +78,6 @@ are later replaced by _colN."
 (defun constant-int-clause (node what test-functions)
   "Evaluate a LIMIT/OFFSET expression: a constant non-negative INT64."
   (when node
-    (when (ast-node-contains-column-ref-p node)
-      (bind-error-at node "SEMANTIC_ERROR" "~A must be a constant expression" what))
     (let* ((env (make-bind-env :clause what :test-functions test-functions))
            (e (bind-expr node env)))
       (unless (member (bexpr-type e) '(:int64 :null))
@@ -88,19 +86,6 @@ are later replaced by _colN."
         (cond ((null-value-p v) nil)
               ((minusp v) (bind-error-at node "INVALID_ARGUMENT" "~A must not be negative" what))
               (t v))))))
-
-(defun ast-node-contains-column-ref-p (node)
-  "Conservative syntactic check used for constant-only clauses."
-  (typecase node
-    (ast-column-ref t)
-    (ast-unary (ast-node-contains-column-ref-p (ast-unary-operand node)))
-    (ast-binary (or (ast-node-contains-column-ref-p (ast-binary-left node))
-                    (ast-node-contains-column-ref-p (ast-binary-right node))))
-    (ast-not (ast-node-contains-column-ref-p (ast-not-operand node)))
-    (ast-cast (ast-node-contains-column-ref-p (ast-cast-operand node)))
-    (ast-function (some #'ast-node-contains-column-ref-p (ast-function-args node)))
-    (ast-is-null (ast-node-contains-column-ref-p (ast-is-null-operand node)))
-    (t nil)))
 
 ;;; ------------------------------------------------------------------
 ;;; Aggregation analysis (semantics.md §5)
