@@ -63,6 +63,7 @@ func (p *planner) subqueries(exprs ...plan.Expr) error {
 				return
 			}
 			saved := p.params
+			p.params = nil
 			if len(sq.Correlated) > 0 {
 				p.params = with(saved)
 				for _, c := range sq.Correlated {
