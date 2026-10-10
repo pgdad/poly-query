@@ -421,10 +421,10 @@ Main effects, in order of impact:
 * **GC pause** (all modes). Q8 vectorized went from 2,878 to 775 ms, row
   mode Q2 from 783 to 456 ms. Most of the old engine's Q8 / Q9 time was
   garbage collection.
-* **Vectorized execution** is 1.4–2.5× faster than row mode, and up to
+* **Vectorized execution** is 1.3–2.4× faster than row mode, and up to
   13× faster than the old engine (Q2). The gains come from C-level kernels,
   columnar group state and positional joins.
-* **Parallel pipelines** (forked workers) give a further 1.5–2.4× at 4–8
+* **Parallel pipelines** (forked workers) give a further 1.6–2.2× at 4–8
   threads for scans, filters, joins and low-cardinality aggregation (Q1,
   Q2, Q4, Q6, Q7, Q10). They give little for high-cardinality grouping
   (Q3: merging 100k-group partial states in the parent is serial), full
