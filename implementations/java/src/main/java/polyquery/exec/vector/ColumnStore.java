@@ -4,12 +4,14 @@ import java.util.List;
 import polyquery.storage.ColumnSchema;
 
 /**
- * Growable columnar storage of materialized rows (one vector per slot, plain representation),
- * used by blocking operators (hash join build side, sort).
+ * Growable columnar storage of materialized rows (one vector per slot), used by blocking
+ * operators (hash join build side, sort). A STRING column stays dictionary-encoded as long as
+ * all its input batches share one dictionary (the usual case for in-memory tables).
  */
 final class ColumnStore {
     private final List<ColumnSchema> schema;
     private final Vec[] cols;
+    private final boolean[] populated;
     private int rows;
     private int capacity;
 
@@ -17,9 +19,11 @@ final class ColumnStore {
         this.schema = schema;
         this.capacity = 64;
         this.cols = new Vec[schema.size()];
+        this.populated = new boolean[cols.length];
         for (int c = 0; c < cols.length; c++) {
             cols[c] = new Vec(schema.get(c).type(), capacity);
             cols[c].nullMask(capacity);
+            cols[c].hasNulls = false; // set once a NULL is stored
         }
     }
 
@@ -27,8 +31,9 @@ final class ColumnStore {
         return rows;
     }
 
+    /** The stored values of a slot, or null if the input never filled it (nobody reads it). */
     Vec column(int slot) {
-        return cols[slot];
+        return populated[slot] ? cols[slot] : null;
     }
 
     /** Appends the rows at positions {@code keep[0..m)} of {@code b}; returns the first new row index. */
@@ -45,12 +50,17 @@ final class ColumnStore {
             Vec dst = cols[c];
             Vec src = b.cols[c];
             if (src == null) {
-                for (int k = 0; k < m; k++) {
-                    dst.nulls[start + k] = true; // a slot nobody reads
-                }
-            } else {
-                gather(src, keep, m, dst, start);
+                continue; // a slot nobody reads
             }
+            populated[c] = true;
+            if (dst.kind == Vec.Kind.DICT && (src.kind != Vec.Kind.DICT || src.dict != dst.dict)) {
+                decode(dst, start);
+            } else if (start == 0 && src.kind == Vec.Kind.DICT && dst.kind == Vec.Kind.OBJECT) {
+                dst.toDict(src.dict, capacity);
+            }
+            boolean hadNulls = dst.hasNulls;
+            gather(src, keep, m, dst, start);
+            dst.hasNulls = hadNulls || src.hasNulls && anyTrue(dst.nulls, start, m);
         }
         rows = need;
         return start;
@@ -81,6 +91,25 @@ final class ColumnStore {
         return total;
     }
 
+    private static boolean anyTrue(boolean[] a, int from, int n) {
+        for (int i = from; i < from + n; i++) {
+            if (a[i]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Switches a dictionary column to plain strings (rows {@code 0..n-1} decoded). */
+    private void decode(Vec v, int n) {
+        String[] dict = v.dict;
+        int[] codes = v.codes;
+        v.toObjects(capacity);
+        for (int i = 0; i < n; i++) {
+            v.objects[i] = v.nulls[i] ? null : dict[codes[i]];
+        }
+    }
+
     /** A new store with rows {@code perm[0..count)} of this one, in that order. */
     ColumnStore select(int[] perm, int count) {
         ColumnStore out = new ColumnStore(schema);
@@ -91,7 +120,15 @@ final class ColumnStore {
             }
         }
         for (int c = 0; c < cols.length; c++) {
+            if (!populated[c]) {
+                continue;
+            }
+            out.populated[c] = true;
+            if (cols[c].kind == Vec.Kind.DICT) {
+                out.cols[c].toDict(cols[c].dict, out.capacity);
+            }
             gather(cols[c], perm, 0, count, out.cols[c], 0);
+            out.cols[c].hasNulls = cols[c].hasNulls;
         }
         out.rows = count;
         return out;
@@ -102,8 +139,20 @@ final class ColumnStore {
         gather(src, idx, 0, m, dst, at);
     }
 
-    /** {@code dst[at + k] = src[idx[from + k]]} for k in [0, m) (null mask of dst prepared). */
+    /**
+     * {@code dst[at + k] = src[idx[from + k]]} for k in [0, m) (null mask of dst prepared). A
+     * dictionary source is copied as codes when {@code dst} uses the same dictionary or when
+     * {@code at == 0} (dst then switches to that dictionary), else decoded.
+     */
     static void gather(Vec src, int[] idx, int from, int m, Vec dst, int at) {
+        if (src.kind == Vec.Kind.DICT && at == 0 && (dst.kind != Vec.Kind.DICT || dst.dict != src.dict)) {
+            dst.toDict(src.dict, Math.max(m, dst.nulls.length));
+        } else if (src.kind != Vec.Kind.DICT && dst.kind == Vec.Kind.DICT) {
+            if (at != 0) {
+                throw new IllegalStateException("plain strings appended to a dictionary column");
+            }
+            dst.toObjects(Math.max(m, dst.nulls.length));
+        }
         boolean[] dn = dst.nulls;
         if (src.hasNulls) {
             boolean[] sn = src.nulls;
@@ -136,8 +185,18 @@ final class ColumnStore {
                 }
             }
             case DICT -> {
-                String[] dict = src.dict;
                 int[] s = src.codes;
+                if (dst.kind == Vec.Kind.DICT && dst.dict == src.dict) {
+                    int[] d = dst.codes;
+                    for (int k = 0; k < m; k++) {
+                        d[at + k] = s[idx[from + k]];
+                    }
+                    return;
+                }
+                if (dst.kind == Vec.Kind.DICT) {
+                    throw new IllegalStateException("dictionary mismatch in gather");
+                }
+                String[] dict = src.dict;
                 Object[] d = dst.objects;
                 for (int k = 0; k < m; k++) {
                     d[at + k] = dn[at + k] ? null : dict[s[idx[from + k]]];

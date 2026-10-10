@@ -81,6 +81,7 @@ final class JoinBatches {
         private final ExecContext ctx;
         private ColumnStore store;
         private GroupKeys keys;
+        private LongIndex longIndex;
         private int[] first;
         private int[] last;
         private int[] next;
@@ -91,16 +92,36 @@ final class JoinBatches {
             this.ctx = ctx;
         }
 
+        /** Stored values of a build slot, or null if no consumer reads it. */
         Vec column(int slot) {
             return store.column(slot);
         }
 
-        GroupKeys keys() {
-            return keys;
+        /** Per-probe lookup state (a private view of the key table), or null if none is needed. */
+        GroupKeys prober() {
+            return keys == null ? null : keys.prober();
         }
 
-        int first(int key) {
-            return first[key];
+        /**
+         * For the active rows of a probe batch with key vectors {@code kv}: the first build row
+         * with an equal key (NULL keys never match), or -1, written to {@code heads} by position.
+         */
+        void heads(Vec[] kv, int[] sel, int n, int size, int[] heads, GroupKeys prober) {
+            if (longIndex != null) {
+                Vec v = kv[0];
+                long[] x = v.longs;
+                for (int kk = 0; kk < n; kk++) {
+                    int i = sel == null ? kk : sel[kk];
+                    heads[i] = v.isNull(i) ? -1 : longIndex.head(x[i]);
+                }
+                return;
+            }
+            prober.lookup(kv, sel, n, size, heads, false);
+            for (int kk = 0; kk < n; kk++) {
+                int i = sel == null ? kk : sel[kk];
+                int g = heads[i];
+                heads[i] = g < 0 ? -1 : first[g];
+            }
         }
 
         int next(int row) {
@@ -109,7 +130,9 @@ final class JoinBatches {
 
         /** Consumes the build input completely (raising its deferred error, if any, at the end). */
         void build(BatchOperator input, BatchExprs keyExprs, long[] factors, DataType[] keyTypes) {
-            keys = new GroupKeys(keyTypes);
+            boolean singleLong = keyTypes.length == 1 && Vec.kindOf(keyTypes[0]) == Vec.Kind.LONG;
+            keys = singleLong ? null : new GroupKeys(keyTypes);
+            longIndex = singleLong ? new LongIndex() : null;
             store = new ColumnStore(schema);
             first = new int[16];
             Arrays.fill(first, -1);
@@ -129,15 +152,26 @@ final class JoinBatches {
                             gids = new int[Math.max(b.size, 16)];
                             keep = new int[gids.length];
                         }
-                        keys.groupIds(kv, b.sel, b.count, b.size, gids);
-                        int m = 0;
-                        for (int k = 0; k < b.count; k++) {
-                            int i = b.pos(k);
-                            if (!keys.hasNull(gids[i])) {
-                                keep[m++] = i;
+                        if (longIndex != null) {
+                            int m = 0;
+                            for (int k = 0; k < b.count; k++) {
+                                int i = b.pos(k);
+                                if (!kv[0].isNull(i)) {
+                                    keep[m++] = i;
+                                }
                             }
+                            appendLong(b, keep, m, kv[0]);
+                        } else {
+                            keys.groupIds(kv, b.sel, b.count, b.size, gids);
+                            int m = 0;
+                            for (int k = 0; k < b.count; k++) {
+                                int i = b.pos(k);
+                                if (!keys.hasNull(gids[i])) {
+                                    keep[m++] = i;
+                                }
+                            }
+                            append(b, keep, m, gids);
                         }
-                        append(b, keep, m, gids);
                     }
                     if (b.error != null) {
                         throw b.error;
@@ -146,6 +180,19 @@ final class JoinBatches {
             } finally {
                 input.close();
             }
+        }
+
+        private void appendLong(Batch b, int[] keep, int m, Vec key) {
+            int start = store.append(b, keep, m);
+            if (next.length < store.rows()) {
+                next = Arrays.copyOf(next, Math.max(store.rows(), next.length * 2));
+            }
+            for (int k = 0; k < m; k++) {
+                longIndex.add(key.longs[keep[k]], start + k, next);
+            }
+            long bytes = ColumnStore.estimate(b, keep, m) + 32L * m;
+            ctx.reserve(bytes);
+            reserved += bytes;
         }
 
         private void append(Batch b, int[] keep, int m, int[] gids) {
@@ -182,6 +229,85 @@ final class JoinBatches {
             reserved = 0;
             store = null;
             keys = null;
+            longIndex = null;
+        }
+    }
+
+    /**
+     * Open-addressing hash index from a single 64-bit join key to the chain of build rows with
+     * that key: the key is stored inline in its slot (linear probing, multiplicative hashing),
+     * so a probe usually costs a single cache miss.
+     */
+    static final class LongIndex {
+        private long[] keys = new long[64];
+        private int[] heads = new int[64];
+        private int[] tails = new int[64];
+        private int shift = 64 - 6;
+        private int mask = 63;
+        private int size;
+
+        LongIndex() {
+            Arrays.fill(heads, -1);
+        }
+
+        private int slot(long key) {
+            return (int) ((key * 0x9E3779B97F4A7C15L) >>> shift);
+        }
+
+        /** Appends build row {@code row} to the chain of {@code key} ({@code next} links the chain). */
+        void add(long key, int row, int[] next) {
+            int s = slot(key);
+            while (heads[s] >= 0 && keys[s] != key) {
+                s = (s + 1) & mask;
+            }
+            next[row] = -1;
+            if (heads[s] < 0) {
+                keys[s] = key;
+                heads[s] = row;
+                tails[s] = row;
+                if (++size * 2 > heads.length) {
+                    grow();
+                }
+            } else {
+                next[tails[s]] = row;
+                tails[s] = row;
+            }
+        }
+
+        /** First build row with this key, or -1. */
+        int head(long key) {
+            int s = slot(key);
+            while (true) {
+                int h = heads[s];
+                if (h < 0 || keys[s] == key) {
+                    return h;
+                }
+                s = (s + 1) & mask;
+            }
+        }
+
+        private void grow() {
+            long[] oldKeys = keys;
+            int[] oldHeads = heads;
+            int[] oldTails = tails;
+            int cap = oldHeads.length * 2;
+            keys = new long[cap];
+            heads = new int[cap];
+            tails = new int[cap];
+            Arrays.fill(heads, -1);
+            mask = cap - 1;
+            shift--;
+            for (int i = 0; i < oldHeads.length; i++) {
+                if (oldHeads[i] >= 0) {
+                    int s = slot(oldKeys[i]);
+                    while (heads[s] >= 0) {
+                        s = (s + 1) & mask;
+                    }
+                    keys[s] = oldKeys[i];
+                    heads[s] = oldHeads[i];
+                    tails[s] = oldTails[i];
+                }
+            }
         }
     }
 
@@ -277,7 +403,7 @@ final class JoinBatches {
                 counter.reset();
                 table.build(buildInput, buildKeys, buildFactors, keyTypes);
             }
-            keys = table.keys().prober();
+            keys = table.prober();
             input.open();
             cur = null;
             done = false;
@@ -294,7 +420,7 @@ final class JoinBatches {
                 if (gids.length < b.size) {
                     gids = new int[Math.max(b.size, 16)];
                 }
-                keys.lookup(kv, b.sel, b.count, b.size, gids, false);
+                table.heads(kv, b.sel, b.count, b.size, gids, keys);
             }
         }
 
@@ -326,8 +452,7 @@ final class JoinBatches {
                     }
                     int i = cur.pos(k);
                     if (chain == -2) {
-                        int g = gids[i];
-                        chain = g < 0 ? -1 : table.first(g);
+                        chain = gids[i];
                     }
                     if (chain >= 0) {
                         entryPos[m] = i;
@@ -384,9 +509,25 @@ final class JoinBatches {
             for (int c = 0; c < buildWidth; c++) {
                 Vec src = table.column(c);
                 int slot = buildSlot(c);
+                if (src == null) {
+                    out.cols[slot] = null;
+                    continue;
+                }
                 Vec dst = outVec(slot);
                 boolean[] nm = dst.nullMask(capacity);
-                if (leftOuter) {
+                if (leftOuter && src.kind == Vec.Kind.DICT) {
+                    if (dst.kind != Vec.Kind.DICT || dst.dict != src.dict) {
+                        dst.toDict(src.dict, capacity);
+                    }
+                    for (int e = 0; e < m; e++) {
+                        int r = entryRow[e];
+                        nm[e] = r < 0 || src.isNull(r);
+                        dst.codes[e] = r < 0 ? 0 : src.codes[r];
+                    }
+                } else if (leftOuter) {
+                    if (dst.kind == Vec.Kind.DICT) {
+                        dst.toObjects(capacity);
+                    }
                     for (int e = 0; e < m; e++) {
                         int r = entryRow[e];
                         if (r < 0) {

@@ -55,11 +55,11 @@ final class SortBatches {
             cols[j] = store.column(keys.get(j).column());
             desc[j] = keys.get(j).descending();
             nullsFirst[j] = keys.get(j).nullsFirst();
-            if (cols[j].kind == Vec.Kind.OBJECT) {
+            if (cols[j].kind == Vec.Kind.OBJECT || cols[j].kind == Vec.Kind.DICT) {
                 long[] p = new long[store.rows()];
                 for (int i = 0; i < p.length; i++) {
                     if (!cols[j].isNull(i)) {
-                        p[i] = prefix((String) cols[j].objects[i]);
+                        p[i] = prefix(cols[j].string(i));
                     }
                 }
                 prefixes[j] = p;
@@ -81,7 +81,7 @@ final class SortBatches {
                     case DOUBLE -> Values.compareDoubles(v.doubles[a], v.doubles[b]);
                     default -> {
                         int pc = Long.compareUnsigned(prefixes[j][a], prefixes[j][b]);
-                        yield pc != 0 ? pc : Values.compareStrings((String) v.objects[a], (String) v.objects[b]);
+                        yield pc != 0 ? pc : Values.compareStrings(v.string(a), v.string(b));
                     }
                 };
                 if (c != 0) {
@@ -99,11 +99,14 @@ final class SortBatches {
      */
     static int[] sort(ColumnStore store, List<SortKey> keys, ExecContext ctx) {
         int n = store.rows();
+        if (n == 0) {
+            return new int[0];
+        }
         SortKey first = keys.getFirst();
         Vec v = store.column(first.column());
         long[] sortedKeys = new long[n];
         int[] idx = radix(v, n, first, sortedKeys, ctx);
-        if (keys.size() == 1 && v.kind != Vec.Kind.OBJECT) {
+        if (keys.size() == 1 && (v.kind == Vec.Kind.LONG || v.kind == Vec.Kind.DOUBLE)) {
             return idx; // the radix key is the whole sort key
         }
         RowOrder order = order(store, keys);
@@ -132,7 +135,7 @@ final class SortBatches {
                 long bits = Double.doubleToLongBits(d == 0.0 ? 0.0 : d);
                 yield bits < 0 ? ~bits : bits ^ Long.MIN_VALUE;
             }
-            default -> prefix((String) v.objects[i]);
+            default -> prefix(v.string(i));
         };
     }
 
@@ -336,9 +339,15 @@ final class SortBatches {
             }
             int n = Math.min(batchSize, end - pos);
             for (int c = 0; c < out.cols.length; c++) {
+                Vec src = store.column(c);
+                if (src == null) {
+                    out.cols[c] = null; // a slot nobody reads
+                    continue;
+                }
                 Vec dst = out.cols[c];
                 dst.nullMask(batchSize);
-                ColumnStore.gather(store.column(c), perm, pos, n, dst, 0);
+                ColumnStore.gather(src, perm, pos, n, dst, 0);
+                dst.hasNulls = src.hasNulls;
             }
             pos += n;
             out.reset(n);
