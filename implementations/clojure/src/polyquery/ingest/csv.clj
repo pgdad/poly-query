@@ -127,14 +127,13 @@
                    (when-not (= (.size fields) ncols)
                      (c/ingest-error! (str "record " record " has " (.size fields) " fields, expected " ncols)
                                       {"record" record}))
-                   (dotimes [i ncols] (.add ^ArrayList (aget buffers i) (.get fields i)))
+                   (dotimes [i ncols] (.add ^ArrayList (nth buffers i) (.get fields i)))
                    (when (zero? (rem rows 65536)) (c/check-row-limit! (inc rows) limits))
                    (recur (inc record) (inc rows)))
                  rows))
         _ (c/check-row-limit! rows limits)
         types (if schema
                 (mapv :type schema)
-                (mapv #(c/infer-text-type (aget buffers %)) (range ncols)))
-        data (mapv (fn [i] (c/convert-text-column (aget buffers i) (nth types i) (nth names i) first-record))
-                   (range ncols))]
+                (mapv c/infer-text-type buffers))
+        data (mapv #(c/convert-text-column %1 %2 %3 first-record) buffers types names)]
     (table/make-table name (c/make-columns names types) data rows)))

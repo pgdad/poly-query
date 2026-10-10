@@ -88,7 +88,7 @@
 (defn dec->double ^double [^long v ^long s]
   (if (zero? s)
     (double v)
-    (.doubleValue (dec->bigdec v s))))
+    (.doubleValue ^BigDecimal (dec->bigdec v s))))
 
 (defn bigdec->unscaled
   "Rescales a BigDecimal to scale s (round half away from zero) and returns the

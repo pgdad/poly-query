@@ -118,7 +118,6 @@
   (mapv table/->Column names types))
 
 (defn new-column-buffers
-  ^"[Ljava.util.ArrayList;" [^long n]
-  (let [arr (make-array ArrayList n)]
-    (dotimes [i n] (aset ^"[Ljava.util.ArrayList;" arr i (ArrayList.)))
-    arr))
+  "A vector of n empty ArrayLists collecting raw column values."
+  [^long n]
+  (vec (repeatedly n #(ArrayList.))))

@@ -1,5 +1,6 @@
 #!/bin/sh
 # PolyQuery launcher: runs the AOT-compiled engine (build with `make build`).
+# Extra JVM options can be passed via POLYQUERY_JAVA_OPTS (e.g. -Xmx8g).
 set -e
 HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(dirname -- "$HERE")"
@@ -9,9 +10,6 @@ if [ ! -f "$CP_FILE" ] || [ ! -d "$ROOT/target/classes" ]; then
   exit 1
 fi
 JAVA="${JAVA_HOME:+$JAVA_HOME/bin/}java"
-CDS=""
-if [ -f "$ROOT/target/polyquery.jsa" ]; then
-  CDS="-XX:SharedArchiveFile=$ROOT/target/polyquery.jsa"
-fi
-exec "$JAVA" -Xss16m -XX:+UseParallelGC -XX:TieredStopAtLevel=4 $CDS -Xlog:disable -Xlog:all=warning:stderr \
+# -Xlog settings keep JVM warnings off stdout, which carries the protocol.
+exec "$JAVA" -Xss16m -XX:+UseParallelGC -Xlog:disable -Xlog:all=warning:stderr \
   ${POLYQUERY_JAVA_OPTS:-} -cp "$ROOT/target/classes:$(cat "$CP_FILE")" polyquery.main "$@"
