@@ -119,6 +119,19 @@ func TestExecutionModesAgree(t *testing.T) {
 		"SELECT grp FROM t WHERE id IN (SELECT grp FROM d) ORDER BY grp",
 		"SELECT COUNT(*) FROM t WHERE NULL",
 		"SELECT id FROM t WHERE TRUE AND id < 3",
+		"SELECT COUNT(*), SUM(amount), MAX(cat) FROM t WHERE id < 0",
+		"SELECT grp, COUNT(*) FROM t WHERE id < 0 GROUP BY grp",
+		"SELECT id FROM t ORDER BY id LIMIT 0",
+		"SELECT id FROM t ORDER BY id DESC LIMIT 5 OFFSET 2990",
+		"SELECT COUNT(*) FROM t JOIN d ON CAST(t.grp AS INT64) = d.grp",
+		"SELECT COUNT(*) FROM t CROSS JOIN d WHERE t.id < 10",
+		"SELECT id FROM t WHERE EXISTS (SELECT 1 FROM d WHERE d.grp = t.id) ORDER BY id",
+		"SELECT id, (SELECT MAX(label) FROM d WHERE d.grp = t.id % 13) FROM t WHERE id < 40",
+		"SELECT d.label, (SELECT COUNT(*) FROM t WHERE t.cat = 'red') FROM d",
+		"SELECT t.id FROM t LEFT JOIN d ON CAST(t.grp AS INT64) = d.grp WHERE d.grp IS NULL AND t.id < 100",
+		"SELECT cat, SUM(price) FILTERED FROM t GROUP BY cat",
+		"SELECT COALESCE(grp, 'none'), NULLIF(cat, 'red'), ROUND(price, 1) FROM t WHERE id % 97 = 0",
+		"WITH x AS (SELECT grp, COUNT(*) AS n FROM t GROUP BY grp) SELECT a.grp, a.n + b.n FROM x a JOIN x b ON a.grp = b.grp",
 	}
 	for _, q := range queries {
 		want := canonical(e, q, modeConfig{"row", "hash", 1, true})
