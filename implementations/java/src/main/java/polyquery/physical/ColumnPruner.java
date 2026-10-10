@@ -1,5 +1,6 @@
 package polyquery.physical;
 
+import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.List;
 import polyquery.plan.AggregateCall;
@@ -42,11 +43,19 @@ final class ColumnPruner {
                         h.staticPredicate(), h.dynamicPredicate());
             }
             case PhysicalPlan.Project p -> {
+                // Outputs nobody reads are not computed if computing them cannot fail (a plain
+                // column or literal); their slots become NULL so the columns need not be read.
                 BitSet need = new BitSet();
-                for (BoundExpr e : p.expressions()) {
-                    addReferences(e, need);
+                List<BoundExpr> exprs = new ArrayList<>(p.expressions());
+                for (int i = 0; i < exprs.size(); i++) {
+                    BoundExpr e = exprs.get(i);
+                    if (!required.get(i) && (e instanceof BoundExpr.ColumnRef || e instanceof BoundExpr.Literal)) {
+                        exprs.set(i, new BoundExpr.Literal(null, e.type()));
+                    } else {
+                        addReferences(e, need);
+                    }
                 }
-                yield new PhysicalPlan.Project(prune(p.input(), need), p.expressions(), p.names());
+                yield new PhysicalPlan.Project(prune(p.input(), need), exprs, p.names());
             }
             case PhysicalPlan.HashAggregate a -> {
                 BitSet need = new BitSet();
