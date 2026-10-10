@@ -107,6 +107,8 @@
                  (advance)
                  (when (member (peek) '(#\+ #\-)) (advance))
                  (scan-digits))
+               (when (and (peek) (ident-char-p (peek)))
+                 (parse-error-at tline tcol "invalid numeric literal"))
                (emit (if integral :integer :number) (subseq sql start i) tline tcol)))
             (t
              (let* ((tline line) (tcol (col))

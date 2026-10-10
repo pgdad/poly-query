@@ -390,14 +390,18 @@ AST-CREATE-INDEX or AST-DROP-INDEX."
        (next-token p)
        (let ((op (if (string= (token-value tok) "-") :neg :pos)))
          (with-depth (p)
-           ;; Fold a minus sign directly applied to an integer literal so that
-           ;; -9223372036854775808 is representable (types.md §3).
-           (if (and (eq op :neg) (eq (token-kind (current p)) :integer))
-               (let ((lit (next-token p)))
+           ;; Fold a minus sign applied to an (unsigned, possibly parenthesized)
+           ;; integer literal so that -9223372036854775808 is representable
+           ;; (types.md §3).
+           (let ((operand (parse-unary p)))
+             (if (and (eq op :neg)
+                      (ast-literal-p operand)
+                      (eq (ast-literal-kind operand) :integer)
+                      (char/= (char (ast-literal-value operand) 0) #\-))
                  (apply #'make-ast-literal :kind :integer
-                                           :value (concatenate 'string "-" (token-value lit))
-                                           (pos-args tok)))
-               (apply #'make-ast-unary :op op :operand (parse-unary p) (pos-args tok))))))
+                                           :value (concatenate 'string "-" (ast-literal-value operand))
+                                           (pos-args tok))
+                 (apply #'make-ast-unary :op op :operand operand (pos-args tok)))))))
       (t (parse-primary p)))))
 
 (defun parse-primary (p)

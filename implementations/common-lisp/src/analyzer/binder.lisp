@@ -96,7 +96,7 @@
          (unless d (bind-error-at node "CONVERSION_ERROR" "invalid DATE literal '~A'" v))
          (make-b-literal :date d)))
       (:timestamp
-       (let ((ts (parse-timestamp-text v :allow-date-only t)))
+       (let ((ts (parse-timestamp-text v)))
          (unless ts (bind-error-at node "CONVERSION_ERROR" "invalid TIMESTAMP literal '~A'" v))
          (make-b-literal :timestamp ts))))))
 
@@ -122,6 +122,9 @@
                      (type-name-string (bexpr-type right))))
     (let ((lk (type-kind lt)) (rk (type-kind rt)))
       (cond
+        ((and (null-type-p (bexpr-type left)) (null-type-p (bexpr-type right)))
+         ;; Nothing determines a type: the result keeps the null type.
+         (make-b-literal :null +null+))
         ((and (eq lk :int64) (eq rk :int64))
          (make-b-op :int64 op (list (implicit-cast left :int64) (implicit-cast right :int64))))
         ((eq op :%)
@@ -159,9 +162,10 @@
     (unless (numeric-type-p type)
       (bind-error-at node "TYPE_ERROR" "unary ~A expects a numeric operand"
                      (if (eq (ast-unary-op node) :neg) "-" "+")))
-    (if (eq (ast-unary-op node) :pos)
-        (implicit-cast operand type)
-        (make-b-op type :neg (list (implicit-cast operand type))))))
+    (cond
+      ((null-type-p (bexpr-type operand)) operand)
+      ((eq (ast-unary-op node) :pos) (implicit-cast operand type))
+      (t (make-b-op type :neg (list (implicit-cast operand type)))))))
 
 (defun bind-binary (node env)
   (let* ((op (ast-binary-op node))
@@ -201,7 +205,9 @@
             (unless (numeric-type-p ty)
               (bind-error-at node "TYPE_ERROR" "SUM expects a numeric argument, got ~A"
                              (type-name-string arg-type)))
-            (if (decimal-type-p ty) (make-decimal-type 18 (decimal-scale ty)) ty)))
+            (cond ((null-type-p arg-type) :null)
+                  ((decimal-type-p ty) (make-decimal-type 18 (decimal-scale ty)))
+                  (t ty))))
     (:avg (unless (numeric-type-p (arithmetic-operand-type arg-type))
             (bind-error-at node "TYPE_ERROR" "AVG expects a numeric argument, got ~A"
                            (type-name-string arg-type)))

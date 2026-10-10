@@ -37,8 +37,9 @@ fractional digits than SCALE is :INVALID (ingestion is exact)."
                    (values v :ok)
                    (values nil :overflow)))))))
 
-(defun text-to-value (s type &key (rounding nil))
-  "Convert already-trimmed text S to a value of TYPE."
+(defun text-to-value (s type &key (rounding nil) (date-as-timestamp t))
+  "Convert already-trimmed text S to a value of TYPE. DATE-AS-TIMESTAMP accepts
+a bare date for TIMESTAMP (ingestion does; CAST requires timestamp syntax)."
   (ecase (type-kind type)
     (:boolean (text-to-boolean s))
     (:int64 (text-to-int64 s))
@@ -48,7 +49,7 @@ fractional digits than SCALE is :INVALID (ingestion is exact)."
     (:string (values s :ok))
     (:date (let ((d (parse-date-text s)))
              (if d (values d :ok) (values nil :invalid))))
-    (:timestamp (let ((ts (parse-timestamp-text s :allow-date-only t)))
+    (:timestamp (let ((ts (parse-timestamp-text s :allow-date-only date-as-timestamp)))
                   (if ts (values ts :ok) (values nil :invalid))))))
 
 ;;; ------------------------------------------------------------------
@@ -101,7 +102,7 @@ fractional digits than SCALE is :INVALID (ingestion is exact)."
         ((eq k :string) (fn (value-to-text v from)))
         ((eq f :string)
          (fn (let ((s (trim-whitespace v)))
-               (multiple-value-bind (value status) (text-to-value s to :rounding t)
+               (multiple-value-bind (value status) (text-to-value s to :rounding t :date-as-timestamp nil)
                  (ecase status
                    (:ok value)
                    (:overflow (overflow-error "value ~S out of range for ~A" s (type-name-string to)))

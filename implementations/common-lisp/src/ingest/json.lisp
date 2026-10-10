@@ -41,7 +41,11 @@
         ((or (eq v :true) (eq v :false)) :boolean)
         ((integerp v) (if (int64-p v) :int :float))
         ((jnum-p v) :float)
-        ((stringp v) :string)
+        ((stringp v)
+         (when (and (> (length v) (floor +max-field-bytes+ 4))
+                    (> (length (sb-ext:string-to-octets v :external-format :utf-8)) +max-field-bytes+))
+           (ingest-error "field longer than 16 MiB"))
+         :string)
         (t (ingest-error "nested objects or arrays are not supported as values"))))
 
 (defun json-number-text (v)
@@ -104,8 +108,8 @@
                         :fail))
                    ((stringp v)
                     (case kind
-                      ((:date :timestamp :string) (from-text v))
-                      ((:int64 :float64 :decimal) (from-text (trim-spaces-tabs v)))
+                      (:string (from-text v))
+                      ((:date :timestamp :int64 :float64 :decimal) (from-text (trim-spaces-tabs v)))
                       (t :fail)))
                    (t (ingest-error "nested objects or arrays are not supported as values")))))
       (if (eq result :fail) (fail) result))))

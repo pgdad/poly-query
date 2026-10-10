@@ -127,9 +127,13 @@ values into a common representation and the type kind to compare as."
                ((:int64 :decimal)
                 (let ((shift (- (if (decimal-type-p target) (decimal-scale target) 0)
                                 (if (decimal-type-p type) (decimal-scale type) 0))))
-                  (if (zerop shift)
-                      #'identity
-                      (let ((m (pow10 shift))) (lambda (v) (* v m)))))))))
+                  (cond ((and (eq (type-kind type) :int64) (decimal-type-p target))
+                         ;; INT64 -> DECIMAL(18,s) promotion overflows beyond 18 digits
+                         ;; (types.md §2).
+                         (let ((m (pow10 shift)))
+                           (lambda (v) (check-decimal-fits (* v m) +max-decimal-precision+))))
+                        ((zerop shift) #'identity)
+                        (t (let ((m (pow10 shift))) (lambda (v) (* v m))))))))))
       (cond
         ((numeric-type-p ct)
          (values (numeric-normalizer lt ct) (numeric-normalizer rt ct)

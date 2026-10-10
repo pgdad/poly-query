@@ -88,16 +88,28 @@ Phase 5 and leaves room for vectorized operators beside it.
   names are `SEMANTIC_ERROR`. `COUNT(DISTINCT x)` and the other DISTINCT
   aggregates are implemented.
 * Ops `explain`, `save`, `open`, `stats` answer `UNSUPPORTED`; `serve` exits 1.
-* The NULL literal behaves as INT64 in arithmetic (`NULL + 1` is INT64,
-  `NULL / 0` is NULL); an expression of the null type is reported as STRING.
+* A NULL literal combined with a typed operand takes that operand's role
+  (`NULL + 1` is INT64, `NULL / 0` is NULL); when nothing determines a type
+  (`-NULL`, `NULL + NULL`, `SUM(NULL)`) the expression keeps the null type and
+  is reported as STRING.
 * INT64 operands of DECIMAL arithmetic are promoted to DECIMAL(18,0) (so
-  `1.5 * 2` is DECIMAL(18,1)); comparisons between numeric types are exact.
+  `1.5 * 2` is DECIMAL(18,1)). In comparisons an INT64 is promoted to the
+  common DECIMAL(18,s) and, per types.md §2, a value needing more than 18
+  digits at that scale is `NUMERIC_OVERFLOW` (e.g. `INT64_MAX > 0.5`).
+* Unary minus is folded into any unsigned integer literal, also a
+  parenthesized one (`-(9223372036854775808)`). A numeric literal directly
+  followed by an identifier character (`0x10`, `1abc`, `1e`) is a
+  `PARSE_ERROR`.
 * `LIMIT NULL` / `OFFSET NULL` mean "no limit"/"no offset"; a non-INT64
   LIMIT is a `TYPE_ERROR`; ORDER BY ordinal 0 is out of range.
-* CAST from STRING trims ASCII whitespace; `CAST('2024-01-01' AS TIMESTAMP)`
-  is accepted (midnight). FLOAT64 → STRING uses the shortest round-trip text.
+* CAST from STRING trims ASCII whitespace. TIMESTAMP literals and
+  `CAST(... AS TIMESTAMP)` require the full timestamp syntax of types.md §3
+  (a bare date is `CONVERSION_ERROR`); ingestion accepts a DATE text for a
+  TIMESTAMP column as the ingestion spec says. FLOAT64 → STRING uses the
+  shortest round-trip text.
 * `PQ_SLEEP` with a negative argument is `INVALID_ARGUMENT`.
-* CSV: an input without any record (no header) is `INGEST_ERROR`; a
+* CSV: a field that is empty after trimming spaces/tabs is NULL for
+  non-STRING columns and is ignored by inference. An input without any record (no header) is `INGEST_ERROR`; a
   `header: false` load without schema is `INVALID_REQUEST`; an unknown type
   in an explicit schema is `INVALID_REQUEST`; a delimiter must be one ASCII
   character other than `"`, CR, LF. A path naming a directory is `IO_ERROR`.
