@@ -1,7 +1,7 @@
 {
  "schema": "polyquery-project-state/1",
- "updated": "2026-10-10T19:22:23+00:00",
- "current_milestone": "M3",
+ "updated": "2026-10-10T20:15:35+00:00",
+ "current_milestone": "M4",
  "milestones": {
   "M0": {
    "status": "complete",
@@ -13,26 +13,27 @@
   },
   "M2": {
    "status": "complete",
-   "evidence": "bench.py validated at 100k on java/go/clojure (results/performance/20261010T190017Z-100k-harness-validation; digests agree); datasets 10k..10m manifests committed",
-   "open": [
-    "http_suite.py not yet run against a Phase 4 engine"
-   ]
+   "evidence": "bench.py validated at 100k on java/go/clojure (results/performance/20261010T190017Z-100k-harness-validation; digests agree); datasets 10k..10m manifests committed; http_suite validated on clojure phase 4 (18/18) with negative control (go phase 3: 0/18)"
   },
   "M3": {
-   "status": "in_progress",
-   "detail": "phase1/a1: java, go, clojure accepted (249/249 incl. hidden; merged; results/correctness). python, rust, common-lisp still running. phase2/a1 started 19:02Z for java, go, clojure."
+   "status": "complete",
+   "evidence": "All 6 Track A phase1 a1 runs pass 249/249 (public+hidden) in clean sandboxed validation and 225/225 public after merge (results/correctness/*.json). Telemetry (cost USD list price, turns, minutes): {\"go\": [8.25, 70, 25], \"python\": [15.28, 119, 37], \"java\": [8.63, 76, 24], \"common-lisp\": [16.76, 114, 83], \"clojure\": [8.98, 102, 27], \"rust\": [14.53, 103, 106]}"
   },
   "M4": {
-   "status": "not_started"
+   "status": "in_progress",
+   "detail": "accepted: clojure, java, go. running: python, common-lisp, rust"
   },
   "M5": {
-   "status": "not_started"
+   "status": "in_progress",
+   "detail": "accepted: clojure, go (interop clojure<->go 28/28 both ways, crash 0 violations). running: java"
   },
   "M6": {
-   "status": "not_started"
+   "status": "in_progress",
+   "detail": "accepted: clojure (HTTP suite 18/18). running: go"
   },
   "M7": {
-   "status": "not_started"
+   "status": "in_progress",
+   "detail": "running: clojure phase5"
   },
   "M8": {
    "status": "complete",
@@ -46,8 +47,7 @@
   }
  },
  "outstanding_tasks": [
-  "When python/rust/common-lisp phase1 runs and kernel runs finish: re-validate with `pq_orchestrate.py validate <run>` (wave process predates harness fixes HI-002/HI-003), record, import --merge, `just test-language <lang>`; attempt 2 for failures",
-  "Phase 2 for java/go/clojure running; then phase 2 for the rest, phases 3-5",
+  "Per finished run: tools/orchestration/accept.sh <run_id> <next-phase>; after phase 3 also `just test-interop` and `just test-crash <lang>`; after phase 4 `just test-http <lang>`",
   "Run 1m benchmark on a quiet host (no agents running)",
   "Resolve SPEC-Q-001 (INT64 vs DECIMAL comparison overflow) via change control after the current waves",
   "Run http_suite against first Phase 4 engine",
@@ -76,6 +76,6 @@
   "kernels_arm64_native": "pass on spark (scalar, neon, sve; native + asan)",
   "kernels_x86_native": "pass (scalar, avx2, avx512)"
  },
- "last_successful_commit": "7f7295e",
- "next_recommended_action": "Wait for remaining phase1/kernels runs and phase2 (java/go/clojure); re-validate each finished phase1/kernels run with the current orchestrator, then import --merge and run `just test-language <lang>`."
+ "last_successful_commit": "bcac8d6",
+ "next_recommended_action": "Keep accepting finished runs with accept.sh (launching the next phase); when all engines reach phase 5, run 1m benchmarks on a quiet host and generate reports."
 }
