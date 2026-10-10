@@ -3,7 +3,7 @@ into one engine session and times a fixed set of queries under several
 option sets.
 
     python3 tools/bench.py --data /tmp/pqdata/1m [--repeat 3] [--only Q2,Q4]
-        [--variant row] [--variant '{"mode":"vectorized","threads":4}']
+        [--variant row] [--variant '{"mode":"vectorized","threads":4}'] [--engine bin/polyquery]
 
 Each query is run ``--repeat`` times per variant (``result: count``, so
 serialization does not dominate); the median wall time is reported in ms.
@@ -45,6 +45,17 @@ QUERIES = {
     "Q8": "SELECT id, float_key FROM sk ORDER BY float_key, id",
     "Q9": "SELECT tx_id, amount, fee FROM tx WHERE amount > 10",
     "Q10": "SELECT tx_id, amount FROM tx WHERE status = 'approved' AND amount > 5000",
+    # join algorithms (use the 100k scale: nested loops are quadratic)
+    "J1": "SELECT c.segment, COUNT(*), SUM(t.amount) FROM tx t JOIN cust c "
+    "ON c.customer_id = t.customer_id GROUP BY c.segment",
+    "J2": "SELECT p.category, SUM(i.quantity) FROM items i JOIN products p "
+    "ON p.product_id = i.product_id WHERE i.order_id <= 2000 GROUP BY p.category",
+    # join reordering + pushdown (comma joins written in a bad order)
+    "R1": "SELECT p.category, COUNT(*) FROM products p, orders o, items i "
+    "WHERE i.order_id = o.order_id AND i.product_id = p.product_id AND o.status = 'delivered' "
+    "GROUP BY p.category",
+    "J3": "SELECT o.status, COUNT(i.order_id) FROM orders o LEFT JOIN items i "
+    "ON i.order_id = o.order_id AND i.quantity > 8 GROUP BY o.status",
 }
 
 PRESETS = {
@@ -58,9 +69,9 @@ PRESETS = {
 
 
 class Session:
-    def __init__(self, data_dir: str):
+    def __init__(self, data_dir: str, launcher: str):
         self.proc = subprocess.Popen(
-            [str(LAUNCHER), "session", "--data-dir", data_dir],
+            [launcher, "session", "--data-dir", data_dir],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
@@ -91,10 +102,11 @@ def main() -> int:
     ap.add_argument("--only")
     ap.add_argument("--variant", action="append")
     ap.add_argument("--tables", help="comma-separated subset of tables to load")
+    ap.add_argument("--engine", default=str(LAUNCHER), help="launcher to benchmark (default: this engine)")
     args = ap.parse_args()
 
     data = Path(args.data)
-    session = Session(str(data))
+    session = Session(str(data), args.engine)
     wanted = set(args.tables.split(",")) if args.tables else set(TABLES)
     for name, base in TABLES.items():
         if name not in wanted:

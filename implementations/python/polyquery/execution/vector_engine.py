@@ -25,7 +25,9 @@ are only built at the very end (results) or where an algorithm needs them
 from __future__ import annotations
 
 import itertools
+import operator
 from collections import Counter
+from functools import partial
 from itertools import compress, repeat
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
@@ -33,7 +35,6 @@ from ..planner import physical as pp
 from ..planner.access import group_may_match
 from . import parallel
 from .common import (
-    CHECK_INTERVAL_ROWS,
     VECTOR_BATCH_ROWS,
     JoinCounter,
     aligned_keys,
@@ -47,7 +48,9 @@ from .common import (
 from .compiler import Layout
 from .context import ExecutionContext
 from .group_states import GroupState, make_state
-from .vcompiler import VecFn, _is_not_none, compile_vector, take
+from .vcompiler import VecFn, compile_vector, take
+
+_is_not_none = partial(operator.is_not, None)
 
 Columns = list[Sequence[Any]]
 Batch = tuple[Columns, int]
@@ -595,11 +598,21 @@ def _sort(node: pp.Sort | pp.TopN, ctx: ExecutionContext) -> Batches:
     keep = top_count(node, ctx) if isinstance(node, pp.TopN) else None
     if keep == 0:
         return
-    parts = partition_batches(node.input, ctx, lambda batches: _sorted_partition(batches, node, ctx, keep))
+    if keep is None and isinstance(node.input, pp.Gather):
+        # full sort: partitions only collect, the rows are sorted once
+        merged = _Collector(len(node.layout))
+        for part in partition_batches(node.input, ctx, list):
+            for batch in part:
+                merged.add(batch)
+        ctx.reserve_rows(merged.n, len(node.layout))
+        cols, n = _sorted(merged.cols, merged.n, node, None)
+        parts = []
+    else:
+        parts = partition_batches(node.input, ctx, lambda batches: _sorted_partition(batches, node, ctx, keep))
     if len(parts) == 1:
         cols, n = parts[0]
-    else:
-        # sorted runs in partition order: the stable re-sort merges them
+    elif parts:
+        # partial top-Ns in partition order: the stable re-sort merges them
         merged = _Collector(len(node.layout))
         for part in parts:
             merged.add(part)
@@ -647,5 +660,3 @@ _HANDLERS: dict[type, Callable[[Any, ExecutionContext], Batches]] = {
     pp.TopN: _sort,
     pp.Limit: _limit,
 }
-
-__all__ = ["CHECK_INTERVAL_ROWS", "execute", "rows", "to_rows"]

@@ -390,10 +390,10 @@ class Gather(PhysicalNode):
     """Parallel pipeline: ``input`` runs once per partition, each run reading
     a disjoint row range of the ``driver`` scan (the other inputs of joins in
     the pipeline are prepared once and shared). The consumer of a Gather
-    (HashAggregate, Sort, TopN, Distinct) does its partial work per
-    partition and merges the partial results; otherwise the partition
-    outputs are concatenated in partition order, i.e. in the order of a
-    serial scan."""
+    (HashAggregate, TopN, Distinct) does its partial work per partition and
+    merges the partial results; otherwise (also below a full Sort) the
+    partition outputs are concatenated in partition order, i.e. in the order
+    of a serial scan."""
 
     input: PhysicalNode
     partitions: int
@@ -761,37 +761,41 @@ def pipeline_path(node: PhysicalNode) -> list[PhysicalNode] | None:
             return None
 
 
-_PARTIAL_CONSUMERS = (HashAggregate, Sort, TopN, Distinct)
-
-
 # partitions of a parallel pipeline (``threads`` beyond this add no parallelism)
 MAX_PARTITIONS = 64
-# a pipeline at the root is parallelized only if it is expected to return at
-# most this fraction of the rows it scans: every result row of a worker
-# process has to be pickled back to the parent
+# a pipeline whose rows all go back to the parent (at the root, below a full
+# sort) is parallelized only if it is expected to return at most this
+# fraction of the rows it scans: every row of a worker process is pickled
 ROOT_GATHER_MAX_SELECTIVITY = 0.25
 
 
 def parallelize(root: PhysicalNode, partitions: int) -> PhysicalNode:
-    """Inserts Gathers below the operators that can merge partial results
-    (aggregation, sort, top-N, distinct) and at the root when it is a
-    selective pipeline that filters or joins."""
+    """Inserts Gathers below the operators that merge partial results
+    (aggregation, top-N, distinct), and above selective pipelines that
+    filter or join at the root or below a full sort (whose input rows are
+    all returned to the parent anyway)."""
     _parallelize_inputs(root, partitions)
-    path = pipeline_path(root)
+    return _gather_selective(root, partitions)
+
+
+def _gather_selective(node: PhysicalNode, partitions: int) -> PhysicalNode:
+    path = pipeline_path(node)
     if path is None or not any(isinstance(n, (Filter, _Join)) for n in path):
-        return root
-    if root.estimated_rows > ROOT_GATHER_MAX_SELECTIVITY * max(path[-1].estimated_rows, 1.0):
-        return root
-    return _estimated(Gather(root, partitions, path[-1]), root.estimated_rows)
+        return node
+    if node.estimated_rows > ROOT_GATHER_MAX_SELECTIVITY * max(path[-1].estimated_rows, 1.0):
+        return node
+    return _estimated(Gather(node, partitions, path[-1]), node.estimated_rows)
 
 
 def _parallelize_inputs(node: PhysicalNode, partitions: int) -> None:
     for child in node.inputs():
         _parallelize_inputs(child, partitions)
-    if isinstance(node, _PARTIAL_CONSUMERS):
+    if isinstance(node, (HashAggregate, TopN, Distinct)):
         path = pipeline_path(node.input)
         if path is not None:
             node.input = _estimated(Gather(node.input, partitions, path[-1]), node.input.estimated_rows)
+    elif isinstance(node, Sort):
+        node.input = _gather_selective(node.input, partitions)
 
 
 def _estimated(node: PhysicalNode, rows: float) -> PhysicalNode:

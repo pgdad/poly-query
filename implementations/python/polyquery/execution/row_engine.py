@@ -370,15 +370,10 @@ def _distinct(node: pp.Distinct, ctx: ExecutionContext) -> Rows:
             yield row
 
 
-def _sorted_partition(rows: Rows, node: pp.Sort | pp.TopN, ctx: ExecutionContext, keep: int | None) -> list[tuple]:
+def _sorted_partition(rows: Rows, node: pp.Sort | pp.TopN, ctx: ExecutionContext, keep: int) -> list[tuple]:
+    """Top-N of one partition: a buffer of at most ~2N rows, trimmed to the
+    best N whenever it is full."""
     width = len(node.layout)
-    if keep is None:
-        out = list(rows)
-        ctx.reserve_rows(len(out), width)
-        ctx.check()
-        sort_rows(out, node.keys)
-        return out
-    # top-N: a buffer of at most ~2N rows, trimmed to the best N when full
     buffer: list[tuple] = []
     limit = max(2 * keep, 1024)
     for row in rows:
@@ -397,13 +392,19 @@ def _sort(node: pp.Sort | pp.TopN, ctx: ExecutionContext) -> Rows:
     keep = top_count(node, ctx) if isinstance(node, pp.TopN) else None
     if keep == 0:
         return iter(())
+    if keep is None:  # full sort: partitions only collect, the rows are sorted once
+        rows = list(itertools.chain.from_iterable(partition_rows(node.input, ctx, list)))
+        ctx.reserve_rows(len(rows), len(node.layout))
+        ctx.check()
+        sort_rows(rows, node.keys)
+        return iter(rows)
     parts = partition_rows(node.input, ctx, lambda rows: _sorted_partition(rows, node, ctx, keep))
     if len(parts) == 1:
         return iter(parts[0])
-    # sorted runs in partition order: the stable re-sort merges them
+    # partial top-Ns in partition order: the stable re-sort merges them
     rows = list(itertools.chain.from_iterable(parts))
     sort_rows(rows, node.keys)
-    return iter(rows if keep is None else rows[:keep])
+    return iter(rows[:keep])
 
 
 def _limit(node: pp.Limit, ctx: ExecutionContext) -> Rows:

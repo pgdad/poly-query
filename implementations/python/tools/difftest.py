@@ -176,7 +176,44 @@ class QueryGen:
         # comma joins with the conditions in WHERE (join reordering)
         return f"{t1} p, t2 q, t3 w WHERE {cond.split(' AND ')[0]} AND {cond3.split(' AND ')[0]}", aliases
 
+    TEMPLATES = [
+        "SELECT p.id, YEAR(p.d), MONTH(p.d), DAY(p.d), DATE_TRUNC('month', p.d), "
+        "DATE_DIFF('day', p.d, DATE '2024-06-01') FROM {t1} p",
+        "SELECT CONCAT(p.s, p.a, p.b, p.f), REPLACE(p.s, 'b', 'xx'), TRIM(p.s), LENGTH(p.s), LOWER(p.s) FROM {t1} p",
+        "SELECT p.id, CASE p.a WHEN 1 THEN 'one' WHEN {n} THEN 'n' ELSE 'many' END FROM {t1} p",
+        "SELECT p.id FROM {t1} p WHERE p.a NOT IN (SELECT q.x FROM t2 q WHERE q.t1_id < {n}0)",
+        "SELECT p.id FROM {t1} p WHERE p.a NOT IN (SELECT q.t1_id FROM t2 q)",
+        "SELECT p.id, (SELECT q.s FROM t2 q WHERE q.id = p.id) FROM {t1} p",
+        "SELECT p.id, (SELECT q.s FROM t2 q WHERE q.x = p.a) FROM {t1} p WHERE p.id < {n}",
+        "SELECT p.a, SUM(p.b) FROM {t1} p GROUP BY p.a HAVING SUM(p.b) > {n} ORDER BY SUM(p.b) DESC, p.a NULLS FIRST",
+        "SELECT p.s, COUNT(DISTINCT p.a), SUM(DISTINCT p.a), AVG(DISTINCT p.c), MAX(DISTINCT p.d) FROM {t1} p GROUP BY p.s",
+        "SELECT -p.a, ABS(p.c), ROUND(p.b, 1), FLOOR(p.c), CEIL(p.b), SQRT(ABS(p.c)), POWER(p.a, 2), MOD(p.id, 7) FROM {t1} p",
+        "SELECT DISTINCT p.c * 0, p.f FROM {t1} p",
+        "SELECT x.s, x.n, q.id FROM (SELECT p.s, COUNT(*) AS n FROM {t1} p GROUP BY p.s) x JOIN t2 q ON q.s = x.s",
+        "WITH a AS (SELECT id, a FROM {t1} WHERE a > {n}) SELECT x.id, y.id FROM a x JOIN a y ON x.a = y.a",
+        "SELECT p.id FROM {t1} p WHERE EXISTS (SELECT 1 FROM t3 WHERE k > {n})",
+        "SELECT p.id FROM {t1} p WHERE p.a > (SELECT AVG(x) FROM t2)",
+        "SELECT p.id, p.c FROM {t1} p WHERE p.c > (SELECT MIN(z.c) FROM t1 z WHERE z.a = p.a AND z.id < p.id)",
+        "SELECT 1 + {n}, 'x', NULL, CAST('2024-01-01' AS DATE), {n} / 0.5",
+        "SELECT COUNT(*) FROM {t1} p WHERE p.f AND p.a > {n} OR NOT p.f",
+        "SELECT p.id FROM {t1} p ORDER BY p.c DESC, p.id LIMIT {n} OFFSET 3",
+        "SELECT p.s, MAX(p.id) FROM {t1} p GROUP BY p.s ORDER BY 2 DESC LIMIT 2",
+        "SELECT CAST(p.a AS STRING), CAST(p.b AS FLOAT64), CAST(p.c AS DECIMAL(10,3)) FROM {t1} p",
+        "SELECT CAST(p.s AS INT64) FROM {t1} p WHERE p.id < {n}",
+        "SELECT p.id FROM {t1} p WHERE p.s BETWEEN 'a' AND 'b'",
+        "SELECT p.a, COUNT(*) FROM {t1} p LEFT JOIN t2 q ON q.t1_id = p.id GROUP BY p.a HAVING COUNT(q.id) = 0",
+        "SELECT p.id FROM {t1} p WHERE p.a IN (1, {n}) AND p.id IN (SELECT t1_id FROM t2 WHERE s = 'b')",
+        "SELECT p.id, p.a / 2, p.a % 3, p.b / 3, p.c / 7 FROM {t1} p WHERE p.a <> 0",
+        "SELECT SUM(p.a), COUNT(*), MIN(p.s) FROM {t1} p WHERE FALSE",
+        "SELECT p.a, COUNT(*) FROM {t1} p GROUP BY p.a ORDER BY COUNT(*) DESC, p.a LIMIT {n}",
+        "SELECT q.x, w.v, COUNT(*) FROM t2 q LEFT JOIN t3 w ON w.k = q.x AND w.v <> 'one' GROUP BY q.x, w.v",
+        "SELECT p.id, q.id FROM {t1} p JOIN t2 q ON q.t1_id = p.id AND q.x * 2 > p.a OR q.id = p.id",
+    ]
+
     def query(self) -> str:
+        if self.rng.random() < 0.35:
+            sql = self.pick(self.TEMPLATES)
+            return sql.replace("{t1}", self.pick(["t1", "r"])).replace("{n}", str(self.rng.randint(0, 6)))
         frm, aliases = self.from_clause()
         has_where = " WHERE " in frm
         where = ""
