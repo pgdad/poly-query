@@ -345,7 +345,7 @@ func AppendDecimalValue(b []byte, v Value, t Type) []byte {
 	if t.IsWide() {
 		return AppendWide(b, v.Wide(), t.Scale)
 	}
-	return append(b, FormatDecimal(v.I, t.Scale)...)
+	return AppendDecimal(b, v.I, t.Scale)
 }
 
 // DecimalValueToFloat converts a DECIMAL value of type t to the nearest

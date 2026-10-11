@@ -1,6 +1,7 @@
 package types
 
 import (
+	"math"
 	"testing"
 
 	"polyquery/internal/errs"
@@ -177,5 +178,16 @@ func TestTextParsing(t *testing.T) {
 	}
 	if _, st := ParseIntText("9223372036854775808"); st != TextRange {
 		t.Errorf("int overflow not detected")
+	}
+}
+
+func TestAppendDecimalMatchesFormat(t *testing.T) {
+	vals := []int64{0, 1, -1, 5, -5, 12, 123, -123, 1000, 99999, -100000, 1 << 40, math.MaxInt64, math.MinInt64, math.MinInt64 + 1}
+	for _, v := range vals {
+		for s := 0; s <= 18; s++ {
+			if got, want := string(AppendDecimal([]byte("x"), v, s)), "x"+FormatDecimal(v, s); got != want {
+				t.Errorf("AppendDecimal(%d, %d) = %q, want %q", v, s, got, want)
+			}
+		}
 	}
 }

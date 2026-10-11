@@ -21,11 +21,13 @@ import (
 // the output order is the same as with any other strategy.
 
 // scatterMinRows and scatterGroupRatio decide when a worker switches to
-// scattering: after at least scatterMinRows rows, when its table has more
-// than one group per scatterGroupRatio rows.
+// scattering: after at least scatterMinRows (active) rows, when its table
+// has more than scatterGroupRatio groups per row. (Below that, e.g. 10,000
+// groups seen twice on average in the first 16,384 rows, pre-aggregation
+// still reduces the data well over a whole table.)
 const (
-	scatterMinRows    = 1 << 15
-	scatterGroupRatio = 3
+	scatterMinRows    = 1 << 13
+	scatterGroupRatio = 0.75
 )
 
 // aggChunk holds up to BatchSize buffered rows of a partition: key and
@@ -33,14 +35,18 @@ const (
 // positions. Columns are allocated with their final capacity, so appending
 // never copies.
 type aggChunk struct {
-	keys []Vec
-	args []Vec
-	pos  []int64
+	keys   []Vec
+	args   []Vec
+	pos    []int64
+	hashes []uint64 // single STRING key: strKeyHash of the key (else nil)
 }
 
 func newAggChunk(keyClasses, argClasses []vclass, hasArg []bool) *aggChunk {
 	c := &aggChunk{keys: make([]Vec, len(keyClasses)), args: make([]Vec, len(argClasses)),
 		pos: make([]int64, 0, BatchSize)}
+	if len(keyClasses) == 1 && keyClasses[0] == vStr {
+		c.hashes = make([]uint64, 0, BatchSize)
+	}
 	for k, cls := range keyClasses {
 		c.keys[k] = newChunkVec(cls)
 	}
@@ -120,25 +126,28 @@ func newAggScatter(ec *Context, seed maphash.Seed, parts int, keyTypes []types.T
 	return s
 }
 
-// rowPartHash is groupPartHash for the keys of row i.
-func (s *aggScatter) rowPartHash(keys []*Vec, i int) uint64 {
+// rowPartHash is groupPartHash for the keys of row i. For a non-NULL
+// single STRING key it also returns its strKeyHash.
+func (s *aggScatter) rowPartHash(keys []*Vec, i int) (part, strHash uint64) {
 	if len(keys) == 1 && !keys[0].isNull(i) {
 		v := keys[0]
 		switch s.keyClasses[0] {
 		case vInt:
-			return intPartHash(v.I[i])
+			return intPartHash(v.I[i]), 0
 		case vStr:
 			if v.Dict != nil {
-				return strPartHash(strKeyHash(v.Dict[v.Codes[i]]))
+				strHash = strKeyHash(v.Dict[v.Codes[i]])
+			} else {
+				strHash = strKeyHash(v.S[i])
 			}
-			return strPartHash(strKeyHash(v.S[i]))
+			return strPartHash(strHash), strHash
 		}
 	}
 	s.key = s.key[:0]
 	for k, v := range keys {
 		s.key = appendKey(s.key, v.value(i, s.keyClasses[k]), s.keyTypes[k])
 	}
-	return maphash.Bytes(s.seed, s.key)
+	return maphash.Bytes(s.seed, s.key), 0
 }
 
 // add buffers the active rows of an evaluated batch at input position pos.
@@ -146,7 +155,8 @@ func (s *aggScatter) add(keys, args []*Vec, n int, sel []int32, pos int64) error
 	parts := uint64(len(s.parts))
 	var bytes int64
 	forActive(n, sel, func(i int) {
-		chunks := &s.parts[s.rowPartHash(keys, i)%parts]
+		h, strHash := s.rowPartHash(keys, i)
+		chunks := &s.parts[h%parts]
 		if len(*chunks) == 0 || len((*chunks)[len(*chunks)-1].pos) == BatchSize {
 			*chunks = append(*chunks, newAggChunk(s.keyClasses, s.argClasses, s.hasArg))
 			bytes += int64(BatchSize * 9 * (len(keys) + len(args) + 1))
@@ -161,6 +171,9 @@ func (s *aggScatter) add(keys, args []*Vec, n int, sel []int32, pos int64) error
 			}
 		}
 		p.pos = append(p.pos, pos+int64(i))
+		if p.hashes != nil {
+			p.hashes = append(p.hashes, strHash)
+		}
 	})
 	s.unreserved += bytes
 	if s.unreserved >= reserveChunk {
@@ -175,7 +188,7 @@ func (s *aggScatter) add(keys, args []*Vec, n int, sel []int32, pos int64) error
 func (s *aggScatter) foldInto(t *aggTable, p int) error {
 	keys := make([]*Vec, len(s.keyClasses))
 	args := make([]*Vec, len(s.argClasses))
-	defer func() { t.rowPos = nil }()
+	defer func() { t.rowPos, t.rowHash = nil, nil }()
 	for _, c := range s.parts[p] {
 		for k := range c.keys {
 			keys[k] = &c.keys[k]
@@ -185,7 +198,7 @@ func (s *aggScatter) foldInto(t *aggTable, p int) error {
 				args[a] = &c.args[a]
 			}
 		}
-		t.rowPos = c.pos
+		t.rowPos, t.rowHash = c.pos, c.hashes
 		if err := t.update(keys, args, len(c.pos), nil, 0); err != nil {
 			return err
 		}

@@ -589,6 +589,9 @@ type aggTable struct {
 	// folded (partitioned aggregation, whose batches gather rows from
 	// anywhere in the input); else row i of a batch at pos is at pos+i.
 	rowPos []int64
+	// rowHash, if set, holds the strKeyHash of each row's single STRING key
+	// (computed when the rows were partitioned).
+	rowHash []uint64
 
 	slab       []types.Value // storage for key rows
 	unreserved int64         // memory accounted but not yet reserved
@@ -710,6 +713,14 @@ func (t *aggTable) posAt(pos int64, i int) int64 {
 	return pos + int64(i)
 }
 
+// strHashAt returns the strKeyHash of s, the single STRING key of row i.
+func (t *aggTable) strHashAt(s string, i int) uint64 {
+	if t.rowHash != nil {
+		return t.rowHash[i]
+	}
+	return strKeyHash(s)
+}
+
 // nullKey returns the group of the NULL key (single key), creating it.
 func (t *aggTable) nullKey(pos int64) (int32, error) {
 	if t.nullGroup >= 0 {
@@ -805,7 +816,7 @@ func (t *aggTable) resolveString(v *Vec, n int, sel []int32, pos int64) error {
 			gids[i] = g
 			return err
 		}
-		g, err := t.findOrAddStr(vals[i], strKeyHash(vals[i]), t.posAt(pos, i))
+		g, err := t.findOrAddStr(vals[i], t.strHashAt(vals[i], i), t.posAt(pos, i))
 		gids[i] = g
 		return err
 	}
@@ -937,49 +948,63 @@ func (t *aggTable) update(keys, args []*Vec, n int, sel []int32, pos int64) erro
 // otherwise its first position is lowered to pos if earlier). Keys are
 // looked up in the same maps as resolve uses.
 func (t *aggTable) findOrAdd(key types.Row, pos int64) (int32, error) {
-	var g int32
-	var ok bool
-	var put func(int32)
-	single := len(key) == 1 && (key[0].Null || t.keyClasses[0] != vFloat)
-	if single {
+	if len(key) == 1 && (key[0].Null || t.keyClasses[0] != vFloat) {
 		v := key[0]
 		switch {
 		case v.Null:
-			g, ok = t.nullGroup, t.nullGroup >= 0
-			put = func(g int32) { t.nullGroup = g }
+			if t.nullGroup >= 0 {
+				return t.found(t.nullGroup, pos), nil
+			}
+			g, err := t.newGroup(key, pos)
+			t.nullGroup = g
+			return g, err
 		case t.keyClasses[0] == vInt && t.nmap != nil:
 			h := fmix64(v.I)
-			g, ok = t.nmap.get(v.I, h)
-			put = func(g int32) { t.nmap.put(v.I, h, g) }
+			if g, ok := t.nmap.get(v.I, h); ok {
+				return t.found(g, pos), nil
+			}
+			g, err := t.newGroup(key, pos)
+			t.nmap.put(v.I, h, g)
+			return g, err
 		case t.keyClasses[0] == vInt:
-			var slot int
-			g, slot, ok = t.imap.find(v.I)
-			put = func(g int32) { t.imap.insert(slot, v.I, g) }
+			g, slot, ok := t.imap.find(v.I)
+			if ok {
+				return t.found(g, pos), nil
+			}
+			g, err := t.newGroup(key, pos)
+			t.imap.insert(slot, v.I, g)
+			return g, err
 		case t.keyClasses[0] == vWide:
-			g, ok = t.wideMap[v.Wide()]
-			put = func(g int32) { t.wideMap[v.Wide()] = g }
-		default:
-			return t.findOrAddStr(v.S, strKeyHash(v.S), pos)
+			if g, ok := t.wideMap[v.Wide()]; ok {
+				return t.found(g, pos), nil
+			}
+			g, err := t.newGroup(key, pos)
+			t.wideMap[v.Wide()] = g
+			return g, err
 		}
-	} else {
-		// Several keys, or a FLOAT64 key: canonical encoding (resolveEncoded).
-		t.key = t.key[:0]
-		for k, v := range key {
-			t.key = appendKey(t.key, v, t.keyTypes[k])
-		}
-		g, ok = t.strMap[string(t.key)]
-		k := string(t.key)
-		put = func(g int32) { t.strMap[k] = g }
+		return t.findOrAddStr(v.S, strKeyHash(v.S), pos)
 	}
-	if ok {
-		if pos < t.first[g] {
-			t.first[g] = pos
-		}
-		return g, nil
+	// Several keys, or a FLOAT64 key: canonical encoding (resolveEncoded).
+	t.key = t.key[:0]
+	for k, v := range key {
+		t.key = appendKey(t.key, v, t.keyTypes[k])
 	}
+	if g, ok := t.strMap[string(t.key)]; ok {
+		return t.found(g, pos), nil
+	}
+	k := string(t.key)
 	g, err := t.newGroup(key, pos)
-	put(g)
+	t.strMap[k] = g
 	return g, err
+}
+
+// found returns the existing group g, lowering its first position to pos
+// if earlier.
+func (t *aggTable) found(g int32, pos int64) int32 {
+	if pos < t.first[g] {
+		t.first[g] = pos
+	}
+	return g
 }
 
 // findOrAddStr is findOrAdd for a non-NULL single STRING key s with hash h.
@@ -1153,7 +1178,8 @@ func orderByFirst(rows []types.Row, first []int64) []types.Row {
 	return out
 }
 
-// mergeByFirst merges row lists that are each ordered by first position.
+// mergeByFirst merges row lists that are each ordered by first position
+// (positions are distinct), with a binary heap of the lists' heads.
 func mergeByFirst(rows [][]types.Row, first [][]int64) []types.Row {
 	total := 0
 	for _, r := range rows {
@@ -1161,15 +1187,40 @@ func mergeByFirst(rows [][]types.Row, first [][]int64) []types.Row {
 	}
 	out := make([]types.Row, 0, total)
 	pos := make([]int, len(rows))
-	for len(out) < total {
-		best := -1
-		for p := range rows {
-			if pos[p] < len(rows[p]) && (best < 0 || first[p][pos[p]] < first[best][pos[best]]) {
-				best = p
+	heap := make([]int, 0, len(rows)) // list indexes, ordered by their head
+	head := func(p int) int64 { return first[p][pos[p]] }
+	down := func(i int) {
+		for {
+			l, m := 2*i+1, i
+			if l < len(heap) && head(heap[l]) < head(heap[m]) {
+				m = l
 			}
+			if r := l + 1; r < len(heap) && head(heap[r]) < head(heap[m]) {
+				m = r
+			}
+			if m == i {
+				return
+			}
+			heap[i], heap[m] = heap[m], heap[i]
+			i = m
 		}
-		out = append(out, rows[best][pos[best]])
-		pos[best]++
+	}
+	for p := range rows {
+		if len(rows[p]) > 0 {
+			heap = append(heap, p)
+		}
+	}
+	for i := len(heap)/2 - 1; i >= 0; i-- {
+		down(i)
+	}
+	for len(heap) > 0 {
+		p := heap[0]
+		out = append(out, rows[p][pos[p]])
+		if pos[p]++; pos[p] == len(rows[p]) {
+			heap[0] = heap[len(heap)-1]
+			heap = heap[:len(heap)-1]
+		}
+		down(0)
 	}
 	return out
 }

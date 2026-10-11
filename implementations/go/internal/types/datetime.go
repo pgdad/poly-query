@@ -159,7 +159,8 @@ func FloorDiv(a, b int64) int64 {
 func TimestampToDate(micros int64) int64 { return FloorDiv(micros, MicrosPerDay) }
 
 func pad(b []byte, v int64, n int) []byte {
-	s := strconv.FormatInt(v, 10)
+	var buf [20]byte
+	s := strconv.AppendInt(buf[:0], v, 10)
 	for i := len(s); i < n; i++ {
 		b = append(b, '0')
 	}

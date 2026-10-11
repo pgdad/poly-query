@@ -249,6 +249,28 @@ func FormatDecimal(u int64, s int) string {
 	return digits
 }
 
+// AppendDecimal appends FormatDecimal(u, s) to b without allocating.
+func AppendDecimal(b []byte, u int64, s int) []byte {
+	var buf [24]byte
+	digits := strconv.AppendUint(buf[:0], absU(u), 10)
+	if u < 0 {
+		b = append(b, '-')
+	}
+	if s <= 0 {
+		return append(b, digits...)
+	}
+	if len(digits) <= s {
+		b = append(b, '0', '.')
+		for i := len(digits); i < s; i++ {
+			b = append(b, '0')
+		}
+		return append(b, digits...)
+	}
+	b = append(b, digits[:len(digits)-s]...)
+	b = append(b, '.')
+	return append(b, digits[len(digits)-s:]...)
+}
+
 func zeros(n int) string {
 	b := make([]byte, n)
 	for i := range b {
