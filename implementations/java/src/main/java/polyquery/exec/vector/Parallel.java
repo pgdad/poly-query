@@ -177,7 +177,7 @@ final class Parallel {
                 return null;
             }
             return new SortBatches.Sort(new Gather(builder, c, new TopNReducer(t.keys(), t.input().schema(),
-                    (int) (offset + limit))), t.keys(), t.schema(), builder.context(), builder.batchSize(), offset,
+                    (int) (offset + limit), builder.batchSize())), t.keys(), t.schema(), builder.context(), builder.batchSize(), offset,
                     limit);
         }
         Chain c = chain(plan);
@@ -251,46 +251,111 @@ final class Parallel {
         }
     }
 
-    /** Keeps the best {@code keep} rows of the morsel (stable: ties in morsel order), in sort order. */
+    /**
+     * Keeps the best {@code keep} rows of the morsel (stable: ties in morsel order), in sort order.
+     * The rows are collected in a column store that is sorted and cut back to the best
+     * {@code keep} rows whenever it holds enough rows; after that, incoming rows whose first sort
+     * key is strictly worse than the first key of the last row kept are dropped right away.
+     */
     private record TopNReducer(List<polyquery.plan.SortKey> keys, List<polyquery.storage.ColumnSchema> schema,
-                               int keep) implements Reducer {
+                               int keep, int batchSize) implements Reducer {
         @Override
         public MorselReduction start(int width, ExecContext ctx) {
-            ColumnStore store = new ColumnStore(schema);
             return new MorselReduction() {
-                private int[] all = new int[0];
+                private ColumnStore store = new ColumnStore(schema);
+                private int[] pass = new int[0];
+                private final int limit = Math.max(2 * keep, 2 * batchSize);
+                /** Last row kept by the latest cut: its first sort key bounds the rows worth keeping. */
+                private Vec bound;
 
                 @Override
                 public void add(Batch b) {
-                    if (all.length < b.count) {
-                        all = new int[b.count];
+                    if (pass.length < b.count) {
+                        pass = new int[b.count];
                     }
+                    int m = 0;
+                    Vec first = b.cols[keys.getFirst().column()];
                     for (int k = 0; k < b.count; k++) {
-                        all[k] = b.pos(k);
+                        int i = b.pos(k);
+                        if (bound == null || first == null || !worse(first, i)) {
+                            pass[m++] = i;
+                        }
                     }
-                    store.append(b, all, b.count);
+                    if (m > 0) {
+                        store.append(b, pass, m);
+                    }
+                    if (store.rows() >= limit) {
+                        cut();
+                    }
                 }
 
-                @Override
-                public List<Batch> finish() {
+                /** True if row i's first sort key orders strictly after the bound's. */
+                private boolean worse(Vec v, int i) {
+                    polyquery.plan.SortKey key = keys.getFirst();
+                    boolean rowNull = v.isNull(i);
+                    boolean boundNull = bound.isNull(0);
+                    if (rowNull || boundNull) {
+                        if (rowNull && boundNull) {
+                            return false;
+                        }
+                        return rowNull != key.nullsFirst(); // the NULL side comes first iff nullsFirst
+                    }
+                    int c = switch (v.kind) {
+                        case LONG -> Long.compare(v.longs[i], bound.longs[0]);
+                        case DOUBLE -> polyquery.types.Values.compareDoubles(v.doubles[i], bound.doubles[0]);
+                        default -> v.type.isWideDecimal()
+                                ? ((java.math.BigInteger) v.objects[i]).compareTo((java.math.BigInteger) bound.objects[0])
+                                : polyquery.types.Values.compareStrings(v.string(i), bound.string(0));
+                    };
+                    return (key.descending() ? -c : c) > 0;
+                }
+
+                /** Sorts the store and keeps its best {@code keep} rows (in sort order). */
+                private void cut() {
                     int[] perm = SortBatches.sort(store, keys, ctx);
                     int n = Math.min(keep, perm.length);
-                    if (n == 0) {
-                        return List.of();
+                    Batch best = gather(perm, n);
+                    store = new ColumnStore(schema, Math.max(limit, n));
+                    if (n > 0) {
+                        int[] all = new int[n];
+                        for (int k = 0; k < n; k++) {
+                            all[k] = k;
+                        }
+                        store.append(best, all, n);
+                        if (n == keep) {
+                            Vec src = store.column(keys.getFirst().column());
+                            if (src != null) {
+                                bound = new Vec(src.type, 1);
+                                bound.nullMask(1);
+                                ColumnStore.gather(src, new int[] {n - 1}, 0, 1, bound, 0);
+                                bound.hasNulls = src.isNull(n - 1);
+                            }
+                        }
                     }
+                }
+
+                /** The rows {@code perm[0..n)} of the store as a batch. */
+                private Batch gather(int[] perm, int n) {
                     Batch out = new Batch(width);
                     for (int c = 0; c < width; c++) {
                         Vec src = store.column(c);
                         if (src != null) {
-                            Vec dst = new Vec(src.type, n);
-                            dst.nullMask(n);
+                            Vec dst = new Vec(src.type, Math.max(n, 1));
+                            dst.nullMask(Math.max(n, 1));
                             ColumnStore.gather(src, perm, 0, n, dst, 0);
                             dst.hasNulls = src.hasNulls;
                             out.cols[c] = dst;
                         }
                     }
                     out.reset(n);
-                    return List.of(out);
+                    return out;
+                }
+
+                @Override
+                public List<Batch> finish() {
+                    int[] perm = SortBatches.sort(store, keys, ctx);
+                    int n = Math.min(keep, perm.length);
+                    return n == 0 ? List.of() : List.of(gather(perm, n));
                 }
             };
         }
