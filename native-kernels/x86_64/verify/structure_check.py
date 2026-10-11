@@ -93,7 +93,11 @@ def check_headers_empty():
         with open(src, "w") as f:
             f.write("".join('#include "%s"\n' % h for h in HEADERS))
         obj = os.path.join(tmp, "h.o")
-        run(["gcc", "-c", "-I" + X86, src, "-o", obj])
+        try:
+            run(["gcc", "-c", "-I" + X86, src, "-o", obj])
+        except subprocess.CalledProcessError as e:
+            err("headers do not assemble on their own:\n" + e.stderr)
+            return
         out = run(["size", "-A", obj])
         total = sum(int(l.split()[1]) for l in out.splitlines()[2:] if len(l.split()) >= 2
                     and l.split()[1].isdigit())
