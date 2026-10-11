@@ -48,6 +48,8 @@
                  (:file "optimizer")
                  (:file "access")
                  (:file "physical")))
+   (:module "native" :serial t
+    :components ((:file "kernels")))
    (:module "exec" :serial t
     :components ((:file "expressions")
                  (:file "aggregates")
@@ -56,6 +58,7 @@
                  (:file "vexpressions")
                  (:file "keytable")
                  (:file "vaggregates")
+                 (:file "vnative")
                  (:file "voperators")
                  (:file "parallel")))
    (:file "engine")

@@ -11,7 +11,8 @@
     "phase3" "storage.pqcf" "storage.mmap" "index.hash" "index.btree"
     "phase4" "http.streaming"
     "phase5" "exec.row" "exec.vectorized" "exec.parallel"
-    "join.hash" "join.merge" "join.nested_loop"))
+    "join.hash" "join.merge" "join.nested_loop"
+    "native.kernels"))
 
 (defstruct engine-config
   (data-dir nil)                         ; pathname of the data directory (with trailing /)

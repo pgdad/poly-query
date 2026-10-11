@@ -130,9 +130,14 @@ by the first error of evaluating EXPRS row by row over BATCH."
 ;;; Filter, projection, limit
 
 (defun make-batch-filter (open-child predicate)
-  (let ((kernel (compile-vexpr predicate))
-        (guard (make-row-order-guard (list predicate))))
-    (declare (type function open-child kernel guard))
+  (let ((filter (or (and (native-kernels-enabled-p) (compile-native-filter predicate))
+                    (let ((kernel (compile-vexpr predicate))
+                          (guard (make-row-order-guard (list predicate))))
+                      (declare (type function kernel guard))
+                      (lambda (batch)
+                        (filter-batch batch (funcall guard batch
+                                                     (lambda () (funcall kernel batch)))))))))
+    (declare (type function open-child filter))
     (lambda ()
       (let ((child (funcall open-child)))
         (declare (type function child))
@@ -140,8 +145,7 @@ by the first error of evaluating EXPRS row by row over BATCH."
           (loop
             (let ((batch (funcall child)))
               (unless batch (return nil))
-              (let ((out (filter-batch batch (funcall guard batch
-                                                      (lambda () (funcall kernel batch))))))
+              (let ((out (funcall filter batch)))
                 (when out (return out))))))))))
 
 (defmethod compile-batch-operator ((node pp-filter))

@@ -89,7 +89,19 @@
         (opt :max-table-rows engine-config-max-table-rows)
         (opt :max-join-rows engine-config-max-join-rows)
         (opt :threads engine-config-threads))
+      (when (getf options :native-kernels)
+        (setup-native-kernels (getf options :native-kernels)))
       config)))
+
+(defun setup-native-kernels (path)
+  "Load the native kernel library given with --native-kernels. A library
+that cannot be used is reported and the engine continues with its own
+code paths (native kernels are optional)."
+  (multiple-value-bind (library message) (load-native-kernels path)
+    (if library
+        (log-message :info "native kernels loaded from ~A (variant ~A; available ~A)"
+                     path (native-library-variant library) (native-library-available library))
+        (log-message :warn "native kernels disabled: ~A" message))))
 
 (defun make-server-options-from (options)
   "SERVER-OPTIONS for `serve` from the parsed command line options."
