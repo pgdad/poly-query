@@ -289,18 +289,25 @@ impl BatchOperator for DistinctOp {
 }
 
 /// Sort / top-N. Input batches are materialized (compacted to the best
-/// `top` rows from time to time for top-N), sorted by permutation and
-/// emitted in batches.
+/// `top` rows from time to time for top-N) and sorted by permutation; the
+/// output batches are gathered lazily, `BATCH_SIZE` rows at a time.
 pub struct SortOp {
     pub input: Option<BoxedBatchOp>,
     pub keys: Vec<SortKey>,
     pub top: Option<usize>,
     pub width: usize,
-    pub output: Option<(Batch, usize)>,
+    pub output: Option<SortedRows>,
+}
+
+/// The materialized input of a sort and the permutation that orders it.
+pub struct SortedRows {
+    rows: Batch,
+    perm: Vec<u32>,
+    pos: usize,
 }
 
 impl SortOp {
-    fn compute(&self, mut input: BoxedBatchOp, ctx: &ExecContext) -> Result<Batch> {
+    fn compute(&self, mut input: BoxedBatchOp, ctx: &ExecContext) -> Result<SortedRows> {
         let mut parts: Vec<Batch> = Vec::new();
         let mut rows = 0usize;
         let mut reserved = 0usize;
@@ -313,7 +320,7 @@ impl SortOp {
             if let Some(n) = self.top
                 && rows >= n.saturating_mul(2).max(8 * BATCH_SIZE)
             {
-                let all = Batch::concat(&parts, self.width);
+                let all = Batch::concat(std::mem::take(&mut parts), self.width);
                 let mut keep = sort_permutation(&all, &self.keys, Some(n), ctx)?;
                 keep.sort_unstable();
                 let kept = all.gather(&keep);
@@ -325,41 +332,39 @@ impl SortOp {
             }
         }
         if parts.is_empty() {
-            return Ok(Batch::new(Vec::new(), 0));
+            return Ok(SortedRows {
+                rows: Batch::new(Vec::new(), 0),
+                perm: Vec::new(),
+                pos: 0,
+            });
         }
-        let all = Batch::concat(&parts, self.width);
+        let all = Batch::concat(parts, self.width);
         let perm = sort_permutation(&all, &self.keys, self.top, ctx)?;
-        Ok(all.gather(&perm))
+        Ok(SortedRows {
+            rows: all,
+            perm,
+            pos: 0,
+        })
     }
 }
 
 impl BatchOperator for SortOp {
     fn next_batch(&mut self, ctx: &ExecContext) -> Result<Option<Batch>> {
         if let Some(input) = self.input.take() {
-            let sorted = self.compute(input, ctx)?;
-            self.output = Some((sorted, 0));
+            self.output = Some(self.compute(input, ctx)?);
         }
-        emit_slices(&mut self.output)
+        let Some(out) = &mut self.output else {
+            return Ok(None);
+        };
+        if out.pos >= out.perm.len() {
+            self.output = None;
+            return Ok(None);
+        }
+        let to = (out.pos + BATCH_SIZE).min(out.perm.len());
+        let b = out.rows.gather(&out.perm[out.pos..to]);
+        out.pos = to;
+        Ok(Some(b))
     }
-}
-
-/// Emits a materialized batch in slices of `BATCH_SIZE` rows.
-pub fn emit_slices(output: &mut Option<(Batch, usize)>) -> Result<Option<Batch>> {
-    let Some((b, pos)) = output else {
-        return Ok(None);
-    };
-    if *pos >= b.len {
-        *output = None;
-        return Ok(None);
-    }
-    if *pos == 0 && b.len <= BATCH_SIZE {
-        let out = output.take().map(|(b, _)| b);
-        return Ok(out);
-    }
-    let to = (*pos + BATCH_SIZE).min(b.len);
-    let out = b.slice(*pos, to);
-    *pos = to;
-    Ok(Some(out))
 }
 
 pub struct LimitOp {

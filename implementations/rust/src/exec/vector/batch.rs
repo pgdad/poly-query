@@ -358,29 +358,31 @@ impl Vector {
     }
 
     /// Concatenates vectors, keeping a typed representation when possible.
-    pub fn concat(parts: &[Vector]) -> Vector {
+    /// Takes the parts by value, so their data is moved, not cloned.
+    pub fn concat(mut parts: Vec<Vector>) -> Vector {
         let len: usize = parts.iter().map(Vector::len).sum();
-        let non_null: Vec<&Vector> = parts
+        let Some(first) = parts
             .iter()
-            .filter(|p| !matches!(p.data, Data::Null) && p.len > 0)
-            .collect();
-        if non_null.is_empty() {
+            .find(|p| !matches!(p.data, Data::Null) && p.len > 0)
+        else {
             return Vector::null(len);
-        }
+        };
         if parts.len() == 1 {
-            return parts[0].clone();
+            return parts.pop().unwrap_or_else(|| Vector::null(0));
         }
         // All parts (ignoring all-NULL ones) of one typed kind?
-        let first = &non_null[0].data;
-        let same = non_null.iter().all(|p| match (first, &p.data) {
-            (Data::Decimal(_, a), Data::Decimal(_, b)) => a == b,
-            (Data::Dict(_, a), Data::Dict(_, b)) => Arc::ptr_eq(a, b),
-            (Data::Values(_), _) | (_, Data::Values(_)) => false,
-            (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
-        });
+        let same = parts
+            .iter()
+            .filter(|p| !matches!(p.data, Data::Null) && p.len > 0)
+            .all(|p| match (&first.data, &p.data) {
+                (Data::Decimal(_, a), Data::Decimal(_, b)) => a == b,
+                (Data::Dict(_, a), Data::Dict(_, b)) => Arc::ptr_eq(a, b),
+                (Data::Values(_), _) | (_, Data::Values(_)) => false,
+                (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
+            });
         if !same {
             let mut values = Vec::with_capacity(len);
-            for p in parts {
+            for p in &parts {
                 values.extend((0..p.len).map(|i| p.value(i)));
             }
             return Vector::from_values(values);
@@ -388,7 +390,7 @@ impl Vector {
         let any_null = parts.iter().any(|p| !p.no_nulls());
         let valid = any_null.then(|| {
             let mut v = Vec::with_capacity(len);
-            for p in parts {
+            for p in &parts {
                 match p.validity() {
                     Some(pv) => v.extend(pv),
                     None => v.extend(std::iter::repeat_n(true, p.len)),
@@ -396,47 +398,62 @@ impl Vector {
             }
             v
         });
+        // The kind of the result (an empty vector of the parts' variant).
+        let template = match &first.data {
+            Data::Bool(_) => Data::Bool(Vec::new()),
+            Data::Int(_) => Data::Int(Vec::new()),
+            Data::Float(_) => Data::Float(Vec::new()),
+            Data::Date(_) => Data::Date(Vec::new()),
+            Data::Timestamp(_) => Data::Timestamp(Vec::new()),
+            Data::Str(_) => Data::Str(Vec::new()),
+            Data::Decimal(_, s) => Data::Decimal(Vec::new(), *s),
+            Data::Dict(_, d) => Data::Dict(Vec::new(), d.clone()),
+            Data::Null | Data::Values(_) => unreachable!(),
+        };
         macro_rules! cat {
             ($variant:ident, $default:expr) => {{
                 let mut out = Vec::with_capacity(len);
                 for p in parts {
-                    match &p.data {
-                        Data::$variant(v) => out.extend_from_slice(v),
-                        _ => out.extend(std::iter::repeat_n($default, p.len)),
+                    let n = p.len;
+                    match p.data {
+                        Data::$variant(v) => out.extend(v),
+                        _ => out.extend(std::iter::repeat_n($default, n)),
                     }
                 }
-                Data::$variant(out)
+                out
             }};
         }
-        let data = match first {
-            Data::Bool(_) => cat!(Bool, false),
-            Data::Int(_) => cat!(Int, 0),
-            Data::Float(_) => cat!(Float, 0.0),
-            Data::Date(_) => cat!(Date, 0),
-            Data::Timestamp(_) => cat!(Timestamp, 0),
+        let data = match template {
+            Data::Bool(_) => Data::Bool(cat!(Bool, false)),
+            Data::Int(_) => Data::Int(cat!(Int, 0)),
+            Data::Float(_) => Data::Float(cat!(Float, 0.0)),
+            Data::Date(_) => Data::Date(cat!(Date, 0)),
+            Data::Timestamp(_) => Data::Timestamp(cat!(Timestamp, 0)),
             Data::Str(_) => {
                 let empty: Arc<str> = Arc::from("");
-                cat!(Str, empty.clone())
+                Data::Str(cat!(Str, empty.clone()))
             }
             Data::Decimal(_, s) => {
                 let mut out = Vec::with_capacity(len);
                 for p in parts {
-                    match &p.data {
-                        Data::Decimal(v, _) => out.extend_from_slice(v),
-                        _ => out.extend(std::iter::repeat_n(0, p.len)),
+                    let n = p.len;
+                    match p.data {
+                        Data::Decimal(v, _) => out.extend(v),
+                        _ => out.extend(std::iter::repeat_n(0, n)),
                     }
                 }
-                Data::Decimal(out, *s)
+                Data::Decimal(out, s)
             }
             Data::Dict(_, d) => {
                 let mut out = Vec::with_capacity(len);
                 for p in parts {
-                    match &p.data {
-                        Data::Dict(c, _) => out.extend_from_slice(c),
-                        _ => out.extend(std::iter::repeat_n(0, p.len)),
+                    let n = p.len;
+                    match p.data {
+                        Data::Dict(c, _) => out.extend(c),
+                        _ => out.extend(std::iter::repeat_n(0, n)),
                     }
                 }
-                Data::Dict(out, d.clone())
+                Data::Dict(out, d)
             }
             Data::Null | Data::Values(_) => unreachable!(),
         };
@@ -520,18 +537,21 @@ impl Batch {
         Batch::new(columns, rows.len())
     }
 
-    /// Concatenates batches of the same width.
-    pub fn concat(batches: &[Batch], width: usize) -> Batch {
+    /// Concatenates batches of the same width (moving their data).
+    pub fn concat(mut batches: Vec<Batch>, width: usize) -> Batch {
         if batches.len() == 1 {
-            return batches[0].clone();
+            return batches.pop().unwrap_or_else(|| Batch::new(Vec::new(), 0));
         }
         let len = batches.iter().map(|b| b.len).sum();
-        let columns = (0..width)
-            .map(|c| {
-                let parts: Vec<Vector> = batches.iter().map(|b| b.columns[c].clone()).collect();
-                Vector::concat(&parts)
-            })
+        let mut parts: Vec<Vec<Vector>> = (0..width)
+            .map(|_| Vec::with_capacity(batches.len()))
             .collect();
+        for b in batches {
+            for (c, v) in b.columns.into_iter().enumerate() {
+                parts[c].push(v);
+            }
+        }
+        let columns = parts.into_iter().map(Vector::concat).collect();
         Batch::new(columns, len)
     }
 
@@ -573,7 +593,7 @@ mod tests {
     fn gather_and_concat() {
         let a = Vector::from_values(vec![Value::str("x"), Value::Null]);
         let b = Vector::from_values(vec![Value::str("y")]);
-        let c = Vector::concat(&[a, Vector::null(1), b]);
+        let c = Vector::concat(vec![a, Vector::null(1), b]);
         assert_eq!(c.len(), 4);
         assert_eq!(c.value(3), Value::str("y"));
         assert!(c.is_null(2));

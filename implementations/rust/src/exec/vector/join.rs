@@ -274,7 +274,7 @@ pub fn materialize(
     if parts.is_empty() {
         return Ok(Batch::new((0..width).map(|_| Vector::null(0)).collect(), 0));
     }
-    Ok(Batch::concat(&parts, width))
+    Ok(Batch::concat(parts, width))
 }
 
 /// The build side of a hash join: rows plus a key index with CSR row lists.
@@ -523,7 +523,7 @@ impl MergeJoinOp {
         let combined: Vec<Vector> = lk
             .iter()
             .zip(&rk)
-            .map(|(a, b)| Vector::concat(&[a.clone(), b.clone()]))
+            .map(|(a, b)| Vector::concat(vec![a.clone(), b.clone()]))
             .collect();
         let null_key = |pos: usize| combined.iter().any(|c| c.is_null(pos));
         let asc = SortKey {

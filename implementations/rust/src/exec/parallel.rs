@@ -713,5 +713,5 @@ fn merge_partitioned(
     if batches.is_empty() {
         return Ok(Batch::new(Vec::new(), 0));
     }
-    Ok(Batch::concat(&batches, width))
+    Ok(Batch::concat(batches, width))
 }
