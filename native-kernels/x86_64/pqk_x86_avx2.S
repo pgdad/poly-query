@@ -2044,8 +2044,9 @@ ENDF pqk_x86_avx2_sum_i128
  * result, whichever lane it is in. On the high words alone: if every row
  * of the block (valid or not) has gminH < hi < gmaxH, where gminH /
  * gmaxH are the high words of G.min / G.max (= min of the lanes' minH /
- * max of the lanes' maxH), the block is skipped: 2 compares per group
- * instead of ~10. gminH / gmaxH are recomputed (GLOBAL_HI) before a quick
+ * max of the lanes' maxH), the block is skipped. As an unsigned range test
+ * (cf. MM64_GLOBAL): (hi - (gminH + 1)) <u gmaxH - gminH - 1, one vpsubq +
+ * one vpcmpgtq per group instead of ~10 compare/blend ops. gminH / gmaxH are recomputed (GLOBAL_HI) before a quick
  * reject when a full block ran since the last one (r13d = dirty flag);
  * while no valid row has been seen they are INT64_MAX / INT64_MIN and the
  * test fails. If the test fails, the block runs through MMG128 (exact,
@@ -2054,10 +2055,13 @@ ENDF pqk_x86_avx2_sum_i128
  * failed attempt up to QR_BACKOFF_MAX and is reset by a successful one.
  * This bounds its cost on data where it never succeeds (e.g. all high
  * words equal) to < 1%.
- * valid = 1: ymm13 = bcast(validity word). 0(%rsp) = bcast(gminH),
- * ymm12 = bcast(gmaxH). clobbers ymm0-ymm3, ymm14, ymm15. */
-/* GLOBAL_HI: 0(%rsp) = bcast(min of the 8 lanes of ymm5, ymm9), ymm12 =
- * bcast(max of the 8 lanes of ymm7, ymm11). clobbers ymm0-ymm3. */
+ * valid = 1: ymm13 = bcast(validity word). 0(%rsp) = bcast((gminH + 1) ^
+ * 2^63), ymm12 = bcast(W ^ 2^63). clobbers ymm0-ymm3, ymm14, ymm15, rax,
+ * rcx, rdx. */
+/* GLOBAL_HI: gminH = min of the 8 lanes of ymm5, ymm9, gmaxH = max of the
+ * 8 lanes of ymm7, ymm11; 0(%rsp) = bcast((gminH + 1) ^ 2^63), ymm12 =
+ * bcast(W ^ 2^63), W = gmaxH - gminH - 1 or 0 if gmaxH <= gminH + 1.
+ * clobbers ymm0-ymm3, rax, rcx, rdx. */
 .macro HMIN8 a, b, rmax
 .if \rmax
         vpcmpgtq \a, \b, %ymm0                  /* b > a */
@@ -2083,9 +2087,26 @@ ENDF pqk_x86_avx2_sum_i128
 .endm
 .macro GLOBAL_HI
         HMIN8   %ymm5, %ymm9, 0
-        vmovdqu %ymm1, (%rsp)
+        vmovq   %xmm1, %rcx                     /* gminH */
         HMIN8   %ymm7, %ymm11, 1
-        vmovdqa %ymm1, %ymm12
+        vmovq   %xmm1, %rdx                     /* gmaxH */
+        movabs  $C_SIGN64, %rax
+        cmp     %rcx, %rdx
+        jle     .Lghi_empty\@                   /* no interior: W = 0 */
+        sub     %rcx, %rdx
+        dec     %rdx                            /* W = gmaxH - gminH - 1 */
+        inc     %rcx
+        xor     %rax, %rcx
+        vmovq   %rcx, %xmm1
+        vpbroadcastq %xmm1, %ymm1
+        vmovdqu %ymm1, (%rsp)                   /* (gminH + 1) ^ 2^63 */
+        jmp     .Lghi_w\@
+.Lghi_empty\@:
+        xor     %edx, %edx
+.Lghi_w\@:
+        xor     %rax, %rdx
+        vmovq   %rdx, %xmm12
+        vpbroadcastq %xmm12, %ymm12             /* W ^ 2^63 */
 .endm
 .macro MM128_BLOCK valid, k
         test    %r12d, %r12d
@@ -2099,17 +2120,15 @@ ENDF pqk_x86_avx2_sum_i128
         .rept 16
         vmovdqu g*64(%rdi), %ymm0
         vpunpckhqdq g*64+32(%rdi), %ymm0, %ymm2 /* H */
-        vpcmpgtq (%rsp), %ymm2, %ymm3           /* H > gminH */
-        vpcmpgtq %ymm2, %ymm12, %ymm14          /* gmaxH > H */
+        vpsubq  (%rsp), %ymm2, %ymm2
+        vpcmpgtq %ymm2, %ymm12, %ymm3           /* gminH < H < gmaxH */
         .if g == 0
-        vpand   %ymm14, %ymm3, %ymm15
+        vmovdqa %ymm3, %ymm15
         .elseif g == 1
-        vpand   %ymm14, %ymm3, %ymm1
+        vmovdqa %ymm3, %ymm1
         .elseif g % 2
-        vpand   %ymm14, %ymm3, %ymm3
         vpand   %ymm3, %ymm1, %ymm1
         .else
-        vpand   %ymm14, %ymm3, %ymm3
         vpand   %ymm3, %ymm15, %ymm15
         .endif
         .set g, g + 1
