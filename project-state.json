@@ -1,6 +1,6 @@
 {
  "schema": "polyquery-project-state/1",
- "updated": "2026-10-11T18:33:45+00:00",
+ "updated": "2026-10-11T19:10:21+00:00",
  "current_milestone": "M10",
  "milestones": {
   "M0": {
@@ -52,7 +52,7 @@
   }
  },
  "outstanding_tasks": [
-  "Option B: Phase 3 chains running for x86_64-asm-engine and arm64-asm-engine ($100 cap each); option-B spend so far $84.04 of the approved $300 (Phase 1 + 2 both merged) - ask the owner before exceeding $300 (Phases 4-5 and later families)",
+  "Option B: Phases 1-3 merged for both assembly engines (all one session each); spend $118.49 of the approved $300. Awaiting owner decision on budget for Phase 4 (HTTP, concurrency) and Phase 5 (vectorized/parallel, native kernels)",
   "Native-kernel validation path for the AArch64 engine (Phase 5) is x86-only (native-kernels/build/x86_64)",
   "Main-line HTTP throughput not re-measured after INT-001 (bench.py run without the HTTP benchmark)",
   "Debugging family remains too easy for both engines and kernels (kernel variant with symptom-only report and hidden-only failures: fixed in ~1 min)",
@@ -94,8 +94,8 @@
   "interop": "6x6 + reference clean, incl. PQCF v2 wide-decimal files (results/correctness/interop.json)",
   "http_suite": "19/19 all engines except python 18/19 (malformed_chunked_body)"
  },
- "last_successful_commit": "d3a18b6854307462e01afaed47d6244f9f94cfca",
- "next_recommended_action": "When the Phase 2 chains finish: verify assembly-only compliance, accept (ARM via accept.sh -> arm_engines.sh on spark), report spend; then ask the owner about the budget for Phases 3-5.",
+ "last_successful_commit": "4073bb4483a42b07640fa3cce552ec2707d79ced",
+ "next_recommended_action": "Ask the owner for the Phase 4-5 budget for the assembly engines; then run Phase 4 chains (x86 local, ARM on spark).",
  "findings": [
   "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) — report as engine quality finding; clojure p95 16 ms",
   "CR-2 DECIMAL(38) was the most expensive change (6.25-16.50 USD); Go and Java needed a new wide-decimal representation",

@@ -1,0 +1,2312 @@
+{
+ "schema": "polyquery-interop/1",
+ "summary": {
+  "engines": [
+   "java",
+   "clojure",
+   "rust",
+   "python",
+   "go",
+   "common-lisp",
+   "x86_64-asm-engine"
+  ],
+  "files_written": 222,
+  "write_errors": 0,
+  "read_failures": 0,
+  "passed": true
+ },
+ "files": [
+  {
+   "writer": "java",
+   "table": "people",
+   "mode": "plain",
+   "path": "out/java__people__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "people",
+   "mode": "dict",
+   "path": "out/java__people__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "people",
+   "mode": "rle",
+   "path": "out/java__people__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "people",
+   "mode": "auto",
+   "path": "out/java__people__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "ledger",
+   "mode": "plain",
+   "path": "out/java__ledger__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "ledger",
+   "mode": "dict",
+   "path": "out/java__ledger__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "ledger",
+   "mode": "rle",
+   "path": "out/java__ledger__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "ledger",
+   "mode": "auto",
+   "path": "out/java__ledger__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "strings",
+   "mode": "plain",
+   "path": "out/java__strings__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "strings",
+   "mode": "dict",
+   "path": "out/java__strings__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "strings",
+   "mode": "rle",
+   "path": "out/java__strings__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "strings",
+   "mode": "auto",
+   "path": "out/java__strings__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "dates",
+   "mode": "plain",
+   "path": "out/java__dates__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "dates",
+   "mode": "dict",
+   "path": "out/java__dates__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "dates",
+   "mode": "rle",
+   "path": "out/java__dates__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "dates",
+   "mode": "auto",
+   "path": "out/java__dates__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "tx",
+   "mode": "plain",
+   "path": "out/java__tx__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "tx",
+   "mode": "dict",
+   "path": "out/java__tx__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "tx",
+   "mode": "rle",
+   "path": "out/java__tx__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "tx",
+   "mode": "auto",
+   "path": "out/java__tx__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "nulls",
+   "mode": "plain",
+   "path": "out/java__nulls__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "nulls",
+   "mode": "dict",
+   "path": "out/java__nulls__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "nulls",
+   "mode": "rle",
+   "path": "out/java__nulls__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "nulls",
+   "mode": "auto",
+   "path": "out/java__nulls__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "events",
+   "mode": "plain",
+   "path": "out/java__events__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "events",
+   "mode": "dict",
+   "path": "out/java__events__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "events",
+   "mode": "rle",
+   "path": "out/java__events__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "events",
+   "mode": "auto",
+   "path": "out/java__events__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "java",
+   "table": "bigdec",
+   "mode": "plain",
+   "path": "out/java__bigdec__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "java",
+   "table": "bigdec",
+   "mode": "dict",
+   "path": "out/java__bigdec__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "java",
+   "table": "bigdec",
+   "mode": "rle",
+   "path": "out/java__bigdec__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "java",
+   "table": "bigdec",
+   "mode": "auto",
+   "path": "out/java__bigdec__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "clojure",
+   "table": "people",
+   "mode": "plain",
+   "path": "out/clojure__people__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "people",
+   "mode": "dict",
+   "path": "out/clojure__people__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "people",
+   "mode": "rle",
+   "path": "out/clojure__people__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "people",
+   "mode": "auto",
+   "path": "out/clojure__people__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "ledger",
+   "mode": "plain",
+   "path": "out/clojure__ledger__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "ledger",
+   "mode": "dict",
+   "path": "out/clojure__ledger__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "ledger",
+   "mode": "rle",
+   "path": "out/clojure__ledger__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "ledger",
+   "mode": "auto",
+   "path": "out/clojure__ledger__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "strings",
+   "mode": "plain",
+   "path": "out/clojure__strings__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "strings",
+   "mode": "dict",
+   "path": "out/clojure__strings__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "strings",
+   "mode": "rle",
+   "path": "out/clojure__strings__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "strings",
+   "mode": "auto",
+   "path": "out/clojure__strings__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "dates",
+   "mode": "plain",
+   "path": "out/clojure__dates__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "dates",
+   "mode": "dict",
+   "path": "out/clojure__dates__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "dates",
+   "mode": "rle",
+   "path": "out/clojure__dates__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "dates",
+   "mode": "auto",
+   "path": "out/clojure__dates__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "tx",
+   "mode": "plain",
+   "path": "out/clojure__tx__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "tx",
+   "mode": "dict",
+   "path": "out/clojure__tx__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "tx",
+   "mode": "rle",
+   "path": "out/clojure__tx__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "tx",
+   "mode": "auto",
+   "path": "out/clojure__tx__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "nulls",
+   "mode": "plain",
+   "path": "out/clojure__nulls__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "nulls",
+   "mode": "dict",
+   "path": "out/clojure__nulls__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "nulls",
+   "mode": "rle",
+   "path": "out/clojure__nulls__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "nulls",
+   "mode": "auto",
+   "path": "out/clojure__nulls__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "events",
+   "mode": "plain",
+   "path": "out/clojure__events__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "events",
+   "mode": "dict",
+   "path": "out/clojure__events__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "events",
+   "mode": "rle",
+   "path": "out/clojure__events__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "events",
+   "mode": "auto",
+   "path": "out/clojure__events__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "clojure",
+   "table": "bigdec",
+   "mode": "plain",
+   "path": "out/clojure__bigdec__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "clojure",
+   "table": "bigdec",
+   "mode": "dict",
+   "path": "out/clojure__bigdec__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "clojure",
+   "table": "bigdec",
+   "mode": "rle",
+   "path": "out/clojure__bigdec__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "clojure",
+   "table": "bigdec",
+   "mode": "auto",
+   "path": "out/clojure__bigdec__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "rust",
+   "table": "people",
+   "mode": "plain",
+   "path": "out/rust__people__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "people",
+   "mode": "dict",
+   "path": "out/rust__people__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "people",
+   "mode": "rle",
+   "path": "out/rust__people__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "people",
+   "mode": "auto",
+   "path": "out/rust__people__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "ledger",
+   "mode": "plain",
+   "path": "out/rust__ledger__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "ledger",
+   "mode": "dict",
+   "path": "out/rust__ledger__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "ledger",
+   "mode": "rle",
+   "path": "out/rust__ledger__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "ledger",
+   "mode": "auto",
+   "path": "out/rust__ledger__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "strings",
+   "mode": "plain",
+   "path": "out/rust__strings__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "strings",
+   "mode": "dict",
+   "path": "out/rust__strings__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "strings",
+   "mode": "rle",
+   "path": "out/rust__strings__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "strings",
+   "mode": "auto",
+   "path": "out/rust__strings__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "dates",
+   "mode": "plain",
+   "path": "out/rust__dates__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "dates",
+   "mode": "dict",
+   "path": "out/rust__dates__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "dates",
+   "mode": "rle",
+   "path": "out/rust__dates__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "dates",
+   "mode": "auto",
+   "path": "out/rust__dates__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "tx",
+   "mode": "plain",
+   "path": "out/rust__tx__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "tx",
+   "mode": "dict",
+   "path": "out/rust__tx__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "tx",
+   "mode": "rle",
+   "path": "out/rust__tx__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "tx",
+   "mode": "auto",
+   "path": "out/rust__tx__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "nulls",
+   "mode": "plain",
+   "path": "out/rust__nulls__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "nulls",
+   "mode": "dict",
+   "path": "out/rust__nulls__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "nulls",
+   "mode": "rle",
+   "path": "out/rust__nulls__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "nulls",
+   "mode": "auto",
+   "path": "out/rust__nulls__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "events",
+   "mode": "plain",
+   "path": "out/rust__events__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "events",
+   "mode": "dict",
+   "path": "out/rust__events__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "events",
+   "mode": "rle",
+   "path": "out/rust__events__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "events",
+   "mode": "auto",
+   "path": "out/rust__events__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "rust",
+   "table": "bigdec",
+   "mode": "plain",
+   "path": "out/rust__bigdec__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "rust",
+   "table": "bigdec",
+   "mode": "dict",
+   "path": "out/rust__bigdec__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "rust",
+   "table": "bigdec",
+   "mode": "rle",
+   "path": "out/rust__bigdec__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "rust",
+   "table": "bigdec",
+   "mode": "auto",
+   "path": "out/rust__bigdec__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "python",
+   "table": "people",
+   "mode": "plain",
+   "path": "out/python__people__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "people",
+   "mode": "dict",
+   "path": "out/python__people__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "people",
+   "mode": "rle",
+   "path": "out/python__people__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "people",
+   "mode": "auto",
+   "path": "out/python__people__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "ledger",
+   "mode": "plain",
+   "path": "out/python__ledger__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "ledger",
+   "mode": "dict",
+   "path": "out/python__ledger__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "ledger",
+   "mode": "rle",
+   "path": "out/python__ledger__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "ledger",
+   "mode": "auto",
+   "path": "out/python__ledger__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "strings",
+   "mode": "plain",
+   "path": "out/python__strings__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "strings",
+   "mode": "dict",
+   "path": "out/python__strings__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "strings",
+   "mode": "rle",
+   "path": "out/python__strings__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "strings",
+   "mode": "auto",
+   "path": "out/python__strings__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "dates",
+   "mode": "plain",
+   "path": "out/python__dates__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "dates",
+   "mode": "dict",
+   "path": "out/python__dates__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "dates",
+   "mode": "rle",
+   "path": "out/python__dates__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "dates",
+   "mode": "auto",
+   "path": "out/python__dates__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "tx",
+   "mode": "plain",
+   "path": "out/python__tx__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "tx",
+   "mode": "dict",
+   "path": "out/python__tx__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "tx",
+   "mode": "rle",
+   "path": "out/python__tx__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "tx",
+   "mode": "auto",
+   "path": "out/python__tx__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "nulls",
+   "mode": "plain",
+   "path": "out/python__nulls__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "nulls",
+   "mode": "dict",
+   "path": "out/python__nulls__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "nulls",
+   "mode": "rle",
+   "path": "out/python__nulls__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "nulls",
+   "mode": "auto",
+   "path": "out/python__nulls__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "events",
+   "mode": "plain",
+   "path": "out/python__events__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "events",
+   "mode": "dict",
+   "path": "out/python__events__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "events",
+   "mode": "rle",
+   "path": "out/python__events__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "events",
+   "mode": "auto",
+   "path": "out/python__events__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "python",
+   "table": "bigdec",
+   "mode": "plain",
+   "path": "out/python__bigdec__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "python",
+   "table": "bigdec",
+   "mode": "dict",
+   "path": "out/python__bigdec__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "python",
+   "table": "bigdec",
+   "mode": "rle",
+   "path": "out/python__bigdec__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "python",
+   "table": "bigdec",
+   "mode": "auto",
+   "path": "out/python__bigdec__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "go",
+   "table": "people",
+   "mode": "plain",
+   "path": "out/go__people__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "people",
+   "mode": "dict",
+   "path": "out/go__people__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "people",
+   "mode": "rle",
+   "path": "out/go__people__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "people",
+   "mode": "auto",
+   "path": "out/go__people__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "ledger",
+   "mode": "plain",
+   "path": "out/go__ledger__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "ledger",
+   "mode": "dict",
+   "path": "out/go__ledger__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "ledger",
+   "mode": "rle",
+   "path": "out/go__ledger__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "ledger",
+   "mode": "auto",
+   "path": "out/go__ledger__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "strings",
+   "mode": "plain",
+   "path": "out/go__strings__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "strings",
+   "mode": "dict",
+   "path": "out/go__strings__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "strings",
+   "mode": "rle",
+   "path": "out/go__strings__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "strings",
+   "mode": "auto",
+   "path": "out/go__strings__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "dates",
+   "mode": "plain",
+   "path": "out/go__dates__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "dates",
+   "mode": "dict",
+   "path": "out/go__dates__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "dates",
+   "mode": "rle",
+   "path": "out/go__dates__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "dates",
+   "mode": "auto",
+   "path": "out/go__dates__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "tx",
+   "mode": "plain",
+   "path": "out/go__tx__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "tx",
+   "mode": "dict",
+   "path": "out/go__tx__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "tx",
+   "mode": "rle",
+   "path": "out/go__tx__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "tx",
+   "mode": "auto",
+   "path": "out/go__tx__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "nulls",
+   "mode": "plain",
+   "path": "out/go__nulls__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "nulls",
+   "mode": "dict",
+   "path": "out/go__nulls__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "nulls",
+   "mode": "rle",
+   "path": "out/go__nulls__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "nulls",
+   "mode": "auto",
+   "path": "out/go__nulls__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "events",
+   "mode": "plain",
+   "path": "out/go__events__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "events",
+   "mode": "dict",
+   "path": "out/go__events__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "events",
+   "mode": "rle",
+   "path": "out/go__events__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "events",
+   "mode": "auto",
+   "path": "out/go__events__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "go",
+   "table": "bigdec",
+   "mode": "plain",
+   "path": "out/go__bigdec__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "go",
+   "table": "bigdec",
+   "mode": "dict",
+   "path": "out/go__bigdec__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "go",
+   "table": "bigdec",
+   "mode": "rle",
+   "path": "out/go__bigdec__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "go",
+   "table": "bigdec",
+   "mode": "auto",
+   "path": "out/go__bigdec__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "common-lisp",
+   "table": "people",
+   "mode": "plain",
+   "path": "out/common-lisp__people__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "people",
+   "mode": "dict",
+   "path": "out/common-lisp__people__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "people",
+   "mode": "rle",
+   "path": "out/common-lisp__people__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "people",
+   "mode": "auto",
+   "path": "out/common-lisp__people__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "ledger",
+   "mode": "plain",
+   "path": "out/common-lisp__ledger__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "ledger",
+   "mode": "dict",
+   "path": "out/common-lisp__ledger__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "ledger",
+   "mode": "rle",
+   "path": "out/common-lisp__ledger__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "ledger",
+   "mode": "auto",
+   "path": "out/common-lisp__ledger__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "strings",
+   "mode": "plain",
+   "path": "out/common-lisp__strings__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "strings",
+   "mode": "dict",
+   "path": "out/common-lisp__strings__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "strings",
+   "mode": "rle",
+   "path": "out/common-lisp__strings__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "strings",
+   "mode": "auto",
+   "path": "out/common-lisp__strings__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "dates",
+   "mode": "plain",
+   "path": "out/common-lisp__dates__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "dates",
+   "mode": "dict",
+   "path": "out/common-lisp__dates__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "dates",
+   "mode": "rle",
+   "path": "out/common-lisp__dates__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "dates",
+   "mode": "auto",
+   "path": "out/common-lisp__dates__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "tx",
+   "mode": "plain",
+   "path": "out/common-lisp__tx__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "tx",
+   "mode": "dict",
+   "path": "out/common-lisp__tx__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "tx",
+   "mode": "rle",
+   "path": "out/common-lisp__tx__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "tx",
+   "mode": "auto",
+   "path": "out/common-lisp__tx__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "nulls",
+   "mode": "plain",
+   "path": "out/common-lisp__nulls__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "nulls",
+   "mode": "dict",
+   "path": "out/common-lisp__nulls__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "nulls",
+   "mode": "rle",
+   "path": "out/common-lisp__nulls__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "nulls",
+   "mode": "auto",
+   "path": "out/common-lisp__nulls__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "events",
+   "mode": "plain",
+   "path": "out/common-lisp__events__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "events",
+   "mode": "dict",
+   "path": "out/common-lisp__events__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "events",
+   "mode": "rle",
+   "path": "out/common-lisp__events__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "events",
+   "mode": "auto",
+   "path": "out/common-lisp__events__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "common-lisp",
+   "table": "bigdec",
+   "mode": "plain",
+   "path": "out/common-lisp__bigdec__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "common-lisp",
+   "table": "bigdec",
+   "mode": "dict",
+   "path": "out/common-lisp__bigdec__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "common-lisp",
+   "table": "bigdec",
+   "mode": "rle",
+   "path": "out/common-lisp__bigdec__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "common-lisp",
+   "table": "bigdec",
+   "mode": "auto",
+   "path": "out/common-lisp__bigdec__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 2
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "people",
+   "mode": "plain",
+   "path": "out/x86_64-asm-engine__people__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "people",
+   "mode": "dict",
+   "path": "out/x86_64-asm-engine__people__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "people",
+   "mode": "rle",
+   "path": "out/x86_64-asm-engine__people__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "people",
+   "mode": "auto",
+   "path": "out/x86_64-asm-engine__people__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "ledger",
+   "mode": "plain",
+   "path": "out/x86_64-asm-engine__ledger__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "ledger",
+   "mode": "dict",
+   "path": "out/x86_64-asm-engine__ledger__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "ledger",
+   "mode": "rle",
+   "path": "out/x86_64-asm-engine__ledger__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "ledger",
+   "mode": "auto",
+   "path": "out/x86_64-asm-engine__ledger__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "strings",
+   "mode": "plain",
+   "path": "out/x86_64-asm-engine__strings__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "strings",
+   "mode": "dict",
+   "path": "out/x86_64-asm-engine__strings__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "strings",
+   "mode": "rle",
+   "path": "out/x86_64-asm-engine__strings__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "strings",
+   "mode": "auto",
+   "path": "out/x86_64-asm-engine__strings__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "dates",
+   "mode": "plain",
+   "path": "out/x86_64-asm-engine__dates__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "dates",
+   "mode": "dict",
+   "path": "out/x86_64-asm-engine__dates__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "dates",
+   "mode": "rle",
+   "path": "out/x86_64-asm-engine__dates__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "dates",
+   "mode": "auto",
+   "path": "out/x86_64-asm-engine__dates__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "tx",
+   "mode": "plain",
+   "path": "out/x86_64-asm-engine__tx__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "tx",
+   "mode": "dict",
+   "path": "out/x86_64-asm-engine__tx__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "tx",
+   "mode": "rle",
+   "path": "out/x86_64-asm-engine__tx__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "tx",
+   "mode": "auto",
+   "path": "out/x86_64-asm-engine__tx__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "nulls",
+   "mode": "plain",
+   "path": "out/x86_64-asm-engine__nulls__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "nulls",
+   "mode": "dict",
+   "path": "out/x86_64-asm-engine__nulls__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "nulls",
+   "mode": "rle",
+   "path": "out/x86_64-asm-engine__nulls__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "nulls",
+   "mode": "auto",
+   "path": "out/x86_64-asm-engine__nulls__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "events",
+   "mode": "plain",
+   "path": "out/x86_64-asm-engine__events__plain.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "events",
+   "mode": "dict",
+   "path": "out/x86_64-asm-engine__events__dict.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "events",
+   "mode": "rle",
+   "path": "out/x86_64-asm-engine__events__rle.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "x86_64-asm-engine",
+   "table": "events",
+   "mode": "auto",
+   "path": "out/x86_64-asm-engine__events__auto.pqcf",
+   "valid": true,
+   "content_ok": true,
+   "format_version": 1
+  },
+  {
+   "writer": "reference",
+   "table": "people",
+   "mode": "auto",
+   "path": "out/reference__people__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  },
+  {
+   "writer": "reference",
+   "table": "wide",
+   "mode": "auto",
+   "path": "out/reference__wide__auto.pqcf",
+   "valid": true,
+   "content_ok": true
+  }
+ ],
+ "matrix": {
+  "java": {
+   "java": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "clojure": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "rust": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "python": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "go": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "common-lisp": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "x86_64-asm-engine": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "reference": {
+    "ok": 2,
+    "fail": 0,
+    "failures": []
+   }
+  },
+  "clojure": {
+   "java": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "clojure": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "rust": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "python": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "go": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "common-lisp": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "x86_64-asm-engine": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "reference": {
+    "ok": 2,
+    "fail": 0,
+    "failures": []
+   }
+  },
+  "rust": {
+   "java": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "clojure": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "rust": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "python": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "go": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "common-lisp": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "x86_64-asm-engine": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "reference": {
+    "ok": 2,
+    "fail": 0,
+    "failures": []
+   }
+  },
+  "python": {
+   "java": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "clojure": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "rust": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "python": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "go": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "common-lisp": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "x86_64-asm-engine": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "reference": {
+    "ok": 2,
+    "fail": 0,
+    "failures": []
+   }
+  },
+  "go": {
+   "java": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "clojure": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "rust": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "python": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "go": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "common-lisp": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "x86_64-asm-engine": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "reference": {
+    "ok": 2,
+    "fail": 0,
+    "failures": []
+   }
+  },
+  "common-lisp": {
+   "java": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "clojure": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "rust": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "python": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "go": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "common-lisp": {
+    "ok": 32,
+    "fail": 0,
+    "failures": []
+   },
+   "x86_64-asm-engine": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "reference": {
+    "ok": 2,
+    "fail": 0,
+    "failures": []
+   }
+  },
+  "x86_64-asm-engine": {
+   "java": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "clojure": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "rust": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "python": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "go": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "common-lisp": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "x86_64-asm-engine": {
+    "ok": 28,
+    "fail": 0,
+    "failures": []
+   },
+   "reference": {
+    "ok": 1,
+    "fail": 0,
+    "failures": []
+   }
+  }
+ }
+}
