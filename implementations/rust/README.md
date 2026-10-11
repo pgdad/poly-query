@@ -377,7 +377,10 @@ carries `"execution": {"mode": …, "threads": …}`.
   monomorphized loops over slices (one closure type per operator, so the
   compiler emits branch-free, auto-vectorized SIMD code; overflow checks
   accumulate flags instead of branching). Comparisons and `LIKE`/`IN` on a
-  dictionary column are evaluated once per dictionary entry. `AND`, `OR`
+  dictionary column are evaluated once per dictionary entry; scalar
+  functions whose only non-constant input is a dictionary column (e.g.
+  `UPPER(category)`) once per distinct code occurring in the batch, with
+  string results kept dictionary-encoded. `AND`, `OR`
   and `CASE` evaluate lazily-evaluated operands only on the rows that need
   them (like row mode). Everything else (functions, casts, subqueries) is
   evaluated element-wise by the row evaluator on the vectorized child
