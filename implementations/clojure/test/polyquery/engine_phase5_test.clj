@@ -175,6 +175,10 @@
    ["SELECT DISTINCT g FROM t UNION ALL SELECT DISTINCT k FROM s" false]
    ["SELECT k FROM s UNION ALL SELECT k FROM t LIMIT 100" false]
    ["SELECT id FROM t UNION ALL SELECT k / g FROM t" false]
+   ;; functions over dictionary-encoded strings (evaluated per dictionary entry)
+   ["SELECT id, CONCAT(s, 'x'), CONCAT(NULL, s), NULLIF(s, 'red'), LENGTH(s), LOWER(s), RTRIM(s) FROM t" false]
+   ["SELECT UPPER(s), COUNT(*), MAX(LENGTH(s)) FROM t GROUP BY UPPER(s)" false]
+   ["SELECT COUNT(*) FROM tp WHERE UPPER(s) = 'RED' OR TRIM(s) = 'w h i t e' OR NULLIF(s, 'blue') IS NULL" false]
    ;; CTEs referenced several times (shared subqueries)
    ["WITH c AS (SELECT g, SUM(d) AS sd FROM t GROUP BY g) SELECT COUNT(*) FROM c WHERE sd > (SELECT AVG(sd) FROM c)" false]
    ["WITH c AS (SELECT k, COUNT(*) AS n FROM t GROUP BY k) SELECT a.k, b.n FROM c a JOIN c b ON b.k = a.k + 1" false]

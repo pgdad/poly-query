@@ -852,9 +852,42 @@
                             (recur (rest ks) s2 (long n2)))
                           out))))))))))
 
+(defn- dict-call
+  "The vector of a function call whose only non-literal argument (number j)
+  is the dictionary vector d: the function is applied once per dictionary
+  entry and once to NULL (results cached per dictionary in `cache`) and
+  mapped through the codes. STRING results stay dictionary-encoded."
+  ^polyquery.exec.batch.Vec
+  [^IdentityHashMap cache f ^objects current ^objects args j ^DictVec d type ^ints sel n]
+  (let [j (long j)
+        ^objects dict (.-dict d)
+        [^objects res null-res]
+        (or (.get cache dict)
+            (let [k (aget sel 0)
+                  res (object-array (alength dict))]
+              (dotimes [a (alength args)]
+                (aset current a (.getObj ^Vec (aget args a) k)))
+              (dotimes [c (alength dict)]
+                (aset current j (aget dict c))
+                (aset res c (f nil)))
+              (aset current j nil)
+              (let [r [res (f nil)]]
+                (.put cache dict r)
+                r)))
+        ^ints codes (.-codes d)
+        ^booleans nulls (.-nulls d)]
+    (if (and (= :string (t/kind type)) (nil? null-res) (not-any? nil? res))
+      (DictVec. codes res nulls)
+      (let [out (b/new-vec type)]
+        (each-sel [i sel n]
+          (.setObj out i (if (b/nulls-at? nulls i) null-res (aget res (aget codes i)))))
+        out))))
+
 (defn- call-kernel
   "Function calls whose arguments cannot fail: the arguments are evaluated
-  as vectors and the row engine's function is applied per row to them."
+  as vectors and the row engine's function is applied per row to them —
+  or, for a function that cannot fail either and whose only non-literal
+  argument is dictionary-encoded, once per dictionary entry."
   [env e]
   (if (or (some may-fail? (:args e)) (= "PQ_SLEEP" (:fn e)))
     (row-kernel env e)
@@ -863,18 +896,23 @@
           ^objects current (object-array (max 1 nargs))
           arg-fns (mapv (fn [j] (fn [_] (aget current j))) (range nargs))
           f (functions/compile-call e arg-fns (:ctx env))
-          type (:type e)]
+          type (:type e)
+          varying (keep-indexed (fn [j a] (when-not (= :literal (:node a)) j)) (:args e))
+          dict-arg (when (and (= 1 (count varying)) (not (may-fail? e))) (long (first varying)))
+          per-dict (IdentityHashMap.)]
       ;; `current` is shared by the closures above: one evaluation at a time
       (reify Kernel
         (eval [_ bt sel n]
           (locking current
-            (let [args (object-array nargs)
-                  out (b/new-vec type)]
+            (let [args (object-array nargs)]
               (dotimes [j nargs] (aset args j (ev (aget ^objects ks j) bt sel n)))
-              (each-sel [i sel n]
-                (dotimes [j nargs] (aset current j (.getObj ^Vec (aget args j) i)))
-                (.setObj out i (f nil)))
-              out)))))))
+              (if (and dict-arg (pos? (long n)) (instance? DictVec (aget args (long dict-arg))))
+                (dict-call per-dict f current args dict-arg (aget args (long dict-arg)) type sel n)
+                (let [out (b/new-vec type)]
+                  (each-sel [i sel n]
+                    (dotimes [j nargs] (aset current j (.getObj ^Vec (aget args j) i)))
+                    (.setObj out i (f nil)))
+                  out)))))))))
 
 ;; ---------------------------------------------------------------------------
 
