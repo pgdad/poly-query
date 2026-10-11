@@ -125,6 +125,9 @@ func (p *planner) node(n plan.Node, req idset) (Node, error) {
 		if err != nil {
 			return nil, err
 		}
+		if hj, ok := in.(*HashJoin); ok && hj.Kind == plan.JoinLeft && hj.Residual == nil && !hj.BuildLeft {
+			hj.Anti = rejectsMatches(x.Pred, x.Input.(*plan.Join))
+		}
 		return &Filter{Input: in, Pred: x.Pred}, nil
 	case *plan.Project:
 		out := &Project{}
@@ -492,6 +495,40 @@ func orderFreeAggregate(n Node, keys []plan.SortKey) *HashAggregate {
 			return nil
 		}
 	}
+}
+
+// rejectsMatches reports whether a filter above a LEFT join rejects every
+// matched row: all its conjuncts test right-side columns for NULL that
+// hold no NULLs (column statistics of a right input that is a plain,
+// possibly filtered, table scan). Such a filter keeps exactly the
+// NULL-extended rows (an anti join).
+func rejectsMatches(pred plan.Expr, j *plan.Join) bool {
+	scan := j.Right
+	for {
+		f, ok := scan.(*plan.Filter)
+		if !ok {
+			break
+		}
+		scan = f.Input
+	}
+	if _, ok := scan.(*plan.Scan); !ok {
+		return false
+	}
+	for _, c := range plan.Conjuncts(pred) {
+		isNull, ok := c.(*plan.IsNull)
+		if !ok || isNull.Not {
+			return false
+		}
+		ref, ok := isNull.X.(*plan.ColumnRef)
+		if !ok {
+			return false
+		}
+		st, ok := columnStats(scan, ref.ID)
+		if !ok || st.NullCount != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // maxBitmapValues bounds the value range of DISTINCT bitmaps.

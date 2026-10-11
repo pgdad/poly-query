@@ -110,6 +110,10 @@ type HashJoin struct {
 	RightKeys   []plan.Expr
 	Residual    plan.Expr
 	BuildLeft   bool
+	// Anti (LEFT joins without residual) emits only the NULL-extended
+	// rows of unmatched probe rows: the filter above the join rejects
+	// every matched row (it tests a build column without NULLs for NULL).
+	Anti bool
 }
 
 // MergeJoin is a sort-merge equi-join: both inputs are sorted by their

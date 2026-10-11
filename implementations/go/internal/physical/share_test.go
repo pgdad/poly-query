@@ -63,3 +63,37 @@ func TestAnyOrderAggregate(t *testing.T) {
 		}
 	}
 }
+
+func TestAntiJoin(t *testing.T) {
+	for _, c := range []struct {
+		sql  string
+		anti bool
+	}{
+		// emp.id has no NULLs: only unmatched rows survive the filter.
+		{"SELECT d.code FROM dept d LEFT JOIN emp e ON e.dept = d.code WHERE e.id IS NULL", true},
+		// emp.salary has a NULL, so a matched row may pass.
+		{"SELECT d.code FROM dept d LEFT JOIN emp e ON e.dept = d.code WHERE e.salary IS NULL", false},
+		{"SELECT d.code FROM dept d LEFT JOIN emp e ON e.dept = d.code WHERE e.id IS NOT NULL", false},
+		{"SELECT d.code FROM dept d LEFT JOIN emp e ON e.dept = d.code WHERE e.id IS NULL OR d.code = 'hr'", false},
+		// A right-side ON conjunct is pushed into the right input.
+		{"SELECT d.code FROM dept d LEFT JOIN emp e ON e.dept = d.code AND e.salary > 70 WHERE e.id IS NULL", true},
+		// A residual decides matches during the probe.
+		{"SELECT d.code FROM dept d LEFT JOIN emp e ON e.dept = d.code AND e.salary > LENGTH(d.title) WHERE e.id IS NULL", false},
+	} {
+		p := build(t, c.sql, physical.Options{})
+		var hj *physical.HashJoin
+		var visit func(physical.Node)
+		visit = func(n physical.Node) {
+			if j, ok := n.(*physical.HashJoin); ok {
+				hj = j
+			}
+			for _, ch := range n.Children() {
+				visit(ch)
+			}
+		}
+		visit(p.Root)
+		if hj == nil || hj.Anti != c.anti {
+			t.Errorf("%s: Anti = %v, want %v", c.sql, hj != nil && hj.Anti, c.anti)
+		}
+	}
+}
