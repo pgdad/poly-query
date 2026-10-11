@@ -35,6 +35,9 @@ use crate::exec::pool;
 use crate::planner::logical::SortKey;
 use crate::types::Value;
 
+/// Dictionaries up to this size are ranked by a comparison sort.
+const SMALL_DICTIONARY: usize = 4096;
+
 /// Minimum rows per parallel sort chunk.
 const PARALLEL_SORT_MIN: usize = 64 * 1024;
 
@@ -274,16 +277,28 @@ pub fn sort_permutation(
         }
         _ => {
             // The first string key is coded by prefix (with ties), later
-            // ones by rank.
-            let mut codes: Vec<KeyCodes> = Vec::new();
-            for (v, k) in vectors.iter().zip(keys) {
-                let allow_ties = codes.iter().all(|c| c.ties.is_none());
-                codes.extend(
-                    key_codes(v, k, threads, allow_ties)
-                        .into_iter()
-                        .filter(|c| c.bits > 0 || c.ties.is_some()),
-                );
-            }
+            // ones by rank. With several keys, they are coded in parallel.
+            let prefixed = vectors.iter().position(|v| match &v.data {
+                Data::Str(_) => true,
+                Data::Dict(_, dict) => dict.len() > SMALL_DICTIONARY,
+                _ => false,
+            });
+            let jobs: Vec<_> = vectors
+                .iter()
+                .zip(keys)
+                .enumerate()
+                .map(|(i, (v, k))| move || key_codes(v, k, threads, prefixed == Some(i)))
+                .collect();
+            let per_key = if threads > 1 {
+                pool::scoped(jobs)
+            } else {
+                jobs.into_iter().map(|job| job()).collect()
+            };
+            let codes: Vec<KeyCodes> = per_key
+                .into_iter()
+                .flatten()
+                .filter(|c| c.bits > 0 || c.ties.is_some())
+                .collect();
             normalized_sort(&codes, n, threads)
         }
     };
@@ -477,7 +492,7 @@ fn key_codes<'a>(
         }
         Data::Str(x) => string_ranks(x, threads),
         Data::Dict(codes, dict) => {
-            let rank = if dict.len() <= 4096 {
+            let rank = if dict.len() <= SMALL_DICTIONARY {
                 dict_ranks(dict)
             } else if allow_ties {
                 ties = Some(Strings::Dict(codes, dict));

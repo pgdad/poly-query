@@ -398,25 +398,34 @@ impl SortOp {
         if parts.is_empty() {
             return Ok(SortedRows::lazy(Batch::new(Vec::new(), 0), Vec::new()));
         }
-        let mut all = Batch::concat(parts, self.width);
-        if all.len > 4 * BATCH_SIZE && self.top.is_none_or(|t| t > 4 * BATCH_SIZE) {
-            // Many output rows: emit strings as codes into a shared
-            // dictionary (cheap gathers).
-            all.columns = all
-                .columns
-                .into_iter()
-                .map(Vector::into_dictionary)
-                .collect();
-        }
-        let perm = sort_permutation(&all, &self.keys, self.top, ctx)?;
+        // Many output rows: strings are emitted as codes into a shared
+        // dictionary (cheap gathers).
+        let len: usize = parts.iter().map(|b| b.len).sum();
+        let dictionary = len > 4 * BATCH_SIZE && self.top.is_none_or(|t| t > 4 * BATCH_SIZE);
+        let finish = |v: Vector| if dictionary { v.into_dictionary() } else { v };
         let threads = ctx.execution.threads;
-        Ok(
-            if threads > 1 && !ctx.serial_only() && perm.len() >= PARALLEL_GATHER_ROWS {
-                SortedRows::gathered(all, perm, threads)
-            } else {
-                SortedRows::lazy(all, perm)
-            },
-        )
+        let parallel = threads > 1 && !ctx.serial_only() && len >= PARALLEL_GATHER_ROWS;
+        let all = if parallel {
+            // Columns are concatenated in parallel.
+            let finish = &finish;
+            let columns = pool::scoped(
+                Batch::column_parts(parts, self.width)
+                    .into_iter()
+                    .map(|column| move || finish(Vector::concat(column)))
+                    .collect(),
+            );
+            Batch::new(columns, len)
+        } else {
+            let mut all = Batch::concat(parts, self.width);
+            all.columns = all.columns.into_iter().map(finish).collect();
+            all
+        };
+        let perm = sort_permutation(&all, &self.keys, self.top, ctx)?;
+        Ok(if parallel && perm.len() >= PARALLEL_GATHER_ROWS {
+            SortedRows::gathered(all, perm, threads)
+        } else {
+            SortedRows::lazy(all, perm)
+        })
     }
 }
 

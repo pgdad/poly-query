@@ -556,6 +556,15 @@ impl Batch {
             return batches.pop().unwrap_or_else(|| Batch::new(Vec::new(), 0));
         }
         let len = batches.iter().map(|b| b.len).sum();
+        let columns = Batch::column_parts(batches, width)
+            .into_iter()
+            .map(Vector::concat)
+            .collect();
+        Batch::new(columns, len)
+    }
+
+    /// The vectors of every column of `batches` (of the same width).
+    pub fn column_parts(batches: Vec<Batch>, width: usize) -> Vec<Vec<Vector>> {
         let mut parts: Vec<Vec<Vector>> = (0..width)
             .map(|_| Vec::with_capacity(batches.len()))
             .collect();
@@ -564,8 +573,7 @@ impl Batch {
                 parts[c].push(v);
             }
         }
-        let columns = parts.into_iter().map(Vector::concat).collect();
-        Batch::new(columns, len)
+        parts
     }
 
     pub fn approx_size(&self) -> usize {
