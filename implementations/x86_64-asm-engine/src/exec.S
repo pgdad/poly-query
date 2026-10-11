@@ -712,6 +712,67 @@ FUNC row_cmp
 9:  LEAVE
 ENDF row_cmp
 
+/* row_cmp_stable(pa rdi, pb rsi, plan rdx) -> eax: qsort_r comparator on
+ * (row*, sequence) pairs: ORDER BY keys, ties by sequence (production order) */
+FUNC row_cmp_stable
+    push %rdi
+    push %rsi
+    sub $8, %rsp
+    call row_cmp
+    add $8, %rsp
+    pop %rsi
+    pop %rdi
+    test %eax, %eax
+    jnz 9f
+    mov 8(%rdi), %rcx
+    cmp 8(%rsi), %rcx
+    seta %al
+    setb %cl
+    sub %cl, %al
+    movsbl %al, %eax
+9:  ret
+ENDF row_cmp_stable
+
+/* sort_rows(rows rdi, n rsi, plan rdx): stable sort of result rows by the
+ * plan's ORDER BY keys (ties keep their production order, so every
+ * execution mode returns tied rows in the same order) */
+FUNC sort_rows
+    ENTER 16
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %rdx, %r13
+    mov %r12, %rdi
+    shl $4, %rdi
+    call tmp_alloc
+    mov %rax, %r14                  /* (row, sequence) pairs */
+    xor %ecx, %ecx
+1:  cmp %r12, %rcx
+    jae 2f
+    mov %rcx, %rdx
+    shl $4, %rdx
+    mov (%rbx, %rcx, 8), %rax
+    mov %rax, (%r14, %rdx)
+    mov %rcx, 8(%r14, %rdx)
+    inc %rcx
+    jmp 1b
+2:  mov %r14, %rdi
+    mov %r12, %rsi
+    mov $16, %edx
+    lea row_cmp_stable(%rip), %rcx
+    mov %r13, %r8
+    call qsort_r
+    xor %ecx, %ecx
+3:  cmp %r12, %rcx
+    jae 9f
+    mov %rcx, %rdx
+    shl $4, %rdx
+    mov (%r14, %rdx), %rax
+    mov %rax, (%rbx, %rcx, 8)
+    inc %rcx
+    jmp 3b
+9:  LEAVE
+ENDF sort_rows
+
 /* agg_update(plan rdi, ctx rsi, states rdx): feeds the current row to every aggregate */
 FUNC agg_update
     ENTER 48
@@ -1386,10 +1447,8 @@ FUNC exec_plan
     cmp $1, %rsi
     jbe 87f
     mov VEC_DATA+XS_ROWS(%r12), %rdi
-    mov $8, %edx
-    lea row_cmp(%rip), %rcx
-    mov %rbx, %r8
-    call qsort_r
+    mov %rbx, %rdx
+    call sort_rows
 87: /* ---- offset / limit */
     mov VEC_LEN+XS_ROWS(%r12), %rax /* n */
     mov QP_OFFSET(%rbx), %r13
@@ -1580,13 +1639,57 @@ ENDF eval_subquery
 
 /* exec_query_result(plan rdi, max_rows rsi) -> rax Result*: runs the plan;
  * RESOURCE_LIMIT when the result has more than max_rows (>= 0) rows.  The row
- * count is also left in g_result_rows (logged by the server). */
+ * count is also left in g_result_rows (logged by the server).
+ *
+ * Error replay: batch and parallel execution evaluate expressions column by
+ * column and part by part, so a query whose rows raise *different* data
+ * errors (say an overflow in row 5 and a division by zero in row 9 of
+ * another column) could report another error than the row baseline.  When
+ * such an execution fails with a data error, the query is re-run in the
+ * row baseline, which raises (exactly) the baseline's error. */
 FUNC exec_query_result
-    ENTER 16
-    mov %rsi, 0(%rsp)
+    ENTER 256
+    mov %rsi, 0(%rsp)               /* max rows */
+    mov %rdi, 8(%rsp)               /* plan */
+    call pexec_enabled
+    test %eax, %eax
+    jz 5f
+    mov g_jmpbuf(%rip), %rax
+    mov %rax, 16(%rsp)              /* the request's handler */
+    lea 32(%rsp), %rdi              /* jmp_buf at 32..231 */
+    mov %rdi, g_jmpbuf(%rip)
+    call _setjmp
+    test %eax, %eax
+    jnz 3f
+    mov 8(%rsp), %rdi
+    xor %esi, %esi
+    call exec_plan
+    mov 16(%rsp), %rcx
+    mov %rcx, g_jmpbuf(%rip)
+    mov %rax, %r12
+    jmp 6f
+3:  mov 16(%rsp), %rdi              /* failed */
+    mov %rdi, g_jmpbuf(%rip)
+    mov g_err_code(%rip), %rax
+    cmp $E_NUMERIC_OVERFLOW, %rax
+    je 4f
+    cmp $E_DIVISION_BY_ZERO, %rax
+    je 4f
+    cmp $E_CONVERSION_ERROR, %rax
+    je 4f
+    cmp $E_INVALID_ARGUMENT, %rax
+    je 4f
+    cmp $E_SUBQUERY_CARDINALITY, %rax
+    je 4f
+    mov $1, %esi                    /* other errors: report as they are */
+    call longjmp
+4:  movq $MODE_ROW, g_opt_mode(%rip)    /* replay in the row baseline */
+    movq $1, g_opt_threads(%rip)
+5:  mov 8(%rsp), %rdi
     xor %esi, %esi
     call exec_plan
     mov %rax, %r12
+6:
     mov RS_NROWS(%r12), %r14
     mov %r14, g_result_rows(%rip)
     mov 0(%rsp), %rax

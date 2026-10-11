@@ -707,28 +707,47 @@ ENDF pexec_filter
 
 /* ================================================================ projection */
 
-/* heap_cmp(heap rdi, i rsi, j rdx, plan rcx) -> eax row_cmp(heap[i], heap[j]) */
+/* heap_cmp(heap rdi, i rsi, j rdx, plan rcx) -> eax: compares the heap's
+ * (row, sequence) entries i and j (ORDER BY keys, then sequence) */
 FUNC heap_cmp
-    lea (%rdi, %rsi, 8), %rsi
-    lea (%rdi, %rdx, 8), %rdx
-    xchg %rsi, %rdi
-    xchg %rdx, %rsi
+    shl $4, %rsi
+    shl $4, %rdx
+    add %rdi, %rsi
+    add %rdi, %rdx
+    mov %rsi, %rdi
+    mov %rdx, %rsi
     mov %rcx, %rdx
-    jmp row_cmp
+    jmp row_cmp_stable
 ENDF heap_cmp
 
-/* topn_offer(heap rdi, size* rsi, K rdx, row rcx, plan r8): keeps the K
- * smallest rows (ORDER BY order) in a binary max-heap */
+/* seq_cmp(a rdi, b rsi) -> eax: orders (row, sequence) pairs by sequence */
+FUNC seq_cmp
+    mov 8(%rdi), %rax
+    cmp 8(%rsi), %rax
+    seta %al
+    setb %cl
+    sub %cl, %al
+    movsbl %al, %eax
+    ret
+ENDF seq_cmp
+
+/* topn_offer(heap rdi, size* rsi, K rdx, row rcx, sequence r9, plan r8):
+ * keeps the K first (row, sequence) entries in ORDER BY order (ties by
+ * sequence, as the stable final sort orders them) in a binary max-heap of
+ * 16-byte entries with a spare slot at [K] */
 FUNC topn_offer
     ENTER 32
-    mov %rdi, %rbx                  /* heap (one spare slot at [K]) */
+    mov %rdi, %rbx                  /* heap */
     mov %rsi, %r12
     mov %rdx, %r13                  /* K */
     mov %r8, %r15                   /* plan */
     mov (%r12), %r14                /* size */
     cmp %r13, %r14
     jae 10f
-    mov %rcx, (%rbx, %r14, 8)       /* ---- push and sift up */
+    mov %r14, %rax                  /* ---- push and sift up */
+    shl $4, %rax
+    mov %rcx, (%rbx, %rax)
+    mov %r9, 8(%rbx, %rax)
     incq (%r12)
 1:  test %r14, %r14
     jz 9f
@@ -742,16 +761,17 @@ FUNC topn_offer
     call heap_cmp
     cmp $0, %eax
     jle 9f
-    mov 0(%rsp), %rax
-    mov (%rbx, %rax, 8), %rcx
-    mov (%rbx, %r14, 8), %rdx
-    mov %rdx, (%rbx, %rax, 8)
-    mov %rcx, (%rbx, %r14, 8)
-    mov %rax, %r14
+    mov 0(%rsp), %rsi
+    mov %r14, %rdi
+    call heap_swap
+    mov 0(%rsp), %r14
     jmp 1b
 10: test %r13, %r13                 /* ---- full: replace the maximum? */
     jz 9f
-    mov %rcx, (%rbx, %r13, 8)       /* candidate in the spare slot */
+    mov %r13, %rax                  /* candidate in the spare slot */
+    shl $4, %rax
+    mov %rcx, (%rbx, %rax)
+    mov %r9, 8(%rbx, %rax)
     mov %rbx, %rdi
     mov %r13, %rsi
     xor %edx, %edx
@@ -759,8 +779,9 @@ FUNC topn_offer
     call heap_cmp
     cmp $0, %eax
     jge 9f
-    mov (%rbx, %r13, 8), %rax
-    mov %rax, (%rbx)
+    mov %r13, %rdi
+    xor %esi, %esi
+    call heap_swap
     xor %r14d, %r14d                /* sift down */
 11: lea 1(%r14, %r14), %rax         /* left child */
     cmp %r13, %rax
@@ -786,14 +807,26 @@ FUNC topn_offer
     call heap_cmp
     cmp $0, %eax
     jle 9f
-    mov 0(%rsp), %rax
-    mov (%rbx, %rax, 8), %rcx
-    mov (%rbx, %r14, 8), %rdx
-    mov %rdx, (%rbx, %rax, 8)
-    mov %rcx, (%rbx, %r14, 8)
-    mov %rax, %r14
+    mov 0(%rsp), %rsi
+    mov %r14, %rdi
+    call heap_swap
+    mov 0(%rsp), %r14
     jmp 11b
 9:  LEAVE
+
+/* heap_swap: local helper (rbx = heap): swaps entries rdi and rsi */
+heap_swap:
+    shl $4, %rdi
+    shl $4, %rsi
+    mov (%rbx, %rdi), %rax
+    mov 8(%rbx, %rdi), %rcx
+    mov (%rbx, %rsi), %rdx
+    mov 8(%rbx, %rsi), %r8
+    mov %rdx, (%rbx, %rdi)
+    mov %r8, 8(%rbx, %rdi)
+    mov %rax, (%rbx, %rsi)
+    mov %rcx, 8(%rbx, %rsi)
+    ret
 ENDF topn_offer
 
 /* project_part(task rdi, part rsi, lo rdx, hi rcx): output rows of the
@@ -817,9 +850,10 @@ FUNC project_part
     cmpq $0, PT_D(%rbx)
     je 0f
     mov PT_A(%rbx), %rdi
-    lea 8(, %rdi, 8), %rdi
+    inc %rdi
+    shl $4, %rdi
     call tmp_alloc
-    mov %rax, 88(%rsp)              /* heap */
+    mov %rax, 88(%rsp)              /* heap of (row, sequence) */
 0:  mov XS_W(%r13), %r12
     shl $3, %r12
 1:  cmp 72(%rsp), %r14
@@ -840,15 +874,15 @@ FUNC project_part
     mov XS_W(%r13), %r8
     mov 80(%rsp), %r9
     call k_project
-    add %r15, %r14
     cmpq $0, PT_D(%rbx)
-    je 1b
+    je 31f
     movq $0, 104(%rsp)              /* top-N: offer the batch's rows */
 3:  mov 80(%rsp), %rax
     mov 104(%rsp), %rcx
     cmp VEC_LEN(%rax), %rcx
     jae 4f
     mov VEC_DATA(%rax), %rax
+    lea (%r14, %rcx), %r9           /* sequence = tuple index */
     mov (%rax, %rcx, 8), %rcx
     mov 88(%rsp), %rdi
     lea 96(%rsp), %rsi
@@ -857,17 +891,32 @@ FUNC project_part
     call topn_offer
     incq 104(%rsp)
     jmp 3b
+31: add %r15, %r14
+    jmp 1b
 4:  mov 80(%rsp), %rax
     movq $0, VEC_LEN(%rax)
+    add %r15, %r14
     jmp 1b
 9:  cmpq $0, PT_D(%rbx)
     je 91f
-    mov 80(%rsp), %rax              /* the heap becomes the part's rows */
-    mov 88(%rsp), %rcx
-    mov %rcx, VEC_DATA(%rax)
-    mov 96(%rsp), %rcx
-    mov %rcx, VEC_LEN(%rax)
-    mov %rcx, VEC_CAP(%rax)
+    mov 88(%rsp), %rdi              /* the heap, in production order, */
+    mov 96(%rsp), %rsi              /* becomes the part's rows */
+    mov $16, %edx
+    lea seq_cmp(%rip), %rcx
+    call qsort
+    mov 80(%rsp), %rax
+    movq $0, VEC_LEN(%rax)
+    xor %r14d, %r14d
+92: cmp 96(%rsp), %r14
+    jae 91f
+    mov %r14, %rsi
+    shl $4, %rsi
+    add 88(%rsp), %rsi
+    mov (%rsi), %rsi
+    mov 80(%rsp), %rdi
+    call vec_push
+    inc %r14
+    jmp 92b
 91: mov 64(%rsp), %rcx
     mov 80(%rsp), %rax
     mov %rax, PT_OUT(%rbx, %rcx, 8)
