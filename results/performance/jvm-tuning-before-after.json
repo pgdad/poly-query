@@ -1,0 +1,111 @@
+{
+ "before": "results/performance/20261011T175135Z-1m-before-jvm-tuning",
+ "after": "results/performance/20261011T175237Z-1m-after-jvm-tuning",
+ "engines": {
+  "java": {
+   "queries": 20,
+   "geomean_before_s": 0.0038249520753781074,
+   "geomean_after_s": 0.0038268059108606815,
+   "speedup": 0.9995155658463595,
+   "best_ratio": 1.3539200012443775,
+   "worst_ratio": 0.7037876808728301,
+   "significantly_slower": [
+    "q18_nulls"
+   ],
+   "peak_rss_before": 9635180544,
+   "peak_rss_after": 9460305920,
+   "per_query_speedup": {
+    "q01_filter_selective": 0.8869860036173275,
+    "q02_filter_low_selectivity": 1.0553295416619168,
+    "q03_range_filter_time": 1.2950918314621862,
+    "q04_arith_aggregate": 1.1234055773503402,
+    "q05_groupby_low_card": 0.9300901170871418,
+    "q06_groupby_high_card": 0.9853693814810718,
+    "q07_groupby_skewed": 1.080358201231955,
+    "q08_groupby_uniform_multi": 0.9822029583355634,
+    "q09_distinct_count": 0.8901872742224481,
+    "q10_join_customers": 0.9177935244925142,
+    "q11_join_star": 0.9116106270884348,
+    "q12_left_join_anti": 1.072584880078385,
+    "q13_sort_topn": 1.1117814991436665,
+    "q14_sort_full_string": 1.3539200012443775,
+    "q15_sort_multi_key": 1.0052339541538846,
+    "q16_timeseries_hourly": 0.9892927938330635,
+    "q17_wide_projection": 1.0651370397317594,
+    "q18_nulls": 0.7037876808728301,
+    "q19_cte_subquery": 0.9075923778426492,
+    "q20_string_functions": 0.919065116099549
+   }
+  },
+  "clojure": {
+   "queries": 20,
+   "geomean_before_s": 0.0068964609203966565,
+   "geomean_after_s": 0.004952413048308784,
+   "speedup": 1.39254558396573,
+   "best_ratio": 5.273610097559287,
+   "worst_ratio": 1.0565777431731267,
+   "significantly_slower": [],
+   "peak_rss_before": 6158135296,
+   "peak_rss_after": 9502048256,
+   "per_query_speedup": {
+    "q01_filter_selective": 1.510734857251168,
+    "q02_filter_low_selectivity": 1.272955227660163,
+    "q03_range_filter_time": 2.0000680109906446,
+    "q04_arith_aggregate": 1.1588820564923041,
+    "q05_groupby_low_card": 1.5999720058929046,
+    "q06_groupby_high_card": 1.15216131463982,
+    "q07_groupby_skewed": 1.2383844084027127,
+    "q08_groupby_uniform_multi": 1.2832387276547226,
+    "q09_distinct_count": 1.1294907776848773,
+    "q10_join_customers": 1.0646837418269777,
+    "q11_join_star": 1.1869131676486229,
+    "q12_left_join_anti": 1.0565777431731267,
+    "q13_sort_topn": 1.1024895140164117,
+    "q14_sort_full_string": 5.273610097559287,
+    "q15_sort_multi_key": 2.1221004244395476,
+    "q16_timeseries_hourly": 1.1416013651321752,
+    "q17_wide_projection": 1.2835002922313483,
+    "q18_nulls": 1.1918451378342705,
+    "q19_cte_subquery": 1.1819138083725664,
+    "q20_string_functions": 1.4994300099971192
+   }
+  }
+ },
+ "digests_identical": true,
+ "track": "B",
+ "track_b_metrics": {
+  "java": {
+   "before": {
+    "startup_median_s": 0.02209429698996246,
+    "first_run_geomean_s": 0.037018967577017094,
+    "first_run_sum_s": 1.1734702967805788,
+    "warm_geomean_s": 0.0038249520753781074,
+    "peak_rss_bytes": 9635180544
+   },
+   "after": {
+    "startup_median_s": 0.015521090012043715,
+    "first_run_geomean_s": 0.027955638749715028,
+    "first_run_sum_s": 0.8599940480780788,
+    "warm_geomean_s": 0.0038268059108606815,
+    "peak_rss_bytes": 9460305920
+   }
+  },
+  "clojure": {
+   "before": {
+    "startup_median_s": 0.35963933396851644,
+    "first_run_geomean_s": 0.10842162086031397,
+    "first_run_sum_s": 3.1090597769943997,
+    "warm_geomean_s": 0.0068964609203966565,
+    "peak_rss_bytes": 6158135296
+   },
+   "after": {
+    "startup_median_s": 0.1326605980284512,
+    "first_run_geomean_s": 0.01863542860273203,
+    "first_run_sum_s": 0.6274090808583423,
+    "warm_geomean_s": 0.004952413048308784,
+    "peak_rss_bytes": 9502048256
+   }
+  }
+ },
+ "note": "Track B (ecosystem-optimized) only; never combined with Track A. Base = the engines as merged before INT-001 (first-round optimizations). Java's run timed out (120 min); its committed work passes all checks. first_run = the first execution of each query in a fresh session (cold JIT); startup = process spawn to first protocol response."
+}
