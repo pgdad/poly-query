@@ -14,7 +14,11 @@
   A single INT64/DECIMAL/DATE/TIMESTAMP key uses a primitive table
   instead: an open-addressing long → key id map (polyquery.exec.grouping)
   plus the build rows of every key chained through int arrays, so probing
-  a batch neither boxes keys nor calls equals.
+  a batch neither boxes keys nor calls equals. Its build side is also kept
+  column-wise: every build column is converted once, on first use, to a
+  typed vector over all build rows (STRING columns dictionary-encoded), and
+  the build-side columns of the output batches gather from it by build row
+  id (polyquery.exec.batch/GatherCol).
 
   Used for INNER joins and for LEFT joins without residual condition; LEFT
   joins with a residual condition (which decides per probe row whether it
@@ -39,7 +43,8 @@
             [polyquery.types :as t]
             [polyquery.values :as v])
   (:import (java.util ArrayList HashMap)
-           (polyquery.exec.batch Batch BoolVec DictVec DoubleVec LazyCol LongVec ObjVec Vec)
+           (polyquery.exec.batch Batch BoolVec DictVec DoubleVec GatherCol LazyCol LongVec ObjVec
+                                 RowsColumn Vec)
            (polyquery.exec.grouping LongKeyTable)
            (polyquery.exec.kernels Kernel)))
 
@@ -78,6 +83,8 @@
       (let [src ^ints (.-codes ^DictVec v) out (int-array b/capacity)]
         (dotimes [i n] (aset out i (aget src (aget pos i))))
         (DictVec. out (.-dict ^DictVec v) (take-nulls (.-nulls ^DictVec v))))
+      (instance? GatherCol v)
+      (b/gather-col v (java.util.Arrays/copyOf pos (int n)) n)
       (instance? LazyCol v)
       (let [src ^objects (.-rows ^LazyCol v) out (object-array n)]
         (dotimes [i n] (aset out i (aget src (aget pos i))))
@@ -90,7 +97,8 @@
 ;; ---------------------------------------------------------------------------
 ;; Primitive join table for one integer-like key
 
-(deftype LongJoinTable [^LongKeyTable ids ^ints heads ^ints nexts ^objects rows])
+(deftype LongJoinTable [^LongKeyTable ids ^ints heads ^ints nexts
+                        ^objects cols]) ; RowsColumn per build column; row id n = all NULL
 
 (defn- key-factor
   "Multiplier converting a non-NULL value of type `from` to the long key of
@@ -155,7 +163,12 @@
                           (recur (inc r)))
                         false)))))]
       (if ok?
-        (LongJoinTable. ids heads nexts (.toArray rows))
+        (let [width (long (if build-left? (:left-width plan) (:right-width plan)))
+              all (object-array (inc n))]
+          (dotimes [r n] (aset all r (.get rows r)))
+          (aset all n (object-array width))
+          (LongJoinTable. ids heads nexts
+                          (object-array (map #(RowsColumn. all % nil) (range width)))))
         (join/hash-table rows (join/key-extractor env (if build-left? (:left-keys plan) (:right-keys plan)))
                          env)))
     (join/build-hash-table plan env)))
@@ -191,15 +204,15 @@
 
 (defn- probe-long
   "Probes the selected rows of batch bt in a LongJoinTable, calling
-  (add acc bt position build-row) per match (and per unmatched row of a
-  LEFT join, with empty-row). hashes: a batch-sized buffer for the
-  natively computed key hashes."
-  [^LongJoinTable table [pk factor] ^Batch bt add left-join? empty-row acc ^longs hashes]
+  (add acc bt position build-row-id) per match (and per unmatched row of a
+  LEFT join, with the id of the all-NULL row). hashes: a batch-sized buffer
+  for the natively computed key hashes."
+  [^LongJoinTable table [pk factor] ^Batch bt add left-join? acc ^longs hashes]
   (let [^LongKeyTable ids (.-ids table)
         lib (.-lib ids)
         ^ints heads (.-heads table)
         ^ints nexts (.-nexts table)
-        ^objects rows (.-rows table)
+        null-id (alength heads)
         ^ints sel (.-sel bt)
         n (.-n bt)
         factor (long factor)
@@ -218,12 +231,12 @@
                     hashed? (.findHashed ids (long key) (aget hashes p))
                     :else (.find ids (long key)))]
           (if (neg? gid)
-            (recur (inc i) (if left-join? (add acc bt p empty-row) acc))
+            (recur (inc i) (if left-join? (add acc bt p null-id) acc))
             (recur (inc i)
                    (loop [r (aget heads gid) acc acc]
                      (if (or (neg? r) (reduced? acc))
                        acc
-                       (recur (aget nexts r) (add acc bt p (aget rows r))))))))))))
+                       (recur (aget nexts r) (add acc bt p r)))))))))))
 
 (defmethod vectorized/build-batches :hash-join [plan env]
   (if-not (vectorizable? plan)
@@ -249,10 +262,12 @@
       (ops/reducible
        (fn [f init]
          (let [table (or (:prebuilt plan) (build-table plan env))
+               ^objects build-cols (when (instance? LongJoinTable table) (.-cols ^LongJoinTable table))
                produced (long-array 1)
                hashes (long-array b/capacity)
                pos (int-array b/capacity)
                brows (object-array b/capacity)
+               bids (int-array b/capacity)
                cnt (long-array 1)
                ;; emits the pending pairs of probe batch bt as one batch
                flush (fn [acc ^Batch bt]
@@ -260,13 +275,17 @@
                          (if (zero? n)
                            acc
                            (let [^objects pcols (.-cols bt)
-                                 cols (object-array (+ lw rw))
-                                 rows (java.util.Arrays/copyOf brows (int n))]
+                                 cols (object-array (+ lw rw))]
                              (dotimes [c (alength pcols)]
                                (when-let [pv (aget pcols c)]
                                  (aset cols (+ probe-offset c) (gather pv pos n lib))))
-                             (dotimes [c build-width]
-                               (aset cols (+ build-offset c) (LazyCol. rows c nil)))
+                             (if build-cols
+                               (let [ids (java.util.Arrays/copyOf bids (int n))]
+                                 (dotimes [c build-width]
+                                   (aset cols (+ build-offset c) (b/gather-col (aget build-cols c) ids n))))
+                               (let [rows (java.util.Arrays/copyOf brows (int n))]
+                                 (dotimes [c build-width]
+                                   (aset cols (+ build-offset c) (LazyCol. rows c nil)))))
                              (aset cnt 0 0)
                              (let [out (Batch. cols b/identity-sel n)
                                    [sel m] (if residual (residual out) [b/identity-sel n])
@@ -283,13 +302,19 @@
                        (aset pos c (int p))
                        (aset brows c r)
                        (aset cnt 0 (inc c))
-                       (if (= (inc c) b/capacity) (flush acc bt) acc)))]
+                       (if (= (inc c) b/capacity) (flush acc bt) acc)))
+               add-id (fn [acc bt ^long p ^long r]
+                        (let [c (aget cnt 0)]
+                          (aset pos c (int p))
+                          (aset bids c (int r))
+                          (aset cnt 0 (inc c))
+                          (if (= (inc c) b/capacity) (flush acc bt) acc)))]
            (reduce
             (fn [acc ^Batch bt]
               (let [^ints sel (.-sel bt)
                     n (.-n bt)
                     acc (if (instance? LongJoinTable table)
-                          (probe-long table long-probe bt add left-join? empty-row acc hashes)
+                          (probe-long table long-probe bt add-id left-join? acc hashes)
                           (let [^HashMap table table
                                 ^objects pkeys (keys-of bt)]
                             (loop [i 0 acc acc]

@@ -175,6 +175,10 @@
    ["SELECT DISTINCT g FROM t UNION ALL SELECT DISTINCT k FROM s" false]
    ["SELECT k FROM s UNION ALL SELECT k FROM t LIMIT 100" false]
    ["SELECT id FROM t UNION ALL SELECT k / g FROM t" false]
+   ;; column-wise join build sides, grouping by several dictionary-encoded keys
+   ["SELECT r.name, s.name, COUNT(*), SUM(t.d) FROM t JOIN r ON r.k = t.k JOIN s ON s.k = t.g GROUP BY r.name, s.name" false]
+   ["SELECT r.name, t.s, COUNT(*), MAX(r.w) FROM t LEFT JOIN r ON r.k = t.k GROUP BY r.name, t.s" false]
+   ["SELECT t.id, r.name, r.w, s.name FROM t LEFT JOIN r ON r.k = t.k LEFT JOIN s ON s.k = t.g WHERE t.id < 400" false]
    ;; functions over dictionary-encoded strings (evaluated per dictionary entry)
    ["SELECT id, CONCAT(s, 'x'), CONCAT(NULL, s), NULLIF(s, 'red'), LENGTH(s), LOWER(s), RTRIM(s) FROM t" false]
    ["SELECT UPPER(s), COUNT(*), MAX(LENGTH(s)) FROM t GROUP BY UPPER(s)" false]

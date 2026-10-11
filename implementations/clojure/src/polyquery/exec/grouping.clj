@@ -191,9 +191,13 @@
                   lib (when lib (long-array b/capacity)))))
 
 (definterface ObjLookup
-  (^long lookupKey [k] "Group id of a hashable key (added if new)."))
+  (^long lookupKey [k] "Group id of a hashable key (added if new).")
+  (^long lookupRow [^"[Ljava.lang.Object;" keyVecs ^long i]
+   "Group id of the key values at position i of the key vectors (2+ keys).")
+  (assignGeneric [^"[Ljava.lang.Object;" keyVecs ^ints sel ^long n ^ints gids]))
 
-(deftype ObjKeyTable [^HashMap ids ^ArrayList key-vals ^long nkeys ^IdentityHashMap dicts]
+(deftype ObjKeyTable [^HashMap ids ^ArrayList key-vals ^long nkeys ^IdentityHashMap dicts
+                      ^HashMap combos] ; dictionary combination → code tuple → group id
   GroupTable
   (size [_] (.size key-vals))
   (keyAt [_ gid] (.get key-vals gid))
@@ -230,12 +234,46 @@
           (each-sel [i sel n]
             (aset gids i (int (.lookupKey this (v/normalize-key (.getObj x i)))))))
 
+        (every? #(instance? DictVec %) kvs)
+        ;; dictionary-encoded keys: code tuple → group id through a flat
+        ;; per-dictionary-combination array (when small enough)
+        (let [ds (object-array (map #(.-dict ^DictVec %) kvs))
+              ck (Arrays/asList ds)                 ; arrays compare by identity
+              size (reduce (fn [^long acc ^objects d] (* acc (max 1 (alength d)))) 1 ds)
+              ^ints m (when (<= size 1048576)
+                        (or (.get combos ck)
+                            (let [m (doto (int-array size) (Arrays/fill -1))]
+                              (.put combos ck m)
+                              m)))]
+          (if (nil? m)
+            (.assignGeneric this kvs sel n gids)
+            (each-sel [i sel n]
+              (aset gids i
+                    (int (loop [j 0 idx 0]
+                           (if (< j nkeys)
+                             (let [^DictVec d (aget kvs j)]
+                               (if (b/nulls-at? (.-nulls d) i)
+                                 (.lookupRow this kvs i)
+                                 (recur (inc j) (+ (* idx (alength ^objects (.-dict d)))
+                                                   (aget ^ints (.-codes d) i)))))
+                             (let [g (aget m idx)]
+                               (if (neg? g)
+                                 (let [g (.lookupRow this kvs i)]
+                                   (aset m idx (int g))
+                                   g)
+                                 g)))))))))
+
         :else
-        (each-sel [i sel n]
-          (let [kv (object-array nkeys)]
-            (dotimes [j nkeys] (aset kv j (v/normalize-key (.getObj ^Vec (aget kvs j) i))))
-            (aset gids i (int (.lookupKey this (Arrays/asList kv)))))))))
+        (.assignGeneric this kvs sel n gids))))
   ObjLookup
+  (lookupRow [this kvs i]
+    (let [kv (object-array nkeys)]
+      (dotimes [j nkeys] (aset kv j (v/normalize-key (.getObj ^Vec (aget kvs j) i))))
+      (.lookupKey this (Arrays/asList kv))))
+  (assignGeneric [this kvs sel n gids]
+    (let [^objects kvs kvs ^ints gids gids]
+      (each-sel [i sel n]
+        (aset gids i (int (.lookupRow this kvs i))))))
   (lookupKey [_ k]
     (let [g (.get ids k)]
       (if (some? g)
@@ -255,7 +293,7 @@
    (cond
      (empty? key-types) (GlobalTable.)
      (and (= 1 (count key-types)) (= :long (b/vec-kind (first key-types)))) (long-key-table lib)
-     :else (ObjKeyTable. (HashMap.) (ArrayList.) (count key-types) (IdentityHashMap.)))))
+     :else (ObjKeyTable. (HashMap.) (ArrayList.) (count key-types) (IdentityHashMap.) (HashMap.)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Aggregate states
