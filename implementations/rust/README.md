@@ -5,7 +5,10 @@ An analytical database engine implementing the PolyQuery specification
 
 Status: **Phase 5** (optimization) plus **M9** (native kernel
 integration) plus change request **CR-1 `UNION ALL`**
-(`spec/changes/union-all.md`, see [Change CR-1](#change-cr-1-union-all)),
+(`spec/changes/union-all.md`, see [Change CR-1](#change-cr-1-union-all))
+and change request **CR-2 `DECIMAL` precision 38**
+(`spec/changes/decimal38.md`, see
+[Change CR-2](#change-cr-2-decimal-precision-38)),
 restructured by the refactoring **CR-3 logical/physical plan separation**
 (`spec/changes/refactor-plan-separation.md`, see
 [Change CR-3](#change-cr-3-logicalphysical-plan-separation)).
@@ -16,7 +19,7 @@ Capabilities claimed:
 `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`, `phase4`,
 `http.streaming`, `phase5`, `exec.row`, `exec.vectorized`, `exec.parallel`,
 `join.hash`, `join.merge`, `join.nested_loop`, `native.kernels`,
-`change.union_all`.
+`change.union_all`, `change.decimal38`.
 
 ## Build and run
 
@@ -58,7 +61,7 @@ Layers, bottom-up:
 |---|---|
 | `json` | strict RFC 8259 parser (keeps number literal text and member order) and single-line serializer |
 | `error` | stable error codes (errors.md), error object with optional `details` (`line`/`column`, `record`, …) |
-| `types` | `DataType`, runtime `Value`, exact DECIMAL helpers (i128 intermediates), DATE/TIMESTAMP calendar code, FLOAT64 text, CAST matrix |
+| `types` | `DataType`, runtime `Value`, exact DECIMAL helpers (i128 values, 256-bit `I256` intermediates), DATE/TIMESTAMP calendar code, FLOAT64 text, CAST matrix |
 | `storage` | immutable tables in row layout, column layout (typed vectors + validity bitmap, dictionary-encoded STRING) or PQCF-file-backed (lazily decoded row groups); `stats` (per-column statistics), `index` (hash and ordered indexes), `pqcf` (CRC-32, mmap, reader, writer) |
 | `catalog` | case-insensitive table map of `Arc<Table>` (queries hold snapshots) |
 | `ingest` | CSV (RFC 4180 + spec rules), JSON array and JSON Lines readers, type inference, explicit schemas |
@@ -111,12 +114,16 @@ in (no LATERAL).
 * **FLOAT64 output** uses Rust's shortest round-trip formatting; magnitudes
   outside [1e-5, 1e16) use exponent form (`1.5e300`); `-0.0` prints as `0.0`.
   `CAST(float AS STRING)` uses the same text.
-* **FLOAT64 → DECIMAL** rounds half away from zero based on the shortest
-  round-trip decimal representation of the float (so `1.005e0` → `1.01`).
-* **Numeric comparisons** are exact by mathematical value (types.md §5); INT64
-  vs DECIMAL is compared in i128, so `0.000000000000000001 < 1` is TRUE rather
-  than a promotion overflow. Arithmetic still applies the promotion rule
-  (an INT64 operand of DECIMAL arithmetic must fit 18 digits).
+* **FLOAT64 → DECIMAL** uses the exact binary value of the double and rounds
+  half away from zero (CR-2 §5; so `1.005e0` → `1.00`, since the double is
+  1.00499999999999989…, and `CAST(0.1e0 AS DECIMAL(38,30))` →
+  `0.100000000000000005551115123126`).
+* **Numeric comparisons** are exact by mathematical value (types.md §5,
+  CR-2 §4); INT64 vs DECIMAL and decimals of any scales are compared exactly
+  (256-bit when a rescaled side exceeds i128), so `9223372036854775807 > 1.5`
+  is TRUE rather than a promotion overflow. Arithmetic still applies the
+  promotion rule (an INT64 operand of narrow DECIMAL arithmetic must fit 18
+  digits).
 * **Null type**: in arithmetic a `NULL` operand takes the other operand's type
   (`NULL / 0` is INT64); `SUM(NULL)` is INT64, `AVG(NULL)` FLOAT64, `MIN/MAX(NULL)`
   are reported as STRING.
@@ -144,7 +151,8 @@ in (no LATERAL).
   options are described below.
 * **Common type** (CASE, COALESCE): if all non-NULL branch types are equal
   that type is kept (e.g. `DECIMAL(10,2)`); otherwise numeric promotion
-  (`INT64`+`DECIMAL(p,s)` ⇒ `DECIMAL(18,s)`, decimals ⇒ `DECIMAL(18,max s)`,
+  (`INT64`+`DECIMAL(p,s)` ⇒ `DECIMAL(W,s)`, decimals ⇒ `DECIMAL(W,max s)`
+  with W = 18, or 38 if a wide decimal is involved (CR-2),
   any `FLOAT64` ⇒ `FLOAT64`); DATE and TIMESTAMP have no common type.
   Branch values are converted to the common type.
 * **UPPER/LOWER** map ASCII letters only. A word (maximal run of
@@ -203,6 +211,8 @@ every operator works unchanged on all representations; `schema` reports the
   every chunk carries `null_count` and exact `min`/`max` of its non-null values
   (STRING bounds are omitted when longer than 1 KiB). Index definitions of the
   table are written to `indexes`. Writer string: `polyquery-rust <version>`.
+  A table with a wide decimal column is written as PQCF **v2**, every other
+  table as v1 (see [Change CR-2](#change-cr-2-decimal-precision-38)).
 * `open` validates header, footer, metadata checksum, JSON structure and all
   consistency rules of pqcf-v1.md §2 up front. Without `mmap` the file is read
   and **every chunk is checksummed, decoded and validated at open**. With
@@ -383,7 +393,8 @@ carries `"execution": {"mode": …, "threads": …}`.
   **Dictionary-encoded columns stay encoded** (codes + the shared dictionary
   `Arc`), so string predicates, grouping, joins and sorting on them work on
   integer codes. A generic `Value` representation covers non-uniform data
-  (e.g. DECIMALs of mixed scales). Scans copy typed slices straight out of
+  (e.g. DECIMALs of mixed scales) and wide (128-bit) DECIMALs; typed
+  DECIMAL vectors only hold values of at most 18 digits. Scans copy typed slices straight out of
   the column chunks (row-layout tables are transposed per batch).
 * **Expression kernels** (`eval.rs`): comparisons, arithmetic (with the
   exact overflow / division-by-zero semantics), `AND`/`OR`/`NOT`,
@@ -506,7 +517,7 @@ a scan (index / row-group skipping) and top-N for `ORDER BY … LIMIT`.
   join output in the row engine's order (hash joins: probe order).
 * `SUM`/`AVG` over FLOAT64 may differ in the last bits with `threads > 1`
   (summation order is implementation-defined, functions.md §2); INT64 and
-  DECIMAL sums are exact (`i128`) in every mode.
+  DECIMAL sums are exact (`i128`, wide decimals 256-bit) in every mode.
 
 Verification beyond the conformance suite: `bench/difftest.py` generates
 random typed queries (joins, LEFT joins, 3-way joins, grouping, DISTINCT,
@@ -877,7 +888,7 @@ optimizer's pushdown and pruning into `planner::optimizer::*` rules.)
   `SELECT NULL` (reported as STRING).
 * As for CASE, equal branch types are kept as they are (`DECIMAL(10,2)` in
   every branch stays `DECIMAL(10,2)`); differing DECIMALs become
-  `DECIMAL(18, max scale)`.
+  `DECIMAL(W, max scale)` (W = 18, or 38 with a wide branch, CR-2).
 * ORDER BY names are matched case-insensitively against the first branch's
   output names; a name occurring twice there is ambiguous
   (`SEMANTIC_ERROR`), since the branches may disagree on the columns.
@@ -889,8 +900,10 @@ optimizer's pushdown and pruning into `planner::optimizer::*` rules.)
   `"spec_version":"1.0.0"` in the `version` response, and the change must
   not break earlier phases.
 
-### Public case that contradicts the spec
+### Public case that contradicted the spec (resolved)
 
+The case has since been changed to load `ordersd` with an explicit
+`amount:DECIMAL(10,2)` schema and passes; the original analysis follows.
 `changes/union_all.pqt:51` (`SELECT order_id AS v FROM orders … UNION ALL
 SELECT amount FROM orders …`) expects `DECIMAL(18,2)`. In that file `orders`
 is loaded **without a schema**, and ingestion.md §1.1 says that inference
@@ -900,8 +913,125 @@ never yields DECIMAL, so `amount` is FLOAT64 (phase-1 cases such as
 and the engine answers `v FLOAT64: [99.99], [101.0]`. With
 `amount DECIMAL(10,2)` the same query returns the expected
 `DECIMAL(18,2): ["99.99"], ["101.00"]` (checked by hand). Making the case
-pass would mean breaking CSV inference or special-casing the test, so it is
-left failing on purpose.
+pass would have meant breaking CSV inference or special-casing the test, so
+it was left failing on purpose until the case was fixed.
+
+## Change CR-2: DECIMAL precision 38
+
+`DECIMAL(p,s)` accepts `1 ≤ p ≤ 38`. Decimals with `p ≤ 18` are *narrow*
+and behave exactly as before; `p > 18` are *wide*. Capability
+`change.decimal38`.
+
+### Wide-decimal representation
+
+* **Values**: `Value::Decimal(i128, u8)` — one runtime representation for
+  narrow and wide decimals (unscaled value + scale). |unscaled| < 10³⁸ <
+  2¹²⁷, so every legal DECIMAL value fits an `i128`.
+* **Exact intermediates**: `types::i256::I256` is a small two's-complement
+  256-bit integer (add/sub/neg, exact i128×i128 product, division by u64,
+  rounding shifts, decimal text). It is used where i128 is not enough: a
+  product of two wide operands (up to 76 digits, checked against W before
+  narrowing), `+`/`-` when rescaling one side overflows i128 (e.g.
+  `2e37 (scale 0) − 1.5e37 (scale 1)`), exact comparison of decimals whose
+  scales differ by up to 38 digits, exact SUM accumulators (a long wide sum
+  may exceed i128 before the final range check) and FLOAT64 → DECIMAL
+  (mantissa × 10ˢ × 2ᵉ, rounded half away from zero).
+* **Column storage**: narrow columns keep `ColumnData::Decimal(Vec<i64>)`;
+  wide columns use `ColumnData::WideDecimal(Vec<i128>)`
+  (`ColumnBuilder` picks the variant from the precision).
+* **Vectors** (vectorized engine): typed `Data::Decimal(Vec<i64>, scale)`
+  only ever holds values of at most 18 digits; wide columns and wide values
+  use the generic `Data::Values` representation, which every kernel accepts
+  through its value-at-a-time path (the row evaluator's semantics). The
+  typed kernels refuse anything that could leave 64 bits (wide scalars are
+  `Kind::Generic`, i128 comparison lanes require scales ≤ 18, casts to a
+  wide target fall back), so narrow kernels never see a wide value.
+* **PQCF**: a table with at least one wide column is written as **v2**
+  (header and metadata `format_version` 2): wide PLAIN chunks are n × i128
+  LE, wide RLE chunks are `u32 R` + R × `{i128, u32}` (20 bytes per run);
+  narrow columns keep the i64 layout. All other tables are written as v1.
+  The reader accepts v1 and v2, rejects a wide column in a v1 file and
+  out-of-precision values (`STORAGE_CORRUPT`), and rejects versions > 2 or
+  flags ≠ 0 (`STORAGE_VERSION_UNSUPPORTED`). Chunk min/max stay canonical
+  decimal strings.
+
+### Narrow/wide dispatch
+
+* **Typing** (`planner::typing`, `planner::binder::functions`): every rule
+  that produced precision 18 now produces `W = types::result_precision(..)`
+  — 18 if all DECIMAL operands are narrow, 38 if any is wide (INT64 does not
+  count): `+ - *` (product scale > W ⇒ `TYPE_ERROR`), common types (CASE,
+  COALESCE, `UNION ALL`), `SUM`, `ROUND`, `FLOOR`/`CEIL`. Identical types
+  are still kept as they are (`DECIMAL(20,2)` in every CASE branch stays
+  `DECIMAL(20,2)`).
+* **Arithmetic** carries the limit in its evaluation kind:
+  `ArithKind::Decimal` (narrow, 18 digits; INT64 operands promoted to
+  DECIMAL(18,0)) or `ArithKind::WideDecimal` (38 digits). Both use the same
+  exact helpers (`decimal::add`, `decimal::mul`); the vectorized engine runs
+  narrow decimal arithmetic in its i128 lane kernels and wide arithmetic
+  value-at-a-time.
+* **Function results** (`ROUND`, `FLOOR`, `CEIL`) are checked against the
+  precision of the call's static type in the evaluator, so narrow `ROUND`
+  still overflows beyond 18 digits while wide `ROUND` allows 38.
+* **Aggregates**: SUM/AVG accumulate in `I256` and check the result against
+  W at the end (narrow sums still overflow beyond 18 digits; cast the
+  argument to sum into 38). The vectorized aggregator keeps its typed i64/i128
+  accumulators for narrow arguments and uses row-mode states for wide
+  arguments (SUM, AVG, MIN, MAX). AVG of a narrow sum is computed as before;
+  AVG of a wide sum converts the exact sum to the nearest FLOAT64 first.
+* **Literals**: a decimal literal with up to 38 significant digits is
+  `DECIMAL(p,s)`; more digits ⇒ FLOAT64. Digits-only literals are unchanged.
+* **Comparison, hashing, sorting**: `Value` comparison is exact for every
+  INT64/DECIMAL mix; hashing strips trailing fractional zeros so equal values
+  of different scales/precisions group and join together. Hash-key interning
+  keeps its i64 fast path for values that fit and switches to `Value` keys
+  otherwise.
+* **Native kernels**: never receive wide columns (their ABI is 64-bit):
+  native filter analysis treats wide decimal columns as unsupported, so such
+  conjuncts and aggregates run in the engine's own code.
+* **CAST**: DECIMAL → INT64 truncates and fails with `NUMERIC_OVERFLOW`
+  outside INT64; FLOAT64 → DECIMAL uses the exact binary value.
+
+### Modules touched
+
+| Module | Change |
+|---|---|
+| `types` (`mod`, `decimal`, `i256`, `value`, `cast`, `float`) | max precision 38, `is_wide_decimal`, `result_precision`; i128 values; new `I256`; exact compare/add/mul helpers; i128 text conversion and formatting; exact-binary float → decimal; DECIMAL → INT64 range check |
+| `storage::column`, `storage::stats` | `ColumnData::WideDecimal(Vec<i128>)` |
+| `storage::pqcf` (`mod`, `read`, `write`) | PQCF v2 writer rule, i128 PLAIN/RLE encoding and decoding, version checks |
+| `planner::typing`, `planner::binder` (`exprs`, `functions`), `planner::expr` | W rules, `ArithKind::WideDecimal`, 38-digit literals |
+| `exec::eval`, `exec::functions`, `exec::aggregate` | W-aware arithmetic, function result precision check, 256-bit sums |
+| `exec::vector` (`batch`, `eval`, `agg`, `keys`) | wide values as `Values`, guards on the 64-bit kernels, wide aggregates via row states, key interning |
+| `exec::native_filter` | wide columns excluded from the kernels |
+| `sql::lexer` | `FULL` / `RIGHT` directly after `AS` are identifiers (see below) |
+| `protocol` | capability `change.decimal38` |
+
+### Decisions
+
+* **`AS full`**: the public case `changes/decimal38.pqt` uses `full` as a
+  column alias, but grammar.md lists `FULL` as a reserved keyword. `FULL`
+  and `RIGHT` are only reserved "for future use" and are not part of any
+  syntax that can follow `AS`, so the lexer reads them as identifiers when
+  they directly follow `AS` (`CAST(x AS full)` is then an unknown type ⇒
+  `SEMANTIC_ERROR`). Elsewhere they remain reserved (`FULL JOIN` ⇒
+  `UNSUPPORTED`, `SELECT full` ⇒ `PARSE_ERROR`).
+* The old unit test that expected a v1 body with header version 2 to be
+  `STORAGE_VERSION_UNSUPPORTED` now expects `STORAGE_CORRUPT` (header /
+  metadata mismatch), and version 3 is the unsupported case (CR-2 §8).
+* `spec_version` stays `1.0.0` (as for CR-1: `catalog.pqt` requires it).
+
+### Verification
+
+`bench/widetest.py` builds tables with wide and narrow columns (several
+thousand rows, so scans span many batches and morsels), loads them as column
+and row tables and as PQCF v2 files (PLAIN and RLE, with and without mmap),
+creates BTREE/HASH indexes on wide columns and checks 31 queries
+(aggregates, filters against wide/INT64/narrow values, arithmetic with
+predicted overflows, joins on wide = wide / INT64 = wide / narrow = narrow
+keys, sorting, DISTINCT, CAST, ROUND/FLOOR/CEIL, CASE/COALESCE,
+`UNION ALL`, subqueries) against a Python `decimal` oracle under every
+execution variant, with default and tiny morsels, optionally with
+`--native LIB`.
 
 ## Change CR-3: logical/physical plan separation
 

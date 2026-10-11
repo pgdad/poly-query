@@ -82,7 +82,7 @@ pub fn call(func: ScalarFunc, args: Vec<Value>, ctx: &ExecContext) -> Result<Val
             match a {
                 Value::Int(_) => a.clone(),
                 Value::Decimal(u, s) => {
-                    let d = 10i64.pow(*s as u32);
+                    let d = decimal::pow10(*s as u32);
                     let q = if up {
                         -((-u).div_euclid(d))
                     } else {
@@ -315,16 +315,18 @@ fn round(x: &Value, n: i64) -> Result<Value> {
             } else {
                 // Round to 10^-n units, then express at scale max(n, 0).
                 let drop = (s - n).min(39) as u32;
-                let q = decimal::div_pow10_round(*u as i128, drop);
+                let q = decimal::div_pow10_round(*u, drop);
                 let v = if n < 0 && q != 0 {
-                    q * decimal::pow10(n.unsigned_abs().min(38) as u32)
+                    q.checked_mul(decimal::pow10(n.unsigned_abs().min(38) as u32))
+                        .ok_or_else(|| overflow(func))?
                 } else {
                     q
                 };
-                if !decimal::fits18(v) {
+                // The caller checks the result type's precision (18 or 38).
+                if !decimal::fits_precision(v, crate::types::MAX_DECIMAL_PRECISION) {
                     return Err(overflow(func));
                 }
-                Value::Decimal(v as i64, n.max(0) as u8)
+                Value::Decimal(v, n.max(0) as u8)
             }
         }
         Value::Float(f) => {

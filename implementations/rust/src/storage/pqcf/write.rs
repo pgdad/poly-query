@@ -11,7 +11,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-use super::{Encoding, FORMAT_VERSION, IndexMeta, MAGIC, crc::crc32};
+use super::{Encoding, FORMAT_VERSION, FORMAT_VERSION_WIDE, IndexMeta, MAGIC, crc::crc32};
 use crate::error::{Error, ErrorCode, Result};
 use crate::json::Json;
 use crate::storage::Table;
@@ -93,11 +93,20 @@ fn put_strings<'a>(out: &mut Vec<u8>, strs: impl Iterator<Item = &'a str> + Clon
     }
 }
 
+/// Integer representation of a non-null fixed-width slot for RLE (wide
+/// decimals use their 128-bit unscaled value).
+fn rle_repr(col: &Column, row: usize) -> i128 {
+    match &col.data {
+        ColumnData::WideDecimal(v) => v[row],
+        _ => col.int_repr(row).unwrap_or(0) as i128,
+    }
+}
+
 /// Number of runs of the integer representation over `[start, start+n)`;
 /// NULL slots extend the current run.
 fn count_runs(col: &Column, start: usize, n: usize) -> usize {
     let mut runs = 0;
-    let mut last: Option<i64> = None;
+    let mut last: Option<i128> = None;
     for i in start..start + n {
         if col.is_null(i) {
             if last.is_none() {
@@ -106,7 +115,7 @@ fn count_runs(col: &Column, start: usize, n: usize) -> usize {
             }
             continue;
         }
-        let v = col.int_repr(i).unwrap_or(0);
+        let v = rle_repr(col, i);
         if last != Some(v) {
             last = Some(v);
             runs += 1;
@@ -116,21 +125,27 @@ fn count_runs(col: &Column, start: usize, n: usize) -> usize {
 }
 
 fn write_rle(col: &Column, start: usize, n: usize, out: &mut Vec<u8>) {
-    let mut runs: Vec<(i64, u32)> = Vec::new();
+    let mut runs: Vec<(i128, u32)> = Vec::new();
     for i in start..start + n {
         let v = if col.is_null(i) {
             runs.last().map_or(0, |r| r.0)
         } else {
-            col.int_repr(i).unwrap_or(0)
+            rle_repr(col, i)
         };
         match runs.last_mut() {
             Some(r) if r.0 == v => r.1 += 1,
             _ => runs.push((v, 1)),
         }
     }
+    // PQCF v2: wide decimal runs hold i128 values (20 bytes per run).
+    let wide = matches!(col.data, ColumnData::WideDecimal(_));
     put_u32(out, runs.len() as u32);
     for (v, len) in runs {
-        put_i64(out, v);
+        if wide {
+            out.extend_from_slice(&v.to_le_bytes());
+        } else {
+            put_i64(out, v as i64);
+        }
         put_u32(out, len);
     }
 }
@@ -241,6 +256,12 @@ fn encode_chunk(
                 put_i64(out, if col.is_null(i) { 0 } else { v[i] });
             }
         }
+        (_, ColumnData::WideDecimal(v)) => {
+            for i in rows {
+                let u = if col.is_null(i) { 0 } else { v[i] };
+                out.extend_from_slice(&u.to_le_bytes());
+            }
+        }
         (_, ColumnData::String(_) | ColumnData::Dict { .. }) => {
             let strs = rows.map(|i| col.str_at(i).unwrap_or(""));
             put_strings(out, strs);
@@ -277,8 +298,19 @@ fn write_error(display: &str, e: std::io::Error) -> Error {
     Error::new(ErrorCode::IoError, format!("cannot write '{display}': {e}"))
 }
 
-/// Serializes `table` (with index definitions `indexes`) as PQCF v1 to
-/// `out`, returning the number of bytes written.
+/// The format version a table is written with (CR-2 §7 writer rule): v2
+/// iff the table has a wide decimal column, else v1.
+pub fn format_version_for(table: &Table) -> u16 {
+    if table.fields.iter().any(|f| f.data_type.is_wide_decimal()) {
+        FORMAT_VERSION_WIDE
+    } else {
+        FORMAT_VERSION
+    }
+}
+
+/// Serializes `table` (with index definitions `indexes`) as PQCF v1 (or v2
+/// when it has wide decimal columns) to `out`, returning the number of
+/// bytes written.
 fn write_file(
     table: &Table,
     columns: &[Cow<'_, Column>],
@@ -286,10 +318,11 @@ fn write_file(
     opts: &SaveOptions,
     out: &mut impl Write,
 ) -> std::io::Result<u64> {
+    let version = format_version_for(table);
     let mut pos: u64 = 0;
     let mut header = Vec::with_capacity(8);
     header.extend_from_slice(MAGIC);
-    header.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    header.extend_from_slice(&version.to_le_bytes());
     header.extend_from_slice(&0u16.to_le_bytes());
     out.write_all(&header)?;
     pos += header.len() as u64;
@@ -331,7 +364,7 @@ fn write_file(
     }
 
     let meta = Json::object(vec![
-        ("format_version", Json::uint(FORMAT_VERSION as u64)),
+        ("format_version", Json::uint(version as u64)),
         (
             "writer",
             Json::String(format!("polyquery-rust {}", env!("CARGO_PKG_VERSION"))),
@@ -480,7 +513,7 @@ mod tests {
             } else {
                 tags.push(Value::str(["a", "bb", "ünï"][(i % 3) as usize]));
                 flags.push(Value::Bool(i % 50 < 25));
-                amounts.push(Value::Decimal(i * 3 - 1500, 2));
+                amounts.push(Value::Decimal(i as i128 * 3 - 1500, 2));
                 days.push(Value::Date((i / 100) as i32));
                 ratio.push(Value::Float(i as f64 / 8.0));
             }
@@ -555,6 +588,46 @@ mod tests {
     }
 
     #[test]
+    fn wide_decimals_use_v2() {
+        let dir = std::env::temp_dir().join(format!("pq-wide-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let ty = DataType::decimal(38, 10);
+        let mut wide = ColumnBuilder::new(ty);
+        for i in 0..500i128 {
+            if i % 9 == 0 {
+                wide.push_null();
+            } else {
+                // Runs of equal values (RLE-friendly), up to 38 digits.
+                wide.push(Value::Decimal((i / 50 - 5) * (10i128.pow(37) + 7), 10));
+            }
+        }
+        let t = Table::new("w", vec![Field::new("v", ty)], vec![wide.finish()], 500);
+        assert_eq!(format_version_for(&t), FORMAT_VERSION_WIDE);
+        assert_eq!(format_version_for(&sample()), FORMAT_VERSION);
+        let expected = all_rows(&t);
+        for (k, enc) in [
+            EncodingChoice::Plain,
+            EncodingChoice::Rle,
+            EncodingChoice::Auto,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = dir.join(format!("w{k}.pqcf"));
+            let opts = SaveOptions {
+                row_group_size: 128,
+                encoding: enc,
+            };
+            save(&t, &[], &path, "w.pqcf", &opts).unwrap();
+            let bytes = fs::read(&path).unwrap();
+            assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 2);
+            let opened = read::open(&path, "w.pqcf", "w", false, usize::MAX).unwrap();
+            assert_eq!(all_rows(&opened.table), expected, "{enc:?}");
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn corruption_is_detected() {
         let dir = std::env::temp_dir().join(format!("pq-corrupt-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -576,9 +649,13 @@ mod tests {
             Some(ErrorCode::StorageCorrupt)
         );
         assert_eq!(code(&[]), Some(ErrorCode::StorageCorrupt));
+        // A v1 body with header version 2: header/metadata mismatch.
         let mut v2 = good.clone();
         v2[4] = 2;
-        assert_eq!(code(&v2), Some(ErrorCode::StorageVersionUnsupported));
+        assert_eq!(code(&v2), Some(ErrorCode::StorageCorrupt));
+        let mut v3 = good.clone();
+        v3[4] = 3;
+        assert_eq!(code(&v3), Some(ErrorCode::StorageVersionUnsupported));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

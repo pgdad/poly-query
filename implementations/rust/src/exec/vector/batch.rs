@@ -6,7 +6,8 @@
 //! encoded strings stay encoded (codes + shared dictionary). Values whose
 //! runtime representation is not uniform (e.g. DECIMALs of mixed scales) use
 //! the generic `Values` representation, which every kernel accepts through a
-//! value-at-a-time fallback.
+//! value-at-a-time fallback. `Data::Decimal` only holds values of at most 18
+//! digits; wide (128-bit) decimals use `Values`.
 
 use std::sync::Arc;
 
@@ -27,7 +28,8 @@ pub enum Data {
     Bool(Vec<bool>),
     Int(Vec<i64>),
     Float(Vec<f64>),
-    /// Unscaled values with one scale for the whole vector.
+    /// Unscaled values with one scale for the whole vector; every value has
+    /// at most 18 digits (wider values use `Values`).
     Decimal(Vec<i64>, u8),
     Str(Vec<Arc<str>>),
     /// Dictionary-encoded strings: codes into a shared dictionary.
@@ -110,7 +112,10 @@ impl Vector {
             Value::Bool(b) => Vector::new(Data::Bool(vec![*b; len]), None),
             Value::Int(i) => Vector::new(Data::Int(vec![*i; len]), None),
             Value::Float(f) => Vector::new(Data::Float(vec![*f; len]), None),
-            Value::Decimal(u, s) => Vector::new(Data::Decimal(vec![*u; len], *s), None),
+            Value::Decimal(u, s) if decimal::fits18(*u) => {
+                Vector::new(Data::Decimal(vec![*u as i64; len], *s), None)
+            }
+            Value::Decimal(..) => Vector::new(Data::Values(vec![v.clone(); len]), None),
             Value::Str(s) => {
                 Vector::new(Data::Dict(vec![0; len], Arc::from(vec![s.clone()])), None)
             }
@@ -128,7 +133,7 @@ impl Vector {
         };
         let uniform = values.iter().all(|v| match (first, v) {
             (_, Value::Null) => true,
-            (Value::Decimal(_, a), Value::Decimal(_, b)) => a == b,
+            (Value::Decimal(_, a), Value::Decimal(u, b)) => a == b && decimal::fits18(*u),
             _ => std::mem::discriminant(first) == std::mem::discriminant(v),
         });
         if !uniform {
@@ -159,7 +164,7 @@ impl Vector {
                     values
                         .into_iter()
                         .map(|v| match v {
-                            Value::Decimal(u, _) => u,
+                            Value::Decimal(u, _) => u as i64,
                             _ => 0,
                         })
                         .collect(),
@@ -192,12 +197,20 @@ impl Vector {
             ColumnData::Boolean(v) => Data::Bool(v[from..to].to_vec()),
             ColumnData::Int64(v) => Data::Int(v[from..to].to_vec()),
             ColumnData::Float64(v) => Data::Float(v[from..to].to_vec()),
-            ColumnData::Decimal(v) => {
-                let scale = match col.data_type {
-                    DataType::Decimal { scale, .. } => scale,
-                    _ => 0,
-                };
-                Data::Decimal(v[from..to].to_vec(), scale)
+            ColumnData::Decimal(v) => Data::Decimal(v[from..to].to_vec(), col.decimal_scale()),
+            ColumnData::WideDecimal(v) => {
+                let scale = col.decimal_scale();
+                Data::Values(
+                    (from..to)
+                        .map(|i| {
+                            if col.validity.get(i) {
+                                Value::Decimal(v[i], scale)
+                            } else {
+                                Value::Null
+                            }
+                        })
+                        .collect(),
+                )
             }
             ColumnData::String(v) => Data::Str(v[from..to].to_vec()),
             ColumnData::Dict { codes, dict } => Data::Dict(codes[from..to].to_vec(), dict.clone()),
@@ -244,7 +257,7 @@ impl Vector {
             Data::Bool(v) => Value::Bool(v[i]),
             Data::Int(v) => Value::Int(v[i]),
             Data::Float(v) => Value::Float(v[i]),
-            Data::Decimal(v, s) => Value::Decimal(v[i], *s),
+            Data::Decimal(v, s) => Value::Decimal(v[i] as i128, *s),
             Data::Str(v) => Value::Str(v[i].clone()),
             Data::Dict(c, d) => Value::Str(d[c[i] as usize].clone()),
             Data::Date(v) => Value::Date(v[i]),
@@ -266,7 +279,7 @@ impl Vector {
             Data::Dict(c, d) => crate::json::write_escaped(out, &d[c[i] as usize]),
             Data::Decimal(v, s) if !matches!(ty, DataType::Decimal { scale, .. } if scale != *s) => {
                 out.push('"');
-                decimal::write(out, v[i], *s);
+                decimal::write(out, v[i] as i128, *s);
                 out.push('"');
             }
             Data::Date(v) => {

@@ -1,8 +1,14 @@
 //! Exact fixed-point decimal helpers. A DECIMAL value is an unscaled integer
-//! with at most 18 digits plus a scale; intermediates use i128.
+//! with at most 38 digits plus a scale, held in an i128 (10^38 < 2^127);
+//! intermediates that may exceed i128 use [`I256`].
+
+use super::i256::I256;
 
 /// Largest unscaled magnitude representable with 18 digits.
 pub const MAX_UNSCALED: i128 = 999_999_999_999_999_999;
+
+/// Precision limit of a narrow decimal (and of narrow results).
+pub const NARROW_PRECISION: u8 = 18;
 
 /// 10^n as i128 (n ≤ 38).
 pub fn pow10(n: u32) -> i128 {
@@ -17,6 +23,11 @@ pub fn fits_precision(v: i128, precision: u8) -> bool {
 /// True if `v` fits in DECIMAL(18, s) for any s.
 pub fn fits18(v: i128) -> bool {
     (-MAX_UNSCALED..=MAX_UNSCALED).contains(&v)
+}
+
+/// True if a 256-bit intermediate has at most `precision` digits.
+pub fn fits_precision_wide(v: I256, precision: u8) -> bool {
+    v.to_i128().is_some_and(|x| fits_precision(x, precision))
 }
 
 /// Divides `v` by 10^`digits`, rounding half away from zero.
@@ -47,17 +58,61 @@ pub fn rescale(v: i128, from: u8, to: u8) -> Option<i128> {
     }
 }
 
-/// Compares two decimals with possibly different scales exactly.
-pub fn compare(a: i64, sa: u8, b: i64, sb: u8) -> std::cmp::Ordering {
+/// Compares two decimals with possibly different scales exactly (scales
+/// ≤ 38, so each side is multiplied by at most 10^38).
+pub fn compare(a: i128, sa: u8, b: i128, sb: u8) -> std::cmp::Ordering {
     let s = sa.max(sb);
-    let x = a as i128 * pow10((s - sa) as u32);
-    let y = b as i128 * pow10((s - sb) as u32);
-    x.cmp(&y)
+    let (fa, fb) = (pow10((s - sa) as u32), pow10((s - sb) as u32));
+    match (a.checked_mul(fa), b.checked_mul(fb)) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        _ => I256::mul_i128(a, fa).cmp(&I256::mul_i128(b, fb)),
+    }
+}
+
+/// `a ± b` at scale max(sa, sb), exact; None if the result needs more than
+/// `precision` digits.
+pub fn add(a: i128, sa: u8, b: i128, sb: u8, subtract: bool, precision: u8) -> Option<(i128, u8)> {
+    let s = sa.max(sb);
+    let (fa, fb) = (pow10((s - sa) as u32), pow10((s - sb) as u32));
+    let fast = a.checked_mul(fa).zip(b.checked_mul(fb)).and_then(|(x, y)| {
+        if subtract {
+            x.checked_sub(y)
+        } else {
+            x.checked_add(y)
+        }
+    });
+    let v = match fast {
+        Some(v) => v,
+        None => {
+            let (x, y) = (I256::mul_i128(a, fa), I256::mul_i128(b, fb));
+            let r = if subtract {
+                x.wrapping_sub(y)
+            } else {
+                x.wrapping_add(y)
+            };
+            r.to_i128()?
+        }
+    };
+    fits_precision(v, precision).then_some((v, s))
+}
+
+/// `a * b` (scale sa + sb), exact; None if the result needs more than
+/// `precision` digits.
+pub fn mul(a: i128, b: i128, precision: u8) -> Option<i128> {
+    let v = match a.checked_mul(b) {
+        Some(v) => v,
+        None => I256::mul_i128(a, b).to_i128()?,
+    };
+    fits_precision(v, precision).then_some(v)
 }
 
 /// Appends the decimal digits of `v` (no allocation).
-pub fn write_u64(out: &mut String, mut v: u64) {
-    let mut buf = [0u8; 20];
+pub fn write_u64(out: &mut String, v: u64) {
+    write_u128(out, v as u128);
+}
+
+fn write_u128(out: &mut String, mut v: u128) {
+    let mut buf = [0u8; 40];
     let mut i = buf.len();
     loop {
         i -= 1;
@@ -80,11 +135,11 @@ pub fn write_i64(out: &mut String, v: i64) {
 
 /// Appends the canonical text of a decimal (see [`format`]) without
 /// allocating.
-pub fn write(out: &mut String, unscaled: i64, scale: u8) {
+pub fn write(out: &mut String, unscaled: i128, scale: u8) {
     if unscaled < 0 {
         out.push('-');
     }
-    let mut buf = [0u8; 20];
+    let mut buf = [0u8; 40];
     let mut i = buf.len();
     let mut v = unscaled.unsigned_abs();
     loop {
@@ -114,38 +169,30 @@ pub fn write(out: &mut String, unscaled: i64, scale: u8) {
 }
 
 /// Canonical text: exactly `scale` fractional digits, at least one integer digit.
-pub fn format(unscaled: i64, scale: u8) -> String {
-    let neg = unscaled < 0;
-    let digits = unscaled.unsigned_abs().to_string();
-    let scale = scale as usize;
-    let mut out = String::with_capacity(digits.len() + 3);
-    if neg {
-        out.push('-');
-    }
-    if scale == 0 {
-        out.push_str(&digits);
-    } else if digits.len() > scale {
-        let (int, frac) = digits.split_at(digits.len() - scale);
-        out.push_str(int);
-        out.push('.');
-        out.push_str(frac);
-    } else {
-        out.push_str("0.");
-        for _ in 0..scale - digits.len() {
-            out.push('0');
-        }
-        out.push_str(&digits);
-    }
+pub fn format(unscaled: i128, scale: u8) -> String {
+    let mut out = String::with_capacity(44);
+    write(&mut out, unscaled, scale);
     out
 }
 
 /// Converts to the nearest f64.
-pub fn to_f64(unscaled: i64, scale: u8) -> f64 {
-    if unscaled.unsigned_abs() < (1u64 << 53) && scale <= 22 {
+pub fn to_f64(unscaled: i128, scale: u8) -> f64 {
+    if unscaled.unsigned_abs() < (1u128 << 53) && scale <= 22 {
         // Both operands are exact, so the division is correctly rounded.
         unscaled as f64 / 10f64.powi(scale as i32)
     } else {
+        // Rust's float parser is correctly rounded.
         format(unscaled, scale).parse().unwrap_or(0.0)
+    }
+}
+
+/// Nearest f64 of a 256-bit unscaled value at `scale` (exact sums).
+pub fn wide_to_f64(unscaled: I256, scale: u8) -> f64 {
+    match unscaled.to_i128() {
+        Some(v) => to_f64(v, scale),
+        None => format!("{}e-{scale}", unscaled.to_decimal_string())
+            .parse()
+            .unwrap_or(0.0),
     }
 }
 
@@ -189,7 +236,7 @@ pub fn parse_text(s: &str) -> Option<DecimalText<'_>> {
 /// Outcome of converting decimal text to a fixed scale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextToDecimal {
-    Ok(i64),
+    Ok(i128),
     /// More fractional digits than the scale allows (only with `exact`).
     TooPrecise,
     /// The value does not fit the precision.
@@ -207,6 +254,14 @@ pub fn text_to_unscaled(
 ) -> TextToDecimal {
     let scale_us = scale as usize;
     if t.int_digits.len() > precision as usize {
+        return TextToDecimal::Overflow;
+    }
+    if exact && t.frac_digits.len() > scale_us {
+        return TextToDecimal::TooPrecise;
+    }
+    // Integer digits beyond precision - scale cannot fit (and could overflow
+    // the accumulator below).
+    if t.int_digits.len() > (precision - scale) as usize {
         return TextToDecimal::Overflow;
     }
     let mut v: i128 = 0;
@@ -229,7 +284,7 @@ pub fn text_to_unscaled(
     if !fits_precision(v, precision) {
         return TextToDecimal::Overflow;
     }
-    TextToDecimal::Ok(if t.negative { -(v as i64) } else { v as i64 })
+    TextToDecimal::Ok(if t.negative { -v } else { v })
 }
 
 #[cfg(test)]
@@ -273,5 +328,26 @@ mod tests {
     fn comparison() {
         assert_eq!(compare(150, 2, 15, 1), std::cmp::Ordering::Equal);
         assert_eq!(compare(-1, 0, 5, 1), std::cmp::Ordering::Less);
+        let big = pow10(38) - 1;
+        assert_eq!(compare(big, 0, 1, 38), std::cmp::Ordering::Greater);
+        assert_eq!(compare(-big, 0, 1, 38), std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn wide_arithmetic() {
+        // 2e37 (scale 0) - 1.5e37 (scale 1): the rescaled operand exceeds
+        // i128 but the exact result fits 38 digits.
+        let a = 2 * pow10(37);
+        let b = -15 * pow10(37);
+        assert_eq!(add(a, 0, b, 1, false, 38), Some((5 * pow10(37), 1)));
+        assert_eq!(
+            add(pow10(38) - 2, 0, 1, 0, false, 38),
+            Some((pow10(38) - 1, 0))
+        );
+        assert_eq!(add(pow10(38) - 2, 0, 2, 0, false, 38), None);
+        assert_eq!(add(MAX_UNSCALED, 0, 1, 0, false, 18), None);
+        assert_eq!(mul(pow10(20), pow10(19), 38), None);
+        assert_eq!(mul(pow10(20), pow10(17), 38), Some(pow10(37)));
+        assert_eq!(format(-(pow10(38) - 1), 10).len(), 40);
     }
 }

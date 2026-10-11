@@ -79,7 +79,11 @@ pub fn cast_value(v: &Value, to: DataType) -> Result<Value> {
         T::Int64 => match v {
             Value::Int(_) => v.clone(),
             Value::Bool(b) => Value::Int(*b as i64),
-            Value::Decimal(u, s) => Value::Int(u / 10i64.pow(*s as u32)),
+            Value::Decimal(u, s) => {
+                Value::Int(i64::try_from(u / decimal::pow10(*s as u32)).map_err(|_| {
+                    Error::overflow(format!("{} is out of range for INT64", v.to_text()))
+                })?)
+            }
             Value::Float(f) => Value::Int(float_to_int(*f)?),
             Value::Str(s) => Value::Int(parse_int_text(trim(s)).map_err(|e| match e {
                 NumTextError::Syntax => Error::conversion(format!("cannot convert '{s}' to INT64")),
@@ -104,11 +108,11 @@ pub fn cast_value(v: &Value, to: DataType) -> Result<Value> {
             let overflow = || Error::overflow(format!("value does not fit {to}"));
             match v {
                 Value::Decimal(u, s) => {
-                    let r = decimal::rescale(*u as i128, *s, scale).ok_or_else(overflow)?;
+                    let r = decimal::rescale(*u, *s, scale).ok_or_else(overflow)?;
                     if !decimal::fits_precision(r, precision) {
                         return Err(overflow());
                     }
-                    Value::Decimal(r as i64, scale)
+                    Value::Decimal(r, scale)
                 }
                 Value::Int(i) => {
                     let r = (*i as i128)
@@ -117,7 +121,7 @@ pub fn cast_value(v: &Value, to: DataType) -> Result<Value> {
                     if !decimal::fits_precision(r, precision) {
                         return Err(overflow());
                     }
-                    Value::Decimal(r as i64, scale)
+                    Value::Decimal(r, scale)
                 }
                 Value::Float(f) => Value::Decimal(
                     float::f64_to_decimal(*f, precision, scale).ok_or_else(overflow)?,

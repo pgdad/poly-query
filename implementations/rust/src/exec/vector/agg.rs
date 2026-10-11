@@ -14,6 +14,7 @@ use crate::exec::ExecContext;
 use crate::exec::aggregate::{AggState, Partial};
 use crate::native::{GroupSum, Kernels, pack_bools};
 use crate::planner::expr::{AggFunc, AggregateCall};
+use crate::types::i256::I256;
 use crate::types::{DataType, Value, decimal};
 
 /// Accumulator for one aggregate over all groups.
@@ -220,7 +221,7 @@ impl I64Kind {
             I64Kind::Int => Value::Int(x),
             I64Kind::Date => Value::Date(x as i32),
             I64Kind::Ts => Value::Timestamp(x),
-            I64Kind::Dec(s) => Value::Decimal(x, s),
+            I64Kind::Dec(s) => Value::Decimal(x as i128, s),
         }
     }
 }
@@ -234,7 +235,8 @@ fn arg_type(call: &AggregateCall) -> DataType {
 
 impl Acc {
     fn new(call: &AggregateCall) -> Acc {
-        if call.distinct {
+        // DISTINCT and wide (128-bit) decimal arguments use row-mode states.
+        if call.distinct || arg_type(call).is_wide_decimal() {
             return Acc::States(Vec::new());
         }
         match call.func {
@@ -624,7 +626,7 @@ impl Acc {
             Acc::SumDec { sum, n, scale, .. } => {
                 match v {
                     Value::Decimal(u, vs) => {
-                        sum[g] += decimal::rescale(*u as i128, *vs, *scale).unwrap_or(*u as i128)
+                        sum[g] += decimal::rescale(*u, *vs, *scale).unwrap_or(*u)
                     }
                     Value::Int(i) => sum[g] += *i as i128 * decimal::pow10(*scale as u32),
                     _ => return Err(Error::internal("SUM over non-decimal value")),
@@ -792,7 +794,8 @@ impl Acc {
                 AggState::from_partial(call, Partial::SumInt(exact_sum(sum, wrap, g), n[g]))
             }
             Acc::SumDec { sum, n, wrap, .. } => {
-                AggState::from_partial(call, Partial::SumDecimal(exact_sum(sum, wrap, g), n[g]))
+                let total = I256::from_i128(exact_sum(sum, wrap, g));
+                AggState::from_partial(call, Partial::SumDecimal(total, n[g]))
             }
             Acc::SumFloat { sum, n } => {
                 AggState::from_partial(call, Partial::SumFloat(sum[g], n[g]))

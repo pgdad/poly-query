@@ -140,8 +140,12 @@ pub enum ColumnData {
     Boolean(Vec<bool>),
     Int64(Vec<i64>),
     Float64(Vec<f64>),
-    /// Unscaled values; the scale comes from the column type.
+    /// Unscaled values of a narrow (p ≤ 18) DECIMAL; the scale comes from
+    /// the column type.
     Decimal(Vec<i64>),
+    /// Unscaled values of a wide (p > 18) DECIMAL. Never handed to native
+    /// kernels, whose ABI covers 64-bit values only.
+    WideDecimal(Vec<i128>),
     String(Vec<Arc<str>>),
     /// Dictionary-encoded STRING: `codes[i]` indexes `dict` (codes of NULL
     /// slots are 0 and ignored).
@@ -191,17 +195,20 @@ impl Column {
             ColumnData::Boolean(v) => Value::Bool(v[row]),
             ColumnData::Int64(v) => Value::Int(v[row]),
             ColumnData::Float64(v) => Value::Float(v[row]),
-            ColumnData::Decimal(v) => {
-                let scale = match self.data_type {
-                    DataType::Decimal { scale, .. } => scale,
-                    _ => 0,
-                };
-                Value::Decimal(v[row], scale)
-            }
+            ColumnData::Decimal(v) => Value::Decimal(v[row] as i128, self.decimal_scale()),
+            ColumnData::WideDecimal(v) => Value::Decimal(v[row], self.decimal_scale()),
             ColumnData::String(v) => Value::Str(v[row].clone()),
             ColumnData::Dict { codes, dict } => Value::Str(dict[codes[row] as usize].clone()),
             ColumnData::Date(v) => Value::Date(v[row]),
             ColumnData::Timestamp(v) => Value::Timestamp(v[row]),
+        }
+    }
+
+    /// Scale of a DECIMAL column (0 for other types).
+    pub fn decimal_scale(&self) -> u8 {
+        match self.data_type {
+            DataType::Decimal { scale, .. } => scale,
+            _ => 0,
         }
     }
 
@@ -218,7 +225,8 @@ impl Column {
     }
 
     /// Integer representation of a fixed-width non-null slot (BOOLEAN as
-    /// 0/1, DATE days widened); None for FLOAT64 and STRING columns.
+    /// 0/1, DATE days widened); None for FLOAT64, STRING and wide DECIMAL
+    /// columns.
     pub fn int_repr(&self, row: usize) -> Option<i64> {
         match &self.data {
             ColumnData::Boolean(v) => Some(v[row] as i64),
@@ -298,6 +306,9 @@ impl ColumnBuilder {
             DataType::Boolean => ColumnData::Boolean(Vec::with_capacity(n)),
             DataType::Int64 => ColumnData::Int64(Vec::with_capacity(n)),
             DataType::Float64 => ColumnData::Float64(Vec::with_capacity(n)),
+            t @ DataType::Decimal { .. } if t.is_wide_decimal() => {
+                ColumnData::WideDecimal(Vec::with_capacity(n))
+            }
             DataType::Decimal { .. } => ColumnData::Decimal(Vec::with_capacity(n)),
             DataType::String | DataType::Null => ColumnData::String(Vec::with_capacity(n)),
             DataType::Date => ColumnData::Date(Vec::with_capacity(n)),
@@ -322,6 +333,7 @@ impl ColumnBuilder {
             ColumnData::Int64(v) => v.push(0),
             ColumnData::Float64(v) => v.push(0.0),
             ColumnData::Decimal(v) => v.push(0),
+            ColumnData::WideDecimal(v) => v.push(0),
             ColumnData::String(v) => v.push(Arc::from("")),
             ColumnData::Dict { codes, .. } => codes.push(0),
             ColumnData::Date(v) => v.push(0),
@@ -337,7 +349,8 @@ impl ColumnBuilder {
             (ColumnData::Boolean(v), Value::Bool(b)) => v.push(b),
             (ColumnData::Int64(v), Value::Int(i)) => v.push(i),
             (ColumnData::Float64(v), Value::Float(f)) => v.push(f),
-            (ColumnData::Decimal(v), Value::Decimal(u, _)) => v.push(u),
+            (ColumnData::Decimal(v), Value::Decimal(u, _)) => v.push(u as i64),
+            (ColumnData::WideDecimal(v), Value::Decimal(u, _)) => v.push(u),
             (ColumnData::String(v), Value::Str(s)) => v.push(s),
             (ColumnData::Date(v), Value::Date(d)) => v.push(d),
             (ColumnData::Timestamp(v), Value::Timestamp(t)) => v.push(t),
@@ -369,6 +382,17 @@ mod tests {
         assert_eq!(c.null_count(), 1);
         assert_eq!(c.value(0), Value::Decimal(150, 2));
         assert!(c.value(1).is_null());
+    }
+
+    #[test]
+    fn wide_decimal_column() {
+        let mut b = ColumnBuilder::new(DataType::decimal(38, 0));
+        let big = 10i128.pow(37);
+        b.push(Value::Decimal(big, 0));
+        let c = b.finish();
+        assert!(matches!(c.data, ColumnData::WideDecimal(_)));
+        assert_eq!(c.value(0), Value::Decimal(big, 0));
+        assert_eq!(c.int_repr(0), None);
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod cast;
 pub mod datetime;
 pub mod decimal;
 pub mod float;
+pub mod i256;
 pub mod value;
 
 use std::fmt;
@@ -12,8 +13,11 @@ pub use value::Value;
 
 use crate::error::{Error, Result};
 
-/// Maximum DECIMAL precision.
-pub const MAX_DECIMAL_PRECISION: u8 = 18;
+/// Maximum DECIMAL precision (CR-2: 38; precisions ≤ 18 are "narrow").
+pub const MAX_DECIMAL_PRECISION: u8 = 38;
+
+/// Precision of decimal results that involve at least one wide operand.
+pub const WIDE_RESULT_PRECISION: u8 = 38;
 
 /// A logical SQL type. `Null` is the type of the bare `NULL` literal; it is
 /// coercible to every type and reported as `STRING` in result metadata.
@@ -39,6 +43,11 @@ impl DataType {
             self,
             DataType::Int64 | DataType::Float64 | DataType::Decimal { .. }
         )
+    }
+
+    /// True for DECIMAL(p,s) with p > 18 (stored as 128-bit values).
+    pub fn is_wide_decimal(self) -> bool {
+        matches!(self, DataType::Decimal { precision, .. } if precision > decimal::NARROW_PRECISION)
     }
 
     pub fn is_temporal(self) -> bool {
@@ -129,6 +138,16 @@ impl DataType {
     }
 }
 
+/// Result precision `W` of a decimal-producing rule (CR-2 §2): 18 if every
+/// DECIMAL operand is narrow, 38 if any is wide (INT64 operands do not count).
+pub fn result_precision(operands: &[DataType]) -> u8 {
+    if operands.iter().any(|t| t.is_wide_decimal()) {
+        WIDE_RESULT_PRECISION
+    } else {
+        decimal::NARROW_PRECISION
+    }
+}
+
 impl fmt::Display for DataType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -166,7 +185,9 @@ mod tests {
             DataType::parse("Decimal( 10 , 2 )").unwrap().to_string(),
             "DECIMAL(10,2)"
         );
-        assert!(DataType::parse("DECIMAL(19,2)").is_err());
+        assert!(DataType::parse("DECIMAL(19,2)").unwrap().is_wide_decimal());
+        assert!(!DataType::parse("DECIMAL(18,2)").unwrap().is_wide_decimal());
+        assert!(DataType::parse("DECIMAL(39,2)").is_err());
         assert!(DataType::parse("DECIMAL(2,3)").is_err());
         assert!(DataType::parse("WIDGET").is_err());
         assert_eq!(DataType::Null.to_string(), "STRING");

@@ -187,7 +187,7 @@ pub fn column_stats(col: &Column) -> ColumnStats {
             let make = |x: i64| match &col.data {
                 ColumnData::Int64(_) => Value::Int(x),
                 ColumnData::Timestamp(_) => Value::Timestamp(x),
-                _ => Value::Decimal(x, scale),
+                _ => Value::Decimal(x as i128, scale),
             };
             if let Some((lo, hi)) = range {
                 min = Some(make(lo));

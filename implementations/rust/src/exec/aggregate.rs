@@ -4,15 +4,17 @@ use std::collections::HashSet;
 
 use crate::error::{Error, Result};
 use crate::planner::expr::{AggFunc, AggregateCall};
-use crate::types::{DataType, Value, decimal};
+use crate::types::i256::I256;
+use crate::types::{DataType, Value, decimal, result_precision};
 
 #[derive(Debug, Clone)]
 enum Acc {
     Count(i64),
     /// Exact integer sum (INT64 input).
     SumInt(i128),
-    /// Exact unscaled sum at the result scale (DECIMAL input).
-    SumDecimal(i128),
+    /// Exact unscaled sum at the result scale (DECIMAL input); 256 bits so
+    /// that long wide sums cannot overflow before the final range check.
+    SumDecimal(I256),
     SumFloat(f64),
     Min(Option<Value>),
     Max(Option<Value>),
@@ -26,7 +28,7 @@ pub enum Partial {
     /// SUM/AVG over INT64: exact sum and number of inputs.
     SumInt(i128, i64),
     /// SUM/AVG over DECIMAL: exact unscaled sum at the input type's scale.
-    SumDecimal(i128, i64),
+    SumDecimal(I256, i64),
     SumFloat(f64, i64),
     /// MIN/MAX: the extreme value so far (None if no input).
     Extreme(Option<Value>),
@@ -41,6 +43,8 @@ pub struct AggState {
     count: i64,
     /// Scale of DECIMAL input (sum/avg).
     scale: u8,
+    /// Result precision W of a DECIMAL sum (18 or 38).
+    precision: u8,
     distinct: Option<HashSet<Value>>,
 }
 
@@ -59,7 +63,7 @@ impl AggState {
             AggFunc::CountStar | AggFunc::Count => Acc::Count(0),
             AggFunc::Sum | AggFunc::Avg => match input_ty {
                 DataType::Float64 => Acc::SumFloat(0.0),
-                DataType::Decimal { .. } => Acc::SumDecimal(0),
+                DataType::Decimal { .. } => Acc::SumDecimal(I256::ZERO),
                 _ => Acc::SumInt(0),
             },
             AggFunc::Min => Acc::Min(None),
@@ -75,6 +79,7 @@ impl AggState {
             acc,
             count: 0,
             scale,
+            precision: result_precision(&[input_ty]),
             distinct,
         }
     }
@@ -107,9 +112,13 @@ impl AggState {
             },
             Acc::SumDecimal(s) => match v {
                 Value::Decimal(u, vs) => {
-                    *s += decimal::rescale(*u as i128, *vs, self.scale).unwrap_or(*u as i128);
+                    let u = decimal::rescale(*u, *vs, self.scale).unwrap_or(*u);
+                    *s = s.wrapping_add(I256::from_i128(u));
                 }
-                Value::Int(i) => *s += *i as i128 * decimal::pow10(self.scale as u32),
+                Value::Int(i) => {
+                    let u = I256::mul_i128(*i as i128, decimal::pow10(self.scale as u32));
+                    *s = s.wrapping_add(u);
+                }
                 _ => return Err(Error::internal("SUM over non-decimal value")),
             },
             Acc::SumFloat(s) => *s += v.to_f64().unwrap_or(0.0),
@@ -171,7 +180,8 @@ impl AggState {
         self.count += other.count;
         match (&mut self.acc, other.acc) {
             (Acc::Count(a), Acc::Count(b)) => *a += b,
-            (Acc::SumInt(a), Acc::SumInt(b)) | (Acc::SumDecimal(a), Acc::SumDecimal(b)) => *a += b,
+            (Acc::SumInt(a), Acc::SumInt(b)) => *a += b,
+            (Acc::SumDecimal(a), Acc::SumDecimal(b)) => *a = a.wrapping_add(b),
             (Acc::SumFloat(a), Acc::SumFloat(b)) => *a += b,
             (Acc::Min(a), Acc::Min(b)) => {
                 if let Some(b) = b
@@ -204,9 +214,12 @@ impl AggState {
         let n = self.count as f64;
         Ok(match (&self.acc, self.func) {
             (Acc::SumInt(s), AggFunc::Avg) => Value::Float(*s as f64 / n),
-            (Acc::SumDecimal(s), AggFunc::Avg) => {
-                Value::Float(*s as f64 / (decimal::pow10(self.scale as u32) as f64) / n)
-            }
+            (Acc::SumDecimal(s), AggFunc::Avg) => match s.to_i128() {
+                Some(v) if self.precision <= decimal::NARROW_PRECISION => {
+                    Value::Float(v as f64 / (decimal::pow10(self.scale as u32) as f64) / n)
+                }
+                _ => Value::Float(decimal::wide_to_f64(*s, self.scale) / n),
+            },
             (Acc::SumFloat(s), AggFunc::Avg) => {
                 let v = s / n;
                 if !v.is_finite() {
@@ -216,10 +229,10 @@ impl AggState {
             }
             (Acc::SumInt(s), _) => Value::Int(i64::try_from(*s).map_err(|_| overflow())?),
             (Acc::SumDecimal(s), _) => {
-                if !decimal::fits18(*s) {
+                if !decimal::fits_precision_wide(*s, self.precision) {
                     return Err(overflow());
                 }
-                Value::Decimal(*s as i64, self.scale)
+                Value::Decimal(s.to_i128().unwrap_or(0), self.scale)
             }
             (Acc::SumFloat(s), _) => {
                 if !s.is_finite() {

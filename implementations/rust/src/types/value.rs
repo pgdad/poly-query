@@ -7,14 +7,15 @@ use std::sync::Arc;
 use super::{DataType, datetime, decimal, float};
 use crate::error::{Error, Result};
 
-/// A single SQL value. DECIMAL carries its unscaled value and scale.
+/// A single SQL value. DECIMAL carries its unscaled value (i128, which holds
+/// both narrow and wide precisions) and scale.
 #[derive(Debug, Clone)]
 pub enum Value {
     Null,
     Bool(bool),
     Int(i64),
     Float(f64),
-    Decimal(i64, u8),
+    Decimal(i128, u8),
     Str(Arc<str>),
     /// Days since 1970-01-01.
     Date(i32),
@@ -43,7 +44,7 @@ impl Value {
 
     /// Compares two non-null values of comparable types (types.md §5).
     /// Numeric values compare by exact mathematical value (INT64 vs DECIMAL
-    /// uses i128, so no promotion overflow can occur).
+    /// and mixed scales are exact, so no promotion overflow can occur).
     pub fn compare(&self, other: &Value) -> Result<Ordering> {
         use Value::*;
         Ok(match (self, other) {
@@ -51,8 +52,8 @@ impl Value {
             (Int(a), Int(b)) => a.cmp(b),
             (Float(a), Float(b)) => cmp_f64(*a, *b),
             (Decimal(a, sa), Decimal(b, sb)) => decimal::compare(*a, *sa, *b, *sb),
-            (Int(a), Decimal(b, s)) => (*a as i128 * decimal::pow10(*s as u32)).cmp(&(*b as i128)),
-            (Decimal(a, s), Int(b)) => (*a as i128).cmp(&(*b as i128 * decimal::pow10(*s as u32))),
+            (Int(a), Decimal(b, s)) => decimal::compare(*a as i128, 0, *b, *s),
+            (Decimal(a, s), Int(b)) => decimal::compare(*a, *s, *b as i128, 0),
             (Int(_) | Decimal(..), Float(b)) => cmp_f64(self.to_f64().unwrap_or(0.0), *b),
             (Float(a), Int(_) | Decimal(..)) => cmp_f64(*a, other.to_f64().unwrap_or(0.0)),
             (Str(a), Str(b)) => a.as_bytes().cmp(b.as_bytes()),
@@ -75,12 +76,6 @@ impl Value {
             (Value::Null, Value::Null) => Ordering::Equal,
             (Value::Null, _) => Ordering::Less,
             (_, Value::Null) => Ordering::Greater,
-            (Value::Int(a), Value::Decimal(b, s)) => {
-                (*a as i128 * decimal::pow10(*s as u32)).cmp(&(*b as i128))
-            }
-            (Value::Decimal(a, s), Value::Int(b)) => {
-                (*a as i128).cmp(&(*b as i128 * decimal::pow10(*s as u32)))
-            }
             _ => self.compare(other).unwrap_or(Ordering::Equal),
         }
     }
@@ -111,8 +106,8 @@ impl Value {
                 out.push('"');
                 match ty {
                     DataType::Decimal { scale, .. } if scale != *s => {
-                        let v = decimal::rescale(*u as i128, *s, scale).unwrap_or(*u as i128);
-                        decimal::write(out, v as i64, scale);
+                        let v = decimal::rescale(*u, *s, scale).unwrap_or(*u);
+                        decimal::write(out, v, scale);
                     }
                     _ => decimal::write(out, *u, *s),
                 }
@@ -141,15 +136,14 @@ impl Value {
     }
 }
 
-/// Promotes an INT64 to the unscaled value of DECIMAL(18, scale).
-pub fn promote_int(v: i64, scale: u8) -> Result<i128> {
-    let scaled = v as i128 * decimal::pow10(scale as u32);
-    if decimal::fits18(scaled) {
-        Ok(scaled)
-    } else {
-        Err(Error::overflow(format!(
-            "{v} does not fit DECIMAL(18,{scale})"
-        )))
+/// Promotes an INT64 to the unscaled value of DECIMAL(precision, scale)
+/// (precision is the result precision W: 18 or 38).
+pub fn promote_int(v: i64, precision: u8, scale: u8) -> Result<i128> {
+    match (v as i128).checked_mul(decimal::pow10(scale as u32)) {
+        Some(scaled) if decimal::fits_precision(scaled, precision) => Ok(scaled),
+        _ => Err(Error::overflow(format!(
+            "{v} does not fit DECIMAL({precision},{scale})"
+        ))),
     }
 }
 

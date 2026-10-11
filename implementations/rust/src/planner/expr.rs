@@ -11,8 +11,22 @@ use crate::types::{DataType, Value};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArithKind {
     Int,
+    /// Narrow decimal arithmetic: results limited to 18 digits.
     Decimal,
+    /// Decimal arithmetic with a wide operand: results limited to 38 digits
+    /// (CR-2 §2).
+    WideDecimal,
     Float,
+}
+
+impl ArithKind {
+    /// Result precision limit of a decimal kind.
+    pub fn decimal_precision(self) -> u8 {
+        match self {
+            ArithKind::WideDecimal => crate::types::WIDE_RESULT_PRECISION,
+            _ => crate::types::decimal::NARROW_PRECISION,
+        }
+    }
 }
 
 /// Domain in which two values of possibly different (but comparable) types
@@ -22,7 +36,7 @@ pub enum ArithKind {
 pub enum KeyDomain {
     /// Both sides have the same representation.
     Exact,
-    /// INT64 mixed with DECIMAL: INT64 is viewed as DECIMAL(18,0).
+    /// INT64 mixed with DECIMAL: INT64 is viewed as DECIMAL(p,0).
     Decimal,
     /// Any numeric mixed with FLOAT64.
     Float,

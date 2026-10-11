@@ -9,7 +9,7 @@ use crate::planner::expr::{ArithKind, Expr, KeyDomain};
 use crate::sql::ast::BinaryOp;
 use crate::types::cast::cast_value;
 use crate::types::value::promote_int;
-use crate::types::{Value, datetime, decimal, float};
+use crate::types::{DataType, Value, datetime, decimal, float};
 
 /// Evaluates an expression that references no columns.
 pub fn eval_constant(e: &Expr) -> Result<Value> {
@@ -44,7 +44,7 @@ pub fn compare3(op: BinaryOp, l: &Value, r: &Value) -> Result<Option<bool>> {
 /// that values equal under SQL comparison hash and compare equal.
 pub fn normalize_key(v: Value, domain: KeyDomain) -> Value {
     match (domain, &v) {
-        (KeyDomain::Decimal, Value::Int(i)) => Value::Decimal(*i, 0),
+        (KeyDomain::Decimal, Value::Int(i)) => Value::Decimal(*i as i128, 0),
         (KeyDomain::Float, Value::Int(_) | Value::Decimal(..)) => {
             Value::Float(float::normalize(v.to_f64().unwrap_or(0.0)))
         }
@@ -154,12 +154,12 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
         },
         Expr::IsNull { expr, negated } => Value::Bool(eval(expr, row, ctx)?.is_null() != *negated),
         Expr::Cast { expr, to } => cast_value(&eval(expr, row, ctx)?, *to)?,
-        Expr::Function { func, args, .. } => {
+        Expr::Function { func, args, ty } => {
             let mut vals = Vec::with_capacity(args.len());
             for a in args {
                 vals.push(eval(a, row, ctx)?);
             }
-            functions::call(*func, vals, ctx)?
+            check_decimal_result(functions::call(*func, vals, ctx)?, *ty)?
         }
         Expr::Case {
             operand,
@@ -275,6 +275,19 @@ fn decided_by(
     Err(err)
 }
 
+/// Fails with NUMERIC_OVERFLOW if a DECIMAL function result (ROUND, FLOOR,
+/// CEIL) needs more digits than its type's precision W allows.
+fn check_decimal_result(v: Value, ty: DataType) -> Result<Value> {
+    if let (Value::Decimal(u, _), DataType::Decimal { precision, .. }) = (&v, ty)
+        && !decimal::fits_precision(*u, precision)
+    {
+        return Err(Error::overflow(format!(
+            "function result does not fit {ty}"
+        )));
+    }
+    Ok(v)
+}
+
 /// Truth value of a predicate (NULL counts as not true).
 pub fn eval_predicate(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<bool> {
     Ok(matches!(eval(e, row, ctx)?, Value::Bool(true)))
@@ -292,11 +305,12 @@ pub fn compare_op(op: BinaryOp, ord: Ordering) -> bool {
     }
 }
 
-/// Decimal operand as (unscaled, scale); INT64 is promoted to DECIMAL(18,0).
-fn as_decimal(v: &Value) -> Result<(i128, u8)> {
+/// Decimal operand as (unscaled, scale); INT64 is promoted to
+/// DECIMAL(precision,0).
+fn as_decimal(v: &Value, precision: u8) -> Result<(i128, u8)> {
     match v {
-        Value::Decimal(u, s) => Ok((*u as i128, *s)),
-        Value::Int(i) => Ok((promote_int(*i, 0)?, 0)),
+        Value::Decimal(u, s) => Ok((*u, *s)),
+        Value::Int(i) => Ok((promote_int(*i, precision, 0)?, 0)),
         _ => Err(Error::internal(format!(
             "expected a decimal operand, got {v:?}"
         ))),
@@ -331,23 +345,19 @@ pub fn arithmetic(op: BinaryOp, kind: ArithKind, l: &Value, r: &Value) -> Result
                 _ => return Err(Error::internal("invalid arithmetic operator")),
             }))
         }
-        ArithKind::Decimal => {
-            let (a, sa) = as_decimal(l)?;
-            let (b, sb) = as_decimal(r)?;
+        ArithKind::Decimal | ArithKind::WideDecimal => {
+            let precision = kind.decimal_precision();
+            let (a, sa) = as_decimal(l, precision)?;
+            let (b, sb) = as_decimal(r, precision)?;
             let (v, s) = match op {
                 BinaryOp::Add | BinaryOp::Sub => {
-                    let s = sa.max(sb);
-                    let a = a * decimal::pow10((s - sa) as u32);
-                    let b = b * decimal::pow10((s - sb) as u32);
-                    (if op == BinaryOp::Add { a + b } else { a - b }, s)
+                    decimal::add(a, sa, b, sb, op == BinaryOp::Sub, precision)
+                        .ok_or_else(overflow)?
                 }
-                BinaryOp::Mul => (a * b, sa + sb),
+                BinaryOp::Mul => (decimal::mul(a, b, precision).ok_or_else(overflow)?, sa + sb),
                 _ => return Err(Error::internal("invalid decimal operator")),
             };
-            if !decimal::fits18(v) {
-                return Err(overflow());
-            }
-            Ok(Value::Decimal(v as i64, s))
+            Ok(Value::Decimal(v, s))
         }
         ArithKind::Float => {
             let a = l

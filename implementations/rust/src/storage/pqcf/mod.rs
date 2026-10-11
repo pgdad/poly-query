@@ -1,4 +1,5 @@
-//! PQCF v1 — the PolyQuery columnar file format (spec/storage/pqcf-v1.md).
+//! PQCF v1/v2 — the PolyQuery columnar file format (spec/storage/pqcf-v1.md;
+//! v2 adds 128-bit wide decimal columns, spec/changes/decimal38.md §7).
 //!
 //! * [`crc`]   — CRC-32 used for metadata and chunk checksums
 //! * [`mmap`]  — read-only memory mapping via the system C library
@@ -15,8 +16,11 @@ use crate::types::datetime::{MICROS_PER_DAY, days_from_civil};
 
 /// Header and trailer magic.
 pub const MAGIC: &[u8; 4] = b"PQCF";
-/// The only format version this engine reads and writes.
+/// The base format version, written for tables without wide decimals.
 pub const FORMAT_VERSION: u16 = 1;
+/// PQCF v2 (CR-2 §7): v1 plus 128-bit wide decimal columns. Written iff a
+/// table has a wide decimal column; the newest version this engine reads.
+pub const FORMAT_VERSION_WIDE: u16 = 2;
 /// Header size: magic, u16 version, u16 flags.
 pub const HEADER_LEN: usize = 8;
 /// Footer size: u32 metadata length, u32 metadata CRC, magic.

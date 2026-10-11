@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 
 use super::mmap::Mmap;
 use super::{
-    Encoding, FOOTER_LEN, FORMAT_VERSION, HEADER_LEN, IndexMeta, MAGIC, corrupt, crc::crc32,
+    Encoding, FOOTER_LEN, FORMAT_VERSION_WIDE, HEADER_LEN, IndexMeta, MAGIC, corrupt, crc::crc32,
     date_range, timestamp_range, unsupported_version,
 };
 use crate::error::{Error, ErrorCode, Result};
@@ -204,7 +204,7 @@ fn parse_layout(bytes: &[u8], max_rows: usize) -> Result<Layout> {
     if version == 0 {
         return Err(corrupt("format version 0 is invalid"));
     }
-    if version > FORMAT_VERSION {
+    if version > FORMAT_VERSION_WIDE {
         return Err(unsupported_version(format!(
             "PQCF format version {version} is not supported"
         )));
@@ -252,6 +252,11 @@ fn parse_layout(bytes: &[u8], max_rows: usize) -> Result<Layout> {
         let ty_text = string(c.get("type"), "column type")?;
         let ty = DataType::parse(ty_text)
             .map_err(|_| corrupt(format!("invalid column type '{ty_text}'")))?;
+        if ty.is_wide_decimal() && version < FORMAT_VERSION_WIDE {
+            return Err(corrupt(format!(
+                "column type {ty} requires PQCF format version 2"
+            )));
+        }
         fields.push(Field::new(name, ty));
     }
     let ncols = fields.len();
@@ -447,6 +452,28 @@ fn i64s(b: &[u8]) -> impl Iterator<Item = i64> + '_ {
         .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
 }
 
+fn i128s(b: &[u8]) -> impl Iterator<Item = i128> + '_ {
+    b.chunks_exact(16).map(|c| {
+        let mut a = [0u8; 16];
+        a.copy_from_slice(c);
+        i128::from_le_bytes(a)
+    })
+}
+
+/// Validates raw 128-bit unscaled values of a wide DECIMAL column
+/// (|v| < 10^p for non-null slots).
+fn wide_decimal(raw: Vec<i128>, ty: DataType, valid: &Bitmap) -> Result<ColumnData> {
+    let DataType::Decimal { precision, .. } = ty else {
+        return Err(Error::internal("not a decimal type"));
+    };
+    for (i, &v) in raw.iter().enumerate() {
+        if valid.get(i) && !decimal::fits_precision(v, precision) {
+            return Err(corrupt(format!("invalid DECIMAL value {v}")));
+        }
+    }
+    Ok(ColumnData::WideDecimal(raw))
+}
+
 fn u32s(b: &[u8]) -> impl Iterator<Item = u32> + '_ {
     b.chunks_exact(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -570,6 +597,12 @@ fn decode_chunk(file: &[u8], meta: &ChunkMeta, ty: DataType, n: usize) -> Result
         (Encoding::Plain, DataType::String) => {
             ColumnData::String(decode_strings(&mut cur, n, &|i| validity.get(i))?)
         }
+        (Encoding::Plain, t) if t.is_wide_decimal() => {
+            let b = cur.take_n(n, 16)?;
+            let mut raw = alloc(n)?;
+            raw.extend(i128s(b));
+            wide_decimal(raw, ty, &validity)?
+        }
         (Encoding::Plain, _) => {
             let b = cur.take_n(n, 8)?;
             let mut raw = alloc(n)?;
@@ -593,6 +626,24 @@ fn decode_chunk(file: &[u8], meta: &ChunkMeta, ty: DataType, n: usize) -> Result
                 codes,
                 dict: dict.into(),
             }
+        }
+        (Encoding::Rle, t) if t.is_wide_decimal() => {
+            // v2: runs of { i128 value, u32 run_length } (20 bytes).
+            let r = cur.u32()? as usize;
+            let runs = cur.take_n(r, 20)?;
+            let mut raw = alloc(n)?;
+            for run in runs.chunks_exact(20) {
+                let value = i128s(&run[..16]).next().unwrap_or(0);
+                let len = u32::from_le_bytes([run[16], run[17], run[18], run[19]]) as usize;
+                if len == 0 || len > n - raw.len() {
+                    return Err(corrupt("invalid RLE run length"));
+                }
+                raw.extend(std::iter::repeat_n(value, len));
+            }
+            if raw.len() != n {
+                return Err(corrupt("RLE runs do not cover the row group"));
+            }
+            wide_decimal(raw, ty, &validity)?
         }
         (Encoding::Rle, _) => {
             let r = cur.u32()? as usize;
