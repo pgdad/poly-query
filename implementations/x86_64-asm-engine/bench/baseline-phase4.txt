@@ -1,9 +1,11 @@
-query              | row,t=1,noopt | row,t=1      | vec,t=1      | vec,t=4      | vec,t=16    
-Q1 filter+count    |      22.6 ms |      22.6 ms |      22.5 ms |      22.7 ms |      22.6 ms
-Q2 scalar aggs     |      20.3 ms |      20.5 ms |      20.2 ms |      20.2 ms |      20.2 ms
-Q3 group by        |      39.9 ms |      39.7 ms |      39.8 ms |      39.8 ms |      39.8 ms
-Q4 group by expr   |      27.4 ms |      27.2 ms |      27.2 ms |      27.1 ms |      27.0 ms
-Q5 hash join+agg   |      59.9 ms |      58.7 ms |      60.5 ms |      61.6 ms |      62.5 ms
-Q6 top-N           |      50.0 ms |      49.9 ms |      52.0 ms |      52.2 ms |      53.2 ms
-Q7 projection      |       9.3 ms |       9.5 ms |       8.9 ms |       8.8 ms |       8.9 ms
-Q8 const fold      |      26.1 ms |      26.0 ms |      25.8 ms |      26.2 ms |      25.8 ms
+query              | Phase 4 engine (commit c86cc2d interpreter, row mode, 1 thread)
+Q1 filter+count    |      22.4 ms 
+Q2 scalar aggs     |      20.0 ms 
+Q3 group by        |      39.4 ms 
+Q4 group by expr   |      25.5 ms 
+Q5 hash join+agg   |      54.5 ms 
+Q6 top-N           |      48.8 ms 
+Q7 projection      |       9.0 ms 
+Q8 const fold      |      25.7 ms 
+Q9 full sort       |     218.7 ms 
+Q10 2k x 2k join   |       9.0 ms 

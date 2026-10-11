@@ -434,22 +434,28 @@ threads), best of 5:
 
 | query | Phase 4 engine | row, 1 thread, `optimize:false` | row, 1 thread | vectorized, 1 thread | vectorized, 4 threads | vectorized, 16 threads |
 |---|---:|---:|---:|---:|---:|---:|
-| Q1 filter + COUNT | 22.6 ms | 22.9 ms | 18.3 ms | 4.5 ms | 1.5 ms | 0.7 ms |
-| Q2 5 scalar aggregates | 20.3 ms | 19.9 ms | 20.3 ms | 8.5 ms | 2.6 ms | 1.2 ms |
-| Q3 GROUP BY 2 strings | 39.7 ms | 38.8 ms | 38.9 ms | 27.7 ms | 13.1 ms | 8.7 ms |
-| Q4 GROUP BY expression + filter | 27.2 ms | 24.7 ms | 24.7 ms | 11.8 ms | 9.6 ms | 6.9 ms |
-| Q5 hash join + GROUP BY | 58.7 ms | 51.6 ms | 51.4 ms | 42.1 ms | 28.5 ms | 20.1 ms |
-| Q6 filter + ORDER BY … LIMIT 10 | 49.9 ms | 47.6 ms | 48.4 ms | 11.0 ms | 4.2 ms | 2.2 ms |
-| Q7 filter + projection | 9.5 ms | 8.7 ms | 8.6 ms | 1.4 ms | 0.7 ms | 0.4 ms |
-| Q8 constant-foldable filter | 26.0 ms | 25.9 ms | 14.5 ms | 5.0 ms | 1.6 ms | 0.8 ms |
+| Q1 filter + COUNT | 22.4 ms | 22.7 ms | 17.8 ms | 4.3 ms | 1.2 ms | 0.7 ms |
+| Q2 5 scalar aggregates | 20.0 ms | 19.8 ms | 19.8 ms | 8.7 ms | 3.0 ms | 1.2 ms |
+| Q3 GROUP BY 2 strings | 39.4 ms | 38.6 ms | 38.8 ms | 27.8 ms | 13.4 ms | 8.8 ms |
+| Q4 GROUP BY expression + filter | 25.5 ms | 25.1 ms | 24.9 ms | 11.7 ms | 9.7 ms | 7.0 ms |
+| Q5 hash join + GROUP BY | 54.5 ms | 53.6 ms | 52.5 ms | 42.7 ms | 29.4 ms | 21.2 ms |
+| Q6 filter + ORDER BY … LIMIT 10 | 48.8 ms | 58.9 ms | 62.2 ms | 11.4 ms | 3.3 ms | 1.7 ms |
+| Q7 filter + projection | 9.0 ms | 8.6 ms | 9.1 ms | 1.3 ms | 0.6 ms | 0.4 ms |
+| Q8 constant-foldable filter | 25.7 ms | 26.1 ms | 15.1 ms | 5.0 ms | 2.0 ms | 0.9 ms |
+| Q9 full sort of 1M rows | 218.7 ms | 268.2 ms | 268.1 ms | 278.0 ms | 118.3 ms | 81.4 ms |
+| Q10 2,000 × 2,000 join | 9.0 ms | 9.2 ms | 9.2 ms | 1.3 ms | 0.5 ms | 0.5 ms |
 
-(The "Phase 4 engine" column is `bench/baseline-phase4.txt`, measured
-before any Phase 5 change; the row baseline is the same interpreter, so the
-first two columns agree within noise. The queries are in `bench/bench.sh`.)
+(The "Phase 4 engine" column is `bench/baseline-phase4.txt`: the
+interpreter as it was before any Phase 5 change, built from commit c86cc2d,
+which only added option parsing; the other columns are
+`bench/results-phase5.txt`. The queries are in `bench/bench.sh`.) The row
+baseline is the Phase 4 interpreter; it got slower on sorts (Q6, Q9: +20%)
+because ORDER BY is now a *stable* sort over (row, sequence) pairs, the
+price for returning tied rows in the same order in every mode.
 Effects in short: vectorization 2–7× on scan / filter / aggregate /
-projection queries (Q1, Q2, Q6, Q7), top-N 4× (Q6), constant folding 1.8×
+projection queries (Q1, Q2, Q7, Q10), top-N 5× (Q6), constant folding 1.7×
 in the row baseline (Q8: `amount > 10 * 10 + 0` folds, and the promoted
-DECIMAL literal is no longer cast per row), parallelism a further 3–13×
+DECIMAL literal is no longer cast per row), parallelism a further 2–14×
 with 16 threads. Join algorithms on Q5 (1M ⋈ 100k rows): hash join
 51 ms (row, 1 thread) / 42 ms (vectorized) / 20 ms (16 threads); sort-merge
 join 152 ms before its optimizations (comparison sort, per-pair ON

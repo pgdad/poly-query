@@ -11,7 +11,7 @@ set -e
 DIR=${1:?usage: bench.sh DATASET_DIR [REPS]}
 REPS=${2:-3}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-ENGINE="$HERE/bin/polyquery"
+ENGINE="${PQ_ENGINE:-$HERE/bin/polyquery}"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -30,7 +30,7 @@ Q6 top-N|SELECT tx_id, amount FROM tx WHERE status = '"'"'approved'"'"' ORDER BY
 Q7 projection|SELECT tx_id, amount * 2, fee + amount FROM tx WHERE merchant_id < 100
 Q8 const fold|SELECT COUNT(*) FROM tx WHERE amount > 10 * 10 + 0 AND 1 = 1
 Q9 full sort|SELECT tx_id, amount FROM tx ORDER BY amount DESC, tx_id
-Q10 NL join|SELECT COUNT(*) FROM tx t JOIN cust c ON c.customer_id = t.customer_id WHERE t.tx_id < 2000 AND c.customer_id < 2000'
+Q10 2k x 2k join|SELECT COUNT(*) FROM tx t JOIN cust c ON c.customer_id = t.customer_id WHERE t.tx_id < 2000 AND c.customer_id < 2000'
 
 req() { printf '{"op":"query","sql":"%s","options":%s}\n' "$1" "$2"; }
 
