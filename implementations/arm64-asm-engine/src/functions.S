@@ -176,8 +176,11 @@ FUNC common_type
     mov  w0, w1                         // null type is neutral
     ret
 1:  cbz  w10, 9f                        // t2 null type: t1
-    cmp  w0, w1
-    b.eq 9f                             // identical types
+    cmp  w9, w10
+    b.ne 10f
+    cmp  w9, #T_DEC                     // same kind: identical type, except
+    b.ne 9f                             // DECIMALs -> DECIMAL(18, max s)
+10:
     sub  w11, w9, #T_INT                // otherwise both must be numeric
     cmp  w11, #(T_FLOAT - T_INT)
     b.hi 8f
@@ -436,13 +439,11 @@ FUNC bind_scalar_func
     mov  w24, #0
     b    .Lbsf_done
 
-    // ---- ABS: same type (null type -> INT64) -------------------------------
+    // ---- ABS: same type (also the null type) ---------------------------------
 .Lbsf_abs:
     ldr  x9, [x25]
     ldr  w9, [x9, #N_TYPE]
-    cbnz w9, 1f
-    mov  w9, #T_INT
-1:  str  w9, [x20, #N_TYPE]
+    str  w9, [x20, #N_TYPE]
     b    .Lbsf_done
 
     // ---- FLOOR / CEIL: INT64 -> INT64, DECIMAL -> DECIMAL(18,0), FLOAT64 ---
@@ -450,7 +451,9 @@ FUNC bind_scalar_func
     ldr  x9, [x25]
     ldrb w9, [x9, #N_TYPE]
     mov  w10, #T_INT
-    cmp  w9, #T_FLOAT
+    cbnz w9, 0f
+    mov  w10, #T_NULL                   // FLOOR(NULL): null type
+0:  cmp  w9, #T_FLOAT
     b.ne 1f
     mov  w10, #T_FLOAT
 1:  cmp  w9, #T_DEC
@@ -471,10 +474,12 @@ FUNC bind_scalar_func
     and  w10, w27, #T_KIND_MASK
     cmp  w10, #T_DEC
     b.eq 2f
-    mov  w11, #T_INT                    // INT64 / null type -> INT64
+    mov  w11, #T_INT                    // INT64 -> INT64
     mov  w12, #T_FLOAT
     cmp  w10, #T_FLOAT
     csel w11, w12, w11, eq
+    cmp  w10, #T_NULL                   // ROUND(NULL): null type
+    csel w11, wzr, w11, eq
     str  w11, [x20, #N_TYPE]
     b    .Lbsf_done
 2:  mov  x28, #0                        // n (NULL n: result is NULL anyway)

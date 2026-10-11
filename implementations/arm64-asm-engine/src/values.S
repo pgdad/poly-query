@@ -683,7 +683,7 @@ FUNC cast_value
     b    58f
 55: cmp  w22, #T_TS
     b.ne 98f
-    mov  w2, #1                     // a bare date means midnight
+    mov  w2, #0                     // timestamp syntax only (types.md §8)
     bl   parse_timestamp
 58: cbz  w1, 99f
     cmp  w1, #1

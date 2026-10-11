@@ -1015,10 +1015,8 @@ LFUNC bind_unary
     b.ne .Lbu_type
     mov  w10, #T_BOOL
     b    9f
-1:  // unary + / -: numeric, type preserved; -NULL is INT64
-    cbnz w11, 2f
-    mov  w10, #T_INT
-    b    9f
+1:  // unary + / -: numeric or null type, type preserved (types.md §4)
+    cbz  w11, 9f
 2:  sub  w12, w11, #T_INT
     cmp  w12, #(T_FLOAT - T_INT)
     b.hi .Lbu_type

@@ -158,7 +158,7 @@ cases_start:
     TC  "SELECT NULL / 0", 0, T_INT, 0, 1
     TC  "SELECT 1 + NULL", 0, T_INT, 0, 1
     TC  "SELECT NULL + NULL", 0, T_INT, 0, 1
-    TC  "SELECT -NULL", 0, T_INT, 0, 1
+    TC  "SELECT -NULL", 0, T_NULL, 0, 1
     // --- decimal arithmetic
     TC  "SELECT 1.25 + 2.5", 0, D(18,2), 375
     TC  "SELECT 1.25 - 2.5", 0, D(18,2), -125
