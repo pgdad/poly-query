@@ -65,6 +65,9 @@ def _non_null_rows(ids: Sequence[int], vals: Sequence[Any]) -> tuple[Sequence[in
 class GroupState:
     """State of one aggregate for every group."""
 
+    # the attributes holding one list entry per group
+    PER_GROUP: tuple[str, ...] = ()
+
     def grow(self, n: int) -> None:
         """Adds ``n`` new (empty) groups."""
         raise NotImplementedError
@@ -79,11 +82,19 @@ class GroupState:
         """Absorbs ``other``; its group ``g`` is this state's group ``mapping[g]``."""
         raise NotImplementedError
 
+    def append(self, other: GroupState) -> None:
+        """Absorbs ``other``, whose groups are all new: they follow this
+        state's groups in their order."""
+        for name in self.PER_GROUP:
+            getattr(self, name).extend(getattr(other, name))
+
     def results(self) -> list[Any]:
         raise NotImplementedError
 
 
 class CountStarState(GroupState):
+    PER_GROUP = ("counts",)
+
     def __init__(self) -> None:
         self.counts: list[int] = []
 
@@ -128,6 +139,8 @@ class CountState(CountStarState):
 
 class SumState(GroupState):
     """Exact SUM / AVG over INT64 and DECIMAL (unscaled) values."""
+
+    PER_GROUP = ("totals", "counts")
 
     def __init__(self, kind: str, scale: int = 0, precision: int = 18) -> None:
         self.kind = kind  # "int", "decimal" or "avg"
@@ -192,6 +205,8 @@ class SumState(GroupState):
 
 class FloatSumState(GroupState):
     """SUM / AVG over FLOAT64: per group the values (compacted with fsum)."""
+
+    PER_GROUP = ("parts", "counts")
 
     def __init__(self, average: bool) -> None:
         self.average = average
@@ -260,6 +275,8 @@ def _fsum(parts: list[float]) -> float:
 
 
 class MinMaxState(GroupState):
+    PER_GROUP = ("values",)
+
     def __init__(self, is_min: bool) -> None:
         self.is_min = is_min
         self.values: list[Any] = []
@@ -310,6 +327,8 @@ class MinMaxState(GroupState):
 
 class DistinctState(GroupState):
     """Aggregates over DISTINCT values: per group the set of values."""
+
+    PER_GROUP = ("sets",)
 
     def __init__(self, call: b.AggCall) -> None:
         assert call.arg is not None
@@ -378,6 +397,11 @@ def merge_partials(partials: list[tuple[list[Any], list[GroupState]]]) -> tuple[
     for part_keys, part_states in partials[1:]:
         # the keys of a partial are distinct: new ones get the next group ids
         new = list(filterfalse(index.__contains__, part_keys))
+        if len(new) == len(part_keys):  # disjoint groups (e.g. clustered keys)
+            index.update(zip(new, range(len(index), len(index) + len(new))))
+            for state, other in zip(states, part_states):
+                state.append(other)
+            continue
         if new:
             index.update(zip(new, range(len(index), len(index) + len(new))))
             for state in states:

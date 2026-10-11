@@ -326,7 +326,9 @@ def _probe(side: _HashSide, keys: Sequence[Any], n: int) -> tuple[list[int], lis
     """(probe position, build position) of every matching pair, in probe order."""
     found = list(map(side.table.get, keys))
     if side.unique:
-        mask = list(map(_is_not_none, found))
+        if None not in found:  # every probe row matched (the usual foreign-key join)
+            return list(range(n)), found
+        mask = [f is not None for f in found]
         return list(compress(range(n), mask)), list(compress(found, mask))
     probe: list[int] = []
     build: list[int] = []
