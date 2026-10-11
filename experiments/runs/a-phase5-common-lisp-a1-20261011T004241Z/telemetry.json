@@ -1,0 +1,224 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase5-common-lisp-a1-20261011T004241Z",
+ "language": "common-lisp",
+ "task": "phase5",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase5",
+ "prompt_sha256": "92716d90c336320865a8a2c167c8958ef5691f5132de94fae194e1c549949b38",
+ "session_id": "5df2077c-2da4-456d-a49f-1cbc95aaee3f",
+ "tokens": {
+  "input": 626,
+  "output": 413439,
+  "cache_read": 142176744,
+  "cache_creation": 690786,
+  "thinking": null,
+  "thinking_estimated": 190983,
+  "source": "result events",
+  "api_messages": 371
+ },
+ "rate_limit": {
+  "events": 24,
+  "max_utilization": {
+   "five_hour": 0.28,
+   "seven_day": 0.21
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 47.31045240000007,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 321,
+ "result_segments": 1,
+ "assistant_messages": 817,
+ "tool_calls": {
+  "Bash": 354,
+  "Read": 16,
+  "Write": 10,
+  "Agent": 1
+ },
+ "tool_calls_total": 381,
+ "tool_failures": 8,
+ "build_invocations": 110,
+ "build_failures_heuristic": 2,
+ "conformance_runs": 40,
+ "conformance_progress": [
+  [
+   0,
+   3324
+  ],
+  [
+   568,
+   569
+  ],
+  [
+   142,
+   143
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3300,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   15,
+   15
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ]
+ ],
+ "repair_iterations": 39,
+ "time": {
+  "wall_seconds": 8713.7,
+  "model_api_seconds": 4649.0,
+  "tool_seconds": 4977.4,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 29,
+  "files_changed": 26,
+  "lines_added": 5211,
+  "lines_removed": 157,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 5 is finished: every check in the definition of done passes and everything is committed (working tree clean).\n\n## Test results (final run)\n```\nTOTAL: 569/569 pass        (phases 1, 2, 3 and 5; 0 fail, 0 error, 0 not implemented)\n--modes: TOTAL: 3324/3324 pass\nhttp suite: 18/18 passed\nmake build test: No tests failed     make lint: clean\n```\nI also ran `--modes` with `POLYQUERY_MORSEL_ROWS=7`, which shrinks morsels so the parallel code runs on the small test tables; it also passes 3324/3324.\n\n## What I implemented\n- **Options:** `mode`, `threads`, `join`, `optimize` and `native` work on queries, EXPLAIN and HTTP. The Phase 5 capabilities are claimed (all except `native.kernels`). `--threads` sets the default thread count.\n- **Row mode** is the unchanged Volcano executor, kept as the baseline.\n- **Vectorized mode** (the default for `auto`) works on batches of 2048 rows in typed column vectors.\n  - Common operators have dedicated typed loops.\n  - Every other operator reuses the row implementation per element, so both executors share one definition of each function.\n  - Operands that can fail are only evaluated on the rows the row executor would evaluate.\n  - String comparisons and LIKE are computed once per dictionary entry.\n  - Hash joins use a cache-friendly hash table, with integer keys stored inline.\n- **Joins:** hash, sort-merge and nested-loop joins all have vectorized versions sharing one driver.\n- **Parallelism (`threads`)** splits tables into 16k-row chunks processed by worker threads. It covers scans, filters, join probes, aggregation, DISTINCT and sorting.\n  - Output order and the reported error match a serial run.\n  - Worker threads are always stopped when the query ends, including when a LIMIT stops early.\n- **Optimizer:** constant folding, predicate simplification, pushdown, join reordering for chains containing a cross product, column pruning, and top-N.\n- **Errors:** if a vectorized query hits a data error (overflow, division by zero, bad conversion), it is re-run on the row executor, so the reported error is identical to row mode's.\n- **Engine-wide:** faster JSON result writing, and a one-time GC after large loads, which removed 80\u2013180 ms pauses in later queries.\n\n## Measurements (1M-row generated datasets, in README)\nCompared with the Phase 4 engine, single-threaded vectorized is 1.5\u201316\u00d7 faster and 8 threads give 2.4\u201320\u00d7. Examples: a full sort of 1M rows went from 1067 to 123 ms, and ORDER BY \u2026 LIMIT from 198 to 10 ms. Turning `optimize` off makes a comma join hit the 100M join-row limit instead of finishing in 7 ms. Join-algorithm and optimizer tables are in the README too.\n\n## Correctness testing\nBeyond the suites, I wrote a randomized tester (`bench/fuzz.py`) that runs random queries under seven option combinations and compares results. Tens of thousands of queries were run. Together with an independent code review, this found and I fixed:\n- a CASE row-misalignment bug;\n- an SBCL mutex not being re-acquired after a timed wait;\n- a merge-join crash with NULL-typed keys;\n- errors being raised on rows past a LIMIT in streamed HTTP results;\n- several error-ordering differences between modes.\n\nThe final runs had no mismatches.\n\n## Known limitations (documented)\n- Parallel float sums can differ in the last digits from a serial sum, because they are added in a different order (the spec allows this).\n- With predicate pushdown, a predicate that raises an error may be evaluated on rows the unoptimized plan would have filtered out first, so `optimize` on and off can disagree for such queries (also allowed by the spec).\n- High-cardinality GROUP BY does not get faster with more threads; in the q3 benchmark 8 threads (32 ms) are slightly slower than 1 (29 ms).\n- No explicit SIMD: the kernels are tight typed loops instead.\n- `native: true` is accepted but has no effect, because there is no native kernel library in the workspace to load.\n- With `optimize: false`, column pruning stays on, because the Phase 3 tests requi",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
