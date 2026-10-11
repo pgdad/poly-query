@@ -1,0 +1,54 @@
+{
+ "language": "arm64-asm",
+ "reviewer": "A",
+ "scores": {
+  "architecture": 5,
+  "readability": 5,
+  "robustness": 4,
+  "testability": 3
+ },
+ "evidence": {
+  "architecture": [
+   "native-kernels/arm64/pq_a64_common.h:1-40 — one shared header with 11 numbered sections (constants, framing, op validation, predicates, exact sums, min/max, bitmaps, fmix64, compare_fixed, group_sum, addressing). It emits no code or data, and its macros use only caller-saved registers",
+   "native-kernels/arm64/pq_a64_neon.h:56-100 and pq_a64_neon.S:46 — all NEON constant tables, including the 4 KiB u16 selpos table generated at assembly time with .rept/.if, are in one macro that is invoked exactly once",
+   "native-kernels/arm64/README.md:~371-376 — written placement rule: a block lives in a header only if more than one kernel or variant uses it, otherwise its macro sits directly above its one kernel (e.g. RANGE_PRED at pq_a64_sve.S:112, MM2/MM_INSIDE at pq_a64_neon.S:1769-1846). Variants share only common.h, so they are not coupled to each other",
+   "pq_a64_common.h:130-259 — PRED_SETUP/PRED128_SETUP reduce all 7 ops to one form, ((x-lo) <=u span) ^ inv, which all three variants reuse; CMPOP_CHECK/CMPOP_SWAP (268-288) do the same for compare_i64"
+  ],
+  "readability": [
+   "pq_a64_sve.S:52-67, pq_a64_neon.S:54-76 — every kernel has the same header block (Args/Result/Clobbers/Registers/Algorithm/Tail) and the same 4-step body (// -- 1. ... 4.)",
+   "pq_a64_common.h:34-37 and README.md skeleton section — consistent label scheme (.L<variant>_<kernel>_<step>, macro labels .L<macro>_<step>\\@) with no numeric labels left. Every macro documents its inputs, outputs and clobbers",
+   "pq_a64_neon.h:153-171 and pq_a64_neon.S:1735-1760 — comments explain why the code is correct (predicate-form shapes, the minmax_i128 open-window skip test and why a skipped row can't change accumulators), not just what it does",
+   "README.md:1-260 — weak spot: the 887-line README opens with a long hypothetical performance model (no hardware measurements) before the module map, so a maintainer has to dig for the structure docs"
+  ],
+  "robustness": [
+   "pq_a64_scalar.S:6-18, pq_a64_neon.S:5-21, pq_a64_sve.S:9-21 — all kernels are leaves that never touch sp, x18-x29 or v8-v15/z8-z15. README.md:~300 reports a disassembly audit showing Clobbers lines match exactly. PQ_FILE_END (common.h:97-99) emits .note.GNU-stack and is used at pq_a64_sve.S:873",
+   "pq_a64_sve.S:33-35, 169, 786 and pq_a64_sve.h:151-196 — SVE code is VL-agnostic throughout: WHILELO/b.first loops, the row counter resets to the exact block end because INCD can overshoot with non-power-of-two VLs, the validity bits are gathered per lane, and COMPACT + truncating ST1W under WHILELO(0,count) avoids any over-store",
+   "pq_a64_common.h:151-159, 210-217 — ops are validated as unsigned 32-bit (negative ints rejected, upper X half ignored), and *a/*b are not read before validation. Exact sums use 128/192-bit accumulators with documented block bounds (pq_a64_sve.S:137-143, 741-752; NEON popcount halfword bound pq_a64_neon.S:779-781)",
+   "pq_a64_neon.h:300-317 and pq_a64_neon.S:1259-1280 — correctness depends on subtle invariants. EMIT8 writes 32 bytes unconditionally, which is safe only while cursor <= row and row+8 <= n. group_sum meets 'outputs untouched on EINVAL' by modifying sums/counts and then subtracting earlier chunks again, which assumes outputs never alias inputs"
+  ],
+  "testability": [
+   "native-kernels/tests/kernel_test.c:71-100 — a shared randomized differential test runs every variant against the C reference, with unaligned buffers, n=0, NULL/non-NULL validity and all ops; Makefile:59-66 runs it under qemu (functional only)",
+   "pq_a64_neon.S:48-52, pq_a64_sve.S:48-50 — block-size constants are #defines whose comments say to shrink them to exercise flush paths. README.md:~297 shows this was done, but only in a temporary copy, never as a build option or Makefile target",
+   "README.md:~267-305 — the guard-page harness (PROT_NONE neighbours, n 0..140, extreme operands) and mutation checks are described but 'not committed'. The committed tests allocate +16 bytes of slack (kernel_test.c:62-67) and ASan cannot see inside assembly, so the committed suite would not catch over-reads/over-writes past the documented sizes",
+   "README.md:550-551 — multiple SVE vector lengths (128/384/512/2048) were tested by hand with -cpu max,sve-default-vector-length, but Makefile test-cross runs only qemu's default VL. There is no per-kernel test entry point inside arm64/"
+  ]
+ },
+ "top_strengths": [
+  "Strong modular structure: shared building blocks are defined once with documented register and clobber contracts, variant-specific headers exist, and the rules for where a macro lives are explicit",
+  "Uniform, well-commented kernel skeleton across 60 functions, with 'why' comments for the non-obvious exactness and bounds arguments (predicate forms, block bounds, skip-window invariant)",
+  "Careful ABI and memory-safety discipline: leaf functions only, no callee-saved registers or stack use, .note.GNU-stack present, exact-bounds tails, predicated SVE with correct handling of non-power-of-two VLs"
+ ],
+ "top_weaknesses": [
+  "The strongest verification aids (guard-page harness, mutation checks, shrunken-block builds, multi-VL SVE runs) were throwaway and not committed, so they can't be reproduced or re-run as regression tests",
+  "Several hot paths rely on subtle invariants (EMIT8 over-store, group_sum undo-on-EINVAL, minmax_i128 hi-word skip window) that only random differential tests cover; edge cases like constant hi words need dedicated data the committed suite doesn't generate",
+  "The README is dominated by a performance model with no hardware measurements, which buries the structure and maintenance documentation; code size grew from per-form loop copies (NEON .text 7.5 to 12.9 KiB)"
+ ],
+ "suspected_defects": [
+  "native-kernels/arm64/pq_a64_neon.S:~1259-1280 — group_sum_i64 EINVAL path temporarily modifies sums/counts and then subtracts them again. Final values match the contract, but the result is wrong if sums or counts alias values/ids/validity, and the outputs are visibly modified while the call runs (unverified; the contract is silent on aliasing)",
+  "native-kernels/arm64/pq_a64_neon.h:459-466 — BITS_TAIL_STORE always stores at least one byte. It is correct only because every caller guards x10 < n first (pq_a64_neon.S:~190, ~1000); the precondition is in the comment, not enforced (latent, unverified)",
+  "native-kernels/arm64/pq_a64_scalar.S:68 and pq_a64_neon.S:126 — filter_i64 writes out_idx[count] (and in NEON up to 8 slots past the cursor) for unselected rows. This is allowed by 'capacity >= n' but overwrites caller memory past the returned count, and callers may not expect that (by design, not a defect against the header)"
+ ],
+ "files_read": 10,
+ "scope": "native-kernels/arm64/",
+ "code_commit": "572663e"
+}

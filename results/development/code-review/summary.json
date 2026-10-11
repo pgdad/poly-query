@@ -148,5 +148,65 @@
   "ceiling/compression: almost all scores are 4-5, so the rubric discriminates little between engines",
   "reviewers knew the language (no blinding possible)",
   "extensibility (rubric item 5) is not scored here; it is measured by the change-task costs (report 7)"
- ]
+ ],
+ "kernel_cohort": {
+  "note": "assembly native-kernel libraries (kernel cohort, ADR-0016); reviewed after the kernel-optimize merge. Not comparable with and never ranked against the engine scores: a 20-kernel library is a different artefact from a complete engine. Same reviewer slots (A README-first, B code-first from the ABI header and dispatcher), rubric items interpreted for a kernel library (ABI, bounds/tails, exactness; testability includes the library's own verification aids).",
+  "code_commit": "572663e",
+  "scores": {
+   "x86_64-asm": {
+    "architecture": {
+     "A": 5,
+     "B": 5,
+     "mean": 5.0
+    },
+    "readability": {
+     "A": 4,
+     "B": 4,
+     "mean": 4.0
+    },
+    "robustness": {
+     "A": 5,
+     "B": 5,
+     "mean": 5.0
+    },
+    "testability": {
+     "A": 5,
+     "B": 4,
+     "mean": 4.5
+    }
+   },
+   "arm64-asm": {
+    "architecture": {
+     "A": 5,
+     "B": 4,
+     "mean": 4.5
+    },
+    "readability": {
+     "A": 5,
+     "B": 4,
+     "mean": 4.5
+    },
+    "robustness": {
+     "A": 4,
+     "B": 5,
+     "mean": 4.5
+    },
+    "testability": {
+     "A": 3,
+     "B": 3,
+     "mean": 3.0
+    }
+   }
+  },
+  "agreement": {
+   "pairs": 8,
+   "exact": 0.5,
+   "within_1": 1.0,
+   "mean_abs_diff": 0.5
+  },
+  "observations": [
+   "Task texts for the two optimize runs differ only in the hardware notes; the AArch64 agent nevertheless kept its guard-page harness, mutation checks and clobber audit out of the repository ('only assembly belongs in the repo'), while the x86-64 agent committed them under verify/. Both ARM reviewers scored testability 3 for this reason.",
+   "No functional defect found by any reviewer; suspected issues are design notes (index over-stores within the documented capacity, group_sum EINVAL undo pass assumes no aliasing, a 7th-argument stack read in count kernels), hardening gaps (no BTI/GNU property note on AArch64) and stale documentation (README module-map line counts, an SVE header claiming emulation-only validation)."
+  ]
+ }
 }

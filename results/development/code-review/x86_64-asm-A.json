@@ -1,0 +1,57 @@
+{
+ "language": "x86_64-asm",
+ "reviewer": "A",
+ "scores": {
+  "architecture": 5,
+  "readability": 4,
+  "robustness": 5,
+  "testability": 5
+ },
+ "evidence": {
+  "architecture": [
+   "native-kernels/x86_64/pqk_x86_common.h:5-37 — explicit header rules: headers only define macros and constants and emit no bytes, each building block is defined exactly once, and a numbered table of contents lists the blocks (FUNC/LFUNC, PROLOGUE/EPILOGUE, OP_CHECK/JUMPTABLE, DRV_*, GSUM_PASS2, ...)",
+   "native-kernels/x86_64/README.md:452-486 — layered include placement (common.h for all variants, simd.h for AVX2+AVX-512, pqk_x86_<variant>.h for one variant, kernel-private blocks next to their kernel) keeps each variant object self-contained with no cross-file symbols",
+   "native-kernels/x86_64/pqk_x86_avx2.S:68-126 — a variant's section 1 only instantiates tables (TAB_*), lvp and the per-operator mask routines from shared macros plus self-relative PIC jump tables; kernels such as filter/bitmap/count are 3-line VDRIVER instantiations (lines 144-182)",
+   "native-kernels/x86_64/pqk_x86_avx2.h:861-930 — VDRIVER128 reuses the common DRV_ENTER/DRV_MASK/DRV_VALIDITY/DRV_NEXT/DRV_LEAVE driver pieces, so the 64-row block loop exists once across all variants and kernels"
+  ],
+  "readability": [
+   "native-kernels/x86_64/pqk_x86_avx2.S:333-365 — kernel header comments state Args/Returns/Clobbers/Algorithm/Tail plus register roles. The sum_i64 header explains the 2^63-bias exact-sum algebra and the chunk bound",
+   "native-kernels/x86_64/pqk_x86_common.h:38-49 — documented label scheme (.L<kernel>_<step>, .L<block>_<step>\\@, no numeric labels) and [check]/[main]/[tail]/[result] skeleton tags, followed consistently (e.g. pqk_x86_scalar.S:845-899)",
+   "native-kernels/x86_64/pqk_x86_avx2.S:400-426 — comments explain why (e.g. 'shr before the adds: shr clobbers CF', Zen 5 pipe/latency reasoning at lines 34-38). The cost is very dense micro-optimized code (rorx nibble tricks at 501-504, HS8/CSA Harley-Seal at 1202-1226) that is hard to follow without the long headers",
+   "native-kernels/x86_64/pqk_x86_avx2.S:1584-1836 — some kernels are very large (group_sum_i64 is about 250 lines with three paths, and the AVX2 file is 2515 lines). The README module map is stale after the optimization task: README.md:473-475 lists avx2.S at 1718 lines and avx2.h at 632, but they are 2515 and 932"
+  ],
+  "robustness": [
+   "native-kernels/x86_64/pqk_x86_common.h:131-145,294-347 — callee-saved registers are pushed and popped from a single #define SAVED list so the push and pop sequences cannot drift. VRET (vzeroupper) is used on every SIMD return, there is no red zone, and the 7th argument is read via ARG7(npush). The OP_CHECK unsigned compare rejects negative ops before any memory access (161-168)",
+   "native-kernels/x86_64/pqk_x86_common.h:210-223,377-390 — lvp loads exactly ceil(len/8) validity bytes and STORE_BITS_TAIL writes exactly ceil(len/8) output bytes. The AVX2 file deliberately avoids vpmaskmov for tails (pqk_x86_avx2.S:23-25), and the AVX-512 file uses fault-suppressing {k}{z} masked loads (pqk_x86_avx512.S:620,665)",
+   "native-kernels/x86_64/pqk_x86_avx2.S:1722-1835 — the group_sum local-table path probes the stack page by page, aligns the table, restores rsp from rbp on both exits, and commits only under a proven no-wrap bound (n*max|x| < 2^62 and |sums[g]| < 2^62); otherwise it falls back to the exact path, so the overflow flag is preserved. Exact 128/192-bit overflow detection: pqk_x86_scalar.S:804-811,900 (JNE_SEXT)",
+   "native-kernels/x86_64/pqk_x86_scalar.S:1098, pqk_x86_avx2.S:2515, pqk_x86_avx512.S:1550 — .note.GNU-stack in every object. The gather prefetch loop stops GATHER_PF rows early so look-ahead idx loads stay in bounds (pqk_x86_avx2.S:1857-1859,1871-1873), and 128-bit kernels read *b only for BETWEEN (pqk_x86_avx2.h:864-867)"
+  ],
+  "testability": [
+   "native-kernels/x86_64/verify/run.sh:11-30 — one script builds and runs the guard-page, edge-case, ABI, stress and structure checks, plus optional machine-code diffing against a base revision",
+   "native-kernels/x86_64/verify/guard_pages.c:1-30 — PROT_NONE guard pages placed at the end or start of every buffer, for n = 0..maxn, with and without validity, compared against the reference. This catches out-of-bounds accesses that ASan cannot see in assembly",
+   "native-kernels/x86_64/verify/abi_check.c:1-56 + abi_trampoline.S — seeds callee-saved registers and checks rsp, DF and XINUSE (vzeroupper) for every kernel and variant at n in {0,1,7,63,64,65,200,1000}, including invalid ops and the large-span gather prefetch path",
+   "native-kernels/x86_64/pqk_x86_simd.h:16-25 and verify/run.sh:15-19 — chunk sizes can be overridden with -D, so the rare chunk-fold paths of the exact sums run in tests. verify/structure_check.py:6-23 checks the Clobbers: header lists against the disassembly, the single definition of each block, the label scheme and the skeleton tags. Weakness: the test C is written as dense one-liners (abi_check.c:14-19), and run.sh uses only 'set -e'"
+  ]
+ },
+ "top_strengths": [
+  "Strong shared-building-block design: every macro, table and helper is defined once in layered headers, enforced by structure_check.py, while each variant object stays self-contained",
+  "Careful memory safety: exact-byte validity loads and stores, no masked-load fault ambiguity on AVX2, fault-suppressing masks on AVX-512, and bounded prefetch look-ahead, all checked by guard-page tests",
+  "Exactness by construction: biased lane sums folded into 128/192-bit totals give precise overflow detection, and group_sum's fast path is gated by a proven no-wrap bound",
+  "Thorough verification tooling: guard pages, an ABI trampoline that checks callee-saved registers and vzeroupper state, clobber lists checked against the disassembly, chunk-size overrides, and machine-code diffing for refactors",
+  "Consistent, informative header comments stating registers, clobbers, algorithm and tail strategy, with measured rationale for performance decisions"
+ ],
+ "top_weaknesses": [
+  "The AVX2 variant is heavily micro-optimized for Zen 5 (rorx nibble indexing, Harley-Seal CSA trees, hybrid vector/scalar hashing, quick-reject backoff), so kernels are long (group_sum_i64 is about 250 lines) and hard to modify safely",
+  "The README is 1451 lines and partly stale: module-map line counts predate the AVX2 optimization (avx2.S 1718 vs 2515 actual, avx2.h 632 vs 932)",
+  "The Makefile does not track .h dependencies (documented at README.md:59-61), so header edits can silently leave stale objects",
+  "Verification C sources are dense one-liners and run.sh uses only 'set -e', which hurts maintainability of the test tooling"
+ ],
+ "suspected_defects": [
+  "native-kernels/x86_64/pqk_x86_avx2.h:223-249 — EMIT_IDX_COMPRESS8 writes up to 7 scratch uint32 entries past the returned count into out_idx (within capacity n, as documented). This is legal under the 'capacity >= n' contract but could surprise callers that assume bytes after the count are untouched (unverified, design note rather than a bug)",
+  "native-kernels/x86_64/pqk_x86_simd.h:57-90 — F64_ZERO_FIXUP rescans the column from row 0 whenever min or max equals 0.0, which adds a potential second full pass. It is correct but a performance pitfall for zero-heavy data (unverified)",
+  "native-kernels/x86_64/README.md:473-475 — module-map line counts are inconsistent with the current sources (documentation drift, not a code defect)"
+ ],
+ "files_read": 14,
+ "scope": "native-kernels/x86_64/",
+ "code_commit": "572663e"
+}

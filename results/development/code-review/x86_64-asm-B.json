@@ -1,0 +1,55 @@
+{
+ "language": "x86_64-asm",
+ "reviewer": "B",
+ "scores": {
+  "architecture": 5,
+  "readability": 4,
+  "robustness": 5,
+  "testability": 4
+ },
+ "evidence": {
+  "architecture": [
+   "native-kernels/x86_64/pqk_x86_common.h:5-49 — explicit header contract: headers only define cpp constants and gas macros and emit no bytes, each building block is defined exactly once, PQK_BMI is set per variant, and there is a documented kernel skeleton and label scheme; each variant object stays self-contained with no cross-file symbols",
+   "native-kernels/x86_64/pqk_x86_consts.h:1-246 — every constant and rodata table is defined once as a TAB_* emit macro; each variant opts in to the tables it uses (pqk_x86_avx2.S:68-84, pqk_x86_avx512.S:55-65)",
+   "native-kernels/x86_64/pqk_x86_common.h:255-391 — one 64-row block driver (DRV_ENTER/ARGS/MASK/VALIDITY/NEXT/LEAVE, EMIT_IDX_BITS, STORE_BITS_*) shared by all variants; the variants only add their mask routines (pqk_x86_scalar.h:136 PRED_DRIVER, pqk_x86_avx2.h:268 VDRIVER, pqk_x86_avx512.h:242 KDRIVER), so filter/bitmap/count are three thin FUNC wrappers (pqk_x86_scalar.S:70-102)",
+   "native-kernels/x86_64/pqk_x86_simd.h:259-417 + pqk_x86_scalar.S:125-180 — exact-sum folding (FOLD_LANES128/UNBIAS192) is shared by AVX2 and AVX-512, but there is still some pattern duplication: SCMP (scalar.S) mirrors SOP (scalar.h:79), and VCMP (avx2.S:214) mirrors VOP (avx2.h:128)"
+  ],
+  "readability": [
+   "native-kernels/x86_64/pqk_x86_scalar.S:57-69, 798-817, 913-937 — every kernel has a header with Args/Returns/Clobbers/Algorithm/Tail and a register map; the [check]/[main]/[tail]/[result] markers are consistent",
+   "native-kernels/x86_64/pqk_x86_avx2.h:59-75, 1594-1615 (avx2.S) — comments explain why (unsigned range trick, Zen 5 port limits, measured before/after numbers, why vpmaskmovq/vpgatherqq are avoided) and not only what",
+   "native-kernels/x86_64/pqk_x86_scalar.h:294-361, pqk_x86_avx2.h:2304-2363 (avx2.S MM128_BLOCK) — heavy gas metaprogramming (label-prefix arguments, nested .rept/.if, private register conventions that span macros) makes the control flow hard to follow without expanding it mentally; pqk_x86_avx2.S is 2515 lines",
+   "native-kernels/x86_64/pqk_x86_scalar.h:288-291 — the comment calling rcr a '1-cycle op' holds for Zen but not for Intel cores (multi-uop); some performance claims in comments are specific to one microarchitecture"
+  ],
+  "robustness": [
+   "native-kernels/x86_64/pqk_x86_common.h:131-145, 296-302 — PROLOGUE/EPILOGUE over one SAVED list per kernel; OP_CHECK is an unsigned compare before any push, so negative ops are rejected and OP_INVALID's bare ret is correct; VRET adds vzeroupper; .note.GNU-stack is at pqk_x86_scalar.S:1098, avx2.S:2515, avx512.S:1550",
+   "native-kernels/x86_64/pqk_x86_common.h:210-223, 316-331, 381-390 — lvp loads exactly ceil(len/8) validity bytes and STORE_BITS_TAIL writes exactly ceil(len/8) bytes; EMIT_IDX_COMPRESS8/16 runs only on full blocks so its 32/64-byte stores stay within out_idx (avx2.h:231-232); AVX-512 tails use zero-masked loads (avx512.h:129-144)",
+   "native-kernels/x86_64/pqk_x86_scalar.S:819-910 and pqk_x86_simd.h:364-415 — exact 192-bit sum_i128 (sign-extended add/adc/adc; SIMD: bias by 2^127, S/H lane split, chunk-bounded H < 2^60, UNBIAS192). Hand-checked: invalid rows are zeroed before the bias in AVX2 (avx2.S:2038-2043) and the count in AVX-512 is valid rows only (avx512.S:1285, 1320)",
+   "native-kernels/x86_64/pqk_x86_avx2.S:1722-1835 — group_sum local-table fast path: the stack is probed page by page, rsp is restored from rbp, and the result is committed only under a proven no-wrap bound (n*max|x| < 2^62 and |sums[g]| < 2^62); otherwise it falls back to the exact row-order GSUM_PASS2, so the overflow flag matches the reference. Pass 1 always validates ids before any output is written (EINVAL leaves outputs untouched)"
+  ],
+  "testability": [
+   "native-kernels/x86_64/verify/guard_pages.c:1-40 and stress.c:1-30 — differential tests against the reference with every buffer placed against PROT_NONE guard pages (end and start), for n = 0..maxn, with and without validity, adversarial columns; each variant is testable in isolation via pqk_variant_table",
+   "native-kernels/x86_64/verify/abi_trampoline.S:1-89 — dedicated ABI checker: detects callee-saved register corruption, rsp drift, DF set and dirty upper YMM/ZMM state (XINUSE via xgetbv)",
+   "native-kernels/x86_64/verify/structure_check.py:1-27 — checks single definition, that headers emit no bytes, presence of all 20 kernels per variant, the label scheme, skeleton markers, and that declared Clobbers match the disassembly; verify/run.sh:15-19 rebuilds with -DSUM_CHUNK_ROWS/SUM128_CHUNK_ROWS to exercise the rare chunk-fold paths",
+   "native-kernels/x86_64/verify/run.sh:7-27, edge_cases.c:12-27 — the extra suite is a loose sh script (set -e only, no -u/pipefail) outside the Makefile/just targets; the tests are dense one-line C with ad-hoc RNGs, so adding a case is easy but reading or failure triage is not; there are no per-kernel named unit tests"
+  ]
+ },
+ "top_strengths": [
+  "Clean layering: common/consts/simd/per-variant headers that emit no bytes; every building block and constant table is defined once, and a script enforces this",
+  "ABI and memory-safety discipline: SAVED-list prologue/epilogue, vzeroupper on every SIMD exit, exact ceil(n/8) validity/bitmap access, no reads past buffers (scalar or masked tails), PIC self-relative jump tables, GNU-stack notes",
+  "Mathematically careful exactness: 128-/192-bit exact sums with documented bias/fold algebra, signed 128-bit compares via cmp/sbb on sign-biased words, and a group_sum fast path committed only under a proven no-wrap bound",
+  "Strong verification aids: guard-page differential harness, ABI trampoline, chunk-size overrides to exercise fold paths, and a disassembly-based clobber checker"
+ ],
+ "top_weaknesses": [
+  "Heavy gas macro metaprogramming (label-prefix parameters, nested .rept/.if, private register conventions across macros) makes kernels hard to read without mentally expanding them; the AVX2 file is about 2.5k lines",
+  "Some structural duplication remains (SCMP vs SOP, VCMP vs VOP), and a few perf comments are Zen 5-specific (e.g. 'rcr is 1-cycle')",
+  "The verification suite is a loose shell script with terse one-line C tests, not wired into the Makefile/just targets; the Makefile has no header dependencies (the README asks for a manual make clean)"
+ ],
+ "suspected_defects": [
+  "native-kernels/x86_64/pqk_x86_common.h:299 — DRV_ENTER always reads ARG7(6)(%rsp) as the output pointer, including for count_i64/count_i128, which have only 6 arguments; this reads a caller stack slot that is not an argument (harmless because the value is never dereferenced in MODE_COUNT; unverified)",
+  "native-kernels/x86_64/pqk_x86_scalar.h:288-291 — the comment's 'rcr is a 1-cycle op' claim is false on Intel (RCR r64,1 is multi-uop), so the scalar i128 predicate performance reasoning may not carry over (documentation/perf only, not correctness; unverified)",
+  "native-kernels/x86_64/pqk_x86_avx512.S:1262-1278 — the no-validity sum_i128 tail adds up to 15 rows to the accumulators after the last chunk countdown without decrementing r12d, so per-lane H can slightly exceed the SUM128_CHUNK_ROWS bound; with the default 2^28 chunk this is far below 2^64 and harmless, but the 'chunk bound' invariant is not strictly kept (unverified)"
+ ],
+ "files_read": 19,
+ "scope": "native-kernels/x86_64/",
+ "code_commit": "572663e"
+}
