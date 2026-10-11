@@ -1,0 +1,137 @@
+{
+ "options": {},
+ "queries": {
+  "A01": {
+   "median_ms": 96.6,
+   "min_ms": 95.5,
+   "rows": 1,
+   "digest": "417e51cfc9fc2ede"
+  },
+  "A02": {
+   "median_ms": 222.4,
+   "min_ms": 221.4,
+   "rows": 20,
+   "digest": "a087dcff3a6b31db"
+  },
+  "A03": {
+   "median_ms": 281.8,
+   "min_ms": 264.3,
+   "rows": 80777,
+   "digest": "5fa97c08816b0a8a"
+  },
+  "A04": {
+   "median_ms": 239.7,
+   "min_ms": 224.6,
+   "rows": 4,
+   "digest": "271faa992b8ef66c"
+  },
+  "A05": {
+   "median_ms": 113.4,
+   "min_ms": 112.7,
+   "rows": 10,
+   "digest": "1612c0fcbb569177"
+  },
+  "A06": {
+   "median_ms": 245.1,
+   "min_ms": 243.2,
+   "rows": 20,
+   "digest": "1a450afa4b9f420b"
+  },
+  "A07": {
+   "median_ms": 177.8,
+   "min_ms": 177.5,
+   "rows": 1,
+   "digest": "c61623d17730b631"
+  },
+  "A08": {
+   "median_ms": 205.8,
+   "min_ms": 201.9,
+   "rows": 24,
+   "digest": "febd0ded149b97f7"
+  },
+  "A09": {
+   "median_ms": 184.7,
+   "min_ms": 179.8,
+   "rows": 20,
+   "digest": "262632174ed0128d"
+  },
+  "A10": {
+   "median_ms": 208.5,
+   "min_ms": 204.6,
+   "rows": 20,
+   "digest": "57fc6d7fc7633e0f"
+  },
+  "A11": {
+   "median_ms": 212.9,
+   "min_ms": 211.4,
+   "rows": 78,
+   "digest": "514ef368c5ea9183"
+  },
+  "A12": {
+   "median_ms": 87.3,
+   "min_ms": 85.2,
+   "rows": 1,
+   "digest": "0cc29a46348dc3ba"
+  },
+  "A13": {
+   "median_ms": 236.9,
+   "min_ms": 230.1,
+   "rows": 1,
+   "digest": "158a22265bb83bba"
+  },
+  "A14": {
+   "median_ms": 292.1,
+   "min_ms": 291.2,
+   "rows": 6,
+   "digest": "dd125e6c6066bc50"
+  },
+  "A15": {
+   "median_ms": 207.4,
+   "min_ms": 203.7,
+   "rows": 6,
+   "digest": "d98b77f93b9c10f7"
+  },
+  "A16": {
+   "median_ms": 295.3,
+   "min_ms": 294.0,
+   "rows": 1000,
+   "digest": "9537fba394bd7638"
+  },
+  "A17": {
+   "median_ms": 219.9,
+   "min_ms": 217.7,
+   "rows": 3,
+   "digest": "a05d006b826ed625"
+  },
+  "A18": {
+   "median_ms": 9.2,
+   "min_ms": 9.0,
+   "rows": 30,
+   "digest": "5423862ef09e75a8"
+  },
+  "A19": {
+   "median_ms": 248.6,
+   "min_ms": 244.8,
+   "rows": 21,
+   "digest": "0dda50071d1f81af"
+  },
+  "A20": {
+   "median_ms": 329.0,
+   "min_ms": 313.9,
+   "rows": 100,
+   "digest": "15c4c24caa9ab88a"
+  },
+  "A21": {
+   "median_ms": 199.2,
+   "min_ms": 183.4,
+   "rows": 15015,
+   "digest": "779243a3c87942e9"
+  },
+  "A22": {
+   "median_ms": 5.5,
+   "min_ms": 5.4,
+   "rows": 120,
+   "digest": "308db2c8e4bc59ea"
+  }
+ }
+}
