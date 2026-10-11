@@ -298,8 +298,8 @@ final class Parallel {
 
     private static boolean aggregatesSafe(List<AggregateCall> calls) {
         for (AggregateCall c : calls) {
-            if (c.distinct() || !safe(c.argument())) {
-                return false; // DISTINCT states are not merged
+            if (!safe(c.argument())) {
+                return false;
             }
             if (!AggState.create(c, null).mergeable()) {
                 return false;
@@ -651,6 +651,7 @@ final class Parallel {
                 errors.fatal(e);
                 throw e;
             }
+            table.prepareMerge();
             return new Partial(table, first, partitionGroups(table, partitions()));
         }
 
@@ -749,6 +750,7 @@ final class Parallel {
                     out[0][to] = firsts[w][idx];
                 }
             });
+            table.flushReservation();
             ctx.checkNow();
             return new Merged(table, out[0]);
         }

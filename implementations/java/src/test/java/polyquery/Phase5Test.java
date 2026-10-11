@@ -95,6 +95,21 @@ final class Phase5Test {
                 + "WHERE s.name LIKE 'n1%'",
         "SELECT id FROM (SELECT id, grp + 1 AS g1, UPPER(name) AS u FROM t) s WHERE id % 7 = 0 AND 100 / (g1 - 4) > 0",
         "SELECT id FROM (SELECT id, val FROM t) s WHERE 100 / (val + 50) > 0 AND id < 10",
+        // DISTINCT aggregates (primitive, mergeable states)
+        "SELECT grp, COUNT(DISTINCT val), SUM(DISTINCT amt), AVG(DISTINCT val), MIN(DISTINCT name), "
+                + "COUNT(DISTINCT day), COUNT(DISTINCT flag) FROM t GROUP BY grp",
+        "SELECT COUNT(DISTINCT name), SUM(DISTINCT val), MAX(DISTINCT amt) FROM t WHERE id > 100",
+        "SELECT name, COUNT(DISTINCT grp), SUM(DISTINCT val * 1.5) FROM t GROUP BY name",
+        // uncorrelated subqueries: shared results, batch kernels, parallel pipelines, deferred errors
+        "SELECT id FROM t WHERE val IN (SELECT grp FROM d) AND id < 300",
+        "SELECT id, name IN (SELECT label FROM d), val NOT IN (SELECT grp FROM d) FROM t "
+                + "WHERE id > (SELECT MAX(grp) FROM d)",
+        "SELECT id FROM t WHERE grp NOT IN (SELECT grp FROM d WHERE weight > 100)",
+        "SELECT id FROM t WHERE val IN (SELECT 100 / (grp - 3) FROM d)",
+        "SELECT id FROM t WHERE id < 0 AND val IN (SELECT 100 / (grp - 3) FROM d)",
+        "SELECT grp, COUNT(*) FROM t WHERE EXISTS (SELECT 1 FROM d WHERE weight > 20) GROUP BY grp",
+        "SELECT COUNT(*), SUM(val + (SELECT MIN(grp) FROM d)) FROM t WHERE amt IN (SELECT weight FROM d)",
+        "SELECT id FROM t WHERE val > (SELECT 10 / (MIN(grp) - 0) FROM d) ORDER BY id LIMIT 4",
     };
 
     /** A result: column list and rows (sorted unless the query orders them), or an error code. */

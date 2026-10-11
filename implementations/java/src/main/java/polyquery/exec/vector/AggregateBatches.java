@@ -43,6 +43,9 @@ final class AggregateBatches {
         private final ExecContext ctx;
         private int[] gids = new int[0];
         private long reserved;
+        /** Bytes of merged groups not reserved yet (see {@link #merge}). */
+        private long pending;
+        private static final long RESERVE_CHUNK = 1 << 20;
 
         Table(List<BoundExpr> groupKeys, List<AggregateCall> calls, ExecContext ctx) {
             this.keys = new GroupKeys(keyTypes(groupKeys), ctx.nativeKernels());
@@ -126,15 +129,20 @@ final class AggregateBatches {
             }
         }
 
-        /** Merges group g of a partial table into this one; returns the group id here. */
+        /**
+         * Merges group g of a partial table into this one; returns the group id here. Memory for
+         * new groups is reserved in chunks (the context's counter is shared by all merging
+         * threads); {@link #flushReservation} reserves the rest.
+         */
         int merge(Table partial, int g) {
             int before = keys.groupCount();
             int to = keys.addFrom(partial.keys, g);
             if (keys.groupCount() > before) {
                 growStates();
-                long bytes = groupBytes();
-                ctx.reserve(bytes);
-                reserved += bytes;
+                pending += groupBytes();
+                if (pending >= RESERVE_CHUNK) {
+                    flushReservation();
+                }
             }
             for (int a = 0; a < states.length; a++) {
                 states[a].merge(partial.states[a], g, to);
@@ -142,9 +150,25 @@ final class AggregateBatches {
             return to;
         }
 
+        /** Prepares the states of a complete partial table for merging (see {@link AggState#prepareMerge}). */
+        void prepareMerge() {
+            for (AggState s : states) {
+                s.prepareMerge();
+            }
+        }
+
+        /** Reserves the memory of groups merged since the last reservation. */
+        void flushReservation() {
+            long bytes = pending;
+            pending = 0;
+            ctx.reserve(bytes);
+            reserved += bytes;
+        }
+
         void release() {
             ctx.release(reserved);
             reserved = 0;
+            pending = 0;
         }
     }
 

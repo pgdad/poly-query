@@ -362,7 +362,13 @@ class Gen:
                              f"SUM({self.expr(scope, 'DEC', 2)})", f"MIN({self.expr(scope, 'STRING', 2)})",
                              f"MAX({self.expr(scope, 'DATE', 1)})", f"AVG({self.expr(scope, 'DEC', 2)})",
                              f"COUNT({self.expr(scope, 'INT64', 2)})", f"COUNT(DISTINCT {self.expr(scope, 'STRING', 2)})",
-                             f"SUM({self.expr(scope, 'FLOAT64', 2)})", f"MIN({self.expr(scope, 'FLOAT64', 2)})"],
+                             f"SUM({self.expr(scope, 'FLOAT64', 2)})", f"MIN({self.expr(scope, 'FLOAT64', 2)})",
+                             f"COUNT(DISTINCT {self.expr(scope, 'INT64', 2)})",
+                             f"SUM(DISTINCT {self.expr(scope, 'DEC', 2)})",
+                             f"AVG(DISTINCT {self.expr(scope, 'INT64', 2)})",
+                             f"MAX(DISTINCT {self.expr(scope, 'STRING', 2)})",
+                             f"COUNT(DISTINCT {self.expr(scope, 'FLOAT64', 2)})",
+                             f"COUNT(DISTINCT {self.expr(scope, 'DATE', 1)})"],
                             r.randint(1, 4))
             sel = ", ".join([f"{k} AS k{i}" for i, k in enumerate(keys)] + [f"{a} AS a{i}" for i, a in enumerate(aggs)])
             group = (" GROUP BY " + ", ".join(str(i + 1) for i in range(len(keys)))) if keys else ""

@@ -114,7 +114,9 @@ def main():
         json.dump({"cold": cold, "warm": warm, "results": results}, open(args.save, "w"))
     if args.compare:
         before = json.load(open(args.compare))
-        bad = [q["id"] for q in queries if not same(before["results"][q["id"]], results[q["id"]])]
+        bad = [q["id"] for q in queries
+               if before["results"][q["id"]]["columns"] != results[q["id"]]["columns"]
+               or not same(before["results"][q["id"]]["rows"], results[q["id"]]["rows"])]
         print("| query | before cold | after cold | before median | after median | speed-up |")
         print("|---|---:|---:|---:|---:|---:|")
         for q in queries:
