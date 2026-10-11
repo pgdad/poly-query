@@ -286,6 +286,34 @@ inputs, as no operator delivers sorted output)."
     (:merge :merge)
     (:nested-loop :nested-loop)))
 
+(defun scan-pipeline-p (node)
+  "True if the logical plan NODE streams rows from a table scan through
+filters and projections (a pipeline the parallel executor can split)."
+  (typecase node
+    (lp-scan t)
+    ((or lp-filter lp-project lp-subquery-alias) (scan-pipeline-p (lnode-child node)))
+    (t nil)))
+
+(defparameter *pipeline-build-factor* 4
+  "With parallel execution, an inner hash join builds on a blocking input
+(not a scan pipeline) rather than on a scan pipeline estimated up to this
+many times smaller, so the scan side remains a parallel probe pipeline.")
+
+(defun build-left-p (left right)
+  "Whether an inner hash join builds on its LEFT input: the input with the
+smaller estimated cardinality, except that with parallel execution a
+blocking input is preferred over a scan pipeline (see
+*PIPELINE-BUILD-FACTOR*): blocking inputs (e.g. aggregations) are often
+estimated far above their real size, and only a pipeline probe runs in
+parallel."
+  (let ((l (estimate-rows left))
+        (r (estimate-rows right))
+        (lp (scan-pipeline-p left))
+        (rp (scan-pipeline-p right)))
+    (cond ((or (<= (exec-options-threads *exec-options*) 1) (eq lp rp)) (< l r))
+          (lp (> l (* *pipeline-build-factor* r)))      ; right is blocking
+          (t (<= l (* *pipeline-build-factor* r))))))   ; left is blocking
+
 (defun physical-join (node)
   (destructuring-bind (left right) (lnode-children node)
     (let ((kind (lp-join-kind node))
@@ -298,10 +326,7 @@ inputs, as no operator delivers sorted output)."
         (case (and lkeys (choose-join-algorithm))
           (:hash
            (make-pp-hash-join :kind kind :children (list pleft pright) :columns (lnode-columns node)
-                              :build (if (and (eq kind :inner)
-                                              (< (estimate-rows left) (estimate-rows right)))
-                                         :left
-                                         :right)
+                              :build (if (and (eq kind :inner) (build-left-p left right)) :left :right)
                               :left-keys lkeys :right-keys rkeys :residual (conjoin residual)))
           (:merge
            (make-pp-merge-join :kind kind :children (list pleft pright) :columns (lnode-columns node)
