@@ -75,6 +75,11 @@ class Catalog:
         with self._lock:
             return sorted(self._tables.values(), key=lambda t: (fold(t.name), t.name))
 
+    def objects(self) -> list[Table | Index]:
+        """Every table and index (what parallel worker processes inherit)."""
+        with self._lock:
+            return [*self._tables.values(), *self._indexes.values()]
+
     # ------------------------------------------------------------ indexes
 
     def get_index(self, name: str) -> Index | None:

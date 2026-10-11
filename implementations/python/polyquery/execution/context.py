@@ -44,6 +44,8 @@ class ExecutionContext:
     # processes (which never fork again)
     partitions: dict[int, tuple[int, int]] = field(default_factory=dict, init=False)
     in_worker: bool = field(default=False, init=False)
+    # the engine's persistent worker processes (worker_pool.WorkerPool), if any
+    pool: Any = field(default=None, init=False)
     # physical plans of subqueries (by Subquery.id) and the current values of
     # correlation parameters (by column key)
     subplans: dict[int, Any] = field(default_factory=dict, init=False)
@@ -89,12 +91,13 @@ class ExecutionContext:
         threads: int = 1,
         parallel_min_rows: int = DEFAULT_PARALLEL_MIN_ROWS,
         native: NativeKernels | None = None,
+        pool: Any = None,
     ) -> ExecutionContext:
         """``deadline`` (a time.monotonic() value) takes precedence over
         ``timeout_ms``, which counts from now."""
         if deadline is None and timeout_ms:
             deadline = time.monotonic() + timeout_ms / 1000.0
-        return cls(
+        ctx = cls(
             deadline,
             cancel_event,
             max_memory_mb * 1024 * 1024,
@@ -105,6 +108,8 @@ class ExecutionContext:
             parallel_min_rows,
             native,
         )
+        ctx.pool = pool
+        return ctx
 
     def check(self) -> None:
         """Raises TIMEOUT / CANCELLED when the query must stop."""

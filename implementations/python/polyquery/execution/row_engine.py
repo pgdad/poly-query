@@ -11,6 +11,7 @@ work.
 from __future__ import annotations
 
 import itertools
+from functools import partial
 from typing import Any, Callable, Iterable, Iterator
 
 from ..planner import physical as pp
@@ -30,6 +31,7 @@ from .common import (
 )
 from .compiler import Layout, compile_expr, compile_row
 from .context import ExecutionContext
+from .worker_pool import PartitionTask, register_engine
 
 Rows = Iterator[tuple]
 
@@ -121,16 +123,30 @@ def _project(node: pp.Project, ctx: ExecutionContext) -> Rows:
 
 def _gather(node: pp.Gather, ctx: ExecutionContext) -> Rows:
     """Partition outputs concatenated in partition order."""
-    prepare_pipeline(node, ctx)
-    return parallel.iterate_partitions(node, ctx, lambda: execute(node.input, ctx))
+    return parallel.iterate_partitions(
+        node,
+        ctx,
+        lambda: execute(node.input, ctx),
+        spec=PartitionTask(ENGINE, "collect", None),
+        prepare=lambda: prepare_pipeline(node, ctx),
+    )
 
 
-def partition_rows(node: pp.PhysicalNode, ctx: ExecutionContext, consume: Callable[[Rows], Any]) -> list[Any]:
-    """``consume`` applied to the input rows of a consumer of partial
-    results: once per partition if ``node`` is a Gather, else once."""
+def partition_rows(
+    node: pp.PhysicalNode, ctx: ExecutionContext, kind: str, consumer: pp.PhysicalNode, arg: Any = None
+) -> list[Any]:
+    """The ``kind`` consumer (see ``_CONSUMERS``) of operator ``consumer``
+    applied to the input rows of a consumer of partial results: once per
+    partition if ``node`` is a Gather, else once."""
+    consume = _CONSUMERS[kind](consumer, ctx, arg)
     if isinstance(node, pp.Gather):
-        prepare_pipeline(node, ctx)
-        return parallel.run_partitions(node, ctx, lambda: consume(execute(node.input, ctx)))
+        return parallel.run_partitions(
+            node,
+            ctx,
+            lambda: consume(execute(node.input, ctx)),
+            spec=PartitionTask(ENGINE, kind, consumer, arg),
+            prepare=lambda: prepare_pipeline(node, ctx),
+        )
     return [consume(execute(node, ctx))]
 
 
@@ -363,7 +379,7 @@ def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Rows:
             prefix = () if width == 0 else (key,) if width == 1 else key
             yield prefix + tuple(r[i] for r in results)
         return
-    partials = partition_rows(node.input, ctx, lambda rows: _aggregate_partition(node, ctx, rows))
+    partials = partition_rows(node.input, ctx, "aggregate", node)
     groups = merge_groups(partials)
     if not node.keys and not groups:
         groups[()] = accumulator_factory(node.aggregates)()  # one group even for empty input
@@ -388,7 +404,7 @@ def _distinct_partition(rows: Rows, ctx: ExecutionContext, width: int) -> list[t
 def _distinct(node: pp.Distinct, ctx: ExecutionContext) -> Rows:
     width = len(node.layout)
     if isinstance(node.input, pp.Gather):
-        parts = partition_rows(node.input, ctx, lambda rows: _distinct_partition(rows, ctx, width))
+        parts = partition_rows(node.input, ctx, "distinct", node)
         yield from _distinct_partition(itertools.chain.from_iterable(parts), ctx, width)
         return
     seen: set[tuple] = set()
@@ -422,12 +438,12 @@ def _sort(node: pp.Sort | pp.TopN, ctx: ExecutionContext) -> Rows:
     if keep == 0:
         return iter(())
     if keep is None:  # full sort: partitions only collect, the rows are sorted once
-        rows = list(itertools.chain.from_iterable(partition_rows(node.input, ctx, list)))
+        rows = list(itertools.chain.from_iterable(partition_rows(node.input, ctx, "collect", node)))
         ctx.reserve_rows(len(rows), len(node.layout))
         ctx.check()
         sort_rows(rows, node.keys)
         return iter(rows)
-    parts = partition_rows(node.input, ctx, lambda rows: _sorted_partition(rows, node, ctx, keep))
+    parts = partition_rows(node.input, ctx, "sort", node, keep)
     if len(parts) == 1:
         return iter(parts[0])
     # partial top-Ns in partition order: the stable re-sort merges them
@@ -464,3 +480,15 @@ _HANDLERS: dict[type, Callable[[Any, ExecutionContext], Rows]] = {
     pp.TopN: _sort,
     pp.Limit: _limit,
 }
+
+
+# per-partition work of the consumers of parallel pipelines, by kind:
+# (consumer operator, ctx, argument) -> function of the partition's rows
+_CONSUMERS: dict[str, Callable[[Any, ExecutionContext, Any], Callable[[Rows], Any]]] = {
+    "aggregate": lambda node, ctx, arg: partial(_aggregate_partition, node, ctx),
+    "distinct": lambda node, ctx, arg: lambda rows: _distinct_partition(rows, ctx, len(node.layout)),
+    "collect": lambda node, ctx, arg: list,
+    "sort": lambda node, ctx, arg: lambda rows: _sorted_partition(rows, node, ctx, arg),
+}
+ENGINE = "row"
+register_engine(ENGINE, execute, prepare_pipeline, _CONSUMERS)

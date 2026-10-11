@@ -50,6 +50,7 @@ from .compiler import Layout
 from .context import ExecutionContext
 from .group_states import GroupState, make_state, merge_partials
 from .vcompiler import VecFn, compile_vector, take
+from .worker_pool import PartitionTask, register_engine
 
 _is_not_none = partial(operator.is_not, None)
 
@@ -206,16 +207,30 @@ def _project(node: pp.Project, ctx: ExecutionContext) -> Batches:
 
 def _gather(node: pp.Gather, ctx: ExecutionContext) -> Batches:
     """Partition outputs concatenated in partition order."""
-    prepare_pipeline(node, ctx)
-    return parallel.iterate_partitions(node, ctx, lambda: execute(node.input, ctx))
+    return parallel.iterate_partitions(
+        node,
+        ctx,
+        lambda: execute(node.input, ctx),
+        spec=PartitionTask(ENGINE, "collect", None),
+        prepare=lambda: prepare_pipeline(node, ctx),
+    )
 
 
-def partition_batches(node: pp.PhysicalNode, ctx: ExecutionContext, consume: Callable[[Batches], Any]) -> list[Any]:
-    """``consume`` applied to the input batches of a consumer of partial
-    results: once per partition if ``node`` is a Gather, else once."""
+def partition_batches(
+    node: pp.PhysicalNode, ctx: ExecutionContext, kind: str, consumer: pp.PhysicalNode, arg: Any = None
+) -> list[Any]:
+    """The ``kind`` consumer (see ``_CONSUMERS``) of operator ``consumer``
+    applied to the input batches of a consumer of partial results: once per
+    partition if ``node`` is a Gather, else once."""
+    consume = _CONSUMERS[kind](consumer, ctx, arg)
     if isinstance(node, pp.Gather):
-        prepare_pipeline(node, ctx)
-        return parallel.run_partitions(node, ctx, lambda: consume(execute(node.input, ctx)))
+        return parallel.run_partitions(
+            node,
+            ctx,
+            lambda: consume(execute(node.input, ctx)),
+            spec=PartitionTask(ENGINE, kind, consumer, arg),
+            prepare=lambda: prepare_pipeline(node, ctx),
+        )
     return [consume(execute(node, ctx))]
 
 
@@ -552,7 +567,7 @@ def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Batches:
     if done is not None:  # aggregated by the kernels from the column storage
         keys, states = done
     else:
-        partials = partition_batches(node.input, ctx, lambda batches: _aggregate_partition(node, ctx, batches))
+        partials = partition_batches(node.input, ctx, "aggregate", node)
         keys, states = merge_partials(partials)
     n = len(keys)
     if not n:
@@ -592,7 +607,7 @@ def _distinct_rows(batches: Iterable[Batch], seen: set, ctx: ExecutionContext, w
 def _distinct(node: pp.Distinct, ctx: ExecutionContext) -> Batches:
     width = len(node.layout)
     if isinstance(node.input, pp.Gather):
-        parts = partition_batches(node.input, ctx, lambda batches: list(_distinct_rows(batches, set(), ctx, width)))
+        parts = partition_batches(node.input, ctx, "distinct", node)
         return _distinct_rows(itertools.chain.from_iterable(parts), set(), ctx, width)
     return _distinct_rows(execute(node.input, ctx), set(), ctx, width)
 
@@ -629,14 +644,14 @@ def _sort(node: pp.Sort | pp.TopN, ctx: ExecutionContext) -> Batches:
     if keep is None and isinstance(node.input, pp.Gather):
         # full sort: partitions only collect, the rows are sorted once
         merged = _Collector(len(node.layout))
-        for part in partition_batches(node.input, ctx, list):
+        for part in partition_batches(node.input, ctx, "collect", node):
             for batch in part:
                 merged.add(batch)
         ctx.reserve_rows(merged.n, len(node.layout))
         cols, n = _sorted(merged.cols, merged.n, node, None)
         parts = []
     else:
-        parts = partition_batches(node.input, ctx, lambda batches: _sorted_partition(batches, node, ctx, keep))
+        parts = partition_batches(node.input, ctx, "sort", node, keep)
     if len(parts) == 1:
         cols, n = parts[0]
     elif parts:
@@ -670,6 +685,15 @@ def _limit(node: pp.Limit, ctx: ExecutionContext) -> Batches:
         yield cols, n
 
 
+# per-partition work of the consumers of parallel pipelines, by kind:
+# (consumer operator, ctx, argument) -> function of the partition's batches
+_CONSUMERS: dict[str, Callable[[Any, ExecutionContext, Any], Callable[[Batches], Any]]] = {
+    "aggregate": lambda node, ctx, arg: partial(_aggregate_partition, node, ctx),
+    "distinct": lambda node, ctx, arg: lambda batches: list(_distinct_rows(batches, set(), ctx, len(node.layout))),
+    "collect": lambda node, ctx, arg: list,
+    "sort": lambda node, ctx, arg: lambda batches: _sorted_partition(batches, node, ctx, arg),
+}
+
 _HANDLERS: dict[type, Callable[[Any, ExecutionContext], Batches]] = {
     pp.TableScan: _table_scan,
     pp.IndexScan: _index_scan,
@@ -689,3 +713,5 @@ _HANDLERS: dict[type, Callable[[Any, ExecutionContext], Batches]] = {
     pp.TopN: _sort,
     pp.Limit: _limit,
 }
+ENGINE = "vec"
+register_engine(ENGINE, execute, prepare_pipeline, _CONSUMERS)

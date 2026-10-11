@@ -16,6 +16,7 @@ from .execution.compiler import evaluate_constant
 from .execution.context import DEFAULT_PARALLEL_MIN_ROWS, ExecutionContext
 from .execution.executor import QueryResult, run_plan, stream_plan
 from .execution.native_ops import kernel_plan
+from .execution.worker_pool import WorkerPool
 from .ingest.limits import DEFAULT_MAX_INGEST_BYTES, DEFAULT_MAX_TABLE_ROWS, IngestLimits
 from .ingest.loader import load_table
 from .native import NativeKernels, load_kernels
@@ -84,6 +85,12 @@ class Engine:
         self.catalog = Catalog()
         self.ingest_limits = IngestLimits(config.max_ingest_bytes, config.max_table_rows)
         self.native: NativeKernels | None = load_kernels(config.native_kernels)
+        # worker processes of parallel pipelines, forked on first use
+        self.pool = WorkerPool(self.catalog.objects)
+
+    def close(self) -> None:
+        """Stops the worker processes (they also exit with this process)."""
+        self.pool.close()
 
     # ------------------------------------------------------------ catalog
 
@@ -197,6 +204,7 @@ class Engine:
             threads=self._threads(options),
             parallel_min_rows=self.config.parallel_min_rows,
             native=plan.native,
+            pool=self.pool,
         )
         return plan, ctx
 
