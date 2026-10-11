@@ -9,7 +9,9 @@
     "phase2" "sql.groupby" "sql.join" "sql.functions" "sql.subquery" "sql.cte"
     "sql.correlated_subquery"
     "phase3" "storage.pqcf" "storage.mmap" "index.hash" "index.btree"
-    "phase4" "http.streaming"))
+    "phase4" "http.streaming"
+    "phase5" "exec.row" "exec.vectorized" "exec.parallel"
+    "join.hash" "join.merge" "join.nested_loop"))
 
 (defstruct engine-config
   (data-dir nil)                         ; pathname of the data directory (with trailing /)
@@ -40,45 +42,49 @@
      :memory-budget (* (engine-config-max-query-memory-mb config) 1024 1024)
      :max-join-rows (engine-config-max-join-rows config))))
 
-(defun plan-statement (session ast use-indexes)
+(defun plan-statement (session ast options)
   "Analyse and plan the query statement AST against a snapshot of the catalog
-(concurrency.md §1). Returns (values plan bound-query)."
+(concurrency.md §1) with the EXEC-OPTIONS OPTIONS. Returns (values plan
+bound-query)."
   (let* ((catalog (catalog-snapshot (session-catalog session)))
          (bound (bind-statement ast catalog
                                 :test-functions (engine-config-test-functions
                                                  (session-config session)))))
     (let ((*planning-catalog* catalog)
-          (*use-indexes* use-indexes))
+          (*exec-options* options)
+          (*use-indexes* (exec-options-use-indexes options)))
       (values (plan-bound-query bound) bound))))
 
 (defun result-columns (bound)
   (loop for c in (bound-query-columns bound)
         collect (make-column-def (column-def-name c) (output-type (column-def-type c)))))
 
-(defun open-sql (session sql &key (use-indexes t))
-  "Parse, analyse and plan SQL in the current *QUERY-CONTEXT*. Index
-statements are executed immediately. Returns (values columns iterator): the
-result COLUMN-DEFs and a function returning the next result row or NIL."
+(defun open-sql (session sql &key (options (make-exec-options)))
+  "Parse, analyse and plan SQL in the current *QUERY-CONTEXT* with the
+EXEC-OPTIONS OPTIONS. Index statements are executed immediately. Returns
+(values columns iterator): the result COLUMN-DEFs and a function returning the
+next result row or NIL."
   (let ((ast (parse-sql sql)))
     (flet ((no-rows () nil))
       (typecase ast
         (ast-create-index (execute-create-index session ast) (values '() #'no-rows))
         (ast-drop-index (execute-drop-index session ast) (values '() #'no-rows))
         (t
-         (multiple-value-bind (plan bound) (plan-statement session ast use-indexes)
+         (multiple-value-bind (plan bound) (plan-statement session ast options)
            (if (ast-explain-p ast)
                (let ((row (vector (json-to-string (explain-plan-json plan)))))
                  (values (list (make-column-def "plan" :string))
                          (lambda () (shiftf row nil))))
                (values (result-columns bound)
-                       (funcall (the function (compile-plan plan)))))))))))
+                       (let ((*exec-options* options))
+                         (funcall (the function (compile-plan plan))))))))))))
 
-(defun execute-sql (session sql &key max-rows timeout-ms (collect-rows t) (use-indexes t)
-                                     context)
+(defun execute-sql (session sql &key max-rows timeout-ms (collect-rows t)
+                                     (options (make-exec-options)) context)
   "Run SQL against the session catalog and return a QUERY-RESULT. CONTEXT is
 the QUERY-CONTEXT to run in (by default a fresh one with TIMEOUT-MS)."
   (let ((*query-context* (or context (make-context-for session timeout-ms))))
-    (multiple-value-bind (columns next) (open-sql session sql :use-indexes use-indexes)
+    (multiple-value-bind (columns next) (open-sql session sql :options options)
       (collect-rows columns next max-rows collect-rows))))
 
 (defun collect-rows (columns next max-rows collect-rows)
@@ -102,13 +108,13 @@ COLLECT-ROWS), enforcing MAX-ROWS and the memory budget."
                        :rows (nreverse rows)
                        :row-count count)))
 
-(defun explain-sql (session sql &key (use-indexes t))
+(defun explain-sql (session sql &key (options (make-exec-options)))
   "The EXPLAIN plan JSON of the query SQL (an EXPLAIN prefix is accepted)."
   (let ((*query-context* (make-context-for session nil))
         (ast (parse-sql sql)))
     (when (typep ast '(or ast-create-index ast-drop-index))
       (signal-pq-error "INVALID_REQUEST" "only queries can be explained"))
-    (explain-plan-json (plan-statement session ast use-indexes))))
+    (explain-plan-json (plan-statement session ast options))))
 
 ;;; ------------------------------------------------------------------
 ;;; Index statements

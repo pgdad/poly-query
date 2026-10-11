@@ -233,7 +233,7 @@ failure the error response is sent and NIL returned."
     (validate-query-options options)
     (option-in options "result" '("rows" "count"))
     (multiple-value-bind (columns next)
-        (open-sql session sql :use-indexes (use-indexes-option options))
+        (open-sql session sql :options (query-exec-options options))
       (declare (type function next))
       (channel-put channel (list :header columns) :on-wait #'check-interrupts)
       (let ((batch '()) (size 0) (count 0) (batch-start 0)

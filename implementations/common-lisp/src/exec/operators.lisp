@@ -399,6 +399,95 @@ each bucket keeps its rows in input order."
                          (return r)))))))
              right-width)))))))
 
+;;; Sort-merge joins: both inputs are materialized and sorted (stably) on
+;;; their normalized join keys; the left input is then merged with the
+;;; groups of equal right keys. Rows with a NULL key never match.
+
+(defun compare-key-values (a b)
+  "Total order (-1/0/1) on normalized join-key values of one key column:
+numbers, strings (code point order) or booleans; equal keys compare 0."
+  (cond ((realp a) (cond ((< a b) -1) ((> a b) 1) (t 0)))
+        ((stringp a) (cond ((string< a b) -1) ((string= a b) 0) (t 1)))
+        ((eq a b) 0)
+        ((null a) -1)
+        (t 1)))
+
+(defun compare-join-keys (a b)
+  "Lexicographic order on key lists produced by MAKE-KEY-FUNCTION."
+  (loop for x in a
+        for y in b
+        for c of-type fixnum = (compare-key-values x y)
+        unless (zerop c) return c
+        finally (return 0)))
+
+(defun sorted-keyed-rows (rows key-fn &key keep-null-keys)
+  "Vector of (key . row) for ROWS sorted stably by key; rows with a NULL key
+are dropped, or (KEEP-NULL-KEYS) placed at the end with key NIL."
+  (declare (type simple-vector rows) (type function key-fn))
+  (let ((keyed '()) (null-keyed '()))
+    (loop for row across rows
+          for k = (funcall key-fn row)
+          do (cond (k (push (cons k row) keyed))
+                   (keep-null-keys (push (cons nil row) null-keyed))))
+    (concatenate 'simple-vector
+                 (stable-sort (nreverse keyed)
+                              (lambda (a b) (minusp (compare-join-keys (car a) (car b)))))
+                 (nreverse null-keyed))))
+
+(defmethod compile-operator ((node pp-merge-join))
+  (destructuring-bind (left right) (pnode-children node)
+    (let* ((open-left (compile-operator left))
+           (open-right (compile-operator right))
+           (lkeys (pp-merge-join-left-keys node))
+           (rkeys (pp-merge-join-right-keys node))
+           (left-key (make-key-function lkeys rkeys))
+           (right-key (make-key-function rkeys lkeys))
+           (residual (and (pp-merge-join-residual node)
+                          (compile-bexpr (pp-merge-join-residual node))))
+           (kind (pp-merge-join-kind node))
+           (right-width (length (pnode-columns right)))
+           (invariant (plan-invariant-p right))
+           (cached nil))
+      (declare (type function open-left open-right))
+      (lambda ()
+        (let ((lefts (sorted-keyed-rows (drain (funcall open-left)) left-key
+                                        :keep-null-keys (eq kind :left)))
+              (rights (or (and invariant cached)
+                          (sorted-keyed-rows (drain (funcall open-right)) right-key)))
+              (li 0) (rpos 0) (current-key nil) (probes 0))
+          (declare (type simple-vector lefts rights) (type fixnum li rpos probes))
+          (when invariant (setf cached rights))
+          (make-join-iterator
+           kind
+           (lambda ()
+             (when (< li (length lefts))
+               (let ((entry (svref lefts li)))
+                 (incf li)
+                 (setf current-key (car entry))
+                 (cdr entry))))
+           (lambda (lrow)
+             (if (null current-key)
+                 (lambda () nil)
+                 (let ((key current-key))
+                   ;; Advance to the first right key >= KEY (left keys ascend).
+                   (loop while (and (< rpos (length rights))
+                                    (minusp (compare-join-keys (car (svref rights rpos)) key)))
+                         do (incf rpos))
+                   (let ((j rpos))
+                     (declare (type fixnum j))
+                     (lambda ()
+                       (loop
+                         (when (or (>= j (length rights))
+                                   (/= 0 (compare-join-keys (car (svref rights j)) key)))
+                           (return nil))
+                         (let ((r (cdr (svref rights j))))
+                           (incf j)
+                           (when (zerop (logand (incf probes) 4095)) (check-interrupts))
+                           (when (or (null residual)
+                                     (eq (funcall (the function residual) (concat-rows lrow r)) t))
+                             (return r)))))))))
+           right-width))))))
+
 ;;; ------------------------------------------------------------------
 ;;; Aggregation (semantics.md §5)
 

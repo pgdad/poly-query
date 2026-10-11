@@ -11,7 +11,11 @@
 (in-package #:polyquery)
 
 (defun optimize-logical-plan (node)
-  (prune-columns (push-down-predicates node)))
+  "Apply the logical rewrites; with `optimize: false` only column pruning,
+which the engine's evaluation guarantees rely on (see README)."
+  (if (exec-options-optimize *exec-options*)
+      (prune-columns (push-down-predicates node))
+      (prune-columns node)))
 
 ;;; ------------------------------------------------------------------
 ;;; Predicate pushdown

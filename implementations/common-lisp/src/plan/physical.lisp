@@ -15,6 +15,9 @@
 ;;;;                 residual; otherwise NestedLoopJoin. Inner hash joins
 ;;;;                 build on the input with the smaller estimated
 ;;;;                 cardinality, LEFT joins on the right input.
+;;;;                 The `join` option forces HashJoin, MergeJoin (sort-merge)
+;;;;                 or NestedLoopJoin for equi-joins; non-equi joins always
+;;;;                 use NestedLoopJoin.
 ;;;;   Aggregate  -> HashAggregate
 ;;;;   Distinct   -> HashDistinct
 ;;;;   Sort+Limit -> TopN when the limit is a small constant, else Sort, Limit
@@ -56,6 +59,12 @@
 (defstruct (pp-hash-join (:include pnode))
   kind
   (build :right)                         ; input hashed: :RIGHT or :LEFT (inner joins)
+  left-keys                              ; BEXPRs over the left row
+  right-keys                             ; BEXPRs over the right row
+  residual)                              ; BEXPR over left ++ right, or NIL
+
+(defstruct (pp-merge-join (:include pnode))
+  kind                                   ; :INNER or :LEFT
   left-keys                              ; BEXPRs over the left row
   right-keys                             ; BEXPRs over the right row
   residual)                              ; BEXPR over left ++ right, or NIL
@@ -224,6 +233,15 @@ enclosing correlated subquery (no correlation parameters anywhere)."
               (node-expressions node))
        (every #'plan-invariant-p (pnode-children node))))
 
+(defun choose-join-algorithm ()
+  "The algorithm for an equi-join: the forced `join` option, else a hash join
+(its cost is linear in both inputs; a merge join would have to sort both
+inputs, as no operator delivers sorted output)."
+  (ecase (exec-options-join *exec-options*)
+    ((:hash :auto) :hash)
+    (:merge :merge)
+    (:nested-loop :nested-loop)))
+
 (defun physical-join (node)
   (destructuring-bind (left right) (lnode-children node)
     (let ((kind (lp-join-kind node))
@@ -233,16 +251,21 @@ enclosing correlated subquery (no correlation parameters anywhere)."
       (plan-expression-subqueries (list condition))
       (multiple-value-bind (lkeys rkeys residual)
           (equi-join-keys condition (lnode-width left) (lnode-width node))
-        (if lkeys
-            (make-pp-hash-join :kind kind :children (list pleft pright) :columns (lnode-columns node)
-                               :build (if (and (eq kind :inner)
-                                               (< (estimate-rows left) (estimate-rows right)))
-                                          :left
-                                          :right)
-                               :left-keys lkeys :right-keys rkeys :residual (conjoin residual))
-            (make-pp-nested-loop-join :kind (if (and (null condition) (eq kind :inner)) :cross kind)
-                                      :children (list pleft pright)
-                                      :columns (lnode-columns node) :condition condition))))))
+        (case (and lkeys (choose-join-algorithm))
+          (:hash
+           (make-pp-hash-join :kind kind :children (list pleft pright) :columns (lnode-columns node)
+                              :build (if (and (eq kind :inner)
+                                              (< (estimate-rows left) (estimate-rows right)))
+                                         :left
+                                         :right)
+                              :left-keys lkeys :right-keys rkeys :residual (conjoin residual)))
+          (:merge
+           (make-pp-merge-join :kind kind :children (list pleft pright) :columns (lnode-columns node)
+                               :left-keys lkeys :right-keys rkeys :residual (conjoin residual)))
+          (t
+           (make-pp-nested-loop-join :kind (if (and (null condition) (eq kind :inner)) :cross kind)
+                                     :children (list pleft pright)
+                                     :columns (lnode-columns node) :condition condition)))))))
 
 ;;; ------------------------------------------------------------------
 ;;; EXPLAIN rendering (indexes-and-planning.md §4)
@@ -264,6 +287,8 @@ enclosing correlated subquery (no correlation parameters anywhere)."
     (pp-nested-loop-join (list (pp-nested-loop-join-condition node)))
     (pp-hash-join (append (pp-hash-join-left-keys node) (pp-hash-join-right-keys node)
                           (list (pp-hash-join-residual node))))
+    (pp-merge-join (append (pp-merge-join-left-keys node) (pp-merge-join-right-keys node)
+                           (list (pp-merge-join-residual node))))
     (pp-hash-aggregate (append (pp-hash-aggregate-group-by node) (pp-hash-aggregate-aggregates node)))
     (pp-lookup-scan (append (pp-lookup-scan-key-exprs node) (pp-lookup-scan-probe-exprs node)
                             (list (pp-lookup-scan-residual node))))
@@ -325,6 +350,10 @@ enclosing correlated subquery (no correlation parameters anywhere)."
                           "left_keys" (describe-all (pp-hash-join-left-keys node))
                           "right_keys" (describe-all (pp-hash-join-right-keys node))
                           "residual" (maybe (pp-hash-join-residual node))))
+      (pp-merge-join (list "op" "MergeJoin" "join_type" (join-type-name (pp-merge-join-kind node))
+                           "left_keys" (describe-all (pp-merge-join-left-keys node))
+                           "right_keys" (describe-all (pp-merge-join-right-keys node))
+                           "residual" (maybe (pp-merge-join-residual node))))
       (pp-hash-aggregate (list "op" "Aggregate" "strategy" "hash"
                                "group_by" (describe-all (pp-hash-aggregate-group-by node))
                                "aggregates" (describe-all (pp-hash-aggregate-aggregates node))))

@@ -40,3 +40,21 @@
 (defun row-footprint (width)
   "Approximate bytes held by one materialized row of WIDTH values."
   (* 8 (+ 2 width)))
+
+;;; ------------------------------------------------------------------
+;;; Execution options (protocol.md §5.2, phase-5.md)
+
+(defstruct exec-options
+  (mode :auto)                      ; :AUTO, :ROW or :VECTORIZED
+  (threads 1)                       ; worker threads for scans and aggregation
+  (join :auto)                      ; :AUTO, :HASH, :MERGE or :NESTED-LOOP
+  (optimize t)                      ; NIL disables the logical rewrites
+  (use-indexes t)                   ; NIL never plans index scans
+  (native nil))                     ; native kernels requested (none are loaded)
+
+(defvar *exec-options* (make-exec-options)
+  "Options of the statement being planned or compiled.")
+
+(defun vectorized-execution-p (&optional (options *exec-options*))
+  "True when the statement runs on the batch (vectorized) executor."
+  (not (eq (exec-options-mode options) :row)))
