@@ -364,7 +364,8 @@ also passes with `PQ_PAR_MIN=1`.
 * Parallel operators: full scans with pushed-down filters (honouring
   row-group skipping), WHERE, projection (with per-part top-N), hash-join
   probe (build is serial), nested-loop join, merge-join key evaluation,
-  aggregation. Aggregation without GROUP BY merges
+  aggregation, ORDER BY (each part sorts its range of (row, sequence)
+  pairs, then the sorted runs are merged pairwise in parallel rounds). Aggregation without GROUP BY merges
   per-part partial states in part order (exact for INT64 / DECIMAL).
   GROUP BY is **hash-partitioned**: phase 1 computes key cells and hashes in
   parallel; in phase 2 part p owns the groups whose hash falls into
@@ -529,9 +530,8 @@ the number of pairs).
 * Join reordering is not implemented: joins run in the order written (the
   hash join picks its build side by estimated cardinality). Merge joins sort
   both inputs (index order is not reused); the merge join's sort and merge,
-  hash builds, DISTINCT aggregates without GROUP BY, DISTINCT, derived
-  tables / CTEs and the final sort run single-threaded (top-N heaps are per
-  part).
+  hash builds, DISTINCT aggregates without GROUP BY, DISTINCT and the
+  materialisation of derived tables / CTEs run single-threaded.
 * Blocks whose expressions contain subqueries run their operators on one
   thread (subquery results are cached in the shared plan). The `native`
   option is accepted and ignored (`native.kernels` is not claimed).
