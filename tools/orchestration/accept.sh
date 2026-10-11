@@ -15,9 +15,11 @@ git add experiments/runs
 git commit -q -m "experiments: record $RUN ($outcome)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01SNVz4GnXkM5Wk9vgdbZLB2" || true
 if [[ $outcome != success ]]; then echo "accept: $RUN outcome=$outcome — not merged"; exit 3; fi
+task=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['task'])" "/srv/polyquery/runs/$RUN/manifest.json")
+# A debug-mutant fix is relative to a baseline with an injected defect that main never had: record only.
+if [[ $task == debug-mutant ]]; then echo "accept: $RUN recorded (debug-mutant runs are not merged)"; exit 0; fi
 "${PQ[@]}" import "$RUN" --merge | tail -n 1
 just test-language "$lang" -q 2>&1 | tail -n 6
-task=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['task'])" "/srv/polyquery/runs/$RUN/manifest.json")
 if [[ $task == native ]]; then
   tools/orchestration/sandboxed.sh make -C native-kernels all >/dev/null
   tools/orchestration/sandboxed.sh python3 tests/conformance/runner.py --engine "implementations/$lang/bin/polyquery" \
