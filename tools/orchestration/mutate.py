@@ -64,8 +64,16 @@ def candidates(lang: str, base: Path, rng: random.Random, n: int) -> list[tuple[
     return pool[:n]
 
 
+SANDBOX = ROOT / "tools/orchestration/sandbox.sh"
+
+
 def run(cmd: list[str], cwd: Path, timeout: int = 1800) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    """Engine code is AI-generated: build and test it only inside the sandbox (cwd = work tree)."""
+    cfg, scr = cwd / ".sbx-config", cwd / ".sbx-scratch"
+    cfg.mkdir(exist_ok=True)
+    scr.mkdir(exist_ok=True)
+    return subprocess.run([str(SANDBOX), str(cwd), str(cfg), str(scr), "--", *cmd], cwd=cwd, capture_output=True,
+                          text=True, timeout=timeout)
 
 
 def main() -> int:
@@ -79,7 +87,9 @@ def main() -> int:
     a = ap.parse_args()
     rng = random.Random(a.seed)
     src = ROOT / "implementations" / a.lang
-    work = Path(tempfile.mkdtemp(prefix=f"pqmut-{a.lang}-"))
+    base = Path("/srv/polyquery/mutants")
+    base.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix=f"pqmut-{a.lang}-", dir=base))
     shutil.copytree(ROOT / "tests", work / "tests")
     dst = work / "implementations" / a.lang
     shutil.copytree(src, dst, ignore=shutil.ignore_patterns("target", "build", ".cpcache", "__pycache__"))
@@ -93,7 +103,7 @@ def main() -> int:
         rel = f.relative_to(work)
         b = run(["make", "-C", str(dst), "build"], work)
         if b.returncode == 0:
-            r = run([sys.executable, "tests/conformance/runner.py", "--engine", str(dst / "bin/polyquery"),
+            r = run(["python3", "tests/conformance/runner.py", "--engine", str(dst / "bin/polyquery"),
                      *phase_args, "--report", str(work / "mut.json"), "-q"], work)
             rep_ = json.loads((work / "mut.json").read_text()) if (work / "mut.json").exists() else None
             failing = [f"{x['file']}:{c['line']}" for x in (rep_ or {}).get("files", []) for c in x["cases"]

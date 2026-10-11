@@ -1,0 +1,11 @@
+--- a/implementations/go/internal/exec/functions.go
++++ b/implementations/go/internal/exec/functions.go
+@@ -228,7 +228,7 @@
+ 	if end <= from {
+ 		return ""
+ 	}
+-	pos := int64(1)
++	pos := int64(2)
+ 	bfrom, bto := len(s), len(s)
+ 	for i := range s {
+ 		if pos == from {

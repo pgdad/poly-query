@@ -191,6 +191,19 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
     }
     task_md = render(template, values)
     (ws / "TASK.md").write_text(task_md)
+    defect_id = None
+    if task == "debug-mutant":
+        # Inject the pre-generated defect (tools/orchestration/mutate.py) before the baseline commit,
+        # so the workspace history contains no trace of the original line.
+        cands = sorted(p for p in (ROOT / "experiments/controlled/defects" / lang).glob("*/mutation.patch"))
+        want = os.environ.get("PQ_DEFECT")
+        cands = [p for p in cands if not want or p.parent.name == want]
+        if not cands:
+            raise SystemExit(f"no defect prepared for {lang} (run tools/orchestration/mutate.py --lang {lang})")
+        patch = cands[0]
+        defect_id = patch.parent.name
+        subprocess.run(["patch", "-p1", "-s", "-d", str(ws)], input=patch.read_bytes(), check=True)
+        shutil.copy(patch.parent / "DEFECT.md", ws / "DEFECT.md")
     (ws / ".gitignore").write_text("target/\nbuild/\nout/\n.cpcache/\n__pycache__/\n*.pyc\n*.fasl\n*.o\n*.so\n/datasets/generated/\n")
     env = {**os.environ, "GIT_AUTHOR_NAME": "PolyQuery Orchestrator", "GIT_AUTHOR_EMAIL": "orchestrator@polyquery.invalid",
            "GIT_COMMITTER_NAME": "PolyQuery Orchestrator", "GIT_COMMITTER_EMAIL": "orchestrator@polyquery.invalid"}
@@ -216,6 +229,7 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
         "agent_harness": None, "limits": {}, "status": "prepared",
         "host": {"hostname": os.uname().nodename, "tools": tool_versions()},
         # Capability set of the accepted engine this run starts from (refactoring must keep it).
+        "defect_id": defect_id,
         "baseline_capabilities": ((load_json_file(ROOT / "results/correctness" / f"{lang}.json") or {})
                                   .get("engine") or {}).get("capability_set"),
     }

@@ -1,0 +1,11 @@
+{
+ "language": "go",
+ "seed": 1,
+ "operator": "int_off_by_one",
+ "file": "implementations/go/internal/exec/functions.go",
+ "line": 231,
+ "failing_cases": [
+  "cases/phase2/functions.pqt:57",
+  "cases/phase2/joins.pqt:131"
+ ]
+}

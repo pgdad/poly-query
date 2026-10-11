@@ -66,8 +66,8 @@
     "title": "Debugging — injected defect",
     "phase_file": "phase-1.md",
     "runner_args": "",
-    "goal": "A defect has been introduced into the engine in `implementations/{{LANG_DIR}}/` (a single small source change). The following conformance cases now fail: see `DEFECT.md` in the workspace root. Find and fix the root cause with a minimal change. Do not rewrite unrelated code.",
-    "done": "All conformance cases pass again with a minimal diff; your summary names the root cause and location. All public conformance phases the engine previously passed still pass (`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery`), plus the task-specific criteria above; `make build test` succeed; all work is committed."
+    "goal": "A defect has been introduced into your accepted engine in `implementations/{{LANG_DIR}}/` (a single small source change). `DEFECT.md` in the workspace root lists the conformance cases that now fail. Find the root cause and fix it with a minimal change; do not rewrite unrelated code.",
+    "done": "All conformance suites pass again: `python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery`, the same with `--modes` and `--transport http`; the capability set is unchanged; the diff is minimal; `make build test` succeed; your final summary names the root cause (file, line, what was wrong); all work is committed."
   },
   "optimize-latency": {
     "title": "Optimization — benchmark latency",
