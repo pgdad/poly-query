@@ -147,9 +147,13 @@ class QueryGen:
             col = self.pick(["a", "big", "dec", "id"] if fn in ("SUM", "AVG") else [c for c, _ in SCHEMA])
             aggs.append(f"{fn}({self.pick(['', '', '', 'DISTINCT '])}{col})")
         where = f" WHERE {self.where()}" if self.rng.random() < 0.75 else ""
-        if r < 0.75:
+        if r < 0.6:
             return f"SELECT {', '.join(aggs)} FROM {table}{where}"
-        key = self.pick(["s", "a", "bo", "d", "s, bo", "a % 3"])
+        key = self.pick(["s", "a", "bo", "d", "s, bo", "a % 3", "u", "id", "big", "dec, s", "ts"])
+        if self.rng.random() < 0.5:  # only COUNT / SUM / AVG (the kernels' group sums)
+            aggs = [self.pick(["COUNT(*)", "COUNT({c})", "SUM({n})", "AVG({n})"]).format(
+                c=self.pick([c for c, _ in SCHEMA]), n=self.pick(["a", "big", "dec", "id"]))
+                for _ in range(self.rng.randint(1, 4))]
         return f"SELECT {key}, {', '.join(aggs)} FROM {table}{where} GROUP BY {key}"
 
 

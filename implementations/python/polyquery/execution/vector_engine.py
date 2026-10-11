@@ -543,9 +543,14 @@ def _update_sorted(ids: list[int], vectors: list, states: list[GroupState]) -> N
 
 def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Batches:
     native = native_ops.native_scan_aggregate(node, ctx)
+    partials = None
     if native is not None:  # aggregates computed by the kernels from the column storage
-        partials = partition_batches(node.input, ctx, lambda batches: native.partition(ctx))
-    else:
+        try:
+            # serially: the kernels leave too little work for worker processes
+            partials = [native.partition(ctx)]
+        except native_ops.NativeFallback:
+            pass
+    if partials is None:
         partials = partition_batches(node.input, ctx, lambda batches: _aggregate_partition(node, ctx, batches))
     keys, states = merge_partials(partials)
     n = len(keys)

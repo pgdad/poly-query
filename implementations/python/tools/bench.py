@@ -4,9 +4,12 @@ option sets.
 
     python3 tools/bench.py --data /tmp/pqdata/1m [--repeat 3] [--only Q2,Q4]
         [--variant row] [--variant '{"mode":"vectorized","threads":4}'] [--engine bin/polyquery]
+        [--native-kernels libpqkernels.so --variant native --variant row-native] [--check]
 
 Each query is run ``--repeat`` times per variant (``result: count``, so
 serialization does not dominate); the median wall time is reported in ms.
+``--check`` first runs every query once per variant with ``result: rows``
+and fails unless all variants return the same rows (as a multiset).
 """
 
 from __future__ import annotations
@@ -65,13 +68,16 @@ PRESETS = {
     "vec4": {"mode": "vectorized", "threads": 4},
     "row4": {"mode": "row", "threads": 4},
     "noopt": {"optimize": False},
+    "native": {"mode": "vectorized", "native": True},
+    "row-native": {"mode": "row", "native": True},
+    "vec4-native": {"mode": "vectorized", "threads": 4, "native": True},
 }
 
 
 class Session:
-    def __init__(self, data_dir: str, launcher: str):
+    def __init__(self, data_dir: str, launcher: str, extra_args: list[str]):
         self.proc = subprocess.Popen(
-            [launcher, "session", "--data-dir", data_dir],
+            [launcher, "session", "--data-dir", data_dir, *extra_args],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
@@ -103,10 +109,13 @@ def main() -> int:
     ap.add_argument("--variant", action="append")
     ap.add_argument("--tables", help="comma-separated subset of tables to load")
     ap.add_argument("--engine", default=str(LAUNCHER), help="launcher to benchmark (default: this engine)")
+    ap.add_argument("--native-kernels", help="libpqkernels to load (for variants with native: true)")
+    ap.add_argument("--check", action="store_true", help="verify that all variants return the same rows")
     args = ap.parse_args()
 
     data = Path(args.data)
-    session = Session(str(data), args.engine)
+    extra = ["--native-kernels", str(Path(args.native_kernels).resolve())] if args.native_kernels else []
+    session = Session(str(data), args.engine, extra)
     wanted = set(args.tables.split(",")) if args.tables else set(TABLES)
     for name, base in TABLES.items():
         if name not in wanted:
@@ -118,6 +127,17 @@ def main() -> int:
 
     variants = args.variant or ["row", "vectorized", "vec4"]
     queries = {k: v for k, v in QUERIES.items() if not args.only or k in args.only.split(",")}
+    if args.check:
+        for qname, sql in queries.items():
+            results = []
+            for variant in variants:
+                options = PRESETS[variant] if variant in PRESETS else json.loads(variant)
+                rows = session.request({"op": "query", "sql": sql, "options": options})["rows"]
+                results.append(sorted(json.dumps(r) for r in rows))
+            same = all(r == results[0] for r in results)
+            print(f"check {qname}: {len(results[0])} rows, {'identical' if same else 'DIFFERENT'}", file=sys.stderr)
+            if not same:
+                return 1
     print("query | " + " | ".join(variants))
     for qname, sql in queries.items():
         cells = []

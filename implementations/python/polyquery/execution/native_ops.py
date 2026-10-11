@@ -68,6 +68,8 @@ WINDOW_ROWS = 65536
 # codes form at most this many ranges (else in Python from the codes)
 MAX_CODE_RANGES = 32
 MAX_IN_ITEMS = 64
+# GROUP BY over a scan: at most this many groups (dictionary entries)
+MAX_GROUP_CODES = 64
 
 INT64_MIN, INT64_MAX = nk.INT64_MIN, nk.INT64_MAX
 _INT_KINDS = frozenset({TypeKind.INT64, TypeKind.DECIMAL, TypeKind.DATE, TypeKind.TIMESTAMP})
@@ -401,9 +403,7 @@ def selected_positions(kernels: NativeKernels, bits: array.array, n: int, count:
     return idx
 
 
-def gather_column(
-    kernels: NativeKernels, window: Window, vector: ColumnVector, idx: array.array, positions: list[int] | None
-) -> list[Any]:
+def gather_column(kernels: NativeKernels, window: Window, vector: ColumnVector, idx: array.array) -> list[Any]:
     """The runtime values of the selected rows of one column."""
     base, k = window.base, len(idx)
     if isinstance(vector, DictVector) or (
@@ -419,8 +419,7 @@ def gather_column(
             values = list(map(vector.dictionary.__getitem__, values))
     else:
         assert isinstance(vector, PlainVector)
-        if positions is None:
-            positions = idx.tolist()
+        positions = idx.tolist()
         chunk = vector.data[base : base + window.n]
         values = [chunk[i] for i in positions] if len(positions) < 2 else list(operator.itemgetter(*positions)(chunk))
         if vector.dtype.kind is TypeKind.BOOLEAN:
@@ -463,14 +462,27 @@ def filtered_batches(
                 cols = [group.vector(i).to_list(lo, hi) for i in scan.columns]
             else:
                 idx = selected_positions(kernels, bits, window.n, count)
-                positions = idx.tolist()
-                cols = [gather_column(kernels, window, group.vector(i), idx, positions) for i in scan.columns]
+                cols = [gather_column(kernels, window, group.vector(i), idx) for i in scan.columns]
             if count <= batch_rows:
                 yield cols, count
             else:
                 for lo in range(0, count, batch_rows):
                     yield [c[lo : lo + batch_rows] for c in cols], min(batch_rows, count - lo)
         ctx.check()
+
+
+def python_rows(gather: pp.Gather, ctx: ExecutionContext) -> float:
+    """Estimated number of rows a parallel pipeline turns into Python values
+    (which is what worker processes can speed up): the rows of its driving
+    scan, or only those selected by the kernels if the scan is filtered
+    natively."""
+    rows = gather.driver.estimated_rows
+    path = pp.pipeline_path(gather.input)
+    if ctx.native is not None and path and len(path) >= 2:
+        parent = path[-2]
+        if isinstance(parent, pp.Filter) and native_filter(parent, ctx) is not None:
+            rows = parent.estimated_rows
+    return rows
 
 
 def native_filter(node: pp.Filter, ctx: ExecutionContext) -> NativeFilter | None:
@@ -493,21 +505,33 @@ class _AggSpec:
 
 @dataclass(eq=False)
 class NativeScanAggregate:
+    """An aggregation directly over a (natively filtered) TableScan, without
+    GROUP BY or grouped by one low-cardinality STRING column. Each window's
+    groups are bitmaps (the selection, ANDed for a key with the rows of each
+    dictionary code), and every aggregate of a group is one kernel call
+    over the column storage with that bitmap as validity."""
+
     scan: pp.TableScan
     filter: NativeFilter | None
     specs: list[_AggSpec]
+    key: int | None  # table column of the GROUP BY key
+    width: int  # output width (memory accounting of new groups)
 
     def partition(self, ctx: ExecutionContext) -> tuple[list[Any], list[GroupState]]:
-        """The partial aggregation state of the scan range of the current
-        partition (same form as the vectorized engine's partials)."""
+        """The partial aggregation of the scan range of the current partition,
+        in the vectorized engine's form: group keys in first-seen order and
+        the columnar state of every aggregate."""
         kernels = ctx.native
         assert kernels is not None
         scan = self.scan
         table = scan.table
         assert isinstance(table, ColumnTable)
         states = [make_state(spec.call) for spec in self.specs]
-        for state in states:
-            state.grow(1)
+        index: dict[Any, int] = {}  # group key -> dense group id
+        if self.key is None:
+            index[()] = 0
+            for state in states:
+                state.grow(1)
         skip = scan.skip
         keep = (lambda group: group_may_match(group, skip)) if skip else None
         start, stop = scan_range(scan, ctx, table.row_count)
@@ -519,72 +543,171 @@ class NativeScanAggregate:
                 sel = window.all_rows()
                 count = kernels.popcount(sel.buffer_info()[0], window.n)
             if count:
-                for spec, state in zip(self.specs, states):
-                    _accumulate(kernels, window, sel, count, spec, state)
+                if self.key is None:
+                    groups = [(0, sel, count)]
+                else:
+                    groups = self._groups(kernels, window, sel, count, index, states, ctx)
+                for gid, bits, n in groups:
+                    for spec, state in zip(self.specs, states):
+                        _accumulate(kernels, window, bits, n, spec, state, gid)
             ctx.check()
-        return [()], states
+        return list(index), states
+
+    def _groups(
+        self,
+        kernels: NativeKernels,
+        window: Window,
+        sel: array.array,
+        count: int,
+        index: dict[Any, int],
+        states: list[GroupState],
+        ctx: ExecutionContext,
+    ) -> list[tuple[int, array.array, int]]:
+        """(group id, row bitmap, row count) of the window's groups, new
+        groups registered in the order of their first row."""
+        assert self.key is not None
+        vector = window.group.vector(self.key)
+        if not isinstance(vector, DictVector) or len(vector.dictionary) > MAX_GROUP_CODES:
+            self._update_rows(kernels, window, sel, count, vector, index, states, ctx)
+            return []
+        codes = address(vector.int64_view(), window.base)
+        validity = window.validity(vector)
+        sel_addr = sel.buffer_info()[0]
+        found: list[tuple[int, Any, array.array, int]] = []
+        for code, value in enumerate(vector.dictionary):
+            bits = new_bitmap(window.n)
+            if kernels.filter_bitmap(codes, validity, window.n, nk.EQ, code, 0, bits):
+                kernels.bitmap_and(bits, sel_addr, window.nbytes)
+                n = kernels.popcount(bits.buffer_info()[0], window.n)
+                if n:
+                    found.append((_first_bit(bits), value, bits, n))
+        if validity is not None:  # NULL keys form one group
+            bits = array.array("B", sel)
+            kernels.bitmap_andnot(bits, validity, window.nbytes)
+            n = kernels.popcount(bits.buffer_info()[0], window.n)
+            if n:
+                found.append((_first_bit(bits), None, bits, n))
+        found.sort(key=operator.itemgetter(0))
+        out = []
+        for _, value, bits, n in found:
+            out.append((_group_id(value, index, states, ctx, self.width), bits, n))
+        return out
+
+    def _update_rows(
+        self,
+        kernels: NativeKernels,
+        window: Window,
+        sel: array.array,
+        count: int,
+        key_vector: ColumnVector,
+        index: dict[Any, int],
+        states: list[GroupState],
+        ctx: ExecutionContext,
+    ) -> None:
+        """A window whose key is not a small dictionary: the selected rows are
+        gathered and fed to the states row by row."""
+        idx = selected_positions(kernels, sel, window.n, count)
+        keys = gather_column(kernels, window, key_vector, idx)
+        for key in dict.fromkeys(keys):
+            if key not in index:
+                _group_id(key, index, states, ctx, self.width)
+        ids = list(map(index.__getitem__, keys))
+        group = window.group
+        for spec, state in zip(self.specs, states):
+            if spec.column is None:
+                state.update_rows(ids, None)
+            else:
+                state.update_rows(ids, gather_column(kernels, window, group.vector(spec.column), idx))
+
+
+def _group_id(key: Any, index: dict[Any, int], states: list[GroupState], ctx: ExecutionContext, width: int) -> int:
+    gid = index.get(key)
+    if gid is None:
+        gid = index[key] = len(index)
+        for state in states:
+            state.grow(1)
+        ctx.reserve_rows(1, width)
+    return gid
+
+
+def _first_bit(bits: array.array) -> int:
+    raw = bits.tobytes()
+    byte = len(raw) - len(raw.lstrip(b"\x00"))
+    value = raw[byte]
+    return byte * 8 + (value & -value).bit_length() - 1
 
 
 def _accumulate(
-    kernels: NativeKernels, window: Window, sel: array.array, count: int, spec: _AggSpec, state: GroupState
+    kernels: NativeKernels,
+    window: Window,
+    bits: array.array,
+    count: int,
+    spec: _AggSpec,
+    state: GroupState,
+    gid: int,
 ) -> None:
+    """Adds the rows set in ``bits`` to group ``gid`` of one aggregate."""
     if spec.column is None:
         assert isinstance(state, CountStarState)
-        state.counts[0] += count
+        state.counts[gid] += count
         return
     vector = window.group.vector(spec.column)
     validity = window.validity(vector)
-    rows = sel
+    rows = bits
     if validity is not None:  # selected and non-NULL
-        rows = array.array("B", sel)
+        rows = array.array("B", bits)
         kernels.bitmap_and(rows, validity, window.nbytes)
         count = kernels.popcount(rows.buffer_info()[0], window.n)
         if not count:
             return
-    if isinstance(state, CountState):
-        state.counts[0] += count
+    kind = type(state)
+    if kind is CountState:
+        state.counts[gid] += count  # type: ignore[attr-defined]
         return
     rows_addr = rows.buffer_info()[0]
-    if isinstance(state, SumState):
-        data = vector.int64_view()
-        assert data is not None
+    data = None if isinstance(vector, DictVector) else vector.int64_view()
+    if kind is SumState and data is not None:
+        assert isinstance(state, SumState)
         total = kernels.sum_i64(address(data, window.base), rows_addr, window.n)
         if total is None:  # outside int64: recompute exactly
             total = sum(_selected_values(kernels, window, vector, rows, count))
-        state.totals[0] += total
-        state.counts[0] += count
+        state.totals[gid] += total
+        state.counts[gid] += count
         return
-    assert isinstance(state, MinMaxState)
-    if vector.dtype.kind is TypeKind.FLOAT64:
-        assert isinstance(vector, PlainVector)
-        _, lo, hi = kernels.minmax_f64(address(vector.data, window.base), rows_addr, window.n)
-        value = lo if state.is_min else hi
-        if value == 0.0:  # 0.0 vs -0.0: the first one seen wins
-            values = _selected_values(kernels, window, vector, rows, count)
-            value = min(values) if state.is_min else max(values)
-    else:
-        data = vector.int64_view()
-        assert data is not None
-        _, lo, hi = kernels.minmax_i64(address(data, window.base), rows_addr, window.n)
-        value = lo if state.is_min else hi
-    state._offer(0, value)
+    if kind is MinMaxState:
+        assert isinstance(state, MinMaxState)
+        if isinstance(vector, PlainVector) and vector.dtype.kind is TypeKind.FLOAT64:
+            _, lo, hi = kernels.minmax_f64(address(vector.data, window.base), rows_addr, window.n)
+            value = lo if state.is_min else hi
+            if value != 0.0:  # (0.0 vs -0.0: the first one seen wins, see below)
+                state._offer(gid, value)
+                return
+        elif data is not None:
+            _, lo, hi = kernels.minmax_i64(address(data, window.base), rows_addr, window.n)
+            state._offer(gid, lo if state.is_min else hi)
+            return
+    # any other aggregate: the state's own update over the selected values
+    values = _selected_values(kernels, window, vector, rows, count)
+    state.update_runs([(gid, 0, len(values))], values)
 
 
 def _selected_values(
     kernels: NativeKernels, window: Window, vector: ColumnVector, rows: array.array, count: int
 ) -> list[Any]:
-    """The values of the (non-NULL) rows set in ``rows``."""
+    """The values of the rows set in ``rows``."""
     idx = selected_positions(kernels, rows, window.n, count)
-    return gather_column(kernels, window, vector, idx, None)
+    return gather_column(kernels, window, vector, idx)
 
 
 _SUM_KINDS = frozenset({TypeKind.INT64, TypeKind.DECIMAL})
-_MINMAX_KINDS = _INT_KINDS | {TypeKind.FLOAT64}
 
 
-def compile_scan_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> NativeScanAggregate | None:
-    if node.keys:
-        return None
+def compile_scan_aggregate(
+    node: pp.HashAggregate, ctx: ExecutionContext
+) -> NativeScanAggregate | NativeHashScanAggregate | None:
+    """The native plan of an aggregation whose input is a (natively
+    filtered, possibly partitioned) TableScan of a column table and whose
+    keys and arguments are columns of that scan."""
     source = node.input.input if isinstance(node.input, pp.Gather) else node.input
     native: NativeFilter | None = None
     if isinstance(source, pp.Filter):
@@ -596,24 +719,156 @@ def compile_scan_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Nat
         scan = source
     if not isinstance(scan, pp.TableScan) or not isinstance(scan.table, ColumnTable):
         return None
+
+    def column_of(expr: b.Expr) -> int | None:
+        if isinstance(expr, b.ColumnRef) and expr.rel == scan.rel:  # type: ignore[union-attr]
+            return expr.index
+        return None
+
+    keys = [column_of(k) for k in node.keys]
     specs: list[_AggSpec] = []
     for call in node.aggregates:
-        if call.arg is None:
-            specs.append(_AggSpec(call, None))
-            continue
-        arg = call.arg
-        if call.distinct or not isinstance(arg, b.ColumnRef) or arg.rel != scan.rel:
+        column = None if call.arg is None else column_of(call.arg)
+        if call.arg is not None and column is None:
             return None
-        kind = scan.table.columns[arg.index].type.kind
-        if call.name in ("SUM", "AVG") and kind not in _SUM_KINDS:
+        specs.append(_AggSpec(call, column))
+    if None in keys:
+        return None
+    columns = scan.table.columns
+    if not keys:
+        return NativeScanAggregate(scan, native, specs, None, len(node.layout))
+    if len(keys) == 1 and columns[keys[0]].type.kind is TypeKind.STRING and node.estimated_rows <= MAX_GROUP_CODES:
+        return NativeScanAggregate(scan, native, specs, keys[0], len(node.layout))
+    for spec in specs:
+        call = spec.call
+        if call.distinct or call.name not in ("COUNT", "SUM", "AVG"):
             return None
-        if call.name in ("MIN", "MAX") and kind not in _MINMAX_KINDS:
+        if call.name != "COUNT" and columns[spec.column].type.kind not in _SUM_KINDS:  # type: ignore[index]
             return None
-        specs.append(_AggSpec(call, arg.index))
-    return NativeScanAggregate(scan, native, specs)
+    return NativeHashScanAggregate(scan, native, specs, keys, len(node.layout))  # type: ignore[arg-type]
 
 
-def native_scan_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> NativeScanAggregate | None:
+class NativeFallback(Exception):
+    """A native path cannot finish exactly (a kernel reported a possible
+    int64 wrap-around); the caller reruns the operator with its own code."""
+
+
+@dataclass(eq=False)
+class NativeHashScanAggregate:
+    """GROUP BY columns of a (natively filtered) TableScan with COUNT and
+    integer SUM / AVG aggregates of its columns, for any number of groups.
+    The engine maps each window's keys to dense group ids (dict lookups);
+    ``pqk_group_sum_i64`` then adds the value columns into int64 sums and
+    counts, reading them directly from the column storage when the whole
+    window is selected (else from natively gathered values). If the kernel
+    reports a possible wrap-around, :class:`NativeFallback` is raised and
+    the aggregation runs again in the engine's exact Python arithmetic."""
+
+    scan: pp.TableScan
+    filter: NativeFilter | None
+    specs: list[_AggSpec]
+    keys: list[int]  # table columns of the GROUP BY keys
+    width: int
+
+    def partition(self, ctx: ExecutionContext) -> tuple[list[Any], list[GroupState]]:
+        kernels = ctx.native
+        assert kernels is not None
+        scan = self.scan
+        table = scan.table
+        assert isinstance(table, ColumnTable)
+        index: dict[Any, int] = {}
+        sums = [array.array("q") for _ in self.specs]
+        counts = [array.array("q") for _ in self.specs]
+        reserved = ctx.memory_used
+        skip = scan.skip
+        keep = (lambda group: group_may_match(group, skip)) if skip else None
+        start, stop = scan_range(scan, ctx, table.row_count)
+        ctx.check()
+        try:
+            for window in windows(table, keep, start, stop):
+                if self.filter is not None:
+                    sel, count = self.filter.select(kernels, window)
+                else:
+                    sel = window.all_rows()
+                    count = window.n - window.first
+                if count:
+                    self._window(kernels, window, sel, count, index, sums, counts, ctx)
+                ctx.check()
+        except NativeFallback:
+            ctx.memory_used = reserved  # the engine's own path accounts again
+            raise
+        states = [make_state(spec.call) for spec in self.specs]
+        for state, total, count_ in zip(states, sums, counts):
+            state.counts = count_.tolist()  # type: ignore[attr-defined]
+            if isinstance(state, SumState):
+                state.totals = total.tolist()
+        return list(index), states
+
+    def _window(
+        self,
+        kernels: NativeKernels,
+        window: Window,
+        sel: array.array,
+        count: int,
+        index: dict[Any, int],
+        sums: list[array.array],
+        counts: list[array.array],
+        ctx: ExecutionContext,
+    ) -> None:
+        group = window.group
+        whole = count == window.n  # every row of the window: no gathering
+        idx = None if whole else selected_positions(kernels, sel, window.n, count)
+        lo, hi = window.base, window.base + window.n
+        key_cols = [
+            group.vector(k).to_list(lo, hi) if idx is None else gather_column(kernels, window, group.vector(k), idx)
+            for k in self.keys
+        ]
+        keys = key_cols[0] if len(key_cols) == 1 else list(zip(*key_cols))
+        missing = list(itertools.filterfalse(index.__contains__, dict.fromkeys(keys)))
+        if missing:
+            first = len(index)
+            index.update(zip(missing, range(first, first + len(missing))))
+            zeros = bytes(8 * len(missing))
+            for arr in itertools.chain(sums, counts):
+                arr.frombytes(zeros)
+            ctx.reserve_rows(len(missing), self.width)
+        ids = array.array("I", map(index.__getitem__, keys))
+        ngroups = len(index)
+        zero = _zero_data(count)
+        for spec, total, count_ in zip(self.specs, sums, counts):
+            values: int = zero
+            validity: int | None = None
+            gathered = valid_bits = None  # (kept alive until the kernel call)
+            if spec.column is not None:
+                vector = group.vector(spec.column)
+                data = None if spec.call.name == "COUNT" else vector.int64_view()
+                if idx is None:
+                    validity = window.validity(vector)
+                    if data is not None:
+                        values = address(data, window.base)  # type: ignore[assignment]
+                else:
+                    if vector.validity is not None:
+                        valid_bits = _gathered_validity(window, vector, idx)
+                        validity = valid_bits.buffer_info()[0]
+                    if data is not None:
+                        gathered = array.array("q", bytes(8 * count))
+                        kernels.gather(address(data, window.base), idx, count, gathered)
+                        values = gathered.buffer_info()[0]
+            if not kernels.group_sum_i64(ids, values, validity, count, total, count_, ngroups):
+                raise NativeFallback()
+
+
+def _gathered_validity(window: Window, vector: ColumnVector, idx: array.array) -> array.array:
+    """The validity bitmap of the gathered rows ``idx``."""
+    assert vector.validity is not None
+    start = window.base >> 3
+    flags = bits_to_flags(vector.validity[start : start + window.nbytes], window.n)
+    return array.array("B", flags_to_bits(bytes(map(flags.__getitem__, idx))))
+
+
+def native_scan_aggregate(
+    node: pp.HashAggregate, ctx: ExecutionContext
+) -> NativeScanAggregate | NativeHashScanAggregate | None:
     if ctx.native is None:
         return None
     plan = ctx.cached(node, "native:aggregate", lambda: compile_scan_aggregate(node, ctx) or False)
@@ -672,10 +927,10 @@ class NativeGroupSums:
             counts = array.array("q", bytes(8 * ngroups))
             if values is None:
                 sums = array.array("q", bytes(8 * ngroups))
-                self.kernels.group_sum_i64(ids, _zero_values(n), None, n, sums, counts, ngroups)
+                self.kernels.group_sum_i64(ids, _zero_data(n), None, n, sums, counts, ngroups)
             else:
                 sums = array.array("q", bytes(8 * ngroups))
-                if not self.kernels.group_sum_i64(ids, values, None, n, sums, counts, ngroups):
+                if not self.kernels.group_sum_i64(ids, values.buffer_info()[0], None, n, sums, counts, ngroups):
                     sums = _exact_group_sums(ids, values, ngroups)  # possible wrap-around
             state.counts[:] = map(operator.add, state.counts, counts)  # type: ignore[attr-defined]
             if isinstance(state, SumState):
@@ -684,10 +939,6 @@ class NativeGroupSums:
             if values is not None:
                 del values[:]
         self.pending = 0
-
-
-def _zero_values(n: int) -> array.array:
-    return array.array("q", bytes(8 * n))
 
 
 def _exact_group_sums(ids: array.array, values: array.array, ngroups: int) -> list[int]:

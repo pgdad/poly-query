@@ -25,6 +25,7 @@ from typing import Any, Callable, Iterator
 
 from .. import errors
 from ..planner import physical as pp
+from . import native_ops
 from .context import ExecutionContext
 
 # forking a process that also runs threads (HTTP server) is safe here: the
@@ -37,7 +38,7 @@ _POLL_SECONDS = 0.05
 def use_processes(gather: pp.Gather, ctx: ExecutionContext) -> bool:
     if ctx.in_worker or not hasattr(os, "fork"):
         return False
-    return gather.driver.estimated_rows >= ctx.parallel_min_rows
+    return native_ops.python_rows(gather, ctx) >= ctx.parallel_min_rows
 
 
 def run_partitions(gather: pp.Gather, ctx: ExecutionContext, task: Callable[[], Any]) -> list[Any]:

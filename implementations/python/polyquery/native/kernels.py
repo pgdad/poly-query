@@ -184,20 +184,21 @@ class NativeKernels:
     def group_sum_i64(
         self,
         group_ids: array.array,
-        values: array.array,
+        values: int,
         validity: int | None,
         n: int,
         sums: array.array,
         counts: array.array | None,
         ngroups: int,
     ) -> bool:
-        """Accumulates ``values`` (``array('q')``) into ``sums`` / ``counts``
-        (``array('q')`` of ``ngroups``) by ``group_ids`` (``array('I')``).
+        """Accumulates ``n`` int64 ``values`` (an address) into ``sums`` /
+        ``counts`` (``array('q')`` of ``ngroups``) by ``group_ids``
+        (``array('I')``), skipping rows not set in ``validity``.
         Returns False when the kernel reports a possible int64 wrap-around
         (PQK_OVERFLOW): the sums are then not exact and must be recomputed."""
         status = self._group_sum(
             group_ids.buffer_info()[0],
-            values.buffer_info()[0],
+            values,
             validity,
             n,
             sums.buffer_info()[0],
