@@ -348,14 +348,23 @@ Many groups are merged in parallel, one thread per hash partition."
       (t
        ;; Partition p collects the groups whose hash is p modulo the number
        ;; of partitions, from every partial state.
-       (let ((parts (coerce (loop repeat workers collect (funcall new-state)) 'simple-vector)))
+       (let ((parts (coerce (loop repeat workers collect (funcall new-state)) 'simple-vector))
+             (partitioned (make-array workers)))
+         ;; Each partial state's groups split by partition (in parallel) ...
+         (run-in-threads
+          (loop for w below workers
+                collect (let ((w w))
+                          (lambda ()
+                            (setf (svref partitioned w)
+                                  (group-state-partitions (svref states w) workers))))))
+         ;; ... then each partition merges its groups of every partial state.
          (run-in-threads
           (loop for p below workers
                 collect (let ((p p))
                           (lambda ()
                             (loop for w below workers
                                   do (group-state-merge (svref parts p) (svref states w)
-                                                        p workers))))))
+                                                        (svref (svref partitioned w) p)))))))
          (check-interrupts)
          (ordered-group-batches parts node))))))
 

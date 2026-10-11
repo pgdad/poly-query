@@ -335,21 +335,39 @@ the input position of the first row (when positions are tracked)."
             do (agg-reserve s groups)
                (agg-update s gids v n)))))
 
-(defun group-state-merge (gs other &optional (partition 0) (partitions 1))
-  "Merge the partial group state OTHER into GS; with PARTITIONS > 1 only the
-groups whose key hash falls into PARTITION."
+(defun group-state-partitions (gs partitions)
+  "Vector of PARTITIONS index vectors: the group ids of GS whose key hash is
+the partition number modulo PARTITIONS."
+  (let* ((count (group-state-count gs))
+         (table (group-state-table gs))
+         (parts (make-array count :element-type 'fixnum))
+         (sizes (make-array partitions :element-type 'fixnum :initial-element 0)))
+    (dotimes (g count)
+      (let ((p (mod (key-table-group-hash table g) partitions)))
+        (setf (aref parts g) p)
+        (incf (aref sizes p))))
+    (let ((out (map 'simple-vector #'make-index-vector sizes)))
+      (fill sizes 0)
+      (dotimes (g count out)
+        (let ((p (aref parts g)))
+          (setf (aref (the index-vector (svref out p)) (aref sizes p)) g)
+          (incf (aref sizes p)))))))
+
+(defun group-state-merge (gs other &optional only)
+  "Merge the partial group state OTHER into GS; when ONLY (an index vector of
+OTHER's group ids) is given, just those groups."
   (let* ((count (group-state-count other))
          (mapping (make-index-vector count))
          (table (group-state-table gs))
          (other-table (group-state-table other)))
-    (if table
-        (dotimes (g count)
-          (setf (aref mapping g)
-                (if (or (= partitions 1)
-                        (= partition (mod (key-table-group-hash other-table g) partitions)))
-                    (key-table-intern-group table other-table g)
-                    -1)))
-        (fill mapping 0))
+    (cond ((null table) (fill mapping 0))
+          (only
+           (fill mapping -1)
+           (loop for g across (the index-vector only)
+                 do (setf (aref mapping g) (key-table-intern-group table other-table g))))
+          (t
+           (dotimes (g count)
+             (setf (aref mapping g) (key-table-intern-group table other-table g)))))
     (when (and (group-state-positions gs) (group-state-positions other))
       (group-state-reserve-positions gs (group-state-count gs))
       (let ((positions (group-state-positions gs))
