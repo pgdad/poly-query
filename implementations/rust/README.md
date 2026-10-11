@@ -373,7 +373,9 @@ carries `"execution": {"mode": …, "threads": …}`.
   the column chunks (row-layout tables are transposed per batch).
 * **Expression kernels** (`eval.rs`): comparisons, arithmetic (with the
   exact overflow / division-by-zero semantics), `AND`/`OR`/`NOT`,
-  `IS NULL`, `BETWEEN`, constant `IN` lists (hash set) and `LIKE` run as
+  `IS NULL`, `BETWEEN`, constant `IN` lists (hash set), `LIKE`, numeric and
+  temporal `CAST`s, unary minus, `ABS`, `YEAR`…`SECOND` and `DATE_TRUNC`
+  (sharing helpers with the row evaluator) run as
   monomorphized loops over slices (one closure type per operator, so the
   compiler emits branch-free, auto-vectorized SIMD code; overflow checks
   accumulate flags instead of branching). Comparisons and `LIKE`/`IN` on a
