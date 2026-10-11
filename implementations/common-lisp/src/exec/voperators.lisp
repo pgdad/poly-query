@@ -405,15 +405,25 @@ normalizing values of the key expression for comparison with the other side
                          vec)))
      null-rows)))
 
-(defun concatenate-batches (batches kinds)
-  "One BATCH holding the rows of BATCHES in order."
-  (let ((total (reduce #'+ batches :key #'batch-count)))
-    (make-batch total
-                (let ((columns (make-array (length kinds))))
-                  (dotimes (k (length kinds) columns)
-                    (setf (svref columns k)
-                          (vec-concatenate (mapcar (lambda (b) (svref (batch-columns b) k)) batches)
-                                           (svref kinds k) total)))))))
+(defun concatenate-batches (batches kinds &optional (threads 1))
+  "One BATCH holding the rows of BATCHES in order (the columns of many rows
+concatenated by up to THREADS threads)."
+  (let* ((total (reduce #'+ batches :key #'batch-count))
+         (width (length kinds))
+         (columns (make-array width)))
+    (flet ((column (k)
+             (setf (svref columns k)
+                   (vec-concatenate (mapcar (lambda (b) (svref (batch-columns b) k)) batches)
+                                    (svref kinds k) total))))
+      (if (and (> threads 1) (> width 1) (>= total 65536))
+          (let ((workers (min threads width)))
+            (run-in-threads
+             (loop for w below workers
+                   collect (let ((w w))
+                             (lambda ()
+                               (loop for k from w below width by workers do (column k)))))))
+          (dotimes (k width) (column k))))
+    (make-batch total columns)))
 
 (defun make-build-provider (build-node open-build prepare)
   "Function returning the JOIN-BUILD of BUILD-NODE's rows, made by PREPARE
@@ -803,7 +813,7 @@ BATCH-B under the ORDER BY KEYS ((pos type descending nulls-first) lists)."
   "Row indexes of BATCH in ORDER BY KEYS order (stable)."
   (let* ((n (batch-count batch))
          (perm (identity-index-vector n))
-         (words (radix-key-words batch keys)))
+         (words (radix-key-words batch keys threads)))
     (if words
         (let ((chunk-sort (lambda (chunk) (radix-sort-permutation chunk words))))
           (if (> threads 1)
@@ -845,40 +855,58 @@ BATCH-B under the ORDER BY KEYS ((pos type descending nulls-first) lists)."
     (declare (type (unsigned-byte 64) w))
     (if descending (logxor w +u64-mask+) w)))
 
-(defun radix-key-words (batch keys)
+(defun radix-key-words (batch keys &optional (threads 1))
   "Simple vector of U64-VECTORs (most significant first) of the row words
 for sorting BATCH by KEYS ((pos type descending nulls-first) lists), or NIL
-when some key is not a typed INT64-like/FLOAT64 column (or holds NaN)."
-  (let ((n (batch-count batch))
-        (out '()))
-    (loop for (pos nil descending nulls-first) in keys
-          for vec = (svref (batch-columns batch) pos)
-          for data = (vec-data vec)
-          for validity = (vec-validity vec)
-          do (unless (or (typep data 'i64-vector)
-                         (and (typep data 'f64-vector)
-                              (let ((data data))
-                                (declare (type f64-vector data))
-                                (loop for d across data always (= d d))))) ; no NaN
-               (return-from radix-key-words nil))
-             (let ((words (make-array n :element-type '(unsigned-byte 64))))
-               (macrolet ((fill-words (type)
-                            `(let ((data data))
-                               (declare (type ,type data))
-                               (dotimes (i n)
-                                 (setf (aref words i) (radix-word data i descending))))))
-                 (if (typep data 'i64-vector) (fill-words i64-vector) (fill-words f64-vector)))
-               (when validity
-                 (let ((flags (make-array n :element-type '(unsigned-byte 64)))
-                       (null-flag (if nulls-first 0 1)))
-                   (dotimes (i n)
-                     (if (zerop (sbit validity i))
-                         (setf (aref flags i) null-flag
-                               (aref words i) 0)
-                         (setf (aref flags i) (- 1 null-flag))))
-                   (push flags out)))
-               (push words out)))
-    (coerce (nreverse out) 'simple-vector)))
+when some key is not a typed INT64-like/FLOAT64 column (or holds NaN). With
+THREADS > 1, large batches are encoded by several threads."
+  (let* ((n (batch-count batch))
+         (specs
+           ;; Per key: (data validity descending nulls-first words flags).
+           (loop for (pos nil descending nulls-first) in keys
+                 for vec = (svref (batch-columns batch) pos)
+                 for data = (vec-data vec)
+                 for validity = (vec-validity vec)
+                 do (unless (or (typep data 'i64-vector)
+                                (and (typep data 'f64-vector)
+                                     (let ((data data))
+                                       (declare (type f64-vector data))
+                                       (loop for d across data always (= d d))))) ; no NaN
+                      (return-from radix-key-words nil))
+                 collect (list data validity descending nulls-first
+                               (make-array n :element-type '(unsigned-byte 64))
+                               (and validity (make-array n :element-type '(unsigned-byte 64)))))))
+    (flet ((encode (start end)
+             (declare (type fixnum start end))
+             (loop for (data validity descending nulls-first words flags) in specs
+                   do (let ((words words))
+                        (declare (type u64-vector words))
+                        (macrolet ((fill-words (type)
+                                     `(let ((data data))
+                                        (declare (type ,type data))
+                                        (loop for i from start below end
+                                              do (setf (aref words i) (radix-word data i descending))))))
+                          (if (typep data 'i64-vector) (fill-words i64-vector) (fill-words f64-vector)))
+                        (when validity
+                          (let ((flags flags)
+                                (null-flag (if nulls-first 0 1)))
+                            (declare (type u64-vector flags) (type simple-bit-vector validity))
+                            (loop for i from start below end
+                                  do (if (zerop (sbit validity i))
+                                         (setf (aref flags i) null-flag
+                                               (aref words i) 0)
+                                         (setf (aref flags i) (- 1 null-flag))))))))))
+      (if (and (> threads 1) (>= n 65536))
+          (run-in-threads
+           (loop for k below threads
+                 collect (let ((start (floor (* k n) threads))
+                               (end (floor (* (1+ k) n) threads)))
+                           (lambda () (encode start end)))))
+          (encode 0 n)))
+    (coerce (loop for (nil validity nil nil words flags) in specs
+                  when validity collect flags
+                  collect words)
+            'simple-vector)))
 
 (defun radix-pass (perm words perm2 words2 shift bits)
   "Stable counting sort of (PERM, WORDS) into (PERM2, WORDS2) by the digit of
@@ -966,7 +994,7 @@ comparing rows by their KEY-WORDS."
           while b
           do (charge-memory (* (batch-count b) (row-footprint (length kinds))))
              (push b batches))
-    (concatenate-batches (nreverse batches) kinds)))
+    (concatenate-batches (nreverse batches) kinds (parallel-threads))))
 
 (defun permutation-batches (batch perm start end &optional (threads 1))
   "Iterator over the rows PERM[START..END) of BATCH, a batch at a time. With
