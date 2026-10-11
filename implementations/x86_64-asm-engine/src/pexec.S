@@ -43,6 +43,8 @@
 #define PT_CNT   (56 + 8 * MAX_THREADS)  /* u64 per part */
 #define PT_SIZE  (56 + 16 * MAX_THREADS)
 
+#define TOPN_MAX 65536                  /* larger LIMITs sort everything */
+
     .data
     .p2align 3
     .globl g_par_threads
@@ -705,9 +707,100 @@ ENDF pexec_filter
 
 /* ================================================================ projection */
 
-/* project_part(task rdi, part rsi, lo rdx, hi rcx) */
+/* heap_cmp(heap rdi, i rsi, j rdx, plan rcx) -> eax row_cmp(heap[i], heap[j]) */
+FUNC heap_cmp
+    lea (%rdi, %rsi, 8), %rsi
+    lea (%rdi, %rdx, 8), %rdx
+    xchg %rsi, %rdi
+    xchg %rdx, %rsi
+    mov %rcx, %rdx
+    jmp row_cmp
+ENDF heap_cmp
+
+/* topn_offer(heap rdi, size* rsi, K rdx, row rcx, plan r8): keeps the K
+ * smallest rows (ORDER BY order) in a binary max-heap */
+FUNC topn_offer
+    ENTER 32
+    mov %rdi, %rbx                  /* heap (one spare slot at [K]) */
+    mov %rsi, %r12
+    mov %rdx, %r13                  /* K */
+    mov %r8, %r15                   /* plan */
+    mov (%r12), %r14                /* size */
+    cmp %r13, %r14
+    jae 10f
+    mov %rcx, (%rbx, %r14, 8)       /* ---- push and sift up */
+    incq (%r12)
+1:  test %r14, %r14
+    jz 9f
+    lea -1(%r14), %rax
+    shr $1, %rax
+    mov %rax, 0(%rsp)               /* parent */
+    mov %rbx, %rdi
+    mov %r14, %rsi
+    mov %rax, %rdx
+    mov %r15, %rcx
+    call heap_cmp
+    cmp $0, %eax
+    jle 9f
+    mov 0(%rsp), %rax
+    mov (%rbx, %rax, 8), %rcx
+    mov (%rbx, %r14, 8), %rdx
+    mov %rdx, (%rbx, %rax, 8)
+    mov %rcx, (%rbx, %r14, 8)
+    mov %rax, %r14
+    jmp 1b
+10: test %r13, %r13                 /* ---- full: replace the maximum? */
+    jz 9f
+    mov %rcx, (%rbx, %r13, 8)       /* candidate in the spare slot */
+    mov %rbx, %rdi
+    mov %r13, %rsi
+    xor %edx, %edx
+    mov %r15, %rcx
+    call heap_cmp
+    cmp $0, %eax
+    jge 9f
+    mov (%rbx, %r13, 8), %rax
+    mov %rax, (%rbx)
+    xor %r14d, %r14d                /* sift down */
+11: lea 1(%r14, %r14), %rax         /* left child */
+    cmp %r13, %rax
+    jae 9f
+    mov %rax, 0(%rsp)               /* largest */
+    lea 1(%rax), %rcx
+    mov %rcx, 8(%rsp)               /* right child */
+    cmp %r13, %rcx
+    jae 12f
+    mov %rbx, %rdi
+    mov %rcx, %rsi
+    mov %rax, %rdx
+    mov %r15, %rcx
+    call heap_cmp
+    cmp $0, %eax
+    jle 12f
+    mov 8(%rsp), %rax
+    mov %rax, 0(%rsp)
+12: mov %rbx, %rdi
+    mov 0(%rsp), %rsi
+    mov %r14, %rdx
+    mov %r15, %rcx
+    call heap_cmp
+    cmp $0, %eax
+    jle 9f
+    mov 0(%rsp), %rax
+    mov (%rbx, %rax, 8), %rcx
+    mov (%rbx, %r14, 8), %rdx
+    mov %rdx, (%rbx, %rax, 8)
+    mov %rcx, (%rbx, %r14, 8)
+    mov %rax, %r14
+    jmp 11b
+9:  LEAVE
+ENDF topn_offer
+
+/* project_part(task rdi, part rsi, lo rdx, hi rcx): output rows of the
+ * tuples [lo, hi) -> PT_OUT[part]; with top-N (PT_D, K = PT_A) only the
+ * K first rows in ORDER BY order are kept */
 FUNC project_part
-    ENTER 112
+    ENTER 128
     mov %rdi, %rbx
     mov %rsi, 64(%rsp)
     mov %rdx, %r14
@@ -719,8 +812,15 @@ FUNC project_part
     call cur_arena
     mov %rax, %rdi
     call vec_new
-    mov %rax, 80(%rsp)              /* rows */
-    mov XS_W(%r13), %r12
+    mov %rax, 80(%rsp)              /* rows (top-N: rows of one batch) */
+    movq $0, 96(%rsp)               /* heap size */
+    cmpq $0, PT_D(%rbx)
+    je 0f
+    mov PT_A(%rbx), %rdi
+    lea 8(, %rdi, 8), %rdi
+    call tmp_alloc
+    mov %rax, 88(%rsp)              /* heap */
+0:  mov XS_W(%r13), %r12
     shl $3, %r12
 1:  cmp 72(%rsp), %r14
     jae 9f
@@ -741,14 +841,43 @@ FUNC project_part
     mov 80(%rsp), %r9
     call k_project
     add %r15, %r14
+    cmpq $0, PT_D(%rbx)
+    je 1b
+    movq $0, 104(%rsp)              /* top-N: offer the batch's rows */
+3:  mov 80(%rsp), %rax
+    mov 104(%rsp), %rcx
+    cmp VEC_LEN(%rax), %rcx
+    jae 4f
+    mov VEC_DATA(%rax), %rax
+    mov (%rax, %rcx, 8), %rcx
+    mov 88(%rsp), %rdi
+    lea 96(%rsp), %rsi
+    mov PT_A(%rbx), %rdx
+    mov XS_PLAN(%r13), %r8
+    call topn_offer
+    incq 104(%rsp)
+    jmp 3b
+4:  mov 80(%rsp), %rax
+    movq $0, VEC_LEN(%rax)
     jmp 1b
-9:  mov 64(%rsp), %rcx
+9:  cmpq $0, PT_D(%rbx)
+    je 91f
+    mov 80(%rsp), %rax              /* the heap becomes the part's rows */
+    mov 88(%rsp), %rcx
+    mov %rcx, VEC_DATA(%rax)
+    mov 96(%rsp), %rcx
+    mov %rcx, VEC_LEN(%rax)
+    mov %rcx, VEC_CAP(%rax)
+91: mov 64(%rsp), %rcx
     mov 80(%rsp), %rax
     mov %rax, PT_OUT(%rbx, %rcx, 8)
     LEAVE
 ENDF project_part
 
-/* pexec_project(xs rdi): appends the output row of every tuple to XS_ROWS */
+/* pexec_project(xs rdi): appends the output row of every tuple to XS_ROWS;
+ * for ORDER BY ... LIMIT (without DISTINCT) only the candidates of a top-N:
+ * the LIMIT + OFFSET first rows of every part (the sort that follows picks
+ * the final ones) */
 FUNC pexec_project
     ENTER 16
     mov %rdi, %rbx
@@ -757,20 +886,34 @@ FUNC pexec_project
     call tmp_zalloc
     mov %rax, %r13
     mov %rbx, PT_XS(%r13)
-    mov XS_TS(%rbx), %rax
+    mov XS_PLAN(%rbx), %rcx
+    cmpq $0, QP_NKEYS(%rcx)
+    je 1f
+    cmpq $0, QP_DISTINCT(%rcx)
+    jne 1f
+    mov QP_LIMIT(%rcx), %rax
+    test %rax, %rax
+    js 1f
+    add QP_OFFSET(%rcx), %rax
+    jo 1f
+    cmp $TOPN_MAX, %rax
+    ja 1f
+    mov %rax, PT_A(%r13)            /* K */
+    movq $1, PT_D(%r13)
+1:  mov XS_TS(%rbx), %rax
     mov TS_N(%rax), %rdi
     lea project_part(%rip), %rsi
     mov %r13, %rdx
     call par_for
     mov %rax, %r14
     xor %r15d, %r15d
-1:  cmp %r14, %r15
+2:  cmp %r14, %r15
     jae 9f
     mov PT_OUT(%r13, %r15, 8), %rsi
     lea XS_ROWS(%rbx), %rdi
     call vec_append
     inc %r15
-    jmp 1b
+    jmp 2b
 9:  LEAVE
 ENDF pexec_project
 
