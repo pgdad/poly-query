@@ -1,9 +1,9 @@
 {
  "schema": "polyquery-conformance-report/1",
- "started": "2026-10-11T19:54:37.502165+00:00",
+ "started": "2026-10-11T21:01:56.678586+00:00",
  "seconds": 0.0,
  "engine": {
-  "launcher": "/srv/pqrunner/jobs/engines-20261011T195434Z-1523050/repo/implementations/arm64-asm-engine/bin/polyquery",
+  "launcher": "/srv/pqrunner/jobs/engines-20261011T210153Z-2317262/repo/implementations/arm64-asm-engine/bin/polyquery",
   "version": {
    "id": null,
    "ok": true,
@@ -44,22 +44,36 @@
     "index.hash",
     "index.btree",
     "phase4",
-    "http.streaming"
+    "http.streaming",
+    "phase5",
+    "exec.row",
+    "exec.vectorized",
+    "exec.parallel",
+    "join.hash",
+    "join.merge",
+    "join.nested_loop"
    ]
   },
   "capabilities_exit": 0,
-  "capabilities_seconds": 0.001,
+  "capabilities_seconds": 0.002,
   "capability_set": [
+   "exec.parallel",
+   "exec.row",
+   "exec.vectorized",
    "http.streaming",
    "index.btree",
    "index.hash",
    "ingest.csv",
    "ingest.json",
    "ingest.jsonl",
+   "join.hash",
+   "join.merge",
+   "join.nested_loop",
    "phase1",
    "phase2",
    "phase3",
    "phase4",
+   "phase5",
    "sql.basic",
    "sql.correlated_subquery",
    "sql.cte",
@@ -98,20 +112,28 @@
     "fail": 0,
     "error": 0,
     "not_implemented": 172
+   },
+   "5": {
+    "total": 15,
+    "pass": 0,
+    "fail": 0,
+    "error": 0,
+    "not_implemented": 15
    }
   },
   "total": {
-   "total": 623,
+   "total": 638,
    "pass": 0,
    "fail": 0,
    "error": 0,
-   "not_implemented": 623
+   "not_implemented": 638
   }
  },
  "phase_passed": {
   "1": false,
   "2": false,
-  "3": false
+  "3": false,
+  "5": false
  },
  "files": [
   {
@@ -4023,6 +4045,104 @@
     {
      "line": 198,
      "kind": "request",
+     "status": "not_implemented",
+     "message": "missing capabilities: native.kernels"
+    }
+   ]
+  },
+  {
+   "file": "execution_options.pqt",
+   "phase": 5,
+   "variant": "session-native",
+   "status": "not_implemented",
+   "cases": [
+    {
+     "line": 11,
+     "kind": "explain",
+     "status": "not_implemented",
+     "message": "missing capabilities: native.kernels"
+    },
+    {
+     "line": 18,
+     "kind": "explain",
+     "status": "not_implemented",
+     "message": "missing capabilities: native.kernels"
+    },
+    {
+     "line": 24,
+     "kind": "explain",
+     "status": "not_implemented",
+     "message": "missing capabilities: native.kernels"
+    },
+    {
+     "line": 30,
+     "kind": "explain",
+     "status": "not_implemented",
+     "message": "missing capabilities: native.kernels"
+    },
+    {
+     "line": 35,
+     "kind": "query",
+     "status": "not_implemented",
+     "message": "missing capabilities: native.kernels"
+    },
+    {
+     "line": 44,
+     "kind": "query",
+     "status": "not_implemented",
+     "message": "missing capabilities: native.kernels"
+    },
+    {
+     "line": 53,
+     "kind": "query",
+     "status": "not_implemented",
+     "message": "missing capabilities: native.kernels"
+    },
+    {
+     "line": 62,
+     "kind": "query",
+     "status": "not_implemented",
+     "message": "missing capabilities: native.kernels"
+    },
+    {
+     "line": 74,
+     "kind": "query",
+     "status": "not_implemented",
+     "message": "missing capabilities: native.kernels"
+    },
+    {
+     "line": 89,
+     "kind": "query",
+     "status": "not_implemented",
+     "message": "missing capabilities: native.kernels"
+    },
+    {
+     "line": 105,
+     "kind": "query",
+     "status": "not_implemented",
+     "message": "missing capabilities: native.kernels"
+    },
+    {
+     "line": 115,
+     "kind": "error",
+     "status": "not_implemented",
+     "message": "missing capabilities: native.kernels"
+    },
+    {
+     "line": 118,
+     "kind": "error",
+     "status": "not_implemented",
+     "message": "missing capabilities: native.kernels"
+    },
+    {
+     "line": 122,
+     "kind": "error",
+     "status": "not_implemented",
+     "message": "missing capabilities: native.kernels"
+    },
+    {
+     "line": 125,
+     "kind": "error",
      "status": "not_implemented",
      "message": "missing capabilities: native.kernels"
     }
