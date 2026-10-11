@@ -126,6 +126,10 @@ func (c *vcompiler) compile(e plan.Expr) (vexpr, error) {
 			return c.fallback(e)
 		}
 		return c.elementwise(e)
+	case *plan.Case:
+		if x.Operand == nil {
+			return c.searchedCase(x)
+		}
 	case *plan.Subquery:
 		if x.Kind == plan.SubScalar && len(x.Correlated) == 0 {
 			fn, err := compileSubquery(c.ec, c.lay, x)
