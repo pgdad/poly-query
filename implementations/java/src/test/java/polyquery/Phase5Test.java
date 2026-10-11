@@ -22,7 +22,11 @@ final class Phase5Test {
     }
 
     private static Engine engine() {
-        Engine e = EngineTest.engine();
+        return engine(null);
+    }
+
+    static Engine engine(polyquery.ffi.NativeKernels kernels) {
+        Engine e = EngineTest.engine(kernels);
         StringBuilder csv = new StringBuilder("id,grp,val,amt,name,flag,day\n");
         for (int i = 1; i <= 600; i++) {
             csv.append(i).append(',')
@@ -45,7 +49,7 @@ final class Phase5Test {
         return e;
     }
 
-    private static final String[] QUERIES = {
+    static final String[] QUERIES = {
         "SELECT id, val * 2 + 1, name FROM t WHERE val > 0 AND name LIKE 'n1%'",
         "SELECT grp, COUNT(*), SUM(val), MIN(name), MAX(amt), AVG(val), COUNT(DISTINCT name) FROM t GROUP BY grp",
         "SELECT COUNT(*), SUM(val), SUM(amt), MIN(day), MAX(id), COUNT(val) FROM t WHERE flag",
@@ -129,14 +133,20 @@ final class Phase5Test {
     }
 
     private static void checkAllCombinations(Engine e) {
-        for (String sql : QUERIES) {
+        checkAllCombinations(e, QUERIES, false);
+    }
+
+    /** Every query gives the row engine's result under every option combination (with {@code native}). */
+    static void checkAllCombinations(Engine e, String[] queries, boolean useNative) {
+        for (String sql : queries) {
             Outcome expected = run(e, sql, new QueryOptions(-1, 0, false, false, JoinStrategy.AUTO, true,
                     ExecMode.ROW, 1));
             for (ExecMode mode : ExecMode.values()) {
                 for (JoinStrategy join : JoinStrategy.values()) {
                     for (int threads : new int[] {1, 4}) {
                         for (boolean optimize : new boolean[] {true, false}) {
-                            QueryOptions o = new QueryOptions(-1, 0, false, optimize, join, true, mode, threads);
+                            QueryOptions o = new QueryOptions(-1, 0, false, optimize, join, true, mode, threads,
+                                    useNative);
                             Outcome got = run(e, sql, o);
                             if (!got.matches(expected)) {
                                 throw new AssertionError(sql + " under " + o + ":\n expected " + expected

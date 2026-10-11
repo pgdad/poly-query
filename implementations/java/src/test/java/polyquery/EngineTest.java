@@ -15,8 +15,13 @@ final class EngineTest {
     }
 
     static Engine engine() {
+        return engine(null);
+    }
+
+    /** The test engine, using {@code kernels} (may be null) for queries with option {@code native}. */
+    static Engine engine(polyquery.ffi.NativeKernels kernels) {
         Engine e = new Engine(new EngineConfig(Path.of(".").toAbsolutePath(), true, 1L << 30, 1L << 30,
-                1_000_000, 1_000_000, 1));
+                1_000_000, 1_000_000, 1, kernels));
         e.load(new LoadRequest("people", "csv", null,
                 "id,name,age,score\n1,Ann,34,1.5\n2,bob,,2.5\n3,Cid,28,\n4,Dee,45,0.5\n", null, true, ',', false));
         return e;

@@ -5,6 +5,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.SplittableRandom;
+import polyquery.engine.Engine;
 import polyquery.ffi.NativeKernels;
 import polyquery.ffi.NativeLoadException;
 
@@ -337,6 +338,50 @@ public final class NativeKernelsTest {
                     Assert.eq(Arrays.toString(before), Arrays.toString(s2));
                 }
             }
+        }
+    }
+
+    /** Queries whose vectorized execution runs native kernels on the Phase5Test tables. */
+    private static final String[] NATIVE_QUERIES = {
+        "SELECT COUNT(*), SUM(id), MIN(val), MAX(val), COUNT(val), AVG(val) FROM t WHERE grp BETWEEN 2 AND 9",
+        // never TRUE, NULL where val is NULL: the later conjunct still runs (and fails) on those rows
+        "SELECT id FROM t WHERE val > 100 AND 10 / (grp - 4) > 0",
+        "SELECT id FROM t WHERE val > 100 AND id > 0 AND 10 / (grp - 4) > 0",
+        "SELECT id, val FROM t WHERE val >= grp AND day BETWEEN DATE '2024-01-05' AND DATE '2024-01-20'"
+                + " AND grp IS NOT NULL",
+        "SELECT COUNT(*), MIN(id), MAX(day) FROM t WHERE grp IS NULL OR val IS NULL",
+        "SELECT COUNT(*) FROM t WHERE val IS NOT NULL AND val < 0 AND flag",
+        "SELECT COUNT(*) FROM t WHERE 3 < val AND id <> 17 AND amt > 1.5",
+        "SELECT grp, SUM(CASE WHEN id % 2 = 0 THEN 9223372036854775000 ELSE -9223372036854775000 END),"
+                + " COUNT(*) FROM t GROUP BY grp",
+        "SELECT SUM(CASE WHEN id % 2 = 0 THEN 9223372036854775000 ELSE -9223372036854775000 END) FROM t",
+        "SELECT SUM(CASE WHEN id < 3 THEN 9223372036854775000 ELSE 1 END) FROM t WHERE id < 300",
+        "SELECT grp, SUM(9223372036854775000 + id - id) FROM t GROUP BY grp",
+        "SELECT flag, MIN(day), MAX(day), MIN(amt), MAX(amt), SUM(amt), AVG(amt), COUNT(grp) FROM t GROUP BY flag",
+        "SELECT MIN(amt * -1.0), MAX(val * 1.0), MIN(id), MAX(day), SUM(val) FROM t WHERE id > 5",
+        "SELECT DISTINCT val FROM t",
+        "SELECT val, COUNT(*) FROM t WHERE id BETWEEN 10 AND 500 GROUP BY val",
+        "SELECT name, COUNT(*) FROM t GROUP BY name",
+        "SELECT t.id, d.label FROM t JOIN d ON d.label = t.name OR d.grp = t.grp WHERE t.id < 50 ORDER BY 1, 2",
+    };
+
+    static void testEndToEndAgreesWithAndWithoutNative() {
+        NativeKernels k = kernels();
+        if (k == null) {
+            return;
+        }
+        Engine e = Phase5Test.engine(k);
+        String[] all = new String[Phase5Test.QUERIES.length + NATIVE_QUERIES.length];
+        System.arraycopy(Phase5Test.QUERIES, 0, all, 0, Phase5Test.QUERIES.length);
+        System.arraycopy(NATIVE_QUERIES, 0, all, Phase5Test.QUERIES.length, NATIVE_QUERIES.length);
+        Phase5Test.checkAllCombinations(e, all, true);
+        System.setProperty("polyquery.batchSize", "13");
+        System.setProperty("polyquery.morselRows", "37");
+        try {
+            Phase5Test.checkAllCombinations(Phase5Test.engine(k), all, true);
+        } finally {
+            System.clearProperty("polyquery.batchSize");
+            System.clearProperty("polyquery.morselRows");
         }
     }
 
