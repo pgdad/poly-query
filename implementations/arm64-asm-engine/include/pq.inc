@@ -127,6 +127,13 @@
 #define ERR_SHUTTING_DOWN       23
 #define ERR_LAST                23
 
+// ------------------------------------------------------------ log levels -----
+#define LOG_DEBUG   0
+#define LOG_INFO    1
+#define LOG_WARN    2
+#define LOG_ERROR   3
+#define LOG_OFF     4
+
 // ----------------------------------------------------------------- types -----
 // A type is a u32:  kind | (precision << 8) | (scale << 16)
 // precision/scale are only meaningful for T_DEC.
@@ -227,6 +234,7 @@
 #define TBL_STATS  88      // ColStats* [ncols] (computed lazily) or 0
 #define TBL_NRG    96      // u64 row groups (PQCF-backed tables) or 0
 #define TBL_RGS    104     // RowGroup* [nrg]
+#define TBL_REFS   112     // u64 references from catalog versions (atomic)
 #define TBL_SIZE   128
 #define LAYOUT_COLUMN 0
 #define LAYOUT_ROW    1
@@ -262,9 +270,23 @@
 #define IX_NEXT    56      // HASH: u32* next row in chain [nrows]
 #define IX_MASK    64      // HASH: u64 bucket mask
 #define IX_ARENA   72      // embedded Arena
-#define IX_SIZE    112
+#define IX_REFS    112     // u64 references from catalog versions (atomic)
+#define IX_SIZE    128
 #define IXK_HASH   1
 #define IXK_BTREE  2
+
+// Catalog version (catalog.S). The catalog is a sequence of immutable
+// versions: readers pin the current version for a whole request (snapshot
+// isolation); a mutation edits a private copy and publishes it atomically.
+// Versions reference their tables and indexes (TBL_REFS / IX_REFS).
+#define CV_REFS    0       // u64 pins (requests) + 1 while current (atomic)
+#define CV_TABLES  8       // Table** (malloc)
+#define CV_NT      16      // u64
+#define CV_TCAP    24      // u64
+#define CV_IDX     32      // Index** (malloc), creation order
+#define CV_NI      40      // u64
+#define CV_ICAP    48      // u64
+#define CV_SIZE    64
 
 // Index specification (from PQCF metadata), 24 bytes
 #define XS_NAME    0       // Str*
