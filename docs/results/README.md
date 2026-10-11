@@ -250,6 +250,8 @@ recorded as its own run. The cohort is never ranked with the six engines.
 |---|---|---:|---|---:|---:|---|---|
 | x86-64 assembly | 1 | 1 | success | $20.99 | 37 min | 225/225 public, 249/249 with hidden | ~9.9 k LOC in 12 `.S` modules |
 | AArch64 assembly | 1 | 1 | success | $23.82 | 28 min | 249/249 with hidden, natively on spark | ~11.0 k LOC in 15 `.S` modules |
+| x86-64 assembly | 2 | 1 | success | $16.04 | 25 min | 411/411 public, 451/451 with hidden | ~19.9 k lines in `.S`/`.inc` |
+| AArch64 assembly | 2 | 1 | success | $23.19 | 36 min | 451/451 with hidden, natively on spark | ~24.3 k lines in `.S`/`.inc` |
 
 Both were checked for compliance: no C or other high-level sources, no
 compiler-generated assembly, and a launcher that only execs the assembled
@@ -257,7 +259,7 @@ binary. The transcripts show no C was ever compiled; Python served only as a
 calculator and test-data generator. The AArch64 agent split the work across
 sub-agents (an available tool; its cost is included). Phase 1 cost more than for the
 high-level languages ($21–24 vs. $8–17) but took no longer (28–37 min vs.
-24–106 min), far below the plan's estimate. Phase 2 is running for both.
+24–106 min), far below the plan's estimate. Both implemented the optional correlated subqueries in Phase 2. The x86-64 agent developed part of Phase 2 on a side branch and merged it; the import was extended to keep such histories (grafted commits with the agent's authorship and dates). Phase 3 is running for both.
 
 ## AArch64 end to end
 

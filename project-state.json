@@ -1,6 +1,6 @@
 {
  "schema": "polyquery-project-state/1",
- "updated": "2026-10-11T17:56:40+00:00",
+ "updated": "2026-10-11T18:33:45+00:00",
  "current_milestone": "M10",
  "milestones": {
   "M0": {
@@ -52,7 +52,7 @@
   }
  },
  "outstanding_tasks": [
-  "Option B: Phase 2 chains running for x86_64-asm-engine ($150 cap) and arm64-asm-engine ($100 cap, on spark); option-B spend so far $44.81 of the approved $300 - ask the owner before exceeding it (Phases 3-5)",
+  "Option B: Phase 3 chains running for x86_64-asm-engine and arm64-asm-engine ($100 cap each); option-B spend so far $84.04 of the approved $300 (Phase 1 + 2 both merged) - ask the owner before exceeding $300 (Phases 4-5 and later families)",
   "Native-kernel validation path for the AArch64 engine (Phase 5) is x86-only (native-kernels/build/x86_64)",
   "Main-line HTTP throughput not re-measured after INT-001 (bench.py run without the HTTP benchmark)",
   "Debugging family remains too easy for both engines and kernels (kernel variant with symptom-only report and hidden-only failures: fixed in ~1 min)",
