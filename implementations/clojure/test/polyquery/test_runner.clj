@@ -5,7 +5,6 @@
 (def test-namespaces
   '[polyquery.util.json-test
     polyquery.values-test
-    polyquery.result-test
     polyquery.sql.lexer-test
     polyquery.sql.parser-test
     polyquery.sql.analyzer-test
@@ -20,6 +19,7 @@
     polyquery.plan.planner-test
     polyquery.exec.functions-test
     polyquery.exec.vectorized-test
+    polyquery.exec.sort-test
     polyquery.engine-test
     polyquery.engine-phase2-test
     polyquery.engine-phase3-test

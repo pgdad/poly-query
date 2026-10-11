@@ -25,11 +25,6 @@
     {:node :subquery :kind :scalar|:exists|:in :cell id :correlated? b
      :query bound-query (after analysis) | :plan physical-plan (after planning)
      [:arg e :cmp-type T :not? b]}               ; for :in
-    {:node :in-set :not? b :arg e :cmp-type T :keys java.util.Set :has-null? b
-     :exists? b}                                ; x [NOT] IN (subquery) with the
-                                                ; subquery's values precomputed
-                                                ; (keys per values/key-fn); with
-                                                ; :exists?, NULL x gives FALSE
   Aggregate specs: {:fn :count-star|:count|:sum|:avg|:min|:max :distinct? b
                     :arg e :type T}"
   (:require [clojure.string :as str]
@@ -49,7 +44,6 @@
     :like [(:arg e) (:pattern e)]
     :between [(:arg e) (:low e) (:high e)]
     :in-list (cons (:arg e) (:items e))
-    :in-set [(:arg e)]
     :subquery (if (:arg e) [(:arg e)] [])
     []))
 
@@ -57,7 +51,7 @@
   "Rebuilds e with f applied to each direct sub-expression."
   [f e]
   (case (:node e)
-    (:neg :not :is-null :cast :in-set) (update e :arg f)
+    (:neg :not :is-null :cast) (update e :arg f)
     (:arith :concat :compare :and :or) (-> e (update :left f) (update :right f))
     :call (update e :args #(mapv f %))
     :case (cond-> (update e :whens (fn [ws] (mapv (fn [[c r]] [(f c) (f r)]) ws)))
@@ -166,8 +160,6 @@
                     " AND " (r (:high e)) ")")
       :in-list (str "(" (r (:arg e)) (when (:not? e) " NOT") " IN ("
                     (str/join ", " (map r (:items e))) "))")
-      :in-set (str "(" (r (:arg e)) (when (:not? e) " NOT") " IN (<" (count (:keys e))
-                   (if (:has-null? e) " values and NULL>))" " values>))"))
       :subquery (case (:kind e)
                   :scalar "(<subquery>)"
                   :exists "EXISTS (<subquery>)"

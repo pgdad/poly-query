@@ -8,8 +8,7 @@
             [polyquery.server :as server]
             [polyquery.util.json :as json]
             [polyquery.util.log :as log])
-  (:import (java.io BufferedOutputStream BufferedReader File FileDescriptor FileOutputStream
-                    InputStreamReader OutputStream)
+  (:import (java.io BufferedReader BufferedWriter File InputStreamReader OutputStreamWriter Writer)
            (java.nio.charset StandardCharsets))
   (:gen-class))
 
@@ -87,11 +86,8 @@
    :test-functions? (boolean (:test-functions? cfg))
    :limits (select-keys cfg [:max-query-memory-mb :max-ingest-bytes :max-table-rows :max-join-rows])})
 
-(defn- stdout-stream
-  "Protocol output: stdout, bypassing System/out (each response is written
-  with one write call, see json/write-line!)."
-  ^OutputStream []
-  (BufferedOutputStream. (FileOutputStream. FileDescriptor/out) 65536))
+(defn- stdout-writer ^Writer []
+  (BufferedWriter. (OutputStreamWriter. System/out StandardCharsets/UTF_8) 65536))
 
 (defn- parse-request-line [^String line]
   (try
@@ -107,7 +103,7 @@
 (defn run-session [cfg]
   (let [state (protocol/make-state (engine-config cfg))
         in (BufferedReader. (InputStreamReader. System/in StandardCharsets/UTF_8) 65536)
-        out (stdout-stream)]
+        out (stdout-writer)]
     (log/debug "session started")
     (loop []
       (when-let [line (.readLine in)]
@@ -125,7 +121,7 @@
                    (throw (ex-info (str "cannot read request file " src) {::fatal true})))
                  (slurp f :encoding "UTF-8")))
         state (protocol/make-state (engine-config cfg))
-        out (stdout-stream)
+        out (stdout-writer)
         parsed (parse-request-line text)
         requests (if (vector? parsed) parsed [parsed])]
     (doseq [req requests]
@@ -146,7 +142,7 @@
                       :max-request-bytes (or (:max-request-bytes cfg) (* 1024 1024 1024))}))
 
 (defn- print-json [v]
-  (let [out (stdout-stream)]
+  (let [out (stdout-writer)]
     (json/write-line! out v)
     0))
 

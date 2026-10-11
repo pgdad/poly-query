@@ -133,7 +133,9 @@
                init input)))))
 
 (defmethod build-batches :subquery-scan [plan env]
-  (build-batches (:input plan) env))
+  (if-let [rows (ops/shared-input (:input plan) env)]
+    (rows->batches rows)
+    (build-batches (:input plan) env)))
 
 ;; ---------------------------------------------------------------------------
 ;; Hash aggregation
@@ -181,11 +183,6 @@
                 nil))
             nil input)
     (->Partial table (vec states))))
-
-(defn partial-size
-  "Number of groups of a Partial."
-  ^long [^Partial p]
-  (.size ^GroupTable (:table p)))
 
 (defn aggregate-merge!
   "Merges Partial `other` into `into` (new groups appended in their order

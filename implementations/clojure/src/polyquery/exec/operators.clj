@@ -9,7 +9,8 @@
     :ctx            QueryContext
     :cells          correlation cells
     :build          this namespace's build function
-    :max-join-rows  join output row limit"
+    :max-join-rows  join output row limit
+    :shared         optional: shared subquery-scan inputs (see shared-input)"
   (:require [polyquery.errors :as err]
             [polyquery.exec.aggregate :as agg]
             [polyquery.exec.context :as ctx]
@@ -20,6 +21,8 @@
             [polyquery.types :as t]
             [polyquery.values :as v])
   (:import (java.util ArrayList Comparator HashMap HashSet PriorityQueue)
+           (java.util.concurrent ConcurrentHashMap)
+           (java.util.function Function)
            (polyquery.exec.aggregate Accumulator)
            (polyquery.storage.column ColumnVector)))
 
@@ -216,8 +219,23 @@
            (reduce-list bucket (fn [acc row] (if (residual row) (f acc row) acc)) init)
            init))))))
 
+(defn shared-input
+  "Re-reducible of the rows of `input`, the input of a subquery-scan, when
+  the query shares it (env :shared {:plans #{input …} :cache
+  ConcurrentHashMap}, polyquery.exec.dispatch): materialized on first use,
+  then reused by every scan of the same input in this execution. nil for
+  other inputs."
+  [input env]
+  (when-let [{:keys [plans ^ConcurrentHashMap cache]} (:shared env)]
+    (when (contains? plans input)
+      (let [rows (.computeIfAbsent cache input
+                                   (reify Function
+                                     (apply [_ _] (delay (materialize (build-input input env) env)))))]
+        (reducible (fn [f init] (reduce-list @rows f init)))))))
+
 (defmethod build :subquery-scan [plan env]
-  (build-input (:input plan) env))
+  (or (shared-input (:input plan) env)
+      (build-input (:input plan) env)))
 
 ;; ---------------------------------------------------------------------------
 ;; Row-wise operators

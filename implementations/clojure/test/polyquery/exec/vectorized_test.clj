@@ -85,6 +85,27 @@
     ;; MAX + 10 - 20 fits again: intermediate overflow is exact
     (is (= (- Long/MAX_VALUE 10) (.result s1 0)))))
 
+(deftest distinct-states-over-long-sets
+  (let [st (fn [f] (g/agg-state {:fn f :distinct? true :arg {:node :column :index 0 :type :int64} :type :int64}))
+        xs (concat [0 0 nil -1 Long/MIN_VALUE Long/MAX_VALUE] (range 5000) (range 2500 7000))
+        ys [nil 0 7000 -5]
+        run (fn [f]
+              (let [^AggState s1 (st f) ^AggState s2 (st f)
+                    gids (int-array b/capacity)]
+                (.grow s1 1)
+                (.grow s2 1)
+                (doseq [chunk (partition-all b/capacity xs)]
+                  (.update s1 gids (long-vec chunk) b/identity-sel (count chunk)))
+                (.update s2 gids (long-vec ys) b/identity-sel (count ys))
+                (.mergeFrom s1 s2 0 0)
+                (.result s1 0)))
+        distinct-vals (set (remove nil? (concat xs ys)))]
+    (is (= (count distinct-vals) (run :count)))
+    (is (= 0 (.result ^AggState (doto ^AggState (st :count) (.grow 1)) 0)))
+    (is (= Long/MIN_VALUE (run :min)))
+    (is (= Long/MAX_VALUE (run :max)))
+    (is (= (long (reduce +' distinct-vals)) (run :sum)))))
+
 (deftest sort-is-stable-and-handles-nulls
   (let [rows (java.util.ArrayList. ^java.util.Collection
                                    (map-indexed (fn [i x] (object-array [x i])) [3 nil 1 3 -2 nil 1]))

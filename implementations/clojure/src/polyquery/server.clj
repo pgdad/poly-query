@@ -11,7 +11,6 @@
   disconnects. Each query works on the catalog snapshot it took when it
   started (polyquery.catalog is an immutable value in an atom)."
   (:require [clojure.string :as str]
-            [polyquery.engine :as engine]
             [polyquery.errors :as err]
             [polyquery.exec.context :as ctx]
             [polyquery.protocol :as protocol]
@@ -238,8 +237,7 @@
   [:header columns], [:rows batch]…, then [:end n] or [:error throwable]."
   [state req ^ArrayBlockingQueue q ^QueryEntry entry]
   (try
-    (let [{:keys [columns ctx count-only?] :as opened} (protocol/open-query state req)
-          rows (if count-only? (:rows opened) (engine/json-rows opened))
+    (let [{:keys [columns rows ctx count-only?]} (protocol/open-query state req)
           check #(ctx/check! ctx)
           batch (ArrayList. ^long stream-batch-rows)
           flush-batch! (fn []

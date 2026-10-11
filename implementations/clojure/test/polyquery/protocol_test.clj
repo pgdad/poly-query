@@ -1,8 +1,7 @@
 (ns polyquery.protocol-test
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
-            [polyquery.protocol :as protocol]
-            [polyquery.util.json :as json])
+            [polyquery.protocol :as protocol])
   (:import (java.io File)
            (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)))
@@ -15,15 +14,10 @@
                         :limits {:max-ingest-bytes 1000000 :max-table-rows 1000
                                  :max-query-memory-mb 64}}))
 
-(defn- wire
-  "A response as the client sees it (query rows are pre-encoded JSON text)."
-  [resp]
-  (json/read-str (json/write-str resp)))
-
 (deftest catalog-operations
   (let [dir (temp-dir)
         st (state dir)
-        req #(wire (protocol/handle-request st %))]
+        req #(protocol/handle-request st %)]
     (spit (io/file dir "t.csv") "a,b\n1,x\n2,y\n")
     (is (= {"id" 7 "ok" true "table" "T" "row_count" 2
             "columns" [{"name" "a" "type" "INT64"} {"name" "b" "type" "STRING"}]}

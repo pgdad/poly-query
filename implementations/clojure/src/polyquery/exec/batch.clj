@@ -295,13 +295,133 @@
           (set! typed out)
           out))))
 
+(defn- rows-vec
+  "Column `col` of all the row tuples as one typed vector of their length:
+  STRING columns dictionary-encoded unless most values are distinct."
+  ^polyquery.exec.batch.Vec [^objects rows ^long col type]
+  (let [n (alength rows)
+        value (fn [^long r] (aget ^objects (aget rows r) col))
+        nulls (let [m (boolean-array n)]
+                (when (loop [r 0 any? false]
+                        (if (< r n)
+                          (let [nul (nil? (value r))] (aset m r nul) (recur (inc r) (or any? nul)))
+                          any?))
+                  m))]
+    (case (vec-kind type)
+      :long (let [v (long-array n)]
+              (dotimes [r n] (when-some [x (value r)] (aset v r (long x))))
+              (LongVec. v nulls))
+      :double (let [v (double-array n)]
+                (dotimes [r n] (when-some [x (value r)] (aset v r (double x))))
+                (DoubleVec. v nulls))
+      :bool (let [v (boolean-array n)]
+              (dotimes [r n] (when-some [x (value r)] (aset v r (boolean x))))
+              (BoolVec. v nulls))
+      :obj (let [codes (int-array n)
+                 ids (java.util.HashMap.)
+                 dict (java.util.ArrayList.)
+                 max-dict (+ 16 (quot n 2))
+                 encoded? (and (= :string (t/kind type))
+                               (loop [r 0]
+                                 (cond
+                                   (= r n) true
+                                   (> (.size dict) max-dict) false
+                                   :else (let [x (value r)]
+                                           (when (some? x)
+                                             (let [c (.get ids x)]
+                                               (aset codes r (int (if (some? c)
+                                                                    c
+                                                                    (let [c (.size dict)]
+                                                                      (.put ids x (Integer/valueOf c))
+                                                                      (.add dict x)
+                                                                      c))))))
+                                           (recur (inc r))))))]
+             (if encoded?
+               (DictVec. codes (.toArray dict) nulls)
+               (let [v (object-array n)]
+                 (dotimes [r n] (aset v r (value r)))
+                 (ObjVec. v)))))))
+
+(deftype RowsColumn [^objects rows ^long col ^:volatile-mutable typed]
+  ;; column `col` of row tuples, converted once (thread-safely) to a typed
+  ;; vector over all rows on first typed use — e.g. a hash join's build side,
+  ;; shared by parallel partitions
+  Vec
+  (getObj [_ i] (aget ^objects (aget rows i) col))
+  (isNullAt [_ i] (nil? (aget ^objects (aget rows i) col)))
+  (setObj [_ _ _] (throw (UnsupportedOperationException. "RowsColumn is read-only")))
+  Typed
+  (typedVec [this type]
+    (or typed
+        (locking this
+          (or typed
+              (let [v (rows-vec rows col type)]
+                (set! typed v)
+                v))))))
+
+(defn gather-vec
+  "Vector of v's values at positions pos[0..n): typed vectors stay typed
+  (dictionary codes are gathered)."
+  ^polyquery.exec.batch.Vec [^Vec v ^ints pos ^long n]
+  (let [take-nulls (fn [^booleans nulls]
+                     (when nulls
+                       (let [out (boolean-array capacity)]
+                         (dotimes [i n] (aset out i (aget nulls (aget pos i))))
+                         out)))]
+    (cond
+      (instance? LongVec v)
+      (let [src ^longs (.-v ^LongVec v) out (long-array capacity)]
+        (dotimes [i n] (aset out i (aget src (aget pos i))))
+        (LongVec. out (take-nulls (.-nulls ^LongVec v))))
+      (instance? DoubleVec v)
+      (let [src ^doubles (.-v ^DoubleVec v) out (double-array capacity)]
+        (dotimes [i n] (aset out i (aget src (aget pos i))))
+        (DoubleVec. out (take-nulls (.-nulls ^DoubleVec v))))
+      (instance? BoolVec v)
+      (let [src ^booleans (.-v ^BoolVec v) out (boolean-array capacity)]
+        (dotimes [i n] (aset out i (aget src (aget pos i))))
+        (BoolVec. out (take-nulls (.-nulls ^BoolVec v))))
+      (instance? DictVec v)
+      (let [src ^ints (.-codes ^DictVec v) out (int-array capacity)]
+        (dotimes [i n] (aset out i (aget src (aget pos i))))
+        (DictVec. out (.-dict ^DictVec v) (take-nulls (.-nulls ^DictVec v))))
+      :else
+      (let [out (object-array capacity)]
+        (dotimes [i n] (aset out i (.getObj v (aget pos i))))
+        (ObjVec. out)))))
+
+(deftype GatherCol [^Vec src ^ints pos ^long n ^:unsynchronized-mutable typed]
+  ;; the values of src at positions pos[0..n), gathered from src's typed
+  ;; representation on first typed use
+  Vec
+  (getObj [_ i] (.getObj src (aget pos i)))
+  (isNullAt [_ i] (.isNullAt src (aget pos i)))
+  (setObj [_ _ _] (throw (UnsupportedOperationException. "GatherCol is read-only")))
+  Typed
+  (typedVec [_ type]
+    (or typed
+        (let [v (gather-vec (if (instance? Typed src) (.typedVec ^Typed src type) src) pos n)]
+          (set! typed v)
+          v))))
+
+(defn gather-col
+  "Lazy column of v's values at positions pos[0..n) (pos is retained)."
+  ^polyquery.exec.batch.Vec [^Vec v ^ints pos ^long n]
+  (if (instance? GatherCol v)
+    (let [^GatherCol g v
+          ^ints inner (.-pos g)
+          out (int-array n)]
+      (dotimes [i n] (aset out i (aget inner (aget pos i))))
+      (GatherCol. (.-src g) out n nil))
+    (GatherCol. v pos n nil)))
+
 (defn typed-column
   "The column vector at position idx of a batch in its typed representation
-  (forces a LazyCol)."
+  (forces a LazyCol, RowsColumn or GatherCol)."
   ^polyquery.exec.batch.Vec [^Batch b ^long idx type]
   (let [v (aget ^objects (.-cols b) idx)]
-    (if (instance? LazyCol v)
-      (.typedVec ^LazyCol v type)
+    (if (instance? Typed v)
+      (.typedVec ^Typed v type)
       v)))
 
 (defn rows->batch

@@ -10,19 +10,12 @@
                    over a long[] (linear probing, power-of-two capacity,
                    keys and group ids in parallel primitive arrays — no
                    boxing, no per-entry objects)
-    MultiKeyTable  2..30 keys: every key value becomes a long code (the
-                   value of integer-like keys, the bits of FLOAT64, 0/1,
-                   or an interned id for other values — dictionary codes
-                   are mapped per dictionary); open addressing over the
-                   code tuples, stored in a long[] (no per-row objects)
     ObjKeyTable    any other keys: HashMap over normalized key values; a
                    single dictionary-encoded STRING key is mapped through a
                    per-dictionary code → group id array
   Aggregate states: COUNT, and SUM/AVG/MIN/MAX over integer-like and
-  FLOAT64 values use typed arrays; DISTINCT over integer-like values one
-  primitive hash set (LongSet) per group; everything else (other DISTINCT,
-  MIN/MAX of strings, …) one Accumulator (polyquery.exec.aggregate) per
-  group. All
+  FLOAT64 values use typed arrays; everything else (DISTINCT, MIN/MAX of
+  strings, …) one Accumulator (polyquery.exec.aggregate) per group. All
   states can merge the states of another table (parallel aggregation) and
   produce exactly the results of the row engine's accumulators.
 
@@ -198,9 +191,13 @@
                   lib (when lib (long-array b/capacity)))))
 
 (definterface ObjLookup
-  (^long lookupKey [k] "Group id of a hashable key (added if new)."))
+  (^long lookupKey [k] "Group id of a hashable key (added if new).")
+  (^long lookupRow [^"[Ljava.lang.Object;" keyVecs ^long i]
+   "Group id of the key values at position i of the key vectors (2+ keys).")
+  (assignGeneric [^"[Ljava.lang.Object;" keyVecs ^ints sel ^long n ^ints gids]))
 
-(deftype ObjKeyTable [^HashMap ids ^ArrayList key-vals ^long nkeys ^IdentityHashMap dicts]
+(deftype ObjKeyTable [^HashMap ids ^ArrayList key-vals ^long nkeys ^IdentityHashMap dicts
+                      ^HashMap combos] ; dictionary combination → code tuple → group id
   GroupTable
   (size [_] (.size key-vals))
   (keyAt [_ gid] (.get key-vals gid))
@@ -237,12 +234,46 @@
           (each-sel [i sel n]
             (aset gids i (int (.lookupKey this (v/normalize-key (.getObj x i)))))))
 
+        (every? #(instance? DictVec %) kvs)
+        ;; dictionary-encoded keys: code tuple → group id through a flat
+        ;; per-dictionary-combination array (when small enough)
+        (let [ds (object-array (map #(.-dict ^DictVec %) kvs))
+              ck (Arrays/asList ds)                 ; arrays compare by identity
+              size (reduce (fn [^long acc ^objects d] (* acc (max 1 (alength d)))) 1 ds)
+              ^ints m (when (<= size 1048576)
+                        (or (.get combos ck)
+                            (let [m (doto (int-array size) (Arrays/fill -1))]
+                              (.put combos ck m)
+                              m)))]
+          (if (nil? m)
+            (.assignGeneric this kvs sel n gids)
+            (each-sel [i sel n]
+              (aset gids i
+                    (int (loop [j 0 idx 0]
+                           (if (< j nkeys)
+                             (let [^DictVec d (aget kvs j)]
+                               (if (b/nulls-at? (.-nulls d) i)
+                                 (.lookupRow this kvs i)
+                                 (recur (inc j) (+ (* idx (alength ^objects (.-dict d)))
+                                                   (aget ^ints (.-codes d) i)))))
+                             (let [g (aget m idx)]
+                               (if (neg? g)
+                                 (let [g (.lookupRow this kvs i)]
+                                   (aset m idx (int g))
+                                   g)
+                                 g)))))))))
+
         :else
-        (each-sel [i sel n]
-          (let [kv (object-array nkeys)]
-            (dotimes [j nkeys] (aset kv j (v/normalize-key (.getObj ^Vec (aget kvs j) i))))
-            (aset gids i (int (.lookupKey this (Arrays/asList kv)))))))))
+        (.assignGeneric this kvs sel n gids))))
   ObjLookup
+  (lookupRow [this kvs i]
+    (let [kv (object-array nkeys)]
+      (dotimes [j nkeys] (aset kv j (v/normalize-key (.getObj ^Vec (aget kvs j) i))))
+      (.lookupKey this (Arrays/asList kv))))
+  (assignGeneric [this kvs sel n gids]
+    (let [^objects kvs kvs ^ints gids gids]
+      (each-sel [i sel n]
+        (aset gids i (int (.lookupRow this kvs i))))))
   (lookupKey [_ k]
     (let [g (.get ids k)]
       (if (some? g)
@@ -254,165 +285,6 @@
                            (.toArray ^java.util.List k)))
           gid)))))
 
-(definterface MultiKeyOps
-  (^long codeOf [^long j x] "Key code of non-NULL value x of key j.")
-  (^long probe [^longs codes ^long nulls] "Group id of a code tuple (added if new).")
-  (^long hashCodes [^longs codes ^long off ^long nulls])
-  (growSlots []))
-
-(def ^:private ^:const kind-long 0)
-(def ^:private ^:const kind-double 1)
-(def ^:private ^:const kind-bool 2)
-(def ^:private ^:const kind-obj 3)
-
-(deftype MultiKeyTable [^ints kinds
-                        ^long nkeys
-                        ^HashMap interned          ; value → id (:obj keys)
-                        ^ArrayList intern-vals     ; id → value
-                        ^IdentityHashMap dicts     ; dictionary → int[] code → id
-                        ^:unsynchronized-mutable ^ints slots ; gid + 1, 0 = empty
-                        ^:unsynchronized-mutable ^long mask
-                        ^:unsynchronized-mutable ^longs gkeys ; gid * nkeys + j
-                        ^:unsynchronized-mutable ^longs gnulls ; NULL bitmask per gid
-                        ^:unsynchronized-mutable ^long cnt
-                        ^objects row-codes         ; long[capacity] per key
-                        ^longs row-nulls
-                        ^longs tuple]
-  GroupTable
-  (size [_] cnt)
-  (keyAt [_ gid]
-    (let [out (object-array nkeys)
-          nm (aget gnulls gid)]
-      (dotimes [j nkeys]
-        (when (zero? (bit-and nm (bit-shift-left 1 j)))
-          (let [c (aget gkeys (+ (* gid nkeys) j))]
-            (aset out j (case (aget kinds j)
-                          0 c
-                          1 (Double/longBitsToDouble c)
-                          2 (== c 1)
-                          (.get intern-vals (int c)))))))
-      out))
-  (findOrAdd [this kv]
-    (let [codes (long-array nkeys)]
-      (loop [j 0 nm 0]
-        (if (< j nkeys)
-          (let [x (aget ^objects kv j)]
-            (if (nil? x)
-              (recur (inc j) (bit-or nm (bit-shift-left 1 j)))
-              (do (aset codes j (.codeOf this j x)) (recur (inc j) nm))))
-          (.probe this codes nm)))))
-  (assign [this kvs sel n gids]
-    (each-sel [i sel n] (aset row-nulls i 0))
-    (dotimes [j nkeys]
-      (let [^longs out (aget row-codes j)
-            x (aget ^objects kvs j)
-            bit (bit-shift-left 1 j)
-            null! (fn [^long i] (aset row-nulls i (bit-or (aget row-nulls i) bit)))]
-        (cond
-          (and (instance? LongVec x) (== kind-long (aget kinds j)))
-          (let [^LongVec x x ^longs v (.-v x) ^booleans nulls (.-nulls x)]
-            (each-sel [i sel n]
-              (if (b/nulls-at? nulls i) (null! i) (aset out i (aget v i)))))
-
-          (and (instance? DictVec x) (== kind-obj (aget kinds j)))
-          (let [^DictVec d x
-                ^objects dict (.-dict d)
-                ^ints codes (.-codes d)
-                ^booleans nulls (.-nulls d)
-                ^ints m (or (.get dicts dict)
-                            (let [m (doto (int-array (alength dict)) (Arrays/fill -1))]
-                              (.put dicts dict m)
-                              m))]
-            (each-sel [i sel n]
-              (if (b/nulls-at? nulls i)
-                (null! i)
-                (let [c (aget codes i)
-                      id (aget m c)]
-                  (aset out i (long (if (neg? id)
-                                      (let [id (.codeOf this j (aget dict c))]
-                                        (aset m c (int id))
-                                        id)
-                                      id)))))))
-
-          :else
-          (let [^Vec x x]
-            (each-sel [i sel n]
-              (let [y (.getObj x i)]
-                (if (nil? y) (null! i) (aset out i (.codeOf this j y)))))))))
-    (each-sel [i sel n]
-      (let [nm (aget row-nulls i)]
-        ;; NULL keys have code 0 (their slot in row-codes is stale)
-        (dotimes [j nkeys]
-          (aset tuple j (if (zero? (bit-and nm (bit-shift-left 1 j)))
-                          (aget ^longs (aget row-codes j) i)
-                          0)))
-        (aset gids i (int (.probe this tuple nm))))))
-  MultiKeyOps
-  (codeOf [_ j x]
-    (case (aget kinds j)
-      0 (long x)
-      1 (Double/doubleToLongBits (double (v/normalize-key x)))
-      2 (if (boolean x) 1 0)
-      (let [k (v/normalize-key x)
-            id (.get interned k)]
-        (if (some? id)
-          (long id)
-          (let [id (.size intern-vals)]
-            (.put interned k (Integer/valueOf (int id)))
-            (.add intern-vals k)
-            id)))))
-  (hashCodes [_ codes off nulls]
-    (loop [j 0 h (mix (+ nulls 0x632BE59BD9B4E019))]
-      (if (< j nkeys)
-        (recur (inc j) (mix (bit-xor h (aget codes (+ off j)))))
-        h)))
-  (probe [this codes nulls]
-    (let [h (.hashCodes this codes 0 nulls)]
-      (loop [s (bit-and h mask)]
-        (let [g1 (aget slots s)]
-          (if (zero? g1)
-            (let [gid cnt]
-              (when (>= (* (inc gid) nkeys) (alength gkeys))
-                (set! gkeys (grow-longs gkeys (* 2 (inc gid) nkeys)))
-                (set! gnulls (grow-longs gnulls (* 2 (inc gid)))))
-              (System/arraycopy codes 0 gkeys (* gid nkeys) nkeys)
-              (aset gnulls gid nulls)
-              (aset slots s (int (inc gid)))
-              (set! cnt (inc gid))
-              (when (> (* 2 cnt) mask) (.growSlots this))
-              gid)
-            (let [g (dec g1)
-                  base (* g nkeys)]
-              (if (and (== nulls (aget gnulls g))
-                       (loop [j 0]
-                         (cond (>= j nkeys) true
-                               (== (aget codes j) (aget gkeys (+ base j))) (recur (inc j))
-                               :else false)))
-                g
-                (recur (bit-and (inc s) mask)))))))))
-  (growSlots [this]
-    (let [cap (* 2 (alength slots))
-          ns (int-array cap)
-          nmask (dec cap)]
-      (dotimes [g cnt]
-        (loop [t (bit-and (.hashCodes this gkeys (* g nkeys) (aget gnulls g)) nmask)]
-          (if (zero? (aget ns t))
-            (aset ns t (int (inc g)))
-            (recur (bit-and (inc t) nmask)))))
-      (set! slots ns)
-      (set! mask nmask)
-      nil)))
-
-(defn- multi-key-table
-  "A MultiKeyTable for 2..30 keys of the given types."
-  ^polyquery.exec.grouping.MultiKeyTable [key-types]
-  (let [nkeys (count key-types)]
-    (MultiKeyTable. (int-array (map #(case (b/vec-kind %) :long 0 :double 1 :bool 2 :obj 3) key-types))
-                    nkeys (HashMap.) (ArrayList.) (IdentityHashMap.)
-                    (int-array 1024) 1023 (long-array (* 64 nkeys)) (long-array 64) 0
-                    (object-array (repeatedly nkeys #(long-array b/capacity)))
-                    (long-array b/capacity) (long-array nkeys))))
-
 (defn group-table
   "A group table for keys of the given types (lib: the native kernel
   library or nil)."
@@ -421,8 +293,7 @@
    (cond
      (empty? key-types) (GlobalTable.)
      (and (= 1 (count key-types)) (= :long (b/vec-kind (first key-types)))) (long-key-table lib)
-     (<= 2 (count key-types) 30) (multi-key-table key-types)
-     :else (ObjKeyTable. (HashMap.) (ArrayList.) (count key-types) (IdentityHashMap.)))))
+     :else (ObjKeyTable. (HashMap.) (ArrayList.) (count key-types) (IdentityHashMap.) (HashMap.)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Aggregate states
@@ -672,90 +543,6 @@
                       (aset has 0 true))
                     true))))))
 
-;; DISTINCT over integer-like values: one primitive hash set per group.
-
-(definterface LongSetOps
-  (^boolean add [^long k] "Adds k; true when it was not present.")
-  (^long size [])
-  (^longs toArray [] "The elements (in no particular order)."))
-
-(deftype LongSet [^:unsynchronized-mutable ^longs slots ; 0 = empty slot
-                  ^:unsynchronized-mutable ^long mask
-                  ^:unsynchronized-mutable ^long n
-                  ^:unsynchronized-mutable has-zero?]
-  LongSetOps
-  (add [this k]
-    (if (zero? k)
-      (if has-zero? false (do (set! has-zero? true) (set! n (inc n)) true))
-      (loop [i (bit-and (mix k) mask)]
-        (let [x (aget slots i)]
-          (cond
-            (== x k) false
-            (zero? x) (do (aset slots i k)
-                          (set! n (inc n))
-                          (when (> (* 2 n) mask)
-                            (let [old slots
-                                  cap (* 2 (alength old))]
-                              (set! slots (long-array cap))
-                              (set! mask (dec cap))
-                              (dotimes [j (alength old)]
-                                (let [y (aget old j)]
-                                  (when-not (zero? y)
-                                    (loop [p (bit-and (mix y) mask)]
-                                      (if (zero? (aget slots p))
-                                        (aset slots p y)
-                                        (recur (bit-and (inc p) mask)))))))))
-                          true)
-            :else (recur (bit-and (inc i) mask)))))))
-  (size [_] n)
-  (toArray [_]
-    (let [out (long-array n)
-          start (if has-zero? 1 0)]
-      (loop [j 0 o start]
-        (if (< j (alength slots))
-          (let [y (aget slots j)]
-            (if (zero? y) (recur (inc j) o) (do (aset out o y) (recur (inc j) (inc o)))))
-          out)))))
-
-(defn- long-set ^LongSet [] (LongSet. (long-array 8) 7 0 false))
-
-(definterface LongSets
-  (^polyquery.exec.grouping.LongSet setOf [^long g] "The set of group g (created on first use)."))
-
-(deftype DistinctLongState [count? make-inner ^:unsynchronized-mutable ^objects sets]
-  AggState
-  (grow [_ size] (set! sets (grow-objects sets size)))
-  (update [this gids arg sel n]
-    (if (instance? LongVec arg)
-      (let [^LongVec x arg
-            ^longs vals (.-v x)
-            ^booleans nulls (.-nulls x)]
-        (each-sel [i sel n]
-          (when-not (b/nulls-at? nulls i)
-            (.add (.setOf this (aget gids i)) (aget vals i)))))
-      (let [^Vec x arg]
-        (each-sel [i sel n]
-          (when-some [y (.getObj x i)]
-            (.add (.setOf this (aget gids i)) (long y)))))))
-  (mergeFrom [this other from to]
-    (let [^longs ys (.toArray (.setOf ^LongSets other from))
-          s (.setOf this to)]
-      (dotimes [j (alength ys)] (.add s (aget ys j)))))
-  (result [this gid]
-    (let [s (.setOf this gid)]
-      (if count?
-        (.size s)
-        ;; the values in ascending order (as for any order: exact arithmetic)
-        (let [^Accumulator inner (make-inner)
-              ys (.toArray s)]
-          (Arrays/sort ys)
-          (dotimes [j (alength ys)] (.add inner (aget ys j)))
-          (.result inner)))))
-  LongSets
-  (setOf [_ g]
-    (or (aget sets g)
-        (let [s (long-set)] (aset sets g s) s))))
-
 (definterface Accs
   (acc [^long g] "The accumulator of group g (created on first use)."))
 
@@ -774,6 +561,82 @@
     (or (aget accs g)
         (let [a (factory)] (aset accs g a) a))))
 
+(definterface LongValues
+  (^boolean add [^long k] "Adds k; true if it was new.")
+  (^long size [])
+  (^longs values [] "The distinct values (in table order)."))
+
+(deftype LongSet [^:unsynchronized-mutable ^longs slots ; 0 = empty slot
+                  ^:unsynchronized-mutable ^long mask
+                  ^:unsynchronized-mutable ^long cnt   ; non-zero values
+                  ^:unsynchronized-mutable ^long zeros]  ; 1 if 0 was added
+  LongValues
+  (add [this k]
+    (if (zero? k)
+      (if (== zeros 1) false (do (set! zeros 1) true))
+      (loop [s (bit-and (mix k) mask)]
+        (let [x (aget slots s)]
+          (cond
+            (zero? x) (do (aset slots s k)
+                          (set! cnt (inc cnt))
+                          (when (> (* 2 cnt) mask)
+                            (let [old slots
+                                  cap (* 2 (inc mask))
+                                  nslots (long-array cap)
+                                  nmask (dec cap)]
+                              (dotimes [i (alength old)]
+                                (let [y (aget old i)]
+                                  (when-not (zero? y)
+                                    (loop [t (bit-and (mix y) nmask)]
+                                      (if (zero? (aget nslots t))
+                                        (aset nslots t y)
+                                        (recur (bit-and (inc t) nmask)))))))
+                              (set! slots nslots)
+                              (set! mask nmask)))
+                          true)
+            (== x k) false
+            :else (recur (bit-and (inc s) mask)))))))
+  (size [_] (+ cnt zeros))
+  (values [this]
+    (let [out (long-array (.size this))]
+      (loop [i 0 j zeros]
+        (if (< i (alength slots))
+          (let [y (aget slots i)]
+            (if (zero? y) (recur (inc i) j) (do (aset out j y) (recur (inc i) (inc j)))))
+          out)))))
+
+(defn long-set ^polyquery.exec.grouping.LongSet [] (LongSet. (long-array 8) 7 0 0))
+
+(deftype LongDistinctState [count? factory ^:unsynchronized-mutable ^objects sets]
+  ;; DISTINCT aggregate of integer-like values: one primitive LongSet per
+  ;; group; the result feeds the distinct values to the plain accumulator
+  ;; (COUNT: the set size), exactly as polyquery.exec.aggregate/DistinctValues
+  AggState
+  (grow [_ size] (set! sets (grow-objects sets size)))
+  (update [this gids arg sel n]
+    (let [^LongVec x arg
+          vals ^longs (.-v x)
+          nulls ^booleans (.-nulls x)]
+      (each-sel [i sel n]
+        (when-not (b/nulls-at? nulls i)
+          (.add ^LongSet (.acc this (aget gids i)) (aget vals i))))))
+  (mergeFrom [this other from to]
+    (let [^LongSet into (.acc this to)
+          ^longs vs (.values ^LongSet (.acc ^Accs other from))]
+      (dotimes [i (alength vs)] (.add into (aget vs i)))))
+  (result [this gid]
+    (let [^LongSet st (.acc this gid)]
+      (if count?
+        (.size st)
+        (let [^Accumulator acc (factory)
+              ^longs vs (.values st)]
+          (dotimes [i (alength vs)] (.add acc (aget vs i)))
+          (.result acc)))))
+  Accs
+  (acc [_ g]
+    (or (aget sets g)
+        (let [st (long-set)] (aset sets g st) st))))
+
 (defn agg-state
   "A fresh aggregate state for aggregate spec (polyquery.sql.bound); lib:
   the native kernel library or nil."
@@ -784,9 +647,10 @@
          vbits (when lib (bits/bitmap))]
      (cond
        (= f :count-star) (CountState. true (long-array 16))
-       (and distinct? (= :long (b/vec-kind at)))
-       (DistinctLongState. (= f :count) (agg/accumulator-factory (assoc spec :distinct? false))
+       (and distinct? (#{:count :sum :avg :min :max} f) (= :long (b/vec-kind at)))
+       (LongDistinctState. (= f :count) (agg/accumulator-factory (assoc spec :distinct? false))
                            (object-array 16))
+
        distinct? (AccState. (agg/accumulator-factory spec) (object-array 16))
        (= f :count) (CountState. false (long-array 16))
 

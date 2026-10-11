@@ -10,10 +10,8 @@
   the pipeline are built once by the coordinating thread and shared
   read-only by all partitions.
 
-    hash-aggregate  partial aggregation per partition, merged in order —
-                    pairwise in parallel when vectorized partials hold many
-                    groups — every merge appending the later partition's
-                    groups (so groups keep their serial order of first
+    hash-aggregate  partial aggregation per partition, merged in partition
+                    order (so groups keep their serial order of first
                     appearance; INT64/DECIMAL sums stay exact)
     sort            partitions materialized in parallel, concatenated in
                     order, then sorted (polyquery.exec.sort: radix sort or
@@ -139,24 +137,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Operators
 
-(def ^:private ^:const parallel-merge-groups
-  "Total groups of the partial aggregates above which they are merged in
-  parallel (below, the hand-offs to worker threads cost more than they save)."
-  16384)
-
-(defn- merge-tree
-  "Merges the partial results `parts` (in order) with (merge! a b) — an
-  associative merge into a — pairwise in parallel (log2(parts) rounds) if
-  parallel? is true, else serially."
-  [parts merge! parallel?]
-  (if-not parallel?
-    (reduce merge! parts)
-    (loop [parts (vec parts)]
-      (if (<= (count parts) 1)
-        (first parts)
-        (recur (run-all (mapv (fn [[a b]] (if b #(merge! a b) (constantly a)))
-                              (partition-all 2 parts))))))))
-
 (defn- aggregate [plan env]
   (let [vectorized? (= :vectorized (:mode env))]
     (ops/reducible
@@ -168,13 +148,16 @@
                            (vec/aggregate-partial plan (vec/build-batches in env) env)
                            (ops/aggregate-partial plan (rows-of in env) env))))
              parts (run-all (mapv (fn [r] #(partial r)) (partitions input (:partitions plan))))
-             merged (if vectorized?
-                      (merge-tree parts vec/aggregate-merge!
-                                  (> (long (reduce + (map vec/partial-size parts)))
-                                     (long parallel-merge-groups)))
-                      (reduce ops/aggregate-merge! parts))]
+             merged (reduce (if vectorized? vec/aggregate-merge! ops/aggregate-merge!) parts)]
          (ops/reduce-list (if vectorized? (vec/aggregate-rows merged) (ops/aggregate-rows merged))
                           f init))))))
+
+(defn- concat-lists
+  "The java.util.Lists `parts` concatenated into one ArrayList."
+  ^ArrayList [parts]
+  (let [out (ArrayList. (int (reduce + (map #(.size ^java.util.List %) parts))))]
+    (doseq [^java.util.Collection p parts] (.addAll out p))
+    out))
 
 (defn- sort-rows [plan env]
   (ops/reducible
@@ -183,7 +166,7 @@
            ranges (partitions input (:partitions plan))
            parts (run-all (mapv (fn [r] #(ops/materialize (rows-of (with-range input r) env) env))
                                 ranges))
-           all (ArrayList. ^java.util.Collection (into [] cat parts))]
+           all (concat-lists parts)]
        (ops/reduce-list (sort/sort-rows all (:keys plan) (:ctx env) run-all (:partitions plan))
                         f init)))))
 
@@ -201,7 +184,7 @@
                                    #(ops/top-candidates (rows-of (with-range input r) env) cmp k
                                                         (bit-shift-left (long i) 40) env))
                                  ranges))
-                 all (ArrayList. ^java.util.Collection (into [] cat parts))]
+                 all (concat-lists parts)]
              (.sort all (ops/candidate-comparator cmp))
              (ops/emit-candidates (if (> (.size all) (long k))
                                     (ArrayList. (.subList all 0 (int k)))

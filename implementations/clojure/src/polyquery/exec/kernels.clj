@@ -94,7 +94,7 @@
   (let [kids-fail? #(boolean (some may-fail? (bound/children e)))]
     (case (:node e)
       (:literal ::vec-literal :column :outer-column) false
-      (:compare :and :or :not :is-null :between :concat :case :in-list :in-set :like) (kids-fail?)
+      (:compare :and :or :not :is-null :between :concat :case :in-list :like) (kids-fail?)
       :cast (or (not (contains? #{[:int64 :float64] [:date :timestamp]}
                                 [(t/kind (:type (:arg e))) (t/kind (:type e))]))
                 (kids-fail?))
@@ -720,23 +720,6 @@
                 out)))))
       (row-kernel env e))))
 
-(defn- in-set-kernel [env e]
-  (let [test (expr/in-set-fn e)
-        xk (compile-kernel env (:arg e))]
-    (if (and (= :string (t/kind (:type (:arg e))))
-             (not (:has-null? e))
-             (not (:exists? e))
-             (not (.isEmpty ^java.util.Set (:keys e))))
-      ;; NULL → NULL, else TRUE/FALSE
-      (string-test-kernel xk test)
-      (reify Kernel
-        (eval [_ bt sel n]
-          (let [x (ev xk bt sel n)
-                out (b/new-vec :boolean)]
-            (each-sel [i sel n]
-              (.setObj out i (test (.getObj x i))))
-            out))))))
-
 (defn- like-kernel [env e]
   (let [pat (:pattern e)]
     (if (= :literal (:node pat))
@@ -869,70 +852,63 @@
                             (recur (rest ks) s2 (long n2)))
                           out))))))))))
 
-(defn- dict-results
-  "Per-dictionary cache of the results of (f x) over the entries x of a
-  dictionary: [Object[] results, every result non-NULL?]."
-  [f]
-  (let [cache (IdentityHashMap.)]
-    (fn [^objects dict]
-      (locking cache
+(defn- dict-call
+  "The vector of a function call whose only non-literal argument (number j)
+  is the dictionary vector d: the function is applied once per dictionary
+  entry and once to NULL (results cached per dictionary in `cache`) and
+  mapped through the codes. STRING results stay dictionary-encoded."
+  ^polyquery.exec.batch.Vec
+  [^IdentityHashMap cache f ^objects current ^objects args j ^DictVec d type ^ints sel n]
+  (let [j (long j)
+        ^objects dict (.-dict d)
+        [^objects res null-res]
         (or (.get cache dict)
-            (let [out (object-array (alength dict))]
-              (dotimes [c (alength dict)] (aset out c (f (aget dict c))))
-              (let [r [out (every? some? out)]]
+            (let [k (aget sel 0)
+                  res (object-array (alength dict))]
+              (dotimes [a (alength args)]
+                (aset current a (.getObj ^Vec (aget args a) k)))
+              (dotimes [c (alength dict)]
+                (aset current j (aget dict c))
+                (aset res c (f nil)))
+              (aset current j nil)
+              (let [r [res (f nil)]]
                 (.put cache dict r)
-                r)))))))
+                r)))
+        ^ints codes (.-codes d)
+        ^booleans nulls (.-nulls d)]
+    (if (and (= :string (t/kind type)) (nil? null-res) (not-any? nil? res))
+      (DictVec. codes res nulls)
+      (let [out (b/new-vec type)]
+        (each-sel [i sel n]
+          (.setObj out i (if (b/nulls-at? nulls i) null-res (aget res (aget codes i)))))
+        out))))
 
 (defn- call-kernel
   "Function calls whose arguments cannot fail: the arguments are evaluated
-  as vectors and the row engine's function is applied per row to them.
-  A call whose only non-constant argument is a STRING is applied once per
-  dictionary entry to dictionary vectors (a STRING result stays
-  dictionary-encoded when no entry maps to NULL)."
+  as vectors and the row engine's function is applied per row to them —
+  or, for a function that cannot fail either and whose only non-literal
+  argument is dictionary-encoded, once per dictionary entry."
   [env e]
   (if (or (some may-fail? (:args e)) (= "PQ_SLEEP" (:fn e)))
     (row-kernel env e)
-    (let [args (:args e)
-          ks (into-array Kernel (map #(compile-kernel env %) args))
+    (let [ks (into-array Kernel (map #(compile-kernel env %) (:args e)))
           nargs (alength ^objects ks)
           ^objects current (object-array (max 1 nargs))
           arg-fns (mapv (fn [j] (fn [_] (aget current j))) (range nargs))
           f (functions/compile-call e arg-fns (:ctx env))
           type (:type e)
-          varying (keep-indexed (fn [j a] (when-not (= :literal (:node a)) j)) args)
-          dict-j (when (and (= 1 (count varying))
-                            (= :string (t/kind (:type (nth args (first varying))))))
-                   (long (first varying)))
-          ;; f of one value of argument dict-j, the other (literal) arguments fixed
-          apply-1 (when dict-j
-                    (fn [x]
-                      (locking current
-                        (dotimes [j nargs] (aset current j (:value (nth args j))))
-                        (aset current dict-j x)
-                        (f nil))))
-          per-dict (when dict-j (dict-results apply-1))
-          null-result (when dict-j (apply-1 nil))
-          keep-dict? (and (= :string (t/kind type)) (nil? null-result))]
+          varying (keep-indexed (fn [j a] (when-not (= :literal (:node a)) j)) (:args e))
+          dict-arg (when (and (= 1 (count varying)) (not (may-fail? e))) (long (first varying)))
+          per-dict (IdentityHashMap.)]
       ;; `current` is shared by the closures above: one evaluation at a time
       (reify Kernel
         (eval [_ bt sel n]
-          (let [x (when dict-j (ev (aget ^objects ks dict-j) bt sel n))]
-            (if (instance? DictVec x)
-              (let [^DictVec d x
-                    [^objects res all?] (per-dict (.-dict d))
-                    codes ^ints (.-codes d)
-                    nulls ^booleans (.-nulls d)]
-                (if (and keep-dict? all?)
-                  (DictVec. codes res nulls)
-                  (let [out (b/new-vec type)]
-                    (each-sel [i sel n]
-                      (.setObj out i (if (b/nulls-at? nulls i) null-result (aget res (aget codes i)))))
-                    out)))
-              (locking current
-                (let [args (object-array nargs)
-                      out (b/new-vec type)]
-                  (dotimes [j nargs]
-                    (aset args j (if (and x (= j dict-j)) x (ev (aget ^objects ks j) bt sel n))))
+          (locking current
+            (let [args (object-array nargs)]
+              (dotimes [j nargs] (aset args j (ev (aget ^objects ks j) bt sel n)))
+              (if (and dict-arg (pos? (long n)) (instance? DictVec (aget args (long dict-arg))))
+                (dict-call per-dict f current args dict-arg (aget args (long dict-arg)) type sel n)
+                (let [out (b/new-vec type)]
                   (each-sel [i sel n]
                     (dotimes [j nargs] (aset current j (.getObj ^Vec (aget args j) i)))
                     (.setObj out i (f nil)))
@@ -986,7 +962,6 @@
     :not (not-kernel env e)
     :is-null (is-null-kernel env e)
     :in-list (in-list-kernel env e)
-    :in-set (in-set-kernel env e)
     :like (like-kernel env e)
     :cast (cast-kernel env e)
     :case (case-kernel env e)

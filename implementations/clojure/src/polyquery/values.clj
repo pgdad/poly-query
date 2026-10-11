@@ -206,22 +206,8 @@
 (defn dec-negate [x]
   (if (instance? BigInteger x) (.negate ^BigInteger x) (- (long x))))
 
-(defn- pad ^String [^long v ^long width]
-  (let [s (Long/toString v)]
-    (if (< (count s) width)
-      (str (apply str (repeat (- width (count s)) \0)) s)
-      s)))
-
-(defn- append-digits!
-  "Appends v (0 <= v < 10^width) zero-padded to width digits."
-  [^StringBuilder sb ^long v ^long width]
-  (loop [k (dec width)]
-    (when (and (pos? k) (< v (aget pow10 k)))
-      (.append sb \0)
-      (recur (dec k))))
-  (.append sb v))
-
-(defn- dec->string*
+(defn dec->string
+  "Canonical text of a decimal (Long or BigInteger unscaled v, scale s)."
   ^String [v ^long s]
   (let [big? (instance? BigInteger v)]
     (if (zero? s)
@@ -237,26 +223,6 @@
             cut (- (count digits) s)]
         (str (when neg "-") (subs digits 0 cut) "." (subs digits cut))))))
 
-(defn append-decimal!
-  "Appends the canonical text of a decimal (see dec->string) to sb."
-  ^StringBuilder [^StringBuilder sb v ^long s]
-  (if (or (instance? BigInteger v) (= (long v) Long/MIN_VALUE) (> s 18))
-    (.append sb (dec->string* v s))
-    (let [x (long v)]
-      (if (zero? s)
-        (.append sb x)
-        (let [p (aget pow10 s)
-              a (Math/abs x)]
-          (when (neg? x) (.append sb \-))
-          (.append sb (quot a p))
-          (.append sb \.)
-          (append-digits! sb (rem a p) s))))))
-
-(defn dec->string
-  "Canonical text of a decimal (Long or BigInteger unscaled v, scale s)."
-  ^String [v ^long s]
-  (.toString (append-decimal! (StringBuilder.) v s)))
-
 ;; ---------------------------------------------------------------------------
 ;; Calendar (proleptic Gregorian), days since 1970-01-01.
 
@@ -270,29 +236,19 @@
         doe (+ (* yoe 365) (quot yoe 4) (- (quot yoe 100)) doy)]
     (+ (* era 146097) doe -719468)))
 
-(defmacro ^:private let-civil
-  "Binds y m d to the calendar fields of day number z (primitive longs)."
-  [[y m d] z & body]
-  `(let [z# (+ (long ~z) 719468)
-         era# (quot (if (>= z# 0) z# (- z# 146096)) 146097)
-         doe# (- z# (* era# 146097))
-         yoe# (quot (- doe# (quot doe# 1460) (- (quot doe# 36524)) (quot doe# 146096)) 365)
-         y# (+ yoe# (* era# 400))
-         doy# (- doe# (- (+ (* 365 yoe#) (quot yoe# 4)) (quot yoe# 100)))
-         mp# (quot (+ (* 5 doy#) 2) 153)
-         ~d (inc (- doy# (quot (+ (* 153 mp#) 2) 5)))
-         ~m (if (< mp# 10) (+ mp# 3) (- mp# 9))
-         ~y (if (<= ~m 2) (inc y#) y#)]
-     ~@body))
-
 (defn civil-from-days
   "Returns [y m d] for a day number."
   [^long z]
-  (let-civil [y m d] z [y m d]))
-
-(defn year-of-days ^long [^long z] (let-civil [y _m _d] z y))
-(defn month-of-days ^long [^long z] (let-civil [_y m _d] z m))
-(defn day-of-days ^long [^long z] (let-civil [_y _m d] z d))
+  (let [z (+ z 719468)
+        era (quot (if (>= z 0) z (- z 146096)) 146097)
+        doe (- z (* era 146097))
+        yoe (quot (- doe (quot doe 1460) (- (quot doe 36524)) (quot doe 146096)) 365)
+        y (+ yoe (* era 400))
+        doy (- doe (- (+ (* 365 yoe) (quot yoe 4)) (quot yoe 100)))
+        mp (quot (+ (* 5 doy) 2) 153)
+        d (inc (- doy (quot (+ (* 153 mp) 2) 5)))
+        m (if (< mp 10) (+ mp 3) (- mp 9))]
+    [(if (<= m 2) (inc y) y) m d]))
 
 (defn leap-year? [^long y]
   (and (zero? (rem y 4)) (or (pos? (rem y 100)) (zero? (rem y 400)))))
@@ -357,46 +313,27 @@
                   (* (+ (* hh 3600) (* mi 60) ss) 1000000)
                   (long frac))))))))))
 
-(defn append-date!
-  "Appends the text of a DATE (days since the epoch) to sb."
-  ^StringBuilder [^StringBuilder sb ^long days]
-  (let-civil [y m d] days
-    (if (<= 0 y 9999)
-      (append-digits! sb y 4)
-      (.append sb (pad y 4)))
-    (.append sb \-)
-    (append-digits! sb m 2)
-    (.append sb \-)
-    (append-digits! sb d 2))
-  sb)
+(defn- pad ^String [^long v ^long width]
+  (let [s (Long/toString v)]
+    (if (< (count s) width)
+      (str (apply str (repeat (- width (count s)) \0)) s)
+      s)))
 
 (defn format-date ^String [^long days]
-  (.toString (append-date! (StringBuilder. 10) days)))
+  (let [[y m d] (civil-from-days days)]
+    (str (pad y 4) "-" (pad m 2) "-" (pad d 2))))
 
 (defn timestamp-date ^long [^long micros]
   (Math/floorDiv micros (long micros-per-day)))
 
-(defn append-timestamp!
-  "Appends the text of a TIMESTAMP (microseconds since the epoch) to sb."
-  ^StringBuilder [^StringBuilder sb ^long micros]
+(defn format-timestamp ^String [^long micros]
   (let [days (timestamp-date micros)
         tod (- micros (* days micros-per-day))
         secs (quot tod 1000000)
         frac (rem tod 1000000)]
-    (append-date! sb days)
-    (.append sb \space)
-    (append-digits! sb (quot secs 3600) 2)
-    (.append sb \:)
-    (append-digits! sb (rem (quot secs 60) 60) 2)
-    (.append sb \:)
-    (append-digits! sb (rem secs 60) 2)
-    (when (pos? frac)
-      (.append sb \.)
-      (append-digits! sb frac 6))
-    sb))
-
-(defn format-timestamp ^String [^long micros]
-  (.toString (append-timestamp! (StringBuilder. 26) micros)))
+    (str (format-date days) " "
+         (pad (quot secs 3600) 2) ":" (pad (rem (quot secs 60) 60) 2) ":" (pad (rem secs 60) 2)
+         (when (pos? frac) (str "." (pad frac 6))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Numeric text parsing (ingestion.md §1.1, types.md §8)

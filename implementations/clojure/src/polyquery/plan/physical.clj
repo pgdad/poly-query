@@ -8,8 +8,6 @@
       auto`/`hash`), a sort-merge join (`join: merge`) or a nested-loop join
       (`join: nested_loop`); nested-loop joins otherwise;
     * top-N for ORDER BY … LIMIT (unless `optimize: false`);
-    * SELECT DISTINCT as a hash aggregation without aggregates (except in
-      row mode);
     * the execution: `mode` (row / vectorized), `threads` (parallel
       operators, polyquery.plan.parallel) and native kernels, recorded in
       the root's :execution;
@@ -60,106 +58,23 @@
   (:require [polyquery.plan.access :as access]
             [polyquery.plan.cost :as cost]
             [polyquery.plan.parallel :as parallel]
-            [polyquery.sql.bound :as b]
-            [polyquery.values :as v])
-  (:import (java.util HashSet)))
+            [polyquery.sql.bound :as b]))
 
 (set! *warn-on-reflection* true)
 
 (declare plan-tree)
 
-(defn- key-set
-  "[keys has-null?]: the keys (values/key-fn from type to cmp-type) of the
-  single-column rows, and whether a NULL occurred."
-  [rows from cmp-type]
-  (let [key-fn (v/key-fn from cmp-type)
-        keys (HashSet.)
-        has-null? (reduce (fn [has-null? ^objects row]
-                            (let [y (aget row 0)]
-                              (if (nil? y) true (do (.add keys (key-fn y)) has-null?))))
-                          false rows)]
-    [keys has-null?]))
-
-(defn- materialize-subquery
-  "Replacement of an uncorrelated subquery expression x (with its :plan)
-  by its precomputed result: a literal for scalar and EXISTS subqueries, an
-  :in-set for IN subqueries. (rows-fn plan) executes a plan (a reducible of
-  its rows). A scalar subquery with more than one row is kept, so that its
-  error is raised only where execution evaluates it."
-  [x rows-fn]
-  (let [rows (rows-fn (:plan x))]
-    (case (:kind x)
-      :scalar (let [rows (into [] (take 2) rows)]
-                (if (> (count rows) 1)
-                  x
-                  {:node :literal :type (:type x)
-                   :value (when-let [^objects row (first rows)] (aget row 0))}))
-      :exists {:node :literal :type :boolean :value (boolean (seq (into [] (take 1) rows)))}
-      :in (let [[keys has-null?] (key-set rows (:type (first (:columns (:plan x)))) (:cmp-type x))]
-            {:node :in-set :type :boolean :not? (:not? x) :arg (:arg x) :cmp-type (:cmp-type x)
-             :keys keys :has-null? has-null?}))))
-
-(defn- simple-expr? [e] (every? #(#{:literal :column} (:node %)) (b/nodes e)))
-
-(defn- exists-as-in-set
-  "An :in-set equivalent to the correlated EXISTS subquery x, or nil. x
-  qualifies when its plan projects simple expressions from a lookup scan
-  with one key, whose probe reads only the row x is evaluated on and whose
-  residual is uncorrelated: EXISTS is then TRUE iff the probe value is
-  among the keys of the scanned rows that satisfy the residual (FALSE for a
-  NULL probe). Those keys are computed now, by a parallel scan."
-  [x rows-fn threads]
-  (let [scan (loop [p (:plan x)]
-               (if (= :project (:op p))
-                 (when (every? simple-expr? (:exprs p)) (recur (:input p)))
-                 p))
-        [{:keys [expr probe cmp-type]} & more] (:keys scan)
-        residual (:residual scan)]
-    (when (and (= :lookup-scan (:op scan)) expr (empty? more)
-               (every? #(case (:node %)
-                          :outer-column (= (:cell %) (:cell x))
-                          (:column :subquery) false
-                          true)
-                       (b/nodes probe))
-               (not-any? #(#{:subquery :outer-column} (:node %)) (b/nodes residual)))
-      (let [table-scan {:op :table-scan :table (:table scan) :alias (:alias scan)
-                        :columns (:columns scan)}
-            keys-plan (parallel/parallelize
-                       {:op :project :exprs [expr] :names ["key"]
-                        :input (if residual
-                                 {:op :filter :input table-scan :predicate residual}
-                                 table-scan)}
-                       threads)
-            [keys] (key-set (rows-fn keys-plan) (:type expr) cmp-type)]
-        {:node :in-set :type :boolean :exists? true :not? false :cmp-type cmp-type
-         :keys keys :has-null? false
-         :arg (b/transform #(if (= :outer-column (:node %))
-                              (b/column-ref (:index %) (:type %) (:name %))
-                              %)
-                           probe)}))))
-
 (defn- plan-expr
-  "Plans the logical plans of the subquery expressions in e. With the
-  option :subquery-rows (see materialize-subquery), uncorrelated subqueries
-  and correlated EXISTS subqueries of the form described at
-  exists-as-in-set are evaluated now and replaced by their results."
+  "Plans the logical plans of the subquery expressions in e."
   [options e]
   (when e
     (b/transform (fn [x]
                    (if (and (= :subquery (:node x)) (:logical x))
                      ;; correlated subqueries run once per outer row: serially
-                     (let [planned (-> x
-                                       (assoc :plan (plan-tree (:logical x)
-                                                               (cond-> options
-                                                                 (:correlated? x) (assoc :threads 1))))
-                                       (dissoc :query :logical))
-                           rows-fn (:subquery-rows options)]
-                       (cond
-                         (nil? rows-fn) planned
-                         (not (:correlated? x)) (materialize-subquery planned rows-fn)
-                         (= :exists (:kind x)) (or (exists-as-in-set planned rows-fn (:threads options))
-                                                   planned)
-                         :else planned))
+                     (-> x
+                         (assoc :plan (plan-tree (:logical x) (cond-> options
+                                                                (:correlated? x) (assoc :threads 1))))
+                         (dissoc :query :logical))
                      x))
                  e)))
 
@@ -271,21 +186,6 @@
        :limit (px (:limit node)) :offset (px (:offset node))}
       {:op :limit :input (phys input) :limit (px (:limit node)) :offset (px (:offset node))})))
 
-(declare execution-mode)
-
-(defn- plan-distinct
-  "SELECT DISTINCT: outside row mode (the baseline's DISTINCT operator), a
-  hash aggregation grouping by every column of the projection below it —
-  same rows (NULLs grouped together, first appearance order), but
-  vectorized and parallelizable."
-  [{:keys [input]} options phys]
-  (let [in (phys input)]
-    (if (and (= :project (:op in)) (not= :row (execution-mode options)))
-      {:op :hash-aggregate :input in :aggregates []
-       :group-keys (vec (map-indexed (fn [i e] (b/column-ref i (:type e) (nth (:names in) i)))
-                                     (:exprs in)))}
-      {:op :distinct :input in})))
-
 (defn- to-physical
   [node options]
   (let [phys #(to-physical % options)
@@ -301,7 +201,7 @@
                   :aggregates (mapv #(if (:arg %) (update % :arg px) %) (:aggregates node))}
       :project {:op :project :input (phys (:input node)) :exprs (mapv px (:exprs node))
                 :names (:names node)}
-      :distinct (plan-distinct node options phys)
+      :distinct {:op :distinct :input (phys (:input node))}
       :sort {:op :sort :input (phys (:input node)) :keys (:keys node)}
       :limit (plan-limit node options phys px)
       :union-all {:op :union-all :inputs (mapv phys (:inputs node))})))
@@ -316,7 +216,7 @@
   "Worker threads per query when neither the query nor --threads says."
   (min 8 (.availableProcessors (Runtime/getRuntime))))
 
-(defn execution-mode
+(defn- execution-mode
   "Execution model of a query: `row` (baseline) or `vectorized` (also for
   `auto`, the default)."
   [options]
@@ -335,9 +235,7 @@
   "Physical plan of an optimized logical query plan. options (the query
   options): :optimize bool (default true), :join \"auto\"|\"hash\"|\"merge\"|
   \"nested_loop\", :use-indexes bool (default true), :mode \"auto\"|\"row\"|
-  \"vectorized\", :threads n, :default-threads n, :native bool; and, from the
-  engine, :subquery-rows (precomputation of uncorrelated subqueries, see
-  plan-expr)."
+  \"vectorized\", :threads n, :default-threads n, :native bool."
   [logical options]
   (let [mode (execution-mode options)
         threads (worker-threads options)]
