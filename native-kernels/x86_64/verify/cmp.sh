@@ -1,0 +1,45 @@
+#!/bin/sh
+# Before/after timing of the AVX2 kernels: builds vbench from git revision
+# $BASE (default: the pre-optimization baseline 424e5a4) and from the working
+# tree, then runs both alternately, pinned to CPU $CPU, $ROUNDS times, and
+# prints per-kernel medians. Usage: sh cmp.sh [kernel-substring]
+# Env: BASE (git rev or directory with x86_64/) CPU ROUNDS N REPS VARIANT
+set -e
+D=$(cd "$(dirname "$0")/../.." && pwd)
+O=$D/build/verify/cmp
+BASE=${BASE:-424e5a4}; CPU=${CPU:-2}; ROUNDS=${ROUNDS:-5}; N=${N:-4194304}; REPS=${REPS:-15}
+VARIANT=${VARIANT:-x86_avx2}
+rm -rf "$O/base"; mkdir -p "$O/base/x86_64"
+if [ -d "$BASE" ]; then              # a directory holding x86_64/*.S, *.h
+  cp "$BASE"/x86_64/*.S "$BASE"/x86_64/*.h "$O/base/x86_64/"
+else
+  for f in $(cd "$D" && git ls-tree --name-only "$BASE" x86_64/ | grep -E '\.(S|h)$'); do
+    (cd "$D" && git show "$BASE:native-kernels/$f" 2>/dev/null || git show "$BASE:$f") > "$O/base/$f"
+  done
+fi
+CF="-O3 -w -I$D/include -I$D/reference-c"
+REF="$D/reference-c/pq_kernels_ref.c $D/reference-c/pq_dispatch.c"
+gcc $CF -o "$O/vb_base" "$D/x86_64/verify/vbench.c" $REF $O/base/x86_64/*.S -lm
+gcc $CF -o "$O/vb_new" "$D/x86_64/verify/vbench.c" $REF $D/x86_64/*.S -lm
+: > "$O/base.jsonl"; : > "$O/new.jsonl"
+i=0
+while [ $i -lt $ROUNDS ]; do
+  taskset -c $CPU "$O/vb_base" $N $REPS $VARIANT "$1" >> "$O/base.jsonl"
+  taskset -c $CPU "$O/vb_new" $N $REPS $VARIANT "$1" >> "$O/new.jsonl"
+  i=$((i+1))
+done
+python3 -I - "$O/base.jsonl" "$O/new.jsonl" <<'PY'
+import sys,json,statistics as st
+def load(p):
+  d={}
+  for l in open(p):
+    r=json.loads(l); d.setdefault(r['kernel'],[]).append((r['ns_per_elem'],r['min_ns']/r['n']))
+  return d
+b,n=load(sys.argv[1]),load(sys.argv[2])
+print('%-20s %8s %8s %7s | %8s %8s %7s' % ('kernel','base','new','speedup','minbase','minnew','speedup'))
+print('%-20s %33s   (median of run medians | min of all reps)' % ('',''))
+for k in b:
+  mb,mn=st.median(x[0] for x in b[k]),st.median(x[0] for x in n[k])
+  ib,inn=min(x[1] for x in b[k]),min(x[1] for x in n[k])
+  print('%-20s %8.4f %8.4f %6.2fx | %8.4f %8.4f %6.2fx' % (k,mb,mn,mb/mn,ib,inn,ib/inn))
+PY

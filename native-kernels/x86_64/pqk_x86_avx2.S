@@ -11,18 +11,31 @@
  *    per-operator mask routine (vop_* / vcmp_*) turns one block into a
  *    64-bit mask (16 x vpcmpeqq/vpcmpgtq on 4 qwords + vmovmskpd); operators
  *    map to (kind, invert), see pqk_x86_avx2.h.
- *  - filter emits indices with an 8-row pdep/pext compress step for full
- *    blocks with a hit, tzcnt/blsr otherwise.
+ *  - filter emits indices 8 rows at a time from a 256-entry table of
+ *    packed bit positions (vpmovzxbd) for full blocks with a hit,
+ *    tzcnt/blsr otherwise. BETWEEN with a <= b is one unsigned range
+ *    compare (kind 4); i128 LT/GT/BETWEEN decide on the high words first.
  *  - Validity in vector loops: the 64-bit validity word of a full block is
  *    broadcast and shifted per lane with vpsllvq (tables shc*) so that the
- *    row's bit lands in the lane's sign bit; vblendvpd consumes it directly,
- *    sums widen it to a lane mask (vpcmpgtq against zero) and AND it with a
- *    plain load. vpmaskmovq/vmaskmovpd are deliberately NOT used (up to 4x
+ *    row's bit lands in the lane's sign bit, which vblendvpd consumes
+ *    directly; the integer sums instead load a lane mask from a small table
+ *    (nibmask / pairmask) indexed by the validity bits (rorx + and on the
+ *    integer side) and AND it with a plain load. vpmaskmovq/vmaskmovpd are deliberately NOT used (up to 4x
  *    slower from DRAM on Zen 5; fault behaviour of masked-off elements is
  *    implementation dependent on AMD). Final partial blocks run scalar code.
- *  - sum_i64 / sum_i128 are exact (lane sums folded into a 128-/192-bit
- *    scalar total per chunk); hash_i64 emulates the 64x64 multiply with
- *    three vpmuludq.
+ *  - sum_i64 / sum_i128 are exact (2^63-biased unsigned lane sums S and
+ *    S >>> 32 folded into a 128-/192-bit scalar total per chunk); hash_i64
+ *    emulates the 64x64 multiply with vpmulld + vpmuludq and runs a
+ *    scalar imul stream in parallel; minmax_i64 / minmax_i128 skip 64-row
+ *    blocks that cannot change the result (quick reject); group_sum_i64
+ *    accumulates {sum, count} pairs in a stack table when no addition can
+ *    wrap; bitmap_popcount combines a Harley-Seal CSA tree with scalar
+ *    POPCNT; gather_i64 prefetches 128 rows ahead.
+ *  - Zen 5 facts that shaped the code (measured): vector integer ops have
+ *    2-cycle latency (so accumulators are split 4 ways); vpaddq / vpand /
+ *    vpxor / vpunpck issue 4 per cycle, but vpcmpgtq, vblendvpd, shifts,
+ *    multiplies, vpshufb and vmovmskpd only 2 per cycle, so their count
+ *    per row decides most compute-bound loops.
  *
  * Layout of this file:
  *   1. constant tables and file-local helpers used by several kernels
@@ -55,13 +68,20 @@
         TAB_SHC
         TAB_EIGHT_D
         TAB_SIGN_D
-        TAB_FMIX_HALVES
+        TAB_FMIX_LO
+        TAB_FMIX_SWAP
         TAB_PINF_NINF
-        TAB_SHC128S
         TAB_SHC128M
         TAB_HIBIAS
         TAB_I64MIN
         TAB_VOP_INV
+        TAB_NIB_LUT
+        TAB_0F
+        TAB_NIBMASK
+        TAB_IDX8
+        TAB_PAIRMASK
+        TAB_SIGN4
+        TAB_SIXTEEN_Q
 
         DEFINE_LVP
 
@@ -72,14 +92,17 @@
         VOP vop_gt, 2, 0
         VOP vop_ge, 1, 1
         VOP vop_bt, 3, 1
-        OPTABLE vop_table, vop
+        VOP vop_rng, 4, 1
+        /* EQ NE LT LE GT GE BETWEEN, PQK_OP_RANGE (BETWEEN with a <= b) */
+        JUMPTABLE vop_table, vop_eq, vop_ne, vop_lt, vop_le, vop_gt, vop_ge, vop_bt, vop_rng
 
         VCNT vcnt_k0, 0
         VCNT vcnt_k1, 1
         VCNT vcnt_k2, 2
         VCNT vcnt_k3, 3
-        /* operator -> kind (EQ NE LT LE GT GE BETWEEN), inversion: vop_inv */
-        JUMPTABLE vcnt_table, vcnt_k0, vcnt_k0, vcnt_k1, vcnt_k2, vcnt_k2, vcnt_k1, vcnt_k3
+        VCNT vcnt_k4, 4
+        /* operator -> kind (EQ NE LT LE GT GE BETWEEN RANGE), inversion: vop_inv */
+        JUMPTABLE vcnt_table, vcnt_k0, vcnt_k0, vcnt_k1, vcnt_k2, vcnt_k2, vcnt_k1, vcnt_k3, vcnt_k4
 
         VOP128 vop128_eq, 0, 0
         VOP128 vop128_ne, 0, 1
@@ -88,13 +111,19 @@
         VOP128 vop128_gt, 2, 0
         VOP128 vop128_ge, 1, 1
         VOP128 vop128_bt, 3, 1
-        OPTABLE vop128_table, vop128
+        VOP128 vop128_rng, 4, 1
+        VOP128F vop128f_lt, 1, 0, vop128_lt     /* high-word fast paths */
+        VOP128F vop128f_le, 2, 1, vop128_le
+        VOP128F vop128f_gt, 2, 0, vop128_gt
+        VOP128F vop128f_ge, 1, 1, vop128_ge
+        JUMPTABLE vop128_table, vop128_eq, vop128_ne, vop128f_lt, vop128f_le, vop128f_gt, vop128f_ge, vop128_bt, vop128_rng
 
         VCNT128 vcnt128_k0, 0
         VCNT128 vcnt128_k1, 1
         VCNT128 vcnt128_k2, 2
         VCNT128 vcnt128_k3, 3
-        JUMPTABLE vcnt128_table, vcnt128_k0, vcnt128_k0, vcnt128_k1, vcnt128_k2, vcnt128_k2, vcnt128_k1, vcnt128_k3
+        VCNT128 vcnt128_k4, 4
+        JUMPTABLE vcnt128_table, vcnt128_k0, vcnt128_k0, vcnt128_k1, vcnt128_k2, vcnt128_k2, vcnt128_k1, vcnt128_k3, vcnt128_k4
 
 /* ========================================================================
  * size_t pqk_x86_avx2_filter_i64(data, validity, n, op, a, b, out_idx)
@@ -105,8 +134,9 @@
  *           (rbx, rbp, r12-r15 saved and restored)
  * Algorithm: VDRIVER: 64-row blocks; vop_<op> builds the block mask, &
  *           validity word; full blocks with a hit emit indices with
- *           EMIT_IDX_COMPRESS8 (pdep/pext, 8 rows per 32-byte store), other
- *           blocks with tzcnt/blsr (EMIT_IDX_BITS).
+ *           EMIT_IDX_COMPRESS8 (bit-position table idx8 + vpmovzxbd, 8 rows
+ *           per 32-byte store), other blocks with tzcnt/blsr
+ *           (EMIT_IDX_BITS). BETWEEN with a <= b: kind 4 (RANGE_SETUP).
  * Tail:     the last block (len < 64) runs through the same loop: vop_*
  *           compares whole vectors while >= 4 rows remain and the last 1..3
  *           rows in scalar code; lvp loads exactly ceil(len/8) bytes.
@@ -142,7 +172,8 @@ ENDF pqk_x86_avx2_filter_i64_bitmap
  *           accumulates the compare results (vpsubq of all-ones lanes,
  *           4 accumulators) over n & ~15 rows; the operator's inversion is
  *           applied once (rows - count). Otherwise (and for the rest) the
- *           block masks of filter_i64 are popcnt-ed.
+ *           block masks of filter_i64 are popcnt-ed. BETWEEN with a <= b
+ *           is kind 4: one vpsubq + vpcmpgtq per 4 rows (RANGE_SETUP).
  * Tail:     the 0..15 rows after the direct counter, or the last block,
  *           through the mask routine (len < 64).
  * ====================================================================== */
@@ -303,43 +334,55 @@ ENDF pqk_x86_avx2_compare_i64
  * int pqk_x86_avx2_sum_i64(data, validity, n, out_sum)
  * Args:     rdi = data, rsi = validity, rdx = n, rcx = out_sum
  * Returns:  eax = PQK_OK (sum stored) or PQK_OVERFLOW (*out_sum untouched)
- * Clobbers: rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, ymm0-ymm7,
- *           ymm10-ymm13, ymm15, flags (rbx, r12 saved and restored)
- * Algorithm: exact: per lane S = sum(x) mod 2^64, HU = sum(x >>> 32) and
- *           N = number of negative x. With LU = sum of the low 32-bit
- *           halves, sum(x) = HU*2^32 + LU - N*2^64 and LU = S - HU*2^32
- *           (mod 2^64, exact while < 2^64). Chunks of at most
- *           SUM_CHUNK_ROWS (2^28) rows keep HU and LU below 2^60; each
- *           chunk is folded (SFOLD) into the 128-bit scalar total r9:r8.
- *           Validity: per full block the word is broadcast (ymm12), shifted
- *           per lane (vpsllvq, table shc) and widened to a lane mask
- *           (vpcmpgtq against zero, ymm15 = 0) that is ANDed with the load.
+ * Clobbers: rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, ymm0-ymm12, flags
+ *           (rbx, rbp, r12, r13 saved and restored)
+ * Algorithm: exact, with biased values: x' = x ^ 2^63 = x + 2^63 is an
+ *           UNSIGNED 64-bit number, and per lane S = sum(x') mod 2^64 and
+ *           U = sum(x' >>> 32) give the exact unsigned lane sum
+ *           U*2^32 + LU with LU = S - U*2^32 (mod 2^64, exact while
+ *           < 2^64). Chunks of at most SUM_CHUNK_ROWS (2^28) rows keep U
+ *           and LU below 2^60; each chunk is folded (SFOLD) into the
+ *           128-bit scalar total r9:r8, and the bias c * 2^63 (c = rows of
+ *           the chunk that went through the vector path, rbp) is
+ *           subtracted. 4 vector ops per 4 rows (xor, add, shift, add)
+ *           instead of 5 with the former "count the negatives" form, and
+ *           only one of them (the shift) on the two Zen 5 shift pipes.
+ *           Four accumulator sets (S ymm0-ymm3, U ymm4-ymm7; vpaddq has
+ *           2-cycle latency on Zen 5), ymm8 = bcast(2^63).
+ *           Validity: invalid rows must contribute exactly 0, so
+ *           x'' = (x ^ 2^63) & lane mask and c counts the valid rows
+ *           (popcnt of the validity words). The lane mask of 4 rows comes
+ *           from the 512-byte table nibmask (16 x 4 qwords), indexed by the
+ *           row nibble of the validity word with rorx + and on the integer
+ *           side (r13 = table base); this replaces vpsllvq + vpcmpgtq
+ *           (two ops on the busy vector pipes) per 4 rows.
  *           Overflow iff hi is not the sign extension of lo (JNE_SEXT).
- *           Lane accumulators (two sets for ILP): S ymm0/ymm1, HU ymm2/ymm3,
- *           N ymm4/ymm5; temps ymm6/ymm7/ymm10/ymm11; r10 = rows remaining,
- *           r11 = out_sum, r12 = rows / blocks left in the chunk.
- * Tail:     no validity: the last 0..7 rows in scalar code (cqo/adc).
+ *           r10 = rows remaining, r11 = out_sum, r12 = rows / blocks left
+ *           in the chunk, rcx = validity word, temps ymm9-ymm12.
+ * Tail:     no validity: 16-row iterations, then 4-row steps (set A),
+ *           then the last 0..3 rows in scalar code (cqo/adc).
  *           Validity: the final partial block (lvp) row by row, scalar.
  * ====================================================================== */
 #ifndef SUM_CHUNK_BLOCKS                /* = SUM_CHUNK_ROWS / 64 */
 #define SUM_CHUNK_BLOCKS (1 << 22)
 #endif
 
-/* SACC x, set, t: accumulate ymm x into accumulator set 0 or 1 (S, HU, N);
- * clobbers x, t. */
-.macro SACC x, set, t
-.if \set == 0
-        vpaddq  \x, %ymm0, %ymm0
-        vpsrlq  $32, \x, \t
-        vpaddq  \t, %ymm2, %ymm2
-        vpsrlq  $63, \x, \x
-        vpaddq  \x, %ymm4, %ymm4
+/* SACC x, set: accumulate the biased vector x into set 0..3 (S ymm<set>,
+ * U ymm<set+4>); clobbers x. */
+.macro SACC2 x, s, u
+        vpaddq  \x, \s, \s
+        vpsrlq  $32, \x, \x
+        vpaddq  \x, \u, \u
+.endm
+.macro SACC x, set
+.if (\set) == 0
+        SACC2   \x, %ymm0, %ymm4
+.elseif (\set) == 1
+        SACC2   \x, %ymm1, %ymm5
+.elseif (\set) == 2
+        SACC2   \x, %ymm2, %ymm6
 .else
-        vpaddq  \x, %ymm1, %ymm1
-        vpsrlq  $32, \x, \t
-        vpaddq  \t, %ymm3, %ymm3
-        vpsrlq  $63, \x, \x
-        vpaddq  \x, %ymm5, %ymm5
+        SACC2   \x, %ymm3, %ymm7
 .endif
 .endm
 
@@ -350,58 +393,87 @@ ENDF pqk_x86_avx2_compare_i64
         vpxor   %xmm3, %xmm3, %xmm3
         vpxor   %xmm4, %xmm4, %xmm4
         vpxor   %xmm5, %xmm5, %xmm5
+        vpxor   %xmm6, %xmm6, %xmm6
+        vpxor   %xmm7, %xmm7, %xmm7
 .endm
 
-/* SFOLD: total(r9:r8) += HU*2^32 + (S - HU*2^32 mod 2^64) - N*2^64.
- * clobbers rax, rcx, rdx, rbx and the accumulators. */
+/* SFOLD: total(r9:r8) += U*2^32 + (S - U*2^32 mod 2^64) - c*2^63 with
+ * c = rbp; rbp = 0. clobbers rax, rcx, rbx, ymm0-ymm7 (zeroed by the
+ * caller's SZERO before reuse), xmm9. */
 .macro SFOLD
         vpaddq  %ymm1, %ymm0, %ymm0
         vpaddq  %ymm3, %ymm2, %ymm2
         vpaddq  %ymm5, %ymm4, %ymm4
-        HSUMQ   %ymm0, %xmm0, %xmm6, %rax       /* S  */
-        HSUMQ   %ymm2, %xmm2, %xmm6, %rcx       /* HU */
-        HSUMQ   %ymm4, %xmm4, %xmm6, %rdx       /* N  */
+        vpaddq  %ymm7, %ymm6, %ymm6
+        vpaddq  %ymm2, %ymm0, %ymm0
+        vpaddq  %ymm6, %ymm4, %ymm4
+        HSUMQ   %ymm0, %xmm0, %xmm9, %rax       /* S  */
+        HSUMQ   %ymm4, %xmm4, %xmm9, %rcx       /* U  */
         mov     %rcx, %rbx
         shl     $32, %rbx
         sub     %rbx, %rax                      /* LU */
-        shr     $32, %rcx                       /* HU >> 32 (before the adds: shr clobbers CF) */
+        shr     $32, %rcx                       /* U >> 32 (before the adds: shr clobbers CF) */
         add     %rax, %r8
         adc     $0, %r9
         add     %rbx, %r8
         adc     %rcx, %r9
-        sub     %rdx, %r9
+        mov     %rbp, %rax                      /* - c * 2^63 */
+        shl     $63, %rax
+        shr     $1, %rbp
+        sub     %rax, %r8
+        sbb     %rbp, %r9
+        xor     %ebp, %ebp
 .endm
 
-#define SAVED %rbx, %r12
+#define SAVED %rbx, %rbp, %r12, %r13
 FUNC pqk_x86_avx2_sum_i64
         PROLOGUE SAVED
         xor     %r8d, %r8d                              /* [check] */
         xor     %r9d, %r9d
+        xor     %ebp, %ebp
         mov     %rcx, %r11
         mov     %rdx, %r10
+        vpbroadcastq c_i64min(%rip), %ymm8
         test    %rsi, %rsi
         jnz     .Lsum_i64_vmain
 .Lsum_i64_chunk:                        /* [main] no validity, per chunk */
-        cmp     $8, %r10
+        cmp     $4, %r10
         jb      .Lsum_i64_tail
         mov     %r10, %r12
-        and     $-8, %r12
         mov     $SUM_CHUNK_ROWS, %eax
         cmp     %rax, %r12
         cmova   %rax, %r12
+        and     $-4, %r12
         sub     %r12, %r10
+        mov     %r12, %rbp                      /* c = rows of the chunk */
         SZERO
-.Lsum_i64_main:                                         /* 8 rows */
-        vmovdqu (%rdi), %ymm6
-        vmovdqu 32(%rdi), %ymm7
-        SACC    %ymm6, 0, %ymm10
-        SACC    %ymm7, 1, %ymm11
-        add     $64, %rdi
-        sub     $8, %r12
-        jnz     .Lsum_i64_main
+        cmp     $16, %r12
+        jb      .Lsum_i64_quad
+.Lsum_i64_main:                                         /* 16 rows */
+        vpxor   (%rdi), %ymm8, %ymm9
+        vpxor   32(%rdi), %ymm8, %ymm10
+        vpxor   64(%rdi), %ymm8, %ymm11
+        vpxor   96(%rdi), %ymm8, %ymm12
+        SACC    %ymm9, 0
+        SACC    %ymm10, 1
+        SACC    %ymm11, 2
+        SACC    %ymm12, 3
+        sub     $-128, %rdi
+        sub     $16, %r12
+        cmp     $16, %r12
+        jae     .Lsum_i64_main
+.Lsum_i64_quad:                                         /* 4 rows */
+        test    %r12, %r12
+        jz      .Lsum_i64_fold
+        vpxor   (%rdi), %ymm8, %ymm9
+        SACC    %ymm9, 0
+        add     $32, %rdi
+        sub     $4, %r12
+        jmp     .Lsum_i64_quad
+.Lsum_i64_fold:
         SFOLD
         jmp     .Lsum_i64_chunk
-.Lsum_i64_tail:                                         /* [tail] 0..7 */
+.Lsum_i64_tail:                                         /* [tail] 0..3 */
         test    %r10, %r10
         jz      .Lsum_i64_result
 .Lsum_i64_row:
@@ -416,18 +488,21 @@ FUNC pqk_x86_avx2_sum_i64
 
 .Lsum_i64_vmain:                        /* [main] validity, 64-row blocks */
         SZERO
-        vpxor   %xmm15, %xmm15, %xmm15
+        lea     nibmask(%rip), %r13
         xor     %r12d, %r12d
 .Lsum_i64_vblk:
         cmp     $64, %r10
         jb      .Lsum_i64_vtail
-        vpbroadcastq (%rsi), %ymm12
+        mov     (%rsi), %rcx
+        popcnt  %rcx, %rax
+        add     %rax, %rbp                      /* c += valid rows */
         .set g, 0
         .rept 16
-        vpsllvq shc+g*32(%rip), %ymm12, %ymm13
-        vpcmpgtq %ymm13, %ymm15, %ymm13         /* 0 > m: full lane mask */
-        vpand   g*32(%rdi), %ymm13, %ymm6
-        SACC    %ymm6, (g % 2), %ymm10
+        rorx    $((4*g - 5) & 63), %rcx, %rax   /* nibble g -> bits 5..8 */
+        and     $0x1e0, %eax                    /* * 32: table entry */
+        vpxor   g*32(%rdi), %ymm8, %ymm9
+        vpand   (%r13,%rax), %ymm9, %ymm9       /* invalid rows -> 0 */
+        SACC    %ymm9, (g % 4)
         .set g, g + 1
         .endr
         add     $512, %rdi
@@ -575,15 +650,26 @@ ENDF pqk_x86_avx2_sum_f64
  * size_t pqk_x86_avx2_minmax_i64(data, validity, n, out_min, out_max)
  * Args:     rdi = data, rsi = validity, rdx = n, rcx = out_min, r8 = out_max
  * Returns:  rax = number of valid rows; *out_min / *out_max written if > 0
- * Clobbers: rax, rdx, rsi, rdi, r9, r10, r11, ymm0-ymm7, ymm12, ymm13,
- *           flags (rbx, r12-r14 saved and restored; rcx is preserved)
- * Algorithm: min accs ymm0/ymm2, max accs ymm1/ymm3 (no 64-bit min/max in
- *           AVX2: vpcmpgtq + vblendvpd, MMI_STEP). With validity the compare
- *           result is ANDed with the vpsllvq sign mask (blendv only looks
+ * Clobbers: rax, rdx, rsi, rdi, r9, r10, r11, ymm0-ymm15,
+ *           flags (rbx, rbp, r12-r15 saved and restored; rcx is preserved)
+ * Algorithm: four accumulator sets, min ymm0/ymm2/ymm8/ymm10, max
+ *           ymm1/ymm3/ymm9/ymm11 (no 64-bit min/max in AVX2: vpcmpgtq +
+ *           vblendvpd, MMI_STEP). Four sets because one set's
+ *           compare -> blend chain is 4 cycles on Zen 5 (2-cycle latency
+ *           each); with the former two sets the loop was latency-bound
+ *           (0.10 -> 0.075 ns/row, L2 and L3). No validity: 64-row blocks
+ *           with a quick reject against the current overall min / max
+ *           (see MM64_GLOBAL), then 32-row iterations, then groups of 4
+ *           rows (set A). A tournament tree (3.5 instead of 4
+ *           compare/blend ops per 4 rows) was measured: no faster.
+ *           ebx/ebp = quick-reject back-off counter / length, r15d = G
+ *           dirty, ymm14/ymm15 = quick-reject constants.
+ *           With validity the compare result is ANDed with the vpsllvq
+ *           sign mask (blendv only looks
  *           at sign bits); the count is popcnt of the validity words.
  *           Scalar parts: r12 = lo, r13 = hi; r14 = count;
  *           r9/r11 = INT64_MAX/MIN; r10 = remaining; rbx = validity bits.
- * Tail:     no validity: 0..7 rows in scalar code. Validity: the final
+ * Tail:     no validity: 0..3 rows in scalar code. Validity: the final
  *           partial block (lvp) in scalar code (cmovnc on VBIT_CF).
  * ====================================================================== */
 
@@ -602,7 +688,66 @@ ENDF pqk_x86_avx2_sum_f64
         vblendvpd %ymm7, \x, \mx, \mx
 .endm
 
-#define SAVED %rbx, %r12, %r13, %r14
+/* Quick reject for the no-validity loop (64-row blocks), as in
+ * minmax_i128 (MM128_BLOCK): G = the current overall min / max over all
+ * lanes and sets is the value of a processed row, so a row with
+ * gmin < x < gmax cannot become the result. As an unsigned range test
+ * (cf. VPRED kind 4): gmin < x < gmax <=> (x - (gmin + 1)) <u W with
+ * W = gmax - gmin - 1 (W = 0, i.e. never, if gmax <= gmin + 1; this also
+ * covers the start values INT64_MAX / INT64_MIN), i.e. one vpsubq + one
+ * vpcmpgtq per 4 rows instead of 2 compares + 2 blends. If all 64 rows of
+ * a block are strictly inside, the block is skipped; otherwise it runs through MMI_STEP and the quick
+ * reject is not tried for the next ebp blocks (ebx counts down; ebp
+ * starts at QR_BACKOFF, doubles after each failed attempt up to
+ * QR_BACKOFF_MAX, reset by a success), so sorted or otherwise
+ * update-heavy data pays < 1%. G is recomputed (MM64_GLOBAL) before an
+ * attempt when a full block ran since the last one (r15d = dirty).
+ * MM64_GLOBAL: G from the 16 lanes of the min sets / max sets, then
+ * ymm14 = bcast((gmin + 1) ^ 2^63), ymm15 = bcast(W ^ 2^63).
+ * in: r11 = 2^63. clobbers rax, rdx, ymm4-ymm7. */
+.macro MM64_RED a, b, dst, rmax
+.if \rmax
+        vpcmpgtq \a, \b, %ymm6                  /* b > a */
+.else
+        vpcmpgtq \b, \a, %ymm6                  /* a > b */
+.endif
+        vblendvpd %ymm6, \b, \a, \dst
+.endm
+.macro MM64_GLOBAL
+        MM64_RED %ymm0, %ymm2, %ymm4, 0
+        MM64_RED %ymm8, %ymm10, %ymm5, 0
+        MM64_RED %ymm4, %ymm5, %ymm4, 0
+        vperm2i128 $0x01, %ymm4, %ymm4, %ymm5
+        MM64_RED %ymm4, %ymm5, %ymm4, 0
+        vpshufd $0x4e, %ymm4, %ymm5
+        MM64_RED %ymm4, %ymm5, %ymm14, 0
+        MM64_RED %ymm1, %ymm3, %ymm4, 1
+        MM64_RED %ymm9, %ymm11, %ymm5, 1
+        MM64_RED %ymm4, %ymm5, %ymm4, 1
+        vperm2i128 $0x01, %ymm4, %ymm4, %ymm5
+        MM64_RED %ymm4, %ymm5, %ymm4, 1
+        vpshufd $0x4e, %ymm4, %ymm5
+        MM64_RED %ymm4, %ymm5, %ymm15, 1
+        vmovq   %xmm14, %rax                    /* gmin */
+        vmovq   %xmm15, %rdx                    /* gmax */
+        cmp     %rax, %rdx
+        jle     .Lmm64g_empty\@                 /* no interior: W = 0 */
+        sub     %rax, %rdx
+        dec     %rdx                            /* W = gmax - gmin - 1 */
+        inc     %rax                            /* gmin + 1 */
+        xor     %r11, %rax
+        vmovq   %rax, %xmm14
+        vpbroadcastq %xmm14, %ymm14             /* (gmin + 1) ^ 2^63 */
+        jmp     .Lmm64g_w\@
+.Lmm64g_empty\@:
+        xor     %edx, %edx
+.Lmm64g_w\@:
+        xor     %r11, %rdx
+        vmovq   %rdx, %xmm15
+        vpbroadcastq %xmm15, %ymm15             /* W ^ 2^63 */
+.endm
+
+#define SAVED %rbx, %rbp, %r12, %r13, %r14, %r15
 FUNC pqk_x86_avx2_minmax_i64
         PROLOGUE SAVED
         movabs  $C_I64MAX, %r9                          /* [check] */
@@ -615,23 +760,129 @@ FUNC pqk_x86_avx2_minmax_i64
         vmovq   %r11, %xmm1
         vpbroadcastq %xmm1, %ymm1
         vmovdqa %ymm1, %ymm3
+        vmovdqa %ymm0, %ymm8
+        vmovdqa %ymm0, %ymm10
+        vmovdqa %ymm1, %ymm9
+        vmovdqa %ymm1, %ymm11
         xor     %r14d, %r14d
         mov     %rdx, %r10
         test    %rsi, %rsi
         jnz     .Lminmax_i64_vmain
         mov     %r10, %r14
-        cmp     $8, %r10
-        jb      .Lminmax_i64_tail
-.Lminmax_i64_main:                                      /* [main] 8 rows */
+        xor     %ebx, %ebx                      /* quick-reject back-off */
+        mov     $QR_BACKOFF, %ebp
+        mov     $1, %r15d                       /* G not computed yet */
+.Lminmax_i64_blk:                                       /* [main] 64 rows */
+        cmp     $64, %r10
+        jb      .Lminmax_i64_rest
+        test    %ebx, %ebx
+        jnz     .Lminmax_i64_plain
+        test    %r15d, %r15d
+        jz      .Lminmax_i64_qr
+        MM64_GLOBAL
+        xor     %r15d, %r15d
+.Lminmax_i64_qr:
+        .set g, 0
+        .rept 16
+        vmovdqu g*32(%rdi), %ymm4
+        vpsubq  %ymm14, %ymm4, %ymm4            /* x - (gmin + 1) ^ 2^63 */
+        vpcmpgtq %ymm4, %ymm15, %ymm12          /* inside (gmin, gmax) */
+        .if g == 0
+        vmovdqa %ymm12, %ymm6
+        .elseif g == 1
+        vmovdqa %ymm12, %ymm7
+        .elseif g % 2
+        vpand   %ymm12, %ymm7, %ymm7
+        .else
+        vpand   %ymm12, %ymm6, %ymm6
+        .endif
+        .set g, g + 1
+        .endr
+        vpand   %ymm7, %ymm6, %ymm6
+        vtestpd c_sign4(%rip), %ymm6            /* CF: all rows inside */
+        jc      .Lminmax_i64_skip
+        mov     %ebp, %ebx                      /* failed: back off */
+        add     %ebp, %ebp
+        mov     $QR_BACKOFF_MAX, %eax
+        cmp     %eax, %ebp
+        cmova   %eax, %ebp
+        jmp     .Lminmax_i64_full
+.Lminmax_i64_plain:
+        dec     %ebx
+.Lminmax_i64_full:
+        mov     $1, %r15d
         vmovdqu (%rdi), %ymm4
         vmovdqu 32(%rdi), %ymm5
+        vmovdqu 64(%rdi), %ymm12
+        vmovdqu 96(%rdi), %ymm13
         MMI_STEP %ymm4, %ymm0, %ymm1, none
         MMI_STEP %ymm5, %ymm2, %ymm3, none
-        add     $64, %rdi
-        sub     $8, %r10
-        cmp     $8, %r10
+        MMI_STEP %ymm12, %ymm8, %ymm9, none
+        MMI_STEP %ymm13, %ymm10, %ymm11, none
+        vmovdqu 128(%rdi), %ymm4
+        vmovdqu 160(%rdi), %ymm5
+        vmovdqu 192(%rdi), %ymm12
+        vmovdqu 224(%rdi), %ymm13
+        MMI_STEP %ymm4, %ymm0, %ymm1, none
+        MMI_STEP %ymm5, %ymm2, %ymm3, none
+        MMI_STEP %ymm12, %ymm8, %ymm9, none
+        MMI_STEP %ymm13, %ymm10, %ymm11, none
+        vmovdqu 256(%rdi), %ymm4
+        vmovdqu 32+256(%rdi), %ymm5
+        vmovdqu 64+256(%rdi), %ymm12
+        vmovdqu 96+256(%rdi), %ymm13
+        MMI_STEP %ymm4, %ymm0, %ymm1, none
+        MMI_STEP %ymm5, %ymm2, %ymm3, none
+        MMI_STEP %ymm12, %ymm8, %ymm9, none
+        MMI_STEP %ymm13, %ymm10, %ymm11, none
+        vmovdqu 128+256(%rdi), %ymm4
+        vmovdqu 160+256(%rdi), %ymm5
+        vmovdqu 192+256(%rdi), %ymm12
+        vmovdqu 224+256(%rdi), %ymm13
+        MMI_STEP %ymm4, %ymm0, %ymm1, none
+        MMI_STEP %ymm5, %ymm2, %ymm3, none
+        MMI_STEP %ymm12, %ymm8, %ymm9, none
+        MMI_STEP %ymm13, %ymm10, %ymm11, none
+        jmp     .Lminmax_i64_next
+.Lminmax_i64_skip:
+        mov     $QR_BACKOFF, %ebp
+.Lminmax_i64_next:
+        add     $512, %rdi
+        sub     $64, %r10
+        jmp     .Lminmax_i64_blk
+.Lminmax_i64_rest:
+        cmp     $32, %r10
+        jb      .Lminmax_i64_quad
+.Lminmax_i64_main:                                      /* 32 rows */
+        vmovdqu (%rdi), %ymm4
+        vmovdqu 32(%rdi), %ymm5
+        vmovdqu 64(%rdi), %ymm12
+        vmovdqu 96(%rdi), %ymm13
+        MMI_STEP %ymm4, %ymm0, %ymm1, none
+        MMI_STEP %ymm5, %ymm2, %ymm3, none
+        MMI_STEP %ymm12, %ymm8, %ymm9, none
+        MMI_STEP %ymm13, %ymm10, %ymm11, none
+        vmovdqu 128(%rdi), %ymm4
+        vmovdqu 160(%rdi), %ymm5
+        vmovdqu 192(%rdi), %ymm12
+        vmovdqu 224(%rdi), %ymm13
+        MMI_STEP %ymm4, %ymm0, %ymm1, none
+        MMI_STEP %ymm5, %ymm2, %ymm3, none
+        MMI_STEP %ymm12, %ymm8, %ymm9, none
+        MMI_STEP %ymm13, %ymm10, %ymm11, none
+        add     $256, %rdi
+        sub     $32, %r10
+        cmp     $32, %r10
         jae     .Lminmax_i64_main
-.Lminmax_i64_tail:                                      /* [tail] 0..7 */
+.Lminmax_i64_quad:                                      /* 4 rows */
+        cmp     $4, %r10
+        jb      .Lminmax_i64_tail
+        vmovdqu (%rdi), %ymm4
+        MMI_STEP %ymm4, %ymm0, %ymm1, none
+        add     $32, %rdi
+        sub     $4, %r10
+        jmp     .Lminmax_i64_quad
+.Lminmax_i64_tail:                                      /* [tail] 0..3 */
         test    %r10, %r10
         jz      .Lminmax_i64_result
 .Lminmax_i64_row:
@@ -654,10 +905,14 @@ FUNC pqk_x86_avx2_minmax_i64
         .rept 16
         vpsllvq shc+g*32(%rip), %ymm12, %ymm13
         vmovdqu g*32(%rdi), %ymm4
-        .if g % 2
-        MMI_STEP %ymm4, %ymm2, %ymm3, %ymm13
-        .else
+        .if g % 4 == 0
         MMI_STEP %ymm4, %ymm0, %ymm1, %ymm13
+        .elseif g % 4 == 1
+        MMI_STEP %ymm4, %ymm2, %ymm3, %ymm13
+        .elseif g % 4 == 2
+        MMI_STEP %ymm4, %ymm8, %ymm9, %ymm13
+        .else
+        MMI_STEP %ymm4, %ymm10, %ymm11, %ymm13
         .endif
         .set g, g + 1
         .endr
@@ -688,6 +943,14 @@ FUNC pqk_x86_avx2_minmax_i64
         dec     %r10
         jnz     .Lminmax_i64_vrow
 .Lminmax_i64_result:                    /* [result] lanes -> r12 / r13 */
+        vpcmpgtq %ymm10, %ymm8, %ymm6           /* sets C, D -> A, B */
+        vblendvpd %ymm6, %ymm10, %ymm8, %ymm8
+        vpcmpgtq %ymm9, %ymm11, %ymm7
+        vblendvpd %ymm7, %ymm11, %ymm9, %ymm9
+        vpcmpgtq %ymm8, %ymm0, %ymm6
+        vblendvpd %ymm6, %ymm8, %ymm0, %ymm0
+        vpcmpgtq %ymm1, %ymm9, %ymm7
+        vblendvpd %ymm7, %ymm9, %ymm1, %ymm1
         vpcmpgtq %ymm2, %ymm0, %ymm6
         vblendvpd %ymm6, %ymm2, %ymm0, %ymm0
         vpcmpgtq %ymm1, %ymm3, %ymm7
@@ -877,13 +1140,91 @@ ENDF pqk_x86_avx2_bitmap_andnot
  * size_t pqk_x86_avx2_bitmap_popcount(bits, nbits)
  * Args:     rdi = bits, rsi = nbits
  * Returns:  rax = number of set bits among the first nbits bits
- * Clobbers: rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, flags
- * Algorithm: POPCNT on 64-bit words, 4 independent accumulators (r8-r11)
- *           over 32 bytes per iteration (beat a vpshufb ymm version on Zen:
- *           4 POPCNT/cycle). rcx = word counter. No vector registers.
- * Tail:     0..3 remaining words one at a time; the last 0..63 bits via lvp
- *           (exactly ceil(rem/8) bytes) + bzhi.
+ * Clobbers: rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, ymm0-ymm15, flags
+ * Algorithm: 640 bytes per iteration, split between the vector and the
+ *           integer units, which run in parallel:
+ *           - 512 bytes (16 ymm) through a Harley-Seal carry-save adder
+ *             tree (CSA): the running "ones/twos/fours/eights" vectors
+ *             (ymm4-ymm7) absorb 16 inputs, and only the resulting
+ *             "sixteens" vector is popcounted (nibble LUT: vpshufb +
+ *             vpsadbw, PCNTV) into ymm0. The CSA is ordered so that each
+ *             running vector sees only one dependent op per step (Zen 5
+ *             vector integer ops have 2-cycle latency).
+ *           - 128 bytes with scalar POPCNT into r8-r11.
+ *           After the loop: total = 16*ymm0 + 8*pc(eights) + 4*pc(fours)
+ *           + 2*pc(twos) + pc(ones). (POPCNT on words alone: 0.0018 ns/bit
+ *           in L2; vpshufb alone 0.0014; this hybrid 0.0010.)
+ *           ymm15 = nibble LUT, ymm14 = bcast(0x0f), ymm13 = 0, temps
+ *           ymm1-ymm3, ymm8-ymm12. rcx = word counter.
+ * Tail:     the last < 80 words with POPCNT one at a time; the last 0..63
+ *           bits via lvp (exactly ceil(rem/8) bytes) + bzhi.
  * ====================================================================== */
+
+/* CSA h, l, b, c: carry-save add of b and c into the running vector l:
+ * l = l ^ b ^ c, h = majority(l, b, c); b ^ c first, so l is on a chain of
+ * one op. clobbers ymm11, ymm12. */
+.macro CSA h, l, b, c
+        vpxor   \b, \c, %ymm12
+        vpand   \b, \c, \h
+        vpand   \l, %ymm12, %ymm11
+        vpxor   \l, %ymm12, \l
+        vpor    %ymm11, \h, \h
+.endm
+/* PCNTV v, acc: acc (4 qwords) += popcount of the bytes of v.
+ * clobbers ymm11, ymm12. */
+.macro PCNTV v, acc
+        vpsrlw  $4, \v, %ymm11
+        vpand   %ymm14, \v, %ymm12
+        vpand   %ymm14, %ymm11, %ymm11
+        vpshufb %ymm12, %ymm15, %ymm12
+        vpshufb %ymm11, %ymm15, %ymm11
+        vpaddb  %ymm11, %ymm12, %ymm12
+        vpsadbw %ymm13, %ymm12, %ymm12
+        vpaddq  %ymm12, \acc, \acc
+.endm
+/* HS8 base, eights: 8 inputs (base..base+7, in ymm) -> ones (ymm4), twos
+ * (ymm5) updated, fours (ymm6) updated, carry into \eights. Each input
+ * load is paired with one scalar POPCNT of the integer part
+ * (POPQ k: word k of the 128 scalar bytes at 512(%rdi)).
+ * clobbers ymm1, ymm2, ymm8-ymm12, rax. */
+.macro POPQ k
+        popcnt  512+8*(\k)(%rdi), %rax
+        .if (\k) % 4 == 0
+        add     %rax, %r8
+        .elseif (\k) % 4 == 1
+        add     %rax, %r9
+        .elseif (\k) % 4 == 2
+        add     %rax, %r10
+        .else
+        add     %rax, %r11
+        .endif
+.endm
+.macro HS8 base, eights
+        vmovdqu 32*(\base)(%rdi), %ymm1
+        POPQ    \base
+        vmovdqu 32*(\base)+32(%rdi), %ymm2
+        POPQ    \base+1
+        CSA     %ymm8, %ymm4, %ymm1, %ymm2      /* twos A */
+        vmovdqu 32*(\base)+64(%rdi), %ymm1
+        POPQ    \base+2
+        vmovdqu 32*(\base)+96(%rdi), %ymm2
+        POPQ    \base+3
+        CSA     %ymm9, %ymm4, %ymm1, %ymm2      /* twos B */
+        CSA     %ymm10, %ymm5, %ymm8, %ymm9     /* fours A */
+        vmovdqu 32*(\base)+128(%rdi), %ymm1
+        POPQ    \base+4
+        vmovdqu 32*(\base)+160(%rdi), %ymm2
+        POPQ    \base+5
+        CSA     %ymm8, %ymm4, %ymm1, %ymm2
+        vmovdqu 32*(\base)+192(%rdi), %ymm1
+        POPQ    \base+6
+        vmovdqu 32*(\base)+224(%rdi), %ymm2
+        POPQ    \base+7
+        CSA     %ymm9, %ymm4, %ymm1, %ymm2
+        CSA     %ymm1, %ymm5, %ymm8, %ymm9      /* fours B */
+        CSA     \eights, %ymm6, %ymm10, %ymm1
+.endm
+
 FUNC pqk_x86_avx2_bitmap_popcount
         xor     %r8d, %r8d                              /* [check] */
         xor     %r9d, %r9d
@@ -891,21 +1232,41 @@ FUNC pqk_x86_avx2_bitmap_popcount
         xor     %r11d, %r11d
         mov     %rsi, %rcx
         shr     $6, %rcx
-        cmp     $4, %rcx
+        cmp     $80, %rcx
         jb      .Lbitmap_popcount_tail
-.Lbitmap_popcount_main:                                 /* [main] 4 words */
-        popcnt  (%rdi), %rax
-        popcnt  8(%rdi), %rdx
-        add     %rax, %r8
-        add     %rdx, %r9
-        popcnt  16(%rdi), %rax
-        popcnt  24(%rdi), %rdx
-        add     %rax, %r10
-        add     %rdx, %r11
-        add     $32, %rdi
-        sub     $4, %rcx
-        cmp     $4, %rcx
+        vbroadcasti128 nib_lut(%rip), %ymm15
+        vpbroadcastb c_0f(%rip), %ymm14
+        vpxor   %xmm13, %xmm13, %xmm13
+        vpxor   %xmm0, %xmm0, %xmm0
+        vpxor   %xmm4, %xmm4, %xmm4
+        vpxor   %xmm5, %xmm5, %xmm5
+        vpxor   %xmm6, %xmm6, %xmm6
+        vpxor   %xmm7, %xmm7, %xmm7
+.Lbitmap_popcount_main:                                 /* [main] 640 bytes */
+        HS8     0, %ymm3                        /* eights A */
+        HS8     8, %ymm2                        /* eights B */
+        CSA     %ymm1, %ymm7, %ymm3, %ymm2      /* sixteens */
+        PCNTV   %ymm1, %ymm0
+        add     $640, %rdi
+        sub     $80, %rcx
+        cmp     $80, %rcx
         jae     .Lbitmap_popcount_main
+        vpsllq  $4, %ymm0, %ymm0                /* 16 * pc(sixteens) */
+        vpxor   %xmm3, %xmm3, %xmm3
+        PCNTV   %ymm7, %ymm3
+        vpsllq  $3, %ymm3, %ymm3
+        vpaddq  %ymm3, %ymm0, %ymm0             /* + 8 * pc(eights) */
+        vpxor   %xmm3, %xmm3, %xmm3
+        PCNTV   %ymm6, %ymm3
+        vpsllq  $2, %ymm3, %ymm3
+        vpaddq  %ymm3, %ymm0, %ymm0             /* + 4 * pc(fours) */
+        vpxor   %xmm3, %xmm3, %xmm3
+        PCNTV   %ymm5, %ymm3
+        vpaddq  %ymm3, %ymm3, %ymm3
+        vpaddq  %ymm3, %ymm0, %ymm0             /* + 2 * pc(twos) */
+        PCNTV   %ymm4, %ymm0                    /* + pc(ones) */
+        HSUMQ   %ymm0, %xmm0, %xmm1, %rax
+        add     %rax, %r8
 .Lbitmap_popcount_tail:                                 /* [tail] words */
         test    %rcx, %rcx
         jz      .Lbitmap_popcount_bits
@@ -929,89 +1290,144 @@ FUNC pqk_x86_avx2_bitmap_popcount
         add     %rax, %r8
 .Lbitmap_popcount_result:                               /* [result] */
         mov     %r8, %rax
-        ret
+        VRET
 ENDF pqk_x86_avx2_bitmap_popcount
 
 /* ========================================================================
  * void pqk_x86_avx2_hash_i64(data, n, seed, out)
  * Args:     rdi = data, rsi = n, rdx = seed, rcx = out
  * Returns:  -
- * Clobbers: rax, rcx, rsi, rdi, r8, r9, r10, ymm0-ymm5, ymm10-ymm14, flags
- * Algorithm: out[i] = fmix64(data[i] ^ seed), 8 rows per iteration in
- *           ymm0/ymm1 (k), temps ymm2-ymm5. AVX2 has no 64-bit multiply,
- *           so k*c = lo*clo + ((hi*clo + lo*chi) << 32) (MUL64, three
- *           vpmuludq). ymm10/11 = C1 low/high dwords, ymm12/13 = C2,
- *           ymm14 = bcast(seed).
- * Tail:     one 4-row vector step, then the last 1..3 rows in scalar code
- *           (FMIX64; r8/r9 = C1/C2, rax/r10 scratch).
+ * Clobbers: rax, rcx, rsi, rdi, r8, r9, r10, r11, ymm0-ymm15, flags
+ *           (rbx, rbp saved and restored)
+ * Algorithm: out[i] = fmix64(data[i] ^ seed), 24 rows per iteration split
+ *           between the vector unit (16 rows: 4 ymm, ymm0-ymm3) and the
+ *           integer unit (8 rows, scalar imul), which run in parallel.
+ *           AVX2 has no 64-bit multiply; k * C (mod 2^64) is
+ *           lo*clo + ((lo*chi + hi*clo) mod 2^32) << 32 (HMUL): one
+ *           vpmulld against the dword-swapped constant (chi, clo) yields
+ *           both cross products, vpsllq / vpand place them in the high
+ *           dword, vpmuludq gives lo*clo (2 multiplies instead of 3, one
+ *           shift instead of two). The four vectors are interleaved step
+ *           by step (each fmix64 is a ~30-cycle dependency chain on Zen 5)
+ *           and the scalar rows are spread between the steps.
+ *           Measured (L1/L2, ns/row): former 3-vpmuludq form 0.34, vpmulld
+ *           form 0.30, hybrid 0.21.
+ *           ymm4-ymm11 temps, ymm12/13 = bcast(clo) of C1/C2, ymm14 =
+ *           bcast(0xffffffff00000000), ymm15 = bcast(seed);
+ *           r8/r9 = C1/C2, rbx = 33 (shrx count), rax/r10 and r11/rbp
+ *           scalar row registers.
+ * Tail:     4-row vector steps, then the last 0..3 rows in scalar code.
  * ====================================================================== */
-.macro XSH33 k, t
+/* HXSH k, t: k ^= k >> 33 (lanes). HMUL k, clo, csw, t1, t2: k *= C
+ * (lanes, mod 2^64), clo = bcast(lo32(C)), csw = (hi32(C), lo32(C)) dword
+ * pairs (memory), ymm14 = high-dword mask. */
+.macro HXSH k, t
         vpsrlq  $33, \k, \t
         vpxor   \t, \k, \k
 .endm
-.macro MUL64 k, clo, chi, t1, t2
-        vpsrlq  $32, \k, \t1
-        vpmuludq \clo, \t1, \t1
-        vpmuludq \chi, \k, \t2
-        vpaddq  \t2, \t1, \t1
-        vpsllq  $32, \t1, \t1
-        vpmuludq \clo, \k, \k
+.macro HMUL k, clo, csw, t1, t2
+        vpmulld \csw, \k, \t1                   /* (lo*chi, hi*clo) */
+        vpsllq  $32, \t1, \t2                   /* lo*chi << 32 */
+        vpmuludq \clo, \k, \k                   /* lo*clo */
+        vpand   %ymm14, \t1, \t1                /* hi*clo << 32 */
+        vpaddq  \t2, \k, \k
         vpaddq  \t1, \k, \k
 .endm
-.macro VFMIX k, t1, t2
-        XSH33   \k, \t1
-        MUL64   \k, %ymm10, %ymm11, \t1, \t2
-        XSH33   \k, \t1
-        MUL64   \k, %ymm12, %ymm13, \t1, \t2
-        XSH33   \k, \t1
+/* The same step on the four vectors ymm0-ymm3 (temps ymm4-ymm11). */
+.macro HXSH4
+        HXSH    %ymm0, %ymm4
+        HXSH    %ymm1, %ymm6
+        HXSH    %ymm2, %ymm8
+        HXSH    %ymm3, %ymm10
+.endm
+.macro HMUL4 clo, csw
+        HMUL    %ymm0, \clo, \csw, %ymm4, %ymm5
+        HMUL    %ymm1, \clo, \csw, %ymm6, %ymm7
+        HMUL    %ymm2, \clo, \csw, %ymm8, %ymm9
+        HMUL    %ymm3, \clo, \csw, %ymm10, %ymm11
+.endm
+/* HROW off, r, t: one scalar row, out[off] = fmix64(data[off] ^ seed). */
+.macro HROW off, r, t
+        mov     \off(%rdi), \r
+        xor     %rdx, \r
+        shrx    %rbx, \r, \t
+        xor     \t, \r
+        imul    %r8, \r
+        shrx    %rbx, \r, \t
+        xor     \t, \r
+        imul    %r9, \r
+        shrx    %rbx, \r, \t
+        xor     \t, \r
+        mov     \r, \off(%rcx)
 .endm
 
+#define SAVED %rbx, %rbp
 FUNC pqk_x86_avx2_hash_i64
-        vpbroadcastq c_fmix1_lo(%rip), %ymm10           /* [check] */
-        vpbroadcastq c_fmix1_hi(%rip), %ymm11
-        vpbroadcastq c_fmix2_lo(%rip), %ymm12
-        vpbroadcastq c_fmix2_hi(%rip), %ymm13
-        vmovq   %rdx, %xmm14
-        vpbroadcastq %xmm14, %ymm14
-        cmp     $8, %rsi
-        jb      .Lhash_i64_tail
-.Lhash_i64_main:                                        /* [main] 8 rows */
-        vpxor   (%rdi), %ymm14, %ymm0
-        vpxor   32(%rdi), %ymm14, %ymm1
-        VFMIX   %ymm0, %ymm2, %ymm3
-        VFMIX   %ymm1, %ymm4, %ymm5
+        PROLOGUE SAVED
+        vpbroadcastq c_fmix1_lo(%rip), %ymm12           /* [check] */
+        vpbroadcastq c_fmix2_lo(%rip), %ymm13
+        vpbroadcastq c_hi32(%rip), %ymm14
+        vmovq   %rdx, %xmm15
+        vpbroadcastq %xmm15, %ymm15
+        FMIX_CONSTS %r8, %r9
+        mov     $33, %ebx
+        cmp     $24, %rsi
+        jb      .Lhash_i64_quad
+.Lhash_i64_main:                                        /* [main] 24 rows */
+        vpxor   (%rdi), %ymm15, %ymm0
+        vpxor   32(%rdi), %ymm15, %ymm1
+        vpxor   64(%rdi), %ymm15, %ymm2
+        vpxor   96(%rdi), %ymm15, %ymm3
+        HXSH4
+        HROW    128, %rax, %r10
+        HMUL4   %ymm12, c_fmix1_sw(%rip)
+        HROW    136, %r11, %rbp
+        HROW    144, %rax, %r10
+        HXSH4
+        HROW    152, %r11, %rbp
+        HMUL4   %ymm13, c_fmix2_sw(%rip)
+        HROW    160, %rax, %r10
+        HROW    168, %r11, %rbp
+        HXSH4
+        HROW    176, %rax, %r10
+        HROW    184, %r11, %rbp
         vmovdqu %ymm0, (%rcx)
         vmovdqu %ymm1, 32(%rcx)
-        add     $64, %rdi
-        add     $64, %rcx
-        sub     $8, %rsi
-        cmp     $8, %rsi
+        vmovdqu %ymm2, 64(%rcx)
+        vmovdqu %ymm3, 96(%rcx)
+        add     $192, %rdi
+        add     $192, %rcx
+        sub     $24, %rsi
+        cmp     $24, %rsi
         jae     .Lhash_i64_main
-.Lhash_i64_tail:                                        /* [tail] 4 rows */
+.Lhash_i64_quad:                                        /* [tail] 4 rows */
         cmp     $4, %rsi
         jb      .Lhash_i64_rows
-        vpxor   (%rdi), %ymm14, %ymm0
-        VFMIX   %ymm0, %ymm2, %ymm3
+        vpxor   (%rdi), %ymm15, %ymm0
+        HXSH    %ymm0, %ymm4
+        HMUL    %ymm0, %ymm12, c_fmix1_sw(%rip), %ymm4, %ymm5
+        HXSH    %ymm0, %ymm4
+        HMUL    %ymm0, %ymm13, c_fmix2_sw(%rip), %ymm4, %ymm5
+        HXSH    %ymm0, %ymm4
         vmovdqu %ymm0, (%rcx)
         add     $32, %rdi
         add     $32, %rcx
         sub     $4, %rsi
+        jmp     .Lhash_i64_quad
 .Lhash_i64_rows:                                        /* 0..3 rows */
         test    %rsi, %rsi
         jz      .Lhash_i64_result
-        FMIX_CONSTS %r8, %r9
 .Lhash_i64_row:
-        mov     (%rdi), %rax
-        xor     %rdx, %rax
-        FMIX64  %rax, %r10, %r8, %r9
-        mov     %rax, (%rcx)
+        HROW    0, %rax, %r10
         add     $8, %rdi
         add     $8, %rcx
         dec     %rsi
         jnz     .Lhash_i64_row
 .Lhash_i64_result:                                      /* [result] */
+        EPILOGUE SAVED
         VRET
 ENDF pqk_x86_avx2_hash_i64
+#undef SAVED
 
 /* ========================================================================
  * void pqk_x86_avx2_compare_fixed(a, b, width, n, out)
@@ -1172,20 +1588,42 @@ ENDF pqk_x86_avx2_compare_fixed
  * Returns:  eax = PQK_OK, PQK_OVERFLOW (some addition wrapped) or
  *           PQK_EINVAL (a valid row's group id >= ngroups; outputs
  *           untouched)
- * Clobbers: rax, rcx, rdx, r10, r11, ymm1-ymm6, flags
- *           (rbx, rbp, r12-r15 saved and restored)
+ * Clobbers: rax, rcx, rdx, r10, r11, ymm0-ymm7, flags
+ *           (rbx, rbp, r12-r15 saved and restored; up to 20 KB of stack
+ *           for the local table)
  * Algorithm: pass 1 (vectorized range check, 8 ids per ymm): unsigned
  *           id >= ngroups <=> (id ^ 2^31) >s ((ngroups-1) ^ 2^31). Without
  *           validity 32 ids are OR-ed and tested with one vptest; with
  *           validity the 8-bit vmovmskps result is ANDed with the row's
  *           validity byte. ngroups > UINT32_MAX skips the check; ngroups ==
- *           0 and the < 8 row tail use the scalar check. Pass 2
- *           (GSUM_PASS2): scalar scatter-add in row order, so the overflow
- *           flag is exactly the reference's.
- *           r10 = row, r11 = ngroups, r12b = overflow flag.
- * Tail:     pass 1: the last < 8 rows in scalar code (VBIT_TEST); pass 2
- *           handles the last partial validity block with lvp + bzhi.
+ *           0 and the < 8 row tail use the scalar check.
+ *           Pass 2, local-table path (no validity, counts != NULL,
+ *           ngroups <= GS_LOCAL_MAX = 1024, n >= 4 * ngroups): the two
+ *           scalar read-modify-writes per row (sums[g], counts[g]) were the
+ *           bottleneck; instead {sum, count} pairs are accumulated in a
+ *           16-byte-per-group table on the stack (zeroed, page-probed), one
+ *           vpaddq read-modify-write of (x, 1) per row, 4 rows per
+ *           iteration built with vpunpck{l,h}qdq. No per-row overflow test:
+ *           the path only commits if no addition can wrap in ANY order,
+ *           i.e. n * max|x| < 2^62 (max|x| bounded by the OR of
+ *           x ^ sign(x), tracked on the fly) and every touched sums[g] is
+ *           in [-2^62, 2^62): then all partial sums stay inside int64, the
+ *           reference would not wrap either, and the result (PQK_OK, sums,
+ *           counts) is identical. The table is then added to sums / counts.
+ *           Otherwise the table is discarded (sums / counts untouched so
+ *           far) and the exact path runs. 0.43 -> 0.29 ns/row on the bench
+ *           (1024 groups).
+ *           Pass 2, exact path (GSUM_PASS2): scalar scatter-add in row
+ *           order, so the overflow flag is exactly the reference's.
+ *           r10 = row, r11 = ngroups, r12b = overflow flag; local path:
+ *           rbp = saved rsp, r13 = table, r14 = row / offset, r15 = rows of
+ *           the 4-row loop, ymm2 = bcast(1), ymm5 = 0, ymm6 = bound.
+ * Tail:     pass 1: the last < 8 rows in scalar code (VBIT_TEST); local
+ *           path: the last 0..3 rows one at a time; exact path: the last
+ *           partial validity block with lvp + bzhi.
  * ====================================================================== */
+#define GS_LOCAL_MAX    1024            /* groups of the local pair table */
+#define GS_LOCAL_PAGES  5               /* 16 * 1024 + 32 bytes, 4 KB probes */
 #define SAVED %rbx, %rbp, %r12, %r13, %r14, %r15
 FUNC pqk_x86_avx2_group_sum_i64
         PROLOGUE SAVED
@@ -1261,6 +1699,16 @@ FUNC pqk_x86_avx2_group_sum_i64
 .Lgroup_sum_i64_pass2:                  /* [main] pass 2 + [tail] */
         test    %rcx, %rcx
         jz      .Lgroup_sum_i64_ok
+        test    %rdx, %rdx              /* local-table path: no validity, */
+        jnz     .Lgroup_sum_i64_exact   /* counts, ngroups <= GS_LOCAL_MAX, */
+        test    %r9, %r9                /* n >= 4 * ngroups */
+        jz      .Lgroup_sum_i64_exact
+        cmp     $GS_LOCAL_MAX, %r11
+        ja      .Lgroup_sum_i64_exact
+        lea     (,%r11,4), %rax
+        cmp     %rax, %rcx
+        jae     .Lgroup_sum_i64_local
+.Lgroup_sum_i64_exact:
         GSUM_PASS2
 .Lgroup_sum_i64_ok:                                     /* [result] */
         movzbl  %r12b, %eax
@@ -1270,6 +1718,121 @@ FUNC pqk_x86_avx2_group_sum_i64
 .Lgroup_sum_i64_ret:
         EPILOGUE SAVED
         VRET
+
+.Lgroup_sum_i64_local:                  /* [main] local pair table */
+        mov     %rsp, %rbp
+        .rept GS_LOCAL_PAGES            /* probe the stack page by page */
+        sub     $4096, %rsp
+        orq     $0, (%rsp)
+        .endr
+        and     $-32, %rsp
+        mov     %rsp, %r13              /* table: 16 * ngroups bytes */
+        vpxor   %xmm0, %xmm0, %xmm0
+        lea     1(%r11), %r10
+        shl     $4, %r10
+        and     $-32, %r10              /* zero ceil(ngroups / 2) * 32 */
+        xor     %r14d, %r14d
+.Lgroup_sum_i64_zero:
+        vmovdqa %ymm0, (%r13,%r14)
+        add     $32, %r14
+        cmp     %r10, %r14
+        jb      .Lgroup_sum_i64_zero
+        mov     $1, %eax
+        vmovq   %rax, %xmm2
+        vpbroadcastq %xmm2, %ymm2       /* count increments */
+        vpxor   %xmm5, %xmm5, %xmm5
+        vpxor   %xmm6, %xmm6, %xmm6     /* bound: OR of x ^ sign(x) */
+        xor     %r14d, %r14d            /* row */
+        mov     %rcx, %r15
+        and     $-4, %r15
+        jz      .Lgroup_sum_i64_ltail
+.Lgroup_sum_i64_lloop:                  /* 4 rows */
+        vmovdqu (%rsi,%r14,8), %ymm3
+        vpcmpgtq %ymm3, %ymm5, %ymm4
+        vpxor   %ymm4, %ymm3, %ymm4
+        vpor    %ymm4, %ymm6, %ymm6
+        vpunpcklqdq %ymm2, %ymm3, %ymm7 /* (x0, 1), (x2, 1) */
+        vpunpckhqdq %ymm2, %ymm3, %ymm3 /* (x1, 1), (x3, 1) */
+        mov     (%rdi,%r14,4), %eax
+        mov     4(%rdi,%r14,4), %r10d
+        mov     8(%rdi,%r14,4), %ebx
+        shl     $4, %eax
+        shl     $4, %r10d
+        shl     $4, %ebx
+        vpaddq  (%r13,%rax), %xmm7, %xmm0
+        vmovdqa %xmm0, (%r13,%rax)
+        mov     12(%rdi,%r14,4), %eax
+        vpaddq  (%r13,%r10), %xmm3, %xmm1
+        vmovdqa %xmm1, (%r13,%r10)
+        shl     $4, %eax
+        vextracti128 $1, %ymm7, %xmm7
+        vextracti128 $1, %ymm3, %xmm3
+        vpaddq  (%r13,%rbx), %xmm7, %xmm0
+        vmovdqa %xmm0, (%r13,%rbx)
+        vpaddq  (%r13,%rax), %xmm3, %xmm1
+        vmovdqa %xmm1, (%r13,%rax)
+        add     $4, %r14
+        cmp     %r15, %r14
+        jb      .Lgroup_sum_i64_lloop
+.Lgroup_sum_i64_ltail:                  /* [tail] 0..3 rows */
+        cmp     %rcx, %r14
+        jae     .Lgroup_sum_i64_bound
+        vmovq   (%rsi,%r14,8), %xmm3
+        vpcmpgtq %xmm3, %xmm5, %xmm4
+        vpxor   %xmm4, %xmm3, %xmm4
+        vpor    %ymm4, %ymm6, %ymm6
+        vpunpcklqdq %xmm2, %xmm3, %xmm3
+        mov     (%rdi,%r14,4), %eax
+        shl     $4, %eax
+        vpaddq  (%r13,%rax), %xmm3, %xmm0
+        vmovdqa %xmm0, (%r13,%rax)
+        inc     %r14
+        jmp     .Lgroup_sum_i64_ltail
+.Lgroup_sum_i64_bound:                  /* no wrap possible in any order? */
+        vextracti128 $1, %ymm6, %xmm4
+        vpor    %xmm4, %xmm6, %xmm6
+        vpshufd $0x4e, %xmm6, %xmm4
+        vpor    %xmm4, %xmm6, %xmm6
+        vmovq   %xmm6, %rax
+        or      $1, %rax
+        bsr     %rax, %rax              /* |x| <= 2^(rax + 1) */
+        mov     %rcx, %r10
+        or      $1, %r10
+        bsr     %r10, %r10              /* n < 2^(r10 + 1) */
+        add     %r10, %rax
+        cmp     $60, %rax               /* n * max|x| < 2^62 */
+        ja      .Lgroup_sum_i64_lfail
+        movabs  $(1 << 62), %r10
+        movabs  $C_SIGN64, %rbx
+        xor     %r14d, %r14d
+.Lgroup_sum_i64_lcheck:                 /* touched groups: |sums[g]| < 2^62 */
+        cmpq    $0, 8(%r13,%r14,2)
+        je      .Lgroup_sum_i64_lcnext
+        mov     (%r8,%r14), %rax
+        add     %r10, %rax
+        cmp     %rbx, %rax              /* sums[g] + 2^62 <u 2^63 */
+        jae     .Lgroup_sum_i64_lfail
+.Lgroup_sum_i64_lcnext:
+        add     $8, %r14
+        lea     (,%r11,8), %rax
+        cmp     %rax, %r14
+        jb      .Lgroup_sum_i64_lcheck
+        xor     %r14d, %r14d
+.Lgroup_sum_i64_merge:                  /* exact: sums[g] += local, no wrap */
+        mov     (%r13,%r14,2), %rax
+        add     %rax, (%r8,%r14)
+        mov     8(%r13,%r14,2), %rax
+        add     %rax, (%r9,%r14)
+        add     $8, %r14
+        lea     (,%r11,8), %rax
+        cmp     %rax, %r14
+        jb      .Lgroup_sum_i64_merge
+        mov     %rbp, %rsp
+        xor     %r12d, %r12d            /* no addition wrapped */
+        jmp     .Lgroup_sum_i64_ok
+.Lgroup_sum_i64_lfail:                  /* bound not met: exact path */
+        mov     %rbp, %rsp
+        jmp     .Lgroup_sum_i64_exact
 ENDF pqk_x86_avx2_group_sum_i64
 #undef SAVED
 
@@ -1277,17 +1840,82 @@ ENDF pqk_x86_avx2_group_sum_i64
  * void pqk_x86_avx2_gather_i64(data, idx, m, out)
  * Args:     rdi = data, rsi = idx, rdx = m, rcx = out
  * Returns:  -
- * Clobbers: rax, rcx, rdx, rsi, r8, r9, r10, flags
- * Algorithm: GATHER_I64 8: 8 independent scalar load pairs per iteration
- *           (idx zero-extended by the 32-bit mov, so indices >= 2^31 are
- *           fine). vpgatherqq was measured: ~5% faster when data is cache
- *           resident, but 15-20% slower from DRAM (random access is latency
- *           bound; the gather exposes less memory-level parallelism on
- *           Zen 5), so plain loads are used. No vector registers.
- * Tail:     0..7 single rows.
+ * Clobbers: rax, rcx, rdx, rsi, r8, r9, r10, r11, flags
+ * Algorithm: plain scalar loads, 8 rows per iteration (idx zero-extended by
+ *           the 32-bit mov, so indices >= 2^31 are fine). vpgatherqq was
+ *           measured: ~5% faster when data is cache resident, but 15-20%
+ *           slower from DRAM, so it is not used.
+ *           The loop is latency-bound (random rows); the out-of-order window
+ *           alone keeps too few misses in flight, so rows j+GATHER_PF ..
+ *           j+GATHER_PF+7 are software-prefetched (prefetcht0 at
+ *           data + 8 * idx[j + GATHER_PF]) while rows j..j+7 are loaded.
+ *           Measured with the bench's 32 MB column (noisy host, ns/row):
+ *           DRAM-bound CCD 2.9-7.1 -> 1.8-2.5; L3-resident about unchanged
+ *           (0.71-0.79). Distances 32..512 rows were tried: 256 is best
+ *           from DRAM but costs ~10% when the column is L3-resident; 128
+ *           is neutral there and still 2-3x from DRAM.
+ *           Prefetch never faults, but the look-ahead idx loads must stay
+ *           inside idx, so the prefetching loop stops GATHER_PF rows before
+ *           the end. r11 = rows for the prefetching loop.
+ *           When the rows are cache resident the extra loads cost ~40%
+ *           (L2: 0.21 -> 0.29 ns/row), so the prefetching loop only runs
+ *           if 16 indices sampled across idx (k * m / 16) reach
+ *           GATHER_PF_MINIDX (the gathered span is then >= 4 MB).
+ * Tail:     the last >= GATHER_PF rows (or all rows if m is small) with
+ *           GATHER_I64 8 (8-row iterations, then 0..7 single rows).
  * ====================================================================== */
+#define GATHER_PF 128
+#define GATHER_PF_MINIDX (1 << 19)      /* sampled max index: 4 MB of rows */
 FUNC pqk_x86_avx2_gather_i64
-        GATHER_I64 8                    /* [check] m < 8 -> [tail] */
+        mov     %rdx, %r11                              /* [check] */
+        sub     $GATHER_PF, %r11
+        jbe     .Lgather_i64_rest
+        and     $-8, %r11
+        jz      .Lgather_i64_rest
+        mov     %rdx, %r8               /* sample idx[k * (m / 16)], k < 16 */
+        shr     $4, %r8
+        xor     %r9d, %r9d              /* sample position */
+        xor     %r10d, %r10d            /* max sampled index */
+        .rept 16
+        mov     (%rsi,%r9,4), %eax
+        cmp     %r10d, %eax
+        cmova   %eax, %r10d
+        add     %r8, %r9
+        .endr
+        cmp     $GATHER_PF_MINIDX, %r10d
+        jb      .Lgather_i64_rest       /* small span: cache-resident */
+        sub     %r11, %rdx
+.Lgather_i64_pf:                        /* [main] 8 rows + prefetch ahead */
+        .set q, 0
+        .rept 2
+        mov     GATHER_PF*4+q*16(%rsi), %eax
+        mov     GATHER_PF*4+q*16+4(%rsi), %r8d
+        mov     GATHER_PF*4+q*16+8(%rsi), %r9d
+        mov     GATHER_PF*4+q*16+12(%rsi), %r10d
+        prefetcht0 (%rdi,%rax,8)
+        prefetcht0 (%rdi,%r8,8)
+        prefetcht0 (%rdi,%r9,8)
+        prefetcht0 (%rdi,%r10,8)
+        mov     q*16(%rsi), %eax
+        mov     q*16+4(%rsi), %r8d
+        mov     q*16+8(%rsi), %r9d
+        mov     q*16+12(%rsi), %r10d
+        mov     (%rdi,%rax,8), %rax
+        mov     (%rdi,%r8,8), %r8
+        mov     (%rdi,%r9,8), %r9
+        mov     (%rdi,%r10,8), %r10
+        mov     %rax, q*32(%rcx)
+        mov     %r8, q*32+8(%rcx)
+        mov     %r9, q*32+16(%rcx)
+        mov     %r10, q*32+24(%rcx)
+        .set q, q + 1
+        .endr
+        add     $32, %rsi
+        add     $64, %rcx
+        sub     $8, %r11
+        jnz     .Lgather_i64_pf
+.Lgather_i64_rest:                                      /* [tail] */
+        GATHER_I64 8
         ret                             /* [result] */
 ENDF pqk_x86_avx2_gather_i64
 
@@ -1303,13 +1931,19 @@ ENDF pqk_x86_avx2_gather_i64
  *           8(%rsp) = out_idx
  * Returns:  rax = number of indices written; (size_t)-1 for an invalid op
  *           (then a and b are not dereferenced)
- * Clobbers: rax, rcx, rdx, rsi, rdi, r10, r11, ymm0-ymm5, ymm8-ymm14, flags
+ * Clobbers: rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, ymm0-ymm5,
+ *           ymm8-ymm14, flags
  *           (rbx, rbp, r12-r15 saved and restored)
  * Algorithm: VDRIVER128: 64-row blocks; vop128_<op> evaluates groups of 4
  *           de-interleaved rows (VG128: 3 compares + blend per 128-bit
  *           predicate), NIBFIX restores row order; mask & validity word;
  *           emission as filter_i64 (EMIT_IDX_COMPRESS8 / tzcnt-blsr; the
  *           32-byte stores stay inside out_idx since outputs <= rows).
+ *           LT/LE/GT/GE use vop128f_<op> (VOP128F): full blocks are first
+ *           decided on the high words alone (2 compares per group); a
+ *           block with a row whose high word equals a.hi goes to the exact
+ *           routine (back-off in r8d/r9d). BETWEEN with a <= b uses kind 4
+ *           (one unsigned 128-bit range test, RANGE128_SETUP).
  * Tail:     last block: whole groups while >= 4 rows remain, then 1..3
  *           single rows as 16-byte xmm loads; lvp for the validity bytes.
  * ====================================================================== */
@@ -1321,12 +1955,16 @@ ENDF pqk_x86_avx2_filter_i128
  * size_t pqk_x86_avx2_count_i128(data, validity, n, op, a, b)
  * Args:     rdi = data, rsi = validity, rdx = n, ecx = op, r8 = &a, r9 = &b
  * Returns:  rax = number of valid rows satisfying op; (size_t)-1 if invalid
- * Clobbers: rax, rcx, rdx, rsi, rdi, r10, r11, ymm0-ymm4, ymm6, ymm8-ymm15,
+ * Clobbers: rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, ymm0-ymm15,
  *           flags (rbx, rbp, r12-r15 saved and restored)
  * Algorithm: VDRIVER128: without validity the direct counter
  *           vcnt128_<kind> (vpsubq of all-ones lanes, two accumulators) over
  *           n & ~3 rows, inversion applied once (rows - count); otherwise
- *           the block masks of filter_i128 are popcnt-ed.
+ *           the block masks of filter_i128 are popcnt-ed. BETWEEN with
+ *           a <= b is kind 4 (unsigned 128-bit range test). Kinds 1, 2, 4
+ *           count 64-row blocks on the high words first (VCNT128_HI, 2
+ *           compares per group) and recount a block exactly only if a row
+ *           is undecided (high word equal to a bound), with back-off.
  * Tail:     the 1..3 rows after the direct counter, or the last block,
  *           through the mask routine.
  * ====================================================================== */
@@ -1339,8 +1977,8 @@ ENDF pqk_x86_avx2_count_i128
  * Args:     rdi = data, rsi = validity, rdx = n, rcx = out_sum
  * Returns:  eax = PQK_OK (sum stored) or PQK_OVERFLOW (*out_sum untouched)
  * Clobbers: rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, ymm0, ymm1,
- *           ymm4-ymm10, flags (rbx, rbp, r12 saved and restored; 8 bytes of
- *           stack hold out_sum)
+ *           ymm4-ymm8, ymm11-ymm14, flags (rbx, rbp, r12, r13 saved and
+ *           restored; 8 bytes of stack hold out_sum)
  * Algorithm: exact sum with overflow detection beyond 128 bits. Each 32-byte
  *           load v = [lo_r, hi_r, lo_r+1, hi_r+1] is treated as four
  *           UNSIGNED 64-bit words after biasing the high words:
@@ -1354,21 +1992,33 @@ ENDF pqk_x86_avx2_count_i128
  *           vector path; invalid ones are zeroed BEFORE the bias, so they
  *           contribute exactly 2^127 each). Overflow iff T's top word is not
  *           the sign extension of its middle word (JNE_SEXT).
- *           Validity: per full block the word is broadcast (ymm9), vpsllvq
- *           (table shc128s) moves each row's bit into the sign bits of its
- *           two lanes, vpcmpgtq against zero (ymm10) widens it to a lane
- *           mask, which is ANDed with the load.
+ *           Four accumulator sets (vpaddq has 2-cycle latency on Zen 5;
+ *           with the former two sets the loop was latency-bound).
+ *           Validity: per full block the word is loaded into rcx; the lane
+ *           mask of each 2-row load comes from the table pairmask, indexed
+ *           with rorx + and on the integer side (r13 = table base), and is
+ *           ANDed with the load.
  *           rdi = row ptr, rsi = validity ptr, r11 = rows remaining, r12 =
  *           chunk counter, rbx = cnt, rbp = tail validity word, (%rsp) =
- *           out_sum; ymm4/ymm5 = S0/S1, ymm6/ymm7 = H0/H1, ymm8 = c_hibias.
+ *           out_sum; S0-S3 = ymm4, ymm5, ymm11, ymm12, H0-H3 = ymm6,
+ *           ymm7, ymm13, ymm14, ymm8 = c_hibias.
  * Tail:     < 8 rows without validity, or the final partial 64-row block
  *           with validity (lvp): added in scalar code, sign-extended to
  *           192 bits (add/adc/adc; invalid rows masked by VBIT_MASK).
  * ====================================================================== */
 
-/* fold128 (sum_i128 only): T += exact value of (S0+S1, H0+H1); zeroes
- * ymm4-ymm7. clobbers rax, rcx, rdx, xmm0, xmm1. */
+/* fold128 (sum_i128 only): T += exact value of (S0+S1+S2+S3,
+ * H0+H1+H2+H3); zeroes ymm4-ymm7, ymm11-ymm14. clobbers rax, rcx, rdx,
+ * xmm0, xmm1. */
 LFUNC fold128
+        vpaddq  %ymm11, %ymm4, %ymm4    /* sets C, D -> A, B */
+        vpaddq  %ymm12, %ymm5, %ymm5
+        vpaddq  %ymm13, %ymm6, %ymm6
+        vpaddq  %ymm14, %ymm7, %ymm7
+        vpxor   %xmm11, %xmm11, %xmm11
+        vpxor   %xmm12, %xmm12, %xmm12
+        vpxor   %xmm13, %xmm13, %xmm13
+        vpxor   %xmm14, %xmm14, %xmm14
         vpaddq  %ymm5, %ymm4, %ymm4
         vpaddq  %ymm7, %ymm6, %ymm6
         vextracti128 $1, %ymm4, %xmm0
@@ -1380,12 +2030,16 @@ LFUNC fold128
 ENDF fold128
 
 /* SV128 off, s, h, valid, k: one 32-byte load (2 rows) into S\s / H\h;
- * valid = 1: masked with validity pair k (shc128s). clobbers ymm0. */
+ * valid = 1: masked with validity pair k: the lane mask of the 2 rows
+ * comes from the table pairmask (4 x 32 bytes), indexed by bits 2k, 2k+1
+ * of the validity word rcx (rorx + and; r13 = table base), instead of
+ * vpsllvq + vpcmpgtq on the vector pipes. clobbers ymm0, rax. */
 .macro SV128 off, s, h, valid, k
 .if \valid
-        vpsllvq shc128s+32*\k(%rip), %ymm9, %ymm0
-        vpcmpgtq %ymm0, %ymm10, %ymm0   /* sign -> lane mask */
-        vpand   \off(%rdi), %ymm0, %ymm0
+        rorx    $((2*(\k) - 5) & 63), %rcx, %rax   /* bits 2k, 2k+1 -> 5, 6 */
+        and     $0x60, %eax
+        vmovdqu \off(%rdi), %ymm0
+        vpand   (%r13,%rax), %ymm0, %ymm0
         vpxor   %ymm8, %ymm0, %ymm0
 .else
         vpxor   \off(%rdi), %ymm8, %ymm0
@@ -1395,7 +2049,7 @@ ENDF fold128
         vpaddq  %ymm0, %ymm\h, %ymm\h
 .endm
 
-#define SAVED %rbx, %rbp, %r12
+#define SAVED %rbx, %rbp, %r12, %r13
 FUNC pqk_x86_avx2_sum_i128
         PROLOGUE SAVED
         push    %rcx                    /* (%rsp) = out_sum */
@@ -1409,7 +2063,10 @@ FUNC pqk_x86_avx2_sum_i128
         vpxor   %xmm5, %xmm5, %xmm5
         vpxor   %xmm6, %xmm6, %xmm6
         vpxor   %xmm7, %xmm7, %xmm7
-        vpxor   %xmm10, %xmm10, %xmm10
+        vpxor   %xmm11, %xmm11, %xmm11
+        vpxor   %xmm12, %xmm12, %xmm12
+        vpxor   %xmm13, %xmm13, %xmm13
+        vpxor   %xmm14, %xmm14, %xmm14
         test    %rsi, %rsi
         jnz     .Lsum_i128_vmain
         cmp     $8, %r11
@@ -1418,8 +2075,8 @@ FUNC pqk_x86_avx2_sum_i128
 .Lsum_i128_main:                                        /* [main] 8 rows */
         SV128   0, 4, 6, 0, 0
         SV128   32, 5, 7, 0, 0
-        SV128   64, 4, 6, 0, 0
-        SV128   96, 5, 7, 0, 0
+        SV128   64, 11, 13, 0, 0
+        SV128   96, 12, 14, 0, 0
         sub     $-128, %rdi
         add     $8, %rbx
         sub     $8, %r11
@@ -1434,16 +2091,21 @@ FUNC pqk_x86_avx2_sum_i128
         jmp     .Lsum_i128_tail
 .Lsum_i128_vmain:                       /* [main] validity, 64-row blocks */
         mov     $(SUM128_CHUNK_ROWS / 64), %r12d
+        lea     pairmask(%rip), %r13
 .Lsum_i128_vblk:
         cmp     $64, %r11
         jb      .Lsum_i128_vend
-        vpbroadcastq (%rsi), %ymm9
+        mov     (%rsi), %rcx
         .set k, 0
         .rept 32
-        .if k % 2
-        SV128   k*32, 5, 7, 1, k
-        .else
+        .if k % 4 == 0
         SV128   k*32, 4, 6, 1, k
+        .elseif k % 4 == 1
+        SV128   k*32, 5, 7, 1, k
+        .elseif k % 4 == 2
+        SV128   k*32, 11, 13, 1, k
+        .else
+        SV128   k*32, 12, 14, 1, k
         .endif
         .set k, k + 1
         .endr
@@ -1540,7 +2202,7 @@ ENDF pqk_x86_avx2_sum_i128
         vmovdqu \off+32(%rdi), %ymm1
         vpunpckhqdq %ymm1, %ymm0, %ymm2         /* H */
         vpunpcklqdq %ymm1, %ymm0, %ymm0
-        vpxor   %ymm12, %ymm0, %ymm0            /* L' */
+        vpxor   c_sign4(%rip), %ymm0, %ymm0     /* L' */
         vpcmpgtq %ymm2, %ymm\mnh, %ymm1
         vpcmpeqq %ymm2, %ymm\mnh, %ymm3
         vpcmpgtq %ymm0, %ymm\mnl, %ymm15
@@ -1568,6 +2230,138 @@ ENDF pqk_x86_avx2_sum_i128
 .Lmmg_skip\@:
 .endm
 
+/* MM128_BLOCK valid, k: one full 64-row block (16 groups, sets A/B
+ * alternating) at (%rdi), with a quick reject first. G = the current
+ * overall min/max (over all lanes of A and B) is a value of a processed
+ * valid row; a row x with G.min < x < G.max can therefore not become the
+ * result, whichever lane it is in. On the high words alone: if every row
+ * of the block (valid or not) has gminH < hi < gmaxH, where gminH /
+ * gmaxH are the high words of G.min / G.max (= min of the lanes' minH /
+ * max of the lanes' maxH), the block is skipped. As an unsigned range test
+ * (cf. MM64_GLOBAL): (hi - (gminH + 1)) <u gmaxH - gminH - 1, one vpsubq +
+ * one vpcmpgtq per group instead of ~10 compare/blend ops. gminH / gmaxH are recomputed (GLOBAL_HI) before a quick
+ * reject when a full block ran since the last one (r13d = dirty flag);
+ * while no valid row has been seen they are INT64_MAX / INT64_MIN and the
+ * test fails. If the test fails, the block runs through MMG128 (exact,
+ * validity applied) and the quick reject is not tried for the next r14d
+ * blocks (r12d counts down); r14d starts at QR_BACKOFF, doubles after each
+ * failed attempt up to QR_BACKOFF_MAX and is reset by a successful one.
+ * This bounds its cost on data where it never succeeds (e.g. all high
+ * words equal) to < 1%.
+ * valid = 1: ymm13 = bcast(validity word). 0(%rsp) = bcast((gminH + 1) ^
+ * 2^63), ymm12 = bcast(W ^ 2^63). clobbers ymm0-ymm3, ymm14, ymm15, rax,
+ * rcx, rdx. */
+/* GLOBAL_HI: gminH = min of the 8 lanes of ymm5, ymm9, gmaxH = max of the
+ * 8 lanes of ymm7, ymm11; 0(%rsp) = bcast((gminH + 1) ^ 2^63), ymm12 =
+ * bcast(W ^ 2^63), W = gmaxH - gminH - 1 or 0 if gmaxH <= gminH + 1.
+ * clobbers ymm0-ymm3, rax, rcx, rdx. */
+.macro HMIN8 a, b, rmax
+.if \rmax
+        vpcmpgtq \a, \b, %ymm0                  /* b > a */
+.else
+        vpcmpgtq \b, \a, %ymm0                  /* a > b */
+.endif
+        vblendvpd %ymm0, \b, \a, %ymm1          /* -> ymm1 */
+        vextracti128 $1, %ymm1, %xmm2
+.if \rmax
+        vpcmpgtq %xmm1, %xmm2, %xmm0
+.else
+        vpcmpgtq %xmm2, %xmm1, %xmm0
+.endif
+        vblendvpd %xmm0, %xmm2, %xmm1, %xmm1
+        vpshufd $0x4e, %xmm1, %xmm2
+.if \rmax
+        vpcmpgtq %xmm1, %xmm2, %xmm0
+.else
+        vpcmpgtq %xmm2, %xmm1, %xmm0
+.endif
+        vblendvpd %xmm0, %xmm2, %xmm1, %xmm1
+        vpbroadcastq %xmm1, %ymm1
+.endm
+.macro GLOBAL_HI
+        HMIN8   %ymm5, %ymm9, 0
+        vmovq   %xmm1, %rcx                     /* gminH */
+        HMIN8   %ymm7, %ymm11, 1
+        vmovq   %xmm1, %rdx                     /* gmaxH */
+        movabs  $C_SIGN64, %rax
+        cmp     %rcx, %rdx
+        jle     .Lghi_empty\@                   /* no interior: W = 0 */
+        sub     %rcx, %rdx
+        dec     %rdx                            /* W = gmaxH - gminH - 1 */
+        inc     %rcx
+        xor     %rax, %rcx
+        vmovq   %rcx, %xmm1
+        vpbroadcastq %xmm1, %ymm1
+        vmovdqu %ymm1, (%rsp)                   /* (gminH + 1) ^ 2^63 */
+        jmp     .Lghi_w\@
+.Lghi_empty\@:
+        xor     %edx, %edx
+.Lghi_w\@:
+        xor     %rax, %rdx
+        vmovq   %rdx, %xmm12
+        vpbroadcastq %xmm12, %ymm12             /* W ^ 2^63 */
+.endm
+.macro MM128_BLOCK valid, k
+        test    %r12d, %r12d
+        jnz     .L\k\()_plain
+        test    %r13d, %r13d
+        jz      .L\k\()_qr
+        GLOBAL_HI
+        xor     %r13d, %r13d
+.L\k\()_qr:
+        .set g, 0
+        .rept 16
+        vmovdqu g*64(%rdi), %ymm0
+        vpunpckhqdq g*64+32(%rdi), %ymm0, %ymm2 /* H */
+        vpsubq  (%rsp), %ymm2, %ymm2
+        vpcmpgtq %ymm2, %ymm12, %ymm3           /* gminH < H < gmaxH */
+        .if g == 0
+        vmovdqa %ymm3, %ymm15
+        .elseif g == 1
+        vmovdqa %ymm3, %ymm1
+        .elseif g % 2
+        vpand   %ymm3, %ymm1, %ymm1
+        .else
+        vpand   %ymm3, %ymm15, %ymm15
+        .endif
+        .set g, g + 1
+        .endr
+        vpand   %ymm1, %ymm15, %ymm15
+        vtestpd c_sign4(%rip), %ymm15           /* CF: all sign bits set */
+        jc      .L\k\()_skip                    /* all rows strictly inside */
+        mov     %r14d, %r12d                    /* failed: back off */
+        add     %r14d, %r14d
+        mov     $QR_BACKOFF_MAX, %eax
+        cmp     %eax, %r14d
+        cmova   %eax, %r14d
+        jmp     .L\k\()_full
+.L\k\()_plain:
+        dec     %r12d
+.L\k\()_full:
+        mov     $1, %r13d
+        .set g, 0
+        .rept 16
+        .if \valid
+        .if g % 2
+        MMG128  g*64, 8, 9, 10, 11, 1, shc128m+32*g(%rip)
+        .else
+        MMG128  g*64, 4, 5, 6, 7, 1, shc128m+32*g(%rip)
+        .endif
+        .else
+        .if g % 2
+        MMG128  g*64, 8, 9, 10, 11, 0
+        .else
+        MMG128  g*64, 4, 5, 6, 7, 0
+        .endif
+        .endif
+        .set g, g + 1
+        .endr
+        jmp     .L\k\()_done
+.L\k\()_skip:
+        mov     $QR_BACKOFF, %r14d
+.L\k\()_done:
+.endm
+
 #define SAVED %rbx, %rbp, %r12, %r13, %r14, %r15
 FUNC pqk_x86_avx2_minmax_i128
         PROLOGUE SAVED
@@ -1585,14 +2379,25 @@ FUNC pqk_x86_avx2_minmax_i128
         vmovdqa %ymm12, %ymm10
         vmovdqa %ymm12, %ymm11
         xor     %ebx, %ebx
+        xor     %r12d, %r12d            /* quick-reject back-off counter */
+        mov     $1, %r13d               /* G not computed yet */
+        mov     $QR_BACKOFF, %r14d
         mov     %rdx, %r11
         test    %rsi, %rsi
         jnz     .Lminmax_i128_vmain
         mov     %r11, %rbx              /* count = n */
         mov     $-1, %rbp               /* tail rows all valid */
+.Lminmax_i128_blk:                                      /* [main] 64 rows */
+        cmp     $64, %r11
+        jb      .Lminmax_i128_rest
+        MM128_BLOCK 0, minmax_i128_nb
+        add     $1024, %rdi
+        sub     $64, %r11
+        jmp     .Lminmax_i128_blk
+.Lminmax_i128_rest:
         cmp     $8, %r11
         jb      .Lminmax_i128_tail
-.Lminmax_i128_main:                                     /* [main] 8 rows */
+.Lminmax_i128_main:                                     /* 8 rows */
         MMG128  0, 4, 5, 6, 7, 0
         MMG128  64, 8, 9, 10, 11, 0
         sub     $-128, %rdi
@@ -1615,15 +2420,7 @@ FUNC pqk_x86_avx2_minmax_i128
         popcnt  %rbp, %rax
         add     %rax, %rbx
         vpbroadcastq (%rsi), %ymm13
-        .set g, 0
-        .rept 16
-        .if g % 2
-        MMG128  g*64, 8, 9, 10, 11, 1, shc128m+32*g(%rip)
-        .else
-        MMG128  g*64, 4, 5, 6, 7, 1, shc128m+32*g(%rip)
-        .endif
-        .set g, g + 1
-        .endr
+        MM128_BLOCK 1, minmax_i128_vb
         add     $1024, %rdi
         add     $8, %rsi
         sub     $64, %r11

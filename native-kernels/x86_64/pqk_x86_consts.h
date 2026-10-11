@@ -28,7 +28,6 @@
 #define C_BITS_2OF4     0x3333333333333333      /* low 2 bits of every nibble */
 #define C_NIBBLE_LO     0x0f0f0f0f0f0f0f0f      /* low nibble of every byte */
 #define C_BYTE_ONES     0x0101010101010101      /* bit 0 of every byte */
-#define C_BYTE_IOTA     0x0706050403020100      /* byte j = j */
 #define C_NIB_BIT1      0x2222222222222222      /* bit 1 of every nibble */
 #define LO32(x)         ((x) & 0xffffffff)
 #define HI32(x)         (((x) >> 32) & 0xffffffff)
@@ -47,18 +46,6 @@
         .set r, r + 1
         .endr
         ENDOBJ  shc
-.endm
-/* shc128s: vpsllvq counts for 128-bit rows in load order [lo hi lo hi]:
- * pair k (rows 2k, 2k+1) -> 63-2k, 63-2k, 62-2k, 62-2k, so a row's validity
- * bit lands in the sign bit of both of its lanes. 32 x 4 quads. */
-.macro TAB_SHC128S
-        OBJ     shc128s, 5
-        .set k, 0
-        .rept 32
-        .quad 63 - 2*k, 63 - 2*k, 62 - 2*k, 62 - 2*k
-        .set k, k + 1
-        .endr
-        ENDOBJ  shc128s
 .endm
 /* shc128m: vpsllvq counts for de-interleaved 128-bit groups, lane order
  * (0, 2, 1, 3): group g -> 63-4g, 61-4g, 62-4g, 60-4g. 16 x 4 quads. */
@@ -81,27 +68,95 @@
         .long   C_SIGN32
         ENDOBJ  c_sign_d
 .endm
-/* fmix64 multipliers split into 32-bit halves (AVX2 has no 64x64 multiply;
- * vpmuludq multiplies the low dwords of each qword). */
-.macro TAB_FMIX_HALVES
+/* low 32-bit halves of the fmix64 multipliers (vpmuludq multiplies the low
+ * dwords of each qword: lo * lo32(C)). */
+.macro TAB_FMIX_LO
         OBJ     c_fmix1_lo, 3
         .quad   LO32(C_FMIX1)
         ENDOBJ  c_fmix1_lo
-        OBJ     c_fmix1_hi, 3
-        .quad   HI32(C_FMIX1)
-        ENDOBJ  c_fmix1_hi
         OBJ     c_fmix2_lo, 3
         .quad   LO32(C_FMIX2)
         ENDOBJ  c_fmix2_lo
-        OBJ     c_fmix2_hi, 3
-        .quad   HI32(C_FMIX2)
-        ENDOBJ  c_fmix2_hi
+.endm
+/* fmix64 multipliers as dword pairs (hi32, lo32) per qword, 32 bytes (vpmulld
+ * memory operand: lo*hi32 and hi*lo32 in one multiply), and the high-dword
+ * mask (vpbroadcastq). */
+.macro TAB_FMIX_SWAP
+        OBJ     c_fmix1_sw, 5
+        .rept 4
+        .long   HI32(C_FMIX1), LO32(C_FMIX1)
+        .endr
+        ENDOBJ  c_fmix1_sw
+        OBJ     c_fmix2_sw, 5
+        .rept 4
+        .long   HI32(C_FMIX2), LO32(C_FMIX2)
+        .endr
+        ENDOBJ  c_fmix2_sw
+        OBJ     c_hi32, 3
+        .quad   0xffffffff00000000
+        ENDOBJ  c_hi32
+.endm
+/* idx8: for every byte value m (entry m, 8 bytes): the positions 0..7 of
+ * the set bits of m in ascending order, packed from byte 0; unused bytes 0.
+ * (filter index emission: vpmovzxbd idx8(, m, 8) gives the row offsets.) */
+.macro TAB_IDX8
+        OBJ     idx8, 3
+        .set m, 0
+        .rept 256
+        .set c, 0
+        .set j, 0
+        .rept 8
+        .if (m >> j) & 1
+        .byte   j
+        .set c, c + 1
+        .endif
+        .set j, j + 1
+        .endr
+        .rept 8 - c
+        .byte   0
+        .endr
+        .set m, m + 1
+        .endr
+        ENDOBJ  idx8
+.endm
+/* pairmask: lane masks of 2 rows of 128 bits, entry k (32 bytes): qwords
+ * 0, 1 all-ones iff bit 0 of k is set, qwords 2, 3 iff bit 1 is set. */
+.macro TAB_PAIRMASK
+        OBJ     pairmask, 5
+        .quad    0,  0,  0,  0
+        .quad   -1, -1,  0,  0
+        .quad    0,  0, -1, -1
+        .quad   -1, -1, -1, -1
+        ENDOBJ  pairmask
+.endm
+.macro TAB_SIXTEEN_Q                    /* 4 x qword 16 (32-byte memory operand) */
+        OBJ     c_sixteen_q, 5
+        .quad   16, 16, 16, 16
+        ENDOBJ  c_sixteen_q
+.endm
+.macro TAB_SIGN4                        /* 4 x 2^63 (32-byte memory operand) */
+        OBJ     c_sign4, 5
+        .quad   C_SIGN64, C_SIGN64, C_SIGN64, C_SIGN64
+        ENDOBJ  c_sign4
+.endm
+/* nibmask: lane masks of 4 rows, entry k (32 bytes) = 4 qwords, qword j =
+ * all-ones iff bit j of the nibble k is set (validity -> lane mask by one
+ * table load). */
+.macro TAB_NIBMASK
+        OBJ     nibmask, 5
+        .set k, 0
+        .rept 16
+        .quad   -((k >> 0) & 1), -((k >> 1) & 1), -((k >> 2) & 1), -((k >> 3) & 1)
+        .set k, k + 1
+        .endr
+        ENDOBJ  nibmask
 .endm
 /* vop_inv: AVX2 operator -> "invert the kind's result" (EQ NE LT LE GT GE
- * BETWEEN; BETWEEN = !OUT). Used by count_i64 / count_i128 direct counters. */
+ * BETWEEN, and index 7 = PQK_OP_RANGE: BETWEEN with a <= b; BETWEEN =
+ * !OUT). Used by count_i64 / count_i128 direct counters. */
 .macro TAB_VOP_INV
         OBJ     vop_inv, 0
-        .byte   0, 1, 0, 1, 0, 1, 1
+        .byte   0, 1, 0, 1, 0, 1, 1, 1
         ENDOBJ  vop_inv
 .endm
 
