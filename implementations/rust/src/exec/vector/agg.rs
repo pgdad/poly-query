@@ -996,6 +996,10 @@ impl Acc {
     }
 }
 
+/// DISTINCT partials with at least this many pairs in total are merged in
+/// parallel.
+const SHARDED_MERGE_PAIRS: usize = 64 * 1024;
+
 /// Grouped aggregation state over batches.
 #[derive(Debug)]
 pub struct Aggregator {
@@ -1080,6 +1084,17 @@ impl Aggregator {
     /// Folds the groups `groups` of the partial aggregator `other` into
     /// this one. Returns approximate bytes newly retained.
     pub fn merge_groups(&mut self, other: &Aggregator, groups: &[u32]) -> Result<usize> {
+        Ok(self.merge_groups_except(other, groups, &[])?.0)
+    }
+
+    /// Like [`Aggregator::merge_groups`], except for the aggregates `skip`
+    /// (merged by the caller); also returns where `groups` went.
+    fn merge_groups_except(
+        &mut self,
+        other: &Aggregator,
+        groups: &[u32],
+        skip: &[usize],
+    ) -> Result<(usize, Vec<u32>)> {
         let before = self.groups;
         let map: Vec<u32> = if self.keys.width() == 0 {
             vec![0; groups.len()]
@@ -1092,10 +1107,84 @@ impl Aggregator {
         self.grow(self.keys.len());
         let mut retained = 0;
         for (k, call) in self.calls.iter().enumerate() {
-            retained += self.accs[k].merge_from(call, &other.accs[k], groups, &map)?;
+            if !skip.contains(&k) {
+                retained += self.accs[k].merge_from(call, &other.accs[k], groups, &map)?;
+            }
         }
         let per_group = 48 + 32 * (self.keys.width() + self.calls.len());
-        Ok(retained + (self.groups - before) * per_group)
+        Ok((retained + (self.groups - before) * per_group, map))
+    }
+
+    /// Merges partial aggregators of the same keys and aggregates (at least
+    /// one). DISTINCT aggregates with many pairs are merged on `threads`
+    /// threads (one hash shard of the pairs each) instead of one by one.
+    pub fn merge_all(
+        partials: Vec<Aggregator>,
+        threads: usize,
+        ctx: &ExecContext,
+    ) -> Result<Aggregator> {
+        let mut iter = partials.into_iter();
+        let mut agg = iter
+            .next()
+            .ok_or_else(|| Error::internal("no partial aggregates"))?;
+        let rest: Vec<Aggregator> = iter.collect();
+        let parts = || std::iter::once(&agg).chain(&rest);
+        let sharded: Vec<usize> = (0..agg.calls.len())
+            .filter(|&k| {
+                let mut pairs = 0;
+                let all_distinct = parts().all(|a| match &a.accs[k] {
+                    Acc::Distinct(d, _) => {
+                        pairs += d.len();
+                        true
+                    }
+                    _ => false,
+                });
+                all_distinct && !rest.is_empty() && threads > 1 && pairs >= SHARDED_MERGE_PAIRS
+            })
+            .collect();
+        let mut maps = Vec::with_capacity(rest.len() + 1);
+        maps.push((0..agg.groups as u32).collect::<Vec<u32>>());
+        for p in &rest {
+            let groups: Vec<u32> = (0..p.groups as u32).collect();
+            let (retained, map) = agg.merge_groups_except(p, &groups, &sharded)?;
+            if retained > 0 {
+                ctx.reserve(retained)?;
+            }
+            maps.push(map);
+        }
+        for k in sharded {
+            let groups = agg.groups;
+            let taken = std::mem::replace(&mut agg.accs[k], Acc::Distinct(Box::default(), groups));
+            let merged = {
+                let mut refs = Vec::with_capacity(maps.len());
+                for (a, map) in std::iter::once(&taken)
+                    .chain(rest.iter().map(|r| &r.accs[k]))
+                    .zip(&maps)
+                {
+                    if let Acc::Distinct(d, _) = a {
+                        refs.push((&**d, map.as_slice()));
+                    }
+                }
+                DistinctAcc::merge_sharded(&refs, threads)
+            };
+            match merged {
+                Some(d) => {
+                    ctx.reserve(d.len() * 24)?;
+                    agg.accs[k] = Acc::Distinct(Box::new(d), groups);
+                }
+                None => {
+                    // Strings or mixed representations: one by one.
+                    agg.accs[k] = taken;
+                    let call = agg.calls[k].clone();
+                    for (p, map) in rest.iter().zip(&maps[1..]) {
+                        let groups: Vec<u32> = (0..p.groups as u32).collect();
+                        let retained = agg.accs[k].merge_from(&call, &p.accs[k], &groups, map)?;
+                        ctx.reserve(retained)?;
+                    }
+                }
+            }
+        }
+        Ok(agg)
     }
 
     /// Splits the groups into `parts` partitions by a hash of their key

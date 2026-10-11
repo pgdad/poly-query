@@ -95,6 +95,9 @@ pub struct DistinctAcc {
     /// Representation of the values (None until the first non-NULL input).
     kind: Option<Kind>,
     strings: Interner,
+    /// Further pair sets, disjoint from `pairs` and from each other (the
+    /// shards of a parallel merge, see [`DistinctAcc::merge_sharded`]).
+    shards: Vec<FastSet<(u32, u64)>>,
 }
 
 /// Approximate bytes retained per distinct pair.
@@ -116,6 +119,7 @@ impl DistinctAcc {
         let Some(kind) = Kind::of(&v.data) else {
             return 0;
         };
+        self.unshard();
         self.kind = Some(kind);
         let valid = v.valid.as_deref();
         let before = self.pairs.len();
@@ -177,6 +181,7 @@ impl DistinctAcc {
     /// Adds the pairs of `other`'s groups `groups[i]` as groups `map[i]`.
     /// Returns retained bytes.
     pub fn merge(&mut self, other: &DistinctAcc, groups: &[u32], map: &[u32]) -> usize {
+        self.unshard();
         if self.kind.is_none() {
             self.kind = other.kind;
         }
@@ -198,7 +203,7 @@ impl DistinctAcc {
         ];
         let before = self.pairs.len();
         let mut retained = 0;
-        for &(g, x) in &other.pairs {
+        for &(g, x) in other.all_pairs() {
             let Some(&t) = target.get(g as usize).filter(|&&t| t != NONE) else {
                 continue;
             };
@@ -218,6 +223,73 @@ impl DistinctAcc {
         retained + (self.pairs.len() - before) * PAIR_BYTES
     }
 
+    fn all_pairs(&self) -> impl Iterator<Item = &(u32, u64)> {
+        self.pairs.iter().chain(self.shards.iter().flatten())
+    }
+
+    /// Number of distinct pairs.
+    pub fn len(&self) -> usize {
+        self.pairs.len() + self.shards.iter().map(FastSet::len).sum::<usize>()
+    }
+
+    /// Folds the shards into `pairs` (before adding pairs).
+    fn unshard(&mut self) {
+        for shard in std::mem::take(&mut self.shards) {
+            self.pairs.extend(shard);
+        }
+    }
+
+    /// Merges partial accumulators of one DISTINCT aggregate on `threads`
+    /// threads: `parts[i] = (acc, map)` adds `acc`'s pairs of group `g` as
+    /// group `map[g]`. Each thread collects one hash shard of the pairs, so
+    /// the shards are disjoint. None if the parts hold strings (their ids
+    /// are local to each part) or values of different representations.
+    pub fn merge_sharded(parts: &[(&DistinctAcc, &[u32])], threads: usize) -> Option<DistinctAcc> {
+        let mut kinds = parts.iter().filter_map(|(a, _)| a.kind);
+        let kind = kinds.next();
+        if kind == Some(Kind::Str) || kinds.any(|k| Some(k) != kind) {
+            return None;
+        }
+        let shards = threads.clamp(1, 64);
+        let shard_of = |&(g, x): &(u32, u64)| {
+            let h = (x ^ (g as u64).rotate_left(29)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            ((h >> 32) % shards as u64) as usize
+        };
+        let total: usize = parts.iter().map(|(a, _)| a.len()).sum();
+        let mut sets: Vec<FastSet<(u32, u64)>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..shards)
+                .map(|s| {
+                    scope.spawn(move || {
+                        let mut set = FastSet::default();
+                        set.reserve(total / shards);
+                        for (acc, map) in parts {
+                            for &(g, x) in acc.all_pairs() {
+                                // Shard by the merged pair: equal merged
+                                // pairs from different parts meet.
+                                let pair = (map[g as usize], x);
+                                if shard_of(&pair) == s {
+                                    set.insert(pair);
+                                }
+                            }
+                        }
+                        set
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+                .collect()
+        });
+        let pairs = sets.swap_remove(0);
+        Some(DistinctAcc {
+            pairs,
+            kind,
+            strings: Interner::default(),
+            shards: sets,
+        })
+    }
+
     fn value(&self, x: u64) -> Value {
         match self.kind {
             Some(Kind::Int) => Value::Int(x as i64),
@@ -235,7 +307,7 @@ impl DistinctAcc {
     /// values (`call` is the DISTINCT aggregate).
     pub fn states(&self, call: &AggregateCall, groups: usize) -> Result<Vec<AggState>> {
         let mut states = vec![AggState::new(call); groups];
-        for &(g, x) in &self.pairs {
+        for &(g, x) in self.all_pairs() {
             states[g as usize].update(&self.value(x))?;
         }
         Ok(states)
@@ -246,7 +318,7 @@ impl DistinctAcc {
     pub fn finish(&self, call: &AggregateCall, groups: usize) -> Result<Vector> {
         if call.func == AggFunc::Count {
             let mut counts = vec![0i64; groups];
-            for &(g, _) in &self.pairs {
+            for &(g, _) in self.all_pairs() {
                 counts[g as usize] += 1;
             }
             return Ok(Vector::new(Data::Int(counts), None));
@@ -257,7 +329,7 @@ impl DistinctAcc {
             ..call.clone()
         };
         let mut states = vec![AggState::new(&plain); groups];
-        for &(g, x) in &self.pairs {
+        for &(g, x) in self.all_pairs() {
             states[g as usize].update(&self.value(x))?;
         }
         let values = states.iter().map(AggState::finish).collect::<Result<_>>()?;
@@ -325,5 +397,42 @@ mod tests {
         );
         let c = call(AggFunc::Count, DataType::Float64);
         assert_eq!(a.finish(&c, 1).unwrap().value(0), Value::Int(2));
+    }
+
+    #[test]
+    fn sharded_merge_equals_serial_merge() {
+        let mut parts = Vec::new();
+        for p in 0..3i64 {
+            let mut a = DistinctAcc::default();
+            let vals: Vec<i64> = (0..500).map(|i| (i * 7 + p * 3) % 211).collect();
+            let gids: Vec<u32> = (0..500).map(|i| (i % 4) as u32).collect();
+            a.update(Some(&gids), &Vector::new(Data::Int(vals), None), 500);
+            parts.push(a);
+        }
+        // Part i's group g is merged group (g + i) % 4.
+        let maps: Vec<Vec<u32>> = (0..3u32)
+            .map(|i| (0..4).map(|g| (g + i) % 4).collect())
+            .collect();
+        let refs: Vec<(&DistinctAcc, &[u32])> = parts
+            .iter()
+            .zip(&maps)
+            .map(|(a, m)| (a, m.as_slice()))
+            .collect();
+        let mut sharded = DistinctAcc::merge_sharded(&refs, 5).unwrap();
+        let mut serial = DistinctAcc::default();
+        for (a, m) in &refs {
+            serial.merge(a, &[0, 1, 2, 3], m);
+        }
+        let c = call(AggFunc::Count, DataType::Int64);
+        let s = call(AggFunc::Sum, DataType::Int64);
+        for k in [&c, &s] {
+            let x = sharded.finish(k, 4).unwrap();
+            let y = serial.finish(k, 4).unwrap();
+            let values = |v: &Vector| (0..4).map(|i| v.value(i)).collect::<Vec<_>>();
+            assert_eq!(values(&x), values(&y));
+        }
+        // Adding to a sharded accumulator keeps the values distinct.
+        sharded.update(None, &Vector::new(Data::Int(vec![0, 1000]), None), 2);
+        assert_eq!(sharded.len(), serial.len() + 1);
     }
 }
