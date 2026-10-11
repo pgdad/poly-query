@@ -1,0 +1,179 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-optimize-latency-common-lisp-a1-20261011T071620Z",
+ "language": "common-lisp",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-optimize-latency",
+ "prompt_sha256": "f7e9f8fac7d8aac86b957b23e556be924c4de4c3f0a3bba0a2dcd341d353e58c",
+ "session_id": "aa86bd69-c7e1-4b97-a8c5-25551e4d629f",
+ "tokens": {
+  "input": 402,
+  "output": 209590,
+  "cache_read": 54273891,
+  "cache_creation": 445762,
+  "thinking": null,
+  "thinking_estimated": 95548,
+  "source": "result events",
+  "api_messages": 201
+ },
+ "rate_limit": {
+  "events": 16,
+  "max_utilization": {
+   "five_hour": 0.75,
+   "seven_day": 0.35
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 18.6142822,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 207,
+ "result_segments": 1,
+ "assistant_messages": 456,
+ "tool_calls": {
+  "Bash": 201,
+  "Write": 4,
+  "Read": 1
+ },
+ "tool_calls_total": 206,
+ "tool_failures": 3,
+ "build_invocations": 59,
+ "build_failures_heuristic": 0,
+ "conformance_runs": 26,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   35,
+   35
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3855,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 10,
+ "time": {
+  "wall_seconds": 3407.1,
+  "model_api_seconds": 2248.3,
+  "tool_seconds": 1160.5,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 16,
+  "files_changed": 21,
+  "lines_added": 1814,
+  "lines_removed": 232,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The engine's total latency on the 32-query workload at scale 1m went from 1240 ms to 336 ms (3.7\u00d7) with default options. Every query returns the same answers as the baseline, conformance is still 660/660, and all work is committed.\n\n**The workload file was missing.** `benchmarks/workloads/analytics.json` doesn't exist in this workspace, so I wrote a stand-in at `bench/workloads/analytics.json`. It holds the 23 queries already in `bench/bench.py` plus 9 more common analytics query patterns. The hidden benchmark's actual queries may differ; the README records this decision.\n\n**How I measured.** `bench/workload.py` sends each query through `bin/polyquery session` with default options and takes the median of 9 runs after 2 warm-ups. I ran the baseline and new builds alternately, twice each, and report the lower median. It also checks every answer against the baseline (floats within the conformance tolerance). The host was shared with other jobs, so small queries vary by roughly \u00b110\u201320%. The README has the full per-query table, including a `--threads 1` column: single-threaded, the new engine is 1.5\u00d7 faster (835 ms).\n\n**What changed, by impact:**\n1. **Default parallelism.** The parallel executor already existed but defaulted to 1 thread; queries now use one thread per usable CPU, capped at 16.\n2. **Uncorrelated subqueries** are evaluated once per query and shared across threads; comparisons and `IN` against them use fast typed code. q31: 55 \u2192 5 ms, q26: 32 \u2192 7 ms.\n3. **INT64/DECIMAL columns compared with a FLOAT64 value** are now compared as integers against exact precomputed bounds instead of converting every row.\n4. **Radix sort** for numeric ORDER BY keys, merged and gathered in parallel. q16: 378 \u2192 45 ms.\n5. **GROUP BY with many groups** now splits rows by key hash, one partition per thread, instead of every thread building nearly all groups. Small inputs fall back to a serial path.\n6. **Hash joins** prefer building on an aggregation's output so the table scan can be probed in parallel. q27: 63 \u2192 40 ms.\n7. **Smaller items:** faster COUNT(DISTINCT) on integer-like values, parallel `ORDER BY \u2026 LIMIT`, `result: \"count\"` no longer builds rows, large results are rendered to JSON in parallel, dictionary codes survive joins, and the GC young generation is 512 MB.\n\nOutput row order is unchanged: parallel GROUP BY and `ORDER BY \u2026 LIMIT` still return rows in the same order as a serial run.\n\n**Test results:**\n```\nphase 1: 225/225   phase 2: 208/208   phase 3: 212/212   phase 5: 15/15   TOTAL: 660/660 pass\n--modes 3870/3870 (also with tiny morsels); --native 660/660 and with --modes 3870/3870\n--transport http 660/660; http_suite 18/18; make build test / make lint OK\n```\nThe repo's random-query fuzzer found one mismatch in 600 queries: a merge join with 3 threads raises CONVERSION_ERROR where row mode returns no rows. The baseline reproduces it identically, and it's an already-documented limitation. A second run of 500 queries with native kernels found none.\n\n**Known limitations:**\n- **No improvement:** q25 (15.0 \u2192 15.6 ms), q32 (3.5 \u2192 3.9 ms) and q29 (unchanged). All are dominated by grouping into many groups, which doesn't scale well across threads.\n- **GC spikes:** q08 shows only 1.1\u00d7 in the final table. In both rounds one run hit what looks like a garbage collection and the next few were slow; it measured 11\u201312 ms (about 2.6\u00d7) in other runs.\n- **Still serial:** hash-join builds and operators that don't read directly from a table scan.\n- **Float sums:** parallel FLOAT64 sums can differ in the last bits between runs, which the spec allows.\n- **Dropped change:** compiling each worker's pipeline inside the worker broke native-kernel aggregation; native conformance caught it, and I reverted it since it gave no measurable gain.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

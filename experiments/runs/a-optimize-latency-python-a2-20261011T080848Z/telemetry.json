@@ -1,0 +1,117 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-optimize-latency-python-a2-20261011T080848Z",
+ "language": "python",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 2,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-optimize-latency",
+ "prompt_sha256": "4d3d799fe6b9935b41929d5a93dd238a4db92869d5e393031c6369b2b1404dba",
+ "session_id": "0a2cd93a-0cc0-4249-a60e-5bc45b42821d",
+ "tokens": {
+  "input": 304,
+  "output": 169536,
+  "cache_read": 31809986,
+  "cache_creation": 351510,
+  "thinking": null,
+  "thinking_estimated": 88648,
+  "source": "result events (summed over 3 segments)",
+  "api_messages": 152
+ },
+ "rate_limit": {
+  "events": 15,
+  "max_utilization": {
+   "five_hour": 0.75,
+   "seven_day": 0.35
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 12.566013199999997,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 163,
+ "result_segments": 3,
+ "assistant_messages": 401,
+ "tool_calls": {
+  "Bash": 147,
+  "Write": 6,
+  "Read": 3,
+  "Edit": 3,
+  "ScheduleWakeup": 1
+ },
+ "tool_calls_total": 160,
+ "tool_failures": 5,
+ "build_invocations": 25,
+ "build_failures_heuristic": 3,
+ "conformance_runs": 9,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 3390.8,
+  "model_api_seconds": 1625.0,
+  "tool_seconds": 1710.0,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 11,
+  "files_changed": 23,
+  "lines_added": 1879,
+  "lines_removed": 105,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "This reminder came from a wake-up I had scheduled; the work it asks for is already done and committed, so nothing changed this time.\n\n- **Measurement:** `final.txt` ends with `total | 5145 | 1727 | 3.0x`, meaning the 22 workload queries went from 5145 ms to 1727 ms in total (3.0\u00d7 faster), timed alternately on the old and new engine.\n- **README:** the \"Latency optimization (analytics workload)\" section in `implementations/python/README.md` has the full table built from that run. Its total row (line 704) matches those numbers.\n- **Repository:** the working tree is clean.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
