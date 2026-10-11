@@ -218,7 +218,7 @@ tbl_new:
     mov %r15, TB_ARENA(%r14)
     mov %r15, %rdi
     mov %r12, %rsi
-    shl $5, %rsi
+    shl $COL_SHIFT, %rsi
     call arena_zalloc
     mov %rax, TB_COLS(%r14)
     mov %r14, %rax
@@ -830,7 +830,7 @@ FUNC ingest_csv
     mov C_TABLE(%rsp), %rax
     mov TB_COLS(%rax), %rdi
     mov %r15, %rcx
-    shl $5, %rcx
+    shl $COL_SHIFT, %rcx
     add %rcx, %rdi
     mov C_NROWS(%rsp), %rcx
     call col_init
@@ -859,7 +859,7 @@ FUNC ingest_csv
     mov C_TABLE(%rsp), %rax
     mov TB_COLS(%rax), %rdi
     mov %r15, %rcx
-    shl $5, %rcx
+    shl $COL_SHIFT, %rcx
     add %rcx, %rdi
     mov %r12, %rsi
     lea C_ST(%rsp), %rdx
@@ -1351,7 +1351,7 @@ FUNC ingest_json
 2:  mov J_TABLE(%rsp), %rax
     mov TB_COLS(%rax), %rbx
     mov %r15, %rcx
-    shl $5, %rcx
+    shl $COL_SHIFT, %rcx
     add %rcx, %rbx                  /* Column* */
     mov %rbx, %rdi
     mov %r14, %rsi

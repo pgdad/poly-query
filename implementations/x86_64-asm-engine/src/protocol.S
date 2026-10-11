@@ -862,6 +862,46 @@ FUNC build_schema
     LEAVE
 ENDF build_schema
 
+/* layout_options(options rdi) -> rax LAYOUT_*, rdx DICT_*:
+ * {"layout":"row"|"column","dictionary":bool}; other values => INVALID_REQUEST */
+FUNC layout_options
+    ENTER 0
+    mov %rdi, %rbx
+    mov $LAYOUT_COLUMN, %r12d
+    mov $DICT_AUTO, %r13d
+    CSTR %rsi, "layout"
+    mov $J_STRING, %edx
+    call opt_field
+    test %rax, %rax
+    jz 2f
+    mov JN_PTR(%rax), %r14
+    mov %r14, %rdi
+    CSTR %rsi, "column"
+    call strcmp
+    test %eax, %eax
+    jz 2f
+    mov %r14, %rdi
+    CSTR %rsi, "row"
+    call strcmp
+    test %eax, %eax
+    jnz 8f
+    mov $LAYOUT_ROW, %r12d
+2:  mov %rbx, %rdi
+    CSTR %rsi, "dictionary"
+    mov $J_TRUE, %edx
+    call opt_field
+    test %rax, %rax
+    jz 9f
+    mov $DICT_ON, %r13d
+    cmpq $J_TRUE, JN_TYPE(%rax)
+    je 9f
+    mov $DICT_OFF, %r13d
+9:  mov %r12, %rax
+    mov %r13, %rdx
+    LEAVE
+8:  RAISE E_INVALID_REQUEST, "layout must be \"row\" or \"column\""
+ENDF layout_options
+
 /* op_load(node) */
 #define LD_NAME    0
 #define LD_FMT     8
@@ -871,8 +911,10 @@ ENDF build_schema
 #define LD_REPLACE 40
 #define LD_DATA    48
 #define LD_LEN     56
+#define LD_LAYOUT  64
+#define LD_DICT    72
 FUNC op_load
-    ENTER 64
+    ENTER 80
     mov %rdi, %rbx
     CSTR %rsi, "table"
     call req_str
@@ -928,6 +970,8 @@ FUNC op_load
     /* options */
     movq $1, LD_HEADER(%rsp)
     movq $',', LD_DELIM(%rsp)
+    movq $LAYOUT_COLUMN, LD_LAYOUT(%rsp)
+    movq $DICT_AUTO, LD_DICT(%rsp)
     mov %rbx, %rdi
     CSTR %rsi, "options"
     mov $J_OBJECT, %edx
@@ -940,6 +984,10 @@ FUNC op_load
     mov $1, %edx
     call opt_bool
     mov %rax, LD_HEADER(%rsp)
+    mov %r12, %rdi
+    call layout_options
+    mov %rax, LD_LAYOUT(%rsp)
+    mov %rdx, LD_DICT(%rsp)
     mov %r12, %rdi
     CSTR %rsi, "delimiter"
     mov $J_STRING, %edx
@@ -1018,6 +1066,10 @@ FUNC op_load
     sete %r8b
     call ingest_json
 12: mov %rax, %r12
+    mov %r12, %rdi
+    mov LD_LAYOUT(%rsp), %rsi
+    mov LD_DICT(%rsp), %rdx
+    call table_finalize
     movq $0, g_pending_arena(%rip)
     mov %r12, %rdi
     call cat_put

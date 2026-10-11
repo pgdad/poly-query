@@ -954,41 +954,27 @@ FUNC result_to_table
     ENTER 16
     mov %rdi, %rbx
     mov %rsi, %r12
-    mov $TB_SIZE, %edi
-    call tmp_zalloc
+    mov g_arena(%rip), %rdi
+    mov RV_NAME(%r12), %rsi
+    mov RV_NCOLS(%r12), %rdx
+    mov RS_NROWS(%rbx), %rcx
+    call table_new
     mov %rax, %r13
-    mov RV_NAME(%r12), %rax
-    mov %rax, TB_NAME(%r13)
-    mov RV_NCOLS(%r12), %rax
-    mov %rax, TB_NCOLS(%r13)
-    mov RS_NROWS(%rbx), %rax
-    mov %rax, TB_NROWS(%r13)
-    mov RV_NCOLS(%r12), %rdi
-    shl $5, %rdi
-    add $8, %rdi
-    call tmp_zalloc
-    mov %rax, TB_COLS(%r13)
     xor %r14d, %r14d                /* column */
 1:  cmp RV_NCOLS(%r12), %r14
     jae 9f
     mov %r14, %r15
-    shl $5, %r15
+    shl $COL_SHIFT, %r15
     add TB_COLS(%r13), %r15         /* Column* */
     mov %r14, %rax
     shl $4, %rax
     add RV_COLS(%r12), %rax
-    mov RVC_NAME(%rax), %rcx
-    mov %rcx, COL_NAME(%r15)
+    mov g_arena(%rip), %rdi
+    mov %r15, %rsi
+    mov RVC_NAME(%rax), %rdx
     mov RVC_TYPE(%rax), %rcx
-    mov %rcx, COL_TYPE(%r15)
-    mov RS_NROWS(%rbx), %rdi
-    lea 8(,%rdi,8), %rdi
-    call tmp_alloc
-    mov %rax, COL_DATA(%r15)
-    mov RS_NROWS(%rbx), %rdi
-    add $8, %rdi
-    call tmp_alloc
-    mov %rax, COL_NULLS(%r15)
+    mov RS_NROWS(%rbx), %r8
+    call col_stage
     mov COL_DATA(%r15), %r8
     mov COL_NULLS(%r15), %r9
     mov RS_ROWS(%rbx), %r10
@@ -1006,7 +992,11 @@ FUNC result_to_table
     jmp 2b
 3:  inc %r14
     jmp 1b
-9:  mov %r13, %rax
+9:  mov %r13, %rdi
+    mov $LAYOUT_COLUMN, %esi
+    mov $DICT_OFF, %edx
+    call table_finalize
+    mov %r13, %rax
     LEAVE
 ENDF result_to_table
 

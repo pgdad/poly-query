@@ -290,7 +290,7 @@ chk_shape:
 
 /* col_ptr(t rdi, ci rsi) -> rax Column* */
 col_ptr:
-    shl $5, %rsi
+    shl $COL_SHIFT, %rsi
     mov TB_COLS(%rdi), %rax
     add %rsi, %rax
     ret

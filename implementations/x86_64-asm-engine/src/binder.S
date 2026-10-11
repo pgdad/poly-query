@@ -1249,7 +1249,7 @@ FUNC rv_from_table
 1:  cmp TB_NCOLS(%rbx), %rcx
     jae 9f
     mov %rcx, %rdx
-    shl $5, %rdx
+    shl $COL_SHIFT, %rdx
     add TB_COLS(%rbx), %rdx         /* Column* */
     mov %rcx, %rsi
     shl $4, %rsi

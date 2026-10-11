@@ -6,7 +6,7 @@
  *   cat_put(table)     -> adds, or replaces the table with the same name
  *   cat_drop(ptr, len) -> eax 1 if dropped, 0 if unknown
  *   cat_reset()
- *   cat_count() -> rax ; cat_sorted() -> rax Table*[] sorted by name (request arena)
+ *   cat_count() -> rax ; cat_at(i) -> rax Table* ; cat_sorted() -> rax Table*[] sorted by name (request arena)
  */
 #include "pq.inc"
 
@@ -72,8 +72,8 @@ FUNC cat_put
     lea (%rcx, %rax, 8), %r12
     mov (%r12), %rax
     mov %rbx, (%r12)
-    mov TB_ARENA(%rax), %rdi
-    call arena_destroy
+    mov %rax, %rdi
+    call table_free
     LEAVE
 1:  mov cat_len(%rip), %rax
     cmp cat_cap(%rip), %rax
@@ -106,8 +106,8 @@ FUNC cat_drop
     mov (%rcx, %rsi, 8), %rdi       /* move last into the hole */
     mov %rdi, (%rcx, %rax, 8)
     mov %rsi, cat_len(%rip)
-    mov TB_ARENA(%rdx), %rdi
-    call arena_destroy
+    mov %rdx, %rdi
+    call table_free
     mov $1, %eax
     LEAVE
 8:  xor %eax, %eax
@@ -122,9 +122,8 @@ FUNC cat_reset
     dec %rax
     mov %rax, cat_len(%rip)
     mov cat_tables(%rip), %rcx
-    mov (%rcx, %rax, 8), %rax
-    mov TB_ARENA(%rax), %rdi
-    call arena_destroy
+    mov (%rcx, %rax, 8), %rdi
+    call table_free
     jmp 1b
 2:  LEAVE
 ENDF cat_reset
@@ -133,6 +132,13 @@ FUNC cat_count
     mov cat_len(%rip), %rax
     ret
 ENDF cat_count
+
+/* cat_at(i) -> rax Table* (0 <= i < cat_count) */
+FUNC cat_at
+    mov cat_tables(%rip), %rax
+    mov (%rax, %rdi, 8), %rax
+    ret
+ENDF cat_at
 
 /* qsort comparator on Table** by name, case-insensitive */
 FUNC cat_name_cmp
