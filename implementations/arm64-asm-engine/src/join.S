@@ -852,50 +852,12 @@ FUNC ex_hashjoin
     mov  x3, x20
     bl   join_keys
     str  x0, [x21, #HS_RCELLS]
-    mov  x24, x1                        // right hashes
-    mov  x25, x2                        // right NULL flags
-    ldr  x9, [x21, #HS_R]               // table size: power of two >= 2n
-    ldr  x9, [x9, #TS_N]
-    lsl  x9, x9, #1
-    mov  x10, #16
-1:  cmp  x10, x9
-    b.hs 2f
-    lsl  x10, x10, #1
-    b    1b
-2:  sub  x9, x10, #1
-    str  x9, [x21, #HS_MASK]
-    lsl  x0, x10, #2
-    bl   arena_alloc
+    ldr  x0, [x21, #HS_R]
+    bl   hj_table
     str  x0, [x21, #HS_HEADS]
-    mov  w1, #0xff
-    ldr  x2, [x21, #HS_MASK]
-    add  x2, x2, #1
-    lsl  x2, x2, #2
-    bl   memset
-    ldr  x9, [x21, #HS_R]
-    ldr  x9, [x9, #TS_N]
-    lsl  x0, x9, #2
-    add  x0, x0, #16
-    bl   arena_alloc
-    str  x0, [x21, #HS_NEXT]
-    ldr  x9, [x21, #HS_R]               // insert in tuple order
-    ldr  x9, [x9, #TS_N]
-    ldr  x10, [x21, #HS_HEADS]
-    ldr  x11, [x21, #HS_NEXT]
-    ldr  x12, [x21, #HS_MASK]
-    mov  x13, #0
-3:  cmp  x13, x9
-    b.hs 4f
-    ldrb w14, [x25, x13]
-    cbnz w14, 31f                       // NULL key: never matches
-    ldr  x14, [x24, x13, lsl #3]
-    and  x14, x14, x12
-    ldr  w15, [x10, x14, lsl #2]
-    str  w15, [x11, x13, lsl #2]
-    str  w13, [x10, x14, lsl #2]
-31: add  x13, x13, #1
-    b    3b
-4:  // ---- probe -------------------------------------------------------------
+    str  x1, [x21, #HS_NEXT]
+    str  x2, [x21, #HS_MASK]
+    // ---- probe -------------------------------------------------------------
     ldr  x0, [x21, #HS_L]
     ldr  x1, [x19, #PN_LKEYS]
     ldr  x2, [x19, #PN_NKEYS]
@@ -985,6 +947,57 @@ FUNC ex_hashjoin
     LEAVE 5
 9:  RAISE ERR_RESOURCE_LIMIT, "join result exceeds --max-join-rows"
 ENDF ex_hashjoin
+
+// =============================================================================
+// hj_table(x0 TupleSet* build input, x1 u64* hashes, x2 u8* NULL flags)
+//   -> x0 u32* bucket heads, x1 u32* chain links, x2 bucket mask
+// Chained hash table over the build tuples (in tuple order; NULL keys are
+// left out: they never match).
+//   x19 ts, x20 hashes, x21 flags, x22 heads, x23 links, x24 mask
+// =============================================================================
+FUNC hj_table
+    ENTER 3
+    mov  x19, x0
+    mov  x20, x1
+    mov  x21, x2
+    ldr  x9, [x19, #TS_N]               // size: power of two >= 2n
+    lsl  x9, x9, #1
+    mov  x10, #16
+1:  cmp  x10, x9
+    b.hs 2f
+    lsl  x10, x10, #1
+    b    1b
+2:  sub  x24, x10, #1
+    lsl  x0, x10, #2
+    bl   arena_alloc
+    mov  x22, x0
+    mov  w1, #0xff
+    add  x2, x24, #1
+    lsl  x2, x2, #2
+    bl   memset
+    ldr  x9, [x19, #TS_N]
+    lsl  x0, x9, #2
+    add  x0, x0, #16
+    bl   arena_alloc
+    mov  x23, x0
+    ldr  x9, [x19, #TS_N]
+    mov  x13, #0
+3:  cmp  x13, x9
+    b.hs 4f
+    ldrb w14, [x21, x13]
+    cbnz w14, 31f
+    ldr  x14, [x20, x13, lsl #3]
+    and  x14, x14, x24
+    ldr  w15, [x22, x14, lsl #2]
+    str  w15, [x23, x13, lsl #2]
+    str  w13, [x22, x14, lsl #2]
+31: add  x13, x13, #1
+    b    3b
+4:  mov  x0, x22
+    mov  x1, x23
+    mov  x2, x24
+    LEAVE 3
+ENDF hj_table
 
 // =============================================================================
 // join_keys(x0 TupleSet*, x1 Node** keys, x2 nkeys, x3 ctx)
