@@ -297,6 +297,18 @@ final class SortBatches {
         }
     }
 
+    /** Indices {@code 0..n-1} ordered (stably) by the unsigned keys {@code keys[0..n)} (not modified). */
+    static int[] orderByKey(long[] keys, int n, ExecContext ctx) {
+        long[] k = Arrays.copyOf(keys, n);
+        int[] ids = new int[n];
+        for (int i = 0; i < n; i++) {
+            ids[i] = i;
+        }
+        long[] tk = new long[n];
+        int[] ti = new int[n];
+        return radix(k, ids, tk, ti, 0, n, ctx) ? ti : ids;
+    }
+
     /**
      * Fills {@code col.keys} (rows whose value is NULL get an arbitrary key) and picks the
      * encoding, in {@code tasks} parallel chunks.

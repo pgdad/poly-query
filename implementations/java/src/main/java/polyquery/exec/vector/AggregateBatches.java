@@ -43,6 +43,9 @@ final class AggregateBatches {
         private final ExecContext ctx;
         private int[] gids = new int[0];
         private long reserved;
+        /** Bytes of merged groups not yet reserved. */
+        private long pending;
+        private static final long MERGE_RESERVE_STEP = 1 << 16;
 
         Table(List<BoundExpr> groupKeys, List<AggregateCall> calls, ExecContext ctx) {
             this.keys = new GroupKeys(keyTypes(groupKeys), ctx.nativeKernels());
@@ -126,15 +129,20 @@ final class AggregateBatches {
             }
         }
 
-        /** Merges group g of a partial table into this one; returns the group id here. */
+        /**
+         * Merges group g of a partial table into this one; returns the group id here. The memory
+         * of new groups is reserved in steps (see {@link #settle}), not per group: parallel
+         * merges share the query's memory counter.
+         */
         int merge(Table partial, int g) {
             int before = keys.groupCount();
             int to = keys.addFrom(partial.keys, g);
             if (keys.groupCount() > before) {
                 growStates();
-                long bytes = groupBytes();
-                ctx.reserve(bytes);
-                reserved += bytes;
+                pending += groupBytes();
+                if (pending >= MERGE_RESERVE_STEP) {
+                    settle();
+                }
             }
             for (int a = 0; a < states.length; a++) {
                 states[a].merge(partial.states[a], g, to);
@@ -142,9 +150,20 @@ final class AggregateBatches {
             return to;
         }
 
+        /** Reserves the memory of groups merged since the last reservation. */
+        void settle() {
+            if (pending > 0) {
+                long bytes = pending;
+                pending = 0;
+                ctx.reserve(bytes);
+                reserved += bytes;
+            }
+        }
+
         void release() {
             ctx.release(reserved);
             reserved = 0;
+            pending = 0;
         }
     }
 

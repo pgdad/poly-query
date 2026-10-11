@@ -242,13 +242,4 @@ public final class VectorTest {
         }
         check(index.head(-1) == -1, "absent key");
     }
-
-    /** k-way merge of sorted runs. */
-    public static void testKWayMerge() {
-        long[][] keys = {{1, 4, 9}, {2, 3, 10, 11}, {}, {0}};
-        int[] sizes = {3, 4, 0, 1};
-        long[] out = new long[8];
-        Parallel.kWayMerge(keys, sizes, (s, i, p) -> out[p] = keys[s][i]);
-        check(Arrays.equals(out, new long[] {0, 1, 2, 3, 4, 9, 10, 11}), Arrays.toString(out));
-    }
 }
