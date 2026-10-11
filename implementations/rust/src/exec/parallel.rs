@@ -482,7 +482,12 @@ impl BatchOperator for GatherOp {
 impl Drop for GatherOp {
     fn drop(&mut self) {
         if let Some(state) = self.state.take() {
-            state.shared.stop.store(true, Ordering::Relaxed);
+            {
+                // Set under the lock: a worker checking the window condition
+                // either sees the flag or is already waiting for the notify.
+                let _slots = state.shared.slots.lock().unwrap_or_else(|e| e.into_inner());
+                state.shared.stop.store(true, Ordering::Relaxed);
+            }
             state.shared.changed.notify_all();
             for h in state.workers {
                 let _ = h.join();
