@@ -1,0 +1,104 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-union-all-common-lisp-a1-20261011T053529Z",
+ "language": "common-lisp",
+ "task": "change-union-all",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-union-all",
+ "prompt_sha256": "547bbc0bdfcf971f04ad5799b10672cad854e1762123e505674a484b824ff22e",
+ "session_id": "379001fb-df00-4be9-aae5-07b8a9ee6e8d",
+ "tokens": {
+  "input": 166,
+  "output": 50836,
+  "cache_read": 10443031,
+  "cache_creation": 183271,
+  "thinking": null,
+  "thinking_estimated": 17715,
+  "source": "result events (summed over 2 segments)",
+  "api_messages": 83
+ },
+ "rate_limit": {
+  "events": 13,
+  "max_utilization": {
+   "five_hour": 0.31,
+   "seven_day": 0.28
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 4.5721582,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 85,
+ "result_segments": 2,
+ "assistant_messages": 170,
+ "tool_calls": {
+  "Bash": 80,
+  "Write": 1,
+  "Read": 1,
+  "ToolSearch": 1
+ },
+ "tool_calls_total": 83,
+ "tool_failures": 1,
+ "build_invocations": 19,
+ "build_failures_heuristic": 4,
+ "conformance_runs": 8,
+ "conformance_progress": [
+  [
+   569,
+   569
+  ],
+  [
+   21,
+   22
+  ],
+  [
+   3450,
+   3456
+  ],
+  [
+   3450,
+   3456
+  ],
+  [
+   590,
+   591
+  ],
+  [
+   590,
+   591
+  ]
+ ],
+ "repair_iterations": 6,
+ "time": {
+  "wall_seconds": 2935.8,
+  "model_api_seconds": 467.4,
+  "tool_seconds": 1882.8,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 1,
+  "files_changed": 16,
+  "lines_added": 483,
+  "lines_removed": 72,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "A background wait loop I'd started was stopped when it hit its time limit. Its pattern most likely matched its own command line, so it never saw the fuzz run end. That doesn't affect any results. The fuzz run it was waiting for had already finished: `3000 queries, 244 errors (in all modes), 0 mismatches`. The \"errors\" are queries that fail the same way in every mode, which is expected. I'm not restarting the loop.\n\nNothing else has changed: the work is committed in `2cffb80` and the working tree is clean. The only open issue is still the one public case, `changes/union_all.pqt:51`, which contradicts the ingestion spec, as described above.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

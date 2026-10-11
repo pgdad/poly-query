@@ -31,5 +31,37 @@
   0.76513671875,
   2.85888671875,
   4.1005859375
+ ],
+ "finished": "2026-10-11T06:25:04+00:00",
+ "loadavg_end": [
+  6.52978515625,
+  7.16259765625,
+  6.40673828125
+ ],
+ "results": [
+  {
+   "run_id": "a-change-union-all-python-a1-20261011T053526Z",
+   "outcome": "tests_failed"
+  },
+  {
+   "run_id": "a-change-union-all-go-a1-20261011T053524Z",
+   "outcome": "tests_failed"
+  },
+  {
+   "run_id": "a-change-union-all-rust-a1-20261011T053528Z",
+   "outcome": "tests_failed"
+  },
+  {
+   "run_id": "a-change-union-all-clojure-a1-20261011T053530Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-change-union-all-java-a1-20261011T053525Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-change-union-all-common-lisp-a1-20261011T053529Z",
+   "outcome": "success"
+  }
  ]
 }

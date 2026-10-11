@@ -20,3 +20,7 @@
 2026-10-11T06:06:53+00:00 [a-change-union-all-java-a1-20261011T053525Z] agent finished; collecting telemetry
 2026-10-11T06:06:53+00:00 [a-change-union-all-java-a1-20261011T053525Z] validating (clean clone, sandboxed)
 2026-10-11T06:07:12+00:00 [a-change-union-all-java-a1-20261011T053525Z] outcome=success cost=$4.9248474 turns=88 wall=1876.3s
+2026-10-11T06:24:47+00:00 [a-change-union-all-common-lisp-a1-20261011T053529Z] agent finished; collecting telemetry
+2026-10-11T06:24:47+00:00 [a-change-union-all-common-lisp-a1-20261011T053529Z] validating (clean clone, sandboxed)
+2026-10-11T06:25:04+00:00 [a-change-union-all-common-lisp-a1-20261011T053529Z] outcome=success cost=$4.5721582 turns=85 wall=2935.8s
+2026-10-11T06:25:04+00:00 wave wave-a-change-union-all-a1-20261011T053524Z finished: union=tests_failed, union=tests_failed, union=tests_failed, union=success, union=success, union=success
