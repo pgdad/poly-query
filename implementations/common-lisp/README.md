@@ -1404,6 +1404,14 @@ same kernels at 0.15–0.5 ns/element in the AVX2/AVX-512 variants.
   set of queries (grouping, DISTINCT aggregates, joins, CASE, ORDER BY …
   LIMIT, subqueries, errors) that must give identical results under every
   option combination with tiny morsels (so the parallel paths run).
+* Latency unit tests (`tests/test-latency.lisp`): queries for every
+  latency optimization (many-group aggregation at two morsel sizes, so both
+  the partitioned and the probed serial paths run; integer DISTINCT sets;
+  top-N ties; radix-sortable keys with NULLs, -0.0 and DESC; uncorrelated
+  scalar and IN subqueries; INT64/DECIMAL vs FLOAT64 constants; joins
+  probing an aggregation) must agree with row mode under the option matrix
+  plus `threads: 16`; the radix sort must order random batches exactly like
+  the comparator sort; the integer-bound search is checked directly.
 * `--modes`: `python3 tests/conformance/runner.py --engine
   implementations/common-lisp/bin/polyquery --modes`; additionally run with
   `POLYQUERY_MORSEL_ROWS=7` so that every Phase 1–3 test exercises parallel
@@ -1416,8 +1424,11 @@ same kernels at 0.15–0.5 ns/element in the AVX2/AVX-512 variants.
   option combinations and must agree. Tens of thousands of queries were run
   during development (it found and fixed a CASE alignment bug and a
   lock-reacquisition bug after timed condition waits).
-* `bench/bench.py` — benchmark and consistency check on generated datasets
-  (see Performance); `bench/profile.lisp` — statistical profile of one query
+* `bench/workload.py` — times the latency workload
+  (`bench/workloads/analytics.json`) through `bin/polyquery session` with
+  default options and compares answers with an earlier run (see *Latency
+  optimization*); `bench/bench.py` — benchmark and consistency check on
+  generated datasets (see Performance); `bench/profile.lisp` — statistical profile of one query
   (`POLYQUERY_NATIVE_KERNELS=LIB` runs it with native kernels);
   `bench/kernels.lisp` — Lisp-versus-native kernel micro-benchmark.
 * Native kernels (`tests/test-native.lisp`, part of `make test`; the library
