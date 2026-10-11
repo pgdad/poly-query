@@ -97,6 +97,24 @@
         .quad   HI32(C_FMIX2)
         ENDOBJ  c_fmix2_hi
 .endm
+/* fmix64 multipliers as dword pairs (hi32, lo32) per qword, 32 bytes (vpmulld
+ * memory operand: lo*hi32 and hi*lo32 in one multiply), and the high-dword
+ * mask (vpbroadcastq). */
+.macro TAB_FMIX_SWAP
+        OBJ     c_fmix1_sw, 5
+        .rept 4
+        .long   HI32(C_FMIX1), LO32(C_FMIX1)
+        .endr
+        ENDOBJ  c_fmix1_sw
+        OBJ     c_fmix2_sw, 5
+        .rept 4
+        .long   HI32(C_FMIX2), LO32(C_FMIX2)
+        .endr
+        ENDOBJ  c_fmix2_sw
+        OBJ     c_hi32, 3
+        .quad   0xffffffff00000000
+        ENDOBJ  c_hi32
+.endm
 /* nibmask: lane masks of 4 rows, entry k (32 bytes) = 4 qwords, qword j =
  * all-ones iff bit j of the nibble k is set (validity -> lane mask by one
  * table load). */

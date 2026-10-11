@@ -56,6 +56,7 @@
         TAB_EIGHT_D
         TAB_SIGN_D
         TAB_FMIX_HALVES
+        TAB_FMIX_SWAP
         TAB_PINF_NINF
         TAB_SHC128S
         TAB_SHC128M
@@ -1126,82 +1127,137 @@ ENDF pqk_x86_avx2_bitmap_popcount
  * void pqk_x86_avx2_hash_i64(data, n, seed, out)
  * Args:     rdi = data, rsi = n, rdx = seed, rcx = out
  * Returns:  -
- * Clobbers: rax, rcx, rsi, rdi, r8, r9, r10, ymm0-ymm5, ymm10-ymm14, flags
- * Algorithm: out[i] = fmix64(data[i] ^ seed), 8 rows per iteration in
- *           ymm0/ymm1 (k), temps ymm2-ymm5. AVX2 has no 64-bit multiply,
- *           so k*c = lo*clo + ((hi*clo + lo*chi) << 32) (MUL64, three
- *           vpmuludq). ymm10/11 = C1 low/high dwords, ymm12/13 = C2,
- *           ymm14 = bcast(seed).
- * Tail:     one 4-row vector step, then the last 1..3 rows in scalar code
- *           (FMIX64; r8/r9 = C1/C2, rax/r10 scratch).
+ * Clobbers: rax, rcx, rsi, rdi, r8, r9, r10, r11, ymm0-ymm15, flags
+ *           (rbx, rbp saved and restored)
+ * Algorithm: out[i] = fmix64(data[i] ^ seed), 24 rows per iteration split
+ *           between the vector unit (16 rows: 4 ymm, ymm0-ymm3) and the
+ *           integer unit (8 rows, scalar imul), which run in parallel.
+ *           AVX2 has no 64-bit multiply; k * C (mod 2^64) is
+ *           lo*clo + ((lo*chi + hi*clo) mod 2^32) << 32 (HMUL): one
+ *           vpmulld against the dword-swapped constant (chi, clo) yields
+ *           both cross products, vpsllq / vpand place them in the high
+ *           dword, vpmuludq gives lo*clo (2 multiplies instead of 3, one
+ *           shift instead of two). The four vectors are interleaved step
+ *           by step (each fmix64 is a ~30-cycle dependency chain on Zen 5)
+ *           and the scalar rows are spread between the steps.
+ *           Measured (L1/L2, ns/row): former 3-vpmuludq form 0.34, vpmulld
+ *           form 0.30, hybrid 0.21.
+ *           ymm4-ymm11 temps, ymm12/13 = bcast(clo) of C1/C2, ymm14 =
+ *           bcast(0xffffffff00000000), ymm15 = bcast(seed);
+ *           r8/r9 = C1/C2, rbx = 33 (shrx count), rax/r10 and r11/rbp
+ *           scalar row registers.
+ * Tail:     4-row vector steps, then the last 0..3 rows in scalar code.
  * ====================================================================== */
-.macro XSH33 k, t
+/* HXSH k, t: k ^= k >> 33 (lanes). HMUL k, clo, csw, t1, t2: k *= C
+ * (lanes, mod 2^64), clo = bcast(lo32(C)), csw = (hi32(C), lo32(C)) dword
+ * pairs (memory), ymm14 = high-dword mask. */
+.macro HXSH k, t
         vpsrlq  $33, \k, \t
         vpxor   \t, \k, \k
 .endm
-.macro MUL64 k, clo, chi, t1, t2
-        vpsrlq  $32, \k, \t1
-        vpmuludq \clo, \t1, \t1
-        vpmuludq \chi, \k, \t2
-        vpaddq  \t2, \t1, \t1
-        vpsllq  $32, \t1, \t1
-        vpmuludq \clo, \k, \k
+.macro HMUL k, clo, csw, t1, t2
+        vpmulld \csw, \k, \t1                   /* (lo*chi, hi*clo) */
+        vpsllq  $32, \t1, \t2                   /* lo*chi << 32 */
+        vpmuludq \clo, \k, \k                   /* lo*clo */
+        vpand   %ymm14, \t1, \t1                /* hi*clo << 32 */
+        vpaddq  \t2, \k, \k
         vpaddq  \t1, \k, \k
 .endm
-.macro VFMIX k, t1, t2
-        XSH33   \k, \t1
-        MUL64   \k, %ymm10, %ymm11, \t1, \t2
-        XSH33   \k, \t1
-        MUL64   \k, %ymm12, %ymm13, \t1, \t2
-        XSH33   \k, \t1
+/* The same step on the four vectors ymm0-ymm3 (temps ymm4-ymm11). */
+.macro HXSH4
+        HXSH    %ymm0, %ymm4
+        HXSH    %ymm1, %ymm6
+        HXSH    %ymm2, %ymm8
+        HXSH    %ymm3, %ymm10
+.endm
+.macro HMUL4 clo, csw
+        HMUL    %ymm0, \clo, \csw, %ymm4, %ymm5
+        HMUL    %ymm1, \clo, \csw, %ymm6, %ymm7
+        HMUL    %ymm2, \clo, \csw, %ymm8, %ymm9
+        HMUL    %ymm3, \clo, \csw, %ymm10, %ymm11
+.endm
+/* HROW off, r, t: one scalar row, out[off] = fmix64(data[off] ^ seed). */
+.macro HROW off, r, t
+        mov     \off(%rdi), \r
+        xor     %rdx, \r
+        shrx    %rbx, \r, \t
+        xor     \t, \r
+        imul    %r8, \r
+        shrx    %rbx, \r, \t
+        xor     \t, \r
+        imul    %r9, \r
+        shrx    %rbx, \r, \t
+        xor     \t, \r
+        mov     \r, \off(%rcx)
 .endm
 
+#define SAVED %rbx, %rbp
 FUNC pqk_x86_avx2_hash_i64
-        vpbroadcastq c_fmix1_lo(%rip), %ymm10           /* [check] */
-        vpbroadcastq c_fmix1_hi(%rip), %ymm11
-        vpbroadcastq c_fmix2_lo(%rip), %ymm12
-        vpbroadcastq c_fmix2_hi(%rip), %ymm13
-        vmovq   %rdx, %xmm14
-        vpbroadcastq %xmm14, %ymm14
-        cmp     $8, %rsi
-        jb      .Lhash_i64_tail
-.Lhash_i64_main:                                        /* [main] 8 rows */
-        vpxor   (%rdi), %ymm14, %ymm0
-        vpxor   32(%rdi), %ymm14, %ymm1
-        VFMIX   %ymm0, %ymm2, %ymm3
-        VFMIX   %ymm1, %ymm4, %ymm5
+        PROLOGUE SAVED
+        vpbroadcastq c_fmix1_lo(%rip), %ymm12           /* [check] */
+        vpbroadcastq c_fmix2_lo(%rip), %ymm13
+        vpbroadcastq c_hi32(%rip), %ymm14
+        vmovq   %rdx, %xmm15
+        vpbroadcastq %xmm15, %ymm15
+        FMIX_CONSTS %r8, %r9
+        mov     $33, %ebx
+        cmp     $24, %rsi
+        jb      .Lhash_i64_quad
+.Lhash_i64_main:                                        /* [main] 24 rows */
+        vpxor   (%rdi), %ymm15, %ymm0
+        vpxor   32(%rdi), %ymm15, %ymm1
+        vpxor   64(%rdi), %ymm15, %ymm2
+        vpxor   96(%rdi), %ymm15, %ymm3
+        HXSH4
+        HROW    128, %rax, %r10
+        HMUL4   %ymm12, c_fmix1_sw(%rip)
+        HROW    136, %r11, %rbp
+        HROW    144, %rax, %r10
+        HXSH4
+        HROW    152, %r11, %rbp
+        HMUL4   %ymm13, c_fmix2_sw(%rip)
+        HROW    160, %rax, %r10
+        HROW    168, %r11, %rbp
+        HXSH4
+        HROW    176, %rax, %r10
+        HROW    184, %r11, %rbp
         vmovdqu %ymm0, (%rcx)
         vmovdqu %ymm1, 32(%rcx)
-        add     $64, %rdi
-        add     $64, %rcx
-        sub     $8, %rsi
-        cmp     $8, %rsi
+        vmovdqu %ymm2, 64(%rcx)
+        vmovdqu %ymm3, 96(%rcx)
+        add     $192, %rdi
+        add     $192, %rcx
+        sub     $24, %rsi
+        cmp     $24, %rsi
         jae     .Lhash_i64_main
-.Lhash_i64_tail:                                        /* [tail] 4 rows */
+.Lhash_i64_quad:                                        /* [tail] 4 rows */
         cmp     $4, %rsi
         jb      .Lhash_i64_rows
-        vpxor   (%rdi), %ymm14, %ymm0
-        VFMIX   %ymm0, %ymm2, %ymm3
+        vpxor   (%rdi), %ymm15, %ymm0
+        HXSH    %ymm0, %ymm4
+        HMUL    %ymm0, %ymm12, c_fmix1_sw(%rip), %ymm4, %ymm5
+        HXSH    %ymm0, %ymm4
+        HMUL    %ymm0, %ymm13, c_fmix2_sw(%rip), %ymm4, %ymm5
+        HXSH    %ymm0, %ymm4
         vmovdqu %ymm0, (%rcx)
         add     $32, %rdi
         add     $32, %rcx
         sub     $4, %rsi
+        jmp     .Lhash_i64_quad
 .Lhash_i64_rows:                                        /* 0..3 rows */
         test    %rsi, %rsi
         jz      .Lhash_i64_result
-        FMIX_CONSTS %r8, %r9
 .Lhash_i64_row:
-        mov     (%rdi), %rax
-        xor     %rdx, %rax
-        FMIX64  %rax, %r10, %r8, %r9
-        mov     %rax, (%rcx)
+        HROW    0, %rax, %r10
         add     $8, %rdi
         add     $8, %rcx
         dec     %rsi
         jnz     .Lhash_i64_row
 .Lhash_i64_result:                                      /* [result] */
+        EPILOGUE SAVED
         VRET
 ENDF pqk_x86_avx2_hash_i64
+#undef SAVED
 
 /* ========================================================================
  * void pqk_x86_avx2_compare_fixed(a, b, width, n, out)
