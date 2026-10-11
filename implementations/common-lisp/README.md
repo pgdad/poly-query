@@ -630,32 +630,34 @@ configurations return the same rows. Queries are listed in `bench/bench.py`
 
 | query | baseline | row | vec1 | vec4 | vec8 | baseline/vec1 | baseline/vec8 |
 |---|---|---|---|---|---|---|---|
-| q1_filter_count | 31 | 31 | 13 | 6.7 | 5.3 | 2.4× | 5.8× |
-| q2_group_low | 84 | 74 | 29 | 9.2 | 6.0 | 2.9× | 14.0× |
-| q3_group_high | 144 | 129 | 29 | 27 | 27 | 5.0× | 5.4× |
-| q4_join_agg | 127 | 120 | 65 | 29 | 19 | 2.0× | 6.7× |
-| q5_topn | 54 | 54 | 9.9 | 5.1 | 4.7 | 5.5× | 11.6× |
-| q6_float_agg | 78 | 77 | 20 | 7.9 | 6.5 | 3.9× | 11.9× |
-| q7_join3 | 89 | 95 | 49 | 19 | 14 | 1.8× | 6.4× |
-| q8_count_distinct | 47 | 46 | 32 | 16 | 14 | 1.5× | 3.3× |
-| q9_project | 53 | 40 | 21 | 15 | 15 | 2.6× | 3.6× |
-| q10_nulls | 85 | 88 | 50 | 16 | 8.7 | 1.7× | 9.8× |
-| q11_case_expr | 74 | 75 | 47 | 16 | 11 | 1.6× | 6.5× |
-| q12_sort | 225 | 199 | 12 | 9.5 | 9.8 | 18.0× | 23.0× |
-| q13_left_join | 68 | 67 | 29 | 16 | 13 | 2.3× | 5.3× |
-| q14_distinct | 62 | 62 | 41 | 12 | 6.6 | 1.5× | 9.4× |
-| q15_comma_join | 16 | 17 | 6.7 | 3.1 | 2.5 | 2.4× | 6.6× |
-| q16_full_sort | 1067 | 1061 | 351 | 148 | 115 | 3.0× | 9.3× |
-| q17_scan_filter | 75 | 70 | 24 | 10 | 11 | 3.1× | 6.8× |
+| q1_filter_count | 31 | 31 | 13 | 6.9 | 5.4 | 2.3× | 5.7× |
+| q2_group_low | 84 | 76 | 30 | 9.3 | 6.1 | 2.8× | 13.8× |
+| q3_group_high | 144 | 136 | 29 | 33 | 32 | 5.0× | 4.5× |
+| q4_join_agg | 121 | 125 | 67 | 23 | 17 | 1.8× | 7.2× |
+| q5_topn | 54 | 53 | 10 | 5.0 | 4.8 | 5.3× | 11.2× |
+| q6_float_agg | 78 | 80 | 20 | 7.9 | 6.7 | 3.9× | 11.8× |
+| q7_join3 | 90 | 89 | 36 | 18 | 14 | 2.5× | 6.5× |
+| q8_count_distinct | 47 | 46 | 32 | 15 | 19 | 1.5× | 2.4× |
+| q9_project | 54 | 45 | 22 | 15 | 16 | 2.5× | 3.5× |
+| q10_nulls | 83 | 86 | 50 | 14 | 9.1 | 1.7× | 9.2× |
+| q11_case_expr | 76 | 76 | 47 | 16 | 11 | 1.6× | 6.8× |
+| q12_sort | 198 | 199 | 13 | 9.3 | 9.7 | 15.6× | 20.4× |
+| q13_left_join | 74 | 67 | 30 | 15 | 13 | 2.5× | 5.5× |
+| q14_distinct | 70 | 62 | 41 | 11 | 6.7 | 1.7× | 10.4× |
+| q15_comma_join | 19 | 16 | 6.7 | 3.1 | 2.4 | 2.9× | 8.2× |
+| q16_full_sort | 1067 | 1059 | 368 | 139 | 123 | 2.9× | 8.7× |
+| q17_scan_filter | 76 | 69 | 34 | 11 | 10 | 2.2× | 7.3× |
 
-Observations: the vectorized executor alone is 1.5–18× faster than the
+Observations: the vectorized executor alone is 1.5–16× faster than the
 baseline (typed loops, no per-row allocation, dictionary-aware string
 predicates, integer-keyed hash tables; top-N with threshold pruning turns
-`q12` from a full re-sorting buffer into one comparison per row).
-Parallelism scales scans, filters, joins and low-cardinality aggregation
-almost linearly up to 4–8 threads; high-cardinality aggregation (`q3`,
-80,777 groups) and result-heavy queries (`q9`, 50k rows) are bounded by
-the serial result serialization and the merge of partial states.
+`q12` from a full re-sorting buffer into one comparison per row), and
+2.4–20× faster with 8 threads. Parallelism scales scans, filters,
+joins, sorts and low-cardinality aggregation well up to 4–8 threads;
+high-cardinality aggregation (`q3`, 80,777 groups) does not gain from
+threads (every worker builds a table of nearly all groups, which are then
+merged and emitted in serial first-appearance order), and result-heavy
+queries (`q9`, 50k rows) are bounded by the serial JSON serialization.
 
 **Join algorithms** (`join` option, vectorized unless noted):
 
