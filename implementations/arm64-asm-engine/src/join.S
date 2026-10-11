@@ -273,21 +273,21 @@ ENDF ex_nljoin
 
 // =============================================================================
 // ex_mergejoin(x0 PlanNode*, x1 ctx) -> x0 TupleSet*   sort-merge join
-// Key records of both inputs (key_records) without NULL keys are sorted by
-// key (ties by tuple index, cmp_key_rec), then merged: for every run of
-// equal keys each left tuple of the run is paired with each right tuple of
-// the run and the residual PN_EXPR is checked. LEFT JOIN pads left tuples
-// without a partner (including those with a NULL key).
+// Both inputs are sorted (mj_side: key cells via join_keys, an index array
+// of the tuples without NULL keys sorted by key, ties by tuple index), then
+// merged: for every run of equal keys each left tuple of the run is paired
+// with each right tuple of the run and the residual PN_EXPR is checked.
+// LEFT JOIN pads left tuples without a partner (including NULL keys).
 //   x19 node, x20 ctx, x21 left ts, x22 right ts, x23 out, x24 i (left),
 //   x25 j (right), x26 matched, x27 combined tuple, x28 key info
-// Stack: [sp] left records, [sp+8] n left, [sp+16] right records,
-//        [sp+24] n right, [sp+32] record size, [sp+40] right run end,
-//        [sp+48] k (right cursor), [sp+56] left NULL flags,
-//        [sp+64] iteration counter
+// Stack: [sp] left cells, [sp+8] left order, [sp+16] n left,
+//        [sp+24] right cells, [sp+32] right order, [sp+40] n right,
+//        [sp+48] key bytes, [sp+56] right run end, [sp+64] k (right
+//        cursor), [sp+72] left NULL flags, [sp+80] iteration counter
 // =============================================================================
 FUNC ex_mergejoin
     ENTER 5
-    sub  sp, sp, #80
+    sub  sp, sp, #96
     mov  x19, x0
     mov  x20, x1
     ldr  x0, [x19, #PN_LEFT]
@@ -297,12 +297,11 @@ FUNC ex_mergejoin
     mov  x1, x20
     bl   ex_tuples
     mov  x22, x0
-    str  xzr, [sp, #64]
+    str  xzr, [sp, #80]
     // key info for the comparators: [0] nkeys, [8..] u32 types
     ldr  x9, [x19, #PN_NKEYS]
     lsl  x10, x9, #4
-    add  x10, x10, #8
-    str  x10, [sp, #32]
+    str  x10, [sp, #48]
     lsl  x0, x9, #2
     add  x0, x0, #16
     bl   arena_alloc
@@ -319,35 +318,21 @@ FUNC ex_mergejoin
     str  w11, [x12, x10, lsl #2]
     add  x10, x10, #1
     b    1b
-2:  mov  x0, x21                        // left records
+2:  mov  x0, x21
     ldr  x1, [x19, #PN_LKEYS]
-    ldr  x2, [x19, #PN_NKEYS]
+    mov  x2, x28
     mov  x3, x20
-    bl   key_records
-    str  x1, [sp, #56]
-    ldr  x2, [x21, #TS_N]
-    ldr  x3, [sp, #32]
-    bl   drop_null_keys
+    bl   mj_side
     stp  x0, x1, [sp]
-    mov  x0, x22                        // right records
+    str  x2, [sp, #16]
+    str  x3, [sp, #72]
+    mov  x0, x22
     ldr  x1, [x19, #PN_RKEYS]
-    ldr  x2, [x19, #PN_NKEYS]
+    mov  x2, x28
     mov  x3, x20
-    bl   key_records
-    ldr  x2, [x22, #TS_N]
-    ldr  x3, [sp, #32]
-    bl   drop_null_keys
-    stp  x0, x1, [sp, #16]
-    ldp  x0, x1, [sp]                   // sort both
-    ldr  x2, [sp, #32]
-    ADR_L x3, cmp_key_rec
-    mov  x4, x28
-    bl   qsort_r
-    ldp  x0, x1, [sp, #16]
-    ldr  x2, [sp, #32]
-    ADR_L x3, cmp_key_rec
-    mov  x4, x28
-    bl   qsort_r
+    bl   mj_side
+    stp  x0, x1, [sp, #24]
+    str  x2, [sp, #40]
     ldr  x0, [x21, #TS_W]
     ldr  x1, [x21, #TS_N]
     bl   ts_new
@@ -360,19 +345,15 @@ FUNC ex_mergejoin
     mov  x24, #0
     mov  x25, #0
 .Lmj_loop:
-    ldr  x9, [sp, #8]
+    ldr  x9, [sp, #16]
     cmp  x24, x9
     b.hs .Lmj_nullkeys
-    ldr  x9, [sp, #24]
+    ldr  x9, [sp, #40]
     cmp  x25, x9
     b.hs .Lmj_unmatched                 // right exhausted
-    ldp  x9, x10, [sp, #24]             // n right, record size
-    ldr  x11, [sp]
-    madd x0, x24, x10, x11
-    ldr  x11, [sp, #16]
-    madd x1, x25, x10, x11
-    mov  x2, x28
-    bl   cmp_group_rec
+    mov  x0, x24
+    mov  x1, x25
+    bl   .Lmj_cmp_lr
     cmp  w0, #0
     b.lt .Lmj_unmatched
     b.eq .Lmj_run
@@ -385,47 +366,40 @@ FUNC ex_mergejoin
 .Lmj_run:
     // right run [j, end) of keys equal to right[j]
     add  x9, x25, #1
-    str  x9, [sp, #40]
-3:  ldr  x9, [sp, #40]
-    ldr  x10, [sp, #24]
-    cmp  x9, x10
-    b.hs 4f
-    ldr  x10, [sp, #32]
-    ldr  x11, [sp, #16]
-    madd x0, x25, x10, x11
-    madd x1, x9, x10, x11
-    mov  x2, x28
-    bl   cmp_group_rec
-    cbnz w0, 4f
-    ldr  x9, [sp, #40]
-    add  x9, x9, #1
-    str  x9, [sp, #40]
-    b    3b
-4:  // every left tuple with this key against the run
-    mov  x26, #0
-    str  x25, [sp, #48]
-5:  ldr  x9, [sp, #48]
+    str  x9, [sp, #56]
+3:  ldr  x9, [sp, #56]
     ldr  x10, [sp, #40]
     cmp  x9, x10
+    b.hs 4f
+    mov  x0, x24
+    mov  x1, x9
+    bl   .Lmj_cmp_lr
+    cbnz w0, 4f
+    ldr  x9, [sp, #56]
+    add  x9, x9, #1
+    str  x9, [sp, #56]
+    b    3b
+4:  // the left tuple against the run
+    mov  x26, #0
+    str  x25, [sp, #64]
+5:  ldr  x9, [sp, #64]
+    ldr  x10, [sp, #56]
+    cmp  x9, x10
     b.hs 7f
-    ldr  x10, [sp, #64]
+    ldr  x10, [sp, #80]
     add  x10, x10, #1
-    str  x10, [sp, #64]
+    str  x10, [sp, #80]
     tst  x10, #DEADLINE_MASK
     b.ne 51f
     bl   check_deadline
-51: ldr  x9, [sp, #48]                  // right tuple
-    ldp  x10, x11, [sp, #16]
-    ldr  x11, [sp, #32]
-    madd x10, x9, x11, x10
-    ldr  x1, [x10]
+51: ldr  x9, [sp, #64]                  // right tuple
+    ldr  x10, [sp, #32]
+    ldr  x1, [x10, x9, lsl #3]
     mov  x0, x22
     bl   ts_tuple
     str  x0, [sp, #-16]!
-    ldr  x10, [sp, #16]                 // left tuple
-    ldr  x11, [sp, #48]
-    madd x10, x24, x11, x10
-    ldr  x1, [x10]
+    ldr  x10, [sp, #(16 + 8)]           // left tuple
+    ldr  x1, [x10, x24, lsl #3]
     mov  x0, x21
     bl   ts_tuple
     mov  x1, x0
@@ -446,25 +420,21 @@ FUNC ex_mergejoin
     mov  x1, x27
     bl   join_emit
     mov  x26, #1
-61: ldr  x9, [sp, #48]
+61: ldr  x9, [sp, #64]
     add  x9, x9, #1
-    str  x9, [sp, #48]
+    str  x9, [sp, #64]
     b    5b
 7:  cbnz x26, 8f
     bl   .Lmj_pad
 8:  add  x24, x24, #1               // next left tuple: same key => same run
-    ldr  x9, [sp, #8]
+    ldr  x9, [sp, #16]
     cmp  x24, x9
     b.hs .Lmj_nullkeys
-    ldr  x10, [sp, #32]
-    ldr  x11, [sp]
-    sub  x9, x24, #1
-    madd x0, x9, x10, x11
-    madd x1, x24, x10, x11
-    mov  x2, x28
-    bl   cmp_group_rec
+    mov  x0, x24
+    mov  x1, x25
+    bl   .Lmj_cmp_lr
     cbz  w0, 4b
-    ldr  x25, [sp, #40]                 // continue after the run
+    ldr  x25, [sp, #56]                 // continue after the run
     b    .Lmj_loop
 .Lmj_nullkeys:                          // LEFT: tuples with a NULL key
     ldr  w9, [x19, #PN_JT]
@@ -474,7 +444,7 @@ FUNC ex_mergejoin
 9:  ldr  x9, [x21, #TS_N]
     cmp  x24, x9
     b.hs .Lmj_end
-    ldr  x10, [sp, #56]
+    ldr  x10, [sp, #72]
     ldrb w10, [x10, x24]
     cbz  w10, 10f
     mov  x0, x21
@@ -485,18 +455,35 @@ FUNC ex_mergejoin
     b    9b
 .Lmj_end:
     mov  x0, x23
-    add  sp, sp, #80
+    add  sp, sp, #96
     LEAVE 5
 
-// local helpers sharing the frame: pad left record x24 / tuple x0 (LEFT JOIN)
+// local helpers sharing the frame
+// .Lmj_cmp_lr: x0 left position, x1 right position -> w0 key order
+.Lmj_cmp_lr:
+    stp  x29, x30, [sp, #-16]!
+    ldr  x9, [sp, #(16 + 48)]           // key bytes
+    ldr  x10, [sp, #(16 + 8)]
+    ldr  x10, [x10, x0, lsl #3]         // left tuple index
+    ldr  x11, [sp, #(16 + 0)]
+    madd x0, x10, x9, x11
+    sub  x0, x0, #8                     // "record": cells at +8
+    ldr  x10, [sp, #(16 + 32)]
+    ldr  x10, [x10, x1, lsl #3]
+    ldr  x11, [sp, #(16 + 24)]
+    madd x1, x10, x9, x11
+    sub  x1, x1, #8
+    mov  x2, x28
+    bl   cmp_group_rec
+    ldp  x29, x30, [sp], #16
+    ret
+// .Lmj_pad: pad left position x24; .Lmj_pad_tuple: pad tuple x0
 .Lmj_pad:
     ldr  w9, [x19, #PN_JT]
     cmp  w9, #JT_LEFT
     b.ne 99f
-    ldr  x10, [sp]
-    ldr  x11, [sp, #32]
-    madd x10, x24, x11, x10
-    ldr  x1, [x10]
+    ldr  x10, [sp, #8]
+    ldr  x1, [x10, x24, lsl #3]
     mov  x0, x21
     stp  x29, x30, [sp, #-16]!
     bl   ts_tuple
@@ -518,52 +505,209 @@ FUNC ex_mergejoin
 99: ret
 ENDF ex_mergejoin
 
-// drop_null_keys(x0 records, x1 u8* NULL flags, x2 n, x3 record size)
-//   -> x0 records, x1 count
-// Compacts (in place, order kept) the records whose keys are all non-NULL.
-// (leaf)
-FUNC drop_null_keys
-    mov  x9, #0                         // records read
-    mov  x10, #0                        // records kept
-    mov  x11, x0                        // write cursor
-    mov  x12, x0                        // read cursor
-1:  cmp  x9, x2
-    b.hs 4f
-    ldrb w13, [x1, x9]
-    cbnz w13, 3f
-    cmp  x11, x12
-    b.eq 21f
-    mov  x14, #0
-2:  cmp  x14, x3
-    b.hs 21f
-    ldr  x15, [x12, x14]
-    str  x15, [x11, x14]
-    add  x14, x14, #8
-    b    2b
-21: add  x11, x11, x3
-    add  x10, x10, #1
-3:  add  x12, x12, x3
-    add  x9, x9, #1
-    b    1b
-4:  mov  x1, x10
-    ret
-ENDF drop_null_keys
-
-// cmp_key_rec(x0 rec a, x1 rec b, x2 key info) -> w0: key order, then tuple
-// index (deterministic order for qsort_r)
-FUNC cmp_key_rec
-    ENTER 2
+// =============================================================================
+// mj_side(x0 TupleSet*, x1 Node** keys, x2 key info, x3 ctx)
+//   -> x0 key cells, x1 u64* order, x2 count, x3 u8* NULL flags
+// The tuples whose keys are all non-NULL, sorted by key (ties by tuple
+// index): LSD radix sort for one integer-like key (BOOLEAN, INT64,
+// DECIMAL, DATE, TIMESTAMP: stable, so ties keep the index order), qsort_r
+// with cmp_key_idx otherwise.
+//   x19 ts, x20 key info, x21 cells, x22 order, x23 count, x24 flags,
+//   x25 key bytes
+// =============================================================================
+FUNC mj_side
+    ENTER 5
+    sub  sp, sp, #32
     mov  x19, x0
-    mov  x20, x1
+    mov  x20, x2
+    mov  x2, x1                         // keys
+    mov  x1, x2
+    ldr  x2, [x20]
+    mov  x0, x19
+    bl   join_keys
+    mov  x21, x0
+    mov  x24, x2
+    ldr  x25, [x20]
+    lsl  x25, x25, #4
+    ldr  x9, [x19, #TS_N]
+    lsl  x0, x9, #3
+    add  x0, x0, #16
+    bl   arena_alloc
+    mov  x22, x0
+    mov  x23, #0
+    mov  x9, #0
+1:  ldr  x10, [x19, #TS_N]
+    cmp  x9, x10
+    b.hs 2f
+    ldrb w11, [x24, x9]
+    cbnz w11, 11f
+    str  x9, [x22, x23, lsl #3]
+    add  x23, x23, #1
+11: add  x9, x9, #1
+    b    1b
+2:  cmp  x23, #2
+    b.lo 9f
+    ldr  x9, [x20]                      // one integer-like key: radix
+    cmp  x9, #1
+    b.ne 3f
+    ldrb w9, [x20, #8]
+    cmp  w9, #T_FLOAT
+    b.eq 3f
+    cmp  w9, #T_STR
+    b.eq 3f
+    mov  x0, x22
+    mov  x1, x23
+    mov  x2, x21
+    mov  x3, x25
+    bl   radix_sort_idx
+    b    9f
+3:  stp  x21, x25, [sp]                 // comparator argument
+    str  x20, [sp, #16]
+    mov  x0, x22
+    mov  x1, x23
+    mov  x2, #8
+    ADR_L x3, cmp_key_idx
+    mov  x4, sp
+    bl   qsort_r
+9:  mov  x0, x21
+    mov  x1, x22
+    mov  x2, x23
+    mov  x3, x24
+    add  sp, sp, #32
+    LEAVE 5
+ENDF mj_side
+
+// cmp_key_idx(x0 u64* a, x1 u64* b, x2 {cells, key bytes, key info})
+//   -> w0 key order of the tuples, then tuple index
+//   x19 index a, x20 index b
+LFUNC cmp_key_idx
+    ENTER 2
+    ldr  x19, [x0]
+    ldr  x20, [x1]
+    ldp  x9, x10, [x2]
+    madd x0, x19, x10, x9
+    sub  x0, x0, #8
+    madd x1, x20, x10, x9
+    sub  x1, x1, #8
+    ldr  x2, [x2, #16]
     bl   cmp_group_rec
     cbnz w0, 1f
-    ldr  x9, [x19]
-    ldr  x10, [x20]
-    cmp  x9, x10
+    cmp  x19, x20
     cset w0, hi
     csinv w0, w0, wzr, hs
 1:  LEAVE 2
-ENDF cmp_key_rec
+ENDF cmp_key_idx
+
+// =============================================================================
+// radix_sort_idx(x0 u64* order, x1 n, x2 key cells, x3 key bytes)
+// Stable LSD radix sort (8 passes of 8 bits, constant bytes skipped) of the
+// tuple indexes by their first key payload as a signed 64-bit integer.
+//   x19 order, x20 n, x21 keys (biased), x22 tmp keys, x23 tmp order,
+//   x24 shift, x25 histogram (257 u64), x26 the caller's array
+// =============================================================================
+FUNC radix_sort_idx
+    ENTER 5
+    mov  x26, x0                        // the caller's array
+    mov  x19, x0
+    mov  x20, x1
+    stp  x2, x3, [sp, #-16]!
+    lsl  x0, x20, #3
+    add  x0, x0, #16
+    bl   arena_alloc
+    mov  x21, x0
+    lsl  x0, x20, #3
+    add  x0, x0, #16
+    bl   arena_alloc
+    mov  x22, x0
+    lsl  x0, x20, #3
+    add  x0, x0, #16
+    bl   arena_alloc
+    mov  x23, x0
+    mov  x0, #(257 * 8)
+    bl   arena_alloc
+    mov  x25, x0
+    ldp  x2, x3, [sp], #16
+    mov  x9, #0                         // biased keys: signed -> unsigned
+1:  cmp  x9, x20
+    b.hs 2f
+    ldr  x10, [x19, x9, lsl #3]
+    mul  x10, x10, x3
+    ldr  x10, [x2, x10]
+    eor  x10, x10, #0x8000000000000000
+    str  x10, [x21, x9, lsl #3]
+    add  x9, x9, #1
+    b    1b
+2:  mov  x24, #0
+.Lrs_pass:
+    cmp  x24, #64
+    b.hs .Lrs_end
+    mov  x0, x25
+    mov  w1, #0
+    mov  x2, #(257 * 8)
+    bl   memset
+    mov  x9, #0                         // histogram of this byte
+3:  cmp  x9, x20
+    b.hs 4f
+    ldr  x10, [x21, x9, lsl #3]
+    lsr  x10, x10, x24
+    and  x10, x10, #0xff
+    add  x10, x10, #1
+    ldr  x11, [x25, x10, lsl #3]
+    add  x11, x11, #1
+    str  x11, [x25, x10, lsl #3]
+    add  x9, x9, #1
+    b    3b
+4:  mov  x9, #1                         // all keys share this byte: skip
+41: cmp  x9, #256
+    b.hi 42f
+    ldr  x10, [x25, x9, lsl #3]
+    cmp  x10, x20
+    b.eq .Lrs_next
+    add  x9, x9, #1
+    b    41b
+42: mov  x9, #1                         // prefix sums: start of each bucket
+    mov  x11, #0
+5:  cmp  x9, #256
+    b.hi 6f
+    ldr  x10, [x25, x9, lsl #3]
+    str  x11, [x25, x9, lsl #3]
+    add  x11, x11, x10
+    add  x9, x9, #1
+    b    5b
+6:  mov  x9, #0                         // scatter (stable)
+7:  cmp  x9, x20
+    b.hs 8f
+    ldr  x10, [x21, x9, lsl #3]
+    lsr  x12, x10, x24
+    and  x12, x12, #0xff
+    add  x12, x12, #1
+    ldr  x13, [x25, x12, lsl #3]
+    add  x14, x13, #1
+    str  x14, [x25, x12, lsl #3]
+    str  x10, [x22, x13, lsl #3]
+    ldr  x15, [x19, x9, lsl #3]
+    str  x15, [x23, x13, lsl #3]
+    add  x9, x9, #1
+    b    7b
+8:  mov  x9, x21                        // swap the buffers
+    mov  x21, x22
+    mov  x22, x9
+    mov  x9, x19
+    mov  x19, x23
+    mov  x23, x9
+.Lrs_next:
+    add  x24, x24, #8
+    b    .Lrs_pass
+.Lrs_end:
+    cmp  x19, x26                       // result in the caller's array?
+    b.eq 9f
+    mov  x0, x26
+    mov  x1, x19
+    lsl  x2, x20, #3
+    bl   memcpy
+9:  LEAVE 5
+ENDF radix_sort_idx
+
 
 // =============================================================================
 // Hashing of key cells
