@@ -444,30 +444,44 @@ tables are flat arrays, and batches read tuple sets in place.
 
 Hardware: NVIDIA GB10 (Arm Cortex-X925 / A725, 20 cores), Linux, glibc.
 Data: `python3 datasets/generators/pqgen.py generate --scale 1m` —
-`transactions` 1,000,000 rows, `customers` 100,000 rows, loaded as CSV with
-the generated schemas (column layout). `bench/bench.sh DATA_DIR 5` runs every
-query five times per option set in one session and reports the best
-engine-measured time (`stats.elapsed_us`). "before" is the Phase 4 engine
-(commit `a16fc89`, `bench/baseline-before.txt`); "after" columns are this
-engine (`bench/results-after.txt`). All times in ms.
+`transactions` 1,000,000 rows, `order_items` 1,000,000, `orders` 250,000,
+`customers` 100,000, loaded as CSV with the generated schemas (column
+layout). `bench/bench.sh DATA_DIR 5` runs every query five times per option
+set in one session and reports the best engine-measured time
+(`stats.elapsed_us`). "before" is the Phase 4 executor (commit `d21cf39`:
+the Phase 4 engine plus option parsing, `bench/baseline-before.txt`); the
+other columns are this engine (`bench/results-after.txt`). Times in ms.
 
-| query | before | row, 1 thread | row, optimize=false | vectorized, 1 | vectorized, 4 | vectorized, 8 | merge join (vec, 1) |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Q1 filter + aggregate (`status = 'approved' AND amount > 100`) | 18.0 | 17.7 | 18.1 | 4.0 | 2.1 | 1.2 | – |
-| Q2 GROUP BY category (5 aggregates) | 147.2 | 147.8 | 147.7 | 22.0 | 9.2 | 5.0 | – |
-| Q3 GROUP BY expression (`bucket % 10`) | 94.0 | 94.5 | 94.9 | 18.5 | 8.1 | 4.2 | – |
-| Q4 top-N (`ORDER BY amount DESC, tx_id LIMIT 10`) | 41.3 | 15.7 | 41.7 | 3.9 | 2.6 | 1.7 | – |
-| Q5 join 1M × 100k + GROUP BY | 137.5 | 134.2 | 129.5 | 35.5 | 23.7 | 15.2 | 89.0 |
-| Q6 arithmetic filter, 3 conjuncts | 19.8 | 18.0 | 19.7 | 7.1 | 3.6 | 1.9 | – |
-| Q7 GROUP BY customer_id + top-N | 108.4 | 103.4 | 107.9 | 17.4 | 14.5 | 11.3 | – |
+| query | before | row | row, optimize=false | vectorized | vectorized, optimize=false | vectorized, 4 threads | vectorized, 8 threads | merge join (vectorized) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Q1 filter + aggregate (`status = 'approved' AND amount > 100`) | 18.0 | 18.8 | 19.3 | 4.2 | 4.3 | 2.1 | 1.1 | 4.4 |
+| Q2 GROUP BY category, 5 aggregates | 154.6 | 160.3 | 160.7 | 20.6 | 21.0 | 9.1 | 4.8 | 21.0 |
+| Q3 GROUP BY `bucket % 10` | 100.9 | 104.9 | 105.7 | 18.9 | 19.1 | 8.1 | 4.2 | 19.1 |
+| Q4 top-N (`ORDER BY amount DESC, tx_id LIMIT 10`) | 40.9 | 16.1 | 45.4 | 3.9 | 31.1 | 2.5 | 1.7 | 4.0 |
+| Q5 join 1M × 100k + GROUP BY | 140.7 | 147.0 | 147.7 | 37.5 | 37.4 | 21.4 | 14.3 | 103.0 |
+| Q6 arithmetic filter, 3 conjuncts | 19.7 | 18.5 | 20.6 | 7.2 | 7.2 | 3.5 | 1.9 | 7.2 |
+| Q7 GROUP BY customer_id (100k groups) + top-N | 116.3 | 115.3 | 120.5 | 18.8 | 28.1 | 15.7 | 12.0 | 19.0 |
+| Q8 3-way join (items, orders, filtered customers) | 35.3 | 22.7 | 41.6 | 12.6 | 46.7 | 10.4 | 8.8 | 41.4 |
 
-Observations: the row-mode baseline performs like the Phase 4 executor
-(now a Volcano pipeline; only top-N helps it in Q4). Vectorization alone gives 2.5–7×
-(largest for grouping, where hash aggregation replaces sorting, and for the
-dictionary-string predicate of Q1); threads add up to another 3–5× on 8
-cores. Q7 scales less because its 100,000 groups make the merge of partial
-tables and the final projection (single-threaded) dominant. The merge join
-(Q5) pays for sorting both inputs and returns tuples in key order.
+Single-thread columns use `threads: 1`; all use `join: "hash"` except the
+last. Observations:
+
+* The row-mode baseline (Volcano) performs like the Phase 4 executor; with
+  `optimize` it gains from top-N (Q4) and join reordering (Q8: the filtered
+  customers are joined first instead of joining all items with all orders).
+* Vectorization alone gives 2.5–8× — most for grouping (hash aggregation
+  instead of sorting key records: Q2, Q3, Q7) and for the dictionary-string
+  predicate (Q1, one byte lookup per row).
+* Threads add up to another 3.5–4.5× on 8 cores for scans and grouping
+  (Q1–Q3, Q6); Q5 and Q7 scale less because the hash-join build, the
+  merge of 100,000 partial groups and the final projection run on one
+  thread.
+* The optimizer matters most where it changes the work: top-N (Q4: 31 →
+  3.9 ms vectorized) and join order (Q8: 46.7 → 12.6 ms). Constant folding
+  and predicate simplification remove per-row work only for queries that
+  contain constant expressions.
+* The merge join pays for sorting both inputs (Q5) and returns tuples in
+  key order.
 
 ## Implementation-defined choices
 
