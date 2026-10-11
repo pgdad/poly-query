@@ -34,9 +34,9 @@
 (defn char-source ^CharSource [^Reader r]
   (CharSource. r (char-array 65536) 0 0))
 
-(def ^:private QUOTE (long \"))
-(def ^:private LF (long \newline))
-(def ^:private CR (long \return))
+(def ^:private ^:const QUOTE (long \"))
+(def ^:private ^:const LF (long \newline))
+(def ^:private ^:const CR (long \return))
 
 (defn- field-too-long! [record]
   (c/ingest-error! (str "record " record ": field longer than 16 MiB") {"record" record}))
