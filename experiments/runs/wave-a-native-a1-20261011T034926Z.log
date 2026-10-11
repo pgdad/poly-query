@@ -11,3 +11,6 @@
 2026-10-11T04:27:36+00:00 [a-native-clojure-a1-20261011T034926Z] agent finished; collecting telemetry
 2026-10-11T04:27:36+00:00 [a-native-clojure-a1-20261011T034926Z] validating (clean clone, sandboxed)
 2026-10-11T04:28:41+00:00 [a-native-clojure-a1-20261011T034926Z] outcome=success cost=$10.135164 turns=115 wall=2282.7s
+2026-10-11T04:34:06+00:00 [a-native-java-a1-20261011T034931Z] agent finished; collecting telemetry
+2026-10-11T04:34:06+00:00 [a-native-java-a1-20261011T034931Z] validating (clean clone, sandboxed)
+2026-10-11T04:34:37+00:00 [a-native-java-a1-20261011T034931Z] outcome=isolation_violation cost=$13.248619 turns=164 wall=2652.5s

@@ -1,0 +1,123 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-native-java-a1-20261011T034931Z",
+ "language": "java",
+ "task": "native",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-native",
+ "prompt_sha256": "c413e1e8c350d81af9074f2a14dca6893bec0be020578fef045eb491192f6462",
+ "session_id": "a6b9ea69-7980-40e1-a641-093e3e752bcd",
+ "tokens": {
+  "input": 310,
+  "output": 160813,
+  "cache_read": 35623555,
+  "cache_creation": 363301,
+  "thinking": null,
+  "thinking_estimated": 69823,
+  "source": "result events",
+  "api_messages": 155
+ },
+ "rate_limit": {
+  "events": 17,
+  "max_utilization": {
+   "seven_day": 0.23,
+   "five_hour": 0.41
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 13.248619,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 164,
+ "result_segments": 1,
+ "assistant_messages": 346,
+ "tool_calls": {
+  "Bash": 153,
+  "Write": 7,
+  "ToolSearch": 2,
+  "TaskStop": 1
+ },
+ "tool_calls_total": 163,
+ "tool_failures": 1,
+ "build_invocations": 31,
+ "build_failures_heuristic": 4,
+ "conformance_runs": 11,
+ "conformance_progress": [
+  [
+   569,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   546,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ]
+ ],
+ "repair_iterations": 8,
+ "time": {
+  "wall_seconds": 2652.5,
+  "model_api_seconds": 1448.2,
+  "tool_seconds": 1209.6,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 11,
+  "files_changed": 29,
+  "lines_added": 2237,
+  "lines_removed": 69,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": [
+   "tests/conformance/dt_nh.pqcf",
+   "tests/conformance/dt_tx.pqcf"
+  ]
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The native kernel integration is finished: every required conformance run reports 0 failures, 0 errors and 0 not-implemented, and all work is committed.\n\n## What I built\n- **FFI binding** (`polyquery.kernels.NativeKernels`): it uses Java's standard FFM API, with no JNI and no C glue. The engine's own Java arrays are passed straight to the C functions without copying. Every wrapper checks array lengths first, because the C code doesn't. An empty call costs about 7 ns.\n- **Loading**: `--native-kernels PATH` checks the file is a real library and the ABI version is 1, then lets the library pick the best CPU variant (`PQ_KERNELS_VARIANT` overrides it). It logs the chosen variant. If the library is missing or broken, the engine logs a warning and runs its own Java code. `native.kernels` is always claimed, and responses report the variant in `stats.native_kernels`.\n- **Filtering**: simple comparisons of a column against a constant, `BETWEEN`, or column against column run in the library. Decimals compared with constants of another scale are rewritten exactly. These conditions are evaluated before other conditions only when nothing earlier in the WHERE clause can raise an error, so the same rows produce the same errors as before.\n- **Aggregation**: exact sums, grouped sums, min/max and counts use the library. When the library reports an overflow, the engine recomputes that batch exactly in Java; for grouped sums it first undoes the library's additions. The float-sum kernel is not used because it can differ in the last bits.\n- **Hashing**: single 64-bit GROUP BY and DISTINCT keys are hashed by the library. The engine computes the same hash in Java, so results never depend on which side computed it.\n- **Not used for join indexes**: I tried native hashing there and joins got about 15% slower, because the hash spreads these datasets' ascending integer keys worse than the existing method. I measured and reverted it.\n\n## Test results\n- `--native`: `TOTAL: 569/569 pass`\n- `--native --modes`: `TOTAL: 3324/3324 pass` (also passes with tiny batch sizes)\n- Without the library: session 569/569, `--modes` 3324/3324, `--transport http` 569/569 (also 569/569 with `--native`), HTTP suite `18/18 passed`\n- Conformance with `--native` also passes with each kernel variant forced: reference, scalar, avx2 and avx512.\n- `make build test`: 63 unit tests passed, 0 failed; `make lint` is clean.\n- The randomized differential tester compared 1,750 queries with and without native kernels: 0 differences.\n\n## Measurements (1m datasets, documented in README)\n- The clear gain is in filters. Q14 (three conditions ANDed) went from 2.7 to 0.9 ms on one thread, and from 1.1 to 0.4 ms on four. Q1 is 10\u201320% faster.\n- Everything else (aggregation, hashing, joins, sorts) is within noise. Java already vectorizes those loops about as well, and lookup costs dominate the rest.\n- The non-native path did not regress against the engine from before this work, measured side by side in the same session.\n- Caveat: the machine was shared (load around 8\u201310), so I alternated configurations run by run and report both medians and minimums. A query with no native code at all still varied 10\u201330% between runs.\n\n## Known limitations\n- Kernels are used only in vectorized mode; row mode stays the unoptimized baseline.\n- Kernels cover only 64-bit columns (integers, decimals, dates, timestamps, booleans) plus float min/max. Strings, `IN` lists and computed expressions stay in Java.\n- Three kernels are bound and tested but not used by queries: `pqk_count_i64`, `pqk_sum_f64` and `pqk_compare_fixed`.\n\n## Fixed during review\nA filter could look past a batch that had been cut short by a deferred error. Under a `LIMIT`, that could have returned rows the engine should never reach instead of raising the error. It's fixed, with a unit test that fails without the fix and a new difftest query shape that covers it.\n\nOne thing to know: the dataset generator fails with a permission error in its parallel mode. I g",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
