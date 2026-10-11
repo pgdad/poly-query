@@ -1,6 +1,7 @@
 ;;;; query.lisp — semantic analysis of whole queries: CTEs, FROM (tables,
 ;;;; derived tables, joins), select list expansion and naming, grouping and
-;;;; aggregation analysis, HAVING, DISTINCT, ORDER BY and LIMIT/OFFSET.
+;;;; aggregation analysis, HAVING, DISTINCT, ORDER BY and LIMIT/OFFSET, and
+;;;; UNION ALL compounds (change request CR-1).
 
 (in-package #:polyquery)
 
@@ -214,8 +215,9 @@ references to (deduplicated) aggregate slots collected in AGGREGATES-CELL
 ;;; ------------------------------------------------------------------
 ;;; ORDER BY (semantics.md §6)
 
-(defun resolve-order-item (item outputs env distinct)
-  "Returns (values output-position-or-NIL bound-expression)."
+(defun resolve-order-item (item outputs env distinct &key compound)
+  "Returns (values output-position-or-NIL bound-expression). In a COMPOUND
+query only output names and positions are allowed."
   (let ((expr (ast-order-item-expr item))
         (k (ordinal-literal (ast-order-item-expr item))))
     (cond
@@ -231,6 +233,9 @@ references to (deduplicated) aggregate slots collected in AGGREGATES-CELL
          (unless (every (lambda (h) (bexpr-equal (cdr h) (cdr (first hits)))) (rest hits))
            (bind-error-at expr "SEMANTIC_ERROR" "ORDER BY ~A is ambiguous" (ast-column-ref-name expr)))
          (values (car (first hits)) nil)))
+      (compound
+       (bind-error-at expr "SEMANTIC_ERROR"
+                      "ORDER BY of a UNION ALL must be an output column name or position"))
       (t
        (let* ((bound (bind-expr expr (env-with env :aggregates :allowed :clause "ORDER BY")))
               (pos (position bound outputs :key #'cdr :test #'bexpr-equal)))
@@ -241,6 +246,25 @@ references to (deduplicated) aggregate slots collected in AGGREGATES-CELL
 
 ;;; ------------------------------------------------------------------
 ;;; LIMIT / OFFSET
+
+(defun bind-order-by (items outputs env distinct &key compound)
+  "Resolve the ORDER BY ITEMS against the named OUTPUTS. Returns (values
+order hidden): ORDER is a list of (position descending nulls-first) whose
+positions index OUTPUTS followed by HIDDEN, the extra sort expressions."
+  (let ((order '())
+        (hidden '()))
+    (dolist (item items)
+      (multiple-value-bind (position expr)
+          (resolve-order-item item outputs env distinct :compound compound)
+        (unless position
+          (setf position (+ (length outputs) (length hidden))
+                hidden (append hidden (list expr))))
+        (let ((descending (ast-order-item-descending item)))
+          (push (list position descending
+                      (ecase (ast-order-item-nulls item)
+                        (:first t) (:last nil) ((nil) (not descending))))
+                order))))
+    (values (nreverse order) hidden)))
 
 (defun bind-constant-int (node what env)
   "A LIMIT/OFFSET expression: a constant INT64 expression (evaluated at execution)."
@@ -261,8 +285,17 @@ references to (deduplicated) aggregate slots collected in AGGREGATES-CELL
 the resolver for columns of enclosing queries; its relations are ignored."
   (let* ((env (env-with parent-env :relations '() :aggregates :forbidden :clause "WHERE"))
          (env (env-with env :ctes (bind-cte-list (ast-query-ctes ast) env)))
-         (core (ast-query-body ast))
-         (distinct (ast-select-distinct core)))
+         (body (ast-query-body ast)))
+    (etypecase body
+      (ast-select (bind-select body (ast-query-order-by ast) (ast-query-limit ast)
+                               (ast-query-offset ast) env))
+      (ast-union-all (bind-union-all body (ast-query-order-by ast) (ast-query-limit ast)
+                                     (ast-query-offset ast) env)))))
+
+(defun bind-select (core order-by limit offset env)
+  "Analyse the AST-SELECT CORE with its ORDER BY items and LIMIT/OFFSET
+expressions in ENV (which already sees the query's CTEs)."
+  (let ((distinct (ast-select-distinct core)))
     (multiple-value-bind (from relations from-width)
         (if (ast-select-from core)
             (bind-from-clause (ast-select-from core) env)
@@ -276,42 +309,77 @@ the resolver for columns of enclosing queries; its relations are ignored."
                                (ast-select-group-by core)))
              (having (when (ast-select-having core)
                        (bind-condition (ast-select-having core)
-                                       (env-with env :aggregates :allowed) "HAVING")))
-             (order '())
-             (hidden '()))
+                                       (env-with env :aggregates :allowed) "HAVING"))))
         ;; ORDER BY keys are either output positions or extra hidden expressions.
-        (dolist (item (ast-query-order-by ast))
-          (multiple-value-bind (position expr) (resolve-order-item item outputs env distinct)
-            (unless position
-              (setf position (+ (length outputs) (length hidden))
-                    hidden (append hidden (list expr))))
-            (let ((descending (ast-order-item-descending item)))
-              (push (list position descending
-                          (ecase (ast-order-item-nulls item)
-                            (:first t) (:last nil) ((nil) (not descending))))
-                    order))))
-        (let* ((aggregated (or group-by having
-                               (some (lambda (o) (bexpr-contains-aggregate-p (cdr o))) outputs)
-                               (some #'bexpr-contains-aggregate-p hidden)))
-               (aggregates (list '()))
-               (columns (loop for (name . e) in outputs collect (make-column-def name (bexpr-type e)))))
-          (when aggregated
-            (flet ((rewrite (e) (rewrite-for-aggregation e group-by aggregates)))
-              (setf outputs (loop for (name . e) in outputs collect (cons name (rewrite e)))
-                    hidden (mapcar #'rewrite hidden)
-                    having (and having (rewrite having)))))
-          (make-bound-query
-           :from from
-           :from-width from-width
-           :where where
-           :aggregated-p (and aggregated t)
-           :group-by group-by
-           :aggregates (car aggregates)
-           :having having
-           :outputs (mapcar #'cdr outputs)
-           :hidden hidden
-           :distinct distinct
-           :order (nreverse order)
-           :limit (bind-constant-int (ast-query-limit ast) "LIMIT" env)
-           :offset (bind-constant-int (ast-query-offset ast) "OFFSET" env)
-           :columns columns))))))
+        (multiple-value-bind (order hidden) (bind-order-by order-by outputs env distinct)
+          (let* ((aggregated (or group-by having
+                                 (some (lambda (o) (bexpr-contains-aggregate-p (cdr o))) outputs)
+                                 (some #'bexpr-contains-aggregate-p hidden)))
+                 (aggregates (list '()))
+                 (columns (loop for (name . e) in outputs
+                                collect (make-column-def name (bexpr-type e)))))
+            (when aggregated
+              (flet ((rewrite (e) (rewrite-for-aggregation e group-by aggregates)))
+                (setf outputs (loop for (name . e) in outputs collect (cons name (rewrite e)))
+                      hidden (mapcar #'rewrite hidden)
+                      having (and having (rewrite having)))))
+            (make-bound-query
+             :from from
+             :from-width from-width
+             :where where
+             :aggregated-p (and aggregated t)
+             :group-by group-by
+             :aggregates (car aggregates)
+             :having having
+             :outputs (mapcar #'cdr outputs)
+             :hidden hidden
+             :distinct distinct
+             :order order
+             :limit (bind-constant-int limit "LIMIT" env)
+             :offset (bind-constant-int offset "OFFSET" env)
+             :columns columns)))))))
+
+;;; ------------------------------------------------------------------
+;;; UNION ALL (spec/changes/union-all.md)
+
+(defun bind-union-all (node order-by limit offset env)
+  "Analyse a UNION ALL compound. Each branch is bound as a query of its own;
+the compound is a query whose FROM is a BF-UNION producing the branch rows
+converted to the common column types, so ORDER BY / LIMIT / OFFSET over the
+whole result reuse the plain query machinery."
+  (let* ((cores (ast-union-all-branches node))
+         (branches (mapcar (lambda (core) (bind-select core '() nil nil env)) cores))
+         (first-columns (bound-query-columns (first branches)))
+         (width (length first-columns)))
+    (loop for branch in (rest branches)
+          for core in (rest cores)
+          for n = (length (bound-query-columns branch))
+          unless (= n width)
+            do (bind-error-at core "SEMANTIC_ERROR"
+                              "UNION ALL branches have different numbers of columns (~D and ~D)"
+                              width n))
+    (let* ((columns
+             (loop for first-column in first-columns
+                   for i from 0
+                   collect (let* ((types (mapcar (lambda (b)
+                                                   (column-def-type (nth i (bound-query-columns b))))
+                                                 branches))
+                                  (type (unify-result-types types)))
+                             (unless type
+                               (bind-error-at node "TYPE_ERROR"
+                                              "UNION ALL column ~D has incompatible types ~{~A~^, ~}"
+                                              (1+ i) (mapcar #'type-name-string types)))
+                             (make-column-def (column-def-name first-column) type))))
+           (outputs (loop for c in columns
+                          for i from 0
+                          collect (cons (column-def-name c)
+                                        (make-b-column (column-def-type c) i (column-def-name c)))))
+           (order (bind-order-by order-by outputs env nil :compound t)))
+      (make-bound-query
+       :from (make-bf-union :branches branches :columns columns :width width)
+       :from-width width
+       :outputs (mapcar #'cdr outputs)
+       :order order
+       :limit (bind-constant-int limit "LIMIT" env)
+       :offset (bind-constant-int offset "OFFSET" env)
+       :columns columns))))

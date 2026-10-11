@@ -397,6 +397,7 @@ below it (statistics are used for its column predicates) or NIL."
                (if (lp-join-condition node) (max l r) (* l r))))
     (lp-aggregate (if (lp-aggregate-group-by node) (estimate-rows (lnode-child node)) 1))
     ((or lp-project lp-distinct lp-sort) (estimate-rows (lnode-child node)))
+    (lp-union-all (reduce #'+ (lnode-children node) :key #'estimate-rows))
     (lp-limit (let ((n (estimate-rows (lnode-child node)))
                     (limit (lp-limit-limit node)))
                 (if (and (b-literal-p limit) (integerp (b-literal-value limit)))

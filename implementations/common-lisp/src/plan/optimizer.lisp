@@ -371,4 +371,25 @@ new ones."
                m)))
     (lp-limit
      (multiple-value-bind (child m) (prune-node (lnode-child node) required)
-       (values (make-limit child (lp-limit-limit node) (lp-limit-offset node)) m)))))
+       (values (make-limit child (lp-limit-limit node) (lp-limit-offset node)) m)))
+    (lp-union-all
+     ;; Every branch keeps exactly the REQUIRED columns, in order.
+     (values (make-union-all
+              (mapcar (lambda (child)
+                        (multiple-value-bind (new-child m) (prune-node child required)
+                          (if (loop for old in required
+                                    for new from 0
+                                    always (eql (svref m old) new))
+                              new-child
+                              (make-project new-child
+                                            (loop for old in required
+                                                  for c = (nth old (lnode-columns child))
+                                                  collect (make-b-column (column-def-type c)
+                                                                         (svref m old)
+                                                                         (column-def-name c)))
+                                            (loop for old in required
+                                                  collect (column-def-name
+                                                           (nth old (lnode-columns child))))))))
+                      (lnode-children node))
+              (mapcar (lambda (i) (nth i (lnode-columns node))) required))
+             (make-mapping (lnode-width node) required)))))

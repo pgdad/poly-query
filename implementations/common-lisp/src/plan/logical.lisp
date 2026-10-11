@@ -10,6 +10,8 @@
 ;;;;     -> [Filter WHERE] -> [Aggregate -> [Filter HAVING]]
 ;;;;     -> Project(outputs + hidden sort keys) -> [Distinct] -> [Sort]
 ;;;;     -> [Limit] -> [Project(strip hidden keys)]
+;;;; A UNION ALL compound's FROM is a UnionAll node whose children are the
+;;;; branch plans, each topped by a Project converting it to the common types.
 
 (in-package #:polyquery)
 
@@ -45,6 +47,9 @@
 
 (defstruct (lp-limit (:include lnode))
   limit offset)                          ; constant BEXPRs or NIL
+
+(defstruct (lp-union-all (:include lnode))
+  "Concatenation of the rows of its children (the UNION ALL branches).")
 
 (defun lnode-child (node) (first (lnode-children node)))
 (defun lnode-width (node) (length (lnode-columns node)))
@@ -85,6 +90,9 @@
 (defun make-sort (child keys)
   (make-lp-sort :children (list child) :keys keys :columns (lnode-columns child)))
 
+(defun make-union-all (children columns)
+  (make-lp-union-all :children children :columns columns))
+
 (defun make-limit (child limit offset)
   (make-lp-limit :children (list child) :limit limit :offset offset
                  :columns (lnode-columns child)))
@@ -100,12 +108,38 @@
        (make-scan table (relation-name (bf-table-relation bf))
                   (loop for i below (table-column-count table) collect i))))
     (bf-derived (plan-query (bf-derived-query bf)))
+    (bf-union
+     (let ((columns (bf-union-columns bf)))
+       (make-union-all (mapcar (lambda (branch) (plan-union-branch branch columns))
+                               (bf-union-branches bf))
+                       columns)))
     (bf-join
      (make-join (bf-join-kind bf)
                 (plan-from (bf-join-left bf))
                 (plan-from (bf-join-right bf))
                 (and (bf-join-condition bf)
                      (bexpr-shift-columns (bf-join-condition bf) (- (bf-node-offset bf))))))))
+
+(defun plan-union-branch (bq columns)
+  "Plan of a UNION ALL branch converted to the COLUMNS of the compound: the
+casts to the common types (and the compound's names) go into the branch's
+final Project, or into a Project above it when it ends in a Distinct (which
+must compare the branch's own values)."
+  (let ((node (plan-query bq))
+        (names (mapcar #'column-def-name columns))
+        (types (mapcar #'column-def-type columns)))
+    (if (lp-project-p node)
+        (make-project (lnode-child node)
+                      (mapcar #'implicit-cast (lp-project-exprs node) types)
+                      names)
+        (make-project node
+                      (loop for c in (lnode-columns node)
+                            for type in types
+                            for i from 0
+                            collect (implicit-cast (make-b-column (column-def-type c) i
+                                                                  (column-def-name c))
+                                                   type))
+                      names))))
 
 (defun plan-query (bq)
   "Build the (unoptimized) logical plan of the BOUND-QUERY BQ."
@@ -120,8 +154,10 @@
       (setf node (make-filter (make-aggregate node (bound-query-group-by bq)
                                               (bound-query-aggregates bq))
                               (bound-query-having bq))))
-    (setf node (make-project node (append outputs hidden)
-                             (append names (mapcar #'bexpr-describe hidden))))
+    ;; A UNION ALL compound's outputs are exactly its FROM row.
+    (unless (bf-union-p (bound-query-from bq))
+      (setf node (make-project node (append outputs hidden)
+                               (append names (mapcar #'bexpr-describe hidden)))))
     (when (bound-query-distinct bq)
       (setf node (make-distinct node)))
     (when (bound-query-order bq)
