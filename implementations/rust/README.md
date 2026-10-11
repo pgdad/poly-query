@@ -358,7 +358,8 @@ connection.
 | `native: true` | accepted; native kernels are optional (native-kernels.md) and none are loaded, so execution is the same as without it. `--native-kernels PATH` is accepted and ignored |
 
 EXPLAIN shows `HashJoin`, `MergeJoin` or `NestedLoopJoin` accordingly
-(`MergeJoin` has `keys` and `residual` like `HashJoin`).
+(`MergeJoin` has `keys` and `residual` like `HashJoin`); the root node
+carries `"execution": {"mode": …, "threads": …}`.
 
 ### Vectorized engine
 

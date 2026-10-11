@@ -431,12 +431,36 @@ impl Engine {
     pub fn explain(&self, sql: &str, opts: &QueryOptions) -> Result<Json> {
         match parse_statement(sql)? {
             Statement::Query(q) | Statement::Explain(q) => {
-                Ok(self.plan_query(&self.catalog(), &q, opts)?.to_json())
+                let plan = self.plan_query(&self.catalog(), &q, opts)?;
+                Ok(self.annotated_plan(&plan, opts))
             }
             Statement::CreateIndex { .. } | Statement::DropIndex { .. } => {
                 Err(Error::unsupported("only queries can be explained"))
             }
         }
+    }
+
+    /// Plan JSON with the execution model on the root node
+    /// (`"execution": {"mode": …, "threads": …}`).
+    fn annotated_plan(&self, plan: &PhysicalPlan, opts: &QueryOptions) -> Json {
+        let mut json = plan.to_json();
+        let (mode, threads) = match opts.mode {
+            ExecMode::Row => ("row", 1),
+            _ => (
+                "vectorized",
+                opts.threads.unwrap_or(self.config.threads).max(1),
+            ),
+        };
+        if let Json::Object(fields) = &mut json {
+            let execution = Json::object(vec![
+                ("mode", Json::str(mode)),
+                ("threads", Json::uint(threads as u64)),
+            ]);
+            // Before "children", so the node's own properties stay together.
+            let at = fields.len().saturating_sub(1);
+            fields.insert(at, ("execution".to_string(), execution));
+        }
+        json
     }
 
     /// Executes a SQL statement and materializes its result.
@@ -518,7 +542,7 @@ impl Engine {
             }
             Statement::Explain(q) => {
                 let plan = self.plan_query(&self.catalog(), &q, opts)?;
-                let text = plan.to_json().to_string_compact();
+                let text = self.annotated_plan(&plan, opts).to_string_compact();
                 Ok(ready(
                     vec![Field::new("plan", DataType::String)],
                     vec![vec![Value::str(&text)]],
