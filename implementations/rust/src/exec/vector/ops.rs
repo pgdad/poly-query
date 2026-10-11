@@ -11,6 +11,7 @@ use super::sort::sort_permutation;
 use crate::error::Result;
 use crate::exec::ExecContext;
 use crate::exec::operators::{Operator, Row};
+use crate::exec::pool;
 use crate::planner::access::IndexLookup;
 use crate::planner::expr::{AggregateCall, Expr};
 use crate::planner::logical::SortKey;
@@ -299,11 +300,55 @@ pub struct SortOp {
     pub output: Option<SortedRows>,
 }
 
-/// The materialized input of a sort and the permutation that orders it.
+/// The output of a sort: batches gathered in advance (in parallel) and/or
+/// the materialized input with the permutation still to be gathered.
 pub struct SortedRows {
+    ready: VecDeque<Batch>,
     rows: Batch,
     perm: Vec<u32>,
     pos: usize,
+}
+
+/// Sorted outputs from this many rows on are gathered in parallel.
+const PARALLEL_GATHER_ROWS: usize = 16 * BATCH_SIZE;
+
+impl SortedRows {
+    fn lazy(rows: Batch, perm: Vec<u32>) -> SortedRows {
+        SortedRows {
+            ready: VecDeque::new(),
+            rows,
+            perm,
+            pos: 0,
+        }
+    }
+
+    /// Gathers every output batch on up to `threads` threads (random
+    /// access into the input is latency-bound, so this scales well).
+    fn gathered(rows: Batch, perm: Vec<u32>, threads: usize) -> SortedRows {
+        let per_thread = perm.len().div_ceil(threads).next_multiple_of(BATCH_SIZE);
+        let rows = &rows;
+        let parts: Vec<Vec<Batch>> = pool::scoped(
+            perm.chunks(per_thread)
+                .map(|range| move || range.chunks(BATCH_SIZE).map(|c| rows.gather(c)).collect())
+                .collect(),
+        );
+        let mut out = SortedRows::lazy(Batch::new(Vec::new(), 0), Vec::new());
+        out.ready = parts.into_iter().flatten().collect();
+        out
+    }
+
+    fn next(&mut self) -> Option<Batch> {
+        if let Some(b) = self.ready.pop_front() {
+            return Some(b);
+        }
+        if self.pos >= self.perm.len() {
+            return None;
+        }
+        let to = (self.pos + BATCH_SIZE).min(self.perm.len());
+        let b = self.rows.gather(&self.perm[self.pos..to]);
+        self.pos = to;
+        Some(b)
+    }
 }
 
 impl SortOp {
@@ -332,11 +377,7 @@ impl SortOp {
             }
         }
         if parts.is_empty() {
-            return Ok(SortedRows {
-                rows: Batch::new(Vec::new(), 0),
-                perm: Vec::new(),
-                pos: 0,
-            });
+            return Ok(SortedRows::lazy(Batch::new(Vec::new(), 0), Vec::new()));
         }
         let mut all = Batch::concat(parts, self.width);
         if all.len > 4 * BATCH_SIZE && self.top.is_none_or(|t| t > 4 * BATCH_SIZE) {
@@ -349,11 +390,14 @@ impl SortOp {
                 .collect();
         }
         let perm = sort_permutation(&all, &self.keys, self.top, ctx)?;
-        Ok(SortedRows {
-            rows: all,
-            perm,
-            pos: 0,
-        })
+        let threads = ctx.execution.threads;
+        Ok(
+            if threads > 1 && !ctx.serial_only() && perm.len() >= PARALLEL_GATHER_ROWS {
+                SortedRows::gathered(all, perm, threads)
+            } else {
+                SortedRows::lazy(all, perm)
+            },
+        )
     }
 }
 
@@ -362,17 +406,11 @@ impl BatchOperator for SortOp {
         if let Some(input) = self.input.take() {
             self.output = Some(self.compute(input, ctx)?);
         }
-        let Some(out) = &mut self.output else {
-            return Ok(None);
-        };
-        if out.pos >= out.perm.len() {
+        let next = self.output.as_mut().and_then(SortedRows::next);
+        if next.is_none() {
             self.output = None;
-            return Ok(None);
         }
-        let to = (out.pos + BATCH_SIZE).min(out.perm.len());
-        let b = out.rows.gather(&out.perm[out.pos..to]);
-        out.pos = to;
-        Ok(Some(b))
+        Ok(next)
     }
 }
 
