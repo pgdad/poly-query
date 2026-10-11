@@ -1134,7 +1134,7 @@ impl Aggregator {
                 let mut pairs = 0;
                 let all_distinct = parts().all(|a| match &a.accs[k] {
                     Acc::Distinct(d, _) => {
-                        pairs += d.len();
+                        pairs += d.pair_count();
                         true
                     }
                     _ => false,
@@ -1169,7 +1169,7 @@ impl Aggregator {
             };
             match merged {
                 Some(d) => {
-                    ctx.reserve(d.len() * 24)?;
+                    ctx.reserve(d.pair_count() * 24)?;
                     agg.accs[k] = Acc::Distinct(Box::new(d), groups);
                 }
                 None => {

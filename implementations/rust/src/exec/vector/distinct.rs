@@ -228,7 +228,7 @@ impl DistinctAcc {
     }
 
     /// Number of distinct pairs.
-    pub fn len(&self) -> usize {
+    pub fn pair_count(&self) -> usize {
         self.pairs.len() + self.shards.iter().map(FastSet::len).sum::<usize>()
     }
 
@@ -255,7 +255,7 @@ impl DistinctAcc {
             let h = (x ^ (g as u64).rotate_left(29)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
             ((h >> 32) % shards as u64) as usize
         };
-        let total: usize = parts.iter().map(|(a, _)| a.len()).sum();
+        let total: usize = parts.iter().map(|(a, _)| a.pair_count()).sum();
         let mut sets: Vec<FastSet<(u32, u64)>> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..shards)
                 .map(|s| {
@@ -433,6 +433,6 @@ mod tests {
         }
         // Adding to a sharded accumulator keeps the values distinct.
         sharded.update(None, &Vector::new(Data::Int(vec![0, 1000]), None), 2);
-        assert_eq!(sharded.len(), serial.len() + 1);
+        assert_eq!(sharded.pair_count(), serial.pair_count() + 1);
     }
 }
