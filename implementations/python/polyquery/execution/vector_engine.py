@@ -816,18 +816,17 @@ def _range_sort(node: pp.Sort | pp.TopN, gather: pp.Gather, ctx: ExecutionContex
 
     1. Every partition samples its leading key values; the parent picks
        ``ranges - 1`` splitters (quantiles of the sample).
-    2. Every partition sorts its rows and cuts them into one run per key
-       range (NULLs belong to the first or last range, wherever the sort
-       places them), each pickled on its own.
+    2. Every partition cuts its rows (kept in input order) into one run per
+       key range (NULLs belong to the first or last range, wherever the
+       sort places them), each pickled on its own.
     3. Worker ``r`` receives the runs of range ``r`` (the parent forwards
        the pickled bytes without decoding them), concatenates them in
-       partition order and sorts them stably.
+       partition order — which is the input order — and sorts them stably.
 
-    Rows with equal leading keys always share a range, and the stable
-    sort of runs in partition order keeps their input order, so the
-    ranges concatenated in output order are exactly the serial stable
-    sort. Every phase does 1/k of the work: workers never scan the whole
-    input. None if the pool cannot run it."""
+    Rows with equal leading keys always share a range, so the ranges
+    concatenated in output order are exactly the serial stable sort. Each
+    row is sorted once, and no worker reads the whole input. None if the
+    pool cannot run it."""
     pool = ctx.pool
     if pool is None or ctx.native is not None or not parallel.use_processes(gather, ctx):
         return None
@@ -841,12 +840,12 @@ def _range_sort(node: pp.Sort | pp.TopN, gather: pp.Gather, ctx: ExecutionContex
         return None
     values = sorted(itertools.chain.from_iterable(samples))
     splitters = [values[len(values) * i // ranges] for i in range(1, ranges)] if values else []
-    split_task = partial(_consume_partition, partial(_sorted_runs, node, splitters, ranges), gather.input)
+    split_task = partial(_consume_partition, partial(_range_runs, node, splitters, ranges), gather.input)
     runs = pool.run(gather, ctx, split_task, prepare_pipeline)
     if runs is None:
         return None
     inputs = {r: [part[r] for part in runs] for r in range(ranges)}
-    return pool.run(gather, ctx, partial(_merge_runs, node, gather), None, count=ranges, inputs=inputs)
+    return pool.run(gather, ctx, partial(_sort_range, node, gather), None, count=ranges, inputs=inputs)
 
 
 def _sample_keys(position: int, batches: Batches, ctx: ExecutionContext) -> list[Any]:
@@ -859,30 +858,41 @@ def _sample_keys(position: int, batches: Batches, ctx: ExecutionContext) -> list
     return values[:: max(1, len(values) // RANGE_SORT_SAMPLES)]
 
 
-def _sorted_runs(
+def _range_runs(
     node: pp.Sort | pp.TopN, splitters: list[Any], ranges: int, batches: Batches, ctx: ExecutionContext
 ) -> list[bytes]:
-    """The partition sorted and cut into one pickled run per key range."""
-    cols, n = _sorted_partition(node, None, batches, ctx)
+    """The partition's rows cut into one pickled run per key range, each
+    in input order."""
+    width = len(node.layout)
+    rows = _Collector(width)
+    for batch in batches:
+        rows.add(batch)
+        ctx.reserve_rows(batch[1], width)
+        ctx.check()
+    cols, n = rows.cols, rows.n
     key = node.keys[0]
-    # range of each row; in sorted order the ranges never decrease
     null_range = 0 if key.nulls_first else ranges - 1
     find = partial(bisect.bisect_right, splitters)
-    keys = cols[key.position] if cols else []
+    keys = cols[key.position] if cols else [None] * n
+    # the range of every row (ranges are numbered in output order)
     if key.descending:
         ids = bytes([null_range if v is None else ranges - 1 - find(v) for v in keys])
     elif None in keys:
         ids = bytes([null_range if v is None else find(v) for v in keys])
     else:
         ids = bytes(map(find, keys))
+    order = sorted(range(n), key=ids.__getitem__)  # stable: input order within a range
     runs = []
+    start = 0
     for r in range(ranges):
-        lo, hi = bisect.bisect_left(ids, r), bisect.bisect_right(ids, r)
-        runs.append(dumps_result(([c[lo:hi] for c in cols], hi - lo)))
+        end = start + ids.count(r)
+        positions = order[start:end]
+        runs.append(dumps_result(([list(take(c, positions)) for c in cols], end - start)))
+        start = end
     return runs
 
 
-def _merge_runs(node: pp.Sort | pp.TopN, gather: pp.Gather, ctx: ExecutionContext) -> Batch:
+def _sort_range(node: pp.Sort | pp.TopN, gather: pp.Gather, ctx: ExecutionContext) -> Batch:
     """Key range ``r`` (this task's index): its runs from every partition,
     concatenated in partition order and sorted stably."""
     r, _ = ctx.partitions[id(gather.driver)]
