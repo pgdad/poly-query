@@ -65,6 +65,11 @@ final class Phase5Test {
         "SELECT id, val FROM t ORDER BY val NULLS FIRST, id DESC LIMIT 70",
         "SELECT id, amt FROM t ORDER BY amt, id DESC LIMIT 40 OFFSET 5",
         "SELECT grp, id FROM t ORDER BY grp DESC, id LIMIT 33",
+        // DISTINCT aggregates without GROUP BY (parallel union of the workers' value sets)
+        "SELECT COUNT(DISTINCT name), SUM(DISTINCT val), AVG(DISTINCT amt), MIN(DISTINCT name), MAX(DISTINCT day), "
+                + "COUNT(DISTINCT grp), COUNT(*), SUM(val) FROM t",
+        "SELECT SUM(DISTINCT CAST(val AS FLOAT64) / 3), COUNT(DISTINCT flag), MAX(DISTINCT amt) FROM t WHERE id > 10",
+        "SELECT COUNT(DISTINCT val * 1000000000000), SUM(DISTINCT id * 4611686018427387) FROM t",
         // a CTE referenced twice: the second identical aggregation reuses the first one's result
         "WITH c AS (SELECT grp, SUM(val) AS s FROM t GROUP BY grp) SELECT COUNT(*) FROM c WHERE s > (SELECT AVG(s) FROM c)",
         "WITH c AS (SELECT grp, COUNT(*) AS n, MAX(name) AS m FROM t GROUP BY grp) "

@@ -1,8 +1,11 @@
 package polyquery.exec.vector;
 
 import java.math.BigInteger;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import polyquery.exec.Accumulator;
+import polyquery.exec.ExecContext;
 import polyquery.ffi.NativeKernels;
 import polyquery.plan.AggregateCall;
 import polyquery.types.DataType;
@@ -46,8 +49,7 @@ abstract class AggState {
      */
     static AggState create(AggregateCall call, NativeKernels kernels) {
         if (call.distinct()) {
-            return new Distinct(create(new AggregateCall(call.function(), call.argument(), false, call.type()),
-                    kernels));
+            return new Distinct(new AggregateCall(call.function(), call.argument(), false, call.type()), kernels);
         }
         DataType in = call.argument() == null ? null : call.argument().type();
         // wide DECIMAL arguments never go to the kernels (their ABI covers 64-bit values only)
@@ -705,7 +707,9 @@ abstract class AggState {
      * and wide DECIMALs as objects.
      */
     static final class Distinct extends AggState {
-        private final AggState inner;
+        private final AggregateCall plain;
+        private final NativeKernels kernels;
+        private AggState inner;
         private long[] keys = new long[64];
         private Object[] objects;
         private int[] owners = new int[64];
@@ -715,8 +719,11 @@ abstract class AggState {
         private int size;
         private int[] fresh = new int[0];
 
-        Distinct(AggState inner) {
-            this.inner = inner;
+        /** @param plain the aggregate without DISTINCT, fed with the distinct values */
+        Distinct(AggregateCall plain, NativeKernels kernels) {
+            this.plain = plain;
+            this.kernels = kernels;
+            this.inner = create(plain, kernels);
         }
 
         @Override
@@ -848,12 +855,70 @@ abstract class AggState {
 
         @Override
         boolean mergeable() {
-            return false;
+            return false; // only {@link #mergeSingle} (aggregation without GROUP BY)
         }
 
         @Override
         void merge(AggState other, int from, int to) {
-            throw new UnsupportedOperationException("DISTINCT aggregates are not merged");
+            throw new UnsupportedOperationException("DISTINCT aggregates are merged with mergeSingle");
+        }
+
+        /**
+         * Replaces this state's single group (aggregation without GROUP BY) by the union of the
+         * workers' partial states: the values are split into hash partitions, each partition
+         * deduplicated by one thread that feeds its distinct values to a fresh plain state, and
+         * the partitions' plain states are merged (exactly; FLOAT64 sums within rounding, as any
+         * parallel float sum). FLOAT64 values are fed as their key ({@code -0.0} as {@code 0.0}).
+         */
+        void mergeSingle(List<Distinct> partials, ExecContext ctx, int threads) {
+            int parts = Math.max(1, Math.min(64, threads));
+            DataType type = plain.argument().type();
+            Vec.Kind kind = Vec.kindOf(type);
+            AggState[] results = new AggState[parts];
+            List<Runnable> tasks = new ArrayList<>(parts);
+            for (int p = 0; p < parts; p++) {
+                int part = p;
+                tasks.add(() -> {
+                    Distinct local = new Distinct(plain, kernels);
+                    local.inner.grow(1);
+                    int cap = 1024;
+                    Vec values = new Vec(type, cap);
+                    int[] zeros = new int[cap];
+                    int n = 0;
+                    for (Distinct d : partials) {
+                        for (int e = 0; e < d.size; e++) {
+                            if ((int) (((d.hashes[e] & 0xFFFFFFFFL) * parts) >>> 32) != part) {
+                                continue;
+                            }
+                            boolean added = d.objects != null && d.objects[e] != null
+                                    ? local.addObject(0, d.objects[e]) : local.addLong(0, d.keys[e]);
+                            if (!added) {
+                                continue;
+                            }
+                            switch (kind) {
+                                case LONG -> values.longs[n] = d.keys[e];
+                                case DOUBLE -> values.doubles[n] = Double.longBitsToDouble(d.keys[e]);
+                                default -> values.objects[n] = d.objects[e];
+                            }
+                            if (++n == cap) {
+                                local.inner.update(values, null, n, zeros);
+                                n = 0;
+                            }
+                        }
+                        ctx.checkNow();
+                    }
+                    if (n > 0) {
+                        local.inner.update(values, null, n, zeros);
+                    }
+                    results[part] = local.inner;
+                });
+            }
+            Parallel.runAll(tasks, ctx);
+            inner = create(plain, kernels);
+            inner.grow(1);
+            for (AggState r : results) {
+                inner.merge(r, 0, 0);
+            }
         }
 
         @Override

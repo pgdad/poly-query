@@ -133,7 +133,7 @@ final class Parallel {
     static BatchOperator tryBuild(BatchBuilder builder, PhysicalPlan plan) {
         if (plan instanceof PhysicalPlan.HashAggregate a) {
             Chain c = chain(a.input());
-            if (c != null && safe(a.groupKeys()) && aggregatesSafe(a.aggregates())
+            if (c != null && safe(a.groupKeys()) && aggregatesSafe(a.aggregates(), a.groupKeys().isEmpty())
                     && worthIt(c, builder.morselRows())) {
                 return new Aggregate(builder, c, a, polyquery.physical.PlanKeys.resultKey(a));
             }
@@ -308,12 +308,16 @@ final class Parallel {
         }
     }
 
-    private static boolean aggregatesSafe(List<AggregateCall> calls) {
+    /**
+     * True if workers can compute partial states of the aggregates: arguments without subqueries
+     * or correlation, and states that merge — DISTINCT ones only without GROUP BY ({@code single}).
+     */
+    private static boolean aggregatesSafe(List<AggregateCall> calls, boolean single) {
         for (AggregateCall c : calls) {
-            if (c.distinct() || !safe(c.argument())) {
-                return false; // DISTINCT states are not merged
+            if (!safe(c.argument())) {
+                return false;
             }
-            if (!AggState.create(c, null).mergeable()) {
+            if (c.distinct() ? !single : !AggState.create(c, null).mergeable()) {
                 return false;
             }
         }
@@ -735,6 +739,16 @@ final class Parallel {
             table.ensureCapacity(bound);
             long[] first = new long[Math.max(16, bound)];
             Arrays.fill(first, Long.MAX_VALUE);
+            if (plan.groupKeys().isEmpty()) {
+                // one group: merged state by state (DISTINCT ones by a parallel union)
+                List<AggregateBatches.Table> tables = new ArrayList<>(results.size());
+                for (Partial p : results) {
+                    tables.add(p.table());
+                }
+                table.mergeSingle(tables, ctx, threads);
+                first[0] = 0;
+                return new Merged(table, first);
+            }
             for (Partial p : results) {
                 AggregateBatches.Table partial = p.table();
                 long[] pf = p.first();

@@ -159,6 +159,27 @@ final class AggregateBatches {
             return to;
         }
 
+        /**
+         * Merges the single group of the partial tables of an aggregation without GROUP BY:
+         * DISTINCT states by a parallel union ({@link AggState.Distinct#mergeSingle}), the
+         * others one partial after the other.
+         */
+        void mergeSingle(List<Table> partials, ExecContext ctx, int threads) {
+            for (int a = 0; a < states.length; a++) {
+                if (states[a] instanceof AggState.Distinct d) {
+                    List<AggState.Distinct> parts = new ArrayList<>(partials.size());
+                    for (Table t : partials) {
+                        parts.add((AggState.Distinct) t.states[a]);
+                    }
+                    d.mergeSingle(parts, ctx, threads);
+                } else {
+                    for (Table t : partials) {
+                        states[a].merge(t.states[a], 0, 0);
+                    }
+                }
+            }
+        }
+
         /** Reserves the memory of groups merged since the last reservation. */
         void settle() {
             if (pending > 0) {
