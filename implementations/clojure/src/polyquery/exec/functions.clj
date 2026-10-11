@@ -158,9 +158,11 @@
     (fn ^long [x] (v/timestamp-date (long x)))))
 
 (defn- date-field-fn [fname t]
-  (let [days (->days-fn t)
-        idx (case fname "YEAR" 0 "MONTH" 1 "DAY" 2)]
-    (fn [x] (long (nth (v/civil-from-days (days x)) idx)))))
+  (let [days (->days-fn t)]
+    (case fname
+      "YEAR" (fn [x] (v/year-of-days (days x)))
+      "MONTH" (fn [x] (v/month-of-days (days x)))
+      "DAY" (fn [x] (v/day-of-days (days x))))))
 
 (defn- time-field-fn [fname]
   (let [[unit modulus] (case fname
@@ -173,7 +175,7 @@
   (let [micros (->micros-fn t)
         day-start (fn ^long [^long m] (* (v/timestamp-date m) v/micros-per-day))]
     (case unit
-      "year" (fn [x] (let [[y] (v/civil-from-days (v/timestamp-date (micros x)))]
+      "year" (fn [x] (let [y (v/year-of-days (v/timestamp-date (micros x)))]
                        (* (v/days-from-civil y 1 1) v/micros-per-day)))
       "month" (fn [x] (let [[y m] (v/civil-from-days (v/timestamp-date (micros x)))]
                         (* (v/days-from-civil y m 1) v/micros-per-day)))

@@ -5,6 +5,7 @@
 (def test-namespaces
   '[polyquery.util.json-test
     polyquery.values-test
+    polyquery.result-test
     polyquery.sql.lexer-test
     polyquery.sql.parser-test
     polyquery.sql.analyzer-test

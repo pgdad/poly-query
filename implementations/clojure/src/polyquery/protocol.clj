@@ -218,7 +218,7 @@
 (defmethod handle-op "query" [state req]
   (let [started (System/nanoTime)
         opened (open-query state req)
-        result (engine/collect opened)
+        result (engine/collect opened (if (:count-only? opened) :count :json-text))
         elapsed-us (quot (- (System/nanoTime) started) 1000)]
     (cond-> {"columns" (:columns result)}
       (not (:count-only? opened)) (assoc "rows" (:rows result))

@@ -182,6 +182,11 @@
             nil input)
     (->Partial table (vec states))))
 
+(defn partial-size
+  "Number of groups of a Partial."
+  ^long [^Partial p]
+  (.size ^GroupTable (:table p)))
+
 (defn aggregate-merge!
   "Merges Partial `other` into `into` (new groups appended in their order
   in `other`). Returns `into`."

@@ -10,35 +10,31 @@
             [polyquery.exec.dispatch :as dispatch]
             [polyquery.native.ffi :as ffi]
             [polyquery.plan.explain :as explain]
+            [polyquery.plan.physical :as physical]
             [polyquery.plan.planner :as planner]
+            [polyquery.result :as result]
             [polyquery.sql.analyzer :as analyzer]
             [polyquery.sql.parser :as parser]
             [polyquery.storage.index :as index]
             [polyquery.storage.table :as table]
             [polyquery.util.json :as json]
-            [polyquery.util.log :as log]
-            [polyquery.values :as v])
+            [polyquery.util.log :as log])
   (:import (clojure.lang ExceptionInfo)))
 
 (set! *warn-on-reflection* true)
 
-(defn- serialized-rows
-  "Reducible of the result rows serialized per types.md §9 (one Object[]
-  per row, or nil per row with count-only?), enforcing max-rows."
-  [rows columns max-rows count-only?]
-  (let [types (mapv :type columns)
-        ncols (count types)
-        max-rows (long (or max-rows Long/MAX_VALUE))]
-    (eduction
-     (map-indexed (fn [^long i ^objects row]
-                    (when (>= i max-rows)
-                      (err/fail! "RESOURCE_LIMIT" (str "result exceeds max_rows (" max-rows ")")))
-                    (when-not count-only?
-                      (let [out (object-array ncols)]
-                        (dotimes [i ncols]
-                          (aset out i (v/value->json (nth types i) (aget row i))))
-                        out))))
-     rows)))
+(defn- limited-rows
+  "rows, failing with RESOURCE_LIMIT when there are more than max-rows."
+  [rows max-rows]
+  (if max-rows
+    (let [max-rows (long max-rows)]
+      (eduction
+       (map-indexed (fn [^long i row]
+                      (when (>= i max-rows)
+                        (err/fail! "RESOURCE_LIMIT" (str "result exceeds max_rows (" max-rows ")")))
+                      row))
+       rows))
+    rows))
 
 (defn- plan-options
   [opts]
@@ -117,14 +113,45 @@
               (reduce f init (:rows (force fallback)))
               (throw e))))))))
 
+(defn- subquery-rows-fn
+  "(fn [plan]) → reducible of the rows of a subquery plan evaluated while
+  planning, executed vectorized (polyquery.plan.physical/plan-expr)."
+  [qctx opts]
+  (let [env (dispatch/environment qctx {:mode :vectorized :max-join-rows (:max-join-rows opts)
+                                        :native (when (:native opts) (ffi/library))})]
+    (fn [plan] (dispatch/build plan env))))
+
+(defn- execution-plan
+  "Physical plan of a query for execution. Unless it runs in row mode (the
+  unoptimized baseline), its uncorrelated subqueries (and correlated EXISTS
+  subqueries that amount to a semi-join) are evaluated once while planning
+  and replaced by their results, so that the expressions containing them
+  can be vectorized and parallelized. When that evaluation
+  fails as described above, the query is planned without it: its outcome is
+  then decided by regular execution, which evaluates the subquery only
+  where the row engine would."
+  [query qctx opts]
+  (let [popts (plan-options opts)
+        plain #(planner/plan-query query popts)]
+    (if (= :row (physical/execution-mode popts))
+      (plain)
+      (try
+        (planner/plan-query query (assoc popts :subquery-rows
+                                         (subquery-rows-fn (ctx/derive-context qctx) opts)))
+        (catch RuntimeException e
+          (if (retry-in-row-mode? e) (plain) (throw e)))))))
+
 (defn- open-plan
-  [{:keys [kind plan query]} opts]
+  "Opens a planned (EXPLAIN) or analyzed query (its :plan is computed here
+  by execution-plan when absent)."
+  [{:keys [kind query plan]} opts]
   (let [qctx (ctx/make-context opts)
-        serialize #(serialized-rows % (:columns plan) (:max-rows opts) (:count-only? opts))]
+        plan (or plan (execution-plan query qctx opts))
+        serialize #(limited-rows % (:max-rows opts))]
     (if (= kind :explain)
       {:columns [{"name" "plan" "type" "STRING"}]
-       :rows (serialized-rows [(object-array [(json/write-str (explain/plan->json plan))])]
-                              [{:type :string}] (:max-rows opts) (:count-only? opts))
+       :types [:string]
+       :rows (serialize [(object-array [(json/write-str (explain/plan->json plan))])])
        :ctx qctx}
       (let [{:keys [mode threads]} (:execution plan)
             rows (serialize (execute plan qctx opts))
@@ -135,39 +162,48 @@
                                                                        :mode "row" :threads 1))]
                            {:rows (serialize (execute serial fctx opts)) :ctx fctx})))]
         (cond-> {:columns (table/columns-json (:columns plan))
+                 :types (mapv :type (:columns plan))
                  :rows (if fallback (with-fallback rows fallback) rows)
                  :ctx qctx}
           fallback (assoc :primary {:rows rows :ctx qctx} :fallback fallback))))))
 
 (defn- collect-rows
-  [rows qctx ^long ncols]
-  (persistent!
-   (reduce (fn [acc row]
-             (when (zero? (rem (count acc) 4096))
-               (ctx/check! qctx)
-               (ctx/reserve! qctx (* 4096 (ctx/row-bytes ncols))))
-             (conj! acc row))
-           (transient [])
-           rows)))
+  [rows qctx ^long ncols sink]
+  (let [n (reduce (fn [^long n row]
+                    (when (zero? (rem n 4096))
+                      (ctx/check! qctx)
+                      (ctx/reserve! qctx (* 4096 (ctx/row-bytes ncols))))
+                    (result/accept! sink row)
+                    (inc n))
+                  0
+                  rows)]
+    {:rows (result/rows sink) :row-count n}))
 
 (defn collect
   "Materializes an opened statement (see open-statement!) into
-  {:columns :rows [serialized rows] :row-count n}, accounting the result
-  against the query's memory budget."
-  [{:keys [columns rows ctx primary fallback]}]
-  (let [ncols (count columns)
-        out (if fallback
-              (try
-                (collect-rows (:rows primary) (:ctx primary) ncols)
-                (catch RuntimeException e
-                  (if (retry-in-row-mode? e)
-                    (let [{:keys [rows ctx]} (force fallback)]
-                      (collect-rows rows ctx ncols))
-                    (throw e))))
-              (collect-rows rows ctx ncols))]
-    {:columns columns :rows out :row-count (count out)}))
+  {:columns :rows :row-count n}, accounting the result against the query's
+  memory budget. encoding (polyquery.result/sink): :values (default; rows
+  as Object[]s of JSON values), :json-text (rows as one json/raw value) or
+  :count (no rows)."
+  ([opened] (collect opened :values))
+  ([{:keys [columns types rows ctx primary fallback]} encoding]
+   (let [ncols (count columns)
+         new-sink #(result/sink encoding types)
+         out (if fallback
+               (try
+                 (collect-rows (:rows primary) (:ctx primary) ncols (new-sink))
+                 (catch RuntimeException e
+                   (if (retry-in-row-mode? e)
+                     (let [{:keys [rows ctx]} (force fallback)]
+                       (collect-rows rows ctx ncols (new-sink)))
+                     (throw e))))
+               (collect-rows rows ctx ncols (new-sink)))]
+     (assoc out :columns columns))))
 
-(defn- run-plan [planned opts] (collect (open-plan planned opts)))
+(defn json-rows
+  "Reducible of the rows of an opened statement as Object[]s of JSON values."
+  [{:keys [types rows]}]
+  (eduction (map (result/json-row-fn types)) rows))
 
 (defn run-query
   "Executes one SQL query against a catalog snapshot. opts:
@@ -176,7 +212,12 @@
   :threads :default-threads :native (use the loaded native kernel library).
   Returns {:columns [{\"name\" \"type\"}] :rows [[…]] :row-count n}."
   [catalog ^String sql opts]
-  (run-plan (plan-statement catalog sql opts) opts))
+  (let [{:keys [kind query]} (analyze catalog sql opts)]
+    (when-not (#{:query :explain} kind)
+      (err/fail! "SEMANTIC_ERROR" "only queries can be planned"))
+    (collect (open-plan {:kind kind :query query
+                         :plan (when (= kind :explain) (planner/plan-query query (plan-options opts)))}
+                        opts))))
 
 ;; ---------------------------------------------------------------------------
 ;; Index statements
@@ -207,19 +248,20 @@
   update the catalog atomically (and yield an empty result), queries and
   EXPLAIN are analyzed and planned on a snapshot of the catalog. Errors
   detectable before execution are thrown here. Returns {:columns
-  [{\"name\" \"type\"}] :rows reducible-of-serialized-rows :ctx query-context};
-  the rows are computed while they are reduced. Same options as run-query
+  [{\"name\" \"type\"}] :types [column-type] :rows reducible-of-engine-rows
+  :ctx query-context}; the rows are computed while they are reduced (see
+  collect and json-rows). Same options as run-query
   (plus :cancel-flag/:deadline-ns, see polyquery.exec.context)."
   [catalog-atom ^String sql opts]
   (let [analyzed (analyze @catalog-atom sql opts)
-        empty-result (fn [] {:columns [] :rows [] :ctx (ctx/make-context opts)})]
+        empty-result (fn [] {:columns [] :types [] :rows [] :ctx (ctx/make-context opts)})]
     (case (:kind analyzed)
       :create-index (do (catalog/update! catalog-atom (create-index analyzed)) (empty-result))
       :drop-index (do (catalog/update! catalog-atom (drop-index analyzed)) (empty-result))
-      (open-plan {:kind (:kind analyzed)
-                  :query (:query analyzed)
-                  :plan (planner/plan-query (:query analyzed) (plan-options opts))}
-                 opts))))
+      (let [{:keys [kind query]} analyzed]
+        (open-plan {:kind kind :query query
+                    :plan (when (= kind :explain) (planner/plan-query query (plan-options opts)))}
+                   opts)))))
 
 (defn execute!
   "Executes one SQL statement against the catalog atom (see open-statement!).
