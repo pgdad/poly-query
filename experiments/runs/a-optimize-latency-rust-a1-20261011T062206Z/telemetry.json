@@ -1,0 +1,111 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-optimize-latency-rust-a1-20261011T062206Z",
+ "language": "rust",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-optimize-latency",
+ "prompt_sha256": "5c4d5eb67b2688d9da28436031a97dcb58bb8369ef8d8534cc9f315700a8ef30",
+ "session_id": "acebab3c-3fe1-4d09-b952-7c41fc8964a4",
+ "tokens": {
+  "input": 272,
+  "output": 152447,
+  "cache_read": 23531245,
+  "cache_creation": 308300,
+  "thinking": null,
+  "thinking_estimated": 66522,
+  "source": "result events",
+  "api_messages": 136
+ },
+ "rate_limit": {
+  "events": 21,
+  "max_utilization": {
+   "five_hour": 0.48,
+   "seven_day": 0.31
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 10.222676999999996,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 141,
+ "result_segments": 1,
+ "assistant_messages": 295,
+ "tool_calls": {
+  "Bash": 135,
+  "Write": 3,
+  "Read": 2
+ },
+ "tool_calls_total": 140,
+ "tool_failures": 4,
+ "build_invocations": 36,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 8,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 2636.4,
+  "model_api_seconds": 1750.1,
+  "tool_seconds": 886.0,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 7,
+  "files_changed": 15,
+  "lines_added": 2262,
+  "lines_removed": 62,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The analytics workload at scale 1m now runs about 5\u00d7 faster: the sum of per-query medians went from 849.8 ms to 163.7 ms, and every query returns the same results as before. Conformance is unchanged at 100%, `make build test` and `make lint` pass, and everything is committed.\n\n**The workload file didn't exist.** `benchmarks/workloads/analytics.json` is not in the workspace, and the rules don't allow adding files outside `implementations/rust/`. So I wrote my own: 24 analytical queries (A01\u2013A24) in `bench/workloads/analytics.json`, covering aggregation, 2- to 4-way joins, subqueries, a CTE, `COUNT(DISTINCT)`, string predicates, top-N, a deep sort and `UNION ALL`. This is recorded in the README. Because I picked the queries, the speedup is measured on my workload rather than an independent one.\n\n**How I measured.** `bench/workload.py` times each query through `bin/polyquery session` with default options and full result rows. I ran the old and new builds alternately, three times each (7 timed runs per query per session), and `bench/combine.py` builds the table from those runs. It also checks that every run of both builds returned the same rows. The machine was shared with other jobs (load average 6\u201311), so differences under ~10\u201315% are noise.\n\n| Query | Before (ms) | After (ms) |\n|---|---:|---:|\n| A19 deep sort page | 436 | 56 |\n| A15 `COUNT(DISTINCT)` by category | 145 | 15 |\n| A12 correlated `NOT EXISTS` | 140 | 2.0 |\n| A11 `IN (subquery)` | 19 | 1.5 |\n| A08 4-way join + `COUNT(DISTINCT)` | 31 | 15 |\n| A18 top-100 | 2.4 | 1.0 |\n\nThe other queries already ran in 1\u201312 ms and are unchanged within noise. The full table is in the README.\n\n**What I changed:**\n- **`COUNT/SUM/AVG(DISTINCT \u2026)`:** one fast hash set per aggregate instead of a generic set per group. Results from worker threads are merged in parallel.\n- **Sorting:**\n  - Multi-key sorts compare compact numeric encodings of the keys; when there are no string keys and the values fit, a row's keys are packed into one integer.\n  - `ORDER BY \u2026 LIMIT n` no longer fully re-sorts its buffer each time it trims it (most of A19's old time).\n  - It now runs in parallel, with ties still broken in scan order exactly like the serial sort.\n  - Concatenating batches no longer copies every column twice.\n- **Subqueries:** uncorrelated `IN (subquery)` and correlated `EXISTS` on an equality are built once per query as a key set shared by all threads, then checked per batch, instead of running the subquery row by row.\n- Row mode (`mode: \"row\"`, the baseline) is untouched.\n\n**Tests:**\n- Conformance: 660/660 in session and over HTTP; the `--modes` option matrix passes 3870/3870.\n- The existing random cross-mode tester (`bench/difftest.py`): 0 mismatches over several runs of 250\u2013500 queries.\n- Spot checks on the 1m data comparing row mode against parallel modes, covering `DISTINCT`, `IN`/`EXISTS` with NULLs, empty subqueries, mixed number types and failing projections, all matched.\n- New unit tests cover the sort, run merging, the `DISTINCT` accumulator and the key sets.\n\nDuring this work, a parallel `DISTINCT` merge bug (fixed and re-checked before committing) got past the conformance suite, which passed throughout. Only the large-data cross-mode checks caught it. So conformance passing alone says little about these new parallel paths.\n\n**Not done:**\n- Hash-join build sides are still built single-threaded; that is most of the remaining time in A06, A14 and A20 (about 5\u201312 ms each).\n- A19 is still the slowest query at ~55 ms, mostly from copying string values around during the sort.\n- Correlated `IN` and `EXISTS` with extra conditions still use the per-row path.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
