@@ -5,6 +5,7 @@ import (
 
 	"polyquery/internal/errs"
 	"polyquery/internal/plan"
+	"polyquery/internal/storage"
 	"polyquery/internal/types"
 )
 
@@ -144,7 +145,8 @@ func (p *planner) node(n plan.Node, req idset) (Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &HashAggregate{Input: in, Keys: x.Keys, KeyCols: x.KeyCols, Aggs: x.Aggs, AggCols: x.AggCols}, nil
+		return &HashAggregate{Input: in, Keys: x.Keys, KeyCols: x.KeyCols, Aggs: x.Aggs, AggCols: x.AggCols,
+			EstGroups: p.estimateGroups(x)}, nil
 	case *plan.Join:
 		return p.join(x, req)
 	case *plan.Sort:
@@ -413,6 +415,54 @@ func (p *planner) estimate(n plan.Node) float64 {
 		return p.estimate(c[0])
 	}
 	return 1
+}
+
+// maxEstGroups caps group estimates (they size hash tables up front).
+const maxEstGroups = 1 << 22
+
+// estimateGroups estimates the number of groups of an aggregation whose
+// keys are base table columns: the product of their distinct counts
+// (plus one for NULL), capped by the input estimate; 0 if unknown.
+func (p *planner) estimateGroups(x *plan.Aggregate) int64 {
+	if len(x.Keys) == 0 {
+		return 1
+	}
+	groups := 1.0
+	for _, k := range x.Keys {
+		ref, ok := k.(*plan.ColumnRef)
+		if !ok {
+			return 0
+		}
+		st, ok := columnStats(x.Input, ref.ID)
+		if !ok {
+			return 0
+		}
+		d := float64(st.Distinct)
+		if st.NullCount > 0 {
+			d++
+		}
+		groups *= max(d, 1)
+	}
+	return int64(min(groups, p.estimate(x.Input), maxEstGroups))
+}
+
+// columnStats finds the base table column producing id below n and
+// returns its statistics.
+func columnStats(n plan.Node, id plan.ColumnID) (storage.ColumnStats, bool) {
+	if s, ok := n.(*plan.Scan); ok {
+		ord, ok := scanOrds(s)[id]
+		if !ok {
+			return storage.ColumnStats{}, false
+		}
+		st, err := s.Table.ColumnStats(ord)
+		return st, err == nil
+	}
+	for _, c := range n.Children() {
+		if st, ok := columnStats(c, id); ok {
+			return st, true
+		}
+	}
+	return storage.ColumnStats{}, false
 }
 
 // scanOrds maps a scan's column IDs to table column ordinals.

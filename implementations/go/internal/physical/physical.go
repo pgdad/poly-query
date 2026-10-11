@@ -75,6 +75,9 @@ type HashAggregate struct {
 	KeyCols []plan.Column
 	Aggs    []*plan.AggCall
 	AggCols []plan.Column
+	// EstGroups estimates the number of groups from column statistics
+	// (0: unknown); execution sizes its hash tables with it.
+	EstGroups int64
 }
 
 // HashJoin is an equi-join: rows match when LeftKeys equal RightKeys (NULL

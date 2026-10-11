@@ -561,6 +561,35 @@ func newAggTable(ec *Context, keyTypes []types.Type, calls []*plan.AggCall) *agg
 
 func (t *aggTable) groups() int { return len(t.keys) }
 
+// maxReserve caps the groups a table is sized for up front.
+const maxReserve = 1 << 20
+
+// reserve sizes an empty table for about n groups.
+func (t *aggTable) reserve(n int) {
+	n = min(n, maxReserve)
+	if n <= 64 || len(t.keys) > 0 {
+		return
+	}
+	t.keys = make([]types.Row, 0, n)
+	t.first = make([]int64, 0, n)
+	for _, s := range t.states {
+		s.grow(n)
+	}
+	t.slab = make([]types.Value, n*max(len(t.keyTypes), 1))
+	if len(t.keyClasses) == 1 && t.keyClasses[0] == vInt && t.nmap == nil {
+		t.intMap.init(n)
+	}
+}
+
+// expectedGroups estimates the distinct keys among rows drawn uniformly
+// from est groups.
+func expectedGroups(est, rows int64) int {
+	if est <= 0 {
+		return 0
+	}
+	return int(float64(est) * (1 - math.Exp(-float64(rows)/float64(est))))
+}
+
 // newGroup creates a group with the given key values first seen at pos.
 func (t *aggTable) newGroup(key types.Row, pos int64) (int32, error) {
 	g := int32(len(t.keys))
@@ -937,13 +966,9 @@ func (t *aggTable) findOrAdd(key types.Row, pos int64) (int32, error) {
 	return g, err
 }
 
-// mergeFrom folds the groups of o for which take(group) holds (nil: all)
-// into t.
-func (t *aggTable) mergeFrom(o *aggTable, take func(int) bool) error {
+// mergeFrom folds all groups of o into t.
+func (t *aggTable) mergeFrom(o *aggTable) error {
 	for sg, key := range o.keys {
-		if take != nil && !take(sg) {
-			continue
-		}
 		g, err := t.findOrAdd(key, o.first[sg])
 		if err != nil {
 			return err
@@ -955,20 +980,41 @@ func (t *aggTable) mergeFrom(o *aggTable, take func(int) bool) error {
 	return nil
 }
 
-// keyHashes hashes the key of every group (merge partitioning).
-func (t *aggTable) keyHashes(seed maphash.Seed) []uint64 {
-	out := make([]uint64, len(t.keys))
+// mergeGroups folds the given groups of o into t.
+func (t *aggTable) mergeGroups(o *aggTable, groups []int32) error {
+	for _, sg := range groups {
+		g, err := t.findOrAdd(o.keys[sg], o.first[sg])
+		if err != nil {
+			return err
+		}
+		for i, s := range t.states {
+			s.merge(g, o.states[i], sg)
+		}
+	}
+	return nil
+}
+
+// partition lists the groups of the table per hash partition of their
+// keys (parts partitions).
+func (t *aggTable) partition(seed maphash.Seed, parts int) [][]int32 {
+	out := make([][]int32, parts)
+	for p := range out {
+		out[p] = make([]int32, 0, len(t.keys)/parts+len(t.keys)/(4*parts)+16)
+	}
 	var buf []byte
 	for g, key := range t.keys {
+		var h uint64
 		if len(key) == 1 && !key[0].Null && t.keyClasses[0] == vInt {
-			out[g] = uint64(key[0].I) * 0x9E3779B97F4A7C15
-			continue
+			h = fibHash(uint64(key[0].I)) >> 32
+		} else {
+			buf = buf[:0]
+			for k, v := range key {
+				buf = appendKey(buf, v, t.keyTypes[k])
+			}
+			h = maphash.Bytes(seed, buf)
 		}
-		buf = buf[:0]
-		for k, v := range key {
-			buf = appendKey(buf, v, t.keyTypes[k])
-		}
-		out[g] = maphash.Bytes(seed, buf)
+		p := h % uint64(parts)
+		out[p] = append(out[p], int32(g))
 	}
 	return out
 }
@@ -1076,29 +1122,37 @@ const minPartitionedMerge = 1 << 13
 // the result rows in first-appearance order. Large merges are partitioned
 // by key hash: partition p of every partial table is merged into final
 // table p by its own goroutine.
-func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls []*plan.AggCall) ([]types.Row, error) {
-	total := 0
+func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls []*plan.AggCall, estGroups int64) ([]types.Row, error) {
+	total, largest := 0, 0
 	for _, t := range tables {
 		total += t.groups()
+		largest = max(largest, t.groups())
+	}
+	// Expected groups of the result: at least those of the largest
+	// partial table, at most the estimate (if known) or the sum.
+	expect := total
+	if estGroups > 0 {
+		expect = max(largest, min(total, int(estGroups)))
 	}
 	parts := min(ec.Threads, len(tables))
 	if parts <= 1 || total < minPartitionedMerge || len(keyTypes) == 0 {
 		final := newAggTable(ec, keyTypes, calls)
+		final.reserve(expect)
 		for _, t := range tables {
-			if err := final.mergeFrom(t, nil); err != nil {
+			if err := final.mergeFrom(t); err != nil {
 				return nil, err
 			}
 		}
 		return final.rows()
 	}
 	seed := maphash.MakeSeed()
-	hashes := make([][]uint64, len(tables))
+	groups := make([][][]int32, len(tables)) // per table, per partition
 	var wg sync.WaitGroup
 	for i, t := range tables {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			hashes[i] = t.keyHashes(seed)
+			groups[i] = t.partition(seed, parts)
 		}()
 	}
 	wg.Wait()
@@ -1114,9 +1168,9 @@ func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls [
 		go func() {
 			defer wg.Done()
 			final := newAggTable(ec, keyTypes, calls)
+			final.reserve(expect/parts + expect/(8*parts))
 			for i, t := range tables {
-				h := hashes[i]
-				if err := final.mergeFrom(t, func(g int) bool { return int(h[g]%uint64(parts)) == p }); err != nil {
+				if err := final.mergeGroups(t, groups[i][p]); err != nil {
 					results[p] = partResult{errPos: math.MinInt64, err: err}
 					return
 				}
@@ -1237,6 +1291,7 @@ func (a *vaggregateOp) NextBatch() (*Batch, error) {
 
 func (a *vaggregateOp) run() ([]types.Row, error) {
 	t := newAggTable(a.ec, exprTypes(a.node.Keys), a.node.Aggs)
+	t.reserve(int(a.node.EstGroups))
 	var pos int64
 	for {
 		b, err := a.input.NextBatch()
