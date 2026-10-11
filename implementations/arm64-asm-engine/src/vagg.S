@@ -552,7 +552,19 @@ FUNC agg_task
     add  x28, x28, #1
     b    3b
 4:  // ---- group of every tuple
-    str  xzr, [sp, #24]
+    ldr  x9, [x21, #BQ_NGROUP]
+    cbnz x9, 41f
+    mov  x0, x23                        // no GROUP BY: one group (index 0)
+    mov  x1, #0
+    ldr  x2, [sp, #16]
+    mov  x3, x25
+    bl   gt_get
+    mov  x0, x27
+    mov  w1, #0
+    lsl  x2, x26, #2
+    bl   memset
+    b    .Lat_aggs
+41: str  xzr, [sp, #24]
 5:  ldr  x9, [sp, #24]
     cmp  x9, x26
     b.hs .Lat_aggs
@@ -653,6 +665,15 @@ FUNC agg_task
     bl   agg_accum
     b    10b
 .Lat_countstar:
+    ldr  x9, [x21, #BQ_NGROUP]
+    cbnz x9, 130f
+    mov  w9, #0                         // one group: add the batch size
+    bl   .Lat_state
+    ldr  x11, [x1, #AS_CNT]
+    add  x11, x11, x26
+    str  x11, [x1, #AS_CNT]
+    b    .Lat_slot_done
+130:
     mov  x10, #0
 13: cmp  x10, x26
     b.hs .Lat_slot_done

@@ -8,6 +8,7 @@
 //       out[p] / out.nulls[p] for every p in sel (other positions untouched)
 //   vfilter(x0 Node* predicate, x1 VBatch*, x2 u16* out sel) -> x0 count
 //       positions 0..VB_N-1 of the batch for which the predicate is TRUE
+//       (conjunctions narrow the selection conjunct by conjunct)
 //   vpool_get(x0 VBatch*) -> x0 Vec*  /  vpool_put(x0 VBatch*)
 //       scratch vectors (stack discipline)
 //
@@ -41,6 +42,8 @@ cmp_masks:
     .byte 2, 5, 1, 3, 4, 6
     .text
 
+#define DC_ENTRIES  8                   // dictionary truth tables per batch ctx
+
 // =============================================================================
 // vb_new(x0 EvalCtx*, x1 width) -> x0 VBatch*
 // =============================================================================
@@ -56,6 +59,9 @@ FUNC vb_new
     mov  x0, #(VPOOL_MAX * 8)
     bl   arena_zalloc
     str  x0, [x19, #VB_POOL]
+    mov  x0, #(DC_ENTRIES * 24 + 16)
+    bl   arena_zalloc
+    str  x0, [x19, #VB_DCACHE]
     mov  x0, x19
     LEAVE 2
 ENDF vb_new
@@ -124,7 +130,8 @@ ENDF is_pure_const
 // veval(x0 Node*, x1 VBatch*, x2 u16* sel, x3 nsel, x4 Vec* out)
 //   x19 node, x20 vb, x21 sel, x22 nsel, x23 out, x24 op / mask / scratch,
 //   x25 index, x26 vector a, x27 vector b, x28 scratch
-// Stack: [sp] u32 AND flag / scratch
+// Stack: [sp] u32 AND flag / comparison class, [sp+4] / [sp+8] u32
+//        operand types of a comparison
 // =============================================================================
 FUNC veval
     ENTER 5
@@ -328,10 +335,12 @@ FUNC veval
     cmp  w12, w13
     b.ne .Lve_fallback
     cbz  w12, .Lve_fallback             // null type
-    cmp  w12, #T_DEC
+    stp  w10, w11, [sp, #4]
+    mov  w9, #3                         // class 3: DECIMALs of different
+    cmp  w12, #T_DEC                    // scales (exact, cmp_typed)
     b.ne 1f
-    cmp  w10, w11                       // DECIMAL: equal scales only
-    b.ne .Lve_fallback
+    cmp  w10, w11
+    b.ne 3f
 1:  mov  w9, #0                         // class: 0 signed, 1 float, 2 string
     cmp  w12, #T_FLOAT
     b.ne 2f
@@ -343,8 +352,18 @@ FUNC veval
     ADR_L x9, cmp_masks
     sub  w10, w24, #OP_EQ
     ldrb w24, [x9, x10]
-    bl   .Lve_operands
-    mov  x25, #0
+    ldr  w9, [sp]
+    cmp  w9, #2
+    b.ne 31f
+    bl   .Lve_dict_cmp                  // STRING column vs literal?
+    cbnz w0, .Lve_ret
+31: bl   .Lve_operands
+    ldr  w9, [sp]
+    cbnz w9, 32f
+    ADR_L x9, vsel_ident
+    cmp  x21, x9
+    b.eq .Lve_cmp_simd                  // dense signed comparison: NEON
+32: mov  x25, #0
 4:  cmp  x25, x22
     b.hs .Lve_release2
     ldrh w28, [x21, x25, lsl #1]
@@ -371,14 +390,141 @@ FUNC veval
 6:  cset w0, gt
     csinv w0, w0, wzr, ge
     b    8f
-7:  mov  w2, #T_STR
-    mov  w3, #T_STR
+7:  ldp  w2, w3, [sp, #4]              // STRING / mixed-scale DECIMAL
     bl   cmp_typed
 8:  add  w0, w0, #1
     lsr  w0, w24, w0
     and  x0, x0, #1
     str  x0, [x23, x28, lsl #3]
     b    4b
+
+    // Explicit SIMD (NEON, 2 x 64-bit lanes) for a dense selection:
+    // result = (a<b & mask_lt) | (a==b & mask_eq) | (a>b & mask_gt), the
+    // NULL flags are OR-ed 16 bytes at a time. Positions past nsel (up to
+    // the rounded-up count, inside the vectors) receive don't-care values.
+.Lve_cmp_simd:
+    tst  w24, #1
+    csetm x9, ne
+    dup  v20.2d, x9                     // lanes for "a < b is TRUE"
+    tst  w24, #2
+    csetm x9, ne
+    dup  v21.2d, x9                     // "a = b"
+    tst  w24, #4
+    csetm x9, ne
+    dup  v22.2d, x9                     // "a > b"
+    mov  x10, #0
+1:  cmp  x10, x22
+    b.hs 2f
+    lsl  x11, x10, #3
+    ldr  q0, [x26, x11]
+    ldr  q1, [x27, x11]
+    cmgt v2.2d, v0.2d, v1.2d
+    cmgt v3.2d, v1.2d, v0.2d
+    cmeq v4.2d, v0.2d, v1.2d
+    and  v2.16b, v2.16b, v22.16b
+    and  v3.16b, v3.16b, v20.16b
+    and  v4.16b, v4.16b, v21.16b
+    orr  v2.16b, v2.16b, v3.16b
+    orr  v2.16b, v2.16b, v4.16b
+    ushr v2.2d, v2.2d, #63
+    str  q2, [x23, x11]
+    add  x10, x10, #2
+    b    1b
+2:  add  x12, x26, #VEC_NULLS
+    add  x13, x27, #VEC_NULLS
+    add  x14, x23, #VEC_NULLS
+    mov  x10, #0
+3:  cmp  x10, x22
+    b.hs .Lve_release2
+    ldr  q0, [x12, x10]
+    ldr  q1, [x13, x10]
+    orr  v0.16b, v0.16b, v1.16b
+    str  q0, [x14, x10]
+    add  x10, x10, #16
+    b    3b
+
+    // local helper: STRING column (DICT encoding, column layout) compared
+    // with a non-NULL literal: the comparison is evaluated once per
+    // dictionary entry (dict_truth) and looked up by code per row.
+    // -> w0 1 if done (out filled), 0 if not applicable
+.Lve_dict_cmp:
+    stp  x29, x30, [sp, #-16]!
+    ldr  x9, [x19, #N_A]
+    ldr  w10, [x9, #N_KIND]
+    cmp  w10, #NK_COL
+    b.ne 9f
+    ldr  w10, [x9, #N_OP]
+    cbnz w10, 9f
+    ldr  x10, [x19, #N_B]
+    ldr  w11, [x10, #N_KIND]
+    cmp  w11, #NK_LIT
+    b.ne 9f
+    ldr  w11, [x10, #N_FLAGS]
+    tbnz w11, #0, 9f                    // NULL literal
+    ldr  x11, [x9, #N_B]                // rv
+    ldr  x12, [x20, #VB_EC]
+    ldr  x12, [x12, #EC_TABLES]
+    ldr  x12, [x12, x11, lsl #3]        // Table*
+    ldr  w13, [x12, #TBL_LAYOUT]
+    cbnz w13, 9f
+    ldr  x13, [x12, #TBL_COLS]
+    ldr  x14, [x9, #N_VAL]
+    add  x13, x13, x14, lsl #5          // Column*
+    ldr  w14, [x13, #COL_ENC]
+    cmp  w14, #CENC_DICT
+    b.ne 9f
+    ldr  x14, [x13, #COL_DATA]          // DictCol*
+    ldr  x15, [x14, #DC_NDICT]
+    ldr  x16, [x12, #TBL_NROWS]
+    cmp  x16, x15, lsl #2               // worth it: ndict <= nrows / 4
+    b.lo 9f
+    stp  x13, x11, [sp, #-16]!
+    mov  x0, x19
+    mov  x1, x20
+    mov  x2, x14
+    ldr  x3, [x10, #N_VAL]              // literal Str*
+    mov  w4, w24
+    bl   dict_truth
+    ldp  x13, x11, [sp], #16
+    ldr  x14, [x13, #COL_DATA]
+    ldr  x14, [x14, #DC_CODES]
+    ldr  x15, [x13, #COL_NULLS]
+    ldr  x9, [x20, #VB_TUP]
+    ldr  x10, [x20, #VB_W]
+    add  x9, x9, x11, lsl #2            // &tuple[0][rv]
+    lsl  x10, x10, #2
+    add  x17, x23, #VEC_NULLS
+    mov  x16, #0
+1:  cmp  x16, x22
+    b.hs 8f
+    ldrh w1, [x21, x16, lsl #1]
+    add  x16, x16, #1
+    madd x2, x1, x10, x9
+    ldr  w2, [x2]                       // row id
+    mov  w3, #1
+    cmn  w2, #1
+    b.eq 3f                             // ROW_NULL
+    cbz  x15, 2f
+    lsr  x4, x2, #3
+    ldrb w3, [x15, x4]
+    and  w4, w2, #7
+    lsr  w3, w3, w4
+    and  w3, w3, #1
+    cbnz w3, 3f
+2:  ldr  w4, [x14, x2, lsl #2]          // code -> truth
+    ldrb w4, [x0, x4]
+    str  x4, [x23, x1, lsl #3]
+    strb wzr, [x17, x1]
+    b    1b
+3:  str  xzr, [x23, x1, lsl #3]
+    strb w3, [x17, x1]
+    b    1b
+8:  mov  w0, #1
+    ldp  x29, x30, [sp], #16
+    ret
+9:  mov  w0, #0
+    ldp  x29, x30, [sp], #16
+    ret
 
     // AND / OR: the right operand only where the left one does not decide
 .Lve_logic:
@@ -598,44 +744,157 @@ FUNC veval
 ENDF veval
 
 // =============================================================================
+// dict_truth(x0 comparison Node*, x1 VBatch*, x2 DictCol*, x3 literal Str*,
+//            w4 truth mask) -> x0 u8* truth per dictionary code
+// Cached per (node, dictionary) in the batch context (DC_ENTRIES entries,
+// replaced round robin).
+//   x19 node, x20 dict, x21 literal, w22 mask, x23 table, x24 index,
+//   x25 cache
+// =============================================================================
+LFUNC dict_truth
+    ENTER 5
+    mov  x19, x0
+    mov  x20, x2
+    mov  x21, x3
+    mov  w22, w4
+    ldr  x25, [x1, #VB_DCACHE]
+    mov  x24, #0
+1:  cmp  x24, #DC_ENTRIES               // cached?
+    b.hs 2f
+    mov  x9, #24
+    madd x9, x24, x9, x25
+    add  x9, x9, #16
+    ldp  x10, x11, [x9]
+    cmp  x10, x19
+    ccmp x11, x20, #0, eq
+    b.ne 11f
+    ldr  x0, [x9, #16]
+    LEAVE 5
+11: add  x24, x24, #1
+    b    1b
+2:  ldr  x0, [x20, #DC_NDICT]
+    add  x0, x0, #16
+    bl   arena_alloc
+    mov  x23, x0
+    mov  x24, #0
+3:  ldr  x9, [x20, #DC_NDICT]
+    cmp  x24, x9
+    b.hs 4f
+    ldr  x9, [x20, #DC_DICT]
+    ldr  x9, [x9, x24, lsl #3]
+    add  x0, x9, #STR_DATA
+    ldr  x1, [x9, #STR_LEN]
+    add  x2, x21, #STR_DATA
+    ldr  x3, [x21, #STR_LEN]
+    bl   bytes_cmp
+    add  w0, w0, #1
+    lsr  w0, w22, w0
+    and  w0, w0, #1
+    strb w0, [x23, x24]
+    add  x24, x24, #1
+    b    3b
+4:  ldr  x9, [x25]                      // insert (round robin)
+    add  x10, x9, #1
+    str  x10, [x25]
+    and  x9, x9, #(DC_ENTRIES - 1)
+    mov  x10, #24
+    madd x9, x9, x10, x25
+    add  x9, x9, #16
+    stp  x19, x20, [x9]
+    str  x23, [x9, #16]
+    mov  x0, x23
+    LEAVE 5
+ENDF dict_truth
+
+// =============================================================================
 // vfilter(x0 predicate, x1 VBatch*, x2 u16* out) -> x0 count
-//   x19 predicate, x20 vb, x21 out, x22 vector
+// Positions 0..VB_N-1 for which the predicate is TRUE.
 // =============================================================================
 FUNC vfilter
+    mov  x4, x2
+    mov  x2, x1
+    mov  x1, x0
+    ldr  x3, [x2, #VB_N]
+    ADR_L x0, vsel_ident
+    mov  x9, x0
+    mov  x0, x1
+    mov  x1, x2
+    mov  x2, x9
+    b    vfilter_sel
+ENDF vfilter
+
+// =============================================================================
+// vfilter_sel(x0 predicate, x1 VBatch*, x2 u16* sel, x3 nsel, x4 u16* out)
+//   -> x0 count of selected positions for which the predicate is TRUE
+// A conjunction narrows the selection conjunct by conjunct (the right
+// operand only sees the positions where the left one is TRUE).
+//   x19 predicate, x20 vb, x21 sel, x22 nsel, x23 out, x24 vector / scratch
+// =============================================================================
+FUNC vfilter_sel
     ENTER 3
     mov  x19, x0
     mov  x20, x1
     mov  x21, x2
-    mov  x0, x20
-    bl   vpool_get
-    mov  x22, x0
-    mov  x0, x19
+    mov  x22, x3
+    mov  x23, x4
+    mov  x0, #0
+    cbz  x22, 9f
+    ldr  w9, [x19, #N_KIND]
+    cmp  w9, #NK_BINARY
+    b.ne 1f
+    ldr  w9, [x19, #N_OP]
+    cmp  w9, #OP_AND
+    b.ne 1f
+    mov  x0, x20                        // AND: left into a scratch
+    bl   vpool_get                      // selection, right from there
+    mov  x24, x0
+    ldr  x0, [x19, #N_A]
     mov  x1, x20
-    ADR_L x2, vsel_ident
-    ldr  x3, [x20, #VB_N]
-    mov  x4, x22
-    bl   veval
-    ldr  x9, [x20, #VB_N]
-    add  x10, x22, #VEC_NULLS
-    mov  x11, #0                        // position
-    mov  x0, #0                         // count
-1:  cmp  x11, x9
-    b.hs 2f
-    ldrb w12, [x10, x11]
-    ldr  x13, [x22, x11, lsl #3]
-    cmp  w12, #0
-    ccmp x13, #0, #4, eq                // ne iff not NULL and TRUE
-    b.eq 11f
-    strh w11, [x21, x0, lsl #1]
-    add  x0, x0, #1
-11: add  x11, x11, #1
-    b    1b
-2:  mov  x19, x0
+    mov  x2, x21
+    mov  x3, x22
+    mov  x4, x24
+    bl   vfilter_sel
+    mov  x3, x0
+    ldr  x0, [x19, #N_B]
+    mov  x1, x20
+    mov  x2, x24
+    mov  x4, x23
+    bl   vfilter_sel
+    mov  x19, x0
     mov  x0, x20
     bl   vpool_put
     mov  x0, x19
-    LEAVE 3
-ENDF vfilter
+    b    9f
+1:  mov  x0, x20
+    bl   vpool_get
+    mov  x24, x0
+    mov  x0, x19
+    mov  x1, x20
+    mov  x2, x21
+    mov  x3, x22
+    mov  x4, x24
+    bl   veval
+    add  x10, x24, #VEC_NULLS
+    mov  x11, #0                        // index into sel
+    mov  x0, #0                         // count
+2:  cmp  x11, x22
+    b.hs 3f
+    ldrh w9, [x21, x11, lsl #1]
+    add  x11, x11, #1
+    ldrb w12, [x10, x9]
+    ldr  x13, [x24, x9, lsl #3]
+    cmp  w12, #0
+    ccmp x13, #0, #4, eq                // ne iff not NULL and TRUE
+    b.eq 2b
+    strh w9, [x23, x0, lsl #1]
+    add  x0, x0, #1
+    b    2b
+3:  mov  x19, x0
+    mov  x0, x20
+    bl   vpool_put
+    mov  x0, x19
+9:  LEAVE 3
+ENDF vfilter_sel
 
 // =============================================================================
 // vkey_cells(x0 TupleSet*, x1 Node** keys, x2 nkeys (<= VKEY_MAX), x3 ctx,

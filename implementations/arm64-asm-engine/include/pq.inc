@@ -698,7 +698,8 @@
                                    //   row-at-a-time fallbacks)
 #define VB_POOL     32             // Vec** scratch vectors [VPOOL_MAX]
 #define VB_POOLN    40             // u64 vectors in use (stack discipline)
-#define VB_SIZE     48
+#define VB_DCACHE   48             // dictionary truth tables (vexec.S)
+#define VB_SIZE     64
 #define VPOOL_MAX   64
 #define VKEY_MAX    32             // most keys evaluated as vectors at once
 
