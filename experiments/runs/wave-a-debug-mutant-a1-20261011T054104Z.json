@@ -1,0 +1,35 @@
+{
+ "wave_id": "wave-a-debug-mutant-a1-20261011T054104Z",
+ "task": "debug-mutant",
+ "track": "A",
+ "attempt": 1,
+ "seed": 2222,
+ "order": [
+  "go",
+  "common-lisp",
+  "python",
+  "java",
+  "rust",
+  "clojure"
+ ],
+ "run_ids": [
+  "a-debug-mutant-go-a1-20261011T054104Z",
+  "a-debug-mutant-common-lisp-a1-20261011T054106Z",
+  "a-debug-mutant-python-a1-20261011T054107Z",
+  "a-debug-mutant-java-a1-20261011T054108Z",
+  "a-debug-mutant-rust-a1-20261011T054109Z",
+  "a-debug-mutant-clojure-a1-20261011T054110Z"
+ ],
+ "started": "2026-10-11T05:41:11+00:00",
+ "parallel": 6,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  11.6259765625,
+  7.40185546875,
+  5.4560546875
+ ]
+}

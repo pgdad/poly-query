@@ -1,0 +1,35 @@
+{
+ "wave_id": "wave-a-change-union-all-a1-20261011T053524Z",
+ "task": "change-union-all",
+ "track": "A",
+ "attempt": 1,
+ "seed": 1111,
+ "order": [
+  "go",
+  "java",
+  "python",
+  "rust",
+  "common-lisp",
+  "clojure"
+ ],
+ "run_ids": [
+  "a-change-union-all-go-a1-20261011T053524Z",
+  "a-change-union-all-java-a1-20261011T053525Z",
+  "a-change-union-all-python-a1-20261011T053526Z",
+  "a-change-union-all-rust-a1-20261011T053528Z",
+  "a-change-union-all-common-lisp-a1-20261011T053529Z",
+  "a-change-union-all-clojure-a1-20261011T053530Z"
+ ],
+ "started": "2026-10-11T05:35:31+00:00",
+ "parallel": 6,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  0.76513671875,
+  2.85888671875,
+  4.1005859375
+ ]
+}
