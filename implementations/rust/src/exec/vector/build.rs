@@ -57,7 +57,7 @@ fn native_filter_scan(
     else {
         return None;
     };
-    let filter = NativeFilter::analyze(predicate, table)?;
+    let filter = NativeFilter::analyze(predicate, table, columns)?;
     Some(Box::new(NativeFilterScanOp::new(
         table.clone(),
         columns.clone(),

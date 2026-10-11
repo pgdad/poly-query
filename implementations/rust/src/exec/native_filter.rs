@@ -166,9 +166,18 @@ fn flip(op: BinaryOp) -> BinaryOp {
 #[derive(Debug, Clone, PartialEq)]
 enum Conjunct {
     /// `op(col, a, b)` on the column's integer representation.
-    Const { col: usize, op: CmpOp, a: i64, b: i64 },
+    Const {
+        col: usize,
+        op: CmpOp,
+        a: i64,
+        b: i64,
+    },
     /// `left <op> right`, both of the same integer domain.
-    Columns { left: usize, right: usize, op: CmpOp },
+    Columns {
+        left: usize,
+        right: usize,
+        op: CmpOp,
+    },
     /// `col IS NULL` (`negated`: IS NOT NULL).
     Null { col: usize, negated: bool },
 }
@@ -274,10 +283,26 @@ fn classify(e: &Expr) -> Option<Conjunct> {
 }
 
 impl NativeFilter {
-    /// Splits `predicate` over a scan of `table` (None if no conjunct can
-    /// use the kernels, or the table is not column-oriented).
-    pub fn analyze(predicate: &Expr, table: &Table) -> Option<NativeFilter> {
+    /// Number of conjuncts evaluated by the kernels.
+    pub fn native_conjuncts(&self) -> usize {
+        self.conjuncts.len()
+    }
+
+    /// Splits `predicate` over a scan of `columns` of `table` (None if no
+    /// conjunct can use the kernels, or the table is not column-oriented).
+    pub fn analyze(predicate: &Expr, table: &Table, columns: &[usize]) -> Option<NativeFilter> {
         if table.layout() != Layout::Column {
+            return None;
+        }
+        // Column references must carry the stored column types (constants
+        // are converted into the stored representation).
+        let foreign = |e: &Expr| match e {
+            Expr::Column { index, ty } => columns
+                .get(*index)
+                .is_none_or(|&c| table.fields[c].data_type != *ty),
+            _ => false,
+        };
+        if predicate.any(&foreign) {
             return None;
         }
         let opaque = |e: &Expr| {
@@ -631,9 +656,14 @@ impl BatchOperator for NativeFilterScanOp {
             let n = to - from;
             let table = self.table.clone();
             let chunks = chunks(&table, &self.columns, rg)?;
-            let selected =
-                self.filter
-                    .select(self.kernels, &chunks, &self.types, from, n, &mut self.scratch);
+            let selected = self.filter.select(
+                self.kernels,
+                &chunks,
+                &self.types,
+                from,
+                n,
+                &mut self.scratch,
+            );
             match selected {
                 Selected::Fallback => {
                     let b = read_batch(&self.table, &self.columns, rg, from, to)?;
@@ -716,17 +746,21 @@ impl NativeFilterRowOp {
 
     /// Fills the row buffer from the next window(s); false at the end.
     fn fill(&mut self, ctx: &ExecContext) -> Result<bool> {
-        let row_at = |chunks: &[&Column], i: usize| -> Row {
-            chunks.iter().map(|c| c.value(i)).collect()
-        };
+        let row_at =
+            |chunks: &[&Column], i: usize| -> Row { chunks.iter().map(|c| c.value(i)).collect() };
         while let Some((rg, from, to)) = self.windows.next() {
             ctx.check_interrupt()?;
             let n = to - from;
             let table = self.table.clone();
             let chunks = chunks(&table, &self.columns, rg)?;
-            let selected =
-                self.filter
-                    .select(self.kernels, &chunks, &self.types, from, n, &mut self.scratch);
+            let selected = self.filter.select(
+                self.kernels,
+                &chunks,
+                &self.types,
+                from,
+                n,
+                &mut self.scratch,
+            );
             let mut out = Vec::new();
             let mut pending = None;
             // Evaluates the remaining predicate on a row; false stops the
@@ -799,6 +833,7 @@ impl Operator for NativeFilterRowOp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::Field;
 
     fn col(index: usize, ty: DataType) -> Box<Expr> {
         Box::new(Expr::Column { index, ty })
@@ -866,11 +901,7 @@ mod tests {
             })
         );
         // decimal(18,1) column >= 3 ⇔ unscaled >= 30
-        let c = classify(&cmp(
-            BinaryOp::GtEq,
-            col(1, dec),
-            lit(Value::Int(3), int),
-        ));
+        let c = classify(&cmp(BinaryOp::GtEq, col(1, dec), lit(Value::Int(3), int)));
         assert_eq!(
             c,
             Some(Conjunct::Const {
@@ -884,10 +915,7 @@ mod tests {
         let c = classify(&cmp(
             BinaryOp::Lt,
             col(2, DataType::Date),
-            lit(
-                Value::Timestamp(86_400_000_001),
-                DataType::Timestamp,
-            ),
+            lit(Value::Timestamp(86_400_000_001), DataType::Timestamp),
         ));
         assert_eq!(
             c,
@@ -957,8 +985,14 @@ mod tests {
                 negated: true,
             }),
         );
-        let table = Table::new("t", Vec::new(), Vec::new(), 0);
-        let f = NativeFilter::analyze(&p, &table).unwrap();
+        let fields = vec![
+            Field::new("a", int),
+            Field::new("b", DataType::Float64),
+            Field::new("c", DataType::String),
+        ];
+        let table = Table::new("t", fields, Vec::new(), 0);
+        let f = NativeFilter::analyze(&p, &table, &[0, 1, 2]).unwrap();
+        assert!(NativeFilter::analyze(&p, &table, &[0, 1]).is_none());
         assert_eq!(f.conjuncts.len(), 2);
         assert!(matches!(f.residual, Some(Expr::Compare { .. })));
     }

@@ -122,9 +122,16 @@ pub fn build_row_with(plan: PhysicalPlan, native: Option<&'static Kernels>) -> B
             batch: Vec::new().into_iter(),
         }),
         PhysicalPlan::Filter { input, predicate } => {
-            if let (Some(kernels), PhysicalPlan::TableScan { table, columns, groups, .. }) =
-                (native, &*input)
-                && let Some(filter) = NativeFilter::analyze(&predicate, table)
+            if let (
+                Some(kernels),
+                PhysicalPlan::TableScan {
+                    table,
+                    columns,
+                    groups,
+                    ..
+                },
+            ) = (native, &*input)
+                && let Some(filter) = NativeFilter::analyze(&predicate, table, columns)
             {
                 return Box::new(NativeFilterRowOp::new(
                     table.clone(),

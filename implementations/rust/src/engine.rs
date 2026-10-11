@@ -472,7 +472,20 @@ impl Engine {
     /// Plan JSON with the execution model on the root node
     /// (`"execution": {"mode": …, "threads": …}`).
     fn annotated_plan(&self, plan: &PhysicalPlan, opts: &QueryOptions) -> Json {
-        let mut json = plan.to_json();
+        let native = crate::native::loaded().filter(|_| opts.native);
+        // Filters evaluated with the kernels: `"native": [conjuncts]`.
+        let annotate = |p: &PhysicalPlan| match (native, p) {
+            (Some(_), PhysicalPlan::Filter { input, predicate }) => match &**input {
+                PhysicalPlan::TableScan { table, columns, .. } => {
+                    crate::exec::native_filter::NativeFilter::analyze(predicate, table, columns)
+                        .map(|f| vec![("native", Json::uint(f.native_conjuncts() as u64))])
+                        .unwrap_or_default()
+                }
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        let mut json = plan.to_json_with(&annotate);
         let (mode, threads) = match opts.mode {
             ExecMode::Row => ("row", 1),
             _ => (
@@ -481,10 +494,14 @@ impl Engine {
             ),
         };
         if let Json::Object(fields) = &mut json {
-            let execution = Json::object(vec![
+            let mut props = vec![
                 ("mode", Json::str(mode)),
                 ("threads", Json::uint(threads as u64)),
-            ]);
+            ];
+            if let Some(k) = native {
+                props.push(("native", Json::str(k.variant())));
+            }
+            let execution = Json::object(props);
             // Before "children", so the node's own properties stay together.
             let at = fields.len().saturating_sub(1);
             fields.insert(at, ("execution".to_string(), execution));

@@ -37,7 +37,8 @@ pub type CountI64Fn = unsafe extern "C" fn(*const i64, *const u8, usize, c_int, 
 pub type BitmapBinFn = unsafe extern "C" fn(*const u8, *const u8, *mut u8, usize);
 pub type PopcountFn = unsafe extern "C" fn(*const u8, usize) -> usize;
 pub type HashI64Fn = unsafe extern "C" fn(*const i64, usize, u64, *mut u64);
-pub type CompareI64Fn = unsafe extern "C" fn(*const i64, *const i64, usize, c_int, *mut u8) -> usize;
+pub type CompareI64Fn =
+    unsafe extern "C" fn(*const i64, *const i64, usize, c_int, *mut u8) -> usize;
 pub type GroupSumI64Fn = unsafe extern "C" fn(
     *const u32,
     *const i64,
@@ -96,10 +97,13 @@ impl Library {
 }
 
 /// Reads a static C string returned by the library.
-pub fn static_str(p: *const c_char) -> String {
+///
+/// # Safety
+/// `p` must be NULL or point to a NUL-terminated string.
+pub unsafe fn static_str(p: *const c_char) -> String {
     if p.is_null() {
         return String::new();
     }
-    // SAFETY: the library returns NUL-terminated static strings.
+    // SAFETY: guaranteed by the caller.
     unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
 }

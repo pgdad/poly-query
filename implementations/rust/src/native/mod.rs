@@ -342,7 +342,8 @@ impl Kernels {
         out.clear();
         out.resize(bitmap_bytes(n), 0);
         // SAFETY: both inputs hold n values, `out` ceil(n/8) bytes.
-        let k = unsafe { (self.compare_i64)(a.as_ptr(), b.as_ptr(), n, op as i32, out.as_mut_ptr()) };
+        let k =
+            unsafe { (self.compare_i64)(a.as_ptr(), b.as_ptr(), n, op as i32, out.as_mut_ptr()) };
         assert!(k <= n, "invalid kernel operator");
         k
     }
@@ -389,7 +390,12 @@ impl Kernels {
         out.reserve(idx.len());
         // SAFETY: every index is in bounds (checked); `out` has capacity.
         unsafe {
-            (self.gather_i64)(data.as_ptr(), idx.as_ptr(), idx.len(), out.as_mut_ptr().add(base));
+            (self.gather_i64)(
+                data.as_ptr(),
+                idx.as_ptr(),
+                idx.len(),
+                out.as_mut_ptr().add(base),
+            );
             out.set_len(base + idx.len());
         }
     }
@@ -503,7 +509,9 @@ mod tests {
 
     #[test]
     fn bitmap_helpers() {
-        let flags = [true, false, true, true, false, false, false, false, true, true];
+        let flags = [
+            true, false, true, true, false, false, false, false, true, true,
+        ];
         let mut bits = Vec::new();
         pack_bools(&flags, &mut bits);
         assert_eq!(bits, vec![0b0000_1101, 0b0000_0011]);

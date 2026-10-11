@@ -121,7 +121,7 @@ impl Frag {
             PhysicalPlan::Filter { input, predicate } => {
                 if let (Some(kernels), PhysicalPlan::TableScan { table, columns, .. }) =
                     (ctx.exec.native, &*input)
-                    && let Some(filter) = NativeFilter::analyze(&predicate, table)
+                    && let Some(filter) = NativeFilter::analyze(&predicate, table, columns)
                 {
                     return Ok(Frag::NativeFilterScan {
                         table: table.clone(),
@@ -634,11 +634,9 @@ impl BatchOperator for ParallelAggregateOp {
             merge_partitioned(partials, &self.seed, ctx)?
         } else {
             let mut iter = partials.into_iter();
-            let mut agg = iter
-                .next()
-                .unwrap_or_else(|| {
-                    Aggregator::new(self.group_by.len(), &self.aggregates, ctx.exec.native)
-                });
+            let mut agg = iter.next().unwrap_or_else(|| {
+                Aggregator::new(self.group_by.len(), &self.aggregates, ctx.exec.native)
+            });
             for p in iter {
                 let retained = agg.merge(p)?;
                 if retained > 0 {
