@@ -1857,16 +1857,33 @@ ENDF pqk_x86_avx2_group_sum_i64
  *           Prefetch never faults, but the look-ahead idx loads must stay
  *           inside idx, so the prefetching loop stops GATHER_PF rows before
  *           the end. r11 = rows for the prefetching loop.
+ *           When the rows are cache resident the extra loads cost ~40%
+ *           (L2: 0.21 -> 0.29 ns/row), so the prefetching loop only runs
+ *           if 16 indices sampled across idx (k * m / 16) reach
+ *           GATHER_PF_MINIDX (the gathered span is then >= 4 MB).
  * Tail:     the last >= GATHER_PF rows (or all rows if m is small) with
  *           GATHER_I64 8 (8-row iterations, then 0..7 single rows).
  * ====================================================================== */
 #define GATHER_PF 128
+#define GATHER_PF_MINIDX (1 << 19)      /* sampled max index: 4 MB of rows */
 FUNC pqk_x86_avx2_gather_i64
         mov     %rdx, %r11                              /* [check] */
         sub     $GATHER_PF, %r11
         jbe     .Lgather_i64_rest
         and     $-8, %r11
         jz      .Lgather_i64_rest
+        mov     %rdx, %r8               /* sample idx[k * (m / 16)], k < 16 */
+        shr     $4, %r8
+        xor     %r9d, %r9d              /* sample position */
+        xor     %r10d, %r10d            /* max sampled index */
+        .rept 16
+        mov     (%rsi,%r9,4), %eax
+        cmp     %r10d, %eax
+        cmova   %eax, %r10d
+        add     %r8, %r9
+        .endr
+        cmp     $GATHER_PF_MINIDX, %r10d
+        jb      .Lgather_i64_rest       /* small span: cache-resident */
         sub     %r11, %rdx
 .Lgather_i64_pf:                        /* [main] 8 rows + prefetch ahead */
         .set q, 0
