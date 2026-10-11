@@ -80,6 +80,8 @@ NATIVE_EXTRA_PATHS = ["native-kernels/Makefile", "native-kernels/reference-c", "
                       "native-kernels/arm64", "native-kernels/tests"]
 
 PHASE_TASKS = {"phase1", "phase2", "phase3", "phase4", "phase5"}
+# Inputs a task's prompt names explicitly (HI-007: optimize-latency named a workload that was never exported).
+TASK_EXTRA_PATHS = {"optimize-latency": ["benchmarks/workloads"]}
 
 TRUSTED_PATHS = ["tests", "spec"]
 TRUSTED_KERNEL_PATHS = ["spec", "native-kernels/Makefile", "native-kernels/include", "native-kernels/reference-c",
@@ -180,6 +182,7 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
     export = (KERNEL_WORKSPACE_PATHS if task in KERNEL_TASKS else WORKSPACE_PATHS) + [impl_path]
     if task not in PHASE_TASKS and task not in KERNEL_TASKS:
         export += NATIVE_EXTRA_PATHS
+    export += TASK_EXTRA_PATHS.get(task, [])
     present = [p for p in export if sh(["git", "cat-file", "-e", f"{ref}:{p}"], cwd=ROOT, check=False).returncode == 0]
     archive = subprocess.run(["git", "archive", "--format=tar", ref, *present], cwd=ROOT, check=True, capture_output=True)
     subprocess.run(["tar", "-x", "-C", str(ws)], input=archive.stdout, check=True)
