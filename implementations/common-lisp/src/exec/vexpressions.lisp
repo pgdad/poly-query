@@ -134,10 +134,11 @@ are non-NULL (the other rows get NULL), as in the row evaluator."
                     (compile-lifted e :eager)
                     (compile-row-fallback e)))
       (:case (compile-vcase e))
-      (:call (compile-lifted e (if (or (scalar-function-null-aware (b-op-info e))
-                                       (> (length args) 2))
-                                   :eager
-                                   :strict)))
+      (:call (or (compile-vcall-of-string e)
+                 (compile-lifted e (if (or (scalar-function-null-aware (b-op-info e))
+                                           (> (length args) 2))
+                                       :eager
+                                       :strict))))
       (:subquery (compile-lifted e :eager)))))
 
 ;;; ------------------------------------------------------------------
@@ -369,27 +370,45 @@ the error at the right time)."
 ;;; Dictionary-aware evaluation: a NULL-propagating function of one STRING
 ;;; operand is computed once per distinct dictionary entry.
 
-(defun compile-memoized-unary (kernel fn &optional (kind :any))
+(defun derived-dictionary (dict fn)
+  "A DICT-COLUMN whose entries are FN of the entries of the DICT-COLUMN DICT
+(possibly with duplicates), or NIL when FN fails on an entry or does not
+return a string."
+  (let ((entries (handler-case (map 'simple-vector fn (dict-column-dictionary dict))
+                   (pq-error () nil))))
+    (when (and entries (every #'stringp entries))
+      (make-dict-column :length (length entries) :codes (make-array 0 :element-type '(unsigned-byte 32))
+                        :dictionary entries))))
+
+(defun compile-memoized-unary (kernel fn &optional (kind :any) derive-codes)
   "Kernel applying FN to the non-NULL values of KERNEL's :ANY vector (NULL
 stays NULL). Values carrying dictionary codes are looked up in a per-entry
-memo of FN's results, kept for the last dictionary seen."
+memo of FN's results, kept for the last dictionary seen. With DERIVE-CODES
+(FN maps strings to strings), results of dictionary-coded values keep the
+codes, into the dictionary of FN's results (see DERIVED-DICTIONARY), so
+that expressions over them are again evaluated once per entry."
   (declare (type function kernel fn))
   (let ((memo-dict nil)
         (memo #())
+        (derived nil)
         (unknown '#:unknown))
     (lambda (batch)
       (let* ((n (batch-count batch))
              (vec (funcall kernel batch))
              (data (vec-data vec))
              (codes (vec-codes vec))
-             (out (make-array n)))
+             (out (make-array n))
+             (coded nil))
         (declare (type simple-vector data out) (type fixnum n))
         (if codes
             (let ((dict (vec-dict vec)))
               (unless (eq dict memo-dict)
                 (setf memo-dict dict
-                      memo (make-array (length (dict-column-dictionary dict))
-                                       :initial-element unknown)))
+                      derived (and derive-codes (derived-dictionary dict fn))
+                      memo (if derived
+                               (copy-seq (dict-column-dictionary derived))
+                               (make-array (length (dict-column-dictionary dict))
+                                           :initial-element unknown))))
               (let ((memo memo))
                 (declare (type simple-vector memo))
                 (dotimes (i n)
@@ -401,14 +420,37 @@ memo of FN's results, kept for the last dictionary seen."
                                      (r (svref memo code)))
                                 (if (eq r unknown)
                                     (setf (svref memo code) (funcall fn v))
-                                    r))))))))
+                                    r)))))))
+              (setf coded (and derived t)))
             (dotimes (i n)
               (setf (svref out i)
                     (let ((v (svref data i)))
                       (if (eq v +null+) +null+ (funcall fn v))))))
-        (if (eq kind :any)
-            (make-vec out)
-            (vec-from-values kind out n))))))
+        (cond (coded (make-vec out nil codes derived))
+              ((eq kind :any) (make-vec out))
+              (t (vec-from-values kind out n)))))))
+
+(defun compile-vcall-of-string (e)
+  "Kernel of a NULL-propagating scalar function call with one STRING
+argument, computed once per dictionary entry of dictionary-coded input
+(COMPILE-MEMOIZED-UNARY), or NIL for other calls."
+  (let ((args (b-op-args e))
+        (info (b-op-info e)))
+    (when (and (= (length args) 1)
+               (eq (type-kind (bexpr-type (first args))) :string)
+               (scalar-function-p info)
+               (not (scalar-function-null-aware info))
+               (not (scalar-function-test-only info)))
+      (let* ((arg (first args))
+             (call (compile-bexpr (make-b-op (bexpr-type e) :call
+                                             (list (make-b-column (bexpr-type arg) 0 "arg"))
+                                             info)))
+             (kind (type-vec-kind (bexpr-type e))))
+        (declare (type function call))
+        (compile-memoized-unary (compile-vexpr arg)
+                                (lambda (v) (funcall call (vector v)))
+                                kind
+                                (eq (type-kind (bexpr-type e)) :string))))))
 
 (defun compile-vlike (e)
   "LIKE with a constant pattern over a STRING operand, or NIL."

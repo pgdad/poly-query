@@ -13,6 +13,9 @@
     ;; dictionary-coded keys (strings), with NULLs, in grouping and joins
     "SELECT label, flag, COUNT(*) FROM g GROUP BY label, flag"
     "SELECT a.label, COUNT(*) FROM g a JOIN gr b ON a.label = b.label AND a.id = b.id GROUP BY a.label"
+    ;; one-argument string functions over dictionary codes (derived codes)
+    "SELECT UPPER(label), COUNT(*), MAX(LENGTH(label)) FROM g WHERE LOWER(UPPER(label)) <> 'beta' GROUP BY UPPER(label)"
+    "SELECT COUNT(*), SUM(CASE WHEN TRIM(label) LIKE '%a%' THEN 1 ELSE 0 END) FROM g WHERE UPPER(label) = 'GAMMA' OR label IS NULL"
     ;; ORDER BY on every key type (radix sort with a low threshold)
     "SELECT id, label, amount FROM g ORDER BY label DESC NULLS FIRST, amount, id"
     "SELECT id, ratio, day, flag FROM g ORDER BY flag NULLS LAST, ratio DESC, day, id"
