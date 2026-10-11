@@ -529,9 +529,11 @@ type aggTable struct {
 	dictGids  []int32
 	key       []byte
 
-	keys  []types.Row // key values per group
-	first []int64     // position of each group's first row (ordering)
-	gids  []int32
+	keys     []types.Row // key values per group (unless intKeyed)
+	intKeyed bool        // single int-class key: values in ikeys
+	ikeys    []int64     // key value per group (intKeyed; any for the NULL key)
+	first    []int64     // position of each group's first row (ordering)
+	gids     []int32
 
 	slab       []types.Value // storage for key rows
 	unreserved int64         // memory accounted but not yet reserved
@@ -553,13 +555,25 @@ func newAggTable(ec *Context, keyTypes []types.Type, calls []*plan.AggCall) *agg
 	if multiKeysApply(t.keyClasses) {
 		t.multi = newMultiKeys(t.keyClasses)
 	}
+	t.intKeyed = len(keyTypes) == 1 && t.keyClasses[0] == vInt
 	if ec.Native != nil && len(keyTypes) == 1 && t.keyClasses[0] == vInt {
 		t.nmap = newNativeIntMap(ec.Native)
 	}
 	return t
 }
 
-func (t *aggTable) groups() int { return len(t.keys) }
+func (t *aggTable) groups() int { return len(t.first) }
+
+// keyRow returns the key values of group g.
+func (t *aggTable) keyOf(g int) types.Row {
+	if !t.intKeyed {
+		return t.keys[g]
+	}
+	if int32(g) == t.nullGroup {
+		return types.Row{null}
+	}
+	return types.Row{types.IntValue(t.ikeys[g])}
+}
 
 // maxReserve caps the groups a table is sized for up front.
 const maxReserve = 1 << 20
@@ -574,7 +588,7 @@ func (t *aggTable) prepare(x *physical.HashAggregate, n int) {
 			}
 		}
 	}
-	if x != nil && x.KeyRange && len(t.keys) == 0 && len(t.keyClasses) == 1 && t.keyClasses[0] == vInt &&
+	if x != nil && x.KeyRange && t.groups() == 0 && len(t.keyClasses) == 1 && t.keyClasses[0] == vInt &&
 		t.nmap == nil && t.intMap.dense == nil {
 		t.intMap.setWindow(x.KeyLo, int(x.KeyHi-x.KeyLo+1))
 	}
@@ -584,15 +598,18 @@ func (t *aggTable) prepare(x *physical.HashAggregate, n int) {
 // reserve sizes an empty table for about n groups.
 func (t *aggTable) reserve(n int) {
 	n = min(n, maxReserve)
-	if n <= 64 || len(t.keys) > 0 {
+	if n <= 64 || t.groups() > 0 {
 		return
 	}
-	t.keys = make([]types.Row, 0, n)
+	if t.intKeyed {
+		t.ikeys = make([]int64, 0, n)
+	} else {
+		t.keys = make([]types.Row, 0, n)
+	}
 	t.first = make([]int64, 0, n)
 	for _, s := range t.states {
 		s.grow(n)
 	}
-	t.slab = make([]types.Value, n*max(len(t.keyTypes), 1))
 	if len(t.keyClasses) == 1 && t.keyClasses[0] == vInt && t.nmap == nil && t.intMap.dense == nil {
 		t.intMap.init(n)
 	}
@@ -609,15 +626,31 @@ func expectedGroups(est, rows int64) int {
 
 // newGroup creates a group with the given key values first seen at pos.
 func (t *aggTable) newGroup(key types.Row, pos int64) (int32, error) {
-	g := int32(len(t.keys))
+	if t.intKeyed {
+		return t.newIntGroup(key[0].I, pos)
+	}
 	t.keys = append(t.keys, key)
+	return t.addGroup(pos, RowSize(key))
+}
+
+// newIntGroup creates a group of an int-keyed table (key k; for the NULL
+// key k is ignored).
+func (t *aggTable) newIntGroup(k int64, pos int64) (int32, error) {
+	t.ikeys = append(t.ikeys, k)
+	return t.addGroup(pos, 8)
+}
+
+// addGroup adds the states and position of a new group whose key (of
+// keyBytes bytes) has been stored.
+func (t *aggTable) addGroup(pos int64, keyBytes int64) (int32, error) {
+	g := int32(len(t.first))
 	t.first = append(t.first, pos)
 	for _, s := range t.states {
-		s.grow(len(t.keys))
+		s.grow(len(t.first))
 	}
 	// Reservations are batched: the budget is shared (atomically) by
 	// parallel workers.
-	t.unreserved += RowSize(key) + int64(48*len(t.states))
+	t.unreserved += keyBytes + int64(48*len(t.states))
 	if t.unreserved >= reserveChunk {
 		n := t.unreserved
 		t.unreserved = 0
@@ -668,7 +701,7 @@ func (t *aggTable) keyRow(keys []*Vec, i int) types.Row {
 func (t *aggTable) resolve(keys []*Vec, n int, sel []int32, pos int64) error {
 	t.gids = grow(t.gids, n)
 	if len(keys) == 0 {
-		if len(t.keys) == 0 {
+		if t.groups() == 0 {
 			if _, err := t.newGroup(types.Row{}, pos); err != nil {
 				return err
 			}
@@ -721,7 +754,7 @@ func (t *aggTable) resolveInt(v *Vec, n int, sel []int32, pos int64) error {
 		g, ok := t.intMap.get(k)
 		if !ok {
 			var err error
-			if g, err = t.newGroup(t.key1(types.IntValue(k)), pos+int64(i)); err != nil {
+			if g, err = t.newIntGroup(k, pos+int64(i)); err != nil {
 				return err
 			}
 			t.intMap.put(k, g)
@@ -759,7 +792,7 @@ func (t *aggTable) resolveIntNative(v *Vec, n int, sel []int32, pos int64) error
 		g, ok := m.get(k, h)
 		if !ok {
 			var err error
-			if g, err = t.newGroup(t.key1(types.IntValue(k)), pos+int64(i)); err != nil {
+			if g, err = t.newIntGroup(k, pos+int64(i)); err != nil {
 				return err
 			}
 			m.put(k, h, g)
@@ -983,10 +1016,30 @@ func (t *aggTable) findOrAdd(key types.Row, pos int64) (int32, error) {
 	return g, err
 }
 
+// findOrAddFrom returns the group of t for group sg of o (same keys),
+// created if new; its first position is lowered to sg's if earlier.
+func (t *aggTable) findOrAddFrom(o *aggTable, sg int32) (int32, error) {
+	pos := o.first[sg]
+	if !t.intKeyed || !o.intKeyed || t.nmap != nil || sg == o.nullGroup {
+		return t.findOrAdd(o.keyOf(int(sg)), pos)
+	}
+	k := o.ikeys[sg]
+	g, ok := t.intMap.get(k)
+	if ok {
+		if pos < t.first[g] {
+			t.first[g] = pos
+		}
+		return g, nil
+	}
+	g, err := t.newIntGroup(k, pos)
+	t.intMap.put(k, g)
+	return g, err
+}
+
 // mergeFrom folds all groups of o into t.
 func (t *aggTable) mergeFrom(o *aggTable) error {
-	for sg, key := range o.keys {
-		g, err := t.findOrAdd(key, o.first[sg])
+	for sg := range o.first {
+		g, err := t.findOrAddFrom(o, int32(sg))
 		if err != nil {
 			return err
 		}
@@ -1000,7 +1053,7 @@ func (t *aggTable) mergeFrom(o *aggTable) error {
 // mergeGroups folds the given groups of o into t.
 func (t *aggTable) mergeGroups(o *aggTable, groups []int32) error {
 	for _, sg := range groups {
-		g, err := t.findOrAdd(o.keys[sg], o.first[sg])
+		g, err := t.findOrAddFrom(o, sg)
 		if err != nil {
 			return err
 		}
@@ -1014,23 +1067,26 @@ func (t *aggTable) mergeGroups(o *aggTable, groups []int32) error {
 // partition lists the groups of the table per hash partition of their
 // keys (parts partitions).
 func (t *aggTable) partition(seed maphash.Seed, parts int) [][]int32 {
+	n := t.groups()
 	out := make([][]int32, parts)
 	for p := range out {
-		out[p] = make([]int32, 0, len(t.keys)/parts+len(t.keys)/(4*parts)+16)
+		out[p] = make([]int32, 0, n/parts+n/(4*parts)+16)
 	}
 	var buf []byte
 	m := &t.intMap
-	for g, key := range t.keys {
+	for g := 0; g < n; g++ {
 		var h uint64
-		if len(key) == 1 && !key[0].Null && t.keyClasses[0] == vInt {
-			if i := uint64(key[0].I - m.lo); i < uint64(len(m.dense)) {
+		if t.intKeyed && int32(g) != t.nullGroup {
+			k := t.ikeys[g]
+			if i := uint64(k - m.lo); i < uint64(len(m.dense)) {
 				// Directly indexed keys: contiguous ranges per partition.
 				p := i * uint64(parts) / uint64(len(m.dense))
 				out[p] = append(out[p], int32(g))
 				continue
 			}
-			h = fibHash(uint64(key[0].I)) >> 32
+			h = fibHash(uint64(k)) >> 32
 		} else {
+			key := t.keyOf(g)
 			buf = buf[:0]
 			for k, v := range key {
 				buf = appendKey(buf, v, t.keyTypes[k])
@@ -1052,12 +1108,20 @@ func (t *aggTable) results() (rows []types.Row, first []int64, errPos int64, err
 		return nil, nil, math.MinInt64, err
 	}
 	width := len(t.keyTypes) + len(t.states)
-	cells := make([]types.Value, len(t.keys)*width)
-	rows = make([]types.Row, len(t.keys))
+	n := t.groups()
+	cells := make([]types.Value, n*width)
+	rows = make([]types.Row, n)
 	errPos = math.MaxInt64
-	for g := range t.keys {
+	for g := 0; g < n; g++ {
 		row := cells[g*width : (g+1)*width : (g+1)*width]
-		copy(row, t.keys[g])
+		switch {
+		case !t.intKeyed:
+			copy(row, t.keys[g])
+		case int32(g) == t.nullGroup:
+			row[0] = null
+		default:
+			row[0] = types.IntValue(t.ikeys[g])
+		}
 		for k, s := range t.states {
 			v, e := s.result(g)
 			if e != nil {
@@ -1076,7 +1140,7 @@ func (t *aggTable) results() (rows []types.Row, first []int64, errPos int64, err
 // rows computes the output rows (keys then aggregates) ordered by first
 // appearance; without keys there is exactly one row.
 func (t *aggTable) rows() ([]types.Row, error) {
-	if len(t.keyTypes) == 0 && len(t.keys) == 0 {
+	if len(t.keyTypes) == 0 && t.groups() == 0 {
 		if _, err := t.newGroup(types.Row{}, 0); err != nil {
 			return nil, err
 		}
