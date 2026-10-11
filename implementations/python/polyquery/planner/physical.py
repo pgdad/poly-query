@@ -9,8 +9,10 @@ operators that run on native kernels."""
 
 from __future__ import annotations
 
+import dataclasses
+import json
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from ..analysis import bound as b
 from ..native import NativeKernels
@@ -168,6 +170,10 @@ class SubqueryScan(PhysicalNode):
     rel: int
     width: int
     alias: str
+    # set when the statement computes the identical (uncorrelated,
+    # side-effect free) input more than once, e.g. a CTE referenced twice:
+    # the first execution's result is reused by the others
+    shared: str | None = None
 
     def inputs(self) -> list[PhysicalNode]:
         return [self.input]
@@ -177,7 +183,10 @@ class SubqueryScan(PhysicalNode):
         return [(self.rel, i) for i in range(self.width)]
 
     def describe(self) -> dict[str, Any]:
-        return {"alias": self.alias}
+        out: dict[str, Any] = {"alias": self.alias}
+        if self.shared is not None:
+            out["shared"] = True
+        return out
 
 
 @dataclass(eq=False)
@@ -241,6 +250,10 @@ class HashJoin(_Join):
     right_keys: list[b.Expr] = field(default_factory=list)
     residual: b.Expr | None = None
     build: str = "right"
+    # LEFT join below a filter that keeps only its unmatched rows (anti
+    # join): only the left rows without a match are produced, padded with
+    # NULLs, and the build side is just a set of keys
+    anti: bool = False
 
     def expressions(self) -> list[b.Expr]:
         out = self.left_keys + self.right_keys
@@ -257,6 +270,8 @@ class HashJoin(_Join):
         }
         if self.residual is not None:
             out["residual"] = render_expr(self.residual)
+        if self.anti:
+            out["anti"] = True
         return out
 
 
@@ -473,8 +488,9 @@ class PlanOptions:
     join: str = "auto"  # auto, hash, merge, nested_loop
     use_indexes: bool = True
     threads: int = 1  # > 1: parallel pipelines (Gather)
-    # only pipelines whose driving scan is expected to read at least this
-    # many rows are parallelized (automatic parallelism; 0 for ``threads``)
+    # automatic parallelism (> 0): only pipelines whose driving scan has at
+    # least this many (estimated) rows, and at least BUILD_SCAN_RATIO times
+    # the rows their join build sides scan, are parallelized
     parallel_min_rows: float = 0
     mode: str = "auto"  # auto (= vectorized), row, vectorized
     # the indexes of a table (catalog lookup)
@@ -524,6 +540,8 @@ class PhysicalPlanner:
     def __init__(self, options: PlanOptions):
         self.options = options
         self.subplans: dict[int, PhysicalNode] = {}
+        # ids of the uncorrelated subqueries (executed once per statement)
+        self.uncorrelated: set[int] = set()
         self.logical_subqueries: dict[int, lp.LogicalNode] = {}
         # base table of every scanned range variable (for statistics)
         self.rel_tables: dict[int, Table] = {}
@@ -534,12 +552,18 @@ class PhysicalPlanner:
         if isinstance(root, Project):
             root.names = [c.name for c in logical.columns]
         if self.options.threads > 1:
-            # subquery plans (executed per outer row) stay serial
-            root = parallelize(root, min(self.options.threads, MAX_PARTITIONS), self.options.parallel_min_rows)
+            partitions = min(self.options.threads, MAX_PARTITIONS)
+            root = parallelize(root, partitions, self.options.parallel_min_rows)
+            # uncorrelated subqueries run once; correlated ones (executed per
+            # outer row) stay serial
+            for sq_id in self.uncorrelated:
+                self.subplans[sq_id] = parallelize(self.subplans[sq_id], partitions, self.options.parallel_min_rows)
         kernels = self.options.kernels
         if kernels is not None and self.options.kernel_plan is not None:
             for tree in [root, *self.subplans.values()]:
                 self._bind_kernels(tree)
+        if self.options.optimize:
+            _share_common_subqueries([root, *self.subplans.values()], self.subplans)
         mode = ROW if self.options.mode == ROW else VECTORIZED
         return PhysicalPlan(root, logical.columns, self.subplans, mode, kernels)
 
@@ -549,6 +573,8 @@ class PhysicalPlanner:
             for sq in b.subqueries(expr):
                 if sq.id not in self.subplans:
                     self.subplans[sq.id] = self.plan(self.logical_subqueries[sq.id])
+                    if not sq.correlated:
+                        self.uncorrelated.add(sq.id)
         return result
 
     def _bind_kernels(self, node: PhysicalNode) -> None:
@@ -576,6 +602,8 @@ class PhysicalPlanner:
             if isinstance(node.input, lp.Scan):
                 return self._scan(node.input, node.predicate)
             child = self.plan(node.input)
+            if isinstance(child, HashJoin) and self.options.optimize:
+                child.anti = self._keeps_only_unmatched(child, node.predicate)
             return self._filter(child, node.predicate)
         if isinstance(node, lp.Join):
             return self._plan_join(node)
@@ -648,6 +676,28 @@ class PhysicalPlanner:
 
     def _filter(self, child: PhysicalNode, predicate: b.Expr) -> PhysicalNode:
         return _estimated(Filter(child, predicate), child.estimated_rows * self._selectivity(predicate))
+
+    def _keeps_only_unmatched(self, join: HashJoin, predicate: b.Expr) -> bool:
+        """Whether a filter over a LEFT hash join (without residual condition)
+        rejects every matched row: one of its conjuncts is ``c IS NULL`` for
+        a right column ``c`` that is never NULL in a matched row — a right
+        join key (NULL keys never match), or a column of the scanned right
+        table whose (exact) statistics count no NULLs."""
+        if join.join_type != "LEFT" or join.residual is not None or join.build != "right":
+            return False
+        right_keys = {k.key for k in join.right_keys if isinstance(k, b.ColumnRef)}
+        scanned = _scanned_rel(join.right)
+        for part in conjuncts(predicate):
+            if not (isinstance(part, b.IsNull) and not part.negated and isinstance(part.operand, b.ColumnRef)):
+                continue
+            key = part.operand.key
+            if key in right_keys:
+                return True
+            if scanned is not None and key[0] == scanned:
+                found = self._resolve(key)
+                if found is not None and found[0].column_stats(found[1]).null_count == 0:
+                    return True
+        return False
 
     def _selectivity(self, predicate: b.Expr) -> float:
         evaluate = self.options.evaluate
@@ -823,45 +873,187 @@ MAX_PARTITIONS = 64
 # sort) is parallelized only if it is expected to return at most this
 # fraction of the rows it scans: every row of a worker process is pickled
 ROOT_GATHER_MAX_SELECTIVITY = 0.25
+# automatic parallelism: the driving scan must read at least this many times
+# the rows scanned to build the pipeline's join hash tables (each worker
+# builds them; 16 workers doing so contend for memory bandwidth)
+BUILD_SCAN_RATIO = 2.0
+# full sorts of pipelines scanning fewer rows are not parallelized unless
+# the pipeline is selective (range partitioning pays off for large inputs)
+RANGE_SORT_MIN_ROWS = 100_000
 
 
 def parallelize(root: PhysicalNode, partitions: int, min_rows: float = 0) -> PhysicalNode:
     """Inserts Gathers below the operators that merge partial results
     (aggregation, top-N, distinct), and above selective pipelines that
     filter or join at the root or below a full sort (whose input rows are
-    all returned to the parent anyway). Pipelines whose driving scan is
-    expected to read fewer than ``min_rows`` rows stay serial."""
+    all returned to the parent anyway). Pipelines driven by scans of fewer
+    than ``min_rows`` estimated rows stay serial."""
     _parallelize_inputs(root, partitions, min_rows)
     return _gather_selective(root, partitions, min_rows)
 
 
-def _parallel_path(node: PhysicalNode, min_rows: float) -> list[PhysicalNode] | None:
-    path = pipeline_path(node)
-    if path is None or path[-1].estimated_rows < min_rows:
-        return None
-    return path
+def _worth_partitioning(path: list[PhysicalNode], min_rows: float) -> bool:
+    """Automatic parallelism (``min_rows`` > 0): the driving scan is large,
+    and large compared with the join build sides on the path, which every
+    worker builds for itself."""
+    if min_rows <= 0:
+        return True
+    driver_rows = path[-1].estimated_rows
+    if driver_rows < min_rows:
+        return False
+    built = sum(_scanned_rows(build) for build in _build_inputs(path))
+    return driver_rows >= BUILD_SCAN_RATIO * built
+
+
+def _build_inputs(path: list[PhysicalNode]) -> list[PhysicalNode]:
+    out: list[PhysicalNode] = []
+    for node in path:
+        if isinstance(node, HashJoin):
+            out.append(node.right if node.build == "right" else node.left)
+        elif isinstance(node, (NestedLoopJoin, MergeJoin)):
+            out.append(node.right)
+    return out
+
+
+def _scanned_rows(node: PhysicalNode) -> float:
+    if isinstance(node, (TableScan, IndexScan, LookupScan)):
+        return node.estimated_rows
+    return sum(_scanned_rows(child) for child in node.inputs())
 
 
 def _gather_selective(node: PhysicalNode, partitions: int, min_rows: float) -> PhysicalNode:
-    path = _parallel_path(node, min_rows)
+    path = pipeline_path(node)
     if path is None or not any(isinstance(n, (Filter, _Join)) for n in path):
+        return node
+    if not _worth_partitioning(path, min_rows):
         return node
     if node.estimated_rows > ROOT_GATHER_MAX_SELECTIVITY * max(path[-1].estimated_rows, 1.0):
         return node
     return _estimated(Gather(node, partitions, path[-1]), node.estimated_rows)
 
 
+def _gather_large(node: PhysicalNode, partitions: int, min_rows: float) -> PhysicalNode:
+    """A Gather over a large pipeline below a full sort (which the
+    vectorized engine sorts by key ranges in parallel)."""
+    path = pipeline_path(node)
+    if path is None or path[-1].estimated_rows < RANGE_SORT_MIN_ROWS or not _worth_partitioning(path, min_rows):
+        return node
+    return _estimated(Gather(node, partitions, path[-1]), node.estimated_rows)
+
+
+def is_selective(gather: Gather) -> bool:
+    """Whether a Gather's pipeline returns few of the rows it scans."""
+    return gather.estimated_rows <= ROOT_GATHER_MAX_SELECTIVITY * max(gather.driver.estimated_rows, 1.0)
+
+
 def _parallelize_inputs(node: PhysicalNode, partitions: int, min_rows: float) -> None:
     for child in node.inputs():
         _parallelize_inputs(child, partitions, min_rows)
     if isinstance(node, (HashAggregate, TopN, Distinct)):
-        path = _parallel_path(node.input, min_rows)
-        if path is not None:
+        path = pipeline_path(node.input)
+        if path is not None and _worth_partitioning(path, min_rows):
             node.input = _estimated(Gather(node.input, partitions, path[-1]), node.input.estimated_rows)
     elif isinstance(node, Sort):
-        node.input = _gather_selective(node.input, partitions, min_rows)
+        gathered = _gather_selective(node.input, partitions, min_rows)
+        if gathered is node.input:
+            gathered = _gather_large(node.input, partitions, min_rows)
+        node.input = gathered
     elif isinstance(node, UnionAll):
         node.branches = [_gather_selective(branch, partitions, min_rows) for branch in node.branches]
+
+
+def _walk(node: PhysicalNode, subplans: dict[int, PhysicalNode]) -> Iterator[PhysicalNode]:
+    """A plan tree's nodes, including the plans of the subqueries its
+    expressions use."""
+    yield node
+    for expr in node.expressions():
+        for sq in b.subqueries(expr):
+            if sq.id in subplans:
+                yield from _walk(subplans[sq.id], subplans)
+    for child in node.inputs():
+        yield from _walk(child, subplans)
+
+
+def _self_contained(node: PhysicalNode) -> bool:
+    """Whether a subtree's result depends on nothing outside it: every
+    column it references is produced inside it (no correlation parameter),
+    and no expression has side effects or runs a subquery."""
+    nodes = list(_walk(node, {}))
+    produced = {key[0] for n in nodes for key in n.layout}
+    for n in nodes:
+        if getattr(n, "native", None) is not None:
+            return False
+        for expr in n.expressions():
+            if b.has_side_effects(expr) or b.contains_subquery(expr):
+                return False
+            if any(key[0] not in produced for key in b.column_keys(expr)):
+                return False
+    return True
+
+
+def _signature(root: PhysicalNode) -> str:
+    """A structural description of a subtree that is equal for two subtrees
+    exactly when they compute the same rows: node types and all their
+    fields, with the relation ids of column keys renumbered in order of
+    appearance (so the copies of a CTE planned for each reference compare
+    equal) and tables / indexes by identity."""
+    nodes = list(_walk(root, {}))
+    rels: dict[int, int] = {}
+    for n in nodes:
+        for key in n.layout:
+            rels.setdefault(key[0], len(rels))
+
+    def canonical_expr(e: b.Expr) -> b.Expr:
+        if isinstance(e, b.ColumnRef):
+            return dataclasses.replace(e, rel=rels[e.rel])
+        return b.map_children(e, canonical_expr)
+
+    def canonical(value: Any) -> Any:
+        if isinstance(value, PhysicalNode):
+            return None  # the subtree's structure: the walk order and input counts
+        if isinstance(value, (Table, Index)):
+            return ["object", id(value)]
+        if isinstance(value, b.Expr):
+            return repr(canonical_expr(value))
+        if isinstance(value, (list, tuple)):
+            return [canonical(v) for v in value]
+        return repr(value)
+
+    parts = []
+    for n in nodes:
+        fields = {
+            f.name: canonical(getattr(n, f.name))
+            for f in dataclasses.fields(n)
+            if f.name not in ("rel", "estimated_rows", "shared")
+        }
+        layout = [[rels[key[0]], key[1]] for key in n.layout]
+        parts.append([type(n).__name__, fields, layout, len(n.inputs())])
+    return json.dumps(parts)
+
+
+def _share_common_subqueries(trees: list[PhysicalNode], subplans: dict[int, PhysicalNode]) -> None:
+    """Marks the SubqueryScans of a statement that compute identical,
+    self-contained inputs (e.g. the references to one CTE), so that their
+    result is computed once."""
+    groups: dict[str, list[SubqueryScan]] = {}
+    for tree in trees:
+        for node in _walk(tree, {}):
+            if isinstance(node, SubqueryScan) and _self_contained(node.input):
+                groups.setdefault(_signature(node.input), []).append(node)
+    for signature, scans in groups.items():
+        if len(scans) > 1:
+            for scan in scans:
+                scan.shared = signature
+
+
+def _scanned_rel(node: PhysicalNode) -> int | None:
+    """The range variable of a plain (possibly filtered) table scan, whose
+    output columns are the table's own values."""
+    while isinstance(node, Filter):
+        node = node.input
+    if isinstance(node, (TableScan, IndexScan)):
+        return node.rel
+    return None
 
 
 def _estimated(node: PhysicalNode, rows: float) -> PhysicalNode:

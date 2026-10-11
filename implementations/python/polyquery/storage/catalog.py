@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from typing import Callable
 
 from .. import errors
 from ..names import fold
@@ -20,6 +21,17 @@ class Catalog:
         self._tables: dict[str, Table] = {}
         self._indexes: dict[str, Index] = {}
         self._lock = threading.RLock()
+        # incremented by every change; listeners are called after each change
+        self.version = 0
+        self._listeners: list[Callable[[], None]] = []
+
+    def add_listener(self, listener: Callable[[], None]) -> None:
+        self._listeners.append(listener)
+
+    def _changed(self) -> None:
+        self.version += 1
+        for listener in self._listeners:
+            listener()
 
     # ------------------------------------------------------------ tables
 
@@ -58,6 +70,7 @@ class Catalog:
             self._tables[key] = table
             for index in indexes:
                 self._indexes[fold(index.name)] = index
+            self._changed()
 
     def drop(self, name: str) -> None:
         with self._lock:
@@ -65,20 +78,17 @@ class Catalog:
             if table is None:
                 raise errors.not_found(f"table '{name}' does not exist", table=name)
             self._drop_indexes_of(table)
+            self._changed()
 
     def reset(self) -> None:
         with self._lock:
             self._tables.clear()
             self._indexes.clear()
+            self._changed()
 
     def tables(self) -> list[Table]:
         with self._lock:
             return sorted(self._tables.values(), key=lambda t: (fold(t.name), t.name))
-
-    def objects(self) -> list[Table | Index]:
-        """Every table and index (what parallel worker processes inherit)."""
-        with self._lock:
-            return [*self._tables.values(), *self._indexes.values()]
 
     # ------------------------------------------------------------ indexes
 
@@ -94,11 +104,19 @@ class Catalog:
             if self._tables.get(fold(index.table.name)) is not index.table:
                 raise errors.not_found(f"table '{index.table.name}' does not exist")
             self._indexes[fold(index.name)] = index
+            self._changed()
 
     def drop_index(self, name: str) -> bool:
         """Removes an index; False if it does not exist."""
         with self._lock:
-            return self._indexes.pop(fold(name), None) is not None
+            dropped = self._indexes.pop(fold(name), None) is not None
+            if dropped:
+                self._changed()
+            return dropped
+
+    def indexes(self) -> list[Index]:
+        with self._lock:
+            return list(self._indexes.values())
 
     def indexes_of(self, table: Table) -> list[Index]:
         """The indexes of a table, in creation order."""

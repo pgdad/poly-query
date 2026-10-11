@@ -25,8 +25,10 @@ are only built at the very end (results) or where an algorithm needs them
 from __future__ import annotations
 
 import array
+import bisect
 import itertools
 import operator
+import pickle
 from collections import Counter
 from functools import partial
 from itertools import compress, repeat
@@ -49,12 +51,11 @@ from .common import (
 )
 from .compiler import Layout
 from .context import ExecutionContext
-from .group_states import GroupState, make_state, merge_partials
+from .group_states import GroupState, make_state, merge_partials, merge_ranked_partials
 from .vcompiler import VecFn, compile_vector, take
-from .worker_pool import PartitionTask, register_engine
+from .workers import dumps_result
 
 _is_not_none = partial(operator.is_not, None)
-_is_none = partial(operator.is_, None)
 
 Columns = list[Sequence[Any]]
 Batch = tuple[Columns, int]
@@ -125,6 +126,14 @@ class _Collector:
 
 def _materialize(node: pp.PhysicalNode, ctx: ExecutionContext) -> tuple[list[list[Any]], int]:
     width = len(node.layout)
+    if isinstance(node, pp.TableScan) and not node.skip and ctx.partitions.get(id(node)) is None:
+        # a whole table: decode every column at once instead of batch by batch
+        ctx.check()
+        n = node.table.row_count
+        ctx.reserve_rows(n, width)
+        cols = [node.table.column_values(i) for i in node.columns]
+        ctx.check()
+        return cols, n
     out = _Collector(width)
     for batch in execute(node, ctx):
         ctx.reserve_rows(batch[1], width)
@@ -169,7 +178,12 @@ def _values(node: pp.Values, ctx: ExecutionContext) -> Batches:
 
 
 def _subquery_scan(node: pp.SubqueryScan, ctx: ExecutionContext) -> Batches:
-    return execute(node.input, ctx)
+    if node.shared is None or ctx.partitions:  # (a partition sees part of the input)
+        return execute(node.input, ctx)
+    result = ctx.shared_results.get(node.shared)
+    if result is None:
+        result = ctx.shared_results[node.shared] = _materialize(node.input, ctx)
+    return _rebatch(*result)
 
 
 def _union_all(node: pp.UnionAll, ctx: ExecutionContext) -> Batches:
@@ -209,31 +223,30 @@ def _project(node: pp.Project, ctx: ExecutionContext) -> Batches:
 
 def _gather(node: pp.Gather, ctx: ExecutionContext) -> Batches:
     """Partition outputs concatenated in partition order."""
-    return parallel.iterate_partitions(
-        node,
-        ctx,
-        lambda: execute(node.input, ctx),
-        spec=PartitionTask(ENGINE, "collect", None),
-        prepare=lambda: prepare_pipeline(node, ctx),
-    )
+    return parallel.iterate_partitions(node, ctx, partial(execute, node.input), prepare_pipeline)
 
 
 def partition_batches(
-    node: pp.PhysicalNode, ctx: ExecutionContext, kind: str, consumer: pp.PhysicalNode, arg: Any = None
+    node: pp.PhysicalNode, ctx: ExecutionContext, consume: Callable[[Batches, ExecutionContext], Any]
 ) -> list[Any]:
-    """The ``kind`` consumer (see ``_CONSUMERS``) of operator ``consumer``
-    applied to the input batches of a consumer of partial results: once per
-    partition if ``node`` is a Gather, else once."""
-    consume = _CONSUMERS[kind](consumer, ctx, arg)
+    """``consume(batches, ctx)`` applied to the input batches of a consumer
+    of partial results: once per partition if ``node`` is a Gather, else
+    once. ``consume`` must be picklable (a module-level function or a
+    ``partial`` of one): partitions may run in pool worker processes."""
     if isinstance(node, pp.Gather):
-        return parallel.run_partitions(
-            node,
-            ctx,
-            lambda: consume(execute(node.input, ctx)),
-            spec=PartitionTask(ENGINE, kind, consumer, arg),
-            prepare=lambda: prepare_pipeline(node, ctx),
-        )
-    return [consume(execute(node, ctx))]
+        task = partial(_consume_partition, consume, node.input)
+        return parallel.run_partitions(node, ctx, task, prepare_pipeline)
+    return [consume(execute(node, ctx), ctx)]
+
+
+def _consume_partition(
+    consume: Callable[[Batches, ExecutionContext], Any], source: pp.PhysicalNode, ctx: ExecutionContext
+) -> Any:
+    return consume(execute(source, ctx), ctx)
+
+
+def _collect_batches(batches: Batches, ctx: ExecutionContext) -> list[Batch]:
+    return list(batches)
 
 
 def prepare_pipeline(gather: pp.Gather, ctx: ExecutionContext) -> None:
@@ -306,37 +319,42 @@ def _build_hash_side(node: pp.HashJoin, ctx: ExecutionContext) -> _HashSide:
     valid = _valid_keys(keys, len(fns) > 1)
     positions: Iterable[int] = range(n) if valid is None else compress(range(n), valid)
     usable = keys if valid is None else list(compress(keys, valid))
+    if node.anti:  # only whether a key has a match matters
+        ctx.check()
+        return _HashSide([], n, set(usable), True)
     table: dict = dict(zip(usable, positions))
     unique = len(table) == len(usable)
     if not unique:
-        table = {}
-        for key, i in zip(usable, range(n) if valid is None else compress(range(n), valid)):
-            bucket = table.get(key)
-            if bucket is None:
-                table[key] = [i]
-            else:
-                bucket.append(i)
+        table = _buckets(usable, range(n) if valid is None else list(compress(range(n), valid)))
     for c in cols:
         c.append(None)  # padding slot
     ctx.check()
     return _HashSide(cols, n, table, unique)
 
 
+def _buckets(keys: Sequence[Any], rows: Sequence[int]) -> dict[Any, list[int]]:
+    """key -> the ``rows`` (ascending) with that key. (A plain loop: measured
+    faster than sorting the positions by key and slicing the runs.)"""
+    table: dict[Any, list[int]] = {}
+    for key, i in zip(keys, rows):
+        bucket = table.get(key)
+        if bucket is None:
+            table[key] = [i]
+        else:
+            bucket.append(i)
+    return table
+
+
 def _probe(side: _HashSide, keys: Sequence[Any], n: int) -> tuple[list[int], list[int]]:
     """(probe position, build position) of every matching pair, in probe order."""
     found = list(map(side.table.get, keys))
+    mask = list(map(_is_not_none, found))
     if side.unique:
-        if None not in found:  # every probe row matched (the usual foreign-key join)
-            return list(range(n)), found
-        mask = [f is not None for f in found]
         return list(compress(range(n), mask)), list(compress(found, mask))
-    probe: list[int] = []
-    build: list[int] = []
-    for i, matches in enumerate(found):
-        if matches is not None:
-            probe.extend(repeat(i, len(matches)))
-            build.extend(matches)
-    return probe, build
+    buckets = list(compress(found, mask))
+    rows = compress(range(n), mask)
+    probe = list(itertools.chain.from_iterable(map(repeat, rows, map(len, buckets))))
+    return probe, list(itertools.chain.from_iterable(buckets))
 
 
 def _filter_pairs(
@@ -392,6 +410,9 @@ def _hash_join(node: pp.HashJoin, ctx: ExecutionContext) -> Batches:
     residual = _residual(node, ctx)
     side: _HashSide = ctx.shared(node, "vec:build", lambda: _build_hash_side(node, ctx))
     counter = JoinCounter(ctx)
+    if node.anti:
+        yield from _anti_join(node, ctx, left_fns, side, counter)
+        return
     if node.build == "left":  # INNER join probing with the right input
         for cols, n in execute(node.right, ctx):
             pi, bi = _probe(side, _key_vector(right_fns, cols, n), n)
@@ -409,6 +430,23 @@ def _hash_join(node: pp.HashJoin, ctx: ExecutionContext) -> Batches:
             pi, bi = _with_unmatched(pi, bi, n, side.n)
         counter.add(len(pi))
         yield from _emit_pairs(cols, side.cols, pi, bi, "left" if side.unique and len(pi) == n else None)
+        ctx.check()
+
+
+def _anti_join(
+    node: pp.HashJoin, ctx: ExecutionContext, left_fns: list[VecFn], side: _HashSide, counter: JoinCounter
+) -> Batches:
+    """The left rows without a matching right row, padded with NULLs (the
+    rows a LEFT join produces for them)."""
+    width = len(node.right.layout)
+    contains = side.table.__contains__  # NULL keys are not in the table
+    for cols, n in execute(node.left, ctx):
+        unmatched = list(map(operator.not_, map(contains, _key_vector(left_fns, cols, n))))
+        kept = unmatched.count(True)
+        if kept:
+            counter.add(kept)
+            left = list(cols) if kept == n else [list(compress(c, unmatched)) for c in cols]
+            yield left + [[None] * kept] * width, kept
         ctx.check()
 
 
@@ -477,7 +515,7 @@ def _merge_join(node: pp.MergeJoin, ctx: ExecutionContext) -> Batches:
 
 
 def _aggregate_partition(
-    node: pp.HashAggregate, ctx: ExecutionContext, batches: Batches
+    node: pp.HashAggregate, batches: Batches, ctx: ExecutionContext
 ) -> tuple[list[Any], list[GroupState]]:
     """Partial aggregation: the group keys in first-seen order (values for
     one GROUP BY expression, else tuples) and the columnar state of every
@@ -568,11 +606,16 @@ def _update_sorted(ids: list[int], vectors: list, states: list[GroupState]) -> N
 def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Batches:
     native = native_ops.native_scan_aggregate(node)
     done = None if native is None else native_ops.run_scan_aggregate(native, node, ctx)
-    if done is not None:  # aggregated by the kernels from the column storage
-        keys, states = done
+    exchanged = None if done is not None else _exchange_aggregate(node, ctx)
+    if exchanged is not None:  # merged and finished by the pool workers
+        keys, results = exchanged
     else:
-        partials = partition_batches(node.input, ctx, "aggregate", node)
-        keys, states = merge_partials(partials)
+        if done is not None:  # aggregated by the kernels from the column storage
+            keys, states = done
+        else:
+            partials = partition_batches(node.input, ctx, partial(_aggregate_partition, node))
+            keys, states = merge_partials(partials)
+        results = [state.results() for state in states]
     n = len(keys)
     if not n:
         return
@@ -582,12 +625,94 @@ def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Batches:
         key_cols = [keys]
     else:
         key_cols = [list(c) for c in zip(*keys)]
-    cols = key_cols + [state.results() for state in states]
+    cols = key_cols + results
     if not cols:
         yield [], n
         return
     ctx.check()
     yield from _rebatch(cols, n)
+
+
+# grouped aggregations expected to produce at least this many groups merge
+# their partial states in the pool workers instead of the parent
+EXCHANGE_MIN_GROUPS = 4_096
+
+
+def _exchange_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> tuple[list[Any], Columns] | None:
+    """Parallel grouped aggregation with a hash exchange, in the worker pool.
+
+    1. Every partition aggregates its rows and splits its groups by key hash
+       into one pickled part per hash range; each group carries its rank
+       (partition, first-seen position in the partition).
+    2. Worker ``r`` receives the parts of hash range ``r`` (forwarded as raw
+       bytes), merges them in partition order and computes the results.
+
+    The parent orders the groups by rank: exactly the order of first
+    appearance of a serial scan, as with :func:`merge_partials`. Used for
+    many groups, whose merge would otherwise run serially in the parent.
+    None if not applicable."""
+    gather = node.input
+    pool = ctx.pool
+    if (
+        not isinstance(gather, pp.Gather)
+        or pool is None
+        or ctx.native is not None
+        or not parallel.use_processes(gather, ctx)
+    ):
+        return None
+    ranges = min(gather.partitions, pool.max_workers)
+    if ranges < 2:
+        return None
+    if not node.keys or node.estimated_rows < EXCHANGE_MIN_GROUPS:
+        return None
+    split_task = partial(_consume_partition, partial(_aggregate_split, node, gather, ranges), gather.input)
+    parts = pool.run(gather, ctx, split_task, prepare_pipeline)
+    if parts is None:
+        return None
+    inputs = {r: [part[r] for part in parts] for r in range(ranges)}
+    merged = pool.run(gather, ctx, partial(_aggregate_merge, gather), None, count=ranges, inputs=inputs)
+    if merged is None:
+        return None
+    keys: list[Any] = []
+    ranks: list[int] = []
+    results: list[list[Any]] = [[] for _ in node.aggregates]
+    for part_keys, part_results, part_ranks in merged:
+        keys.extend(part_keys)
+        ranks.extend(part_ranks)
+        for column, values in zip(results, part_results):
+            column.extend(values)
+    ctx.reserve_rows(len(keys), len(node.layout))
+    order = sorted(range(len(ranks)), key=ranks.__getitem__)
+    return list(take(keys, order)), [list(take(column, order)) for column in results]
+
+
+def _aggregate_split(
+    node: pp.HashAggregate, gather: pp.Gather, ranges: int, batches: Batches, ctx: ExecutionContext
+) -> list[bytes]:
+    """The partition's partial aggregation, split by key hash into one pickled
+    ``(keys, states, ranks)`` part per hash range."""
+    keys, states = _aggregate_partition(node, batches, ctx)
+    base = ctx.partitions[id(gather.driver)][0] << 32
+    buckets = list(map(operator.mod, map(hash, keys), repeat(ranges)))
+    order = sorted(range(len(keys)), key=buckets.__getitem__)  # stable: ids ascend per range
+    counts = Counter(buckets)
+    out = []
+    start = 0
+    for r in range(ranges):
+        ids = order[start : start + counts[r]]
+        start += counts[r]
+        part_keys = [keys[i] for i in ids]
+        ranks = list(map(operator.or_, repeat(base), ids))
+        out.append(dumps_result((part_keys, [state.subset(ids) for state in states], ranks)))
+    return out
+
+
+def _aggregate_merge(gather: pp.Gather, ctx: ExecutionContext) -> tuple[list[Any], list[list[Any]], list[int]]:
+    """Hash range ``r`` (this task's index): its parts from every partition
+    merged in partition order, with the final aggregate values."""
+    r, _ = ctx.partitions[id(gather.driver)]
+    keys, states, ranks = merge_ranked_partials([pickle.loads(blob) for blob in ctx.task_inputs[r]])
+    return keys, [state.results() for state in states], ranks
 
 
 # ------------------------------------------------------------ distinct / sort / limit
@@ -608,63 +733,34 @@ def _distinct_rows(batches: Iterable[Batch], seen: set, ctx: ExecutionContext, w
             yield [list(c) for c in zip(*new)], len(new)
 
 
+def _distinct_partition(width: int, batches: Batches, ctx: ExecutionContext) -> list[Batch]:
+    return list(_distinct_rows(batches, set(), ctx, width))
+
+
 def _distinct(node: pp.Distinct, ctx: ExecutionContext) -> Batches:
     width = len(node.layout)
     if isinstance(node.input, pp.Gather):
-        parts = partition_batches(node.input, ctx, "distinct", node)
+        parts = partition_batches(node.input, ctx, partial(_distinct_partition, width))
         return _distinct_rows(itertools.chain.from_iterable(parts), set(), ctx, width)
     return _distinct_rows(execute(node.input, ctx), set(), ctx, width)
 
 
-def _sorted_partition(batches: Batches, node: pp.Sort | pp.TopN, ctx: ExecutionContext, keep: int | None) -> Batch:
+def _sorted_partition(node: pp.Sort | pp.TopN, keep: int | None, batches: Batches, ctx: ExecutionContext) -> Batch:
     width = len(node.layout)
     buffer = _Collector(width)
     limit = None if keep is None else max(2 * keep, VECTOR_BATCH_ROWS)
-    bound: Callable[[Columns, int], Batch] | None = None
     for batch in batches:
-        if bound is not None:
-            batch = bound(*batch)
         buffer.add(batch)
         if keep is None:
             ctx.reserve_rows(batch[1], width)
         elif buffer.n >= limit:  # type: ignore[operator]
             cols, buffer.n = _sorted(buffer.cols, buffer.n, node, keep)
             buffer.cols = [list(c) for c in cols]
-            if buffer.n == keep:
-                bound = _top_bound(node.keys[0], buffer.cols, keep)
         ctx.check()
     cols, n = _sorted(buffer.cols, buffer.n, node, keep)
     if keep is not None:
         ctx.reserve_rows(n, width)
     return cols, n
-
-
-def _top_bound(key: b.SortKey, cols: Columns, n: int) -> Callable[[Columns, int], Batch] | None:
-    """A top-N prefilter: drops the rows whose first sort key is strictly
-    worse than that of the last of the ``n`` rows kept so far (such a row
-    sorts after ``n`` kept rows, so it cannot be in the top ``n``). Rows that
-    tie on the first key are kept for the full sort."""
-    column = key.position
-    last = cols[column][n - 1]
-    nulls_first = key.nulls_first
-    if last is None and not nulls_first:
-        return None  # NULLs sort last: every row ties or is better
-    compare = operator.ge if key.descending else operator.le
-
-    def prefilter(batch_cols: Columns, size: int) -> Batch:
-        values = batch_cols[column]
-        if last is None:  # only NULLs tie
-            mask = list(map(_is_none, values))
-        elif None in values:
-            mask = [nulls_first if v is None else compare(v, last) for v in values]
-        else:
-            mask = list(map(compare, values, repeat(last)))
-        kept = mask.count(True)
-        if kept == size:
-            return batch_cols, size
-        return [list(compress(c, mask)) for c in batch_cols], kept
-
-    return prefilter
 
 
 def _sorted(cols: Columns, n: int, node: pp.Sort | pp.TopN, keep: int | None) -> tuple[Columns, int]:
@@ -679,16 +775,10 @@ def _sort(node: pp.Sort | pp.TopN, ctx: ExecutionContext) -> Batches:
     if keep == 0:
         return
     if keep is None and isinstance(node.input, pp.Gather):
-        # full sort: partitions only collect, the rows are sorted once
-        merged = _Collector(len(node.layout))
-        for part in partition_batches(node.input, ctx, "collect", node):
-            for batch in part:
-                merged.add(batch)
-        ctx.reserve_rows(merged.n, len(node.layout))
-        cols, n = _sorted(merged.cols, merged.n, node, None)
+        cols, n = _full_sort(node, node.input, ctx)
         parts = []
     else:
-        parts = partition_batches(node.input, ctx, "sort", node, keep)
+        parts = partition_batches(node.input, ctx, partial(_sorted_partition, node, keep))
     if len(parts) == 1:
         cols, n = parts[0]
     elif parts:
@@ -699,6 +789,158 @@ def _sort(node: pp.Sort | pp.TopN, ctx: ExecutionContext) -> Batches:
         cols, n = _sorted(merged.cols, merged.n, node, keep)
     ctx.check()
     yield from _rebatch(cols, n)
+
+
+def _full_sort(node: pp.Sort | pp.TopN, gather: pp.Gather, ctx: ExecutionContext) -> tuple[Columns, int]:
+    """A full sort of a parallel pipeline: range partitioned in the worker
+    pool when possible; else the partitions only collect and the rows are
+    sorted once (serially when every row would have to be sent back from a
+    forked worker)."""
+    width = len(node.layout)
+    merged = _Collector(width)
+    ranges = _range_sort(node, gather, ctx)
+    if ranges is not None:
+        for part in ranges:  # key ranges in output order
+            merged.add(part)
+        ctx.reserve_rows(merged.n, width)
+        return merged.cols, merged.n
+    if parallel.use_processes(gather, ctx) and not pp.is_selective(gather):
+        return _sorted_partition(node, None, execute(gather.input, ctx), ctx)
+    for part in partition_batches(gather, ctx, _collect_batches):
+        for batch in part:
+            merged.add(batch)
+    ctx.reserve_rows(merged.n, width)
+    return _sorted(merged.cols, merged.n, node, None)
+
+
+# sampled leading sort key values per partition (range-partitioned sorts)
+RANGE_SORT_SAMPLES = 256
+
+
+def _range_sort(node: pp.Sort | pp.TopN, gather: pp.Gather, ctx: ExecutionContext) -> list[Batch] | None:
+    """Parallel sort by ranges of the leading sort key, in the worker pool.
+
+    1. Every partition samples its leading key values; the parent picks
+       ``ranges - 1`` splitters (quantiles of the sample).
+    2. Every partition cuts its rows (kept in input order) into one run per
+       key range (NULLs belong to the first or last range, wherever the
+       sort places them), each pickled on its own.
+    3. Worker ``r`` receives the runs of range ``r`` (the parent forwards
+       the pickled bytes without decoding them), concatenates them in
+       partition order — which is the input order — and sorts them stably.
+
+    Rows with equal leading keys always share a range, so the ranges
+    concatenated in output order are exactly the serial stable sort. Each
+    row is sorted once, and no worker reads the whole input. None if the
+    pool cannot run it."""
+    pool = ctx.pool
+    if pool is None or ctx.native is not None or not parallel.use_processes(gather, ctx):
+        return None
+    ranges = min(gather.partitions, pool.max_workers)
+    if ranges < 2:
+        return None
+    key = node.keys[0]
+    values = _table_sample(gather, key.position, ranges)
+    if values is None:  # a computed key: sample the pipeline's output
+        sample_task = partial(_consume_partition, partial(_sample_keys, key.position), gather.input)
+        samples = pool.run(gather, ctx, sample_task, prepare_pipeline)
+        if samples is None:
+            return None
+        values = sorted(itertools.chain.from_iterable(samples))
+    splitters = [values[len(values) * i // ranges] for i in range(1, ranges)] if values else []
+    split_task = partial(_consume_partition, partial(_range_runs, node, splitters, ranges), gather.input)
+    runs = pool.run(gather, ctx, split_task, prepare_pipeline)
+    if runs is None:
+        return None
+    inputs = {r: [part[r] for part in runs] for r in range(ranges)}
+    return pool.run(gather, ctx, partial(_sort_range, node, gather), None, count=ranges, inputs=inputs)
+
+
+def _table_sample(gather: pp.Gather, position: int, ranges: int) -> list[Any] | None:
+    """Sorted non-NULL values sampled evenly from the driver table's column
+    that column ``position`` of the pipeline output passes through
+    unchanged; None if it is computed (or comes from a join build side).
+    (Splitters only balance the ranges: any values give a correct sort.)"""
+    key = gather.layout[position]
+    node = gather.input
+    while not isinstance(node, (pp.TableScan, pp.IndexScan)):
+        if isinstance(node, pp.Project):
+            expr = node.exprs[key[1]]
+            if not isinstance(expr, b.ColumnRef):
+                return None
+            key = expr.key
+        elif isinstance(node, pp.SubqueryScan):
+            key = node.input.layout[key[1]]
+        elif isinstance(node, (pp.HashJoin, pp.MergeJoin, pp.NestedLoopJoin)):
+            path = pp.pipeline_path(node)
+            probe = path[1] if path is not None and len(path) > 1 else None
+            if probe is None or key not in probe.layout:
+                return None
+            node = probe
+            continue
+        elif not isinstance(node, pp.Filter):
+            return None
+        node = node.input
+    if key[0] != node.rel:
+        return None
+    table = node.table
+    step = max(1, table.row_count // (RANGE_SORT_SAMPLES * ranges))
+    values = [row[0] for row in table.fetch(range(0, table.row_count, step), [key[1]])]
+    return sorted(filter(_is_not_none, values))
+
+
+def _sample_keys(position: int, batches: Batches, ctx: ExecutionContext) -> list[Any]:
+    """Evenly spaced non-NULL values of column ``position`` of the input."""
+    values: list[Any] = []
+    for cols, _ in batches:
+        values.extend(cols[position])
+    if None in values:
+        values = list(filter(_is_not_none, values))
+    return values[:: max(1, len(values) // RANGE_SORT_SAMPLES)]
+
+
+def _range_runs(
+    node: pp.Sort | pp.TopN, splitters: list[Any], ranges: int, batches: Batches, ctx: ExecutionContext
+) -> list[bytes]:
+    """The partition's rows cut into one pickled run per key range, each
+    in input order."""
+    width = len(node.layout)
+    rows = _Collector(width)
+    for batch in batches:
+        rows.add(batch)
+        ctx.reserve_rows(batch[1], width)
+        ctx.check()
+    cols, n = rows.cols, rows.n
+    key = node.keys[0]
+    null_range = 0 if key.nulls_first else ranges - 1
+    find = partial(bisect.bisect_right, splitters)
+    keys = cols[key.position] if cols else [None] * n
+    # the range of every row (ranges are numbered in output order)
+    if key.descending:
+        ids = bytes([null_range if v is None else ranges - 1 - find(v) for v in keys])
+    elif None in keys:
+        ids = bytes([null_range if v is None else find(v) for v in keys])
+    else:
+        ids = bytes(map(find, keys))
+    order = sorted(range(n), key=ids.__getitem__)  # stable: input order within a range
+    runs = []
+    start = 0
+    for r in range(ranges):
+        end = start + ids.count(r)
+        positions = order[start:end]
+        runs.append(dumps_result(([list(take(c, positions)) for c in cols], end - start)))
+        start = end
+    return runs
+
+
+def _sort_range(node: pp.Sort | pp.TopN, gather: pp.Gather, ctx: ExecutionContext) -> Batch:
+    """Key range ``r`` (this task's index): its runs from every partition,
+    concatenated in partition order and sorted stably."""
+    r, _ = ctx.partitions[id(gather.driver)]
+    merged = _Collector(len(node.layout))
+    for blob in ctx.task_inputs[r]:
+        merged.add(pickle.loads(blob))
+    return _sorted(merged.cols, merged.n, node, None)
 
 
 def _limit(node: pp.Limit, ctx: ExecutionContext) -> Batches:
@@ -722,15 +964,6 @@ def _limit(node: pp.Limit, ctx: ExecutionContext) -> Batches:
         yield cols, n
 
 
-# per-partition work of the consumers of parallel pipelines, by kind:
-# (consumer operator, ctx, argument) -> function of the partition's batches
-_CONSUMERS: dict[str, Callable[[Any, ExecutionContext, Any], Callable[[Batches], Any]]] = {
-    "aggregate": lambda node, ctx, arg: partial(_aggregate_partition, node, ctx),
-    "distinct": lambda node, ctx, arg: lambda batches: list(_distinct_rows(batches, set(), ctx, len(node.layout))),
-    "collect": lambda node, ctx, arg: list,
-    "sort": lambda node, ctx, arg: lambda batches: _sorted_partition(batches, node, ctx, arg),
-}
-
 _HANDLERS: dict[type, Callable[[Any, ExecutionContext], Batches]] = {
     pp.TableScan: _table_scan,
     pp.IndexScan: _index_scan,
@@ -750,5 +983,3 @@ _HANDLERS: dict[type, Callable[[Any, ExecutionContext], Batches]] = {
     pp.TopN: _sort,
     pp.Limit: _limit,
 }
-ENGINE = "vec"
-register_engine(ENGINE, execute, prepare_pipeline, _CONSUMERS)

@@ -125,13 +125,10 @@ def float_to_decimal(v: float, scale: int) -> int:
 
 
 def format_decimal(unscaled: int, scale: int) -> str:
-    if scale == 0:
-        return str(unscaled)
-    if unscaled >= POW10[scale]:  # the common case: no sign, no zero padding
-        digits = str(unscaled)
-        return f"{digits[:-scale]}.{digits[-scale:]}"
     sign = "-" if unscaled < 0 else ""
     digits = str(abs(unscaled))
+    if scale == 0:
+        return sign + digits
     if len(digits) <= scale:
         digits = "0" * (scale - len(digits) + 1) + digits
     return f"{sign}{digits[:-scale]}.{digits[-scale:]}"

@@ -22,7 +22,7 @@ VALUE_BYTES = 16
 
 # parallel pipelines whose driving scan has fewer rows run their partitions
 # one after the other in the calling thread instead of in worker processes
-DEFAULT_PARALLEL_MIN_ROWS = 200_000
+DEFAULT_PARALLEL_MIN_ROWS = 50_000
 
 
 @dataclass
@@ -38,14 +38,14 @@ class ExecutionContext:
     # the native kernel library when the query runs with ``native: true``
     # and it is loaded (else None: the engine's own code paths)
     native: NativeKernels | None = None
+    # the engine's persistent worker pool (execution/workers.py), if any
+    pool: Any = None
     memory_used: int = field(default=0, init=False)
     # partition (index, count) of each partitioned driver scan of a parallel
     # pipeline, by id() of the scan node; ``in_worker`` is set in worker
     # processes (which never fork again)
     partitions: dict[int, tuple[int, int]] = field(default_factory=dict, init=False)
     in_worker: bool = field(default=False, init=False)
-    # the engine's persistent worker processes (worker_pool.WorkerPool), if any
-    pool: Any = field(default=None, init=False)
     # physical plans of subqueries (by Subquery.id) and the current values of
     # correlation parameters (by column key)
     subplans: dict[int, Any] = field(default_factory=dict, init=False)
@@ -56,6 +56,10 @@ class ExecutionContext:
     lookup_tables: dict[tuple, dict[Any, list[tuple]]] = field(default_factory=dict, init=False)
     # join build sides prepared once for all partitions of a parallel pipeline
     prepared: dict[tuple[int, str], Any] = field(default_factory=dict, init=False)
+    # per-task inputs of the tasks a pool worker runs, by task index
+    task_inputs: dict[int, Any] = field(default_factory=dict, init=False)
+    # results of shared subquery scans (SubqueryScan.shared), by signature
+    shared_results: dict[str, Any] = field(default_factory=dict, init=False)
 
     def cached(self, owner: object, tag: str, factory: Callable[[], Any]) -> Any:
         """Returns the value cached for ``(owner, tag)``, creating it on first use."""
@@ -97,7 +101,7 @@ class ExecutionContext:
         ``timeout_ms``, which counts from now."""
         if deadline is None and timeout_ms:
             deadline = time.monotonic() + timeout_ms / 1000.0
-        ctx = cls(
+        return cls(
             deadline,
             cancel_event,
             max_memory_mb * 1024 * 1024,
@@ -107,9 +111,8 @@ class ExecutionContext:
             threads,
             parallel_min_rows,
             native,
+            pool,
         )
-        ctx.pool = pool
-        return ctx
 
     def check(self) -> None:
         """Raises TIMEOUT / CANCELLED when the query must stop."""

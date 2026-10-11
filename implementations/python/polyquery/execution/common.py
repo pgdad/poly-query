@@ -4,6 +4,7 @@ evaluation and the LookupScan hash tables."""
 
 from __future__ import annotations
 
+import itertools
 import operator
 from typing import Any, Callable, Sequence
 
@@ -101,16 +102,27 @@ def sort_rows(rows: list[tuple], keys: list[b.SortKey]) -> None:
         rows.sort(key=sort_key, reverse=key.descending)
 
 
+def _in_order(column: Sequence[Any], descending: bool) -> bool:
+    """Whether the values (no NULLs) are already ascending / descending
+    (equal neighbours allowed: the stable sort would keep them in place)."""
+    if len(column) < 2:
+        return True
+    compare = operator.ge if descending else operator.le
+    return all(map(compare, column, itertools.islice(column, 1, None)))
+
+
 def sort_permutation(columns: Sequence[Sequence[Any]], length: int, keys: list[b.SortKey]) -> list[int]:
     """The row order of column data sorted by ``keys`` (stable). Every pass
     sorts the permutation with a C-level key (``column.__getitem__``); NULLs
     are split off first and placed before or after the sorted non-NULLs,
     which is exactly a stable sort with NULLs ranked first or last."""
     perm = list(range(length))
-    for key in reversed(keys):
+    for i, key in enumerate(reversed(keys)):
         column = columns[key.position]
         get = column.__getitem__
         if None not in column:
+            if i == 0 and _in_order(column, key.descending):
+                continue  # input already ordered by the least significant key
             perm.sort(key=get, reverse=key.descending)
             continue
         nulls = [i for i in perm if column[i] is None]
