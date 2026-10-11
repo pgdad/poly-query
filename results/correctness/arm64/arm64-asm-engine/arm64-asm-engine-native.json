@@ -1,9 +1,9 @@
 {
  "schema": "polyquery-conformance-report/1",
- "started": "2026-10-11T19:09:49.935663+00:00",
+ "started": "2026-10-11T19:54:37.502165+00:00",
  "seconds": 0.0,
  "engine": {
-  "launcher": "/srv/pqrunner/jobs/engines-20261011T190946Z-1453946/repo/implementations/arm64-asm-engine/bin/polyquery",
+  "launcher": "/srv/pqrunner/jobs/engines-20261011T195434Z-1523050/repo/implementations/arm64-asm-engine/bin/polyquery",
   "version": {
    "id": null,
    "ok": true,
@@ -42,12 +42,15 @@
     "storage.pqcf",
     "storage.mmap",
     "index.hash",
-    "index.btree"
+    "index.btree",
+    "phase4",
+    "http.streaming"
    ]
   },
   "capabilities_exit": 0,
   "capabilities_seconds": 0.001,
   "capability_set": [
+   "http.streaming",
    "index.btree",
    "index.hash",
    "ingest.csv",
@@ -56,6 +59,7 @@
    "phase1",
    "phase2",
    "phase3",
+   "phase4",
    "sql.basic",
    "sql.correlated_subquery",
    "sql.cte",
