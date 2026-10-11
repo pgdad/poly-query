@@ -193,13 +193,7 @@ alternating keys and JSON values appended after ts, level and msg."
 
 (defun session-exec-options (session options)
   "EXEC-OPTIONS of a request of SESSION (defaults from its configuration)."
-  (query-exec-options options (session-default-threads session)))
-
-(defun session-default-threads (session)
-  "Threads of a query without a `threads` option: --threads, else (also for
---threads 0) one per usable CPU up to *MAX-DEFAULT-QUERY-THREADS*."
-  (let ((n (engine-config-threads (session-config session))))
-    (if (and n (plusp n)) n (default-query-threads))))
+  (query-exec-options options (engine-config-threads (session-config session))))
 
 (defun boolean-option (options key default)
   "Value of a boolean option; DEFAULT when absent or null."
@@ -268,83 +262,26 @@ variant when the query ran with native kernels, else omitted."
   "A JSON-RAW writing the result rows with type-directed serialization."
   (rows-json-raw (query-result-columns result) (query-result-rows result)))
 
-(defparameter *parallel-render-rows* 16384
-  "Results with at least this many rows are rendered by several threads.")
-
-(defun render-row (row types cb)
-  (declare (type simple-vector row types))
-  (cb-char cb #\[)
-  (dotimes (k (length types))
-    (unless (zerop k) (cb-char cb #\,))
-    (render-value (svref row k) (svref types k) cb))
-  (cb-char cb #\]))
-
-(defun render-rows-in-parallel (rows types parts)
-  "Vector of PARTS CHARBUFs holding the rendered, comma-separated rows of
-consecutive slices of the list ROWS."
-  (let* ((n (length rows))
-         (slices (make-array parts))
-         (bufs (make-array parts)))
-    ;; Cut the list into PARTS consecutive slices.
-    (let ((tail rows))
-      (dotimes (p parts)
-        (let ((count (- (floor (* (1+ p) n) parts) (floor (* p n) parts))))
-          (setf (svref slices p) tail
-                tail (nthcdr count tail)
-                (svref bufs p) count))))
-    (let ((threads
-            (loop for p from 1 below parts
-                  collect (let ((p p))
-                            (sb-thread:make-thread
-                             (lambda ()
-                               (sb-int:with-float-traps-masked
-                                   (:overflow :invalid :divide-by-zero :inexact :underflow)
-                                 (render-row-slice (svref slices p) (svref bufs p) types)))
-                             :name "polyquery-render")))))
-      (setf (svref bufs 0) (render-row-slice (svref slices 0) (svref bufs 0) types))
-      (loop for th in threads
-            for p from 1
-            do (setf (svref bufs p) (sb-thread:join-thread th)))
-      bufs)))
-
-(defun render-row-slice (rows count types)
-  "CHARBUF of the first COUNT rows of the list ROWS, comma-separated."
-  (let ((cb (make-charbuf (* 32 (max 1 count)))))
-    (loop for k below count
-          for row in rows
-          do (unless (zerop k) (cb-char cb #\,))
-             (render-row row types cb))
-    cb))
-
 (defun rows-json-raw (columns rows)
   "A JSON-RAW writing ROWS (a list of value vectors) as a JSON array of arrays,
-serializing each value according to the type of its column in COLUMNS.
-Large results are rendered in slices by parallel threads."
+serializing each value according to the type of its column in COLUMNS."
   (let ((types (coerce (mapcar #'column-def-type columns) 'simple-vector)))
     (make-json-raw
      (lambda (stream)
-       (let ((n (length rows))
-             (threads (default-query-threads)))
-         (if (and (>= n *parallel-render-rows*) (> threads 1))
-             (let ((first t))
-               (write-char #\[ stream)
-               (loop for cb across (render-rows-in-parallel rows types
-                                                            (min threads (ceiling n 4096)))
-                     do (when (plusp (charbuf-fill cb))
-                          (unless first (write-char #\, stream))
-                          (setf first nil)
-                          (cb-flush cb stream)))
-               (write-char #\] stream))
-             (let ((cb (make-charbuf 65536)))
-               (cb-char cb #\[)
-               (loop for first = t then nil
-                     for row in rows
-                     do (unless first (cb-char cb #\,))
-                        (render-row row types cb)
-                        (when (> (charbuf-fill cb) 60000)
-                          (cb-flush cb stream)))
-               (cb-char cb #\])
-               (cb-flush cb stream))))))))
+       (let ((cb (make-charbuf 65536)))
+         (cb-char cb #\[)
+         (loop for first = t then nil
+               for row in rows
+               do (unless first (cb-char cb #\,))
+                  (cb-char cb #\[)
+                  (dotimes (k (length types))
+                    (unless (zerop k) (cb-char cb #\,))
+                    (render-value (svref row k) (svref types k) cb))
+                  (cb-char cb #\])
+                  (when (> (charbuf-fill cb) 60000)
+                    (cb-flush cb stream)))
+         (cb-char cb #\])
+         (cb-flush cb stream))))))
 
 ;;; ------------------------------------------------------------------
 ;;; load

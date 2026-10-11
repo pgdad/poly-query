@@ -33,7 +33,11 @@ see *Change request CR-3: logical/physical plan separation*), and change
 request CR-2 raises the maximum DECIMAL precision from 18 to 38 digits with
 exact INT64/DECIMAL comparisons and the PQCF v2 file format
 (`spec/changes/decimal38.md`, capability `change.decimal38`; see *Change
-request CR-2: DECIMAL precision 38*).
+request CR-2: DECIMAL precision 38*). The latest round of work optimized
+query latency on the benchmark workload
+(`benchmarks/workloads/analytics.json`, scale 1m) without changing results;
+see *Latency optimization (analytics workload)* for the measurements and
+the design decisions.
 
 ## Build prerequisites
 
@@ -321,7 +325,7 @@ summation order, which functions.md leaves implementation-defined):
 |---|---|
 | `mode: "row"` | the row-at-a-time Volcano executor (`operators.lisp`), kept unchanged as the unoptimized baseline; single-threaded |
 | `mode: "vectorized"` / `"auto"` (default) | the batch executor (`v*.lisp`) |
-| `threads: N` | morsel-driven parallelism of the vectorized executor (scans, filters, projections, hash-join probes, aggregation, DISTINCT, sorting, top-N); default: the `--threads` command line option of `session`/`exec`/`serve`, else (or with `--threads 0`) one per usable CPU, at most 16 (see *Latency optimization*) |
+| `threads: N` | morsel-driven parallelism of the vectorized executor (scans, filters, projections, hash-join probes, aggregation, DISTINCT, sorting); default: the `--threads` command line option of `session`/`exec`/`serve`, else 1 |
 | `join: "hash"` / `"merge"` / `"nested_loop"` | forces the algorithm of every equi-join (`HashJoin`, `MergeJoin`, `NestedLoopJoin` in EXPLAIN); joins without an equality conjunct are always nested loops. `auto` = hash join (linear in both inputs; no operator produces sorted output a merge join could exploit) |
 | `optimize: false` | applies no optimizer rule (no constant folding, predicate simplification, predicate pushdown, join reordering or re-pruning). Scans still read only referenced columns: Phase 3 requires pruned scans, so the plan builder prunes every new plan, which also guarantees that unreferenced expressions are not evaluated |
 | `native: true` | the vectorized executor uses the native kernels of `libpqkernels` when the library was loaded with `--native-kernels` (see *Native kernels*); otherwise, and in `mode: "row"`, the Lisp code runs |
@@ -366,10 +370,9 @@ rows with non-NULL keys are stably sorted on their normalized keys — in
 parallel with `threads` > 1 — and each left row is paired with the run of
 equal right keys) and *nested loop* (all pairs; the whole join condition is
 the residual). Sort materializes its input and sorts a permutation of row
-indexes: with an LSD radix sort over order-preserving 64-bit words when all
-keys are INT64-like/FLOAT64 columns, else with comparators over the typed
-key vectors; Top-N keeps the best LIMIT+OFFSET rows and discards, with one
-comparison per row, everything that cannot beat the current K-th row. Index scans, correlated hash lookups and
+indexes with comparators over the typed key vectors; Top-N keeps the best
+LIMIT+OFFSET rows and discards, with one comparison per row, everything that
+cannot beat the current K-th row. Index scans, correlated hash lookups and
 `Values` run their row implementation behind batch adapters.
 
 **Errors.** Kernels evaluate an expression for a whole batch before the next
@@ -412,19 +415,13 @@ by
 * *partial aggregation*: each worker aggregates into its own group state;
   the states are merged at the end — with many groups in parallel, one
   thread per hash partition of the groups (DISTINCT is an aggregation
-  without aggregates). With many groups (detected on the first morsel),
-  workers instead split their rows by key hash and each partition is
-  aggregated by one thread (*partitioned aggregation*, see *Latency
-  optimization*). Every group records its first input position
+  without aggregates). Every group records its first input position
   (morsel, row); the merged groups are emitted sorted by it (radix sort),
   i.e. in exactly the first-appearance order of a serial aggregation, so
   even LIMIT without ORDER BY returns the same rows;
 * *parallel sort*: chunks of the permutation are stable-sorted in parallel
   and merged pairwise in parallel rounds (stable, so equal to the serial
-  sort);
-* *parallel top-N*: every worker keeps the best LIMIT+OFFSET rows of its
-  morsels, ordered by the keys and then by input position, and the
-  workers' rows are combined the same way (equal to the serial top-N).
+  sort).
 
 Worker errors are re-signalled by the query's thread; timeouts and
 cancellation are observed by every worker; each run registers a query
@@ -988,9 +985,9 @@ results and errors were identical to the previous engine.
 * `mode: "auto"` (the default) runs the vectorized executor; `row` is the
   unchanged Volcano baseline. `threads` only affects the vectorized
   executor (row mode is the serial baseline); its default is the
-  `--threads` command line option, else (also for `--threads 0`) the
-  number of CPUs in the process's affinity mask, at most 16; values above
-  256 are capped.
+  `--threads` command line option, else the number of CPUs the process may
+  run on (its affinity mask), capped at 16 (`*max-default-threads*`);
+  values above 256 are capped.
 * `join: "auto"` chooses a hash join for every equi-join; forced `merge` /
   `hash` on a join without equality conjuncts plan a nested-loop join
   (phase-5.md: `nested_loop` "also for non-equi").
@@ -1017,209 +1014,7 @@ results and errors were identical to the previous engine.
 * When different rows would raise different errors, the vectorized
   executor reports the row executor's error (see *Errors* above).
 
-## Latency optimization (analytics workload)
-
-Task: lower the latency of the benchmark workload at scale `1m` without
-changing results. The workload file named by the task,
-`benchmarks/workloads/analytics.json`, does not exist in this workspace (no
-`benchmarks/` directory), so I wrote a stand-in, documented here as a
-decision: **`bench/workloads/analytics.json`**, 32 analytical queries over
-the `pqgen` tables loaded under their file names (`transactions`,
-`customers`, `orders`, `order_items`, `products`, `sensor_readings`,
-`nulls_heavy`, `sort_keys`). It contains the 23 queries of `bench/bench.py`
-(filters, low/high-cardinality GROUP BY, joins of 2–3 tables, LEFT and comma
-joins, top-N, COUNT(DISTINCT), projections, NULL-heavy aggregates, CASE,
-full sorts, IN lists, date ranges) plus 9 more typical shapes: DATE_TRUNC /
-YEAR / HOUR grouping, HAVING with ORDER BY … LIMIT, `IN (subquery)`, a CTE
-joined to a table, string functions, a scalar subquery in WHERE, and a
-derived table. Two queries (`q16`, `q17`) use `result: "count"`, as in
-`bench/bench.py`.
-
-**Method.** `bench/workload.py` starts one `bin/polyquery session`, loads the
-tables (CSV with their schema files) and sends each query 2 + 9 times with
-the default options (no `options` object, as a plain client would; only the
-`result` option where the workload asks for it). Times are client-side wall
-times from writing the request to reading the complete response line
-(parse, plan, execute, serialize, pipe), median of the 9 measured runs. The
-baseline executable (commit `39cc3f5`) and the new one were run alternately,
-twice each; the table shows the lower of the two medians per query. Machine:
-AMD Ryzen 9 9950X3D (16 cores / 32 threads), SBCL 2.6.9, shared with other
-jobs (load average 3–9), so run-to-run noise is roughly ±10–20% for
-queries under 10 ms. The script also compares every answer with the
-baseline's (rows sorted unless the query has ORDER BY, FLOAT64 within the
-conformance tolerance 1e-9): **all 32 queries returned the same results.**
-
-```
-python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pqdata
-python3 bench/workload.py --engine OLD/bin/polyquery --data /tmp/pqdata/1m --json before.json
-python3 bench/workload.py --engine bin/polyquery --data /tmp/pqdata/1m --compare before.json
-```
-
-Columns: *before* = baseline engine (default options: vectorized, 1 thread);
-*after* = this engine with default options (vectorized, one thread per
-usable CPU up to 16, i.e. 16 here); *after, 1 thread* = this engine with
-`--threads 1`, isolating the single-threaded improvements. Times in ms.
-
-| query | before | after | speed-up | after, 1 thread | speed-up |
-|---|---:|---:|---:|---:|---:|
-| q01_filter_count | 13.5 | 5.1 | 2.6× | 13.8 | 1.0× |
-| q02_group_low | 31.1 | 5.4 | 5.7× | 34.8 | 0.9× |
-| q03_group_high | 19.4 | 15.8 | 1.2× | 18.0 | 1.1× |
-| q04_join_agg | 77.9 | 15.8 | 4.9× | 58.7 | 1.3× |
-| q05_topn | 10.9 | 5.6 | 1.9× | 10.1 | 1.1× |
-| q06_float_agg | 19.7 | 6.9 | 2.9× | 20.3 | 1.0× |
-| q07_join3 | 38.9 | 14.2 | 2.7× | 35.9 | 1.1× |
-| q08_count_distinct | 31.3 | 28.4 | 1.1× | 14.8 | 2.1× |
-| q09_project | 14.0 | 7.8 | 1.8× | 12.6 | 1.1× |
-| q10_nulls | 52.7 | 6.7 | 7.9× | 50.6 | 1.0× |
-| q11_case_expr | 58.9 | 11.1 | 5.3× | 48.3 | 1.2× |
-| q12_sort_offset | 12.7 | 7.9 | 1.6× | 14.4 | 0.9× |
-| q13_left_join | 29.0 | 15.1 | 1.9× | 31.9 | 0.9× |
-| q14_distinct | 41.9 | 5.6 | 7.4× | 41.4 | 1.0× |
-| q15_comma_join | 7.1 | 2.6 | 2.7× | 7.1 | 1.0× |
-| q16_full_sort | 378 | 44.7 | 8.5× | 94.9 | 4.0× |
-| q17_scan_filter | 25.3 | 8.2 | 3.1× | 20.8 | 1.2× |
-| q18_global_agg | 13.3 | 4.1 | 3.2× | 13.1 | 1.0× |
-| q19_range_filter | 31.7 | 7.9 | 4.0× | 32.2 | 1.0× |
-| q20_in_list | 23.0 | 5.1 | 4.5× | 22.8 | 1.0× |
-| q21_date_range | 5.1 | 2.2 | 2.3× | 5.0 | 1.0× |
-| q22_null_filter | 15.7 | 6.8 | 2.3× | 15.7 | 1.0× |
-| q23_float_minmax | 7.6 | 3.2 | 2.4× | 7.4 | 1.0× |
-| q24_monthly | 26.9 | 5.3 | 5.1× | 26.6 | 1.0× |
-| q25_top_customers | 15.0 | 15.6 | 1.0× | 14.6 | 1.0× |
-| q26_in_subquery | 31.7 | 6.6 | 4.8× | 19.6 | 1.6× |
-| q27_cte_join | 63.3 | 40.0 | 1.6× | 59.9 | 1.1× |
-| q28_country_revenue | 37.4 | 12.9 | 2.9× | 31.9 | 1.2× |
-| q29_string_funcs | 2.2 | 2.1 | 1.1× | 2.0 | 1.1× |
-| q30_sensor_hourly | 46.7 | 8.3 | 5.7× | 46.0 | 1.0× |
-| q31_scalar_subquery | 55.3 | 5.3 | 10.5× | 6.6 | 8.4× |
-| q32_derived_table | 3.5 | 3.9 | 0.9× | 3.5 | 1.0× |
-| **total** | **1240** | **336** | **3.7×** | **835** | **1.5×** |
-
-### What changed
-
-Ordered by impact on this workload:
-
-1. **Default parallelism.** Without a `threads` option (and without
-   `--threads`, or with `--threads 0`) a query now uses one thread per CPU
-   in the process's affinity mask (`sched_getaffinity`, so `taskset`/cgroup
-   limits are respected), at most 16 (`src/util/system.lisp`). The
-   morsel-driven executor already existed, but its default was 1 thread.
-   Inputs of a single morsel (16384 rows) still run serially. On this
-   16-core machine 16 threads beat 8 overall (2.2× vs 2.1× on the baseline
-   engine); I did not measure more than 16, and capped the default there
-   because per-worker start-up and merge costs grow with the thread count
-   while 1M-row inputs leave little work per worker.
-2. **Uncorrelated subqueries** (`src/exec/vsubqueries.lisp`). They are
-   evaluated once per *query* and the result is shared by all parallel
-   workers (`QUERY-SHARED-VALUE` in the query context; an error is
-   remembered and re-signalled to every caller, so laziness is preserved).
-   Pipelines containing them may now run in parallel. A comparison or
-   other operator with a scalar subquery operand is recompiled, on its
-   first evaluation, with the subquery's value as a literal, so it gets the
-   typed column/constant kernels instead of the per-row generic path.
-   `x IN (subquery)` over INT64-like values probes an integer key table
-   built once from the subquery's rows. (q31: 55 → 5 ms; q26: 32 → 7 ms.)
-3. **INT64/DECIMAL column vs. FLOAT64 constant** comparisons (e.g. against
-   an `AVG`) used to convert every row through a rational division. The
-   comparison holds exactly for the column values in one integer range
-   [lo, hi] (or outside it, for `<>`), found once by binary search over
-   the monotone conversion, so rows are compared as integers.
-4. **Radix sort** for ORDER BY keys that are INT64-like/FLOAT64 columns:
-   each key maps to an order-preserving 64-bit word (sign bit flipped;
-   negative doubles inverted, −0.0 as 0.0; complemented for DESC; NULLs as
-   a separate, more significant flag word), and a stable LSD radix sort
-   (11-bit digits, skipping digits on which all rows agree) sorts each
-   parallel chunk; the chunks are merged pairwise by comparing these words
-   instead of calling comparator closures. The sorted output batches are
-   gathered in parallel. Other key types keep the comparator sort. The sort keys' words are computed, and a large
-   sort input is concatenated, by several threads. (q16: 378 → 45 ms; 95 ms
-   single-threaded.)
-5. **Partitioned parallel aggregation** for many groups. Before, every
-   worker built a table of nearly all groups and the merge re-inserted all
-   of them. Now the first worker to finish a morsel checks its group count:
-   above 1/8 of its rows, the run switches mode: workers only evaluate keys
-   and arguments of later morsels and split each morsel's rows by key hash
-   (high hash bits, so the low bits still spread keys within a partition's
-   table) into one partition per worker; each partition is then aggregated
-   by one thread, together with that partition's groups from the partial
-   states. Rows carry their input position, so groups are still emitted in
-   serial first-appearance order. Tables are pre-sized (partial states
-   start at 2048 groups; partition tables get room for all groups the
-   partial states hand them), and large outputs are built in parallel.
-   Small grouped inputs (≤ 32 morsels) aggregate their first morsel in the
-   consumer thread first and, when it has many groups, finish serially
-   (no parallel scheme pays off there).
-6. **Hash-join build side.** With parallel execution, an inner hash join
-   builds on a blocking input (e.g. an aggregation, whose estimate is the
-   size of its input and often far too high) rather than on a scan
-   pipeline estimated up to 4× smaller, so the scan side remains a parallel
-   probe pipeline and the aggregation above it runs in parallel too.
-   (q27: 63 → 40 ms.)
-7. **COUNT/SUM/AVG(DISTINCT) of INT64-like values** keep each group's
-   distinct values in an integer key table instead of an `EQUAL` hash table
-   plus a list. Without GROUP BY, the workers' sets are united in parallel
-   by hash partition. (q08: 31 → 15 ms single-threaded; with 16 threads
-   11–12 ms in most runs, but 28 ms in the final table: in both rounds
-   one of q08's runs took ~70 ms and the next few ~30 ms before returning
-   to ~11 ms — presumably a garbage collection followed by the cost of
-   touching freshly zeroed nursery pages.)
-8. **Parallel top-N** for `ORDER BY … LIMIT` over a scan pipeline: every
-   worker keeps the best LIMIT+OFFSET rows of its morsels, ordered by the
-   keys and then by the rows' input position (an extra column), and these
-   are combined the same way, so ties resolve exactly as in the serial
-   operator.
-9. **Smaller fixed costs.** `result: "count"` on the vectorized executor
-   counts the rows of the result batches instead of building one row
-   vector per row; large results (≥ 16384 rows) are rendered to JSON by
-   several threads in slices; concatenating batches keeps dictionary codes
-   (a join's build side used to lose them, so its strings were hashed and
-   compared again downstream); the young generation of the garbage
-   collector is 512 MB (`bytes-consed-between-gcs`, overridable with
-   `PQ_NURSERY_MB` for experiments), since the default ~53 MB triggered
-   frequent collections of the batch vectors, each scanning the cards of
-   the old generation holding the tables (128 MB and 1 GB measured worse).
-
-Things I tried and dropped: compiling each worker's pipeline copy in the
-worker itself (no measurable gain, and it broke native-kernel aggregation,
-caught by `--native` conformance).
-
-**Observations.** Most of the remaining time is in operators that still run
-serially: hash-join builds (q04, q07, q13, q27 build 100k–250k keys in
-one thread), operators whose input is not a scan pipeline (the outer
-aggregation of q27/q32), result rendering below 16384 rows, and fixed costs
-of starting workers on small inputs (a 1M-row filtered COUNT takes ~2.5 ms
-with 4–16 threads versus ~6.5 ms serially; q21, q15 and q29 are ~2–3 ms).
-Three queries did not improve: q25 (GROUP BY of 80,777 groups, HAVING,
-top-N; 15.0 → 15.6 ms) and q32 (250k rows grouped into ~100k groups, then
-grouped again; 3.5 → 3.9 ms) are slightly slower in the final run, and
-q29 (20k rows) is unchanged. Both slower queries are dominated by
-high-cardinality hash aggregation, which is memory-bound and scales poorly;
-q32 now aggregates serially (see the probe in 5), and its timing depends on
-the heap state: in isolation both engines took 5.5–6.8 ms for it. q03 (same
-grouping as q25) gained only 1.2×. The single-threaded column is within
-noise of the baseline except where an algorithm changed (sort, subqueries,
-DISTINCT sets, dictionary codes kept through joins: q04, q08, q16, q26,
-q31); q02/q12/q13 at 0.9× there are run-to-run variation.
-
-**Correctness checks.** After every step: the full conformance suite
-(660/660), the option matrix (`--modes`, 3870/3870) also with
-`POLYQUERY_MORSEL_ROWS=3` and `=50` (tiny morsels, so that every parallel
-path — partitioned aggregation, probing, parallel top-N, parallel distinct
-union — runs on the conformance data), native kernels (`--native`, plain and
-with `--modes`), `--transport http`, the HTTP concurrency suite (18/18) and
-`make test` (with new unit tests, `tests/test-latency.lisp`). At the end,
-`bench/fuzz.py` with `POLYQUERY_MORSEL_ROWS=37`: 600 random queries (seed 7)
-gave one mismatch — a merge join with 3 threads raising CONVERSION_ERROR
-where row mode returns no rows — which the baseline engine reproduces
-identically with the same seed (the evaluation-order limitation of pushed
-conjuncts described under *Known limitations*); 500 queries with
-`--native` (seed 11): no mismatch.
-
 ## Performance
-
-(This section predates the latency work above and measures explicit
-`mode`/`threads` options rather than the defaults.)
 
 Measured with `bench/bench.py` (median of 5 runs, wall time seen by the
 client: parsing, planning, execution and JSON serialization of the result)
@@ -1385,6 +1180,152 @@ rare overflowing batch is re-summed in Lisp. The library's own C benchmark
 (`native-kernels/build/x86_64/kernel_bench`, 4M-element arrays) shows the
 same kernels at 0.15–0.5 ns/element in the AVX2/AVX-512 variants.
 
+## Latency optimization (analytics workload)
+
+Goal: lower the latency of the queries of `benchmarks/workloads/analytics.json`
+at scale 1m (`python3 datasets/generators/pqgen.py generate --scale 1m`),
+with identical results.
+
+**Method.** `bench/workload.py` starts `bin/polyquery session` (no options:
+the engine's defaults), loads the nine workload tables from the generated
+CSV files with their schemas, creates the workload's two indexes, then runs
+every workload query with its default options (`result: count` where the
+workload asks for it) once as warm-up and 7 times measured, timing each
+request on the client (request written → response line read, so parsing,
+planning, execution and JSON serialization are included). *Before* is the
+engine at the start of this work (commit `cfdff31`), *after* the final
+build; the two were run alternately, three rounds each, and the table shows
+the lowest of the three per-round medians. The machine (AMD Ryzen 9 9950X3D,
+16 cores / 32 threads, SBCL 2.6.9) was shared with other jobs (load average
+7–11 during the runs), so single measurements vary by ±10–30%; the raw
+per-round results (`bench/workload.py --json`) are in `bench/results/`. Every *after* run was checked against the
+*before* results (`--compare`: same columns, rows and order; FLOAT64 within
+1e-9 relative), and once more with `result: rows` forced for the two
+count-only queries (all 1,000,000 sorted rows identical).
+
+Times in milliseconds. *after, 1 thread* is the final build with
+`--threads 1` (the algorithmic gains alone); *before, 16 threads* is the old
+build given `--threads 16` (the parallelism alone).
+
+| query | before | after | speed-up | after, 1 thread | before, 16 threads |
+|---|---|---|---|---|---|
+| q01_filter_selective | 0.04 | 0.04 | 0.9× | 0.04 | 0.04 |
+| q02_filter_low_selectivity | 26.0 | 6.32 | 4.1× | 24.1 | 6.23 |
+| q03_range_filter_time | 1.49 | 1.51 | 1.0× | 1.45 | 1.41 |
+| q04_arith_aggregate | 26.6 | 5.79 | 4.6× | 24.6 | 5.81 |
+| q05_groupby_low_card | 23.4 | 2.32 | 10.1× | 8.71 | 3.63 |
+| q06_groupby_high_card | 11.7 | 10.4 | 1.1× | 10.6 | 10.4 |
+| q07_groupby_skewed | 12.1 | 12.8 | 0.9× | 10.2 | 28.7 |
+| q08_groupby_uniform_multi | 40.0 | 10.2 | 3.9× | 37.8 | 9.46 |
+| q09_distinct_count | 35.0 | 11.3 | 3.1× | 16.5 | 17.3 |
+| q10_join_customers | 158 | 19.1 | 8.3× | 49.8 | 18.9 |
+| q11_join_star | 46.9 | 16.2 | 2.9× | 32.7 | 16.9 |
+| q12_left_join_anti | 20.3 | 15.1 | 1.3× | 15.1 | 14.3 |
+| q13_sort_topn | 9.18 | 4.25 | 2.2× | 8.57 | 8.08 |
+| q14_sort_full_string | 1669 | 33.6 | 49.7× | 113 | 344 |
+| q15_sort_multi_key | 505 | 34.5 | 14.6× | 123 | 119 |
+| q16_timeseries_hourly | 14.8 | 7.26 | 2.0× | 14.2 | 5.95 |
+| q17_wide_projection | 3.64 | 0.97 | 3.7× | 2.35 | 1.24 |
+| q18_nulls | 44.1 | 9.15 | 4.8× | 32.7 | 9.77 |
+| q19_cte_subquery | 36.1 | 24.0 | 1.5× | 18.2 | 38.3 |
+| q20_string_functions | 69.9 | 6.80 | 10.3× | 17.4 | 11.4 |
+| **total** | **2754** | **232** | **11.9×** | 561 | 671 |
+
+Geometric mean speed-up per query: 3.5×.
+
+Observations: the full sorts gain the most (q14 50×, q15 15×; 15× and
+4× from the radix sort alone at one thread), then the dictionary-keyed and
+string-function queries (q05, q10, q20: 8–10×) and the scan-bound queries,
+mostly from the default parallelism (q02, q04, q08, q17, q18: 3.7–4.8×). q01
+and q03 are index lookups (unchanged, under 2 ms). The high-cardinality
+aggregations (q06, q07) and the CTE query q19 are not faster with sixteen
+threads than with one (q07 and q19 are somewhat slower: 12.8 vs 10.2 ms and
+24.0 vs 18.2 ms); q07 is therefore unchanged against the old serial
+default, while the old engine with 16 threads took 28.7 ms (q19: 38.3 ms),
+so partitioned aggregation and CTE sharing removed the penalty that
+parallelism used to impose, but do not yet turn it into a gain (see *Known
+limitations*). The "total" row is the sum of the per-query times.
+
+**What changed, by effect on the workload:**
+
+1. *Default parallelism.* `threads` defaulted to 1; the default is now the
+   number of CPUs in the process's affinity mask (`sched_getaffinity`, else
+   `sysconf`), capped at 16 (`--threads` and the `threads` option still
+   override it). This alone gives most of the gain on scans, filters,
+   low-cardinality aggregation and joins (q02, q04, q05, q08, q10, q11,
+   q16–q20). The cap: 16 and 24 threads measured alike on this machine,
+   and high-cardinality aggregation does not gain from more threads.
+2. *Radix sort of normalized keys* (`src/exec/vsort.lisp`, q14/q15 and
+   every large ORDER BY). Each ORDER BY key becomes one or more unsigned
+   64-bit words whose order is the key's order (sign-flipped integers,
+   IEEE-754 bits of floats with -0.0 = 0.0, 0/1 for booleans, 8-character
+   big-endian prefixes for strings, complemented for DESC, an extra word
+   for NULL placement). An LSD radix sort (11-bit digits, digits constant
+   over all rows skipped) is stable, so ties keep the input order exactly as
+   the stable comparison sort did. String prefixes order strings only
+   weakly: runs of rows whose words are equal up to the first string key and
+   that contain a row whose prefix does not determine its string (longer
+   than the prefix, NUL or code > 254) are re-sorted with the old comparison
+   predicate. With threads, the rows are partitioned (stably, in parallel
+   chunks) by their most significant varying digit and each thread
+   radix-sorts whole buckets; key encoding and gathering the sorted output
+   are parallel too. Inputs below 4,096 rows and keys that do not fit 64
+   bits (wide DECIMALs beyond int64) use the comparison sort. A Sort over a
+   TableScan reads its input straight from the column stores.
+3. *Partitioned parallel aggregation* (q06, q07, q16, q19). With many
+   groups, every worker's partial state held most of the groups and merging
+   them cost as much as aggregating. A worker whose partial state passes
+   4,096 groups now only evaluates the key and argument vectors of its
+   further batches and files the rows by key hash into one chunk list per
+   partition; afterwards each partition is aggregated by one thread (its
+   chunks from all workers plus its share of the partial states). First
+   input positions are tracked per row, so groups are still emitted in
+   serial first-appearance order. Key tables grow with typed rehash loops
+   and are presized before merges; groups are ordered with the parallel
+   radix sort; output batches of many groups are built in parallel.
+4. *Dictionary codes in key tables and functions* (q05, q10, q11, q20).
+   Group/join keys whose columns all carry dictionary codes are mapped to
+   group ids through a dense array indexed by the combined codes (filled
+   from the hash table on first sight; up to 65,536 combinations; safe for
+   concurrent probes). Concatenated vectors (join build sides) keep their
+   codes. Strict one-argument scalar functions of a STRING (UPPER, LOWER,
+   TRIM, LENGTH, …) are computed once per dictionary entry, and string
+   results keep the input's codes into a derived dictionary, so
+   `UPPER(currency) = 'EUR'` is evaluated once per distinct currency.
+5. *Shared CTE results* (q19). Plan nodes inside a CTE reference carry a
+   share key (the CTE's bound query and the node's EXPLAIN text); keys that
+   occur more than once in a statement, subquery plans included, are
+   compiled once and their rows materialized on first use. References that
+   predicate pushdown rewrote differently still share their identical
+   subplans (in q19 the per-customer aggregation is computed once instead of
+   twice); correlated subplans and plans calling `PQ_SLEEP` are never
+   shared. Uncorrelated subqueries may now use parallel workers.
+6. *COUNT(DISTINCT)* (q09). Distinct values live in per-group key tables
+   (batch inserts, the integer fast path) instead of EQUAL hash tables, and
+   without GROUP BY the workers' sets are merged by hash partition in
+   parallel.
+7. *Parallel top-N* (q13). Over a parallel pipeline, workers reduce each
+   morsel to its best LIMIT+OFFSET rows; the reduced morsels, in input
+   order, go through the serial selection, which yields exactly the serial
+   result (ties included).
+8. *Smaller things.* `result: count` drains the batch executor without
+   building row vectors; BOOLEAN comparisons with constants are vectorized
+   and boolean columns scanned with a typed loop (q17, q18); morsels shrink
+   for small tables (about four per worker); the GC nursery is 512 MB
+   (`POLYQUERY_NURSERY_MB` overrides it) instead of SBCL's 53 MB, which
+   makes young-generation collections rarer (a few percent over the
+   workload; 2 GB measured only slightly better).
+
+**Decisions.** Results are unchanged by construction (stable sorts, serial
+group order, serial top-N tie order); the only differences allowed by the
+spec are FLOAT64 sums, whose summation order already depended on the
+thread count. Thresholds (radix sort from 4,096 rows, partitioning from
+4,096 groups per worker, 16 default threads) were chosen from measurements
+on this workload; all are parameters (`*radix-sort-min-rows*`,
+`*partition-groups-threshold*`, `*max-default-threads*`). Not done: a
+parallel hash-join build (joins are now bounded by their serial build) and
+copy-free scans for grouped aggregation.
+
 ## Testing
 
 * `make test` — unit tests (sb-rt) for numeric parsing/formatting, temporal
@@ -1417,14 +1358,6 @@ same kernels at 0.15–0.5 ns/element in the AVX2/AVX-512 variants.
   set of queries (grouping, DISTINCT aggregates, joins, CASE, ORDER BY …
   LIMIT, subqueries, errors) that must give identical results under every
   option combination with tiny morsels (so the parallel paths run).
-* Latency unit tests (`tests/test-latency.lisp`): queries for every
-  latency optimization (many-group aggregation at two morsel sizes, so both
-  the partitioned and the probed serial paths run; integer DISTINCT sets;
-  top-N ties; radix-sortable keys with NULLs, -0.0 and DESC; uncorrelated
-  scalar and IN subqueries; INT64/DECIMAL vs FLOAT64 constants; joins
-  probing an aggregation) must agree with row mode under the option matrix
-  plus `threads: 16`; the radix sort must order random batches exactly like
-  the comparator sort; the integer-bound search is checked directly.
 * `--modes`: `python3 tests/conformance/runner.py --engine
   implementations/common-lisp/bin/polyquery --modes`; additionally run with
   `POLYQUERY_MORSEL_ROWS=7` so that every Phase 1–3 test exercises parallel
@@ -1437,11 +1370,27 @@ same kernels at 0.15–0.5 ns/element in the AVX2/AVX-512 variants.
   option combinations and must agree. Tens of thousands of queries were run
   during development (it found and fixed a CASE alignment bug and a
   lock-reacquisition bug after timed condition waits).
-* `bench/workload.py` — times the latency workload
-  (`bench/workloads/analytics.json`) through `bin/polyquery session` with
-  default options and compares answers with an earlier run (see *Latency
-  optimization*); `bench/bench.py` — benchmark and consistency check on
-  generated datasets (see Performance); `bench/profile.lisp` — statistical profile of one query
+* Latency optimization tests: `tests/test-sort.lisp` (the radix sort of
+  normalized keys against the stable comparison sort on random batches of
+  every key type with NULLs, DESC/NULLS FIRST, -0.0, strings with long
+  common prefixes, NUL and non-Latin-1 characters, serial and parallel)
+  and `tests/test-latency.lisp` (partitioned aggregation, dictionary-code
+  key tables, string functions over dictionaries, boolean comparisons,
+  radix ORDER BY, parallel top-N tie order and shared CTE results against
+  the row executor, with low thresholds so every path runs).
+* After the latency work, `POLYQUERY_MORSEL_ROWS=37 bench/fuzz.py --count
+  1500 --seed 7` found one bug (parallel DISTINCT aggregates over empty
+  inputs, fixed and covered by `tests/test-latency.lisp`); the one remaining
+  difference of that run (a conversion error raised under a forced merge
+  join where other modes return no rows) is produced identically by the
+  engine before this work (error evaluation order, see *Known limitations*).
+  The conformance suite also passes with `--modes` (3870/3870) and with
+  `POLYQUERY_MORSEL_ROWS=7`.
+* `bench/workload.py` — times the benchmark workload through `bin/polyquery
+  session` and compares the results of two builds (see *Latency
+  optimization*).
+* `bench/bench.py` — benchmark and consistency check on generated datasets
+  (see Performance); `bench/profile.lisp` — statistical profile of one query
   (`POLYQUERY_NATIVE_KERNELS=LIB` runs it with native kernels);
   `bench/kernels.lisp` — Lisp-versus-native kernel micro-benchmark.
 * Native kernels (`tests/test-native.lisp`, part of `make test`; the library
@@ -1501,13 +1450,18 @@ same kernels at 0.15–0.5 ns/element in the AVX2/AVX-512 variants.
   may overflow) is common in single-table filters. This is independent of
   native kernels (found by `bench/fuzz.py`).
 * `threads` parallelizes the vectorized executor only; `mode: row` is the
-  single-threaded baseline. Pipelines containing correlated subqueries, and
-  everything inside subqueries, run serially. Operators whose input is not
-  a scan pipeline (e.g. a join probing the output of an aggregation, or an
-  aggregation over such a join) run serially, as does the hash-join build.
-  Very high-cardinality GROUP BYs scale less than low-cardinality ones.
+  single-threaded baseline. Pipelines containing subqueries, and correlated
+  subqueries, run serially (uncorrelated subqueries may run in parallel).
+  High-cardinality GROUP BYs use partitioned aggregation, but still gain
+  little from threads at this scale (about 80,000 groups over 1M rows take
+  10–12 ms with 1 or 16 threads): hashing every row twice, the per-chunk
+  overhead and the serial ordering/output of the groups dominate.
+* Hash-join build sides are built serially (the probe side is parallel), so
+  joins with large build inputs (q10–q12) are bounded by the build.
 * Sorting (and the hash-join build) materializes its whole input; a sort is
-  not interruptible while the permutation is being sorted.
+  not interruptible while the permutation is being sorted. The radix sort
+  keeps up to two 8-character prefix words per STRING key; strings with
+  longer common prefixes fall back to the comparison sort within their run.
 * Parallel FLOAT64 sums add partial sums, so they can round differently
   from a serial sum (summation order is implementation-defined).
 * A streamed (`/v1/query/stream`) vectorized query under a LIMIT evaluates

@@ -226,19 +226,21 @@ by the first error of evaluating EXPRS row by row over BATCH."
 ;;; Aggregation
 
 (defun make-aggregate-consumer (node &key track-positions)
-  "(values new-state consume lazy prepare) for vectorized aggregation of NODE:
-(NEW-STATE [expected-groups]) creates an empty GROUP-STATE, (CONSUME state batch [base])
-aggregates one input batch (whose first row has input position BASE) into
-it; LAZY is true when CONSUME also accepts lazy scan batches (native
-kernels, see GROUP-STATE-CONSUME-LAZY). (PREPARE batch) returns the key and
-argument VECs of a batch, i.e. CONSUME's work before GROUP-STATE-CONSUME
-(parallel.lisp aggregates them elsewhere). Kernels are compiled once per
-call."
+  "(values new-state consume lazy evaluate consume-vecs) for vectorized
+aggregation of NODE: NEW-STATE creates an empty GROUP-STATE, (CONSUME state
+batch [base]) aggregates one input batch (whose first row has input position
+BASE) into it; LAZY is true when CONSUME also accepts lazy scan batches
+(native kernels, see GROUP-STATE-CONSUME-LAZY). The two steps of CONSUME are
+also available separately: (EVALUATE batch) returns the key and argument
+vectors of a batch, (CONSUME-VECS state key-vecs arg-vecs n positions)
+aggregates such vectors (POSITIONS: see GROUP-STATE-CONSUME). Kernels are
+compiled once per call."
   (let* ((keys (pp-hash-aggregate-group-by node))
          (aggs (pp-hash-aggregate-aggregates node))
          (key-kernels (mapcar #'compile-vexpr keys))
          (arg-kernels (mapcar (lambda (a) (and (b-agg-args a) (compile-vexpr (first (b-agg-args a)))))
                               aggs))
+         (nkeys (length keys))
          (key-kinds (mapcar (lambda (k) (type-vec-kind (bexpr-type k))) keys))
          (native (native-kernels-enabled-p))
          (lazy-columns nil)
@@ -247,38 +249,33 @@ call."
                       (setf lazy-columns columns)
                       ok)))
          (guard (make-row-order-guard (append keys (mapcan (lambda (a) (copy-list (b-agg-args a)))
-                                                           aggs))))
-         (prepare (lambda (batch)
-                    (batch-materialize batch)
-                    (funcall (the function guard) batch
-                             (lambda ()
-                               (values (mapcar (lambda (k) (funcall (the function k) batch)) key-kernels)
-                                       (mapcar (lambda (k) (and k (funcall (the function k) batch)))
-                                               arg-kernels)))))))
-    (values
-     (lambda (&optional (expected 16))
-       (make-group-state key-kinds aggs track-positions native expected))
-     (lambda (gs batch &optional (base 0))
-       (let ((n (batch-count batch)))
+                                                           aggs)))))
+    (labels ((evaluate (batch)
+               (funcall (the function guard) batch
+                        (lambda ()
+                          (values (mapcar (lambda (k) (funcall (the function k) batch)) key-kernels)
+                                  (mapcar (lambda (k) (and k (funcall (the function k) batch)))
+                                          arg-kernels)))))
+             (charge-groups (gs)
+               (let ((groups (group-state-count gs))
+                     (charged (group-state-charged gs)))
+                 (when (>= (- groups charged) 1024)
+                   (charge-memory (* (- groups charged) (row-footprint (* 4 (+ nkeys (length aggs))))))
+                   (setf (group-state-charged gs) groups))))
+             (consume-vecs (gs key-vecs arg-vecs n positions)
+               (group-state-consume gs key-vecs arg-vecs n positions)
+               (charge-groups gs)))
+      (values
+       (lambda () (make-group-state key-kinds aggs track-positions native))
+       (lambda (gs batch &optional (base 0))
          (if (batch-source batch)
-             (group-state-consume-lazy gs batch lazy-columns)
-             (multiple-value-bind (key-vecs arg-vecs) (funcall prepare batch)
-               (group-state-consume gs key-vecs arg-vecs n base)))
-         (group-state-charge gs)))
-     lazy
-     prepare)))
-
-(defun group-state-charge (gs)
-  "Charge the groups GS added since the last charge to the memory budget."
-  (let ((groups (group-state-count gs))
-        (charged (group-state-charged gs)))
-    (when (>= (- groups charged) 1024)
-      (charge-memory (* (- groups charged)
-                        (row-footprint (* 4 (+ (if (group-state-table gs)
-                                                   (key-table-width (group-state-table gs))
-                                                   0)
-                                               (length (group-state-aggs gs)))))))
-      (setf (group-state-charged gs) groups))))
+             (progn (group-state-consume-lazy gs batch lazy-columns)
+                    (charge-groups gs))
+             (multiple-value-bind (key-vecs arg-vecs) (evaluate batch)
+               (consume-vecs gs key-vecs arg-vecs (batch-count batch) base))))
+       lazy
+       #'evaluate
+       #'consume-vecs))))
 
 (defun group-state-batches (gs node)
   "Iterator over the output batches of the finished group state GS."
@@ -405,25 +402,15 @@ normalizing values of the key expression for comparison with the other side
                          vec)))
      null-rows)))
 
-(defun concatenate-batches (batches kinds &optional (threads 1))
-  "One BATCH holding the rows of BATCHES in order (the columns of many rows
-concatenated by up to THREADS threads)."
-  (let* ((total (reduce #'+ batches :key #'batch-count))
-         (width (length kinds))
-         (columns (make-array width)))
-    (flet ((column (k)
-             (setf (svref columns k)
-                   (vec-concatenate (mapcar (lambda (b) (svref (batch-columns b) k)) batches)
-                                    (svref kinds k) total))))
-      (if (and (> threads 1) (> width 1) (>= total 65536))
-          (let ((workers (min threads width)))
-            (run-in-threads
-             (loop for w below workers
-                   collect (let ((w w))
-                             (lambda ()
-                               (loop for k from w below width by workers do (column k)))))))
-          (dotimes (k width) (column k))))
-    (make-batch total columns)))
+(defun concatenate-batches (batches kinds)
+  "One BATCH holding the rows of BATCHES in order."
+  (let ((total (reduce #'+ batches :key #'batch-count)))
+    (make-batch total
+                (let ((columns (make-array (length kinds))))
+                  (dotimes (k (length kinds) columns)
+                    (setf (svref columns k)
+                          (vec-concatenate (mapcar (lambda (b) (svref (batch-columns b) k)) batches)
+                                           (svref kinds k) total)))))))
 
 (defun make-build-provider (build-node open-build prepare)
   "Function returning the JOIN-BUILD of BUILD-NODE's rows, made by PREPARE
@@ -810,179 +797,15 @@ BATCH-B under the ORDER BY KEYS ((pos type descending nulls-first) lists)."
   (make-row-order-predicate batch batch keys))
 
 (defun sorted-permutation (batch keys &optional (threads 1))
-  "Row indexes of BATCH in ORDER BY KEYS order (stable)."
-  (let* ((n (batch-count batch))
-         (perm (identity-index-vector n))
-         (words (radix-key-words batch keys threads)))
-    (if words
-        (let ((chunk-sort (lambda (chunk) (radix-sort-permutation chunk words))))
-          (if (> threads 1)
-              (parallel-stable-sort perm nil threads chunk-sort
-                                    (lambda (src dst start mid end)
-                                      (merge-runs-by-words src dst start mid end words)))
-              (funcall chunk-sort perm)))
-        (let ((before (make-index-sort-predicate batch keys)))
+  "Row indexes of BATCH in ORDER BY KEYS order (stable): by radix sort of
+normalized keys for large inputs (vsort.lisp), else by comparison sort."
+  (let ((before (make-index-sort-predicate batch keys)))
+    (or (and (>= (batch-count batch) *radix-sort-min-rows*)
+             (radix-sorted-permutation batch keys before threads))
+        (let ((perm (identity-index-vector (batch-count batch))))
           (if (> threads 1)
               (parallel-stable-sort perm before threads)
               (stable-sort perm before))))))
-
-;;; Radix sorting. When every ORDER BY key is an INT64-like or FLOAT64
-;;; column, each key value maps to an unsigned 64-bit word whose order is
-;;; the key's order (sign bit flipped; IEEE bits of doubles with negative
-;;; values inverted, -0.0 as 0.0; complemented for DESC); a key with NULLs
-;;; also gets a more significant word holding its NULL flag (NULL values
-;;; get the value word 0, as they are equal). Rows then compare as their
-;;; word sequences, and a stable LSD radix sort over the words, least
-;;; significant first, yields exactly the stable comparison sort. Digits on
-;;; which all rows agree are skipped.
-
-(defconstant +radix-bits+ 11)
-(defconstant +u64-mask+ #xFFFFFFFFFFFFFFFF)
-
-(deftype u64-vector () '(simple-array (unsigned-byte 64) (*)))
-
-(declaim (inline radix-word))
-(defun radix-word (data i descending)
-  "Order-preserving unsigned word of DATA[I]."
-  (let ((w (etypecase data
-             (i64-vector (logxor (logand (aref data i) +u64-mask+) #x8000000000000000))
-             (f64-vector (let* ((d (aref data i))
-                                (bits (logand (sb-kernel:double-float-bits (if (zerop d) 0d0 d))
-                                              +u64-mask+)))
-                           (if (logbitp 63 bits)
-                               (logand (lognot bits) +u64-mask+)
-                               (logior bits #x8000000000000000)))))))
-    (declare (type (unsigned-byte 64) w))
-    (if descending (logxor w +u64-mask+) w)))
-
-(defun radix-key-words (batch keys &optional (threads 1))
-  "Simple vector of U64-VECTORs (most significant first) of the row words
-for sorting BATCH by KEYS ((pos type descending nulls-first) lists), or NIL
-when some key is not a typed INT64-like/FLOAT64 column (or holds NaN). With
-THREADS > 1, large batches are encoded by several threads."
-  (let* ((n (batch-count batch))
-         (specs
-           ;; Per key: (data validity descending nulls-first words flags).
-           (loop for (pos nil descending nulls-first) in keys
-                 for vec = (svref (batch-columns batch) pos)
-                 for data = (vec-data vec)
-                 for validity = (vec-validity vec)
-                 do (unless (or (typep data 'i64-vector)
-                                (and (typep data 'f64-vector)
-                                     (let ((data data))
-                                       (declare (type f64-vector data))
-                                       (loop for d across data always (= d d))))) ; no NaN
-                      (return-from radix-key-words nil))
-                 collect (list data validity descending nulls-first
-                               (make-array n :element-type '(unsigned-byte 64))
-                               (and validity (make-array n :element-type '(unsigned-byte 64)))))))
-    (flet ((encode (start end)
-             (declare (type fixnum start end))
-             (loop for (data validity descending nulls-first words flags) in specs
-                   do (let ((words words))
-                        (declare (type u64-vector words))
-                        (macrolet ((fill-words (type)
-                                     `(let ((data data))
-                                        (declare (type ,type data))
-                                        (loop for i from start below end
-                                              do (setf (aref words i) (radix-word data i descending))))))
-                          (if (typep data 'i64-vector) (fill-words i64-vector) (fill-words f64-vector)))
-                        (when validity
-                          (let ((flags flags)
-                                (null-flag (if nulls-first 0 1)))
-                            (declare (type u64-vector flags) (type simple-bit-vector validity))
-                            (loop for i from start below end
-                                  do (if (zerop (sbit validity i))
-                                         (setf (aref flags i) null-flag
-                                               (aref words i) 0)
-                                         (setf (aref flags i) (- 1 null-flag))))))))))
-      (if (and (> threads 1) (>= n 65536))
-          (run-in-threads
-           (loop for k below threads
-                 collect (let ((start (floor (* k n) threads))
-                               (end (floor (* (1+ k) n) threads)))
-                           (lambda () (encode start end)))))
-          (encode 0 n)))
-    (coerce (loop for (nil validity nil nil words flags) in specs
-                  when validity collect flags
-                  collect words)
-            'simple-vector)))
-
-(defun radix-pass (perm words perm2 words2 shift bits)
-  "Stable counting sort of (PERM, WORDS) into (PERM2, WORDS2) by the digit of
-BITS bits at SHIFT; returns NIL (and does nothing) if all digits are equal."
-  (declare (type index-vector perm perm2) (type u64-vector words words2)
-           (type (integer 0 63) shift) (type (integer 1 16) bits))
-  (let* ((n (length perm))
-         (buckets (ash 1 bits))
-         (counts (make-array (1+ buckets) :element-type 'fixnum :initial-element 0)))
-    (declare (type fixnum n buckets))
-    (dotimes (i n)
-      (incf (aref counts (1+ (ldb (byte bits shift) (aref words i))))))
-    (when (= (aref counts (1+ (ldb (byte bits shift) (aref words 0)))) n)
-      (return-from radix-pass nil))
-    (loop for d from 1 to buckets
-          do (incf (aref counts d) (aref counts (1- d))))
-    (dotimes (i n t)
-      (let* ((w (aref words i))
-             (d (ldb (byte bits shift) w))
-             (k (aref counts d)))
-        (setf (aref perm2 k) (aref perm i)
-              (aref words2 k) w
-              (aref counts d) (1+ k))))))
-
-(defun radix-sort-permutation (perm key-words)
-  "PERM (row indexes) stably sorted by the row words KEY-WORDS (see
-RADIX-KEY-WORDS); may return a new vector."
-  (declare (type index-vector perm) (type simple-vector key-words))
-  (let* ((n (length perm))
-         (words (make-array n :element-type '(unsigned-byte 64)))
-         (perm2 (make-index-vector n))
-         (words2 (make-array n :element-type '(unsigned-byte 64))))
-    (declare (type u64-vector words words2) (type index-vector perm2))
-    (when (< n 2) (return-from radix-sort-permutation perm))
-    (loop for k from (1- (length key-words)) downto 0
-          do (let ((row-words (svref key-words k))
-                   (all-or 0) (all-and +u64-mask+))
-               (declare (type u64-vector row-words) (type (unsigned-byte 64) all-or all-and))
-               (dotimes (i n)
-                 (let ((w (aref row-words (aref perm i))))
-                   (setf (aref words i) w
-                         all-or (logior all-or w)
-                         all-and (logand all-and w))))
-               ;; Only digits containing bits that differ between rows matter.
-               (let ((varying (logxor all-or all-and)))
-                 (loop for shift from 0 below (integer-length varying) by +radix-bits+
-                       do (when (and (plusp (ldb (byte +radix-bits+ shift) varying))
-                                     (radix-pass perm words perm2 words2 shift
-                                                 (min +radix-bits+ (- 64 shift))))
-                            (rotatef perm perm2)
-                            (rotatef words words2))))))
-    perm))
-
-(defun merge-runs-by-words (src dst start mid end key-words)
-  "Stably merge the sorted runs SRC[START,MID) and SRC[MID,END) into DST,
-comparing rows by their KEY-WORDS."
-  (declare (type index-vector src dst) (type fixnum start mid end)
-           (type simple-vector key-words))
-  (flet ((before (a b)
-           (declare (type fixnum a b))
-           (loop for w across key-words
-                 do (let ((x (aref (the u64-vector w) a))
-                          (y (aref (the u64-vector w) b)))
-                      (cond ((< x y) (return t))
-                            ((> x y) (return nil))))
-                 finally (return nil))))
-    (declare (inline before))
-    (let ((i start) (j mid) (k start))
-      (declare (type fixnum i j k))
-      (loop while (and (< i mid) (< j end))
-            do (if (before (aref src j) (aref src i))
-                   (progn (setf (aref dst k) (aref src j)) (incf j))
-                   (progn (setf (aref dst k) (aref src i)) (incf i)))
-               (incf k))
-      (replace dst src :start1 k :start2 i :end2 mid)
-      (replace dst src :start1 (+ k (- mid i)) :start2 j :end2 end))))
 
 (defun drain-batches (open kinds)
   "All rows of the batch opener OPEN as one batch (charging memory)."
@@ -994,40 +817,75 @@ comparing rows by their KEY-WORDS."
           while b
           do (charge-memory (* (batch-count b) (row-footprint (length kinds))))
              (push b batches))
-    (concatenate-batches (nreverse batches) kinds (parallel-threads))))
+    (concatenate-batches (nreverse batches) kinds)))
 
-(defun permutation-batches (batch perm start end &optional (threads 1))
-  "Iterator over the rows PERM[START..END) of BATCH, a batch at a time. With
-THREADS > 1 and many rows, the batches are gathered in parallel up front."
+(defun whole-scan-batch (node threads)
+  "One batch of all rows of NODE, read straight from the column stores (one
+copy, a column per thread) when NODE is a TableScan or a Project of column
+references over one; NIL otherwise."
+  (typecase node
+    (pp-table-scan
+     (let* ((kinds (output-kinds node))
+            (indexes (coerce (pp-table-scan-column-indexes node) 'simple-vector))
+            (batches (mapcar (lambda (seg)
+                               (let* ((n (segment-count seg))
+                                      (columns (make-array (length indexes))))
+                                 (map-row-ranges (length indexes) threads
+                                                 (lambda (start end)
+                                                   (loop for k from start below end
+                                                         do (setf (svref columns k)
+                                                                  (segment-vec seg (svref indexes k) 0 n
+                                                                               (svref kinds k)))))
+                                                 1)
+                                 (make-batch n columns)))
+                             (scan-segments node)))
+            (batch (if (and batches (null (rest batches)))
+                       (first batches)
+                       (concatenate-batches batches kinds))))
+       (charge-memory (* (batch-count batch) (row-footprint (length kinds))))
+       batch))
+    (pp-project
+     (when (every #'b-column-p (pp-project-exprs node))
+       (let ((input (whole-scan-batch (pnode-child node) threads)))
+         (when input
+           (make-batch (batch-count input)
+                       (map 'simple-vector (lambda (e) (svref (batch-columns input) (b-column-index e)))
+                            (pp-project-exprs node)))))))))
+
+(defun permutation-batches (batch perm start end)
+  "Iterator over the rows PERM[START..END) of BATCH, a batch at a time."
   (declare (type fixnum start end) (type index-vector perm))
-  (let ((pos start)
-        (nbatches (ceiling (- end start) +batch-size+)))
+  (let ((pos start))
     (declare (type fixnum pos))
-    (flet ((gather (from)
-             (let* ((stop (min end (+ from +batch-size+)))
-                    (idx (subseq perm from stop)))
-               (batch-gather batch idx (length idx)))))
-      (if (and (> threads 1) (> nbatches 8))
-          (let ((batches (make-array nbatches))
-                (workers (min threads nbatches))
-                (k 0))
-            (declare (type fixnum k))
-            (run-in-threads
-             (loop for w below workers
-                   collect (let ((w w))
-                             (lambda ()
-                               (loop for b from w below nbatches by workers
-                                     do (setf (svref batches b)
-                                              (gather (+ start (* b +batch-size+)))))))))
-            (lambda ()
-              (when (< k nbatches)
-                (prog1 (svref batches k)
-                  (setf (svref batches k) nil)
-                  (incf k)))))
-          (lambda ()
-            (when (< pos end)
-              (prog1 (gather pos)
-                (setf pos (min end (+ pos +batch-size+))))))))))
+    (lambda ()
+      (when (< pos end)
+        (let* ((stop (min end (+ pos +batch-size+)))
+               (idx (subseq perm pos stop)))
+          (setf pos stop)
+          (batch-gather batch idx (length idx)))))))
+
+(defun parallel-permutation-batches (batch perm threads)
+  "Iterator over the rows PERM of BATCH a batch at a time, the batches
+gathered up front by up to THREADS threads (for large sorted outputs)."
+  (declare (type index-vector perm))
+  (let* ((n (length perm))
+         (count (ceiling n +batch-size+))
+         (batches (make-array count)))
+    (map-row-ranges count threads
+                    (lambda (start end)
+                      (loop for k from start below end
+                            do (let* ((a (* k +batch-size+))
+                                      (b (min n (+ a +batch-size+)))
+                                      (idx (subseq perm a b)))
+                                 (setf (svref batches k) (batch-gather batch idx (length idx))))))
+                    4)
+    (let ((k 0))
+      (declare (type fixnum k))
+      (lambda ()
+        (when (< k count)
+          (prog1 (svref batches k)
+            (setf (svref batches k) nil)
+            (incf k)))))))
 
 (defmethod compile-batch-operator ((node pp-sort))
   (let ((open-child (compile-batch-operator (pnode-child node)))
@@ -1038,19 +896,20 @@ THREADS > 1 and many rows, the batches are gathered in parallel up front."
       (let ((output nil))
         (lambda ()
           (unless output
-            (let ((batch (drain-batches open-child kinds)))
+            (let ((batch (or (whole-scan-batch (pnode-child node) threads)
+                             (drain-batches open-child kinds))))
               (check-interrupts)
-              (setf output (permutation-batches batch (sorted-permutation batch keys threads)
-                                                0 (batch-count batch) threads))))
+              (let ((perm (sorted-permutation batch keys threads)))
+                (setf output (if (and (> threads 1) (> (batch-count batch) (* 4 (morsel-rows))))
+                                 (parallel-permutation-batches batch perm threads)
+                                 (permutation-batches batch perm 0 (batch-count batch)))))))
           (funcall (the function output)))))))
 
-(defun make-top-n-collector (keys keep kinds)
-  "(values add finish) keeping the best KEEP rows under the ORDER BY KEYS of
-the batches (of column KINDS) given to ADD, in order (ties keep input
-order): the buffered rows are compacted to the best KEEP whenever they reach
-twice that many, and once KEEP rows are known only rows sorting strictly
-before the last of them are buffered. FINISH returns the best rows, sorted,
-as one batch (or NIL)."
+(defun top-n-batch (next kinds keys keep)
+  "The best KEEP rows (ORDER BY KEYS, ties in input order) of the batches
+returned by NEXT, as one sorted batch, or NIL without rows. The buffered
+input is compacted whenever it holds twice KEEP rows."
+  (declare (type function next) (type fixnum keep))
   (let ((buffer '()) (buffered 0) (best nil))
     (declare (type fixnum buffered))
     (flet ((compact ()
@@ -1062,67 +921,75 @@ as one batch (or NIL)."
                (setf best (batch-gather batch perm n)
                      buffer '()
                      buffered 0))))
-      (values
-       (lambda (b)
-         (unless (zerop keep)
-           (when (and best (= (batch-count best) keep))
-             (let ((before (make-row-order-predicate b best keys))
-                   (last (1- keep))
-                   (idx (make-index-vector (batch-count b)))
-                   (m 0))
-               (declare (type function before) (type fixnum m))
-               (dotimes (i (batch-count b))
-                 (when (funcall before i last)
-                   (setf (aref idx m) i)
-                   (incf m)))
-               (setf b (cond ((zerop m) nil)
-                             ((= m (batch-count b)) b)
-                             (t (batch-gather b idx m))))))
-           (when b
-             (push b buffer)
-             (incf buffered (batch-count b))
-             (when (>= buffered (max +batch-size+ (* 2 keep)))
-               (check-interrupts)
-               (compact)))))
-       (lambda ()
-         (unless (zerop keep) (compact))
-         best)))))
-
-(defun top-n-output (best offset)
-  "Iterator over the rows of the sorted batch BEST from OFFSET on."
-  (if best
-      (permutation-batches best (identity-index-vector (batch-count best))
-                           (min offset (batch-count best))
-                           (batch-count best))
-      (lambda () nil)))
+      (unless (zerop keep)
+        (loop for b = (funcall next)
+              while b
+              do ;; Once KEEP rows are known, only rows sorting
+                 ;; strictly before the last of them can qualify.
+                 (when (and best (= (batch-count best) keep))
+                   (let ((before (make-row-order-predicate b best keys))
+                         (last (1- keep))
+                         (idx (make-index-vector (batch-count b)))
+                         (m 0))
+                     (declare (type function before) (type fixnum m))
+                     (dotimes (i (batch-count b))
+                       (when (funcall before i last)
+                         (setf (aref idx m) i)
+                         (incf m)))
+                     (setf b (cond ((zerop m) nil)
+                                   ((= m (batch-count b)) b)
+                                   (t (batch-gather b idx m))))))
+                 (when b
+                   (push b buffer)
+                   (incf buffered (batch-count b))
+                   (when (>= buffered (max +batch-size+ (* 2 keep)))
+                     (check-interrupts)
+                     (compact))))
+        (compact))
+      best)))
 
 (defmethod compile-batch-operator ((node pp-top-n))
-  ;; ORDER BY ... LIMIT: keep the best LIMIT+OFFSET rows (MAKE-TOP-N-COLLECTOR).
-  (let* ((open-child (compile-batch-operator (pnode-child node)))
+  ;; ORDER BY ... LIMIT: keep the best LIMIT+OFFSET rows (ties keep input
+  ;; order). Over a parallel pipeline, the workers first reduce each morsel
+  ;; to its best rows; the reduced morsels, in input order, then go through
+  ;; the same selection, which yields exactly the serial result.
+  (let* ((child-node (pnode-child node))
          (kinds (output-kinds node))
          (keys (pp-top-n-keys node))
          (limit (evaluate-limit-expr (pp-top-n-limit node) "LIMIT"))
          (offset (or (evaluate-limit-expr (pp-top-n-offset node) "OFFSET") 0))
-         (keep (+ limit offset)))
+         (keep (+ limit offset))
+         (threads (parallel-threads))
+         (scan (and (> threads 1) (plusp keep) (pipeline-scan child-node)))
+         (open-child
+           (if (and scan (> (length (scan-morsels scan)) 1))
+               (let ((child-kinds (output-kinds child-node)))
+                 (make-parallel-gather
+                  child-node scan threads
+                  :reduce (lambda (batches)
+                            (let ((best (top-n-batch (lambda () (pop batches)) child-kinds keys keep)))
+                              (and best (list best))))))
+               (compile-batch-operator child-node))))
     (declare (type function open-child))
     (lambda ()
       (let ((output nil))
         (lambda ()
           (unless output
-            (multiple-value-bind (add finish) (make-top-n-collector keys keep kinds)
-              (declare (type function add finish))
-              (unless (zerop keep)
-                (let ((child (funcall open-child)))
-                  (declare (type function child))
-                  (loop for b = (funcall child)
-                        while b
-                        do (funcall add b))))
-              (setf output (top-n-output (funcall finish) offset))))
+            (let ((best (top-n-batch (if (zerop keep) (lambda () nil) (funcall open-child))
+                                     kinds keys keep)))
+              (setf output (if best
+                               (permutation-batches best (identity-index-vector (batch-count best))
+                                                    (min offset (batch-count best))
+                                                    (batch-count best))
+                               (lambda () nil)))))
           (funcall (the function output)))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Entry point
 
-(defun compile-vectorized-plan (node)
-  "Row opener running the physical plan NODE on the batch executor."
-  (batches-to-rows-opener (compile-batch-operator node)))
+(defun compile-vectorized-plan (node &key count-only)
+  "Row opener running the physical plan NODE on the batch executor (yielding
+placeholder rows when COUNT-ONLY)."
+  (if count-only
+      (batches-to-count-opener (compile-batch-operator node))
+      (batches-to-rows-opener (compile-batch-operator node))))

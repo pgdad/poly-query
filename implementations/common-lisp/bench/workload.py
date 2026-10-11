@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
-"""Time a benchmark workload through `bin/polyquery session`.
+"""Time the benchmark workload (benchmarks/workloads/analytics.json) through
+`bin/polyquery session`.
 
-Loads the workload's tables (CSV + schema from a pqgen output directory) into
-one session, then runs every query `--warmup` + `--repeat` times with the
-engine's default execution options (no `options` object, as a client would
-send) and reports the median and minimum wall time seen by the client
-(request written -> complete response line read: parse, plan, execute,
-serialize; the client's own JSON decoding is not included).
+Loads every workload table from a generated dataset directory (CSV with its
+`.schema.json`), creates the workload's indexes, then runs each workload
+query with its default options (plus `result: count` where the workload asks
+for it). Reports the median and minimum client-side wall time per query
+(request written -> response line read, including JSON serialization).
 
-Results are canonicalised (rows sorted unless the query has ORDER BY, floats
-rounded to 9 significant digits) and hashed, so two runs (e.g. before/after an
-optimization) can be checked for identical answers with --compare.
+The rows of every query are written to --rows so that two engine builds can
+be compared for identical results (--compare OTHER_ROWS_FILE).
 
 Usage:
-  workload.py --engine bin/polyquery --data /tmp/pqdata/1m
-              [--workload bench/workloads/analytics.json] [--repeat 7]
-              [--warmup 1] [--queries q01,q02] [--json out.json]
-              [--compare before.json] [--engine-arg=--threads=8 ...]
+  workload.py --engine bin/polyquery --data datasets/generated/1m
+              [--workload benchmarks/workloads/analytics.json]
+              [--repeat 7] [--warmup 1] [--queries q01,q02]
+              [--engine-arg=--threads=4] [--json out.json]
+              [--rows rows.json] [--compare rows.json]
 """
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import statistics
@@ -29,154 +28,125 @@ import subprocess
 import sys
 import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-
-
-FLOAT_REL_TOL = 1e-9   # as the conformance runner
-
-
-def canon_value(v):
-    # FLOAT64 sums of parallel runs may differ in the last bits (summation
-    # order is implementation-defined); the digest rounds them, and results
-    # small enough to be kept are compared with FLOAT_REL_TOL.
-    if isinstance(v, float):
-        return "%.6g" % v
-    return json.dumps(v)
-
-
-def canon_rows(sql: str, resp: dict):
-    rows = resp["rows"]
-    if "ORDER BY" not in sql.upper():
-        rows = sorted(rows, key=lambda r: [canon_value(v) for v in r])
-    return rows
-
-
-def rows_close(a, b) -> bool:
-    if len(a) != len(b):
-        return False
-    for ra, rb in zip(a, b):
-        for x, y in zip(ra, rb):
-            if isinstance(x, float) or isinstance(y, float):
-                if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
-                    return False
-                if abs(x - y) > FLOAT_REL_TOL * max(1.0, abs(x), abs(y)):
-                    return False
-            elif x != y:
-                return False
-    return True
-
-
-def result_digest(sql: str, resp: dict) -> str:
-    if not resp.get("ok"):
-        return "error:" + resp["error"]["code"]
-    if "rows" not in resp:
-        return "count:%d" % resp["row_count"]
-    rows = [[canon_value(v) for v in r] for r in resp["rows"]]
-    if "ORDER BY" not in sql.upper():
-        rows.sort()
-    return hashlib.sha256(json.dumps([resp.get("columns"), rows]).encode()).hexdigest()[:16]
+FLOAT_REL_TOL = 1e-9
 
 
 class Session:
-    def __init__(self, engine: str, data_dir: str, extra_args):
+    def __init__(self, engine: str, data_dir: str, extra_args=()):
         self.proc = subprocess.Popen([engine, "session", "--data-dir", data_dir, *extra_args],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
     def request(self, req: dict) -> dict:
-        return json.loads(self.request_raw(req)[0])
-
-    def request_raw(self, req: dict):
-        """(response line, seconds until the whole line was read)."""
-        t = time.monotonic()
         self.proc.stdin.write((json.dumps(req) + "\n").encode())
         self.proc.stdin.flush()
-        line = self.proc.stdout.readline()
-        return line, time.monotonic() - t
+        return json.loads(self.proc.stdout.readline())
 
     def close(self) -> None:
         self.proc.stdin.close()
         self.proc.wait()
 
 
+def values_equal(x, y) -> bool:
+    if isinstance(x, float) or isinstance(y, float):
+        if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
+            return False
+        return abs(x - y) <= FLOAT_REL_TOL * max(1.0, abs(x), abs(y))
+    return x == y
+
+
+def results_equal(a, b) -> bool:
+    """Ordered comparison (every workload query is ordered or a single row)."""
+    if a.get("error") or b.get("error"):
+        return a.get("error") == b.get("error")
+    if a["row_count"] != b["row_count"] or a.get("columns") != b.get("columns"):
+        return False
+    ra, rb = a.get("rows"), b.get("rows")
+    if ra is None or rb is None:
+        return ra is None and rb is None
+    return len(ra) == len(rb) and all(
+        len(x) == len(y) and all(values_equal(u, v) for u, v in zip(x, y)) for x, y in zip(ra, rb))
+
+
 def main() -> int:
+    here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", required=True)
-    ap.add_argument("--data", required=True, help="pqgen output directory (CSV + schema files)")
-    ap.add_argument("--workload", default=os.path.join(HERE, "workloads", "analytics.json"))
+    ap.add_argument("--data", required=True, help="directory with the generated CSV files")
+    ap.add_argument("--workload", default=os.path.join(here, "../../../benchmarks/workloads/analytics.json"))
     ap.add_argument("--repeat", type=int, default=7)
     ap.add_argument("--warmup", type=int, default=1)
-    ap.add_argument("--queries", default=None)
-    ap.add_argument("--json", default=None)
-    ap.add_argument("--compare", default=None, help="earlier --json output to compare answers/times with")
-    ap.add_argument("--engine-arg", action="append", default=[])
+    ap.add_argument("--queries", default=None, help="comma-separated name prefixes")
+    ap.add_argument("--engine-arg", action="append", default=[], help="extra engine CLI argument")
+    ap.add_argument("--options", default=None,
+                    help="JSON object merged into every query's options (e.g. {\"result\":\"rows\"})")
+    ap.add_argument("--json", default=None, help="write timings to this file")
+    ap.add_argument("--rows", default=None, help="write query results to this file")
+    ap.add_argument("--compare", default=None, help="compare results with a --rows file")
     args = ap.parse_args()
 
     wl = json.load(open(args.workload))
+    extra_opts = json.loads(args.options) if args.options else {}
     queries = wl["queries"]
     if args.queries:
-        wanted = args.queries.split(",")
-        queries = [q for q in queries if any(q["name"].startswith(w) for w in wanted)]
-    before = json.load(open(args.compare))["results"] if args.compare else {}
+        prefixes = args.queries.split(",")
+        queries = [q for q in queries if any(q["name"].startswith(p) for p in prefixes)]
 
     s = Session(args.engine, args.data, args.engine_arg)
     t0 = time.monotonic()
-    for table in wl["tables"]:
-        schema = json.load(open(os.path.join(args.data, f"{table}.schema.json")))
-        r = s.request({"op": "load", "table": table, "format": "csv", "path": f"{table}.csv", "schema": schema})
+    for table, base in wl["tables"].items():
+        schema = json.load(open(f"{args.data}/{base}.schema.json"))
+        r = s.request({"op": "load", "table": table, "format": "csv", "path": f"{base}.csv", "schema": schema})
         if not r.get("ok"):
             print("load failed", table, r, file=sys.stderr)
             return 1
+    for ix in wl.get("indexes", []):
+        r = s.request({"op": "query", "sql": ix["sql"]})
+        if not r.get("ok"):
+            print("index failed", ix["sql"], r, file=sys.stderr)
+            return 1
     print(f"loaded {len(wl['tables'])} tables in {time.monotonic() - t0:.1f}s", flush=True)
 
-    results = {}
-    mismatches = 0
-    hdr = "%-22s %10s %10s %8s  %s" % ("query", "median_ms", "min_ms", "rows", "digest")
-    if before:
-        hdr += "   before_ms  speedup same"
-    print(hdr)
+    timings, outputs = {}, {}
+    print("%-28s %10s %10s %8s" % ("query", "median ms", "min ms", "rows"))
     for q in queries:
         req = {"op": "query", "sql": q["sql"]}
-        if q.get("result"):
-            req["options"] = {"result": q["result"]}
+        options = {"result": q["result"]} if q.get("result") else {}
+        options.update(extra_opts)
+        if options:
+            req["options"] = options
         samples = []
-        digest = None
-        rows = None
+        r = None
         for i in range(args.warmup + args.repeat):
-            line, dt = s.request_raw(req)
-            r = json.loads(line)
+            t = time.monotonic()
+            r = s.request(req)
+            dt = time.monotonic() - t
             if i >= args.warmup:
                 samples.append(dt * 1000.0)
-            d = result_digest(q["sql"], r)
-            if digest is not None and d != digest:
-                print(f"  {q['name']}: nondeterministic result", file=sys.stderr)
-                mismatches += 1
-            digest = d
-            rows = r.get("row_count") if r.get("ok") else r["error"]["code"]
-        med, lo = statistics.median(samples), min(samples)
-        kept = canon_rows(q["sql"], r) if r.get("ok") and "rows" in r and len(r["rows"]) <= 2000 else None
-        line = "%-22s %10.1f %10.1f %8s  %s" % (q["name"], med, lo, rows, digest)
-        if q["name"] in before:
-            b = before[q["name"]]
-            if kept is not None and b.get("rows_kept") is not None:
-                same = rows_close(kept, b["rows_kept"])
-            else:
-                same = b["digest"] == digest
-            mismatches += not same
-            line += "   %9.1f  %6.2fx %s" % (b["median_ms"], b["median_ms"] / med, "yes" if same else "NO")
-        print(line, flush=True)
-        results[q["name"]] = {"sql": q["sql"], "median_ms": med, "min_ms": lo, "rows": rows,
-                              "digest": digest, "samples_ms": samples, "rows_kept": kept}
+            if not r.get("ok"):
+                break
+        if r.get("ok"):
+            outputs[q["name"]] = {"columns": r.get("columns"), "rows": r.get("rows"), "row_count": r["row_count"]}
+        else:
+            outputs[q["name"]] = {"error": r["error"]["code"]}
+        timings[q["name"]] = {"median_ms": statistics.median(samples), "min_ms": min(samples),
+                              "samples_ms": samples}
+        print("%-28s %10.2f %10.2f %8s" % (q["name"], timings[q["name"]]["median_ms"],
+                                            timings[q["name"]]["min_ms"],
+                                            r.get("row_count", r.get("error", {}).get("code"))), flush=True)
     s.close()
-    total = sum(r["median_ms"] for r in results.values())
-    print(f"total of medians: {total:.1f} ms")
-    if before:
-        btotal = sum(before[n]["median_ms"] for n in results if n in before)
-        print(f"total before: {btotal:.1f} ms  ({btotal / total:.2f}x)")
+
     if args.json:
-        json.dump({"engine_args": args.engine_arg, "results": results}, open(args.json, "w"), indent=1)
-    if mismatches:
-        print(f"{mismatches} result mismatches", file=sys.stderr)
-    return 1 if mismatches else 0
+        json.dump(timings, open(args.json, "w"), indent=1)
+    if args.rows:
+        json.dump(outputs, open(args.rows, "w"))
+    if args.compare:
+        ref = json.load(open(args.compare))
+        bad = [n for n in outputs if n in ref and not results_equal(outputs[n], ref[n])]
+        for n in bad:
+            print(f"MISMATCH {n}", file=sys.stderr)
+        print(f"compared {len(outputs)} queries: {len(bad)} mismatches")
+        return 1 if bad else 0
+    return 0
 
 
 if __name__ == "__main__":

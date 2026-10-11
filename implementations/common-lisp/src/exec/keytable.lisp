@@ -9,7 +9,8 @@
 ;;;;
 ;;;; Key values are runtime values (NULL is :NULL, a valid key: NULLs group
 ;;;; together); FLOAT64 -0.0 is normalized to 0.0. Lookups never modify the
-;;;; table, so a built table may be probed by several threads at once.
+;;;; table's groups (only its dictionary code cache, safely), so a built
+;;;; table may be probed by several threads at once.
 ;;;;
 ;;;; A table made for a query with native kernels hashes INT64-like key
 ;;;; columns with pqk_hash_i64, the same murmur3 finalizer as HASH-I64.
@@ -140,7 +141,12 @@ larger inputs (a hash join's whole build side) use the heap."
   (null-gid -1 :type fixnum)                           ; group of the NULL key (integer tables)
   (mask 0 :type fixnum)
   (count 0 :type fixnum)
-  (native nil))                                        ; hash with pqk_hash_i64
+  (native nil)                                         ; hash with pqk_hash_i64
+  ;; Dictionary fast path (KEY-TABLE-MAP-CODES): (dicts . map), the
+  ;; DICT-COLUMN stores of the key columns and a dense map from combined
+  ;; codes to group ids. Replaced as a whole, so that threads probing a
+  ;; shared table always read a consistent pair.
+  (code-cache nil :type list))
 
 (defun make-key-table (width &optional (expected 16) kinds native)
   "Empty table for keys of WIDTH columns (of vector KINDS, when known);
@@ -176,34 +182,40 @@ NATIVE hashes INT64-like keys with the native kernel."
         (replace new (svref keys k))
         (setf (svref keys k) new)))))
 
-(defun key-table-grow (table)
-  "Double the slot array and the per-group arrays."
+(defun key-table-grow (table &optional (factor 2))
+  "Multiply the size of the slot array and the per-group arrays by FACTOR
+(a power of two)."
+  (declare (type fixnum factor))
   (if (key-table-int-slots table)
-      (let* ((size (* 2 (1+ (key-table-mask table))))
+      (let* ((size (* factor (1+ (key-table-mask table))))
              (slots (make-array (* 2 size) :element-type '(signed-byte 64) :initial-element 0))
              (mask (1- size))
              (keys (svref (key-table-keys table) 0)))
-        (declare (type simple-vector keys))
+        (declare (type simple-vector keys) (type i64-vector slots) (type fixnum size mask))
         (dotimes (g (key-table-count table))
           (let ((v (svref keys g)))
             (unless (eq v +null+)
-              (let ((pos (logand (hash-i64 v) mask)))
-                (declare (type fixnum pos))
-                (loop until (zerop (aref slots (1+ (* 2 pos))))
-                      do (setf pos (logand (1+ pos) mask)))
-                (setf (aref slots (* 2 pos)) v
-                      (aref slots (1+ (* 2 pos))) (1+ g))))))
+              (let ((v v))
+                (declare (type (signed-byte 64) v))
+                (let ((pos (logand (hash-i64 v) mask)))
+                  (declare (type fixnum pos))
+                  (loop until (zerop (aref slots (1+ (* 2 pos))))
+                        do (setf pos (logand (1+ pos) mask)))
+                  (setf (aref slots (* 2 pos)) v
+                        (aref slots (1+ (* 2 pos))) (1+ g)))))))
         (grow-key-columns table (floor size 2))
         (setf (key-table-int-slots table) slots
               (key-table-mask table) mask))
-      (let* ((size (* 2 (length (key-table-slots table))))
+      (let* ((size (* factor (length (key-table-slots table))))
              (slots (make-array size :element-type 'fixnum :initial-element -1))
              (mask (1- size))
              (count (key-table-count table))
              (hashes (make-index-vector (floor size 2))))
+        (declare (type index-vector slots hashes) (type fixnum size mask count))
         (replace hashes (key-table-hashes table))
         (dotimes (g count)
           (let ((pos (logand (aref hashes g) mask)))
+            (declare (type fixnum pos))
             (loop until (= (aref slots pos) -1)
                   do (setf pos (logand (1+ pos) mask)))
             (setf (aref slots pos) g)))
@@ -211,6 +223,14 @@ NATIVE hashes INT64-like keys with the native kernel."
         (setf (key-table-slots table) slots
               (key-table-mask table) mask
               (key-table-hashes table) hashes))))
+
+(defun key-table-reserve (table groups)
+  "Grow TABLE at once so that it holds GROUPS groups without growing."
+  (let ((factor 1))
+    (loop while (< (* factor (key-table-capacity table)) (1+ groups))
+          do (setf factor (* 2 factor)))
+    (when (> factor 1)
+      (key-table-grow table factor))))
 
 (defun key-table-new-group (table values-fn)
   "Allocate the next group id with key values (VALUES-FN k)."
@@ -304,11 +324,81 @@ MISSING-FORM (with FREE-POS bound to the free slot)."
     (key-table-ensure-room table)
     g))
 
+(defparameter *max-code-map-size* 65536
+  "Largest product of dictionary sizes for which a key table maps combined
+dictionary codes to group ids directly.")
+
+(defun row-key-hash (vecs i)
+  "Hash of the key of row I of the key VECS (as computed by HASH-KEY-VECS)."
+  (let ((h 0))
+    (dolist (vec vecs h)
+      (let ((v (vec-ref vec i)))
+        (setf h (combine-hash h (if (eq v +null+) +null-key-hash+ (hash-key-value v))))))))
+
+(defun key-table-probe-row (table vecs i add)
+  "Group id of row I of the key VECS in the generic TABLE (added when ADD,
+else -1 if absent)."
+  (let ((h (row-key-hash vecs i))
+        (width (key-table-width table)))
+    (probe-key-table (table h g
+                            (let ((keys (key-table-keys table)))
+                              (loop for k below width
+                                    for vec in vecs
+                                    always (key-value-equal (svref (svref keys k) g)
+                                                            (normalize-key-value (vec-ref vec i))))))
+                     g
+                     (if add
+                         (key-table-insert-at table free-pos h
+                                              (lambda (k) (normalize-key-value (vec-ref (nth k vecs) i))))
+                         -1))))
+
+(defun key-table-map-codes (table vecs n gids add)
+  "Dictionary fast path of KEY-TABLE-MAP-BATCH for a generic TABLE: when
+every key vector carries dictionary codes, the group id of a combination of
+codes is looked up in a dense map (filled from the table on first sight).
+Returns true when done, NIL when the path does not apply."
+  (declare (type index-vector gids) (type fixnum n))
+  (unless (every #'vec-codes vecs)
+    (return-from key-table-map-codes nil))
+  (let ((dicts (mapcar #'vec-dict vecs))
+        (cache (key-table-code-cache table)))
+    (unless (and cache (every #'eq dicts (car cache)))
+      (let ((size (reduce #'* dicts :key (lambda (d) (length (dict-column-dictionary d))))))
+        (when (> size *max-code-map-size*)
+          (return-from key-table-map-codes nil))
+        (setf cache (cons dicts (make-array size :element-type 'fixnum :initial-element -1))
+              (key-table-code-cache table) cache)))
+    (let ((map (cdr cache))
+          (codes (coerce (mapcar #'vec-codes vecs) 'simple-vector))
+          (data (coerce (mapcar #'vec-data vecs) 'simple-vector))
+          (sizes (map 'index-vector (lambda (d) (length (dict-column-dictionary d))) dicts))
+          (width (length vecs)))
+      (declare (type index-vector map sizes) (type fixnum width))
+      (dotimes (i n)
+        (let ((c 0) (null-key nil))
+          (declare (type fixnum c))
+          (dotimes (k width)
+            (when (eq (svref (the simple-vector (svref data k)) i) +null+)
+              (setf null-key t))
+            (setf c (+ (* c (aref sizes k)) (aref (the u32-vector (svref codes k)) i))))
+          (setf (aref gids i)
+                (if null-key
+                    (key-table-probe-row table vecs i add)
+                    (let ((g (aref map c)))
+                      (if (>= g 0)
+                          g
+                          (let ((g (key-table-probe-row table vecs i add)))
+                            (when (>= g 0) (setf (aref map c) g))
+                            g)))))))
+      t)))
+
 (defun key-table-map-batch (table vecs n gids add)
   "Fill GIDS[0..N) with the group ids of the rows of the key VECS; new keys
 are added when ADD, else their id is -1. Returns GIDS."
   (declare (type index-vector gids) (type fixnum n))
-  (if (key-table-int-slots table)
+  (cond
+    ((and (null (key-table-int-slots table)) (key-table-map-codes table vecs n gids add)))
+    ((key-table-int-slots table)
       (let* ((vec (first vecs))
              (data (vec-data vec))
              (validity (vec-validity vec)))
@@ -331,7 +421,8 @@ are added when ADD, else their id is -1. Returns GIDS."
                  (setf (aref gids i) (int-key-probe table (aref data i) add)))))
           (t
            (dotimes (i n)
-             (setf (aref gids i) (int-key-group table (vec-ref vec i) add))))))
+             (setf (aref gids i) (int-key-group table (vec-ref vec i) add)))))))
+    (t
       (let ((hashes (hash-key-vecs vecs n (key-table-native table)))
             (vecs (coerce vecs 'simple-vector))
             (width (length vecs)))
@@ -350,16 +441,8 @@ are added when ADD, else their id is -1. Returns GIDS."
                                        (key-table-insert-at
                                         table free-pos h
                                         (lambda (k) (normalize-key-value (vec-ref (svref vecs k) i))))
-                                       -1)))))))
+                                       -1))))))))
   gids)
-
-(declaim (inline hash-partition))
-(defun hash-partition (hash partitions)
-  "Partition in [0, PARTITIONS) of a key HASH. It is taken from the hash's
-high bits: the low bits choose the slot within a partition's own table, and
-keys sharing their low bits would cluster in it."
-  (declare (type (unsigned-byte 61) hash) (type (integer 1 65536) partitions))
-  (ash (* (ldb (byte 16 45) hash) partitions) -16))
 
 (defun key-table-group-hash (table g)
   "Hash of the key of group G (used to partition groups)."
@@ -367,6 +450,23 @@ keys sharing their low bits would cluster in it."
       (let ((v (key-table-key table 0 g)))
         (if (eq v +null+) +null-key-hash+ (hash-i64 v)))
       (aref (key-table-hashes table) g)))
+
+(defun key-table-partitions (table partitions)
+  "Vector of PARTITIONS index vectors: the group ids of TABLE whose key hash
+is the partition number modulo PARTITIONS."
+  (let* ((count (key-table-count table))
+         (parts (make-index-vector count))
+         (sizes (make-array partitions :element-type 'fixnum :initial-element 0)))
+    (dotimes (g count)
+      (let ((p (mod (key-table-group-hash table g) partitions)))
+        (setf (aref parts g) p)
+        (incf (aref sizes p))))
+    (let ((out (map 'simple-vector #'make-index-vector sizes)))
+      (fill sizes 0)
+      (dotimes (g count out)
+        (let ((p (aref parts g)))
+          (setf (aref (the index-vector (svref out p)) (aref sizes p)) g)
+          (incf (aref sizes p)))))))
 
 (defun key-table-intern-group (table other g)
   "Group id in TABLE of the key of group G of the key table OTHER (added if

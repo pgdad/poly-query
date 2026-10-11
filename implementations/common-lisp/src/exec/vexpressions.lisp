@@ -116,10 +116,6 @@ are non-NULL (the other rows get NULL), as in the row evaluator."
     (b-agg (error "internal: aggregate call outside an aggregation context"))))
 
 (defun compile-vop (e)
-  (or (compile-with-subquery-values e)
-      (compile-vop-1 e)))
-
-(defun compile-vop-1 (e)
   (let ((op (b-op-op e))
         (args (b-op-args e)))
     (ecase op
@@ -138,11 +134,12 @@ are non-NULL (the other rows get NULL), as in the row evaluator."
                     (compile-lifted e :eager)
                     (compile-row-fallback e)))
       (:case (compile-vcase e))
-      (:call (compile-lifted e (if (or (scalar-function-null-aware (b-op-info e))
-                                       (> (length args) 2))
-                                   :eager
-                                   :strict)))
-      (:subquery (or (compile-vin-subquery e) (compile-lifted e :eager))))))
+      (:call (or (compile-vcall-of-string e)
+                 (compile-lifted e (if (or (scalar-function-null-aware (b-op-info e))
+                                           (> (length args) 2))
+                                       :eager
+                                       :strict))))
+      (:subquery (compile-lifted e :eager)))))
 
 ;;; ------------------------------------------------------------------
 ;;; Generic paths
@@ -292,16 +289,9 @@ the error at the right time)."
   (destructuring-bind (a b) (b-op-args e)
     (let ((op (b-op-op e))
           (lt (bexpr-type a)) (rt (bexpr-type b)))
-      (multiple-value-bind (nl nr ct) (comparison-normalizers lt rt)
+      (multiple-value-bind (nl nr) (comparison-normalizers lt rt)
         (let ((ka (type-vec-kind lt)) (kb (type-vec-kind rt)))
           (cond
-            ;; INT64/DECIMAL column op FLOAT64 constant: integer bounds.
-            ((and (eq ct :float64) (eq ka :i64) (eq nr #'identity)
-                  (bexpr-constant-p b) (not (bexpr-constant-p a)))
-             (compile-vcompare-float-constant op a nl b))
-            ((and (eq ct :float64) (eq kb :i64) (eq nl #'identity)
-                  (bexpr-constant-p a) (not (bexpr-constant-p b)))
-             (compile-vcompare-float-constant (flip-comparison-op op) b nr a))
             ;; column op constant (either order); the constant is normalized once.
             ((and (bexpr-constant-p b) (not (bexpr-constant-p a)) (eq nl #'identity))
              (compile-vcompare-constant op a (type-vec-kind lt) b nr))
@@ -345,6 +335,21 @@ the error at the right time)."
       ((and (eq kind :f64) (typep c 'double-float))
        (let ((kernel (compile-vexpr column-expr)))
          (comparison-dispatch op typed-compare-vc kernel double-float c)))
+      ((and (eq kind :any) (member c '(t nil)) (eq (type-kind (bexpr-type column-expr)) :boolean))
+       ;; BOOLEAN operand (T / NIL / NULL values): FALSE sorts before TRUE.
+       (let ((kernel (compile-vexpr column-expr))
+             (test (comparison-test op))
+             (cv (if c 1 0)))
+         (declare (type function kernel test) (type fixnum cv))
+         (lambda (batch)
+           (let* ((n (batch-count batch))
+                  (data (vec-data (funcall kernel batch)))
+                  (out (make-array n)))
+             (declare (type simple-vector data out) (type fixnum n))
+             (dotimes (i n (make-vec out))
+               (let ((v (svref data i)))
+                 (setf (svref out i)
+                       (if (eq v +null+) +null+ (funcall test (- (if v 1 0) cv))))))))))
       ((and (eq kind :any) (stringp c))
        (let ((cmp (make-comparator :string))
              (test (comparison-test op)))
@@ -369,61 +374,6 @@ the error at the right time)."
            (comparison-dispatch op generic))))
       (t nil))))
 
-(defun first-true-integer (predicate)
-  "Smallest (SIGNED-BYTE 64) integer for which the monotone PREDICATE (false
-below some point, true from it on) holds, or NIL."
-  (declare (type function predicate))
-  (let ((lo (- (expt 2 63))) (hi (1- (expt 2 63))))
-    (cond ((funcall predicate lo) lo)
-          ((not (funcall predicate hi)) nil)
-          (t ;; invariant: (predicate lo) false, (predicate hi) true
-           (loop while (> (- hi lo) 1)
-                 do (let ((mid (floor (+ lo hi) 2)))
-                      (if (funcall predicate mid) (setf hi mid) (setf lo mid))))
-           hi))))
-
-(defun compile-vcompare-float-constant (op column-expr to-double constant-expr)
-  "Kernel for COLUMN-EXPR op CONSTANT-EXPR where the INT64-like column values
-are compared as doubles (TO-DOUBLE, monotone) with a FLOAT64 constant, or NIL.
-The comparison holds exactly for the column values within an integer range
-[LO, HI] (or outside it, for <>), found once by binary search, so rows are
-compared as integers without converting them."
-  (multiple-value-bind (c ok) (constant-operand-value constant-expr)
-    (when (and ok (typep c 'double-float) (= c c))
-      (let* ((to-double to-double)
-             (min (- (expt 2 63))) (max (1- (expt 2 63)))
-             (first-ge (first-true-integer (lambda (v) (>= (funcall to-double v) c))))
-             (first-gt (first-true-integer (lambda (v) (> (funcall to-double v) c))))
-             (negate (eq op :<>))
-             (lo (ecase op
-                   ((:= :<> :>=) first-ge)
-                   (:> first-gt)
-                   ((:< :<=) min)))
-             (hi (ecase op
-                   (:< (if first-ge (1- first-ge) max))
-                   ((:= :<> :<=) (if first-gt (1- first-gt) max))
-                   ((:> :>=) max)))
-             (kernel (compile-vexpr column-expr)))
-        (declare (type function kernel to-double))
-        (when (or (null lo) (null hi) (> lo hi))
-          ;; No column value satisfies the comparison.
-          (setf lo 0 hi -1))
-        (let ((lo lo) (hi hi))
-          (declare (type (signed-byte 64) lo) (type (signed-byte 64) hi))
-          (lambda (batch)
-            (let* ((n (batch-count batch))
-                   (va (funcall kernel batch))
-                   (x (vec-data va))
-                   (validity (vec-validity va))
-                   (out (make-array n)))
-              (declare (type fixnum n) (type i64-vector x) (type (or null simple-bit-vector) validity))
-              (do-valid-rows (i n validity)
-                (setf (svref out i)
-                      (let ((v (aref x i)))
-                        (if (and (<= lo v) (<= v hi)) (not negate) negate)))
-                (setf (svref out i) +null+))
-              (make-vec out))))))))
-
 (defun comparison-test (op)
   "Function of a comparator result (-1/0/1) implementing comparison OP."
   (ecase op
@@ -435,27 +385,45 @@ compared as integers without converting them."
 ;;; Dictionary-aware evaluation: a NULL-propagating function of one STRING
 ;;; operand is computed once per distinct dictionary entry.
 
-(defun compile-memoized-unary (kernel fn &optional (kind :any))
+(defun derived-dictionary (dict fn)
+  "A DICT-COLUMN whose entries are FN of the entries of the DICT-COLUMN DICT
+(possibly with duplicates), or NIL when FN fails on an entry or does not
+return a string."
+  (let ((entries (handler-case (map 'simple-vector fn (dict-column-dictionary dict))
+                   (pq-error () nil))))
+    (when (and entries (every #'stringp entries))
+      (make-dict-column :length (length entries) :codes (make-array 0 :element-type '(unsigned-byte 32))
+                        :dictionary entries))))
+
+(defun compile-memoized-unary (kernel fn &optional (kind :any) derive-codes)
   "Kernel applying FN to the non-NULL values of KERNEL's :ANY vector (NULL
 stays NULL). Values carrying dictionary codes are looked up in a per-entry
-memo of FN's results, kept for the last dictionary seen."
+memo of FN's results, kept for the last dictionary seen. With DERIVE-CODES
+(FN maps strings to strings), results of dictionary-coded values keep the
+codes, into the dictionary of FN's results (see DERIVED-DICTIONARY), so
+that expressions over them are again evaluated once per entry."
   (declare (type function kernel fn))
   (let ((memo-dict nil)
         (memo #())
+        (derived nil)
         (unknown '#:unknown))
     (lambda (batch)
       (let* ((n (batch-count batch))
              (vec (funcall kernel batch))
              (data (vec-data vec))
              (codes (vec-codes vec))
-             (out (make-array n)))
+             (out (make-array n))
+             (coded nil))
         (declare (type simple-vector data out) (type fixnum n))
         (if codes
             (let ((dict (vec-dict vec)))
               (unless (eq dict memo-dict)
                 (setf memo-dict dict
-                      memo (make-array (length (dict-column-dictionary dict))
-                                       :initial-element unknown)))
+                      derived (and derive-codes (derived-dictionary dict fn))
+                      memo (if derived
+                               (copy-seq (dict-column-dictionary derived))
+                               (make-array (length (dict-column-dictionary dict))
+                                           :initial-element unknown))))
               (let ((memo memo))
                 (declare (type simple-vector memo))
                 (dotimes (i n)
@@ -467,14 +435,37 @@ memo of FN's results, kept for the last dictionary seen."
                                      (r (svref memo code)))
                                 (if (eq r unknown)
                                     (setf (svref memo code) (funcall fn v))
-                                    r))))))))
+                                    r)))))))
+              (setf coded (and derived t)))
             (dotimes (i n)
               (setf (svref out i)
                     (let ((v (svref data i)))
                       (if (eq v +null+) +null+ (funcall fn v))))))
-        (if (eq kind :any)
-            (make-vec out)
-            (vec-from-values kind out n))))))
+        (cond (coded (make-vec out nil codes derived))
+              ((eq kind :any) (make-vec out))
+              (t (vec-from-values kind out n)))))))
+
+(defun compile-vcall-of-string (e)
+  "Kernel of a NULL-propagating scalar function call with one STRING
+argument, computed once per dictionary entry of dictionary-coded input
+(COMPILE-MEMOIZED-UNARY), or NIL for other calls."
+  (let ((args (b-op-args e))
+        (info (b-op-info e)))
+    (when (and (= (length args) 1)
+               (eq (type-kind (bexpr-type (first args))) :string)
+               (scalar-function-p info)
+               (not (scalar-function-null-aware info))
+               (not (scalar-function-test-only info)))
+      (let* ((arg (first args))
+             (call (compile-bexpr (make-b-op (bexpr-type e) :call
+                                             (list (make-b-column (bexpr-type arg) 0 "arg"))
+                                             info)))
+             (kind (type-vec-kind (bexpr-type e))))
+        (declare (type function call))
+        (compile-memoized-unary (compile-vexpr arg)
+                                (lambda (v) (funcall call (vector v)))
+                                kind
+                                (eq (type-kind (bexpr-type e)) :string))))))
 
 (defun compile-vlike (e)
   "LIKE with a constant pattern over a STRING operand, or NIL."

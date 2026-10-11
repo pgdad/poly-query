@@ -369,112 +369,79 @@ again with unbounded integers."
   (svref (minmax-state-best s) gid))
 
 ;;; ------------------------------------------------------------------
-;;; DISTINCT aggregates: the distinct values of each group, in order of
-;;; first appearance, are fed to a row accumulator when the result is needed.
+;;; DISTINCT aggregates: the distinct values of each group are the keys of a
+;;; per-group KEY-TABLE (in order of first appearance; a NULL key, if any,
+;;; is skipped), fed to a row accumulator when the result is needed. Rows of
+;;; a batch that all belong to one group (no GROUP BY) are added to its
+;;; table a batch at a time.
 
 (defstruct (distinct-state (:include agg-state))
   (factory nil :type function)           ; row accumulator factory (aggregates.lisp)
-  (seen #() :type simple-vector)         ; per group: EQUAL hash table or NIL
-  (values #() :type simple-vector))      ; per group: list of values, newest first
+  (kind :any)                            ; vector kind of the argument
+  (tables #() :type simple-vector)       ; per group: KEY-TABLE or NIL
+  (gids nil :type (or null index-vector))) ; scratch group ids of batch inserts
 
 (defmethod agg-reserve ((s distinct-state) groups)
   (when (> groups (agg-state-capacity s))
     (let ((c (next-capacity s groups)))
-      (setf (distinct-state-seen s) (grow-array (distinct-state-seen s) c nil)
-            (distinct-state-values s) (grow-array (distinct-state-values s) c nil)
+      (setf (distinct-state-tables s) (grow-array (distinct-state-tables s) c nil)
             (agg-state-capacity s) c))))
 
-(defun distinct-add (s g v)
-  (let ((seen (or (svref (distinct-state-seen s) g)
-                  (setf (svref (distinct-state-seen s) g) (make-hash-table :test 'equal))))
-        (k (distinct-key v)))
-    (unless (gethash k seen)
-      (setf (gethash k seen) t)
-      (push v (svref (distinct-state-values s) g)))))
+(defun distinct-table (s g)
+  "The key table of the distinct values of group G (created on first use)."
+  (or (svref (distinct-state-tables s) g)
+      (setf (svref (distinct-state-tables s) g)
+            (make-key-table 1 16 (list (distinct-state-kind s))))))
+
+(defun distinct-add-vec (s g vec n)
+  "Add the values of rows [0, N) of VEC to the distinct values of group G."
+  (declare (type fixnum n))
+  (let ((gids (distinct-state-gids s)))
+    (when (or (null gids) (< (length gids) n))
+      (setf gids (make-index-vector (max n +batch-size+))
+            (distinct-state-gids s) gids))
+    (key-table-map-batch (distinct-table s g) (list vec) n gids t)))
+
+(defun distinct-values (s g)
+  "The distinct non-NULL values of group G, in order of first appearance
+(per partition, after MERGE-DISTINCT-STATES-IN-PARALLEL)."
+  (let ((entry (svref (distinct-state-tables s) g)))
+    (loop for table in (if (listp entry) entry (list entry))
+          nconc (loop for i below (key-table-count table)
+                      for v = (key-table-key table 0 i)
+                      unless (eq v +null+) collect v))))
 
 (defmethod agg-update ((s distinct-state) gids vec n)
   (declare (type index-vector gids) (type fixnum n))
-  (dotimes (i n)
-    (let ((v (vec-ref vec i)))
-      (unless (eq v +null+)
-        (distinct-add s (aref gids i) v)))))
+  (when (plusp n)
+    (let ((g0 (aref gids 0)))
+      (if (loop for i of-type fixnum from 1 below n always (= (aref gids i) g0))
+          (distinct-add-vec s g0 vec n)
+          (dotimes (i n)
+            (let ((v (vec-ref vec i)))
+              (unless (eq v +null+)
+                (let ((table (distinct-table s (aref gids i))))
+                  (if (key-table-int-slots table)
+                      (int-key-group table v t)
+                      (key-table-probe-row table (list vec) i t))))))))))
 
 (defmethod agg-merge ((s distinct-state) other mapping)
   (dotimes (g (length mapping))
-    (when (>= (aref mapping g) 0)
-      (dolist (v (reverse (svref (distinct-state-values other) g)))
-        (distinct-add s (aref mapping g) v)))))
+    (let ((to (aref mapping g))
+          (table (svref (distinct-state-tables other) g)))
+      (when (and (>= to 0) table (plusp (key-table-count table)))
+        (let ((n (key-table-count table)))
+          (distinct-add-vec s to
+                            (vec-from-values (distinct-state-kind s)
+                                             (subseq (the simple-vector (svref (key-table-keys table) 0)) 0 n)
+                                             n)
+                            n))))))
 
 (defmethod agg-result ((s distinct-state) gid)
   (multiple-value-bind (step finish) (funcall (distinct-state-factory s))
     (declare (type function step finish))
-    (dolist (v (reverse (svref (distinct-state-values s) gid)))
+    (dolist (v (distinct-values s gid))
       (funcall step v))
-    (funcall finish)))
-
-;;; DISTINCT aggregates of INT64-like values (INT64, narrow DECIMAL, DATE,
-;;; TIMESTAMP): the distinct values of each group are kept in an integer
-;;; KEY-TABLE (in order of first appearance). Their result depends only on
-;;; the set of values (COUNT, and exact integer SUM/AVG), so sets may be
-;;; merged in any order (see MERGE-INT-DISTINCT-SETS).
-
-(defstruct (int-distinct-state (:include agg-state))
-  (factory nil :type function)           ; row accumulator factory (aggregates.lisp)
-  (sets #() :type simple-vector))        ; per group: integer KEY-TABLE or NIL
-
-(defmethod agg-reserve ((s int-distinct-state) groups)
-  (when (> groups (agg-state-capacity s))
-    (let ((c (next-capacity s groups)))
-      (setf (int-distinct-state-sets s) (grow-array (int-distinct-state-sets s) c nil)
-            (agg-state-capacity s) c))))
-
-(defun int-distinct-set (s g)
-  (let ((sets (int-distinct-state-sets s)))
-    (or (svref sets g)
-        (setf (svref sets g) (make-key-table 1 16 '(:i64))))))
-
-(defmethod agg-update ((s int-distinct-state) gids vec n)
-  (declare (type index-vector gids) (type fixnum n))
-  (let ((data (vec-data vec))
-        (validity (vec-validity vec)))
-    (if (typep data 'i64-vector)
-        (let ((data data)
-              (last-g -1)
-              (set nil))
-          (declare (type i64-vector data) (type fixnum last-g))
-          (do-valid-rows (i n validity)
-            (let ((g (aref gids i)))
-              (unless (= g last-g)
-                (setf set (int-distinct-set s g) last-g g))
-              (int-key-probe set (aref data i) t))))
-        (dotimes (i n)
-          (let ((v (vec-ref vec i)))
-            (unless (eq v +null+)
-              (int-key-probe (int-distinct-set s (aref gids i)) v t)))))))
-
-(defun int-set-add-all (set other)
-  "Add the keys of the integer key table OTHER to SET."
-  (let ((keys (svref (key-table-keys other) 0)))
-    (declare (type simple-vector keys))
-    (dotimes (k (key-table-count other))
-      (int-key-probe set (svref keys k) t))))
-
-(defmethod agg-merge ((s int-distinct-state) other mapping)
-  (let ((theirs (int-distinct-state-sets other)))
-    (dotimes (g (length mapping))
-      (let ((to (aref mapping g))
-            (set (svref theirs g)))
-        (when (and set (>= to 0))
-          (int-set-add-all (int-distinct-set s to) set))))))
-
-(defmethod agg-result ((s int-distinct-state) gid)
-  (multiple-value-bind (step finish) (funcall (int-distinct-state-factory s))
-    (declare (type function step finish))
-    (let ((set (svref (int-distinct-state-sets s) gid)))
-      (when set
-        (let ((keys (svref (key-table-keys set) 0)))
-          (dotimes (k (key-table-count set))
-            (funcall step (svref keys k))))))
     (funcall finish)))
 
 ;;; ------------------------------------------------------------------
@@ -486,11 +453,9 @@ again with unbounded integers."
          (arg-type (if (b-agg-args agg) (bexpr-type (first (b-agg-args agg))) :int64))
          (float-p (eq (type-kind arg-type) :float64)))
     (cond
-      ((and (b-agg-distinct agg) (not (member fn '(:min :max :count-star)))
-            (eq (type-vec-kind arg-type) :i64))
-       (make-int-distinct-state :factory (make-base-accumulator-factory fn arg-type)))
       ((and (b-agg-distinct agg) (not (member fn '(:min :max :count-star))))
-       (make-distinct-state :factory (make-base-accumulator-factory fn arg-type)))
+       (make-distinct-state :factory (make-base-accumulator-factory fn arg-type)
+                            :kind (type-vec-kind arg-type)))
       (t
        (ecase fn
          (:count-star (make-count-state :star t))
@@ -517,13 +482,13 @@ again with unbounded integers."
   ;; position, so the merged groups can be emitted in serial order.
   (positions nil :type (or null index-vector)))
 
-(defun make-group-state (key-kinds aggs &optional track-positions native (expected 16))
+(defun make-group-state (key-kinds aggs &optional track-positions native)
   "Empty group state for keys of KEY-KINDS (a list of vector kinds) and the
-aggregate calls AGGS, with room for EXPECTED groups; TRACK-POSITIONS records
-first input positions, NATIVE uses the native kernels."
+aggregate calls AGGS; TRACK-POSITIONS records first input positions, NATIVE
+uses the native kernels."
   (let ((gs (%make-group-state :native native
                                :table (and key-kinds
-                                           (make-key-table (length key-kinds) expected key-kinds native))
+                                           (make-key-table (length key-kinds) 16 key-kinds native))
                                :aggs (map 'simple-vector #'make-agg-state aggs)
                                :positions (and track-positions key-kinds
                                                (make-array 16 :element-type 'fixnum
@@ -532,6 +497,52 @@ first input positions, NATIVE uses the native kernels."
       (fill (group-state-gids gs) 0)
       (loop for s across (group-state-aggs gs) do (agg-reserve s 1)))
     gs))
+
+(defun merge-distinct-states-in-parallel (total states)
+  "Without GROUP BY: merge the DISTINCT aggregate states of the partial group
+STATES into those of TOTAL (one of them), one thread per hash partition of
+the values; group 0 of TOTAL's states then holds a list of partition tables
+and the other partial states are emptied."
+  (let ((threads (length states)))
+    (dotimes (j (length (group-state-aggs total)))
+      (let ((s (svref (group-state-aggs total) j)))
+        (when (and (distinct-state-p s)
+                   (loop for gs across states
+                         thereis (svref (distinct-state-tables (svref (group-state-aggs gs) j)) 0)))
+          (let* ((sources (coerce (loop for gs across states
+                                        for table = (svref (distinct-state-tables
+                                                            (svref (group-state-aggs gs) j))
+                                                           0)
+                                        when table collect table)
+                                  'simple-vector))
+                 (split (make-array (length sources)))
+                 (parts (make-array threads))
+                 ;; Partition size guess: twice the largest source's share.
+                 (expected (max 16 (ceiling (* 2 (reduce #'max sources :key #'key-table-count
+                                                                         :initial-value 0))
+                                            threads))))
+            ;; Each source's values split by partition (in parallel) ...
+            (run-in-threads
+             (loop for k below (length sources)
+                   collect (let ((k k))
+                             (lambda ()
+                               (setf (svref split k)
+                                     (key-table-partitions (svref sources k) threads))))))
+            ;; ... then each partition interns its values of every source.
+            (run-in-threads
+             (loop for p below threads
+                   collect (let ((p p))
+                             (lambda ()
+                               (let ((table (make-key-table 1 expected (list (distinct-state-kind s)))))
+                                 (dotimes (k (length sources))
+                                   (let ((src (svref sources k)))
+                                     (loop for g across (the index-vector (svref (svref split k) p))
+                                           do (key-table-intern-group table src g))))
+                                 (setf (svref parts p) table))))))
+            (setf (svref (distinct-state-tables s) 0) (coerce parts 'list))
+            (loop for gs across states
+                  unless (eq gs total)
+                    do (setf (svref (distinct-state-tables (svref (group-state-aggs gs) j)) 0) nil))))))))
 
 (defun group-state-count (gs)
   (let ((table (group-state-table gs)))
@@ -544,9 +555,10 @@ first input positions, NATIVE uses the native kernels."
             (grow-array positions (max groups (* 2 (length positions))) most-positive-fixnum)))))
 
 (defun group-state-consume (gs key-vecs arg-vecs n &optional (base 0))
-  "Aggregate N rows given their key VECs and aggregate argument VECs; BASE is
-the input position of the first row, or an index vector of the rows' input
-positions (when positions are tracked)."
+  "Aggregate N rows given their key VECs and aggregate argument VECs. BASE
+is the input position of the first row (rows are consecutive), or an index
+vector of the rows' input positions (in any order); used when positions are
+tracked."
   (declare (type fixnum n) (type (or fixnum index-vector) base))
   (let ((gids (group-state-gids gs))
         (table (group-state-table gs)))
@@ -558,21 +570,22 @@ positions (when positions are tracked)."
     (when table
       (let ((before (key-table-count table)))
         (key-table-map-batch table key-vecs n gids t)
-        (when (group-state-positions gs)
-          (group-state-reserve-positions gs (key-table-count table))
-          (let ((positions (group-state-positions gs)))
-            (declare (type index-vector positions))
-            (if (typep base 'fixnum)
-                ;; Rows in input order: a group's first row is its first position.
-                (when (> (key-table-count table) before)
-                  (dotimes (i n)
-                    (let ((g (aref gids i)))
-                      (when (and (>= g before) (= (aref positions g) most-positive-fixnum))
-                        (setf (aref positions g) (+ base i))))))
-                ;; Rows of several inputs in any order: keep the minimum.
-                (dotimes (i n)
-                  (let ((g (aref gids i)))
-                    (setf (aref positions g) (min (aref positions g) (aref base i))))))))))
+        (cond
+          ((null (group-state-positions gs)))
+          ((typep base 'index-vector)
+           (group-state-reserve-positions gs (key-table-count table))
+           (let ((positions (group-state-positions gs)))
+             (declare (type index-vector positions base))
+             (dotimes (i n)
+               (let ((g (aref gids i)))
+                 (setf (aref positions g) (min (aref positions g) (aref base i)))))))
+          ((> (key-table-count table) before)
+           (group-state-reserve-positions gs (key-table-count table))
+           (let ((positions (group-state-positions gs)))
+             (dotimes (i n)
+               (let ((g (aref gids i)))
+                 (when (and (>= g before) (= (aref positions g) most-positive-fixnum))
+                   (setf (aref positions g) (+ base i))))))))))
     (let ((groups (group-state-count gs))
           (gids32 nil))
       (flet ((gids32 ()
@@ -603,7 +616,7 @@ the partition number modulo PARTITIONS."
          (parts (make-array count :element-type 'fixnum))
          (sizes (make-array partitions :element-type 'fixnum :initial-element 0)))
     (dotimes (g count)
-      (let ((p (hash-partition (key-table-group-hash table g) partitions)))
+      (let ((p (mod (key-table-group-hash table g) partitions)))
         (setf (aref parts g) p)
         (incf (aref sizes p))))
     (let ((out (map 'simple-vector #'make-index-vector sizes)))
@@ -620,6 +633,10 @@ OTHER's group ids) is given, just those groups."
          (mapping (make-index-vector count))
          (table (group-state-table gs))
          (other-table (group-state-table other)))
+    (when table
+      ;; One resize up front instead of repeated doubling while merging.
+      (key-table-reserve table (+ (key-table-count table)
+                                  (if only (length (the index-vector only)) count))))
     (cond ((null table) (fill mapping 0))
           (only
            (fill mapping -1)
@@ -642,34 +659,9 @@ OTHER's group ids) is given, just those groups."
             do (agg-reserve s groups)
                (agg-merge s o mapping)))))
 
-(defun radix-sort-by-keys (keys)
-  "Permutation of [0, n) ordering the non-negative fixnum KEYS ascending
-(LSD radix sort, stable)."
-  (declare (type index-vector keys))
-  (let* ((n (length keys))
-         (perm (identity-index-vector n))
-         (tmp (make-index-vector n))
-         (counts (make-array 2049 :element-type 'fixnum))
-         (max-key (if (zerop n) 0 (reduce #'max keys))))
-    (declare (type index-vector perm tmp) (type fixnum max-key))
-    (loop for shift of-type fixnum from 0 by 11
-          while (< shift (integer-length max-key))
-          do (fill counts 0)
-             (dotimes (i n)
-               (incf (aref counts (1+ (ldb (byte 11 shift) (aref keys (aref perm i)))))))
-             (loop for d from 1 to 2048
-                   do (incf (aref counts d) (aref counts (1- d))))
-             (dotimes (i n)
-               (let* ((e (aref perm i))
-                      (d (ldb (byte 11 shift) (aref keys e))))
-                 (setf (aref tmp (aref counts d)) e)
-                 (incf (aref counts d))))
-             (rotatef perm tmp))
-    perm))
-
-(defun groups-in-position-order (states)
+(defun groups-in-position-order (states &optional (threads 1))
   "Vectors (states gids) listing the groups of the merged group STATES in
-order of their first input position."
+order of their first input position (sorted with up to THREADS threads)."
   (let* ((n (reduce #'+ states :key #'group-state-count))
          (keys (make-index-vector n))
          (owners (make-array n))
@@ -683,7 +675,9 @@ order of their first input position."
                        (svref owners k) gs
                        (aref gids k) g)
                  (incf k))))
-    (let ((perm (radix-sort-by-keys keys))
+    (let ((perm (let ((words (make-array n :element-type '(unsigned-byte 64))))
+                  (dotimes (i n) (setf (aref words i) (aref keys i)))
+                  (radix-sort-rows (list words) n threads)))
           (sorted-owners (make-array n))
           (sorted-gids (make-index-vector n)))
       (dotimes (i n)

@@ -9,10 +9,7 @@
   (memory-budget (* 2048 1024 1024))
   (max-join-rows nil)               ; limit on rows produced by one join, or NIL
   (memory-used 0 :type sb-ext:word) ; updated atomically (parallel workers)
-  (cleanups '())                    ; functions to run when the query ends
-  ;; Results of uncorrelated subqueries, shared by all compiled copies of a
-  ;; plan (parallel workers): SUBQUERY descriptor -> SHARED-RESULT.
-  (subquery-results (make-hash-table :test 'eq :synchronized t)))
+  (cleanups '()))                   ; functions to run when the query ends
 
 (defvar *query-context* nil
   "The context of the query currently executing in this thread.")
@@ -49,38 +46,6 @@ re-acquiring the mutex). Returns true if woken up."
                (query-context-memory-budget ctx))
         (resource-limit-error "query exceeded its memory budget of ~D MB"
                               (floor (query-context-memory-budget ctx) (* 1024 1024)))))))
-
-;;; A SHARED-RESULT computes a value once for all threads of a query; an
-;;; error is remembered and signalled again to every later caller.
-
-(defstruct (shared-result (:constructor make-shared-result ()))
-  (state :pending)                  ; :PENDING, :VALUE or :ERROR
-  value
-  (mutex (sb-thread:make-mutex :name "shared result")))
-
-(defun query-shared-value (key compute)
-  "The value of (COMPUTE) for KEY within the current query: computed by the
-first thread asking for it, then shared. Without a query context COMPUTE is
-simply called."
-  (declare (type function compute))
-  (let ((ctx *query-context*))
-    (if (null ctx)
-        (funcall compute)
-        (let* ((table (query-context-subquery-results ctx))
-               (result (or (gethash key table)
-                           (sb-ext:with-locked-hash-table (table)
-                             (or (gethash key table)
-                                 (setf (gethash key table) (make-shared-result)))))))
-          (sb-thread:with-mutex ((shared-result-mutex result))
-            (when (eq (shared-result-state result) :pending)
-              (handler-case (setf (shared-result-value result) (funcall compute)
-                                  (shared-result-state result) :value)
-                (pq-error (e)
-                  (setf (shared-result-value result) e
-                        (shared-result-state result) :error)))))
-          (if (eq (shared-result-state result) :error)
-              (error (shared-result-value result))
-              (shared-result-value result))))))
 
 (defun add-query-cleanup (fn)
   "Arrange for FN to be called when the current query ends (normally or not)."

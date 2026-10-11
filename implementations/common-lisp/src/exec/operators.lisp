@@ -14,11 +14,12 @@
 (defgeneric compile-operator (node)
   (:documentation "Return the opener implementing physical plan NODE."))
 
-(defun compile-plan (node)
+(defun compile-plan (node &key count-only)
   "Row opener for the physical plan NODE, on the executor selected by the
-statement's execution settings."
+statement's execution settings. COUNT-ONLY: the consumer only counts the
+rows, so the vectorized executor may return placeholder rows."
   (if (vectorized-execution-p)
-      (compile-vectorized-plan node)
+      (compile-vectorized-plan node :count-only count-only)
       (compile-operator node)))
 
 (defmacro counting-interrupts ((counter) &body body)

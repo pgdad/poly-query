@@ -1,20 +1,19 @@
-;;;; system.lisp — facts about the host: usable CPUs.
+;;;; system.lisp — facts about the host system.
 
 (in-package #:polyquery)
 
 (defun affinity-cpu-count ()
   "Number of CPUs in this process's affinity mask (sched_getaffinity), or NIL."
   (ignore-errors
-   (let ((bytes 128))                     ; a cpu_set_t of 1024 CPUs
-     (sb-alien:with-alien ((mask (array (sb-alien:unsigned 8) 128)))
-       (let ((rc (sb-alien:alien-funcall
-                  (sb-alien:extern-alien "sched_getaffinity"
-                                         (function sb-alien:int sb-alien:int sb-alien:unsigned-long
-                                                   (* (array (sb-alien:unsigned 8) 128))))
-                  0 bytes (sb-alien:addr mask))))
-         (when (zerop rc)
-           (let ((n (loop for i below bytes sum (logcount (sb-alien:deref mask i)))))
-             (and (plusp n) n))))))))
+   (sb-alien:with-alien ((mask (array (sb-alien:unsigned 64) 16)))
+     (let ((rc (sb-alien:alien-funcall
+                (sb-alien:extern-alien "sched_getaffinity"
+                                       (function sb-alien:int sb-alien:int sb-alien:unsigned-long
+                                                 (* (array (sb-alien:unsigned 64) 16))))
+                0 (* 8 16) (sb-alien:addr mask))))
+       (when (zerop rc)
+         (let ((n (loop for i below 16 sum (logcount (sb-alien:deref mask i)))))
+           (and (plusp n) n)))))))
 
 (defun online-cpu-count ()
   "Number of online CPUs (sysconf), or NIL."
@@ -25,14 +24,5 @@
     (and (integerp n) (plusp n) n)))
 
 (defun cpu-count ()
-  "CPUs this process may run on: its affinity mask, else the online CPUs, else 4."
+  "Number of CPUs this process can use (4 when unknown)."
   (or (affinity-cpu-count) (online-cpu-count) 4))
-
-(defparameter *max-default-query-threads* 16
-  "Upper bound of the automatic per-query thread count: beyond it the fixed
-costs of starting and merging workers outweigh the gains on typical
-analytical queries.")
-
-(defun default-query-threads ()
-  "Worker threads per query when neither the request nor --threads sets them."
-  (max 1 (min (cpu-count) *max-default-query-threads*)))
