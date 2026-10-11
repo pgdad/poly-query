@@ -82,8 +82,8 @@ SQL text ─lexer→ tokens ─parser→ AST ─analyzer→ logical plan ─opti
 | `internal/analyzer` | Semantic validation: scopes and range variables, CTE environments, name resolution (incl. outer scopes for correlation), typing with implicit promotions, function signatures, aggregate/grouping rules, ORDER BY resolution; produces the logical plan |
 | `internal/plan` | Bound typed expressions and the logical plan (`Scan`, `Values`, `Filter`, `Project`, `Aggregate`, `Join`, `Sort`, `Limit`, `Distinct`, `UnionAll`; subqueries are `Subquery` expressions holding their own plan); every produced column has a statement-unique `ColumnID`; `Format` prints a plan for debugging |
 | `internal/optimizer` | Rule-based logical optimizer, rules applied in order, none with `optimize: false`: `constant_folding`, `predicate_pushdown` (below joins, projections, sorts, DISTINCT, into UNION ALL branches), `join_reorder` (greedy, inner-join chains), `column_pruning` — see *Logical / physical plan separation* |
-| `internal/physical` | Physical planning, the only place where execution decisions are taken: access paths (table scan with row-group skipping vs index scan chosen from statistics; columns a scan reads), join algorithm (hash join with the build side by estimated cardinality, sort-merge join, nested loop; `join` option), hash aggregation, hash distinct, top-N sort, correlated-subquery helpers, execution mode / threads / native kernels (`Plan.Exec`); EXPLAIN JSON |
-| `internal/exec` | Execution in two models over the same physical plan: Volcano row operators (`operators.go`, `join.go`, `merge.go`, `aggregate.go`; expressions compiled to closures against the input row layout) and vectorized batch operators (`vector.go`, `vexpr.go`, `vops.go`, `vagg.go`, `vjoin.go`, `vsort.go`, `simd_*.go`); morsel-driven parallelism (`parallel.go`); all scalar functions, LIKE, CASE, BETWEEN, IN; subquery evaluation; cancellation checks; approximate memory accounting; `--max-join-rows` |
+| `internal/physical` | Physical planning, the only place where execution decisions are taken: access paths (table scan with row-group skipping vs index scan chosen from statistics; columns a scan reads), join algorithm (hash join with the build side by estimated cardinality, sort-merge join, nested loop; `join` option), hash aggregation (with group estimates, key ranges and order-freedom from statistics and plan shape), hash distinct, top-N sort, anti-join probes, shared aggregations (`share.go`), correlated-subquery helpers, execution mode / threads / native kernels (`Plan.Exec`); EXPLAIN JSON |
+| `internal/exec` | Execution in two models over the same physical plan: Volcano row operators (`operators.go`, `join.go`, `merge.go`, `aggregate.go`; expressions compiled to closures against the input row layout) and vectorized batch operators (`vector.go`, `vexpr.go`, `vcase.go`, `vops.go`, `vagg.go`, `vaggkeys.go`, `vdistinct.go`, `hashmap.go`, `vjoin.go`, `vjoinpar.go`, `vsort.go`, `vradix.go`, `simd_*.go`); shared aggregation results (`shared.go`); morsel-driven parallelism (`parallel.go`); all scalar functions, LIKE, CASE, BETWEEN, IN; subquery evaluation; cancellation checks; approximate memory accounting; `--max-join-rows` |
 | `internal/storage` | Immutable tables split into row groups, each either column-oriented (typed vectors with validity bitmaps, STRING columns optionally dictionary-encoded, chunks optionally decoded lazily) or row-oriented (tuples); per-group min/max/null statistics; lazily computed table statistics |
 | `internal/index` | Single-column HASH (hash map value → row IDs) and BTREE (sorted permutation with binary search) indexes |
 | `internal/catalog` | Copy-on-write catalog of tables and globally named indexes: every mutation publishes a new immutable snapshot atomically |
@@ -767,6 +767,210 @@ Reproduce with `python3 implementations/go/scripts/bench.py --data
 another binary, e.g. a build of the baseline commit), or with Go benchmarks:
 `POLYQUERY_BENCH_DATA=/tmp/pqdata/1m go test ./internal/engine -run - -bench
 Queries`.
+
+### Latency optimization (analytics workload)
+
+Goal: lower the latency of the queries of
+`benchmarks/workloads/analytics.json` at scale 1m (`python3
+datasets/generators/pqgen.py generate --scale 1m --jobs 1`) with
+unchanged results.
+
+**Method.** `scripts/workload.py` starts `bin/polyquery session` once per
+engine, loads the workload's tables (CSV with the generated schemas,
+default layout), creates the workload's two indexes and runs each workload
+query with the default query options (plus `result: "count"` where the
+workload asks for it): one warm-up, then N timed runs; reported is the
+median client-side wall time (request written → response line read).
+Several engines run side by side with their runs interleaved, so load on
+the machine affects them alike, and the script checks that every engine
+returns the same result (digest of columns and rows; FLOAT64 values to 9
+significant digits). *Before* is the baseline commit `5bf4eab`, *after*
+the final commit; both built with `make build`. Machine: AMD Ryzen 9
+9950X3D (16 cores / 32 threads), shared with other jobs (load average
+5–9 during the measurements, so single numbers vary by ±10–20%; the
+interleaving keeps the comparison fair).
+
+```bash
+python3 implementations/go/scripts/workload.py --data datasets/generated/1m \
+    --engine /path/to/polyquery-before --engine implementations/go/build/polyquery --repeat 21
+# same thread count for both: --engine-args "--threads 4"
+# CPU profile of one query: POLYQUERY_BENCH_DATA=$PWD/datasets/generated/1m \
+#   go test ./internal/engine -run - -bench 'Workload/q19' -cpuprofile cpu.out   (in implementations/go)
+```
+
+Default configuration (before: 4 worker threads per query, the old
+default; after: 16, the new default — see below), median of 21 runs, ms:
+
+| query | before (ms) | after (ms) | speedup |
+|---|---:|---:|---:|
+| `q01_filter_selective` | 0.05 | 0.03 | 1.7× |
+| `q02_filter_low_selectivity` | 1.54 | 0.97 | 1.6× |
+| `q03_range_filter_time` | 0.60 | 0.60 | 1.0× |
+| `q04_arith_aggregate` | 2.66 | 1.60 | 1.7× |
+| `q05_groupby_low_card` | 1.13 | 0.63 | 1.8× |
+| `q06_groupby_high_card` | 4.56 | 2.50 | 1.8× |
+| `q07_groupby_skewed` | 15.46 | 5.52 | 2.8× |
+| `q08_groupby_uniform_multi` | 9.20 | 2.67 | 3.4× |
+| `q09_distinct_count` | 52.08 | 2.88 | 18.1× |
+| `q10_join_customers` | 15.10 | 3.49 | 4.3× |
+| `q11_join_star` | 6.80 | 3.01 | 2.3× |
+| `q12_left_join_anti` | 7.34 | 3.44 | 2.1× |
+| `q13_sort_topn` | 2.71 | 1.37 | 2.0× |
+| `q14_sort_full_string` | 109.61 | 14.39 | 7.6× |
+| `q15_sort_multi_key` | 144.42 | 12.36 | 11.7× |
+| `q16_timeseries_hourly` | 1.15 | 0.96 | 1.2× |
+| `q17_wide_projection` | 0.16 | 0.18 | 0.9× |
+| `q18_nulls` | 3.89 | 1.74 | 2.2× |
+| `q19_cte_subquery` | 141.47 | 8.21 | 17.2× |
+| `q20_string_functions` | 8.54 | 2.14 | 4.0× |
+| **total** | 528.50 | 68.70 | 7.7× |
+
+The same engines with the same thread count (medians of 7 and 21 runs),
+which separates the algorithmic gains from the new thread default:
+
+| query | before, 1 thread | after, 1 thread | before, 4 threads | after, 4 threads |
+|---|---:|---:|---:|---:|
+| `q01_filter_selective` | 0.04 | 0.04 | 0.03 | 0.03 |
+| `q02_filter_low_selectivity` | 5.03 | 4.84 | 1.50 | 1.49 |
+| `q03_range_filter_time` | 0.81 | 0.67 | 0.64 | 0.59 |
+| `q04_arith_aggregate` | 9.73 | 9.08 | 2.64 | 2.54 |
+| `q05_groupby_low_card` | 4.01 | 3.32 | 1.11 | 0.94 |
+| `q06_groupby_high_card` | 9.33 | 5.11 | 4.75 | 2.58 |
+| `q07_groupby_skewed` | 16.71 | 6.98 | 15.51 | 5.74 |
+| `q08_groupby_uniform_multi` | 29.78 | 10.89 | 9.33 | 4.36 |
+| `q09_distinct_count` | 101.06 | 6.11 | 51.65 | 3.21 |
+| `q10_join_customers` | 47.54 | 13.75 | 13.92 | 4.89 |
+| `q11_join_star` | 18.29 | 10.13 | 6.87 | 3.98 |
+| `q12_left_join_anti` | 7.97 | 4.39 | 7.49 | 3.55 |
+| `q13_sort_topn` | 9.35 | 9.38 | 2.92 | 2.91 |
+| `q14_sort_full_string` | 211.99 | 68.45 | 115.63 | 21.94 |
+| `q15_sort_multi_key` | 237.22 | 48.02 | 126.19 | 19.16 |
+| `q16_timeseries_hourly` | 3.26 | 2.97 | 1.27 | 1.16 |
+| `q17_wide_projection` | 0.38 | 0.44 | 0.16 | 0.16 |
+| `q18_nulls` | 12.73 | 13.13 | 3.49 | 3.63 |
+| `q19_cte_subquery` | 156.09 | 11.63 | 139.26 | 9.09 |
+| `q20_string_functions` | 25.19 | 5.76 | 6.79 | 1.85 |
+| **total** | 906.50 | 235.10 | 511.20 | 93.80 |
+
+Each engine returned identical results for every query (row counts for the
+two `result: "count"` sorts; full sorted outputs were compared separately,
+see *Verification*). `q01`/`q03`/`q17` were already well under a
+millisecond and stay there; `q13`
+(top-N) and `q18` gain only from more threads.
+
+What changed, by the queries it helps (each step was profiled with the Go
+benchmark above and kept only if an interleaved A/B run showed a gain):
+
+* **DISTINCT aggregates** (`q09`, 18×): `COUNT/SUM/AVG(DISTINCT x)` used
+  one row-mode accumulator per group with a Go map keyed by boxed values.
+  Now a typed (group, value) open-addressing set filters each batch to the
+  first occurrences, which feed the plain aggregate state; aggregations
+  without keys over an int-class column whose value range (column
+  statistics) is small use a bitmap instead, merged by OR
+  (`vdistinct.go`).
+* **Sorts** (`q14`, `q15`, 8–12×): the comparison sort with pairwise run
+  merging became a stable radix sort of `(normalized first key, row)`
+  items — a parallel MSD pass, then LSD passes per bucket with all digit
+  histograms counted in one pass — followed by tie resolution key by key:
+  runs whose values are equal are re-keyed with the next sort key's
+  normalized value; only values that differ beyond their 8-byte prefix
+  reach the comparator. A small-range INT-class first key (`dup_key`) is
+  range-coded and packed with the top bits of the second key, so the
+  radix sort leaves almost no ties. Strings of ≤ 8 bytes without NUL are
+  equal iff their prefixes are. The input is materialized by the parallel
+  workers — straight into the final columns when it is a scan with
+  projections — and output batches are gathered ahead by parallel workers
+  (`vradix.go`, `vsort.go`).
+* **Shared aggregations** (`q19`, 17×): the CTE `per_c` is referenced twice
+  and the analyzer expands each reference separately, so the 1M-row,
+  80k-group aggregation ran twice. The physical planner now fingerprints
+  self-contained aggregation subtrees (scans, filters, projections,
+  aggregations; no subqueries, outer references or test functions) with
+  column IDs renumbered canonically (`physical/share.go`); aggregations
+  with equal fingerprints share one result per statement, computed by the
+  first occurrence that runs and replayed by the others (tables are
+  immutable snapshots). Uncorrelated subqueries now run in the statement's
+  execution mode (they always ran row-at-a-time, here a serial row-mode
+  aggregation of 1M rows), and an uncorrelated scalar subquery is a
+  constant inside vectorized expressions.
+* **Group tables** (`q06`–`q08`, `q10`, `q19`): a single INT-class key uses
+  an open-addressing int64 map, or a directly indexed array when the key's
+  value range (statistics) is small (`customer_id`, `merchant_id`); keys are
+  stored as plain int64s instead of boxed key rows; exact SUM/AVG states
+  are int64 running sums that spill into 128-bit/big remainders only on
+  overflow (16 instead of 56 bytes per group); multi-column keys map each
+  column to dense IDs (dictionary-code caches, an int map, or a string map
+  behind a cache keyed by string data pointer) and combine the IDs column
+  by column through int maps instead of encoding and hashing bytes per row
+  (`vaggkeys.go`). Tables are sized up front from a group estimate
+  (product of the key columns' distinct counts), and partial tables of
+  parallel workers are split into merge partitions once instead of every
+  merging goroutine scanning all groups.
+* **Order-free aggregation** (`q06`, `q07`, `q19`, …): groups are emitted in
+  first-appearance order so that results do not depend on the execution
+  options; that ordering (a sort of the groups by first position and a
+  k-way merge of partitions) is skipped when nothing can observe it — a
+  sort above the aggregation orders by all grouping keys, or an
+  order-insensitive aggregation without keys (no FLOAT64 SUM/AVG) consumes
+  it through filters and projections that cannot fail.
+* **Hash joins** (`q10`–`q12`, 2–4×): STRING build columns with at most
+  16,384 distinct values are stored as dictionary codes, so probes emit
+  dictionary-encoded vectors and the grouping on `c.segment, c.country`
+  works per code; INT-class build keys spanning a small range index the
+  bucket heads by `key − min` (a primary key then needs one array lookup
+  per probe row, in a tight loop); build sides are appended column-wise
+  and, for parallel pipelines, by the workers into per-morsel partial
+  tables concatenated in table order (so chains keep the serial insertion
+  order). A LEFT join under a filter that tests right-side columns
+  without NULLs (statistics) for NULL only emits the unmatched probe rows
+  (`q12` is an anti join).
+* **Vectorized CASE** (`q20`, 4×): searched CASE fell back to row-at-a-time
+  evaluation (boxing every value, evaluating `LIKE` per row). It is now
+  evaluated batch-wise with a shrinking selection: each WHEN only for the
+  rows no earlier WHEN took, each branch result only for its rows — as lazy
+  as row mode, so `CASE WHEN x = 0 THEN 0 ELSE 1 / x END` cannot fail.
+* **Threads**: the default `--threads` is now min(16, CPU count) (was
+  min(4, CPU count)). With the changes above, scans, joins, sorts and
+  aggregations scale further; on this machine 16 was best (8: about 10%
+  slower in total, 32: no better and worse for high-cardinality
+  aggregations, whose partial-table merge grows with the workers).
+* Smaller items: materialized columns grow by doubling (Go's `append` grows
+  large slices by 1.25×, which re-copied 250k-row build sides many times),
+  exact-sum updates are inlined into the aggregation loops, and column
+  stores append whole vectors instead of calling a closure per cell.
+
+**Verification**: after every step the conformance suite (session, HTTP,
+`--modes`, small morsels with `POLYQUERY_MORSEL_ROWS=3/5`, and with
+`--native`), `make test` and `scripts/difftest.py` (random queries compared
+across all execution options) passed; the full results — including row
+order — of sorts, joins without ORDER BY, high-cardinality aggregations,
+DISTINCT aggregates and CTE queries over the 1m data were compared with the
+baseline engine under several thread counts and in row mode
+(identical). New unit tests cover the radix sort against the comparator,
+the multi-column key resolver against the byte encoding, the int map and
+pair set, sharing/anti-join/order-free planning, and CASE, scalar-subquery
+and shared-CTE queries in every execution mode (`modes_test.go`).
+
+**Decisions**:
+
+* *Statistics-driven execution choices* (group estimates, key and value
+  ranges for direct indexing and bitmaps, NULL-freedom for anti joins) use
+  the lazily computed, exact per-column statistics of the immutable table
+  snapshot a query reads; values outside a range still work (they fall back
+  to hashing), so a stale estimate can only cost time.
+* *Group order*: unordered output is used only where the order provably
+  cannot show; otherwise results stay identical across execution options.
+* *`--max-join-rows`* still counts the matched rows an anti join skips, so
+  the limit fails exactly the same queries as before.
+* *Shared aggregations* are computed in first-appearance order unless every
+  occurrence may be unordered; their rows are immutable once computed.
+
+**Remaining hot spots**: the sorts are bound by memory traffic (copying
+the input columns, string prefix extraction touching every string,
+gathering the output in permutation order); `q19` still replays its 80k
+shared groups through a row → batch conversion twice; `q07`'s merge of
+per-worker partial tables (each worker sees most of the 80k customers)
+grows with the thread count.
 
 ### Native kernels (M9)
 
