@@ -76,8 +76,8 @@ public record QueryRequest(String sql, QueryOptions options, String queryId) {
         }
         boolean optimize = RequestHandler.optionalBoolean(o, "optimize", true);
         boolean useIndexes = RequestHandler.optionalBoolean(o, "use_indexes", true);
-        RequestHandler.optionalBoolean(o, "native", false);
+        boolean useNative = RequestHandler.optionalBoolean(o, "native", false);
         return new QueryOptions(maxRows == null ? -1 : maxRows, timeout == null ? 0 : timeout, countOnly, optimize,
-                joinStrategy, useIndexes, execMode, threads == null ? 0 : threads.intValue());
+                joinStrategy, useIndexes, execMode, threads == null ? 0 : threads.intValue(), useNative);
     }
 }

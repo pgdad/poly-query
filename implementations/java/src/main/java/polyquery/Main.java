@@ -17,6 +17,8 @@ import polyquery.common.PolyQueryException;
 import polyquery.engine.Engine;
 import polyquery.engine.EngineConfig;
 import polyquery.engine.Version;
+import polyquery.ffi.NativeKernels;
+import polyquery.ffi.NativeLoadException;
 import polyquery.json.JsonException;
 import polyquery.json.JsonParser;
 import polyquery.json.JsonWriter;
@@ -92,6 +94,10 @@ public final class Main {
                 System.err.println("data directory does not exist: " + config.dataDir());
                 return 1;
             }
+            String nativePath = opts.get("--native-kernels");
+            if (nativePath != null) {
+                config = config.withNativeKernels(loadNativeKernels(nativePath, log));
+            }
             if (mode.equals("serve")) {
                 return serve(new Engine(config), serverConfig(opts), log, stdout);
             }
@@ -107,6 +113,23 @@ public final class Main {
         } catch (UsageException e) {
             System.err.println("polyquery: " + e.getMessage());
             return 2;
+        }
+    }
+
+    /**
+     * Loads the native kernel library; native kernels are optional, so a library that cannot be
+     * loaded is logged and the engine runs on its own code paths (returns null).
+     */
+    private static NativeKernels loadNativeKernels(String path, Logger log) {
+        try {
+            NativeKernels kernels = NativeKernels.load(Path.of(path));
+            log.log(Logger.Level.INFO, "native kernels loaded", Map.of("path", path, "variant", kernels.variant(),
+                    "available", kernels.availableVariants()));
+            return kernels;
+        } catch (NativeLoadException | java.nio.file.InvalidPathException e) {
+            log.log(Logger.Level.WARN, "native kernels unavailable; using the engine's own code paths",
+                    Map.of("path", path, "error", String.valueOf(e.getMessage())));
+            return null;
         }
     }
 
