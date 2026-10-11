@@ -3,6 +3,7 @@
   parsing and the version, capabilities, session and exec modes."
   (:require [clojure.string :as str]
             [polyquery.errors :as err]
+            [polyquery.native.ffi :as ffi]
             [polyquery.protocol :as protocol]
             [polyquery.server :as server]
             [polyquery.util.json :as json]
@@ -152,6 +153,8 @@
     (let [cfg (parse-args args)]
       (when-not (log/set-level! (:log-level cfg))
         (usage-error (str "invalid --log-level '" (:log-level cfg) "'")))
+      (when-let [path (:native-kernels cfg)]
+        (ffi/load! path))
       (case (:mode cfg)
         "version" (print-json (protocol/version-info))
         "capabilities" (print-json (protocol/capabilities-info))

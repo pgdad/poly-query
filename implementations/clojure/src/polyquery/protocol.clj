@@ -8,6 +8,7 @@
             [polyquery.engine :as engine]
             [polyquery.errors :as err]
             [polyquery.ingest :as ingest]
+            [polyquery.native.ffi :as ffi]
             [polyquery.storage.index :as index]
             [polyquery.storage.pqcf :as pqcf]
             [polyquery.storage.stats :as stats]
@@ -29,7 +30,8 @@
    "sql.correlated_subquery"
    "phase3" "storage.pqcf" "storage.mmap" "index.hash" "index.btree"
    "phase4" "http.streaming"
-   "phase5" "exec.row" "exec.vectorized" "exec.parallel" "join.hash" "join.merge" "join.nested_loop"])
+   "phase5" "exec.row" "exec.vectorized" "exec.parallel" "join.hash" "join.merge" "join.nested_loop"
+   "native.kernels"])
 
 (defn version-info []
   {"ok" true
@@ -39,7 +41,8 @@
    "protocol_version" protocol-version
    "spec_version" spec-version
    "runtime" (str "Clojure " (clojure-version) " on Java " (System/getProperty "java.version"))
-   "build" {"profile" "release" "flags" "aot,direct-linking"}})
+   "build" (cond-> {"profile" "release" "flags" "aot,direct-linking"}
+             (ffi/info) (assoc "native_kernels" (ffi/info)))})
 
 (defn capabilities-info []
   {"ok" true "protocol_version" protocol-version "capabilities" capabilities})
@@ -187,7 +190,8 @@
    :use-indexes (get opts "use_indexes" true)
    :join (get opts "join" "auto")
    :mode (get opts "mode" "auto")
-   :threads (get opts "threads")})
+   :threads (get opts "threads")
+   :native (get opts "native" false)})
 
 (defn- engine-options
   "Engine options of a query/explain request. A server controlling the query

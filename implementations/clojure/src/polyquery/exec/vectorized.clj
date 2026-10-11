@@ -22,12 +22,13 @@
             [polyquery.exec.context :as ctx]
             [polyquery.exec.grouping :as g]
             [polyquery.exec.kernels :as k]
+            [polyquery.exec.native :as native]
             [polyquery.exec.operators :as ops]
             [polyquery.exec.sort :as sort]
             [polyquery.storage.table :as table])
   (:import (java.util ArrayList)
            (polyquery.exec.batch Batch)
-           (polyquery.exec.grouping AggState GroupTable)
+           (polyquery.exec.grouping AggState GroupTable NativeUpdate)
            (polyquery.exec.kernels Kernel)))
 
 (set! *warn-on-reflection* true)
@@ -107,7 +108,7 @@
              (recur (next segs) acc)))))))))
 
 (defmethod build-batches :filter [plan env]
-  (let [pred (k/compile-filter env (:predicate plan))
+  (let [pred (native/compile-filter env (:predicate plan))
         input (build-batches (:input plan) env)]
     (ops/reducible
      (fn [f init]
@@ -150,8 +151,10 @@
         ^objects arg-ks (into-array Object (map #(when-let [a (:arg %)] (k/compile-kernel env a)) specs))
         nkeys (alength key-ks)
         naggs (alength arg-ks)
-        table (g/group-table (map :type key-exprs))
-        ^objects states (into-array AggState (map g/agg-state specs))
+        lib (:native env)
+        global? (empty? key-exprs)
+        table (g/group-table (map :type key-exprs) lib)
+        ^objects states (into-array AggState (map #(g/agg-state % lib) specs))
         gids (int-array b/capacity)
         reserved (long-array 1)
         width (+ nkeys naggs)]
@@ -169,9 +172,12 @@
                     (aset reserved 0 size))
                   (dotimes [j naggs]
                     (let [^AggState st (aget states j)
-                          ak (aget arg-ks j)]
+                          ak (aget arg-ks j)
+                          arg (when ak (k/ev ak bt sel n))]
                       (.grow st size)
-                      (.update st gids (when ak (k/ev ak bt sel n)) sel n))))
+                      (when-not (and lib (instance? NativeUpdate st)
+                                     (.nativeUpdate ^NativeUpdate st gids arg sel n global?))
+                        (.update st gids arg sel n)))))
                 nil))
             nil input)
     (->Partial table (vec states))))

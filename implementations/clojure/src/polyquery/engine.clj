@@ -7,6 +7,7 @@
             [polyquery.errors :as err]
             [polyquery.exec.context :as ctx]
             [polyquery.exec.dispatch :as dispatch]
+            [polyquery.native.ffi :as ffi]
             [polyquery.plan.explain :as explain]
             [polyquery.plan.physical :as physical]
             [polyquery.sql.analyzer :as analyzer]
@@ -84,7 +85,8 @@
 
 (defn- execute
   [plan qctx mode opts]
-  (let [env (dispatch/environment qctx {:mode mode :max-join-rows (:max-join-rows opts)})]
+  (let [env (dispatch/environment qctx {:mode mode :max-join-rows (:max-join-rows opts)
+                                        :native (when (:native opts) (ffi/library))})]
     (dispatch/build plan env)))
 
 ;; ---------------------------------------------------------------------------
@@ -187,7 +189,7 @@
   "Executes one SQL query against a catalog snapshot. opts:
   :max-rows :timeout-ms :memory-budget-bytes :max-join-rows :test-functions?
   :count-only? :optimize :join :use-indexes :mode (\"auto\" \"row\" \"vectorized\")
-  :threads :default-threads.
+  :threads :default-threads :native (use the loaded native kernel library).
   Returns {:columns [{\"name\" \"type\"}] :rows [[…]] :row-count n}."
   [catalog ^String sql opts]
   (run-plan (plan-statement catalog sql opts) opts))
