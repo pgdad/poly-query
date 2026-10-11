@@ -1,0 +1,5 @@
+make: Entering directory '/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/python'
+python3 -m compileall -q polyquery entry.py
+chmod +x bin/polyquery
+build ok
+make: Leaving directory '/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/python'

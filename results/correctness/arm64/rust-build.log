@@ -1,0 +1,5 @@
+make: Entering directory '/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/rust'
+cargo build --release --offline
+   Compiling polyquery v0.1.0 (/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/rust)
+    Finished `release` profile [optimized] target(s) in 7.16s
+make: Leaving directory '/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/rust'

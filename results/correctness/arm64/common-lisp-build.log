@@ -1,0 +1,222 @@
+make: Entering directory '/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp'
+sbcl --dynamic-space-size 8192 --control-stack-size 64 --non-interactive --no-sysinit --no-userinit --load build.lisp
+This is SBCL 2.6.9, an implementation of ANSI Common Lisp.
+More information about SBCL is available at <http://www.sbcl.org/>.
+
+SBCL is free software, provided as is, with absolutely no warranty.
+It is mostly in the public domain; some portions are provided under
+BSD-style licenses.  See the CREDITS and COPYING files in the
+distribution for more information.
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/package.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/package-tmpGHU3ALSV.fasl
+; compilation finished in 0:00:00.001
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/version.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/version-tmpAAURSO1.fasl
+; compilation finished in 0:00:00.000
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/util/errors.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/util/errors-tmp5GEXGEG5.fasl
+; compilation finished in 0:00:00.007
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/util/numbers.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/util/numbers-tmpAR3FSGEY.fasl
+; compilation finished in 0:00:00.042
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/util/json.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/util/json-tmpJAIDFZTC.fasl
+; compilation finished in 0:00:00.076
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/types/types.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/types/types-tmp8V3J6PE9.fasl
+; compilation finished in 0:00:00.017
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/types/temporal.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/types/temporal-tmp9V47YWQF.fasl
+; compilation finished in 0:00:00.022
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/types/values.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/types/values-tmp9BN22RMA.fasl
+; compilation finished in 0:00:00.034
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/types/compare.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/types/compare-tmp1CXFJSK9.fasl
+; compilation finished in 0:00:00.006
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/exec/context.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/exec/context-tmpX4BRKI0R.fasl
+; compilation finished in 0:00:00.027
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/storage/columns.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/storage/columns-tmpQ371UGST.fasl
+; compilation finished in 0:00:00.076
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/storage/table.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/storage/table-tmp2OWI3Q7U.fasl
+; compilation finished in 0:00:00.056
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/storage/stats.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/storage/stats-tmp9KKTJMYV.fasl
+; compilation finished in 0:00:00.015
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/storage/index.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/storage/index-tmpJU0JWO19.fasl
+; compilation finished in 0:00:00.029
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/storage/catalog.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/storage/catalog-tmpZX2WN8N4.fasl
+; compilation finished in 0:00:00.026
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/storage/binary.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/storage/binary-tmpOU81XRV0.fasl
+; compilation finished in 0:00:00.019
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/storage/files.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/storage/files-tmpY2ML9CFA.fasl
+; compilation finished in 0:00:00.039
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/storage/pqcf-write.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/storage/pqcf-write-tmpX2JYJDQE.fasl
+; compilation finished in 0:00:00.050
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/storage/pqcf-read.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/storage/pqcf-read-tmpOPCILR65.fasl
+; compilation finished in 0:00:00.104
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/ingest/common.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/ingest/common-tmpRV9F8A9A.fasl
+; compilation finished in 0:00:00.015
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/ingest/csv.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/ingest/csv-tmpK2ZAJT4I.fasl
+; compilation finished in 0:00:00.029
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/ingest/json.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/ingest/json-tmpUX5S4ADN.fasl
+; compilation finished in 0:00:00.054
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/sql/lexer.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/sql/lexer-tmp10401X32.fasl
+; compilation finished in 0:00:00.015
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/sql/ast.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/sql/ast-tmpZ7CBRM0G.fasl
+; compilation finished in 0:00:00.161
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/sql/parser.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/sql/parser-tmp9OZEQ0G2.fasl
+; compilation finished in 0:00:00.032
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/analyzer/bound.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/analyzer/bound-tmpB2JTL1W9.fasl
+; compilation finished in 0:00:00.070
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/analyzer/functions.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/analyzer/functions-tmpP3BI68WQ.fasl
+; compilation finished in 0:00:00.051
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/analyzer/binder.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/analyzer/binder-tmpQDARA81Z.fasl
+; compilation finished in 0:00:00.051
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/analyzer/query.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/analyzer/query-tmpYEMMM7SE.fasl
+; compilation finished in 0:00:00.018
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/plan/logical.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/plan/logical-tmp73HU0RPK.fasl
+; compilation finished in 0:00:00.051
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/plan/optimizer.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/plan/optimizer-tmpIO5N7K88.fasl
+; compilation finished in 0:00:00.036
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/plan/access.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/plan/access-tmpCM21U60Z.fasl
+; compilation finished in 0:00:00.065
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/plan/physical.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/plan/physical-tmp9DT7SEFG.fasl
+; compilation finished in 0:00:00.128
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/native/kernels.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/native/kernels-tmp8065ESJT.fasl
+; compilation finished in 0:00:00.039
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/exec/expressions.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/exec/expressions-tmp7S8Z6FGF.fasl
+; compilation finished in 0:00:00.053
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/exec/aggregates.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/exec/aggregates-tmpSIT3QPKP.fasl
+; compilation finished in 0:00:00.008
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/exec/operators.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/exec/operators-tmpE0PA0714.fasl
+; compilation finished in 0:00:00.058
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/exec/vectors.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/exec/vectors-tmpJRWHHVG0.fasl
+; compilation finished in 0:00:00.036
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/exec/vexpressions.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/exec/vexpressions-tmp4WZVROCX.fasl
+; compilation finished in 0:00:00.148
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/exec/keytable.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/exec/keytable-tmpA0I3UKX8.fasl
+; compilation finished in 0:00:00.051
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/exec/vaggregates.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/exec/vaggregates-tmp267Y2N80.fasl
+; compilation finished in 0:00:00.152
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/exec/vnative.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/exec/vnative-tmpOUPE5FSJ.fasl
+; compilation finished in 0:00:00.048
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/exec/voperators.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/exec/voperators-tmpIGHCU6ZA.fasl
+; compilation finished in 0:00:00.079
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/exec/parallel.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/exec/parallel-tmpBO0TUGLK.fasl
+; compilation finished in 0:00:00.040
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/engine.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/engine-tmpIIXPIQNW.fasl
+; compilation finished in 0:00:00.042
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/protocol/requests.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/protocol/requests-tmpOHM494YR.fasl
+; compilation finished in 0:00:00.035
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/server/http.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/server/http-tmpOVFB07XF.fasl
+; compilation finished in 0:00:00.051
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/server/scheduler.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/server/scheduler-tmpG6VFGMYP.fasl
+; compilation finished in 0:00:00.046
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/server/metrics.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/server/metrics-tmp4QIPRMOF.fasl
+; compilation finished in 0:00:00.013
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/server/server.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/server/server-tmpGW0QV22K.fasl
+; compilation finished in 0:00:00.060
+; compiling file "/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/src/protocol/cli.lisp" (written 11 OCT 2026 01:57:29 AM):
+
+; wrote /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/fasl/src/protocol/cli-tmp2K9J0HSR.fasl
+; compilation finished in 0:00:00.014
+[undoing binding stack and other enclosing state... done]
+[performing final GC... done]
+[saving current Lisp image into /srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp/build/polyquery:
+writing 5680 bytes from the static space at 0x2f0100000
+writing 34865152 bytes from the dynamic space at 0x1000000000
+writing 9288944 bytes from the read-only space at 0xfff720000
+writing 0 bytes from the text space at (nil)
+done]
+make: Leaving directory '/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/common-lisp'

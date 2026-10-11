@@ -1,0 +1,6 @@
+engine: polyquery-python caps=29
+  phase 1: 249/249 pass, 0 fail, 0 error, 0 not implemented
+  phase 2: 229/229 pass, 0 fail, 0 error, 0 not implemented
+  phase 3: 172/172 pass, 0 fail, 0 error, 0 not implemented
+  phase 5: 15/15 pass, 0 fail, 0 error, 0 not implemented
+  TOTAL: 665/665 pass

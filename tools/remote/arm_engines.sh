@@ -41,6 +41,9 @@ mkdir -p "$L"
 sudo -n mkdir -p "$J/home/.m2/repository"
 sudo -n cp -a ~/.pq-stage/"$JOB"/repo "$J/"
 sudo -n cp -a ~/.pq-cache/m2/. "$J/home/.m2/repository/"
+# Maven resolves the local repo from user.home (passwd), not $HOME: point the Clojure CLI at the job's copy.
+sudo -n mkdir -p "$J/home/.clojure"
+echo "{:mvn/local-repo \"$J/home/.m2/repository\"}" | sudo -n tee "$J/home/.clojure/deps.edn" >/dev/null
 sudo -n chown -R pqrunner:pqrunner "$J"
 rm -rf ~/.pq-stage/"$JOB"
 P=/opt/pq

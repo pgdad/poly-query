@@ -1,0 +1,3 @@
+make: Entering directory '/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/go'
+go build -trimpath -o build/polyquery ./cmd/polyquery
+make: Leaving directory '/srv/pqrunner/jobs/engines-20261011T055914Z-1555867/repo/implementations/go'

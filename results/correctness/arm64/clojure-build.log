@@ -1,0 +1,4 @@
+make: Entering directory '/srv/pqrunner/jobs/engines-20261011T060007Z-1572048/repo/implementations/clojure'
+clojure -Spath | tr ':' '\n' | grep -v '^src$' | paste -sd: - > target/classpath
+clojure -M -i script/compile.clj
+make: Leaving directory '/srv/pqrunner/jobs/engines-20261011T060007Z-1572048/repo/implementations/clojure'
