@@ -26,8 +26,17 @@ done
 for run in "$@"; do
   read -r lang before after < <(python3 -c 'import json,sys; m=json.load(open(sys.argv[1]))
 print(m["language"], m["repo_ref"], m["import_branch"])' "/srv/polyquery/runs/$run/manifest.json")
+  # Remove the directory first: checkout of a path only adds/updates files, so files present at
+  # HEAD but absent at the ref would otherwise stay in the measured tree (HI-009).
+  for side in before after; do rm -rf "${BASE:?}/$side/implementations/$lang"; done
   git -C "$BASE/before" checkout -q "$before" -- "implementations/$lang"
   git -C "$BASE/after" checkout -q "$after" -- "implementations/$lang"
+  for side in before after; do
+    ref=$before; [[ $side == after ]] && ref=$after
+    [[ -z $(git -C "$BASE/$side" diff --name-only "$ref" -- "implementations/$lang") &&
+       -z $(git -C "$BASE/$side" ls-files --others -- "implementations/$lang") ]] ||
+      { echo "before_after: $side tree of $lang differs from $ref" >&2; exit 1; }
+  done
   langs+=("$lang")
   echo "before_after: $lang before=${before:0:12} after=$after ($run)"
 done
