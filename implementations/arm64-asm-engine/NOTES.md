@@ -1,5 +1,31 @@
 # Working notes (arm64-asm-engine)
 
+## Status (Phase 5, session 1) — in progress
+- Conformance: all phases 569/569, `--modes` 3324/3324 (also with
+  `PQ_PARALLEL_MIN_ROWS=1`, which forces parallel tasks on tiny inputs —
+  use it to test the parallel code paths). `make build test` pass.
+- Options (protocol.S parse_exec_opts -> TLS g_x_mode / g_x_join /
+  g_x_threads / g_x_optimize in exec.S; default threads = --threads or
+  min(nprocs, 8)). Capabilities phase5, exec.*, join.* claimed.
+- New modules: join.S (hash / merge / nested-loop joins), vexec.S (batch
+  expression evaluator veval, vfilter, vkey_cells), vagg.S (hash
+  aggregation, partial tables merged in task order), parallel.S (par_run:
+  worker threads with own arena/setjmp, arenas adopted by the caller).
+- mode row = old executor (per-tuple eval, sort-based grouping);
+  vectorized = batch scans/filters, hash aggregation, vectorized join keys.
+- optimize=false disables: top-N, hash-join build-side swap (and future
+  logical rewrites). Pushdown / pruning / index choice stay (Phase 3 suite
+  runs with optimize=false in --modes and expects them).
+- Benchmark: bench/bench.sh DATA_DIR (data: pqgen.py generate --scale 1m
+  --out /tmp/pqbench/1m --jobs 1); baseline before Phase 5 in
+  bench/baseline-before.txt.
+
+## Next steps (Phase 5)
+- constant folding / predicate simplification (optimize=true only)
+- dictionary-code comparisons for STRING = constant, explicit NEON kernel
+- vectorized projection; faster merge join (vectorized keys)
+- README: Phase 5 section with before/after table
+
 ## Status (Phase 4, session 1) — complete
 - Conformance: session and `--transport http` both 554/554 for phases 1-3
   (phase 5: 15 not_implemented, out of scope). `tests/concurrency/http_suite.py`
