@@ -1,7 +1,7 @@
 {
  "language": "x86_64-asm",
- "generated": "2026-10-11T11:39:45+00:00",
- "commit": "6775395fbe69c414a539f19e3069abf5d4d3a24e",
+ "generated": "2026-10-11T12:08:04+00:00",
+ "commit": "1ab9b775d80000ff86b2cd4e9ff6e8b3c2cb336a",
  "suites": {
   "public": {
    "exit": 0,
@@ -18,21 +18,21 @@
  },
  "variants": {
   "x86_scalar": {
-   "provided": 16,
+   "provided": 20,
    "total": 20,
    "public": "PASS",
    "asan": "PASS",
    "hidden": "PASS"
   },
   "x86_avx2": {
-   "provided": 16,
+   "provided": 20,
    "total": 20,
    "public": "PASS",
    "asan": "PASS",
    "hidden": "PASS"
   },
   "x86_avx512": {
-   "provided": 16,
+   "provided": 20,
    "total": 20,
    "public": "PASS",
    "asan": "PASS",
@@ -42,7 +42,11 @@
  "summary": {
   "variants": 3,
   "all_pass": true,
-  "complete_variants": [],
+  "complete_variants": [
+   "x86_avx2",
+   "x86_avx512",
+   "x86_scalar"
+  ],
   "suites_exit_ok": true
  }
 }
