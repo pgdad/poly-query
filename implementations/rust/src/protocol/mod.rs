@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use crate::exec::Row;
 use crate::json::{self, Json};
 use crate::storage::{ColumnStats, Field, Table};
+use crate::types::DataType;
 use request::Request;
 
 pub const ENGINE_NAME: &str = "polyquery-rust";
@@ -44,6 +45,13 @@ pub const CAPABILITIES: &[&str] = &[
     "index.btree",
     "phase4",
     "http.streaming",
+    "phase5",
+    "exec.row",
+    "exec.vectorized",
+    "exec.parallel",
+    "join.hash",
+    "join.merge",
+    "join.nested_loop",
 ];
 
 /// The `version` response body (without id).
@@ -200,35 +208,40 @@ pub fn catch_panic<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
 
 /// Serializes rows as a JSON array of arrays (types.md §9).
 pub fn rows_json(rows: &[Row], columns: &[Field]) -> String {
+    let types: Vec<DataType> = columns.iter().map(|f| f.data_type).collect();
     let mut out = String::with_capacity(rows.len() * 16 + 2);
     out.push('[');
     for (i, row) in rows.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
-        write_row(row, columns, &mut out);
+        write_row(row, &types, &mut out);
     }
     out.push(']');
     out
 }
 
-/// Serializes one row as a JSON array.
-pub fn write_row(row: &Row, columns: &[Field], out: &mut String) {
+/// Serializes one row as a JSON array (`types`: the column types).
+pub fn write_row(row: &Row, types: &[DataType], out: &mut String) {
     out.push('[');
     for (j, v) in row.iter().enumerate() {
         if j > 0 {
             out.push(',');
         }
-        v.write_json(columns[j].data_type, out);
+        v.write_json(types[j], out);
     }
     out.push(']');
 }
 
 /// The success body of a `query` request (protocol.md §5.2).
-pub fn query_body(result: &QueryResult, count_only: bool, elapsed: Duration) -> Json {
+pub fn query_body(result: QueryResult, count_only: bool, elapsed: Duration) -> Json {
     let mut body = vec![ok(), ("columns", columns_json(&result.columns))];
     if !count_only {
-        body.push(("rows", Json::Raw(rows_json(&result.rows, &result.columns))));
+        let rows = match result.rows_json {
+            Some(json) => json,
+            None => rows_json(&result.rows, &result.columns),
+        };
+        body.push(("rows", Json::Raw(rows)));
     }
     body.push(("row_count", Json::uint(result.row_count)));
     body.push((
@@ -344,8 +357,10 @@ pub fn execute(engine: &Engine, req: Request, started: Instant) -> Result<Json> 
             body
         }
         Request::Query { sql, options } => {
-            let result = engine.query(&sql, &options)?;
-            return Ok(query_body(&result, options.count_only, started.elapsed()));
+            let result = engine
+                .start_query(&sql, &options, Default::default())?
+                .collect_json(options.count_only)?;
+            return Ok(query_body(result, options.count_only, started.elapsed()));
         }
         Request::Explain { sql, options } => {
             vec![ok(), ("plan", engine.explain(&sql, &options)?)]

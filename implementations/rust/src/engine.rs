@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use crate::catalog::Catalog;
 use crate::config::Config;
 use crate::error::{Error, ErrorCode, Result};
-use crate::exec::{ExecContext, Operator, Row, build};
+use crate::exec::parallel::default_morsel_rows;
+use crate::exec::{ExecContext, ExecOptions, Operator, Row, build};
 use crate::ingest::{self, Format, IngestOptions};
 use crate::json::Json;
 use crate::planner::physical::{self, JoinStrategy};
@@ -80,8 +81,27 @@ pub struct QueryOptions {
     pub join: JoinStrategy,
     /// `use_indexes: false` ⇒ never use indexes.
     pub use_indexes: bool,
+    /// Execution model (`mode`).
+    pub mode: ExecMode,
+    /// Worker threads (`threads`; None = the `--threads` default).
+    pub threads: Option<usize>,
+    /// `optimize: false` disables logical rewrites.
+    pub optimize: bool,
+    /// Rows per parallel morsel (tests; None = default).
+    pub morsel_rows: Option<usize>,
     /// Client-assigned id used for cancellation (HTTP).
     pub query_id: Option<String>,
+}
+
+/// Query option `mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExecMode {
+    /// Vectorized execution (the engine's default).
+    #[default]
+    Auto,
+    /// Row-at-a-time baseline.
+    Row,
+    Vectorized,
 }
 
 impl Default for QueryOptions {
@@ -92,6 +112,10 @@ impl Default for QueryOptions {
             count_only: false,
             join: JoinStrategy::Auto,
             use_indexes: true,
+            mode: ExecMode::Auto,
+            threads: None,
+            optimize: true,
+            morsel_rows: None,
             query_id: None,
         }
     }
@@ -109,9 +133,12 @@ impl QueryOptions {
 #[derive(Debug)]
 pub struct QueryResult {
     pub columns: Vec<Field>,
-    /// Empty when `count_only` was requested.
+    /// Empty when `count_only` was requested or the rows were serialized
+    /// directly (`rows_json`).
     pub rows: Vec<Row>,
     pub row_count: u64,
+    /// The rows as a JSON array (from [`QueryCursor::collect_json`]).
+    pub rows_json: Option<String>,
 }
 
 /// How a running query is interrupted (concurrency.md §3–§4).
@@ -394,8 +421,9 @@ impl Engine {
         let ctx = BindContext {
             catalog,
             test_functions: self.config.test_functions,
+            optimize: opts.optimize,
         };
-        let logical = optimizer::optimize(plan_query(q, &ctx)?);
+        let logical = optimizer::optimize(plan_query(q, &ctx)?, opts.optimize);
         Ok(physical::lower(&logical, opts.physical()))
     }
 
@@ -403,12 +431,36 @@ impl Engine {
     pub fn explain(&self, sql: &str, opts: &QueryOptions) -> Result<Json> {
         match parse_statement(sql)? {
             Statement::Query(q) | Statement::Explain(q) => {
-                Ok(self.plan_query(&self.catalog(), &q, opts)?.to_json())
+                let plan = self.plan_query(&self.catalog(), &q, opts)?;
+                Ok(self.annotated_plan(&plan, opts))
             }
             Statement::CreateIndex { .. } | Statement::DropIndex { .. } => {
                 Err(Error::unsupported("only queries can be explained"))
             }
         }
+    }
+
+    /// Plan JSON with the execution model on the root node
+    /// (`"execution": {"mode": …, "threads": …}`).
+    fn annotated_plan(&self, plan: &PhysicalPlan, opts: &QueryOptions) -> Json {
+        let mut json = plan.to_json();
+        let (mode, threads) = match opts.mode {
+            ExecMode::Row => ("row", 1),
+            _ => (
+                "vectorized",
+                opts.threads.unwrap_or(self.config.threads).max(1),
+            ),
+        };
+        if let Json::Object(fields) = &mut json {
+            let execution = Json::object(vec![
+                ("mode", Json::str(mode)),
+                ("threads", Json::uint(threads as u64)),
+            ]);
+            // Before "children", so the node's own properties stay together.
+            let at = fields.len().saturating_sub(1);
+            fields.insert(at, ("execution".to_string(), execution));
+        }
+        json
     }
 
     /// Executes a SQL statement and materializes its result.
@@ -434,6 +486,7 @@ impl Engine {
             ctx: ExecContext::default(),
             max_rows: opts.max_rows,
             row_count: 0,
+            replay: None,
         };
         match parse_statement(sql)? {
             Statement::Query(q) => {
@@ -455,25 +508,41 @@ impl Engine {
                 let memory =
                     usize::try_from(self.config.max_query_memory_mb.saturating_mul(1024 * 1024))
                         .unwrap_or(usize::MAX);
-                let mut ctx = ExecContext::new(None, memory, self.config.test_functions)
-                    .with_deadline(deadline)
-                    .with_max_join_rows(self.config.max_join_rows)
-                    .with_physical_options(opts.physical());
-                if let Some(flag) = control.cancel {
-                    ctx = ctx.with_cancel_flag(flag);
-                }
+                let exec = ExecOptions {
+                    vectorized: opts.mode != ExecMode::Row,
+                    threads: opts.threads.unwrap_or(self.config.threads).max(1),
+                    morsel_rows: opts.morsel_rows.unwrap_or_else(default_morsel_rows),
+                };
+                let make_ctx = |exec: ExecOptions| {
+                    let ctx = ExecContext::new(None, memory, self.config.test_functions)
+                        .with_deadline(deadline)
+                        .with_max_join_rows(self.config.max_join_rows)
+                        .with_physical_options(opts.physical())
+                        .with_exec_options(exec);
+                    match &control.cancel {
+                        Some(flag) => ctx.with_cancel_flag(flag.clone()),
+                        None => ctx,
+                    }
+                };
+                let ctx = make_ctx(exec);
                 ctx.check_interrupt()?;
+                // A vectorized/parallel execution that fails is re-run with
+                // the row-at-a-time reference engine (see `QueryCursor`).
+                let replay = exec
+                    .vectorized
+                    .then(|| (plan.clone(), make_ctx(ExecOptions::default())));
                 Ok(QueryCursor {
                     columns,
-                    source: CursorSource::Plan(build(plan)),
+                    source: CursorSource::Plan(build(plan, &ctx)),
                     ctx,
                     max_rows: opts.max_rows,
                     row_count: 0,
+                    replay,
                 })
             }
             Statement::Explain(q) => {
                 let plan = self.plan_query(&self.catalog(), &q, opts)?;
-                let text = plan.to_json().to_string_compact();
+                let text = self.annotated_plan(&plan, opts).to_string_compact();
                 Ok(ready(
                     vec![Field::new("plan", DataType::String)],
                     vec![vec![Value::str(&text)]],
@@ -506,12 +575,22 @@ enum CursorSource {
 
 /// An executing statement: pulls result rows one at a time, enforcing
 /// `max_rows`, the timeout and cancellation.
+///
+/// Error replay: vectorized and parallel execution evaluate expressions
+/// eagerly over whole batches and in a different order than the row engine,
+/// so when such an execution fails with a data error (overflow, division by
+/// zero, conversion, …) before any row has been delivered, the statement is
+/// transparently re-executed by the row-at-a-time engine, whose result or
+/// error is then reported. Every execution mode therefore reports exactly
+/// the baseline's errors (e.g. `LIMIT 1` over a later failing row succeeds).
 pub struct QueryCursor {
     columns: Vec<Field>,
     source: CursorSource,
     ctx: ExecContext,
     max_rows: Option<u64>,
     row_count: u64,
+    /// Plan and context for a row-mode re-execution (vectorized queries).
+    replay: Option<(PhysicalPlan, ExecContext)>,
 }
 
 impl QueryCursor {
@@ -525,9 +604,43 @@ impl QueryCursor {
         self.row_count
     }
 
+    /// Switches to row-mode re-execution after `e`, if possible.
+    fn try_replay(&mut self, e: &Error) -> bool {
+        let replayable = !matches!(
+            e.code,
+            ErrorCode::Timeout | ErrorCode::Cancelled | ErrorCode::ResourceLimit
+        );
+        if !replayable {
+            return false;
+        }
+        let Some((plan, ctx)) = self.replay.take() else {
+            return false;
+        };
+        // Dropping the old operator tree stops its worker threads.
+        self.source = CursorSource::Plan(build(plan, &ctx));
+        self.ctx = ctx;
+        self.row_count = 0;
+        true
+    }
+
     /// The next result row, or None at the end.
     pub fn next_row(&mut self) -> Result<Option<Row>> {
+        loop {
+            match self.pull() {
+                Err(e) if self.row_count == 0 && self.try_replay(&e) => continue,
+                r => return r,
+            }
+        }
+    }
+
+    fn pull(&mut self) -> Result<Option<Row>> {
         let row = match &mut self.source {
+            // An internal failure of the vectorized engine is contained
+            // and answered by the row-mode re-execution.
+            CursorSource::Plan(root) if self.replay.is_some() => {
+                let ctx = &self.ctx;
+                crate::protocol::catch_panic(|| root.next(ctx))?
+            }
             CursorSource::Plan(root) => root.next(&self.ctx)?,
             CursorSource::Ready(rows) => rows.next(),
         };
@@ -549,10 +662,129 @@ impl QueryCursor {
         self.ctx.check_interrupt()
     }
 
+    /// Runs the query to completion counting rows (`result: "count"`).
+    fn count(mut self) -> Result<QueryResult> {
+        // One row beyond `max_rows` is enough to detect the violation.
+        let max = self.max_rows.map_or(u64::MAX, |m| m.saturating_add(1));
+        loop {
+            let step = match &mut self.source {
+                CursorSource::Plan(root) if self.replay.is_some() => {
+                    let ctx = &self.ctx;
+                    let left = max - self.row_count;
+                    crate::protocol::catch_panic(|| root.skip(ctx, left))
+                }
+                CursorSource::Plan(root) => root.skip(&self.ctx, max - self.row_count),
+                CursorSource::Ready(rows) => Ok(rows.by_ref().take(max as usize).count() as u64),
+            };
+            match step {
+                Ok(0) => break,
+                Ok(n) => {
+                    self.row_count += n;
+                    if let Some(m) = self.max_rows
+                        && self.row_count > m
+                    {
+                        return Err(Error::resource_limit(format!(
+                            "result exceeds max_rows = {m}"
+                        )));
+                    }
+                }
+                Err(e) => {
+                    if !self.try_replay(&e) {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Ok(QueryResult {
+            columns: self.columns,
+            rows: Vec::new(),
+            row_count: self.row_count,
+            rows_json: None,
+        })
+    }
+
+    /// Runs the query to completion, serializing the rows directly into a
+    /// JSON array (types.md §9) instead of materializing them; vectorized
+    /// plans write straight from their column vectors.
+    pub fn collect_json(mut self, count_only: bool) -> Result<QueryResult> {
+        if count_only {
+            return self.count();
+        }
+        let types: Vec<DataType> = self.columns.iter().map(|f| f.data_type).collect();
+        let max = self.max_rows.map_or(u64::MAX, |m| m.saturating_add(1));
+        let mut out = String::from("[");
+        loop {
+            let before = out.len();
+            let step = match &mut self.source {
+                CursorSource::Plan(root) if self.replay.is_some() => {
+                    let ctx = &self.ctx;
+                    let left = max - self.row_count;
+                    let out = &mut out;
+                    crate::protocol::catch_panic(|| root.write_json(ctx, out, &types, left))
+                }
+                CursorSource::Plan(root) => {
+                    root.write_json(&self.ctx, &mut out, &types, max - self.row_count)
+                }
+                CursorSource::Ready(rows) => {
+                    let mut n = 0;
+                    for row in rows.by_ref().take((max - self.row_count) as usize) {
+                        if out.len() > 1 {
+                            out.push(',');
+                        }
+                        crate::protocol::write_row(&row, &types, &mut out);
+                        n += 1;
+                    }
+                    Ok(n)
+                }
+            };
+            match step {
+                Ok(0) => break,
+                Ok(n) => {
+                    self.row_count += n;
+                    if let Some(m) = self.max_rows
+                        && self.row_count > m
+                    {
+                        return Err(Error::resource_limit(format!(
+                            "result exceeds max_rows = {m}"
+                        )));
+                    }
+                    self.ctx.reserve(out.len() - before)?;
+                }
+                Err(e) => {
+                    if !self.try_replay(&e) {
+                        return Err(e);
+                    }
+                    out.truncate(1);
+                }
+            }
+        }
+        out.push(']');
+        Ok(QueryResult {
+            columns: self.columns,
+            rows: Vec::new(),
+            row_count: self.row_count,
+            rows_json: Some(out),
+        })
+    }
+
     /// Runs the query to completion, keeping the rows unless `count_only`.
     pub fn collect(mut self, count_only: bool) -> Result<QueryResult> {
+        if count_only {
+            return self.count();
+        }
         let mut rows = Vec::new();
-        while let Some(row) = self.next_row()? {
+        loop {
+            let row = match self.pull() {
+                Ok(Some(row)) => row,
+                Ok(None) => break,
+                Err(e) => {
+                    if self.try_replay(&e) {
+                        rows.clear();
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
             if !count_only {
                 self.ctx
                     .reserve(row.iter().map(|v| v.approx_size()).sum::<usize>() + 24)?;
@@ -563,6 +795,7 @@ impl QueryCursor {
             columns: self.columns,
             rows,
             row_count: self.row_count,
+            rows_json: None,
         })
     }
 }
@@ -830,5 +1063,164 @@ mod tests {
             .unwrap();
         assert_eq!(r.columns, vec![Field::new("plan", DataType::String)]);
         assert_eq!(r.row_count, 1);
+    }
+
+    /// Every combination of mode, join algorithm, threads and optimize
+    /// returns the row baseline's result (multiset; ordered queries in
+    /// order) and errors. Tiny morsels force the parallel operators.
+    #[test]
+    fn execution_modes_agree() {
+        let e = Engine::new(Config::default());
+        let mut fact = String::from("id,k,grp,amt,tag\n");
+        for i in 0..600 {
+            let k = if i % 13 == 0 {
+                String::new()
+            } else {
+                (i % 37).to_string()
+            };
+            let tag = ["red", "green", "blue", ""][i % 4];
+            fact.push_str(&format!(
+                "{i},{k},{},{}.{:02},{tag}\n",
+                i % 7,
+                i * 3 % 101,
+                i % 100
+            ));
+        }
+        load(&e, "f", &fact);
+        let mut dim = String::from("k,label\n");
+        for k in 0..40 {
+            dim.push_str(&format!("{k},L{}\n", k % 5));
+        }
+        load(&e, "d", &dim);
+        let queries = [
+            (
+                "SELECT grp, COUNT(*), SUM(amt), MIN(tag), MAX(k), AVG(amt) FROM f GROUP BY grp",
+                false,
+            ),
+            (
+                "SELECT COUNT(DISTINCT k), SUM(DISTINCT grp) FROM f WHERE amt > 10",
+                false,
+            ),
+            (
+                "SELECT d.label, COUNT(*), SUM(f.amt) FROM f JOIN d ON d.k = f.k GROUP BY d.label",
+                false,
+            ),
+            (
+                "SELECT f.id, d.label FROM f LEFT JOIN d ON d.k = f.k AND d.label <> 'L1'",
+                false,
+            ),
+            ("SELECT id, amt FROM f ORDER BY amt DESC, id LIMIT 25", true),
+            (
+                "SELECT tag, k FROM f ORDER BY tag NULLS FIRST, k DESC, id",
+                true,
+            ),
+            ("SELECT DISTINCT tag, grp FROM f", false),
+            (
+                "SELECT id FROM f WHERE k IN (SELECT k FROM d WHERE label = 'L2')",
+                false,
+            ),
+            (
+                "SELECT COUNT(*) FROM f a, d b WHERE a.k < b.k AND b.label = 'L3'",
+                false,
+            ),
+            (
+                "SELECT x.id, y.label, z.label FROM f x JOIN d y ON y.k = x.k \
+                 JOIN d z ON z.k = x.grp WHERE z.label IN ('L1', 'L2')",
+                false,
+            ),
+            ("SELECT 100 / (grp - 3) FROM f", false),
+            (
+                "SELECT id FROM f WHERE grp <> 3 AND 100 / (grp - 3) > 20",
+                false,
+            ),
+            ("SELECT SUM(id * 4611686018427387904) FROM f", false),
+        ];
+        let base = QueryOptions {
+            mode: ExecMode::Row,
+            join: JoinStrategy::Hash,
+            threads: Some(1),
+            ..Default::default()
+        };
+        let canon = |r: Result<QueryResult>, ordered: bool| match r {
+            Ok(mut q) => {
+                // FLOAT64 sums may differ in the last bits (summation order).
+                let fmt = |v: &Value| match v {
+                    Value::Float(f) => format!("{f:.9e}"),
+                    v => format!("{v:?}"),
+                };
+                let mut rows: Vec<String> = q
+                    .rows
+                    .drain(..)
+                    .map(|r| r.iter().map(fmt).collect::<Vec<_>>().join("|"))
+                    .collect();
+                if !ordered {
+                    rows.sort();
+                }
+                Ok(rows)
+            }
+            Err(err) => Err(err.code),
+        };
+        for (sql, ordered) in queries {
+            let expect = canon(e.query(sql, &base), ordered);
+            for mode in [ExecMode::Row, ExecMode::Vectorized] {
+                for join in [
+                    JoinStrategy::Hash,
+                    JoinStrategy::Merge,
+                    JoinStrategy::NestedLoop,
+                ] {
+                    for threads in [1, 4] {
+                        for optimize in [true, false] {
+                            let opts = QueryOptions {
+                                mode,
+                                join,
+                                threads: Some(threads),
+                                optimize,
+                                morsel_rows: Some(50),
+                                ..Default::default()
+                            };
+                            let got = canon(e.query(sql, &opts), ordered);
+                            assert_eq!(got, expect, "{sql} with {opts:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Consumers that stop early (LIMIT) stop the parallel workers; this
+    /// must neither hang nor change results.
+    #[test]
+    fn parallel_early_stop() {
+        let e = Engine::new(Config::default());
+        let mut csv = String::from("id,v\n");
+        for i in 0..3000 {
+            csv.push_str(&format!("{i},{}\n", i % 17));
+        }
+        load(&e, "t", &csv);
+        for round in 0..200u64 {
+            let limit = 30 + (round * 37) % 2000;
+            let opts = QueryOptions {
+                threads: Some(1 + (round as usize % 7)),
+                morsel_rows: Some(5 + (round as usize % 11)),
+                ..Default::default()
+            };
+            let sql = format!("SELECT id FROM t WHERE v <> 3 LIMIT {limit}");
+            let r = e.query(&sql, &opts).unwrap();
+            assert_eq!(r.row_count, limit);
+            // Ordered gather: the first `limit` qualifying rows in scan order.
+            let first: Vec<i64> = (0..3000)
+                .filter(|i| i % 17 != 3)
+                .take(limit as usize)
+                .collect();
+            let got: Vec<i64> = r
+                .rows
+                .iter()
+                .map(|row| match row[0] {
+                    Value::Int(i) => i,
+                    _ => -1,
+                })
+                .collect();
+            assert_eq!(got, first);
+        }
     }
 }

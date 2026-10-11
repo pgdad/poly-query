@@ -105,29 +105,28 @@ impl Value {
         match self {
             Value::Null => out.push_str("null"),
             Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-            Value::Int(i) => out.push_str(&i.to_string()),
+            Value::Int(i) => decimal::write_i64(out, *i),
             Value::Float(f) => out.push_str(&float::format_f64(*f)),
             Value::Decimal(u, s) => {
-                let text = match ty {
+                out.push('"');
+                match ty {
                     DataType::Decimal { scale, .. } if scale != *s => {
                         let v = decimal::rescale(*u as i128, *s, scale).unwrap_or(*u as i128);
-                        decimal::format(v as i64, scale)
+                        decimal::write(out, v as i64, scale);
                     }
-                    _ => decimal::format(*u, *s),
-                };
-                out.push('"');
-                out.push_str(&text);
+                    _ => decimal::write(out, *u, *s),
+                }
                 out.push('"');
             }
             Value::Str(s) => crate::json::write_escaped(out, s),
             Value::Date(d) => {
                 out.push('"');
-                out.push_str(&datetime::format_date(*d));
+                datetime::write_date(out, *d);
                 out.push('"');
             }
             Value::Timestamp(t) => {
                 out.push('"');
-                out.push_str(&datetime::format_timestamp(*t));
+                datetime::write_timestamp(out, *t);
                 out.push('"');
             }
         }

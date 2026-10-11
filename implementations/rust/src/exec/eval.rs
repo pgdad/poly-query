@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 
 use super::context::ExecContext;
 use super::{functions, subquery};
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::planner::expr::{ArithKind, Expr, KeyDomain};
 use crate::sql::ast::BinaryOp;
 use crate::types::cast::cast_value;
@@ -97,7 +97,10 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
         },
         Expr::Not(inner) => bool_value(not3(truth(&eval(inner, row, ctx)?))),
         Expr::And(l, r) => {
-            let lv = eval(l, row, ctx)?;
+            let lv = match eval(l, row, ctx) {
+                Ok(v) => v,
+                Err(e) => return decided_by(r, false, e, row, ctx),
+            };
             if let Value::Bool(false) = lv {
                 return Ok(Value::Bool(false));
             }
@@ -108,7 +111,10 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
             }
         }
         Expr::Or(l, r) => {
-            let lv = eval(l, row, ctx)?;
+            let lv = match eval(l, row, ctx) {
+                Ok(v) => v,
+                Err(e) => return decided_by(r, true, e, row, ctx),
+            };
             if let Value::Bool(true) = lv {
                 return Ok(Value::Bool(true));
             }
@@ -237,6 +243,36 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
             bool_value(if *negated { not3(r) } else { r })
         }
     })
+}
+
+/// The left operand of `AND` (`decisive = false`) or `OR` (`decisive =
+/// true`) failed with `err`. The operators are commutative, so the error is
+/// only raised if the right operand does not decide the result on its own;
+/// evaluation order (and hence plan shape, e.g. predicate pushdown) then
+/// does not change whether a query fails. Interruptions and resource limits
+/// are always raised.
+fn decided_by(
+    r: &Expr,
+    decisive: bool,
+    err: Error,
+    row: &[Value],
+    ctx: &ExecContext,
+) -> Result<Value> {
+    let data_error = matches!(
+        err.code,
+        ErrorCode::NumericOverflow
+            | ErrorCode::DivisionByZero
+            | ErrorCode::ConversionError
+            | ErrorCode::InvalidArgument
+            | ErrorCode::SubqueryCardinality
+    );
+    if data_error
+        && let Ok(Value::Bool(b)) = eval(r, row, ctx)
+        && b == decisive
+    {
+        return Ok(Value::Bool(decisive));
+    }
+    Err(err)
 }
 
 /// Truth value of a predicate (NULL counts as not true).
@@ -410,6 +446,48 @@ mod tests {
             normalize_key(Value::Decimal(15, 1), KeyDomain::Float),
             Value::Float(1.5)
         );
+    }
+
+    #[test]
+    fn and_or_errors_are_order_independent() {
+        let ty = crate::types::DataType::Int64;
+        let lit = |v: Value| Box::new(Expr::Literal { value: v, ty });
+        let div0 = Box::new(Expr::Compare {
+            op: BinaryOp::Gt,
+            left: Box::new(Expr::Arith {
+                op: BinaryOp::Div,
+                kind: ArithKind::Int,
+                left: lit(Value::Int(1)),
+                right: lit(Value::Int(0)),
+                ty,
+            }),
+            right: lit(Value::Int(0)),
+        });
+        let ctx = ExecContext::default();
+        let f = Box::new(Expr::Literal {
+            value: Value::Bool(false),
+            ty: crate::types::DataType::Boolean,
+        });
+        let t = Box::new(Expr::Literal {
+            value: Value::Bool(true),
+            ty: crate::types::DataType::Boolean,
+        });
+        // The other operand decides: no error, in either order.
+        assert_eq!(
+            eval(&Expr::And(div0.clone(), f.clone()), &[], &ctx).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval(&Expr::And(f, div0.clone()), &[], &ctx).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval(&Expr::Or(div0.clone(), t.clone()), &[], &ctx).unwrap(),
+            Value::Bool(true)
+        );
+        // Otherwise the error is raised.
+        let e = eval(&Expr::And(div0, t), &[], &ctx).unwrap_err();
+        assert_eq!(e.code, ErrorCode::DivisionByZero);
     }
 
     #[test]

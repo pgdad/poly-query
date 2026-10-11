@@ -21,6 +21,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::json::Json;
 use crate::log;
 use crate::protocol::{catch_panic, columns_json, error_response, query_body, respond, write_row};
+use crate::types::DataType;
 
 /// Streamed rows per `rows` line (protocol limit: 10,000).
 const BATCH_ROWS: usize = 4096;
@@ -127,7 +128,9 @@ fn run(job: Job, ticket: Ticket, tx: SyncSender<Event>) {
                         };
                         s.run(cursor).map(Success::Streamed)
                     } else {
-                        cursor.collect(job.options.count_only).map(Success::Result)
+                        cursor
+                            .collect_json(job.options.count_only)
+                            .map(Success::Result)
                     }
                 })
                 // `_permit` is released here, before the response is sent.
@@ -172,7 +175,7 @@ fn finish(job: &Job, outcome: std::result::Result<Success, Failure>, tx: &SyncSe
             status: 200,
             body: respond(
                 job.id.clone(),
-                Ok(query_body(&result, job.options.count_only, duration)),
+                Ok(query_body(result, job.options.count_only, duration)),
             )
             .to_string_compact(),
         },
@@ -236,6 +239,7 @@ impl Streamer<'_> {
         // The header is held back until the first batch (or the end) is
         // ready, so errors found early still get a proper HTTP status.
         let mut header = Some(header);
+        let types: Vec<DataType> = cursor.columns().iter().map(|f| f.data_type).collect();
         let mut batch = String::new();
         let mut batch_rows = 0usize;
         let mut batch_started = Instant::now();
@@ -249,7 +253,7 @@ impl Streamer<'_> {
             } else {
                 batch.push(',');
             }
-            write_row(&row, cursor.columns(), &mut batch);
+            write_row(&row, &types, &mut batch);
             batch_rows += 1;
             // The first row goes out at once so that slow queries show
             // progress; later batches fill up or age out.
