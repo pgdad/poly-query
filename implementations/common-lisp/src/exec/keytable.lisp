@@ -307,6 +307,13 @@ are added when ADD, else their id is -1. Returns GIDS."
                                        -1)))))))
   gids)
 
+(defun key-table-group-hash (table g)
+  "Hash of the key of group G (used to partition groups)."
+  (if (key-table-int-slots table)
+      (let ((v (key-table-key table 0 g)))
+        (if (eq v +null+) +null-key-hash+ (hash-i64 v)))
+      (aref (key-table-hashes table) g)))
+
 (defun key-table-intern-group (table other g)
   "Group id in TABLE of the key of group G of the key table OTHER (added if
 new); both tables have the same key kinds."

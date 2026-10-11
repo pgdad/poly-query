@@ -303,11 +303,40 @@ THREADS workers, each aggregating into a partial group state."
                 (setf (prun-threads run) '())
                 (prun-raise run)
                 (check-interrupts)
-                (let ((total (svref states 0)))
-                  (loop for w from 1 below workers
-                        do (group-state-merge total (svref states w)))
-                  (setf output (group-state-batches total node)))))
+                (setf output (merge-partial-states states node (first (first consumers))))))
             (funcall (the function output))))))))
+
+
+(defun merge-partial-states (states node new-state)
+  "Batch iterator over the merged groups of the partial group STATES. Many
+groups are merged in parallel, one thread per hash partition of the groups."
+  (declare (type simple-vector states) (type function new-state))
+  (let ((workers (length states))
+        (groups (reduce #'+ states :key #'group-state-count)))
+    (if (or (= workers 1)
+            (null (pp-hash-aggregate-group-by node))
+            ;; Few groups (below a quarter morsel): a serial merge is cheaper.
+            (< groups (floor (morsel-rows) 4)))
+        (let ((total (svref states 0)))
+          (loop for w from 1 below workers
+                do (group-state-merge total (svref states w)))
+          (group-state-batches total node))
+        ;; Partition p collects the groups whose hash is p modulo the number
+        ;; of partitions, from every partial state.
+        (let ((parts (coerce (loop repeat workers collect (funcall new-state)) 'simple-vector)))
+          (run-in-threads
+           (loop for p below workers
+                 collect (let ((p p))
+                           (lambda ()
+                             (loop for w below workers
+                                   do (group-state-merge (svref parts p) (svref states w)
+                                                         p workers))))))
+          (check-interrupts)
+          (let ((iterators (map 'list (lambda (gs) (group-state-batches gs node)) parts)))
+            (lambda ()
+              (loop while iterators
+                    do (let ((b (funcall (the function (first iterators)))))
+                         (if b (return b) (pop iterators))))))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Parallel sorting: contiguous chunks of the permutation are sorted
