@@ -990,13 +990,22 @@ mod tests {
         );
         assert_eq!(code("SELECT a < b IS NULL"), ErrorCode::ParseError);
         assert_eq!(code("SELECT 1 UNION SELECT 2"), ErrorCode::Unsupported);
-        assert_eq!(code("SELECT 1 UNION DISTINCT SELECT 2"), ErrorCode::Unsupported);
-        assert_eq!(code("SELECT 1 UNION ALL SELECT 2 UNION SELECT 3"), ErrorCode::Unsupported);
+        assert_eq!(
+            code("SELECT 1 UNION DISTINCT SELECT 2"),
+            ErrorCode::Unsupported
+        );
+        assert_eq!(
+            code("SELECT 1 UNION ALL SELECT 2 UNION SELECT 3"),
+            ErrorCode::Unsupported
+        );
         assert_eq!(
             code("SELECT 1 AS a ORDER BY a UNION ALL SELECT 2"),
             ErrorCode::ParseError
         );
-        assert_eq!(code("SELECT 1 LIMIT 1 UNION ALL SELECT 2"), ErrorCode::ParseError);
+        assert_eq!(
+            code("SELECT 1 LIMIT 1 UNION ALL SELECT 2"),
+            ErrorCode::ParseError
+        );
         assert_eq!(
             code("(SELECT 1) UNION ALL (SELECT 2)"),
             ErrorCode::ParseError
@@ -1010,7 +1019,8 @@ mod tests {
 
     #[test]
     fn union_all_branches() {
-        let q = q("SELECT a FROM t UNION ALL SELECT b FROM u UNION ALL SELECT 1 ORDER BY 1 LIMIT 2");
+        let q =
+            q("SELECT a FROM t UNION ALL SELECT b FROM u UNION ALL SELECT 1 ORDER BY 1 LIMIT 2");
         assert_eq!(q.union_all.len(), 2);
         assert!(q.is_compound());
         assert_eq!(q.branches().count(), 3);

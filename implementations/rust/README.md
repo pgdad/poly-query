@@ -4,13 +4,16 @@ An analytical database engine implementing the PolyQuery specification
 (`spec/`) in Rust, using **only the standard library** (no crates).
 
 Status: **Phase 5** (optimization) plus **M9** (native kernel
-integration). Capabilities claimed:
+integration) plus change request **CR-1 `UNION ALL`**
+(`spec/changes/union-all.md`, see [Change CR-1](#change-cr-1-union-all)).
+Capabilities claimed:
 `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`, `sql.basic`,
 `test.functions`, `phase2`, `sql.groupby`, `sql.join`, `sql.functions`,
 `sql.subquery`, `sql.cte`, `sql.correlated_subquery`, `phase3`,
 `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`, `phase4`,
 `http.streaming`, `phase5`, `exec.row`, `exec.vectorized`, `exec.parallel`,
-`join.hash`, `join.merge`, `join.nested_loop`, `native.kernels`.
+`join.hash`, `join.merge`, `join.nested_loop`, `native.kernels`,
+`change.union_all`.
 
 ## Build and run
 
@@ -59,7 +62,7 @@ Layers, bottom-up:
 | `sql` | lexer (positions for `PARSE_ERROR` details), AST, recursive-descent parser for the **full** v1 grammar |
 | `planner::binder` | semantic analysis: name resolution (`scope`: range variables, CTE environments, correlation), expression typing (`exprs`), function signatures (`functions`), the grouping rule, ORDER BY/GROUP BY ordinal and alias resolution; produces a `LogicalPlan` of bound, typed `Expr`s |
 | `planner::typing` | numeric promotion, comparability, common types (CASE/COALESCE) |
-| `planner::logical` | logical algebra: Scan, Filter, Project, Aggregate, Join (INNER/LEFT/CROSS), Distinct, Sort, Limit |
+| `planner::logical` | logical algebra: Scan, Filter, Project, Aggregate, Join (INNER/LEFT/CROSS), Distinct, Sort, Limit, UnionAll |
 | `planner::optimizer` | logical optimization driver: `rewrite` (constant folding, predicate simplification), predicate pushdown (WHERE/ON conjuncts to the scans, also through pass-through projections of derived tables/CTEs; cross joins with equality predicates become inner joins), `reorder` (join reordering of inner-join chains) and column pruning |
 | `planner::access` | access paths: recognizes `col <op> const` / `BETWEEN` / `IN` / `IS NULL` conjuncts, estimates selectivity from statistics, chooses index scans, selects PQCF row groups by min/max |
 | `planner::physical` | physical plan: hash / merge / nested-loop join (equi-keys, build side by estimated cardinality; LEFT builds right), hash aggregate, top-N sort, `ParamLookup` for correlated subqueries; EXPLAIN JSON |
@@ -833,6 +836,63 @@ python3 implementations/rust/bench/difftest.py --engine implementations/rust/bin
 * The library is located only through `--native-kernels` (no search path);
   a library that fails to load is not fatal, so a typo leaves `native: true`
   without effect (a warning is logged).
+
+## Change CR-1: `UNION ALL`
+
+`query = [WITH …] select_core { UNION ALL select_core } [ORDER BY …] [LIMIT …]`,
+usable wherever a query is (top level, CTEs, derived tables, scalar / `IN` /
+`EXISTS` subqueries, `EXPLAIN`).
+
+### Modules touched
+
+| Module | Change |
+|---|---|
+| `sql::ast` | `Query` keeps its first branch in `body` and the further branches in `union_all: Vec<SelectCore>` (`branches()`, `is_compound()`); ORDER BY / LIMIT / OFFSET stay on `Query` and apply to the whole compound |
+| `sql::parser` | `UNION ALL select_core` loop after the first core. `UNION` not followed by `ALL` (incl. `UNION DISTINCT`) ⇒ `UNSUPPORTED`; `UNION ALL` after a branch's ORDER BY / LIMIT ⇒ `PARSE_ERROR`; parenthesized branches fail as `PARSE_ERROR` (a branch must start with `SELECT`) |
+| `planner::binder` | `select` now binds one SELECT core plus an optional ORDER BY / LIMIT *tail*; `compound` binds every branch (with no tail, same CTE environment and correlation), checks the column counts (`SEMANTIC_ERROR`), computes each column's common type with `typing::common_type` (the CASE rule; `TYPE_ERROR` otherwise), wraps a branch in a `Project` of casts when its types differ (`conform_branch`), and resolves the compound's ORDER BY to output names of the first branch or positions only (`SEMANTIC_ERROR` for anything else) |
+| `planner::logical` | new node `UnionAll { inputs, schema }` |
+| `planner::rewrite`, `reorder` | recurse into the branches |
+| `planner::optimizer` | predicate pushdown pushes a filter above a `UnionAll` into every branch; column pruning prunes every branch to exactly the required columns (adding a projection where a branch keeps extra columns) |
+| `planner::physical` | `PhysicalPlan::UnionAll`; cardinality estimate = sum of the branches; EXPLAIN node `{"op":"UnionAll","columns":[…],"children":[branch plans in order]}` |
+| `exec::operators` | row operator `UnionAllOp` (pulls each input in turn) |
+| `exec::vector` | batch operator `UnionAllOp` (`ops`), built in `build`; each branch is built with the normal builder, so its scan pipelines run in parallel (`threads`) and use native filters (`native`) like any other pipeline |
+| `protocol` | capability `change.union_all` |
+
+### Semantics and decisions
+
+* Branch values are converted to the output type by the ordinary `CAST`
+  of a promotion (INT64 → DECIMAL(18,s) fails with `NUMERIC_OVERFLOW` for
+  values with more than 18−s digits; INT64/DECIMAL → FLOAT64). A branch
+  column of the untyped NULL type is cast to the common type; if every
+  branch's column is untyped NULL the output column has the type of
+  `SELECT NULL` (reported as STRING).
+* As for CASE, equal branch types are kept as they are (`DECIMAL(10,2)` in
+  every branch stays `DECIMAL(10,2)`); differing DECIMALs become
+  `DECIMAL(18, max scale)`.
+* ORDER BY names are matched case-insensitively against the first branch's
+  output names; a name occurring twice there is ambiguous
+  (`SEMANTIC_ERROR`), since the branches may disagree on the columns.
+* Without ORDER BY, rows come out branch by branch (in every mode); this is
+  an implementation property, not a guarantee.
+* `max_rows` is checked on the final result like for any query.
+* `spec_version` stays `1.0.0`: CR-1 names `1.1.0-cr1` for engines claiming
+  the change, but the phase-1 conformance case `catalog.pqt` requires
+  `"spec_version":"1.0.0"` in the `version` response, and the change must
+  not break earlier phases.
+
+### Public case that contradicts the spec
+
+`changes/union_all.pqt:51` (`SELECT order_id AS v FROM orders … UNION ALL
+SELECT amount FROM orders …`) expects `DECIMAL(18,2)`. In that file `orders`
+is loaded **without a schema**, and ingestion.md §1.1 says that inference
+never yields DECIMAL, so `amount` is FLOAT64 (phase-1 cases such as
+`ingest_csv.pqt` check this rule). The other phase-2 files load `orders` with
+`amount:DECIMAL(10,2)`. With FLOAT64, the CR-1 promotion rule gives FLOAT64,
+and the engine answers `v FLOAT64: [99.99], [101.0]`. With
+`amount DECIMAL(10,2)` the same query returns the expected
+`DECIMAL(18,2): ["99.99"], ["101.00"]` (checked by hand). Making the case
+pass would mean breaking CSV inference or special-casing the test, so it is
+left failing on purpose.
 
 ## Known limitations
 
