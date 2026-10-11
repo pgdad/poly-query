@@ -98,6 +98,7 @@
                (:file "test-phase5")
                (:file "test-native")
                (:file "test-union")
+               (:file "test-decimal38")
                (:file "test-plan"))
   :perform (test-op (o c)
              (unless (uiop:symbol-call '#:polyquery-tests '#:run-all-tests)
