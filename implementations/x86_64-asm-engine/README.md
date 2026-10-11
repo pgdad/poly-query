@@ -2,7 +2,7 @@
 
 An in-memory analytical database engine implementing the PolyQuery
 specification (`spec/`), written entirely in hand-written x86-64 assembly
-(GNU as, AT&T syntax). Status: **Phase 4** (protocol, catalog, CSV/JSON/JSONL
+(GNU as, AT&T syntax). Status: **Phase 5** (protocol, catalog, CSV/JSON/JSONL
 ingestion, all data types, the complete SQL grammar: GROUP BY/HAVING,
 DISTINCT, INNER/LEFT/CROSS joins, all scalar functions, CASE/LIKE/BETWEEN/IN,
 uncorrelated and correlated subqueries, derived tables, CTEs, EXPLAIN,
@@ -15,7 +15,12 @@ checksums, atomic crash-safe saves and memory-mapped reads; the `serve`
 HTTP/1.1 server with all endpoints, pipelined NDJSON streaming, Prometheus
 metrics, structured JSON logs, snapshot-isolated concurrent queries, worker
 limits with FIFO queueing and `OVERLOADED` rejection, timeouts, cancellation
-and graceful shutdown).
+and graceful shutdown; Phase 5: the row-at-a-time baseline next to
+vectorized batch execution with AVX2 kernels, intra-query parallelism for
+scans, filters, projections, hash-join probes and (hash-partitioned)
+aggregation, hash / sort-merge / nested-loop joins selectable per query, a
+switchable logical optimizer and top-N sorting - see
+[Phase 5](#phase-5-execution-modes-parallelism-and-optimizations)).
 
 ## Build prerequisites
 
@@ -30,7 +35,8 @@ and graceful shutdown).
 make build        # -> out/polyquery
 make test         # assembly unit tests (text, JSON, ingest, hash, SQL,
                   # storage, planner, HTTP parser) + end-to-end session
-                  # tests + end-to-end serve tests (curl)
+                  # tests + end-to-end serve tests (curl) + the Phase 5
+                  # differential test of all execution options
 make lint         # verifies every object carries a non-executable .note.GNU-stack
 make fmt          # whitespace normalisation
 make clean
@@ -62,8 +68,10 @@ structure layouts and macros in `include/`:
 | parser / AST | `parser.S`, `ast.S` | recursive descent over the full grammar → statement, query, FROM-item and expression nodes (`include/sql.inc`); `ast.S` gives generic child access to every expression kind |
 | semantic analysis + logical plan | `binder.S` | scopes and range variables, CTE visibility, name resolution (incl. correlation), typing with implicit promotions, aggregate / GROUP BY validation by structural equality, output naming, ORDER BY resolution, constant LIMIT/OFFSET → plan tree (`QP_*` per query block, `FP_*` FROM tree, `RV_*` range variables) |
 | scalar functions | `functions.S` | binding (typing) and evaluation of all scalar functions, CASE, LIKE, BETWEEN, IN lists |
-| physical planning / EXPLAIN | `binder.S` (`find_equi`), `planner.S`, `explain.S` | join algorithm choice (hash join on an equi-key conjunct, else nested loop); predicate pushdown, index selection, row-group skipping, cardinality estimates and hash-join build side; JSON plan rendering |
-| execution | `eval.S`, `exec.S`, `hash.S` | expression interpreter (exact DECIMAL with 128-bit intermediates, CAST matrix); materialising operators: scan, hash / nested-loop join, filter, hash aggregation, projection, DISTINCT, sort, offset/limit; subquery evaluation; generic hash table on value cells |
+| logical optimizer | `optimizer.S` | error-preserving constant folding, AND/OR simplification (option `optimize`) |
+| physical planning / EXPLAIN | `binder.S` (`find_equi`), `planner.S`, `explain.S` | join key extraction and algorithm choice (hash / merge / nested loop, option `join`); predicate pushdown, index selection, row-group skipping, cardinality estimates and hash-join build side; JSON plan rendering |
+| execution (row baseline) | `eval.S`, `exec.S`, `join.S`, `hash.S` | expression interpreter (exact DECIMAL with 128-bit intermediates, CAST matrix); materialising tuple-at-a-time operators: scan, hash / sort-merge / nested-loop join, filter, hash aggregation, projection, DISTINCT, sort, offset/limit; subquery evaluation; generic hash table on value cells |
+| execution (batch / parallel) | `pexec.S`, `vec.S`, `par.S` | batch operator drivers split into parallel parts; vectorized expression evaluator and kernels (filter, projection, group keys, aggregation, join keys / ON re-check); worker threads with thread-local arenas and error handlers |
 | protocol | `protocol.S`, `main.S` | CLI, JSON-lines session loop, `exec` mode, request validation, operations (`query`, `explain`, …), path safety, fault guard |
 | HTTP | `http.S` | HTTP/1.1 message layer: incremental request parsing (Content-Length and chunked bodies, size limits, malformed framing), response / chunk writing, URL decoding, query parameters, error code → status mapping |
 | server | `server.S` | `serve`: poll() event loop, connections and keep-alive, routing, admission control (workers, FIFO queue, `OVERLOADED`), fork-per-query execution, catalog worker thread, timeouts, cancellation, streaming, metrics, JSON logs, graceful shutdown |
@@ -122,8 +130,10 @@ Key decisions:
   PQCF-backed tables, row groups whose chunk min/max (or all-NULL chunk)
   exclude a constraint are skipped. Inner hash joins build on the input with
   the smaller estimated cardinality; LEFT joins build on the right input.
-  `use_indexes:false` disables index use; `optimize:false` disables pushdown
-  (and thereby index use and row-group skipping). Pushed conjuncts are
+  `use_indexes:false` disables index use. Pushdown, index selection and
+  row-group skipping are physical planning and stay on with
+  `optimize:false` (which only disables the logical rewrites of
+  `optimizer.S`, see Phase 5). Pushed conjuncts are
   always re-evaluated on every candidate row, so index lookups and skipping
   only need to be conservative.
 * **Column pruning** is inherent: scans produce row ids, and only the columns
@@ -166,10 +176,13 @@ Key decisions:
   executed once (results of uncorrelated plans are cached in the plan) and
   converted into columnar tables, so every range variable is a table.
 * **Joins**: the binder extracts the first `left_expr = right_expr` conjunct
-  of `ON` whose sides reference only the left resp. right input; such joins
-  run as hash joins (build on the right input, which is also the correct
-  side for LEFT JOIN), others as nested loops. The full `ON` predicate is
-  always re-checked. `--max-join-rows` bounds every join output.
+  of `ON` whose sides reference only the left resp. right input; such
+  equi-joins run as hash joins (build on the right input, which is also the
+  correct side for LEFT JOIN, or on the smaller input of an inner join),
+  sort-merge joins or nested loops (option `join`, see Phase 5); joins
+  without such a key (and CROSS joins) always run as nested loops. The full
+  `ON` predicate is always re-checked. `--max-join-rows` bounds every join
+  output.
 * **Grouping** hashes the GROUP BY key cells (NULLs group together); each
   group keeps a representative tuple and aggregate states. Because every
   column reference outside aggregates must be (structurally) a GROUP BY
@@ -278,6 +291,158 @@ running queries continue for `--shutdown-grace-ms`, then queued ones are
 answered `CANCELLED` and running ones are cancelled (SIGUSR1, SIGKILL 300 ms
 later); the process exits 0 once nothing is left.
 
+## Phase 5: execution modes, parallelism and optimizations
+
+### Query options
+
+| option | values | effect |
+|---|---|---|
+| `mode` | `"row"` | the unoptimized baseline: the original tuple-at-a-time interpreter of `exec.S` (every operator evaluates `eval()` once per tuple and materialises its output tuple set) |
+| | `"vectorized"`, `"auto"` (default) | batch execution: operators run over batches of 1024 tuples and evaluate expressions as column vectors (`vec.S`) |
+| `threads` | int ≥ 1 (default 1, capped at 64) | parallel parts for scans, filters, projections, hash-join probes and aggregation, in both modes |
+| `join` | `"auto"` (default), `"hash"`, `"merge"`, `"nested_loop"` | algorithm of every equi-join (see below); joins without an equi-key conjunct and CROSS joins are always nested loops |
+| `optimize` | `true` (default) / `false` | logical rewrites (`optimizer.S`) on / off |
+| `native` | bool | accepted and ignored (`native.kernels` is not claimed) |
+
+Unsupported values of known options are `UNSUPPORTED`. `explain` honours
+the options: join nodes are `HashJoin`, `MergeJoin` or `NestedLoopJoin`.
+With `join: "auto"` an equi-join is a hash join unless both inputs are
+estimated tiny (≤ 64 pairs), where a nested loop avoids building anything.
+
+**Identical results.** Every combination of options produces the same
+rows, and in the same order wherever the row baseline's order is defined by
+its operators: parallel parts cover contiguous ranges of their input and are
+concatenated in order, groups are emitted in order of their first tuple, and
+all three join algorithms emit left-input order with the matching right
+tuples in right-input order (only a hash join that builds on its smaller
+*left* input emits right-input order). Errors are identical too: the
+vectorized evaluator computes anything that can fail (overflow, division by
+zero, casts, functions) only on the rows the row engine evaluates - the
+right operand of AND / OR only where the left one did not decide, the right
+operand of other binary operators only where the left one is not NULL,
+CASE branches and other complex nodes tuple by tuple - and parallel parts
+re-raise the error of the lowest failing part. `tests/modes_test.sh` (part
+of `make test`) checks byte-identical responses, including error cases,
+across modes, thread counts (forced onto tiny inputs with `PQ_PAR_MIN=1`),
+join algorithms and `optimize`; the conformance runner's `--modes` matrix
+also passes with `PQ_PAR_MIN=1`.
+
+### Vectorized execution (`vec.S`, `pexec.S`)
+
+* A vector is 1024 `u64` values followed by 1024 NULL bytes; vectors live
+  on a per-thread scratch stack (8 MiB, mark / release per batch kernel, so
+  steady-state execution allocates nothing).
+* `veval(node, batch, active-mask)` fast paths: column gathers from both
+  physical layouts (inline NULL-bitmap tests, dictionary decoding),
+  literals, constant subtrees (evaluated once per batch; never `PQ_SLEEP`),
+  comparisons (AVX2 `vpcmpeqq` / `vpcmpgtq` for all 64-bit integer-like
+  types and same-scale DECIMALs; FLOAT64, STRING and mixed-scale DECIMAL
+  per row), INT64 / FLOAT64 / DECIMAL arithmetic with the exact overflow /
+  division checks of the row engine, AND / OR (Kleene logic) / NOT / IS
+  [NOT] NULL (AVX2 mask arithmetic), CAST. Functions, CASE, LIKE, IN,
+  BETWEEN and subqueries fall back to `eval()` on the active rows.
+* Kernels: filter (selection + tuple compaction), projection (one vector per
+  output column, then row assembly), group keys, aggregation (dispatch per
+  batch into specialised update loops: COUNT, 128-bit SUM / AVG with the
+  accumulators in registers, FLOAT64 sums in row order so results equal the
+  baseline bit for bit, integer MIN / MAX), join key evaluation and batched
+  ON re-checks.
+
+### Parallel execution (`par.S`, `pexec.S`)
+
+* `par_for(n, fn, arg)` splits `[0, n)` into P = min(threads, ⌈n / 4096⌉)
+  contiguous parts (environment variable `PQ_PAR_MIN` overrides the 4096 -
+  used by the tests to force parallelism on tiny inputs); part 0 runs on
+  the calling thread, the others on fresh pthreads. Workers allocate from
+  their own arenas (thread-local `t_arena`, kept until the request ends) and
+  raise errors through a thread-local `jmp_buf`; `tmp_alloc`, `pq_raise`
+  and the CAST formatting buffer are thread-aware, so the evaluator runs
+  unchanged in workers. Lazily decoded PQCF columns referenced by the block
+  are decoded before workers start. Blocks containing subqueries run on one
+  thread (subquery results are cached in the shared AST).
+* Parallel operators: full scans with pushed-down filters (honouring
+  row-group skipping), WHERE, projection (with per-part top-N), hash-join
+  probe (build is serial), aggregation. Aggregation without GROUP BY merges
+  per-part partial states in part order (exact for INT64 / DECIMAL).
+  GROUP BY is **hash-partitioned**: phase 1 computes key cells and hashes in
+  parallel; in phase 2 part p owns the groups whose hash falls into
+  partition p and aggregates their tuples in input order, so every group
+  sees exactly the serial sequence of updates (identical FLOAT64 sums,
+  DISTINCT aggregates work unchanged) and each part's hash table stays
+  small and cache-resident. With one part, grouping is a single fused pass.
+* Timeouts and cancellation are checked by every part once per batch.
+
+### Joins (`exec.S`, `join.S`, `pexec.S`)
+
+* **Hash join**: chained hash table over the build input (inserted
+  backwards so chains list build tuples in input order); the probe runs in
+  parallel batches: key vector, candidate pairs, one vectorized ON re-check
+  per batch (skipped when ON is just the key equality), emission in probe
+  order with LEFT JOIN padding.
+* **Sort-merge join**: both inputs reduced to (key, tuple) entries, NULL
+  keys dropped, sorted with `qsort_r`, merged into per-left-tuple ranges of
+  equal right keys; emission in left input order (LEFT JOIN supported).
+* **Nested loop**: every pair, full ON predicate.
+
+### Logical optimizer (`optimizer.S`, `optimize: true`)
+
+* **Constant folding** of subtrees without column / outer / aggregate
+  references, subqueries or `PQ_SLEEP`, evaluated once at planning and
+  replaced by a literal - unless the evaluation raises an error, in which
+  case the subtree stays and fails at run time exactly when the baseline
+  does. Folding happens before predicate pushdown, so `a = 2 + 3` or
+  `d > CAST('2024-01-01' AS DATE)` become index / row-group-skipping
+  candidates.
+* **Predicate simplification**: `TRUE AND x → x`, `x AND TRUE → x`,
+  `FALSE AND x → FALSE`, `FALSE OR x → x`, `x OR FALSE → x`,
+  `TRUE OR x → TRUE`; `x AND FALSE → FALSE` / `x OR TRUE → TRUE` only when
+  `x` cannot raise errors. WHERE / HAVING folding to TRUE disappear.
+* Physical optimizations that are always on (all modes): predicate
+  pushdown, index selection, row-group skipping, column pruning, hash-join
+  build side by estimated cardinality; **top-N** for `ORDER BY … LIMIT`
+  (without DISTINCT, LIMIT + OFFSET ≤ 65536) in the batch modes: each part
+  keeps a bounded max-heap of LIMIT + OFFSET rows instead of sorting all
+  rows. Not implemented: join reordering.
+
+### Memory and cache-aware layout
+
+* Arena (bump) allocation everywhere, per request and per worker; vector
+  scratch stacks per thread; tuple sets of row indices (base data is never
+  copied); 1024-tuple batches keep the working vectors of a kernel in L1/L2.
+* Hash-partitioned aggregation keeps one small hash table per partition;
+  string hashing processes 8 bytes per step.
+
+### Measurements
+
+`bench/bench.sh DATASET_DIR [REPS]` loads `transactions` (1,000,000 rows)
+and `customers` (100,000 rows) of `pqgen.py generate --scale 1m` into one
+session and reports the best of REPS server-side `stats.elapsed_us` (results
+not serialised: `"result":"count"`). AMD Ryzen 9 9950X3D (16 cores / 32
+threads), best of 5:
+
+| query | Phase 4 engine | row, 1 thread, `optimize:false` | row, 1 thread | vectorized, 1 thread | vectorized, 4 threads | vectorized, 16 threads |
+|---|---:|---:|---:|---:|---:|---:|
+| Q1 filter + COUNT | 22.6 ms | 22.9 ms | 18.3 ms | 4.5 ms | 1.5 ms | 0.7 ms |
+| Q2 5 scalar aggregates | 20.3 ms | 19.9 ms | 20.3 ms | 8.5 ms | 2.6 ms | 1.2 ms |
+| Q3 GROUP BY 2 strings | 39.7 ms | 38.8 ms | 38.9 ms | 27.7 ms | 13.1 ms | 8.7 ms |
+| Q4 GROUP BY expression + filter | 27.2 ms | 24.7 ms | 24.7 ms | 11.8 ms | 9.6 ms | 6.9 ms |
+| Q5 hash join + GROUP BY | 58.7 ms | 51.6 ms | 51.4 ms | 42.1 ms | 28.5 ms | 20.1 ms |
+| Q6 filter + ORDER BY … LIMIT 10 | 49.9 ms | 47.6 ms | 48.4 ms | 11.0 ms | 4.2 ms | 2.2 ms |
+| Q7 filter + projection | 9.5 ms | 8.7 ms | 8.6 ms | 1.4 ms | 0.7 ms | 0.4 ms |
+| Q8 constant-foldable filter | 26.0 ms | 25.9 ms | 14.5 ms | 5.0 ms | 1.6 ms | 0.8 ms |
+
+(The "Phase 4 engine" column is `bench/baseline-phase4.txt`, measured
+before any Phase 5 change; the row baseline is the same interpreter, so the
+first two columns agree within noise. The queries are in `bench/bench.sh`.)
+Effects in short: vectorization 2–7× on scan / filter / aggregate /
+projection queries (Q1, Q2, Q6, Q7), top-N 4× (Q6), constant folding 1.8×
+in the row baseline (Q8: `amount > 10 * 10 + 0` folds, and the promoted
+DECIMAL literal is no longer cast per row), parallelism a further 3–13×
+with 16 threads. Join algorithms on Q5 (1 thread): hash 64 ms (row) /
+42 ms (vectorized), sort-merge 152 ms / 145 ms; joining 2,000 × 2,000 filtered rows
+(both 1M- and 100k-row scans included):
+hash 9.4 ms, merge 9.5 ms, nested loop 50 ms.
+
 ## Implementation-defined choices
 
 * `UNION`, `RIGHT` and `FULL` joins are `UNSUPPORTED`.
@@ -297,7 +462,7 @@ later); the process exits 0 once nothing is left.
   offending token (lexical errors: of the current scan position).
 * EXPLAIN plan nodes: `Limit`, `Sort`, `Distinct`, `Project`, `Filter`
   (`predicate` is `"WHERE"` or `"HAVING"`), `Aggregate`, `HashJoin` /
-  `NestedLoopJoin` (with `join_type`), `TableScan` (catalog `table`, `alias`,
+  `MergeJoin` / `NestedLoopJoin` (with `join_type`), `TableScan` (catalog `table`, `alias`,
   `columns` actually referenced), `SubqueryScan` (derived table / CTE, with
   its plan as child) and `Values` (SELECT without FROM). Subqueries inside
   expressions are not shown.
@@ -338,7 +503,14 @@ later); the process exits 0 once nothing is left.
 * Index contents are rebuilt whenever a table is loaded or opened (PQCF
   persists only index definitions); statistics are recomputed per table on
   first use.
-* Single-threaded query execution (no intra-query parallelism, Phase 5).
+* Join reordering is not implemented: joins run in the order written (the
+  hash join picks its build side by estimated cardinality). Merge joins sort
+  both inputs (index order is not reused); nested-loop and merge joins, hash
+  builds, DISTINCT aggregates without GROUP BY, DISTINCT, derived tables /
+  CTEs and the final sort run single-threaded (top-N heaps are per part).
+* Blocks whose expressions contain subqueries run their operators on one
+  thread (subquery results are cached in the shared plan). The `native`
+  option is accepted and ignored (`native.kernels` is not claimed).
 * `serve` binds IPv4 addresses only (`--host` must be an IPv4 address or
   `localhost`); at most 1000 simultaneous connections.
 * A client that half-closes its socket (`shutdown(SHUT_WR)`) while its query
