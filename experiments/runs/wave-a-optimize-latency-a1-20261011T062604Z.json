@@ -1,0 +1,25 @@
+{
+ "wave_id": "wave-a-optimize-latency-a1-20261011T062604Z",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 1,
+ "seed": 4183,
+ "order": [
+  "clojure"
+ ],
+ "run_ids": [
+  "a-optimize-latency-clojure-a1-20261011T062604Z"
+ ],
+ "started": "2026-10-11T06:26:05+00:00",
+ "parallel": 1,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  14.31591796875,
+  9.4482421875,
+  7.25341796875
+ ]
+}

@@ -1,0 +1,93 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-refactor-plan-separation-java-a1-20261011T060719Z",
+ "language": "java",
+ "task": "refactor-plan-separation",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-refactor-plan-separation",
+ "prompt_sha256": "f3cedb0faf91d9ae09deaee3e3e9b058c4fb20a30615bdff27ba6e426fe07bc7",
+ "session_id": "50ca677a-9ace-409d-befc-9621e28099e5",
+ "tokens": {
+  "input": 156,
+  "output": 103810,
+  "cache_read": 11324296,
+  "cache_creation": 244636,
+  "thinking": null,
+  "thinking_estimated": 52050,
+  "source": "result events",
+  "api_messages": 78
+ },
+ "rate_limit": {
+  "events": 10,
+  "max_utilization": {
+   "five_hour": 0.32,
+   "seven_day": 0.28
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 6.298771200000003,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 80,
+ "result_segments": 1,
+ "assistant_messages": 186,
+ "tool_calls": {
+  "Bash": 79
+ },
+ "tool_calls_total": 79,
+ "tool_failures": 3,
+ "build_invocations": 16,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 6,
+ "conformance_progress": [
+  [
+   591,
+   591
+  ],
+  [
+   591,
+   591
+  ],
+  [
+   591,
+   591
+  ],
+  [
+   3456,
+   3456
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 1345.7,
+  "model_api_seconds": 1007.3,
+  "tool_seconds": 338.3,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 2,
+  "files_changed": 29,
+  "lines_added": 1397,
+  "lines_removed": 397,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The refactoring is finished and committed in two commits on `main`. Every suite that passed before still passes, and no response, error or capability changed. EXPLAIN plans are identical except for one deliberate change, explained under Known limitations.\n\n## What I implemented\nThe engine already planned in two stages (logical, then physical). I closed the gaps the change request names:\n\n- **Logical plan** (`plan/LogicalPlan.java`): every node can now be walked and rewritten generically. There is also a debug printer (`plan/LogicalPlanPrinter.java`) that includes subquery plans, and an internal `Engine.logicalPlan(sql)` for tests. It is not part of the protocol.\n- **Rule-based optimizer** (`optimizer/`): the old single optimizer class is now an `OptimizerRule` interface plus a driver, `LogicalOptimizer`. It has a `STANDARD` rule list, and `DISABLED` applies no rules for `optimize: false`. Each rule is its own class:\n  - `ConstantFolding`\n  - `PredicateSimplification`\n  - `PredicatePushdown`, which now also pushes filters below projections\n  - `JoinReorder`\n  - `ProjectionPruning`, which is new\n- **Separate physical planning**: `PhysicalPlanner` now also decides the execution mode, thread count and native-kernel use, returned together as a `PhysicalQuery`. Previously `Engine` decided these. A new `engine/QueryPlanner` runs the optimizer and then the physical planner, for queries and subqueries.\n- **Layering fixes**: the optimizer no longer imports anything from the physical layer. Cardinality estimates and predicate analysis moved to a new `cost/` package, and column-slot analysis moved into `plan/BoundExprs`.\n- **README**: has the before/after module map and the design decisions (section \"Change CR-3\").\n\n## Test results\n| Suite | Result |\n|---|---|\n| runner (session) | TOTAL: 591/591 pass |\n| `--modes` | TOTAL: 3456/3456 pass |\n| `--transport http` | TOTAL: 591/591 pass |\n| `--native` (also with `--modes` and with http) | 591/591, 3456/3456, 591/591 |\n| `http_suite.py` | http suite: 18/18 passed |\n| `make build lint test` | clean; 91 passed, 0 failed (23 new: every rule tested on its own, `optimize: false`, the printer, physical planner decisions) |\n\nI also ran some extra checks:\n- The randomized differential tool found 0 mismatches (400 queries; 300 more with native kernels).\n- The tiny-batch stress run passed 3456/3456.\n- The capabilities output is byte-identical to a build of the original commit.\n\n## Known limitations\n- **EXPLAIN changes for one query shape.** Pushing filters below projections is required by the change request, so it can't be avoided. A filter on a derived-table or CTE column now appears below the projection in EXPLAIN, and on an indexed column it can now use an index. I dumped EXPLAIN for every public query under four option sets: 6 of 1,884 plans changed, all from the two queries of this shape. With `optimize: false` every plan is identical to before.\n- **Column pruning still exists in both layers.** The tests require scans to read only the needed columns even with `optimize: false`, so the physical pruner stays. The new logical rule uses the same criterion (it only drops unused column references and constants), so scans read the same columns whether or not the optimizer runs.\n- **Filters are not pushed through `UNION ALL`, aggregations, DISTINCT, sorts or limits.** This is documented in the README.\n\n## Main design decisions\n- **Rules run once each, in a fixed order:** folding, simplification, pushdown, join reordering, pruning. This matches the old passes. Folding and simplification are separate rules but give the same result as the old combined pass.\n- **Top-N stays a physical choice,** and `optimize: false` still turns it off, as before.\n- **Subqueries are planned when the executor first needs them,** through the same `QueryPlanner`.\n- **Moving a filter below a projection** only happens when none of the projected expressions can fail. Otherwise a query that should raise an error could silently skip it.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

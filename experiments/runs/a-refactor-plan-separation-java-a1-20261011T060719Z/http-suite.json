@@ -1,0 +1,120 @@
+{
+ "schema": "polyquery-http-suite/1",
+ "engine": "/srv/polyquery/runs/a-refactor-plan-separation-java-a1-20261011T060719Z/validate/implementations/java/bin/polyquery",
+ "summary": {
+  "total": 18,
+  "passed": 18,
+  "failed": 0
+ },
+ "checks": [
+  {
+   "check": "health_version_capabilities",
+   "status": "pass",
+   "seconds": 0.07
+  },
+  {
+   "check": "table_lifecycle",
+   "status": "pass",
+   "seconds": 0.09
+  },
+  {
+   "check": "query_and_error_mapping",
+   "status": "pass",
+   "seconds": 0.15
+  },
+  {
+   "check": "keep_alive",
+   "status": "pass",
+   "seconds": 0.06
+  },
+  {
+   "check": "streaming",
+   "status": "pass",
+   "seconds": 0.16
+  },
+  {
+   "check": "metrics",
+   "status": "pass",
+   "seconds": 0.13
+  },
+  {
+   "check": "timeout",
+   "status": "pass",
+   "seconds": 0.28
+  },
+  {
+   "check": "server_default_timeout",
+   "status": "pass",
+   "seconds": 0.38
+  },
+  {
+   "check": "cancellation",
+   "status": "pass",
+   "seconds": 0.11
+  },
+  {
+   "check": "backpressure_overloaded",
+   "status": "pass",
+   "seconds": 4.09
+  },
+  {
+   "check": "queued_time_counts_toward_timeout",
+   "status": "pass",
+   "seconds": 1.58
+  },
+  {
+   "check": "snapshot_isolation",
+   "status": "pass",
+   "seconds": 1.54
+  },
+  {
+   "check": "concurrent_readers",
+   "status": "pass",
+   "seconds": 0.13
+  },
+  {
+   "check": "client_disconnect_cancels",
+   "status": "pass",
+   "seconds": 0.55
+  },
+  {
+   "check": "request_size_limit",
+   "status": "pass",
+   "seconds": 0.05
+  },
+  {
+   "check": "structured_logs",
+   "status": "pass",
+   "seconds": 0.38
+  },
+  {
+   "check": "graceful_shutdown",
+   "status": "pass",
+   "seconds": 1.61
+  },
+  {
+   "check": "grace_expiry",
+   "status": "pass",
+   "seconds": 0.75
+  }
+ ],
+ "startup_seconds": [
+  0.040078465011902153,
+  0.042676180019043386,
+  0.044209397980012,
+  0.04362640902400017,
+  0.04217802098719403,
+  0.04177658801199868,
+  0.04208292096154764,
+  0.03714287799084559,
+  0.03100532595999539,
+  0.03407798398984596,
+  0.03016739198938012,
+  0.033962004992645234,
+  0.03215620800619945,
+  0.03397373703774065,
+  0.0353313609957695,
+  0.028823535016272217
+ ],
+ "logs": "/tmp/pqhttp-logs-1aagroo7"
+}

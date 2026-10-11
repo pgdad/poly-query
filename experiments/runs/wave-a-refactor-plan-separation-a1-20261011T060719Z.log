@@ -1,2 +1,6 @@
 2026-10-11T06:07:20+00:00 wave wave-a-refactor-plan-separation-a1-20261011T060719Z: order=['java']
 2026-10-11T06:07:20+00:00 [a-refactor-plan-separation-java-a1-20261011T060719Z] agent queued (usage gate, then launch)
+2026-10-11T06:29:46+00:00 [a-refactor-plan-separation-java-a1-20261011T060719Z] agent finished; collecting telemetry
+2026-10-11T06:29:46+00:00 [a-refactor-plan-separation-java-a1-20261011T060719Z] validating (clean clone, sandboxed)
+2026-10-11T06:30:09+00:00 [a-refactor-plan-separation-java-a1-20261011T060719Z] outcome=success cost=$6.298771200000003 turns=80 wall=1345.7s
+2026-10-11T06:30:09+00:00 wave wave-a-refactor-plan-separation-a1-20261011T060719Z finished: plan=success

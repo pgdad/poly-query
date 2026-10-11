@@ -1,0 +1,182 @@
+{
+ "schema": "polyquery-run-manifest/1",
+ "run_id": "a-refactor-plan-separation-java-a1-20261011T060719Z",
+ "wave": "wave-a-refactor-plan-separation-a1-20261011T060719Z",
+ "language": "java",
+ "task": "refactor-plan-separation",
+ "track": "A",
+ "attempt": 1,
+ "created": "2026-10-11T06:07:19+00:00",
+ "repo_ref": "f4e16626e6b66506a1aeabf8d8a8c73762f09360",
+ "baseline_commit": "475bc27c6f84234e9df39868920476d9a728b568",
+ "spec_hash": "ac0ce7e84218817a57cd13a3d110e234c0c2326d20589e158849bab1a80c84c5",
+ "prompt_template": "experiments/prompts/track-a-implementation.md",
+ "work_dir": "implementations/java",
+ "prompt_id": "track-a-refactor-plan-separation",
+ "prompt_sha256": "f3cedb0faf91d9ae09deaee3e3e9b058c4fb20a30615bdff27ba6e426fe07bc7",
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness": {
+  "name": "claude-code",
+  "version": "2.1.296 (Claude Code)",
+  "mode": "headless -p stream-json"
+ },
+ "limits": {
+  "timeout_min": 118,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "status": "validated",
+ "host": {
+  "hostname": "esa-9000",
+  "tools": {
+   "hardware": {
+    "arch": "x86_64",
+    "logical_cpus": 32,
+    "memory_gib": 249.3,
+    "model": "AMD Ryzen 9 9950X3D 16-Core Processor",
+    "simd": [
+     "avx",
+     "avx2",
+     "avx512bw",
+     "avx512dq",
+     "avx512f",
+     "avx512vl",
+     "bmi2",
+     "fma",
+     "popcnt",
+     "sse4_2"
+    ]
+   },
+   "missing_required": [],
+   "os": {
+    "pretty": "Ubuntu 24.04.5 LTS",
+    "release": "7.0.0-34-generic",
+    "system": "Linux"
+   },
+   "tools": {
+    "aarch64-gcc": {
+     "required": false,
+     "version": "aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+    },
+    "as": {
+     "required": true,
+     "version": "GNU assembler (GNU Binutils for Ubuntu) 2.42"
+    },
+    "bwrap": {
+     "required": false,
+     "version": "bubblewrap 0.9.0"
+    },
+    "cargo": {
+     "required": true,
+     "version": "cargo 1.96.0 (30a34c682 2026-05-25)"
+    },
+    "clang": {
+     "required": false,
+     "version": "Ubuntu clang version 18.1.3 (1ubuntu1)"
+    },
+    "claude": {
+     "required": false,
+     "version": "2.1.296 (Claude Code)"
+    },
+    "clojure": {
+     "required": true,
+     "version": "1.12.3"
+    },
+    "docker": {
+     "required": false,
+     "version": "Docker version 28.4.0, build d8eb465"
+    },
+    "gcc": {
+     "required": true,
+     "version": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+    },
+    "git": {
+     "required": true,
+     "version": "git version 2.43.0"
+    },
+    "go": {
+     "required": true,
+     "version": "go version go1.27.1 linux/amd64"
+    },
+    "java": {
+     "required": true,
+     "version": "openjdk version \"27\" 2026-09-15"
+    },
+    "javac": {
+     "required": true,
+     "version": "javac 27"
+    },
+    "just": {
+     "required": false,
+     "version": "just 1.58.0"
+    },
+    "make": {
+     "required": true,
+     "version": "GNU Make 4.3"
+    },
+    "nasm": {
+     "required": false,
+     "version": "NASM version 2.16.01"
+    },
+    "python": {
+     "path": "/home/esa/.local/share/uv/python/cpython-3.14.0-linux-x86_64-gnu/bin/python3.14",
+     "version": "Python 3.14.0"
+    },
+    "qemu-aarch64": {
+     "required": false,
+     "version": "qemu-aarch64 version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)"
+    },
+    "rustc": {
+     "required": true,
+     "version": "rustc 1.96.0 (ac68faa20 2026-05-25)"
+    },
+    "sbcl": {
+     "required": true,
+     "version": "SBCL 2.6.9"
+    },
+    "sqlite3-python": {
+     "required": true,
+     "version": "3.45.1"
+    }
+   }
+  }
+ },
+ "defect_id": null,
+ "baseline_capabilities": [
+  "change.union_all",
+  "exec.parallel",
+  "exec.row",
+  "exec.vectorized",
+  "http.streaming",
+  "index.btree",
+  "index.hash",
+  "ingest.csv",
+  "ingest.json",
+  "ingest.jsonl",
+  "join.hash",
+  "join.merge",
+  "join.nested_loop",
+  "native.kernels",
+  "phase1",
+  "phase2",
+  "phase3",
+  "phase4",
+  "phase5",
+  "sql.basic",
+  "sql.correlated_subquery",
+  "sql.cte",
+  "sql.functions",
+  "sql.groupby",
+  "sql.join",
+  "sql.subquery",
+  "storage.mmap",
+  "storage.pqcf",
+  "test.functions"
+ ],
+ "started": "2026-10-11T06:07:20+00:00",
+ "finished": "2026-10-11T06:29:46+00:00",
+ "wall_seconds": 1345.7,
+ "agent_exit_code": 0,
+ "outcome": "success"
+}
