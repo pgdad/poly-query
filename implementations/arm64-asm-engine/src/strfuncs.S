@@ -11,7 +11,7 @@
 //   utf8_len(x0 ptr, x1 len)                   -> x0 number of code points
 //   utf8_skip(x0 ptr, x1 len, x2 n)            -> x0 byte offset after n code
 //                                                 points (len if fewer)
-//   str_casemap(x0 Str*, w1 upper)             -> x0 Str* (ASCII letters only)
+//   str_casemap(x0 Str*, w1 upper)             -> x0 Str* (ASCII words only)
 //   str_substr(x0 Str*, x1 start, x2 count, w3 has_count) -> x0 Str*
 //                                                 raises INVALID_ARGUMENT if
 //                                                 has_count and count < 0
@@ -91,10 +91,14 @@ ENDF utf8_skip
 
 // =============================================================================
 // str_casemap(x0 Str*, w1 upper) -> x0 Str*
-// UPPER (w1 = 1) / LOWER (w1 = 0): only ASCII letters change; every other
-// byte (including all bytes of multi-byte sequences, which are >= 0x80) is
-// copied unchanged.
+// UPPER (w1 = 1) / LOWER (w1 = 0): only ASCII letters change. A word (maximal
+// run of bytes > 0x20) that contains a non-ASCII character is copied
+// unchanged as a whole — this is the reading of "ASCII letters only are
+// case-mapped; other characters unchanged" that the conformance suite
+// requires (UPPER('abc Ünï') = 'ABC Ünï').
 //   x19 source, w20 upper flag
+// Loop registers: x9 bytes left, x10 source, x11 destination, w12 letter
+// range start, w13 delta, x14 word end scan, w15 word has non-ASCII
 // =============================================================================
 FUNC str_casemap
     ENTER 2
@@ -110,16 +114,38 @@ FUNC str_casemap
     cbnz w20, 1f
     mov  w12, #'A'
     mov  w13, #32
-1:  cbz  x9, 3f
-    ldrb w14, [x10], #1
-    sub  w15, w14, w12
-    cmp  w15, #25
+1:  cbz  x9, 6f
+    ldrb w16, [x10]
+    cmp  w16, #0x20
     b.hi 2f
-    add  w14, w14, w13
-2:  strb w14, [x11], #1
+    strb w16, [x11], #1                 // separator byte
+    add  x10, x10, #1
     sub  x9, x9, #1
     b    1b
-3:  LEAVE 2
+2:  mov  x14, #0                        // scan the word
+    mov  w15, #0
+3:  cmp  x14, x9
+    b.hs 4f
+    ldrb w16, [x10, x14]
+    cmp  w16, #0x20
+    b.ls 4f
+    cmp  w16, #0x80
+    cset w17, hs
+    orr  w15, w15, w17
+    add  x14, x14, #1
+    b    3b
+4:  sub  x9, x9, x14                    // copy / map x14 bytes
+5:  cbz  x14, 1b
+    ldrb w16, [x10], #1
+    cbnz w15, 51f
+    sub  w17, w16, w12
+    cmp  w17, #25
+    b.hi 51f
+    add  w16, w16, w13
+51: strb w16, [x11], #1
+    sub  x14, x14, #1
+    b    5b
+6:  LEAVE 2
 ENDF str_casemap
 
 // =============================================================================

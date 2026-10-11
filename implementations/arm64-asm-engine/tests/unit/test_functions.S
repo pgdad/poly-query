@@ -237,9 +237,11 @@ cases_start:
     TN  "SELECT LENGTH(s) FROM t WHERE i IS NULL", T_INT
     TE  "SELECT LENGTH(5)", ERR_TYPE
     TCS "SELECT UPPER('abc xyz_{')", "ABC XYZ_{"
-    TCS "SELECT UPPER('aé')", "Aé"
+    TCS "SELECT UPPER('aé')", "aé"          // word with non-ASCII: unchanged
+    TCS "SELECT UPPER('ab cé d')", "AB cé D"
     TCS "SELECT LOWER('ABC ÀÉ@[')", "abc ÀÉ@["
-    TCS "SELECT UPPER(s) FROM t WHERE i = 2", "HéLLO"
+    TCS "SELECT LOWER('ABC XÀ')", "abc XÀ"
+    TCS "SELECT UPPER(s) FROM t WHERE i = 2", "héllo"
     TN  "SELECT LOWER(NULL)", T_STR
     // --- SUBSTR
     TCS "SELECT SUBSTR('hello', 2, 3)", "ell"
@@ -484,26 +486,6 @@ fmt_sum:    .asciz "test_functions: %d/%d passed\n"
     .text
 
 // =============================================================================
-// where_ok(x0 BoundQuery*, x1 EvalCtx*) -> w0 1 if the row passes WHERE
-// =============================================================================
-LFUNC where_ok
-    stp  x29, x30, [sp, #-16]!
-    mov  x29, sp
-    ldr  x0, [x0, #BQ_WHERE]
-    cbz  x0, 1f
-    bl   eval
-    cbnz x1, 2f
-    cmp  x0, #0
-    cset w0, ne
-    ldp  x29, x30, [sp], #16
-    ret
-1:  mov  w0, #1
-    ldp  x29, x30, [sp], #16
-    ret
-2:  mov  w0, #0
-    ldp  x29, x30, [sp], #16
-    ret
-ENDF where_ok
 
 // str_eq_c(x0 Str*, x1 cstr) -> w0 1 if byte-equal
 //   x19 Str*, x20 cstr
@@ -573,32 +555,20 @@ LFUNC run_case
     cmp  w9, #M_SHAPE
     b.eq .Lrc_shape
 
-    // ---- evaluate output column 0 on the first qualifying row --------------
+    // ---- plan and execute; check output column 0 of the first row ---------
     ldr  x9, [x20, #BQ_OUT]
     ldr  w9, [x9, #OC_TYPE]
     ADR_L x10, r_type
     str  x9, [x10]
-    mov  x0, sp
-    mov  w1, #0
-    mov  x2, #EC_SIZE
-    bl   memset
-    ldr  x9, [x20, #BQ_TABLE]
-    str  x9, [sp, #EC_TABLE]
-    mov  x22, #1
-    cbz  x9, 2f
-    ldr  x22, [x9, #TBL_NROWS]
-2:  mov  x21, #0
-3:  cmp  x21, x22
-    b.hs .Lrc_norow
-    str  x21, [sp, #EC_ROW]
     mov  x0, x20
-    mov  x1, sp
-    bl   where_ok
-    add  x21, x21, #1
-    cbz  w0, 3b
-    mov  x0, x24
-    mov  x1, sp
-    bl   eval
+    bl   plan_statement
+    mov  x1, #0
+    bl   exec_plan
+    ldr  x9, [x0, #RS_NROWS]
+    cbz  x9, .Lrc_norow
+    ldr  x9, [x0, #RS_ROWS]
+    ldr  x9, [x9]
+    ldp  x0, x1, [x9]
     ADR_L x9, r_val
     str  x0, [x9]
     ADR_L x9, r_null
