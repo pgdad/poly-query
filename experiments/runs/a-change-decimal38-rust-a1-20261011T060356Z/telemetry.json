@@ -1,0 +1,98 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-decimal38-rust-a1-20261011T060356Z",
+ "language": "rust",
+ "task": "change-decimal38",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-decimal38",
+ "prompt_sha256": "b805ffb5378283d28ef246ff6eb2630ce48d21833b01c6a53de2b57f73d8907c",
+ "session_id": "817db1c7-bb6e-44a4-b7c2-bc563b896678",
+ "tokens": {
+  "input": 228,
+  "output": 91101,
+  "cache_read": 22058806,
+  "cache_creation": 291951,
+  "thinking": null,
+  "thinking_estimated": 27981,
+  "source": "result events",
+  "api_messages": 114
+ },
+ "rate_limit": {
+  "events": 9,
+  "max_utilization": {
+   "five_hour": 0.3,
+   "seven_day": 0.28
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 8.570301200000001,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 118,
+ "result_segments": 1,
+ "assistant_messages": 226,
+ "tool_calls": {
+  "Bash": 114,
+  "Write": 3
+ },
+ "tool_calls_total": 117,
+ "tool_failures": 3,
+ "build_invocations": 34,
+ "build_failures_heuristic": 11,
+ "conformance_runs": 6,
+ "conformance_progress": [
+  [
+   591,
+   591
+  ],
+  [
+   68,
+   69
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 4,
+ "time": {
+  "wall_seconds": 1049.8,
+  "model_api_seconds": 816.1,
+  "tool_seconds": 233.7,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 2,
+  "files_changed": 27,
+  "lines_added": 1411,
+  "lines_removed": 233,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "DECIMAL now supports precision up to 38, and every required suite passes with 0 failures, 0 errors and 0 not-implemented. The work is committed in two commits on `main`; nothing outside `implementations/rust/` was modified.\n\n## Test results (from a clean build)\n- `make build test`: succeed, 157 unit tests passed.\n- Conformance runner, session: `TOTAL: 660/660 pass` (includes the 69 `changes/decimal38` cases).\n- `--modes`: `TOTAL: 3870/3870 pass`.\n- `--transport http`: `TOTAL: 660/660 pass`.\n- Concurrency suite: `http suite: 18/18 passed`.\n- Not required, also run:\n  - `--modes` with the native kernels loaded: 3870/3870.\n  - The existing random differential test: 400 queries, 0 mismatches.\n  - A new oracle test, `bench/widetest.py`: 3472/3472. It loads several thousand wide-decimal rows into column, row and PQCF v2 tables (plain and RLE, with and without mmap) and checks 31 queries against Python's `decimal` module under every execution option, including native kernels.\n- The engine claims both `change.decimal38` and `change.union_all`.\n\n## How it works\n- **Values:** every DECIMAL value, narrow or wide, is held as a 128-bit integer plus a scale. Any 38-digit value fits in that.\n- **Exact intermediate maths:** a small 256-bit integer type handles the cases 128 bits can't: products of two wide numbers, sums where rescaling one side overflows, comparisons across very different scales, running SUM totals, and FLOAT64 \u2192 DECIMAL conversion.\n- **Storage:** narrow columns keep their 64-bit layout. Wide columns get their own 128-bit column type, and tables with one are saved as PQCF v2; all other tables stay v1. The reader accepts v1 and v2, and rejects a wide column inside a v1 file.\n- **Narrow vs wide dispatch:** the type rules compute the result precision as 18 when all decimal operands are narrow and 38 when any is wide. Arithmetic carries that limit with it, and ROUND/FLOOR/CEIL results are checked against their declared type.\n- **Vectorized engine:** the fast typed paths only ever see values of at most 18 digits. Wide values take the existing value-at-a-time path. Wide columns are never passed to the native kernels.\n\n## Decisions you may want to check\n- **`AS full`:** the public test uses `full` as a column alias, but the grammar lists `FULL` as reserved. I let `FULL` and `RIGHT` be read as plain names only directly after `AS`; everywhere else they stay reserved.\n- **FLOAT64 \u2192 DECIMAL now uses the exact binary value of the double, for narrow targets too, as the change spec requires.** So `CAST(1.005e0 AS DECIMAL(4,2))` now gives `1.00` instead of `1.01`. No existing test depends on the old behaviour.\n- **Version string:** the engine still reports `spec_version` as `\"1.0.0\"`, because an existing phase-1 test requires it. The change spec suggests `1.2.0-cr2`.\n- **One unit test changed:** it expected a v1 file with version number 2 in its header to be rejected as unsupported. It now expects corrupt, and version 3 is the unsupported case, as the change spec says.\n\n## Known limitations\n- Wide decimals run value-at-a-time in the vectorized engine, so they are slower than narrow ones: a grouped SUM/MIN/MAX/AVG over 1M rows took about 11 ms wide versus 4 ms narrow.\n\nThe README has a new \"Change CR-2\" section covering the representation, the narrow/wide dispatch and the modules touched. I also updated an old note in the UNION ALL section that said one of its tests fails on purpose; that test has since been fixed and passes.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

@@ -1,2 +1,6 @@
 2026-10-11T06:03:57+00:00 wave wave-a-change-decimal38-a1-20261011T060356Z: order=['rust']
 2026-10-11T06:03:57+00:00 [a-change-decimal38-rust-a1-20261011T060356Z] agent queued (usage gate, then launch)
+2026-10-11T06:21:27+00:00 [a-change-decimal38-rust-a1-20261011T060356Z] agent finished; collecting telemetry
+2026-10-11T06:21:27+00:00 [a-change-decimal38-rust-a1-20261011T060356Z] validating (clean clone, sandboxed)
+2026-10-11T06:21:50+00:00 [a-change-decimal38-rust-a1-20261011T060356Z] outcome=success cost=$8.570301200000001 turns=118 wall=1049.8s
+2026-10-11T06:21:50+00:00 wave wave-a-change-decimal38-a1-20261011T060356Z finished: decimal38=success
