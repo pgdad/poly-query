@@ -37,6 +37,9 @@ func newAggState(call *plan.AggCall) aggState {
 	}
 	t := call.Arg.Type()
 	if call.Distinct && call.Func != plan.AggMin && call.Func != plan.AggMax {
+		if s := newDistinctState(call, classOf(t)); s != nil {
+			return s
+		}
 		return &genericState{call: call, cls: classOf(t)}
 	}
 	switch {
@@ -513,7 +516,7 @@ type aggTable struct {
 	calls      []*plan.AggCall
 	states     []aggState
 
-	intMap    map[int64]int32
+	intMap    i64Map
 	wideMap   map[types.Int128]int32 // single wide DECIMAL key
 	nmap      *nativeIntMap          // replaces intMap with native kernels
 	floatMap  map[uint64]int32
@@ -533,7 +536,7 @@ type aggTable struct {
 
 func newAggTable(ec *Context, keyTypes []types.Type, calls []*plan.AggCall) *aggTable {
 	t := &aggTable{ec: ec, keyTypes: keyTypes, calls: calls, nullGroup: -1,
-		intMap: map[int64]int32{}, wideMap: map[types.Int128]int32{}, floatMap: map[uint64]int32{}, strMap: map[string]int32{}}
+		wideMap: map[types.Int128]int32{}, floatMap: map[uint64]int32{}, strMap: map[string]int32{}}
 	for _, kt := range keyTypes {
 		t.keyClasses = append(t.keyClasses, classOf(kt))
 	}
@@ -660,13 +663,13 @@ func (t *aggTable) resolveInt(v *Vec, n int, sel []int32, pos int64) error {
 			return err
 		}
 		k := vals[i]
-		g, ok := t.intMap[k]
+		g, ok := t.intMap.get(k)
 		if !ok {
 			var err error
 			if g, err = t.newGroup(t.key1(types.IntValue(k)), pos+int64(i)); err != nil {
 				return err
 			}
-			t.intMap[k] = g
+			t.intMap.put(k, g)
 		}
 		gids[i] = g
 		return nil
@@ -882,8 +885,8 @@ func (t *aggTable) findOrAdd(key types.Row, pos int64) (int32, error) {
 			g, ok = t.nmap.get(v.I, h)
 			put = func(g int32) { t.nmap.put(v.I, h, g) }
 		case t.keyClasses[0] == vInt:
-			g, ok = t.intMap[v.I]
-			put = func(g int32) { t.intMap[v.I] = g }
+			g, ok = t.intMap.get(v.I)
+			put = func(g int32) { t.intMap.put(v.I, g) }
 		case t.keyClasses[0] == vWide:
 			g, ok = t.wideMap[v.Wide()]
 			put = func(g int32) { t.wideMap[v.Wide()] = g }

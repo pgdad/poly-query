@@ -222,12 +222,18 @@ func runSubquery(ec *Context, x *plan.Subquery, sub physical.Node) (*subResult, 
 }
 
 func collectSubquery(ec *Context, x *plan.Subquery, sub physical.Node) (*subResult, error) {
+	var op Operator
+	var err error
 	if len(x.Correlated) > 0 {
-		// Evaluated per outer row: never worth parallel workers.
+		// Evaluated per outer row: never worth parallel workers or the
+		// set-up of batch operators.
 		ec.serial++
 		defer func() { ec.serial-- }()
+		op, err = Build(ec, sub)
+	} else {
+		// Evaluated once: in the statement's execution mode.
+		op, err = BuildRoot(ec, sub)
 	}
-	op, err := Build(ec, sub)
 	if err != nil {
 		return nil, err
 	}
