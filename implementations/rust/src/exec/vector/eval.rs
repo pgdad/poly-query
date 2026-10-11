@@ -51,7 +51,7 @@ pub fn true_mask(v: &Vector) -> Vec<bool> {
     }
 }
 
-fn eval_cow<'a>(e: &Expr, b: &'a Batch, ctx: &ExecContext) -> Result<Cow<'a, Vector>> {
+pub fn eval_cow<'a>(e: &Expr, b: &'a Batch, ctx: &ExecContext) -> Result<Cow<'a, Vector>> {
     match e {
         Expr::Column { index, .. } => Ok(Cow::Borrowed(&b.columns[*index])),
         _ => Ok(Cow::Owned(eval_owned(e, b, ctx)?)),

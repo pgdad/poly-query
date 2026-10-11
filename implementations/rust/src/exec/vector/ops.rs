@@ -338,7 +338,16 @@ impl SortOp {
                 pos: 0,
             });
         }
-        let all = Batch::concat(parts, self.width);
+        let mut all = Batch::concat(parts, self.width);
+        if all.len > 4 * BATCH_SIZE && self.top.is_none_or(|t| t > 4 * BATCH_SIZE) {
+            // Many output rows: emit strings as codes into a shared
+            // dictionary (cheap gathers).
+            all.columns = all
+                .columns
+                .into_iter()
+                .map(Vector::into_dictionary)
+                .collect();
+        }
         let perm = sort_permutation(&all, &self.keys, self.top, ctx)?;
         Ok(SortedRows {
             rows: all,

@@ -357,6 +357,19 @@ impl Vector {
         Vector::new(data, Some(valid))
     }
 
+    /// A plain string vector as a dictionary-encoded one whose dictionary
+    /// is the vector's own strings (codes are row numbers), so that gathers
+    /// copy codes instead of string references. Other vectors unchanged.
+    pub fn into_dictionary(self) -> Vector {
+        match self.data {
+            Data::Str(v) => Vector::new(
+                Data::Dict((0..v.len() as u32).collect(), Arc::from(v)),
+                self.valid,
+            ),
+            data => Vector { data, ..self },
+        }
+    }
+
     /// Concatenates vectors, keeping a typed representation when possible.
     /// Takes the parts by value, so their data is moved, not cloned.
     pub fn concat(mut parts: Vec<Vector>) -> Vector {
