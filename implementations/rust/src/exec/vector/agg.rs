@@ -379,11 +379,11 @@ impl Acc {
                         }
                     }
                     Data::Str(v) => {
-                        for i in 0..n {
+                        for (i, x) in v.iter().enumerate() {
                             if ok(i) {
                                 let gi = g(i);
-                                if better(strings, best[gi], &v[i]) {
-                                    best[gi] = strings.push(&v[i]);
+                                if better(strings, best[gi], x) {
+                                    best[gi] = strings.push(x);
                                 }
                             }
                         }
