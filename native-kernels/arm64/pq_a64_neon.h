@@ -7,10 +7,14 @@
  *   NEON_TABLES       .rodata constant tables (bit weights, CMTST lane
  *                     constants, filter compaction tables)
  *   VMASK2D, VMASK4S  validity byte -> per-lane masks (CMTST)
+ *   LD8_VMASK2D, COUNT_VALID8
+ *                     8 rows + their validity masks; valid-row counter
  *   TAIL_VBYTE        validity byte for a scalar tail of <= 7 rows
- *   PACK16, RANGE16   16 int64 rows -> 16-bit range-predicate row mask
- *   EMIT8             table-driven compaction of 8 rows into indices
- *   LD2X4, RNG2, RNG8, PACK8
+ *   PACK16, RANGE_LANES, RANGE16, FILTER16_PROLOGUE
+ *                     16 int64 rows -> 16-bit range-predicate row mask
+ *   EMIT8_SETUP, EMIT8
+ *                     table-driven compaction of 8 rows into indices
+ *   PRED128_BCAST, LD2X4, RNG2, RNG8, PACK8
  *                     128-bit rows: lo/hi split, range predicate, 8-bit mask
  *   ADDV2X            horizontal sum of two 2x64-bit counters into a GPR
  *   BITS_TAIL_PUT, BITS_TAIL_STORE, POPCOUNT_TAILCALL
@@ -108,6 +112,25 @@
     cmtst   v\m1\().4s, v\vb\().4s, v\c1\().4s
     .endm
 
+/* LD8_VMASK2D: loads the next 8 rows (v0-v3, data x0 post-incremented by
+ * 64) and the lane masks of their validity byte (x1 post-incremented):
+ * v20 = replicated byte, v21-v24 = masks (VMASK2D with v26-v29 =
+ * .Lneon_bits2d). */
+    .macro  LD8_VMASK2D
+    ld1r    {v20.16b}, [x1], #1
+    ld1     {v0.2d-v3.2d}, [x0], #64
+    VMASK2D 20, 21, 22, 23, 24, 26, 27, 28, 29
+    .endm
+
+/* COUNT_VALID8: v30 (2x64-bit valid-row counter) -= the all-ones masks
+ * v21-v24 of LD8_VMASK2D, i.e. += number of valid rows. */
+    .macro  COUNT_VALID8
+    sub     v30.2d, v30.2d, v21.2d
+    sub     v30.2d, v30.2d, v22.2d
+    sub     v30.2d, v30.2d, v23.2d
+    sub     v30.2d, v30.2d, v24.2d
+    .endm
+
 /* TAIL_VBYTE wd, xtest, xptr
  * Validity of a scalar tail of at most 7 rows starting at a multiple of 8:
  * wd = 0xff (all valid) if xtest (the original validity pointer) is NULL,
@@ -143,30 +166,69 @@
     umov    \wout, v0.h[0]
     .endm
 
+/* RANGE_LANES r0, r1, ...: v<r> = 2x64-bit lane mask of (x - lo) <=u span
+ * for the int64 rows in each listed register (all SUBs first, then all
+ * CMHS, so independent operations are adjacent). Needs v16 = lo,
+ * v17 = span. */
+    .macro  RANGE_LANES regs:vararg
+    RANGE_SUB \regs
+    RANGE_CMHS \regs
+    .endm
+
+/* RANGE_SUB / RANGE_CMHS r, rest...: the two halves of RANGE_LANES
+ * (recursive over the register list). */
+    .macro  RANGE_SUB r, rest:vararg
+    sub     v\r\().2d, v\r\().2d, v16.2d
+    .ifnb   \rest
+    RANGE_SUB \rest
+    .endif
+    .endm
+
+    .macro  RANGE_CMHS r, rest:vararg
+    cmhs    v\r\().2d, v17.2d, v\r\().2d
+    .ifnb   \rest
+    RANGE_CMHS \rest
+    .endif
+    .endm
+
 /* RANGE16 xp, wout: loads 16 int64 from [xp] (post-increment by 128) and
- * produces the un-inverted 16-bit mask of (x - lo) <=u span (SUB + CMHS per
- * 2 rows, then PACK16). Needs v16 = lo, v17 = span, v18 = .Lneon_bitsel16.
+ * produces the un-inverted 16-bit mask of (x - lo) <=u span (RANGE_LANES,
+ * then PACK16). Needs v16 = lo, v17 = span, v18 = .Lneon_bitsel16.
  * Clobbers v0-v7. */
     .macro  RANGE16 xp, wout
     ld1     {v0.2d-v3.2d}, [\xp], #64
     ld1     {v4.2d-v7.2d}, [\xp], #64
-    sub     v0.2d, v0.2d, v16.2d
-    sub     v1.2d, v1.2d, v16.2d
-    sub     v2.2d, v2.2d, v16.2d
-    sub     v3.2d, v3.2d, v16.2d
-    sub     v4.2d, v4.2d, v16.2d
-    sub     v5.2d, v5.2d, v16.2d
-    sub     v6.2d, v6.2d, v16.2d
-    sub     v7.2d, v7.2d, v16.2d
-    cmhs    v0.2d, v17.2d, v0.2d
-    cmhs    v1.2d, v17.2d, v1.2d
-    cmhs    v2.2d, v17.2d, v2.2d
-    cmhs    v3.2d, v17.2d, v3.2d
-    cmhs    v4.2d, v17.2d, v4.2d
-    cmhs    v5.2d, v17.2d, v5.2d
-    cmhs    v6.2d, v17.2d, v6.2d
-    cmhs    v7.2d, v17.2d, v7.2d
+    RANGE_LANES 0, 1, 2, 3, 4, 5, 6, 7
     PACK16  \wout
+    .endm
+
+/* FILTER16_PROLOGUE invalid, tail: section 1 of filter_i64 and
+ * filter_i64_bitmap. PRED_SETUP (x7 lo, x8 span, w9 inv widened to a 16-bit
+ * mask 0/0xffff), x3 = validity base, x10 = 0 (row), x11 = x6 (output
+ * cursor), x15 = n rounded down to 16; branches to `tail` if there is no
+ * full 16-row block, else broadcasts v16 = lo, v17 = span and loads
+ * v18 = .Lneon_bitsel16 for RANGE16. Clobbers x12. */
+    .macro  FILTER16_PROLOGUE invalid, tail
+    PRED_SETUP w3, x4, x5, x7, x8, x9, x10, \invalid
+    and     w9, w9, #0xffff
+    mov     x3, x1
+    mov     x10, #0
+    mov     x11, x6
+    and     x15, x2, #~15
+    cbz     x15, \tail
+    dup     v16.2d, x7
+    dup     v17.2d, x8
+    LOADADDR x12, .Lneon_bitsel16
+    ld1     {v18.16b}, [x12]
+    .endm
+
+/* EMIT8_SETUP: x12 = .Lneon_selpos, x13 = .Lneon_selcnt, v20 = 0 (row
+ * base), v21 = 8 (u32 x4): the state EMIT8 expects. */
+    .macro  EMIT8_SETUP
+    LOADADDR x12, .Lneon_selpos
+    LOADADDR x13, .Lneon_selcnt
+    movi    v20.4s, #0
+    movi    v21.4s, #8
     .endm
 
 /* EMIT8 m: appends the row indices selected by the mask byte x<m> (bit j =
@@ -210,6 +272,15 @@
     ld2     {v2.2d, v3.2d}, [\xp], #32
     ld2     {v4.2d, v5.2d}, [\xp], #32
     ld2     {v6.2d, v7.2d}, [\xp], #32
+    .endm
+
+/* PRED128_BCAST: broadcasts the PRED128_SETUP result (x8:x7 lo,
+ * x10:x9 span) into v16:v17 = lo and v18:v19 = span (lo word, hi word). */
+    .macro  PRED128_BCAST
+    dup     v16.2d, x7
+    dup     v17.2d, x8
+    dup     v18.2d, x9
+    dup     v19.2d, x10
     .endm
 
 /* RNG2 l, h, t: v<l>/v<h> hold the lo/hi words of 2 rows. Leaves the 2x64

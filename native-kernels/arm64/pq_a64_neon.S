@@ -46,9 +46,9 @@
 
 /* Block sizes of the bounded accumulation loops (see the kernels). Shrink
  * them to a few iterations to exercise the block-flush paths in testing. */
-#define NEON_SUM64_BLOCK     (1 << 24)      /* sum_i64: 8-row groups per block */
-#define NEON_POPCNT_BLOCK    (1 << 20)      /* bitmap_popcount: 64-byte steps per block */
-#define NEON_SUM128_BLOCK    (1 << 28)      /* sum_i128: rows per block */
+#define NEON_SUM64_BLOCK     (1<<24)        /* sum_i64: 8-row groups per block */
+#define NEON_POPCNT_BLOCK    (1<<20)        /* bitmap_popcount: 64-byte steps per block */
+#define NEON_SUM128_BLOCK    (1<<28)        /* sum_i128: rows per block */
 
 /* ========================================================================
  * filter_i64
@@ -71,21 +71,8 @@
  * ======================================================================== */
 FUNC pqk_a64_neon_filter_i64
     // -- 1. arguments / empty input
-    PRED_SETUP w3, x4, x5, x7, x8, x9, x10, .Lneon_filter_i64_inval
-    and     w9, w9, #0xffff
-    mov     x3, x1
-    mov     x10, #0
-    mov     x11, x6
-    and     x15, x2, #~15
-    cbz     x15, .Lneon_filter_i64_tail
-    dup     v16.2d, x7
-    dup     v17.2d, x8
-    LOADADDR x12, .Lneon_bitsel16
-    ld1     {v18.16b}, [x12]
-    LOADADDR x12, .Lneon_selpos
-    LOADADDR x13, .Lneon_selcnt
-    movi    v20.4s, #0
-    movi    v21.4s, #8
+    FILTER16_PROLOGUE .Lneon_filter_i64_inval, .Lneon_filter_i64_tail
+    EMIT8_SETUP
     // -- 2. main loop: 16 rows
 .Lneon_filter_i64_main:
     RANGE16 x0, w16
@@ -141,17 +128,7 @@ ENDF pqk_a64_neon_filter_i64
  * ======================================================================== */
 FUNC pqk_a64_neon_filter_i64_bitmap
     // -- 1. arguments / empty input
-    PRED_SETUP w3, x4, x5, x7, x8, x9, x10, .Lneon_filter_i64_bitmap_inval
-    and     w9, w9, #0xffff
-    mov     x3, x1
-    mov     x10, #0
-    mov     x11, x6
-    and     x15, x2, #~15
-    cbz     x15, .Lneon_filter_i64_bitmap_tail
-    dup     v16.2d, x7
-    dup     v17.2d, x8
-    LOADADDR x12, .Lneon_bitsel16
-    ld1     {v18.16b}, [x12]
+    FILTER16_PROLOGUE .Lneon_filter_i64_bitmap_inval, .Lneon_filter_i64_bitmap_tail
     // -- 2. main loop: 16 rows
 .Lneon_filter_i64_bitmap_main:
     RANGE16 x0, w16
@@ -315,9 +292,7 @@ FUNC pqk_a64_neon_sum_f64
     ld1     {v26.2d-v29.2d}, [x7]
     // -- 2. main loop: 8 rows
 .Lneon_sum_f64_main_v:
-    ld1r    {v20.16b}, [x1], #1
-    ld1     {v0.2d-v3.2d}, [x0], #64
-    VMASK2D 20, 21, 22, 23, 24, 26, 27, 28, 29
+    LD8_VMASK2D
     and     v0.16b, v0.16b, v21.16b
     and     v1.16b, v1.16b, v22.16b
     and     v2.16b, v2.16b, v23.16b
@@ -401,13 +376,8 @@ FUNC pqk_a64_neon_minmax_i64
     ld1     {v26.2d-v29.2d}, [x8]
     // -- 2. main loop: 8 rows
 .Lneon_minmax_i64_main_v:
-    ld1r    {v20.16b}, [x1], #1
-    ld1     {v0.2d-v3.2d}, [x0], #64
-    VMASK2D 20, 21, 22, 23, 24, 26, 27, 28, 29
-    sub     v30.2d, v30.2d, v21.2d
-    sub     v30.2d, v30.2d, v22.2d
-    sub     v30.2d, v30.2d, v23.2d
-    sub     v30.2d, v30.2d, v24.2d
+    LD8_VMASK2D
+    COUNT_VALID8
     MMSTEP  v0, v21, v16, v17
     MMSTEP  v1, v22, v18, v19
     MMSTEP  v2, v23, v16, v17
@@ -448,10 +418,7 @@ FUNC pqk_a64_neon_minmax_i64
     csel    x9, x8, x13, ne
     csel    x8, x8, x14, ne
     cinc    x11, x11, ne
-    cmp     x9, x5
-    csel    x5, x9, x5, lt
-    cmp     x8, x6
-    csel    x6, x8, x6, gt
+    MINMAX64_STEP x5, x6, x9, x8
     lsr     w12, w12, #1
     subs    x7, x7, #1
     b.ne    .Lneon_minmax_i64_tail_row
@@ -511,13 +478,8 @@ FUNC pqk_a64_neon_minmax_f64
     ld1     {v26.2d-v29.2d}, [x8]
     // -- 2. main loop: 8 rows
 .Lneon_minmax_f64_main_v:
-    ld1r    {v20.16b}, [x1], #1
-    ld1     {v0.2d-v3.2d}, [x0], #64
-    VMASK2D 20, 21, 22, 23, 24, 26, 27, 28, 29
-    sub     v30.2d, v30.2d, v21.2d
-    sub     v30.2d, v30.2d, v22.2d
-    sub     v30.2d, v30.2d, v23.2d
-    sub     v30.2d, v30.2d, v24.2d
+    LD8_VMASK2D
+    COUNT_VALID8
     orn     v0.16b, v0.16b, v21.16b         // invalid -> all-ones (qNaN)
     orn     v1.16b, v1.16b, v22.16b
     orn     v2.16b, v2.16b, v23.16b
@@ -550,10 +512,7 @@ FUNC pqk_a64_neon_minmax_f64
     fcsel   d5, d4, d3, ne
     fcsel   d4, d4, d2, ne
     cinc    x11, x11, ne
-    fcmp    d4, d0
-    fcsel   d0, d4, d0, mi
-    fcmp    d5, d1
-    fcsel   d1, d5, d1, gt
+    F64_MINMAX_STEP d0, d1, d4, d5
     lsr     w12, w12, #1
     subs    x7, x7, #1
     b.ne    .Lneon_minmax_f64_tail_row
@@ -587,18 +546,6 @@ ENDF pqk_a64_neon_minmax_f64
  *            applied algebraically at the end (count = rows - count).
  * Tail:      0-7 rows: scalar SPRED, validity from TAIL_VBYTE.
  * ======================================================================== */
-/* RANGE8: v0-v3 (8 rows) -> lane masks of (x - lo) <=u span. */
-    .macro  RANGE8
-    sub     v0.2d, v0.2d, v16.2d
-    sub     v1.2d, v1.2d, v16.2d
-    sub     v2.2d, v2.2d, v16.2d
-    sub     v3.2d, v3.2d, v16.2d
-    cmhs    v0.2d, v17.2d, v0.2d
-    cmhs    v1.2d, v17.2d, v1.2d
-    cmhs    v2.2d, v17.2d, v2.2d
-    cmhs    v3.2d, v17.2d, v3.2d
-    .endm
-
 /* COUNT8: v20/v21 -= lane masks v0-v3 (all-ones = +1). */
     .macro  COUNT8
     sub     v20.2d, v20.2d, v0.2d
@@ -627,7 +574,7 @@ FUNC pqk_a64_neon_count_i64
     ld1r    {v19.16b}, [x1], #1
     ld1     {v0.2d-v3.2d}, [x0], #64
     VMASK2D 19, 4, 5, 6, 7, 26, 27, 28, 29
-    RANGE8
+    RANGE_LANES 0, 1, 2, 3
     eor     v0.16b, v0.16b, v18.16b
     eor     v1.16b, v1.16b, v18.16b
     eor     v2.16b, v2.16b, v18.16b
@@ -643,7 +590,7 @@ FUNC pqk_a64_neon_count_i64
     b       .Lneon_count_i64_tail
 .Lneon_count_i64_main_nv:
     ld1     {v0.2d-v3.2d}, [x0], #64
-    RANGE8
+    RANGE_LANES 0, 1, 2, 3
     COUNT8
     subs    x6, x6, #1
     b.ne    .Lneon_count_i64_main_nv
@@ -902,6 +849,18 @@ ENDF pqk_a64_neon_hash_i64
     PACK16  \wout
     .endm
 
+/* CMP16_LOOP insn, loop: main loop (label `loop`) of one compare type:
+ * CMP16, EOR inversion, STRH, while x10 < x15. */
+    .macro  CMP16_LOOP insn, loop
+\loop:
+    CMP16   \insn, w16
+    eor     w16, w16, w9
+    strh    w16, [x11], #2
+    add     x10, x10, #16
+    cmp     x10, x15
+    b.lo    \loop
+    .endm
+
 FUNC pqk_a64_neon_compare_i64
     // -- 1. arguments / empty input
     CMPOP_CHECK w3, w9, .Lneon_compare_i64_inval
@@ -918,22 +877,10 @@ FUNC pqk_a64_neon_compare_i64
     ld1     {v18.16b}, [x12]
     cbnz    w5, .Lneon_compare_i64_main_gt
     // -- 2. main loop: 16 rows, EQ-based ops
-.Lneon_compare_i64_main_eq:
-    CMP16   cmeq, w16
-    eor     w16, w16, w9
-    strh    w16, [x11], #2
-    add     x10, x10, #16
-    cmp     x10, x15
-    b.lo    .Lneon_compare_i64_main_eq
+    CMP16_LOOP cmeq, .Lneon_compare_i64_main_eq
     b       .Lneon_compare_i64_tail
     // -- 2. main loop: 16 rows, GT-based ops
-.Lneon_compare_i64_main_gt:
-    CMP16   cmgt, w16
-    eor     w16, w16, w9
-    strh    w16, [x11], #2
-    add     x10, x10, #16
-    cmp     x10, x15
-    b.lo    .Lneon_compare_i64_main_gt
+    CMP16_LOOP cmgt, .Lneon_compare_i64_main_gt
     // -- 3. tail: 0-15 rows -> 1-2 bytes
 .Lneon_compare_i64_tail:
     cmp     x10, x2
@@ -1227,16 +1174,10 @@ FUNC pqk_a64_neon_filter_i128
     mov     x11, x6
     and     x15, x2, #~7
     cbz     x15, .Lneon_filter_i128_tail
-    dup     v16.2d, x7
-    dup     v17.2d, x8
-    dup     v18.2d, x9
-    dup     v19.2d, x10
+    PRED128_BCAST
     LOADADDR x12, .Lneon_bitsel16
     ldr     d28, [x12]
-    LOADADDR x12, .Lneon_selpos
-    LOADADDR x13, .Lneon_selcnt
-    movi    v20.4s, #0
-    movi    v21.4s, #8
+    EMIT8_SETUP
     // -- 2. main loop: 8 rows
 .Lneon_filter_i128_main:
     RNG8    x0
@@ -1308,10 +1249,7 @@ FUNC pqk_a64_neon_count_i128
     mov     x6, #0
     and     x15, x2, #~7
     cbz     x15, .Lneon_count_i128_tail
-    dup     v16.2d, x7
-    dup     v17.2d, x8
-    dup     v18.2d, x9
-    dup     v19.2d, x10
+    PRED128_BCAST
     movi    v26.2d, #0
     movi    v27.2d, #0
     cbz     x1, .Lneon_count_i128_main_nv
@@ -1414,10 +1352,7 @@ FUNC pqk_a64_neon_sum_i128
     ld1     {v26.4s, v27.4s}, [x10]
     // -- 2. main loop: blocks of up to NEON_SUM128_BLOCK rows, 8 rows
 .Lneon_sum_i128_block:
-    mov     x8, #NEON_SUM128_BLOCK
-    add     x8, x8, x7
-    cmp     x8, x15
-    csel    x8, x8, x15, lo                 // multiple of 8, <= x15
+    BLOCK_END x8, x7, x15, NEON_SUM128_BLOCK // multiple of 8, <= x15
     movi    v16.2d, #0
     movi    v17.2d, #0
     movi    v18.2d, #0
@@ -1461,10 +1396,6 @@ FUNC pqk_a64_neon_sum_i128
     addp    d17, v17.2d
     addp    d18, v18.2d
     addp    d19, v19.2d
-    fmov    x10, d16                        // L0 (unsigned)
-    fmov    x11, d17                        // L1 (unsigned)
-    fmov    x12, d18                        // L2 (unsigned)
-    fmov    x13, d19                        // L3 (signed)
     FOLD_LIMBS192 x4, x5, x6, x10, x11, x12, x13, x14, x16
     cmp     x7, x15
     b.lo    .Lneon_sum_i128_block

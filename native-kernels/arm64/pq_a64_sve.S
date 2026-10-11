@@ -47,7 +47,7 @@
 
 /* Block size of the bounded accumulation loops (rows per block). Shrink it
  * to a few rows to exercise the block-flush paths in testing. */
-#define SVE_SUM_BLOCK        (1 << 24)      /* sum_i64 and sum_i128 */
+#define SVE_SUM_BLOCK        (1<<24)        /* sum_i64 and sum_i128 */
 
 /* ========================================================================
  * filter_i64
@@ -152,10 +152,7 @@ FUNC pqk_a64_sve_sum_i64
     cbz     x2, .Lsve_sum_i64_result
     // -- 2. main loop: blocks of up to SVE_SUM_BLOCK rows, one vector
 .Lsve_sum_i64_block:
-    mov     x8, #SVE_SUM_BLOCK
-    add     x8, x8, x6
-    cmp     x8, x2
-    csel    x8, x8, x2, lo
+    BLOCK_END x8, x6, x2, SVE_SUM_BLOCK
     mov     z16.d, #0
     mov     z17.d, #0
     whilelo p0.d, x6, x8
@@ -765,10 +762,7 @@ FUNC pqk_a64_sve_sum_i128
     cbz     x2, .Lsve_sum_i128_result
     // -- 2. main loop: blocks of up to SVE_SUM_BLOCK rows, one vector
 .Lsve_sum_i128_block:
-    mov     x8, #SVE_SUM_BLOCK
-    add     x8, x8, x7
-    cmp     x8, x2
-    csel    x8, x8, x2, lo
+    BLOCK_END x8, x7, x2, SVE_SUM_BLOCK
     mov     z16.d, #0
     mov     z17.d, #0
     mov     z18.d, #0
@@ -794,10 +788,6 @@ FUNC pqk_a64_sve_sum_i128
     uaddv   d17, p7, z17.d
     uaddv   d18, p7, z18.d
     uaddv   d19, p7, z19.d                  // two's complement, |.| < 2^55
-    fmov    x10, d16
-    fmov    x11, d17
-    fmov    x12, d18
-    fmov    x13, d19
     FOLD_LIMBS192 x4, x5, x6, x10, x11, x12, x13, x14, x16
     cmp     x7, x2
     b.lo    .Lsve_sum_i128_block

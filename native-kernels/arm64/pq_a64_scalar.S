@@ -225,10 +225,7 @@ FUNC pqk_a64_scalar_minmax_i64
 .Lscalar_minmax_i64_all:
     add     x5, x5, #1
 .Lscalar_minmax_i64_update:
-    cmp     x8, x6
-    csel    x6, x8, x6, lt
-    cmp     x9, x7
-    csel    x7, x9, x7, gt
+    MINMAX64_STEP x6, x7, x8, x9
     add     x10, x10, #1
     cmp     x10, x2
     b.lo    .Lscalar_minmax_i64_main
@@ -276,10 +273,7 @@ FUNC pqk_a64_scalar_minmax_f64
 .Lscalar_minmax_f64_all:
     add     x5, x5, #1
 .Lscalar_minmax_f64_update:
-    fcmp    d4, d0
-    fcsel   d0, d4, d0, mi
-    fcmp    d5, d1
-    fcsel   d1, d5, d1, gt
+    F64_MINMAX_STEP d0, d1, d4, d5
     add     x10, x10, #1
     cmp     x10, x2
     b.lo    .Lscalar_minmax_f64_main

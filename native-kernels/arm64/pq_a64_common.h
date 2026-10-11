@@ -16,9 +16,10 @@
  *   4. Scalar predicate evaluation and validity bits: SPRED, SPRED128, VBIT,
  *      AND_VBIT.
  *   5. Exact integer accumulation: ADD128S, ADD192S, FOLD_SUM64,
- *      FOLD_LIMBS192 and the result epilogues SUM64_RESULT, SUM128_RESULT.
- *   6. Min/max: MIN128(V), MAX128(V), MINMAX_RESULT, MINMAX128_RESULT,
- *      F64_FIRST_ZERO.
+ *      FOLD_LIMBS192, BLOCK_END and the result epilogues SUM64_RESULT,
+ *      SUM128_RESULT.
+ *   6. Min/max: MIN128(V), MAX128(V), MINMAX64_STEP, F64_MINMAX_STEP,
+ *      MINMAX_RESULT, MINMAX128_RESULT, F64_FIRST_ZERO.
  *   7. Bitmaps and bit counting: SBITMAP_PUT / SBITMAP_FLUSH (scalar bitmap
  *      writer), BITOP_STEP8, BITOP_BYTES, LOWBITS, ADD_CNT8, ADD_POPCNT_LOW.
  *   8. Hashing: LOAD_FMIX, FMIX1.
@@ -367,10 +368,15 @@
     .endm
 
 /* FOLD_LIMBS192 a0, a1, a2, l0, l1, l2, l3, t1, t2
- * sum_i128 block fold: (a2:a1:a0) += L0 + L1 * 2^32 + L2 * 2^64 + L3 * 2^96
- * (192-bit), where L0..L2 are unsigned and L3 signed 64-bit limb sums.
- * Clobbers t1, t2. */
+ * sum_i128 block fold (NEON and SVE): (a2:a1:a0) += L0 + L1 * 2^32 +
+ * L2 * 2^64 + L3 * 2^96 (192-bit), where the limb sums L0..L2 (unsigned)
+ * and L3 (signed) are the 64-bit values in d16..d19; they are first moved
+ * to the GPRs l0..l3. Clobbers l0-l3, t1, t2. */
     .macro FOLD_LIMBS192 a0, a1, a2, l0, l1, l2, l3, t1, t2
+    fmov    \l0, d16                        // L0 (unsigned)
+    fmov    \l1, d17                        // L1 (unsigned)
+    fmov    \l2, d18                        // L2 (unsigned)
+    fmov    \l3, d19                        // L3 (signed)
     adds    \a0, \a0, \l0                   // += L0
     adcs    \a1, \a1, xzr
     adc     \a2, \a2, xzr
@@ -385,6 +391,16 @@
     asr     \t2, \l3, #32
     adds    \a1, \a1, \t1
     adc     \a2, \a2, \t2
+    .endm
+
+/* BLOCK_END xend, xi, xlimit, size : xend = min(xi + size, xlimit), the
+ * end row of the next bounded accumulation block (size: an immediate
+ * encodable by MOV, e.g. (1<<24)). Clobbers flags. */
+    .macro BLOCK_END xend, xi, xlimit, size
+    mov     \xend, #\size
+    add     \xend, \xend, \xi
+    cmp     \xend, \xlimit
+    csel    \xend, \xend, \xlimit, lo
     .endm
 
 /* SUM64_RESULT xlo, xhi, xout : result section of sum_i64. The exact sum is
@@ -455,6 +471,25 @@
     ccmp    w\v, #0, #4, lt
     csel    x\ml, x\xl, x\ml, ne
     csel    x\mh, x\xh, x\mh, ne
+    .endm
+
+/* MINMAX64_STEP mn, mx, cmin, cmax : signed int64 update
+ * mn = min(mn, cmin), mx = max(mx, cmax) with CMP + CSEL lt / gt (X regs).
+ * F64_MINMAX_STEP mn, mx, cmin, cmax : the same for doubles with FCMP +
+ * FCSEL mi / gt, i.e. the reference's strict "<" / ">" (the first of equal
+ * values wins, so signed zeros match the sequential order). */
+    .macro MINMAX64_STEP mn, mx, cmin, cmax
+    cmp     \cmin, \mn
+    csel    \mn, \cmin, \mn, lt
+    cmp     \cmax, \mx
+    csel    \mx, \cmax, \mx, gt
+    .endm
+
+    .macro F64_MINMAX_STEP mn, mx, cmin, cmax
+    fcmp    \cmin, \mn
+    fcsel   \mn, \cmin, \mn, mi
+    fcmp    \cmax, \mx
+    fcsel   \mx, \cmax, \mx, gt
     .endm
 
 /* MINMAX_RESULT cnt, rmin, rmax : result section of minmax_i64/minmax_f64:
