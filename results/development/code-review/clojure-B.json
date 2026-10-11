@@ -1,0 +1,47 @@
+{
+ "language": "clojure",
+ "reviewer": "B",
+ "scores": {
+  "architecture": 5,
+  "readability": 4,
+  "robustness": 4,
+  "testability": 4
+ },
+ "evidence": {
+  "architecture": [
+   "src/polyquery/protocol.clj:1-5 — protocol handling does not depend on the transport. The session, exec and HTTP modes all use it, and each op is a `defmethod handle-op` (protocol.clj:101-104).",
+   "src/polyquery/engine.clj:1-6,43-55 — the pipeline is laid out in one place: parser/parse-statement, then analyzer/analyze-statement, then planner/plan-query, then dispatch/build. Each stage is its own namespace (sql/*, plan/*, exec/*, storage/*, server/*, native/*).",
+   "src/polyquery/plan/optimizer.clj:29-46 — the optimizer is a data vector of named rules, and each rule lives in its own namespace under plan/rules/. planner.clj:20-31 composes logical plan, then pruning, then optimizer, then physical plan, keeping logical and physical choices apart.",
+   "src/polyquery/engine.clj:82-114 — falling back to row mode after a vectorized or parallel failure is one documented wrapper (`with-fallback`). It keeps the execution engines decoupled and does not scatter retry logic around."
+  ],
+  "readability": [
+   "src/polyquery/sql/analyzer.clj:1-20, exec/grouping.clj:1-34, storage/pqcf.clj:1-19 — namespace docstrings explain design and reasons (data-structure choices, native-kernel overflow handling, mmap lazy validation) and cite spec sections.",
+   "src/polyquery/protocol.clj:65-76,170-195 — validation is small and data-driven (`field` helper, `enum-options` map). The AST, bound query and plans are plain maps, which is idiomatic data orientation.",
+   "src/polyquery/exec/grouping.clj:192-416 — hot paths are Java-style deftypes and definterfaces with primitive arrays. `long-key-table` is about 214 lines and `group-table` about 300, and there are 1000+ line files (exec/kernels.clj, 1003 lines). These are justified for performance but hard to follow.",
+   "src/polyquery/sql/lexer.clj:33-128 — the tokenizer is one 95-line loop with nested local closures. It is correct and readable, but dense."
+  ],
+  "robustness": [
+   "src/polyquery/errors.clj:15-47 — one central model of ex-info with :pq/code. A :pre check validates codes, and `->error-object` maps OOM and StackOverflow to RESOURCE_LIMIT and anything else to INTERNAL_ERROR. protocol.clj:337-351 `handle-request` is documented as never throwing and catches Throwable.",
+   "src/polyquery/storage/pqcf.clj:612-740 — the untrusted file is validated thoroughly: header and footer magic, version and flags, metadata CRC, strict UTF-8, range-checked ints (`req-int`), chunk bounds against data-end, duplicate column and index names, row-count consistency. Per-value checks (pqcf.clj:403-415) return STORAGE_CORRUPT or STORAGE_VERSION_UNSUPPORTED. Row-group size is capped at Integer/MAX_VALUE (pqcf.clj:752-768).",
+   "src/polyquery/protocol.clj:85-96 — path checks reject absolute paths, `..`, NUL and drive letters. They are lexical only, and the docstring admits symlinks are followed. util/json.clj:121 caps JSON nesting at 512, and server/http.clj:121 enforces max-request-bytes with 413. exec/context.clj:10-49 provides a deadline, cancellation and a memory budget.",
+   "src/polyquery/sql/parser.clj:68-120 — the recursive-descent parser has no explicit nesting-depth limit. Deep SQL relies on StackOverflowError being turned into RESOURCE_LIMIT (errors.clj:42), which is weaker than an explicit guard."
+  ],
+  "testability": [
+   "test/polyquery/plan/rules/predicate_pushdown_test.clj:7-60 — each optimizer rule is unit-tested in isolation from SQL text or hand-built plan maps. This works because plans are plain data and rules are pure functions.",
+   "test/polyquery/test_util.clj:7-24 — an `error-code` macro and a `csv-catalog` helper make new engine tests one-liners. There are 142 deftests across lexer, parser, analyzer, logical, planner, each rule, vectorized execution, functions, ingest, pqcf, server and native.",
+   "test/polyquery/storage/pqcf_test.clj:36-121 — the CRC check value, round-trips, wide-decimal files and invalid-file cases are tested directly against the storage namespace.",
+   "deps.edn:1-6 — there is a single :test alias with a custom runner and no test libraries beyond clojure.test. There is no property-based or generative testing inside the engine, and the big execution files (kernels, grouping, operators) are covered mainly indirectly through engine_phase*_test."
+  ]
+ },
+ "top_strengths": [
+  "Clean, well-documented pipeline with strict namespace boundaries: lexer, parser, analyzer/binder, logical plan, rule optimizer, physical plan, row/vectorized/parallel execution, storage, protocol, server.",
+  "A single coded-error model, with defensive validation of all untrusted input (protocol fields, paths, JSON depth, HTTP body size, and very thorough PQCF corruption checks).",
+  "Pure-data plans and stateless rules make components easy to unit-test in isolation, and the tests cover every layer."
+ ],
+ "top_weaknesses": [
+  "Performance code (exec/kernels.clj at 1003 lines, exec/grouping.clj at 826, storage/pqcf.clj at 771) is very large, with long Java-style deftype bodies and functions of 200+ lines.",
+  "The SQL parser has no explicit recursion-depth limit and relies on catching StackOverflowError. Path safety is lexical only, so symlinks inside the data directory are followed.",
+  "There is a silent fallback to row-mode re-execution after unexpected RuntimeExceptions (engine.clj:91-100). It can hide vectorized or parallel defects unless PQ_STRICT_EXECUTION is set."
+ ],
+ "files_read": 17
+}

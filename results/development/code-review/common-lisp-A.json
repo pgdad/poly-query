@@ -1,0 +1,48 @@
+{
+ "language": "common-lisp",
+ "reviewer": "A",
+ "scores": {
+  "architecture": 4,
+  "readability": 4,
+  "robustness": 4,
+  "testability": 3
+ },
+ "evidence": {
+  "architecture": [
+   "implementations/common-lisp/polyquery.asd:10-81 — the system is split into modules for util, types, storage, ingest, sql (lexer/ast/parser), analyzer (bound/functions/binder/query), native, plan (logical/estimates/rules/builder/optimizer/access/physical), exec, engine, protocol, server and cli. The modules load serially in a clear layered order.",
+   "implementations/common-lisp/src/plan/optimizer.lisp:1-35 — the logical optimizer is a registry of named rules, one file per rule. Each rule is a plan-to-plan function. The optimizer does not deal with access paths or join algorithms, which belong to the separate physical planner (plan/physical.lisp).",
+   "implementations/common-lisp/src/engine.lisp:46-94 — a thin facade runs parse-sql, then bind-statement against a catalog snapshot, then plan-bound-query, then either compile-batch-operator (vectorized) or compile-plan (row). The pipeline stages are clean and visible here.",
+   "implementations/common-lisp/src/package.lisp:3-20 — the whole engine lives in one package (#:polyquery), so layer boundaries are enforced only by ASDF load order. Tests and layers reach internals freely (e.g. tests/test-plan.lisp:24-50 uses polyquery:: throughout). The row and vectorized executors also run in parallel with duplicated logic (exec/operators vs voperators, expressions vs vexpressions, aggregates vs vaggregates). Engine.lisp:96-166 is coupled to both through the retry on the row executor after a data error."
+  ],
+  "readability": [
+   "implementations/common-lisp/src/sql/lexer.lisp:42-125 — tokenize is idiomatic: local helpers in labels (peek/advance/scan-quoted), tokens as a defstruct with a docstring describing each kind, and parse errors that carry the line and column.",
+   "implementations/common-lisp/src/sql/parser.lisp:87-103 — small, purposeful macros (with-node-position, with-depth) remove repeated position and depth bookkeeping. The docstrings explain why, e.g. expect-alias at :78-85 explains why FULL/RIGHT are accepted after AS.",
+   "implementations/common-lisp/src/engine.lisp:241-250 — the docstrings explain intent and trade-offs, e.g. settle-heap explains the GC promotion pauses, and the comment at :111-115 explains why execution falls back to the row executor.",
+   "implementations/common-lisp/src/exec/parallel.lisp:382-485 — make-parallel-aggregate is about 104 lines of closures nested several levels deep (lambda in lambda in prun-start callback). Several other functions run 50-85 lines (parallel.lisp:241 make-parallel-gather, voperators.lisp:473 make-pair-join), and the vectorized and parallel executors are dense and hard to follow."
+  ],
+  "robustness": [
+   "implementations/common-lisp/src/util/errors.lisp:5-35 — a single pq-error condition carries a stable spec code and an alist of details, with shorthand signalers per code. implementations/common-lisp/src/protocol/requests.lisp:84-94 maps pq-error to a structured response, storage-condition to RESOURCE_LIMIT, and any other error to INTERNAL_ERROR. Server workers also catch serious-condition (src/server/scheduler.lisp:126-131).",
+   "implementations/common-lisp/src/storage/pqcf-read.lisp:174-217,247-366 — the PQCF reader checks a lot: header and trailer magic, metadata CRC and JSON shape, chunk CRC, check-room before every fixed-width or offset read, monotonic string offsets, dictionary code range, RLE coverage, value ranges per type, and non-finite floats. Every violation becomes STORAGE_CORRUPT.",
+   "implementations/common-lisp/src/sql/parser.lisp:9,97-103 and implementations/common-lisp/src/server/http.lisp:8-10,170-220 — input limits are enforced: parser nesting depth (400), HTTP line length, header count, body size and discard caps. Query execution checks a deadline, memory budget, max_rows and join-row limits (engine.lisp:22-25,67-72,168-188).",
+   "implementations/common-lisp/src/storage/binary.lisp:30-75,100-110 — the raw octet accessors use sb-sys:sap-ref with no bounds checks of their own, and crc32 is compiled with (safety 0). Memory safety therefore depends on every caller checking ranges first, as pqcf-read does. No global safety declaim exists, so the default safety is 1 elsewhere."
+  ],
+  "testability": [
+   "implementations/common-lisp/tests/package.lisp:14-26 — tests use the bundled sb-rt framework with a small code-of helper that returns the pq-error code. Adding a test is a single (deftest name form expected) form; there are about 290 deftests across 14 files.",
+   "implementations/common-lisp/tests/test-plan.lisp:44-60 — each optimizer rule can be tested on its own (apply-optimizer-rule) by comparing printed logical plans. This works because the rules are pure plan-to-plan functions, a good design for testability.",
+   "implementations/common-lisp/tests/test-sql.lisp:9-45 — the lexer and parser are unit-tested directly, including error codes (unterminated string, non-associative =, UNION, which gives UNSUPPORTED).",
+   "Coverage is thin for the largest and most complex code. The vectorized, parallel and native executors (exec/voperators 1128, parallel 836, vaggregates 733 and vnative 551 LOC) are covered mainly by test-phase5 (12 tests), test-native (6) and test-latency (3), and mostly end-to-end through execute-sql. The tests total about 2k LOC against about 17k LOC of source, and sb-rt has no fixtures or grouping beyond the global registry."
+  ]
+ },
+ "top_strengths": [
+  "Clear staged pipeline: a separate lexer, parser, binder/analyzer, logical plan, rule-based optimizer, physical planner and executors, each in its own module.",
+  "Thorough validation of untrusted PQCF files and HTTP input, with stable spec error codes on every path and a catch-all mapping to INTERNAL_ERROR or RESOURCE_LIMIT at the protocol and worker boundaries.",
+  "Uses only standard libraries plus SBCL contribs, and its docstrings and comments explain the reasons behind design and performance decisions."
+ ],
+ "top_weaknesses": [
+  "A single package for the whole engine: no enforced module boundaries, and tests depend on internal (polyquery::) symbols.",
+  "The row and vectorized executors duplicate logic, with a re-run-on-row-executor fallback for data errors that couples the two paths.",
+  "The parallel and vectorized operator code relies on large, deeply nested closure-building functions that are hard to read and have relatively little direct unit testing.",
+  "Unchecked sap-ref and (safety 0) octet accessors rely on caller-side bounds checks."
+ ],
+ "files_read": 22
+}

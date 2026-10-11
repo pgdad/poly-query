@@ -1,0 +1,47 @@
+{
+ "language": "java",
+ "reviewer": "A",
+ "scores": {
+  "architecture": 5,
+  "readability": 4,
+  "robustness": 4,
+  "testability": 3
+ },
+ "evidence": {
+  "architecture": [
+   "implementations/java/README.md:83-117 — one package per layer (lexer, ast, parser, analyzer, plan, optimizer, cost, physical, exec, exec.vector, ffi, storage, storage.pqcf, protocol, server). The README pipeline diagram gives each stage its own data structure.",
+   "Import analysis: sql/parser depends only on sql.ast, sql.lexer and common. storage depends only on types, common and index. server goes through protocol and engine. Dependencies point down the layers with no cycles between front-ends and storage.",
+   "src/main/java/polyquery/physical/PhysicalPlan.java:15 — the physical plan is a sealed interface of records, kept separate from LogicalPlan (CR-3). Both execution models (row and vectorized) consume the same PhysicalQuery.",
+   "Minor coupling: physical/PhysicalPlanner.java:8 and physical/PhysicalQuery.java:3 import exec.ExecMode, and optimizer/ConstantFolding.java:6 imports exec.ConstantEvaluator, so the planning layers depend upward on exec. FFM is confined to ffi/NativeKernels.java (README:111)."
+  ],
+  "readability": [
+   "src/main/java/polyquery/sql/analyzer/Analyzer.java:23-80 — idiomatic modern Java with small private records (CteEnv, SelectEntry), Javadoc that cites spec sections, and short focused methods.",
+   "src/main/java/polyquery/exec/vector/Kernels.java:22-27 — comments explain why (branch-free null-free paths so the JIT can auto-vectorize; overflow detected by OR-ing flags), not just what the code does.",
+   "God-class tendency: exec/vector/Kernels.java has 1488 lines, exec/vector/Parallel.java has 1117 lines mixing the thread pool, reducers, k-way merge heap and Gather/Aggregate operators (Parallel.java:40-983), and exec/vector/AggState.java has 1033 lines.",
+   "Few very long methods: types/Casts.java has a roughly 120-line method and physical/PlanExplainer.java roughly 124 lines. Fully qualified names inline (Parallel.java:210, 260; RequestHandler.java:109) are a small style blemish."
+  ],
+  "robustness": [
+   "src/main/java/polyquery/protocol/RequestHandler.java:64-116 — handleLine and handle 'never throw'. They map JsonException and malformed input to INVALID_REQUEST, StackOverflowError and OutOfMemoryError to RESOURCE_LIMIT, and other RuntimeExceptions to INTERNAL_ERROR, logging the stack trace only at debug level.",
+   "src/main/java/polyquery/storage/pqcf/PqcfReader.java:122-160 and ChunkDecoder.java:51-381 — untrusted files are thoroughly validated: header and trailer magic, version and flags, metadata length range, CRC, strict UTF-8, chunk CRCs, offsets, dictionary codes, RLE coverage and value ranges, each with STORAGE_CORRUPT. Row limit enforced at PqcfReader.java:77.",
+   "src/main/java/polyquery/server/HttpConnection.java:186, 211, 271 — header-size limit, and a body limit checked for both Content-Length and chunked bodies, with overflow guards. Admission.java:40-62 removes the queued entry on interrupt or failure, so no slots leak.",
+   "Weak spots: sql/parser/Parser.java:131-135 and 268 track depth with a manual increment and decrement rather than try/finally (safe only because errors abort the whole parse). PqcfReader.java:382 swallows every RuntimeException and returns null when parsing statistics values, and ffi/NativeKernels.java:173-448 has many catch(Throwable) blocks (wrapped via failure(t))."
+  ],
+  "testability": [
+   "src/test/java/polyquery/TestMain.java:7-41 — a home-made reflection runner (no JUnit, a Track A constraint) with a hard-coded suite list. Adding a suite means editing this list, and there is no per-test isolation or filtering.",
+   "Test volume is modest: about 3.2k test lines against about 28k main lines, and about 111 test methods across 17 suites. LexerTest has 3 tests, ParserTest 6 and ProtocolTest 2, so core front-end coverage is thin and the engine relies on the external conformance harness.",
+   "src/test/java/polyquery/optimizer/OptimizerRulesTest.java:41-60 — good pattern: each rule is applied on its own and compared with golden LogicalPlanPrinter text. physical/PhysicalPlannerTest.java and exec/vector/VectorTest.java test the layers directly.",
+   "The design aids testing: an Engine façade with EngineConfig injection (OptimizerRulesTest.java:22-24), Parser.parse as a static pure entry point (ParserTest.java:14), and a QueryRunner policy hook in RequestHandler.java:50."
+  ]
+ },
+ "top_strengths": [
+  "Clean, well-documented layered pipeline (lexer → AST → analyzer → logical plan → rule optimizer → physical plan → row or vectorized execution) built on sealed interfaces and records.",
+  "Strong defensive handling of untrusted input: a strict PQCF reader and decoder, HTTP size limits, parser and JSON nesting limits, and a protocol handler that never throws and maps errors to spec error codes.",
+  "Comments explain performance and semantic reasons, with frequent spec references; the logical optimizer has golden-plan unit tests per rule."
+ ],
+ "top_weaknesses": [
+  "Very large classes in exec.vector (Kernels about 1.5k lines, Parallel about 1.1k, AggState about 1k) that mix several concerns.",
+  "Thin unit-test coverage of the lexer, parser and protocol, plus a custom runner with a hand-maintained suite list; most correctness evidence comes from the external conformance harness.",
+  "Some broad catch-alls (catch(Throwable) in the FFI binding, a silent catch(RuntimeException) → null in the PQCF stats parser), manual depth bookkeeping in the parser, and small upward dependencies from physical and optimizer into exec."
+ ],
+ "files_read": 15
+}

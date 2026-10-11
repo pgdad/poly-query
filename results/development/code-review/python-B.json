@@ -1,0 +1,49 @@
+{
+ "language": "python",
+ "reviewer": "B",
+ "scores": {
+  "architecture": 5,
+  "readability": 4,
+  "robustness": 4,
+  "testability": 4
+ },
+ "evidence": {
+  "architecture": [
+   "polyquery/service.py:96-292 — the Engine facade is the only entry point the session, exec and HTTP front ends use. It runs parse, then Binder, then plan_statement, then run_plan/stream_plan, against a catalog snapshot (service.py:265).",
+   "polyquery/protocol/handlers.py:1-7,256-279 — RequestHandler does not depend on the transport. HTTP passes a QueryControl to add cancellation and deadlines, so protocol logic is not duplicated across transports.",
+   "polyquery/planner/ — split into planner.py (bound to logical, following the spec clause order), optimizer.py plus rules/ with one file per rule (predicate_pushdown, constant_folding, column_pruning, predicate_simplification), and physical.py, whose docstring at lines 1-8 says it alone makes execution decisions. access.py and explain.py are separate modules.",
+   "polyquery/storage/*.py — no imports from execution, planner or protocol, so layering is clean. Native kernel paths are isolated in execution/native_ops.py and planned through an injected kernel_plan callback (service.py:283), not hard-wired."
+  ],
+  "readability": [
+   "Static AST count: 1170 of 1212 functions have return annotations. The longest function is 72 lines (vector_engine.py:479 _aggregate_partition), and most are well under 40.",
+   "polyquery/storage/pqcf.py:1-18 — the module docstring explains the v1/v2 difference, the atomic temp-file/fsync/rename write and lazy mmap validation. Comments explain why, e.g. pqcf.py:589 and service.py:84-86 on the AUTO_THREADS_MAX rationale.",
+   "polyquery/errors.py:58-81 — the factory-generated error constructors (parse_error, storage_corrupt and so on) keep raise sites short and uniform. Naming is consistent: op_* and api_* dispatch, and _require/_corrupt in the PQCF reader.",
+   "Weaknesses: dynamic dispatch through getattr(self, 'op_'+op) (handlers.py:269) and getattr(self, 'api_'+endpoint) (http.py:259) hides call graphs from tooling. native_ops.py (1209 lines) and physical.py (890 lines) are large. ExecutionContext (context.py:28-63) has become a grab-bag of caches and parallelism state."
+  ],
+  "robustness": [
+   "polyquery/protocol/handlers.py:256-279 plus handlers.py:217-226 — handle() never raises. RecursionError maps to RESOURCE_LIMIT, MemoryError to RESOURCE_LIMIT, and anything else to a logged INTERNAL_ERROR. session.py:17-29 guarantees that serializing a response cannot crash the loop, and session.py:51-53 rejects NaN/Infinity in JSON.",
+   "polyquery/storage/pqcf.py:417-574,576-740 — the PQCF reader is thoroughly defensive. It validates magic, version and flags, metadata CRC, chunk bounds against meta_start, a per-chunk CRC, validity-bitmap null_count, monotonic string offsets, the dictionary code range, RLE run coverage, and DECIMAL/DATE/TIMESTAMP value ranges, all reported as STORAGE_CORRUPT or STORAGE_VERSION_UNSUPPORTED.",
+   "Resource limits: ingest byte and row limits (handlers.py:200-215, service.py:154-157), the HTTP max_request_bytes limit (http.py:268-293), and a per-query memory budget, join-row cap and deadline/cancel checks (context.py:114-137). Parser recursion is caught at parser.py:505-510.",
+   "Defects: (1) http.py:295-314 _read_chunked accepts a negative hex chunk size, because int('-5',16) parses. total then decreases and rfile.read(-5) reads to EOF, which bypasses the body limit. Short chunk reads are also not detected. (2) handlers.py:189-196 resolve_data_path rejects absolute paths and '..', but does not realpath-check symlinks that escape data_dir. (3) Nesting depth relies on CPython RecursionError rather than an explicit depth limit."
+  ],
+  "testability": [
+   "tests/helpers.py:12-50 — EngineTestMixin gives each test case a fresh in-process engine with load_csv/query/rows/error_code shortcuts, so adding a test takes a few lines. No subprocess or server is needed.",
+   "tests/test_optimizer_rules.py:1-60 — direct unit tests of each logical optimizer rule, applied alone and through Optimizer, using hand-built bound expressions (b.ColumnRef, b.Literal) and textual plan assertions (assertPlan).",
+   "tests/test_parser.py:15-40 — lexer and parser are testable in isolation (tokenize and parse are pure functions with positions). The PQCF encode/decode functions are module-level and pure (pqcf.py:236, 576).",
+   "Coverage is thin relative to code size: about 2.5k test lines and about 183 test_ methods for about 17k source lines. test_parser.py has only 8 tests, test_session.py 3 and test_topn.py 2. Most tests go through the protocol handler rather than unit-testing the binder or the execution operators."
+  ]
+ },
+ "top_strengths": [
+  "Clean layered pipeline (lexer, parser, binder, logical plan, rule optimizer, physical planner, row/vectorized engines, storage) behind a single Engine facade shared by all transports",
+  "Very defensive PQCF reader with full structural, checksum and value-range validation mapped to the spec's error codes",
+  "Request handling that never crashes: every exception maps to a structured error code, with strict JSON decoding and validation of each field",
+  "Highly consistent typing, small functions and docstrings that explain why"
+ ],
+ "top_weaknesses": [
+  "HTTP chunked-body reader accepts a negative chunk size, which bypasses max_request_bytes (http.py:295-314)",
+  "The data-dir path check ignores symlinks (handlers.py:189-196)",
+  "Test suite is modest relative to the 17k-line codebase and leans on end-to-end handler tests. Few direct tests of binder, execution operators or the HTTP edge cases",
+  "A few oversized modules (native_ops.py, physical.py) and a broad ExecutionContext; getattr-based dispatch hides call paths"
+ ],
+ "files_read": 17
+}

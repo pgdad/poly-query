@@ -1,0 +1,48 @@
+{
+ "language": "rust",
+ "reviewer": "A",
+ "scores": {
+  "architecture": 5,
+  "readability": 4,
+  "robustness": 4,
+  "testability": 4
+ },
+ "evidence": {
+  "architecture": [
+   "implementations/rust/src/lib.rs:1-29 — the crate is a library behind a thin binary. Its documented bottom-up layers (types, storage, ingest, catalog, sql, planner, exec, engine, protocol, server) match the directory tree, and the README module map matches the code.",
+   "implementations/rust/src/planner/optimizer/mod.rs:33-53 — a `Rule` trait with one module per rule and an ordered DEFAULT_RULES list. The comment states that rules never pick access paths or join algorithms, so the logical/physical boundary is explicit (CR-3).",
+   "implementations/rust/src/engine.rs:489-546 — start_query runs a clean pipeline: parse_statement → logical_plan (bind and optimize) → physical::plan → build. The engine facade does not depend on any transport; session, exec and HTTP all call into it.",
+   "implementations/rust/src/exec/vector/eval.rs:1-12 — the vectorized engine reuses the row evaluator as a fallback for non-hot expressions, so the semantics are defined in one place. One drawback is that physical.rs (1059 lines) holds planning, the execution model and EXPLAIN JSON in a single file."
+  ],
+  "readability": [
+   "implementations/rust/src/engine.rs:584-597 — doc comments explain why (vectorized and parallel errors are replayed on the row engine so error reporting is deterministic), not just what the code does.",
+   "implementations/rust/src/storage/pqcf/read.rs:410-445 — a small, idiomatic Cursor/take/take_n helper with checked arithmetic and clear names.",
+   "implementations/rust/src/exec/vector/agg.rs:367-633 — Acc::update is about 266 lines of nested match arms that mix native-kernel and scalar paths with `if let` guards and use `native.expect` inside guarded arms. It is hard to follow.",
+   "implementations/rust/src/planner/physical.rs:657-922 (to_json, about 265 lines), planner/binder/mod.rs `select` (about 217 lines) and exec/functions.rs:call (about 184 lines) — several very large functions, though each one is a regular dispatch."
+  ],
+  "robustness": [
+   "implementations/rust/src/storage/pqcf/read.rs:195-230 and 443-512 — untrusted PQCF files get full validation: magic, version and flags (STORAGE_VERSION_UNSUPPORTED), checked_sub on the metadata length, CRC, offset monotonicity, UTF-8 char boundaries, decimal precision, and fallible try_reserve_exact allocation (RESOURCE_LIMIT).",
+   "implementations/rust/src/engine.rs:229-279 — path sandboxing rejects NUL, absolute paths, prefixes and `..` components, and file size is checked before reading (max_ingest_bytes). Symlinks are not canonicalized, so a link inside data_dir can escape it.",
+   "implementations/rust/src/server/http.rs:8-11,92-135,241-262 — the HTTP parser bounds header bytes (64 KiB), header count (128) and body size (413 response plus a bounded drain), including chunked bodies. protocol/mod.rs:195-210 turns any panic into INTERNAL_ERROR, and error.rs:8-62 maps every spec error code.",
+   "Panics are confined to invariant checks. About 25 sites in non-test code, for example native/mod.rs:381-382 (a kernel status panics), exec/vector/sort.rs:277 (a thread-spawn failure panics) and storage/column.rs:357. The parser allows a nesting depth of 10,000 (sql/parser.rs:8) and depends on a 256 MiB worker stack rather than a tight limit."
+  ],
+  "testability": [
+   "About 163 #[test] functions in 51 inline `mod tests` blocks covering the lexer, parser, types (decimal, i256, datetime, cast), JSON, optimizer rules, access paths, and PQCF round-trip and corruption (storage/pqcf/write.rs:554-631).",
+   "implementations/rust/src/engine.rs:1139-1279 — execution_modes_agree and native_kernels_agree are differential tests that check row, vectorized, parallel and native execution against each other on generated data. This is cheap to extend with new queries.",
+   "implementations/rust/src/sql/parser.rs:1033 (deep_nesting_is_an_error_not_a_crash) and server/http.rs:464 (limits_and_errors) — adversarial-input tests exist for the parser and HTTP layers.",
+   "Gaps: no tests in planner/binder/mod.rs, exec/operators.rs, exec/parallel.rs, storage/pqcf/read.rs or server/conn.rs, and no `tests/` integration directory. The engine relies on the external conformance harness for end-to-end coverage."
+  ]
+ },
+ "top_strengths": [
+  "Clean layered architecture with an explicit logical/physical split and a pluggable Rule-based optimizer, written with no external crates.",
+  "Strong validation of untrusted input in PQCF decoding, the HTTP parser and path resolution, with a complete mapping to stable spec error codes and panic-to-INTERNAL_ERROR containment.",
+  "Differential testing across execution modes and native kernels, plus an error-replay design that makes vectorized and parallel errors match the row engine."
+ ],
+ "top_weaknesses": [
+  "Very large match-heavy functions in the vectorized aggregation, physical-plan JSON, binder `select` and scalar function dispatch hurt readability.",
+  "Some failure paths depend on panics plus catch_unwind (native kernel status, thread-spawn failure) instead of returning Result. The parser depth limit relies on a 256 MiB stack.",
+  "Unit tests are thin for the binder, row operators, parallel execution, the PQCF reader and server routing; there is no in-crate integration test suite.",
+  "Path sandboxing does not resolve symlinks."
+ ],
+ "files_read": 16
+}

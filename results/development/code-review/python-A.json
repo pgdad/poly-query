@@ -1,0 +1,47 @@
+{
+ "language": "python",
+ "reviewer": "A",
+ "scores": {
+  "architecture": 5,
+  "readability": 4,
+  "robustness": 5,
+  "testability": 4
+ },
+ "evidence": {
+  "architecture": [
+   "implementations/python/README.md:63-85 — documents a strict layering (lex, parse, bind, logical plan, optimizer, physical plan, execution) with one package per layer; a grep found no upward imports from sql/, analysis/, planner/ or storage/ into execution/, server/ or protocol/",
+   "polyquery/planner/rules/ (base.py, constant_folding.py, predicate_pushdown.py, column_pruning.py, predicate_simplification.py) — one module per optimizer rule, so the logical optimizer is separate from physical planning (planner/physical.py:523 PhysicalPlanner._plan maps LogicalNode to PhysicalNode)",
+   "polyquery/planner/physical.py:546-552 — native kernel plans are attached through an injected options.kernel_plan callback, so the planner does not import execution/native_ops; polyquery/protocol/handlers.py:1-7 — the request handler is transport-independent and shared by session, exec and HTTP",
+   "Minor coupling: polyquery/service.py:16-31 — the Engine facade imports from nearly every layer; execution/vector_engine.py:503 calls native_ops directly inside the aggregation hot loop"
+  ],
+  "readability": [
+   "AST scan (static parse only, nothing imported or run): 1170 of 1212 functions have return annotations, only 11 are longer than 50 lines, and the largest is 72 lines (execution/vector_engine.py:479 _aggregate_partition)",
+   "polyquery/errors.py:32-79 — small, clear error model: code constants, a picklable PolyQueryError with a comment explaining why it must pickle, and per-code factory functions",
+   "polyquery/execution/vector_engine.py:479-552 — dense, performance-tuned code (native/non-native branches, run-vs-row update heuristics such as `len(batch_keys) * 8 <= n`) with few comments explaining the thresholds",
+   "polyquery/execution/native_ops.py — 1209 lines and 66 defs in one module; only 322 of 1212 functions have docstrings, so explanations depend heavily on the README"
+  ],
+  "robustness": [
+   "polyquery/protocol/handlers.py:257-278 + 219-228 — handle() never raises; error_of maps RecursionError and MemoryError to RESOURCE_LIMIT, and anything else is logged and returned as an opaque INTERNAL_ERROR",
+   "polyquery/storage/pqcf.py:417-470 — the PQCF reader checks magic, version and flags (STORAGE_VERSION_UNSUPPORTED), footer bounds, metadata CRC and JSON (rejecting NaN/Infinity), and every structural field before decoding; the writer (pqcf.py:125-147) writes to a temp file, fsyncs, renames atomically and cleans up on failure",
+   "polyquery/server/http.py:267-293 — request bodies are capped by max_request_bytes (413), Content-Length and chunked encoding are validated, chunk lines are length-bounded; server/queries.py:111 adds admission control with a queue-depth limit and queue timeouts",
+   "polyquery/protocol/handlers.py:188-195 — path safety rejects absolute paths, NUL and '..' components, but does not resolve symlinks out of data_dir; sql/parser.py:505-510 relies on catching RecursionError rather than an explicit depth limit (cli.py:103 raises the recursion limit to 20000)"
+  ],
+  "testability": [
+   "implementations/python/tests/ — 18 unittest modules with about 183 test methods (around 2.5k lines), against about 16k lines of engine code",
+   "tests/test_optimizer_rules.py:1-40 — optimizer rules are tested on their own on hand-built bound expressions (b.Literal, b.ColumnRef), which shows the components can be built in isolation",
+   "tests/helpers.py:12-40 — EngineTestMixin and make_handler make it cheap to add end-to-end tests through the protocol handler; most suites (test_engine, test_execution, test_planning) work at this level",
+   "Gaps: there is no lexer or binder/typing-rules unit test module, and test_parser.py has only 8 tests and test_topn.py only 2 for a recursive-descent grammar and typing lattice of this size"
+  ]
+ },
+ "top_strengths": [
+  "Clean, documented layering with a pluggable rule-based optimizer that is separate from a cost-aware physical planner",
+  "Thorough defensive handling of untrusted input: the protocol never crashes, PQCF validation is exhaustive with atomic writes, and HTTP has body limits and admission control",
+  "Consistent idiomatic Python: nearly every function has type hints, functions are small, and there is a single structured error model"
+ ],
+ "top_weaknesses": [
+  "Unit test coverage is thin for the parser, lexer and binder relative to their complexity; most coverage comes from end-to-end tests through the handler",
+  "Native and vectorized hot paths (native_ops.py at 1209 lines, vector_engine.py) are dense, with tuning heuristics that are rarely explained in code comments",
+  "Recursion depth is handled by raising the recursion limit and catching RecursionError rather than an explicit nesting limit; data paths are not checked for symlinks leading outside data_dir"
+ ],
+ "files_read": 14
+}

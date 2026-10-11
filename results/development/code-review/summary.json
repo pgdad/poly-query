@@ -1,0 +1,152 @@
+{
+ "schema": "polyquery-code-review/1",
+ "reviewers": "two independent AI reviewer agents per language (slots A: README-first sampling, B: code-first request-path sampling), model claude-opus-5-5, read-only, no execution; same rubric (docs/methodology/code-quality-rubric.md)",
+ "code_commit": "cbd8569b11f993e60d5f111b4d608637a7947fb1",
+ "scores": {
+  "go": {
+   "architecture": {
+    "A": 5,
+    "B": 5,
+    "mean": 5.0
+   },
+   "readability": {
+    "A": 4,
+    "B": 4,
+    "mean": 4.0
+   },
+   "robustness": {
+    "A": 4,
+    "B": 4,
+    "mean": 4.0
+   },
+   "testability": {
+    "A": 4,
+    "B": 4,
+    "mean": 4.0
+   }
+  },
+  "rust": {
+   "architecture": {
+    "A": 5,
+    "B": 5,
+    "mean": 5.0
+   },
+   "readability": {
+    "A": 4,
+    "B": 4,
+    "mean": 4.0
+   },
+   "robustness": {
+    "A": 4,
+    "B": 4,
+    "mean": 4.0
+   },
+   "testability": {
+    "A": 4,
+    "B": 4,
+    "mean": 4.0
+   }
+  },
+  "java": {
+   "architecture": {
+    "A": 5,
+    "B": 5,
+    "mean": 5.0
+   },
+   "readability": {
+    "A": 4,
+    "B": 4,
+    "mean": 4.0
+   },
+   "robustness": {
+    "A": 4,
+    "B": 4,
+    "mean": 4.0
+   },
+   "testability": {
+    "A": 3,
+    "B": 3,
+    "mean": 3.0
+   }
+  },
+  "clojure": {
+   "architecture": {
+    "A": 5,
+    "B": 5,
+    "mean": 5.0
+   },
+   "readability": {
+    "A": 4,
+    "B": 4,
+    "mean": 4.0
+   },
+   "robustness": {
+    "A": 4,
+    "B": 4,
+    "mean": 4.0
+   },
+   "testability": {
+    "A": 4,
+    "B": 4,
+    "mean": 4.0
+   }
+  },
+  "python": {
+   "architecture": {
+    "A": 5,
+    "B": 5,
+    "mean": 5.0
+   },
+   "readability": {
+    "A": 4,
+    "B": 4,
+    "mean": 4.0
+   },
+   "robustness": {
+    "A": 5,
+    "B": 4,
+    "mean": 4.5
+   },
+   "testability": {
+    "A": 4,
+    "B": 4,
+    "mean": 4.0
+   }
+  },
+  "common-lisp": {
+   "architecture": {
+    "A": 4,
+    "B": 4,
+    "mean": 4.0
+   },
+   "readability": {
+    "A": 4,
+    "B": 4,
+    "mean": 4.0
+   },
+   "robustness": {
+    "A": 4,
+    "B": 4,
+    "mean": 4.0
+   },
+   "testability": {
+    "A": 3,
+    "B": 4,
+    "mean": 3.5
+   }
+  }
+ },
+ "agreement": {
+  "pairs": 24,
+  "exact": 0.9166666666666666,
+  "within_1": 1.0,
+  "mean_abs_diff": 0.08333333333333333,
+  "quadratic_weighted_kappa": 0.8421052631578947
+ },
+ "caveats": [
+  "AI reviewers, not humans: scores are subjective judgements, never facts",
+  "ceiling/compression: almost all scores are 4-5, so the rubric discriminates little between engines",
+  "reviewers knew the language (no blinding possible)",
+  "extensibility (rubric item 5) is not scored here; it is measured by the change-task costs (report 7)"
+ ]
+}

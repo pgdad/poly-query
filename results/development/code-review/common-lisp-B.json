@@ -1,0 +1,47 @@
+{
+ "language": "common-lisp",
+ "reviewer": "B",
+ "scores": {
+  "architecture": 4,
+  "readability": 4,
+  "robustness": 4,
+  "testability": 4
+ },
+ "evidence": {
+  "architecture": [
+   "polyquery.asd:3-82 — the build is split into modules that follow the pipeline (util, types, storage, ingest, sql, analyzer, plan with plan/rules, exec, protocol, server). Because the modules load in a fixed order, the dependencies only point one way. The odd one is exec/context, which loads before storage (polyquery.asd:23) because storage charges memory against the query context.",
+   "src/engine.lisp:44-91 — one facade runs lex -> parse -> bind (plan-statement) -> logical/physical plan -> compile-operator or compile-batch-operator. The protocol layer (src/protocol/requests.lisp:108-139) only parses requests and calls this facade, so it is cleanly separate from the engine.",
+   "src/plan/optimizer.lisp:1-54 — the optimizer is a list of named rules, each mapping a logical plan to a logical plan, with one file per rule in plan/rules/. Its header comment says it knows nothing about access paths or execution modes, so logical and physical planning are clearly separated.",
+   "src/package.lisp:3-20 — there is a single package, `polyquery`, holding about 940 defuns. Nothing at the package level enforces the module boundaries, and the layers share dynamic specials (*query-context*, *execution-settings*, *planning-catalog*; see src/engine.lisp:56,79), which couples them implicitly."
+  ],
+  "readability": [
+   "src/storage/catalog.lisp:1-60 — the file header explains the concurrency design (an immutable published object under a mutex, and snapshots). Each function has a short docstring stating its contract, e.g. 'Caller holds the lock'.",
+   "src/engine.lisp:110-117,248-257 — comments explain why the code works as it does: rerunning on the row executor so data errors are reported in a deterministic order, and calling settle-heap to avoid GC promotion pauses.",
+   "src/exec/operators.lisp:533-600 — the code is idiomatic Common Lisp: defmethod dispatches on plan-node structs, closures form the iterator protocol, labels hold local helpers and type declarations are used. Functions are mostly short; the longest is parse-json at 163 lines (src/util/json.lisp:51), followed by make-parallel-aggregate at 104 (src/exec/parallel.lisp:382).",
+   "About 536 of 937 defuns have docstrings, and the protocol/CLI code uses small, readable helpers (src/protocol/cli.lisp:34-64, src/protocol/requests.lisp:47-65). Negatives: some ad-hoc vector-as-record data structures (the group is (vector key-values steps finishers) at src/exec/operators.lisp:550), and multi-thousand-line exec files (voperators.lisp is 1128 lines)."
+  ],
+  "robustness": [
+   "src/util/errors.lisp:5-35 and src/protocol/requests.lisp:84-97 — the pq-error condition carries the spec's error code. Every request is wrapped in call-with-error-response: storage-condition (heap or stack exhaustion) becomes RESOURCE_LIMIT, and any other error becomes INTERNAL_ERROR without leaking a backtrace.",
+   "src/storage/pqcf-read.lisp:174-245,295-330 — untrusted PQCF files are validated thoroughly: magic, version and flags, CRC-32 of the metadata, JSON metadata with typed and range-checked fields, check-room bounds checks before every decode, a check that unused bytes are zero, strict UTF-8, and a max-rows limit. Violations are reported as STORAGE_CORRUPT.",
+   "src/server/http.lisp:8-10,63-80,152-222 and src/sql/parser.lisp:9,99 and src/util/json.lisp:49,71 — input limits exist: HTTP lines are capped at 64 KiB, at most 200 headers, a discard limit and a body-size limit (including chunked bodies), SQL nesting depth at 400, JSON nesting depth at 512. Queries are also bounded by a memory budget, max_rows and a deadline (src/engine.lisp:95-99,136-160).",
+   "Gaps: the session mode reads stdin with an unbounded read-line (src/protocol/cli.lisp:146-150). resolve-data-path rejects '..' and absolute paths but does not resolve symlinks (src/protocol/requests.lisp:352-359). Two hot paths run under (safety 0) (src/storage/binary.lisp:102, src/util/json.lisp:249); their bounds depend on the callers' declared types."
+  ],
+  "testability": [
+   "tests/package.lisp:1-26 — tests use SBCL's bundled sb-rt with no extra dependencies. A small helper, code-of, checks error codes, so adding a test is a single deftest form, and the suite is wired into ASDF test-op (polyquery.asd:84-106).",
+   "tests/test-plan.lisp:1-40 — the planner is tested at the unit level: the builder, each optimizer rule on its own (apply-optimizer-rule at src/plan/optimizer.lisp:33 exists for this), and the physical planner, comparing printed logical plans.",
+   "tests/test-sql.lisp:5-50 — lexer and parser unit tests cover precedence, error codes and grammar coverage. There are about 268 deftests across 14 files (numbers, json, ingest, storage, server, native, decimal38, union, latency).",
+   "Weaknesses: the tests reach heavily into internals with polyquery:: (tests/test-sql.lisp:22-30), because the package exports little. Test code is about 2,000 lines against about 16,500 lines of source, and the vectorized and parallel operators are mostly exercised end-to-end through execute-sql rather than in isolation."
+  ]
+ },
+ "top_strengths": [
+  "Clear layering of the pipeline (lexer/parser -> binder -> logical plan + rule-based optimizer -> physical plan -> row and vectorized executors), with one facade (engine.lisp) and a thin protocol layer",
+  "Defensive handling of untrusted input: strict PQCF validation with CRC, bounds checks and UTF-8 checks; HTTP, JSON and SQL nesting limits; memory, row and deadline budgets; storage-condition mapped to RESOURCE_LIMIT",
+  "Docstrings and header comments that explain why (concurrency snapshot model, morsel-parallel design, rerunning on the row executor for deterministic data errors, GC settling)"
+ ],
+ "top_weaknesses": [
+  "A single package holding ~940 functions, plus shared dynamic specials, so module boundaries rely on ASDF load order and convention only",
+  "Tests depend on internal symbols (polyquery::), and the vectorized and parallel operators lack isolated unit tests; the test-to-source ratio is modest",
+  "Some unbounded or loosely checked edges: unbounded stdin line reads in session mode, no symlink check on data paths, a few (safety 0) regions, and large exec files (voperators.lisp, parallel.lisp, vexpressions.lisp)"
+ ],
+ "files_read": 19
+}

@@ -1,0 +1,49 @@
+{
+ "language": "go",
+ "reviewer": "B",
+ "scores": {
+  "architecture": 5,
+  "readability": 4,
+  "robustness": 4,
+  "testability": 4
+ },
+ "evidence": {
+  "architecture": [
+   "internal/engine/engine.go:1-4,263-300 — the engine package runs the full pipeline (parser.Parse, then analyze, plan and open a cursor). Protocol and server sit on top of it; storage/pqcf/index sit below it",
+   "Package import graph (non-test): sql/lexer imports only errs, sql/parser imports only lexer/ast/errs, storage imports only errs/types, optimizer imports only plan/types. Layers are acyclic and only point downward. Small leak: protocol imports exec directly as well as engine",
+   "internal/optimizer/optimizer.go:1-60 — a logical optimizer of named Rule implementations (ConstantFolding, PredicatePushdown, JoinReorder, ColumnPruning), one file each. Physical choices (access path, join algorithm, execution mode, native kernels) are kept separate in package physical",
+   "internal/errs/*.go:1-80 — one structured error model with stable spec codes and SQL line/column details, shared by every layer. internal/native is isolated behind a cgo/stub build split (native_cgo.go / native_stub.go)"
+  ],
+  "readability": [
+   "internal/sql/parser/parser.go:98-933 — textbook recursive descent with one small function per grammar level (orExpr, andExpr, predicate, additive, ...) and consistent errs.At position errors",
+   "internal/exec/vagg.go:15-50 — a block comment explains why the design was chosen (batch group-ID resolution, struct-of-arrays states, mergeable states for parallel workers). The aggState interface methods are documented",
+   "Function size is mostly moderate, but a few run over 100 lines: analyzer/query.go:53 selectBlock (~136), exec/subquery.go:80 compileSubquery (~131), exec/functions.go:15 compileFunc (~131), exec/build.go:33 build (~119)",
+   "Large files in exec (vexpr.go 1113 lines, vagg.go 1240, vsort.go 698), and cmd/polyquery/main.go:66-74 reads an undocumented POLYQUERY_MORSEL_ROWS test-only env var inside production arg parsing"
+  ],
+  "robustness": [
+   "internal/protocol/handler.go:118-135 — guard() turns errors into coded responses and recovers panics into INTERNAL_ERROR with a logged stack. server/server.go:621-628 and server/stream.go:126-130 do the same for streamed queries",
+   "internal/engine/engine.go:157-201 — request paths are checked (absolute paths, '..' and NUL are rejected with ACCESS_DENIED). File size is checked by stat and again by LimitReader against MaxIngestBytes, and OS errors map to NOT_FOUND/ACCESS_DENIED/IO_ERROR",
+   "internal/pqcf/read.go:95-160 — PQCF parsing checks size, magic, version (UNSUPPORTED vs CORRUPT), flags, metadata length bounds, CRC, UTF-8, required keys, negative row_count and the max-rows limit before trusting anything",
+   "Gaps: worker goroutines in exec/parallel.go:249 and :530 (and vagg.go:1081/1096, vsort.go:402/427) have no recover, so a panic in a worker kills the process instead of reaching guard(). The parser has no nesting-depth limit (parser.go:525-733), so deeply nested SQL can overflow the stack. protocol/session.go:16 ReadBytes has no line-length cap. native.go:124-127 panics on short buffers (an internal invariant)"
+  ],
+  "testability": [
+   "114 Test functions across 23 _test.go files (~4050 lines vs ~26.8k source), covering types, parser, analyzer, optimizer, physical, exec, storage, pqcf, index, ingest, catalog, protocol, server and native",
+   "internal/testutil/testutil.go:1-40 — a shared fixture catalog (emp/dept from inline CSV) makes pipeline-level unit tests cheap to write",
+   "internal/optimizer/optimizer_test.go:20-60 — each rule can be tested on its own through the Rule interface. Helpers check that rules do not mutate their input plan and assert on the printed plan text",
+   "Gaps: no dedicated tests for sql/lexer (only reached through the parser) or errs. No Fuzz targets for the parser, protocol decoding or the PQCF reader, which handle untrusted input. engine/bench_test.go has only benchmarks"
+  ]
+ },
+ "top_strengths": [
+  "Clean, acyclic layering (lexer → parser → analyzer → logical plan → rule optimizer → physical planner → row/vectorized exec → storage/pqcf), with each optimizer rule in its own file",
+  "Consistent structured error model (errs.Code with SQL positions) carried end to end, plus panic-to-INTERNAL_ERROR guards at the protocol and HTTP boundaries",
+  "Defensive handling of untrusted input: path-traversal checks, ingest size limits, a memory-reservation budget, and strict PQCF header/metadata/CRC validation",
+  "Idiomatic Go with doc comments that explain design reasons, and a test-fixture package that makes component tests cheap to add"
+ ],
+ "top_weaknesses": [
+  "Panics inside parallel worker goroutines (exec/parallel.go:249,530; vagg.go; vsort.go) are not recovered and would crash the whole server or session process",
+  "No recursion-depth limit in the recursive-descent parser or analyzer, and no line-length cap on JSON-lines session input",
+  "Several 100+ line functions and 1000+ line files in exec and analyzer make the vectorized and subquery paths harder to follow",
+  "No fuzz tests for the parser, protocol or PQCF reader, and no direct lexer unit tests"
+ ],
+ "files_read": 17
+}

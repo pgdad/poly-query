@@ -1,0 +1,49 @@
+{
+ "language": "rust",
+ "reviewer": "B",
+ "scores": {
+  "architecture": 5,
+  "readability": 4,
+  "robustness": 4,
+  "testability": 4
+ },
+ "evidence": {
+  "architecture": [
+   "src/lib.rs:1-31 — the crate doc lists the layers from the bottom up (types, storage, ingest, catalog, sql, planner, exec, engine, protocol, server), and each layer is its own module tree with no external crates (Cargo.toml has an empty [dependencies])",
+   "src/planner/optimizer/mod.rs:1-55 — the optimizer is a `Rule` trait with separately named rules (ConstantFolding, PredicatePushdown, JoinReorder, ColumnPruning) in their own files, in a documented order; logical rewriting is kept apart from physical planning",
+   "src/engine.rs:489-580 — the transport-independent facade runs parse_statement, then logical_plan, then physical::plan, then build(Operator) and a QueryCursor; protocol/session.rs and server/ only call into Engine",
+   "src/sql/lexer.rs:3-4 — sql/ depends only on error/json. Two upward-coupling leaks exist: src/exec/parallel.rs:50 imports crate::protocol::catch_panic and src/exec/vector/ops.rs:492 calls crate::protocol::write_row from inside exec"
+  ],
+  "readability": [
+   "src/exec/vector/eval.rs:1-12 — module docs explain why it works this way (typed kernels per batch, row-evaluator template so semantics match row mode, lazy AND/OR/CASE)",
+   "src/engine.rs:585-598 — the QueryCursor doc explains the error-replay design (re-run on the row engine so that every mode reports the baseline's errors), which is a non-obvious decision",
+   "src/sql/parser.rs:298-345 — idiomatic recursive descent with small helpers (eat_keyword, expect_keyword, optional_alias) and clear names",
+   "Several files are large (src/engine.rs 1424 lines, src/exec/vector/eval.rs 1474, src/exec/vector/agg.rs 1310, src/planner/physical.rs 1059), and some functions run past 100 lines (eval_owned at vector/eval.rs:~60, start_query at engine.rs:489)"
+  ],
+  "robustness": [
+   "src/error.rs:8-80 — a typed ErrorCode enum mirrors the spec's stable codes, with a mapping to HTTP status; Result<T> is used throughout. Almost all .unwrap() calls (about 208) are inside #[cfg(test)] modules",
+   "src/protocol/mod.rs:166-212 — each request runs under catch_unwind and becomes INTERNAL_ERROR, and main.rs:19-26 routes panic output away from the protocol channel. However, some internal invariants still panic: native/mod.rs:381-382 (native kernel status), storage/column.rs:357, and sort.rs:277 (thread spawn failure)",
+   "src/storage/pqcf/read.rs:1-5,198-238 — PQCF open checks magic, version, checked_sub on lengths, metadata CRC, UTF-8 and JSON shape, and each chunk's CRC is verified lazily on decode, with every failure reported as STORAGE_CORRUPT",
+   "src/engine.rs:229-279 — resolve_path rejects absolute paths, '..' and NUL, and ingestion checks max_ingest_bytes. Limits also exist in server/http.rs:8-10 (64 KiB head, 128 headers), server/conn.rs:50 (max_request_bytes), json.rs:24 (JSON depth 512) and parser.rs:8 (nesting 10000 on a 256 MiB worker stack). Gaps: resolve_path does not canonicalize, so a symlink inside data_dir can escape it, and protocol/session.rs:19 read_until has no line-length cap"
+  ],
+  "testability": [
+   "163 #[test] functions in 51 inline test modules spread across the lexer, parser, types (decimal, i256, cast, datetime), storage, PQCF writing, the optimizer rules, the vectorized operators and the HTTP parser",
+   "src/planner/optimizer/predicate_pushdown.rs:207-250 — rule tests use a shared builder DSL (optimizer::test_util: table/scan/filter/join/cmp) and golden plan text through show()/apply_checked, so new rule tests are cheap to add",
+   "src/engine.rs:827+ — engine-level tests include execution_modes_agree and native_kernels_agree, which cross-check the row, vectorized and native paths against each other",
+   "There is no crate-level tests/ directory and no property or fuzz tests in the crate. Test density is uneven: the largest execution files (vector/agg.rs, physical.rs, operators.rs) have few tests compared with their size"
+  ]
+ },
+ "top_strengths": [
+  "Clear layered architecture with a pluggable rule-based optimizer and a transport-independent Engine facade, built with zero dependencies",
+  "Disciplined error model: spec error codes as an enum, Result everywhere, unwrap confined to tests, and catch_unwind at the request boundary",
+  "Defensive PQCF reader that validates every length, checksum and type before trusting the data, plus resource limits on ingest, HTTP, JSON depth and parser depth",
+  "Why-oriented module docs on the hard design points (vectorized semantics, error replay)"
+ ],
+ "top_weaknesses": [
+  "Very large files and some functions over 100 lines in execution and planning (engine.rs, vector/eval.rs, vector/agg.rs, physical.rs)",
+  "Upward coupling from exec to protocol (catch_panic, write_row)",
+  "Some invariant panics remain on reachable paths (native kernel status, column type mismatch, sort thread spawn). They are contained by catch_unwind but surface as INTERNAL_ERROR",
+  "No symlink canonicalization in resolve_path, and no cap on session line length; tests are thin on the largest execution modules and there are no property or fuzz tests"
+ ],
+ "files_read": 15
+}

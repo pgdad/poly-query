@@ -1,0 +1,49 @@
+{
+ "language": "go",
+ "reviewer": "A",
+ "scores": {
+  "architecture": 5,
+  "readability": 4,
+  "robustness": 4,
+  "testability": 4
+ },
+ "evidence": {
+  "architecture": [
+   "implementations/go/README.md:62-90 — the documented pipeline (lexer → parser → analyzer → optimizer → physical → exec) maps one-to-one onto packages under internal/ (sql/lexer, sql/parser, analyzer, plan, optimizer, physical, exec, storage, pqcf, index, catalog, ingest, protocol, server, native, errs). Each package has a single stated responsibility.",
+   "internal/engine/engine.go:440-466 — plan() is a thin facade: analyzer.AnalyzeQuery → optimizer.Optimize → physical.Build. Each stage gets an Options struct, and dependencies are injected (EvalConst: exec.EvalConstant, Indexes: snap.IndexesOf), so the optimizer and planner do not import exec state.",
+   "internal/optimizer/optimizer.go:28 — a Rule interface with ordered, individually switchable rules split by file (fold.go, pushdown.go, reorder.go, prune.go). internal/physical/planner.go:node is the only place that makes execution decisions, as the README states.",
+   "README 'Column IDs instead of positions' plus internal/plan/expr.go — expressions use statement-unique ColumnIDs that are resolved to positions only when exec compiles them, so rewrite rules stay decoupled from physical layouts. Catalog is copy-on-write with immutable snapshots (engine.go:441)."
+  ],
+  "readability": [
+   "internal/sql/parser/parser.go:1-80,525-733 — a textbook recursive-descent parser: one small method per precedence level (orExpr/andExpr/notExpr/predicate/additive/multiplicative/unary/primary) and tiny helpers (peek/accept/expect) that attach line/column to errors.",
+   "internal/exec/parallel.go:15-28 — a long comment explaining why morsel ordering and first-failing-morsel error reporting keep parallel results identical to serial execution. internal/storage/table.go:101 and engine.go:66-70 likewise document intent in their comments.",
+   "internal/exec/vexpr.go:1034-1150 (evalDict, ~117 lines) and vagg.go (1240 lines), vexpr.go (1113 lines), vops.go/vsort.go (~700 lines each) — the vectorized layer is dense, with large files and long functions full of type-specialized branches, so it is harder to follow than the rest.",
+   "Idiomatic Go throughout: errors returned as values, Options structs, generics where useful (gather[T] in parallel.go:246), standard library only (go.mod has no requirements)."
+  ],
+  "robustness": [
+   "internal/protocol/handler.go:116-134 — guard() recovers panics into INTERNAL_ERROR responses with a logged stack, and errs.From maps every error to a stable code. server/server.go:620-627 and stream.go:127 do the same for streamed queries. internal/errs/errs.go:14-38 mirrors all spec error codes and attaches line/column details to parse errors.",
+   "internal/engine/engine.go:159-199 — path safety rejects absolute paths, NUL, '..' and backslash roots with ACCESS_DENIED. readFile checks the ingestion limit with Stat and then again with an io.LimitReader. server.go:99,319 adds ReadHeaderTimeout and a LimitReader on request bodies. server/admission.go:38 uses a bounded queue that returns OVERLOADED.",
+   "internal/pqcf/read.go:96-136,358-706 — thorough validation of untrusted PQCF files: magic, version, flags, metadata length range, CRC on metadata and on each chunk, UTF-8, decreasing string offsets, dictionary code range, zero-length and over-covering RLE runs, trailing bytes, non-finite floats, row-count resource limit. Lazy chunks keep their decode error (storage/table.go:101-112).",
+   "Gaps: exec/parallel.go:249 and exec/vagg.go:1081,1096 start worker goroutines with no recover, so a panic in a worker kills the whole process because guard() covers only the calling goroutine. protocol/session.go:13-16 uses ReadBytes('\\n') with no per-line size cap. sql/parser/parser.go has no expression nesting-depth limit. native/native.go:124-128 turns short buffers into a panic rather than an error."
+  ],
+  "testability": [
+   "23 _test.go files, about 4,050 test lines against about 26,800 lines of production code (roughly 15%). Every layer has its own unit tests: parser_test, analyzer_test, optimizer_test, physical_test/access_test, exec_test/simd_test, pqcf_test, types/widedecimal_test, catalog/index/storage/ingest tests, protocol_test, server_test.",
+   "internal/optimizer/optimizer_test.go:19-50 — a clean harness: logical() parses and analyzes against shared testutil fixtures, and apply() runs any subset of rules, compares plan.Format output and asserts the rules did not mutate their input plan. Adding a rule test takes a few lines.",
+   "internal/exec/exec_test.go:11-60 — table-driven tests for LIKE, SUBSTR, case mapping and ROUND. internal/engine/modes_test.go (355 lines) cross-checks the row, vectorized and parallel modes, and server_test.go tests admission control and streaming with fakes.",
+   "Weakness: the vectorized and parallel executor (about 6,000 lines across vagg/vexpr/vops/vsort/vjoin/parallel) is covered only by a 114-line exec_test.go and simd_test.go at the unit level. It relies mostly on engine-level mode-comparison tests and the external conformance harness."
+  ]
+ },
+ "top_strengths": [
+  "Very clean layering with one package per pipeline stage, ColumnID-based plan rewrites, an injectable rule-based optimizer and a separate physical planner, all documented in the README module map",
+  "Thorough, defensive PQCF reader with checksums, range checks on offsets, dictionary codes and RLE runs, and resource limits",
+  "Consistent structured error model (errs.Code mirrors the spec) with panic-to-INTERNAL_ERROR guards at the protocol and HTTP boundaries, plus admission control, timeouts and body limits",
+  "Standard library only, idiomatic Go, with comments that explain why (parallel determinism, dictionary immutability)"
+ ],
+ "top_weaknesses": [
+  "Worker goroutines in parallel scan, aggregation and merge (exec/parallel.go:249, exec/vagg.go:1081,1096) have no recover, so any panic there crashes the whole server or session",
+  "Vectorized executor files are very large (vagg.go 1240 lines, vexpr.go 1113 lines) with long type-specialized functions (evalDict about 117 lines), which hurts readability",
+  "Unbounded inputs remain: no size cap on session lines (protocol/session.go:16) and no parser recursion-depth limit",
+  "Thin direct unit tests for the vectorized and parallel executor compared with its size"
+ ],
+ "files_read": 14
+}

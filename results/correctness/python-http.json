@@ -2,80 +2,80 @@
  "schema": "polyquery-http-suite/1",
  "engine": "/home/esa/git/poly-query/implementations/python/bin/polyquery",
  "summary": {
-  "total": 18,
+  "total": 19,
   "passed": 18,
-  "failed": 0
+  "failed": 1
  },
  "checks": [
   {
    "check": "health_version_capabilities",
    "status": "pass",
-   "seconds": 0.33
+   "seconds": 0.39
   },
   {
    "check": "table_lifecycle",
    "status": "pass",
-   "seconds": 0.38
+   "seconds": 0.39
   },
   {
    "check": "query_and_error_mapping",
    "status": "pass",
-   "seconds": 0.38
+   "seconds": 0.4
   },
   {
    "check": "keep_alive",
    "status": "pass",
-   "seconds": 0.32
+   "seconds": 0.38
   },
   {
    "check": "streaming",
    "status": "pass",
-   "seconds": 0.37
+   "seconds": 0.42
   },
   {
    "check": "metrics",
    "status": "pass",
-   "seconds": 0.38
+   "seconds": 0.39
   },
   {
    "check": "timeout",
    "status": "pass",
-   "seconds": 0.52
+   "seconds": 0.59
   },
   {
    "check": "server_default_timeout",
    "status": "pass",
-   "seconds": 0.63
+   "seconds": 0.65
   },
   {
    "check": "cancellation",
    "status": "pass",
-   "seconds": 0.38
+   "seconds": 0.4
   },
   {
    "check": "backpressure_overloaded",
    "status": "pass",
-   "seconds": 4.24
+   "seconds": 4.26
   },
   {
    "check": "queued_time_counts_toward_timeout",
    "status": "pass",
-   "seconds": 1.74
+   "seconds": 1.89
   },
   {
    "check": "snapshot_isolation",
    "status": "pass",
-   "seconds": 1.84
+   "seconds": 1.83
   },
   {
    "check": "concurrent_readers",
    "status": "pass",
-   "seconds": 0.49
+   "seconds": 0.46
   },
   {
    "check": "client_disconnect_cancels",
    "status": "pass",
-   "seconds": 0.88
+   "seconds": 0.89
   },
   {
    "check": "request_size_limit",
@@ -83,14 +83,20 @@
    "seconds": 0.38
   },
   {
+   "check": "malformed_chunked_body",
+   "status": "fail",
+   "message": "negative chunk size: expected a 4xx answer within 5 s, got ''",
+   "seconds": 0.39
+  },
+  {
    "check": "structured_logs",
    "status": "pass",
-   "seconds": 0.63
+   "seconds": 0.7
   },
   {
    "check": "graceful_shutdown",
    "status": "pass",
-   "seconds": 1.74
+   "seconds": 1.75
   },
   {
    "check": "grace_expiry",
@@ -99,22 +105,23 @@
   }
  ],
  "startup_seconds": [
-  0.20837048796238378,
-  0.21017881995067,
-  0.20712934900075197,
-  0.20875142503064126,
-  0.20799977000569925,
-  0.2098992770188488,
-  0.20152331702411175,
-  0.203881288995035,
-  0.2052956279949285,
-  0.20464552694465965,
-  0.20188715204130858,
-  0.24334778997581452,
-  0.2591526419855654,
-  0.2138149730162695,
-  0.2149362430209294,
-  0.2134792519500479
+  0.22229416196933016,
+  0.22542462695855647,
+  0.22980562300654128,
+  0.21619708597427234,
+  0.2178566480288282,
+  0.22310864803148434,
+  0.2189215839607641,
+  0.22533201903570443,
+  0.22068275097990409,
+  0.2253427989780903,
+  0.2228941569919698,
+  0.22947341500548646,
+  0.22641288302838802,
+  0.22885119495913386,
+  0.21807599399471655,
+  0.22147688595578074,
+  0.2324383319937624
  ],
- "logs": "/tmp/pqhttp-logs-yldzsh04"
+ "logs": "/tmp/pqhttp-logs-4080i86y"
 }

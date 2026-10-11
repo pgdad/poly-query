@@ -445,6 +445,31 @@ def _(s: Server):
     expect(st == 413 and (b.get("error") or {}).get("code") == "RESOURCE_LIMIT", f"oversized body {st} {b}")
 
 
+@check("malformed_chunked_body", ["--max-request-bytes", "1000"])
+def _(s: Server):
+    # chunk-size is 1*HEXDIG (RFC 9112 §7.1). A negative size is malformed framing: the server
+    # must reject it when it reads the size line, not keep reading the body (which would let it
+    # bypass --max-request-bytes). The client keeps the connection open, so a server that reads
+    # on to end-of-stream never answers.
+    sock = socket.create_connection((s.host, s.port))
+    sock.settimeout(5)
+    sock.sendall(b"PUT /v1/tables/neg?format=csv HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+                 b"-5\r\n" + b"a\n" + b"1\n" * 2000)
+    try:
+        head = sock.recv(64).decode("latin-1", "replace")
+    except OSError:
+        head = ""
+    finally:
+        sock.close()
+    status = int(head.split()[1]) if head.startswith("HTTP/1.") and len(head.split()) > 1 else None
+    expect(status is not None and 400 <= status < 500,
+           f"negative chunk size: expected a 4xx answer within 5 s, got {head[:40]!r}")
+    st, _, b = s.json("GET", "/v1/tables")
+    expect(st == 200, f"server unresponsive after malformed chunked body: {st}")
+    names = [t.get("name") for t in b.get("tables", [])] if isinstance(b, dict) else []
+    expect("neg" not in names, "table created from a malformed chunked body")
+
+
 @check("structured_logs")
 def _(s: Server):
     s.load_people()

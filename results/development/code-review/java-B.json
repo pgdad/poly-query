@@ -1,0 +1,47 @@
+{
+ "language": "java",
+ "reviewer": "B",
+ "scores": {
+  "architecture": 5,
+  "readability": 4,
+  "robustness": 4,
+  "testability": 3
+ },
+ "evidence": {
+  "architecture": [
+   "src/main/java/polyquery/engine/Engine.java:200-238 — the pipeline (parse → analyze against a catalog snapshot → plan → physical plan → row or vector executor) is one short method behind a front-end-neutral facade, and the javadoc documents each stage",
+   "src/main/java/polyquery/optimizer/OptimizerRule.java:9-14 and optimizer/LogicalOptimizer.java:22-28 — each rewrite is a pluggable rule with a single apply method, chained in a fixed sequence; physical choices are kept out of the optimizer",
+   "Package layout sql/{lexer,parser,ast,analyzer}, plan, optimizer, physical, exec, exec/vector, storage/pqcf, protocol, server — imports follow the layering. plan depends only on types and storage, and storage does not import exec, protocol or server",
+   "Small layering leaks: exec/vector/Parallel.java:60 calls polyquery.optimizer.ExprSafety, and sql/analyzer/ScalarFunctionBinder.java:11 imports exec.ConstantEvaluator"
+  ],
+  "readability": [
+   "Modern Java used well: sealed AST/statement types with pattern-matching switches (Engine.java:210-237, Analyzer.java:128-131) and records for requests and plan nodes (PqcfReader.java:50-55)",
+   "Comments explain why, not what: LogicalOptimizer.java:11-16 explains why predicates move only when error semantics are preserved, and Kernels.java:22-26 explains the branch-free and OR-ed overflow flag design",
+   "Methods stay short even in the hot vector kernels (the longest method in exec/vector/Kernels.java is about 64 lines), but several files are very large: Parallel.java has 1117 lines, Kernels.java 1488 and AggState.java 1033",
+   "sql/parser/Parser.java:133,268,378-383,401 — nesting depth is decremented by hand on every return path instead of with try/finally. It works because a parse error aborts the whole parse, but it is fragile"
+  ],
+  "robustness": [
+   "protocol/RequestHandler.java:64-115 — handleLine and handle never throw. They map PolyQueryException, StackOverflowError, OutOfMemoryError and RuntimeException to error codes (INTERNAL_ERROR hides the internal message), and the error codes come from a single enum with HTTP statuses (common/ErrorCode.java:4-37)",
+   "engine/PathResolver.java:15-37 — strict data-directory confinement: it rejects NUL bytes, absolute paths, drive letters and '..', then checks that the normalized path starts with the root. Engine.java:136-160 enforces the ingest size limit before reading and decodes UTF-8 strictly",
+   "storage/pqcf/PqcfReader.java:125-314 — header, trailer and metadata are validated thoroughly (magic, checksum, length range, duplicate names, unknown types or index kinds, chunk byte range out of bounds), and ChunkDecoder has 19 more corruption checks. The parser and JSON parser have depth limits (Parser.java:20, JsonParser.java:13), and HttpConnection.java:28-29,211,229,271 caps header, buffer and body sizes",
+   "Gap: the session loop at Main.java:256 uses an unbounded BufferedReader.readLine(), so --max-request-bytes is not applied on stdin and a huge line can exhaust the heap outside the handler's OOM catch. ffi/NativeKernels.java:173-259 also catches Throwable broadly around every downcall"
+  ],
+  "testability": [
+   "src/test/java/polyquery/TestMain.java:13-38 — a hand-rolled reflection runner with no JUnit; every suite must be registered by hand in a list, and there are no per-test fixtures or filtering",
+   "Coverage is fairly thin for the code size: about 105 test methods in 3,231 test lines against about 28k main lines",
+   "optimizer/OptimizerRulesTest.java:40-60 — good design for testing: each rule is applied in isolation to Engine.logicalPlan() (Engine.java:257-262) and compared with a golden printed plan, which makes new rule tests cheap",
+   "StorageTest.java and Assert.java:24-33 — PQCF round-trip and corruption tests, plus an Assert.fails(ErrorCode, ...) helper. Most other suites test end to end through the Engine facade rather than isolating lexer, binder or operators"
+  ]
+ },
+ "top_strengths": [
+  "Clean layered architecture with a thin Engine facade, pluggable optimizer rules and separate row and vectorized executors",
+  "Disciplined error handling: one error-code enum, a request handler that never throws, and thorough validation of PQCF files and HTTP input",
+  "Idiomatic modern Java (sealed types, records, pattern-matching switch, FFM API) with no dependencies, and comments that explain the reasoning behind tricky semantics"
+ ],
+ "top_weaknesses": [
+  "Custom reflection test runner with manual suite registration and modest coverage (about 105 tests for about 28k lines of code)",
+  "Some very large files in exec/vector (Parallel, Kernels, AggState over 1000 lines each) and a few layering leaks (exec to optimizer, analyzer to exec)",
+  "Session-mode stdin lines have no size limit, and NativeKernels catches Throwable broadly"
+ ],
+ "files_read": 17
+}

@@ -2,8 +2,8 @@
  "schema": "polyquery-http-suite/1",
  "engine": "/home/esa/git/poly-query/implementations/common-lisp/bin/polyquery",
  "summary": {
-  "total": 18,
-  "passed": 18,
+  "total": 19,
+  "passed": 19,
   "failed": 0
  },
  "checks": [
@@ -45,12 +45,12 @@
   {
    "check": "server_default_timeout",
    "status": "pass",
-   "seconds": 0.4
+   "seconds": 0.39
   },
   {
    "check": "cancellation",
    "status": "pass",
-   "seconds": 0.14
+   "seconds": 0.13
   },
   {
    "check": "backpressure_overloaded",
@@ -65,12 +65,12 @@
   {
    "check": "snapshot_isolation",
    "status": "pass",
-   "seconds": 1.57
+   "seconds": 1.51
   },
   {
    "check": "concurrent_readers",
    "status": "pass",
-   "seconds": 0.11
+   "seconds": 0.1
   },
   {
    "check": "client_disconnect_cancels",
@@ -79,6 +79,11 @@
   },
   {
    "check": "request_size_limit",
+   "status": "pass",
+   "seconds": 0.08
+  },
+  {
+   "check": "malformed_chunked_body",
    "status": "pass",
    "seconds": 0.08
   },
@@ -99,22 +104,23 @@
   }
  ],
  "startup_seconds": [
-  0.010024168994277716,
-  0.008034448022954166,
-  0.009083912998903543,
-  0.010251814033836126,
-  0.009468648000620306,
-  0.01040283200563863,
-  0.009832883020862937,
-  0.009604627033695579,
-  0.010132687049917877,
-  0.00665229803416878,
-  0.010380869964137673,
-  0.010722311970312148,
-  0.011245772009715438,
-  0.009508833987638354,
-  0.010192029003519565,
-  0.008403461950365454
+  0.011173390957992524,
+  0.009646212041843683,
+  0.00902359199244529,
+  0.009325097955297679,
+  0.010267258970998228,
+  0.008665736997500062,
+  0.009172265010420233,
+  0.00881785899400711,
+  0.008214756031520665,
+  0.007041151984594762,
+  0.00872602197341621,
+  0.011812262993771583,
+  0.009132970997598022,
+  0.00832534598885104,
+  0.008000575006008148,
+  0.009227091039065272,
+  0.009505773021373898
  ],
- "logs": "/tmp/pqhttp-logs-sc7_hsfg"
+ "logs": "/tmp/pqhttp-logs-43ixq_vm"
 }
