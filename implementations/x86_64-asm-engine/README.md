@@ -380,9 +380,13 @@ also passes with `PQ_PAR_MIN=1`.
   parallel batches: key vector, candidate pairs, one vectorized ON re-check
   per batch (skipped when ON is just the key equality), emission in probe
   order with LEFT JOIN padding.
-* **Sort-merge join**: both inputs reduced to (key, tuple) entries, NULL
-  keys dropped, sorted with `qsort_r`, merged into per-left-tuple ranges of
-  equal right keys; emission in left input order (LEFT JOIN supported).
+* **Sort-merge join**: both inputs reduced to (key, tuple) entries (keys
+  evaluated as vectors, in parallel parts, in the batch modes), NULL keys
+  dropped, sorted - stable LSD radix sort (8-bit digits, constant digits
+  skipped) for integer-like keys, `qsort_r` otherwise - and merged into
+  per-left-tuple ranges of equal right keys; emission in left input order
+  (LEFT JOIN supported); the ON re-check is skipped when ON is just the key
+  equality.
 * **Nested loop**: every pair, full ON predicate.
 
 ### Logical optimizer (`optimizer.S`, `optimize: true`)
@@ -443,10 +447,13 @@ Effects in short: vectorization 2–7× on scan / filter / aggregate /
 projection queries (Q1, Q2, Q6, Q7), top-N 4× (Q6), constant folding 1.8×
 in the row baseline (Q8: `amount > 10 * 10 + 0` folds, and the promoted
 DECIMAL literal is no longer cast per row), parallelism a further 3–13×
-with 16 threads. Join algorithms on Q5 (1 thread): hash 64 ms (row) /
-42 ms (vectorized), sort-merge 152 ms / 145 ms; joining 2,000 × 2,000 filtered rows
-(both 1M- and 100k-row scans included):
-hash 9.4 ms, merge 9.5 ms, nested loop 50 ms.
+with 16 threads. Join algorithms on Q5 (1M ⋈ 100k rows): hash join
+51 ms (row, 1 thread) / 42 ms (vectorized) / 20 ms (16 threads); sort-merge
+join 152 ms before its optimizations (comparison sort, per-pair ON
+re-check) and 58 ms / 42 ms / 42 ms after them (radix sort of
+integer-like keys, vectorized key evaluation, no ON re-check when ON is just
+the key equality); joining 2,000 × 2,000 filtered rows (scans of both
+tables included): hash 9.4 ms, merge 9.5 ms, nested loop 50 ms.
 
 ## Implementation-defined choices
 

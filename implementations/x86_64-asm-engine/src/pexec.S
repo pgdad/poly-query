@@ -1909,3 +1909,113 @@ FUNC pexec_probe
 9:  mov %r15, %rax
     LEAVE
 ENDF pexec_probe
+
+/* ================================================================ merge join keys */
+
+/* jkey_part(task rdi, part rsi, lo rdx, hi rcx): (key, index) entries of
+ * the tuples [lo, hi) of PT_A with non-NULL key PT_B, written from
+ * PT_C + lo * 16 on; PT_CNT[part] = count */
+FUNC jkey_part
+    ENTER 112
+    mov %rdi, %rbx
+    mov %rsi, 64(%rsp)
+    mov %rdx, %r14                  /* batch start */
+    mov %rcx, 72(%rsp)
+    mov PT_XS(%rbx), %r13
+    lea 0(%rsp), %rdi
+    mov %r13, %rsi
+    call wctx_init
+    mov $VSIZE, %edi
+    call tmp_alloc
+    mov %rax, 80(%rsp)              /* key vector */
+    mov %r14, %r12
+    shl $4, %r12
+    add PT_C(%rbx), %r12            /* next entry */
+    mov %r12, 88(%rsp)              /* first entry */
+1:  cmp 72(%rsp), %r14
+    jae 9f
+    call check_deadline
+    mov 72(%rsp), %r15
+    sub %r14, %r15
+    cmp $VB, %r15
+    jbe 2f
+    mov $VB, %r15d
+2:  mov PT_A(%rbx), %rax
+    mov XS_W(%r13), %rdx
+    shl $3, %rdx
+    imul %r14, %rdx
+    add TS_DATA(%rax), %rdx
+    lea 0(%rsp), %rdi
+    mov PT_B(%rbx), %rsi
+    mov %r15, %rcx
+    mov XS_W(%r13), %r8
+    mov 80(%rsp), %r9
+    call k_eval1
+    mov 80(%rsp), %rax
+    xor %ecx, %ecx
+3:  cmp %r15, %rcx
+    jae 4f
+    cmpb $0, VNULL(%rax, %rcx)
+    jne 31f
+    mov (%rax, %rcx, 8), %rdx
+    mov %rdx, (%r12)
+    lea (%r14, %rcx), %rdx
+    mov %rdx, 8(%r12)
+    add $16, %r12
+31: inc %rcx
+    jmp 3b
+4:  add %r15, %r14
+    jmp 1b
+9:  sub 88(%rsp), %r12
+    shr $4, %r12
+    mov 64(%rsp), %rcx
+    lea PT_CNT(%rbx), %rax
+    mov %r12, (%rax, %rcx, 8)
+    LEAVE
+ENDF jkey_part
+
+/* pexec_join_keys(xs rdi, ts rsi, key rdx, entries rcx) -> rax count: the
+ * (key, tuple index) entries of the non-NULL keys, in tuple order */
+FUNC pexec_join_keys
+    ENTER 16
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %rdx, %r14
+    mov %rcx, %r15
+    call pexec_threads
+    mov $PT_SIZE, %edi
+    call tmp_zalloc
+    mov %rax, %r13
+    mov %rbx, PT_XS(%r13)
+    mov %r12, PT_A(%r13)
+    mov %r14, PT_B(%r13)
+    mov %r15, PT_C(%r13)
+    mov TS_N(%r12), %rdi
+    mov %rdi, PT_N(%r13)
+    lea jkey_part(%rip), %rsi
+    mov %r13, %rdx
+    call par_for
+    mov %rax, %r14                  /* parts: compact their entries */
+    mov PT_CNT(%r13), %r15          /* count = part 0's */
+    mov $1, %ebx
+1:  cmp %r14, %rbx
+    jae 9f
+    mov PT_N(%r13), %rax            /* part start = n * p / P */
+    mul %rbx
+    div %r14
+    mov %rax, %rsi
+    shl $4, %rsi
+    add PT_C(%r13), %rsi
+    mov %r15, %rdi
+    shl $4, %rdi
+    add PT_C(%r13), %rdi
+    lea PT_CNT(%r13), %rcx
+    mov (%rcx, %rbx, 8), %rdx
+    add %rdx, %r15
+    shl $4, %rdx
+    call memmove
+    inc %rbx
+    jmp 1b
+9:  mov %r15, %rax
+    LEAVE
+ENDF pexec_join_keys
