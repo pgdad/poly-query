@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-engine PQCF v1 interoperability matrix (Phase 3 / M5).
+"""Cross-engine PQCF interoperability matrix (Phase 3 / M5; PQCF v2 wide decimals per CR-2).
 
 For every writer engine W (claiming storage.pqcf) and every encoding mode, W
 loads the interop tables and saves them. Each file is validated by the
@@ -7,7 +7,9 @@ independent reference reader (tools/validation/pqcf.py) and its decoded content
 is compared with the reference ingestion of the source data. Then every reader
 engine R opens every file and its `SELECT *` result is compared with the same
 reference content. The golden files written by the reference writer are
-included as an extra "writer".
+included as an extra "writer". Tables marked with `requires` (CR-2 wide decimals,
+written as PQCF v2) are only written and read by engines claiming that capability;
+every file's format version must be 2 exactly when the table has a wide column.
 
   storage_interop.py [--engines java,go,...] [--report results/correctness/interop.json]
 """
@@ -26,6 +28,8 @@ sys.path.insert(0, str(ROOT / "tools/validation"))
 
 import pqcf  # noqa: E402
 import pqref  # noqa: E402
+
+pqref.MAX_DECIMAL_P = 38   # reference ingestion of the CR-2 table
 from engine import EngineError, SessionEngine, engine_info  # noqa: E402
 from pqt import rows_match  # noqa: E402
 
@@ -44,6 +48,10 @@ TABLES = {
     "nulls": {"path": "fixtures/gen/nulls_heavy.csv", "format": "csv",
               "schema": json.loads((FIX / "gen/nulls_heavy.schema.json").read_text())},
     "events": {"path": "fixtures/events.json", "format": "json"},
+    "bigdec": {"path": "fixtures/bigdec.csv", "format": "csv", "requires": "change.decimal38",
+               "schema": [{"name": "id", "type": "INT64"}, {"name": "grp", "type": "STRING"},
+                          {"name": "amt", "type": "DECIMAL(38,10)"}, {"name": "big", "type": "DECIMAL(30,0)"},
+                          {"name": "small", "type": "DECIMAL(10,2)"}]},
 }
 MODES = [("plain", 100000), ("dict", 333), ("rle", 1000), ("auto", 64)]
 
@@ -63,6 +71,17 @@ def decode_file(path: Path) -> tuple[list[str], list[list]]:
     return types, [[pqref.serialize(v, ty) for v, ty in zip(r, types)] for r in rows]
 
 
+def file_version(path: Path) -> int:
+    return int.from_bytes(path.read_bytes()[4:6], "little")
+
+
+def expected_version(types: list[str]) -> int:
+    return 2 if any(pqcf.is_wide(t) for t in types) else 1
+
+
+CAPS: dict[str, set[str]] = {}
+
+
 def discover(names: list[str] | None) -> dict[str, str]:
     out = {}
     for l in names or LANGS:
@@ -71,6 +90,7 @@ def discover(names: list[str] | None) -> dict[str, str]:
             info = engine_info(str(launcher))
             if "storage.pqcf" in info["capability_set"]:
                 out[l] = str(launcher)
+                CAPS[l] = set(info["capability_set"])
     return out
 
 
@@ -95,6 +115,8 @@ def main() -> int:
             continue
         try:
             for tname, t in TABLES.items():
+                if t.get("requires") and t["requires"] not in CAPS[w]:
+                    continue
                 req = {"op": "load", "table": tname, "format": t["format"], "path": t["path"]}
                 if "schema" in t:
                     req["schema"] = t["schema"]
@@ -115,8 +137,12 @@ def main() -> int:
                             ok, msg = rows_match(refs[tname][1], rows, refs[tname][0], True)
                             entry["valid"] = True
                             entry["content_ok"] = ok and types == refs[tname][0]
+                            entry["format_version"] = file_version(work / rel)
                             if not entry["content_ok"]:
                                 entry["error"] = f"content differs from source: {msg or types}"
+                            elif entry["format_version"] != expected_version(types):
+                                entry["error"] = (f"format_version {entry['format_version']}, "
+                                                  f"expected {expected_version(types)}")
                         except pqcf.Corrupt as e:
                             entry["valid"] = False
                             entry["error"] = f"reference reader rejects file: {e.code}: {e}"
@@ -127,7 +153,11 @@ def main() -> int:
             eng.close()
 
     # reference-writer golden files count as an extra writer
-    gold = {"people": "people.pqcf"}
+    gold = {"people": "people.pqcf", "wide": "wide_plain.pqcf"}
+    m, wrows = pqcf.read((FIX / "pqcf/wide_plain.pqcf").read_bytes())
+    wtypes = [pqref.canonical_type(c["type"]) for c in m["columns"]]
+    refs["wide"] = (wtypes, [[pqref.serialize(v, ty) for v, ty in zip(r, wtypes)] for r in wrows])
+    TABLES["wide"] = {"requires": "change.decimal38"}
     for tname, g in gold.items():
         shutil.copy(FIX / "pqcf" / g, work / "out" / f"reference__{tname}__auto.pqcf")
         files.append({"writer": "reference", "table": tname, "mode": "auto",
@@ -144,6 +174,9 @@ def main() -> int:
             continue
         try:
             for k, f in enumerate(readable):
+                req_cap = TABLES[f["table"]].get("requires")
+                if req_cap and req_cap not in CAPS[r_name]:
+                    continue
                 tab = f"t{k}"
                 cell = matrix.setdefault(r_name, {}).setdefault(f["writer"], {"ok": 0, "fail": 0, "failures": []})
                 r = eng.request({"op": "open", "table": tab, "path": f["path"]})

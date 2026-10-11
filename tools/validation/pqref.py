@@ -32,7 +32,12 @@ class IngestError(Exception):
         self.code = code
 
 
-def canonical_type(t: str, max_p: int = 18) -> str:
+# Maximum DECIMAL precision accepted by default: 18 (base spec); 38 for CR-2 tooling.
+MAX_DECIMAL_P = 18
+
+
+def canonical_type(t: str, max_p: int | None = None) -> str:
+    max_p = max_p or MAX_DECIMAL_P
     u = t.strip().upper().replace(" ", "")
     alias = {"BOOL": "BOOLEAN", "BOOLEAN": "BOOLEAN", "INT": "INT64", "INTEGER": "INT64", "BIGINT": "INT64",
              "INT64": "INT64", "DOUBLE": "FLOAT64", "FLOAT": "FLOAT64", "REAL": "FLOAT64", "FLOAT64": "FLOAT64",
