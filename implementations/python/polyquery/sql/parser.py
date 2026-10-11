@@ -130,9 +130,7 @@ class Parser:
             ctes.append(self.parse_cte())
             while self.accept_op(","):
                 ctes.append(self.parse_cte())
-        body = self.parse_select_core()
-        if self.tok.is_keyword("UNION"):
-            raise self.unsupported(self.tok)
+        body = self.parse_compound()
         query = ast.Query(self.pos(start), body, ctes)
         if self.accept_keyword("ORDER"):
             self.expect_keyword("BY")
@@ -163,6 +161,21 @@ class Parser:
         query = self.parse_query()
         self.expect_op(")")
         return ast.CommonTableExpr(self.pos(start), name, columns, query)
+
+    def parse_compound(self) -> ast.Select | ast.Compound:
+        """``select_core { UNION ALL select_core }``; branches are plain
+        select cores (no ORDER BY / LIMIT, no parentheses). ``UNION`` without
+        ``ALL`` is reserved."""
+        first = self.parse_select_core()
+        branches = [first]
+        while self.tok.is_keyword("UNION"):
+            if not self.peek().is_keyword("ALL"):
+                raise self.unsupported(self.tok)
+            self.i += 2
+            if not self.tok.is_keyword("SELECT"):
+                raise self.error("expected SELECT after UNION ALL")
+            branches.append(self.parse_select_core())
+        return first if len(branches) == 1 else ast.Compound(first.pos, branches)
 
     def parse_select_core(self) -> ast.Select:
         start = self.expect_keyword("SELECT")

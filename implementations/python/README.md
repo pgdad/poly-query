@@ -16,7 +16,8 @@ Capabilities reported: `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`,
 `phase4`, `http.streaming`, `phase5`, `exec.row`, `exec.vectorized`,
 `exec.parallel`, `join.hash`, `join.merge`, `join.nested_loop`,
 `native.kernels` (M9: the native kernel library `libpqkernels` is used
-through `ctypes` when loaded, see *Native kernels* below).
+through `ctypes` when loaded, see *Native kernels* below), `change.union_all`
+(change request CR-1, `UNION ALL`, see *UNION ALL (CR-1)* below).
 
 ## Build prerequisites
 
@@ -228,6 +229,30 @@ any remaining reference to a FROM column is a grouping violation
   `table`/`index`/`columns`, `TopN`, `Gather` with `partitions`, …). Plans
   of subqueries used by an operator follow its inputs in `children`, marked
   `"subquery": true`, so every scan of the statement appears in the tree.
+
+### UNION ALL (CR-1, `spec/changes/union-all.md`)
+
+`query = [WITH …] select_core { UNION ALL select_core } [ORDER BY …] [LIMIT …]`,
+usable wherever a query is (top level, CTE bodies, derived tables, scalar /
+`IN` / `EXISTS` subqueries, `EXPLAIN`). The change is carried through every
+layer as a new relation kind, so everything that consumes a bound query
+(subqueries, CTEs, derived tables, the executor's option matrix) works
+unchanged:
+
+| Layer | Module | Change |
+|---|---|---|
+| AST | `sql/ast.py` | `Compound(branches)`; `Query.body` is a `Select` or a `Compound` |
+| Parser | `sql/parser.py` | `parse_compound`: `UNION ALL` chains of plain select cores; `UNION` without `ALL` stays `UNSUPPORTED`; a branch `ORDER BY`/`LIMIT` or a parenthesized branch is a `PARSE_ERROR` |
+| Binding | `analysis/binder.py`, `analysis/bound.py`, `analysis/typing_rules.py` | `_bind_compound`: a compound is bound as a query over a `UnionRelation` (`SELECT * FROM (b1 UNION ALL b2 …) ORDER BY … LIMIT …`); branch arity check (`SEMANTIC_ERROR`), `union_type` per column (`TYPE_ERROR`), first-branch names, ORDER BY restricted to output names / positions (`_output_position`, shared with plain SELECTs) |
+| Logical plan | `planner/planner.py`, `planner/logical.py`, `planner/optimizer.py`, `planner/rewrite.py` | `UnionAll(branches)`; a branch whose column types differ from the output types gets a `Project` of implicit promotions (`Cast`, so INT64 → DECIMAL overflow is `NUMERIC_OVERFLOW`); expression simplification and pushdown run inside each branch; column pruning maps the required output columns to every branch |
+| Physical plan | `planner/physical.py` | `UnionAll` node (EXPLAIN `op: "UnionAll"`, children = branch plans in order, estimated rows = sum); with `threads > 1` every selective branch pipeline gets its own `Gather` |
+| Execution | `execution/row_engine.py`, `execution/vector_engine.py` | `_union_all`: the branches' rows / batches concatenated in branch order |
+| Protocol | `protocol/handlers.py` | capability `change.union_all` |
+
+Branch scopes are children of a compound scope without range variables, so
+correlated references inside a branch pass through it and make the whole
+compound subquery correlated. `max_rows` applies to the final result as for
+any query. Unit tests: `tests/test_union_all.py`.
 
 ### Execution modes and optimization (Phase 5)
 
@@ -853,7 +878,35 @@ python3 tools/native_difftest.py --lib ../../native-kernels/build/x86_64/libpqke
 * Responses are serialized with ASCII escaping (`\uXXXX`) so the output is always
   valid UTF-8 JSON on one line.
 
+* **UNION ALL typing** follows the CASE rule literally (semantics.md §13,
+  as CR-1 requires): numeric promotion, otherwise identical types, untyped
+  NULL columns adopt the other branches' type. Unlike this engine's CASE /
+  COALESCE, `DATE` and `TIMESTAMP` branches are therefore *not* unified
+  (`TYPE_ERROR`). Identical DECIMAL types are kept as they are
+  (`DECIMAL(5,2)` ∪ `DECIMAL(5,2)` = `DECIMAL(5,2)`); different DECIMALs or
+  INT64 with DECIMAL become `DECIMAL(18, max scale)`.
+* **UNION ALL ORDER BY**: an output name that occurs more than once in the
+  first branch (`SELECT a, a … UNION ALL … ORDER BY a`) is ambiguous
+  (`SEMANTIC_ERROR`); a position is always accepted. Rows are concatenated in
+  branch order, but without ORDER BY the order is unspecified (parallel
+  branches keep partition order).
+* `spec_version` stays `1.0.0` although CR-1 names `1.1.0-cr1` for engines
+  that claim the change: the Phase 1 conformance case
+  `phase1/catalog.pqt` asserts `"spec_version":"1.0.0"`, and earlier phases
+  must keep passing. The adopted change is visible as capability
+  `change.union_all`.
+
 ## Known limitations
+
+* Public case `changes/union_all.pqt:51` (`SELECT order_id … UNION ALL SELECT
+  amount FROM orders …`) expects `DECIMAL(18,2)`, but that file loads
+  `fixtures/orders.csv` without a schema, and CSV inference never yields
+  DECIMAL (ingestion.md §1.1; `amount` is inferred FLOAT64 like `people.score`
+  in the same file). INT64 ∪ FLOAT64 is FLOAT64, which the engine returns
+  (`[99.99], [101.0]`). The case is left failing rather than special-cased.
+* UNION ALL branches are not merged into partial aggregation / top-N: an
+  aggregate or ORDER BY over a union consumes the concatenated branch rows
+  (each branch can still run partitioned in parallel).
 
 * The GIL serializes CPU work: concurrent queries interleave rather than run
   in parallel, so throughput does not scale with `--workers`. Intra-query

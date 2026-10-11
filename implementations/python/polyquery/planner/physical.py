@@ -170,6 +170,22 @@ class SubqueryScan(PhysicalNode):
 
 
 @dataclass(eq=False)
+class UnionAll(PhysicalNode):
+    """Concatenates the rows of its branches, in order (spec/changes/union-all.md)."""
+
+    branches: list[PhysicalNode]
+    rel: int
+    width: int
+
+    def inputs(self) -> list[PhysicalNode]:
+        return list(self.branches)
+
+    @property
+    def layout(self) -> list[b.ColumnKey]:
+        return [(self.rel, i) for i in range(self.width)]
+
+
+@dataclass(eq=False)
 class Filter(PhysicalNode):
     input: PhysicalNode
     predicate: b.Expr
@@ -516,6 +532,10 @@ class PhysicalPlanner:
         if isinstance(node, lp.SubqueryScan):
             child = self.plan(node.input)
             return _estimated(SubqueryScan(child, node.rel, node.width, node.name), child.estimated_rows)
+        if isinstance(node, lp.UnionAll):
+            branches = [self.plan(branch) for branch in node.branches]
+            rows = sum(branch.estimated_rows for branch in branches)
+            return _estimated(UnionAll(branches, node.rel, node.width), rows)
         if isinstance(node, lp.Filter):
             if isinstance(node.input, lp.Scan):
                 return self._scan(node.input, node.predicate)
@@ -796,6 +816,8 @@ def _parallelize_inputs(node: PhysicalNode, partitions: int) -> None:
             node.input = _estimated(Gather(node.input, partitions, path[-1]), node.input.estimated_rows)
     elif isinstance(node, Sort):
         node.input = _gather_selective(node.input, partitions)
+    elif isinstance(node, UnionAll):
+        node.branches = [_gather_selective(branch, partitions) for branch in node.branches]
 
 
 def _estimated(node: PhysicalNode, rows: float) -> PhysicalNode:

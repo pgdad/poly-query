@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from ..analysis import bound as b
+from ..analysis import typing_rules as tr
+from ..datatypes import DataType
 from . import logical as lp
 
 
@@ -49,6 +51,9 @@ class LogicalPlanner:
                 len(relation.query.outputs),
                 relation.name,
             )
+        if isinstance(relation, b.UnionRelation):
+            branches = [self._converted(q, relation.types) for q in relation.branches]
+            return lp.UnionAll(branches, relation.rel, len(relation.types))
         assert isinstance(relation, b.JoinRelation)
         return lp.Join(
             relation.kind,
@@ -56,3 +61,16 @@ class LogicalPlanner:
             self.plan_relation(relation.right),
             relation.condition,
         )
+
+    def _converted(self, query: b.BoundQuery, types: list[DataType]) -> lp.LogicalNode:
+        """The plan of a UNION ALL branch with its columns promoted to the
+        output types (an INT64 that does not fit the DECIMAL fails with
+        NUMERIC_OVERFLOW)."""
+        node = self.plan_query(query)
+        columns = [
+            b.ColumnRef(o.expr.type, *key, o.name) for o, key in zip(query.outputs, node.layout)
+        ]
+        promoted = [tr.promote(c, t) for c, t in zip(columns, types)]
+        if all(p is c for p, c in zip(promoted, columns)):
+            return node
+        return lp.Project(node, self.ids.next(), promoted)

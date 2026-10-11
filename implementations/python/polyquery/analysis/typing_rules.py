@@ -9,6 +9,7 @@ from ..datatypes import (
     FLOAT64,
     INT64,
     MAX_DECIMAL_PRECISION,
+    NULL,
     STRING,
     TIMESTAMP,
     DataType,
@@ -144,6 +145,23 @@ def unify(exprs: list[b.Expr], what: str) -> tuple[DataType, list[b.Expr]]:
     if result is None:
         raise errors.type_error(f"incompatible types in {what}")
     return result, [promote(e, result) for e in exprs]
+
+
+def union_type(types: list[DataType]) -> DataType | None:
+    """Common type of a UNION ALL output column (the CASE rule, semantics.md
+    §13): numeric promotion, otherwise one type; untyped NULL columns adopt
+    the others' type (all NULL ⇒ the NULL type). None if there is none."""
+    result = NULL
+    for t in types:
+        if t.is_null or t == result:
+            continue
+        if result.is_null:
+            result = t
+        elif result.is_numeric and t.is_numeric:
+            result = common_numeric_type(result, t)
+        else:
+            return None
+    return result
 
 
 def _common_comparison_type(exprs: list[b.Expr], what: str) -> DataType:

@@ -42,6 +42,8 @@ def _push(node: lp.LogicalNode, predicates: list[b.Expr]) -> lp.LogicalNode:
     # stop here: optimize the subtree independently
     if isinstance(node, (lp.Aggregate, lp.Project, lp.Distinct, lp.Sort, lp.Limit, lp.SubqueryScan)):
         node.input = _push(node.input, [])
+    elif isinstance(node, lp.UnionAll):
+        node.branches = [_push(branch, []) for branch in node.branches]
     return _wrap(node, predicates)
 
 
@@ -105,6 +107,10 @@ def _prune(node: lp.LogicalNode, required: set[b.ColumnKey]) -> None:
     elif isinstance(node, lp.SubqueryScan):
         layout = node.input.layout
         _prune(node.input, {layout[i] for i in range(node.width) if (node.rel, i) in required})
+    elif isinstance(node, lp.UnionAll):
+        for branch in node.branches:
+            layout = branch.layout
+            _prune(branch, {layout[i] for i in range(node.width) if (node.rel, i) in required})
     elif isinstance(node, lp.Project):
         node.exprs = [
             b.Literal(e.type, None)
