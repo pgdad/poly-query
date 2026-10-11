@@ -273,24 +273,6 @@ fn from_truth(t: Vec<bool>, f: Vec<bool>) -> Vector {
     bool_vector(t, valid)
 }
 
-/// True if evaluating `e` can never raise an error (so it may be evaluated
-/// on rows where row mode would have skipped it).
-fn infallible(e: &Expr) -> bool {
-    match e {
-        Expr::Literal { .. } | Expr::Column { .. } | Expr::Param { .. } => true,
-        Expr::Not(_)
-        | Expr::And(..)
-        | Expr::Or(..)
-        | Expr::IsNull { .. }
-        | Expr::Compare { .. }
-        | Expr::Between { .. }
-        | Expr::InList { .. }
-        | Expr::Like { .. }
-        | Expr::Concat(..) => e.children().into_iter().all(infallible),
-        _ => false,
-    }
-}
-
 /// Three-valued AND (`is_and`) / OR. The right operand is evaluated only on
 /// the rows the left operand does not decide (unless it cannot fail).
 fn and_or(is_and: bool, l: &Expr, r: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
@@ -303,7 +285,7 @@ fn and_or(is_and: bool, l: &Expr, r: &Expr, b: &Batch, ctx: &ExecContext) -> Res
     let need = undecided.iter().filter(|&&u| u).count();
     let (rt, rf) = if need == 0 {
         (vec![false; n], vec![false; n])
-    } else if need == n || infallible(r) {
+    } else if need == n || r.is_infallible() {
         truth(&*eval_cow(r, b, ctx)?)
     } else {
         let idx = selection(&undecided);

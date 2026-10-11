@@ -455,6 +455,7 @@ impl Engine {
             ctx: ExecContext::default(),
             max_rows: opts.max_rows,
             row_count: 0,
+            replay: None,
         };
         match parse_statement(sql)? {
             Statement::Query(q) => {
@@ -480,21 +481,31 @@ impl Engine {
                     vectorized: opts.mode != ExecMode::Row,
                     threads: opts.threads.unwrap_or(self.config.threads).max(1),
                 };
-                let mut ctx = ExecContext::new(None, memory, self.config.test_functions)
-                    .with_deadline(deadline)
-                    .with_max_join_rows(self.config.max_join_rows)
-                    .with_physical_options(opts.physical())
-                    .with_exec_options(exec);
-                if let Some(flag) = control.cancel {
-                    ctx = ctx.with_cancel_flag(flag);
-                }
+                let make_ctx = |exec: ExecOptions| {
+                    let ctx = ExecContext::new(None, memory, self.config.test_functions)
+                        .with_deadline(deadline)
+                        .with_max_join_rows(self.config.max_join_rows)
+                        .with_physical_options(opts.physical())
+                        .with_exec_options(exec);
+                    match &control.cancel {
+                        Some(flag) => ctx.with_cancel_flag(flag.clone()),
+                        None => ctx,
+                    }
+                };
+                let ctx = make_ctx(exec);
                 ctx.check_interrupt()?;
+                // A vectorized/parallel execution that fails is re-run with
+                // the row-at-a-time reference engine (see `QueryCursor`).
+                let replay = exec
+                    .vectorized
+                    .then(|| (plan.clone(), make_ctx(ExecOptions::default())));
                 Ok(QueryCursor {
                     columns,
                     source: CursorSource::Plan(build(plan, &ctx)),
                     ctx,
                     max_rows: opts.max_rows,
                     row_count: 0,
+                    replay,
                 })
             }
             Statement::Explain(q) => {
@@ -532,12 +543,22 @@ enum CursorSource {
 
 /// An executing statement: pulls result rows one at a time, enforcing
 /// `max_rows`, the timeout and cancellation.
+///
+/// Error replay: vectorized and parallel execution evaluate expressions
+/// eagerly over whole batches and in a different order than the row engine,
+/// so when such an execution fails with a data error (overflow, division by
+/// zero, conversion, …) before any row has been delivered, the statement is
+/// transparently re-executed by the row-at-a-time engine, whose result or
+/// error is then reported. Every execution mode therefore reports exactly
+/// the baseline's errors (e.g. `LIMIT 1` over a later failing row succeeds).
 pub struct QueryCursor {
     columns: Vec<Field>,
     source: CursorSource,
     ctx: ExecContext,
     max_rows: Option<u64>,
     row_count: u64,
+    /// Plan and context for a row-mode re-execution (vectorized queries).
+    replay: Option<(PhysicalPlan, ExecContext)>,
 }
 
 impl QueryCursor {
@@ -551,8 +572,36 @@ impl QueryCursor {
         self.row_count
     }
 
+    /// Switches to row-mode re-execution after `e`, if possible.
+    fn try_replay(&mut self, e: &Error) -> bool {
+        let replayable = !matches!(
+            e.code,
+            ErrorCode::Timeout | ErrorCode::Cancelled | ErrorCode::ResourceLimit
+        );
+        if !replayable {
+            return false;
+        }
+        let Some((plan, ctx)) = self.replay.take() else {
+            return false;
+        };
+        // Dropping the old operator tree stops its worker threads.
+        self.source = CursorSource::Plan(build(plan, &ctx));
+        self.ctx = ctx;
+        self.row_count = 0;
+        true
+    }
+
     /// The next result row, or None at the end.
     pub fn next_row(&mut self) -> Result<Option<Row>> {
+        loop {
+            match self.pull() {
+                Err(e) if self.row_count == 0 && self.try_replay(&e) => continue,
+                r => return r,
+            }
+        }
+    }
+
+    fn pull(&mut self) -> Result<Option<Row>> {
         let row = match &mut self.source {
             CursorSource::Plan(root) => root.next(&self.ctx)?,
             CursorSource::Ready(rows) => rows.next(),
@@ -578,7 +627,18 @@ impl QueryCursor {
     /// Runs the query to completion, keeping the rows unless `count_only`.
     pub fn collect(mut self, count_only: bool) -> Result<QueryResult> {
         let mut rows = Vec::new();
-        while let Some(row) = self.next_row()? {
+        loop {
+            let row = match self.pull() {
+                Ok(Some(row)) => row,
+                Ok(None) => break,
+                Err(e) => {
+                    if self.try_replay(&e) {
+                        rows.clear();
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
             if !count_only {
                 self.ctx
                     .reserve(row.iter().map(|v| v.approx_size()).sum::<usize>() + 24)?;

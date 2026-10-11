@@ -1,15 +1,24 @@
-//! Logical optimization (indexes-and-planning.md §3): predicate pushdown and
-//! column pruning. Both rewrites preserve results.
+//! Logical optimization (indexes-and-planning.md §3): constant folding and
+//! predicate simplification ([`super::rewrite`]), predicate pushdown, join
+//! reordering ([`super::reorder`]) and column pruning. All rewrites
+//! preserve results.
 
 use super::expr::Expr;
 use super::logical::{JoinType, LogicalPlan};
+use super::{reorder, rewrite};
 
 /// Optimizes a logical plan. With `rewrites` (query option `optimize`,
 /// default true) the logical rewrites run; column pruning (projection
 /// pushdown) is always applied, since scans must read only referenced
 /// columns.
 pub fn optimize(plan: LogicalPlan, rewrites: bool) -> LogicalPlan {
-    let plan = if rewrites { push_down(plan) } else { plan };
+    let plan = if rewrites {
+        let plan = rewrite::simplify_plan(plan);
+        let plan = push_down(plan);
+        reorder::reorder_joins(plan)
+    } else {
+        plan
+    };
     let width = plan.width();
     let (plan, _) = prune(plan, &(0..width).collect::<Vec<_>>());
     plan

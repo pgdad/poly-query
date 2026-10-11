@@ -458,6 +458,25 @@ impl Expr {
         })
     }
 
+    /// True if evaluating the expression can never raise an error, so it may
+    /// be evaluated where the row engine would skip it (or skipped where it
+    /// would evaluate it) without changing the outcome.
+    pub fn is_infallible(&self) -> bool {
+        match self {
+            Expr::Literal { .. } | Expr::Column { .. } | Expr::Param { .. } => true,
+            Expr::Not(_)
+            | Expr::And(..)
+            | Expr::Or(..)
+            | Expr::IsNull { .. }
+            | Expr::Compare { .. }
+            | Expr::Between { .. }
+            | Expr::InList { .. }
+            | Expr::Like { .. }
+            | Expr::Concat(..) => self.children().into_iter().all(Expr::is_infallible),
+            _ => false,
+        }
+    }
+
     /// Splits a conjunction into its conjuncts.
     pub fn into_conjuncts(self, out: &mut Vec<Expr>) {
         match self {
