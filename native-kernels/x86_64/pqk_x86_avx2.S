@@ -2445,7 +2445,8 @@ ENDF pqk_x86_avx2_sum_i128
  * section), with low words kept sign-biased (lo ^ 2^63) in the accumulators
  * so that every compare is a signed vpcmpgtq:
  *   lt = (x < min)  [3 compares + blend], min = lt ? x : min (2 blends),
- *   gt = (x > max)  likewise.
+ *   gt = (x > max)  likewise; the update blends are skipped when no valid
+ *   lane of the group needs them (vtestpd, see MMG128).
  * Two accumulator sets (A: ymm4-7, B: ymm8-11 = minL', minH, maxL', maxH)
  * alternate between groups to halve the blend dependency chains. They start
  * at the neutral elements INT128_MAX / INT128_MIN, so no first-element
@@ -2453,7 +2454,8 @@ ENDF pqk_x86_avx2_sum_i128
  * to the neutral value).
  * Validity: per block the word is broadcast (ymm13); vpsllvq (table
  * shc128m, lane order 0,2,1,3) moves each row's bit into its lane's sign
- * bit, and lt/gt are ANDed with it (vblendvpd only reads sign bits). The
+ * bit; vtestpd tests only sign bits, and lt/gt are ANDed with it before the
+ * blends (vblendvpd only reads sign bits, too). The
  * count is popcnt of the validity words (bzhi'd to the rows of the final
  * block), or n without validity.
  * Groups of 4 are processed while >= 4 rows remain (also inside the final
@@ -2468,34 +2470,44 @@ ENDF pqk_x86_avx2_sum_i128
  * Stack: 0..127 spill area, 128 = out_max, 136 = out_min.
  * ---------------------------------------------------------------------- */
 
-/* MMG128 off, A|B, valid, shift-operand: one group of 4 rows. */
+/* MMG128 off, A|B, valid, shift-operand: one group of 4 rows.
+ * Lazy update: lt and gt are computed for all lanes; one vtestpd checks
+ * whether any (valid) lane needs an update, and only then are the four
+ * blends executed. With random data updates become rare after a few
+ * thousand rows (measured -15% in L2/L3); ascending data takes the update
+ * path every time (+5%, always predicted); 50% unpredictable updates per
+ * group were still 10% faster than the branch-free form. */
 .macro MMG128 off, mnl, mnh, mxl, mxh, valid, sh
         vmovdqu \off(%rdi), %ymm0
         vmovdqu \off+32(%rdi), %ymm1
         vpunpckhqdq %ymm1, %ymm0, %ymm2         /* H */
         vpunpcklqdq %ymm1, %ymm0, %ymm0
         vpxor   %ymm12, %ymm0, %ymm0            /* L' */
-.if \valid
-        vpsllvq \sh, %ymm13, %ymm14             /* sign = row valid */
-.endif
         vpcmpgtq %ymm2, %ymm\mnh, %ymm1
         vpcmpeqq %ymm2, %ymm\mnh, %ymm3
         vpcmpgtq %ymm0, %ymm\mnl, %ymm15
         vblendvpd %ymm3, %ymm15, %ymm1, %ymm1   /* x < min */
+        vpcmpgtq %ymm\mxh, %ymm2, %ymm3
+        vpcmpeqq %ymm2, %ymm\mxh, %ymm15
+        vpcmpgtq %ymm\mxl, %ymm0, %ymm14
+        vblendvpd %ymm15, %ymm14, %ymm3, %ymm3  /* x > max */
+        vpor    %ymm1, %ymm3, %ymm15
+.if \valid
+        vpsllvq \sh, %ymm13, %ymm14             /* sign = row valid */
+        vtestpd %ymm14, %ymm15                  /* ZF: no valid lane to update */
+.else
+        vtestpd %ymm15, %ymm15
+.endif
+        jz      77f
 .if \valid
         vpand   %ymm14, %ymm1, %ymm1
+        vpand   %ymm14, %ymm3, %ymm3
 .endif
         vblendvpd %ymm1, %ymm0, %ymm\mnl, %ymm\mnl
         vblendvpd %ymm1, %ymm2, %ymm\mnh, %ymm\mnh
-        vpcmpgtq %ymm\mxh, %ymm2, %ymm1
-        vpcmpeqq %ymm2, %ymm\mxh, %ymm3
-        vpcmpgtq %ymm\mxl, %ymm0, %ymm15
-        vblendvpd %ymm3, %ymm15, %ymm1, %ymm1   /* x > max */
-.if \valid
-        vpand   %ymm14, %ymm1, %ymm1
-.endif
-        vblendvpd %ymm1, %ymm0, %ymm\mxl, %ymm\mxl
-        vblendvpd %ymm1, %ymm2, %ymm\mxh, %ymm\mxh
+        vblendvpd %ymm3, %ymm0, %ymm\mxl, %ymm\mxl
+        vblendvpd %ymm3, %ymm2, %ymm\mxh, %ymm\mxh
+77:
 .endm
 
 /* scalar 128-bit updates: candidate rdx:rax; clobber rcx */

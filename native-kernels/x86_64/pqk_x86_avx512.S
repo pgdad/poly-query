@@ -1615,11 +1615,12 @@ ENDF pqk_x86_avx512_gather_i64
  * {lo, hi}; row i is at data + 16*i (any alignment).
  *
  * A "group" is 8 rows = two 64-byte loads Z0 = [lo0 hi0 .. lo3 hi3],
- * Z1 = [lo4 hi4 .. lo7 hi7]. vpermt2q with the index vectors zmm14
- * (0,2,..,14) and zmm15 (1,3,..,15) de-interleaves them into
+ * Z1 = [lo4 hi4 .. lo7 hi7]. minmax de-interleaves them with vpermt2q and
+ * the index vectors zmm14 (0,2,..,14) / zmm15 (1,3,..,15) into
  *   L = [lo0 .. lo7] and H = [hi0 .. hi7]   (natural row order),
- * so k-mask bit j is row j and validity bytes can be used directly as
- * write masks. AVX-512 has unsigned compares, so signed 128-bit
+ * so validity bytes can be used directly as write masks. filter/count use
+ * the cheaper in-lane vpunpck{l,h}qdq (LGU128, lane order 0,4,1,5,2,6,3,7)
+ * and reorder the 64-row result masks with pext/pdep (KFIX). AVX-512 has unsigned compares, so signed 128-bit
  *   x < c  <=>  (x.hi <s c.hi) | (x.hi == c.hi & x.lo <u c.lo)
  * is vpcmpq + vpcmpq + vpcmpuq{masked} + korb. Tails use zero-masked loads
  * (architectural fault suppression); the hot loops use plain loads.
@@ -1658,6 +1659,39 @@ kinv128:        .byte 0, 1, 0, 1, 0, 1, 0
         vpermt2q %zmm2, %zmm15, %zmm1           /* H */
 .endm
 
+/* LGU128 off[, k0, k1]: like LG128 but with in-lane vpunpck{l,h}qdq, which
+ * is cheaper than vpermt2q (count -12%, filter -5% measured) and leaves the
+ * rows in lane order (0, 4, 1, 5, 2, 6, 3, 7): row j < 4 in lane 2j, row
+ * j + 4 in lane 2j + 1. Used by filter/count, whose masks are reordered with
+ * KFIX (counts need no fix). */
+.macro LGU128 off, k0=, k1=
+.ifb \k0
+        vmovdqu64 \off(%rdi), %zmm2
+        vmovdqu64 \off+64(%rdi), %zmm1
+.else
+        vmovdqu64 \off(%rdi), %zmm2{\k0}{z}
+        vmovdqu64 \off+64(%rdi), %zmm1{\k1}{z}
+.endif
+        vpunpcklqdq %zmm1, %zmm2, %zmm0         /* L */
+        vpunpckhqdq %zmm1, %zmm2, %zmm1         /* H */
+.endm
+
+/* KFIX m: reorder every byte of a 64-bit mask built from LGU128 groups from
+ * lane order (0,4,1,5,2,6,3,7) to row order: the even bits (rows 0-3 of each
+ * group) and odd bits (rows 4-7) are extracted with pext and deposited into
+ * the low / high nibbles with pdep. clobbers rcx, rdx. */
+.macro KFIX m
+        movabs  $0x5555555555555555, %rcx
+        pext    %rcx, \m, %rdx          /* rows 0-3 of each group */
+        add     %rcx, %rcx              /* 0xaaaa... */
+        pext    %rcx, \m, \m            /* rows 4-7 */
+        movabs  $0x0f0f0f0f0f0f0f0f, %rcx
+        pdep    %rcx, %rdx, %rdx
+        not     %rcx
+        pdep    %rcx, \m, \m
+        or      %rdx, \m
+.endm
+
 /* GLANES r: k4/k5 = lane masks for the first r (1..8) rows of a group
  * (2r qwords). in: \r (32-bit gpr, doubled on exit), clobbers edx. */
 .macro GLANES r
@@ -1671,6 +1705,7 @@ kinv128:        .byte 0, 1, 0, 1, 0, 1, 0
 /* ------------------------------------------------------------------------
  * KP128 kind, k: predicate on L (zmm0) / H (zmm1) into \k (not k6/k7).
  * Constants: zmm8 = bcast a.lo, zmm9 = bcast a.hi, zmm10/zmm11 = b (BETWEEN).
+ * Lane order is irrelevant here (lane-wise).
  * Kinds: 0 EQ, 1 LT (x < a), 2 GT (x > a), 3 IN (a <= x <= b); operators are
  * (kind, invert) = EQ (0,0) NE (0,1) LT (1,0) LE (2,1) GT (2,0) GE (1,1)
  * BETWEEN (3,0). IN with a > b is empty automatically. clobbers k6, k7.
@@ -1703,40 +1738,41 @@ kinv128:        .byte 0, 1, 0, 1, 0, 1, 0
 
 /* ------------------------------------------------------------------------
  * Mask routines kop128_*: in rdi = block ptr, esi = len (1..64), constants
- * as above, zmm14/zmm15 = de-interleave indices. out rax = mask with
- * exactly len bits. clobbers rcx, rdx, rdi, rsi, r10, r11, k1-k7,
- * zmm0-zmm2.
- * Full block: 8 groups, k-masks merged with kunpckbw/wd/dq. Partial block:
- * groups with zero-masked loads, kmovb + shlx, then bzhi to len.
+ * as above. out rax = mask with exactly len bits.
+ * clobbers rcx, rdx, rdi, rsi, r10, r11, k1-k7, zmm0-zmm2.
+ * Full block: 8 groups (LGU128), k-masks merged with kunpckbw/wd/dq, then
+ * KFIX. Partial block: groups with zero-masked loads, kmovb + shlx, KFIX,
+ * then bzhi to len.
  * ---------------------------------------------------------------------- */
 .macro KOP128 name, kind, inv
 LFUNC \name
         cmp     $64, %esi
         jne     .Lpart\@
-        LG128   0
+        LGU128   0
         KP128   \kind, %k1
-        LG128   128
+        LGU128   128
         KP128   \kind, %k2
         kunpckbw %k1, %k2, %k1
-        LG128   256
+        LGU128   256
         KP128   \kind, %k2
-        LG128   384
+        LGU128   384
         KP128   \kind, %k3
         kunpckbw %k2, %k3, %k2
         kunpckwd %k1, %k2, %k1
-        LG128   512
+        LGU128   512
         KP128   \kind, %k2
-        LG128   640
+        LGU128   640
         KP128   \kind, %k3
         kunpckbw %k2, %k3, %k2
-        LG128   768
+        LGU128   768
         KP128   \kind, %k3
-        LG128   896
+        LGU128   896
         KP128   \kind, %k4
         kunpckbw %k3, %k4, %k3
         kunpckwd %k2, %k3, %k2
         kunpckdq %k1, %k2, %k1
         kmovq   %k1, %rax
+        KFIX    %rax
 .if \inv
         not     %rax
 .endif
@@ -1750,7 +1786,7 @@ LFUNC \name
         cmovb   %esi, %edx
         mov     %edx, %r11d
         GLANES  %r11d
-        LG128   0, %k4, %k5
+        LGU128   0, %k4, %k5
         KP128   \kind, %k1
         kmovb   %k1, %edx
         shlx    %rcx, %rdx, %rdx
@@ -1759,6 +1795,7 @@ LFUNC \name
         add     $8, %ecx
         sub     $8, %esi
         jg      1b
+        KFIX    %rax
 .if \inv
         not     %rax
 .endif
@@ -1779,8 +1816,8 @@ ENDF \name
  * rdx = rows (>= 1). out rax = number of rows where the KIND holds
  * (inversion applied by the caller). Two groups per step: predicate -> k,
  * merge-masked "acc -= -1"; the last 1..15 rows use zero-masked groups whose
- * k is ANDed with the row mask. clobbers rcx, rdx, rdi, r10, zmm0-zmm5,
- * k1-k7. */
+ * k is ANDed with the row mask (in LGU128 lane order). clobbers rcx, rdx,
+ * rdi, r10, r11, zmm0-zmm5, k1-k7. */
 .macro KCNT128 name, kind
 LFUNC \name
         vpxorq  %zmm4, %zmm4, %zmm4
@@ -1789,10 +1826,10 @@ LFUNC \name
         mov     %rdx, %r10
 1:      cmp     $16, %r10
         jb      2f
-        LG128   0
+        LGU128   0
         KP128   \kind, %k1
         vpsubq  %zmm3, %zmm4, %zmm4{%k1}
-        LG128   128
+        LGU128   128
         KP128   \kind, %k2
         vpsubq  %zmm3, %zmm5, %zmm5{%k2}
         add     $256, %rdi
@@ -1804,10 +1841,16 @@ LFUNC \name
         cmp     %rcx, %r10
         cmovb   %r10, %rcx
         mov     $0xff, %edx
-        bzhi    %ecx, %edx, %edx
-        kmovb   %edx, %k3               /* rows */
+        bzhi    %ecx, %edx, %edx        /* rows < r, in LGU128 lane order: */
+        mov     $0x55, %eax
+        pdep    %eax, %edx, %r11d       /* rows 0-3 -> lanes 0, 2, 4, 6 */
+        shr     $4, %edx
+        mov     $0xaa, %eax
+        pdep    %eax, %edx, %edx        /* rows 4-7 -> lanes 1, 3, 5, 7 */
+        or      %r11d, %edx
+        kmovb   %edx, %k3
         GLANES  %ecx
-        LG128   0, %k4, %k5
+        LGU128   0, %k4, %k5
         KP128   \kind, %k1
         kandb   %k3, %k1, %k1
         vpsubq  %zmm3, %zmm4, %zmm4{%k1}
@@ -1853,7 +1896,7 @@ kcnt128_table:
  * Registers: r12 = block data ptr, r13 = validity ptr (0 = all valid),
  * r14 = rows remaining, r15 = mask routine, rbx = row base (mode 0) /
  * count (mode 2), rbp = output ptr, (%rsp) = output start; zmm8-11 = a/b
- * constants, zmm14/15 = indices, zmm4 = row indices for vpcompressd,
+ * constants, zmm4 = row indices for vpcompressd,
  * zmm5 = iota, zmm6 = bcast(16).
  * Per 64-row block: mask & validity word (8-byte load, or exactly
  * ceil(len/8) bytes via lvp for the last block); filter emits with
@@ -1882,8 +1925,6 @@ kcnt128_table:
         vpbroadcastq 8(%r9), %zmm11
 1:      vpbroadcastq (%r8), %zmm8       /* a */
         vpbroadcastq 8(%r8), %zmm9
-        vmovdqu64 c_idx_even(%rip), %zmm14
-        vmovdqu64 c_idx_odd(%rip), %zmm15
         mov     %rdi, %r12
         mov     %rsi, %r13
         mov     %rdx, %r14
