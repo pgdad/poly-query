@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"polyquery/internal/errs"
+	"polyquery/internal/native"
 	"polyquery/internal/physical"
 	"polyquery/internal/plan"
 	"polyquery/internal/types"
@@ -138,20 +139,32 @@ func growZero[T any](s []T, g int) []T {
 }
 
 // exactSumState is SUM/AVG over INT64 or DECIMAL: exact (wide) sums.
+// With native kernels, batches are first added to int64 partial sums
+// (fast) by pqk_group_sum_i64; a group's sum is sums[g] + fast[g].
 type exactSumState struct {
 	sums  []types.BigDecimalSum
 	n     []int64
 	limit int64 // DECIMAL SUM: exclusive bound of the result
 	avg   bool
 	scale int
+
+	lib  *native.Lib
+	fast []int64
+	mask []byte
 }
 
 func (s *exactSumState) grow(g int) {
 	s.sums = growZero(s.sums, g)
 	s.n = growZero(s.n, g)
+	if s.lib != nil {
+		s.fast = growZero(s.fast, g)
+	}
 }
 
 func (s *exactSumState) update(gids []int32, n int, sel []int32, v *Vec) {
+	if s.lib != nil && n > 0 && s.nativeUpdate(gids, n, sel, v) {
+		return
+	}
 	sums, cnt, vals, nulls := s.sums, s.n, v.I, v.Nulls
 	add := func(g int32, x int64) {
 		if p := &sums[g]; !p.AddSmall(x) {
@@ -183,13 +196,49 @@ func (s *exactSumState) update(gids []int32, n int, sel []int32, v *Vec) {
 	}
 }
 
+// nativeUpdate adds a batch with pqk_group_sum_i64 into the fast sums and
+// the counts. If the kernel reports a possible overflow the batch is
+// subtracted again (wrapping arithmetic is exactly invertible) and false
+// is returned: the caller then adds the batch exactly.
+func (s *exactSumState) nativeUpdate(gids []int32, n int, sel []int32, v *Vec) bool {
+	var valid []byte
+	if sel != nil || v.Nulls != nil {
+		s.mask = activeMask(s.mask, n, sel, v.Nulls)
+		valid = s.mask
+	}
+	switch s.lib.GroupSumI64(asUint32(gids[:n]), v.I[:n], valid, s.fast, s.n) {
+	case native.OK:
+		return true
+	case native.Overflow:
+		for i, g := range gids[:n] {
+			if valid == nil || valid[i>>3]&(1<<(i&7)) != 0 {
+				s.fast[g] -= v.I[i]
+				s.n[g]--
+			}
+		}
+	}
+	return false
+}
+
+// settle folds the fast partial sum of group g into its exact sum.
+func (s *exactSumState) settle(g int) {
+	if s.fast != nil && s.fast[g] != 0 {
+		s.sums[g].Add(s.fast[g])
+		s.fast[g] = 0
+	}
+}
+
 func (s *exactSumState) merge(g int32, src aggState, sg int32) {
 	o := src.(*exactSumState)
 	s.sums[g].Merge(&o.sums[sg])
+	if o.fast != nil {
+		s.sums[g].Add(o.fast[sg])
+	}
 	s.n[g] += o.n[sg]
 }
 
 func (s *exactSumState) result(g int) (types.Value, error) {
+	s.settle(g)
 	if s.n[g] == 0 {
 		return null, nil
 	}
@@ -455,6 +504,7 @@ type aggTable struct {
 	states     []aggState
 
 	intMap    map[int64]int32
+	nmap      *nativeIntMap // replaces intMap with native kernels
 	floatMap  map[uint64]int32
 	strMap    map[string]int32 // single STRING key, or encoded multi-column keys
 	nullGroup int32            // group of the NULL key (single key)
@@ -477,7 +527,14 @@ func newAggTable(ec *Context, keyTypes []types.Type, calls []*plan.AggCall) *agg
 		t.keyClasses = append(t.keyClasses, classOf(kt))
 	}
 	for _, c := range calls {
-		t.states = append(t.states, newAggState(c))
+		st := newAggState(c)
+		if s, ok := st.(*exactSumState); ok {
+			s.lib = ec.Native
+		}
+		t.states = append(t.states, st)
+	}
+	if ec.Native != nil && len(keyTypes) == 1 && t.keyClasses[0] == vInt {
+		t.nmap = newNativeIntMap(ec.Native)
 	}
 	return t
 }
@@ -579,6 +636,9 @@ func (t *aggTable) nullKey(pos int64) (int32, error) {
 }
 
 func (t *aggTable) resolveInt(v *Vec, n int, sel []int32, pos int64) error {
+	if t.nmap != nil {
+		return t.resolveIntNative(v, n, sel, pos)
+	}
 	gids, vals, nulls := t.gids, v.I, v.Nulls
 	one := func(i int) error {
 		if nulls != nil && nulls[i] {
@@ -594,6 +654,44 @@ func (t *aggTable) resolveInt(v *Vec, n int, sel []int32, pos int64) error {
 				return err
 			}
 			t.intMap[k] = g
+		}
+		gids[i] = g
+		return nil
+	}
+	if sel == nil {
+		for i := 0; i < n; i++ {
+			if err := one(i); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, i := range sel {
+		if err := one(int(i)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resolveIntNative is resolveInt with keys hashed by pqk_hash_i64.
+func (t *aggTable) resolveIntNative(v *Vec, n int, sel []int32, pos int64) error {
+	gids, vals, nulls, m := t.gids, v.I, v.Nulls, t.nmap
+	hashes := m.hashBatch(vals[:n])
+	one := func(i int) error {
+		if nulls != nil && nulls[i] {
+			g, err := t.nullKey(pos + int64(i))
+			gids[i] = g
+			return err
+		}
+		k, h := vals[i], hashes[i]
+		g, ok := m.get(k, h)
+		if !ok {
+			var err error
+			if g, err = t.newGroup(t.key1(types.IntValue(k)), pos+int64(i)); err != nil {
+				return err
+			}
+			m.put(k, h, g)
 		}
 		gids[i] = g
 		return nil
@@ -766,6 +864,10 @@ func (t *aggTable) findOrAdd(key types.Row, pos int64) (int32, error) {
 		case v.Null:
 			g, ok = t.nullGroup, t.nullGroup >= 0
 			put = func(g int32) { t.nullGroup = g }
+		case t.keyClasses[0] == vInt && t.nmap != nil:
+			h := fmix64(v.I)
+			g, ok = t.nmap.get(v.I, h)
+			put = func(g int32) { t.nmap.put(v.I, h, g) }
 		case t.keyClasses[0] == vInt:
 			g, ok = t.intMap[v.I]
 			put = func(g int32) { t.intMap[v.I] = g }

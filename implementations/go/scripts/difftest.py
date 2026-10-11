@@ -6,7 +6,7 @@ execution option combination returns the same result as the row-at-a-time
 baseline (or fails with the same error code).
 
 Usage:
-  python3 implementations/go/scripts/difftest.py [--seed N] [--queries N] [--morsel-rows N] [-v]
+  python3 implementations/go/scripts/difftest.py [--seed N] [--queries N] [--morsel-rows N] [--native LIB] [-v]
 
 Errors may legitimately depend on evaluation order (e.g. a filter that is
 pushed below a join is evaluated for more rows), so error codes are compared
@@ -255,13 +255,14 @@ class Gen:
 
 
 class Session:
-    def __init__(self, morsel):
+    def __init__(self, morsel, native=None):
         env = dict(os.environ, GOTRACEBACK="all")
         if morsel > 0:
             env["POLYQUERY_MORSEL_ROWS"] = str(morsel)
         self.dir = tempfile.mkdtemp(prefix="pq-difftest-")
         os.symlink(FIXTURES, os.path.join(self.dir, "fixtures"))
-        self.p = subprocess.Popen([str(ENGINE), "session", "--data-dir", self.dir],
+        extra = ["--native-kernels", native] if native else []
+        self.p = subprocess.Popen([str(ENGINE), "session", "--data-dir", self.dir] + extra,
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open(os.path.join(self.dir, "stderr"), "w"),
                                   text=True, env=env)
 
@@ -297,12 +298,17 @@ def main():
                     help="directory with gen/<table>.csv (e.g. a pqgen output linked as gen/)")
     ap.add_argument("--joins", default="hash,merge,nested_loop",
                     help="join algorithms to test (nested_loop is slow on large data)")
+    ap.add_argument("--native", metavar="LIBPQKERNELS",
+                    help="load the native kernels and also compare every variant with native: true")
     ap.add_argument("-v", action="store_true")
     args = ap.parse_args()
+    if args.native:
+        VARIANTS.extend([{**BASE, "native": True}] + [{**v, "native": True} for v in VARIANTS])
+        args.native = str(Path(args.native).resolve())
     if args.fixtures:
         FIXTURES = Path(args.fixtures)
     JOIN_OPT = [(j, o) for j, o in JOIN_OPT if j in args.joins.split(",")]
-    s = Session(args.morsel_rows)
+    s = Session(args.morsel_rows, args.native)
     schemas = {}
     for t, (csv, sch) in TABLES.items():
         schema = json.loads((FIXTURES / sch).read_text())

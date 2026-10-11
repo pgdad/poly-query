@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"polyquery/internal/errs"
+	"polyquery/internal/native"
 	"polyquery/internal/physical"
 	"polyquery/internal/plan"
 	"polyquery/internal/types"
@@ -31,6 +32,8 @@ type joinTable struct {
 	next    []int32
 	shift   uint
 	seed    maphash.Seed
+	// lib, if set, hashes int keys with pqk_hash_i64 (build and probe).
+	lib *native.Lib
 }
 
 func hashInt(k int64, shift uint) uint64 {
@@ -107,9 +110,16 @@ func (t *joinTable) index() {
 		t.heads[i] = -1
 	}
 	t.next = make([]int32, t.n)
+	var hashes []uint64
+	if t.lib != nil {
+		hashes = make([]uint64, t.n)
+		t.lib.HashI64(t.intKeys, nativeHashSeed, hashes)
+	}
 	for i := t.n - 1; i >= 0; i-- {
 		var h uint64
-		if t.intKey {
+		if hashes != nil {
+			h = hashes[i] >> t.shift
+		} else if t.intKey {
 			h = hashInt(t.intKeys[i], t.shift)
 		} else {
 			h = maphash.String(t.seed, t.strKeys[i]) >> t.shift
@@ -168,6 +178,9 @@ func (s *joinBuild) get() (*joinTable, error) {
 
 func (s *joinBuild) build() (*joinTable, error) {
 	t := &joinTable{seed: maphash.MakeSeed(), classes: s.classes, intKey: s.intKey}
+	if s.intKey {
+		t.lib = s.ec.Native
+	}
 	t.cols = make([]Vec, len(t.classes))
 	keys := make([]*Vec, len(s.keyTypes))
 	var keyBuf []byte
@@ -227,6 +240,7 @@ type vhashJoinOp struct {
 	keyBuf     []byte
 
 	pairP, pairB []int32
+	phash        []uint64 // native: hashes of the probe batch's int keys
 	outCols      []vclass
 	bufs         []vecBuf
 	codes        [][]uint32
@@ -299,6 +313,10 @@ func (j *vhashJoinOp) nextProbeBatch() (bool, error) {
 			}
 		}
 	}
+	if t := j.table; t.lib != nil && j.active > 0 {
+		j.phash = grow(j.phash, b.N)
+		t.lib.HashI64(j.pkeys[0].I[:b.N], nativeHashSeed, j.phash)
+	}
 	if j.kind == plan.JoinLeft && j.residual != nil {
 		j.matched = grow(j.matched, b.N)
 		clear(j.matched)
@@ -356,7 +374,9 @@ func (j *vhashJoinOp) fillPairs() {
 				hasNull = hasNull || kv.isNull(i)
 			}
 			if !hasNull {
-				if t.intKey {
+				if t.lib != nil {
+					j.chain = t.heads[j.phash[i]>>t.shift]
+				} else if t.intKey {
 					j.chain = t.heads[hashInt(j.pkeys[0].I[i], t.shift)]
 				} else {
 					j.keyBuf = j.keyBuf[:0]
@@ -433,9 +453,7 @@ func (j *vhashJoinOp) gatherProbe(k int, v *Vec, n int) *Vec {
 	idx := j.pairP[:n]
 	switch {
 	case cls == vInt:
-		for o, i := range idx {
-			out.I[o] = v.I[i]
-		}
+		gatherInts(j.ec.Native, v.I, idx, out.I)
 	case cls == vFloat:
 		for o, i := range idx {
 			out.F[o] = v.F[i]

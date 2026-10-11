@@ -4,6 +4,8 @@
 Usage:
   python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pqdata --jobs 1
   python3 implementations/go/scripts/bench.py --data /tmp/pqdata/1m [--configs row1,vec1,vec8] [--repeat 3]
+  python3 implementations/go/scripts/bench.py --data /tmp/pqdata/1m --native native-kernels/build/x86_64/libpqkernels.so \
+      --configs row1,row1_nat,vec1,vec1_nat,vec8,vec8_nat
 
 Starts `bin/polyquery session --data-dir DATA`, loads the generated tables and
 runs every query under every configuration, printing the median wall time
@@ -24,7 +26,7 @@ ENGINE = HERE.parent / "bin" / "polyquery"
 TABLES = {
     "tx": "transactions", "cust": "customers", "orders": "orders",
     "items": "order_items", "products": "products", "sensors": "sensor_readings",
-    "sk": "sort_keys",
+    "sk": "sort_keys", "nh": "nulls_heavy",
 }
 
 QUERIES = {
@@ -42,6 +44,11 @@ QUERIES = {
     "distinct": "SELECT DISTINCT merchant_id FROM tx",
     "const_fold": "SELECT COUNT(*) FROM tx WHERE amount > 100 * 5 + 0 AND 1 = 1 AND fee >= CAST('0.50' AS DECIMAL(10,2))",
     "join_small": "SELECT COUNT(*), SUM(c.credit_limit) FROM orders o JOIN cust c ON c.customer_id = o.customer_id WHERE o.order_id <= 2000",
+    "int_filter": "SELECT COUNT(*) FROM tx WHERE bucket BETWEEN 10 AND 40 AND merchant_id < 500",
+    "int_filter_rows": "SELECT tx_id, amount FROM tx WHERE customer_id = 4242 OR merchant_id = 77",
+    "global_agg": "SELECT COUNT(*), SUM(amount), MIN(ts), MAX(fee), AVG(bucket) FROM tx",
+    "global_agg_filter": "SELECT COUNT(*), SUM(quantity), MAX(unit_price) FROM items WHERE product_id < 5000 AND quantity > 2",
+    "nulls_agg": "SELECT COUNT(n50), SUM(n90), MIN(d99), MAX(f95) FROM nh WHERE n50 IS NOT NULL OR b60",
     "join3_reorder": "SELECT COUNT(*) FROM items i, cust c, orders o WHERE i.order_id = o.order_id AND o.customer_id = c.customer_id AND c.segment = 'enterprise'",
 }
 
@@ -62,11 +69,14 @@ CONFIGS = {
     "vec8_noopt": {"mode": "vectorized", "threads": 8, "optimize": False},
     "default": {},
 }
+# Every configuration also exists with native kernels: <name>_nat (needs --native).
+CONFIGS.update({k + "_nat": {**v, "native": True} for k, v in list(CONFIGS.items())})
 
 
 class Session:
-    def __init__(self, data, engine=ENGINE):
-        self.p = subprocess.Popen([str(engine), "session", "--data-dir", str(data)],
+    def __init__(self, data, engine=ENGINE, native=None):
+        extra = ["--native-kernels", str(Path(native).resolve())] if native else []
+        self.p = subprocess.Popen([str(engine), "session", "--data-dir", str(data)] + extra,
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         self.n = 0
 
@@ -91,8 +101,9 @@ def main():
     ap.add_argument("--layout", default="column")
     ap.add_argument("--engine", default=str(ENGINE), help="engine executable (e.g. a build without SIMD)")
     ap.add_argument("--timeout-ms", type=int, default=120000)
+    ap.add_argument("--native", metavar="LIBPQKERNELS", help="load the native kernels (for the *_nat configs)")
     args = ap.parse_args()
-    s = Session(args.data, args.engine)
+    s = Session(args.data, args.engine, args.native)
     for t, f in TABLES.items():
         schema = json.loads((Path(args.data) / f"{f}.schema.json").read_text())
         t0 = time.monotonic()
