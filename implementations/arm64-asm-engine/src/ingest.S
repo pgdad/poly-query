@@ -281,12 +281,16 @@ LFUNC alloc_columns
     mov  w1, #0
     lsl  x2, x23, #3
     bl   memset
-    mov  x0, x24
-    add  x1, x23, #1
+    mov  x0, x24                    // null bitmap, all NULL
+    add  x1, x23, #7
+    lsr  x1, x1, #3
+    add  x1, x1, #8
     bl   arena_alloc_in
     str  x0, [x27, #COL_NULLS]
-    mov  w1, #1
-    mov  x2, x23
+    mov  w1, #0xff
+    add  x2, x23, #7
+    lsr  x2, x2, #3
+    add  x2, x2, #8
     bl   memset
     add  x21, x21, #1
     b    1b
@@ -379,7 +383,7 @@ LFUNC store_text
     ldr  x10, [x9, #COL_DATA]
     str  x0, [x10, x21, lsl #3]
     ldr  x10, [x9, #COL_NULLS]
-    strb wzr, [x10, x21]
+    NULLBIT_CLEAR 10, 21, 11, 12, 13, 14
 .Lst_done:
     ldp  x20, x21, [sp, #16]
     ldp  x22, x23, [sp, #32]
@@ -832,7 +836,7 @@ LFUNC csv_convert
     ldr  x10, [x9, #COL_DATA]
     str  x0, [x10, x21, lsl #3]
     ldr  x10, [x9, #COL_NULLS]
-    strb wzr, [x10, x21]
+    NULLBIT_CLEAR 10, 21, 11, 12, 13, 14
 .Lcc_ret:
     ldp  x20, x21, [sp, #16]
     ldp  x22, x23, [sp, #32]
@@ -1314,7 +1318,7 @@ LFUNC json_convert
     ldr  x10, [x9, #COL_DATA]
     str  x0, [x10, x22, lsl #3]
     ldr  x10, [x9, #COL_NULLS]
-    strb wzr, [x10, x22]
+    NULLBIT_CLEAR 10, 22, 11, 12, 13, 14
     b    .Ljc_ret
 .Ljc_num:
     cmp  w23, #T_INT

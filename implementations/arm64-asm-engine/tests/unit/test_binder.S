@@ -87,7 +87,7 @@
     .p2align 4
 tbl_t:
     .quad s_t, 8, 4, cols_t
-    .skip AR_SIZE
+    .skip TBL_SIZE - TBL_ARENA
 cols_t:
     .quad s_i;   .word T_INT, 0;      .quad d_i,   nulls
     .quad s_d;   .word D(10,2), 0;    .quad d_d,   nulls
@@ -105,7 +105,7 @@ d_b:    .quad 1, 0, 0, 1
 d_dt:   .quad 0, 1, 0, 19000
 d_big:  .quad 0x7fffffffffffffff, 1, 0, -1
 d_ts:   .quad 0, 86400000000, 0, -1
-nulls:  .byte 0, 0, 1, 0
+nulls:  .byte 0x04, 0, 0, 0     // null bitmap: row 2 is NULL
     PSTR s_t, "t"
     PSTR s_i, "i"
     PSTR s_d, "d"

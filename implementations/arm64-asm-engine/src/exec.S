@@ -1079,9 +1079,11 @@ LFUNC materialize
     add  x0, x0, #8
     bl   arena_alloc
     str  x0, [x25, #COL_DATA]
-    ldr  x0, [x20, #RS_NROWS]
+    ldr  x0, [x20, #RS_NROWS]           // null bitmap
+    add  x0, x0, #7
+    lsr  x0, x0, #3
     add  x0, x0, #8
-    bl   arena_alloc
+    bl   arena_zalloc
     str  x0, [x25, #COL_NULLS]
     mov  x24, #0
 3:  ldr  x9, [x20, #RS_NROWS]
@@ -1093,8 +1095,16 @@ LFUNC materialize
     ldp  x10, x11, [x9]
     ldr  x12, [x25, #COL_DATA]
     str  x10, [x12, x24, lsl #3]
+    cbz  x11, 31f
     ldr  x12, [x25, #COL_NULLS]
-    strb w11, [x12, x24]
+    lsr  x13, x24, #3
+    ldrb w14, [x12, x13]
+    and  w15, w24, #7
+    mov  w16, #1
+    lsl  w16, w16, w15
+    orr  w14, w14, w16
+    strb w14, [x12, x13]
+31:
     add  x24, x24, #1
     b    3b
 4:  add  x23, x23, #1

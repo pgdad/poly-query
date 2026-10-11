@@ -58,10 +58,10 @@
     .p2align 4
 tbl_t:
     .quad s_t, 2, 4, cols_t
-    .skip AR_SIZE
+    .skip TBL_SIZE - TBL_ARENA
 tbl_u:
     .quad s_u, 2, 4, cols_u
-    .skip AR_SIZE
+    .skip TBL_SIZE - TBL_ARENA
 cols_t:
     .quad s_i;   .word T_INT, 0;   .quad t_i, t_inull
     .quad s_s;   .word T_STR, 0;   .quad t_s, nonull
@@ -69,10 +69,10 @@ cols_u:
     .quad s_i;   .word T_INT, 0;   .quad u_i, u_inull
     .quad s_v;   .word T_STR, 0;   .quad u_v, nonull
 t_i:     .quad 1, 2, 0, 3
-t_inull: .byte 0, 0, 1, 0
+t_inull: .byte 0x04, 0, 0, 0    // null bitmaps
 t_s:     .quad s_a, s_b, s_c, s_d
 u_i:     .quad 1, 1, 2, 0
-u_inull: .byte 0, 0, 0, 1
+u_inull: .byte 0x08, 0, 0, 0
 u_v:     .quad s_x, s_y, s_z, s_w
 nonull:  .byte 0, 0, 0, 0
     PSTR s_t, "t"
