@@ -367,9 +367,9 @@ first error of any task (in task order) is re-raised in the caller after
 all tasks finished. Timeouts and cancellation reach workers through the
 copied deadline and flag (`check_deadline` in every loop).
 
-Parallel operators split their input into contiguous windows, at most
-`threads`, each at least `g_par_min_rows` = 16384 rows (environment variable
-`PQ_PARALLEL_MIN_ROWS` overrides it, for tests):
+In vectorized mode, parallel operators split their input into contiguous
+windows, at most `threads`, each at least `g_par_min_rows` = 16384 rows
+(environment variable `PQ_PARALLEL_MIN_ROWS` overrides it, for tests):
 
 * **scans**: the candidate row ranges (whole table, row groups not skipped,
   index row runs) are cut into windows of candidate rows; each task filters
