@@ -23,7 +23,9 @@ column pruning, top-N); and the M9 native kernel integration: the
 `libpqkernels` library (`native-kernels/`) is loaded through SBCL's FFI
 (`sb-alien`) with `--native-kernels PATH` and used for filtering,
 aggregation, bitmap and hashing work of queries run with `native: true`
-(see *Native kernels*).
+(see *Native kernels*). On top of that, change request CR-1 adds
+`UNION ALL` (`spec/changes/union-all.md`, capability `change.union_all`;
+see *Change request CR-1: UNION ALL*).
 
 ## Build prerequisites
 
@@ -63,7 +65,8 @@ own optional kernel library `libpqkernels` (built separately with
 `sql.subquery`, `sql.cte`, `sql.correlated_subquery`, `phase3`,
 `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`, `phase4`,
 `http.streaming`, `phase5`, `exec.row`, `exec.vectorized`, `exec.parallel`,
-`join.hash`, `join.merge`, `join.nested_loop`, `native.kernels`.
+`join.hash`, `join.merge`, `join.nested_loop`, `native.kernels`,
+`change.union_all`.
 
 ## Architecture
 
@@ -548,6 +551,28 @@ plain columns materialize the batch as usual.
   results to be byte-identical to non-native ones (same rows, same order)
   for serial runs.
 
+### Change request CR-1: UNION ALL
+
+`spec/changes/union-all.md`: `select_core UNION ALL select_core ...` with
+`ORDER BY` / `LIMIT` / `OFFSET` over the whole compound, wherever a query is
+allowed (top level, CTE bodies, derived tables, scalar / `IN` / `EXISTS`
+subqueries, `EXPLAIN`). The compound is modelled as an ordinary query whose
+FROM is the union, so ordering, limits, `max_rows`, streaming and every
+execution option work unchanged; the only new runtime piece is a
+concatenation operator.
+
+| Layer | Module | Change |
+|---|---|---|
+| AST | `sql/ast.lisp` | `AST-UNION-ALL` (list of `AST-SELECT` branches); `AST-QUERY-BODY` is an `AST-SELECT` or an `AST-UNION-ALL` |
+| Parser | `sql/parser.lisp` | `parse-compound` implements `compound = select_core { UNION ALL select_core }`; `UNION` without `ALL` (incl. `UNION DISTINCT`) ⇒ `UNSUPPORTED`; `UNION` after a branch's `ORDER BY`/`LIMIT`, or a parenthesized branch ⇒ `PARSE_ERROR` |
+| Analysis | `analyzer/query.lisp`, `analyzer/bound.lisp` | `bind-query` dispatches to `bind-select` (the former body, unchanged) or `bind-union-all`: every branch is bound as a query of its own in the environment that sees the WITH clause and the enclosing queries (correlated branches work); arity mismatch ⇒ `SEMANTIC_ERROR`; column types are unified with the CASE rule (`unify-result-types`) ⇒ `TYPE_ERROR` on mismatch; names come from the first branch. The result is a `BOUND-QUERY` whose FROM is a new `BF-UNION` node and whose outputs are its columns. ORDER BY resolution (`bind-order-by`, factored out of the old code) accepts only output names and positions in a compound (anything else, incl. qualified names ⇒ `SEMANTIC_ERROR`; ambiguous names as for plain queries) |
+| Logical plan | `plan/logical.lisp` | `LP-UNION-ALL`; each branch plan ends in a Project that casts to the common types (`implicit-cast`, the same conversion as CASE — an INT64 that does not fit DECIMAL(18,s) ⇒ `NUMERIC_OVERFLOW`). The cast is folded into the branch's final Project; a branch ending in `DISTINCT` gets a Project above it, so DISTINCT compares the branch's own values. No identity Project is added above the union |
+| Optimizer | `plan/optimizer.lisp`, `plan/access.lisp` | column pruning pushes the required columns into every branch (a Project realigns a branch if needed); predicates above a union stay above it; row estimate = sum of the branches |
+| Physical plan / EXPLAIN | `plan/physical.lisp` | `PP-UNION-ALL`, rendered as `{"op":"UnionAll","columns":[…],"children":[branch plans in order]}` |
+| Execution | `exec/operators.lisp`, `exec/voperators.lisp` | row executor: `concatenating-opener` runs the branches one after another (each opened when the previous one is exhausted); the vectorized executor concatenates the branches' batch streams with the same function. Each branch is compiled independently, so it is parallelized (`threads`), uses native kernels and the forced join algorithm exactly like a stand-alone query; `mode: row` fallback after data errors applies to the whole statement as before |
+| Facade | `engine.lisp` | claims `change.union_all` |
+| Tests | `tests/test-union.lisp` | parser, typing, errors, ORDER BY/LIMIT, nesting, correlation, EXPLAIN, pruning, and agreement of all option combinations |
+
 ### Extensibility notes
 
 * Physical operator choice is isolated in `plan/physical.lisp`; the batch
@@ -561,9 +586,22 @@ plain columns materialize the batch as usual.
 
 ## Decisions on points the spec leaves open
 
+### UNION ALL (CR-1)
+
+* Row order without ORDER BY: the first branch's rows, then the second's, …
+  (each branch in its own unspecified order).
+* `spec_version` stays `1.0.0`: the CR names `1.1.0-cr1` for engines
+  claiming the change, but the Phase 1 conformance case
+  `phase1/catalog.pqt` requires `"spec_version":"1.0.0"` and the CR also
+  requires all earlier phases to keep passing.
+* An ORDER BY name that occurs several times among the first branch's
+  output names is `SEMANTIC_ERROR` (ambiguous), as for plain queries.
+* Predicates over a derived table / CTE that is a union are not pushed into
+  the branches (they are applied above the UnionAll); column pruning is.
+
 ### General
 
-* `UNION`, `RIGHT`/`FULL` joins answer `UNSUPPORTED` (reserved syntax).
+* `UNION` without `ALL` (also `UNION DISTINCT`), `RIGHT`/`FULL` joins answer `UNSUPPORTED` (reserved syntax).
 * A NULL literal combined with a typed operand takes that operand's role
   (`NULL + 1` is INT64, `NULL / 0` is NULL); when nothing determines a type
   (`-NULL`, `NULL + NULL`, `SUM(NULL)`) the expression keeps the null type and
@@ -933,6 +971,8 @@ same kernels at 0.15–0.5 ns/element in the AVX2/AVX-512 variants.
   error → HTTP status table, admission/overload, cancellation of queued and
   running jobs, queued timeouts, the bounded streaming channel and metrics
   rendering.
+* UNION ALL unit tests (`tests/test-union.lisp`): see *Change request
+  CR-1*.
 * Phase 5 unit tests (`tests/test-phase5.lisp`): option validation, forced
   join algorithms in EXPLAIN, constant folding and join reordering, vector
   gather, generic and integer key tables, partial aggregate merging, and a
@@ -988,6 +1028,17 @@ same kernels at 0.15–0.5 ns/element in the AVX2/AVX-512 variants.
   complete).
 
 ## Known limitations
+
+* Public case `changes/union_all.pqt:51` (`SELECT order_id AS v FROM orders
+  … UNION ALL SELECT amount FROM orders …`, expected `DECIMAL(18,2)`) fails:
+  that file loads `fixtures/orders.csv` *without* a schema, so by
+  ingestion.md §1.1 ("Inference NEVER yields DECIMAL"; checked by
+  `phase1/ingest_csv.pqt`) `amount` is FLOAT64 and INT64 ∪ FLOAT64 is
+  FLOAT64. The expectation matches the other Phase 2 files, which load
+  `orders` with `amount:DECIMAL(10,2)`; with that schema the engine returns
+  exactly the expected `DECIMAL(18,2)` rows `"99.99"`, `"101.00"` in every
+  mode. The engine follows the ingestion spec rather than special-casing
+  the test.
 
 * Native kernels cover integer-like predicates, integer sums, global
   MIN/MAX/COUNT and integer key hashing (see *Native kernels*). FLOAT64

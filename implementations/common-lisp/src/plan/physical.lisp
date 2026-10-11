@@ -21,6 +21,7 @@
 ;;;;   Aggregate  -> HashAggregate
 ;;;;   Distinct   -> HashDistinct
 ;;;;   Sort+Limit -> TopN when the limit is a small constant, else Sort, Limit
+;;;;   UnionAll   -> UnionAll (the branches' rows one branch after another)
 
 (in-package #:polyquery)
 
@@ -82,6 +83,8 @@
 
 (defstruct (pp-top-n (:include pnode))
   keys limit offset)
+
+(defstruct (pp-union-all (:include pnode)))
 
 (defstruct (pp-batch-source (:include pnode))
   "Executor-internal adapter (never planned): an input whose batches feed a
@@ -174,7 +177,10 @@ residual-conjuncts); right keys index the right input."
                               :keys (lp-sort-keys input) :limit (lp-limit-limit node)
                               :offset (lp-limit-offset node) :columns columns)
                (make-pp-limit :children (list (child)) :limit (lp-limit-limit node)
-                              :offset (lp-limit-offset node) :columns columns))))))))
+                              :offset (lp-limit-offset node) :columns columns))))
+        (lp-union-all
+         (make-pp-union-all :children (mapcar #'physical-plan (lnode-children node))
+                            :columns columns))))))
 
 (defun parameter-only-p (e)
   "True if E reads no columns but depends on correlation parameters."
@@ -380,7 +386,9 @@ inputs, as no operator delivers sorted output)."
                       "offset" (maybe (pp-limit-offset node))))
       (pp-top-n (list "op" "TopN" "keys" (describe-sort-keys node (pp-top-n-keys node))
                       "limit" (maybe (pp-top-n-limit node))
-                      "offset" (maybe (pp-top-n-offset node)))))))
+                      "offset" (maybe (pp-top-n-offset node))))
+      (pp-union-all (list "op" "UnionAll"
+                          "columns" (mapcar #'column-def-name (pnode-columns node)))))))
 
 (defun explain-plan-json (node)
   "The EXPLAIN JSON object of physical plan NODE. The plans of subqueries

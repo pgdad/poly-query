@@ -3,7 +3,7 @@
 ;;;; COMPILE-BATCH-OPERATOR turns a physical plan node into a *batch opener*:
 ;;;; a function of no arguments returning a fresh iterator that yields
 ;;;; BATCHes (vectors.lisp) or NIL at the end. Scans, filters, projections,
-;;;; limits, hash aggregation, DISTINCT and hash joins are vectorized; every
+;;;; limits, UNION ALL, hash aggregation, DISTINCT and hash joins are vectorized; every
 ;;;; other operator (sort, top-N, merge and nested-loop joins, index scans,
 ;;;; ...) runs its row implementation over adapted inputs, so the two
 ;;;; executors always agree. The MAKE-BATCH-* constructors take their input
@@ -98,6 +98,11 @@ column-layout segments are lazy (see SCAN-SOURCE)."
         (unless done
           (setf done t)
           (make-batch 1 (vector)))))))
+
+(defmethod compile-batch-operator ((node pp-union-all))
+  ;; The branches' batches one branch after another; every branch already
+  ;; produces the compound's column types.
+  (concatenating-opener (mapcar #'compile-batch-operator (pnode-children node))))
 
 ;;; ------------------------------------------------------------------
 ;;; Errors in row order

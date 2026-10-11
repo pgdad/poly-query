@@ -30,7 +30,8 @@
   *native-state*)
 
 (defmacro with-native (&body body)
-  "BODY's value, or T when the library is not available."
+  "BODY's value, or T when the library is not available (so BODY must
+compare its results itself and return T on success)."
   `(if (native-available-p) (progn ,@body) t))
 
 (defun random-i64-vector (n state &optional (range (expt 2 64)))
@@ -84,11 +85,12 @@
                                    :initial-contents (list big 5 -10)))
              (over (make-array 2 :element-type '(signed-byte 64) :initial-contents (list big 1))))
         (declare (ignore max))
-        (list (multiple-value-list (polyquery::native-sum-i64 cancel nil 3))
-              (multiple-value-list (polyquery::native-sum-i64 over nil 2))
-              ;; The invalid row is not summed.
-              (multiple-value-list (polyquery::native-sum-i64 over #*10 2)))))
-  ((9223372036854775802 t) (nil nil) (9223372036854775807 t)))
+        (equal (list (multiple-value-list (polyquery::native-sum-i64 cancel nil 3))
+                     (multiple-value-list (polyquery::native-sum-i64 over nil 2))
+                     ;; The invalid row is not summed.
+                     (multiple-value-list (polyquery::native-sum-i64 over #*10 2)))
+               '((9223372036854775802 t) (nil nil) (9223372036854775807 t)))))
+  t)
 
 (deftest native.minmax-popcount-hash
     (with-native
@@ -131,11 +133,12 @@
         (polyquery::agg-reserve s 3)
         (polyquery::agg-update-native s gids (lambda () gids32) vec 6)
         (polyquery::agg-update-native s gids (lambda () gids32) vec 6)
-        (list (polyquery::sum-state-group s 0)
-              (polyquery::sum-state-group s 1)
-              (polyquery::sum-state-group s 2)
-              (code-of (polyquery::agg-result s 0)))))
-  (#.(* 2 (+ (1- (expt 2 63)) (1- (expt 2 63)) -5)) #.(* 2 (1- (expt 2 63))) 20 "NUMERIC_OVERFLOW"))
+        (equal (list (polyquery::sum-state-group s 0)
+                     (polyquery::sum-state-group s 1)
+                     (polyquery::sum-state-group s 2)
+                     (code-of (polyquery::agg-result s 0)))
+               (list (* 2 (+ big big -5)) (* 2 big) 20 "NUMERIC_OVERFLOW"))))
+  t)
 
 ;;; Queries: native: true must give exactly the results of native: false.
 

@@ -713,3 +713,23 @@ are dropped, or (KEEP-NULL-KEYS) placed at the end with key NIL."
                                                 (min offset (fill-pointer buffer))
                                                 (fill-pointer buffer))))))
           (funcall (the function iterator)))))))
+
+;;; ------------------------------------------------------------------
+;;; UNION ALL (spec/changes/union-all.md)
+
+(defun concatenating-opener (openers)
+  "Opener of an iterator returning the items of the iterators opened by
+OPENERS, one after another (each opened when the previous one is exhausted)."
+  (lambda ()
+    (let ((pending openers)
+          (current nil))
+      (lambda ()
+        (loop
+          (let ((item (and current (funcall (the function current)))))
+            (when item (return item))
+            (when (null pending) (return nil))
+            (setf current (funcall (the function (pop pending))))))))))
+
+(defmethod compile-operator ((node pp-union-all))
+  (concatenating-opener (mapcar #'compile-operator (pnode-children node))))
+

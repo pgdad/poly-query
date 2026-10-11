@@ -224,6 +224,11 @@ aggregation row [group keys..., aggregate values...]."
 (defstruct (bf-join (:include bf-node))
   kind left right condition)   ; kind :INNER :LEFT :CROSS; condition over the FROM row
 
+(defstruct (bf-union (:include bf-node))
+  "The rows of all BRANCHES (BOUND-QUERYs) of a UNION ALL, converted to the
+COLUMNS (COLUMN-DEFs carrying the common types)."
+  branches columns)
+
 ;;; ------------------------------------------------------------------
 ;;; Rendering (EXPLAIN and error messages)
 

@@ -1,6 +1,8 @@
 ;;;; parser.lisp — recursive-descent parser for the full PolyQuery SQL grammar
-;;;; (grammar.md §2). Produces the AST defined in ast.lisp. Syntax that is
-;;;; reserved for future use (UNION, FULL/RIGHT joins) raises UNSUPPORTED.
+;;;; (grammar.md §2, with the `compound` production of change request CR-1,
+;;;; spec/changes/union-all.md). Produces the AST defined in ast.lisp. Syntax
+;;;; that is reserved for future use (UNION [DISTINCT], FULL/RIGHT joins)
+;;;; raises UNSUPPORTED.
 
 (in-package #:polyquery)
 
@@ -144,10 +146,8 @@ AST-CREATE-INDEX or AST-DROP-INDEX."
   (with-depth (p)
     (with-node-position (tok p)
       (let ((ctes (when (accept-keyword p :with) (parse-cte-list p)))
-            (body (parse-select-core p))
+            (body (parse-compound p))
             (order-by nil) (limit nil) (offset nil))
-        (when (at-keyword p :union)
-          (unsupported-error "UNION is not supported"))
         (when (accept-keyword p :order)
           (expect-keyword p :by)
           (setf order-by (parse-comma-list p #'parse-order-item)))
@@ -159,10 +159,25 @@ AST-CREATE-INDEX or AST-DROP-INDEX."
                (setf offset (parse-expr p))
                (when (accept-keyword p :limit)
                  (setf limit (parse-expr p)))))
+        ;; A branch cannot carry its own ORDER BY / LIMIT.
         (when (at-keyword p :union)
-          (unsupported-error "UNION is not supported"))
+          (unexpected p))
         (apply #'make-ast-query :ctes ctes :body body :order-by order-by
                                 :limit limit :offset offset (pos-args tok))))))
+
+(defun parse-compound (p)
+  "compound = select_core { UNION ALL select_core }. Returns the AST-SELECT
+itself when there is a single branch, else an AST-UNION-ALL."
+  (with-node-position (tok p)
+    (let ((branches (list (parse-select-core p))))
+      (loop while (at-keyword p :union)
+            do (next-token p)
+               (unless (accept-keyword p :all)
+                 (unsupported-error "UNION without ALL is not supported"))
+               (push (parse-select-core p) branches))
+      (if (rest branches)
+          (apply #'make-ast-union-all :branches (nreverse branches) (pos-args tok))
+          (first branches)))))
 
 (defun parse-comma-list (p fn)
   (loop collect (funcall fn p)

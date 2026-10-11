@@ -12,7 +12,8 @@
     "phase4" "http.streaming"
     "phase5" "exec.row" "exec.vectorized" "exec.parallel"
     "join.hash" "join.merge" "join.nested_loop"
-    "native.kernels"))
+    "native.kernels"
+    "change.union_all"))
 
 (defstruct engine-config
   (data-dir nil)                         ; pathname of the data directory (with trailing /)

@@ -69,9 +69,13 @@ VALUE is the literal text (or T/NIL for booleans)."
 
 (defstruct (ast-query (:include ast-node))
   ctes                                  ; list of AST-CTE
-  body                                  ; AST-SELECT
+  body                                  ; AST-SELECT or AST-UNION-ALL
   order-by                              ; list of AST-ORDER-ITEM
   limit offset)
+
+(defstruct (ast-union-all (:include ast-node))
+  "A compound `core UNION ALL core ...` (change request CR-1)."
+  branches)                             ; list of AST-SELECT, at least two
 
 (defstruct (ast-cte (:include ast-node))
   name columns query)

@@ -229,8 +229,41 @@ class Gen:
             return self.expr("BOOLEAN", scope)
         return f"{r.choice(cols)} > (SELECT AVG({r.choice(cols).split('.')[1]}) FROM {table})"
 
+    def union_all(self):
+        """A UNION ALL compound (change request CR-1): 2-3 branches over random
+        scopes whose columns have unifiable types (numeric mixes, NULLs)."""
+        r = self.r
+        width = r.randint(1, 3)
+        groups = [["INT64", "DECIMAL", "FLOAT64"], ["INT64", "DECIMAL"], ["STRING"], ["DATE"], ["BOOLEAN"]]
+        column_kinds = [r.choice(groups) for _ in range(width)]
+        branches = []
+        for b in range(r.randint(2, 3)):
+            scope, from_ = self.scope_for()
+            items = []
+            for i, kinds in enumerate(column_kinds):
+                e = "NULL" if r.random() < 0.1 else self.expr(r.choice(kinds), scope, 1)
+                items.append(f"{e} AS c{i}" if b == 0 else e)
+            where = f" {'AND' if ' WHERE ' in from_ else 'WHERE'} {self.expr('BOOLEAN', scope)}" if r.random() < 0.6 else ""
+            distinct = "DISTINCT " if r.random() < 0.1 else ""
+            branches.append(f"SELECT {distinct}{', '.join(items)} FROM {from_}{where}")
+        body = " UNION ALL ".join(branches)
+        shape = r.random()
+        if shape < 0.3:
+            order = ", ".join(f"{i + 1} {r.choice(['ASC', 'DESC'])} NULLS {r.choice(['FIRST', 'LAST'])}"
+                              for i in range(width))
+            limit = f" LIMIT {r.randint(0, 40)} OFFSET {r.randint(0, 5)}" if r.random() < 0.5 else ""
+            return ("ORDERED", f"{body} ORDER BY {order}{limit}")
+        if shape < 0.5:
+            return f"SELECT c0, COUNT(*) AS n FROM ({body}) u GROUP BY c0"
+        if shape < 0.6 and column_kinds[0] != ["BOOLEAN"]:
+            return f"WITH u AS ({body}) SELECT COUNT(*) AS n, COUNT(DISTINCT c0) AS d, MIN(c0) AS lo FROM u"
+        return body
+
     def query(self):
         r = self.r
+        shape = r.random()
+        if shape < 0.1:
+            return self.union_all()
         shape = r.random()
         if shape < 0.08:
             # Derived table / CTE.
