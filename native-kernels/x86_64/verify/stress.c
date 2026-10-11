@@ -185,6 +185,12 @@ int main(int argc, char **argv) {
       { size_t m = n ? below(2 * n + 1) : 0; uint32_t *ix = gal(m * 4, gm); for (size_t i = 0; i < m; i++) ix[i] = (uint32_t)below(n);
         int64_t *g1 = calloc(m + 1, 8), *g2 = gal(m * 8, gm); ref.gather_i64(d, ix, m, g1); v.gather_i64(d, ix, m, g2);
         CK(!memcmp(g1, g2, m * 8), "gather m=%zu", m); free(g1); }
+      if (below(8) == 0) {   /* large span: the AVX2 prefetching gather path (sampled index >= 2^19) */
+        size_t nb2 = ((size_t)1 << 19) + below(1 << 18), m = below(6000); int64_t *bd = gal(nb2 * 8, gm); uint32_t *ix = gal(m * 4, gm);
+        for (size_t i = 0; i < nb2; i += 1 + below(64)) bd[i] = (int64_t)rnd();
+        for (size_t i = 0; i < m; i++) ix[i] = (uint32_t)(below(4) ? below(nb2) : nb2 - 1 - below(8));
+        int64_t *g1 = calloc(m + 1, 8), *g2 = gal(m * 8, gm); ref.gather_i64(bd, ix, m, g1); v.gather_i64(bd, ix, m, g2);
+        CK(!memcmp(g1, g2, m * 8), "gather (large span) m=%zu", m); free(g1); }
       /* 128-bit */
       { size_t m = n / (1 + below(3)); int m128 = (int)below(10);
         pqk_i128 *w = gal(m * 16, gm), *ca = gal(16, gm), *cb = gal(16, gm);

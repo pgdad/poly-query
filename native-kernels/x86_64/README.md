@@ -255,7 +255,8 @@ dependent / independent instruction loops (cycles at 5.4 GHz):
 * **`hash_i64` (1.5×).** `k·C mod 2^64 = lo·clo + ((lo·chi + hi·clo) mod
   2^32) << 32`: one `vpmulld` against the dword-swapped constant
   `(chi, clo)` yields both cross products at once, so a 64-bit multiply is 2
-  multiplies + 4 cheap ops instead of 3 multiplies + 2 shifts + 2 adds. On
+  multiplies + 1 shift + 3 adds/ands instead of 3 multiplies + 2 shifts +
+  2 adds. On
   top of that each 24-row iteration hashes 16 rows on the vector unit (4
   vectors, interleaved step by step because one fmix64 is a ~30-cycle chain)
   and 8 rows with scalar `imul` on the integer unit, in parallel. L2: 0.34
