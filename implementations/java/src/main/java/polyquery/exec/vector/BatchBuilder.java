@@ -5,6 +5,7 @@ import polyquery.exec.ExecContext;
 import polyquery.exec.Operator;
 import polyquery.exec.OperatorBuilder;
 import polyquery.physical.PhysicalPlan;
+import polyquery.physical.PlanKeys;
 import polyquery.plan.LogicalPlan;
 import polyquery.storage.ColumnSchema;
 import polyquery.types.DataType;
@@ -87,7 +88,7 @@ public final class BatchBuilder {
                     f.schema().size());
             case PhysicalPlan.Project p -> new BatchOperators.Project(build(p.input()), compiler, p.expressions());
             case PhysicalPlan.HashAggregate a -> new AggregateBatches.HashAggregate(build(a.input()), a.groupKeys(),
-                    a.aggregates(), compiler, ctx, batchSize);
+                    a.aggregates(), compiler, ctx, batchSize, PlanKeys.resultKey(a));
             case PhysicalPlan.HashDistinct d -> new AggregateBatches.Distinct(build(d.input()), types(d.schema()), ctx);
             case PhysicalPlan.UnionAll u -> new BatchOperators.UnionAll(u.inputs().stream().map(this::build).toList());
             case PhysicalPlan.HashJoin j -> hashJoin(j, build(j.buildLeft() ? j.right() : j.left()), null, compiler,

@@ -216,6 +216,42 @@ final class ColumnStore {
         }
     }
 
+    /**
+     * {@link #select(int[], int)} with the rows gathered by {@code threads} workers, each filling
+     * a contiguous range of the new store.
+     */
+    ColumnStore select(int[] perm, int count, ExecContext ctx, int threads) {
+        int tasks = Math.max(1, Math.min(threads, count / 16_384));
+        if (tasks == 1) {
+            return select(perm, count);
+        }
+        ColumnStore out = new ColumnStore(schema, count);
+        for (int c = 0; c < cols.length; c++) {
+            if (populated[c]) {
+                out.allocate(c);
+                if (cols[c].kind == Vec.Kind.DICT) {
+                    out.cols[c].toDict(cols[c].dict, out.capacity);
+                }
+                out.cols[c].hasNulls = cols[c].hasNulls;
+            }
+        }
+        List<Runnable> work = new ArrayList<>(tasks);
+        for (int t = 0; t < tasks; t++) {
+            int from = (int) ((long) count * t / tasks);
+            int to = (int) ((long) count * (t + 1) / tasks);
+            work.add(() -> {
+                for (int c = 0; c < cols.length; c++) {
+                    if (populated[c]) {
+                        gather(cols[c], perm, from, to - from, out.cols[c], from);
+                    }
+                }
+            });
+        }
+        Parallel.runAll(work, ctx);
+        out.rows = count;
+        return out;
+    }
+
     /** A new store with rows {@code perm[0..count)} of this one, in that order. */
     ColumnStore select(int[] perm, int count) {
         ColumnStore out = new ColumnStore(schema, count);

@@ -33,6 +33,15 @@ final class AggregateBatches {
     }
 
     /**
+     * A completed aggregation shared within a query: identical aggregation subplans (see
+     * {@link polyquery.physical.PlanKeys}) emit the same groups from the same tables, each
+     * consumer with its own emitter (emission only reads the tables).
+     */
+    interface Shared {
+        Emitter emitter();
+    }
+
+    /**
      * One aggregation table: group keys plus aggregate states, fed with evaluated input vectors.
      * Also used as the partial table of a parallel worker.
      */
@@ -250,27 +259,37 @@ final class AggregateBatches {
         private final VecCompiler compiler;
         private final ExecContext ctx;
         private final int batchSize;
+        private final Object resultKey;
         private BatchExprs exprs;
         private Table table;
         private Emitter emitter;
+        private boolean inputOpen;
 
+        /** @param resultKey structural key of the aggregation subplan if its result may be shared, else null */
         HashAggregate(BatchOperator input, List<BoundExpr> groupKeys, List<AggregateCall> calls, VecCompiler compiler,
-                      ExecContext ctx, int batchSize) {
+                      ExecContext ctx, int batchSize, Object resultKey) {
             this.input = input;
             this.groupKeys = groupKeys;
             this.calls = calls;
             this.compiler = compiler;
             this.ctx = ctx;
             this.batchSize = batchSize;
+            this.resultKey = resultKey;
         }
 
         @Override
         public void open() {
-            if (exprs == null) {
-                exprs = new BatchExprs(compiler, inputs(groupKeys, calls));
-            }
             if (table != null) {
                 table.release();
+                table = null;
+            }
+            if (resultKey != null && ctx.sharedResult(resultKey) instanceof Shared s) {
+                emitter = s.emitter(); // the same subplan was aggregated earlier in this query
+                return;
+            }
+            inputOpen = true;
+            if (exprs == null) {
+                exprs = new BatchExprs(compiler, inputs(groupKeys, calls));
             }
             table = new Table(groupKeys, calls, ctx);
             input.open();
@@ -286,6 +305,10 @@ final class AggregateBatches {
                 }
             }
             emitter = new Emitter(table, groupKeys, calls, batchSize);
+            if (resultKey != null) {
+                Table done = table;
+                ctx.shareResult(resultKey, (Shared) () -> new Emitter(done, groupKeys, calls, batchSize));
+            }
         }
 
         @Override
@@ -295,7 +318,10 @@ final class AggregateBatches {
 
         @Override
         public void close() {
-            input.close();
+            if (inputOpen) {
+                input.close();
+                inputOpen = false;
+            }
             if (table != null) {
                 table.release();
                 table = null;

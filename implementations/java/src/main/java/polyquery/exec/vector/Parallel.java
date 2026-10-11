@@ -135,7 +135,7 @@ final class Parallel {
             Chain c = chain(a.input());
             if (c != null && safe(a.groupKeys()) && aggregatesSafe(a.aggregates())
                     && worthIt(c, builder.morselRows())) {
-                return new Aggregate(builder, c, a);
+                return new Aggregate(builder, c, a, polyquery.physical.PlanKeys.resultKey(a));
             }
             return null;
         }
@@ -155,7 +155,7 @@ final class Parallel {
                 for (int i = 0; i < in.size(); i++) {
                     keys.add(new BoundExpr.ColumnRef(i, in.get(i).type(), in.get(i).name()));
                 }
-                return new Aggregate(builder, c, new PhysicalPlan.HashAggregate(d.input(), keys, List.of()));
+                return new Aggregate(builder, c, new PhysicalPlan.HashAggregate(d.input(), keys, List.of()), null);
             }
             // workers drop duplicates within their morsels; the final DISTINCT streams over the rest
             return new AggregateBatches.Distinct(new Gather(builder, c, new DistinctReducer(
@@ -515,12 +515,15 @@ final class Parallel {
         private final List<AggregateBatches.Table> merged = new ArrayList<>();
         private AggregateBatches.Emitter emitter;
         private final List<AggregateBatches.Table> partials = new ArrayList<>();
+        private final Object resultKey;
 
-        Aggregate(BatchBuilder builder, Chain chain, PhysicalPlan.HashAggregate plan) {
+        /** @param resultKey structural key of the aggregation subplan if its result may be shared, else null */
+        Aggregate(BatchBuilder builder, Chain chain, PhysicalPlan.HashAggregate plan, Object resultKey) {
             this.shared = new Shared(builder, chain);
             this.plan = plan;
             this.ctx = builder.context();
             this.threads = builder.threads();
+            this.resultKey = resultKey;
         }
 
         /**
@@ -558,6 +561,10 @@ final class Parallel {
         @Override
         public void open() {
             close();
+            if (resultKey != null && ctx.sharedResult(resultKey) instanceof AggregateBatches.Shared s) {
+                emitter = s.emitter(); // the same subplan was aggregated earlier in this query
+                return;
+            }
             shared.open();
             List<Morsel> morsels = Morsel.of(shared.chain.scan(), shared.builder.morselRows());
             AtomicInteger next = new AtomicInteger();
@@ -711,6 +718,11 @@ final class Parallel {
             }
             emitter = new AggregateBatches.Emitter(tables, sortedTable, sortedGroup, plan.groupKeys(),
                     plan.aggregates(), shared.builder.batchSize());
+            if (resultKey != null) {
+                int batchSize = shared.builder.batchSize();
+                ctx.shareResult(resultKey, (AggregateBatches.Shared) () -> new AggregateBatches.Emitter(tables,
+                        sortedTable, sortedGroup, plan.groupKeys(), plan.aggregates(), batchSize));
+            }
         }
 
         /** Merges partition {@code part} of every partial table (in worker order), keeping the earliest first positions. */

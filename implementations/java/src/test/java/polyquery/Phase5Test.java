@@ -65,6 +65,12 @@ final class Phase5Test {
         "SELECT id, val FROM t ORDER BY val NULLS FIRST, id DESC LIMIT 70",
         "SELECT id, amt FROM t ORDER BY amt, id DESC LIMIT 40 OFFSET 5",
         "SELECT grp, id FROM t ORDER BY grp DESC, id LIMIT 33",
+        // a CTE referenced twice: the second identical aggregation reuses the first one's result
+        "WITH c AS (SELECT grp, SUM(val) AS s FROM t GROUP BY grp) SELECT COUNT(*) FROM c WHERE s > (SELECT AVG(s) FROM c)",
+        "WITH c AS (SELECT grp, COUNT(*) AS n, MAX(name) AS m FROM t GROUP BY grp) "
+                + "SELECT a.grp, b.n, a.m FROM c a JOIN c b ON a.grp = b.grp ORDER BY 1",
+        "WITH c AS (SELECT grp, SUM(id * 4611686018427387) AS s FROM t GROUP BY grp) "
+                + "SELECT (SELECT COUNT(*) FROM c), COUNT(*) FROM c",
         "SELECT grp, id FROM t ORDER BY grp NULLS LAST, id DESC LIMIT 25",
         "SELECT id, CAST(val AS FLOAT64) / 4 AS f FROM t ORDER BY f, id LIMIT 30",
         "SELECT id, CASE WHEN val IS NULL THEN 'none' WHEN val > 10 THEN 'big' ELSE 'small' END FROM t",

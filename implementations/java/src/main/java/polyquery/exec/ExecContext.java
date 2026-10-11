@@ -21,6 +21,8 @@ public final class ExecContext {
     private Object[][] frames = new Object[8][];
     private final java.util.concurrent.atomic.AtomicLong memoryUsed = new java.util.concurrent.atomic.AtomicLong();
     private int counter;
+    /** Results of invariant subplans, by structural key, for reuse within the query (query thread only). */
+    private java.util.Map<Object, Object> shared;
 
     /**
      * @param timeoutMillis 0 = no timeout
@@ -92,6 +94,19 @@ public final class ExecContext {
     /** Nanoseconds until the deadline (Long.MAX_VALUE if none). */
     public long remainingNanos() {
         return control.remainingNanos();
+    }
+
+    /** A result registered under {@code key} by an earlier operator of this query, or null. */
+    public Object sharedResult(Object key) {
+        return shared == null ? null : shared.get(key);
+    }
+
+    /** Registers the (immutable) result of an invariant subplan for reuse within this query. */
+    public void shareResult(Object key, Object result) {
+        if (shared == null) {
+            shared = new java.util.HashMap<>();
+        }
+        shared.put(key, result);
     }
 
     /** Accounts for retained memory; RESOURCE_LIMIT when the budget is exceeded. Thread-safe. */

@@ -814,6 +814,13 @@ final class SortBatches {
                 reserved += source.reservedBytes();
                 perm = sort(store, keys, ctx, threads);
                 end = perm.length;
+                if (end >= PARALLEL_SORT_MIN) {
+                    // rows moved into sort order by the workers: the output is then read sequentially
+                    store = store.select(perm, end, ctx, threads);
+                    for (int i = 0; i < end; i++) {
+                        perm[i] = i;
+                    }
+                }
                 return;
             }
             long keep = limit < 0 ? Long.MAX_VALUE : offset + limit < 0 ? Long.MAX_VALUE : offset + limit;
