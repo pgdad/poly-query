@@ -234,7 +234,7 @@ failure the error response is sent and NIL returned."
     (option-in options "result" '("rows" "count"))
     (with-query-cleanups (context)
       (multiple-value-bind (columns next)
-          (open-sql session sql :options (session-exec-options session options))
+          (open-sql-with-row-fallback session sql (session-exec-options session options))
         (declare (type function next))
         (channel-put channel (list :header columns) :on-wait #'check-interrupts)
         (let ((batch '()) (size 0) (count 0) (batch-start 0)

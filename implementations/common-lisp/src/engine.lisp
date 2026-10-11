@@ -83,10 +83,62 @@ next result row or NIL."
                                      (options (make-exec-options)) context)
   "Run SQL against the session catalog and return a QUERY-RESULT. CONTEXT is
 the QUERY-CONTEXT to run in (by default a fresh one with TIMEOUT-MS)."
-  (let ((*query-context* (or context (make-context-for session timeout-ms))))
-    (with-query-cleanups (*query-context*)
-      (multiple-value-bind (columns next) (open-sql session sql :options options)
-        (collect-rows columns next max-rows collect-rows)))))
+  (let* ((*query-context* (or context (make-context-for session timeout-ms)))
+         (memory-before (query-context-memory-used *query-context*)))
+    (flet ((run (options)
+             (with-query-cleanups (*query-context*)
+               (multiple-value-bind (columns next) (open-sql session sql :options options)
+                 (collect-rows columns next max-rows collect-rows)))))
+      (if (eq (exec-options-mode options) :row)
+          (run options)
+          (handler-case (run options)
+            (pq-error (e)
+              (unless (data-error-p e)
+                (error e))
+              ;; A data error (overflow, division by zero, conversion, ...):
+              ;; when rows fail differently, which error is met first depends
+              ;; on the evaluation order. Re-running the statement on the row
+              ;; executor reports exactly the row executor's outcome.
+              (setf (query-context-memory-used *query-context*) memory-before)
+              (run (row-mode-options options))))))))
+
+(defun data-error-p (condition)
+  (member (pq-error-code condition) *data-error-codes* :test #'string=))
+
+(defun open-sql-with-row-fallback (session sql options)
+  "OPEN-SQL for streamed results: when the vectorized executor fails with a
+data error before producing the first row, the statement continues on the
+row executor (as EXECUTE-SQL does); afterwards errors propagate."
+  (let ((memory-before (query-context-memory-used *query-context*)))
+    (flet ((row-open ()
+             (let ((ctx *query-context*))
+               (run-query-cleanups ctx)
+               (setf (query-context-memory-used ctx) memory-before)
+               (open-sql session sql :options (row-mode-options options)))))
+      (if (eq (exec-options-mode options) :row)
+          (open-sql session sql :options options)
+          (multiple-value-bind (columns next)
+              (handler-case (open-sql session sql :options options)
+                (pq-error (e)
+                  (if (data-error-p e) (row-open) (error e))))
+            (let ((started nil))
+              (values columns
+                      (lambda ()
+                        (if started
+                            (funcall (the function next))
+                            (handler-case (prog1 (funcall (the function next)) (setf started t))
+                              (pq-error (e)
+                                (unless (data-error-p e) (error e))
+                                (setf started t
+                                      next (nth-value 1 (row-open)))
+                                (funcall (the function next)))))))))))))
+
+(defun row-mode-options (options)
+  "OPTIONS for the row executor (serial), otherwise unchanged."
+  (let ((copy (copy-exec-options options)))
+    (setf (exec-options-mode copy) :row
+          (exec-options-threads copy) 1)
+    copy))
 
 (defun collect-rows (columns next max-rows collect-rows)
   "Drain the row iterator NEXT into a QUERY-RESULT (only counting rows unless
