@@ -7,6 +7,9 @@
 // the row's payloads followed by its null bitmap). See include/pq.inc.
 //
 //   tbl_get(x0 Table*, x1 col, x2 row) -> x0 payload, x1 isnull
+//   table_finalize(x0 Table*, w1 layout, w2 dict mode)
+//       converts a freshly built plain columnar table (ingest / PQCF reader)
+//       into its final representation, in place
 // =============================================================================
 #include "pq.inc"
 #include "frame.inc"
@@ -46,5 +49,14 @@ FUNC tbl_get
     NULLBIT_TEST 1, 13, 11, 14
     ret
 ENDF tbl_get
+
+// =============================================================================
+// table_finalize(x0 Table*, w1 layout LAYOUT_* or -1 = default,
+//                w2 dict mode: 0 = auto, 1 = force dictionary for STRING)
+// (stub: the plain columnar representation is kept)
+// =============================================================================
+FUNC table_finalize
+    ret
+ENDF table_finalize
 
     NOTE_GNU_STACK
