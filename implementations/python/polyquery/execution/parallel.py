@@ -21,12 +21,14 @@ import pickle
 import selectors
 import signal
 import warnings
+from functools import partial
 from typing import Any, Callable, Iterator
 
 from .. import errors
 from ..planner import physical as pp
 from . import native_ops
 from .context import ExecutionContext
+from .workers import Prepare, Task
 
 # forking a process that also runs threads (HTTP server) is safe here: the
 # child only computes and then calls os._exit
@@ -41,30 +43,42 @@ def use_processes(gather: pp.Gather, ctx: ExecutionContext) -> bool:
     return native_ops.python_rows(gather, ctx) >= ctx.parallel_min_rows
 
 
-def run_partitions(gather: pp.Gather, ctx: ExecutionContext, task: Callable[[], Any]) -> list[Any]:
-    """Runs ``task`` once per partition of ``gather`` (each run sees its
-    partition of the driver scan) and returns the results in partition order."""
+def run_partitions(gather: pp.Gather, ctx: ExecutionContext, task: Task, prepare: Prepare | None = None) -> list[Any]:
+    """Runs ``task(ctx)`` once per partition of ``gather`` (each run sees its
+    partition of the driver scan) and returns the results in partition
+    order. ``prepare(gather, ctx)`` builds what the partitions share (join
+    build sides) once, before they run."""
     count = gather.partitions
     if use_processes(gather, ctx):
+        if ctx.pool is not None and ctx.native is None:
+            results = ctx.pool.run(gather, ctx, task, prepare)
+            if results is not None:
+                return results
+        if prepare is not None:
+            prepare(gather, ctx)  # before forking: the workers inherit it
         return _run_forked(gather, ctx, task)
-    return [_in_partition(gather, ctx, index, task) for index in range(count)]
+    if prepare is not None:
+        prepare(gather, ctx)
+    return [in_partition(gather, ctx, index, task) for index in range(count)]
 
 
 def iterate_partitions(
-    gather: pp.Gather, ctx: ExecutionContext, produce: Callable[[], Iterator[Any]]
+    gather: pp.Gather, ctx: ExecutionContext, produce: Callable[[ExecutionContext], Iterator[Any]], prepare: Prepare
 ) -> Iterator[Any]:
-    """Streams the outputs of ``produce`` for every partition in partition
-    order. In-process partitions are consumed lazily (a LIMIT above can stop
-    early); worker processes collect their partition's output completely."""
+    """Streams the outputs of ``produce(ctx)`` for every partition in
+    partition order. In-process partitions are consumed lazily (a LIMIT
+    above can stop early); worker processes collect their partition's
+    output completely."""
     if use_processes(gather, ctx):
-        for items in _run_forked(gather, ctx, lambda: list(produce())):
+        for items in run_partitions(gather, ctx, partial(_listed, produce), prepare):
             yield from items
         return
+    prepare(gather, ctx)
     driver = id(gather.driver)
     for index in range(gather.partitions):
         ctx.partitions[driver] = (index, gather.partitions)
         try:
-            items = produce()
+            items = produce(ctx)
             while True:
                 ctx.partitions[driver] = (index, gather.partitions)
                 try:
@@ -76,11 +90,16 @@ def iterate_partitions(
             ctx.partitions.pop(driver, None)
 
 
-def _in_partition(gather: pp.Gather, ctx: ExecutionContext, index: int, task: Callable[[], Any]) -> Any:
+def _listed(produce: Callable[[ExecutionContext], Iterator[Any]], ctx: ExecutionContext) -> list[Any]:
+    return list(produce(ctx))
+
+
+def in_partition(gather: pp.Gather, ctx: ExecutionContext, index: int, task: Task) -> Any:
+    """Runs ``task`` with the driver scan of ``gather`` reading partition ``index``."""
     driver = id(gather.driver)
     ctx.partitions[driver] = (index, gather.partitions)
     try:
-        return task()
+        return task(ctx)
     finally:
         ctx.partitions.pop(driver, None)
 
@@ -88,7 +107,7 @@ def _in_partition(gather: pp.Gather, ctx: ExecutionContext, index: int, task: Ca
 # ------------------------------------------------------------ worker processes
 
 
-def _run_forked(gather: pp.Gather, ctx: ExecutionContext, task: Callable[[], Any]) -> list[Any]:
+def _run_forked(gather: pp.Gather, ctx: ExecutionContext, task: Task) -> list[Any]:
     """Forks at most one worker per CPU; worker ``w`` runs partitions
     ``w, w + workers, …`` and returns their results in that order."""
     count = gather.partitions
@@ -117,7 +136,7 @@ def _run_forked(gather: pp.Gather, ctx: ExecutionContext, task: Callable[[], Any
 
 
 def _worker(
-    gather: pp.Gather, ctx: ExecutionContext, indexes: range, task: Callable[[], Any], fd: int
+    gather: pp.Gather, ctx: ExecutionContext, indexes: range, task: Task, fd: int
 ) -> None:  # pragma: no cover - runs in the child
     status = 1
     try:
@@ -126,7 +145,7 @@ def _worker(
         ctx.in_worker = True
         ctx.cancel_event = None  # the parent observes cancellation and kills us
         try:
-            payload: tuple[bool, Any] = (True, [_in_partition(gather, ctx, i, task) for i in indexes])
+            payload: tuple[bool, Any] = (True, [in_partition(gather, ctx, i, task) for i in indexes])
         except errors.PolyQueryError as e:
             payload = (False, e)
         except RecursionError:

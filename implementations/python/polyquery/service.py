@@ -16,10 +16,11 @@ from .execution.compiler import evaluate_constant
 from .execution.context import DEFAULT_PARALLEL_MIN_ROWS, ExecutionContext
 from .execution.executor import QueryResult, run_plan, stream_plan
 from .execution.native_ops import kernel_plan
+from .execution.workers import WorkerPool, available_cpus
 from .ingest.limits import DEFAULT_MAX_INGEST_BYTES, DEFAULT_MAX_TABLE_ROWS, IngestLimits
 from .ingest.loader import load_table
 from .native import NativeKernels, load_kernels
-from .planner.physical import PhysicalPlan, PlanOptions
+from .planner.physical import MAX_PARTITIONS, PhysicalPlan, PlanOptions
 from .planner.pipeline import plan_statement
 from .sql import ast
 from .sql.parser import parse
@@ -46,7 +47,9 @@ class EngineConfig:
     max_ingest_bytes: int = DEFAULT_MAX_INGEST_BYTES
     max_table_rows: int = DEFAULT_MAX_TABLE_ROWS
     max_join_rows: int = 100_000_000
-    threads: int = 1  # default parallelism of queries without a ``threads`` option
+    # parallelism of queries without a ``threads`` option; None: automatic
+    # (see Engine.default_threads)
+    threads: int | None = None
     # parallel pipelines over fewer rows run their partitions in-process
     parallel_min_rows: int = DEFAULT_PARALLEL_MIN_ROWS
     log_level: str = "info"
@@ -84,6 +87,18 @@ class Engine:
         self.catalog = Catalog()
         self.ingest_limits = IngestLimits(config.max_ingest_bytes, config.max_table_rows)
         self.native: NativeKernels | None = load_kernels(config.native_kernels)
+        cpus = available_cpus()
+        # automatic parallelism: one partition per CPU, at most AUTO_THREADS
+        self.auto_threads = max(1, min(cpus, AUTO_THREADS))
+        self.pool = WorkerPool(min(cpus, MAX_POOL_WORKERS), lambda: self.catalog.version, self._shared_objects)
+        self.catalog.add_listener(self.pool.invalidate)
+
+    def _shared_objects(self) -> list[object]:
+        """What the worker pool shares with its workers by identity."""
+        return [*self.catalog.tables(), *self.catalog.indexes()]
+
+    def close(self) -> None:
+        self.pool.close()
 
     # ------------------------------------------------------------ catalog
 
@@ -197,11 +212,31 @@ class Engine:
             threads=self._threads(options),
             parallel_min_rows=self.config.parallel_min_rows,
             native=plan.native,
+            pool=self.pool,
         )
         return plan, ctx
 
-    def _threads(self, options: QueryOptions) -> int:
+    def _explicit_threads(self, options: QueryOptions) -> int | None:
         return options.threads if options.threads is not None else self.config.threads
+
+    def _threads(self, options: QueryOptions) -> int:
+        """The query's partition count: the ``threads`` option, else
+        ``--threads``, else automatic: one per CPU (at most AUTO_THREADS)
+        for the vectorized engine without native kernels, else 1 (the row
+        engine is the serial baseline; native kernels choose their own
+        parallel strategy)."""
+        explicit = self._explicit_threads(options)
+        if explicit is not None:
+            return explicit
+        if options.mode == "row" or options.native:
+            return 1
+        return self.auto_threads
+
+    def _parallel_min_rows(self, options: QueryOptions) -> int:
+        """Explicit parallelism partitions every pipeline; automatic
+        parallelism only pipelines large enough for the worker processes
+        (smaller inputs keep exactly their serial plans)."""
+        return 0 if self._explicit_threads(options) is not None else self.config.parallel_min_rows
 
     def create_index(self, statement: ast.CreateIndex) -> None:
         table = self.catalog.get(statement.table)
@@ -250,6 +285,7 @@ class Engine:
             join=options.join,
             use_indexes=options.use_indexes,
             threads=self._threads(options),
+            parallel_min_rows=self._parallel_min_rows(options),
             mode=options.mode,
             indexes_of=snapshot.indexes_of,
             evaluate=evaluate_constant,
@@ -257,6 +293,13 @@ class Engine:
             kernel_plan=kernel_plan,
         )
         return plan_statement(bound, plan_options)
+
+
+# automatic parallelism: partitions per parallel pipeline (at most)
+AUTO_THREADS = 16
+# worker processes of the pool (queries with more partitions give each
+# worker several)
+MAX_POOL_WORKERS = min(16, MAX_PARTITIONS)
 
 
 def _position(node: ast.Node) -> dict[str, int]:

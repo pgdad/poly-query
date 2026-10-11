@@ -38,6 +38,8 @@ class ExecutionContext:
     # the native kernel library when the query runs with ``native: true``
     # and it is loaded (else None: the engine's own code paths)
     native: NativeKernels | None = None
+    # the engine's persistent worker pool (execution/workers.py), if any
+    pool: Any = None
     memory_used: int = field(default=0, init=False)
     # partition (index, count) of each partitioned driver scan of a parallel
     # pipeline, by id() of the scan node; ``in_worker`` is set in worker
@@ -89,6 +91,7 @@ class ExecutionContext:
         threads: int = 1,
         parallel_min_rows: int = DEFAULT_PARALLEL_MIN_ROWS,
         native: NativeKernels | None = None,
+        pool: Any = None,
     ) -> ExecutionContext:
         """``deadline`` (a time.monotonic() value) takes precedence over
         ``timeout_ms``, which counts from now."""
@@ -104,6 +107,7 @@ class ExecutionContext:
             threads,
             parallel_min_rows,
             native,
+            pool,
         )
 
     def check(self) -> None:

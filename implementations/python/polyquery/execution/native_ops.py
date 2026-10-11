@@ -1099,7 +1099,7 @@ def run_scan_aggregate(
         and native.hash_partitionable()
         and parallel.use_processes(gather, ctx)
     ):
-        parts = parallel.run_partitions(gather, ctx, lambda: native.hash_partition(ctx))
+        parts = parallel.run_partitions(gather, ctx, native.hash_partition)
         if any(part is None for part in parts):
             return None
         return native.merge_hash_partitions(parts)  # type: ignore[arg-type]
