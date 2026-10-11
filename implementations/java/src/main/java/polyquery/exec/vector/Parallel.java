@@ -173,7 +173,7 @@ final class Parallel {
                 return null;
             }
             return new SortBatches.Sort(new Gather(builder, c, new TopNReducer(t.keys(), t.input().schema(),
-                    (int) (offset + limit))), t.keys(), t.schema(), builder.context(), builder.batchSize(),
+                    (int) (offset + limit), builder.batchSize())), t.keys(), t.schema(), builder.context(), builder.batchSize(),
                     builder.threads(), offset, limit);
         }
         Chain c = chain(plan);
@@ -249,22 +249,29 @@ final class Parallel {
 
     /** Keeps the best {@code keep} rows of the morsel (stable: ties in morsel order), in sort order. */
     private record TopNReducer(List<polyquery.plan.SortKey> keys, List<polyquery.storage.ColumnSchema> schema,
-                               int keep) implements Reducer {
+                               int keep, int batchSize) implements Reducer {
         @Override
         public MorselReduction start(int width, ExecContext ctx) {
-            ColumnStore store = new ColumnStore(schema);
+            SortBatches.Cutoff cutoff = new SortBatches.Cutoff(keys.getFirst());
+            int compactAt = Math.max(2 * keep, 2 * batchSize);
             return new MorselReduction() {
+                private ColumnStore store = new ColumnStore(schema);
                 private int[] all = new int[0];
 
                 @Override
                 public void add(Batch b) {
+                    if (keep == 0) {
+                        return;
+                    }
                     if (all.length < b.count) {
                         all = new int[b.count];
                     }
-                    for (int k = 0; k < b.count; k++) {
-                        all[k] = b.pos(k);
+                    store.append(b, all, cutoff.filter(b, all));
+                    if (store.rows() >= compactAt) {
+                        // keep the best rows so far; later rows must beat the last of them
+                        store = store.select(SortBatches.sort(store, keys, ctx), keep);
+                        cutoff.update(store, keep - 1);
                     }
-                    store.append(b, all, b.count);
                 }
 
                 @Override

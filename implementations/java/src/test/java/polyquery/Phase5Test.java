@@ -60,6 +60,13 @@ final class Phase5Test {
         "SELECT id, amt FROM t ORDER BY amt DESC, id LIMIT 17 OFFSET 3",
         "SELECT name, id FROM t ORDER BY name NULLS FIRST, id DESC",
         "SELECT id FROM t ORDER BY val, id LIMIT 5",
+        // top-N cutoff: NULLs first/last, descending, ties on the first key, DECIMAL and FLOAT64 keys
+        "SELECT id, val FROM t ORDER BY val DESC NULLS LAST, id LIMIT 12",
+        "SELECT id, val FROM t ORDER BY val NULLS FIRST, id DESC LIMIT 70",
+        "SELECT id, amt FROM t ORDER BY amt, id DESC LIMIT 40 OFFSET 5",
+        "SELECT grp, id FROM t ORDER BY grp DESC, id LIMIT 33",
+        "SELECT grp, id FROM t ORDER BY grp NULLS LAST, id DESC LIMIT 25",
+        "SELECT id, CAST(val AS FLOAT64) / 4 AS f FROM t ORDER BY f, id LIMIT 30",
         "SELECT id, CASE WHEN val IS NULL THEN 'none' WHEN val > 10 THEN 'big' ELSE 'small' END FROM t",
         "SELECT grp, COUNT(*) FROM t WHERE grp IN (1, 2, 3, NULL) OR val BETWEEN -5 AND 5 GROUP BY grp",
         "SELECT id FROM t WHERE id IN (SELECT grp * 10 FROM d) AND EXISTS (SELECT 1 FROM d WHERE d.grp = t.grp)",

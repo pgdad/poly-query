@@ -683,6 +683,67 @@ final class SortBatches {
     }
 
     /**
+     * Top-N pre-filter: once the best {@code keep} rows so far are known, a row whose first sort
+     * key ranks strictly after the first key of the {@code keep}-th row cannot be among the
+     * result, so it is dropped before it is materialized (rows with an equal first key are kept:
+     * later keys and input order decide). Only for INT64-like and FLOAT64 first keys.
+     */
+    static final class Cutoff {
+        private final SortKey key;
+        private final long flip;
+        private boolean active;
+        private long threshold;
+
+        Cutoff(SortKey key) {
+            this.key = key;
+            this.flip = key.descending() ? -1L : 0L;
+        }
+
+        /** Sets the threshold from row {@code row} of {@code store}, the current {@code keep}-th best row. */
+        void update(ColumnStore store, int row) {
+            Vec v = store.column(key.column());
+            active = v != null && (v.kind == Vec.Kind.LONG || v.kind == Vec.Kind.DOUBLE) && !v.isNull(row);
+            if (active) {
+                threshold = normalized(v, row);
+            }
+        }
+
+        private long normalized(Vec v, int i) {
+            long k;
+            if (v.kind == Vec.Kind.LONG) {
+                k = v.longs[i] ^ Long.MIN_VALUE;
+            } else {
+                double d = v.doubles[i];
+                long bits = Double.doubleToLongBits(d == 0.0 ? 0.0 : d);
+                k = bits < 0 ? ~bits : bits ^ Long.MIN_VALUE;
+            }
+            return k ^ flip;
+        }
+
+        /** Writes the positions of the active rows of {@code b} that may still be in the result to {@code out}; returns their number. */
+        int filter(Batch b, int[] out) {
+            Vec v = b.cols[key.column()];
+            int m = 0;
+            if (!active || v == null || (v.kind != Vec.Kind.LONG && v.kind != Vec.Kind.DOUBLE)) {
+                for (int k = 0; k < b.count; k++) {
+                    out[k] = b.pos(k);
+                }
+                return b.count;
+            }
+            // the threshold row is not NULL: NULLs rank before it (NULLS FIRST) or after it
+            boolean keepNulls = key.nullsFirst();
+            for (int k = 0; k < b.count; k++) {
+                int i = b.pos(k);
+                boolean pass = v.isNull(i) ? keepNulls : Long.compareUnsigned(normalized(v, i), threshold) <= 0;
+                if (pass) {
+                    out[m++] = i;
+                }
+            }
+            return m;
+        }
+    }
+
+    /**
      * Blocking sort of the input; with {@code limit >= 0} a top-N that keeps only the best
      * {@code offset + limit} rows (re-sorting and truncating the store whenever it doubles) and
      * returns rows {@code offset .. offset+limit-1}.
@@ -736,6 +797,7 @@ final class SortBatches {
             }
             long keep = limit < 0 ? Long.MAX_VALUE : offset + limit < 0 ? Long.MAX_VALUE : offset + limit;
             long compactAt = keep >= Integer.MAX_VALUE / 4 ? Long.MAX_VALUE : Math.max(2 * keep, 2L * batchSize);
+            Cutoff cutoff = limit < 0 ? null : new Cutoff(keys.getFirst());
             input.open();
             try {
                 int[] all = new int[0];
@@ -746,17 +808,26 @@ final class SortBatches {
                         if (all.length < b.count) {
                             all = new int[Math.max(b.count, 16)];
                         }
-                        for (int k = 0; k < b.count; k++) {
-                            all[k] = b.pos(k);
+                        int m;
+                        if (cutoff != null) {
+                            m = cutoff.filter(b, all);
+                        } else {
+                            for (int k = 0; k < b.count; k++) {
+                                all[k] = b.pos(k);
+                            }
+                            m = b.count;
                         }
-                        store.append(b, all, b.count);
-                        reserve(ColumnStore.estimate(b, all, b.count));
+                        store.append(b, all, m);
+                        reserve(ColumnStore.estimate(b, all, m));
                         if (store.rows() >= compactAt) {
                             int[] order = sort(store, keys, ctx, threads);
                             long kept = reserved * keep / store.rows();
                             store = store.select(order, (int) keep);
                             ctx.release(reserved - kept);
                             reserved = kept;
+                            if (cutoff != null) {
+                                cutoff.update(store, (int) keep - 1);
+                            }
                         }
                     }
                     if (b.error != null) {
