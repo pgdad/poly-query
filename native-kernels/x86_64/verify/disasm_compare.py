@@ -2,7 +2,12 @@
 """Compare the machine code of the x86-64 kernel sources against a git revision.
 
 Usage (from anywhere inside the repository):
-    python3 -I native-kernels/x86_64/verify/disasm_compare.py [REV] [-D NAME=VALUE ...]
+    python3 -I native-kernels/x86_64/verify/disasm_compare.py [REV]
+            [-D NAME=VALUE ...] [-R OLD=NEW ...]
+
+-D defines a cpp macro for both builds (e.g. -D SUM_CHUNK_ROWS=24).
+-R declares that symbol OLD of REV was renamed to NEW (applied to REV's
+side before comparing).
 
 REV defaults to HEAD. Both trees (REV and the working tree) are assembled with
 gcc, each variant file is linked into its own throw-away shared object, and
@@ -136,20 +141,30 @@ def objects(so, syms, secs):
     return res
 
 
-def describe(src_dir, name, out_dir, defs):
+def describe(src_dir, name, out_dir, defs, ren=None):
     so = build(src_dir, name, out_dir, defs)
     syms = symbols(so)
     funcs = functions(so, syms)
     funcs = {k: v for k, v in funcs.items() if k in syms}
-    return funcs, objects(so, syms, sections(so)), {k: v[3] for k, v in syms.items()}
+    objs = objects(so, syms, sections(so))
+    binds = {k: v[3] for k, v in syms.items()}
+    if ren:
+        def fix(t):
+            return re.sub(r"<([^>+]+)", lambda m: "<" + ren.get(m.group(1), m.group(1)), t)
+        funcs = {ren.get(k, k): [fix(i) for i in v] for k, v in funcs.items()}
+        objs = {ren.get(k, k): fix(v) for k, v in objs.items()}
+        binds = {ren.get(k, k): v for k, v in binds.items()}
+    return funcs, objs, binds
 
 
 def main():
     args = sys.argv[1:]
-    defs, rest = [], []
+    defs, rest, ren = [], [], {}
     i = 0
     while i < len(args):
-        if args[i] == "-D":
+        if args[i] == "-R":
+            o, n = args[i + 1].split("="); ren[o] = n; i += 2
+        elif args[i] == "-D":
             defs.append("-D" + args[i + 1]); i += 2
         elif args[i].startswith("-D"):
             defs.append(args[i]); i += 1
@@ -162,7 +177,7 @@ def main():
         for v in VARIANTS:
             o1 = os.path.join(tmp, "old"); o2 = os.path.join(tmp, "new")
             os.makedirs(o1, exist_ok=True); os.makedirs(o2, exist_ok=True)
-            f1, d1, b1 = describe(old_dir, v, o1, defs)
+            f1, d1, b1 = describe(old_dir, v, o1, defs, ren)
             f2, d2, b2 = describe(X86, v, o2, defs)
             nf = no = 0
             for n in sorted(set(f1) | set(f2)):
