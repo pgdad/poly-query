@@ -531,39 +531,42 @@ Data: `pqgen.py generate --scale 1m` (transactions, order_items, sensor
 readings and sort keys: 1M rows each; orders 250k; customers 100k;
 products 20k), loaded as CSV with the generated schemas (column layout).
 Tool: `bench/bench.py` (session protocol, `result: "count"`, wall-clock
-per query as seen by the client, best of 5, milliseconds). Machine:
-32 hardware threads (shared host, so ±10 % noise). "Phase 4 engine" is the
+per query as seen by the client, best of 7, milliseconds). Machine:
+32 hardware threads on a shared host (run-to-run noise up to ±25 %; the
+Phase 4 column comes from an earlier, quieter run). "Phase 4 engine" is the
 accepted engine before this phase (commit `978d364`).
 
 | Query | Phase 4 engine | `mode: row` | vectorized, 1 thread | vectorized, 8 threads | default (vectorized, 32 threads) |
 |---|---:|---:|---:|---:|---:|
-| Q1 filter + COUNT (1M) | 86 | 83 | 3 | 1 | 1 |
-| Q2 GROUP BY 20 groups, 5 aggregates | 120 | 118 | 8 | 1 | 1 |
-| Q3 GROUP BY 80k groups | 107 | 115 | 7 | 4 | 5 |
-| Q4 1M ⋈ 100k + GROUP BY | 212 | 228 | 16 | 4 | 3 |
-| Q5 1M ⋈ 250k + GROUP BY | 326 | 354 | 36 | 13 | 10 |
-| Q6 filter + top-10 | 107 | 111 | 5 | 2 | 2 |
-| Q7 full sort of 1M rows | 523 | 469 | 25 | 25 | 25 |
-| Q8 FLOAT64 arithmetic + filter | 128 | 131 | 7 | 1 | 1 |
-| Q9 3-way join + GROUP BY | 160 | 171 | 12 | 4 | 3 |
-| Q10 DISTINCT (10k values) | 61 | 64 | 3 | 3 | 3 |
-| Q11 4-way join, badly ordered | 252 | 121 | 9 | 2 | 2 |
-| Q12 GROUP BY 500k groups, MIN(string) | 513 | 555 | 47 | 29 | 28 |
+| Q1 filter + COUNT (1M) | 86 | 85 | 3 | 1 | 1 |
+| Q2 GROUP BY 20 groups, 5 aggregates | 120 | 120 | 9 | 1 | 1 |
+| Q3 GROUP BY 80k groups | 107 | 124 | 7 | 4 | 5 |
+| Q4 1M ⋈ 100k + GROUP BY | 212 | 277 | 15 | 4 | 3 |
+| Q5 1M ⋈ 250k + GROUP BY | 326 | 371 | 41 | 12 | 13 |
+| Q6 filter + top-10 | 107 | 112 | 5 | 2 | 2 |
+| Q7 full sort of 1M rows | 523 | 430 | 39 | 18 | 23 |
+| Q8 FLOAT64 arithmetic + filter | 128 | 137 | 7 | 1 | 1 |
+| Q9 3-way join + GROUP BY | 160 | 179 | 13 | 4 | 3 |
+| Q10 DISTINCT (10k values) | 61 | 62 | 3 | 1 | 3 |
+| Q11 4-way join, badly ordered | 252 | 140 | 10 | 3 | 2 |
+| Q12 GROUP BY 500k groups, MIN(string) | 513 | 600 | 44 | 27 | 26 |
 
-Vectorized execution alone is 9–30× faster than the row baseline; with 8
-threads scan/aggregation queries gain another 3–8× (the radix sort of
-Q7 is a serial linear pass and does not scale). `mode: row`
-is the unchanged Phase 4 operator code; it benefits from the logical
-optimizer like every mode (Q11: join reordering).
+Vectorized execution alone is 10–30× faster than the row baseline; with 8
+threads, scan/aggregation/join queries gain another 2–9× (Q7: the scan and
+materialization run in parallel, the radix sort itself is one serial
+linear pass). With 32 threads the per-query thread start-up and merging
+of 32 partial results cost about as much as they gain on 1M-row tables.
+`mode: row` is the unchanged Phase 4 operator code; it benefits from the
+logical optimizer like every mode (Q11: join reordering).
 
 Logical optimizer and join algorithms (vectorized, 8 threads):
 
 | Query | `optimize: true`, hash joins | `optimize: false` | `join: "merge"` |
 |---|---:|---:|---:|
-| Q4 1M ⋈ 100k + GROUP BY | 4 | 4 | 72 |
-| Q5 1M ⋈ 250k + GROUP BY | 13 | 11 | 27 |
-| Q9 3-way join + GROUP BY | 4 | 9 | 31 |
-| Q11 4-way join, badly ordered | 2 | 17 | 16 |
+| Q4 1M ⋈ 100k + GROUP BY | 4 | 5 | 74 |
+| Q5 1M ⋈ 250k + GROUP BY | 12 | 18 | 29 |
+| Q9 3-way join + GROUP BY | 4 | 9 | 32 |
+| Q11 4-way join, badly ordered | 3 | 13 | 16 |
 
 Without the rewrites, filters stay above the joins and the written join
 order is kept (Q9, Q11). The merge join pays for sorting both inputs.
