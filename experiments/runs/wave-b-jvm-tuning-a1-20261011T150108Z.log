@@ -1,0 +1,10 @@
+2026-10-11T15:01:11+00:00 wave wave-b-jvm-tuning-a1-20261011T150108Z: order=['clojure', 'java']
+2026-10-11T15:01:11+00:00 [b-jvm-tuning-clojure-a1-20261011T150108Z] agent queued (usage gate, then launch)
+2026-10-11T15:01:16+00:00 [b-jvm-tuning-java-a1-20261011T150109Z] agent queued (usage gate, then launch)
+2026-10-11T16:45:41+00:00 [b-jvm-tuning-clojure-a1-20261011T150108Z] agent finished; collecting telemetry
+2026-10-11T16:45:41+00:00 [b-jvm-tuning-clojure-a1-20261011T150108Z] validating (clean clone, sandboxed)
+2026-10-11T16:46:46+00:00 [b-jvm-tuning-clojure-a1-20261011T150108Z] outcome=success cost=$17.4543776 turns=222 wall=6270.6s
+2026-10-11T17:01:16+00:00 [b-jvm-tuning-java-a1-20261011T150109Z] agent finished; collecting telemetry
+2026-10-11T17:01:16+00:00 [b-jvm-tuning-java-a1-20261011T150109Z] validating (clean clone, sandboxed)
+2026-10-11T17:01:47+00:00 [b-jvm-tuning-java-a1-20261011T150109Z] outcome=timeout cost=$None turns=None wall=7200.6s
+2026-10-11T17:01:47+00:00 wave wave-b-jvm-tuning-a1-20261011T150108Z finished: tuning=success, tuning=timeout

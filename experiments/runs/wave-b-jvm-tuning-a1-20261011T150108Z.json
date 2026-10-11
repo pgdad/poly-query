@@ -1,0 +1,46 @@
+{
+ "wave_id": "wave-b-jvm-tuning-a1-20261011T150108Z",
+ "task": "jvm-tuning",
+ "track": "B",
+ "attempt": 1,
+ "seed": 17904,
+ "order": [
+  "clojure",
+  "java"
+ ],
+ "run_ids": [
+  "b-jvm-tuning-clojure-a1-20261011T150108Z",
+  "b-jvm-tuning-java-a1-20261011T150109Z"
+ ],
+ "started": "2026-10-11T15:01:11+00:00",
+ "parallel": 2,
+ "base_refs": {},
+ "attempts": {},
+ "record_only": true,
+ "limits": {
+  "timeout_min": 120,
+  "budget_usd": 60.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  2.07666015625,
+  2.95947265625,
+  3.5048828125
+ ],
+ "finished": "2026-10-11T17:01:47+00:00",
+ "loadavg_end": [
+  6.60595703125,
+  5.779296875,
+  7.40185546875
+ ],
+ "results": [
+  {
+   "run_id": "b-jvm-tuning-clojure-a1-20261011T150108Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "b-jvm-tuning-java-a1-20261011T150109Z",
+   "outcome": "timeout"
+  }
+ ]
+}
