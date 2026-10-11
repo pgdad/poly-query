@@ -294,7 +294,11 @@ fn parse_query_options(req: &Json) -> Result<QueryOptions> {
         if t == 0 {
             return Err(invalid("threads must be at least 1"));
         }
-        o.threads = Some(usize::try_from(t).unwrap_or(usize::MAX).min(MAX_QUERY_THREADS));
+        o.threads = Some(
+            usize::try_from(t)
+                .unwrap_or(usize::MAX)
+                .min(MAX_QUERY_THREADS),
+        );
     }
     if let Some(b) = optional_bool(opts, "optimize")? {
         o.optimize = b;

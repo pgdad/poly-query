@@ -1,20 +1,19 @@
 //! Batch (vectorized) physical operators.
 
-use std::cmp::Ordering;
 use std::sync::Arc;
 
 use super::agg::Aggregator;
-use super::batch::{BATCH_SIZE, Batch, Data, Vector};
+use super::batch::{BATCH_SIZE, Batch, Vector};
 use super::eval::{eval, eval_mask};
 use super::keys::KeyTable;
+use super::sort::sort_permutation;
 use crate::error::Result;
-use crate::exec::operators::{Operator, Row};
 use crate::exec::ExecContext;
+use crate::exec::operators::{Operator, Row};
 use crate::planner::access::IndexLookup;
 use crate::planner::expr::{AggregateCall, Expr};
 use crate::planner::logical::SortKey;
 use crate::storage::{Index, Table};
-use crate::types::Value;
 
 /// A pull-based operator producing batches (never empty ones).
 pub trait BatchOperator {
@@ -83,7 +82,13 @@ impl ScanOp {
 }
 
 /// Rows `[from, to)` of row group `rg`, projected to `columns`.
-pub fn read_batch(table: &Table, columns: &[usize], rg: usize, from: usize, to: usize) -> Result<Batch> {
+pub fn read_batch(
+    table: &Table,
+    columns: &[usize],
+    rg: usize,
+    from: usize,
+    to: usize,
+) -> Result<Batch> {
     let n = to - from;
     if let Some(rows) = table.row_slice(rg, from, to) {
         let cols = columns
@@ -279,146 +284,6 @@ impl BatchOperator for DistinctOp {
     }
 }
 
-/// Comparison form of one sort key over a materialized batch.
-enum SortCol {
-    I64(Vec<i64>),
-    F64(Vec<f64>),
-    Str(Vec<Arc<str>>),
-    Values(Vec<Value>),
-}
-
-struct SortColumn {
-    col: SortCol,
-    nulls: Option<Vec<bool>>,
-    descending: bool,
-    nulls_first: bool,
-}
-
-impl SortColumn {
-    fn new(v: Vector, key: &SortKey) -> SortColumn {
-        let nulls = v.validity().map(|valid| valid.into_iter().map(|ok| !ok).collect());
-        let col = match v.data {
-            Data::Int(x) | Data::Timestamp(x) | Data::Decimal(x, _) => SortCol::I64(x),
-            Data::Date(x) => SortCol::I64(x.into_iter().map(i64::from).collect()),
-            Data::Bool(x) => SortCol::I64(x.into_iter().map(i64::from).collect()),
-            Data::Float(x) => SortCol::F64(x),
-            Data::Str(x) => SortCol::Str(x),
-            Data::Dict(codes, dict) => {
-                // Rank dictionary entries once; equal strings share a rank.
-                let mut order: Vec<u32> = (0..dict.len() as u32).collect();
-                order.sort_by(|&a, &b| dict[a as usize].as_bytes().cmp(dict[b as usize].as_bytes()));
-                let mut rank = vec![0i64; dict.len()];
-                let mut r = 0;
-                for (k, &e) in order.iter().enumerate() {
-                    if k > 0 && dict[e as usize] != dict[order[k - 1] as usize] {
-                        r += 1;
-                    }
-                    rank[e as usize] = r;
-                }
-                SortCol::I64(codes.into_iter().map(|c| rank[c as usize]).collect())
-            }
-            Data::Null => SortCol::I64(vec![0; v.len()]),
-            Data::Values(x) => SortCol::Values(x),
-        };
-        SortColumn {
-            col,
-            nulls,
-            descending: key.descending,
-            nulls_first: key.nulls_first,
-        }
-    }
-
-    #[inline]
-    fn compare(&self, a: usize, b: usize) -> Ordering {
-        if let Some(nulls) = &self.nulls {
-            match (nulls[a], nulls[b]) {
-                (true, true) => return Ordering::Equal,
-                (true, false) => {
-                    return if self.nulls_first { Ordering::Less } else { Ordering::Greater };
-                }
-                (false, true) => {
-                    return if self.nulls_first { Ordering::Greater } else { Ordering::Less };
-                }
-                _ => {}
-            }
-        }
-        let o = match &self.col {
-            SortCol::I64(v) => v[a].cmp(&v[b]),
-            SortCol::F64(v) => v[a].partial_cmp(&v[b]).unwrap_or(Ordering::Equal),
-            SortCol::Str(v) => v[a].as_bytes().cmp(v[b].as_bytes()),
-            SortCol::Values(v) => match (v[a].is_null(), v[b].is_null()) {
-                (true, true) => Ordering::Equal,
-                (true, false) => {
-                    return if self.nulls_first { Ordering::Less } else { Ordering::Greater };
-                }
-                (false, true) => {
-                    return if self.nulls_first { Ordering::Greater } else { Ordering::Less };
-                }
-                _ => v[a].sort_cmp(&v[b]),
-            },
-        };
-        if self.descending { o.reverse() } else { o }
-    }
-}
-
-fn compare_rows(cols: &[SortColumn], a: usize, b: usize) -> Ordering {
-    for c in cols {
-        let o = c.compare(a, b);
-        if o != Ordering::Equal {
-            return o;
-        }
-    }
-    Ordering::Equal
-}
-
-/// Compares rows of key vectors with one direction / NULL placement
-/// (merge-join keys).
-pub struct KeyComparator {
-    cols: Vec<SortColumn>,
-}
-
-impl KeyComparator {
-    pub fn new(vectors: Vec<Vector>, key: &SortKey) -> KeyComparator {
-        KeyComparator {
-            cols: vectors.into_iter().map(|v| SortColumn::new(v, key)).collect(),
-        }
-    }
-
-    pub fn compare(&self, a: usize, b: usize) -> Ordering {
-        compare_rows(&self.cols, a, b)
-    }
-}
-
-/// The permutation that sorts `b` by `keys` (stable). With `top`, only the
-/// first `top` positions of the stable order.
-pub fn sort_permutation(
-    b: &Batch,
-    keys: &[SortKey],
-    top: Option<usize>,
-    ctx: &ExecContext,
-) -> Result<Vec<u32>> {
-    let mut cols = Vec::with_capacity(keys.len());
-    for k in keys {
-        cols.push(SortColumn::new(eval(&k.expr, b, ctx)?, k));
-    }
-    let mut idx: Vec<u32> = (0..b.len as u32).collect();
-    // Ties are broken by input position, so selection + sort equals the
-    // prefix of a stable sort.
-    let cmp = |x: &u32, y: &u32| compare_rows(&cols, *x as usize, *y as usize).then(x.cmp(y));
-    if let Some(n) = top
-        && n < idx.len()
-    {
-        if n == 0 {
-            return Ok(Vec::new());
-        }
-        idx.select_nth_unstable_by(n - 1, cmp);
-        idx.truncate(n);
-    }
-    ctx.check_interrupt()?;
-    idx.sort_unstable_by(cmp);
-    Ok(idx)
-}
-
 /// Sort / top-N. Input batches are materialized (compacted to the best
 /// `top` rows from time to time for top-N), sorted by permutation and
 /// emitted in batches.
@@ -515,7 +380,9 @@ impl BatchOperator for LimitOp {
             }
             let from = self.offset as usize;
             self.offset = 0;
-            let take = self.remaining.map_or(n - from as u64, |r| r.min(n - from as u64));
+            let take = self
+                .remaining
+                .map_or(n - from as u64, |r| r.min(n - from as u64));
             if let Some(r) = &mut self.remaining {
                 *r -= take;
             }
@@ -583,6 +450,24 @@ impl Operator for RowSink {
                 Some(b) => self.rows = b.into_rows().into_iter(),
                 None => return Ok(None),
             }
+        }
+    }
+
+    fn skip(&mut self, ctx: &ExecContext, max: u64) -> Result<u64> {
+        let pending = self.rows.len() as u64;
+        if pending > 0 {
+            let n = pending.min(max);
+            self.rows.nth(n as usize - 1);
+            return Ok(n);
+        }
+        // Whole batches are counted without converting them to rows.
+        match self.input.next_batch(ctx)? {
+            Some(b) if b.len as u64 <= max => Ok(b.len as u64),
+            Some(b) => {
+                self.rows = b.into_rows().into_iter();
+                self.skip(ctx, max)
+            }
+            None => Ok(0),
         }
     }
 }

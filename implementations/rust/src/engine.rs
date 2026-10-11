@@ -603,6 +603,12 @@ impl QueryCursor {
 
     fn pull(&mut self) -> Result<Option<Row>> {
         let row = match &mut self.source {
+            // An internal failure of the vectorized engine is contained
+            // and answered by the row-mode re-execution.
+            CursorSource::Plan(root) if self.replay.is_some() => {
+                let ctx = &self.ctx;
+                crate::protocol::catch_panic(|| root.next(ctx))?
+            }
             CursorSource::Plan(root) => root.next(&self.ctx)?,
             CursorSource::Ready(rows) => rows.next(),
         };
@@ -624,8 +630,51 @@ impl QueryCursor {
         self.ctx.check_interrupt()
     }
 
+    /// Runs the query to completion counting rows (`result: "count"`).
+    fn count(mut self) -> Result<QueryResult> {
+        // One row beyond `max_rows` is enough to detect the violation.
+        let max = self.max_rows.map_or(u64::MAX, |m| m.saturating_add(1));
+        loop {
+            let step = match &mut self.source {
+                CursorSource::Plan(root) if self.replay.is_some() => {
+                    let ctx = &self.ctx;
+                    let left = max - self.row_count;
+                    crate::protocol::catch_panic(|| root.skip(ctx, left))
+                }
+                CursorSource::Plan(root) => root.skip(&self.ctx, max - self.row_count),
+                CursorSource::Ready(rows) => Ok(rows.by_ref().take(max as usize).count() as u64),
+            };
+            match step {
+                Ok(0) => break,
+                Ok(n) => {
+                    self.row_count += n;
+                    if let Some(m) = self.max_rows
+                        && self.row_count > m
+                    {
+                        return Err(Error::resource_limit(format!(
+                            "result exceeds max_rows = {m}"
+                        )));
+                    }
+                }
+                Err(e) => {
+                    if !self.try_replay(&e) {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Ok(QueryResult {
+            columns: self.columns,
+            rows: Vec::new(),
+            row_count: self.row_count,
+        })
+    }
+
     /// Runs the query to completion, keeping the rows unless `count_only`.
     pub fn collect(mut self, count_only: bool) -> Result<QueryResult> {
+        if count_only {
+            return self.count();
+        }
         let mut rows = Vec::new();
         loop {
             let row = match self.pull() {

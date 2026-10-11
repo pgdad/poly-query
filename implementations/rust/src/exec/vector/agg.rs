@@ -2,14 +2,18 @@
 //! struct-of-arrays accumulator per aggregate updated by tight per-batch
 //! loops (with dedicated loops for the single-group case). Partial
 //! aggregators of parallel workers are merged with [`Aggregator::merge`].
-//! Final values go through [`AggState::finish`], so results and errors are
-//! exactly those of row mode.
+//! Final values follow [`AggState::finish`] exactly (typed accumulators
+//! are finished column-wise with the same arithmetic and overflow checks).
+
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use super::batch::{Batch, Data, Vector};
 use super::keys::KeyTable;
+use crate::exec::hash::FastHasher;
 use crate::error::{Error, Result};
-use crate::exec::aggregate::{AggState, Partial};
 use crate::exec::ExecContext;
+use crate::exec::aggregate::{AggState, Partial};
 use crate::planner::expr::{AggFunc, AggregateCall};
 use crate::types::{DataType, Value, decimal};
 
@@ -18,13 +22,39 @@ use crate::types::{DataType, Value, decimal};
 enum Acc {
     CountStar(Vec<i64>),
     Count(Vec<i64>),
-    SumInt { sum: Vec<i128>, n: Vec<i64> },
+    SumInt {
+        sum: Vec<i128>,
+        n: Vec<i64>,
+    },
     /// Unscaled sums at `scale` (the argument type's scale).
-    SumDec { sum: Vec<i128>, n: Vec<i64>, scale: u8 },
-    SumFloat { sum: Vec<f64>, n: Vec<i64> },
+    SumDec {
+        sum: Vec<i128>,
+        n: Vec<i64>,
+        scale: u8,
+    },
+    SumFloat {
+        sum: Vec<f64>,
+        n: Vec<i64>,
+    },
     /// MIN/MAX over fixed-width values of one representation (`kind` is
     /// the representation of the first values seen).
-    ExtremeI64 { max: bool, best: Vec<i64>, has: Vec<bool>, kind: Option<I64Kind> },
+    ExtremeI64 {
+        max: bool,
+        best: Vec<i64>,
+        has: Vec<bool>,
+        kind: Option<I64Kind>,
+    },
+    /// MIN/MAX over strings.
+    ExtremeStr {
+        max: bool,
+        best: Vec<Option<Arc<str>>>,
+    },
+    /// MIN/MAX over FLOAT64.
+    ExtremeF64 {
+        max: bool,
+        best: Vec<f64>,
+        has: Vec<bool>,
+    },
     /// Any other aggregate (DISTINCT, MIN/MAX of other types): row-mode states.
     States(Vec<AggState>),
 }
@@ -59,7 +89,10 @@ impl I64Kind {
 }
 
 fn arg_type(call: &AggregateCall) -> DataType {
-    call.arg.as_ref().map(|a| a.data_type()).unwrap_or(DataType::Null)
+    call.arg
+        .as_ref()
+        .map(|a| a.data_type())
+        .unwrap_or(DataType::Null)
 }
 
 impl Acc {
@@ -71,23 +104,39 @@ impl Acc {
             AggFunc::CountStar => Acc::CountStar(Vec::new()),
             AggFunc::Count => Acc::Count(Vec::new()),
             AggFunc::Sum | AggFunc::Avg => match arg_type(call) {
-                DataType::Float64 => Acc::SumFloat { sum: Vec::new(), n: Vec::new() },
+                DataType::Float64 => Acc::SumFloat {
+                    sum: Vec::new(),
+                    n: Vec::new(),
+                },
                 DataType::Decimal { scale, .. } => Acc::SumDec {
                     sum: Vec::new(),
                     n: Vec::new(),
                     scale,
                 },
-                _ => Acc::SumInt { sum: Vec::new(), n: Vec::new() },
+                _ => Acc::SumInt {
+                    sum: Vec::new(),
+                    n: Vec::new(),
+                },
             },
             AggFunc::Min | AggFunc::Max => match arg_type(call) {
-                DataType::Int64 | DataType::Date | DataType::Timestamp | DataType::Decimal { .. } => {
-                    Acc::ExtremeI64 {
-                        max: call.func == AggFunc::Max,
-                        best: Vec::new(),
-                        has: Vec::new(),
-                        kind: None,
-                    }
-                }
+                DataType::Int64
+                | DataType::Date
+                | DataType::Timestamp
+                | DataType::Decimal { .. } => Acc::ExtremeI64 {
+                    max: call.func == AggFunc::Max,
+                    best: Vec::new(),
+                    has: Vec::new(),
+                    kind: None,
+                },
+                DataType::String => Acc::ExtremeStr {
+                    max: call.func == AggFunc::Max,
+                    best: Vec::new(),
+                },
+                DataType::Float64 => Acc::ExtremeF64 {
+                    max: call.func == AggFunc::Max,
+                    best: Vec::new(),
+                    has: Vec::new(),
+                },
                 _ => Acc::States(Vec::new()),
             },
         }
@@ -108,21 +157,51 @@ impl Acc {
                 best.resize(groups, 0);
                 has.resize(groups, false);
             }
+            Acc::ExtremeStr { best, .. } => best.resize(groups, None),
+            Acc::ExtremeF64 { best, has, .. } => {
+                best.resize(groups, 0.0);
+                has.resize(groups, false);
+            }
             Acc::States(s) => s.resize_with(groups, || AggState::new(call)),
         }
     }
 
-    /// Converts typed MIN/MAX state to row-mode states (mixed representations).
-    fn to_states(&mut self, call: &AggregateCall) {
-        if let Acc::ExtremeI64 { best, has, kind, .. } = self {
-            let states = best
-                .iter()
-                .zip(has.iter())
-                .map(|(&b, &h)| {
-                    let v = if h { kind.map(|k| k.value(b)) } else { None };
-                    AggState::from_partial(call, Partial::Extreme(v))
-                })
-                .collect();
+    /// Number of group slots.
+    fn len(&self) -> usize {
+        match self {
+            Acc::CountStar(c) | Acc::Count(c) => c.len(),
+            Acc::SumInt { n, .. } | Acc::SumDec { n, .. } | Acc::SumFloat { n, .. } => n.len(),
+            Acc::ExtremeI64 { has, .. } | Acc::ExtremeF64 { has, .. } => has.len(),
+            Acc::ExtremeStr { best, .. } => best.len(),
+            Acc::States(s) => s.len(),
+        }
+    }
+
+    /// Whether the typed accumulator can take values of this representation.
+    fn accepts(&mut self, data: &Data) -> bool {
+        match self {
+            Acc::ExtremeI64 { kind, .. } => {
+                let k = I64Kind::of(data);
+                if k.is_none() || (kind.is_some() && *kind != k) {
+                    return false;
+                }
+                *kind = k;
+                true
+            }
+            Acc::ExtremeStr { .. } => matches!(data, Data::Str(_) | Data::Dict(..)),
+            Acc::ExtremeF64 { .. } => matches!(data, Data::Float(_)),
+            _ => true,
+        }
+    }
+
+    /// Converts a typed MIN/MAX accumulator to row-mode states (for values
+    /// of another representation).
+    fn switch_to_states(&mut self, call: &AggregateCall) {
+        if matches!(
+            self,
+            Acc::ExtremeI64 { .. } | Acc::ExtremeStr { .. } | Acc::ExtremeF64 { .. }
+        ) {
+            let states = (0..self.len()).map(|g| self.state_of(call, g)).collect();
             *self = Acc::States(states);
         }
     }
@@ -156,13 +235,8 @@ impl Acc {
         }
         let valid = v.valid.as_deref();
         let ok = |i: usize| valid.is_none_or(|x| x[i]);
-        if let Acc::ExtremeI64 { kind, .. } = self {
-            let k = I64Kind::of(&v.data);
-            if k.is_none() || (kind.is_some() && *kind != k) {
-                self.to_states(call);
-            } else {
-                *kind = k;
-            }
+        if !self.accepts(&v.data) {
+            self.switch_to_states(call);
         }
         match (&mut *self, &v.data) {
             (Acc::Count(c), Data::Values(vals)) => {
@@ -243,6 +317,43 @@ impl Acc {
                     }
                 }
             }
+            (Acc::ExtremeStr { max, best }, data) => {
+                let max = *max;
+                for i in 0..n {
+                    if !ok(i) {
+                        continue;
+                    }
+                    let x: &Arc<str> = match data {
+                        Data::Str(v) => &v[i],
+                        Data::Dict(c, d) => &d[c[i] as usize],
+                        _ => unreachable!(),
+                    };
+                    let gi = g(i);
+                    let better = match &best[gi] {
+                        None => true,
+                        Some(b) => {
+                            let o = x.as_bytes().cmp(b.as_bytes());
+                            if max { o.is_gt() } else { o.is_lt() }
+                        }
+                    };
+                    if better {
+                        best[gi] = Some(x.clone());
+                    }
+                }
+            }
+            (Acc::ExtremeF64 { max, best, has }, Data::Float(vals)) => {
+                let max = *max;
+                for (i, &x) in vals.iter().enumerate() {
+                    if !ok(i) {
+                        continue;
+                    }
+                    let gi = g(i);
+                    if !has[gi] || (if max { x > best[gi] } else { x < best[gi] }) {
+                        best[gi] = x;
+                        has[gi] = true;
+                    }
+                }
+            }
             (Acc::States(states), _) => {
                 let mut retained = 0;
                 for i in 0..n {
@@ -291,44 +402,97 @@ impl Acc {
                 sum[g] += v.to_f64().unwrap_or(0.0);
                 n[g] += 1;
             }
-            Acc::ExtremeI64 { .. } | Acc::States(_) => {
+            Acc::ExtremeI64 { .. }
+            | Acc::ExtremeStr { .. }
+            | Acc::ExtremeF64 { .. }
+            | Acc::States(_) => {
                 return Err(Error::internal("unexpected aggregate update"));
             }
         }
         Ok(())
     }
 
-    /// Folds `other` (a partial accumulator of the same aggregate) into
-    /// this one; `map[g]` is the group of `other`'s group `g` here.
-    fn merge_from(&mut self, call: &AggregateCall, other: &mut Acc, map: &[u32]) -> Result<usize> {
-        match (&mut *self, &mut *other) {
+    /// Folds groups of `other` (a partial accumulator of the same
+    /// aggregate) into this one: `other`'s group `groups[i]` goes to group
+    /// `map[i]` here.
+    fn merge_from(
+        &mut self,
+        call: &AggregateCall,
+        other: &Acc,
+        groups: &[u32],
+        map: &[u32],
+    ) -> Result<usize> {
+        let pairs = || groups.iter().map(|&g| g as usize).zip(map.iter().map(|&t| t as usize));
+        match (&mut *self, other) {
             (Acc::CountStar(a), Acc::CountStar(b)) | (Acc::Count(a), Acc::Count(b)) => {
-                for (g, &t) in map.iter().enumerate() {
-                    a[t as usize] += b[g];
+                for (g, t) in pairs() {
+                    a[t] += b[g];
                 }
             }
             (Acc::SumInt { sum: a, n: an }, Acc::SumInt { sum: b, n: bn })
             | (Acc::SumDec { sum: a, n: an, .. }, Acc::SumDec { sum: b, n: bn, .. }) => {
-                for (g, &t) in map.iter().enumerate() {
-                    a[t as usize] += b[g];
-                    an[t as usize] += bn[g];
+                for (g, t) in pairs() {
+                    a[t] += b[g];
+                    an[t] += bn[g];
                 }
             }
             (Acc::SumFloat { sum: a, n: an }, Acc::SumFloat { sum: b, n: bn }) => {
-                for (g, &t) in map.iter().enumerate() {
-                    a[t as usize] += b[g];
-                    an[t as usize] += bn[g];
+                for (g, t) in pairs() {
+                    a[t] += b[g];
+                    an[t] += bn[g];
                 }
             }
             (
-                Acc::ExtremeI64 { max, best: a, has: ah, kind: ak },
-                Acc::ExtremeI64 { best: b, has: bh, kind: bk, .. },
+                Acc::ExtremeI64 {
+                    max,
+                    best: a,
+                    has: ah,
+                    kind: ak,
+                },
+                Acc::ExtremeI64 {
+                    best: b,
+                    has: bh,
+                    kind: bk,
+                    ..
+                },
             ) if ak.is_none() || bk.is_none() || ak == bk => {
                 if ak.is_none() {
                     *ak = *bk;
                 }
-                for (g, &t) in map.iter().enumerate() {
-                    let t = t as usize;
+                for (g, t) in pairs() {
+                    if bh[g] && (!ah[t] || (if *max { b[g] > a[t] } else { b[g] < a[t] })) {
+                        a[t] = b[g];
+                        ah[t] = true;
+                    }
+                }
+            }
+            (Acc::ExtremeStr { max, best: a }, Acc::ExtremeStr { best: b, .. }) => {
+                for (g, t) in pairs() {
+                    if let Some(x) = &b[g] {
+                        let better = match &a[t] {
+                            None => true,
+                            Some(cur) => {
+                                let o = x.as_bytes().cmp(cur.as_bytes());
+                                if *max { o.is_gt() } else { o.is_lt() }
+                            }
+                        };
+                        if better {
+                            a[t] = Some(x.clone());
+                        }
+                    }
+                }
+            }
+            (
+                Acc::ExtremeF64 {
+                    max,
+                    best: a,
+                    has: ah,
+                },
+                Acc::ExtremeF64 {
+                    best: b, has: bh, ..
+                },
+            ) => {
+                for (g, t) in pairs() {
                     if bh[g] && (!ah[t] || (if *max { b[g] > a[t] } else { b[g] < a[t] })) {
                         a[t] = b[g];
                         ah[t] = true;
@@ -336,13 +500,12 @@ impl Acc {
                 }
             }
             _ => {
-                self.to_states(call);
-                other.to_states(call);
+                self.switch_to_states(call);
                 let mut retained = 0;
-                for (g, &t) in map.iter().enumerate() {
-                    let theirs = other.state(call, g);
+                for (g, t) in pairs() {
+                    let theirs = other.state_of(call, g);
                     if let Acc::States(s) = self {
-                        retained += s[t as usize].merge(theirs)?;
+                        retained += s[t].merge(theirs)?;
                     }
                 }
                 return Ok(retained);
@@ -351,22 +514,145 @@ impl Acc {
         Ok(0)
     }
 
-    /// The state of group `g` as a row-mode aggregate state.
-    fn state(&mut self, call: &AggregateCall, g: usize) -> AggState {
-        let partial = match self {
-            Acc::CountStar(c) | Acc::Count(c) => Partial::Count(c[g]),
-            Acc::SumInt { sum, n } => Partial::SumInt(sum[g], n[g]),
-            Acc::SumDec { sum, n, .. } => Partial::SumDecimal(sum[g], n[g]),
-            Acc::SumFloat { sum, n } => Partial::SumFloat(sum[g], n[g]),
-            Acc::ExtremeI64 { best, has, kind, .. } => Partial::Extreme(
-                has[g]
-                    .then(|| kind.map(|k| k.value(best[g])))
-                    .flatten(),
+    /// A copy of the state of group `g` as a row-mode aggregate state.
+    fn state_of(&self, call: &AggregateCall, g: usize) -> AggState {
+        match self {
+            Acc::States(s) => s[g].clone(),
+            Acc::CountStar(c) | Acc::Count(c) => AggState::from_partial(call, Partial::Count(c[g])),
+            Acc::SumInt { sum, n } => AggState::from_partial(call, Partial::SumInt(sum[g], n[g])),
+            Acc::SumDec { sum, n, .. } => {
+                AggState::from_partial(call, Partial::SumDecimal(sum[g], n[g]))
+            }
+            Acc::SumFloat { sum, n } => AggState::from_partial(call, Partial::SumFloat(sum[g], n[g])),
+            Acc::ExtremeI64 {
+                best, has, kind, ..
+            } => AggState::from_partial(
+                call,
+                Partial::Extreme(has[g].then(|| kind.map(|k| k.value(best[g]))).flatten()),
             ),
-            Acc::States(s) => return std::mem::replace(&mut s[g], AggState::new(call)),
-        };
-        AggState::from_partial(call, partial)
+            Acc::ExtremeStr { best, .. } => {
+                AggState::from_partial(call, Partial::Extreme(best[g].clone().map(Value::Str)))
+            }
+            Acc::ExtremeF64 { best, has, .. } => AggState::from_partial(
+                call,
+                Partial::Extreme(has[g].then_some(Value::Float(best[g]))),
+            ),
+        }
     }
+
+    /// Final values of groups `0..groups` (same results and errors as
+    /// `AggState::finish`).
+    fn finish(&mut self, call: &AggregateCall, groups: usize, ctx: &ExecContext) -> Result<Vector> {
+        let overflow = || Error::overflow(format!("{} result is out of range", call.func.name()));
+        let avg = call.func == AggFunc::Avg;
+        let valid_of = |n: &[i64]| {
+            let v: Vec<bool> = n[..groups].iter().map(|&c| c > 0).collect();
+            (!v.iter().all(|&x| x)).then_some(v)
+        };
+        Ok(match self {
+            Acc::CountStar(c) | Acc::Count(c) => Vector::new(Data::Int(c[..groups].to_vec()), None),
+            Acc::SumInt { sum, n } if avg => Vector::new(
+                Data::Float(
+                    (0..groups)
+                        .map(|g| if n[g] > 0 { sum[g] as f64 / n[g] as f64 } else { 0.0 })
+                        .collect(),
+                ),
+                valid_of(n),
+            ),
+            Acc::SumInt { sum, n } => {
+                let mut out = Vec::with_capacity(groups);
+                for g in 0..groups {
+                    out.push(if n[g] > 0 {
+                        i64::try_from(sum[g]).map_err(|_| overflow())?
+                    } else {
+                        0
+                    });
+                }
+                Vector::new(Data::Int(out), valid_of(n))
+            }
+            Acc::SumDec { sum, n, scale } if avg => {
+                let div = decimal::pow10(*scale as u32) as f64;
+                Vector::new(
+                    Data::Float(
+                        (0..groups)
+                            .map(|g| {
+                                if n[g] > 0 {
+                                    sum[g] as f64 / div / n[g] as f64
+                                } else {
+                                    0.0
+                                }
+                            })
+                            .collect(),
+                    ),
+                    valid_of(n),
+                )
+            }
+            Acc::SumDec { sum, n, scale } => {
+                let mut out = Vec::with_capacity(groups);
+                for g in 0..groups {
+                    if n[g] > 0 && !decimal::fits18(sum[g]) {
+                        return Err(overflow());
+                    }
+                    out.push(if n[g] > 0 { sum[g] as i64 } else { 0 });
+                }
+                Vector::new(Data::Decimal(out, *scale), valid_of(n))
+            }
+            Acc::SumFloat { sum, n } => {
+                let mut out = Vec::with_capacity(groups);
+                for g in 0..groups {
+                    let v = if n[g] == 0 {
+                        0.0
+                    } else if avg {
+                        sum[g] / n[g] as f64
+                    } else {
+                        sum[g]
+                    };
+                    if !v.is_finite() {
+                        return Err(overflow());
+                    }
+                    out.push(v);
+                }
+                Vector::new(Data::Float(out), valid_of(n))
+            }
+            Acc::ExtremeI64 {
+                best, has, kind, ..
+            } => {
+                let valid: Vec<bool> = has[..groups].to_vec();
+                let all = valid.iter().all(|&x| x);
+                let valid = (!all).then_some(valid);
+                let vals = best[..groups].to_vec();
+                match kind {
+                    None => Vector::null(groups),
+                    Some(I64Kind::Int) => Vector::new(Data::Int(vals), valid),
+                    Some(I64Kind::Ts) => Vector::new(Data::Timestamp(vals), valid),
+                    Some(I64Kind::Date) => Vector::new(
+                        Data::Date(vals.into_iter().map(|d| d as i32).collect()),
+                        valid,
+                    ),
+                    Some(I64Kind::Dec(s)) => Vector::new(Data::Decimal(vals, *s), valid),
+                }
+            }
+            Acc::ExtremeStr { best, .. } => {
+                Vector::from_values(best[..groups].iter().map(|b| b.clone().map_or(Value::Null, Value::Str)).collect())
+            }
+            Acc::ExtremeF64 { best, has, .. } => {
+                let valid: Vec<bool> = has[..groups].to_vec();
+                let all = valid.iter().all(|&x| x);
+                Vector::new(Data::Float(best[..groups].to_vec()), (!all).then_some(valid))
+            }
+            Acc::States(states) => {
+                let mut values = Vec::with_capacity(groups);
+                for (g, s) in states[..groups].iter().enumerate() {
+                    if g % 4096 == 4095 {
+                        ctx.check_interrupt()?;
+                    }
+                    values.push(s.finish()?);
+                }
+                Vector::from_values(values)
+            }
+        })
+    }
+
 }
 
 /// Grouped aggregation state over batches.
@@ -433,37 +719,59 @@ impl Aggregator {
 
     /// Folds a partial aggregator over the same keys and aggregates into
     /// this one. Returns approximate bytes newly retained.
-    pub fn merge(&mut self, mut other: Aggregator) -> Result<usize> {
+    pub fn merge(&mut self, other: Aggregator) -> Result<usize> {
+        let groups: Vec<u32> = (0..other.groups as u32).collect();
+        self.merge_groups(&other, &groups)
+    }
+
+    /// Folds the groups `groups` of the partial aggregator `other` into
+    /// this one. Returns approximate bytes newly retained.
+    pub fn merge_groups(&mut self, other: &Aggregator, groups: &[u32]) -> Result<usize> {
         let before = self.groups;
         let map: Vec<u32> = if self.keys.width() == 0 {
-            vec![0; other.groups]
+            vec![0; groups.len()]
         } else {
-            (0..other.groups as u32)
-                .map(|g| self.keys.assign_values(&other.keys.key(g)))
+            groups
+                .iter()
+                .map(|&g| self.keys.assign_values(&other.keys.key(g)))
                 .collect()
         };
         self.grow(self.keys.len());
         let mut retained = 0;
         for (k, call) in self.calls.iter().enumerate() {
-            retained += self.accs[k].merge_from(call, &mut other.accs[k], &map)?;
+            retained += self.accs[k].merge_from(call, &other.accs[k], groups, &map)?;
         }
         let per_group = 48 + 32 * (self.keys.width() + self.calls.len());
         Ok(retained + (self.groups - before) * per_group)
+    }
+
+    /// Splits the groups into `parts` partitions by a hash of their key
+    /// (equal keys of different partial aggregators land in the same
+    /// partition, so partitions can be merged independently).
+    pub fn partition_groups(&self, parts: usize) -> Vec<Vec<u32>> {
+        let mut out = vec![Vec::new(); parts];
+        for g in 0..self.groups as u32 {
+            let mut h = FastHasher::default();
+            self.keys.key(g).hash(&mut h);
+            out[(h.finish() % parts as u64) as usize].push(g);
+        }
+        out
+    }
+
+    pub fn key_count(&self) -> usize {
+        self.keys.width()
+    }
+
+    pub fn calls(&self) -> &[AggregateCall] {
+        &self.calls
     }
 
     /// Output batch: group key columns followed by one column per aggregate.
     pub fn finish(mut self, ctx: &ExecContext) -> Result<Batch> {
         let groups = self.groups;
         let mut columns = self.keys.key_vectors();
-        for (k, call) in self.calls.iter().enumerate() {
-            let mut values = Vec::with_capacity(groups);
-            for g in 0..groups {
-                if g % 4096 == 4095 {
-                    ctx.check_interrupt()?;
-                }
-                values.push(self.accs[k].state(call, g).finish()?);
-            }
-            columns.push(Vector::from_values(values));
+        for (acc, call) in self.accs.iter_mut().zip(&self.calls) {
+            columns.push(acc.finish(call, groups, ctx)?);
         }
         Ok(Batch::new(columns, groups))
     }

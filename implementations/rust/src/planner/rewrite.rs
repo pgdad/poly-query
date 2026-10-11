@@ -239,7 +239,13 @@ mod tests {
             right: int(2),
             ty: DataType::Int64,
         };
-        assert!(matches!(simplify(e), Expr::Literal { value: Value::Int(3), .. }));
+        assert!(matches!(
+            simplify(e),
+            Expr::Literal {
+                value: Value::Int(3),
+                ..
+            }
+        ));
         let div = Expr::Arith {
             op: BinaryOp::Div,
             kind: ArithKind::Int,

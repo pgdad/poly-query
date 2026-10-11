@@ -111,7 +111,9 @@ impl Vector {
             Value::Int(i) => Vector::new(Data::Int(vec![*i; len]), None),
             Value::Float(f) => Vector::new(Data::Float(vec![*f; len]), None),
             Value::Decimal(u, s) => Vector::new(Data::Decimal(vec![*u; len], *s), None),
-            Value::Str(s) => Vector::new(Data::Dict(vec![0; len], Arc::from(vec![s.clone()])), None),
+            Value::Str(s) => {
+                Vector::new(Data::Dict(vec![0; len], Arc::from(vec![s.clone()])), None)
+            }
             Value::Date(d) => Vector::new(Data::Date(vec![*d; len]), None),
             Value::Timestamp(t) => Vector::new(Data::Timestamp(vec![*t; len]), None),
         }
@@ -315,10 +317,7 @@ impl Vector {
             return self.gather(idx);
         }
         let valid: Vec<bool> = match &self.valid {
-            Some(v) => idx
-                .iter()
-                .map(|&i| i != NO_ROW && v[i as usize])
-                .collect(),
+            Some(v) => idx.iter().map(|&i| i != NO_ROW && v[i as usize]).collect(),
             None => idx.iter().map(|&i| i != NO_ROW).collect(),
         };
         let data = match &self.data {
@@ -331,7 +330,9 @@ impl Vector {
             Data::Dict(c, d) => Data::Dict(gather_slice_opt(c, idx, 0), d.clone()),
             Data::Date(v) => Data::Date(gather_slice_opt(v, idx, 0)),
             Data::Timestamp(v) => Data::Timestamp(gather_slice_opt(v, idx, 0)),
-            Data::Values(v) => return Vector::new(Data::Values(gather_slice_opt(v, idx, Value::Null)), None),
+            Data::Values(v) => {
+                return Vector::new(Data::Values(gather_slice_opt(v, idx, Value::Null)), None);
+            }
         };
         Vector::new(data, Some(valid))
     }
@@ -456,7 +457,10 @@ impl Batch {
     }
 
     pub fn gather(&self, idx: &[u32]) -> Batch {
-        Batch::new(self.columns.iter().map(|c| c.gather(idx)).collect(), idx.len())
+        Batch::new(
+            self.columns.iter().map(|c| c.gather(idx)).collect(),
+            idx.len(),
+        )
     }
 
     /// Rows where `mask` is true.
@@ -539,7 +543,10 @@ mod tests {
         assert_eq!(v.value(2), Value::Int(3));
         let mixed = Vector::from_values(vec![Value::Decimal(1, 1), Value::Decimal(1, 2)]);
         assert!(matches!(mixed.data, Data::Values(_)));
-        assert!(matches!(Vector::from_values(vec![Value::Null]).data, Data::Null));
+        assert!(matches!(
+            Vector::from_values(vec![Value::Null]).data,
+            Data::Null
+        ));
     }
 
     #[test]

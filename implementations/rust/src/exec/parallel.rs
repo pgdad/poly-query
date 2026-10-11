@@ -25,16 +25,19 @@ use super::context::ContextSeed;
 use super::vector::agg::Aggregator;
 use super::vector::batch::{BATCH_SIZE, Batch};
 use super::vector::build::{build, side_keys};
-use super::vector::join::{HashJoinOp, HashTable, JoinSpec, NestedLoopJoinOp, build_table, materialize};
+use super::vector::join::{
+    HashJoinOp, HashTable, JoinSpec, NestedLoopJoinOp, build_table, materialize,
+};
 use super::vector::ops::{
-    BatchOperator, BoxedBatchOp, FilterOp, ProjectOp, ScanOp, ScanRange, aggregate_batch, full_ranges,
+    BatchOperator, BoxedBatchOp, FilterOp, ProjectOp, ScanOp, ScanRange, aggregate_batch,
+    full_ranges,
 };
 use crate::error::{Error, Result};
 use crate::exec::ExecContext;
 use crate::planner::expr::{AggregateCall, Expr, KeyDomain};
 use crate::planner::logical::JoinType;
 use crate::planner::physical::PhysicalPlan;
-use crate::protocol::WORKER_STACK_BYTES;
+use crate::protocol::{WORKER_STACK_BYTES, catch_panic};
 use crate::storage::Table;
 
 /// Default rows per morsel.
@@ -265,7 +268,10 @@ pub fn try_build(plan: &PhysicalPlan, ctx: &ExecContext) -> Option<BoxedBatchOp>
     }
 }
 
-fn spawn<T: Send + 'static>(name: &str, f: impl FnOnce() -> T + Send + 'static) -> Result<JoinHandle<T>> {
+fn spawn<T: Send + 'static>(
+    name: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<JoinHandle<T>> {
     std::thread::Builder::new()
         .name(name.to_string())
         .stack_size(WORKER_STACK_BYTES)
@@ -314,14 +320,14 @@ impl GatherShared {
             if self.stop.load(Ordering::Relaxed) {
                 return;
             }
-            let result = (|| {
+            let result = catch_panic(|| {
                 let mut op = self.frag.instantiate(&self.morsels[m]);
                 let mut out = Vec::new();
                 while let Some(b) = op.next_batch(&ctx)? {
                     out.push(b);
                 }
                 Ok(out)
-            })();
+            });
             let failed = result.is_err();
             let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
             slots.results[m] = Some(result);
@@ -489,13 +495,13 @@ impl AggShared {
             if m >= self.morsels.len() {
                 return Ok(agg);
             }
-            let mut op = self.frag.instantiate(&self.morsels[m]);
-            let r = (|| {
+            let r = catch_panic(|| {
+                let mut op = self.frag.instantiate(&self.morsels[m]);
                 while let Some(b) = op.next_batch(&ctx)? {
                     aggregate_batch(&mut agg, &self.group_by, &self.aggregates, &b, &ctx)?;
                 }
                 Ok(())
-            })();
+            });
             if let Err(e) = r {
                 self.stop.store(true, Ordering::Relaxed);
                 return Err(e);
@@ -552,17 +558,87 @@ impl BatchOperator for ParallelAggregateOp {
             return Err(e);
         }
         ctx.check_interrupt()?;
-        let mut iter = partials.into_iter();
-        let mut agg = iter
-            .next()
-            .unwrap_or_else(|| Aggregator::new(self.group_by.len(), &self.aggregates));
-        for p in iter {
-            let retained = agg.merge(p)?;
-            if retained > 0 {
-                ctx.reserve(retained)?;
+        let total: usize = partials.iter().map(Aggregator::groups).sum();
+        // Merging is worth parallelizing once there are about as many
+        // groups as rows in a morsel.
+        let out = if partials.len() > 1 && total >= morsel_rows() {
+            merge_partitioned(partials, &self.seed, ctx)?
+        } else {
+            let mut iter = partials.into_iter();
+            let mut agg = iter
+                .next()
+                .unwrap_or_else(|| Aggregator::new(self.group_by.len(), &self.aggregates));
+            for p in iter {
+                let retained = agg.merge(p)?;
+                if retained > 0 {
+                    ctx.reserve(retained)?;
+                }
             }
-        }
-        let out = agg.finish(ctx)?;
+            agg.finish(ctx)?
+        };
         Ok((out.len > 0).then_some(out))
     }
+}
+
+/// Merges partial aggregators in parallel: each worker's groups are split
+/// into hash partitions; partition `p` of every partial is merged (and
+/// finished) by thread `p`. Equal keys always meet in the same partition.
+fn merge_partitioned(partials: Vec<Aggregator>, seed: &ContextSeed, ctx: &ExecContext) -> Result<Batch> {
+    let parts = partials.len();
+    let key_count = partials[0].key_count();
+    let calls = partials[0].calls().to_vec();
+    let split: Vec<Vec<Vec<u32>>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = partials
+            .iter()
+            .map(|p| scope.spawn(move || p.partition_groups(parts)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_default())
+            .collect()
+    });
+    let results: Vec<Result<Batch>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..parts)
+            .map(|p| {
+                let (partials, split, calls) = (&partials, &split, &calls);
+                std::thread::Builder::new()
+                    .stack_size(WORKER_STACK_BYTES)
+                    .spawn_scoped(scope, move || {
+                        catch_panic(|| {
+                            let wctx = seed.context();
+                            let mut agg = Aggregator::new(key_count, calls);
+                            for (w, partial) in partials.iter().enumerate() {
+                                if let Some(groups) = split[w].get(p) {
+                                    let retained = agg.merge_groups(partial, groups)?;
+                                    wctx.reserve(retained)?;
+                                }
+                            }
+                            agg.finish(&wctx)
+                        })
+                    })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| match h {
+                Ok(h) => h
+                    .join()
+                    .unwrap_or_else(|_| Err(Error::internal("aggregation merge panicked"))),
+                Err(e) => Err(Error::internal(format!("cannot start worker thread: {e}"))),
+            })
+            .collect()
+    });
+    let mut batches = Vec::with_capacity(parts);
+    for r in results {
+        let b = r?;
+        if b.len > 0 {
+            batches.push(b);
+        }
+    }
+    ctx.check_interrupt()?;
+    let width = key_count + calls.len();
+    if batches.is_empty() {
+        return Ok(Batch::new(Vec::new(), 0));
+    }
+    Ok(Batch::concat(&batches, width))
 }

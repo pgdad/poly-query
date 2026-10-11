@@ -89,19 +89,71 @@ fn assemble(spec: &JoinSpec, outer: &Batch, inner: &Batch, o: &[u32], i: &[u32])
     Batch::new(columns, o.len())
 }
 
-/// Produces the next output batch of joining the outer rows `order` (their
-/// positions in `outer`) with their candidates. Returns None once every
-/// outer row has been processed.
-pub fn emit<'a>(
+/// The outer rows of a join step in emission order, with their candidates.
+pub trait Pairs {
+    /// Number of outer rows.
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// Position (in the outer batch) of the `p`-th outer row.
+    fn outer(&self, p: usize) -> u32;
+    /// Candidate inner rows of the `p`-th outer row.
+    fn candidates(&self, p: usize) -> Cand<'_>;
+}
+
+/// Hash join: probe rows in order, candidates from the hash table.
+struct HashPairs<'a> {
+    ids: &'a [u32],
+    table: &'a HashTable,
+}
+
+impl Pairs for HashPairs<'_> {
+    fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    fn outer(&self, p: usize) -> u32 {
+        p as u32
+    }
+
+    fn candidates(&self, p: usize) -> Cand<'_> {
+        Cand::Rows(self.table.candidates(self.ids[p]))
+    }
+}
+
+/// Nested loop: every outer row against all `inner` rows.
+struct AllPairs {
+    outer: usize,
+    inner: usize,
+}
+
+impl Pairs for AllPairs {
+    fn len(&self) -> usize {
+        self.outer
+    }
+
+    fn outer(&self, p: usize) -> u32 {
+        p as u32
+    }
+
+    fn candidates(&self, _p: usize) -> Cand<'_> {
+        Cand::All(self.inner)
+    }
+}
+
+/// Produces the next output batch of joining the outer rows of `pairs`
+/// (positions in `outer`) with their candidates in `inner`. Returns None
+/// once every outer row has been processed.
+pub fn emit(
     spec: &JoinSpec,
     cursor: &mut Cursor,
     outer: &Batch,
     inner: &Batch,
-    order: &dyn Fn(usize) -> u32,
-    order_len: usize,
-    candidates: &dyn Fn(usize) -> Cand<'a>,
+    pairs: &dyn Pairs,
     ctx: &ExecContext,
 ) -> Result<Option<Batch>> {
+    let order_len = pairs.len();
     // (outer row, end of its pairs in this chunk, row complete)
     let mut segments: Vec<(u32, usize, bool)> = Vec::new();
     loop {
@@ -113,8 +165,8 @@ pub fn emit<'a>(
         let mut o_idx: Vec<u32> = Vec::new();
         let mut i_idx: Vec<u32> = Vec::new();
         while cursor.pos < order_len && o_idx.len() < BATCH_SIZE {
-            let o = order(cursor.pos);
-            let c = candidates(cursor.pos);
+            let o = pairs.outer(cursor.pos);
+            let c = pairs.candidates(cursor.pos);
             let total = c.len();
             let take = (total - cursor.cand).min(BATCH_SIZE - o_idx.len());
             for k in cursor.cand..cursor.cand + take {
@@ -189,7 +241,11 @@ fn normalized(v: Vector, domain: KeyDomain) -> Vector {
     let values = (0..v.len())
         .map(|i| {
             let x = v.value(i);
-            if x.is_null() { x } else { normalize_key(x, domain) }
+            if x.is_null() {
+                x
+            } else {
+                normalize_key(x, domain)
+            }
         })
         .collect();
     Vector::from_values(values)
@@ -205,7 +261,11 @@ fn key_vectors(keys: &[(Expr, KeyDomain)], b: &Batch, ctx: &ExecContext) -> Resu
 }
 
 /// Materializes an input into one batch.
-pub fn materialize(input: &mut dyn BatchOperator, width: usize, ctx: &ExecContext) -> Result<Batch> {
+pub fn materialize(
+    input: &mut dyn BatchOperator,
+    width: usize,
+    ctx: &ExecContext,
+) -> Result<Batch> {
     let mut parts = Vec::new();
     while let Some(b) = input.next_batch(ctx)? {
         ctx.reserve(b.approx_size())?;
@@ -228,11 +288,7 @@ pub struct HashTable {
 }
 
 impl HashTable {
-    pub fn build(
-        rows: Batch,
-        keys: &[(Expr, KeyDomain)],
-        ctx: &ExecContext,
-    ) -> Result<HashTable> {
+    pub fn build(rows: Batch, keys: &[(Expr, KeyDomain)], ctx: &ExecContext) -> Result<HashTable> {
         let kv = key_vectors(keys, &rows, ctx)?;
         let n = rows.len;
         let mut table = KeyTable::new(keys.len());
@@ -307,7 +363,9 @@ impl HashJoinOp {
         probe_keys: Vec<(Expr, KeyDomain)>,
         spec: JoinSpec,
     ) -> HashJoinOp {
-        let caches = (0..probe_keys.len()).map(|_| DictCache::default()).collect();
+        let caches = (0..probe_keys.len())
+            .map(|_| DictCache::default())
+            .collect();
         HashJoinOp {
             probe,
             build_input: build,
@@ -336,21 +394,25 @@ pub fn build_table(
 impl BatchOperator for HashJoinOp {
     fn next_batch(&mut self, ctx: &ExecContext) -> Result<Option<crate::exec::vector::Batch>> {
         if let Some((mut input, width)) = self.build_input.take() {
-            self.table = Some(Arc::new(build_table(&mut *input, width, &self.build_keys, ctx)?));
+            self.table = Some(Arc::new(build_table(
+                &mut *input,
+                width,
+                &self.build_keys,
+                ctx,
+            )?));
         }
         let Some(table) = self.table.clone() else {
             return Ok(None);
         };
         loop {
             if let Some((probe, ids)) = &self.current {
+                let pairs = HashPairs { ids, table: &table };
                 let out = emit(
                     &self.spec,
                     &mut self.cursor,
                     probe,
                     &table.rows,
-                    &|p| p as u32,
-                    probe.len,
-                    &|p| Cand::Rows(table.candidates(ids[p])),
+                    &pairs,
                     ctx,
                 )?;
                 if out.is_some() {
@@ -391,17 +453,11 @@ impl BatchOperator for NestedLoopJoinOp {
         };
         loop {
             if let Some(left) = &self.current {
-                let n = right.len;
-                let out = emit(
-                    &self.spec,
-                    &mut self.cursor,
-                    left,
-                    &right,
-                    &|p| p as u32,
-                    left.len,
-                    &|_| Cand::All(n),
-                    ctx,
-                )?;
+                let pairs = AllPairs {
+                    outer: left.len,
+                    inner: right.len,
+                };
+                let out = emit(&self.spec, &mut self.cursor, left, &right, &pairs, ctx)?;
                 if out.is_some() {
                     return Ok(out);
                 }
@@ -437,6 +493,21 @@ pub struct MergeState {
     right_sorted: Vec<u32>,
 }
 
+impl Pairs for MergeState {
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    fn outer(&self, p: usize) -> u32 {
+        self.order[p]
+    }
+
+    fn candidates(&self, p: usize) -> Cand<'_> {
+        let (a, b) = self.ranges[p];
+        Cand::Rows(&self.right_sorted[a as usize..b as usize])
+    }
+}
+
 impl MergeJoinOp {
     fn prepare(&mut self, ctx: &ExecContext) -> Result<MergeState> {
         let (Some((mut l, lw)), Some((mut r, rw))) = (self.left.take(), self.right.take()) else {
@@ -463,7 +534,7 @@ impl MergeJoinOp {
             descending: false,
             nulls_first: true,
         };
-        let cmp = super::ops::KeyComparator::new(combined.clone(), &asc);
+        let cmp = super::sort::KeyComparator::new(combined.clone(), &asc);
         let mut lsorted: Vec<u32> = (0..nl as u32).filter(|&i| !null_key(i as usize)).collect();
         let lnull: Vec<u32> = (0..nl as u32).filter(|&i| null_key(i as usize)).collect();
         let mut rsorted: Vec<u32> = (nl as u32..(nl + nr) as u32)
@@ -480,18 +551,24 @@ impl MergeJoinOp {
             // Group of equal left keys.
             let mut i2 = i + 1;
             while i2 < lsorted.len()
-                && cmp.compare(lsorted[i] as usize, lsorted[i2] as usize).is_eq()
+                && cmp
+                    .compare(lsorted[i] as usize, lsorted[i2] as usize)
+                    .is_eq()
             {
                 i2 += 1;
             }
             while j < rsorted.len()
-                && cmp.compare(rsorted[j] as usize, lsorted[i] as usize).is_lt()
+                && cmp
+                    .compare(rsorted[j] as usize, lsorted[i] as usize)
+                    .is_lt()
             {
                 j += 1;
             }
             let mut j2 = j;
             while j2 < rsorted.len()
-                && cmp.compare(rsorted[j2] as usize, lsorted[i] as usize).is_eq()
+                && cmp
+                    .compare(rsorted[j2] as usize, lsorted[i] as usize)
+                    .is_eq()
             {
                 j2 += 1;
             }
@@ -522,18 +599,6 @@ impl BatchOperator for MergeJoinOp {
         let Some(s) = &self.state else {
             return Ok(None);
         };
-        emit(
-            &self.spec,
-            &mut self.cursor,
-            &s.left,
-            &s.right,
-            &|p| s.order[p],
-            s.order.len(),
-            &|p| {
-                let (a, b) = s.ranges[p];
-                Cand::Rows(&s.right_sorted[a as usize..b as usize])
-            },
-            ctx,
-        )
+        emit(&self.spec, &mut self.cursor, &s.left, &s.right, s, ctx)
     }
 }

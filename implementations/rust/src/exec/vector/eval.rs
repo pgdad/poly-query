@@ -374,7 +374,9 @@ fn i64_lane<'a>(o: &'a Operand) -> Option<Lane<'a, i64>> {
         Operand::Scalar(Value::Date(d)) => Lane::Scalar(*d as i64),
         Operand::Scalar(Value::Bool(b)) => Lane::Scalar(*b as i64),
         Operand::Vector(v) => match &v.data {
-            Data::Int(x) | Data::Timestamp(x) | Data::Decimal(x, _) => Lane::Slice(Cow::Borrowed(x)),
+            Data::Int(x) | Data::Timestamp(x) | Data::Decimal(x, _) => {
+                Lane::Slice(Cow::Borrowed(x))
+            }
             Data::Date(x) => Lane::Slice(Cow::Owned(x.iter().map(|&d| d as i64).collect())),
             Data::Bool(x) => Lane::Slice(Cow::Owned(x.iter().map(|&b| b as i64).collect())),
             _ => return None,
@@ -436,7 +438,9 @@ fn str_lane<'a>(o: &'a Operand) -> Option<Lane<'a, &'a str>> {
         Operand::Scalar(Value::Str(s)) => Lane::Scalar(&**s),
         Operand::Vector(v) => match &v.data {
             Data::Str(x) => Lane::Slice(Cow::Owned(x.iter().map(|s| &**s).collect())),
-            Data::Dict(c, d) => Lane::Slice(Cow::Owned(c.iter().map(|&k| &*d[k as usize]).collect())),
+            Data::Dict(c, d) => {
+                Lane::Slice(Cow::Owned(c.iter().map(|&k| &*d[k as usize]).collect()))
+            }
             _ => return None,
         },
         _ => return None,
@@ -508,9 +512,19 @@ fn compare_strings(op: BinaryOp, l: &Operand, r: &Operand, n: usize) -> Option<V
         }
         let entries: Vec<&str> = dict.iter().map(|d| &**d).collect();
         let per_entry = if flip {
-            cmp_kernel(op, &Lane::Scalar(s), &Lane::Slice(Cow::Owned(entries)), dict.len())
+            cmp_kernel(
+                op,
+                &Lane::Scalar(s),
+                &Lane::Slice(Cow::Owned(entries)),
+                dict.len(),
+            )
         } else {
-            cmp_kernel(op, &Lane::Slice(Cow::Owned(entries)), &Lane::Scalar(s), dict.len())
+            cmp_kernel(
+                op,
+                &Lane::Slice(Cow::Owned(entries)),
+                &Lane::Scalar(s),
+                dict.len(),
+            )
         };
         Some(codes.iter().map(|&c| per_entry[c as usize]).collect())
     };
@@ -615,7 +629,11 @@ fn arith_int(
                 }))?
             } else {
                 zip_map(&a, &b, n, |x: i64, y| {
-                    if y == 0 { 0 } else { x.checked_rem(y).unwrap_or(0) }
+                    if y == 0 {
+                        0
+                    } else {
+                        x.checked_rem(y).unwrap_or(0)
+                    }
                 })
             }
         }
@@ -716,7 +734,9 @@ fn arith_float(
     if any_valid(&flags, valid) {
         return Err(overflow(op));
     }
-    Ok(Some(Data::Float(out.into_iter().map(float::normalize).collect())))
+    Ok(Some(Data::Float(
+        out.into_iter().map(float::normalize).collect(),
+    )))
 }
 
 // ------------------------------------------------------------ IN, LIKE
@@ -744,7 +764,11 @@ fn in_list_const(
     };
     let n = b.len;
     let found: Vec<bool> = match &v.data {
-        Data::Int(vals) if consts.iter().all(|c| matches!(c, Value::Int(_) | Value::Null)) => {
+        Data::Int(vals)
+            if consts
+                .iter()
+                .all(|c| matches!(c, Value::Int(_) | Value::Null)) =>
+        {
             let set: FastSet<i64> = consts
                 .iter()
                 .filter_map(|c| match c {
@@ -755,7 +779,9 @@ fn in_list_const(
             vals.iter().map(|x| set.contains(x)).collect()
         }
         Data::Str(_) | Data::Dict(..)
-            if consts.iter().all(|c| matches!(c, Value::Str(_) | Value::Null)) =>
+            if consts
+                .iter()
+                .all(|c| matches!(c, Value::Str(_) | Value::Null)) =>
         {
             let set: FastSet<&str> = consts
                 .iter()
@@ -814,7 +840,10 @@ fn like(
         _ => return elementwise(e, b, ctx),
     };
     let valid = v.validity();
-    Ok(bool_vector(values, valid.filter(|x| !x.iter().all(|&ok| ok))))
+    Ok(bool_vector(
+        values,
+        valid.filter(|x| !x.iter().all(|&ok| ok)),
+    ))
 }
 
 // ------------------------------------------------------------ CASE
@@ -944,7 +973,12 @@ mod tests {
     }
 
     fn batch() -> Batch {
-        let a = Vector::from_values(vec![Value::Int(1), Value::Int(5), Value::Null, Value::Int(0)]);
+        let a = Vector::from_values(vec![
+            Value::Int(1),
+            Value::Int(5),
+            Value::Null,
+            Value::Int(0),
+        ]);
         let s = Vector::from_values(vec![
             Value::str("x"),
             Value::str("y"),
@@ -1006,7 +1040,10 @@ mod tests {
         ));
         agrees(&Expr::InList {
             expr: col(1, DataType::String),
-            list: vec![*lit(Value::str("y"), DataType::String), *lit(Value::Null, DataType::Null)],
+            list: vec![
+                *lit(Value::str("y"), DataType::String),
+                *lit(Value::Null, DataType::Null),
+            ],
             negated: false,
         });
     }

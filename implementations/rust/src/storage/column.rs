@@ -88,7 +88,11 @@ impl Bitmap {
             let w = self.words[i / 64];
             let bit = i % 64;
             let n = (64 - bit).min(to - i);
-            let mask = if n == 64 { u64::MAX } else { ((1u64 << n) - 1) << bit };
+            let mask = if n == 64 {
+                u64::MAX
+            } else {
+                ((1u64 << n) - 1) << bit
+            };
             if w & mask != mask {
                 all = false;
                 break;

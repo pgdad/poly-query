@@ -8,6 +8,7 @@ pub mod eval;
 pub mod join;
 pub mod keys;
 pub mod ops;
+pub mod sort;
 
 pub use batch::{Batch, Vector};
 pub use build::build;

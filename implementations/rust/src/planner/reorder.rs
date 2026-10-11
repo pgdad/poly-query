@@ -166,7 +166,11 @@ struct EquiEdge {
 fn leaves_of(c: &Expr, leaves: &[Leaf]) -> HashSet<usize> {
     c.columns()
         .into_iter()
-        .filter_map(|g| leaves.iter().position(|l| g >= l.offset && g < l.offset + l.width))
+        .filter_map(|g| {
+            leaves
+                .iter()
+                .position(|l| g >= l.offset && g < l.offset + l.width)
+        })
         .collect()
 }
 
@@ -199,7 +203,13 @@ fn equi_edge(c: &Expr, leaves: &[Leaf]) -> Option<EquiEdge> {
 
 /// Estimated size of joining the leaves in `set` (estimated `rows`) with
 /// leaf `next`, and whether they are connected by an equality.
-fn join_estimate(set: &[bool], rows: f64, next: usize, leaves: &[Leaf], edges: &[EquiEdge]) -> (f64, bool) {
+fn join_estimate(
+    set: &[bool],
+    rows: f64,
+    next: usize,
+    leaves: &[Leaf],
+    edges: &[EquiEdge],
+) -> (f64, bool) {
     let mut best: Option<f64> = None;
     for e in edges {
         let (inside, ndv_in, ndv_next) = if e.b == next && set[e.a] {
@@ -272,7 +282,10 @@ fn reorder_chain(plan: LogicalPlan) -> LogicalPlan {
     flatten(plan, 0, &mut leaves, &mut conjuncts);
     let n = leaves.len();
     let order: Vec<usize> = if n >= 3 {
-        let edges: Vec<EquiEdge> = conjuncts.iter().filter_map(|c| equi_edge(c, &leaves)).collect();
+        let edges: Vec<EquiEdge> = conjuncts
+            .iter()
+            .filter_map(|c| equi_edge(c, &leaves))
+            .collect();
         greedy_order(&leaves, &edges)
     } else {
         (0..n).collect()
@@ -287,7 +300,8 @@ fn reorder_chain(plan: LogicalPlan) -> LogicalPlan {
         }
         offset += l.width;
     }
-    let conj_leaves: Vec<HashSet<usize>> = conjuncts.iter().map(|c| leaves_of(c, &leaves)).collect();
+    let conj_leaves: Vec<HashSet<usize>> =
+        conjuncts.iter().map(|c| leaves_of(c, &leaves)).collect();
     let mut pending: Vec<Option<Expr>> = conjuncts.into_iter().map(Some).collect();
     let identity = order.iter().enumerate().all(|(k, &i)| k == i);
     let mut slots: Vec<Option<LogicalPlan>> = leaves.into_iter().map(|l| Some(l.plan)).collect();

@@ -152,7 +152,7 @@ impl Interner {
     }
 
     /// Switches to `Value` keys (when a representation does not fit).
-    fn to_generic(&mut self) {
+    fn switch_to_generic(&mut self) {
         if matches!(self.map, Map::Generic(_)) {
             return;
         }
@@ -183,7 +183,7 @@ impl Interner {
             (Map::I64(class, map), _) => match Class::of_value(v) {
                 Some((c, x)) if c == *class => *map.entry(x).or_insert(next),
                 _ => {
-                    self.to_generic();
+                    self.switch_to_generic();
                     return self.intern_value(v);
                 }
             },
@@ -195,7 +195,7 @@ impl Interner {
                 }
             },
             (Map::Str(_), _) => {
-                self.to_generic();
+                self.switch_to_generic();
                 return self.intern_value(v);
             }
             (Map::Generic(map), _) => *map.entry(v.clone()).or_insert(next),
@@ -219,7 +219,9 @@ impl Interner {
         if let Map::Empty = self.map {
             self.map = match Class::of(&v.data) {
                 Some(c) => Map::I64(c, FastMap::default()),
-                None if matches!(v.data, Data::Str(_) | Data::Dict(..)) => Map::Str(FastMap::default()),
+                None if matches!(v.data, Data::Str(_) | Data::Dict(..)) => {
+                    Map::Str(FastMap::default())
+                }
                 None => Map::Generic(FastMap::default()),
             };
         }
@@ -230,7 +232,7 @@ impl Interner {
             _ => false,
         };
         if !fits {
-            self.to_generic();
+            self.switch_to_generic();
         }
         let valid = v.valid.as_deref();
         match (&mut self.map, &v.data) {
@@ -480,8 +482,8 @@ impl KeyTable {
                 let w = self.interners.len();
                 let mut key = vec![0u32; w];
                 for i in 0..n {
-                    for c in 0..w {
-                        key[c] = self.scratch[c][i];
+                    for (k, ids) in key.iter_mut().zip(&self.scratch) {
+                        *k = ids[i];
                     }
                     let next = self.groups as u32;
                     let g = match map.get(key.as_slice()) {
@@ -559,15 +561,15 @@ impl KeyTable {
             Composite::Many(map) => {
                 let w = self.interners.len();
                 let mut ids: Vec<Vec<u32>> = vec![Vec::new(); w];
-                for c in 0..w {
-                    self.interners[c].lookup(&keys[c], &mut ids[c], &mut caches[c]);
+                for (c, interner) in self.interners.iter().enumerate() {
+                    interner.lookup(&keys[c], &mut ids[c], &mut caches[c]);
                 }
                 let mut key = vec![0u32; w];
                 for i in 0..n {
                     let mut missing = false;
-                    for c in 0..w {
-                        key[c] = ids[c][i];
-                        missing |= key[c] == NO_ROW;
+                    for (k, col) in key.iter_mut().zip(&ids) {
+                        *k = col[i];
+                        missing |= *k == NO_ROW;
                     }
                     out.push(if missing {
                         NO_ROW
@@ -605,7 +607,9 @@ impl KeyTable {
                         Composite::One => self.interners[0].value(g).clone(),
                         _ => {
                             let w = self.width();
-                            self.interners[c].value(self.group_ids[g as usize * w + c]).clone()
+                            self.interners[c]
+                                .value(self.group_ids[g as usize * w + c])
+                                .clone()
                         }
                     })
                     .collect();
@@ -632,8 +636,18 @@ mod tests {
     #[test]
     fn interning_and_lookup() {
         let mut t = KeyTable::new(2);
-        let a = Vector::from_values(vec![Value::Int(1), Value::Int(2), Value::Int(1), Value::Null]);
-        let b = Vector::from_values(vec![Value::str("x"), Value::str("x"), Value::str("x"), Value::Null]);
+        let a = Vector::from_values(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(1),
+            Value::Null,
+        ]);
+        let b = Vector::from_values(vec![
+            Value::str("x"),
+            Value::str("x"),
+            Value::str("x"),
+            Value::Null,
+        ]);
         let mut out = Vec::new();
         t.assign(&[a.clone(), b.clone()], 4, &mut out);
         assert_eq!(out, vec![0, 1, 0, 2]);

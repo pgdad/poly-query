@@ -24,13 +24,25 @@ const CHECK_INTERVAL: usize = 1024;
 pub trait Operator {
     /// Produces the next row, or None when exhausted.
     fn next(&mut self, ctx: &ExecContext) -> Result<Option<Row>>;
+
+    /// Produces up to `max` further rows without materializing them and
+    /// returns how many there were (`result: "count"`); 0 at the end.
+    fn skip(&mut self, ctx: &ExecContext, max: u64) -> Result<u64> {
+        let mut n = 0;
+        while n < max && self.next(ctx)?.is_some() {
+            n += 1;
+        }
+        Ok(n)
+    }
 }
 
 /// Builds the operator tree for a physical plan in the execution mode of
 /// `ctx` (row-at-a-time or vectorized).
 pub fn build(plan: PhysicalPlan, ctx: &ExecContext) -> Box<dyn Operator> {
     if ctx.exec.vectorized {
-        Box::new(crate::exec::vector::ops::RowSink::new(crate::exec::vector::build(plan, ctx)))
+        Box::new(crate::exec::vector::ops::RowSink::new(
+            crate::exec::vector::build(plan, ctx),
+        ))
     } else {
         build_row(plan)
     }
@@ -376,6 +388,9 @@ fn key(keys: &[Option<Vec<Value>>], i: usize) -> &[Value] {
     keys[i].as_deref().unwrap_or(&[])
 }
 
+/// Materialized rows with their join keys (None for a NULL key).
+type KeyedRows = (Vec<Row>, Vec<Option<Vec<Value>>>);
+
 /// Materialized, sorted inputs of a merge join.
 struct MergeState {
     left: Vec<Row>,
@@ -407,7 +422,7 @@ impl MergeJoinOp {
         mut right: Box<dyn Operator>,
         ctx: &ExecContext,
     ) -> Result<MergeState> {
-        let read = |input: &mut Box<dyn Operator>, is_left: bool| -> Result<(Vec<Row>, Vec<Option<Vec<Value>>>)> {
+        let read = |input: &mut Box<dyn Operator>, is_left: bool| -> Result<KeyedRows> {
             let mut rows = Vec::new();
             let mut keys = Vec::new();
             while let Some(row) = input.next(ctx)? {
@@ -427,8 +442,12 @@ impl MergeJoinOp {
         };
         let (left_rows, lkeys) = read(&mut left, true)?;
         let (right_rows, rkeys) = read(&mut right, false)?;
-        let mut lsorted: Vec<usize> = (0..left_rows.len()).filter(|&i| lkeys[i].is_some()).collect();
-        let mut rsorted: Vec<usize> = (0..right_rows.len()).filter(|&i| rkeys[i].is_some()).collect();
+        let mut lsorted: Vec<usize> = (0..left_rows.len())
+            .filter(|&i| lkeys[i].is_some())
+            .collect();
+        let mut rsorted: Vec<usize> = (0..right_rows.len())
+            .filter(|&i| rkeys[i].is_some())
+            .collect();
         lsorted.sort_by(|&a, &b| compare_join_keys(key(&lkeys, a), key(&lkeys, b)));
         rsorted.sort_by(|&a, &b| compare_join_keys(key(&rkeys, a), key(&rkeys, b)));
         ctx.check_interrupt()?;
@@ -479,7 +498,7 @@ impl Operator for MergeJoinOp {
                 return Ok(None);
             };
             self.pos += 1;
-            if self.pos % CHECK_INTERVAL == 0 {
+            if self.pos.is_multiple_of(CHECK_INTERVAL) {
                 ctx.check_interrupt()?;
             }
             let left = &state.left[l];
