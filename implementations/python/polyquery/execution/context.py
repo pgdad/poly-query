@@ -22,7 +22,7 @@ VALUE_BYTES = 16
 
 # parallel pipelines whose driving scan has fewer rows run their partitions
 # one after the other in the calling thread instead of in worker processes
-DEFAULT_PARALLEL_MIN_ROWS = 200_000
+DEFAULT_PARALLEL_MIN_ROWS = 50_000
 
 
 @dataclass

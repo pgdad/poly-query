@@ -488,8 +488,9 @@ class PlanOptions:
     join: str = "auto"  # auto, hash, merge, nested_loop
     use_indexes: bool = True
     threads: int = 1  # > 1: parallel pipelines (Gather)
-    # only pipelines whose driving scan has at least this many (estimated)
-    # rows are parallelized (automatic parallelism: small inputs stay serial)
+    # automatic parallelism (> 0): only pipelines whose driving scan has at
+    # least this many (estimated) rows, and at least BUILD_SCAN_RATIO times
+    # the rows their join build sides scan, are parallelized
     parallel_min_rows: float = 0
     mode: str = "auto"  # auto (= vectorized), row, vectorized
     # the indexes of a table (catalog lookup)
@@ -872,6 +873,10 @@ MAX_PARTITIONS = 64
 # sort) is parallelized only if it is expected to return at most this
 # fraction of the rows it scans: every row of a worker process is pickled
 ROOT_GATHER_MAX_SELECTIVITY = 0.25
+# automatic parallelism: the driving scan must read at least this many times
+# the rows scanned to build the pipeline's join hash tables (each worker
+# builds them; 16 workers doing so contend for memory bandwidth)
+BUILD_SCAN_RATIO = 2.0
 # full sorts of pipelines scanning fewer rows are not parallelized unless
 # the pipeline is selective (range partitioning pays off for large inputs)
 RANGE_SORT_MIN_ROWS = 100_000
@@ -887,11 +892,40 @@ def parallelize(root: PhysicalNode, partitions: int, min_rows: float = 0) -> Phy
     return _gather_selective(root, partitions, min_rows)
 
 
+def _worth_partitioning(path: list[PhysicalNode], min_rows: float) -> bool:
+    """Automatic parallelism (``min_rows`` > 0): the driving scan is large,
+    and large compared with the join build sides on the path, which every
+    worker builds for itself."""
+    if min_rows <= 0:
+        return True
+    driver_rows = path[-1].estimated_rows
+    if driver_rows < min_rows:
+        return False
+    built = sum(_scanned_rows(build) for build in _build_inputs(path))
+    return driver_rows >= BUILD_SCAN_RATIO * built
+
+
+def _build_inputs(path: list[PhysicalNode]) -> list[PhysicalNode]:
+    out: list[PhysicalNode] = []
+    for node in path:
+        if isinstance(node, HashJoin):
+            out.append(node.right if node.build == "right" else node.left)
+        elif isinstance(node, (NestedLoopJoin, MergeJoin)):
+            out.append(node.right)
+    return out
+
+
+def _scanned_rows(node: PhysicalNode) -> float:
+    if isinstance(node, (TableScan, IndexScan, LookupScan)):
+        return node.estimated_rows
+    return sum(_scanned_rows(child) for child in node.inputs())
+
+
 def _gather_selective(node: PhysicalNode, partitions: int, min_rows: float) -> PhysicalNode:
     path = pipeline_path(node)
     if path is None or not any(isinstance(n, (Filter, _Join)) for n in path):
         return node
-    if path[-1].estimated_rows < min_rows:
+    if not _worth_partitioning(path, min_rows):
         return node
     if node.estimated_rows > ROOT_GATHER_MAX_SELECTIVITY * max(path[-1].estimated_rows, 1.0):
         return node
@@ -902,7 +936,7 @@ def _gather_large(node: PhysicalNode, partitions: int, min_rows: float) -> Physi
     """A Gather over a large pipeline below a full sort (which the
     vectorized engine sorts by key ranges in parallel)."""
     path = pipeline_path(node)
-    if path is None or path[-1].estimated_rows < max(min_rows, RANGE_SORT_MIN_ROWS):
+    if path is None or path[-1].estimated_rows < RANGE_SORT_MIN_ROWS or not _worth_partitioning(path, min_rows):
         return node
     return _estimated(Gather(node, partitions, path[-1]), node.estimated_rows)
 
@@ -917,7 +951,7 @@ def _parallelize_inputs(node: PhysicalNode, partitions: int, min_rows: float) ->
         _parallelize_inputs(child, partitions, min_rows)
     if isinstance(node, (HashAggregate, TopN, Distinct)):
         path = pipeline_path(node.input)
-        if path is not None and path[-1].estimated_rows >= min_rows:
+        if path is not None and _worth_partitioning(path, min_rows):
             node.input = _estimated(Gather(node.input, partitions, path[-1]), node.input.estimated_rows)
     elif isinstance(node, Sort):
         gathered = _gather_selective(node.input, partitions, min_rows)

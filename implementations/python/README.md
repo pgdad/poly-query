@@ -50,9 +50,13 @@ python3 tools/native_difftest.py --lib LIB   # native: true vs false on random q
 python3 tools/native_bench.py --lib LIB      # kernel micro-benchmarks vs the CPython code
 ```
 
-Engine-specific flag: `--parallel-min-rows N` (default 200,000): parallel
-pipelines whose driving scan has fewer rows run their partitions in-process
-(see Phase 5).
+`--threads N` sets the default parallelism of queries without a `threads`
+option; without it the engine chooses automatically (one partition per CPU,
+at most 16, for vectorized queries over large inputs — see *Latency
+optimization* below). Engine-specific flag: `--parallel-min-rows N` (default
+200,000): parallel pipelines whose driving scan has fewer rows run their
+partitions in-process, and automatic parallelism only partitions pipelines
+at least this large (see Phase 5).
 
 `bin/polyquery` is a POSIX shell launcher that resolves its own location and
 runs `entry.py` with `python3 -I` (isolated mode: neither the current directory
@@ -74,7 +78,7 @@ logical plan → optimizer → physical plan → execution**.
 | `polyquery/analysis/` | `binder.py` (name resolution, CTE/derived-table/subquery binding, aggregate extraction, GROUP BY validation, ORDER BY resolution), `scope.py` (range variables, correlation tracking, CTE environments), `typing_rules.py` (promotion lattice, CAST matrix, CASE/IN/BETWEEN/LIKE typing), `functions.py` (function signatures & result types), `bound.py` (bound expression / query model) |
 | `polyquery/planner/` | `pipeline.py` (bound statement → logical plan → optimizer → physical plan), `planner.py` (bound query → logical plan), `logical.py` (`LogicalPlan`; Scan, Values, SubqueryScan, UnionAll, Filter, Join, Aggregate, Project, Distinct, Sort, Limit; `format_plan`), `optimizer.py` (rule-based optimizer) with `rules/` (one module per rule: constant folding, predicate simplification, predicate pushdown, column pruning), `physical.py` (all execution decisions: TableScan, IndexScan, LookupScan, HashJoin, MergeJoin, NestedLoopJoin, HashAggregate, TopN, Gather, … with cardinality estimates, join reordering, parallel pipelines, execution mode, native kernel plans, and the EXPLAIN JSON), `access.py` (index-usable predicates, selectivity estimation, index selection, row-group skipping), `explain.py` (expression rendering) |
 
-| `polyquery/execution/` | `compiler.py` (bound expression → row closure, incl. subquery evaluation), `vcompiler.py` (bound expression → vector function over column batches), `row_engine.py` (row-at-a-time Volcano operators, `mode:"row"`), `vector_engine.py` (column-batch operators, `mode:"vectorized"`/`auto`), `parallel.py` (partitioned execution of `Gather` pipelines, in-process or in forked workers), `common.py` (algorithms shared by both engines: merge pairing, sort orders, join limits, LookupScan tables), `group_states.py` (columnar aggregation state of the vectorized engine), `aggregates.py` (accumulators of the row engine), `functions.py` (scalar function kernels), `casts.py`, `executor.py` (mode dispatch, result streaming), `context.py` (timeout / cancellation / memory budget / join-row limit, correlation parameters, per-statement caches, GC pausing) |
+| `polyquery/execution/` | `compiler.py` (bound expression → row closure, incl. subquery evaluation), `vcompiler.py` (bound expression → vector function over column batches), `row_engine.py` (row-at-a-time Volcano operators, `mode:"row"`), `vector_engine.py` (column-batch operators, `mode:"vectorized"`/`auto`; parallel range-partitioned sorts and hash-exchange aggregation), `parallel.py` (partitioned execution of `Gather` pipelines: in-process, in the worker pool or in per-query forked workers), `workers.py` (the persistent pool of forked worker processes), `common.py` (algorithms shared by both engines: merge pairing, sort orders, join limits, LookupScan tables), `group_states.py` (columnar aggregation state of the vectorized engine), `aggregates.py` (accumulators of the row engine), `functions.py` (scalar function kernels), `casts.py`, `executor.py` (mode dispatch, result streaming), `context.py` (timeout / cancellation / memory budget / join-row limit, correlation parameters, per-statement caches, GC pausing) |
 | `polyquery/execution/native_ops.py` | Execution paths that use the kernels (`native: true`): scan filtering, gathers, scan aggregation, group sums, hash partitioning; `kernel_plan` compiles the kernel plan of an operator for the physical planner |
 | `polyquery/service.py` | `Engine` facade: owns the catalog, runs `load`, SQL and `explain` |
 | `polyquery/protocol/` | Transport-independent request handler (validation, path safety, responses, streaming cursor), JSON-lines session loop, exec mode, canonical value serialization |
@@ -452,38 +456,44 @@ join must first sort both inputs (no input arrives sorted in this engine),
 so equi-joins get a `HashJoin` built on the smaller input (the right input
 for LEFT joins).
 
-**`threads: N`** (default `--threads`, 1). With N > 1 the planner wraps
-every *pipeline* in a `Gather(partitions = min(N, 64))`. A pipeline is a
-chain of streaming operators (Filter, Project, SubqueryScan, join probe
-sides) driven by one TableScan or IndexScan. Gathers are inserted below
-the operators that can merge partial results, and at the root when the
-pipeline is selective (estimated ≤ 25% of the scanned rows). Each
-partition reads a disjoint row range of the driving scan:
-* `HashAggregate`: partial aggregation per partition, then merge;
-* `Sort`: local sort, then a stable re-sort of the concatenated runs;
+**`threads: N`** (default `--threads`; without either, *automatic*: see
+*Latency optimization*). With N > 1 the planner wraps every *pipeline* in
+a `Gather(partitions = min(N, 64))`. A pipeline is a chain of streaming
+operators (Filter, Project, SubqueryScan, join probe sides) driven by one
+TableScan or IndexScan. Gathers are inserted below the operators that can
+merge partial results, at the root when the pipeline is selective
+(estimated ≤ 25% of the scanned rows), and below full sorts of large
+pipelines. Each partition reads a disjoint row range of the driving scan:
+* `HashAggregate`: partial aggregation per partition, then merge (with
+  many groups: a hash exchange, see below);
+* `Sort`: range-partitioned parallel sort in the worker pool (see below);
+  in-process partitions only collect and the rows are sorted once;
 * `TopN`: local top-N, then merge;
 * `Distinct`: local, then global deduplication;
 * root: partitions concatenated in order.
 
-Join build sides on the path are built once before the partitions run.
-Partial results are merged in partition order, so group order, ties and
-float sums (`fsum`-based) do not depend on the partitioning. Subquery
-plans stay serial.
+Join build sides on the path are built once per process before the
+partitions run. Partial results are merged in partition order, so group
+order, ties and float sums (`fsum`-based) do not depend on the
+partitioning. Correlated subquery plans stay serial; uncorrelated ones
+(executed once) are parallelized like the main plan.
 
 *Why processes:* CPython's GIL serializes threads, so threads cannot make
 CPU-bound operators faster. When the driving scan has at least
-`--parallel-min-rows` rows (default 200,000), the partitions run in forked
-worker processes (`execution/parallel.py`): at most one per CPU, each
-handling every k-th partition. A child inherits a copy-on-write snapshot
-of the immutable tables, the compiled plan and the prepared build sides.
-It sends its partial result back through a pipe as a pickle. Columnar
-group states, plain value lists and row lists all pickle cheaply. The
-parent waits with `selectors`, observing cancellation and the deadline,
-and kills all workers on error, cancel or timeout. Smaller inputs run
-their partitions one after the other in the calling thread, through the
-same partial/merge code, so the conformance matrix (`threads: 4` on small
-tables) exercises the parallel logic. A unit test and `tools/difftest.py`
-cover the forked path.
+`--parallel-min-rows` rows (default 200,000), the partitions run in
+worker processes: normally in the engine's persistent worker pool
+(`execution/workers.py`, see *Latency optimization*), else — while
+another query uses the pool, or with `native: true` — in processes forked
+for the query (`execution/parallel.py`), at most one per CPU, each
+handling every k-th partition and inheriting a copy-on-write snapshot of
+the tables, the compiled plan and the prepared build sides. Results come
+back through pipes as length-prefixed pickles; the parent waits with
+`selectors`, observing cancellation and the deadline, and kills the
+workers on cancel or timeout. Smaller inputs run their partitions one
+after the other in the calling thread, through the same partial/merge
+code, so the conformance matrix (`threads: 4` on small tables) exercises
+the parallel logic. Unit tests and `tools/difftest.py` cover the pool and
+forked paths.
 
 **`optimize: false`** disables all logical rewrites (the optimizer applies
 no rule) and the physical planner's two cost-based alternatives (the last
@@ -960,7 +970,10 @@ python3 tools/native_difftest.py --lib ../../native-kernels/build/x86_64/libpqke
   `vectorized`; `join` is `auto`, `hash`, `merge` or `nested_loop`; unknown
   values of these enum options are `UNSUPPORTED`; ill-typed option values
   (also `threads` < 1) are `INVALID_REQUEST`. A query without `threads`
-  uses the engine's `--threads`. `native: true` uses the native kernels
+  uses the engine's `--threads`, else automatic parallelism (vectorized
+  queries without native kernels over inputs of ≥ `--parallel-min-rows`
+  rows; row mode — the serial baseline — and `native: true` default to
+  one partition). `native: true` uses the native kernels
   when `--native-kernels` loaded them and is a no-op otherwise.
 * **Phase 5 result order**: without ORDER BY the row order may differ
   between join algorithms (a merge join emits in key order); for a given
@@ -1046,14 +1059,25 @@ python3 tools/native_difftest.py --lib ../../native-kernels/build/x86_64/libpqke
 
 * The GIL serializes CPU work: concurrent queries interleave rather than run
   in parallel, so throughput does not scale with `--workers`. Intra-query
-  parallelism (`threads`) uses forked worker processes instead, which needs
-  `os.fork` (POSIX) and pays a fork plus a pickle round-trip per pipeline
-  (hence `--parallel-min-rows`).
-* Parallel speedups are limited by the serial parts: the merge of partial
-  results in the parent (high-cardinality GROUP BY), returning many rows
+  parallelism (`threads`) uses worker processes instead, which needs
+  `os.fork` (POSIX) and pays a pickle round-trip per pipeline (hence
+  `--parallel-min-rows`). Only one query at a time uses the worker pool;
+  concurrent parallel queries fork their own workers (a few ms per fork
+  with large tables loaded).
+* The pool is forked lazily by the first parallel query after a catalog
+  change (load, drop, index, …): about 6 ms per worker with ~1 GB of
+  tables loaded, ~100 ms for 16 workers. Its workers keep the pages they
+  touched as private copies (copy-on-write): after the whole analytics
+  workload at scale 1m, 16 workers held ~1.2 GB of private memory next to
+  the parent's ~1 GB.
+* Parallel speedups are limited by the serial parts: returning many rows
   from workers (non-selective scans are therefore not parallelized at the
-  root), and full sorts, whose re-sort of the merged runs is serial.
-  Hash-join build sides and subquery plans are always built serially.
+  root), the parent's concatenation of sorted ranges, and hash-join build
+  sides, which every worker builds itself (a large build side costs every
+  worker the same time). Correlated subquery plans run serially.
+* 16 busy workers share memory bandwidth (and on this machine, other
+  tenants' load): each runs memory-bound Python code up to ~3× slower
+  than a single process, which caps the speedup well below 16.
 * Worker processes each enforce `--max-query-memory-mb` on their own
   partition, so a parallel query may use up to (workers + 1) × the budget.
 * The native kernels only cover the work listed under *Native kernels*:
