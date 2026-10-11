@@ -343,13 +343,20 @@ cannot beat the current K-th row. Index scans, correlated hash lookups and
 `Values` run their row implementation behind batch adapters.
 
 **Errors.** Kernels evaluate an expression for a whole batch before the next
-expression, while the row executor finishes a row before the next one. To
-report the same error when different rows fail differently, a data error
-raised by a filter, projection or aggregation kernel makes the operator
-replay that batch row by row with the row implementation and signal the
-first error in row order. Parallel runs report the error of the earliest
-failing morsel (morsels before it are completed, later ones are not
-started), which is the error a serial run would have raised.
+expression, while the row executor finishes a row before the next one, so
+when different rows fail with different errors the first error met can
+differ (the spec allows any). The engine nevertheless reports the row
+executor's error:
+* a data error (`NUMERIC_OVERFLOW`, `DIVISION_BY_ZERO`, `CONVERSION_ERROR`,
+  `INVALID_ARGUMENT`, `SUBQUERY_CARDINALITY`) of a vectorized statement makes
+  it re-run on the row executor (same plan options, serial), whose outcome is
+  returned — errors are exceptional, so this costs nothing otherwise. For
+  streamed results this happens if no row has been produced yet;
+* within the vectorized executor, a data error raised by a filter,
+  projection or aggregation kernel makes the operator replay the batch row by
+  row and signal the first error in row order, and parallel runs report the
+  error of the earliest failing morsel (morsels before it are completed,
+  later ones are not started) — what a serial run would raise.
 
 **Cache-aware hash tables** (`keytable.lisp`). Group ids are assigned by an
 open-addressing table with linear probing over a flat `fixnum` slot array
