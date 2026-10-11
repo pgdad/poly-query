@@ -4,10 +4,11 @@
 //   sort_rows_par(x0 Row** rows, x1 n, x2 key descriptors, x3 number of
 //                 leading keys that are ORDER BY keys)
 //       sorts like exec.S sort_rows (qsort_r with cmp_rows; mode "row"). In
-//       vectorized mode with sort_rows_fast (normalized-key radix sort), and
-//       with threads > 1 and at least 2 * g_par_min_rows rows: the array is
-//       cut into one chunk per task, the chunks are sorted in parallel, then
-//       merged pairwise in rounds (the merges of a round run in parallel),
+//       vectorized mode with sort_rows_fast (normalized-key radix sort) when
+//       the first ORDER BY key is not a STRING; otherwise, with threads > 1
+//       and at least 2 * g_par_min_rows rows: the array is cut into one
+//       chunk per task, the chunks are sorted in parallel, then merged
+//       pairwise in rounds (the merges of a round run in parallel),
 //       alternating between the array and a scratch array.
 //
 // The ORDER BY / DISTINCT key lists end with every visible column as a
@@ -46,7 +47,15 @@ FUNC sort_rows_par
     ldr  w9, [x9]
     cmp  w9, #XM_ROW
     b.eq .Lsp_serial
-    TLS_LDR x9, g_x_threads
+    ldr  x9, [sp]                       // radix-able first ORDER BY key:
+    cbz  x9, 1f                         // the single-threaded radix sort
+    ldr  x9, [x21]                      // beats chunk sorts + comparator
+    cbz  x9, 1f                         // merges
+    ldrb w9, [x21, #(8 + 8)]
+    cbz  w9, 1f
+    cmp  w9, #T_STR
+    b.ne .Lsp_fast
+1:  TLS_LDR x9, g_x_threads
     cmp  x9, #1
     b.ls .Lsp_fast
     LDR_G x10, g_par_min_rows
