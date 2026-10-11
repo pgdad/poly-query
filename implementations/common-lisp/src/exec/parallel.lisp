@@ -70,9 +70,20 @@ is not a parallelizable pipeline."
           (pipeline-scan (hash-join-probe-node node))))
     (t nil)))
 
+(defun scan-morsel-rows (scan)
+  "Rows per morsel of SCAN: MORSEL-ROWS, but smaller for small tables (down to
+a batch) so that every worker gets about four morsels; a forced size
+(*MORSEL-ROWS* or POLYQUERY_MORSEL_ROWS) is used as is."
+  (let ((size (morsel-rows)))
+    (if (or *morsel-rows* (/= size 16384))
+        size
+        (let ((rows (reduce #'+ (scan-segments scan) :key #'segment-count))
+              (threads (max 1 (parallel-threads))))
+          (max +batch-size+ (min size (* +batch-size+ (ceiling rows (* 4 threads +batch-size+)))))))))
+
 (defun scan-morsels (scan)
   "Vector of the (segment start end) morsels of a TableScan."
-  (let ((size (morsel-rows)))
+  (let ((size (scan-morsel-rows scan)))
     (coerce (loop for seg in (scan-segments scan)
                   nconc (loop for start from 0 below (segment-count seg) by size
                               collect (list seg start (min (segment-count seg) (+ start size)))))
@@ -238,12 +249,13 @@ morsel fails."
 workers, yielding the batches in serial order. REDUCE, when given, maps the
 list of output batches of each morsel to the batches handed on (in the
 worker)."
-  (let ((morsel-count (length (scan-morsels scan)))
-        (workers (min threads (length (scan-morsels scan)))))
+  (let* ((morsels (scan-morsels scan))   ; fixed at compile time
+         (morsel-count (length morsels))
+         (workers (min threads morsel-count)))
     (multiple-value-bind (copies providers) (compile-pipeline-copies node workers)
       (lambda ()
         (mapc #'funcall providers)
-        (let* ((run (make-prun (scan-morsels scan)))
+        (let* ((run (make-prun morsels))
                (k 0)
                (pending '()))
           (declare (type fixnum k))
@@ -351,7 +363,8 @@ as in GROUP-STATE-PARTITIONS."
 THREADS workers, each aggregating into a partial group state (or
 partitioning its rows, see above)."
   (let* ((child (pnode-child node))
-         (morsel-count (length (scan-morsels scan)))
+         (morsels (scan-morsels scan))   ; fixed at compile time
+         (morsel-count (length morsels))
          (workers (min threads morsel-count))
          (consumers (loop repeat workers
                           collect (multiple-value-list
@@ -366,7 +379,7 @@ partitioning its rows, see above)."
           (lambda ()
             (unless output
               (mapc #'funcall providers)
-              (let ((run (make-prun (scan-morsels scan)))
+              (let ((run (make-prun morsels))
                     (states (make-array workers :initial-element nil))
                     (chunk-lists (make-array workers :initial-element nil)))
                 (prun-start run workers
