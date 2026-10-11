@@ -14,6 +14,7 @@ int main(void){
   size_t N=1000; int64_t *d=malloc(N*8+8),*d2=malloc(N*8+8),*o64=malloc(N*8+64); uint8_t *val=malloc(N/8+2), *bo=malloc(N+64); uint32_t *idx=malloc(N*4+64), *gid=malloc(N*4);
   for(size_t i=0;i<N;i++){d[i]=(int64_t)(i*7919)%201-100; d2[i]=(int64_t)(i*104729)%201-100; idx[i]=(uint32_t)((i*31)%N); gid[i]=(uint32_t)(i%10);} memset(val,0x5b,N/8+2);
   int64_t sums[16],counts[16],mn,mx; double fmn,fmx;
+  pqk_i128 *w=(pqk_i128 *)d, q128, x128;  /* N/2 128-bit rows over d (n/2 <= 500) */
   for(int vi=0;vi<3;vi++){ pqk_table t; if(!pqk_variant_table(vars[vi],&t)) continue;
     size_t ns[]={0,1,7,63,64,65,200,1000};
     for(size_t k=0;k<sizeof ns/sizeof*ns;k++){ size_t n=ns[k];
@@ -36,6 +37,14 @@ int main(void){
           {"group_sum_i64",(void*)t.group_sum_i64,{U(gid),U(d),U(v),n,U(sums),U(counts),16}},
           {"gather_i64",(void*)t.gather_i64,{U(d),U(idx),n,U(o64),0,0,0}},
           {"filter_i64(bad op)",(void*)t.filter_i64,{U(d),U(v),n,77,0,0,U(idx)}},
+          {"filter_i128",(void*)t.filter_i128,{U(w),U(v),n/2,6,U(w+3),U(w+9),U(idx)}},
+          {"filter_i128(lt)",(void*)t.filter_i128,{U(w),U(v),n/2,2,U(w+3),0,U(idx)}},
+          {"count_i128",(void*)t.count_i128,{U(w),U(v),n/2,6,U(w+3),U(w+9),0}},
+          {"count_i128(ne)",(void*)t.count_i128,{U(w),U(v),n/2,1,U(w+3),0,0}},
+          {"sum_i128",(void*)t.sum_i128,{U(w),U(v),n/2,U(&q128),0,0,0}},
+          {"minmax_i128",(void*)t.minmax_i128,{U(w),U(v),n/2,U(&q128),U(&x128),0,0}},
+          {"filter_i128(bad op)",(void*)t.filter_i128,{U(w),U(v),n/2,7,0,0,U(idx)}},
+          {"count_i128(bad op)",(void*)t.count_i128,{U(w),U(v),n/2,(uint64_t)-1,0,0,0}},
         };
         for(size_t c=0;c<sizeof calls/sizeof*calls;c++){ uint64_t r=abi_call(calls[c].fn,calls[c].a,out);
           if(r){ bad++; printf("ABI VIOLATION %s %s n=%zu v=%d: 0x%llx\n",vars[vi],calls[c].nm,n,withv,(unsigned long long)r);} }
