@@ -303,9 +303,9 @@ def build(weights: dict) -> dict:
     perf_rep = []
     for p in perf:
         meta = p["meta"]
-        # Before/after benchmarks of optimization runs measure task branches (some never merged):
-        # they belong to report 6 only, never to the main-line performance of reports 3, 4 and 8.
-        if meta["bench_id"].endswith(("-before-optimize", "-after-optimize")):
+        # Before/after benchmarks measure task branches (some never merged): they belong to report 6
+        # only. Track B benchmarks never enter the Track A reports 3, 4 and 8.
+        if re.search(r"-(before|after)-[a-z-]+$", meta["bench_id"]) or meta.get("track", "A") != "A":
             continue
         entry = {"bench_id": meta["bench_id"], "scale": meta["scale"], "track": meta.get("track"), "source": p["_path"],
                  "host_cpu": None, "engines": {}}

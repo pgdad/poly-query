@@ -8,10 +8,14 @@
 # separate worktrees, are built inside the sandbox and benchmarked back-to-back with
 # the same harness and deterministically regenerated datasets. Run with no agents active.
 #
-# Usage: before_after.sh <scale> <run_id>...   (one optimize-latency run per language)
+# Usage: before_after.sh <scale> <run_id>...   (one run per language)
+# PQ_BA_TASK names the task in the labels (default optimize -> "<side>-optimize");
+# PQ_BA_TRACK is passed to bench.py (default A; Track B runs are reported only in Track B).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 SCALE=$1; shift
+TASK=${PQ_BA_TASK:-optimize}
+TRACK=${PQ_BA_TRACK:-A}
 BASE=${PQ_BEFORE_AFTER_DIR:-/srv/polyquery/before-after}
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 langs=()
@@ -38,12 +42,12 @@ for side in before after; do
   done
 done
 for side in before after; do
-  (cd "$BASE/$side" && python3 benchmarks/harness/bench.py --engines "$list" --scale "$SCALE" --label "$side-optimize")
-  for d in "$BASE/$side"/results/performance/*"-$SCALE-$side-optimize"; do
+  (cd "$BASE/$side" && python3 benchmarks/harness/bench.py --engines "$list" --scale "$SCALE" --label "$side-$TASK" --track "$TRACK")
+  for d in "$BASE/$side"/results/performance/*"-$SCALE-$side-$TASK"; do
     # The worktree also contains earlier, already committed result dirs.
     [[ -e "results/performance/$(basename "$d")" ]] && continue
     cp -r "$d" "results/performance/$(basename "$d")"
   done
 done
-printf '%s\n' "$@" > "results/performance/optimize-runs-$STAMP.txt"
+printf '%s\n' "$@" > "results/performance/$TASK-runs-$STAMP.txt"
 for side in before after; do git worktree remove --force "$BASE/$side"; done
