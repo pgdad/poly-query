@@ -12,7 +12,7 @@
     },
     "build": {
       "jar": "target/polyquery.jar (the JDK AOT cache only covers classes loaded from jar files)",
-      "aot_cache": "make build records target/polyquery.aot with -XX:AOTCacheOutput by replaying a synthetic training session (script/training.clj: generated tables, generic queries) through bin/polyquery; training failure leaves no cache and the build still succeeds"
+      "aot_cache": "make build records target/polyquery.aot with -XX:AOTCacheOutput by replaying a synthetic training session (script/training.clj: generated tables with NULLs in every column type, generic queries, never the benchmark queries) through bin/polyquery; training failure leaves no cache and the build still succeeds"
     },
     "launcher_jvm_flags": [
       "-XX:AOTCache=target/polyquery.aot (only when the file exists; -Xlog:aot*=off,cds*=off so a stale or unusable cache is ignored silently)",
@@ -37,7 +37,10 @@
       "-XX:+AlwaysPreTouch",
       "-XX:ReservedCodeCacheSize",
       "-XX:+AOTCompileEagerly",
-      "-XX:CICompilerCount=24"
+      "-XX:CICompilerCount=24",
+      "Math/addExact|subtractExact|multiplyExact in arithmetic kernels (existing explicit overflow checks kept)",
+      "unboxed partial-aggregate merges",
+      "-XX:+UseZGC (AOT cache unusable)"
     ]
   }
 }
