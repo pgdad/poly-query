@@ -315,7 +315,7 @@ ENDF pqk_x86_avx2_compare_i64
  * int pqk_x86_avx2_sum_i64(data, validity, n, out_sum)
  * Args:     rdi = data, rsi = validity, rdx = n, rcx = out_sum
  * Returns:  eax = PQK_OK (sum stored) or PQK_OVERFLOW (*out_sum untouched)
- * Clobbers: rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, ymm0-ymm13, flags
+ * Clobbers: rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, ymm0-ymm12, flags
  *           (rbx, rbp, r12, r13 saved and restored)
  * Algorithm: exact, with biased values: x' = x ^ 2^63 = x + 2^63 is an
  *           UNSIGNED 64-bit number, and per lane S = sum(x') mod 2^64 and
@@ -339,7 +339,7 @@ ENDF pqk_x86_avx2_compare_i64
  *           (two ops on the busy vector pipes) per 4 rows.
  *           Overflow iff hi is not the sign extension of lo (JNE_SEXT).
  *           r10 = rows remaining, r11 = out_sum, r12 = rows / blocks left
- *           in the chunk, rcx = validity word, temps ymm9-ymm13.
+ *           in the chunk, rcx = validity word, temps ymm9-ymm12.
  * Tail:     no validity: 16-row iterations, then 4-row steps (set A),
  *           then the last 0..3 rows in scalar code (cqo/adc).
  *           Validity: the final partial block (lvp) row by row, scalar.
