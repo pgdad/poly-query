@@ -1,0 +1,37 @@
+{
+ "wave_id": "wave-a-phase5-a1-20261011T004454Z",
+ "task": "phase5",
+ "track": "A",
+ "attempt": 1,
+ "seed": 6877,
+ "order": [
+  "rust"
+ ],
+ "run_ids": [
+  "a-phase5-rust-a1-20261011T004454Z"
+ ],
+ "started": "2026-10-11T00:44:55+00:00",
+ "parallel": 1,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  0.69970703125,
+  0.78564453125,
+  0.93798828125
+ ],
+ "finished": "2026-10-11T02:08:22+00:00",
+ "loadavg_end": [
+  2.27734375,
+  3.29833984375,
+  3.32666015625
+ ],
+ "results": [
+  {
+   "run_id": "a-phase5-rust-a1-20261011T004454Z",
+   "outcome": "success"
+  }
+ ]
+}
