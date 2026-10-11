@@ -71,6 +71,18 @@
  *                     ngroups); the scatter-add itself is scalar (no NEON
  *                     scatter), in row order with ADDS/CSINC overflow flag.
  *   gather_i64        4-way unrolled scalar loads (no NEON gather).
+ *   filter_i128 /     LD2 {.2d} splits 2 rows into lo/hi word vectors; the
+ *   count_i128        128-bit range predicate costs 8 lane ops per 2 rows
+ *                     (borrow via CMHI mask, CMHS/CMHI/CMEQ + BIF); 8 rows
+ *                     per iteration; filter packs an 8-bit mask and reuses
+ *                     EMIT8, count accumulates lane masks.
+ *   sum_i128          exact: LD4 {.4s} splits 4 rows into their 32-bit limbs
+ *                     (one vector per limb); UADALP (limbs 0-2) / SADALP
+ *                     (limb 3) into 64-bit lanes; blocks of 2^28 rows folded
+ *                     into a 192-bit GPR total; overflow iff the total is
+ *                     outside int128.
+ *   minmax_i128       signed 128-bit lane compares (CMGT/CMEQ/CMHI + BIT),
+ *                     two accumulator sets, GPR fold of the 4 lane pairs.
  */
 #include "pq_a64_macros.h"
 
@@ -1242,5 +1254,500 @@ FUNC pqk_a64_neon_gather_i64
     b       2b
 3:  ret
 ENDF pqk_a64_neon_gather_i64
+
+/* ========================================================================
+ * 128-bit kernels (CR-4, kernels 17-20).
+ *
+ * Data layout: LD2 {.2d} of 32 bytes de-interleaves two pqk_i128 rows into
+ * a lo-word vector and a hi-word vector (lane j = row j), so every 128-bit
+ * operation becomes a short sequence of 64-bit lane operations:
+ *   unsigned 128-bit a <= b : (a_hi <u b_hi) | (a_hi == b_hi & a_lo <=u b_lo)
+ *   signed   128-bit a <  b : (a_hi <s b_hi) | (a_hi == b_hi & a_lo <u b_lo)
+ * evaluated as CMHI/CMGT + CMEQ + CMHS/CMHI and one BIT/BIF select; the
+ * 128-bit subtraction x - lo propagates the borrow with CMHI (all-ones
+ * mask = -1) added to the high word.
+ * Main loops process 8 rows (128 bytes, 4 x LD2; one validity byte); the
+ * remaining 0-7 rows go through the scalar GPR code of the macro header.
+ * ======================================================================== */
+
+/* RNG2 l, h, t: v<l>/v<h> hold the lo/hi words of 2 rows. Leaves the 2x64
+ * lane mask of ((x - lo) <=u span) (128-bit) in v<l>; clobbers v<h>, v<t>.
+ * Needs v16/v17 = lo (lo word / hi word), v18/v19 = span. 8 ops. */
+    .macro  RNG2 l, h, t
+    cmhi    v\t\().2d, v16.2d, v\l\().2d    // borrow: lo_lo >u x_lo (-1)
+    sub     v\l\().2d, v\l\().2d, v16.2d    // d_lo
+    sub     v\h\().2d, v\h\().2d, v17.2d
+    add     v\h\().2d, v\h\().2d, v\t\().2d // d_hi (borrow applied)
+    cmhs    v\l\().2d, v18.2d, v\l\().2d    // d_lo <=u span_lo
+    cmhi    v\t\().2d, v19.2d, v\h\().2d    // d_hi <u span_hi
+    cmeq    v\h\().2d, v19.2d, v\h\().2d    // d_hi == span_hi
+    bif     v\l\().16b, v\t\().16b, v\h\().16b  // eq ? lo test : hi test
+    .endm
+
+/* RNG8 xp: loads 8 rows from [xp] (post-increment by 128) and leaves the
+ * un-inverted range masks of rows (0,1),(2,3),(4,5),(6,7) in v0,v2,v4,v6.
+ * Clobbers v1,v3,v5,v7, v22-v25. */
+    .macro  RNG8 xp
+    ld2     {v0.2d, v1.2d}, [\xp], #32
+    ld2     {v2.2d, v3.2d}, [\xp], #32
+    ld2     {v4.2d, v5.2d}, [\xp], #32
+    ld2     {v6.2d, v7.2d}, [\xp], #32
+    RNG2    0, 1, 22
+    RNG2    2, 3, 23
+    RNG2    4, 5, 24
+    RNG2    6, 7, 25
+    .endm
+
+/* PACK8 wout: narrows the lane masks v0,v2,v4,v6 (rows 0..7) to an 8-bit row
+ * mask (bit j = row j). Needs v28 = .Lbitsel16 (low 8 bytes). */
+    .macro  PACK8 wout
+    uzp1    v0.4s, v0.4s, v2.4s
+    uzp1    v4.4s, v4.4s, v6.4s
+    uzp1    v0.8h, v0.8h, v4.8h
+    xtn     v0.8b, v0.8h
+    and     v0.8b, v0.8b, v28.8b
+    addv    b0, v0.8b
+    umov    \wout, v0.b[0]
+    .endm
+
+/* ------------------------------------------------------------------------
+ * size_t filter_i128(x0 data, x1 validity, x2 n, w3 op, x4 &a, x5 &b,
+ *                    x6 out_idx)
+ * Registers: x8:x7 lo, x10:x9 span (scalar copies for the tail), w5 mask
+ * inversion (0/0xff), w4 row inversion (0/1), x3 validity base, x14 row i,
+ * x11 output cursor, x12 .Lselpos, x13 .Lselcnt, x15 main-loop row limit,
+ * w16 row mask, w17 validity byte; v16:v17 lo, v18:v19 span, v20 row base
+ * (u32 x4), v21 = 8 (u32 x4), v28 bit weights, v0-v7/v22-v25 work.
+ * Algorithm: PRED128_SETUP (op validated before *a / *b are read) gives the
+ * canonical 128-bit range predicate. 8 rows per iteration: RNG8 (LD2 + 8
+ * lane ops per 2 rows), PACK8 to an 8-bit mask, EOR inversion, AND the
+ * validity byte, then EMIT8: table-driven compaction storing 8 indices
+ * branch-free (cursor k <= i and i + 8 <= n, so the 32-byte over-store stays
+ * inside the documented capacity >= n). Tail: scalar SPRED128 per row.
+ */
+FUNC pqk_a64_neon_filter_i128
+    PRED128_SETUP w3, x4, x5, x7, x8, x9, x10, x11, x12, x13, .Lnf8_inval
+    and     w5, w11, #0xff
+    and     w4, w11, #1
+    mov     x3, x1
+    mov     x14, #0
+    mov     x11, x6
+    and     x15, x2, #~7
+    cbz     x15, .Lnf8_tail
+    dup     v16.2d, x7
+    dup     v17.2d, x8
+    dup     v18.2d, x9
+    dup     v19.2d, x10
+    LOADADDR x12, .Lbitsel16
+    ldr     d28, [x12]
+    LOADADDR x12, .Lselpos
+    LOADADDR x13, .Lselcnt
+    movi    v20.4s, #0
+    movi    v21.4s, #8
+.Lnf8_main:
+    RNG8    x0
+    PACK8   w16
+    eor     w16, w16, w5
+    cbz     x1, 1f
+    ldrb    w17, [x1], #1                   // validity of rows i..i+7
+    and     w16, w16, w17
+1:  EMIT8   16
+    add     x14, x14, #8
+    cmp     x14, x15
+    b.lo    .Lnf8_main
+.Lnf8_tail:
+    cmp     x14, x2
+    b.hs    .Lnf8_done
+1:  ldp     x16, x17, [x0], #16
+    SPRED128 16, 17, 7, 8, 9, 10, 4
+    cbz     x3, 2f
+    VBIT    12, 3, 14, 13
+    and     w16, w16, w12
+2:  str     w14, [x11]
+    add     x11, x11, x16, lsl #2
+    add     x14, x14, #1
+    cmp     x14, x2
+    b.lo    1b
+.Lnf8_done:
+    sub     x0, x11, x6
+    lsr     x0, x0, #2
+    ret
+.Lnf8_inval:
+    mov     x0, #-1
+    ret
+ENDF pqk_a64_neon_filter_i128
+
+/* ------------------------------------------------------------------------
+ * size_t count_i128(x0 data, x1 validity, x2 n, w3 op, x4 &a, x5 &b)
+ * Registers: x8:x7 lo, x10:x9 span, x11 inv (0/-1), w4 row inversion (0/1),
+ * x3 validity base, x6 count, x14 row i, x15 main-loop row limit,
+ * x16/x17/x12/x13 tail temps; v16-v19 predicate constants, v26/v27 lane
+ * counters, v20 lane inversion, v21 replicated validity byte, v28-v31
+ * .Lbits2d (CMTST constants), v22-v25 validity lane masks.
+ * Algorithm: 8 rows per iteration through RNG8; selected lanes (all-ones)
+ * are accumulated with SUB into two 2x64 counters. Without validity the
+ * inversion is applied algebraically once (count = rows - count); with
+ * validity each lane mask is EORed with the inversion and ANDed with the
+ * CMTST-expanded validity byte. Tail: scalar SPRED128.
+ */
+FUNC pqk_a64_neon_count_i128
+    PRED128_SETUP w3, x4, x5, x7, x8, x9, x10, x11, x12, x13, .Lnc8_inval
+    and     w4, w11, #1
+    mov     x3, x1
+    mov     x14, #0
+    mov     x6, #0
+    and     x15, x2, #~7
+    cbz     x15, .Lnc8_tail
+    dup     v16.2d, x7
+    dup     v17.2d, x8
+    dup     v18.2d, x9
+    dup     v19.2d, x10
+    movi    v26.2d, #0
+    movi    v27.2d, #0
+    cbz     x1, .Lnc8_nv
+    dup     v20.2d, x11
+    LOADADDR x12, .Lbits2d
+    ld1     {v28.2d-v31.2d}, [x12]
+.Lnc8_v:
+    RNG8    x0
+    ld1r    {v21.16b}, [x1], #1
+    cmtst   v22.2d, v21.2d, v28.2d
+    cmtst   v23.2d, v21.2d, v29.2d
+    cmtst   v24.2d, v21.2d, v30.2d
+    cmtst   v25.2d, v21.2d, v31.2d
+    eor     v0.16b, v0.16b, v20.16b
+    eor     v2.16b, v2.16b, v20.16b
+    eor     v4.16b, v4.16b, v20.16b
+    eor     v6.16b, v6.16b, v20.16b
+    and     v0.16b, v0.16b, v22.16b
+    and     v2.16b, v2.16b, v23.16b
+    and     v4.16b, v4.16b, v24.16b
+    and     v6.16b, v6.16b, v25.16b
+    sub     v26.2d, v26.2d, v0.2d
+    sub     v27.2d, v27.2d, v2.2d
+    sub     v26.2d, v26.2d, v4.2d
+    sub     v27.2d, v27.2d, v6.2d
+    add     x14, x14, #8
+    cmp     x14, x15
+    b.lo    .Lnc8_v
+    add     v26.2d, v26.2d, v27.2d
+    addp    d26, v26.2d
+    fmov    x6, d26
+    b       .Lnc8_tail
+.Lnc8_nv:
+    RNG8    x0
+    sub     v26.2d, v26.2d, v0.2d
+    sub     v27.2d, v27.2d, v2.2d
+    sub     v26.2d, v26.2d, v4.2d
+    sub     v27.2d, v27.2d, v6.2d
+    add     x14, x14, #8
+    cmp     x14, x15
+    b.lo    .Lnc8_nv
+    add     v26.2d, v26.2d, v27.2d
+    addp    d26, v26.2d
+    fmov    x6, d26
+    cbz     x11, .Lnc8_tail
+    sub     x6, x15, x6                     // inverted op: rows - in-range
+.Lnc8_tail:
+    cmp     x14, x2
+    b.hs    .Lnc8_done
+1:  ldp     x16, x17, [x0], #16
+    SPRED128 16, 17, 7, 8, 9, 10, 4
+    cbz     x3, 2f
+    VBIT    12, 3, 14, 13
+    and     w16, w16, w12
+2:  add     x6, x6, x16
+    add     x14, x14, #1
+    cmp     x14, x2
+    b.lo    1b
+.Lnc8_done:
+    mov     x0, x6
+    ret
+.Lnc8_inval:
+    mov     x0, #-1
+    ret
+ENDF pqk_a64_neon_count_i128
+
+/* ------------------------------------------------------------------------
+ * int sum_i128(x0 data, x1 validity, x2 n, x3 out_sum)
+ * Registers: x6:x5:x4 = exact 192-bit total (lo, mid, top), x7 row i,
+ * x8 block end, x9 validity base, x15 main-loop row limit, x10-x14/x16
+ * temps; v16-v19 / v20-v23 two sets of limb accumulators (limb 0..3) for
+ * rows 0-3 / 4-7 of each iteration, v24/v25 validity lane masks, v26/v27
+ * .Lbits4s (CMTST constants).
+ * Algorithm (exact): LD4 {.4s} of 64 bytes splits 4 rows into their four
+ * 32-bit limbs, one vector per limb (lane j = row j): limbs 0-2 unsigned,
+ * limb 3 signed (it carries the sign of the int128). UADALP (limbs 0-2) and
+ * SADALP (limb 3) add pairs of limbs into 64-bit lanes, i.e.
+ *     sum = L0 + L1 * 2^32 + L2 * 2^64 + L3 * 2^96
+ * with each Lk an exact lane sum. Invalid rows are zeroed beforehand (AND
+ * with the CMTST-expanded validity byte). Blocks of at most 2^28 rows
+ * (2^25 iterations) bound every lane below 2^58 (|.| < 2^57 for L3), so the
+ * lanes cannot wrap even after adding the two sets and the two lanes
+ * (< 2^60). Each block is folded into the 192-bit GPR total with
+ * ADDS/ADCS/ADC (L1 and L3 split into their << 32 parts, L3 sign-extended).
+ * The scalar tail adds rows sign-extended to 192 bits. Since |sum| < 2^160,
+ * the 192-bit total is the exact mathematical sum, so cancelling
+ * intermediate overflow is OK; the result fits in int128 iff
+ * top == mid ASR 63, otherwise PQK_OVERFLOW (out_sum untouched).
+ */
+FUNC pqk_a64_neon_sum_i128
+    mov     x4, #0
+    mov     x5, #0
+    mov     x6, #0
+    mov     x7, #0
+    mov     x9, x1
+    and     x15, x2, #~7
+    cbz     x15, .Lns8_tail
+    LOADADDR x10, .Lbits4s
+    ld1     {v26.4s, v27.4s}, [x10]
+.Lns8_block:
+    mov     x8, #(1 << 28)
+    add     x8, x8, x7
+    cmp     x8, x15
+    csel    x8, x8, x15, lo                 // multiple of 8, <= x15
+    movi    v16.2d, #0
+    movi    v17.2d, #0
+    movi    v18.2d, #0
+    movi    v19.2d, #0
+    movi    v20.2d, #0
+    movi    v21.2d, #0
+    movi    v22.2d, #0
+    movi    v23.2d, #0
+    cbz     x1, .Lns8_nv
+.Lns8_v:
+    ld4     {v0.4s-v3.4s}, [x0], #64        // rows 0-3: limbs 0..3
+    ld4     {v4.4s-v7.4s}, [x0], #64        // rows 4-7
+    ld1r    {v24.16b}, [x1], #1
+    cmtst   v25.4s, v24.4s, v26.4s          // rows 0-3 valid
+    cmtst   v24.4s, v24.4s, v27.4s          // rows 4-7 valid
+    and     v0.16b, v0.16b, v25.16b
+    and     v1.16b, v1.16b, v25.16b
+    and     v2.16b, v2.16b, v25.16b
+    and     v3.16b, v3.16b, v25.16b
+    and     v4.16b, v4.16b, v24.16b
+    and     v5.16b, v5.16b, v24.16b
+    and     v6.16b, v6.16b, v24.16b
+    and     v7.16b, v7.16b, v24.16b
+    uadalp  v16.2d, v0.4s
+    uadalp  v17.2d, v1.4s
+    uadalp  v18.2d, v2.4s
+    sadalp  v19.2d, v3.4s
+    uadalp  v20.2d, v4.4s
+    uadalp  v21.2d, v5.4s
+    uadalp  v22.2d, v6.4s
+    sadalp  v23.2d, v7.4s
+    add     x7, x7, #8
+    cmp     x7, x8
+    b.lo    .Lns8_v
+    b       .Lns8_fold
+.Lns8_nv:
+    ld4     {v0.4s-v3.4s}, [x0], #64
+    ld4     {v4.4s-v7.4s}, [x0], #64
+    uadalp  v16.2d, v0.4s
+    uadalp  v17.2d, v1.4s
+    uadalp  v18.2d, v2.4s
+    sadalp  v19.2d, v3.4s
+    uadalp  v20.2d, v4.4s
+    uadalp  v21.2d, v5.4s
+    uadalp  v22.2d, v6.4s
+    sadalp  v23.2d, v7.4s
+    add     x7, x7, #8
+    cmp     x7, x8
+    b.lo    .Lns8_nv
+.Lns8_fold:
+    add     v16.2d, v16.2d, v20.2d
+    add     v17.2d, v17.2d, v21.2d
+    add     v18.2d, v18.2d, v22.2d
+    add     v19.2d, v19.2d, v23.2d
+    addp    d16, v16.2d
+    addp    d17, v17.2d
+    addp    d18, v18.2d
+    addp    d19, v19.2d
+    fmov    x10, d16                        // L0 (unsigned)
+    fmov    x11, d17                        // L1 (unsigned)
+    fmov    x12, d18                        // L2 (unsigned)
+    fmov    x13, d19                        // L3 (signed)
+    adds    x4, x4, x10                     // += L0
+    adcs    x5, x5, xzr
+    adc     x6, x6, xzr
+    lsl     x14, x11, #32                   // += L1 << 32
+    lsr     x16, x11, #32
+    adds    x4, x4, x14
+    adcs    x5, x5, x16
+    adc     x6, x6, xzr
+    adds    x5, x5, x12                     // += L2 << 64
+    adc     x6, x6, xzr
+    lsl     x14, x13, #32                   // += L3 << 96 (sign-extended)
+    asr     x16, x13, #32
+    adds    x5, x5, x14
+    adc     x6, x6, x16
+    cmp     x7, x15
+    b.lo    .Lns8_block
+.Lns8_tail:
+    cmp     x7, x2
+    b.hs    .Lns8_fin
+1:  ldp     x10, x11, [x0], #16
+    cbz     x9, 2f
+    VBIT    12, 9, 7, 13
+    sbfx    x12, x12, #0, #1
+    and     x10, x10, x12
+    and     x11, x11, x12
+2:  asr     x12, x11, #63
+    adds    x4, x4, x10
+    adcs    x5, x5, x11
+    adc     x6, x6, x12
+    add     x7, x7, #1
+    cmp     x7, x2
+    b.lo    1b
+.Lns8_fin:
+    cmp     x6, x5, asr #63                 // fits in int128 <=> top == sign(mid)
+    b.ne    .Lns8_ovf
+    stp     x4, x5, [x3]
+    mov     w0, #0
+    ret
+.Lns8_ovf:
+    mov     w0, #1
+    ret
+ENDF pqk_a64_neon_sum_i128
+
+/* MM2 xl, xh, nl, nh, ml, mh [, vm]: updates the 2-lane min (v<nl>/v<nh>)
+ * and max (v<ml>/v<mh>) accumulators with the 2 rows in v<xl>/v<xh> (signed
+ * 128-bit: CMGT on the hi words, CMEQ, CMHI on the lo words, BIT select);
+ * with vm, only lanes whose mask v<vm> is set. Clobbers v24-v26. */
+    .macro  MM2 xl, xh, nl, nh, ml, mh, vm
+    cmgt    v24.2d, v\nh\().2d, v\xh\().2d  // x_hi <s min_hi
+    cmeq    v25.2d, v\nh\().2d, v\xh\().2d
+    cmhi    v26.2d, v\nl\().2d, v\xl\().2d  // x_lo <u min_lo
+    bit     v24.16b, v26.16b, v25.16b       // x <s min
+    .ifnb   \vm
+    and     v24.16b, v24.16b, v\vm\().16b
+    .endif
+    bit     v\nl\().16b, v\xl\().16b, v24.16b
+    bit     v\nh\().16b, v\xh\().16b, v24.16b
+    cmgt    v24.2d, v\xh\().2d, v\mh\().2d  // x_hi >s max_hi
+    cmeq    v25.2d, v\xh\().2d, v\mh\().2d
+    cmhi    v26.2d, v\xl\().2d, v\ml\().2d  // x_lo >u max_lo
+    bit     v24.16b, v26.16b, v25.16b       // x >s max
+    .ifnb   \vm
+    and     v24.16b, v24.16b, v\vm\().16b
+    .endif
+    bit     v\ml\().16b, v\xl\().16b, v24.16b
+    bit     v\mh\().16b, v\xh\().16b, v24.16b
+    .endm
+
+/* MMV xl, xh, nl, nh, ml, mh: MM2 for the next 2 rows of the validity byte
+ * replicated in v27 (CMTST with v28 = {1, 2}, then shift the byte by 2);
+ * the valid-lane mask is also counted into v30. */
+    .macro  MMV xl, xh, nl, nh, ml, mh
+    cmtst   v29.2d, v27.2d, v28.2d
+    ushr    v27.2d, v27.2d, #2
+    sub     v30.2d, v30.2d, v29.2d
+    MM2     \xl, \xh, \nl, \nh, \ml, \mh, 29
+    .endm
+
+/* REDMM nl, nh, ml, mh, lane: folds lane `lane` of a vector min/max set into
+ * the GPR min (x7:x6) and max (x12:x11). Clobbers x13, x14. */
+    .macro  REDMM nl, nh, ml, mh, lane
+    umov    x13, v\nl\().d[\lane]
+    umov    x14, v\nh\().d[\lane]
+    MIN128  6, 7, 13, 14
+    umov    x13, v\ml\().d[\lane]
+    umov    x14, v\mh\().d[\lane]
+    MAX128  11, 12, 13, 14
+    .endm
+
+/* ------------------------------------------------------------------------
+ * size_t minmax_i128(x0 data, x1 validity, x2 n, x3 out_min, x4 out_max)
+ * Registers: x5 count, x7:x6 min, x12:x11 max (GPR results), x9 validity
+ * base, x10 row i, x15 main-loop row limit, x13/x14/x16/x17 temps;
+ * v16-v19 (rows 0,1 / 4,5) and v20-v23 (rows 2,3 / 6,7) two independent
+ * sets of 2-lane min-lo, min-hi, max-lo, max-hi accumulators, v24-v26
+ * compare temps, v27 validity byte, v28 = {1, 2}, v29 lane validity,
+ * v30 valid-row lane counter.
+ * Algorithm: 8 rows per iteration (4 x LD2), signed 128-bit compares per
+ * lane (MM2, 12 ops per 2 rows), two accumulator sets to halve the
+ * loop-carried dependency chain. Accumulators start at INT128_MAX /
+ * INT128_MIN; invalid lanes never update (mask ANDed into the update
+ * masks). The 8 lane candidates are folded into GPRs with the scalar
+ * MIN128/MAX128 chain, then the 0-7 tail rows are processed the same way.
+ * Outputs are written only when count > 0.
+ */
+FUNC pqk_a64_neon_minmax_i128
+    mov     x5, #0
+    mov     x6, #-1                         // min = INT128_MAX
+    mov     x7, #0x7fffffffffffffff
+    mov     x11, #0                         // max = INT128_MIN
+    mov     x12, #0x8000000000000000
+    mov     x9, x1
+    mov     x10, #0
+    and     x15, x2, #~7
+    cbz     x15, .Lnm8_tail
+    dup     v16.2d, x6
+    dup     v17.2d, x7
+    dup     v18.2d, x11
+    dup     v19.2d, x12
+    mov     v20.16b, v16.16b
+    mov     v21.16b, v17.16b
+    mov     v22.16b, v18.16b
+    mov     v23.16b, v19.16b
+    cbz     x1, .Lnm8_nv
+    LOADADDR x13, .Lbits2d
+    ld1     {v28.2d}, [x13]
+    movi    v30.2d, #0
+.Lnm8_v:
+    ld2     {v0.2d, v1.2d}, [x0], #32
+    ld2     {v2.2d, v3.2d}, [x0], #32
+    ld2     {v4.2d, v5.2d}, [x0], #32
+    ld2     {v6.2d, v7.2d}, [x0], #32
+    ld1r    {v27.16b}, [x1], #1
+    MMV     0, 1, 16, 17, 18, 19
+    MMV     2, 3, 20, 21, 22, 23
+    MMV     4, 5, 16, 17, 18, 19
+    MMV     6, 7, 20, 21, 22, 23
+    add     x10, x10, #8
+    cmp     x10, x15
+    b.lo    .Lnm8_v
+    addp    d30, v30.2d
+    fmov    x5, d30
+    b       .Lnm8_red
+.Lnm8_nv:
+    ld2     {v0.2d, v1.2d}, [x0], #32
+    ld2     {v2.2d, v3.2d}, [x0], #32
+    ld2     {v4.2d, v5.2d}, [x0], #32
+    ld2     {v6.2d, v7.2d}, [x0], #32
+    MM2     0, 1, 16, 17, 18, 19
+    MM2     2, 3, 20, 21, 22, 23
+    MM2     4, 5, 16, 17, 18, 19
+    MM2     6, 7, 20, 21, 22, 23
+    add     x10, x10, #8
+    cmp     x10, x15
+    b.lo    .Lnm8_nv
+    mov     x5, x15
+.Lnm8_red:
+    REDMM   16, 17, 18, 19, 0
+    REDMM   16, 17, 18, 19, 1
+    REDMM   20, 21, 22, 23, 0
+    REDMM   20, 21, 22, 23, 1
+.Lnm8_tail:
+    cmp     x10, x2
+    b.hs    .Lnm8_fin
+1:  ldp     x13, x14, [x0], #16
+    cbz     x9, 2f
+    VBIT    16, 9, 10, 17
+    tbz     w16, #0, 3f                     // invalid row (tail: <= 7 rows)
+2:  add     x5, x5, #1
+    MIN128  6, 7, 13, 14
+    MAX128  11, 12, 13, 14
+3:  add     x10, x10, #1
+    cmp     x10, x2
+    b.lo    1b
+.Lnm8_fin:
+    cbz     x5, 4f
+    stp     x6, x7, [x3]
+    stp     x11, x12, [x4]
+4:  mov     x0, x5
+    ret
+ENDF pqk_a64_neon_minmax_i128
 
     .section .note.GNU-stack, "", %progbits
