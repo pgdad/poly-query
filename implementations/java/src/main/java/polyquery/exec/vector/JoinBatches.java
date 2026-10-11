@@ -680,13 +680,16 @@ final class JoinBatches {
                     keepRow = !lastRowMatched;
                 }
                 if (keepRow) {
-                    if (!counter.add()) {
-                        error = new PolyQueryException(ErrorCode.RESOURCE_LIMIT,
-                                "join produced more than " + ctx.maxJoinRows() + " rows");
-                        done = true;
-                        break;
-                    }
                     sel[count++] = e;
+                }
+            }
+            if (count > 0) {
+                int allowed = counter.add(count);
+                if (allowed < count) {
+                    count = allowed; // the rows up to the limit are produced, then the error
+                    error = new PolyQueryException(ErrorCode.RESOURCE_LIMIT,
+                            "join produced more than " + ctx.maxJoinRows() + " rows");
+                    done = true;
                 }
             }
             out.size = m;
@@ -715,9 +718,13 @@ final class JoinBatches {
             this.max = max;
         }
 
-        /** Counts one row; false if the limit is exceeded. */
-        boolean add() {
-            return produced.incrementAndGet() <= max;
+        /**
+         * Counts {@code rows} rows (one atomic update per batch, not per row: parallel probes
+         * share the counter); returns how many of them are within the limit.
+         */
+        int add(int rows) {
+            long before = produced.getAndAdd(rows);
+            return (int) Math.max(0, Math.min(rows, max - before));
         }
 
         void reset() {

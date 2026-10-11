@@ -28,6 +28,9 @@ final class SortBatches {
     private static final int INSERTION_RUN = 24;
     /** Inputs from this many rows are sorted in parallel (if the query may use several threads). */
     static final int PARALLEL_SORT_ROWS = 1 << 17;
+    /** The parallel sort threshold in effect; system property {@code polyquery.parallelSortRows}. */
+    private static final int PARALLEL_SORT_MIN =
+            Math.max(2, Integer.getInteger("polyquery.parallelSortRows", PARALLEL_SORT_ROWS));
 
     private SortBatches() {
     }
@@ -196,7 +199,7 @@ final class SortBatches {
         if (n == 0) {
             return new int[0];
         }
-        boolean parallel = threads > 1 && n >= PARALLEL_SORT_ROWS;
+        boolean parallel = threads > 1 && n >= PARALLEL_SORT_MIN;
         int tasks = parallel ? threads : 1;
         KeyColumn[] cols = new KeyColumn[keys.size()];
         for (int j = 0; j < cols.length; j++) {
@@ -237,7 +240,7 @@ final class SortBatches {
             }
         }
         Refiner refiner = new Refiner(cols);
-        if (parallel && m >= PARALLEL_SORT_ROWS) {
+        if (parallel && m >= PARALLEL_SORT_MIN) {
             sortParallel(sortKeys, ids, m, refiner, threads, ctx);
         } else {
             long[] tk = new long[m];

@@ -46,7 +46,8 @@ abstract class AggState {
      */
     static AggState create(AggregateCall call, NativeKernels kernels) {
         if (call.distinct()) {
-            return new Generic(call);
+            return new Distinct(create(new AggregateCall(call.function(), call.argument(), false, call.type()),
+                    kernels));
         }
         DataType in = call.argument() == null ? null : call.argument().type();
         // wide DECIMAL arguments never go to the kernels (their ABI covers 64-bit values only)
@@ -693,6 +694,171 @@ abstract class AggState {
         @Override
         Object result(int g) {
             return acc(g).result();
+        }
+    }
+
+    /**
+     * An aggregate over DISTINCT values: a hash set of (group, value) pairs passes only the
+     * first occurrence of each non-NULL value per group to the plain aggregate's state, in
+     * input order (like the row engine's {@code Accumulator.Distinct}). INT64-like and FLOAT64
+     * values are kept as primitive 64-bit keys ({@code -0.0} counts as {@code 0.0}); strings
+     * and wide DECIMALs as objects.
+     */
+    static final class Distinct extends AggState {
+        private final AggState inner;
+        private long[] keys = new long[64];
+        private Object[] objects;
+        private int[] owners = new int[64];
+        private int[] hashes = new int[64];
+        /** Open addressing (linear probing): entry index + 1, 0 = empty. */
+        private int[] slots = new int[128];
+        private int size;
+        private int[] fresh = new int[0];
+
+        Distinct(AggState inner) {
+            this.inner = inner;
+        }
+
+        @Override
+        void grow(int groups) {
+            inner.grow(groups);
+        }
+
+        @Override
+        void update(Vec arg, int[] sel, int n, int[] gids) {
+            if (fresh.length < n) {
+                fresh = new int[Math.max(n, 16)];
+            }
+            boolean checkNull = arg.hasNulls;
+            int m = 0;
+            switch (arg.kind) {
+                case LONG, DOUBLE -> {
+                    boolean dbl = arg.kind == Vec.Kind.DOUBLE;
+                    for (int k = 0; k < n; k++) {
+                        int i = sel == null ? k : sel[k];
+                        if (checkNull && arg.nulls[i]) {
+                            continue;
+                        }
+                        long key;
+                        if (dbl) {
+                            double d = arg.doubles[i];
+                            key = Double.doubleToLongBits(d == 0.0 ? 0.0 : d);
+                        } else {
+                            key = arg.longs[i];
+                        }
+                        if (addLong(gids[i], key)) {
+                            fresh[m++] = i;
+                        }
+                    }
+                }
+                case OBJECT, DICT -> {
+                    for (int k = 0; k < n; k++) {
+                        int i = sel == null ? k : sel[k];
+                        if (checkNull && arg.nulls[i]) {
+                            continue;
+                        }
+                        if (addObject(gids[i], arg.kind == Vec.Kind.DICT ? arg.dict[arg.codes[i]] : arg.objects[i])) {
+                            fresh[m++] = i;
+                        }
+                    }
+                }
+            }
+            if (m > 0) {
+                inner.update(arg, fresh, m, gids);
+            }
+        }
+
+        private static int hash(int group, long key) {
+            long h = key * 0x9E3779B97F4A7C15L + group * 0xC2B2AE3D27D4EB4FL;
+            h ^= h >>> 32;
+            h *= 0xD6E8FEB86659FD93L;
+            return (int) (h ^ (h >>> 32));
+        }
+
+        /** Adds (group, key); true if it was not present. */
+        private boolean addLong(int group, long key) {
+            int h = hash(group, key);
+            int mask = slots.length - 1;
+            int s = h & mask;
+            int e;
+            while ((e = slots[s]) != 0) {
+                if (keys[e - 1] == key && owners[e - 1] == group) {
+                    return false;
+                }
+                s = (s + 1) & mask;
+            }
+            int entry = newEntry(group, h);
+            keys[entry] = key;
+            slots[s] = entry + 1;
+            if (2 * size > slots.length) {
+                rehash();
+            }
+            return true;
+        }
+
+        private boolean addObject(int group, Object value) {
+            int h = hash(group, value.hashCode());
+            int mask = slots.length - 1;
+            int s = h & mask;
+            int e;
+            while ((e = slots[s]) != 0) {
+                if (hashes[e - 1] == h && owners[e - 1] == group && objects[e - 1].equals(value)) {
+                    return false;
+                }
+                s = (s + 1) & mask;
+            }
+            int entry = newEntry(group, h);
+            if (objects == null || objects.length < owners.length) {
+                objects = objects == null ? new Object[owners.length] : Arrays.copyOf(objects, owners.length);
+            }
+            objects[entry] = value;
+            slots[s] = entry + 1;
+            if (2 * size > slots.length) {
+                rehash();
+            }
+            return true;
+        }
+
+        /** A new entry of {@code group} with hash {@code h} (the caller stores the value); returns its index. */
+        private int newEntry(int group, int h) {
+            if (size == owners.length) {
+                int cap = size * 2;
+                keys = Arrays.copyOf(keys, cap);
+                owners = Arrays.copyOf(owners, cap);
+                hashes = Arrays.copyOf(hashes, cap);
+            }
+            int e = size++;
+            owners[e] = group;
+            hashes[e] = h;
+            return e;
+        }
+
+        private void rehash() {
+            int[] table = new int[slots.length * 2];
+            int mask = table.length - 1;
+            for (int e = 0; e < size; e++) {
+                int s = hashes[e] & mask;
+                while (table[s] != 0) {
+                    s = (s + 1) & mask;
+                }
+                table[s] = e + 1;
+            }
+            slots = table;
+        }
+
+        @Override
+        boolean mergeable() {
+            return false;
+        }
+
+        @Override
+        void merge(AggState other, int from, int to) {
+            throw new UnsupportedOperationException("DISTINCT aggregates are not merged");
+        }
+
+        @Override
+        Object result(int g) {
+            return inner.result(g);
         }
     }
 }
