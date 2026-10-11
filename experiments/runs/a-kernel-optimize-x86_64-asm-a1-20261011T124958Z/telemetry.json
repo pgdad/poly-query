@@ -1,0 +1,78 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-kernel-optimize-x86_64-asm-a1-20261011T124958Z",
+ "language": "x86_64-asm",
+ "task": "kernel-optimize",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-kernel-optimize",
+ "prompt_sha256": "6d09f85b7569217f6f2b30eba91b34c4cfd976acc0c2722fdda53e65d8513d9a",
+ "session_id": "ea53fbc1-879b-4a84-988f-76613c641442",
+ "tokens": {
+  "input": 428,
+  "output": 372634,
+  "cache_read": 77028822,
+  "cache_creation": 609445,
+  "thinking": null,
+  "thinking_estimated": 183486,
+  "source": "result events (summed over 2 segments)",
+  "api_messages": 214
+ },
+ "rate_limit": {
+  "events": 38,
+  "max_utilization": {
+   "seven_day": 0.45,
+   "five_hour": 0.57
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 27.73571639999999,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 217,
+ "result_segments": 2,
+ "assistant_messages": 540,
+ "tool_calls": {
+  "Bash": 212,
+  "Write": 2,
+  "ToolSearch": 1
+ },
+ "tool_calls_total": 215,
+ "tool_failures": 7,
+ "build_invocations": 72,
+ "build_failures_heuristic": 3,
+ "conformance_runs": 0,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 5270.9,
+  "model_api_seconds": 3407.3,
+  "tool_seconds": 449.1,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 22,
+  "files_changed": 9,
+  "lines_added": 2196,
+  "lines_removed": 298,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The AVX2 variant is now about 1.3\u00d7 faster on the benchmark (geometric mean over the 17 workloads, data in L3), and up to 2\u00d7 on single kernels. Results are still bit-identical. `make -C native-kernels test` reports 20/20 PASS for `x86_scalar`, `x86_avx2` and `x86_avx512`, natively and under ASan/UBSan. Everything is committed.\n\n**What changed (AVX2 only):** the scalar and AVX-512 machine code is byte-identical to the starting commit, checked with the existing disassembly-compare tool.\n- **Accumulators:** simple vector integer ops have 2-cycle latency on Zen 5, which made several loops latency-bound. `minmax_i64`, `sum_i64` and `sum_i128` now use 4 accumulator sets instead of 2.\n- **`bitmap_popcount` (2\u00d7):** a carry-save adder tree on 512 bytes, with scalar POPCNT doing another 128 bytes in parallel.\n- **`minmax_i64` / `minmax_i128` (2\u00d7 / 1.5\u00d7):** a 64-row block is skipped when every row lies strictly between the current min and max. If that check keeps failing (e.g. sorted data), it backs off so the extra cost stays under 1%.\n- **`sum_i64` (1.4\u00d7, 1.6\u00d7 with validity):** a cheaper exact-sum scheme (4 vector ops per 4 rows instead of 5), with validity masks loaded from a small table.\n- **`hash_i64` (1.5\u00d7):** the 64-bit multiply needs 2 multiplies instead of 3, and a third of the rows are hashed with scalar `imul` in parallel.\n- **`group_sum_i64` (1.5\u00d7):** accumulates `{sum, count}` pairs in a 16 KB table on the stack. It only uses the result when no addition can overflow; otherwise it reruns the original exact loop, so the overflow flag always matches the reference.\n- **`filter_i64`, `filter_i128`, `count_i128` (1.3\u20131.4\u00d7):**\n  - index output comes from a table lookup;\n  - BETWEEN is one subtract plus one compare instead of two compares;\n  - 128-bit comparisons are decided on the high words first, with an exact fallback.\n- **`gather_i64` (1.5\u00d7 on the slower CCD):** software prefetch 128 rows ahead. It only switches on when the sampled indices cover at least 4 MB, because it made cache-resident gathers about 40% slower.\n\n**Measured speedups (geometric mean, AVX2 before vs after, run alternately and pinned):**\n\n| setup | speedup |\n|---|---|\n| CPU 2, data in L3 | 1.31\u00d7 |\n| CPU 10, data from DRAM | 1.16\u00d7 |\n| L2-resident (compute only) | 1.32\u00d7 |\n\nThe README now has the before/after table for all 17 kernels, the Zen 5 timings behind each decision, a note per optimization, the experiments that didn't pay off, and the older AVX2 descriptions marked where they no longer apply.\n\n**Testing:** the existing tests never reach many of the new paths (they stop at 5,000 rows and 200-byte bitmaps). I added `verify/stress.c`, a randomized comparison against the reference with large sizes, adversarial data and every buffer next to a guard page. It caught every deliberately broken version I tried. `verify/run.sh` now runs it, and that full suite (guard pages, edge cases, ABI check, structure/clobber check, stress) passes.\n\n**Limitations:**\n- Other jobs were running on the machine the whole time. Kernels I didn't touch still varied by up to \u00b15% between runs, so the README gives both median and minimum figures.\n- The one official unpinned `make bench` landed on the slower CCD. Most kernels there are limited by memory bandwidth, so the gains are smaller.\n- `sum_f64`, `bitmap_and`, `filter_i64_bitmap` and `compare_i64` were already at or near the memory limit and are essentially unchanged.\n- The `group_sum_i64` fast path covers only calls without validity, with counts, and at most 1024 groups.\n- The optional AVX-512 variant was not optimized.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

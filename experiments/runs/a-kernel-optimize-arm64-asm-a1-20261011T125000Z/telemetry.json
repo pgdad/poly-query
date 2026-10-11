@@ -1,0 +1,77 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-kernel-optimize-arm64-asm-a1-20261011T125000Z",
+ "language": "arm64-asm",
+ "task": "kernel-optimize",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-kernel-optimize",
+ "prompt_sha256": "0ba215983f62179981b54b263294d0500e60b27ffa9b820ee611deee54bc2b36",
+ "session_id": "ef7cffe8-337a-4643-89b4-1c7cfa343692",
+ "tokens": {
+  "input": 134,
+  "output": 221127,
+  "cache_read": 16916827,
+  "cache_creation": 369866,
+  "thinking": null,
+  "thinking_estimated": 132532,
+  "source": "result events",
+  "api_messages": 67
+ },
+ "rate_limit": {
+  "events": 18,
+  "max_utilization": {
+   "seven_day": 0.42,
+   "five_hour": 0.38
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 10.765369399999992,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 72,
+ "result_segments": 1,
+ "assistant_messages": 160,
+ "tool_calls": {
+  "Bash": 67,
+  "Read": 4
+ },
+ "tool_calls_total": 71,
+ "tool_failures": 0,
+ "build_invocations": 18,
+ "build_failures_heuristic": 0,
+ "conformance_runs": 0,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 2120.2,
+  "model_api_seconds": 2021.7,
+  "tool_seconds": 98.1,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 6,
+  "files_changed": 3,
+  "lines_added": 1406,
+  "lines_removed": 548,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "I've optimized the `a64_neon` variant and all work is committed. I couldn't measure any speedup: there's no AArch64 hardware here and qemu timings mean nothing. Every performance figure below is an expectation from instruction counts and an assumed model of the Cortex-X925.\n\n**Tests:** `make -C native-kernels test-cross` reports 20/20 PASS for `a64_scalar`, `a64_neon` and `a64_sve`, and `make test` passes. I also ran several throwaway checks, not committed since only assembly belongs in the repo:\n- **Guard pages:** a harness put every input and output buffer against a protected page, across many sizes, ops, data patterns and validity patterns. 0 failures.\n- **Deliberate bugs:** each one I introduced into the new code was caught.\n- **Block boundaries:** the chunk/block paths still pass with the size constants shrunk.\n- **Registers:** a disassembly check confirms each function writes exactly the registers its comment declares and never a callee-saved one.\n\n**What changed** (only `pq_a64_neon.S` and `pq_a64_neon.h`):\n- **Comparisons:** every op except a real BETWEEN now uses one compare per 2 rows instead of two. For 128-bit rows that is 3\u20134 ops instead of 8. This affects filter/count for i64 and i128.\n- **Mask packing and index output:** `filter_i64`, `filter_i64_bitmap` and `compare_i64` now build masks for 32 rows at a time. Writing selected row indices takes half the vector ops.\n- **`minmax_i64`:** four independent accumulators remove a dependency chain that limited the loop.\n- **`minmax_i128`:** a cheap test (about 13 ops per 8 rows instead of about 64) skips groups where no row can change the min or max. The exact update still runs whenever one could. On sorted or constant-hi-word data it falls back to the exact update, costing about 1\u20132%.\n- **`group_sum_i64`:** the id check now runs per 2048-row chunk, so the ids are read from memory once (25% less memory traffic). The loop is unrolled. If a bad id appears late, the earlier chunks are subtracted back out, so the outputs end up bit-for-bit unchanged as the spec requires. Another thread reading the outputs during the call could see intermediate values.\n- **`gather_i64`:** prefetches the rows 64 indices ahead.\n- **Popcount and bitmap and/or/andnot:** 128 bytes per iteration, with slightly fewer ops for popcount.\n\n**Expected effect:** the benchmark arrays (32\u201364 MiB) don't fit in cache, so most kernels are limited by memory bandwidth, and I don't know the target's single-core bandwidth. The README table gives each workload's expected speedup at 40 GB/s and at 80 GB/s:\n\n| Workload | Expected speedup (40 / 80 GB/s) |\n|---|---|\n| `minmax_i128` | ~1.3\u00d7 / ~2.6\u00d7 |\n| `minmax_i64` | ~1.25\u00d7 / ~2\u00d7 |\n| `group_sum_i64` | ~1.3\u00d7 / ~1.3\u00d7 |\n| `filter_i128` | 1.0\u00d7 / ~1.7\u00d7 |\n| `filter_i64` | 1.0\u00d7 / ~1.45\u00d7 |\n| `bitmap_popcount` | ~1.1\u00d7 |\n| `gather_i64` | 1.0\u20131.5\u00d7 (uncertain) |\n| other 10 workloads | ~1.0\u00d7 |\n\nNo kernel is expected to get slower on the benchmark data.\n\n**Limitations:**\n- **Left unchanged:** I didn't touch the sum kernels, `count_i64_between`, `count_i128_between` or `hash_i64`. I judged them memory-bound. For `hash_i64`, a mixed NEON/integer version could also be slower depending on how many multiply units the core has.\n- **SVE untouched:** the `a64_sve` variant is unchanged. It is the default the dispatcher picks on the X925, so normal library users won't see these gains unless they select `neon`.\n- **Small inputs:** the 32-row loops leave up to 31 rows to scalar code, so those three kernels are slightly slower when n is under 64.\n- **Code size:** the NEON `.text` grew from 7.5 KiB to 12.9 KiB because each comparison shape has its own loop copy.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

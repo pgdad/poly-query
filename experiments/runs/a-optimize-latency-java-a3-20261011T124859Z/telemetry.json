@@ -1,0 +1,145 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-optimize-latency-java-a3-20261011T124859Z",
+ "language": "java",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 3,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-optimize-latency",
+ "prompt_sha256": "8e2db5104933b83f2b94f2aee1bf817ed0cf7eb7041927c19f4f965272d58595",
+ "session_id": "f98448a7-5376-483c-961c-3518ca23ca12",
+ "tokens": {
+  "input": 542,
+  "output": 305053,
+  "cache_read": 87765275,
+  "cache_creation": 556062,
+  "thinking": null,
+  "thinking_estimated": 142249,
+  "source": "result events",
+  "api_messages": 271
+ },
+ "rate_limit": {
+  "events": 43,
+  "max_utilization": {
+   "five_hour": 0.55,
+   "seven_day": 0.45
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 28.104779000000008,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 281,
+ "result_segments": 1,
+ "assistant_messages": 655,
+ "tool_calls": {
+  "Bash": 268,
+  "Write": 6,
+  "ToolSearch": 1,
+  "Edit": 3,
+  "Read": 2
+ },
+ "tool_calls_total": 280,
+ "tool_failures": 3,
+ "build_invocations": 54,
+ "build_failures_heuristic": 5,
+ "conformance_runs": 17,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 4727.5,
+  "model_api_seconds": 2841.8,
+  "tool_seconds": 1887.8,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 15,
+  "files_changed": 20,
+  "lines_added": 2403,
+  "lines_removed": 305,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Query latency on the analytics workload is about 3.4\u00d7 lower once warm and 2.3\u00d7 lower on each query's first run, and every query still returns exactly what it did before. Everything is committed; the conformance runner reports 100% and `make build test` passes.\n\n**Results** (1m scale, all 20 queries through `bin/polyquery session`; median of 7 rounds, each round running the old engine and then the new one so both see the same machine load):\n\n| | before | after | speed-up |\n|---|---:|---:|---:|\n| Total, warm (steady state) | 451.0 ms | 134.4 ms | 3.4\u00d7 |\n| Total, cold (first run in a fresh session) | 1969.0 ms | 851.4 ms | 2.3\u00d7 |\n\nThe per-query before/after table is in `implementations/java/README.md` under \"Latency optimization\". The biggest gains:\n- **Full sorts (q14, q15):** 166 \u2192 29 ms and 141 \u2192 31 ms.\n- **`ORDER BY \u2026 LIMIT` (q13):** 6.4 \u2192 0.7 ms.\n- **`COUNT(DISTINCT)` (q09):** 27 \u2192 4.9 ms.\n- **Join with grouping (q10):** 18 \u2192 5 ms.\n- **Grouping by 81k customers (q07):** 19 \u2192 8.5 ms.\n- **CTE used twice (q19):** 27 \u2192 13 ms.\n\n**Where it got slower:**\n- **Small queries, warm:** q05, q17 and q20 are about 1 ms slower. Most of that comes from the JIT warm-up cache described below. Across the whole workload the cache still wins on warm times too: 117 vs 130 ms total in an earlier run.\n- **First runs:** q04, q17 and q18 came out slower in this run. First-run times swing a lot between sessions (q04 measured anywhere from 32 to 185 ms), so I can't pin these down.\n- **Noisy machine:** it was shared with other jobs the whole time, and whole runs drifted by up to 25% within an hour. Differences under about 1 ms are noise.\n\n**What I changed:**\n- **Sorting:** each sort key is turned into a 64-bit number whose order matches the value order, so short strings are never compared directly. Large sorts, and the loading of their input, now run in parallel.\n- **`ORDER BY \u2026 LIMIT n`:** once n rows are kept, rows that can't make the cut are dropped before they are copied.\n- **`COUNT(DISTINCT)`:** a new primitive hash set replaces boxed Java sets, and without `GROUP BY` the work runs in parallel.\n- **Repeated subqueries:** when the same grouping subquery appears twice in a query (e.g. a CTE used twice), the second use reuses the first result.\n- **Merging parallel results and joins:** cheaper merges of per-thread grouping results; one shared counter that every join thread bumped per row is now updated once per batch; join hash tables are sized up front.\n- **JIT warm-up:** `make build` now runs a ~10 s training workload with synthetic tables and generic queries, not the benchmark ones. It writes a JVM ahead-of-time cache, and the launcher uses it when present; `POLYQUERY_AOT=off` turns it off. If training fails, the build still succeeds. The launcher also adds `-Xlog:disable` because the JVM prints cache warnings to stdout, which would break the protocol.\n- **Heap:** on machines with at least 16 GiB, the launcher starts with a 4 GiB heap and a fixed 2 GiB young generation.\n\nResults, row order and errors are the same as before. I tried and dropped these after measuring: a different parallel grouping scheme, smaller work units, fewer threads, eager compilation, and a very large heap.\n\n**Test results:**\n- Conformance runner: `phase 1: 225/225`, `phase 2: 208/208`, `phase 3: 212/212`, `phase 5: 15/15`, `TOTAL: 660/660 pass`.\n- Also passing: `--modes` (3870/3870), `--transport http` (660/660), the HTTP concurrency suite (18/18), and the stress settings (tiny batch, morsel and parallel-sort thresholds).\n- `make test`: 103 passed. New tests cover the parallel sort, the string sort keys, concatenating per-thread results, `LIMIT` edge cases, parallel `DISTINCT`, and CTEs used twice. I deliberately broke the two riskiest pieces of code and checked the tests catch it.\n- The randomized differential tester ran 600 queries across all option combinations with no mismatches.\n\n**Known limitations:**\n- Grouping with many distinct keys still scales only moderately across",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

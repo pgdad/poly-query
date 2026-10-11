@@ -1,0 +1,110 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-optimize-latency-clojure-a2-20261011T124901Z",
+ "language": "clojure",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 2,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-optimize-latency",
+ "prompt_sha256": "8b493a42053c3e9befe241b3fb99bd5cbe695fa4d2d3245efc01904dcb3099cf",
+ "session_id": "108dea2b-db23-4e36-83ad-744217434a58",
+ "tokens": {
+  "input": 320,
+  "output": 133899,
+  "cache_read": 27136400,
+  "cache_creation": 296325,
+  "thinking": null,
+  "thinking_estimated": 61051,
+  "source": "result events",
+  "api_messages": 160
+ },
+ "rate_limit": {
+  "events": 27,
+  "max_utilization": {
+   "five_hour": 0.43,
+   "seven_day": 0.43
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 10.477140000000002,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 163,
+ "result_segments": 1,
+ "assistant_messages": 327,
+ "tool_calls": {
+  "Bash": 158,
+  "Write": 4
+ },
+ "tool_calls_total": 162,
+ "tool_failures": 2,
+ "build_invocations": 143,
+ "build_failures_heuristic": 8,
+ "conformance_runs": 8,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 2734.3,
+  "model_api_seconds": 1294.4,
+  "tool_seconds": 1440.9,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 10,
+  "files_changed": 26,
+  "lines_added": 1368,
+  "lines_removed": 163,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The benchmark workload now runs about 3.3\u00d7 faster once warm and about 2.8\u00d7 faster on each query's first run. All 20 queries return exactly the same results as before, conformance is unchanged, and everything is committed.\n\n## Results\nTimings are from `bench/workload.py`, which runs the workload's queries at scale 1m through one `bin/polyquery session`. I ran the old and new engines alternately, three rounds each, and report the median per query. The machine was shared with other jobs, so single numbers vary by roughly \u00b120%; queries that already took 1\u201310 ms changed by less than that.\n\n| | before | after |\n|---|---:|---:|\n| warm total (median per query) | 662 ms | 202 ms (3.3\u00d7) |\n| first-run total | 3647 ms | 1290 ms (2.8\u00d7) |\n| q14 full string sort | 324 ms | 59 ms |\n| q15 multi-key sort | 184 ms | 40 ms |\n| q20 string functions | 18.4 ms | 3.0 ms |\n| q09 COUNT(DISTINCT) | 18.4 ms | 7.6 ms |\n| q19 CTE + subquery | 23.3 ms | 14.2 ms |\n\nThe README has the before/after table for all 20 queries, how I measured, and the raw outputs (`bench/results/`).\n\n**Tests:**\n- Conformance runner: `TOTAL: 660/660 pass` (phase 1 225/225, phase 2 208/208, phase 3 212/212, phase 5 15/15). It also passes under `--modes` (3870/3870) and over HTTP (660/660).\n- `make build test` from a fresh clone: 114 tests, 1473 assertions, 0 failures.\n- Results are identical: I saved digests of all 20 query results from the original engine and checked the final build against them.\n\n## What I changed\n1. **Sorting:** each sort key becomes a 64-bit code and rows are radix-sorted on it, one key at a time, splitting off NULLs first. Strings are handled three characters per pass. The order is exactly the same stable order as before. Small groups of tied rows still use the old comparison sort, and key extraction and those groups run in parallel.\n2. **CTEs used more than once:** in the default (vectorized) mode, a CTE referenced twice is computed once per query and reused. Row mode, which is also the retry path after a runtime error, still evaluates every reference, so error behaviour is unchanged.\n3. **`COUNT(DISTINCT \u2026)` on integer-like columns:** uses a primitive `long` hash set per group instead of a `HashSet<Long>`.\n4. **Functions on dictionary-encoded strings** (`UPPER`, `LENGTH`, `CONCAT`, \u2026): evaluated once per distinct value rather than once per row. This is only done for functions that cannot fail, because the dictionary can contain values from rows that were filtered out.\n5. **Joins:** the build side is stored column by column (strings dictionary-encoded), so output rows are copied from typed arrays instead of being boxed one by one. GROUP BY on several dictionary-encoded columns uses a flat lookup array.\n6. **`result: count`:** rows are counted instead of collecting a million placeholder entries.\n7. **Faster first runs:** `make build` now packages a jar and records a JVM ahead-of-time cache from a short training session (about 10 s). The training uses synthetic data and generic query shapes, not the benchmark queries. The launcher uses the cache when it is present; the engine works without it.\n\n## Limitations\n- The first run of the first few scans (q02, q04, q18, q20) still takes about 140\u2013210 ms, while the JIT compiles the hot loops. I rejected a background warm-up at session start because it would compete for CPU with timing-sensitive sessions.\n- The AOT cache only works with the same JDK build and the same absolute paths. After moving the checkout or changing the JDK, run `make build` again. Until then the engine runs without it and the JVM prints a warning on stderr.\n- I left the default thread count at 8. 16 threads helped the scan-only queries slightly but slowed the high-cardinality GROUP BY.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

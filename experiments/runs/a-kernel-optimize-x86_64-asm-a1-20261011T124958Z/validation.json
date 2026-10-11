@@ -1,0 +1,722 @@
+{
+ "seconds": 8.2,
+ "status": {
+  "test_exit": "0",
+  "bench_exit": "0",
+  "hidden_exit": "0"
+ },
+ "variants": {
+  "x86_scalar": {
+   "kernels": 20,
+   "total": 20,
+   "status": "PASS"
+  },
+  "x86_avx2": {
+   "kernels": 20,
+   "total": 20,
+   "status": "PASS"
+  },
+  "x86_avx512": {
+   "kernels": 20,
+   "total": 20,
+   "status": "PASS"
+  }
+ },
+ "required": [
+  "x86_scalar",
+  "x86_avx2"
+ ],
+ "emulated": false,
+ "hidden": {
+  "x86_scalar": "PASS",
+  "x86_avx2": "PASS",
+  "x86_avx512": "PASS"
+ },
+ "bench": [
+  {
+   "variant": "reference",
+   "kernel": "filter_i64_sel10",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 3308502,
+   "min_ns": 3134691,
+   "max_ns": 3375539,
+   "ns_per_elem": 0.7888
+  },
+  {
+   "variant": "reference",
+   "kernel": "filter_i64_bitmap",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 10993706,
+   "min_ns": 10968268,
+   "max_ns": 11055563,
+   "ns_per_elem": 2.6211
+  },
+  {
+   "variant": "reference",
+   "kernel": "count_i64_between",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1587348,
+   "min_ns": 1580365,
+   "max_ns": 1627575,
+   "ns_per_elem": 0.3785
+  },
+  {
+   "variant": "reference",
+   "kernel": "sum_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1038124,
+   "min_ns": 1007837,
+   "max_ns": 1138855,
+   "ns_per_elem": 0.2475
+  },
+  {
+   "variant": "reference",
+   "kernel": "sum_i64_validity",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1623677,
+   "min_ns": 1593019,
+   "max_ns": 1637644,
+   "ns_per_elem": 0.3871
+  },
+  {
+   "variant": "reference",
+   "kernel": "sum_f64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1606575,
+   "min_ns": 1596415,
+   "max_ns": 1694872,
+   "ns_per_elem": 0.383
+  },
+  {
+   "variant": "reference",
+   "kernel": "minmax_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 2296337,
+   "min_ns": 2273654,
+   "max_ns": 2432035,
+   "ns_per_elem": 0.5475
+  },
+  {
+   "variant": "reference",
+   "kernel": "bitmap_and",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 11001,
+   "min_ns": 9779,
+   "max_ns": 31260,
+   "ns_per_elem": 0.0026
+  },
+  {
+   "variant": "reference",
+   "kernel": "bitmap_popcount",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 476286,
+   "min_ns": 472548,
+   "max_ns": 506012,
+   "ns_per_elem": 0.1136
+  },
+  {
+   "variant": "reference",
+   "kernel": "hash_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 2841995,
+   "min_ns": 2788012,
+   "max_ns": 3124712,
+   "ns_per_elem": 0.6776
+  },
+  {
+   "variant": "reference",
+   "kernel": "compare_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 12002644,
+   "min_ns": 11728242,
+   "max_ns": 12144273,
+   "ns_per_elem": 2.8617
+  },
+  {
+   "variant": "reference",
+   "kernel": "group_sum_i64_1024",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 3319211,
+   "min_ns": 3272283,
+   "max_ns": 3356443,
+   "ns_per_elem": 0.7914
+  },
+  {
+   "variant": "reference",
+   "kernel": "gather_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 15449198,
+   "min_ns": 13859255,
+   "max_ns": 18793117,
+   "ns_per_elem": 3.6834
+  },
+  {
+   "variant": "reference",
+   "kernel": "filter_i128_sel10",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 4725295,
+   "min_ns": 4564209,
+   "max_ns": 4805217,
+   "ns_per_elem": 1.1266
+  },
+  {
+   "variant": "reference",
+   "kernel": "count_i128_between",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 2801757,
+   "min_ns": 2633839,
+   "max_ns": 3328439,
+   "ns_per_elem": 0.668
+  },
+  {
+   "variant": "reference",
+   "kernel": "sum_i128",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 2044939,
+   "min_ns": 2028047,
+   "max_ns": 2222476,
+   "ns_per_elem": 0.4876
+  },
+  {
+   "variant": "reference",
+   "kernel": "minmax_i128",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 3495167,
+   "min_ns": 3443398,
+   "max_ns": 3538669,
+   "ns_per_elem": 0.8333
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "filter_i64_sel10",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1532053,
+   "min_ns": 1497648,
+   "max_ns": 1753053,
+   "ns_per_elem": 0.3653
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "filter_i64_bitmap",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1148935,
+   "min_ns": 1112275,
+   "max_ns": 1209300,
+   "ns_per_elem": 0.2739
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "count_i64_between",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1262811,
+   "min_ns": 1244326,
+   "max_ns": 1275405,
+   "ns_per_elem": 0.3011
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "sum_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1049216,
+   "min_ns": 1019548,
+   "max_ns": 1315552,
+   "ns_per_elem": 0.2502
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "sum_i64_validity",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1487559,
+   "min_ns": 1450729,
+   "max_ns": 1550789,
+   "ns_per_elem": 0.3547
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "sum_f64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1631794,
+   "min_ns": 1618418,
+   "max_ns": 1761239,
+   "ns_per_elem": 0.3891
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "minmax_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 2408741,
+   "min_ns": 2365789,
+   "max_ns": 2529099,
+   "ns_per_elem": 0.5743
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "bitmap_and",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 14909,
+   "min_ns": 12895,
+   "max_ns": 23013,
+   "ns_per_elem": 0.0036
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "bitmap_popcount",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 60475,
+   "min_ns": 60445,
+   "max_ns": 61236,
+   "ns_per_elem": 0.0144
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "hash_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 2632476,
+   "min_ns": 2535772,
+   "max_ns": 2895226,
+   "ns_per_elem": 0.6276
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "compare_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1659656,
+   "min_ns": 1585014,
+   "max_ns": 1967852,
+   "ns_per_elem": 0.3957
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "group_sum_i64_1024",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 2655560,
+   "min_ns": 2588432,
+   "max_ns": 2837356,
+   "ns_per_elem": 0.6331
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "gather_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 11804077,
+   "min_ns": 11509076,
+   "max_ns": 13778441,
+   "ns_per_elem": 2.8143
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "filter_i128_sel10",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1905544,
+   "min_ns": 1886477,
+   "max_ns": 1988913,
+   "ns_per_elem": 0.4543
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "count_i128_between",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1628306,
+   "min_ns": 1610793,
+   "max_ns": 1723418,
+   "ns_per_elem": 0.3882
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "sum_i128",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1572259,
+   "min_ns": 1558223,
+   "max_ns": 1613759,
+   "ns_per_elem": 0.3749
+  },
+  {
+   "variant": "x86_scalar",
+   "kernel": "minmax_i128",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 2237214,
+   "min_ns": 2226735,
+   "max_ns": 2337925,
+   "ns_per_elem": 0.5334
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "filter_i64_sel10",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 863713,
+   "min_ns": 777348,
+   "max_ns": 1013246,
+   "ns_per_elem": 0.2059
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "filter_i64_bitmap",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 673451,
+   "min_ns": 639266,
+   "max_ns": 1033365,
+   "ns_per_elem": 0.1606
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "count_i64_between",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 584852,
+   "min_ns": 556809,
+   "max_ns": 640889,
+   "ns_per_elem": 0.1394
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "sum_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 707516,
+   "min_ns": 645868,
+   "max_ns": 1174092,
+   "ns_per_elem": 0.1687
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "sum_i64_validity",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 643774,
+   "min_ns": 622444,
+   "max_ns": 726793,
+   "ns_per_elem": 0.1535
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "sum_f64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 577539,
+   "min_ns": 473621,
+   "max_ns": 923627,
+   "ns_per_elem": 0.1377
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "minmax_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 606143,
+   "min_ns": 556949,
+   "max_ns": 774673,
+   "ns_per_elem": 0.1445
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "bitmap_and",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 11672,
+   "min_ns": 9518,
+   "max_ns": 15600,
+   "ns_per_elem": 0.0028
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "bitmap_popcount",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 3958,
+   "min_ns": 3947,
+   "max_ns": 4098,
+   "ns_per_elem": 0.0009
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "hash_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1934479,
+   "min_ns": 1899542,
+   "max_ns": 2082249,
+   "ns_per_elem": 0.4612
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "compare_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1324208,
+   "min_ns": 1305843,
+   "max_ns": 1448754,
+   "ns_per_elem": 0.3157
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "group_sum_i64_1024",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1617335,
+   "min_ns": 1600613,
+   "max_ns": 1778762,
+   "ns_per_elem": 0.3856
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "gather_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 6664654,
+   "min_ns": 6376425,
+   "max_ns": 7608929,
+   "ns_per_elem": 1.589
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "filter_i128_sel10",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1641792,
+   "min_ns": 1567350,
+   "max_ns": 1998631,
+   "ns_per_elem": 0.3914
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "count_i128_between",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1417676,
+   "min_ns": 1392548,
+   "max_ns": 1454746,
+   "ns_per_elem": 0.338
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "sum_i128",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1438405,
+   "min_ns": 1408589,
+   "max_ns": 1605242,
+   "ns_per_elem": 0.3429
+  },
+  {
+   "variant": "x86_avx2",
+   "kernel": "minmax_i128",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1372551,
+   "min_ns": 1344366,
+   "max_ns": 1409751,
+   "ns_per_elem": 0.3272
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "filter_i64_sel10",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 733926,
+   "min_ns": 697256,
+   "max_ns": 849175,
+   "ns_per_elem": 0.175
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "filter_i64_bitmap",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 638123,
+   "min_ns": 620620,
+   "max_ns": 650517,
+   "ns_per_elem": 0.1521
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "count_i64_between",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 545458,
+   "min_ns": 534296,
+   "max_ns": 577228,
+   "ns_per_elem": 0.13
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "sum_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 491305,
+   "min_ns": 481816,
+   "max_ns": 529377,
+   "ns_per_elem": 0.1171
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "sum_i64_validity",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 661658,
+   "min_ns": 621001,
+   "max_ns": 789982,
+   "ns_per_elem": 0.1578
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "sum_f64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 472579,
+   "min_ns": 366577,
+   "max_ns": 830940,
+   "ns_per_elem": 0.1127
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "minmax_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 529848,
+   "min_ns": 498889,
+   "max_ns": 732323,
+   "ns_per_elem": 0.1263
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "bitmap_and",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 11713,
+   "min_ns": 10099,
+   "max_ns": 16201,
+   "ns_per_elem": 0.0028
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "bitmap_popcount",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 3356,
+   "min_ns": 3286,
+   "max_ns": 3467,
+   "ns_per_elem": 0.0008
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "hash_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1858935,
+   "min_ns": 1772691,
+   "max_ns": 2394253,
+   "ns_per_elem": 0.4432
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "compare_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1481227,
+   "min_ns": 1370155,
+   "max_ns": 1802327,
+   "ns_per_elem": 0.3532
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "group_sum_i64_1024",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 2117606,
+   "min_ns": 2079484,
+   "max_ns": 2175818,
+   "ns_per_elem": 0.5049
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "gather_i64",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 10563818,
+   "min_ns": 10215887,
+   "max_ns": 12143703,
+   "ns_per_elem": 2.5186
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "filter_i128_sel10",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1611184,
+   "min_ns": 1543335,
+   "max_ns": 1778272,
+   "ns_per_elem": 0.3841
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "count_i128_between",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1482439,
+   "min_ns": 1447372,
+   "max_ns": 1540129,
+   "ns_per_elem": 0.3534
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "sum_i128",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1383340,
+   "min_ns": 1338014,
+   "max_ns": 1507597,
+   "ns_per_elem": 0.3298
+  },
+  {
+   "variant": "x86_avx512",
+   "kernel": "minmax_i128",
+   "n": 4194304,
+   "reps": 15,
+   "median_ns": 1547252,
+   "min_ns": 1517706,
+   "max_ns": 1652914,
+   "ns_per_elem": 0.3689
+  }
+ ],
+ "sve_vector_lengths_bits": null,
+ "native_arm": null,
+ "validated_at": "2026-10-11T14:18:00+00:00",
+ "harness_commit": "f96f4c4",
+ "outcome": "success"
+}

@@ -1,0 +1,46 @@
+{
+ "wave_id": "wave-a-kernel-optimize-a1-20261011T124958Z",
+ "task": "kernel-optimize",
+ "track": "A",
+ "attempt": 1,
+ "seed": 5794,
+ "order": [
+  "x86_64-asm",
+  "arm64-asm"
+ ],
+ "run_ids": [
+  "a-kernel-optimize-x86_64-asm-a1-20261011T124958Z",
+  "a-kernel-optimize-arm64-asm-a1-20261011T125000Z"
+ ],
+ "started": "2026-10-11T12:50:01+00:00",
+ "parallel": 2,
+ "base_refs": {},
+ "attempts": {},
+ "record_only": false,
+ "limits": {
+  "timeout_min": 120,
+  "budget_usd": 60.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  5.39404296875,
+  2.12353515625,
+  1.26123046875
+ ],
+ "finished": "2026-10-11T14:18:00+00:00",
+ "loadavg_end": [
+  4.05517578125,
+  5.4228515625,
+  7.04638671875
+ ],
+ "results": [
+  {
+   "run_id": "a-kernel-optimize-arm64-asm-a1-20261011T125000Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-kernel-optimize-x86_64-asm-a1-20261011T124958Z",
+   "outcome": "success"
+  }
+ ]
+}
