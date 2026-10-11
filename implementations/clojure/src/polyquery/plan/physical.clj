@@ -8,6 +8,8 @@
       auto`/`hash`), a sort-merge join (`join: merge`) or a nested-loop join
       (`join: nested_loop`); nested-loop joins otherwise;
     * top-N for ORDER BY … LIMIT (unless `optimize: false`);
+    * SELECT DISTINCT as a hash aggregation without aggregates (except in
+      row mode);
     * the execution: `mode` (row / vectorized), `threads` (parallel
       operators, polyquery.plan.parallel) and native kernels, recorded in
       the root's :execution;
@@ -269,6 +271,21 @@
        :limit (px (:limit node)) :offset (px (:offset node))}
       {:op :limit :input (phys input) :limit (px (:limit node)) :offset (px (:offset node))})))
 
+(declare execution-mode)
+
+(defn- plan-distinct
+  "SELECT DISTINCT: outside row mode (the baseline's DISTINCT operator), a
+  hash aggregation grouping by every column of the projection below it —
+  same rows (NULLs grouped together, first appearance order), but
+  vectorized and parallelizable."
+  [{:keys [input]} options phys]
+  (let [in (phys input)]
+    (if (and (= :project (:op in)) (not= :row (execution-mode options)))
+      {:op :hash-aggregate :input in :aggregates []
+       :group-keys (vec (map-indexed (fn [i e] (b/column-ref i (:type e) (nth (:names in) i)))
+                                     (:exprs in)))}
+      {:op :distinct :input in})))
+
 (defn- to-physical
   [node options]
   (let [phys #(to-physical % options)
@@ -284,7 +301,7 @@
                   :aggregates (mapv #(if (:arg %) (update % :arg px) %) (:aggregates node))}
       :project {:op :project :input (phys (:input node)) :exprs (mapv px (:exprs node))
                 :names (:names node)}
-      :distinct {:op :distinct :input (phys (:input node))}
+      :distinct (plan-distinct node options phys)
       :sort {:op :sort :input (phys (:input node)) :keys (:keys node)}
       :limit (plan-limit node options phys px)
       :union-all {:op :union-all :inputs (mapv phys (:inputs node))})))

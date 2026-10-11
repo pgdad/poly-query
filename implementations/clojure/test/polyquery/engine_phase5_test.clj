@@ -175,6 +175,12 @@
    ["SELECT DISTINCT g FROM t UNION ALL SELECT DISTINCT k FROM s" false]
    ["SELECT k FROM s UNION ALL SELECT k FROM t LIMIT 100" false]
    ["SELECT id FROM t UNION ALL SELECT k / g FROM t" false]
+   ;; SELECT DISTINCT (a hash aggregation outside row mode)
+   ["SELECT DISTINCT g, s, b FROM t" false]
+   ["SELECT DISTINCT f, d FROM t WHERE g = 2" false]
+   ["SELECT DISTINCT g FROM t ORDER BY g DESC NULLS FIRST" true]
+   ["SELECT DISTINCT u FROM t ORDER BY u LIMIT 7" true]
+   ["SELECT COUNT(*) FROM (SELECT DISTINCT k, g FROM t) x" false]
    ;; DISTINCT aggregates over integer-like values (primitive per-group sets)
    ["SELECT g, COUNT(DISTINCT k), SUM(DISTINCT k), AVG(DISTINCT d), MIN(DISTINCT dt), MAX(DISTINCT ts) FROM t GROUP BY g" false]
    ["SELECT COUNT(DISTINCT k), COUNT(DISTINCT g), SUM(DISTINCT d), COUNT(DISTINCT 0) FROM t" false]
