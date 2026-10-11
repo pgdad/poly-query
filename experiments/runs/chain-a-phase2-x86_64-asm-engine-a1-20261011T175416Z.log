@@ -1,0 +1,6 @@
+2026-10-11T17:54:16+00:00 chain chain-a-phase2-x86_64-asm-engine-a1-20261011T175416Z: session 1 -> a-phase2-x86_64-asm-engine-a1-20261011T175416Z (budget $150.00)
+2026-10-11T17:54:16+00:00 [a-phase2-x86_64-asm-engine-a1-20261011T175416Z] agent queued (usage gate, then launch)
+2026-10-11T18:19:13+00:00 [a-phase2-x86_64-asm-engine-a1-20261011T175416Z] agent finished; collecting telemetry
+2026-10-11T18:19:13+00:00 [a-phase2-x86_64-asm-engine-a1-20261011T175416Z] validating (clean clone, sandboxed)
+2026-10-11T18:19:13+00:00 [a-phase2-x86_64-asm-engine-a1-20261011T175416Z] outcome=success cost=$16.038120000000003 turns=85 wall=1496.4s
+2026-10-11T18:19:13+00:00 chain chain-a-phase2-x86_64-asm-engine-a1-20261011T175416Z finished: outcome=success sessions=1 spent=$16.04
