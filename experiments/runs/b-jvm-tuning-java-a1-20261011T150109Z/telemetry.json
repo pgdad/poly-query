@@ -1,0 +1,117 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "b-jvm-tuning-java-a1-20261011T150109Z",
+ "language": "java",
+ "task": "jvm-tuning",
+ "track": "B",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-b-jvm-tuning",
+ "prompt_sha256": "334c1741d2f0ef2041f82b391c3ee49e0a0907294497aab886c09a3c5253274c",
+ "session_id": "666619ba-013a-4e8f-97c3-7777a052b584",
+ "tokens": {
+  "input": 486,
+  "output": 2093,
+  "cache_read": 60789563,
+  "cache_creation": 462568,
+  "thinking": null,
+  "thinking_estimated": 107709,
+  "source": "summed per-message usage (no final result event; output tokens are a lower bound)",
+  "api_messages": 243
+ },
+ "rate_limit": {
+  "events": 16,
+  "max_utilization": {
+   "seven_day": 0.48,
+   "five_hour": 0.17
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": null,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": null,
+ "result_segments": 0,
+ "assistant_messages": 577,
+ "tool_calls": {
+  "Bash": 232,
+  "Write": 6,
+  "ToolSearch": 2,
+  "Monitor": 3,
+  "TaskStop": 2
+ },
+ "tool_calls_total": 245,
+ "tool_failures": 3,
+ "build_invocations": 33,
+ "build_failures_heuristic": 3,
+ "conformance_runs": 9,
+ "conformance_progress": [
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 7200.6,
+  "model_api_seconds": null,
+  "tool_seconds": 5184.8,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 4,
+  "files_changed": 21,
+  "lines_added": 2681,
+  "lines_removed": 332,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 124,
+ "result_subtype": null,
+ "is_error": null,
+ "stop_reason": null,
+ "final_message": "",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

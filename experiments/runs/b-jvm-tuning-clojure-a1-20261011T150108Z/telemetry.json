@@ -1,0 +1,99 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "b-jvm-tuning-clojure-a1-20261011T150108Z",
+ "language": "clojure",
+ "task": "jvm-tuning",
+ "track": "B",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-b-jvm-tuning",
+ "prompt_sha256": "2f49dd24abcaa7f1d7a23b0b1ff05775c885a54e54f5a8edb9938966d92f29f3",
+ "session_id": "aa0513e3-bb79-4c0f-ba78-08f80c4d8e1c",
+ "tokens": {
+  "input": 434,
+  "output": 195273,
+  "cache_read": 51431388,
+  "cache_creation": 407613,
+  "thinking": null,
+  "thinking_estimated": 85630,
+  "source": "result events",
+  "api_messages": 217
+ },
+ "rate_limit": {
+  "events": 12,
+  "max_utilization": {
+   "seven_day": 0.48,
+   "five_hour": 0.13
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 17.4543776,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 222,
+ "result_segments": 1,
+ "assistant_messages": 481,
+ "tool_calls": {
+  "Bash": 217,
+  "Write": 3,
+  "Read": 1
+ },
+ "tool_calls_total": 221,
+ "tool_failures": 3,
+ "build_invocations": 201,
+ "build_failures_heuristic": 17,
+ "conformance_runs": 7,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 6270.6,
+  "model_api_seconds": 1841.5,
+  "tool_seconds": 4430.6,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 13,
+  "files_changed": 41,
+  "lines_added": 1310,
+  "lines_removed": 221,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Tuning is finished and everything is committed. Conformance passes everywhere it passed before, the capability set is unchanged, and all 20 workload queries return exactly the same full results as the starting engine.\n\n## Results (scale 1m)\n\nStarting engine vs final build, run alternately on the same machine:\n\n| | before | after |\n|---|---:|---:|\n| Start-up (process spawn \u2192 first response), median of 40 | 354 ms | **117 ms** (3.0\u00d7 faster) |\n| Cold total (first run of each of the 20 queries), 5 sessions | 3186 ms | **497 ms** (6.4\u00d7) |\n| Warm total (median per query), 5 sessions | 530 ms | **226 ms** (2.3\u00d7) |\n| Peak memory (RSS) per session | 5.37 GB | 5.14 GB |\n| Memory at first response | 135 MB | 144 MB |\n| Table loading | 11.2 s | 7.8 s |\n\n## What was kept\n\n- **JDK AOT cache:** `make build` now packs the engine into a jar and records an AOT cache by replaying a synthetic training session. The training uses generated tables with NULLs in every column type and generic queries, never the benchmark queries or data. The cache alone took start-up from 343 to 119 ms. The training itself is what helps first queries: a cache recorded without it leaves the cold total at 1597 ms instead of 600 ms. Adding NULLs to the training data cut the cold total from 596 to 513 ms. If training fails, the build warns and still succeeds. A missing, stale, truncated or garbage cache is ignored with nothing on stdout or stderr; I tested all of these.\n- **`-XX:CompileThresholdScaling=0.3`** (lets the JIT compile hot code sooner): cold total 1367 \u2192 847 ms. Warm latency and start-up time are unchanged; it costs about 22 MB more memory at start-up.\n- **`-XX:+UseTransparentHugePages`:** warm latency 5\u20139% faster, mostly on the sorts. It costs 2.5\u20139% more peak memory.\n- **Compilation checks:**\n  - Class-loading logs confirm nothing is compiled or loaded from source at run time.\n  - `javap` confirms direct linking on the call sites.\n  - `make lint` now also fails on any boxed-math or performance warning, in every namespace. I removed all 145 boxed-math sites it found.\n- **Hidden boxing and slow dispatch in hot loops**, found by profiling and reading the bytecode. These are cases the lint cannot see (`not=` on primitives, `cond`'s implicit nil branch, locally defined primitive functions, a comparator call site that saw many classes). Fixing them in the sort, plus a parallel merge and parallel key extraction, took q14 from ~320 to 61 ms and q15 from ~125 to 55 ms warm. Smaller kernel fixes gave \u221211% warm on six filter/aggregate queries. One CSV-reader fix cut table loading from 12.2 to 8.0 s.\n\n## What was dropped (measured, no gain beyond noise or too costly)\n\n`:elide-meta`, G1, Serial GC, `-XX:-UsePerfData`, `-Xms8g`, `-Xmn4g`, pre-touch (3\u00d7 peak memory), a smaller code cache (it peaks at 14 MB of 240 MB), `AOTCompileEagerly` and more compiler threads. ZGC could not be measured because the AOT cache doesn't work with it. Two code changes were reverted for having no measurable effect: unboxed aggregate merges, and `Math/addExact`-style arithmetic kernels. The existing overflow checks were already exact, so `NUMERIC_OVERFLOW` behaviour is unchanged. The README has the full table with start-up, cold, warm and memory numbers for every technique, plus how I judged noise.\n\n## Test results\n\n- `make build test lint`: 116 tests, 0 failures; lint clean.\n- Conformance: `TOTAL: 660/660 pass`; `--modes` `3870/3870`; `--transport http` `660/660`; `--native` `660/660`.\n- Concurrency suite: `http suite: 19/19 passed`.\n\n## Known limitations\n\n- The AOT cache is tied to the JDK build and the jar's path and modification time. After a JDK upgrade or moving the directory it is silently skipped, and start-up goes back to about 350 ms until you run `make clean build`.\n- Transparent huge pages only take effect when the kernel's mode is `madvise` or `always`.\n- About 115 ms of start-up remains. It is JVM boot plus Clojure namespace initialization, which the JDK 27 cache does not capture",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
