@@ -13,6 +13,7 @@ use crate::error::{Error, Result};
 use crate::exec::ExecContext;
 use crate::exec::aggregate::{AggState, Partial};
 use crate::exec::hash::FastSet;
+use crate::exec::pool;
 use crate::native::{GroupSum, Kernels, pack_bools};
 use crate::planner::expr::{AggFunc, AggregateCall};
 use crate::types::i256::I256;
@@ -68,7 +69,7 @@ enum Acc {
     /// DISTINCT aggregates over fixed-width values of one representation:
     /// the distinct values of each group (`kind` as for `ExtremeI64`).
     DistinctI64 {
-        sets: Vec<FastSet<i64>>,
+        sets: Vec<DistinctSet>,
         kind: Option<I64Kind>,
     },
     /// Any other aggregate (other DISTINCT aggregates, MIN/MAX of other
@@ -80,6 +81,92 @@ const NONE: u32 = u32::MAX;
 
 /// Retained bytes per distinct value (memory accounting, as row mode).
 const DISTINCT_VALUE_BYTES: usize = 40;
+
+/// Global DISTINCT sets with at least this many values in all partials
+/// together are united in parallel.
+const PARALLEL_DISTINCT_UNION: usize = 64 * 1024;
+
+/// The distinct values of one group of a DISTINCT aggregate: one set, or
+/// (after a parallel union) several disjoint sets partitioned by value hash.
+#[derive(Debug, Default)]
+struct DistinctSet {
+    parts: Vec<FastSet<i64>>,
+}
+
+impl DistinctSet {
+    #[inline]
+    fn part_of(x: i64, parts: usize) -> usize {
+        ((x as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40) as usize % parts
+    }
+
+    #[inline]
+    fn insert(&mut self, x: i64) -> bool {
+        match self.parts.len() {
+            0 => {
+                self.parts.push(FastSet::default());
+                self.parts[0].insert(x)
+            }
+            1 => self.parts[0].insert(x),
+            n => self.parts[Self::part_of(x, n)].insert(x),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.parts.iter().map(FastSet::len).sum()
+    }
+
+    fn values(&self) -> impl Iterator<Item = i64> + '_ {
+        self.parts.iter().flatten().copied()
+    }
+
+    /// Adds the values of `other`; returns how many were new.
+    fn merge(&mut self, other: &DistinctSet) -> usize {
+        if let ([into], [from]) = (self.parts.as_mut_slice(), other.parts.as_slice()) {
+            into.reserve(from.len());
+            return from.iter().filter(|&&x| into.insert(x)).count();
+        }
+        other.values().filter(|&x| self.insert(x)).count()
+    }
+
+    /// The union of `sets` on `threads` threads: the values are scattered
+    /// into `threads` hash partitions, then each partition's set is built
+    /// on its own thread.
+    fn union_parallel(sets: Vec<DistinctSet>, threads: usize) -> DistinctSet {
+        let parts = threads.max(2);
+        let scattered: Vec<Vec<Vec<i64>>> = pool::scoped(
+            sets.iter()
+                .map(|set| {
+                    move || {
+                        let mut out: Vec<Vec<i64>> = vec![Vec::new(); parts];
+                        for x in set.values() {
+                            out[Self::part_of(x, parts)].push(x);
+                        }
+                        out
+                    }
+                })
+                .collect(),
+        );
+        drop(sets);
+        let scattered = &scattered;
+        DistinctSet {
+            parts: pool::scoped(
+                (0..parts)
+                    .map(|p| {
+                        move || {
+                            let total = scattered.iter().map(|s| s[p].len()).sum();
+                            let mut set =
+                                FastSet::with_capacity_and_hasher(total, Default::default());
+                            for s in scattered {
+                                set.extend(s[p].iter().copied());
+                            }
+                            set
+                        }
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
 
 /// Per-group `i64` sums of the native grouped-sum kernel.
 #[derive(Debug, Default)]
@@ -328,7 +415,7 @@ impl Acc {
                 best.resize(groups, 0.0);
                 has.resize(groups, false);
             }
-            Acc::DistinctI64 { sets, .. } => sets.resize_with(groups, FastSet::default),
+            Acc::DistinctI64 { sets, .. } => sets.resize_with(groups, DistinctSet::default),
             Acc::States(s) => s.resize_with(groups, || AggState::new(call)),
         }
     }
@@ -830,13 +917,7 @@ impl Acc {
                 if ak.is_none() {
                     *ak = *bk;
                 }
-                let mut added = 0;
-                for (g, t) in pairs() {
-                    a[t].reserve(b[g].len());
-                    for &x in &b[g] {
-                        added += usize::from(a[t].insert(x));
-                    }
-                }
+                let added: usize = pairs().map(|(g, t)| a[t].merge(&b[g])).sum();
                 return Ok(added * DISTINCT_VALUE_BYTES);
             }
             _ => {
@@ -889,7 +970,7 @@ impl Acc {
             Acc::DistinctI64 { sets, kind } => {
                 let mut state = AggState::new(call);
                 if let Some(k) = kind {
-                    for &x in &sets[g] {
+                    for x in sets[g].values() {
                         // Cannot fail: the values have the argument's type.
                         let _ = state.update(&k.value(x));
                     }
@@ -1030,13 +1111,25 @@ impl Acc {
                 Data::Int(sets[..groups].iter().map(|s| s.len() as i64).collect()),
                 None,
             ),
-            Acc::DistinctI64 { .. } => {
+            Acc::DistinctI64 { sets, kind } => {
+                // The values are distinct already: a plain (non-DISTINCT)
+                // state over them gives the DISTINCT result.
+                let plain = AggregateCall {
+                    distinct: false,
+                    ..call.clone()
+                };
                 let mut values = Vec::with_capacity(groups);
-                for g in 0..groups {
+                for (g, set) in sets[..groups].iter().enumerate() {
                     if g % 4096 == 4095 {
                         ctx.check_interrupt()?;
                     }
-                    values.push(self.state_of(call, g).finish()?);
+                    let mut state = AggState::new(&plain);
+                    if let Some(k) = kind {
+                        for x in set.values() {
+                            state.update(&k.value(x))?;
+                        }
+                    }
+                    values.push(state.finish()?);
                 }
                 Vector::from_values(values)
             }
@@ -1126,6 +1219,64 @@ impl Aggregator {
         }
         let per_group = 48 + 32 * (keys.len() + self.calls.len());
         Ok(retained + (self.groups - before) * per_group)
+    }
+
+    /// Merges the partial aggregators of parallel workers (serially, for
+    /// few groups); the large DISTINCT value sets of a global aggregate are
+    /// united in parallel on `threads` threads. `reserve` accounts the
+    /// bytes newly retained.
+    pub fn merge_all(
+        mut partials: Vec<Aggregator>,
+        threads: usize,
+        reserve: &dyn Fn(usize) -> Result<()>,
+    ) -> Result<Option<Aggregator>> {
+        let mut united = Vec::new();
+        if partials.len() > 1 && threads > 1 && partials[0].keys.width() == 0 {
+            for k in 0..partials[0].accs.len() {
+                let mut sets = Vec::with_capacity(partials.len());
+                for p in partials.iter_mut() {
+                    if let Acc::DistinctI64 { sets: s, .. } = &mut p.accs[k]
+                        && let Some(set) = s.first_mut()
+                    {
+                        sets.push(std::mem::take(set));
+                    }
+                }
+                let total: usize = sets.iter().map(DistinctSet::len).sum();
+                if sets.len() == partials.len() && total >= PARALLEL_DISTINCT_UNION {
+                    let largest = sets.iter().map(DistinctSet::len).max().unwrap_or(0);
+                    let union = DistinctSet::union_parallel(sets, threads);
+                    reserve(union.len().saturating_sub(largest) * DISTINCT_VALUE_BYTES)?;
+                    united.push((k, union));
+                } else {
+                    // Put the sets back: they are merged below.
+                    for (p, set) in partials.iter_mut().zip(sets) {
+                        if let Acc::DistinctI64 { sets: s, .. } = &mut p.accs[k]
+                            && let Some(slot) = s.first_mut()
+                        {
+                            *slot = set;
+                        }
+                    }
+                }
+            }
+        }
+        let mut iter = partials.into_iter();
+        let Some(mut agg) = iter.next() else {
+            return Ok(None);
+        };
+        for p in iter {
+            let retained = agg.merge(p)?;
+            if retained > 0 {
+                reserve(retained)?;
+            }
+        }
+        for (k, union) in united {
+            if let Acc::DistinctI64 { sets, .. } = &mut agg.accs[k]
+                && let Some(slot) = sets.first_mut()
+            {
+                *slot = union;
+            }
+        }
+        Ok(Some(agg))
     }
 
     /// Folds a partial aggregator over the same keys and aggregates into
@@ -1323,6 +1474,51 @@ mod tests {
                     Value::Float(4.0)
                 ],
             ]
+        );
+    }
+
+    #[test]
+    fn large_global_distinct_sets_are_united_in_parallel() {
+        let distinct = |func, ty| AggregateCall {
+            distinct: true,
+            ..call(func, ty)
+        };
+        let calls = vec![
+            distinct(AggFunc::Count, DataType::Int64),
+            distinct(AggFunc::Sum, DataType::Int64),
+            distinct(AggFunc::Min, DataType::Int64),
+            distinct(AggFunc::Avg, DataType::Int64),
+        ];
+        let ctx = ExecContext::default();
+        // Four partials with overlapping value ranges: 0..200_000 in all.
+        let partials: Vec<Aggregator> = (0..4i64)
+            .map(|w| {
+                let vals: Vec<Value> = (w * 40_000..w * 40_000 + 80_000).map(Value::Int).collect();
+                let n = vals.len();
+                let v = Vector::from_values(vals);
+                let mut a = Aggregator::new(0, &calls, None);
+                a.update(
+                    &[],
+                    &[Some(v.clone()), Some(v.clone()), Some(v.clone()), Some(v)],
+                    n,
+                )
+                .unwrap();
+                a
+            })
+            .collect();
+        let merged = Aggregator::merge_all(partials, 4, &|_| Ok(()))
+            .unwrap()
+            .unwrap();
+        let rows = merged.finish(&ctx).unwrap().into_rows();
+        let n = 200_000i64;
+        assert_eq!(
+            rows,
+            vec![vec![
+                Value::Int(n),
+                Value::Int(n * (n - 1) / 2),
+                Value::Int(0),
+                Value::Float((n - 1) as f64 / 2.0)
+            ]]
         );
     }
 }

@@ -638,16 +638,11 @@ impl BatchOperator for ParallelAggregateOp {
         let out = if partials.len() > 1 && total >= self.morsel_rows {
             merge_partitioned(partials, &self.seed, ctx)?
         } else {
-            let mut iter = partials.into_iter();
-            let mut agg = iter.next().unwrap_or_else(|| {
+            let merged =
+                Aggregator::merge_all(partials, self.threads, &|bytes| ctx.reserve(bytes))?;
+            let agg = merged.unwrap_or_else(|| {
                 Aggregator::new(self.group_by.len(), &self.aggregates, ctx.execution.native)
             });
-            for p in iter {
-                let retained = agg.merge(p)?;
-                if retained > 0 {
-                    ctx.reserve(retained)?;
-                }
-            }
             agg.finish(ctx)?
         };
         Ok((out.len > 0).then_some(out))
