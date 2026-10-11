@@ -279,8 +279,9 @@ inherit them. Unsupported values (`"mode":"quantum"`) are `UNSUPPORTED`.
 | `native: true` | accepted and ignored (`native.kernels` is not claimed; no kernel library is loaded). |
 
 Every combination produces the same rows (row order only differs where no
-`ORDER BY` fixes it) and raises the same error codes; the planner and the
-executor guarantee this structurally:
+`ORDER BY` fixes it) and raises the same error codes (apart from operands
+that need not be evaluated, see the implementation-defined choices); the
+planner and the executor guarantee this structurally:
 
 * the vectorized evaluator computes exactly the same values as `eval`:
   it reuses the same arithmetic / comparison / accumulation routines
@@ -299,13 +300,17 @@ executor guarantee this structurally:
   addition is not associative; INT64 / DECIMAL sums are exact 128-bit and
   merge exactly).
 
-`tests/sh/run_mode_tests.sh` (part of `make test`) runs a query set under
-eight option combinations with `PQ_PARALLEL_MIN_ROWS=37`, which makes even the
-small fixture tables split into many parallel tasks, and checks that all
-results agree. During development a throw-away random query generator
-(outside the repository) compared five option sets on ~4000 random
-queries (joins, LEFT joins, grouping, DISTINCT aggregates, NULL-heavy data,
-LIKE / IN / BETWEEN / CASE, top-N) without a mismatch.
+`make test` checks this: `tests/unit/test_exec5.S` runs 30 cases under six
+settings (with `g_par_min_rows` = 1, so 4-row tables are split into
+parallel tasks) and compares row counts, errors and result checksums;
+`tests/sh/run_mode_tests.sh` runs 30 queries over the generated fixture
+tables under eight option combinations (`PQ_PARALLEL_MIN_ROWS=37`) and
+compares the results as multisets. During development a throw-away random
+query generator (outside the repository) compared five option sets on more
+than 5000 random queries (2–4-way inner / LEFT / comma joins, grouping,
+DISTINCT aggregates, NULL-heavy data, LIKE / IN / BETWEEN / CASE, top-N),
+also on 100k-row data with the default parallel thresholds, without a
+mismatch.
 
 ### Row mode: Volcano iterators (`volcano.S`)
 
