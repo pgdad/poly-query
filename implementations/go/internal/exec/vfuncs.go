@@ -163,7 +163,10 @@ func calendarKernel(name, unit string, t types.Type) func(int64) int64 {
 // evaluated for the rows not decided by earlier branches, exactly the rows
 // for which row-at-a-time evaluation reaches it.
 type vbranches struct {
-	conds   []vexpr // CASE: WHEN conditions; nil for COALESCE
+	operand vexpr   // CASE with operand: compared with the WHEN values
+	opCls   vclass  // class of the operand and the WHEN values
+	nullOp  []int32 // rows whose operand is NULL (ELSE)
+	conds   []vexpr // CASE: WHEN conditions (or values); nil for COALESCE
 	results []vexpr // CASE: THEN results; COALESCE: the arguments
 	els     vexpr   // CASE: ELSE (nil: NULL)
 	cls     vclass
@@ -177,12 +180,22 @@ type vbranches struct {
 // result type, or returns nil.
 func (c *vcompiler) branchesKernel(e plan.Expr) (vexpr, error) {
 	var conds, results []plan.Expr
-	var els plan.Expr
+	var els, operand plan.Expr
 	t := e.Type()
 	switch x := e.(type) {
 	case *plan.Case:
-		if x.Operand != nil {
-			return nil, nil
+		if operand = x.Operand; operand != nil {
+			// Operand and values of one type compare by representation.
+			switch operand.Type().Kind {
+			case types.KindInt64, types.KindBoolean, types.KindDate, types.KindTimestamp, types.KindString:
+			default:
+				return nil, nil
+			}
+			for _, w := range x.Whens {
+				if w.Cond.Type() != operand.Type() {
+					return nil, nil
+				}
+			}
 		}
 		for _, w := range x.Whens {
 			conds = append(conds, w.Cond)
@@ -206,9 +219,12 @@ func (c *vcompiler) branchesKernel(e plan.Expr) (vexpr, error) {
 		}
 	}
 	for _, x := range conds {
-		if x.Type().Kind != types.KindBoolean {
+		if operand == nil && x.Type().Kind != types.KindBoolean {
 			return nil, nil
 		}
+	}
+	if operand != nil && volatile(operand) {
+		return nil, nil
 	}
 	for _, x := range append(append([]plan.Expr(nil), conds...), results...) {
 		if volatile(x) {
@@ -216,6 +232,13 @@ func (c *vcompiler) branchesKernel(e plan.Expr) (vexpr, error) {
 		}
 	}
 	v := &vbranches{cls: classOf(t)}
+	if operand != nil {
+		var err error
+		if v.operand, err = c.compile(operand); err != nil {
+			return nil, err
+		}
+		v.opCls = classOf(operand.Type())
+	}
 	for _, x := range conds {
 		ve, err := c.compile(x)
 		if err != nil {
@@ -240,6 +263,14 @@ func (c *vcompiler) branchesKernel(e plan.Expr) (vexpr, error) {
 		return nil, nil
 	}
 	return v, nil
+}
+
+// strAt returns row i of a (possibly dictionary-encoded) STRING vector.
+func strAt(v *Vec, i int) string {
+	if v.Dict != nil {
+		return v.Dict[v.Codes[i]]
+	}
+	return v.S[i]
 }
 
 // copyRows copies rows of src (class cls) into dst, including NULL flags.
@@ -280,6 +311,26 @@ func (v *vbranches) eval(b *Batch, sel []int32) (*Vec, error) {
 	} else {
 		v.rows = append(v.rows, sel...)
 	}
+	var op *Vec
+	v.nullOp = v.nullOp[:0]
+	if v.operand != nil {
+		// A NULL operand matches no WHEN value.
+		var err error
+		if op, err = v.operand.eval(b, v.rows); err != nil {
+			return nil, err
+		}
+		if op.Nulls != nil {
+			kept := v.rows[:0]
+			for _, i := range v.rows {
+				if op.Nulls[i] {
+					v.nullOp = append(v.nullOp, i)
+				} else {
+					kept = append(kept, i)
+				}
+			}
+			v.rows = kept
+		}
+	}
 	out := v.out.reset(n, v.cls)
 	nulls := v.out.withNulls(n)
 	rows := v.rows
@@ -294,7 +345,17 @@ func (v *vbranches) eval(b *Batch, sel []int32) (*Vec, error) {
 				return nil, err
 			}
 			for _, i := range rows {
-				if (cv.Nulls == nil || !cv.Nulls[i]) && cv.I[i] != 0 {
+				var match bool
+				switch {
+				case cv.isNull(int(i)):
+				case op == nil:
+					match = cv.I[i] != 0
+				case v.opCls == vInt:
+					match = op.I[i] == cv.I[i]
+				default:
+					match = strAt(op, int(i)) == strAt(cv, int(i))
+				}
+				if match {
 					v.take = append(v.take, i)
 				} else {
 					v.rest = append(v.rest, i)
@@ -324,6 +385,9 @@ func (v *vbranches) eval(b *Batch, sel []int32) (*Vec, error) {
 		// rows aliases v.rows or a previous rest buffer: swap buffers.
 		v.rows, v.rest = v.rest, rows[:0]
 		rows = v.rows
+	}
+	if len(v.nullOp) > 0 {
+		rows = append(rows, v.nullOp...)
 	}
 	if len(rows) == 0 {
 		return out, nil

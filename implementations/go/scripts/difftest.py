@@ -113,6 +113,8 @@ class Gen:
                 lambda: f"{r.choice(['HOUR', 'MINUTE', 'SECOND'])}({e('TS')})",
                 lambda: f"CASE WHEN {e('BOOL')} THEN {e('INT')} WHEN {e('BOOL')} THEN {e('INT')} END",
                 lambda: f"COALESCE({e('INT')}, {e('INT')}, {e('INT')})",
+                lambda: f"CASE {e('INT')} WHEN {e('INT')} THEN {e('INT')} WHEN {r.choice(['1', '2', '0'])} THEN {e('INT')} ELSE {e('INT')} END",
+                lambda: f"CASE {e('STR')} WHEN {e('STR')} THEN 1 WHEN 'paid' THEN 2 END",
                 lambda: f"CASE WHEN {e('BOOL')} THEN {e('INT')} ELSE {e('INT')} END",
                 lambda: f"COALESCE({e('INT')}, {e('INT')})",
                 lambda: f"CAST({e('DEC')} AS INT64)",
