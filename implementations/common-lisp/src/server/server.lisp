@@ -184,18 +184,29 @@ called with the query context and returns the job's thunk."
           (error e)))
       job)))
 
+(defmacro with-admission-errors ((conn id) &body body)
+  "Run BODY; a PQ-ERROR raised before any response was sent (validation or
+admission) is answered as an error response carrying the request ID, and
+NIL is returned."
+  `(handler-case (progn ,@body)
+     (pq-error (e)
+       (send-response ,conn (error-response ,id (pq-error-code e) (pq-error-message e)
+                                            (pq-error-details e)))
+       nil)))
+
 (defun run-query (server conn request id)
   "Execute a query request through the scheduler and send its response."
-  (let* ((session (server-session server))
-         (job (admit-query server request id
-                           (lambda (context)
-                             (lambda ()
-                               (with-error-response (id)
-                                 (op-query session id request context))))))
-         (result (wait-for-job (server-scheduler server) job
-                               :on-poll (disconnect-watcher server conn job))))
-    (unless (connection-gone conn)
-      (send-response conn result :headers (query-id-header job)))))
+  (let ((session (server-session server)))
+    (with-admission-errors (conn id)
+      (let* ((job (admit-query server request id
+                               (lambda (context)
+                                 (lambda ()
+                                   (with-error-response (id)
+                                     (op-query session id request context))))))
+             (result (wait-for-job (server-scheduler server) job
+                                   :on-poll (disconnect-watcher server conn job))))
+        (unless (connection-gone conn)
+          (send-response conn result :headers (query-id-header job)))))))
 
 ;;; Streaming (protocol.md §7.2). The worker produces items into a bounded
 ;;; channel: (:header columns), (:rows columns rows)*, then (:end count) or
@@ -239,15 +250,18 @@ called with the query context and returns the job's thunk."
 (defun stream-query (server conn request id)
   (let* ((session (server-session server))
          (channel (make-channel +stream-channel-batches+))
-         (job (admit-query server request id
-                           (lambda (context)
-                             (lambda ()
-                               (let ((result (with-error-response (id)
-                                               (produce-stream session request id
-                                                               context channel))))
-                                 (unless (response-ok-p result)
-                                   (channel-put channel (list :error result) :force t))
-                                 result))))))
+         (job (with-admission-errors (conn id)
+                (admit-query server request id
+                             (lambda (context)
+                               (lambda ()
+                                 (let ((result (with-error-response (id)
+                                                 (produce-stream session request id
+                                                                 context channel))))
+                                   (unless (response-ok-p result)
+                                     (channel-put channel (list :error result) :force t))
+                                   result)))))))
+    (unless job
+      (return-from stream-query))
     (ignore-errors
      (setf (sb-bsd-sockets:sockopt-send-buffer (connection-socket conn)) +stream-socket-buffer+))
     (relay-stream server conn job channel)))

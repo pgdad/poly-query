@@ -12,7 +12,7 @@
 
 (in-package #:polyquery)
 
-(defconstant +stop-grace-seconds+ 0.25
+(defconstant +stop-grace-seconds+ 0.05
   "How long a running job may take to notice cancellation/timeout before its
 waiter completes it on the worker's behalf.")
 
