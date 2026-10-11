@@ -120,12 +120,11 @@ def _run_forked(gather: pp.Gather, ctx: ExecutionContext, task: Task) -> list[An
                 _worker(gather, ctx, range(w, count, workers), task, write_fd)
             os.close(write_fd)
             children.append((pid, read_fd))
-        payloads = read_frames([fd for _, fd in children], ctx)
+        replies = read_frames([fd for _, fd in children], ctx, pickle.loads)
     finally:
         _reap(children)
     results: list[Any] = [None] * count
-    for w, payload in enumerate(payloads):
-        ok, value = pickle.loads(payload)
+    for w, (ok, value) in enumerate(replies):
         if not ok:
             raise value
         for index, result in zip(range(w, count, workers), value):

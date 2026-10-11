@@ -314,15 +314,18 @@ class WorkerPool:
                 self._start(pickler.missing)
         return None
 
-    def _collect(self, workers: list[_Worker], ctx: ExecutionContext) -> list[bytes]:
-        return read_frames([w.result_fd for w in workers], ctx)
+    def _collect(self, workers: list[_Worker], ctx: ExecutionContext) -> list[Any]:
+        return read_frames([w.result_fd for w in workers], ctx, pickle.loads)
 
 
-def read_frames(fds: list[int], ctx: ExecutionContext) -> list[bytes]:
+def read_frames(fds: list[int], ctx: ExecutionContext, decode: Callable[[Any], Any] = bytes) -> list[Any]:
     """Reads one length-prefixed frame from every fd, observing cancellation
-    and the deadline while waiting. (Frames, not EOF, delimit a reply: a
-    concurrently forked process may hold a copy of a pipe's write end.)"""
+    and the deadline while waiting, and returns ``decode(frame)`` for each;
+    a frame is decoded as soon as it is complete, while the others are
+    still being computed. (Frames, not EOF, delimit a reply: a concurrently
+    forked process may hold a copy of a pipe's write end.)"""
     buffers: dict[int, bytearray] = {fd: bytearray() for fd in fds}
+    decoded: dict[int, Any] = {}
     sizes: dict[int, int | None] = {fd: None for fd in fds}
     selector = selectors.DefaultSelector()
     try:
@@ -344,10 +347,12 @@ def read_frames(fds: list[int], ctx: ExecutionContext) -> list[bytes]:
                 if size is not None and len(buf) >= _HEADER.size + size:
                     selector.unregister(fd)
                     pending -= 1
+                    decoded[fd] = decode(memoryview(buf)[_HEADER.size :])
+                    buffers[fd] = bytearray()
             ctx.check()
     finally:
         selector.close()
-    return [bytes(memoryview(buffers[fd])[_HEADER.size :]) for fd in fds]
+    return [decoded[fd] for fd in fds]
 
 
 def close_inherited_streams(keep: set[int]) -> None:
@@ -370,14 +375,13 @@ def close_inherited_streams(keep: set[int]) -> None:
             os.close(fd)
 
 
-def _results(replies: list[bytes], count: int, k: int) -> list[Any]:
+def _results(replies: list[tuple[bool, Any]], count: int, k: int) -> list[Any]:
     """Partition results in partition order. If partitions failed, raises
     the error of the first failing partition: the one a serial run would
     have reached first."""
     results: list[Any] = [None] * count
     failure: tuple[int, BaseException] | None = None
-    for w, reply in enumerate(replies):
-        ok, value = pickle.loads(reply)
+    for w, (ok, value) in enumerate(replies):
         if ok:
             for index, result in zip(range(w, count, k), value):
                 results[index] = result
