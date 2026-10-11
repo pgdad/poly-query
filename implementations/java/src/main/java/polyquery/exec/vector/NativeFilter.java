@@ -7,21 +7,24 @@ import polyquery.ffi.NativeKernels;
 import polyquery.plan.BoundExpr.CompareOp;
 
 /**
- * Native evaluation of the leading conjuncts of a WHERE clause with the filter and bitmap
- * kernels of {@code libpqkernels}.
+ * Native evaluation of conjuncts of a WHERE clause with the filter and bitmap kernels of
+ * {@code libpqkernels}.
  *
- * <p>Eligible conjuncts are those the vectorized engine would evaluate with a plain comparison
- * of LONG-represented values ({@link Kernels.LongCompare}: INT64, DECIMAL of one scale, DATE,
- * TIMESTAMP, BOOLEAN) — {@code column op constant}, {@code constant op column},
- * {@code column op column} and {@code column BETWEEN constant AND constant} — and
- * {@code column IS [NOT] NULL}. None of them can raise an error, so evaluating them on every row
- * of the batch is safe; the leading run of eligible conjuncts is evaluated at once, the rest by
- * the engine's kernels on the surviving rows.
+ * <p>Eligible conjuncts compare LONG-represented values (INT64, DECIMAL, DATE, TIMESTAMP,
+ * BOOLEAN): {@code column op constant} (either side; DECIMAL constants of another scale are
+ * rescaled exactly to the column's scale), {@code column op column} of one scale,
+ * {@code column BETWEEN constant AND constant}, and {@code column IS [NOT] NULL}.
  *
- * <p>Three-valued logic is kept exact: a row is dropped only where a conjunct is FALSE. When the
- * run contains a NULL-able conjunct and more conjuncts follow, rows on which the run is NULL
- * (no conjunct FALSE, one NULL) stay selected for the later conjuncts — which the row engine
- * also evaluates on them — and are flagged in {@code sawNull} so they never pass the filter.
+ * <p>Order of evaluation: the leading conjuncts that cannot raise an error (comparisons, IS NULL,
+ * LIKE, IN, BETWEEN over columns and constants) form the <em>safe prefix</em>; their order does
+ * not matter, since three-valued AND is commutative and none of them fails. The eligible ones
+ * among them are evaluated natively first, over every row of the batch, the others then by the
+ * engine's kernels on the surviving rows, followed by the remaining conjuncts in their order.
+ *
+ * <p>Three-valued logic is kept exact: a row is dropped only where a conjunct is FALSE. When
+ * conjuncts that may fail follow the safe prefix, rows on which the native conjuncts are NULL
+ * (none FALSE, one NULL) stay selected for them — the row engine evaluates them on those rows
+ * too — and are flagged in {@code sawNull} so they never pass the filter.
  *
  * <p>Per conjunct: {@code pqk_filter_i64_bitmap} (or {@code pqk_compare_i64} for two columns;
  * validity bitmaps for IS NULL) gives the TRUE rows; {@code pqk_bitmap_and} intersects them,
@@ -48,11 +51,15 @@ final class NativeFilter {
 
     private final NativeKernels kernels;
     private final Pred[] preds;
-    private final int conjuncts;
-    /** Number of conjuncts the last {@link #select} evaluated. */
-    int consumed;
+    /** Conjunct index of each of {@link #preds}. */
+    private final int[] conjunctOf;
+    /** True if no conjunct can fail: rows can be dropped as soon as a conjunct is NULL. */
+    private final boolean allSafe;
+    /** Per conjunct: evaluated by the last {@link #select}. */
+    final boolean[] evaluated;
     /** Whether the last {@link #select} flagged rows in {@code sawNull}. */
     boolean sawNulls;
+    private final Pred[] active;
     private long[] pass = new long[0];
     private long[] keep;
     private long[] bits;
@@ -60,26 +67,58 @@ final class NativeFilter {
     private long[] valid;
     private long[] ones;
 
-    private NativeFilter(NativeKernels kernels, Pred[] preds, int conjuncts) {
+    private NativeFilter(NativeKernels kernels, Pred[] preds, int[] conjunctOf, int conjuncts, boolean allSafe) {
         this.kernels = kernels;
         this.preds = preds;
-        this.conjuncts = conjuncts;
+        this.conjunctOf = conjunctOf;
+        this.allSafe = allSafe;
+        this.evaluated = new boolean[conjuncts];
+        this.active = new Pred[preds.length];
     }
 
-    /** A native evaluator of the leading eligible conjuncts, or null if there is none (or no library). */
+    /** A native evaluator of the eligible conjuncts of the safe prefix, or null if there is none (or no library). */
     static NativeFilter create(NativeKernels kernels, VecExpr[] conjuncts) {
         if (kernels == null) {
             return null;
         }
         List<Pred> preds = new ArrayList<>();
-        for (VecExpr c : conjuncts) {
-            Pred p = analyze(c);
-            if (p == null) {
-                break;
+        List<Integer> index = new ArrayList<>();
+        int safe = 0;
+        while (safe < conjuncts.length && cannotFail(conjuncts[safe])) {
+            Pred p = analyze(conjuncts[safe]);
+            if (p != null) {
+                preds.add(p);
+                index.add(safe);
             }
-            preds.add(p);
+            safe++;
         }
-        return preds.isEmpty() ? null : new NativeFilter(kernels, preds.toArray(Pred[]::new), conjuncts.length);
+        if (preds.isEmpty()) {
+            return null;
+        }
+        return new NativeFilter(kernels, preds.toArray(Pred[]::new), index.stream().mapToInt(Integer::intValue).toArray(),
+                conjuncts.length, safe == conjuncts.length);
+    }
+
+    /** True if evaluating {@code e} can never raise an error (whatever the row values). */
+    static boolean cannotFail(VecExpr e) {
+        return switch (e) {
+            case Kernels.ColumnRef c -> true;
+            case Kernels.Constant c -> true;
+            case Kernels.Operand o -> true;
+            case Kernels.LongCompare c -> cannotFail(c.left) && cannotFail(c.right);
+            case Kernels.DecimalCompare c -> cannotFail(c.left) && cannotFail(c.right);
+            case Kernels.DoubleCompare c -> cannotFail(c.left) && cannotFail(c.right);
+            case Kernels.StringCompare c -> cannotFail(c.left) && cannotFail(c.right);
+            case Kernels.IsNull n -> cannotFail(n.input);
+            case Kernels.Not n -> cannotFail(n.input);
+            case Kernels.AndOr a -> cannotFail(a.left) && cannotFail(a.right);
+            case Kernels.Between b -> cannotFail(b.operand) && cannotFail(b.bounds);
+            case Kernels.Like l -> cannotFail(l.input);
+            case Kernels.InSet i -> cannotFail(i.operand);
+            case Kernels.InList i -> cannotFail(i.operand) && java.util.Arrays.stream(i.comparisons)
+                    .allMatch(NativeFilter::cannotFail);
+            default -> false;
+        };
     }
 
     private static int nativeOp(CompareOp op) {
@@ -108,8 +147,100 @@ final class NativeFilter {
         return e instanceof Kernels.Constant c && c.value != null ? Vec.longValue(c.value) : null;
     }
 
+    private static final long[] POW10 = new long[19];
+
+    static {
+        POW10[0] = 1;
+        for (int i = 1; i < POW10.length; i++) {
+            POW10[i] = POW10[i - 1] * 10;
+        }
+    }
+
+    /**
+     * {@code x op k / 10^ks} over unscaled column values x of scale {@code xs} as an integer
+     * predicate {@code x op' k'} (exact), or null if the constant does not fit.
+     */
+    private static ConstPred rescaled(int slot, CompareOp op, int xs, long k, int ks) {
+        if (ks <= xs) {
+            if (xs - ks >= POW10.length) {
+                return null;
+            }
+            try {
+                return new ConstPred(slot, nativeOp(op), Math.multiplyExact(k, POW10[xs - ks]), 0);
+            } catch (ArithmeticException e) {
+                return null;
+            }
+        }
+        if (ks - xs >= POW10.length) {
+            return null;
+        }
+        long p = POW10[ks - xs];
+        long f = Math.floorDiv(k, p); // x is an integer: compare with floor(k / p)
+        boolean exact = Math.floorMod(k, p) == 0;
+        return switch (op) {
+            case EQ -> exact ? new ConstPred(slot, NativeKernels.EQ, f, 0) : new ConstPred(slot, NativeKernels.BETWEEN, 1, 0);
+            case NEQ -> exact ? new ConstPred(slot, NativeKernels.NE, f, 0)
+                    : new ConstPred(slot, NativeKernels.BETWEEN, Long.MIN_VALUE, Long.MAX_VALUE);
+            case LT -> new ConstPred(slot, exact ? NativeKernels.LT : NativeKernels.LE, f, 0);
+            case LE -> new ConstPred(slot, NativeKernels.LE, f, 0);
+            case GT -> new ConstPred(slot, NativeKernels.GT, f, 0);
+            case GE -> new ConstPred(slot, exact ? NativeKernels.GE : NativeKernels.GT, f, 0);
+        };
+    }
+
+    /** {@code column op constant} of a LONG or DECIMAL comparison kernel ({@code operand}: the column side). */
+    private static ConstPred withConstant(VecExpr e, VecExpr column) {
+        switch (e) {
+            case Kernels.LongCompare c -> {
+                if (c.left == column) {
+                    Long k = constant(c.right);
+                    return k == null ? null : new ConstPred(-1, nativeOp(c.op), k, 0);
+                }
+                Long k = c.right == column ? constant(c.left) : null;
+                return k == null ? null : new ConstPred(-1, nativeOp(flip(c.op)), k, 0);
+            }
+            case Kernels.DecimalCompare c -> {
+                if (c.left == column) {
+                    Long k = constant(c.right);
+                    return k == null ? null : rescaled(-1, c.op, c.s1, k, c.s2);
+                }
+                Long k = c.right == column ? constant(c.left) : null;
+                return k == null ? null : rescaled(-1, flip(c.op), c.s2, k, c.s1);
+            }
+            default -> {
+                return null;
+            }
+        }
+    }
+
+    private static ConstPred atSlot(ConstPred p, int slot) {
+        return p == null ? null : new ConstPred(slot, p.op(), p.a(), p.b());
+    }
+
+    /** The bounds {@code [lo, hi]} of {@code x op k} for op GE/GT (lower) or LE/LT (upper), or null. */
+    private static long[] bound(ConstPred p, boolean lower) {
+        int op = p.op();
+        long k = p.a();
+        if (lower && op == NativeKernels.GE || !lower && op == NativeKernels.LE) {
+            return new long[] {k};
+        }
+        if (lower && op == NativeKernels.GT) {
+            return k == Long.MAX_VALUE ? null : new long[] {k + 1};
+        }
+        if (!lower && op == NativeKernels.LT) {
+            return k == Long.MIN_VALUE ? null : new long[] {k - 1};
+        }
+        return null;
+    }
+
     private static Pred analyze(VecExpr e) {
         switch (e) {
+            case Kernels.DecimalCompare c -> {
+                if (c.left instanceof Kernels.ColumnRef l) {
+                    return atSlot(withConstant(c, c.left), l.slot());
+                }
+                return c.right instanceof Kernels.ColumnRef r ? atSlot(withConstant(c, c.right), r.slot()) : null;
+            }
             case Kernels.LongCompare c -> {
                 if (c.left instanceof Kernels.ColumnRef l) {
                     if (c.right instanceof Kernels.ColumnRef r) {
@@ -127,15 +258,25 @@ final class NativeFilter {
             case Kernels.Between b -> {
                 // compiled as (operand >= low) AND (operand <= high) over the shared operand
                 if (b.negated || !(b.operand instanceof Kernels.ColumnRef col)
-                        || !(b.bounds instanceof Kernels.AndOr ao) || !ao.and
-                        || !(ao.left instanceof Kernels.LongCompare lo) || !(ao.right instanceof Kernels.LongCompare hi)
-                        || lo.op != CompareOp.GE || hi.op != CompareOp.LE
-                        || lo.left != b.holder || hi.left != b.holder) {
+                        || !(b.bounds instanceof Kernels.AndOr ao) || !ao.and) {
                     return null;
                 }
-                Long a = constant(lo.right);
-                Long z = constant(hi.right);
-                return a == null || z == null ? null : new ConstPred(col.slot(), NativeKernels.BETWEEN, a, z);
+                ConstPred lo = withConstant(ao.left, b.holder);
+                ConstPred hi = withConstant(ao.right, b.holder);
+                if (lo == null || hi == null) {
+                    return null;
+                }
+                if (lo.op() == NativeKernels.BETWEEN || hi.op() == NativeKernels.BETWEEN) {
+                    return null; // a bound equal to a non-representable value: left to the engine
+                }
+                long[] a = bound(lo, true);
+                long[] z = bound(hi, false);
+                if (a == null || z == null) {
+                    return lo.op() == NativeKernels.GT || hi.op() == NativeKernels.LT
+                            ? new ConstPred(col.slot(), NativeKernels.BETWEEN, 1, 0) // empty range
+                            : null;
+                }
+                return new ConstPred(col.slot(), NativeKernels.BETWEEN, a[0], z[0]);
             }
             case Kernels.IsNull n -> {
                 return n.input instanceof Kernels.ColumnRef col ? new NullPred(col.slot(), n.negated) : null;
@@ -177,26 +318,31 @@ final class NativeFilter {
     }
 
     /**
-     * Evaluates the leading eligible conjuncts on the active rows of {@code in} (dense batches
+     * Evaluates the eligible conjuncts natively on the active rows of {@code in} (dense batches
      * only) and writes the surviving positions to {@code dst}; rows kept only because a conjunct
-     * was NULL are flagged in {@code sawNull}. Returns their number, with {@link #consumed} and
-     * {@link #sawNulls} describing the work done — or -1 if the batch is not eligible.
+     * was NULL are flagged in {@code sawNull}. Returns their number, with {@link #evaluated}
+     * telling which conjuncts were done and {@link #sawNulls} whether rows were flagged — or -1 if
+     * the batch is not eligible.
      */
     int select(Batch in, int[] dst, boolean[] sawNull) {
         if (in.sel != null) {
             return -1;
         }
         int p = 0;
-        while (p < preds.length && applicable(preds[p], in)) {
-            p++;
+        for (int j = 0; j < preds.length; j++) {
+            boolean ok = applicable(preds[j], in);
+            evaluated[conjunctOf[j]] = ok;
+            if (ok) {
+                active[p++] = preds[j];
+            }
         }
         if (p == 0) {
             return -1;
         }
+        Pred[] preds = active;
         int n = in.count;
-        consumed = p;
         sawNulls = false;
-        boolean last = p == conjuncts; // nothing follows: NULL rows can be dropped right away
+        boolean last = allSafe; // no failing conjunct follows: NULL rows can be dropped right away
         if (p == 1 && preds[0] instanceof ConstPred c) {
             Vec v = in.cols[c.slot()];
             if (!v.hasNulls || last) {

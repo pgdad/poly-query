@@ -461,11 +461,11 @@ final class Kernels {
 
     /** DECIMAL comparison across different scales. */
     static final class DecimalCompare implements VecExpr {
-        private final CompareOp op;
-        private final VecExpr left;
-        private final VecExpr right;
-        private final int s1;
-        private final int s2;
+        final CompareOp op;
+        final VecExpr left;
+        final VecExpr right;
+        final int s1;
+        final int s2;
         private final Vec out = new Vec(DataType.BOOLEAN, 16);
 
         DecimalCompare(CompareOp op, VecExpr left, VecExpr right, int s1, int s2) {
@@ -493,9 +493,9 @@ final class Kernels {
     }
 
     static final class DoubleCompare implements VecExpr {
-        private final CompareOp op;
-        private final VecExpr left;
-        private final VecExpr right;
+        final CompareOp op;
+        final VecExpr left;
+        final VecExpr right;
         private final Vec out = new Vec(DataType.BOOLEAN, 16);
 
         DoubleCompare(CompareOp op, VecExpr left, VecExpr right) {
@@ -526,9 +526,9 @@ final class Kernels {
      * right side is a constant, each distinct dictionary entry is compared only once.
      */
     static final class StringCompare implements VecExpr {
-        private final CompareOp op;
-        private final VecExpr left;
-        private final VecExpr right;
+        final CompareOp op;
+        final VecExpr left;
+        final VecExpr right;
         private final String constant;
         private final Vec out = new Vec(DataType.BOOLEAN, 16);
         private String[] cachedDict;
@@ -595,7 +595,7 @@ final class Kernels {
     // ---------------------------------------------------------------- logic
 
     static final class Not implements VecExpr {
-        private final VecExpr input;
+        final VecExpr input;
         private final Vec out = new Vec(DataType.BOOLEAN, 16);
 
         Not(VecExpr input) {
@@ -717,7 +717,7 @@ final class Kernels {
      * the operand's type); a NULL constant makes non-members NULL.
      */
     static final class InSet implements VecExpr {
-        private final VecExpr operand;
+        final VecExpr operand;
         private final boolean negated;
         private final boolean hasNull;
         private final Set<Object> values;
@@ -779,9 +779,9 @@ final class Kernels {
 
     /** {@code operand [NOT] IN (e1, e2, …)} with non-constant items: e1, e2, … until one is TRUE. */
     static final class InList implements VecExpr {
-        private final VecExpr operand;
+        final VecExpr operand;
         private final Operand holder;
-        private final VecExpr[] comparisons;
+        final VecExpr[] comparisons;
         private final boolean negated;
         private final Vec out = new Vec(DataType.BOOLEAN, 16);
         private int[] active = new int[16];
@@ -882,7 +882,7 @@ final class Kernels {
 
     /** {@code s [NOT] LIKE 'constant pattern'}; per dictionary entry once for dictionary input. */
     static final class Like implements VecExpr {
-        private final VecExpr input;
+        final VecExpr input;
         private final LikeMatcher matcher;
         private final boolean negated;
         private final Vec out = new Vec(DataType.BOOLEAN, 16);

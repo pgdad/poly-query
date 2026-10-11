@@ -52,18 +52,21 @@ final class BatchOperators {
             int n = in.count;
             int[] dst = sel;
             boolean anyNull = false;
-            int first = 0;
+            boolean[] done = null;
             if (nativeFilter != null) {
                 int m = nativeFilter.select(in, dst, sawNull);
                 if (m >= 0) {
-                    first = nativeFilter.consumed;
+                    done = nativeFilter.evaluated;
                     anyNull = nativeFilter.sawNulls;
                     cur = dst;
                     dst = tmp;
                     n = m;
                 }
             }
-            for (int ci = first; ci < conjuncts.length && n > 0; ci++) {
+            for (int ci = 0; ci < conjuncts.length && n > 0; ci++) {
+                if (done != null && done[ci]) {
+                    continue;
+                }
                 VecExpr c = conjuncts[ci];
                 Vec r = c.eval(in, cur, n);
                 long[] v = r.longs;

@@ -49,7 +49,8 @@ public final class NativeVectorTest {
 
     /**
      * Table columns: 0 INT64 with NULLs, 1 INT64 without, 2 DATE with NULLs, 3 FLOAT64 with NULLs,
-     * 4 INT64 extreme, 5 and 6 FLOAT64 whose minimum resp. maximum is a mix of 0.0 and -0.0.
+     * 4 INT64 extreme, 5 and 6 FLOAT64 whose minimum resp. maximum is a mix of 0.0 and -0.0,
+     * 7 DECIMAL(12,2) with NULLs, 8 dictionary STRING with NULLs.
      */
     private static ColumnVector[] table(SplittableRandom r) {
         long[] a = new long[ROWS];
@@ -59,6 +60,10 @@ public final class NativeVectorTest {
         long[] e = new long[ROWS];
         double[] z1 = new double[ROWS];
         double[] z2 = new double[ROWS];
+        long[] dec = new long[ROWS];
+        int[] codes = new int[ROWS];
+        BitSet ndec = new BitSet();
+        BitSet nstr = new BitSet();
         BitSet na = new BitSet();
         BitSet nd = new BitSet();
         BitSet nf = new BitSet();
@@ -67,6 +72,14 @@ public final class NativeVectorTest {
             b[i] = r.nextInt(21) - 10;
             d[i] = 19000 + r.nextInt(30);
             f[i] = r.nextInt(5) == 0 ? (r.nextBoolean() ? -0.0 : 0.0) : (r.nextInt(2001) - 1000) / 8.0;
+            dec[i] = r.nextInt(401) - 200;
+            codes[i] = r.nextInt(4);
+            if (r.nextInt(5) == 0) {
+                ndec.set(i);
+            }
+            if (r.nextInt(7) == 0) {
+                nstr.set(i);
+            }
             double zero = r.nextBoolean() ? -0.0 : 0.0;
             z1[i] = r.nextInt(3) == 0 ? 1.5 : zero;
             z2[i] = r.nextInt(3) == 0 ? -1.5 : zero;
@@ -87,11 +100,14 @@ public final class NativeVectorTest {
         return new ColumnVector[] {ColumnVector.ofLongs(DataType.INT64, a, na),
             ColumnVector.ofLongs(DataType.INT64, b, new BitSet()), ColumnVector.ofInts(DATE, d, nd),
             ColumnVector.ofDoubles(f, nf), ColumnVector.ofLongs(DataType.INT64, e, new BitSet()),
-            ColumnVector.ofDoubles(z1, new BitSet()), ColumnVector.ofDoubles(z2, nf)};
+            ColumnVector.ofDoubles(z1, new BitSet()), ColumnVector.ofDoubles(z2, nf),
+            ColumnVector.ofLongs(DEC, dec, ndec), ColumnVector.ofDictionary(new String[] {"a", "ab", "b", "c"}, codes, nstr)};
     }
 
+    private static final DataType DEC = DataType.decimal(12, 2);
+
     private static final DataType[] TYPES = {DataType.INT64, DataType.INT64, DATE, DataType.FLOAT64, DataType.INT64,
-        DataType.FLOAT64, DataType.FLOAT64};
+        DataType.FLOAT64, DataType.FLOAT64, DEC, DataType.STRING};
 
     /** Scan-like source: batches loaded with {@link ScanBatches#load}, i.e. with validity bitmaps. */
     private static final class Source implements BatchOperator {
@@ -142,6 +158,10 @@ public final class NativeVectorTest {
         BoundExpr p = new BoundExpr.Placeholder(t);
         return new BoundExpr.Between(col(c), cmp(CompareOp.GE, p, new BoundExpr.Literal(lo, t)),
                 cmp(CompareOp.LE, p, new BoundExpr.Literal(hi, t)), false);
+    }
+
+    private static BoundExpr dec(long unscaled, int precision, int scale) {
+        return new BoundExpr.Literal(unscaled, DataType.decimal(Math.max(precision, scale), scale));
     }
 
     private static BoundExpr and(BoundExpr... parts) {
@@ -198,7 +218,30 @@ public final class NativeVectorTest {
         BoundExpr failingA = cmp(CompareOp.GT, new BoundExpr.Arithmetic(BoundExpr.ArithOp.DIV, lit(100),
                 new BoundExpr.Arithmetic(BoundExpr.ArithOp.ADD, col(1), lit(11), DataType.INT64), DataType.INT64),
                 lit(-1000));
-        List<BoundExpr> predicates = List.of(gt, flipped, folded, btw, cols, dates, isNull, notNull, extreme, dbl,
+        BoundExpr decInt = cmp(CompareOp.GT, col(7), dec(100, 3, 0)); // DECIMAL(12,2) > 100
+        BoundExpr decExactEq = cmp(CompareOp.EQ, col(7), dec(1500, 4, 3)); // = 1.500
+        BoundExpr decInexactEq = cmp(CompareOp.EQ, col(7), dec(1555, 4, 3)); // = 1.555: never
+        BoundExpr decInexactNe = cmp(CompareOp.NEQ, col(7), dec(1555, 4, 3));
+        BoundExpr decLe = cmp(CompareOp.LE, col(7), dec(1555, 4, 3));
+        BoundExpr decLt = cmp(CompareOp.LT, col(7), dec(-1555, 4, 3));
+        BoundExpr decLtExact = cmp(CompareOp.LT, col(7), dec(1500, 4, 3));
+        BoundExpr decGe = cmp(CompareOp.GE, col(7), dec(-5, 2, 3));
+        BoundExpr decFlipped = cmp(CompareOp.GT, dec(5, 1, 0), col(7));
+        BoundExpr decBetween = new BoundExpr.Between(col(7),
+                cmp(CompareOp.GE, new BoundExpr.Placeholder(DEC), dec(-105, 3, 1)),
+                cmp(CompareOp.LE, new BoundExpr.Placeholder(DEC), dec(1, 1, 0)), false);
+        BoundExpr decBetweenFine = new BoundExpr.Between(col(7),
+                cmp(CompareOp.GE, new BoundExpr.Placeholder(DEC), dec(-1555, 4, 3)),
+                cmp(CompareOp.LE, new BoundExpr.Placeholder(DEC), dec(1555, 4, 3)), false);
+        BoundExpr decHuge = cmp(CompareOp.LT, col(7), dec(Long.MAX_VALUE / 10, 18, 0)); // rescaling overflows
+        BoundExpr str = cmp(CompareOp.EQ, col(8), new BoundExpr.Literal("b", DataType.STRING));
+        BoundExpr like = new BoundExpr.Like(col(8), new BoundExpr.Literal("a%", DataType.STRING), false);
+        List<BoundExpr> decimals = List.of(decInt, decExactEq, decInexactEq, decInexactNe, decLe, decLt, decLtExact,
+                decGe, decFlipped, decBetween, decBetweenFine);
+        List<BoundExpr> predicates = List.of(decInt, decExactEq, decInexactEq, decInexactNe, decLe, decLt,
+                decLtExact, decGe, decFlipped, decBetween, decBetweenFine, decHuge, and(decInexactEq, failing),
+                and(decInexactNe, never, failing), and(str, gt), and(like, btw, failing), and(str, never, failing),
+                and(gt, like, dbl, decLe), and(failing, str, gt), and(like, decBetween, isNull, failingA),gt, flipped, folded, btw, cols, dates, isNull, notNull, extreme, dbl,
                 and(gt, cols), and(btw, dates, extreme), and(isNull, cols), and(gt, dbl), and(dbl, gt),
                 and(btw, notNull, dbl, flipped), and(gt, failing), and(cols, failing), and(dates, failingA),
                 and(notNull, btw, failingA), and(failing, gt), and(cols, isNull, dates, dbl),
@@ -215,6 +258,13 @@ public final class NativeVectorTest {
         for (BoundExpr p : List.of(gt, flipped, folded, btw, cols, dates, isNull, notNull, extreme)) {
             check(NativeFilter.create(k, new VecExpr[] {c.compile(p)}) != null, "native filter for " + p);
         }
+        for (BoundExpr p : decimals) {
+            check(NativeFilter.create(k, new VecExpr[] {c.compile(p)}) != null, "native filter for " + p);
+        }
+        check(NativeFilter.create(k, new VecExpr[] {c.compile(decHuge)}) == null, "no native filter on overflow");
+        check(NativeFilter.create(k, new VecExpr[] {c.compile(str), c.compile(gt)}) != null, "reordered safe prefix");
+        check(NativeFilter.create(k, new VecExpr[] {c.compile(failing), c.compile(gt)}) == null,
+                "nothing moves before a conjunct that may fail");
         check(NativeFilter.create(k, new VecExpr[] {c.compile(dbl)}) == null, "no native filter for FLOAT64");
         check(NativeFilter.create(k, new VecExpr[] {c.compile(failing)}) == null, "no native filter for arithmetic");
         Source src = new Source(data);
@@ -222,7 +272,7 @@ public final class NativeVectorTest {
         Batch b = src.next();
         NativeFilter f = NativeFilter.create(k, new VecExpr[] {c.compile(gt), c.compile(btw), c.compile(dbl)});
         int m = f.select(b, new int[BATCH], new boolean[BATCH]);
-        check(m >= 0 && f.consumed == 2, "two leading conjuncts evaluated natively");
+        check(m >= 0 && f.evaluated[0] && f.evaluated[1] && !f.evaluated[2], "two conjuncts evaluated natively");
     }
 
     private static Object result(AggState s, int g) {
