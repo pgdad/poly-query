@@ -305,6 +305,9 @@ def _build_hash_side(node: pp.HashJoin, ctx: ExecutionContext) -> _HashSide:
     valid = _valid_keys(keys, len(fns) > 1)
     positions: Iterable[int] = range(n) if valid is None else compress(range(n), valid)
     usable = keys if valid is None else list(compress(keys, valid))
+    if node.anti:  # only whether a key has a match matters
+        ctx.check()
+        return _HashSide([], n, set(usable), True)
     table: dict = dict(zip(usable, positions))
     unique = len(table) == len(usable)
     if not unique:
@@ -393,6 +396,9 @@ def _hash_join(node: pp.HashJoin, ctx: ExecutionContext) -> Batches:
     residual = _residual(node, ctx)
     side: _HashSide = ctx.shared(node, "vec:build", lambda: _build_hash_side(node, ctx))
     counter = JoinCounter(ctx)
+    if node.anti:
+        yield from _anti_join(node, ctx, left_fns, side, counter)
+        return
     if node.build == "left":  # INNER join probing with the right input
         for cols, n in execute(node.right, ctx):
             pi, bi = _probe(side, _key_vector(right_fns, cols, n), n)
@@ -410,6 +416,23 @@ def _hash_join(node: pp.HashJoin, ctx: ExecutionContext) -> Batches:
             pi, bi = _with_unmatched(pi, bi, n, side.n)
         counter.add(len(pi))
         yield from _emit_pairs(cols, side.cols, pi, bi, "left" if side.unique and len(pi) == n else None)
+        ctx.check()
+
+
+def _anti_join(
+    node: pp.HashJoin, ctx: ExecutionContext, left_fns: list[VecFn], side: _HashSide, counter: JoinCounter
+) -> Batches:
+    """The left rows without a matching right row, padded with NULLs (the
+    rows a LEFT join produces for them)."""
+    width = len(node.right.layout)
+    contains = side.table.__contains__  # NULL keys are not in the table
+    for cols, n in execute(node.left, ctx):
+        unmatched = list(map(operator.not_, map(contains, _key_vector(left_fns, cols, n))))
+        kept = unmatched.count(True)
+        if kept:
+            counter.add(kept)
+            left = list(cols) if kept == n else [list(compress(c, unmatched)) for c in cols]
+            yield left + [[None] * kept] * width, kept
         ctx.check()
 
 

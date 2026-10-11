@@ -230,6 +230,11 @@ def _hash_join(node: pp.HashJoin, ctx: ExecutionContext) -> Rows:
     for lrow in execute(node.left, ctx):
         key = left_key(lrow)
         matches = None if None in key else table.get(key)
+        if node.anti:  # only the unmatched rows (no residual condition)
+            if not matches:
+                counter.add(1)
+                yield lrow + padding
+            continue
         matched = False
         if matches:
             for rrow in matches:

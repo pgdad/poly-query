@@ -241,6 +241,10 @@ class HashJoin(_Join):
     right_keys: list[b.Expr] = field(default_factory=list)
     residual: b.Expr | None = None
     build: str = "right"
+    # LEFT join below a filter that keeps only its unmatched rows (anti
+    # join): only the left rows without a match are produced, padded with
+    # NULLs, and the build side is just a set of keys
+    anti: bool = False
 
     def expressions(self) -> list[b.Expr]:
         out = self.left_keys + self.right_keys
@@ -257,6 +261,8 @@ class HashJoin(_Join):
         }
         if self.residual is not None:
             out["residual"] = render_expr(self.residual)
+        if self.anti:
+            out["anti"] = True
         return out
 
 
@@ -584,6 +590,8 @@ class PhysicalPlanner:
             if isinstance(node.input, lp.Scan):
                 return self._scan(node.input, node.predicate)
             child = self.plan(node.input)
+            if isinstance(child, HashJoin) and self.options.optimize:
+                child.anti = self._keeps_only_unmatched(child, node.predicate)
             return self._filter(child, node.predicate)
         if isinstance(node, lp.Join):
             return self._plan_join(node)
@@ -656,6 +664,28 @@ class PhysicalPlanner:
 
     def _filter(self, child: PhysicalNode, predicate: b.Expr) -> PhysicalNode:
         return _estimated(Filter(child, predicate), child.estimated_rows * self._selectivity(predicate))
+
+    def _keeps_only_unmatched(self, join: HashJoin, predicate: b.Expr) -> bool:
+        """Whether a filter over a LEFT hash join (without residual condition)
+        rejects every matched row: one of its conjuncts is ``c IS NULL`` for
+        a right column ``c`` that is never NULL in a matched row — a right
+        join key (NULL keys never match), or a column of the scanned right
+        table whose (exact) statistics count no NULLs."""
+        if join.join_type != "LEFT" or join.residual is not None or join.build != "right":
+            return False
+        right_keys = {k.key for k in join.right_keys if isinstance(k, b.ColumnRef)}
+        scanned = _scanned_rel(join.right)
+        for part in conjuncts(predicate):
+            if not (isinstance(part, b.IsNull) and not part.negated and isinstance(part.operand, b.ColumnRef)):
+                continue
+            key = part.operand.key
+            if key in right_keys:
+                return True
+            if scanned is not None and key[0] == scanned:
+                found = self._resolve(key)
+                if found is not None and found[0].column_stats(found[1]).null_count == 0:
+                    return True
+        return False
 
     def _selectivity(self, predicate: b.Expr) -> float:
         evaluate = self.options.evaluate
@@ -885,6 +915,16 @@ def _parallelize_inputs(node: PhysicalNode, partitions: int, min_rows: float) ->
         node.input = gathered
     elif isinstance(node, UnionAll):
         node.branches = [_gather_selective(branch, partitions, min_rows) for branch in node.branches]
+
+
+def _scanned_rel(node: PhysicalNode) -> int | None:
+    """The range variable of a plain (possibly filtered) table scan, whose
+    output columns are the table's own values."""
+    while isinstance(node, Filter):
+        node = node.input
+    if isinstance(node, (TableScan, IndexScan)):
+        return node.rel
+    return None
 
 
 def _estimated(node: PhysicalNode, rows: float) -> PhysicalNode:
