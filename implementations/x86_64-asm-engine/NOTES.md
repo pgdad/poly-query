@@ -36,8 +36,17 @@ non-DISTINCT queries. See README "HTTP server" for details.
 * 1M-row load (49 MB CSV) through `/v1/request` while polling `/health` and
   querying another table: health ~0.5 ms, queries ~4 ms during the load.
 * Streaming 1M rows: first byte after ~5 ms (pipelined) vs ~75 ms (ORDER BY).
-* curl: `Expect: 100-continue` uploads, chunked PUT, HTTP/1.0, pipelined
-  requests, percent-encoded table names.
+* curl: `Expect: 100-continue` uploads, chunked PUT (49 MB chunked upload
+  ~0.3 s thanks to resumable chunk scanning), HTTP/1.0, pipelined requests,
+  percent-encoded table names.
+* Timeouts on 1M-row ORDER BY / scans answer within ~1 ms of the deadline
+  (checks in the sort comparator and the serialization loop).
+* 20 s stress run, 24 client threads mixing queries, streams, replaces,
+  cancellations, timeouts and abrupt disconnects with `--workers 4
+  --queue-depth 8`: no errors, empty registry and consistent metrics at the
+  end, exit 0 on SIGTERM.
+* HTTP suite repeated 4x, once while the HTTP conformance run used 16 jobs:
+  19/19 each time.
 
 ## Next steps / ideas
 
