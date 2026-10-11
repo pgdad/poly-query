@@ -41,10 +41,12 @@ class Session:
         self.n += 1
         self.proc.stdin.write(json.dumps(dict(req, id=self.n)) + "\n")
         self.proc.stdin.flush()
-        line = self.proc.stdout.readline()
-        if not line:
-            raise RuntimeError("engine exited")
-        return json.loads(line)
+        while True:
+            line = self.proc.stdout.readline()
+            if not line:
+                raise RuntimeError("engine exited")
+            if line.startswith("{"):  # skip JVM diagnostics (e.g. JFR banners)
+                return json.loads(line)
 
     def close(self) -> None:
         self.proc.stdin.close()

@@ -152,6 +152,13 @@
          (ops/reduce-list (if vectorized? (vec/aggregate-rows merged) (ops/aggregate-rows merged))
                           f init))))))
 
+(defn- concat-lists
+  "The java.util.Lists `parts` concatenated into one ArrayList."
+  ^ArrayList [parts]
+  (let [out (ArrayList. (int (reduce + (map #(.size ^java.util.List %) parts))))]
+    (doseq [^java.util.Collection p parts] (.addAll out p))
+    out))
+
 (defn- sort-rows [plan env]
   (ops/reducible
    (fn [f init]
@@ -159,7 +166,7 @@
            ranges (partitions input (:partitions plan))
            parts (run-all (mapv (fn [r] #(ops/materialize (rows-of (with-range input r) env) env))
                                 ranges))
-           all (ArrayList. ^java.util.Collection (into [] cat parts))]
+           all (concat-lists parts)]
        (ops/reduce-list (sort/sort-rows all (:keys plan) (:ctx env) run-all (:partitions plan))
                         f init)))))
 
@@ -177,7 +184,7 @@
                                    #(ops/top-candidates (rows-of (with-range input r) env) cmp k
                                                         (bit-shift-left (long i) 40) env))
                                  ranges))
-                 all (ArrayList. ^java.util.Collection (into [] cat parts))]
+                 all (concat-lists parts)]
              (.sort all (ops/candidate-comparator cmp))
              (ops/emit-candidates (if (> (.size all) (long k))
                                     (ArrayList. (.subList all 0 (int k)))
