@@ -1,0 +1,195 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase5-java-a1-20261010T223255Z",
+ "language": "java",
+ "task": "phase5",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase5",
+ "prompt_sha256": "fb5b33a1c02e1d035c0d4e7af0affaef6e17dafba7be24347a51b3bbfe99a39b",
+ "session_id": "084fa8bf-56aa-4514-b361-d09783b8371c",
+ "tokens": {
+  "input": 522,
+  "output": 471867,
+  "cache_read": 117384014,
+  "cache_creation": 711892,
+  "thinking": null,
+  "thinking_estimated": 207280,
+  "source": "result events",
+  "api_messages": 261
+ },
+ "rate_limit": {
+  "events": 19,
+  "max_utilization": {
+   "five_hour": 0.89,
+   "seven_day": 0.17
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 38.611366799999985,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 270,
+ "result_segments": 1,
+ "assistant_messages": 595,
+ "tool_calls": {
+  "Bash": 250,
+  "Read": 2,
+  "Write": 17
+ },
+ "tool_calls_total": 269,
+ "tool_failures": 6,
+ "build_invocations": 58,
+ "build_failures_heuristic": 3,
+ "conformance_runs": 30,
+ "conformance_progress": [
+  [
+   554,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   15,
+   15
+  ],
+  [
+   569,
+   569
+  ]
+ ],
+ "repair_iterations": 29,
+ "time": {
+  "wall_seconds": 5706.4,
+  "model_api_seconds": 4140.7,
+  "tool_seconds": 1568.2,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 22,
+  "files_changed": 48,
+  "lines_added": 9365,
+  "lines_removed": 117,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 5 is finished and committed. Every check in the definition of done passes; the runner's summary lines are below.\n\n## What I implemented\n- **Execution options.** `mode` can be `row`, `vectorized` or `auto` (`auto` means vectorized). `threads`, `join` (`auto`, `hash`, `merge`, `nested_loop`) and `optimize` all work. `native` is accepted and ignored. The engine now reports `phase5 exec.row exec.vectorized exec.parallel join.hash join.merge join.nested_loop`.\n- **Row baseline.** The Phase 1\u20134 engine is kept as `mode: row`. I added a sort-merge join and a top-N operator to it.\n- **Vectorized engine.**\n  - Rows move in batches of column arrays, and filters narrow a list of active rows instead of copying data.\n  - Dictionary-encoded strings stay encoded through scans, joins and sorts.\n  - Expressions without a fast batch version fall back to the row engine's code, so every SQL feature works.\n  - It has its own hash aggregation, DISTINCT, hash join, radix-based sort and top-N.\n  - **Errors match row mode exactly.** If a batch hits an error, it is re-evaluated row by row to find the first failing row, and the error is raised only if that row is actually needed. So `LIMIT` and the order of failing rows behave as in row mode.\n- **Parallel execution.** Table scans are split into chunks handed to worker threads.\n  - Aggregation, DISTINCT and top-N run in parallel, and groups come out in the same order as single-threaded execution.\n  - Integer and DECIMAL sums stay exact.\n  - Other pipelines are gathered back in scan order, and large hash-join indexes are built in parallel.\n- **Optimizer.**\n  - Constant folding and predicate simplification.\n  - Predicate pushdown that never changes which error a query raises: it uses column min/max and null counts to prove a predicate can't fail before moving it.\n  - Join reordering for chains of three or more inner joins.\n- **SIMD.** Kernels are branch-free loops the JIT turns into vector instructions. I didn't use the JDK's incubator Vector API because it prints a non-JSON warning line on stderr, which breaks the structured-log check.\n\n## Test results\n- `runner.py`: phase 1 225/225, phase 2 186/186, phase 3 143/143, phase 5 15/15, **TOTAL: 569/569 pass**\n- `runner.py --modes`: **TOTAL: 3324/3324 pass**\n- `--transport http`: 569/569; HTTP suite: **18/18 passed**\n- `make build test`: 57 passed, 0 failed; `make lint` is clean; a fresh clone builds and passes.\n- Stress runs with 3-row batches and 5-row chunks also pass all of the above.\n- `tools/difftest.py` ran several thousand random queries under all 32 option combinations and two batch configurations. It found two real bugs, both fixed:\n  - **Dropped WHERE:** an earlier version of my pushdown silently discarded the WHERE clause when the join condition could fail.\n  - **Empty LEFT JOIN build:** a LEFT JOIN with an empty build side crashed.\n\n## Measurements (1M-row generated data, in the README with before/after tables)\nCompared with the Phase 4 engine, the best vectorized time is 2\u2013119\u00d7 faster:\n\n| Query | Before | Now |\n|---|---|---|\n| Single-table reductions | 24 ms | 0.2 ms |\n| Filter + aggregate | 23 ms | 1 ms |\n| `ORDER BY \u2026 LIMIT` | 100 ms | 1.5 ms |\n| Full sort of 1M rows | 398 ms | 24 ms |\n| Joins | \u2014 | 4\u20138\u00d7 faster |\n\n## Known limitations\n- Without `ORDER BY`, the row order of a join depends on the join algorithm. So `LIMIT` over a join, or a query where several different rows fail, can return different rows or a different error depending on the `join` option. This is the one exception to \"identical in every combination\".\n- GROUP BY and DISTINCT with mostly distinct keys gain little from extra threads.\n- Merge and nested-loop joins run as row operators even in vectorized mode.\n- Native kernels are not used.\n\nDesign notes, measurements and these limitations are written up in `implementations/java/README.md`.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
