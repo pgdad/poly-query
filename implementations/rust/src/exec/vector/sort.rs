@@ -22,7 +22,7 @@ use super::eval::eval;
 use crate::error::Result;
 use crate::exec::ExecContext;
 use crate::planner::logical::SortKey;
-use crate::protocol::WORKER_STACK_BYTES;
+use crate::exec::parallel::PARALLEL_STACK_BYTES;
 use crate::types::Value;
 
 /// Minimum rows per parallel sort chunk.
@@ -258,7 +258,7 @@ fn parallel_sort<T: Copy + Send + Sync>(
             .into_iter()
             .map(|p| {
                 std::thread::Builder::new()
-                    .stack_size(WORKER_STACK_BYTES)
+                    .stack_size(PARALLEL_STACK_BYTES)
                     .spawn_scoped(scope, move || sort(p))
             })
             .collect();

@@ -44,6 +44,10 @@ QUERIES = [
                       "JOIN products p ON p.product_id = i.product_id WHERE o.status = 'delivered' "
                       "GROUP BY p.category"),
     ("Q10 distinct", "SELECT DISTINCT merchant_id FROM tx"),
+    ("Q11 join order", "SELECT COUNT(*), SUM(i.quantity) FROM items i JOIN products p ON p.product_id = i.product_id "
+                       "JOIN orders o ON o.order_id = i.order_id JOIN cust c ON c.customer_id = o.customer_id "
+                       "WHERE c.segment = 'public_sector' AND o.status = 'returned'"),
+    ("Q12 high-card group", "SELECT tx_id % 500000, COUNT(*), MAX(ts), MIN(category) FROM tx GROUP BY 1"),
 ]
 
 

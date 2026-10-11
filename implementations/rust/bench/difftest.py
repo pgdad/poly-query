@@ -130,7 +130,8 @@ class Gen:
             if c == 0:
                 return f"({self.expr(scope, 'int', d)} {r.choice(['+', '-', '*'])} {self.expr(scope, 'int', d)})"
             if c == 1:
-                return f"({self.expr(scope, 'int', d)} {r.choice(['/', '%'])} {r.choice(['2', '3', '7', '10'])})"
+                divisor = r.choice(['2', '3', '7', '10', self.expr(scope, 'int', d)])
+                return f"({self.expr(scope, 'int', d)} {r.choice(['/', '%'])} {divisor})"
             if c == 2:
                 return f"ABS({self.expr(scope, 'int', d)})"
             if c == 3:
@@ -143,6 +144,8 @@ class Gen:
                 return f"COALESCE({self.expr(scope, 'int', d)}, {self.lit('int')})"
             if c == 7:
                 return f"CAST({self.expr(scope, r.choice(['dec', 'float']), d)} AS INT64)"
+            if r.random() < 0.3:
+                return f"({self.expr(scope, 'int', d)} * 4611686018427387)"
             return f"(-{self.expr(scope, 'int', d)})"
         if kind == "dec":
             c = r.randrange(6)
@@ -318,8 +321,11 @@ class Gen:
             sub = f"{col} {r.choice(['', 'NOT '])}IN (SELECT {ocol} FROM {other} s WHERE {self.pred([('s', other)], 2)})"
         elif c == 1:
             sub = f"{r.choice(['', 'NOT '])}EXISTS (SELECT 1 FROM {other} s WHERE {ocol} = {col})"
-        else:
+        elif r.random() < 0.8:
             sub = f"{col} {r.choice(['=', '<', '>='])} (SELECT {r.choice(['MIN', 'MAX'])}({ocol}) FROM {other} s)"
+        else:
+            # may return several rows (SUBQUERY_CARDINALITY) or none
+            sub = f"{col} = (SELECT {ocol} FROM {other} s WHERE {ocol} = {col} LIMIT {r.choice([1, 2])})"
         w = f" WHERE {sub}" + (f" AND {self.pred(scope, 2)}" if r.random() < 0.5 else "")
         return f"SELECT COUNT(*), {self.agg(scope)} FROM {frm}{w}", False
 

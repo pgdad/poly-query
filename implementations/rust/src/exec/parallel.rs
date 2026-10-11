@@ -37,8 +37,12 @@ use crate::exec::ExecContext;
 use crate::planner::expr::{AggregateCall, Expr, KeyDomain};
 use crate::planner::logical::JoinType;
 use crate::planner::physical::PhysicalPlan;
-use crate::protocol::{WORKER_STACK_BYTES, catch_panic};
+use crate::protocol::catch_panic;
 use crate::storage::Table;
+
+/// Stack size of parallel worker threads (expression evaluation recurses
+/// over the expression tree, whose depth the parser bounds).
+pub const PARALLEL_STACK_BYTES: usize = 64 * 1024 * 1024;
 
 /// Default rows per morsel.
 const DEFAULT_MORSEL_ROWS: usize = 16 * BATCH_SIZE;
@@ -274,7 +278,7 @@ fn spawn<T: Send + 'static>(
 ) -> Result<JoinHandle<T>> {
     std::thread::Builder::new()
         .name(name.to_string())
-        .stack_size(WORKER_STACK_BYTES)
+        .stack_size(PARALLEL_STACK_BYTES)
         .spawn(f)
         .map_err(|e| Error::internal(format!("cannot start worker thread: {e}")))
 }
@@ -606,7 +610,7 @@ fn merge_partitioned(
             .map(|p| {
                 let (partials, split, calls) = (&partials, &split, &calls);
                 std::thread::Builder::new()
-                    .stack_size(WORKER_STACK_BYTES)
+                    .stack_size(PARALLEL_STACK_BYTES)
                     .spawn_scoped(scope, move || {
                         catch_panic(|| {
                             let wctx = seed.context();
