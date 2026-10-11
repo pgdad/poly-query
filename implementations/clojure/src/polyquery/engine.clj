@@ -68,7 +68,7 @@
   "Rows of a physical plan, executed as its :execution says."
   [plan qctx opts]
   (let [{:keys [mode native?]} (:execution plan)
-        env (dispatch/environment qctx {:mode mode :max-join-rows (:max-join-rows opts)
+        env (dispatch/environment qctx {:mode mode :max-join-rows (:max-join-rows opts) :plan plan
                                         :native (when native? (ffi/library))})]
     (dispatch/build plan env)))
 

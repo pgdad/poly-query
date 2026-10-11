@@ -133,7 +133,9 @@
                init input)))))
 
 (defmethod build-batches :subquery-scan [plan env]
-  (build-batches (:input plan) env))
+  (if-let [rows (ops/shared-input (:input plan) env)]
+    (rows->batches rows)
+    (build-batches (:input plan) env)))
 
 ;; ---------------------------------------------------------------------------
 ;; Hash aggregation

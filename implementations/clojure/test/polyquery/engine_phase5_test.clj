@@ -175,6 +175,12 @@
    ["SELECT DISTINCT g FROM t UNION ALL SELECT DISTINCT k FROM s" false]
    ["SELECT k FROM s UNION ALL SELECT k FROM t LIMIT 100" false]
    ["SELECT id FROM t UNION ALL SELECT k / g FROM t" false]
+   ;; CTEs referenced several times (shared subqueries)
+   ["WITH c AS (SELECT g, SUM(d) AS sd FROM t GROUP BY g) SELECT COUNT(*) FROM c WHERE sd > (SELECT AVG(sd) FROM c)" false]
+   ["WITH c AS (SELECT k, COUNT(*) AS n FROM t GROUP BY k) SELECT a.k, b.n FROM c a JOIN c b ON b.k = a.k + 1" false]
+   ["WITH c AS (SELECT id, 10 / (2500 - id) AS x FROM t ORDER BY id LIMIT 4) SELECT * FROM c UNION ALL SELECT * FROM c" false]
+   ["WITH c AS (SELECT g, 100 / (g - 3) AS x FROM t GROUP BY g) SELECT a.x FROM c a JOIN c b ON a.g = b.g" false]
+   ["WITH c AS (SELECT id, s FROM t WHERE g = 1) SELECT COUNT(*) FROM c a JOIN c b ON a.id = b.id" false]
    ;; runtime errors
    ["SELECT id, k / g FROM t" false]
    ["SELECT SUM(k * 4611686018427387) FROM t" false]
