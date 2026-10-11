@@ -39,3 +39,13 @@ complete for an engine only when **all** tests of that phase are run and pass
 
 Phase documents: [phase-1.md](phase-1.md) … [phase-5.md](phase-5.md),
 [native-kernels.md](native-kernels.md).
+
+## Requirement-change capabilities
+
+Claimed only by engines that adopted a change request from `spec/changes/`
+(architectural-change experiment family); suites requiring them are skipped
+for other engines.
+
+| capability | phase | meaning |
+|---|---|---|
+| `change.union_all` | CR-1 | `UNION ALL` per [`../changes/union-all.md`](../changes/union-all.md) |

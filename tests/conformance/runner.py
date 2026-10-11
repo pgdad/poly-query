@@ -318,6 +318,8 @@ def main() -> int:
 
     syntax_errors = [{"file": str(p), "error": str(e)} for p, e in found if isinstance(e, Exception)]
     files = [f for _, f in found if not isinstance(f, Exception)]
+    # Requirement-change suites (spec/changes/) apply only to engines that adopted the change.
+    files = [f for f in files if all(c in caps for c in f.requires if c.startswith("change."))]
 
     jobs: list[tuple[PqtFile, dict | None, str]] = []
     if args.modes:

@@ -45,8 +45,8 @@
     "title": "Architectural change — UNION ALL",
     "phase_file": "phase-2.md",
     "runner_args": "",
-    "goal": "Requirement change (identical for every language): add `UNION ALL` to the engine as specified in `spec/changes/union-all.md`. The new public cases in `tests/conformance/cases/changes/union_all.pqt` must pass.",
-    "done": "The `changes/union_all` cases pass. All public conformance phases the engine previously passed still pass (`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery`), plus the task-specific criteria above; `make build test` succeed; all work is committed."
+    "goal": "Requirement change (identical for every language): your accepted engine (Phases 1–5 and native kernels) is in `implementations/{{LANG_DIR}}/`. Add `UNION ALL` exactly as specified in `spec/changes/union-all.md` (grammar, typing, ORDER BY/LIMIT over the compound, use in CTEs/derived tables/subqueries, EXPLAIN `UnionAll`), consistently across all execution options (`mode`, `threads`, `join`, `optimize`, `native`), and claim the capability `change.union_all`. The public cases are in `tests/conformance/cases/changes/union_all.pqt`.",
+    "done": "`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery` (which now includes the `changes/union_all` cases), the same with `--modes`, with `--transport http`, and `python3 tests/concurrency/http_suite.py --engine implementations/{{LANG_DIR}}/bin/polyquery` all report 0 failures, 0 errors and 0 not-implemented (except optionally correlated subqueries); the engine claims `change.union_all`; `make build test` succeed; README.md documents the change and which modules it touched; all work is committed."
   },
   "change-decimal38": {
     "title": "Architectural change — DECIMAL precision 38",

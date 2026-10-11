@@ -1,0 +1,152 @@
+# CR-1 UNION ALL — spec/changes/union-all.md
+@phase 2
+@requires phase2 change.union_all sql.groupby sql.subquery sql.cte ingest.csv
+
+load people fixtures/people.csv
+load orders fixtures/orders.csv
+load customers fixtures/customers.csv
+
+# duplicates are kept
+query oracle
+SELECT city FROM people WHERE city = 'Helsinki' UNION ALL SELECT city FROM people WHERE city = 'Helsinki'
+----
+city STRING
+["Helsinki"]
+["Helsinki"]
+["Helsinki"]
+["Helsinki"]
+["Helsinki"]
+["Helsinki"]
+
+query ordered oracle
+SELECT id, name FROM people WHERE id <= 2 UNION ALL SELECT customer_id, name FROM customers WHERE customer_id <= 3 ORDER BY id, name
+----
+id INT64 | name STRING
+[1, "Alice"]
+[1, "Alice"]
+[2, "Bob"]
+[2, "Bob"]
+[3, "Carol"]
+
+# three branches; names come from the first branch
+query ordered oracle
+SELECT 1 AS a UNION ALL SELECT 2 UNION ALL SELECT 3 ORDER BY a DESC
+----
+a INT64
+[3]
+[2]
+[1]
+
+# ORDER BY position and LIMIT/OFFSET apply to the whole result
+query ordered oracle
+SELECT name, age FROM people WHERE age IS NOT NULL UNION ALL SELECT name, NULL FROM customers ORDER BY 1, 2 LIMIT 4 OFFSET 1
+----
+name STRING | age INT64
+["Alice", 34]
+["Bob", null]
+["Bob", 28]
+["Carol", null]
+
+# numeric promotion INT64 + DECIMAL -> DECIMAL(18,2)
+query ordered
+SELECT order_id AS v FROM orders WHERE order_id = 101 UNION ALL SELECT amount FROM orders WHERE order_id = 102 ORDER BY v
+----
+v DECIMAL(18,2)
+["99.99"]
+["101.00"]
+
+# INT64 + FLOAT64 -> FLOAT64
+query ordered
+SELECT age AS v FROM people WHERE id = 1 UNION ALL SELECT score FROM people WHERE id = 1 ORDER BY v
+----
+v FLOAT64
+[34.0]
+[88.5]
+
+# NULL literal branch adopts the other type
+query
+SELECT NULL AS x UNION ALL SELECT 'a'
+----
+x STRING
+[null]
+["a"]
+
+# aggregates and GROUP BY inside branches
+query ordered oracle
+SELECT 'people' AS src, COUNT(*) AS n FROM people UNION ALL SELECT 'orders', COUNT(*) FROM orders ORDER BY src
+----
+src STRING | n INT64
+["orders", 10]
+["people", 8]
+
+query ordered oracle
+SELECT city AS k, COUNT(*) AS n FROM people WHERE city IS NOT NULL GROUP BY city UNION ALL SELECT status, COUNT(*) FROM orders GROUP BY status ORDER BY k
+----
+k STRING | n INT64
+["Espoo", 1]
+["Helsinki", 3]
+["Oulu", 1]
+["Tampere", 2]
+["cancelled", 1]
+["pending", 3]
+["shipped", 6]
+
+# in a CTE, a derived table and subqueries
+query oracle
+WITH u AS (SELECT id FROM people UNION ALL SELECT customer_id FROM customers) SELECT COUNT(*) AS n, COUNT(DISTINCT id) AS d FROM u
+----
+n INT64 | d INT64
+[13, 8]
+
+query oracle
+SELECT SUM(v) AS s FROM (SELECT age AS v FROM people UNION ALL SELECT customer_id FROM customers) t
+----
+s INT64
+[277]
+
+query ordered oracle
+SELECT name FROM people WHERE id IN (SELECT customer_id FROM customers WHERE tier = 'gold' UNION ALL SELECT 3) ORDER BY name
+----
+name STRING
+["Alice"]
+["Carol"]
+
+query oracle
+SELECT EXISTS (SELECT 1 FROM people WHERE id = 999 UNION ALL SELECT 1 FROM customers WHERE customer_id = 1) AS e
+----
+e BOOLEAN
+[true]
+
+# empty branches
+query oracle
+SELECT id FROM people WHERE id < 0 UNION ALL SELECT customer_id FROM customers WHERE customer_id < 0
+----
+id INT64
+
+# errors
+error SEMANTIC_ERROR
+SELECT id, name FROM people UNION ALL SELECT id FROM people
+
+error TYPE_ERROR
+SELECT name FROM people UNION ALL SELECT id FROM people
+
+error TYPE_ERROR
+SELECT joined FROM people UNION ALL SELECT active FROM people
+
+error SEMANTIC_ERROR
+SELECT id FROM people UNION ALL SELECT customer_id FROM customers ORDER BY id + 1
+
+error UNSUPPORTED
+SELECT id FROM people UNION SELECT customer_id FROM customers
+
+error PARSE_ERROR
+SELECT id FROM people ORDER BY id UNION ALL SELECT customer_id FROM customers
+
+error PARSE_ERROR
+(SELECT id FROM people) UNION ALL (SELECT customer_id FROM customers)
+
+# EXPLAIN shows a UnionAll node
+explain
+SELECT id FROM people UNION ALL SELECT customer_id FROM customers
+----
+node UnionAll

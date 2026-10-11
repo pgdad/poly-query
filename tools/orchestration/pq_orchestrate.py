@@ -607,7 +607,10 @@ def validate(run_id: str, phases: list[int] | None = None) -> dict:
         return validate_kernels(run_id, m, vd)
     task_phase = {"phase1": [1], "phase2": [1, 2], "phase3": [1, 2, 3], "phase4": [1, 2, 3], "phase5": [1, 2, 3],
                   "native": [1, 2, 3]}
-    phases = phases or task_phase.get(m["task"], [1])
+    # Later experiment families (changes, refactoring, debugging, optimization) start from complete
+    # Phase 5 engines and are validated like Phase 5 (change suites run when the engine claims the change).
+    full = m["task"] not in task_phase or m["task"] == "phase5"
+    phases = phases or task_phase.get(m["task"], [1, 2, 3])
     phase_args = " ".join(f"--phase {p}" for p in phases)
     vscr = rd / "vscratch"
     vscr.mkdir(exist_ok=True)
@@ -624,7 +627,7 @@ python3 tests/conformance/runner.py --engine implementations/{lang}/bin/polyquer
    --report conformance.json --logs engine-logs -q > validate-conformance.log 2>&1; echo "conformance_exit=$?" >> validate-status
 """
     extra = []
-    if m["task"] in ("phase4", "phase5"):
+    if m["task"] == "phase4" or full:
         script += f"""python3 tests/conformance/runner.py --engine implementations/{lang}/bin/polyquery {phase_args} --include-hidden \
    --transport http --report conformance-http.json -q > validate-http.log 2>&1; echo "http_exit=$?" >> validate-status
 python3 tests/concurrency/http_suite.py --engine implementations/{lang}/bin/polyquery --report http-suite.json > validate-http-suite.log 2>&1; echo "http_suite_exit=$?" >> validate-status
@@ -645,7 +648,7 @@ python3 tests/concurrency/http_suite.py --engine implementations/{lang}/bin/poly
 """
         extra = ["conformance-native.json", "conformance-native-modes.json", "conformance-modes.json",
                  "conformance-http.json", "http-suite.json"]
-    if m["task"] == "phase5":
+    if full:
         script += f"""python3 tests/conformance/runner.py --engine implementations/{lang}/bin/polyquery --modes --include-hidden \
    --report conformance-modes.json -q > validate-modes.log 2>&1; echo "modes_exit=$?" >> validate-status
 """
@@ -797,6 +800,10 @@ def run_native_arm(kernels_dir: Path, out_dir: Path) -> dict:
                                                          "sve_default_vector_length_bytes", "governor")}}
 
 
+TASK_REQUIRED_CAPS = {"change-union-all": "change.union_all", "change-decimal38": "change.decimal38",
+                      "native": "native.kernels"}
+
+
 def classify(m: dict, v: dict) -> str:
     tel_path = run_dir(m["run_id"]) / "telemetry.json"
     tel = json.loads(tel_path.read_text()) if tel_path.exists() else {}
@@ -804,6 +811,10 @@ def classify(m: dict, v: dict) -> str:
         return "isolation_violation"
     if v["status"].get("build_exit") != "0":
         return "build_failed"
+    # A requirement-change task is only done if the engine claims the change (its suites are skipped otherwise).
+    need = TASK_REQUIRED_CAPS.get(m["task"])
+    if need and need not in (v.get("capabilities") or []):
+        return "tests_failed"
     summ = (v.get("summary") or {}).get("by_phase") or {}
     ok = True
     for ph in v["phases"]:

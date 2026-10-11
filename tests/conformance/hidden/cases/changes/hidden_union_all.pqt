@@ -1,0 +1,42 @@
+# Hidden acceptance cases for CR-1 UNION ALL
+@phase 2
+@requires phase2 change.union_all sql.groupby sql.join ingest.csv
+
+load people fixtures/people.csv
+load orders fixtures/orders.csv
+load customers fixtures/customers.csv
+
+query ordered oracle
+SELECT c.name AS who, o.amount AS v FROM customers c JOIN orders o ON o.customer_id = c.customer_id WHERE o.status = 'pending' UNION ALL SELECT name, score FROM people WHERE score > 90 ORDER BY v DESC, who
+----
+who STRING | v FLOAT64
+["Bob", 99.99]
+["Grace", 95.5]
+["Carol", 91.0]
+["Carol", null]
+
+query oracle
+SELECT tier, COUNT(*) AS n FROM (SELECT tier FROM customers UNION ALL SELECT tier FROM customers WHERE tier IS NOT NULL) x GROUP BY tier
+----
+tier STRING | n INT64
+[null, 1]
+["bronze", 2]
+["gold", 2]
+["silver", 4]
+
+query ordered oracle
+SELECT DISTINCT city FROM people WHERE city IS NOT NULL UNION ALL SELECT DISTINCT city FROM people WHERE city IS NOT NULL ORDER BY city LIMIT 3
+----
+city STRING
+["Espoo"]
+["Espoo"]
+["Helsinki"]
+
+error SEMANTIC_ERROR
+SELECT 1 AS a, 2 AS b UNION ALL SELECT 1 UNION ALL SELECT 1, 2
+
+query
+SELECT COUNT(*) AS n FROM people WHERE id IN (SELECT id FROM people UNION ALL SELECT NULL)
+----
+n INT64
+[8]
