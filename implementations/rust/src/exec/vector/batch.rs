@@ -359,9 +359,111 @@ impl Vector {
 
     /// Concatenates vectors, keeping a typed representation when possible.
     pub fn concat(parts: &[Vector]) -> Vector {
-        let len: usize = parts.iter().map(Vector::len).sum();
+        Vector::concat_refs(&parts.iter().collect::<Vec<_>>())
+    }
+
+    /// Whether the non-empty, not all-NULL `parts` share one typed
+    /// representation (same DECIMAL scale, same dictionary).
+    fn same_kind(parts: &[&Vector]) -> bool {
+        let first = &parts[0].data;
+        parts.iter().all(|p| match (first, &p.data) {
+            (Data::Decimal(_, a), Data::Decimal(_, b)) => a == b,
+            (Data::Dict(_, a), Data::Dict(_, b)) => Arc::ptr_eq(a, b),
+            (Data::Values(_), _) | (_, Data::Values(_)) => false,
+            (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
+        })
+    }
+
+    /// The elements `idx[k] = (part, row)` of several vectors (in that
+    /// order).
+    pub fn gather_parts(parts: &[&Vector], idx: &[(u32, u32)]) -> Vector {
         let non_null: Vec<&Vector> = parts
             .iter()
+            .copied()
+            .filter(|p| !matches!(p.data, Data::Null) && p.len > 0)
+            .collect();
+        if non_null.is_empty() {
+            return Vector::null(idx.len());
+        }
+        if !Vector::same_kind(&non_null) {
+            let values = idx
+                .iter()
+                .map(|&(p, i)| parts[p as usize].value(i as usize))
+                .collect();
+            return Vector::from_values(values);
+        }
+        let any_null = parts.iter().any(|p| !p.no_nulls());
+        let valid = any_null.then(|| {
+            idx.iter()
+                .map(|&(p, i)| !parts[p as usize].is_null(i as usize))
+                .collect()
+        });
+        macro_rules! pick {
+            ($variant:ident, $default:expr) => {{
+                let slices: Vec<Option<&[_]>> = parts
+                    .iter()
+                    .map(|p| match &p.data {
+                        Data::$variant(v) => Some(v.as_slice()),
+                        _ => None,
+                    })
+                    .collect();
+                idx.iter()
+                    .map(|&(p, i)| match slices[p as usize] {
+                        Some(v) => v[i as usize].clone(),
+                        None => $default,
+                    })
+                    .collect()
+            }};
+        }
+        let data = match &non_null[0].data {
+            Data::Bool(_) => Data::Bool(pick!(Bool, false)),
+            Data::Int(_) => Data::Int(pick!(Int, 0)),
+            Data::Float(_) => Data::Float(pick!(Float, 0.0)),
+            Data::Date(_) => Data::Date(pick!(Date, 0)),
+            Data::Timestamp(_) => Data::Timestamp(pick!(Timestamp, 0)),
+            Data::Str(_) => {
+                let empty: Arc<str> = Arc::from("");
+                Data::Str(pick!(Str, empty.clone()))
+            }
+            Data::Decimal(_, s) => {
+                let slices: Vec<Option<&[i64]>> = parts
+                    .iter()
+                    .map(|p| match &p.data {
+                        Data::Decimal(v, _) => Some(v.as_slice()),
+                        _ => None,
+                    })
+                    .collect();
+                let out = idx
+                    .iter()
+                    .map(|&(p, i)| slices[p as usize].map_or(0, |v| v[i as usize]))
+                    .collect();
+                Data::Decimal(out, *s)
+            }
+            Data::Dict(_, d) => {
+                let slices: Vec<Option<&[u32]>> = parts
+                    .iter()
+                    .map(|p| match &p.data {
+                        Data::Dict(c, _) => Some(c.as_slice()),
+                        _ => None,
+                    })
+                    .collect();
+                let out = idx
+                    .iter()
+                    .map(|&(p, i)| slices[p as usize].map_or(0, |v| v[i as usize]))
+                    .collect();
+                Data::Dict(out, d.clone())
+            }
+            Data::Null | Data::Values(_) => unreachable!(),
+        };
+        Vector::new(data, valid)
+    }
+
+    /// Concatenates vectors, keeping a typed representation when possible.
+    pub fn concat_refs(parts: &[&Vector]) -> Vector {
+        let len: usize = parts.iter().map(|p| p.len()).sum();
+        let non_null: Vec<&Vector> = parts
+            .iter()
+            .copied()
             .filter(|p| !matches!(p.data, Data::Null) && p.len > 0)
             .collect();
         if non_null.is_empty() {
@@ -372,13 +474,7 @@ impl Vector {
         }
         // All parts (ignoring all-NULL ones) of one typed kind?
         let first = &non_null[0].data;
-        let same = non_null.iter().all(|p| match (first, &p.data) {
-            (Data::Decimal(_, a), Data::Decimal(_, b)) => a == b,
-            (Data::Dict(_, a), Data::Dict(_, b)) => Arc::ptr_eq(a, b),
-            (Data::Values(_), _) | (_, Data::Values(_)) => false,
-            (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
-        });
-        if !same {
+        if !Vector::same_kind(&non_null) {
             let mut values = Vec::with_capacity(len);
             for p in parts {
                 values.extend((0..p.len).map(|i| p.value(i)));
@@ -528,11 +624,22 @@ impl Batch {
         let len = batches.iter().map(|b| b.len).sum();
         let columns = (0..width)
             .map(|c| {
-                let parts: Vec<Vector> = batches.iter().map(|b| b.columns[c].clone()).collect();
-                Vector::concat(&parts)
+                let parts: Vec<&Vector> = batches.iter().map(|b| &b.columns[c]).collect();
+                Vector::concat_refs(&parts)
             })
             .collect();
         Batch::new(columns, len)
+    }
+
+    /// The rows `idx[k] = (batch, row)` of batches of the same width.
+    pub fn gather_parts(batches: &[&Batch], idx: &[(u32, u32)], width: usize) -> Batch {
+        let columns = (0..width)
+            .map(|c| {
+                let parts: Vec<&Vector> = batches.iter().map(|b| &b.columns[c]).collect();
+                Vector::gather_parts(&parts, idx)
+            })
+            .collect();
+        Batch::new(columns, idx.len())
     }
 
     pub fn approx_size(&self) -> usize {

@@ -7,7 +7,7 @@ use super::agg::Aggregator;
 use super::batch::{BATCH_SIZE, Batch, Vector};
 use super::eval::{eval, eval_mask};
 use super::keys::KeyTable;
-use super::sort::sort_permutation;
+use super::sort::{sort_permutation, top_rows};
 use crate::error::Result;
 use crate::exec::ExecContext;
 use crate::exec::operators::{Operator, Row};
@@ -314,8 +314,7 @@ impl SortOp {
                 && rows >= n.saturating_mul(2).max(8 * BATCH_SIZE)
             {
                 let all = Batch::concat(&parts, self.width);
-                let mut keep = sort_permutation(&all, &self.keys, Some(n), ctx)?;
-                keep.sort_unstable();
+                let keep = top_rows(&all, &self.keys, n, ctx)?;
                 let kept = all.gather(&keep);
                 ctx.release(reserved);
                 reserved = kept.approx_size();

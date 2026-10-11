@@ -34,6 +34,9 @@ enum SortCol {
     /// Order-preserving unsigned encoding (ascending).
     U64(Vec<u64>),
     Str(Vec<Arc<str>>),
+    /// Dictionary-encoded strings compared as strings (sorted runs, whose
+    /// keys are compared with other batches' keys).
+    Dict(Vec<u32>, Arc<[Arc<str>]>),
     Values(Vec<Value>),
 }
 
@@ -62,6 +65,12 @@ fn enc_f64(f: f64) -> u64 {
 
 impl SortColumn {
     fn new(v: Vector, key: &SortKey) -> SortColumn {
+        SortColumn::with_dict_ranks(v, key, true)
+    }
+
+    /// With `ranks`, dictionary codes are replaced by the ranks of their
+    /// strings (only comparable within this vector).
+    fn with_dict_ranks(v: Vector, key: &SortKey, ranks: bool) -> SortColumn {
         let nulls = match &v.data {
             Data::Values(_) => None,
             _ => v
@@ -76,6 +85,7 @@ impl SortColumn {
             Data::Bool(x) => SortCol::U64(x.into_iter().map(u64::from).collect()),
             Data::Float(x) => SortCol::U64(x.into_iter().map(enc_f64).collect()),
             Data::Str(x) => SortCol::Str(x),
+            Data::Dict(codes, dict) if !ranks => SortCol::Dict(codes, dict),
             Data::Dict(codes, dict) => {
                 // Rank dictionary entries once; equal strings share a rank.
                 let mut order: Vec<u32> = (0..dict.len() as u32).collect();
@@ -130,6 +140,7 @@ impl SortColumn {
         let o = match &self.col {
             SortCol::U64(v) => v[a].cmp(&v[b]),
             SortCol::Str(v) => v[a].as_bytes().cmp(v[b].as_bytes()),
+            SortCol::Dict(c, d) => d[c[a] as usize].as_bytes().cmp(d[c[b] as usize].as_bytes()),
             SortCol::Values(v) => {
                 if let Some(o) = self.null_order(v[a].is_null(), v[b].is_null()) {
                     return o;
@@ -282,6 +293,26 @@ pub fn sort_permutation(
     top: Option<usize>,
     ctx: &ExecContext,
 ) -> Result<Vec<u32>> {
+    order(b, keys, top, true, ctx)
+}
+
+/// The rows at the first `n` positions of the stable order, in row order
+/// (top-N compaction: selecting the set does not need sorting it).
+pub fn top_rows(b: &Batch, keys: &[SortKey], n: usize, ctx: &ExecContext) -> Result<Vec<u32>> {
+    let mut rows = order(b, keys, Some(n), false, ctx)?;
+    rows.sort_unstable();
+    Ok(rows)
+}
+
+/// The first `top` (default: all) rows of the stable order; sorted by
+/// that order if `sorted`, else in unspecified order.
+fn order(
+    b: &Batch,
+    keys: &[SortKey],
+    top: Option<usize>,
+    sorted: bool,
+    ctx: &ExecContext,
+) -> Result<Vec<u32>> {
     let mut cols = Vec::with_capacity(keys.len());
     for k in keys {
         cols.push(SortColumn::new(eval(&k.expr, b, ctx)?, k));
@@ -299,29 +330,434 @@ pub fn sort_permutation(
         && !matches!(single.col, SortCol::Values(_))
     {
         sort_single(single, n, top, threads)
-    } else {
-        let mut idx: Vec<u32> = (0..n as u32).collect();
-        let cmp = |x: &u32, y: &u32| compare_rows(&cols, *x as usize, *y as usize).then(x.cmp(y));
-        match top {
-            Some(t) if t < n => {
-                idx.select_nth_unstable_by(t - 1, cmp);
-                idx.truncate(t);
-                idx.sort_unstable_by(cmp);
-                idx
+    } else if cols.iter().all(|c| !matches!(c.col, SortCol::Values(_))) {
+        let keys = NormKeys::new(cols, n, false);
+        match keys.pack() {
+            Some(Packed::U64(items)) => sort_packed64(items, top, sorted),
+            Some(Packed::U128(items)) => sort_packed128(items, top, sorted, threads),
+            None => {
+                let idx: Vec<u32> = (0..n as u32).collect();
+                let cmp = |x: &u32, y: &u32| keys.compare(*x, *y).then(x.cmp(y));
+                select_or_sort(idx, top, sorted, threads, &cmp)
             }
-            _ => parallel_sort(
-                idx,
-                threads,
-                &|mut v: Vec<u32>| {
-                    v.sort_unstable_by(cmp);
-                    v
-                },
-                &cmp,
-            ),
         }
+    } else {
+        let idx: Vec<u32> = (0..n as u32).collect();
+        let cmp = |x: &u32, y: &u32| compare_rows(&cols, *x as usize, *y as usize).then(x.cmp(y));
+        select_or_sort(idx, top, sorted, threads, &cmp)
     };
     ctx.check_interrupt()?;
     Ok(out)
+}
+
+/// Sorts `items` by `cmp` (a total order), or selects its first `top`
+/// items (sorted if `sorted`).
+fn select_or_sort<T: Copy + Send + Sync>(
+    mut items: Vec<T>,
+    top: Option<usize>,
+    sorted: bool,
+    threads: usize,
+    cmp: &(dyn Fn(&T, &T) -> Ordering + Sync),
+) -> Vec<T> {
+    match top {
+        Some(t) if t < items.len() => {
+            items.select_nth_unstable_by(t - 1, cmp);
+            items.truncate(t);
+            if sorted {
+                items.sort_unstable_by(cmp);
+            }
+            items
+        }
+        _ if !sorted => items,
+        _ => parallel_sort(
+            items,
+            threads,
+            &|mut v: Vec<T>| {
+                v.sort_unstable_by(cmp);
+                v
+            },
+            cmp,
+        ),
+    }
+}
+
+/// Multi-key sort keys normalized to rows of `u64` words that compare
+/// lexicographically in sort order (row-major, so a comparison touches one
+/// cache line): per key an optional NULL-placement word and the value
+/// word(s), bit-inverted for DESC: the order-preserving encoding of
+/// fixed-width values; for strings the big-endian 8-byte prefix and
+/// `min(length, 9)`, which decide the order unless both strings are longer
+/// than 8 bytes and the prefixes tie (then the strings are compared).
+struct NormKeys {
+    width: usize,
+    words: Vec<u64>,
+    strings: Vec<StrKey>,
+}
+
+/// A string key of [`NormKeys`].
+struct StrKey {
+    /// Index of the prefix word (the length word follows it).
+    word: usize,
+    src: StrSource,
+    descending: bool,
+}
+
+enum StrSource {
+    Plain(Vec<Arc<str>>),
+    Dict(Vec<u32>, Arc<[Arc<str>]>),
+}
+
+impl StrSource {
+    #[inline]
+    fn get(&self, i: usize) -> &[u8] {
+        match self {
+            StrSource::Plain(v) => v[i].as_bytes(),
+            StrSource::Dict(c, d) => d[c[i] as usize].as_bytes(),
+        }
+    }
+}
+
+/// Normalized keys packed into one integer per row (key bits above the
+/// row number), so plain integer order is the stable sort order.
+enum Packed {
+    U64(Vec<(u64, u32)>),
+    U128(Vec<u128>),
+}
+
+#[inline]
+fn str_prefix(b: &[u8]) -> u64 {
+    let mut buf = [0u8; 8];
+    let k = b.len().min(8);
+    buf[..k].copy_from_slice(&b[..k]);
+    u64::from_be_bytes(buf)
+}
+
+/// Value of the length word of strings that need a full comparison.
+const LONG: u64 = 9;
+
+impl NormKeys {
+    /// `cols` must not contain generic (`Values`) keys. With `uniform`,
+    /// every key has a NULL word, so keys of different batches have the
+    /// same layout and compare with each other.
+    fn new(cols: Vec<SortColumn>, n: usize, uniform: bool) -> NormKeys {
+        let has_null_word = |c: &SortColumn| uniform || c.nulls.is_some();
+        let width: usize = cols
+            .iter()
+            .map(|c| {
+                let value_words = match c.col {
+                    SortCol::Str(_) | SortCol::Dict(..) => 2,
+                    _ => 1,
+                };
+                value_words + usize::from(has_null_word(c))
+            })
+            .sum();
+        let mut words = vec![0u64; n * width];
+        let mut strings = Vec::new();
+        let mut w = 0;
+        for c in cols {
+            if has_null_word(&c) {
+                // NULLs first: NULL = 0 < non-NULL = 1; NULLs last: reversed.
+                let (null, non_null) = if c.nulls_first { (0, 1) } else { (1, 0) };
+                for i in 0..n {
+                    let is_null = c.nulls.as_ref().is_some_and(|x| x[i]);
+                    words[i * width + w] = if is_null { null } else { non_null };
+                }
+                w += 1;
+            }
+            let flip = if c.descending { u64::MAX } else { 0 };
+            let nulls = c.nulls;
+            let is_null = |i: usize| nulls.as_ref().is_some_and(|x| x[i]);
+            let src = match c.col {
+                SortCol::U64(v) => {
+                    for (i, &x) in v.iter().enumerate() {
+                        words[i * width + w] = if is_null(i) { 0 } else { x ^ flip };
+                    }
+                    w += 1;
+                    continue;
+                }
+                SortCol::Str(v) => StrSource::Plain(v),
+                SortCol::Dict(codes, dict) => StrSource::Dict(codes, dict),
+                SortCol::Values(_) => unreachable!("generic keys use the comparator path"),
+            };
+            for i in 0..n {
+                if !is_null(i) {
+                    let s = src.get(i);
+                    words[i * width + w] = str_prefix(s) ^ flip;
+                    words[i * width + w + 1] = (s.len() as u64).min(LONG) ^ flip;
+                }
+            }
+            strings.push(StrKey {
+                word: w,
+                src,
+                descending: c.descending,
+            });
+            w += 2;
+        }
+        NormKeys {
+            width,
+            words,
+            strings,
+        }
+    }
+
+    #[inline]
+    fn row(&self, i: u32) -> &[u64] {
+        let from = i as usize * self.width;
+        &self.words[from..from + self.width]
+    }
+
+    #[inline]
+    fn compare(&self, a: u32, b: u32) -> Ordering {
+        compare_norm(self, a, a, self, b, b)
+    }
+
+    /// The word rows reordered by `perm` (word row `k` = row `perm[k]`),
+    /// so that a merge reads them sequentially.
+    fn permute_words(&mut self, perm: &[u32]) {
+        let mut words = Vec::with_capacity(perm.len() * self.width);
+        for &i in perm {
+            words.extend_from_slice(self.row(i));
+        }
+        self.words = words;
+    }
+
+    /// Packs every row's words into one integer if the words' value ranges
+    /// fit (no string keys).
+    fn pack(&self) -> Option<Packed> {
+        if !self.strings.is_empty() {
+            return None;
+        }
+        let n = self.words.len() / self.width.max(1);
+        let mut min = vec![u64::MAX; self.width];
+        let mut max = vec![0u64; self.width];
+        for row in self.words.chunks_exact(self.width) {
+            for (j, &x) in row.iter().enumerate() {
+                min[j] = min[j].min(x);
+                max[j] = max[j].max(x);
+            }
+        }
+        let bits: Vec<u32> = (0..self.width)
+            .map(|j| {
+                if n == 0 {
+                    0
+                } else {
+                    64 - (max[j] - min[j]).leading_zeros()
+                }
+            })
+            .collect();
+        let total: u32 = bits.iter().sum();
+        let key = |row: &[u64]| -> u128 {
+            let mut k = 0u128;
+            for (j, &x) in row.iter().enumerate() {
+                k = (k << bits[j]) | (x - min[j]) as u128;
+            }
+            k
+        };
+        if total <= 64 {
+            Some(Packed::U64(
+                self.words
+                    .chunks_exact(self.width)
+                    .enumerate()
+                    .map(|(i, row)| (key(row) as u64, i as u32))
+                    .collect(),
+            ))
+        } else if total <= 96 {
+            Some(Packed::U128(
+                self.words
+                    .chunks_exact(self.width)
+                    .enumerate()
+                    .map(|(i, row)| (key(row) << 32) | i as u128)
+                    .collect(),
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+fn sort_packed64(items: Vec<(u64, u32)>, top: Option<usize>, sorted: bool) -> Vec<u32> {
+    let items = match top {
+        Some(t) if t < items.len() => {
+            let mut p = items;
+            p.select_nth_unstable(t - 1);
+            p.truncate(t);
+            if sorted {
+                p.sort_unstable();
+            }
+            p
+        }
+        _ if !sorted => items,
+        _ if items.len() < 1024 => {
+            let mut p = items;
+            p.sort_unstable();
+            p
+        }
+        _ => radix_sort(items),
+    };
+    items.into_iter().map(|(_, i)| i).collect()
+}
+
+/// Compares a row of `x` with a row of `y` (keys of the same sort keys
+/// and layout), given as word row (`aw`, `bw`) and row of the string
+/// sources (`a`, `b`), which differ once the words are permuted.
+#[inline]
+fn compare_norm(x: &NormKeys, aw: u32, a: u32, y: &NormKeys, bw: u32, b: u32) -> Ordering {
+    let (ra, rb) = (x.row(aw), y.row(bw));
+    let mut from = 0;
+    for (sx, sy) in x.strings.iter().zip(&y.strings) {
+        let end = sx.word + 2;
+        let o = ra[from..end].cmp(&rb[from..end]);
+        if o != Ordering::Equal {
+            return o;
+        }
+        let flip = if sx.descending { u64::MAX } else { 0 };
+        if ra[sx.word + 1] ^ flip == LONG {
+            let o = sx.src.get(a as usize).cmp(sy.src.get(b as usize));
+            if o != Ordering::Equal {
+                return if sx.descending { o.reverse() } else { o };
+            }
+        }
+        from = end;
+    }
+    ra[from..].cmp(&rb[from..])
+}
+
+/// Sorted rows with their keys normalized for comparisons with other runs
+/// of the same keys (None: generic keys; such runs are merged by
+/// re-sorting). Row `k` of `batch` was row `perm[k]` of the input, where
+/// the keys' string sources still refer to.
+pub struct SortedRun {
+    batch: Batch,
+    perm: Vec<u32>,
+    keys: Option<NormKeys>,
+}
+
+/// Sorts `b` by `keys` (the first `top` rows with `top`) into a run.
+pub fn sorted_run(
+    b: Batch,
+    keys: &[SortKey],
+    top: Option<usize>,
+    ctx: &ExecContext,
+) -> Result<SortedRun> {
+    let mut cols = Vec::with_capacity(keys.len());
+    for k in keys {
+        cols.push(SortColumn::with_dict_ranks(
+            eval(&k.expr, &b, ctx)?,
+            k,
+            false,
+        ));
+    }
+    if cols.iter().any(|c| matches!(c.col, SortCol::Values(_))) {
+        let perm = sort_permutation(&b, keys, top, ctx)?;
+        return Ok(SortedRun {
+            batch: b.gather(&perm),
+            perm,
+            keys: None,
+        });
+    }
+    let mut norm = NormKeys::new(cols, b.len, true);
+    let threads = if ctx.in_subquery() {
+        1
+    } else {
+        ctx.execution.threads
+    };
+    let perm = match norm.pack() {
+        Some(Packed::U64(items)) => sort_packed64(items, top, true),
+        Some(Packed::U128(items)) => sort_packed128(items, top, true, threads),
+        None => {
+            let idx: Vec<u32> = (0..b.len as u32).collect();
+            let cmp = |x: &u32, y: &u32| norm.compare(*x, *y).then(x.cmp(y));
+            select_or_sort(idx, top, true, threads, &cmp)
+        }
+    };
+    norm.permute_words(&perm);
+    ctx.check_interrupt()?;
+    Ok(SortedRun {
+        batch: b.gather(&perm),
+        perm,
+        keys: Some(norm),
+    })
+}
+
+/// The first `n` rows of the sorted union of `runs` (runs of `keys`, with
+/// `width` columns). `keys` must be a total order (no ties between rows).
+pub fn merge_top(
+    runs: Vec<SortedRun>,
+    keys: &[SortKey],
+    n: usize,
+    width: usize,
+    ctx: &ExecContext,
+) -> Result<Batch> {
+    let runs: Vec<SortedRun> = runs.into_iter().filter(|r| !r.perm.is_empty()).collect();
+    if runs.iter().any(|r| r.keys.is_none()) {
+        let batches: Vec<Batch> = runs.into_iter().map(|r| r.batch).collect();
+        if batches.is_empty() {
+            return Ok(Batch::new(Vec::new(), 0));
+        }
+        let all = Batch::concat(&batches, width);
+        let perm = sort_permutation(&all, keys, Some(n), ctx)?;
+        return Ok(all.gather(&perm));
+    }
+    let norm: Vec<&NormKeys> = runs.iter().filter_map(|r| r.keys.as_ref()).collect();
+    let perms: Vec<&[u32]> = runs.iter().map(|r| r.perm.as_slice()).collect();
+    // Position in each run's order (= word row of its permuted keys); a
+    // binary min-heap of run indices ordered by the rows at those positions.
+    let mut pos = vec![0usize; runs.len()];
+    let less = |pos: &[usize], x: usize, y: usize| {
+        let (px, py) = (pos[x], pos[y]);
+        compare_norm(
+            norm[x],
+            px as u32,
+            perms[x][px],
+            norm[y],
+            py as u32,
+            perms[y][py],
+        ) == Ordering::Less
+    };
+    let sift_down = |heap: &mut [usize], pos: &[usize], mut i: usize| {
+        loop {
+            let (l, r) = (2 * i + 1, 2 * i + 2);
+            let mut m = i;
+            if l < heap.len() && less(pos, heap[l], heap[m]) {
+                m = l;
+            }
+            if r < heap.len() && less(pos, heap[r], heap[m]) {
+                m = r;
+            }
+            if m == i {
+                return;
+            }
+            heap.swap(i, m);
+            i = m;
+        }
+    };
+    let mut heap: Vec<usize> = (0..runs.len()).collect();
+    for i in (0..heap.len() / 2).rev() {
+        sift_down(&mut heap, &pos, i);
+    }
+    let mut order: Vec<(u32, u32)> = Vec::with_capacity(n.min(1 << 20));
+    while order.len() < n && !heap.is_empty() {
+        let r = heap[0];
+        order.push((r as u32, pos[r] as u32));
+        pos[r] += 1;
+        if pos[r] == perms[r].len() {
+            let last = heap.len() - 1;
+            heap.swap(0, last);
+            heap.pop();
+        }
+        sift_down(&mut heap, &pos, 0);
+    }
+    ctx.check_interrupt()?;
+    let batches: Vec<&Batch> = runs.iter().map(|r| &r.batch).collect();
+    Ok(Batch::gather_parts(&batches, &order, width))
+}
+
+fn sort_packed128(items: Vec<u128>, top: Option<usize>, sorted: bool, threads: usize) -> Vec<u32> {
+    let cmp = |a: &u128, b: &u128| a.cmp(b);
+    select_or_sort(items, top, sorted, threads, &cmp)
+        .into_iter()
+        .map(|x| x as u32)
+        .collect()
 }
 
 /// One key: NULLs are placed as a block (stable), the rest sorted by
@@ -388,7 +824,9 @@ fn sort_single(col: &SortColumn, n: usize, top: Option<usize>, threads: usize) -
             };
             pairs.into_iter().map(|(_, i)| i).collect()
         }
-        SortCol::Values(_) => unreachable!("generic keys use the comparator path"),
+        SortCol::Dict(..) | SortCol::Values(_) => {
+            unreachable!("generic keys use the comparator path")
+        }
     };
     let mut out = if col.nulls_first {
         let mut out = nulls;
@@ -464,6 +902,108 @@ mod tests {
                 }
                 assert_eq!(got, expect, "desc={desc} nulls_first={nf} top={top:?}");
             }
+        }
+    }
+
+    /// Multi-key orders (normalized words, packed and string keys) and
+    /// merged runs equal the generic comparator's stable order.
+    #[test]
+    fn multi_key_orders_and_merged_runs_match_comparator() {
+        let n = 3000usize;
+        let strs = [
+            "",
+            "a",
+            "ab",
+            "abcdefgh",
+            "abcdefghi",
+            "abcdefghj",
+            "b\0",
+            "b",
+            "zz",
+        ];
+        let rows: Vec<Vec<Value>> = (0..n)
+            .map(|i| {
+                let s = if i % 13 == 0 {
+                    Value::Null
+                } else {
+                    Value::str(strs[(i * 7) % strs.len()])
+                };
+                let x = if i % 17 == 0 {
+                    Value::Null
+                } else {
+                    Value::Int(((i * 31) % 23) as i64 - 11)
+                };
+                vec![s, x, Value::Int(i as i64 % 5)]
+            })
+            .collect();
+        let column = |c: usize| Vector::from_values(rows.iter().map(|r| r[c].clone()).collect());
+        let b = Batch::new(vec![column(0), column(1), column(2)], n);
+        let ctx = ExecContext::default();
+        let key = |index: usize, ty: DataType, descending: bool, nulls_first: bool| SortKey {
+            expr: Expr::Column { index, ty },
+            descending,
+            nulls_first,
+        };
+        let key_sets = [
+            vec![
+                key(0, DataType::String, false, true),
+                key(1, DataType::Int64, true, false),
+            ],
+            vec![
+                key(1, DataType::Int64, false, false),
+                key(2, DataType::Int64, true, true),
+            ],
+            vec![
+                key(2, DataType::Int64, true, false),
+                key(0, DataType::String, true, true),
+            ],
+        ];
+        for keys in &key_sets {
+            let mut expect: Vec<u32> = (0..n as u32).collect();
+            expect.sort_by(|&x, &y| {
+                for k in keys {
+                    let Expr::Column { index, .. } = k.expr else {
+                        unreachable!()
+                    };
+                    let o = crate::exec::operators::compare_keys(
+                        &rows[x as usize][index],
+                        &rows[y as usize][index],
+                        k,
+                    );
+                    if o != Ordering::Equal {
+                        return o;
+                    }
+                }
+                Ordering::Equal
+            });
+            for top in [None, Some(1), Some(100)] {
+                let got = sort_permutation(&b, keys, top, &ctx).unwrap();
+                let want = &expect[..top.unwrap_or(n)];
+                assert_eq!(got, want, "keys={keys:?} top={top:?}");
+            }
+            // Runs over slices, with the row number as the final key.
+            let mut keys_seq = keys.clone();
+            keys_seq.push(key(3, DataType::Int64, false, true));
+            let with_seq = |from: usize, to: usize| {
+                let mut part = b.slice(from, to);
+                part.columns.push(Vector::new(
+                    Data::Int((from as i64..to as i64).collect()),
+                    None,
+                ));
+                part
+            };
+            let runs = [(0, 1000), (1000, 1100), (1100, n)]
+                .iter()
+                .map(|&(f, t)| sorted_run(with_seq(f, t), &keys_seq, Some(500), &ctx).unwrap())
+                .collect();
+            let merged = merge_top(runs, &keys_seq, 400, 4, &ctx).unwrap();
+            let order: Vec<u32> = (0..merged.len)
+                .map(|i| match merged.columns[3].value(i) {
+                    Value::Int(x) => x as u32,
+                    v => panic!("{v:?}"),
+                })
+                .collect();
+            assert_eq!(order, &expect[..400], "merged keys={keys:?}");
         }
     }
 }
