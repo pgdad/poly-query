@@ -211,6 +211,59 @@ class AntiJoinPlanTests(unittest.TestCase):
                 self.assertEqual(sorted(json.dumps(r) for r in resp["rows"]), expected, (sql, mode))
 
 
+class SharedSubqueryTests(unittest.TestCase):
+    """SubqueryScans computing identical self-contained inputs (CTE
+    references) are computed once; everything else is not shared."""
+
+    SHARED = [
+        "WITH c AS (SELECT g, SUM(v) AS s FROM t GROUP BY g) SELECT COUNT(*) FROM c WHERE s > (SELECT AVG(s) FROM c)",
+        "WITH c AS (SELECT g, COUNT(*) AS n FROM t GROUP BY g) SELECT a.g, a.n, b.n FROM c a JOIN c b ON a.g = b.g",
+        "WITH c AS (SELECT id, s FROM t WHERE v > 0) SELECT (SELECT COUNT(*) FROM c), COUNT(*) FROM c",
+    ]
+    NOT_SHARED = [
+        # different filters pushed into each reference
+        "WITH c AS (SELECT id, v FROM t) SELECT COUNT(*) FROM c x JOIN c y ON x.id = y.id + 1 WHERE x.v > 3",
+        # a CTE read by a correlated subquery that filters it per outer row
+        "WITH c AS (SELECT id, g FROM t) SELECT COUNT(*) FROM c o WHERE o.id > (SELECT MAX(i.id) FROM c i WHERE i.g = o.g) - 3",
+        # side effects
+        "WITH c AS (SELECT id, PQ_SLEEP(0) AS z FROM t) SELECT COUNT(*) FROM c a JOIN c b ON a.id = b.id",
+    ]
+
+    def setUp(self):
+        self.handler = make_handler(test_functions=True)
+        _load(self.handler)
+
+    def shared_scans(self, sql):
+        plan = self.handler.handle({"op": "explain", "sql": sql})["plan"]
+        found = []
+
+        def walk(node):
+            if node["op"] == "SubqueryScan":
+                found.append(node.get("shared", False))
+            for child in node["children"]:
+                walk(child)
+
+        walk(plan)
+        return found
+
+    def test_identical_cte_references_are_shared(self):
+        for sql in self.SHARED:
+            self.assertTrue(all(self.shared_scans(sql)) and len(self.shared_scans(sql)) >= 2, sql)
+
+    def test_differing_or_dependent_inputs_are_not_shared(self):
+        for sql in self.NOT_SHARED:
+            self.assertFalse(any(self.shared_scans(sql)), sql)
+
+    def test_results_match_unoptimized_execution(self):
+        for sql in self.SHARED + self.NOT_SHARED:
+            expected = self.handler.handle({"op": "query", "sql": sql, "options": {"optimize": False, "mode": "row"}})
+            self.assertTrue(expected["ok"], (sql, expected))
+            for mode in ("row", "vectorized"):
+                for threads in (1, 4):
+                    got = self.handler.handle({"op": "query", "sql": sql, "options": {"mode": mode, "threads": threads}})
+                    self.assertEqual(sorted(map(list, got["rows"])), sorted(map(list, expected["rows"])), (sql, mode))
+
+
 class CountResultTests(unittest.TestCase):
     def test_count_matches_rows_and_limits(self):
         handler = make_handler()

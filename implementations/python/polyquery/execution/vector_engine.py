@@ -177,7 +177,12 @@ def _values(node: pp.Values, ctx: ExecutionContext) -> Batches:
 
 
 def _subquery_scan(node: pp.SubqueryScan, ctx: ExecutionContext) -> Batches:
-    return execute(node.input, ctx)
+    if node.shared is None or ctx.partitions:  # (a partition sees part of the input)
+        return execute(node.input, ctx)
+    result = ctx.shared_results.get(node.shared)
+    if result is None:
+        result = ctx.shared_results[node.shared] = _materialize(node.input, ctx)
+    return _rebatch(*result)
 
 
 def _union_all(node: pp.UnionAll, ctx: ExecutionContext) -> Batches:

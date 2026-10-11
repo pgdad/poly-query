@@ -9,8 +9,10 @@ operators that run on native kernels."""
 
 from __future__ import annotations
 
+import dataclasses
+import json
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from ..analysis import bound as b
 from ..native import NativeKernels
@@ -168,6 +170,10 @@ class SubqueryScan(PhysicalNode):
     rel: int
     width: int
     alias: str
+    # set when the statement computes the identical (uncorrelated,
+    # side-effect free) input more than once, e.g. a CTE referenced twice:
+    # the first execution's result is reused by the others
+    shared: str | None = None
 
     def inputs(self) -> list[PhysicalNode]:
         return [self.input]
@@ -177,7 +183,10 @@ class SubqueryScan(PhysicalNode):
         return [(self.rel, i) for i in range(self.width)]
 
     def describe(self) -> dict[str, Any]:
-        return {"alias": self.alias}
+        out: dict[str, Any] = {"alias": self.alias}
+        if self.shared is not None:
+            out["shared"] = True
+        return out
 
 
 @dataclass(eq=False)
@@ -552,6 +561,8 @@ class PhysicalPlanner:
         if kernels is not None and self.options.kernel_plan is not None:
             for tree in [root, *self.subplans.values()]:
                 self._bind_kernels(tree)
+        if self.options.optimize:
+            _share_common_subqueries([root, *self.subplans.values()], self.subplans)
         mode = ROW if self.options.mode == ROW else VECTORIZED
         return PhysicalPlan(root, logical.columns, self.subplans, mode, kernels)
 
@@ -915,6 +926,90 @@ def _parallelize_inputs(node: PhysicalNode, partitions: int, min_rows: float) ->
         node.input = gathered
     elif isinstance(node, UnionAll):
         node.branches = [_gather_selective(branch, partitions, min_rows) for branch in node.branches]
+
+
+def _walk(node: PhysicalNode, subplans: dict[int, PhysicalNode]) -> Iterator[PhysicalNode]:
+    """A plan tree's nodes, including the plans of the subqueries its
+    expressions use."""
+    yield node
+    for expr in node.expressions():
+        for sq in b.subqueries(expr):
+            if sq.id in subplans:
+                yield from _walk(subplans[sq.id], subplans)
+    for child in node.inputs():
+        yield from _walk(child, subplans)
+
+
+def _self_contained(node: PhysicalNode) -> bool:
+    """Whether a subtree's result depends on nothing outside it: every
+    column it references is produced inside it (no correlation parameter),
+    and no expression has side effects or runs a subquery."""
+    nodes = list(_walk(node, {}))
+    produced = {key[0] for n in nodes for key in n.layout}
+    for n in nodes:
+        if getattr(n, "native", None) is not None:
+            return False
+        for expr in n.expressions():
+            if b.has_side_effects(expr) or b.contains_subquery(expr):
+                return False
+            if any(key[0] not in produced for key in b.column_keys(expr)):
+                return False
+    return True
+
+
+def _signature(root: PhysicalNode) -> str:
+    """A structural description of a subtree that is equal for two subtrees
+    exactly when they compute the same rows: node types and all their
+    fields, with the relation ids of column keys renumbered in order of
+    appearance (so the copies of a CTE planned for each reference compare
+    equal) and tables / indexes by identity."""
+    nodes = list(_walk(root, {}))
+    rels: dict[int, int] = {}
+    for n in nodes:
+        for key in n.layout:
+            rels.setdefault(key[0], len(rels))
+
+    def canonical_expr(e: b.Expr) -> b.Expr:
+        if isinstance(e, b.ColumnRef):
+            return dataclasses.replace(e, rel=rels[e.rel])
+        return b.map_children(e, canonical_expr)
+
+    def canonical(value: Any) -> Any:
+        if isinstance(value, PhysicalNode):
+            return None  # the subtree's structure: the walk order and input counts
+        if isinstance(value, (Table, Index)):
+            return ["object", id(value)]
+        if isinstance(value, b.Expr):
+            return repr(canonical_expr(value))
+        if isinstance(value, (list, tuple)):
+            return [canonical(v) for v in value]
+        return repr(value)
+
+    parts = []
+    for n in nodes:
+        fields = {
+            f.name: canonical(getattr(n, f.name))
+            for f in dataclasses.fields(n)
+            if f.name not in ("rel", "estimated_rows", "shared")
+        }
+        layout = [[rels[key[0]], key[1]] for key in n.layout]
+        parts.append([type(n).__name__, fields, layout, len(n.inputs())])
+    return json.dumps(parts)
+
+
+def _share_common_subqueries(trees: list[PhysicalNode], subplans: dict[int, PhysicalNode]) -> None:
+    """Marks the SubqueryScans of a statement that compute identical,
+    self-contained inputs (e.g. the references to one CTE), so that their
+    result is computed once."""
+    groups: dict[str, list[SubqueryScan]] = {}
+    for tree in trees:
+        for node in _walk(tree, {}):
+            if isinstance(node, SubqueryScan) and _self_contained(node.input):
+                groups.setdefault(_signature(node.input), []).append(node)
+    for signature, scans in groups.items():
+        if len(scans) > 1:
+            for scan in scans:
+                scan.shared = signature
 
 
 def _scanned_rel(node: PhysicalNode) -> int | None:

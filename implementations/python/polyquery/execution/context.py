@@ -58,6 +58,8 @@ class ExecutionContext:
     prepared: dict[tuple[int, str], Any] = field(default_factory=dict, init=False)
     # per-task inputs of the tasks a pool worker runs, by task index
     task_inputs: dict[int, Any] = field(default_factory=dict, init=False)
+    # results of shared subquery scans (SubqueryScan.shared), by signature
+    shared_results: dict[str, Any] = field(default_factory=dict, init=False)
 
     def cached(self, owner: object, tag: str, factory: Callable[[], Any]) -> Any:
         """Returns the value cached for ``(owner, tag)``, creating it on first use."""

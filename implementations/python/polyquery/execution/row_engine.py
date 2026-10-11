@@ -85,7 +85,12 @@ def _values(node: pp.Values, ctx: ExecutionContext) -> Rows:
 
 
 def _subquery_scan(node: pp.SubqueryScan, ctx: ExecutionContext) -> Rows:
-    return execute(node.input, ctx)
+    if node.shared is None or ctx.partitions:  # (a partition sees part of the input)
+        return execute(node.input, ctx)
+    rows = ctx.shared_results.get(node.shared)
+    if rows is None:
+        rows = ctx.shared_results[node.shared] = _materialize(node.input, ctx)
+    return iter(rows)
 
 
 def _union_all(node: pp.UnionAll, ctx: ExecutionContext) -> Rows:
