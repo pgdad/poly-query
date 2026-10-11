@@ -87,7 +87,7 @@ public final class BatchBuilder {
                     f.schema().size());
             case PhysicalPlan.Project p -> new BatchOperators.Project(build(p.input()), compiler, p.expressions());
             case PhysicalPlan.HashAggregate a -> new AggregateBatches.HashAggregate(build(a.input()), a.groupKeys(),
-                    a.aggregates(), compiler, ctx, batchSize);
+                    a.aggregates(), compiler, ctx, batchSize, new SharedAggregates.Candidate(a));
             case PhysicalPlan.HashDistinct d -> new AggregateBatches.Distinct(build(d.input()), types(d.schema()), ctx);
             case PhysicalPlan.UnionAll u -> new BatchOperators.UnionAll(u.inputs().stream().map(this::build).toList());
             case PhysicalPlan.HashJoin j -> hashJoin(j, build(j.buildLeft() ? j.right() : j.left()), null, compiler,
@@ -98,12 +98,12 @@ public final class BatchBuilder {
                 yield new BatchOperators.Limit(build(l.input()), offset, limit, l.schema().size());
             }
             case PhysicalPlan.Sort s -> new SortBatches.Sort(build(s.input()), s.keys(), s.schema(), ctx, batchSize,
-                    0, -1);
+                    threads, 0, -1);
             case PhysicalPlan.TopN t -> {
                 long offset = t.offset() == null ? 0 : rows.constant(t.offset(), "OFFSET", 0);
                 long limit = rows.constant(t.limit(), "LIMIT", -1);
                 BatchOperator sorted = new SortBatches.Sort(build(t.input()), t.keys(), t.schema(), ctx, batchSize,
-                        limit < 0 ? 0 : offset, limit);
+                        threads, limit < 0 ? 0 : offset, limit);
                 yield limit < 0 && offset > 0 ? new BatchOperators.Limit(sorted, offset, -1, t.schema().size())
                         : sorted;
             }

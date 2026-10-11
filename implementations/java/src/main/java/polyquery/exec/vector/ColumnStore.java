@@ -1,6 +1,8 @@
 package polyquery.exec.vector;
 
+import java.util.ArrayList;
 import java.util.List;
+import polyquery.exec.ExecContext;
 import polyquery.storage.ColumnSchema;
 
 /**
@@ -123,6 +125,131 @@ final class ColumnStore {
         for (int i = 0; i < n; i++) {
             v.objects[i] = v.nulls[i] ? null : dict[codes[i]];
         }
+    }
+
+    /**
+     * The rows of {@code parts} in order, as one store (the parts' slots are copied in parallel,
+     * part by part). A STRING slot stays dictionary-encoded if all parts share one dictionary.
+     */
+    static ColumnStore concat(List<ColumnSchema> schema, List<ColumnStore> parts, ExecContext ctx, int threads) {
+        int total = 0;
+        int[] offsets = new int[parts.size()];
+        for (int p = 0; p < parts.size(); p++) {
+            offsets[p] = total;
+            total += parts.get(p).rows;
+        }
+        ColumnStore out = new ColumnStore(schema, total);
+        for (int c = 0; c < out.cols.length; c++) {
+            String[] dict = null;
+            boolean anyRows = false;
+            boolean sameDict = true;
+            boolean hasNulls = false;
+            for (ColumnStore part : parts) {
+                if (part.rows == 0) {
+                    continue;
+                }
+                Vec v = part.column(c);
+                if (v == null) {
+                    continue;
+                }
+                hasNulls |= v.hasNulls;
+                if (v.kind != Vec.Kind.DICT || anyRows && v.dict != dict) {
+                    sameDict = false;
+                }
+                dict = v.dict;
+                anyRows = true;
+            }
+            if (!anyRows) {
+                continue;
+            }
+            Vec v = out.allocate(c);
+            if (sameDict && dict != null) {
+                v.toDict(dict, total);
+            }
+            v.hasNulls = hasNulls;
+        }
+        List<Runnable> tasks = new ArrayList<>();
+        int workers = Math.max(1, Math.min(threads, parts.size()));
+        java.util.concurrent.atomic.AtomicInteger next = new java.util.concurrent.atomic.AtomicInteger();
+        for (int w = 0; w < workers; w++) {
+            tasks.add(() -> {
+                int p;
+                while ((p = next.getAndIncrement()) < parts.size()) {
+                    ColumnStore part = parts.get(p);
+                    for (int c = 0; c < out.cols.length; c++) {
+                        if (out.cols[c] != null && part.rows > 0) {
+                            copySegment(part.column(c), part.rows, out.cols[c], offsets[p]);
+                        }
+                    }
+                }
+            });
+        }
+        Parallel.runAll(tasks, ctx);
+        out.rows = total;
+        return out;
+    }
+
+    /** {@code dst[at .. at+n) = src[0 .. n)} (a missing source slot is all NULL). */
+    private static void copySegment(Vec src, int n, Vec dst, int at) {
+        if (src == null) {
+            java.util.Arrays.fill(dst.nulls, at, at + n, true);
+            return;
+        }
+        if (src.hasNulls) {
+            System.arraycopy(src.nulls, 0, dst.nulls, at, n);
+        } else {
+            java.util.Arrays.fill(dst.nulls, at, at + n, false);
+        }
+        switch (dst.kind) {
+            case LONG -> System.arraycopy(src.longs, 0, dst.longs, at, n);
+            case DOUBLE -> System.arraycopy(src.doubles, 0, dst.doubles, at, n);
+            case DICT -> System.arraycopy(src.codes, 0, dst.codes, at, n);
+            case OBJECT -> {
+                if (src.kind == Vec.Kind.DICT) {
+                    for (int i = 0; i < n; i++) {
+                        dst.objects[at + i] = src.hasNulls && src.nulls[i] ? null : src.dict[src.codes[i]];
+                    }
+                } else {
+                    System.arraycopy(src.objects, 0, dst.objects, at, n);
+                }
+            }
+        }
+    }
+
+    /**
+     * {@link #select(int[], int)} with the rows gathered by {@code threads} workers, each filling
+     * a contiguous range of the new store.
+     */
+    ColumnStore select(int[] perm, int count, ExecContext ctx, int threads) {
+        int tasks = Math.max(1, Math.min(threads, count / 16_384));
+        if (tasks == 1) {
+            return select(perm, count);
+        }
+        ColumnStore out = new ColumnStore(schema, count);
+        for (int c = 0; c < cols.length; c++) {
+            if (populated[c]) {
+                out.allocate(c);
+                if (cols[c].kind == Vec.Kind.DICT) {
+                    out.cols[c].toDict(cols[c].dict, out.capacity);
+                }
+                out.cols[c].hasNulls = cols[c].hasNulls;
+            }
+        }
+        List<Runnable> work = new ArrayList<>(tasks);
+        for (int t = 0; t < tasks; t++) {
+            int from = (int) ((long) count * t / tasks);
+            int to = (int) ((long) count * (t + 1) / tasks);
+            work.add(() -> {
+                for (int c = 0; c < cols.length; c++) {
+                    if (populated[c]) {
+                        gather(cols[c], perm, from, to - from, out.cols[c], from);
+                    }
+                }
+            });
+        }
+        Parallel.runAll(work, ctx);
+        out.rows = count;
+        return out;
     }
 
     /** A new store with rows {@code perm[0..count)} of this one, in that order. */

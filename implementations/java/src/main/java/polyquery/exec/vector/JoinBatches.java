@@ -173,7 +173,7 @@ final class JoinBatches {
             int parts = 1 << partitionBits;
             longIndex = new LongIndex[parts];
             if (parts == 1) {
-                LongIndex index = new LongIndex();
+                LongIndex index = new LongIndex(rows);
                 for (int r = 0; r < rows; r++) {
                     index.add(rowKeys[r], r, next);
                 }
@@ -198,7 +198,7 @@ final class JoinBatches {
             for (int p = 0; p < parts; p++) {
                 int part = p;
                 tasks.add(() -> {
-                    LongIndex index = new LongIndex();
+                    LongIndex index = new LongIndex(start[part + 1] - start[part]);
                     for (int k = start[part]; k < start[part + 1]; k++) {
                         index.add(rowKeys[members[k]], members[k], next);
                     }
@@ -331,15 +331,26 @@ final class JoinBatches {
      * so a probe usually costs a single cache miss.
      */
     static final class LongIndex {
-        private long[] keys = new long[64];
-        private int[] heads = new int[64];
-        private int[] tails = new int[64];
-        private int shift = 64 - 6;
-        private int mask = 63;
+        private long[] keys;
+        private int[] heads;
+        private int[] tails;
+        private int shift;
+        private int mask;
         private int size;
 
         LongIndex() {
+            this(32);
+        }
+
+        /** An index presized for {@code expectedKeys} distinct keys (it still grows beyond them). */
+        LongIndex(int expectedKeys) {
+            int cap = Integer.highestOneBit(Math.max(64, 2 * expectedKeys - 1)) << 1;
+            keys = new long[cap];
+            heads = new int[cap];
+            tails = new int[cap];
             Arrays.fill(heads, -1);
+            mask = cap - 1;
+            shift = 64 - Integer.numberOfTrailingZeros(cap);
         }
 
         private int slot(long key) {
@@ -683,13 +694,14 @@ final class JoinBatches {
                     sel[count++] = e;
                 }
             }
-            // one update of the shared counter per batch (not per row: parallel probes share it)
-            int allowed = counter.add(count);
-            if (allowed < count) {
-                count = allowed;
-                error = new PolyQueryException(ErrorCode.RESOURCE_LIMIT,
-                        "join produced more than " + ctx.maxJoinRows() + " rows");
-                done = true;
+            if (count > 0) {
+                int allowed = counter.add(count);
+                if (allowed < count) {
+                    count = allowed; // the rows up to the limit are produced, then the error
+                    error = new PolyQueryException(ErrorCode.RESOURCE_LIMIT,
+                            "join produced more than " + ctx.maxJoinRows() + " rows");
+                    done = true;
+                }
             }
             out.size = m;
             out.sel = count == m ? null : sel;
@@ -717,13 +729,13 @@ final class JoinBatches {
             this.max = max;
         }
 
-        /** Counts {@code n} rows; returns how many of them are within the limit. */
-        int add(int n) {
-            if (n == 0) {
-                return 0;
-            }
-            long after = produced.addAndGet(n);
-            return after <= max ? n : (int) Math.max(0, n - (after - max));
+        /**
+         * Counts {@code rows} rows (one atomic update per batch, not per row: parallel probes
+         * share the counter); returns how many of them are within the limit.
+         */
+        int add(int rows) {
+            long before = produced.getAndAdd(rows);
+            return (int) Math.max(0, Math.min(rows, max - before));
         }
 
         void reset() {

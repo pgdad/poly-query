@@ -3,9 +3,9 @@ package polyquery.exec.vector;
 import java.util.Arrays;
 import java.util.BitSet;
 import java.util.List;
+import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.exec.Evaluator;
-import polyquery.exec.ExecContext;
 import polyquery.plan.BoundExpr;
 import polyquery.plan.BoundExprs;
 
@@ -45,7 +45,9 @@ final class BatchExprs {
 
     /** True if an error may be deferred to the row that causes it (a data-dependent error). */
     static boolean deferrable(PolyQueryException e) {
-        return ExecContext.isDataError(e);
+        ErrorCode c = e.code();
+        return c != ErrorCode.TIMEOUT && c != ErrorCode.CANCELLED && c != ErrorCode.RESOURCE_LIMIT
+                && c != ErrorCode.INTERNAL_ERROR;
     }
 
     /**

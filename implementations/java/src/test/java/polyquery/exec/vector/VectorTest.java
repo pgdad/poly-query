@@ -162,6 +162,119 @@ public final class VectorTest {
                 "prefix keeps code point order");
     }
 
+    /**
+     * The parallel bucket sort and the normalized string keys (Latin-1 and UTF-16, short and
+     * long strings, dictionary ranks) order exactly like the reference comparator, stably.
+     */
+    public static void testParallelSortMatchesReference() {
+        List<ColumnSchema> schema = List.of(new ColumnSchema("s", DataType.STRING),
+                new ColumnSchema("k", DataType.INT64), new ColumnSchema("d", DataType.STRING),
+                new ColumnSchema("f", DataType.FLOAT64));
+        Random r = new Random(11);
+        int n = SortBatches.PARALLEL_SORT_ROWS + 4321;
+        String[] dict = {"pear", "apple", "fig", "apple", "", "kiwi\u0000", "kiwi"};
+        for (boolean latin1 : new boolean[] {true, false}) {
+            Batch b = new Batch(4);
+            b.cols[0] = new Vec(DataType.STRING, n);
+            b.cols[1] = new Vec(DataType.INT64, n);
+            b.cols[2] = new Vec(DataType.STRING, n);
+            b.cols[3] = new Vec(DataType.FLOAT64, n);
+            for (Vec v : b.cols) {
+                v.nullMask(n);
+            }
+            b.cols[2].toDict(dict, n);
+            for (int i = 0; i < n; i++) {
+                StringBuilder sb = new StringBuilder();
+                int len = r.nextInt(11);
+                for (int c = 0; c < len; c++) {
+                    sb.append(latin1 || r.nextInt(5) > 0 ? (char) ('a' + r.nextInt(3)) : "😀｡\u0000é".charAt(r.nextInt(5)));
+                }
+                b.cols[0].set(i, r.nextInt(50) == 0 ? null : sb.toString());
+                b.cols[1].set(i, r.nextInt(30) == 0 ? null : (long) r.nextInt(100) - 50);
+                b.cols[2].codes[i] = r.nextInt(dict.length);
+                b.cols[2].nulls[i] = r.nextInt(20) == 0;
+                b.cols[3].set(i, (double) r.nextInt(7) - 3.0);
+            }
+            b.reset(n);
+            int[] all = new int[n];
+            for (int i = 0; i < n; i++) {
+                all[i] = i;
+            }
+            ColumnStore store = new ColumnStore(schema);
+            store.append(b, all, n);
+            for (List<SortKey> keys : List.of(List.of(new SortKey(0, false, true)),
+                    List.of(new SortKey(0, true, false), new SortKey(1, false, true)),
+                    List.of(new SortKey(1, true, true), new SortKey(0, false, false)),
+                    List.of(new SortKey(2, false, false), new SortKey(3, true, false)),
+                    List.of(new SortKey(3, false, false), new SortKey(2, true, true), new SortKey(1, false, true)))) {
+                SortBatches.RowOrder order = SortBatches.order(store, keys);
+                for (int threads : new int[] {1, 8}) {
+                    int[] perm = SortBatches.sort(store, keys, ctx(), threads);
+                    check(perm.length == n, "permutation size");
+                    for (int i = 1; i < n; i++) {
+                        int c = order.compare(perm[i - 1], perm[i]);
+                        check(c < 0 || c == 0 && perm[i - 1] < perm[i],
+                                "stable order at " + i + " for " + keys + " threads " + threads + " latin1 " + latin1);
+                    }
+                }
+            }
+        }
+    }
+
+    /** Concatenated stores hold the parts' rows in order, keeping a shared dictionary and NULLs. */
+    public static void testColumnStoreConcat() {
+        List<ColumnSchema> schema = List.of(new ColumnSchema("s", DataType.STRING),
+                new ColumnSchema("x", DataType.INT64));
+        String[] dictA = {"a", "b"};
+        String[] dictB = {"b", "c"};
+        List<Object[]> expected = new ArrayList<>();
+        for (boolean mixed : new boolean[] {false, true}) {
+            expected.clear();
+            List<ColumnStore> parts = new ArrayList<>();
+            for (int p = 0; p < 4; p++) {
+                int n = p == 2 ? 0 : 3 + p;
+                Batch b = new Batch(2);
+                b.cols[0] = new Vec(DataType.STRING, n);
+                b.cols[1] = new Vec(DataType.INT64, n);
+                b.cols[0].nullMask(n);
+                b.cols[1].nullMask(n);
+                boolean plain = mixed && p == 3;
+                String[] dict = mixed && p == 1 ? dictB : dictA;
+                if (!plain) {
+                    b.cols[0].toDict(dict, n);
+                }
+                for (int i = 0; i < n; i++) {
+                    boolean isNull = (i + p) % 3 == 0;
+                    String value = plain ? "z" + i : dict[i % 2];
+                    if (plain) {
+                        b.cols[0].set(i, isNull ? null : value);
+                    } else {
+                        b.cols[0].codes[i] = i % 2;
+                        b.cols[0].nulls[i] = isNull;
+                        b.cols[0].hasNulls |= isNull;
+                    }
+                    b.cols[1].set(i, (long) (10 * p + i));
+                    expected.add(new Object[] {isNull ? null : value, (long) (10 * p + i)});
+                }
+                b.reset(n);
+                int[] all = new int[n];
+                for (int i = 0; i < n; i++) {
+                    all[i] = i;
+                }
+                ColumnStore part = new ColumnStore(schema);
+                part.append(b, all, n);
+                parts.add(part);
+            }
+            ColumnStore out = ColumnStore.concat(schema, parts, ctx(), 3);
+            check(out.rows() == expected.size(), "concat rows");
+            check((out.column(0).kind == Vec.Kind.DICT) == !mixed, "dictionary kept only if shared");
+            for (int i = 0; i < out.rows(); i++) {
+                check(java.util.Objects.equals(out.column(0).get(i), expected.get(i)[0])
+                        && out.column(1).get(i).equals(expected.get(i)[1]), "concat row " + i + " mixed " + mixed);
+            }
+        }
+    }
+
     /** The single-key join index chains rows with equal keys in insertion order. */
     public static void testLongIndex() {
         JoinBatches.LongIndex index = new JoinBatches.LongIndex();
@@ -182,87 +295,5 @@ public final class VectorTest {
             check(count == 5, "chain length");
         }
         check(index.head(-1) == -1, "absent key");
-    }
-
-    /** k-way merge of sorted runs. */
-    public static void testKWayMerge() {
-        long[][] keys = {{1, 4, 9}, {2, 3, 10, 11}, {}, {0}};
-        int[] sizes = {3, 4, 0, 1};
-        long[] out = new long[8];
-        Parallel.kWayMerge(keys, sizes, (s, i, p) -> out[p] = keys[s][i]);
-        check(Arrays.equals(out, new long[] {0, 1, 2, 3, 4, 9, 10, 11}), Arrays.toString(out));
-    }
-
-    /** LongSet agrees with a HashSet, including the slot sentinel value and growth. */
-    public static void testLongSet() {
-        LongSet set = new LongSet(4);
-        java.util.Set<Long> ref = new java.util.HashSet<>();
-        Random r = new Random(5);
-        for (int i = 0; i < 20_000; i++) {
-            long v = switch (i % 4) {
-                case 0 -> Long.MIN_VALUE;
-                case 1 -> r.nextInt(5000);
-                default -> r.nextLong();
-            };
-            check(set.add(v) == ref.add(v), "add " + v);
-        }
-        check(set.size() == ref.size(), "size");
-        for (int i = 0; i < 5000; i++) {
-            long v = r.nextInt(10_000);
-            check(set.contains(v) == ref.contains(v), "contains " + v);
-        }
-        check(set.contains(Long.MIN_VALUE), "sentinel value");
-    }
-
-    /** PairSet distinguishes the group and the value of a pair. */
-    public static void testPairSet() {
-        AggState.PairSet set = new AggState.PairSet();
-        java.util.Set<List<Long>> ref = new java.util.HashSet<>();
-        Random r = new Random(9);
-        for (int i = 0; i < 50_000; i++) {
-            int g = r.nextInt(50);
-            long v = r.nextInt(300) - 150;
-            check(set.add(g, v) == ref.add(List.of((long) g, v)), "pair " + g + "," + v);
-        }
-    }
-
-    /** A DISTINCT aggregate merged from partial states equals the one computed in one piece. */
-    public static void testDistinctStateMerge() {
-        BoundExpr arg = new BoundExpr.ColumnRef(0, DataType.STRING, "s");
-        AggregateCall count = new AggregateCall(AggregateCall.AggregateFunction.COUNT, arg, true, DataType.INT64);
-        AggregateCall min = new AggregateCall(AggregateCall.AggregateFunction.MIN, arg, true, DataType.STRING);
-        for (AggregateCall call : List.of(count, min)) {
-            AggState whole = AggState.create(call, null);
-            AggState a = AggState.create(call, null);
-            AggState b = AggState.create(call, null);
-            check(whole instanceof AggState.Distinct && whole.mergeable(), "primitive distinct state");
-            Vec v1 = strings("x", "y", null, "x", "z");
-            Vec v2 = strings("z", "w", "x", "w", "q");
-            int[] g1 = {0, 1, 0, 0, 1};
-            int[] g2 = {1, 0, 0, 1, 0};
-            for (AggState s : List.of(whole, a, b)) {
-                s.grow(2);
-            }
-            whole.update(v1, null, 5, g1);
-            whole.update(v2, null, 5, g2);
-            a.update(v1, null, 5, g1);
-            b.update(v2, null, 5, g2);
-            a.prepareMerge();
-            b.prepareMerge();
-            AggState merged = AggState.create(call, null);
-            merged.grow(2);
-            for (int g = 0; g < 2; g++) {
-                merged.merge(a, g, g);
-                merged.merge(b, g, g);
-            }
-            for (int g = 0; g < 2; g++) {
-                check(java.util.Objects.equals(whole.result(g), merged.result(g)),
-                        call.function() + " group " + g + ": " + whole.result(g) + " vs " + merged.result(g));
-            }
-            if (call == count) {
-                check(Long.valueOf(3).equals(whole.result(0)) && Long.valueOf(3).equals(whole.result(1)),
-                        "distinct counts " + whole.result(0) + "," + whole.result(1));
-            }
-        }
     }
 }

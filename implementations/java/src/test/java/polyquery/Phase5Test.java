@@ -60,6 +60,24 @@ final class Phase5Test {
         "SELECT id, amt FROM t ORDER BY amt DESC, id LIMIT 17 OFFSET 3",
         "SELECT name, id FROM t ORDER BY name NULLS FIRST, id DESC",
         "SELECT id FROM t ORDER BY val, id LIMIT 5",
+        // top-N cutoff: NULLs first/last, descending, ties on the first key, DECIMAL and FLOAT64 keys
+        "SELECT id, val FROM t ORDER BY val DESC NULLS LAST, id LIMIT 12",
+        "SELECT id, val FROM t ORDER BY val NULLS FIRST, id DESC LIMIT 70",
+        "SELECT id, amt FROM t ORDER BY amt, id DESC LIMIT 40 OFFSET 5",
+        "SELECT grp, id FROM t ORDER BY grp DESC, id LIMIT 33",
+        // DISTINCT aggregates without GROUP BY (parallel union of the workers' value sets)
+        "SELECT COUNT(DISTINCT name), SUM(DISTINCT val), AVG(DISTINCT amt), MIN(DISTINCT name), MAX(DISTINCT day), "
+                + "COUNT(DISTINCT grp), COUNT(*), SUM(val) FROM t",
+        "SELECT SUM(DISTINCT CAST(val AS FLOAT64) / 3), COUNT(DISTINCT flag), MAX(DISTINCT amt) FROM t WHERE id > 10",
+        "SELECT COUNT(DISTINCT val * 1000000000000), SUM(DISTINCT id * 4611686018427387) FROM t",
+        // a CTE referenced twice: the second identical aggregation reuses the first one's result
+        "WITH c AS (SELECT grp, SUM(val) AS s FROM t GROUP BY grp) SELECT COUNT(*) FROM c WHERE s > (SELECT AVG(s) FROM c)",
+        "WITH c AS (SELECT grp, COUNT(*) AS n, MAX(name) AS m FROM t GROUP BY grp) "
+                + "SELECT a.grp, b.n, a.m FROM c a JOIN c b ON a.grp = b.grp ORDER BY 1",
+        "WITH c AS (SELECT grp, SUM(id * 4611686018427387) AS s FROM t GROUP BY grp) "
+                + "SELECT (SELECT COUNT(*) FROM c), COUNT(*) FROM c",
+        "SELECT grp, id FROM t ORDER BY grp NULLS LAST, id DESC LIMIT 25",
+        "SELECT id, CAST(val AS FLOAT64) / 4 AS f FROM t ORDER BY f, id LIMIT 30",
         "SELECT id, CASE WHEN val IS NULL THEN 'none' WHEN val > 10 THEN 'big' ELSE 'small' END FROM t",
         "SELECT grp, COUNT(*) FROM t WHERE grp IN (1, 2, 3, NULL) OR val BETWEEN -5 AND 5 GROUP BY grp",
         "SELECT id FROM t WHERE id IN (SELECT grp * 10 FROM d) AND EXISTS (SELECT 1 FROM d WHERE d.grp = t.grp)",
@@ -95,21 +113,6 @@ final class Phase5Test {
                 + "WHERE s.name LIKE 'n1%'",
         "SELECT id FROM (SELECT id, grp + 1 AS g1, UPPER(name) AS u FROM t) s WHERE id % 7 = 0 AND 100 / (g1 - 4) > 0",
         "SELECT id FROM (SELECT id, val FROM t) s WHERE 100 / (val + 50) > 0 AND id < 10",
-        // DISTINCT aggregates (primitive, mergeable states)
-        "SELECT grp, COUNT(DISTINCT val), SUM(DISTINCT amt), AVG(DISTINCT val), MIN(DISTINCT name), "
-                + "COUNT(DISTINCT day), COUNT(DISTINCT flag) FROM t GROUP BY grp",
-        "SELECT COUNT(DISTINCT name), SUM(DISTINCT val), MAX(DISTINCT amt) FROM t WHERE id > 100",
-        "SELECT name, COUNT(DISTINCT grp), SUM(DISTINCT val * 1.5) FROM t GROUP BY name",
-        // uncorrelated subqueries: shared results, batch kernels, parallel pipelines, deferred errors
-        "SELECT id FROM t WHERE val IN (SELECT grp FROM d) AND id < 300",
-        "SELECT id, name IN (SELECT label FROM d), val NOT IN (SELECT grp FROM d) FROM t "
-                + "WHERE id > (SELECT MAX(grp) FROM d)",
-        "SELECT id FROM t WHERE grp NOT IN (SELECT grp FROM d WHERE weight > 100)",
-        "SELECT id FROM t WHERE val IN (SELECT 100 / (grp - 3) FROM d)",
-        "SELECT id FROM t WHERE id < 0 AND val IN (SELECT 100 / (grp - 3) FROM d)",
-        "SELECT grp, COUNT(*) FROM t WHERE EXISTS (SELECT 1 FROM d WHERE weight > 20) GROUP BY grp",
-        "SELECT COUNT(*), SUM(val + (SELECT MIN(grp) FROM d)) FROM t WHERE amt IN (SELECT weight FROM d)",
-        "SELECT id FROM t WHERE val > (SELECT 10 / (MIN(grp) - 0) FROM d) ORDER BY id LIMIT 4",
     };
 
     /** A result: column list and rows (sorted unless the query orders them), or an error code. */

@@ -6,7 +6,6 @@ import java.util.List;
 import java.util.Set;
 import java.util.function.BinaryOperator;
 import java.util.function.Function;
-import java.util.function.Supplier;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.plan.BoundExpr;
@@ -100,11 +99,11 @@ public final class ExpressionCompiler {
             case BoundExpr.Case c -> caseExpr(c);
             case BoundExpr.NullIf n -> nullIf(n);
             case BoundExpr.ScalarSubquery s -> {
-                SubqueryRunner runner = new SubqueryRunner(s, s.subquery(), subqueryBuilder, ctx);
+                SubqueryRunner runner = new SubqueryRunner(s.subquery(), subqueryBuilder, ctx);
                 yield runner::scalar;
             }
             case BoundExpr.Exists x -> {
-                SubqueryRunner runner = new SubqueryRunner(x, x.subquery(), subqueryBuilder, ctx);
+                SubqueryRunner runner = new SubqueryRunner(x.subquery(), subqueryBuilder, ctx);
                 yield runner::exists;
             }
             case BoundExpr.InSubquery i -> inSubquery(i);
@@ -547,12 +546,19 @@ public final class ExpressionCompiler {
 
     private Evaluator inSubquery(BoundExpr.InSubquery in) {
         Evaluator x = compile(in.operand());
-        Function<Object[], ValueSet> values = valueSet(in);
+        Object[] cell = new Object[1];
+        Evaluator valueCast = withPlaceholder(cell, List.of(in.valueCast()))[0];
         DataType t = in.operand().type();
+        DataType vt = in.valueCast().type();
+        SubqueryRunner runner = new SubqueryRunner(in.subquery(), subqueryBuilder, ctx);
         boolean neg = in.negated();
         return row -> {
             Object v = x.eval(row);
-            ValueSet set = values.apply(row);
+            SubqueryRunner.ValueSet set = runner.valueSet(row, value -> {
+                cell[0] = value;
+                Object c = valueCast.eval(row);
+                return c == null ? null : HashKeys.normalize(c, vt);
+            });
             if (set.isEmpty()) {
                 return neg;
             }
@@ -564,72 +570,6 @@ public final class ExpressionCompiler {
             }
             return set.hasNull() ? null : neg;
         };
-    }
-
-    /** The value set of an IN subquery for the current row (outer references read from it). */
-    private Function<Object[], ValueSet> valueSet(BoundExpr.InSubquery in) {
-        Object[] cell = new Object[1];
-        Evaluator valueCast = withPlaceholder(cell, List.of(in.valueCast()))[0];
-        DataType vt = in.valueCast().type();
-        SubqueryRunner runner = new SubqueryRunner(in, in.subquery(), subqueryBuilder, ctx);
-        return row -> runner.valueSet(row, value -> {
-            cell[0] = value;
-            Object c = valueCast.eval(row);
-            return c == null ? null : HashKeys.normalize(c, vt);
-        });
-    }
-
-    /**
-     * The result of an uncorrelated subquery expression ({@code ScalarSubquery}: its value,
-     * {@code Exists}: a Boolean, {@code InSubquery}: a {@link ValueSet}), evaluated on the first
-     * call and shared with every other compiled copy of the expression (see
-     * {@link ExecContext#subqueryResult}).
-     */
-    public Supplier<Object> uncorrelatedSubquery(BoundExpr e) {
-        Object[] noRow = new Object[0];
-        return switch (e) {
-            case BoundExpr.ScalarSubquery s when !s.subquery().correlated() -> {
-                SubqueryRunner runner = new SubqueryRunner(s, s.subquery(), subqueryBuilder, ctx);
-                yield () -> runner.scalar(noRow);
-            }
-            case BoundExpr.Exists x when !x.subquery().correlated() -> {
-                SubqueryRunner runner = new SubqueryRunner(x, x.subquery(), subqueryBuilder, ctx);
-                yield () -> runner.exists(noRow);
-            }
-            case BoundExpr.InSubquery i when !i.subquery().correlated() -> {
-                Function<Object[], ValueSet> values = valueSet(i);
-                yield () -> values.apply(noRow);
-            }
-            default -> throw new IllegalArgumentException("not an uncorrelated subquery: " + e);
-        };
-    }
-
-    /**
-     * Evaluates every uncorrelated subquery in {@code e} now (on this thread), so that parallel
-     * workers find their results. A data error is not raised here but kept for the rows that
-     * evaluate the subquery.
-     */
-    public void precomputeSubqueries(BoundExpr e) {
-        List<BoundExpr> found = new java.util.ArrayList<>();
-        polyquery.plan.BoundExprs.any(e, x -> {
-            polyquery.plan.Subquery sq = polyquery.plan.BoundExprs.subqueryOf(x);
-            if (sq != null && !sq.correlated()) {
-                found.add(x);
-            }
-            return false;
-        });
-        for (BoundExpr x : found) {
-            if (ctx.hasSubqueryResult(x)) {
-                continue;
-            }
-            try {
-                uncorrelatedSubquery(x).get();
-            } catch (PolyQueryException ex) {
-                if (!ExecContext.isDataError(ex)) {
-                    throw ex;
-                }
-            }
-        }
     }
 
     private Evaluator[] compileAll(List<BoundExpr> exprs) {

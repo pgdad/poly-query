@@ -77,13 +77,9 @@ final class Parallel {
         }
     }
 
-    /**
-     * Expressions workers can evaluate concurrently: no correlation and no correlated subqueries
-     * (uncorrelated ones are evaluated before the workers start, see {@link Shared#open}).
-     */
+    /** Expressions workers can evaluate concurrently: no subqueries and no correlation. */
     private static boolean safe(BoundExpr e) {
-        return e == null || !BoundExprs.any(e, x -> x instanceof BoundExpr.OuterRef
-                || BoundExprs.subqueryOf(x) != null && BoundExprs.subqueryOf(x).correlated());
+        return e == null || !BoundExprs.any(e, x -> x instanceof BoundExpr.OuterRef || BoundExprs.subqueryOf(x) != null);
     }
 
     private static boolean safe(List<BoundExpr> exprs) {
@@ -137,9 +133,9 @@ final class Parallel {
     static BatchOperator tryBuild(BatchBuilder builder, PhysicalPlan plan) {
         if (plan instanceof PhysicalPlan.HashAggregate a) {
             Chain c = chain(a.input());
-            if (c != null && safe(a.groupKeys()) && aggregatesSafe(a.aggregates())
+            if (c != null && safe(a.groupKeys()) && aggregatesSafe(a.aggregates(), a.groupKeys().isEmpty())
                     && worthIt(c, builder.morselRows())) {
-                return new Aggregate(builder, c, a);
+                return new Aggregate(builder, c, a, new SharedAggregates.Candidate(a));
             }
             return null;
         }
@@ -159,11 +155,20 @@ final class Parallel {
                 for (int i = 0; i < in.size(); i++) {
                     keys.add(new BoundExpr.ColumnRef(i, in.get(i).type(), in.get(i).name()));
                 }
-                return new Aggregate(builder, c, new PhysicalPlan.HashAggregate(d.input(), keys, List.of()));
+                return new Aggregate(builder, c, new PhysicalPlan.HashAggregate(d.input(), keys, List.of()), null);
             }
             // workers drop duplicates within their morsels; the final DISTINCT streams over the rest
             return new AggregateBatches.Distinct(new Gather(builder, c, new DistinctReducer(
                     BatchBuilder.types(d.schema()))), BatchBuilder.types(d.schema()), builder.context());
+        }
+        if (plan instanceof PhysicalPlan.Sort s) {
+            // the input is materialized by the workers, morsel by morsel, then sorted in parallel
+            Chain c = chain(s.input());
+            if (c == null || !worthIt(c, builder.morselRows())) {
+                return null;
+            }
+            return new SortBatches.Sort(new Materialize(builder, c), s.keys(), s.schema(), builder.context(),
+                    builder.batchSize(), builder.threads());
         }
         if (plan instanceof PhysicalPlan.TopN t) {
             // workers keep the best rows of their morsels; the final top-N picks among them
@@ -177,8 +182,8 @@ final class Parallel {
                 return null;
             }
             return new SortBatches.Sort(new Gather(builder, c, new TopNReducer(t.keys(), t.input().schema(),
-                    (int) (offset + limit), builder.batchSize())), t.keys(), t.schema(), builder.context(), builder.batchSize(), offset,
-                    limit);
+                    (int) (offset + limit), builder.batchSize())), t.keys(), t.schema(), builder.context(), builder.batchSize(),
+                    builder.threads(), offset, limit);
         }
         Chain c = chain(plan);
         if (c != null && worthIt(c, builder.morselRows())) {
@@ -251,122 +256,68 @@ final class Parallel {
         }
     }
 
-    /**
-     * Keeps the best {@code keep} rows of the morsel (stable: ties in morsel order), in sort order.
-     * The rows are collected in a column store that is sorted and cut back to the best
-     * {@code keep} rows whenever it holds enough rows; after that, incoming rows whose first sort
-     * key is strictly worse than the first key of the last row kept are dropped right away.
-     */
+    /** Keeps the best {@code keep} rows of the morsel (stable: ties in morsel order), in sort order. */
     private record TopNReducer(List<polyquery.plan.SortKey> keys, List<polyquery.storage.ColumnSchema> schema,
                                int keep, int batchSize) implements Reducer {
         @Override
         public MorselReduction start(int width, ExecContext ctx) {
+            SortBatches.Cutoff cutoff = new SortBatches.Cutoff(keys.getFirst());
+            int compactAt = Math.max(2 * keep, 2 * batchSize);
             return new MorselReduction() {
                 private ColumnStore store = new ColumnStore(schema);
-                private int[] pass = new int[0];
-                private final int limit = Math.max(2 * keep, 2 * batchSize);
-                /** Last row kept by the latest cut: its first sort key bounds the rows worth keeping. */
-                private Vec bound;
+                private int[] all = new int[0];
 
                 @Override
                 public void add(Batch b) {
-                    if (pass.length < b.count) {
-                        pass = new int[b.count];
+                    if (keep == 0) {
+                        return;
                     }
-                    int m = 0;
-                    Vec first = b.cols[keys.getFirst().column()];
-                    for (int k = 0; k < b.count; k++) {
-                        int i = b.pos(k);
-                        if (bound == null || first == null || !worse(first, i)) {
-                            pass[m++] = i;
-                        }
+                    if (all.length < b.count) {
+                        all = new int[b.count];
                     }
-                    if (m > 0) {
-                        store.append(b, pass, m);
+                    store.append(b, all, cutoff.filter(b, all));
+                    if (store.rows() >= compactAt) {
+                        // keep the best rows so far; later rows must beat the last of them
+                        store = store.select(SortBatches.sort(store, keys, ctx), keep);
+                        cutoff.update(store, keep - 1);
                     }
-                    if (store.rows() >= limit) {
-                        cut();
-                    }
-                }
-
-                /** True if row i's first sort key orders strictly after the bound's. */
-                private boolean worse(Vec v, int i) {
-                    polyquery.plan.SortKey key = keys.getFirst();
-                    boolean rowNull = v.isNull(i);
-                    boolean boundNull = bound.isNull(0);
-                    if (rowNull || boundNull) {
-                        if (rowNull && boundNull) {
-                            return false;
-                        }
-                        return rowNull != key.nullsFirst(); // the NULL side comes first iff nullsFirst
-                    }
-                    int c = switch (v.kind) {
-                        case LONG -> Long.compare(v.longs[i], bound.longs[0]);
-                        case DOUBLE -> polyquery.types.Values.compareDoubles(v.doubles[i], bound.doubles[0]);
-                        default -> v.type.isWideDecimal()
-                                ? ((java.math.BigInteger) v.objects[i]).compareTo((java.math.BigInteger) bound.objects[0])
-                                : polyquery.types.Values.compareStrings(v.string(i), bound.string(0));
-                    };
-                    return (key.descending() ? -c : c) > 0;
-                }
-
-                /** Sorts the store and keeps its best {@code keep} rows (in sort order). */
-                private void cut() {
-                    int[] perm = SortBatches.sort(store, keys, ctx);
-                    int n = Math.min(keep, perm.length);
-                    Batch best = gather(perm, n);
-                    store = new ColumnStore(schema, Math.max(limit, n));
-                    if (n > 0) {
-                        int[] all = new int[n];
-                        for (int k = 0; k < n; k++) {
-                            all[k] = k;
-                        }
-                        store.append(best, all, n);
-                        if (n == keep) {
-                            Vec src = store.column(keys.getFirst().column());
-                            if (src != null) {
-                                bound = new Vec(src.type, 1);
-                                bound.nullMask(1);
-                                ColumnStore.gather(src, new int[] {n - 1}, 0, 1, bound, 0);
-                                bound.hasNulls = src.isNull(n - 1);
-                            }
-                        }
-                    }
-                }
-
-                /** The rows {@code perm[0..n)} of the store as a batch. */
-                private Batch gather(int[] perm, int n) {
-                    Batch out = new Batch(width);
-                    for (int c = 0; c < width; c++) {
-                        Vec src = store.column(c);
-                        if (src != null) {
-                            Vec dst = new Vec(src.type, Math.max(n, 1));
-                            dst.nullMask(Math.max(n, 1));
-                            ColumnStore.gather(src, perm, 0, n, dst, 0);
-                            dst.hasNulls = src.hasNulls;
-                            out.cols[c] = dst;
-                        }
-                    }
-                    out.reset(n);
-                    return out;
                 }
 
                 @Override
                 public List<Batch> finish() {
                     int[] perm = SortBatches.sort(store, keys, ctx);
                     int n = Math.min(keep, perm.length);
-                    return n == 0 ? List.of() : List.of(gather(perm, n));
+                    if (n == 0) {
+                        return List.of();
+                    }
+                    Batch out = new Batch(width);
+                    for (int c = 0; c < width; c++) {
+                        Vec src = store.column(c);
+                        if (src != null) {
+                            Vec dst = new Vec(src.type, n);
+                            dst.nullMask(n);
+                            ColumnStore.gather(src, perm, 0, n, dst, 0);
+                            dst.hasNulls = src.hasNulls;
+                            out.cols[c] = dst;
+                        }
+                    }
+                    out.reset(n);
+                    return List.of(out);
                 }
             };
         }
     }
 
-    private static boolean aggregatesSafe(List<AggregateCall> calls) {
+    /**
+     * True if workers can compute partial states of the aggregates: arguments without subqueries
+     * or correlation, and states that merge — DISTINCT ones only without GROUP BY ({@code single}).
+     */
+    private static boolean aggregatesSafe(List<AggregateCall> calls, boolean single) {
         for (AggregateCall c : calls) {
             if (!safe(c.argument())) {
                 return false;
             }
-            if (!AggState.create(c, null).mergeable()) {
+            if (c.distinct() ? !single : !AggState.create(c, null).mergeable()) {
                 return false;
             }
         }
@@ -452,24 +403,10 @@ final class Parallel {
             this.chain = chain;
         }
 
-        /**
-         * Evaluates the uncorrelated subqueries of the pipeline and of {@code extra} expressions
-         * on this thread (workers only read their shared results; a data error is raised by the
-         * rows that evaluate the subquery), then builds the hash tables of the chain's joins
-         * (outermost first, like the row engine).
-         */
-        void open(List<BoundExpr> extra) {
+        /** Builds the hash tables of the chain's joins (outermost first, like the row engine). */
+        void open() {
             release();
             ExecContext ctx = builder.context();
-            List<BoundExpr> exprs = new ArrayList<>(extra);
-            for (PhysicalPlan stage : chain.stages()) {
-                exprs.addAll(PhysicalPlan.expressions(stage));
-            }
-            for (BoundExpr e : exprs) {
-                if (e != null) {
-                    builder.rows().compiler().precomputeSubqueries(e);
-                }
-            }
             for (PhysicalPlan.HashJoin j : chain.joinsTopDown()) {
                 boolean left = j.buildLeft();
                 List<BoundExpr> buildKeys = left ? j.leftKeys() : j.rightKeys();
@@ -571,7 +508,8 @@ final class Parallel {
     /**
      * Parallel hash aggregation: every worker aggregates whole morsels into a private partial
      * table, recording for each group the position (morsel, row) of its first row; the partial
-     * tables are merged exactly and the groups emitted in order of first appearance.
+     * tables are merged exactly and the groups emitted in order of first appearance (sorted by
+     * first position).
      */
     static final class Aggregate implements BatchOperator {
         private final Shared shared;
@@ -581,12 +519,16 @@ final class Parallel {
         private final List<AggregateBatches.Table> merged = new ArrayList<>();
         private AggregateBatches.Emitter emitter;
         private final List<AggregateBatches.Table> partials = new ArrayList<>();
+        private final SharedAggregates.Candidate sharedResult;
 
-        Aggregate(BatchBuilder builder, Chain chain, PhysicalPlan.HashAggregate plan) {
+        /** @param sharedResult the aggregation subplan, for sharing its result within the query (null: never) */
+        Aggregate(BatchBuilder builder, Chain chain, PhysicalPlan.HashAggregate plan,
+                  SharedAggregates.Candidate sharedResult) {
             this.shared = new Shared(builder, chain);
             this.plan = plan;
             this.ctx = builder.context();
             this.threads = builder.threads();
+            this.sharedResult = sharedResult;
         }
 
         /**
@@ -624,7 +566,12 @@ final class Parallel {
         @Override
         public void open() {
             close();
-            shared.open(AggregateBatches.inputs(plan.groupKeys(), plan.aggregates()));
+            AggregateBatches.Shared done = SharedAggregates.find(ctx, sharedResult);
+            if (done != null) {
+                emitter = done.emitter(); // the same subplan was aggregated earlier in this query
+                return;
+            }
+            shared.open();
             List<Morsel> morsels = Morsel.of(shared.chain.scan(), shared.builder.morselRows());
             AtomicInteger next = new AtomicInteger();
             Errors errors = new Errors();
@@ -716,7 +663,6 @@ final class Parallel {
                 errors.fatal(e);
                 throw e;
             }
-            table.prepareMerge();
             return new Partial(table, first, partitionGroups(table, partitions()));
         }
 
@@ -725,15 +671,14 @@ final class Parallel {
             return (int) (((hash >>> 32) * parts) >>> 32);
         }
 
-        /** A merged partition: table and first positions of its groups (ascending by group id). */
+        /** A merged partition: table and first positions of its groups. */
         private record Merged(AggregateBatches.Table table, long[] first) {
         }
 
         /**
-         * Merges the partial tables. Groups are split into hash partitions merged in parallel;
-         * within a partition, the partials' groups are merged in order of first position (a
-         * k-way merge, as each partial lists its groups in that order), so merged group ids are
-         * in first-appearance order; the output interleaves the partitions the same way.
+         * Merges the partial tables. Groups are split into hash partitions merged in parallel,
+         * each group keeping its earliest first position; the output lists the groups of all
+         * partitions in order of first position (a radix sort), i.e. in order of first appearance.
          */
         private void merge(List<Partial> results) {
             long total = 0;
@@ -741,115 +686,87 @@ final class Parallel {
                 total += p.table().groupCount();
             }
             int parts = total < 16_384 ? 1 : partitions();
-            if (parts == 1 && results.size() > 1 && results.getFirst().table().hasDistinct()) {
-                // few groups: merging DISTINCT states group by group would run on one thread
-                Merged m = mergePartition(results, 0, 1, true);
-                ctx.checkNow();
-                this.merged.add(m.table());
-                emitter = new AggregateBatches.Emitter(m.table(), plan.groupKeys(), plan.aggregates(),
-                        shared.builder.batchSize());
-                return;
-            }
             List<Future<Merged>> futures = new ArrayList<>();
             for (int part = 1; part < parts; part++) {
                 int pp = part;
-                futures.add(POOL.submit(() -> mergePartition(results, pp, parts, false)));
+                futures.add(POOL.submit(() -> mergePartition(results, pp, parts)));
             }
             List<Merged> merged = new ArrayList<>();
-            merged.add(mergePartition(results, 0, parts, false));
+            merged.add(mergePartition(results, 0, parts));
             for (Future<Merged> f : futures) {
                 merged.add(await(f, ctx));
             }
             AggregateBatches.Table[] tables = new AggregateBatches.Table[parts];
-            long[][] firsts = new long[parts][];
             int groups = 0;
             for (int part = 0; part < parts; part++) {
                 tables[part] = merged.get(part).table();
-                firsts[part] = merged.get(part).first();
                 this.merged.add(tables[part]);
                 groups += tables[part].groupCount();
             }
+            long[] first = new long[groups];
             int[] tableOf = new int[groups];
             int[] groupOf = new int[groups];
-            int[] sizes = new int[parts];
+            int i = 0;
             for (int part = 0; part < parts; part++) {
-                sizes[part] = tables[part].groupCount();
+                long[] f = merged.get(part).first();
+                for (int g = 0; g < tables[part].groupCount(); g++) {
+                    first[i] = f[g];
+                    tableOf[i] = part;
+                    groupOf[i++] = g;
+                }
             }
-            kWayMerge(firsts, sizes, (src, g, i) -> {
-                tableOf[i] = src;
-                groupOf[i] = g;
-            });
-            emitter = new AggregateBatches.Emitter(tables, tableOf, groupOf, plan.groupKeys(), plan.aggregates(),
-                    shared.builder.batchSize());
+            int[] order = SortBatches.orderByKey(first, groups, ctx);
+            int[] sortedTable = new int[groups];
+            int[] sortedGroup = new int[groups];
+            for (int k = 0; k < groups; k++) {
+                sortedTable[k] = tableOf[order[k]];
+                sortedGroup[k] = groupOf[order[k]];
+            }
+            emitter = new AggregateBatches.Emitter(tables, sortedTable, sortedGroup, plan.groupKeys(),
+                    plan.aggregates(), shared.builder.batchSize());
+            int batchSize = shared.builder.batchSize();
+            SharedAggregates.register(ctx, sharedResult, () -> new AggregateBatches.Emitter(tables, sortedTable,
+                    sortedGroup, plan.groupKeys(), plan.aggregates(), batchSize));
         }
 
-        /**
-         * Merges hash partition {@code part} of the partial tables. With {@code parallelDistinct}
-         * (a single partition), DISTINCT states are merged afterwards by value-hash partitioned
-         * parallel tasks.
-         */
-        private Merged mergePartition(List<Partial> results, int part, int parts, boolean parallelDistinct) {
+        /** Merges partition {@code part} of every partial table (in worker order), keeping the earliest first positions. */
+        private Merged mergePartition(List<Partial> results, int part, int parts) {
             AggregateBatches.Table table = new AggregateBatches.Table(plan.groupKeys(), plan.aggregates(), ctx);
-            table.deferDistinct = parallelDistinct;
-            int k = results.size();
-            int[][] members = new int[k][];
-            long[][] firsts = new long[k][];
-            int[] sizes = new int[k];
-            for (int w = 0; w < k; w++) {
-                Partial p = results.get(w);
-                int[] ids;
-                if (parts == 1) {
-                    ids = new int[p.table().groupCount()];
-                    for (int g = 0; g < ids.length; g++) {
-                        ids[g] = g;
-                    }
-                } else {
-                    ids = p.byPartition()[part];
-                }
-                long[] first = new long[ids.length];
-                for (int i = 0; i < ids.length; i++) {
-                    first[i] = p.first()[ids[i]];
-                }
-                members[w] = ids;
-                firsts[w] = first;
-                sizes[w] = ids.length;
-            }
             int bound = 0;
-            for (int size : sizes) {
-                bound += size;
+            for (Partial p : results) {
+                bound += parts == 1 ? p.table().groupCount() : p.byPartition()[part].length;
             }
             table.ensureCapacity(bound);
-            long[][] out = {new long[Math.max(16, bound)]};
-            int[][] groupMap = new int[k][];
-            if (parallelDistinct) {
-                for (int w = 0; w < k; w++) {
-                    groupMap[w] = new int[results.get(w).table().groupCount()];
-                }
-            }
-            kWayMerge(firsts, sizes, (w, idx, i) -> {
-                int before = table.groupCount();
-                int to = table.merge(results.get(w).table(), members[w][idx]);
-                if (parallelDistinct) {
-                    groupMap[w][members[w][idx]] = to;
-                }
-                if (table.groupCount() > before) {
-                    if (out[0].length <= to) {
-                        out[0] = Arrays.copyOf(out[0], Math.max(to + 1, out[0].length * 2));
-                    }
-                    out[0][to] = firsts[w][idx];
-                }
-            });
-            table.flushReservation();
-            if (parallelDistinct) {
-                List<AggregateBatches.Table> tables = new ArrayList<>();
+            long[] first = new long[Math.max(16, bound)];
+            Arrays.fill(first, Long.MAX_VALUE);
+            if (plan.groupKeys().isEmpty()) {
+                // one group: merged state by state (DISTINCT ones by a parallel union)
+                List<AggregateBatches.Table> tables = new ArrayList<>(results.size());
                 for (Partial p : results) {
                     tables.add(p.table());
                 }
-                table.mergeDistinct(tables, groupMap, Math.max(1, Math.min(64, threads)),
-                        tasks -> runAll(tasks, ctx));
+                table.mergeSingle(tables, ctx, threads);
+                first[0] = 0;
+                return new Merged(table, first);
             }
+            for (Partial p : results) {
+                AggregateBatches.Table partial = p.table();
+                long[] pf = p.first();
+                if (parts == 1) {
+                    for (int g = 0; g < partial.groupCount(); g++) {
+                        int to = table.merge(partial, g);
+                        first[to] = Math.min(first[to], pf[g]);
+                    }
+                } else {
+                    for (int g : p.byPartition()[part]) {
+                        int to = table.merge(partial, g);
+                        first[to] = Math.min(first[to], pf[g]);
+                    }
+                }
+            }
+            table.settle();
             ctx.checkNow();
-            return new Merged(table, out[0]);
+            return new Merged(table, first);
         }
 
         @Override
@@ -872,73 +789,106 @@ final class Parallel {
         }
     }
 
-    /** Receives the elements of a k-way merge: source, index within the source, output position. */
-    interface MergeSink {
-        void accept(int source, int index, int position);
-    }
+    // ------------------------------------------------------------------ materialization
 
     /**
-     * Merges k ascending sequences of positions ({@code keys[s][0 .. sizes[s])}) and passes the
-     * elements to {@code sink} in ascending order (ties: lower source first).
+     * Materializes a pipeline's output in parallel: workers run morsels into column stores of
+     * their own (reserving memory as the sequential sort does), which are then concatenated in
+     * morsel order — the rows in sequential order. A data error is that of the first failing
+     * morsel, raised after all workers stopped (a blocking consumer would read up to it anyway).
      */
-    static void kWayMerge(long[][] keys, int[] sizes, MergeSink sink) {
-        int k = keys.length;
-        int[] heap = new int[k];
-        int[] cursor = new int[k];
-        int n = 0;
-        for (int s = 0; s < k; s++) {
-            if (sizes[s] > 0) {
-                heap[n++] = s;
-                siftUp(heap, n - 1, keys, cursor);
+    static final class Materialize {
+        private final Shared shared;
+        private final ExecContext ctx;
+        private final int threads;
+        private final List<polyquery.storage.ColumnSchema> schema;
+        private final AtomicLong bytes = new AtomicLong();
+
+        Materialize(BatchBuilder builder, Chain chain) {
+            this.shared = new Shared(builder, chain);
+            this.ctx = builder.context();
+            this.threads = builder.threads();
+            this.schema = chain.stages().isEmpty() ? chain.scan().schema() : chain.stages().getLast().schema();
+        }
+
+        /** Memory reserved for the materialized rows (to be released by the consumer). */
+        long reservedBytes() {
+            return bytes.get();
+        }
+
+        ColumnStore run() {
+            try {
+                shared.open();
+                List<Morsel> morsels = Morsel.of(shared.chain.scan(), shared.builder.morselRows());
+                ColumnStore[] parts = new ColumnStore[morsels.size()];
+                AtomicInteger next = new AtomicInteger();
+                Errors errors = new Errors();
+                int workers = Math.max(1, Math.min(threads, morsels.size()));
+                List<Runnable> tasks = new ArrayList<>();
+                for (int w = 0; w < workers; w++) {
+                    tasks.add(() -> work(morsels, parts, next, errors));
+                }
+                runAll(tasks, ctx);
+                if (errors.firstError() != null) {
+                    throw errors.firstError();
+                }
+                List<ColumnStore> list = new ArrayList<>(parts.length);
+                for (ColumnStore part : parts) {
+                    if (part != null) {
+                        list.add(part);
+                    }
+                }
+                return ColumnStore.concat(schema, list, ctx, threads);
+            } catch (RuntimeException e) {
+                ctx.release(bytes.getAndSet(0));
+                throw e;
+            } finally {
+                shared.release();
             }
         }
-        int out = 0;
-        while (n > 0) {
-            int s = heap[0];
-            sink.accept(s, cursor[s], out++);
-            if (++cursor[s] < sizes[s]) {
-                siftDown(heap, n, keys, cursor);
-            } else {
-                heap[0] = heap[--n];
-                siftDown(heap, n, keys, cursor);
-            }
-        }
-    }
 
-    private static boolean less(int a, int b, long[][] keys, int[] cursor) {
-        long x = keys[a][cursor[a]];
-        long y = keys[b][cursor[b]];
-        return x < y || x == y && a < b;
-    }
-
-    private static void siftUp(int[] heap, int i, long[][] keys, int[] cursor) {
-        while (i > 0) {
-            int parent = (i - 1) >>> 1;
-            if (!less(heap[i], heap[parent], keys, cursor)) {
-                return;
+        private void work(List<Morsel> morsels, ColumnStore[] parts, AtomicInteger next, Errors errors) {
+            Pipeline pipe = shared.instantiate();
+            int[] all = new int[0];
+            int m;
+            while ((m = next.getAndIncrement()) < morsels.size()) {
+                if (m > errors.firstMorsel()) {
+                    break; // an earlier morsel already failed
+                }
+                Morsel morsel = morsels.get(m);
+                ColumnStore store = new ColumnStore(schema, morsel.to() - morsel.from());
+                pipe.start(morsel);
+                try {
+                    Batch b;
+                    while ((b = pipe.top().next()) != null) {
+                        ctx.checkNow();
+                        if (b.count > 0) {
+                            if (all.length < b.count) {
+                                all = new int[Math.max(b.count, 16)];
+                            }
+                            for (int k = 0; k < b.count; k++) {
+                                all[k] = b.pos(k);
+                            }
+                            store.append(b, all, b.count);
+                            long size = ColumnStore.estimate(b, all, b.count);
+                            ctx.reserve(size);
+                            bytes.addAndGet(size);
+                        }
+                        if (b.error != null) {
+                            errors.data(m, b.error);
+                            break;
+                        }
+                    }
+                } catch (PolyQueryException e) {
+                    if (!BatchExprs.deferrable(e)) {
+                        throw e;
+                    }
+                    errors.data(m, e);
+                } finally {
+                    pipe.top().close();
+                }
+                parts[m] = store;
             }
-            int t = heap[i];
-            heap[i] = heap[parent];
-            heap[parent] = t;
-            i = parent;
-        }
-    }
-
-    private static void siftDown(int[] heap, int n, long[][] keys, int[] cursor) {
-        int i = 0;
-        while (true) {
-            int l = 2 * i + 1;
-            if (l >= n) {
-                return;
-            }
-            int c = l + 1 < n && less(heap[l + 1], heap[l], keys, cursor) ? l + 1 : l;
-            if (!less(heap[c], heap[i], keys, cursor)) {
-                return;
-            }
-            int t = heap[i];
-            heap[i] = heap[c];
-            heap[c] = t;
-            i = c;
         }
     }
 
@@ -987,7 +937,7 @@ final class Parallel {
         public void open() {
             close();
             cancelled = new AtomicBoolean();
-            shared.open(List.of());
+            shared.open();
             idle.clear();
             morsels = Morsel.of(shared.chain.scan(), shared.builder.morselRows());
             submitted = 0;

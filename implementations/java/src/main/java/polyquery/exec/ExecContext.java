@@ -21,14 +21,8 @@ public final class ExecContext {
     private Object[][] frames = new Object[8][];
     private final java.util.concurrent.atomic.AtomicLong memoryUsed = new java.util.concurrent.atomic.AtomicLong();
     private int counter;
-    /** Outcomes of uncorrelated subqueries by expression node (identity); guarded by itself. */
-    private final java.util.Map<Object, Object> subqueryResults = new java.util.IdentityHashMap<>();
-
-    /** A data error raised by an uncorrelated subquery, re-raised wherever its result is needed. */
-    private record SubqueryFailure(PolyQueryException error) {
-    }
-
-    private static final Object NULL_RESULT = new Object();
+    /** Results of invariant subplans, by structural key, for reuse within the query (query thread only). */
+    private java.util.Map<Object, Object> shared;
 
     /**
      * @param timeoutMillis 0 = no timeout
@@ -81,59 +75,6 @@ public final class ExecContext {
         return previous;
     }
 
-    /**
-     * The result of the uncorrelated subquery expression {@code key}, computed by {@code compute}
-     * the first time it is needed and then shared by every compiled copy of the expression and
-     * by parallel workers. A data error is kept and raised again on every later use.
-     */
-    public Object subqueryResult(Object key, java.util.function.Supplier<Object> compute) {
-        Object r;
-        synchronized (subqueryResults) {
-            r = subqueryResults.get(key);
-        }
-        if (r == null) {
-            try {
-                r = compute.get();
-                if (r == null) {
-                    r = NULL_RESULT;
-                }
-            } catch (PolyQueryException e) {
-                if (!isDataError(e)) {
-                    throw e;
-                }
-                r = new SubqueryFailure(e);
-            }
-            synchronized (subqueryResults) {
-                Object existing = subqueryResults.putIfAbsent(key, r);
-                if (existing != null) {
-                    r = existing;
-                }
-            }
-        }
-        if (r instanceof SubqueryFailure f) {
-            throw f.error();
-        }
-        return r == NULL_RESULT ? null : r;
-    }
-
-    /** True if {@code subqueryResult(key, …)} has already been computed. */
-    public boolean hasSubqueryResult(Object key) {
-        synchronized (subqueryResults) {
-            return subqueryResults.containsKey(key);
-        }
-    }
-
-    /**
-     * True for errors caused by the data a row holds (which a row-at-a-time engine raises at the
-     * row that causes them), false for those that stop the query at once (timeout,
-     * cancellation, resource limits, internal errors).
-     */
-    public static boolean isDataError(PolyQueryException e) {
-        ErrorCode c = e.code();
-        return c != ErrorCode.TIMEOUT && c != ErrorCode.CANCELLED && c != ErrorCode.RESOURCE_LIMIT
-                && c != ErrorCode.INTERNAL_ERROR;
-    }
-
     public QueryControl control() {
         return control;
     }
@@ -153,6 +94,19 @@ public final class ExecContext {
     /** Nanoseconds until the deadline (Long.MAX_VALUE if none). */
     public long remainingNanos() {
         return control.remainingNanos();
+    }
+
+    /** A result registered under {@code key} by an earlier operator of this query, or null. */
+    public Object sharedResult(Object key) {
+        return shared == null ? null : shared.get(key);
+    }
+
+    /** Registers the (immutable) result of an invariant subplan for reuse within this query. */
+    public void shareResult(Object key, Object result) {
+        if (shared == null) {
+            shared = new java.util.HashMap<>();
+        }
+        shared.put(key, result);
     }
 
     /** Accounts for retained memory; RESOURCE_LIMIT when the budget is exceeded. Thread-safe. */

@@ -33,6 +33,15 @@ final class AggregateBatches {
     }
 
     /**
+     * A completed aggregation shared within a query: identical aggregation subplans (see
+     * {@link SharedAggregates}) emit the same groups from the same tables, each consumer with
+     * its own emitter (emission only reads the tables).
+     */
+    interface Shared {
+        Emitter emitter();
+    }
+
+    /**
      * One aggregation table: group keys plus aggregate states, fed with evaluated input vectors.
      * Also used as the partial table of a parallel worker.
      */
@@ -43,11 +52,9 @@ final class AggregateBatches {
         private final ExecContext ctx;
         private int[] gids = new int[0];
         private long reserved;
-        /** {@link #merge} leaves DISTINCT states alone (they are merged by {@link #mergeDistinct}). */
-        boolean deferDistinct;
-        /** Bytes of merged groups not reserved yet (see {@link #merge}). */
+        /** Bytes of merged groups not yet reserved. */
         private long pending;
-        private static final long RESERVE_CHUNK = 1 << 20;
+        private static final long MERGE_RESERVE_STEP = 1 << 16;
 
         Table(List<BoundExpr> groupKeys, List<AggregateCall> calls, ExecContext ctx) {
             this.keys = new GroupKeys(keyTypes(groupKeys), ctx.nativeKernels());
@@ -132,9 +139,9 @@ final class AggregateBatches {
         }
 
         /**
-         * Merges group g of a partial table into this one; returns the group id here. Memory for
-         * new groups is reserved in chunks (the context's counter is shared by all merging
-         * threads); {@link #flushReservation} reserves the rest.
+         * Merges group g of a partial table into this one; returns the group id here. The memory
+         * of new groups is reserved in steps (see {@link #settle}), not per group: parallel
+         * merges share the query's memory counter.
          */
         int merge(Table partial, int g) {
             int before = keys.groupCount();
@@ -142,59 +149,45 @@ final class AggregateBatches {
             if (keys.groupCount() > before) {
                 growStates();
                 pending += groupBytes();
-                if (pending >= RESERVE_CHUNK) {
-                    flushReservation();
+                if (pending >= MERGE_RESERVE_STEP) {
+                    settle();
                 }
             }
             for (int a = 0; a < states.length; a++) {
-                if (!(deferDistinct && states[a] instanceof AggState.Distinct)) {
-                    states[a].merge(partial.states[a], g, to);
-                }
+                states[a].merge(partial.states[a], g, to);
             }
             return to;
         }
 
-        /** True if some aggregate is a DISTINCT one with a primitive state. */
-        boolean hasDistinct() {
-            for (AggState s : states) {
-                if (s instanceof AggState.Distinct) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
         /**
-         * Merges the DISTINCT states of {@code partials} after their groups were merged with
-         * {@link #deferDistinct} set ({@code groupMap[w][g]}: the group here of partial w's group g),
-         * value-hash partitioned over {@code parts} parallel tasks.
+         * Merges the single group of the partial tables of an aggregation without GROUP BY:
+         * DISTINCT states by a parallel union ({@link AggState.Distinct#mergeSingle}), the
+         * others one partial after the other.
          */
-        void mergeDistinct(List<Table> partials, int[][] groupMap, int parts,
-                           java.util.function.Consumer<List<Runnable>> runAll) {
+        void mergeSingle(List<Table> partials, ExecContext ctx, int threads) {
             for (int a = 0; a < states.length; a++) {
                 if (states[a] instanceof AggState.Distinct d) {
-                    List<AggState.Distinct> from = new ArrayList<>();
+                    List<AggState.Distinct> parts = new ArrayList<>(partials.size());
                     for (Table t : partials) {
-                        from.add((AggState.Distinct) t.states[a]);
+                        parts.add((AggState.Distinct) t.states[a]);
                     }
-                    d.mergeParallel(from, groupMap, groupCount(), parts, runAll);
+                    d.mergeSingle(parts, ctx, threads);
+                } else {
+                    for (Table t : partials) {
+                        states[a].merge(t.states[a], 0, 0);
+                    }
                 }
-            }
-        }
-
-        /** Prepares the states of a complete partial table for merging (see {@link AggState#prepareMerge}). */
-        void prepareMerge() {
-            for (AggState s : states) {
-                s.prepareMerge();
             }
         }
 
         /** Reserves the memory of groups merged since the last reservation. */
-        void flushReservation() {
-            long bytes = pending;
-            pending = 0;
-            ctx.reserve(bytes);
-            reserved += bytes;
+        void settle() {
+            if (pending > 0) {
+                long bytes = pending;
+                pending = 0;
+                ctx.reserve(bytes);
+                reserved += bytes;
+            }
         }
 
         void release() {
@@ -287,27 +280,38 @@ final class AggregateBatches {
         private final VecCompiler compiler;
         private final ExecContext ctx;
         private final int batchSize;
+        private final SharedAggregates.Candidate shared;
         private BatchExprs exprs;
         private Table table;
         private Emitter emitter;
+        private boolean inputOpen;
 
+        /** @param shared the aggregation subplan, for sharing its result within the query (null: never) */
         HashAggregate(BatchOperator input, List<BoundExpr> groupKeys, List<AggregateCall> calls, VecCompiler compiler,
-                      ExecContext ctx, int batchSize) {
+                      ExecContext ctx, int batchSize, SharedAggregates.Candidate shared) {
             this.input = input;
             this.groupKeys = groupKeys;
             this.calls = calls;
             this.compiler = compiler;
             this.ctx = ctx;
             this.batchSize = batchSize;
+            this.shared = shared;
         }
 
         @Override
         public void open() {
-            if (exprs == null) {
-                exprs = new BatchExprs(compiler, inputs(groupKeys, calls));
-            }
             if (table != null) {
                 table.release();
+                table = null;
+            }
+            Shared earlier = SharedAggregates.find(ctx, shared);
+            if (earlier != null) {
+                emitter = earlier.emitter(); // the same subplan was aggregated earlier in this query
+                return;
+            }
+            inputOpen = true;
+            if (exprs == null) {
+                exprs = new BatchExprs(compiler, inputs(groupKeys, calls));
             }
             table = new Table(groupKeys, calls, ctx);
             input.open();
@@ -323,6 +327,8 @@ final class AggregateBatches {
                 }
             }
             emitter = new Emitter(table, groupKeys, calls, batchSize);
+            Table done = table;
+            SharedAggregates.register(ctx, shared, () -> new Emitter(done, groupKeys, calls, batchSize));
         }
 
         @Override
@@ -332,7 +338,10 @@ final class AggregateBatches {
 
         @Override
         public void close() {
-            input.close();
+            if (inputOpen) {
+                input.close();
+                inputOpen = false;
+            }
             if (table != null) {
                 table.release();
                 table = null;
