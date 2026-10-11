@@ -10,6 +10,7 @@ if [ ! -f "$CP_FILE" ] || [ ! -d "$ROOT/target/classes" ]; then
   exit 1
 fi
 JAVA="${JAVA_HOME:+$JAVA_HOME/bin/}java"
-# -Xlog settings keep JVM warnings off stdout, which carries the protocol.
-exec "$JAVA" -Xss16m -XX:+UseParallelGC -XX:+DisplayVMOutputToStderr -Xlog:disable -Xlog:all=warning:stderr \
+# -Xlog settings keep JVM warnings off stdout, which carries the protocol;
+# native access is enabled for the optional kernel library (--native-kernels).
+exec "$JAVA" --enable-native-access=ALL-UNNAMED -Xss16m -XX:+UseParallelGC -XX:+DisplayVMOutputToStderr -Xlog:disable -Xlog:all=warning:stderr \
   ${POLYQUERY_JAVA_OPTS:-} -cp "$ROOT/target/classes:$(cat "$CP_FILE")" polyquery.main "$@"

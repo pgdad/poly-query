@@ -31,10 +31,12 @@
 
 (defn environment
   "Execution environment of a query: opts :mode (:row | :vectorized),
-  :max-join-rows; qctx the QueryContext."
+  :max-join-rows, :native (the native kernel library used by vectorized
+  operators, polyquery.native.ffi, or nil); qctx the QueryContext."
   [qctx opts]
   {:ctx qctx
    :cells (atom {})
    :build build
    :mode (:mode opts :row)
-   :max-join-rows (:max-join-rows opts)})
+   :max-join-rows (:max-join-rows opts)
+   :native (when (= :vectorized (:mode opts)) (:native opts))})

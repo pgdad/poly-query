@@ -8,6 +8,8 @@ requested with result=count so serialization of large results is excluded).
 
 usage: bench.py DATA_DIR [--runs N] [--only Q1,Q2] [--configs baseline,vec1,...]
        bench.py DATA_DIR --verify     # compare full results across configurations
+       bench.py DATA_DIR --native LIB --configs vec1,nvec1,vec8,nvec8
+                                      # with libpqkernels loaded: n* = native: true
 """
 from __future__ import annotations
 
@@ -32,6 +34,7 @@ TABLES = {
     "products": "products",
     "sensor": "sensor_readings",
     "sk": "sort_keys",
+    "nh": "nulls_heavy",
 }
 
 QUERIES = {
@@ -47,6 +50,12 @@ QUERIES = {
     "Q10 3-way join (comma)": "SELECT COUNT(*), SUM(i.quantity) FROM items i, products p, orders o WHERE o.order_id = i.order_id AND p.product_id = i.product_id AND p.category = 'books'",
     "Q12 3-way join (bad order)": "SELECT COUNT(*), SUM(i.quantity) FROM orders o, products p, items i WHERE o.order_id = i.order_id AND p.product_id = i.product_id AND p.category = 'books'",
     "Q11 CASE/strings": "SELECT currency, SUM(CASE WHEN status = 'approved' THEN amount ELSE 0 END), COUNT(*) FROM tx WHERE category LIKE 'g%' OR category IN ('travel', 'utilities') GROUP BY currency",
+    # integer filters and aggregates (the work native kernels cover)
+    "Q13 int filters+agg": "SELECT COUNT(*), SUM(amount), MIN(ts), MAX(ts) FROM tx WHERE bucket BETWEEN 100 AND 400 AND merchant_id <> 7 AND ts >= TIMESTAMP '2024-03-01 00:00:00'",
+    "Q14 global sums/min/max": "SELECT SUM(amount), SUM(fee), AVG(bucket), MIN(amount), MAX(amount), MIN(tx_id) FROM tx",
+    "Q15 NULL-heavy filter": "SELECT COUNT(*), SUM(n50), MAX(n90) FROM nh WHERE n50 IS NOT NULL AND n90 > 100",
+    "Q16 int key group by": "SELECT merchant_id, SUM(amount), SUM(bucket), COUNT(*) FROM tx WHERE bucket < 500 GROUP BY merchant_id",
+    "Q17 IN list OR": "SELECT COUNT(*), SUM(quantity) FROM items WHERE product_id IN (1, 5, 17, 42, 99, 1000) OR quantity > 9",
 }
 
 CONFIGS = {
@@ -56,13 +65,17 @@ CONFIGS = {
     "vec1": {"mode": "vectorized", "threads": 1},
     "vec8": {"mode": "vectorized", "threads": 8},
     "merge8": {"mode": "vectorized", "threads": 8, "join": "merge"},
+    "nvec1": {"mode": "vectorized", "threads": 1, "native": True},
+    "nvec8": {"mode": "vectorized", "threads": 8, "native": True},
+    "ndefault": {"native": True},
 }
 
 
 class Session:
-    def __init__(self, data_dir: str, java_opts: str, launcher: str):
+    def __init__(self, data_dir: str, java_opts: str, launcher: str, native: str | None = None):
         env = dict(os.environ, POLYQUERY_JAVA_OPTS=java_opts)
-        self.proc = subprocess.Popen([launcher, "session", "--data-dir", data_dir],
+        extra = ["--native-kernels", str(Path(native).resolve())] if native else []
+        self.proc = subprocess.Popen([launcher, "session", "--data-dir", data_dir] + extra,
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env)
         self.n = 0
 
@@ -91,9 +104,10 @@ def main() -> int:
     ap.add_argument("--java-opts", default="-Xmx24g")
     ap.add_argument("--engine", default=str(LAUNCHER), help="launcher to benchmark (default: this engine)")
     ap.add_argument("--verify", action="store_true", help="compare result digests instead of timing")
+    ap.add_argument("--native", metavar="LIB", help="libpqkernels to load (--native-kernels)")
     args = ap.parse_args()
 
-    s = Session(args.data_dir, args.java_opts, args.engine)
+    s = Session(args.data_dir, args.java_opts, args.engine, args.native)
     for t, f in TABLES.items():
         schema = json.loads((Path(args.data_dir) / f"{f}.schema.json").read_text())
         t0 = time.monotonic()

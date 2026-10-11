@@ -21,13 +21,16 @@ parallel scans/aggregation/sorting `threads: N`, hash, sort-merge and
 nested-loop joins selectable with `join`, a switchable logical optimizer
 `optimize`, SIMD-friendly kernels, buffer reuse and cache-aware hash
 tables — see [Phase 5](#phase-5-optimization) for the design and the
-measurements).
+measurements) and **M9 native kernel integration** (the C/assembly library
+`libpqkernels` loaded with `--native-kernels PATH` through the Java FFM API
+and used by vectorized filters, aggregation, hashing and join gathers when
+a query runs with `native: true` — see [Native kernels](#native-kernels-m9)).
 
 Reported capabilities: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic
 test.functions phase2 sql.groupby sql.join sql.functions sql.subquery sql.cte
 sql.correlated_subquery phase3 storage.pqcf storage.mmap index.hash
 index.btree phase4 http.streaming phase5 exec.row exec.vectorized
-exec.parallel join.hash join.merge join.nested_loop`.
+exec.parallel join.hash join.merge join.nested_loop native.kernels`.
 
 ## Prerequisites and build
 
@@ -49,11 +52,18 @@ bin/polyquery serve --port 0 --data-dir DIR [--workers N --queue-depth Q ...]
 `POLYQUERY_JAVA_OPTS` (e.g. `-Xmx16g` for very large tables). `--threads N`
 sets the default worker threads per query.
 
+Native kernels are optional: build them with `make -C native-kernels`
+(C compiler + assembler; produces `native-kernels/build/x86_64/libpqkernels.so`)
+and start the engine with `--native-kernels PATH`; queries then use them
+with the option `"native": true`. The engine builds, runs and passes
+conformance without them.
+
 Development tools (Python, not part of the build): `bench/bench.py DATA_DIR`
 times a fixed query set on the generated datasets under several option
 combinations (`--verify` compares full results instead), `bench/fuzz.py`
 is a differential fuzzer of the option matrix (random expressions,
-predicates, aggregates, joins, sorts over the generator fixtures).
+predicates, aggregates, joins, sorts over the generator fixtures); both
+take `--native LIB` to add `native: true` configurations.
 
 ## Libraries
 
@@ -88,6 +98,7 @@ SQL text ─lexer→ tokens ─parser→ AST ─analyzer/binder→ bound query
 | Execution — row engine | `polyquery.exec.operators`, `polyquery.exec.join`, `polyquery.exec.skipping`, `polyquery.exec.expr`, `polyquery.exec.functions`, `polyquery.exec.aggregate`, `polyquery.exec.context` | operators compiled once into re-reducible row sources (table/index scans over segments); hash, sort-merge and nested-loop joins; top-N; row-group skipping; expression compiler (bound expr → specialised closure); scalar functions and LIKE; mergeable aggregate accumulators; query context (timeout, cancellation, memory budget) |
 | Execution — vectorized engine | `polyquery.exec.batch`, `polyquery.exec.kernels`, `polyquery.exec.vectorized`, `polyquery.exec.vjoin`, `polyquery.exec.grouping`, `polyquery.exec.sort` | column batches with selection vectors; vectorized expression kernels; batch scan/filter/project; vectorized hash aggregation (primitive group tables, typed aggregate states); vectorized hash-join probe; primitive-column sorting |
 | Execution — parallelism | `polyquery.exec.parallel` | worker pool, partitioned pipelines over table row ranges, partial aggregation + merge, parallel sort/top-N, ordered morsel-driven Gather |
+| Execution — native kernels (M9) | `polyquery.native.ffi`, `polyquery.native.bits`, `polyquery.exec.native` (+ hooks in `exec.grouping`, `exec.vjoin`) | FFM binding of libpqkernels; batch ↔ bitmap conversions; native filter compiler; native aggregate updates, key hashing and gathers |
 | Storage | `polyquery.storage.column`, `polyquery.storage.table`, `polyquery.storage.stats`, `polyquery.storage.index`, `polyquery.storage.pqcf` | typed column vectors with validity bitmaps, dictionary-encoded strings, row-layout views; tables split into segments; statistics; HASH/BTREE indexes; the PQCF v1 writer and validating reader |
 | Catalog | `polyquery.catalog` | immutable catalog value held in an atom (snapshot per query, atomic publication of loads, opens and index changes); global index namespace |
 | Ingestion | `polyquery.ingest`, `polyquery.ingest.{csv,json,common}` | streaming RFC 4180 reader, strict JSON reader, inference, explicit-schema conversion |
@@ -472,6 +483,228 @@ compares the full results of every query under every configuration above
 (sorted unless ordered, FLOAT64 to 6 significant digits) — all match
 (Q10's baseline fails with `RESOURCE_LIMIT` instead).
 
+## Native kernels (M9)
+
+`libpqkernels` (`native-kernels/`, C ABI `include/pq_kernels.h` v1: C
+reference, runtime CPU dispatch, x86-64 scalar/AVX2/AVX-512 and AArch64
+assembly) is integrated as an optional accelerator of the vectorized
+engine. Results with and without it are identical; it is only used when
+the engine was started with `--native-kernels PATH` **and** a query runs
+with `"native": true` in a vectorized plan (`mode: vectorized`, or `auto`,
+the default). Row mode — the baseline — never uses it.
+
+### FFI design
+
+* **Loading** (`polyquery.native.ffi/load!`, called by `polyquery.main` when
+  `--native-kernels` is given, in every CLI mode): the library is opened
+  with `SymbolLookup.libraryLookup` in the global arena,
+  `pqk_abi_version()` must return 1, then `pqk_init()` selects the variant
+  (honouring `PQ_KERNELS_VARIANT`). The variant and the available variants
+  are logged (stderr) and reported in `version` under
+  `build.native_kernels`. A missing/unloadable file, a wrong ABI version
+  or a big-endian platform produce a warning and the engine continues on
+  its own code paths — the library is never required. `native.kernels` is
+  always claimed: with no library, `native: true` simply runs the Java
+  kernels (identical results). The launcher passes
+  `--enable-native-access=ALL-UNNAMED` (the FFM linker is a restricted
+  API), so the JVM prints no warning.
+* **Binding.** Each of the 16 C functions becomes a downcall method handle
+  (`Linker.nativeLinker().downcallHandle`). Clojure cannot call a method
+  handle's signature-polymorphic `invokeExact`, and `invokeWithArguments`
+  boxes every argument; so each handle is wrapped by
+  `MethodHandleProxies.asInterfaceInstance` into an instance of a
+  one-method interface declared with `definterface` in the C signature's
+  primitive types (`size_t`→`long`, `int`→`int`, pointers→`MemorySegment`).
+  The call wrappers (`ffi/filter-i64`, `ffi/group-sum-i64`, …) are macros
+  so every call site compiles to a direct, reflection-free interface call
+  with primitive arguments (Clojure fns take at most 4 primitive args).
+* **Zero-copy.** The kernels are bound as *critical* downcalls
+  (`Linker.Option.critical(true)`: short, non-blocking, no upcalls), which
+  allows passing Java arrays as heap segments (`MemorySegment.ofArray`):
+  the C code reads the batch's `long[]`/`int[]` vectors and writes the
+  engine's arrays in place; nothing is copied to or from native memory and
+  nothing is allocated off-heap. Bitmaps are kept as `long[]` words, whose
+  bytes on a little-endian machine are exactly the ABI's LSB-first byte
+  bitmaps. Measured overhead: one `pqk_filter_i64` call over 1,024 rows
+  takes ~95 ns including the downcall, versus ~310 ns for the equivalent
+  Java compaction loop.
+* **Batches ↔ bitmaps** (`polyquery.native.bits`). The vectorized engine
+  keeps `boolean[]` null masks and `int[]` selection vectors (Phase 5);
+  kernels run over the batch positions `[0, span)` (span = last selected
+  position + 1), with validity bitmaps built from the null masks (or a
+  NULL pointer when a full batch has no NULLs), and results are restricted
+  to the selection by AND-ing with a selection bitmap. Values at
+  unselected positions are harmless (no kernel can fail). Scratch bitmaps
+  are per thread (`ThreadLocal`) or per operator; kernels are thread-safe
+  after `pqk_init`, so parallel partitions call them concurrently.
+
+### Which kernels are used where
+
+| kernel | used for | namespace |
+|---|---|---|
+| `pqk_filter_i64` | a WHERE / join residual whose native part is one integer-like column vs constant comparison, on a full batch without NULLs: writes the new selection vector directly | `exec.native` |
+| `pqk_filter_i64_bitmap` | every column/constant leaf of a native predicate: `= <> < <= > >=`, `BETWEEN` (`PQK_BETWEEN`), `NOT BETWEEN` (`<` OR `>`), each item of an `IN` list (≤ 16 constants; `NOT IN` = AND of `<>`), with the column's validity | `exec.native` |
+| `pqk_compare_i64` | integer-like column vs column comparisons (same domain), AND-ed with both validities | `exec.native` |
+| `pqk_bitmap_and` / `_or` / `_andnot` | combining leaves (AND/OR, NOT pushed down to the leaves at compile time), validity of column comparisons and BOOLEAN columns, `IS NULL` (all `andnot` valid), restricting to the batch selection | `exec.native` |
+| `pqk_bitmap_popcount` | number of non-NULL values of a batch for SUM/AVG without GROUP BY | `exec.grouping` |
+| `pqk_sum_i64` | SUM/AVG of INT64/DECIMAL without GROUP BY: exact 128-bit batch sum; `PQK_OVERFLOW` ⇒ the batch goes through the exact Java path | `exec.grouping` (`LongSumState`) |
+| `pqk_group_sum_i64` | grouped SUM/AVG of INT64/DECIMAL (sums and counts per group id); `PQK_OVERFLOW` ⇒ the batch is undone and recomputed exactly (below) | `exec.grouping` (`LongSumState`) |
+| `pqk_minmax_i64` | MIN/MAX of INT64/DECIMAL/DATE/TIMESTAMP without GROUP BY | `exec.grouping` (`LongExtremeState`) |
+| `pqk_minmax_f64` | MIN/MAX of FLOAT64 without GROUP BY (zero results are left to Java, see below) | `exec.grouping` (`DoubleExtremeState`) |
+| `pqk_hash_i64` | hashing a whole batch of single integer-like GROUP BY keys and hash-join probe keys; the tables then use fmix64 (also computed in Java for single lookups and rehashing) | `exec.grouping` (`LongKeyTable`), `exec.vjoin` |
+| `pqk_gather_i64` | gathering integer-like probe-side columns into hash-join output batches | `exec.vjoin` |
+
+Not used, deliberately:
+* `pqk_sum_f64` — its lane-wise reassociation changes FLOAT64 sums in the
+  last bits, and results must be *identical* with and without the library.
+* `pqk_count_i64` — a filter must produce the selection anyway (the
+  aggregate above it counts it); there is no operator that only counts.
+* `pqk_compare_fixed` — the engine has no fixed-width byte records: strings
+  are Java strings (compared by code point), sort keys are primitive
+  columns.
+
+Not covered by kernels (Java as before): FLOAT64 and STRING predicates
+(string equality on dictionary columns is already one lookup per
+dictionary entry), arithmetic, grouped MIN/MAX, COUNT, FLOAT64 SUM/AVG,
+multi-column keys, sorting.
+
+### Identical results
+
+* **Filters.** A predicate is split into conjuncts; the native ones are
+  evaluated as one bitmap, the others by the Java kernels on the rows the
+  native part kept. Constants are converted to the column's domain with
+  exactly the rules of the Java kernels (DECIMAL constants rescaled to
+  the column's scale only when exact; DATE vs TIMESTAMP, scale-reducing or
+  FLOAT64 comparisons stay in Java). NOT is pushed to the leaves (De
+  Morgan, inverted operators, `NOT BETWEEN` → `<` OR `>`), which is exact
+  in three-valued logic since only TRUE rows survive a filter; `x NOT IN
+  (…, NULL)` is never TRUE. Native leaves cannot fail, and when a
+  remaining conjunct could fail (division, casts, subqueries, …) the
+  whole predicate stays in Java — the row engine evaluates a conjunct on
+  rows where earlier ones are NULL, so this keeps runtime errors exactly
+  those of the baseline.
+* **Integer overflow flags are honoured exactly.** `pqk_sum_i64` is exact;
+  on `PQK_OVERFLOW` the batch is fed to the Java state, which promotes the
+  group to `BigInteger` (the final SUM raises `NUMERIC_OVERFLOW` only if
+  the exact total does not fit, as without the library). When
+  `pqk_group_sum_i64` returns `PQK_OVERFLOW` ("may have wrapped"), the
+  sums/counts it accumulated with wrapping arithmetic are undone by
+  subtracting the same values (two's-complement addition is exactly
+  invertible) and the batch is recomputed by the Java code; groups already
+  in `BigInteger` mode bypass the kernel. `PQK_EINVAL` falls back too.
+* **MIN/MAX of FLOAT64.** `0.0` and `-0.0` compare equal, so which one a
+  vectorized min/max returns depends on evaluation order; batches whose
+  result is a zero are recomputed by the Java loop (same first-seen rule
+  as without the library).
+* **Hashing** only decides slot positions: group ids are assigned in order
+  of first appearance and join matches are chained in build order, so
+  results do not depend on the hash function.
+* **Verification:** the conformance suite with `--native` (session, HTTP
+  and `--modes`, also under `PQ_STRICT_EXECUTION=1`, which disables the
+  row-mode re-execution so no native defect can hide behind it);
+  `native_test` (bitmap helpers, every binding against a Java
+  implementation, the ~60-query Phase 5 matrix and integer-overflow tables
+  — wrapping intermediate sums, overflowing totals, NULLs — under four
+  native configurations); `bench/fuzz.py --native` (random predicates,
+  aggregates and joins over 2,000-row generated tables; 1,600 queries ×
+  10 configurations with each of
+  `PQ_KERNELS_VARIANT=reference|scalar|avx2|avx512`, no mismatch); and
+  `bench/bench.py --native … --verify` on the 1M-row datasets (17 queries,
+  identical digests across 9 configurations).
+
+### Measurements
+
+Setup: 32-core x86-64 (Zen 5, `x86_avx512` selected by default), OpenJDK
+27, datasets from `pqgen.py generate --scale 1m` loaded as CSV with their
+schemas. The host was shared with other jobs (load average ~10), so the
+before/after numbers come from an *interleaved* A/B run: one engine
+process, every query executed alternately with and without `native: true`
+(10 warm-up pairs, then 40 measured pairs), median latency of the
+`query` request (`result: count`). Q1–Q12 are the Phase 5 queries; Q13–Q17
+were added to exercise the native paths:
+
+| id | query |
+|---|---|
+| Q13 | `SELECT COUNT(*), SUM(amount), MIN(ts), MAX(ts) FROM tx WHERE bucket BETWEEN 100 AND 400 AND merchant_id <> 7 AND ts >= TIMESTAMP '2024-03-01 00:00:00'` |
+| Q14 | `SELECT SUM(amount), SUM(fee), AVG(bucket), MIN(amount), MAX(amount), MIN(tx_id) FROM tx` |
+| Q15 | `SELECT COUNT(*), SUM(n50), MAX(n90) FROM nh WHERE n50 IS NOT NULL AND n90 > 100` (nulls_heavy, 1M rows) |
+| Q16 | `SELECT merchant_id, SUM(amount), SUM(bucket), COUNT(*) FROM tx WHERE bucket < 500 GROUP BY merchant_id` |
+| Q17 | `SELECT COUNT(*), SUM(quantity) FROM items WHERE product_id IN (1, 5, 17, 42, 99, 1000) OR quantity > 9` |
+
+**Before (`native: false`) / after (`native: true`)**, vectorized, median ms:
+
+| query | what runs natively | 1 thread before | after | speed-up | 8 threads before | after | speed-up |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Q1 filter + count | `amount > 500` (status stays Java) | 10.7 | 4.3 | 2.5× | 2.6 | 2.1 | 1.2× |
+| Q2 group by category | grouped SUM/AVG (string key) | 12.3 | 12.6 | 1.0× | 2.2 | 1.9 | 1.2× |
+| Q3 group by customer_id (80K groups) | key hashing, group sums | 18.9 | 18.2 | 1.0× | 15.8 | 16.2 | 1.0× |
+| Q4 projection + filter | `bucket < 200 AND NOT is_fraud` | 26.5 | 20.2 | 1.3× | 6.1 | 5.2 | 1.2× |
+| Q5 join + group | probe hashing, gather, grouped SUM | 41.1 | 43.4 | 0.95× | 11.1 | 11.3 | 1.0× |
+| Q6 join 1M × 250K | probe hashing, gather, grouped SUM | 65.7 | 54.4 | 1.2× | 18.4 | 17.9 | 1.0× |
+| Q7 top-10 | — | 13.9 | 13.9 | 1.0× | 3.5 | 3.5 | 1.0× |
+| Q8 full sort | — | 53.3 | 53.1 | 1.0× | 52.8 | 55.4 | 0.95× |
+| Q9 filter + group by sensor_id | key hashing | 13.3 | 13.9 | 0.96× | 2.9 | 3.0 | 0.97× |
+| Q10 3-way join | probe hashing, gather, SUM | 35.3 | 37.0 | 0.95× | 14.0 | 14.6 | 0.96× |
+| Q11 CASE/LIKE/IN on strings | grouped SUM of the CASE | 23.2 | 23.3 | 1.0× | 4.2 | 4.2 | 1.0× |
+| Q13 integer filters + aggregates | whole filter, SUM, MIN/MAX | 28.4 | 6.9 | 4.1× | 3.9 | 1.0 | 3.9× |
+| Q14 global sums/min/max | SUM/AVG/MIN/MAX | 12.5 | 8.2 | 1.5× | 2.1 | 1.1 | 1.9× |
+| Q15 NULL-heavy filter | `IS NOT NULL AND >`, SUM, MAX | 19.8 | 9.7 | 2.0× | 3.3 | 1.8 | 1.8× |
+| Q16 integer-key group by | filter, key hashing, group sums | 13.4 | 10.0 | 1.3× | 6.1 | 5.5 | 1.1× |
+| Q17 IN list OR | 6 EQ leaves + GT, OR-ed bitmaps | 28.2 | 4.6 | 6.1× | 4.9 | 1.1 | 4.5× |
+
+(Q12 behaves like Q10.) Reading the table: the kernels pay off where the
+Java engine spent its time in integer predicate evaluation and aggregation
+— 2–6× on Q1, Q13, Q15, Q17 single-threaded, where the Java path builds a
+`boolean[]` per comparison and compacts it, evaluates BETWEEN/IN through
+generic code, and checks overflow per row, while the kernels go from the
+column straight to a bitmap or selection with AVX-512. With 8 threads the
+absolute gains shrink (the scan is split 8 ways) but the ratios on those
+queries stay at 2–4.5×. Queries dominated by string work, sorting, hash
+table random access (80K groups) or join materialization are unchanged
+within noise. Native key hashing is not a win: with the bulk-hashed keys
+the tables use fmix64, whose random-like slot distribution has slightly
+more collisions on dense sequential integer keys than the engine's own
+multiplicative hash (an experiment with fmix64 in both paths made the
+native bulk hashing equal or faster) — this costs ~0.4 ms per 1M rows on
+Q9/Q10-style queries (≈5%).
+
+**Kernel variants** (same interleaving, variant switched with
+`pqk_set_variant` between runs, 1 thread, median ms; "Java" = without the
+library):
+
+| query | Java | reference C | x86 scalar | AVX2 | AVX-512 |
+|---|---:|---:|---:|---:|---:|
+| Q1 | 9.1 | 5.5 | 3.8 | 3.4 | 3.2 |
+| Q4 | 19.9 | 14.5 | 13.4 | 13.1 | 13.2 |
+| Q13 | 28.5 | 15.5 | 8.9 | 6.2 | 5.8 |
+| Q14 | 11.8 | 12.6 | 9.9 | 7.6 | 7.5 |
+| Q15 | 18.9 | 9.7 | 8.9 | 8.7 | 8.6 |
+| Q16 | 12.0 | 18.4 | 13.0 | 8.8 | 8.3 |
+| Q17 | 26.0 | 9.0 | 5.1 | 3.5 | 3.1 |
+
+The portable C reference is already faster than Java for predicates but
+slower for exact sums (128-bit accumulation, per-row validity tests) and
+grouped sums; the SIMD variants are 1.5–3× faster than the reference.
+
+**End to end through the protocol** (`bench/bench.py … --native LIB
+--configs vec1,nvec1,vec8,nvec8`: a `session` process, client-side wall
+clock, 11 runs after 8 warm-ups, median of three separate sessions):
+
+| query | vec1 | nvec1 | vec8 | nvec8 |
+|---|---:|---:|---:|---:|
+| Q1 | 14 ms | 3 ms | 4 ms | 2 ms |
+| Q4 | 28 ms | 19 ms | 8 ms | 8 ms |
+| Q13 | 31 ms | 7 ms | 5 ms | 2 ms |
+| Q14 | 16 ms | 11 ms | 3 ms | 2 ms |
+| Q15 | 26 ms | 16 ms | 5 ms | 3 ms |
+| Q16 | 16 ms | 13 ms | 8 ms | 7 ms |
+| Q17 | 33 ms | 7 ms | 6 ms | 1 ms |
+
+The other queries show no consistent difference (session-to-session
+variation on the loaded host was ±20–40% for the join and sort queries);
+`--verify` confirmed identical results for all 17 queries in all
+configurations.
+
 ## Design decisions (where the spec is silent or open)
 
 * **Unsupported features.** `UNION`, `RIGHT`/`FULL` joins answer
@@ -611,19 +844,36 @@ compares the full results of every query under every configuration above
   (`engine_phase5_test`). `PQ_STRICT_EXECUTION=1` disables the row-mode
   re-execution after unexpected exceptions, so tests see vectorized
   defects instead of correct fallback results.
+* Native kernels (`native_test`; uses
+  `../../native-kernels/build/<arch>/libpqkernels.so` or
+  `$PQ_NATIVE_KERNELS`, skipped when the library is not built): bitmap
+  helpers, every binding against a Java implementation (filters for all
+  operators, overflow flags of `sum_i64`/`group_sum_i64`, fmix64, …), the
+  Phase 5 differential queries and integer-overflow tables under four
+  `native: true` configurations in strict execution, `native: true`
+  without a library, and an unloadable library being ignored.
 * Storage unit tests: column vectors and layouts, statistics, index lookups,
   PQCF round trips for every encoding/row-group size/mmap, corrupt and
   unsupported files; Phase 3 planning (pruning, index selection, build side).
 * Conformance: `python3 tests/conformance/runner.py --engine
   implementations/clojure/bin/polyquery` (add `--transport http` to run the
-  same cases through `serve`, `--modes` for the Phase 5 option matrix), and
+  same cases through `serve`, `--modes` for the Phase 5 option matrix,
+  `--native native-kernels/build/x86_64/libpqkernels.so` to run every
+  query with `native: true`), and
   `python3 tests/concurrency/http_suite.py --engine
   implementations/clojure/bin/polyquery`.
 
 ## Known limitations
 
-* No native kernels (`native: true` is ignored); no explicit SIMD (see
-  [Phase 5](#phase-5-optimization) for why).
+* No explicit SIMD in the Java code (see [Phase 5](#phase-5-optimization)
+  for why); SIMD comes from the native kernels with `native: true`.
+* Native kernels are used by vectorized operators only (row mode is the
+  unmodified baseline); predicates on FLOAT64 and STRING columns, grouped
+  MIN/MAX, COUNT and FLOAT64 sums stay on the Java kernels (see
+  [Native kernels](#native-kernels-m9) for which kernels are used where
+  and why `pqk_sum_f64`, `pqk_count_i64` and `pqk_compare_fixed` are not).
+  The native code assumes a little-endian platform (bitmaps are passed as
+  `long[]`); on a big-endian JVM the library is not used.
 * Vectorized execution covers scans, filters, projections, hash aggregation,
   hash-join probes and sorting; index scans, DISTINCT, LIMIT, sort-merge and
   nested-loop joins and LEFT hash joins with a residual condition run row

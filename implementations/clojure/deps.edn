@@ -2,4 +2,5 @@
  :deps {org.clojure/clojure {:mvn/version "1.12.3"}}
  :aliases
  {:test {:extra-paths ["test"]
+         :jvm-opts ["--enable-native-access=ALL-UNNAMED"]
          :main-opts ["-m" "polyquery.test-runner"]}}}

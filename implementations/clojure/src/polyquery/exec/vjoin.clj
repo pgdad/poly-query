@@ -18,7 +18,12 @@
 
   Used for INNER joins and for LEFT joins without residual condition; LEFT
   joins with a residual condition (which decides per probe row whether it
-  matched at all) use the row operator."
+  matched at all) use the row operator.
+
+  Native kernels (`native: true`): the primitive table hashes with fmix64,
+  and a probe batch's keys are hashed at once with pqk_hash_i64; integer
+  probe columns are gathered into the output batches with pqk_gather_i64;
+  residual conditions use native filters (polyquery.exec.native)."
   (:require [polyquery.errors :as err]
             [polyquery.exec.batch :as b]
             [polyquery.exec.context :as ctx]
@@ -26,8 +31,11 @@
             [polyquery.exec.grouping :as g]
             [polyquery.exec.join :as join]
             [polyquery.exec.kernels :as k]
+            [polyquery.exec.native :as native]
             [polyquery.exec.operators :as ops]
             [polyquery.exec.vectorized :as vectorized]
+            [polyquery.native.bits :as bits]
+            [polyquery.native.ffi :as ffi]
             [polyquery.types :as t]
             [polyquery.values :as v])
   (:import (java.util ArrayList HashMap)
@@ -44,8 +52,8 @@
       (and (= :left (:join-type plan)) (nil? (:residual plan)) (not= :left (:build plan)))))
 
 (defn- gather
-  "Vector of v's values at positions pos[0..n)."
-  ^polyquery.exec.batch.Vec [^Vec v ^ints pos ^long n]
+  "Vector of v's values at positions pos[0..n) (lib: native kernels or nil)."
+  ^polyquery.exec.batch.Vec [^Vec v ^ints pos ^long n lib]
   (let [take-nulls (fn [^booleans nulls]
                      (when nulls
                        (let [out (boolean-array b/capacity)]
@@ -54,7 +62,9 @@
     (cond
       (instance? LongVec v)
       (let [src ^longs (.-v ^LongVec v) out (long-array b/capacity)]
-        (dotimes [i n] (aset out i (aget src (aget pos i))))
+        (if lib
+          (ffi/gather-i64! lib src pos n out)
+          (dotimes [i n] (aset out i (aget src (aget pos i)))))
         (LongVec. out (take-nulls (.-nulls ^LongVec v))))
       (instance? DoubleVec v)
       (let [src ^doubles (.-v ^DoubleVec v) out (double-array b/capacity)]
@@ -125,7 +135,7 @@
           n (.size rows)
           kf (expr/compile-expr env (:expr bk))
           factor (long (key-factor (:type (:expr bk)) (:cmp-type bk)))
-          ids (g/long-key-table)
+          ids (g/long-key-table (:native env))
           heads (int-array n -1)
           tails (int-array n -1)
           nexts (int-array n -1)
@@ -181,9 +191,11 @@
 (defn- probe-long
   "Probes the selected rows of batch bt in a LongJoinTable, calling
   (add acc bt position build-row) per match (and per unmatched row of a
-  LEFT join, with empty-row)."
-  [^LongJoinTable table [pk factor] ^Batch bt add left-join? empty-row acc]
+  LEFT join, with empty-row). hashes: a batch-sized buffer for the
+  natively computed key hashes."
+  [^LongJoinTable table [pk factor] ^Batch bt add left-join? empty-row acc ^longs hashes]
   (let [^LongKeyTable ids (.-ids table)
+        lib (.-lib ids)
         ^ints heads (.-heads table)
         ^ints nexts (.-nexts table)
         ^objects rows (.-rows table)
@@ -192,13 +204,18 @@
         factor (long factor)
         ^LongVec x (k/ev pk bt sel n)
         vals ^longs (.-v x)
-        nulls ^booleans (.-nulls x)]
+        nulls ^booleans (.-nulls x)
+        hashed? (and lib (== factor 1))]
+    (when hashed? (ffi/hash-i64! lib vals (bits/span sel n) 0 hashes))
     (loop [i 0 acc acc]
       (if (or (= i n) (reduced? acc))
         acc
         (let [p (aget sel i)
               key (when-not (b/nulls-at? nulls p) (scaled (aget vals p) factor))
-              gid (if (nil? key) -1 (.find ids (long key)))]
+              gid (cond
+                    (nil? key) -1
+                    hashed? (.findHashed ids (long key) (aget hashes p))
+                    :else (.find ids (long key)))]
           (if (neg? gid)
             (recur (inc i) (if left-join? (add acc bt p empty-row) acc))
             (recur (inc i)
@@ -223,7 +240,8 @@
           long-probe (when-let [[_ pk] (long-key-spec plan)]
                        [(k/compile-kernel env (:expr pk))
                         (key-factor (:type (:expr pk)) (:cmp-type pk))])
-          residual (when-let [r (:residual plan)] (k/compile-filter env r))
+          residual (when-let [r (:residual plan)] (native/compile-filter env r))
+          lib (:native env)
           limit (long (or (:max-join-rows env) Long/MAX_VALUE))
           qctx (:ctx env)
           empty-row (object-array build-width)]
@@ -231,6 +249,7 @@
        (fn [f init]
          (let [table (or (:prebuilt plan) (build-table plan env))
                produced (long-array 1)
+               hashes (long-array b/capacity)
                pos (int-array b/capacity)
                brows (object-array b/capacity)
                cnt (long-array 1)
@@ -244,7 +263,7 @@
                                  rows (java.util.Arrays/copyOf brows (int n))]
                              (dotimes [c (alength pcols)]
                                (when-let [pv (aget pcols c)]
-                                 (aset cols (+ probe-offset c) (gather pv pos n))))
+                                 (aset cols (+ probe-offset c) (gather pv pos n lib))))
                              (dotimes [c build-width]
                                (aset cols (+ build-offset c) (LazyCol. rows c nil)))
                              (aset cnt 0 0)
@@ -269,7 +288,7 @@
               (let [^ints sel (.-sel bt)
                     n (.-n bt)
                     acc (if (instance? LongJoinTable table)
-                          (probe-long table long-probe bt add left-join? empty-row acc)
+                          (probe-long table long-probe bt add left-join? empty-row acc hashes)
                           (let [^HashMap table table
                                 ^objects pkeys (keys-of bt)]
                             (loop [i 0 acc acc]

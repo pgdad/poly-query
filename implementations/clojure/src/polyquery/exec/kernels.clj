@@ -87,7 +87,7 @@
   [^booleans nulls ^ints sel ^long n]
   (b/positions-where sel n (fn [^long i] (not (aget nulls i)))))
 
-(defn- may-fail?
+(defn may-fail?
   "True when evaluating e can raise an error for some row."
   [e]
   (let [kids-fail? #(boolean (some may-fail? (bound/children e)))]
