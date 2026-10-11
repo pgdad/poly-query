@@ -115,7 +115,10 @@ get their references to grouped columns redirected to the key columns.
 ### Subqueries and CTEs
 
 * Uncorrelated scalar/IN/EXISTS subqueries are evaluated once per statement
-  (lazily) and cached; IN builds a hash set (NULL-aware three-valued logic).
+  (lazily, in the statement's execution mode — vectorized and parallel
+  unless `mode: "row"`) and cached; IN builds a hash set (NULL-aware
+  three-valued logic). In vectorized expressions an uncorrelated scalar
+  subquery is a constant evaluated when the first batch needs it.
 * Correlated subqueries are evaluated per distinct combination of outer
   values (memoized). Inside their plans, a filter `inner = outer` over an
   uncorrelated input becomes a `ParamLookup` (input hashed once per query),
@@ -123,7 +126,10 @@ get their references to grouped columns redirected to the key columns.
   correlated EXISTS/COUNT/MAX patterns run in near-linear time.
 * CTEs are inlined: each reference re-analyzes the definition in its
   definition environment (fresh column IDs, so a CTE can be self-joined).
-  Every CTE is also validated once even when unreferenced.
+  Every CTE is also validated once even when unreferenced. Aggregations
+  that occur several times in a statement with identical self-contained
+  subtrees (a CTE referenced twice) are computed once: see *Shared
+  aggregations* under [Latency optimization](#latency-optimization-analytics-workload).
 
 ### EXPLAIN
 
@@ -538,9 +544,12 @@ optional selection vector of active rows.
   evaluation: `cat = 'x'`, `UPPER(cat)`, `cat LIKE 'a%'`, … are computed
   once per dictionary entry and mapped through the codes (string results
   stay dictionary-encoded). Every other node (functions, CAST, LIKE,
-  BETWEEN, IN lists) is applied element-wise over vectorized operands; CASE,
-  COALESCE, non-constant IN lists, subqueries and outer references are
-  evaluated row by row.
+  BETWEEN, IN lists) is applied element-wise over vectorized operands.
+  Searched CASE is evaluated batch-wise with a shrinking selection: each
+  WHEN condition only for the rows no earlier condition took, each branch
+  result only for the rows taking it (as lazily as row mode). Uncorrelated
+  scalar subqueries are constants. Simple CASE, COALESCE, non-constant IN
+  lists, other subqueries and outer references are evaluated row by row.
 * *Exact semantics*: a batch whose vectorized evaluation fails is
   re-evaluated row by row with the row-mode evaluator of the same
   expressions, which yields exactly the row-mode results and the error of
@@ -549,19 +558,29 @@ optional selection vector of active rows.
 * *Filters* produce selection vectors (branch-free); *projections* reuse
   input vectors for column references.
 * *Hash aggregation* (`vagg.go`) resolves the group of every row of a batch
-  first — specialized maps for a single INT-class or STRING key, a
-  per-dictionary code→group cache, canonical byte keys otherwise — then
-  updates struct-of-arrays aggregate states (exact 64-bit-with-overflow-
-  spill sums, counts, min/max, …) in tight loops. DISTINCT is a grouping
-  without aggregates. Groups keep their first-appearance order.
+  first — an open-addressing int64 map for a single INT-class key (with a
+  directly indexed window when column statistics show a small key range),
+  a per-dictionary code→group cache, dense value IDs combined column by
+  column for multi-column keys (`vaggkeys.go`), canonical byte keys only
+  for wide DECIMALs — then updates struct-of-arrays aggregate states
+  (int64 running sums that spill to exact 128-bit/big remainders, counts,
+  min/max, …) in tight loops. DISTINCT aggregates keep a typed (group,
+  value) set, or a bitmap for small value ranges (`vdistinct.go`).
+  DISTINCT is a grouping without aggregates. Groups keep their
+  first-appearance order unless no consumer can observe it (see
+  [Latency optimization](#latency-optimization-analytics-workload)).
 * *Hash join* (`vjoin.go`): see Joins.
-* *Sort* (`vsort.go`): input materialized column-wise; a permutation of
-  `(normalized first key, row)` pairs is sorted — INT-class, FLOAT64 and
-  8-byte string prefixes map to order-preserving `uint64`s, so most
-  comparisons touch no other memory — and ties fall back to a typed
-  comparator over all keys and the input position (so the order equals
-  the row-mode stable sort). `ORDER BY … LIMIT n` keeps a bounded heap and
-  rejects most rows with one comparison against its root, without copying.
+* *Sort* (`vsort.go`, `vradix.go`): input materialized column-wise;
+  `(normalized first key, row)` items — INT-class, FLOAT64 and 8-byte
+  string prefixes map to order-preserving `uint64`s; a small-range
+  INT-class first key is packed with the top bits of the second key — are
+  radix-sorted (stable, parallel MSD pass then per-bucket LSD passes), and
+  runs of equal normalized keys are resolved key by key with the next
+  key's normalized values, falling back to a typed comparator over all
+  keys and the input position only where values differ beyond their
+  prefix (so the order equals the row-mode stable sort). `ORDER BY … LIMIT
+  n` keeps a bounded heap and rejects most rows with one comparison
+  against its root, without copying.
 * Operators without a batch implementation (nested-loop and merge joins,
   index scans, VALUES, correlated-subquery helpers) run row-at-a-time over
   adapters; `result: "count"` counts whole batches.
@@ -582,8 +601,10 @@ first worker that needs them) and probed read-only by all workers.
   first-appearance order. If several morsels fail, the error of the first
   failing morsel (table order) is reported.
 * Parallel *top-N* keeps a heap per worker (ties broken by input
-  position) and merges them; full *sorts* sort runs in parallel and merge
-  them pairwise in parallel.
+  position) and merges them; full *sorts* materialize morsels in the
+  workers (straight into the final columns when the input is a scan with
+  projections), radix-sort and resolve ties in parallel, and gather output
+  batches ahead of the consumer with parallel workers.
 * Row mode parallelizes the same pipelines with row operators.
 
 Results are identical for every option combination (FLOAT64 sums aside,
@@ -595,10 +616,15 @@ vectorized build side is a column-wise copy of the build rows plus three
 flat arrays — bucket heads, a `next` link per row and the keys (int64 for
 INT-class keys of identical representation on both sides, canonical byte
 strings otherwise) — instead of a map of slices: compact, cache-friendly and
-shareable by parallel probes; chains keep insertion order. Probing gathers
+shareable by parallel probes; chains keep insertion order. INT-class keys
+spanning a small range index the bucket heads directly by `key - min`
+(with distinct keys, a probe is one array lookup), and STRING build
+columns with at most 16,384 distinct values are stored as dictionary
+codes, so probes emit dictionary-encoded vectors. Probing gathers
 (probe row, build row) pairs into output batches, evaluates residual
 conditions vectorized, and emits NULL-extended rows for unmatched LEFT
-rows. `join: "merge"` sorts both inputs by their keys (NULL keys never
+rows (only those, when a filter above the join keeps nothing else — an
+anti join). `join: "merge"` sorts both inputs by their keys (NULL keys never
 match; unmatched LEFT rows are emitted) and merges equal-key runs; `join:
 "nested_loop"` materializes the right input. EXPLAIN shows `HashJoin`,
 `MergeJoin` or `NestedLoopJoin`.

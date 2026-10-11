@@ -184,7 +184,10 @@ func (s *exactSumState) add(g int32, x int64) {
 	s.addSlow(g, x)
 }
 
-// addSlow adds x to the remainder of group g's sum (int64 overflow).
+// addSlow adds x to the remainder of group g's sum (int64 overflow). Not
+// inlined, so that add stays small enough to inline into update loops.
+//
+//go:noinline
 func (s *exactSumState) addSlow(g int32, x int64) {
 	if s.sums == nil {
 		s.sums = make([]types.BigDecimalSum, len(s.small))
@@ -206,32 +209,35 @@ func (s *exactSumState) update(gids []int32, n int, sel []int32, v *Vec) {
 	if s.lib != nil && n > 0 && s.nativeUpdate(gids, n, sel, v) {
 		return
 	}
-	cnt, vals, nulls := s.n, v.I, v.Nulls
+	small, cnt, vals, nulls := s.small, s.n, v.I, v.Nulls
+	// add is s.add, written out so that the loops inline it.
+	add := func(g int32, x int64) {
+		if c := small[g] + x; (c > small[g]) == (x > 0) {
+			small[g] = c
+		} else {
+			s.addSlow(g, x)
+		}
+		cnt[g]++
+	}
 	switch {
 	case sel == nil && nulls == nil:
 		for i, g := range gids[:n] {
-			s.add(g, vals[i])
-			cnt[g]++
+			add(g, vals[i])
 		}
 	case sel == nil:
 		for i, g := range gids[:n] {
 			if !nulls[i] {
-				s.add(g, vals[i])
-				cnt[g]++
+				add(g, vals[i])
 			}
 		}
 	case nulls == nil:
 		for _, i := range sel {
-			g := gids[i]
-			s.add(g, vals[i])
-			cnt[g]++
+			add(gids[i], vals[i])
 		}
 	default:
 		for _, i := range sel {
 			if !nulls[i] {
-				g := gids[i]
-				s.add(g, vals[i])
-				cnt[g]++
+				add(gids[i], vals[i])
 			}
 		}
 	}
