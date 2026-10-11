@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use super::batch::{Batch, Data, Vector};
+use super::distinct::DistinctAcc;
 use super::keys::KeyTable;
 use crate::error::{Error, Result};
 use crate::exec::ExecContext;
@@ -64,7 +65,11 @@ enum Acc {
         best: Vec<f64>,
         has: Vec<bool>,
     },
-    /// Any other aggregate (DISTINCT, MIN/MAX of other types): row-mode states.
+    /// DISTINCT aggregates: distinct `(group, value)` pairs, for this
+    /// many groups.
+    Distinct(Box<DistinctAcc>, usize),
+    /// Any other aggregate (MIN/MAX of other types, DISTINCT over generic
+    /// values): row-mode states.
     States(Vec<AggState>),
 }
 
@@ -235,9 +240,12 @@ fn arg_type(call: &AggregateCall) -> DataType {
 
 impl Acc {
     fn new(call: &AggregateCall) -> Acc {
-        // DISTINCT and wide (128-bit) decimal arguments use row-mode states.
-        if call.distinct || arg_type(call).is_wide_decimal() {
+        // Wide (128-bit) decimal arguments use row-mode states.
+        if arg_type(call).is_wide_decimal() {
             return Acc::States(Vec::new());
+        }
+        if call.distinct {
+            return Acc::Distinct(Box::default(), 0);
         }
         match call.func {
             AggFunc::CountStar => Acc::CountStar(Vec::new()),
@@ -304,6 +312,7 @@ impl Acc {
                 best.resize(groups, 0.0);
                 has.resize(groups, false);
             }
+            Acc::Distinct(_, n) => *n = groups,
             Acc::States(s) => s.resize_with(groups, || AggState::new(call)),
         }
     }
@@ -315,6 +324,7 @@ impl Acc {
             Acc::SumInt { n, .. } | Acc::SumDec { n, .. } | Acc::SumFloat { n, .. } => n.len(),
             Acc::ExtremeI64 { has, .. } | Acc::ExtremeF64 { has, .. } => has.len(),
             Acc::ExtremeStr { best, .. } => best.len(),
+            Acc::Distinct(_, n) => *n,
             Acc::States(s) => s.len(),
         }
     }
@@ -332,20 +342,24 @@ impl Acc {
             }
             Acc::ExtremeStr { .. } => matches!(data, Data::Str(_) | Data::Dict(..)),
             Acc::ExtremeF64 { .. } => matches!(data, Data::Float(_)),
+            Acc::Distinct(d, _) => d.accepts(data),
             _ => true,
         }
     }
 
     /// Converts a typed MIN/MAX accumulator to row-mode states (for values
     /// of another representation).
-    fn switch_to_states(&mut self, call: &AggregateCall) {
-        if matches!(
+    fn switch_to_states(&mut self, call: &AggregateCall) -> Result<()> {
+        if let Acc::Distinct(d, groups) = self {
+            *self = Acc::States(d.states(call, *groups)?);
+        } else if matches!(
             self,
             Acc::ExtremeI64 { .. } | Acc::ExtremeStr { .. } | Acc::ExtremeF64 { .. }
         ) {
             let states = (0..self.len()).map(|g| self.state_of(call, g)).collect();
             *self = Acc::States(states);
         }
+        Ok(())
     }
 
     /// Adds the values of `v` (None for COUNT(*)) for rows mapped to groups
@@ -380,7 +394,10 @@ impl Acc {
         let valid = v.valid.as_deref();
         let ok = |i: usize| valid.is_none_or(|x| x[i]);
         if !self.accepts(&v.data) {
-            self.switch_to_states(call);
+            self.switch_to_states(call)?;
+        }
+        if let Acc::Distinct(d, _) = self {
+            return Ok(d.update(gids, v, n));
         }
         // Native kernels: integer sums whose representation matches the
         // accumulator, and global MIN/MAX of FLOAT64 (a zero extreme is
@@ -640,6 +657,7 @@ impl Acc {
             Acc::ExtremeI64 { .. }
             | Acc::ExtremeStr { .. }
             | Acc::ExtremeF64 { .. }
+            | Acc::Distinct(..)
             | Acc::States(_) => {
                 return Err(Error::internal("unexpected aggregate update"));
             }
@@ -770,11 +788,22 @@ impl Acc {
                     }
                 }
             }
+            (Acc::Distinct(a, _), Acc::Distinct(b, _)) if a.can_merge(b) => {
+                return Ok(a.merge(b, groups, map));
+            }
             _ => {
-                self.switch_to_states(call);
+                self.switch_to_states(call)?;
+                // All of a DISTINCT accumulator's states at once.
+                let distinct_states = match other {
+                    Acc::Distinct(d, n) => Some(d.states(call, *n)?),
+                    _ => None,
+                };
                 let mut retained = 0;
                 for (g, t) in pairs() {
-                    let theirs = other.state_of(call, g);
+                    let theirs = match &distinct_states {
+                        Some(states) => states[g].clone(),
+                        None => other.state_of(call, g),
+                    };
                     if let Acc::States(s) = self {
                         retained += s[t].merge(theirs)?;
                     }
@@ -789,6 +818,11 @@ impl Acc {
     fn state_of(&self, call: &AggregateCall, g: usize) -> AggState {
         match self {
             Acc::States(s) => s[g].clone(),
+            Acc::Distinct(d, n) => d
+                .states(call, *n)
+                .ok()
+                .and_then(|mut s| (g < s.len()).then(|| s.swap_remove(g)))
+                .unwrap_or_else(|| AggState::new(call)),
             Acc::CountStar(c) | Acc::Count(c) => AggState::from_partial(call, Partial::Count(c[g])),
             Acc::SumInt { sum, n, wrap } => {
                 AggState::from_partial(call, Partial::SumInt(exact_sum(sum, wrap, g), n[g]))
@@ -947,6 +981,7 @@ impl Acc {
                     (!all).then_some(valid),
                 )
             }
+            Acc::Distinct(d, _) => d.finish(call, groups)?,
             Acc::States(states) => {
                 let mut values = Vec::with_capacity(groups);
                 for (g, s) in states[..groups].iter().enumerate() {
