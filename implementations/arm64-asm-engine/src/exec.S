@@ -375,6 +375,7 @@ LFUNC ex_rows
     mov  x2, x0
     ldr  x0, [x22, #RS_ROWS]
     ldr  x1, [x22, #RS_NROWS]
+    ldr  x3, [x21, #BQ_NORDER]
     bl   sort_rows_par
     mov  x0, x22
     LEAVE 3
@@ -1226,6 +1227,7 @@ LFUNC distinct_rows
 2:  ldr  x0, [x20, #RS_ROWS]
     ldr  x1, [x20, #RS_NROWS]
     mov  x2, x21
+    mov  x3, #0
     bl   sort_rows_par
     ldr  x24, [x20, #RS_ROWS]
     ldr  x9, [x20, #RS_NROWS]

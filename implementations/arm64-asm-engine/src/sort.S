@@ -1,7 +1,8 @@
 // =============================================================================
 // sort.S — parallel sorting of result rows (Phase 5, option "threads").
 //
-//   sort_rows_par(x0 Row** rows, x1 n, x2 key descriptors)
+//   sort_rows_par(x0 Row** rows, x1 n, x2 key descriptors, x3 number of
+//                 leading keys that are ORDER BY keys)
 //       sorts like exec.S sort_rows (qsort_r with cmp_rows; mode "row"). In
 //       vectorized mode with sort_rows_fast (normalized-key radix sort), and
 //       with threads > 1 and at least 2 * g_par_min_rows rows: the array is
@@ -23,17 +24,21 @@
 #define SO_MID      24
 #define SO_HI       32
 #define SO_KEYS     40
-#define SO_SIZE     48
+#define SO_NK       48              // leading keys sort_rows_fast may radix
+#define SO_SIZE     64
 
     .text
 
 // =============================================================================
-// sort_rows_par(x0 rows, x1 n, x2 keys)
+// sort_rows_par(x0 rows, x1 n, x2 keys, x3 nk: leading keys that may be
+// radix sorted)
 //   x19 rows, x20 n, x21 keys, x22 runs, x23 run bounds (u64 [runs + 1]),
 //   x24 tasks, x25 source, x26 destination, x27 index, x28 pairs
 // =============================================================================
 FUNC sort_rows_par
     ENTER 5
+    sub  sp, sp, #16
+    str  x3, [sp]                       // nk
     mov  x19, x0
     mov  x20, x1
     mov  x21, x2
@@ -83,6 +88,8 @@ FUNC sort_rows_par
     ldr  x11, [x23, x12, lsl #3]
     str  x11, [x10, #SO_HI]
     str  x21, [x10, #SO_KEYS]
+    ldr  x12, [sp]
+    str  x12, [x10, #SO_NK]
     add  x27, x27, #1
     b    3b
 4:  ADR_L x0, sort_chunk_task
@@ -155,68 +162,41 @@ FUNC sort_rows_par
     mov  x1, x25
     lsl  x2, x20, #3
     bl   memcpy
-11: LEAVE 5
+11: add  sp, sp, #16
+    LEAVE 5
 .Lsp_serial:                            // row mode: qsort_r
     mov  x0, x19
     mov  x1, x20
     mov  x2, x21
+    add  sp, sp, #16
     LEAVE_NORET 5
     b    sort_rows                      // tail call
 .Lsp_fast:                              // vectorized, one thread
     mov  x0, x19
     mov  x1, x20
     mov  x2, x21
+    ldr  x3, [sp]
+    add  sp, sp, #16
     LEAVE_NORET 5
     b    sort_rows_fast                 // tail call
 ENDF sort_rows_par
 
 // =============================================================================
-// sort_rows_fast(x0 Row** rows, x1 n, x2 keys) — the same order as
-// sort_rows, computed by normalized keys: every row gets a 64-bit prefix of
-// its first sort key whose unsigned order agrees with the key order
-// (integers biased, FLOAT64 sign-folded with -0.0 = 0.0, strings: their
-// first 8 bytes big-endian; inverted for DESC); the (prefix, row) pairs are
-// radix sorted (stable LSD, constant bytes skipped) and only runs of equal
-// prefixes are sorted by the full comparator. Falls back to sort_rows for
-// small inputs and when the first key has a NULL.
-//   x19 rows, x20 n, x21 keys, x22 pairs, x23 tmp pairs, x24 shift,
-//   x25 histogram, x26 index / run start, x27 key kind, x28 key offset
-// Stack: [sp] DESC flag
+// sk_encode(x0 row, x1 key descriptor) -> x0 64-bit code, x1 1 if NULL
+// A code whose unsigned order agrees with the key order: integer-like
+// payloads biased, FLOAT64 sign-folded (-0.0 = 0.0), STRING: the first 8
+// bytes big-endian (only a prefix: equal codes need the comparator);
+// inverted for DESC.   (leaf)
 // =============================================================================
-FUNC sort_rows_fast
-    ENTER 5
-    sub  sp, sp, #16
-    mov  x19, x0
-    mov  x20, x1
-    mov  x21, x2
-    cmp  x20, #64
-    b.lo .Lsf_fallback
-    ldr  x9, [x21]
-    cbz  x9, .Lsf_fallback
-    ldr  x28, [x21, #(8 + 0)]           // first key: offset, type, DESC
-    ldrb w27, [x21, #(8 + 8)]
-    ldr  w9, [x21, #(8 + 12)]
-    str  x9, [sp]
-    cbz  w27, .Lsf_fallback             // null type
-    lsl  x0, x20, #4
-    bl   arena_alloc
-    mov  x22, x0
-    lsl  x0, x20, #4
-    bl   arena_alloc
-    mov  x23, x0
-    mov  x0, #(257 * 8)
-    bl   arena_alloc
-    mov  x25, x0
-    mov  x26, #0                        // prefixes
-1:  cmp  x26, x20
-    b.hs 8f
-    ldr  x10, [x19, x26, lsl #3]        // row
-    add  x11, x10, x28                  // first key cell
-    ldp  x0, x12, [x11]
-    cbnz x12, .Lsf_fallback             // NULL: comparator only
-    cmp  w27, #T_STR
+LFUNC sk_encode
+    ldr  x9, [x1, #0]                   // SK_OFF
+    add  x9, x0, x9
+    ldp  x0, x10, [x9]
+    cbnz x10, 9f
+    ldrb w11, [x1, #8]                  // SK_TYPE kind
+    cmp  w11, #T_STR
     b.eq 3f
-    cmp  w27, #T_FLOAT
+    cmp  w11, #T_FLOAT
     b.eq 2f
     eor  x0, x0, #0x8000000000000000    // signed -> unsigned order
     b    7f
@@ -228,7 +208,7 @@ FUNC sort_rows_fast
     b    7f
 21: orr  x0, x0, x12                    // positive: set the sign bit
     b    7f
-3:  ldr  x12, [x0, #STR_LEN]            // STRING: first 8 bytes, big-endian
+3:  ldr  x12, [x0, #STR_LEN]
     add  x13, x0, #STR_DATA
     cmp  x12, #8
     b.lo 4f
@@ -246,17 +226,204 @@ FUNC sort_rows_fast
     add  x14, x14, #1
     sub  x15, x15, #8
     b    5b
-7:  ldr  x12, [sp]                      // DESC: reverse the order
-    cbz  x12, 71f
+7:  ldr  w12, [x1, #12]                 // SK_DESC
+    cbz  w12, 8f
     mvn  x0, x0
-71: add  x12, x22, x26, lsl #4
-    stp  x0, x10, [x12]
-    add  x26, x26, #1
+8:  mov  x1, #0
+    ret
+9:  mov  x1, #1
+    ret
+ENDF sk_encode
+
+// =============================================================================
+// sort_rows_fast(x0 Row** rows, x1 n, x2 keys, x3 nk) — the same order as
+// sort_rows, computed by normalized keys. The leading ORDER BY keys (at
+// most nk; each column once) that are not STRING get exact 64-bit codes
+// (sk_encode), computed once per row and key; a permutation of the rows is
+// radix sorted on them, last key first (stable LSD passes, constant bytes
+// skipped). When the first key is a STRING its 8-byte prefix code is used
+// instead. Only runs of rows with equal codes are then sorted by the full
+// comparator (the remaining keys and the tie-breaker columns). Falls back to
+// sort_rows for small inputs and when a radix key has a NULL.
+//   x19 rows, x20 n, x21 keys, x22 pairs, x23 tmp pairs, x24 key,
+//   x25 histogram, x26 index / run start, x27 radix keys, x28 codes
+//   (n u64 per key) / run end
+// =============================================================================
+FUNC sort_rows_fast
+    ENTER 5
+    mov  x19, x0
+    mov  x20, x1
+    mov  x21, x2
+    cmp  x20, #64
+    b.lo .Lsf_fallback
+    ldr  x9, [x21]                      // radix keys: descriptor pointers
+    cmp  x3, x9                         // of the leading non-STRING keys
+    csel x3, x3, x9, lo                 // among the first nk (the ORDER BY
+    str  x3, [sp, #-16]!                // keys), a column only once
+    lsl  x0, x9, #3
+    add  x0, x0, #8
+    bl   arena_alloc
+    ldr  x3, [sp]
+    stp  x0, x3, [sp]                   // [sp] pointers, [sp+8] nk
+    mov  x27, #0
+    mov  x9, #0
+1:  ldr  x10, [sp, #8]
+    cmp  x9, x10
+    b.hs 2f
+    mov  x10, #24                       // SK_SIZE
+    madd x10, x9, x10, x21
+    add  x10, x10, #8                   // descriptor
+    ldrb w11, [x10, #8]
+    cbz  w11, 2f
+    cmp  w11, #T_STR
+    b.eq 2f
+    add  x9, x9, #1
+    ldr  x11, [x10]                     // same cell as a selected key?
+    mov  x12, #0
+11: cmp  x12, x27
+    b.hs 12f
+    ldr  x13, [x0, x12, lsl #3]
+    ldr  x13, [x13]
+    cmp  x13, x11
+    b.eq 1b
+    add  x12, x12, #1
+    b    11b
+12: str  x10, [x0, x27, lsl #3]
+    add  x27, x27, #1
     b    1b
-8:  mov  x24, #0                        // radix passes
-.Lsf_pass:
+2:  cbnz x27, 3f
+    ldr  x10, [sp, #8]
+    cbz  x10, .Lsf_fallback1
+    ldrb w10, [x21, #(8 + 8)]           // first key a STRING: its prefix
+    cmp  w10, #T_STR
+    b.ne .Lsf_fallback1
+    add  x10, x21, #8
+    str  x10, [x0]
+    mov  x27, #1
+3:  mul  x0, x20, x27                   // codes [key][row]
+    lsl  x0, x0, #3
+    bl   arena_alloc
+    mov  x28, x0
+    mov  x24, #0
+4:  cmp  x24, x27
+    b.hs 6f
+    mov  x26, #0
+5:  cmp  x26, x20
+    b.hs 51f
+    ldr  x0, [x19, x26, lsl #3]
+    ldr  x1, [sp]
+    ldr  x1, [x1, x24, lsl #3]
+    bl   sk_encode
+    cbnz x1, .Lsf_fallback1             // NULL: comparator only
+    madd x10, x24, x20, x26
+    str  x0, [x28, x10, lsl #3]
+    add  x26, x26, #1
+    b    5b
+51: add  x24, x24, #1
+    b    4b
+6:  lsl  x0, x20, #4
+    bl   arena_alloc
+    mov  x22, x0
+    lsl  x0, x20, #4
+    bl   arena_alloc
+    mov  x23, x0
+    mov  x0, #(257 * 8)
+    bl   arena_alloc
+    mov  x25, x0
+    mov  x9, #0                         // pairs (code, row index): identity
+7:  cmp  x9, x20
+    b.hs 8f
+    add  x10, x22, x9, lsl #4
+    str  x9, [x10, #8]
+    add  x9, x9, #1
+    b    7b
+8:  mov  x24, x27                       // keys last to first
+.Lsf_key:
+    cbz  x24, .Lsf_perm
+    sub  x24, x24, #1
+    mul  x11, x24, x20                  // codes of this key, current order
+    add  x11, x28, x11, lsl #3
+    mov  x9, #0
+1:  cmp  x9, x20
+    b.hs 2f
+    add  x10, x22, x9, lsl #4
+    ldr  x12, [x10, #8]
+    ldr  x12, [x11, x12, lsl #3]
+    str  x12, [x10]
+    add  x9, x9, #1
+    b    1b
+2:  bl   .Lsf_radix                     // stable sort of the pairs
+    b    .Lsf_key
+.Lsf_perm:                              // rows in the sorted order (via the
+    lsl  x0, x20, #3                    // scratch: rows -> tmp -> rows)
+    bl   arena_alloc
+    mov  x9, #0
+1:  cmp  x9, x20
+    b.hs 2f
+    add  x10, x22, x9, lsl #4
+    ldr  x10, [x10, #8]
+    ldr  x10, [x19, x10, lsl #3]
+    str  x10, [x0, x9, lsl #3]
+    add  x9, x9, #1
+    b    1b
+2:  mov  x1, x0
+    mov  x0, x19
+    lsl  x2, x20, #3
+    bl   memcpy
+    mov  x26, #0                        // runs equal on every radix code
+.Lsf_runs:
+    cmp  x26, x20
+    b.hs .Lsf_ret
+    add  x12, x26, #1
+1:  cmp  x12, x20
+    b.hs 4f
+    add  x10, x22, x26, lsl #4          // original indexes of both rows
+    ldr  x10, [x10, #8]
+    add  x11, x22, x12, lsl #4
+    ldr  x11, [x11, #8]
+    mov  x13, #0
+2:  cmp  x13, x27
+    b.hs 3f
+    madd x14, x13, x20, x10
+    ldr  x14, [x28, x14, lsl #3]
+    madd x15, x13, x20, x11
+    ldr  x15, [x28, x15, lsl #3]
+    cmp  x14, x15
+    b.ne 4f
+    add  x13, x13, #1
+    b    2b
+3:  add  x12, x12, #1
+    b    1b
+4:  sub  x1, x12, x26
+    mov  x24, x12
+    cmp  x1, #2
+    b.lo 5f
+    add  x0, x19, x26, lsl #3
+    mov  x2, x21
+    bl   sort_rows
+5:  mov  x26, x24
+    b    .Lsf_runs
+.Lsf_ret:
+    add  sp, sp, #16
+    LEAVE 5
+.Lsf_fallback1:
+    add  sp, sp, #16
+.Lsf_fallback:
+    mov  x0, x19
+    mov  x1, x20
+    mov  x2, x21
+    LEAVE_NORET 5
+    b    sort_rows                      // tail call
+
+// local helper: stable LSD radix sort of the n (code, row) pairs at x22
+// (x23 scratch; the result ends in x22)
+.Lsf_radix:
+    stp  x29, x30, [sp, #-16]!
+    str  x24, [sp, #-16]!
+    mov  x24, #0
+.Lsr_pass:
     cmp  x24, #64
-    b.hs .Lsf_runs
+    b.hs .Lsr_done
     mov  x0, x25
     mov  w1, #0
     mov  x2, #(257 * 8)
@@ -279,7 +446,7 @@ FUNC sort_rows_fast
     b.hi 4f
     ldr  x10, [x25, x9, lsl #3]
     cmp  x10, x20
-    b.eq .Lsf_next
+    b.eq .Lsr_next
     add  x9, x9, #1
     b    3b
 4:  mov  x9, #1                         // bucket starts
@@ -309,58 +476,22 @@ FUNC sort_rows_fast
 8:  mov  x9, x22
     mov  x22, x23
     mov  x23, x9
-.Lsf_next:
+.Lsr_next:
     add  x24, x24, #8
-    b    .Lsf_pass
-.Lsf_runs:
-    mov  x9, #0                         // rows in prefix order
-1:  cmp  x9, x20
-    b.hs 2f
-    add  x10, x22, x9, lsl #4
-    ldr  x10, [x10, #8]
-    str  x10, [x19, x9, lsl #3]
-    add  x9, x9, #1
-    b    1b
-2:  mov  x26, #0                        // runs of equal prefixes
-3:  cmp  x26, x20
-    b.hs .Lsf_ret
-    lsl  x10, x26, #4
-    ldr  x11, [x22, x10]
-    add  x27, x26, #1
-4:  cmp  x27, x20
-    b.hs 5f
-    lsl  x10, x27, #4
-    ldr  x12, [x22, x10]
-    cmp  x12, x11
-    b.ne 5f
-    add  x27, x27, #1
-    b    4b
-5:  sub  x1, x27, x26
-    cmp  x1, #2
-    b.lo 6f
-    add  x0, x19, x26, lsl #3
-    mov  x2, x21
-    bl   sort_rows
-6:  mov  x26, x27
-    b    3b
-.Lsf_ret:
-    add  sp, sp, #16
-    LEAVE 5
-.Lsf_fallback:
-    mov  x0, x19
-    mov  x1, x20
-    mov  x2, x21
-    add  sp, sp, #16
-    LEAVE_NORET 5
-    b    sort_rows                      // tail call
+    b    .Lsr_pass
+.Lsr_done:
+    ldr  x24, [sp], #16
+    ldp  x29, x30, [sp], #16
+    ret
 ENDF sort_rows_fast
 
-// sort_chunk_task(x0 task): qsort_r of rows [lo, hi)
+// sort_chunk_task(x0 task): sorts rows [lo, hi)
 LFUNC sort_chunk_task
     ldr  x9, [x0, #SO_SRC]
     ldr  x10, [x0, #SO_LO]
     ldr  x1, [x0, #SO_HI]
     ldr  x2, [x0, #SO_KEYS]
+    ldr  x3, [x0, #SO_NK]
     sub  x1, x1, x10
     add  x0, x9, x10, lsl #3
     b    sort_rows_fast                 // tail call
