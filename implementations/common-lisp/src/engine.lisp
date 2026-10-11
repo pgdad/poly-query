@@ -22,7 +22,7 @@
   (max-ingest-bytes (* 4 1024 1024 1024))
   (max-table-rows 200000000)
   (max-join-rows 100000000)
-  (threads 1)
+  (threads nil)                          ; NIL or 0 = DEFAULT-QUERY-THREADS
   (log-level :info))
 
 (defstruct (session (:constructor make-session (config)))

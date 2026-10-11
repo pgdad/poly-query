@@ -193,7 +193,13 @@ alternating keys and JSON values appended after ts, level and msg."
 
 (defun session-exec-options (session options)
   "EXEC-OPTIONS of a request of SESSION (defaults from its configuration)."
-  (query-exec-options options (engine-config-threads (session-config session))))
+  (query-exec-options options (session-default-threads session)))
+
+(defun session-default-threads (session)
+  "Threads of a query without a `threads` option: --threads, else (also for
+--threads 0) one per usable CPU up to *MAX-DEFAULT-QUERY-THREADS*."
+  (let ((n (engine-config-threads (session-config session))))
+    (if (and n (plusp n)) n (default-query-threads))))
 
 (defun boolean-option (options key default)
   "Value of a boolean option; DEFAULT when absent or null."

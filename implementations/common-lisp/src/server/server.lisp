@@ -582,13 +582,6 @@ response is not destroyed by a TCP reset when the socket is closed."
 ;;; ------------------------------------------------------------------
 ;;; Listener and lifecycle
 
-(defun cpu-count ()
-  (let ((n (ignore-errors
-            (sb-alien:alien-funcall
-             (sb-alien:extern-alien "sysconf" (function sb-alien:long sb-alien:int))
-             84))))                       ; _SC_NPROCESSORS_ONLN on Linux
-    (if (and (integerp n) (plusp n)) n 4)))
-
 (defun resolve-host (host)
   "Returns (values address socket-class) for HOST: a dotted quad, an IPv6
 literal (optionally in brackets) or a resolvable name."
