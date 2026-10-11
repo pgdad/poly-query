@@ -1,7 +1,8 @@
 #!/bin/sh
 # Phase 5 benchmark: runs a fixed query set over generated data under
 # several execution-option sets and prints the best of N runs (engine
-# elapsed_us, ms) per query and option set.
+# elapsed_us, ms) per query and option set. Results are not sent back
+# ("result":"count"): the times measure query execution.
 #
 #   bench/bench.sh DATA_DIR [RUNS]
 # DATA_DIR holds transactions / customers / orders / order_items .csv
@@ -24,15 +25,17 @@ Q5|SELECT c.segment, COUNT(*), SUM(t.amount) FROM tx t JOIN cust c ON c.customer
 Q6|SELECT COUNT(*) FROM tx WHERE amount * 2 > 1000 AND bucket < 500 AND is_fraud = false
 Q7|SELECT customer_id, COUNT(*) AS n FROM tx GROUP BY customer_id ORDER BY n DESC, customer_id LIMIT 5
 Q8|SELECT COUNT(*), SUM(i.quantity) FROM items i JOIN orders o ON o.order_id = i.order_id JOIN cust c ON c.customer_id = o.customer_id WHERE c.segment = 'public_sector' AND c.birth_year < 1960
+Q9|SELECT tx_id, amount FROM tx ORDER BY amount, tx_id
+Q10|SELECT DISTINCT customer_id, status FROM tx
 "
 configs='
-row-1|{"mode":"row","threads":1,"join":"hash"}
-vec-1|{"mode":"vectorized","threads":1,"join":"hash"}
-vec-4|{"mode":"vectorized","threads":4,"join":"hash"}
-vec-8|{"mode":"vectorized","threads":8,"join":"hash"}
-merge|{"mode":"vectorized","threads":1,"join":"merge"}
-noopt|{"mode":"row","threads":1,"optimize":false}
-vnoopt|{"mode":"vectorized","threads":1,"optimize":false}
+row-1|{"mode":"row","threads":1,"join":"hash","result":"count"}
+vec-1|{"mode":"vectorized","threads":1,"join":"hash","result":"count"}
+vec-4|{"mode":"vectorized","threads":4,"join":"hash","result":"count"}
+vec-8|{"mode":"vectorized","threads":8,"join":"hash","result":"count"}
+merge|{"mode":"vectorized","threads":1,"join":"merge","result":"count"}
+noopt|{"mode":"row","threads":1,"optimize":false,"result":"count"}
+vnoopt|{"mode":"vectorized","threads":1,"optimize":false,"result":"count"}
 '
 req="$tmp/req.jsonl"
 {

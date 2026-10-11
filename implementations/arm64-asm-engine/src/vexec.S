@@ -826,12 +826,15 @@ ENDF vfilter
 // =============================================================================
 // vfilter_sel(x0 predicate, x1 VBatch*, x2 u16* sel, x3 nsel, x4 u16* out)
 //   -> x0 count of selected positions for which the predicate is TRUE
-// A conjunction narrows the selection conjunct by conjunct (the right
-// operand only sees the positions where the left one is TRUE).
-//   x19 predicate, x20 vb, x21 sel, x22 nsel, x23 out, x24 vector / scratch
+// For a conjunction the left operand is evaluated (three-valued, veval) and
+// the right one only at the positions where the left one is not FALSE —
+// exactly the operands the row evaluator evaluates — and the right one is
+// filtered recursively, so nested conjunctions narrow conjunct by conjunct.
+//   x19 predicate, x20 vb, x21 sel, x22 nsel, x23 out, x24 left vector,
+//   x25 positions where the left operand is not FALSE
 // =============================================================================
 FUNC vfilter_sel
-    ENTER 3
+    ENTER 4
     mov  x19, x0
     mov  x20, x1
     mov  x21, x2
@@ -845,22 +848,53 @@ FUNC vfilter_sel
     ldr  w9, [x19, #N_OP]
     cmp  w9, #OP_AND
     b.ne 1f
-    mov  x0, x20                        // AND: left into a scratch
-    bl   vpool_get                      // selection, right from there
+    mov  x0, x20                        // AND: the left operand
+    bl   vpool_get
     mov  x24, x0
     ldr  x0, [x19, #N_A]
     mov  x1, x20
     mov  x2, x21
     mov  x3, x22
     mov  x4, x24
-    bl   vfilter_sel
-    mov  x3, x0
-    ldr  x0, [x19, #N_B]
+    bl   veval
+    mov  x0, x20
+    bl   vpool_get
+    mov  x25, x0
+    add  x10, x24, #VEC_NULLS           // positions where it is not FALSE
+    mov  x11, #0
+    mov  x3, #0
+11: cmp  x11, x22
+    b.hs 12f
+    ldrh w9, [x21, x11, lsl #1]
+    add  x11, x11, #1
+    ldrb w12, [x10, x9]
+    ldr  x13, [x24, x9, lsl #3]
+    cmp  w12, #0
+    ccmp x13, #0, #0, eq                // eq iff not NULL and FALSE
+    b.eq 11b
+    strh w9, [x25, x3, lsl #1]
+    add  x3, x3, #1
+    b    11b
+12: ldr  x0, [x19, #N_B]                // the right operand there
     mov  x1, x20
-    mov  x2, x24
+    mov  x2, x25
     mov  x4, x23
     bl   vfilter_sel
-    mov  x19, x0
+    add  x10, x24, #VEC_NULLS           // keep those where the left is TRUE
+    mov  x11, #0
+    mov  x12, #0
+13: cmp  x11, x0
+    b.hs 14f
+    ldrh w9, [x23, x11, lsl #1]
+    add  x11, x11, #1
+    ldrb w13, [x10, x9]
+    cbnz w13, 13b
+    strh w9, [x23, x12, lsl #1]
+    add  x12, x12, #1
+    b    13b
+14: mov  x19, x12
+    mov  x0, x20
+    bl   vpool_put
     mov  x0, x20
     bl   vpool_put
     mov  x0, x19
@@ -893,7 +927,7 @@ FUNC vfilter_sel
     mov  x0, x20
     bl   vpool_put
     mov  x0, x19
-9:  LEAVE 3
+9:  LEAVE 4
 ENDF vfilter_sel
 
 // =============================================================================

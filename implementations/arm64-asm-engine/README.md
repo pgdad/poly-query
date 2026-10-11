@@ -279,17 +279,17 @@ inherit them. Unsupported values (`"mode":"quantum"`) are `UNSUPPORTED`.
 | `native: true` | accepted and ignored (`native.kernels` is not claimed; no kernel library is loaded). |
 
 Every combination produces the same rows (row order only differs where no
-`ORDER BY` fixes it) and raises the same error codes (apart from operands
-that need not be evaluated, see the implementation-defined choices); the
-planner and the executor guarantee this structurally:
+`ORDER BY` fixes it) and raises the same error codes; the planner and the
+executor guarantee this structurally:
 
 * the vectorized evaluator computes exactly the same values as `eval`:
   it reuses the same arithmetic / comparison / accumulation routines
   (`arith_int`, `arith_dec`, `cmp_typed`, `agg_accum`, `agg_finish`), and
   every node kind it has no kernel for falls back to `eval` per row;
 * AND / OR evaluate their right operand only where the left one does not
-  decide the result (the row evaluator's short circuit); in filters a
-  conjunction narrows the selection conjunct by conjunct;
+  decide the result (the row evaluator's short circuit); a filter evaluates
+  the right operand of a conjunction where the left one is TRUE or NULL
+  (as the row evaluator does) and keeps the rows where both are TRUE;
 * all three join algorithms evaluate the same key expressions (all keys of
   both inputs) and the residual condition only on key-equal pairs;
 * parallel tasks work on contiguous windows of their input and their
@@ -346,8 +346,10 @@ in every mode); Aggregate, Distinct and Sort consume their whole input.
   encoded column evaluates the comparison once per dictionary entry into a
   truth table (cached per batch context) and then reads one byte per row by
   dictionary code.
-* **Filters** (`vfilter`) narrow selection vectors conjunct by conjunct;
-  scans build tuples for whole batches and copy only the survivors.
+* **Filters** (`vfilter`) narrow selection vectors conjunct by conjunct
+  (the right operand of AND only sees the positions where the left one is
+  not FALSE); scans build tuples for whole batches and copy only the
+  survivors.
 * **Hash aggregation** (`vagg.S`): GROUP BY keys and aggregate arguments
   are evaluated as vectors; every tuple is hashed into an open-addressing
   table (linear probing, load ≤ 1/2) of contiguous group records
@@ -510,9 +512,11 @@ last. Observations:
   CPUs capped at 8; a parallel task gets at least 16384 input rows. Without
   ORDER BY, the row order of a result may differ between option sets
   (e.g. sort-based vs hash-based grouping, merge-join key order).
-* Phase 5: an operand that need not be evaluated (types.md §6) may be
-  skipped by a vectorized filter: in `WHERE a AND b`, `b` is not evaluated
-  for rows where `a` is NULL (the row evaluator evaluates it).
+* Phase 5: every mode evaluates exactly the operands the row evaluator
+  evaluates (AND / OR short-circuit only on the deciding value), so the
+  same rows raise the same errors. When a query would raise *different*
+  errors on different rows or columns, which one is reported first may
+  depend on the mode (batches evaluate column by column).
 
 * FLOAT64 output uses the shortest of `%.15g`/`%.16g`/`%.17g` that round-trips.
 * CAST(FLOAT64 AS STRING) uses the same text.

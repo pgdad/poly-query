@@ -2,11 +2,12 @@
 // sort.S — parallel sorting of result rows (Phase 5, option "threads").
 //
 //   sort_rows_par(x0 Row** rows, x1 n, x2 key descriptors)
-//       sorts like exec.S sort_rows (qsort_r with cmp_rows). In vectorized
-//       mode with threads > 1 and at least 2 * g_par_min_rows rows: the
-//       array is cut into one chunk per task, the chunks are sorted in
-//       parallel, then merged pairwise in rounds (the merges of a round run
-//       in parallel), alternating between the array and a scratch array.
+//       sorts like exec.S sort_rows (qsort_r with cmp_rows; mode "row"). In
+//       vectorized mode with sort_rows_fast (normalized-key radix sort), and
+//       with threads > 1 and at least 2 * g_par_min_rows rows: the array is
+//       cut into one chunk per task, the chunks are sorted in parallel, then
+//       merged pairwise in rounds (the merges of a round run in parallel),
+//       alternating between the array and a scratch array.
 //
 // The ORDER BY / DISTINCT key lists end with every visible column as a
 // tie-breaker (exec.S order_keys), so only identical rows compare equal and
@@ -42,13 +43,13 @@ FUNC sort_rows_par
     b.eq .Lsp_serial
     TLS_LDR x9, g_x_threads
     cmp  x9, #1
-    b.ls .Lsp_serial
+    b.ls .Lsp_fast
     LDR_G x10, g_par_min_rows
     udiv x10, x20, x10
     cmp  x10, x9
     csel x22, x10, x9, lo
     cmp  x22, #2
-    b.lo .Lsp_serial
+    b.lo .Lsp_fast
     // ---- chunks ------------------------------------------------------------
     add  x0, x22, #1
     lsl  x0, x0, #3
@@ -155,13 +156,204 @@ FUNC sort_rows_par
     lsl  x2, x20, #3
     bl   memcpy
 11: LEAVE 5
-.Lsp_serial:
+.Lsp_serial:                            // row mode: qsort_r
     mov  x0, x19
     mov  x1, x20
     mov  x2, x21
     LEAVE_NORET 5
     b    sort_rows                      // tail call
+.Lsp_fast:                              // vectorized, one thread
+    mov  x0, x19
+    mov  x1, x20
+    mov  x2, x21
+    LEAVE_NORET 5
+    b    sort_rows_fast                 // tail call
 ENDF sort_rows_par
+
+// =============================================================================
+// sort_rows_fast(x0 Row** rows, x1 n, x2 keys) — the same order as
+// sort_rows, computed by normalized keys: every row gets a 64-bit prefix of
+// its first sort key whose unsigned order agrees with the key order
+// (integers biased, FLOAT64 sign-folded with -0.0 = 0.0, strings: their
+// first 8 bytes big-endian; inverted for DESC); the (prefix, row) pairs are
+// radix sorted (stable LSD, constant bytes skipped) and only runs of equal
+// prefixes are sorted by the full comparator. Falls back to sort_rows for
+// small inputs and when the first key has a NULL.
+//   x19 rows, x20 n, x21 keys, x22 pairs, x23 tmp pairs, x24 shift,
+//   x25 histogram, x26 index / run start, x27 key kind, x28 key offset
+// Stack: [sp] DESC flag
+// =============================================================================
+FUNC sort_rows_fast
+    ENTER 5
+    sub  sp, sp, #16
+    mov  x19, x0
+    mov  x20, x1
+    mov  x21, x2
+    cmp  x20, #64
+    b.lo .Lsf_fallback
+    ldr  x9, [x21]
+    cbz  x9, .Lsf_fallback
+    ldr  x28, [x21, #(8 + 0)]           // first key: offset, type, DESC
+    ldrb w27, [x21, #(8 + 8)]
+    ldr  w9, [x21, #(8 + 12)]
+    str  x9, [sp]
+    cbz  w27, .Lsf_fallback             // null type
+    lsl  x0, x20, #4
+    bl   arena_alloc
+    mov  x22, x0
+    lsl  x0, x20, #4
+    bl   arena_alloc
+    mov  x23, x0
+    mov  x0, #(257 * 8)
+    bl   arena_alloc
+    mov  x25, x0
+    mov  x26, #0                        // prefixes
+1:  cmp  x26, x20
+    b.hs 8f
+    ldr  x10, [x19, x26, lsl #3]        // row
+    add  x11, x10, x28                  // first key cell
+    ldp  x0, x12, [x11]
+    cbnz x12, .Lsf_fallback             // NULL: comparator only
+    cmp  w27, #T_STR
+    b.eq 3f
+    cmp  w27, #T_FLOAT
+    b.eq 2f
+    eor  x0, x0, #0x8000000000000000    // signed -> unsigned order
+    b    7f
+2:  mov  x12, #0x8000000000000000       // FLOAT64: -0.0 = 0.0, then fold
+    cmp  x0, x12
+    csel x0, xzr, x0, eq
+    tbz  x0, #63, 21f
+    mvn  x0, x0                         // negative: invert everything
+    b    7f
+21: orr  x0, x0, x12                    // positive: set the sign bit
+    b    7f
+3:  ldr  x12, [x0, #STR_LEN]            // STRING: first 8 bytes, big-endian
+    add  x13, x0, #STR_DATA
+    cmp  x12, #8
+    b.lo 4f
+    ldr  x0, [x13]
+    rev  x0, x0
+    b    7f
+4:  mov  x0, #0
+    mov  x14, #0
+    mov  x15, #56
+5:  cmp  x14, x12
+    b.hs 7f
+    ldrb w16, [x13, x14]
+    lsl  x16, x16, x15
+    orr  x0, x0, x16
+    add  x14, x14, #1
+    sub  x15, x15, #8
+    b    5b
+7:  ldr  x12, [sp]                      // DESC: reverse the order
+    cbz  x12, 71f
+    mvn  x0, x0
+71: add  x12, x22, x26, lsl #4
+    stp  x0, x10, [x12]
+    add  x26, x26, #1
+    b    1b
+8:  mov  x24, #0                        // radix passes
+.Lsf_pass:
+    cmp  x24, #64
+    b.hs .Lsf_runs
+    mov  x0, x25
+    mov  w1, #0
+    mov  x2, #(257 * 8)
+    bl   memset
+    mov  x9, #0
+1:  cmp  x9, x20
+    b.hs 2f
+    lsl  x10, x9, #4
+    ldr  x10, [x22, x10]
+    lsr  x10, x10, x24
+    and  x10, x10, #0xff
+    add  x10, x10, #1
+    ldr  x11, [x25, x10, lsl #3]
+    add  x11, x11, #1
+    str  x11, [x25, x10, lsl #3]
+    add  x9, x9, #1
+    b    1b
+2:  mov  x9, #1                         // constant byte: skip the pass
+3:  cmp  x9, #256
+    b.hi 4f
+    ldr  x10, [x25, x9, lsl #3]
+    cmp  x10, x20
+    b.eq .Lsf_next
+    add  x9, x9, #1
+    b    3b
+4:  mov  x9, #1                         // bucket starts
+    mov  x11, #0
+5:  cmp  x9, #256
+    b.hi 6f
+    ldr  x10, [x25, x9, lsl #3]
+    str  x11, [x25, x9, lsl #3]
+    add  x11, x11, x10
+    add  x9, x9, #1
+    b    5b
+6:  mov  x9, #0                         // scatter (stable)
+7:  cmp  x9, x20
+    b.hs 8f
+    add  x12, x22, x9, lsl #4
+    ldp  x13, x14, [x12]
+    lsr  x10, x13, x24
+    and  x10, x10, #0xff
+    add  x10, x10, #1
+    ldr  x15, [x25, x10, lsl #3]
+    add  x16, x15, #1
+    str  x16, [x25, x10, lsl #3]
+    add  x15, x23, x15, lsl #4
+    stp  x13, x14, [x15]
+    add  x9, x9, #1
+    b    7b
+8:  mov  x9, x22
+    mov  x22, x23
+    mov  x23, x9
+.Lsf_next:
+    add  x24, x24, #8
+    b    .Lsf_pass
+.Lsf_runs:
+    mov  x9, #0                         // rows in prefix order
+1:  cmp  x9, x20
+    b.hs 2f
+    add  x10, x22, x9, lsl #4
+    ldr  x10, [x10, #8]
+    str  x10, [x19, x9, lsl #3]
+    add  x9, x9, #1
+    b    1b
+2:  mov  x26, #0                        // runs of equal prefixes
+3:  cmp  x26, x20
+    b.hs .Lsf_ret
+    lsl  x10, x26, #4
+    ldr  x11, [x22, x10]
+    add  x27, x26, #1
+4:  cmp  x27, x20
+    b.hs 5f
+    lsl  x10, x27, #4
+    ldr  x12, [x22, x10]
+    cmp  x12, x11
+    b.ne 5f
+    add  x27, x27, #1
+    b    4b
+5:  sub  x1, x27, x26
+    cmp  x1, #2
+    b.lo 6f
+    add  x0, x19, x26, lsl #3
+    mov  x2, x21
+    bl   sort_rows
+6:  mov  x26, x27
+    b    3b
+.Lsf_ret:
+    add  sp, sp, #16
+    LEAVE 5
+.Lsf_fallback:
+    mov  x0, x19
+    mov  x1, x20
+    mov  x2, x21
+    add  sp, sp, #16
+    LEAVE_NORET 5
+    b    sort_rows                      // tail call
+ENDF sort_rows_fast
 
 // sort_chunk_task(x0 task): qsort_r of rows [lo, hi)
 LFUNC sort_chunk_task
@@ -171,7 +363,7 @@ LFUNC sort_chunk_task
     ldr  x2, [x0, #SO_KEYS]
     sub  x1, x1, x10
     add  x0, x9, x10, lsl #3
-    b    sort_rows                      // tail call
+    b    sort_rows_fast                 // tail call
 ENDF sort_chunk_task
 
 // =============================================================================
