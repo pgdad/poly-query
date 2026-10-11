@@ -473,8 +473,7 @@ func (c *vcompiler) comparison(x *plan.Binary) (vexpr, error) {
 	lt, rt := x.L.Type(), x.R.Type()
 	switch {
 	case lt.IsWide() || rt.IsWide():
-		// Exact 128-bit comparison per element.
-		return c.elementwise(x)
+		return c.wideComparison(x)
 	case lt.Kind != rt.Kind && !(isExact(lt) && isExact(rt)):
 		return c.fallback(x)
 	}
@@ -686,6 +685,8 @@ func (c *vcompiler) arithmetic(x *plan.Binary) (vexpr, error) {
 	case kind == types.KindInt64:
 	case kind == types.KindFloat64 && x.Op != plan.OpMod:
 	case kind == types.KindDecimal && !x.T.IsWide() && (x.Op == plan.OpAdd || x.Op == plan.OpSub || x.Op == plan.OpMul):
+	case kind == types.KindDecimal && (x.Op == plan.OpAdd || x.Op == plan.OpSub || x.Op == plan.OpMul):
+		return c.wideArithmetic(x)
 	default:
 		return c.elementwise(x)
 	}

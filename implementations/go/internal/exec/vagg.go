@@ -43,9 +43,13 @@ func newAggState(call *plan.AggCall) aggState {
 	case call.Func == plan.AggCount:
 		return &countState{}
 	case t.IsWide():
-		// SUM/AVG/MIN/MAX of wide DECIMALs use the row accumulators
-		// (128-bit sums, exact comparisons).
-		return &genericState{call: call, cls: classOf(t)}
+		switch call.Func {
+		case plan.AggSum, plan.AggAvg:
+			return &wideSumState{avg: call.Func == plan.AggAvg, scale: t.Scale}
+		case plan.AggMin:
+			return &wideMinMax{sign: -1}
+		}
+		return &wideMinMax{sign: 1}
 	}
 	switch call.Func {
 	case plan.AggSum:
@@ -510,7 +514,8 @@ type aggTable struct {
 	states     []aggState
 
 	intMap    map[int64]int32
-	nmap      *nativeIntMap // replaces intMap with native kernels
+	wideMap   map[types.Int128]int32 // single wide DECIMAL key
+	nmap      *nativeIntMap          // replaces intMap with native kernels
 	floatMap  map[uint64]int32
 	strMap    map[string]int32 // single STRING key, or encoded multi-column keys
 	nullGroup int32            // group of the NULL key (single key)
@@ -528,7 +533,7 @@ type aggTable struct {
 
 func newAggTable(ec *Context, keyTypes []types.Type, calls []*plan.AggCall) *aggTable {
 	t := &aggTable{ec: ec, keyTypes: keyTypes, calls: calls, nullGroup: -1,
-		intMap: map[int64]int32{}, floatMap: map[uint64]int32{}, strMap: map[string]int32{}}
+		intMap: map[int64]int32{}, wideMap: map[types.Int128]int32{}, floatMap: map[uint64]int32{}, strMap: map[string]int32{}}
 	for _, kt := range keyTypes {
 		t.keyClasses = append(t.keyClasses, classOf(kt))
 	}
@@ -623,7 +628,9 @@ func (t *aggTable) resolve(keys []*Vec, n int, sel []int32, pos int64) error {
 	switch {
 	case t.keyClasses[0] == vInt:
 		return t.resolveInt(v, n, sel, pos)
-	case t.keyClasses[0] == vFloat || t.keyClasses[0] == vWide:
+	case t.keyClasses[0] == vWide:
+		return t.resolveWide(v, n, sel, pos)
+	case t.keyClasses[0] == vFloat:
 		return t.resolveEncoded(keys, n, sel, pos)
 	case v.Dict != nil:
 		return t.resolveDict(v, n, sel, pos)
@@ -864,9 +871,7 @@ func (t *aggTable) findOrAdd(key types.Row, pos int64) (int32, error) {
 	var g int32
 	var ok bool
 	var put func(int32)
-	// Single wide keys are encoded like multi-column keys (the NULL key
-	// has its own group, as in resolveEncoded).
-	if len(key) == 1 && (t.keyClasses[0] != vWide || key[0].Null) {
+	if len(key) == 1 {
 		v := key[0]
 		switch {
 		case v.Null:
@@ -879,6 +884,9 @@ func (t *aggTable) findOrAdd(key types.Row, pos int64) (int32, error) {
 		case t.keyClasses[0] == vInt:
 			g, ok = t.intMap[v.I]
 			put = func(g int32) { t.intMap[v.I] = g }
+		case t.keyClasses[0] == vWide:
+			g, ok = t.wideMap[v.Wide()]
+			put = func(g int32) { t.wideMap[v.Wide()] = g }
 		case t.keyClasses[0] == vFloat:
 			f := v.F
 			if f == 0 {
