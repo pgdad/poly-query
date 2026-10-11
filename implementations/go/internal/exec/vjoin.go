@@ -30,8 +30,8 @@ type joinTable struct {
 	heads   []int32
 	next    []int32
 	shift   uint
-	direct  bool  // int keys: heads indexed by key - lo (no hashing)
-	unique  bool  // direct mode with distinct keys: chains of length 1
+	direct  bool // int keys: heads indexed by key - lo (no hashing)
+	unique  bool // direct mode with distinct keys: chains of length 1
 	lo      int64
 	seed    maphash.Seed
 	rows    []int32 // scratch: stored rows of the current batch
