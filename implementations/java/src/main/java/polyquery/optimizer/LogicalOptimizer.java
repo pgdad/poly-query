@@ -61,6 +61,7 @@ public final class LogicalOptimizer {
             }
             case LogicalPlan.Project p -> new LogicalPlan.Project(fold(p.input()), foldAll(p.expressions()), p.names());
             case LogicalPlan.Distinct d -> new LogicalPlan.Distinct(fold(d.input()));
+            case LogicalPlan.UnionAll u -> u.withInputs(u.inputs().stream().map(LogicalOptimizer::fold).toList());
             case LogicalPlan.Sort s -> new LogicalPlan.Sort(fold(s.input()), s.keys());
             case LogicalPlan.Limit l -> new LogicalPlan.Limit(fold(l.input()), l.offset(), l.limit());
         };
@@ -172,6 +173,7 @@ public final class LogicalOptimizer {
                     a.aggregates());
             case LogicalPlan.Project p -> new LogicalPlan.Project(pushdown(p.input()), p.expressions(), p.names());
             case LogicalPlan.Distinct d -> new LogicalPlan.Distinct(pushdown(d.input()));
+            case LogicalPlan.UnionAll u -> u.withInputs(u.inputs().stream().map(LogicalOptimizer::pushdown).toList());
             case LogicalPlan.Sort s -> new LogicalPlan.Sort(pushdown(s.input()), s.keys());
             case LogicalPlan.Limit l -> new LogicalPlan.Limit(pushdown(l.input()), l.offset(), l.limit());
         };

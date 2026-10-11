@@ -2,9 +2,17 @@ package polyquery.sql.ast;
 
 import java.util.List;
 
-/** A query expression: optional WITH, a SELECT core, ORDER BY and LIMIT/OFFSET. */
-public record Query(SourcePos pos, List<Cte> with, Select select, List<OrderItem> orderBy,
+/**
+ * A query expression: optional WITH, one or more SELECT cores combined with {@code UNION ALL}
+ * (the branches, in order), then ORDER BY and LIMIT/OFFSET applying to the whole result.
+ */
+public record Query(SourcePos pos, List<Cte> with, List<Select> branches, List<OrderItem> orderBy,
                     Expr limit, Expr offset) {
+
+    /** True for a {@code UNION ALL} of two or more branches. */
+    public boolean compound() {
+        return branches.size() > 1;
+    }
 
     public record Cte(SourcePos pos, String name, List<String> columnNames, Query query) {
     }

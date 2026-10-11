@@ -89,6 +89,21 @@ public sealed interface LogicalPlan {
         }
     }
 
+    /**
+     * Concatenation of the rows of its inputs, in order, duplicates kept ({@code UNION ALL}).
+     * Every input already produces {@code columns}' types; the names are the first branch's.
+     */
+    record UnionAll(List<LogicalPlan> inputs, List<ColumnSchema> columns) implements LogicalPlan {
+        @Override
+        public List<ColumnSchema> schema() {
+            return columns;
+        }
+
+        public UnionAll withInputs(List<LogicalPlan> newInputs) {
+            return new UnionAll(List.copyOf(newInputs), columns);
+        }
+    }
+
     /** OFFSET then LIMIT; expressions are constant INT64 (null = absent). */
     record Limit(LogicalPlan input, BoundExpr offset, BoundExpr limit) implements LogicalPlan {
         @Override

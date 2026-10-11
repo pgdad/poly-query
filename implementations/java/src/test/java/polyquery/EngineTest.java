@@ -91,6 +91,39 @@ final class EngineTest {
         Assert.check(System.nanoTime() - t0 < 1_000_000_000L, "timeout honoured promptly");
     }
 
+    static void testUnionAll() {
+        Engine e = engine();
+        Assert.eq("[[1],[1],[2]]", rows(e, "SELECT id FROM people WHERE id = 1 UNION ALL SELECT 1 UNION ALL SELECT 2"));
+        Assert.eq("[v:DECIMAL(18,1)]", types(e, "SELECT age AS v FROM people UNION ALL SELECT 1.5"));
+        Assert.eq("[v:FLOAT64]", types(e, "SELECT 1.5 AS v UNION ALL SELECT score FROM people"));
+        Assert.eq("[x:STRING, y:INT64]", types(e, "SELECT NULL AS x, NULL AS y UNION ALL SELECT name, NULL FROM people "
+                + "UNION ALL SELECT NULL, 1"));
+        Assert.eq("[[\"Ann\"],[\"Ann\"],[\"Cid\"]]",
+                rows(e, "SELECT name FROM people UNION ALL SELECT name FROM people ORDER BY name LIMIT 3 OFFSET 0"));
+        Assert.eq("[[3],[2]]", rows(e, "SELECT id AS k FROM people UNION ALL SELECT age FROM people ORDER BY 1 DESC "
+                + "NULLS LAST OFFSET 4 LIMIT 2"));
+        Assert.eq("[[8]]", rows(e, "SELECT COUNT(*) FROM (SELECT id FROM people UNION ALL SELECT age FROM people) u"));
+        Assert.eq("[[2]]", rows(e, "WITH a AS (SELECT id FROM people WHERE id < 2 UNION ALL SELECT 4) "
+                + "SELECT COUNT(*) FROM people WHERE id IN (SELECT id FROM a)"));
+        // a correlated reference inside a branch of a subquery
+        Assert.eq("[[1],[3]]", rows(e, "SELECT id FROM people p WHERE EXISTS (SELECT 1 FROM people q WHERE q.id = p.id "
+                + "AND q.age < 30 UNION ALL SELECT 1 WHERE p.id = 1) ORDER BY id"));
+        Assert.fails(ErrorCode.SEMANTIC_ERROR, () -> e.query("SELECT id, name FROM people UNION ALL SELECT id FROM people",
+                QueryOptions.DEFAULT));
+        Assert.fails(ErrorCode.TYPE_ERROR, () -> e.query("SELECT id FROM people UNION ALL SELECT name FROM people",
+                QueryOptions.DEFAULT));
+        Assert.fails(ErrorCode.SEMANTIC_ERROR, () -> e.query("SELECT id FROM people UNION ALL SELECT id FROM people "
+                + "ORDER BY id + 1", QueryOptions.DEFAULT));
+        Assert.fails(ErrorCode.SEMANTIC_ERROR, () -> e.query("SELECT id FROM people UNION ALL SELECT age FROM people "
+                + "ORDER BY age", QueryOptions.DEFAULT));
+        Assert.fails(ErrorCode.NUMERIC_OVERFLOW, () -> e.query("SELECT 9223372036854775807 AS v UNION ALL SELECT 1.5",
+                QueryOptions.DEFAULT));
+        Assert.fails(ErrorCode.RESOURCE_LIMIT, () -> e.query("SELECT id FROM people UNION ALL SELECT id FROM people",
+                new QueryOptions(7, 0, false)));
+        String plan = rows(e, "EXPLAIN SELECT id FROM people UNION ALL SELECT age FROM people");
+        Assert.check(plan.contains("\\\"op\\\":\\\"UnionAll\\\""), "EXPLAIN shows UnionAll: " + plan);
+    }
+
     static void testUnsupportedSyntax() {
         Engine e = engine();
         for (String sql : List.of("SELECT * FROM people a RIGHT JOIN people b ON a.id = b.id",

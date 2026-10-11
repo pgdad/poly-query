@@ -96,6 +96,55 @@ public final class Operators {
         }
     }
 
+    /**
+     * Concatenation of its inputs ({@code UNION ALL}): each input is opened only once the
+     * previous one is exhausted (and closed then), so later branches are not evaluated if the
+     * consumer stops early.
+     */
+    public static final class UnionAll implements Operator {
+        private final List<Operator> inputs;
+        private int current;
+        private boolean open;
+
+        public UnionAll(List<Operator> inputs) {
+            this.inputs = List.copyOf(inputs);
+        }
+
+        @Override
+        public void open() {
+            close();
+            current = 0;
+            inputs.get(0).open();
+            open = true;
+        }
+
+        @Override
+        public Object[] next() {
+            while (open) {
+                Object[] row = inputs.get(current).next();
+                if (row != null) {
+                    return row;
+                }
+                inputs.get(current).close();
+                open = false;
+                if (current + 1 < inputs.size()) {
+                    current++;
+                    inputs.get(current).open();
+                    open = true;
+                }
+            }
+            return null;
+        }
+
+        @Override
+        public void close() {
+            if (open) {
+                open = false;
+                inputs.get(current).close();
+            }
+        }
+    }
+
     /** Blocking sort; materializes its input under the memory budget. */
     public static final class Sort implements Operator {
         private final Operator input;

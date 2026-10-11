@@ -84,6 +84,7 @@ public final class Cardinality {
             case LogicalPlan.Aggregate a -> a.groupKeys().isEmpty() ? 1 : Math.max(1, rows(a.input()) / 10);
             case LogicalPlan.Project p -> rows(p.input());
             case LogicalPlan.Distinct d -> rows(d.input());
+            case LogicalPlan.UnionAll u -> u.inputs().stream().mapToDouble(Cardinality::rows).sum();
             case LogicalPlan.Sort s -> rows(s.input());
             case LogicalPlan.Limit l -> rows(l.input());
         };

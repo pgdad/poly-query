@@ -286,6 +286,56 @@ final class BatchOperators {
         }
     }
 
+    /**
+     * Concatenation of its inputs ({@code UNION ALL}): passes on the batches of each input in
+     * turn (all inputs produce the same column types). An input is opened only once the
+     * previous one is exhausted, so later branches (possibly parallel pipelines) are not run if
+     * the consumer stops early; a batch's pending error is passed on with it.
+     */
+    static final class UnionAll implements BatchOperator {
+        private final List<BatchOperator> inputs;
+        private int current;
+        private boolean open;
+
+        UnionAll(List<BatchOperator> inputs) {
+            this.inputs = List.copyOf(inputs);
+        }
+
+        @Override
+        public void open() {
+            close();
+            current = 0;
+            inputs.get(0).open();
+            open = true;
+        }
+
+        @Override
+        public Batch next() {
+            while (open) {
+                Batch b = inputs.get(current).next();
+                if (b != null) {
+                    return b;
+                }
+                inputs.get(current).close();
+                open = false;
+                if (current + 1 < inputs.size()) {
+                    current++;
+                    inputs.get(current).open();
+                    open = true;
+                }
+            }
+            return null;
+        }
+
+        @Override
+        public void close() {
+            if (open) {
+                open = false;
+                inputs.get(current).close();
+            }
+        }
+    }
+
     /** Presents a batch operator as a row operator (rows are boxed into fresh arrays). */
     static final class BatchToRow implements Operator {
         private final BatchOperator input;

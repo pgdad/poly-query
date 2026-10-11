@@ -58,6 +58,8 @@ public final class PhysicalPlanner {
             case LogicalPlan.Project p -> new PhysicalPlan.Project(build(p.input()), p.expressions(), p.names());
             case LogicalPlan.Aggregate a -> new PhysicalPlan.HashAggregate(build(a.input()), a.groupKeys(), a.aggregates());
             case LogicalPlan.Distinct d -> new PhysicalPlan.HashDistinct(build(d.input()));
+            case LogicalPlan.UnionAll u -> new PhysicalPlan.UnionAll(u.inputs().stream().map(this::build).toList(),
+                    u.columns());
             case LogicalPlan.Sort s -> new PhysicalPlan.Sort(build(s.input()), s.keys());
             case LogicalPlan.Limit l when topN && l.limit() != null && l.input() instanceof LogicalPlan.Sort s ->
                     new PhysicalPlan.TopN(build(s.input()), s.keys(), l.offset(), l.limit());

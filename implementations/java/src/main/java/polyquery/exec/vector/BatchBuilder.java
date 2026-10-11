@@ -11,7 +11,7 @@ import polyquery.types.DataType;
 
 /**
  * Turns a physical plan into batch operators. Scans, filters, projections, hash aggregation,
- * DISTINCT, hash joins, sorts, top-N and LIMIT run vectorized; the remaining operators (merge
+ * DISTINCT, hash joins, UNION ALL, sorts, top-N and LIMIT run vectorized; the remaining operators (merge
  * and nested-loop joins, correlated lookups) are the row engine's, connected through row/batch
  * adapters. Pipelines over large tables are executed by parallel workers when the
  * query may use several threads (see {@link Parallel}).
@@ -48,6 +48,7 @@ public final class BatchBuilder {
             case PhysicalPlan.Project p -> true;
             case PhysicalPlan.HashAggregate a -> true;
             case PhysicalPlan.HashDistinct d -> true;
+            case PhysicalPlan.UnionAll u -> true;
             case PhysicalPlan.HashJoin j -> true;
             case PhysicalPlan.Limit l -> true;
             case PhysicalPlan.Sort s -> true;
@@ -88,6 +89,7 @@ public final class BatchBuilder {
             case PhysicalPlan.HashAggregate a -> new AggregateBatches.HashAggregate(build(a.input()), a.groupKeys(),
                     a.aggregates(), compiler, ctx, batchSize);
             case PhysicalPlan.HashDistinct d -> new AggregateBatches.Distinct(build(d.input()), types(d.schema()), ctx);
+            case PhysicalPlan.UnionAll u -> new BatchOperators.UnionAll(u.inputs().stream().map(this::build).toList());
             case PhysicalPlan.HashJoin j -> hashJoin(j, build(j.buildLeft() ? j.right() : j.left()), null, compiler,
                     new JoinBatches.JoinCounter(ctx.maxJoinRows()));
             case PhysicalPlan.Limit l -> {

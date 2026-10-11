@@ -75,6 +75,18 @@ final class Phase5Test {
                 + "WHERE t.flag AND d.weight > 2",
         "SELECT t.id, d.label FROM t, d WHERE t.grp = d.grp AND t.id / (d.grp - 3) > 0 ORDER BY 1, 2",
         "SELECT t.id FROM t, d WHERE t.grp = d.grp AND d.weight * 1000000 > 1 AND t.val + 1 > 0 ORDER BY 1",
+        // UNION ALL (CR-1): branches of different types, aggregation / joins over it, ORDER BY + LIMIT
+        "SELECT id, name FROM t WHERE val > 20 UNION ALL SELECT grp, label FROM d UNION ALL SELECT 0, NULL",
+        "SELECT amt AS v FROM t WHERE id < 50 UNION ALL SELECT val FROM t WHERE flag UNION ALL SELECT weight FROM d",
+        "SELECT x, COUNT(*), SUM(v) FROM (SELECT grp AS x, val AS v FROM t UNION ALL SELECT grp, 1 FROM d) u GROUP BY x",
+        "SELECT u.k, d.label FROM (SELECT grp AS k FROM t WHERE id < 90 UNION ALL SELECT grp FROM d) u "
+                + "JOIN d ON d.grp = u.k",
+        "SELECT name FROM t UNION ALL SELECT label FROM d ORDER BY 1 NULLS FIRST LIMIT 20 OFFSET 5",
+        "SELECT DISTINCT grp FROM t UNION ALL SELECT DISTINCT weight FROM d",
+        "SELECT id FROM t WHERE grp IN (SELECT grp FROM d WHERE weight > 10 UNION ALL SELECT 2) AND id < 200",
+        "SELECT id FROM t WHERE EXISTS (SELECT 1 FROM d WHERE d.grp = t.grp UNION ALL SELECT 1 FROM d WHERE t.val > 45)",
+        "SELECT id FROM t WHERE id < 5 UNION ALL SELECT 1000 / (grp - 3) FROM t",
+        "SELECT id FROM t WHERE id < 5 UNION ALL SELECT 1000 / (grp - 3) FROM t LIMIT 3",
     };
 
     /** A result: column list and rows (sorted unless the query orders them), or an error code. */
