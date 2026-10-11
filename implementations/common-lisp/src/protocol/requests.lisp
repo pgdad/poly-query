@@ -253,16 +253,20 @@ serializing each value according to the type of its column in COLUMNS."
   (let ((types (coerce (mapcar #'column-def-type columns) 'simple-vector)))
     (make-json-raw
      (lambda (stream)
-       (write-char #\[ stream)
-       (loop for first = t then nil
-             for row in rows
-             do (unless first (write-char #\, stream))
-                (write-char #\[ stream)
-                (dotimes (k (length types))
-                  (unless (zerop k) (write-char #\, stream))
-                  (write-value (svref row k) (svref types k) stream))
-                (write-char #\] stream))
-       (write-char #\] stream)))))
+       (let ((cb (make-charbuf 65536)))
+         (cb-char cb #\[)
+         (loop for first = t then nil
+               for row in rows
+               do (unless first (cb-char cb #\,))
+                  (cb-char cb #\[)
+                  (dotimes (k (length types))
+                    (unless (zerop k) (cb-char cb #\,))
+                    (render-value (svref row k) (svref types k) cb))
+                  (cb-char cb #\])
+                  (when (> (charbuf-fill cb) 60000)
+                    (cb-flush cb stream)))
+         (cb-char cb #\])
+         (cb-flush cb stream))))))
 
 ;;; ------------------------------------------------------------------
 ;;; load

@@ -206,8 +206,93 @@ whitespace may follow the value. Returns (values value end-position)."
 ;;; ------------------------------------------------------------------
 ;;; Writer
 
+;;; ------------------------------------------------------------------
+;;; Character buffers: large outputs (result rows) are rendered into a
+;;; string with inline appends and written to the stream in bulk, which
+;;; avoids the per-call overhead of Lisp character streams.
+
+(defstruct (charbuf (:constructor make-charbuf (&optional (size 4096)
+                                                &aux (chars (make-string size)))))
+  (chars "" :type (simple-array character (*)))
+  (fill 0 :type fixnum))
+
+(defun charbuf-grow (cb needed)
+  (let ((new (make-string (max needed (* 2 (length (charbuf-chars cb)))))))
+    (replace new (charbuf-chars cb) :end2 (charbuf-fill cb))
+    (setf (charbuf-chars cb) new)))
+
+(declaim (inline cb-char))
+(defun cb-char (cb c)
+  (let ((fill (charbuf-fill cb)))
+    (when (>= fill (length (charbuf-chars cb)))
+      (charbuf-grow cb (1+ fill)))
+    (setf (schar (charbuf-chars cb) fill) c
+          (charbuf-fill cb) (1+ fill))))
+
+(defun cb-string (cb string)
+  (let* ((fill (charbuf-fill cb))
+         (end (+ fill (length string))))
+    (when (> end (length (charbuf-chars cb)))
+      (charbuf-grow cb end))
+    (replace (charbuf-chars cb) string :start1 fill)
+    (setf (charbuf-fill cb) end)))
+
+(sb-ext:defglobal +fixnum-powers-of-ten+
+    (let ((v (make-array 19 :element-type 'fixnum)))
+      (dotimes (i 19 v) (setf (aref v i) (expt 10 i)))))
+(declaim (type (simple-array fixnum (19)) +fixnum-powers-of-ten+))
+
+(defun cb-integer (cb n &optional (width 0))
+  "Append the decimal digits of the integer N, zero-padded to WIDTH digits."
+  (declare (type integer n) (type fixnum width))
+  (if (typep n '(integer #.(- most-positive-fixnum) #.most-positive-fixnum))
+      (locally (declare (optimize (speed 3) (safety 0)))
+        (let ((digits 1)
+              (v (abs n))
+              (powers +fixnum-powers-of-ten+))
+          (declare (type (integer 1 19) digits) (type (integer 0 #.most-positive-fixnum) v))
+          (loop while (and (< digits 19) (<= (aref powers digits) v))
+                do (incf digits))
+          (when (minusp n) (cb-char cb #\-))
+          (let* ((total (max digits width))
+                 (start (charbuf-fill cb))
+                 (end (+ start total)))
+            (declare (type fixnum total start end))
+            (when (> end (length (charbuf-chars cb)))
+              (charbuf-grow cb end))
+            (let ((chars (charbuf-chars cb)))
+              (loop for i of-type fixnum from (1- end) downto start
+                    do (multiple-value-bind (q r) (truncate v 10)
+                         (setf (schar chars i) (code-char (+ 48 r))
+                               v q))))
+            (setf (charbuf-fill cb) end))))
+      (cb-string cb (format nil "~v,'0D" width n))))
+
+(defun cb-flush (cb stream)
+  "Write the buffered characters to STREAM and empty the buffer."
+  (write-string (charbuf-chars cb) stream :end (charbuf-fill cb))
+  (setf (charbuf-fill cb) 0))
+
+(defun cb-json-string (cb string)
+  "Append STRING as a JSON string literal."
+  (cb-char cb #\")
+  (if (json-plain-string-p string)
+      (cb-string cb string)
+      (cb-string cb (with-output-to-string (s) (write-escaped-json-chars string s))))
+  (cb-char cb #\"))
+
+(defun json-plain-string-p (string)
+  "True if STRING contains no character that JSON requires to be escaped."
+  (every (lambda (c) (and (char/= c #\") (char/= c #\\) (>= (char-code c) 32))) string))
+
 (defun write-json-string (string stream)
   (write-char #\" stream)
+  (if (json-plain-string-p string)
+      (write-string string stream)
+      (write-escaped-json-chars string stream))
+  (write-char #\" stream))
+
+(defun write-escaped-json-chars (string stream)
   (loop for c across string
         for code = (char-code c)
         do (cond ((char= c #\") (write-string "\\\"" stream))
@@ -220,8 +305,7 @@ whitespace may follow the value. Returns (values value end-position)."
                     (8 (write-string "\\b" stream))
                     (12 (write-string "\\f" stream))
                     (t (format stream "\\u~4,'0X" code))))
-                 (t (write-char c stream))))
-  (write-char #\" stream))
+                 (t (write-char c stream)))))
 
 (defun write-json (value stream)
   "Serialize VALUE as compact single-line JSON onto STREAM."
