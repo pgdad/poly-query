@@ -175,6 +175,12 @@
    ["SELECT DISTINCT g FROM t UNION ALL SELECT DISTINCT k FROM s" false]
    ["SELECT k FROM s UNION ALL SELECT k FROM t LIMIT 100" false]
    ["SELECT id FROM t UNION ALL SELECT k / g FROM t" false]
+   ;; string functions over dictionary-encoded columns (once per entry)
+   ["SELECT UPPER(SUBSTR(s, 1, 3)), LENGTH(u), COUNT(*) FROM t GROUP BY UPPER(SUBSTR(s, 1, 3)), LENGTH(u)" false]
+   ["SELECT id, CONCAT(s, '-', g), NULLIF(s, 'red'), REPLACE(s, 'e', 'E'), LOWER(TRIM(s)) FROM t" false]
+   ["SELECT NULLIF(s, 'blue') AS x, COUNT(*) FROM t GROUP BY NULLIF(s, 'blue')" false]
+   ["SELECT CONCAT(s, 'x') AS x, COUNT(*) FROM t GROUP BY CONCAT(s, 'x')" false]
+   ["SELECT id FROM t WHERE UPPER(s) = 'RED' AND LENGTH(SUBSTR(u, 2)) > 2" false]
    ;; SELECT DISTINCT (a hash aggregation outside row mode)
    ["SELECT DISTINCT g, s, b FROM t" false]
    ["SELECT DISTINCT f, d FROM t WHERE g = 2" false]

@@ -869,29 +869,74 @@
                             (recur (rest ks) s2 (long n2)))
                           out))))))))))
 
+(defn- dict-results
+  "Per-dictionary cache of the results of (f x) over the entries x of a
+  dictionary: [Object[] results, every result non-NULL?]."
+  [f]
+  (let [cache (IdentityHashMap.)]
+    (fn [^objects dict]
+      (locking cache
+        (or (.get cache dict)
+            (let [out (object-array (alength dict))]
+              (dotimes [c (alength dict)] (aset out c (f (aget dict c))))
+              (let [r [out (every? some? out)]]
+                (.put cache dict r)
+                r)))))))
+
 (defn- call-kernel
   "Function calls whose arguments cannot fail: the arguments are evaluated
-  as vectors and the row engine's function is applied per row to them."
+  as vectors and the row engine's function is applied per row to them.
+  A call whose only non-constant argument is a STRING is applied once per
+  dictionary entry to dictionary vectors (a STRING result stays
+  dictionary-encoded when no entry maps to NULL)."
   [env e]
   (if (or (some may-fail? (:args e)) (= "PQ_SLEEP" (:fn e)))
     (row-kernel env e)
-    (let [ks (into-array Kernel (map #(compile-kernel env %) (:args e)))
+    (let [args (:args e)
+          ks (into-array Kernel (map #(compile-kernel env %) args))
           nargs (alength ^objects ks)
           ^objects current (object-array (max 1 nargs))
           arg-fns (mapv (fn [j] (fn [_] (aget current j))) (range nargs))
           f (functions/compile-call e arg-fns (:ctx env))
-          type (:type e)]
+          type (:type e)
+          varying (keep-indexed (fn [j a] (when-not (= :literal (:node a)) j)) args)
+          dict-j (when (and (= 1 (count varying))
+                            (= :string (t/kind (:type (nth args (first varying))))))
+                   (long (first varying)))
+          ;; f of one value of argument dict-j, the other (literal) arguments fixed
+          apply-1 (when dict-j
+                    (fn [x]
+                      (locking current
+                        (dotimes [j nargs] (aset current j (:value (nth args j))))
+                        (aset current dict-j x)
+                        (f nil))))
+          per-dict (when dict-j (dict-results apply-1))
+          null-result (when dict-j (apply-1 nil))
+          keep-dict? (and (= :string (t/kind type)) (nil? null-result))]
       ;; `current` is shared by the closures above: one evaluation at a time
       (reify Kernel
         (eval [_ bt sel n]
-          (locking current
-            (let [args (object-array nargs)
-                  out (b/new-vec type)]
-              (dotimes [j nargs] (aset args j (ev (aget ^objects ks j) bt sel n)))
-              (each-sel [i sel n]
-                (dotimes [j nargs] (aset current j (.getObj ^Vec (aget args j) i)))
-                (.setObj out i (f nil)))
-              out)))))))
+          (let [x (when dict-j (ev (aget ^objects ks dict-j) bt sel n))]
+            (if (instance? DictVec x)
+              (let [^DictVec d x
+                    [^objects res all?] (per-dict (.-dict d))
+                    codes ^ints (.-codes d)
+                    nulls ^booleans (.-nulls d)]
+                (if (and keep-dict? all?)
+                  (DictVec. codes res nulls)
+                  (let [out (b/new-vec type)]
+                    (each-sel [i sel n]
+                      (.setObj out i (if (b/nulls-at? nulls i) null-result (aget res (aget codes i)))))
+                    out)))
+              (locking current
+                (let [args (object-array nargs)
+                      out (b/new-vec type)]
+                  (dotimes [j nargs]
+                    (aset args j (if (and x (= j dict-j)) x (ev (aget ^objects ks j) bt sel n))))
+                  (each-sel [i sel n]
+                    (dotimes [j nargs] (aset current j (.getObj ^Vec (aget args j) i)))
+                    (.setObj out i (f nil)))
+                  out)))))))))
 
 ;; ---------------------------------------------------------------------------
 
