@@ -156,11 +156,13 @@ final class Phase5Test {
     static void testTinyBatchesAndMorsels() {
         System.setProperty("polyquery.batchSize", "5");
         System.setProperty("polyquery.morselRows", "37");
+        System.setProperty("polyquery.parallelBuildRows", "8");
         try {
             checkAllCombinations(engine());
         } finally {
             System.clearProperty("polyquery.batchSize");
             System.clearProperty("polyquery.morselRows");
+            System.clearProperty("polyquery.parallelBuildRows");
         }
     }
 

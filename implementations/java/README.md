@@ -338,9 +338,11 @@ pipeline over fewer than two morsels is not parallelized.
 
 ### Joins
 
-* **Hash join** (vectorized): the build input is materialized in a `ColumnStore`; a single
-  integer-like key uses `LongIndex`, an open-addressing table with the key stored inline in the
-  slot (one cache miss per probe); other keys use the generic tuple table. Rows with equal keys
+* **Hash join** (vectorized): the build input is materialized in a `ColumnStore` (presized
+  when the input is a plain table scan); a single integer-like key uses `LongIndex`, an
+  open-addressing table with the key stored inline in the slot (one cache miss per probe) — for
+  large build sides (≥ 131,072 rows) with several threads, built as hash partitions in parallel;
+  other keys use the generic tuple table. Rows with equal keys
   are chained in input order. The probe emits (probe row, build row) pairs in probe order and,
   per probe row, in build order, gathering only the columns some consumer reads; LEFT JOIN
   padding rows are placed right after their row's candidates — the row engine's exact order.
@@ -487,8 +489,9 @@ hashing, memory access and selection-vector bookkeeping, which do not vectorize:
 
 ### Configuration for experiments
 
-`-Dpolyquery.batchSize=N` and `-Dpolyquery.morselRows=N` (via `POLYQUERY_JAVA_OPTS`) change the
-batch and morsel sizes. Tiny values (e.g. 3 and 5) make every batch boundary, adapter, parallel
+`-Dpolyquery.batchSize=N`, `-Dpolyquery.morselRows=N` and `-Dpolyquery.parallelBuildRows=N` (via
+`POLYQUERY_JAVA_OPTS`) change the batch and morsel sizes and the build size from which hash-join
+indexes are built in parallel. Tiny values (e.g. 3 and 5) make every batch boundary, adapter, parallel
 worker and deferred-error path run on the small conformance fixtures; the conformance suite,
 the `--modes` matrix and the unit tests pass that way too.
 
@@ -631,8 +634,8 @@ and `use_indexes`/`optimize` off.
 * Native kernels (`native: true`, `--native-kernels`) are not used: the option is accepted and
   ignored, `native.kernels` is not claimed.
 * In vectorized mode, sort-merge and nested-loop joins and correlated hash lookups are the row
-  engine's operators behind adapters. Hash join build sides are built by one thread (their
-  input pipelines may run in parallel).
+  engine's operators behind adapters. Hash join build inputs are materialized by one thread
+  (their input pipelines and, for single integer keys, the index may run in parallel).
 * Parallelism applies to pipelines that start with a table scan and contain no subqueries;
   index scans and pipelines over fewer than two morsels (131,072 rows) run on one thread.
   High-cardinality GROUP BY / DISTINCT scale only moderately (partial aggregation reduces

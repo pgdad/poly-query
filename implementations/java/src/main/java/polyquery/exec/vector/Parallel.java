@@ -308,6 +308,32 @@ final class Parallel {
         return Morsel.of(c.scan(), morselRows).size() >= 2;
     }
 
+    /** Runs independent tasks on the worker pool (the first on the calling thread) and waits for all. */
+    static void runAll(List<Runnable> tasks, ExecContext ctx) {
+        List<Future<?>> futures = new ArrayList<>();
+        for (int i = 1; i < tasks.size(); i++) {
+            futures.add(POOL.submit(tasks.get(i)));
+        }
+        RuntimeException failure = null;
+        try {
+            tasks.getFirst().run();
+        } catch (RuntimeException e) {
+            failure = e;
+        }
+        for (Future<?> f : futures) {
+            try {
+                await(f, ctx);
+            } catch (RuntimeException e) {
+                if (failure == null) {
+                    failure = e;
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
     /** Rethrows a worker's failure on the query thread. */
     private static RuntimeException unwrap(Throwable t) {
         if (t instanceof ExecutionException e && e.getCause() != null) {
@@ -369,7 +395,7 @@ final class Parallel {
                 JoinBatches.JoinTable t = new JoinBatches.JoinTable(buildPlan.schema(), ctx);
                 t.build(builder.build(buildPlan), new BatchExprs(builder.compiler(), buildKeys),
                         JoinBatches.scaleFactors(buildKeys, probeKeys), keyTypes(buildKeys),
-                        BatchBuilder.expectedRows(buildPlan));
+                        BatchBuilder.expectedRows(buildPlan), builder.threads());
                 joins.add(j);
                 tables.add(t);
                 counters.add(new JoinBatches.JoinCounter(ctx.maxJoinRows()));

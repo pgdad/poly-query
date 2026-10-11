@@ -81,7 +81,10 @@ final class JoinBatches {
         private final ExecContext ctx;
         private ColumnStore store;
         private GroupKeys keys;
-        private LongIndex longIndex;
+        /** Single 64-bit key: index partitions by key hash (one unless built in parallel). */
+        private LongIndex[] longIndex;
+        private int partitionBits;
+        private long[] rowKeys;
         private int[] first;
         private int[] last;
         private int[] next;
@@ -114,9 +117,17 @@ final class JoinBatches {
             if (longIndex != null) {
                 Vec v = kv[0];
                 long[] x = v.longs;
-                for (int kk = 0; kk < n; kk++) {
-                    int i = sel == null ? kk : sel[kk];
-                    heads[i] = v.isNull(i) ? -1 : longIndex.head(x[i]);
+                if (partitionBits == 0) {
+                    LongIndex index = longIndex[0];
+                    for (int kk = 0; kk < n; kk++) {
+                        int i = sel == null ? kk : sel[kk];
+                        heads[i] = v.isNull(i) ? -1 : index.head(x[i]);
+                    }
+                } else {
+                    for (int kk = 0; kk < n; kk++) {
+                        int i = sel == null ? kk : sel[kk];
+                        heads[i] = v.isNull(i) ? -1 : longIndex[partition(x[i])].head(x[i]);
+                    }
                 }
                 return;
             }
@@ -132,11 +143,67 @@ final class JoinBatches {
             return next[row];
         }
 
+        /** Index partition of a key (independent bits of a different hash than the index slots). */
+        private int partition(long key) {
+            return (int) ((key * 0xC2B2AE3D27D4EB4FL) >>> (64 - partitionBits));
+        }
+
+        /**
+         * Builds the single-key index over the stored rows: as one table, or — for large inputs
+         * with several threads — as hash partitions built in parallel, each inserting its rows in
+         * input order (so every chain still lists equal keys in build input order).
+         */
+        private void indexLongKeys(int threads) {
+            int rows = store.rows();
+            partitionBits = 0;
+            if (threads > 1 && rows >= Integer.getInteger("polyquery.parallelBuildRows", PARALLEL_BUILD_ROWS)) {
+                partitionBits = Math.min(6, 32 - Integer.numberOfLeadingZeros(threads - 1) + 1);
+            }
+            int parts = 1 << partitionBits;
+            longIndex = new LongIndex[parts];
+            if (parts == 1) {
+                LongIndex index = new LongIndex();
+                for (int r = 0; r < rows; r++) {
+                    index.add(rowKeys[r], r, next);
+                }
+                longIndex[0] = index;
+                return;
+            }
+            int[] start = new int[parts + 1];
+            int[] partOf = new int[rows];
+            for (int r = 0; r < rows; r++) {
+                partOf[r] = partition(rowKeys[r]);
+                start[partOf[r] + 1]++;
+            }
+            for (int p = 0; p < parts; p++) {
+                start[p + 1] += start[p];
+            }
+            int[] members = new int[rows];
+            int[] fill = Arrays.copyOf(start, parts);
+            for (int r = 0; r < rows; r++) {
+                members[fill[partOf[r]]++] = r; // ascending row order within each partition
+            }
+            List<Runnable> tasks = new java.util.ArrayList<>();
+            for (int p = 0; p < parts; p++) {
+                int part = p;
+                tasks.add(() -> {
+                    LongIndex index = new LongIndex();
+                    for (int k = start[part]; k < start[part + 1]; k++) {
+                        index.add(rowKeys[members[k]], members[k], next);
+                    }
+                    longIndex[part] = index;
+                });
+            }
+            Parallel.runAll(tasks, ctx);
+        }
+
         /** Consumes the build input completely (raising its deferred error, if any, at the end). */
-        void build(BatchOperator input, BatchExprs keyExprs, long[] factors, DataType[] keyTypes, int expectedRows) {
+        void build(BatchOperator input, BatchExprs keyExprs, long[] factors, DataType[] keyTypes, int expectedRows,
+                   int threads) {
             boolean singleLong = keyTypes.length == 1 && Vec.kindOf(keyTypes[0]) == Vec.Kind.LONG;
             keys = singleLong ? null : new GroupKeys(keyTypes);
-            longIndex = singleLong ? new LongIndex() : null;
+            longIndex = null;
+            rowKeys = singleLong ? new long[Math.max(64, expectedRows)] : null;
             store = new ColumnStore(schema, expectedRows);
             first = new int[16];
             Arrays.fill(first, -1);
@@ -156,7 +223,7 @@ final class JoinBatches {
                             gids = new int[Math.max(b.size, 16)];
                             keep = new int[gids.length];
                         }
-                        if (longIndex != null) {
+                        if (singleLong) {
                             int m = 0;
                             for (int k = 0; k < b.count; k++) {
                                 int i = b.pos(k);
@@ -184,6 +251,9 @@ final class JoinBatches {
             } finally {
                 input.close();
             }
+            if (singleLong) {
+                indexLongKeys(threads);
+            }
         }
 
         private void appendLong(Batch b, int[] keep, int m, Vec key) {
@@ -191,10 +261,13 @@ final class JoinBatches {
             if (next.length < store.rows()) {
                 next = Arrays.copyOf(next, Math.max(store.rows(), next.length * 2));
             }
-            for (int k = 0; k < m; k++) {
-                longIndex.add(key.longs[keep[k]], start + k, next);
+            if (rowKeys.length < store.rows()) {
+                rowKeys = Arrays.copyOf(rowKeys, Math.max(store.rows(), rowKeys.length * 2));
             }
-            long bytes = ColumnStore.estimate(b, keep, m) + 32L * m;
+            for (int k = 0; k < m; k++) {
+                rowKeys[start + k] = key.longs[keep[k]];
+            }
+            long bytes = ColumnStore.estimate(b, keep, m) + 40L * m;
             ctx.reserve(bytes);
             reserved += bytes;
         }
@@ -234,8 +307,12 @@ final class JoinBatches {
             store = null;
             keys = null;
             longIndex = null;
+            rowKeys = null;
         }
     }
+
+    /** Default: build sides with at least this many rows get their key index built in parallel. */
+    static final int PARALLEL_BUILD_ROWS = 1 << 17;
 
     /**
      * Open-addressing hash index from a single 64-bit join key to the chain of build rows with
@@ -330,6 +407,7 @@ final class JoinBatches {
         private final long[] buildFactors;
         private final DataType[] keyTypes;
         private final int expectedBuildRows;
+        private final int threads;
         private final BatchExprs probeKeys;
         private final long[] probeFactors;
         private final BatchExprs residual;
@@ -362,7 +440,7 @@ final class JoinBatches {
          * @param buildIsLeft the build input supplies the left columns (INNER joins only)
          */
         Probe(BatchOperator input, JoinTable table, BatchOperator buildInput, BatchExprs buildKeys, long[] buildFactors,
-              DataType[] keyTypes, int expectedBuildRows, BatchExprs probeKeys, long[] probeFactors, BatchExprs residual, boolean leftOuter,
+              DataType[] keyTypes, int expectedBuildRows, int threads, BatchExprs probeKeys, long[] probeFactors, BatchExprs residual, boolean leftOuter,
               boolean buildIsLeft, List<ColumnSchema> outSchema, int probeWidth, ExecContext ctx, JoinCounter counter,
               int capacity) {
             this.input = input;
@@ -375,6 +453,7 @@ final class JoinBatches {
             this.buildFactors = buildFactors;
             this.keyTypes = keyTypes;
             this.expectedBuildRows = expectedBuildRows;
+            this.threads = threads;
             this.probeKeys = probeKeys;
             this.probeFactors = probeFactors;
             this.residual = residual;
@@ -407,7 +486,7 @@ final class JoinBatches {
         public void open() {
             if (ownsTable) {
                 counter.reset();
-                table.build(buildInput, buildKeys, buildFactors, keyTypes, expectedBuildRows);
+                table.build(buildInput, buildKeys, buildFactors, keyTypes, expectedBuildRows, threads);
             }
             keys = table.prober();
             input.open();

@@ -128,7 +128,7 @@ public final class BatchBuilder {
         BatchOperator buildInput = table == null ? build(buildPlan) : null;
         BatchExprs buildKeys = table == null ? new BatchExprs(comp, buildKeyExprs) : null;
         return new JoinBatches.Probe(probe, table, buildInput, buildKeys,
-                JoinBatches.scaleFactors(buildKeyExprs, probeKeyExprs), keyTypes, expectedRows(buildPlan),
+                JoinBatches.scaleFactors(buildKeyExprs, probeKeyExprs), keyTypes, expectedRows(buildPlan), threads,
                 new BatchExprs(comp, probeKeyExprs),
                 JoinBatches.scaleFactors(probeKeyExprs, buildKeyExprs),
                 j.residual() == null ? null : new BatchExprs(comp, List.of(j.residual())),

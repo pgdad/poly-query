@@ -309,7 +309,7 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--quick", action="store_true", help="only the runner's mode matrix")
     args = ap.parse_args()
-    variants = ["", "-Dpolyquery.batchSize=7 -Dpolyquery.morselRows=40"]
+    variants = ["", "-Dpolyquery.batchSize=7 -Dpolyquery.morselRows=40 -Dpolyquery.parallelBuildRows=16"]
     engines = [Engine(args.engine, args.data, v) for v in variants]
     schemas = None
     for e in engines:
