@@ -1,0 +1,110 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-optimize-latency-rust-a2-20261011T124903Z",
+ "language": "rust",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 2,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-optimize-latency",
+ "prompt_sha256": "5c4d5eb67b2688d9da28436031a97dcb58bb8369ef8d8534cc9f315700a8ef30",
+ "session_id": "05419ead-35dc-43bb-8232-3b8be0048b81",
+ "tokens": {
+  "input": 594,
+  "output": 346572,
+  "cache_read": 96054120,
+  "cache_creation": 586766,
+  "thinking": null,
+  "thinking_estimated": 160770,
+  "source": "result events",
+  "api_messages": 297
+ },
+ "rate_limit": {
+  "events": 47,
+  "max_utilization": {
+   "five_hour": 0.57,
+   "seven_day": 0.46
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 30.83876799999999,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 308,
+ "result_segments": 1,
+ "assistant_messages": 694,
+ "tool_calls": {
+  "Bash": 299,
+  "Write": 8
+ },
+ "tool_calls_total": 307,
+ "tool_failures": 6,
+ "build_invocations": 116,
+ "build_failures_heuristic": 10,
+ "conformance_runs": 10,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 6669.4,
+  "model_api_seconds": 3223.7,
+  "tool_seconds": 3448.6,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 17,
+  "files_changed": 25,
+  "lines_added": 3201,
+  "lines_removed": 358,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The analytics workload at scale 1m now runs about 7.8\u00d7 faster in total (sum of per-query medians: 428 ms before, 55 ms after). Every query returns the same results as before, and all conformance phases still pass. Everything is committed in 18 commits on `main`, and the README has a new \"Latency optimization (analytics workload)\" section with the full before/after table.\n\n**Test results (final commit):**\n- Conformance runner, session: phase 1 225/225, phase 2 208/208, phase 3 212/212, phase 5 15/15, **TOTAL 660/660 pass** (same as the baseline).\n- Also 660/660 over HTTP, 3870/3870 with `--modes`, and 660/660 with `--native` (kernel library built outside the workspace).\n- `make build test` passes (167 unit tests), and `make lint` is clean.\n- Extra checks:\n  - A new ordered comparison of 29 `ORDER BY` queries on the 1m tables against row mode: no differences.\n  - The existing random differential tester (about 2,000 queries) and 1m-table comparison script: no differences.\n  - A smoke test of 72 concurrent queries in `serve` mode: no errors.\n\n**Before/after (median ms; full table in the README):**\n\n| Query | Before | After |\n|---|---:|---:|\n| q14 full string sort | 281 | 18.0 |\n| q15 multi-key sort | 83 | 10.9 |\n| q09 `COUNT(DISTINCT)` | 21.1 | 1.7 |\n| q19 CTE + subquery | 13.4 | 4.1 |\n| q13 top-N | 3.5 | 0.6 |\n| q10 / q11 joins | 4.0 / 3.4 | 2.6 / 2.0 |\n\nThe other queries are 1.2\u20131.8\u00d7 faster, except q03 and q20, which are unchanged.\n\n**What I changed:**\n- **Sorting:** every sort key becomes a compact integer code (strings by their first 8 bytes after any prefix all values share), and rows are sorted on one 64-bit key using all threads. Rare ties that the 64-bit key can't settle are then ordered by full comparison.\n- **Thread pool:** parallel operators now reuse a shared pool of worker threads instead of starting new ones for every operator. The pool starts a new thread rather than making work wait, so a slow client can't block other queries.\n- **Allocator fix:** reusing threads triggered a glibc memory-allocator problem that made parallel join probes about 2\u00d7 slower. A small custom global allocator (`src/alloc.rs`) avoids it.\n- **Parallel top-N:** for `ORDER BY \u2026 LIMIT n`, each worker keeps its own best n rows. Ties come out in the same order as the serial engine.\n- **DISTINCT aggregates:** they now use typed hash sets instead of slow row-by-row code, and partial results from the workers are merged in parallel.\n- **Subqueries:** uncorrelated subqueries can now run in parallel and are evaluated once per batch instead of once per row.\n- **Shared subplans:** an identical aggregation that appears twice in a query (such as q19's CTE) is computed once.\n- **Join and grouping keys:** dense integer keys (like primary keys) use a direct array lookup instead of hashing.\n\n**Known limitations:**\n- Building the hash table for a join is still single-threaded; it costs about 1\u20132 ms per join here.\n- Correlated subqueries still run serially.\n- The machine is shared with other workloads, so absolute times move by \u00b120\u201330% between runs. The table comes from one quiet run with both engines interleaved; the speedups were consistent across runs.\n- q20 (string functions) did not improve.\n\n**Main design decisions:**\n- Sorting always uses one 64-bit key and fixes the rare unresolved ties afterwards. This beat my earlier versions that ranked strings with an extra sort or used 128-bit keys.\n- I only accepted a change when an interleaved before/after comparison confirmed it. Two ideas made things slower and were reverted, and malloc tuning brought nothing; these are listed in the README under \"Tried and rejected\".\n- New tools in `bench/`: `workload.py` (interleaved, result-checked timing; produces the README table), `ab.py` (quick before/after comparison of two builds) and `ordercheck.py` (ordered result comparison against row mode).",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

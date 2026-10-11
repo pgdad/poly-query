@@ -1,0 +1,166 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-optimize-latency-common-lisp-a2-20261011T124904Z",
+ "language": "common-lisp",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 2,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-optimize-latency",
+ "prompt_sha256": "f7e9f8fac7d8aac86b957b23e556be924c4de4c3f0a3bba0a2dcd341d353e58c",
+ "session_id": "e93a91e7-97d7-45fb-bf4e-01ce195f8cb9",
+ "tokens": {
+  "input": 426,
+  "output": 201551,
+  "cache_read": 51283636,
+  "cache_creation": 414336,
+  "thinking": null,
+  "thinking_estimated": 91357,
+  "source": "result events (summed over 2 segments)",
+  "api_messages": 213
+ },
+ "rate_limit": {
+  "events": 41,
+  "max_utilization": {
+   "five_hour": 0.56,
+   "seven_day": 0.46
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 17.604139200000017,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 223,
+ "result_segments": 2,
+ "assistant_messages": 482,
+ "tool_calls": {
+  "Bash": 212,
+  "Write": 3,
+  "Edit": 3,
+  "Read": 1,
+  "ToolSearch": 1,
+  "Monitor": 1
+ },
+ "tool_calls_total": 221,
+ "tool_failures": 1,
+ "build_invocations": 91,
+ "build_failures_heuristic": 5,
+ "conformance_runs": 21,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 6293.1,
+  "model_api_seconds": 2169.5,
+  "tool_seconds": 3556.1,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 13,
+  "files_changed": 29,
+  "lines_added": 3946,
+  "lines_removed": 230,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "A background job I'd left running hit its time limit and was stopped. It was only waiting for the baseline fuzz run to finish so it could print the output, and I had already read that output directly. Nothing is lost and the work above is complete and committed.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

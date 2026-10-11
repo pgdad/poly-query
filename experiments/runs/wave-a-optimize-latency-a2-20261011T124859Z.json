@@ -45,5 +45,37 @@
   1.0517578125,
   0.9013671875,
   0.84130859375
+ ],
+ "finished": "2026-10-11T14:40:56+00:00",
+ "loadavg_end": [
+  1.7177734375,
+  2.45166015625,
+  4.1923828125
+ ],
+ "results": [
+  {
+   "run_id": "a-optimize-latency-clojure-a2-20261011T124901Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-optimize-latency-java-a3-20261011T124859Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-optimize-latency-go-a3-20261011T124900Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-optimize-latency-python-a3-20261011T124902Z",
+   "outcome": "tests_failed"
+  },
+  {
+   "run_id": "a-optimize-latency-common-lisp-a2-20261011T124904Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-optimize-latency-rust-a2-20261011T124903Z",
+   "outcome": "success"
+  }
  ]
 }

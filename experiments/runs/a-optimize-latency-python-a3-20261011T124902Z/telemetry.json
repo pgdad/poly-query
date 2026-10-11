@@ -1,0 +1,132 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-optimize-latency-python-a3-20261011T124902Z",
+ "language": "python",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 3,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-optimize-latency",
+ "prompt_sha256": "4d3d799fe6b9935b41929d5a93dd238a4db92869d5e393031c6369b2b1404dba",
+ "session_id": "50a753ac-50c1-412e-9b89-bca7fbec45b7",
+ "tokens": {
+  "input": 430,
+  "output": 288030,
+  "cache_read": 67074091,
+  "cache_creation": 498027,
+  "thinking": null,
+  "thinking_estimated": 159326,
+  "source": "result events",
+  "api_messages": 215
+ },
+ "rate_limit": {
+  "events": 42,
+  "max_utilization": {
+   "seven_day": 0.46,
+   "five_hour": 0.57
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 23.161354200000005,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 221,
+ "result_segments": 1,
+ "assistant_messages": 529,
+ "tool_calls": {
+  "Bash": 211,
+  "Write": 7,
+  "Read": 1,
+  "Edit": 1
+ },
+ "tool_calls_total": 220,
+ "tool_failures": 1,
+ "build_invocations": 48,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 14,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 6071.8,
+  "model_api_seconds": 2739.5,
+  "tool_seconds": 3335.2,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 16,
+  "files_changed": 20,
+  "lines_added": 2168,
+  "lines_removed": 189,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The task is complete: the 20 analytics queries now take **835 ms in total instead of 5,233 ms (6.3\u00d7 faster)**, and every query returns exactly the same rows as the starting commit. Everything is committed and the tree is clean.\n\n## Results\nTimes are medians of 10 runs per query, alternating between the old and new engine through `bin/polyquery session` at scale 1m. The machine is shared (load average around 10), so single runs vary by about \u00b130%.\n\n| query | before (ms) | after (ms) | | query | before (ms) | after (ms) |\n|---|---:|---:|---|---|---:|---:|\n| q02 | 114 | 13 | | q12 | 136 | 16 |\n| q04 | 212 | 27 | | q13 | 182 | 18 |\n| q06 | 188 | 49 | | q14 | 971 | 176 |\n| q08 | 260 | 29 | | q15 | 1209 | 166 |\n| q10 | 346 | 59 | | q19 | 476 | 59 |\n| q11 | 266 | 68 | | q20 | 200 | 15 |\n\nThe full table for all 20 queries is in the new \"Latency optimization\" section of `implementations/python/README.md`.\n\n**Tests:**\n- Conformance: `TOTAL: 660/660 pass` (phases 1, 2, 3, 5 and the change-request cases), the same as before.\n- HTTP suite: `18/18 passed`.\n- `make build test` succeeds from a clean tree, and `make lint` is clean.\n- The random differential tester found 0 mismatches in 900 queries.\n\n## What I changed\n1. **Persistent worker pool.** Starting one worker process per query cost about 6 ms each once ~1 GB of tables is loaded, which ate the gain from parallelism. Workers are now started once per catalog version and reused. Without a `threads` option, vectorized queries split inputs of at least 50,000 rows across up to 16 workers. Small inputs keep their exact serial plans, so conformance behaviour is unchanged.\n2. **Parallel full sorts (q14, q15).** Rows are split into ranges of the first sort key, each worker sorts one range, and the parent joins the ranges in order. The output order is exactly what a serial sort gives.\n3. **Parallel merging for GROUP BYs with many groups.** Workers merge the per-key partial results instead of the parent, and the original group order is kept.\n4. **Anti join (q12).** A `LEFT JOIN \u2026 WHERE right_col IS NULL` that can only keep unmatched rows now skips building the joined rows it would throw away.\n5. **CTE reuse (q19).** Identical, self-contained subquery inputs, such as a CTE referenced twice, are computed once.\n6. **Faster expression kernels.** Decimal and integer arithmetic run on whole batches, and functions and `LIKE` run once per distinct value on low-variety columns.\n7. **`result: count`** no longer builds row tuples it then discards.\n\nI deliberately did not cache results or hash tables between queries, and did not skip work such as the sort in count-only queries, since either would only flatter repeated benchmark runs.\n\n## Bug found and fixed along the way\nConcurrent parallel queries could hang forever, because a worker started for one query kept another query's pipe open. Replies are now length-prefixed, and workers close inherited pipes and sockets, including HTTP connections.\n\n## Known limitations\n- **First parallel query after a load:** starting the 16 workers costs about 100 ms.\n- **Memory:** after the full workload the workers hold about 1.2 GB of their own memory, on top of the parent's ~1 GB.\n- **Concurrent queries:** only one query uses the pool at a time; others fall back to starting their own workers.\n- **Joins:** every worker builds the join's hash table itself.\n- **Scaling:** 16 busy workers slow each other down about 3\u00d7 on this machine, which caps the speedup well below 16\u00d7.\n\n## New tools\n- `tools/workload_bench.py` times the workload through a session and can save or check result rows.\n- `tools/profile_workload.py` profiles chosen workload queries.\n\nThe test data was generated with `--jobs 1` because this sandbox has no semaphores for multiprocessing.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

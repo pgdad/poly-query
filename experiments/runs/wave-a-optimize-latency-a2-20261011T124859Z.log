@@ -14,3 +14,13 @@
 2026-10-11T14:21:35+00:00 [a-optimize-latency-go-a3-20261011T124900Z] agent finished; collecting telemetry
 2026-10-11T14:21:35+00:00 [a-optimize-latency-go-a3-20261011T124900Z] validating (clean clone, sandboxed)
 2026-10-11T14:21:52+00:00 [a-optimize-latency-go-a3-20261011T124900Z] outcome=success cost=$31.194049000000007 turns=328 wall=5543.9s
+2026-10-11T14:30:33+00:00 [a-optimize-latency-python-a3-20261011T124902Z] agent finished; collecting telemetry
+2026-10-11T14:30:33+00:00 [a-optimize-latency-python-a3-20261011T124902Z] validating (clean clone, sandboxed)
+2026-10-11T14:31:04+00:00 [a-optimize-latency-python-a3-20261011T124902Z] outcome=tests_failed cost=$23.161354200000005 turns=221 wall=6071.8s
+2026-10-11T14:34:24+00:00 [a-optimize-latency-common-lisp-a2-20261011T124904Z] agent finished; collecting telemetry
+2026-10-11T14:34:24+00:00 [a-optimize-latency-common-lisp-a2-20261011T124904Z] validating (clean clone, sandboxed)
+2026-10-11T14:34:41+00:00 [a-optimize-latency-common-lisp-a2-20261011T124904Z] outcome=success cost=$17.604139200000017 turns=223 wall=6293.1s
+2026-10-11T14:40:35+00:00 [a-optimize-latency-rust-a2-20261011T124903Z] agent finished; collecting telemetry
+2026-10-11T14:40:35+00:00 [a-optimize-latency-rust-a2-20261011T124903Z] validating (clean clone, sandboxed)
+2026-10-11T14:40:56+00:00 [a-optimize-latency-rust-a2-20261011T124903Z] outcome=success cost=$30.83876799999999 turns=308 wall=6669.4s
+2026-10-11T14:40:56+00:00 wave wave-a-optimize-latency-a2-20261011T124859Z finished: latency=success, latency=success, latency=success, latency=tests_failed, latency=success, latency=success
