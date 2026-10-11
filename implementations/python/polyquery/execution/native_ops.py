@@ -42,11 +42,12 @@ first one seen.
 from __future__ import annotations
 
 import array
+import bisect
 import collections
 import itertools
 import operator
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from .. import errors
 from ..analysis import bound as b
@@ -454,8 +455,11 @@ def selected_positions(kernels: NativeKernels, bits: array.array, n: int, count:
     return idx
 
 
-def gather_column(kernels: NativeKernels, window: Window, vector: ColumnVector, idx: array.array) -> list[Any]:
-    """The runtime values of the selected rows of one column."""
+def gather_column(
+    kernels: NativeKernels, window: Window, vector: ColumnVector, bits: array.array, idx: array.array
+) -> list[Any]:
+    """The runtime values of one column at the selected rows (``idx``: the
+    positions of the bits set in ``bits``)."""
     base, k = window.base, len(idx)
     if isinstance(vector, DictVector) or (
         isinstance(vector, PlainVector) and isinstance(vector.data, array.array) and vector.data.itemsize >= 4
@@ -476,18 +480,29 @@ def gather_column(kernels: NativeKernels, window: Window, vector: ColumnVector, 
         if vector.dtype.kind is TypeKind.BOOLEAN:
             values = list(map(bool, values))
     if vector.validity is not None:
-        _apply_nulls(window, vector, idx, values)
+        _apply_nulls(kernels, window, vector, bits, idx, values)
     return values
 
 
-def _apply_nulls(window: Window, vector: ColumnVector, idx: array.array, values: list[Any]) -> None:
-    assert vector.validity is not None
-    start = window.base >> 3
-    flags = bits_to_flags(vector.validity[start : start + window.nbytes], window.n)
-    valid = list(map(flags.__getitem__, idx))
-    if 0 in valid:
-        nulls = itertools.compress(range(len(valid)), map(operator.not_, valid))
-        collections.deque(map(values.__setitem__, nulls, itertools.repeat(None)), maxlen=0)
+def _apply_nulls(
+    kernels: NativeKernels, window: Window, vector: ColumnVector, bits: array.array, idx: array.array, values: list[Any]
+) -> None:
+    """Sets the gathered values of the selected NULL rows to None."""
+    validity = window.validity(vector)
+    nulls_bits = array.array("B", bits)
+    kernels.bitmap_andnot(nulls_bits, validity, window.nbytes)  # selected and NULL
+    nulls = kernels.popcount(nulls_bits.buffer_info()[0], window.n)
+    if not nulls:
+        return
+    if nulls * 16 < len(idx):  # few: find their output positions by bisection
+        rows = selected_positions(kernels, nulls_bits, window.n, nulls)
+        positions: Iterable[int] = map(bisect.bisect_left, itertools.repeat(idx), rows)
+    else:
+        assert vector.validity is not None
+        start = window.base >> 3
+        flags = bits_to_flags(vector.validity[start : start + window.nbytes], window.n)
+        positions = itertools.compress(range(len(idx)), map(operator.not_, map(flags.__getitem__, idx)))
+    collections.deque(map(values.__setitem__, positions, itertools.repeat(None)), maxlen=0)
 
 
 def filtered_batches(
@@ -513,7 +528,7 @@ def filtered_batches(
                 cols = [group.vector(i).to_list(lo, hi) for i in scan.columns]
             else:
                 idx = selected_positions(kernels, bits, window.n, count)
-                cols = [gather_column(kernels, window, group.vector(i), idx) for i in scan.columns]
+                cols = [gather_column(kernels, window, group.vector(i), bits, idx) for i in scan.columns]
             if count <= batch_rows:
                 yield cols, count
             else:
@@ -696,7 +711,7 @@ class NativeScanAggregate:
         """A window whose key is not a small dictionary: the selected rows are
         gathered and fed to the states row by row."""
         idx = selected_positions(kernels, sel, window.n, count)
-        keys = gather_column(kernels, window, key_vector, idx)
+        keys = gather_column(kernels, window, key_vector, sel, idx)
         for key in dict.fromkeys(keys):
             if key not in index:
                 _group_id(key, index, states, ctx, self.width)
@@ -706,7 +721,7 @@ class NativeScanAggregate:
             if spec.column is None:
                 state.update_rows(ids, None)
             else:
-                state.update_rows(ids, gather_column(kernels, window, group.vector(spec.column), idx))
+                state.update_rows(ids, gather_column(kernels, window, group.vector(spec.column), sel, idx))
 
 
 def _group_id(key: Any, index: dict[Any, int], states: list[GroupState], ctx: ExecutionContext, width: int) -> int:
@@ -785,7 +800,7 @@ def _selected_values(
 ) -> list[Any]:
     """The values of the rows set in ``rows``."""
     idx = selected_positions(kernels, rows, window.n, count)
-    return gather_column(kernels, window, vector, idx)
+    return gather_column(kernels, window, vector, rows, idx)
 
 
 _SUM_KINDS = frozenset({TypeKind.INT64, TypeKind.DECIMAL})
@@ -957,7 +972,7 @@ class NativeHashScanAggregate:
         idx = None if whole else selected_positions(kernels, sel, window.n, count)
         lo, hi = window.base, window.base + window.n
         key_cols = [
-            group.vector(k).to_list(lo, hi) if idx is None else gather_column(kernels, window, group.vector(k), idx)
+            group.vector(k).to_list(lo, hi) if idx is None else gather_column(kernels, window, group.vector(k), sel, idx)
             for k in self.keys
         ]
         keys = key_cols[0] if len(key_cols) == 1 else list(zip(*key_cols))
