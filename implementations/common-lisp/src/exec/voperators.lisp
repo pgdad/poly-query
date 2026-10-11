@@ -113,7 +113,9 @@ otherwise all unskipped segments are read in order."
                 (when out (return out))))))))))
 
 (defmethod compile-batch-operator ((node pp-filter))
-  (make-batch-filter (compile-batch-operator (pnode-child node)) (pp-filter-predicate node)))
+  (if (never-true-p (pp-filter-predicate node))
+      (lambda () (lambda () nil))
+      (make-batch-filter (compile-batch-operator (pnode-child node)) (pp-filter-predicate node))))
 
 (defun make-batch-project (open-child exprs)
   (let ((kernels (map 'simple-vector #'compile-vexpr exprs)))
@@ -466,6 +468,144 @@ NULLs."
        (make-join-build-provider build-node (compile-batch-operator build-node)
                                  (if build-left (pp-hash-join-left-keys node) (pp-hash-join-right-keys node))
                                  (if build-left (pp-hash-join-right-keys node) (pp-hash-join-left-keys node)))))))
+
+;;; ------------------------------------------------------------------
+;;; Sorting: the input is materialized as one batch and a permutation of its
+;;; row indexes is sorted (stably) with comparators reading the typed key
+;;; columns directly.
+
+(defun make-key-index-comparator (batch pos type descending nulls-first)
+  "Function (i j) -> -1/0/1 ordering rows I and J of BATCH by column POS."
+  (let* ((vec (svref (batch-columns batch) pos))
+         (data (vec-data vec))
+         (validity (vec-validity vec))
+         (null-order (if nulls-first -1 1))
+         (sign (if descending -1 1)))
+    (declare (type fixnum null-order sign) (type (or null simple-bit-vector) validity))
+    (macrolet ((typed (element-type)
+                 `(let ((data data))
+                    (declare (type (simple-array ,element-type (*)) data))
+                    (lambda (i j)
+                      (declare (type fixnum i j))
+                      (let ((an (and validity (zerop (sbit validity i))))
+                            (bn (and validity (zerop (sbit validity j)))))
+                        (cond ((and an bn) 0)
+                              (an null-order)
+                              (bn (- null-order))
+                              (t (let ((a (aref data i)) (b (aref data j)))
+                                   (cond ((< a b) (- sign)) ((> a b) sign) (t 0))))))))))
+      (etypecase data
+        (i64-vector (typed (signed-byte 64)))
+        (f64-vector (typed double-float))
+        (simple-vector
+         (let ((cmp (make-sort-key-comparator type descending nulls-first)))
+           (declare (type function cmp))
+           (lambda (i j)
+             (declare (type fixnum i j))
+             (funcall cmp (svref data i) (svref data j)))))))))
+
+(defun make-index-sort-predicate (batch keys)
+  "Predicate (i j) -> T when row I of BATCH sorts strictly before row J."
+  (let ((comparators (map 'simple-vector
+                          (lambda (key)
+                            (destructuring-bind (pos type descending nulls-first) key
+                              (make-key-index-comparator batch pos type descending nulls-first)))
+                          keys)))
+    (if (= (length comparators) 1)
+        (let ((cmp (svref comparators 0)))
+          (declare (type function cmp))
+          (lambda (i j) (minusp (the fixnum (funcall cmp i j)))))
+        (lambda (i j)
+          (loop for cmp across comparators
+                for c of-type fixnum = (funcall (the function cmp) i j)
+                do (cond ((< c 0) (return t))
+                         ((> c 0) (return nil)))
+                finally (return nil))))))
+
+(defun sorted-permutation (batch keys)
+  (let ((perm (identity-index-vector (batch-count batch))))
+    (stable-sort perm (make-index-sort-predicate batch keys))))
+
+(defun drain-batches (open kinds)
+  "All rows of the batch opener OPEN as one batch (charging memory)."
+  (declare (type function open))
+  (let ((child (funcall open))
+        (batches '()))
+    (declare (type function child))
+    (loop for b = (funcall child)
+          while b
+          do (charge-memory (* (batch-count b) (row-footprint (length kinds))))
+             (push b batches))
+    (concatenate-batches (nreverse batches) kinds)))
+
+(defun permutation-batches (batch perm start end)
+  "Iterator over the rows PERM[START..END) of BATCH, a batch at a time."
+  (declare (type fixnum start end) (type index-vector perm))
+  (let ((pos start))
+    (declare (type fixnum pos))
+    (lambda ()
+      (when (< pos end)
+        (let* ((stop (min end (+ pos +batch-size+)))
+               (idx (subseq perm pos stop)))
+          (setf pos stop)
+          (batch-gather batch idx (length idx)))))))
+
+(defmethod compile-batch-operator ((node pp-sort))
+  (let ((open-child (compile-batch-operator (pnode-child node)))
+        (kinds (output-kinds node))
+        (keys (pp-sort-keys node)))
+    (lambda ()
+      (let ((output nil))
+        (lambda ()
+          (unless output
+            (let ((batch (drain-batches open-child kinds)))
+              (check-interrupts)
+              (setf output (permutation-batches batch (sorted-permutation batch keys)
+                                                0 (batch-count batch)))))
+          (funcall (the function output)))))))
+
+(defmethod compile-batch-operator ((node pp-top-n))
+  ;; ORDER BY ... LIMIT: keep the best LIMIT+OFFSET rows, compacting the
+  ;; buffered input whenever it holds twice that many (ties keep input order).
+  (let* ((open-child (compile-batch-operator (pnode-child node)))
+         (kinds (output-kinds node))
+         (keys (pp-top-n-keys node))
+         (limit (evaluate-limit-expr (pp-top-n-limit node) "LIMIT"))
+         (offset (or (evaluate-limit-expr (pp-top-n-offset node) "OFFSET") 0))
+         (keep (+ limit offset)))
+    (declare (type function open-child))
+    (lambda ()
+      (let ((output nil))
+        (lambda ()
+          (unless output
+            (let ((buffer '()) (buffered 0) (best nil))
+              (declare (type fixnum buffered))
+              (flet ((compact ()
+                       (let* ((batch (concatenate-batches
+                                      (if best (cons best (nreverse buffer)) (nreverse buffer))
+                                      kinds))
+                              (perm (sorted-permutation batch keys))
+                              (n (min keep (batch-count batch))))
+                         (setf best (batch-gather batch perm n)
+                               buffer '()
+                               buffered 0))))
+                (unless (zerop keep)
+                  (let ((child (funcall open-child)))
+                    (declare (type function child))
+                    (loop for b = (funcall child)
+                          while b
+                          do (push b buffer)
+                             (incf buffered (batch-count b))
+                             (when (>= buffered (max +batch-size+ (* 2 keep)))
+                               (check-interrupts)
+                               (compact))))
+                  (compact))
+                (setf output (if best
+                                 (permutation-batches best (identity-index-vector (batch-count best))
+                                                      (min offset (batch-count best))
+                                                      (batch-count best))
+                                 (lambda () nil))))))
+          (funcall (the function output)))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Entry point

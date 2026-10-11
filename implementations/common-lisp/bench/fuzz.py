@@ -168,6 +168,16 @@ class Gen:
         if shape < 0.5:
             t = r.choice(list(self.schemas))
             return [("a", t)], f"{t} a"
+        if shape < 0.62:
+            # Three inputs (join reordering): explicit joins or a comma list.
+            scope = [("a", "items"), ("b", "orders"), ("c", "products")]
+            extra = f" AND {self.expr('BOOLEAN', scope, 2)}" if r.random() < 0.4 else ""
+            if r.random() < 0.5:
+                return scope, ("products c, items a, orders b WHERE a.order_id = b.order_id "
+                               f"AND a.product_id = c.product_id{extra}")
+            kind = r.choice(["JOIN", "LEFT JOIN"])
+            return scope, (f"orders b JOIN items a ON a.order_id = b.order_id {kind} products c "
+                           f"ON c.product_id = a.product_id{extra}")
         if shape < 0.8:
             pairs = [("tx", "cust", "customer_id", "customer_id"), ("orders", "cust", "customer_id", "customer_id"),
                      ("items", "orders", "order_id", "order_id"), ("items", "products", "product_id", "product_id"),
@@ -181,10 +191,57 @@ class Gen:
         lt, rt = r.choice([("orders", "products"), ("products", "cust"), ("cust", "products")])
         return [("a", lt), ("b", rt)], f"{lt} a, {rt} b"
 
+    def subquery_predicate(self, scope):
+        """A predicate with an (uncorrelated or correlated) subquery."""
+        r = self.r
+        alias, table = scope[0]
+        keyed = {"tx": "customer_id", "orders": "customer_id", "cust": "customer_id", "txp": "customer_id",
+                 "txr": "customer_id", "custr": "customer_id", "items": "order_id"}
+        if table in keyed and r.random() < 0.6:
+            k = keyed[table]
+            other = {"customer_id": r.choice(["cust", "orders", "tx"]), "order_id": "items"}[k]
+            inner = self.expr("BOOLEAN", [("s", other)], 2)
+            if r.random() < 0.5:
+                return f"{alias}.{k} IN (SELECT s.{k} FROM {other} s WHERE {inner})"
+            neg = "NOT " if r.random() < 0.3 else ""
+            return f"{neg}EXISTS (SELECT 1 FROM {other} s WHERE s.{k} = {alias}.{k} AND {inner})"
+        k = r.choice(["INT64", "DECIMAL"])
+        cols = self.cols(alias, table, k)
+        if not cols:
+            return self.expr("BOOLEAN", scope)
+        return f"{r.choice(cols)} > (SELECT AVG({r.choice(cols).split('.')[1]}) FROM {table})"
+
     def query(self):
         r = self.r
+        shape = r.random()
+        if shape < 0.08:
+            # Derived table / CTE.
+            t = r.choice(["tx", "orders", "items", "cust"])
+            inner_scope = [("x", t)]
+            e1 = self.expr(r.choice(["INT64", "STRING", "BOOLEAN"]), inner_scope, 1)
+            e2 = self.expr(r.choice(["INT64", "DECIMAL"]), inner_scope, 1)
+            where = f" WHERE {self.expr('BOOLEAN', inner_scope)}" if r.random() < 0.5 else ""
+            body = f"SELECT {e1} AS k, {e2} AS v FROM {t} x{where}"
+            if r.random() < 0.5:
+                return f"WITH d AS ({body}) SELECT k, COUNT(*) AS n, SUM(v) AS s, MIN(v) AS lo FROM d GROUP BY k"
+            return f"SELECT d.k, MAX(d.v) AS m FROM ({body}) d GROUP BY d.k HAVING COUNT(*) >= 1"
+        if shape < 0.16:
+            scope, from_ = self.scope_for()
+            pred = self.subquery_predicate(scope)
+            items = ", ".join(f"{self.expr(r.choice(['INT64', 'STRING', 'DECIMAL']), scope, 1)} AS c{i}"
+                              for i in range(r.randint(1, 3)))
+            return f"SELECT {items} FROM {from_} {'AND' if ' WHERE ' in from_ else 'WHERE'} {pred}"
+        if shape < 0.24:
+            scope, from_ = self.scope_for()
+            items = [f"{self.expr(r.choice(['INT64', 'STRING', 'DECIMAL', 'DATE']), scope, 1)} AS c{i}"
+                     for i in range(r.randint(1, 3))]
+            where = f" {'AND' if ' WHERE ' in from_ else 'WHERE'} {self.expr('BOOLEAN', scope)}" if r.random() < 0.6 else ""
+            order = ", ".join(f"{i + 1} {r.choice(['ASC', 'DESC'])} NULLS {r.choice(['FIRST', 'LAST'])}"
+                              for i in range(len(items)))
+            return ("ORDERED", f"SELECT {', '.join(items)} FROM {from_}{where} ORDER BY {order} "
+                               f"LIMIT {r.randint(0, 40)} OFFSET {r.randint(0, 5)}")
         scope, from_ = self.scope_for()
-        where = f" WHERE {self.expr('BOOLEAN', scope)}" if r.random() < 0.7 else ""
+        where = f" {'AND' if ' WHERE ' in from_ else 'WHERE'} {self.expr('BOOLEAN', scope)}" if r.random() < 0.7 else ""
         kinds = ["INT64", "DECIMAL", "FLOAT64", "STRING", "BOOLEAN", "DATE", "TIMESTAMP"]
         shape = r.random()
         if shape < 0.4:
@@ -248,6 +305,9 @@ def main() -> int:
         sql = gen.query()
         if sql is None:
             continue
+        ordered = isinstance(sql, tuple)
+        if ordered:
+            sql = sql[1]
         ran += 1
         outs = []
         for cfg in CONFIGS:
@@ -260,6 +320,8 @@ def main() -> int:
                 print("INTERNAL_ERROR (row):", sql)
         for cfg, o in zip(CONFIGS[1:], outs[1:]):
             ok = (o[0] == ref[0] and (o[1] == ref[1] if o[0] == "error" else same_rows(o[1], ref[1])))
+            if ok and ordered and o[0] == "ok":
+                ok = all(same_rows([x], [y]) for x, y in zip(o[1], ref[1]))
             if not ok:
                 bad += 1
                 print(f"MISMATCH {cfg}: {sql}")

@@ -168,7 +168,16 @@ statement's `mode` option."
 ;;; ------------------------------------------------------------------
 ;;; Filter and projection
 
+(defun never-true-p (predicate)
+  "True if PREDICATE is a FALSE or NULL literal: the filter passes no row."
+  (and (b-literal-p predicate) (not (eq (b-literal-value predicate) t))))
+
 (defmethod compile-operator ((node pp-filter))
+  (if (never-true-p (pp-filter-predicate node))
+      (lambda () (lambda () nil))
+      (compile-row-filter node)))
+
+(defun compile-row-filter (node)
   (let ((open-child (compile-operator (pnode-child node)))
         (pred (compile-bexpr (pp-filter-predicate node))))
     (declare (type function open-child pred))

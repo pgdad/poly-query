@@ -25,11 +25,15 @@
 
 (in-package #:polyquery)
 
+(defvar *morsel-rows* nil
+  "Rows per morsel; NIL means the environment variable POLYQUERY_MORSEL_ROWS
+(used by tests to force many small morsels) or 16384.")
+
 (defun morsel-rows ()
-  "Rows per morsel (environment POLYQUERY_MORSEL_ROWS overrides, for tests)."
-  (let ((env (sb-posix:getenv "POLYQUERY_MORSEL_ROWS")))
-    (or (and env (ignore-errors (let ((n (parse-integer env))) (and (plusp n) n))))
-        16384)))
+  (or *morsel-rows*
+      (let ((env (sb-posix:getenv "POLYQUERY_MORSEL_ROWS")))
+        (and env (ignore-errors (let ((n (parse-integer env))) (and (plusp n) n)))))
+      16384))
 
 (defun parallel-threads ()
   (if *parallel-disabled* 1 (exec-options-threads *exec-options*)))
@@ -317,6 +321,19 @@ THREADS workers, each aggregating into a partial group state."
          (let ((scan (and (parallel-safe-node-p node) (pipeline-scan (pnode-child node)))))
            (when (and scan (> (length (scan-morsels scan)) 1))
              (make-parallel-aggregate node scan threads))))
+        (pp-hash-distinct
+         ;; DISTINCT is a grouping on all columns without aggregates.
+         (let* ((child (pnode-child node))
+                (scan (pipeline-scan child)))
+           (when (and scan (> (length (scan-morsels scan)) 1))
+             (make-parallel-aggregate
+              (make-pp-hash-aggregate :children (list child) :columns (pnode-columns node)
+                                      :group-by (loop for c in (pnode-columns child)
+                                                      for i from 0
+                                                      collect (make-b-column (column-def-type c) i
+                                                                             (column-def-name c)))
+                                      :aggregates '())
+              scan threads))))
         ((or pp-filter pp-project pp-hash-join pp-table-scan)
          (let ((scan (pipeline-scan node)))
            (when (and scan (> (length (scan-morsels scan)) 1))

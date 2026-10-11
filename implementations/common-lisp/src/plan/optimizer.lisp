@@ -1,21 +1,125 @@
-;;;; optimizer.lisp — logical rewrites: predicate pushdown and column pruning.
+;;;; optimizer.lisp — logical rewrites.
 ;;;;
-;;;; Both passes are semantics preserving rewrites of LNODE trees:
+;;;; All passes are semantics preserving rewrites of LNODE trees:
+;;;;  * SIMPLIFY-PLAN folds constant subexpressions into literals (when their
+;;;;    evaluation succeeds; an expression that fails stays, so the error is
+;;;;    raised only if a row evaluates it) and simplifies predicates
+;;;;    (TRUE/FALSE operands of AND/OR, double negation, negated comparisons,
+;;;;    duplicate conjuncts); a filter that is always TRUE disappears.
 ;;;;  * PUSH-DOWN-PREDICATES splits filter and join conditions into conjuncts
 ;;;;    and moves each one as close to the scans as possible: below joins
 ;;;;    (never into the NULL-supplying side of a LEFT JOIN from above) and
 ;;;;    into the conditions of inner joins, so comma joins become equi-joins.
+;;;;  * REORDER-JOINS rewrites chains of three or more inner joins into a
+;;;;    left-deep order that starts with the smallest input and always adds a
+;;;;    connected input (avoiding cross products), smallest first.
 ;;;;  * PRUNE-COLUMNS removes every column a parent does not need, so scans
 ;;;;    read only referenced columns.
+;;;; With `optimize: false` only column pruning runs (Phase 3 requires the
+;;;; pruned scans, and it guarantees that unused expressions are never
+;;;; evaluated).
 
 (in-package #:polyquery)
 
 (defun optimize-logical-plan (node)
-  "Apply the logical rewrites; with `optimize: false` only column pruning,
-which the engine's evaluation guarantees rely on (see README)."
   (if (exec-options-optimize *exec-options*)
-      (prune-columns (push-down-predicates node))
+      (prune-columns (reorder-joins (push-down-predicates (simplify-plan node))))
       (prune-columns node)))
+
+;;; ------------------------------------------------------------------
+;;; Constant folding and predicate simplification
+
+(defun foldable-p (e)
+  "True if E is a constant expression worth (and safe) evaluating now."
+  (and (b-op-p e)
+       (bexpr-constant-p e)
+       (not (bexpr-some (lambda (x)
+                          (and (b-op-p x) (eq (b-op-op x) :call)
+                               (scalar-function-test-only (b-op-info x))))
+                        e))))
+
+(defun fold-constants (e)
+  "E with every constant subexpression whose evaluation succeeds replaced by
+a literal of the same type."
+  (bexpr-rewrite (lambda (x)
+                   (when (foldable-p x)
+                     (handler-case (make-b-literal (bexpr-type x) (evaluate-constant x))
+                       (pq-error () nil))))
+                 e))
+
+(defun boolean-literal-p (e value)
+  (and (b-literal-p e) (eq (b-literal-value e) value)))
+
+(defun negated-comparison (op)
+  (case op (:= :<>) (:<> :=) (:< :>=) (:<= :>) (:> :<=) (:>= :<) (t nil)))
+
+(defun simplify-node (e)
+  "Simplify the operator node E whose arguments are already simplified."
+  (let ((op (b-op-op e))
+        (args (b-op-args e)))
+    (case op
+      (:and (destructuring-bind (a b) args
+              (cond ((boolean-literal-p a t) b)
+                    ((boolean-literal-p b t) a)
+                    ((boolean-literal-p a nil) a)
+                    ((boolean-literal-p b nil) b)
+                    ((bexpr-equal a b) a)
+                    (t e))))
+      (:or (destructuring-bind (a b) args
+             (cond ((boolean-literal-p a nil) b)
+                   ((boolean-literal-p b nil) a)
+                   ((boolean-literal-p a t) a)
+                   ((boolean-literal-p b t) b)
+                   ((bexpr-equal a b) a)
+                   (t e))))
+      (:not (let ((a (first args)))
+              (cond ((and (b-op-p a) (eq (b-op-op a) :not)) (first (b-op-args a)))
+                    ((and (b-op-p a) (negated-comparison (b-op-op a)))
+                     (make-b-op (bexpr-type a) (negated-comparison (b-op-op a)) (b-op-args a)
+                                (b-op-info a)))
+                    (t e))))
+      (t e))))
+
+(defun simplify-expr (e)
+  "Fold constants in E, then simplify its boolean structure bottom-up."
+  (labels ((walk (x)
+             (if (b-op-p x)
+                 (let* ((args (mapcar #'walk (b-op-args x)))
+                        (node (if (every #'eq args (b-op-args x))
+                                  x
+                                  (make-b-op (bexpr-type x) (b-op-op x) args (b-op-info x)))))
+                   (simplify-node node))
+                 x)))
+    (and e (walk (fold-constants e)))))
+
+(defun simplify-plan (node)
+  "Apply SIMPLIFY-EXPR to every expression of the plan NODE."
+  (let ((children (mapcar #'simplify-plan (lnode-children node))))
+    (flet ((copy-with (&rest slots)
+             (let ((copy (copy-structure node)))
+               (setf (lnode-children copy) children)
+               (loop for (setter value) on slots by #'cddr
+                     do (funcall setter copy value))
+               copy)))
+      (typecase node
+        (lp-filter
+         (let ((p (simplify-expr (lp-filter-predicate node))))
+           (if (boolean-literal-p p t)
+               (first children)
+               (copy-with (lambda (c v) (setf (lp-filter-predicate c) v)) p))))
+        (lp-project
+         (copy-with (lambda (c v) (setf (lp-project-exprs c) v))
+                    (mapcar #'simplify-expr (lp-project-exprs node))))
+        (lp-join
+         (let ((c (simplify-expr (lp-join-condition node))))
+           (copy-with (lambda (n v) (setf (lp-join-condition n) v))
+                      (if (boolean-literal-p c t) nil c))))
+        (lp-aggregate
+         (copy-with (lambda (c v) (setf (lp-aggregate-group-by c) v))
+                    (mapcar #'simplify-expr (lp-aggregate-group-by node))
+                    (lambda (c v) (setf (lp-aggregate-aggregates c) v))
+                    (mapcar #'simplify-expr (lp-aggregate-aggregates node))))
+        (t (rebuild-with-children node children))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Predicate pushdown
@@ -71,6 +175,99 @@ pushing each conjunct as far down as is valid."
                                                            (nreverse to-right)))
                              (conjoin (nreverse to-join)))))
         (make-filter join (conjoin (nreverse above)))))))
+
+;;; ------------------------------------------------------------------
+;;; Join reordering
+
+(defun inner-join-node-p (node)
+  (and (lp-join-p node) (member (lp-join-kind node) '(:inner :cross))))
+
+(defun collect-inner-joins (node offset)
+  "Leaves of the inner-join tree NODE as (plan offset) lists and all join
+conjuncts, with column positions relative to the tree's row (NODE at OFFSET)."
+  (if (inner-join-node-p node)
+      (destructuring-bind (left right) (lnode-children node)
+        (multiple-value-bind (left-leaves left-conjuncts) (collect-inner-joins left offset)
+          (multiple-value-bind (right-leaves right-conjuncts)
+              (collect-inner-joins right (+ offset (lnode-width left)))
+            (values (append left-leaves right-leaves)
+                    (append left-conjuncts right-conjuncts
+                            (mapcar (lambda (c) (bexpr-shift-columns c offset))
+                                    (and (lp-join-condition node)
+                                         (split-conjuncts (lp-join-condition node)))))))))
+      (values (list (list (reorder-joins node) offset)) '())))
+
+(defun reorder-joins (node)
+  "Reorder every chain of at least three inner joins in NODE."
+  (if (inner-join-node-p node)
+      (multiple-value-bind (leaves conjuncts) (collect-inner-joins node 0)
+        (if (< (length leaves) 3)
+            (rebuild-with-children node (mapcar #'reorder-joins (lnode-children node)))
+            (greedy-join-order node leaves conjuncts)))
+      (rebuild-with-children node (mapcar #'reorder-joins (lnode-children node)))))
+
+(defun greedy-join-order (node leaves conjuncts)
+  "Left-deep join of LEAVES ((plan offset) lists) applying CONJUNCTS (over
+NODE's row) as early as possible; a Project restores NODE's column order."
+  (let* ((width (lnode-width node))
+         (mapping (make-array width :initial-element nil))
+         (remaining (mapcar (lambda (leaf)
+                              (destructuring-bind (plan offset) leaf
+                                (list plan offset (lnode-width plan) (estimate-rows plan))))
+                            leaves))
+         (pending conjuncts)
+         (plan nil)
+         (placed-width 0))
+    (labels ((leaf-columns (leaf)
+               (destructuring-bind (plan offset w est) leaf
+                 (declare (ignore plan est))
+                 (loop for i from offset below (+ offset w) collect i)))
+             (placed-p (i) (svref mapping i))
+             (applicable (c leaf)
+               ;; C only reads placed columns and LEAF's.
+               (let ((cols (leaf-columns leaf)))
+                 (every (lambda (i) (or (placed-p i) (member i cols))) (bexpr-column-indexes c))))
+             (connects-p (leaf)
+               (let ((cols (leaf-columns leaf)))
+                 (some (lambda (c)
+                         (let ((used (bexpr-column-indexes c)))
+                           (and (applicable c leaf)
+                                (some (lambda (i) (member i cols)) used)
+                                (some #'placed-p used))))
+                       pending)))
+             (smallest (candidates)
+               (let ((best nil))
+                 (dolist (leaf candidates best)
+                   (when (or (null best) (< (fourth leaf) (fourth best)))
+                     (setf best leaf)))))
+             (place (leaf)
+               (destructuring-bind (leaf-plan offset w est) leaf
+                 (declare (ignore est))
+                 (dotimes (k w) (setf (svref mapping (+ offset k)) (+ placed-width k)))
+                 (incf placed-width w)
+                 (let ((conds (remove-if-not (lambda (c) (applicable c leaf)) pending)))
+                   (setf pending (set-difference pending conds))
+                   (setf conds (sort-by-original-order conds conjuncts))
+                   (let ((condition (and conds (conjoin (mapcar (lambda (c) (remap c mapping)) conds)))))
+                     (setf plan (if plan
+                                    (make-join (if conds :inner :cross) plan leaf-plan condition)
+                                    ;; Conjuncts over the first input alone (constants).
+                                    (make-filter leaf-plan condition)))))
+                 (setf remaining (remove leaf remaining)))))
+      (place (smallest remaining))
+      (loop while remaining
+            do (place (smallest (or (remove-if-not #'connects-p remaining) remaining))))
+      (when pending
+        (setf plan (make-filter plan (conjoin (mapcar (lambda (c) (remap c mapping)) pending)))))
+      (make-project plan
+                    (loop for i below width
+                          for c in (lnode-columns node)
+                          collect (make-b-column (column-def-type c) (svref mapping i)
+                                                 (column-def-name c)))
+                    (mapcar #'column-def-name (lnode-columns node))))))
+
+(defun sort-by-original-order (subset all)
+  (remove-if-not (lambda (c) (member c subset)) all))
 
 ;;; ------------------------------------------------------------------
 ;;; Column pruning
