@@ -5,13 +5,13 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::operators::Row;
 use super::subquery::SubqueryResult;
-use super::vector::semi::KeySet;
+use super::vector::Batch;
 use crate::error::{Error, ErrorCode, Result};
 use crate::planner::physical::{Execution, PhysicalQuery, PhysicalSubquery, SubqueryPlans};
 use crate::types::Value;
@@ -25,16 +25,10 @@ pub type LookupTable = HashMap<Vec<Value>, Vec<Row>>;
 /// Cache key of a subquery execution: (subquery id, parameter values).
 type SubqueryKey = (usize, Vec<Value>);
 
-/// A key set, once built (its lock is held while building it).
-type KeySetSlot = Mutex<Option<Arc<KeySet>>>;
-
-/// Budgets and semi-join key sets shared by all threads executing one
-/// query.
+/// Budgets shared by all threads executing one query.
 #[derive(Debug, Default)]
 struct Shared {
     memory_used: AtomicUsize,
-    /// Semi-join key sets by (kind, id), built once per query.
-    key_sets: Mutex<HashMap<(u8, usize), Arc<KeySetSlot>>>,
     join_rows: AtomicU64,
 }
 
@@ -54,6 +48,8 @@ pub struct ExecContext {
     pub execution: Execution,
     /// Rows per morsel of parallel scans.
     pub morsel_rows: usize,
+    /// Whether this context belongs to a parallel worker thread.
+    worker: bool,
     /// Physical plans of the statement's subqueries.
     subqueries: Arc<SubqueryPlans>,
     /// Correlation parameters of the subquery executions in progress
@@ -63,6 +59,8 @@ pub struct ExecContext {
     results: RefCell<HashMap<SubqueryKey, Rc<SubqueryResult>>>,
     /// ParamLookup hash tables by node id.
     lookups: RefCell<HashMap<usize, Rc<LookupTable>>>,
+    /// Materialized shared subplans by id.
+    shared_results: RefCell<HashMap<usize, Arc<[Batch]>>>,
 }
 
 impl Default for ExecContext {
@@ -83,10 +81,12 @@ impl ExecContext {
             test_functions,
             execution: Execution::default(),
             morsel_rows: super::parallel::default_morsel_rows(),
+            worker: false,
             subqueries: Arc::default(),
             params: RefCell::new(Vec::new()),
             results: RefCell::new(HashMap::new()),
             lookups: RefCell::new(HashMap::new()),
+            shared_results: RefCell::new(HashMap::new()),
         }
     }
 
@@ -136,9 +136,12 @@ impl ExecContext {
         }
     }
 
-    /// True while executing (correlated) subquery code.
-    pub fn in_subquery(&self) -> bool {
-        !self.params.borrow().is_empty()
+    /// True if execution must stay on the current thread: on a parallel
+    /// worker (no nested worker pools) or inside a correlated subquery
+    /// (one small execution per outer row). Uncorrelated subqueries run
+    /// once per query and may use parallel operators.
+    pub fn serial_only(&self) -> bool {
+        self.worker || self.params.borrow().iter().any(|p| !p.is_empty())
     }
 
     /// Fails with TIMEOUT or CANCELLED if the query must stop.
@@ -235,30 +238,6 @@ impl ExecContext {
         r
     }
 
-    /// The key set `key` of this query, built with `build` by the first
-    /// thread that asks for it (others wait for it).
-    pub fn shared_key_set(
-        &self,
-        key: (u8, usize),
-        build: impl FnOnce() -> Result<KeySet>,
-    ) -> Result<Arc<KeySet>> {
-        let slot = self
-            .shared
-            .key_sets
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(key)
-            .or_default()
-            .clone();
-        let mut built = slot.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(set) = &*built {
-            return Ok(set.clone());
-        }
-        let set = Arc::new(build()?);
-        *built = Some(set.clone());
-        Ok(set)
-    }
-
     /// The physical plan of subquery `id`.
     pub fn subquery_plan(&self, id: usize) -> Result<&PhysicalSubquery> {
         self.subqueries
@@ -283,6 +262,15 @@ impl ExecContext {
 
     pub fn cache_lookup(&self, id: usize, table: Rc<LookupTable>) {
         self.lookups.borrow_mut().insert(id, table);
+    }
+
+    /// The rows of shared subplan `id`, if already computed.
+    pub fn shared_result(&self, id: usize) -> Option<Arc<[Batch]>> {
+        self.shared_results.borrow().get(&id).cloned()
+    }
+
+    pub fn cache_shared_result(&self, id: usize, rows: Arc<[Batch]>) {
+        self.shared_results.borrow_mut().insert(id, rows);
     }
 }
 
@@ -315,10 +303,12 @@ impl ContextSeed {
             test_functions: self.test_functions,
             execution: self.execution,
             morsel_rows: self.morsel_rows,
+            worker: true,
             subqueries: self.subqueries.clone(),
             params: RefCell::new(self.params.clone()),
             results: RefCell::new(HashMap::new()),
             lookups: RefCell::new(HashMap::new()),
+            shared_results: RefCell::new(HashMap::new()),
         }
     }
 

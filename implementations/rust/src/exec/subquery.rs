@@ -133,7 +133,22 @@ pub fn in_subquery(
     row: &[Value],
     ctx: &ExecContext,
 ) -> Result<Option<bool>> {
-    match &*run(sub, params, row, ctx, Want::Set(domain))? {
+    set_contains(&*run(sub, params, row, ctx, Want::Set(domain))?, x, domain)
+}
+
+/// The value set of an uncorrelated IN subquery (for [`set_contains`]).
+pub fn uncorrelated_set(
+    sub: &SubqueryPlan,
+    domain: KeyDomain,
+    ctx: &ExecContext,
+) -> Result<Rc<SubqueryResult>> {
+    run(sub, &[], &[], ctx, Want::Set(domain))
+}
+
+/// `x IN set` with SQL three-valued semantics (None = NULL), for the result
+/// of an IN subquery.
+pub fn set_contains(set: &SubqueryResult, x: &Value, domain: KeyDomain) -> Result<Option<bool>> {
+    match set {
         SubqueryResult::Set {
             values,
             has_null,

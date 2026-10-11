@@ -357,134 +357,35 @@ impl Vector {
         Vector::new(data, Some(valid))
     }
 
-    /// Concatenates vectors, keeping a typed representation when possible.
-    pub fn concat(parts: &[Vector]) -> Vector {
-        Vector::concat_refs(&parts.iter().collect::<Vec<_>>())
-    }
-
-    /// Whether the non-empty, not all-NULL `parts` share one typed
-    /// representation (same DECIMAL scale, same dictionary).
-    fn same_kind(parts: &[&Vector]) -> bool {
-        let first = &parts[0].data;
-        parts.iter().all(|p| match (first, &p.data) {
-            (Data::Decimal(_, a), Data::Decimal(_, b)) => a == b,
-            (Data::Dict(_, a), Data::Dict(_, b)) => Arc::ptr_eq(a, b),
-            (Data::Values(_), _) | (_, Data::Values(_)) => false,
-            (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
-        })
-    }
-
-    /// The elements `idx[k] = (part, row)` of several vectors (in that
-    /// order).
-    pub fn gather_parts(parts: &[&Vector], idx: &[(u32, u32)]) -> Vector {
-        let non_null: Vec<&Vector> = parts
-            .iter()
-            .copied()
-            .filter(|p| !matches!(p.data, Data::Null) && p.len > 0)
-            .collect();
-        if non_null.is_empty() {
-            return Vector::null(idx.len());
+    /// A plain string vector as a dictionary-encoded one whose dictionary
+    /// is the vector's own strings (codes are row numbers), so that gathers
+    /// copy codes instead of string references. Other vectors unchanged.
+    pub fn into_dictionary(self) -> Vector {
+        match self.data {
+            Data::Str(v) => Vector::new(
+                Data::Dict((0..v.len() as u32).collect(), Arc::from(v)),
+                self.valid,
+            ),
+            data => Vector { data, ..self },
         }
-        if !Vector::same_kind(&non_null) {
-            let values = idx
+    }
+
+    /// [`Vector::concat`] followed by [`Vector::into_dictionary`]; plain
+    /// string parts are moved straight into the shared dictionary (one
+    /// copy of the string references instead of two).
+    pub fn concat_dictionary(parts: Vec<Vector>) -> Vector {
+        let strings = parts.iter().any(|p| matches!(p.data, Data::Str(_)))
+            && parts
                 .iter()
-                .map(|&(p, i)| parts[p as usize].value(i as usize))
-                .collect();
-            return Vector::from_values(values);
+                .all(|p| matches!(p.data, Data::Str(_) | Data::Null));
+        if !strings {
+            return Vector::concat(parts).into_dictionary();
         }
-        let any_null = parts.iter().any(|p| !p.no_nulls());
-        let valid = any_null.then(|| {
-            idx.iter()
-                .map(|&(p, i)| !parts[p as usize].is_null(i as usize))
-                .collect()
-        });
-        macro_rules! pick {
-            ($variant:ident, $default:expr) => {{
-                let slices: Vec<Option<&[_]>> = parts
-                    .iter()
-                    .map(|p| match &p.data {
-                        Data::$variant(v) => Some(v.as_slice()),
-                        _ => None,
-                    })
-                    .collect();
-                idx.iter()
-                    .map(|&(p, i)| match slices[p as usize] {
-                        Some(v) => v[i as usize].clone(),
-                        None => $default,
-                    })
-                    .collect()
-            }};
-        }
-        let data = match &non_null[0].data {
-            Data::Bool(_) => Data::Bool(pick!(Bool, false)),
-            Data::Int(_) => Data::Int(pick!(Int, 0)),
-            Data::Float(_) => Data::Float(pick!(Float, 0.0)),
-            Data::Date(_) => Data::Date(pick!(Date, 0)),
-            Data::Timestamp(_) => Data::Timestamp(pick!(Timestamp, 0)),
-            Data::Str(_) => {
-                let empty: Arc<str> = Arc::from("");
-                Data::Str(pick!(Str, empty.clone()))
-            }
-            Data::Decimal(_, s) => {
-                let slices: Vec<Option<&[i64]>> = parts
-                    .iter()
-                    .map(|p| match &p.data {
-                        Data::Decimal(v, _) => Some(v.as_slice()),
-                        _ => None,
-                    })
-                    .collect();
-                let out = idx
-                    .iter()
-                    .map(|&(p, i)| slices[p as usize].map_or(0, |v| v[i as usize]))
-                    .collect();
-                Data::Decimal(out, *s)
-            }
-            Data::Dict(_, d) => {
-                let slices: Vec<Option<&[u32]>> = parts
-                    .iter()
-                    .map(|p| match &p.data {
-                        Data::Dict(c, _) => Some(c.as_slice()),
-                        _ => None,
-                    })
-                    .collect();
-                let out = idx
-                    .iter()
-                    .map(|&(p, i)| slices[p as usize].map_or(0, |v| v[i as usize]))
-                    .collect();
-                Data::Dict(out, d.clone())
-            }
-            Data::Null | Data::Values(_) => unreachable!(),
-        };
-        Vector::new(data, valid)
-    }
-
-    /// Concatenates vectors, keeping a typed representation when possible.
-    pub fn concat_refs(parts: &[&Vector]) -> Vector {
-        let len: usize = parts.iter().map(|p| p.len()).sum();
-        let non_null: Vec<&Vector> = parts
-            .iter()
-            .copied()
-            .filter(|p| !matches!(p.data, Data::Null) && p.len > 0)
-            .collect();
-        if non_null.is_empty() {
-            return Vector::null(len);
-        }
-        if parts.len() == 1 {
-            return parts[0].clone();
-        }
-        // All parts (ignoring all-NULL ones) of one typed kind?
-        let first = &non_null[0].data;
-        if !Vector::same_kind(&non_null) {
-            let mut values = Vec::with_capacity(len);
-            for p in parts {
-                values.extend((0..p.len).map(|i| p.value(i)));
-            }
-            return Vector::from_values(values);
-        }
+        let len: usize = parts.iter().map(Vector::len).sum();
         let any_null = parts.iter().any(|p| !p.no_nulls());
         let valid = any_null.then(|| {
             let mut v = Vec::with_capacity(len);
-            for p in parts {
+            for p in &parts {
                 match p.validity() {
                     Some(pv) => v.extend(pv),
                     None => v.extend(std::iter::repeat_n(true, p.len)),
@@ -492,47 +393,133 @@ impl Vector {
             }
             v
         });
+        let empty: Arc<str> = Arc::from("");
+        let mut dict = Arc::<[Arc<str>]>::new_uninit_slice(len);
+        let slots = Arc::get_mut(&mut dict).expect("new allocation is unique");
+        let mut next = slots.iter_mut();
+        let mut written = 0;
+        for p in parts {
+            let n = p.len;
+            // The part's values drive the iteration, so no slot is skipped.
+            match p.data {
+                Data::Str(v) => {
+                    for (s, slot) in v.into_iter().zip(next.by_ref()) {
+                        slot.write(s);
+                        written += 1;
+                    }
+                }
+                _ => {
+                    for slot in next.by_ref().take(n) {
+                        slot.write(empty.clone());
+                        written += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(written, len, "every dictionary slot is written");
+        // SAFETY: `written == len`: every slot of the new slice was
+        // written above.
+        let dict = unsafe { dict.assume_init() };
+        Vector::new(Data::Dict((0..len as u32).collect(), dict), valid)
+    }
+
+    /// Concatenates vectors, keeping a typed representation when possible.
+    /// Takes the parts by value, so their data is moved, not cloned.
+    pub fn concat(mut parts: Vec<Vector>) -> Vector {
+        let len: usize = parts.iter().map(Vector::len).sum();
+        let Some(first) = parts
+            .iter()
+            .find(|p| !matches!(p.data, Data::Null) && p.len > 0)
+        else {
+            return Vector::null(len);
+        };
+        if parts.len() == 1 {
+            return parts.pop().unwrap_or_else(|| Vector::null(0));
+        }
+        // All parts (ignoring all-NULL ones) of one typed kind?
+        let same = parts
+            .iter()
+            .filter(|p| !matches!(p.data, Data::Null) && p.len > 0)
+            .all(|p| match (&first.data, &p.data) {
+                (Data::Decimal(_, a), Data::Decimal(_, b)) => a == b,
+                (Data::Dict(_, a), Data::Dict(_, b)) => Arc::ptr_eq(a, b),
+                (Data::Values(_), _) | (_, Data::Values(_)) => false,
+                (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
+            });
+        if !same {
+            let mut values = Vec::with_capacity(len);
+            for p in &parts {
+                values.extend((0..p.len).map(|i| p.value(i)));
+            }
+            return Vector::from_values(values);
+        }
+        let any_null = parts.iter().any(|p| !p.no_nulls());
+        let valid = any_null.then(|| {
+            let mut v = Vec::with_capacity(len);
+            for p in &parts {
+                match p.validity() {
+                    Some(pv) => v.extend(pv),
+                    None => v.extend(std::iter::repeat_n(true, p.len)),
+                }
+            }
+            v
+        });
+        // The kind of the result (an empty vector of the parts' variant).
+        let template = match &first.data {
+            Data::Bool(_) => Data::Bool(Vec::new()),
+            Data::Int(_) => Data::Int(Vec::new()),
+            Data::Float(_) => Data::Float(Vec::new()),
+            Data::Date(_) => Data::Date(Vec::new()),
+            Data::Timestamp(_) => Data::Timestamp(Vec::new()),
+            Data::Str(_) => Data::Str(Vec::new()),
+            Data::Decimal(_, s) => Data::Decimal(Vec::new(), *s),
+            Data::Dict(_, d) => Data::Dict(Vec::new(), d.clone()),
+            Data::Null | Data::Values(_) => unreachable!(),
+        };
         macro_rules! cat {
             ($variant:ident, $default:expr) => {{
                 let mut out = Vec::with_capacity(len);
                 for p in parts {
-                    match &p.data {
-                        Data::$variant(v) => out.extend_from_slice(v),
-                        _ => out.extend(std::iter::repeat_n($default, p.len)),
+                    let n = p.len;
+                    match p.data {
+                        Data::$variant(v) => out.extend(v),
+                        _ => out.extend(std::iter::repeat_n($default, n)),
                     }
                 }
-                Data::$variant(out)
+                out
             }};
         }
-        let data = match first {
-            Data::Bool(_) => cat!(Bool, false),
-            Data::Int(_) => cat!(Int, 0),
-            Data::Float(_) => cat!(Float, 0.0),
-            Data::Date(_) => cat!(Date, 0),
-            Data::Timestamp(_) => cat!(Timestamp, 0),
+        let data = match template {
+            Data::Bool(_) => Data::Bool(cat!(Bool, false)),
+            Data::Int(_) => Data::Int(cat!(Int, 0)),
+            Data::Float(_) => Data::Float(cat!(Float, 0.0)),
+            Data::Date(_) => Data::Date(cat!(Date, 0)),
+            Data::Timestamp(_) => Data::Timestamp(cat!(Timestamp, 0)),
             Data::Str(_) => {
                 let empty: Arc<str> = Arc::from("");
-                cat!(Str, empty.clone())
+                Data::Str(cat!(Str, empty.clone()))
             }
             Data::Decimal(_, s) => {
                 let mut out = Vec::with_capacity(len);
                 for p in parts {
-                    match &p.data {
-                        Data::Decimal(v, _) => out.extend_from_slice(v),
-                        _ => out.extend(std::iter::repeat_n(0, p.len)),
+                    let n = p.len;
+                    match p.data {
+                        Data::Decimal(v, _) => out.extend(v),
+                        _ => out.extend(std::iter::repeat_n(0, n)),
                     }
                 }
-                Data::Decimal(out, *s)
+                Data::Decimal(out, s)
             }
             Data::Dict(_, d) => {
                 let mut out = Vec::with_capacity(len);
                 for p in parts {
-                    match &p.data {
-                        Data::Dict(c, _) => out.extend_from_slice(c),
-                        _ => out.extend(std::iter::repeat_n(0, p.len)),
+                    let n = p.len;
+                    match p.data {
+                        Data::Dict(c, _) => out.extend(c),
+                        _ => out.extend(std::iter::repeat_n(0, n)),
                     }
                 }
-                Data::Dict(out, d.clone())
+                Data::Dict(out, d)
             }
             Data::Null | Data::Values(_) => unreachable!(),
         };
@@ -616,30 +603,30 @@ impl Batch {
         Batch::new(columns, rows.len())
     }
 
-    /// Concatenates batches of the same width.
-    pub fn concat(batches: &[Batch], width: usize) -> Batch {
+    /// Concatenates batches of the same width (moving their data).
+    pub fn concat(mut batches: Vec<Batch>, width: usize) -> Batch {
         if batches.len() == 1 {
-            return batches[0].clone();
+            return batches.pop().unwrap_or_else(|| Batch::new(Vec::new(), 0));
         }
         let len = batches.iter().map(|b| b.len).sum();
-        let columns = (0..width)
-            .map(|c| {
-                let parts: Vec<&Vector> = batches.iter().map(|b| &b.columns[c]).collect();
-                Vector::concat_refs(&parts)
-            })
+        let columns = Batch::column_parts(batches, width)
+            .into_iter()
+            .map(Vector::concat)
             .collect();
         Batch::new(columns, len)
     }
 
-    /// The rows `idx[k] = (batch, row)` of batches of the same width.
-    pub fn gather_parts(batches: &[&Batch], idx: &[(u32, u32)], width: usize) -> Batch {
-        let columns = (0..width)
-            .map(|c| {
-                let parts: Vec<&Vector> = batches.iter().map(|b| &b.columns[c]).collect();
-                Vector::gather_parts(&parts, idx)
-            })
+    /// The vectors of every column of `batches` (of the same width).
+    pub fn column_parts(batches: Vec<Batch>, width: usize) -> Vec<Vec<Vector>> {
+        let mut parts: Vec<Vec<Vector>> = (0..width)
+            .map(|_| Vec::with_capacity(batches.len()))
             .collect();
-        Batch::new(columns, idx.len())
+        for b in batches {
+            for (c, v) in b.columns.into_iter().enumerate() {
+                parts[c].push(v);
+            }
+        }
+        parts
     }
 
     pub fn approx_size(&self) -> usize {
@@ -680,7 +667,7 @@ mod tests {
     fn gather_and_concat() {
         let a = Vector::from_values(vec![Value::str("x"), Value::Null]);
         let b = Vector::from_values(vec![Value::str("y")]);
-        let c = Vector::concat(&[a, Vector::null(1), b]);
+        let c = Vector::concat(vec![a, Vector::null(1), b]);
         assert_eq!(c.len(), 4);
         assert_eq!(c.value(3), Value::str("y"));
         assert!(c.is_null(2));
@@ -688,6 +675,29 @@ mod tests {
         assert_eq!(g.value(0), Value::str("y"));
         assert!(g.is_null(1));
         assert_eq!(g.value(2), Value::str("x"));
+    }
+
+    #[test]
+    fn concat_dictionary_moves_strings() {
+        let a = Vector::from_values(vec![Value::str("x"), Value::Null, Value::str("y")]);
+        let b = Vector::from_values(vec![Value::str("z")]);
+        let c = Vector::concat_dictionary(vec![a, Vector::null(2), b]);
+        assert!(matches!(c.data, Data::Dict(..)));
+        assert_eq!(c.len(), 6);
+        let values: Vec<Value> = (0..6).map(|i| c.value(i)).collect();
+        assert_eq!(
+            values,
+            vec![
+                Value::str("x"),
+                Value::Null,
+                Value::str("y"),
+                Value::Null,
+                Value::Null,
+                Value::str("z")
+            ]
+        );
+        let ints = Vector::concat_dictionary(vec![Vector::from_values(vec![Value::Int(1)])]);
+        assert!(matches!(ints.data, Data::Int(_)));
     }
 
     #[test]

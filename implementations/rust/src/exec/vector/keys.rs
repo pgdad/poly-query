@@ -78,10 +78,117 @@ fn i64_at(data: &Data, i: usize) -> i64 {
     }
 }
 
+/// Slots of a dense key map may span this many values at least (more if
+/// there are many keys).
+const DENSE_MIN_SPAN: i128 = 1 << 12;
+
+/// Map from `i64` keys to ids: a direct-indexed slot array while the keys
+/// are dense (their span at most `max(8 × keys, DENSE_MIN_SPAN)`, as for
+/// row ids, order numbers or small codes), else a hash map.
+#[derive(Debug)]
+enum I64Ids {
+    /// `slots[k - base]` is the id of key `k` (`NO_ROW`: absent).
+    Dense {
+        base: i64,
+        slots: Vec<u32>,
+        keys: usize,
+    },
+    Hashed(FastMap<i64, u32>),
+}
+
+impl Default for I64Ids {
+    fn default() -> Self {
+        I64Ids::Dense {
+            base: 0,
+            slots: Vec::new(),
+            keys: 0,
+        }
+    }
+}
+
+impl I64Ids {
+    #[inline]
+    fn get(&self, x: i64) -> Option<u32> {
+        match self {
+            I64Ids::Dense { base, slots, .. } => {
+                let off = (x as i128 - *base as i128) as u128;
+                match slots.get(usize::try_from(off).ok()?) {
+                    Some(&id) if id != NO_ROW => Some(id),
+                    _ => None,
+                }
+            }
+            I64Ids::Hashed(map) => map.get(&x).copied(),
+        }
+    }
+
+    /// The id of `x`, `next` if it is new.
+    #[inline]
+    fn get_or_insert(&mut self, x: i64, next: u32) -> u32 {
+        if let I64Ids::Dense { base, slots, keys } = self {
+            let off = (x as i128 - *base as i128) as u128;
+            if let Some(slot) = usize::try_from(off).ok().and_then(|o| slots.get_mut(o)) {
+                if *slot == NO_ROW {
+                    *slot = next;
+                    *keys += 1;
+                }
+                return *slot;
+            }
+            self.grow(x);
+            return self.get_or_insert(x, next);
+        }
+        match self {
+            I64Ids::Hashed(map) => *map.entry(x).or_insert(next),
+            I64Ids::Dense { .. } => unreachable!(),
+        }
+    }
+
+    /// Makes room for key `x` outside the slots: a wider slot array if the
+    /// keys stay dense enough, else the hash map.
+    fn grow(&mut self, x: i64) {
+        let I64Ids::Dense { base, slots, keys } = self else {
+            return;
+        };
+        let (x, old_base) = (x as i128, *base as i128);
+        let (lo, hi) = if slots.is_empty() {
+            (x, x)
+        } else {
+            (x.min(old_base), x.max(old_base + slots.len() as i128 - 1))
+        };
+        let need = hi - lo + 1;
+        let limit = (8 * (*keys as i128 + 1)).max(DENSE_MIN_SPAN);
+        if need > limit {
+            let mut map = FastMap::default();
+            map.reserve(*keys + 1);
+            for (i, &id) in slots.iter().enumerate() {
+                if id != NO_ROW {
+                    map.insert((old_base + i as i128) as i64, id);
+                }
+            }
+            *self = I64Ids::Hashed(map);
+            return;
+        }
+        // Room for growth in the direction of `x` (amortized resizing).
+        let len = (2 * need).clamp(1024, limit.max(need));
+        let new_base = if x < old_base && !slots.is_empty() {
+            (hi + 1 - len).max(i64::MIN as i128)
+        } else {
+            lo
+        };
+        let len = len.min(i64::MAX as i128 - new_base + 1) as usize;
+        let mut new_slots = vec![NO_ROW; len];
+        if !slots.is_empty() {
+            let shift = (old_base - new_base) as usize;
+            new_slots[shift..shift + slots.len()].copy_from_slice(slots);
+        }
+        *base = new_base as i64;
+        *slots = new_slots;
+    }
+}
+
 #[derive(Debug)]
 enum Map {
     Empty,
-    I64(Class, FastMap<i64, u32>),
+    I64(Class, I64Ids),
     /// `i64` keys in a table hashed by the native `pqk_hash_i64` kernel.
     NativeI64(Class, I64Table),
     Str(FastMap<Arc<str>, u32>),
@@ -175,7 +282,7 @@ impl Interner {
     fn i64_map(&self, c: Class) -> Map {
         match self.native {
             Some(_) => Map::NativeI64(c, I64Table::default()),
-            None => Map::I64(c, FastMap::default()),
+            None => Map::I64(c, I64Ids::default()),
         }
     }
 
@@ -225,7 +332,7 @@ impl Interner {
         }
         let id = match (&mut self.map, v) {
             (Map::I64(class, map), _) => match Class::of_value(v) {
-                Some((c, x)) if c == *class => *map.entry(x).or_insert(next),
+                Some((c, x)) if c == *class => map.get_or_insert(x, next),
                 _ => {
                     self.switch_to_generic();
                     return self.intern_value(v);
@@ -288,19 +395,57 @@ impl Interner {
         let valid = v.valid.as_deref();
         match (&mut self.map, &v.data) {
             (Map::I64(class, map), d) => {
+                // One tight loop per representation of the map; a dense map
+                // that must grow (or turn into a hash map) is resumed.
                 let class = *class;
-                for i in 0..n {
-                    if valid.is_some_and(|ok| !ok[i]) {
-                        out.push(null_id(&mut self.values, &mut self.null_id));
-                        continue;
+                let mut i = 0;
+                while i < n {
+                    let mut grow_for = None;
+                    match map {
+                        I64Ids::Hashed(h) => {
+                            for j in i..n {
+                                if valid.is_some_and(|ok| !ok[j]) {
+                                    out.push(null_id(&mut self.values, &mut self.null_id));
+                                    continue;
+                                }
+                                let x = i64_at(d, j);
+                                let next = self.values.len() as u32;
+                                let id = *h.entry(x).or_insert(next);
+                                if id == next {
+                                    self.values.push(class.value(x));
+                                }
+                                out.push(id);
+                            }
+                            i = n;
+                        }
+                        I64Ids::Dense { base, slots, keys } => {
+                            while i < n {
+                                if valid.is_some_and(|ok| !ok[i]) {
+                                    out.push(null_id(&mut self.values, &mut self.null_id));
+                                    i += 1;
+                                    continue;
+                                }
+                                let x = i64_at(d, i);
+                                let off = (x as i128 - *base as i128) as u128;
+                                let Some(slot) =
+                                    usize::try_from(off).ok().and_then(|o| slots.get_mut(o))
+                                else {
+                                    grow_for = Some(x);
+                                    break;
+                                };
+                                if *slot == NO_ROW {
+                                    *slot = self.values.len() as u32;
+                                    *keys += 1;
+                                    self.values.push(class.value(x));
+                                }
+                                out.push(*slot);
+                                i += 1;
+                            }
+                        }
                     }
-                    let x = i64_at(d, i);
-                    let next = self.values.len() as u32;
-                    let id = *map.entry(x).or_insert(next);
-                    if id == next {
-                        self.values.push(class.value(x));
+                    if let Some(x) = grow_for {
+                        map.grow(x);
                     }
-                    out.push(id);
                 }
             }
             (Map::NativeI64(class, table), d) => {
@@ -402,7 +547,7 @@ impl Interner {
         }
         let found = match (&self.map, v) {
             (Map::I64(class, map), _) => match Class::of_value(v) {
-                Some((c, x)) if c == *class => map.get(&x).copied(),
+                Some((c, x)) if c == *class => map.get(x),
                 _ => self.generic_map().get(v).copied(),
             },
             (Map::NativeI64(class, table), _) => match Class::of_value(v) {
@@ -424,16 +569,32 @@ impl Interner {
         let valid = v.valid.as_deref();
         match (&self.map, &v.data) {
             (_, Data::Null) | (Map::Empty, _) => out.resize(n, NO_ROW),
-            (Map::I64(class, map), d) if Class::of(d) == Some(*class) => {
-                for i in 0..n {
-                    let id = if valid.is_some_and(|ok| !ok[i]) {
-                        NO_ROW
-                    } else {
-                        map.get(&i64_at(d, i)).copied().unwrap_or(NO_ROW)
-                    };
-                    out.push(id);
+            (Map::I64(class, map), d) if Class::of(d) == Some(*class) => match map {
+                I64Ids::Dense { base, slots, .. } => {
+                    for i in 0..n {
+                        let id = if valid.is_some_and(|ok| !ok[i]) {
+                            NO_ROW
+                        } else {
+                            let off = (i64_at(d, i) as i128 - *base as i128) as u128;
+                            usize::try_from(off)
+                                .ok()
+                                .and_then(|o| slots.get(o).copied())
+                                .unwrap_or(NO_ROW)
+                        };
+                        out.push(id);
+                    }
                 }
-            }
+                I64Ids::Hashed(h) => {
+                    for i in 0..n {
+                        let id = if valid.is_some_and(|ok| !ok[i]) {
+                            NO_ROW
+                        } else {
+                            h.get(&i64_at(d, i)).copied().unwrap_or(NO_ROW)
+                        };
+                        out.push(id);
+                    }
+                }
+            },
             (Map::NativeI64(class, table), d) if Class::of(d) == Some(*class) => {
                 let keys = i64_keys(d, n, &mut cache.wide);
                 if let Some(k) = self.native {
@@ -817,5 +978,50 @@ mod tests {
         i.intern(&v, &mut out);
         assert_eq!(out, vec![0, 1, 0]);
         assert_eq!(i.value(0), &Value::str("b"));
+    }
+
+    #[test]
+    fn dense_and_hashed_key_maps_agree() {
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let cases: Vec<Vec<i64>> = vec![
+            (0..5000).map(|_| (next() % 3000) as i64 + 1).collect(),
+            (0..5000)
+                .map(|_| 1_000_000 - (next() % 70_000) as i64)
+                .collect(),
+            (0..3000)
+                .map(|i| if i % 50 == 0 { (next() >> 1) as i64 } else { i })
+                .collect(),
+            vec![
+                i64::MAX,
+                i64::MAX - 5,
+                i64::MIN,
+                i64::MIN + 3,
+                0,
+                -1,
+                i64::MAX,
+            ],
+            vec![-5, -1_000, 7, 300_000, -2, 7],
+        ];
+        for keys in cases {
+            let mut ids = I64Ids::default();
+            let mut reference = std::collections::HashMap::new();
+            for &k in &keys {
+                let next = reference.len() as u32;
+                let want = *reference.entry(k).or_insert(next);
+                assert_eq!(ids.get_or_insert(k, next), want, "key {k}");
+            }
+            for (&k, &id) in &reference {
+                assert_eq!(ids.get(k), Some(id));
+            }
+            for probe in [i64::MIN, -3, 0, 12_345, 999_999, i64::MAX - 1] {
+                assert_eq!(ids.get(probe), reference.get(&probe).copied(), "{probe}");
+            }
+        }
     }
 }

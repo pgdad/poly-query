@@ -4,13 +4,14 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::agg::Aggregator;
-use super::batch::{BATCH_SIZE, Batch, Vector};
+use super::batch::{BATCH_SIZE, Batch, Data, Vector};
 use super::eval::{eval, eval_mask};
 use super::keys::KeyTable;
-use super::sort::{sort_permutation, top_rows};
+use super::sort::sort_permutation;
 use crate::error::Result;
 use crate::exec::ExecContext;
 use crate::exec::operators::{Operator, Row};
+use crate::exec::pool;
 use crate::planner::access::IndexLookup;
 use crate::planner::expr::{AggregateCall, Expr};
 use crate::planner::logical::SortKey;
@@ -289,18 +290,88 @@ impl BatchOperator for DistinctOp {
 }
 
 /// Sort / top-N. Input batches are materialized (compacted to the best
-/// `top` rows from time to time for top-N), sorted by permutation and
-/// emitted in batches.
+/// `top` rows from time to time for top-N) and sorted by permutation; the
+/// output batches are gathered lazily, `BATCH_SIZE` rows at a time.
 pub struct SortOp {
     pub input: Option<BoxedBatchOp>,
     pub keys: Vec<SortKey>,
     pub top: Option<usize>,
     pub width: usize,
-    pub output: Option<(Batch, usize)>,
+    pub output: Option<SortedRows>,
+}
+
+/// The output of a sort: batches gathered in advance (in parallel) and/or
+/// the materialized input with the permutation still to be gathered.
+pub struct SortedRows {
+    ready: VecDeque<Batch>,
+    rows: Batch,
+    perm: Vec<u32>,
+    pos: usize,
+}
+
+/// Sorted outputs from this many rows on are gathered in parallel.
+const PARALLEL_GATHER_ROWS: usize = 16 * BATCH_SIZE;
+
+impl SortedRows {
+    /// The rows `rows` in the order `perm`, gathered batch by batch.
+    pub fn lazy(rows: Batch, perm: Vec<u32>) -> SortedRows {
+        SortedRows {
+            ready: VecDeque::new(),
+            rows,
+            perm,
+            pos: 0,
+        }
+    }
+
+    /// Gathers every output batch on up to `threads` threads (random
+    /// access into the input is latency-bound, so this scales well).
+    fn gathered(rows: Batch, perm: Vec<u32>, threads: usize) -> SortedRows {
+        let per_thread = perm.len().div_ceil(threads).next_multiple_of(BATCH_SIZE);
+        let input = &rows;
+        let parts: Vec<Vec<Batch>> = pool::scoped(
+            perm.chunks(per_thread)
+                .map(|range| move || range.chunks(BATCH_SIZE).map(|c| input.gather(c)).collect())
+                .collect(),
+        );
+        // The input is kept (see `finish`); no rows are left to gather.
+        let mut out = SortedRows::lazy(rows, Vec::new());
+        out.ready = parts.into_iter().flatten().collect();
+        out
+    }
+
+    /// Releases the rows once every output batch was taken. The input
+    /// shares string dictionaries with the output batches, so freeing it
+    /// may mean releasing millions of strings: that happens on a pool
+    /// thread, after the consumer dropped the output batches, instead of
+    /// delaying the query's response.
+    pub fn finish(self) {
+        let strings = self
+            .rows
+            .columns
+            .iter()
+            .any(|c| matches!(c.data, Data::Str(_) | Data::Dict(..) | Data::Values(_)));
+        if strings && self.rows.len > PARALLEL_GATHER_ROWS {
+            pool::drop_in_background(self);
+        }
+    }
+
+    /// The next output batch.
+    pub fn take_batch(&mut self) -> Option<Batch> {
+        if let Some(b) = self.ready.pop_front() {
+            return Some(b);
+        }
+        if self.pos >= self.perm.len() {
+            return None;
+        }
+        let to = (self.pos + BATCH_SIZE).min(self.perm.len());
+        let b = self.rows.gather(&self.perm[self.pos..to]);
+        self.pos = to;
+        Some(b)
+    }
 }
 
 impl SortOp {
-    fn compute(&self, mut input: BoxedBatchOp, ctx: &ExecContext) -> Result<Batch> {
+    fn compute(&self, mut input: BoxedBatchOp, ctx: &ExecContext) -> Result<SortedRows> {
         let mut parts: Vec<Batch> = Vec::new();
         let mut rows = 0usize;
         let mut reserved = 0usize;
@@ -313,8 +384,9 @@ impl SortOp {
             if let Some(n) = self.top
                 && rows >= n.saturating_mul(2).max(8 * BATCH_SIZE)
             {
-                let all = Batch::concat(&parts, self.width);
-                let keep = top_rows(&all, &self.keys, n, ctx)?;
+                let all = Batch::concat(std::mem::take(&mut parts), self.width);
+                let mut keep = sort_permutation(&all, &self.keys, Some(n), ctx)?;
+                keep.sort_unstable();
                 let kept = all.gather(&keep);
                 ctx.release(reserved);
                 reserved = kept.approx_size();
@@ -324,41 +396,60 @@ impl SortOp {
             }
         }
         if parts.is_empty() {
-            return Ok(Batch::new(Vec::new(), 0));
+            return Ok(SortedRows::lazy(Batch::new(Vec::new(), 0), Vec::new()));
         }
-        let all = Batch::concat(&parts, self.width);
+        // Many output rows: strings are emitted as codes into a shared
+        // dictionary (cheap gathers).
+        let len: usize = parts.iter().map(|b| b.len).sum();
+        let dictionary = len > 4 * BATCH_SIZE && self.top.is_none_or(|t| t > 4 * BATCH_SIZE);
+        let finish = |v: Vector| if dictionary { v.into_dictionary() } else { v };
+        let threads = ctx.execution.threads;
+        let parallel = threads > 1 && !ctx.serial_only() && len >= PARALLEL_GATHER_ROWS;
+        let all = if parallel {
+            // Columns are concatenated in parallel.
+            let finish = &finish;
+            let columns = pool::scoped(
+                Batch::column_parts(parts, self.width)
+                    .into_iter()
+                    .map(|column| {
+                        move || {
+                            if dictionary {
+                                Vector::concat_dictionary(column)
+                            } else {
+                                finish(Vector::concat(column))
+                            }
+                        }
+                    })
+                    .collect(),
+            );
+            Batch::new(columns, len)
+        } else {
+            let mut all = Batch::concat(parts, self.width);
+            all.columns = all.columns.into_iter().map(finish).collect();
+            all
+        };
         let perm = sort_permutation(&all, &self.keys, self.top, ctx)?;
-        Ok(all.gather(&perm))
+        Ok(if parallel && perm.len() >= PARALLEL_GATHER_ROWS {
+            SortedRows::gathered(all, perm, threads)
+        } else {
+            SortedRows::lazy(all, perm)
+        })
     }
 }
 
 impl BatchOperator for SortOp {
     fn next_batch(&mut self, ctx: &ExecContext) -> Result<Option<Batch>> {
         if let Some(input) = self.input.take() {
-            let sorted = self.compute(input, ctx)?;
-            self.output = Some((sorted, 0));
+            self.output = Some(self.compute(input, ctx)?);
         }
-        emit_slices(&mut self.output)
+        let next = self.output.as_mut().and_then(SortedRows::take_batch);
+        if next.is_none()
+            && let Some(out) = self.output.take()
+        {
+            out.finish();
+        }
+        Ok(next)
     }
-}
-
-/// Emits a materialized batch in slices of `BATCH_SIZE` rows.
-pub fn emit_slices(output: &mut Option<(Batch, usize)>) -> Result<Option<Batch>> {
-    let Some((b, pos)) = output else {
-        return Ok(None);
-    };
-    if *pos >= b.len {
-        *output = None;
-        return Ok(None);
-    }
-    if *pos == 0 && b.len <= BATCH_SIZE {
-        let out = output.take().map(|(b, _)| b);
-        return Ok(out);
-    }
-    let to = (*pos + BATCH_SIZE).min(b.len);
-    let out = b.slice(*pos, to);
-    *pos = to;
-    Ok(Some(out))
 }
 
 pub struct LimitOp {
@@ -396,6 +487,38 @@ impl BatchOperator for LimitOp {
                 b.slice(from, to)
             }));
         }
+    }
+}
+
+/// A subplan occurring several times in the statement: the first
+/// execution materializes its rows in the query's context, later ones (of
+/// the other occurrences) replay them.
+pub struct SharedOp {
+    pub id: usize,
+    pub input: Option<BoxedBatchOp>,
+    pub width: usize,
+    pub output: VecDeque<Batch>,
+}
+
+impl BatchOperator for SharedOp {
+    fn next_batch(&mut self, ctx: &ExecContext) -> Result<Option<Batch>> {
+        if let Some(mut input) = self.input.take() {
+            let rows = match ctx.shared_result(self.id) {
+                Some(rows) => rows,
+                None => {
+                    let mut batches = Vec::new();
+                    while let Some(b) = input.next_batch(ctx)? {
+                        ctx.reserve(b.approx_size())?;
+                        batches.push(b);
+                    }
+                    let rows: Arc<[Batch]> = batches.into();
+                    ctx.cache_shared_result(self.id, rows.clone());
+                    rows
+                }
+            };
+            self.output = rows.iter().cloned().collect();
+        }
+        Ok(self.output.pop_front())
     }
 }
 

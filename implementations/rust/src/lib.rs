@@ -11,7 +11,9 @@
 //! * [`engine`]   — transport-independent facade
 //! * [`protocol`] — JSON request/response protocol, session and exec modes
 //! * [`server`]   — HTTP/1.1 server (`serve`): admission, streaming, metrics, shutdown
+//! * [`alloc`]    — the global allocator (arena-local `realloc`)
 
+pub mod alloc;
 pub mod catalog;
 pub mod cli;
 pub mod config;

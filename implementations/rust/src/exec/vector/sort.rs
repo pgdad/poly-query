@@ -2,29 +2,41 @@
 //! the rows by the sort keys, with exactly the row engine's order (stable:
 //! ties keep input order; NULL placement per key).
 //!
-//! * A single numeric/temporal/boolean/dictionary key is encoded as an
-//!   order-preserving `u64` and sorted as `(key, row)` pairs with an LSD
-//!   radix sort (8-bit digits, constant digits skipped) — stable by
-//!   construction and branch-free.
-//! * A single string key sorts `(8-byte big-endian prefix, row)` pairs,
-//!   comparing full strings only when prefixes tie.
-//! * Other key lists use a comparator over typed key columns.
-//!
-//! Large comparator-sorted inputs are cut into chunks sorted on separate
-//! threads and merged.
-//! Top-N uses selection (`select_nth_unstable`) with the row number as
-//! final tie-breaker, i.e. the prefix of the stable order.
+//! * Full sorts **normalize** the keys: every key becomes an unsigned code
+//!   per row whose natural order is the requested order (direction and NULL
+//!   placement folded in; numbers by an order-preserving bit encoding,
+//!   dictionary codes by their dense rank, the first string key by the 8
+//!   bytes after the prefix all its strings share, later string keys by
+//!   their rank), with the minimal bit width. The top 64 bits of each
+//!   row's concatenated codes and the row number are sorted as
+//!   `(u64, u32)` pairs: an MSD partition on the top varying bits on
+//!   several threads, then the partitions in parallel (LSD radix sort or
+//!   `sort_unstable`). Ties are broken by the row number, which gives the
+//!   stable order. Where that key is inexact (string prefixes, codes
+//!   longer than 64 bits), runs of equal keys are then ordered by comparing
+//!   the full codes and strings.
+//! * Generic (`Values`) key vectors use a comparator over the values;
+//!   large inputs are cut into chunks sorted on separate threads and
+//!   merged.
+//! * Top-N uses selection (`select_nth_unstable`) with the row number as
+//!   final tie-breaker, i.e. the prefix of the stable order.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::Relaxed;
 
 use super::batch::{Batch, Data, Vector};
-use super::eval::eval;
+use super::eval::eval_cow;
 use crate::error::Result;
 use crate::exec::ExecContext;
-use crate::exec::parallel::PARALLEL_STACK_BYTES;
+use crate::exec::pool;
 use crate::planner::logical::SortKey;
 use crate::types::Value;
+
+/// Dictionaries up to this size are ranked by a comparison sort.
+const SMALL_DICTIONARY: usize = 4096;
 
 /// Minimum rows per parallel sort chunk.
 const PARALLEL_SORT_MIN: usize = 64 * 1024;
@@ -34,9 +46,6 @@ enum SortCol {
     /// Order-preserving unsigned encoding (ascending).
     U64(Vec<u64>),
     Str(Vec<Arc<str>>),
-    /// Dictionary-encoded strings compared as strings (sorted runs, whose
-    /// keys are compared with other batches' keys).
-    Dict(Vec<u32>, Arc<[Arc<str>]>),
     Values(Vec<Value>),
 }
 
@@ -65,12 +74,6 @@ fn enc_f64(f: f64) -> u64 {
 
 impl SortColumn {
     fn new(v: Vector, key: &SortKey) -> SortColumn {
-        SortColumn::with_dict_ranks(v, key, true)
-    }
-
-    /// With `ranks`, dictionary codes are replaced by the ranks of their
-    /// strings (only comparable within this vector).
-    fn with_dict_ranks(v: Vector, key: &SortKey, ranks: bool) -> SortColumn {
         let nulls = match &v.data {
             Data::Values(_) => None,
             _ => v
@@ -85,7 +88,6 @@ impl SortColumn {
             Data::Bool(x) => SortCol::U64(x.into_iter().map(u64::from).collect()),
             Data::Float(x) => SortCol::U64(x.into_iter().map(enc_f64).collect()),
             Data::Str(x) => SortCol::Str(x),
-            Data::Dict(codes, dict) if !ranks => SortCol::Dict(codes, dict),
             Data::Dict(codes, dict) => {
                 // Rank dictionary entries once; equal strings share a rank.
                 let mut order: Vec<u32> = (0..dict.len() as u32).collect();
@@ -140,7 +142,6 @@ impl SortColumn {
         let o = match &self.col {
             SortCol::U64(v) => v[a].cmp(&v[b]),
             SortCol::Str(v) => v[a].as_bytes().cmp(v[b].as_bytes()),
-            SortCol::Dict(c, d) => d[c[a] as usize].as_bytes().cmp(d[c[b] as usize].as_bytes()),
             SortCol::Values(v) => {
                 if let Some(o) = self.null_order(v[a].is_null(), v[b].is_null()) {
                     return o;
@@ -190,36 +191,6 @@ impl KeyComparator {
     }
 }
 
-/// Stable LSD radix sort of `(key, row)` pairs by key.
-fn radix_sort(mut items: Vec<(u64, u32)>) -> Vec<(u64, u32)> {
-    let n = items.len();
-    let mut hist = vec![[0usize; 256]; 8];
-    for &(k, _) in &items {
-        for (d, h) in hist.iter_mut().enumerate() {
-            h[((k >> (8 * d)) & 0xff) as usize] += 1;
-        }
-    }
-    let mut buf = vec![(0u64, 0u32); n];
-    for (d, h) in hist.iter().enumerate() {
-        if h.contains(&n) {
-            continue; // every key has the same digit
-        }
-        let mut offs = [0usize; 256];
-        let mut sum = 0;
-        for (o, &c) in offs.iter_mut().zip(h.iter()) {
-            *o = sum;
-            sum += c;
-        }
-        for &it in &items {
-            let b = ((it.0 >> (8 * d)) & 0xff) as usize;
-            buf[offs[b]] = it;
-            offs[b] += 1;
-        }
-        std::mem::swap(&mut items, &mut buf);
-    }
-    items
-}
-
 /// Merges sorted runs (each sorted by `cmp`, which must be a total order).
 fn merge_runs<T: Copy>(runs: Vec<Vec<T>>, cmp: &(dyn Fn(&T, &T) -> Ordering + Sync)) -> Vec<T> {
     let mut runs = runs;
@@ -265,23 +236,9 @@ fn parallel_sort<T: Copy + Send + Sync>(
     }
     let size = items.len().div_ceil(chunks);
     let parts: Vec<Vec<T>> = items.chunks(size).map(<[T]>::to_vec).collect();
-    // A failure to start or a panic in a sort thread is propagated as a
-    // panic; the query layer turns it into a row-mode re-execution.
-    let runs: Vec<Vec<T>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = parts
-            .into_iter()
-            .map(|p| {
-                std::thread::Builder::new()
-                    .stack_size(PARALLEL_STACK_BYTES)
-                    .spawn_scoped(scope, move || sort(p))
-                    .unwrap_or_else(|e| panic!("cannot start sort thread: {e}"))
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-            .collect()
-    });
+    // A panic in a sort job is propagated; the query layer turns it into
+    // a row-mode re-execution.
+    let runs: Vec<Vec<T>> = pool::scoped(parts.into_iter().map(|p| move || sort(p)).collect());
     merge_runs(runs, cmp)
 }
 
@@ -293,510 +250,122 @@ pub fn sort_permutation(
     top: Option<usize>,
     ctx: &ExecContext,
 ) -> Result<Vec<u32>> {
-    order(b, keys, top, true, ctx)
-}
-
-/// The rows at the first `n` positions of the stable order, in row order
-/// (top-N compaction: selecting the set does not need sorting it).
-pub fn top_rows(b: &Batch, keys: &[SortKey], n: usize, ctx: &ExecContext) -> Result<Vec<u32>> {
-    let mut rows = order(b, keys, Some(n), false, ctx)?;
-    rows.sort_unstable();
-    Ok(rows)
-}
-
-/// The first `top` (default: all) rows of the stable order; sorted by
-/// that order if `sorted`, else in unspecified order.
-fn order(
-    b: &Batch,
-    keys: &[SortKey],
-    top: Option<usize>,
-    sorted: bool,
-    ctx: &ExecContext,
-) -> Result<Vec<u32>> {
-    let mut cols = Vec::with_capacity(keys.len());
+    let mut vectors = Vec::with_capacity(keys.len());
     for k in keys {
-        cols.push(SortColumn::new(eval(&k.expr, b, ctx)?, k));
+        vectors.push(eval_cow(&k.expr, b, ctx)?);
     }
     let n = b.len;
     if top == Some(0) {
         return Ok(Vec::new());
     }
-    let threads = if ctx.in_subquery() {
+    let threads = if ctx.serial_only() {
         1
     } else {
         ctx.execution.threads
     };
-    let out = if let [single] = cols.as_slice()
-        && !matches!(single.col, SortCol::Values(_))
-    {
-        sort_single(single, n, top, threads)
-    } else if cols.iter().all(|c| !matches!(c.col, SortCol::Values(_))) {
-        let keys = NormKeys::new(cols, n, false);
-        match keys.pack() {
-            Some(Packed::U64(items)) => sort_packed64(items, top, sorted),
-            Some(Packed::U128(items)) => sort_packed128(items, top, sorted, threads),
-            None => {
-                let idx: Vec<u32> = (0..n as u32).collect();
-                let cmp = |x: &u32, y: &u32| keys.compare(*x, *y).then(x.cmp(y));
-                select_or_sort(idx, top, sorted, threads, &cmp)
-            }
+    let generic = vectors.iter().any(|v| matches!(v.data, Data::Values(_)));
+    let out = match top {
+        Some(t) if t < n => {
+            let cols = sort_columns(vectors, keys);
+            top_permutation(&cols, n, t)
         }
-    } else {
-        let idx: Vec<u32> = (0..n as u32).collect();
-        let cmp = |x: &u32, y: &u32| compare_rows(&cols, *x as usize, *y as usize).then(x.cmp(y));
-        select_or_sort(idx, top, sorted, threads, &cmp)
+        _ if generic => {
+            let cols = sort_columns(vectors, keys);
+            let cmp =
+                |x: &u32, y: &u32| compare_rows(&cols, *x as usize, *y as usize).then(x.cmp(y));
+            comparator_sort(n, threads, &cmp)
+        }
+        _ => {
+            // The first string key is coded by prefix (with ties), later
+            // ones by rank. With several keys, they are coded in parallel.
+            let prefixed = vectors.iter().position(|v| match &v.data {
+                Data::Str(_) => true,
+                Data::Dict(_, dict) => dict.len() > SMALL_DICTIONARY,
+                _ => false,
+            });
+            let jobs: Vec<_> = vectors
+                .iter()
+                .zip(keys)
+                .enumerate()
+                .map(|(i, (v, k))| move || key_codes(v, k, threads, prefixed == Some(i)))
+                .collect();
+            let per_key = if threads > 1 {
+                pool::scoped(jobs)
+            } else {
+                jobs.into_iter().map(|job| job()).collect()
+            };
+            let codes: Vec<KeyCodes> = per_key
+                .into_iter()
+                .flatten()
+                .filter(|c| c.bits > 0 || c.ties.is_some())
+                .collect();
+            normalized_sort(&codes, n, threads)
+        }
     };
     ctx.check_interrupt()?;
     Ok(out)
 }
 
-/// Sorts `items` by `cmp` (a total order), or selects its first `top`
-/// items (sorted if `sorted`).
-fn select_or_sort<T: Copy + Send + Sync>(
-    mut items: Vec<T>,
-    top: Option<usize>,
-    sorted: bool,
-    threads: usize,
-    cmp: &(dyn Fn(&T, &T) -> Ordering + Sync),
-) -> Vec<T> {
-    match top {
-        Some(t) if t < items.len() => {
-            items.select_nth_unstable_by(t - 1, cmp);
-            items.truncate(t);
-            if sorted {
-                items.sort_unstable_by(cmp);
-            }
-            items
-        }
-        _ if !sorted => items,
-        _ => parallel_sort(
-            items,
-            threads,
-            &|mut v: Vec<T>| {
-                v.sort_unstable_by(cmp);
-                v
-            },
-            cmp,
-        ),
-    }
-}
-
-/// Multi-key sort keys normalized to rows of `u64` words that compare
-/// lexicographically in sort order (row-major, so a comparison touches one
-/// cache line): per key an optional NULL-placement word and the value
-/// word(s), bit-inverted for DESC: the order-preserving encoding of
-/// fixed-width values; for strings the big-endian 8-byte prefix and
-/// `min(length, 9)`, which decide the order unless both strings are longer
-/// than 8 bytes and the prefixes tie (then the strings are compared).
-struct NormKeys {
-    width: usize,
-    words: Vec<u64>,
-    strings: Vec<StrKey>,
-}
-
-/// A string key of [`NormKeys`].
-struct StrKey {
-    /// Index of the prefix word (the length word follows it).
-    word: usize,
-    src: StrSource,
-    descending: bool,
-}
-
-enum StrSource {
-    Plain(Vec<Arc<str>>),
-    Dict(Vec<u32>, Arc<[Arc<str>]>),
-}
-
-impl StrSource {
-    #[inline]
-    fn get(&self, i: usize) -> &[u8] {
-        match self {
-            StrSource::Plain(v) => v[i].as_bytes(),
-            StrSource::Dict(c, d) => d[c[i] as usize].as_bytes(),
-        }
-    }
-}
-
-/// Normalized keys packed into one integer per row (key bits above the
-/// row number), so plain integer order is the stable sort order.
-enum Packed {
-    U64(Vec<(u64, u32)>),
-    U128(Vec<u128>),
-}
-
-#[inline]
-fn str_prefix(b: &[u8]) -> u64 {
-    let mut buf = [0u8; 8];
-    let k = b.len().min(8);
-    buf[..k].copy_from_slice(&b[..k]);
-    u64::from_be_bytes(buf)
-}
-
-/// Value of the length word of strings that need a full comparison.
-const LONG: u64 = 9;
-
-impl NormKeys {
-    /// `cols` must not contain generic (`Values`) keys. With `uniform`,
-    /// every key has a NULL word, so keys of different batches have the
-    /// same layout and compare with each other.
-    fn new(cols: Vec<SortColumn>, n: usize, uniform: bool) -> NormKeys {
-        let has_null_word = |c: &SortColumn| uniform || c.nulls.is_some();
-        let width: usize = cols
-            .iter()
-            .map(|c| {
-                let value_words = match c.col {
-                    SortCol::Str(_) | SortCol::Dict(..) => 2,
-                    _ => 1,
-                };
-                value_words + usize::from(has_null_word(c))
-            })
-            .sum();
-        let mut words = vec![0u64; n * width];
-        let mut strings = Vec::new();
-        let mut w = 0;
-        for c in cols {
-            if has_null_word(&c) {
-                // NULLs first: NULL = 0 < non-NULL = 1; NULLs last: reversed.
-                let (null, non_null) = if c.nulls_first { (0, 1) } else { (1, 0) };
-                for i in 0..n {
-                    let is_null = c.nulls.as_ref().is_some_and(|x| x[i]);
-                    words[i * width + w] = if is_null { null } else { non_null };
-                }
-                w += 1;
-            }
-            let flip = if c.descending { u64::MAX } else { 0 };
-            let nulls = c.nulls;
-            let is_null = |i: usize| nulls.as_ref().is_some_and(|x| x[i]);
-            let src = match c.col {
-                SortCol::U64(v) => {
-                    for (i, &x) in v.iter().enumerate() {
-                        words[i * width + w] = if is_null(i) { 0 } else { x ^ flip };
-                    }
-                    w += 1;
-                    continue;
-                }
-                SortCol::Str(v) => StrSource::Plain(v),
-                SortCol::Dict(codes, dict) => StrSource::Dict(codes, dict),
-                SortCol::Values(_) => unreachable!("generic keys use the comparator path"),
-            };
-            for i in 0..n {
-                if !is_null(i) {
-                    let s = src.get(i);
-                    words[i * width + w] = str_prefix(s) ^ flip;
-                    words[i * width + w + 1] = (s.len() as u64).min(LONG) ^ flip;
-                }
-            }
-            strings.push(StrKey {
-                word: w,
-                src,
-                descending: c.descending,
-            });
-            w += 2;
-        }
-        NormKeys {
-            width,
-            words,
-            strings,
-        }
-    }
-
-    #[inline]
-    fn row(&self, i: u32) -> &[u64] {
-        let from = i as usize * self.width;
-        &self.words[from..from + self.width]
-    }
-
-    #[inline]
-    fn compare(&self, a: u32, b: u32) -> Ordering {
-        compare_norm(self, a, a, self, b, b)
-    }
-
-    /// The word rows reordered by `perm` (word row `k` = row `perm[k]`),
-    /// so that a merge reads them sequentially.
-    fn permute_words(&mut self, perm: &[u32]) {
-        let mut words = Vec::with_capacity(perm.len() * self.width);
-        for &i in perm {
-            words.extend_from_slice(self.row(i));
-        }
-        self.words = words;
-    }
-
-    /// Packs every row's words into one integer if the words' value ranges
-    /// fit (no string keys).
-    fn pack(&self) -> Option<Packed> {
-        if !self.strings.is_empty() {
-            return None;
-        }
-        let n = self.words.len() / self.width.max(1);
-        let mut min = vec![u64::MAX; self.width];
-        let mut max = vec![0u64; self.width];
-        for row in self.words.chunks_exact(self.width) {
-            for (j, &x) in row.iter().enumerate() {
-                min[j] = min[j].min(x);
-                max[j] = max[j].max(x);
-            }
-        }
-        let bits: Vec<u32> = (0..self.width)
-            .map(|j| {
-                if n == 0 {
-                    0
-                } else {
-                    64 - (max[j] - min[j]).leading_zeros()
-                }
-            })
-            .collect();
-        let total: u32 = bits.iter().sum();
-        let key = |row: &[u64]| -> u128 {
-            let mut k = 0u128;
-            for (j, &x) in row.iter().enumerate() {
-                k = (k << bits[j]) | (x - min[j]) as u128;
-            }
-            k
-        };
-        if total <= 64 {
-            Some(Packed::U64(
-                self.words
-                    .chunks_exact(self.width)
-                    .enumerate()
-                    .map(|(i, row)| (key(row) as u64, i as u32))
-                    .collect(),
-            ))
-        } else if total <= 96 {
-            Some(Packed::U128(
-                self.words
-                    .chunks_exact(self.width)
-                    .enumerate()
-                    .map(|(i, row)| (key(row) << 32) | i as u128)
-                    .collect(),
-            ))
-        } else {
-            None
-        }
-    }
-}
-
-fn sort_packed64(items: Vec<(u64, u32)>, top: Option<usize>, sorted: bool) -> Vec<u32> {
-    let items = match top {
-        Some(t) if t < items.len() => {
-            let mut p = items;
-            p.select_nth_unstable(t - 1);
-            p.truncate(t);
-            if sorted {
-                p.sort_unstable();
-            }
-            p
-        }
-        _ if !sorted => items,
-        _ if items.len() < 1024 => {
-            let mut p = items;
-            p.sort_unstable();
-            p
-        }
-        _ => radix_sort(items),
-    };
-    items.into_iter().map(|(_, i)| i).collect()
-}
-
-/// Compares a row of `x` with a row of `y` (keys of the same sort keys
-/// and layout), given as word row (`aw`, `bw`) and row of the string
-/// sources (`a`, `b`), which differ once the words are permuted.
-#[inline]
-fn compare_norm(x: &NormKeys, aw: u32, a: u32, y: &NormKeys, bw: u32, b: u32) -> Ordering {
-    let (ra, rb) = (x.row(aw), y.row(bw));
-    let mut from = 0;
-    for (sx, sy) in x.strings.iter().zip(&y.strings) {
-        let end = sx.word + 2;
-        let o = ra[from..end].cmp(&rb[from..end]);
-        if o != Ordering::Equal {
-            return o;
-        }
-        let flip = if sx.descending { u64::MAX } else { 0 };
-        if ra[sx.word + 1] ^ flip == LONG {
-            let o = sx.src.get(a as usize).cmp(sy.src.get(b as usize));
-            if o != Ordering::Equal {
-                return if sx.descending { o.reverse() } else { o };
-            }
-        }
-        from = end;
-    }
-    ra[from..].cmp(&rb[from..])
-}
-
-/// Sorted rows with their keys normalized for comparisons with other runs
-/// of the same keys (None: generic keys; such runs are merged by
-/// re-sorting). Row `k` of `batch` was row `perm[k]` of the input, where
-/// the keys' string sources still refer to.
-pub struct SortedRun {
-    batch: Batch,
-    perm: Vec<u32>,
-    keys: Option<NormKeys>,
-}
-
-/// Sorts `b` by `keys` (the first `top` rows with `top`) into a run.
-pub fn sorted_run(
-    b: Batch,
-    keys: &[SortKey],
-    top: Option<usize>,
-    ctx: &ExecContext,
-) -> Result<SortedRun> {
-    let mut cols = Vec::with_capacity(keys.len());
-    for k in keys {
-        cols.push(SortColumn::with_dict_ranks(
-            eval(&k.expr, &b, ctx)?,
-            k,
-            false,
-        ));
-    }
-    if cols.iter().any(|c| matches!(c.col, SortCol::Values(_))) {
-        let perm = sort_permutation(&b, keys, top, ctx)?;
-        return Ok(SortedRun {
-            batch: b.gather(&perm),
-            perm,
-            keys: None,
-        });
-    }
-    let mut norm = NormKeys::new(cols, b.len, true);
-    let threads = if ctx.in_subquery() {
-        1
-    } else {
-        ctx.execution.threads
-    };
-    let perm = match norm.pack() {
-        Some(Packed::U64(items)) => sort_packed64(items, top, true),
-        Some(Packed::U128(items)) => sort_packed128(items, top, true, threads),
-        None => {
-            let idx: Vec<u32> = (0..b.len as u32).collect();
-            let cmp = |x: &u32, y: &u32| norm.compare(*x, *y).then(x.cmp(y));
-            select_or_sort(idx, top, true, threads, &cmp)
-        }
-    };
-    norm.permute_words(&perm);
-    ctx.check_interrupt()?;
-    Ok(SortedRun {
-        batch: b.gather(&perm),
-        perm,
-        keys: Some(norm),
-    })
-}
-
-/// The first `n` rows of the sorted union of `runs` (runs of `keys`, with
-/// `width` columns). `keys` must be a total order (no ties between rows).
-pub fn merge_top(
-    runs: Vec<SortedRun>,
-    keys: &[SortKey],
-    n: usize,
-    width: usize,
-    ctx: &ExecContext,
-) -> Result<Batch> {
-    let runs: Vec<SortedRun> = runs.into_iter().filter(|r| !r.perm.is_empty()).collect();
-    if runs.iter().any(|r| r.keys.is_none()) {
-        let batches: Vec<Batch> = runs.into_iter().map(|r| r.batch).collect();
-        if batches.is_empty() {
-            return Ok(Batch::new(Vec::new(), 0));
-        }
-        let all = Batch::concat(&batches, width);
-        let perm = sort_permutation(&all, keys, Some(n), ctx)?;
-        return Ok(all.gather(&perm));
-    }
-    let norm: Vec<&NormKeys> = runs.iter().filter_map(|r| r.keys.as_ref()).collect();
-    let perms: Vec<&[u32]> = runs.iter().map(|r| r.perm.as_slice()).collect();
-    // Position in each run's order (= word row of its permuted keys); a
-    // binary min-heap of run indices ordered by the rows at those positions.
-    let mut pos = vec![0usize; runs.len()];
-    let less = |pos: &[usize], x: usize, y: usize| {
-        let (px, py) = (pos[x], pos[y]);
-        compare_norm(
-            norm[x],
-            px as u32,
-            perms[x][px],
-            norm[y],
-            py as u32,
-            perms[y][py],
-        ) == Ordering::Less
-    };
-    let sift_down = |heap: &mut [usize], pos: &[usize], mut i: usize| {
-        loop {
-            let (l, r) = (2 * i + 1, 2 * i + 2);
-            let mut m = i;
-            if l < heap.len() && less(pos, heap[l], heap[m]) {
-                m = l;
-            }
-            if r < heap.len() && less(pos, heap[r], heap[m]) {
-                m = r;
-            }
-            if m == i {
-                return;
-            }
-            heap.swap(i, m);
-            i = m;
-        }
-    };
-    let mut heap: Vec<usize> = (0..runs.len()).collect();
-    for i in (0..heap.len() / 2).rev() {
-        sift_down(&mut heap, &pos, i);
-    }
-    let mut order: Vec<(u32, u32)> = Vec::with_capacity(n.min(1 << 20));
-    while order.len() < n && !heap.is_empty() {
-        let r = heap[0];
-        order.push((r as u32, pos[r] as u32));
-        pos[r] += 1;
-        if pos[r] == perms[r].len() {
-            let last = heap.len() - 1;
-            heap.swap(0, last);
-            heap.pop();
-        }
-        sift_down(&mut heap, &pos, 0);
-    }
-    ctx.check_interrupt()?;
-    let batches: Vec<&Batch> = runs.iter().map(|r| &r.batch).collect();
-    Ok(Batch::gather_parts(&batches, &order, width))
-}
-
-fn sort_packed128(items: Vec<u128>, top: Option<usize>, sorted: bool, threads: usize) -> Vec<u32> {
-    let cmp = |a: &u128, b: &u128| a.cmp(b);
-    select_or_sort(items, top, sorted, threads, &cmp)
+fn sort_columns(vectors: Vec<Cow<Vector>>, keys: &[SortKey]) -> Vec<SortColumn> {
+    vectors
         .into_iter()
-        .map(|x| x as u32)
+        .zip(keys)
+        .map(|(v, k)| SortColumn::new(v.into_owned(), k))
         .collect()
 }
+/// Sorts the row numbers `0..n` by `cmp` (a total order) on up to `threads`
+/// threads.
+fn comparator_sort(
+    n: usize,
+    threads: usize,
+    cmp: &(dyn Fn(&u32, &u32) -> Ordering + Sync),
+) -> Vec<u32> {
+    parallel_sort(
+        (0..n as u32).collect(),
+        threads,
+        &|mut v: Vec<u32>| {
+            v.sort_unstable_by(cmp);
+            v
+        },
+        cmp,
+    )
+}
 
-/// One key: NULLs are placed as a block (stable), the rest sorted by
-/// encoded key (or string prefix) and row number.
-fn sort_single(col: &SortColumn, n: usize, top: Option<usize>, threads: usize) -> Vec<u32> {
+/// The first `t` (< `n`) positions of the stable order.
+fn top_permutation(cols: &[SortColumn], n: usize, t: usize) -> Vec<u32> {
+    if let [single] = cols
+        && !matches!(single.col, SortCol::Values(_))
+    {
+        return top_single(single, n, t);
+    }
+    let mut idx: Vec<u32> = (0..n as u32).collect();
+    let cmp = |x: &u32, y: &u32| compare_rows(cols, *x as usize, *y as usize).then(x.cmp(y));
+    idx.select_nth_unstable_by(t - 1, cmp);
+    idx.truncate(t);
+    idx.sort_unstable_by(cmp);
+    idx
+}
+
+/// Top-N by one key: NULLs are placed as a block (stable), the rest
+/// selected by encoded key (or string prefix) and row number.
+fn top_single(col: &SortColumn, n: usize, t: usize) -> Vec<u32> {
     let nulls: Vec<u32> = (0..n as u32).filter(|&i| col.is_null(i as usize)).collect();
+    if col.nulls_first && nulls.len() >= t {
+        return nulls[..t].to_vec();
+    }
     let rows = (0..n as u32).filter(|&i| !col.is_null(i as usize));
     let mut sorted: Vec<u32> = match &col.col {
         SortCol::U64(v) => {
             let flip = if col.descending { u64::MAX } else { 0 };
-            let pairs: Vec<(u64, u32)> = rows.map(|i| (v[i as usize] ^ flip, i)).collect();
-            let pairs = match top {
-                Some(t) if t < pairs.len() => {
-                    let mut p = pairs;
-                    p.select_nth_unstable(t - 1);
-                    p.truncate(t);
-                    p.sort_unstable();
-                    p
-                }
-                _ if pairs.len() < 1024 => {
-                    let mut p = pairs;
-                    p.sort_unstable();
-                    p
-                }
-                // Radix sorting is memory-bound and linear: one pass beats
-                // sorting chunks in parallel and merging them.
-                _ => radix_sort(pairs),
-            };
-            pairs.into_iter().map(|(_, i)| i).collect()
+            let mut p: Vec<(u64, u32)> = rows.map(|i| (v[i as usize] ^ flip, i)).collect();
+            if t < p.len() {
+                p.select_nth_unstable(t - 1);
+                p.truncate(t);
+            }
+            p.sort_unstable();
+            p.into_iter().map(|(_, i)| i).collect()
         }
         SortCol::Str(v) => {
-            let prefix = |s: &str| {
-                let mut buf = [0u8; 8];
-                let b = s.as_bytes();
-                let k = b.len().min(8);
-                buf[..k].copy_from_slice(&b[..k]);
-                u64::from_be_bytes(buf)
-            };
-            let pairs: Vec<(u64, u32)> = rows.map(|i| (prefix(&v[i as usize]), i)).collect();
             let desc = col.descending;
             let cmp = |a: &(u64, u32), b: &(u64, u32)| {
                 let o =
@@ -804,29 +373,17 @@ fn sort_single(col: &SortColumn, n: usize, top: Option<usize>, threads: usize) -
                         .then_with(|| v[a.1 as usize].as_bytes().cmp(v[b.1 as usize].as_bytes()));
                 (if desc { o.reverse() } else { o }).then(a.1.cmp(&b.1))
             };
-            let pairs = match top {
-                Some(t) if t < pairs.len() => {
-                    let mut p = pairs;
-                    p.select_nth_unstable_by(t - 1, cmp);
-                    p.truncate(t);
-                    p.sort_unstable_by(cmp);
-                    p
-                }
-                _ => parallel_sort(
-                    pairs,
-                    threads,
-                    &|mut p: Vec<(u64, u32)>| {
-                        p.sort_unstable_by(cmp);
-                        p
-                    },
-                    &cmp,
-                ),
-            };
-            pairs.into_iter().map(|(_, i)| i).collect()
+            let mut p: Vec<(u64, u32)> = rows
+                .map(|i| (str_prefix(v[i as usize].as_bytes()), i))
+                .collect();
+            if t < p.len() {
+                p.select_nth_unstable_by(t - 1, cmp);
+                p.truncate(t);
+            }
+            p.sort_unstable_by(cmp);
+            p.into_iter().map(|(_, i)| i).collect()
         }
-        SortCol::Dict(..) | SortCol::Values(_) => {
-            unreachable!("generic keys use the comparator path")
-        }
+        SortCol::Values(_) => unreachable!("generic keys use the comparator path"),
     };
     let mut out = if col.nulls_first {
         let mut out = nulls;
@@ -836,10 +393,602 @@ fn sort_single(col: &SortColumn, n: usize, top: Option<usize>, threads: usize) -
         sorted.extend(nulls);
         sorted
     };
-    if let Some(t) = top {
-        out.truncate(t);
+    out.truncate(t);
+    out
+}
+
+/// The first 8 bytes of a string as a big-endian integer (zero padded):
+/// ordering prefixes orders strings up to ties.
+#[inline]
+fn str_prefix(b: &[u8]) -> u64 {
+    let mut buf = [0u8; 8];
+    let k = b.len().min(8);
+    buf[..k].copy_from_slice(&b[..k]);
+    u64::from_be_bytes(buf)
+}
+
+// ---------------------------------------------------------------------------
+// Normalized keys
+
+/// One component of a normalized sort key: a code per row whose ascending
+/// order is the requested order, using `bits` bits (0: constant, ignored
+/// unless it has `ties`).
+struct KeyCodes<'a> {
+    codes: Vec<u64>,
+    bits: u32,
+    /// Set for string prefix codes: rows with equal codes may still differ
+    /// and are ordered by these strings.
+    ties: Option<Ties<'a>>,
+}
+
+impl KeyCodes<'_> {
+    fn exact(codes: Vec<u64>, bits: u32) -> Self {
+        KeyCodes {
+            codes,
+            bits,
+            ties: None,
+        }
+    }
+}
+
+/// The strings of a key coded by prefix.
+struct Ties<'a> {
+    strings: Strings<'a>,
+    valid: Option<&'a [bool]>,
+    descending: bool,
+}
+
+/// Plain or dictionary-encoded strings of a vector.
+#[derive(Clone, Copy)]
+enum Strings<'a> {
+    Plain(&'a [Arc<str>]),
+    Dict(&'a [u32], &'a [Arc<str>]),
+}
+
+impl<'a> Strings<'a> {
+    #[inline]
+    fn get(self, row: usize) -> &'a [u8] {
+        match self {
+            Strings::Plain(v) => v[row].as_bytes(),
+            Strings::Dict(codes, dict) => dict[codes[row] as usize].as_bytes(),
+        }
+    }
+}
+
+impl Ties<'_> {
+    /// Compares rows `a` and `b` whose codes are equal.
+    fn compare(&self, a: usize, b: usize) -> Ordering {
+        if self.valid.is_some_and(|v| !v[a]) {
+            return Ordering::Equal;
+        }
+        let o = self.strings.get(a).cmp(self.strings.get(b));
+        if self.descending { o.reverse() } else { o }
+    }
+}
+
+/// The normalized components of one sort key over a typed vector: a NULL
+/// flag (if there are NULLs) followed by the value code. Strings (plain or
+/// with a large dictionary) are coded by prefix if `allow_ties`, else by
+/// rank.
+fn key_codes<'a>(
+    v: &'a Vector,
+    key: &SortKey,
+    threads: usize,
+    allow_ties: bool,
+) -> Vec<KeyCodes<'a>> {
+    let n = v.len();
+    let valid: Option<&[bool]> = v.valid.as_deref();
+    let mut ties = None;
+    let mut enc: Vec<u64> = match &v.data {
+        Data::Int(x) | Data::Timestamp(x) | Data::Decimal(x, _) => {
+            x.iter().map(|&x| enc_i64(x)).collect()
+        }
+        Data::Date(x) => x.iter().map(|&d| enc_i64(d as i64)).collect(),
+        Data::Bool(x) => x.iter().map(|&b| u64::from(b)).collect(),
+        Data::Float(x) => x.iter().map(|&f| enc_f64(f)).collect(),
+        Data::Str(x) if allow_ties => {
+            ties = Some(Strings::Plain(x));
+            string_prefixes(x, threads)
+        }
+        Data::Str(x) => string_ranks(x, threads),
+        Data::Dict(codes, dict) => {
+            let rank = if dict.len() <= SMALL_DICTIONARY {
+                dict_ranks(dict)
+            } else if allow_ties {
+                ties = Some(Strings::Dict(codes, dict));
+                string_prefixes(dict, threads)
+            } else {
+                string_ranks(dict, threads)
+            };
+            codes.iter().map(|&c| rank[c as usize]).collect()
+        }
+        Data::Null => return Vec::new(),
+        Data::Values(_) => unreachable!("generic keys use the comparator path"),
+    };
+    let mut out = Vec::with_capacity(2);
+    let null_count = valid.map_or(0, |v| v.iter().filter(|&&ok| !ok).count());
+    if null_count == n {
+        return out;
+    }
+    if let Some(valid) = valid
+        && null_count > 0
+    {
+        // NULLs first: NULL rows get flag 0; NULLs last: flag 1.
+        let codes = valid
+            .iter()
+            .map(|&ok| u64::from(ok == key.nulls_first))
+            .collect();
+        out.push(KeyCodes::exact(codes, 1));
+        // NULL rows take the first non-NULL value: no effect on min/max.
+        let first = enc[valid.iter().position(|&ok| ok).unwrap_or(0)];
+        for (e, &ok) in enc.iter_mut().zip(valid) {
+            if !ok {
+                *e = first;
+            }
+        }
+    }
+    let (lo, hi) = enc
+        .iter()
+        .fold((u64::MAX, 0u64), |(lo, hi), &e| (lo.min(e), hi.max(e)));
+    let bits = 64 - (hi - lo).leading_zeros();
+    let ties = ties.map(|strings| Ties {
+        strings,
+        valid,
+        descending: key.descending,
+    });
+    if bits > 0 || ties.is_some() {
+        if key.descending {
+            enc.iter_mut().for_each(|e| *e = hi - *e);
+        } else {
+            enc.iter_mut().for_each(|e| *e -= lo);
+        }
+        out.push(KeyCodes {
+            codes: enc,
+            bits,
+            ties,
+        });
     }
     out
+}
+
+/// Order-preserving codes of strings up to ties: the 8 bytes following
+/// the longest prefix shared by all strings (big-endian, zero padded).
+/// Computed on up to `threads` threads.
+fn string_prefixes(v: &[Arc<str>], threads: usize) -> Vec<u64> {
+    let n = v.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let threads = if n < 2 * PARALLEL_SORT_MIN {
+        1
+    } else {
+        threads.min(n / PARALLEL_SORT_MIN).max(1)
+    };
+    let size = n.div_ceil(threads);
+    let first = v[0].as_bytes();
+    let offset = pool::scoped(
+        v.chunks(size)
+            .map(|chunk| {
+                move || {
+                    chunk.iter().fold(first.len(), |l, s| {
+                        let s = s.as_bytes();
+                        let l = l.min(s.len());
+                        first[..l].iter().zip(s).take_while(|(a, b)| a == b).count()
+                    })
+                }
+            })
+            .collect(),
+    )
+    .into_iter()
+    .min()
+    .unwrap_or(0);
+    let mut codes = vec![0u64; n];
+    pool::scoped(
+        codes
+            .chunks_mut(size)
+            .zip(v.chunks(size))
+            .map(|(out, strings)| {
+                move || {
+                    for (o, s) in out.iter_mut().zip(strings) {
+                        *o = str_prefix(&s.as_bytes()[offset.min(s.len())..]);
+                    }
+                }
+            })
+            .collect(),
+    );
+    codes
+}
+
+/// Dense ranks of dictionary entries in byte order (equal strings share a
+/// rank).
+fn dict_ranks(dict: &[Arc<str>]) -> Vec<u64> {
+    let mut order: Vec<u32> = (0..dict.len() as u32).collect();
+    order.sort_by(|&a, &b| dict[a as usize].as_bytes().cmp(dict[b as usize].as_bytes()));
+    let mut rank = vec![0u64; dict.len()];
+    let mut r = 0;
+    for (k, &e) in order.iter().enumerate() {
+        if k > 0 && dict[e as usize] != dict[order[k - 1] as usize] {
+            r += 1;
+        }
+        rank[e as usize] = r;
+    }
+    rank
+}
+
+/// Order-preserving codes of strings (equal strings share a code): the
+/// position of the string's first occurrence in byte order. `(prefix, row)`
+/// pairs are sorted, then runs of equal prefixes are ordered by the full
+/// strings; both steps run on up to `threads` threads.
+fn string_ranks(v: &[Arc<str>], threads: usize) -> Vec<u64> {
+    let n = v.len();
+    let threads = if n < 2 * PARALLEL_SORT_MIN {
+        1
+    } else {
+        threads.min(n / PARALLEL_SORT_MIN).max(1)
+    };
+    let size = n.div_ceil(threads).max(1);
+    let (pairs, diff) = pairs_by(n, threads, |i| str_prefix(v[i].as_bytes()));
+    let mut pairs = sort_pairs(pairs, diff, threads);
+    // Segments of the sorted pairs, cut where prefixes change.
+    let mut segments = Vec::with_capacity(threads);
+    let mut rest: &mut [(u64, u32)] = &mut pairs;
+    let mut start = 0;
+    while !rest.is_empty() {
+        let mut cut = size.min(rest.len());
+        while cut < rest.len() && rest[cut].0 == rest[cut - 1].0 {
+            cut += 1;
+        }
+        let (seg, tail) = rest.split_at_mut(cut);
+        segments.push((start, seg));
+        start += cut;
+        rest = tail;
+    }
+    let ranks: Vec<AtomicU64> = (0..n).map(|_| AtomicU64::new(0)).collect();
+    let ranks_ref = &ranks;
+    pool::scoped(
+        segments
+            .into_iter()
+            .map(|(base, seg)| move || rank_segment(v, base, seg, ranks_ref))
+            .collect(),
+    );
+    ranks.into_iter().map(AtomicU64::into_inner).collect()
+}
+
+/// Assigns the codes of one segment of sorted `(prefix, row)` pairs
+/// starting at position `base`.
+fn rank_segment(v: &[Arc<str>], base: usize, seg: &mut [(u64, u32)], ranks: &[AtomicU64]) {
+    let set = |row: u32, code: usize| ranks[row as usize].store(code as u64, Relaxed);
+    let mut i = 0;
+    while i < seg.len() {
+        let prefix = seg[i].0;
+        let mut end = i + 1;
+        while end < seg.len() && seg[end].0 == prefix {
+            end += 1;
+        }
+        if end == i + 1 {
+            set(seg[i].1, base + i);
+            i = end;
+            continue;
+        }
+        let run = &mut seg[i..end];
+        // Equal prefixes and equal lengths of at most 8 bytes mean equal
+        // strings; otherwise order the run by the full strings.
+        let len0 = v[run[0].1 as usize].len();
+        if len0 <= 8 && run.iter().all(|p| v[p.1 as usize].len() == len0) {
+            for p in run.iter() {
+                set(p.1, base + i);
+            }
+        } else {
+            run.sort_unstable_by(|a, b| {
+                v[a.1 as usize]
+                    .as_bytes()
+                    .cmp(v[b.1 as usize].as_bytes())
+                    .then(a.1.cmp(&b.1))
+            });
+            let mut first = 0;
+            for k in 0..run.len() {
+                if k > 0 && v[run[k].1 as usize] != v[run[k - 1].1 as usize] {
+                    first = k;
+                }
+                set(run[k].1, base + i + first);
+            }
+        }
+        i = end;
+    }
+}
+
+/// A `(key, row)` pair of a sort.
+type Pair = (u64, u32);
+
+/// Sorts rows `0..n` by the components' codes (first component most
+/// significant, ties by row number). The codes are concatenated and the
+/// top 64 bits sorted as integers. If that key is inexact — a string coded
+/// by prefix, or codes longer than 64 bits — runs of rows that are equal
+/// up to the inexact part are then ordered by comparing the components
+/// (rare in practice: they need equal prefixes or equal leading 64 bits).
+fn normalized_sort(codes: &[KeyCodes], n: usize, threads: usize) -> Vec<u32> {
+    let total: u32 = codes.iter().map(|c| c.bits).sum();
+    // Bits (from the top) up to the end of the first prefix-coded string.
+    let tie_end = codes
+        .iter()
+        .scan(0, |end, c| {
+            *end += c.bits;
+            Some((*end, c.ties.is_some()))
+        })
+        .find(|&(_, ties)| ties)
+        .map(|(end, _)| end);
+    if total == 0 && tie_end.is_none() {
+        return (0..n as u32).collect();
+    }
+    let width = total.min(64);
+    let (pairs, diff) = pairs_by(n, threads, |i| pack(codes, i));
+    let mut pairs = sort_pairs(pairs, diff, threads);
+    let exact_to = match tie_end {
+        Some(end) => Some(end.min(64)),
+        None => (total > 64).then_some(64),
+    };
+    if let Some(m) = exact_to {
+        // Runs: pairs equal in the key's top `m` bits.
+        let mask = u64::MAX.checked_shl(width - m).unwrap_or(0);
+        let size = n.div_ceil(threads.max(1)).max(PARALLEL_SORT_MIN);
+        let mut segments = Vec::new();
+        let mut rest: &mut [Pair] = &mut pairs;
+        while !rest.is_empty() {
+            let mut cut = size.min(rest.len());
+            while cut < rest.len() && rest[cut].0 & mask == rest[cut - 1].0 & mask {
+                cut += 1;
+            }
+            let (segment, tail) = std::mem::take(&mut rest).split_at_mut(cut);
+            segments.push(segment);
+            rest = tail;
+        }
+        pool::scoped(
+            segments
+                .into_iter()
+                .map(|segment| move || order_runs(segment, mask, codes))
+                .collect(),
+        );
+    }
+    pairs.into_iter().map(|(_, i)| i).collect()
+}
+
+/// The top 64 bits of the concatenated codes of row `i` (all of them,
+/// right-aligned, if they are shorter).
+#[inline]
+fn pack(codes: &[KeyCodes], i: usize) -> u64 {
+    let mut key = 0u64;
+    let mut room = 64;
+    for c in codes {
+        if c.bits <= room {
+            key = key.checked_shl(c.bits).unwrap_or(0) | c.codes[i];
+            room -= c.bits;
+        } else {
+            if room > 0 {
+                key = (key << room) | (c.codes[i] >> (c.bits - room));
+            }
+            break;
+        }
+    }
+    key
+}
+
+/// Orders the runs of `pairs` that are equal under `mask` by comparing the
+/// components (codes, then strings for prefix-coded ones), then rows.
+fn order_runs(pairs: &mut [Pair], mask: u64, codes: &[KeyCodes]) {
+    let cmp = |a: usize, b: usize| {
+        codes
+            .iter()
+            .map(|c| {
+                c.codes[a]
+                    .cmp(&c.codes[b])
+                    .then_with(|| c.ties.as_ref().map_or(Ordering::Equal, |t| t.compare(a, b)))
+            })
+            .find(|o| o.is_ne())
+            .unwrap_or(Ordering::Equal)
+            .then(a.cmp(&b))
+    };
+    let mut i = 0;
+    while i < pairs.len() {
+        let m = pairs[i].0 & mask;
+        let mut j = i + 1;
+        while j < pairs.len() && pairs[j].0 & mask == m {
+            j += 1;
+        }
+        if j - i > 1 {
+            pairs[i..j].sort_unstable_by(|x, y| cmp(x.1 as usize, y.1 as usize));
+        }
+        i = j;
+    }
+}
+
+/// The pairs `(key(i), i)` for rows `0..n`, computed on up to `threads`
+/// threads, and the bits in which the keys differ (OR of `key ^ key(0)`).
+fn pairs_by(n: usize, threads: usize, key: impl Fn(usize) -> u64 + Sync) -> (Vec<Pair>, u64) {
+    let mut pairs = vec![(0u64, 0u32); n];
+    if n == 0 {
+        return (pairs, 0);
+    }
+    let first = key(0);
+    let threads = threads.min(n / PARALLEL_SORT_MIN).max(1);
+    let size = n.div_ceil(threads);
+    let key = &key;
+    let diffs = pool::scoped(
+        pairs
+            .chunks_mut(size)
+            .enumerate()
+            .map(|(c, chunk)| {
+                move || {
+                    let mut diff = 0;
+                    for (j, p) in chunk.iter_mut().enumerate() {
+                        let i = c * size + j;
+                        let k = key(i);
+                        diff |= k ^ first;
+                        *p = (k, i as u32);
+                    }
+                    diff
+                }
+            })
+            .collect(),
+    );
+    (pairs, diffs.into_iter().fold(0, |a, b| a | b))
+}
+
+/// The 8-bit digit of `key` starting at bit `shift`.
+#[inline]
+fn digit(key: u64, shift: u32) -> usize {
+    ((key >> shift) & 0xff) as usize
+}
+
+/// Sorts `(key, row)` pairs (rows unique, pairs in ascending row order) by
+/// key and row; `diff` has the bits in which keys differ. Large inputs are
+/// partitioned by their top varying bits (every thread scatters its chunk
+/// straight into the partitions), then the partitions are sorted in place
+/// in parallel.
+fn sort_pairs(mut pairs: Vec<Pair>, diff: u64, threads: usize) -> Vec<Pair> {
+    let n = pairs.len();
+    if threads <= 1 || n < 2 * PARALLEL_SORT_MIN {
+        sort_slice(&mut pairs, &mut Vec::new());
+        return pairs;
+    }
+    if diff == 0 {
+        return pairs; // one key: row order
+    }
+    let top = 63 - diff.leading_zeros();
+    let shift = top.saturating_sub(7);
+    let threads = threads.min(n / PARALLEL_SORT_MIN).max(1);
+    let size = n.div_ceil(threads);
+    let hists: Vec<[usize; 256]> = pool::scoped(
+        pairs
+            .chunks(size)
+            .map(|chunk| {
+                move || {
+                    let mut h = [0usize; 256];
+                    for p in chunk {
+                        h[digit(p.0, shift)] += 1;
+                    }
+                    h
+                }
+            })
+            .collect(),
+    );
+    // Partition `d` is the concatenation of every chunk's part `d` (in
+    // chunk order, so it stays in ascending row order).
+    let mut out = vec![(0u64, 0u32); n];
+    let mut targets: Vec<Vec<&mut [Pair]>> =
+        hists.iter().map(|_| Vec::with_capacity(256)).collect();
+    let mut rest: &mut [Pair] = &mut out;
+    for d in 0..256 {
+        for (c, h) in hists.iter().enumerate() {
+            let (part, tail) = std::mem::take(&mut rest).split_at_mut(h[d]);
+            targets[c].push(part);
+            rest = tail;
+        }
+    }
+    pool::scoped(
+        pairs
+            .chunks(size)
+            .zip(targets)
+            .map(|(chunk, mut parts)| {
+                move || {
+                    let mut pos = [0usize; 256];
+                    for &p in chunk {
+                        let d = digit(p.0, shift);
+                        parts[d][pos[d]] = p;
+                        pos[d] += 1;
+                    }
+                }
+            })
+            .collect(),
+    );
+    drop(pairs);
+    // Sort the partitions, assigned to threads largest first (each to the
+    // least loaded thread).
+    let mut parts: Vec<&mut [Pair]> = Vec::with_capacity(256);
+    let mut rest: &mut [Pair] = &mut out;
+    for d in 0..256 {
+        let len = hists.iter().map(|h| h[d]).sum();
+        let (part, tail) = std::mem::take(&mut rest).split_at_mut(len);
+        rest = tail;
+        if len > 1 {
+            parts.push(part);
+        }
+    }
+    parts.sort_by_key(|p| std::cmp::Reverse(p.len()));
+    let mut work: Vec<(usize, Vec<&mut [Pair]>)> = (0..threads).map(|_| (0, Vec::new())).collect();
+    for part in parts {
+        let w = work
+            .iter_mut()
+            .min_by_key(|(load, _)| *load)
+            .expect("at least one thread");
+        w.0 += part.len();
+        w.1.push(part);
+    }
+    pool::scoped(
+        work.into_iter()
+            .map(|(_, parts)| {
+                move || {
+                    let mut scratch = Vec::new();
+                    for part in parts {
+                        sort_slice(part, &mut scratch);
+                    }
+                }
+            })
+            .collect(),
+    );
+    out
+}
+
+/// Sorts `(key, row)` pairs that are in ascending row order by key and row
+/// on the current thread: `sort_unstable` for small inputs, else a stable
+/// LSD radix sort (8-bit digits; digits equal in every key are skipped)
+/// using `scratch` as the second buffer.
+fn sort_slice(items: &mut [Pair], scratch: &mut Vec<Pair>) {
+    let n = items.len();
+    if n < 4096 {
+        items.sort_unstable();
+        return;
+    }
+    // Only the digits up to the highest varying bit are histogrammed.
+    let first = items[0].0;
+    let diff = items.iter().fold(0, |acc, p| acc | (p.0 ^ first));
+    if diff == 0 {
+        return; // one key: already in row order
+    }
+    let digits = (64 - diff.leading_zeros()).div_ceil(8) as usize;
+    let mut hist = vec![[0usize; 256]; digits];
+    for &(k, _) in items.iter() {
+        for (d, h) in hist.iter_mut().enumerate() {
+            h[digit(k, 8 * d as u32)] += 1;
+        }
+    }
+    scratch.clear();
+    scratch.resize(n, (0, 0));
+    let mut in_items = true;
+    for (d, h) in hist.iter().enumerate() {
+        if h.contains(&n) {
+            continue; // every key has the same digit
+        }
+        let mut offs = [0usize; 256];
+        let mut sum = 0;
+        for (o, &c) in offs.iter_mut().zip(h.iter()) {
+            *o = sum;
+            sum += c;
+        }
+        let (src, dst): (&[Pair], &mut [Pair]) = if in_items {
+            (items, scratch)
+        } else {
+            (scratch, items)
+        };
+        for &it in src {
+            let b = digit(it.0, 8 * d as u32);
+            dst[offs[b]] = it;
+            offs[b] += 1;
+        }
+        in_items = !in_items;
+    }
+    if !in_items {
+        items.copy_from_slice(scratch);
+    }
 }
 
 #[cfg(test)]
@@ -864,7 +1013,8 @@ mod tests {
         let items: Vec<(u64, u32)> = (0..5000u32)
             .map(|i| (((i * 7919) % 97) as u64, i))
             .collect();
-        let sorted = radix_sort(items.clone());
+        let mut sorted = items.clone();
+        sort_slice(&mut sorted, &mut Vec::new());
         let mut expect = items;
         expect.sort();
         assert_eq!(sorted, expect);
@@ -905,105 +1055,138 @@ mod tests {
         }
     }
 
-    /// Multi-key orders (normalized words, packed and string keys) and
-    /// merged runs equal the generic comparator's stable order.
+    /// Deterministic pseudo-random values (xorshift).
+    fn rand_seq(seed: u64) -> impl FnMut() -> u64 {
+        let mut x = seed;
+        move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        }
+    }
+
+    fn column(ty: DataType, index: usize, desc: bool, nulls_first: bool) -> SortKey {
+        SortKey {
+            expr: Expr::Column { index, ty },
+            descending: desc,
+            nulls_first,
+        }
+    }
+
+    /// Full sorts (normalized keys, serial and parallel) and top-N agree
+    /// with the row engine's comparator, for strings with shared prefixes
+    /// and NUL bytes, floats with -0.0, and NULLs.
     #[test]
-    fn multi_key_orders_and_merged_runs_match_comparator() {
-        let n = 3000usize;
-        let strs = [
+    fn normalized_sort_matches_comparator() {
+        let mut rnd = rand_seq(0x9e37_79b9_7f4a_7c15);
+        let n = 140_000;
+        let words = [
             "",
             "a",
+            "a\0",
             "ab",
             "abcdefgh",
             "abcdefghi",
-            "abcdefghj",
-            "b\0",
+            "abcdefgh\0",
             "b",
             "zz",
         ];
-        let rows: Vec<Vec<Value>> = (0..n)
-            .map(|i| {
-                let s = if i % 13 == 0 {
-                    Value::Null
-                } else {
-                    Value::str(strs[(i * 7) % strs.len()])
-                };
-                let x = if i % 17 == 0 {
-                    Value::Null
-                } else {
-                    Value::Int(((i * 31) % 23) as i64 - 11)
-                };
-                vec![s, x, Value::Int(i as i64 % 5)]
-            })
-            .collect();
-        let column = |c: usize| Vector::from_values(rows.iter().map(|r| r[c].clone()).collect());
-        let b = Batch::new(vec![column(0), column(1), column(2)], n);
-        let ctx = ExecContext::default();
-        let key = |index: usize, ty: DataType, descending: bool, nulls_first: bool| SortKey {
-            expr: Expr::Column { index, ty },
-            descending,
-            nulls_first,
-        };
-        let key_sets = [
-            vec![
-                key(0, DataType::String, false, true),
-                key(1, DataType::Int64, true, false),
-            ],
-            vec![
-                key(1, DataType::Int64, false, false),
-                key(2, DataType::Int64, true, true),
-            ],
-            vec![
-                key(2, DataType::Int64, true, false),
-                key(0, DataType::String, true, true),
-            ],
+        let mut strs = Vec::new();
+        let mut ints = Vec::new();
+        let mut floats = Vec::new();
+        let mut shared = Vec::new();
+        for _ in 0..n {
+            let r = rnd();
+            strs.push(match r % 13 {
+                0 => Value::Null,
+                k if k < 9 => Value::str(words[k as usize]),
+                _ => Value::str(&format!("abcdefgh{}", r % 1000)),
+            });
+            ints.push(if r.is_multiple_of(17) {
+                Value::Null
+            } else {
+                Value::Int((r >> 8) as i64 % 50 - 25)
+            });
+            floats.push(Value::Float(match (r >> 20) % 5 {
+                0 => -0.0,
+                1 => 0.0,
+                2 => f64::MIN,
+                _ => ((r >> 24) % 1000) as f64 / 7.0 - 70.0,
+            }));
+            // A long shared prefix, then short, NUL-extended and long tails.
+            let tail = words[((r >> 30) % 9) as usize];
+            shared.push(if (r >> 40).is_multiple_of(29) {
+                Value::Null
+            } else if (r >> 34).is_multiple_of(3) {
+                Value::str(&format!("shared/prefix/{tail}{}", (r >> 44) % 50))
+            } else {
+                Value::str(&format!("shared/prefix/{tail}"))
+            });
+        }
+        let cols = [strs, ints, floats, shared];
+        let b = Batch::new(
+            cols.iter()
+                .map(|c| Vector::from_values(c.clone()))
+                .collect(),
+            n,
+        );
+        let types = [
+            DataType::String,
+            DataType::Int64,
+            DataType::Float64,
+            DataType::String,
         ];
-        for keys in &key_sets {
+        let mut ctx = ExecContext::default();
+        for (round, order) in [
+            [0usize, 1, 2],
+            [1, 0, 2],
+            [2, 0, 1],
+            [1, 2, 0],
+            [3, 1, 2],
+            [3, 0, 1],
+            [1, 3, 0],
+            [0, 3, 2],
+        ]
+        .iter()
+        .enumerate()
+        {
+            let keys: Vec<SortKey> = order
+                .iter()
+                .enumerate()
+                .map(|(j, &c)| column(types[c], c, (round + j) % 2 == 1, (round + j) % 3 == 0))
+                .collect();
             let mut expect: Vec<u32> = (0..n as u32).collect();
             expect.sort_by(|&x, &y| {
-                for k in keys {
-                    let Expr::Column { index, .. } = k.expr else {
-                        unreachable!()
-                    };
-                    let o = crate::exec::operators::compare_keys(
-                        &rows[x as usize][index],
-                        &rows[y as usize][index],
-                        k,
-                    );
-                    if o != Ordering::Equal {
-                        return o;
-                    }
-                }
-                Ordering::Equal
+                keys.iter()
+                    .zip(order)
+                    .map(|(k, &c)| {
+                        crate::exec::operators::compare_keys(
+                            &cols[c][x as usize],
+                            &cols[c][y as usize],
+                            k,
+                        )
+                    })
+                    .find(|o| o.is_ne())
+                    .unwrap_or(Ordering::Equal)
             });
-            for top in [None, Some(1), Some(100)] {
-                let got = sort_permutation(&b, keys, top, &ctx).unwrap();
-                let want = &expect[..top.unwrap_or(n)];
-                assert_eq!(got, want, "keys={keys:?} top={top:?}");
+            for threads in [1, 8] {
+                ctx.execution.threads = threads;
+                for top in [None, Some(1000)] {
+                    let got = sort_permutation(&b, &keys, top, &ctx).unwrap();
+                    let want = &expect[..top.unwrap_or(n)];
+                    assert!(got == want, "round {round} threads {threads} top {top:?}");
+                }
             }
-            // Runs over slices, with the row number as the final key.
-            let mut keys_seq = keys.clone();
-            keys_seq.push(key(3, DataType::Int64, false, true));
-            let with_seq = |from: usize, to: usize| {
-                let mut part = b.slice(from, to);
-                part.columns.push(Vector::new(
-                    Data::Int((from as i64..to as i64).collect()),
-                    None,
-                ));
-                part
-            };
-            let runs = [(0, 1000), (1000, 1100), (1100, n)]
-                .iter()
-                .map(|&(f, t)| sorted_run(with_seq(f, t), &keys_seq, Some(500), &ctx).unwrap())
-                .collect();
-            let merged = merge_top(runs, &keys_seq, 400, 4, &ctx).unwrap();
-            let order: Vec<u32> = (0..merged.len)
-                .map(|i| match merged.columns[3].value(i) {
-                    Value::Int(x) => x as u32,
-                    v => panic!("{v:?}"),
-                })
-                .collect();
-            assert_eq!(order, &expect[..400], "merged keys={keys:?}");
         }
+    }
+
+    #[test]
+    fn string_ranks_are_ordered() {
+        let v: Vec<Arc<str>> = ["b", "a\0", "a", "abcdefghij", "abcdefghi", "a", ""]
+            .iter()
+            .map(|s| Arc::from(*s))
+            .collect();
+        assert_eq!(string_ranks(&v, 1), vec![6, 3, 1, 5, 4, 1, 0]);
     }
 }

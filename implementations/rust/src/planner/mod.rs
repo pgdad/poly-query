@@ -10,6 +10,7 @@ pub mod expr;
 pub mod logical;
 pub mod optimizer;
 pub mod physical;
+pub mod shared;
 pub mod typing;
 
 pub use binder::{BindContext, plan_query};

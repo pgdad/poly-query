@@ -1,43 +1,58 @@
 #!/usr/bin/env python3
-"""Latency benchmark: run a workload file through `bin/polyquery session`.
+"""Times the benchmark workload (benchmarks/workloads/analytics.json).
 
-Loads the workload's tables (CSV + schema files from the generated dataset
-directory), then runs every query `--warmup` times untimed and `--runs` times
-timed. Timing is client-side wall clock of one request/response round trip
-with default query options and full result rows (what a client sees),
-so parsing, planning, execution and JSON serialization are all included.
+Loads the workload's tables (generated CSV + schema, `pqgen.py generate
+--scale 1m --out DIR`) into one `bin/polyquery session` per engine, creates
+the workload's indexes, then runs every workload query with the default
+options (plus `result: "count"` where the workload asks for it). Each query
+runs `--warmup` times untimed and `--repeat` times timed per engine; with
+several engines the timed runs alternate between them, so drifting machine
+load affects all alike. Reported: client-side wall-clock median and
+minimum (milliseconds) per engine, and the median speedup of the last
+engine over the first.
 
-  workload.py --engine bin/polyquery --data /tmp/pqdata/1m \
-      --workload bench/workloads/analytics.json [--runs 5] [--warmup 1] \
-      [--save results.json] [--compare before.json] [--only A01,A07]
+`--save FILE` writes a digest of every query's response (rows or row
+count; FLOAT64 rounded to 9 significant digits) of the last engine, and
+`--check FILE` compares every engine against such a file.
 
-`--save` writes timings and result rows; `--compare` checks this run's
-results against a saved run (exact, FLOAT64 within 1e-9 relative, unordered
-queries as multisets) and prints a before/after Markdown table.
+Usage:
+  workload.py --engine bin/polyquery [--engine OTHER/bin/polyquery ...]
+              --data /tmp/pqdata/1m
+              [--workload benchmarks/workloads/analytics.json]
+              [--repeat 15] [--warmup 2] [--only q01,q06]
+              [--options '{"threads":8}'] [--save F] [--check F]
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import statistics
 import subprocess
 import sys
 import time
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_WORKLOAD = os.path.join(HERE, "..", "..", "..", "benchmarks", "workloads", "analytics.json")
+
 
 class Session:
-    def __init__(self, engine: str, data: str, extra=()):
-        self.p = subprocess.Popen([engine, "session", "--data-dir", data, *extra], stdin=subprocess.PIPE,
-                                  stdout=subprocess.PIPE, text=True, bufsize=1 << 20)
+    def __init__(self, engine: str, data: str):
+        self.p = subprocess.Popen([engine, "session", "--data-dir", data], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
         self.n = 0
 
-    def call(self, req: dict) -> dict:
+    def call_raw(self, req: dict) -> str:
         self.n += 1
         req["id"] = self.n
         assert self.p.stdin and self.p.stdout
         self.p.stdin.write(json.dumps(req) + "\n")
         self.p.stdin.flush()
-        return json.loads(self.p.stdout.readline())
+        return self.p.stdout.readline()
+
+    def call(self, req: dict) -> dict:
+        return json.loads(self.call_raw(req))
 
     def close(self) -> None:
         if self.p.stdin:
@@ -45,107 +60,108 @@ class Session:
         self.p.wait()
 
 
-def values_equal(a, b, typ: str) -> bool:
-    if a is None or b is None:
-        return a is b
-    if typ == "FLOAT64":
-        return abs(a - b) <= 1e-9 * max(1.0, abs(a), abs(b))
-    return a == b
+def digest(resp: dict) -> str:
+    """Digest of a response; FLOAT64 values are rounded to 9 significant
+    digits (their summation order, hence last bits, may vary with threads)."""
+    if not resp.get("ok"):
+        return "error:" + resp.get("error", {}).get("code", "?")
+    rows = resp.get("rows")
+    if rows is not None:
+        rows = [[f"{v:.9g}" if isinstance(v, float) else v for v in row] for row in rows]
+    body = {"columns": resp.get("columns"), "row_count": resp.get("row_count"), "rows": rows}
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def rows_equal(cols: list, ra: list, rb: list, ordered: bool) -> bool:
-    if len(ra) != len(rb):
-        return False
-    types = [c["type"] for c in cols]
-    if not ordered:
-        key = lambda r: json.dumps([None if t == "FLOAT64" else v for v, t in zip(r, types)])
-        ra, rb = sorted(ra, key=key), sorted(rb, key=key)
-    return all(all(values_equal(x, y, t) for x, y, t in zip(a, b, types)) for a, b in zip(ra, rb))
+def load(s: Session, wl: dict, data: str) -> None:
+    for name, base in wl["tables"].items():
+        schema = json.load(open(f"{data}/{base}.schema.json"))
+        r = s.call({"op": "load", "table": name, "format": "csv", "path": f"{base}.csv", "schema": schema})
+        if not r.get("ok"):
+            raise SystemExit(f"load {name} failed: {r}")
+    for ix in wl.get("indexes", []):
+        r = s.call({"op": "query", "sql": ix["sql"]})
+        if not r.get("ok"):
+            raise SystemExit(f"index failed: {r}")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--engine", required=True)
+    ap.add_argument("--engine", action="append", required=True)
     ap.add_argument("--data", required=True)
-    ap.add_argument("--workload", required=True)
-    ap.add_argument("--runs", type=int, default=5)
-    ap.add_argument("--warmup", type=int, default=1)
+    ap.add_argument("--workload", default=DEFAULT_WORKLOAD)
+    ap.add_argument("--repeat", type=int, default=15)
+    ap.add_argument("--warmup", type=int, default=2)
     ap.add_argument("--only", default="")
-    ap.add_argument("--save")
-    ap.add_argument("--compare")
     ap.add_argument("--options", default="{}", help="extra query options (JSON object)")
+    ap.add_argument("--save")
+    ap.add_argument("--check")
     args = ap.parse_args()
     wl = json.load(open(args.workload))
-    only = {s.strip() for s in args.only.split(",") if s.strip()}
-    extra_opts = json.loads(args.options)
+    only = [s.strip() for s in args.only.split(",") if s.strip()]
+    extra = json.loads(args.options)
 
-    s = Session(args.engine, args.data)
-    t0 = time.monotonic()
-    for t in wl["tables"]:
-        schema = json.load(open(f"{args.data}/{t['schema']}"))
-        r = s.call({"op": "load", "table": t["table"], "format": "csv", "path": t["file"], "schema": schema})
-        if not r.get("ok"):
-            print(f"load {t['table']} failed: {r}", file=sys.stderr)
-            return 1
-    load_s = time.monotonic() - t0
-    print(f"# loaded {len(wl['tables'])} tables in {load_s:.1f}s", file=sys.stderr, flush=True)
+    sessions = []
+    for e in args.engine:
+        t0 = time.monotonic()
+        s = Session(e, args.data)
+        load(s, wl, args.data)
+        print(f"# {e}: loaded {len(wl['tables'])} tables in {time.monotonic() - t0:.1f}s", flush=True)
+        sessions.append(s)
 
-    results = {"load_s": load_s, "queries": {}}
+    digests = {}
+    expected = json.load(open(args.check)) if args.check else {}
+    mismatches = 0
+    names = [f"engine {i + 1}" for i in range(len(sessions))]
+    head = "| query | " + " | ".join(f"{n} median ms | {n} min ms" for n in names)
+    if len(sessions) > 1:
+        head += " | speedup (median)"
+    print(head + " |")
+    print("|---|" + "---:|" * (2 * len(sessions) + (len(sessions) > 1)))
+    totals = [0.0] * len(sessions)
     for q in wl["queries"]:
-        if only and q["id"] not in only:
+        if only and not any(q["name"].startswith(o) for o in only):
             continue
-        times = []
-        resp = None
-        for i in range(args.warmup + args.runs):
-            t = time.monotonic()
-            r = s.call({"op": "query", "sql": q["sql"], "options": dict(extra_opts)})
-            dt = (time.monotonic() - t) * 1000
-            if not r.get("ok"):
-                print(f"{q['id']} failed: {r.get('error')}", file=sys.stderr)
-                return 1
-            if i >= args.warmup:
-                times.append(dt)
-            resp = r
-        results["queries"][q["id"]] = {
-            "median_ms": statistics.median(times), "min_ms": min(times), "times_ms": times,
-            "columns": resp["columns"], "rows": resp["rows"], "row_count": resp["row_count"],
-        }
-        print(f"{q['id']} {q['name']}: median {statistics.median(times):.1f} ms, min {min(times):.1f} ms, "
-              f"{resp['row_count']} rows", file=sys.stderr, flush=True)
-    s.close()
-
+        opts = dict(extra)
+        if q.get("result"):
+            opts["result"] = q["result"]
+        req = {"op": "query", "sql": q["sql"], "options": opts}
+        note = ""
+        for i, s in enumerate(sessions):
+            first = s.call(dict(req))
+            d = digest(first)
+            if not first.get("ok"):
+                note += f" ERROR({names[i]}) {first.get('error')}"
+            if expected and expected.get(q["name"]) not in (None, d):
+                note += f" RESULT MISMATCH ({names[i]})"
+                mismatches += 1
+            digests[q["name"]] = d
+            for _ in range(max(0, args.warmup - 1)):
+                s.call_raw(dict(req))
+        times: list[list[float]] = [[] for _ in sessions]
+        for _ in range(args.repeat):
+            for i, s in enumerate(sessions):
+                t = time.perf_counter()
+                s.call_raw(dict(req))
+                times[i].append((time.perf_counter() - t) * 1000)
+        meds = [statistics.median(t) for t in times]
+        for i, m in enumerate(meds):
+            totals[i] += m
+        cells = " | ".join(f"{statistics.median(t):.2f} | {min(t):.2f}" for t in times)
+        if len(sessions) > 1:
+            cells += f" | {meds[0] / meds[-1]:.1f}x"
+        print(f"| {q['name']} | {cells} |{note}", flush=True)
+    total = " | ".join(f"{t:.1f} | " for t in totals)
+    if len(sessions) > 1:
+        total += f" | {totals[0] / totals[-1]:.1f}x"
+    print(f"| **sum of medians** | {total} |")
+    for s in sessions:
+        s.close()
     if args.save:
         with open(args.save, "w") as f:
-            json.dump(results, f)
-
-    if args.compare:
-        before = json.load(open(args.compare))
-        print("| query | description | before median (ms) | after median (ms) | speedup | result |")
-        print("|---|---|---:|---:|---:|---|")
-        tb = ta = 0.0
-        bad = 0
-        for q in wl["queries"]:
-            a = results["queries"].get(q["id"])
-            b = before["queries"].get(q["id"])
-            if not a or not b:
-                continue
-            same = a["columns"] == b["columns"] and rows_equal(a["columns"], a["rows"], b["rows"], q["ordered"])
-            bad += not same
-            tb += b["median_ms"]
-            ta += a["median_ms"]
-            print(f"| {q['id']} | {q['name']} | {b['median_ms']:.1f} | {a['median_ms']:.1f} | "
-                  f"{b['median_ms'] / a['median_ms']:.2f}x | {'identical' if same else 'DIFFERENT'} |")
-        print(f"| **total** | | **{tb:.1f}** | **{ta:.1f}** | **{tb / ta:.2f}x** | |")
-        if bad:
-            print(f"{bad} queries returned different results", file=sys.stderr)
-            return 1
-    else:
-        print("| query | description | median (ms) | min (ms) | rows |")
-        print("|---|---|---:|---:|---:|")
-        for q in wl["queries"]:
-            a = results["queries"].get(q["id"])
-            if a:
-                print(f"| {q['id']} | {q['name']} | {a['median_ms']:.1f} | {a['min_ms']:.1f} | {a['row_count']} |")
+            json.dump(digests, f, indent=1)
+    if mismatches:
+        print(f"# {mismatches} result mismatches", file=sys.stderr)
+        return 1
     return 0
 
 

@@ -1212,6 +1212,22 @@ mod tests {
                 false,
             ),
             (
+                "WITH c AS (SELECT k, SUM(amt) AS s FROM f GROUP BY k) \
+                 SELECT COUNT(*) FROM c WHERE s > (SELECT AVG(s) FROM c)",
+                false,
+            ),
+            (
+                "WITH c AS (SELECT grp, COUNT(*) AS n FROM f WHERE amt > 5 GROUP BY grp) \
+                 SELECT a.grp, a.n, b.n FROM c a JOIN c b ON b.grp = a.grp + 1",
+                false,
+            ),
+            (
+                "WITH c AS (SELECT grp, MAX(tag) AS t FROM f GROUP BY grp) \
+                 SELECT grp FROM c WHERE t IN (SELECT t FROM c WHERE grp > 2) \
+                 AND EXISTS (SELECT 1 FROM c WHERE grp = 0)",
+                false,
+            ),
+            (
                 "SELECT id AS v FROM f UNION ALL SELECT k FROM d ORDER BY v DESC LIMIT 30",
                 true,
             ),
@@ -1420,5 +1436,31 @@ mod tests {
                 .collect();
             assert_eq!(got, first);
         }
+    }
+
+    #[test]
+    fn repeated_aggregations_are_shared() {
+        let e = engine();
+        let catalog = e.catalog();
+        let sql = "WITH c AS (SELECT name, SUM(id) AS s FROM t GROUP BY name) \
+                   SELECT COUNT(*) FROM c WHERE s > (SELECT AVG(s) FROM c)";
+        let Statement::Query(q) = crate::sql::parse_statement(sql).unwrap() else {
+            panic!("not a query");
+        };
+        let opts = QueryOptions::default();
+        let logical = e.logical_plan(&catalog, &q, &opts).unwrap();
+        let plan = physical::plan(&logical, &catalog, e.physical_options(&opts));
+        fn count_shared(p: &PhysicalPlan) -> usize {
+            usize::from(matches!(p, PhysicalPlan::Shared { .. }))
+                + p.children().into_iter().map(count_shared).sum::<usize>()
+        }
+        let shared = count_shared(&plan.root)
+            + plan
+                .subqueries
+                .values()
+                .map(|s| count_shared(&s.plan))
+                .sum::<usize>();
+        assert_eq!(shared, 2);
+        assert_eq!(rows(&e, sql), vec![vec![Value::Int(1)]]);
     }
 }

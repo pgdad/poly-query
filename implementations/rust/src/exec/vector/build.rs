@@ -6,7 +6,7 @@ use super::join::{HashJoinOp, JoinSpec, MergeJoinOp, NestedLoopJoinOp};
 use super::keys::KeyTable;
 use super::ops::{
     AggregateOp, BoxedBatchOp, DistinctOp, FilterOp, IndexScanOp, LimitOp, ProjectOp, RowSource,
-    ScanOp, SortOp, UnionAllOp, ValuesOp, full_ranges,
+    ScanOp, SharedOp, SortOp, UnionAllOp, ValuesOp, full_ranges,
 };
 
 use crate::exec::ExecContext;
@@ -205,14 +205,22 @@ fn build_serial(plan: PhysicalPlan, ctx: &ExecContext, parallel: bool) -> BoxedB
         } => {
             // A small LIMIT over a scan pipeline is answered serially: the
             // scan stops after the first batches, whereas parallel workers
-            // would read ahead.
-            // (A top-N sort reads its whole input either way.)
-            let small = !matches!(*input, PhysicalPlan::Sort { .. })
-                && limit.is_some_and(|l| offset.saturating_add(l) <= ctx.morsel_rows as u64);
+            // would read ahead. A sort (top-N) reads its whole input anyway.
+            let small = limit.is_some_and(|l| offset.saturating_add(l) <= ctx.morsel_rows as u64)
+                && !matches!(*input, PhysicalPlan::Sort { .. });
             Box::new(LimitOp {
                 input: build_with(*input, ctx, !small),
                 offset,
                 remaining: limit,
+            })
+        }
+        PhysicalPlan::Shared { id, input } => {
+            let width = input.schema().len();
+            Box::new(SharedOp {
+                id,
+                input: Some(build(*input, ctx)),
+                width,
+                output: Default::default(),
             })
         }
         PhysicalPlan::UnionAll { inputs, .. } => Box::new(UnionAllOp {
