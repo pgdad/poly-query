@@ -443,7 +443,12 @@ impl Engine {
                     .iter()
                     .map(|f| Field::new(f.name.clone(), f.data_type.result_type()))
                     .collect();
-                let timeout = (opts.timeout_ms > 0).then(|| Duration::from_millis(opts.timeout_ms));
+                let timeout_ms = if opts.timeout_ms > 0 {
+                    opts.timeout_ms
+                } else {
+                    self.config.query_timeout_ms
+                };
+                let timeout = (timeout_ms > 0).then(|| Duration::from_millis(timeout_ms));
                 let deadline = control
                     .deadline
                     .or_else(|| timeout.map(|t| Instant::now() + t));

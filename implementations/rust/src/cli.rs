@@ -107,19 +107,13 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
             }
             "native-kernels" => config.native_kernels = Some(PathBuf::from(v)),
             "request" if mode_name == "exec" => request = Some(v),
-            "host" if mode_name == "serve" => serve.host = v,
-            "port" if mode_name == "serve" => serve.port = Some(number(&opt, &v)?),
-            "workers" if mode_name == "serve" => serve.workers = Some(number(&opt, &v)?),
-            "queue-depth" if mode_name == "serve" => serve.queue_depth = number(&opt, &v)?,
-            "query-timeout-ms" if mode_name == "serve" => {
-                serve.query_timeout_ms = number(&opt, &v)?
-            }
-            "shutdown-grace-ms" if mode_name == "serve" => {
-                serve.shutdown_grace_ms = number(&opt, &v)?
-            }
-            "max-request-bytes" if mode_name == "serve" => {
-                serve.max_request_bytes = number(&opt, &v)?
-            }
+            "host" => serve.host = v,
+            "port" => serve.port = Some(number(&opt, &v)?),
+            "workers" => serve.workers = Some(number(&opt, &v)?),
+            "queue-depth" => serve.queue_depth = number(&opt, &v)?,
+            "query-timeout-ms" => config.query_timeout_ms = number(&opt, &v)?,
+            "shutdown-grace-ms" => serve.shutdown_grace_ms = number(&opt, &v)?,
+            "max-request-bytes" => serve.max_request_bytes = number(&opt, &v)?,
             _ => return Err(format!("unknown option {opt}")),
         }
     }
@@ -171,6 +165,7 @@ mod tests {
         assert!(parse_args(&args("frob")).is_err());
         assert!(parse_args(&args("exec")).is_err());
         assert!(parse_args(&args("session --threads")).is_err());
-        assert!(parse_args(&args("session --port 1")).is_err());
+        assert!(parse_args(&args("session --port x")).is_err());
+        assert!(parse_args(&args("serve --workers 2")).is_err());
     }
 }

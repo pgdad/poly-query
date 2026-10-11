@@ -303,6 +303,11 @@ line. The first row is flushed immediately; later `rows` lines hold up to
 
 ### HTTP details
 
+* The `serve` options are accepted (and validated) in every mode so that one
+  set of engine arguments works for both transports; outside `serve` they
+  are ignored, except `--query-timeout-ms`, which is the default query
+  timeout in `session`/`exec` too. `serve` still requires `--port`.
+
 * `PUT /v1/tables/{name}` accepts `format`, `replace`, `header`, `delimiter`,
   `layout` and (extension) `schema` — a URL-encoded JSON schema array as in
   the `load` op. As in `load`, CSV with `header=false` requires a schema

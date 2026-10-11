@@ -98,7 +98,11 @@ struct Failure {
 
 fn run(job: Job, ticket: Ticket, tx: SyncSender<Event>) {
     let shared = job.shared.clone();
-    let deadline = deadline(job.arrival, &job.options, shared.serve.query_timeout_ms);
+    let deadline = deadline(
+        job.arrival,
+        &job.options,
+        shared.engine.config.query_timeout_ms,
+    );
     let mut header_sent = false;
     let mut rows_sent = 0u64;
     let outcome = {

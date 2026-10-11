@@ -17,6 +17,9 @@ pub struct Config {
     pub threads: usize,
     pub log_level: LogLevel,
     pub native_kernels: Option<PathBuf>,
+    /// Default query timeout when a query sets none (`--query-timeout-ms`,
+    /// 0 = none).
+    pub query_timeout_ms: u64,
 }
 
 impl Default for Config {
@@ -33,18 +36,19 @@ impl Default for Config {
                 .unwrap_or(1),
             log_level: LogLevel::Info,
             native_kernels: None,
+            query_timeout_ms: 0,
         }
     }
 }
 
-/// Options only meaningful for `serve` (accepted and validated by the CLI).
+/// Options only meaningful for `serve` (accepted in every mode; ignored
+/// outside `serve`).
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
     pub host: String,
     pub port: Option<u16>,
     pub workers: Option<usize>,
     pub queue_depth: usize,
-    pub query_timeout_ms: u64,
     pub shutdown_grace_ms: u64,
     pub max_request_bytes: u64,
 }
@@ -56,7 +60,6 @@ impl Default for ServeConfig {
             port: None,
             workers: None,
             queue_depth: 64,
-            query_timeout_ms: 0,
             shutdown_grace_ms: 10_000,
             max_request_bytes: 1 << 30,
         }
