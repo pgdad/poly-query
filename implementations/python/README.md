@@ -7,7 +7,8 @@ hash and ordered indexes, cost-based access-path selection, an HTTP/1.1
 server with streaming results, admission control, timeouts, cancellation,
 Prometheus metrics, structured logs and graceful shutdown; plus two execution
 engines — row-at-a-time and vectorized —, hash / sort-merge / nested-loop
-joins, parallel partitioned pipelines and a switchable logical optimizer).
+joins, parallel partitioned pipelines and a switchable rule-based logical
+optimizer, separate from physical planning (CR-3)).
 
 Capabilities reported: `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`,
 `sql.basic`, `test.functions`, `phase2`, `sql.groupby`, `sql.join`,
@@ -69,9 +70,10 @@ logical plan → optimizer → physical plan → execution**.
 | `polyquery/ingest/` | CSV (stdlib `csv` reader in `QUOTE_NOTNULL` mode to distinguish `""` from empty) and JSON/JSONL ingestion, type inference, explicit-schema conversion, ingestion limits |
 | `polyquery/sql/` | `lexer.py` (tokens with line/column), `parser.py` (recursive descent, complete v1 grammar), `ast.py` |
 | `polyquery/analysis/` | `binder.py` (name resolution, CTE/derived-table/subquery binding, aggregate extraction, GROUP BY validation, ORDER BY resolution), `scope.py` (range variables, correlation tracking, CTE environments), `typing_rules.py` (promotion lattice, CAST matrix, CASE/IN/BETWEEN/LIKE typing), `functions.py` (function signatures & result types), `bound.py` (bound expression / query model) |
-| `polyquery/planner/` | `planner.py` (bound query → logical plan), `logical.py` (Scan, Values, SubqueryScan, Filter, Join, Aggregate, Project, Distinct, Sort, Limit), `optimizer.py` (expression rewrites, predicate pushdown, join-condition extraction, column pruning), `rewrite.py` (constant folding, predicate simplification), `physical.py` (algorithm and access-path choice: TableScan, IndexScan, LookupScan, HashJoin, MergeJoin, NestedLoopJoin, HashAggregate, TopN, Gather, … with cardinality estimates, join reordering, parallel pipelines, and the EXPLAIN JSON), `access.py` (index-usable predicates, selectivity estimation, index selection, row-group skipping), `explain.py` (expression rendering) |
+| `polyquery/planner/` | `pipeline.py` (bound statement → logical plan → optimizer → physical plan), `planner.py` (bound query → logical plan), `logical.py` (`LogicalPlan`; Scan, Values, SubqueryScan, UnionAll, Filter, Join, Aggregate, Project, Distinct, Sort, Limit; `format_plan`), `optimizer.py` (rule-based optimizer) with `rules/` (one module per rule: constant folding, predicate simplification, predicate pushdown, column pruning), `physical.py` (all execution decisions: TableScan, IndexScan, LookupScan, HashJoin, MergeJoin, NestedLoopJoin, HashAggregate, TopN, Gather, … with cardinality estimates, join reordering, parallel pipelines, execution mode, native kernel plans, and the EXPLAIN JSON), `access.py` (index-usable predicates, selectivity estimation, index selection, row-group skipping), `explain.py` (expression rendering) |
+
 | `polyquery/execution/` | `compiler.py` (bound expression → row closure, incl. subquery evaluation), `vcompiler.py` (bound expression → vector function over column batches), `row_engine.py` (row-at-a-time Volcano operators, `mode:"row"`), `vector_engine.py` (column-batch operators, `mode:"vectorized"`/`auto`), `parallel.py` (partitioned execution of `Gather` pipelines, in-process or in forked workers), `common.py` (algorithms shared by both engines: merge pairing, sort orders, join limits, LookupScan tables), `group_states.py` (columnar aggregation state of the vectorized engine), `aggregates.py` (accumulators of the row engine), `functions.py` (scalar function kernels), `casts.py`, `executor.py` (mode dispatch, result streaming), `context.py` (timeout / cancellation / memory budget / join-row limit, correlation parameters, per-statement caches, GC pausing) |
-| `polyquery/execution/native_ops.py` | Execution paths that use the kernels (`native: true`): scan filtering, gathers, scan aggregation, group sums, hash partitioning |
+| `polyquery/execution/native_ops.py` | Execution paths that use the kernels (`native: true`): scan filtering, gathers, scan aggregation, group sums, hash partitioning; `kernel_plan` compiles the kernel plan of an operator for the physical planner |
 | `polyquery/service.py` | `Engine` facade: owns the catalog, runs `load`, SQL and `explain` |
 | `polyquery/protocol/` | Transport-independent request handler (validation, path safety, responses, streaming cursor), JSON-lines session loop, exec mode, canonical value serialization |
 | `polyquery/server/` | `serve` mode: `http.py` (HTTP/1.1 routing, bodies, JSON / NDJSON responses, query lifecycle), `queries.py` (query registry + admission control), `watcher.py` (client-disconnect detection), `metrics.py` (Prometheus text), `app.py` (server lifecycle, signals, graceful shutdown) |
@@ -210,7 +212,9 @@ any remaining reference to a FROM column is a grouping violation
 * Predicate pushdown: WHERE / ON conjuncts referencing only one side of an
   inner/cross join move below the join; conjuncts over both sides become join
   conditions. For LEFT joins, WHERE conjuncts on the preserved side and ON
-  conjuncts on the nullable side are pushed. (Disabled by `optimize:false`.)
+  conjuncts on the nullable side are pushed. Conjuncts on a derived table /
+  CTE move below its projection when neither the conjunct nor any projected
+  expression can fail (see CR-3 below). (Disabled by `optimize:false`.)
 * Join keys: equality conjuncts whose sides reference disjoint inputs become
   equi-join keys (DECIMAL keys of different scales are aligned; NULL keys
   never match), the remaining conjuncts are a residual predicate; joins
@@ -244,7 +248,7 @@ unchanged:
 | AST | `sql/ast.py` | `Compound(branches)`; `Query.body` is a `Select` or a `Compound` |
 | Parser | `sql/parser.py` | `parse_compound`: `UNION ALL` chains of plain select cores; `UNION` without `ALL` stays `UNSUPPORTED`; a branch `ORDER BY`/`LIMIT` or a parenthesized branch is a `PARSE_ERROR` |
 | Binding | `analysis/binder.py`, `analysis/bound.py`, `analysis/typing_rules.py` | `_bind_compound`: a compound is bound as a query over a `UnionRelation` (`SELECT * FROM (b1 UNION ALL b2 …) ORDER BY … LIMIT …`); branch arity check (`SEMANTIC_ERROR`), `union_type` per column (`TYPE_ERROR`), first-branch names, ORDER BY restricted to output names / positions (`_output_position`, shared with plain SELECTs) |
-| Logical plan | `planner/planner.py`, `planner/logical.py`, `planner/optimizer.py`, `planner/rewrite.py` | `UnionAll(branches)`; a branch whose column types differ from the output types gets a `Project` of implicit promotions (`Cast`, so INT64 → DECIMAL overflow is `NUMERIC_OVERFLOW`); expression simplification and pushdown run inside each branch; column pruning maps the required output columns to every branch |
+| Logical plan | `planner/planner.py`, `planner/logical.py`, `planner/optimizer.py`, `planner/rules/` | `UnionAll(branches)`; a branch whose column types differ from the output types gets a `Project` of implicit promotions (`Cast`, so INT64 → DECIMAL overflow is `NUMERIC_OVERFLOW`); expression simplification and pushdown run inside each branch; column pruning maps the required output columns to every branch |
 | Physical plan | `planner/physical.py` | `UnionAll` node (EXPLAIN `op: "UnionAll"`, children = branch plans in order, estimated rows = sum); with `threads > 1` every selective branch pipeline gets its own `Gather` |
 | Execution | `execution/row_engine.py`, `execution/vector_engine.py` | `_union_all`: the branches' rows / batches concatenated in branch order |
 | Protocol | `protocol/handlers.py` | capability `change.union_all` |
@@ -253,6 +257,75 @@ Branch scopes are children of a compound scope without range variables, so
 correlated references inside a branch pass through it and make the whole
 compound subquery correlated. `max_rows` applies to the final result as for
 any query. Unit tests: `tests/test_union_all.py`.
+
+### Logical / physical plan separation (CR-3, `spec/changes/refactor-plan-separation.md`)
+
+A behaviour-preserving refactoring: every response, error and capability is
+unchanged. A statement is planned in three separate steps
+(`planner/pipeline.py`):
+
+1. **Logical plan** (`planner/planner.py` → `planner/logical.py`): a
+   `LogicalPlan` holds the query's operator tree (`Scan`, `Values`,
+   `SubqueryScan` for derived tables / CTE references, `UnionAll`, `Filter`,
+   `Join` with type and condition, `Aggregate` with keys and aggregate calls,
+   `Project`, `Distinct`, `Sort`, `Limit`) plus one tree per scalar / `IN` /
+   `EXISTS` subquery (by subquery id, nested ones included). Nodes carry no
+   algorithm choices. `str(plan)` / `format_plan(node)` print it.
+2. **Optimizer** (`planner/optimizer.py`, `planner/rules/`): an ordered list
+   of named rules applied to every tree. Each rule is a class with a `name`
+   and `apply(tree)`; expression rules also have `rewrite(expr)` for one
+   expression node, and consecutive expression rules share one bottom-up
+   pass (`RewriteExpressions`), exactly like the former single
+   simplification pass (`NOT (FALSE AND x)`: simplification gives
+   `NOT FALSE`, which folding then turns into `TRUE` at the parent).
+   `optimize: false` → `Optimizer([])`: no rule is applied.
+3. **Physical planning** (`planner/physical.py`): maps the optimized trees to
+   physical operators and alone takes every execution decision: access paths
+   (TableScan / IndexScan / LookupScan, row-group skipping), join algorithm
+   (honouring `join`), build side, join order and `TopN` (both cost-based;
+   off with `optimize: false`, as before), `Gather` pipelines for `threads`,
+   the execution `mode` (`auto` → vectorized) and the operators that run on
+   native kernels. The result (`PhysicalPlan`: root, subquery plans, mode,
+   kernels) is what the executor runs and what `EXPLAIN` prints, unchanged.
+
+**Module map.**
+
+| Concern | Before | After |
+|---|---|---|
+| Logical plan | `planner/logical.py` (operator nodes only); subquery trees built on demand inside the physical planner | `planner/logical.py`: nodes with `expressions()` / `describe()`, `LogicalPlan` (query + subquery trees), `walk`, `format_plan`; `planner/planner.py`: `LogicalPlanner.plan_statement` |
+| Constant folding | `planner/rewrite.py` (`ExprSimplifier._fold`, fused with simplification) | `planner/rules/constant_folding.py`: `ConstantFolding` |
+| Predicate simplification | `planner/rewrite.py` (`ExprSimplifier`, `simplify_plan`) | `planner/rules/predicate_simplification.py`: `PredicateSimplification`; predicate normalisation in `planner/rules/base.py`: `RewriteExpressions` |
+| Predicate pushdown | `planner/optimizer.py` (`optimize`, `_push`; join inputs only) | `planner/rules/predicate_pushdown.py`: `PredicatePushdown` (join inputs and below derived-table projections) |
+| Column pruning | `planner/optimizer.py` (`prune_columns`) | `planner/rules/column_pruning.py`: `ColumnPruning` |
+| Rule interface / driver | — (fixed function calls in `physical.py`) | `planner/rules/base.py`: `Rule`, `ExpressionRule`; `planner/optimizer.py`: `Optimizer`, `default_rules` |
+| Physical planner | `planner/physical.py` (also called the logical planner and the optimizer for every query and subquery) | `planner/physical.py`: `PhysicalPlanner.plan_statement(LogicalPlan)`, no logical rewrites |
+| Execution mode | `service.py` (`ROW if options.mode == ROW else VECTORIZED`) | `planner/physical.py` (`PhysicalPlan.mode`) |
+| Native kernels | `execution/native_ops.py` compiled kernel plans lazily during execution (`ctx.cached`) | `planner/physical.py` binds them (`Filter.native`, `HashAggregate.native`) through `PlanOptions.kernel_plan` = `native_ops.kernel_plan`; `PhysicalPlan.native` |
+| Pipeline | `physical.plan_statement` | `planner/pipeline.py`: `plan_statement` |
+
+Unit tests: `tests/test_optimizer_rules.py` (the logical plan and each rule
+on its own and through the optimizer), `tests/test_planning.py` (physical
+decisions).
+
+*Decisions.*
+* Pushing a conjunct below a derived table's projection is the one place
+  where the refactoring makes the optimizer do more than before (CR-3 lists
+  it among the required rules). Results and errors cannot change: it is
+  only done when neither the conjunct nor any projected expression can fail
+  (no arithmetic, casts, function calls or subqueries), so the same rows are
+  filtered and no error is skipped or added; the pushed conjuncts are placed
+  after the conjuncts of the derived table's own `WHERE` / `HAVING`. It is
+  visible in `EXPLAIN` only as a different Filter position (and possibly an
+  `IndexScan` inside the derived table). A differential run over every
+  conformance query × the option matrix (results and EXPLAIN, with and
+  without native kernels) showed no other difference.
+* Join reordering and `TopN` stay in the physical planner: both depend on
+  physical cardinality estimates (index choices) and choose physical
+  operators, so they are not logical rules. They keep honouring
+  `optimize: false` exactly as before.
+* The physical planner layer does not import the execution layer; the
+  kernel-plan compiler is passed in (`PlanOptions.kernel_plan`), like the
+  constant evaluator.
 
 ### Execution modes and optimization (Phase 5)
 
@@ -349,7 +422,9 @@ same partial/merge code, so the conformance matrix (`threads: 4` on small
 tables) exercises the parallel logic. A unit test and `tools/difftest.py`
 cover the forked path.
 
-**`optimize: false`** disables all logical rewrites:
+**`optimize: false`** disables all logical rewrites (the optimizer applies
+no rule) and the physical planner's two cost-based alternatives (the last
+two items):
 * constant folding (constant subexpressions become literals; a constant
   whose evaluation fails, like `1/0`, is left alone, so the error is
   raised exactly when a row evaluates it);
@@ -357,7 +432,7 @@ cover the forked path.
   absorbing literals, `NOT NOT x`, comparisons with NULL, CASE branches
   with constant conditions, duplicate conjuncts, always-true filters
   removed; operands that may raise errors are never dropped);
-* predicate pushdown;
+* predicate pushdown (into join inputs and below derived-table projections);
 * projection pushdown (column pruning through derived tables);
 * greedy join reordering for chains of ≥ 3 inner/cross joins (start with
   the smallest input, then repeatedly add the connected input giving the
@@ -536,7 +611,11 @@ same row order, same errors — and without the library (or with
   kernel applies.
 
 **Where kernels are used** (`polyquery/execution/native_ops.py`; both
-`mode: row` and `mode: vectorized`, since the paths sit at the scan):
+`mode: row` and `mode: vectorized`, since the paths sit at the scan). The
+physical planner decides: with `native: true` and the library loaded it
+offers every Filter and HashAggregate to `native_ops.kernel_plan` and keeps
+the kernel plan on the operator; the executors run the kernel path of an
+operator exactly when it has one:
 
 | situation | kernels | what the engine still does |
 |---|---|---|

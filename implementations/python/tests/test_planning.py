@@ -95,6 +95,24 @@ class PlanningTests(EngineTestMixin, unittest.TestCase):
         (subplan,) = plan.subplans.values()
         self.assertTrue(any(isinstance(n, pp.LookupScan) for n in _walk(subplan)))
 
+    def test_physical_planner_decides_mode_and_kernel_operators(self):
+        self.assertEqual(self.physical("SELECT 1").mode, pp.VECTORIZED)
+        self.assertEqual(self.physical("SELECT 1", mode="row").mode, pp.ROW)
+        sql = "SELECT COUNT(*) FROM orders WHERE amount > 1"
+        plain = self.physical(sql)
+        self.assertIsNone(plain.native)
+        self.assertTrue(all(getattr(n, "native", None) is None for n in _walk(plain.root)))
+        kernels, offered = object(), []
+
+        def kernel_plan(node):
+            offered.append(node.op)
+            return f"kernels:{node.op}"
+
+        plan = self.physical(sql, kernels=kernels, kernel_plan=kernel_plan)
+        self.assertIs(plan.native, kernels)
+        self.assertEqual(offered, ["Filter", "Aggregate"])  # inputs first
+        self.assertEqual(plan.root.input.native, "kernels:Aggregate")
+
     def test_explain_reports_scan_columns_and_join_type(self):
         resp = self.request(op="explain", sql="SELECT p.name FROM people p JOIN orders o ON o.pid = p.id")
         self.assertTrue(resp["ok"], resp)

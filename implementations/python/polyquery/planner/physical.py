@@ -877,4 +877,3 @@ def _lookup_scan(scan: lp.Scan, predicate: b.Expr) -> LookupScan | None:
                 scan.table, scan.rel, scan.columns, scan.name, column.index, other, residual
             )
     return None
-
