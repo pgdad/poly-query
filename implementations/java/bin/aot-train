@@ -1,0 +1,16 @@
+#!/bin/sh
+# Creates the JVM ahead-of-time cache build/polyquery.aot from a training run of the engine
+# (polyquery.Training: synthetic tables, a broad query mix). Run by `make build`; the engine
+# works without the cache, it only starts up and warms up faster with it.
+SELF=$0
+if command -v readlink >/dev/null 2>&1; then
+    RESOLVED=$(readlink -f "$0" 2>/dev/null) && SELF=$RESOLVED
+fi
+HERE=$(cd "$(dirname "$SELF")/.." && pwd)
+. "$HERE/bin/jvm-options"
+rm -f "$AOT_CACHE"
+if ! "$JAVA" $JVM_OPTS -XX:AOTCacheOutput="$AOT_CACHE" -cp "$JAR" polyquery.Training "$@"; then
+    rm -f "$AOT_CACHE"
+    exit 1
+fi
+[ -f "$AOT_CACHE" ]

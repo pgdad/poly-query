@@ -5,14 +5,16 @@ if command -v readlink >/dev/null 2>&1; then
     RESOLVED=$(readlink -f "$0" 2>/dev/null) && SELF=$RESOLVED
 fi
 HERE=$(cd "$(dirname "$SELF")/.." && pwd)
-JAR="$HERE/build/polyquery.jar"
+. "$HERE/bin/jvm-options"
 if [ ! -f "$JAR" ]; then
     echo "polyquery: $JAR not found; run 'make -C $HERE build' first" >&2
     exit 1
 fi
-if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
-    JAVA="$JAVA_HOME/bin/java"
+# The AOT cache (made by `make build`, see README "JIT warm-up") holds linked classes and method
+# profiles of a training run; POLYQUERY_AOT=off runs without it.
+if [ -f "$AOT_CACHE" ] && [ "${POLYQUERY_AOT:-on}" != off ]; then
+    SHARING="-XX:AOTCache=$AOT_CACHE"
 else
-    JAVA=java
+    SHARING="-Xshare:auto"
 fi
-exec "$JAVA" -XX:+UseParallelGC -XX:-UsePerfData -Xshare:auto $POLYQUERY_JAVA_OPTS -jar "$JAR" "$@"
+exec "$JAVA" $JVM_OPTS $SHARING $POLYQUERY_JAVA_OPTS -jar "$JAR" "$@"

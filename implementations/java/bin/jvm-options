@@ -1,0 +1,13 @@
+# JVM selection and options shared by bin/polyquery and bin/aot-train (sourced, not executed).
+# The AOT cache is only used by a JVM whose options match the training run's (GC, compressed
+# oops, i.e. the heap limit), so both scripts take them from here.
+if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+    JAVA="$JAVA_HOME/bin/java"
+else
+    JAVA=java
+fi
+JAR="$HERE/build/polyquery.jar"
+AOT_CACHE="$HERE/build/polyquery.aot"
+# -Xlog:disable: the JVM's own log lines (e.g. about an unusable AOT cache) would go to stdout,
+# which carries only protocol responses.
+JVM_OPTS="-XX:+UseParallelGC -XX:-UsePerfData -Xlog:disable"

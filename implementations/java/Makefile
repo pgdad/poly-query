@@ -7,6 +7,7 @@ BUILD    := build
 CLASSES  := $(BUILD)/classes
 TCLASSES := $(BUILD)/test-classes
 ENGINE_JAR := $(BUILD)/polyquery.jar
+AOT_CACHE := $(BUILD)/polyquery.aot
 SRC      := $(shell find src/main/java -name '*.java')
 TEST_SRC := $(shell find src/test/java -name '*.java')
 
@@ -15,13 +16,19 @@ TEST_SRC := $(shell find src/test/java -name '*.java')
 # Native kernel library used by the unit tests and bench-kernels (tests are skipped without it).
 NATIVE_LIB ?= ../../native-kernels/build/$(shell uname -m)/libpqkernels.so
 
-build: $(ENGINE_JAR)
+build: $(ENGINE_JAR) $(AOT_CACHE)
 
 $(ENGINE_JAR): $(SRC) src/main/resources/MANIFEST.MF
 	rm -rf $(CLASSES)
 	mkdir -p $(CLASSES)
 	$(JAVAC) --release $(RELEASE) -encoding UTF-8 -Xlint:all,-serial -d $(CLASSES) $(SRC)
 	$(JAR) --create --file $(ENGINE_JAR) --main-class polyquery.Main --manifest src/main/resources/MANIFEST.MF -C $(CLASSES) .
+
+# JIT training run creating the JVM's AOT cache (README "JIT warm-up"). Optional: if it fails,
+# the engine runs without the cache.
+$(AOT_CACHE): $(ENGINE_JAR) bin/aot-train bin/jvm-options
+	@if sh bin/aot-train > $(BUILD)/aot-training.log 2>&1; then echo "AOT cache: $@"; \
+	else echo "note: AOT training failed, the engine runs without the cache (see $(BUILD)/aot-training.log)"; fi
 
 test: build
 	rm -rf $(TCLASSES)
