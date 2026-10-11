@@ -404,7 +404,8 @@ EXPLAIN shows `HashJoin`, `MergeJoin` or `NestedLoopJoin` accordingly
   with an LSD **radix sort** (constant digits skipped); a single string key
   sorts `(8-byte prefix, row)` pairs and compares full strings only on
   prefix ties; other key lists use a comparator over typed key columns.
-  Large inputs are sorted in chunks on several threads and merged. Top-N
+  Large comparator-sorted inputs are sorted in chunks on several threads
+  and merged (a radix sort is a single linear pass and stays serial). Top-N
   (`ORDER BY … LIMIT`) keeps only the best rows (periodic compaction, then
   selection). Ties are broken by input position, so results are exactly
   the stable order of the row engine (whose top-N now uses the same
@@ -508,7 +509,69 @@ code, no runtime dispatch).
 
 ### Measurements
 
-MEASUREMENTS_PLACEHOLDER
+Data: `pqgen.py generate --scale 1m` (transactions, order_items, sensor
+readings and sort keys: 1M rows each; orders 250k; customers 100k;
+products 20k), loaded as CSV with the generated schemas (column layout).
+Tool: `bench/bench.py` (session protocol, `result: "count"`, wall-clock
+per query as seen by the client, best of 5, milliseconds). Machine:
+32 hardware threads (shared host, so ±10 % noise). "Phase 4 engine" is the
+accepted engine before this phase (commit `978d364`).
+
+| Query | Phase 4 engine | `mode: row` | vectorized, 1 thread | vectorized, 8 threads | default (vectorized, 32 threads) |
+|---|---:|---:|---:|---:|---:|
+| Q1 filter + COUNT (1M) | 86 | 83 | 3 | 1 | 1 |
+| Q2 GROUP BY 20 groups, 5 aggregates | 120 | 118 | 8 | 1 | 1 |
+| Q3 GROUP BY 80k groups | 107 | 115 | 7 | 4 | 5 |
+| Q4 1M ⋈ 100k + GROUP BY | 212 | 228 | 16 | 4 | 3 |
+| Q5 1M ⋈ 250k + GROUP BY | 326 | 354 | 36 | 13 | 10 |
+| Q6 filter + top-10 | 107 | 111 | 5 | 2 | 2 |
+| Q7 full sort of 1M rows | 523 | 469 | 25 | 25 | 25 |
+| Q8 FLOAT64 arithmetic + filter | 128 | 131 | 7 | 1 | 1 |
+| Q9 3-way join + GROUP BY | 160 | 171 | 12 | 4 | 3 |
+| Q10 DISTINCT (10k values) | 61 | 64 | 3 | 3 | 3 |
+| Q11 4-way join, badly ordered | 252 | 121 | 9 | 2 | 2 |
+| Q12 GROUP BY 500k groups, MIN(string) | 513 | 555 | 47 | 29 | 28 |
+
+Vectorized execution alone is 9–30× faster than the row baseline; with 8
+threads scan/aggregation queries gain another 3–8× (sorting and the
+DISTINCT/merge steps stay serial, so Q7/Q10 do not scale). `mode: row`
+is the unchanged Phase 4 operator code; it benefits from the logical
+optimizer like every mode (Q11: join reordering).
+
+Logical optimizer and join algorithms (vectorized, 8 threads):
+
+| Query | `optimize: true`, hash joins | `optimize: false` | `join: "merge"` |
+|---|---:|---:|---:|
+| Q4 1M ⋈ 100k + GROUP BY | 4 | 4 | 72 |
+| Q5 1M ⋈ 250k + GROUP BY | 13 | 11 | 27 |
+| Q9 3-way join + GROUP BY | 4 | 9 | 31 |
+| Q11 4-way join, badly ordered | 2 | 17 | 16 |
+
+Without the rewrites, filters stay above the joins and the written join
+order is kept (Q9, Q11). The merge join pays for sorting both inputs.
+
+Other measurements (single queries, engine-side time):
+
+* Full results without `result: "count"`: `SELECT * FROM transactions`
+  (1M rows, 100 MB of JSON) went from ≈490 ms to ≈270 ms, a 3-column
+  integer result from ≈100 ms to ≈20 ms, by serializing straight from the
+  column vectors with allocation-free number/date formatting.
+* Sorting 1M rows by an INT64 key (`ORDER BY uniq_key`): row engine
+  612 ms, first vectorized version (comparator sort) 120 ms, radix sort
+  28 ms.
+* First 4-way join on fresh tables (statistics computed for the cost
+  model): 66 ms → 17 ms after replacing SipHash / per-value `Value`
+  construction in the statistics code with typed loops.
+
+Reproduce:
+
+```bash
+python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pqdata --jobs 1
+python3 implementations/rust/bench/bench.py --engine implementations/rust/bin/polyquery \
+    --data /tmp/pqdata/1m --variant '{"mode":"row","threads":1}' \
+    --variant '{"mode":"vectorized","threads":1}' --variant '{"mode":"vectorized","threads":8}'
+python3 implementations/rust/bench/difftest.py --engine implementations/rust/bin/polyquery --queries 500
+```
 
 ## Known limitations
 

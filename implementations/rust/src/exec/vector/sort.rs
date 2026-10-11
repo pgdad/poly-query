@@ -10,7 +10,8 @@
 //!   comparing full strings only when prefixes tie.
 //! * Other key lists use a comparator over typed key columns.
 //!
-//! Large inputs are cut into chunks sorted on separate threads and merged.
+//! Large comparator-sorted inputs are cut into chunks sorted on separate
+//! threads and merged.
 //! Top-N uses selection (`select_nth_unstable`) with the row number as
 //! final tie-breaker, i.e. the prefix of the stable order.
 
@@ -345,7 +346,9 @@ fn sort_single(col: &SortColumn, n: usize, top: Option<usize>, threads: usize) -
                     p.sort_unstable();
                     p
                 }
-                _ => parallel_sort(pairs, threads, &radix_sort, &|a: &(u64, u32), b| a.cmp(b)),
+                // Radix sorting is memory-bound and linear: one pass beats
+                // sorting chunks in parallel and merging them.
+                _ => radix_sort(pairs),
             };
             pairs.into_iter().map(|(_, i)| i).collect()
         }
