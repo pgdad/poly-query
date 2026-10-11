@@ -128,3 +128,20 @@ func TestTopN(t *testing.T) {
 		t.Fatalf("expected top-N sort of 3 rows: %v", s)
 	}
 }
+
+func TestUnionAllPlan(t *testing.T) {
+	p := build(t, "SELECT n FROM (SELECT id AS n, name FROM emp UNION ALL SELECT boss, name FROM emp) u WHERE n > 2", physical.Options{})
+	ns := nodes(t, p)
+	unions := find(ns, "UnionAll")
+	if len(unions) != 1 || len(unions[0]["children"].([]any)) != 2 {
+		t.Fatalf("expected one UnionAll with two children: %v", ns)
+	}
+	// Predicates are pushed into both branches and unused columns pruned.
+	scans := find(ns, "TableScan")
+	if len(scans) != 2 || scanColumns(scans[0]) != "id" || scanColumns(scans[1]) != "boss" {
+		t.Errorf("scans: %v", scans)
+	}
+	if f := find(ns, "Filter"); len(f) != 2 {
+		t.Errorf("expected a filter in each branch, got %v", f)
+	}
+}

@@ -32,7 +32,13 @@ type FromItem interface {
 
 // ---------------------------------------------------------------- statements
 
-// Query is a (possibly WITH-prefixed) SELECT with ORDER BY and LIMIT/OFFSET.
+// Query is a (possibly WITH-prefixed) SELECT, or a compound of SELECTs
+// combined with UNION ALL, with ORDER BY and LIMIT/OFFSET.
+//
+// The select-core fields (Distinct … Having) hold the first branch. For a
+// compound query Union lists the following branches, which carry only
+// select-core fields; With, OrderBy, Limit and Offset apply to the whole
+// compound.
 type Query struct {
 	Pos
 	With     []*CTE
@@ -42,6 +48,7 @@ type Query struct {
 	Where    Expr
 	GroupBy  []Expr
 	Having   Expr
+	Union    []*Query
 	OrderBy  []*OrderItem
 	Limit    Expr
 	Offset   Expr

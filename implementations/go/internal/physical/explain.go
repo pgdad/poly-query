@@ -170,6 +170,8 @@ func explainNode(p *Plan, n Node) *Object {
 		}
 	case *HashDistinct:
 		o.Set("op", "Distinct").Set("algorithm", "hash")
+	case *UnionAll:
+		o.Set("op", "UnionAll").Set("columns", names(x.Cols))
 	case *ParamLookup:
 		keys := make([]string, len(x.InnerKeys))
 		for i := range keys {

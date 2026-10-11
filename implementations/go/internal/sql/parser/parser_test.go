@@ -102,3 +102,41 @@ func TestErrors(t *testing.T) {
 		t.Errorf("error position = %v", e.Details)
 	}
 }
+
+func TestUnionAll(t *testing.T) {
+	q := mustParse(t, "WITH c AS (SELECT 1 UNION ALL SELECT 2) SELECT a FROM t UNION ALL SELECT b FROM u WHERE b > 1 UNION ALL SELECT c FROM c ORDER BY 1 LIMIT 3")
+	if len(q.With) != 1 || len(q.With[0].Query.Union) != 1 {
+		t.Errorf("UNION ALL in CTE body not parsed")
+	}
+	if len(q.Union) != 2 || q.Union[0].Where == nil || q.Union[1].From == nil {
+		t.Fatalf("branches parsed wrongly: %+v", q.Union)
+	}
+	if len(q.OrderBy) != 1 || q.Limit == nil || q.Union[1].OrderBy != nil || q.Union[1].Limit != nil {
+		t.Errorf("ORDER BY/LIMIT must belong to the compound")
+	}
+	for _, sql := range []string{
+		"SELECT * FROM (SELECT 1 AS x UNION ALL SELECT 2) s",
+		"SELECT 1 WHERE 1 IN (SELECT 1 UNION ALL SELECT 2) AND EXISTS (SELECT 1 UNION ALL SELECT 2)",
+		"SELECT (SELECT 1 UNION ALL SELECT 2 LIMIT 1)",
+		"EXPLAIN SELECT 1 UNION ALL SELECT 2",
+		"SELECT DISTINCT a FROM t GROUP BY a HAVING COUNT(*) > 1 UNION ALL SELECT ALL b FROM u",
+	} {
+		if _, err := Parse(sql); err != nil {
+			t.Errorf("Parse(%q): %v", sql, err)
+		}
+	}
+	for sql, code := range map[string]errs.Code{
+		"SELECT 1 UNION DISTINCT SELECT 2":                         errs.Unsupported,
+		"SELECT 1 UNION ALL SELECT 2 UNION SELECT 3":               errs.Unsupported,
+		"SELECT 1 ORDER BY 1 UNION ALL SELECT 2":                   errs.ParseError,
+		"SELECT 1 LIMIT 1 UNION ALL SELECT 2":                      errs.ParseError,
+		"(SELECT 1) UNION ALL (SELECT 2)":                          errs.ParseError,
+		"SELECT 1 UNION ALL (SELECT 2)":                            errs.ParseError,
+		"SELECT 1 UNION ALL":                                       errs.ParseError,
+		"SELECT * FROM (SELECT 1 ORDER BY 1 UNION ALL SELECT 2) s": errs.ParseError,
+	} {
+		if _, err := Parse(sql); !errs.Is(err, code) {
+			t.Errorf("Parse(%q) = %v, want %s", sql, err, code)
+		}
+	}
+}

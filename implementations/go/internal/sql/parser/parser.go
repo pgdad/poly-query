@@ -28,9 +28,6 @@ func Parse(sql string) (ast.Statement, error) {
 	}
 	p.accept(";")
 	if t := p.peek(); t.Kind != lexer.EOF {
-		if t.Is("UNION") {
-			return nil, p.unsupported(t, "UNION is not supported")
-		}
 		return nil, p.unexpected(t)
 	}
 	return stmt, nil
@@ -221,8 +218,17 @@ func (p *parser) query() (*ast.Query, error) {
 	}
 	q.Pos = pos(start)
 	q.With = with
-	if p.peek().Is("UNION") {
-		return nil, p.unsupported(p.peek(), "UNION is not supported")
+	for p.peek().Is("UNION") {
+		u := p.next()
+		if !p.accept("ALL") {
+			return nil, p.unsupported(u, "UNION without ALL is not supported")
+		}
+		branch, err := p.selectCore()
+		if err != nil {
+			return nil, err
+		}
+		branch.Pos = pos(u)
+		q.Union = append(q.Union, branch)
 	}
 	if p.accept("ORDER") {
 		if _, err := p.expect("BY"); err != nil {

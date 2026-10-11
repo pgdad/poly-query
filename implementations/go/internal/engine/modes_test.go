@@ -143,6 +143,45 @@ func TestExecutionModesAgree(t *testing.T) {
 	}
 }
 
+func TestUnionAllModesAgree(t *testing.T) {
+	e := newModesEngine(t)
+	queries := []string{
+		"SELECT id, cat FROM t WHERE id < 50 UNION ALL SELECT grp, label FROM d UNION ALL SELECT id, cat FROM t WHERE id < 50",
+		"SELECT grp AS g, COUNT(*) AS n FROM t GROUP BY grp UNION ALL SELECT label, grp FROM d",
+		"SELECT amount AS v FROM t WHERE id % 11 = 0 UNION ALL SELECT id FROM t WHERE id % 13 = 0 UNION ALL SELECT price FROM t WHERE id % 17 = 0",
+		"SELECT v, COUNT(*), SUM(v) FROM (SELECT id % 10 AS v FROM t UNION ALL SELECT grp FROM d UNION ALL SELECT NULL) u GROUP BY v",
+		"SELECT id, amount FROM t UNION ALL SELECT grp, NULL FROM d ORDER BY amount DESC, id LIMIT 13 OFFSET 4",
+		"SELECT u.k, d.label FROM (SELECT CAST(grp AS INT64) AS k FROM t WHERE id < 100 UNION ALL SELECT grp FROM d) u JOIN d ON u.k = d.grp",
+		"SELECT COUNT(*) FROM (SELECT * FROM t UNION ALL SELECT * FROM t) u WHERE u.flag AND u.cat = 'red'",
+		"WITH x AS (SELECT cat FROM t WHERE id < 20 UNION ALL SELECT label FROM d) SELECT a.cat, COUNT(*) FROM x a JOIN x b ON a.cat = b.cat GROUP BY a.cat",
+		"SELECT id FROM t WHERE id IN (SELECT grp FROM d UNION ALL SELECT 2999) ORDER BY id",
+		"SELECT id FROM t WHERE id < 30 AND EXISTS (SELECT 1 FROM d WHERE d.grp = t.id UNION ALL SELECT 1 FROM t s WHERE s.id = t.id + 2990)",
+		"SELECT id, (SELECT COUNT(*) FROM (SELECT grp FROM d WHERE d.grp = t.id % 13 UNION ALL SELECT 1) s) FROM t WHERE id < 40",
+		"SELECT DISTINCT cat FROM t UNION ALL SELECT DISTINCT cat FROM t",
+		"SELECT id FROM t WHERE id < 0 UNION ALL SELECT grp FROM d WHERE grp < 0",
+		"SELECT 9223372036854775807 AS v UNION ALL SELECT CAST(amount AS DECIMAL(10,2)) FROM t",
+		"SELECT id / (id - 1500) FROM t UNION ALL SELECT 1",
+	}
+	for _, q := range queries {
+		want := canonical(e, q, modeConfig{"row", "hash", 1, true})
+		for _, c := range modeMatrix {
+			if got := canonical(e, q, c); got != want {
+				t.Errorf("%s\n  %+v:\n  got  %.300s\n  want %.300s", q, c, got, want)
+			}
+		}
+	}
+	if got := canonical(e, "SELECT 9223372036854775807 AS v UNION ALL SELECT CAST(amount AS DECIMAL(10,2)) FROM t", modeMatrix[0]); got != "error NUMERIC_OVERFLOW" {
+		t.Errorf("INT64 not fitting DECIMAL(18,2): %s", got)
+	}
+	res, err := e.Query(context.Background(), "SELECT id FROM t UNION ALL SELECT id FROM t ORDER BY id DESC LIMIT 3", QueryOptions{MaxRows: -1, Mode: "vectorized", Threads: 4})
+	if err != nil || len(res.Rows) != 3 || res.Rows[0][0].I != 3000 || res.Rows[1][0].I != 3000 || res.Rows[2][0].I != 2999 {
+		t.Errorf("ORDER BY/LIMIT over UNION ALL: %v %v", res, err)
+	}
+	if _, err := e.Query(context.Background(), "SELECT id FROM t UNION ALL SELECT id FROM t", QueryOptions{MaxRows: 5000}); !errs.Is(err, errs.ResourceLimit) {
+		t.Errorf("max_rows applies to the whole result: %v", err)
+	}
+}
+
 func TestJoinAlgorithmSelection(t *testing.T) {
 	e := newModesEngine(t)
 	q := "SELECT t.id FROM t JOIN d ON CAST(t.grp AS INT64) = d.grp"

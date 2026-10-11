@@ -130,3 +130,58 @@ func TestCorrelation(t *testing.T) {
 		t.Fatalf("ungrouped correlated column: %v", err)
 	}
 }
+
+func TestUnionAll(t *testing.T) {
+	schemas := map[string]string{
+		"SELECT id AS k, name FROM emp UNION ALL SELECT 1, title FROM dept":                       "k:INT64,name:STRING",
+		"SELECT id FROM emp UNION ALL SELECT 2.5 UNION ALL SELECT 1.25":                           "id:DECIMAL(18,2)",
+		"SELECT 1.5 AS v UNION ALL SELECT 2e0":                                                    "v:FLOAT64",
+		"SELECT NULL AS x UNION ALL SELECT 'a'":                                                   "x:STRING",
+		"SELECT NULL AS x UNION ALL SELECT NULL":                                                  "x:STRING", // as SELECT NULL
+		"SELECT x FROM (SELECT 1 AS x UNION ALL SELECT NULL) s ORDER BY x":                        "x:INT64",
+		"WITH u AS (SELECT id FROM emp UNION ALL SELECT id FROM emp) SELECT COUNT(*) AS n FROM u": "n:INT64",
+		"SELECT name FROM emp UNION ALL SELECT title FROM dept ORDER BY name DESC LIMIT 2":        "name:STRING",
+	}
+	for sql, want := range schemas {
+		n, err := analyze(t, sql)
+		if err != nil {
+			t.Errorf("%s: %v", sql, err)
+			continue
+		}
+		if got := schemaString(n); got != want {
+			t.Errorf("%s:\n got %s\nwant %s", sql, got, want)
+		}
+	}
+	errors := map[string]errs.Code{
+		"SELECT id, name FROM emp UNION ALL SELECT id FROM emp":                     errs.SemanticError,
+		"SELECT name FROM emp UNION ALL SELECT id FROM emp":                         errs.TypeError,
+		"SELECT DATE '2024-01-01' UNION ALL SELECT TIMESTAMP '2024-01-01 00:00:00'": errs.TypeError,
+		"SELECT id FROM emp UNION ALL SELECT id FROM emp ORDER BY id + 1":           errs.SemanticError,
+		"SELECT id FROM emp UNION ALL SELECT id FROM emp ORDER BY emp.id":           errs.SemanticError,
+		"SELECT id FROM emp UNION ALL SELECT id FROM emp ORDER BY salary":           errs.SemanticError,
+		"SELECT id FROM emp UNION ALL SELECT id FROM emp ORDER BY 2":                errs.SemanticError,
+		"SELECT id AS a, name AS a FROM emp UNION ALL SELECT 1, 'x' ORDER BY a":     errs.SemanticError,
+		"SELECT id FROM emp UNION ALL SELECT nope FROM emp":                         errs.SemanticError,
+		"SELECT (SELECT id FROM emp UNION ALL SELECT id, id FROM emp)":              errs.SemanticError,
+	}
+	for sql, code := range errors {
+		if _, err := analyze(t, sql); !errs.Is(err, code) {
+			t.Errorf("%s: got %v, want %s", sql, err, code)
+		}
+	}
+	// The plan is a UnionAll with one input per branch; a branch whose
+	// types differ from the result is converted by a projection.
+	n, err := analyze(t, "SELECT id FROM emp UNION ALL SELECT 2.5 UNION ALL SELECT salary FROM emp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, ok := n.(*plan.UnionAll)
+	if !ok || len(u.Inputs) != 3 {
+		t.Fatalf("expected a 3-input UnionAll, got %T", n)
+	}
+	for i, in := range u.Inputs {
+		if got := in.Schema()[0].Type; got != u.Cols[0].Type {
+			t.Errorf("branch %d produces %s, want %s", i, got, u.Cols[0].Type)
+		}
+	}
+}

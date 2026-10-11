@@ -6,8 +6,9 @@
 //     single join input are evaluated below the join, conjuncts spanning
 //     both inputs of an inner/cross join become join conditions), through
 //     projections (derived tables and CTEs; output columns are replaced by
-//     their defining expressions), sorts and DISTINCT, and merging of
-//     stacked filters, so that predicates reach the table scans;
+//     their defining expressions), sorts, DISTINCT and UNION ALL (into
+//     every branch), and merging of stacked filters, so that predicates
+//     reach the table scans;
 //   - join reordering for chains of inner joins (reorder.go).
 //
 // Subquery plans are optimized recursively. Projection pushdown (column
@@ -85,8 +86,44 @@ func push(n plan.Node, preds []plan.Expr) plan.Node {
 		return filter(&plan.Limit{Input: push(x.Input, nil), Count: x.Count, Offset: x.Offset}, preds)
 	case *plan.Distinct:
 		return &plan.Distinct{Input: push(x.Input, preds)}
+	case *plan.UnionAll:
+		return pushUnion(x, preds)
 	}
 	return filter(n, preds)
+}
+
+// pushUnion pushes predicates over a UNION ALL's output into every branch,
+// rewritten in terms of the branch's columns. Predicates containing
+// subqueries stay above (their plans must not be duplicated).
+func pushUnion(u *plan.UnionAll, preds []plan.Expr) plan.Node {
+	var down, keep []plan.Expr
+	for _, p := range preds {
+		if hasSubquery(p) {
+			keep = append(keep, p)
+		} else {
+			down = append(down, p)
+		}
+	}
+	out := &plan.UnionAll{Inputs: make([]plan.Node, len(u.Inputs)), Cols: u.Cols}
+	for i, in := range u.Inputs {
+		branch := make(map[plan.ColumnID]plan.Column, len(u.Cols))
+		for j, c := range in.Schema() {
+			branch[u.Cols[j].ID] = c
+		}
+		mapped := make([]plan.Expr, len(down))
+		for k, p := range down {
+			mapped[k] = plan.Map(p, func(e plan.Expr) plan.Expr {
+				if ref, ok := e.(*plan.ColumnRef); ok {
+					if c, ok := branch[ref.ID]; ok {
+						return c.Ref()
+					}
+				}
+				return nil
+			})
+		}
+		out.Inputs[i] = push(in, mapped)
+	}
+	return filter(out, keep)
 }
 
 // throughProject splits predicates over a projection's output into those

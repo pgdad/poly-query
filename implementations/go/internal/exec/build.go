@@ -144,6 +144,8 @@ func build(ec *Context, n physical.Node, vec bool) (Operator, error) {
 			ts[i] = c.Type
 		}
 		return &distinctOp{ec: ec, input: in, types: ts, seen: map[string]struct{}{}}, nil
+	case *physical.UnionAll:
+		return newUnionOp(ec, x, vec), nil
 	}
 	return nil, errs.New(errs.InternalError, "cannot execute plan node %T", n)
 }

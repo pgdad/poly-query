@@ -127,6 +127,15 @@ type HashDistinct struct {
 	Input Node
 }
 
+// UnionAll concatenates the rows of its inputs in order. Output column j is
+// read from column InputCols[i][j] of input i (inputs may produce further
+// columns, which are ignored).
+type UnionAll struct {
+	Inputs    []Node
+	InputCols [][]plan.Column
+	Cols      []plan.Column
+}
+
 // ParamLookup appears inside correlated subquery plans: it returns the rows
 // of its uncorrelated input whose InnerKeys equal the OuterKeys (expressions
 // over outer-query values) and that satisfy Residual. The input is hashed
@@ -165,6 +174,7 @@ func (n *NestedLoopJoin) Schema() []plan.Column {
 func (n *Sort) Schema() []plan.Column         { return n.Input.Schema() }
 func (n *Limit) Schema() []plan.Column        { return n.Input.Schema() }
 func (n *HashDistinct) Schema() []plan.Column { return n.Input.Schema() }
+func (n *UnionAll) Schema() []plan.Column     { return n.Cols }
 func (n *ParamLookup) Schema() []plan.Column  { return n.Input.Schema() }
 func (n *Materialize) Schema() []plan.Column  { return n.Input.Schema() }
 
@@ -181,6 +191,7 @@ func (n *MergeJoin) Children() []Node      { return []Node{n.Left, n.Right} }
 func (n *Sort) Children() []Node           { return []Node{n.Input} }
 func (n *Limit) Children() []Node          { return []Node{n.Input} }
 func (n *HashDistinct) Children() []Node   { return []Node{n.Input} }
+func (n *UnionAll) Children() []Node       { return n.Inputs }
 func (n *ParamLookup) Children() []Node    { return []Node{n.Input} }
 func (n *Materialize) Children() []Node    { return []Node{n.Input} }
 

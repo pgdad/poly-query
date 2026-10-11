@@ -42,7 +42,15 @@ func (a *analyzer) query(q *ast.Query, outer *scope, env *cteEnv) (plan.Node, er
 		}
 		env = &cteEnv{def: def, parent: env}
 	}
+	if len(q.Union) > 0 {
+		return a.compound(q, outer, env)
+	}
+	return a.selectBlock(q, outer, env)
+}
 
+// selectBlock analyzes a single SELECT with its ORDER BY and LIMIT/OFFSET
+// (q.With has already been processed into env).
+func (a *analyzer) selectBlock(q *ast.Query, outer *scope, env *cteEnv) (plan.Node, error) {
 	sc := &scope{parent: outer}
 	var input plan.Node = &plan.Values{Rows: [][]plan.Expr{{}}}
 	if q.From != nil {

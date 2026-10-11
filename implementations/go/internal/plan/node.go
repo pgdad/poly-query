@@ -112,6 +112,14 @@ type Distinct struct {
 	Input Node
 }
 
+// UnionAll concatenates the rows of its inputs, keeping duplicates. Every
+// input produces exactly len(Cols) columns, column i having type
+// Cols[i].Type; output column i is fed by column i of each input.
+type UnionAll struct {
+	Inputs []Node
+	Cols   []Column
+}
+
 // Schema implementations.
 func (n *Scan) Schema() []Column    { return n.Cols }
 func (n *Values) Schema() []Column  { return n.Cols }
@@ -126,6 +134,7 @@ func (n *Join) Schema() []Column {
 func (n *Sort) Schema() []Column     { return n.Input.Schema() }
 func (n *Limit) Schema() []Column    { return n.Input.Schema() }
 func (n *Distinct) Schema() []Column { return n.Input.Schema() }
+func (n *UnionAll) Schema() []Column { return n.Cols }
 
 // Children implementations.
 func (n *Scan) Children() []Node      { return nil }
@@ -137,6 +146,7 @@ func (n *Join) Children() []Node      { return []Node{n.Left, n.Right} }
 func (n *Sort) Children() []Node      { return []Node{n.Input} }
 func (n *Limit) Children() []Node     { return []Node{n.Input} }
 func (n *Distinct) Children() []Node  { return []Node{n.Input} }
+func (n *UnionAll) Children() []Node  { return n.Inputs }
 
 // NodeExprs returns the expressions evaluated by node n itself.
 func NodeExprs(n Node) []Expr {
@@ -281,6 +291,12 @@ func MapExprs(n Node, f func(Expr) Expr) Node {
 		return &Limit{Input: MapExprs(x.Input, f), Count: mapExpr(x.Count), Offset: mapExpr(x.Offset)}
 	case *Distinct:
 		return &Distinct{Input: MapExprs(x.Input, f)}
+	case *UnionAll:
+		c := &UnionAll{Inputs: make([]Node, len(x.Inputs)), Cols: x.Cols}
+		for i, in := range x.Inputs {
+			c.Inputs[i] = MapExprs(in, f)
+		}
+		return c
 	}
 	return n
 }
