@@ -277,8 +277,11 @@ OTHER's group ids to STATE's."))
   (aggs #() :type simple-vector)         ; of AGG-STATE
   (gids (make-index-vector +batch-size+) :type index-vector))
 
-(defun make-group-state (nkeys aggs)
-  (let ((gs (%make-group-state :table (and (plusp nkeys) (make-key-table nkeys))
+(defun make-group-state (key-kinds aggs)
+  "Empty group state for keys of KEY-KINDS (a list of vector kinds) and the
+aggregate calls AGGS."
+  (let ((gs (%make-group-state :table (and key-kinds
+                                           (make-key-table (length key-kinds) 16 key-kinds))
                                :aggs (map 'simple-vector #'make-agg-state aggs))))
     (unless (group-state-table gs)
       (fill (group-state-gids gs) 0)

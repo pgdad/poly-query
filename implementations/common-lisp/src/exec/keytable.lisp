@@ -98,54 +98,148 @@
               (dotimes (k (length dict) hashes)
                 (setf (aref hashes k) (hash-key-value (svref dict k))))))))
 
+;;; A key table with a single INT64-like key column (KINDS = (:I64)) keeps
+;;; its keys inline: INT-SLOTS holds (key, group id + 1) pairs, so a probe
+;;; reads one cache line and never consults HASHES; the NULL key, if present,
+;;; is the group NULL-GID outside the slot array.
+
 (defstruct (key-table (:constructor %make-key-table))
   (width 0 :type fixnum)
   (keys #() :type simple-vector)          ; per key column: SIMPLE-VECTOR of values by group id
-  (hashes (make-index-vector 0) :type index-vector)    ; per group id
-  (slots (make-index-vector 0) :type index-vector)     ; group id or -1
+  (hashes (make-index-vector 0) :type index-vector)    ; per group id (generic tables)
+  (slots (make-index-vector 0) :type index-vector)     ; group id or -1 (generic tables)
+  (int-slots nil :type (or null i64-vector))           ; (key, gid + 1) pairs (integer tables)
+  (null-gid -1 :type fixnum)                           ; group of the NULL key (integer tables)
   (mask 0 :type fixnum)
   (count 0 :type fixnum))
 
-(defun make-key-table (width &optional (expected 16))
-  (let ((size 16))
+(defun make-key-table (width &optional (expected 16) kinds)
+  "Empty table for keys of WIDTH columns (of vector KINDS, when known)."
+  (let ((size 16)
+        (int-mode (and (= width 1) (equal kinds '(:i64)))))
     (loop while (< size (* 2 expected)) do (setf size (* 2 size)))
     (%make-key-table :width width
                      :keys (let ((v (make-array width)))
                              (dotimes (k width v) (setf (svref v k) (make-array (floor size 2)))))
-                     :hashes (make-index-vector (floor size 2))
-                     :slots (make-array size :element-type 'fixnum :initial-element -1)
+                     :hashes (make-index-vector (if int-mode 0 (floor size 2)))
+                     :slots (if int-mode
+                                (make-index-vector 0)
+                                (make-array size :element-type 'fixnum :initial-element -1))
+                     :int-slots (and int-mode
+                                     (make-array (* 2 size) :element-type '(signed-byte 64)
+                                                            :initial-element 0))
                      :mask (1- size))))
 
 (defun key-table-key (table k gid)
   "Value of key column K of group GID."
   (svref (svref (key-table-keys table) k) gid))
 
+(defun key-table-capacity (table)
+  "Number of groups the per-group arrays can hold."
+  (length (the simple-vector (svref (key-table-keys table) 0))))
+
+(defun grow-key-columns (table capacity)
+  (let ((keys (key-table-keys table)))
+    (dotimes (k (length keys))
+      (let ((new (make-array capacity)))
+        (replace new (svref keys k))
+        (setf (svref keys k) new)))))
+
 (defun key-table-grow (table)
   "Double the slot array and the per-group arrays."
-  (let* ((size (* 2 (length (key-table-slots table))))
-         (slots (make-array size :element-type 'fixnum :initial-element -1))
-         (mask (1- size))
-         (count (key-table-count table))
-         (hashes (make-index-vector (floor size 2))))
-    (replace hashes (key-table-hashes table))
-    (dotimes (g count)
-      (let ((pos (logand (aref hashes g) mask)))
-        (loop until (= (aref slots pos) -1)
-              do (setf pos (logand (1+ pos) mask)))
-        (setf (aref slots pos) g)))
-    (let ((keys (key-table-keys table)))
-      (dotimes (k (length keys))
-        (let ((new (make-array (floor size 2))))
-          (replace new (svref keys k))
-          (setf (svref keys k) new))))
-    (setf (key-table-slots table) slots
-          (key-table-mask table) mask
-          (key-table-hashes table) hashes)))
+  (if (key-table-int-slots table)
+      (let* ((size (* 2 (1+ (key-table-mask table))))
+             (slots (make-array (* 2 size) :element-type '(signed-byte 64) :initial-element 0))
+             (mask (1- size))
+             (keys (svref (key-table-keys table) 0)))
+        (declare (type simple-vector keys))
+        (dotimes (g (key-table-count table))
+          (let ((v (svref keys g)))
+            (unless (eq v +null+)
+              (let ((pos (logand (hash-i64 v) mask)))
+                (declare (type fixnum pos))
+                (loop until (zerop (aref slots (1+ (* 2 pos))))
+                      do (setf pos (logand (1+ pos) mask)))
+                (setf (aref slots (* 2 pos)) v
+                      (aref slots (1+ (* 2 pos))) (1+ g))))))
+        (grow-key-columns table (floor size 2))
+        (setf (key-table-int-slots table) slots
+              (key-table-mask table) mask))
+      (let* ((size (* 2 (length (key-table-slots table))))
+             (slots (make-array size :element-type 'fixnum :initial-element -1))
+             (mask (1- size))
+             (count (key-table-count table))
+             (hashes (make-index-vector (floor size 2))))
+        (replace hashes (key-table-hashes table))
+        (dotimes (g count)
+          (let ((pos (logand (aref hashes g) mask)))
+            (loop until (= (aref slots pos) -1)
+                  do (setf pos (logand (1+ pos) mask)))
+            (setf (aref slots pos) g)))
+        (grow-key-columns table (floor size 2))
+        (setf (key-table-slots table) slots
+              (key-table-mask table) mask
+              (key-table-hashes table) hashes))))
+
+(defun key-table-new-group (table values-fn)
+  "Allocate the next group id with key values (VALUES-FN k)."
+  (declare (type function values-fn))
+  (let ((g (key-table-count table))
+        (keys (key-table-keys table)))
+    (dotimes (k (key-table-width table))
+      (setf (svref (svref keys k) g) (funcall values-fn k)))
+    (setf (key-table-count table) (1+ g))
+    g))
+
+(defun key-table-ensure-room (table)
+  ;; Keep room for the next group (load factor <= 1/2).
+  (when (>= (key-table-count table) (key-table-capacity table))
+    (key-table-grow table)))
+
+;;; Integer tables
+
+(declaim (inline int-key-probe))
+(defun int-key-probe (table v add)
+  "Group id of the integer key V (added when ADD, else -1 if absent)."
+  (declare (type (signed-byte 64) v))
+  (let* ((slots (key-table-int-slots table))
+         (mask (key-table-mask table))
+         (pos (logand (hash-i64 v) mask)))
+    (declare (type i64-vector slots) (type fixnum mask pos))
+    (loop
+      (let ((g1 (aref slots (1+ (* 2 pos)))))
+        (cond ((zerop g1)
+               (return
+                 (if add
+                     (let ((g (key-table-new-group table (lambda (k) (declare (ignore k)) v))))
+                       (setf (aref slots (* 2 pos)) v
+                             (aref slots (1+ (* 2 pos))) (1+ g))
+                       (key-table-ensure-room table)
+                       g)
+                     -1)))
+              ((= (aref slots (* 2 pos)) v) (return (1- g1)))))
+      (setf pos (logand (1+ pos) mask)))))
+
+(defun int-key-null-group (table add)
+  (let ((g (key-table-null-gid table)))
+    (cond ((>= g 0) g)
+          ((not add) -1)
+          (t (let ((g (key-table-new-group table (lambda (k) (declare (ignore k)) +null+))))
+               (setf (key-table-null-gid table) g)
+               (key-table-ensure-room table)
+               g)))))
+
+(defun int-key-group (table v add)
+  (if (eq v +null+)
+      (int-key-null-group table add)
+      (int-key-probe table v add)))
+
+;;; Generic tables
 
 (defmacro probe-key-table ((table hash gid-var equal-form) found-form missing-form)
-  "Probe TABLE for HASH; for each candidate group GID-VAR with the same hash
-EQUAL-FORM decides equality. Runs FOUND-FORM (GID-VAR bound) or MISSING-FORM
-(with POS-VAR bound to the free slot)."
+  "Probe the generic TABLE for HASH; for each candidate group GID-VAR with the
+same hash EQUAL-FORM decides equality. Runs FOUND-FORM (GID-VAR bound) or
+MISSING-FORM (with FREE-POS bound to the free slot)."
   (let ((pos (gensym "POS")) (slots (gensym "SLOTS")) (mask (gensym "MASK"))
         (hashes (gensym "HASHES")))
     `(let* ((,slots (key-table-slots ,table))
@@ -165,71 +259,68 @@ EQUAL-FORM decides equality. Runs FOUND-FORM (GID-VAR bound) or MISSING-FORM
          (setf ,pos (logand (1+ ,pos) ,mask))))))
 
 (defun key-table-insert-at (table pos hash values-fn)
-  "Add a new group at the free slot POS; VALUES-FN (k) gives its key values."
-  (declare (type function values-fn) (type fixnum pos))
-  (let ((g (key-table-count table)))
+  "Add a new group at the free slot POS of a generic table."
+  (declare (type fixnum pos))
+  (let ((g (key-table-new-group table values-fn)))
     (setf (aref (key-table-slots table) pos) g
           (aref (key-table-hashes table) g) hash)
-    (let ((keys (key-table-keys table)))
-      (dotimes (k (key-table-width table))
-        (setf (svref (svref keys k) g) (funcall values-fn k))))
-    (setf (key-table-count table) (1+ g))
-    ;; Keep room for the next group (load factor <= 1/2).
-    (when (>= (1+ g) (length (key-table-hashes table)))
-      (key-table-grow table))
+    (key-table-ensure-room table)
     g))
 
 (defun key-table-map-batch (table vecs n gids add)
   "Fill GIDS[0..N) with the group ids of the rows of the key VECS; new keys
 are added when ADD, else their id is -1. Returns GIDS."
   (declare (type index-vector gids) (type fixnum n))
-  (let ((hashes (hash-key-vecs vecs n))
-        (vecs (coerce vecs 'simple-vector)))
-    (if (and (= (length vecs) 1) (typep (vec-data (svref vecs 0)) 'i64-vector)
-             (null (vec-validity (svref vecs 0))))
-        ;; Fast path: one non-NULL INT64-like key column.
-        (let ((data (vec-data (svref vecs 0))))
-          (declare (type i64-vector data))
-          (dotimes (i n)
-            (let ((v (aref data i))
-                  (h (aref hashes i)))
-              (setf (aref gids i)
-                    (probe-key-table (table h g (eql (svref (svref (key-table-keys table) 0) g) v))
-                                     g
-                                     (if add
-                                         (key-table-insert-at table free-pos h
-                                                              (lambda (k) (declare (ignore k)) v))
-                                         -1))))))
-        (let ((width (length vecs)))
-          (dotimes (i n)
-            (let ((h (aref hashes i)))
-              (setf (aref gids i)
-                    (probe-key-table (table h g
-                                            (let ((keys (key-table-keys table)))
-                                              (dotimes (k width t)
-                                                (unless (key-value-equal
-                                                         (svref (svref keys k) g)
-                                                         (normalize-key-value (vec-ref (svref vecs k) i)))
-                                                  (return nil)))))
-                                     g
-                                     (if add
-                                         (key-table-insert-at
-                                          table free-pos h
-                                          (lambda (k) (normalize-key-value (vec-ref (svref vecs k) i))))
-                                         -1)))))))
-    gids))
+  (if (key-table-int-slots table)
+      (let* ((vec (first vecs))
+             (data (vec-data vec))
+             (validity (vec-validity vec)))
+        (if (typep data 'i64-vector)
+            (if validity
+                (dotimes (i n)
+                  (setf (aref gids i)
+                        (if (zerop (sbit validity i))
+                            (int-key-null-group table add)
+                            (int-key-probe table (aref data i) add))))
+                (dotimes (i n)
+                  (setf (aref gids i) (int-key-probe table (aref data i) add))))
+            (dotimes (i n)
+              (setf (aref gids i) (int-key-group table (vec-ref vec i) add)))))
+      (let ((hashes (hash-key-vecs vecs n))
+            (vecs (coerce vecs 'simple-vector))
+            (width (length vecs)))
+        (dotimes (i n)
+          (let ((h (aref hashes i)))
+            (setf (aref gids i)
+                  (probe-key-table (table h g
+                                          (let ((keys (key-table-keys table)))
+                                            (dotimes (k width t)
+                                              (unless (key-value-equal
+                                                       (svref (svref keys k) g)
+                                                       (normalize-key-value (vec-ref (svref vecs k) i)))
+                                                (return nil)))))
+                                   g
+                                   (if add
+                                       (key-table-insert-at
+                                        table free-pos h
+                                        (lambda (k) (normalize-key-value (vec-ref (svref vecs k) i))))
+                                       -1)))))))
+  gids)
 
 (defun key-table-intern-group (table other g)
-  "Group id in TABLE of the key of group G of the key table OTHER (added if new)."
-  (let ((h (aref (key-table-hashes other) g))
-        (width (key-table-width table))
-        (other-keys (key-table-keys other)))
-    (probe-key-table (table h gid
-                            (let ((keys (key-table-keys table)))
-                              (dotimes (k width t)
-                                (unless (key-value-equal (svref (svref keys k) gid)
-                                                         (svref (svref other-keys k) g))
-                                  (return nil)))))
-                     gid
-                     (key-table-insert-at table free-pos h
-                                          (lambda (k) (svref (svref other-keys k) g))))))
+  "Group id in TABLE of the key of group G of the key table OTHER (added if
+new); both tables have the same key kinds."
+  (if (key-table-int-slots table)
+      (int-key-group table (key-table-key other 0 g) t)
+      (let ((h (aref (key-table-hashes other) g))
+            (width (key-table-width table))
+            (other-keys (key-table-keys other)))
+        (probe-key-table (table h gid
+                                (let ((keys (key-table-keys table)))
+                                  (dotimes (k width t)
+                                    (unless (key-value-equal (svref (svref keys k) gid)
+                                                             (svref (svref other-keys k) g))
+                                      (return nil)))))
+                         gid
+                         (key-table-insert-at table free-pos h
+                                              (lambda (k) (svref (svref other-keys k) g)))))))

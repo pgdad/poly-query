@@ -173,10 +173,11 @@ batch into it. Kernels are compiled once per call."
          (arg-kernels (mapcar (lambda (a) (and (b-agg-args a) (compile-vexpr (first (b-agg-args a)))))
                               aggs))
          (nkeys (length keys))
+         (key-kinds (mapcar (lambda (k) (type-vec-kind (bexpr-type k))) keys))
          (charged 0))
     (declare (type fixnum charged))
     (values
-     (lambda () (make-group-state nkeys aggs))
+     (lambda () (make-group-state key-kinds aggs))
      (lambda (gs batch)
        (let ((n (batch-count batch)))
          (group-state-consume gs
@@ -230,7 +231,7 @@ batch into it. Kernels are compiled once per call."
     (declare (type function open-child))
     (lambda ()
       (let ((child (funcall open-child))
-            (table (make-key-table width)))
+            (table (make-key-table width 16 (coerce (output-kinds node) 'list))))
         (declare (type function child))
         (lambda ()
           (loop
@@ -317,7 +318,7 @@ NULL key (or NIL)."
              (push b batches))
     (let* ((batch (concatenate-batches (nreverse batches) kinds))
            (n (batch-count batch))
-           (table (make-key-table (length kernels) (max 16 n)))
+           (table (make-key-table (length kernels) (max 16 n) (mapcar #'cdr normalizers)))
            (gids (make-index-vector n))
            (next (make-array n :element-type 'fixnum :initial-element -1)))
       (multiple-value-bind (key-vecs null-rows) (join-key-vecs kernels normalizers batch)

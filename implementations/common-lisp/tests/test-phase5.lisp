@@ -170,10 +170,24 @@ to 9 significant digits (summation order is implementation-defined)."
                     'list)))
   ((0 1 2 3 4 5) 6 (0 1 2 3 4 5)))
 
+(deftest phase5.integer-key-table
+    (let* ((table (polyquery::make-key-table 1 2 '(:i64)))
+           (keys (list (polyquery::build-vec :i64 8 (lambda (i) (if (= i 3) :null (* (mod i 5) 1000000007))))))
+           (gids (polyquery::make-index-vector 8)))
+      (polyquery::key-table-map-batch table keys 8 gids t)
+      (list (coerce gids 'list)
+            (loop for g below (polyquery::key-table-count table)
+                  collect (polyquery::key-table-key table 0 g))
+            (coerce (polyquery::key-table-map-batch
+                     table (list (polyquery::build-vec :i64 3 (lambda (i) (nth i '(4000000028 7 :null)))))
+                     3 (polyquery::make-index-vector 3) nil)
+                    'list)))
+  ((0 1 2 3 4 0 1 2) (0 1000000007 2000000014 :null 4000000028) (4 -1 3)))
+
 (deftest phase5.group-state-merge
     (let* ((agg (polyquery::make-b-agg :int64 :sum (list (polyquery::make-b-column :int64 0 "x")) nil))
-           (a (polyquery::make-group-state 1 (list agg)))
-           (b (polyquery::make-group-state 1 (list agg))))
+           (a (polyquery::make-group-state '(:any) (list agg)))
+           (b (polyquery::make-group-state '(:any) (list agg))))
       (flet ((feed (gs keys values)
                (polyquery::group-state-consume
                 gs (list (polyquery::build-vec :any (length keys) (lambda (i) (nth i keys))))
