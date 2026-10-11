@@ -5,12 +5,13 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::operators::Row;
 use super::subquery::SubqueryResult;
+use super::vector::semi::KeySet;
 use crate::error::{Error, ErrorCode, Result};
 use crate::planner::physical::{Execution, PhysicalQuery, PhysicalSubquery, SubqueryPlans};
 use crate::types::Value;
@@ -24,10 +25,16 @@ pub type LookupTable = HashMap<Vec<Value>, Vec<Row>>;
 /// Cache key of a subquery execution: (subquery id, parameter values).
 type SubqueryKey = (usize, Vec<Value>);
 
-/// Budgets shared by all threads executing one query.
+/// A key set, once built (its lock is held while building it).
+type KeySetSlot = Mutex<Option<Arc<KeySet>>>;
+
+/// Budgets and semi-join key sets shared by all threads executing one
+/// query.
 #[derive(Debug, Default)]
 struct Shared {
     memory_used: AtomicUsize,
+    /// Semi-join key sets by (kind, id), built once per query.
+    key_sets: Mutex<HashMap<(u8, usize), Arc<KeySetSlot>>>,
     join_rows: AtomicU64,
 }
 
@@ -226,6 +233,30 @@ impl ExecContext {
         let r = f();
         self.params.borrow_mut().pop();
         r
+    }
+
+    /// The key set `key` of this query, built with `build` by the first
+    /// thread that asks for it (others wait for it).
+    pub fn shared_key_set(
+        &self,
+        key: (u8, usize),
+        build: impl FnOnce() -> Result<KeySet>,
+    ) -> Result<Arc<KeySet>> {
+        let slot = self
+            .shared
+            .key_sets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key)
+            .or_default()
+            .clone();
+        let mut built = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(set) = &*built {
+            return Ok(set.clone());
+        }
+        let set = Arc::new(build()?);
+        *built = Some(set.clone());
+        Ok(set)
     }
 
     /// The physical plan of subquery `id`.

@@ -10,6 +10,7 @@ pub mod hashtab;
 pub mod join;
 pub mod keys;
 pub mod ops;
+pub mod semi;
 pub mod sort;
 
 pub use batch::{Batch, Vector};

@@ -257,6 +257,22 @@ fn eval_owned(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
             }
         }
         Expr::Function { .. } | Expr::Concat(..) => elementwise(e, b, ctx),
+        // Semi-join probes (`semi`); other subqueries row by row.
+        Expr::InSubquery {
+            expr,
+            sub,
+            params,
+            negated,
+            domain,
+        } if params.is_empty() && b.len > 0 => {
+            super::semi::in_subquery(expr, sub, *negated, *domain, b, ctx)
+        }
+        Expr::Exists { sub, params } if b.len > 0 => {
+            match super::semi::exists(sub, params, b, ctx)? {
+                Some(v) => Ok(v),
+                None => rowwise(e, b, ctx),
+            }
+        }
         Expr::ScalarSubquery { .. } | Expr::Exists { .. } | Expr::InSubquery { .. } => {
             rowwise(e, b, ctx)
         }
