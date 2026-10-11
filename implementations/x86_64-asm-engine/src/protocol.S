@@ -56,7 +56,8 @@ caps_fields:
     .ascii ",\"protocol_version\":1,\"capabilities\":[\"phase1\",\"ingest.csv\",\"ingest.json\""
     .ascii ",\"ingest.jsonl\",\"sql.basic\",\"test.functions\""
     .ascii ",\"phase2\",\"sql.groupby\",\"sql.join\",\"sql.functions\",\"sql.subquery\""
-    .asciz ",\"sql.cte\",\"sql.correlated_subquery\"]"
+    .ascii ",\"sql.cte\",\"sql.correlated_subquery\""
+    .asciz ",\"phase3\",\"storage.pqcf\",\"storage.mmap\",\"index.hash\",\"index.btree\"]"
 
 /* operation table: name, handler */
 op_names:
@@ -78,7 +79,7 @@ op_names:
 op_handlers:
     .quad op_query, op_load, op_tables, op_schema, op_drop, op_reset
     .quad op_version, op_capabilities, op_sleep
-    .quad op_explain, op_unsupported, op_unsupported, op_unsupported
+    .quad op_explain, op_unsupported, op_unsupported, op_stats
 
     .text
 
@@ -508,9 +509,89 @@ FUNC op_schema
     call buf_putc
     mov %rbx, %rdi
     call put_columns
-    PUTS %r15, ",\"indexes\":[]"
+    PUTS %r15, ",\"indexes\":"
+    mov %r15, %rdi
+    mov %rbx, %rsi
+    call idx_put_list
+    cmpq $LAYOUT_ROW, TB_LAYOUT(%rbx)
+    je 1f
+    PUTS %r15, ",\"layout\":\"column\""
+    LEAVE
+1:  PUTS %r15, ",\"layout\":\"row\""
     LEAVE
 ENDF op_schema
+
+/* op_stats: {"op":"stats","table":t} */
+FUNC op_stats
+    ENTER 16
+    call find_table_field
+    mov %rax, %rbx
+    mov %rbx, %rdi
+    call table_stats
+    mov %rax, %r12
+    lea g_out(%rip), %r15
+    PUTS %r15, ",\"table\":"
+    mov %r15, %rdi
+    mov TB_NAME(%rbx), %rsi
+    call buf_put_json_pstr
+    PUTS %r15, ",\"row_count\":"
+    mov %r15, %rdi
+    mov TB_NROWS(%rbx), %rsi
+    call buf_put_u64
+    PUTS %r15, ",\"columns\":["
+    xor %r13d, %r13d
+1:  cmp TB_NCOLS(%rbx), %r13
+    jae 9f
+    test %r13, %r13
+    jz 2f
+    mov %r15, %rdi
+    mov $',', %esi
+    call buf_putc
+2:  mov %r13, %r14
+    shl $COL_SHIFT, %r14
+    add TB_COLS(%rbx), %r14         /* Column* */
+    PUTS %r15, "{\"name\":"
+    mov %r15, %rdi
+    mov COL_NAME(%r14), %rsi
+    call buf_put_json_pstr
+    PUTS %r15, ",\"type\":\""
+    mov %r15, %rdi
+    mov COL_TYPE(%r14), %rsi
+    call fmt_type
+    PUTS %r15, "\",\"null_count\":"
+    imul $CST_SIZE, %r13, %rax
+    lea (%r12, %rax), %rax
+    mov %rax, 0(%rsp)               /* ColStats* */
+    mov %r15, %rdi
+    mov CST_NULLS(%rax), %rsi
+    call buf_put_u64
+    PUTS %r15, ",\"distinct_count\":"
+    mov 0(%rsp), %rax
+    mov %r15, %rdi
+    mov CST_DISTINCT(%rax), %rsi
+    call buf_put_u64
+    PUTS %r15, ",\"min\":"
+    mov 0(%rsp), %rax
+    cmpq $0, CST_HAS(%rax)
+    je 3f
+    mov %r15, %rdi
+    mov COL_TYPE(%r14), %rsi
+    mov CST_MIN(%rax), %rdx
+    call fmt_value_json
+    PUTS %r15, ",\"max\":"
+    mov 0(%rsp), %rax
+    mov %r15, %rdi
+    mov COL_TYPE(%r14), %rsi
+    mov CST_MAX(%rax), %rdx
+    call fmt_value_json
+    jmp 4f
+3:  PUTS %r15, "null,\"max\":null"
+4:  PUTS %r15, "}"
+    inc %r13
+    jmp 1b
+9:  PUTS %r15, "]"
+    LEAVE
+ENDF op_stats
 
 FUNC op_drop
     sub $8, %rsp
@@ -623,7 +704,15 @@ FUNC op_query
     je 5f
     cmp $STMT_EXPLAIN, %rax
     je 6f
-    RAISE E_UNSUPPORTED, "indexes are not supported by this engine"
+    mov %r14, %rdi
+    cmp $STMT_CREATE_INDEX, %rax
+    jne 51f
+    call idx_create_stmt
+    jmp 52f
+51: call idx_drop_stmt
+52: lea g_out(%rip), %r15
+    PUTS %r15, ",\"columns\":[],\"rows\":[],\"row_count\":0"
+    jmp 9f
 5:  mov ST_QUERY(%r14), %rdi
     call bind_statement
     mov %rax, %r13

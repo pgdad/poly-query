@@ -411,3 +411,126 @@ FUNC idx_eq
     jmp 2b
 9:  LEAVE
 ENDF idx_eq
+
+/* ================================================================ statements */
+
+/* idx_create_stmt(stmt rdi): CREATE INDEX [IF NOT EXISTS] name ON table (col)
+ * [USING HASH|BTREE] (default BTREE) */
+FUNC idx_create_stmt
+    ENTER 16
+    mov %rdi, %rbx
+    mov ST_TABLE(%rbx), %rax
+    lea 8(%rax), %rdi
+    mov (%rax), %rsi
+    call cat_find
+    test %rax, %rax
+    jz 7f
+    mov %rax, %r12                  /* table */
+    xor %r13d, %r13d                /* column */
+1:  cmp TB_NCOLS(%r12), %r13
+    jae 8f
+    mov %r13, %rax
+    shl $COL_SHIFT, %rax
+    add TB_COLS(%r12), %rax
+    mov COL_NAME(%rax), %rdi
+    mov ST_COLUMN(%rbx), %rsi
+    call pstr_ieq
+    test %eax, %eax
+    jnz 2f
+    inc %r13
+    jmp 1b
+2:  mov ST_NAME(%rbx), %rax
+    lea 8(%rax), %rdi
+    mov (%rax), %rsi
+    call idx_find
+    test %rax, %rax
+    jz 3f
+    cmpq $0, ST_IFX(%rbx)
+    jne 9f
+    RAISE E_ALREADY_EXISTS, "index already exists"
+3:  mov $IXK_BTREE, %edx
+    cmpq $1, ST_USING(%rbx)
+    jne 4f
+    mov $IXK_HASH, %edx
+4:  mov %r12, %rdi
+    mov %r13, %rsi
+    mov ST_NAME(%rbx), %rcx
+    call idx_build
+    mov %r12, %rdi
+    mov %rax, %rsi
+    call idx_attach
+9:  LEAVE
+7:  mov $E_SEMANTIC_ERROR, %edi
+    CSTR %rsi, "unknown table '%s'"
+    mov ST_TABLE(%rbx), %rdx
+    add $8, %rdx
+    call pq_raisef
+8:  mov $E_SEMANTIC_ERROR, %edi
+    CSTR %rsi, "unknown column '%s'"
+    mov ST_COLUMN(%rbx), %rdx
+    add $8, %rdx
+    call pq_raisef
+ENDF idx_create_stmt
+
+/* idx_drop_stmt(stmt rdi): DROP INDEX [IF EXISTS] name */
+FUNC idx_drop_stmt
+    push %rbx
+    mov %rdi, %rbx
+    mov ST_NAME(%rbx), %rax
+    lea 8(%rax), %rdi
+    mov (%rax), %rsi
+    call idx_drop
+    test %eax, %eax
+    jnz 9f
+    cmpq $0, ST_IFX(%rbx)
+    jne 9f
+    RAISE E_NOT_FOUND, "unknown index"
+9:  pop %rbx
+    ret
+ENDF idx_drop_stmt
+
+/* idx_put_list(buf rdi, table rsi): [{"name":..,"column":..,"kind":..},...] */
+FUNC idx_put_list
+    ENTER 0
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov $'[', %esi
+    call buf_putc
+    mov TB_INDEXES(%r12), %r13
+    test %r13, %r13
+    jz 9f
+    xor %r14d, %r14d
+1:  cmp VEC_LEN(%r13), %r14
+    jae 9f
+    test %r14, %r14
+    jz 2f
+    mov %rbx, %rdi
+    mov $',', %esi
+    call buf_putc
+2:  mov VEC_DATA(%r13), %rax
+    mov (%rax, %r14, 8), %r15
+    PUTS %rbx, "{\"name\":"
+    mov %rbx, %rdi
+    mov IX_NAME(%r15), %rsi
+    call buf_put_json_pstr
+    PUTS %rbx, ",\"column\":"
+    mov IX_COL(%r15), %rax
+    shl $COL_SHIFT, %rax
+    add TB_COLS(%r12), %rax
+    mov %rbx, %rdi
+    mov COL_NAME(%rax), %rsi
+    call buf_put_json_pstr
+    PUTS %rbx, ",\"kind\":\""
+    mov IX_KIND(%r15), %rdi
+    call idx_kind_name
+    mov %rbx, %rdi
+    mov %rax, %rsi
+    call buf_puts
+    PUTS %rbx, "\"}"
+    inc %r14
+    jmp 1b
+9:  mov %rbx, %rdi
+    mov $']', %esi
+    call buf_putc
+    LEAVE
+ENDF idx_put_list
