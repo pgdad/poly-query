@@ -595,7 +595,7 @@ unless the query has ORDER BY; FLOAT64 to 9 significant digits).
 `--check FILE` compares against it. The digests of the baseline and of
 every optimization step are identical. The conformance suite (660/660) and
 the Phase 5 option matrix (`--modes`, 3870/3870) still pass. The unit test
-`engine_phase5_test` gained ~40 queries for the new paths, each run under
+`engine_phase5_test` gained ~45 queries for the new paths, each run under
 seven option combinations and compared with row mode. These cover IN/NOT
 IN with NULLs and empty subqueries, mixed numeric/date key types, EXISTS
 with NULL keys, LIMIT 0, a failing projection or residual, deferred
