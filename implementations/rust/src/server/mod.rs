@@ -32,8 +32,10 @@ use admission::Admission;
 use metrics::{Gauges, Metrics};
 use registry::Registry;
 
-/// How often the accept loop checks for a shutdown request.
-const ACCEPT_POLL: Duration = Duration::from_millis(5);
+/// How often the main thread checks for a shutdown request.
+const SIGNAL_POLL: Duration = Duration::from_millis(5);
+/// Pause after a failed `accept` (e.g. out of file descriptors).
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(10);
 /// After the grace period, how long cancelled requests get to answer.
 const CANCEL_DRAIN: Duration = Duration::from_millis(1000);
 
@@ -110,13 +112,6 @@ pub fn serve(config: Config, serve: ServeConfig) -> u8 {
             return 1;
         }
     };
-    if let Err(e) = listener.set_nonblocking(true) {
-        log::error(
-            "cannot listen",
-            vec![("detail", Json::String(e.to_string()))],
-        );
-        return 1;
-    }
     signal::install();
     let workers = serve.workers.unwrap_or_else(|| {
         std::thread::available_parallelism()
@@ -154,26 +149,40 @@ pub fn serve(config: Config, serve: ServeConfig) -> u8 {
             ("queue_depth", Json::uint(shared.serve.queue_depth as u64)),
         ],
     );
-    accept_loop(&listener, &shared);
-    drop(listener);
+    {
+        let shared = shared.clone();
+        let spawned = std::thread::Builder::new()
+            .name("http-accept".into())
+            .spawn(move || accept_loop(&listener, &shared));
+        if let Err(e) = spawned {
+            log::error(
+                "cannot start accept thread",
+                vec![("detail", Json::String(e.to_string()))],
+            );
+            return 1;
+        }
+    }
+    while !signal::shutdown_requested() {
+        std::thread::sleep(SIGNAL_POLL);
+    }
     shutdown(&shared);
     0
 }
 
+/// Accepts connections until the process exits. During shutdown new
+/// connections are still accepted, but are answered `503 SHUTTING_DOWN`
+/// (`/health`: `shutting_down`) and closed.
 fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>) {
-    while !signal::shutdown_requested() {
+    loop {
         match listener.accept() {
             Ok((stream, _)) => spawn_connection(shared, stream),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(ACCEPT_POLL);
-            }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(e) => {
                 log::warn(
                     "accept failed",
                     vec![("detail", Json::String(e.to_string()))],
                 );
-                std::thread::sleep(ACCEPT_POLL);
+                std::thread::sleep(ACCEPT_BACKOFF);
             }
         }
     }
@@ -193,7 +202,7 @@ fn spawn_connection(shared: &Arc<Shared>, stream: TcpStream) {
     }
 }
 
-/// Graceful shutdown (concurrency.md §5); the listener is already closed.
+/// Graceful shutdown (concurrency.md §5).
 fn shutdown(shared: &Shared) {
     shared.shutting_down.store(true, Ordering::SeqCst);
     let grace = Duration::from_millis(shared.serve.shutdown_grace_ms);

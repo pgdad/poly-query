@@ -247,7 +247,10 @@ impl Streamer<'_> {
             }
             write_row(&row, cursor.columns(), &mut batch);
             batch_rows += 1;
-            if batch_rows >= BATCH_ROWS
+            // The first row goes out at once so that slow queries show
+            // progress; later batches fill up or age out.
+            if *self.rows_sent == 0
+                || batch_rows >= BATCH_ROWS
                 || batch.len() >= BATCH_BYTES
                 || batch_started.elapsed() >= BATCH_AGE
             {
@@ -292,5 +295,97 @@ impl Streamer<'_> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::engine::{Engine, LoadRequest, Source};
+    use crate::ingest::Format;
+    use crate::storage::Layout;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn engine(rows: usize) -> Engine {
+        let e = Engine::new(Config::default());
+        let mut csv = String::from("n\n");
+        for i in 0..rows {
+            csv.push_str(&format!("{i}\n"));
+        }
+        e.load(LoadRequest {
+            table: "t".into(),
+            format: Format::Csv,
+            source: Source::Data(csv),
+            schema: None,
+            header: true,
+            delimiter: b',',
+            replace: false,
+            layout: Layout::Column,
+            dictionary: None,
+        })
+        .unwrap();
+        e
+    }
+
+    fn stream(e: &Engine, cancel: Arc<AtomicBool>, tx: SyncSender<Event>) -> (Result<u64>, bool) {
+        let control = QueryControl {
+            deadline: None,
+            cancel: Some(cancel),
+        };
+        let cursor = e
+            .start_query("SELECT n FROM t", &QueryOptions::default(), control)
+            .unwrap();
+        let (mut header_sent, mut rows_sent) = (false, 0);
+        let mut s = Streamer {
+            tx: &tx,
+            query_id: "q",
+            count_only: false,
+            header_sent: &mut header_sent,
+            rows_sent: &mut rows_sent,
+        };
+        let r = s.run(cursor);
+        (r, header_sent)
+    }
+
+    #[test]
+    fn streams_all_rows_in_bounded_batches() {
+        let e = engine(10_000);
+        let (tx, rx) = mpsc::sync_channel(CHANNEL_LINES);
+        let reader = std::thread::spawn(move || rx.iter().collect::<Vec<_>>());
+        let (r, header_sent) = stream(&e, Arc::new(AtomicBool::new(false)), tx);
+        assert_eq!(r.unwrap(), 10_000);
+        assert!(header_sent);
+        let events = reader.join().unwrap();
+        let Event::Line(header) = &events[0] else {
+            panic!("no header")
+        };
+        assert!(header.starts_with(r#"{"type":"header","query_id":"q","columns":[{"name":"n""#));
+        let rows: usize = events[1..]
+            .iter()
+            .map(|ev| match ev {
+                Event::Line(l) => l.matches("],[").count() + 1,
+                _ => panic!("unexpected event"),
+            })
+            .sum();
+        assert_eq!(rows, 10_000);
+    }
+
+    #[test]
+    fn blocks_when_client_does_not_read() {
+        let e = Arc::new(engine(200_000));
+        let (tx, rx) = mpsc::sync_channel(CHANNEL_LINES);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let producer = {
+            let (e, cancel) = (e.clone(), cancel.clone());
+            std::thread::spawn(move || stream(&e, cancel, tx).0)
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        // Execution is blocked on the full channel, not finished.
+        assert!(!producer.is_finished());
+        cancel.store(true, Ordering::Relaxed);
+        let err = producer.join().unwrap().unwrap_err();
+        assert_eq!(err.code, ErrorCode::Cancelled);
+        assert_eq!(rx.try_iter().count(), CHANNEL_LINES);
     }
 }
