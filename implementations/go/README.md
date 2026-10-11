@@ -172,8 +172,9 @@ compiled, never per value.
   integer holding the unscaled value (|v| < 10³⁸ < 2¹²⁷). Arithmetic is
   implemented on 64-bit limbs with `math/bits` (`int128.go`,
   `widedecimal.go`): add/sub with overflow detection, 128×128 products
-  whose 256-bit magnitude is checked before narrowing (so a product of two
-  38-digit values is exact up to the overflow decision), division by
+  with exact overflow detection (a product needing more than 127 bits
+  exceeds 10³⁸ anyway, so the 256-bit result never has to be
+  materialized; a product of two 38-digit values is decided exactly), division by
   powers of ten in ≤ 19-digit steps (rescaling with round-half-away,
   FLOOR/CEIL, truncation to INT64), decimal parsing/formatting, exact
   comparison across scales. `math/big` is used only off the hot paths
