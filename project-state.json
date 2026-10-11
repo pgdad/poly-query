@@ -1,6 +1,6 @@
 {
  "schema": "polyquery-project-state/1",
- "updated": "2026-10-11T19:10:21+00:00",
+ "updated": "2026-10-11T19:55:35+00:00",
  "current_milestone": "M10",
  "milestones": {
   "M0": {
@@ -52,7 +52,7 @@
   }
  },
  "outstanding_tasks": [
-  "Option B: Phases 1-3 merged for both assembly engines (all one session each); spend $118.49 of the approved $300. Awaiting owner decision on budget for Phase 4 (HTTP, concurrency) and Phase 5 (vectorized/parallel, native kernels)",
+  "Option B: Phases 1-4 merged for both assembly engines (each phase one session); Phase 5 chains running ($120 cap each); spend $141.37 of the $600 cap",
   "Native-kernel validation path for the AArch64 engine (Phase 5) is x86-only (native-kernels/build/x86_64)",
   "Main-line HTTP throughput not re-measured after INT-001 (bench.py run without the HTTP benchmark)",
   "Debugging family remains too easy for both engines and kernels (kernel variant with symptom-only report and hidden-only failures: fixed in ~1 min)",
@@ -95,7 +95,7 @@
   "http_suite": "19/19 all engines except python 18/19 (malformed_chunked_body)"
  },
  "last_successful_commit": "4073bb4483a42b07640fa3cce552ec2707d79ced",
- "next_recommended_action": "Ask the owner for the Phase 4-5 budget for the assembly engines; then run Phase 4 chains (x86 local, ARM on spark).",
+ "next_recommended_action": "When Phase 5 finishes: compliance checks, accept, then plan the later families (CR-1/CR-3/CR-2, debugging, optimization, code review) and benchmarks for the assembly engines within the $600 cap.",
  "findings": [
   "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) — report as engine quality finding; clojure p95 16 ms",
   "CR-2 DECIMAL(38) was the most expensive change (6.25-16.50 USD); Go and Java needed a new wide-decimal representation",
