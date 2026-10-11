@@ -24,8 +24,8 @@
 //       (ignoring indexes of the table being replaced)
 //   index_create_specs(x0 Table*, x1 XS* specs, x2 count)
 //   index_stmt(x0 Statement*)              CREATE INDEX / DROP INDEX
-//   index_lookup_eq(x0 Index*, x1 payload, x2 RowVec*)
-//       appends the rows whose value equals payload (column encoding)
+//   index_lookup_eq(x0 Index*, x1 key, w2 key type, x3 RowVec*)
+//       appends the rows whose value equals the key
 //   index_lookup_range(x0 Index*, x1 Range*, x2 RowVec*)   (BTREE only)
 //       appends the rows within the range
 //   rowvec_sort_unique(x0 RowVec*)         sorts ascending, drops duplicates
@@ -603,64 +603,113 @@ FUNC rowvec_sort_unique
 ENDF rowvec_sort_unique
 
 // =============================================================================
-// index_lookup_eq(x0 Index*, x1 payload, x2 RowVec*)
-// Appends every row whose (non-NULL) value equals the payload.
-//   x19 index, x20 value, x21 vec, x22 table, x23 column, w24 type, x25 row
+// key_to_col(x0 key payload, w1 key type, w2 column type) -> x0 payload in
+// the column's encoding, w1 1 if exact (0: no column value can equal the key)
+// Only DECIMAL keys of another scale need converting.   (leaf-like)
+// =============================================================================
+LFUNC key_to_col
+    and  w9, w1, #T_KIND_MASK
+    cmp  w9, #T_DEC
+    b.ne 8f
+    ubfx w10, w1, #T_SCALE_SHIFT, #8    // key scale
+    ubfx w11, w2, #T_SCALE_SHIFT, #8    // column scale
+    cmp  w10, w11
+    b.eq 8f
+    ENTER 2
+    mov  x19, x0                        // key
+    mov  w20, w10                       // key scale
+    mov  w21, w11                       // column scale
+    mov  w1, w10
+    mov  w2, w11
+    bl   dec_rescale
+    cbnz w1, 7f                         // too many digits: no match
+    mov  x22, x0
+    mov  w1, w21                        // back to the key scale: exact?
+    mov  w2, w20
+    bl   dec_rescale
+    cbnz w1, 7f
+    cmp  x0, x19
+    b.ne 7f
+    mov  x0, x22
+    mov  w1, #1
+    LEAVE 2
+7:  mov  w1, #0
+    LEAVE 2
+8:  mov  w1, #1
+    ret
+ENDF key_to_col
+
+// =============================================================================
+// index_lookup_eq(x0 Index*, x1 key payload, w2 key type, x3 RowVec*)
+// Appends every row whose (non-NULL) value equals the key. The key has the
+// column's type kind (DECIMAL scales may differ).
+//   x19 index, x20 key, w21 key type, x22 vec, x23 table, x24 column,
+//   w25 column type, x26 row
 // =============================================================================
 FUNC index_lookup_eq
     ENTER 5
     mov  x19, x0
     mov  x20, x1
-    mov  x21, x2
-    ldr  x22, [x19, #IX_TABLE]
-    ldr  x23, [x19, #IX_COL]
-    ldr  x9, [x22, #TBL_COLS]
-    add  x9, x9, x23, lsl #5
-    ldr  w24, [x9, #COL_TYPE]
+    mov  w21, w2
+    mov  x22, x3
+    ldr  x23, [x19, #IX_TABLE]
+    ldr  x24, [x19, #IX_COL]
+    ldr  x9, [x23, #TBL_COLS]
+    add  x9, x9, x24, lsl #5
+    ldr  w25, [x9, #COL_TYPE]
     ldr  w9, [x19, #IX_KIND]
     cmp  w9, #IXK_HASH
     b.ne .Lle_btree
     mov  x0, x20
-    mov  w1, w24
+    mov  w1, w21
+    mov  w2, w25
+    bl   key_to_col
+    cbz  w1, 9f
+    mov  x20, x0
+    mov  w1, w25
     bl   hash_cell
     ldr  x9, [x19, #IX_MASK]
     and  x0, x0, x9
     ldr  x9, [x19, #IX_HEADS]
-    ldr  w25, [x9, x0, lsl #2]
-1:  cmn  w25, #1
+    ldr  w26, [x9, x0, lsl #2]
+1:  cmn  w26, #1
     b.eq 9f
-    mov  x0, x22
-    mov  x1, x23
-    mov  x2, x25
+    mov  x0, x23
+    mov  x1, x24
+    mov  x2, x26
     bl   tbl_get
     mov  x1, x20
-    mov  w2, w24
+    mov  w2, w25
     bl   value_cmp
     cbnz w0, 2f
-    mov  x0, x21
-    mov  w1, w25
+    mov  x0, x22
+    mov  w1, w26
     bl   rowvec_push
 2:  ldr  x9, [x19, #IX_NEXT]
-    ldr  w25, [x9, x25, lsl #2]
+    ldr  w26, [x9, x26, lsl #2]
     b    1b
 .Lle_btree:
-    sub  sp, sp, #32                    // Range: [lo, hi] inclusive
+    sub  sp, sp, #48                    // Range [key, key]
     mov  x9, #1
     stp  x20, x9, [sp]
     stp  x20, x9, [sp, #16]
+    str  w21, [sp, #32]
+    str  w21, [sp, #36]
     mov  x0, x19
     mov  x1, sp
-    mov  x2, x21
+    mov  x2, x22
     bl   index_lookup_range
-    add  sp, sp, #32
+    add  sp, sp, #48
 9:  LEAVE 5
 ENDF index_lookup_eq
 
 // =============================================================================
 // index_lookup_range(x0 Index* (BTREE), x1 Range*, x2 RowVec*)
-// Range (32 bytes): [0] lo payload, [8] lo kind, [16] hi payload, [24] hi kind;
-// kind 0 = unbounded, 1 = inclusive, 2 = exclusive.
-//   x19 index, x20 range, x21 vec, w22 type, x23 first, x24 end, x25 vals
+// Range (40 bytes): [0] lo payload, [8] lo kind, [16] hi payload, [24] hi
+// kind, [32] u32 lo type, [36] u32 hi type; kind 0 = unbounded,
+// 1 = inclusive, 2 = exclusive. Rows are appended in value order.
+//   x19 index, x20 range, x21 vec, w22 column type, x23 first, x24 end,
+//   x25 sorted values
 // =============================================================================
 FUNC index_lookup_range
     ENTER 5
@@ -673,26 +722,20 @@ FUNC index_lookup_range
     add  x9, x9, x10, lsl #5
     ldr  w22, [x9, #COL_TYPE]
     ldr  x25, [x19, #IX_VALS]
-    // first: lower bound (incl: first v >= lo; excl: first v > lo)
-    mov  x23, #0
-    ldr  x9, [x20, #8]
+    mov  x23, #0                        // first: incl => first v >= lo,
+    ldr  x9, [x20, #8]                  //        excl => first v > lo
     cbz  x9, 2f
     ldr  x0, [x20]
     mov  x1, x9
-    mov  x2, #0
+    ldr  w2, [x20, #32]
     bl   bsearch_bound
     mov  x23, x0
-2:  ldr  x24, [x19, #IX_N]
-    ldr  x9, [x20, #24]
+2:  ldr  x24, [x19, #IX_N]              // end: incl => first v > hi,
+    ldr  x9, [x20, #24]                 //      excl => first v >= hi
     cbz  x9, 3f
-    // end: inclusive hi => first v > hi; exclusive => first v >= hi
     ldr  x0, [x20, #16]
-    mov  x1, #1                         // swap meaning: incl -> "> hi"
-    cmp  x9, #1
-    b.eq 21f
-    mov  x1, #2
-21: eor  x1, x1, #3                     // 1 <-> 2
-    mov  x2, #0
+    eor  x1, x9, #3                     // 1 <-> 2
+    ldr  w2, [x20, #36]
     bl   bsearch_bound
     mov  x24, x0
 3:  cmp  x23, x24
@@ -706,36 +749,39 @@ FUNC index_lookup_range
 9:  LEAVE 5
 ENDF index_lookup_range
 
-// bsearch_bound(x0 key, x1 mode, x2 unused) -> x0 position, using the
-// caller's registers x19 (Index*), w22 (type), x25 (vals) — a helper of
-// index_lookup_range. mode 1: first v >= key; mode 2: first v > key.
-//   x19.. preserved: uses x26-x28 saved here
+// bsearch_bound(x0 key, x1 mode, w2 key type) -> x0 position in the sorted
+// values; mode 1: first v >= key, mode 2: first v > key. Helper of
+// index_lookup_range: reads its x19 (Index*), w22 (column type) and x25
+// (sorted values), which are callee-saved and unchanged.
+//   x26 key, x27 lo, x28 hi; [sp+40] mode, [sp+44] key type
 LFUNC bsearch_bound
     stp  x29, x30, [sp, #-48]!
     mov  x29, sp
     stp  x26, x27, [sp, #16]
     str  x28, [sp, #32]
-    mov  x26, x0                        // key
-    mov  x27, #0                        // lo
-    ldr  x28, [x19, #IX_N]              // hi
-    str  x1, [sp, #40]
+    mov  x26, x0
+    mov  x27, #0
+    ldr  x28, [x19, #IX_N]
+    str  w1, [sp, #40]
+    str  w2, [sp, #44]
 1:  cmp  x27, x28
     b.hs 4f
     add  x9, x27, x28
     lsr  x9, x9, #1
-    str  x9, [sp, #-16]!
     ldr  x0, [x25, x9, lsl #3]
     mov  x1, x26
     mov  w2, w22
-    bl   value_cmp
-    ldr  x9, [sp], #16
-    ldr  x10, [sp, #40]
-    cmp  x10, #1
+    ldr  w3, [sp, #44]
+    bl   cmp_typed
+    add  x9, x27, x28
+    lsr  x9, x9, #1
+    ldr  w10, [sp, #40]
+    cmp  w10, #1
     b.ne 2f
-    tbnz w0, #31, 3f                    // v < key: go right
+    tbnz w0, #31, 3f                    // mode 1: v < key => right half
     mov  x28, x9
     b    1b
-2:  cmp  w0, #0                         // mode 2: v <= key: go right
+2:  cmp  w0, #0                         // mode 2: v <= key => right half
     b.gt 21f
 3:  add  x27, x9, #1
     b    1b
