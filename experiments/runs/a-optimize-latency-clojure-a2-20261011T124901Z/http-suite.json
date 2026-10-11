@@ -15,32 +15,32 @@
   {
    "check": "table_lifecycle",
    "status": "pass",
-   "seconds": 0.19
+   "seconds": 0.16
   },
   {
    "check": "query_and_error_mapping",
    "status": "pass",
-   "seconds": 0.24
+   "seconds": 0.18
   },
   {
    "check": "keep_alive",
    "status": "pass",
-   "seconds": 0.17
+   "seconds": 0.14
   },
   {
    "check": "streaming",
    "status": "pass",
-   "seconds": 0.31
+   "seconds": 0.3
   },
   {
    "check": "metrics",
    "status": "pass",
-   "seconds": 0.23
+   "seconds": 0.17
   },
   {
    "check": "timeout",
    "status": "pass",
-   "seconds": 0.36
+   "seconds": 0.35
   },
   {
    "check": "server_default_timeout",
@@ -50,7 +50,7 @@
   {
    "check": "cancellation",
    "status": "pass",
-   "seconds": 0.24
+   "seconds": 0.21
   },
   {
    "check": "backpressure_overloaded",
@@ -60,42 +60,42 @@
   {
    "check": "queued_time_counts_toward_timeout",
    "status": "pass",
-   "seconds": 1.68
+   "seconds": 1.8
   },
   {
    "check": "snapshot_isolation",
    "status": "pass",
-   "seconds": 1.69
+   "seconds": 1.84
   },
   {
    "check": "concurrent_readers",
    "status": "pass",
-   "seconds": 0.2
+   "seconds": 0.21
   },
   {
    "check": "client_disconnect_cancels",
    "status": "pass",
-   "seconds": 0.66
+   "seconds": 0.65
   },
   {
    "check": "request_size_limit",
    "status": "pass",
-   "seconds": 0.14
+   "seconds": 0.15
   },
   {
    "check": "malformed_chunked_body",
    "status": "pass",
-   "seconds": 0.17
+   "seconds": 0.15
   },
   {
    "check": "structured_logs",
    "status": "pass",
-   "seconds": 0.47
+   "seconds": 0.45
   },
   {
    "check": "graceful_shutdown",
    "status": "pass",
-   "seconds": 1.69
+   "seconds": 1.67
   },
   {
    "check": "grace_expiry",
@@ -104,23 +104,23 @@
   }
  ],
  "startup_seconds": [
-  0.13433222303865477,
-  0.1544808920007199,
-  0.19113676605047658,
-  0.1455137170269154,
-  0.1635217880248092,
-  0.17911393503891304,
-  0.13381655799457803,
-  0.12603996699908748,
-  0.14835126500111073,
-  0.12425423599779606,
-  0.14465841598575935,
-  0.19443190499441698,
-  0.12980609497753903,
-  0.13711683300789446,
-  0.12885480298427865,
-  0.14858810894656926,
-  0.127845082024578
+  0.13701367395697162,
+  0.12583332596113905,
+  0.131937519996427,
+  0.12832378700841218,
+  0.1445670030079782,
+  0.13112372800242156,
+  0.12403456401079893,
+  0.13105475599877536,
+  0.12272786197718233,
+  0.13016207300825045,
+  0.2493063880247064,
+  0.27739699796075,
+  0.12911524099763483,
+  0.12983991799410433,
+  0.12644101900514215,
+  0.1332701980136335,
+  0.12304029503138736
  ],
- "logs": "/tmp/pqhttp-logs-okfc5b3t"
+ "logs": "/tmp/pqhttp-logs-nj3pqjhz"
 }

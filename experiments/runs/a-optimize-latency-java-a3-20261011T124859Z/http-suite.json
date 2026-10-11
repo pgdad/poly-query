@@ -20,22 +20,22 @@
   {
    "check": "query_and_error_mapping",
    "status": "pass",
-   "seconds": 0.08
+   "seconds": 0.06
   },
   {
    "check": "keep_alive",
    "status": "pass",
-   "seconds": 0.06
+   "seconds": 0.05
   },
   {
    "check": "streaming",
    "status": "pass",
-   "seconds": 0.1
+   "seconds": 0.11
   },
   {
    "check": "metrics",
    "status": "pass",
-   "seconds": 0.07
+   "seconds": 0.08
   },
   {
    "check": "timeout",
@@ -45,12 +45,12 @@
   {
    "check": "server_default_timeout",
    "status": "pass",
-   "seconds": 0.39
+   "seconds": 0.38
   },
   {
    "check": "cancellation",
    "status": "pass",
-   "seconds": 0.14
+   "seconds": 0.11
   },
   {
    "check": "backpressure_overloaded",
@@ -60,67 +60,67 @@
   {
    "check": "queued_time_counts_toward_timeout",
    "status": "pass",
-   "seconds": 1.57
+   "seconds": 1.62
   },
   {
    "check": "snapshot_isolation",
    "status": "pass",
-   "seconds": 1.52
+   "seconds": 1.71
   },
   {
    "check": "concurrent_readers",
    "status": "pass",
-   "seconds": 0.25
+   "seconds": 0.09
   },
   {
    "check": "client_disconnect_cancels",
    "status": "pass",
-   "seconds": 0.61
+   "seconds": 0.55
   },
   {
    "check": "request_size_limit",
    "status": "pass",
-   "seconds": 0.08
+   "seconds": 0.05
   },
   {
    "check": "malformed_chunked_body",
    "status": "pass",
-   "seconds": 0.07
+   "seconds": 0.04
   },
   {
    "check": "structured_logs",
    "status": "pass",
-   "seconds": 0.37
+   "seconds": 0.36
   },
   {
    "check": "graceful_shutdown",
    "status": "pass",
-   "seconds": 1.57
+   "seconds": 1.55
   },
   {
    "check": "grace_expiry",
    "status": "pass",
-   "seconds": 0.71
+   "seconds": 0.69
   }
  ],
  "startup_seconds": [
-  0.037598599039483815,
-  0.035530225024558604,
-  0.03910372598329559,
-  0.037886107980739325,
-  0.03036600397899747,
-  0.03282899199984968,
-  0.043641559954266995,
-  0.0453801229596138,
-  0.052905777003616095,
-  0.031260884017683566,
-  0.037648393015842885,
-  0.04116392298601568,
-  0.09092779603088275,
-  0.08452570700319484,
-  0.04378837998956442,
-  0.049993792024906725,
-  0.04125751199899241
+  0.043209577968809754,
+  0.03450381098082289,
+  0.03005391202168539,
+  0.0349125909851864,
+  0.03161424899008125,
+  0.03665171901229769,
+  0.039090752019546926,
+  0.03438424301566556,
+  0.03300800797296688,
+  0.028825738991145045,
+  0.03561864799121395,
+  0.16488923999713734,
+  0.02919437299715355,
+  0.03358619997743517,
+  0.030751562968362123,
+  0.03006521303905174,
+  0.027769203996285796
  ],
- "logs": "/tmp/pqhttp-logs-sa2g8n67"
+ "logs": "/tmp/pqhttp-logs-_h_bk7qg"
 }

@@ -180,5 +180,6 @@
  "finished": "2026-10-11T13:34:50+00:00",
  "wall_seconds": 2734.3,
  "agent_exit_code": 0,
- "outcome": "success"
+ "outcome": "success",
+ "import_branch": "track-a/clojure/optimize-latency/a2"
 }
