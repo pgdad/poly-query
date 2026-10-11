@@ -50,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--max-ingest-bytes", type=_positive_int, default=4 * 1024**3)
     ap.add_argument("--max-table-rows", type=_positive_int, default=200_000_000)
     ap.add_argument("--max-join-rows", type=_positive_int, default=100_000_000)
-    ap.add_argument("--threads", type=_positive_int, default=1)
+    ap.add_argument("--threads", type=_positive_int)  # default: automatic
     ap.add_argument("--parallel-min-rows", type=_positive_int, default=DEFAULT_PARALLEL_MIN_ROWS)
     ap.add_argument("--log-level", choices=sorted(LOG_LEVELS), default="info")
     ap.add_argument("--native-kernels")

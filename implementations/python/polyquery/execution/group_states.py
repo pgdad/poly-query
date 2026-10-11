@@ -22,10 +22,10 @@ from __future__ import annotations
 
 import math
 import operator
-from collections import Counter
+from collections import Counter, deque
 from functools import partial
-from itertools import compress
-from typing import Any, Sequence
+from itertools import compress, filterfalse, repeat
+from typing import Any, Iterable, Sequence
 
 from .. import errors, values
 from ..analysis import bound as b
@@ -37,6 +37,24 @@ _is_not_none = partial(operator.is_not, None)
 _FLOAT_COMPACT = 4096
 
 
+def _gather(values_: list[Any], positions: Sequence[int]) -> list[Any]:
+    return list(map(values_.__getitem__, positions))
+
+
+def _consume(calls: Iterable[Any]) -> None:
+    """Runs a lazy ``map`` of calls to completion inside C."""
+    deque(calls, maxlen=0)
+
+
+def _scatter(target: list[Any], positions: Sequence[int], values_: Iterable[Any]) -> None:
+    """``target[p] = v`` for every pair (C-level calls, no Python loop)."""
+    _consume(map(target.__setitem__, positions, values_))
+
+
+def _merge_counts(counts: list[int], mapping: Sequence[int], other: list[int]) -> None:
+    _scatter(counts, mapping, map(operator.add, _gather(counts, mapping), other))
+
+
 def _non_null_rows(ids: Sequence[int], vals: Sequence[Any]) -> tuple[Sequence[int], Sequence[Any]]:
     if None not in vals:
         return ids, vals
@@ -46,6 +64,9 @@ def _non_null_rows(ids: Sequence[int], vals: Sequence[Any]) -> tuple[Sequence[in
 
 class GroupState:
     """State of one aggregate for every group."""
+
+    # the attributes holding one list entry per group
+    PER_GROUP: tuple[str, ...] = ()
 
     def grow(self, n: int) -> None:
         """Adds ``n`` new (empty) groups."""
@@ -61,11 +82,19 @@ class GroupState:
         """Absorbs ``other``; its group ``g`` is this state's group ``mapping[g]``."""
         raise NotImplementedError
 
+    def append(self, other: GroupState) -> None:
+        """Absorbs ``other``, whose groups are all new: they follow this
+        state's groups in their order."""
+        for name in self.PER_GROUP:
+            getattr(self, name).extend(getattr(other, name))
+
     def results(self) -> list[Any]:
         raise NotImplementedError
 
 
 class CountStarState(GroupState):
+    PER_GROUP = ("counts",)
+
     def __init__(self) -> None:
         self.counts: list[int] = []
 
@@ -84,9 +113,7 @@ class CountStarState(GroupState):
 
     def merge(self, other: GroupState, mapping: Sequence[int]) -> None:
         assert isinstance(other, CountStarState)
-        counts = self.counts
-        for g, c in zip(mapping, other.counts):
-            counts[g] += c
+        _merge_counts(self.counts, mapping, other.counts)
 
     def results(self) -> list[Any]:
         return self.counts
@@ -112,6 +139,8 @@ class CountState(CountStarState):
 
 class SumState(GroupState):
     """Exact SUM / AVG over INT64 and DECIMAL (unscaled) values."""
+
+    PER_GROUP = ("totals", "counts")
 
     def __init__(self, kind: str, scale: int = 0, precision: int = 18) -> None:
         self.kind = kind  # "int", "decimal" or "avg"
@@ -149,14 +178,20 @@ class SumState(GroupState):
 
     def merge(self, other: GroupState, mapping: Sequence[int]) -> None:
         assert isinstance(other, SumState)
-        totals, counts = self.totals, self.counts
-        for g, t, c in zip(mapping, other.totals, other.counts):
-            totals[g] += t
-            counts[g] += c
+        _merge_counts(self.totals, mapping, other.totals)
+        _merge_counts(self.counts, mapping, other.counts)
 
     def results(self) -> list[Any]:
+        totals, counts = self.totals, self.counts
+        if totals and min(counts) > 0:  # no empty group: whole-list kernels
+            if self.kind == "avg":
+                return list(map(operator.truediv, totals, map(operator.mul, counts, repeat(self.divisor))))
+            limit = values.INT64_MAX if self.kind == "int" else values.POW10[self.precision] - 1
+            low = values.INT64_MIN if self.kind == "int" else -limit
+            if max(totals) <= limit and min(totals) >= low:
+                return list(totals)
         out: list[Any] = []
-        for total, count in zip(self.totals, self.counts):
+        for total, count in zip(totals, counts):
             if not count:
                 out.append(None)
             elif self.kind == "int":
@@ -171,6 +206,8 @@ class SumState(GroupState):
 class FloatSumState(GroupState):
     """SUM / AVG over FLOAT64: per group the values (compacted with fsum)."""
 
+    PER_GROUP = ("parts", "counts")
+
     def __init__(self, average: bool) -> None:
         self.average = average
         self.parts: list[list[float]] = []
@@ -179,6 +216,14 @@ class FloatSumState(GroupState):
     def grow(self, n: int) -> None:
         self.parts.extend([] for _ in range(n))
         self.counts.extend([0] * n)
+
+    def __getstate__(self) -> dict[str, Any]:
+        """A partial state leaving a worker process carries one (correctly
+        rounded) sum per group instead of every value: much less to pickle
+        and merge, at the cost of one rounding per partition (FLOAT64 sums
+        are compared with tolerance, concurrency.md §6)."""
+        parts = [p if len(p) <= 1 else [_fsum(p)] for p in self.parts]
+        return {**self.__dict__, "parts": parts}
 
     def _compact(self, g: int) -> None:
         if len(self.parts[g]) > _FLOAT_COMPACT:
@@ -208,9 +253,8 @@ class FloatSumState(GroupState):
 
     def merge(self, other: GroupState, mapping: Sequence[int]) -> None:
         assert isinstance(other, FloatSumState)
-        for g, p, c in zip(mapping, other.parts, other.counts):
-            self.parts[g].extend(p)
-            self.counts[g] += c
+        _consume(map(list.extend, _gather(self.parts, mapping), other.parts))
+        _merge_counts(self.counts, mapping, other.counts)
 
     def results(self) -> list[Any]:
         out: list[Any] = []
@@ -231,6 +275,8 @@ def _fsum(parts: list[float]) -> float:
 
 
 class MinMaxState(GroupState):
+    PER_GROUP = ("values",)
+
     def __init__(self, is_min: bool) -> None:
         self.is_min = is_min
         self.values: list[Any] = []
@@ -282,6 +328,8 @@ class MinMaxState(GroupState):
 class DistinctState(GroupState):
     """Aggregates over DISTINCT values: per group the set of values."""
 
+    PER_GROUP = ("sets",)
+
     def __init__(self, call: b.AggCall) -> None:
         assert call.arg is not None
         # only picklable parts of the call (partial states go to other processes)
@@ -304,8 +352,7 @@ class DistinctState(GroupState):
 
     def merge(self, other: GroupState, mapping: Sequence[int]) -> None:
         assert isinstance(other, DistinctState)
-        for g, s in zip(mapping, other.sets):
-            self.sets[g] |= s
+        _consume(map(set.update, _gather(self.sets, mapping), other.sets))
 
     def results(self) -> list[Any]:
         out = []
@@ -348,11 +395,18 @@ def merge_partials(partials: list[tuple[list[Any], list[GroupState]]]) -> tuple[
         return keys, states
     index = dict(zip(keys, range(len(keys))))
     for part_keys, part_states in partials[1:]:
-        before = len(index)
-        mapping = [index.setdefault(key, len(index)) for key in part_keys]
-        if len(index) > before:
+        # the keys of a partial are distinct: new ones get the next group ids
+        new = list(filterfalse(index.__contains__, part_keys))
+        if len(new) == len(part_keys):  # disjoint groups (e.g. clustered keys)
+            index.update(zip(new, range(len(index), len(index) + len(new))))
+            for state, other in zip(states, part_states):
+                state.append(other)
+            continue
+        if new:
+            index.update(zip(new, range(len(index), len(index) + len(new))))
             for state in states:
-                state.grow(len(index) - before)
+                state.grow(len(new))
+        mapping = list(map(index.__getitem__, part_keys))
         for state, other in zip(states, part_states):
             state.merge(other, mapping)
     return list(index), states

@@ -27,6 +27,7 @@ from .. import errors
 from ..planner import physical as pp
 from . import native_ops
 from .context import ExecutionContext
+from .worker_pool import PartitionTask
 
 # forking a process that also runs threads (HTTP server) is safe here: the
 # child only computes and then calls os._exit
@@ -41,25 +42,50 @@ def use_processes(gather: pp.Gather, ctx: ExecutionContext) -> bool:
     return native_ops.python_rows(gather, ctx) >= ctx.parallel_min_rows
 
 
-def run_partitions(gather: pp.Gather, ctx: ExecutionContext, task: Callable[[], Any]) -> list[Any]:
+def run_partitions(
+    gather: pp.Gather,
+    ctx: ExecutionContext,
+    task: Callable[[], Any],
+    *,
+    spec: PartitionTask | None = None,
+    prepare: Callable[[], None] | None = None,
+) -> list[Any]:
     """Runs ``task`` once per partition of ``gather`` (each run sees its
-    partition of the driver scan) and returns the results in partition order."""
-    count = gather.partitions
+    partition of the driver scan) and returns the results in partition order.
+    ``prepare`` builds the pipeline's shared state before ``task`` runs here
+    or in forked children; with a ``spec`` (the picklable description of
+    ``task``) the engine's persistent worker pool is used when it can be."""
     if use_processes(gather, ctx):
+        if spec is not None and ctx.pool is not None:
+            results = ctx.pool.run(gather, ctx, spec)
+            if results is not None:
+                return results
+        if prepare is not None:
+            prepare()
         return _run_forked(gather, ctx, task)
-    return [_in_partition(gather, ctx, index, task) for index in range(count)]
+    if prepare is not None:
+        prepare()
+    return [_in_partition(gather, ctx, index, task) for index in range(gather.partitions)]
 
 
 def iterate_partitions(
-    gather: pp.Gather, ctx: ExecutionContext, produce: Callable[[], Iterator[Any]]
+    gather: pp.Gather,
+    ctx: ExecutionContext,
+    produce: Callable[[], Iterator[Any]],
+    *,
+    spec: PartitionTask | None = None,
+    prepare: Callable[[], None] | None = None,
 ) -> Iterator[Any]:
     """Streams the outputs of ``produce`` for every partition in partition
     order. In-process partitions are consumed lazily (a LIMIT above can stop
-    early); worker processes collect their partition's output completely."""
+    early); worker processes collect their partition's output completely
+    (``spec`` describes that collection, see :func:`run_partitions`)."""
     if use_processes(gather, ctx):
-        for items in _run_forked(gather, ctx, lambda: list(produce())):
+        for items in run_partitions(gather, ctx, lambda: list(produce()), spec=spec, prepare=prepare):
             yield from items
         return
+    if prepare is not None:
+        prepare()
     driver = id(gather.driver)
     for index in range(gather.partitions):
         ctx.partitions[driver] = (index, gather.partitions)
