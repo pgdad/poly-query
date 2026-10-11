@@ -183,11 +183,16 @@ FUNC opt_field
     test %rax, %rax
     jz 9f
     mov JN_TYPE(%rax), %rcx
-    cmp $J_TRUE, %ebx
+    cmp $J_NULL, %ecx               /* null = absent */
     jne 1f
+    xor %eax, %eax
+    jmp 9f
+1:
+    cmp $J_TRUE, %ebx
+    jne 2f
     cmp $J_FALSE, %ecx
     je 9f
-1:  cmp %rbx, %rcx
+2:  cmp %rbx, %rcx
     jne bad_request
 9:  pop %rbx
     ret

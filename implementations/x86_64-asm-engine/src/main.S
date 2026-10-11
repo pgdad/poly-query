@@ -13,10 +13,12 @@
 #define MODE_SESSION 3
 #define MODE_EXEC    4
 #define MODE_SERVE   5
+#define BIG_STACK    (1024*1024*1024)
 
     .data
     .p2align 3
 opt_request: .quad 0
+cur_mode:    .quad 0
 
     .section .rodata
 /* options taking a value; the value is stored by index in option handling */
@@ -266,6 +268,7 @@ FUNC main
     jmp 2b
 
 20: /* dispatch */
+    mov %r14, cur_mode(%rip)
     cmp $MODE_VERSION, %r14d
     jne 21f
     xor %edi, %edi
@@ -287,16 +290,27 @@ FUNC main
     LEAVE
 23: call install_fault_handlers
     cmp $MODE_EXEC, %r14d
-    je m_exec
-    call session_loop
+    jne 24f
+    cmpq $0, opt_request(%rip)
+    je m_no_request
+24: /* run on a large, lazily committed stack so that very large
+     * expressions (deep recursion in binder/evaluator) do not overflow */
+    xor %edi, %edi
+    mov $BIG_STACK, %rsi
+    mov $3, %edx                    /* PROT_READ | PROT_WRITE */
+    mov $0x4022, %ecx               /* MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE */
+    mov $-1, %r8d
+    xor %r9d, %r9d
+    call mmap
+    cmp $-1, %rax
+    je 25f
+    mov %rsp, %r15                  /* old stack */
+    lea BIG_STACK(%rax), %rsp
+    call run_mode
+    mov %r15, %rsp
     xor %eax, %eax
     LEAVE
-
-m_exec:
-    mov opt_request(%rip), %rdi
-    test %rdi, %rdi
-    jz m_no_request
-    call exec_requests
+25: call run_mode
     xor %eax, %eax
     LEAVE
 
@@ -317,6 +331,23 @@ m_no_request:
     CSTR %rsi, ""
     call usage_error
 ENDF main
+
+/* run_mode(): session loop or exec requests (mode in r14d of main is
+ * re-derived from opt_request) */
+FUNC run_mode
+    sub $8, %rsp
+    mov opt_request(%rip), %rdi
+    test %rdi, %rdi
+    jz 1f
+    cmpq $MODE_EXEC, cur_mode(%rip)
+    jne 1f
+    call exec_requests
+    add $8, %rsp
+    ret
+1:  call session_loop
+    add $8, %rsp
+    ret
+ENDF run_mode
 
 /* read_fd_all(fd edi, Buf* rsi): appends the whole stream */
 FUNC read_fd_all

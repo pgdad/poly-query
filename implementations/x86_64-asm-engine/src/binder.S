@@ -140,8 +140,28 @@ ENDF wrap_cast
 bind_type_error:
     RAISE E_TYPE_ERROR, "operand types are incompatible"
 
-/* bind_expr(B rdi, node rsi) -> rax bound node (may be a replacement) */
+    .bss
+    .p2align 3
+bind_depth: .quad 0
+    .text
+
+#define MAX_BIND_DEPTH 400000
+
+/* bind_expr(B rdi, node rsi) -> rax bound node (may be a replacement);
+ * guards the recursion depth of very large expressions */
 FUNC bind_expr
+    sub $8, %rsp
+    incq bind_depth(%rip)
+    cmpq $MAX_BIND_DEPTH, bind_depth(%rip)
+    ja 1f
+    call bind_expr_node
+    decq bind_depth(%rip)
+    add $8, %rsp
+    ret
+1:  RAISE E_PARSE_ERROR, "expression too complex"
+ENDF bind_expr
+
+FUNC bind_expr_node
     ENTER 32
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -644,7 +664,7 @@ bf_agg_nested:
     RAISE E_SEMANTIC_ERROR, "aggregate calls cannot be nested"
 bf_arity_star:
     RAISE E_SEMANTIC_ERROR, "only COUNT accepts *"
-ENDF bind_expr
+ENDF bind_expr_node
 
 /* ================================================================ query */
 
@@ -752,6 +772,7 @@ ENDF same_expr
 FUNC bind_select
     ENTER 64
     mov %rdi, %rbx                  /* stmt */
+    movq $0, bind_depth(%rip)
     cmpq $0, SS_GROUPBY(%rbx)
     jne bs_unsupported
     cmpq $0, SS_HAVING(%rbx)

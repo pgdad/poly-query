@@ -14,7 +14,7 @@
     .section .note.GNU-stack, "", @progbits
     .text
 
-#define MAX_DEPTH 800
+#define MAX_DEPTH 4000
 
 /* ================================================================ token helpers */
 
