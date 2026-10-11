@@ -3,16 +3,13 @@
 //! and response writing (fixed-length and chunked).
 
 use std::io::{self, BufRead, Read, Write};
-use std::time::{Duration, Instant};
 
 /// Maximum size of the request line plus headers.
 const MAX_HEAD_BYTES: usize = 64 * 1024;
 /// Maximum number of header fields.
 const MAX_HEADERS: usize = 128;
-/// How long an over-limit body is drained before the connection is closed
-/// (so the client sees the response rather than a reset).
-const DRAIN_TIME: Duration = Duration::from_secs(2);
-/// Maximum number of bytes drained from an over-limit body.
+/// Maximum number of bytes of an over-limit body that are read and discarded
+/// before responding (so the client sees the response rather than a reset).
 const DRAIN_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -238,8 +235,12 @@ fn read_body(
 }
 
 /// Decodes a chunked request body (chunk extensions and trailers ignored).
+/// Once the body exceeds `max_body` the remaining chunks are decoded and
+/// discarded (so the client can read the 413 response), up to
+/// `DRAIN_BYTES`.
 fn read_chunked(reader: &mut impl BufRead, max_body: u64) -> Result<Vec<u8>, ReadError> {
     let mut body = Vec::new();
+    let mut total: u64 = 0;
     loop {
         let mut budget = MAX_HEAD_BYTES;
         let line = read_line(reader, &mut budget)?.ok_or(ReadError::Closed)?;
@@ -251,18 +252,27 @@ fn read_chunked(reader: &mut impl BufRead, max_body: u64) -> Result<Vec<u8>, Rea
             loop {
                 match read_line(reader, &mut budget)? {
                     Some(l) if !l.is_empty() => continue,
+                    _ if total > max_body => return Err(ReadError::TooLarge),
                     _ => return Ok(body),
                 }
             }
         }
-        if body.len() as u64 + size > max_body {
-            drain(reader, DRAIN_BYTES);
-            return Err(ReadError::TooLarge);
-        }
-        let before = body.len();
-        reader.by_ref().take(size).read_to_end(&mut body)?;
-        if (body.len() - before) as u64 != size {
-            return Err(ReadError::Closed);
+        total = total.saturating_add(size);
+        if total > max_body {
+            if total > max_body.saturating_add(DRAIN_BYTES) {
+                return Err(ReadError::TooLarge);
+            }
+            body = Vec::new();
+            let skipped = io::copy(&mut reader.by_ref().take(size), &mut io::sink())?;
+            if skipped != size {
+                return Err(ReadError::Closed);
+            }
+        } else {
+            let before = body.len();
+            reader.by_ref().take(size).read_to_end(&mut body)?;
+            if (body.len() - before) as u64 != size {
+                return Err(ReadError::Closed);
+            }
         }
         let mut crlf = [0u8; 2];
         reader.read_exact(&mut crlf)?;
@@ -272,18 +282,9 @@ fn read_chunked(reader: &mut impl BufRead, max_body: u64) -> Result<Vec<u8>, Rea
     }
 }
 
-/// Reads and discards up to `limit` bytes, for at most `DRAIN_TIME`.
+/// Reads and discards up to `limit` bytes.
 fn drain(reader: &mut impl BufRead, limit: u64) {
-    let start = Instant::now();
-    let mut left = limit;
-    let mut buf = [0u8; 64 * 1024];
-    while left > 0 && start.elapsed() < DRAIN_TIME {
-        let want = buf.len().min(usize::try_from(left).unwrap_or(buf.len()));
-        match reader.read(&mut buf[..want]) {
-            Ok(0) | Err(_) => return,
-            Ok(n) => left -= n as u64,
-        }
-    }
+    let _ = io::copy(&mut reader.by_ref().take(limit), &mut io::sink());
 }
 
 /// Decodes `%XX` escapes (and `+` as space in query strings).
@@ -464,6 +465,13 @@ mod tests {
         assert!(matches!(
             parse(
                 "POST /x HTTP/1.1\r\nContent-Length: 10\r\n\r\n0123456789",
+                5
+            ),
+            Err(ReadError::TooLarge)
+        ));
+        assert!(matches!(
+            parse(
+                "POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n4\r\nefgh\r\n0\r\n\r\n",
                 5
             ),
             Err(ReadError::TooLarge)
