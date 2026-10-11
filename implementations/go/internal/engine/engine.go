@@ -347,23 +347,16 @@ func (e *Engine) open(ctx context.Context, p *physical.Plan, opts QueryOptions) 
 		// Closing the cursor stops parallel workers of unfinished queries.
 		ctx, cancel = context.WithCancel(ctx)
 	}
-	threads := opts.Threads
-	if threads <= 0 {
-		threads = e.cfg.Threads
-	}
 	ec := &exec.Context{
 		Ctx:         ctx,
 		Mem:         &exec.MemTracker{Limit: e.cfg.MaxQueryMemoryMB << 20},
 		MaxJoinRows: e.cfg.MaxJoinRows,
 		Plan:        p,
-		Vectorized:  opts.Mode != "row" && !callsSleep(p),
-		Threads:     threads,
+		Vectorized:  p.Exec.Vectorized,
+		Threads:     p.Exec.Threads,
 		MorselRows:  e.cfg.MorselRows,
 	}
-	if opts.Native && !callsSleep(p) {
-		// PQ_SLEEP's evaluation count is observable; native filters
-		// evaluate conjuncts in a different order, so such (test-only)
-		// queries keep the engine's own code paths.
+	if p.Exec.Native {
 		ec.Native = e.cfg.Native
 	}
 	op, err := exec.BuildRoot(ec, p.Root)
@@ -372,32 +365,6 @@ func (e *Engine) open(ctx context.Context, p *physical.Plan, opts QueryOptions) 
 		return nil, err
 	}
 	return &Cursor{Columns: p.Root.Schema(), ctx: ctx, cancel: cancel, ec: ec, op: op, maxRows: opts.MaxRows}, nil
-}
-
-// callsSleep reports whether a plan evaluates PQ_SLEEP. Such (test-only)
-// queries always run row-at-a-time: PQ_SLEEP's per-row evaluation count is
-// observable through timing, and batch execution would evaluate it for rows
-// a LIMIT never needs.
-func callsSleep(p *physical.Plan) bool {
-	found := false
-	var visit func(n physical.Node)
-	visit = func(n physical.Node) {
-		for _, e := range physical.Exprs(n) {
-			plan.Walk(e, func(x plan.Expr) {
-				if f, ok := x.(*plan.Func); ok && f.Name == "PQ_SLEEP" {
-					found = true
-				}
-			})
-		}
-		for _, c := range n.Children() {
-			visit(c)
-		}
-	}
-	visit(p.Root)
-	for _, sub := range p.Subplans {
-		visit(sub)
-	}
-	return found
 }
 
 // Next returns the next result row, or nil at the end. The row is only
@@ -479,14 +446,19 @@ func (e *Engine) plan(q *ast.Query, opts QueryOptions) (*physical.Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !opts.NoOptimize {
-		logical = optimizer.Optimize(logical, optimizer.Options{EvalConst: exec.EvalConstant})
-	}
+	logical = optimizer.Optimize(logical, optimizer.Options{
+		Disabled:  opts.NoOptimize,
+		EvalConst: exec.EvalConstant,
+	})
 	return physical.Build(logical, physical.Options{
-		Join:       opts.Join,
-		UseIndexes: !opts.NoIndexes,
-		Indexes:    snap.IndexesOf,
-		EvalConst:  exec.EvalConstant,
+		Join:           opts.Join,
+		UseIndexes:     !opts.NoIndexes,
+		Indexes:        snap.IndexesOf,
+		EvalConst:      exec.EvalConstant,
+		Mode:           opts.Mode,
+		Threads:        opts.Threads,
+		DefaultThreads: e.cfg.Threads,
+		Native:         opts.Native && e.cfg.Native != nil,
 	})
 }
 

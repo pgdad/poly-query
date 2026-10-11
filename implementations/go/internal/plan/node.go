@@ -22,9 +22,12 @@ type Node interface {
 	Children() []Node
 }
 
-// Scan reads a base table; Cols has one entry per table column.
+// Scan reads columns of a base table: Cols[i] is table column Ords[i]
+// (ascending ordinals). The analyzer lists every table column; column
+// pruning removes those no operator needs.
 type Scan struct {
 	Table *storage.Table
+	Ords  []int
 	Cols  []Column
 }
 

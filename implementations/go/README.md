@@ -65,8 +65,8 @@ file into memory (chunks are still decoded lazily).
 A statement flows through distinct, inspectable stages, one package each:
 
 ```
-SQL text ─lexer→ tokens ─parser→ AST ─analyzer→ logical plan ─optimizer→ logical plan
-        ─physical→ physical plan ─exec→ operator tree → rows
+SQL text ─lexer→ tokens ─parser→ AST ─analyzer→ logical plan ─optimizer (rules)→ logical plan
+        ─physical→ physical plan + execution settings ─exec→ operator tree → rows
 ```
 
 | Package | Responsibility |
@@ -74,13 +74,13 @@ SQL text ─lexer→ tokens ─parser→ AST ─analyzer→ logical plan ─opti
 | `cmd/polyquery` | CLI: modes `version`, `capabilities`, `session`, `exec`, `serve`; option parsing, JSON logs on stderr, SIGTERM/SIGINT handling |
 | `internal/server` | HTTP API (protocol.md §7): router, admission control (workers + bounded FIFO queue), query registry (listing, cancellation, duplicate ids), timeouts, NDJSON streaming with backpressure, Prometheus metrics, completion logs, graceful shutdown |
 | `internal/protocol` | JSON request decoding/validation, context-aware op dispatch (incl. `explain`, `save`, `open`, `stats`), single-line JSON response writer, NDJSON stream lines, session loop and exec mode |
-| `internal/engine` | Facade owning config + catalog: path safety, file loading with limits, the query pipeline (statements run through a `Cursor` so results can be consumed incrementally), `EXPLAIN`, `CREATE/DROP INDEX`, `save`/`open`/`stats`, `max_rows`, timeouts |
+| `internal/engine` | Facade owning config + catalog: path safety, file loading with limits, the query pipeline (analyze → optimize → physical plan → execute; statements run through a `Cursor` so results can be consumed incrementally), `EXPLAIN`, `CREATE/DROP INDEX`, `save`/`open`/`stats`, `max_rows`, timeouts |
 | `internal/sql/lexer` | Tokens with 1-based line/column positions; comments, quoted identifiers, reserved keywords |
 | `internal/sql/ast`, `internal/sql/parser` | Recursive-descent parser for the full v1 grammar producing an AST; `PARSE_ERROR` carries `line`/`column` |
 | `internal/analyzer` | Semantic validation: scopes and range variables, CTE environments, name resolution (incl. outer scopes for correlation), typing with implicit promotions, function signatures, aggregate/grouping rules, ORDER BY resolution; produces the logical plan |
-| `internal/plan` | Bound typed expressions and logical plan nodes (`Scan`, `Values`, `Filter`, `Project`, `Aggregate`, `Join`, `Sort`, `Limit`, `Distinct`, `UnionAll`); every produced column has a statement-unique `ColumnID` |
-| `internal/optimizer` | Logical rewrites (all disabled by `optimize: false`): constant folding and boolean simplification; predicate pushdown through joins (WHERE/ON conjuncts on one input move below the join, spanning conjuncts become join conditions, so comma joins become inner joins) and through projections (derived tables, CTEs), sorts and DISTINCT, so that predicates end up directly above table scans; greedy reordering of inner-join chains |
-| `internal/physical` | Physical planning: access paths (index selection from statistics, row-group skipping filters), join algorithm (hash join with the build side by estimated cardinality, sort-merge join, nested loop), hash aggregation, hash distinct, top-N sort; column pruning (scans read only referenced columns); correlated-subquery helpers; EXPLAIN JSON |
+| `internal/plan` | Bound typed expressions and the logical plan (`Scan`, `Values`, `Filter`, `Project`, `Aggregate`, `Join`, `Sort`, `Limit`, `Distinct`, `UnionAll`; subqueries are `Subquery` expressions holding their own plan); every produced column has a statement-unique `ColumnID`; `Format` prints a plan for debugging |
+| `internal/optimizer` | Rule-based logical optimizer, rules applied in order, none with `optimize: false`: `constant_folding`, `predicate_pushdown` (below joins, projections, sorts, DISTINCT, into UNION ALL branches), `join_reorder` (greedy, inner-join chains), `column_pruning` — see *Logical / physical plan separation* |
+| `internal/physical` | Physical planning, the only place where execution decisions are taken: access paths (table scan with row-group skipping vs index scan chosen from statistics; columns a scan reads), join algorithm (hash join with the build side by estimated cardinality, sort-merge join, nested loop; `join` option), hash aggregation, hash distinct, top-N sort, correlated-subquery helpers, execution mode / threads / native kernels (`Plan.Exec`); EXPLAIN JSON |
 | `internal/exec` | Execution in two models over the same physical plan: Volcano row operators (`operators.go`, `join.go`, `merge.go`, `aggregate.go`; expressions compiled to closures against the input row layout) and vectorized batch operators (`vector.go`, `vexpr.go`, `vops.go`, `vagg.go`, `vjoin.go`, `vsort.go`, `simd_*.go`); morsel-driven parallelism (`parallel.go`); all scalar functions, LIKE, CASE, BETWEEN, IN; subquery evaluation; cancellation checks; approximate memory accounting; `--max-join-rows` |
 | `internal/storage` | Immutable tables split into row groups, each either column-oriented (typed vectors with validity bitmaps, STRING columns optionally dictionary-encoded, chunks optionally decoded lazily) or row-oriented (tuples); per-group min/max/null statistics; lazily computed table statistics |
 | `internal/index` | Single-column HASH (hash map value → row IDs) and BTREE (sorted permutation with binary search) indexes |
@@ -154,6 +154,89 @@ The executor is unchanged otherwise: all `mode`/`threads`/`join`/
 `optimize`/`native` combinations run the same `UnionAll` operator over
 branch plans built by the existing code, which is why they agree (checked
 by `TestUnionAllModesAgree`).
+
+### Logical / physical plan separation (change request CR-3)
+
+`spec/changes/refactor-plan-separation.md` asks for an explicit logical
+plan, a rule-based optimizer of separately named and tested rules working
+only on that plan, and a physical planner that alone decides access paths,
+join algorithms, execution mode and native kernels — without any
+externally visible change. The engine already had separate `plan`,
+`optimizer` and `physical` packages; the refactoring closed the gaps:
+
+* the optimizer was one hard-wired pipeline (`foldPlan` → `push` →
+  `reorder`, with its own recursion into subquery plans) — it is now a list
+  of `Rule`s (`Name()`, `Apply(plan.Node) plan.Node`), one type and file per
+  rule, applied by `optimizer.Optimizer`;
+* column pruning existed only inside the physical planner — it is now
+  also the logical rule `column_pruning`; logical scans carry the table
+  ordinals of the columns they list (`Scan.Ords`);
+* `optimize: false` was handled by the engine skipping the optimizer call —
+  `optimizer.New(Options{Disabled: true})` now builds an optimizer with no
+  rules;
+* the execution mode, thread count and native-kernel decisions (including
+  the PQ_SLEEP rule) were taken by the engine facade when opening a
+  cursor — they are now taken by the physical planner
+  (`physical.Execution` in `Plan.Exec`), the engine only copies them into
+  the executor's context;
+* there was no way to print a logical plan — `plan.Format` renders it as an
+  indented tree (subquery plans below the operator using them).
+
+Module map, **before**:
+
+| Concern | Where |
+|---|---|
+| Logical plan | `internal/plan/node.go` (nodes), `internal/plan/expr.go` (expressions); no printer |
+| Optimizer | `internal/optimizer/optimizer.go`: `Optimize` = `foldPlan` (from `fold.go`) then `push` (predicate pushdown) then `reorder` (from `reorder.go`) then recursion into subquery plans; called by the engine only when `optimize` was true |
+| Column pruning | `internal/physical/planner.go` only (required-column sets passed down while planning) |
+| Physical planner | `internal/physical/planner.go` (operators, join algorithm, column selection, correlated-subquery helpers), `access.go` (search arguments, row-group filters), `cost.go` (statistics, index choice), `explain.go` |
+| Execution mode, threads, native kernels | `internal/engine/engine.go` (`open`, `callsSleep`) |
+
+Module map, **after**:
+
+| Concern | Where |
+|---|---|
+| Logical plan | `internal/plan/node.go` (`Scan` with `Ords`, `Values`, `Filter`, `Project`, `Aggregate`, `Join` with kind and condition, `Sort`, `Limit`, `Distinct`, `UnionAll`), `internal/plan/expr.go` (expressions incl. `Subquery` with its plan), `internal/plan/print.go` (`Format`) |
+| Optimizer driver | `internal/optimizer/optimizer.go`: `Rule`, `Optimizer`, `New` (default rule order; no rules when disabled), `Optimize`, `everyPlan` (applies a rule to all subquery plans) |
+| Rule `constant_folding` | `internal/optimizer/fold.go` (`ConstantFolding`) |
+| Rule `predicate_pushdown` | `internal/optimizer/pushdown.go` (`PredicatePushdown`) |
+| Rule `join_reorder` | `internal/optimizer/reorder.go` (`JoinReorder`) |
+| Rule `column_pruning` | `internal/optimizer/prune.go` (`ColumnPruning`) |
+| Rule tests | `internal/optimizer/optimizer_test.go` (each rule applied alone to analyzed plans, checked on the printed plan; rule order; disabled optimizer) |
+| Physical planner | `internal/physical/planner.go` (logical → physical operators, join algorithm, scan column selection, correlated-subquery helpers), `access.go`, `cost.go` (access paths), `execution.go` (execution mode, threads, native kernels), `explain.go` (EXPLAIN from the physical plan, unchanged) |
+| Pipeline | `internal/engine/engine.go` `plan`: analyze → `optimizer.Optimize` → `physical.Build`; `open` executes `Plan.Exec` |
+
+Decisions:
+
+* **Scan columns are chosen in both layers.** `column_pruning` narrows
+  the logical plan, but with `optimize: false` no rule runs, and the
+  EXPLAIN output (`TableScan.columns`, `Project.columns`) must stay as it
+  was — scans read only referenced columns in every configuration. So the
+  physical planner keeps its required-column propagation, which it needs
+  anyway for access paths (an `IndexScan` reads the columns of the whole
+  predicate). On a pruned plan it changes nothing.
+* **Pruning never changes correlation.** The physical planner decides from
+  each subtree's outer references what a correlated subquery computes once
+  per query (`Materialize`, `ParamLookup`) — so `column_pruning` keeps
+  projection outputs that reference outer columns, and does not narrow
+  UNION ALL outputs (the logical node requires every branch to produce
+  exactly its columns; the physical planner prunes branches itself).
+* **Native kernels**: the physical plan decides whether a query may use the
+  native kernel library (`Execution.Native`: requested, loaded, no
+  PQ_SLEEP). Which operators then call a kernel (filters over scans,
+  aggregation, gathers) depends on the kernel library's coverage of
+  types and expressions and stays in the executor's native operators.
+* **CTEs** have no node of their own: each reference is inlined by the
+  analyzer as a subtree (see *Subqueries and CTEs*), so rules see ordinary
+  operators.
+* **Behaviour preserved exactly**, including quirks visible in EXPLAIN:
+  constant folding enters a subquery plan only when the subquery forms a
+  whole expression (as before). Verified by recording every conformance
+  statement's responses plus EXPLAIN and results under several option
+  combinations before and after the refactoring (identical), and by
+  comparing old and new binaries on ~400 random and hand-written queries
+  (derived tables with unused columns, correlated subqueries, CTE
+  self-joins, UNION ALL) × 6 option sets (identical).
 
 ### Value representation
 
@@ -412,8 +495,10 @@ match; unmatched LEFT rows are emitted) and merges equal-key runs; `join:
   smallest estimated cardinality and repeatedly adding the smallest input
   connected by a join conjunct (cross products only for disconnected join
   graphs); a projection restores the column order.
-* Physical planning adds *projection pushdown* (scans read only needed
-  columns) and *top-N* for `ORDER BY … LIMIT`.
+* *column pruning* — scans and projections keep only the columns some
+  operator needs (CR-3; the physical planner independently restricts
+  scans to the referenced columns, also with `optimize: false`).
+* Physical planning adds *top-N* for `ORDER BY … LIMIT`.
 
 **SIMD**: Go's standard library has no stable SIMD API, so the loops are
 written to be SIMD-friendly (dense, branch-free, over contiguous typed
@@ -758,9 +843,9 @@ Observations:
   `threads` (≥ 1, capped at 256) defaults to `--threads`, whose default is
   min(4, CPU count); `join` is `auto` (= hash for equi-joins), `hash`, `merge`
   or `nested_loop` (joins without an equality conjunct between the inputs
-  always use a nested loop); `optimize: false` skips the logical optimizer
-  (physical planning — column pruning, index selection, row-group skipping,
-  build-side choice — stays on; `use_indexes: false` disables indexes);
+  always use a nested loop); `optimize: false` applies no optimizer rule
+  (physical planning — scan column selection, index selection, row-group
+  skipping, build-side choice — stays on; `use_indexes: false` disables indexes);
   `native: true` uses the native kernels when the library is loaded and is
   ignored otherwise. Other values of the enumerated options ⇒
   `UNSUPPORTED`; ill-typed values or `threads < 1` (the request schema's

@@ -5,7 +5,8 @@ import (
 	"polyquery/internal/types"
 )
 
-// Join reordering for chains of inner joins (after predicate pushdown).
+// JoinReorder reorders chains of inner joins (best applied after predicate
+// pushdown, which turns WHERE conjuncts into join conditions).
 //
 // A tree of INNER/CROSS joins is flattened into its inputs ("leaves": scans
 // with their pushed-down filters, LEFT joins, derived tables, …) and its
@@ -18,6 +19,13 @@ import (
 // commutative and associative, so results are unchanged; this avoids
 // cross products caused by the FROM order and keeps intermediate results
 // small.
+type JoinReorder struct{}
+
+// Name implements Rule.
+func (JoinReorder) Name() string { return "join_reorder" }
+
+// Apply implements Rule.
+func (JoinReorder) Apply(n plan.Node) plan.Node { return everyPlan(n, reorder) }
 
 func reorder(n plan.Node) plan.Node {
 	switch x := n.(type) {

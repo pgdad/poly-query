@@ -378,8 +378,9 @@ func (a *analyzer) from(item ast.FromItem, sc *scope, env *cteEnv) (plan.Node, e
 		if !ok {
 			return nil, semanticAt(f.Pos, "unknown table %q", f.Name)
 		}
-		scan := &plan.Scan{Table: t, Cols: make([]plan.Column, len(t.Columns))}
+		scan := &plan.Scan{Table: t, Ords: make([]int, len(t.Columns)), Cols: make([]plan.Column, len(t.Columns))}
 		for i, c := range t.Columns {
+			scan.Ords[i] = i
 			scan.Cols[i] = a.newColumn(c.Name, c.Type)
 		}
 		return scan, sc.add(f.Pos, &rangeVar{name: name, cols: scan.Cols})
