@@ -46,7 +46,8 @@
 (defn- write-tables! [dir]
   (let [r (SplittableRandom. 20261011)]
     (write-table! dir "fact"
-                  ["id" "dim_id" "small_id" "kind" "state" "qty" "price" "cost" "ratio" "at" "day" "flag" "opt" "note" "code"]
+                  ["id" "dim_id" "small_id" "kind" "state" "qty" "price" "cost" "ratio" "at" "day" "flag" "opt" "note" "code"
+                   "maybe_flag" "maybe_ratio" "maybe_day" "maybe_price" "maybe_at"]
                   (fn [^long i]
                     [(inc i) (inc (.nextInt r dim-rows)) (.nextInt r 64) (pick r kinds) (pick r states)
                      (- (.nextInt r 1000) 100) (money r 1000000) (money r 5000) (.nextDouble r)
@@ -54,7 +55,13 @@
                      (if (.nextBoolean r) "true" "false")
                      (if (< (.nextInt r 10) 4) "" (.nextInt r 100000))
                      (if (< (.nextInt r 10) 3) "" (str "n" (.nextInt r 50)))
-                     (format "c%07d" (.nextInt r 10000000))])
+                     (format "c%07d" (.nextInt r 10000000))
+                     ;; NULLs in every column type, at varying rates
+                     (if (< (.nextInt r 10) 5) "" (if (.nextBoolean r) "true" "false"))
+                     (if (< (.nextInt r 10) 2) "" (.nextDouble r))
+                     (if (< (.nextInt r 10) 8) "" (date-str (.nextInt r 1000)))
+                     (if (< (.nextInt r 10) 3) "" (money r 100000))
+                     (if (< (.nextInt r 10) 6) "" (ts-str (.nextLong r (* 3 365 86400)) 0))])
                   fact-rows)
     (write-table! dir "dim"
                   ["dim_id" "region" "label" "opened" "budget" "active"]
@@ -78,7 +85,9 @@
 (def ^:private schemas
   {"fact" [["id" "INT64"] ["dim_id" "INT64"] ["small_id" "INT64"] ["kind" "STRING"] ["state" "STRING"]
            ["qty" "INT64"] ["price" "DECIMAL(12,2)"] ["cost" "DECIMAL(10,2)"] ["ratio" "FLOAT64"]
-           ["at" "TIMESTAMP"] ["day" "DATE"] ["flag" "BOOLEAN"] ["opt" "INT64"] ["note" "STRING"] ["code" "STRING"]]
+           ["at" "TIMESTAMP"] ["day" "DATE"] ["flag" "BOOLEAN"] ["opt" "INT64"] ["note" "STRING"] ["code" "STRING"]
+           ["maybe_flag" "BOOLEAN"] ["maybe_ratio" "FLOAT64"] ["maybe_day" "DATE"] ["maybe_price" "DECIMAL(12,2)"]
+           ["maybe_at" "TIMESTAMP"]]
    "dim" [["dim_id" "INT64"] ["region" "STRING"] ["label" "STRING"] ["opened" "DATE"]
           ["budget" "DECIMAL(14,2)"] ["active" "BOOLEAN"]]
    "small" [["small_id" "INT64"] ["name" "STRING"]]
@@ -132,6 +141,13 @@
    "SELECT w02, AVG(w01), MAX(w09) FROM wide_t WHERE w13 = false GROUP BY w02 ORDER BY w02"
    "SELECT COUNT(opt), COUNT(note), SUM(opt), COUNT(*) FROM fact WHERE note IS NOT NULL OR flag = true"
    "SELECT COUNT(*), SUM(opt) FROM fact WHERE opt IS NULL AND note IS NULL"
+   "SELECT COUNT(maybe_flag), COUNT(maybe_ratio), SUM(maybe_price), MIN(maybe_day), MAX(maybe_ratio), MAX(maybe_at) FROM fact"
+   "SELECT COUNT(*), AVG(maybe_ratio) FROM fact WHERE maybe_flag = true OR maybe_ratio > 0.5"
+   "SELECT COUNT(*), SUM(opt) FROM fact WHERE maybe_flag IS NULL AND maybe_day > DATE '2022-01-01'"
+   "SELECT maybe_flag, COUNT(*), AVG(maybe_ratio), SUM(maybe_price) FROM fact GROUP BY maybe_flag"
+   "SELECT kind, SUM(maybe_price * 2 - price), COUNT(maybe_day) FROM fact WHERE NOT maybe_flag GROUP BY kind ORDER BY kind"
+   "SELECT DATE_TRUNC('day', maybe_at) AS d, COUNT(*) FROM fact WHERE maybe_at IS NOT NULL GROUP BY DATE_TRUNC('day', maybe_at) ORDER BY d LIMIT 10"
+   "SELECT id, maybe_ratio, maybe_price FROM fact WHERE id < 100000 ORDER BY maybe_ratio DESC, maybe_price, id LIMIT 30"
    "WITH per AS (SELECT dim_id, SUM(price) AS total FROM fact GROUP BY dim_id) SELECT COUNT(*) FROM per WHERE total > (SELECT AVG(total) FROM per)"
    "SELECT COUNT(*) FROM fact WHERE dim_id IN (SELECT dim_id FROM dim WHERE region = 'west')"
    "SELECT COUNT(*) FROM fact WHERE price > (SELECT AVG(price) FROM fact WHERE kind = 'beta')"

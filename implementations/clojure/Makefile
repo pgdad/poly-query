@@ -44,7 +44,7 @@ target/polyquery.aot: target/polyquery.jar script/training.clj bin/polyquery
 test:
 	$(CLOJURE) -M:test
 
-# Fails on any reflection or boxed-math warning (script/lint.clj).
+# Fails on any reflection, boxed-math or performance warning (script/lint.clj).
 lint:
 	@rm -rf target/lint-classes
 	@mkdir -p target/lint-classes
