@@ -1,5 +1,5 @@
 {
- "generated": "2026-10-11T05:33:08.728527+00:00",
+ "generated": "2026-10-11T08:19:46.164389+00:00",
  "weights": {
   "correctness": 0.35,
   "development_effort": 0.2,
@@ -7,8 +7,170 @@
   "resources": 0.1,
   "maintainability": 0.15
  },
- "git_commit": "f896531c88f5163905681b87b6332de0bd1640a6",
+ "git_commit": "a2fa770467f0bfa2f07557c22adc971cef0923a0",
  "runs": [
+  {
+   "run_id": "a-change-decimal38-clojure-a1-20261011T060221Z",
+   "language": "clojure",
+   "task": "change-decimal38",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-decimal38-clojure-a1-20261011T060221Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-decimal38-common-lisp-a1-20261011T065327Z",
+   "language": "common-lisp",
+   "task": "change-decimal38",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-decimal38-common-lisp-a1-20261011T065327Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-decimal38-go-a1-20261011T060035Z",
+   "language": "go",
+   "task": "change-decimal38",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-decimal38-go-a1-20261011T060035Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-decimal38-java-a1-20261011T063016Z",
+   "language": "java",
+   "task": "change-decimal38",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-decimal38-java-a1-20261011T063016Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-decimal38-python-a1-20261011T060828Z",
+   "language": "python",
+   "task": "change-decimal38",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-decimal38-python-a1-20261011T060828Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-decimal38-rust-a1-20261011T060356Z",
+   "language": "rust",
+   "task": "change-decimal38",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-decimal38-rust-a1-20261011T060356Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-union-all-clojure-a1-20261011T053530Z",
+   "language": "clojure",
+   "task": "change-union-all",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-union-all-clojure-a1-20261011T053530Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-union-all-common-lisp-a1-20261011T053529Z",
+   "language": "common-lisp",
+   "task": "change-union-all",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-union-all-common-lisp-a1-20261011T053529Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-union-all-go-a1-20261011T053524Z",
+   "language": "go",
+   "task": "change-union-all",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-union-all-go-a1-20261011T053524Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-union-all-java-a1-20261011T053525Z",
+   "language": "java",
+   "task": "change-union-all",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-union-all-java-a1-20261011T053525Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-union-all-python-a1-20261011T053526Z",
+   "language": "python",
+   "task": "change-union-all",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-union-all-python-a1-20261011T053526Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-union-all-rust-a1-20261011T053528Z",
+   "language": "rust",
+   "task": "change-union-all",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-union-all-rust-a1-20261011T053528Z/manifest.json"
+  },
+  {
+   "run_id": "a-debug-mutant-clojure-a1-20261011T054110Z",
+   "language": "clojure",
+   "task": "debug-mutant",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-debug-mutant-clojure-a1-20261011T054110Z/manifest.json"
+  },
+  {
+   "run_id": "a-debug-mutant-common-lisp-a1-20261011T054106Z",
+   "language": "common-lisp",
+   "task": "debug-mutant",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-debug-mutant-common-lisp-a1-20261011T054106Z/manifest.json"
+  },
+  {
+   "run_id": "a-debug-mutant-go-a1-20261011T054104Z",
+   "language": "go",
+   "task": "debug-mutant",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-debug-mutant-go-a1-20261011T054104Z/manifest.json"
+  },
+  {
+   "run_id": "a-debug-mutant-java-a1-20261011T054108Z",
+   "language": "java",
+   "task": "debug-mutant",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-debug-mutant-java-a1-20261011T054108Z/manifest.json"
+  },
+  {
+   "run_id": "a-debug-mutant-python-a1-20261011T054107Z",
+   "language": "python",
+   "task": "debug-mutant",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-debug-mutant-python-a1-20261011T054107Z/manifest.json"
+  },
+  {
+   "run_id": "a-debug-mutant-rust-a1-20261011T054109Z",
+   "language": "rust",
+   "task": "debug-mutant",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-debug-mutant-rust-a1-20261011T054109Z/manifest.json"
+  },
   {
    "run_id": "a-kernels-arm64-asm-a1-20261010T184024Z",
    "language": "arm64-asm",
@@ -89,6 +251,51 @@
    "attempt": 1,
    "outcome": "success",
    "manifest": "experiments/runs/a-native-rust-a1-20261011T034932Z/manifest.json"
+  },
+  {
+   "run_id": "a-optimize-latency-clojure-a1-20261011T062604Z",
+   "language": "clojure",
+   "task": "optimize-latency",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-optimize-latency-clojure-a1-20261011T062604Z/manifest.json"
+  },
+  {
+   "run_id": "a-optimize-latency-go-a1-20261011T063805Z",
+   "language": "go",
+   "task": "optimize-latency",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "timeout",
+   "manifest": "experiments/runs/a-optimize-latency-go-a1-20261011T063805Z/manifest.json"
+  },
+  {
+   "run_id": "a-optimize-latency-java-a1-20261011T065356Z",
+   "language": "java",
+   "task": "optimize-latency",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "timeout",
+   "manifest": "experiments/runs/a-optimize-latency-java-a1-20261011T065356Z/manifest.json"
+  },
+  {
+   "run_id": "a-optimize-latency-python-a1-20261011T065122Z",
+   "language": "python",
+   "task": "optimize-latency",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "timeout",
+   "manifest": "experiments/runs/a-optimize-latency-python-a1-20261011T065122Z/manifest.json"
+  },
+  {
+   "run_id": "a-optimize-latency-rust-a1-20261011T062206Z",
+   "language": "rust",
+   "task": "optimize-latency",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-optimize-latency-rust-a1-20261011T062206Z/manifest.json"
   },
   {
    "run_id": "a-phase1-clojure-a1-20261010T182858Z",
@@ -359,10 +566,66 @@
    "attempt": 1,
    "outcome": "success",
    "manifest": "experiments/runs/a-phase5-rust-a1-20261011T004454Z/manifest.json"
+  },
+  {
+   "run_id": "a-refactor-plan-separation-clojure-a1-20261011T054654Z",
+   "language": "clojure",
+   "task": "refactor-plan-separation",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-refactor-plan-separation-clojure-a1-20261011T054654Z/manifest.json"
+  },
+  {
+   "run_id": "a-refactor-plan-separation-common-lisp-a1-20261011T062513Z",
+   "language": "common-lisp",
+   "task": "refactor-plan-separation",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-refactor-plan-separation-common-lisp-a1-20261011T062513Z/manifest.json"
+  },
+  {
+   "run_id": "a-refactor-plan-separation-go-a1-20261011T054655Z",
+   "language": "go",
+   "task": "refactor-plan-separation",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-refactor-plan-separation-go-a1-20261011T054655Z/manifest.json"
+  },
+  {
+   "run_id": "a-refactor-plan-separation-java-a1-20261011T060719Z",
+   "language": "java",
+   "task": "refactor-plan-separation",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-refactor-plan-separation-java-a1-20261011T060719Z/manifest.json"
+  },
+  {
+   "run_id": "a-refactor-plan-separation-python-a1-20261011T054658Z",
+   "language": "python",
+   "task": "refactor-plan-separation",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-refactor-plan-separation-python-a1-20261011T054658Z/manifest.json"
+  },
+  {
+   "run_id": "a-refactor-plan-separation-rust-a1-20261011T054657Z",
+   "language": "rust",
+   "task": "refactor-plan-separation",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-refactor-plan-separation-rust-a1-20261011T054657Z/manifest.json"
   }
  ],
  "capability_matrix": {
   "java": [
+   "change.decimal38",
+   "change.union_all",
    "exec.parallel",
    "exec.row",
    "exec.vectorized",
@@ -393,6 +656,8 @@
    "test.functions"
   ],
   "clojure": [
+   "change.decimal38",
+   "change.union_all",
    "exec.parallel",
    "exec.row",
    "exec.vectorized",
@@ -423,6 +688,8 @@
    "test.functions"
   ],
   "rust": [
+   "change.decimal38",
+   "change.union_all",
    "exec.parallel",
    "exec.row",
    "exec.vectorized",
@@ -453,6 +720,8 @@
    "test.functions"
   ],
   "python": [
+   "change.decimal38",
+   "change.union_all",
    "exec.parallel",
    "exec.row",
    "exec.vectorized",
@@ -483,6 +752,8 @@
    "test.functions"
   ],
   "go": [
+   "change.decimal38",
+   "change.union_all",
    "exec.parallel",
    "exec.row",
    "exec.vectorized",
@@ -513,6 +784,8 @@
    "test.functions"
   ],
   "common-lisp": [
+   "change.decimal38",
+   "change.union_all",
    "exec.parallel",
    "exec.row",
    "exec.vectorized",
@@ -556,15 +829,15 @@
        "not_implemented": 0
       },
       "2": {
-       "total": 186,
-       "pass": 186,
+       "total": 208,
+       "pass": 208,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
       },
       "3": {
-       "total": 143,
-       "pass": 143,
+       "total": 212,
+       "pass": 212,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
@@ -578,8 +851,8 @@
       }
      },
      "total": {
-      "total": 569,
-      "pass": 569,
+      "total": 660,
+      "pass": 660,
       "fail": 0,
       "error": 0,
       "not_implemented": 0
@@ -592,6 +865,8 @@
      "5": true
     },
     "capabilities": [
+     "change.decimal38",
+     "change.union_all",
      "exec.parallel",
      "exec.row",
      "exec.vectorized",
@@ -621,7 +896,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T05:16:39.238072+00:00",
+    "started": "2026-10-11T06:53:54.634777+00:00",
     "source": "results/correctness/java.json"
    },
    "clojure": {
@@ -635,15 +910,15 @@
        "not_implemented": 0
       },
       "2": {
-       "total": 186,
-       "pass": 186,
+       "total": 208,
+       "pass": 208,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
       },
       "3": {
-       "total": 143,
-       "pass": 143,
+       "total": 212,
+       "pass": 212,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
@@ -657,8 +932,8 @@
       }
      },
      "total": {
-      "total": 569,
-      "pass": 569,
+      "total": 660,
+      "pass": 660,
       "fail": 0,
       "error": 0,
       "not_implemented": 0
@@ -671,6 +946,8 @@
      "5": true
     },
     "capabilities": [
+     "change.decimal38",
+     "change.union_all",
      "exec.parallel",
      "exec.row",
      "exec.vectorized",
@@ -700,7 +977,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T04:28:52.587800+00:00",
+    "started": "2026-10-11T07:07:53.339036+00:00",
     "source": "results/correctness/clojure.json"
    },
    "rust": {
@@ -714,15 +991,15 @@
        "not_implemented": 0
       },
       "2": {
-       "total": 186,
-       "pass": 186,
+       "total": 208,
+       "pass": 208,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
       },
       "3": {
-       "total": 143,
-       "pass": 143,
+       "total": 212,
+       "pass": 212,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
@@ -736,8 +1013,8 @@
       }
      },
      "total": {
-      "total": 569,
-      "pass": 569,
+      "total": 660,
+      "pass": 660,
       "fail": 0,
       "error": 0,
       "not_implemented": 0
@@ -750,6 +1027,8 @@
      "5": true
     },
     "capabilities": [
+     "change.decimal38",
+     "change.union_all",
      "exec.parallel",
      "exec.row",
      "exec.vectorized",
@@ -779,7 +1058,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T04:38:16.829559+00:00",
+    "started": "2026-10-11T07:06:43.932146+00:00",
     "source": "results/correctness/rust.json"
    },
    "python": {
@@ -793,15 +1072,15 @@
        "not_implemented": 0
       },
       "2": {
-       "total": 186,
-       "pass": 186,
+       "total": 208,
+       "pass": 208,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
       },
       "3": {
-       "total": 143,
-       "pass": 143,
+       "total": 212,
+       "pass": 212,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
@@ -815,8 +1094,8 @@
       }
      },
      "total": {
-      "total": 569,
-      "pass": 569,
+      "total": 660,
+      "pass": 660,
       "fail": 0,
       "error": 0,
       "not_implemented": 0
@@ -829,6 +1108,8 @@
      "5": true
     },
     "capabilities": [
+     "change.decimal38",
+     "change.union_all",
      "exec.parallel",
      "exec.row",
      "exec.vectorized",
@@ -858,7 +1139,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T04:52:02.062247+00:00",
+    "started": "2026-10-11T06:51:21.682752+00:00",
     "source": "results/correctness/python.json"
    },
    "go": {
@@ -872,15 +1153,15 @@
        "not_implemented": 0
       },
       "2": {
-       "total": 186,
-       "pass": 186,
+       "total": 208,
+       "pass": 208,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
       },
       "3": {
-       "total": 143,
-       "pass": 143,
+       "total": 212,
+       "pass": 212,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
@@ -894,8 +1175,8 @@
       }
      },
      "total": {
-      "total": 569,
-      "pass": 569,
+      "total": 660,
+      "pass": 660,
       "fail": 0,
       "error": 0,
       "not_implemented": 0
@@ -908,6 +1189,8 @@
      "5": true
     },
     "capabilities": [
+     "change.decimal38",
+     "change.union_all",
      "exec.parallel",
      "exec.row",
      "exec.vectorized",
@@ -937,7 +1220,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T04:27:04.538058+00:00",
+    "started": "2026-10-11T06:38:05.365342+00:00",
     "source": "results/correctness/go.json"
    },
    "common-lisp": {
@@ -951,15 +1234,15 @@
        "not_implemented": 0
       },
       "2": {
-       "total": 186,
-       "pass": 186,
+       "total": 208,
+       "pass": 208,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
       },
       "3": {
-       "total": 143,
-       "pass": 143,
+       "total": 212,
+       "pass": 212,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
@@ -973,8 +1256,8 @@
       }
      },
      "total": {
-      "total": 569,
-      "pass": 569,
+      "total": 660,
+      "pass": 660,
       "fail": 0,
       "error": 0,
       "not_implemented": 0
@@ -987,6 +1270,8 @@
      "5": true
     },
     "capabilities": [
+     "change.decimal38",
+     "change.union_all",
      "exec.parallel",
      "exec.row",
      "exec.vectorized",
@@ -1016,12 +1301,96 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T05:10:02.032644+00:00",
+    "started": "2026-10-11T07:16:20.281445+00:00",
     "source": "results/correctness/common-lisp.json"
    }
   },
   "2_development_effort": {
    "java": {
+    "change-decimal38": [
+     {
+      "run_id": "a-change-decimal38-java-a1-20261011T063016Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-decimal38-java-a1-20261011T063016Z/manifest.json",
+      "cost_usd": 13.923582400000006,
+      "tokens_output": 137382,
+      "tokens_input_total": 40721989,
+      "turns": 175,
+      "wall_seconds": 1385.4,
+      "tool_calls": 174,
+      "tool_failures": 0,
+      "build_failures": 4,
+      "repair_iterations": 7,
+      "commits": 3,
+      "lines_added": 1552,
+      "lines_removed": 280,
+      "files_changed": 44,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-union-all": [
+     {
+      "run_id": "a-change-union-all-java-a1-20261011T053525Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-union-all-java-a1-20261011T053525Z/manifest.json",
+      "cost_usd": 4.9248474,
+      "tokens_output": 49714,
+      "tokens_input_total": 11898044,
+      "turns": 88,
+      "wall_seconds": 1876.3,
+      "tool_calls": 86,
+      "tool_failures": 1,
+      "build_failures": 1,
+      "repair_iterations": 5,
+      "commits": 3,
+      "lines_added": 475,
+      "lines_removed": 25,
+      "files_changed": 21,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "debug-mutant": [
+     {
+      "run_id": "a-debug-mutant-java-a1-20261011T054108Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-debug-mutant-java-a1-20261011T054108Z/manifest.json",
+      "cost_usd": 0.2830554,
+      "tokens_output": 2869,
+      "tokens_input_total": 326199,
+      "turns": 14,
+      "wall_seconds": 80.9,
+      "tool_calls": 13,
+      "tool_failures": 0,
+      "build_failures": 1,
+      "repair_iterations": 6,
+      "commits": 1,
+      "lines_added": 1,
+      "lines_removed": 1,
+      "files_changed": 1,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "native": [
      {
       "run_id": "a-native-java-a1-20261011T034931Z",
@@ -1039,6 +1408,8 @@
       "repair_iterations": 8,
       "commits": 11,
       "lines_added": 2237,
+      "lines_removed": 69,
+      "files_changed": 29,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1063,9 +1434,39 @@
       "repair_iterations": 8,
       "commits": 7,
       "lines_added": 2813,
+      "lines_removed": 123,
+      "files_changed": 33,
       "conformance": {
        "total": 623,
        "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "optimize-latency": [
+     {
+      "run_id": "a-optimize-latency-java-a1-20261011T065356Z",
+      "attempt": 1,
+      "outcome": "timeout",
+      "manifest": "experiments/runs/a-optimize-latency-java-a1-20261011T065356Z/manifest.json",
+      "cost_usd": null,
+      "tokens_output": 1861,
+      "tokens_input_total": 52318596,
+      "turns": null,
+      "wall_seconds": 4320.3,
+      "tool_calls": 203,
+      "tool_failures": 5,
+      "build_failures": 2,
+      "repair_iterations": 0,
+      "commits": 9,
+      "lines_added": 2555,
+      "lines_removed": 143,
+      "files_changed": 36,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
@@ -1089,6 +1490,8 @@
       "repair_iterations": 5,
       "commits": 3,
       "lines_added": 7521,
+      "lines_removed": 0,
+      "files_changed": 76,
       "conformance": {
        "total": 249,
        "pass": 249,
@@ -1115,6 +1518,8 @@
       "repair_iterations": 7,
       "commits": 4,
       "lines_added": 3830,
+      "lines_removed": 585,
+      "files_changed": 40,
       "conformance": {
        "total": 451,
        "pass": 451,
@@ -1141,6 +1546,8 @@
       "repair_iterations": 8,
       "commits": 7,
       "lines_added": 4374,
+      "lines_removed": 132,
+      "files_changed": 54,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1167,6 +1574,8 @@
       "repair_iterations": 4,
       "commits": 3,
       "lines_added": 2348,
+      "lines_removed": 154,
+      "files_changed": 27,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1193,6 +1602,8 @@
       "repair_iterations": 29,
       "commits": 22,
       "lines_added": 9365,
+      "lines_removed": 117,
+      "files_changed": 48,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1201,9 +1612,121 @@
        "not_implemented": 0
       }
      }
+    ],
+    "refactor-plan-separation": [
+     {
+      "run_id": "a-refactor-plan-separation-java-a1-20261011T060719Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-refactor-plan-separation-java-a1-20261011T060719Z/manifest.json",
+      "cost_usd": 6.298771200000003,
+      "tokens_output": 103810,
+      "tokens_input_total": 11569088,
+      "turns": 80,
+      "wall_seconds": 1345.7,
+      "tool_calls": 79,
+      "tool_failures": 3,
+      "build_failures": 1,
+      "repair_iterations": 0,
+      "commits": 2,
+      "lines_added": 1397,
+      "lines_removed": 397,
+      "files_changed": 29,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
     ]
    },
    "clojure": {
+    "change-decimal38": [
+     {
+      "run_id": "a-change-decimal38-clojure-a1-20261011T060221Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-decimal38-clojure-a1-20261011T060221Z/manifest.json",
+      "cost_usd": 8.530311999999997,
+      "tokens_output": 90967,
+      "tokens_input_total": 21966393,
+      "turns": 112,
+      "wall_seconds": 1353.6,
+      "tool_calls": 110,
+      "tool_failures": 2,
+      "build_failures": 10,
+      "repair_iterations": 7,
+      "commits": 3,
+      "lines_added": 825,
+      "lines_removed": 157,
+      "files_changed": 27,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-union-all": [
+     {
+      "run_id": "a-change-union-all-clojure-a1-20261011T053530Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-union-all-clojure-a1-20261011T053530Z/manifest.json",
+      "cost_usd": 3.755507999999999,
+      "tokens_output": 42345,
+      "tokens_input_total": 8237394,
+      "turns": 73,
+      "wall_seconds": 545.6,
+      "tool_calls": 72,
+      "tool_failures": 1,
+      "build_failures": 1,
+      "repair_iterations": 7,
+      "commits": 1,
+      "lines_added": 312,
+      "lines_removed": 39,
+      "files_changed": 17,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "debug-mutant": [
+     {
+      "run_id": "a-debug-mutant-clojure-a1-20261011T054110Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-debug-mutant-clojure-a1-20261011T054110Z/manifest.json",
+      "cost_usd": 0.388602,
+      "tokens_output": 2708,
+      "tokens_input_total": 463848,
+      "turns": 14,
+      "wall_seconds": 87.1,
+      "tool_calls": 13,
+      "tool_failures": 0,
+      "build_failures": 2,
+      "repair_iterations": 4,
+      "commits": 1,
+      "lines_added": 1,
+      "lines_removed": 1,
+      "files_changed": 1,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "native": [
      {
       "run_id": "a-native-clojure-a1-20261011T034926Z",
@@ -1221,9 +1744,39 @@
       "repair_iterations": 7,
       "commits": 3,
       "lines_added": 1570,
+      "lines_removed": 97,
+      "files_changed": 18,
       "conformance": {
        "total": 623,
        "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "optimize-latency": [
+     {
+      "run_id": "a-optimize-latency-clojure-a1-20261011T062604Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-optimize-latency-clojure-a1-20261011T062604Z/manifest.json",
+      "cost_usd": 10.817963000000002,
+      "tokens_output": 133864,
+      "tokens_input_total": 27777596,
+      "turns": 152,
+      "wall_seconds": 2440.3,
+      "tool_calls": 151,
+      "tool_failures": 2,
+      "build_failures": 6,
+      "repair_iterations": 16,
+      "commits": 11,
+      "lines_added": 1409,
+      "lines_removed": 134,
+      "files_changed": 22,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
@@ -1247,6 +1800,8 @@
       "repair_iterations": 5,
       "commits": 4,
       "lines_added": 4315,
+      "lines_removed": 0,
+      "files_changed": 42,
       "conformance": {
        "total": 249,
        "pass": 249,
@@ -1273,6 +1828,8 @@
       "repair_iterations": 8,
       "commits": 5,
       "lines_added": 2474,
+      "lines_removed": 666,
+      "files_changed": 25,
       "conformance": {
        "total": 451,
        "pass": 451,
@@ -1299,6 +1856,8 @@
       "repair_iterations": 6,
       "commits": 6,
       "lines_added": 2420,
+      "lines_removed": 155,
+      "files_changed": 24,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1325,6 +1884,8 @@
       "repair_iterations": 2,
       "commits": 2,
       "lines_added": 1415,
+      "lines_removed": 81,
+      "files_changed": 13,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1351,6 +1912,8 @@
       "repair_iterations": 13,
       "commits": 9,
       "lines_added": 4845,
+      "lines_removed": 220,
+      "files_changed": 29,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1359,9 +1922,121 @@
        "not_implemented": 0
       }
      }
+    ],
+    "refactor-plan-separation": [
+     {
+      "run_id": "a-refactor-plan-separation-clojure-a1-20261011T054654Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-refactor-plan-separation-clojure-a1-20261011T054654Z/manifest.json",
+      "cost_usd": 4.0508755999999995,
+      "tokens_output": 73732,
+      "tokens_input_total": 6533560,
+      "turns": 64,
+      "wall_seconds": 859.2,
+      "tool_calls": 63,
+      "tool_failures": 2,
+      "build_failures": 7,
+      "repair_iterations": 0,
+      "commits": 3,
+      "lines_added": 849,
+      "lines_removed": 212,
+      "files_changed": 19,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
     ]
    },
    "rust": {
+    "change-decimal38": [
+     {
+      "run_id": "a-change-decimal38-rust-a1-20261011T060356Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-decimal38-rust-a1-20261011T060356Z/manifest.json",
+      "cost_usd": 8.570301200000001,
+      "tokens_output": 91101,
+      "tokens_input_total": 22350985,
+      "turns": 118,
+      "wall_seconds": 1049.8,
+      "tool_calls": 117,
+      "tool_failures": 3,
+      "build_failures": 11,
+      "repair_iterations": 4,
+      "commits": 2,
+      "lines_added": 1411,
+      "lines_removed": 233,
+      "files_changed": 27,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-union-all": [
+     {
+      "run_id": "a-change-union-all-rust-a1-20261011T053528Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-union-all-rust-a1-20261011T053528Z/manifest.json",
+      "cost_usd": 3.743945800000001,
+      "tokens_output": 42358,
+      "tokens_input_total": 8377812,
+      "turns": 78,
+      "wall_seconds": 476.4,
+      "tool_calls": 77,
+      "tool_failures": 0,
+      "build_failures": 1,
+      "repair_iterations": 6,
+      "commits": 2,
+      "lines_added": 566,
+      "lines_removed": 40,
+      "files_changed": 14,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "debug-mutant": [
+     {
+      "run_id": "a-debug-mutant-rust-a1-20261011T054109Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-debug-mutant-rust-a1-20261011T054109Z/manifest.json",
+      "cost_usd": 0.22225180000000005,
+      "tokens_output": 2343,
+      "tokens_input_total": 228555,
+      "turns": 10,
+      "wall_seconds": 75.8,
+      "tool_calls": 9,
+      "tool_failures": 1,
+      "build_failures": 1,
+      "repair_iterations": 3,
+      "commits": 1,
+      "lines_added": 1,
+      "lines_removed": 1,
+      "files_changed": 1,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "native": [
      {
       "run_id": "a-native-rust-a1-20261011T034932Z",
@@ -1379,9 +2054,39 @@
       "repair_iterations": 7,
       "commits": 7,
       "lines_added": 2873,
+      "lines_removed": 96,
+      "files_changed": 23,
       "conformance": {
        "total": 623,
        "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "optimize-latency": [
+     {
+      "run_id": "a-optimize-latency-rust-a1-20261011T062206Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-optimize-latency-rust-a1-20261011T062206Z/manifest.json",
+      "cost_usd": 10.222676999999996,
+      "tokens_output": 152447,
+      "tokens_input_total": 23839817,
+      "turns": 141,
+      "wall_seconds": 2636.4,
+      "tool_calls": 140,
+      "tool_failures": 4,
+      "build_failures": 1,
+      "repair_iterations": 0,
+      "commits": 7,
+      "lines_added": 2262,
+      "lines_removed": 62,
+      "files_changed": 15,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
@@ -1405,6 +2110,8 @@
       "repair_iterations": 3,
       "commits": 4,
       "lines_added": 8823,
+      "lines_removed": 0,
+      "files_changed": 44,
       "conformance": {
        "total": 249,
        "pass": 249,
@@ -1431,6 +2138,8 @@
       "repair_iterations": 5,
       "commits": 3,
       "lines_added": 4838,
+      "lines_removed": 1315,
+      "files_changed": 22,
       "conformance": {
        "total": 451,
        "pass": 451,
@@ -1457,6 +2166,8 @@
       "repair_iterations": 3,
       "commits": 3,
       "lines_added": 3889,
+      "lines_removed": 118,
+      "files_changed": 24,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1483,6 +2194,8 @@
       "repair_iterations": 2,
       "commits": 5,
       "lines_added": 2647,
+      "lines_removed": 214,
+      "files_changed": 19,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1509,6 +2222,8 @@
       "repair_iterations": 26,
       "commits": 32,
       "lines_added": 9413,
+      "lines_removed": 133,
+      "files_changed": 42,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1517,9 +2232,121 @@
        "not_implemented": 0
       }
      }
+    ],
+    "refactor-plan-separation": [
+     {
+      "run_id": "a-refactor-plan-separation-rust-a1-20261011T054657Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-refactor-plan-separation-rust-a1-20261011T054657Z/manifest.json",
+      "cost_usd": 5.855050400000002,
+      "tokens_output": 94161,
+      "tokens_input_total": 11372944,
+      "turns": 79,
+      "wall_seconds": 970.2,
+      "tool_calls": 78,
+      "tool_failures": 0,
+      "build_failures": 3,
+      "repair_iterations": 0,
+      "commits": 3,
+      "lines_added": 1969,
+      "lines_removed": 828,
+      "files_changed": 23,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
     ]
    },
    "python": {
+    "change-decimal38": [
+     {
+      "run_id": "a-change-decimal38-python-a1-20261011T060828Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-decimal38-python-a1-20261011T060828Z/manifest.json",
+      "cost_usd": 6.252252400000002,
+      "tokens_output": 66526,
+      "tokens_input_total": 15520513,
+      "turns": 104,
+      "wall_seconds": 2530.8,
+      "tool_calls": 103,
+      "tool_failures": 4,
+      "build_failures": 4,
+      "repair_iterations": 4,
+      "commits": 2,
+      "lines_added": 505,
+      "lines_removed": 110,
+      "files_changed": 22,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-union-all": [
+     {
+      "run_id": "a-change-union-all-python-a1-20261011T053526Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-union-all-python-a1-20261011T053526Z/manifest.json",
+      "cost_usd": 3.480239,
+      "tokens_output": 39272,
+      "tokens_input_total": 7588572,
+      "turns": 71,
+      "wall_seconds": 472.8,
+      "tool_calls": 70,
+      "tool_failures": 1,
+      "build_failures": 0,
+      "repair_iterations": 4,
+      "commits": 1,
+      "lines_added": 417,
+      "lines_removed": 21,
+      "files_changed": 15,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "debug-mutant": [
+     {
+      "run_id": "a-debug-mutant-python-a1-20261011T054107Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-debug-mutant-python-a1-20261011T054107Z/manifest.json",
+      "cost_usd": 0.208926,
+      "tokens_output": 1973,
+      "tokens_input_total": 283676,
+      "turns": 13,
+      "wall_seconds": 36.3,
+      "tool_calls": 12,
+      "tool_failures": 1,
+      "build_failures": 0,
+      "repair_iterations": 2,
+      "commits": 1,
+      "lines_added": 1,
+      "lines_removed": 1,
+      "files_changed": 1,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "native": [
      {
       "run_id": "a-native-python-a1-20261011T034927Z",
@@ -1537,9 +2364,39 @@
       "repair_iterations": 0,
       "commits": 10,
       "lines_added": 2576,
+      "lines_removed": 49,
+      "files_changed": 18,
       "conformance": {
        "total": 623,
        "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "optimize-latency": [
+     {
+      "run_id": "a-optimize-latency-python-a1-20261011T065122Z",
+      "attempt": 1,
+      "outcome": "timeout",
+      "manifest": "experiments/runs/a-optimize-latency-python-a1-20261011T065122Z/manifest.json",
+      "cost_usd": null,
+      "tokens_output": 1330,
+      "tokens_input_total": 30320844,
+      "turns": null,
+      "wall_seconds": 4440.2,
+      "tool_calls": 153,
+      "tool_failures": 3,
+      "build_failures": 2,
+      "repair_iterations": 0,
+      "commits": 10,
+      "lines_added": 1732,
+      "lines_removed": 133,
+      "files_changed": 17,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
@@ -1563,6 +2420,8 @@
       "repair_iterations": 9,
       "commits": 8,
       "lines_added": 5525,
+      "lines_removed": 0,
+      "files_changed": 52,
       "conformance": {
        "total": 249,
        "pass": 249,
@@ -1589,6 +2448,8 @@
       "repair_iterations": 7,
       "commits": 5,
       "lines_added": 3032,
+      "lines_removed": 487,
+      "files_changed": 24,
       "conformance": {
        "total": 451,
        "pass": 451,
@@ -1615,6 +2476,8 @@
       "repair_iterations": 6,
       "commits": 6,
       "lines_added": 2682,
+      "lines_removed": 114,
+      "files_changed": 19,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1641,6 +2504,8 @@
       "repair_iterations": 2,
       "commits": 2,
       "lines_added": 1578,
+      "lines_removed": 85,
+      "files_changed": 20,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1667,6 +2532,8 @@
       "repair_iterations": 12,
       "commits": 8,
       "lines_added": 4158,
+      "lines_removed": 622,
+      "files_changed": 26,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1675,9 +2542,121 @@
        "not_implemented": 0
       }
      }
+    ],
+    "refactor-plan-separation": [
+     {
+      "run_id": "a-refactor-plan-separation-python-a1-20261011T054658Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-refactor-plan-separation-python-a1-20261011T054658Z/manifest.json",
+      "cost_usd": 4.8918387999999995,
+      "tokens_output": 81928,
+      "tokens_input_total": 8780368,
+      "turns": 67,
+      "wall_seconds": 1237.6,
+      "tool_calls": 66,
+      "tool_failures": 1,
+      "build_failures": 2,
+      "repair_iterations": 0,
+      "commits": 2,
+      "lines_added": 1105,
+      "lines_removed": 361,
+      "files_changed": 23,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
     ]
    },
    "go": {
+    "change-decimal38": [
+     {
+      "run_id": "a-change-decimal38-go-a1-20261011T060035Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-decimal38-go-a1-20261011T060035Z/manifest.json",
+      "cost_usd": 16.4993488,
+      "tokens_output": 163665,
+      "tokens_input_total": 49100994,
+      "turns": 179,
+      "wall_seconds": 2225.1,
+      "tool_calls": 178,
+      "tool_failures": 1,
+      "build_failures": 3,
+      "repair_iterations": 6,
+      "commits": 11,
+      "lines_added": 2595,
+      "lines_removed": 231,
+      "files_changed": 45,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-union-all": [
+     {
+      "run_id": "a-change-union-all-go-a1-20261011T053524Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-union-all-go-a1-20261011T053524Z/manifest.json",
+      "cost_usd": 3.616785200000001,
+      "tokens_output": 43303,
+      "tokens_input_total": 7501218,
+      "turns": 74,
+      "wall_seconds": 495.0,
+      "tool_calls": 73,
+      "tool_failures": 0,
+      "build_failures": 0,
+      "repair_iterations": 7,
+      "commits": 2,
+      "lines_added": 595,
+      "lines_removed": 11,
+      "files_changed": 19,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "debug-mutant": [
+     {
+      "run_id": "a-debug-mutant-go-a1-20261011T054104Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-debug-mutant-go-a1-20261011T054104Z/manifest.json",
+      "cost_usd": 0.22887059999999998,
+      "tokens_output": 1974,
+      "tokens_input_total": 245392,
+      "turns": 10,
+      "wall_seconds": 49.8,
+      "tool_calls": 9,
+      "tool_failures": 0,
+      "build_failures": 1,
+      "repair_iterations": 3,
+      "commits": 1,
+      "lines_added": 1,
+      "lines_removed": 1,
+      "files_changed": 1,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "native": [
      {
       "run_id": "a-native-go-a1-20261011T034928Z",
@@ -1695,9 +2674,39 @@
       "repair_iterations": 9,
       "commits": 8,
       "lines_added": 2805,
+      "lines_removed": 76,
+      "files_changed": 21,
       "conformance": {
        "total": 623,
        "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "optimize-latency": [
+     {
+      "run_id": "a-optimize-latency-go-a1-20261011T063805Z",
+      "attempt": 1,
+      "outcome": "timeout",
+      "manifest": "experiments/runs/a-optimize-latency-go-a1-20261011T063805Z/manifest.json",
+      "cost_usd": null,
+      "tokens_output": 4396,
+      "tokens_input_total": 105599394,
+      "turns": null,
+      "wall_seconds": 5280.4,
+      "tool_calls": 490,
+      "tool_failures": 2,
+      "build_failures": 16,
+      "repair_iterations": 19,
+      "commits": 18,
+      "lines_added": 4192,
+      "lines_removed": 179,
+      "files_changed": 28,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
@@ -1721,6 +2730,8 @@
       "repair_iterations": 1,
       "commits": 3,
       "lines_added": 8310,
+      "lines_removed": 0,
+      "files_changed": 40,
       "conformance": {
        "total": 249,
        "pass": 249,
@@ -1747,6 +2758,8 @@
       "repair_iterations": 7,
       "commits": 6,
       "lines_added": 5260,
+      "lines_removed": 708,
+      "files_changed": 27,
       "conformance": {
        "total": 451,
        "pass": 451,
@@ -1773,6 +2786,8 @@
       "repair_iterations": 8,
       "commits": 4,
       "lines_added": 4514,
+      "lines_removed": 249,
+      "files_changed": 36,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1799,6 +2814,8 @@
       "repair_iterations": 2,
       "commits": 2,
       "lines_added": 1909,
+      "lines_removed": 128,
+      "files_changed": 13,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1825,6 +2842,8 @@
       "repair_iterations": 17,
       "commits": 12,
       "lines_added": 7790,
+      "lines_removed": 262,
+      "files_changed": 36,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1833,9 +2852,121 @@
        "not_implemented": 0
       }
      }
+    ],
+    "refactor-plan-separation": [
+     {
+      "run_id": "a-refactor-plan-separation-go-a1-20261011T054655Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-refactor-plan-separation-go-a1-20261011T054655Z/manifest.json",
+      "cost_usd": 3.6674945999999995,
+      "tokens_output": 56272,
+      "tokens_input_total": 6639319,
+      "turns": 67,
+      "wall_seconds": 731.4,
+      "tool_calls": 66,
+      "tool_failures": 1,
+      "build_failures": 0,
+      "repair_iterations": 0,
+      "commits": 3,
+      "lines_added": 1071,
+      "lines_removed": 273,
+      "files_changed": 16,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
     ]
    },
    "common-lisp": {
+    "change-decimal38": [
+     {
+      "run_id": "a-change-decimal38-common-lisp-a1-20261011T065327Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-decimal38-common-lisp-a1-20261011T065327Z/manifest.json",
+      "cost_usd": 7.4481686,
+      "tokens_output": 76437,
+      "tokens_input_total": 18483412,
+      "turns": 103,
+      "wall_seconds": 1346.3,
+      "tool_calls": 102,
+      "tool_failures": 1,
+      "build_failures": 3,
+      "repair_iterations": 7,
+      "commits": 3,
+      "lines_added": 526,
+      "lines_removed": 132,
+      "files_changed": 26,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-union-all": [
+     {
+      "run_id": "a-change-union-all-common-lisp-a1-20261011T053529Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-union-all-common-lisp-a1-20261011T053529Z/manifest.json",
+      "cost_usd": 4.5721582,
+      "tokens_output": 50836,
+      "tokens_input_total": 10626468,
+      "turns": 85,
+      "wall_seconds": 2935.8,
+      "tool_calls": 83,
+      "tool_failures": 1,
+      "build_failures": 4,
+      "repair_iterations": 6,
+      "commits": 1,
+      "lines_added": 483,
+      "lines_removed": 72,
+      "files_changed": 16,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "debug-mutant": [
+     {
+      "run_id": "a-debug-mutant-common-lisp-a1-20261011T054106Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-debug-mutant-common-lisp-a1-20261011T054106Z/manifest.json",
+      "cost_usd": 0.3427072,
+      "tokens_output": 3099,
+      "tokens_input_total": 401506,
+      "turns": 14,
+      "wall_seconds": 62.9,
+      "tool_calls": 13,
+      "tool_failures": 0,
+      "build_failures": 3,
+      "repair_iterations": 0,
+      "commits": 1,
+      "lines_added": 1,
+      "lines_removed": 1,
+      "files_changed": 1,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "native": [
      {
       "run_id": "a-native-common-lisp-a1-20261011T034930Z",
@@ -1853,6 +2984,8 @@
       "repair_iterations": 0,
       "commits": 9,
       "lines_added": 1902,
+      "lines_removed": 139,
+      "files_changed": 18,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1879,6 +3012,8 @@
       "repair_iterations": 5,
       "commits": 5,
       "lines_added": 4592,
+      "lines_removed": 0,
+      "files_changed": 41,
       "conformance": {
        "total": 249,
        "pass": 249,
@@ -1905,6 +3040,8 @@
       "repair_iterations": 11,
       "commits": 8,
       "lines_added": 2765,
+      "lines_removed": 543,
+      "files_changed": 17,
       "conformance": {
        "total": 451,
        "pass": 451,
@@ -1931,6 +3068,8 @@
       "repair_iterations": 7,
       "commits": 5,
       "lines_added": 2807,
+      "lines_removed": 177,
+      "files_changed": 19,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1957,6 +3096,8 @@
       "repair_iterations": 6,
       "commits": 5,
       "lines_added": 1891,
+      "lines_removed": 83,
+      "files_changed": 11,
       "conformance": {
        "total": 623,
        "pass": 623,
@@ -1983,9 +3124,39 @@
       "repair_iterations": 39,
       "commits": 29,
       "lines_added": 5211,
+      "lines_removed": 157,
+      "files_changed": 26,
       "conformance": {
        "total": 623,
        "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "refactor-plan-separation": [
+     {
+      "run_id": "a-refactor-plan-separation-common-lisp-a1-20261011T062513Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-refactor-plan-separation-common-lisp-a1-20261011T062513Z/manifest.json",
+      "cost_usd": 6.373399000000003,
+      "tokens_output": 97285,
+      "tokens_input_total": 13164919,
+      "turns": 95,
+      "wall_seconds": 1663.6,
+      "tool_calls": 93,
+      "tool_failures": 3,
+      "build_failures": 0,
+      "repair_iterations": 0,
+      "commits": 4,
+      "lines_added": 1520,
+      "lines_removed": 711,
+      "files_changed": 22,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
@@ -2011,6 +3182,8 @@
       "repair_iterations": 0,
       "commits": 11,
       "lines_added": 5290,
+      "lines_removed": 0,
+      "files_changed": 10,
       "conformance": null
      }
     ]
@@ -2033,6 +3206,8 @@
       "repair_iterations": 0,
       "commits": 4,
       "lines_added": 2803,
+      "lines_removed": 0,
+      "files_changed": 5,
       "conformance": null
      }
     ]
@@ -15148,52 +16323,52 @@
   ],
   "5_code_quality": {
    "java": {
-    "source_loc": 21290,
-    "test_loc": 2173,
-    "files": 154,
-    "comment_lines": 1917,
-    "comment_density": 0.09,
-    "largest_file_loc": 1102
+    "source_loc": 22503,
+    "test_loc": 2789,
+    "files": 163,
+    "comment_lines": 2207,
+    "comment_density": 0.098,
+    "largest_file_loc": 1180
    },
    "clojure": {
-    "source_loc": 11198,
-    "test_loc": 1391,
-    "files": 60,
-    "comment_lines": 336,
-    "comment_density": 0.03,
-    "largest_file_loc": 798
+    "source_loc": 12441,
+    "test_loc": 2007,
+    "files": 63,
+    "comment_lines": 389,
+    "comment_density": 0.031,
+    "largest_file_loc": 869
    },
    "rust": {
-    "source_loc": 22201,
-    "test_loc": 3194,
-    "files": 78,
-    "comment_lines": 1845,
-    "comment_density": 0.083,
-    "largest_file_loc": 1051
+    "source_loc": 24488,
+    "test_loc": 4193,
+    "files": 84,
+    "comment_lines": 2233,
+    "comment_density": 0.091,
+    "largest_file_loc": 1083
    },
    "python": {
-    "source_loc": 12222,
-    "test_loc": 1377,
-    "files": 70,
-    "comment_lines": 708,
-    "comment_density": 0.058,
-    "largest_file_loc": 979
+    "source_loc": 12738,
+    "test_loc": 1909,
+    "files": 76,
+    "comment_lines": 792,
+    "comment_density": 0.062,
+    "largest_file_loc": 988
    },
    "go": {
-    "source_loc": 21217,
-    "test_loc": 2895,
-    "files": 77,
-    "comment_lines": 1845,
-    "comment_density": 0.087,
-    "largest_file_loc": 1068
+    "source_loc": 22902,
+    "test_loc": 3709,
+    "files": 86,
+    "comment_lines": 2176,
+    "comment_density": 0.095,
+    "largest_file_loc": 1084
    },
    "common-lisp": {
-    "source_loc": 12742,
-    "test_loc": 999,
-    "files": 55,
-    "comment_lines": 1044,
-    "comment_density": 0.082,
-    "largest_file_loc": 763
+    "source_loc": 13212,
+    "test_loc": 1544,
+    "files": 62,
+    "comment_lines": 1189,
+    "comment_density": 0.09,
+    "largest_file_loc": 765
    },
    "x86_64-asm": {
     "source_loc": 4010,
@@ -26262,12 +27437,830 @@
    }
   ],
   "7_architectural_adaptability": {
-   "java": {},
-   "clojure": {},
-   "rust": {},
-   "python": {},
-   "go": {},
-   "common-lisp": {},
+   "java": {
+    "change-decimal38": [
+     {
+      "run_id": "a-change-decimal38-java-a1-20261011T063016Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-decimal38-java-a1-20261011T063016Z/manifest.json",
+      "cost_usd": 13.923582400000006,
+      "tokens_output": 137382,
+      "tokens_input_total": 40721989,
+      "turns": 175,
+      "wall_seconds": 1385.4,
+      "tool_calls": 174,
+      "tool_failures": 0,
+      "build_failures": 4,
+      "repair_iterations": 7,
+      "commits": 3,
+      "lines_added": 1552,
+      "lines_removed": 280,
+      "files_changed": 44,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-union-all": [
+     {
+      "run_id": "a-change-union-all-java-a1-20261011T053525Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-union-all-java-a1-20261011T053525Z/manifest.json",
+      "cost_usd": 4.9248474,
+      "tokens_output": 49714,
+      "tokens_input_total": 11898044,
+      "turns": 88,
+      "wall_seconds": 1876.3,
+      "tool_calls": 86,
+      "tool_failures": 1,
+      "build_failures": 1,
+      "repair_iterations": 5,
+      "commits": 3,
+      "lines_added": 475,
+      "lines_removed": 25,
+      "files_changed": 21,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "debug-mutant": [
+     {
+      "run_id": "a-debug-mutant-java-a1-20261011T054108Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-debug-mutant-java-a1-20261011T054108Z/manifest.json",
+      "cost_usd": 0.2830554,
+      "tokens_output": 2869,
+      "tokens_input_total": 326199,
+      "turns": 14,
+      "wall_seconds": 80.9,
+      "tool_calls": 13,
+      "tool_failures": 0,
+      "build_failures": 1,
+      "repair_iterations": 6,
+      "commits": 1,
+      "lines_added": 1,
+      "lines_removed": 1,
+      "files_changed": 1,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "optimize-latency": [
+     {
+      "run_id": "a-optimize-latency-java-a1-20261011T065356Z",
+      "attempt": 1,
+      "outcome": "timeout",
+      "manifest": "experiments/runs/a-optimize-latency-java-a1-20261011T065356Z/manifest.json",
+      "cost_usd": null,
+      "tokens_output": 1861,
+      "tokens_input_total": 52318596,
+      "turns": null,
+      "wall_seconds": 4320.3,
+      "tool_calls": 203,
+      "tool_failures": 5,
+      "build_failures": 2,
+      "repair_iterations": 0,
+      "commits": 9,
+      "lines_added": 2555,
+      "lines_removed": 143,
+      "files_changed": 36,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "refactor-plan-separation": [
+     {
+      "run_id": "a-refactor-plan-separation-java-a1-20261011T060719Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-refactor-plan-separation-java-a1-20261011T060719Z/manifest.json",
+      "cost_usd": 6.298771200000003,
+      "tokens_output": 103810,
+      "tokens_input_total": 11569088,
+      "turns": 80,
+      "wall_seconds": 1345.7,
+      "tool_calls": 79,
+      "tool_failures": 3,
+      "build_failures": 1,
+      "repair_iterations": 0,
+      "commits": 2,
+      "lines_added": 1397,
+      "lines_removed": 397,
+      "files_changed": 29,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ]
+   },
+   "clojure": {
+    "change-decimal38": [
+     {
+      "run_id": "a-change-decimal38-clojure-a1-20261011T060221Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-decimal38-clojure-a1-20261011T060221Z/manifest.json",
+      "cost_usd": 8.530311999999997,
+      "tokens_output": 90967,
+      "tokens_input_total": 21966393,
+      "turns": 112,
+      "wall_seconds": 1353.6,
+      "tool_calls": 110,
+      "tool_failures": 2,
+      "build_failures": 10,
+      "repair_iterations": 7,
+      "commits": 3,
+      "lines_added": 825,
+      "lines_removed": 157,
+      "files_changed": 27,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-union-all": [
+     {
+      "run_id": "a-change-union-all-clojure-a1-20261011T053530Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-union-all-clojure-a1-20261011T053530Z/manifest.json",
+      "cost_usd": 3.755507999999999,
+      "tokens_output": 42345,
+      "tokens_input_total": 8237394,
+      "turns": 73,
+      "wall_seconds": 545.6,
+      "tool_calls": 72,
+      "tool_failures": 1,
+      "build_failures": 1,
+      "repair_iterations": 7,
+      "commits": 1,
+      "lines_added": 312,
+      "lines_removed": 39,
+      "files_changed": 17,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "debug-mutant": [
+     {
+      "run_id": "a-debug-mutant-clojure-a1-20261011T054110Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-debug-mutant-clojure-a1-20261011T054110Z/manifest.json",
+      "cost_usd": 0.388602,
+      "tokens_output": 2708,
+      "tokens_input_total": 463848,
+      "turns": 14,
+      "wall_seconds": 87.1,
+      "tool_calls": 13,
+      "tool_failures": 0,
+      "build_failures": 2,
+      "repair_iterations": 4,
+      "commits": 1,
+      "lines_added": 1,
+      "lines_removed": 1,
+      "files_changed": 1,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "optimize-latency": [
+     {
+      "run_id": "a-optimize-latency-clojure-a1-20261011T062604Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-optimize-latency-clojure-a1-20261011T062604Z/manifest.json",
+      "cost_usd": 10.817963000000002,
+      "tokens_output": 133864,
+      "tokens_input_total": 27777596,
+      "turns": 152,
+      "wall_seconds": 2440.3,
+      "tool_calls": 151,
+      "tool_failures": 2,
+      "build_failures": 6,
+      "repair_iterations": 16,
+      "commits": 11,
+      "lines_added": 1409,
+      "lines_removed": 134,
+      "files_changed": 22,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "refactor-plan-separation": [
+     {
+      "run_id": "a-refactor-plan-separation-clojure-a1-20261011T054654Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-refactor-plan-separation-clojure-a1-20261011T054654Z/manifest.json",
+      "cost_usd": 4.0508755999999995,
+      "tokens_output": 73732,
+      "tokens_input_total": 6533560,
+      "turns": 64,
+      "wall_seconds": 859.2,
+      "tool_calls": 63,
+      "tool_failures": 2,
+      "build_failures": 7,
+      "repair_iterations": 0,
+      "commits": 3,
+      "lines_added": 849,
+      "lines_removed": 212,
+      "files_changed": 19,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ]
+   },
+   "rust": {
+    "change-decimal38": [
+     {
+      "run_id": "a-change-decimal38-rust-a1-20261011T060356Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-decimal38-rust-a1-20261011T060356Z/manifest.json",
+      "cost_usd": 8.570301200000001,
+      "tokens_output": 91101,
+      "tokens_input_total": 22350985,
+      "turns": 118,
+      "wall_seconds": 1049.8,
+      "tool_calls": 117,
+      "tool_failures": 3,
+      "build_failures": 11,
+      "repair_iterations": 4,
+      "commits": 2,
+      "lines_added": 1411,
+      "lines_removed": 233,
+      "files_changed": 27,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-union-all": [
+     {
+      "run_id": "a-change-union-all-rust-a1-20261011T053528Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-union-all-rust-a1-20261011T053528Z/manifest.json",
+      "cost_usd": 3.743945800000001,
+      "tokens_output": 42358,
+      "tokens_input_total": 8377812,
+      "turns": 78,
+      "wall_seconds": 476.4,
+      "tool_calls": 77,
+      "tool_failures": 0,
+      "build_failures": 1,
+      "repair_iterations": 6,
+      "commits": 2,
+      "lines_added": 566,
+      "lines_removed": 40,
+      "files_changed": 14,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "debug-mutant": [
+     {
+      "run_id": "a-debug-mutant-rust-a1-20261011T054109Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-debug-mutant-rust-a1-20261011T054109Z/manifest.json",
+      "cost_usd": 0.22225180000000005,
+      "tokens_output": 2343,
+      "tokens_input_total": 228555,
+      "turns": 10,
+      "wall_seconds": 75.8,
+      "tool_calls": 9,
+      "tool_failures": 1,
+      "build_failures": 1,
+      "repair_iterations": 3,
+      "commits": 1,
+      "lines_added": 1,
+      "lines_removed": 1,
+      "files_changed": 1,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "optimize-latency": [
+     {
+      "run_id": "a-optimize-latency-rust-a1-20261011T062206Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-optimize-latency-rust-a1-20261011T062206Z/manifest.json",
+      "cost_usd": 10.222676999999996,
+      "tokens_output": 152447,
+      "tokens_input_total": 23839817,
+      "turns": 141,
+      "wall_seconds": 2636.4,
+      "tool_calls": 140,
+      "tool_failures": 4,
+      "build_failures": 1,
+      "repair_iterations": 0,
+      "commits": 7,
+      "lines_added": 2262,
+      "lines_removed": 62,
+      "files_changed": 15,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "refactor-plan-separation": [
+     {
+      "run_id": "a-refactor-plan-separation-rust-a1-20261011T054657Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-refactor-plan-separation-rust-a1-20261011T054657Z/manifest.json",
+      "cost_usd": 5.855050400000002,
+      "tokens_output": 94161,
+      "tokens_input_total": 11372944,
+      "turns": 79,
+      "wall_seconds": 970.2,
+      "tool_calls": 78,
+      "tool_failures": 0,
+      "build_failures": 3,
+      "repair_iterations": 0,
+      "commits": 3,
+      "lines_added": 1969,
+      "lines_removed": 828,
+      "files_changed": 23,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ]
+   },
+   "python": {
+    "change-decimal38": [
+     {
+      "run_id": "a-change-decimal38-python-a1-20261011T060828Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-decimal38-python-a1-20261011T060828Z/manifest.json",
+      "cost_usd": 6.252252400000002,
+      "tokens_output": 66526,
+      "tokens_input_total": 15520513,
+      "turns": 104,
+      "wall_seconds": 2530.8,
+      "tool_calls": 103,
+      "tool_failures": 4,
+      "build_failures": 4,
+      "repair_iterations": 4,
+      "commits": 2,
+      "lines_added": 505,
+      "lines_removed": 110,
+      "files_changed": 22,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-union-all": [
+     {
+      "run_id": "a-change-union-all-python-a1-20261011T053526Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-union-all-python-a1-20261011T053526Z/manifest.json",
+      "cost_usd": 3.480239,
+      "tokens_output": 39272,
+      "tokens_input_total": 7588572,
+      "turns": 71,
+      "wall_seconds": 472.8,
+      "tool_calls": 70,
+      "tool_failures": 1,
+      "build_failures": 0,
+      "repair_iterations": 4,
+      "commits": 1,
+      "lines_added": 417,
+      "lines_removed": 21,
+      "files_changed": 15,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "debug-mutant": [
+     {
+      "run_id": "a-debug-mutant-python-a1-20261011T054107Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-debug-mutant-python-a1-20261011T054107Z/manifest.json",
+      "cost_usd": 0.208926,
+      "tokens_output": 1973,
+      "tokens_input_total": 283676,
+      "turns": 13,
+      "wall_seconds": 36.3,
+      "tool_calls": 12,
+      "tool_failures": 1,
+      "build_failures": 0,
+      "repair_iterations": 2,
+      "commits": 1,
+      "lines_added": 1,
+      "lines_removed": 1,
+      "files_changed": 1,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "optimize-latency": [
+     {
+      "run_id": "a-optimize-latency-python-a1-20261011T065122Z",
+      "attempt": 1,
+      "outcome": "timeout",
+      "manifest": "experiments/runs/a-optimize-latency-python-a1-20261011T065122Z/manifest.json",
+      "cost_usd": null,
+      "tokens_output": 1330,
+      "tokens_input_total": 30320844,
+      "turns": null,
+      "wall_seconds": 4440.2,
+      "tool_calls": 153,
+      "tool_failures": 3,
+      "build_failures": 2,
+      "repair_iterations": 0,
+      "commits": 10,
+      "lines_added": 1732,
+      "lines_removed": 133,
+      "files_changed": 17,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "refactor-plan-separation": [
+     {
+      "run_id": "a-refactor-plan-separation-python-a1-20261011T054658Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-refactor-plan-separation-python-a1-20261011T054658Z/manifest.json",
+      "cost_usd": 4.8918387999999995,
+      "tokens_output": 81928,
+      "tokens_input_total": 8780368,
+      "turns": 67,
+      "wall_seconds": 1237.6,
+      "tool_calls": 66,
+      "tool_failures": 1,
+      "build_failures": 2,
+      "repair_iterations": 0,
+      "commits": 2,
+      "lines_added": 1105,
+      "lines_removed": 361,
+      "files_changed": 23,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ]
+   },
+   "go": {
+    "change-decimal38": [
+     {
+      "run_id": "a-change-decimal38-go-a1-20261011T060035Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-decimal38-go-a1-20261011T060035Z/manifest.json",
+      "cost_usd": 16.4993488,
+      "tokens_output": 163665,
+      "tokens_input_total": 49100994,
+      "turns": 179,
+      "wall_seconds": 2225.1,
+      "tool_calls": 178,
+      "tool_failures": 1,
+      "build_failures": 3,
+      "repair_iterations": 6,
+      "commits": 11,
+      "lines_added": 2595,
+      "lines_removed": 231,
+      "files_changed": 45,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-union-all": [
+     {
+      "run_id": "a-change-union-all-go-a1-20261011T053524Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-union-all-go-a1-20261011T053524Z/manifest.json",
+      "cost_usd": 3.616785200000001,
+      "tokens_output": 43303,
+      "tokens_input_total": 7501218,
+      "turns": 74,
+      "wall_seconds": 495.0,
+      "tool_calls": 73,
+      "tool_failures": 0,
+      "build_failures": 0,
+      "repair_iterations": 7,
+      "commits": 2,
+      "lines_added": 595,
+      "lines_removed": 11,
+      "files_changed": 19,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "debug-mutant": [
+     {
+      "run_id": "a-debug-mutant-go-a1-20261011T054104Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-debug-mutant-go-a1-20261011T054104Z/manifest.json",
+      "cost_usd": 0.22887059999999998,
+      "tokens_output": 1974,
+      "tokens_input_total": 245392,
+      "turns": 10,
+      "wall_seconds": 49.8,
+      "tool_calls": 9,
+      "tool_failures": 0,
+      "build_failures": 1,
+      "repair_iterations": 3,
+      "commits": 1,
+      "lines_added": 1,
+      "lines_removed": 1,
+      "files_changed": 1,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "optimize-latency": [
+     {
+      "run_id": "a-optimize-latency-go-a1-20261011T063805Z",
+      "attempt": 1,
+      "outcome": "timeout",
+      "manifest": "experiments/runs/a-optimize-latency-go-a1-20261011T063805Z/manifest.json",
+      "cost_usd": null,
+      "tokens_output": 4396,
+      "tokens_input_total": 105599394,
+      "turns": null,
+      "wall_seconds": 5280.4,
+      "tool_calls": 490,
+      "tool_failures": 2,
+      "build_failures": 16,
+      "repair_iterations": 19,
+      "commits": 18,
+      "lines_added": 4192,
+      "lines_removed": 179,
+      "files_changed": 28,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "refactor-plan-separation": [
+     {
+      "run_id": "a-refactor-plan-separation-go-a1-20261011T054655Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-refactor-plan-separation-go-a1-20261011T054655Z/manifest.json",
+      "cost_usd": 3.6674945999999995,
+      "tokens_output": 56272,
+      "tokens_input_total": 6639319,
+      "turns": 67,
+      "wall_seconds": 731.4,
+      "tool_calls": 66,
+      "tool_failures": 1,
+      "build_failures": 0,
+      "repair_iterations": 0,
+      "commits": 3,
+      "lines_added": 1071,
+      "lines_removed": 273,
+      "files_changed": 16,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ]
+   },
+   "common-lisp": {
+    "change-decimal38": [
+     {
+      "run_id": "a-change-decimal38-common-lisp-a1-20261011T065327Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-decimal38-common-lisp-a1-20261011T065327Z/manifest.json",
+      "cost_usd": 7.4481686,
+      "tokens_output": 76437,
+      "tokens_input_total": 18483412,
+      "turns": 103,
+      "wall_seconds": 1346.3,
+      "tool_calls": 102,
+      "tool_failures": 1,
+      "build_failures": 3,
+      "repair_iterations": 7,
+      "commits": 3,
+      "lines_added": 526,
+      "lines_removed": 132,
+      "files_changed": 26,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-union-all": [
+     {
+      "run_id": "a-change-union-all-common-lisp-a1-20261011T053529Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-union-all-common-lisp-a1-20261011T053529Z/manifest.json",
+      "cost_usd": 4.5721582,
+      "tokens_output": 50836,
+      "tokens_input_total": 10626468,
+      "turns": 85,
+      "wall_seconds": 2935.8,
+      "tool_calls": 83,
+      "tool_failures": 1,
+      "build_failures": 4,
+      "repair_iterations": 6,
+      "commits": 1,
+      "lines_added": 483,
+      "lines_removed": 72,
+      "files_changed": 16,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "debug-mutant": [
+     {
+      "run_id": "a-debug-mutant-common-lisp-a1-20261011T054106Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-debug-mutant-common-lisp-a1-20261011T054106Z/manifest.json",
+      "cost_usd": 0.3427072,
+      "tokens_output": 3099,
+      "tokens_input_total": 401506,
+      "turns": 14,
+      "wall_seconds": 62.9,
+      "tool_calls": 13,
+      "tool_failures": 0,
+      "build_failures": 3,
+      "repair_iterations": 0,
+      "commits": 1,
+      "lines_added": 1,
+      "lines_removed": 1,
+      "files_changed": 1,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "refactor-plan-separation": [
+     {
+      "run_id": "a-refactor-plan-separation-common-lisp-a1-20261011T062513Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-refactor-plan-separation-common-lisp-a1-20261011T062513Z/manifest.json",
+      "cost_usd": 6.373399000000003,
+      "tokens_output": 97285,
+      "tokens_input_total": 13164919,
+      "turns": 95,
+      "wall_seconds": 1663.6,
+      "tool_calls": 93,
+      "tool_failures": 3,
+      "build_failures": 0,
+      "repair_iterations": 0,
+      "commits": 4,
+      "lines_added": 1520,
+      "lines_removed": 711,
+      "files_changed": 22,
+      "conformance": {
+       "total": 650,
+       "pass": 650,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ]
+   },
    "x86_64-asm": {},
    "arm64-asm": {}
   },
@@ -26275,45 +28268,45 @@
    "per_language": {
     "java": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 106.0187414,
+     "dev_cost_usd": 131.4489978,
      "correctness_gate": true,
      "geomean_latency_s": 0.005230464563776863
     },
     "clojure": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 66.60463899999999,
+     "dev_cost_usd": 94.14789959999999,
      "correctness_gate": true,
      "geomean_latency_s": 0.00807026526308777
     },
     "rust": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 87.55209060000001,
+     "dev_cost_usd": 116.16631680000002,
      "correctness_gate": true,
      "geomean_latency_s": 0.0029494056007496675
     },
     "python": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 72.99011720000001,
+     "dev_cost_usd": 87.82337340000001,
      "correctness_gate": true,
      "geomean_latency_s": 0.1240703368863103
     },
     "go": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 68.77106440000001,
+     "dev_cost_usd": 92.78356360000002,
      "correctness_gate": true,
      "geomean_latency_s": 0.0053031964692956965
     },
     "common-lisp": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 112.98521780000007,
+     "dev_cost_usd": 131.72165080000008,
      "correctness_gate": true,
      "geomean_latency_s": 0.021384917775040736
     }
    },
    "pareto_front": [
     "rust",
-    "go",
-    "clojure"
+    "python",
+    "go"
    ],
    "note": "Correctness-gated: a language without a 100% pass rate is never ranked above one with 100%. Track A and Track B are never combined."
   }

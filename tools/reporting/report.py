@@ -177,6 +177,8 @@ def build(weights: dict) -> dict:
                 "repair_iterations": r["telemetry"].get("repair_iterations"),
                 "commits": (r["telemetry"].get("git") or {}).get("commits"),
                 "lines_added": (r["telemetry"].get("git") or {}).get("lines_added"),
+                "lines_removed": (r["telemetry"].get("git") or {}).get("lines_removed"),
+                "files_changed": (r["telemetry"].get("git") or {}).get("files_changed"),
                 "conformance": (r["validation"].get("summary") or {}).get("total"),
             } for r in rs]
     # 3/4/6. performance, resources, optimization (latest benchmark per scale)
@@ -274,6 +276,18 @@ def render_html(rep: dict) -> str:
     R = rep["reports"]
     dev = R["2_development_effort"]
 
+    def cell(v, f="{:,.2f}") -> str:
+        return "—" if v is None else f.format(v)
+
+    adapt_rows = "".join(
+        f"<tr><td>{html.escape(t)}</td><td>{html.escape(l)}</td><td>{a['attempt']}</td>"
+        f"<td class='o-{html.escape(a['outcome'])}'><a href='../../{html.escape(a['manifest'])}'>{html.escape(a['outcome'])}</a></td>"
+        f"<td>{cell(a['cost_usd'])}</td><td>{cell(a['turns'], '{:d}')}</td>"
+        f"<td>{cell(None if a['wall_seconds'] is None else a['wall_seconds'] / 60, '{:.1f}')}</td>"
+        f"<td>{cell(a['lines_added'], '{:d}')} / {cell(a['lines_removed'], '{:d}')}</td><td>{cell(a['files_changed'], '{:d}')}</td></tr>"
+        for t in sorted({t for d in R["7_architectural_adaptability"].values() for t in d})
+        for l, d in R["7_architectural_adaptability"].items() for a in d.get(t, []))
+
     def agg(lang: str, key: str) -> float | None:
         vals = [a[key] for t in dev.get(lang, {}).values() for a in t if a.get(key) is not None]
         return sum(vals) if vals else None
@@ -341,6 +355,11 @@ Missing bars mean the measurement has not been run — nothing is estimated.</p>
 <h2>Overall (correctness-gated)</h2><p>{html.escape(ov['note'])} Pareto front (dev cost × correctness × latency):
 <b>{html.escape(', '.join(ov['pareto_front']) or 'not yet computable')}</b></p>
 {''.join(charts)}
+<h2>Architectural adaptability (change, refactoring, debugging, optimization tasks)</h2>
+<p class="muted">One row per attempt; failed and timed-out attempts are kept. Cost is null when the agent was killed
+before reporting it (timeouts). Lines and files count the agent's diff inside its language directory.</p>
+<table><tr><th>task</th><th>language</th><th>attempt</th><th>outcome</th><th>cost USD</th><th>turns</th><th>wall min</th>
+<th>lines +/−</th><th>files</th></tr>{adapt_rows}</table>
 <h2>Capability matrix (claimed and tested)</h2><table><tr><th>capability</th>{''.join(f'<th>{l}</th>' for l in LANGS)}</tr>{cap_rows}</table>
 <h2>All agent attempts (failures included)</h2><table><tr><th>language</th><th>task</th><th>attempt</th><th>outcome</th><th>manifest</th></tr>{runs_rows}</table>
 </body></html>"""
