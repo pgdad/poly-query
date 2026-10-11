@@ -94,19 +94,43 @@ Globals (rt.S): `g_arena` (Arena), `g_out` (Buf, response line), `g_deadline`,
 |---|---|---|
 | `ingest` | x0 Table* (zeroed, arena empty), x1 data ptr, x2 len, w3 format FMT_*, x4 Schema* or 0, w5 header (CSV), w6 delimiter byte (CSV) | fills TBL_NCOLS/NROWS/COLS (all in the table arena); raises INGEST_ERROR / CONVERSION_ERROR / RESOURCE_LIMIT |
 
-## binder.S / eval.S
+## binder.S / functions.S / strfuncs.S (semantic analysis)
 
 | function | in | out |
 |---|---|---|
-| `bind_query` | x0 Query* | x0 BoundQuery*; raises SEMANTIC/TYPE/UNSUPPORTED/INVALID_ARGUMENT |
+| `bind_query` | x0 Query* | x0 root BoundQuery* (BQ_SPV lists every SubPlan); raises SEMANTIC/TYPE/UNSUPPORTED/INVALID_ARGUMENT |
+| `bind_expr` | x0 BindCtx*, x1 Node* | x0 bound Node* (may be a new node) |
+| `mk_cast` | x0 bound Node*, w1 type | x0 Node* (implicit CAST; null-typed operands unchanged) |
+| `make_compare` | w0 OP_*, x1 bound left, x2 bound right | x0 typed comparison node |
+| `expr_equal` | x0 Node*, x1 Node* | w0 1 if structurally equal |
+| `expr_nchildren` / `expr_child_slot` | x0 Node* (, x1 i) | child count / Node** of child i (generic tree walk) |
+| `bind_scalar_func`, `bind_case`, `bind_between`, `bind_inlist`, `bind_like` | x0 BindCtx*, x1 Node* | x0 bound Node* (functions.S) |
+| `common_type` | w0 t1, w1 t2 | w0 common CASE/COALESCE type or -1 |
+
+## plan.S (planning)
+
+| function | in | out |
+|---|---|---|
+| `plan_statement` | x0 root BoundQuery* | x0 root PlanNode* (also plans every SubPlan: SP_PLAN) |
+| `plan_explain` | x0 Buf*, x1 PlanNode* | – plan JSON |
+| `expr_rvmask` | x0 Node* | x0 bitmask of this query's range variables referenced |
+
+## exec.S / eval.S (execution)
+
+| function | in | out |
+|---|---|---|
+| `exec_plan` | x0 PlanNode*, x1 outer EvalCtx* or 0 | x0 ResultSet* |
 | `eval` | x0 Node*, x1 EvalCtx* | x0 payload, x1 isnull; raises runtime errors |
-| `agg_init` | x0 BoundQuery* | x0 state* |
-| `agg_step` | x0 BoundQuery*, x1 state*, x2 EvalCtx* | – |
+| `ev_subq` / `ev_exists` / `ev_insub` | x0 Node*, x1 EvalCtx* | subquery expressions (exec.S) |
+| `ev_func` / `ev_case` / `ev_inlist` / `ev_like` | x0 Node*, x1 EvalCtx* | functions.S |
+| `cmp_typed` | x0 a, x1 b, w2 type a, w3 type b | w0 -1/0/1 (same kind, DECIMAL scales may differ) |
+| `agg_init` | x0 BoundQuery* | x0 state* (AGG_STATE_SIZE per slot) |
+| `agg_step` | x0 BoundQuery*, x1 state*, x2 EvalCtx* | – (non-DISTINCT slots) |
+| `agg_accum` | x0 NK_AGG node, x1 state record, x2 payload | – (one non-NULL value) |
 | `agg_finish` | x0 BoundQuery*, x1 state* | x0 cell array (16 bytes/slot) |
 
-## catalog.S / exec.S / protocol.S / main.S
+## catalog.S / protocol.S / main.S
 
 | function | in | out |
 |---|---|---|
 | `catalog_find` | x0 ptr, x1 len | x0 Table* or 0 (case-insensitive) |
-| `exec_query` | x0 BoundQuery* | x0 ResultSet* |

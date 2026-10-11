@@ -12,8 +12,8 @@
 //   2   | NULL NULL     NULL  NULL   NULL   NULL   NULL       NULL
 //   3   | -5   10.00    -1.5  ''     true   19000  -1         -1
 //
-// Rows are evaluated like the executor would: WHERE filters, aggregated
-// queries go through agg_init/agg_step/agg_finish. Exit status 0 iff all pass.
+// Queries are planned (plan_statement) and executed (exec_plan); the first
+// result row is checked. Exit status 0 iff all pass.
 // =============================================================================
 #include "pq.inc"
 
@@ -158,7 +158,7 @@ cases_start:
     TC  "SELECT NULL / 0", 0, T_INT, 0, 1
     TC  "SELECT 1 + NULL", 0, T_INT, 0, 1
     TC  "SELECT NULL + NULL", 0, T_INT, 0, 1
-    TC  "SELECT -NULL", 0, T_INT, 0, 1
+    TC  "SELECT -NULL", 0, T_NULL, 0, 1
     // --- decimal arithmetic
     TC  "SELECT 1.25 + 2.5", 0, D(18,2), 375
     TC  "SELECT 1.25 - 2.5", 0, D(18,2), -125
@@ -235,24 +235,18 @@ cases_start:
     TE  "SELECT CAST(1000 AS DECIMAL(3,0))", ERR_NUMERIC_OVERFLOW
     TE  "SELECT CAST(DATE '2024-01-01' AS INT64)", ERR_TYPE
     TE  "SELECT CAST(1 AS DATE)", ERR_TYPE
-    // --- functions and unsupported syntax
-    TE  "SELECT ABS(1)", ERR_UNSUPPORTED
-    TE  "SELECT date_trunc('day', DATE '2024-01-01')", ERR_UNSUPPORTED
+    // --- functions
     TE  "SELECT FOO(1)", ERR_SEMANTIC
     TC  "SELECT PQ_SLEEP(5)", 0, T_INT, 5
     TC  "SELECT pq_sleep(NULL)", 0, T_INT, 0, 1
     TE  "SELECT PQ_SLEEP('a')", ERR_TYPE
     TE  "SELECT PQ_SLEEP(1, 2)", ERR_SEMANTIC
     TC  "SELECT PQ_SLEEP(5000)", ERR_TIMEOUT, 0, 0, 0, M_TIMEOUT
-    TE  "SELECT CASE WHEN TRUE THEN 1 END", ERR_UNSUPPORTED
-    TE  "SELECT 1 BETWEEN 0 AND 2", ERR_UNSUPPORTED
-    TE  "SELECT 'a' LIKE 'a'", ERR_UNSUPPORTED
-    TE  "SELECT 1 IN (1, 2)", ERR_UNSUPPORTED
-    TE  "SELECT (SELECT 1)", ERR_UNSUPPORTED
-    TE  "SELECT DISTINCT 1", ERR_UNSUPPORTED
-    TE  "SELECT i FROM t GROUP BY i", ERR_UNSUPPORTED
-    TE  "SELECT COUNT(DISTINCT i) FROM t", ERR_UNSUPPORTED
-    TE  "SELECT i FROM t a JOIN t b ON TRUE", ERR_UNSUPPORTED
+    TC  "SELECT (SELECT 1)", 0, T_INT, 1
+    TC  "SELECT DISTINCT 1", 0, T_INT, 1
+    TC  "SELECT i FROM t GROUP BY i", 0, T_INT, 0, 1
+    TC  "SELECT COUNT(DISTINCT i) FROM t", 0, T_INT, 3
+    TE  "SELECT i FROM t a JOIN t b ON TRUE", ERR_SEMANTIC
     TE  "SELECT *", ERR_SEMANTIC
     // --- WHERE / LIMIT / OFFSET
     TC  "SELECT 2 WHERE TRUE", 0, T_INT, 2
@@ -353,7 +347,7 @@ cases_start:
     TC  "SELECT i, s FROM t ORDER BY 2", 0, 0, 1, 1, M_KEY0
     TC  "SELECT i AS x FROM t ORDER BY x DESC", 0, 0, 0, 0, M_KEY0
     TC  "SELECT i FROM t ORDER BY s", 0, 0, 1, 1, M_KEY0
-    TC  "SELECT i FROM t ORDER BY t.i", 0, 0, 1, 1, M_KEY0
+    TC  "SELECT i FROM t ORDER BY t.i", 0, 0, 0, 1, M_KEY0      // same as output column
     TC  "SELECT i, i FROM t ORDER BY I", 0, 0, 0, 1, M_KEY0
     TC  "SELECT i FROM t ORDER BY i NULLS LAST", 0, 0, 0, 0, M_KEY0
     TC  "SELECT i FROM t ORDER BY i DESC NULLS FIRST", 0, 0, 0, 1, M_KEY0
@@ -371,26 +365,6 @@ fmt_sum:    .asciz "test_binder: %d/%d passed\n"
     .text
 
 // =============================================================================
-// where_ok(x0 BoundQuery*, x1 EvalCtx*) -> w0 1 if the row passes WHERE
-// =============================================================================
-LFUNC where_ok
-    stp  x29, x30, [sp, #-16]!
-    mov  x29, sp
-    ldr  x0, [x0, #BQ_WHERE]
-    cbz  x0, 1f
-    bl   eval
-    cbnz x1, 2f
-    cmp  x0, #0
-    cset w0, ne
-    ldp  x29, x30, [sp], #16
-    ret
-1:  mov  w0, #1
-    ldp  x29, x30, [sp], #16
-    ret
-2:  mov  w0, #0
-    ldp  x29, x30, [sp], #16
-    ret
-ENDF where_ok
 
 // str_eq_c(x0 Str*, x1 cstr) -> w0 1 if byte-equal
 //   x19 Str*, x20 cstr
@@ -473,56 +447,20 @@ LFUNC run_case
     cmp  w9, #M_KEY0
     b.eq .Lrc_key0
 
-    // ---- evaluate output column 0 like the executor ------------------------
+    // ---- plan and execute; check output column 0 of the first row ---------
     ldr  x9, [x20, #BQ_OUT]
-    ldr  x24, [x9, #OC_EXPR]
     ldr  w9, [x9, #OC_TYPE]
     ADR_L x10, r_type
     str  x9, [x10]
-    ldr  x9, [x20, #BQ_TABLE]
-    stp  x9, xzr, [sp]                  // EC_TABLE, EC_ROW
-    stp  xzr, xzr, [sp, #16]            // EC_AGGV
-    mov  x22, #1
-    cbz  x9, 2f
-    ldr  x22, [x9, #TBL_NROWS]
-2:  mov  x21, #0
-    ldr  x9, [x20, #BQ_ISAGG]
-    cbnz x9, .Lrc_agg
-3:  cmp  x21, x22                       // plain query: first qualifying row
-    b.hs .Lrc_norow
-    str  x21, [sp, #EC_ROW]
     mov  x0, x20
-    mov  x1, sp
-    bl   where_ok
-    add  x21, x21, #1
-    cbz  w0, 3b
-    b    .Lrc_eval
-.Lrc_agg:
-    mov  x0, x20
-    bl   agg_init
-    mov  x23, x0
-4:  cmp  x21, x22
-    b.hs 5f
-    str  x21, [sp, #EC_ROW]
-    add  x21, x21, #1
-    mov  x0, x20
-    mov  x1, sp
-    bl   where_ok
-    cbz  w0, 4b
-    mov  x0, x20
-    mov  x1, x23
-    mov  x2, sp
-    bl   agg_step
-    b    4b
-5:  mov  x0, x20
-    mov  x1, x23
-    bl   agg_finish
-    str  x0, [sp, #EC_AGGV]
-    str  xzr, [sp, #EC_ROW]
-.Lrc_eval:
-    mov  x0, x24
-    mov  x1, sp
-    bl   eval
+    bl   plan_statement
+    mov  x1, #0
+    bl   exec_plan
+    ldr  x9, [x0, #RS_NROWS]
+    cbz  x9, .Lrc_norow
+    ldr  x9, [x0, #RS_ROWS]
+    ldr  x9, [x9]
+    ldp  x0, x1, [x9]
     ADR_L x9, r_val
     str  x0, [x9]
     ADR_L x9, r_null

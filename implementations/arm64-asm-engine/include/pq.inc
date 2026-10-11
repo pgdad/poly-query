@@ -230,6 +230,20 @@
 #define NK_EXISTS   14     // N_C Query*
 #define NK_SUBQ     15     // N_C Query* (scalar subquery)
 #define NK_OUTREF   16     // binder-internal: reference to output column N_VAL
+#define NK_GKEY     17     // grouped context: value of GROUP BY key N_VAL
+                           // (read from EC_GKEYS)
+
+// Shapes of the *bound* nodes produced by the binder (Phase 2):
+//   NK_COL     N_B rv index, N_VAL column index, N_OP outer depth (0 = this query)
+//   NK_FUNC    scalar function: N_OP function id (private to functions.S),
+//              N_C Node** bound args, N_VAL argc
+//   NK_CASE    searched form only: N_A = 0, N_C Node** [w1,t1,...], N_VAL pairs,
+//              N_B ELSE or 0 (simple CASE is rewritten to x = v comparisons)
+//   NK_IN      N_A = 0, N_C Node** bound comparison nodes (x = e_i), N_VAL count,
+//              N_OP 1 if NOT IN
+//   NK_LIKE    N_A string, N_B pattern, N_OP 1 if NOT LIKE
+//   BETWEEN    rewritten to AND / NOT nodes (no NK_BETWEEN after binding)
+//   NK_SUBQ / NK_EXISTS / NK_INSUB: N_C SubPlan* (see plan.S); NK_INSUB N_A x
 
 // Unary operators
 #define OP_NEG      1
@@ -343,30 +357,94 @@
 #define SK_DROP_INDEX    4
 
 // ----------------------------------------------------------- bound query -----
-// Produced by bind_query, consumed by exec_query.
-// The executor evaluates, per result row, a "matrix row" of width
-// BQ_NOUT + BQ_NEXTRA cells: first the visible output expressions, then the
-// hidden extra expressions (ORDER BY keys that are not output columns).
+// Produced by bind_query (binder.S) for one query level (SELECT block incl.
+// its WITH, ORDER BY, LIMIT); consumed by the planner (plan.S).
+//
+// Range variables: every table reference of the FROM clause gets an index
+// 0..BQ_NRV-1 in FROM order. A *tuple* is an array of BQ_NRV u32 row ids, one
+// per range variable (ROW_NULL = NULL-padded side of a LEFT JOIN). Column
+// references are bound to (rv index, column index, outer depth).
+//
+// After grouping, expressions of the SELECT list, HAVING and ORDER BY are
+// evaluated per group: aggregates read EC_AGGV (NK_AGG slot N_B), GROUP BY
+// expressions read EC_GKEYS (NK_GKEY index N_VAL).
+//
+// Result rows ("matrix rows") have BQ_NOUT visible cells followed by
+// BQ_NEXTRA hidden cells (ORDER BY keys that are not output columns).
 // Cells are 16 bytes: [0] payload u64, [8] isnull u64.
-#define BQ_TABLE    0      // Table* or 0 (SELECT without FROM)
-#define BQ_NOUT     8      // u64 number of output columns
-#define BQ_OUT      16     // OutCol* array
-#define BQ_WHERE    24     // Node* or 0 (evaluated in row context)
-#define BQ_ISAGG    32     // u64 1 if aggregated query (single group)
-#define BQ_NAGG     40     // u64 number of aggregate slots
-#define BQ_AGGS     48     // Node** NK_AGG nodes indexed by slot
-#define BQ_NORDER   56     // u64
-#define BQ_ORDER    64     // OrderKey* array
-#define BQ_LIMIT    72     // i64, -1 = no limit
-#define BQ_OFFSET   80     // i64 >= 0
-#define BQ_NEXTRA   88     // u64
-#define BQ_EXTRA    96     // Node** hidden expressions
-#define BQ_SIZE     112
+#define BQ_NRV      0      // u64 number of range variables
+#define BQ_RVS      8      // RV* array (RV_SIZE records)
+#define BQ_NOUT     16     // u64 number of output columns
+#define BQ_OUT      24     // OutCol* array
+#define BQ_WHERE    32     // Node* or 0 (tuple context)
+#define BQ_ISAGG    40     // u64 1 if aggregated query
+#define BQ_NAGG     48     // u64 number of aggregate slots
+#define BQ_AGGS     56     // Node** NK_AGG nodes indexed by slot
+#define BQ_NORDER   64     // u64
+#define BQ_ORDER    72     // OrderKey* array
+#define BQ_LIMIT    80     // i64, -1 = no limit
+#define BQ_OFFSET   88     // i64 >= 0
+#define BQ_NEXTRA   96     // u64
+#define BQ_EXTRA    104    // Node** hidden expressions
+#define BQ_FROM     112    // BoundFrom* or 0 (no FROM)
+#define BQ_NGROUP   120    // u64 number of GROUP BY expressions
+#define BQ_GROUP    128    // Node** GROUP BY expressions (tuple context)
+#define BQ_HAVING   136    // Node* or 0 (group context)
+#define BQ_DISTINCT 144    // u64 1 = SELECT DISTINCT
+#define BQ_CORR     152    // u64 1 = references an enclosing query (correlated)
+#define BQ_SPV      160    // root query only: Vec* of every SubPlan of the
+                           //   statement ([0] n, [8] cap, [16] SubPlan**)
+#define BQ_SIZE     176
+
+#define ROW_NULL    0xffffffff
+
+// Range variable (48 bytes)
+#define RV_NAME     0      // Str* alias, or table / CTE name
+#define RV_TABLE    8      // Table*: catalog table, or a data-less "shape"
+                           //   table (names/types) for derived tables / CTEs
+#define RV_KIND     16     // u32 RVK_*
+#define RV_CTEUP    20     // u32 RVK_CTE: query levels up to the CTE's owner
+#define RV_SUB      24     // RVK_DERIVED: SubPlan*; RVK_CTE: CteDef*
+#define RV_USED     32     // u8* per-column "referenced" flags (pruning)
+#define RV_SIZE     48
+#define RVK_BASE    0
+#define RVK_DERIVED 1
+#define RVK_CTE     2
+
+// Bound FROM tree (48 bytes)
+#define BF_KIND     0      // u32 BFK_*
+#define BF_JT       4      // u32 JT_* (BFK_JOIN)
+#define BF_RV       8      // u64 rv index (BFK_RV)
+#define BF_LEFT     16     // BoundFrom*
+#define BF_RIGHT    24     // BoundFrom*
+#define BF_ON       32     // bound ON expression or 0
+#define BF_LO       40     // u32 first rv index of the subtree
+#define BF_HI       44     // u32 one past the last rv index
+#define BF_SIZE     48
+#define BFK_RV      1
+#define BFK_JOIN    2
+
+// Subquery / derived table plan holder (48 bytes). Created by the binder
+// (SP_BQ), planned by plan.S (SP_PLAN), executed lazily by exec.S; results of
+// uncorrelated subqueries are cached for the whole statement.
+#define SP_BQ       0      // BoundQuery*
+#define SP_PLAN     8      // PlanNode* (physical plan)
+#define SP_CACHE    16     // cached result: ResultSet* / Table* / InSet*
+#define SP_DONE     24     // u64 1 = SP_CACHE valid
+#define SP_INTYPE   32     // u32 NK_INSUB: comparison type of the values
+#define SP_SIZE     48
+
+// CTE definition (48 bytes): one per WITH entry, shared by all references.
+#define CD_NAME     0      // Str*
+#define CD_SP       8      // SubPlan* of the CTE query
+#define CD_SHAPE    16     // Table* shape (column names after renaming)
+#define CD_SIZE     48
 
 // Output column (32 bytes)
 #define OC_EXPR   0        // Node* bound expression
 #define OC_NAME   8        // Str* output name
 #define OC_TYPE   16       // u32 type (T_NULL is reported as STRING)
+#define OC_ALIASED 20      // u32 1 = name comes from an explicit alias
 #define OC_SIZE   32
 
 // Order key (16 bytes)
@@ -375,16 +453,62 @@
 #define OK_NFIRST 12       // u32 1 = NULLs sort first
 #define OK_SIZE   16
 
-// Evaluation context (32 bytes) passed to eval
-#define EC_TABLE   0       // Table* (or 0)
-#define EC_ROW     8       // u64 row index
+// Evaluation context (48 bytes) passed to eval. A zeroed context is valid
+// for constant expressions.
+#define EC_TABLES  0       // Table** per range variable (or 0)
+#define EC_TUPLE   8       // u32* current tuple (row id per range variable)
 #define EC_AGGV    16      // cell array of aggregate results (16 bytes per slot) or 0
-#define EC_SIZE    32
+#define EC_GKEYS   24      // cell array of GROUP BY key values or 0
+#define EC_OUTER   32      // EvalCtx* of the enclosing query (correlation) or 0
+#define EC_SIZE    48
 
-// Result set produced by exec_query (rows already sorted, offset/limit applied)
+// Aggregate state: AGG_STATE_SIZE bytes per slot (layout private to eval.S)
+#define AGG_STATE_SIZE 32
+
+// Result set (rows already sorted, offset/limit applied)
 #define RS_WIDTH   0       // u64 cells per row (nout + nextra)
 #define RS_NROWS   8       // u64
 #define RS_ROWS    16      // u8** array of row pointers (each width*16 bytes)
 #define RS_SIZE    32
+
+// ------------------------------------------------------------- plan nodes -----
+// Logical and physical plans share one node record (plan.S). The logical plan
+// mirrors the bound query; the physical planner rewrites it (pushdown, join
+// algorithm, column pruning). Lower operators (scans, filters, joins) produce
+// tuple sets; Aggregate / Project produce result rows; Distinct / Sort / Limit
+// transform result rows.
+#define PN_OP       0      // u32 PO_*
+#define PN_JT       4      // u32 JT_* (joins)
+#define PN_LEFT     8      // PlanNode* (the only child of unary operators)
+#define PN_RIGHT    16     // PlanNode* (joins)
+#define PN_EXPR     24     // Node*: filter predicate / join residual / HAVING
+#define PN_BQ       32     // BoundQuery* the node belongs to
+#define PN_RV       40     // u64 rv index (scans)
+#define PN_NKEYS    48     // u64 hash join keys
+#define PN_LKEYS    56     // Node** left key expressions
+#define PN_RKEYS    64     // Node** right key expressions
+#define PN_LO       72     // u32 first rv of the subtree
+#define PN_HI       76     // u32 one past the last rv
+#define PN_SIZE     80
+
+#define PO_SCAN       1    // table scan of rv PN_RV (base / derived / CTE),
+                           //   optional pushed-down filter PN_EXPR
+#define PO_VALUES     2    // one empty tuple (SELECT without FROM)
+#define PO_FILTER     3    // tuple filter PN_EXPR
+#define PO_JOIN       4    // logical join (PN_EXPR = ON condition)
+#define PO_HASHJOIN   5    // physical: equi keys + residual PN_EXPR
+#define PO_NLJOIN     6    // physical: nested loop, condition PN_EXPR
+#define PO_AGGREGATE  7    // grouping + aggregates + HAVING (PN_EXPR) + projection
+#define PO_PROJECT    8    // projection of the output (and hidden) columns
+#define PO_DISTINCT   9
+#define PO_SORT       10
+#define PO_LIMIT      11
+
+// Tuple set produced by the lower operators
+#define TS_N        0      // u64 number of tuples
+#define TS_W        8      // u64 tuple width (BQ_NRV)
+#define TS_DATA     16     // u32* tuples [n * w]
+#define TS_CAP      24     // u64 capacity in tuples (growable sets)
+#define TS_SIZE     32
 
 #endif

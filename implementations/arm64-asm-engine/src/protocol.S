@@ -55,7 +55,7 @@ op_names:
     .quad o_version, op_version
     .quad o_caps, op_capabilities
     .quad o_sleep, op_sleep
-    .quad o_explain, op_unsupported
+    .quad o_explain, op_explain
     .quad o_save, op_unsupported
     .quad o_open, op_unsupported
     .quad o_stats, op_unsupported
@@ -81,7 +81,7 @@ r_err:      .asciz ",\"ok\":false,\"error\":{\"code\":\""
 r_msg:      .asciz "\",\"message\":"
 r_details:  .asciz ",\"details\":{\"line\":"
 r_column:   .asciz ",\"column\":"
-r_caps:     .asciz ",\"protocol_version\":1,\"capabilities\":[\"phase1\",\"ingest.csv\",\"ingest.json\",\"ingest.jsonl\",\"sql.basic\",\"test.functions\"]"
+r_caps:     .asciz ",\"protocol_version\":1,\"capabilities\":[\"phase1\",\"ingest.csv\",\"ingest.json\",\"ingest.jsonl\",\"sql.basic\",\"test.functions\",\"phase2\",\"sql.groupby\",\"sql.join\",\"sql.functions\",\"sql.subquery\",\"sql.cte\",\"sql.correlated_subquery\"]"
 r_version:  .asciz ",\"engine\":\"polyquery-arm64-asm\",\"engine_version\":\"0.1.0\",\"language\":\"arm64-asm-engine\",\"protocol_version\":1,\"spec_version\":\"1.0.0\",\"runtime\":\"GNU as (AArch64) + glibc\",\"build\":{\"profile\":\"release\",\"flags\":\"-g\"}"
 r_tables:   .asciz ",\"tables\":["
 r_name:     .asciz "{\"name\":"
@@ -92,6 +92,8 @@ r_type:     .asciz ",\"type\":\""
 r_indexes:  .asciz ",\"indexes\":[]"
 r_rows:     .asciz ",\"rows\":["
 r_stats:    .asciz ",\"stats\":{\"elapsed_us\":"
+r_plan:     .asciz ",\"plan\":"
+s_plan:     .asciz "plan"
 
 m_badjson:  .asciz "request is not a valid JSON object"
 m_noop:     .asciz "missing or non-string 'op'"
@@ -1279,6 +1281,114 @@ LFUNC check_option_str
     ret
 ENDF check_option_str
 
+// explain_query(x0 Query*) -> x0 Str* plan JSON text (binds and plans)
+//   x19 root plan, sp: temporary Buf
+LFUNC explain_query
+    stp  x29, x30, [sp, #-64]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    bl   bind_query
+    bl   plan_statement
+    mov  x19, x0
+    add  x0, sp, #32
+    stp  xzr, xzr, [x0]
+    stp  xzr, xzr, [x0, #16]
+    mov  x1, x19
+    bl   plan_explain
+    ldr  x0, [sp, #(32 + BUF_PTR)]
+    ldr  x1, [sp, #(32 + BUF_LEN)]
+    bl   str_new
+    mov  x19, x0
+    ldr  x0, [sp, #(32 + BUF_PTR)]
+    bl   free
+    mov  x0, x19
+    ldp  x19, x20, [sp, #16]
+    ldp  x29, x30, [sp], #64
+    ret
+ENDF explain_query
+
+// explain_result(x0 Str* plan) -> x0 BoundQuery* (one output column "plan"
+// STRING), x1 ResultSet* (one row)
+//   x19 plan text, x20 bq, x21 rs
+LFUNC explain_result
+    stp  x29, x30, [sp, #-48]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    stp  x21, x22, [sp, #32]
+    mov  x19, x0
+    mov  x0, #BQ_SIZE
+    bl   arena_zalloc
+    mov  x20, x0
+    mov  x9, #1
+    str  x9, [x20, #BQ_NOUT]
+    mov  x0, #OC_SIZE
+    bl   arena_zalloc
+    str  x0, [x20, #BQ_OUT]
+    mov  w9, #T_STR
+    str  w9, [x0, #OC_TYPE]
+    mov  x21, x0
+    ADR_L x0, s_plan
+    mov  x1, #4
+    bl   str_new
+    str  x0, [x21, #OC_NAME]
+    mov  x0, #RS_SIZE
+    bl   arena_zalloc
+    mov  x21, x0
+    mov  x9, #1
+    str  x9, [x21, #RS_WIDTH]
+    str  x9, [x21, #RS_NROWS]
+    mov  x0, #32
+    bl   arena_zalloc
+    str  x19, [x0, #16]             // cell: payload Str*, not NULL
+    add  x9, x0, #16
+    str  x9, [x0]                   // rows[0] -> cell
+    str  x0, [x21, #RS_ROWS]
+    mov  x0, x20
+    mov  x1, x21
+    ldp  x19, x20, [sp, #16]
+    ldp  x21, x22, [sp, #32]
+    ldp  x29, x30, [sp], #48
+    ret
+ENDF explain_result
+
+// op_explain: {"op":"explain","sql":…} => {"ok":true,"plan":{…}}
+//   x19 request, x20 plan text
+LFUNC op_explain
+    stp  x29, x30, [sp, #-32]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    mov  x19, x0
+    ADR_L x1, k_sql
+    mov  w2, #1
+    bl   get_str
+    mov  x20, x0
+    LDR_G x0, g_max_query_mem
+    ADR_L x1, g_arena_limit
+    str  x0, [x1]
+    add  x0, x20, #STR_DATA
+    ldr  x1, [x20, #STR_LEN]
+    bl   parse_sql
+    ldr  w1, [x0, #ST_KIND]
+    cmp  w1, #SK_QUERY
+    b.eq 1f
+    cmp  w1, #SK_EXPLAIN
+    b.eq 1f
+    RAISE ERR_UNSUPPORTED, "only queries can be explained"
+1:  ldr  x0, [x0, #ST_QUERY]
+    bl   explain_query
+    mov  x20, x0
+    bl   out_begin_ok
+    ADR_L x0, r_plan
+    bl   out_puts
+    ADR_L x0, g_out
+    add  x1, x20, #STR_DATA
+    ldr  x2, [x20, #STR_LEN]
+    bl   buf_put
+    ldp  x19, x20, [sp, #16]
+    ldp  x29, x30, [sp], #32
+    ret
+ENDF op_explain
+
 // op_query
 // x19 request, x20 options or 0, x21 max_rows (-1 none), w22 count-only,
 // x23 BoundQuery*, x24 ResultSet*
@@ -1386,12 +1496,23 @@ LFUNC op_query
     ldr  w1, [x0, #ST_KIND]
     cmp  w1, #SK_QUERY
     b.eq 4f
-    RAISE ERR_UNSUPPORTED, "only SELECT queries are supported in this engine phase"
+    cmp  w1, #SK_EXPLAIN
+    b.eq 41f
+    RAISE ERR_UNSUPPORTED, "CREATE/DROP INDEX are not supported in this engine phase"
 4:  ldr  x0, [x0, #ST_QUERY]
-    bl   bind_query
+    bl   bind_query                 // semantic analysis
     mov  x23, x0
-    bl   exec_query
+    bl   plan_statement             // logical + physical plan
+    mov  x1, #0
+    bl   exec_plan                  // execution
     mov  x24, x0
+    b    42f
+41: ldr  x0, [x0, #ST_QUERY]        // EXPLAIN: one STRING column "plan"
+    bl   explain_query
+    bl   explain_result
+    mov  x23, x0
+    mov  x24, x1
+42:
     // max_rows
     tbnz x21, #63, 5f
     ldr  x0, [x24, #RS_NROWS]
