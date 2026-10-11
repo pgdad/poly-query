@@ -14,6 +14,13 @@ variants:
 | `pqk_x86_avx2.S` | `x86_avx2` | AVX2 + BMI1 + BMI2 + POPCNT | 20/20 |
 | `pqk_x86_avx512.S` | `x86_avx512` (optional) | AVX-512 F/BW/VL/DQ (+BMI/POPCNT) | 20/20 |
 
+The AVX2 variant was then optimized for throughput (1.3x geometric mean
+over the 17 benchmark workloads with L3-resident data, up to 2x per kernel,
+bit-identical results); see
+[Throughput optimization of `x86_avx2`](#throughput-optimization-of-x86_avx2-kernel-optimize-task).
+The sections after it describe the code as of CR-5 and are annotated where
+the AVX2 code has changed since.
+
 Change request CR-5 restructured the three sources without changing
 behaviour. Building blocks are now defined once in shared include files, and
 every kernel has the same documented shape and a header comment. See
@@ -45,6 +52,7 @@ BASE=16e68a2 sh native-kernels/x86_64/verify/run.sh   # ... plus machine-code co
 python3 -I native-kernels/x86_64/verify/structure_check.py -v   # CR-5 structure + per-kernel clobber lists
 python3 -I native-kernels/x86_64/verify/disasm_compare.py 16e68a2 -R c_sign_q=c_i64min
 python3 native-kernels/x86_64/verify/bench_table.py native-kernels/build/x86_64/bench.jsonl
+sh native-kernels/x86_64/verify/cmp.sh [kernel]           # AVX2 before/after (vs 424e5a4), interleaved, pinned
 ```
 
 The Makefile lists only the `*.S` files as prerequisites, not the `*.h`
@@ -66,6 +74,308 @@ The ASan/UBSan run prints one `runtime error: load of misaligned address` at
 `tests/kernel_test.c:69`. That load is in the test program's own C code
 (`data[rnd_below(n)]` on a deliberately misaligned buffer), not in a kernel.
 It is non-fatal, and it was there before any assembly existed.
+
+## Throughput optimization of `x86_avx2` (kernel-optimize task)
+
+This change makes the AVX2 variant faster on the kernel micro-benchmark
+(`make -C native-kernels bench`, n = 4,194,304, 17 workloads) with
+bit-identical results. Only `pqk_x86_avx2.S`, `pqk_x86_avx2.h` and new
+AVX2-only tables in `pqk_x86_consts.h` changed. The scalar and AVX-512
+machine code is **byte-for-byte identical** to the starting point
+(`verify/disasm_compare.py 424e5a4` reports differences only in AVX2
+symbols), so the scalar algorithms are untouched.
+
+### Results (measured, ns per element, lower is better)
+
+Before = commit `424e5a4` (start of this task), after = final commit. Both
+binaries were built from `verify/vbench.c` (the same 17 workloads and data
+as `tests/kernel_bench.c`, restricted to `x86_avx2`) and run **alternately**
+by `verify/cmp.sh`, pinned to one CPU. Every run takes the median of 15
+repetitions like `make bench`. The left half of each table is the median of
+9 such runs, the right half ("min") the minimum over all repetitions. The
+minimum is the more robust figure here: other jobs were running on this
+machine the whole time (load average 7–11), so a run can be slowed down at
+random, never sped up. The CPU 10 medians in particular are dominated by that
+interference (unchanged code: `sum_f64` 1.54×, `compare_i64` 0.74×); use
+its min columns.
+
+**Pinned to CPU 2 (V-cache CCD, columns L3-resident; this is where an unpinned run usually lands when the machine is idle)**
+
+| kernel | before | after | speedup | before (min) | after (min) | speedup (min) |
+|---|---|---|---|---|---|---|
+| filter_i64_sel10 | 0.1619 | 0.1154 | 1.40x | 0.1554 | 0.1104 | 1.41x |
+| filter_i64_bitmap | 0.0742 | 0.0764 | 0.97x | 0.0702 | 0.0676 | 1.04x |
+| count_i64_between | 0.0699 | 0.0660 | 1.06x | 0.0601 | 0.0524 | 1.15x |
+| sum_i64 | 0.0737 | 0.0597 | 1.23x | 0.0706 | 0.0520 | 1.36x |
+| sum_i64_validity | 0.1198 | 0.0954 | 1.26x | 0.1154 | 0.0769 | 1.50x |
+| sum_f64 | 0.0554 | 0.0551 | 1.01x | 0.0515 | 0.0521 | 0.99x |
+| minmax_i64 | 0.1089 | 0.0571 | 1.91x | 0.1046 | 0.0532 | 1.97x |
+| bitmap_and | 0.0025 | 0.0025 | 1.00x | 0.0023 | 0.0023 | 1.00x |
+| bitmap_popcount | 0.0020 | 0.0010 | 2.00x | 0.0019 | 0.0010 | 1.97x |
+| hash_i64 | 0.4284 | 0.3075 | 1.39x | 0.3693 | 0.2380 | 1.55x |
+| compare_i64 | 0.2777 | 0.2430 | 1.14x | 0.1629 | 0.1603 | 1.02x |
+| group_sum_i64_1024 | 0.4501 | 0.2994 | 1.50x | 0.4276 | 0.2762 | 1.55x |
+| gather_i64 | 1.0361 | 0.9982 | 1.04x | 0.7391 | 0.7149 | 1.03x |
+| filter_i128_sel10 | 0.3689 | 0.2617 | 1.41x | 0.2804 | 0.2216 | 1.27x |
+| count_i128_between | 0.2857 | 0.2024 | 1.41x | 0.2157 | 0.1696 | 1.27x |
+| sum_i128 | 0.2957 | 0.1980 | 1.49x | 0.1776 | 0.1681 | 1.06x |
+| minmax_i128 | 0.3100 | 0.1915 | 1.62x | 0.2368 | 0.1569 | 1.51x |
+| **geometric mean** | | | **1.31x** | | | **1.30x** |
+
+**Pinned to CPU 10 (32 MB L3 CCD, columns stream from DRAM)**
+
+| kernel | before | after | speedup | before (min) | after (min) | speedup (min) |
+|---|---|---|---|---|---|---|
+| filter_i64_sel10 | 0.3450 | 0.3001 | 1.15x | 0.2156 | 0.2041 | 1.06x |
+| filter_i64_bitmap | 0.2689 | 0.2653 | 1.01x | 0.1577 | 0.1686 | 0.94x |
+| count_i64_between | 0.2596 | 0.2362 | 1.10x | 0.1467 | 0.1456 | 1.01x |
+| sum_i64 | 0.2835 | 0.2362 | 1.20x | 0.1604 | 0.1581 | 1.01x |
+| sum_i64_validity | 0.3145 | 0.2836 | 1.11x | 0.1727 | 0.1729 | 1.00x |
+| sum_f64 | 0.2919 | 0.1895 | 1.54x | 0.1162 | 0.1277 | 0.91x |
+| minmax_i64 | 0.3197 | 0.2186 | 1.46x | 0.1749 | 0.1529 | 1.14x |
+| bitmap_and | 0.0030 | 0.0035 | 0.86x | 0.0023 | 0.0023 | 1.00x |
+| bitmap_popcount | 0.0020 | 0.0009 | 2.22x | 0.0019 | 0.0009 | 2.10x |
+| hash_i64 | 1.0948 | 0.8619 | 1.27x | 0.5625 | 0.5446 | 1.03x |
+| compare_i64 | 0.6232 | 0.8439 | 0.74x | 0.3515 | 0.3711 | 0.95x |
+| group_sum_i64_1024 | 0.6987 | 0.5653 | 1.24x | 0.4978 | 0.4260 | 1.17x |
+| gather_i64 | 5.9623 | 2.4854 | 2.40x | 2.5654 | 1.7835 | 1.44x |
+| filter_i128_sel10 | 0.8635 | 0.7564 | 1.14x | 0.5056 | 0.4197 | 1.20x |
+| count_i128_between | 0.7681 | 0.6259 | 1.23x | 0.4478 | 0.3844 | 1.16x |
+| sum_i128 | 0.7767 | 0.5740 | 1.35x | 0.4082 | 0.3736 | 1.09x |
+| minmax_i128 | 0.7277 | 0.6007 | 1.21x | 0.4300 | 0.3573 | 1.20x |
+| **geometric mean** | | | **1.25x** | | | **1.12x** |
+
+**Pinned to CPU 2, n = 32,768 (L2-resident: compute speed), minimum of 5 x 2001 repetitions**
+
+| kernel | before | after | speedup |
+|---|---|---|---|
+| filter_i64_sel10 | 0.1446 | 0.0966 | 1.50x |
+| filter_i64_bitmap | 0.0517 | 0.0514 | 1.01x |
+| count_i64_between | 0.0556 | 0.0483 | 1.15x |
+| sum_i64 | 0.0660 | 0.0489 | 1.35x |
+| sum_i64_validity | 0.1073 | 0.0685 | 1.57x |
+| sum_f64 | 0.0364 | 0.0376 | 0.97x |
+| minmax_i64 | 0.0991 | 0.0508 | 1.95x |
+| bitmap_and | 0.0012 | 0.0012 | 1.00x |
+| bitmap_popcount | 0.0021 | 0.0015 | 1.40x |
+| hash_i64 | 0.3400 | 0.2049 | 1.66x |
+| compare_i64 | 0.0782 | 0.0761 | 1.03x |
+| group_sum_i64_1024 | 0.4103 | 0.2788 | 1.47x |
+| gather_i64 | 0.2097 | 0.2085 | 1.01x |
+| filter_i128_sel10 | 0.2330 | 0.1406 | 1.66x |
+| count_i128_between | 0.1633 | 0.1009 | 1.62x |
+| sum_i128 | 0.0978 | 0.0969 | 1.01x |
+| minmax_i128 | 0.1865 | 0.1174 | 1.59x |
+| **geometric mean** | | | **1.32x** |
+
+Reading the numbers:
+
+* On the V-cache CCD the 32 MB columns are L3-resident. Everything with real
+  compute per row got faster: 1.3–2× for most kernels. `sum_f64`,
+  `bitmap_and` and `filter_i64_bitmap` were already at the L3 bandwidth limit
+  (≈ 0.05 ns per 8-byte row), and `compare_i64` reads two columns
+  (16 bytes per row) and is close to that limit too, so they did not change.
+* On the DRAM-bound CCD almost every 8-byte streaming kernel is limited by
+  memory bandwidth (≈ 0.15–0.17 ns per row by the min column), so the
+  compute savings mostly disappear there. The exceptions are
+  `bitmap_popcount` (2.1×; its 512 KB bitmap stays in L2), `gather_i64`
+  (software prefetch: 1.44× by the min column, 2.4× by the median; 2.85 →
+  1.47 ns/row in a separate 5-round alternating run), the compute-bound
+  `group_sum_i64` (1.17×) and `minmax_i64` (1.14×), and the 128-bit
+  kernels (1.1–1.2×).
+* The L2-resident run (n = 32,768; 256 KB per 8-byte column, 512 KB per
+  128-bit column) shows the compute speed of the kernels without memory
+  effects. (`bitmap_*` are only 4 KB at this n and mostly measure call
+  overhead.)
+
+### What limits AVX2 on Zen 5 (measured on this host)
+
+All decisions below are based on these numbers, measured with small
+dependent / independent instruction loops (cycles at 5.4 GHz):
+
+| instruction (ymm) | latency | throughput per cycle |
+|---|---|---|
+| `vpaddq`, `vpxor`, `vpand`, `vpor`, `vpunpck*qdq` | 2 | 4 |
+| `vpcmpgtq`, `vpcmpeqq`, `vblendvpd` | 2 | 2 |
+| `vpsrlq`/`vpsllq`, `vpsllvq` | 2 | 2 |
+| `vpmuludq`, `vpmulld` | 3 | 2 (shared) |
+| `vpshufb`, `vpsadbw`, `vmovmskpd`, `vtestpd` | – | 2 |
+| scalar `popcnt` / `imul r64` | 1 / 3 | ≈ 5 / ≈ 2.8 |
+
+* **Simple vector integer ops have 2-cycle latency on Zen 5.** Every loop
+  whose accumulator is updated by a chain of two such ops (compare → blend in
+  `minmax`, add → add in the sums) was latency-bound with the original two
+  accumulator sets. Four sets fix that.
+* **Compares, blends, shifts, multiplies, `vpshufb` and `vmovmskpd` issue
+  only twice per cycle** (on two pipes; multiplies and shifts use different
+  pipes, compares and blends partly overlap), while adds and logic ops issue
+  4 per cycle. So the number of compare/blend/shift ops per row decides most
+  compute-bound loops, and replacing two compares by `vpsubq` + one compare
+  (range tests) pays off.
+* The integer side (6 ALUs, scalar `popcnt`, `imul`) runs in parallel with
+  the vector pipes; `bitmap_popcount` and `hash_i64` use both at once.
+* L3 streams at ≈ 0.05 ns per 8-byte row (≈ 150 GB/s per core) on the
+  V-cache CCD; L2 at ≈ 0.035. A kernel is only as fast as the slower of its
+  compute and its memory stream, so compute below ≈ 0.05 ns/row no longer
+  shows at bench size.
+
+### The optimizations, per kernel
+
+* **`bitmap_popcount` (2×).** 640 bytes per iteration: 512 bytes go through
+  a **Harley-Seal carry-save adder tree** on ymm (ones/twos/fours/eights
+  vectors absorb 16 inputs with `vpxor`/`vpand`/`vpor`, which issue 4 per
+  cycle; only the "sixteens" vector is popcounted with the nibble-LUT
+  `vpshufb` + `vpsadbw` method), and at the same time 128 bytes go through
+  scalar `popcnt` on the integer pipes. The CSA is ordered so that each
+  running vector sees one dependent op per step (2-cycle latency).
+  L2: `popcnt` loop 0.0018 ns/bit, `vpshufb` only 0.0014, Harley-Seal
+  0.0011, hybrid 0.0010.
+* **`minmax_i64` (2×).** Four accumulator sets instead of two (the
+  compare → blend chain is 4 cycles), then a **quick reject per 64-row
+  block**: the current overall min/max `G` is the value of an already
+  processed row, so a row with `gmin < x < gmax` cannot change the result.
+  As an unsigned range test that is one `vpsubq` + one `vpcmpgtq` per 4 rows
+  (`(x − (gmin+1)) <u gmax − gmin − 1`), instead of 2 compares + 2 blends.
+  If any row of the block is outside, the block runs through the exact
+  min/max code and the test is skipped for the next 8, 16, … 1024 blocks
+  (exponential back-off, reset after a success), so sorted or otherwise
+  update-heavy data pays < 1 % for the attempts. `G` is recomputed from the
+  lanes only before an attempt that follows a full block.
+* **`sum_i64` (1.4×), with validity (1.5×).** New exactness argument with
+  fewer ops: bias every value, `x' = x ^ 2^63 = x + 2^63` is an unsigned
+  64-bit number; per lane `S = Σx' mod 2^64` and `U = Σ(x' >>> 32)` give the
+  exact unsigned lane sum `U·2^32 + (S − U·2^32 mod 2^64)`; the fold
+  subtracts `c·2^63` (`c` = rows added). That is 4 vector ops per 4 rows
+  (xor, add, shift, add) instead of 5, and only one shift instead of two.
+  Four accumulator sets. With validity, invalid rows must add exactly 0
+  (`x'' = (x ^ 2^63) & mask`, `c` = number of valid rows = popcnt of the
+  validity words); the lane mask of 4 rows is loaded from a 16-entry table
+  (`nibmask`) indexed with `rorx` + `and` on the integer side, which replaces
+  `vpsllvq` + `vpcmpgtq` (two ops on the busy pipes) per 4 rows.
+* **`hash_i64` (1.5×).** `k·C mod 2^64 = lo·clo + ((lo·chi + hi·clo) mod
+  2^32) << 32`: one `vpmulld` against the dword-swapped constant
+  `(chi, clo)` yields both cross products at once, so a 64-bit multiply is 2
+  multiplies + 4 cheap ops instead of 3 multiplies + 2 shifts + 2 adds. On
+  top of that each 24-row iteration hashes 16 rows on the vector unit (4
+  vectors, interleaved step by step because one fmix64 is a ~30-cycle chain)
+  and 8 rows with scalar `imul` on the integer unit, in parallel. L2: 0.34
+  (original) → 0.30 (`vpmulld` form alone) → 0.21 ns/row (hybrid).
+* **`group_sum_i64` (1.5×).** The two scalar read-modify-writes per row
+  (`sums[g]`, `counts[g]`) were the bottleneck. Without validity, with
+  counts, `ngroups ≤ 1024` and `n ≥ 4·ngroups`, `{sum, count}` pairs are
+  accumulated in a 16-byte-per-group table on the stack (zeroed,
+  page-probed, ≤ 20 KB) with **one `vpaddq` read-modify-write of `(x, 1)` per
+  row**, 4 rows per iteration. There is no per-row overflow test: the table is
+  only committed if no addition can wrap **in any order**, i.e.
+  `n · max|x| < 2^62` (`max|x|` bounded by the OR of `x ^ sign(x)`, tracked
+  on the fly) and every touched `sums[g]` is in `[−2^62, 2^62)`. Then all
+  partial sums stay inside int64, the reference would not have wrapped
+  either, and the result (`PQK_OK`, sums, counts) is identical to it.
+  Otherwise the table is discarded (`sums`/`counts` are untouched up to that
+  point) and the original exact row-order loop runs, so the overflow flag
+  is always exactly the reference's.
+* **`gather_i64` (DRAM: 1.4–2.4×).** Random rows are latency-bound, and the
+  out-of-order window alone keeps too few misses in flight. Rows
+  `j+128 … j+135` are now software-prefetched while rows `j … j+7` are
+  loaded (the look-ahead index loads stop 128 rows before the end of `idx`).
+  Distances 32…512 were tried: 256 is best from DRAM but costs ~10 % when the
+  column is L3-resident, 128 is neutral there. When the rows are
+  cache-resident the extra loads cost ~40 %, so prefetching is only enabled
+  if 16 indices sampled across `idx` reach 2^19 (a span ≥ 4 MB).
+* **`filter_i64` (1.4×).** Index emission for full blocks with a hit: the
+  former `pdep` + `imul` + `pext` + `vmovq` per 8 rows became one
+  `vpmovzxbd` load from a 2 KB table (`idx8`) that holds the packed bit
+  positions of every byte value. L2: 0.146 → 0.098 ns/row.
+* **`count_i64` BETWEEN (1.15×), also `filter_i64`/`filter_i64_bitmap`.**
+  With `a ≤ b`, `x ∉ [a,b] ⇔ (x − a) >u (b − a) ⇔ (x − (a^2^63)) >s
+  ((b−a)^2^63)`: one `vpsubq` + one `vpcmpgtq` instead of two compares and a
+  `vpor`. The driver switches to this "kind 4" through a pseudo-operator
+  index (7) in the jump tables; `a > b` keeps the old form (empty range).
+* **`filter_i128` (1.4×), `count_i128` BETWEEN (1.3×).** Three changes:
+  * the `idx8` index emission (as `filter_i64`);
+  * BETWEEN with `a ≤ b` as one unsigned 128-bit range test
+    (`d = x − a` with the borrow from a biased compare, then
+    `d >u b − a`): 4 compares + 1 blend per 4 rows instead of 6 + 2;
+  * a **high-word fast path** per 64-row block for LT/LE/GT/GE (mask
+    routines `vop128f_*`) and for the LT/GT/BETWEEN direct counters: a row
+    whose high word differs from the bound(s) is decided by the high word
+    alone (2 compares per 4 rows instead of 3 compares + blend + low-word
+    de-interleave and bias). If a row's high word equals a bound, the block is
+    recomputed exactly, with the same exponential back-off as `minmax`
+    (e.g. small values with all high words 0 fall back at < 1 % cost).
+* **`minmax_i128` (1.5×).** The same block quick reject as `minmax_i64`, on
+  the high words: if every row has `gminH < hi < gmaxH` (one `vpsubq` +
+  one `vpcmpgtq` per 4 rows), the block is skipped. It must use the *global*
+  min/max, not the per-lane accumulators: with the bench's validity pattern
+  `0xF7` one lane of one set only ever sees invalid rows, so its accumulator
+  stays at the start value and a per-lane test would never pass.
+* **`sum_i128`.** Four accumulator sets and the validity lane masks from a
+  2-row table (`pairmask`), as in `sum_i64`. At bench size it is
+  memory-bound (16 bytes per row), so this shows only in L2.
+
+### Rejected experiments
+
+* `minmax_i64`: a tournament tree (pairwise min/max before touching the
+  accumulators, 3.5 instead of 4 compare/blend ops per 4 rows) and a lazy
+  per-32-row test against the per-set accumulators — no faster in L3 than
+  four plain sets. Superseded by the block quick reject with the range test.
+* `filter_i64`: per-step row bases from a table (to break the `ymm4 += 8`
+  chain) and straight-line `tzcnt`/`blsr` emission with 4-byte stores for
+  blocks with ≤ 12 hits — both no faster; the emission seems limited by its
+  stores.
+* `hash_i64`: vector-only variants (the `vpmulld` form, a 3-multiply
+  `vpslldq` form, 2 or 4 interleaved vectors) all stayed at 0.29–0.31
+  ns/row in L2; only adding the scalar stream helped (0.21).
+* `bitmap_popcount`: unrolled scalar `popcnt` (0.0014), `vpshufb` only
+  (0.0014), Harley-Seal in the textbook order (0.0017, latency-bound on the
+  "ones" chain).
+* `group_sum_i64`: 2 or 4 sub-tables (even/odd rows) to shorten
+  store-to-load forwarding chains — slower (more L1 footprint).
+* Software prefetch for the sequential kernels (`sum_i64`, `compare_i64`,
+  `sum_i128`) — no measurable gain under the noise; not used.
+* `compare_i64`: 32-byte-aligned inputs would make the loop ≈ 15 % faster
+  (fewer split loads), but two independently aligned inputs plus a
+  bit-aligned output make a peel impractical; the kernel is near the L3
+  limit anyway.
+
+### Verification of the changes
+
+* `make -C native-kernels test`: 20/20 kernels PASS for `x86_scalar`,
+  `x86_avx2` and `x86_avx512` (native and ASan/UBSan).
+* `verify/run.sh` (guard pages, edge cases, small-chunk builds, ABI check,
+  structure/clobber check) passes. It now also runs **`verify/stress.c`**:
+  a randomized differential test with sizes up to 70,000 rows and 20,000
+  bitmap bytes (the stock tests stop at 5,000 rows / 200 bytes, so they
+  never reach the 640-byte popcount loop or many 64-row block paths),
+  adversarial columns (sorted, constant, extremes, alternating, high words
+  equal to the bounds, ties with the current extreme), extreme constants
+  (`INT64_MIN/MAX`, `a > b`, `a == b`), extreme initial group sums, every
+  buffer against a `PROT_NONE` guard page, and the overflow flag of
+  `group_sum` compared exactly. It is also built with tiny sum chunks.
+* Mutation checks: the stress test caught every deliberately broken
+  variant that was tried — the popcount operator-precedence bug during
+  development, the `minmax_i128` quick reject reading low instead of high
+  words, the `group_sum` init-bound check disabled, and the `filter_i128`
+  fast path treating "equal" as decided.
+* `verify/disasm_compare.py 424e5a4`: scalar and AVX-512 identical.
+* ABI: the new code follows the same rules as before (see [ABI](#abi)).
+  `group_sum_i64` is the only kernel with a larger stack frame: it moves
+  `rsp` down page by page (touching each page) and restores it from `rbp`.
+  `vcnt128_k4` uses 32 bytes of stack for a constant. Neither uses memory
+  below `rsp`.
+
+### Tools added for this task (`verify/`, not part of the library)
+
+```bash
+sh native-kernels/x86_64/verify/cmp.sh [kernel-substring]   # before/after, interleaved, pinned
+CPU=10 ROUNDS=9 BASE=<rev|dir> sh native-kernels/x86_64/verify/cmp.sh
+native-kernels/build/verify/stress [iterations] [seed] [variant]   # built by run.sh
+```
+
+`vbench.c` is `tests/kernel_bench.c` with a variant and kernel filter.
+`cmp.sh` builds it from a git revision (default `424e5a4`) or a source
+directory and from the working tree, runs both alternately and prints the
+median of the run medians and the minimum over all repetitions.
 
 ## Source structure (CR-5)
 
@@ -210,10 +520,10 @@ Kernel names below are ABI names. "all" = all three variants; `s`/`a2`/`a5`
 |---|---|---|
 | `PQK_OK … PQK_EINVAL`, `PQK_EQ … PQK_BETWEEN`, `PQK_OP_LAST`, `PQK_CMP_OP_LAST`, `ARG7()`, `MODE_*` | ABI constants (mirror `pq_kernels.h`) | all kernels returning a status or taking an op / 7th argument |
 | `FUNC`, `ENDF` | global `@function`, 32-byte aligned, `.size` | all 60 kernels |
-| `LFUNC` | local helper `@function`, 16-byte aligned | every helper: `lvp`, `popcnt64`, `sop_* scmp_* sop_false mm128_upd` (s), `vop_* vcnt_* vcmp_* vop128_* vcnt128_* fold128` (a2), `kop_* kcnt_* kcmp_* kop128_* kcnt128_* fold512` (a5) |
+| `LFUNC` | local helper `@function`, 16-byte aligned | every helper: `lvp`, `popcnt64`, `sop_* scmp_* sop_false mm128_upd` (s), `vop_* vcnt_* vcmp_* vop128_* vop128f_* vcnt128_* fold128` (a2), `kop_* kcnt_* kcmp_* kop128_* kcnt128_* fold512` (a5) |
 | `OBJ`, `ENDOBJ` | rodata `@object` with `.size` | every table (`TAB_*`, `JUMPTABLE`) |
-| `PROLOGUE`, `EPILOGUE` | push / reverse-pop of the kernel's `SAVED` list | every kernel that uses callee-saved registers (all except `bitmap_popcount`, `compare_fixed`, `gather_i64` (s); `sum_f64`, bitmap ops, `bitmap_popcount`, `hash_i64`, `gather_i64` (a2); `sum_f64`, `minmax_i64`, bitmap ops, `bitmap_popcount`, `hash_i64`, `gather_i64` (a5)) |
-| `VRET` | `vzeroupper; ret` | every AVX2/AVX-512 kernel exit after vector use (all a2/a5 kernels except a2 `bitmap_popcount` and both `gather_i64`, which use no vector registers; `compare_fixed` spells out `vzeroupper` / `ret` because its `n == 0` exit jumps between them) |
+| `PROLOGUE`, `EPILOGUE` | push / reverse-pop of the kernel's `SAVED` list | every kernel that uses callee-saved registers (all except `bitmap_popcount`, `compare_fixed`, `gather_i64` (s); `sum_f64`, bitmap ops, `bitmap_popcount`, `gather_i64` (a2); `sum_f64`, `minmax_i64`, bitmap ops, `bitmap_popcount`, `hash_i64`, `gather_i64` (a5)) |
+| `VRET` | `vzeroupper; ret` | every AVX2/AVX-512 kernel exit after vector use (all a2/a5 kernels except both `gather_i64`, which use no vector registers; `compare_fixed` spells out `vzeroupper` / `ret` because its `n == 0` exit jumps between them) |
 | `OP_CHECK`, `OP_INVALID` | operator validation (unsigned, so negative ints fail too), `(size_t)-1` exit | `filter_i64`, `filter_i64_bitmap`, `count_i64`, `compare_i64`, `filter_i128`, `count_i128` (all) |
 | `JTAB_LOAD` | target of a self-relative jump table entry | the same six kernels (all), plus the direct-counter tables of `count_i64`/`count_i128` (a2, a5) |
 | `JUMPTABLE`, `OPTABLE`, `CMPTABLE` | PIC jump tables in ABI operator order | `sop_table` `.L<k>_tab` `scmp_table` (s); `vop_table vcnt_table vcmp_table vop128_table vcnt128_table` (a2); `kop_table kcnt_table kcmp_table kop128_table kcnt128_table` (a5) |
@@ -228,7 +538,7 @@ Kernel names below are ABI names. "all" = all three variants; `s`/`a2`/`a5`
 | `EMIT_IDX_BITS` | indices of the set bits of a block mask | `filter_i64`, `filter_i128` (all) |
 | `STORE_BITS_FULL`, `STORE_BITS_TAIL` | 8-byte / ceil(len/8)-byte bitmap store | `filter_i64_bitmap`, `compare_i64` (all) |
 | `JNE_SEXT` | exact-overflow test (hi ≠ sign extension of lo) | `sum_i64`, `sum_i128` (all) |
-| `FMIX_CONSTS`, `FMIX64` | scalar MurmurHash3 finalizer | s `hash_i64`; a2 `hash_i64` (tail rows) |
+| `FMIX_CONSTS`, `FMIX64` | scalar MurmurHash3 finalizer | s `hash_i64`; a2 `hash_i64` (`FMIX_CONSTS` only; its scalar rows use `HROW` with `shrx`) |
 | `LOWMASK` | (1 << n) - 1 without bzhi | s: `bitmap_popcount`, `GSUM_PASS2` (baseline path) |
 | `BYTE_BITOP` | byte loop of and/or/andnot | `bitmap_and`, `bitmap_or`, `bitmap_andnot` (s, a2) |
 | `GATHER_I64` | whole gather body (unroll 4 or 8) | `gather_i64` (all) |
@@ -241,13 +551,15 @@ Kernel names below are ABI names. "all" = all three variants; `s`/`a2`/`a5`
 | `C_I64MAX`, `C_SIGN64` | s `minmax_i64`, s `P128_KERNEL`, a2 `minmax_i64`, a2 `minmax_i128`, `UNBIAS192`, tables below |
 | `C_F64_PINF`, `C_F64_NINF` | s `minmax_f64`, `TAB_PINF_NINF` |
 | `C_FMIX1`, `C_FMIX2` | `FMIX_CONSTS`, `TAB_FMIX_HALVES`, `TAB_FMIX` |
-| `C_BITS_EVEN`, `C_BITS_2OF4`, `C_NIBBLE_LO`, `C_BYTE_ONES` | `SWAR_POPCNT` (s), `KFIX`, `DOUBLE2` (a5), `EMIT_IDX_COMPRESS8` (a2) |
-| `C_BYTE_IOTA`, `C_NIB_BIT1`, `C_SIGN32` | `EMIT_IDX_COMPRESS8`, `NIBFIX`, a2 `group_sum_i64` / `TAB_SIGN_D` |
-| `TAB_SHC` → `shc` | a2 `sum_i64`, `sum_f64`, `minmax_i64`, `minmax_f64` |
-| `TAB_SHC128S`, `TAB_SHC128M` | a2 `sum_i128`; a2 `minmax_i128` |
-| `TAB_EIGHT_D`, `TAB_SIGN_D`, `TAB_FMIX_HALVES`, `TAB_VOP_INV` | a2 `filter_i64`/`filter_i128`; a2 `group_sum_i64`; a2 `hash_i64`; a2 `count_i64`/`count_i128` |
+| `C_BITS_EVEN`, `C_BITS_2OF4`, `C_NIBBLE_LO`, `C_BYTE_ONES` | `SWAR_POPCNT` (s), `KFIX`, `DOUBLE2` (a5) |
+| `C_NIB_BIT1`, `C_SIGN32` | `NIBFIX`, a2 `group_sum_i64` / `TAB_SIGN_D` |
+| `TAB_SHC` → `shc` | a2 `sum_f64`, `minmax_i64`, `minmax_f64` (validity paths) |
+| `TAB_SHC128M` | a2 `minmax_i128` |
+| `TAB_EIGHT_D`, `TAB_SIGN_D`, `TAB_FMIX_LO`, `TAB_VOP_INV` | a2 `filter_i64`/`filter_i128`; a2 `group_sum_i64`; a2 `hash_i64`; a2 `count_i64`/`count_i128` (8 entries: index 7 = `PQK_OP_RANGE`) |
+| `TAB_FMIX_SWAP`, `TAB_NIBMASK`, `TAB_PAIRMASK`, `TAB_IDX8` | a2 `hash_i64` (`vpmulld` constants, high-dword mask); a2 `sum_i64` (4-row validity lane masks); a2 `sum_i128` (2-row masks); a2 `EMIT_IDX_COMPRESS8` (bit positions of each byte value) |
+| `TAB_SIGN4`, `TAB_SIXTEEN_Q` | a2 `minmax_i64`, `minmax_i128`, `VOP128F`, `VCNT128_HI` (32-byte 2^63 operand); a2 `VCNT128_HI` |
 | `TAB_IOTA16`, `TAB_SIXTEEN_D` | a5 `filter_i64`, `filter_i128` |
-| `TAB_FMIX`, `TAB_I64MAX`, `TAB_NIB_LUT`, `TAB_0F`, `TAB_IDX_EVEN_ODD`, `TAB_KINV128` | a5 `hash_i64`; a5 `minmax_i64`/`minmax_i128`; a5 `bitmap_popcount` (2); a5 `minmax_i128`; a5 `count_i128` |
+| `TAB_FMIX`, `TAB_I64MAX`, `TAB_NIB_LUT`, `TAB_0F`, `TAB_IDX_EVEN_ODD`, `TAB_KINV128` | a5 `hash_i64`; a5 `minmax_i64`/`minmax_i128`; a5 and a2 `bitmap_popcount` (2); a5 `minmax_i128`; a5 `count_i128` |
 | `TAB_PINF_NINF` | `minmax_f64` (a2, a5) |
 | `TAB_I64MIN` → `c_i64min` | a2 `filter_i128`, `count_i128`, `minmax_i128`; a5 `minmax_i64`, `minmax_i128` |
 | `TAB_HIBIAS` → `c_hibias` | `sum_i128` (a2, a5) |
@@ -256,7 +568,7 @@ Kernel names below are ABI names. "all" = all three variants; `s`/`a2`/`a5`
 
 | block | users |
 |---|---|
-| `HSUMQ` | a2: `count_i64` (`VCNT`), `count_i128` (`VCNT128`), `sum_i64`; `HSUMZ` |
+| `HSUMQ` | a2: `count_i64` (`VCNT`), `count_i128` (`VCNT128`), `sum_i64`, `bitmap_popcount`; `HSUMZ` |
 | `HSUMZ` | a5: `count_i64` (`KCNT`), `count_i128` (`KCNT128`), `sum_i64`, `bitmap_popcount` |
 | `F64_ZERO_FIXUP` | `minmax_f64` (a2, a5) |
 | `SMIN128`, `SMAX128` | `minmax_i128` (a2, a5) |
@@ -271,10 +583,11 @@ Kernel names below are ABI names. "all" = all three variants; `s`/`a2`/`a5`
 | s `SPRED`, `SOP` → `sop_*`, `PRED_DRIVER` | `filter_i64`, `filter_i64_bitmap`, `count_i64` |
 | s `BQ`, `BITOP` | `bitmap_and`, `bitmap_or`, `bitmap_andnot` |
 | s `P128`, `P128_BODY`, `P128_KERNEL` | `filter_i128`, `count_i128` |
-| a2 `VPRED`, `ROWPRED`, `VOP` → `vop_*`, `VDRIVER` | `filter_i64`, `filter_i64_bitmap`, `count_i64` (`VCNT` → `vcnt_*`: `count_i64`) |
+| a2 `VPRED`, `ROWPRED`, `VOP` → `vop_*`, `RANGE_SETUP`, `VDRIVER` | `filter_i64`, `filter_i64_bitmap`, `count_i64` (`VCNT` → `vcnt_*`: `count_i64`) |
 | a2 `EMIT_IDX_COMPRESS8` | `filter_i64`, `filter_i128` |
 | a2 `VBOP`, `VBITOP` | `bitmap_and`, `bitmap_or`, `bitmap_andnot` |
-| a2 `LTX`, `GTX`, `VG128`, `NIBFIX`, `VOP128` → `vop128_*`, `VDRIVER128` | `filter_i128`, `count_i128` (`VCNT128` → `vcnt128_*`: `count_i128`) |
+| a2 `LTX`, `GTX`, `VG128`, `NIBFIX`, `VOP128` → `vop128_*`, `VOP128F` → `vop128f_*`, `RANGE128_SETUP`, `VDRIVER128` | `filter_i128`, `count_i128` (`VCNT128` → `vcnt128_*` with `VCNT128_HI` / `VCNT128_EXACT`: `count_i128`) |
+| a2 `QR_BACKOFF`, `QR_BACKOFF_MAX` | quick-reject / fast-path back-off: `minmax_i64`, `minmax_i128`, `VOP128F`, `VCNT128` |
 | a5 `LANES8` | `KOP`, `KCNT`, `GROUPMASK`; `compare_i64` (`KCMP`), `hash_i64` |
 | a5 `PEELMASK` | `count_i64` (`KCNT`), `sum_i64`, `sum_f64`, `minmax_i64`, `minmax_f64` |
 | a5 `GROUPMASK` | `sum_i64`, `sum_f64`, `minmax_i64`, `minmax_f64` |
@@ -285,7 +598,8 @@ Kernel names below are ABI names. "all" = all three variants; `s`/`a2`/`a5`
 | a5 `LGU128`, `KFIX`, `KP128`, `KOP128` → `kop128_*`, `KCNT128` → `kcnt128_*`, `KDRIVER128` | `filter_i128`, `count_i128` |
 
 `structure_check.py` verifies that each of these macros, constants, helpers
-and tables is defined in exactly one place (232 definitions).
+and tables is defined in exactly one place (232 definitions at CR-5, 260
+after the AVX2 throughput work).
 
 ### How "no behaviour change" was verified
 
@@ -427,7 +741,9 @@ The mask routines differ per variant:
   (kind, invert): `EQ x==a`, `NE !(x==a)`, `LT a>x`, `LE !(x>a)`, `GT x>a`,
   `GE !(a>x)`, `BETWEEN !(a>x | x>b)`. Each group of 4 rows does
   `vpcmpeqq`/`vpcmpgtq` + `vmovmskpd`, and the 4-bit pieces are OR-ed on two
-  independent chains. In the partial block, whole vectors are used while at
+  independent chains. (Since the throughput work, BETWEEN with `a <= b` is
+  the unsigned range test `(x-a) >u (b-a)` as one `vpsubq` + `vpcmpgtq`,
+  "kind 4".) In the partial block, whole vectors are used while at
   least 4 rows remain, the last 1–3 rows are compared in scalar code, and the
   result is trimmed with `bzhi`.
 * **AVX-512**: `vpcmpq` with an immediate predicate writes k-masks directly
@@ -439,12 +755,12 @@ The mask routines differ per variant:
 Index emission in `filter_i64`:
 
 * **scalar**: `bsf` / `x &= x-1`.
-* **AVX2**: every full block that has any hit uses an 8-row compress step.
-  `pdep` spreads the 8 mask bits to bytes, `imul 0xff` turns them into byte
-  masks, `pext` packs the row positions `0..7`, and then `vpmovzxbd` +
-  `vpaddd base` produce 8 indices, which are stored as one 32-byte store. The
-  output pointer then advances by `popcnt`. Partial and empty blocks use
-  `tzcnt`/`blsr`.
+* **AVX2**: every full block that has any hit uses an 8-row compress step:
+  one `vpmovzxbd` from the 2 KB table `idx8` (the packed bit positions of
+  every byte value) + `vpaddd base` produce 8 indices, which are stored as
+  one 32-byte store. The output pointer then advances by `popcnt`. Partial
+  and empty blocks use `tzcnt`/`blsr`. (Before the throughput work the
+  positions were computed with `pdep`, `imul 0xff`, `pext`.)
 * **AVX-512**: `vpcompressd` of an index vector, 16 rows per step.
 
 The vector stores can write past the last emitted index. This is safe: after
@@ -465,9 +781,11 @@ compare results (`vpsubq` of all-ones lanes, inversion applied at the end via
 * **AVX2**: the 64-bit validity word of a full block is broadcast and shifted
   per lane with `vpsllvq` (by `63-(4g+j)`, from a 16×4 table), which puts each
   row's bit into its lane's sign bit. `vblendvpd` uses that sign bit directly
-  (min/max). For sums it is widened to a full lane mask (`vpcmpgtq` against
-  zero) and ANDed with a plain load. The final partial block (< 64 rows) runs
-  scalar code.
+  (min/max); `sum_f64` widens it with `vpcmpgtq` against zero. The integer
+  sums now load the lane mask of 4 rows (`sum_i64`, table `nibmask`) or 2
+  rows (`sum_i128`, table `pairmask`) indexed by the validity bits (`rorx` +
+  `and` on the integer side) and AND it with a plain load. The final partial
+  block (< 64 rows) runs scalar code.
 * **AVX-512**: `kmovb`/`kmovw` read validity bytes straight into k registers,
   which act as merge masks on the arithmetic. Masked loads are used only for
   tails.
@@ -477,12 +795,13 @@ compare results (`vpsubq` of all-ones lanes, inversion applied at the end via
 * **`sum_i64`** is exact in every variant (the result must be the exact
   mathematical sum, and wrap-around that cancels out is fine).
   * scalar: a 128-bit accumulator (`add`/`adc` with `cqo` sign extension).
-  * AVX2: per lane, it accumulates `S = Σx mod 2^64`, `HU = Σ(x >>> 32)` and
-    `N = #negatives`. With `LU` = the exact sum of the low 32-bit halves:
-    `Σx = HU·2^32 + LU − N·2^64` and `LU = (S − HU·2^32) mod 2^64`. That is
-    exact while `LU < 2^64`. Chunks of at most 2^28 rows keep `HU, LU < 2^60`.
-    Each chunk is folded into a 128-bit scalar total. The cost is 5 vector ops
-    per 4 rows.
+  * AVX2: per lane, it accumulates the biased values `x' = x ^ 2^63`
+    (unsigned): `S = Σx' mod 2^64` and `U = Σ(x' >>> 32)`. The exact
+    unsigned lane sum is `U·2^32 + LU` with `LU = (S − U·2^32) mod 2^64`,
+    exact while `LU < 2^64`; chunks of at most 2^28 rows keep `U, LU < 2^60`.
+    Each chunk is folded into a 128-bit scalar total and `c·2^63` (`c` =
+    rows added) is subtracted. The cost is 4 vector ops per 4 rows. (Before
+    the throughput work: `S`, `HU = Σ(x >>> 32)` and `N = #negatives`, 5 ops.)
   * AVX-512: has `vpsraq`, so it uses signed high halves:
     `Σx = H·2^32 + L`, `L = (S − H·2^32) mod 2^64`. That is 3 ops per 8 rows,
     with no N term.
@@ -507,12 +826,18 @@ compare results (`vpsubq` of all-ones lanes, inversion applied at the end via
 * **`group_sum_i64`**: every variant validates all valid group ids first
   (outputs untouched on `PQK_EINVAL`), then adds in row order. The wrap flag is
   therefore exactly the reference's, and sums and counts are bit-identical.
+  * AVX2 (throughput work): without validity and for at most 1024 groups it
+    first accumulates `{sum, count}` pairs in a stack table and commits them
+    only if no addition can wrap in any order (then the reference cannot
+    wrap either); otherwise it discards the table and adds in row order.
   * AVX2 range check: `(id ^ 2^31) >s ((ng-1) ^ 2^31)`, 32 ids per `vptest`.
   * AVX-512 range check: native unsigned `vpcmpud`. `ngroups == 0` rejects
     every valid row, and `ngroups > UINT32_MAX` skips the check.
 * **`hash_i64`**: AVX2 has no 64-bit multiply, so `k·c` is computed as
-  `lo·clo + ((hi·clo + lo·chi) << 32)` with three `vpmuludq`. AVX-512 uses
-  `vpmullq`.
+  `lo·clo + ((hi·clo + lo·chi) << 32)`: `vpmulld` against `(chi, clo)` gives
+  both cross products, `vpmuludq` gives `lo·clo` (originally three
+  `vpmuludq`); a third of the rows are hashed with scalar `imul` in
+  parallel. AVX-512 uses `vpmullq`.
 
 ### Memory safety and aliasing
 
@@ -551,8 +876,11 @@ System V AMD64 throughout:
   touched. MXCSR is not modified.
 * No red zone is used. Internal helpers (mask routines, `lvp`, `popcnt64`)
   have documented private register conventions and use the stack only for
-  `call/ret`, so stack alignment is irrelevant to them. No external function
-  is ever called.
+  `call/ret` (exception: `vcnt128_k4` keeps one 32-byte constant on the
+  stack, between `sub`/`add` of `rsp`), so stack alignment is irrelevant to
+  them. AVX2 `group_sum_i64` allocates up to 20 KB for its local table by
+  moving `rsp` down page by page (touching each page, like stack-clash
+  probing) and restores it from `rbp`. No external function is ever called.
 * Every function that touches ymm/zmm ends with `vzeroupper` (`VRET`).
   AVX-512 code uses only zmm0–15, so `vzeroupper` leaves no dirty upper or
   Hi16 state.
@@ -585,7 +913,9 @@ argument. This section summarizes them.
 * **Operators map to (kind, invert)** so each variant needs only 3–4
   predicate kernels:
   * scalar/AVX2: `EQ`, `LT` (x<a), `GT` (x>a), and `OUT` (x<a | x>b, or
-    the range trick); `BETWEEN = !OUT`.
+    the range trick); `BETWEEN = !OUT`. AVX2 uses the 128-bit range trick
+    for `a <= b` since the throughput work (kind 4), and decides LT/GT and
+    the range kind on the high words first, per 64-row block.
   * AVX-512: `IN` (a≤x≤b) directly.
 
   With `a > b`, `BETWEEN` is empty automatically in the vector variants. The
@@ -630,7 +960,9 @@ argument. This section summarizes them.
     AVX-512 file.
 * **count without validity** skips the masks in the SIMD variants:
   * AVX2: `vpsubq` of all-ones lanes on two accumulators over `n & ~3`
-    rows; the remaining 1–3 rows go through the mask path.
+    rows; the remaining 1–3 rows go through the mask path. For LT/GT and
+    BETWEEN (`a <= b`) full 64-row blocks are first counted on the high
+    words alone and recounted exactly only if a row is undecided.
   * AVX-512: merge-masked `acc -= -1` per group. Tail groups are ANDed
     with a row mask in permuted lane order (`pdep` with `0x55`/`0xaa`).
   * The inversion is applied once at the end: `rows − count`.
@@ -661,9 +993,9 @@ any final sum outside `[-2^127, 2^127-1]` is always reported.
   * Cost: 4 vector ops per 2 rows (AVX2) or per 4 rows (AVX-512). The
     `vpxor` with the bias constant is fused with the load.
 * **Validity handling** depends on the variant:
-  * AVX2: per 64-row block, `vpsllvq` with a table moves each row's bit into
-    the sign bit of both of its lanes, and `vpcmpgtq` against zero widens it
-    to a lane mask, which is then ANDed with the load. Invalid rows become 0
+  * AVX2: per 2-row load, the lane mask is loaded from the 4-entry table
+    `pairmask` indexed by the two validity bits (originally `vpsllvq` +
+    `vpcmpgtq`), and ANDed with the load. Invalid rows become 0
     *before* the bias, so they still contribute exactly 2^127 and are
     counted in `cnt`. The final partial block is scalar.
   * AVX-512: the 64-bit validity word is expanded to a 128-bit lane mask
@@ -688,6 +1020,9 @@ any final sum outside `[-2^127, 2^127-1]` is always reported.
   * The count is `n`, or the `sbb` masks summed per row.
 * **AVX2**: lane-wise 128-bit min/max on de-interleaved groups, with
   accumulators that keep biased low words (all compares are signed).
+  * Since the throughput work, every full 64-row block is first checked on
+    the high words against the overall min/max (skip if all rows are
+    strictly inside; exponential back-off when the check fails).
   * Two accumulator sets alternate between groups and start at the neutral
     values `INT128_MAX`/`INT128_MIN`. If the true minimum is `INT128_MAX`
     it is bit-identical to the neutral value, so no first-element case is
@@ -742,7 +1077,10 @@ any final sum outside `[-2^127, 2^127-1]` is always reported.
 
 ## Verification
 
-Besides `make test`, `verify/run.sh` builds and runs:
+Besides `make test`, `verify/run.sh` builds and runs the tools below, plus
+`stress.c`, the randomized large-size differential test added for the AVX2
+throughput work (see
+[Verification of the changes](#verification-of-the-changes)):
 
 * **`guard_pages.c`**: every buffer handed to a kernel either ends exactly at a
   `PROT_NONE` page or starts right after one. It runs n = 0…300, with and
@@ -842,7 +1180,8 @@ microbenchmarks.
   selectivity, because of `tzcnt` loop-exit mispredicts.
 * **`gather_i64` uses plain scalar loads (8 per iteration) in all variants.**
   `vpgatherqq` was about 5% faster with L3-resident data but 15–20% slower
-  from DRAM. The kernel is latency-bound either way.
+  from DRAM. The kernel is latency-bound either way. (AVX2 now adds software
+  prefetch 128 rows ahead for spans >= 4 MB, see the throughput section.)
 * **`group_sum_i64` must not mispredict on overflow-heavy data.** A `jo` to a
   cold path cost up to 2× with full-range values. Now the first `jo` sets the
   flag and jumps into a copy of the loop without the check, since the flag is
@@ -873,8 +1212,9 @@ microbenchmarks.
   increment) instead of masks + popcnt: 0.070 → 0.051 ns/row in L3.
 * **AVX-512 `bitmap_popcount`** uses the Mula nibble-LUT method on zmm
   (`vpshufb` + `vpsadbw`, BW), because VPOPCNTQ is not in the checked feature
-  set. AVX2 uses `popcnt` on 64-bit words with 4 accumulators, which beat a
-  `vpshufb` ymm version on Zen (4 POPCNT/cycle).
+  set. AVX2 originally used `popcnt` on 64-bit words with 4 accumulators,
+  which beat a `vpshufb` ymm version on Zen; it now runs a Harley-Seal tree
+  on ymm and scalar `popcnt` in parallel (2x, see the throughput section).
 
 ## Benchmark results
 
@@ -884,8 +1224,11 @@ lower is better. The speedup columns are reference ns / variant ns. The
 reference is the C17 implementation compiled with `-O3` (gcc auto-vectorizes
 some loops with SSE2).
 
-The three tables below cover the 16 original kernels; they come from the
-original acceptance run of that code, which neither CR-4 nor CR-5 changed
+**These are the numbers from before the AVX2 throughput work** (for the
+current AVX2 numbers see
+[Throughput optimization of `x86_avx2`](#throughput-optimization-of-x86_avx2-kernel-optimize-task);
+scalar and AVX-512 are unchanged). The three tables below cover the 16
+original kernels; they come from the original acceptance run of that code, which neither CR-4 nor CR-5 changed
 (CR-5 kept the instructions; see
 [Performance before / after CR-5](#performance-before--after-cr-5)). The
 [128-bit kernels](#128-bit-kernels-cr-4-1) follow after them.
@@ -1032,11 +1375,15 @@ Reading the 128-bit numbers:
 * SIMD `sum_f64` is not bit-identical to sequential summation (reassociation,
   allowed by the header). Everything else in every variant is bit-identical to
   the reference, including the sign of zero in `minmax_f64`.
-* `gather_i64` and `group_sum_i64` are essentially scalar in all variants.
-  `vpgatherqq` was measured and rejected (above). A conflict-free vector
-  scatter would need AVX512CD, which is not in the checked feature set.
-* No software prefetching and no non-temporal stores. Prefetching gained about
-  10% from DRAM in isolated tests. NT stores would help `hash_i64` from DRAM
+* `gather_i64` and `group_sum_i64` are essentially scalar in all variants
+  (AVX2 `group_sum_i64` now uses one 16-byte vector read-modify-write per
+  row on a local table when no overflow is possible). `vpgatherqq` was
+  measured and rejected (above). A conflict-free vector scatter would need
+  AVX512CD, which is not in the checked feature set.
+* No software prefetching (except AVX2 `gather_i64`, where it is 1.5–2x from
+  DRAM) and no non-temporal stores. Prefetching sequential streams gained
+  about 10% from DRAM in isolated tests, and nothing measurable on this busy
+  host during the throughput work. NT stores would help `hash_i64` from DRAM
   but hurt when the hashes are consumed right away from cache, which is the
   usual case.
 * The AVX-512 alignment peel only applies when the column is 8-byte aligned
