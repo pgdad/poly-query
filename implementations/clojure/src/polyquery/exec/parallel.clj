@@ -10,8 +10,9 @@
   the pipeline are built once by the coordinating thread and shared
   read-only by all partitions.
 
-    hash-aggregate  partial aggregation per partition, merged pairwise in
-                    parallel, every merge appending the later partition's
+    hash-aggregate  partial aggregation per partition, merged in order —
+                    pairwise in parallel when vectorized partials hold many
+                    groups — every merge appending the later partition's
                     groups (so groups keep their serial order of first
                     appearance; INT64/DECIMAL sums stay exact)
     sort            partitions materialized in parallel, concatenated in
@@ -138,15 +139,23 @@
 ;; ---------------------------------------------------------------------------
 ;; Operators
 
+(def ^:private ^:const parallel-merge-groups
+  "Total groups of the partial aggregates above which they are merged in
+  parallel (below, the hand-offs to worker threads cost more than they save)."
+  16384)
+
 (defn- merge-tree
   "Merges the partial results `parts` (in order) with (merge! a b) — an
-  associative merge into a — pairwise in parallel: log2(parts) rounds."
-  [parts merge!]
-  (loop [parts (vec parts)]
-    (if (<= (count parts) 1)
-      (first parts)
-      (recur (run-all (mapv (fn [[a b]] (if b #(merge! a b) (constantly a)))
-                            (partition-all 2 parts)))))))
+  associative merge into a — pairwise in parallel (log2(parts) rounds) if
+  parallel? is true, else serially."
+  [parts merge! parallel?]
+  (if-not parallel?
+    (reduce merge! parts)
+    (loop [parts (vec parts)]
+      (if (<= (count parts) 1)
+        (first parts)
+        (recur (run-all (mapv (fn [[a b]] (if b #(merge! a b) (constantly a)))
+                              (partition-all 2 parts))))))))
 
 (defn- aggregate [plan env]
   (let [vectorized? (= :vectorized (:mode env))]
@@ -159,7 +168,11 @@
                            (vec/aggregate-partial plan (vec/build-batches in env) env)
                            (ops/aggregate-partial plan (rows-of in env) env))))
              parts (run-all (mapv (fn [r] #(partial r)) (partitions input (:partitions plan))))
-             merged (merge-tree parts (if vectorized? vec/aggregate-merge! ops/aggregate-merge!))]
+             merged (if vectorized?
+                      (merge-tree parts vec/aggregate-merge!
+                                  (> (long (reduce + (map vec/partial-size parts)))
+                                     (long parallel-merge-groups)))
+                      (reduce ops/aggregate-merge! parts))]
          (ops/reduce-list (if vectorized? (vec/aggregate-rows merged) (ops/aggregate-rows merged))
                           f init))))))
 
