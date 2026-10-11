@@ -36,6 +36,7 @@ import os
 import pickle
 import selectors
 import signal
+import stat
 import struct
 import threading
 from typing import Any, Callable
@@ -95,7 +96,7 @@ class _PlanUnpickler(pickle.Unpickler):
         return obj
 
 
-def _write_frame(fd: int, data: bytes) -> None:
+def write_frame(fd: int, data: bytes) -> None:
     view = memoryview(_HEADER.pack(len(data)) + data)
     while view:
         written = os.write(fd, view)
@@ -240,15 +241,11 @@ class WorkerPool:
     def _fork(self) -> _Worker:
         task_read, task_write = os.pipe()
         result_read, result_write = os.pipe()
-        inherited = [fd for w in self._workers for fd in (w.task_fd, w.result_fd)]
         pid = os.fork()
         if pid == 0:  # pragma: no cover - runs in the child
             status = 1
             try:
-                os.close(task_write)
-                os.close(result_read)
-                for fd in inherited:
-                    os.close(fd)
+                close_inherited_streams({task_read, result_write})
                 _worker_main(task_read, result_write, self._registry)
                 status = 0
             finally:
@@ -289,8 +286,8 @@ class WorkerPool:
                 for w, worker in enumerate(workers):
                     indexes = list(range(w, count, k))
                     own = {i: inputs[i] for i in indexes if i in inputs} if inputs else {}
-                    _write_frame(worker.task_fd, pickle.dumps((indexes, own), protocol=pickle.HIGHEST_PROTOCOL))
-                    _write_frame(worker.task_fd, payload)
+                    write_frame(worker.task_fd, pickle.dumps((indexes, own), protocol=pickle.HIGHEST_PROTOCOL))
+                    write_frame(worker.task_fd, payload)
                 replies = self._collect(workers, ctx)
             except BaseException:
                 self._stop()  # workers may be mid-task: never reuse them
@@ -318,34 +315,59 @@ class WorkerPool:
         return None
 
     def _collect(self, workers: list[_Worker], ctx: ExecutionContext) -> list[bytes]:
-        """Reads one reply frame per worker, observing cancellation and the
-        deadline while waiting."""
-        buffers: dict[int, bytearray] = {w.result_fd: bytearray() for w in workers}
-        sizes: dict[int, int | None] = {w.result_fd: None for w in workers}
-        selector = selectors.DefaultSelector()
+        return read_frames([w.result_fd for w in workers], ctx)
+
+
+def read_frames(fds: list[int], ctx: ExecutionContext) -> list[bytes]:
+    """Reads one length-prefixed frame from every fd, observing cancellation
+    and the deadline while waiting. (Frames, not EOF, delimit a reply: a
+    concurrently forked process may hold a copy of a pipe's write end.)"""
+    buffers: dict[int, bytearray] = {fd: bytearray() for fd in fds}
+    sizes: dict[int, int | None] = {fd: None for fd in fds}
+    selector = selectors.DefaultSelector()
+    try:
+        for fd in fds:
+            selector.register(fd, selectors.EVENT_READ)
+        pending = len(fds)
+        while pending:
+            for key, _ in selector.select(_POLL_SECONDS):
+                fd = key.fd
+                buf = buffers[fd]
+                size = sizes[fd]
+                want = (_HEADER.size if size is None else _HEADER.size + size) - len(buf)
+                chunk = os.read(fd, max(want, 1 << 16))
+                if not chunk:
+                    raise errors.PolyQueryError(errors.INTERNAL_ERROR, "parallel worker exited without a result")
+                buf += chunk
+                if size is None and len(buf) >= _HEADER.size:
+                    size = sizes[fd] = _HEADER.unpack_from(buf)[0]
+                if size is not None and len(buf) >= _HEADER.size + size:
+                    selector.unregister(fd)
+                    pending -= 1
+            ctx.check()
+    finally:
+        selector.close()
+    return [bytes(memoryview(buffers[fd])[_HEADER.size :]) for fd in fds]
+
+
+def close_inherited_streams(keep: set[int]) -> None:
+    """In a forked child: closes the inherited pipes and sockets (other
+    workers' pipes, client connections, listening sockets) except ``keep``,
+    so that the child never keeps them open for others. Regular files stay
+    open (memory-mapped tables own their descriptors)."""
+    try:
+        fds = [int(name) for name in os.listdir("/proc/self/fd")]
+    except OSError:
+        return
+    for fd in fds:
+        if fd < 3 or fd in keep:
+            continue
         try:
-            for worker in workers:
-                selector.register(worker.result_fd, selectors.EVENT_READ)
-            pending = len(workers)
-            while pending:
-                for key, _ in selector.select(_POLL_SECONDS):
-                    fd = key.fd
-                    buf = buffers[fd]
-                    size = sizes[fd]
-                    want = (_HEADER.size if size is None else _HEADER.size + size) - len(buf)
-                    chunk = os.read(fd, max(want, 1 << 16))
-                    if not chunk:
-                        raise errors.PolyQueryError(errors.INTERNAL_ERROR, "parallel worker exited unexpectedly")
-                    buf += chunk
-                    if size is None and len(buf) >= _HEADER.size:
-                        size = sizes[fd] = _HEADER.unpack_from(buf)[0]
-                    if size is not None and len(buf) >= _HEADER.size + size:
-                        selector.unregister(fd)
-                        pending -= 1
-                ctx.check()
-        finally:
-            selector.close()
-        return [bytes(memoryview(buffers[w.result_fd])[_HEADER.size :]) for w in workers]
+            mode = os.fstat(fd).st_mode
+        except OSError:
+            continue
+        if stat.S_ISSOCK(mode) or stat.S_ISFIFO(mode):
+            os.close(fd)
 
 
 def _results(replies: list[bytes], count: int, k: int) -> list[Any]:
@@ -401,7 +423,7 @@ def _worker_main(task_fd: int, result_fd: int, registry: dict[int, Any]) -> None
             return  # the parent closed the pipe (pool stopped or parent gone)
         indexes, inputs = pickle.loads(header)  # type: ignore[arg-type]
         reply = _run_task(payload, indexes, inputs, registry)
-        _write_frame(result_fd, reply)
+        write_frame(result_fd, reply)
         del reply, payload
         gc.collect()
 

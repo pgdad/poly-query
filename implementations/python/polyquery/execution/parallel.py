@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import os
 import pickle
-import selectors
 import signal
 import warnings
 from functools import partial
@@ -28,13 +27,12 @@ from .. import errors
 from ..planner import physical as pp
 from . import native_ops
 from .context import ExecutionContext
-from .workers import Prepare, Task
+from .workers import Prepare, Task, read_frames, write_frame
 
 # forking a process that also runs threads (HTTP server) is safe here: the
 # child only computes and then calls os._exit
 warnings.filterwarnings("ignore", message=r".*fork\(\).*", category=DeprecationWarning)
 
-_POLL_SECONDS = 0.05
 
 
 def use_processes(gather: pp.Gather, ctx: ExecutionContext) -> bool:
@@ -122,7 +120,7 @@ def _run_forked(gather: pp.Gather, ctx: ExecutionContext, task: Task) -> list[An
                 _worker(gather, ctx, range(w, count, workers), task, write_fd)
             os.close(write_fd)
             children.append((pid, read_fd))
-        payloads = _collect(children, ctx)
+        payloads = read_frames([fd for _, fd in children], ctx)
     finally:
         _reap(children)
     results: list[Any] = [None] * count
@@ -159,41 +157,10 @@ def _worker(
         except Exception as e:
             failure = errors.PolyQueryError(errors.INTERNAL_ERROR, f"parallel worker result not picklable: {e!r}")
             data = pickle.dumps((False, failure))
-        view = memoryview(data)
-        while view:
-            written = os.write(fd, view)
-            view = view[written:]
+        write_frame(fd, data)
         status = 0
     finally:
         os._exit(status)
-
-
-def _collect(children: list[tuple[int, int]], ctx: ExecutionContext) -> list[bytes]:
-    """Reads every worker's complete output, checking for cancellation and
-    the deadline while waiting."""
-    buffers = {fd: bytearray() for _, fd in children}
-    selector = selectors.DefaultSelector()
-    try:
-        for _, fd in children:
-            selector.register(fd, selectors.EVENT_READ)
-        open_fds = len(children)
-        while open_fds:
-            for key, _ in selector.select(_POLL_SECONDS):
-                chunk = os.read(key.fd, 1 << 20)
-                if chunk:
-                    buffers[key.fd] += chunk
-                else:
-                    selector.unregister(key.fd)
-                    open_fds -= 1
-            ctx.check()
-    finally:
-        selector.close()
-    out = []
-    for pid, fd in children:
-        if not buffers[fd]:
-            raise errors.PolyQueryError(errors.INTERNAL_ERROR, f"parallel worker {pid} exited without a result")
-        out.append(bytes(buffers[fd]))
-    return out
 
 
 def _reap(children: list[tuple[int, int]]) -> None:

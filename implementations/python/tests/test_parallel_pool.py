@@ -107,6 +107,43 @@ class PoolResultTests(unittest.TestCase):
             pooled.engine.close()
 
 
+class PoolLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.handler = make_handler(parallel_min_rows=1, test_functions=True)
+        _load(self.handler)
+
+    def tearDown(self):
+        self.handler.engine.close()
+
+    def query(self, sql, **options):
+        return self.handler.handle({"op": "query", "sql": sql, "options": options})
+
+    def test_timeout_stops_the_workers_and_the_pool_recovers(self):
+        resp = self.query("SELECT COUNT(*) FROM t WHERE PQ_SLEEP(5) = 0", threads=4, timeout_ms=200)
+        self.assertEqual(resp["error"]["code"], "TIMEOUT")
+        self.assertEqual(self.handler.engine.pool._workers, [])
+        resp = self.query("SELECT COUNT(*) FROM t WHERE id > 600", threads=4)
+        self.assertEqual([list(r) for r in resp["rows"]], [[600]])
+
+    def test_concurrent_queries_share_or_bypass_the_pool(self):
+        import threading
+
+        sql = "SELECT g, COUNT(*), SUM(v) FROM t WHERE PQ_SLEEP(0) = 0 GROUP BY g"
+        expected = [list(r) for r in self.query(sql, threads=1)["rows"]]
+        results = []
+
+        def run():
+            resp = self.query(sql, threads=4)
+            results.append([list(r) for r in resp["rows"]] if resp["ok"] else resp)
+
+        threads = [threading.Thread(target=run) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(results, [expected] * 4)
+
+
 class AutomaticParallelismTests(unittest.TestCase):
     def ops(self, handler, sql, **options):
         plan = handler.handle({"op": "explain", "sql": sql, "options": options})["plan"]
