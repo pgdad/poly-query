@@ -227,7 +227,7 @@ by the first error of evaluating EXPRS row by row over BATCH."
 
 (defun make-aggregate-consumer (node &key track-positions)
   "(values new-state consume lazy prepare) for vectorized aggregation of NODE:
-NEW-STATE creates an empty GROUP-STATE, (CONSUME state batch [base])
+(NEW-STATE [expected-groups]) creates an empty GROUP-STATE, (CONSUME state batch [base])
 aggregates one input batch (whose first row has input position BASE) into
 it; LAZY is true when CONSUME also accepts lazy scan batches (native
 kernels, see GROUP-STATE-CONSUME-LAZY). (PREPARE batch) returns the key and
@@ -256,7 +256,8 @@ call."
                                        (mapcar (lambda (k) (and k (funcall (the function k) batch)))
                                                arg-kernels)))))))
     (values
-     (lambda () (make-group-state key-kinds aggs track-positions native))
+     (lambda (&optional (expected 16))
+       (make-group-state key-kinds aggs track-positions native expected))
      (lambda (gs batch &optional (base 0))
        (let ((n (batch-count batch)))
          (if (batch-source batch)

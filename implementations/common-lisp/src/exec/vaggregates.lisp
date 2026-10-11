@@ -517,13 +517,13 @@ again with unbounded integers."
   ;; position, so the merged groups can be emitted in serial order.
   (positions nil :type (or null index-vector)))
 
-(defun make-group-state (key-kinds aggs &optional track-positions native)
+(defun make-group-state (key-kinds aggs &optional track-positions native (expected 16))
   "Empty group state for keys of KEY-KINDS (a list of vector kinds) and the
-aggregate calls AGGS; TRACK-POSITIONS records first input positions, NATIVE
-uses the native kernels."
+aggregate calls AGGS, with room for EXPECTED groups; TRACK-POSITIONS records
+first input positions, NATIVE uses the native kernels."
   (let ((gs (%make-group-state :native native
                                :table (and key-kinds
-                                           (make-key-table (length key-kinds) 16 key-kinds native))
+                                           (make-key-table (length key-kinds) expected key-kinds native))
                                :aggs (map 'simple-vector #'make-agg-state aggs)
                                :positions (and track-positions key-kinds
                                                (make-array 16 :element-type 'fixnum

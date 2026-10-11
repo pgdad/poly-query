@@ -307,6 +307,9 @@ workers, yielding the batches in serial order."
 ;;; the partial states. Every row carries its input position, so the groups
 ;;; are still emitted in serial first-appearance order.
 
+(defconstant +partial-state-groups+ 2048
+  "Initial room for groups of a worker's partial group state.")
+
 (defconstant +partition-group-ratio+ 1/8
   "Groups per input row of a worker's first morsel above which a parallel
 aggregation partitions its rows instead of pre-aggregating them.")
@@ -403,7 +406,7 @@ many groups, partitioning its rows; see above)."
                               (destructuring-bind (new-state consume lazy prepare) (svref consumers w)
                                 (declare (ignore lazy))
                                 (declare (type function new-state consume prepare))
-                                (let ((gs (funcall new-state))
+                                (let ((gs (funcall new-state (if grouped +partial-state-groups+ 16)))
                                       (first-morsel t)
                                       (partition nil))
                                   (setf (svref states w) gs)
@@ -485,7 +488,7 @@ merged in parallel, one thread per hash partition."
        ;; Partition p collects the groups whose hash is in partition p, from
        ;; every partial state, and the rows of partition p of every
        ;; partitioned batch.
-       (let ((parts (coerce (loop repeat workers collect (funcall new-state)) 'simple-vector))
+       (let ((parts (make-array workers))
              (split (make-array workers)))
          ;; Each partial state's groups split by partition (in parallel) ...
          (run-in-threads
@@ -494,6 +497,12 @@ merged in parallel, one thread per hash partition."
                           (lambda ()
                             (setf (svref split w)
                                   (group-state-partitions (svref states w) workers))))))
+         ;; ... (a partition's table gets room for all groups it receives
+         ;; from the partial states) ...
+         (dotimes (p workers)
+           (setf (svref parts p)
+                 (funcall new-state (max 16 (loop for w below workers
+                                                  sum (length (svref (svref split w) p)))))))
          ;; ... then each partition merges its groups of every partial state
          ;; and aggregates its rows of the partitioned batches.
          (run-in-threads
