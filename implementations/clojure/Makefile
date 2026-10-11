@@ -36,7 +36,7 @@ target/polyquery.aot: target/polyquery.jar script/training.clj bin/polyquery
 	    test -s $@; then \
 	  echo "AOT cache: $@ ($$(grep -c '"ok":true' target/training/responses.jsonl) training requests ok)"; \
 	else \
-	  echo "warning: AOT cache training failed (see target/training/training.log); building without it" >&2; \
+	  echo "warning: AOT cache training failed (see the output above and target/training/training.log); building without it" >&2; \
 	  rm -f $@; \
 	fi
 	@rm -f target/training/*.csv target/training/*.pqcf target/training/responses.jsonl
