@@ -1091,7 +1091,7 @@ ENDF pqk_a64_neon_compare_fixed
  * Args:      x0 group_ids, x1 values, x2 validity (NULL = all valid), x3 n,
  *            x4 sums, x5 counts (may be NULL), x6 ngroups
  * Result:    w0 = PQK_OK, PQK_OVERFLOW or PQK_EINVAL (outputs untouched)
- * Clobbers:  x7-x17, v0, v1, v16, v17, v20-v22, v26, v27, flags
+ * Clobbers:  x0, x7-x17, v0, v1, v16, v17, v20-v22, v26, v27, flags
  * Registers: x8 first row of the current chunk, x12 rows of the chunk /
  *            rows left; check: x10 id cursor, x17 validity cursor, x13
  *            groups / rows, w11 max id, w14 tail validity, w15 tail id,
