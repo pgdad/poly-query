@@ -1,5 +1,5 @@
 {
- "generated": "2026-10-11T17:55:38.457239+00:00",
+ "generated": "2026-10-11T21:03:07.040293+00:00",
  "weights": {
   "correctness": 0.35,
   "development_effort": 0.2,
@@ -7,7 +7,7 @@
   "resources": 0.1,
   "maintainability": 0.15
  },
- "git_commit": "89bb3c50c1a318b5773f8f450e849b55d48771dd",
+ "git_commit": "8566c8859e20f01b1802d02f85012a6828625be9",
  "runs": [
   {
    "run_id": "a-change-decimal38-clojure-a1-20261011T060221Z",
@@ -532,6 +532,15 @@
    "manifest": "experiments/runs/a-phase1-x86_64-asm-engine-a1-20261011T164036Z/manifest.json"
   },
   {
+   "run_id": "a-phase2-arm64-asm-engine-a1-20261011T175419Z",
+   "language": "arm64-asm-engine",
+   "task": "phase2",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-phase2-arm64-asm-engine-a1-20261011T175419Z/manifest.json"
+  },
+  {
    "run_id": "a-phase2-clojure-a1-20261010T190215Z",
    "language": "clojure",
    "task": "phase2",
@@ -584,6 +593,24 @@
    "attempt": 1,
    "outcome": "success",
    "manifest": "experiments/runs/a-phase2-rust-a1-20261010T201523Z/manifest.json"
+  },
+  {
+   "run_id": "a-phase2-x86_64-asm-engine-a1-20261011T175416Z",
+   "language": "x86_64-asm-engine",
+   "task": "phase2",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-phase2-x86_64-asm-engine-a1-20261011T175416Z/manifest.json"
+  },
+  {
+   "run_id": "a-phase3-arm64-asm-engine-a1-20261011T183250Z",
+   "language": "arm64-asm-engine",
+   "task": "phase3",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-phase3-arm64-asm-engine-a1-20261011T183250Z/manifest.json"
   },
   {
    "run_id": "a-phase3-clojure-a1-20261010T192851Z",
@@ -640,6 +667,24 @@
    "manifest": "experiments/runs/a-phase3-rust-a1-20261010T204115Z/manifest.json"
   },
   {
+   "run_id": "a-phase3-x86_64-asm-engine-a1-20261011T183247Z",
+   "language": "x86_64-asm-engine",
+   "task": "phase3",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-phase3-x86_64-asm-engine-a1-20261011T183247Z/manifest.json"
+  },
+  {
+   "run_id": "a-phase4-arm64-asm-engine-a1-20261011T191538Z",
+   "language": "arm64-asm-engine",
+   "task": "phase4",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-phase4-arm64-asm-engine-a1-20261011T191538Z/manifest.json"
+  },
+  {
    "run_id": "a-phase4-clojure-a1-20261010T195932Z",
    "language": "clojure",
    "task": "phase4",
@@ -694,6 +739,24 @@
    "manifest": "experiments/runs/a-phase4-rust-a1-20261010T224055Z/manifest.json"
   },
   {
+   "run_id": "a-phase4-x86_64-asm-engine-a1-20261011T191535Z",
+   "language": "x86_64-asm-engine",
+   "task": "phase4",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-phase4-x86_64-asm-engine-a1-20261011T191535Z/manifest.json"
+  },
+  {
+   "run_id": "a-phase5-arm64-asm-engine-a1-20261011T195447Z",
+   "language": "arm64-asm-engine",
+   "task": "phase5",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-phase5-arm64-asm-engine-a1-20261011T195447Z/manifest.json"
+  },
+  {
    "run_id": "a-phase5-clojure-a1-20261010T201442Z",
    "language": "clojure",
    "task": "phase5",
@@ -746,6 +809,15 @@
    "attempt": 1,
    "outcome": "success",
    "manifest": "experiments/runs/a-phase5-rust-a1-20261011T004454Z/manifest.json"
+  },
+  {
+   "run_id": "a-phase5-x86_64-asm-engine-a1-20261011T195444Z",
+   "language": "x86_64-asm-engine",
+   "task": "phase5",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-phase5-x86_64-asm-engine-a1-20261011T195444Z/manifest.json"
   },
   {
    "run_id": "a-refactor-plan-separation-clojure-a1-20261011T054654Z",
@@ -1637,28 +1709,73 @@
         "fail": 0,
         "error": 0,
         "not_implemented": 0
+       },
+       "2": {
+        "total": 186,
+        "pass": 186,
+        "fail": 0,
+        "error": 0,
+        "not_implemented": 0
+       },
+       "3": {
+        "total": 143,
+        "pass": 143,
+        "fail": 0,
+        "error": 0,
+        "not_implemented": 0
+       },
+       "5": {
+        "total": 15,
+        "pass": 15,
+        "fail": 0,
+        "error": 0,
+        "not_implemented": 0
        }
       },
       "total": {
-       "total": 225,
-       "pass": 225,
+       "total": 569,
+       "pass": 569,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
       }
      },
      "phase_passed": {
-      "1": true
+      "1": true,
+      "2": true,
+      "3": true,
+      "5": true
      },
      "capabilities": [
+      "exec.parallel",
+      "exec.row",
+      "exec.vectorized",
+      "http.streaming",
+      "index.btree",
+      "index.hash",
       "ingest.csv",
       "ingest.json",
       "ingest.jsonl",
+      "join.hash",
+      "join.merge",
+      "join.nested_loop",
       "phase1",
+      "phase2",
+      "phase3",
+      "phase4",
+      "phase5",
       "sql.basic",
+      "sql.correlated_subquery",
+      "sql.cte",
+      "sql.functions",
+      "sql.groupby",
+      "sql.join",
+      "sql.subquery",
+      "storage.mmap",
+      "storage.pqcf",
       "test.functions"
      ],
-     "started": "2026-10-11T17:27:18.331712+00:00",
+     "started": "2026-10-11T21:01:50.505672+00:00",
      "source": "results/correctness/x86_64-asm-engine.json"
     },
     "arm64-asm-engine": {
@@ -1670,28 +1787,73 @@
         "fail": 0,
         "error": 0,
         "not_implemented": 0
+       },
+       "2": {
+        "total": 202,
+        "pass": 202,
+        "fail": 0,
+        "error": 0,
+        "not_implemented": 0
+       },
+       "3": {
+        "total": 172,
+        "pass": 172,
+        "fail": 0,
+        "error": 0,
+        "not_implemented": 0
+       },
+       "5": {
+        "total": 15,
+        "pass": 15,
+        "fail": 0,
+        "error": 0,
+        "not_implemented": 0
        }
       },
       "total": {
-       "total": 249,
-       "pass": 249,
+       "total": 638,
+       "pass": 638,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
       }
      },
      "phase_passed": {
-      "1": true
+      "1": true,
+      "2": true,
+      "3": true,
+      "5": true
      },
      "capabilities": [
+      "exec.parallel",
+      "exec.row",
+      "exec.vectorized",
+      "http.streaming",
+      "index.btree",
+      "index.hash",
       "ingest.csv",
       "ingest.json",
       "ingest.jsonl",
+      "join.hash",
+      "join.merge",
+      "join.nested_loop",
       "phase1",
+      "phase2",
+      "phase3",
+      "phase4",
+      "phase5",
       "sql.basic",
+      "sql.correlated_subquery",
+      "sql.cte",
+      "sql.functions",
+      "sql.groupby",
+      "sql.join",
+      "sql.subquery",
+      "storage.mmap",
+      "storage.pqcf",
       "test.functions"
      ],
-     "started": "2026-10-11T17:54:08.923614+00:00",
+     "started": "2026-10-11T21:01:56.426578+00:00",
      "source": "results/correctness/arm64-asm-engine.json"
     }
    }
@@ -4125,6 +4287,118 @@
        "not_implemented": 0
       }
      }
+    ],
+    "phase2": [
+     {
+      "run_id": "a-phase2-x86_64-asm-engine-a1-20261011T175416Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-phase2-x86_64-asm-engine-a1-20261011T175416Z/manifest.json",
+      "cost_usd": 16.038120000000003,
+      "tokens_output": 175552,
+      "tokens_input_total": 19836679,
+      "turns": 85,
+      "wall_seconds": 1496.4,
+      "tool_calls": 143,
+      "tool_failures": 1,
+      "build_failures": 2,
+      "repair_iterations": 11,
+      "commits": 10,
+      "lines_added": 6331,
+      "lines_removed": 645,
+      "files_changed": 19,
+      "conformance": {
+       "total": 451,
+       "pass": 451,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "phase3": [
+     {
+      "run_id": "a-phase3-x86_64-asm-engine-a1-20261011T183247Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-phase3-x86_64-asm-engine-a1-20261011T183247Z/manifest.json",
+      "cost_usd": 14.795773600000002,
+      "tokens_output": 237295,
+      "tokens_input_total": 33239016,
+      "turns": 125,
+      "wall_seconds": 2143.7,
+      "tool_calls": 124,
+      "tool_failures": 2,
+      "build_failures": 1,
+      "repair_iterations": 13,
+      "commits": 10,
+      "lines_added": 5829,
+      "lines_removed": 151,
+      "files_changed": 19,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "phase4": [
+     {
+      "run_id": "a-phase4-x86_64-asm-engine-a1-20261011T191535Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-phase4-x86_64-asm-engine-a1-20261011T191535Z/manifest.json",
+      "cost_usd": 12.701766400000006,
+      "tokens_output": 225676,
+      "tokens_input_total": 27012255,
+      "turns": 109,
+      "wall_seconds": 2221.0,
+      "tool_calls": 108,
+      "tool_failures": 3,
+      "build_failures": 1,
+      "repair_iterations": 6,
+      "commits": 12,
+      "lines_added": 5266,
+      "lines_removed": 133,
+      "files_changed": 12,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "phase5": [
+     {
+      "run_id": "a-phase5-x86_64-asm-engine-a1-20261011T195444Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-phase5-x86_64-asm-engine-a1-20261011T195444Z/manifest.json",
+      "cost_usd": 20.200703200000003,
+      "tokens_output": 297634,
+      "tokens_input_total": 52644128,
+      "turns": 194,
+      "wall_seconds": 3043.3,
+      "tool_calls": 193,
+      "tool_failures": 0,
+      "build_failures": 7,
+      "repair_iterations": 11,
+      "commits": 24,
+      "lines_added": 6315,
+      "lines_removed": 164,
+      "files_changed": 23,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
     ]
    },
    "arm64-asm-engine": {
@@ -4150,6 +4424,118 @@
       "conformance": {
        "total": 249,
        "pass": 249,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "phase2": [
+     {
+      "run_id": "a-phase2-arm64-asm-engine-a1-20261011T175419Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-phase2-arm64-asm-engine-a1-20261011T175419Z/manifest.json",
+      "cost_usd": 23.1850926,
+      "tokens_output": 203261,
+      "tokens_input_total": 28883524,
+      "turns": 119,
+      "wall_seconds": 2147.6,
+      "tool_calls": 253,
+      "tool_failures": 4,
+      "build_failures": 6,
+      "repair_iterations": 16,
+      "commits": 12,
+      "lines_added": 7371,
+      "lines_removed": 898,
+      "files_changed": 17,
+      "conformance": {
+       "total": 451,
+       "pass": 451,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "phase3": [
+     {
+      "run_id": "a-phase3-arm64-asm-engine-a1-20261011T183250Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-phase3-arm64-asm-engine-a1-20261011T183250Z/manifest.json",
+      "cost_usd": 19.647368599999997,
+      "tokens_output": 171429,
+      "tokens_input_total": 33203412,
+      "turns": 142,
+      "wall_seconds": 1804.5,
+      "tool_calls": 216,
+      "tool_failures": 4,
+      "build_failures": 6,
+      "repair_iterations": 11,
+      "commits": 17,
+      "lines_added": 7445,
+      "lines_removed": 72,
+      "files_changed": 23,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "phase4": [
+     {
+      "run_id": "a-phase4-arm64-asm-engine-a1-20261011T191538Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-phase4-arm64-asm-engine-a1-20261011T191538Z/manifest.json",
+      "cost_usd": 10.1815308,
+      "tokens_output": 183768,
+      "tokens_input_total": 19200393,
+      "turns": 98,
+      "wall_seconds": 1760.7,
+      "tool_calls": 97,
+      "tool_failures": 3,
+      "build_failures": 3,
+      "repair_iterations": 6,
+      "commits": 5,
+      "lines_added": 5306,
+      "lines_removed": 467,
+      "files_changed": 27,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "phase5": [
+     {
+      "run_id": "a-phase5-arm64-asm-engine-a1-20261011T195447Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-phase5-arm64-asm-engine-a1-20261011T195447Z/manifest.json",
+      "cost_usd": 27.42186900000002,
+      "tokens_output": 375548,
+      "tokens_input_total": 75960963,
+      "turns": 213,
+      "wall_seconds": 3947.6,
+      "tool_calls": 212,
+      "tool_failures": 2,
+      "build_failures": 0,
+      "repair_iterations": 45,
+      "commits": 33,
+      "lines_added": 8160,
+      "lines_removed": 678,
+      "files_changed": 22,
+      "conformance": {
+       "total": 623,
+       "pass": 623,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
@@ -17704,21 +18090,21 @@
     }
    },
    "x86_64-asm-engine": {
-    "source_loc": 9919,
-    "test_loc": 3065,
-    "files": 14,
-    "comment_lines": 687,
-    "comment_density": 0.069,
-    "largest_file_loc": 1318,
+    "source_loc": 28243,
+    "test_loc": 4608,
+    "files": 31,
+    "comment_lines": 1918,
+    "comment_density": 0.068,
+    "largest_file_loc": 3057,
     "rubric_review": null
    },
    "arm64-asm-engine": {
-    "source_loc": 11018,
-    "test_loc": 4476,
-    "files": 17,
-    "comment_lines": 1681,
-    "comment_density": 0.153,
-    "largest_file_loc": 1528,
+    "source_loc": 30022,
+    "test_loc": 7046,
+    "files": 36,
+    "comment_lines": 4362,
+    "comment_density": 0.145,
+    "largest_file_loc": 2397,
     "rubric_review": null
    }
   },

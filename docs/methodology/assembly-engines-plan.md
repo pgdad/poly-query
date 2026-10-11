@@ -57,7 +57,8 @@ concurrency) and the cost of later changes (CR-1…CR-3)?
 | prompt | the engine template unchanged for the six engines (byte-identical renders); assembly rules via `EXTRA_RULES`, glibc policy via `stdlib_note` |
 | continuation runs | `pq_orchestrate.py chain --task phaseN --lang L --max-sessions 3 --total-budget-usd B --timeout-min 120`: each session is its own recorded run (`-sN` suffix, `continues`, `session`), cloned from the previous session's workspace with its git history; the budget is shared across sessions; import covers all sessions |
 | AArch64 loop | agents and their validation run natively on spark (`agent_host`), in the same bubblewrap sandbox (`tools/remote/spark_sandbox.sh`, installed by `tools/remote/spark_agent_setup.sh`); the credential copy exists on spark only during a run |
-| still to do before Phase 5 | the native-kernel library path in engine validation is x86-only (`native-kernels/build/x86_64`); the AArch64 engine needs the aarch64 build there |
+| native-kernel library path | per host (`build/aarch64` for spark agents); the assembly engines do not claim `native.kernels`, so the native mode is skipped for them |
+| phases 1–5 | complete for both, one session each; $188.99 of the $600 cap |
 | pilot | started 2026-10-11 16:40 UTC: x86-64 Phase 1, attempt 1, ≤ 3 sessions × 120 min, $300 |
 
 ## 4. Phasing and stop rules

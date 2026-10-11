@@ -256,6 +256,8 @@ recorded as its own run. The cohort is never ranked with the six engines.
 | AArch64 assembly | 3 | 1 | success | $19.65 | 30 min | 623/623 with hidden, natively on spark | ~31.4 k lines |
 | x86-64 assembly | 4 | 1 | success | $12.70 | 37 min | 623/623 with hidden, also over HTTP; HTTP suite 19/19 | ~30.4 k lines |
 | AArch64 assembly | 4 | 1 | success | $10.18 | 29 min | 623/623 with hidden, also over HTTP; HTTP suite 19/19 (spark) | ~36.0 k lines |
+| x86-64 assembly | 5 | 1 | success | $20.20 | 51 min | 623/623 with hidden, over HTTP, and 3738/3738 across the six execution modes; HTTP suite 19/19 | ~36.1 k lines |
+| AArch64 assembly | 5 | 1 | success | $27.42 | 66 min | 623/623 with hidden, over HTTP, and 3738/3738 across the six execution modes; HTTP suite 19/19 (spark) | ~42.8 k lines |
 
 Both were checked for compliance: no C or other high-level sources, no
 compiler-generated assembly, and a launcher that only execs the assembled
@@ -263,7 +265,7 @@ binary. The transcripts show no C was ever compiled; Python served only as a
 calculator and test-data generator. The AArch64 agent split the work across
 sub-agents (an available tool; its cost is included). Phase 1 cost more than for the
 high-level languages ($21–24 vs. $8–17) but took no longer (28–37 min vs.
-24–106 min), far below the plan's estimate. Both implemented the optional correlated subqueries in Phase 2. The x86-64 agent developed part of Phase 2 on a side branch and merged it; the import was extended to keep such histories (grafted commits with the agent's authorship and dates). After Phase 3 the x86-64 assembly engine joined the PQCF interoperability matrix with the six engines: every file written by any engine is read correctly by every other, in both directions ([`interop-asm-engine.json`](../../results/correctness/interop-asm-engine.json); the assembly engine does not implement CR-2, so the four PQCF v2 files are excluded for it). After Phase 3 the owner raised the cap to $600; spend after Phase 4: $141.37. Phase 5 is running for both.
+24–106 min), far below the plan's estimate. Both implemented the optional correlated subqueries in Phase 2. The x86-64 agent developed part of Phase 2 on a side branch and merged it; the import was extended to keep such histories (grafted commits with the agent's authorship and dates). After Phase 3 the x86-64 assembly engine joined the PQCF interoperability matrix with the six engines: every file written by any engine is read correctly by every other, in both directions ([`interop-asm-engine.json`](../../results/correctness/interop-asm-engine.json); the assembly engine does not implement CR-2, so the four PQCF v2 files are excluded for it). After Phase 3 the owner raised the cap to $600; spend after Phase 5: $188.99. Both engines completed all five phases in one session per phase (no continuation session was needed) and claim row, vectorized and parallel execution and hash, merge and nested-loop joins. The native-kernel conformance mode does not apply to them (they do not load the kernel library); the ARM validation script now skips it for engines that do not claim `native.kernels`, as engine validation already did.
 
 ## AArch64 end to end
 

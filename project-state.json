@@ -1,6 +1,6 @@
 {
  "schema": "polyquery-project-state/1",
- "updated": "2026-10-11T19:55:35+00:00",
+ "updated": "2026-10-11T21:30:00Z",
  "current_milestone": "M10",
  "milestones": {
   "M0": {
@@ -52,13 +52,13 @@
   }
  },
  "outstanding_tasks": [
-  "Option B: Phases 1-4 merged for both assembly engines (each phase one session); Phase 5 chains running ($120 cap each); spend $141.37 of the $600 cap",
+  "Option B: Phases 1-5 merged for both assembly engines (each phase one session; Phase 5 3738/3738 across modes, HTTP suite 19/19); spend $188.99 of the $600 cap; next: later families, code review, benchmarks",
   "Native-kernel validation path for the AArch64 engine (Phase 5) is x86-only (native-kernels/build/x86_64)",
   "Main-line HTTP throughput not re-measured after INT-001 (bench.py run without the HTTP benchmark)",
   "Debugging family remains too easy for both engines and kernels (kernel variant with symptom-only report and hidden-only failures: fixed in ~1 min)",
   "AArch64 kernel review findings: verification harnesses not committed, no BTI/GNU property note, block-size test constants not overridable",
-  "Python HTTP defect: negative chunk size bypasses --max-request-bytes (HTTP suite malformed_chunked_body fails 18/19) — fix via a sandboxed agent run (e.g. a regression/robustness task), not by hand",
-  "Go optimize-latency: two timeouts (88 min, 120 min); committed a2 work passes all checks (1.74x speedup) but is unmerged — decide on attempt 3 or accept timeout as the result",
+  "Python HTTP defect: negative chunk size bypasses --max-request-bytes (HTTP suite malformed_chunked_body fails 18/19) \u2014 fix via a sandboxed agent run (e.g. a regression/robustness task), not by hand",
+  "Go optimize-latency: two timeouts (88 min, 120 min); committed a2 work passes all checks (1.74x speedup) but is unmerged \u2014 decide on attempt 3 or accept timeout as the result",
   "Resolve SPEC-Q-002 (expression size/nesting implementation limits) via change control",
   "Repeated attempts (n>1) per language/task for statistics (docs/methodology/statistics.md)",
   "10m-scale benchmark",
@@ -95,9 +95,9 @@
   "http_suite": "19/19 all engines except python 18/19 (malformed_chunked_body)"
  },
  "last_successful_commit": "4073bb4483a42b07640fa3cce552ec2707d79ced",
- "next_recommended_action": "When Phase 5 finishes: compliance checks, accept, then plan the later families (CR-1/CR-3/CR-2, debugging, optimization, code review) and benchmarks for the assembly engines within the $600 cap.",
+ "next_recommended_action": "Assembly engines: later families (CR-1 UNION ALL, CR-3 refactor, CR-2 decimal38, debugging, optimization), read-only code review (2 reviewers each) and quiet-host benchmarks (x86 here, ARM on spark; separate cohort), within the $600 cap ($188.99 spent after Phase 5).",
  "findings": [
-  "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) — report as engine quality finding; clojure p95 16 ms",
+  "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) \u2014 report as engine quality finding; clojure p95 16 ms",
   "CR-2 DECIMAL(38) was the most expensive change (6.25-16.50 USD); Go and Java needed a new wide-decimal representation",
   "Independent optimization speedups (geomean, 1m): Python 2.85x, Common Lisp 2.48x, Go 1.74x (timed out), Java 1.38x, Clojure 1.13x, Rust 1.07x; results identical before/after",
   "AI code review: high inter-reviewer agreement (92% exact, kappa 0.84) but compressed scale (4-5); concrete findings more informative than scores",
