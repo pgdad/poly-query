@@ -28,7 +28,9 @@ Q4 group by expr|SELECT bucket % 10 AS b, COUNT(*), SUM(amount) FROM tx WHERE is
 Q5 hash join+agg|SELECT c.segment, COUNT(*), SUM(t.amount) FROM tx t JOIN cust c ON c.customer_id = t.customer_id GROUP BY c.segment
 Q6 top-N|SELECT tx_id, amount FROM tx WHERE status = '"'"'approved'"'"' ORDER BY amount DESC, tx_id LIMIT 10
 Q7 projection|SELECT tx_id, amount * 2, fee + amount FROM tx WHERE merchant_id < 100
-Q8 const fold|SELECT COUNT(*) FROM tx WHERE amount > 10 * 10 + 0 AND 1 = 1'
+Q8 const fold|SELECT COUNT(*) FROM tx WHERE amount > 10 * 10 + 0 AND 1 = 1
+Q9 full sort|SELECT tx_id, amount FROM tx ORDER BY amount DESC, tx_id
+Q10 NL join|SELECT COUNT(*) FROM tx t JOIN cust c ON c.customer_id = t.customer_id WHERE t.tx_id < 2000 AND c.customer_id < 2000'
 
 req() { printf '{"op":"query","sql":"%s","options":%s}\n' "$1" "$2"; }
 

@@ -2200,3 +2200,203 @@ FUNC pexec_nl
 9:  mov %r15, %rax
     LEAVE
 ENDF pexec_nl
+
+/* ================================================================ sort */
+
+/* sort task: PT_A rows, PT_B source pairs, PT_C plan, PT_D destination
+ * pairs, PT_N run bounds (u64[runs + 1]) */
+
+/* sort_part(task rdi, part rsi, lo rdx, hi rcx): sorts the (row, sequence)
+ * pairs of rows [lo, hi) */
+FUNC sort_part
+    ENTER 0
+    mov %rdi, %rbx
+    mov %rdx, %r12
+    mov %rcx, %r13
+    mov PT_A(%rbx), %r8
+    mov PT_B(%rbx), %r9
+    mov %r12, %rcx
+1:  cmp %r13, %rcx
+    jae 2f
+    mov %rcx, %rdx
+    shl $4, %rdx
+    mov (%r8, %rcx, 8), %rax
+    mov %rax, (%r9, %rdx)
+    mov %rcx, 8(%r9, %rdx)
+    inc %rcx
+    jmp 1b
+2:  mov %r12, %rdi
+    shl $4, %rdi
+    add PT_B(%rbx), %rdi
+    mov %r13, %rsi
+    sub %r12, %rsi
+    mov $16, %edx
+    lea row_cmp_stable(%rip), %rcx
+    mov PT_C(%rbx), %r8
+    call qsort_r
+    LEAVE
+ENDF sort_part
+
+/* merge_part(task rdi, part k rsi): merges the sorted runs 2k and 2k+1 of
+ * PT_B into PT_D */
+FUNC merge_part
+    ENTER 16
+    mov %rdi, %rbx
+    mov PT_N(%rbx), %rax
+    lea (%rsi, %rsi), %rcx
+    mov (%rax, %rcx, 8), %r12       /* i: first run */
+    mov 8(%rax, %rcx, 8), %r13      /* j: second run (= end of the first) */
+    mov %r13, 0(%rsp)
+    mov 16(%rax, %rcx, 8), %rax
+    mov %rax, 8(%rsp)               /* end of the second run */
+    mov %r12, %r14                  /* output position */
+1:  cmp 0(%rsp), %r12
+    jae 5f
+    cmp 8(%rsp), %r13
+    jae 5f
+    mov %r13, %rdi
+    shl $4, %rdi
+    add PT_B(%rbx), %rdi
+    mov %r12, %rsi
+    shl $4, %rsi
+    add PT_B(%rbx), %rsi
+    mov PT_C(%rbx), %rdx
+    call row_cmp_stable
+    mov %r12, %rcx
+    cmp $0, %eax
+    jge 2f
+    mov %r13, %rcx                  /* the second run's entry first */
+    inc %r13
+    jmp 3f
+2:  inc %r12
+3:  shl $4, %rcx
+    add PT_B(%rbx), %rcx
+    mov %r14, %rdx
+    shl $4, %rdx
+    add PT_D(%rbx), %rdx
+    mov (%rcx), %rax
+    mov %rax, (%rdx)
+    mov 8(%rcx), %rax
+    mov %rax, 8(%rdx)
+    inc %r14
+    jmp 1b
+5:  mov %r14, %rdi                  /* the rest of either run */
+    shl $4, %rdi
+    add PT_D(%rbx), %rdi
+    mov %r12, %rsi
+    shl $4, %rsi
+    add PT_B(%rbx), %rsi
+    mov 0(%rsp), %rdx
+    sub %r12, %rdx
+    add %rdx, %r14
+    shl $4, %rdx
+    call memcpy
+    mov %r14, %rdi
+    shl $4, %rdi
+    add PT_D(%rbx), %rdi
+    mov %r13, %rsi
+    shl $4, %rsi
+    add PT_B(%rbx), %rsi
+    mov 8(%rsp), %rdx
+    sub %r13, %rdx
+    shl $4, %rdx
+    call memcpy
+    LEAVE
+ENDF merge_part
+
+/* pexec_sort(rows rdi, n rsi, plan rdx) -> eax 1 if sorted here (stable,
+ * like sort_rows), 0 when one part would do all the work */
+FUNC pexec_sort
+    ENTER 32
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %rdx, %r13
+    mov g_opt_threads(%rip), %rax   /* sorting evaluates no expressions */
+    mov %rax, g_par_threads(%rip)
+    mov %r12, %rdi
+    call par_parts
+    mov %rax, %r14                  /* runs */
+    xor %eax, %eax
+    cmp $1, %r14
+    jbe 99f
+    mov $PT_SIZE, %edi
+    call tmp_zalloc
+    mov %rax, %r15
+    mov %rbx, PT_A(%r15)
+    mov %r13, PT_C(%r15)
+    mov %r12, %rdi
+    shl $4, %rdi
+    call tmp_alloc
+    mov %rax, PT_B(%r15)
+    mov %r12, %rdi
+    shl $4, %rdi
+    call tmp_alloc
+    mov %rax, PT_D(%r15)
+    lea 8(, %r14, 8), %rdi
+    call tmp_alloc
+    mov %rax, PT_N(%r15)            /* bounds of part p: n * p / P */
+    xor %ecx, %ecx
+1:  cmp %r14, %rcx
+    ja 2f
+    mov %r12, %rax
+    mul %rcx
+    div %r14
+    mov PT_N(%r15), %rdx
+    mov %rax, (%rdx, %rcx, 8)
+    inc %rcx
+    jmp 1b
+2:  mov %r12, %rdi                  /* sorted runs */
+    mov %r14, %rsi
+    lea sort_part(%rip), %rdx
+    mov %r15, %rcx
+    call par_run
+3:  cmp $1, %r14                    /* merge rounds */
+    jbe 8f
+    mov %r14, %rdi
+    shr $1, %rdi
+    mov %rdi, %rsi
+    lea merge_part(%rip), %rdx
+    mov %r15, %rcx
+    call par_run
+    test $1, %r14                   /* odd run count: the last run moves */
+    jz 4f
+    mov PT_N(%r15), %rax
+    mov -8(%rax, %r14, 8), %rsi     /* start of the last run */
+    mov (%rax, %r14, 8), %rdx
+    sub %rsi, %rdx
+    shl $4, %rdx
+    shl $4, %rsi
+    mov PT_D(%r15), %rdi
+    add %rsi, %rdi
+    add PT_B(%r15), %rsi
+    call memcpy
+4:  mov PT_N(%r15), %rax            /* bounds of the merged runs */
+    xor %ecx, %ecx
+5:  lea (%rcx, %rcx), %rdx
+    cmp %r14, %rdx
+    jae 6f
+    mov (%rax, %rdx, 8), %rdx
+    mov %rdx, (%rax, %rcx, 8)
+    inc %rcx
+    jmp 5b
+6:  mov (%rax, %r14, 8), %rdx       /* final bound */
+    mov %rdx, (%rax, %rcx, 8)
+    mov %rcx, %r14                  /* runs = ceil(runs / 2) */
+    mov PT_B(%r15), %rax            /* swap source and destination */
+    mov PT_D(%r15), %rcx
+    mov %rcx, PT_B(%r15)
+    mov %rax, PT_D(%r15)
+    jmp 3b
+8:  mov PT_B(%r15), %rcx            /* rows in sorted order */
+    xor %edx, %edx
+81: cmp %r12, %rdx
+    jae 82f
+    mov %rdx, %rax
+    shl $4, %rax
+    mov (%rcx, %rax), %rax
+    mov %rax, (%rbx, %rdx, 8)
+    inc %rdx
+    jmp 81b
+82: mov $1, %eax
+99: LEAVE
+ENDF pexec_sort

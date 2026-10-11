@@ -666,8 +666,8 @@ ENDF build_row
 /* row_cmp(pa rdi, pb rsi, plan rdx) -> eax  (qsort_r comparator) */
 FUNC row_cmp
     ENTER 0
-    incq cmp_count(%rip)            /* deadline / cancellation while sorting */
-    testl $0xffff, cmp_count(%rip)
+    incq %fs:cmp_count@tpoff         /* deadline / cancellation while sorting */
+    testl $0xffff, %fs:cmp_count@tpoff
     jnz 0f
     push %rdi
     push %rsi
@@ -752,7 +752,18 @@ FUNC sort_rows
     mov %rdi, %rbx
     mov %rsi, %r12
     mov %rdx, %r13
-    mov %r12, %rdi
+    call pexec_enabled              /* parallel sort + merge (pexec.S) */
+    test %eax, %eax
+    jz 0f
+    cmpq $1, g_opt_threads(%rip)
+    jbe 0f
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    mov %r13, %rdx
+    call pexec_sort
+    test %eax, %eax
+    jnz 9f
+0:    mov %r12, %rdi
     shl $4, %rdi
     call tmp_alloc
     mov %rax, %r14                  /* (row, sequence) pairs */
@@ -1831,4 +1842,6 @@ g_result_rows: .quad 0          /* row count of the last executed query */
     .globl g_sink_plan, g_row_sink
 g_sink_plan:   .quad 0          /* plan whose projected rows go to g_row_sink */
 g_row_sink:    .quad 0          /* sink(row rdi) -> eax 1 to stop (streaming) */
-cmp_count:     .quad 0          /* row_cmp calls (periodic deadline checks) */
+    .section .tbss, "awT", @nobits
+    .p2align 3
+cmp_count:     .zero 8          /* row_cmp calls of this thread (periodic deadline checks) */
