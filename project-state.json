@@ -1,7 +1,7 @@
 {
  "schema": "polyquery-project-state/1",
- "updated": "2026-10-10T22:49:28+00:00",
- "current_milestone": "M6",
+ "updated": "2026-10-11T00:45:04+00:00",
+ "current_milestone": "M7",
  "milestones": {
   "M0": {
    "status": "complete",
@@ -28,12 +28,12 @@
    "evidence": "All 6 phase3 a1 runs pass 623/623 (public+hidden; golden PQCF cases included). Interop 6x6: 169 files, every reader 28/28 from every writer + reference (results/correctness/interop.json). Crash suite violations: {\"python\": 0, \"go\": 0, \"clojure\": 0, \"java\": 0, \"rust\": 0, \"common-lisp\": 0}. Telemetry (USD list, turns, min): {\"python\": [8.59, 94, 22], \"go\": [10.38, 107, 27], \"rust\": [8.65, 91, 23], \"java\": [15.81, 130, 67], \"clojure\": [11.72, 122, 29], \"common-lisp\": [11.95, 132, 32]}"
   },
   "M6": {
-   "status": "in_progress",
-   "detail": "accepted: clojure, go, python, java (HTTP 18/18). running: rust, common-lisp"
+   "status": "complete",
+   "evidence": "All 6 phase4 a1 runs pass 623/623 over session and HTTP transports (public+hidden) and the HTTP/concurrency suite 18/18 (validated with a negative control). Telemetry (USD list, turns, min): {\"java\": [5.12, 59, 16], \"go\": [4.24, 61, 14], \"clojure\": [3.97, 42, 14], \"python\": [3.95, 48, 14], \"rust\": [6.5, 88, 21], \"common-lisp\": [6.46, 78, 20]}"
   },
   "M7": {
    "status": "in_progress",
-   "detail": "accepted: clojure, go. running: python, java"
+   "detail": "accepted: clojure, go, python, java (modes 3738/3738). running: common-lisp, rust"
   },
   "M8": {
    "status": "complete",
