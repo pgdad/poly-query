@@ -143,7 +143,7 @@ func TestTypeNames(t *testing.T) {
 			t.Errorf("ParseTypeName(%q) = %v, %v; want %s", in, typ, err, want)
 		}
 	}
-	for _, bad := range []string{"WIDGET", "DECIMAL(19,0)", "DECIMAL(5,6)", "INT(3)"} {
+	for _, bad := range []string{"WIDGET", "DECIMAL(39,0)", "DECIMAL(5,6)", "INT(3)"} {
 		if _, err := ParseTypeName(bad); err == nil {
 			t.Errorf("ParseTypeName(%q) should fail", bad)
 		}

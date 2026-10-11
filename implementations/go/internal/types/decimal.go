@@ -257,26 +257,26 @@ func zeros(n int) string {
 	return string(b)
 }
 
-// BigDecimalSum accumulates exact sums of int64 values (INT64 or unscaled
-// DECIMAL) without intermediate overflow.
+// BigDecimalSum accumulates exact sums of INT64 values and unscaled
+// DECIMALs (narrow or wide) without intermediate overflow: in an int64
+// while possible, then in 128 bits, then in a big.Int.
 type BigDecimalSum struct {
-	small int64
-	big   *big.Int
+	small  int64
+	wide   Int128
+	isWide bool
+	big    *big.Int
 }
 
 // Add adds v to the sum.
 func (s *BigDecimalSum) Add(v int64) {
-	if s.big != nil {
-		s.big.Add(s.big, big.NewInt(v))
-		return
+	if s.big == nil && !s.isWide {
+		c := s.small + v
+		if (c > s.small) == (v > 0) {
+			s.small = c
+			return
+		}
 	}
-	c := s.small + v
-	if (c > s.small) != (v > 0) {
-		s.big = big.NewInt(s.small)
-		s.big.Add(s.big, big.NewInt(v))
-		return
-	}
-	s.small = c
+	s.AddWide(Int128From(v))
 }
 
 // AddSmall adds v if the sum stays within int64 (the common case; small
@@ -284,49 +284,87 @@ func (s *BigDecimalSum) Add(v int64) {
 // otherwise the caller uses Add.
 func (s *BigDecimalSum) AddSmall(v int64) bool {
 	c := s.small + v
-	if s.big != nil || (c > s.small) != (v > 0) {
+	if s.big != nil || s.isWide || (c > s.small) != (v > 0) {
 		return false
 	}
 	s.small = c
 	return true
 }
 
-// Merge adds another partial sum.
-func (s *BigDecimalSum) Merge(o *BigDecimalSum) {
-	if o.big == nil {
-		s.Add(o.small)
+// AddWide adds a 128-bit value to the sum.
+func (s *BigDecimalSum) AddWide(x Int128) {
+	if s.big != nil {
+		s.big.Add(s.big, x.Big())
 		return
 	}
-	if s.big == nil {
-		s.big = big.NewInt(s.small)
+	if !s.isWide {
+		s.wide, s.isWide = Int128From(s.small), true
 	}
-	s.big.Add(s.big, o.big)
+	c, ok := s.wide.add(x)
+	if !ok {
+		s.big = s.wide.Big()
+		s.big.Add(s.big, x.Big())
+		return
+	}
+	s.wide = c
+}
+
+// Merge adds another partial sum.
+func (s *BigDecimalSum) Merge(o *BigDecimalSum) {
+	switch {
+	case o.big != nil:
+		if s.big == nil {
+			s.big = s.Big()
+		}
+		s.big.Add(s.big, o.big)
+	case o.isWide:
+		s.AddWide(o.wide)
+	default:
+		s.Add(o.small)
+	}
 }
 
 // Int64 returns the sum if it fits in int64.
 func (s *BigDecimalSum) Int64() (int64, bool) {
-	if s.big == nil {
-		return s.small, true
+	switch {
+	case s.big != nil:
+		if s.big.IsInt64() {
+			return s.big.Int64(), true
+		}
+		return 0, false
+	case s.isWide:
+		return s.wide.Int64(), s.wide.IsInt64()
 	}
-	if s.big.IsInt64() {
-		return s.big.Int64(), true
+	return s.small, true
+}
+
+// Wide returns the sum if it fits in 127 bits.
+func (s *BigDecimalSum) Wide() (Int128, bool) {
+	switch {
+	case s.big != nil:
+		return Int128FromBig(s.big)
+	case s.isWide:
+		return s.wide, true
 	}
-	return 0, false
+	return Int128From(s.small), true
 }
 
 // Big returns the sum as a big.Int.
 func (s *BigDecimalSum) Big() *big.Int {
-	if s.big == nil {
-		return big.NewInt(s.small)
+	switch {
+	case s.big != nil:
+		return new(big.Int).Set(s.big)
+	case s.isWide:
+		return s.wide.Big()
 	}
-	return new(big.Int).Set(s.big)
+	return big.NewInt(s.small)
 }
 
 // RatioFloat returns sum / (count · 10^scale) correctly rounded to FLOAT64.
 func (s *BigDecimalSum) RatioFloat(count int64, scale int) float64 {
 	den := big.NewInt(count)
 	if scale > 0 {
-		den.Mul(den, big.NewInt(Pow10[scale]))
+		den.Mul(den, bigPow10(scale))
 	}
 	f, _ := new(big.Rat).SetFrac(s.Big(), den).Float64()
 	return f
