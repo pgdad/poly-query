@@ -326,6 +326,9 @@ ENDF pstr_new
 FUNC pstr_tmp
     mov %rsi, %rdx
     mov %rdi, %rsi
+    mov %fs:t_arena@tpoff, %rdi     /* cur_arena */
+    test %rdi, %rdi
+    jnz pstr_new
     mov g_arena(%rip), %rdi
     jmp pstr_new
 ENDF pstr_tmp

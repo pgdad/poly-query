@@ -570,11 +570,24 @@ ENDF eval
 
 /* ================================================================ CAST */
 
-/* scratch buffer for formatting values to text */
-    .bss
+/* scratch buffer for formatting values to text (one per thread: parallel
+ * workers evaluate CASTs concurrently) */
+    .section .tbss, "awT", @nobits
     .p2align 3
 cast_buf: .zero BUF_SIZE
     .text
+
+/* eval_thread_exit(): releases the calling thread's formatting buffer */
+FUNC eval_thread_exit
+    sub $8, %rsp
+    mov %fs:cast_buf@tpoff+BUF_DATA, %rdi
+    call free
+    movq $0, %fs:cast_buf@tpoff+BUF_DATA
+    movq $0, %fs:cast_buf@tpoff+BUF_LEN
+    movq $0, %fs:cast_buf@tpoff+BUF_CAP
+    add $8, %rsp
+    ret
+ENDF eval_thread_exit
 
 /* fmt_to_pstr(type rdi, payload rsi) -> rax pstr in request arena (text form) */
 FUNC fmt_to_pstr
@@ -583,17 +596,19 @@ FUNC fmt_to_pstr
     sub $8, %rsp
     mov %rdi, %rbx
     mov %rsi, %r12
-    lea cast_buf(%rip), %rdi
+    mov %fs:0, %rdi
+    lea cast_buf@tpoff(%rdi), %rdi
     movq $0, BUF_LEN(%rdi)
     mov %rbx, %rsi
     mov %r12, %rdx
     call fmt_value_text
-    lea cast_buf(%rip), %rax
+    mov %fs:0, %rax
+    lea cast_buf@tpoff(%rax), %rax
     mov BUF_DATA(%rax), %rdi
     mov BUF_LEN(%rax), %rsi
     test %rdi, %rdi
     jnz 1f
-    lea cast_buf(%rip), %rdi        /* empty text: any valid pointer */
+    mov %rax, %rdi                  /* empty text: any valid pointer */
 1:  call pstr_tmp
     add $8, %rsp
     pop %r12

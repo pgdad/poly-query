@@ -84,6 +84,8 @@ ENDF par_body
 FUNC par_thread
     sub $8, %rsp
     call par_body
+    call eval_thread_exit           /* thread-local buffers */
+    call vs_thread_exit
     xor %eax, %eax
     add $8, %rsp
     ret
