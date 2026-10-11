@@ -38,6 +38,7 @@ o_qtimeout:     .asciz "--query-timeout-ms"
 o_grace:        .asciz "--shutdown-grace-ms"
 o_maxreq:       .asciz "--max-request-bytes"
 s_dash:         .asciz "-"
+s_env_minrows:  .asciz "PQ_PARALLEL_MIN_ROWS"
 s_rb:           .asciz "rb"
 m_usage:        .asciz "usage: polyquery (version|capabilities|session|exec|serve) [options]\n"
 m_unknown:      .asciz "polyquery: unknown option: %s\n"
@@ -60,7 +61,7 @@ opt_table:
     .quad o_ingest,   2, g_max_ingest_bytes
     .quad o_trows,    2, g_max_table_rows
     .quad o_jrows,    2, g_max_join_rows
-    .quad o_threads,  5, 0
+    .quad o_threads,  2, g_def_threads
     .quad o_loglevel, 6, g_log_level
     .quad o_native,   4, 0
     .quad o_request,  1, g_request_file
@@ -225,6 +226,27 @@ FUNC main
     b    .Lopt_loop
 .Lopts_done:
     bl   cat_init                   // the (empty) catalog
+    LDR_G x0, g_def_threads         // default query parallelism: --threads,
+    cbnz x0, 6f                     // else the online CPUs (at most 8)
+    bl   get_nprocs
+    sxtw x0, w0
+    cmp  x0, #8
+    mov  x1, #8
+    csel x0, x0, x1, ls
+    cmp  x0, #1
+    csinc x0, x0, xzr, hs
+    ADR_L x1, g_def_threads
+    str  x0, [x1]
+6:  ADR_L x0, s_env_minrows         // testing aid: rows per parallel task
+    bl   getenv
+    cbz  x0, 7f
+    mov  x1, #0
+    mov  w2, #10
+    bl   strtoull
+    cbz  x0, 7f
+    ADR_L x1, g_par_min_rows
+    str  x0, [x1]
+7:
     LDR_G x22, g_mode
     cmp  x22, #1
     b.ne 1f

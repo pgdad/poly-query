@@ -97,7 +97,7 @@ r_code:     .asciz "{\"code\":\""
 r_msg:      .asciz "\",\"message\":"
 r_details:  .asciz ",\"details\":{\"line\":"
 r_column:   .asciz ",\"column\":"
-r_caps:     .asciz ",\"protocol_version\":1,\"capabilities\":[\"phase1\",\"ingest.csv\",\"ingest.json\",\"ingest.jsonl\",\"sql.basic\",\"test.functions\",\"phase2\",\"sql.groupby\",\"sql.join\",\"sql.functions\",\"sql.subquery\",\"sql.cte\",\"sql.correlated_subquery\",\"phase3\",\"storage.pqcf\",\"storage.mmap\",\"index.hash\",\"index.btree\",\"phase4\",\"http.streaming\"]"
+r_caps:     .asciz ",\"protocol_version\":1,\"capabilities\":[\"phase1\",\"ingest.csv\",\"ingest.json\",\"ingest.jsonl\",\"sql.basic\",\"test.functions\",\"phase2\",\"sql.groupby\",\"sql.join\",\"sql.functions\",\"sql.subquery\",\"sql.cte\",\"sql.correlated_subquery\",\"phase3\",\"storage.pqcf\",\"storage.mmap\",\"index.hash\",\"index.btree\",\"phase4\",\"http.streaming\",\"phase5\",\"exec.row\",\"exec.vectorized\",\"exec.parallel\",\"join.hash\",\"join.merge\",\"join.nested_loop\"]"
 r_version:  .asciz ",\"engine\":\"polyquery-arm64-asm\",\"engine_version\":\"0.1.0\",\"language\":\"arm64-asm-engine\",\"protocol_version\":1,\"spec_version\":\"1.0.0\",\"runtime\":\"GNU as (AArch64) + glibc\",\"build\":{\"profile\":\"release\",\"flags\":\"-g\"}"
 r_tables:   .asciz ",\"tables\":["
 r_name:     .asciz "{\"name\":"
@@ -1544,33 +1544,129 @@ ENDF op_load
 
 // ----------------------------------------------------------------- query -----
 
-// check_option_str(x0 options, x1 key, x2 allowed cstr): string option whose
-// only supported value is `allowed`; other strings => UNSUPPORTED.
-LFUNC check_option_str
-    stp  x29, x30, [sp, #-32]!
+
+// option_enum(x0 options obj, x1 key cstr, x2 0-terminated table of
+// accepted cstr values) -> w0 index of the value (0 if absent); any other
+// string => UNSUPPORTED.
+//   x19 key, x20 table, x21 index, x22 value Str*
+LFUNC option_enum
+    stp  x29, x30, [sp, #-48]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
+    stp  x21, x22, [sp, #32]
     mov  x19, x1
     mov  x20, x2
+    mov  w21, #0
     mov  w2, #J_STR
     mov  w3, #0
     bl   get_field
-    cbz  x0, 1f
-    ldr  x0, [x0, #JN_PTR]
-    mov  x1, x20
+    cbz  x0, 3f
+    ldr  x22, [x0, #JN_PTR]
+1:  ldr  x1, [x20, x21, lsl #3]
+    cbz  x1, 2f
+    mov  x0, x22
     bl   str_eq_c
-    cbnz w0, 1f
-    mov  x0, x19
+    cbnz w0, 3f
+    add  w21, w21, #1
+    b    1b
+2:  mov  x0, x19
     bl   strlen
     mov  x3, x0
     mov  x2, x19
     mov  w0, #ERR_UNSUPPORTED
     ADR_L x1, m_optval
     bl   pq_raise_s
-1:  ldp  x19, x20, [sp, #16]
+3:  mov  w0, w21
+    ldp  x19, x20, [sp, #16]
+    ldp  x21, x22, [sp, #32]
+    ldp  x29, x30, [sp], #48
+    ret
+ENDF option_enum
+
+// parse_exec_opts(x0 options obj or 0): the execution options of a query /
+// explain request into this thread's settings (exec.S g_x_mode, g_x_join,
+// g_x_threads, g_x_optimize; access.S g_use_indexes). Absent options take
+// their defaults (auto, auto, --threads, true, true).
+//   x19 options
+LFUNC parse_exec_opts
+    stp  x29, x30, [sp, #-32]!
+    mov  x29, sp
+    str  x19, [sp, #16]
+    mov  x19, x0
+    TLS_ADDR x9, g_use_indexes
+    mov  w10, #1
+    str  w10, [x9]
+    TLS_ADDR x9, g_x_optimize
+    str  w10, [x9]
+    TLS_ADDR x9, g_x_mode
+    str  wzr, [x9]
+    TLS_ADDR x9, g_x_join
+    str  wzr, [x9]
+    LDR_G x10, g_def_threads
+    cmp  x10, #1
+    csinc x10, x10, xzr, hs         // 0 (no CLI default) => 1
+    TLS_ADDR x9, g_x_threads
+    str  x10, [x9]
+    cbz  x19, 9f
+    mov  x0, x19
+    ADR_L x1, k_mode
+    ADR_L x2, tab_modes
+    bl   option_enum
+    TLS_ADDR x9, g_x_mode
+    str  w0, [x9]
+    mov  x0, x19
+    ADR_L x1, k_join
+    ADR_L x2, tab_joins
+    bl   option_enum
+    TLS_ADDR x9, g_x_join
+    str  w0, [x9]
+    mov  x0, x19
+    ADR_L x1, k_threads
+    TLS_LDR x2, g_x_threads
+    mov  x3, #0x8000000000000000        // any integer; < 1 is unsupported
+    bl   get_int
+    cmp  x0, #1
+    b.lt 8f
+    cmp  x0, #MAX_THREADS
+    mov  x9, #MAX_THREADS
+    csel x0, x0, x9, ls
+    TLS_ADDR x9, g_x_threads
+    str  x0, [x9]
+    mov  x0, x19
+    ADR_L x1, k_optimize
+    mov  w2, #1
+    bl   get_bool
+    TLS_ADDR x9, g_x_optimize
+    str  w0, [x9]
+    mov  x0, x19
+    ADR_L x1, k_use_idx
+    mov  w2, #1
+    bl   get_bool
+    TLS_ADDR x9, g_use_indexes
+    str  w0, [x9]
+    mov  x0, x19
+    ADR_L x1, k_native
+    mov  w2, #0
+    bl   get_bool                   // validated; no kernels are loaded
+9:  ldr  x19, [sp, #16]
     ldp  x29, x30, [sp], #32
     ret
-ENDF check_option_str
+8:  mov  w0, #ERR_UNSUPPORTED
+    ADR_L x1, m_optval
+    ADR_L x2, k_threads
+    mov  x3, #7
+    bl   pq_raise_s
+ENDF parse_exec_opts
+
+    .section .rodata
+    .p2align 3
+tab_modes:  .quad v_auto, v_row, v_vectorized, 0      // XM_*
+tab_joins:  .quad v_auto, v_hash, v_merge, v_nested, 0  // XJ_*
+v_vectorized: .asciz "vectorized"
+v_hash:     .asciz "hash"
+v_merge:    .asciz "merge"
+v_nested:   .asciz "nested_loop"
+    .text
 
 // explain_query(x0 Query*) -> x0 Str* plan JSON text (binds and plans)
 //   x19 root plan, sp: temporary Buf
@@ -1670,21 +1766,13 @@ LFUNC op_explain
     mov  w2, #1
     bl   get_str
     mov  x20, x0
-    TLS_ADDR x9, g_use_indexes         // option use_indexes (default true)
-    mov  w10, #1
-    str  w10, [x9]
     mov  x0, x19
     ADR_L x1, k_options
     mov  w2, #J_OBJ
     mov  w3, #0
     bl   get_field
-    cbz  x0, 01f
-    ADR_L x1, k_use_idx
-    mov  w2, #1
-    bl   get_bool
-    TLS_ADDR x9, g_use_indexes
-    str  w0, [x9]
-01: LDR_G x0, g_max_query_mem
+    bl   parse_exec_opts            // join / optimize / use_indexes matter
+    LDR_G x0, g_max_query_mem
     TLS_ADDR x1, g_arena_limit
     str  x0, [x1]
     add  x0, x20, #STR_DATA
@@ -1733,9 +1821,6 @@ LFUNC op_query
     mov  w2, #1
     bl   get_str
     mov  x25, x0                    // sql Str*
-    TLS_ADDR x9, g_use_indexes
-    mov  w10, #1
-    str  w10, [x9]
     mov  x21, #-1
     mov  w22, #0
     mov  x0, x19
@@ -1744,7 +1829,9 @@ LFUNC op_query
     mov  w3, #0
     bl   get_field
     mov  x20, x0
+    bl   parse_exec_opts
     cbz  x20, 3f
+    mov  x0, x20
     // max_rows
     ADR_L x1, k_max_rows
     mov  x2, #-1
@@ -1790,33 +1877,7 @@ LFUNC op_query
     ADR_L x2, k_result
     mov  x3, #6
     bl   pq_raise_s
-21: mov  x0, x20
-    ADR_L x1, k_mode
-    ADR_L x2, v_auto
-    bl   check_option_str
-    mov  x0, x20
-    ADR_L x1, k_join
-    ADR_L x2, v_auto
-    bl   check_option_str
-    mov  x0, x20
-    ADR_L x1, k_threads
-    mov  x2, #1
-    mov  x3, #1
-    bl   get_int
-    mov  x0, x20
-    ADR_L x1, k_optimize
-    mov  w2, #1
-    bl   get_bool
-    mov  x0, x20
-    ADR_L x1, k_use_idx
-    mov  w2, #1
-    bl   get_bool
-    TLS_ADDR x9, g_use_indexes
-    str  w0, [x9]
-    mov  x0, x20
-    ADR_L x1, k_native
-    mov  w2, #0
-    bl   get_bool
+21:
 3:  // effective timeout: option, else the server default; it runs from
     // the arrival of the request, so time spent queued counts
     ldr  x0, [sp]

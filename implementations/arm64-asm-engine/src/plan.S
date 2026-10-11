@@ -17,7 +17,11 @@
 //   * join conditions are split again: single-side conjuncts move into the
 //     children (only the right child for LEFT JOIN), equality conjuncts
 //     between the two sides become hash keys, the rest stays as residual;
-//   * join algorithm: HashJoin when there are equi keys, else NestedLoopJoin;
+//   * join order (optimize): inner-join regions of >= 3 inputs are
+//     reordered greedily (optimize.S opt_join_order);
+//   * join algorithm (option "join"): with equi keys HashJoin (auto, hash),
+//     MergeJoin (merge) or NestedLoopJoin (nested_loop: the keys are kept and
+//     compared per pair); without equi keys always NestedLoopJoin;
 //   * column pruning: scans read only referenced columns (RV_USED, collected
 //     by the binder) — reported by EXPLAIN as the TableScan column list.
 // =============================================================================
@@ -32,7 +36,7 @@
 // pn_new(w0 op, x1 BoundQuery*, x2 left child) -> x0 PlanNode*
 // The new node inherits the rv range of its child.
 // =============================================================================
-LFUNC pn_new
+FUNC pn_new
     ENTER 2
     mov  w19, w0
     stp  x1, x2, [sp, #-16]!
@@ -76,6 +80,12 @@ ENDF plan_statement
 // plan_query(x0 BoundQuery*) -> x0 physical PlanNode*
 LFUNC plan_query
     ENTER 1
+    mov  x19, x0
+    TLS_ADDR x9, g_x_optimize           // logical rewrites (optimize.S)
+    ldr  w9, [x9]
+    cbz  w9, 1f
+    bl   opt_query
+1:  mov  x0, x19
     bl   lp_build
     mov  x19, x0
     bl   pp_rewrite
@@ -163,6 +173,9 @@ LFUNC lp_from
     bl   pn_new
     ldr  x9, [x20, #BF_RV]
     str  x9, [x0, #PN_RV]
+    mov  x10, #1
+    lsl  x10, x10, x9
+    str  x10, [x0, #PN_MASK]
     ldr  x9, [x20, #BF_LO]
     str  x9, [x0, #PN_LO]
     LEAVE 3
@@ -185,6 +198,11 @@ LFUNC lp_from
     ldr  x1, [x20, #BF_RIGHT]
     bl   lp_from
     str  x0, [x21, #PN_RIGHT]
+    ldr  x9, [x21, #PN_LEFT]
+    ldr  x9, [x9, #PN_MASK]
+    ldr  x10, [x0, #PN_MASK]
+    orr  x9, x9, x10
+    str  x9, [x21, #PN_MASK]
     mov  x0, x21
     LEAVE 3
 ENDF lp_from
@@ -256,7 +274,18 @@ LFUNC pp_rewrite
     bl   memcpy
     mov  x20, x19                       // the FROM root now lives in x19
 .Lpp_joins:
+    TLS_ADDR x9, g_x_optimize           // join order (optimize.S)
+    ldr  w9, [x9]
+    cbz  w9, 7f
     mov  x0, x20
+    bl   opt_join_order
+    cmp  x0, x20
+    b.eq 7f
+    mov  x1, x0                         // new root: into the old record
+    mov  x0, x20
+    mov  x2, #PN_SIZE
+    bl   memcpy
+7:  mov  x0, x20
     bl   pp_joins
     mov  x0, x20
     bl   pp_access
@@ -321,19 +350,10 @@ LFUNC push_conj
     LEAVE 4
 ENDF push_conj
 
-// range_mask(x0 PlanNode*) -> x0 bitmask of the rvs [PN_LO, PN_HI)   (leaf)
-LFUNC range_mask
-    ldr  w9, [x0, #PN_LO]
-    ldr  w10, [x0, #PN_HI]
-    mov  x0, #0
-    mov  x11, #1
-1:  cmp  w9, w10
-    b.hs 2f
-    lsl  x12, x11, x9
-    orr  x0, x0, x12
-    add  w9, w9, #1
-    b    1b
-2:  ret
+// range_mask(x0 PlanNode* scan / join) -> x0 bitmask of its rvs   (leaf)
+FUNC range_mask
+    ldr  x0, [x0, #PN_MASK]
+    ret
 ENDF range_mask
 
 // =============================================================================
@@ -421,10 +441,18 @@ LFUNC pp_joins
     str  x9, [x19, #PN_LKEYS]
     ldr  x9, [sp, #72]
     str  x9, [x19, #PN_RKEYS]
-    mov  w9, #PO_NLJOIN
+    mov  w9, #PO_NLJOIN                 // algorithm: option "join"
     ldr  x10, [x19, #PN_NKEYS]
-    cbz  x10, 3f
-    mov  w9, #PO_HASHJOIN
+    cbz  x10, 3f                        // no equi keys: nested loop
+    TLS_ADDR x11, g_x_join
+    ldr  w11, [x11]
+    mov  w9, #PO_HASHJOIN               // auto / hash
+    cmp  w11, #XJ_MERGE
+    b.ne 31f
+    mov  w9, #PO_MERGEJOIN
+31: cmp  w11, #XJ_NL                    // keys stay: compared per pair
+    b.ne 3f
+    mov  w9, #PO_NLJOIN
 3:  str  w9, [x19, #PN_OP]
     ldr  w9, [x19, #PN_JT]              // a cross join that got a condition
     cmp  w9, #JT_CROSS
@@ -467,9 +495,14 @@ LFUNC pp_access
     ldr  x0, [x19, #PN_RIGHT]
     bl   pp_access
     mov  x21, x0
+    ldr  x9, [x19, #PN_NKEYS]
+    cbz  x9, 3f
     ldr  w9, [x19, #PN_OP]
     cmp  w9, #PO_HASHJOIN
-    b.ne 3f
+    b.ne 2f
+    TLS_ADDR x9, g_x_optimize           // build-side choice is an optimization
+    ldr  w9, [x9]
+    cbz  w9, 2f
     ldr  w9, [x19, #PN_JT]
     cmp  w9, #JT_INNER
     b.ne 2f
@@ -605,7 +638,7 @@ ENDF split_conj
 
 // and_append(x0 Node* or 0, x1 Node*) -> x0 (x0 AND x1), or x1 if x0 is 0
 //   x19 a, x20 b
-LFUNC and_append
+FUNC and_append
     cbnz x0, 1f
     mov  x0, x1
     ret
@@ -748,6 +781,8 @@ FUNC plan_explain
     cmp  w9, #PO_HASHJOIN
     b.eq .Lpe_join
     cmp  w9, #PO_NLJOIN
+    b.eq .Lpe_join
+    cmp  w9, #PO_MERGEJOIN
     b.eq .Lpe_join
     cmp  w9, #PO_PROJECT
     b.eq .Lpe_project
@@ -991,6 +1026,10 @@ LFUNC pe_subplans
     ldr  w9, [x20, #PN_OP]
     cmp  w9, #PO_HASHJOIN
     b.eq .Lps_keys
+    cmp  w9, #PO_MERGEJOIN
+    b.eq .Lps_keys
+    cmp  w9, #PO_NLJOIN
+    b.eq .Lps_keys
     cmp  w9, #PO_PROJECT
     b.eq .Lps_out
     cmp  w9, #PO_AGGREGATE
@@ -1109,6 +1148,7 @@ ENDF pe_expr
 op_names:
     .quad s_unknown, s_scan, s_values, s_filter, s_join, s_hashjoin
     .quad s_nljoin, s_aggregate, s_project, s_distinct, s_sort, s_limit
+    .quad s_mergejoin
 jt_names:
     .quad s_unknown, s_inner, s_left, s_cross
 s_unknown:   .asciz "Unknown"
@@ -1120,6 +1160,7 @@ s_filter:    .asciz "Filter"
 s_join:      .asciz "Join"
 s_hashjoin:  .asciz "HashJoin"
 s_nljoin:    .asciz "NestedLoopJoin"
+s_mergejoin: .asciz "MergeJoin"
 s_aggregate: .asciz "Aggregate"
 s_project:   .asciz "Project"
 s_distinct:  .asciz "Distinct"

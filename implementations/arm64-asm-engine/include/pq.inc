@@ -633,7 +633,9 @@
 #define PN_EST      112    // u64 estimated output rows (tuple operators)
 #define PN_SWAP     120    // u32 1 = hash join inputs swapped (build = left)
 #define PN_RGSKIP   124    // u32 scans: row groups skipped (EXPLAIN)
-#define PN_SIZE     128
+#define PN_MASK     128    // u64 scans / joins: bitmask of the range variables
+                           //   of the subtree
+#define PN_SIZE     144
 
 // Simple predicate "column op constant" extracted from a scan filter
 // (index selection, row-group skipping, estimates). 48 bytes.
@@ -667,6 +669,52 @@
 #define PO_DISTINCT   9
 #define PO_SORT       10
 #define PO_LIMIT      11
+#define PO_MERGEJOIN  12   // physical: sort-merge on the equi keys + residual
+
+// Execution options of the current request (Phase 5, protocol.md §5.2),
+// thread-local settings defined in exec.S:
+//   g_x_mode (u32 XM_*), g_x_join (u32 XJ_*), g_x_threads (u64 >= 1),
+//   g_x_optimize (u32 0/1). g_def_threads (process-wide, --threads).
+#define XM_AUTO     0
+#define XM_ROW      1
+#define XM_VEC      2
+#define XJ_AUTO     0
+#define XJ_HASH     1
+#define XJ_MERGE    2
+#define XJ_NL       3
+#define MAX_THREADS 64
+
+// ----------------------------------------------------- vectorized execution --
+// (vexec.S) Expressions are evaluated for a batch of up to VBATCH tuples at a
+// time. A Vec holds one payload and one NULL byte per batch position; a
+// selection vector (u16 positions) lists the positions to evaluate.
+#define VBATCH      1024
+#define VEC_VALS    0              // u64 [VBATCH]
+#define VEC_NULLS   8192           // u8  [VBATCH]
+#define VEC_SIZE    9216
+// Batch context (one per thread)
+#define VB_TUP      0              // u32* tuples of the batch (stride VB_W)
+#define VB_W        8              // u64 tuple width (u32 row ids)
+#define VB_N        16             // u64 tuples in the batch
+#define VB_EC       24             // EvalCtx* (EC_TABLES; EC_TUPLE set for
+                                   //   row-at-a-time fallbacks)
+#define VB_POOL     32             // Vec** scratch vectors [VPOOL_MAX]
+#define VB_POOLN    40             // u64 vectors in use (stack discipline)
+#define VB_DCACHE   48             // dictionary truth tables (vexec.S)
+#define VB_SIZE     64
+#define VPOOL_MAX   64
+#define VKEY_MAX    32             // most keys evaluated as vectors at once
+// Join key task (vexec.S vkey_cells)
+#define VK_TS       0              // TupleSet*
+#define VK_KEYS     8              // Node** key expressions
+#define VK_NKEYS    16
+#define VK_CTX      24             // EvalCtx* (own copy for worker tasks)
+#define VK_CELLS    32             // out: nkeys cells per tuple
+#define VK_HASH     40             // out: u64 hash per tuple
+#define VK_FLAGS    48             // out: u8 1 = a key is NULL
+#define VK_LO       56             // tuples [lo, hi)
+#define VK_HI       64
+#define VK_SIZE     80
 
 // Rows per batch handed to a streaming sink (exec_plan_stream)
 #define EXEC_STREAM_BATCH 1000
