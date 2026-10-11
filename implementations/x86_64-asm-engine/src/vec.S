@@ -352,27 +352,36 @@ v_col:
     movb $1, VNULL(%r15, %rcx)
     inc %rcx
     jmp 10b
-20: /* general: NULL bitmap (and maybe a dictionary) */
-    mov %rdx, 8(%rsp)
-    mov %rsi, 16(%rsp)
-    mov %rcx, %r13                  /* i (mask no longer needed) */
-21: cmp 8(%rsp), %r13
+20: /* NULL bitmap (and maybe a dictionary) */
+    mov COL_NSTRIDE(%r14), %r13     /* (node and mask are no longer needed) */
+    mov COL_NBIT(%r14), %rbx
+    mov COL_NULLS(%r14), %rdi
+21: cmp %rdx, %rcx
     jae 30f
-    mov 16(%rsp), %rsi
-    mov (%rsi), %rsi
-    add %r9, 16(%rsp)
-    cmp $-1, %rsi
-    je 22f
-    mov %r14, %rdi
-    call col_get
-    mov %rax, (%r15, %r13, 8)
-    mov %dl, VNULL(%r15, %r13)
-    mov BT_TW(%r12), %r9
-    inc %r13
+    mov (%rsi), %rax                /* row */
+    add %r9, %rsi
+    cmp $-1, %rax
+    je 24f
+    push %rax
+    imul %r13, %rax                 /* NULL bit: row * nstride + nbit */
+    add %rbx, %rax
+    bt %rax, (%rdi)
+    pop %rax
+    jc 24f
+    imul %r10, %rax
+    test %r11, %r11
+    jnz 22f
+    mov (%r8, %rax), %rax
+    jmp 23f
+22: mov (%r8, %rax), %eax
+    mov (%r11, %rax, 8), %rax
+23: mov %rax, (%r15, %rcx, 8)
+    movb $0, VNULL(%r15, %rcx)
+    inc %rcx
     jmp 21b
-22: movq $0, (%r15, %r13, 8)
-    movb $1, VNULL(%r15, %r13)
-    inc %r13
+24: movq $0, (%r15, %rcx, 8)
+    movb $1, VNULL(%r15, %rcx)
+    inc %rcx
     jmp 21b
 30: jmp v_done
 
@@ -1176,70 +1185,193 @@ ENDF has_distinct
 
 /* vagg_update(agg node rdi, vector rsi, n rdx, states rcx, stride r8,
  * offset r9): feeds the vector's non-NULL values to the aggregate states
- * at states + i*stride + offset (stride 0: one state for the batch; with
- * stride 8 `states` is an array of state pointers, see vk_agg_groups) */
+ * at states + offset (stride 0: one state for the batch) or at
+ * states[i] + offset (stride 8: a state pointer per row, see
+ * vk_agg_groups).  The aggregate and type dispatch happens once per batch;
+ * COUNT, SUM / AVG and MIN / MAX of integer-like types (and SUM of FLOAT64,
+ * in row order) run in specialised loops, MIN / MAX of FLOAT64 and STRING
+ * through value_cmp. */
 FUNC vagg_update
     ENTER 48
     mov %rdi, %rbx                  /* agg */
     mov %rsi, %r12                  /* vector */
     mov %rdx, %r13                  /* n */
-    mov %rcx, 0(%rsp)
-    mov %r8, 8(%rsp)
-    mov %r9, 16(%rsp)
+    mov %rcx, %r14                  /* states */
+    mov %r9, %r15                   /* offset */
+    mov %r8, 0(%rsp)                /* stride */
     mov N_A(%rbx), %rax
     mov N_TYPE(%rax), %eax
     mov %rax, 24(%rsp)              /* argument type */
-    xor %r14d, %r14d                /* i */
-1:  cmp %r13, %r14
-    jae 9f
-    cmpb $0, VNULL(%r12, %r14)
-    jne 8f
-    mov 0(%rsp), %r15               /* state of row i */
-    cmpq $0, 8(%rsp)
-    je 2f
-    mov (%r15, %r14, 8), %r15
-2:  add 16(%rsp), %r15
-    incq AS_COUNT(%r15)
+    movzbl %al, %eax
     mov N_OP(%rbx), %ecx
     cmp $AGG_COUNT, %ecx
-    je 8f
-    mov (%r12, %r14, 8), %rax       /* value */
+    je 10f
     cmp $AGG_MIN, %ecx
-    jae 5f
-    movzbl 24(%rsp), %ecx           /* SUM / AVG */
-    cmp $T_FLOAT, %ecx
-    jne 3f
-    movq %rax, %xmm0
-    addsd AS_VAL(%r15), %xmm0
-    movsd %xmm0, AS_VAL(%r15)
-    jmp 8f
-3:  cqo
-    add %rax, AS_LO(%r15)
-    adc %rdx, AS_HI(%r15)
-    jmp 8f
-5:  cmpq $0, AS_HAS(%r15)           /* MIN / MAX */
-    je 7f
+    jae 40f
+    cmp $T_FLOAT, %eax
+    je 30f
+    /* ---- SUM / AVG of INT64 / DECIMAL: 128-bit sums */
+    cmpq $0, 0(%rsp)
+    jne 25f
+    lea (%r14, %r15), %rdi          /* one state: accumulate in registers */
+    mov AS_LO(%rdi), %r8
+    mov AS_HI(%rdi), %r9
+    mov AS_COUNT(%rdi), %r10
+    xor %ecx, %ecx
+21: cmp %r13, %rcx
+    jae 22f
+    cmpb $0, VNULL(%r12, %rcx)
+    jne 23f
+    mov (%r12, %rcx, 8), %rax
+    cqo
+    add %rax, %r8
+    adc %rdx, %r9
+    inc %r10
+23: inc %rcx
+    jmp 21b
+22: mov %r8, AS_LO(%rdi)
+    mov %r9, AS_HI(%rdi)
+    mov %r10, AS_COUNT(%rdi)
+    jmp 99f
+25: xor %ecx, %ecx                  /* a state per row */
+26: cmp %r13, %rcx
+    jae 99f
+    cmpb $0, VNULL(%r12, %rcx)
+    jne 27f
+    mov (%r14, %rcx, 8), %rdi
+    add %r15, %rdi
+    mov (%r12, %rcx, 8), %rax
+    cqo
+    add %rax, AS_LO(%rdi)
+    adc %rdx, AS_HI(%rdi)
+    incq AS_COUNT(%rdi)
+27: inc %rcx
+    jmp 26b
+
+10: /* ---- COUNT(x) */
+    xor %ecx, %ecx
+    xor %r8d, %r8d
+11: cmp %r13, %rcx
+    jae 13f
+    cmpb $0, VNULL(%r12, %rcx)
+    jne 12f
+    inc %r8
+    cmpq $0, 0(%rsp)
+    je 12f
+    mov (%r14, %rcx, 8), %rdi
+    incq AS_COUNT(%rdi, %r15)
+12: inc %rcx
+    jmp 11b
+13: cmpq $0, 0(%rsp)
+    jne 99f
+    add %r8, AS_COUNT(%r14, %r15)
+    jmp 99f
+
+30: /* ---- SUM / AVG of FLOAT64 (in row order) */
+    xor %ecx, %ecx
+    cmpq $0, 0(%rsp)
+    jne 35f
+    lea (%r14, %r15), %rdi
+    movsd AS_VAL(%rdi), %xmm0
+    mov AS_COUNT(%rdi), %r10
+31: cmp %r13, %rcx
+    jae 32f
+    cmpb $0, VNULL(%r12, %rcx)
+    jne 33f
+    addsd (%r12, %rcx, 8), %xmm0
+    inc %r10
+33: inc %rcx
+    jmp 31b
+32: movsd %xmm0, AS_VAL(%rdi)
+    mov %r10, AS_COUNT(%rdi)
+    jmp 99f
+35: cmp %r13, %rcx
+    jae 99f
+    cmpb $0, VNULL(%r12, %rcx)
+    jne 36f
+    mov (%r14, %rcx, 8), %rdi
+    add %r15, %rdi
+    movsd AS_VAL(%rdi), %xmm0
+    addsd (%r12, %rcx, 8), %xmm0
+    movsd %xmm0, AS_VAL(%rdi)
+    incq AS_COUNT(%rdi)
+36: inc %rcx
+    jmp 35b
+
+40: /* ---- MIN / MAX */
+    cmp $T_FLOAT, %eax
+    je 60f
+    cmp $T_STR, %eax
+    je 60f
+    xor %ecx, %ecx                  /* integer-like: signed compare */
+    mov N_OP(%rbx), %r11d
+41: cmp %r13, %rcx
+    jae 99f
+    cmpb $0, VNULL(%r12, %rcx)
+    jne 48f
+    mov %r14, %rdi
+    cmpq $0, 0(%rsp)
+    je 42f
+    mov (%r14, %rcx, 8), %rdi
+42: add %r15, %rdi                  /* state */
+    incq AS_COUNT(%rdi)
+    mov (%r12, %rcx, 8), %rax
+    cmpq $0, AS_HAS(%rdi)
+    je 46f
+    cmp $AGG_MIN, %r11d
+    jne 44f
+    cmp AS_VAL(%rdi), %rax
+    jge 48f
+    jmp 47f
+44: cmp AS_VAL(%rdi), %rax
+    jle 48f
+    jmp 47f
+46: movq $1, AS_HAS(%rdi)
+47: mov %rax, AS_VAL(%rdi)
+48: inc %rcx
+    jmp 41b
+
+60: /* FLOAT64 / STRING: value_cmp */
+    xor %ecx, %ecx
+61: cmp %r13, %rcx
+    jae 99f
+    cmpb $0, VNULL(%r12, %rcx)
+    jne 68f
+    mov %r14, %rdi
+    cmpq $0, 0(%rsp)
+    je 62f
+    mov (%r14, %rcx, 8), %rdi
+62: add %r15, %rdi
+    mov %rdi, 8(%rsp)               /* state */
+    mov %rcx, 16(%rsp)
+    incq AS_COUNT(%rdi)
+    mov (%r12, %rcx, 8), %rax
+    cmpq $0, AS_HAS(%rdi)
+    je 66f
     mov %rax, 32(%rsp)
     mov 24(%rsp), %rdi
     mov %rax, %rsi
-    mov AS_VAL(%r15), %rdx
+    mov 8(%rsp), %rdx
+    mov AS_VAL(%rdx), %rdx
     call value_cmp
-    mov 32(%rsp), %rcx
+    mov 16(%rsp), %rcx
+    mov 8(%rsp), %rdi
+    mov 32(%rsp), %rdx
     cmpl $AGG_MIN, N_OP(%rbx)
-    jne 6f
+    jne 64f
     cmp $0, %eax
-    jge 8f
-    mov %rcx, AS_VAL(%r15)
-    jmp 8f
-6:  cmp $0, %eax
-    jle 8f
-    mov %rcx, AS_VAL(%r15)
-    jmp 8f
-7:  mov %rax, AS_VAL(%r15)
-    movq $1, AS_HAS(%r15)
-8:  inc %r14
-    jmp 1b
-9:  LEAVE
+    jge 68f
+    mov %rdx, AS_VAL(%rdi)
+    jmp 68f
+64: cmp $0, %eax
+    jle 68f
+    mov %rdx, AS_VAL(%rdi)
+    jmp 68f
+66: mov %rax, AS_VAL(%rdi)
+    movq $1, AS_HAS(%rdi)
+68: inc %rcx
+    jmp 61b
+99: LEAVE
 ENDF vagg_update
 
 /* vk_aggs(ctx rdi, plan rsi, tuples rdx, n rcx, W r8, states r9, stride
