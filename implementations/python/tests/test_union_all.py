@@ -9,6 +9,7 @@ from polyquery.analysis import bound as b
 from polyquery.analysis.binder import Binder
 from polyquery.execution.compiler import evaluate_constant
 from polyquery.planner import physical as pp
+from polyquery.planner.pipeline import plan_statement
 from polyquery.sql import ast
 from polyquery.sql.parser import parse
 from tests.helpers import EngineTestMixin
@@ -117,14 +118,14 @@ class UnionAllTests(EngineTestMixin, unittest.TestCase):
                          [["Ann"], ["Bob"], ["Cid"]])
 
     def test_explain_shows_union_all_with_branch_children(self):
-        plan = pp.plan_statement(self.bind("SELECT id FROM people UNION ALL SELECT id FROM items"), pp.PlanOptions())
+        plan = plan_statement(self.bind("SELECT id FROM people UNION ALL SELECT id FROM items"), pp.PlanOptions())
         unions = [n for n in _walk(plan.root) if isinstance(n, pp.UnionAll)]
         self.assertEqual(len(unions), 1)
         self.assertEqual(len(unions[0].branches), 2)
         self.assertEqual(plan.to_json()["children"][0]["op"], "UnionAll")
 
     def test_branches_read_only_required_columns(self):
-        plan = pp.plan_statement(
+        plan = plan_statement(
             self.bind("SELECT COUNT(*) FROM (SELECT id, name FROM people UNION ALL SELECT id, 'x' FROM items) t"),
             pp.PlanOptions(),
         )

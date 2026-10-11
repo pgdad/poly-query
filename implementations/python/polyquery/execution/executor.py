@@ -10,11 +10,11 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from .. import errors
-from ..planner.physical import PhysicalNode, PhysicalPlan
+from ..planner.physical import ROW, PhysicalNode, PhysicalPlan
 from ..storage.catalog import Column
 from . import row_engine, vector_engine
 from .common import OUTPUT_BATCH_ROWS
-from .context import ROW, ExecutionContext
+from .context import ExecutionContext
 
 
 @dataclass

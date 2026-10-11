@@ -391,7 +391,7 @@ def _python_term_bits(window: Window, term: Term, vector: ColumnVector) -> array
     return array.array("B", flags_to_bits(flags))
 
 
-def compile_filter(node: pp.Filter, ctx: ExecutionContext) -> NativeFilter | None:
+def compile_filter(node: pp.Filter) -> NativeFilter | None:
     """The native plan of a Filter, if its input is a TableScan of a column
     table and some conjunct can be computed by the kernels."""
     scan = node.input
@@ -564,18 +564,16 @@ def python_rows(gather: pp.Gather, ctx: ExecutionContext) -> float:
     path = pp.pipeline_path(gather.input)
     if ctx.native is not None and path and len(path) >= 2:
         parent = path[-2]
-        if isinstance(parent, pp.Filter) and native_filter(parent, ctx) is not None:
+        if isinstance(parent, pp.Filter) and native_filter(parent) is not None:
             rows = parent.estimated_rows * NATIVE_ROW_COST
     return rows
 
 
-def native_filter(node: pp.Filter, ctx: ExecutionContext) -> NativeFilter | None:
-    """The cached native plan of a Filter for this statement (None if the
+def native_filter(node: pp.Filter) -> NativeFilter | None:
+    """The kernel plan the physical planner bound to a Filter (None if the
     kernels are not in use or do not apply)."""
-    if ctx.native is None:
-        return None
-    plan = ctx.cached(node, "native:filter", lambda: compile_filter(node, ctx) or False)
-    return plan or None
+    assert node.native is None or isinstance(node.native, NativeFilter)
+    return node.native
 
 
 # ------------------------------------------------------------------ scan aggregation
@@ -824,16 +822,14 @@ def _selected_values(
 _SUM_KINDS = frozenset({TypeKind.INT64, TypeKind.DECIMAL})
 
 
-def compile_scan_aggregate(
-    node: pp.HashAggregate, ctx: ExecutionContext
-) -> NativeScanAggregate | NativeHashScanAggregate | None:
+def compile_scan_aggregate(node: pp.HashAggregate) -> NativeScanAggregate | NativeHashScanAggregate | None:
     """The native plan of an aggregation whose input is a (natively
     filtered, possibly partitioned) TableScan of a column table and whose
     keys and arguments are columns of that scan."""
     source = node.input.input if isinstance(node.input, pp.Gather) else node.input
     native: NativeFilter | None = None
     if isinstance(source, pp.Filter):
-        native = native_filter(source, ctx)
+        native = native_filter(source)
         if native is None or native.residual is not None:
             return None
         scan: pp.PhysicalNode = native.scan
@@ -1110,13 +1106,20 @@ def _gathered_validity(window: Window, vector: ColumnVector, idx: array.array) -
     return array.array("B", flags_to_bits(bytes(map(flags.__getitem__, idx))))
 
 
-def native_scan_aggregate(
-    node: pp.HashAggregate, ctx: ExecutionContext
-) -> NativeScanAggregate | NativeHashScanAggregate | None:
-    if ctx.native is None:
-        return None
-    plan = ctx.cached(node, "native:aggregate", lambda: compile_scan_aggregate(node, ctx) or False)
-    return plan or None
+def native_scan_aggregate(node: pp.HashAggregate) -> NativeScanAggregate | NativeHashScanAggregate | None:
+    """The kernel plan the physical planner bound to an aggregation."""
+    assert node.native is None or isinstance(node.native, (NativeScanAggregate, NativeHashScanAggregate))
+    return node.native
+
+
+def kernel_plan(node: pp.PhysicalNode) -> NativeFilter | NativeScanAggregate | NativeHashScanAggregate | None:
+    """The kernel plan of a physical operator, if the kernels can compute
+    it (the physical planner's ``PlanOptions.kernel_plan``)."""
+    if isinstance(node, pp.Filter):
+        return compile_filter(node)
+    if isinstance(node, pp.HashAggregate):
+        return compile_scan_aggregate(node)
+    return None
 
 
 # ------------------------------------------------------------------ grouped sums

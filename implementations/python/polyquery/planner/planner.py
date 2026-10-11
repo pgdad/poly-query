@@ -5,12 +5,29 @@ from __future__ import annotations
 from ..analysis import bound as b
 from ..analysis import typing_rules as tr
 from ..datatypes import DataType
+from ..storage.catalog import Column
 from . import logical as lp
 
 
 class LogicalPlanner:
     def __init__(self, ids: b.IdGenerator):
         self.ids = ids
+
+    def plan_statement(self, query: b.BoundQuery) -> lp.LogicalPlan:
+        """The logical plan of a statement's query and of every subquery its
+        expressions (transitively) evaluate."""
+        root = self.plan_query(query)
+        subqueries: dict[int, lp.LogicalNode] = {}
+        pending = [root]
+        while pending:
+            for node in lp.walk(pending.pop(0)):
+                for expr in node.expressions():
+                    for sq in b.subqueries(expr):
+                        if sq.id not in subqueries:
+                            subqueries[sq.id] = self.plan_query(sq.query)
+                            pending.append(subqueries[sq.id])
+        columns = [Column(o.name, o.expr.type) for o in query.outputs]
+        return lp.LogicalPlan(root, columns, subqueries)
 
     def plan_query(self, query: b.BoundQuery) -> lp.LogicalNode:
         node: lp.LogicalNode

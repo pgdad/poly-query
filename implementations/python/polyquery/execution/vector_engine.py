@@ -175,7 +175,7 @@ def _union_all(node: pp.UnionAll, ctx: ExecutionContext) -> Batches:
 
 
 def _filter(node: pp.Filter, ctx: ExecutionContext) -> Batches:
-    native = native_ops.native_filter(node, ctx)
+    native = native_ops.native_filter(node)
     if native is not None:
         # the kernels select rows of the scan below; the engine evaluates the rest
         batches = native_ops.filtered_batches(native, ctx, VECTOR_BATCH_ROWS)
@@ -547,7 +547,7 @@ def _update_sorted(ids: list[int], vectors: list, states: list[GroupState]) -> N
 
 
 def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Batches:
-    native = native_ops.native_scan_aggregate(node, ctx)
+    native = native_ops.native_scan_aggregate(node)
     done = None if native is None else native_ops.run_scan_aggregate(native, node, ctx)
     if done is not None:  # aggregated by the kernels from the column storage
         keys, states = done

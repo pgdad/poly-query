@@ -9,7 +9,8 @@ from polyquery.analysis.binder import Binder
 from polyquery.execution.compiler import evaluate_constant
 from polyquery.planner import logical as lp
 from polyquery.planner import physical as pp
-from polyquery.planner.optimizer import optimize
+from polyquery.planner.optimizer import Optimizer
+from polyquery.planner.pipeline import plan_statement
 from polyquery.planner.planner import LogicalPlanner
 from polyquery.sql.parser import parse
 from tests.helpers import EngineTestMixin
@@ -35,7 +36,12 @@ class PlanningTests(EngineTestMixin, unittest.TestCase):
         return binder.bind_statement(parse(sql).query)
 
     def physical(self, sql: str, **options) -> pp.PhysicalPlan:
-        return pp.plan_statement(self.bind(sql), pp.PlanOptions(**options))
+        return plan_statement(self.bind(sql), pp.PlanOptions(**options))
+
+    def optimized(self, sql: str) -> lp.LogicalNode:
+        stmt = self.bind(sql)
+        logical = LogicalPlanner(stmt.ids).plan_statement(stmt.query)
+        return Optimizer.for_options(True, evaluate_constant).optimize(logical).root
 
     def test_binder_resolves_columns_to_range_variables(self):
         stmt = self.bind("SELECT p.name, o.amount FROM people p JOIN orders o ON o.pid = p.id")
@@ -61,10 +67,9 @@ class PlanningTests(EngineTestMixin, unittest.TestCase):
         self.assertEqual(len(exists.args), 1)
 
     def test_pushdown_moves_single_table_conjuncts_below_the_join(self):
-        stmt = self.bind(
+        node = self.optimized(
             "SELECT p.name FROM people p, orders o WHERE o.pid = p.id AND p.age > 30 AND o.amount > 2"
         )
-        node = optimize(LogicalPlanner(stmt.ids).plan_query(stmt.query))
         join = next(n for n in _walk(node) if isinstance(n, lp.Join))
         self.assertEqual(join.kind, "INNER")
         self.assertIsInstance(join.left, lp.Filter)
@@ -72,8 +77,7 @@ class PlanningTests(EngineTestMixin, unittest.TestCase):
         self.assertIsInstance(join.condition, b.Compare)
 
     def test_left_join_keeps_where_on_nullable_side_above_the_join(self):
-        stmt = self.bind("SELECT p.id FROM people p LEFT JOIN orders o ON o.pid = p.id WHERE o.oid IS NULL")
-        node = optimize(LogicalPlanner(stmt.ids).plan_query(stmt.query))
+        node = self.optimized("SELECT p.id FROM people p LEFT JOIN orders o ON o.pid = p.id WHERE o.oid IS NULL")
         flt = next(n for n in _walk(node) if isinstance(n, lp.Filter))
         self.assertIsInstance(flt.input, lp.Join)
 
@@ -90,6 +94,24 @@ class PlanningTests(EngineTestMixin, unittest.TestCase):
         plan = self.physical("SELECT name FROM people p WHERE EXISTS (SELECT 1 FROM orders o WHERE o.pid = p.id)")
         (subplan,) = plan.subplans.values()
         self.assertTrue(any(isinstance(n, pp.LookupScan) for n in _walk(subplan)))
+
+    def test_physical_planner_decides_mode_and_kernel_operators(self):
+        self.assertEqual(self.physical("SELECT 1").mode, pp.VECTORIZED)
+        self.assertEqual(self.physical("SELECT 1", mode="row").mode, pp.ROW)
+        sql = "SELECT COUNT(*) FROM orders WHERE amount > 1"
+        plain = self.physical(sql)
+        self.assertIsNone(plain.native)
+        self.assertTrue(all(getattr(n, "native", None) is None for n in _walk(plain.root)))
+        kernels, offered = object(), []
+
+        def kernel_plan(node):
+            offered.append(node.op)
+            return f"kernels:{node.op}"
+
+        plan = self.physical(sql, kernels=kernels, kernel_plan=kernel_plan)
+        self.assertIs(plan.native, kernels)
+        self.assertEqual(offered, ["Filter", "Aggregate"])  # inputs first
+        self.assertEqual(plan.root.input.native, "kernels:Aggregate")
 
     def test_explain_reports_scan_columns_and_join_type(self):
         resp = self.request(op="explain", sql="SELECT p.name FROM people p JOIN orders o ON o.pid = p.id")

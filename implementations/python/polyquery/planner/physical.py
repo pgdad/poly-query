@@ -1,6 +1,11 @@
 """Physical plan: concrete operator algorithms, and the planner that chooses
-them from a logical plan. Physical plans are what the executor runs and what
-``EXPLAIN`` shows (indexes-and-planning.md §4)."""
+them from an (optimized) logical plan. Physical plans are what the executor
+runs and what ``EXPLAIN`` shows (indexes-and-planning.md §4).
+
+The physical planner alone takes the execution decisions: access paths
+(table / index / lookup scans, row-group skipping), join algorithms and
+order, ``TopN``, parallel pipelines (``Gather``), the execution mode and the
+operators that run on native kernels."""
 
 from __future__ import annotations
 
@@ -8,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..analysis import bound as b
+from ..native import NativeKernels
 from ..storage.catalog import Column, Table
 from ..storage.indexes import Index
 from . import logical as lp
@@ -19,8 +25,13 @@ from .access import (
     selectivity,
 )
 from .explain import render_expr
-from .optimizer import conjunction, conjuncts, optimize, prune_columns
-from .planner import LogicalPlanner
+
+conjuncts = b.conjuncts
+conjunction = b.conjunction
+
+# execution modes (protocol option ``mode``; ``auto`` runs vectorized)
+ROW = "row"
+VECTORIZED = "vectorized"
 
 
 @dataclass(eq=False)
@@ -189,6 +200,8 @@ class UnionAll(PhysicalNode):
 class Filter(PhysicalNode):
     input: PhysicalNode
     predicate: b.Expr
+    # kernel plan of the filter (``native: true``; see execution.native_ops)
+    native: object | None = None
 
     def inputs(self) -> list[PhysicalNode]:
         return [self.input]
@@ -295,6 +308,8 @@ class HashAggregate(PhysicalNode):
     rel: int
     keys: list[b.Expr]
     aggregates: list[b.AggCall]
+    # kernel plan of a scan aggregation (``native: true``; see execution.native_ops)
+    native: object | None = None
 
     def inputs(self) -> list[PhysicalNode]:
         return [self.input]
@@ -453,14 +468,22 @@ class Limit(PhysicalNode):
 
 @dataclass
 class PlanOptions:
+    # logical rewrites, and the physical planner's join reordering and TopN
     optimize: bool = True
     join: str = "auto"  # auto, hash, merge, nested_loop
     use_indexes: bool = True
     threads: int = 1  # > 1: parallel pipelines (Gather)
+    mode: str = "auto"  # auto (= vectorized), row, vectorized
     # the indexes of a table (catalog lookup)
     indexes_of: Callable[[Table], list[Index]] = lambda table: []
-    # evaluates a constant expression (for index lookups / row-group skipping)
+    # evaluates a constant expression (constant folding, index lookups,
+    # row-group skipping)
     evaluate: Callable[[b.Expr], Any] | None = None
+    # the native kernel library (``native: true`` and loaded), and the
+    # function that compiles the kernel plan of a Filter or HashAggregate
+    # (None where the kernels do not apply)
+    kernels: NativeKernels | None = None
+    kernel_plan: Callable[[PhysicalNode], object | None] | None = None
 
 
 @dataclass(eq=False)
@@ -469,6 +492,8 @@ class PhysicalPlan:
     columns: list[Column]
     # physical plans of the subqueries used in expressions, by Subquery.id
     subplans: dict[int, PhysicalNode]
+    mode: str = VECTORIZED  # ROW (Volcano iterators) or VECTORIZED (column batches)
+    native: NativeKernels | None = None  # the kernels, if any operator uses them
 
     def to_json(self) -> dict[str, Any]:
         return _node_json(self.root, self.subplans)
@@ -493,36 +518,44 @@ def _node_json(node: PhysicalNode, subplans: dict[int, PhysicalNode]) -> dict[st
 
 
 class PhysicalPlanner:
-    def __init__(self, ids: b.IdGenerator, options: PlanOptions):
-        self.ids = ids
+    def __init__(self, options: PlanOptions):
         self.options = options
         self.subplans: dict[int, PhysicalNode] = {}
+        self.logical_subqueries: dict[int, lp.LogicalNode] = {}
         # base table of every scanned range variable (for statistics)
         self.rel_tables: dict[int, Table] = {}
 
-    def plan_statement(self, query: b.BoundQuery) -> PhysicalPlan:
-        root = self.plan_query(query)
+    def plan_statement(self, logical: lp.LogicalPlan) -> PhysicalPlan:
+        self.logical_subqueries = logical.subqueries
+        root = self.plan(logical.root)
         if isinstance(root, Project):
-            root.names = [o.name for o in query.outputs]
+            root.names = [c.name for c in logical.columns]
         if self.options.threads > 1:
             # subquery plans (executed per outer row) stay serial
             root = parallelize(root, min(self.options.threads, MAX_PARTITIONS))
-        columns = [Column(o.name, o.expr.type) for o in query.outputs]
-        return PhysicalPlan(root, columns, self.subplans)
-
-    def plan_query(self, query: b.BoundQuery) -> PhysicalNode:
-        logical = LogicalPlanner(self.ids).plan_query(query)
-        if self.options.optimize:
-            logical = prune_columns(optimize(logical, self.options.evaluate))
-        return self.plan(logical)
+        kernels = self.options.kernels
+        if kernels is not None and self.options.kernel_plan is not None:
+            for tree in [root, *self.subplans.values()]:
+                self._bind_kernels(tree)
+        mode = ROW if self.options.mode == ROW else VECTORIZED
+        return PhysicalPlan(root, logical.columns, self.subplans, mode, kernels)
 
     def plan(self, node: lp.LogicalNode) -> PhysicalNode:
         result = self._plan(node)
         for expr in result.expressions():
             for sq in b.subqueries(expr):
                 if sq.id not in self.subplans:
-                    self.subplans[sq.id] = self.plan_query(sq.query)
+                    self.subplans[sq.id] = self.plan(self.logical_subqueries[sq.id])
         return result
+
+    def _bind_kernels(self, node: PhysicalNode) -> None:
+        """Attaches the kernel plans of the Filters and HashAggregates the
+        native kernels can compute (inputs first: an aggregation's plan
+        builds on the plan of the filter below it)."""
+        for child in node.inputs():
+            self._bind_kernels(child)
+        if isinstance(node, (Filter, HashAggregate)):
+            node.native = self.options.kernel_plan(node)  # type: ignore[misc]
 
     def _plan(self, node: lp.LogicalNode) -> PhysicalNode:
         if isinstance(node, lp.Scan):
@@ -844,7 +877,3 @@ def _lookup_scan(scan: lp.Scan, predicate: b.Expr) -> LookupScan | None:
                 scan.table, scan.rel, scan.columns, scan.name, column.index, other, residual
             )
     return None
-
-
-def plan_statement(statement: b.BoundStatement, options: PlanOptions) -> PhysicalPlan:
-    return PhysicalPlanner(statement.ids, options).plan_statement(statement.query)

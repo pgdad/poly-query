@@ -1,6 +1,6 @@
 """Unit tests for the Phase 5 executors: row vs vectorized execution, join
 algorithms, parallel (partitioned / forked) pipelines, the vector
-expression compiler, columnar group states and the optimizer rewrites."""
+expression compiler, and columnar group states."""
 
 import gc
 import itertools
@@ -8,12 +8,11 @@ import json
 import unittest
 
 from polyquery.analysis import bound as b
-from polyquery.datatypes import BOOLEAN, INT64
+from polyquery.datatypes import INT64
 from polyquery.execution import context
 from polyquery.execution.aggregates import make_accumulator
 from polyquery.execution.common import merge_pairs, sort_permutation
 from polyquery.execution.group_states import make_state
-from polyquery.planner.rewrite import ExprSimplifier
 from tests.helpers import EngineTestMixin, make_handler
 
 T = "id,g,v,s,f\n" + "".join(
@@ -185,17 +184,6 @@ class KernelTests(unittest.TestCase):
             second.update_rows([{0: 2, 1: 0, 2: 1}[i] for i in ids[3:]], values[3:])
             first.merge(second, [1, 2, 0])  # second's group g is first's group mapping[g]
             self.assertEqual(first.results(), expected, name)
-
-    def test_simplifier_keeps_operands_that_may_fail(self):
-        s = ExprSimplifier(None)
-        x = b.ColumnRef(BOOLEAN, 1, 0, "x")
-        true, false = b.Literal(BOOLEAN, True), b.Literal(BOOLEAN, False)
-        self.assertEqual(s.simplify(b.Logical(BOOLEAN, "AND", true, x)), x)
-        self.assertEqual(s.simplify(b.Logical(BOOLEAN, "AND", x, false)), false)
-        risky = b.Compare(BOOLEAN, "=", b.Arith(INT64, "/", b.Literal(INT64, 1), b.ColumnRef(INT64, 1, 1, "y")), b.Literal(INT64, 1))
-        kept = b.Logical(BOOLEAN, "AND", risky, false)
-        self.assertEqual(s.simplify(kept), kept)
-        self.assertEqual(s.simplify(b.Logical(BOOLEAN, "OR", true, risky)), true)
 
     def test_gc_pauses_nest(self):
         was = gc.isenabled()
