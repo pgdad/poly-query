@@ -5,6 +5,7 @@
 //   vagg_ok(x0 BoundQuery*) -> w0 1 if the query can use vagg_aggregate
 //       (no DISTINCT aggregate, at most VAGG_MAXKEYS GROUP BY expressions)
 //   vagg_aggregate(x0 Aggregate PlanNode*, x1 ctx) -> x0 ResultSet*
+//   vdistinct(x0 BoundQuery*, x1 ResultSet*) -> x0 ResultSet*   hash DISTINCT
 //
 // The input tuple set is cut into contiguous windows, one per task
 // (agg_task); each task builds a hash table of groups over its window in
@@ -66,6 +67,14 @@
 #define MT_CTX      32
 #define MT_GT       40             // GroupTable* result
 #define MT_SIZE     48
+
+// DISTINCT task (vdistinct): XT_SIZE records, the table at XT_GT
+#define DT_RS       0              // ResultSet* (rows to dedupe)
+#define DT_TYPES    8              // u32* visible column types
+#define DT_GT       16             // GroupTable* result (= XT_GT)
+#define DT_NKEYS    24
+#define DT_LO       32             // rows [lo, hi)
+#define DT_HI       40
 
 // Group emission task (emit_groups)
 #define ET_NODE     0
@@ -341,6 +350,198 @@ LFUNC gt_new
 2:  mov  x0, x20
     LEAVE 3
 ENDF gt_new
+
+// gt_alloc(x0 nkeys, x1 nagg, x2 u32* key types) -> x0 empty GroupTable*
+// with the given layout (the types array is shared)
+//   x19 table
+LFUNC gt_alloc
+    ENTER 1
+    stp  x0, x1, [sp, #-16]!
+    str  x2, [sp, #-16]!
+    mov  x0, #GT_SIZE
+    bl   arena_zalloc
+    mov  x19, x0
+    ldr  x2, [sp], #16
+    ldp  x0, x1, [sp], #16
+    str  x0, [x19, #GT_NKEYS]
+    str  x1, [x19, #GT_NAGG]
+    str  x2, [x19, #GT_TYPES]
+    lsl  x9, x0, #4
+    add  x9, x9, #GR_KEYS
+    add  x9, x9, x1, lsl #5             // AGG_STATE_SIZE = 32
+    str  x9, [x19, #GT_RECSZ]
+    mov  x10, #64
+    str  x10, [x19, #GT_CAP]
+    mul  x0, x9, x10
+    bl   arena_alloc
+    str  x0, [x19, #GT_RECS]
+    mov  x0, #(128 * 4)
+    bl   arena_zalloc
+    str  x0, [x19, #GT_HT]
+    mov  x9, #127
+    str  x9, [x19, #GT_MASK]
+    mov  x0, x19
+    LEAVE 1
+ENDF gt_alloc
+
+// =============================================================================
+// vdistinct(x0 BoundQuery*, x1 ResultSet*) -> x0 ResultSet*
+// SELECT DISTINCT by hashing (vectorized mode): the visible cells of every
+// row are looked up in a group table without aggregates; the first row of
+// every distinct value survives, in order of first appearance. With threads
+// > 1 tasks dedupe windows of the rows into partial tables that are merged
+// like partial aggregates (gt_pmerge).
+//   x19 bq, x20 rs, x21 types, x22 tasks, x23 records, x24 list, x25 count,
+//   x26 index
+// =============================================================================
+FUNC vdistinct
+    ENTER 5
+    mov  x19, x0
+    mov  x20, x1
+    ldr  x9, [x19, #BQ_NOUT]            // key types: the visible columns
+    lsl  x0, x9, #2
+    add  x0, x0, #4
+    bl   arena_alloc
+    mov  x21, x0
+    mov  x26, #0
+1:  ldr  x9, [x19, #BQ_NOUT]
+    cmp  x26, x9
+    b.hs 2f
+    ldr  x10, [x19, #BQ_OUT]
+    mov  x11, #OC_SIZE
+    madd x10, x26, x11, x10
+    ldr  w10, [x10, #OC_TYPE]
+    str  w10, [x21, x26, lsl #2]
+    add  x26, x26, #1
+    b    1b
+2:  mov  x22, #1                        // tasks (no expressions: always safe)
+    TLS_LDR x9, g_x_threads
+    cmp  x9, #1
+    b.ls 3f
+    LDR_G x10, g_par_min_rows
+    ldr  x11, [x20, #RS_NROWS]
+    udiv x10, x11, x10
+    cmp  x10, x9
+    csel x10, x10, x9, lo
+    cmp  x10, #2
+    csel x22, x10, x22, hs
+3:  mov  x9, #XT_SIZE
+    mul  x0, x9, x22
+    bl   arena_alloc
+    mov  x23, x0
+    ldr  x11, [x20, #RS_NROWS]          // window: ceil(n / tasks)
+    add  x9, x11, x22
+    sub  x9, x9, #1
+    udiv x9, x9, x22
+    mov  x26, #0
+4:  cmp  x26, x22
+    b.hs 5f
+    mov  x10, #XT_SIZE
+    madd x10, x26, x10, x23
+    str  x20, [x10, #DT_RS]
+    str  x21, [x10, #DT_TYPES]
+    ldr  x12, [x19, #BQ_NOUT]
+    str  x12, [x10, #DT_NKEYS]
+    mul  x12, x26, x9
+    cmp  x12, x11
+    csel x12, x12, x11, lo
+    str  x12, [x10, #DT_LO]
+    add  x12, x12, x9
+    cmp  x12, x11
+    csel x12, x12, x11, lo
+    str  x12, [x10, #DT_HI]
+    add  x26, x26, #1
+    b    4b
+5:  cmp  x22, #1
+    b.ne 6f
+    mov  x0, x23
+    bl   distinct_task
+    ldr  x0, [x23, #DT_GT]
+    bl   gt_list
+    b    7f
+6:  ADR_L x0, distinct_task
+    mov  x1, x23
+    mov  x2, #XT_SIZE
+    mov  x3, x22
+    bl   par_run
+    mov  x0, x23
+    mov  x1, x22
+    mov  x2, x19
+    mov  x3, #0
+    bl   gt_pmerge
+7:  mov  x24, x0                        // first row of every group, in order
+    mov  x25, x1
+    lsl  x0, x25, #3
+    add  x0, x0, #16
+    bl   arena_alloc
+    ldr  x10, [x20, #RS_ROWS]
+    mov  x26, #0
+8:  cmp  x26, x25
+    b.hs 9f
+    ldr  x11, [x24, x26, lsl #3]
+    ldr  x11, [x11, #GR_FIRST]
+    ldr  x11, [x10, x11, lsl #3]
+    str  x11, [x0, x26, lsl #3]
+    add  x26, x26, #1
+    b    8b
+9:  str  x0, [x20, #RS_ROWS]
+    str  x25, [x20, #RS_NROWS]
+    mov  x0, x20
+    LEAVE 5
+ENDF vdistinct
+
+// distinct_task(x0 record): rows [lo, hi) into a key-only group table
+//   x19 record, x20 table, x21 row index, x22 rows, x23 nkeys, x24 hash,
+//   x25 key, x26 row
+LFUNC distinct_task
+    ENTER 5
+    mov  x19, x0
+    ldr  x0, [x19, #DT_NKEYS]
+    mov  x1, #0
+    ldr  x2, [x19, #DT_TYPES]
+    bl   gt_alloc
+    mov  x20, x0
+    str  x20, [x19, #DT_GT]
+    ldr  x9, [x19, #DT_RS]
+    ldr  x22, [x9, #RS_ROWS]
+    ldr  x23, [x19, #DT_NKEYS]
+    ldr  x21, [x19, #DT_LO]
+1:  ldr  x9, [x19, #DT_HI]
+    cmp  x21, x9
+    b.hs 9f
+    tst  x21, #0xfff
+    b.ne 2f
+    bl   check_deadline
+2:  ldr  x26, [x22, x21, lsl #3]
+    mov  x24, #0
+    mov  x25, #0
+3:  cmp  x25, x23                       // hash of the visible cells
+    b.hs 5f
+    add  x9, x26, x25, lsl #4
+    ldp  x0, x10, [x9]
+    ldr  x11, =NULL_HASH
+    cbnz x10, 4f
+    ldr  x9, [x19, #DT_TYPES]
+    ldr  w1, [x9, x25, lsl #2]
+    and  w9, w1, #T_KIND_MASK
+    cbz  w9, 4f                         // null type (all NULL)
+    bl   hash_cell
+    mov  x11, x0
+4:  eor  x24, x24, x11
+    ldr  x9, =0x9e3779b97f4a7c15
+    mul  x24, x24, x9
+    add  x24, x24, #1
+    add  x25, x25, #1
+    b    3b
+5:  mov  x0, x20
+    mov  x1, x24
+    mov  x2, x26
+    mov  x3, x21
+    bl   gt_get
+    add  x21, x21, #1
+    b    1b
+9:  LEAVE 5
+ENDF distinct_task
 
 // gt_keys_eq(x0 cells a, x1 cells b, x2 GroupTable*) -> w0 1 if equal
 // (NULL equals NULL)
@@ -851,9 +1052,12 @@ LFUNC merge_task
     ENTER 5
     mov  x19, x0
     ldr  x24, [x19, #MT_T]
-    ldr  x0, [x19, #MT_BQ]
-    ldr  x1, [x19, #MT_CTX]
-    bl   gt_new
+    ldr  x9, [x19, #MT_TASKS]           // same key layout as the partial
+    ldr  x9, [x9, #XT_GT]               // tables
+    ldr  x0, [x9, #GT_NKEYS]
+    ldr  x1, [x9, #GT_NAGG]
+    ldr  x2, [x9, #GT_TYPES]
+    bl   gt_alloc
     mov  x20, x0
     str  x20, [x19, #MT_GT]
     mov  x21, #0
@@ -892,6 +1096,8 @@ LFUNC merge_task
     add  x1, x10, x12, lsl #4
     add  x2, x23, #GR_KEYS              // source states
     add  x2, x2, x12, lsl #4
+    ldr  x9, [x20, #GT_NAGG]
+    cbz  x9, 2b                         // DISTINCT: keys only
     ldr  x0, [x19, #MT_BQ]
     bl   merge_states
     b    2b

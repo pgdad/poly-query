@@ -375,7 +375,7 @@ LFUNC ex_rows
     mov  x2, x0
     ldr  x0, [x22, #RS_ROWS]
     ldr  x1, [x22, #RS_NROWS]
-    bl   sort_rows
+    bl   sort_rows_par
     mov  x0, x22
     LEAVE 3
 .Lxr_distinct:
@@ -384,7 +384,13 @@ LFUNC ex_rows
     bl   ex_rows
     mov  x1, x0
     mov  x0, x21
-    bl   distinct_rows
+    TLS_ADDR x9, g_x_mode               // vectorized: hash DISTINCT
+    ldr  w9, [x9]
+    cmp  w9, #XM_ROW
+    b.eq 1f
+    bl   vdistinct
+    LEAVE 3
+1:  bl   distinct_rows
     LEAVE 3
 ENDF ex_rows
 
@@ -966,7 +972,7 @@ ENDF cmp_group_rec
 // keys: [0] u64 count, then SK_SIZE descriptors.
 //   x19 row a, x20 row b, x21 keys left, x22 descriptor
 // =============================================================================
-LFUNC cmp_rows
+FUNC cmp_rows
     ENTER 3
     ldr  x19, [x0]
     ldr  x20, [x1]
@@ -1026,17 +1032,25 @@ LFUNC cell_type
 ENDF cell_type
 
 // order_keys(x0 BoundQuery*) -> x0 key descriptors for the ORDER BY
-//   x19 bq, x20 keys, x21 index, x22 count
-LFUNC order_keys
+// The ORDER BY keys are followed by every visible column (ascending, NULLs
+// first) as tie-breakers: rows that are equal on the ORDER BY keys come out
+// in one well-defined order whatever order the executor produced them in
+// (mode, join algorithm, threads), and only identical rows compare equal.
+//   x19 bq, x20 keys, x21 index, x22 count, x23 descriptor
+FUNC order_keys
     ENTER 3
     mov  x19, x0
     ldr  x22, [x19, #BQ_NORDER]
-    mov  x0, #SK_SIZE
-    mul  x0, x22, x0
+    ldr  x9, [x19, #BQ_NOUT]
+    add  x0, x22, x9
+    mov  x10, #SK_SIZE
+    mul  x0, x0, x10
     add  x0, x0, #8
     bl   arena_alloc
     mov  x20, x0
-    str  x22, [x20]
+    ldr  x9, [x19, #BQ_NOUT]
+    add  x9, x22, x9
+    str  x9, [x20]
     mov  x21, #0
 1:  cmp  x21, x22
     b.hs 2f
@@ -1057,12 +1071,32 @@ LFUNC order_keys
     str  w0, [x23, #SK_TYPE]
     add  x21, x21, #1
     b    1b
-2:  mov  x0, x20
+2:  mov  x21, #0                        // tie-breakers: visible columns
+3:  ldr  x9, [x19, #BQ_NOUT]
+    cmp  x21, x9
+    b.hs 4f
+    add  x10, x22, x21
+    mov  x11, #SK_SIZE
+    madd x23, x10, x11, x20
+    add  x23, x23, #8
+    lsl  x9, x21, #4
+    str  x9, [x23, #SK_OFF]
+    str  wzr, [x23, #SK_DESC]
+    mov  w9, #1
+    str  w9, [x23, #SK_NFIRST]
+    ldr  x9, [x19, #BQ_OUT]
+    mov  x10, #OC_SIZE
+    madd x9, x21, x10, x9
+    ldr  w9, [x9, #OC_TYPE]
+    str  w9, [x23, #SK_TYPE]
+    add  x21, x21, #1
+    b    3b
+4:  mov  x0, x20
     LEAVE 3
 ENDF order_keys
 
 // sort_rows(x0 Row** rows, x1 count, x2 keys)
-LFUNC sort_rows
+FUNC sort_rows
     cmp  x1, #2
     b.lo 1f
     mov  x4, x2
@@ -1192,7 +1226,7 @@ LFUNC distinct_rows
 2:  ldr  x0, [x20, #RS_ROWS]
     ldr  x1, [x20, #RS_NROWS]
     mov  x2, x21
-    bl   sort_rows
+    bl   sort_rows_par
     ldr  x24, [x20, #RS_ROWS]
     ldr  x9, [x20, #RS_NROWS]
     cbz  x9, 5f

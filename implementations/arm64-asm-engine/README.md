@@ -79,7 +79,7 @@ frame macros in `include/frame.inc`, the internal API contract in
 | semantic analysis | `binder.S`, `functions.S`, `strfuncs.S` | scopes (range variables, outer scopes, CTEs), name resolution, typing with implicit casts, aggregate / GROUP BY validation, subquery binding; scalar functions, CASE, LIKE, BETWEEN, IN lists |
 | planning | `plan.S`, `access.S` | logical plan, physical rewrite (predicate pushdown, hash-join keys, join algorithm, column pruning, build side), access paths (simple predicates, selectivity estimates, index selection, row-group skipping), EXPLAIN JSON |
 | optimizer | `optimize.S` | logical rewrites (Phase 5, option `optimize`): constant folding, predicate simplification |
-| execution | `exec.S`, `eval.S`, `ops.S`, `join.S`, `volcano.S` | plan operators (scan tasks, filter, project, hash / merge / nested-loop joins, sort-based aggregation, distinct, sort, top-N, limit), subquery evaluation, batched projection for streaming; expression evaluator and aggregate accumulators |
+| execution | `exec.S`, `eval.S`, `ops.S`, `join.S`, `volcano.S`, `sort.S` | plan operators (scan tasks, filter, project, hash / merge / nested-loop joins, sort-based aggregation, distinct, sort, top-N, limit), subquery evaluation, batched projection for streaming; expression evaluator and aggregate accumulators |
 | vectorized execution | `vexec.S`, `vagg.S` | batch expression evaluation over column vectors with selection vectors (`veval`, `vfilter`, join key vectors), hash aggregation with partial tables |
 | parallelism | `parallel.S` | worker threads for query tasks (`par_run`), parallel-safety check |
 | server | `http.S`, `server.S`, `log.S` | HTTP/1.1 listener and connection threads, routing, request framing, streaming, shutdown; query registry, admission control, cancellation, disconnect watchdog, metrics; structured logs |
@@ -360,6 +360,14 @@ in every mode); Aggregate, Distinct and Sort consume their whole input.
   use the sort-based path.
 * **Projection** evaluates each output column as a vector and scatters it
   into the result rows.
+* **DISTINCT** (`vdistinct`) hashes the visible cells of every result row
+  into a key-only group table and keeps the first row of every value (O(n)
+  instead of sorting); with threads, windows are deduplicated in parallel
+  and merged like partial aggregates.
+* **ORDER BY** sorts with `qsort_r`; with threads, chunks are sorted in
+  parallel and merged pairwise in parallel rounds (`sort.S`). The key list
+  ends with every visible column as a tie-breaker, so rows that tie on the
+  ORDER BY keys still come out in one well-defined order in every mode.
 
 ### Parallelism (`parallel.S`)
 
@@ -562,9 +570,9 @@ last. Observations:
 
 * Correlated subqueries are re-executed per outer row (no decorrelation).
 * Join reordering is greedy (no exhaustive / dynamic-programming search)
-  and uses simple cardinality estimates. Sorting, DISTINCT, sort-based
-  (row mode / DISTINCT-aggregate) grouping and the merge-join sort run on
-  one thread.
+  and uses simple cardinality estimates. The hash-join build, sort-based
+  grouping (row mode, DISTINCT aggregates) and the merge-join sort run on
+  one thread; the final merge round of a parallel sort is a single merge.
 * `native: true` is accepted but no native kernel library is supported.
 * Streamed projections (`/v1/query/stream`) are evaluated row at a time.
 * One thread per HTTP connection (no connection limit besides the OS).

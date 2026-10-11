@@ -34,8 +34,15 @@
   replaces PN_LO/PN_HI ranges; join.S combine() merges tuples slot-wise
   (AND), so subtrees need not cover contiguous rv ranges.
 
+- vagg.S also: gt_pmerge (partitioned parallel merge of partial tables,
+  groups ordered by first tuple), emit_groups (parallel HAVING /
+  projection), vdistinct (hash DISTINCT). sort.S: parallel chunk sort +
+  pairwise merge rounds. order_keys appends all visible columns as
+  tie-breakers (deterministic ORDER BY across modes).
+
 ## Possible next steps
-- parallel sort; vectorized streaming projection; better join estimates.
+- vectorized streaming projection; better join estimates; parallel
+  hash-join build.
 
 ## Gotchas (phase 5)
 - Tuple width can be 0 (SELECT without FROM): copy loops must check it.
