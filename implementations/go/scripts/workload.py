@@ -51,7 +51,7 @@ def digest(resp):
         return "error:" + resp["error"]["code"]
     rows = resp["rows"]
     # FLOAT64 aggregates may differ in the last bits between summation orders.
-    norm = [[round(v, 6) if isinstance(v, float) else v for v in r] for r in rows]
+    norm = [[float(f"{v:.9g}") if isinstance(v, float) else v for v in r] for r in rows]
     return hashlib.sha256(json.dumps([resp["columns"], norm]).encode()).hexdigest()[:16]
 
 

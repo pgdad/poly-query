@@ -135,12 +135,17 @@ type vsortOp struct {
 	threads int
 }
 
+// maxTopN is the largest LIMIT (plus OFFSET) sorted with a bounded heap;
+// beyond it, sorting all rows (normalized keys, parallel runs) is faster
+// than maintaining the heap, with the same (stable) order.
+const maxTopN = 1 << 14
+
 func buildVSort(ec *Context, x *physical.Sort) (BatchOperator, error) {
 	keys, err := sortKeys(x)
 	if err != nil {
 		return nil, err
 	}
-	if x.Limit >= 0 {
+	if x.Limit >= 0 && x.Limit <= maxTopN {
 		return buildVTopN(ec, x, keys)
 	}
 	in, err := BuildBatch(ec, x.Input)

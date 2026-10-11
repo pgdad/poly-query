@@ -5,6 +5,7 @@ import (
 	"math"
 	"slices"
 	"sync"
+	"unsafe"
 
 	"polyquery/internal/errs"
 	"polyquery/internal/native"
@@ -575,6 +576,7 @@ type aggTable struct {
 	wideMap   map[types.Int128]int32 // single wide DECIMAL key
 	nmap      *nativeIntMap          // replaces imap with native kernels
 	smap      *strGroupMap           // single STRING key
+	strCache  [16]strCacheEntry      // single STRING key: recent keys by address
 	hashes    []uint64               // per group: hash of its single STRING key
 	tmap      *tupleGroupMap         // several keys, or a FLOAT64 key
 	hasher    tupleHasher
@@ -810,6 +812,18 @@ func (t *aggTable) resolveIntNative(v *Vec, n int, sel []int32, pos int64) error
 	return nil
 }
 
+// strCacheEntry maps the address and length of a group's key string
+// (retained by the table, so the address cannot be reused) to the group:
+// rows holding that very string (constants, CASE results, repeated
+// values of plain vectors) skip hashing.
+type strCacheEntry struct {
+	p *byte
+	n int
+	g int32
+}
+
+func strCacheSlot(p *byte) int { return int(uintptr(unsafe.Pointer(p))>>3) & 15 }
+
 func (t *aggTable) resolveString(v *Vec, n int, sel []int32, pos int64) error {
 	gids, vals, nulls := t.gids, v.S, v.Nulls
 	one := func(i int) error {
@@ -818,8 +832,20 @@ func (t *aggTable) resolveString(v *Vec, n int, sel []int32, pos int64) error {
 			gids[i] = g
 			return err
 		}
-		g, err := t.findOrAddStr(vals[i], t.strHashAt(vals[i], i), t.posAt(pos, i))
+		s := vals[i]
+		if len(s) > 0 {
+			p := unsafe.StringData(s)
+			if e := &t.strCache[strCacheSlot(p)]; e.p == p && e.n == len(s) {
+				gids[i] = e.g
+				return nil
+			}
+		}
+		g, err := t.findOrAddStr(s, t.strHashAt(s, i), t.posAt(pos, i))
 		gids[i] = g
+		if key := t.keys[g][0].S; err == nil && len(key) > 0 {
+			p := unsafe.StringData(key)
+			t.strCache[strCacheSlot(p)] = strCacheEntry{p: p, n: len(key), g: g}
+		}
 		return err
 	}
 	if sel == nil {

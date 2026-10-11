@@ -395,3 +395,33 @@ func testParallelHighCardinality(t *testing.T, scatterRows int) {
 		t.Errorf("group order: %v %v", res, err)
 	}
 }
+
+// TestOrderedLimitModesAgree compares ORDER BY … LIMIT results in order
+// (ties are broken by input position in every mode), for small limits
+// (bounded heap) and large ones (full sort).
+func TestOrderedLimitModesAgree(t *testing.T) {
+	e := newModesEngine(t)
+	queries := []string{
+		"SELECT id, cat FROM t ORDER BY cat LIMIT 50 OFFSET 7",
+		"SELECT id, cat FROM t ORDER BY cat DESC NULLS LAST LIMIT 20000 OFFSET 10",
+		"SELECT id, flag FROM t ORDER BY flag, amount DESC LIMIT 100000",
+		"SELECT cat, COUNT(*) FROM t GROUP BY cat ORDER BY COUNT(*) LIMIT 20000",
+	}
+	for _, q := range queries {
+		run := func(c modeConfig) string {
+			res, err := e.Query(context.Background(), q, QueryOptions{
+				MaxRows: -1, Mode: c.mode, Join: c.join, Threads: c.threads, NoOptimize: !c.optimize,
+			})
+			if err != nil {
+				return "error " + err.Error()
+			}
+			return render(res)
+		}
+		want := run(modeConfig{"row", "hash", 1, true})
+		for _, c := range modeMatrix {
+			if got := run(c); got != want {
+				t.Errorf("%s\n  %+v:\n  got  %.300s\n  want %.300s", q, c, got, want)
+			}
+		}
+	}
+}
