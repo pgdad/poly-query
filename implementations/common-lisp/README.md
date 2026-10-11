@@ -465,8 +465,9 @@ objects and closures; group keys are stored once in the key table.
   duplicate column names (`INGEST_ERROR`). JSON numbers that do not fit a
   finite FLOAT64 are `INGEST_ERROR` under inference.
 * Query option values (for `query` and `explain`): see the Phase 5 section.
-  Unknown values of `mode`/`join` are `UNSUPPORTED`; `threads` < 1 or
-  non-integer, and non-boolean `optimize`/`use_indexes`/`native`, are
+  Unknown values of `mode`/`join` and `threads` < 1 are `UNSUPPORTED`
+  (unsupported values of known options); ill-typed values (non-integer
+  `threads`, non-boolean `optimize`/`use_indexes`/`native`) are
   `INVALID_REQUEST`; `threads` above 256 is capped at 256.
 * Default limits: query memory budget 2048 MB (approximate accounting of
   materialized rows, hash tables, sort buffers), ingestion 4 GiB,

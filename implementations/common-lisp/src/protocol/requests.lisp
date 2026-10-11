@@ -208,8 +208,9 @@ option, DEFAULT-THREADS (the --threads command line option) is used."
   (let ((mode (option-in options "mode" '("auto" "row" "vectorized")))
         (join (option-in options "join" '("auto" "hash" "merge" "nested_loop")))
         (threads (request-field options "threads" :type :integer)))
+    ;; A well-typed but out-of-range value is an unsupported value (§5.2).
     (when (and threads (< threads 1))
-      (invalid-request-error "option threads must be >= 1"))
+      (unsupported-error "unsupported value ~D for option threads (must be >= 1)" threads))
     (make-exec-options
      :mode (cond ((null mode) :auto)
                  ((string= mode "row") :row)

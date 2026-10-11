@@ -102,7 +102,7 @@ to 9 significant digits (summation order is implementation-defined)."
 (deftest phase5.option-validation
     (mapcar #'option-error '("{\"mode\":\"quantum\"}" "{\"join\":\"teleport\"}" "{\"threads\":0}"
                              "{\"optimize\":1}" "{\"mode\":\"vectorized\",\"threads\":8,\"join\":\"merge\"}"))
-  ("UNSUPPORTED" "UNSUPPORTED" "INVALID_REQUEST" "INVALID_REQUEST" :ok))
+  ("UNSUPPORTED" "UNSUPPORTED" "UNSUPPORTED" "INVALID_REQUEST" :ok))
 
 ;;; Plans
 
