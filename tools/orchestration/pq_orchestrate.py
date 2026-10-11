@@ -76,7 +76,7 @@ WORKSPACE_PATHS = [
 
 
 # The engine-integration task builds the accepted kernel library (read-only for the agent).
-NATIVE_EXTRA_PATHS = ["native-kernels/Makefile", "native-kernels/reference-c", "native-kernels/x86_64",
+NATIVE_EXTRA_PATHS = ["native-kernels/Makefile", "native-kernels/include", "native-kernels/reference-c", "native-kernels/x86_64",
                       "native-kernels/arm64", "native-kernels/tests"]
 
 PHASE_TASKS = {"phase1", "phase2", "phase3", "phase4", "phase5"}
@@ -696,9 +696,13 @@ python3 tests/concurrency/http_suite.py --engine implementations/{lang}/bin/poly
                  "conformance-http.json", "http-suite.json"]
     if full and m["task"] != "phase5":
         lib = "native-kernels/build/x86_64/libpqkernels.so"
+        # Engines may silently fall back when the library cannot be loaded (phase-5.md), so a missing
+        # library must fail the native check instead of letting it pass without native kernels (HI-008).
         script += f"""if implementations/{lang}/bin/polyquery capabilities | grep -q native.kernels; then
+if [ ! -f {lib} ]; then echo "native_exit=3" >> validate-status; else
 python3 tests/conformance/runner.py --engine implementations/{lang}/bin/polyquery {phase_args} --include-hidden \
    --native {lib} --report conformance-native.json -q > validate-native.log 2>&1; echo "native_exit=$?" >> validate-status
+fi
 fi
 """
         extra.append("conformance-native.json")
@@ -926,6 +930,9 @@ def classify(m: dict, v: dict) -> str:
             ok = False
         elif isinstance(s, dict) and "failed" in s and s["failed"]:
             ok = False
+    # Fail closed: a native check that ran without a library would otherwise pass on the fallback path (HI-008).
+    if any(v["status"].get(k, "0") != "0" for k in ("native_lib_exit", "native_exit")):
+        ok = False
     rc = m.get("agent_exit_code")
     # A killed agent did not finish its task, even if what it had committed passes.
     if rc in (124, 137):
