@@ -1,0 +1,4 @@
+#!/bin/sh
+# PolyQuery launcher: execs the assembled engine binary.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$here/../build/polyquery" "$@"
