@@ -25,13 +25,13 @@ A capability is listed only if the engine claims it **and** its conformance repo
 | `index.btree` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
 | `phase4` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
 | `http.streaming` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
-| `phase5` | ✔ | ✔ | · | ✔ | ✔ | · |
-| `exec.row` | ✔ | ✔ | · | ✔ | ✔ | · |
-| `exec.vectorized` | ✔ | ✔ | · | ✔ | ✔ | · |
-| `exec.parallel` | ✔ | ✔ | · | ✔ | ✔ | · |
-| `join.hash` | ✔ | ✔ | · | ✔ | ✔ | · |
-| `join.merge` | ✔ | ✔ | · | ✔ | ✔ | · |
-| `join.nested_loop` | ✔ | ✔ | · | ✔ | ✔ | · |
+| `phase5` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `exec.row` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `exec.vectorized` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `exec.parallel` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `join.hash` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `join.merge` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `join.nested_loop` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
 | `native.kernels` | · | · | · | · | · | · |
 
 | phase passed (public suite) | java | clojure | rust | python | go | common-lisp |
@@ -40,4 +40,4 @@ A capability is listed only if the engine claims it **and** its conformance repo
 | phase 2 | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
 | phase 3 | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
 | phase 4 | – | – | – | – | – | – |
-| phase 5 | ✔ | ✔ | – | ✔ | ✔ | – |
+| phase 5 | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |

@@ -1,7 +1,7 @@
 {
  "schema": "polyquery-project-state/1",
- "updated": "2026-10-11T00:45:04+00:00",
- "current_milestone": "M7",
+ "updated": "2026-10-11T03:21:56+00:00",
+ "current_milestone": "M9",
  "milestones": {
   "M0": {
    "status": "complete",
@@ -32,8 +32,8 @@
    "evidence": "All 6 phase4 a1 runs pass 623/623 over session and HTTP transports (public+hidden) and the HTTP/concurrency suite 18/18 (validated with a negative control). Telemetry (USD list, turns, min): {\"java\": [5.12, 59, 16], \"go\": [4.24, 61, 14], \"clojure\": [3.97, 42, 14], \"python\": [3.95, 48, 14], \"rust\": [6.5, 88, 21], \"common-lisp\": [6.46, 78, 20]}"
   },
   "M7": {
-   "status": "in_progress",
-   "detail": "accepted: clojure, go, python, java (modes 3738/3738). running: common-lisp, rust"
+   "status": "complete",
+   "evidence": "All 6 phase5 a1 runs pass 623/623 (session+HTTP, public+hidden), HTTP suite 18/18, modes matrix 3738/3738. Quiet-host 1m benchmark results/performance/20261011T030826Z-1m-final-p5-all: all 20 queries ok on all engines, identical results; row-baseline vs vectorized geomean speedups go 14.8x, rust 121x, java 24x, clojure 17.5x, python 2.4x, common-lisp 2.5x. Telemetry (USD list, turns, min): {\"python\": [16.42, 158, 66], \"clojure\": [22.11, 195, 68], \"java\": [38.61, 270, 95], \"rust\": [35.13, 270, 83], \"common-lisp\": [47.31, 321, 145], \"go\": [24.05, 210, 93]}"
   },
   "M8": {
    "status": "complete",
@@ -47,12 +47,12 @@
   }
  },
  "outstanding_tasks": [
-  "Per finished run: tools/orchestration/accept.sh <run_id> <next-phase>; after phase 3 also `just test-interop` and `just test-crash <lang>`; after phase 4 `just test-http <lang>`",
-  "Run 1m benchmark on a quiet host (no agents running)",
-  "Resolve SPEC-Q-001 (INT64 vs DECIMAL comparison overflow) via change control after the current waves",
-  "Run http_suite against first Phase 4 engine",
-  "Native integration (M9), Track B, later experiment families",
-  "M9: kernel dispatch default should follow measured performance (on spark NEON beats SVE at VL=128 for 11/13 kernels)"
+  "M9: native kernel integration per engine (native.kernels capability, `native: true` option), dispatch policy from measured performance (NEON > SVE on spark at VL=128)",
+  "M10: clean-clone reproduction of one engine build + conformance + benchmark via documented commands; finalize docs/results narrative",
+  "Track B (ecosystem-optimized) runs",
+  "Later experiment families: write spec/changes/*.md when scheduled, then change-union-all, change-decimal38, refactor-plan-separation, debug-mutant (tools/orchestration/mutate.py), optimize-latency",
+  "Resolve SPEC-Q-001 (INT64 vs DECIMAL comparison overflow) via change control",
+  "10m-scale benchmark; fuzz/differential suites for all engines (just fuzz <lang>)"
  ],
  "known_defects": [
   "See experiments/telemetry/harness-incidents.jsonl (HI-001..003 fixed; SPEC-Q-001 open)"
@@ -75,9 +75,13 @@
   "kernels_arm64_native": "pass on spark (scalar, neon, sve; native + asan)",
   "kernels_x86_native": "pass (scalar, avx2, avx512)"
  },
- "last_successful_commit": "80e0187",
- "next_recommended_action": "Keep accepting finished runs with accept.sh (launching the next phase); when all engines reach phase 5, run 1m benchmarks on a quiet host and generate reports.",
+ "last_successful_commit": "dc87b97",
+ "next_recommended_action": "Run `just fuzz <lang>` for all six engines, then start M9 native integration (spec phases/native-kernels.md) or Track B, per experiment-design priority.",
  "findings": [
   "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) \u2014 report as engine quality finding; clojure p95 16 ms"
- ]
+ ],
+ "totals": {
+  "track_a_runs": 30,
+  "track_a_cost_usd_list": 446.91
+ }
 }

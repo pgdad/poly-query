@@ -13,6 +13,7 @@ rust,phase1,1,success,14.525043400000001,208167,20697616,103,6351.8,120,1,4,3,4,
 rust,phase2,1,success,10.743264000000003,173675,22053261,93,1540.2,92,2,2,5,3,4838,experiments/runs/a-phase2-rust-a1-20261010T201523Z/manifest.json
 rust,phase3,1,success,8.645523000000003,141755,17247800,91,1409.8,90,0,6,3,3,3889,experiments/runs/a-phase3-rust-a1-20261010T204115Z/manifest.json
 rust,phase4,1,success,6.4989698,110122,12767205,88,1283.3,87,1,4,2,5,2647,experiments/runs/a-phase4-rust-a1-20261010T224055Z/manifest.json
+rust,phase5,1,success,35.131324400000004,405290,109783226,270,4988.0,269,1,10,26,32,9413,experiments/runs/a-phase5-rust-a1-20261011T004454Z/manifest.json
 python,phase1,1,success,15.281845200000001,203773,23000264,119,2242.9,160,4,2,9,8,5525,experiments/runs/a-phase1-python-a1-20261010T182855Z/manifest.json
 python,phase2,1,success,13.434732200000001,150151,17987476,89,4137.4,134,3,3,7,5,3032,experiments/runs/a-phase2-python-a1-20261010T190707Z/manifest.json
 python,phase3,1,success,8.587422,139816,17854522,94,1310.1,93,1,4,6,6,2682,experiments/runs/a-phase3-python-a1-20261010T201612Z/manifest.json
@@ -27,5 +28,6 @@ common-lisp,phase1,1,success,16.7564782,181636,21813953,114,4962.1,174,3,8,5,5,4
 common-lisp,phase2,1,success,18.151204200000006,204235,29373803,117,4603.0,164,0,2,11,8,2765,experiments/runs/a-phase2-common-lisp-a1-20261010T195221Z/manifest.json
 common-lisp,phase3,1,success,11.952766000000002,168859,29494228,132,1892.7,131,1,2,7,5,2807,experiments/runs/a-phase3-common-lisp-a1-20261010T210913Z/manifest.json
 common-lisp,phase4,1,success,6.461978200000001,120599,11407204,78,1214.0,77,4,1,6,5,1891,experiments/runs/a-phase4-common-lisp-a1-20261010T224856Z/manifest.json
+common-lisp,phase5,1,success,47.31045240000007,413439,142868156,321,8713.7,381,8,2,39,29,5211,experiments/runs/a-phase5-common-lisp-a1-20261011T004241Z/manifest.json
 x86_64-asm,kernels,1,success,11.984526399999998,274268,18839166,83,2468.0,82,2,3,0,11,5290,experiments/runs/a-kernels-x86_64-asm-a1-20261010T184025Z/manifest.json
 arm64-asm,kernels,1,success,4.7987362,137298,3339378,26,1698.6,25,0,0,0,4,2803,experiments/runs/a-kernels-arm64-asm-a1-20261010T184024Z/manifest.json
