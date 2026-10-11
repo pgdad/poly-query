@@ -1,5 +1,5 @@
 {
- "seconds": 32.4,
+ "seconds": 31.3,
  "status": {
   "native_lib_exit": "0",
   "build_exit": "0",
@@ -186,7 +186,7 @@
    }
   }
  },
- "outcome": "success",
- "validated_at": "2026-10-11T08:05:56+00:00",
- "harness_commit": "1583aa8"
+ "outcome": "timeout",
+ "validated_at": "2026-10-11T08:07:57+00:00",
+ "harness_commit": "afdf3da"
 }
