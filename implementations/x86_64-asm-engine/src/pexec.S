@@ -2019,3 +2019,184 @@ FUNC pexec_join_keys
 9:  mov %r15, %rax
     LEAVE
 ENDF pexec_join_keys
+
+/* ================================================================ nested loop */
+
+/* nl_part(task rdi, part rsi, lo rdx, hi rcx): every pair of the left
+ * tuples [lo, hi) (PT_A) with all right tuples (PT_B), in left-major order;
+ * ON evaluated per chunk of VB pairs; LEFT JOIN padding */
+FUNC nl_part
+    ENTER 160
+    mov %rdi, %rbx
+    mov %rsi, 64(%rsp)
+    mov %rdx, %r14                  /* left tuple */
+    mov %rcx, 72(%rsp)
+    mov PT_FP(%rbx), %r12
+    mov PT_XS(%rbx), %r13
+    lea 0(%rsp), %rdi
+    mov %r13, %rsi
+    call wctx_init
+    mov XS_W(%r13), %r15
+    shl $3, %r15                    /* tuple bytes */
+    mov XS_W(%r13), %rdi
+    mov $16, %esi
+    call ts_new
+    mov %rax, 80(%rsp)              /* out */
+    mov XS_W(%r13), %rdi
+    mov $VB, %esi
+    call ts_new
+    mov %rax, 88(%rsp)              /* candidate pairs */
+    mov $VB, %edi
+    call tmp_alloc
+    mov %rax, 96(%rsp)              /* flags */
+1:  cmp 72(%rsp), %r14
+    jae 90f
+    call check_deadline
+    movq $0, 104(%rsp)              /* matched */
+    movq $0, 112(%rsp)              /* right chunk start */
+    mov PT_A(%rbx), %rax
+    mov %r14, %rcx
+    imul %r15, %rcx
+    add TS_DATA(%rax), %rcx
+    mov %rcx, 120(%rsp)             /* left tuple */
+2:  mov PT_B(%rbx), %rax
+    mov 112(%rsp), %rcx
+    cmp TS_N(%rax), %rcx
+    jae 6f
+    mov TS_N(%rax), %rdx
+    sub %rcx, %rdx
+    cmp $VB, %rdx
+    jbe 21f
+    mov $VB, %edx
+21: mov %rdx, 128(%rsp)             /* chunk size */
+    mov 88(%rsp), %rax
+    movq $0, TS_N(%rax)
+    movq $0, 136(%rsp)
+3:  mov 136(%rsp), %rcx             /* candidates */
+    cmp 128(%rsp), %rcx
+    jae 4f
+    mov 88(%rsp), %rdi
+    call ts_slot
+    mov %rax, %rdi
+    mov 120(%rsp), %rsi
+    mov PT_B(%rbx), %rdx
+    mov 112(%rsp), %rcx
+    add 136(%rsp), %rcx
+    imul %r15, %rcx
+    add TS_DATA(%rdx), %rcx
+    mov %rcx, %rdx
+    mov %r12, %rcx
+    mov XS_W(%r13), %r8
+    call tuple_combine
+    incq 136(%rsp)
+    jmp 3b
+4:  cmpq $0, FP_ON(%r12)
+    jne 41f
+    mov 96(%rsp), %rdi              /* no condition: every pair */
+    mov $1, %esi
+    mov 128(%rsp), %rdx
+    call memset
+    jmp 42f
+41: lea 0(%rsp), %rdi
+    mov FP_ON(%r12), %rsi
+    mov 88(%rsp), %rdx
+    mov TS_DATA(%rdx), %rdx
+    mov 128(%rsp), %rcx
+    mov XS_W(%r13), %r8
+    mov 96(%rsp), %r9
+    call k_pred
+42: movq $0, 136(%rsp)              /* emit the matching pairs in order */
+5:  mov 136(%rsp), %rcx
+    cmp 128(%rsp), %rcx
+    jae 51f
+    mov 96(%rsp), %rax
+    cmpb $0, (%rax, %rcx)
+    je 50f
+    movq $1, 104(%rsp)
+    mov 88(%rsp), %rax
+    mov TS_DATA(%rax), %rsi
+    imul %r15, %rcx
+    add %rcx, %rsi
+    mov 80(%rsp), %rdi
+    mov $1, %edx
+    call ts_append
+50: incq 136(%rsp)
+    jmp 5b
+51: mov 80(%rsp), %rdi
+    call check_join_rows
+    mov 128(%rsp), %rax
+    add %rax, 112(%rsp)
+    jmp 2b
+6:  cmpq $JT_LEFT, FP_JTYPE(%r12)   /* unmatched left tuple: NULL-padded */
+    jne 7f
+    cmpq $0, 104(%rsp)
+    jne 7f
+    mov 80(%rsp), %rdi
+    call ts_slot
+    mov %rax, %rdi
+    mov 120(%rsp), %rsi
+    xor %edx, %edx
+    mov %r12, %rcx
+    mov XS_W(%r13), %r8
+    call tuple_combine
+    mov 80(%rsp), %rdi
+    call check_join_rows
+7:  inc %r14
+    jmp 1b
+90: mov 64(%rsp), %rcx
+    mov 80(%rsp), %rax
+    mov %rax, PT_OUT(%rbx, %rcx, 8)
+    LEAVE
+ENDF nl_part
+
+/* pexec_nl(xs rdi, fp rsi, L rdx, R rcx) -> rax joined TupleSet: nested-loop
+ * join in parallel parts over the left input */
+FUNC pexec_nl
+    ENTER 16
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %rdx, %r14
+    mov %rcx, %r15
+    call pexec_threads
+    mov $PT_SIZE, %edi
+    call tmp_zalloc
+    mov %rax, %r13
+    mov %rbx, PT_XS(%r13)
+    mov %r12, PT_FP(%r13)
+    mov %r14, PT_A(%r13)
+    mov %r15, PT_B(%r13)
+    mov TS_N(%r14), %rax            /* parts sized by pairs, at most one */
+    mov TS_N(%r15), %rcx            /* per left tuple */
+    inc %rcx
+    mul %rcx
+    jno 1f
+    mov $0x7fffffffffffffff, %rax
+1:  mov %rax, %rdi
+    call par_parts
+    mov TS_N(%r14), %rdi
+    cmp %rdi, %rax
+    cmova %rdi, %rax
+    mov $1, %ecx
+    test %rax, %rax
+    cmovz %rcx, %rax
+    mov %rax, %rsi
+    lea nl_part(%rip), %rdx
+    mov %r13, %rcx
+    call par_run
+    mov %rax, %r14
+    mov PT_OUT(%r13), %r15
+    mov $1, %ebx
+2:  cmp %r14, %rbx
+    jae 9f
+    mov PT_OUT(%r13, %rbx, 8), %rax
+    mov %r15, %rdi
+    mov TS_DATA(%rax), %rsi
+    mov TS_N(%rax), %rdx
+    call ts_append
+    mov %r15, %rdi
+    call check_join_rows
+    inc %rbx
+    jmp 2b
+9:  mov %r15, %rax
+    LEAVE
+ENDF pexec_nl

@@ -363,7 +363,8 @@ also passes with `PQ_PAR_MIN=1`.
   thread (subquery results are cached in the shared AST).
 * Parallel operators: full scans with pushed-down filters (honouring
   row-group skipping), WHERE, projection (with per-part top-N), hash-join
-  probe (build is serial), aggregation. Aggregation without GROUP BY merges
+  probe (build is serial), nested-loop join, merge-join key evaluation,
+  aggregation. Aggregation without GROUP BY merges
   per-part partial states in part order (exact for INT64 / DECIMAL).
   GROUP BY is **hash-partitioned**: phase 1 computes key cells and hashes in
   parallel; in phase 2 part p owns the groups whose hash falls into
@@ -387,7 +388,9 @@ also passes with `PQ_PAR_MIN=1`.
   per-left-tuple ranges of equal right keys; emission in left input order
   (LEFT JOIN supported); the ON re-check is skipped when ON is just the key
   equality.
-* **Nested loop**: every pair, full ON predicate.
+* **Nested loop**: every pair, full ON predicate; in the batch modes the
+  left input is split into parallel parts and ON is evaluated as a vector
+  over chunks of 1024 candidate pairs.
 
 ### Logical optimizer (`optimizer.S`, `optimize: true`)
 
@@ -453,7 +456,9 @@ join 152 ms before its optimizations (comparison sort, per-pair ON
 re-check) and 58 ms / 42 ms / 42 ms after them (radix sort of
 integer-like keys, vectorized key evaluation, no ON re-check when ON is just
 the key equality); joining 2,000 × 2,000 filtered rows (scans of both
-tables included): hash 9.4 ms, merge 9.5 ms, nested loop 50 ms.
+tables included): hash 9.4 ms, merge 9.5 ms, nested loop 49 ms (row) /
+21 ms (vectorized) / 6 ms (4 threads) / 2 ms (16 threads; parts sized by
+the number of pairs).
 
 ## Implementation-defined choices
 
@@ -517,9 +522,10 @@ tables included): hash 9.4 ms, merge 9.5 ms, nested loop 50 ms.
   first use.
 * Join reordering is not implemented: joins run in the order written (the
   hash join picks its build side by estimated cardinality). Merge joins sort
-  both inputs (index order is not reused); nested-loop and merge joins, hash
-  builds, DISTINCT aggregates without GROUP BY, DISTINCT, derived tables /
-  CTEs and the final sort run single-threaded (top-N heaps are per part).
+  both inputs (index order is not reused); the merge join's sort and merge,
+  hash builds, DISTINCT aggregates without GROUP BY, DISTINCT, derived
+  tables / CTEs and the final sort run single-threaded (top-N heaps are per
+  part).
 * Blocks whose expressions contain subqueries run their operators on one
   thread (subquery results are cached in the shared plan). The `native`
   option is accepted and ignored (`native.kernels` is not claimed).

@@ -349,7 +349,18 @@ FUNC exec_from
     mov %r13, %r8
     call exec_merge_join
     jmp 90f
-101:
+101: mov %rbx, %rdi                  /* nested loop: batch / parallel */
+    call pexec_enabled
+    test %eax, %eax
+    jz 102f
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    mov 0(%rsp), %rdx
+    mov 8(%rsp), %rcx
+    call pexec_nl
+    mov %rax, %r13
+    jmp 90f
+102:
 
     /* ---- nested loop join */
     xor %r14d, %r14d                /* i */
