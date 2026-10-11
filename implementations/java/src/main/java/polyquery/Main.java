@@ -123,12 +123,17 @@ public final class Main {
     private static NativeKernels loadNativeKernels(String path, Logger log) {
         try {
             NativeKernels kernels = NativeKernels.load(Path.of(path));
-            log.log(Logger.Level.INFO, "native kernels loaded", Map.of("path", path, "variant", kernels.variant(),
-                    "available", kernels.availableVariants()));
+            Map<String, Object> fields = new LinkedHashMap<>();
+            fields.put("path", path);
+            fields.put("variant", kernels.variant());
+            fields.put("available", kernels.availableVariants());
+            log.log(Logger.Level.INFO, "native kernels loaded", fields);
             return kernels;
         } catch (NativeLoadException | java.nio.file.InvalidPathException e) {
-            log.log(Logger.Level.WARN, "native kernels unavailable; using the engine's own code paths",
-                    Map.of("path", path, "error", String.valueOf(e.getMessage())));
+            Map<String, Object> fields = new LinkedHashMap<>();
+            fields.put("path", path);
+            fields.put("error", String.valueOf(e.getMessage()));
+            log.log(Logger.Level.WARN, "native kernels unavailable; using the engine's own code paths", fields);
             return null;
         }
     }
