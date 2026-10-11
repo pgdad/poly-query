@@ -330,3 +330,21 @@ def make_state(call: b.AggCall) -> GroupState:
     if is_float:
         return FloatSumState(average=True)
     return SumState("avg", arg_type.scale if arg_type.kind is TypeKind.DECIMAL else 0)
+
+
+def merge_partials(partials: list[tuple[list[Any], list[GroupState]]]) -> tuple[list[Any], list[GroupState]]:
+    """Merges partial aggregation states in partition order (groups keep the
+    order of their first appearance in a serial scan)."""
+    keys, states = partials[0]
+    if len(partials) == 1:
+        return keys, states
+    index = dict(zip(keys, range(len(keys))))
+    for part_keys, part_states in partials[1:]:
+        before = len(index)
+        mapping = [index.setdefault(key, len(index)) for key in part_keys]
+        if len(index) > before:
+            for state in states:
+                state.grow(len(index) - before)
+        for state, other in zip(states, part_states):
+            state.merge(other, mapping)
+    return list(index), states

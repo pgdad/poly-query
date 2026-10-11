@@ -14,12 +14,17 @@ Capabilities reported: `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`,
 `sql.functions`, `sql.subquery`, `sql.cte`, `sql.correlated_subquery`,
 `phase3`, `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`,
 `phase4`, `http.streaming`, `phase5`, `exec.row`, `exec.vectorized`,
-`exec.parallel`, `join.hash`, `join.merge`, `join.nested_loop`
-(`native.kernels` is not claimed, see Phase 5 below).
+`exec.parallel`, `join.hash`, `join.merge`, `join.nested_loop`,
+`native.kernels` (M9: the native kernel library `libpqkernels` is used
+through `ctypes` when loaded, see *Native kernels* below).
 
 ## Build prerequisites
 
 * CPython 3.14 (`python3` on `PATH`). No other dependencies.
+* Optional: the native kernel library, built with `make -C native-kernels`
+  (`native-kernels/build/x86_64/libpqkernels.so`) and passed with
+  `--native-kernels PATH`. It is loaded with the standard library's `ctypes`;
+  the engine works identically without it.
 * **Libraries:** none. Only the Python standard library is used
   (`json`, `csv`, `decimal`-free integer arithmetic, `datetime`, `argparse`,
   `array`, `mmap`, `zlib` (CRC-32), `struct`, `bisect`, `unittest`, …).
@@ -37,6 +42,8 @@ bin/polyquery serve --port N [--workers N --queue-depth Q --query-timeout-ms T .
 bin/polyquery version | capabilities
 python3 tools/bench.py --data DIR       # Phase 5 benchmarks over pqgen.py datasets
 python3 tools/difftest.py --seed N      # random queries under the whole option matrix
+python3 tools/native_difftest.py --lib LIB   # native: true vs false on random queries
+python3 tools/native_bench.py --lib LIB      # kernel micro-benchmarks vs the CPython code
 ```
 
 Engine-specific flag: `--parallel-min-rows N` (default 200,000): parallel
@@ -56,12 +63,14 @@ logical plan → optimizer → physical plan → execution**.
 | Package | Responsibility |
 |---|---|
 | `polyquery/datatypes.py`, `values.py`, `names.py` | SQL types, runtime value representation, exact decimal / date / timestamp helpers, ASCII identifier folding |
+| `polyquery/native/` | `kernels.py`: `ctypes` binding of the `libpqkernels` C ABI (signatures, ABI check, zero-copy buffer addresses, loading with fallback) |
 | `polyquery/storage/` | `table.py` (immutable `RowTable` / `ColumnTable` with row groups, lazily computed column statistics), `vectors.py` (typed column vectors, null bitmaps, dictionary encoding), `indexes.py` (hash and ordered indexes), `catalog.py` (tables + globally named indexes), `pqcf.py` (PQCF v1 writer with atomic replace, validating reader, lazy memory-mapped decoding) |
 | `polyquery/ingest/` | CSV (stdlib `csv` reader in `QUOTE_NOTNULL` mode to distinguish `""` from empty) and JSON/JSONL ingestion, type inference, explicit-schema conversion, ingestion limits |
 | `polyquery/sql/` | `lexer.py` (tokens with line/column), `parser.py` (recursive descent, complete v1 grammar), `ast.py` |
 | `polyquery/analysis/` | `binder.py` (name resolution, CTE/derived-table/subquery binding, aggregate extraction, GROUP BY validation, ORDER BY resolution), `scope.py` (range variables, correlation tracking, CTE environments), `typing_rules.py` (promotion lattice, CAST matrix, CASE/IN/BETWEEN/LIKE typing), `functions.py` (function signatures & result types), `bound.py` (bound expression / query model) |
 | `polyquery/planner/` | `planner.py` (bound query → logical plan), `logical.py` (Scan, Values, SubqueryScan, Filter, Join, Aggregate, Project, Distinct, Sort, Limit), `optimizer.py` (expression rewrites, predicate pushdown, join-condition extraction, column pruning), `rewrite.py` (constant folding, predicate simplification), `physical.py` (algorithm and access-path choice: TableScan, IndexScan, LookupScan, HashJoin, MergeJoin, NestedLoopJoin, HashAggregate, TopN, Gather, … with cardinality estimates, join reordering, parallel pipelines, and the EXPLAIN JSON), `access.py` (index-usable predicates, selectivity estimation, index selection, row-group skipping), `explain.py` (expression rendering) |
 | `polyquery/execution/` | `compiler.py` (bound expression → row closure, incl. subquery evaluation), `vcompiler.py` (bound expression → vector function over column batches), `row_engine.py` (row-at-a-time Volcano operators, `mode:"row"`), `vector_engine.py` (column-batch operators, `mode:"vectorized"`/`auto`), `parallel.py` (partitioned execution of `Gather` pipelines, in-process or in forked workers), `common.py` (algorithms shared by both engines: merge pairing, sort orders, join limits, LookupScan tables), `group_states.py` (columnar aggregation state of the vectorized engine), `aggregates.py` (accumulators of the row engine), `functions.py` (scalar function kernels), `casts.py`, `executor.py` (mode dispatch, result streaming), `context.py` (timeout / cancellation / memory budget / join-row limit, correlation parameters, per-statement caches, GC pausing) |
+| `polyquery/execution/native_ops.py` | Execution paths that use the kernels (`native: true`): scan filtering, gathers, scan aggregation, group sums, hash partitioning |
 | `polyquery/service.py` | `Engine` facade: owns the catalog, runs `load`, SQL and `explain` |
 | `polyquery/protocol/` | Transport-independent request handler (validation, path safety, responses, streaming cursor), JSON-lines session loop, exec mode, canonical value serialization |
 | `polyquery/server/` | `serve` mode: `http.py` (HTTP/1.1 routing, bodies, JSON / NDJSON responses, query lifecycle), `queries.py` (query registry + admission control), `watcher.py` (client-disconnect detection), `metrics.py` (Prometheus text), `app.py` (server lifecycle, signals, graceful shutdown) |
@@ -369,10 +378,8 @@ homogeneous values (`map(operator.add, a, b)`, `compress`, `sum`,
 `min`/`max`), which is the closest CPython equivalent. Explicit SIMD would
 need the optional native kernels.
 
-**`native: true`** is accepted (boolean, else `INVALID_REQUEST`) and has
-no effect: no native kernel library is built or loaded (`--native-kernels`
-is accepted and ignored), so `native.kernels` is not claimed. That is
-allowed, since native kernels are optional (native-kernels.md).
+**`native: true`** (boolean, else `INVALID_REQUEST`) runs the operators
+that the kernel library supports with it, see *Native kernels* below.
 
 **Verification.** `tools/difftest.py` generates random queries (joins of
 all kinds, grouping, DISTINCT, ORDER BY/LIMIT/OFFSET, IN/EXISTS/scalar/
@@ -460,6 +467,228 @@ python3 tools/bench.py --data /tmp/pqdata/1m --repeat 5 \
     --variant row --variant vectorized --variant vec4 --variant '{"mode":"vectorized","threads":8}'
 python3 tools/bench.py --data /tmp/pqdata/1m --repeat 5 --variant auto --engine <phase-4 checkout>/bin/polyquery
 ```
+
+### Native kernels (M9)
+
+`--native-kernels PATH` loads `libpqkernels` (built with
+`make -C native-kernels`); queries with `native: true` then use it for the
+operations below. Results are identical with and without it — same rows,
+same row order, same errors — and without the library (or with
+`native: false`) the engine runs exactly its Phase 5 code.
+
+**FFI design** (`polyquery/native/kernels.py`).
+* The library is opened with `ctypes.CDLL`. `argtypes`/`restype` are
+  declared for all 21 functions of the ABI (`pq_kernels.h`). The ABI version
+  is checked, then `pqk_init()` picks the CPU variant (honouring
+  `PQ_KERNELS_VARIANT`). The variant is logged at `info`. A missing or
+  incompatible library is a `warn` log line, never a startup failure: the
+  engine continues without it. `native.kernels` is claimed statically
+  (`capabilities` runs without options).
+* **Zero copy.** The column storage already has the ABI's layout:
+  INT64 / DECIMAL (unscaled) / TIMESTAMP values are `array('q')`, FLOAT64
+  `array('d')`, and validity bitmaps are LSB-first with 1 = non-NULL (the PQCF
+  convention). The binding passes `buffer_info()` addresses of arrays and the
+  buffer address of `bytes` bitmaps, plus offsets for the window being
+  processed. Nothing is converted per query. DATE values (`array('i')`) and
+  dictionary codes (`array('I')`) get a widened int64 copy, made once and
+  cached on the immutable vector (`ColumnVector.int64_view`).
+* Kernel status codes are honoured exactly. A `(size_t)-1` / `PQK_EINVAL`
+  return is a `NativeKernelError` (a caller bug, never expected).
+  `PQK_OVERFLOW` from `pqk_sum_i64` makes the engine recompute that sum with
+  Python integers. `PQK_OVERFLOW` from `pqk_group_sum_i64` (a conservative
+  "may have wrapped") makes the operator rerun in the engine's own exact code
+  (`NativeFallback`). So an overflowing SUM still raises `NUMERIC_OVERFLOW`,
+  and a sum whose partial results overflow but whose total fits is still
+  returned.
+* `ctypes` releases the GIL during a call, and the kernels are thread-safe
+  and allocation-free. HTTP worker threads share one binding, and forked
+  parallel workers inherit it. Shared scratch buffers (zeros, hash masks)
+  are only ever replaced, never mutated, and every caller holds the buffer
+  it got for the duration of the call.
+* Physical plans and `EXPLAIN` are unchanged. `ExecutionContext.native` is
+  set when the query has `native: true` and the library is loaded. Each
+  operator then decides at run time, from the actual storage, whether a
+  kernel applies.
+
+**Where kernels are used** (`polyquery/execution/native_ops.py`; both
+`mode: row` and `mode: vectorized`, since the paths sit at the scan):
+
+| situation | kernels | what the engine still does |
+|---|---|---|
+| Filter on a TableScan (column layout): conjuncts `col op constant` (`=`, `<>`, `<`, `<=`, `>`, `>=`, `BETWEEN`, `IN`) on INT64 / DECIMAL / DATE / TIMESTAMP columns | `pqk_filter_i64_bitmap` (constants normalised to closed int64 intervals: EQ / NE / LE / GE / BETWEEN), `pqk_bitmap_or` for IN lists, `pqk_bitmap_and` to combine conjuncts, `pqk_bitmap_popcount` | converts constants exactly to the column's representation (same rules as index selection; inexact ones such as `int_col = 1.5` stay with the engine) |
+| … on dictionary-encoded STRING columns | `pqk_filter_i64_bitmap` on the codes (the predicate evaluated once per dictionary entry gives code ranges), `pqk_bitmap_andnot` when the complement has fewer ranges | > 32 scattered ranges: one Python pass over the window |
+| `col op col` on two columns of the same integer-represented type | `pqk_compare_i64`, `pqk_bitmap_and` with both validities | |
+| the selected rows | `pqk_filter_i64` turns a bitmap into positions (an always-true predicate over a zero buffer with the bitmap as validity); `pqk_gather_i64` fetches 8-byte values (INT64, DECIMAL, TIMESTAMP, FLOAT64, widened DATE / dictionary codes); `pqk_bitmap_andnot` + popcount find selected NULLs | turns only the selected values into Python objects; evaluates the remaining conjuncts on them |
+| aggregation without GROUP BY over a (filtered) scan, arguments are columns | popcount (COUNT), `pqk_sum_i64` (SUM/AVG of INT64/DECIMAL), `pqk_minmax_i64` (INT64/DECIMAL/DATE/TIMESTAMP), `pqk_minmax_f64` (FLOAT64), `pqk_count_i64` (`COUNT(*)` with a single comparison), the selection bitmap ∧ validity as validity | float SUM/AVG (`math.fsum`), MIN/MAX of strings, DISTINCT aggregates over gathered values |
+| GROUP BY one low-cardinality (≤ 64 estimated groups) STRING column directly over a scan | per dictionary code `pqk_filter_i64_bitmap` (code = c) ∧ selection gives the group's bitmap; then the kernels of the previous row per group | orders groups by first row |
+| other GROUP BY columns directly over a scan, with COUNT / integer SUM / AVG | `pqk_group_sum_i64` reading the value columns straight from storage (or natively gathered when filtered) | maps keys to dense group ids with dict lookups |
+| … with `threads` > 1, ≥ `--parallel-min-rows` rows and one integer key | `pqk_hash_i64`, `pqk_bitmap_and` (mask to the low 16 bits), `pqk_filter_i64_bitmap` (BETWEEN: the worker's share of the hash range): **hash-partitioned** aggregation | merges the workers' disjoint groups by concatenation, ordered by first row |
+| vectorized hash aggregation over any other input (joins, expressions) | `pqk_group_sum_i64` on buffered (group id, value) pairs, folded every 1M rows | everything else |
+
+Not used: `pqk_sum_f64` (its reassociated sum may differ from the
+engine's exactly rounded `fsum` in the last bit, and results must be
+identical) and `pqk_compare_fixed` (the engine has no fixed-width binary
+columns; strings are variable-length `str`). Joins, sorts, DISTINCT and
+expression evaluation have no matching kernel. They profit only from
+natively filtered inputs below them.
+
+**Exactness rules.**
+* *Overflow:* see the FFI design notes above.
+* *Float MIN/MAX* results equal to zero are recomputed in Python: `0.0`
+  and `-0.0` compare equal, and the engine returns the first one seen.
+* *NULLs and errors.* Conjuncts are only evaluated natively if they come
+  before the first conjunct that may raise an error (`may_fail`: arithmetic,
+  casts, functions, subqueries). If such a conjunct exists, the native
+  conjuncts keep rows where they are NULL ("not FALSE"), and the engine
+  evaluates the whole original predicate on the remaining rows. So an error
+  is raised for exactly the rows on which the engine's own left-to-right AND
+  would raise it.
+* *Storage errors.* Native scans load every scanned column of each row group,
+  like the engine's scan. A corrupt chunk of a memory-mapped file therefore
+  fails the query (`STORAGE_CORRUPT`) even when the kernels select no row of
+  that group.
+* *Order and accounting.* Rows come out in scan order. Groups are numbered by
+  their first row, also across hash partitions. Memory accounting of groups
+  matches the engine's.
+
+**Parallelism.** Native scan aggregations run serially in the calling
+process: they leave so little per-row work that forking workers costs more
+than the whole scan. The exception is the hash-partitioned high-cardinality
+case above. For pipelines whose scan is filtered natively, the
+fork-or-not decision (`--parallel-min-rows`) uses the estimated number of
+*selected* rows, because only those become Python objects.
+
+**Verification.**
+* `tests/test_native.py`: binding against Python reference computations
+  (including `fmix64`, overflow flags and invalid ops); native vs. engine on
+  CSV, PQCF (odd row groups, mmap) and row-layout tables in row, vectorized,
+  partitioned and forked modes; overflow, `-0.0`, NULL / error parity,
+  corrupt chunks; fallback without the library.
+* `tools/native_difftest.py`: random filters and aggregations over 40k–150k-row
+  tables spanning several kernel windows (CSV plus PQCF with 777- to
+  65,536-row groups and forced PLAIN / DICT / RLE encodings). Each query is
+  compared, rows *in order*, with and without `native` in 4 option sets plus
+  forked workers. More than 2,500 queries, including 250 under each of the
+  `reference`, `x86_scalar`, `x86_avx2` and `x86_avx512` variants, gave
+  no mismatch.
+* `tools/bench.py --check` verifies that all variants of every benchmark
+  query return the same rows.
+* The conformance runner with `--native` (and `--native --modes`, and
+  `--native --transport http`) passes 100%.
+
+#### Measurements (M9)
+
+Same setup as the Phase 5 measurements: the `pqgen.py --scale 1m` datasets,
+CSV loaded into the column layout, CPython 3.14 on the shared 32-core
+x86-64 machine (AVX-512 available, so `pqk_init` picks `x86_avx512`).
+There is about ±20% noise between runs. Times are medians of 5 runs of
+`tools/bench.py` in ms, wall clock per `query` request with
+`result: "count"`. *Before* is the accepted Phase 5 engine (baseline commit
+`8f5d63f`, run from a separate worktree). The other columns are this
+engine with `native: false` / `native: true`. `--check` confirmed that all
+six variants of this engine return the same rows for every query.
+
+| query | what | before: row | before: vect. | before: 4 thr | row | **row native** | vect. | **vect. native** | 4 thr | **4 thr native** |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Q1 | `COUNT(*)` with 2-predicate filter | 130 | 95 | 52 | 175 | **<1** | 104 | **<1** | 63 | **<1** |
+| Q2 | GROUP BY category (8 groups), 5 aggregates | 417 | 214 | 89 | 483 | **8** | 232 | **8** | 104 | **9** |
+| Q3 | GROUP BY customer_id (100k groups) | 353 | 190 | 179 | 476 | **115** | 215 | **83** | 160 | **103** |
+| Q4 | 1M ⋈ 100k hash join + GROUP BY | 583 | 259 | 143 | 564 | **619** | 291 | **253** | 164 | **173** |
+| Q5 | filter + `ORDER BY … LIMIT 10` | 177 | 122 | 98 | 234 | **44** | 131 | **34** | 103 | **35** |
+| Q6 | 3-way join + filter + GROUP BY | 532 | 261 | 182 | 704 | **589** | 284 | **287** | 189 | **181** |
+| Q7 | `SUM(amount * 2 + fee)` with filter | 327 | 179 | 78 | 372 | **222** | 192 | **103** | 115 | **81** |
+| Q8 | full sort of 1M rows on 2 keys | 1049 | 703 | 702 | 1037 | **919** | 769 | **834** | 834 | **821** |
+| Q9 | non-selective filter returning 946k rows | 297 | 188 | 188 | 317 | **170** | 150 | **123** | 152 | **146** |
+| Q10 | selective filter returning 15k rows | 242 | 151 | 82 | 182 | **3** | 128 | **2** | 106 | **2** |
+| J1 | same as Q4 | 629 | 268 | 143 | 603 | **616** | 273 | **233** | 159 | **157** |
+| J2 | 8k-row filter on 1M items ⋈ products | 204 | 81 | 88 | 158 | **5** | 72 | **3** | 72 | **3** |
+| R1 | comma join + GROUP BY | 584 | 256 | 148 | 681 | **849** | 223 | **243** | 155 | **130** |
+| J3 | LEFT join + GROUP BY | 395 | 377 | 410 | 371 | **218** | 230 | **144** | 220 | **132** |
+
+("<1": below 0.5 ms.) The effects follow from where the kernels apply:
+
+* **Selective filters over scans** (Q1, Q5, Q10, J2) gain 4× (Q5) to
+  over 100× (Q1). The
+  predicate runs over the stored arrays, and only the selected rows are
+  turned into Python values. The engine's own path decodes every row of
+  every referenced column and evaluates the predicate in Python, so the
+  cost now scales with the *output* instead of the input. Q1 needs no
+  Python values at all (`COUNT(*)` is a popcount).
+* **Aggregation directly over a scan** (Q2: 232 → 8 ms; Q3: 215 → 83 ms).
+  Q2 groups by an 8-entry dictionary: per code one bitmap, then one
+  `pqk_sum_i64` / `pqk_minmax_i64` call per group and aggregate. Q3
+  (100k groups) still maps every key with a dict lookup, but the sums come
+  from `pqk_group_sum_i64` over the stored `amount` array. With 4–8
+  threads, hash partitioning keeps the parent's merge a concatenation
+  (Q3 at 8 threads: 53 ms in a quieter run, against 80 ms serial).
+* **Filters followed by Python work** (Q7, Q9) gain less (1.2–1.9×): the
+  arithmetic over the selected rows (Q7) or the materialization of 946k
+  result rows (Q9) is still the engine's.
+* **Joins and sorts** (Q4, Q6, J1, R1, J3, Q8) have no matching kernel.
+  Their filtered inputs and the group sums above them gain a little; the
+  rest is unchanged, within noise. For example, R1 in row mode took 681 vs
+  849 ms in this run, but 365 vs 330 ms in a 9-run re-measurement. J3
+  profits from the LEFT join input `quantity > 8` being filtered natively.
+* **Parallel workers.** The native paths remove most per-row work, so
+  forking rarely pays off any more. Native scan aggregations always run in
+  the calling process. For natively filtered pipelines, the fork decision
+  counts a selected row as half a scanned row (`NATIVE_ROW_COST`). With
+  that, Q7 still forks (81 ms), while Q5 / Q10 stay serial (forked they
+  took 92 / 68 ms against 35 / 2 ms serial).
+
+Kernel micro-benchmarks, from the engine's point of view
+(`tools/native_bench.py`: 1M int64 values, one kernel call through
+`ctypes` against the CPython code the engine runs without it; median ms):
+
+| operation | kernel(s) | CPython | native | speedup |
+|---|---|---:|---:|---:|
+| filter `x > 900000` → values (10%) | `filter_i64_bitmap + filter_i64 + gather_i64` | 10.87 | 0.90 | 12× |
+| count `x BETWEEN …` | `count_i64` | 22.48 | 0.11 | 205× |
+| SUM | `sum_i64` | 2.59 | 0.10 | 27× |
+| MIN + MAX | `minmax_i64` | 10.16 | 0.10 | 103× |
+| popcount of a selection | `bitmap_popcount` | 0.05 | 0.00 | 35× |
+| SUM + COUNT by 1024 groups | `group_sum_i64` | 43.29 | 0.41 | 105× |
+| hash (fmix64) | `hash_i64` | 150.40 | 0.53 | 283× |
+| column < column | `compare_i64` | 11.26 | 0.17 | 67× |
+| gather 10% of the rows | `gather_i64` | 2.20 | 0.69 | 3× |
+
+With `--variant x86_scalar` the speedups are about half of these (for
+example 85× instead of 205× for counting, 19× instead of 103× for
+MIN+MAX). That is still far above CPython, because the gain comes from
+not creating Python objects, not from SIMD. Gathers gain least: their
+output must become Python objects (`array.tolist()`) anyway.
+
+The library's own C-level benchmark (`native-kernels/build/x86_64/kernel_bench
+1048576 9`, ns per element) for reference:
+
+| kernel | reference | x86_scalar | x86_avx2 | x86_avx512 |
+|---|---:|---:|---:|---:|
+| filter_i64 (10% selected) | 0.746 | 0.318 | 0.150 | 0.089 |
+| filter_i64_bitmap | 2.833 | 0.214 | 0.054 | 0.048 |
+| count_i64 (BETWEEN) | 0.341 | 0.262 | 0.056 | 0.049 |
+| sum_i64 | 0.196 | 0.192 | 0.065 | 0.062 |
+| sum_i64 with validity | 0.334 | 0.324 | 0.109 | 0.065 |
+| minmax_i64 | 0.546 | 0.551 | 0.101 | 0.063 |
+| bitmap_popcount | 0.114 | 0.014 | 0.002 | 0.001 |
+| hash_i64 | 0.608 | 0.568 | 0.347 | 0.128 |
+| compare_i64 | 2.844 | 0.234 | 0.142 | 0.132 |
+| group_sum_i64 (1024 groups) | 0.662 | 0.561 | 0.408 | 0.413 |
+| gather_i64 | 0.572 | 0.546 | 0.516 | 0.504 |
+
+The `ctypes` call overhead (about 1 µs) is negligible: kernels are called
+once per 65,536-row window, conjunct and aggregate, never per row.
+
+Reproduce with:
+
+```sh
+make -C native-kernels
+python3 tools/bench.py --data /tmp/pqdata/1m --repeat 5 --check \
+    --native-kernels ../../native-kernels/build/x86_64/libpqkernels.so \
+    --variant row --variant row-native --variant vectorized --variant native --variant vec4 --variant vec4-native
+python3 tools/native_bench.py --lib ../../native-kernels/build/x86_64/libpqkernels.so [--variant x86_scalar]
+python3 tools/native_difftest.py --lib ../../native-kernels/build/x86_64/libpqkernels.so [--variant reference]
+```
+
 
 ### HTTP server (Phase 4)
 
@@ -565,8 +794,8 @@ python3 tools/bench.py --data /tmp/pqdata/1m --repeat 5 --variant auto --engine 
   `vectorized`; `join` is `auto`, `hash`, `merge` or `nested_loop`; unknown
   values of these enum options are `UNSUPPORTED`; ill-typed option values
   (also `threads` < 1) are `INVALID_REQUEST`. A query without `threads`
-  uses the engine's `--threads`. `native` is validated and has no effect
-  (no native kernels).
+  uses the engine's `--threads`. `native: true` uses the native kernels
+  when `--native-kernels` loaded them and is a no-op otherwise.
 * **Phase 5 result order**: without ORDER BY the row order may differ
   between join algorithms (a merge join emits in key order); for a given
   plan it is the same in row and vectorized mode and with any number of
@@ -638,8 +867,10 @@ python3 tools/bench.py --data /tmp/pqdata/1m --repeat 5 --variant auto --engine 
   Hash-join build sides and subquery plans are always built serially.
 * Worker processes each enforce `--max-query-memory-mb` on their own
   partition, so a parallel query may use up to (workers + 1) × the budget.
-* No native kernels (`native: true` has no effect) and no explicit SIMD:
-  the standard library provides neither.
+* The native kernels only cover the work listed under *Native kernels*:
+  joins, sorts, DISTINCT, expressions and row-layout tables run the
+  engine's own code with `native: true` too (they profit only from
+  natively filtered inputs). Without the library there is no explicit SIMD.
 * A single in-memory sort (`ORDER BY`) runs `list.sort` without interruption,
   so cancellation/timeouts take effect only after the sort of a large input
   finishes; all other operators check at least every 65,536 rows.

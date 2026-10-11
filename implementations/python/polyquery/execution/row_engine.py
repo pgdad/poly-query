@@ -15,7 +15,7 @@ from typing import Any, Callable, Iterable, Iterator
 
 from ..planner import physical as pp
 from ..planner.access import group_may_match
-from . import parallel
+from . import native_ops, parallel
 from .aggregates import accumulator_factory
 from .common import (
     CHECK_INTERVAL_ROWS,
@@ -88,8 +88,22 @@ def _subquery_scan(node: pp.SubqueryScan, ctx: ExecutionContext) -> Rows:
 
 
 def _filter(node: pp.Filter, ctx: ExecutionContext) -> Rows:
-    predicate = ctx.cached(node, "row:predicate", lambda: compile_expr(node.predicate, ctx, layout_of(node.input)))
-    for row in execute(node.input, ctx):
+    native = native_ops.native_filter(node, ctx)
+    if native is not None:
+        # the kernels select rows of the scan below; the engine evaluates the rest
+        residual = native.residual
+        rows = itertools.chain.from_iterable(
+            zip(*cols) if cols else itertools.repeat((), n)
+            for cols, n in native_ops.filtered_batches(native, ctx, _CHECK_ROWS)
+        )
+        if residual is None:
+            yield from rows
+            return
+        predicate = ctx.cached(node, "row:native_residual", lambda: compile_expr(residual, ctx, layout_of(node.input)))
+    else:
+        predicate = ctx.cached(node, "row:predicate", lambda: compile_expr(node.predicate, ctx, layout_of(node.input)))
+        rows = execute(node.input, ctx)
+    for row in rows:
         if predicate(row) is True:
             yield row
 
@@ -334,6 +348,16 @@ def merge_groups(partials: list[dict[tuple, list]]) -> dict[tuple, list]:
 
 
 def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Rows:
+    native = native_ops.native_scan_aggregate(node, ctx)
+    done = None if native is None else native_ops.run_scan_aggregate(native, node, ctx)
+    if done is not None:  # aggregated by the kernels from the column storage
+        keys, states = done
+        results = [state.results() for state in states]
+        width = len(node.keys)
+        for i, key in enumerate(keys):
+            prefix = () if width == 0 else (key,) if width == 1 else key
+            yield prefix + tuple(r[i] for r in results)
+        return
     partials = partition_rows(node.input, ctx, lambda rows: _aggregate_partition(node, ctx, rows))
     groups = merge_groups(partials)
     if not node.keys and not groups:

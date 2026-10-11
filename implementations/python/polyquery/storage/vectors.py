@@ -129,11 +129,18 @@ class ColumnVector:
         validity = self.validity
         return validity is None or (validity[i >> 3] >> (i & 7)) & 1 == 1
 
+    def int64_view(self) -> array.array | None:
+        """The stored values as an ``array('q')`` (NULL slots hold 0), for the
+        native kernels: the stored array itself for INT64 / DECIMAL /
+        TIMESTAMP, a widened copy (made once and cached) of DATE values and
+        of dictionary codes; None for other representations."""
+        return None
+
 
 class PlainVector(ColumnVector):
     """Values stored one per row (array / bytearray / list of str)."""
 
-    __slots__ = ("dtype", "length", "null_count", "validity", "data", "_nulls")
+    __slots__ = ("dtype", "length", "null_count", "validity", "data", "_nulls", "_wide")
 
     def __init__(self, dtype: DataType, data: Any, validity: bytes | None, null_count: int):
         self.dtype = dtype
@@ -142,6 +149,20 @@ class PlainVector(ColumnVector):
         self.validity = validity
         self.null_count = null_count
         self._nulls: Sequence[int] | None = None
+        self._wide: array.array | None = None
+
+    def int64_view(self) -> array.array | None:
+        data = self.data
+        if not isinstance(data, array.array):
+            return None
+        if data.typecode == "q":
+            return data
+        if data.typecode != "i":
+            return None
+        wide = self._wide
+        if wide is None:
+            wide = self._wide = array.array("q", data)
+        return wide
 
     def to_list(self, start: int = 0, stop: int | None = None) -> list[Any]:
         whole = start == 0 and (stop is None or stop >= self.length)
@@ -166,7 +187,7 @@ class PlainVector(ColumnVector):
 class DictVector(ColumnVector):
     """Dictionary-encoded STRING vector: ``dictionary[codes[i]]`` is row i's value."""
 
-    __slots__ = ("dtype", "length", "null_count", "validity", "dictionary", "codes", "_nulls")
+    __slots__ = ("dtype", "length", "null_count", "validity", "dictionary", "codes", "_nulls", "_wide")
 
     def __init__(
         self,
@@ -183,6 +204,14 @@ class DictVector(ColumnVector):
         self.validity = validity
         self.null_count = null_count
         self._nulls: Sequence[int] | None = None
+        self._wide: array.array | None = None
+
+    def int64_view(self) -> array.array:
+        """The dictionary codes widened to int64."""
+        wide = self._wide
+        if wide is None:
+            wide = self._wide = array.array("q", self.codes)
+        return wide
 
     def to_list(self, start: int = 0, stop: int | None = None) -> list[Any]:
         codes = self.codes if start == 0 and stop is None else self.codes[start:stop]

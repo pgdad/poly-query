@@ -122,6 +122,7 @@ def main(argv: list[str]) -> int:
         threads=args.threads,
         parallel_min_rows=args.parallel_min_rows,
         log_level=args.log_level,
+        native_kernels=args.native_kernels,
     )
     handler = RequestHandler(Engine(config))
 

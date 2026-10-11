@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, TypeVar
 
 from .. import errors
+from ..native import NativeKernels
 
 T = TypeVar("T")
 
@@ -35,6 +36,9 @@ class ExecutionContext:
     mode: str = VECTORIZED  # ROW (Volcano iterators) or VECTORIZED (column batches)
     threads: int = 1
     parallel_min_rows: int = DEFAULT_PARALLEL_MIN_ROWS
+    # the native kernel library when the query runs with ``native: true``
+    # and it is loaded (else None: the engine's own code paths)
+    native: NativeKernels | None = None
     memory_used: int = field(default=0, init=False)
     # partition (index, count) of each partitioned driver scan of a parallel
     # pipeline, by id() of the scan node; ``in_worker`` is set in worker
@@ -85,6 +89,7 @@ class ExecutionContext:
         mode: str = VECTORIZED,
         threads: int = 1,
         parallel_min_rows: int = DEFAULT_PARALLEL_MIN_ROWS,
+        native: NativeKernels | None = None,
     ) -> ExecutionContext:
         """``deadline`` (a time.monotonic() value) takes precedence over
         ``timeout_ms``, which counts from now."""
@@ -99,6 +104,7 @@ class ExecutionContext:
             mode,
             threads,
             parallel_min_rows,
+            native,
         )
 
     def check(self) -> None:
