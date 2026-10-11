@@ -1,4 +1,7 @@
-;;;; pqcf-write.lisp — PQCF v1 writer (storage/pqcf-v1.md).
+;;;; pqcf-write.lisp — PQCF writer (storage/pqcf-v1.md, v2 of decimal38.md §7).
+;;;;
+;;;; A table with a wide DECIMAL column (p > 18) is written as PQCF v2, whose
+;;;; wide values are 128-bit integers; every other table is written as v1.
 ;;;;
 ;;;; The file is produced row group by row group, column by column: each
 ;;;; chunk is encoded into an octet vector (validity bitmap + values), written
@@ -9,7 +12,8 @@
 
 (defparameter *pqcf-writer-name* "polyquery-common-lisp")
 (defparameter *default-row-group-size* 65536)
-(defconstant +pqcf-version+ 1)
+(defconstant +pqcf-version+ 2
+  "Highest PQCF format version this engine reads and writes.")
 (defparameter *pqcf-magic* (coerce #(80 81 67 70) '(simple-array (unsigned-byte 8) (4))))
 
 ;;; ------------------------------------------------------------------
@@ -45,11 +49,21 @@
           unless (null-value-p v) do (setf (gethash v seen) t))
     (hash-table-count seen)))
 
+(defun stored-type-kind (type)
+  "Physical value kind of TYPE in PQCF chunks: wide DECIMALs (128-bit values)
+are distinguished from the other, 64-bit integer kinds."
+  (if (wide-decimal-type-p type) :wide-decimal (type-kind type)))
+
 (defun encode-plain (values type)
   (declare (type simple-vector values))
   (let ((n (length values)))
-    (ecase (type-kind type)
+    (ecase (stored-type-kind type)
       (:boolean (bitmap-octets n (lambda (i) (eq (svref values i) t))))
+      (:wide-decimal
+       (let ((out (make-octets (* 16 n))))
+         (dotimes (i n out)
+           (let ((v (svref values i)))
+             (unless (null-value-p v) (setf (octets-i128 out (* 16 i)) v))))))
       ((:int64 :decimal :timestamp)
        (let ((out (make-octets (* 8 n))))
          (dotimes (i n out)
@@ -112,12 +126,15 @@
                      (setf current x len 1)))))
     (when current (push (cons current len) runs))
     (setf runs (nreverse runs))
-    (let ((out (make-octets (+ 4 (* 12 (length runs))))))
+    (let* ((width (if (wide-decimal-type-p type) 16 8))
+           (out (make-octets (+ 4 (* (+ width 4) (length runs))))))
       (setf (octets-u32 out 0) (length runs))
       (loop for (value . count) in runs
-            for pos from 4 by 12
-            do (setf (octets-i64 out pos) value
-                     (octets-u32 out (+ pos 8)) count))
+            for pos from 4 by (+ width 4)
+            do (if (= width 16)
+                   (setf (octets-i128 out pos) value)
+                   (setf (octets-i64 out pos) value))
+               (setf (octets-u32 out (+ pos width)) count))
       out)))
 
 (defun choose-encoding (values type mode)
@@ -179,11 +196,16 @@ encodings that do not apply to TYPE fall back to PLAIN."
               (funcall (the function (svref readers s))
                        (- row-id (segment-start (svref segs s))))))))))
 
+(defun pqcf-format-version (defs)
+  "Writer rule (decimal38.md §7): v2 exactly when a column is a wide DECIMAL."
+  (if (some (lambda (def) (wide-decimal-type-p (column-def-type def))) defs) 2 1))
+
 (defun write-pqcf (stream table indexes &key (row-group-size *default-row-group-size*)
                                              (encoding :auto))
-  "Write TABLE (with the metadata of INDEXES) as a PQCF v1 file to the octet
-STREAM. Returns the number of bytes written."
+  "Write TABLE (with the metadata of INDEXES) as a PQCF v1 or v2 file to the
+octet STREAM. Returns the number of bytes written."
   (let* ((defs (table-columns table))
+         (version (pqcf-format-version defs))
          (ncols (length defs))
          (row-count (table-row-count table))
          (accessors (loop for k below ncols collect (table-column-accessor table k)))
@@ -197,7 +219,7 @@ STREAM. Returns the number of bytes written."
                  (unless (zerop r) (emit (make-octets (- 8 r)))))))
       (emit *pqcf-magic*)
       (let ((header (make-octets 4)))
-        (setf (aref header 0) +pqcf-version+)
+        (setf (aref header 0) version)
         (emit header))
       (loop for start from 0 below row-count by row-group-size
             for n = (min row-group-size (- row-count start))
@@ -227,7 +249,7 @@ STREAM. Returns the number of bytes written."
                                         chunks))))))
                  (push (jobj "row_count" n "chunks" (nreverse chunks)) row-groups)))
       (pad)
-      (let* ((metadata (jobj "format_version" +pqcf-version+
+      (let* ((metadata (jobj "format_version" version
                              "writer" (format nil "~A ~A" *pqcf-writer-name* *engine-version*)
                              "table" (table-name table)
                              "row_count" row-count

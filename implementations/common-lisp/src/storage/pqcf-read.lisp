@@ -1,4 +1,5 @@
-;;;; pqcf-read.lisp — PQCF v1 reader and validator (storage/pqcf-v1.md).
+;;;; pqcf-read.lisp — PQCF reader and validator (storage/pqcf-v1.md; v2 of
+;;;; decimal38.md §7: wide DECIMAL columns hold 128-bit values).
 ;;;;
 ;;;; READ-PQCF validates header, footer, metadata checksum and metadata
 ;;;; structure, and returns the table description with one segment per row
@@ -173,7 +174,8 @@ absent or not understood (statistics are only an optimization)."
 (defun read-pqcf (source &key max-rows)
   "Validate the structure of the PQCF file in SOURCE. Returns a PQCF-FILE.
 Files with more than MAX-ROWS rows are refused with RESOURCE_LIMIT."
-  (let ((size (file-source-size source)))
+  (let ((size (file-source-size source))
+        (header-version 0))
     (when (< size 8) (storage-corrupt "file too short for a PQCF header"))
     (let ((header (source-copy source 0 8)))
       (unless (equalp (subseq header 0 4) *pqcf-magic*)
@@ -184,7 +186,8 @@ Files with more than MAX-ROWS rows are refused with RESOURCE_LIMIT."
         (when (> version +pqcf-version+)
           (storage-unsupported "PQCF format version ~D is not supported" version))
         (unless (zerop flags)
-          (storage-unsupported "PQCF flags ~D are not supported" flags))))
+          (storage-unsupported "PQCF flags ~D are not supported" flags))
+        (setf header-version version)))
     (when (< size 20) (storage-corrupt "file too short for a PQCF footer"))
     (let* ((footer (source-copy source (- size 12) 12))
            (m (octets-u32 footer 0))
@@ -199,13 +202,16 @@ Files with more than MAX-ROWS rows are refused with RESOURCE_LIMIT."
                      (handler-case (parse-json (decode-utf8 bytes 0 m) :duplicate-keys :first)
                        (json-syntax-error () (storage-corrupt "metadata is not valid JSON"))))))
         (meta-object meta "metadata")
-        (unless (eql (meta-field meta "format_version") +pqcf-version+)
+        (unless (eql (meta-field meta "format_version") header-version)
           (storage-corrupt "metadata format_version does not match the header"))
         (unless (stringp (meta-field meta "table"))
           (storage-corrupt "metadata table must be a string"))
         (let* ((row-count (meta-integer meta "row_count"))
                (columns (parse-metadata-columns meta))
                (indexes (parse-metadata-indexes meta columns)))
+          (when (and (< header-version 2)
+                     (some (lambda (c) (wide-decimal-type-p (column-def-type c))) columns))
+            (storage-corrupt "PQCF v1 file declares a wide DECIMAL column"))
           (multiple-value-bind (groups total) (parse-metadata-row-groups meta columns meta-start)
             (unless (= total row-count)
               (storage-corrupt "row_count ~D does not match the row groups (~D)" row-count total))
@@ -307,7 +313,17 @@ data-end) after checking they are well-formed and within END."
 (defun decode-plain (buf pos end n type validity valid-p)
   "Returns (values store bytes-used)."
   (declare (type octets buf) (type fixnum pos end n) (type function valid-p))
-  (ecase (type-kind type)
+  (ecase (stored-type-kind type)
+    (:wide-decimal
+     (let ((out (progn (check-room pos (* 16 n) end)
+                       (make-array n :initial-element 0))))
+       (dotimes (i n)
+         (when (funcall valid-p i)
+           (let ((v (octets-i128 buf (+ pos (* 16 i)))))
+             (unless (value-in-type-range-p v type)
+               (storage-corrupt "value out of range for ~A" (type-name-string type)))
+             (setf (svref out i) v))))
+       (values (make-wide-column :length n :validity validity :values out) (* 16 n))))
     (:boolean
      (let ((nbytes (ceiling n 8)))
        (check-room pos nbytes end)
@@ -371,34 +387,39 @@ data-end) after checking they are well-formed and within END."
 (defun decode-rle (buf pos end n type validity valid-p)
   (declare (type octets buf) (type fixnum pos end n) (type function valid-p))
   (check-room pos 4 end)
-  (let* ((runs (octets-u32 buf pos))
-         (bytes (+ 4 (* 12 runs)))
+  (let* ((wide (wide-decimal-type-p type))
+         (width (if wide 16 8))         ; value bytes; each run adds a u32 length
+         (runs (octets-u32 buf pos))
+         (bytes (+ 4 (* (+ width 4) runs)))
          (row 0)
          (check (not (eq type :int64))))
-    (declare (type fixnum row))
+    (declare (type fixnum row width))
     (check-room pos bytes end)
     ;; Validate the run lengths before allocating N values.
     (unless (= n (loop for r below runs
-                       for count = (octets-u32 buf (+ pos 4 (* 12 r) 8))
+                       for count = (octets-u32 buf (+ pos 4 (* (+ width 4) r) width))
                        when (zerop count) do (storage-corrupt "invalid RLE run length")
                        sum count))
       (storage-corrupt "RLE runs do not cover the ~D rows of the chunk" n))
-    (let ((out (make-array n :element-type '(signed-byte 64) :initial-element 0)))
+    (let ((out (if wide
+                   (make-array n :initial-element 0)
+                   (make-array n :element-type '(signed-byte 64) :initial-element 0))))
       (dotimes (r runs)
-        (let* ((at (+ pos 4 (* 12 r)))
-               (value (octets-i64 buf at))
-               (count (octets-u32 buf (+ at 8))))
+        (let* ((at (+ pos 4 (* (+ width 4) r)))
+               (value (if wide (octets-i128 buf at) (octets-i64 buf at)))
+               (count (octets-u32 buf (+ at width))))
           (dotimes (k count)
             (when (funcall valid-p row)
               (when (and check (not (value-in-type-range-p value type)))
                 (storage-corrupt "RLE value out of range for ~A" (type-name-string type)))
               (setf (aref out row) value))
             (incf row))))
-      (values (if (eq (type-kind type) :boolean)
-                  (let ((bits (make-array n :element-type 'bit)))
-                    (dotimes (i n) (setf (sbit bits i) (aref out i)))
-                    (make-bool-column :length n :validity validity :values bits))
-                  (make-int-column :length n :validity validity :values out))
+      (values (cond ((eq (type-kind type) :boolean)
+                     (let ((bits (make-array n :element-type 'bit)))
+                       (dotimes (i n) (setf (sbit bits i) (aref out i)))
+                       (make-bool-column :length n :validity validity :values bits)))
+                    (wide (make-wide-column :length n :validity validity :values out))
+                    (t (make-int-column :length n :validity validity :values out)))
               bytes))))
 
 ;;; ------------------------------------------------------------------

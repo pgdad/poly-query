@@ -102,11 +102,15 @@
                 (rs (decimal-scale (bexpr-type (second args))))
                 (scale (max ls rs))
                 (lf (pow10 (- scale ls)))
-                (rf (pow10 (- scale rs))))
+                (rf (pow10 (- scale rs)))
+                (precision (decimal-precision result-type))
+                (limit (pow10 precision)))
+           ;; Intermediates are exact (unbounded integers); only the result
+           ;; is checked against the result precision W.
            (flet ((fit (v)
-                    (if (fits-precision-p v +max-decimal-precision+)
+                    (if (< (- limit) v limit)
                         v
-                        (overflow-error "DECIMAL result exceeds 18 digits"))))
+                        (overflow-error "DECIMAL result exceeds ~D digits" precision))))
              (ecase op
                (:+ (binary (fit (+ (* a lf) (* b rf)))))
                (:- (binary (fit (- (* a lf) (* b rf)))))
@@ -124,7 +128,11 @@
 
 (defun comparison-normalizers (lt rt)
   "Return (values left-fn right-fn kind): functions mapping each operand's
-values into a common representation and the type kind to compare as."
+values into a common representation and the type to compare them as.
+INT64 and DECIMAL values compare exactly (decimal38.md §4): both sides are
+rescaled to the larger scale without any range check; the kind is :INT64
+when the normalized values are known to fit INT64, else a wide DECIMAL type
+(values held as unbounded integers)."
   (let ((ct (comparison-type lt rt)))
     (flet ((numeric-normalizer (type target)
              (ecase (type-kind target)
@@ -138,17 +146,20 @@ values into a common representation and the type kind to compare as."
                ((:int64 :decimal)
                 (let ((shift (- (if (decimal-type-p target) (decimal-scale target) 0)
                                 (if (decimal-type-p type) (decimal-scale type) 0))))
-                  (cond ((and (eq (type-kind type) :int64) (decimal-type-p target))
-                         ;; INT64 -> DECIMAL(18,s) promotion overflows beyond 18 digits
-                         ;; (types.md §2).
-                         (let ((m (pow10 shift)))
-                           (lambda (v) (check-decimal-fits (* v m) +max-decimal-precision+))))
-                        ((zerop shift) #'identity)
-                        (t (let ((m (pow10 shift))) (lambda (v) (* v m))))))))))
+                  (if (zerop shift)
+                      #'identity
+                      (let ((m (pow10 shift))) (lambda (v) (* v m)))))))))
       (cond
         ((numeric-type-p ct)
-         (values (numeric-normalizer lt ct) (numeric-normalizer rt ct)
-                 (if (eq (type-kind ct) :float64) :float64 :int64)))
+         (let ((nl (numeric-normalizer lt ct))
+               (nr (numeric-normalizer rt ct)))
+           (values nl nr
+                   (cond ((eq (type-kind ct) :float64) :float64)
+                         ((and (eq nl #'identity) (eq nr #'identity)
+                               (not (wide-decimal-type-p lt)) (not (wide-decimal-type-p rt)))
+                          :int64)
+                         (t (make-decimal-type +max-decimal-precision+
+                                               (if (decimal-type-p ct) (decimal-scale ct) 0)))))))
         ((eq ct :timestamp)
          (values (if (eq lt :date) #'date-to-timestamp #'identity)
                  (if (eq rt :date) #'date-to-timestamp #'identity)

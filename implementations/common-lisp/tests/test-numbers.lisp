@@ -43,4 +43,4 @@
 (deftest type.parse.1 (type-name-string (parse-type-string "numeric(4, 1)" "X")) "DECIMAL(4,1)")
 (deftest type.parse.2 (type-name-string (parse-type-string "BIGINT" "X")) "INT64")
 (deftest type.parse.3 (type-name-string (parse-type-string "decimal" "X")) "DECIMAL(18,0)")
-(deftest type.parse.4 (code-of (parse-type-string "DECIMAL(19,2)" "SEMANTIC_ERROR")) "SEMANTIC_ERROR")
+(deftest type.parse.4 (code-of (parse-type-string "DECIMAL(39,2)" "SEMANTIC_ERROR")) "SEMANTIC_ERROR")

@@ -28,6 +28,15 @@
 (defun decimal-precision (type) (second type))
 (defun decimal-scale (type) (third type))
 
+(defun wide-decimal-type-p (type)
+  "True for DECIMAL(p,s) with p > 18: values that may not fit INT64."
+  (and (decimal-type-p type) (> (decimal-precision type) +narrow-decimal-precision+)))
+
+(defun decimal-result-precision (&rest types)
+  "The result precision W of a decimal operation over operands of TYPES
+(decimal38.md §2): 38 if some operand is a wide DECIMAL, else 18."
+  (if (some #'wide-decimal-type-p types) +max-decimal-precision+ +narrow-decimal-precision+))
+
 (defun numeric-type-p (type)
   (member (type-kind type) '(:int64 :decimal :float64)))
 
@@ -109,7 +118,7 @@ integer PARAMS. Signals ERROR-CODE for unknown names or bad parameters."
   (let ((ka (type-kind a)) (kb (type-kind b)))
     (cond ((or (eq ka :float64) (eq kb :float64)) :float64)
           ((and (eq ka :int64) (eq kb :int64)) :int64)
-          (t (make-decimal-type +max-decimal-precision+
+          (t (make-decimal-type (decimal-result-precision a b)
                                 (max (if (eq ka :decimal) (decimal-scale a) 0)
                                      (if (eq kb :decimal) (decimal-scale b) 0)))))))
 
@@ -134,7 +143,7 @@ NULLs are ignored, numeric types combine by the promotion table of types.md
             ((null-type-p result) (setf result ty))
             ((and (numeric-type-p result) (numeric-type-p ty))
              ;; The promotion table applies even to equal DECIMAL types:
-             ;; DECIMAL(p,s) with DECIMAL(p,s) is DECIMAL(18,s).
+             ;; DECIMAL(p,s) with DECIMAL(p,s) is DECIMAL(W,s).
              (setf result (common-numeric-type result ty)))
             ((type-equal result ty))
             (t (return nil))))))

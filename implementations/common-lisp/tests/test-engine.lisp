@@ -27,7 +27,8 @@
 (deftest eval.where-no-from (eval-sql "SELECT 1 WHERE FALSE") nil)
 (deftest eval.limit-negative (eval-sql "SELECT 1 LIMIT -1") "INVALID_ARGUMENT")
 (deftest eval.null-type (eval-sql "SELECT -NULL, NULL + NULL, NULL + 1") (:null :null :null))
-(deftest eval.int-decimal-compare-overflow (eval-sql "SELECT 9223372036854775807 > 0.5") "NUMERIC_OVERFLOW")
+;; CR-2 (decimal38.md §4): INT64/DECIMAL comparisons are exact, never overflow.
+(deftest eval.int-decimal-compare-exact (eval-sql "SELECT 9223372036854775807 > 0.5") (t))
 (deftest eval.timestamp-literal-strict (eval-sql "SELECT TIMESTAMP '2024-01-01'") "CONVERSION_ERROR")
 (deftest eval.paren-min-folding (eval-sql "SELECT -(9223372036854775808)") (-9223372036854775808))
 (deftest eval.trailing-junk (eval-sql "SELECT 0x10") "PARSE_ERROR")

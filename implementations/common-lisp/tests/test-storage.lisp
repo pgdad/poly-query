@@ -153,11 +153,13 @@
     (list (corrupted-open-code (lambda (b) (setf (aref b 9) (logxor (aref b 9) 1)) b))
           (corrupted-open-code (lambda (b) (subseq b 0 (- (length b) 5))))
           (corrupted-open-code (lambda (b) (setf (aref b 0) 0) b))
+          (corrupted-open-code (lambda (b) (setf (aref b 4) 3) b))
+          ;; v2 header over v1 metadata: version mismatch (decimal38.md §7)
           (corrupted-open-code (lambda (b) (setf (aref b 4) 2) b))
           (corrupted-open-code (lambda (b) (setf (aref b 6) 1) b))
           (corrupted-open-code (lambda (b) (subseq b 0 0))))
   ("STORAGE_CORRUPT" "STORAGE_CORRUPT" "STORAGE_CORRUPT" "STORAGE_VERSION_UNSUPPORTED"
-   "STORAGE_VERSION_UNSUPPORTED" "STORAGE_CORRUPT"))
+   "STORAGE_CORRUPT" "STORAGE_VERSION_UNSUPPORTED" "STORAGE_CORRUPT"))
 
 ;;; ------------------------------------------------------------------
 ;;; Protocol and planning

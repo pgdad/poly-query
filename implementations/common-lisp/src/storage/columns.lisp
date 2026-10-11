@@ -1,8 +1,10 @@
 ;;;; columns.lisp — typed in-memory column vectors (column-oriented layout).
 ;;;;
 ;;;; A COLUMN-STORE holds the values of one column for a run of rows:
-;;;;   INT-COLUMN     INT64, DECIMAL (unscaled), DATE (days), TIMESTAMP (micros)
-;;;;                  as (SIGNED-BYTE 64) vectors
+;;;;   INT-COLUMN     INT64, narrow DECIMAL (p <= 18, unscaled), DATE (days),
+;;;;                  TIMESTAMP (micros) as (SIGNED-BYTE 64) vectors
+;;;;   WIDE-COLUMN    wide DECIMAL (p > 18): unscaled values as a SIMPLE-VECTOR
+;;;;                  of integers (fixnums or bignums; up to 38 digits)
 ;;;;   FLOAT-COLUMN   FLOAT64 as a DOUBLE-FLOAT vector
 ;;;;   BOOL-COLUMN    BOOLEAN as a bit vector (1 = true)
 ;;;;   STRING-COLUMN  STRING as a SIMPLE-VECTOR of strings
@@ -27,6 +29,9 @@
 (defstruct (int-column (:include column-store))
   (values (make-array 0 :element-type '(signed-byte 64)) :type i64-vector))
 
+(defstruct (wide-column (:include column-store))
+  (values #() :type simple-vector))
+
 (defstruct (float-column (:include column-store))
   (values (make-array 0 :element-type 'double-float) :type f64-vector))
 
@@ -46,7 +51,9 @@
     (if v (count 0 v) 0)))
 
 (defun integer-kind-type-p (type)
-  (member (type-kind type) '(:int64 :decimal :date :timestamp)))
+  "True for types stored in INT-COLUMNs (64-bit integer representation)."
+  (and (member (type-kind type) '(:int64 :decimal :date :timestamp))
+       (not (wide-decimal-type-p type))))
 
 ;;; ------------------------------------------------------------------
 ;;; Building column stores from value vectors
@@ -94,7 +101,13 @@ T (force dictionary encoding of STRING columns), NIL (never) or :AUTO."
   (declare (type simple-vector values))
   (let* ((n (length values))
          (validity (build-validity values)))
-    (ecase (type-kind type)
+    (ecase (if (wide-decimal-type-p type) :wide-decimal (type-kind type))
+      (:wide-decimal
+       (let ((out (make-array n :initial-element 0)))
+         (dotimes (i n)
+           (let ((v (svref values i)))
+             (unless (null-value-p v) (setf (svref out i) v))))
+         (make-wide-column :length n :validity validity :values out)))
       ((:int64 :decimal :date :timestamp)
        (let ((out (make-array n :element-type '(signed-byte 64) :initial-element 0)))
          (dotimes (i n)
@@ -142,6 +155,9 @@ T (force dictionary encoding of STRING columns), NIL (never) or :AUTO."
          (if validity
              (lambda (i) (declare (type fixnum i)) (with-validity (validity i) (aref vals i)))
              (lambda (i) (declare (type fixnum i)) (aref vals i)))))
+      (wide-column
+       (let ((vals (wide-column-values store)))
+         (lambda (i) (declare (type fixnum i)) (with-validity (validity i) (svref vals i)))))
       (float-column
        (let ((vals (float-column-values store)))
          (declare (type f64-vector vals))
@@ -171,6 +187,7 @@ T (force dictionary encoding of STRING columns), NIL (never) or :AUTO."
 (defun column-store-encoding-name (store)
   (etypecase store
     (int-column "int64")
+    (wide-column "int128")
     (float-column "float64")
     (bool-column "bitmap")
     (string-column "plain")

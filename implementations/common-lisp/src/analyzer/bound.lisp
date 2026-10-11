@@ -159,29 +159,11 @@ aggregates or subqueries)."
       (null-type-p from)
       (and (member (type-kind from) '(:int64 :decimal)) (eq (type-kind to) :float64))))
 
-(defun mixes-int-and-decimal-p (exprs)
-  "True if EXPRS include both INT64 and DECIMAL operands whose comparison may
-overflow: the INT64 operand is promoted to DECIMAL(18,s), which fails for
-values of more than 18-s digits (types.md §2). Literals are checked now."
-  (let* ((decimals (remove-if-not #'decimal-type-p exprs :key #'bexpr-type))
-         (scale (reduce #'max decimals :key (lambda (e) (decimal-scale (bexpr-type e)))
-                                       :initial-value 0)))
-    (and decimals
-         (some (lambda (e)
-                 (and (eq (type-kind (bexpr-type e)) :int64)
-                      (not (and (b-literal-p e)
-                                (let ((v (b-literal-value e)))
-                                  (or (eq v +null+)
-                                      (fits-precision-p (* v (pow10 scale))
-                                                        +max-decimal-precision+)))))))
-               exprs))))
-
 (defun node-may-fail-p (e)
   (and (b-op-p e)
        (case (b-op-op e)
          ((:+ :- :* :/ :% :neg :call :subquery) t)
          (:cast (not (safe-cast-p (bexpr-type (first (b-op-args e))) (bexpr-type e))))
-         ((:= :<> :< :<= :> :>= :between :in-list :case) (mixes-int-and-decimal-p (b-op-args e)))
          (t nil))))
 
 (defun may-fail-p (e)

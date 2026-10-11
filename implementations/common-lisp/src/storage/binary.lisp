@@ -67,6 +67,21 @@
   (sb-sys:with-pinned-objects (buf)
     (setf (sb-sys:signed-sap-ref-32 (sb-sys:vector-sap buf) off) value)))
 
+(defun octets-i128 (buf off)
+  "The 128-bit two's-complement little-endian integer at OFF (PQCF v2 wide
+DECIMAL values)."
+  (declare (type octets buf) (type fixnum off))
+  (let ((low (sb-sys:with-pinned-objects (buf) (sb-sys:sap-ref-64 (sb-sys:vector-sap buf) off)))
+        (high (octets-i64 buf (+ off 8))))
+    (logior (ash high 64) low)))
+
+(defun (setf octets-i128) (value buf off)
+  (declare (type octets buf) (type fixnum off) (type integer value))
+  (setf (octets-i64 buf off) (let ((u (ldb (byte 64 0) value)))
+                               (if (logbitp 63 u) (- u (expt 2 64)) u))
+        (octets-i64 buf (+ off 8)) (ash value -64))
+  value)
+
 ;;; ------------------------------------------------------------------
 ;;; CRC-32 (ISO-HDLC / zlib): reflected polynomial #xEDB88320
 

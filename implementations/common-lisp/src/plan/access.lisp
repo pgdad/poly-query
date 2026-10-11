@@ -57,7 +57,8 @@ a column of COLTYPE. Returns (values key status), STATUS being :OK, :NONE
          (let ((s1 (decimal-scale coltype)))
            (case ck
              (:int64 (let ((v (* c (pow10 s1))))
-                       (if (fits-precision-p v +max-decimal-precision+) (values v :ok) (values nil :unusable))))
+                       ;; Comparison is exact: a value the column cannot hold matches nothing.
+                       (if (fits-precision-p v (decimal-precision coltype)) (values v :ok) (values nil :none))))
              (:decimal (let* ((s2 (decimal-scale ctype)) (m (max s1 s2)))
                          (divide (* c (pow10 (- m s2))) (pow10 (- m s1)))))
              (t (values nil :unusable)))))

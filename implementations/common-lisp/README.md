@@ -27,9 +27,13 @@ and the M9 native kernel integration: the
 aggregation, bitmap and hashing work of queries run with `native: true`
 (see *Native kernels*). On top of that, change request CR-1 adds
 `UNION ALL` (`spec/changes/union-all.md`, capability `change.union_all`;
-see *Change request CR-1: UNION ALL*), and the refactoring CR-3 separates
+see *Change request CR-1: UNION ALL*), the refactoring CR-3 separates
 logical and physical planning (`spec/changes/refactor-plan-separation.md`;
-see *Change request CR-3: logical/physical plan separation*).
+see *Change request CR-3: logical/physical plan separation*), and change
+request CR-2 raises the maximum DECIMAL precision from 18 to 38 digits with
+exact INT64/DECIMAL comparisons and the PQCF v2 file format
+(`spec/changes/decimal38.md`, capability `change.decimal38`; see *Change
+request CR-2: DECIMAL precision 38*).
 
 ## Build prerequisites
 
@@ -70,7 +74,7 @@ own optional kernel library `libpqkernels` (built separately with
 `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`, `phase4`,
 `http.streaming`, `phase5`, `exec.row`, `exec.vectorized`, `exec.parallel`,
 `join.hash`, `join.merge`, `join.nested_loop`, `native.kernels`,
-`change.union_all`.
+`change.union_all`, `change.decimal38`.
 
 ## Architecture
 
@@ -90,7 +94,7 @@ SQL text --lexer--> tokens --parser--> AST --binder--> BOUND-QUERY
 |---|---|---|
 | util | `errors`, `numbers`, `json` | `pq-error` condition with stable codes; exact numeric text parsing, correctly rounded float parsing, shortest round-trip float printing; strict RFC 8259 JSON reader/writer |
 | types | `types`, `temporal`, `values`, `compare` | type representation, aliases, promotion lattice and result-type unification; DATE/TIMESTAMP calendar math; text conversion, `CAST`, canonical serialization; total ordering |
-| storage | `columns`, `table`, `stats`, `index`, `catalog`, `binary`, `files`, `pqcf-write`, `pqcf-read` | typed column vectors with validity bitmaps and dictionary encoding; immutable tables in row or column layout split into segments; lazily computed column statistics; hash and sorted-permutation (B-tree equivalent) indexes; catalog of tables and global index names with atomic publish (mutex-protected); little-endian codec, CRC-32, strict UTF-8; crash-safe file replacement and mmap/buffered file sources; PQCF v1 writer and validating reader |
+| storage | `columns`, `table`, `stats`, `index`, `catalog`, `binary`, `files`, `pqcf-write`, `pqcf-read` | typed column vectors with validity bitmaps and dictionary encoding; immutable tables in row or column layout split into segments; lazily computed column statistics; hash and sorted-permutation (B-tree equivalent) indexes; catalog of tables and global index names with atomic publish (mutex-protected); little-endian codec, CRC-32, strict UTF-8; crash-safe file replacement and mmap/buffered file sources; PQCF v1/v2 writer and validating reader |
 | ingest | `common`, `csv`, `json` | CSV parsing on raw UTF-8 octets, JSON/JSONL; type inference and explicit-schema conversion |
 | sql | `lexer`, `ast`, `parser` | tokenizer with line/column positions; AST structures; recursive-descent parser for the full grammar of `grammar.md` (`PARSE_ERROR` carries `details.line`/`column`) |
 | analyzer | `bound`, `functions`, `binder`, `query` | semantic validation. `bound`: bound expression nodes and the analysed-query representation; `functions`: the scalar function registry (typing + implementation per function); `binder`: expressions — name resolution through nested scopes, typing, implicit promotions, CASE/LIKE/BETWEEN/IN, subqueries; `query`: CTEs, FROM/joins/derived tables, `*` expansion, output naming, GROUP BY alias/ordinal resolution, the structural grouping rewrite, HAVING, DISTINCT, ORDER BY resolution, constant LIMIT/OFFSET |
@@ -107,7 +111,10 @@ meaning: NULL is `:null`, BOOLEAN is `t`/`nil`, INT64 an integer, FLOAT64 a
 `double-float`, DECIMAL(p,s) its unscaled integer, STRING a Lisp string,
 DATE days and TIMESTAMP microseconds since the epoch. Exactness comes from
 Lisp's unbounded integers: INT64 and DECIMAL arithmetic is computed exactly
-and range-checked afterwards; SUM/AVG accumulate exactly.
+and range-checked afterwards; SUM/AVG accumulate exactly. This holds for
+narrow (p ≤ 18) and wide (p 19–38) decimals alike: a wide value is the same
+kind of unscaled integer, merely one that may be a bignum (see *Change
+request CR-2*).
 
 Bound expressions (`B-LITERAL`, `B-COLUMN`, `B-PARAM`, `B-OP`, `B-AGG`) are
 typed trees; every column reference is a position in the row of the operator
@@ -178,7 +185,8 @@ against the memory budget.
 * **Layouts.** A table is immutable and split into *segments* (one for
   loaded tables, one per row group for tables opened from PQCF). In the
   *column* layout (default) a segment holds one typed vector per column —
-  `(signed-byte 64)` for INT64/DECIMAL/DATE/TIMESTAMP, `double-float` for
+  `(signed-byte 64)` for INT64/narrow DECIMAL/DATE/TIMESTAMP, a simple
+  vector of integers for wide DECIMAL (p > 18), `double-float` for
   FLOAT64, a bit vector for BOOLEAN, strings or dictionary codes for STRING —
   plus a validity bitmap (absent when the column has no NULLs). In the *row*
   layout a segment holds row tuples. Scans, statistics, indexes and the PQCF
@@ -199,7 +207,9 @@ against the memory budget.
   scans return rows in table order. Index names are global; indexes belong
   to the table object they were built on and disappear when it is dropped or
   replaced.
-* **PQCF writing** (`save`): row-group-major chunks at 8-byte aligned
+* **PQCF writing** (`save`): a table with a wide DECIMAL column is written
+  as PQCF v2 (128-bit values for those columns), every other table as v1
+  (decimal38.md §7). Row-group-major chunks at 8-byte aligned
   offsets (zero padding), metadata with min/max for every type except
   STRING, indexes of the table. Encodings with `auto`: RLE when the run count
   is below n/4 (BOOLEAN, INT64, DECIMAL, DATE, TIMESTAMP), DICT when the
@@ -585,6 +595,85 @@ concatenation operator.
 | Facade | `engine.lisp` | claims `change.union_all` |
 | Tests | `tests/test-union.lisp` | parser, typing, errors, ORDER BY/LIMIT, nesting, correlation, EXPLAIN, pruning, and agreement of all option combinations |
 
+### Change request CR-2: DECIMAL precision 38
+
+`spec/changes/decimal38.md`: `DECIMAL(p,s)` with `1 ≤ p ≤ 38`. Narrow
+decimals (p ≤ 18) behave exactly as before; any operation with a wide
+operand (p > 18) has result precision `W = 38` instead of 18.
+
+**Representation of wide values.** A DECIMAL value is its unscaled integer
+(value = unscaled / 10^s) for every precision. Lisp integers are unbounded,
+so a wide value is an ordinary integer that is a fixnum or a bignum (|v| <
+10^38 needs at most 127 bits). The *physical* containers differ:
+
+| Where | Narrow (p ≤ 18) and INT64 | Wide (p 19–38) |
+|---|---|---|
+| Column store (`storage/columns.lisp`) | `INT-COLUMN`: `(signed-byte 64)` vector | `WIDE-COLUMN`: simple vector of integers (0 in NULL slots) + validity bitmap |
+| Vector of the vectorized executor (`exec/vectors.lisp`) | kind `:i64` (typed vector + validity) | kind `:any` (simple vector of integers / `:null`) — `type-vec-kind` decides from the static type |
+| Row executor, aggregate states, keys, indexes, statistics | integers | integers (the same code) |
+| PQCF chunk | i64 (v1 and v2 files) | i128 two's complement LE (v2 only) |
+
+No 128-bit fixed-width type is emulated: exact intermediates (including the
+up-to-76-digit product of two wide operands before the overflow check) come
+for free from bignum arithmetic, and only the final result is checked
+against `W` digits.
+
+**Dispatch narrow/wide.** Types decide everything at compile time:
+
+* The binder computes `W` with `decimal-result-precision` (`types.lisp`):
+  38 if some DECIMAL operand is wide, else 18 (INT64 operands do not count).
+  It is used for `+ - *` (INT64 operands are promoted to `DECIMAL(W,0)`; a
+  product scale above `W` is `TYPE_ERROR`), `common-numeric-type` (CASE,
+  COALESCE, UNION ALL, IN/BETWEEN typing), `SUM`, `ROUND`, `FLOOR`/`CEIL`.
+* The row evaluator (`exec/expressions.lisp`) is representation-agnostic;
+  arithmetic checks the result against the precision of its result type.
+* The vectorized evaluator keeps its typed `(signed-byte 64)` kernels for
+  narrow types only (`compile-varithmetic`, `compile-vnegation`,
+  `compile-vcast` check `wide-decimal-type-p`); wide operations fall back to
+  the *lifted* path (vector arguments, the row implementation per element),
+  wide comparisons with a constant have a generic integer kernel. Because
+  wide vectors are of kind `:any`, they can never reach code that expects
+  `i64-vector`s — in particular never the native kernels (`vnative.lisp`
+  only accepts `:i64`/`:f64` operands and `INT-COLUMN`/`FLOAT-COLUMN`
+  stores; SUM/MIN/MAX of a wide column take the Lisp path).
+* **Exact comparisons** (§4): `comparison-normalizers` rescales both
+  sides to the larger scale without a range check (an INT64 is a decimal
+  with scale 0), so `9223372036854775807 > 1.5` is `TRUE` instead of
+  `NUMERIC_OVERFLOW`. The normalized *kind* is `:int64` only when no side is
+  rescaled and neither is wide; otherwise it is a wide decimal type, so
+  normalized join keys, IN-sets and merge-join keys use `:any` vectors and
+  can hold any integer. Comparisons can no longer fail, so they are no
+  longer treated as "may fail" for lazy evaluation.
+
+**Modules touched.**
+
+| Layer | Module | Change |
+|---|---|---|
+| util | `util/numbers.lisp` | `+max-decimal-precision+` = 38, new `+narrow-decimal-precision+` = 18 |
+| types | `types/types.lisp` | `wide-decimal-type-p`, `decimal-result-precision`; `common-numeric-type` uses `W`; type names up to `DECIMAL(38,s)` (CAST ⇒ `SEMANTIC_ERROR`, load schema ⇒ `INVALID_REQUEST`, PQCF metadata ⇒ `STORAGE_CORRUPT` beyond 38) |
+| types | `types/values.lisp` | DECIMAL → INT64 checks the INT64 range (reachable with wide values); other CAST rules were already exact |
+| sql | `sql/lexer.lisp`, `sql/parser.lisp` | keyword tokens keep their source text; `AS full` / `AS right` accepted as aliases (see *Decisions*) |
+| analyzer | `analyzer/binder.lisp` | literals with up to 38 significant digits are DECIMAL; arithmetic and `SUM` typing with `W` |
+| analyzer | `analyzer/functions.lisp` | `ROUND`, `FLOOR`, `CEIL` result precision `W` |
+| analyzer | `analyzer/bound.lisp` | comparisons removed from the may-fail analysis (they are exact) |
+| plan | `plan/access.lisp` | hash-index probe: an INT64 constant that the DECIMAL column cannot hold matches nothing (exact comparison) |
+| storage | `storage/columns.lisp` | `WIDE-COLUMN` store and its reader |
+| storage | `storage/binary.lisp` | `octets-i128` and its setter |
+| storage | `storage/pqcf-write.lisp` | writer rule v1/v2, i128 PLAIN (16 bytes/value) and RLE (20 bytes/run) |
+| storage | `storage/pqcf-read.lisp` | reads v1 and v2; header/metadata version mismatch and v1 files declaring wide columns ⇒ `STORAGE_CORRUPT`; version > 2 or flags ≠ 0 ⇒ `STORAGE_VERSION_UNSUPPORTED`; i128 decoding with the `|v| < 10^p` check |
+| exec | `exec/expressions.lisp` | arithmetic overflow at the result precision; exact `comparison-normalizers` |
+| exec | `exec/vectors.lisp` | wide DECIMAL vectors are `:any`; scans of `WIDE-COLUMN`s |
+| exec | `exec/vexpressions.lisp` | typed decimal kernels restricted to narrow types; integer constant-comparison kernel for wide operands |
+| exec | `exec/aggregates.lisp`, `exec/vaggregates.lisp` | `SUM` overflow check at `W` |
+| facade | `engine.lisp`, `version.lisp` | claims `change.decimal38`; engine version 0.4.0 |
+| tests | `tests/test-decimal38.lisp` (+ three updated tests) | type domain, `W`, literal typing, exact arithmetic/comparison/CAST, SUM overflow, i128 codec, PQCF v1/v2 choice and round trips, agreement of all option combinations on wide data |
+
+Ingestion and the protocol needed no change: CSV/JSON conversion parses the
+value's text (JSON numbers keep their literal text, so no binary float is
+involved) into an integer checked against the column's precision, and
+results are rendered from the unscaled integer (`render-decimal`), which
+handles bignums.
+
 ### Change request CR-3: logical/physical plan separation
 
 `spec/changes/refactor-plan-separation.md`: a behaviour-preserving
@@ -666,6 +755,24 @@ results and errors were identical to the previous engine.
   output names is `SEMANTIC_ERROR` (ambiguous), as for plain queries.
 * Predicates over a derived table / CTE that is a union are not pushed into
   the branches (they are applied above the UnionAll); column pruning is.
+
+### DECIMAL precision 38 (CR-2)
+
+* `spec_version` stays `1.0.0` (as for CR-1): `phase1/catalog.pqt`
+  requires it, although the CR names `1.2.0-cr2`.
+* `AS full`: the public case `changes/decimal38.pqt` names a column
+  `full`, which grammar.md §1 lists as a reserved keyword ("reserved for
+  future use"). The engine accepts exactly the future-only keywords `FULL`
+  and `RIGHT` as an alias *after an explicit `AS`*, where nothing else can
+  follow, keeping the spelling of the source text. Everywhere else they
+  stay reserved (`FULL JOIN` / `RIGHT JOIN` ⇒ `UNSUPPORTED`; `SELECT 1 full`
+  ⇒ `PARSE_ERROR`).
+* A hash index on a DECIMAL column probed with an INT64 constant that does
+  not fit the column's precision answers "no rows" (before CR-2 the index
+  was not used and the scan raised the comparison overflow).
+* Comparing an INT64 column with a DECIMAL of a different scale (or a
+  narrow with a wide decimal) runs on the generic per-element path; equal
+  representations keep the typed and native kernels.
 
 ### Plan separation (CR-3)
 
@@ -1084,7 +1191,8 @@ same kernels at 0.15–0.5 ns/element in the AVX2/AVX-512 variants.
   running jobs, queued timeouts, the bounded streaming channel and metrics
   rendering.
 * UNION ALL unit tests (`tests/test-union.lisp`): see *Change request
-  CR-1*.
+  CR-1*. DECIMAL(38) unit tests (`tests/test-decimal38.lisp`): see *Change
+  request CR-2*.
 * Planning unit tests (`tests/test-plan.lisp`): the plan builder (plan
   shapes, pruned scans, SubqueryAlias, UNION ALL, subquery plans), every
   optimizer rule applied on its own (`apply-optimizer-rule`), the optimizer
@@ -1148,17 +1256,12 @@ same kernels at 0.15–0.5 ns/element in the AVX2/AVX-512 variants.
 
 ## Known limitations
 
-* Public case `changes/union_all.pqt:51` (`SELECT order_id AS v FROM orders
-  … UNION ALL SELECT amount FROM orders …`, expected `DECIMAL(18,2)`) fails:
-  that file loads `fixtures/orders.csv` *without* a schema, so by
-  ingestion.md §1.1 ("Inference NEVER yields DECIMAL"; checked by
-  `phase1/ingest_csv.pqt`) `amount` is FLOAT64 and INT64 ∪ FLOAT64 is
-  FLOAT64. The expectation matches the other Phase 2 files, which load
-  `orders` with `amount:DECIMAL(10,2)`; with that schema the engine returns
-  exactly the expected `DECIMAL(18,2)` rows `"99.99"`, `"101.00"` in every
-  mode. The engine follows the ingestion spec rather than special-casing
-  the test.
-
+* Wide DECIMAL (p > 18) values are bignum-capable integers in generic
+  vectors: their arithmetic, comparisons, sums and keys run element by
+  element (no typed or native kernels). On 300k rows (values of 10
+  digits stored as `DECIMAL(30,2)` vs `DECIMAL(12,2)`) filters, sums and
+  grouped products took 1.3–1.6× the time of the narrow columns; values
+  beyond the fixnum range (bignums) cost more.
 * Native kernels cover integer-like predicates, integer sums, global
   MIN/MAX/COUNT and integer key hashing (see *Native kernels*). FLOAT64
   predicates and sums, strings, grouped MIN/MAX, and filters/aggregates in

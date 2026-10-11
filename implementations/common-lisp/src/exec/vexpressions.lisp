@@ -340,6 +340,22 @@ the error at the right time)."
          (declare (type function cmp test))
          (compile-memoized-unary (compile-vexpr column-expr)
                                  (lambda (v) (funcall test (funcall cmp v c))))))
+      ((and (eq kind :any) (integerp c))
+       ;; Wide DECIMAL operand: unscaled values are unbounded integers.
+       (let ((kernel (compile-vexpr column-expr)))
+         (declare (type function kernel))
+         (macrolet ((generic (test)
+                      `(lambda (batch)
+                         (let* ((n (batch-count batch))
+                                (x (vec-data (funcall kernel batch)))
+                                (out (make-array n)))
+                           (declare (type simple-vector x) (type fixnum n))
+                           (dotimes (i n (make-vec out))
+                             (setf (svref out i)
+                                   (let ((a (svref x i)) (b c))
+                                     (declare (type integer b))
+                                     (if (eq a +null+) +null+ ,test))))))))
+           (comparison-dispatch op generic))))
       (t nil))))
 
 (defun comparison-test (op)
@@ -421,7 +437,10 @@ memo of FN's results, kept for the last dictionary seen."
            (evaluate (when (and (eq rk ak) (eq rk bk)
                                 (or (eq rk :int64)
                                     (and (eq rk :float64) (not (eq op :%)))
-                                    (and (eq rk :decimal) (member op '(:+ :- :*)))))
+                                    ;; Wide DECIMALs use the generic path.
+                                    (and (eq rk :decimal) (member op '(:+ :- :*))
+                                         (notany #'wide-decimal-type-p
+                                                 (list (bexpr-type e) (bexpr-type a) (bexpr-type b))))))
                        (make-arguments-evaluator (list (compile-operand a) (compile-operand b)) t))))
       (macrolet ((i64 (expr) `(binary-kernel (evaluate i64-vector i64-vector) :i64 ,expr))
                  (f64 (expr) `(binary-kernel (evaluate f64-vector f64-vector) :f64 ,expr)))
@@ -446,7 +465,7 @@ memo of FN's results, kept for the last dictionary seen."
                   (scale (max ls rs))
                   (lf (pow10 (- scale ls)))
                   (rf (pow10 (- scale rs)))
-                  (limit (pow10 +max-decimal-precision+)))
+                  (limit (pow10 +narrow-decimal-precision+)))
              (declare (type (signed-byte 64) lf rf limit))
              (flet ((fit (v)
                       (if (< (- limit) v limit)
@@ -479,6 +498,7 @@ memo of FN's results, kept for the last dictionary seen."
         (:int64 (and (eq (type-kind (bexpr-type a)) :int64)
                      (unary (signed-byte 64) (check-int64 (- a)))))
         (:decimal (and (eq (type-kind (bexpr-type a)) :decimal)
+                       (not (wide-decimal-type-p (bexpr-type a)))
                        (unary (signed-byte 64) (- a))))
         (:float64 (and (eq (type-kind (bexpr-type a)) :float64)
                        (unary double-float (- a))))
@@ -506,8 +526,10 @@ memo of FN's results, kept for the last dictionary seen."
            (dotimes (i n) (setf (aref out i) (coerce (aref x i) 'double-float)))
            (make-vec out (vec-validity va)))))
       ((and (member (type-kind from) '(:int64 :decimal)) (eq (type-kind to) :decimal)
+            (not (wide-decimal-type-p from)) (not (wide-decimal-type-p to))
             (>= (decimal-scale to) (if (decimal-type-p from) (decimal-scale from) 0)))
-       ;; Exact rescaling; values needing more than 18 digits overflow.
+       ;; Exact rescaling between narrow types; values needing more than the
+       ;; target precision overflow.
        (let* ((factor (pow10 (- (decimal-scale to) (if (decimal-type-p from) (decimal-scale from) 0))))
               (limit (pow10 (decimal-precision to))))
          (declare (type (signed-byte 64) factor limit))

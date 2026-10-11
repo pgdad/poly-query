@@ -7,7 +7,8 @@
 ;;;; aggregate can be merged (parallel aggregation: each worker aggregates
 ;;;; its share of the input, the partial states are then merged). Results
 ;;;; are identical to the row accumulators of aggregates.lisp: INT64/DECIMAL
-;;;; sums are exact and range checked when the result is produced.
+;;;; sums are exact and range checked when the result is produced. Wide
+;;;; DECIMAL arguments arrive as :ANY vectors and never reach the kernels.
 ;;;;
 ;;;; With native kernels (`native: true`), AGG-UPDATE-NATIVE updates a state
 ;;;; from a whole batch with libpqkernels where a kernel applies:
@@ -130,6 +131,7 @@ the store in place. Returns true if done, NIL if no kernel applies.")
   fn                                     ; :SUM or :AVG
   float-p
   (decimal-p nil)
+  (precision 0)                          ; SUM of DECIMAL: result precision W
   (divisor 1)                            ; AVG of DECIMAL: 10^scale
   (sums #() :type simple-vector)         ; exact integers or doubles, by group
   (counts (make-index-vector 0) :type index-vector) ; non-NULL inputs, by group
@@ -239,7 +241,7 @@ again with unbounded integers."
            (setf (svref sums g) (+ (the double-float (svref sums g)) (aref data i)))
            (incf (aref counts g)))))
       (simple-vector
-       ;; Only the NULL type reaches here (all values NULL).
+       ;; Wide DECIMAL values, or the NULL type (all values NULL).
        (dotimes (i n)
          (let ((v (svref data i)))
            (unless (eq v +null+)
@@ -265,9 +267,9 @@ again with unbounded integers."
                (values (rational-to-double (/ sum (* n (sum-state-divisor s)))))))
           ((sum-state-float-p s) (check-finite sum))
           ((sum-state-decimal-p s)
-           (if (fits-precision-p sum +max-decimal-precision+)
+           (if (fits-precision-p sum (sum-state-precision s))
                sum
-               (overflow-error "DECIMAL SUM exceeds 18 digits")))
+               (overflow-error "DECIMAL SUM exceeds ~D digits" (sum-state-precision s))))
           (t (check-int64 sum)))))
 
 ;;; ------------------------------------------------------------------
@@ -428,6 +430,7 @@ again with unbounded integers."
          ((:sum :avg)
           (make-sum-state :fn fn :float-p float-p
                           :decimal-p (decimal-type-p arg-type)
+                          :precision (decimal-result-precision arg-type)
                           :divisor (if (decimal-type-p arg-type) (pow10 (decimal-scale arg-type)) 1)))
          ((:min :max)
           (make-minmax-state :sign (if (eq fn :min) -1 1) :cmp (make-comparator arg-type))))))))
