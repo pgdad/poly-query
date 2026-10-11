@@ -657,4 +657,272 @@ FUNC pqk_a64_sve_gather_i64
 2:  ret
 ENDF pqk_a64_sve_gather_i64
 
+/* ========================================================================
+ * 128-bit kernels (CR-4, kernels 17-20), vector-length agnostic.
+ *
+ * LD2D {z2.d, z3.d} de-interleaves VL/64 pqk_i128 rows into a lo-word and a
+ * hi-word vector (lane j = row j); it is addressed as [x0, 2*row, lsl #3],
+ * so the row counter alone locates the data (block loops can restart at
+ * any row). 128-bit comparisons are composed from 64-bit lane compares
+ * into predicates:
+ *   unsigned d <= s : SEL(d_hi == s_hi, d_lo <=u s_lo, d_hi <u s_hi)
+ *   signed   x <  m : SEL(x_hi == m_hi, x_lo <u m_lo,  x_hi <s m_hi)
+ * using predicate SEL (Pd = Pg ? Pn : Pm). All compares are zeroing under
+ * the valid-row predicate p1, so inactive or invalid lanes never count.
+ * ======================================================================== */
+
+/* RANGE128: p2 = valid rows (p1) whose value (z2 lo / z3 hi words)
+ * satisfies ((x - lo) <=u span) ^ inv in 128 bits. Needs z16/z17 = lo,
+ * z18/z19 = span, z30 = 1, p6 inversion. Clobbers z2, z3, p3-p5. */
+    .macro  RANGE128
+    cmphi   p3.d, p1/z, z16.d, z2.d         // borrow: lo_lo >u x_lo
+    sub     z2.d, z2.d, z16.d               // d_lo
+    sub     z3.d, z3.d, z17.d
+    sub     z3.d, p3/m, z3.d, z30.d         // d_hi (borrow applied)
+    cmphs   p4.d, p1/z, z18.d, z2.d         // d_lo <=u span_lo
+    cmphi   p5.d, p1/z, z19.d, z3.d         // d_hi <u span_hi
+    cmpeq   p2.d, p1/z, z19.d, z3.d         // d_hi == span_hi
+    sel     p2.b, p2, p4.b, p5.b
+    eor     p2.b, p1/z, p2.b, p6.b
+    .endm
+
+/* SETUP128 invalid: PRED128_SETUP from (w3 op, x4 &a, x5 &b) into the
+ * vector constants z16-z19, z30 = 1, p6 (inversion), p7 = all-true.
+ * Clobbers x7-x13. */
+    .macro  SETUP128 invalid
+    PRED128_SETUP w3, x4, x5, x7, x8, x9, x10, x11, x12, x13, \invalid
+    dup     z16.d, x7
+    dup     z17.d, x8
+    dup     z18.d, x9
+    dup     z19.d, x10
+    mov     z30.d, #1
+    INVPRED x11
+    ptrue   p7.d
+    .endm
+
+/* ------------------------------------------------------------------------
+ * size_t filter_i128(x0 data, x1 validity, x2 n, w3 op, x4 &a, x5 &b,
+ *                    x6 out_idx)
+ * Registers: x10 row, x11 count, x12 selected in this vector, x13 = 2*row;
+ * z16:z17 lo, z18:z19 span, z30 = 1, z2/z3 lo/hi words, z1 row numbers,
+ * z4 compacted rows; p0 rows, p1 valid rows, p2 selected, p3 store
+ * predicate (and RANGE128 temps p3-p5), p6 inversion, p7 all-true.
+ * Algorithm: PRED128_SETUP (op validated before *a / *b are read), then per
+ * vector RANGE128 (LD2D + 4 vector ops + 4 compares + SEL + EOR), COMPACT of
+ * the row numbers and a truncating ST1W under WHILELO(0, count): exactly
+ * `count` indices are written, no over-store.
+ */
+FUNC pqk_a64_sve_filter_i128
+    SETUP128 .Lvf8_inval
+    mov     x10, #0
+    mov     x11, #0
+    whilelo p0.d, x10, x2
+    b.none  .Lvf8_done
+.Lvf8_loop:
+    lsl     x13, x10, #1
+    ld2d    {z2.d, z3.d}, p0/z, [x0, x13, lsl #3]
+    index   z1.d, x10, #1
+    ROWPRED
+    RANGE128
+    compact z4.d, p2, z1.d
+    cntp    x12, p7, p2.d
+    whilelo p3.d, xzr, x12
+    st1w    {z4.d}, p3, [x6, x11, lsl #2]
+    add     x11, x11, x12
+    incd    x10
+    whilelo p0.d, x10, x2
+    b.first .Lvf8_loop
+.Lvf8_done:
+    mov     x0, x11
+    ret
+.Lvf8_inval:
+    mov     x0, #-1
+    ret
+ENDF pqk_a64_sve_filter_i128
+
+/* ------------------------------------------------------------------------
+ * size_t count_i128(x0 data, x1 validity, x2 n, w3 op, x4 &a, x5 &b)
+ * Registers as filter_i128; x11 count (INCP of the selected predicate).
+ */
+FUNC pqk_a64_sve_count_i128
+    SETUP128 .Lvc8_inval
+    mov     x10, #0
+    mov     x11, #0
+    whilelo p0.d, x10, x2
+    b.none  .Lvc8_done
+.Lvc8_loop:
+    lsl     x13, x10, #1
+    ld2d    {z2.d, z3.d}, p0/z, [x0, x13, lsl #3]
+    index   z1.d, x10, #1
+    ROWPRED
+    RANGE128
+    incp    x11, p2.d
+    incd    x10
+    whilelo p0.d, x10, x2
+    b.first .Lvc8_loop
+.Lvc8_done:
+    mov     x0, x11
+    ret
+.Lvc8_inval:
+    mov     x0, #-1
+    ret
+ENDF pqk_a64_sve_count_i128
+
+/* ------------------------------------------------------------------------
+ * int sum_i128(x0 data, x1 validity, x2 n, x3 out_sum)
+ * Registers: x6:x5:x4 = exact 192-bit total (lo, mid, top), x7 row,
+ * x8 block end, x13 = 2*row, x10-x12/x14/x16 fold temps; z16-z19 lane sums
+ * of limbs 0..3, z2/z3 lo/hi words, z4-z7 limbs; p0 rows, p1 valid rows,
+ * p7 all-true.
+ * Algorithm (exact): every value is split into four 32-bit limbs (AND /
+ * LSR of the lo word: unsigned; AND / ASR of the hi word: unsigned and
+ * signed top limb), and each limb is added (merging, under p1, so invalid
+ * and inactive lanes add nothing) into its own 64-bit lane accumulator:
+ *     sum = L0 + L1 * 2^32 + L2 * 2^64 + L3 * 2^96.
+ * Blocks of at most 2^24 rows keep every lane and every UADDV total below
+ * 2^56 (|.| < 2^55 for L3), so the modular UADDV is exact. Each block is
+ * folded into the 192-bit GPR total with ADDS/ADCS/ADC (L1 and L3 split
+ * into their << 32 parts, L3 sign-extended). |sum| < 2^160, so the total is
+ * the exact mathematical sum (cancelling intermediate overflow is OK); the
+ * result fits in int128 iff top == mid ASR 63, else PQK_OVERFLOW.
+ * The row counter restarts exactly at the block end (INCD may overshoot it
+ * for non-power-of-two VLs).
+ */
+FUNC pqk_a64_sve_sum_i128
+    mov     x4, #0
+    mov     x5, #0
+    mov     x6, #0
+    mov     x7, #0
+    ptrue   p7.d
+    cbz     x2, .Lvs8_fin
+.Lvs8_block:
+    mov     x8, #(1 << 24)
+    add     x8, x8, x7
+    cmp     x8, x2
+    csel    x8, x8, x2, lo
+    mov     z16.d, #0
+    mov     z17.d, #0
+    mov     z18.d, #0
+    mov     z19.d, #0
+    whilelo p0.d, x7, x8
+.Lvs8_loop:
+    lsl     x13, x7, #1
+    ld2d    {z2.d, z3.d}, p0/z, [x0, x13, lsl #3]
+    index   z1.d, x7, #1
+    ROWPRED
+    movprfx z4, z2
+    and     z4.d, z4.d, #0xffffffff         // limb 0
+    lsr     z5.d, z2.d, #32                 // limb 1
+    movprfx z6, z3
+    and     z6.d, z6.d, #0xffffffff         // limb 2
+    asr     z7.d, z3.d, #32                 // limb 3 (signed)
+    add     z16.d, p1/m, z16.d, z4.d
+    add     z17.d, p1/m, z17.d, z5.d
+    add     z18.d, p1/m, z18.d, z6.d
+    add     z19.d, p1/m, z19.d, z7.d
+    incd    x7
+    whilelo p0.d, x7, x8
+    b.first .Lvs8_loop
+    mov     x7, x8                          // resume exactly at the block end
+    uaddv   d16, p7, z16.d
+    uaddv   d17, p7, z17.d
+    uaddv   d18, p7, z18.d
+    uaddv   d19, p7, z19.d                  // two's complement, |.| < 2^55
+    fmov    x10, d16
+    fmov    x11, d17
+    fmov    x12, d18
+    fmov    x13, d19
+    adds    x4, x4, x10                     // += L0
+    adcs    x5, x5, xzr
+    adc     x6, x6, xzr
+    lsl     x14, x11, #32                   // += L1 << 32
+    lsr     x16, x11, #32
+    adds    x4, x4, x14
+    adcs    x5, x5, x16
+    adc     x6, x6, xzr
+    adds    x5, x5, x12                     // += L2 << 64
+    adc     x6, x6, xzr
+    lsl     x14, x13, #32                   // += L3 << 96 (sign-extended)
+    asr     x16, x13, #32
+    adds    x5, x5, x14
+    adc     x6, x6, x16
+    cmp     x7, x2
+    b.lo    .Lvs8_block
+.Lvs8_fin:
+    cmp     x6, x5, asr #63                 // fits in int128 <=> top == sign(mid)
+    b.ne    .Lvs8_ovf
+    stp     x4, x5, [x3]
+    mov     w0, #0
+    ret
+.Lvs8_ovf:
+    mov     w0, #1
+    ret
+ENDF pqk_a64_sve_sum_i128
+
+/* ------------------------------------------------------------------------
+ * size_t minmax_i128(x0 data, x1 validity, x2 n, x3 out_min, x4 out_max)
+ * Registers: x6 row, x9 count, x13 = 2*row, x7/x8 temps; z16/z17 lane
+ * minima (lo/hi words, start INT128_MAX), z18/z19 lane maxima (start
+ * INT128_MIN), z2/z3 values, z4 broadcast; p0 rows, p1 valid rows, p3-p5
+ * compare predicates, p7 all-true.
+ * Algorithm: per lane signed 128-bit compares (CMPGT hi, CMPEQ hi, CMPHI lo,
+ * predicate SEL) give the update predicates, applied with vector SEL to
+ * both words; INCP counts valid rows. Horizontal reduction in two steps:
+ * SMINV of the hi words, then UMINV of the lo words over the lanes whose
+ * hi word equals that minimum (CMPEQ predicate) -- lexicographic order of
+ * (signed hi, unsigned lo) is the int128 order. Same with SMAXV/UMAXV.
+ */
+FUNC pqk_a64_sve_minmax_i128
+    mov     x6, #0
+    mov     x9, #0
+    ptrue   p7.d
+    mov     z16.d, #-1                      // min = INT128_MAX
+    mov     x7, #0x7fffffffffffffff
+    dup     z17.d, x7
+    mov     z18.d, #0                       // max = INT128_MIN
+    mov     x7, #0x8000000000000000
+    dup     z19.d, x7
+    whilelo p0.d, x6, x2
+    b.none  .Lvm8_ret
+.Lvm8_loop:
+    lsl     x13, x6, #1
+    ld2d    {z2.d, z3.d}, p0/z, [x0, x13, lsl #3]
+    index   z1.d, x6, #1
+    ROWPRED
+    cmpgt   p3.d, p1/z, z17.d, z3.d         // x_hi <s min_hi
+    cmpeq   p4.d, p1/z, z17.d, z3.d
+    cmphi   p5.d, p1/z, z16.d, z2.d         // x_lo <u min_lo
+    sel     p3.b, p4, p5.b, p3.b            // x <s min
+    sel     z16.d, p3, z2.d, z16.d
+    sel     z17.d, p3, z3.d, z17.d
+    cmpgt   p3.d, p1/z, z3.d, z19.d         // x_hi >s max_hi
+    cmpeq   p4.d, p1/z, z3.d, z19.d
+    cmphi   p5.d, p1/z, z2.d, z18.d         // x_lo >u max_lo
+    sel     p3.b, p4, p5.b, p3.b            // x >s max
+    sel     z18.d, p3, z2.d, z18.d
+    sel     z19.d, p3, z3.d, z19.d
+    incp    x9, p1.d
+    incd    x6
+    whilelo p0.d, x6, x2
+    b.first .Lvm8_loop
+    cbz     x9, .Lvm8_ret
+    sminv   d0, p7, z17.d                   // min hi word
+    fmov    x7, d0
+    dup     z4.d, x7
+    cmpeq   p3.d, p7/z, z17.d, z4.d
+    uminv   d1, p3, z16.d                   // min lo word among those lanes
+    fmov    x8, d1
+    stp     x8, x7, [x3]
+    smaxv   d0, p7, z19.d
+    fmov    x7, d0
+    dup     z4.d, x7
+    cmpeq   p3.d, p7/z, z19.d, z4.d
+    umaxv   d1, p3, z18.d
+    fmov    x8, d1
+    stp     x8, x7, [x4]
+.Lvm8_ret:
+    mov     x0, x9
+    ret
+ENDF pqk_a64_sve_minmax_i128
+
     .section .note.GNU-stack, "", %progbits
