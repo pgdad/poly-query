@@ -1,1 +1,43 @@
-{"language": "clojure", "track": "A", "libraries": []}
+{
+  "language": "clojure",
+  "track": "B",
+  "libraries": [],
+  "tuning": {
+    "compiler": {
+      "aot": "every namespace AOT-compiled (script/compile.clj); verified: no namespace compiled or loaded from source at run time (-Xlog:class+load)",
+      "direct_linking": true,
+      "unchecked_math": false,
+      "elide_meta": "not used (no measurable start-up effect)",
+      "lint": "make lint compiles with *warn-on-reflection* and *unchecked-math* :warn-on-boxed and fails on any reflection, boxed-math or performance warning"
+    },
+    "build": {
+      "jar": "target/polyquery.jar (the JDK AOT cache only covers classes loaded from jar files)",
+      "aot_cache": "make build records target/polyquery.aot with -XX:AOTCacheOutput by replaying a synthetic training session (script/training.clj: generated tables, generic queries) through bin/polyquery; training failure leaves no cache and the build still succeeds"
+    },
+    "launcher_jvm_flags": [
+      "-XX:AOTCache=target/polyquery.aot (only when the file exists; -Xlog:aot*=off,cds*=off so a stale or unusable cache is ignored silently)",
+      "-XX:+UseParallelGC (kept from the accepted engine; G1 and Serial measured, not better)",
+      "-XX:CompileThresholdScaling=0.3",
+      "-XX:+UseTransparentHugePages",
+      "-Xss16m"
+    ],
+    "code": [
+      "boxed arithmetic removed from every namespace (primitive locals, ^:const constants)",
+      "sort: one comparator type switching on key kind (no megamorphic per-key calls, no boxing), 8-byte UTF-8 prefixes for string keys, merge-path parallel merges, parallel key extraction",
+      "positions-where is a macro (no boxed predicate call per row); no not= on primitives in hot loops",
+      "MIN/MAX states and comparators branch on the sign instead of a checked multiplication"
+    ],
+    "rejected": [
+      ":elide-meta",
+      "-XX:+UseG1GC",
+      "-XX:+UseSerialGC",
+      "-XX:-UsePerfData",
+      "-Xms8g",
+      "-Xmn4g",
+      "-XX:+AlwaysPreTouch",
+      "-XX:ReservedCodeCacheSize",
+      "-XX:+AOTCompileEagerly",
+      "-XX:CICompilerCount=24"
+    ]
+  }
+}
