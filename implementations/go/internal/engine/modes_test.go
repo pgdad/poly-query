@@ -133,6 +133,27 @@ func TestExecutionModesAgree(t *testing.T) {
 		"SELECT cat, SUM(price) FILTERED FROM t GROUP BY cat",
 		"SELECT COALESCE(grp, 'none'), NULLIF(cat, 'red'), ROUND(price, 1) FROM t WHERE id % 97 = 0",
 		"WITH x AS (SELECT grp, COUNT(*) AS n FROM t GROUP BY grp) SELECT a.grp, a.n + b.n FROM x a JOIN x b ON a.grp = b.grp",
+		// Vectorized CASE: lazy branches, NULL conditions and results,
+		// decimals, dictionary-encoded strings, nesting, errors.
+		"SELECT id, CASE WHEN id % 3 = 0 THEN 0 ELSE 100 / (id % 3) END FROM t WHERE id < 50",
+		"SELECT SUM(CASE WHEN cat LIKE '%e%' THEN 1 ELSE 0 END), MAX(CASE WHEN flag THEN amount END) FROM t",
+		"SELECT CASE WHEN grp IS NULL THEN NULL WHEN amount > 250 THEN amount * 2 ELSE amount END FROM t WHERE id % 11 = 0",
+		"SELECT CASE WHEN NULL THEN 1 WHEN price > 4 THEN 2 END, CASE WHEN cat = 'red' THEN cat WHEN cat = '' THEN 'empty' ELSE UPPER(cat) END FROM t",
+		"SELECT CASE WHEN id < 10 THEN CASE WHEN flag THEN 'a' ELSE 'b' END ELSE grp END, COUNT(*) FROM t GROUP BY 1",
+		"SELECT CASE WHEN id > 2995 THEN 1 / (id - id) ELSE 0 END FROM t",
+		"SELECT CASE WHEN 1 / (id - 1500) > 0 THEN 1 ELSE 2 END FROM t WHERE id > 1400",
+		"SELECT CASE WHEN price > 5 THEN price WHEN price > 2 THEN 2.5 ELSE id END FROM t WHERE id % 13 = 0",
+		// Uncorrelated scalar subqueries and shared aggregations.
+		"SELECT id FROM t WHERE amount > (SELECT AVG(amount) FROM t) AND id < 100",
+		"SELECT COUNT(*) FROM t WHERE amount > (SELECT MAX(amount) FROM t WHERE id < 0)",
+		"SELECT COUNT(*) FROM t WHERE id < 0 AND amount > (SELECT 1 / 0 FROM d)",
+		"WITH x AS (SELECT grp, SUM(amount) AS s FROM t GROUP BY grp) SELECT COUNT(*) FROM x WHERE s > (SELECT AVG(s) FROM x)",
+		"SELECT grp, COUNT(*) AS n FROM t GROUP BY grp ORDER BY n DESC, grp LIMIT 4",
+		"SELECT id % 50, cat, COUNT(*) FROM t GROUP BY id % 50, cat ORDER BY 1, 2",
+		// Global DISTINCT aggregates over columns with known ranges.
+		"SELECT COUNT(DISTINCT id), SUM(DISTINCT id), AVG(DISTINCT amount), COUNT(DISTINCT day), COUNT(DISTINCT flag) FROM t",
+		"SELECT COUNT(DISTINCT id), SUM(DISTINCT amount) FROM t WHERE id % 3 = 0 OR grp IS NULL",
+		"SELECT COUNT(DISTINCT id) FROM t WHERE id < 0",
 	}
 	for _, q := range queries {
 		want := canonical(e, q, modeConfig{"row", "hash", 1, true})

@@ -575,10 +575,15 @@ func parallelAggregate(ec *Context, x *physical.HashAggregate) (BatchOperator, b
 		}
 		tables[w] = newAggTable(ec, keyTypes, x.Aggs)
 	}
+	var rows int64
+	for _, r := range ranges {
+		rows += int64(r.end - r.start)
+	}
 	run := func() ([]types.Row, error) {
 		mark := ec.Mem.Mark()
 		err := runMorsels(ec, ranges, nw, func(w, i int) error {
 			srcs[w].set(ranges[i])
+			tables[w].prepare(x, expectedGroups(x.EstGroups, rows/int64(nw)))
 			var k int64
 			for {
 				b, err := ops[w].NextBatch()
@@ -594,15 +599,15 @@ func parallelAggregate(ec *Context, x *physical.HashAggregate) (BatchOperator, b
 		if err != nil {
 			return nil, err
 		}
-		rows, err := mergeTables(ec, tables, keyTypes, x.Aggs)
+		out, err := mergeTables(ec, x, tables, keyTypes, x.Aggs)
 		if err != nil {
 			return nil, err
 		}
 		ec.Mem.Reset(mark)
-		if err := ec.Mem.Reserve(int64(len(rows)) * int64(64+48*len(x.Aggs))); err != nil {
+		if err := ec.Mem.Reserve(int64(len(out)) * int64(64+48*len(x.Aggs))); err != nil {
 			return nil, err
 		}
-		return rows, nil
+		return out, nil
 	}
 	return &lazyRows{run: run, types: schemaTypes(x.Schema())}, true, nil
 }

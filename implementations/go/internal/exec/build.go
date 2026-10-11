@@ -75,6 +75,17 @@ func build(ec *Context, n physical.Node, vec bool) (Operator, error) {
 		}
 		return &projectOp{input: in, exprs: fns, buf: make(types.Row, len(fns))}, nil
 	case *physical.HashAggregate:
+		if ec.isShared(x) {
+			return &lazyRowsOp{run: func() ([]types.Row, error) {
+				return ec.sharedRows(x, func() ([]types.Row, error) {
+					op, err := buildAggregate(ec, x, vec)
+					if err != nil {
+						return nil, err
+					}
+					return rowsOf(ec, op)
+				})
+			}}, nil
+		}
 		return buildAggregate(ec, x, vec)
 	case *physical.HashJoin:
 		return buildHashJoin(ec, x, vec)

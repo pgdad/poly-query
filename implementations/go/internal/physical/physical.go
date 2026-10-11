@@ -75,6 +75,28 @@ type HashAggregate struct {
 	KeyCols []plan.Column
 	Aggs    []*plan.AggCall
 	AggCols []plan.Column
+	// EstGroups estimates the number of groups from column statistics
+	// (0: unknown); execution sizes its hash tables with it.
+	EstGroups int64
+	// KeyRange reports that the single int-class key lies within
+	// [KeyLo, KeyHi] (column statistics), a range small enough for
+	// directly indexed group tables.
+	KeyRange     bool
+	KeyLo, KeyHi int64
+	// AnyOrder reports that the order of the output groups does not
+	// matter: a sort above it orders by all grouping keys (otherwise
+	// groups come out in order of first appearance).
+	AnyOrder bool
+	// ArgRanges (parallel to Aggs; nil if none applies) gives the value
+	// range of int-class DISTINCT arguments of aggregations without
+	// grouping keys, when small enough for a bitmap of seen values.
+	ArgRanges []ValueRange
+}
+
+// ValueRange is a range [Lo, Hi] of int-class values (OK: known).
+type ValueRange struct {
+	OK     bool
+	Lo, Hi int64
 }
 
 // HashJoin is an equi-join: rows match when LeftKeys equal RightKeys (NULL
@@ -88,6 +110,10 @@ type HashJoin struct {
 	RightKeys   []plan.Expr
 	Residual    plan.Expr
 	BuildLeft   bool
+	// Anti (LEFT joins without residual) emits only the NULL-extended
+	// rows of unmatched probe rows: the filter above the join rejects
+	// every matched row (it tests a build column without NULLs for NULL).
+	Anti bool
 }
 
 // MergeJoin is a sort-merge equi-join: both inputs are sorted by their
@@ -266,6 +292,10 @@ type Plan struct {
 	Root     Node
 	Subplans map[*plan.Subquery]Node
 	Exec     Execution
+	// Shared keys the aggregations that occur more than once in the
+	// statement (identical self-contained subtrees): execution computes
+	// each key's rows once.
+	Shared map[*HashAggregate]string
 }
 
 // Options influence physical planning.

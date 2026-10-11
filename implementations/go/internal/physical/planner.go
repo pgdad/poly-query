@@ -5,6 +5,7 @@ import (
 
 	"polyquery/internal/errs"
 	"polyquery/internal/plan"
+	"polyquery/internal/storage"
 	"polyquery/internal/types"
 )
 
@@ -17,6 +18,7 @@ func Build(root plan.Node, opts Options) (*Plan, error) {
 	}
 	out := &Plan{Root: r, Subplans: p.subplans}
 	out.Exec = chooseExecution(out, opts)
+	out.Shared = sharedAggregates(out)
 	return out, nil
 }
 
@@ -123,6 +125,9 @@ func (p *planner) node(n plan.Node, req idset) (Node, error) {
 		if err != nil {
 			return nil, err
 		}
+		if hj, ok := in.(*HashJoin); ok && hj.Kind == plan.JoinLeft && hj.Residual == nil && !hj.BuildLeft {
+			hj.Anti = rejectsMatches(x.Pred, x.Input.(*plan.Join))
+		}
 		return &Filter{Input: in, Pred: x.Pred}, nil
 	case *plan.Project:
 		out := &Project{}
@@ -144,13 +149,25 @@ func (p *planner) node(n plan.Node, req idset) (Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &HashAggregate{Input: in, Keys: x.Keys, KeyCols: x.KeyCols, Aggs: x.Aggs, AggCols: x.AggCols}, nil
+		if len(x.Keys) == 0 && orderInsensitive(x.Aggs) {
+			if below := orderFreeInput(in); below != nil {
+				below.AnyOrder = true
+			}
+		}
+		agg := &HashAggregate{Input: in, Keys: x.Keys, KeyCols: x.KeyCols, Aggs: x.Aggs, AggCols: x.AggCols,
+			EstGroups: p.estimateGroups(x)}
+		agg.KeyRange, agg.KeyLo, agg.KeyHi = keyRange(x, agg.EstGroups)
+		agg.ArgRanges = distinctArgRanges(x)
+		return agg, nil
 	case *plan.Join:
 		return p.join(x, req)
 	case *plan.Sort:
 		in, err := p.node(x.Input, with(req, plan.NodeExprs(x)...))
 		if err != nil {
 			return nil, err
+		}
+		if agg := orderFreeAggregate(in, x.Keys); agg != nil {
+			agg.AnyOrder = true
 		}
 		return &Sort{Input: in, Keys: x.Keys, Limit: -1}, nil
 	case *plan.Limit:
@@ -413,6 +430,269 @@ func (p *planner) estimate(n plan.Node) float64 {
 		return p.estimate(c[0])
 	}
 	return 1
+}
+
+// maxEstGroups caps group estimates (they size hash tables up front).
+const maxEstGroups = 1 << 22
+
+// estimateGroups estimates the number of groups of an aggregation whose
+// keys are base table columns: the product of their distinct counts
+// (plus one for NULL), capped by the input estimate; 0 if unknown.
+func (p *planner) estimateGroups(x *plan.Aggregate) int64 {
+	if len(x.Keys) == 0 {
+		return 1
+	}
+	groups := 1.0
+	for _, k := range x.Keys {
+		ref, ok := k.(*plan.ColumnRef)
+		if !ok {
+			return 0
+		}
+		st, ok := columnStats(x.Input, ref.ID)
+		if !ok {
+			return 0
+		}
+		d := float64(st.Distinct)
+		if st.NullCount > 0 {
+			d++
+		}
+		groups *= max(d, 1)
+	}
+	return int64(min(groups, p.estimate(x.Input), maxEstGroups))
+}
+
+// orderFreeAggregate returns the aggregation below a sort (through
+// projections of plain columns) if the sort keys include all its grouping
+// keys: distinct groups then sort by distinct keys, so the order in which
+// the aggregation emits them cannot show.
+func orderFreeAggregate(n Node, keys []plan.SortKey) *HashAggregate {
+	ids := map[plan.ColumnID]bool{}
+	for _, k := range keys {
+		if ref, ok := k.Expr.(*plan.ColumnRef); ok {
+			ids[ref.ID] = true
+		}
+	}
+	for {
+		switch x := n.(type) {
+		case *Project:
+			next := map[plan.ColumnID]bool{}
+			for i, e := range x.Exprs {
+				ref, ok := e.(*plan.ColumnRef)
+				if !ok {
+					return nil // evaluation order could decide which error shows
+				}
+				if ids[x.Cols[i].ID] {
+					next[ref.ID] = true
+				}
+			}
+			ids, n = next, x.Input
+		case *HashAggregate:
+			if len(x.KeyCols) == 0 {
+				return nil
+			}
+			for _, c := range x.KeyCols {
+				if !ids[c.ID] {
+					return nil
+				}
+			}
+			return x
+		default:
+			return nil
+		}
+	}
+}
+
+// rejectsMatches reports whether a filter above a LEFT join rejects every
+// matched row: all its conjuncts test right-side columns for NULL that
+// hold no NULLs (column statistics of a right input that is a plain,
+// possibly filtered, table scan). Such a filter keeps exactly the
+// NULL-extended rows (an anti join).
+func rejectsMatches(pred plan.Expr, j *plan.Join) bool {
+	scan := j.Right
+	for {
+		f, ok := scan.(*plan.Filter)
+		if !ok {
+			break
+		}
+		scan = f.Input
+	}
+	if _, ok := scan.(*plan.Scan); !ok {
+		return false
+	}
+	for _, c := range plan.Conjuncts(pred) {
+		isNull, ok := c.(*plan.IsNull)
+		if !ok || isNull.Not {
+			return false
+		}
+		ref, ok := isNull.X.(*plan.ColumnRef)
+		if !ok {
+			return false
+		}
+		st, ok := columnStats(scan, ref.ID)
+		if !ok || st.NullCount != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// maxBitmapValues bounds the value range of DISTINCT bitmaps.
+const maxBitmapValues = 1 << 23
+
+// distinctArgRanges returns the value ranges of the int-class base column
+// arguments of DISTINCT aggregates of an aggregation without keys.
+func distinctArgRanges(x *plan.Aggregate) []ValueRange {
+	if len(x.Keys) != 0 {
+		return nil
+	}
+	var out []ValueRange
+	for i, a := range x.Aggs {
+		if !a.Distinct || a.Arg == nil {
+			continue
+		}
+		ok, lo, hi := intColumnRange(x.Input, a.Arg)
+		if !ok || float64(hi)-float64(lo)+1 > maxBitmapValues {
+			continue
+		}
+		if out == nil {
+			out = make([]ValueRange, len(x.Aggs))
+		}
+		out[i] = ValueRange{OK: true, Lo: lo, Hi: hi}
+	}
+	return out
+}
+
+// intColumnRange returns the value range of e if it is an int-class base
+// table column (narrow DECIMALs: unscaled values).
+func intColumnRange(input plan.Node, e plan.Expr) (bool, int64, int64) {
+	ref, ok := e.(*plan.ColumnRef)
+	if !ok {
+		return false, 0, 0
+	}
+	switch t := ref.T; t.Kind {
+	case types.KindInt64, types.KindBoolean, types.KindDate, types.KindTimestamp:
+	case types.KindDecimal:
+		if t.IsWide() {
+			return false, 0, 0
+		}
+	default:
+		return false, 0, 0
+	}
+	st, ok := columnStats(input, ref.ID)
+	if !ok || st.Min.Null || st.Max.Null {
+		return false, 0, 0
+	}
+	return true, st.Min.I, st.Max.I
+}
+
+// orderInsensitive reports whether aggregates yield the same result for
+// any order of their input rows: no FLOAT64 sums (rounding depends on the
+// summation order).
+func orderInsensitive(aggs []*plan.AggCall) bool {
+	for _, a := range aggs {
+		if (a.Func == plan.AggSum || a.Func == plan.AggAvg) && a.Arg.Type().Kind == types.KindFloat64 {
+			return false
+		}
+	}
+	return true
+}
+
+// orderFreeInput returns the aggregation feeding an order-insensitive
+// global aggregation through filters and projections whose expressions
+// cannot fail (so no row order decides which error shows).
+func orderFreeInput(n Node) *HashAggregate {
+	for {
+		switch x := n.(type) {
+		case *Project:
+			for _, e := range x.Exprs {
+				if !cannotFail(e) {
+					return nil
+				}
+			}
+			n = x.Input
+		case *Filter:
+			if !cannotFail(x.Pred) {
+				return nil
+			}
+			n = x.Input
+		case *HashAggregate:
+			if len(x.KeyCols) == 0 {
+				return nil
+			}
+			return x
+		default:
+			return nil
+		}
+	}
+}
+
+// cannotFail reports whether evaluating e for a row can never raise an
+// error: column references, literals, comparisons, IS NULL, logical
+// operators and uncorrelated subqueries (evaluated once, independently of
+// rows).
+func cannotFail(e plan.Expr) bool {
+	switch x := e.(type) {
+	case *plan.ColumnRef, *plan.Literal:
+		return true
+	case *plan.IsNull:
+		return cannotFail(x.X)
+	case *plan.Unary:
+		return x.Op == plan.OpNot && cannotFail(x.X)
+	case *plan.Binary:
+		if !x.Op.IsComparison() && x.Op != plan.OpAnd && x.Op != plan.OpOr {
+			return false
+		}
+		return cannotFail(x.L) && cannotFail(x.R)
+	case *plan.Subquery:
+		return len(x.Correlated) == 0 && x.Kind != plan.SubIn
+	case *plan.Cast:
+		// Numeric conversions to FLOAT64 (comparison promotions).
+		switch x.X.Type().Kind {
+		case types.KindInt64, types.KindDecimal, types.KindFloat64:
+			return x.To.Kind == types.KindFloat64 && cannotFail(x.X)
+		}
+	}
+	return false
+}
+
+// maxDenseKeys bounds the key range of directly indexed group tables.
+const maxDenseKeys = 1 << 22
+
+// keyRange returns the value range of a single int-class grouping key
+// that is a base table column, if the range is small: at most
+// maxDenseKeys values and not much sparser than the estimated groups.
+func keyRange(x *plan.Aggregate, estGroups int64) (bool, int64, int64) {
+	if len(x.Keys) != 1 || estGroups <= 0 {
+		return false, 0, 0
+	}
+	ok, lo, hi := intColumnRange(x.Input, x.Keys[0])
+	if !ok {
+		return false, 0, 0
+	}
+	span := float64(hi) - float64(lo) + 1
+	if span > maxDenseKeys || span > 4*float64(estGroups)+4096 {
+		return false, 0, 0
+	}
+	return true, lo, hi
+}
+
+// columnStats finds the base table column producing id below n and
+// returns its statistics.
+func columnStats(n plan.Node, id plan.ColumnID) (storage.ColumnStats, bool) {
+	if s, ok := n.(*plan.Scan); ok {
+		ord, ok := scanOrds(s)[id]
+		if !ok {
+			return storage.ColumnStats{}, false
+		}
+		st, err := s.Table.ColumnStats(ord)
+		return st, err == nil
+	}
+	for _, c := range n.Children() {
+		if st, ok := columnStats(c, id); ok {
+			return st, true
+		}
+	}
+	return storage.ColumnStats{}, false
 }
 
 // scanOrds maps a scan's column IDs to table column ordinals.

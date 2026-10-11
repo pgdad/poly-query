@@ -126,6 +126,18 @@ func (c *vcompiler) compile(e plan.Expr) (vexpr, error) {
 			return c.fallback(e)
 		}
 		return c.elementwise(e)
+	case *plan.Case:
+		if x.Operand == nil {
+			return c.searchedCase(x)
+		}
+	case *plan.Subquery:
+		if x.Kind == plan.SubScalar && len(x.Correlated) == 0 {
+			fn, err := compileSubquery(c.ec, c.lay, x)
+			if err != nil {
+				return nil, err
+			}
+			return &vscalarSubquery{fn: fn, cls: classOf(t)}, nil
+		}
 	}
 	return c.fallback(e)
 }
@@ -177,6 +189,26 @@ func newVConst(v types.Value, c vclass) *vconst {
 }
 
 func (k *vconst) eval(*Batch, []int32) (*Vec, error) { return &k.vec, nil }
+
+// vscalarSubquery is an uncorrelated scalar subquery: evaluated once (when
+// the first batch with active rows needs it, as row-mode evaluation would)
+// and then a constant.
+type vscalarSubquery struct {
+	fn  evalFn
+	cls vclass
+	val *vconst
+}
+
+func (q *vscalarSubquery) eval(b *Batch, sel []int32) (*Vec, error) {
+	if q.val == nil {
+		v, err := q.fn(nil)
+		if err != nil {
+			return nil, err
+		}
+		q.val = newVConst(v, q.cls)
+	}
+	return &q.val.vec, nil
+}
 
 // vfallback evaluates an expression row by row with the row-mode
 // evaluator (CASE, COALESCE, subqueries, outer references, …).

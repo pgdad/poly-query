@@ -77,6 +77,12 @@ type Config struct {
 	Logger *slog.Logger
 }
 
+// DefaultMaxThreads caps the default number of worker threads per query
+// (--threads): measured on the 1m analytics workload, more threads stop
+// paying off beyond 16 (merging per-worker partial aggregates grows with
+// the number of workers).
+const DefaultMaxThreads = 16
+
 // DefaultConfig returns the default configuration.
 func DefaultConfig() Config {
 	return Config{
@@ -85,7 +91,7 @@ func DefaultConfig() Config {
 		MaxIngestBytes:   4 << 30,
 		MaxTableRows:     500_000_000,
 		MaxJoinRows:      100_000_000,
-		Threads:          min(4, runtime.NumCPU()),
+		Threads:          min(DefaultMaxThreads, runtime.NumCPU()),
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }

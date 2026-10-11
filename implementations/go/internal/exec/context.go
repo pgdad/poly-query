@@ -6,6 +6,7 @@ package exec
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"unsafe"
 
@@ -46,6 +47,9 @@ type Context struct {
 	// Materialize nodes of correlated subquery plans.
 	lookups map[*physical.ParamLookup]*lookupTable
 	cached  map[*physical.Materialize][]types.Row
+	// shared holds the rows of shared aggregations by key.
+	sharedMu sync.Mutex
+	shared   map[string]*sharedResult
 }
 
 // checkEvery is how many rows operators process between cancellation checks.

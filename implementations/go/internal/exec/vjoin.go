@@ -30,7 +30,78 @@ type joinTable struct {
 	heads   []int32
 	next    []int32
 	shift   uint
+	direct  bool // int keys: heads indexed by key - lo (no hashing)
+	unique  bool // direct mode with distinct keys: chains of length 1
+	lo      int64
 	seed    maphash.Seed
+	rows    []int32 // scratch: stored rows of the current batch
+	// enc dictionary-encodes STRING build columns while their number of
+	// distinct values stays small (nil entries: plain columns); probes
+	// then emit dictionary-encoded vectors.
+	enc []*buildDict
+}
+
+// maxBuildDict is the number of distinct values from which a STRING build
+// column is stored plainly.
+const maxBuildDict = 1 << 14
+
+// buildDict encodes the values of one STRING build column.
+type buildDict struct {
+	dict   []string
+	index  map[string]uint32
+	inDict []string // dictionary of the last dictionary-encoded input …
+	inMap  []int32  // … and its codes mapped to ours (+1; 0 = unmapped)
+}
+
+func (d *buildDict) code(s string) uint32 {
+	c, ok := d.index[s]
+	if !ok {
+		c = uint32(len(d.dict))
+		d.dict = append(d.dict, s)
+		d.index[s] = c
+	}
+	return c
+}
+
+// codeOf encodes row i of v (not NULL).
+func (d *buildDict) codeOf(v *Vec, i int) uint32 {
+	if v.Dict == nil {
+		return d.code(v.S[i])
+	}
+	if !sameDict(d.inDict, v.Dict) {
+		d.inDict = v.Dict
+		d.inMap = grow(d.inMap, len(v.Dict))
+		clear(d.inMap)
+	}
+	in := v.Codes[i]
+	if m := d.inMap[in]; m != 0 {
+		return uint32(m - 1)
+	}
+	c := d.code(v.Dict[in])
+	d.inMap[in] = int32(c) + 1
+	return c
+}
+
+// decode turns dictionary-encoded build column k into a plain one.
+func (t *joinTable) decode(k int) {
+	c, d := &t.cols[k], t.enc[k]
+	c.S = make([]string, len(c.Codes), max(cap(c.Codes), 16))
+	for i, code := range c.Codes {
+		c.S[i] = d.dict[code]
+	}
+	c.Codes, t.enc[k] = nil, nil
+}
+
+// intChain returns the first build row of the bucket of int key k (-1:
+// none). In direct mode the bucket holds only rows with key k.
+func (t *joinTable) intChain(k int64) int32 {
+	if t.direct {
+		if i := uint64(k - t.lo); i < uint64(len(t.heads)) {
+			return t.heads[i]
+		}
+		return -1
+	}
+	return t.heads[hashInt(k, t.shift)]
 }
 
 func hashInt(k int64, shift uint) uint64 {
@@ -49,59 +120,117 @@ func (t *joinTable) appendRows(b *Batch, keys []*Vec, keyTypes []types.Type, key
 	for k, kt := range keyTypes {
 		keyClasses[k] = classOf(kt)
 	}
-	for k, v := range b.Cols {
-		if t.classes[k] == vStr {
-			v.strs(b.N)
+	if t.enc == nil {
+		t.enc = make([]*buildDict, len(t.classes))
+		for k, cls := range t.classes {
+			if cls == vStr {
+				t.enc[k] = &buildDict{index: map[string]uint32{}}
+			}
 		}
 	}
+	// Rows with a NULL key never match: they are not stored.
+	rows := t.rows[:0]
 	forActive(b.N, b.Sel, func(i int) {
 		for _, kv := range keys {
 			if kv.isNull(i) {
-				return // NULL keys never match
+				return
 			}
 		}
-		if t.intKey {
-			t.intKeys = append(t.intKeys, keys[0].I[i])
-		} else {
+		rows = append(rows, int32(i))
+	})
+	t.rows = rows
+	n, sel := b.N, rows
+	if b.Sel == nil && len(rows) == n {
+		sel = nil // all rows: bulk copies
+	}
+	if t.intKey {
+		t.intKeys = appendActive(t.intKeys, keys[0].I, n, sel)
+	} else {
+		t.strKeys = growFor(t.strKeys, len(rows))
+		for _, i := range rows {
 			kb := (*keyBuf)[:0]
 			for k, kv := range keys {
-				kb = appendKey(kb, kv.value(i, keyClasses[k]), keyTypes[k])
+				kb = appendKey(kb, kv.value(int(i), keyClasses[k]), keyTypes[k])
 			}
 			*keyBuf = kb
 			t.strKeys = append(t.strKeys, string(kb))
 			bytes += int64(len(kb))
 		}
-		for k, v := range b.Cols {
-			c := &t.cols[k]
-			isNull := v.isNull(i)
-			if isNull && c.Nulls == nil {
-				c.Nulls = make([]bool, t.n, max(t.n, 16))
-			}
-			if c.Nulls != nil {
-				c.Nulls = append(c.Nulls, isNull)
-			}
-			switch t.classes[k] {
-			case vInt:
-				c.I = append(c.I, v.I[i])
-			case vFloat:
-				c.F = append(c.F, v.F[i])
-			case vWide:
-				c.W = append(c.W, v.W[i])
-			default:
-				c.S = append(c.S, v.S[i])
-				bytes += int64(len(v.S[i]))
+	}
+	for k, v := range b.Cols {
+		c := &t.cols[k]
+		if v.Nulls != nil && c.Nulls == nil {
+			c.Nulls = make([]bool, t.n, max(t.n, 16))
+		}
+		if c.Nulls != nil {
+			if v.Nulls != nil {
+				c.Nulls = appendActive(c.Nulls, v.Nulls, n, sel)
+			} else {
+				c.Nulls = append(growFor(c.Nulls, len(rows)), make([]bool, len(rows))...)
 			}
 		}
-		t.n++
-	})
+		switch t.classes[k] {
+		case vInt:
+			c.I = appendActive(c.I, v.I, n, sel)
+		case vFloat:
+			c.F = appendActive(c.F, v.F, n, sel)
+		case vWide:
+			c.W = appendActive(c.W, v.W, n, sel)
+		default:
+			if d := t.enc[k]; d != nil {
+				c.Codes = growFor(c.Codes, len(rows))
+				for _, i := range rows {
+					var code uint32
+					if !v.isNull(int(i)) {
+						code = d.codeOf(v, int(i))
+					}
+					c.Codes = append(c.Codes, code)
+				}
+				break
+			}
+			old := len(c.S)
+			c.S = appendActive(c.S, v.strs(n), n, sel)
+			for _, str := range c.S[old:] {
+				bytes += int64(len(str))
+			}
+		}
+	}
+	t.n += len(rows)
+	for k, d := range t.enc {
+		if d != nil && len(d.dict) > maxBuildDict {
+			t.decode(k)
+		}
+	}
 	return bytes
 }
 
-// index builds the bucket chains.
+// index builds the bucket chains (and finishes dictionary-encoded
+// columns).
 func (t *joinTable) index() {
+	for k, d := range t.enc {
+		if d == nil {
+			continue
+		}
+		if len(d.dict) == 0 {
+			t.decode(k) // only NULLs (or no rows)
+			continue
+		}
+		t.cols[k].Dict = d.dict
+	}
 	size := 16
 	for size < 2*t.n {
 		size <<= 1
+	}
+	if t.intKey && t.n > 0 {
+		// Keys spanning a small range index the bucket heads directly:
+		// a bucket then holds exactly the rows of one key value.
+		lo, hi := t.intKeys[0], t.intKeys[0]
+		for _, k := range t.intKeys {
+			lo, hi = min(lo, k), max(hi, k)
+		}
+		if span := uint64(hi - lo); hi-lo >= 0 && span < uint64(max(2*size, 1024)) {
+			t.direct, t.lo, size = true, lo, int(span)+1
+		}
 	}
 	t.shift = uint(64 - bits.TrailingZeros(uint(size)))
 	t.heads = make([]int32, size)
@@ -111,13 +240,25 @@ func (t *joinTable) index() {
 	t.next = make([]int32, t.n)
 	for i := t.n - 1; i >= 0; i-- {
 		var h uint64
-		if t.intKey {
+		switch {
+		case t.direct:
+			h = uint64(t.intKeys[i] - t.lo)
+		case t.intKey:
 			h = hashInt(t.intKeys[i], t.shift)
-		} else {
+		default:
 			h = maphash.String(t.seed, t.strKeys[i]) >> t.shift
 		}
 		t.next[i] = t.heads[h]
 		t.heads[h] = int32(i)
+	}
+	if t.direct {
+		t.unique = true
+		for _, n := range t.next {
+			if n >= 0 {
+				t.unique = false
+				break
+			}
+		}
 	}
 }
 
@@ -127,6 +268,7 @@ func (t *joinTable) index() {
 type joinBuild struct {
 	ec       *Context
 	input    BatchOperator
+	par      *buildInput // parallel input (instead of input)
 	keys     *exprSet
 	keyTypes []types.Type
 	classes  []vclass
@@ -147,13 +289,19 @@ func buildSide(x *physical.HashJoin) (build, probe physical.Node, buildKeys, pro
 
 func newJoinBuild(ec *Context, x *physical.HashJoin) (*joinBuild, error) {
 	buildNode, _, buildKeys, probeKeys := buildSide(x)
-	input, err := BuildBatch(ec, buildNode)
-	if err != nil {
+	s := &joinBuild{ec: ec, keyTypes: exprTypes(buildKeys)}
+	keyExprs := func() (*exprSet, error) { return newExprSet(ec, buildNode.Schema(), buildKeys) }
+	var err error
+	if s.par, err = newBuildInput(ec, buildNode, keyExprs); err != nil {
 		return nil, err
 	}
-	s := &joinBuild{ec: ec, input: input, keyTypes: exprTypes(buildKeys)}
-	if s.keys, err = newExprSet(ec, buildNode.Schema(), buildKeys); err != nil {
-		return nil, err
+	if s.par == nil {
+		if s.input, err = BuildBatch(ec, buildNode); err != nil {
+			return nil, err
+		}
+		if s.keys, err = keyExprs(); err != nil {
+			return nil, err
+		}
 	}
 	for _, c := range buildNode.Schema() {
 		s.classes = append(s.classes, classOf(c.Type))
@@ -169,6 +317,9 @@ func (s *joinBuild) get() (*joinTable, error) {
 }
 
 func (s *joinBuild) build() (*joinTable, error) {
+	if s.par != nil {
+		return s.buildParallel()
+	}
 	t := &joinTable{seed: maphash.MakeSeed(), classes: s.classes, intKey: s.intKey}
 	t.cols = make([]Vec, len(t.classes))
 	keys := make([]*Vec, len(s.keyTypes))
@@ -206,6 +357,7 @@ type vhashJoinOp struct {
 	ec          *Context
 	kind        plan.JoinKind
 	buildLeft   bool
+	anti        bool // emit unmatched probe rows only (physical.HashJoin.Anti)
 	shared      *joinBuild
 	probe       BatchOperator
 	probeKeys   *exprSet
@@ -256,7 +408,7 @@ func buildVHashJoin(ec *Context, x *physical.HashJoin, pc *pipelineCtx) (BatchOp
 	if err != nil {
 		return nil, err
 	}
-	op := &vhashJoinOp{ec: ec, kind: x.Kind, buildLeft: x.BuildLeft, shared: shared, probe: probe}
+	op := &vhashJoinOp{ec: ec, kind: x.Kind, buildLeft: x.BuildLeft, anti: x.Anti, shared: shared, probe: probe}
 	if op.probeKeys, err = newExprSet(ec, probeNode.Schema(), probeKeys); err != nil {
 		return nil, err
 	}
@@ -346,6 +498,14 @@ func (j *vhashJoinOp) rowAt(k int) int {
 // fillPairs collects up to BatchSize (probe row, build row) pairs of the
 // current probe batch; build row -1 denotes a NULL-extended row.
 func (j *vhashJoinOp) fillPairs() {
+	if j.anti {
+		j.fillUnmatched()
+		return
+	}
+	if j.table.unique {
+		j.fillUnique()
+		return
+	}
 	t := j.table
 	pp, pbuild := j.pairP[:0], j.pairB[:0]
 	leftNoResidual := j.kind == plan.JoinLeft && j.residual == nil
@@ -359,7 +519,7 @@ func (j *vhashJoinOp) fillPairs() {
 			}
 			if !hasNull {
 				if t.intKey {
-					j.chain = t.heads[hashInt(j.pkeys[0].I[i], t.shift)]
+					j.chain = t.intChain(j.pkeys[0].I[i])
 				} else {
 					j.keyBuf = j.keyBuf[:0]
 					for k, kv := range j.pkeys {
@@ -374,7 +534,7 @@ func (j *vhashJoinOp) fillPairs() {
 			for j.chain >= 0 && len(pp) < BatchSize {
 				c := j.chain
 				j.chain = t.next[c]
-				if t.intKeys[c] == k {
+				if t.direct || t.intKeys[c] == k {
 					pp, pbuild = append(pp, int32(i)), append(pbuild, c)
 					j.matchedRow = true
 				}
@@ -400,6 +560,79 @@ func (j *vhashJoinOp) fillPairs() {
 		}
 		j.inChain = false
 		j.pos++
+	}
+	j.pairP, j.pairB = pp, pbuild
+}
+
+// fillUnique is fillPairs for build tables with distinct, directly indexed
+// int keys: every probe row has at most one match.
+func (j *vhashJoinOp) fillUnique() {
+	t := j.table
+	pp, pbuild := j.pairP[:0], j.pairB[:0]
+	leftNoResidual := j.kind == plan.JoinLeft && j.residual == nil
+	keys, nulls := j.pkeys[0].I, j.pkeys[0].Nulls
+	heads, lo, size := t.heads, t.lo, uint64(len(t.heads))
+	for ; j.pos < j.active && len(pp) < BatchSize; j.pos++ {
+		i := j.rowAt(j.pos)
+		c := int32(-1)
+		if nulls == nil || !nulls[i] {
+			if h := uint64(keys[i] - lo); h < size {
+				c = heads[h]
+			}
+		}
+		if c >= 0 {
+			pp, pbuild = append(pp, int32(i)), append(pbuild, c)
+		} else if leftNoResidual {
+			pp, pbuild = append(pp, int32(i)), append(pbuild, -1)
+		}
+	}
+	j.pairP, j.pairB = pp, pbuild
+}
+
+// fillUnmatched collects up to BatchSize unmatched probe rows (paired with
+// build row -1) of the current probe batch (anti joins). The matched rows
+// the join would have produced still count for --max-join-rows.
+func (j *vhashJoinOp) fillUnmatched() {
+	t := j.table
+	pp, pbuild := j.pairP[:0], j.pairB[:0]
+	var matches int64
+	defer func() {
+		if limit := j.ec.MaxJoinRows; limit > 0 && matches > 0 && j.shared.emitted.Add(matches) > limit {
+			j.pending = errs.New(errs.ResourceLimit, "join produced more than %d rows", limit)
+		}
+	}()
+	for ; j.pos < j.active && len(pp) < BatchSize && j.pending == nil; j.pos++ {
+		i := j.rowAt(j.pos)
+		hasNull := false
+		for _, kv := range j.pkeys {
+			hasNull = hasNull || kv.isNull(i)
+		}
+		matched := false
+		switch {
+		case hasNull:
+		case t.intKey:
+			k := j.pkeys[0].I[i]
+			for c := t.intChain(k); c >= 0; c = t.next[c] {
+				if t.intKeys[c] == k {
+					matched = true
+					matches++
+				}
+			}
+		default:
+			j.keyBuf = j.keyBuf[:0]
+			for k, kv := range j.pkeys {
+				j.keyBuf = appendKey(j.keyBuf, kv.value(i, j.keyClassesP[k]), j.keyTypesP[k])
+			}
+			for c := t.heads[t.bucketOfString(j.keyBuf)]; c >= 0; c = t.next[c] {
+				if t.strKeys[c] == string(j.keyBuf) {
+					matched = true
+					matches++
+				}
+			}
+		}
+		if !matched {
+			pp, pbuild = append(pp, int32(i)), append(pbuild, -1)
+		}
 	}
 	j.pairP, j.pairB = pp, pbuild
 }
@@ -474,6 +707,22 @@ func (j *vhashJoinOp) gatherBuild(k int, v *Vec, n int) *Vec {
 	var nulls []bool
 	if v.Nulls != nil || j.kind == plan.JoinLeft {
 		nulls = buf.withNulls(n)
+	}
+	if v.Dict != nil {
+		// Dictionary-encoded build column: gather codes.
+		codes := grow(j.codes[k], n)
+		j.codes[k] = codes
+		for o, b := range idx {
+			if b < 0 || (v.Nulls != nil && v.Nulls[b]) {
+				codes[o] = 0
+				nulls[o] = true
+				continue
+			}
+			codes[o] = v.Codes[b]
+		}
+		out.S = out.S[:0]
+		out.Dict, out.Codes = v.Dict, codes
+		return out
 	}
 	for o, b := range idx {
 		if b < 0 {
@@ -584,6 +833,11 @@ func (j *vhashJoinOp) NextBatch() (*Batch, error) {
 		}
 		j.fillPairs()
 		if len(j.pairP) == 0 {
+			if j.pending != nil {
+				err := j.pending
+				j.pending = nil
+				return nil, err
+			}
 			continue
 		}
 		b := j.gather()

@@ -37,6 +37,9 @@ func newAggState(call *plan.AggCall) aggState {
 	}
 	t := call.Arg.Type()
 	if call.Distinct && call.Func != plan.AggMin && call.Func != plan.AggMax {
+		if s := newDistinctState(call, classOf(t)); s != nil {
+			return s
+		}
 		return &genericState{call: call, cls: classOf(t)}
 	}
 	switch {
@@ -152,22 +155,53 @@ func growZero[T any](s []T, g int) []T {
 // With native kernels, batches are first added to int64 partial sums
 // (fast) by pqk_group_sum_i64; a group's sum is sums[g] + fast[g].
 type exactSumState struct {
-	sums  []types.BigDecimalSum
+	small []int64               // per group: running sum while it fits int64
+	sums  []types.BigDecimalSum // per group: the remainder (nil until a sum leaves int64)
 	n     []int64
 	limit int64 // DECIMAL SUM: exclusive bound of the result
 	avg   bool
 	scale int
 
 	lib  *native.Lib
-	fast []int64
 	mask []byte
 }
 
 func (s *exactSumState) grow(g int) {
-	s.sums = growZero(s.sums, g)
+	s.small = growZero(s.small, g)
 	s.n = growZero(s.n, g)
-	if s.lib != nil {
-		s.fast = growZero(s.fast, g)
+	if s.sums != nil {
+		s.sums = growZero(s.sums, g)
+	}
+}
+
+// add adds x to the sum of group g (counts are maintained by callers).
+func (s *exactSumState) add(g int32, x int64) {
+	p := &s.small[g]
+	if c := *p + x; (c > *p) == (x > 0) {
+		*p = c
+		return
+	}
+	s.addSlow(g, x)
+}
+
+// addSlow adds x to the remainder of group g's sum (int64 overflow). Not
+// inlined, so that add stays small enough to inline into update loops.
+//
+//go:noinline
+func (s *exactSumState) addSlow(g int32, x int64) {
+	if s.sums == nil {
+		s.sums = make([]types.BigDecimalSum, len(s.small))
+	}
+	s.sums[g].Add(x)
+}
+
+// addMasked adds the values selected by an LSB-first bitmap (nil: all)
+// to group g.
+func (s *exactSumState) addMasked(g int32, vals []int64, mask []byte) {
+	for i, x := range vals {
+		if mask == nil || mask[i>>3]&(1<<(i&7)) != 0 {
+			s.add(g, x)
+		}
 	}
 }
 
@@ -175,10 +209,13 @@ func (s *exactSumState) update(gids []int32, n int, sel []int32, v *Vec) {
 	if s.lib != nil && n > 0 && s.nativeUpdate(gids, n, sel, v) {
 		return
 	}
-	sums, cnt, vals, nulls := s.sums, s.n, v.I, v.Nulls
+	small, cnt, vals, nulls := s.small, s.n, v.I, v.Nulls
+	// add is s.add, written out so that the loops inline it.
 	add := func(g int32, x int64) {
-		if p := &sums[g]; !p.AddSmall(x) {
-			p.Add(x)
+		if c := small[g] + x; (c > small[g]) == (x > 0) {
+			small[g] = c
+		} else {
+			s.addSlow(g, x)
 		}
 		cnt[g]++
 	}
@@ -206,8 +243,8 @@ func (s *exactSumState) update(gids []int32, n int, sel []int32, v *Vec) {
 	}
 }
 
-// nativeUpdate adds a batch with pqk_group_sum_i64 into the fast sums and
-// the counts. If the kernel reports a possible overflow the batch is
+// nativeUpdate adds a batch with pqk_group_sum_i64 into the running sums
+// and the counts. If the kernel reports a possible overflow the batch is
 // subtracted again (wrapping arithmetic is exactly invertible) and false
 // is returned: the caller then adds the batch exactly.
 func (s *exactSumState) nativeUpdate(gids []int32, n int, sel []int32, v *Vec) bool {
@@ -216,13 +253,13 @@ func (s *exactSumState) nativeUpdate(gids []int32, n int, sel []int32, v *Vec) b
 		s.mask = activeMask(s.mask, n, sel, v.Nulls)
 		valid = s.mask
 	}
-	switch s.lib.GroupSumI64(asUint32(gids[:n]), v.I[:n], valid, s.fast, s.n) {
+	switch s.lib.GroupSumI64(asUint32(gids[:n]), v.I[:n], valid, s.small, s.n) {
 	case native.OK:
 		return true
 	case native.Overflow:
 		for i, g := range gids[:n] {
 			if valid == nil || valid[i>>3]&(1<<(i&7)) != 0 {
-				s.fast[g] -= v.I[i]
+				s.small[g] -= v.I[i]
 				s.n[g]--
 			}
 		}
@@ -230,32 +267,37 @@ func (s *exactSumState) nativeUpdate(gids []int32, n int, sel []int32, v *Vec) b
 	return false
 }
 
-// settle folds the fast partial sum of group g into its exact sum.
-func (s *exactSumState) settle(g int) {
-	if s.fast != nil && s.fast[g] != 0 {
-		s.sums[g].Add(s.fast[g])
-		s.fast[g] = 0
-	}
-}
-
 func (s *exactSumState) merge(g int32, src aggState, sg int32) {
 	o := src.(*exactSumState)
-	s.sums[g].Merge(&o.sums[sg])
-	if o.fast != nil {
-		s.sums[g].Add(o.fast[sg])
+	s.add(g, o.small[sg])
+	if o.sums != nil {
+		if s.sums == nil {
+			s.sums = make([]types.BigDecimalSum, len(s.small))
+		}
+		s.sums[g].Merge(&o.sums[sg])
 	}
 	s.n[g] += o.n[sg]
 }
 
+// total returns the exact sum of group g.
+func (s *exactSumState) total(g int) *types.BigDecimalSum {
+	t := &types.BigDecimalSum{}
+	t.Add(s.small[g])
+	if s.sums != nil {
+		t.Merge(&s.sums[g])
+	}
+	return t
+}
+
 func (s *exactSumState) result(g int) (types.Value, error) {
-	s.settle(g)
 	if s.n[g] == 0 {
 		return null, nil
 	}
+	t := s.total(g)
 	if s.avg {
-		return types.FloatValue(s.sums[g].RatioFloat(s.n[g], s.scale)), nil
+		return types.FloatValue(t.RatioFloat(s.n[g], s.scale)), nil
 	}
-	v, ok := s.sums[g].Int64()
+	v, ok := t.Int64()
 	if !ok || (s.limit > 0 && (v <= -s.limit || v >= s.limit)) {
 		return null, errs.New(errs.NumericOverflow, "SUM overflow")
 	}
@@ -513,19 +555,24 @@ type aggTable struct {
 	calls      []*plan.AggCall
 	states     []aggState
 
-	intMap    map[int64]int32
+	intMap    i64Map
 	wideMap   map[types.Int128]int32 // single wide DECIMAL key
 	nmap      *nativeIntMap          // replaces intMap with native kernels
 	floatMap  map[uint64]int32
 	strMap    map[string]int32 // single STRING key, or encoded multi-column keys
+	multi     *multiKeys       // multi-column keys without wide DECIMALs
+	strIDs    *keyIDs          // single plain STRING key: value IDs …
+	idGroups  []int32          // … and per ID its group + 1
 	nullGroup int32            // group of the NULL key (single key)
 	dict      []string         // dictionary of the code→group cache
 	dictGids  []int32
 	key       []byte
 
-	keys  []types.Row // key values per group
-	first []int64     // position of each group's first row (ordering)
-	gids  []int32
+	keys     []types.Row // key values per group (unless intKeyed)
+	intKeyed bool        // single int-class key: values in ikeys
+	ikeys    []int64     // key value per group (intKeyed; any for the NULL key)
+	first    []int64     // position of each group's first row (ordering)
+	gids     []int32
 
 	slab       []types.Value // storage for key rows
 	unreserved int64         // memory accounted but not yet reserved
@@ -533,7 +580,7 @@ type aggTable struct {
 
 func newAggTable(ec *Context, keyTypes []types.Type, calls []*plan.AggCall) *aggTable {
 	t := &aggTable{ec: ec, keyTypes: keyTypes, calls: calls, nullGroup: -1,
-		intMap: map[int64]int32{}, wideMap: map[types.Int128]int32{}, floatMap: map[uint64]int32{}, strMap: map[string]int32{}}
+		wideMap: map[types.Int128]int32{}, floatMap: map[uint64]int32{}, strMap: map[string]int32{}}
 	for _, kt := range keyTypes {
 		t.keyClasses = append(t.keyClasses, classOf(kt))
 	}
@@ -544,25 +591,105 @@ func newAggTable(ec *Context, keyTypes []types.Type, calls []*plan.AggCall) *agg
 		}
 		t.states = append(t.states, st)
 	}
+	if multiKeysApply(t.keyClasses) {
+		t.multi = newMultiKeys(t.keyClasses)
+	}
+	t.intKeyed = len(keyTypes) == 1 && t.keyClasses[0] == vInt
 	if ec.Native != nil && len(keyTypes) == 1 && t.keyClasses[0] == vInt {
 		t.nmap = newNativeIntMap(ec.Native)
 	}
 	return t
 }
 
-func (t *aggTable) groups() int { return len(t.keys) }
+func (t *aggTable) groups() int { return len(t.first) }
+
+// keyRow returns the key values of group g.
+func (t *aggTable) keyOf(g int) types.Row {
+	if !t.intKeyed {
+		return t.keys[g]
+	}
+	if int32(g) == t.nullGroup {
+		return types.Row{null}
+	}
+	return types.Row{types.IntValue(t.ikeys[g])}
+}
+
+// maxReserve caps the groups a table is sized for up front.
+const maxReserve = 1 << 20
+
+// prepare sizes an empty table for about n groups of the aggregation x
+// (nil: unknown), with a directly indexed key range if x has one.
+func (t *aggTable) prepare(x *physical.HashAggregate, n int) {
+	if x != nil && x.ArgRanges != nil && len(t.keyTypes) == 0 {
+		for i, st := range t.states {
+			if ds, ok := st.(*distinctState); ok && x.ArgRanges[i].OK {
+				ds.setBitmap(x.ArgRanges[i].Lo, x.ArgRanges[i].Hi)
+			}
+		}
+	}
+	if x != nil && x.KeyRange && t.groups() == 0 && len(t.keyClasses) == 1 && t.keyClasses[0] == vInt &&
+		t.nmap == nil && t.intMap.dense == nil {
+		t.intMap.setWindow(x.KeyLo, int(x.KeyHi-x.KeyLo+1))
+	}
+	t.reserve(n)
+}
+
+// reserve sizes an empty table for about n groups.
+func (t *aggTable) reserve(n int) {
+	n = min(n, maxReserve)
+	if n <= 64 || t.groups() > 0 {
+		return
+	}
+	if t.intKeyed {
+		t.ikeys = make([]int64, 0, n)
+	} else {
+		t.keys = make([]types.Row, 0, n)
+	}
+	t.first = make([]int64, 0, n)
+	for _, s := range t.states {
+		s.grow(n)
+	}
+	if len(t.keyClasses) == 1 && t.keyClasses[0] == vInt && t.nmap == nil && t.intMap.dense == nil {
+		t.intMap.init(n)
+	}
+}
+
+// expectedGroups estimates the distinct keys among rows drawn uniformly
+// from est groups.
+func expectedGroups(est, rows int64) int {
+	if est <= 0 {
+		return 0
+	}
+	return int(float64(est) * (1 - math.Exp(-float64(rows)/float64(est))))
+}
 
 // newGroup creates a group with the given key values first seen at pos.
 func (t *aggTable) newGroup(key types.Row, pos int64) (int32, error) {
-	g := int32(len(t.keys))
+	if t.intKeyed {
+		return t.newIntGroup(key[0].I, pos)
+	}
 	t.keys = append(t.keys, key)
+	return t.addGroup(pos, RowSize(key))
+}
+
+// newIntGroup creates a group of an int-keyed table (key k; for the NULL
+// key k is ignored).
+func (t *aggTable) newIntGroup(k int64, pos int64) (int32, error) {
+	t.ikeys = append(t.ikeys, k)
+	return t.addGroup(pos, 8)
+}
+
+// addGroup adds the states and position of a new group whose key (of
+// keyBytes bytes) has been stored.
+func (t *aggTable) addGroup(pos int64, keyBytes int64) (int32, error) {
+	g := int32(len(t.first))
 	t.first = append(t.first, pos)
 	for _, s := range t.states {
-		s.grow(len(t.keys))
+		s.grow(len(t.first))
 	}
 	// Reservations are batched: the budget is shared (atomically) by
 	// parallel workers.
-	t.unreserved += RowSize(key) + int64(48*len(t.states))
+	t.unreserved += keyBytes + int64(48*len(t.states))
 	if t.unreserved >= reserveChunk {
 		n := t.unreserved
 		t.unreserved = 0
@@ -613,7 +740,7 @@ func (t *aggTable) keyRow(keys []*Vec, i int) types.Row {
 func (t *aggTable) resolve(keys []*Vec, n int, sel []int32, pos int64) error {
 	t.gids = grow(t.gids, n)
 	if len(keys) == 0 {
-		if len(t.keys) == 0 {
+		if t.groups() == 0 {
 			if _, err := t.newGroup(types.Row{}, pos); err != nil {
 				return err
 			}
@@ -622,6 +749,9 @@ func (t *aggTable) resolve(keys []*Vec, n int, sel []int32, pos int64) error {
 		return nil
 	}
 	if len(keys) > 1 {
+		if t.multi != nil {
+			return t.resolveMulti(keys, n, sel, pos)
+		}
 		return t.resolveEncoded(keys, n, sel, pos)
 	}
 	v := keys[0]
@@ -660,13 +790,13 @@ func (t *aggTable) resolveInt(v *Vec, n int, sel []int32, pos int64) error {
 			return err
 		}
 		k := vals[i]
-		g, ok := t.intMap[k]
+		g, ok := t.intMap.get(k)
 		if !ok {
 			var err error
-			if g, err = t.newGroup(t.key1(types.IntValue(k)), pos+int64(i)); err != nil {
+			if g, err = t.newIntGroup(k, pos+int64(i)); err != nil {
 				return err
 			}
-			t.intMap[k] = g
+			t.intMap.put(k, g)
 		}
 		gids[i] = g
 		return nil
@@ -701,7 +831,7 @@ func (t *aggTable) resolveIntNative(v *Vec, n int, sel []int32, pos int64) error
 		g, ok := m.get(k, h)
 		if !ok {
 			var err error
-			if g, err = t.newGroup(t.key1(types.IntValue(k)), pos+int64(i)); err != nil {
+			if g, err = t.newIntGroup(k, pos+int64(i)); err != nil {
 				return err
 			}
 			m.put(k, h, g)
@@ -726,21 +856,27 @@ func (t *aggTable) resolveIntNative(v *Vec, n int, sel []int32, pos int64) error
 }
 
 func (t *aggTable) resolveString(v *Vec, n int, sel []int32, pos int64) error {
-	gids, vals, nulls := t.gids, v.S, v.Nulls
+	if t.strIDs == nil {
+		t.strIDs = newKeyIDs(vStr)
+	}
+	ids, gids := t.strIDs.ids(v, n, sel), t.gids
 	one := func(i int) error {
-		if nulls != nil && nulls[i] {
+		id := ids[i]
+		if id == 0 {
 			g, err := t.nullKey(pos + int64(i))
 			gids[i] = g
 			return err
 		}
-		s := vals[i]
-		g, ok := t.strMap[s]
-		if !ok {
+		if int(id) >= len(t.idGroups) {
+			t.idGroups = growZero(t.idGroups, max(int(id)+1, 2*len(t.idGroups)))
+		}
+		g := t.idGroups[id] - 1
+		if g < 0 {
 			var err error
-			if g, err = t.newGroup(t.key1(types.StringValue(s)), pos+int64(i)); err != nil {
+			if g, err = t.newGroup(t.key1(types.StringValue(v.S[i])), pos+int64(i)); err != nil {
 				return err
 			}
-			t.strMap[s] = g
+			t.idGroups[id] = g + 1
 		}
 		gids[i] = g
 		return nil
@@ -882,8 +1018,8 @@ func (t *aggTable) findOrAdd(key types.Row, pos int64) (int32, error) {
 			g, ok = t.nmap.get(v.I, h)
 			put = func(g int32) { t.nmap.put(v.I, h, g) }
 		case t.keyClasses[0] == vInt:
-			g, ok = t.intMap[v.I]
-			put = func(g int32) { t.intMap[v.I] = g }
+			g, ok = t.intMap.get(v.I)
+			put = func(g int32) { t.intMap.put(v.I, g) }
 		case t.keyClasses[0] == vWide:
 			g, ok = t.wideMap[v.Wide()]
 			put = func(g int32) { t.wideMap[v.Wide()] = g }
@@ -919,14 +1055,30 @@ func (t *aggTable) findOrAdd(key types.Row, pos int64) (int32, error) {
 	return g, err
 }
 
-// mergeFrom folds the groups of o for which take(group) holds (nil: all)
-// into t.
-func (t *aggTable) mergeFrom(o *aggTable, take func(int) bool) error {
-	for sg, key := range o.keys {
-		if take != nil && !take(sg) {
-			continue
+// findOrAddFrom returns the group of t for group sg of o (same keys),
+// created if new; its first position is lowered to sg's if earlier.
+func (t *aggTable) findOrAddFrom(o *aggTable, sg int32) (int32, error) {
+	pos := o.first[sg]
+	if !t.intKeyed || !o.intKeyed || t.nmap != nil || sg == o.nullGroup {
+		return t.findOrAdd(o.keyOf(int(sg)), pos)
+	}
+	k := o.ikeys[sg]
+	g, ok := t.intMap.get(k)
+	if ok {
+		if pos < t.first[g] {
+			t.first[g] = pos
 		}
-		g, err := t.findOrAdd(key, o.first[sg])
+		return g, nil
+	}
+	g, err := t.newIntGroup(k, pos)
+	t.intMap.put(k, g)
+	return g, err
+}
+
+// mergeFrom folds all groups of o into t.
+func (t *aggTable) mergeFrom(o *aggTable) error {
+	for sg := range o.first {
+		g, err := t.findOrAddFrom(o, int32(sg))
 		if err != nil {
 			return err
 		}
@@ -937,20 +1089,51 @@ func (t *aggTable) mergeFrom(o *aggTable, take func(int) bool) error {
 	return nil
 }
 
-// keyHashes hashes the key of every group (merge partitioning).
-func (t *aggTable) keyHashes(seed maphash.Seed) []uint64 {
-	out := make([]uint64, len(t.keys))
+// mergeGroups folds the given groups of o into t.
+func (t *aggTable) mergeGroups(o *aggTable, groups []int32) error {
+	for _, sg := range groups {
+		g, err := t.findOrAddFrom(o, sg)
+		if err != nil {
+			return err
+		}
+		for i, s := range t.states {
+			s.merge(g, o.states[i], sg)
+		}
+	}
+	return nil
+}
+
+// partition lists the groups of the table per hash partition of their
+// keys (parts partitions).
+func (t *aggTable) partition(seed maphash.Seed, parts int) [][]int32 {
+	n := t.groups()
+	out := make([][]int32, parts)
+	for p := range out {
+		out[p] = make([]int32, 0, n/parts+n/(4*parts)+16)
+	}
 	var buf []byte
-	for g, key := range t.keys {
-		if len(key) == 1 && !key[0].Null && t.keyClasses[0] == vInt {
-			out[g] = uint64(key[0].I) * 0x9E3779B97F4A7C15
-			continue
+	m := &t.intMap
+	for g := 0; g < n; g++ {
+		var h uint64
+		if t.intKeyed && int32(g) != t.nullGroup {
+			k := t.ikeys[g]
+			if i := uint64(k - m.lo); i < uint64(len(m.dense)) {
+				// Directly indexed keys: contiguous ranges per partition.
+				p := i * uint64(parts) / uint64(len(m.dense))
+				out[p] = append(out[p], int32(g))
+				continue
+			}
+			h = fibHash(uint64(k)) >> 32
+		} else {
+			key := t.keyOf(g)
+			buf = buf[:0]
+			for k, v := range key {
+				buf = appendKey(buf, v, t.keyTypes[k])
+			}
+			h = maphash.Bytes(seed, buf)
 		}
-		buf = buf[:0]
-		for k, v := range key {
-			buf = appendKey(buf, v, t.keyTypes[k])
-		}
-		out[g] = maphash.Bytes(seed, buf)
+		p := h % uint64(parts)
+		out[p] = append(out[p], int32(g))
 	}
 	return out
 }
@@ -964,12 +1147,20 @@ func (t *aggTable) results() (rows []types.Row, first []int64, errPos int64, err
 		return nil, nil, math.MinInt64, err
 	}
 	width := len(t.keyTypes) + len(t.states)
-	cells := make([]types.Value, len(t.keys)*width)
-	rows = make([]types.Row, len(t.keys))
+	n := t.groups()
+	cells := make([]types.Value, n*width)
+	rows = make([]types.Row, n)
 	errPos = math.MaxInt64
-	for g := range t.keys {
+	for g := 0; g < n; g++ {
 		row := cells[g*width : (g+1)*width : (g+1)*width]
-		copy(row, t.keys[g])
+		switch {
+		case !t.intKeyed:
+			copy(row, t.keys[g])
+		case int32(g) == t.nullGroup:
+			row[0] = null
+		default:
+			row[0] = types.IntValue(t.ikeys[g])
+		}
 		for k, s := range t.states {
 			v, e := s.result(g)
 			if e != nil {
@@ -988,7 +1179,7 @@ func (t *aggTable) results() (rows []types.Row, first []int64, errPos int64, err
 // rows computes the output rows (keys then aggregates) ordered by first
 // appearance; without keys there is exactly one row.
 func (t *aggTable) rows() ([]types.Row, error) {
-	if len(t.keyTypes) == 0 && len(t.keys) == 0 {
+	if len(t.keyTypes) == 0 && t.groups() == 0 {
 		if _, err := t.newGroup(types.Row{}, 0); err != nil {
 			return nil, err
 		}
@@ -1058,29 +1249,41 @@ const minPartitionedMerge = 1 << 13
 // the result rows in first-appearance order. Large merges are partitioned
 // by key hash: partition p of every partial table is merged into final
 // table p by its own goroutine.
-func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls []*plan.AggCall) ([]types.Row, error) {
-	total := 0
+func mergeTables(ec *Context, x *physical.HashAggregate, tables []*aggTable, keyTypes []types.Type, calls []*plan.AggCall) ([]types.Row, error) {
+	var estGroups int64
+	if x != nil {
+		estGroups = x.EstGroups
+	}
+	total, largest := 0, 0
 	for _, t := range tables {
 		total += t.groups()
+		largest = max(largest, t.groups())
+	}
+	// Expected groups of the result: at least those of the largest
+	// partial table, at most the estimate (if known) or the sum.
+	expect := total
+	if estGroups > 0 {
+		expect = max(largest, min(total, int(estGroups)))
 	}
 	parts := min(ec.Threads, len(tables))
 	if parts <= 1 || total < minPartitionedMerge || len(keyTypes) == 0 {
 		final := newAggTable(ec, keyTypes, calls)
+		final.prepare(x, expect)
 		for _, t := range tables {
-			if err := final.mergeFrom(t, nil); err != nil {
+			if err := final.mergeFrom(t); err != nil {
 				return nil, err
 			}
 		}
 		return final.rows()
 	}
 	seed := maphash.MakeSeed()
-	hashes := make([][]uint64, len(tables))
+	groups := make([][][]int32, len(tables)) // per table, per partition
 	var wg sync.WaitGroup
 	for i, t := range tables {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			hashes[i] = t.keyHashes(seed)
+			groups[i] = t.partition(seed, parts)
 		}()
 	}
 	wg.Wait()
@@ -1096,16 +1299,16 @@ func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls [
 		go func() {
 			defer wg.Done()
 			final := newAggTable(ec, keyTypes, calls)
+			final.prepare(x, expect/parts+expect/(8*parts))
 			for i, t := range tables {
-				h := hashes[i]
-				if err := final.mergeFrom(t, func(g int) bool { return int(h[g]%uint64(parts)) == p }); err != nil {
+				if err := final.mergeGroups(t, groups[i][p]); err != nil {
 					results[p] = partResult{errPos: math.MinInt64, err: err}
 					return
 				}
 			}
 			r := &results[p]
 			r.rows, r.first, r.errPos, r.err = final.results()
-			if r.err == nil {
+			if r.err == nil && (x == nil || !x.AnyOrder) {
 				r.rows = orderByFirst(r.rows, r.first)
 			}
 		}()
@@ -1123,6 +1326,9 @@ func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls [
 	}
 	if err != nil {
 		return nil, err
+	}
+	if x != nil && x.AnyOrder {
+		return slices.Concat(rows...), nil
 	}
 	return mergeByFirst(rows, first), nil
 }
@@ -1219,6 +1425,7 @@ func (a *vaggregateOp) NextBatch() (*Batch, error) {
 
 func (a *vaggregateOp) run() ([]types.Row, error) {
 	t := newAggTable(a.ec, exprTypes(a.node.Keys), a.node.Aggs)
+	t.prepare(a.node, int(a.node.EstGroups))
 	var pos int64
 	for {
 		b, err := a.input.NextBatch()
