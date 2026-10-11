@@ -6,9 +6,13 @@ the session protocol and times a fixed set of queries under several option
 combinations. Each query runs `--repeat` times; the best wall-clock time is
 reported (milliseconds, `result: "count"` so serialization is excluded).
 
+Queries N1-N10 exercise the native kernels (`native: true`, which needs
+`--native LIB` so that the engine loads libpqkernels).
+
 Usage:
   bench.py --engine bin/polyquery --data /tmp/pqdata/1m [--repeat 3]
            [--variant '{"mode":"row","threads":1}' ...] [--only Q1,Q4]
+           [--native native-kernels/build/x86_64/libpqkernels.so]
 """
 from __future__ import annotations
 
@@ -48,12 +52,26 @@ QUERIES = [
                        "JOIN orders o ON o.order_id = i.order_id JOIN cust c ON c.customer_id = o.customer_id "
                        "WHERE c.segment = 'public_sector' AND o.status = 'returned'"),
     ("Q12 high-card group", "SELECT tx_id % 500000, COUNT(*), MAX(ts), MIN(category) FROM tx GROUP BY 1"),
+    # Native kernel shapes.
+    ("N1 selective range, wide rows", "SELECT tx_id, customer_id, merchant_id, amount, currency, category, ts, "
+                                      "status FROM tx WHERE customer_id BETWEEN 1000 AND 1999"),
+    ("N2 int+decimal filter+count", "SELECT COUNT(*) FROM tx WHERE merchant_id < 2500 AND amount >= 100.5"),
+    ("N3 filter+global aggs", "SELECT COUNT(*), SUM(quantity), MIN(unit_price), MAX(unit_price) FROM items "
+                              "WHERE quantity >= 5 AND discount IS NOT NULL"),
+    ("N4 global aggs", "SELECT SUM(amount), SUM(fee), MIN(ts), MAX(ts), COUNT(fee), SUM(bucket) FROM tx"),
+    ("N5 date filter", "SELECT COUNT(*) FROM orders WHERE order_date >= DATE '2024-01-01' AND item_count > 3"),
+    ("N6 column compare", "SELECT COUNT(*) FROM sortk WHERE dup_key < uniq_key AND id > 100"),
+    ("N7 group by int key", "SELECT merchant_id, SUM(amount), COUNT(*) FROM tx GROUP BY merchant_id"),
+    ("N8 int join", "SELECT COUNT(*), SUM(i.quantity) FROM items i JOIN orders o ON o.order_id = i.order_id "
+                    "WHERE o.item_count > 2"),
+    ("N9 float min/max", "SELECT MIN(temperature), MAX(pressure), MIN(humidity) FROM sensor"),
+    ("N10 filter + residual", "SELECT COUNT(*) FROM tx WHERE customer_id < 20000 AND amount * 2 > fee"),
 ]
 
 
 class Session:
-    def __init__(self, engine: str, data: str):
-        self.p = subprocess.Popen([engine, "session", "--data-dir", data], stdin=subprocess.PIPE,
+    def __init__(self, engine: str, data: str, extra=()):
+        self.p = subprocess.Popen([engine, "session", "--data-dir", data, *extra], stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, text=True, bufsize=1)
         self.n = 0
 
@@ -78,11 +96,12 @@ def main() -> int:
     ap.add_argument("--repeat", type=int, default=3)
     ap.add_argument("--variant", action="append", default=[])
     ap.add_argument("--only", default="")
+    ap.add_argument("--native", metavar="LIB", help="pass --native-kernels LIB to the engine")
     args = ap.parse_args()
     variants = [json.loads(v) for v in args.variant] or [{}]
     only = {s.strip() for s in args.only.split(",") if s.strip()}
 
-    s = Session(args.engine, args.data)
+    s = Session(args.engine, args.data, ["--native-kernels", args.native] if args.native else [])
     t0 = time.monotonic()
     for name, base in TABLES:
         schema = json.load(open(f"{args.data}/{base}.schema.json"))
@@ -98,23 +117,26 @@ def main() -> int:
     for label, sql in QUERIES:
         if only and label.split()[0] not in only:
             continue
-        cells = []
         counts = set()
-        for v in variants:
-            best = None
-            for _ in range(args.repeat):
+        best: list = [None] * len(variants)
+        failed: list = [None] * len(variants)
+        # Round-robin over the variants, so drifting machine load affects
+        # all of them alike.
+        for _ in range(args.repeat):
+            for i, v in enumerate(variants):
+                if failed[i]:
+                    continue
                 opts = dict(v)
                 opts["result"] = "count"
                 t = time.monotonic()
                 r = s.call({"op": "query", "sql": sql, "options": opts})
                 dt = (time.monotonic() - t) * 1000
                 if not r.get("ok"):
-                    cells.append("error " + r.get("error", {}).get("code", "?"))
-                    break
+                    failed[i] = "error " + r.get("error", {}).get("code", "?")
+                    continue
                 counts.add(r.get("row_count"))
-                best = dt if best is None else min(best, dt)
-            else:
-                cells.append(f"{best:.0f}")
+                best[i] = dt if best[i] is None else min(best[i], dt)
+        cells = [failed[i] or f"{best[i]:.1f}" for i in range(len(variants))]
         note = "" if len(counts) <= 1 else f" (row counts differ: {sorted(counts)})"
         print(f"| {label} | " + " | ".join(cells) + f" |{note}", flush=True)
     s.close()

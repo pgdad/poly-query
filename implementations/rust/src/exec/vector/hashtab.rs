@@ -1,105 +1,81 @@
-//! Open-addressing hash table from `i64` keys to dense `u32` ids whose
-//! hashes are supplied by the caller — computed a batch at a time by the
-//! native `pqk_hash_i64` kernel (`fmix64(key ^ seed)`), or by
-//! [`crate::native::fmix64`] for single keys, which yields the same values.
-//! Linear probing over a power-of-two slot array kept at most half full.
+//! Hash table from `i64` keys to dense `u32` ids whose hashes are supplied
+//! by the caller — computed a batch at a time by the native `pqk_hash_i64`
+//! kernel (`fmix64(key ^ seed)`), or by [`crate::native::fmix64`] for single
+//! keys, which yields the same values.
+//!
+//! The table itself is std's `HashMap` (a SwissTable) keyed by
+//! `(key, hash)` with a pass-through hasher, so the precomputed hash is
+//! used as is. (Hand-written linear-probing and group-probed tables fed
+//! with the same hashes measured 1.5–2× slower.)
+
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hash, Hasher};
 
 use crate::native::{Kernels, fmix64};
 
 /// Seed of the key hashes.
 pub const HASH_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 
-const EMPTY: u32 = u32::MAX;
-
-#[derive(Debug, Clone)]
-pub struct I64Table {
-    keys: Vec<i64>,
-    ids: Vec<u32>,
-    mask: usize,
-    len: usize,
+/// A key with its precomputed hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Hashed {
+    key: i64,
+    hash: u64,
 }
 
-impl Default for I64Table {
-    fn default() -> Self {
-        I64Table {
-            keys: vec![0; 16],
-            ids: vec![EMPTY; 16],
-            mask: 15,
-            len: 0,
+impl Hash for Hashed {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
+}
+
+/// Hasher returning the precomputed hash written by [`Hashed`].
+#[derive(Debug, Default, Clone, Copy)]
+struct PassThrough(u64);
+
+impl Hasher for PassThrough {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        // Only `write_u64` is used by `Hashed`; fold anything else in.
+        for &b in bytes {
+            self.0 = self.0.rotate_left(8) ^ b as u64;
         }
     }
+
+    fn write_u64(&mut self, x: u64) {
+        self.0 = x;
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct I64Table {
+    map: HashMap<Hashed, u32, BuildHasherDefault<PassThrough>>,
 }
 
 impl I64Table {
     pub fn len(&self) -> usize {
-        self.len
+        self.map.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.map.is_empty()
     }
 
-    /// Id of `key` (with hash `hash`), None if absent.
+    /// Id of `key` (whose hash is `hash`), None if absent.
     #[inline]
     pub fn get(&self, key: i64, hash: u64) -> Option<u32> {
-        let mut i = hash as usize & self.mask;
-        loop {
-            let id = self.ids[i];
-            if id == EMPTY {
-                return None;
-            }
-            if self.keys[i] == key {
-                return Some(id);
-            }
-            i = (i + 1) & self.mask;
-        }
+        debug_assert_eq!(hash, fmix64(key, HASH_SEED));
+        self.map.get(&Hashed { key, hash }).copied()
     }
 
     /// Id of `key`, inserting it with id `next` if absent.
     #[inline]
     pub fn get_or_insert(&mut self, key: i64, hash: u64, next: u32) -> u32 {
-        debug_assert_ne!(next, EMPTY);
-        if (self.len + 1) * 2 > self.ids.len() {
-            self.grow();
-        }
-        let mut i = hash as usize & self.mask;
-        loop {
-            let id = self.ids[i];
-            if id == EMPTY {
-                self.keys[i] = key;
-                self.ids[i] = next;
-                self.len += 1;
-                return next;
-            }
-            if self.keys[i] == key {
-                return id;
-            }
-            i = (i + 1) & self.mask;
-        }
-    }
-
-    /// Doubles the slot array and reinserts every key.
-    fn grow(&mut self) {
-        let size = self.ids.len() * 2;
-        let old_keys = std::mem::replace(&mut self.keys, vec![0; size]);
-        let old_ids = std::mem::replace(&mut self.ids, vec![EMPTY; size]);
-        self.mask = size - 1;
-        for (k, id) in old_keys.into_iter().zip(old_ids) {
-            if id == EMPTY {
-                continue;
-            }
-            let mut i = fmix64(k, HASH_SEED) as usize & self.mask;
-            while self.ids[i] != EMPTY {
-                i = (i + 1) & self.mask;
-            }
-            self.keys[i] = k;
-            self.ids[i] = id;
-        }
-    }
-
-    /// Approximate memory held.
-    pub fn approx_size(&self) -> usize {
-        self.ids.len() * 12
+        debug_assert_eq!(hash, fmix64(key, HASH_SEED));
+        *self.map.entry(Hashed { key, hash }).or_insert(next)
     }
 }
 
@@ -126,5 +102,22 @@ mod tests {
             assert_eq!(t.get_or_insert(k, fmix64(k, HASH_SEED), 99_999), i as u32);
         }
         assert_eq!(t.get(1, fmix64(1, HASH_SEED)), None);
+    }
+
+    #[test]
+    fn kernel_hashes_match_scalar_hashes() {
+        let Some(k) = crate::native::tests::test_kernels() else {
+            return;
+        };
+        let keys: Vec<i64> = (-500..500).map(|i| i * 1_000_003).collect();
+        let mut h = Vec::new();
+        hash_keys(k, &keys, &mut h);
+        let mut t = I64Table::default();
+        for (i, (&x, &hx)) in keys.iter().zip(&h).enumerate() {
+            t.get_or_insert(x, hx, i as u32);
+        }
+        for (i, &x) in keys.iter().enumerate() {
+            assert_eq!(t.get(x, fmix64(x, HASH_SEED)), Some(i as u32));
+        }
     }
 }

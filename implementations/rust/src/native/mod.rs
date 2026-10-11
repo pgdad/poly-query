@@ -488,11 +488,11 @@ pub fn fmix64(x: i64, seed: u64) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The library built by `make -C native-kernels`, if present.
-    pub(crate) fn test_kernels() -> Option<&'static Kernels> {
+    pub fn test_kernels() -> Option<&'static Kernels> {
         static K: OnceLock<Option<Kernels>> = OnceLock::new();
         K.get_or_init(|| {
             let path = std::env::var("PQ_TEST_NATIVE_KERNELS").map_or_else(
