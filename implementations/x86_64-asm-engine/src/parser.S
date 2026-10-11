@@ -5,7 +5,7 @@
  *   sql_parse(ptr, len) -> rax SelectStmt*
  *
  * Syntax errors raise PARSE_ERROR; valid syntax of features this engine does
- * not implement yet (joins, subqueries, CASE, IN, ...) raises UNSUPPORTED.
+ * not implement yet raises UNSUPPORTED.
  * All parse functions take the parser state (PS_*) in %rdi.
  */
 #include "pq.inc"
@@ -983,9 +983,19 @@ FUNC parse_not
     LEAVE
 ENDF parse_not
 
-/* predicate = concat [ comp concat | IS [NOT] NULL | [NOT] BETWEEN/IN/LIKE ... ] */
+/* predicate = concat [ comp concat
+ *                    | IS [NOT] NULL
+ *                    | [NOT] BETWEEN concat AND concat
+ *                    | [NOT] IN ( query | expr {, expr} )
+ *                    | [NOT] LIKE concat ]
+ * The predicate level is non-associative: after one suffix the caller sees
+ * whatever follows (e.g. a second '='), which ends the expression and is then
+ * rejected as a trailing token by the statement parser (PARSE_ERROR).
+ *
+ * registers: rbx P, r12 left operand, r13d NOT flag / operator, r14 operator token,
+ *            r15 node under construction */
 FUNC parse_predicate
-    ENTER 0
+    ENTER 16
     mov %rdi, %rbx
     call parse_concat
     mov %rax, %r12
@@ -1014,17 +1024,13 @@ FUNC parse_predicate
     LEAVE
 3:  cmp $TOK_KEYWORD, %ecx
     jne 9f
+    xor %r13d, %r13d                /* NOT flag */
     mov TK_ID(%r14), %ecx
     cmp $KW_IS, %ecx
     je 4f
-    cmp $KW_BETWEEN, %ecx
-    je 8f
-    cmp $KW_IN, %ecx
-    je 8f
-    cmp $KW_LIKE, %ecx
-    je 8f
     cmp $KW_NOT, %ecx
-    jne 9f
+    jne 5f
+    /* NOT BETWEEN / NOT IN / NOT LIKE; any other NOT ends the predicate */
     mov %rbx, %rdi
     mov $1, %esi
     call p_peek
@@ -1032,16 +1038,27 @@ FUNC parse_predicate
     jne 9f
     mov TK_ID(%rax), %ecx
     cmp $KW_BETWEEN, %ecx
-    je 8f
+    je 51f
     cmp $KW_IN, %ecx
-    je 8f
+    je 51f
     cmp $KW_LIKE, %ecx
-    je 8f
+    jne 9f
+51: mov $1, %r13d
+    mov %rbx, %rdi
+    call p_next                     /* NOT */
+5:  mov %rbx, %rdi
+    call p_cur
+    mov TK_ID(%rax), %ecx
+    cmp $KW_BETWEEN, %ecx
+    je pr_between
+    cmp $KW_IN, %ecx
+    je pr_in
+    cmp $KW_LIKE, %ecx
+    je pr_like
     jmp 9f
 4:  /* IS [NOT] NULL */
     mov %rbx, %rdi
     call p_next
-    xor %r13d, %r13d
     mov %rbx, %rdi
     mov $KW_NOT, %esi
     call p_accept_kw
@@ -1055,11 +1072,121 @@ FUNC parse_predicate
     mov %r13d, N_OP(%rax)
     mov %r12, N_A(%rax)
     LEAVE
-8:  mov %rbx, %rdi
-    call p_unsupported
 9:  mov %r12, %rax
     LEAVE
+
+/* x [NOT] BETWEEN low AND high -> EK_BETWEEN (A x, B low, V1 high) */
+pr_between:
+    mov $EK_BETWEEN, %edi
+    call pr_new
+    mov %rbx, %rdi
+    call p_next                     /* BETWEEN */
+    mov %rbx, %rdi
+    call parse_concat
+    mov %rax, N_B(%r15)
+    mov %rbx, %rdi
+    mov $KW_AND, %esi
+    call p_expect_kw
+    mov %rbx, %rdi
+    call parse_concat
+    mov %rax, N_V1(%r15)
+    mov %r15, %rax
+    LEAVE
+
+/* x [NOT] LIKE pattern -> EK_LIKE (A x, B pattern) */
+pr_like:
+    mov $EK_LIKE, %edi
+    call pr_new
+    mov %rbx, %rdi
+    call p_next                     /* LIKE */
+    mov %rbx, %rdi
+    call parse_concat
+    mov %rax, N_B(%r15)
+    mov %r15, %rax
+    LEAVE
+
+/* x [NOT] IN ( query )        -> EK_INSUBQ (A x, V1 SelectStmt*)
+ * x [NOT] IN ( e1 {, e} )     -> EK_INLIST (A x, B node*[V1]) */
+pr_in:
+    mov %rbx, %rdi
+    call p_next                     /* IN */
+    mov %rbx, %rdi
+    mov $OP_LPAREN, %esi
+    call p_expect_op
+    mov %rbx, %rdi
+    call p_starts_query
+    test %eax, %eax
+    jz 1f
+    mov $EK_INSUBQ, %edi
+    call pr_new
+    mov %rbx, %rdi
+    call parse_query
+    mov %rax, N_V1(%r15)
+    jmp 3f
+1:  mov $EK_INLIST, %edi
+    call pr_new
+    mov %rbx, %rdi
+    mov $OP_RPAREN, %esi
+    call p_is_op
+    test %eax, %eax
+    jz 11f
+    mov %rbx, %rdi                  /* IN () */
+    call p_error
+11: mov g_arena(%rip), %rdi
+    call vec_new
+    mov %rax, 0(%rsp)
+2:  mov %rbx, %rdi
+    call parse_expr
+    mov 0(%rsp), %rdi
+    mov %rax, %rsi
+    call vec_push
+    mov %rbx, %rdi
+    mov $OP_COMMA, %esi
+    call p_accept_op
+    test %eax, %eax
+    jnz 2b
+    mov 0(%rsp), %rax
+    mov VEC_DATA(%rax), %rcx
+    mov %rcx, N_B(%r15)
+    mov VEC_LEN(%rax), %rcx
+    mov %rcx, N_V1(%r15)
+3:  mov %rbx, %rdi
+    mov $OP_RPAREN, %esi
+    call p_expect_op
+    mov %r15, %rax
+    LEAVE
+
+/* pr_new(kind edi): local helper of parse_predicate (runs on its frame):
+ * r15 = new node at token r14 with A = r12 and N_OP = r13d (NOT flag) */
+pr_new:
+    sub $8, %rsp
+    mov %r14, %rsi
+    call new_node
+    mov %rax, %r15
+    mov %r12, N_A(%r15)
+    mov %r13d, N_OP(%r15)
+    add $8, %rsp
+    ret
 ENDF parse_predicate
+
+/* p_starts_query(P) -> eax 1 if the current token is SELECT or WITH
+ * (a '(' followed by such a token opens a subquery, grammar.md notes) */
+FUNC p_starts_query
+    mov PS_POS(%rdi), %rax
+    shl $5, %rax
+    add PS_TOKS(%rdi), %rax
+    xor %ecx, %ecx
+    cmpl $TOK_KEYWORD, TK_KIND(%rax)
+    jne 1f
+    mov TK_ID(%rax), %edx
+    cmp $KW_SELECT, %edx
+    sete %cl
+    cmp $KW_WITH, %edx
+    sete %dl
+    or %dl, %cl
+1:  mov %ecx, %eax
+    ret
+ENDF p_starts_query
 
 FUNC parse_concat
     ENTER 0
@@ -1230,30 +1357,22 @@ FUNC parse_primary
     cmp $KW_CAST, %ecx
     je pp_cast
     cmp $KW_CASE, %ecx
-    je pp_unsupported
+    je pp_case
     cmp $KW_EXISTS, %ecx
-    je pp_unsupported
+    je pp_exists
 pp_error:
     mov %rbx, %rdi
     call p_error
-pp_unsupported:
-    mov %rbx, %rdi
-    call p_unsupported
 
 pp_op:
     cmpl $OP_LPAREN, TK_ID(%r14)
     jne pp_error
     mov %rbx, %rdi
-    mov $1, %esi
-    call p_peek
-    cmpl $TOK_KEYWORD, TK_KIND(%rax)
-    jne 1f
-    cmpl $KW_SELECT, TK_ID(%rax)
-    je pp_unsupported
-    cmpl $KW_WITH, TK_ID(%rax)
-    je pp_unsupported
-1:  mov %rbx, %rdi
     call p_next
+    mov %rbx, %rdi
+    call p_starts_query
+    test %eax, %eax
+    jnz pp_subquery
     mov %rbx, %rdi
     call parse_expr
     mov %rax, %r12
@@ -1262,6 +1381,93 @@ pp_op:
     mov $OP_RPAREN, %esi
     call p_expect_op
     mov %r12, %rax
+    LEAVE
+
+/* ( query ) -> EK_SUBQ (V1 SelectStmt*); the '(' has been consumed */
+pp_subquery:
+    mov $EK_SUBQ, %r13d
+    jmp 1f
+/* EXISTS ( query ) -> EK_EXISTS (V1 SelectStmt*) */
+pp_exists:
+    mov %rbx, %rdi
+    call p_next                     /* EXISTS */
+    mov %rbx, %rdi
+    mov $OP_LPAREN, %esi
+    call p_expect_op
+    mov $EK_EXISTS, %r13d
+1:  mov %rbx, %rdi
+    call parse_query
+    mov %rax, %r12
+    mov %rbx, %rdi
+    mov $OP_RPAREN, %esi
+    call p_expect_op
+    mov %r13d, %edi
+    mov %r14, %rsi
+    call new_node
+    mov %r12, N_V1(%rax)
+    LEAVE
+
+/* CASE [operand] WHEN e THEN e {WHEN e THEN e} [ELSE e] END
+ *   -> EK_CASE (A operand or 0, B node*[2*V1] = when1,then1,..., V2 ELSE or 0) */
+pp_case:
+    mov %rbx, %rdi
+    call p_next                     /* CASE */
+    xor %r12d, %r12d                /* operand */
+    mov %rbx, %rdi
+    mov $KW_WHEN, %esi
+    call p_is_kw
+    test %eax, %eax
+    jnz 1f
+    mov %rbx, %rdi
+    call parse_expr
+    mov %rax, %r12
+1:  mov g_arena(%rip), %rdi
+    call vec_new
+    mov %rax, 8(%rsp)               /* when/then pairs */
+    mov %rbx, %rdi                  /* at least one WHEN */
+    mov $KW_WHEN, %esi
+    call p_expect_kw
+2:  mov %rbx, %rdi
+    call parse_expr
+    mov 8(%rsp), %rdi
+    mov %rax, %rsi
+    call vec_push
+    mov %rbx, %rdi
+    mov $KW_THEN, %esi
+    call p_expect_kw
+    mov %rbx, %rdi
+    call parse_expr
+    mov 8(%rsp), %rdi
+    mov %rax, %rsi
+    call vec_push
+    mov %rbx, %rdi
+    mov $KW_WHEN, %esi
+    call p_accept_kw
+    test %eax, %eax
+    jnz 2b
+    xor %r13d, %r13d                /* ELSE */
+    mov %rbx, %rdi
+    mov $KW_ELSE, %esi
+    call p_accept_kw
+    test %eax, %eax
+    jz 3f
+    mov %rbx, %rdi
+    call parse_expr
+    mov %rax, %r13
+3:  mov %rbx, %rdi
+    mov $KW_END, %esi
+    call p_expect_kw
+    mov $EK_CASE, %edi
+    mov %r14, %rsi
+    call new_node
+    mov %r12, N_A(%rax)
+    mov %r13, N_V2(%rax)
+    mov 8(%rsp), %rcx
+    mov VEC_DATA(%rcx), %rdx
+    mov %rdx, N_B(%rax)
+    mov VEC_LEN(%rcx), %rdx
+    shr $1, %rdx
+    mov %rdx, N_V1(%rax)
     LEAVE
 
 pp_true:

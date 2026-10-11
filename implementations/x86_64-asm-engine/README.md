@@ -124,6 +124,16 @@ Key decisions:
   give `DECIMAL(18, max scale)`); otherwise all must be equal.
 * `HAVING` and `WHERE` cannot reference SELECT aliases (only GROUP BY and
   ORDER BY can, as the spec defines).
+* `UPPER`/`LOWER` map ASCII letters only, and leave a whole word (maximal run
+  of ASCII letters/digits and non-ASCII characters) unchanged when it contains
+  a non-ASCII character: `UPPER('abc Ünï')` is `'ABC Ünï'` (as the conformance
+  suite expects).
+* `ROUND(x, n)` with a NULL `n` is NULL; `DATE_TRUNC`/`DATE_DIFF` with a NULL
+  unit are NULL. Constant arguments (`ROUND`'s `n`, units) are evaluated at
+  validation time.
+* Comparisons inside `IN` lists, `BETWEEN`, simple `CASE` and `NULLIF` promote
+  per pair at run time (INT64 vs DECIMAL compares exactly; DATE vs TIMESTAMP
+  uses midnight).
 * In DECIMAL arithmetic an INT64 operand takes part as `DECIMAL(18,0)`
   (e.g. `1.5 * 2` is `DECIMAL(18,1)`); in comparisons the INT64 side is
   promoted to the other operand's scale.

@@ -33,5 +33,5 @@ Schema), `include/sql.inc` (tokens, AST nodes, SelectStmt, plan, eval ctx).
 * Binder: GROUP BY/HAVING/DISTINCT (structural equality of expressions),
   multiple range variables (EC_ROW becomes one row index per range variable).
 * Executor: hash aggregation keyed on value cells; hash join; DISTINCT.
-* Scalar functions table in binder/eval (names already recognised in
-  `phase2_funcs`).
+* Scalar functions, CASE, BETWEEN, IN lists and LIKE: done (`src/functions.S`,
+  hooked from `bind_expr_node` and `eval`).
