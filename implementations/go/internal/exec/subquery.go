@@ -12,8 +12,9 @@ import (
 
 // appendKey appends a canonical, type-aware encoding of v to b, used as
 // hash key for grouping, DISTINCT, hash joins and IN sets. Values that are
-// equal per types.md §7 encode identically (DECIMALs are normalized by
-// stripping trailing fractional zeros, -0.0 equals 0.0, NULLs are equal).
+// equal per types.md §7 encode identically (DECIMALs of any precision are
+// normalized by stripping trailing fractional zeros and encode like an
+// INT64 of the same value, -0.0 equals 0.0, NULLs are equal).
 func appendKey(b []byte, v types.Value, t types.Type) []byte {
 	if v.Null {
 		return append(b, 0)
@@ -31,16 +32,35 @@ func appendKey(b []byte, v types.Value, t types.Type) []byte {
 		b = binary.AppendUvarint(b, uint64(len(v.S)))
 		return append(b, v.S...)
 	case types.KindDecimal:
+		if t.IsWide() {
+			x, s := types.NormalizeWide(v.Wide(), t.Scale)
+			if !x.IsInt64() {
+				b = append(b, 5, byte(s))
+				b = binary.LittleEndian.AppendUint64(b, x.Lo)
+				return binary.LittleEndian.AppendUint64(b, uint64(x.Hi))
+			}
+			return appendNarrowKey(b, x.Int64(), s)
+		}
 		u, s := v.I, t.Scale
 		for s > 0 && u%10 == 0 {
 			u /= 10
 			s--
 		}
-		b = append(b, 3, byte(s))
-		return binary.LittleEndian.AppendUint64(b, uint64(u))
+		return appendNarrowKey(b, u, s)
+	case types.KindInt64:
+		// Encoded like a DECIMAL of scale 0: INT64 and DECIMAL values are
+		// compared by exact value (hash joins, IN sets).
+		return appendNarrowKey(b, v.I, 0)
 	}
 	b = append(b, 4)
 	return binary.LittleEndian.AppendUint64(b, uint64(v.I))
+}
+
+// appendNarrowKey encodes a normalized decimal whose unscaled value fits
+// int64 (so narrow and wide DECIMALs and INT64 encode equal values alike).
+func appendNarrowKey(b []byte, u int64, s int) []byte {
+	b = append(b, 3, byte(s))
+	return binary.LittleEndian.AppendUint64(b, uint64(u))
 }
 
 // subResult is the evaluated result of a subquery.

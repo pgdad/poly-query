@@ -2,7 +2,8 @@
 
 An analytical database engine implementing the PolyQuery specification
 (`spec/`), currently **Phase 5**: the complete SQL v1 query language over
-row- or column-oriented in-memory tables, persistent PQCF v1 columnar files,
+row- or column-oriented in-memory tables (DECIMAL precision up to 38 digits,
+change request CR-2), persistent PQCF v1/v2 columnar files,
 statistics, hash and ordered indexes and a planner with predicate pushdown,
 row-group skipping, column pruning and index selection — served over
 HTTP/1.1 with streamed results, admission control, timeouts, cancellation,
@@ -48,6 +49,7 @@ None. Only the Go standard library is used (`ENGINE.json` lists no libraries).
 `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`, `phase4`,
 `http.streaming`, `phase5`, `exec.row`, `exec.vectorized`, `exec.parallel`,
 `join.hash`, `join.merge`, `join.nested_loop`, `change.union_all`,
+`change.decimal38`,
 `native.kernels`.
 
 `native.kernels` is claimed by cgo builds (the default with a C compiler):
@@ -85,9 +87,9 @@ SQL text ─lexer→ tokens ─parser→ AST ─analyzer→ logical plan ─opti
 | `internal/storage` | Immutable tables split into row groups, each either column-oriented (typed vectors with validity bitmaps, STRING columns optionally dictionary-encoded, chunks optionally decoded lazily) or row-oriented (tuples); per-group min/max/null statistics; lazily computed table statistics |
 | `internal/index` | Single-column HASH (hash map value → row IDs) and BTREE (sorted permutation with binary search) indexes |
 | `internal/catalog` | Copy-on-write catalog of tables and globally named indexes: every mutation publishes a new immutable snapshot atomically |
-| `internal/pqcf` | PQCF v1 reader (full validation, PLAIN/DICT/RLE decoding, CRC-32, memory mapping with lazy chunk decoding) and atomic writer (encoding choice, statistics, temp file + fsync + rename + directory fsync) |
+| `internal/pqcf` | PQCF v1/v2 reader (full validation, PLAIN/DICT/RLE decoding incl. 128-bit wide DECIMALs, CRC-32, memory mapping with lazy chunk decoding) and atomic writer (v2 exactly for tables with a wide DECIMAL column; encoding choice, statistics, temp file + fsync + rename + directory fsync) |
 | `internal/ingest` | CSV (RFC 4180 + spec rules) and strict JSON/JSONL parsers, schema inference and explicit-schema conversion |
-| `internal/types` | Type system: canonical names/aliases, values, exact DECIMAL arithmetic (int64 unscaled + 128-bit products, big-int sums), proleptic Gregorian DATE/TIMESTAMP, CAST matrix, text parsing/formatting, ordering |
+| `internal/types` | Type system: canonical names/aliases, values, exact DECIMAL arithmetic (narrow: int64 unscaled + 128-bit products; wide: `Int128` unscaled + 256-bit-safe products; exact sums in int64 → 128 bits → big.Int), proleptic Gregorian DATE/TIMESTAMP, CAST matrix, text parsing/formatting, exact ordering across INT64/DECIMAL |
 | `internal/errs` | Structured errors with stable codes and optional details |
 | `internal/native` | cgo binding of `libpqkernels`: run-time `dlopen`/`dlsym`, ABI check, length-checked Go wrappers per kernel (stub without cgo) |
 
@@ -154,6 +156,119 @@ The executor is unchanged otherwise: all `mode`/`threads`/`join`/
 `optimize`/`native` combinations run the same `UnionAll` operator over
 branch plans built by the existing code, which is why they agree (checked
 by `TestUnionAllModesAgree`).
+
+### DECIMAL precision 38 (change request CR-2)
+
+`spec/changes/decimal38.md` (capability `change.decimal38`) raises the
+maximum DECIMAL precision from 18 to 38. Decimals with `p ≤ 18` ("narrow")
+keep their representation and every code path they had; only types with
+`p > 18` ("wide") take the new paths, so the dispatch is a type test
+(`types.Type.IsWide()`), decided once per expression/operator when it is
+compiled, never per value.
+
+**Representation of wide values.**
+
+* `types.Int128 {Hi int64; Lo uint64}` is a 128-bit two's-complement
+  integer holding the unscaled value (|v| < 10³⁸ < 2¹²⁷). Arithmetic is
+  implemented on 64-bit limbs with `math/bits` (`int128.go`,
+  `widedecimal.go`): add/sub with overflow detection, 128×128 products
+  with exact overflow detection (a product needing more than 127 bits
+  exceeds 10³⁸ anyway, so the 256-bit result never has to be
+  materialized; a product of two 38-digit values is decided exactly), division by
+  powers of ten in ≤ 19-digit steps (rescaling with round-half-away,
+  FLOOR/CEIL, truncation to INT64), decimal parsing/formatting, exact
+  comparison across scales. `math/big` is used only off the hot paths
+  (FLOAT64 ↔ DECIMAL conversions, sums that leave 128 bits, AVG's final
+  division).
+* `types.Value` gained one field, `Hi int64`: a wide DECIMAL value is
+  `Hi·2⁶⁴ + uint64(I)` (`Value.Wide()`, `types.WideValue`); for every
+  other type `Hi` is zero, so narrow values, map keys and all existing code
+  are unaffected. `types.DecimalOf(t, v)` / `types.MakeDecimal(t, x)`
+  convert between any INT64/DECIMAL value and `Int128`.
+* Column storage: `storage.Vector.Wides []types.Int128` (narrow decimals
+  stay in `Ints []int64`); vectorized batches use a fourth vector class
+  `vWide` with `Vec.W []types.Int128`. Scans slice wide chunks without
+  copying, exactly like int64 chunks.
+* PQCF v2: wide columns as 128-bit little-endian two's complement
+  (PLAIN 16 bytes per value, RLE runs of 20 bytes).
+
+**Narrow/wide dispatch.**
+
+* *Typing* (`internal/analyzer`): `types.ResultPrecision(operands…)` is the
+  CR's `W` (38 if some DECIMAL operand is wide, else 18; INT64 operands do
+  not count) and replaces the constant 18 in `CommonNumeric` (comparisons,
+  CASE/COALESCE, UNION ALL), `+ - *`, SUM, ROUND, FLOOR and CEIL. INT64
+  operands of DECIMAL arithmetic are promoted to `DECIMAL(W,0)`. Decimal
+  literals of up to 38 significant digits are DECIMALs (wide from 19).
+* *Comparisons* between INT64 and DECIMAL operands are no longer wrapped in
+  a promoting CAST (`needsPromotion`): `types.Compare` compares INT64,
+  narrow and wide DECIMAL values by exact value (narrow pairs keep the
+  int64 fast path, everything else goes through `CompareWide`), the
+  comparers used by BETWEEN / IN / simple CASE / NULLIF leave such operands
+  unconverted, and the hash-key encoding (`appendKey`) encodes INT64 and
+  DECIMAL values of any precision identically when they are equal
+  (normalized: trailing fractional zeros stripped, int64-sized values in the
+  narrow layout, larger ones in a 16-byte layout). So hash joins, IN sets,
+  grouping and DISTINCT on mixed INT64/DECIMAL keys never overflow.
+  DECIMAL vs FLOAT64 still converts the decimal to the nearest FLOAT64.
+* *Row execution* (`internal/exec`): arithmetic, negation, ABS, ROUND,
+  FLOOR/CEIL and CAST pick the 128-bit implementation when the result (or
+  argument) type is wide; SUM/AVG accumulators add `Int128`s into an exact
+  sum (int64 → 128 bits → big.Int), MIN/MAX use `types.Compare`.
+* *Vectorized execution*: `vwide.go` has 128-bit kernels — comparisons
+  (`vwideCmp`, operands of any exact numeric type widened per batch),
+  `+ - *` with per-element 38-digit checks (`vwideArith`; failures fall
+  back to row-by-row evaluation for the exact error, as for narrow
+  kernels), SUM/AVG (`wideSumState`), MIN/MAX (`wideMinMax`) and a
+  `map[Int128]` group table for single wide keys. Sorting uses a saturated
+  int64 prefix of the value plus a full 128-bit comparison; hash joins and
+  multi-column keys use the canonical key encoding. Mixed narrow
+  INT64/DECIMAL comparisons stay in int64 kernels (`CompareDecimal` across
+  scales; constants exactly representable at the column's scale are
+  converted once, so `amount > 500` runs the SIMD constant comparison).
+* *Native kernels* are never given a wide column: `intClass` (the gate of
+  native filters, scan aggregation and column-pair comparisons) is false for
+  wide DECIMALs, column-pair comparisons require both sides to be 64-bit,
+  and grouped native SUM, native hash maps and native gathers only exist
+  for the `vInt` class. Wide operands therefore always run in Go, with
+  identical results whether `native` is on or off.
+* *Planning* (`internal/physical`): search arguments translate INT64 and
+  DECIMAL constants of any precision exactly into the column's domain
+  (`exactToDomain`: rescale up, floor down, ±∞ beyond the column's
+  capacity), so indexes and row-group skipping work for wide columns and
+  for mixed INT64/DECIMAL predicates; HASH/BTREE indexes key wide columns
+  by `Int128`.
+* *Storage*: `pqcf.formatVersion` writes v2 iff a column is wide; the reader
+  accepts v1 and v2, requires metadata `format_version` = header version
+  (`STORAGE_CORRUPT`), rejects wide columns in v1 files and wide values
+  exceeding their precision (`STORAGE_CORRUPT`), and reports versions > 2
+  as `STORAGE_VERSION_UNSUPPORTED`.
+
+**Modules touched.**
+
+| Module | Change |
+|---|---|
+| `internal/types` | `int128.go` (new: `Int128`, limb arithmetic, formatting/parsing), `widedecimal.go` (new: wide rescale/add/sub/mul/compare/round/floor/ceil/normalize, text and FLOAT64 conversions, `DecimalOf`/`MakeDecimal`), `value.go` (`Value.Hi`), `type.go` (`MaxDecimalPrecision` 38, `IsWide`), `compare.go` (exact INT64/DECIMAL comparison, `ResultPrecision`, W in `CommonNumeric`), `cast.go` (`castToDecimal`, wide CASTs, exact FLOAT64 → DECIMAL), `decimal.go` (`BigDecimalSum` with a 128-bit stage) |
+| `internal/sql/lexer`, `internal/sql/parser` | keyword column labels after `AS` (see decisions) |
+| `internal/analyzer` | literals up to 38 digits, `W` in arithmetic, SUM/ROUND/FLOOR/CEIL, no promoting CAST between INT64 and DECIMAL in comparisons and NULLIF |
+| `internal/exec` | `eval.go` (wide arithmetic/negation, comparer without INT64 → DECIMAL conversion), `functions.go` (ABS/ROUND/FLOOR/CEIL), `aggregate.go` (wide SUM/AVG), `subquery.go` (`appendKey` encoding), `vector.go` (`vWide`, `Vec.W`), `vwide.go` (new: wide kernels and aggregate states), `vexpr.go` (dispatch, mixed-scale constants, INT64 → DECIMAL promotion kernel), `vagg.go`, `vjoin.go`, `vsort.go`, `vops.go`, `parallel.go` (wide vectors in group tables, join tables, sort stores, scans, gathers), `nfilter.go`/`nagg.go` (wide columns excluded from native kernels) |
+| `internal/storage` | `Vector.Wides`, `WideVector`, statistics (distinct counting) |
+| `internal/index` | `Int128` keys for HASH and BTREE |
+| `internal/physical` | exact constant translation for search arguments (`exactToDomain`), wide statistics in cost estimates |
+| `internal/pqcf` | format version 2 (reader and writer, 128-bit PLAIN/RLE chunks, version rules) |
+| `internal/ingest`, `internal/protocol` | wide DECIMAL parsing from CSV/JSON literal text, result serialization |
+| `internal/engine` | claims `change.decimal38` |
+
+Verification beyond the public cases: unit tests for the 128-bit arithmetic,
+casts, sums and PQCF v2 (round trips through every encoding, the
+reference-writer fixtures, the wide corrupt fixtures); a mode-agreement
+test with wide columns; native differential tests with wide columns next
+to narrow ones; and an oracle harness, `scripts/widecheck.py` (random data with values at
+the 38-digit and int64 limits, ~30,000 checks per run against Python's
+`decimal` module) covering arithmetic, casts, rounding, comparisons, IN /
+BETWEEN, aggregates, grouping, sorting, joins on mixed key types, indexes
+and PQCF round trips under row/vectorized/parallel/merge/nested-loop/
+native/optimize-off execution.
 
 ### Logical / physical plan separation (change request CR-3)
 
@@ -240,12 +355,14 @@ Decisions:
 
 ### Value representation
 
-A `types.Value` is `{Null, I int64, F float64, S string}`; the static type of
-the producing expression decides which field is meaningful (INT64, BOOLEAN,
-DECIMAL unscaled, DATE days and TIMESTAMP microseconds share `I`). Tables store
-typed vectors per column. Hash keys (grouping, DISTINCT, joins, IN sets) use a
-canonical byte encoding in which equal values per types.md §7 encode equally
-(DECIMALs normalized by scale, `-0.0 = 0.0`, NULLs equal).
+A `types.Value` is `{Null, I int64, F float64, S string, Hi int64}`; the
+static type of the producing expression decides which field is meaningful
+(INT64, BOOLEAN, narrow DECIMAL unscaled, DATE days and TIMESTAMP
+microseconds share `I`; a wide DECIMAL is the 128-bit `Hi:I`, see CR-2).
+Tables store typed vectors per column. Hash keys (grouping, DISTINCT, joins,
+IN sets) use a canonical byte encoding in which equal values per types.md §7
+encode equally (DECIMALs of any precision normalized by scale and equal to
+INT64s of the same value, `-0.0 = 0.0`, NULLs equal).
 
 ### Storage (Phase 3)
 
@@ -253,7 +370,8 @@ canonical byte encoding in which equal values per types.md §7 encode equally
   `column`) and `{"dictionary": true}`. Tables are split into row groups of
   65,536 rows (PQCF tables keep the file's row groups). In the column layout
   each group holds one vector per column (`[]int64` for BOOLEAN, INT64,
-  DECIMAL unscaled, DATE, TIMESTAMP; `[]float64`; `[]string` or dictionary
+  narrow DECIMAL unscaled, DATE, TIMESTAMP; `[]types.Int128` for wide
+  DECIMAL; `[]float64`; `[]string` or dictionary
   + `[]uint32` codes) plus an LSB-first validity bitmap (absent when the
   chunk has no NULLs). STRING chunks are dictionary-encoded automatically
   when they have fewer distinct values than half their rows, or always with
@@ -262,7 +380,8 @@ canonical byte encoding in which equal values per types.md §7 encode equally
   reader, so results are identical by construction (and the conformance
   suite was also run with row layout, forced dictionaries and tiny row
   groups as defaults).
-* **PQCF writing** follows the spec byte-exactly: chunks start at 8-byte
+* **PQCF writing** follows the spec byte-exactly (format version 2 for
+  tables with a wide DECIMAL column, version 1 otherwise): chunks start at 8-byte
   aligned offsets with zero padding, NULL slots are zero / empty / code 0,
   validity bitmaps only when `null_count > 0`, `min`/`max` for every type
   except STRING (optional per spec, omitted to avoid cross-language string
@@ -275,7 +394,8 @@ canonical byte encoding in which equal values per types.md §7 encode equally
   fsynced. Stale temporary files of earlier crashed saves to the same target
   are removed by the next save (never those of saves in progress).
 * **PQCF reading** validates header (magic, version 0 ⇒ `STORAGE_CORRUPT`,
-  version > 1 or flags ≠ 0 ⇒ `STORAGE_VERSION_UNSUPPORTED`), footer,
+  version > 2 or flags ≠ 0 ⇒ `STORAGE_VERSION_UNSUPPORTED`; metadata version
+  ≠ header version or a wide column in a v1 file ⇒ `STORAGE_CORRUPT`), footer,
   metadata CRC, UTF-8 and every structural rule of §2; unknown encodings ⇒
   `STORAGE_VERSION_UNSUPPORTED`. Bytes between chunks must be zero (the spec
   only allows zero padding; this makes bit flips there detectable, too).
@@ -401,7 +521,8 @@ expressions are closures over rows.
 
 **Vectorized mode** (`mode: "vectorized"`, also `auto`) exchanges
 batches of up to 2,048 rows (`exec.Batch`): one typed vector per column
-(`[]int64` for BOOLEAN/INT64/DECIMAL/DATE/TIMESTAMP, `[]float64`,
+(`[]int64` for BOOLEAN/INT64/narrow DECIMAL/DATE/TIMESTAMP,
+`[]types.Int128` for wide DECIMAL, `[]float64`,
 `[]string` or dictionary + codes) with a `[]bool` NULL array, plus an
 optional selection vector of active rows.
 
@@ -814,10 +935,12 @@ Observations:
 
 ## Decisions on points the spec leaves open
 
-* **INT64 ↔ DECIMAL comparison** follows types.md §2 literally: the INT64 side
-  is promoted to `DECIMAL(18,s)` and a value that needs more than 18 digits
-  raises `NUMERIC_OVERFLOW`. For arithmetic, INT64 operands keep scale 0
-  (so `1.5 * 2` is `DECIMAL(18,1)`), `/` converts both sides directly to FLOAT64.
+* **INT64 ↔ DECIMAL comparison** compares exact values and never overflows
+  (CR-2 §4, resolving SPEC-Q-001; before CR-2 the INT64 side was promoted to
+  `DECIMAL(18,s)`). For arithmetic, INT64 operands keep scale 0 (so `1.5 * 2`
+  is `DECIMAL(18,1)`) and are promoted to `DECIMAL(W,0)`, which overflows for
+  INT64 values beyond 18 digits when `W` is 18; `/` converts both sides
+  directly to FLOAT64.
 * **Null-typed expressions** (`NULL + NULL`, `SUM(NULL)`, `MIN(NULL)`) keep the
   null type and are reported as `STRING`; arithmetic with one NULL operand takes
   the other operand's type.
@@ -833,7 +956,10 @@ Observations:
 * **CAST from STRING** trims ASCII whitespace; `CAST(... AS TIMESTAMP)` requires
   the full timestamp syntax of types.md §3 (a bare date is a `CONVERSION_ERROR`;
   ingestion does accept dates for TIMESTAMP columns as specified).
-  `FLOAT64 → DECIMAL` rounds the shortest round-trip decimal representation.
+  `FLOAT64 → DECIMAL` rounds the exact binary value of the double half away
+  from zero (CR-2 §5; this applies to narrow targets too — e.g.
+  `CAST(2.675e0 AS DECIMAL(4,2))` is `2.67`, because the double is
+  2.67499999…).
 * **FLOAT64 output** uses the shortest round-trip representation, `-0` as `0.0`,
   and integral values keep a `.0` suffix.
 * **LIMIT/OFFSET** must be constant INT64 expressions: non-constant ⇒
@@ -891,7 +1017,7 @@ Observations:
 * `--max-join-rows` limits the output of every individual join operator.
 * **UNION ALL**: types of identical DECIMAL branch columns are kept
   (`DECIMAL(10,2)` ∪ `DECIMAL(10,2)` is `DECIMAL(10,2)`), exactly as for CASE
-  results; differing DECIMALs and INT64/DECIMAL mixes give `DECIMAL(18,s)`.
+  results; differing DECIMALs and INT64/DECIMAL mixes give `DECIMAL(W,s)`.
   An all-NULL column keeps the null type (reported as `STRING`, as for
   `SELECT NULL`). ORDER BY names are matched case-insensitively against
   the output names; a name matching two output columns is ambiguous
@@ -900,6 +1026,20 @@ Observations:
   `1.0.0`: CR-1 mentions `1.1.0-cr1`, but it also requires that every
   earlier phase keeps passing, and the phase-1 conformance case pins
   `1.0.0`.
+* **Keyword column labels**: grammar.md reserves `FULL` (and other keywords)
+  as identifiers, but the public CR-2 case `…) AS full` expects it as a
+  column name. After an explicit `AS` in the select list any word is
+  accepted as the output name, as SQL column labels allow; everywhere else
+  (aliases without `AS`, table aliases, column references) reserved words
+  remain `PARSE_ERROR`.
+* **CR-2 spec version**: `spec_version` stays `1.0.0` for the same reason as
+  for CR-1 (the phase-1 case pins it), although CR-2 names `1.2.0-cr2`.
+* **Wide DECIMAL details**: `ROUND(x, n)` with `n` far below zero is 0 (or
+  `NUMERIC_OVERFLOW` when the rounded value needs more than 38 digits);
+  the precision of a DECIMAL column bounds the values a search argument can
+  match (constants beyond it are ±∞). JSON numbers with an exponent are
+  not valid DECIMAL text (as for narrow columns: the ingestion grammar has
+  no exponent), so they are `CONVERSION_ERROR`s for DECIMAL columns.
 * Defaults: `--max-query-memory-mb 4096`, `--max-ingest-bytes 4 GiB`,
   `--max-table-rows 500000000`. Memory accounting covers retained rows (sort
   buffers, hash tables, materialized join inputs and results).
@@ -938,15 +1078,11 @@ Observations:
   the column (e.g. `col + 1 = 5`) or INT64/DECIMAL columns compared with
   FLOAT64 values, and not to produce ordered output. Predicates are not
   pushed through GROUP BY or LIMIT.
-* Public case `changes/union_all.pqt:51` fails, deliberately. It loads
-  `orders.csv` **without** a schema and expects
-  `order_id UNION ALL amount` to be `DECIMAL(18,2)`. ingestion.md §1.1
-  says inference never yields DECIMAL, so `amount` is FLOAT64, and
-  CR-1 (and the next public case, `age ∪ score`) say INT64 ∪ FLOAT64 is
-  FLOAT64. The engine follows the spec. With `amount` loaded as
-  `DECIMAL(10,2)` it returns exactly the expected `DECIMAL(18,2)` rows
-  `"99.99"`, `"101.00"`. Making the case pass would mean inferring
-  DECIMAL, which breaks the ingestion spec.
+* Wide DECIMAL (p > 18) expressions are 1.5–4× slower than narrow ones in
+  vectorized mode (128-bit loops without SIMD), and never use native
+  kernels. COUNT/SUM/AVG(DISTINCT …), CASE/COALESCE and CASTs to or from
+  wide DECIMALs are evaluated per value with the row-mode evaluator inside
+  vectorized plans.
 * A hash aggregation, DISTINCT or sort directly over a `UNION ALL` runs
   single-threaded. Its branches still use parallel pipelines.
 * Correlated subqueries whose correlation is not an equality (e.g.

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"sync/atomic"
+	"unsafe"
 
 	"polyquery/internal/errs"
 	"polyquery/internal/native"
@@ -99,9 +100,12 @@ func (m *MemTracker) Reset(mark int64) {
 	}
 }
 
+// valueSize is the in-memory size of a types.Value.
+const valueSize = int64(unsafe.Sizeof(types.Value{}))
+
 // RowSize estimates the retained size of a row in bytes.
 func RowSize(r types.Row) int64 {
-	n := int64(24 + 40*len(r))
+	n := 24 + valueSize*int64(len(r))
 	for i := range r {
 		n += int64(len(r[i].S))
 	}

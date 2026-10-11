@@ -55,40 +55,14 @@ type domainValue struct {
 // toDomain translates constant v of type vt into the domain of column type
 // ct; ok is false for type combinations that are not supported.
 func toDomain(ct types.Type, v types.Value, vt types.Type) (domainValue, bool) {
-	scale := func(t types.Type) (int, bool) {
-		switch t.Kind {
-		case types.KindInt64:
-			return 0, true
-		case types.KindDecimal:
-			return t.Scale, true
-		}
-		return 0, false
-	}
-	cs, cnum := scale(ct)
-	vs, vnum := scale(vt)
+	exactNum := func(t types.Type) bool { return t.Kind == types.KindInt64 || t.Kind == types.KindDecimal }
 	switch {
-	case cnum && vnum:
-		if vs == cs {
-			return domainValue{v: v, exact: true}, true
-		}
-		if vs < cs {
-			// The column is DECIMAL: its values have at most 18 digits.
-			x, err := types.RescaleUp(v.I, cs-vs)
-			if err != nil {
-				if v.I < 0 {
-					return domainValue{inf: -1}, true
-				}
-				return domainValue{inf: 1}, true
-			}
-			return domainValue{v: types.IntValue(x), exact: true}, true
-		}
-		div := types.Pow10[vs-cs]
-		q := types.FloorDiv(v.I, div)
-		return domainValue{v: types.IntValue(q), exact: q*div == v.I}, true
+	case exactNum(ct) && exactNum(vt):
+		return exactToDomain(ct, types.DecimalOf(vt, v), vt.Scale), true
 	case ct.Kind == types.KindFloat64 && vt.Kind == types.KindInt64:
 		return domainValue{v: types.FloatValue(float64(v.I)), exact: true}, true
 	case ct.Kind == types.KindFloat64 && vt.Kind == types.KindDecimal:
-		return domainValue{v: types.FloatValue(types.DecimalToFloat(v.I, vt.Scale)), exact: true}, true
+		return domainValue{v: types.FloatValue(types.DecimalValueToFloat(v, vt)), exact: true}, true
 	case ct.Kind == types.KindDate && vt.Kind == types.KindTimestamp:
 		q := types.FloorDiv(v.I, types.MicrosPerDay)
 		return domainValue{v: types.IntValue(q), exact: q*types.MicrosPerDay == v.I}, true
@@ -98,6 +72,41 @@ func toDomain(ct types.Type, v types.Value, vt types.Type) (domainValue, bool) {
 		return domainValue{v: v, exact: true}, true
 	}
 	return domainValue{}, false
+}
+
+// exactToDomain translates the INT64/DECIMAL constant x / 10^vs into the
+// domain of an INT64 or DECIMAL column type ct (of any precision): the
+// largest value at the column's scale ≤ the constant, or ±inf if that lies
+// outside the values the column can hold.
+func exactToDomain(ct types.Type, x types.Int128, vs int) domainValue {
+	cs := ct.Scale // 0 for INT64
+	d := domainValue{exact: true}
+	if vs <= cs {
+		y, err := types.RescaleWide(x, vs, cs, types.MaxDecimalPrecision)
+		if err != nil {
+			return domainValue{inf: x.Sign()} // beyond 38 digits (x ≠ 0)
+		}
+		x = y
+	} else {
+		x, d.exact = types.FloorWideExact(x, vs-cs)
+	}
+	// Column capacity: INT64 range, 18 digits (narrow), 38 digits (wide).
+	fits := x.IsInt64()
+	switch {
+	case ct.IsWide():
+		fits = true // |x| < 10^38 after the steps above
+	case ct.Kind == types.KindDecimal:
+		fits = fits && types.FitsPrecision(x.Int64(), types.NarrowDecimalPrecision)
+	}
+	if !fits {
+		return domainValue{inf: x.Sign()}
+	}
+	if ct.IsWide() {
+		d.v = types.WideValue(x)
+	} else {
+		d.v = types.IntValue(x.Int64())
+	}
+	return d
 }
 
 // bounder converts comparisons into ranges over one column type.

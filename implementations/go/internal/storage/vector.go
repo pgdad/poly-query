@@ -33,12 +33,14 @@ func (b Bitmap) Set(i int) { b[i>>6] |= 1 << uint(i&63) }
 func (b Bitmap) Clear(i int) { b[i>>6] &^= 1 << uint(i&63) }
 
 // Vector is a typed column of n values plus a validity bitmap. BOOLEAN,
-// INT64, DECIMAL (unscaled), DATE and TIMESTAMP values are stored in Ints,
-// FLOAT64 in Floats, and STRING either plainly in Strs or dictionary-encoded
-// (Dict + Codes). Values of NULL slots are unspecified.
+// INT64, narrow DECIMAL (unscaled), DATE and TIMESTAMP values are stored in
+// Ints, wide DECIMALs (unscaled) in Wides, FLOAT64 in Floats, and STRING
+// either plainly in Strs or dictionary-encoded (Dict + Codes). Values of
+// NULL slots are unspecified.
 type Vector struct {
 	Type   types.Type
 	Ints   []int64
+	Wides  []types.Int128
 	Floats []float64
 	Strs   []string
 	Dict   []string // dictionary of a dictionary-encoded STRING vector
@@ -55,6 +57,8 @@ func NewVector(t types.Type, n int) *Vector {
 		v.Floats = make([]float64, 0, n)
 	case classString:
 		v.Strs = make([]string, 0, n)
+	case classWide:
+		v.Wides = make([]types.Int128, 0, n)
 	default:
 		v.Ints = make([]int64, 0, n)
 	}
@@ -67,6 +71,7 @@ const (
 	classInt class = iota
 	classFloat
 	classString
+	classWide
 )
 
 func storageClass(t types.Type) class {
@@ -75,6 +80,9 @@ func storageClass(t types.Type) class {
 		return classFloat
 	case types.KindString, types.KindNull:
 		return classString
+	}
+	if t.IsWide() {
+		return classWide
 	}
 	return classInt
 }
@@ -103,6 +111,8 @@ func (v *Vector) Append(val types.Value) {
 		v.Floats = append(v.Floats, val.F)
 	case classString:
 		v.Strs = append(v.Strs, val.S)
+	case classWide:
+		v.Wides = append(v.Wides, val.Wide())
 	default:
 		v.Ints = append(v.Ints, val.I)
 	}
@@ -134,6 +144,8 @@ func (v *Vector) Get(i int) types.Value {
 	switch {
 	case v.Ints != nil:
 		return types.Value{I: v.Ints[i]}
+	case v.Wides != nil:
+		return types.WideValue(v.Wides[i])
 	case v.Floats != nil:
 		return types.Value{F: v.Floats[i]}
 	case v.Dict != nil:
@@ -150,6 +162,8 @@ func (v *Vector) Slice(lo, hi int) *Vector {
 	switch {
 	case v.Ints != nil:
 		out.Ints = v.Ints[lo:hi:hi]
+	case v.Wides != nil:
+		out.Wides = v.Wides[lo:hi:hi]
 	case v.Floats != nil:
 		out.Floats = v.Floats[lo:hi:hi]
 	case v.Dict != nil:
@@ -214,12 +228,21 @@ func (v *Vector) distinctStrings(limit int) int {
 	return len(seen)
 }
 
-// IntVector wraps int-class values (BOOLEAN, INT64, DECIMAL, DATE, TIMESTAMP).
+// IntVector wraps int-class values (BOOLEAN, INT64, narrow DECIMAL, DATE,
+// TIMESTAMP).
 func IntVector(t types.Type, vals []int64, valid Bitmap) *Vector {
 	if vals == nil {
 		vals = []int64{}
 	}
 	return &Vector{Type: t, Ints: vals, Valid: valid, n: len(vals)}
+}
+
+// WideVector wraps wide DECIMAL values.
+func WideVector(t types.Type, vals []types.Int128, valid Bitmap) *Vector {
+	if vals == nil {
+		vals = []types.Int128{}
+	}
+	return &Vector{Type: t, Wides: vals, Valid: valid, n: len(vals)}
 }
 
 // FloatVector wraps FLOAT64 values.

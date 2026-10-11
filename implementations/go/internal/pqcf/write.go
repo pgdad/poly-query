@@ -158,12 +158,17 @@ func writeFile(f *os.File, t *storage.Table, indexes []index.Def, opts WriteOpti
 		}
 		return nil
 	}
-	header := []byte{'P', 'Q', 'C', 'F', FormatVersion, 0, 0, 0}
+	colTypes := make([]types.Type, len(t.Columns))
+	for i, c := range t.Columns {
+		colTypes[i] = c.Type
+	}
+	version := formatVersion(colTypes)
+	header := []byte{'P', 'Q', 'C', 'F', byte(version), 0, 0, 0}
 	if err := write(header); err != nil {
 		return 0, err
 	}
 	meta := outMeta{
-		FormatVersion: FormatVersion, Writer: opts.Writer, Table: t.Name, RowCount: t.Rows,
+		FormatVersion: version, Writer: opts.Writer, Table: t.Name, RowCount: t.Rows,
 		Columns: []outColumn{}, Indexes: []outIndex{}, RowGroups: []outGroup{},
 	}
 	for _, c := range t.Columns {
@@ -270,27 +275,29 @@ func chooseEncoding(vals []types.Value, t types.Type, mode string) string {
 	return EncPlain
 }
 
+// run is a run of equal int-class values; hi is the high word of wide
+// DECIMALs (zero otherwise).
 type run struct {
-	value  int64
-	length uint32
+	value, hi int64
+	length    uint32
 }
 
 // runs splits int-class values into runs; NULL slots extend the current run.
 func runs(vals []types.Value) []run {
 	var out []run
 	for i, v := range vals {
-		x := v.I
+		x := run{value: v.I, hi: v.Hi, length: 1}
 		if v.Null {
 			if i > 0 {
-				x = out[len(out)-1].value
+				x.value, x.hi = out[len(out)-1].value, out[len(out)-1].hi
 			} else {
-				x = 0
+				x.value, x.hi = 0, 0
 			}
 		}
-		if len(out) > 0 && out[len(out)-1].value == x && out[len(out)-1].length < math.MaxUint32 {
+		if last := len(out) - 1; last >= 0 && out[last].value == x.value && out[last].hi == x.hi && out[last].length < math.MaxUint32 {
 			out[len(out)-1].length++
 		} else {
-			out = append(out, run{value: x, length: 1})
+			out = append(out, x)
 		}
 	}
 	return out
@@ -337,6 +344,9 @@ func encodeChunk(vals []types.Value, t types.Type, mode string) ([]byte, outChun
 		b = binary.LittleEndian.AppendUint32(b, uint32(len(rs)))
 		for _, r := range rs {
 			b = binary.LittleEndian.AppendUint64(b, uint64(r.value))
+			if t.IsWide() {
+				b = binary.LittleEndian.AppendUint64(b, uint64(r.hi))
+			}
 			b = binary.LittleEndian.AppendUint32(b, r.length)
 		}
 	default:
@@ -375,6 +385,9 @@ func appendPlain(b []byte, vals []types.Value, t types.Type) []byte {
 	}
 	for _, v := range vals {
 		b = binary.LittleEndian.AppendUint64(b, uint64(v.I))
+		if t.IsWide() {
+			b = binary.LittleEndian.AppendUint64(b, uint64(v.Hi))
+		}
 	}
 	return b
 }
@@ -428,7 +441,7 @@ func jsonValue(v types.Value, t types.Type) json.RawMessage {
 	case types.KindFloat64:
 		return json.RawMessage(types.AppendFloat(nil, v.F))
 	case types.KindDecimal:
-		return json.RawMessage(strconv.Quote(types.FormatDecimal(v.I, t.Scale)))
+		return json.RawMessage(strconv.Quote(types.FormatDecimalValue(v, t)))
 	case types.KindDate:
 		return json.RawMessage(strconv.Quote(types.FormatDate(v.I)))
 	case types.KindTimestamp:

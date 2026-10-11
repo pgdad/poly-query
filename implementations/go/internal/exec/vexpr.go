@@ -102,7 +102,16 @@ func (c *vcompiler) compile(e plan.Expr) (vexpr, error) {
 			return nil, err
 		}
 		return &visnull{x: in, not: x.Not}, nil
-	case *plan.Cast, *plan.Like, *plan.Between:
+	case *plan.Cast:
+		if x.X.Type().Kind == types.KindInt64 && x.To.Kind == types.KindDecimal && !x.To.IsWide() {
+			in, err := c.compile(x.X)
+			if err != nil {
+				return nil, err
+			}
+			return &vintToDecimal{x: in, to: x.To}, nil
+		}
+		return c.elementwise(e)
+	case *plan.Like, *plan.Between:
 		return c.elementwise(e)
 	case *plan.InList:
 		for _, item := range x.List {
@@ -152,6 +161,11 @@ func newVConst(v types.Value, c vclass) *vconst {
 		k.vec.F = make([]float64, BatchSize)
 		for i := range k.vec.F {
 			k.vec.F[i] = v.F
+		}
+	case vWide:
+		k.vec.W = make([]types.Int128, BatchSize)
+		for i := range k.vec.W {
+			k.vec.W[i] = v.Wide()
 		}
 	default:
 		k.vec.S = make([]string, BatchSize)
@@ -457,7 +471,10 @@ type vcmp struct {
 
 func (c *vcompiler) comparison(x *plan.Binary) (vexpr, error) {
 	lt, rt := x.L.Type(), x.R.Type()
-	if lt.Kind != rt.Kind {
+	switch {
+	case lt.IsWide() || rt.IsWide():
+		return c.wideComparison(x)
+	case lt.Kind != rt.Kind && !(isExact(lt) && isExact(rt)):
 		return c.fallback(x)
 	}
 	l, err := c.compile(x.L)
@@ -475,15 +492,24 @@ func (c *vcompiler) comparison(x *plan.Binary) (vexpr, error) {
 			lt, rt = rt, lt
 		}
 	}
-	v := &vcmp{op: op, l: l, r: r, cls: classOf(lt)}
-	if lt.Kind == types.KindDecimal {
-		v.scaleL, v.scaleR = lt.Scale, rt.Scale
+	// INT64 (scale 0) and narrow DECIMAL operands compare as int64
+	// unscaled values, exactly across scales. A constant that is exactly
+	// representable at the other operand's scale is converted once, so the
+	// comparison runs on raw int64s.
+	if rc, ok := r.(*vconst); ok && lt.Scale != rt.Scale && !rc.val.Null && classOf(lt) == vInt {
+		if k, exact := rescale(rc.val.I, rt.Scale, lt.Scale); exact {
+			r, rt = newVConst(types.IntValue(k), vInt), lt
+		}
 	}
+	v := &vcmp{op: op, l: l, r: r, cls: classOf(lt), scaleL: lt.Scale, scaleR: rt.Scale}
 	if rc, ok := r.(*vconst); ok {
 		v.rconst = rc
 	}
 	return v, nil
 }
+
+// isExact reports whether t is INT64 or DECIMAL.
+func isExact(t types.Type) bool { return t.Kind == types.KindInt64 || t.Kind == types.KindDecimal }
 
 func cmpResult(op plan.BinaryOp, c int) int64 {
 	var ok bool
@@ -658,7 +684,9 @@ func (c *vcompiler) arithmetic(x *plan.Binary) (vexpr, error) {
 	switch {
 	case kind == types.KindInt64:
 	case kind == types.KindFloat64 && x.Op != plan.OpMod:
+	case kind == types.KindDecimal && !x.T.IsWide() && (x.Op == plan.OpAdd || x.Op == plan.OpSub || x.Op == plan.OpMul):
 	case kind == types.KindDecimal && (x.Op == plan.OpAdd || x.Op == plan.OpSub || x.Op == plan.OpMul):
+		return c.wideArithmetic(x)
 	default:
 		return c.elementwise(x)
 	}
@@ -858,6 +886,50 @@ func (v *varith) flagNonFinite(out []float64) bool {
 	return true
 }
 
+// vintToDecimal casts INT64 to a narrow DECIMAL (the implicit promotion of
+// INT64 operands in DECIMAL arithmetic): x · 10^scale, checked against the
+// target precision.
+type vintToDecimal struct {
+	x      vexpr
+	to     types.Type
+	failed []bool
+	out    vecBuf
+}
+
+func (v *vintToDecimal) eval(b *Batch, sel []int32) (*Vec, error) {
+	in, err := v.x.eval(b, sel)
+	if err != nil {
+		return nil, err
+	}
+	n := b.N
+	out := v.out.reset(n, vInt)
+	if in.Nulls != nil {
+		copy(v.out.withNulls(n), in.Nulls[:n])
+	}
+	if v.to.Scale > types.NarrowDecimalPrecision {
+		return nil, errVector // only zero fits; let the row evaluator decide
+	}
+	m, lim := types.Pow10[v.to.Scale], types.Pow10[v.to.Precision]
+	ok := true
+	for i, x := range in.I[:n] {
+		c, fits := mul64(x, m)
+		ok = ok && fits && c > -lim && c < lim
+		out.I[i] = c
+	}
+	if ok {
+		return out, nil
+	}
+	v.failed = grow(v.failed, n)
+	for i, x := range in.I[:n] {
+		c, fits := mul64(x, m)
+		v.failed[i] = !fits || c <= -lim || c >= lim
+	}
+	if anyFailed(n, sel, out.Nulls, v.failed) {
+		return nil, errVector
+	}
+	return out, nil
+}
+
 // ---------------------------------------------------------------- element-wise
 
 // velementwise evaluates a node whose operands are evaluated vectorized:
@@ -1019,6 +1091,8 @@ func (v *velementwise) evalDict(in *Vec, n int) (*Vec, bool) {
 			out.I[i] = r.I
 		case vFloat:
 			out.F[i] = r.F
+		case vWide:
+			out.W[i] = r.Wide()
 		}
 	}
 	if v.cls == vStr {

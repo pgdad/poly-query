@@ -50,7 +50,7 @@ func newNativeEngine(t *testing.T, lib *native.Lib) *Engine {
 	e := New(cfg)
 	r := rand.New(rand.NewPCG(7, 11))
 	var sb strings.Builder
-	sb.WriteString("id,a,b,big,d,d3,f,day,ts,flag,s\n")
+	sb.WriteString("id,a,b,big,d,d3,f,day,ts,flag,s,w,w0\n")
 	opt := func(p int, s string) string {
 		if r.IntN(100) < p {
 			return ""
@@ -62,17 +62,24 @@ func newNativeEngine(t *testing.T, lib *native.Lib) *Engine {
 		if i%2 == 1 {
 			big = -big + r.Int64N(10)
 		}
-		fmt.Fprintf(&sb, "%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", i,
+		d := fmt.Sprintf("%d.%02d", r.IntN(2000)-1000, r.IntN(100))
+		w := d // wide DECIMAL(30,2): often equal to d, sometimes beyond 64 bits
+		if r.IntN(3) == 0 {
+			w = fmt.Sprintf("%d%018d.%02d", r.IntN(2000)-1000, r.Int64N(1e18), r.IntN(100))
+		}
+		fmt.Fprintf(&sb, "%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", i,
 			opt(10, fmt.Sprint(r.IntN(201)-100)),
 			opt(30, fmt.Sprint(r.IntN(201)-100)),
 			opt(5, fmt.Sprint(big)),
-			opt(15, fmt.Sprintf("%d.%02d", r.IntN(2000)-1000, r.IntN(100))),
+			opt(15, d),
 			opt(15, fmt.Sprintf("%d.%03d", r.IntN(20)-10, r.IntN(1000))),
 			opt(15, strconv.FormatFloat(float64(r.IntN(4001)-2000)/8, 'g', -1, 64)),
 			opt(10, fmt.Sprintf("2024-%02d-%02d", 1+r.IntN(12), 1+r.IntN(28))),
 			opt(10, fmt.Sprintf("2024-01-01 %02d:%02d:00", r.IntN(24), r.IntN(60))),
 			opt(20, fmt.Sprint(r.IntN(2) == 0)),
 			opt(20, []string{"x", "y", "zz", "w"}[r.IntN(4)]),
+			opt(10, w),
+			opt(10, fmt.Sprint(r.IntN(201)-100)),
 		)
 	}
 	data := sb.String()
@@ -82,6 +89,7 @@ func newNativeEngine(t *testing.T, lib *native.Lib) *Engine {
 		{Name: "big", Type: types.Int64}, {Name: "d", Type: types.Decimal(12, 2)}, {Name: "d3", Type: types.Decimal(18, 3)},
 		{Name: "f", Type: types.Float64}, {Name: "day", Type: types.Date}, {Name: "ts", Type: types.Timestamp},
 		{Name: "flag", Type: types.Boolean}, {Name: "s", Type: types.String},
+		{Name: "w", Type: types.Decimal(30, 2)}, {Name: "w0", Type: types.Decimal(25, 0)},
 	}
 	for name, build := range map[string]storage.BuildOptions{
 		"t":  {},
@@ -183,6 +191,18 @@ var nativeQueries = []string{
 	"SELECT DISTINCT a FROM %s WHERE b > 95",
 	"SELECT id FROM %s WHERE a = (SELECT MAX(a) FROM %[1]s WHERE b = 1)",
 	"SELECT id FROM %[1]s o WHERE b = (SELECT MIN(i.b) FROM %[1]s i WHERE i.a = o.a AND i.b > 90) ORDER BY id",
+	// Wide DECIMAL columns never reach the kernels (also next to narrow
+	// columns of the same scale) and INT64/DECIMAL compare exactly.
+	"SELECT id FROM %s WHERE d = w",
+	"SELECT id FROM %s WHERE w < d OR w0 > a",
+	"SELECT id FROM %s WHERE a = w0 AND w > 12.5",
+	"SELECT id FROM %s WHERE w BETWEEN -5 AND 500.25 OR w0 IN (1, 2, 3)",
+	"SELECT id FROM %s WHERE w IS NULL AND d > 0",
+	"SELECT id FROM %s WHERE big > 4000000000000000000.5 AND d < 100",
+	"SELECT COUNT(*), COUNT(w), MIN(w), MAX(w), SUM(w0), AVG(w) FROM %s",
+	"SELECT COUNT(*), SUM(d), SUM(w) FROM %s WHERE w < 0",
+	"SELECT w0, COUNT(*), SUM(w), MAX(d) FROM %s GROUP BY w0 ORDER BY w0",
+	"SELECT x.id, y.id FROM %[1]s x JOIN %[1]s y ON x.a = y.w0 WHERE x.id < 200 ORDER BY x.id, y.id",
 }
 
 var nativeModes = []modeConfig{

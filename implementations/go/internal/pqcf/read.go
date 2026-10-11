@@ -37,6 +37,7 @@ type File struct {
 	Rows    int
 	groups  []fileGroup
 	data    []byte
+	version int // header format version
 }
 
 type fileGroup struct {
@@ -100,11 +101,12 @@ func Parse(data []byte, maxRows int64) (*File, error) {
 	if string(data[:4]) != Magic {
 		return nil, corrupt("bad header magic")
 	}
-	switch v := binary.LittleEndian.Uint16(data[4:6]); {
-	case v == 0:
+	version := int(binary.LittleEndian.Uint16(data[4:6]))
+	switch {
+	case version == 0:
 		return nil, corrupt("format version 0")
-	case v > FormatVersion:
-		return nil, unsupported("PQCF format version %d is not supported", v)
+	case version > maxFormatVersion:
+		return nil, unsupported("PQCF format version %d is not supported", version)
 	}
 	if flags := binary.LittleEndian.Uint16(data[6:8]); flags != 0 {
 		return nil, unsupported("PQCF header flags %#x are not supported", flags)
@@ -129,7 +131,7 @@ func Parse(data []byte, maxRows int64) (*File, error) {
 	if err := json.Unmarshal(meta, &md); err != nil {
 		return nil, corrupt("invalid metadata JSON: %v", err)
 	}
-	pf := &File{data: data}
+	pf := &File{data: data, version: version}
 	if err := pf.load(&md, int(metaStart), maxRows); err != nil {
 		return nil, err
 	}
@@ -137,7 +139,7 @@ func Parse(data []byte, maxRows int64) (*File, error) {
 }
 
 func (pf *File) load(md *metadata, dataEnd int, maxRows int64) error {
-	if md.FormatVersion == nil || *md.FormatVersion != FormatVersion {
+	if md.FormatVersion == nil || *md.FormatVersion != int64(pf.version) {
 		return corrupt("format_version missing or different from the header")
 	}
 	if md.Table == nil || md.RowCount == nil || md.Columns == nil || md.RowGroups == nil {
@@ -162,6 +164,9 @@ func (pf *File) load(md *metadata, dataEnd int, maxRows int64) error {
 		t, err := types.ParseTypeName(*c.Type)
 		if err != nil {
 			return corrupt("column %q has invalid type %q", *c.Name, *c.Type)
+		}
+		if t.IsWide() && pf.version < FormatV2 {
+			return corrupt("column %q has type %s, which needs format version 2", *c.Name, t)
 		}
 		pf.Columns = append(pf.Columns, storage.ColumnDef{Name: *c.Name, Type: t})
 	}
@@ -295,8 +300,8 @@ func statValue(raw json.RawMessage, t types.Type) (types.Value, bool) {
 			return types.FloatValue(f), true
 		}
 	case types.KindDecimal:
-		if u, st := types.ParseDecimalExact(s, t.Precision, t.Scale); isString && st == types.TextOK {
-			return types.IntValue(u), true
+		if v, st := types.ParseDecimalValue(s, t, false); isString && st == types.TextOK {
+			return v, true
 		}
 	case types.KindString:
 		if isString {
@@ -448,7 +453,37 @@ func checkInt(t types.Type, x int64) error {
 	return nil
 }
 
+// checkWide validates a non-NULL wide DECIMAL value.
+func checkWide(t types.Type, x types.Int128) error {
+	if !types.FitsWide(x, t.Precision) {
+		return corrupt("DECIMAL value exceeds precision %d", t.Precision)
+	}
+	return nil
+}
+
+// wideAt reads a little-endian two's-complement 128-bit integer.
+func wideAt(b []byte) types.Int128 {
+	return types.Int128{Lo: binary.LittleEndian.Uint64(b), Hi: int64(binary.LittleEndian.Uint64(b[8:]))}
+}
+
 func decodePlain(d *decoder, t types.Type, n int, valid storage.Bitmap, isNull func(int) bool) (*storage.Vector, error) {
+	if t.IsWide() {
+		if n > d.remaining()/16 {
+			return nil, corrupt("chunk is truncated")
+		}
+		raw, _ := d.take(16 * n)
+		vals := make([]types.Int128, n)
+		for i := range vals {
+			if isNull(i) {
+				continue
+			}
+			vals[i] = wideAt(raw[16*i:])
+			if err := checkWide(t, vals[i]); err != nil {
+				return nil, err
+			}
+		}
+		return storage.WideVector(t, vals, valid), nil
+	}
 	switch t.Kind {
 	case types.KindBoolean:
 		bm, err := d.take((n + 7) / 8)
@@ -586,7 +621,57 @@ func decodeDict(d *decoder, n int, valid storage.Bitmap, isNull func(int) bool) 
 	return storage.DictVector(dict, codes, valid), nil
 }
 
+// wideRunSize is the size of a wide DECIMAL RLE run: i128 value, u32 length.
+const wideRunSize = 20
+
+// decodeWideRLE decodes an RLE chunk of a wide DECIMAL column.
+func decodeWideRLE(d *decoder, t types.Type, n int, valid storage.Bitmap, isNull func(int) bool) (*storage.Vector, error) {
+	runs, err := d.u32()
+	if err != nil {
+		return nil, err
+	}
+	if int64(runs) > int64(d.remaining()/wideRunSize) {
+		return nil, corrupt("run count %d out of range", runs)
+	}
+	raw, _ := d.take(wideRunSize * int(runs))
+	var total int64
+	for r := 0; r < int(runs); r++ {
+		l := binary.LittleEndian.Uint32(raw[wideRunSize*r+16:])
+		if l == 0 {
+			return nil, corrupt("zero-length run")
+		}
+		total += int64(l)
+	}
+	if total != int64(n) {
+		return nil, corrupt("runs cover %d rows, expected %d", total, n)
+	}
+	vals := make([]types.Int128, n)
+	pos := 0
+	for r := 0; r < int(runs); r++ {
+		x := wideAt(raw[wideRunSize*r:])
+		l := int(binary.LittleEndian.Uint32(raw[wideRunSize*r+16:]))
+		checked := false
+		for i := pos; i < pos+l; i++ {
+			if isNull(i) {
+				continue
+			}
+			if !checked {
+				if err := checkWide(t, x); err != nil {
+					return nil, err
+				}
+				checked = true
+			}
+			vals[i] = x
+		}
+		pos += l
+	}
+	return storage.WideVector(t, vals, valid), nil
+}
+
 func decodeRLE(d *decoder, t types.Type, n int, valid storage.Bitmap, isNull func(int) bool) (*storage.Vector, error) {
+	if t.IsWide() {
+		return decodeWideRLE(d, t, n, valid, isNull)
+	}
 	runs, err := d.u32()
 	if err != nil {
 		return nil, err

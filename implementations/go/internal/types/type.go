@@ -27,8 +27,13 @@ const (
 	KindTimestamp
 )
 
-// MaxDecimalPrecision is the largest supported DECIMAL precision.
-const MaxDecimalPrecision = 18
+// DECIMAL precision limits: decimals with precision up to
+// NarrowDecimalPrecision are "narrow" (int64 unscaled values), wider ones up
+// to MaxDecimalPrecision are "wide" (Int128 unscaled values).
+const (
+	NarrowDecimalPrecision = 18
+	MaxDecimalPrecision    = 38
+)
 
 // Type is a fully parameterised SQL type.
 type Type struct {
@@ -50,6 +55,9 @@ var (
 
 // Decimal returns DECIMAL(p,s).
 func Decimal(p, s int) Type { return Type{Kind: KindDecimal, Precision: p, Scale: s} }
+
+// IsWide reports whether t is a wide DECIMAL (precision above 18).
+func (t Type) IsWide() bool { return t.Kind == KindDecimal && t.Precision > NarrowDecimalPrecision }
 
 // IsNumeric reports whether t is INT64, DECIMAL or FLOAT64.
 func (t Type) IsNumeric() bool {

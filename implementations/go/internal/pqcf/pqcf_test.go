@@ -154,7 +154,9 @@ func TestCorruptFixtures(t *testing.T) {
 		"meta_bitflip": errs.StorageCorrupt, "missing_chunk": errs.StorageCorrupt,
 		"not_json_meta": errs.StorageCorrupt, "row_count_mismatch": errs.StorageCorrupt,
 		"truncated_half": errs.StorageCorrupt, "truncated_tail": errs.StorageCorrupt,
-		"unknown_encoding": errs.StorageVersion, "version2": errs.StorageVersion,
+		"unknown_encoding": errs.StorageVersion, "version3": errs.StorageVersion,
+		"wide_in_v1": errs.StorageCorrupt, "wide_overprecision": errs.StorageCorrupt,
+		"wide_version_mismatch": errs.StorageCorrupt,
 	}
 	for name, code := range cases {
 		_, _, err := readFile(t, filepath.Join(fixtures, "corrupt", name+".pqcf"), ReadOptions{})
@@ -167,10 +169,15 @@ func TestCorruptFixtures(t *testing.T) {
 // TestBitFlips flips every bit of a small file: the reader must report an
 // error, eagerly or (memory-mapped) when the data is read.
 func TestBitFlips(t *testing.T) {
+	t.Run("v1", func(t *testing.T) { checkBitFlips(t, sample(20), "auto") })
+	t.Run("v2-plain", func(t *testing.T) { checkBitFlips(t, wideSample(12), "plain") })
+	t.Run("v2-rle", func(t *testing.T) { checkBitFlips(t, wideSample(12), "rle") })
+}
+
+func checkBitFlips(t *testing.T, src *storage.Table, enc string) {
 	dir := t.TempDir()
-	src := sample(20)
 	path := filepath.Join(dir, "s.pqcf")
-	if _, err := Write(path, src, nil, WriteOptions{RowGroupSize: 8}); err != nil {
+	if _, err := Write(path, src, nil, WriteOptions{RowGroupSize: 8, Encoding: enc}); err != nil {
 		t.Fatal(err)
 	}
 	orig, _ := os.ReadFile(path)
@@ -254,5 +261,95 @@ func concat(parts ...[]byte) []byte {
 func TestCRC(t *testing.T) {
 	if crc32.ChecksumIEEE([]byte("123456789")) != 0xCBF43926 {
 		t.Fatal("CRC-32 check value mismatch")
+	}
+}
+
+// wideSample builds a table with wide DECIMAL columns (values beyond 64
+// bits, NULLs, runs) next to a narrow one.
+func wideSample(rows int) *storage.Table {
+	cols := []storage.ColumnDef{
+		{Name: "id", Type: types.Int64}, {Name: "amt", Type: types.Decimal(38, 10)},
+		{Name: "big", Type: types.Decimal(30, 0)}, {Name: "small", Type: types.Decimal(10, 2)},
+	}
+	vecs := make([]*storage.Vector, len(cols))
+	for c, def := range cols {
+		vecs[c] = storage.NewVector(def.Type, rows)
+	}
+	for r := 0; r < rows; r++ {
+		amt, _ := types.ParseDecimalValue("-9999999999999999999999999999.9999999999", cols[1].Type, false)
+		if r%3 != 0 {
+			amt, _ = types.Cast(types.IntValue(int64(r)*1_234_567_890_123), types.Int64, cols[1].Type)
+		}
+		big, _ := types.Cast(types.IntValue(int64(r/8)), types.Int64, cols[2].Type)
+		vals := []types.Value{types.IntValue(int64(r)), amt, big, types.IntValue(int64(r * 25))}
+		for c := range cols {
+			if c > 0 && (r+c)%7 == 0 {
+				vals[c] = types.NullValue
+			}
+			vecs[c].Append(vals[c])
+		}
+	}
+	return storage.Build("wide", &storage.Data{Columns: cols, Vectors: vecs, Rows: rows}, storage.BuildOptions{})
+}
+
+func headerVersion(t *testing.T, path string) uint16 {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return binary.LittleEndian.Uint16(data[4:6])
+}
+
+func TestWideRoundTripV2(t *testing.T) {
+	src := wideSample(300)
+	want := rowsOf(t, src)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "w.pqcf")
+	defs := []index.Def{{Name: "ix", Column: "amt", Kind: index.BTree}}
+	for _, enc := range []string{"auto", "plain", "rle"} {
+		for _, rg := range []int{0, 16} {
+			if _, err := Write(path, src, defs, WriteOptions{RowGroupSize: rg, Encoding: enc}); err != nil {
+				t.Fatal(err)
+			}
+			if v := headerVersion(t, path); v != FormatV2 {
+				t.Fatalf("table with wide columns written as v%d", v)
+			}
+			for _, opts := range []ReadOptions{{}, {Mmap: true}, {Layout: storage.RowLayout}} {
+				got, _, err := readFile(t, path, opts)
+				if err != nil {
+					t.Fatalf("%s/%d: %v", enc, rg, err)
+				}
+				if !reflect.DeepEqual(rowsOf(t, got), want) {
+					t.Fatalf("%s/%d %+v: data differs", enc, rg, opts)
+				}
+			}
+		}
+	}
+	// Tables without wide columns stay v1.
+	if _, err := Write(path, sample(10), nil, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if v := headerVersion(t, path); v != FormatV1 {
+		t.Fatalf("narrow table written as v%d", v)
+	}
+}
+
+func TestReferenceWideFixtures(t *testing.T) {
+	var ref []types.Row
+	for _, name := range []string{"wide_plain", "wide_rle"} {
+		tb, _, err := readFile(t, filepath.Join(fixtures, name+".pqcf"), ReadOptions{})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if tb.Rows != 64 || !tb.Columns[1].Type.IsWide() {
+			t.Fatalf("%s: %d rows, columns %v", name, tb.Rows, tb.Columns)
+		}
+		rows := rowsOf(t, tb)
+		if ref == nil {
+			ref = rows
+		} else if !reflect.DeepEqual(ref, rows) {
+			t.Fatalf("%s decodes differently from wide_plain", name)
+		}
 	}
 }

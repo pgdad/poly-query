@@ -252,6 +252,12 @@ func absFn(t types.Type) func(types.Value) (types.Value, error) {
 		case types.KindFloat64:
 			return types.FloatValue(math.Abs(v.F)), nil
 		case types.KindInt64, types.KindDecimal:
+			if t.IsWide() {
+				if v.Hi < 0 {
+					return types.WideValue(v.Wide().Neg()), nil
+				}
+				return v, nil
+			}
 			if v.I == math.MinInt64 {
 				return null, overflowErr("ABS overflow")
 			}
@@ -273,6 +279,10 @@ func roundFn(t types.Type, n int64) func(types.Value) (types.Value, error) {
 			r, err := roundInt(v.I, -n)
 			return types.IntValue(r), err
 		case types.KindDecimal:
+			if t.IsWide() {
+				r, err := types.RoundWide(v.Wide(), t.Scale, n)
+				return types.WideValue(r), err
+			}
 			s := int64(t.Scale)
 			switch {
 			case n >= s:
@@ -339,6 +349,12 @@ func floorCeilFn(t types.Type, ceil bool) func(types.Value) (types.Value, error)
 			}
 			return types.FloatValue(math.Floor(v.F)), nil
 		case types.KindDecimal:
+			if t.IsWide() {
+				if ceil {
+					return types.WideValue(types.CeilWide(v.Wide(), t.Scale)), nil
+				}
+				return types.WideValue(types.FloorWide(v.Wide(), t.Scale)), nil
+			}
 			d := types.Pow10[t.Scale]
 			q := types.FloorDiv(v.I, d)
 			if ceil && q*d != v.I {

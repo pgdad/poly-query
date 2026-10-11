@@ -140,3 +140,17 @@ func TestUnionAll(t *testing.T) {
 		}
 	}
 }
+
+func TestKeywordColumnLabel(t *testing.T) {
+	st, err := Parse("SELECT 1 AS full, 2 AS Last")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := st.(*ast.Query)
+	if q.Items[0].Alias != "full" || q.Items[1].Alias != "Last" {
+		t.Errorf("aliases = %q, %q", q.Items[0].Alias, q.Items[1].Alias)
+	}
+	if _, err := Parse("SELECT 1 full"); err == nil {
+		t.Errorf("keyword alias without AS accepted")
+	}
+}

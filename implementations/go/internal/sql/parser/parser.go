@@ -374,7 +374,12 @@ func (p *parser) selectItem() (*ast.SelectItem, error) {
 	}
 	item := &ast.SelectItem{Pos: pos(t), Expr: e}
 	if p.accept("AS") {
-		if item.Alias, _, err = p.ident(); err != nil {
+		// After AS any word names the column, reserved keywords included
+		// (e.g. `AS full`), as SQL column labels allow.
+		if k := p.peek(); k.Kind == lexer.Keyword {
+			p.pos++
+			item.Alias = k.Raw
+		} else if item.Alias, _, err = p.ident(); err != nil {
 			return nil, err
 		}
 		item.HasAlias = true

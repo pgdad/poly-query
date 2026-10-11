@@ -2,12 +2,15 @@ package types
 
 import "strings"
 
-// Compare compares two non-NULL values. Both must be of the same kind; DECIMAL
-// values may differ in scale. DATE vs TIMESTAMP must be promoted by the caller.
+// Compare compares two non-NULL values. Both must be of the same kind, except
+// that INT64 and DECIMAL values (of any precision and scale) may be mixed:
+// they compare by exact mathematical value. DATE vs TIMESTAMP and FLOAT64 vs
+// other numerics must be promoted by the caller.
 func Compare(ta Type, a Value, tb Type, b Value) int {
+	if ta.Kind == KindDecimal || tb.Kind == KindDecimal {
+		return compareExact(ta, a, tb, b)
+	}
 	switch ta.Kind {
-	case KindDecimal:
-		return CompareDecimal(a.I, ta.Scale, b.I, tb.Scale)
 	case KindFloat64:
 		switch {
 		case a.F < b.F:
@@ -28,6 +31,15 @@ func Compare(ta Type, a Value, tb Type, b Value) int {
 		return 1
 	}
 	return 0
+}
+
+// compareExact compares INT64/DECIMAL values exactly (types.md §5 as
+// amended by CR-2 §4).
+func compareExact(ta Type, a Value, tb Type, b Value) int {
+	if !ta.IsWide() && !tb.IsWide() {
+		return CompareDecimal(a.I, ta.Scale, b.I, tb.Scale)
+	}
+	return CompareWide(DecimalOf(ta, a), ta.Scale, DecimalOf(tb, b), tb.Scale)
 }
 
 // CompareSame compares two values of the same type t with NULLs first.
@@ -57,18 +69,26 @@ func Comparable(a, b Type) bool {
 	return a.IsTemporal() && b.IsTemporal()
 }
 
+// ResultPrecision is the precision W of a decimal result computed from
+// operands of types ts (CR-2 §2): 38 if some operand is a wide DECIMAL,
+// else 18 (INT64 operands do not count).
+func ResultPrecision(ts ...Type) int {
+	for _, t := range ts {
+		if t.IsWide() {
+			return MaxDecimalPrecision
+		}
+	}
+	return NarrowDecimalPrecision
+}
+
 // CommonNumeric returns the common numeric type of two numeric types
-// (types.md §2 promotion lattice).
+// (types.md §2 promotion lattice, with result precision W of CR-2).
 func CommonNumeric(a, b Type) Type {
 	switch {
 	case a.Kind == KindFloat64 || b.Kind == KindFloat64:
 		return Float64
-	case a.Kind == KindDecimal && b.Kind == KindDecimal:
-		return Decimal(18, max(a.Scale, b.Scale))
-	case a.Kind == KindDecimal:
-		return Decimal(18, a.Scale)
-	case b.Kind == KindDecimal:
-		return Decimal(18, b.Scale)
+	case a.Kind == KindDecimal || b.Kind == KindDecimal:
+		return Decimal(ResultPrecision(a, b), max(a.Scale, b.Scale))
 	}
 	return Int64
 }

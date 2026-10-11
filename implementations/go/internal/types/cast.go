@@ -56,7 +56,14 @@ func Cast(v Value, from, to Type) (Value, error) {
 		case KindInt64, KindBoolean:
 			return IntValue(v.I), nil
 		case KindDecimal:
-			return IntValue(v.I / Pow10[from.Scale]), nil
+			if !from.IsWide() {
+				return IntValue(v.I / Pow10[from.Scale]), nil
+			}
+			q := TruncWide(v.Wide(), from.Scale)
+			if !q.IsInt64() {
+				return Value{}, overflow("DECIMAL value out of INT64 range")
+			}
+			return IntValue(q.Int64()), nil
 		case KindFloat64:
 			t := math.Trunc(v.F)
 			if t < -9223372036854775808.0 || t >= 9223372036854775808.0 {
@@ -80,7 +87,7 @@ func Cast(v Value, from, to Type) (Value, error) {
 		case KindInt64:
 			return FloatValue(float64(v.I)), nil
 		case KindDecimal:
-			return FloatValue(DecimalToFloat(v.I, from.Scale)), nil
+			return FloatValue(DecimalValueToFloat(v, from)), nil
 		case KindString:
 			f, st := ParseFloatText(TrimASCIISpace(v.S))
 			switch st {
@@ -92,40 +99,7 @@ func Cast(v Value, from, to Type) (Value, error) {
 			return FloatValue(f), nil
 		}
 	case KindDecimal:
-		p, s := to.Precision, to.Scale
-		switch from.Kind {
-		case KindInt64:
-			if s > 18 {
-				return Value{}, overflow("value does not fit %s", to)
-			}
-			u, ok := mulCheck(v.I, Pow10[s])
-			if !ok || !FitsPrecision(u, p) {
-				return Value{}, overflow("value does not fit %s", to)
-			}
-			return IntValue(u), nil
-		case KindDecimal:
-			u, err := Rescale(v.I, from.Scale, s, p)
-			if err != nil {
-				return Value{}, err
-			}
-			return IntValue(u), nil
-		case KindFloat64:
-			text := strconv.FormatFloat(v.F, 'f', -1, 64)
-			u, st := ParseDecimalRound(text, p, s)
-			if st != TextOK {
-				return Value{}, overflow("value does not fit %s", to)
-			}
-			return IntValue(u), nil
-		case KindString:
-			u, st := ParseDecimalRound(TrimASCIISpace(v.S), p, s)
-			switch st {
-			case TextSyntax:
-				return Value{}, convErr("cannot convert %q to %s", v.S, to)
-			case TextRange:
-				return Value{}, overflow("value %q does not fit %s", v.S, to)
-			}
-			return IntValue(u), nil
-		}
+		return castToDecimal(v, from, to)
 	case KindString:
 		return StringValue(FormatValue(v, from)), nil
 	case KindDate:
@@ -158,6 +132,59 @@ func Cast(v Value, from, to Type) (Value, error) {
 	return Value{}, errs.New(errs.TypeError, "cannot cast %s to %s", from, to)
 }
 
+// castToDecimal converts INT64, DECIMAL, FLOAT64 and STRING values to
+// DECIMAL type to.
+func castToDecimal(v Value, from, to Type) (Value, error) {
+	p, s := to.Precision, to.Scale
+	switch from.Kind {
+	case KindInt64:
+		if !to.IsWide() {
+			if s > NarrowDecimalPrecision {
+				return Value{}, overflow("value does not fit %s", to)
+			}
+			u, ok := mulCheck(v.I, Pow10[s])
+			if !ok || !FitsPrecision(u, p) {
+				return Value{}, overflow("value does not fit %s", to)
+			}
+			return IntValue(u), nil
+		}
+		x, err := RescaleWide(Int128From(v.I), 0, s, p)
+		if err != nil {
+			return Value{}, overflow("value does not fit %s", to)
+		}
+		return WideValue(x), nil
+	case KindDecimal:
+		if !from.IsWide() && !to.IsWide() {
+			u, err := Rescale(v.I, from.Scale, s, p)
+			if err != nil {
+				return Value{}, err
+			}
+			return IntValue(u), nil
+		}
+		x, err := RescaleWide(DecimalOf(from, v), from.Scale, s, p)
+		if err != nil {
+			return Value{}, err
+		}
+		return MakeDecimal(to, x), nil
+	case KindFloat64:
+		x, ok := FloatToDecimal(v.F, p, s)
+		if !ok {
+			return Value{}, overflow("value does not fit %s", to)
+		}
+		return MakeDecimal(to, x), nil
+	case KindString:
+		r, st := ParseDecimalValue(TrimASCIISpace(v.S), to, true)
+		switch st {
+		case TextSyntax:
+			return Value{}, convErr("cannot convert %q to %s", v.S, to)
+		case TextRange:
+			return Value{}, overflow("value %q does not fit %s", v.S, to)
+		}
+		return r, nil
+	}
+	return Value{}, errs.New(errs.TypeError, "cannot cast %s to %s", from, to)
+}
+
 // FormatValue renders a non-NULL value as text (used for CAST to STRING):
 // DECIMAL canonical form, DATE/TIMESTAMP per §9, booleans as true/false.
 func FormatValue(v Value, t Type) string {
@@ -172,7 +199,7 @@ func FormatValue(v Value, t Type) string {
 	case KindFloat64:
 		return FormatFloat(v.F)
 	case KindDecimal:
-		return FormatDecimal(v.I, t.Scale)
+		return FormatDecimalValue(v, t)
 	case KindDate:
 		return FormatDate(v.I)
 	case KindTimestamp:

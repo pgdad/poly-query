@@ -131,8 +131,8 @@ func convertText(text string, t types.Type) (types.Value, bool) {
 		f, st := types.ParseFloatText(text)
 		return types.FloatValue(f), st == types.TextOK
 	case types.KindDecimal:
-		u, st := types.ParseDecimalExact(text, t.Precision, t.Scale)
-		return types.IntValue(u), st == types.TextOK
+		v, st := types.ParseDecimalValue(text, t, false)
+		return v, st == types.TextOK
 	case types.KindDate:
 		d, ok := types.ParseDate(text)
 		return types.IntValue(d), ok
