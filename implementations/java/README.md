@@ -65,7 +65,7 @@ Source lives in `src/main/java/polyquery/`, one package per layer:
 | `sql.parser` | Recursive-descent parser (WITH, joins, subqueries, CASE, IN, LIKE, BETWEEN, EXPLAIN, CREATE/DROP INDEX); `PARSE_ERROR` carries `line`/`column` |
 | `sql.analyzer` | Semantic validation: `Scope` (range variables, correlation), `ExpressionBinder` + `TypeCoercion` + `ScalarFunctionBinder` (typing), `Analyzer` (per query level: FROM/joins/derived tables/CTEs, GROUP BY rewriting, ORDER BY resolution → `BoundQuery`), `LogicalPlanner` (`BoundQuery` → logical plan) |
 | `plan` | Bound (typed) expressions (`BoundExpr`, `BoundExprs` traversal), aggregate calls, subqueries, logical plan nodes, expression formatter |
-| `optimizer` | `LogicalOptimizer`: constant folding, predicate simplification, error-preserving predicate pushdown into joins and scans, CROSS→INNER join conversion; `JoinReorder` (inner-join trees). All disabled by `optimize: false` |
+| `optimizer` | `LogicalOptimizer`: constant folding, predicate simplification, error-preserving predicate pushdown into joins and scans, CROSS→INNER join conversion; `ExprSafety` (can an expression fail / be NULL — with interval arithmetic over column statistics); `JoinReorder` (inner-join trees). All disabled by `optimize: false` |
 | `physical` | `PhysicalPlan` nodes, `PhysicalPlanner` (table vs index scans, hash / merge / nested-loop joins and build side, top-N, hash lookup for correlated filters), `ColumnPredicates` (sargable conjuncts → key predicates), `Cardinality` (estimates from statistics), `ColumnPruner`, `PlanExplainer` (EXPLAIN JSON) |
 | `exec` | Row engine (`mode: row`): Volcano operators (table/index scans, filter, project, hash aggregate, distinct, hash/merge/nested-loop joins, sort, top-N, limit, hash-lookup filter), `OperatorBuilder` (physical plan → operators), `ExpressionCompiler` (bound expression → closures), `ScalarFunctions`, `SubqueryRunner`, `ExecContext` (timeout, memory budget, row/join limits, correlation frames) |
 | `exec.vector` | Vectorized engine (`mode: vectorized`): `Vec`/`Batch` (column vectors + selection vectors), `VecCompiler` + `Kernels` (batch expression kernels), `BatchExprs` (row-exact error semantics), scan/filter/project/limit, `AggregateBatches` + `GroupKeys` + `AggState` (hash aggregation, DISTINCT), `JoinBatches` (hash join), `SortBatches` (sort, top-N), `ColumnStore`, `Parallel` (morsel-driven workers), `BatchBuilder` (plan → batch operators), `VectorExecutor` |
@@ -432,6 +432,7 @@ Queries (tables `tx` = transactions, `cust` = customers, `items` = order_items, 
 * **Q13** (join order): items ⋈ orders ⋈ products ⋈ customers written in a bad order, selective filters on products and customers
 * **Q14** (conjunctive filter): `SELECT COUNT(*) FROM tx WHERE bucket < 500 AND merchant_id > 10 AND customer_id <> 7`
 * **Q15** (reductions): `SELECT SUM(tx_id), MIN(bucket), MAX(merchant_id), COUNT(*) FROM tx`
+* **Q16** (left join): `SELECT o.status, COUNT(i.order_id), SUM(i.quantity) FROM orders o LEFT JOIN items i ON i.order_id = o.order_id GROUP BY o.status` (builds on the 1M-row side)
 
 Median milliseconds. *Before* is the Phase-4 engine this phase started from (row-at-a-time,
 its default optimizations); the other columns are this engine with the given options
@@ -439,21 +440,22 @@ its default optimizations); the other columns are this engine with the given opt
 
 | query | before (Phase 4) | row, `optimize:false` (baseline) | row | vectorized, 1 thread | vectorized, 4 threads | vectorized, 16 threads | speed-up |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Q1 filter+agg | 24.7 | 33.5 | 33.3 | 2.7 | 1.0 | 1.0 | 25× |
-| Q2 group by (low card.) | 44.3 | 28.0 | 27.5 | 9.2 | 3.7 | 4.3 | 12× |
-| Q3 group by (high card.) | 60.4 | 65.2 | 73.7 | 15.3 | 13.5 | 16.8 | 4× |
-| Q4 join+group | 61.3 | 62.0 | 64.1 | 23.6 | 13.8 | 15.9 | 4× |
-| Q5 3-way join | 50.7 | 109.3 | 48.3 | 12.5 | 6.9 | 5.4 | 9× |
-| Q6 top-N | 117.3 | 107.0 | 17.7 | 5.2 | 1.9 | 1.8 | 65× |
-| Q7 sort | 358.5 | 391.8 | 409.6 | 24.0 | 22.5 | 22.3 | 16× |
-| Q8 sensor avg | 29.8 | 31.4 | 30.8 | 8.2 | 2.6 | 4.5 | 11× |
-| Q9 distinct | 78.8 | 77.5 | 77.4 | 19.7 | 21.4 | 17.5 | 5× |
-| Q10 string filter | 4.2 | 6.3 | 4.0 | 3.3 | 2.9 | 2.6 | 2× |
-| Q11 projection | 46.0 | 43.7 | 42.9 | 5.3 | 2.1 | 1.2 | 38× |
-| Q12 nulls | 33.7 | 34.7 | 32.7 | 17.6 | 5.2 | 2.0 | 17× |
-| Q13 join order | 52.4 | 111.3 | 39.9 | 11.6 | 11.1 | 12.4 | 5× |
-| Q14 conjunctive filter | 32.5 | 32.5 | 32.4 | 3.0 | 1.0 | 0.5 | 65× |
-| Q15 reductions | 24.8 | 24.2 | 24.0 | 0.8 | 0.4 | 0.2 | 124× |
+| Q1 filter+agg | 23.3 | 24.0 | 32.3 | 5.0 | 1.0 | 1.1 | 23× |
+| Q2 group by (low card.) | 44.7 | 28.4 | 28.0 | 8.6 | 3.4 | 4.6 | 13× |
+| Q3 group by (high card.) | 58.8 | 58.7 | 59.9 | 14.9 | 14.4 | 13.5 | 4× |
+| Q4 join+group | 61.0 | 64.2 | 66.6 | 19.5 | 10.7 | 12.7 | 6× |
+| Q5 3-way join | 48.5 | 74.7 | 65.3 | 13.4 | 7.0 | 6.1 | 8× |
+| Q6 top-N | 99.6 | 99.2 | 18.5 | 5.3 | 1.7 | 1.5 | 66× |
+| Q7 sort | 397.5 | 405.5 | 406.3 | 24.1 | 24.9 | 23.5 | 17× |
+| Q8 sensor avg | 30.2 | 29.0 | 28.9 | 8.0 | 2.4 | 1.6 | 19× |
+| Q9 distinct | 86.1 | 79.6 | 80.5 | 19.6 | 24.7 | 19.0 | 5× |
+| Q10 string filter | 4.2 | 3.9 | 3.9 | 3.3 | 2.1 | 2.0 | 2× |
+| Q11 projection | 44.2 | 44.6 | 43.8 | 5.1 | 1.9 | 1.4 | 32× |
+| Q12 nulls | 33.6 | 33.7 | 32.2 | 17.4 | 5.4 | 2.7 | 12× |
+| Q13 join order | 53.7 | 109.5 | 38.1 | 11.0 | 6.9 | 10.6 | 8× |
+| Q14 conjunctive filter | 30.9 | 32.0 | 30.9 | 2.9 | 0.9 | 0.6 | 52× |
+| Q15 reductions | 23.9 | 23.3 | 23.6 | 1.0 | 0.4 | 0.2 | 119× |
+| Q16 left join | 72.8 | 47.3 | 47.0 | 29.8 | 17.9 | 16.8 | 4× |
 
 Observations:
 
@@ -466,10 +468,11 @@ Observations:
   already-fast queries are bounded by fixed costs (thread hand-off, merging) — Q10 is a
   100,000-row table, i.e. two morsels. High-cardinality grouping/DISTINCT (Q3, Q9) gain
   little: each worker's partial table holds most groups, so merging costs about as much as
-  the aggregation saved. Q4/Q13 are limited by the single-threaded hash-table build.
+  the aggregation saved. Joins (Q4, Q13, Q16) are limited by materializing the build side
+  (one thread; the single-key index itself is built in parallel for large inputs).
 * Logical optimization matters most for multi-way joins written in a poor order: Q13 runs
-  111 → 40 ms in row mode (pushdown + join reordering), Q5 109 → 48 ms (pushdown).
-  Top-N turns Q6 from a full sort (107 ms) into a 18 ms heap scan even in row mode.
+  110 → 38 ms in row mode (pushdown + join reordering), Q5 75 → 65 ms (pushdown).
+  Top-N turns Q6 from a full sort (99 ms) into an 18 ms heap scan even in row mode.
 * Results are identical in every configuration (`tools/bench.py` asserts equal row counts;
   the conformance `--modes` matrix and `tools/difftest.py` compare contents).
 
@@ -479,13 +482,14 @@ hashing, memory access and selection-vector bookkeeping, which do not vectorize:
 
 | query | SuperWord on | SuperWord off |
 |---|---:|---:|
-| Q15 reductions | 0.8 | 2.1 |
-| Q14 conjunctive filter | 3.0 | 3.8 |
-| Q7 sort | 24.0 | 34.6 |
-| Q6 top-N | 5.2 | 7.9 |
-| Q1 filter+agg | 2.7 | 2.8 |
-| Q11 projection | 5.3 | 5.5 |
-| Q2 group by (low card.) | 9.2 | 9.0 |
+| Q6 top-N | 5.3 | 8.5 |
+| Q7 sort | 24.1 | 36.5 |
+| Q14 conjunctive filter | 2.9 | 3.7 |
+| Q15 reductions | 1.0 | 2.2 |
+
+End-to-end queries dominated by hashing or row output (Q1, Q2, Q11, …) show no difference
+beyond the run-to-run variance of a few milliseconds (JIT compilation varies between JVM runs;
+e.g. Q1 single-threaded measured 2.7–5.0 ms across runs).
 
 ### Configuration for experiments
 

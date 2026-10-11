@@ -38,6 +38,8 @@ QUERIES = [
     ("Q12 nulls", "SELECT n50 % 10, COUNT(*), SUM(n90), COUNT(f95) FROM nh GROUP BY 1"),
     ("Q14 conjunctive filter", "SELECT COUNT(*) FROM tx WHERE bucket < 500 AND merchant_id > 10 AND customer_id <> 7"),
     ("Q15 reductions", "SELECT SUM(tx_id), MIN(bucket), MAX(merchant_id), COUNT(*) FROM tx"),
+    ("Q16 left join", "SELECT o.status, COUNT(i.order_id), SUM(i.quantity) FROM orders o LEFT JOIN items i "
+                      "ON i.order_id = o.order_id GROUP BY o.status"),
     ("Q13 join order", "SELECT COUNT(*), SUM(i.quantity) FROM items i JOIN orders o ON o.order_id = i.order_id "
                        "JOIN products p ON p.product_id = i.product_id JOIN cust c ON c.customer_id = o.customer_id "
                        "WHERE c.country = 'FI' AND p.category = 'books'"),
