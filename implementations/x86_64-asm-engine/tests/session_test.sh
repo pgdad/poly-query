@@ -45,7 +45,7 @@ check '{"op":"query","sql":"SELECT 1 FROM missing"}' '"code":"SEMANTIC_ERROR"'
 check '{"op":"query","sql":"SELEC 1"}' '"code":"PARSE_ERROR"'
 check '{"op":"query","sql":"SELECT a FROM t FULL JOIN u ON a = b"}' '"code":"UNSUPPORTED"'
 check '{"op":"query","sql":"SELECT 1 UNION SELECT 2"}' '"code":"UNSUPPORTED"'
-check '{"op":"query","sql":"CREATE INDEX i ON t (c)"}' '"code":"UNSUPPORTED"'
+check '{"op":"query","sql":"CREATE INDEX i ON t (c)"}' '"code":"SEMANTIC_ERROR"'
 check '{"op":"query","sql":"SELECT 1\nFROM"}' '"details":{"line":2,"column":5}'
 check '{"op":"query","sql":"WITH a AS (SELECT 1 AS v), b AS (SELECT v + 1 AS w FROM a) SELECT w FROM b"}' '"rows":[[2]]'
 check '{"op":"query","sql":"WITH a AS (SELECT 1 AS v), a AS (SELECT 2 AS v) SELECT v FROM a"}' '"code":"SEMANTIC_ERROR"'
@@ -72,6 +72,23 @@ check_seq "$(seq '{"op":"query","sql":"SELECT a.id, b.id FROM t a JOIN t b ON a.
 check_seq "$(seq '{"op":"query","sql":"SELECT a.id, b.id FROM t a LEFT JOIN t b ON a.id < b.id AND b.id > 2 ORDER BY 1, 2"}')" '"rows":[[1,3],[2,3],[3,null]]'
 check_seq "$(seq '{"op":"query","sql":"SELECT COUNT(*) FROM t a, t b, t c"}')" '"rows":[[27]]'
 check_seq "$(seq '{"op":"query","sql":"SELECT COUNT(*) FROM t a, t b","options":{"max_rows":5}}')" '"rows":[[9]]'
+
+# Phase 3: statistics, layouts, indexes, PQCF storage
+check_seq "$(seq '{"op":"stats","table":"t"}')" '{"name":"amount","type":"DECIMAL(6,2)","null_count":1,"distinct_count":2,"min":"-2.25","max":"1.50"}'
+check_seq "$(seq '{"op":"load","table":"r","format":"csv","path":"t.csv","options":{"layout":"row"}}' '{"op":"query","sql":"SELECT r.name, t.amount FROM r JOIN t ON r.id = t.id WHERE r.amount IS NULL"}')" '"rows":[["b",null]]'
+check_seq "$(seq '{"op":"load","table":"d","format":"csv","path":"t.csv","options":{"dictionary":true}}' '{"op":"query","sql":"SELECT COUNT(DISTINCT name) FROM d WHERE name <> '"'"'a'"'"'"}')" '"rows":[[2]]'
+check_seq "$(seq '{"op":"query","sql":"CREATE INDEX ti ON t (id) USING HASH"}' '{"op":"schema","table":"t"}')" '"indexes":[{"name":"ti","column":"id","kind":"HASH"}]'
+check_seq "$(seq '{"op":"query","sql":"CREATE INDEX ti ON t (id)"}' '{"op":"explain","sql":"SELECT name FROM t WHERE id = 2"}')" '"op":"IndexScan","index":"ti","kind":"BTREE"'
+check_seq "$(seq '{"op":"query","sql":"CREATE INDEX ti ON t (id)"}' '{"op":"query","sql":"SELECT name FROM t WHERE id BETWEEN 2 AND 9 ORDER BY id"}')" '"rows":[["b"],["c, d"]]'
+check_seq "$(seq '{"op":"query","sql":"CREATE INDEX ti ON t (id)"}' '{"op":"query","sql":"DROP INDEX ti"}' '{"op":"query","sql":"DROP INDEX ti"}')" '"code":"NOT_FOUND"'
+for enc in plain dict rle auto; do
+  check_seq "$(seq '{"op":"save","table":"t","path":"t.pqcf","options":{"encoding":"'$enc'","row_group_size":2}}' '{"op":"open","table":"u","path":"t.pqcf","options":{"mmap":true}}' '{"op":"query","sql":"SELECT * FROM u ORDER BY id"}')" '"rows":[[1,"a","1.50"],[2,"b",null],[3,"c, d","-2.25"]]'
+done
+check_seq "$(seq '{"op":"save","table":"t","path":"t.pqcf","options":{"row_group_size":1}}' '{"op":"open","table":"u","path":"t.pqcf"}' '{"op":"explain","sql":"SELECT name FROM u WHERE id > 2"}')" '"row_groups_skipped":2'
+printf 'PQCF\001\000\000\000garbage' > "$TMP/bad.pqcf"
+check '{"op":"open","table":"b","path":"bad.pqcf"}' '"code":"STORAGE_CORRUPT"'
+check '{"op":"open","table":"b","path":"none.pqcf"}' '"code":"NOT_FOUND"'
+check_seq "$(seq '{"op":"save","table":"t","path":"nodir/t.pqcf"}')" '"code":"IO_ERROR"'
 
 # exec mode with an array of requests
 printf '[{"op":"query","sql":"SELECT 1 AS a"},{"op":"query","sql":"SELECT 2 AS b"}]' > "$TMP/req.json"

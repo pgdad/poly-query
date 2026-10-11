@@ -79,7 +79,7 @@ op_names:
 op_handlers:
     .quad op_query, op_load, op_tables, op_schema, op_drop, op_reset
     .quad op_version, op_capabilities, op_sleep
-    .quad op_explain, op_unsupported, op_unsupported, op_stats
+    .quad op_explain, op_save, op_open, op_stats
 
     .text
 
@@ -346,7 +346,13 @@ hr_unknown_op:
     RAISE E_INVALID_REQUEST, "unknown op"
 hr_error:
     movq $0, g_deadline_ns(%rip)
-    mov g_pending_arena(%rip), %rdi
+    mov g_pending_map(%rip), %rdi   /* PQCF file mapped by a failed open */
+    test %rdi, %rdi
+    jz 0f
+    mov g_pending_map_len(%rip), %rsi
+    call munmap
+    movq $0, g_pending_map(%rip)
+0:  mov g_pending_arena(%rip), %rdi
     test %rdi, %rdi
     jz 1f
     movq $0, g_pending_arena(%rip)
@@ -1189,6 +1195,226 @@ FUNC op_load
     call put_columns
     LEAVE
 ENDF op_load
+
+/* ================================================================ save / open */
+
+    .section .rodata
+encodings_ok:
+    .asciz "auto"
+    .asciz "plain"
+    .asciz "dict"
+    .asciz "rle"
+    .byte 0
+    .text
+
+/* op_save: {"op":"save","table":t,"path":p,"options":{"encoding":..,"row_group_size":N}} */
+FUNC op_save
+    ENTER 32
+    mov %rdi, %rbx
+    call find_table_field
+    mov %rax, %r12                  /* table */
+    mov %rbx, %rdi
+    CSTR %rsi, "path"
+    call req_str
+    mov %rax, %r13                  /* path */
+    movq $ENC_AUTO, 0(%rsp)
+    movq $0, 8(%rsp)                /* row group size (0 = default) */
+    mov %rbx, %rdi
+    CSTR %rsi, "options"
+    mov $J_OBJECT, %edx
+    call opt_field
+    test %rax, %rax
+    jz 5f
+    mov %rax, %r14
+    mov %r14, %rdi
+    CSTR %rsi, "row_group_size"
+    xor %edx, %edx
+    call opt_uint
+    mov %rax, 8(%rsp)
+    mov %r14, %rdi
+    CSTR %rsi, "encoding"
+    mov $J_STRING, %edx
+    call opt_field
+    test %rax, %rax
+    jz 5f
+    mov JN_PTR(%rax), %rdi
+    lea encodings_ok(%rip), %rsi
+    xor %r15d, %r15d                /* ENC_AUTO, PLAIN, DICT, RLE in list order */
+1:  cmpb $0, (%rsi)
+    je 4f
+    mov %rdi, 16(%rsp)
+    mov %rsi, 24(%rsp)
+    call strcmp
+    test %eax, %eax
+    jz 3f
+    mov 24(%rsp), %rdi
+    call strlen
+    mov 24(%rsp), %rsi
+    lea 1(%rsi, %rax), %rsi
+    mov 16(%rsp), %rdi
+    inc %r15
+    jmp 1b
+3:  mov %r15, 0(%rsp)
+    jmp 5f
+4:  RAISE E_INVALID_REQUEST, "encoding must be auto, plain, dict or rle"
+5:  mov %r12, %rdi
+    mov %r13, %rsi
+    mov 0(%rsp), %rdx
+    mov 8(%rsp), %rcx
+    call pqcf_save
+    mov %rax, %r14
+    lea g_out(%rip), %r15
+    PUTS %r15, ",\"path\":"
+    mov %r15, %rdi
+    mov %r13, %rsi
+    call buf_put_json_pstr
+    PUTS %r15, ",\"bytes\":"
+    mov %r15, %rdi
+    mov %r14, %rsi
+    call buf_put_u64
+    LEAVE
+ENDF op_save
+
+/* op_open: {"op":"open","table":t,"path":p,"replace":b,"options":{"mmap":b,
+ * "layout":..,"dictionary":b}} - loads a PQCF file and recreates its indexes */
+#define OP_NAME    0
+#define OP_REPLACE 8
+#define OP_MMAP    16
+#define OP_LAYOUT  24
+#define OP_DICT    32
+#define OP_IX      40
+#define OP_OLD     48
+#define OP_TABLE   56
+FUNC op_open
+    ENTER 64
+    mov %rdi, %rbx
+    CSTR %rsi, "table"
+    call req_str
+    cmpq $0, (%rax)
+    je bad_request
+    mov %rax, OP_NAME(%rsp)
+    mov %rbx, %rdi
+    CSTR %rsi, "path"
+    call req_str
+    mov %rax, %r13                  /* path */
+    mov %rbx, %rdi
+    CSTR %rsi, "replace"
+    xor %edx, %edx
+    call opt_bool
+    mov %rax, OP_REPLACE(%rsp)
+    movq $0, OP_MMAP(%rsp)
+    movq $LAYOUT_COLUMN, OP_LAYOUT(%rsp)
+    movq $DICT_AUTO, OP_DICT(%rsp)
+    mov %rbx, %rdi
+    CSTR %rsi, "options"
+    mov $J_OBJECT, %edx
+    call opt_field
+    test %rax, %rax
+    jz 1f
+    mov %rax, %r14
+    mov %r14, %rdi
+    CSTR %rsi, "mmap"
+    xor %edx, %edx
+    call opt_bool
+    mov %rax, OP_MMAP(%rsp)
+    mov %r14, %rdi
+    call layout_options
+    mov %rax, OP_LAYOUT(%rsp)
+    mov %rdx, OP_DICT(%rsp)
+1:  /* existing table */
+    mov OP_NAME(%rsp), %rax
+    lea 8(%rax), %rdi
+    mov (%rax), %rsi
+    call cat_find
+    mov %rax, OP_OLD(%rsp)
+    test %rax, %rax
+    jz 2f
+    cmpq $0, OP_REPLACE(%rsp)
+    jne 2f
+    RAISE E_ALREADY_EXISTS, "table already exists"
+2:  mov g_arena(%rip), %rdi
+    call vec_new
+    mov %rax, OP_IX(%rsp)
+    call arena_new
+    mov %rax, g_pending_arena(%rip)
+    mov %r13, %rdi
+    mov OP_NAME(%rsp), %rsi
+    mov OP_MMAP(%rsp), %rdx
+    mov OP_IX(%rsp), %rcx
+    call pqcf_read
+    mov %rax, OP_TABLE(%rsp)
+    mov %rax, %rdi
+    mov OP_LAYOUT(%rsp), %rsi
+    mov OP_DICT(%rsp), %rdx
+    call table_finalize
+    /* index names: unique in the file, and free in the catalog (the replaced
+     * table's own indexes are dropped with it) */
+    mov OP_IX(%rsp), %r14
+    xor %r15d, %r15d
+3:  cmp VEC_LEN(%r14), %r15
+    jae 6f
+    mov VEC_DATA(%r14), %rax
+    mov (%rax, %r15, 8), %r12       /* name */
+    xor %ecx, %ecx
+4:  cmp %r15, %rcx
+    jae 5f
+    mov VEC_DATA(%r14), %rax
+    mov (%rax, %rcx, 8), %rdi
+    mov %rcx, 0(%rsp)
+    mov %r12, %rsi
+    call pstr_ieq
+    mov 0(%rsp), %rcx
+    test %eax, %eax
+    jnz 8f
+    add $3, %rcx
+    jmp 4b
+5:  lea 8(%r12), %rdi
+    mov (%r12), %rsi
+    call idx_find
+    test %rax, %rax
+    jz 51f
+    mov IX_TABLE(%rax), %rax
+    cmp OP_OLD(%rsp), %rax
+    jne 9f
+51: add $3, %r15
+    jmp 3b
+6:  /* build the indexes, publish the table */
+    xor %r15d, %r15d
+7:  cmp VEC_LEN(%r14), %r15
+    jae 71f
+    mov VEC_DATA(%r14), %rax
+    mov OP_TABLE(%rsp), %rdi
+    mov 8(%rax, %r15, 8), %rsi
+    mov 16(%rax, %r15, 8), %rdx
+    mov (%rax, %r15, 8), %rcx
+    call idx_build
+    mov OP_TABLE(%rsp), %rdi
+    mov %rax, %rsi
+    call idx_attach
+    add $3, %r15
+    jmp 7b
+71: movq $0, g_pending_arena(%rip)
+    mov OP_TABLE(%rsp), %r12
+    mov %r12, %rdi
+    call cat_put
+    lea g_out(%rip), %r15
+    PUTS %r15, ",\"table\":"
+    mov %r15, %rdi
+    mov TB_NAME(%r12), %rsi
+    call buf_put_json_pstr
+    PUTS %r15, ",\"row_count\":"
+    mov %r15, %rdi
+    mov TB_NROWS(%r12), %rsi
+    call buf_put_u64
+    mov %r15, %rdi
+    mov $',', %esi
+    call buf_putc
+    mov %r12, %rdi
+    call put_columns
+    LEAVE
+8:  RAISE E_STORAGE_CORRUPT, "PQCF: duplicate index name"
+9:  RAISE E_ALREADY_EXISTS, "an index of the file already exists"
+ENDF op_open
 
 /* opt_enum(options rdi, key rsi, NUL-separated allowed list rdx):
  * UNSUPPORTED if the option is present and not one of the allowed strings */

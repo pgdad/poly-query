@@ -116,6 +116,12 @@
 #define LAYOUT_COLUMN 0
 #define LAYOUT_ROW    1
 
+/* PQCF save encodings (save option "encoding") */
+#define ENC_AUTO  0
+#define ENC_PLAIN 1
+#define ENC_DICT  2
+#define ENC_RLE   3
+
 /* dictionary encoding of STRING columns (table_finalize) */
 #define DICT_AUTO 0
 #define DICT_ON   1
