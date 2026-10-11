@@ -103,6 +103,9 @@ Engines under `implementations/{x86_64,arm64}-asm/`, run records in
 ## 8. Decisions (taken 2026-10-11)
 
 1. Pilot approved with a **$300** cap for Phase 1, x86-64 (proposed was $150).
+   After Phases 1-3 for both engines ($118.49, every phase in one session) the owner
+   raised the cap for the assembly engines to **$600** (2026-10-11) for Phases 4-5 and
+   continuation sessions.
 2. Library policy: **glibc allowed** (dynamic `libc`, `libm`, `libpthread`), as proposed.
 3. ARM development loop: **agents run on the ARM host (spark)**. This needs the Claude
    CLI, the sandbox and the usage guard on spark, and the OAuth credential copied
