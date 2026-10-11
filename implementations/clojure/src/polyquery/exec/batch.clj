@@ -8,11 +8,13 @@
 
   Vector representations by type kind (every value of one expression has the
   same representation, so kernels are specialised statically):
-    INT64 DECIMAL DATE TIMESTAMP  LongVec   long[] values (DECIMAL unscaled)
+    INT64 DATE TIMESTAMP          LongVec   long[] values
+    narrow DECIMAL (p <= 18)      LongVec   long[] unscaled values
     FLOAT64                       DoubleVec double[] values
     BOOLEAN                       BoolVec   boolean[] values
     STRING (and the NULL type)    ObjVec    Object[] values (nil = NULL), or
                                   DictVec   int[] codes into a dictionary
+    wide DECIMAL (p > 18)         ObjVec    BigInteger unscaled values
   Typed vectors carry a boolean[] null mask, nil when no selected row is
   NULL. Only the selected positions of a vector are meaningful.
 
@@ -95,7 +97,8 @@
   "Vector representation of a type: :long :double :bool or :obj."
   [type]
   (case (t/kind type)
-    (:int64 :decimal :date :timestamp) :long
+    (:int64 :date :timestamp) :long
+    :decimal (if (t/wide? type) :obj :long)
     :float64 :double
     :boolean :bool
     (:string :null) :obj))

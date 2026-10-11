@@ -536,7 +536,7 @@
        distinct? (AccState. (agg/accumulator-factory spec) (object-array 16))
        (= f :count) (CountState. false (long-array 16))
 
-       (and (#{:sum :avg} f) (#{:int64 :decimal} k))
+       (and (#{:sum :avg} f) (#{:int64 :decimal} k) (t/long-repr? at))
        (LongSumState. (case [f k]
                         [:sum :int64] (fn [s _] (agg/int-sum-result s))
                         [:sum :decimal] (fn [s _] (agg/dec-sum-result s))

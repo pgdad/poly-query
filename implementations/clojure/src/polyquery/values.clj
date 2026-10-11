@@ -13,13 +13,23 @@
 (set! *warn-on-reflection* true)
 
 ;; ---------------------------------------------------------------------------
-;; Decimal arithmetic. A DECIMAL value is a long `unscaled`; its scale comes
-;; from the static type. Results must fit 18 digits.
+;; Decimal arithmetic. A DECIMAL value is its unscaled integer; the scale
+;; comes from the static type. Narrow decimals (p <= 18) are Longs, computed
+;; with long fast paths and BigInteger fallbacks wherever an intermediate may
+;; exceed 64 bits; their results must fit 18 digits. Wide decimals (p > 18,
+;; spec/changes/decimal38.md) are BigIntegers; their results must fit 38
+;; digits. Only final results are range-checked.
 
 (def ^"[J" pow10
   (long-array (take 19 (iterate #(* 10 (long %)) 1))))
 
 (def ^:const max-unscaled 999999999999999999)
+
+(def ^:private ^"[Ljava.math.BigInteger;" big-pow10s
+  ;; up to 10^77: products of two wide operands have at most 76 digits
+  (into-array BigInteger (take 78 (iterate #(.multiply ^BigInteger % BigInteger/TEN) BigInteger/ONE))))
+
+(defn big-pow10 ^BigInteger [k] (aget big-pow10s (int k)))
 
 (defn overflow! [what]
   (err/fail! "NUMERIC_OVERFLOW" (str "numeric overflow in " what)))
@@ -28,6 +38,22 @@
   [^long v ^long p]
   (and (< v (aget pow10 p)) (> v (- (aget pow10 p)))))
 
+(defn ->big
+  "A Long or BigInteger unscaled value as a BigInteger."
+  ^BigInteger [x]
+  (if (instance? BigInteger x) x (BigInteger/valueOf (long x))))
+
+(defn big-fits?
+  "True when |u| < 10^p."
+  [^BigInteger u ^long p]
+  (neg? (.compareTo (.abs u) (big-pow10 p))))
+
+(defn dec-value
+  "The runtime value of unscaled u (assumed to fit p) for a decimal of
+  precision p: a Long when narrow, the BigInteger when wide."
+  [^BigInteger u ^long p]
+  (if (<= p (long t/narrow-precision)) (.longValue u) u))
+
 (defn check-dec18
   "Returns v when it fits DECIMAL(18,_), else throws NUMERIC_OVERFLOW."
   ^long [^long v what]
@@ -35,24 +61,35 @@
     v
     (overflow! what)))
 
+(defn check-dec38
+  "Returns u when it fits DECIMAL(38,_), else throws NUMERIC_OVERFLOW."
+  ^BigInteger [^BigInteger u what]
+  (if (big-fits? u t/max-decimal-precision) u (overflow! what)))
+
 (defn- big->dec18 ^long [^BigInteger b what]
   (if (< (.bitLength b) 63)
     (check-dec18 (.longValue b) what)
     (overflow! what)))
 
-(defn- big-scaled ^BigInteger [^long v ^long k]
-  (.multiply (BigInteger/valueOf v) (.pow BigInteger/TEN (int k))))
+(defn- big-scaled ^BigInteger [v k]
+  (.multiply (BigInteger/valueOf v) (big-pow10 k)))
 
 (defn dec-rescale-up
-  "Exact v * 10^k as a BigInteger-or-long (returns a Number)."
+  "Exact v * 10^k as a Long when it fits, else a BigInteger (returns a
+  Number)."
   [^long v ^long k]
   (if (zero? k)
     v
-    (try (Math/multiplyExact v (aget pow10 k))
-         (catch ArithmeticException _ (big-scaled v k)))))
+    (if (<= k 18)
+      (try (Math/multiplyExact v (aget pow10 k))
+           (catch ArithmeticException _ (big-scaled v k)))
+      (big-scaled v k))))
 
-(defn- ->big ^BigInteger [x]
-  (if (instance? BigInteger x) x (BigInteger/valueOf (long x))))
+(defn big-rescale-up
+  "Exact x * 10^k of a Long or BigInteger x, as a BigInteger."
+  ^BigInteger [x k]
+  (let [k (long k)]
+    (if (zero? k) (->big x) (.multiply (->big x) (big-pow10 k)))))
 
 (defn dec-add
   "a (scale sa) + b (scale sb) at scale max(sa,sb); exact, 18-digit result."
@@ -70,6 +107,26 @@
   (try (check-dec18 (Math/multiplyExact a b) "decimal multiplication")
        (catch ArithmeticException _ (overflow! "decimal multiplication"))))
 
+(defn wide-add
+  "a (scale sa) + b (scale sb) at scale max(sa,sb) for Long/BigInteger
+  operands; exact, 38-digit BigInteger result."
+  ^BigInteger [a ^long sa b ^long sb]
+  (let [s (max sa sb)]
+    (check-dec38 (.add (big-rescale-up a (- s sa)) (big-rescale-up b (- s sb))) "decimal addition")))
+
+(defn wide-sub
+  "a (scale sa) - b (scale sb), as wide-add."
+  ^BigInteger [a ^long sa b ^long sb]
+  (let [s (max sa sb)]
+    (check-dec38 (.subtract (big-rescale-up a (- s sa)) (big-rescale-up b (- s sb)))
+                 "decimal subtraction")))
+
+(defn wide-mul
+  "Exact product of two Long/BigInteger unscaled values (up to 76 digits
+  before the check), 38-digit BigInteger result."
+  ^BigInteger [a b]
+  (check-dec38 (.multiply (->big a) (->big b)) "decimal multiplication"))
+
 (defn dec-compare
   "Compares a (scale sa) with b (scale sb) by value."
   ^long [^long a ^long sa ^long b ^long sb]
@@ -82,21 +139,35 @@
         (Long/compare (long x) (long y))
         (long (.compareTo (->big x) (->big y)))))))
 
-(defn dec->bigdec ^BigDecimal [^long v ^long s]
-  (BigDecimal/valueOf v (int s)))
+(defn dec-compare-any
+  "Exact comparison of a (scale sa) with b (scale sb), each a Long or a
+  BigInteger unscaled value."
+  ^long [a ^long sa b ^long sb]
+  (if (and (instance? Long a) (instance? Long b))
+    (dec-compare (long a) sa (long b) sb)
+    (let [s (max sa sb)]
+      (long (.compareTo (big-rescale-up a (- s sa)) (big-rescale-up b (- s sb)))))))
 
-(defn dec->double ^double [^long v ^long s]
-  (if (zero? s)
-    (double v)
+(defn dec->bigdec ^BigDecimal [v s]
+  (if (instance? BigInteger v)
+    (BigDecimal. ^BigInteger v (int s))
+    (BigDecimal/valueOf (long v) (int s))))
+
+(defn dec->double
+  "The FLOAT64 nearest to the decimal (Long or BigInteger unscaled v, scale s)."
+  ^double [v ^long s]
+  (if (and (zero? s) (instance? Long v))
+    (double (long v))
     (.doubleValue ^BigDecimal (dec->bigdec v s))))
 
 (defn bigdec->unscaled
-  "Rescales a BigDecimal to scale s (round half away from zero) and returns the
-  unscaled long if it fits precision p; else throws NUMERIC_OVERFLOW."
-  ^long [^BigDecimal bd ^long p ^long s]
+  "Rescales a BigDecimal to scale s (round half away from zero) and returns
+  the unscaled value (Long for p <= 18, BigInteger above) if it fits
+  precision p; else throws NUMERIC_OVERFLOW."
+  [^BigDecimal bd ^long p ^long s]
   (let [u (.unscaledValue (.setScale bd (int s) RoundingMode/HALF_UP))]
-    (if (and (< (.bitLength u) 63) (fits-precision? (.longValue u) p))
-      (.longValue u)
+    (if (big-fits? u p)
+      (dec-value u p)
       (overflow! (str "conversion to DECIMAL(" p "," s ")")))))
 
 (defn dec-round-down
@@ -114,7 +185,7 @@
 
 (defn dec-rescale
   "Rescales v from scale s to scale s2 (rounding half away from zero when
-  reducing) and checks that the result fits precision p."
+  reducing) and checks that the result fits precision p (narrow v and p)."
   ^long [^long v ^long s ^long p ^long s2]
   (let [r (cond
             (= s s2) v
@@ -123,19 +194,34 @@
             :else (dec-round-down v s s2))]
     (if (fits-precision? r p) r (overflow! (str "conversion to DECIMAL(" p "," s2 ")")))))
 
+(defn dec-convert
+  "Converts a decimal value v of scale s to DECIMAL(p,s2) (round half away
+  from zero, NUMERIC_OVERFLOW when it does not fit); either side may be
+  narrow or wide."
+  [v ^long s ^long p ^long s2]
+  (if (and (instance? Long v) (<= p (long t/narrow-precision)))
+    (dec-rescale (long v) s p s2)
+    (bigdec->unscaled (dec->bigdec v s) p s2)))
+
+(defn dec-negate [x]
+  (if (instance? BigInteger x) (.negate ^BigInteger x) (- (long x))))
+
 (defn dec->string
-  ^String [^long v ^long s]
-  (if (zero? s)
-    (Long/toString v)
-    (let [neg (neg? v)
-          digits (if (= v Long/MIN_VALUE)
-                   (subs (Long/toString v) 1)
-                   (Long/toString (Math/abs v)))
-          digits (if (<= (count digits) s)
-                   (str (apply str (repeat (- (inc s) (count digits)) \0)) digits)
-                   digits)
-          cut (- (count digits) s)]
-      (str (when neg "-") (subs digits 0 cut) "." (subs digits cut)))))
+  "Canonical text of a decimal (Long or BigInteger unscaled v, scale s)."
+  ^String [v ^long s]
+  (let [big? (instance? BigInteger v)]
+    (if (zero? s)
+      (if big? (.toString ^BigInteger v) (Long/toString (long v)))
+      (let [neg (if big? (neg? (.signum ^BigInteger v)) (neg? (long v)))
+            digits (cond
+                     big? (.toString (.abs ^BigInteger v))
+                     (= (long v) Long/MIN_VALUE) (subs (Long/toString (long v)) 1)
+                     :else (Long/toString (Math/abs (long v))))
+            digits (if (<= (count digits) s)
+                     (str (apply str (repeat (- (inc s) (count digits)) \0)) digits)
+                     digits)
+            cut (- (count digits) s)]
+        (str (when neg "-") (subs digits 0 cut) "." (subs digits cut))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Calendar (proleptic Gregorian), days since 1970-01-01.
@@ -280,7 +366,8 @@
 
 (defn parse-decimal-exact
   "Ingestion rule: at most s fractional digits, value fits p. Returns the
-  unscaled long, or nil if not acceptable."
+  unscaled value (Long or, for wide p, BigInteger), or nil if not
+  acceptable."
   [^String text ^long p ^long s]
   (when (re-matches decimal-pattern text)
     (let [neg (.startsWith text "-")
@@ -291,12 +378,12 @@
           ip (.replaceFirst ^String ip "^0+" "")]
       (when (and (<= (count fp) s) (<= (+ (count ip) s) p))
         (let [digits (str ip fp (apply str (repeat (- s (count fp)) \0)))
-              u (if (empty? digits) 0 (Long/parseLong digits))]
-          (if neg (- u) u))))))
+              u (if (empty? digits) BigInteger/ZERO (BigInteger. digits))]
+          (dec-value (if neg (.negate u) u) p))))))
 
 (defn parse-decimal-rounding
   "CAST rule: rounds half away from zero to s digits; returns the unscaled
-  long, throws NUMERIC_OVERFLOW if it does not fit p, nil if malformed."
+  value, throws NUMERIC_OVERFLOW if it does not fit p, nil if malformed."
   [^String text ^long p ^long s]
   (when (re-matches decimal-pattern text)
     (bigdec->unscaled (BigDecimal. text) p s)))
@@ -320,7 +407,7 @@
   [t v]
   (when (some? v)
     (case (t/kind t)
-      :decimal (dec->string (long v) (t/scale t))
+      :decimal (dec->string v (t/scale t))
       :date (format-date (long v))
       :timestamp (format-timestamp (long v))
       :float64 (let [d (double v)] (if (== d 0.0) 0.0 v))
@@ -333,7 +420,7 @@
     :boolean (if v "true" "false")
     :int64 (Long/toString (long v))
     :float64 (float->string (double v))
-    :decimal (dec->string (long v) (t/scale t))
+    :decimal (dec->string v (t/scale t))
     :string v
     :date (format-date (long v))
     :timestamp (format-timestamp (long v))))
@@ -347,9 +434,14 @@
   (case (t/kind t)
     :boolean (reify Comparator
                (compare [_ a b] (Boolean/compare (boolean a) (boolean b))))
-    (:int64 :decimal :date :timestamp)
+    (:int64 :date :timestamp)
     (reify Comparator
       (compare [_ a b] (Long/compare (long a) (long b))))
+    :decimal (if (t/wide? t)
+               (reify Comparator
+                 (compare [_ a b] (.compareTo ^BigInteger a b)))
+               (reify Comparator
+                 (compare [_ a b] (Long/compare (long a) (long b)))))
     :float64 (reify Comparator
                (compare [_ a b]
                  (let [x (double a) y (double b)]
@@ -369,7 +461,7 @@
   (case (t/kind t)
     :int64 (fn ^double [x] (double (long x)))
     :float64 (fn ^double [x] (double x))
-    :decimal (let [s (t/scale t)] (fn ^double [x] (dec->double (long x) s)))
+    :decimal (let [s (t/scale t)] (fn ^double [x] (dec->double x s)))
     :null (fn ^double [_] 0.0)))
 
 (defn comparator-fn
@@ -382,7 +474,10 @@
                (fn [a b] (let [x (double (dl a)) y (double (dr b))]
                            (cond (< x y) -1 (> x y) 1 :else 0))))
     :decimal (let [sl (t/scale lt) sr (t/scale rt)]
-               (fn [a b] (dec-compare (long a) sl (long b) sr)))
+               ;; exact for any INT64/DECIMAL operands (decimal38.md §4)
+               (if (or (t/wide? lt) (t/wide? rt))
+                 (fn [a b] (dec-compare-any a sl b sr))
+                 (fn [a b] (dec-compare (long a) sl (long b) sr))))
     :timestamp (let [conv (fn [t] (if (= t :date)
                                     (fn ^long [x] (* (long x) micros-per-day))
                                     (fn ^long [x] (long x))))
@@ -399,8 +494,12 @@
   (case (t/kind cmp-type)
     :float64 (let [d (->double-fn from)]
                (fn [x] (let [v (double (d x))] (if (== v 0.0) 0.0 v))))
+    ;; narrow comparison types: Long, or BigInteger when the rescaled value
+    ;; exceeds 64 bits; wide comparison types: always BigInteger
     :decimal (let [k (- (t/scale cmp-type) (t/scale from))]
-               (fn [x] (dec-rescale-up (long x) k)))
+               (if (t/wide? cmp-type)
+                 (fn [x] (big-rescale-up x k))
+                 (fn [x] (dec-rescale-up (long x) k))))
     :timestamp (if (= from :date)
                  (fn [x] (* (long x) micros-per-day))
                  identity)
@@ -449,17 +548,30 @@
                  :boolean (fn [v] (not (zero? (long v))))
                  :float64 (fn [v] (double (long v)))
                  :decimal (let [p (t/precision to) s (t/scale to)]
-                            (fn [v]
-                              (let [x (dec-rescale-up (long v) s)]
-                                (if (and (instance? Long x) (fits-precision? (long x) p))
-                                  x
-                                  (overflow! (str "conversion to " (t/type-name to))))))))
+                            (if (t/wide? to)
+                              (fn [v]
+                                (let [x (big-rescale-up v s)]
+                                  (if (big-fits? x p) x (overflow! (str "conversion to " (t/type-name to))))))
+                              (fn [v]
+                                (let [x (dec-rescale-up (long v) s)]
+                                  (if (and (instance? Long x) (fits-precision? (long x) p))
+                                    x
+                                    (overflow! (str "conversion to " (t/type-name to)))))))))
         :decimal (let [s (t/scale from)]
                    (case k
-                     :int64 (fn [v] (quot (long v) (aget pow10 s)))
-                     :float64 (fn [v] (dec->double (long v) s))
+                     :int64 (if (t/wide? from)
+                              ;; truncation toward zero
+                              (let [d (big-pow10 s)]
+                                (fn [v] (let [q (.divide ^BigInteger v d)]
+                                          (if (< (.bitLength q) 64)
+                                            (.longValue q)
+                                            (overflow! "conversion to INT64")))))
+                              (fn [v] (quot (long v) (aget pow10 s))))
+                     :float64 (fn [v] (dec->double v s))
                      :decimal (let [p (t/precision to) s2 (t/scale to)]
-                                (fn [v] (dec-rescale (long v) s p s2)))))
+                                (if (or (t/wide? from) (t/wide? to))
+                                  (fn [v] (dec-convert v s p s2))
+                                  (fn [v] (dec-rescale (long v) s p s2))))))
         :float64 (case k
                    :int64 (fn [v] (float->int64 (double v)))
                    :decimal (let [p (t/precision to) s (t/scale to)]

@@ -28,14 +28,16 @@ a query runs with `native: true` — see [Native kernels](#native-kernels-m9))
 and the **architectural change CR-1 `UNION ALL`** (`spec/changes/union-all.md`
 — see [UNION ALL](#change-cr-1-union-all)) and the **refactoring CR-3
 logical/physical plan separation** (`spec/changes/refactor-plan-separation.md`
-— see [Plan separation](#change-cr-3-logicalphysical-plan-separation)).
+— see [Plan separation](#change-cr-3-logicalphysical-plan-separation)) and
+the **architectural change CR-2 `DECIMAL` precision 38 / PQCF v2**
+(`spec/changes/decimal38.md` — see [DECIMAL(38)](#change-cr-2-decimal-precision-38)).
 
 Reported capabilities: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic
 test.functions phase2 sql.groupby sql.join sql.functions sql.subquery sql.cte
 sql.correlated_subquery phase3 storage.pqcf storage.mmap index.hash
 index.btree phase4 http.streaming phase5 exec.row exec.vectorized
 exec.parallel join.hash join.merge join.nested_loop native.kernels
-change.union_all`.
+change.union_all change.decimal38`.
 
 ## Prerequisites and build
 
@@ -115,9 +117,11 @@ SQL text ─lexer→ tokens ─parser→ AST ─analyzer/binder→ bound query
 
 Rows are `Object[]`; NULL is `nil` for every type. `BOOLEAN` → `Boolean`,
 `INT64` → `Long`, `FLOAT64` → `Double`, `STRING` → `String`, `DATE` → `Long` days
-since 1970-01-01, `TIMESTAMP` → `Long` microseconds, `DECIMAL(p,s)` → `Long`
-unscaled value (the scale is static, carried by the type). Decimal arithmetic
-is exact: long fast paths with `BigInteger` fallbacks wherever an
+since 1970-01-01, `TIMESTAMP` → `Long` microseconds, `DECIMAL(p,s)` → the
+unscaled value (the scale is static, carried by the type): a `Long` for
+*narrow* decimals (p ≤ 18) and a `java.math.BigInteger` for *wide* ones
+(19 ≤ p ≤ 38, see [CR-2](#change-cr-2-decimal-precision-38)). Decimal
+arithmetic is exact: long fast paths with `BigInteger` fallbacks wherever an
 intermediate (rescaling, sums) may exceed 64 bits; only final results are
 range-checked, as the spec requires.
 
@@ -186,7 +190,10 @@ timeout/cancellation checks.
   Lookups return sorted row ids, so index scans produce rows in table order.
   Indexes live in their table value (dropping/replacing a table drops them);
   their names are global and case-insensitive.
-* **PQCF writer**: chunks are written column by column, 8-byte aligned;
+* **PQCF writer**: a table with a wide DECIMAL column is written as PQCF v2
+  (128-bit values), every other table as v1 (see
+  [CR-2](#change-cr-2-decimal-precision-38)). Chunks are written column by
+  column, 8-byte aligned;
   default row group size 65,536 (`row_group_size` option). With
   `encoding: auto` each chunk uses the smallest applicable encoding (RLE for
   BOOLEAN/INT64/DECIMAL/DATE/TIMESTAMP, DICT for STRING, else PLAIN); forced
@@ -742,22 +749,151 @@ Decisions:
 * **All-NULL columns** have the type of `SELECT NULL` (reported as STRING,
   as before).
 * **DECIMAL widening.** As for CASE, two DECIMAL columns always combine to
-  `DECIMAL(18,max(s))`, even if identical.
+  `DECIMAL(W,max(s))` (W = 18, or 38 with a wide operand — CR-2), even if
+  identical.
 * **Branches run one after another.** Parallelism is inside branches, not
   across them, which keeps the row order deterministic and memory bounded.
 * **`spec_version`** stays `1.0.0`: the CR says engines claiming the change
   report `1.1.0-cr1`, but the Phase 1 conformance case `catalog.pqt:10`
   requires `1.0.0`, and earlier phases must keep passing.
-* **Public case `union_all.pqt:51` (known failure).** It expects
-  `SELECT order_id AS v … UNION ALL SELECT amount …` to be
-  `DECIMAL(18,2)`, but the file loads `orders.csv` *without* a schema, and
-  CSV inference never yields DECIMAL (ingestion.md §1.1; the Phase 1 case
-  `ingest_csv.pqt:128` requires the identically formatted `ledger.amount`
-  to be inferred as FLOAT64). With `amount` FLOAT64 the CR's own rule gives
-  INT64 ∪ FLOAT64 = FLOAT64, which the engine answers. With `orders` loaded
-  as `amount:DECIMAL(10,2)` (as in the Phase 2 files) the engine returns
-  exactly the expected `DECIMAL(18,2)` rows `["99.99"], ["101.00"]`. The
-  case cannot pass without special-casing a table, which the rules forbid.
+* **Public case `union_all.pqt` (INT64 ∪ DECIMAL).** An earlier version of
+  the case read `amount` from `orders.csv` without a schema (inferred
+  FLOAT64, so it could not be `DECIMAL(18,2)`); the current suite loads the
+  table as `ordersd` with `amount:DECIMAL(10,2)`, and the engine returns
+  the expected `DECIMAL(18,2)` rows.
+
+## Change CR-2: DECIMAL precision 38
+
+`DECIMAL(p,s)` accepts `1 ≤ p ≤ 38` everywhere (CAST, explicit load
+schemas, PQCF metadata, result metadata); `p > 38` or `s > p` is
+`SEMANTIC_ERROR` in CAST and `INVALID_REQUEST` in a load schema. Decimals
+with p ≤ 18 (*narrow*) behave exactly as before; only expressions with a
+*wide* operand (p > 18) use the new rules.
+
+### Wide-decimal representation
+
+A wide value is its unscaled integer as a `java.math.BigInteger` (|u| <
+10ᵖ); the scale stays static in the type, exactly like the narrow `Long`
+representation. A value's Java class is therefore fixed by its static type:
+every `DECIMAL(p,s)` with p ≤ 18 holds `Long`s and every one with p > 18
+holds `BigInteger`s, so equality/hashing of values of one type (GROUP BY,
+DISTINCT, HASH indexes) needs no normalization. Conversions between the two
+happen only where the type changes (implicit coercions of CASE / COALESCE /
+UNION ALL, CAST, arithmetic results).
+
+`BigInteger` was chosen over a hand-rolled 128-bit pair of longs: the spec
+needs exact intermediates of up to 76 digits (a product of two wide
+operands before the overflow check), exact rounding (`BigDecimal`
+`HALF_UP` = half away from zero), exact FLOAT64 conversion in both
+directions and canonical text, all of which the JDK provides; wide
+decimals are expected to be rare compared with narrow ones, which keep
+their primitive fast paths untouched.
+
+### Narrow/wide dispatch
+
+Dispatch is static: after binding every expression has a type, and the
+compilers choose the implementation once per expression, not per row.
+
+* **Result precision W** (`types/result-precision`): 38 if any DECIMAL
+  operand is wide, else 18 (INT64 operands do not count). Used by `+ - *`,
+  SUM, ROUND, FLOOR/CEIL and the common type of CASE, COALESCE, UNION ALL
+  and comparisons; `*` with result scale > W is `TYPE_ERROR`; results with
+  more than W digits are `NUMERIC_OVERFLOW`. A literal with a decimal point
+  and 19–38 significant digits is a wide DECIMAL (more than 38 → FLOAT64).
+* **Arithmetic** (`exec/expr.clj`): a narrow result type compiles to the
+  existing long code (`values/dec-add`, `dec-mul`); a wide one to
+  `values/wide-add`/`wide-sub`/`wide-mul`, which accept `Long` or
+  `BigInteger` operands, compute exactly and check the 38-digit bound.
+  Unary minus/ABS keep the operand type (`negate`/`abs` cannot overflow).
+* **Comparisons are exact** (SPEC-Q-001 resolved): INT64/DECIMAL operands
+  are compared by mathematical value (`values/dec-compare-any`, a long fast
+  path, else `BigInteger` after rescaling to the common scale), never
+  raising `NUMERIC_OVERFLOW` — for `=`/`<`/…, BETWEEN, IN, simple CASE,
+  NULLIF, join keys, MIN/MAX, ORDER BY, GROUP BY and DISTINCT.
+  **Hash keys** (`values/key-fn`, used by hash joins, IN lists/subqueries
+  and HASH index probes) are the value rescaled to the comparison type's
+  scale: for a narrow comparison type a `Long` (a `BigInteger` only when the
+  rescaled value exceeds 64 bits, as before), for a wide comparison type
+  always a `BigInteger`, so both sides of a comparison produce equal keys
+  for equal values. A HASH index is probed only when the predicate's
+  comparison type has the column's scale *and* width.
+* **Aggregates** (`exec/aggregate.clj`, `exec/grouping.clj`): SUM/AVG of a
+  wide argument accumulate in a `BigInteger` (`BigSum`, mergeable for
+  parallel aggregation); SUM checks 38 digits at the end, AVG divides the
+  exact sum. SUM of a narrow argument is still checked against 18 digits.
+  MIN/MAX use the type's comparator.
+* **CAST** (`values/cast-fn`): INT64 → wide is exact; DECIMAL → DECIMAL
+  in any width combination rescales with half-away-from-zero rounding and
+  checks the target precision (`values/dec-convert`); wide → INT64
+  truncates toward zero and checks the INT64 range; DECIMAL → FLOAT64 is
+  the nearest double (`BigDecimal.doubleValue`); FLOAT64 → DECIMAL rounds
+  the exact binary value of the double.
+* **Vectorized and parallel execution**: wide columns travel in `ObjVec`
+  batches (`batch/vec-kind` → `:obj`) and in-memory/storage vectors hold
+  `Object[]` of `BigInteger`s. Every primitive `long[]` fast path is keyed
+  on `types/long-repr?` (INT64, DATE, TIMESTAMP, *narrow* DECIMAL), so wide
+  values never reach the long kernels, long group tables, long sort keys,
+  long join tables or long aggregate states; they use the generic
+  object paths instead (object group tables, comparator sorts, generic
+  aggregate states). Arithmetic, negation, comparisons and BETWEEN whose
+  operand, comparison or result type is wide are evaluated by the row
+  closure inside the vectorized pipeline (`kernels/wide-operands?`).
+* **Native kernels** are never given wide columns or wide constants: the
+  native filter compiler only accepts long-represented columns and narrow
+  comparison constants (`exec/native.clj`), and grouping/join hooks only
+  engage for `LongVec` inputs.
+
+### PQCF v2
+
+`storage/pqcf.clj` writes a table as **v2 exactly when it has a wide
+DECIMAL column** (header and metadata `format_version` 2), otherwise as v1.
+Wide values are 128-bit two's-complement little-endian integers: `PLAIN`
+n × 16 bytes, `RLE` `u32 R` + R × {i128, u32} (20 bytes per run; `auto`
+picks RLE when it is smaller, as for the other types); narrow DECIMAL
+columns keep the v1 i64 layout inside v2 files. The reader accepts v1 and
+v2; it rejects a v1 file that declares a wide column and wide values with
+|u| ≥ 10ᵖ (`STORAGE_CORRUPT`, the latter also on lazily decoded mapped
+chunks), a header/metadata version mismatch (`STORAGE_CORRUPT`) and
+versions > 2 or non-zero flags (`STORAGE_VERSION_UNSUPPORTED`). Chunk
+`min`/`max` stay canonical decimal strings; mapped wide chunks are decoded
+into object vectors on first access (no zero-copy view). Indexes on wide
+columns are persisted like any other.
+
+### Modules touched
+
+| layer | module | change |
+|---|---|---|
+| types | `types.clj` | max precision 38, `wide?`, `long-repr?`, `result-precision`; common numeric type `DECIMAL(W,…)` |
+| values | `values.clj` | `BigInteger` arithmetic (`wide-add/sub/mul`), exact `dec-compare-any`, `dec-convert`, generic `dec->string`/`dec->double`/`bigdec->unscaled`, wide comparators, hash keys and CASTs, exact parsing of up to 38 digits |
+| lexer / parser | `sql/lexer.clj`, `sql/parser.clj` | keyword tokens keep their spelling; `FULL`/`RIGHT` accepted as select-item aliases after `AS` (see decisions) |
+| binder / functions | `sql/binder.clj`, `sql/functions.clj` | literals up to 38 digits, W for `+ - *`, SUM, ROUND, FLOOR/CEIL |
+| row execution | `exec/expr.clj`, `exec/functions.clj`, `exec/aggregate.clj`, `exec/sort.clj`, `exec/operators.clj` | wide arithmetic/negation, ABS/ROUND/FLOOR/CEIL, `BigSum`, long sort paths limited to long-represented types |
+| vectorized / native | `exec/batch.clj`, `exec/kernels.clj`, `exec/grouping.clj`, `exec/vjoin.clj`, `exec/native.clj` | wide → `ObjVec`; row-closure fallback for wide arithmetic/comparisons; long aggregate states, long join keys and native predicates exclude wide types |
+| planning | `plan/access.clj` | HASH index probing requires matching width |
+| storage | `storage/column.clj`, `storage/pqcf.clj` | object vectors for wide columns; PQCF v2 writer/reader |
+| protocol | `protocol.clj` | capability `change.decimal38` |
+
+Ingestion (`ingest/*`) needed no change of its own: it parses with
+`values/parse-decimal-exact`, which now yields `BigInteger`s for wide
+columns, and JSON numbers keep their literal text.
+
+Decisions:
+
+* **`AS full`.** grammar.md §1 lists `FULL` (and `RIGHT`, `UNION`) as
+  reserved "for future use", but the public CR-2 case
+  `SELECT … AS full` expects an output column named `full`. After an
+  explicit `AS` neither `FULL` nor `RIGHT` can start any construct, so the
+  parser accepts them there as select-item (output column) aliases, keeping
+  their spelling; everywhere else they stay reserved (`l FULL JOIN r` is
+  still `UNSUPPORTED`; `SELECT x full`, `SELECT x AS union` and the table
+  alias `FROM t AS full` are `PARSE_ERROR`s, the latter because such an
+  alias could never be referenced as `full.col`).
+* **`spec_version`** stays `1.0.0` (the CR names `1.2.0-cr2`), for the same
+  reason as for CR-1: the Phase 1 case `catalog.pqt:10` requires `1.0.0`.
+* **Wide literals in mixed comparisons** (`narrow_col = 12345678901234567890.5`)
+  have a wide comparison type; they are evaluated exactly by the generic
+  paths (no long kernels, no HASH index probe on the narrow column; BTREE
+  ranges and row-group skipping use the exact comparator).
 
 ## Change CR-3: logical/physical plan separation
 
@@ -851,8 +987,9 @@ Decisions:
 * **Unsupported features.** `UNION` without `ALL`, `RIGHT`/`FULL` joins
   answer `UNSUPPORTED`.
 * **CASE/COALESCE result type.** Types are combined pairwise in order; any two
-  DECIMAL types (even identical ones) combine to `DECIMAL(18,max(s1,s2))` as
-  semantics.md §13 states, INT64 with DECIMAL(p,s) to `DECIMAL(18,s)`, NULL
+  DECIMAL types (even identical ones) combine to `DECIMAL(W,max(s1,s2))` as
+  semantics.md §13 states (W = 18, or 38 when one is wide — CR-2), INT64
+  with DECIMAL(p,s) to `DECIMAL(W,s)`, NULL
   branches are ignored (a single DECIMAL branch keeps its type). DATE and
   TIMESTAMP results do not combine (`TYPE_ERROR`).
 * **UPPER/LOWER.** ASCII letters are case-mapped, other characters are
@@ -991,6 +1128,12 @@ Decisions:
   and parallelization) and 11 compound queries in the Phase 5 differential
   matrix (CTEs, derived tables, IN/EXISTS/correlated subqueries, GROUP BY,
   DISTINCT, LIMIT, runtime errors in a branch).
+* DECIMAL(38) (CR-2): wide arithmetic, exact comparison, conversions and
+  CASTs (`values_test`), literal typing (`analyzer_test`), PQCF v2 version
+  selection, 128-bit round trips for every encoding/row-group size/mmap and
+  a v1 file with a wide column (`pqcf_test`), and wide typing, arithmetic,
+  joins (wide = wide, narrow = wide), grouping, SUM and overflow under seven
+  option combinations (`engine_decimal38_test`).
 * Plan separation (CR-3): the logical plan (operator tree, subquery plans,
   `format-plan`), the optimizer (rule names and order, `optimize: false`
   applies no rule, rules reach subquery plans), one test namespace per rule
@@ -1049,5 +1192,10 @@ Decisions:
 * Indexes are used for single-table scans only (no index nested-loop joins,
   no index use for `OR`/`NOT IN`/`<>`, no ordered output from BTREE indexes).
 * A PQCF chunk must be smaller than 2 GiB (Java buffer limit).
+* Wide DECIMAL values (p > 18) are boxed `BigInteger`s: arithmetic and
+  comparisons on them run as row closures inside vectorized pipelines, they
+  never use the native kernels, and mapped PQCF v2 chunks of wide columns
+  are decoded into object vectors rather than read in place. Narrow
+  decimals keep all primitive fast paths.
 * Correlated subqueries other than equality lookups over a single table scan
   are re-executed per outer row (correct, but O(outer × inner)).

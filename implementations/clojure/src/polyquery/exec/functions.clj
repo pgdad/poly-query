@@ -8,7 +8,7 @@
             [polyquery.types :as t]
             [polyquery.util.text :as text]
             [polyquery.values :as v])
-  (:import (java.math BigDecimal RoundingMode)))
+  (:import (java.math BigDecimal BigInteger RoundingMode)))
 
 (set! *warn-on-reflection* true)
 
@@ -41,7 +41,9 @@
 (defn- abs-fn [t]
   (case (t/kind t)
     :int64 (fn [x] (if (= (long x) Long/MIN_VALUE) (overflow! "ABS") (Math/abs (long x))))
-    :decimal (fn [x] (Math/abs (long x)))
+    :decimal (if (t/wide? t)
+               (fn [x] (.abs ^BigInteger x))
+               (fn [x] (Math/abs (long x))))
     :float64 (fn [x] (Math/abs (double x)))))
 
 (defn- round-fn [t ^long digits result-type]
@@ -53,12 +55,13 @@
                  (try (.longValueExact r)
                       (catch ArithmeticException _ (overflow! "ROUND"))))))
     :decimal (let [s (t/scale t)
-                   rs (t/scale result-type)]
+                   rs (t/scale result-type)
+                   rp (t/precision result-type)]
                (fn [x]
-                 (-> (BigDecimal/valueOf (long x) (int s))
+                 (-> (v/dec->bigdec x s)
                      (.setScale (int digits) RoundingMode/HALF_UP)
                      (.setScale (int rs) RoundingMode/UNNECESSARY)
-                     (v/bigdec->unscaled 18 rs))))
+                     (v/bigdec->unscaled rp rs))))
     :float64 (fn [x]
                (let [r (-> (BigDecimal. (double x))
                            (.setScale (int (max -400 (min 400 digits))) RoundingMode/HALF_UP)
@@ -68,10 +71,15 @@
 (defn- floor-ceil-fn [t ceil?]
   (case (t/kind t)
     :int64 identity
-    :decimal (let [d (aget v/pow10 (t/scale t))]
-               (if ceil?
-                 (fn [x] (- (Math/floorDiv (- (long x)) d)))
-                 (fn [x] (Math/floorDiv (long x) d))))
+    :decimal (if (t/wide? t)
+               (let [s (t/scale t)
+                     mode (if ceil? RoundingMode/CEILING RoundingMode/FLOOR)]
+                 (fn [x] (v/bigdec->unscaled (.setScale (v/dec->bigdec x s) 0 ^RoundingMode mode)
+                                             t/max-decimal-precision 0)))
+               (let [d (aget v/pow10 (t/scale t))]
+                 (if ceil?
+                   (fn [x] (- (Math/floorDiv (- (long x)) d)))
+                   (fn [x] (Math/floorDiv (long x) d)))))
     :float64 (if ceil?
                (fn [x] (Math/ceil (double x)))
                (fn [x] (Math/floor (double x))))))

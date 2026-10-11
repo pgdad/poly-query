@@ -286,6 +286,20 @@
     (when (ident-token? (peek-tok st))
       (:text (advance! st)))))
 
+(def ^:private future-join-words
+  "Keywords reserved only for future join syntax (grammar.md §1). After an
+  explicit AS they cannot start any construct, so they are accepted there as
+  output column names (e.g. `SELECT x AS full`)."
+  #{"FULL" "RIGHT"})
+
+(defn- parse-output-alias
+  "Optional [AS] alias of a select item."
+  [st]
+  (let [tok (peek-tok st 1)]
+    (if (and (at-kw? st "AS") (= :keyword (:type tok)) (future-join-words (:text tok)))
+      (do (advance! st) (advance! st) (:raw tok))
+      (parse-alias st))))
+
 (defn- parse-select-item [st]
   (let [tok (peek-tok st)]
     (cond
@@ -297,7 +311,7 @@
           {:kind :star :table (:text tok) :pos (pos tok)})
 
       :else
-      {:kind :expr :expr (parse-expr st) :alias (parse-alias st) :pos (pos tok)})))
+      {:kind :expr :expr (parse-expr st) :alias (parse-output-alias st) :pos (pos tok)})))
 
 (declare parse-from-item)
 

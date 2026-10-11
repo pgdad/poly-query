@@ -9,7 +9,9 @@
     :boolean   java.lang.Boolean
     :int64     Long
     :float64   Double (always finite)
-    :decimal   Long holding the unscaled value (scale is static, from the type)
+    :decimal   the unscaled value (scale is static, from the type): a Long
+               for narrow decimals (p <= 18), a java.math.BigInteger for
+               wide decimals (19 <= p <= 38, spec/changes/decimal38.md)
     :string    String
     :date      Long, days since 1970-01-01
     :timestamp Long, microseconds since 1970-01-01 00:00:00"
@@ -18,7 +20,12 @@
 
 (set! *warn-on-reflection* true)
 
-(def max-decimal-precision 18)
+(def max-decimal-precision 38)
+
+(def narrow-precision
+  "Largest precision of a *narrow* decimal (a Long unscaled value); also the
+  result precision W of decimal rules whose operands are all narrow."
+  18)
 
 (defn decimal [p s] [:decimal p s])
 
@@ -30,6 +37,26 @@
 (defn decimal-type? [t] (vector? t))
 (defn precision ^long [t] (long (nth t 1)))
 (defn scale ^long [t] (if (vector? t) (long (nth t 2)) 0))
+
+(defn wide?
+  "True for a wide decimal type (precision > 18, BigInteger values)."
+  [t]
+  (and (vector? t) (> (long (nth t 1)) (long narrow-precision))))
+
+(defn long-repr?
+  "True when the values of type t are Longs: INT64, DATE, TIMESTAMP and
+  narrow DECIMAL (the types of the primitive long fast paths)."
+  [t]
+  (case (kind t)
+    (:int64 :date :timestamp) true
+    :decimal (not (wide? t))
+    false))
+
+(defn result-precision
+  "The result precision W of a decimal rule over operand types `ts`
+  (decimal38.md §2): 38 if any DECIMAL operand is wide, else 18."
+  [& ts]
+  (if (some wide? ts) max-decimal-precision narrow-precision))
 
 (defn numeric? [t] (contains? #{:int64 :float64 :decimal} (kind t)))
 (defn temporal? [t] (contains? #{:date :timestamp} (kind t)))
@@ -98,7 +125,7 @@
     (cond
       (or (= ka :float64) (= kb :float64)) :float64
       (and (= ka :int64) (= kb :int64)) :int64
-      :else (decimal max-decimal-precision (max (scale a) (scale b))))))
+      :else (decimal (result-precision a b) (max (scale a) (scale b))))))
 
 (defn common-type
   "Common supertype of two types for CASE/COALESCE-like constructs, or nil if
@@ -107,8 +134,8 @@
   (cond
     (= a :null) b
     (= b :null) a
-    ;; numeric promotion (§2); two DECIMALs always give DECIMAL(18,max(s1,s2))
-    ;; (semantics.md §13)
+    ;; numeric promotion (§2); two DECIMALs always give DECIMAL(W,max(s1,s2))
+    ;; (semantics.md §13, decimal38.md §2)
     (and (numeric? a) (numeric? b)) (common-numeric-type a b)
     (= a b) a
     :else nil))

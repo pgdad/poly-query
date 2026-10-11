@@ -66,6 +66,8 @@
   (isNull [_ i] (not (valid? validity i)))
   (valueAt [_ i] (when (valid? validity i) (if (bit-set? bits i) Boolean/TRUE Boolean/FALSE))))
 
+;; Object[] values: STRING columns, and wide DECIMAL columns (BigInteger
+;; unscaled values, spec/changes/decimal38.md).
 (deftype StringVector [^objects values ^longs validity ^long n]
   ColumnVector
   (size [_] n)
@@ -141,7 +143,13 @@
    (let [n (alength vals)
          validity (validity-of vals)]
      (case (t/kind t)
-       (:int64 :decimal :date :timestamp)
+       :decimal
+       (if (t/wide? t)
+         (StringVector. (aclone vals) validity n)
+         (let [a (long-array n)]
+           (dotimes [i n] (when-some [x (aget vals i)] (aset a i (long x))))
+           (LongVector. a validity n)))
+       (:int64 :date :timestamp)
        (let [a (long-array n)]
          (dotimes [i n] (when-some [x (aget vals i)] (aset a i (long x))))
          (LongVector. a validity n))

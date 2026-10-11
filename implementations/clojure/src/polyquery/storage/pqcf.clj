@@ -1,5 +1,9 @@
 (ns polyquery.storage.pqcf
-  "PQCF v1 columnar file format (spec/storage/pqcf-v1.md).
+  "PQCF v1 and v2 columnar file formats (spec/storage/pqcf-v1.md,
+  spec/changes/decimal38.md §7). v2 is v1 plus wide DECIMAL columns, whose
+  unscaled values are stored as 128-bit two's-complement little-endian
+  integers; a table is written as v2 exactly when it has a wide DECIMAL
+  column.
 
   Writing: chunks are written column by column (each row group's chunk of a
   column in turn), 8-byte aligned, followed by the JSON metadata and the
@@ -22,6 +26,7 @@
             [polyquery.util.text :as text]
             [polyquery.values :as v])
   (:import (java.io BufferedOutputStream File FileOutputStream IOException OutputStream)
+           (java.math BigInteger)
            (java.nio BufferUnderflowException ByteBuffer ByteOrder)
            (java.nio.channels FileChannel FileChannel$MapMode)
            (java.nio.charset CharacterCodingException CharsetDecoder CodingErrorAction
@@ -35,7 +40,14 @@
 
 (set! *warn-on-reflection* true)
 
-(def format-version 1)
+(def max-format-version
+  "Highest PQCF format version this reader understands."
+  2)
+
+(defn- table-format-version
+  "Writer rule: v2 for a table with a wide DECIMAL column, else v1."
+  ^long [columns]
+  (if (some (comp t/wide? :type) columns) 2 1))
 (def writer-name "polyquery-clojure 0.1.0")
 (def default-row-group-size 65536)
 
@@ -57,6 +69,28 @@
 (def ^:private max-timestamp (dec (* (inc (long max-date)) (long v/micros-per-day))))
 
 (defn- rle-type? [t] (contains? #{:boolean :int64 :decimal :date :timestamp} (t/kind t)))
+
+(defn- storage-kind
+  "The type kind, with wide DECIMAL types as :wide (i128 values)."
+  [t]
+  (if (t/wide? t) :wide (t/kind t)))
+
+(def ^:private ^BigInteger mask64 (.subtract (.shiftLeft BigInteger/ONE 64) BigInteger/ONE))
+
+(defn- put-i128!
+  "Writes x as a 128-bit two's-complement little-endian integer."
+  [^ByteBuffer buf ^BigInteger x]
+  (.putLong buf (.longValue x))
+  (.putLong buf (.longValue (.shiftRight x 64))))
+
+(defn- get-i128
+  "Reads a 128-bit two's-complement little-endian integer at pos."
+  ^BigInteger [^ByteBuffer buf ^long pos]
+  (let [lo (.getLong buf (int pos))
+        hi (.getLong buf (int (+ pos 8)))]
+    (if (== hi (bit-shift-right lo 63))
+      (BigInteger/valueOf lo)
+      (.or (.shiftLeft (BigInteger/valueOf hi) 64) (.and (BigInteger/valueOf lo) mask64)))))
 
 ;; ===========================================================================
 ;; Writing
@@ -82,17 +116,20 @@
 
 (defn- runs-of
   "Run-length runs [[value length] …] of the values; NULL slots extend the
-  current run (their value is ignored by readers)."
+  current run (their value is ignored by readers). Values are longs, or
+  BigIntegers for wide DECIMAL columns (kind :wide)."
   [kind ^objects vals]
   (let [n (alength vals)
-        out (java.util.ArrayList.)]
+        out (java.util.ArrayList.)
+        wide? (= kind :wide)
+        zero (if wide? BigInteger/ZERO 0)]
     (loop [i 0 cur nil len 0]
       (if (< i n)
         (let [x (aget vals i)
-              xv (if (nil? x) cur (long-value kind x))]
+              xv (cond (nil? x) cur wide? x :else (long-value kind x))]
           (cond
-            (nil? cur) (recur (inc i) (or xv 0) 1)
-            (= (long xv) (long cur)) (recur (inc i) cur (inc len))
+            (nil? cur) (recur (inc i) (or xv zero) 1)
+            (if wide? (.equals ^Object xv cur) (= (long xv) (long cur))) (recur (inc i) cur (inc len))
             :else (do (.add out [cur len]) (recur (inc i) xv 1))))
         (when (pos? len) (.add out [cur len]))))
     (vec out)))
@@ -120,7 +157,7 @@
   "Encoding of a chunk: forced (\"plain\" \"dict\" \"rle\") where applicable,
   else the smallest of the applicable encodings."
   [requested t ^objects vals encoded-strings dict runs]
-  (let [kind (t/kind t)
+  (let [kind (storage-kind t)
         n (alength vals)]
     (case requested
       "plain" "PLAIN"
@@ -133,15 +170,16 @@
                            (* 4 n))]
           (if (< dict-size (string-plain-size encoded-strings)) "DICT" "PLAIN"))
         (rle-type? t)
-        (let [plain (case kind :boolean (bitmap-bytes n) :date (* 4 n) (* 8 n))]
-          (if (< (+ 4 (* 12 (count runs))) plain) "RLE" "PLAIN"))
+        (let [plain (case kind :boolean (bitmap-bytes n) :date (* 4 n) :wide (* 16 n) (* 8 n))
+              run-size (if (= kind :wide) 20 12)]
+          (if (< (+ 4 (* run-size (count runs))) plain) "RLE" "PLAIN"))
         :else "PLAIN"))))
 
 (defn- encode-chunk
   "Encodes the values of one column chunk. Returns {:bytes ByteBuffer
   :encoding :null-count}."
   [t ^objects vals requested]
-  (let [kind (t/kind t)
+  (let [kind (storage-kind t)
         n (alength vals)
         nulls (count (filter nil? vals))
         encoded (when (= kind :string)
@@ -157,11 +195,12 @@
                               :boolean (bitmap-bytes n)
                               :date (* 4 n)
                               (:int64 :decimal :timestamp :float64) (* 8 n)
+                              :wide (* 16 n)
                               :string (string-plain-size encoded))
                     "DICT" (let [[entries] dict]
                              (+ 4 (* 4 (inc (count entries)))
                                 (reduce + 0 (map #(alength ^bytes %) entries)) (* 4 n)))
-                    "RLE" (+ 4 (* 12 (count runs))))
+                    "RLE" (+ 4 (* (if (= kind :wide) 20 12) (count runs))))
         buf (le (ByteBuffer/allocate (+ validity-size body-size)))]
     (when (pos? nulls) (put-bitmap! buf n #(some? (aget vals (int %)))))
     (case encoding
@@ -170,6 +209,7 @@
         :boolean (put-bitmap! buf n #(true? (aget vals (int %))))
         :date (dotimes [i n] (.putInt buf (int (or (aget vals i) 0))))
         (:int64 :decimal :timestamp) (dotimes [i n] (.putLong buf (long (or (aget vals i) 0))))
+        :wide (dotimes [i n] (put-i128! buf (or (aget vals i) BigInteger/ZERO)))
         :float64 (dotimes [i n] (.putDouble buf (double (or (aget vals i) 0.0))))
         :string (do (loop [i 0 off 0]
                       (.putInt buf (unchecked-int off))
@@ -188,7 +228,9 @@
       "RLE"
       (do (.putInt buf (int (count runs)))
           (doseq [[x len] runs]
-            (.putLong buf (long x))
+            (if (= kind :wide)
+              (put-i128! buf x)
+              (.putLong buf (long x)))
             (.putInt buf (int len)))))
     (.flip buf)
     {:bytes buf :encoding encoding :null-count nulls}))
@@ -231,6 +273,7 @@
         rg (long (or row-group-size default-row-group-size))
         groups (vec (for [start (range 0 n rg)] [start (min rg (- n start))]))
         columns (:columns tbl)
+        format-version (table-format-version columns)
         header (le (ByteBuffer/allocate 8))
         _ (do (.put header magic) (.putShort header (short format-version)) (.putShort header (short 0))
               (.flip header) (write-buffer! out header))
@@ -351,6 +394,12 @@
         (corrupt! "validity bitmap does not match null_count")))
     bits))
 
+(defn- check-wide!
+  "Validates a stored wide DECIMAL value of type t (|unscaled| < 10^p)."
+  [t ^BigInteger x]
+  (when-not (v/big-fits? x (t/precision t))
+    (corrupt! "DECIMAL value exceeds its precision")))
+
 (defn- value-checker
   "Returns (fn [^long x]) throwing STORAGE_CORRUPT for an invalid stored
   value of type t (integer-represented types)."
@@ -373,9 +422,19 @@
 (defn- decode-plain
   [t ^ByteBuffer buf pos n validity len mmap?]
   (let [pos (long pos) n (long n) len (long len)
-        kind (t/kind t)
+        kind (storage-kind t)
         check (value-checker t)]
     (case kind
+      :wide
+      (do (expect-length! (+ pos (* 16 n)) len)
+          (let [vals (object-array n)]
+            (dotimes [i n]
+              (when (valid-row? validity i)
+                (let [x (get-i128 buf (+ pos (* 16 i)))]
+                  (check-wide! t x)
+                  (aset vals i x))))
+            (StringVector. vals validity n)))
+
       :boolean
       (do (expect-length! (+ pos (bitmap-bytes n)) len)
           (let [bits (long-array (col/bitmap-words n))]
@@ -458,11 +517,36 @@
           (aset codes i (int code)))))
     (DictVector. codes dict validity n))))
 
+(defn- decode-wide-rle
+  "RLE chunk of a wide DECIMAL column: u32 R, then R × {i128, u32 length}."
+  [t ^ByteBuffer buf pos n validity len]
+  (let [pos (long pos) n (long n) len (long len)
+        r (u32 buf pos)
+        _ (expect-length! (+ pos 4 (* 20 r)) len)
+        vals (object-array n)]
+    (loop [k 0 row 0]
+      (if (< k r)
+        (let [at (+ pos 4 (* 20 k))
+              x (get-i128 buf at)
+              run (u32 buf (+ at 16))]
+          (when (or (zero? run) (> (+ row run) n)) (corrupt! "invalid RLE run length"))
+          (dotimes [j run]
+            (let [i (+ row j)]
+              (when (valid-row? validity i)
+                (aset vals i x))))
+          (when (some #(valid-row? validity %) (range row (+ row run)))
+            (check-wide! t x))
+          (recur (inc k) (+ row run)))
+        (when-not (= row n) (corrupt! "RLE runs do not cover the row group"))))
+    (StringVector. vals validity n)))
+
 (defn- decode-rle
   [t ^ByteBuffer buf pos n validity len]
   (let [pos (long pos) n (long n) len (long len)]
   (when-not (rle-type? t) (corrupt! "RLE encoding on an unsupported column type"))
   (when (> (+ pos 4) len) (corrupt! "truncated RLE chunk"))
+  (if (t/wide? t)
+    (decode-wide-rle t buf pos n validity len)
   (let [r (u32 buf pos)
         _ (expect-length! (+ pos 4 (* 12 r)) len)
         check (value-checker t)
@@ -482,7 +566,7 @@
       (let [bits (long-array (col/bitmap-words n))]
         (dotimes [i n] (when (= 1 (aget values i)) (col/set-bit! bits i)))
         (BooleanVector. bits validity n))
-      (LongVector. values validity n)))))
+      (LongVector. values validity n))))))
 
 (defn- decode-chunk
   "Verifies and decodes one chunk held in buf (position 0, little endian)."
@@ -575,6 +659,8 @@
                             (corrupt! "invalid column entry"))
                           (table/->Column nm (t/parse-type-string ty "STORAGE_CORRUPT"))))
                       cols)
+        _ (when (and (< header-version 2) (some (comp t/wide? :type) columns))
+            (corrupt! "a PQCF v1 file declares a wide DECIMAL column"))
         _ (when-not (apply distinct? (cons ::none (map (comp text/ascii-lower :name) columns)))
             (corrupt! "duplicate column names"))
         idx-meta (or (get meta "indexes") [])
@@ -624,7 +710,7 @@
         version (long (.getShort header 4))
         flags (long (.getShort header 6))]
     (cond (zero? version) (corrupt! "format_version 0")
-          (or (neg? version) (> version format-version))
+          (or (neg? version) (> version (long max-format-version)))
           (unsupported! (str "PQCF format version " (bit-and version 0xFFFF) " is not supported"))
           (not (zero? flags)) (unsupported! "unsupported PQCF header flags"))
     (when (< size 20) (corrupt! "file is truncated"))

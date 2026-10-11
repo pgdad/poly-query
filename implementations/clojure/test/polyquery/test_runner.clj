@@ -23,6 +23,7 @@
     polyquery.engine-phase2-test
     polyquery.engine-phase3-test
     polyquery.engine-phase5-test
+    polyquery.engine-decimal38-test
     polyquery.native-test
     polyquery.storage.storage-test
     polyquery.storage.pqcf-test

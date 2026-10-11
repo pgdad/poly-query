@@ -377,7 +377,7 @@
   (let [i (int index)
         sign (if desc? -1 1)
         null-x (if nulls-first? -1 1)
-        long-kind? (#{:int64 :decimal :date :timestamp} (t/kind type))
+        long-kind? (t/long-repr? type)
         ^Comparator c (v/value-comparator type)]
     (if long-kind?
       (reify Comparator

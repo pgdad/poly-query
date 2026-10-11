@@ -65,3 +65,13 @@
   (is (= "UNSUPPORTED" (error-code (parser/parse-statement "SELECT 1 UNION SELECT 2"))))
   (is (= "UNSUPPORTED" (error-code (parser/parse-statement "SELECT 1 UNION DISTINCT SELECT 2"))))
   (is (= "UNSUPPORTED" (error-code (parser/parse-statement "SELECT * FROM a RIGHT JOIN b ON x")))))
+
+(deftest future-join-words-as-output-aliases
+  (let [items #(-> (parser/parse-statement %) :query :select :items)]
+    (testing "FULL/RIGHT after AS name an output column (spelling kept)"
+      (is (= ["full" "Right"] (mapv :alias (items "SELECT 1 AS full, 2 AS Right")))))
+    (testing "elsewhere they stay reserved"
+      (is (= "PARSE_ERROR" (error-code (parser/parse-statement "SELECT 1 full"))))
+      (is (= "PARSE_ERROR" (error-code (parser/parse-statement "SELECT 1 AS union"))))
+      (is (= "PARSE_ERROR" (error-code (parser/parse-statement "SELECT * FROM t AS full"))))
+      (is (= "UNSUPPORTED" (error-code (parser/parse-statement "SELECT * FROM a FULL JOIN b ON a.x = b.x")))))))
