@@ -170,7 +170,10 @@ int main(int argc, char **argv) {
       { size_t ng = below(3) ? 1 + below(2000) : 1 + below(8); uint32_t *g = gal(n * 4, gm);
         for (size_t i = 0; i < n; i++) g[i] = (uint32_t)(below(4) ? below(ng) : (i * 7) % ng);
         int64_t *gs1 = calloc(ng, 8), *gs2 = gal(ng * 8, gm), *gc1 = calloc(ng, 8), *gc2 = gal(ng * 8, gm);
-        for (size_t i = 0; i < ng; i++) { gs1[i] = gs2[i] = (int64_t)below(5); gc1[i] = gc2[i] = (int64_t)below(5); }
+        int initm = (int)below(4);   /* 3: some initial sums near the int64 limits / +-2^62 */
+        for (size_t i = 0; i < ng; i++) { gs1[i] = gs2[i] = (int64_t)below(5); gc1[i] = gc2[i] = (int64_t)below(5);
+          if (initm == 3 && below(50) == 0) { static const int64_t ex[] = {INT64_MAX, INT64_MIN, (int64_t)1 << 62, -((int64_t)1 << 62), ((int64_t)1 << 62) - 1, -((int64_t)1 << 62) - 1};
+            gs1[i] = gs2[i] = ex[below(6)]; } }
         int nocnt = below(4) == 0;
         r1 = ref.group_sum_i64(g, d, val, n, gs1, nocnt ? NULL : gc1, ng); r2 = v.group_sum_i64(g, d, val, n, gs2, nocnt ? NULL : gc2, ng);
         CK(r1 == r2 && !memcmp(gs1, gs2, ng * 8) && (nocnt || !memcmp(gc1, gc2, ng * 8)), "group_sum n=%zu ng=%zu mode=%d %d %d", n, ng, mode, r1, r2);
