@@ -30,6 +30,9 @@ type joinTable struct {
 	heads   []int32
 	next    []int32
 	shift   uint
+	direct  bool  // int keys: heads indexed by key - lo (no hashing)
+	unique  bool  // direct mode with distinct keys: chains of length 1
+	lo      int64
 	seed    maphash.Seed
 	rows    []int32 // scratch: stored rows of the current batch
 	// enc dictionary-encodes STRING build columns while their number of
@@ -87,6 +90,18 @@ func (t *joinTable) decode(k int) {
 		c.S[i] = d.dict[code]
 	}
 	c.Codes, t.enc[k] = nil, nil
+}
+
+// intChain returns the first build row of the bucket of int key k (-1:
+// none). In direct mode the bucket holds only rows with key k.
+func (t *joinTable) intChain(k int64) int32 {
+	if t.direct {
+		if i := uint64(k - t.lo); i < uint64(len(t.heads)) {
+			return t.heads[i]
+		}
+		return -1
+	}
+	return t.heads[hashInt(k, t.shift)]
 }
 
 func hashInt(k int64, shift uint) uint64 {
@@ -204,6 +219,17 @@ func (t *joinTable) index() {
 	for size < 2*t.n {
 		size <<= 1
 	}
+	if t.intKey && t.n > 0 {
+		// Keys spanning a small range index the bucket heads directly:
+		// a bucket then holds exactly the rows of one key value.
+		lo, hi := t.intKeys[0], t.intKeys[0]
+		for _, k := range t.intKeys {
+			lo, hi = min(lo, k), max(hi, k)
+		}
+		if span := uint64(hi - lo); hi-lo >= 0 && span < uint64(max(2*size, 1024)) {
+			t.direct, t.lo, size = true, lo, int(span)+1
+		}
+	}
 	t.shift = uint(64 - bits.TrailingZeros(uint(size)))
 	t.heads = make([]int32, size)
 	for i := range t.heads {
@@ -212,13 +238,25 @@ func (t *joinTable) index() {
 	t.next = make([]int32, t.n)
 	for i := t.n - 1; i >= 0; i-- {
 		var h uint64
-		if t.intKey {
+		switch {
+		case t.direct:
+			h = uint64(t.intKeys[i] - t.lo)
+		case t.intKey:
 			h = hashInt(t.intKeys[i], t.shift)
-		} else {
+		default:
 			h = maphash.String(t.seed, t.strKeys[i]) >> t.shift
 		}
 		t.next[i] = t.heads[h]
 		t.heads[h] = int32(i)
+	}
+	if t.direct {
+		t.unique = true
+		for _, n := range t.next {
+			if n >= 0 {
+				t.unique = false
+				break
+			}
+		}
 	}
 }
 
@@ -452,6 +490,10 @@ func (j *vhashJoinOp) fillPairs() {
 		j.fillUnmatched()
 		return
 	}
+	if j.table.unique {
+		j.fillUnique()
+		return
+	}
 	t := j.table
 	pp, pbuild := j.pairP[:0], j.pairB[:0]
 	leftNoResidual := j.kind == plan.JoinLeft && j.residual == nil
@@ -465,7 +507,7 @@ func (j *vhashJoinOp) fillPairs() {
 			}
 			if !hasNull {
 				if t.intKey {
-					j.chain = t.heads[hashInt(j.pkeys[0].I[i], t.shift)]
+					j.chain = t.intChain(j.pkeys[0].I[i])
 				} else {
 					j.keyBuf = j.keyBuf[:0]
 					for k, kv := range j.pkeys {
@@ -480,7 +522,7 @@ func (j *vhashJoinOp) fillPairs() {
 			for j.chain >= 0 && len(pp) < BatchSize {
 				c := j.chain
 				j.chain = t.next[c]
-				if t.intKeys[c] == k {
+				if t.direct || t.intKeys[c] == k {
 					pp, pbuild = append(pp, int32(i)), append(pbuild, c)
 					j.matchedRow = true
 				}
@@ -510,6 +552,31 @@ func (j *vhashJoinOp) fillPairs() {
 	j.pairP, j.pairB = pp, pbuild
 }
 
+// fillUnique is fillPairs for build tables with distinct, directly indexed
+// int keys: every probe row has at most one match.
+func (j *vhashJoinOp) fillUnique() {
+	t := j.table
+	pp, pbuild := j.pairP[:0], j.pairB[:0]
+	leftNoResidual := j.kind == plan.JoinLeft && j.residual == nil
+	keys, nulls := j.pkeys[0].I, j.pkeys[0].Nulls
+	heads, lo, size := t.heads, t.lo, uint64(len(t.heads))
+	for ; j.pos < j.active && len(pp) < BatchSize; j.pos++ {
+		i := j.rowAt(j.pos)
+		c := int32(-1)
+		if nulls == nil || !nulls[i] {
+			if h := uint64(keys[i] - lo); h < size {
+				c = heads[h]
+			}
+		}
+		if c >= 0 {
+			pp, pbuild = append(pp, int32(i)), append(pbuild, c)
+		} else if leftNoResidual {
+			pp, pbuild = append(pp, int32(i)), append(pbuild, -1)
+		}
+	}
+	j.pairP, j.pairB = pp, pbuild
+}
+
 // fillUnmatched collects up to BatchSize unmatched probe rows (paired with
 // build row -1) of the current probe batch (anti joins). The matched rows
 // the join would have produced still count for --max-join-rows.
@@ -533,7 +600,7 @@ func (j *vhashJoinOp) fillUnmatched() {
 		case hasNull:
 		case t.intKey:
 			k := j.pkeys[0].I[i]
-			for c := t.heads[hashInt(k, t.shift)]; c >= 0; c = t.next[c] {
+			for c := t.intChain(k); c >= 0; c = t.next[c] {
 				if t.intKeys[c] == k {
 					matched = true
 					matches++
