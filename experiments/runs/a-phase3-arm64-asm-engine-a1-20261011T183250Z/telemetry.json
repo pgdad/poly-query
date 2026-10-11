@@ -1,0 +1,124 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase3-arm64-asm-engine-a1-20261011T183250Z",
+ "language": "arm64-asm-engine",
+ "task": "phase3",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase3",
+ "prompt_sha256": "571ee5556825a3e5873c8a24d4ab7e3fe646e7b1e8388794816b55d8fd207a2b",
+ "session_id": "b3271a0b-10a4-4161-84ea-504fb2d539ab",
+ "tokens": {
+  "input": 278,
+  "output": 171429,
+  "cache_read": 32844874,
+  "cache_creation": 358260,
+  "thinking": null,
+  "thinking_estimated": 60217,
+  "source": "result events (summed over 2 segments)",
+  "api_messages": 203
+ },
+ "rate_limit": {
+  "events": 9,
+  "max_utilization": {
+   "five_hour": 0.47,
+   "seven_day": 0.53
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 19.647368599999997,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 142,
+ "result_segments": 2,
+ "assistant_messages": 408,
+ "tool_calls": {
+  "Bash": 202,
+  "Agent": 1,
+  "Write": 12,
+  "ToolSearch": 1
+ },
+ "tool_calls_total": 216,
+ "tool_failures": 4,
+ "build_invocations": 28,
+ "build_failures_heuristic": 6,
+ "conformance_runs": 12,
+ "conformance_progress": [
+  [
+   411,
+   554
+  ],
+  [
+   411,
+   411
+  ],
+  [
+   466,
+   554
+  ],
+  [
+   39,
+   47
+  ],
+  [
+   69,
+   80
+  ],
+  [
+   78,
+   80
+  ],
+  [
+   466,
+   554
+  ],
+  [
+   411,
+   411
+  ],
+  [
+   89,
+   143
+  ],
+  [
+   554,
+   554
+  ],
+  [
+   554,
+   554
+  ]
+ ],
+ "repair_iterations": 11,
+ "time": {
+  "wall_seconds": 1804.5,
+  "model_api_seconds": 2796.3,
+  "tool_seconds": 103.9,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 17,
+  "files_changed": 23,
+  "lines_added": 7445,
+  "lines_removed": 72,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 3 is done and committed: the conformance runner passes every case in Phases 1\u20133, and `make build test lint` succeeds from a clean build.\n\n**Test results (runner summary):**\n```\nphase 1: 225/225 pass, 0 fail, 0 error, 0 not implemented\nphase 2: 186/186 pass, 0 fail, 0 error, 0 not implemented\nphase 3: 143/143 pass, 0 fail, 0 error, 0 not implemented\nTOTAL: 554/554 pass\n```\n\n**What I implemented (all in hand-written AArch64 assembly):**\n- **In-memory layouts (`storage.S`):** column layout with null bitmaps and optional dictionary encoding for STRING columns, plus a row layout. Both are chosen with the `layout` and `dictionary` load/open options, and give identical results.\n- **Statistics:** per-column null count, min, max and exact distinct count, computed on first use and served by the new `stats` op.\n- **Indexes (`index.S`):** HASH (a chained hash table) and BTREE (a sorted list of row ids searched by binary search, which the spec allows instead of a tree). `CREATE`/`DROP INDEX` work, NULLs are never indexed, indexes are dropped with their table, and `schema` lists them.\n- **Planning (`access.S`, `plan.S`):** estimates how many rows each `column op constant` / `IN` filter keeps, picks an index scan, and skips PQCF row groups whose min/max rule them out. Inner hash joins build on the smaller input. EXPLAIN shows `IndexScan` with `index`/`kind`, plus estimated rows and row groups skipped.\n- **PQCF v1 (`pqcf.S`, written by a helper agent in a separate copy of the repo and merged):**\n  - CRC-32 and all three encodings (PLAIN/DICT/RLE).\n  - Atomic `save`: temp file, fsync, rename, fsync of the directory.\n  - `open` fully validates the file before using it. `mmap: true` memory-maps the file instead of reading it.\n  - Index definitions are written to the file and recreated on open.\n- **Tests added:** `test_storage` and `test_pqcf` unit tests, index cases in `test_plan`, and `tests/sh/run_storage_tests.sh`.\n\n**Extra checks I ran (throw-away scripts in /tmp, not in the repo), all with zero failures:**\n- Random queries compared with indexes on and off, and across row, column and dictionary layouts.\n- My own Python PQCF writer and reader, written from the spec, checked against the engine in both directions.\n- Thousands of byte-corrupted files: never a crash and never wrong data.\n- Row-group skipping checked against a Python oracle.\n- Killing the engine (SIGKILL) during repeated saves always left a complete, readable target file.\n\n**Known limitations:**\n- PQCF files are decoded in full at open; mmap only changes how the file is read, which the README states.\n- Temporary files left by a crashed `save` are not cleaned up later. The spec allows this, and readers ignore them.\n- PQCF version 2 (the separate DECIMAL(38) change) is not supported.\n- Single-threaded; no HTTP server (that is Phase 4).\n\n**Main design decisions:**\n- **Index choice rule:** an index is used when the filter keeps at most 10% of rows, or when an equality/IN lookup is expected to return at most 16 rows. I added the second rule because one public test expects an index scan on an 8-row table where the plain 10% rule would choose a full scan.\n- **Index scans re-check the whole filter** on every row they return, so results can never depend on whether an index was used.\n- **Planning never raises errors:** constants are evaluated while planning, but only literals, negation and the binder's implicit casts are accepted, none of which can fail.\n- **Join build side:** the two inputs are swapped rather than adding a second join code path; the output rows are unchanged because each table keeps its own slot in a joined row.\n\nREADME.md and NOTES.md describe the design and current status.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
