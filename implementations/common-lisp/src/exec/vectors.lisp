@@ -310,17 +310,21 @@ all are; NIL when none is)."
   "Row opener (see COMPILE-OPERATOR) producing the rows of a batch opener."
   (declare (type function open-batches))
   (lambda ()
-    (let ((next-batch (funcall open-batches))
-          (batch nil)
-          (i 0) (n 0))
-      (declare (type function next-batch) (type fixnum i n))
-      (lambda ()
-        (loop
-          (when (< i n)
-            (return (prog1 (batch-row batch i) (incf i))))
-          (setf batch (funcall next-batch))
-          (unless batch (return nil))
-          (setf i 0 n (batch-count batch)))))))
+    (batch-iterator-rows (funcall open-batches))))
+
+(defun batch-iterator-rows (next-batch)
+  "Row iterator over the rows of the batch iterator NEXT-BATCH."
+  (declare (type function next-batch))
+  (let ((batch nil)
+        (i 0) (n 0))
+    (declare (type fixnum i n))
+    (lambda ()
+      (loop
+        (when (< i n)
+          (return (prog1 (batch-row batch i) (incf i))))
+        (setf batch (funcall next-batch))
+        (unless batch (return nil))
+        (setf i 0 n (batch-count batch))))))
 
 (defun rows-to-batch (rows n kinds)
   "Batch of the first N row vectors of ROWS (column kinds KINDS)."

@@ -62,8 +62,10 @@ bound-query)."
 (defun open-sql (session sql &key (options (make-exec-options)))
   "Parse, analyse and plan SQL in the current *QUERY-CONTEXT* with the
 EXEC-OPTIONS OPTIONS. Index statements are executed immediately. Returns
-(values columns iterator): the result COLUMN-DEFs and a function returning the
-next result row or NIL."
+(values columns iterator counter): the result COLUMN-DEFs, a function
+returning the next result row or NIL, and, for the vectorized executor, a
+function returning the number of remaining rows without building them (use
+either ITERATOR or COUNTER)."
   (let ((ast (parse-sql sql)))
     (flet ((no-rows () nil))
       (typecase ast
@@ -75,9 +77,18 @@ next result row or NIL."
                (let ((row (vector (json-to-string (explain-plan-json (physical-query-root plan))))))
                  (values (list (make-column-def "plan" :string))
                          (lambda () (shiftf row nil))))
-               (values (result-columns bound)
-                       (let ((*execution-settings* (physical-query-settings plan)))
-                         (funcall (the function (compile-plan (physical-query-root plan)))))))))))))
+               (let ((*execution-settings* (physical-query-settings plan)))
+                 (if (vectorized-execution-p)
+                     (let ((next-batch (funcall (the function (compile-batch-operator
+                                                               (physical-query-root plan))))))
+                       (values (result-columns bound)
+                               (batch-iterator-rows next-batch)
+                               (lambda ()
+                                 (loop for batch = (funcall (the function next-batch))
+                                       while batch
+                                       sum (batch-count batch)))))
+                     (values (result-columns bound)
+                             (funcall (the function (compile-plan (physical-query-root plan))))))))))))))
 
 (defun execute-sql (session sql &key max-rows timeout-ms (collect-rows t)
                                      (options (make-exec-options)) context)
@@ -87,8 +98,10 @@ the QUERY-CONTEXT to run in (by default a fresh one with TIMEOUT-MS)."
          (memory-before (query-context-memory-used *query-context*)))
     (flet ((run (options)
              (with-query-cleanups (*query-context*)
-               (multiple-value-bind (columns next) (open-sql session sql :options options)
-                 (collect-rows columns next max-rows collect-rows)))))
+               (multiple-value-bind (columns next counter) (open-sql session sql :options options)
+                 (if (and counter (not collect-rows))
+                     (count-rows columns counter max-rows)
+                     (collect-rows columns next max-rows collect-rows))))))
       (if (eq (exec-options-mode options) :row)
           (run options)
           (handler-case (run options)
@@ -160,6 +173,13 @@ COLLECT-ROWS), enforcing MAX-ROWS and the memory budget."
     (make-query-result :columns columns
                        :rows (nreverse rows)
                        :row-count count)))
+
+(defun count-rows (columns counter max-rows)
+  "QUERY-RESULT holding only the number of rows the function COUNTER reports."
+  (let ((count (funcall (the function counter))))
+    (when (and max-rows (> count max-rows))
+      (resource-limit-error "result exceeds max_rows (~D)" max-rows))
+    (make-query-result :columns columns :rows '() :row-count count)))
 
 (defun explain-sql (session sql &key (options (make-exec-options)))
   "The EXPLAIN plan JSON of the query SQL (an EXPLAIN prefix is accepted)."
