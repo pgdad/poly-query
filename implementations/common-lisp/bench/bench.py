@@ -10,6 +10,10 @@ median wall time of each configuration is reported.
 Usage:
   bench.py --engine bin/polyquery --data /tmp/pqdata/1m [--repeat 3]
            [--configs row,vec1,vec4] [--queries q1,q2] [--json out.json]
+           [--native native-kernels/build/x86_64/libpqkernels.so]
+
+--native loads the native kernel library (`--native-kernels`), for the
+configurations with `native: true` (vec1n, vec4n, vec8n).
 """
 from __future__ import annotations
 
@@ -56,6 +60,15 @@ QUERIES = {
     # count: only the row count is returned (no result serialization)
     "q16_full_sort": "count:SELECT id, dup_key, float_key FROM sk ORDER BY dup_key, float_key DESC, id",
     "q17_scan_filter": "count:SELECT tx_id, amount, category FROM tx WHERE category LIKE '%e%' AND fee < 5",
+    # Native-kernel oriented: integer/date predicates and global aggregates of columns.
+    "q18_global_agg": "SELECT COUNT(*), SUM(amount), MIN(ts), MAX(bucket), COUNT(fee) FROM tx",
+    "q19_range_filter": "SELECT COUNT(*), SUM(unit_price), MAX(discount) FROM items "
+                        "WHERE quantity BETWEEN 3 AND 5 AND product_id < 5000",
+    "q20_in_list": "SELECT category, COUNT(*) AS n FROM tx WHERE bucket IN (1, 7, 42, 99, 500) GROUP BY category",
+    "q21_date_range": "SELECT status, COUNT(*) AS n, SUM(item_count) AS s FROM orders "
+                      "WHERE order_date >= DATE '2024-01-01' AND order_date < DATE '2024-04-01' GROUP BY status",
+    "q22_null_filter": "SELECT COUNT(*), SUM(n90), MIN(d99) FROM nh WHERE n50 IS NOT NULL AND n90 > 100",
+    "q23_float_minmax": "SELECT MIN(temperature), MAX(temperature), MIN(pressure), MAX(humidity) FROM sensors",
 }
 
 CONFIGS = {
@@ -64,6 +77,9 @@ CONFIGS = {
     "vec1": {"mode": "vectorized", "threads": 1},
     "vec4": {"mode": "vectorized", "threads": 4},
     "vec8": {"mode": "vectorized", "threads": 8},
+    "vec1n": {"mode": "vectorized", "threads": 1, "native": True},
+    "vec4n": {"mode": "vectorized", "threads": 4, "native": True},
+    "vec8n": {"mode": "vectorized", "threads": 8, "native": True},
     "vec4_merge": {"mode": "vectorized", "threads": 4, "join": "merge"},
     "vec1_merge": {"mode": "vectorized", "threads": 1, "join": "merge"},
     "vec1_noopt": {"mode": "vectorized", "threads": 1, "optimize": False},
@@ -75,8 +91,8 @@ FLOAT_REL_TOL = 1e-9
 
 
 class Session:
-    def __init__(self, engine: str, data_dir: str):
-        self.proc = subprocess.Popen([engine, "session", "--data-dir", data_dir],
+    def __init__(self, engine: str, data_dir: str, extra_args=()):
+        self.proc = subprocess.Popen([engine, "session", "--data-dir", data_dir, *extra_args],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
     def request(self, req: dict) -> dict:
@@ -119,11 +135,13 @@ def main() -> int:
     ap.add_argument("--configs", default="row,vec1,vec4")
     ap.add_argument("--queries", default=None)
     ap.add_argument("--json", default=None)
+    ap.add_argument("--native", default=None, help="path of libpqkernels (for the native configs)")
     args = ap.parse_args()
 
     configs = args.configs.split(",")
     queries = args.queries.split(",") if args.queries else list(QUERIES)
-    s = Session(args.engine, args.data)
+    s = Session(args.engine, args.data,
+                ["--native-kernels", args.native] if args.native else [])
     t0 = time.monotonic()
     for name, base in TABLES.items():
         schema = json.load(open(f"{args.data}/{base}.schema.json"))

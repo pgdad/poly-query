@@ -19,7 +19,11 @@ vectorized batch executor over typed column vectors, morsel-driven parallel
 scans, aggregation, DISTINCT and sorting, hash / sort-merge / nested-loop
 joins selectable per query, and a switchable logical optimizer (constant
 folding, predicate simplification, predicate pushdown, join reordering,
-column pruning, top-N).
+column pruning, top-N); and the M9 native kernel integration: the
+`libpqkernels` library (`native-kernels/`) is loaded through SBCL's FFI
+(`sb-alien`) with `--native-kernels PATH` and used for filtering,
+aggregation, bitmap and hashing work of queries run with `native: true`
+(see *Native kernels*).
 
 ## Build prerequisites
 
@@ -43,12 +47,14 @@ SBCL's runtime does not interpret any command-line arguments; the heap
 
 ## Libraries
 
-None. Only ANSI Common Lisp, SBCL extensions (`sb-ext`, `sb-sys`, `sb-int`,
-`sb-impl`, `sb-kernel`, `sb-thread`, `sb-unix`) and the bundled
+None. Only ANSI Common Lisp, SBCL extensions (`sb-ext`, `sb-sys`, `sb-alien`,
+`sb-int`, `sb-impl`, `sb-kernel`, `sb-thread`, `sb-unix`) and the bundled
 `asdf`/`uiop`/`sb-posix`/`sb-bsd-sockets`/`sb-rt` contribs are used (`ENGINE.json` lists
 no libraries). `sb-posix` provides `mmap`, `fsync`, `rename` and `fstat`;
 `sb-bsd-sockets` provides TCP sockets; threads, mutexes and condition
-variables come from `sb-thread`.
+variables come from `sb-thread`; `sb-alien` is the FFI to the workspace's
+own optional kernel library `libpqkernels` (built separately with
+`make -C native-kernels`, loaded at run time, never linked into the build).
 
 ## Capabilities
 
@@ -57,8 +63,7 @@ variables come from `sb-thread`.
 `sql.subquery`, `sql.cte`, `sql.correlated_subquery`, `phase3`,
 `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`, `phase4`,
 `http.streaming`, `phase5`, `exec.row`, `exec.vectorized`, `exec.parallel`,
-`join.hash`, `join.merge`, `join.nested_loop`. (`native.kernels` is not
-claimed: `native: true` is accepted and has no effect, see Phase 5 below.)
+`join.hash`, `join.merge`, `join.nested_loop`, `native.kernels`.
 
 ## Architecture
 
@@ -83,7 +88,8 @@ SQL text --lexer--> tokens --parser--> AST --binder--> BOUND-QUERY
 | sql | `lexer`, `ast`, `parser` | tokenizer with line/column positions; AST structures; recursive-descent parser for the full grammar of `grammar.md` (`PARSE_ERROR` carries `details.line`/`column`) |
 | analyzer | `bound`, `functions`, `binder`, `query` | semantic validation. `bound`: bound expression nodes and the analysed-query representation; `functions`: the scalar function registry (typing + implementation per function); `binder`: expressions — name resolution through nested scopes, typing, implicit promotions, CASE/LIKE/BETWEEN/IN, subqueries; `query`: CTEs, FROM/joins/derived tables, `*` expansion, output naming, GROUP BY alias/ordinal resolution, the structural grouping rewrite, HAVING, DISTINCT, ORDER BY resolution, constant LIMIT/OFFSET |
 | plan | `logical`, `optimizer`, `access`, `physical` | logical plan construction (`Scan`, `Values`, `Filter`, `Join`, `Aggregate`, `Project`, `Distinct`, `Sort`, `Limit`); logical rewrites (predicate pushdown, column pruning); access paths (predicate analysis, selectivity and cardinality estimates, index choice, segment skipping); physical operator selection and EXPLAIN JSON rendering |
-| exec | `context`, `expressions`, `aggregates`, `operators`, `vectors`, `vexpressions`, `keytable`, `vaggregates`, `voperators`, `parallel` | query context (deadline, cancellation flag, memory budget, join row limit, cleanups) and execution options; expression compiler to closures (incl. subquery evaluation); aggregate accumulators; Volcano-style row operators. Vectorized executor: typed column vectors and batches; vector kernels; hash table of key tuples; columnar mergeable aggregate states; batch operators; morsel-driven parallelism |
+| native | `kernels` | FFI bindings to `libpqkernels` (`sb-alien`): run-time loading, ABI check, entry points, array-level wrappers |
+| exec | `context`, `expressions`, `aggregates`, `operators`, `vectors`, `vexpressions`, `keytable`, `vaggregates`, `vnative`, `voperators`, `parallel` | query context (deadline, cancellation flag, memory budget, join row limit, cleanups) and execution options; expression compiler to closures (incl. subquery evaluation); aggregate accumulators; Volcano-style row operators. Vectorized executor: typed column vectors and batches; vector kernels; hash table of key tuples; columnar mergeable aggregate states; native-kernel predicates, filters and lazy scan batches; batch operators; morsel-driven parallelism |
 | protocol | `requests`, `cli` | JSON-lines request dispatch (`query`, `explain`, catalog ops), validation and responses, structured logging; CLI modes `version`, `capabilities`, `session`, `exec`, `serve` |
 | server | `http`, `scheduler`, `metrics`, `server` | HTTP/1.1 message parsing and response writing; admission control (worker pool, bounded queue, query registry, timeouts, cancellation, bounded streaming channel); Prometheus counters; routing, endpoint handlers, connection threads, listener and graceful shutdown |
 
@@ -295,7 +301,7 @@ summation order, which functions.md leaves implementation-defined):
 | `threads: N` | morsel-driven parallelism of the vectorized executor (scans, filters, projections, hash-join probes, aggregation, DISTINCT, sorting); default: the `--threads` command line option of `session`/`exec`/`serve`, else 1 |
 | `join: "hash"` / `"merge"` / `"nested_loop"` | forces the algorithm of every equi-join (`HashJoin`, `MergeJoin`, `NestedLoopJoin` in EXPLAIN); joins without an equality conjunct are always nested loops. `auto` = hash join (linear in both inputs; no operator produces sorted output a merge join could exploit) |
 | `optimize: false` | disables constant folding, predicate simplification, predicate pushdown and join reordering. Column pruning stays on: Phase 3 requires pruned scans and the engine guarantees unreferenced expressions are not evaluated |
-| `native: true` | accepted; no native kernel library is loaded, so the Lisp kernels run |
+| `native: true` | the vectorized executor uses the native kernels of `libpqkernels` when the library was loaded with `--native-kernels` (see *Native kernels*); otherwise, and in `mode: "row"`, the Lisp code runs |
 
 **Vectorized executor.** Operators exchange *batches* of up to 2048 rows
 (small enough to stay in L1/L2) holding one *vector* per column. Vectors are
@@ -437,6 +443,110 @@ rows are rendered into a reusable character buffer instead of through
 is collected once so later queries do not repeatedly promote it.
 
 **Measurements.** See *Performance* below.
+
+### Native kernels (M9)
+
+**Loading** (`src/native/kernels.lisp`). `--native-kernels PATH` (in
+`session`, `exec` and `serve`) loads the library once at startup with
+`sb-alien:load-shared-object` (`:dont-save`), resolves every kernel's entry
+point with `sb-sys:find-foreign-symbol-address`, checks
+`pqk_abi_version() = 1` and calls `pqk_init` (CPU dispatch, honouring
+`PQ_KERNELS_VARIANT`). Failures leave the engine without native kernels
+(see *Execution options*).
+
+**FFI design.**
+* `define-native-function` binds each C function as a global holding its
+  resolved address plus an inline Lisp wrapper
+  `(alien-funcall (sap-alien (int-sap address) (function result args...)) ...)`.
+  With a constant function type SBCL compiles this into a direct `CALL`
+  with register arguments: no marshalling, no allocation, about 5 ns per
+  call including pinning (measured with one-row calls). Nothing references the library at build time (no `extern-alien`), so
+  `make build` does not need it and the executable has no link dependency.
+* Data is passed in place, never converted: Lisp specialized arrays are
+  pinned (`sb-sys:with-pinned-objects`) and their data pointers
+  (`sb-sys:vector-sap`) passed. INT64/DECIMAL/DATE/TIMESTAMP vectors are
+  `(signed-byte 64)` arrays and FLOAT64 vectors `double-float` arrays, i.e.
+  the C arrays; validity bitmaps are `simple-bit-vector`s, whose storage on
+  little-endian machines is exactly the ABI's LSB-first layout (bit vectors
+  are allocated in whole words, so a kernel writing `ceil(n/8)` bytes stays
+  inside); selections and group ids are `(unsigned-byte 32)` arrays. Data
+  pointers can carry an element offset, so kernels read slices of column
+  stores without copying them. Scalar outputs (sums, extremes) go through
+  small stack-allocated arrays.
+* Kernels are thread-safe after `pqk_init` and do not allocate, so the
+  workers of parallel queries call them concurrently.
+* Whether a statement uses kernels is decided when it is compiled
+  (`native-kernels-enabled-p`: library loaded and `native: true`) and
+  captured in the compiled operators, key tables and aggregate states, so
+  parallel workers and later batches see the same choice.
+
+**Where the kernels are used** (vectorized executor):
+
+| work | kernels | code |
+|---|---|---|
+| filter conjuncts `x op c`, `c op x`, `x BETWEEN c1 AND c2` (x INT64, DECIMAL, DATE, TIMESTAMP) | `pqk_filter_i64` (a filter whose only conjunct this is: selection vector directly), else `pqk_filter_i64_bitmap` | `vnative.lisp` |
+| `x IN (c1, …, ck)` (k ≤ 16, no NULL item) | `pqk_filter_i64_bitmap` per value, `pqk_bitmap_or` | `vnative.lisp` |
+| `x op y` (two INT64-like operands of the same representation) | `pqk_compare_i64`, `pqk_bitmap_and` with both validities | `vnative.lisp` |
+| `x IS [NOT] NULL` (INT64-like or FLOAT64 x) | validity bitmap, `pqk_bitmap_andnot` | `vnative.lisp` |
+| NOT / AND / OR of the above; combining a filter's conjuncts | `pqk_bitmap_and`, `pqk_bitmap_or`, `pqk_bitmap_andnot` | `vnative.lisp` |
+| copying the rows a filter keeps | `pqk_gather_i64` (INT64-like and FLOAT64 columns, from batches or straight from column stores) | `vnative.lisp` |
+| SUM / AVG of INT64 or DECIMAL with GROUP BY | `pqk_group_sum_i64` | `vaggregates.lisp` |
+| SUM / AVG / COUNT(x) without GROUP BY | `pqk_sum_i64`, `pqk_bitmap_popcount` | `vaggregates.lisp` |
+| MIN / MAX without GROUP BY | `pqk_minmax_i64`, `pqk_minmax_f64` | `vaggregates.lisp` |
+| hashing INT64-like keys: GROUP BY, DISTINCT, hash-join build and probe | `pqk_hash_i64` (the murmur3 finalizer the Lisp hash uses, so tables are identical) | `keytable.lisp` |
+
+Not used: `pqk_sum_f64` (it reassociates additions, so a FLOAT64 sum could
+differ in the last bits from the Lisp sequential sum, and results must be
+identical), `pqk_compare_fixed` (strings are Lisp character strings, not
+fixed-width byte records; the engine has no fixed-width byte keys) and
+`pqk_count_i64` (filters need the rows, not only their number; it is bound
+and unit-tested). A filter's other conjuncts (strings, LIKE, arithmetic,
+functions, ...), grouped MIN/MAX/COUNT, FLOAT64 sums, multi-column and
+string keys keep their Lisp kernels.
+
+**Fused scans.** A native Filter directly above a TableScan, and an
+aggregation without GROUP BY whose arguments are plain columns (or
+`COUNT(*)`) directly above a TableScan, read *lazy batches* — a segment and
+a row range, without column vectors (also per morsel in parallel
+pipelines). The kernels then run on the column stores in place (data
+pointer plus element offset); a filter copies out only the rows that pass
+and an aggregation copies nothing. Without this, the scan's copies of all
+scanned rows dominated: e.g. 88% of a native `SUM`/`MIN`/`COUNT` query was
+`subseq`. Row-layout segments, non-integer stores and operands that are not
+plain columns materialize the batch as usual.
+
+**Identical results.**
+* Only conjuncts that cannot fail (`may-fail-p`) and precede the first one
+  that may fail are evaluated natively; the other conjuncts run afterwards
+  on exactly the rows where the row executor evaluates them (all rows where
+  no native conjunct is FALSE when they may fail), under the same
+  row-order error guard. So errors are those of the Lisp executor.
+* Constants are converted with the comparison normalizers of the Lisp
+  comparison kernels (DECIMAL rescaling, DATE→TIMESTAMP) and must be exact
+  INT64 values in the operand's representation; anything else (FLOAT64
+  comparisons, mixed INT64/DECIMAL that may overflow, NULL constants) stays
+  in Lisp. Native predicates return two bitmaps — rows where they are TRUE
+  and rows where they are not NULL — so NOT/AND/OR keep SQL's three-valued
+  logic.
+* Integer sums honour the kernels' overflow flags exactly. `pqk_sum_i64`
+  reporting `PQK_OVERFLOW` makes the batch be summed again with Lisp's
+  unbounded integers (an intermediate overflow that cancels out is no
+  error; the final range check is unchanged). `pqk_group_sum_i64`
+  accumulates into per-group int64 arrays next to the exact Lisp sums; when
+  it reports a (possible) wrap, the batch's wrapping additions are undone
+  (subtracting the same values with wrapping arithmetic restores the
+  previous exact sums, since the kernel adds every valid row) and the batch
+  is added exactly to the Lisp sums instead. A group's sum is the exact sum
+  of both parts, range checked when the result is produced, as before.
+* MIN/MAX kernels return the first of equal extremes in row order, as the
+  Lisp loop does (also for FLOAT64 `0.0`/`-0.0`; FLOAT64 values are never
+  NaN, types.md §1).
+* Checked by the conformance suite with `--native` (alone and with
+  `--modes`) under every kernel variant (`PQ_KERNELS_VARIANT=reference`,
+  `scalar`, `avx2`, `avx512`), unit tests of every wrapper and of the
+  overflow recovery, and `bench/fuzz.py --native`, which requires native
+  results to be byte-identical to non-native ones (same rows, same order)
+  for serial runs.
 
 ### Extensibility notes
 
@@ -622,9 +732,19 @@ is collected once so later queries do not repeatedly promote it.
   predicate pushdown and join reordering, but not column pruning (Phase 3's
   scan-column contract) and not index selection for a filter directly over
   a scan (`use_indexes` controls that).
-* `native: true` is accepted and validated (boolean) but has no effect: no
-  native kernel library exists in this workspace, and `native.kernels` is
-  not claimed.
+* `native: true` uses the native kernels in the vectorized executor
+  (`auto`/`vectorized`) when `--native-kernels` loaded the library; with
+  `mode: "row"` it has no effect (row mode stays the pure-Lisp baseline),
+  and without the library the Lisp code paths run (identical results).
+  `native.kernels` is claimed unconditionally: the option is always
+  supported and results never depend on the library.
+* `--native-kernels PATH` that cannot be used (missing file, not a shared
+  object, missing entry point, ABI version other than 1) is logged at
+  `warn` and the engine continues without native kernels (they are
+  optional); it is not a usage error. A successful load is logged at
+  `info` with the selected variant. `PQ_KERNELS_VARIANT` selects the
+  variant (handled by `pqk_init`). Query responses of statements that ran
+  with native kernels carry the variant in `stats.native_kernels`.
 * Invalid option values: unknown `mode`/`join` strings and `threads` < 1 are
   `UNSUPPORTED`; ill-typed values are `INVALID_REQUEST` (also for
   `explain`).
@@ -722,6 +842,81 @@ dropped from about 21 ms to 10 ms (buffered serialization without
 removed sporadic 80–180 ms GC pauses from later queries (it adds about
 0.2–0.5 s to such loads).
 
+### Native kernels: before/after (`native: true`)
+
+`bench/bench.py --native native-kernels/build/x86_64/libpqkernels.so`
+(median of 7 runs; same machine, data and method as above; the AVX-512
+variant `x86_avx512` was selected). `vecN` = `mode: "vectorized"`,
+`threads: N`; `vecNn` = the same with `native: true`. Every configuration
+returned the same rows. Queries q18–q23 were added for M9 (integer, date
+and NULL predicates, IN lists, global aggregates of columns). Times in ms.
+
+| query | vec1 | vec1n | vec4 | vec4n | vec8 | vec8n | vec1/vec1n | vec8/vec8n |
+|---|---|---|---|---|---|---|---|---|
+| q1_filter_count | 14 | 2.4 | 7.1 | 0.9 | 5.9 | 0.8 | 5.9× | 7.3× |
+| q2_group_low | 31 | 28 | 9.7 | 8.5 | 6.4 | 5.7 | 1.1× | 1.1× |
+| q3_group_high | 31 | 32 | 33 | 35 | 33 | 39 | 1.0× | 0.8× |
+| q4_join_agg | 90 | 79 | 27 | 28 | 17 | 18 | 1.1× | 0.9× |
+| q5_topn | 10 | 11 | 5.3 | 5.1 | 4.8 | 4.8 | 1.0× | 1.0× |
+| q6_float_agg | 22 | 27 | 8.0 | 8.5 | 6.5 | 7.6 | 0.8× | 0.9× |
+| q7_join3 | 39 | 39 | 17 | 19 | 16 | 16 | 1.0× | 1.0× |
+| q8_count_distinct | 32 | 32 | 16 | 16 | 15 | 15 | 1.0× | 1.0× |
+| q9_project | 20 | 12 | 15 | 11 | 15 | 11 | 1.6× | 1.3× |
+| q10_nulls | 56 | 50 | 15 | 15 | 9.1 | 9.0 | 1.1× | 1.0× |
+| q11_case_expr | 49 | 48 | 17 | 17 | 12 | 11 | 1.0× | 1.0× |
+| q12_sort | 13 | 13 | 10 | 9.7 | 10 | 10 | 1.0× | 1.0× |
+| q13_left_join | 33 | 29 | 18 | 15 | 24 | 16 | 1.1× | 1.5× |
+| q14_distinct | 43 | 42 | 12 | 12 | 6.9 | 7.5 | 1.0× | 0.9× |
+| q15_comma_join | 7.9 | 7.5 | 3.5 | 3.1 | 2.8 | 2.9 | 1.0× | 1.0× |
+| q16_full_sort | 413 | 450 | 156 | 185 | 123 | 124 | 0.9× | 1.0× |
+| q17_scan_filter | 26 | 11 | 11 | 7.3 | 11 | 9.7 | 2.2× | 1.2× |
+| q18_global_agg | 16 | 1.1 | 5.2 | 0.5 | 3.9 | 0.3 | 14.5× | 11.3× |
+| q19_range_filter | 32 | 3.3 | 13 | 1.5 | 9.2 | 1.5 | 9.8× | 6.2× |
+| q20_in_list | 23 | 0.8 | 8.8 | 0.5 | 6.1 | 0.6 | 27.3× | 11.1× |
+| q21_date_range | 5.1 | 0.8 | 2.0 | 0.5 | 1.6 | 0.4 | 6.1× | 4.2× |
+| q22_null_filter | 15 | 0.5 | 7.0 | 0.5 | 6.6 | 0.6 | 31.2× | 11.0× |
+| q23_float_minmax | 8.2 | 0.9 | 3.1 | 0.3 | 2.9 | 0.3 | 8.7× | 9.8× |
+
+Observations:
+* Selective integer/date predicates and column aggregates gain the most
+  (6–31× serial): the fused scans run the kernels on the column stores and
+  copy only surviving rows (or nothing), so the 1M-row scans drop from
+  5–32 ms to 0.5–3 ms. With the kernels, one thread is often faster than
+  eight threads without them, and parallel runs end up bounded by the fixed
+  costs of a query (planning, thread start, result rendering).
+* Mixed filters gain less: q17 (`LIKE` on a string plus `fee < 5`) and q9
+  (`bucket < 50`, 50k result rows to serialize) still do Lisp work per
+  surviving row; q1 evaluates its string conjunct only on the rows passing
+  `amount > 1000`.
+* Queries dominated by hash tables of string or multi-column keys, joins,
+  sorting, FLOAT64 sums, grouped MIN/MAX or JSON output (q2–q8, q10–q16)
+  are unchanged within the run-to-run noise (about ±10% here; for example
+  q6 and q16 measured 20/21 ms and 466/482 ms in a 15-run rerun).
+  Native group sums and key hashing do run there (q3, q4, q6, q7), but
+  probing hash tables, not summing or hashing, is their cost.
+
+**Kernel micro-benchmark** (`bench/kernels.lisp LIB 2048`: per-row cost on
+2048-row batches, the executor's batch size, of the engine's Lisp loop
+versus the FFI wrapper including the call overhead):
+
+| operation | Lisp ns/row | native ns/row | speed-up |
+|---|---|---|---|
+| filter x > c → selection (10%) | 0.193 | 0.070 | 2.8× |
+| filter x > c → bitmap | 0.835 | 0.033 | 25.7× |
+| exact SUM with validity | 1.933 | 0.038 | 51.5× |
+| MIN/MAX | 0.533 | 0.045 | 11.8× |
+| COUNT(x) (popcount of validity) | 0.005 | 0.003 | 2.0× |
+| hash (murmur3 fmix64) | 0.815 | 0.063 | 13.0× |
+| grouped SUM, 1024 groups (aggregate state) | 1.988 | 0.465 | 4.3× |
+| gather by selection | 0.323 | 0.158 | 2.0× |
+| compare x < y → bitmap | 0.888 | 0.053 | 16.9× |
+
+The exact Lisp SUM is slow because it accumulates in a generic integer
+(bignum-safe); the kernel sums in int64 with an overflow flag and only the
+rare overflowing batch is re-summed in Lisp. The library's own C benchmark
+(`native-kernels/build/x86_64/kernel_bench`, 4M-element arrays) shows the
+same kernels at 0.15–0.5 ns/element in the AVX2/AVX-512 variants.
+
 ## Testing
 
 * `make test` — unit tests (sb-rt) for numeric parsing/formatting, temporal
@@ -757,7 +952,30 @@ removed sporadic 80–180 ms GC pauses from later queries (it adds about
   during development (it found and fixed a CASE alignment bug and a
   lock-reacquisition bug after timed condition waits).
 * `bench/bench.py` — benchmark and consistency check on generated datasets
-  (see Performance); `bench/profile.lisp` — statistical profile of one query.
+  (see Performance); `bench/profile.lisp` — statistical profile of one query
+  (`POLYQUERY_NATIVE_KERNELS=LIB` runs it with native kernels);
+  `bench/kernels.lisp` — Lisp-versus-native kernel micro-benchmark.
+* Native kernels (`tests/test-native.lisp`, part of `make test`; the library
+  is taken from `$POLYQUERY_NATIVE_KERNELS` or
+  `native-kernels/build/x86_64/`, and the tests are skipped without it):
+  every FFI wrapper against Lisp reference computations (all operators,
+  validity bitmaps, sizes 0–2048, bitmap layout), sum overflow detection,
+  the group-sum overflow recovery, and queries (filters of every native
+  form, mixed native/Lisp conjuncts, conjuncts that may fail, global and
+  grouped aggregates with intermediate int64 overflow, -0.0, joins,
+  DISTINCT) that must give exactly the results of `native: false`, in
+  parallel too, and of row mode.
+* Native conformance: `python3 tests/conformance/runner.py --engine
+  implementations/common-lisp/bin/polyquery --native
+  native-kernels/build/x86_64/libpqkernels.so` (also with `--modes`, with
+  `--transport http`, and under `PQ_KERNELS_VARIANT=reference|scalar|avx2|avx512`).
+* `bench/fuzz.py --native LIB` adds a `native: true` twin of every
+  vectorized configuration; serial twins must return byte-identical
+  results (same rows, order and floats), parallel ones the same rows in the
+  same order with floats within the tolerance (parallel FLOAT64 summation
+  order varies between runs). About 10,000 random queries were run this way
+  with `POLYQUERY_MORSEL_ROWS=37` (morsels not aligned to bytes of the
+  validity bitmaps) without a native/non-native difference.
 * HTTP: `python3 tests/concurrency/http_suite.py --engine
   implementations/common-lisp/bin/polyquery` and the conformance runner with
   `--transport http`.
@@ -771,9 +989,22 @@ removed sporadic 80–180 ms GC pauses from later queries (it adds about
 
 ## Known limitations
 
-* No native kernels are loaded (`libpqkernels` is not built here, and
-  `--native-kernels` is accepted but ignored), so `native: true` runs the Lisp
-  kernels; `native.kernels` is not claimed.
+* Native kernels cover integer-like predicates, integer sums, global
+  MIN/MAX/COUNT and integer key hashing (see *Native kernels*). FLOAT64
+  predicates and sums, strings, grouped MIN/MAX, and filters/aggregates in
+  `mode: "row"` keep their Lisp code. Fused (copy-free) scans apply only
+  to a filter or a global aggregation directly above a TableScan; grouped
+  aggregations and joins still read copied batches.
+* The library is loaded once at startup; a library that fails to load
+  only produces a warning (queries then run without it).
+* Predicate pushdown (`optimize: true`) evaluates a single-table conjunct on
+  every row of that table, also rows a join would later discard. A conjunct
+  that fails on such a row (e.g. a constant `CAST('a' AS INT64)` combined
+  with a join that produces no rows) therefore raises an error with
+  pushdown and not without it. The spec does not define evaluation order
+  for errors; pushdown is kept for all conjuncts because arithmetic (which
+  may overflow) is common in single-table filters. This is independent of
+  native kernels (found by `bench/fuzz.py`).
 * `threads` parallelizes the vectorized executor only; `mode: row` is the
   single-threaded baseline. Pipelines containing subqueries, and everything
   inside subqueries, run serially. The final merge of partial aggregates is

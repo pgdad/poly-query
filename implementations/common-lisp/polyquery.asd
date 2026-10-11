@@ -48,6 +48,8 @@
                  (:file "optimizer")
                  (:file "access")
                  (:file "physical")))
+   (:module "native" :serial t
+    :components ((:file "kernels")))
    (:module "exec" :serial t
     :components ((:file "expressions")
                  (:file "aggregates")
@@ -56,6 +58,7 @@
                  (:file "vexpressions")
                  (:file "keytable")
                  (:file "vaggregates")
+                 (:file "vnative")
                  (:file "voperators")
                  (:file "parallel")))
    (:file "engine")
@@ -84,7 +87,8 @@
                (:file "test-query")
                (:file "test-storage")
                (:file "test-server")
-               (:file "test-phase5"))
+               (:file "test-phase5")
+               (:file "test-native"))
   :perform (test-op (o c)
              (unless (uiop:symbol-call '#:polyquery-tests '#:run-all-tests)
                (error "unit tests failed"))))

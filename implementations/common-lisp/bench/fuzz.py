@@ -9,6 +9,14 @@ Tables are also saved as multi-row-group PQCF files and reopened, and loaded
 in the row layout, so every storage path is exercised.
 
   POLYQUERY_MORSEL_ROWS=37 bench/fuzz.py --engine bin/polyquery --count 2000 --seed 1
+
+With --native LIB the engine loads the native kernel library and every
+vectorized configuration also runs with `native: true`; with threads: 1
+those results must be *exactly* equal (same rows in the same order, same
+floats) to the results of the same configuration without native kernels.
+(Parallel runs sum floats in an order that varies from run to run, so
+there the rows must be in the same order with floats equal up to the
+tolerance.)
 """
 from __future__ import annotations
 
@@ -41,8 +49,8 @@ TABLES = {
 
 
 class Session:
-    def __init__(self, engine: str, data_dir: str):
-        self.proc = subprocess.Popen([engine, "session", "--data-dir", data_dir],
+    def __init__(self, engine: str, data_dir: str, extra_args=()):
+        self.proc = subprocess.Popen([engine, "session", "--data-dir", data_dir, *extra_args],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, cwd=data_dir)
 
     def request(self, req: dict) -> dict:
@@ -286,10 +294,19 @@ def main() -> int:
     ap.add_argument("--count", type=int, default=500)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--native", metavar="LIBPQKERNELS", help="also run vectorized configurations with native: true")
     args = ap.parse_args()
     tmp = tempfile.mkdtemp(prefix="pqfuzz-")
     os.symlink(FIXTURES, f"{tmp}/fixtures")
-    s = Session(os.path.abspath(args.engine), tmp)
+    configs = list(CONFIGS)
+    twins = {}                       # index of a native config -> index of its non-native twin
+    if args.native:
+        for k, cfg in enumerate(CONFIGS):
+            if cfg["mode"] == "vectorized":
+                twins[len(configs)] = k
+                configs.append({**cfg, "native": True})
+    s = Session(os.path.abspath(args.engine), tmp,
+                ["--native-kernels", os.path.abspath(args.native)] if args.native else [])
     schemas = {}
     for name, base in TABLES.items():
         schema = json.load(open(FIXTURES / "gen" / f"{base}.schema.json"))
@@ -348,7 +365,7 @@ def main() -> int:
             sql = sql[1]
         ran += 1
         outs = []
-        for cfg in CONFIGS:
+        for cfg in configs:
             r = s.request({"op": "query", "sql": sql, "options": cfg})
             outs.append(("ok", r["rows"]) if r["ok"] else ("error", r["error"]["code"]))
         ref = outs[0]
@@ -356,7 +373,20 @@ def main() -> int:
             errors += 1
             if ref[1] == "INTERNAL_ERROR":
                 print("INTERNAL_ERROR (row):", sql)
-        for cfg, o in zip(CONFIGS[1:], outs[1:]):
+        for k, twin in twins.items():
+            a, b = outs[k], outs[twin]
+            if configs[k]["threads"] == 1:
+                same = a == b
+            else:
+                same = a[0] == b[0] and (a[1] == b[1] if a[0] == "error" else
+                                         len(a[1]) == len(b[1]) and
+                                         all(same_rows([x], [y]) for x, y in zip(a[1], b[1])))
+            if not same:
+                bad += 1
+                print(f"NATIVE MISMATCH {configs[k]}: {sql}")
+                print("   plain: ", str(outs[twin])[:300])
+                print("   native:", str(outs[k])[:300])
+        for cfg, o in zip(configs[1:], outs[1:]):
             ok = (o[0] == ref[0] and (o[1] == ref[1] if o[0] == "error" else same_rows(o[1], ref[1])))
             if ok and ordered and o[0] == "ok":
                 ok = all(same_rows([x], [y]) for x, y in zip(o[1], ref[1]))

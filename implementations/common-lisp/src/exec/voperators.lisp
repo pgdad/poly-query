@@ -51,10 +51,11 @@
                  (or (zerop (segment-count seg)) (and skip-p (funcall skip-p seg))))
                (coerce (table-segments (pp-table-scan-table node)) 'list))))
 
-(defun make-batch-scan (node &key ranges)
+(defun make-batch-scan (node &key ranges lazy)
   "Batch opener of a TableScan. RANGES, when given, is a function returning
 the next (segment start end) range to read or NIL (parallel morsels);
-otherwise all unskipped segments are read in order."
+otherwise all unskipped segments are read in order. With LAZY, batches of
+column-layout segments are lazy (see SCAN-SOURCE)."
   (let ((column-indexes (pp-table-scan-column-indexes node))
         (kinds (output-kinds node)))
     (lambda ()
@@ -78,7 +79,9 @@ otherwise all unskipped segments are read in order."
           (loop
             (when (< pos end)
               (let ((stop (min end (+ pos +batch-size+))))
-                (return (prog1 (segment-batch seg column-indexes kinds pos stop)
+                (return (prog1 (if (and lazy (null (segment-rows seg)))
+                                   (make-lazy-scan-batch seg column-indexes kinds pos stop)
+                                   (segment-batch seg column-indexes kinds pos stop))
                           (setf pos stop)))))
             (let ((range (funcall next-range)))
               (unless range (return nil))
@@ -130,9 +133,14 @@ by the first error of evaluating EXPRS row by row over BATCH."
 ;;; Filter, projection, limit
 
 (defun make-batch-filter (open-child predicate)
-  (let ((kernel (compile-vexpr predicate))
-        (guard (make-row-order-guard (list predicate))))
-    (declare (type function open-child kernel guard))
+  (let ((filter (or (and (native-kernels-enabled-p) (compile-native-filter predicate))
+                    (let ((kernel (compile-vexpr predicate))
+                          (guard (make-row-order-guard (list predicate))))
+                      (declare (type function kernel guard))
+                      (lambda (batch)
+                        (filter-batch batch (funcall guard batch
+                                                     (lambda () (funcall kernel batch)))))))))
+    (declare (type function open-child filter))
     (lambda ()
       (let ((child (funcall open-child)))
         (declare (type function child))
@@ -140,14 +148,15 @@ by the first error of evaluating EXPRS row by row over BATCH."
           (loop
             (let ((batch (funcall child)))
               (unless batch (return nil))
-              (let ((out (filter-batch batch (funcall guard batch
-                                                      (lambda () (funcall kernel batch))))))
+              (let ((out (funcall filter batch)))
                 (when out (return out))))))))))
 
 (defmethod compile-batch-operator ((node pp-filter))
-  (if (never-true-p (pp-filter-predicate node))
-      (lambda () (lambda () nil))
-      (make-batch-filter (compile-batch-operator (pnode-child node)) (pp-filter-predicate node))))
+  (let ((child (pnode-child node))
+        (predicate (pp-filter-predicate node)))
+    (cond ((never-true-p predicate) (lambda () (lambda () nil)))
+          ((and (pp-table-scan-p child) (make-native-scan-filter child predicate)))
+          (t (make-batch-filter (compile-batch-operator child) predicate)))))
 
 (defun make-batch-project (open-child exprs)
   (let ((kernels (map 'simple-vector #'compile-vexpr exprs))
@@ -212,10 +221,11 @@ by the first error of evaluating EXPRS row by row over BATCH."
 ;;; Aggregation
 
 (defun make-aggregate-consumer (node &key track-positions)
-  "(values new-state consume) for vectorized aggregation of NODE: NEW-STATE
-creates an empty GROUP-STATE, (CONSUME state batch [base]) aggregates one
-input batch (whose first row has input position BASE) into it. Kernels are
-compiled once per call."
+  "(values new-state consume lazy) for vectorized aggregation of NODE:
+NEW-STATE creates an empty GROUP-STATE, (CONSUME state batch [base])
+aggregates one input batch (whose first row has input position BASE) into
+it; LAZY is true when CONSUME also accepts lazy scan batches (native
+kernels, see GROUP-STATE-CONSUME-LAZY). Kernels are compiled once per call."
   (let* ((keys (pp-hash-aggregate-group-by node))
          (aggs (pp-hash-aggregate-aggregates node))
          (key-kernels (mapcar #'compile-vexpr keys))
@@ -223,24 +233,33 @@ compiled once per call."
                               aggs))
          (nkeys (length keys))
          (key-kinds (mapcar (lambda (k) (type-vec-kind (bexpr-type k))) keys))
+         (native (native-kernels-enabled-p))
+         (lazy-columns nil)
+         (lazy (and native
+                    (multiple-value-bind (ok columns) (lazy-aggregation-columns keys aggs)
+                      (setf lazy-columns columns)
+                      ok)))
          (guard (make-row-order-guard (append keys (mapcan (lambda (a) (copy-list (b-agg-args a)))
                                                            aggs)))))
     (values
-     (lambda () (make-group-state key-kinds aggs track-positions))
+     (lambda () (make-group-state key-kinds aggs track-positions native))
      (lambda (gs batch &optional (base 0))
        (let ((n (batch-count batch)))
-         (multiple-value-bind (key-vecs arg-vecs)
-             (funcall (the function guard) batch
-                      (lambda ()
-                        (values (mapcar (lambda (k) (funcall (the function k) batch)) key-kernels)
-                                (mapcar (lambda (k) (and k (funcall (the function k) batch)))
-                                        arg-kernels))))
-           (group-state-consume gs key-vecs arg-vecs n base))
+         (if (batch-source batch)
+             (group-state-consume-lazy gs batch lazy-columns)
+             (multiple-value-bind (key-vecs arg-vecs)
+                 (funcall (the function guard) batch
+                          (lambda ()
+                            (values (mapcar (lambda (k) (funcall (the function k) batch)) key-kernels)
+                                    (mapcar (lambda (k) (and k (funcall (the function k) batch)))
+                                            arg-kernels))))
+               (group-state-consume gs key-vecs arg-vecs n base)))
          (let ((groups (group-state-count gs))
                (charged (group-state-charged gs)))
            (when (>= (- groups charged) 1024)
              (charge-memory (* (- groups charged) (row-footprint (* 4 (+ nkeys (length aggs))))))
-             (setf (group-state-charged gs) groups))))))))
+             (setf (group-state-charged gs) groups)))))
+     lazy)))
 
 (defun group-state-batches (gs node)
   "Iterator over the output batches of the finished group state GS."
@@ -257,34 +276,39 @@ compiled once per call."
           (prog1 (group-state-batch gs pos end key-kinds agg-kinds)
             (setf pos end)))))))
 
-(defun make-batch-aggregate (open-child node)
-  (declare (type function open-child))
-  (multiple-value-bind (new-state consume) (make-aggregate-consumer node)
+(defun make-batch-aggregate (child node)
+  "Batch opener of the HashAggregate NODE over its input CHILD (a plan node)."
+  (multiple-value-bind (new-state consume lazy) (make-aggregate-consumer node)
     (declare (type function new-state consume))
-    (lambda ()
-      (let ((output nil))
-        (lambda ()
-          (unless output
-            (let ((gs (funcall new-state))
-                  (child (funcall open-child)))
-              (declare (type function child))
-              (loop for batch = (funcall child)
-                    while batch
-                    do (funcall consume gs batch))
-              (setf output (group-state-batches gs node))))
-          (funcall (the function output)))))))
+    (let ((open-child (if (and lazy (pp-table-scan-p child))
+                          (make-batch-scan child :lazy t)
+                          (compile-batch-operator child))))
+      (declare (type function open-child))
+      (lambda ()
+        (let ((output nil))
+          (lambda ()
+            (unless output
+              (let ((gs (funcall new-state))
+                    (child (funcall open-child)))
+                (declare (type function child))
+                (loop for batch = (funcall child)
+                      while batch
+                      do (funcall consume gs batch))
+                (setf output (group-state-batches gs node))))
+            (funcall (the function output))))))))
 
 (defmethod compile-batch-operator ((node pp-hash-aggregate))
-  (make-batch-aggregate (compile-batch-operator (pnode-child node)) node))
+  (make-batch-aggregate (pnode-child node) node))
 
 ;;; DISTINCT streams: a row is emitted when its key tuple is seen first.
 (defmethod compile-batch-operator ((node pp-hash-distinct))
   (let ((open-child (compile-batch-operator (pnode-child node)))
-        (width (length (pnode-columns node))))
+        (width (length (pnode-columns node)))
+        (native (native-kernels-enabled-p)))
     (declare (type function open-child))
     (lambda ()
       (let ((child (funcall open-child))
-            (table (make-key-table width 16 (coerce (output-kinds node) 'list))))
+            (table (make-key-table width 16 (coerce (output-kinds node) 'list) native)))
         (declare (type function child))
         (lambda ()
           (loop
@@ -497,20 +521,21 @@ first."
 ;;; Hash join: the build rows of each key are chained in input order.
 
 (defun prepare-hash-build (kernels normalizers)
-  (lambda (batch)
-    (let* ((n (batch-count batch))
-           (table (make-key-table (length kernels) (max 16 n) (mapcar #'second normalizers)))
-           (gids (make-index-vector n))
-           (next (make-array n :element-type 'fixnum :initial-element -1)))
-      (multiple-value-bind (key-vecs null-rows) (join-key-vecs kernels normalizers batch)
-        (key-table-map-batch table key-vecs n gids t)
-        (let ((first (make-array (key-table-count table) :element-type 'fixnum :initial-element -1)))
-          (loop for i from (1- n) downto 0
-                unless (and null-rows (= 1 (sbit null-rows i)))
-                  do (let ((g (aref gids i)))
-                       (setf (aref next i) (aref first g)
-                             (aref first g) i)))
-          (make-join-build :table table :first-row first :next-row next :batch batch))))))
+  (let ((native (native-kernels-enabled-p)))
+    (lambda (batch)
+      (let* ((n (batch-count batch))
+             (table (make-key-table (length kernels) (max 16 n) (mapcar #'second normalizers) native))
+             (gids (make-index-vector n))
+             (next (make-array n :element-type 'fixnum :initial-element -1)))
+        (multiple-value-bind (key-vecs null-rows) (join-key-vecs kernels normalizers batch)
+          (key-table-map-batch table key-vecs n gids t)
+          (let ((first (make-array (key-table-count table) :element-type 'fixnum :initial-element -1)))
+            (loop for i from (1- n) downto 0
+                  unless (and null-rows (= 1 (sbit null-rows i)))
+                    do (let ((g (aref gids i)))
+                         (setf (aref next i) (aref first g)
+                               (aref first g) i)))
+            (make-join-build :table table :first-row first :next-row next :batch batch)))))))
 
 (defun make-join-build-provider (build-node open-build build-keys probe-keys)
   "Build provider of a hash join (see MAKE-BUILD-PROVIDER)."

@@ -3,6 +3,7 @@
 ;;;; sbcl --dynamic-space-size 8192 --non-interactive --load bench/profile.lisp \
 ;;;;      DATA-DIR TABLE=FILE[,TABLE=FILE...] MODE THREADS REPEAT "SQL"
 ;;;; e.g. bench/profile.lisp /tmp/pqdata/1m/ tx=transactions vectorized 1 5 "SELECT ..."
+;;;; With POLYQUERY_NATIVE_KERNELS=PATH the query runs with native: true.
 
 (require :asdf)
 (require :sb-sprof)
@@ -21,9 +22,11 @@
 
 (destructuring-bind (data-dir tables mode threads repeat sql)
     (last sb-ext:*posix-argv* 6)
-  (let ((session (make-session (make-engine-config :data-dir data-dir)))
-        (options (make-exec-options :mode (intern (string-upcase mode) :keyword)
-                                    :threads (parse-integer threads))))
+  (let* ((native (sb-posix:getenv "POLYQUERY_NATIVE_KERNELS"))
+         (session (make-session (make-engine-config :data-dir data-dir)))
+         (options (make-exec-options :mode (intern (string-upcase mode) :keyword)
+                                     :threads (parse-integer threads)
+                                     :native (and native (load-native-kernels native) t))))
     (sb-int:with-float-traps-masked (:overflow :invalid :divide-by-zero :inexact :underflow)
       (dolist (spec (split-string tables #\,))
         (destructuring-bind (name file) (split-string spec #\=)

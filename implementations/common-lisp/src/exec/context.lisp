@@ -80,7 +80,7 @@ re-acquiring the mutex). Returns true if woken up."
   (join :auto)                      ; :AUTO, :HASH, :MERGE or :NESTED-LOOP
   (optimize t)                      ; NIL disables the logical rewrites
   (use-indexes t)                   ; NIL never plans index scans
-  (native nil))                     ; native kernels requested (none are loaded)
+  (native nil))                     ; use the native kernels (when loaded)
 
 (defvar *exec-options* (make-exec-options)
   "Options of the statement being planned or compiled.")
