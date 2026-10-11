@@ -137,7 +137,7 @@ id INT64
 [1]
 [2]
 
-query ordered
+query
 SELECT a.id AS x, b.id AS y FROM bd a JOIN bd b ON a.amt = b.amt AND a.id < b.id
 ----
 x INT64 | y INT64
@@ -233,6 +233,17 @@ id INT64
 # ---- storage: v2 exactly when a wide column exists
 save bd out/bd.pqcf
 pqcf out/bd.pqcf 2
+save bd out/bd_rle.pqcf encoding=rle row_group_size=4
+pqcf out/bd_rle.pqcf 2
+
+# the file recreates index bd_amt, whose name is still taken by bd
+open bd2 out/bd.pqcf expect=ALREADY_EXISTS
+
+request
+{"op":"drop","table":"bd"}
+----
+ok
+
 open bd2 out/bd.pqcf
 
 query ordered
@@ -251,8 +262,11 @@ request
 ----
 match {"ok":true,"indexes":[{"name":"bd_amt","column":"amt","kind":"BTREE"}]}
 
-save bd out/bd_rle.pqcf encoding=rle row_group_size=4
-pqcf out/bd_rle.pqcf 2
+request
+{"op":"drop","table":"bd2"}
+----
+ok
+
 open bd3 out/bd_rle.pqcf mmap=true
 
 query ordered

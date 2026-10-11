@@ -5,7 +5,8 @@ Status: adopted for the *architectural change* experiment family (capability
 engines claiming this change: 1.2.0-cr2 (it composes with CR-1).
 
 The change raises the maximum `DECIMAL` precision from 18 to 38 digits. It is
-designed so that **every existing conformance case keeps its expected result**:
+designed so that **every existing conformance case keeps its expected result**
+(one base-suite fixture is replaced, §8):
 decimals of precision ≤ 18 ("narrow") behave exactly as before, and only
 expressions that involve a decimal of precision 19–38 ("wide") use the new
 rules. The change reaches the type system, literals, arithmetic, aggregates,
@@ -19,7 +20,8 @@ type is *narrow* if `p ≤ 18` and *wide* if `p > 18`.
 
 Aliases are unchanged (`DECIMAL` without parameters is still `DECIMAL(18,0)`).
 `p > 38`, `p < 1` or `s > p` in `CAST` or a schema ⇒ `SEMANTIC_ERROR` (CAST) /
-`INVALID_REQUEST` (load schema), as for any other invalid type.
+`INVALID_REQUEST` (load schema; this CR fixes the code, which the base spec
+leaves open for invalid schema types).
 
 ## 2. Result precision `W`
 
@@ -83,7 +85,7 @@ unchanged (the decimal is converted to the nearest FLOAT64).
   `NUMERIC_OVERFLOW` (now reachable with wide decimals).
 * DECIMAL → FLOAT64 yields the FLOAT64 nearest to the exact decimal value.
 * FLOAT64 → DECIMAL uses the exact binary value of the double, then rounds half
-  away from zero to scale `s` (e.g. `CAST(0.1 AS DECIMAL(38,30))` is
+  away from zero to scale `s` (e.g. `CAST(0.1e0 AS DECIMAL(38,30))` is
   `"0.100000000000000005551115123126"`).
 * DECIMAL → STRING: canonical text (unchanged rule, up to 38 digits).
 
