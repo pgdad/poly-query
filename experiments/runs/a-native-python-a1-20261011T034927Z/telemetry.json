@@ -1,0 +1,92 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-native-python-a1-20261011T034927Z",
+ "language": "python",
+ "task": "native",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-native",
+ "prompt_sha256": "c1413f9d1274181ef23721bbd1b89894da2e45930bccf801304d14762e636b10",
+ "session_id": "bc86dc1f-29b5-49cc-bf53-b8cdffeca5c3",
+ "tokens": {
+  "input": 322,
+  "output": 204302,
+  "cache_read": 40681735,
+  "cache_creation": 386224,
+  "thinking": null,
+  "thinking_estimated": 99902,
+  "source": "result events",
+  "api_messages": 161
+ },
+ "rate_limit": {
+  "events": 21,
+  "max_utilization": {
+   "seven_day": 0.24,
+   "five_hour": 0.41
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 15.313467000000003,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 164,
+ "result_segments": 1,
+ "assistant_messages": 360,
+ "tool_calls": {
+  "Bash": 152,
+  "Write": 7,
+  "ToolSearch": 1,
+  "Read": 3
+ },
+ "tool_calls_total": 163,
+ "tool_failures": 4,
+ "build_invocations": 28,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 6,
+ "conformance_progress": [
+  [
+   569,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   569,
+   569
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 3697.2,
+  "model_api_seconds": 1882.6,
+  "tool_seconds": 1814.7,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 10,
+  "files_changed": 18,
+  "lines_added": 2576,
+  "lines_removed": 49,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "I've integrated the native kernel library into the Python engine through `ctypes`, and every required conformance run passes at 100%, with and without the library. Everything is committed and the working tree is clean.\n\n**Test results:**\n\n| run | result |\n|---|---|\n| `--native` | 569/569 pass (phases 1, 2, 3 and 5) |\n| `--native --modes` | 3324/3324 pass |\n| `--native --transport http` | 569/569 pass |\n| without the library: session / `--transport http` / `--modes` | 569/569, 569/569, 3324/3324 pass |\n| HTTP suite | 18/18 passed |\n| `make build test` (in the workspace) | 124 tests OK |\n| `make build test` (fresh clone, no library built) | OK, 10 native tests skipped |\n\nOn top of that, a new random-query tool (`tools/native_difftest.py`) compares each query with and without `native: true`, rows in order. More than 2,500 queries, including 250 under each of the four kernel variants (reference, scalar, AVX2, AVX-512), gave no mismatch.\n\n**What it does:**\n- **Loading:** `--native-kernels PATH` loads the library and checks its ABI version. If it's missing or incompatible the engine logs a warning and runs its own code. `native.kernels` is claimed unconditionally, because the runner asks for capabilities without passing the flag.\n- **No copying:** the engine's column storage already matches the kernel ABI (64-bit integer arrays, same NULL-bitmap layout), so kernels read the stored arrays directly. Only dates and dictionary codes get a widened copy, made once per column.\n- **Filters on a table scan:** comparisons, `BETWEEN` and `IN` on integer, decimal, date and timestamp columns, `<>` and ranges on dictionary-encoded strings, and column-vs-column comparisons are all computed by kernels. Only the matching rows are ever turned into Python values; the engine evaluates any remaining conditions on those.\n- **Aggregation directly over a scan:** `COUNT`, `SUM`/`AVG` and `MIN`/`MAX` without GROUP BY, or grouped by a low-cardinality string column, are computed by kernels. Integer `COUNT`/`SUM`/`AVG` grouped by anything else use the kernels' grouped sum.\n- **Hashing:** with several threads and a large table, high-cardinality GROUP BY on an integer key is split between workers by key hash. Each worker gets disjoint groups, so merging is a concatenation.\n- **Identical results:**\n  - A kernel overflow flag means the sum is recomputed exactly in Python, or the whole aggregation reruns on the engine's own code.\n  - Float `MIN`/`MAX` results of zero are recomputed, so `0.0` vs `-0.0` matches.\n  - Conditions that could raise an error are evaluated on exactly the same rows as before.\n  - A corrupt chunk in a memory-mapped file still fails the query even if the kernels select none of its rows.\n- **Measured effect** (1m datasets, vectorized mode, ms; the shared machine had about \u00b120% noise between runs):\n\n| query | before | with `native: true` |\n|---|---:|---:|\n| Q1 (filtered `COUNT(*)`) | 104 | <1 |\n| Q2 (8-group GROUP BY) | 232 | 8 |\n| Q10 (selective filter) | 128 | 2 |\n| J2 (filter + join) | 72 | 3 |\n| Q5 (filter + `LIMIT 10`) | 131 | 34 |\n| Q3 (100k-group GROUP BY) | 215 | 83 |\n| Q7 (filter + arithmetic sum) | 192 | 103 |\n\nJoins and the full sort are unchanged. The README has the full table (also row mode, 4 threads, and the original Phase 5 engine), plus the FFI design, which kernels are used where, the exactness rules, and two kernel micro-benchmark tables.\n\n**Known limitations:**\n- No kernel applies to joins, sorts, DISTINCT, general expressions, or row-layout tables; they gain only from filtered inputs below them.\n- I deliberately don't use `pqk_sum_f64`: its result can differ in the last bit from the engine's exact float sum. `pqk_compare_fixed` has nothing to work on, since the engine has no fixed-width binary columns.\n- Native aggregations always run in a single process, because forking costs more than the whole scan. The exception is the hash-partitioned case. Whether a natively filtered pipeline forks workers uses a heuristic I tuned on th",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

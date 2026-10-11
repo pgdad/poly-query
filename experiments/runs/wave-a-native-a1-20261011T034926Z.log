@@ -17,3 +17,6 @@
 2026-10-11T04:37:38+00:00 [a-native-rust-a1-20261011T034932Z] agent finished; collecting telemetry
 2026-10-11T04:37:38+00:00 [a-native-rust-a1-20261011T034932Z] validating (clean clone, sandboxed)
 2026-10-11T04:38:03+00:00 [a-native-rust-a1-20261011T034932Z] outcome=success cost=$12.007966000000003 turns=142 wall=2859.6s
+2026-10-11T04:51:15+00:00 [a-native-python-a1-20261011T034927Z] agent finished; collecting telemetry
+2026-10-11T04:51:16+00:00 [a-native-python-a1-20261011T034927Z] validating (clean clone, sandboxed)
+2026-10-11T04:51:57+00:00 [a-native-python-a1-20261011T034927Z] outcome=success cost=$15.313467000000003 turns=164 wall=3697.2s
