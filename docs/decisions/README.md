@@ -17,3 +17,4 @@
 | [ADR-0013](ADR-0013.md) | One fresh agent session per (language, phase, attempt) |
 | [ADR-0014](ADR-0014.md) | Agent-run telemetry vs. orchestrator work |
 | [ADR-0015](ADR-0015.md) | Benchmarks run natively on the host, not in Docker |
+| [ADR-0016](ADR-0016.md) | Assembly languages: kernel experiment family now, complete engines as a separate cohort |
