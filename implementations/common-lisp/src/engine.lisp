@@ -84,7 +84,8 @@ next result row or NIL."
                  (values (list (make-column-def "plan" :string))
                          (lambda () (shiftf row nil))))
                (values (result-columns bound)
-                       (let ((*execution-settings* (physical-query-settings plan)))
+                       (let ((*execution-settings* (physical-query-settings plan))
+                             (*shared-results* (make-shared-results-table (physical-query-root plan))))
                          (funcall (the function (compile-plan (physical-query-root plan)))))))))))))
 
 (defun execute-sql (session sql &key max-rows timeout-ms (collect-rows t)

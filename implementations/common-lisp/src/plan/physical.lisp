@@ -37,7 +37,11 @@
 
 (defstruct (pnode (:constructor nil))
   (children '())
-  (columns '()))
+  (columns '())
+  ;; Set on the nodes of the plan of a CTE reference (CTE-SHARE-KEY): plans
+  ;; with EQUAL keys produce the same rows, so the executor may compute them
+  ;; once per statement.
+  (share-key nil))
 
 (defstruct (pp-table-scan (:include pnode))
   table label
@@ -210,7 +214,29 @@ residual-conjuncts); right keys index the right input."
         (lp-union-all
          (make-pp-union-all :children (mapcar #'physical-plan (lnode-children node))
                             :columns columns))
-        (lp-subquery-alias (child))))))
+        (lp-subquery-alias
+         (let ((plan (child)))
+           (when (lp-subquery-alias-cte node)
+             (mark-cte-plan plan (lp-subquery-alias-cte node)))
+           plan))))))
+
+(defun mark-cte-plan (plan cte)
+  "Set the share keys of the nodes of the PLAN of a reference to the CTE (its
+bound query), see CTE-SHARE-KEY."
+  (unless (pnode-share-key plan)
+    (setf (pnode-share-key plan) (cte-share-key cte plan)))
+  (dolist (child (pnode-children plan))
+    (mark-cte-plan child cte)))
+
+(defun cte-share-key (cte node)
+  "Share key of the plan NODE inside a reference to the CTE: the CTE and the
+plan's EXPLAIN text. References whose plans were rewritten differently (e.g.
+by predicate pushdown) still share their identical subplans. NIL when the
+rows may differ between evaluations (correlation, test functions)."
+  (when (plan-invariant-p node)
+    (let ((text (json-to-string (explain-plan-json node))))
+      (unless (search "PQ_SLEEP" text :test #'char-equal)
+        (cons cte text)))))
 
 (defun parameter-only-p (e)
   "True if E reads no columns but depends on correlation parameters."

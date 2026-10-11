@@ -25,7 +25,9 @@
                   (loop for i below (table-column-count table) collect i))))
     (bf-derived (make-subquery-alias (plan-query (bf-derived-query bf))
                                      (relation-name (bf-derived-relation bf))
-                                     :cte (bf-derived-cte bf)))
+                                     ;; A CTE reference is tagged with the CTE's
+                                     ;; bound query (shared by all references).
+                                     :cte (and (bf-derived-cte bf) (bf-derived-query bf))))
     (bf-union
      (let ((columns (bf-union-columns bf)))
        (make-union-all (mapcar (lambda (branch) (plan-union-branch branch columns))

@@ -67,7 +67,7 @@
   "The rows of a derived table or CTE reference (its single child) under the
 range variable NAME; it does not change the rows."
   name
-  (cte nil))                             ; true for a CTE reference
+  (cte nil))                             ; for a CTE reference: the CTE's bound query
 
 (defun lnode-child (node) (first (lnode-children node)))
 (defun lnode-width (node) (length (lnode-columns node)))

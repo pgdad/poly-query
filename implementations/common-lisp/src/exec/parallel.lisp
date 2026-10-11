@@ -626,5 +626,74 @@ THREADS threads; returns the sorted vector."
            (when (and scan (> (length (scan-morsels scan)) 1))
              (make-parallel-gather node scan threads))))))))
 
+;;; ------------------------------------------------------------------
+;;; Shared CTE results: plans inside references to one CTE with equal share
+;;; keys (see CTE-SHARE-KEY) that occur more than once in a statement
+;;; (counting the plans of its subqueries) are compiled once and their rows
+;;; materialized on first use; every occurrence then reads the stored rows.
+;;; Pipelines over a table scan are not shared (cheap to recompute, and
+;;; parallel when read).
+
+(defvar *shared-results* nil
+  "Per statement being compiled: hash table from share keys to their number
+of occurrences in the statement's plans, or to their SHARED-RESULT.")
+
+(defun make-shared-results-table (root)
+  "Table of the share keys occurring more than once in the plan ROOT and the
+plans of its subqueries (values: occurrence counts), or NIL if there are none."
+  (let ((counts (make-hash-table :test 'equal))
+        (any nil))
+    (labels ((walk (node)
+               (let ((key (pnode-share-key node)))
+                 (when key
+                   (when (> (incf (gethash key counts 0)) 1) (setf any t))))
+               (dolist (e (node-expressions node))
+                 (when e
+                   (bexpr-some (lambda (x)
+                                 (when (subquery-op-p x)
+                                   (walk (subquery-plan (b-op-info x))))
+                                 nil)
+                               e)))
+               (mapc #'walk (pnode-children node))))
+      (walk root))
+    (and any counts)))
+
+(defstruct (shared-result (:constructor make-shared-result (opener)))
+  opener                                 ; batch opener of the shared plan
+  (batch nil)                            ; its rows, once materialized
+  (mutex (sb-thread:make-mutex :name "shared result")))
+
+(defun make-shared-reader (node key compile)
+  "Batch opener reading the shared rows of the plan NODE with share KEY;
+COMPILE compiles NODE's own opener (once per statement)."
+  (declare (type function compile))
+  (let ((entry (let ((value (gethash key *shared-results*)))
+                 (if (shared-result-p value)
+                     value
+                     (setf (gethash key *shared-results*)
+                           ;; Plans below a shared one are compiled once with it.
+                           (make-shared-result (let ((*shared-results* nil)) (funcall compile)))))))
+        (kinds (output-kinds node)))
+    (lambda ()
+      (let* ((batch (sb-thread:with-recursive-lock ((shared-result-mutex entry))
+                      (or (shared-result-batch entry)
+                          (setf (shared-result-batch entry)
+                                (drain-batches (shared-result-opener entry) kinds)))))
+             (n (batch-count batch))
+             (pos 0))
+        (declare (type fixnum n pos))
+        (lambda ()
+          (when (< pos n)
+            (let ((end (min n (+ pos +batch-size+))))
+              (prog1 (batch-slice batch pos end)
+                (setf pos end)))))))))
+
 (defmethod compile-batch-operator :around ((node pnode))
-  (or (compile-parallel node) (call-next-method)))
+  (let ((key (pnode-share-key node)))
+    (if (and key *shared-results*
+             (let ((value (gethash key *shared-results*)))
+               (or (shared-result-p value) (and value (> value 1))))
+             (not (pipeline-scan node)))
+        (make-shared-reader node key
+                            (lambda () (or (compile-parallel node) (call-next-method))))
+        (or (compile-parallel node) (call-next-method)))))
