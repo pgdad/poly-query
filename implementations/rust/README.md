@@ -384,9 +384,9 @@ carries `"execution": {"mode": …, "threads": …}`.
   `UPPER(category)`) once per distinct code occurring in the batch, with
   string results kept dictionary-encoded. `AND`, `OR`
   and `CASE` evaluate lazily-evaluated operands only on the rows that need
-  them (like row mode). Everything else (functions, casts, subqueries) is
-  evaluated element-wise by the row evaluator on the vectorized child
-  results, so semantics are shared, not duplicated.
+  them (like row mode). Everything else (other functions and casts,
+  subqueries) is evaluated element-wise by the row evaluator on the
+  vectorized child results, so semantics are shared, not duplicated.
 * **Hash aggregation** (`keys.rs`, `agg.rs`): each key column is interned to
   dense ids (specialized maps for `i64`-representable values, strings and
   dictionary codes resolved once per code); multi-column keys combine the
@@ -416,7 +416,9 @@ carries `"execution": {"mode": …, "threads": …}`.
   selection). Ties are broken by input position, so results are exactly
   the stable order of the row engine (whose top-N now uses the same
   tie-breaker).
-* `result: "count"` counts whole batches without converting them to rows.
+* Results are serialized to JSON straight from the column vectors
+  (allocation-free number/date formatting, no per-row value tuples);
+  `result: "count"` counts whole batches without touching the values.
 
 ### Parallel execution (`exec/parallel.rs`)
 
@@ -439,7 +441,9 @@ are built once, before the workers start, and shared read-only (`Arc`).
 * **Parallel DISTINCT**: executed as a parallel aggregation grouping by
   every column (no aggregates).
 * **Parallel sort**: see above.
-* Tables smaller than two morsels, and subqueries, run serially.
+* Tables smaller than two morsels, subqueries, and scan pipelines under a
+  `LIMIT` of at most one morsel (which a serial scan answers from its
+  first batches) run serially.
   `POLYQUERY_MORSEL_ROWS` overrides the morsel size (used by the test
   scripts to force parallel execution on small tables).
 
