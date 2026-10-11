@@ -7,7 +7,7 @@
  * Shape (outermost first, each present only when needed):
  *   Limit > Sort > Distinct > Project > Filter(HAVING) > Aggregate >
  *   Filter(WHERE) > FROM tree (TableScan | SubqueryScan | HashJoin |
- *   NestedLoopJoin) or Values for a SELECT without FROM.
+ *   MergeJoin | NestedLoopJoin) or Values for a SELECT without FROM.
  */
 #include "pq.inc"
 #include "sql.inc"
@@ -20,6 +20,12 @@ jt_names:
 jt_inner: .asciz "INNER"
 jt_left:  .asciz "LEFT"
 jt_cross: .asciz "CROSS"
+    .p2align 3
+ja_names:
+    .quad ja_nl, ja_hash, ja_merge
+ja_nl:    .asciz "NestedLoopJoin"
+ja_hash:  .asciz "HashJoin"
+ja_merge: .asciz "MergeJoin"
 
     .text
 
@@ -172,11 +178,10 @@ FUNC explain_from
     PUTS %rbx, "]}"
 491: LEAVE
 5:  /* join */
-    CSTR %rsi, "NestedLoopJoin"
-    cmpq $0, FP_LKEY(%r13)
-    je 6f
-    CSTR %rsi, "HashJoin"
-6:  mov %rbx, %rdi
+    lea ja_names(%rip), %rax
+    mov FP_ALGO(%r13), %rcx
+    mov (%rax, %rcx, 8), %rsi
+    mov %rbx, %rdi
     call open_node
     PUTS %rbx, ",\"join_type\":\""
     lea jt_names(%rip), %rax
@@ -184,8 +189,8 @@ FUNC explain_from
     mov (%rax, %rcx, 8), %rsi
     mov %rbx, %rdi
     call buf_puts
-    cmpq $0, FP_LKEY(%r13)
-    je 7f
+    cmpq $JA_HASH, FP_ALGO(%r13)
+    jne 7f
     cmpq $0, FP_BUILDL(%r13)
     jne 61f
     PUTS %rbx, "\",\"build\":\"right"

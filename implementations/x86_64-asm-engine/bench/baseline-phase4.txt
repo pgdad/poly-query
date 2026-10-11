@@ -1,0 +1,11 @@
+query              | Phase 4 engine (commit c86cc2d interpreter, row mode, 1 thread)
+Q1 filter+count    |      22.4 ms 
+Q2 scalar aggs     |      20.0 ms 
+Q3 group by        |      39.4 ms 
+Q4 group by expr   |      25.5 ms 
+Q5 hash join+agg   |      54.5 ms 
+Q6 top-N           |      48.8 ms 
+Q7 projection      |       9.0 ms 
+Q8 const fold      |      25.7 ms 
+Q9 full sort       |     218.7 ms 
+Q10 2k x 2k join   |       9.0 ms 

@@ -6,7 +6,10 @@
  *   - pushdown: single-table conjuncts leave the WHERE, mixed ones stay
  *   - LEFT JOIN: conjuncts on the NULL-padded side are not pushed
  *   - hash-join build side follows the estimated cardinalities
- *   - optimize = false disables pushdown, use_indexes = false index use
+ *   - optimize = false keeps index selection, use_indexes = false disables it
+ *   - the join option forces the join algorithm of equi-joins
+ *   - optimizer: constant folding (not of failing constants), AND/OR
+ *     simplification, optimize = false
  */
 #include "pq.inc"
 #include "sql.inc"
@@ -312,11 +315,112 @@ FUNC main
     mov %rax, %r12
     mov QP_FROM(%r12), %r13
     xor %edi, %edi
-    cmpq $0, FP_FILTER(%r13)
-    jne 1f
-    cmpq $0, QP_WHERE(%r12)
+    cmpq $0, FP_INDEX(%r13)
     setne %dil
-1:  CSTR %rsi, "optimize = false: no pushdown"
+    CSTR %rsi, "optimize = false: physical index selection unchanged"
+    call check
+    movq $1, g_opt_optimize(%rip)
+
+    /* ---- join algorithm: forced by the join option, nested loop otherwise */
+    mov $JOIN_MERGE, %eax
+    mov %rax, g_opt_join(%rip)
+    CSTR %rdi, "SELECT t.a FROM t JOIN u ON t.a = u.a"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    cmpq $JA_MERGE, FP_ALGO(%r13)
+    sete %dil
+    CSTR %rsi, "join = merge: MergeJoin for an equi-join"
+    call check
+    CSTR %rdi, "SELECT t.a FROM t JOIN u ON t.a < u.a"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    cmpq $JA_NL, FP_ALGO(%r13)
+    sete %dil
+    CSTR %rsi, "join = merge: non-equi join falls back to a nested loop"
+    call check
+    movq $JOIN_HASH, g_opt_join(%rip)
+    CSTR %rdi, "SELECT t.a FROM t JOIN u ON t.a = u.a"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    cmpq $JA_HASH, FP_ALGO(%r13)
+    sete %dil
+    CSTR %rsi, "join = hash: HashJoin"
+    call check
+    movq $JOIN_NL, g_opt_join(%rip)
+    CSTR %rdi, "SELECT t.a FROM t JOIN u ON t.a = u.a"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    cmpq $JA_NL, FP_ALGO(%r13)
+    sete %dil
+    CSTR %rsi, "join = nested_loop: NestedLoopJoin"
+    call check
+    movq $JOIN_AUTO, g_opt_join(%rip)
+
+    /* ---- logical optimizer (runs after pushdown / index selection) */
+    CSTR %rdi, "SELECT a FROM t WHERE b = 1 + 2"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    cmpq $0, FP_INDEX(%r13)         /* planned on the original predicate */
+    jne 1f
+    mov FP_FILTER(%r13), %rax
+    mov N_B(%rax), %rax
+    cmpl $EK_LIT, N_KIND(%rax)
+    jne 1f
+    cmpq $3, N_V1(%rax)
+    sete %dil
+1:  CSTR %rsi, "optimizer: 1 + 2 folded to 3 in the pushed filter"
+    call check
+    CSTR %rdi, "SELECT a FROM t WHERE 1 / 0 = a"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    mov FP_FILTER(%r13), %rax
+    mov N_A(%rax), %rax
+    xor %edi, %edi
+    cmpl $EK_BINARY, N_KIND(%rax)
+    sete %dil
+    CSTR %rsi, "optimizer: a failing constant (1 / 0) is not folded"
+    call check
+    CSTR %rdi, "SELECT a FROM t WHERE a > 5 AND 1 = 1"
+    call plan_of
+    xor %edi, %edi
+    cmpq $0, QP_WHERE(%rax)
+    sete %dil
+    CSTR %rsi, "optimizer: a residual TRUE conjunct disappears"
+    call check
+    CSTR %rdi, "SELECT a FROM t WHERE a > 5 OR 1 = 0"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    mov FP_FILTER(%r13), %rax
+    xor %edi, %edi
+    cmpl $EK_BINARY, N_KIND(%rax)
+    jne 1f
+    cmpl $B_GT, N_OP(%rax)
+    sete %dil
+1:  CSTR %rsi, "optimizer: x OR FALSE -> x"
+    call check
+    CSTR %rdi, "SELECT a FROM t WHERE a / 2 > 1 AND 1 = 0"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    cmpq $0, FP_FILTER(%r13)        /* a / 2 > 1 is pushed, FALSE residual */
+    setne %dil
+    CSTR %rsi, "optimizer: unsafe conjuncts are kept"
+    call check
+    movq $0, g_opt_optimize(%rip)
+    CSTR %rdi, "SELECT a FROM t WHERE b = 1 + 2"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    mov FP_FILTER(%r13), %rax
+    mov N_B(%rax), %rax
+    xor %edi, %edi
+    cmpl $EK_BINARY, N_KIND(%rax)
+    sete %dil
+    CSTR %rsi, "optimize = false: no folding"
     call check
     movq $1, g_opt_optimize(%rip)
 

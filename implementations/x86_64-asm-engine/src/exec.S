@@ -21,38 +21,7 @@
 
     .section .note.GNU-stack, "", @progbits
 
-/* aggregate state */
-#define AS_COUNT 0
-#define AS_LO    8
-#define AS_HI    16
-#define AS_VAL   24
-#define AS_HAS   32
-#define AS_SET   40    /* HashTable* of seen values (DISTINCT aggregates) */
-#define AS_SIZE  48
-
-/* execution state of one query block (arena allocated) */
-#define XS_PLAN   0
-#define XS_CTX    8    /* EvalCtx, EC_SIZE bytes */
-#define XS_TABLES 72   /* Table*[nrv] */
-#define XS_W      80   /* tuple width = max(nrv, 1) */
-#define XS_TS     88   /* TupleSet* (after FROM and WHERE) */
-#define XS_ROWS   96   /* Vec of rows: 96..127 */
-#define XS_STOP   128  /* stop producing rows after this many (LIMIT pushdown) */
-#define XS_SIZE   136
-
-/* tuple set */
-#define TS_N    0
-#define TS_CAP  8
-#define TS_DATA 16
-#define TS_W    24
-#define TS_SIZE 32
-
-/* IN (subquery) value set */
-#define IS_HT    0
-#define IS_NULL  8     /* the subquery produced a NULL */
-#define IS_ROWS  16    /* number of rows produced */
-#define IS_TYPE  24    /* comparison type (key type of IS_HT) */
-#define IS_SIZE  32
+#include "exec.inc"
 
     .text
 
@@ -294,6 +263,15 @@ FUNC exec_scan
     jmp 25b
 
 30: /* ---- full scan, skipping row groups excluded by their statistics */
+    mov %rbx, %rdi                  /* batch / parallel execution */
+    call pexec_enabled
+    test %eax, %eax
+    jz 300f
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    call pexec_scan
+    LEAVE
+300:
     movq $0, 16(%rsp)               /* row group */
     movq $0, 24(%rsp)               /* first row of the range */
     mov %r14, 32(%rsp)              /* end of the range */
@@ -359,8 +337,30 @@ FUNC exec_from
     mov TS_N(%rax), %rsi
     call ts_new
     mov %rax, %r13                  /* out */
-    cmpq $0, FP_LKEY(%r12)
-    jne 30f
+    mov FP_ALGO(%r12), %rax
+    cmp $JA_HASH, %rax
+    je 30f
+    cmp $JA_MERGE, %rax
+    jne 101f
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    mov 0(%rsp), %rdx
+    mov 8(%rsp), %rcx
+    mov %r13, %r8
+    call exec_merge_join
+    jmp 90f
+101: mov %rbx, %rdi                  /* nested loop: batch / parallel */
+    call pexec_enabled
+    test %eax, %eax
+    jz 102f
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    mov 0(%rsp), %rdx
+    mov 8(%rsp), %rcx
+    call pexec_nl
+    mov %rax, %r13
+    jmp 90f
+102:
 
     /* ---- nested loop join */
     xor %r14d, %r14d                /* i */
@@ -444,10 +444,11 @@ FUNC exec_from
     lea 8(,%rdi,8), %rdi
     call tmp_alloc
     mov %rax, 40(%rsp)              /* next[] */
-    xor %r15d, %r15d
+    mov 56(%rsp), %rax              /* insert backwards: chains then list */
+    mov TS_N(%rax), %r15            /* the build tuples in input order */
 31: mov 56(%rsp), %rax
-    cmp TS_N(%rax), %r15
-    jae 35f
+    sub $1, %r15
+    jb 35f
     mov 40(%rsp), %rcx
     movq $-1, (%rcx, %r15, 8)
     mov XS_W(%rbx), %rcx
@@ -476,9 +477,22 @@ FUNC exec_from
     mov 40(%rsp), %rdx
     mov %rcx, (%rdx, %r15, 8)
     mov %r15, EN_D0(%rax)
-34: inc %r15
-    jmp 31b
+34: jmp 31b
 35: /* probe */
+    mov %rbx, %rdi                  /* batch / parallel probe (pexec.S) */
+    call pexec_enabled
+    test %eax, %eax
+    jz 351f
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    mov 64(%rsp), %rdx
+    mov 56(%rsp), %rcx
+    mov 32(%rsp), %r8
+    mov 40(%rsp), %r9
+    call pexec_probe
+    mov %rax, %r13
+    jmp 90f
+351:
     xor %r14d, %r14d
 36: mov 64(%rsp), %rax
     cmp TS_N(%rax), %r14
@@ -652,8 +666,8 @@ ENDF build_row
 /* row_cmp(pa rdi, pb rsi, plan rdx) -> eax  (qsort_r comparator) */
 FUNC row_cmp
     ENTER 0
-    incq cmp_count(%rip)            /* deadline / cancellation while sorting */
-    testl $0xffff, cmp_count(%rip)
+    incq %fs:cmp_count@tpoff         /* deadline / cancellation while sorting */
+    testl $0xffff, %fs:cmp_count@tpoff
     jnz 0f
     push %rdi
     push %rsi
@@ -708,6 +722,78 @@ FUNC row_cmp
 8:  xor %eax, %eax
 9:  LEAVE
 ENDF row_cmp
+
+/* row_cmp_stable(pa rdi, pb rsi, plan rdx) -> eax: qsort_r comparator on
+ * (row*, sequence) pairs: ORDER BY keys, ties by sequence (production order) */
+FUNC row_cmp_stable
+    push %rdi
+    push %rsi
+    sub $8, %rsp
+    call row_cmp
+    add $8, %rsp
+    pop %rsi
+    pop %rdi
+    test %eax, %eax
+    jnz 9f
+    mov 8(%rdi), %rcx
+    cmp 8(%rsi), %rcx
+    seta %al
+    setb %cl
+    sub %cl, %al
+    movsbl %al, %eax
+9:  ret
+ENDF row_cmp_stable
+
+/* sort_rows(rows rdi, n rsi, plan rdx): stable sort of result rows by the
+ * plan's ORDER BY keys (ties keep their production order, so every
+ * execution mode returns tied rows in the same order) */
+FUNC sort_rows
+    ENTER 16
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %rdx, %r13
+    call pexec_enabled              /* parallel sort + merge (pexec.S) */
+    test %eax, %eax
+    jz 0f
+    cmpq $1, g_opt_threads(%rip)
+    jbe 0f
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    mov %r13, %rdx
+    call pexec_sort
+    test %eax, %eax
+    jnz 9f
+0:    mov %r12, %rdi
+    shl $4, %rdi
+    call tmp_alloc
+    mov %rax, %r14                  /* (row, sequence) pairs */
+    xor %ecx, %ecx
+1:  cmp %r12, %rcx
+    jae 2f
+    mov %rcx, %rdx
+    shl $4, %rdx
+    mov (%rbx, %rcx, 8), %rax
+    mov %rax, (%r14, %rdx)
+    mov %rcx, 8(%r14, %rdx)
+    inc %rcx
+    jmp 1b
+2:  mov %r14, %rdi
+    mov %r12, %rsi
+    mov $16, %edx
+    lea row_cmp_stable(%rip), %rcx
+    mov %r13, %r8
+    call qsort_r
+    xor %ecx, %ecx
+3:  cmp %r12, %rcx
+    jae 9f
+    mov %rcx, %rdx
+    shl $4, %rdx
+    mov (%r14, %rdx), %rax
+    mov %rax, (%rbx, %rcx, 8)
+    inc %rcx
+    jmp 3b
+9:  LEAVE
+ENDF sort_rows
 
 /* agg_update(plan rdi, ctx rsi, states rdx): feeds the current row to every aggregate */
 FUNC agg_update
@@ -1259,6 +1345,14 @@ FUNC exec_plan
 6:  /* ---- WHERE: filter tuples in place */
     cmpq $0, QP_WHERE(%rbx)
     je 8f
+    mov %r12, %rdi
+    call pexec_enabled
+    test %eax, %eax
+    jz 60f
+    mov %r12, %rdi
+    call pexec_filter
+    jmp 8f
+60:
     mov XS_TS(%r12), %r15
     xor %r13d, %r13d                /* read */
     xor %r14d, %r14d                /* write */
@@ -1300,7 +1394,13 @@ FUNC exec_plan
     cmpq $0, QP_AGG(%rbx)
     je 81f
     mov %r12, %rdi
-    call exec_aggregate
+    call pexec_enabled
+    mov %r12, %rdi
+    test %eax, %eax
+    jz 80f
+    call pexec_aggregate
+    jmp 85f
+80: call exec_aggregate
     jmp 85f
 81: /* projection; stop early when unsorted, not DISTINCT and limited */
     mov $0x7fffffffffffffff, %rax
@@ -1315,7 +1415,19 @@ FUNC exec_plan
     add QP_OFFSET(%rbx), %rax
     jo 82f
     mov %rax, XS_STOP(%r12)
-82: xor %r13d, %r13d
+82: mov $0x7fffffffffffffff, %rax    /* batch / parallel: whole input */
+    cmp XS_STOP(%r12), %rax
+    jne 820f
+    cmp g_sink_plan(%rip), %rbx
+    je 820f
+    mov %r12, %rdi
+    call pexec_enabled
+    test %eax, %eax
+    jz 820f
+    mov %r12, %rdi
+    call pexec_project
+    jmp 85f
+820: xor %r13d, %r13d
     mov XS_TS(%r12), %r15
 83: cmp TS_N(%r15), %r13
     jae 85f
@@ -1357,10 +1469,8 @@ FUNC exec_plan
     cmp $1, %rsi
     jbe 87f
     mov VEC_DATA+XS_ROWS(%r12), %rdi
-    mov $8, %edx
-    lea row_cmp(%rip), %rcx
-    mov %rbx, %r8
-    call qsort_r
+    mov %rbx, %rdx
+    call sort_rows
 87: /* ---- offset / limit */
     mov VEC_LEN+XS_ROWS(%r12), %rax /* n */
     mov QP_OFFSET(%rbx), %r13
@@ -1551,13 +1661,57 @@ ENDF eval_subquery
 
 /* exec_query_result(plan rdi, max_rows rsi) -> rax Result*: runs the plan;
  * RESOURCE_LIMIT when the result has more than max_rows (>= 0) rows.  The row
- * count is also left in g_result_rows (logged by the server). */
+ * count is also left in g_result_rows (logged by the server).
+ *
+ * Error replay: batch and parallel execution evaluate expressions column by
+ * column and part by part, so a query whose rows raise *different* data
+ * errors (say an overflow in row 5 and a division by zero in row 9 of
+ * another column) could report another error than the row baseline.  When
+ * such an execution fails with a data error, the query is re-run in the
+ * row baseline, which raises (exactly) the baseline's error. */
 FUNC exec_query_result
-    ENTER 16
-    mov %rsi, 0(%rsp)
+    ENTER 256
+    mov %rsi, 0(%rsp)               /* max rows */
+    mov %rdi, 8(%rsp)               /* plan */
+    call pexec_enabled
+    test %eax, %eax
+    jz 5f
+    mov g_jmpbuf(%rip), %rax
+    mov %rax, 16(%rsp)              /* the request's handler */
+    lea 32(%rsp), %rdi              /* jmp_buf at 32..231 */
+    mov %rdi, g_jmpbuf(%rip)
+    call _setjmp
+    test %eax, %eax
+    jnz 3f
+    mov 8(%rsp), %rdi
+    xor %esi, %esi
+    call exec_plan
+    mov 16(%rsp), %rcx
+    mov %rcx, g_jmpbuf(%rip)
+    mov %rax, %r12
+    jmp 6f
+3:  mov 16(%rsp), %rdi              /* failed */
+    mov %rdi, g_jmpbuf(%rip)
+    mov g_err_code(%rip), %rax
+    cmp $E_NUMERIC_OVERFLOW, %rax
+    je 4f
+    cmp $E_DIVISION_BY_ZERO, %rax
+    je 4f
+    cmp $E_CONVERSION_ERROR, %rax
+    je 4f
+    cmp $E_INVALID_ARGUMENT, %rax
+    je 4f
+    cmp $E_SUBQUERY_CARDINALITY, %rax
+    je 4f
+    mov $1, %esi                    /* other errors: report as they are */
+    call longjmp
+4:  movq $MODE_ROW, g_opt_mode(%rip)    /* replay in the row baseline */
+    movq $1, g_opt_threads(%rip)
+5:  mov 8(%rsp), %rdi
     xor %esi, %esi
     call exec_plan
     mov %rax, %r12
+6:
     mov RS_NROWS(%r12), %r14
     mov %r14, g_result_rows(%rip)
     mov 0(%rsp), %rax
@@ -1688,4 +1842,6 @@ g_result_rows: .quad 0          /* row count of the last executed query */
     .globl g_sink_plan, g_row_sink
 g_sink_plan:   .quad 0          /* plan whose projected rows go to g_row_sink */
 g_row_sink:    .quad 0          /* sink(row rdi) -> eax 1 to stop (streaming) */
-cmp_count:     .quad 0          /* row_cmp calls (periodic deadline checks) */
+    .section .tbss, "awT", @nobits
+    .p2align 3
+cmp_count:     .zero 8          /* row_cmp calls of this thread (periodic deadline checks) */

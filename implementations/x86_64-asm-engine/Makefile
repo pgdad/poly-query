@@ -23,10 +23,10 @@ build: $(ENGINE)
 $(ENGINE): $(OBJS)
 	$(AS_DRIVER) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
 
-$(BUILD)/%.o: src/%.S include/pq.inc include/sql.inc include/http.inc | $(BUILD)
+$(BUILD)/%.o: src/%.S $(wildcard include/*.inc) | $(BUILD)
 	$(AS_DRIVER) $(ASFLAGS) -o $@ $<
 
-$(BUILD)/tests/%: tests/%.S $(LIBOBJS) include/pq.inc include/sql.inc include/http.inc | $(BUILD)/tests
+$(BUILD)/tests/%: tests/%.S $(LIBOBJS) $(wildcard include/*.inc) | $(BUILD)/tests
 	$(AS_DRIVER) $(ASFLAGS) -o $@.o $<
 	$(AS_DRIVER) $(LDFLAGS) -o $@ $@.o $(LIBOBJS) $(LDLIBS)
 
@@ -37,6 +37,7 @@ test: build $(TEST_BINS)
 	@set -e; for t in $(TEST_BINS); do echo "== $$t"; $$t; done
 	@sh tests/session_test.sh
 	@sh tests/server_test.sh
+	@sh tests/modes_test.sh
 
 # lint: assemble everything with warnings as errors and check every object
 # carries a non-executable .note.GNU-stack section.

@@ -62,18 +62,33 @@ FUNC hash_cells
     jnz 5f
     xor %ecx, %ecx
     jmp 5f
-3:  mov (%rcx), %rsi                /* FNV-1a over the string bytes */
+3:  mov (%rcx), %rsi                /* string: 8 bytes per step */
     lea 8(%rcx), %rdi
     mov $0xcbf29ce484222325, %rcx
-    mov $0x100000001b3, %r8
-4:  test %rsi, %rsi
-    jz 5f
-    movzbl (%rdi), %eax
+    xor %rsi, %rcx                  /* seeded with the length */
+    mov $HASH_MUL, %r8
+4:  cmp $8, %rsi
+    jb 41f
+    xor (%rdi), %rcx
+    imul %r8, %rcx
+    mov %rcx, %rax
+    shr $31, %rax
+    xor %rax, %rcx
+    add $8, %rdi
+    sub $8, %rsi
+    jmp 4b
+41: test %rsi, %rsi                 /* tail of t = 1..7 bytes: the 8 bytes */
+    jz 5f                           /* ending at the last one (in bounds: */
+    mov -8(%rdi, %rsi), %rax        /* at worst the length word), shifted */
+    lea (, %rsi, 8), %r9            /* so that the t bytes remain */
+    neg %r9
+    add $64, %r9
+    shrx %r9, %rax, %rax
     xor %rax, %rcx
     imul %r8, %rcx
-    inc %rdi
-    dec %rsi
-    jmp 4b
+    mov %rcx, %rax
+    shr $31, %rax
+    xor %rax, %rcx
 5:  xor %rcx, %r14
     mov $HASH_MUL, %rax
     imul %rax, %r14
@@ -157,7 +172,9 @@ ENDF ht_grow
 
 /* ht_lookup(ht, cells, insert) -> rax Entry* or 0, rdx 1 when newly inserted */
 FUNC ht_lookup
-    ENTER 16
+    push %rbx
+    push %r12
+    push %r13
     mov %rdi, %rbx
     mov %rsi, %r12
     mov %edx, %r13d
@@ -165,10 +182,27 @@ FUNC ht_lookup
     mov HT_NK(%rbx), %rsi
     mov HT_TYPES(%rbx), %rdx
     call hash_cells
-    mov %rax, %r14                  /* hash */
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    mov %r13d, %edx
+    mov %rax, %rcx
+    pop %r13
+    pop %r12
+    pop %rbx
+    jmp ht_lookup_h
+ENDF ht_lookup
+
+/* ht_lookup_h(ht, cells, insert, hash rcx): ht_lookup with the key's
+ * hash_cells value already computed */
+FUNC ht_lookup_h
+    ENTER 16
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %edx, %r13d
+    mov %rcx, %r14                  /* hash */
     mov HT_NB(%rbx), %rcx
     dec %rcx
-    and %rax, %rcx
+    and %r14, %rcx
     mov HT_BKT(%rbx), %rax
     mov (%rax, %rcx, 8), %r15
 1:  test %r15, %r15
@@ -213,4 +247,4 @@ FUNC ht_lookup
 8:  mov %r15, %rax
     xor %edx, %edx
 9:  LEAVE
-ENDF ht_lookup
+ENDF ht_lookup_h
