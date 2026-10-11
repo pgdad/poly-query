@@ -2,11 +2,11 @@
 //! null count, min, max and an approximate distinct count.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{Hash, Hasher};
 
 use super::column::{Column, ColumnData};
-use crate::types::Value;
+use crate::exec::hash::{FastHasher, FastSet};
+use crate::types::{DataType, Value, float};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColumnStats {
@@ -31,13 +31,13 @@ const HLL_BITS: u32 = 14;
 
 /// Distinct counter over 64-bit value hashes.
 enum DistinctCounter {
-    Exact(HashSet<u64>),
+    Exact(FastSet<u64>),
     Sketch(Vec<u8>),
 }
 
 impl DistinctCounter {
     fn new() -> Self {
-        DistinctCounter::Exact(HashSet::new())
+        DistinctCounter::Exact(FastSet::default())
     }
 
     fn add(&mut self, hash: u64) {
@@ -87,16 +87,43 @@ fn hll_estimate(regs: &[u8]) -> usize {
     est.round() as usize
 }
 
+/// SplitMix64 finalizer: spreads every input bit over the whole word (the
+/// HyperLogLog ranks use the high bits).
+fn mix(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
 fn hash_of(v: &Value) -> u64 {
-    let mut h = DefaultHasher::new();
+    let mut h = FastHasher::default();
     v.hash(&mut h);
-    h.finish()
+    mix(h.finish())
 }
 
 fn hash_str(s: &str) -> u64 {
-    let mut h = DefaultHasher::new();
+    let mut h = FastHasher::default();
     s.hash(&mut h);
-    h.finish()
+    mix(h.finish())
+}
+
+/// Distinct count, min and max of the non-null slots of a fixed-width
+/// column read as `i64` (values of one representation compare as `i64`).
+fn int_stats(col: &Column, at: impl Fn(usize) -> i64) -> (usize, Option<(i64, i64)>) {
+    let mut counter = DistinctCounter::new();
+    let mut range: Option<(i64, i64)> = None;
+    for i in 0..col.len() {
+        if col.is_null(i) {
+            continue;
+        }
+        let x = at(i);
+        counter.add(mix(x as u64));
+        range = Some(match range {
+            None => (x, x),
+            Some((lo, hi)) => (lo.min(x), hi.max(x)),
+        });
+    }
+    (counter.count(), range)
 }
 
 /// Computes the statistics of one column.
@@ -149,6 +176,41 @@ pub fn column_stats(col: &Column) -> ColumnStats {
             }
             min = lo.map(Value::str);
             max = hi.map(Value::str);
+            counter.count()
+        }
+        ColumnData::Int64(v) | ColumnData::Timestamp(v) | ColumnData::Decimal(v) => {
+            let (count, range) = int_stats(col, |i| v[i]);
+            let scale = match col.data_type {
+                DataType::Decimal { scale, .. } => scale,
+                _ => 0,
+            };
+            let make = |x: i64| match &col.data {
+                ColumnData::Int64(_) => Value::Int(x),
+                ColumnData::Timestamp(_) => Value::Timestamp(x),
+                _ => Value::Decimal(x, scale),
+            };
+            if let Some((lo, hi)) = range {
+                min = Some(make(lo));
+                max = Some(make(hi));
+            }
+            count
+        }
+        ColumnData::Date(v) => {
+            let (count, range) = int_stats(col, |i| v[i] as i64);
+            if let Some((lo, hi)) = range {
+                min = Some(Value::Date(lo as i32));
+                max = Some(Value::Date(hi as i32));
+            }
+            count
+        }
+        ColumnData::Float64(v) => {
+            let mut counter = DistinctCounter::new();
+            for (i, &x) in v.iter().enumerate() {
+                if !col.is_null(i) {
+                    counter.add(mix(float::normalize(x).to_bits()));
+                    update(Value::Float(x));
+                }
+            }
             counter.count()
         }
         _ => {
