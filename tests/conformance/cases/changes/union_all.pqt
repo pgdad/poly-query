@@ -5,6 +5,7 @@
 load people fixtures/people.csv
 load orders fixtures/orders.csv
 load customers fixtures/customers.csv
+load ordersd fixtures/orders.csv schema=order_id:INT64;customer_id:INT64;amount:DECIMAL(10,2);status:STRING;ordered_at:TIMESTAMP
 
 # duplicates are kept
 query oracle
@@ -49,7 +50,7 @@ name STRING | age INT64
 
 # numeric promotion INT64 + DECIMAL -> DECIMAL(18,2)
 query ordered
-SELECT order_id AS v FROM orders WHERE order_id = 101 UNION ALL SELECT amount FROM orders WHERE order_id = 102 ORDER BY v
+SELECT order_id AS v FROM ordersd WHERE order_id = 101 UNION ALL SELECT amount FROM ordersd WHERE order_id = 102 ORDER BY v
 ----
 v DECIMAL(18,2)
 ["99.99"]
