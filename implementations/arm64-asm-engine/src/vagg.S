@@ -266,11 +266,16 @@ FUNC vagg_aggregate
 ENDF vagg_aggregate
 
 // =============================================================================
-// gt_new(x0 BoundQuery*) -> x0 GroupTable*
-//   x19 bq, x20 table
+// gt_new(x0 BoundQuery*, x1 ctx) -> x0 GroupTable*
+// Key types drive hashing and equality inside the table. A key that is a
+// column of a dictionary-encoded STRING column is hashed and compared by
+// its dictionary entry (Str*): within one column every distinct string has
+// exactly one entry, so entry identity is value equality.
+//   x19 bq, x20 table, x21 ctx
 // =============================================================================
 LFUNC gt_new
-    ENTER 2
+    ENTER 3
+    mov  x21, x1
     mov  x19, x0
     mov  x0, #GT_SIZE
     bl   arena_zalloc
@@ -305,12 +310,30 @@ LFUNC gt_new
     b.hs 2f
     ldr  x11, [x19, #BQ_GROUP]
     ldr  x11, [x11, x10, lsl #3]
-    ldr  w11, [x11, #N_TYPE]
-    str  w11, [x0, x10, lsl #2]
+    ldr  w12, [x11, #N_TYPE]
+    ldr  w13, [x11, #N_KIND]            // dictionary column?
+    cmp  w13, #NK_COL
+    b.ne 11f
+    ldr  w13, [x11, #N_OP]
+    cbnz w13, 11f
+    ldr  x13, [x11, #N_B]
+    ldr  x14, [x21, #EC_TABLES]
+    ldr  x14, [x14, x13, lsl #3]
+    cbz  x14, 11f
+    ldr  w13, [x14, #TBL_LAYOUT]
+    cbnz w13, 11f
+    ldr  x14, [x14, #TBL_COLS]
+    ldr  x13, [x11, #N_VAL]
+    add  x14, x14, x13, lsl #5
+    ldr  w13, [x14, #COL_ENC]
+    cmp  w13, #CENC_DICT
+    b.ne 11f
+    mov  w12, #T_INT                    // compare entries, not bytes
+11: str  w12, [x0, x10, lsl #2]
     add  x10, x10, #1
     b    1b
 2:  mov  x0, x20
-    LEAVE 2
+    LEAVE 3
 ENDF gt_new
 
 // gt_keys_eq(x0 cells a, x1 cells b, x2 GroupTable*) -> w0 1 if equal
@@ -486,6 +509,7 @@ FUNC agg_task
     ldr  x21, [x9, #PN_BQ]
     ldr  x22, [x19, #XT_TS]
     mov  x0, x21
+    mov  x1, x20
     bl   gt_new
     mov  x23, x0
     str  x23, [x19, #XT_GT]
