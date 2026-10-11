@@ -58,6 +58,66 @@
         (pqcf/save! empty-tbl f {})
         (is (= 0 (:row-count (pqcf/open f {}))))))))
 
+(defn- header-version [^File f]
+  (let [b (Files/readAllBytes (.toPath f))]
+    (bit-or (bit-and (aget b 4) 0xFF) (bit-shift-left (bit-and (aget b 5) 0xFF) 8))))
+
+(def wide-columns
+  [(table/->Column "i" :int64) (table/->Column "w" [:decimal 38 10]) (table/->Column "n" [:decimal 10 2])])
+
+(def wide-rows
+  (let [big #(BigInteger. ^String %)]
+    [[1 (big "99999999999999999999999999999999999999") 1050]
+     [2 (big "-99999999999999999999999999999999999999") nil]
+     [3 nil -99]
+     [4 (big "-1") 0]
+     [5 (big "-1") 0]
+     [6 (big "18446744073709551616") 7]
+     [7 (big "-9223372036854775809") 7]]))
+
+(defn- make-tbl [columns rows]
+  (table/make-table "t" columns (apply mapv (fn [& xs] (object-array xs)) rows) (count rows)))
+
+(deftest wide-decimal-files
+  (let [dir (temp-dir)
+        wide-tbl (make-tbl wide-columns wide-rows)]
+    (testing "a table with a wide DECIMAL column is written as v2, others as v1"
+      (let [f (File. dir "w.pqcf") g (File. dir "n.pqcf")]
+        (pqcf/save! wide-tbl f {})
+        (pqcf/save! tbl g {})
+        (is (= 2 (header-version f)))
+        (is (= 1 (header-version g)))))
+    (testing "round trips of 128-bit values"
+      (doseq [encoding ["auto" "plain" "rle"]
+              rg [1 3 1000]
+              mmap? [false true]]
+        (let [f (File. dir (str "w-" encoding rg ".pqcf"))]
+          (pqcf/save! wide-tbl f {:row-group-size rg :encoding encoding})
+          (is (= wide-rows (read-rows (pqcf/open f {:mmap? mmap?}))) (str encoding " " rg " " mmap?)))))
+    (testing "a v1 file declaring a wide column is corrupt"
+      (let [f (File. dir "w.pqcf")
+            b (Files/readAllBytes (.toPath f))
+            n (alength b)
+            mlen (bit-or (bit-and (aget b (- n 12)) 0xFF) (bit-shift-left (bit-and (aget b (- n 11)) 0xFF) 8)
+                         (bit-shift-left (bit-and (aget b (- n 10)) 0xFF) 16))
+            meta (String. b (int (- n 12 mlen)) (int mlen) "UTF-8")
+            meta1 (.replace meta "\"format_version\":2" "\"format_version\":1")
+            mb (.getBytes meta1 "UTF-8")
+            crc (doto (CRC32.) (.update mb))
+            out (java.io.ByteArrayOutputStream.)]
+        (.write out b 0 (int (- n 12 mlen)))
+        (.write out mb)
+        (let [footer (doto (java.nio.ByteBuffer/allocate 12) (.order java.nio.ByteOrder/LITTLE_ENDIAN))]
+          (.putInt footer (alength mb))
+          (.putInt footer (unchecked-int (.getValue crc)))
+          (.put footer (.getBytes "PQCF" "US-ASCII"))
+          (.write out (.array footer)))
+        (let [bytes (.toByteArray out)
+              h (File. dir "v1wide.pqcf")]
+          (aset bytes 4 (byte 1))
+          (Files/write (.toPath h) bytes (make-array java.nio.file.OpenOption 0))
+          (is (= "STORAGE_CORRUPT" (error-code (pqcf/open h {})))))))))
+
 (deftest invalid-files
   (let [dir (temp-dir)
         f (File. dir "t.pqcf")
@@ -70,7 +130,9 @@
                     (Files/write (.toPath g) ^bytes b (make-array java.nio.file.OpenOption 0))
                     (error-code (read-rows (pqcf/open g {})))))]
     (is (= "STORAGE_CORRUPT" (variant (fn [^bytes b] (aset b 0 (byte 0x58)) nil))))
-    (is (= "STORAGE_VERSION_UNSUPPORTED" (variant (fn [^bytes b] (aset b 4 (byte 2)) nil))))
+    ;; a v2 header on a v1 body: header/metadata mismatch
+    (is (= "STORAGE_CORRUPT" (variant (fn [^bytes b] (aset b 4 (byte 2)) nil))))
+    (is (= "STORAGE_VERSION_UNSUPPORTED" (variant (fn [^bytes b] (aset b 4 (byte 3)) nil))))
     (is (= "STORAGE_VERSION_UNSUPPORTED" (variant (fn [^bytes b] (aset b 6 (byte 1)) nil))))
     (is (= "STORAGE_CORRUPT" (variant (fn [^bytes b] (aset b 8 (byte (bit-xor (aget b 8) 1))) nil))))
     (is (= "STORAGE_CORRUPT" (variant (fn [^bytes b] (java.util.Arrays/copyOf b (- (alength b) 3))))))

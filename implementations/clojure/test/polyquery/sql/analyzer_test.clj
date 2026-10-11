@@ -23,7 +23,9 @@
 (deftest literal-types
   (is (= ["INT64" "DECIMAL(3,2)" "DECIMAL(2,2)" "DECIMAL(1,1)" "FLOAT64" "STRING" "STRING"]
          (out-types "SELECT 1, 1.50, 0.05, .5, 1e3, 'x', NULL")))
-  (is (= ["FLOAT64"] (out-types "SELECT 1234567890.1234567890"))))
+  ;; up to 38 significant digits (decimal38.md §3)
+  (is (= ["DECIMAL(20,10)" "FLOAT64"]
+         (out-types "SELECT 1234567890.1234567890, 123456789012345678901234567890123456789.0"))))
 
 (deftest arithmetic-types
   (is (= ["DECIMAL(18,2)" "DECIMAL(18,3)" "DECIMAL(18,1)" "FLOAT64" "INT64"]
