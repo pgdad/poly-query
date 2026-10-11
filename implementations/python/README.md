@@ -48,6 +48,8 @@ python3 tools/bench.py --data DIR       # Phase 5 benchmarks over pqgen.py datas
 python3 tools/difftest.py --seed N      # random queries under the whole option matrix
 python3 tools/native_difftest.py --lib LIB   # native: true vs false on random queries
 python3 tools/native_bench.py --lib LIB      # kernel micro-benchmarks vs the CPython code
+python3 tools/workload_bench.py --data DIR  # times benchmarks/workloads/analytics.json through a session
+python3 tools/profile_workload.py --data DIR q14 q19   # cProfile of workload queries
 ```
 
 `--threads N` sets the default parallelism of queries without a `threads`
@@ -640,6 +642,174 @@ python3 tools/bench.py --data /tmp/pqdata/1m --repeat 5 \
     --variant row --variant vectorized --variant vec4 --variant '{"mode":"vectorized","threads":8}'
 python3 tools/bench.py --data /tmp/pqdata/1m --repeat 5 --variant auto --engine <phase-4 checkout>/bin/polyquery
 ```
+
+### Latency optimization (analytics workload)
+
+Task: lower the latency of the 20 queries of
+`benchmarks/workloads/analytics.json` at scale 1m, with unchanged results
+and conformance. Everything below is on by default (no option needed);
+`optimize: false` disables the plan-level parts (anti join, shared
+subqueries) like any other rewrite.
+
+**Measurement.** `tools/workload_bench.py` loads the nine tables
+(`pqgen.py generate --scale 1m`, CSV with the generated schemas, column
+layout), creates the workload's two indexes, then runs every query through
+one `bin/polyquery session` with default options and the workload's
+`result` mode (`rows`, or `count` for q14/q15): one warm-up run, then 5
+timed runs, each the wall time from sending the request to parsing the
+response. *Before* is the starting commit (`664fd3e`), *after* this
+commit, measured alternately (before, after, before, after; 10 timed runs
+per query and engine) on the same machine: AMD Ryzen 9 9950X3D, 16 cores
+/ 32 threads, CPython 3.14, shared with other jobs (load average ≈ 10
+during the runs, so single runs vary by ±30%). Cells are medians in ms.
+`--check-results` confirmed that every query returns exactly the rows of
+the starting commit (ORDER BY queries in the same order).
+
+| query | what | before (ms) | after (ms) | speedup |
+|---|---|---:|---:|---:|
+| q01_filter_selective | filter, high-selectivity | 0.2 | 0.2 | — |
+| q02_filter_low_selectivity | filter, low-selectivity | 114 | 13 | 8.8× |
+| q03_range_filter_time | filter, range, time | 2 | 2 | 1.0× |
+| q04_arith_aggregate | scan, arithmetic, decimal | 212 | 27 | 7.7× |
+| q05_groupby_low_card | group-by, low-cardinality | 120 | 15 | 7.9× |
+| q06_groupby_high_card | group-by, high-cardinality, top-n | 188 | 49 | 3.8× |
+| q07_groupby_skewed | group-by, skewed | 125 | 40 | 3.1× |
+| q08_groupby_uniform_multi | group-by, uniform | 260 | 29 | 9.0× |
+| q09_distinct_count | distinct, high-cardinality | 76 | 31 | 2.5× |
+| q10_join_customers | join, hash-join | 346 | 59 | 5.8× |
+| q11_join_star | join, multi-join | 266 | 68 | 3.9× |
+| q12_left_join_anti | join, left-join | 136 | 16 | 8.4× |
+| q13_sort_topn | sort, top-n | 182 | 18 | 10.0× |
+| q14_sort_full_string | sort, string | 971 | 176 | 5.5× |
+| q15_sort_multi_key | sort, duplicates | 1209 | 166 | 7.3× |
+| q16_timeseries_hourly | time-series, group-by, functions | 125 | 20 | 6.1× |
+| q17_wide_projection | wide, projection | 12 | 2 | 7.1× |
+| q18_nulls | nulls | 210 | 27 | 7.7× |
+| q19_cte_subquery | cte, subquery | 476 | 59 | 8.1× |
+| q20_string_functions | functions, string, like | 200 | 15 | 13.4× |
+| **total** | sum of medians | **5233** | **835** | **6.3×** |
+
+The first parallel query after a catalog change also forks the worker
+pool (~100 ms for 16 workers with these tables loaded); the warm-up run
+absorbs it above. Reproduce with:
+
+```sh
+python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pqdata --jobs 1
+python3 tools/workload_bench.py --data /tmp/pqdata/1m --repeat 5 --save-results /tmp/base.json \
+    --engine <checkout of 664fd3e>/implementations/python/bin/polyquery
+python3 tools/workload_bench.py --data /tmp/pqdata/1m --repeat 5 --check-results /tmp/base.json
+python3 tools/profile_workload.py --data /tmp/pqdata/1m q14 q19   # cProfile of the parent process
+```
+
+(`--jobs 1`: this sandbox has no POSIX semaphores for `multiprocessing`.)
+
+**What changed, in order of impact** (effects from A/B runs against the
+preceding commit; each change keeps results and conformance identical):
+
+1. **Persistent worker pool + automatic parallelism** (`workers.py`). The
+   existing parallel pipelines forked one process per partition and query;
+   with ~1 GB of tables loaded a fork costs ~6 ms (page tables), so 16
+   workers cost ~100 ms per query and parallelism barely paid off (q04:
+   217 ms serial, 170 ms at 8 threads). The pool forks its workers once per
+   catalog version and keeps them. Per query the parent pickles the
+   pipeline (a few KB: the `Gather`, a picklable task — module-level
+   functions and `functools.partial`s instead of closures —, and the
+   execution settings); tables and indexes travel as *persistent ids* that
+   each worker resolves to its inherited copy-on-write snapshot, so a round
+   trip costs ~0.2 ms. Workers `gc.freeze()` the inherited heap so their
+   collections never touch (and copy) it, reply with length-prefixed
+   frames pickled without the memo (`Pickler.fast`: 3× faster for large
+   results), and the parent decodes each reply as soon as it is complete.
+   Without a `threads` option, vectorized queries now partition every
+   pipeline whose driving scan has ≥ `--parallel-min-rows` rows (now
+   50,000) into one partition per CPU (at most 16) — unless its join build
+   sides scan more than half as many rows as the driving scan, since every
+   worker builds them itself (q12's 100k-row probe against a 250k-row
+   build side runs 3× slower partitioned). Smaller inputs keep exactly
+   their serial plans, so small queries (and the conformance suites) are
+   unaffected. Row mode (the serial baseline) and `native: true` keep one
+   partition unless asked. Effect: 5–9× on every scan / filter /
+   aggregation / join query (q02 137 → 16 ms, q04 217 → 26 ms, q05
+   126 → 15 ms, q17 14 → 2 ms).
+2. **Range-partitioned parallel sort** for full sorts of large pipelines
+   (q14, q15: 1.1–1.4 s → ~0.2 s). (a) The parent picks `k − 1` splitters
+   of the leading sort key from an evenly spaced sample of the driver
+   table's column (or, for computed keys, from samples of every
+   partition). (b) Every partition cuts its rows — kept in input order —
+   into one pickled run per key range. (c) The parent forwards the raw run
+   bytes (no decoding) to the range workers; worker `r` concatenates its
+   runs in partition order and sorts them stably. Rows with equal leading
+   keys share a range and keep their input order, so the concatenated
+   ranges are exactly the serial stable sort, every row is sorted once and
+   no worker reads the whole input. (A first version in which every range
+   worker scanned the whole input was 3× slower: 16 processes scanning the
+   same million strings saturate memory bandwidth.) A sort pass over a
+   least-significant key that is already in order (here `id`) is skipped.
+3. **Hash-exchange aggregation** for GROUP BYs estimated at ≥ 4,096 groups:
+   merging 16 partial states of 10k–100k groups in the parent took longer
+   than the aggregation itself. Now every partition splits its groups by
+   key hash into one part per range; worker `r` merges range `r` and
+   computes its final values; the parent orders the groups by their rank
+   (partition, first-seen position) — exactly the order of a serial scan.
+   q06 ~70 → ~45 ms, q07 ~60 → ~48 ms, q19 ~370 → ~130 ms (with item 5).
+4. **Anti join.** `LEFT JOIN … WHERE r.c IS NULL`, where `r.c` is a right
+   join key or a scanned column whose (exact) statistics count no NULLs, can
+   only keep unmatched left rows. The planner marks such a LEFT hash join
+   (without residual condition) `anti: true`: it builds a set of right keys
+   and emits only unmatched left rows (both engines). q12 ~140 → ~25 ms
+   instead of materializing 250k joined rows to filter them all away.
+5. **Uncorrelated subqueries and shared CTEs.** Plans of uncorrelated
+   subqueries (executed once) are parallelized like the main plan, and the
+   vectorized engine evaluates uncorrelated scalar / EXISTS subqueries once
+   per batch instead of through the per-row fallback. SubqueryScans whose
+   inputs are structurally identical (node fields and expressions with
+   relation ids renumbered, tables by identity), uncorrelated and free of
+   side effects and subqueries — typically two references to one CTE that
+   the optimizer rewrote identically — are marked `shared` (EXPLAIN:
+   `"shared": true`); the first execution materializes the result and the
+   others reuse it. q19 ~140 → ~70 ms.
+6. **Vector kernels.** DECIMAL `+ − ×` with INT64 or differently scaled
+   DECIMAL operands run on whole (rescaled) vectors with one overflow check
+   per batch; INT64 `/` and `%` use C-level floor operations when the
+   dividend is ≥ 0 and the divisor > 0 (equal to truncation then), else the
+   exact per-row kernel. Functions with one varying argument and `LIKE` are
+   evaluated once per distinct value when a batch has few distinct values
+   (dictionary-like columns; not for FLOAT64 because `-0.0 == 0.0`), in
+   first-appearance order so that the first error is the row-by-row one.
+   q20 23 → 15 ms; q08's `bucket % 100` no longer calls a Python function
+   per row. Join build sides that are whole table scans decode each column
+   once instead of batch by batch.
+7. **`result: "count"`** counts the result batches without building row
+   tuples (limits and the memory budget apply as before): building and
+   freeing a million tuples cost ~150 ms in q14/q15.
+
+**Tried and rejected** (measured slower, reverted): building non-unique
+hash tables by sorting positions and slicing runs (4× slower than the dict
+loop); a NULL-aware compress/compute/scatter path for arithmetic (slower
+than CPython 3.14's comprehension); a value-hash exchange for global
+`COUNT(DISTINCT)` (q09: the split costs what the parent saves); tuple keys
+for multi-column sorts (2× slower than one stable pass per key on random
+data); fewer partitions for joins (flat within noise).
+
+**Deliberately not done.** No cross-query caching of results or hash
+tables (repeated benchmark runs would measure the cache), and no skipping of
+work whose output `result: "count"` discards (e.g. the sort of q14/q15):
+every query still computes its full result.
+
+**Robustness.** Pool workers close inherited pipes and sockets (other
+queries' pipes, HTTP connections, the listening socket) and redirect
+stdin/stdout/stderr to `/dev/null`, so the session's stdout reaches EOF
+when the parent exits and a closed HTTP connection is not held open; they
+exit when the parent closes their pipe (or dies). Catalog changes stop
+idle workers at once (busy ones after their query); cancellation and
+timeouts kill them, and the next parallel query forks a new pool. A
+worker error is reported as the error of the first failing partition,
+the one a serial run would hit first. Verified with the unit tests
+(`tests/test_parallel_pool.py`, `tests/test_vector_kernels.py`, which force
+the pool, range sorts, exchange aggregation, anti joins and memoized
+kernels onto small tables), `tools/difftest.py` with those paths forced
+(1,000+ random queries, 0 mismatches), the HTTP suite (18/18) and a manual
+`serve` run with concurrent, timed-out and cancelled 1M-row queries.
 
 ### Native kernels (M9)
 
