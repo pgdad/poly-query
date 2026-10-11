@@ -58,23 +58,57 @@
   (:require [polyquery.plan.access :as access]
             [polyquery.plan.cost :as cost]
             [polyquery.plan.parallel :as parallel]
-            [polyquery.sql.bound :as b]))
+            [polyquery.sql.bound :as b]
+            [polyquery.values :as v])
+  (:import (java.util HashSet)))
 
 (set! *warn-on-reflection* true)
 
 (declare plan-tree)
 
+(defn- materialize-subquery
+  "Replacement of an uncorrelated subquery expression x (with its :plan)
+  by its precomputed result: a literal for scalar and EXISTS subqueries, an
+  :in-set for IN subqueries. (rows-fn plan limit) executes a plan and
+  returns at most limit (nil: all) rows. A scalar subquery with more than
+  one row is kept, so that its error is raised only where execution
+  evaluates it."
+  [x rows-fn]
+  (case (:kind x)
+    :scalar (let [rows (rows-fn (:plan x) 2)]
+              (if (> (count rows) 1)
+                x
+                {:node :literal :type (:type x)
+                 :value (when-let [^objects row (first rows)] (aget row 0))}))
+    :exists {:node :literal :type :boolean :value (boolean (seq (rows-fn (:plan x) 1)))}
+    :in (let [col-type (:type (first (:columns (:plan x))))
+              key-fn (v/key-fn col-type (:cmp-type x))
+              keys (HashSet.)
+              has-null? (reduce (fn [has-null? ^objects row]
+                                  (let [y (aget row 0)]
+                                    (if (nil? y) true (do (.add keys (key-fn y)) has-null?))))
+                                false (rows-fn (:plan x) nil))]
+          {:node :in-set :type :boolean :not? (:not? x) :arg (:arg x) :cmp-type (:cmp-type x)
+           :keys keys :has-null? has-null?})))
+
 (defn- plan-expr
-  "Plans the logical plans of the subquery expressions in e."
+  "Plans the logical plans of the subquery expressions in e. With the
+  option :subquery-rows (see materialize-subquery), uncorrelated subqueries
+  are evaluated now and replaced by their results."
   [options e]
   (when e
     (b/transform (fn [x]
                    (if (and (= :subquery (:node x)) (:logical x))
                      ;; correlated subqueries run once per outer row: serially
-                     (-> x
-                         (assoc :plan (plan-tree (:logical x) (cond-> options
-                                                                (:correlated? x) (assoc :threads 1))))
-                         (dissoc :query :logical))
+                     (let [planned (-> x
+                                       (assoc :plan (plan-tree (:logical x)
+                                                               (cond-> options
+                                                                 (:correlated? x) (assoc :threads 1))))
+                                       (dissoc :query :logical))
+                           rows-fn (:subquery-rows options)]
+                       (if (and rows-fn (not (:correlated? x)))
+                         (materialize-subquery planned rows-fn)
+                         planned))
                      x))
                  e)))
 
@@ -216,7 +250,7 @@
   "Worker threads per query when neither the query nor --threads says."
   (min 8 (.availableProcessors (Runtime/getRuntime))))
 
-(defn- execution-mode
+(defn execution-mode
   "Execution model of a query: `row` (baseline) or `vectorized` (also for
   `auto`, the default)."
   [options]
@@ -235,7 +269,9 @@
   "Physical plan of an optimized logical query plan. options (the query
   options): :optimize bool (default true), :join \"auto\"|\"hash\"|\"merge\"|
   \"nested_loop\", :use-indexes bool (default true), :mode \"auto\"|\"row\"|
-  \"vectorized\", :threads n, :default-threads n, :native bool."
+  \"vectorized\", :threads n, :default-threads n, :native bool; and, from the
+  engine, :subquery-rows (precomputation of uncorrelated subqueries, see
+  plan-expr)."
   [logical options]
   (let [mode (execution-mode options)
         threads (worker-threads options)]

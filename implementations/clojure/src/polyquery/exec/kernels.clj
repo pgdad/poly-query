@@ -94,7 +94,7 @@
   (let [kids-fail? #(boolean (some may-fail? (bound/children e)))]
     (case (:node e)
       (:literal ::vec-literal :column :outer-column) false
-      (:compare :and :or :not :is-null :between :concat :case :in-list :like) (kids-fail?)
+      (:compare :and :or :not :is-null :between :concat :case :in-list :in-set :like) (kids-fail?)
       :cast (or (not (contains? #{[:int64 :float64] [:date :timestamp]}
                                 [(t/kind (:type (:arg e))) (t/kind (:type e))]))
                 (kids-fail?))
@@ -720,6 +720,22 @@
                 out)))))
       (row-kernel env e))))
 
+(defn- in-set-kernel [env e]
+  (let [test (expr/in-set-fn e)
+        xk (compile-kernel env (:arg e))]
+    (if (and (= :string (t/kind (:type (:arg e))))
+             (not (:has-null? e))
+             (not (.isEmpty ^java.util.Set (:keys e))))
+      ;; NULL → NULL, else TRUE/FALSE
+      (string-test-kernel xk test)
+      (reify Kernel
+        (eval [_ bt sel n]
+          (let [x (ev xk bt sel n)
+                out (b/new-vec :boolean)]
+            (each-sel [i sel n]
+              (.setObj out i (test (.getObj x i))))
+            out))))))
+
 (defn- like-kernel [env e]
   (let [pat (:pattern e)]
     (if (= :literal (:node pat))
@@ -924,6 +940,7 @@
     :not (not-kernel env e)
     :is-null (is-null-kernel env e)
     :in-list (in-list-kernel env e)
+    :in-set (in-set-kernel env e)
     :like (like-kernel env e)
     :cast (cast-kernel env e)
     :case (case-kernel env e)

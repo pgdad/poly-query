@@ -290,6 +290,29 @@
                         :else false)]
                 (if not? (not3 r) r)))))))
 
+(defn in-set-fn
+  "Three-valued test of an :in-set node (polyquery.sql.bound) for a value x
+  of its argument — the result of the IN subquery it replaces."
+  [e]
+  (let [^java.util.Set s (:keys e)
+        none? (.isEmpty s)
+        has-null? (boolean (:has-null? e))
+        xkey (v/key-fn (:type (:arg e)) (:cmp-type e))
+        not? (:not? e)]
+    (fn [x]
+      (let [r (cond
+                none? (if has-null? nil false)
+                (nil? x) nil
+                (.contains s (xkey x)) true
+                has-null? nil
+                :else false)]
+        (if not? (not3 r) r)))))
+
+(defn- compile-in-set [c e]
+  (let [xf (compile-expr c (:arg e))
+        test (in-set-fn e)]
+    (fn [row] (test (xf row)))))
+
 ;; ---------------------------------------------------------------------------
 
 (defn compile-expr
@@ -320,6 +343,7 @@
     :like (compile-like c e)
     :between (compile-between c e)
     :in-list (compile-in-list c e)
+    :in-set (compile-in-set c e)
     :subquery (compile-subquery c e)))
 
 (defn compile-predicate

@@ -4,7 +4,8 @@
   The reader is configurable so that the protocol layer gets plain Clojure
   values while ingestion can keep number literal texts and detect duplicate
   object keys."
-  (:import (java.io Writer)))
+  (:import (java.io OutputStream)
+           (java.nio.charset StandardCharsets)))
 
 (set! *warn-on-reflection* true)
 
@@ -181,9 +182,40 @@
 ;; ---------------------------------------------------------------------------
 ;; Writer
 
+(deftype RawJson [^CharSequence text]
+  Object
+  (toString [_] (str text)))
+
+(defn raw
+  "A value written verbatim by the writer: text must be valid JSON."
+  [^CharSequence text]
+  (RawJson. text))
+
+(defn- plain-string?
+  "True when s needs no escaping: no quote, backslash, control character or
+  surrogate."
+  [^String s]
+  (let [n (.length s)]
+    (loop [i 0]
+      (if (< i n)
+        (let [c (int (.charAt s i))]
+          (if (or (< c 0x20) (== c 0x22) (== c 0x5c) (and (>= c 0xd800) (<= c 0xdfff)))
+            false
+            (recur (inc i))))
+        true))))
+
+(declare write-escaped)
+
 (defn write-string
   [^StringBuilder sb ^String s]
   (.append sb \")
+  (if (plain-string? s)
+    (.append sb s)
+    (write-escaped sb s))
+  (.append sb \"))
+
+(defn- write-escaped
+  [^StringBuilder sb ^String s]
   (let [n (.length s)]
     (loop [i 0]
       (when (< i n)
@@ -206,8 +238,7 @@
               (.append sb c)
               (.append sb (format "\\u%04x" ci)))
             :else (.append sb c)))
-        (recur (inc i)))))
-  (.append sb \"))
+        (recur (inc i))))))
 
 (defn write-double
   [^StringBuilder sb ^double d]
@@ -225,6 +256,7 @@
     (instance? Long v) (.append sb (long v))
     (instance? Double v) (write-double sb (double v))
     (instance? JsonNumber v) (.append sb (.-text ^JsonNumber v))
+    (instance? RawJson v) (.append sb (.-text ^RawJson v))
     (integer? v) (.append sb (str v))
     (float? v) (write-double sb (double v))
     (decimal? v) (.append sb (.toPlainString ^java.math.BigDecimal v))
@@ -256,8 +288,10 @@
     (.toString sb)))
 
 (defn write-line!
-  "Writes v as one JSON line and flushes."
-  [^Writer w v]
-  (.write w (write-str v))
-  (.write w "\n")
-  (.flush w))
+  "Writes v as one JSON line (UTF-8) and flushes."
+  [^OutputStream out v]
+  (let [sb (StringBuilder. 256)]
+    (write-value sb v)
+    (.append sb \newline)
+    (.write out (.getBytes (.toString sb) StandardCharsets/UTF_8))
+    (.flush out)))
