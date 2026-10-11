@@ -14,8 +14,8 @@
  *                     16 int64 rows -> 16-bit range-predicate row mask
  *   EMIT8_SETUP, EMIT8
  *                     table-driven compaction of 8 rows into indices
- *   PRED128_BCAST, LD2X4, RNG2, RNG8, PACK8
- *                     128-bit rows: lo/hi split, range predicate, 8-bit mask
+ *   PRED128_BCAST, LD2X4, RNG2, RNG8
+ *                     128-bit rows: broadcast, lo/hi split, range predicate
  *   ADDV2X            horizontal sum of two 2x64-bit counters into a GPR
  *   BITS_TAIL_PUT, BITS_TAIL_STORE, POPCOUNT_TAILCALL
  *                     scalar tail of the 16-row bitmap writers and their
@@ -35,7 +35,7 @@
 /* NEON_TABLES: emits the read-only tables used by the NEON kernels:
  *   .Lneon_bitsel16  16 x u8: bit weight of each row in a byte (1..128, x2)
  *                    users: PACK16 (filter_i64, filter_i64_bitmap,
- *                    compare_i64), PACK8 (filter_i128)
+ *                    compare_i64), PACK8 (filter_i128, kernel-local)
  *   .Lneon_bits2d    8 x u64: CMTST constants 1..128, 2 lanes per vector
  *                    users: VMASK2D (sum_f64, minmax_i64, minmax_f64,
  *                    count_i64, count_i128), minmax_i128 (first 2 lanes)
@@ -306,19 +306,6 @@
     RNG2    2, 3, 23
     RNG2    4, 5, 24
     RNG2    6, 7, 25
-    .endm
-
-/* PACK8 wout: narrows the lane masks v0,v2,v4,v6 (rows 0..7) to an 8-bit row
- * mask (bit j = row j). Needs v28 = .Lneon_bitsel16 (low 8 bytes).
- * Clobbers v0, v4. */
-    .macro  PACK8 wout
-    uzp1    v0.4s, v0.4s, v2.4s
-    uzp1    v4.4s, v4.4s, v6.4s
-    uzp1    v0.8h, v0.8h, v4.8h
-    xtn     v0.8b, v0.8h
-    and     v0.8b, v0.8b, v28.8b
-    addv    b0, v0.8b
-    umov    \wout, v0.b[0]
     .endm
 
 /* ======================================================================

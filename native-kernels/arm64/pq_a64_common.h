@@ -18,7 +18,7 @@
  *   5. Exact integer accumulation: ADD128S, ADD192S, FOLD_SUM64,
  *      FOLD_LIMBS192, BLOCK_END and the result epilogues SUM64_RESULT,
  *      SUM128_RESULT.
- *   6. Min/max: MIN128(V), MAX128(V), MINMAX64_STEP, F64_MINMAX_STEP,
+ *   6. Min/max: MIN128, MAX128, MINMAX64_STEP, F64_MINMAX_STEP,
  *      MINMAX_RESULT, MINMAX128_RESULT, F64_FIRST_ZERO.
  *   7. Bitmaps and bit counting: SBITMAP_PUT / SBITMAP_FLUSH (scalar bitmap
  *      writer), BITOP_STEP8, BITOP_BYTES, LOWBITS, ADD_CNT8, ADD_POPCNT_LOW.
@@ -452,25 +452,6 @@
     sbcs    xzr, x\mh, x\xh
     csel    x\ml, x\xl, x\ml, lt
     csel    x\mh, x\xh, x\mh, lt
-    .endm
-
-/* MIN128V / MAX128V ml, mh, xl, xh, v : as MIN128 / MAX128, but only when
- * w<v> (0 or 1) is 1. CCMP folds the validity into the condition:
- * if lt then Z = (v == 0) else Z = 1; the update happens on ne. */
-    .macro MIN128V ml, mh, xl, xh, v
-    cmp     x\xl, x\ml
-    sbcs    xzr, x\xh, x\mh
-    ccmp    w\v, #0, #4, lt
-    csel    x\ml, x\xl, x\ml, ne
-    csel    x\mh, x\xh, x\mh, ne
-    .endm
-
-    .macro MAX128V ml, mh, xl, xh, v
-    cmp     x\ml, x\xl
-    sbcs    xzr, x\mh, x\xh
-    ccmp    w\v, #0, #4, lt
-    csel    x\ml, x\xl, x\ml, ne
-    csel    x\mh, x\xh, x\mh, ne
     .endm
 
 /* MINMAX64_STEP mn, mx, cmin, cmax : signed int64 update

@@ -967,7 +967,8 @@ FUNC pqk_a64_neon_compare_fixed
     b       .Lneon_compare_fixed_diff
     CFX_BYTES w8, w9, .Lneon_compare_fixed_tail_bytes, .Lneon_compare_fixed_eq
     // -- 4. result: per record, then next record
-    CFX_RESULT w10, .Lneon_compare_fixed_diff, .Lneon_compare_fixed_eq, .Lneon_compare_fixed_next, .Lneon_compare_fixed_rec
+    CFX_RESULT w10, .Lneon_compare_fixed_diff, .Lneon_compare_fixed_eq, \
+               .Lneon_compare_fixed_next, .Lneon_compare_fixed_rec
 .Lneon_compare_fixed_result:
     ret
 ENDF pqk_a64_neon_compare_fixed
@@ -1164,6 +1165,19 @@ ENDF pqk_a64_neon_gather_i64
  *            inside the documented capacity >= n).
  * Tail:      0-7 rows: scalar SPRED128 + AND_VBIT, unconditional store.
  * ======================================================================== */
+/* PACK8 wout: narrows the lane masks v0,v2,v4,v6 (rows 0..7) to an 8-bit row
+ * mask (bit j = row j). Needs v28 = .Lneon_bitsel16 (low 8 bytes).
+ * Clobbers v0, v4. */
+    .macro  PACK8 wout
+    uzp1    v0.4s, v0.4s, v2.4s
+    uzp1    v4.4s, v4.4s, v6.4s
+    uzp1    v0.8h, v0.8h, v4.8h
+    xtn     v0.8b, v0.8h
+    and     v0.8b, v0.8b, v28.8b
+    addv    b0, v0.8b
+    umov    \wout, v0.b[0]
+    .endm
+
 FUNC pqk_a64_neon_filter_i128
     // -- 1. arguments / empty input
     PRED128_SETUP w3, x4, x5, x7, x8, x9, x10, x11, x12, x13, .Lneon_filter_i128_inval

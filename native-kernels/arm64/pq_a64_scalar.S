@@ -32,10 +32,11 @@
  *
  * Shared building blocks come from pq_a64_common.h (PRED_SETUP,
  * PRED128_SETUP, CMPOP_CHECK/SWAP, SPRED, SPRED128, VBIT, AND_VBIT, ADD128S,
- * ADD192S, SUM64/128_RESULT, MIN128(V)/MAX128(V), MINMAX(128)_RESULT,
- * SBITMAP_PUT/FLUSH, BITOP_STEP8/BYTES, LOWBITS, LOAD_FMIX, FMIX1, CFX_BYTES,
- * CFX_RESULT, GSUM_ADD/ROWS, return helpers). Macros used by a single kernel
- * (SCALAR_BITOP, SWARPOP, SCALAR_CMPBITS) are defined next to that kernel.
+ * ADD192S, SUM64/128_RESULT, MIN128/MAX128, MINMAX64_STEP, F64_MINMAX_STEP,
+ * MINMAX(128)_RESULT, SBITMAP_PUT/FLUSH, BITOP_STEP8/BYTES, LOWBITS,
+ * LOAD_FMIX, FMIX1, CFX_BYTES, CFX_RESULT, GSUM_ADD/ROWS, return helpers).
+ * Macros used by a single kernel (SCALAR_BITOP, SWARPOP, SCALAR_CMPBITS,
+ * MIN128V/MAX128V) are defined next to that kernel.
  */
 #include "pq_a64_common.h"
 
@@ -523,7 +524,8 @@ FUNC pqk_a64_scalar_compare_fixed
     // -- 3. tail: bytes of the record
     CFX_BYTES w6, w7, .Lscalar_compare_fixed_tail, .Lscalar_compare_fixed_eq
     // -- 4. result: per record, then next record
-    CFX_RESULT w8, .Lscalar_compare_fixed_diff, .Lscalar_compare_fixed_eq, .Lscalar_compare_fixed_next, .Lscalar_compare_fixed_rec
+    CFX_RESULT w8, .Lscalar_compare_fixed_diff, .Lscalar_compare_fixed_eq, \
+               .Lscalar_compare_fixed_next, .Lscalar_compare_fixed_rec
 .Lscalar_compare_fixed_result:
     ret
 ENDF pqk_a64_scalar_compare_fixed
@@ -735,6 +737,25 @@ ENDF pqk_a64_scalar_sum_i128
  *            initialisation (integers: ties are indistinguishable).
  * Tail:      none (one row per iteration).
  * ======================================================================== */
+/* MIN128V / MAX128V ml, mh, xl, xh, v : as MIN128 / MAX128, but only when
+ * w<v> (0 or 1) is 1. CCMP folds the validity into the condition:
+ * if lt then Z = (v == 0) else Z = 1; the update happens on ne. */
+    .macro MIN128V ml, mh, xl, xh, v
+    cmp     x\xl, x\ml
+    sbcs    xzr, x\xh, x\mh
+    ccmp    w\v, #0, #4, lt
+    csel    x\ml, x\xl, x\ml, ne
+    csel    x\mh, x\xh, x\mh, ne
+    .endm
+
+    .macro MAX128V ml, mh, xl, xh, v
+    cmp     x\ml, x\xl
+    sbcs    xzr, x\mh, x\xh
+    ccmp    w\v, #0, #4, lt
+    csel    x\ml, x\xl, x\ml, ne
+    csel    x\mh, x\xh, x\mh, ne
+    .endm
+
 FUNC pqk_a64_scalar_minmax_i128
     // -- 1. arguments / empty input
     mov     x5, #0
