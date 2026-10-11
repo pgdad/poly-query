@@ -523,6 +523,82 @@
     (or (aget accs g)
         (let [a (factory)] (aset accs g a) a))))
 
+(definterface LongValues
+  (^boolean add [^long k] "Adds k; true if it was new.")
+  (^long size [])
+  (^longs values [] "The distinct values (in table order)."))
+
+(deftype LongSet [^:unsynchronized-mutable ^longs slots ; 0 = empty slot
+                  ^:unsynchronized-mutable ^long mask
+                  ^:unsynchronized-mutable ^long cnt   ; non-zero values
+                  ^:unsynchronized-mutable ^long zeros]  ; 1 if 0 was added
+  LongValues
+  (add [this k]
+    (if (zero? k)
+      (if (== zeros 1) false (do (set! zeros 1) true))
+      (loop [s (bit-and (mix k) mask)]
+        (let [x (aget slots s)]
+          (cond
+            (zero? x) (do (aset slots s k)
+                          (set! cnt (inc cnt))
+                          (when (> (* 2 cnt) mask)
+                            (let [old slots
+                                  cap (* 2 (inc mask))
+                                  nslots (long-array cap)
+                                  nmask (dec cap)]
+                              (dotimes [i (alength old)]
+                                (let [y (aget old i)]
+                                  (when-not (zero? y)
+                                    (loop [t (bit-and (mix y) nmask)]
+                                      (if (zero? (aget nslots t))
+                                        (aset nslots t y)
+                                        (recur (bit-and (inc t) nmask)))))))
+                              (set! slots nslots)
+                              (set! mask nmask)))
+                          true)
+            (== x k) false
+            :else (recur (bit-and (inc s) mask)))))))
+  (size [_] (+ cnt zeros))
+  (values [this]
+    (let [out (long-array (.size this))]
+      (loop [i 0 j zeros]
+        (if (< i (alength slots))
+          (let [y (aget slots i)]
+            (if (zero? y) (recur (inc i) j) (do (aset out j y) (recur (inc i) (inc j)))))
+          out)))))
+
+(defn long-set ^polyquery.exec.grouping.LongSet [] (LongSet. (long-array 8) 7 0 0))
+
+(deftype LongDistinctState [count? factory ^:unsynchronized-mutable ^objects sets]
+  ;; DISTINCT aggregate of integer-like values: one primitive LongSet per
+  ;; group; the result feeds the distinct values to the plain accumulator
+  ;; (COUNT: the set size), exactly as polyquery.exec.aggregate/DistinctValues
+  AggState
+  (grow [_ size] (set! sets (grow-objects sets size)))
+  (update [this gids arg sel n]
+    (let [^LongVec x arg
+          vals ^longs (.-v x)
+          nulls ^booleans (.-nulls x)]
+      (each-sel [i sel n]
+        (when-not (b/nulls-at? nulls i)
+          (.add ^LongSet (.acc this (aget gids i)) (aget vals i))))))
+  (mergeFrom [this other from to]
+    (let [^LongSet into (.acc this to)
+          ^longs vs (.values ^LongSet (.acc ^Accs other from))]
+      (dotimes [i (alength vs)] (.add into (aget vs i)))))
+  (result [this gid]
+    (let [^LongSet st (.acc this gid)]
+      (if count?
+        (.size st)
+        (let [^Accumulator acc (factory)
+              ^longs vs (.values st)]
+          (dotimes [i (alength vs)] (.add acc (aget vs i)))
+          (.result acc)))))
+  Accs
+  (acc [_ g]
+    (or (aget sets g)
+        (let [st (long-set)] (aset sets g st) st))))
+
 (defn agg-state
   "A fresh aggregate state for aggregate spec (polyquery.sql.bound); lib:
   the native kernel library or nil."
@@ -533,6 +609,10 @@
          vbits (when lib (bits/bitmap))]
      (cond
        (= f :count-star) (CountState. true (long-array 16))
+       (and distinct? (#{:count :sum :avg :min :max} f) (= :long (b/vec-kind at)))
+       (LongDistinctState. (= f :count) (agg/accumulator-factory (assoc spec :distinct? false))
+                           (object-array 16))
+
        distinct? (AccState. (agg/accumulator-factory spec) (object-array 16))
        (= f :count) (CountState. false (long-array 16))
 
