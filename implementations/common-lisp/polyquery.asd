@@ -43,13 +43,21 @@
                  (:file "functions")
                  (:file "binder")
                  (:file "query")))
+   (:module "native" :serial t
+    :components ((:file "kernels")))
    (:module "plan" :serial t
     :components ((:file "logical")
+                 (:file "estimates")
+                 (:module "rules" :serial t
+                  :components ((:file "constant-folding")
+                               (:file "predicate-simplification")
+                               (:file "predicate-pushdown")
+                               (:file "join-reordering")
+                               (:file "column-pruning")))
+                 (:file "builder")
                  (:file "optimizer")
                  (:file "access")
                  (:file "physical")))
-   (:module "native" :serial t
-    :components ((:file "kernels")))
    (:module "exec" :serial t
     :components ((:file "expressions")
                  (:file "aggregates")

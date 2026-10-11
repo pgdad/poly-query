@@ -1,5 +1,7 @@
-;;;; physical.lisp — physical planning: choose an operator implementation for
-;;;; every logical node, plan subqueries, and render plans as EXPLAIN JSON.
+;;;; physical.lisp — physical planning: map an optimized logical plan to
+;;;; physical operators, decide how the statement executes, and render
+;;;; physical plans as EXPLAIN JSON. All physical decisions are taken here
+;;;; (and in access.lisp), none in the logical layer.
 ;;;;
 ;;;; Operator choices:
 ;;;;   Scan       -> TableScan (reads only the pruned columns)
@@ -22,6 +24,14 @@
 ;;;;   Distinct   -> HashDistinct
 ;;;;   Sort+Limit -> TopN when the limit is a small constant, else Sort, Limit
 ;;;;   UnionAll   -> UnionAll (the branches' rows one branch after another)
+;;;;   SubqueryAlias -> (nothing: the plan of the derived table itself)
+;;;; Expression subqueries get physical plans of their own logical plans
+;;;; (SUBQUERY-PLAN).
+;;;;
+;;;; Execution: the EXECUTION-SETTINGS of a PHYSICAL-QUERY fix the executor
+;;;; (`mode`: row, or vectorized for `vectorized`/`auto`), the worker
+;;;; threads of parallel operators and the use of the native kernels
+;;;; (vectorized execution with `native: true` and the library loaded).
 
 (in-package #:polyquery)
 
@@ -97,10 +107,29 @@ row operator in the vectorized executor (voperators.lisp)."
 ;;; ------------------------------------------------------------------
 ;;; Entry point
 
-(defun plan-bound-query (bq)
-  "Full planning pipeline for an analysed query: logical plan, logical
-optimization, physical plan (including the plans of nested subqueries)."
-  (physical-plan (optimize-logical-plan (plan-query bq))))
+(defstruct physical-query
+  "A planned statement: the physical operator tree and how to execute it."
+  root                                   ; PNODE
+  settings)                              ; EXECUTION-SETTINGS
+
+(defun plan-bound-query (bq &optional (options *exec-options*))
+  "Full planning pipeline for an analysed query under the EXEC-OPTIONS
+OPTIONS: logical plan, logical optimization, physical plan (including the
+plans of nested subqueries) and execution settings."
+  (let ((*exec-options* options)
+        (*use-indexes* (exec-options-use-indexes options)))
+    (make-physical-query
+     :root (physical-plan (optimize-logical-plan (build-logical-plan bq)
+                                                 :enabled (exec-options-optimize options)))
+     :settings (choose-execution-settings options))))
+
+(defun choose-execution-settings (options)
+  "The EXECUTION-SETTINGS for a statement run with the EXEC-OPTIONS OPTIONS."
+  (let ((vectorized (not (eq (exec-options-mode options) :row))))
+    (make-execution-settings :mode (if vectorized :vectorized :row)
+                             :threads (exec-options-threads options)
+                             :native (and vectorized (exec-options-native options)
+                                          (native-loaded-p)))))
 
 ;;; ------------------------------------------------------------------
 ;;; Logical -> physical
@@ -116,7 +145,7 @@ optimization, physical plan (including the plans of nested subqueries)."
                     (when (subquery-op-p x)
                       (let ((sq (b-op-info x)))
                         (unless (subquery-plan sq)
-                          (setf (subquery-plan sq) (plan-bound-query (subquery-query sq)))))))
+                          (setf (subquery-plan sq) (physical-plan (subquery-logical-plan sq)))))))
                   e))))
 
 (defun equi-join-keys (condition left-width width)
@@ -180,7 +209,8 @@ residual-conjuncts); right keys index the right input."
                               :offset (lp-limit-offset node) :columns columns))))
         (lp-union-all
          (make-pp-union-all :children (mapcar #'physical-plan (lnode-children node))
-                            :columns columns))))))
+                            :columns columns))
+        (lp-subquery-alias (child))))))
 
 (defun parameter-only-p (e)
   "True if E reads no columns but depends on correlation parameters."

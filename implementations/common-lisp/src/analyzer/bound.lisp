@@ -55,7 +55,8 @@ parameter expressions, which are evaluated in the enclosing row."
   (param-env (make-param-env))
   (param-count 0)
   (cacheable t)                         ; NIL if results depend on foreign parameters
-  plan)                                 ; physical plan, filled in by the planner
+  logical-plan                          ; logical plan, filled in by the plan builder
+  plan)                                 ; physical plan, filled in by the physical planner
 
 (defun subquery-op-p (e)
   (and (b-op-p e) (eq (b-op-op e) :subquery)))
@@ -219,7 +220,8 @@ aggregation row [group keys..., aggregate values...]."
   relation table)
 
 (defstruct (bf-derived (:include bf-node))
-  relation query)
+  relation query
+  (cte nil))               ; true for a CTE reference
 
 (defstruct (bf-join (:include bf-node))
   kind left right condition)   ; kind :INNER :LEFT :CROSS; condition over the FROM row

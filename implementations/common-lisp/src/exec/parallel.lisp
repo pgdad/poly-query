@@ -36,7 +36,7 @@
       16384))
 
 (defun parallel-threads ()
-  (if *parallel-disabled* 1 (exec-options-threads *exec-options*)))
+  (if *parallel-disabled* 1 (execution-settings-threads *execution-settings*)))
 
 ;;; ------------------------------------------------------------------
 ;;; Pipelines
@@ -192,7 +192,7 @@ are no longer started."
   "Start COUNT workers calling (BODY worker-index) with the query's dynamic
 environment; register their shutdown as a query cleanup."
   (let ((ctx *query-context*)
-        (options *exec-options*))
+        (settings *execution-settings*))
     (add-query-cleanup (lambda () (prun-stop run)))
     (setf (prun-threads run)
           (loop for w below count
@@ -200,7 +200,7 @@ environment; register their shutdown as a query cleanup."
                           (sb-thread:make-thread
                            (lambda ()
                              (let ((*query-context* ctx)
-                                   (*exec-options* options)
+                                   (*execution-settings* settings)
                                    (*parallel-disabled* t))
                                (sb-int:with-float-traps-masked
                                    (:overflow :invalid :divide-by-zero :inexact :underflow)

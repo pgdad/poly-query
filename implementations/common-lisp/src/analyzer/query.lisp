@@ -84,7 +84,7 @@ such subqueries must not cache their results."
                         (let ((rel (add-relation node (or (ast-table-ref-alias node) (cte-binding-name cte))
                                                  (cte-binding-columns cte) offset)))
                           (note-cte-reference cte)
-                          (make-bf-derived :relation rel :query (cte-binding-query cte)
+                          (make-bf-derived :relation rel :query (cte-binding-query cte) :cte t
                                            :relation-list (list rel) :offset offset
                                            :width (length (relation-columns rel))))
                         (let ((table (catalog-find-table (bind-env-catalog env) name)))

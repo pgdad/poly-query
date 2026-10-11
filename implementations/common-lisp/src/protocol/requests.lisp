@@ -254,7 +254,7 @@ in (the HTTP server creates it at admission so queued time counts)."
 (defun native-kernels-stat (options)
   "The `stats.native_kernels` field of a query response: the active kernel
 variant when the query ran with native kernels, else omitted."
-  (if (and (native-kernels-enabled-p options) (vectorized-execution-p options))
+  (if (native-kernels-enabled-p (choose-execution-settings options))
       (native-library-variant *native-library*)
       :omit))
 
