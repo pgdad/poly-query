@@ -260,11 +260,19 @@ class WorkerPool:
     # ------------------------------------------------------------ queries
 
     def run(
-        self, gather: pp.Gather, ctx: ExecutionContext, task: Task, prepare: Prepare | None
+        self,
+        gather: pp.Gather,
+        ctx: ExecutionContext,
+        task: Task,
+        prepare: Prepare | None,
+        count: int | None = None,
+        inputs: dict[int, Any] | None = None,
     ) -> list[Any] | None:
-        """Runs ``task`` for every partition of ``gather`` in the workers and
-        returns the results in partition order; None if the pool cannot run
-        it (busy with another query, or the task cannot be pickled)."""
+        """Runs ``task`` for every partition of ``gather`` (or for ``count``
+        task indexes) in the workers and returns the results in partition
+        order; None if the pool cannot run it (busy with another query, or
+        the task cannot be pickled). ``inputs[i]`` is sent only to the
+        worker running task ``i`` (``ctx.task_inputs[i]`` there)."""
         if not self._lock.acquire(blocking=False):
             return None
         try:
@@ -273,13 +281,15 @@ class WorkerPool:
             payload = self._payload(gather, ctx, task, prepare)
             if payload is None:
                 return None
-            count = gather.partitions
+            count = gather.partitions if count is None else count
             k = min(count, self.max_workers)
             self._ensure(k)
             workers = self._workers[:k]
             try:
                 for w, worker in enumerate(workers):
-                    _write_frame(worker.task_fd, pickle.dumps(list(range(w, count, k))))
+                    indexes = list(range(w, count, k))
+                    own = {i: inputs[i] for i in indexes if i in inputs} if inputs else {}
+                    _write_frame(worker.task_fd, pickle.dumps((indexes, own), protocol=pickle.HIGHEST_PROTOCOL))
                     _write_frame(worker.task_fd, payload)
                 replies = self._collect(workers, ctx)
             except BaseException:
@@ -359,6 +369,21 @@ def _results(replies: list[bytes], count: int, k: int) -> list[Any]:
 # ------------------------------------------------------------ worker side
 
 
+def dumps_result(value: Any) -> bytes:
+    """Pickles a result without the memo (``fast`` mode): results are acyclic
+    value lists whose objects' identities do not matter, and memoizing every
+    object of a large result triples the pickling time. Falls back to
+    regular pickling for cyclic objects."""
+    buffer = io.BytesIO()
+    pickler = pickle.Pickler(buffer, protocol=pickle.HIGHEST_PROTOCOL)
+    pickler.fast = True
+    try:
+        pickler.dump(value)
+    except ValueError:
+        return pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    return buffer.getvalue()
+
+
 def _worker_main(task_fd: int, result_fd: int, registry: dict[int, Any]) -> None:  # pragma: no cover
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
@@ -374,14 +399,16 @@ def _worker_main(task_fd: int, result_fd: int, registry: dict[int, Any]) -> None
         payload = _read_frame(task_fd) if header is not None else None
         if payload is None:
             return  # the parent closed the pipe (pool stopped or parent gone)
-        indexes: list[int] = pickle.loads(header)  # type: ignore[arg-type]
-        reply = _run_task(payload, indexes, registry)
+        indexes, inputs = pickle.loads(header)  # type: ignore[arg-type]
+        reply = _run_task(payload, indexes, inputs, registry)
         _write_frame(result_fd, reply)
         del reply, payload
         gc.collect()
 
 
-def _run_task(payload: bytes, indexes: list[int], registry: dict[int, Any]) -> bytes:  # pragma: no cover
+def _run_task(
+    payload: bytes, indexes: list[int], inputs: dict[int, Any], registry: dict[int, Any]
+) -> bytes:  # pragma: no cover
     from .parallel import in_partition  # local import: parallel uses this module
 
     first = indexes[0] if indexes else 0
@@ -389,6 +416,7 @@ def _run_task(payload: bytes, indexes: list[int], registry: dict[int, Any]) -> b
     try:
         gather, task, prepare, state = _PlanUnpickler(io.BytesIO(payload), registry).load()
         ctx = _worker_context(state)
+        ctx.task_inputs = inputs
         if prepare is not None:
             prepare(gather, ctx)
         results = []
@@ -405,7 +433,7 @@ def _run_task(payload: bytes, indexes: list[int], registry: dict[int, Any]) -> b
     except Exception as e:
         reply = (False, (current, errors.PolyQueryError(errors.INTERNAL_ERROR, f"parallel worker failed: {e!r}")))
     try:
-        return pickle.dumps(reply, protocol=pickle.HIGHEST_PROTOCOL)
+        return dumps_result(reply)
     except Exception as e:
         failure = errors.PolyQueryError(errors.INTERNAL_ERROR, f"parallel worker result not picklable: {e!r}")
         return pickle.dumps((False, (first, failure)))

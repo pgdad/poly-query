@@ -823,6 +823,9 @@ MAX_PARTITIONS = 64
 # sort) is parallelized only if it is expected to return at most this
 # fraction of the rows it scans: every row of a worker process is pickled
 ROOT_GATHER_MAX_SELECTIVITY = 0.25
+# full sorts of pipelines scanning fewer rows are not parallelized unless
+# the pipeline is selective (range partitioning pays off for large inputs)
+RANGE_SORT_MIN_ROWS = 100_000
 
 
 def parallelize(root: PhysicalNode, partitions: int, min_rows: float = 0) -> PhysicalNode:
@@ -846,6 +849,20 @@ def _gather_selective(node: PhysicalNode, partitions: int, min_rows: float) -> P
     return _estimated(Gather(node, partitions, path[-1]), node.estimated_rows)
 
 
+def _gather_large(node: PhysicalNode, partitions: int, min_rows: float) -> PhysicalNode:
+    """A Gather over a large pipeline below a full sort (which the
+    vectorized engine sorts by key ranges in parallel)."""
+    path = pipeline_path(node)
+    if path is None or path[-1].estimated_rows < max(min_rows, RANGE_SORT_MIN_ROWS):
+        return node
+    return _estimated(Gather(node, partitions, path[-1]), node.estimated_rows)
+
+
+def is_selective(gather: Gather) -> bool:
+    """Whether a Gather's pipeline returns few of the rows it scans."""
+    return gather.estimated_rows <= ROOT_GATHER_MAX_SELECTIVITY * max(gather.driver.estimated_rows, 1.0)
+
+
 def _parallelize_inputs(node: PhysicalNode, partitions: int, min_rows: float) -> None:
     for child in node.inputs():
         _parallelize_inputs(child, partitions, min_rows)
@@ -854,7 +871,10 @@ def _parallelize_inputs(node: PhysicalNode, partitions: int, min_rows: float) ->
         if path is not None and path[-1].estimated_rows >= min_rows:
             node.input = _estimated(Gather(node.input, partitions, path[-1]), node.input.estimated_rows)
     elif isinstance(node, Sort):
-        node.input = _gather_selective(node.input, partitions, min_rows)
+        gathered = _gather_selective(node.input, partitions, min_rows)
+        if gathered is node.input:
+            gathered = _gather_large(node.input, partitions, min_rows)
+        node.input = gathered
     elif isinstance(node, UnionAll):
         node.branches = [_gather_selective(branch, partitions, min_rows) for branch in node.branches]
 

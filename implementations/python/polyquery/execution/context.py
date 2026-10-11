@@ -56,6 +56,8 @@ class ExecutionContext:
     lookup_tables: dict[tuple, dict[Any, list[tuple]]] = field(default_factory=dict, init=False)
     # join build sides prepared once for all partitions of a parallel pipeline
     prepared: dict[tuple[int, str], Any] = field(default_factory=dict, init=False)
+    # per-task inputs of the tasks a pool worker runs, by task index
+    task_inputs: dict[int, Any] = field(default_factory=dict, init=False)
 
     def cached(self, owner: object, tag: str, factory: Callable[[], Any]) -> Any:
         """Returns the value cached for ``(owner, tag)``, creating it on first use."""

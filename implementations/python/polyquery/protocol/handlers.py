@@ -395,10 +395,12 @@ class RequestHandler:
 
     def op_query(self, req: dict, control: QueryControl | None = None) -> dict[str, Any]:
         sql, options, count_only = self._query_request(req, control)
+        if count_only:
+            columns, row_count = self.engine.count(sql, options)
+            return {"columns": [c.to_json() for c in columns], "row_count": row_count, "stats": {}}
         result = self.engine.query(sql, options)
         body: dict[str, Any] = {"columns": [c.to_json() for c in result.columns]}
-        if not count_only:
-            body["rows"] = serialize_rows(result.columns, result.rows)
+        body["rows"] = serialize_rows(result.columns, result.rows)
         body["row_count"] = len(result.rows)
         body["stats"] = {}
         return body

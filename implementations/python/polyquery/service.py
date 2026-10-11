@@ -14,7 +14,7 @@ from .analysis.binder import Binder
 from .datatypes import STRING
 from .execution.compiler import evaluate_constant
 from .execution.context import DEFAULT_PARALLEL_MIN_ROWS, ExecutionContext
-from .execution.executor import QueryResult, run_plan, stream_plan
+from .execution.executor import QueryResult, count_plan, run_plan, stream_plan
 from .execution.native_ops import kernel_plan
 from .execution.workers import WorkerPool, available_cpus
 from .ingest.limits import DEFAULT_MAX_INGEST_BYTES, DEFAULT_MAX_TABLE_ROWS, IngestLimits
@@ -175,6 +175,16 @@ class Engine:
             return self._run_statement(statement, options)
         plan, ctx = self._prepare(statement.query, options)
         return run_plan(plan, ctx, max_rows=options.max_rows)
+
+    def count(self, sql: str, options: QueryOptions) -> tuple[list[Column], int]:
+        """Runs a statement to completion; returns its columns and row count
+        (``result: "count"``: the rows are not built)."""
+        statement = parse(sql)
+        if not isinstance(statement, ast.QueryStatement):
+            result = self._run_statement(statement, options)
+            return result.columns, len(result.rows)
+        plan, ctx = self._prepare(statement.query, options)
+        return plan.columns, count_plan(plan, ctx, max_rows=options.max_rows)
 
     def open_cursor(self, sql: str, options: QueryOptions) -> QueryCursor:
         """Parses, binds and plans a statement (raising errors found up to
