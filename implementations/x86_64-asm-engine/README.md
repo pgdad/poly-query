@@ -210,8 +210,9 @@ concurrent replace, drop or reset in the server never affects it, readers
 never block each other, and a crash or runaway query cannot corrupt the
 server. A `pthread` mutex (`cat_lock`) held by the catalog worker while it
 changes the catalog is taken with `trylock` around `fork()`, so a snapshot is
-never torn; `load` releases it while it reads and parses its input (the new
-table is published only afterwards), so a long load does not delay queries.
+never torn; `load` and `open` release it while they read and parse their
+input (the new table is published only afterwards), so a long load does not
+delay queries.
 The child writes the HTTP response straight to the client socket (blocking
 writes, so a slow streaming client applies backpressure to execution),
 publishes its status and row count in a small `MAP_SHARED` record, and
@@ -347,6 +348,6 @@ later); the process exits 0 once nothing is left.
   query in the query's arena (memory grows with the result, the output
   buffer does not).
 * Catalog operations are serialized in one worker thread: a long `save`,
-  `open` or `CREATE INDEX` delays other catalog operations (not queries
+  `stats` or `CREATE INDEX` delays other catalog operations (not queries
   already admitted, `/health`, `/metrics` or cancellation); new queries wait
   for the catalog lock while such an operation changes the catalog.

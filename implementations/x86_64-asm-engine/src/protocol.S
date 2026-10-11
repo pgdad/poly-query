@@ -1454,7 +1454,10 @@ FUNC op_open
     cmpq $LAYOUT_COLUMN, OP_LAYOUT(%rsp)
     jne 21f
     mov $PQ_MMAP_LAZY, %edx
-21: mov %r13, %rdi
+21: mov %edx, %r14d
+    call cat_parse_begin            /* reading needs no catalog lock */
+    mov %r14d, %edx
+    mov %r13, %rdi
     mov OP_NAME(%rsp), %rsi
     mov OP_IX(%rsp), %rcx
     call pqcf_read
@@ -1463,6 +1466,7 @@ FUNC op_open
     mov OP_LAYOUT(%rsp), %rsi
     mov OP_DICT(%rsp), %rdx
     call table_finalize
+    call cat_parse_end
     /* index names: unique in the file, and free in the catalog (the replaced
      * table's own indexes are dropped with it) */
     mov OP_IX(%rsp), %r14
