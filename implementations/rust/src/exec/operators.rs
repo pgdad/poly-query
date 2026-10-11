@@ -244,6 +244,8 @@ pub fn build_row(plan: PhysicalPlan) -> Box<dyn Operator> {
         PhysicalPlan::UnionAll { inputs, .. } => Box::new(UnionAllOp {
             inputs: inputs.into_iter().map(build_row).collect(),
         }),
+        // Row-at-a-time execution recomputes shared subplans.
+        PhysicalPlan::Shared { input, .. } => build_row(*input),
     }
 }
 

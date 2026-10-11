@@ -6,7 +6,7 @@ use super::join::{HashJoinOp, JoinSpec, MergeJoinOp, NestedLoopJoinOp};
 use super::keys::KeyTable;
 use super::ops::{
     AggregateOp, BoxedBatchOp, DistinctOp, FilterOp, IndexScanOp, LimitOp, ProjectOp, RowSource,
-    ScanOp, SortOp, UnionAllOp, ValuesOp, full_ranges,
+    ScanOp, SharedOp, SortOp, UnionAllOp, ValuesOp, full_ranges,
 };
 
 use crate::exec::ExecContext;
@@ -212,6 +212,15 @@ fn build_serial(plan: PhysicalPlan, ctx: &ExecContext, parallel: bool) -> BoxedB
                 input: build_with(*input, ctx, !small),
                 offset,
                 remaining: limit,
+            })
+        }
+        PhysicalPlan::Shared { id, input } => {
+            let width = input.schema().len();
+            Box::new(SharedOp {
+                id,
+                input: Some(build(*input, ctx)),
+                width,
+                output: Default::default(),
             })
         }
         PhysicalPlan::UnionAll { inputs, .. } => Box::new(UnionAllOp {

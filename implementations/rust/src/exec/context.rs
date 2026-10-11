@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use super::operators::Row;
 use super::subquery::SubqueryResult;
+use super::vector::Batch;
 use crate::error::{Error, ErrorCode, Result};
 use crate::planner::physical::{Execution, PhysicalQuery, PhysicalSubquery, SubqueryPlans};
 use crate::types::Value;
@@ -58,6 +59,8 @@ pub struct ExecContext {
     results: RefCell<HashMap<SubqueryKey, Rc<SubqueryResult>>>,
     /// ParamLookup hash tables by node id.
     lookups: RefCell<HashMap<usize, Rc<LookupTable>>>,
+    /// Materialized shared subplans by id.
+    shared_results: RefCell<HashMap<usize, Arc<[Batch]>>>,
 }
 
 impl Default for ExecContext {
@@ -83,6 +86,7 @@ impl ExecContext {
             params: RefCell::new(Vec::new()),
             results: RefCell::new(HashMap::new()),
             lookups: RefCell::new(HashMap::new()),
+            shared_results: RefCell::new(HashMap::new()),
         }
     }
 
@@ -259,6 +263,15 @@ impl ExecContext {
     pub fn cache_lookup(&self, id: usize, table: Rc<LookupTable>) {
         self.lookups.borrow_mut().insert(id, table);
     }
+
+    /// The rows of shared subplan `id`, if already computed.
+    pub fn shared_result(&self, id: usize) -> Option<Arc<[Batch]>> {
+        self.shared_results.borrow().get(&id).cloned()
+    }
+
+    pub fn cache_shared_result(&self, id: usize, rows: Arc<[Batch]>) {
+        self.shared_results.borrow_mut().insert(id, rows);
+    }
 }
 
 /// Sendable description of a query's execution context (see
@@ -295,6 +308,7 @@ impl ContextSeed {
             params: RefCell::new(self.params.clone()),
             results: RefCell::new(HashMap::new()),
             lookups: RefCell::new(HashMap::new()),
+            shared_results: RefCell::new(HashMap::new()),
         }
     }
 

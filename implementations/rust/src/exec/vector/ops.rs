@@ -490,6 +490,38 @@ impl BatchOperator for LimitOp {
     }
 }
 
+/// A subplan occurring several times in the statement: the first
+/// execution materializes its rows in the query's context, later ones (of
+/// the other occurrences) replay them.
+pub struct SharedOp {
+    pub id: usize,
+    pub input: Option<BoxedBatchOp>,
+    pub width: usize,
+    pub output: VecDeque<Batch>,
+}
+
+impl BatchOperator for SharedOp {
+    fn next_batch(&mut self, ctx: &ExecContext) -> Result<Option<Batch>> {
+        if let Some(mut input) = self.input.take() {
+            let rows = match ctx.shared_result(self.id) {
+                Some(rows) => rows,
+                None => {
+                    let mut batches = Vec::new();
+                    while let Some(b) = input.next_batch(ctx)? {
+                        ctx.reserve(b.approx_size())?;
+                        batches.push(b);
+                    }
+                    let rows: Arc<[Batch]> = batches.into();
+                    ctx.cache_shared_result(self.id, rows.clone());
+                    rows
+                }
+            };
+            self.output = rows.iter().cloned().collect();
+        }
+        Ok(self.output.pop_front())
+    }
+}
+
 /// `UNION ALL`: the batches of each input in turn. Exhausted inputs are
 /// dropped right away, releasing their state.
 pub struct UnionAllOp {

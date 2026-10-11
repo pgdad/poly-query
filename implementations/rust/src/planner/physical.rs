@@ -250,6 +250,13 @@ pub enum PhysicalPlan {
         inputs: Vec<PhysicalPlan>,
         schema: Vec<Field>,
     },
+    /// A subplan occurring several times in the statement (see
+    /// [`super::shared`]): vectorized execution computes it once per query
+    /// and replays its rows under `id`. EXPLAIN shows just the input.
+    Shared {
+        id: usize,
+        input: Box<PhysicalPlan>,
+    },
 }
 
 /// Plans an (optimized) logical query against the catalog snapshot it was
@@ -285,6 +292,10 @@ pub fn plan(logical: &LogicalPlan, catalog: &Catalog, opts: PhysicalOptions) -> 
                 row_at_a_time: correlated,
             },
         );
+    }
+    let mut root = root;
+    if execution.vectorized {
+        super::shared::share_common_subplans(&mut root, &mut subqueries);
     }
     PhysicalQuery {
         root,
@@ -649,7 +660,52 @@ impl PhysicalPlan {
             | PhysicalPlan::ParamLookup { input, .. }
             | PhysicalPlan::Distinct { input }
             | PhysicalPlan::Sort { input, .. }
-            | PhysicalPlan::Limit { input, .. } => input.schema(),
+            | PhysicalPlan::Limit { input, .. }
+            | PhysicalPlan::Shared { input, .. } => input.schema(),
+        }
+    }
+
+    /// The input plans of this node.
+    pub fn children(&self) -> Vec<&PhysicalPlan> {
+        match self {
+            PhysicalPlan::Values
+            | PhysicalPlan::TableScan { .. }
+            | PhysicalPlan::NativeFilterScan { .. }
+            | PhysicalPlan::IndexScan { .. } => Vec::new(),
+            PhysicalPlan::Filter { input, .. }
+            | PhysicalPlan::Project { input, .. }
+            | PhysicalPlan::HashAggregate { input, .. }
+            | PhysicalPlan::Distinct { input }
+            | PhysicalPlan::ParamLookup { input, .. }
+            | PhysicalPlan::Sort { input, .. }
+            | PhysicalPlan::Limit { input, .. }
+            | PhysicalPlan::Shared { input, .. } => vec![input],
+            PhysicalPlan::HashJoin { left, right, .. }
+            | PhysicalPlan::MergeJoin { left, right, .. }
+            | PhysicalPlan::NestedLoopJoin { left, right, .. } => vec![left, right],
+            PhysicalPlan::UnionAll { inputs, .. } => inputs.iter().collect(),
+        }
+    }
+
+    /// The input plans of this node, mutably.
+    pub fn children_mut(&mut self) -> Vec<&mut PhysicalPlan> {
+        match self {
+            PhysicalPlan::Values
+            | PhysicalPlan::TableScan { .. }
+            | PhysicalPlan::NativeFilterScan { .. }
+            | PhysicalPlan::IndexScan { .. } => Vec::new(),
+            PhysicalPlan::Filter { input, .. }
+            | PhysicalPlan::Project { input, .. }
+            | PhysicalPlan::HashAggregate { input, .. }
+            | PhysicalPlan::Distinct { input }
+            | PhysicalPlan::ParamLookup { input, .. }
+            | PhysicalPlan::Sort { input, .. }
+            | PhysicalPlan::Limit { input, .. }
+            | PhysicalPlan::Shared { input, .. } => vec![input],
+            PhysicalPlan::HashJoin { left, right, .. }
+            | PhysicalPlan::MergeJoin { left, right, .. }
+            | PhysicalPlan::NestedLoopJoin { left, right, .. } => vec![left, right],
+            PhysicalPlan::UnionAll { inputs, .. } => inputs.iter_mut().collect(),
         }
     }
 
@@ -847,6 +903,7 @@ impl PhysicalPlan {
                 vec![left, right],
             ),
             PhysicalPlan::Distinct { input } => node("Distinct", vec![], vec![input]),
+            PhysicalPlan::Shared { input, .. } => input.to_json(),
             PhysicalPlan::ParamLookup {
                 input,
                 keys,
