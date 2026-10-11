@@ -483,8 +483,9 @@ ORDER BY/LIMIT, subqueries, overflow and division-by-zero prone
 expressions) over the generated fixture tables, including PQCF copies
 with many small row groups (lazily decoded) and row-layout copies, and
 compares every option combination — once with default morsels and once
-with 37-row morsels — against the row baseline (thousands of queries, no
-differences).
+with 37-row morsels — against the row-mode execution of the same plan
+(thousands of queries, no differences; different plans agree whenever
+both succeed).
 
 ### Memory and cache-oriented techniques
 

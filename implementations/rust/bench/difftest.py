@@ -5,8 +5,12 @@ Generates random (typed) queries over the conformance fixture datasets and
 runs each one under the row-at-a-time baseline and under every combination
 of mode x join x threads x optimize, in one engine process with default
 morsels and one with tiny morsels (POLYQUERY_MORSEL_ROWS) so that the
-parallel operators are exercised on small tables. Results (or error codes)
-must agree; rows are compared as multisets with a float tolerance.
+parallel operators are exercised on small tables. Every variant must agree
+exactly (rows, or the error code) with the row-mode execution of the same
+plan (join algorithm x optimize); different plans must return the same rows
+whenever both succeed (whether a failing predicate is evaluated at all may
+depend on the plan, types.md §6; such cases are only counted). Rows are
+compared as multisets with a float tolerance.
 
 Usage: difftest.py --engine bin/polyquery [--queries 500] [--seed 1] [-v]
 """
@@ -428,33 +432,63 @@ def main() -> int:
     gen = Gen(random.Random(args.seed), schemas)
     failures = 0
     errors = 0
+    def same(x, y, ordered, sql):
+        if x[0] != y[0]:
+            return False
+        if x[0] == "error":
+            return x[1] == y[1]
+        if x[1] != y[1]:
+            return False
+        return rows_equal(x[2], y[2], ordered is True or ordered == "limit")
+
+    plan_dependent = 0
     for qi in range(args.queries):
         sql, ordered = gen.query()
-        base = engines[0].call({"op": "query", "sql": sql, "options": dict(BASELINE)})
-        bo = outcome(base)
+        # Row-mode reference per plan (join algorithm x optimize): every
+        # mode/thread count executing the same plan must agree exactly,
+        # including errors.
+        refs = {}
+
+        def ref(join, optimize):
+            key = (join, optimize)
+            if key not in refs:
+                opts = {"mode": "row", "threads": 1, "join": join, "optimize": optimize}
+                refs[key] = outcome(engines[0].call({"op": "query", "sql": sql, "options": opts}))
+            return refs[key]
+
+        bo = ref("hash", True)
         if bo[0] == "error":
             errors += 1
+        bad = False
         for e in engines:
             for v in VARIANTS:
+                expect = ref(v.get("join", "hash"), v.get("optimize", True))
                 got = outcome(e.call({"op": "query", "sql": sql, "options": dict(v)}))
-                same = got[0] == bo[0]
-                if same and bo[0] == "error":
-                    same = got[1] == bo[1]
-                elif same:
-                    same = got[1] == bo[1] and (
-                        len(got[2]) == len(bo[2]) if ordered == "limit" and not sql.count("ORDER BY")
-                        else rows_equal(bo[2], got[2], ordered is True)
-                        if ordered != "limit" else rows_equal(bo[2], got[2], True))
-                if not same:
+                if not same(expect, got, ordered, sql):
                     failures += 1
+                    bad = True
                     print(f"MISMATCH q{qi} variant={v} morsels={'tiny' if e is engines[1] else 'default'}\n  {sql}")
-                    print(f"  baseline: {str(bo)[:400]}\n  got:      {str(got)[:400]}", flush=True)
+                    print(f"  expected: {str(expect)[:400]}\n  got:      {str(got)[:400]}", flush=True)
                     break
+            if bad:
+                break
+        # Different plans: equal results whenever both succeed. Which
+        # failing predicate gets evaluated may depend on the plan
+        # (types.md §6), which is only counted.
+        for (key, out) in refs.items():
+            if out[0] == "ok" and bo[0] == "ok" and not same(bo, out, ordered, sql):
+                failures += 1
+                print(f"PLAN MISMATCH q{qi} plan={key}\n  {sql}\n  baseline: {str(bo)[:400]}\n  got:      {str(out)[:400]}")
+            elif out != bo and (out[0] == "error" or bo[0] == "error"):
+                plan_dependent += 1
+                if args.verbose:
+                    print(f"plan-dependent error q{qi} plan={key}: {sql}\n  {str(bo)[:200]} vs {str(out)[:200]}")
         if args.verbose and qi % 50 == 0:
             print(f"{qi} queries, {failures} mismatches, {errors} baseline errors", flush=True)
     for e in engines:
         e.close()
-    print(f"{args.queries} queries, {failures} mismatches ({errors} queries ended in errors)")
+    print(f"{args.queries} queries, {failures} mismatches ({errors} queries ended in errors, "
+          f"{plan_dependent} plan-dependent errors)")
     return 1 if failures else 0
 
 

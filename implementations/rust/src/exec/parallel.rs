@@ -47,9 +47,9 @@ pub const PARALLEL_STACK_BYTES: usize = 64 * 1024 * 1024;
 /// Default rows per morsel.
 const DEFAULT_MORSEL_ROWS: usize = 16 * BATCH_SIZE;
 
-/// Rows per morsel (`POLYQUERY_MORSEL_ROWS` overrides it; used by tests to
-/// exercise the parallel operators on small tables).
-fn morsel_rows() -> usize {
+/// Default rows per morsel (`POLYQUERY_MORSEL_ROWS` overrides it; used by
+/// tests to exercise the parallel operators on small tables).
+pub fn default_morsel_rows() -> usize {
     std::env::var("POLYQUERY_MORSEL_ROWS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -236,7 +236,7 @@ pub fn try_build(plan: &PhysicalPlan, ctx: &ExecContext) -> Option<BoxedBatchOp>
     if threads <= 1 || ctx.in_subquery() {
         return None;
     }
-    let morsel = morsel_rows();
+    let morsel = ctx.exec.morsel_rows.max(1);
     let split = |fragment: &PhysicalPlan| {
         let (table, groups) = fragment_scan(fragment)?;
         let m = morsels(table, groups, morsel);
@@ -257,6 +257,7 @@ pub fn try_build(plan: &PhysicalPlan, ctx: &ExecContext) -> Option<BoxedBatchOp>
                 morsels,
                 threads,
                 seed: ctx.seed(),
+                morsel_rows: morsel,
             }))
         }
         _ => {
@@ -475,6 +476,8 @@ pub struct ParallelAggregateOp {
     morsels: Vec<Vec<ScanRange>>,
     threads: usize,
     seed: ContextSeed,
+    /// Merge partials in parallel from this many groups on.
+    morsel_rows: usize,
 }
 
 struct AggShared {
@@ -565,7 +568,7 @@ impl BatchOperator for ParallelAggregateOp {
         let total: usize = partials.iter().map(Aggregator::groups).sum();
         // Merging is worth parallelizing once there are about as many
         // groups as rows in a morsel.
-        let out = if partials.len() > 1 && total >= morsel_rows() {
+        let out = if partials.len() > 1 && total >= self.morsel_rows {
             merge_partitioned(partials, &self.seed, ctx)?
         } else {
             let mut iter = partials.into_iter();

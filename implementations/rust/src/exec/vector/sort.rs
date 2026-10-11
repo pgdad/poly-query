@@ -21,8 +21,8 @@ use super::batch::{Batch, Data, Vector};
 use super::eval::eval;
 use crate::error::Result;
 use crate::exec::ExecContext;
-use crate::planner::logical::SortKey;
 use crate::exec::parallel::PARALLEL_STACK_BYTES;
+use crate::planner::logical::SortKey;
 use crate::types::Value;
 
 /// Minimum rows per parallel sort chunk.

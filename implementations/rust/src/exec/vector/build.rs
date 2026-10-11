@@ -24,13 +24,20 @@ pub fn side_keys(keys: &[JoinKey], left: bool) -> Vec<(Expr, KeyDomain)> {
 
 /// Builds the batch operator tree of `plan`.
 pub fn build(plan: PhysicalPlan, ctx: &ExecContext) -> BoxedBatchOp {
-    if let Some(op) = parallel::try_build(&plan, ctx) {
-        return op;
-    }
-    build_serial(plan, ctx)
+    build_with(plan, ctx, true)
 }
 
-fn build_serial(plan: PhysicalPlan, ctx: &ExecContext) -> BoxedBatchOp {
+/// Builds `plan`; with `parallel = false` the scan pipeline at the top of
+/// `plan` runs serially (its pipeline breakers' inputs may still run in
+/// parallel).
+fn build_with(plan: PhysicalPlan, ctx: &ExecContext, parallel: bool) -> BoxedBatchOp {
+    if parallel && let Some(op) = parallel::try_build(&plan, ctx) {
+        return op;
+    }
+    build_serial(plan, ctx, parallel)
+}
+
+fn build_serial(plan: PhysicalPlan, ctx: &ExecContext, parallel: bool) -> BoxedBatchOp {
     match plan {
         PhysicalPlan::Values => Box::new(ValuesOp { done: false }),
         PhysicalPlan::TableScan {
@@ -57,11 +64,11 @@ fn build_serial(plan: PhysicalPlan, ctx: &ExecContext) -> BoxedBatchOp {
             pos: 0,
         }),
         PhysicalPlan::Filter { input, predicate } => Box::new(FilterOp {
-            input: build(*input, ctx),
+            input: build_with(*input, ctx, parallel),
             predicate,
         }),
         PhysicalPlan::Project { input, exprs, .. } => Box::new(ProjectOp {
-            input: build(*input, ctx),
+            input: build_with(*input, ctx, parallel),
             exprs,
         }),
         PhysicalPlan::HashAggregate {
@@ -97,7 +104,7 @@ fn build_serial(plan: PhysicalPlan, ctx: &ExecContext) -> BoxedBatchOp {
                 inner_width: bw,
             };
             Box::new(HashJoinOp::new(
-                build(*probe, ctx),
+                build_with(*probe, ctx, parallel),
                 Some((build(*build_side, ctx), bw)),
                 None,
                 side_keys(&keys, build_left),
@@ -139,7 +146,7 @@ fn build_serial(plan: PhysicalPlan, ctx: &ExecContext) -> BoxedBatchOp {
         } => {
             let (lw, rw) = (left.schema().len(), right.schema().len());
             Box::new(NestedLoopJoinOp {
-                left: build(*left, ctx),
+                left: build_with(*left, ctx, parallel),
                 right_input: Some((build(*right, ctx), rw)),
                 right: None,
                 spec: JoinSpec {
@@ -180,10 +187,17 @@ fn build_serial(plan: PhysicalPlan, ctx: &ExecContext) -> BoxedBatchOp {
             input,
             offset,
             limit,
-        } => Box::new(LimitOp {
-            input: build(*input, ctx),
-            offset,
-            remaining: limit,
-        }),
+        } => {
+            // A small LIMIT over a scan pipeline is answered serially: the
+            // scan stops after the first batches, whereas parallel workers
+            // would read ahead.
+            let small =
+                limit.is_some_and(|l| offset.saturating_add(l) <= ctx.exec.morsel_rows as u64);
+            Box::new(LimitOp {
+                input: build_with(*input, ctx, !small),
+                offset,
+                remaining: limit,
+            })
+        }
     }
 }

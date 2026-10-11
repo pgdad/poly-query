@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use crate::catalog::Catalog;
 use crate::config::Config;
 use crate::error::{Error, ErrorCode, Result};
+use crate::exec::parallel::default_morsel_rows;
 use crate::exec::{ExecContext, ExecOptions, Operator, Row, build};
 use crate::ingest::{self, Format, IngestOptions};
 use crate::json::Json;
@@ -86,6 +87,8 @@ pub struct QueryOptions {
     pub threads: Option<usize>,
     /// `optimize: false` disables logical rewrites.
     pub optimize: bool,
+    /// Rows per parallel morsel (tests; None = default).
+    pub morsel_rows: Option<usize>,
     /// Client-assigned id used for cancellation (HTTP).
     pub query_id: Option<String>,
 }
@@ -112,6 +115,7 @@ impl Default for QueryOptions {
             mode: ExecMode::Auto,
             threads: None,
             optimize: true,
+            morsel_rows: None,
             query_id: None,
         }
     }
@@ -480,6 +484,7 @@ impl Engine {
                 let exec = ExecOptions {
                     vectorized: opts.mode != ExecMode::Row,
                     threads: opts.threads.unwrap_or(self.config.threads).max(1),
+                    morsel_rows: opts.morsel_rows.unwrap_or_else(default_morsel_rows),
                 };
                 let make_ctx = |exec: ExecOptions| {
                     let ctx = ExecContext::new(None, memory, self.config.test_functions)
@@ -965,5 +970,127 @@ mod tests {
             .unwrap();
         assert_eq!(r.columns, vec![Field::new("plan", DataType::String)]);
         assert_eq!(r.row_count, 1);
+    }
+
+    /// Every combination of mode, join algorithm, threads and optimize
+    /// returns the row baseline's result (multiset; ordered queries in
+    /// order) and errors. Tiny morsels force the parallel operators.
+    #[test]
+    fn execution_modes_agree() {
+        let e = Engine::new(Config::default());
+        let mut fact = String::from("id,k,grp,amt,tag\n");
+        for i in 0..600 {
+            let k = if i % 13 == 0 {
+                String::new()
+            } else {
+                (i % 37).to_string()
+            };
+            let tag = ["red", "green", "blue", ""][i % 4];
+            fact.push_str(&format!(
+                "{i},{k},{},{}.{:02},{tag}\n",
+                i % 7,
+                i * 3 % 101,
+                i % 100
+            ));
+        }
+        load(&e, "f", &fact);
+        let mut dim = String::from("k,label\n");
+        for k in 0..40 {
+            dim.push_str(&format!("{k},L{}\n", k % 5));
+        }
+        load(&e, "d", &dim);
+        let queries = [
+            (
+                "SELECT grp, COUNT(*), SUM(amt), MIN(tag), MAX(k), AVG(amt) FROM f GROUP BY grp",
+                false,
+            ),
+            (
+                "SELECT COUNT(DISTINCT k), SUM(DISTINCT grp) FROM f WHERE amt > 10",
+                false,
+            ),
+            (
+                "SELECT d.label, COUNT(*), SUM(f.amt) FROM f JOIN d ON d.k = f.k GROUP BY d.label",
+                false,
+            ),
+            (
+                "SELECT f.id, d.label FROM f LEFT JOIN d ON d.k = f.k AND d.label <> 'L1'",
+                false,
+            ),
+            ("SELECT id, amt FROM f ORDER BY amt DESC, id LIMIT 25", true),
+            (
+                "SELECT tag, k FROM f ORDER BY tag NULLS FIRST, k DESC, id",
+                true,
+            ),
+            ("SELECT DISTINCT tag, grp FROM f", false),
+            (
+                "SELECT id FROM f WHERE k IN (SELECT k FROM d WHERE label = 'L2')",
+                false,
+            ),
+            (
+                "SELECT COUNT(*) FROM f a, d b WHERE a.k < b.k AND b.label = 'L3'",
+                false,
+            ),
+            (
+                "SELECT x.id, y.label, z.label FROM f x JOIN d y ON y.k = x.k \
+                 JOIN d z ON z.k = x.grp WHERE z.label IN ('L1', 'L2')",
+                false,
+            ),
+            ("SELECT 100 / (grp - 3) FROM f", false),
+            (
+                "SELECT id FROM f WHERE grp <> 3 AND 100 / (grp - 3) > 20",
+                false,
+            ),
+            ("SELECT SUM(id * 4611686018427387904) FROM f", false),
+        ];
+        let base = QueryOptions {
+            mode: ExecMode::Row,
+            join: JoinStrategy::Hash,
+            threads: Some(1),
+            ..Default::default()
+        };
+        let canon = |r: Result<QueryResult>, ordered: bool| match r {
+            Ok(mut q) => {
+                // FLOAT64 sums may differ in the last bits (summation order).
+                let fmt = |v: &Value| match v {
+                    Value::Float(f) => format!("{f:.9e}"),
+                    v => format!("{v:?}"),
+                };
+                let mut rows: Vec<String> = q
+                    .rows
+                    .drain(..)
+                    .map(|r| r.iter().map(fmt).collect::<Vec<_>>().join("|"))
+                    .collect();
+                if !ordered {
+                    rows.sort();
+                }
+                Ok(rows)
+            }
+            Err(err) => Err(err.code),
+        };
+        for (sql, ordered) in queries {
+            let expect = canon(e.query(sql, &base), ordered);
+            for mode in [ExecMode::Row, ExecMode::Vectorized] {
+                for join in [
+                    JoinStrategy::Hash,
+                    JoinStrategy::Merge,
+                    JoinStrategy::NestedLoop,
+                ] {
+                    for threads in [1, 4] {
+                        for optimize in [true, false] {
+                            let opts = QueryOptions {
+                                mode,
+                                join,
+                                threads: Some(threads),
+                                optimize,
+                                morsel_rows: Some(50),
+                                ..Default::default()
+                            };
+                            let got = canon(e.query(sql, &opts), ordered);
+                            assert_eq!(got, expect, "{sql} with {opts:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }

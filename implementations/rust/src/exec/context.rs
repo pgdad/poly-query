@@ -32,6 +32,8 @@ pub struct ExecOptions {
     pub vectorized: bool,
     /// Worker threads for parallel scans/aggregation (vectorized mode).
     pub threads: usize,
+    /// Rows per morsel of parallel scans.
+    pub morsel_rows: usize,
 }
 
 impl Default for ExecOptions {
@@ -39,6 +41,7 @@ impl Default for ExecOptions {
         ExecOptions {
             vectorized: false,
             threads: 1,
+            morsel_rows: super::parallel::default_morsel_rows(),
         }
     }
 }
