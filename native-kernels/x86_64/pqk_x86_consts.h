@@ -128,10 +128,11 @@
         ENDOBJ  nibmask
 .endm
 /* vop_inv: AVX2 operator -> "invert the kind's result" (EQ NE LT LE GT GE
- * BETWEEN; BETWEEN = !OUT). Used by count_i64 / count_i128 direct counters. */
+ * BETWEEN, and index 7 = PQK_OP_RANGE: BETWEEN with a <= b; BETWEEN =
+ * !OUT). Used by count_i64 / count_i128 direct counters. */
 .macro TAB_VOP_INV
         OBJ     vop_inv, 0
-        .byte   0, 1, 0, 1, 0, 1, 1
+        .byte   0, 1, 0, 1, 0, 1, 1, 1
         ENDOBJ  vop_inv
 .endm
 

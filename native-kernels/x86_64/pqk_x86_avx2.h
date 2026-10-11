@@ -20,16 +20,52 @@
 #ifndef PQK_X86_AVX2_H
 #define PQK_X86_AVX2_H
 
+/* Pseudo operator for BETWEEN with a <= b (kind 4, see VPRED); index 7 of
+ * vop_table / vcnt_table / vop_inv. */
+#define PQK_OP_RANGE 7
+
+/* RANGE_SETUP k: if op (ecx) is BETWEEN and a (r8) <= b (r9): ecx =
+ * PQK_OP_RANGE, ymm8 = bcast(a ^ 2^63), ymm9 = bcast((b - a) ^ 2^63).
+ * clobbers rax, r10. */
+.macro RANGE_SETUP k
+        cmp     $PQK_BETWEEN, %ecx
+        jne     .L\k\()_norange
+        cmp     %r9, %r8
+        jg      .L\k\()_norange          /* a > b: empty, kind 3 */
+        mov     $PQK_OP_RANGE, %ecx
+        movabs  $C_SIGN64, %rax
+        mov     %r8, %r10
+        xor     %rax, %r10
+        vmovq   %r10, %xmm8
+        vpbroadcastq %xmm8, %ymm8
+        mov     %r9, %r10
+        sub     %r8, %r10
+        xor     %rax, %r10
+        vmovq   %r10, %xmm9
+        vpbroadcastq %xmm9, %ymm9
+.L\k\()_norange:
+.endm
+
 /* filter: a full block with at least DENSE_MIN hits uses the compress step
  * (swept 1, 2, 3, 4, 8, 16: 1 is flattest across selectivities). */
 #define DENSE_MIN 1
 
 /* ------------------------------------------------------------------------
- * Predicate kinds: 0 EQ (x==a), 1 ALT (a>x), 2 XGT (x>a), 3 OUT (a>x | x>b).
- * VPRED kind, src, dst, tmp: vector form, ymm8 = bcast(a), ymm9 = bcast(b);
+ * Predicate kinds: 0 EQ (x==a), 1 ALT (a>x), 2 XGT (x>a), 3 OUT (a>x | x>b),
+ * 4 ROUT: OUT as one unsigned range test, valid only for a <= b:
+ *     x outside [a, b]  <=>  (x - a) >u (b - a)
+ *                       <=>  (x - (a ^ 2^63)) >s ((b - a) ^ 2^63)
+ *     (x - a + 2^63 = x - (a ^ 2^63) mod 2^64 turns the unsigned compare
+ *     into the signed vpcmpgtq): vpsubq + vpcmpgtq instead of two
+ *     compares + vpor (one op instead of two on the two Zen 5 compare
+ *     pipes). The driver uses it for BETWEEN when a <= b (pseudo operator
+ *     PQK_OP_RANGE) and keeps kind 3 for a > b (empty range).
+ * VPRED kind, src, dst, tmp: vector form, ymm8 = bcast(a), ymm9 = bcast(b)
+ *     (kind 4: ymm8 = bcast(a ^ 2^63), ymm9 = bcast((b - a) ^ 2^63));
  *     src = memory or register; dst = all-ones / zero lanes.
  * ROWPRED kind: scalar form for one row, rdx = x, r8 = a, r9 = b
- *     -> r10 = 0/1; clobbers r11.
+ *     (kind 4 = kind 3; r8/r9 keep the original a/b) -> r10 = 0/1;
+ *     clobbers r11.
  * ---------------------------------------------------------------------- */
 .macro VPRED kind, src, dst, tmp
 .if \kind == 0
@@ -39,11 +75,15 @@
 .elseif \kind == 2
         vmovdqu \src, \dst
         vpcmpgtq %ymm8, \dst, \dst
-.else
+.elseif \kind == 3
         vmovdqu \src, \tmp
         vpcmpgtq \tmp, %ymm8, \dst
         vpcmpgtq %ymm9, \tmp, \tmp
         vpor    \tmp, \dst, \dst
+.else
+        vmovdqu \src, \dst
+        vpsubq  %ymm8, \dst, \dst
+        vpcmpgtq %ymm9, \dst, \dst
 .endif
 .endm
 
@@ -223,11 +263,12 @@ ENDF \name
  * ---------------------------------------------------------------------- */
 .macro VDRIVER mode, k
         DRV_ENTER PQK_OP_LAST, .L\k\()_inval            /* [check] */
-        JTAB_LOAD vop_table, %r15
         vmovq   %r8, %xmm8
         vpbroadcastq %xmm8, %ymm8
         vmovq   %r9, %xmm9
         vpbroadcastq %xmm9, %ymm9
+        RANGE_SETUP \k
+        JTAB_LOAD vop_table, %r15
         DRV_ARGS
 .if \mode == MODE_FILTER
         vpbroadcastd c_eight_d(%rip), %ymm5

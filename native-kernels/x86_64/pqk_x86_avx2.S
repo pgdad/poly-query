@@ -76,14 +76,17 @@
         VOP vop_gt, 2, 0
         VOP vop_ge, 1, 1
         VOP vop_bt, 3, 1
-        OPTABLE vop_table, vop
+        VOP vop_rng, 4, 1
+        /* EQ NE LT LE GT GE BETWEEN, PQK_OP_RANGE (BETWEEN with a <= b) */
+        JUMPTABLE vop_table, vop_eq, vop_ne, vop_lt, vop_le, vop_gt, vop_ge, vop_bt, vop_rng
 
         VCNT vcnt_k0, 0
         VCNT vcnt_k1, 1
         VCNT vcnt_k2, 2
         VCNT vcnt_k3, 3
-        /* operator -> kind (EQ NE LT LE GT GE BETWEEN), inversion: vop_inv */
-        JUMPTABLE vcnt_table, vcnt_k0, vcnt_k0, vcnt_k1, vcnt_k2, vcnt_k2, vcnt_k1, vcnt_k3
+        VCNT vcnt_k4, 4
+        /* operator -> kind (EQ NE LT LE GT GE BETWEEN RANGE), inversion: vop_inv */
+        JUMPTABLE vcnt_table, vcnt_k0, vcnt_k0, vcnt_k1, vcnt_k2, vcnt_k2, vcnt_k1, vcnt_k3, vcnt_k4
 
         VOP128 vop128_eq, 0, 0
         VOP128 vop128_ne, 0, 1
