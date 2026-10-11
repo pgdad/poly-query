@@ -114,6 +114,6 @@ for opts in '{"mode":"row","threads":1}' \
     fi
   done < "$TMP/base"
 done
-grep -n '"ok":false' "$TMP/base" | sed 's/"message".*//;s/^/modes_test: baseline error: request /'
+grep -n '"ok":false' "$TMP/base" | sed 's/"message".*//;s/^/modes_test: (expected) error case, request /'
 echo "modes_test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
