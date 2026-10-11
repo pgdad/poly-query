@@ -237,9 +237,10 @@ in (the HTTP server creates it at admission so queued time counts)."
     (validate-query-options options)
     (let* ((start (get-internal-real-time))
            (count-only (string= result-mode "count"))
+           (exec-options (session-exec-options session options))
            (result (execute-sql session sql :max-rows max-rows :timeout-ms timeout-ms
                                             :collect-rows (not count-only)
-                                            :options (session-exec-options session options)
+                                            :options exec-options
                                             :context context))
            (elapsed-us (floor (* (- (get-internal-real-time) start) 1000000)
                               internal-time-units-per-second)))
@@ -247,7 +248,15 @@ in (the HTTP server creates it at admission so queued time counts)."
                         "columns" (columns-json (query-result-columns result))
                         "rows" (if count-only :omit (rows-json result))
                         "row_count" (query-result-row-count result)
-                        "stats" (jobj "elapsed_us" elapsed-us)))))
+                        "stats" (jobj "elapsed_us" elapsed-us
+                                      "native_kernels" (native-kernels-stat exec-options))))))
+
+(defun native-kernels-stat (options)
+  "The `stats.native_kernels` field of a query response: the active kernel
+variant when the query ran with native kernels, else omitted."
+  (if (and (native-kernels-enabled-p options) (vectorized-execution-p options))
+      (native-library-variant *native-library*)
+      :omit))
 
 (defun rows-json (result)
   "A JSON-RAW writing the result rows with type-directed serialization."
