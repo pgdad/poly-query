@@ -1,0 +1,112 @@
+{
+  "hardware": {
+    "arch": "x86_64",
+    "logical_cpus": 32,
+    "memory_gib": 249.3,
+    "model": "AMD Ryzen 9 9950X3D 16-Core Processor",
+    "simd": [
+      "avx",
+      "avx2",
+      "avx512bw",
+      "avx512dq",
+      "avx512f",
+      "avx512vl",
+      "bmi2",
+      "fma",
+      "popcnt",
+      "sse4_2"
+    ]
+  },
+  "missing_required": [],
+  "os": {
+    "pretty": "Ubuntu 24.04.5 LTS",
+    "release": "7.0.0-34-generic",
+    "system": "Linux"
+  },
+  "tools": {
+    "aarch64-gcc": {
+      "required": false,
+      "version": "aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+    },
+    "as": {
+      "required": true,
+      "version": "GNU assembler (GNU Binutils for Ubuntu) 2.42"
+    },
+    "bwrap": {
+      "required": false,
+      "version": "bubblewrap 0.9.0"
+    },
+    "cargo": {
+      "required": true,
+      "version": "cargo 1.96.0 (30a34c682 2026-05-25)"
+    },
+    "clang": {
+      "required": false,
+      "version": "Ubuntu clang version 18.1.3 (1ubuntu1)"
+    },
+    "claude": {
+      "required": false,
+      "version": "2.1.296 (Claude Code)"
+    },
+    "clojure": {
+      "required": true,
+      "version": "1.12.3"
+    },
+    "docker": {
+      "required": false,
+      "version": "Docker version 28.4.0, build d8eb465"
+    },
+    "gcc": {
+      "required": true,
+      "version": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+    },
+    "git": {
+      "required": true,
+      "version": "git version 2.43.0"
+    },
+    "go": {
+      "required": true,
+      "version": "go version go1.27.1 linux/amd64"
+    },
+    "java": {
+      "required": true,
+      "version": "openjdk version \"27\" 2026-09-15"
+    },
+    "javac": {
+      "required": true,
+      "version": "javac 27"
+    },
+    "just": {
+      "required": false,
+      "version": "just 1.58.0"
+    },
+    "make": {
+      "required": true,
+      "version": "GNU Make 4.3"
+    },
+    "nasm": {
+      "required": false,
+      "version": "NASM version 2.16.01"
+    },
+    "python": {
+      "path": "/home/esa/.local/share/uv/python/cpython-3.14.0-linux-x86_64-gnu/bin/python3.14",
+      "version": "Python 3.14.0"
+    },
+    "qemu-aarch64": {
+      "required": false,
+      "version": "qemu-aarch64 version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)"
+    },
+    "rustc": {
+      "required": true,
+      "version": "rustc 1.96.0 (ac68faa20 2026-05-25)"
+    },
+    "sbcl": {
+      "required": true,
+      "version": "SBCL 2.6.9"
+    },
+    "sqlite3-python": {
+      "required": true,
+      "version": "3.45.1"
+    }
+  }
+}
