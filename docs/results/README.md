@@ -1,4 +1,4 @@
-# PolyQuery results — Track A, first complete pass (2026-10-10/11)
+# PolyQuery results — Track A (2026-10-10/11)
 
 This page summarizes the first complete Track A (controlled) pass: six engines
 through Phases 1–5, native kernels in two assembly languages, and native
@@ -20,8 +20,10 @@ generated comparison report is [`report.html`](report.html) and
   ARM numbers exist only for the kernels (spark, NVIDIA GB10).
 * Costs are the platform-reported **list-price equivalent** of the tokens used
   (`total_cost_usd`), not what was billed under the subscription.
-* Track B (ecosystem-optimized) and the later experiment families
-  (architectural change, refactoring, debugging, optimization) have not run yet.
+* Track B (ecosystem-optimized) has not run yet. The later experiment families
+  (architectural change, refactoring, debugging, optimization) ran as one chained
+  lineage per language: CR-1 UNION ALL → CR-3 refactoring → CR-2 DECIMAL(38) →
+  latency optimization; debugging ran on the CR-1 baseline and is never merged.
 
 ## Correctness
 
@@ -109,25 +111,82 @@ the dispatcher currently prefers SVE. Sources:
 | Java | 21.3 k | 2.2 k | 154 | 1,102 |
 | Rust | 22.2 k | 3.2 k | 78 | 1,051 |
 
-The rubric-based maintainability review (`docs/methodology/code-quality-rubric.md`)
-has not been performed yet.
+The rubric-based review is summarized under "Code-quality review" below.
 
 ## Engine quality findings
 
 * Go: single-client HTTP latency is bimodal (p50 1.2 ms, p95 ~40 ms), consistent
   with a Nagle/delayed-ACK interaction.
+* Python: a negative HTTP chunk size makes the server read the request body to
+  end-of-stream, bypassing `--max-request-bytes` (found in code review, confirmed by
+  the `malformed_chunked_body` HTTP check).
 * Clojure: on a failing vectorized/parallel execution the engine re-runs the
   query row-at-a-time (documented; results verified identical).
 * Valid but very large expressions (20,001-term sum, 2,000-deep parentheses):
   some engines compute them, others return PARSE_ERROR or RESOURCE_LIMIT
   (spec question SPEC-Q-002).
 
+## Later experiment families (report 7, architectural adaptability)
+
+Per-attempt data (outcome, cost, turns, time, diff size) is in the report-7 table of
+[`report.html`](report.html); records in `experiments/runs/a-{change,refactor,debug,optimize}-*`.
+
+| task | outcome | cost range (USD) | notes |
+|---|---|---|---|
+| CR-1 `UNION ALL` (change) | 6/6 success, first attempt | 3.48–4.92 | 14–21 files, 312–595 lines added |
+| CR-3 plan separation (refactoring) | 6/6 success | 3.67–6.37 | behaviour and capabilities unchanged; named optimizer rules with unit tests |
+| CR-2 `DECIMAL(38)` + PQCF v2 (change) | 6/6 success | 6.25–16.50 | the most expensive change; Go (16.50) and Java (13.92) needed a new wide-decimal value representation |
+| debugging (one injected defect each) | 6/6 success | 0.21–0.39 | one-line fixes in 36–87 s: too easy, because the defect report names the failing cases |
+| latency optimization | 5/6 success; Go timed out twice | 10.22–18.61 (successes) | see below |
+
+All merged engines pass 660/660 public cases (746 with hidden) after the chain,
+and the 6 × 6 PQCF interop matrix — now including v2 files with 128-bit decimals —
+is clean ([`interop.json`](../../results/correctness/interop.json)).
+
+### Optimization effectiveness, measured independently
+
+The agents' own before/after tables are not used. Each engine was benchmarked at
+the commit its optimization run started from and at the run's result, back to back
+on a quiet host (1m rows, same harness and data):
+[`optimize-latency-before-after.json`](../../results/performance/optimize-latency-before-after.json).
+
+| engine | geomean latency before → after | speedup | caveat |
+|---|---|---:|---|
+| Python | 123.5 → 43.3 ms | 2.85× | peak RSS 15.4 → 21.2 GiB |
+| Common Lisp | 21.9 → 8.9 ms | 2.48× | |
+| Go | 5.3 → 3.0 ms | 1.74× | attempt 2 **timed out** (120 min); committed work passes all checks but is not merged |
+| Java | 5.3 → 3.9 ms | 1.38× | |
+| Clojure | 8.0 → 7.1 ms | 1.13× | |
+| Rust | 3.1 → 2.9 ms | 1.07× | `q15_sort_multi_key` significantly slower (0.66×) |
+
+Result digests were identical before and after for every engine and query.
+
+## AArch64 end to end
+
+All six engines and the native kernel library were built natively on spark
+(NVIDIA GB10) with the host's toolchain versions and pass 746/746 (public + hidden)
+with and without native kernels ([`results/correctness/arm64/`](../../results/correctness/arm64/)).
+
+## Code-quality review
+
+Two independent AI reviewers per language scored rubric items 1–4
+([`results/development/code-review/`](../../results/development/code-review/)).
+Agreement is high (92 % exact, κ = 0.84) but the scale is compressed (almost all
+4–5), so the scores barely separate the engines. The useful output is the list of
+concrete findings; one was verified by a new black-box check: the Python HTTP
+server accepts a negative chunk size and then reads the body past
+`--max-request-bytes` (HTTP suite 18/19; all others 19/19).
+
 ## Harness incidents
 
-Four harness defects were found during the runs and fixed; each is logged with
+Six harness defects were found during the runs and fixed; each is logged with
 its impact in [`experiments/telemetry/harness-incidents.jsonl`](../../experiments/telemetry/harness-incidents.jsonl).
 HI-002 (the runner overwrote explicit request ids) was visible to the Phase 1
-agents as two spurious failures. Affected runs were re-validated; earlier
+agents as two spurious failures. HI-005 (a CR-1 case expected DECIMAL from an
+untyped load) was visible to every UNION ALL agent. HI-006: run time limits
+depended on the login token's remaining lifetime, and killed agents were counted
+as successes; three optimization runs were re-classified as timeouts and the
+family was re-run with a uniform 120-minute limit. Affected runs were re-validated; earlier
 verdicts are kept in each run's `validation-history/`.
 
 ## Reproducibility

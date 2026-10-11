@@ -5,6 +5,7 @@ java,debug-mutant,1,success,0.2830554,2869,326199,14,80.9,13,0,1,6,1,1,experimen
 java,native,1,isolation_violation,13.248619,160813,35987166,164,2652.5,163,1,4,8,11,2237,experiments/runs/a-native-java-a1-20261011T034931Z/manifest.json
 java,native,2,success,12.755314400000005,170576,32935230,150,2465.4,149,3,6,8,7,2813,experiments/runs/a-native-java-a2-20261011T043500Z/manifest.json
 java,optimize-latency,1,timeout,,1861,52318596,,4320.3,203,5,2,0,9,2555,experiments/runs/a-optimize-latency-java-a1-20261011T065356Z/manifest.json
+java,optimize-latency,2,success,11.041763,134747,28063813,138,2745.9,137,3,3,0,6,1764,experiments/runs/a-optimize-latency-java-a2-20261011T080849Z/manifest.json
 java,phase1,1,success,8.625029999999997,182356,13520418,76,1463.6,75,1,2,5,3,7521,experiments/runs/a-phase1-java-a1-20261010T182856Z/manifest.json
 java,phase2,1,success,11.841913400000001,189989,25310345,102,1685.1,101,1,1,7,4,3830,experiments/runs/a-phase2-java-a1-20261010T190217Z/manifest.json
 java,phase3,1,success,15.812226800000005,190353,30184182,130,4004.8,182,5,3,8,7,4374,experiments/runs/a-phase3-java-a1-20261010T193056Z/manifest.json
@@ -38,6 +39,7 @@ python,change-union-all,1,success,3.480239,39272,7588572,71,472.8,70,1,0,4,1,417
 python,debug-mutant,1,success,0.208926,1973,283676,13,36.3,12,1,0,2,1,1,experiments/runs/a-debug-mutant-python-a1-20261011T054107Z/manifest.json
 python,native,1,success,15.313467000000003,204302,41068281,164,3697.2,163,4,1,0,10,2576,experiments/runs/a-native-python-a1-20261011T034927Z/manifest.json
 python,optimize-latency,1,timeout,,1330,30320844,,4440.2,153,3,2,0,10,1732,experiments/runs/a-optimize-latency-python-a1-20261011T065122Z/manifest.json
+python,optimize-latency,2,success,12.566013199999997,169536,32161800,163,3390.8,160,5,3,0,11,1879,experiments/runs/a-optimize-latency-python-a2-20261011T080848Z/manifest.json
 python,phase1,1,success,15.281845200000001,203773,23000264,119,2242.9,160,4,2,9,8,5525,experiments/runs/a-phase1-python-a1-20261010T182855Z/manifest.json
 python,phase2,1,success,13.434732200000001,150151,17987476,89,4137.4,134,3,3,7,5,3032,experiments/runs/a-phase2-python-a1-20261010T190707Z/manifest.json
 python,phase3,1,success,8.587422,139816,17854522,94,1310.1,93,1,4,6,6,2682,experiments/runs/a-phase3-python-a1-20261010T201612Z/manifest.json
@@ -49,6 +51,7 @@ go,change-union-all,1,success,3.616785200000001,43303,7501218,74,495.0,73,0,0,7,
 go,debug-mutant,1,success,0.22887059999999998,1974,245392,10,49.8,9,0,1,3,1,1,experiments/runs/a-debug-mutant-go-a1-20261011T054104Z/manifest.json
 go,native,1,success,8.982767200000001,130521,20707655,119,2208.0,118,3,1,9,8,2805,experiments/runs/a-native-go-a1-20261011T034928Z/manifest.json
 go,optimize-latency,1,timeout,,4396,105599394,,5280.4,490,2,16,19,18,4192,experiments/runs/a-optimize-latency-go-a1-20261011T063805Z/manifest.json
+go,optimize-latency,2,timeout,,3267,123860786,,7200.3,341,9,4,0,16,3865,experiments/runs/a-optimize-latency-go-a2-20261011T080847Z/manifest.json
 go,phase1,1,success,8.245643799999996,180066,12235652,70,1510.4,69,1,1,1,3,8310,experiments/runs/a-phase1-go-a1-20261010T182859Z/manifest.json
 go,phase2,1,success,12.865657600000006,211386,27870240,114,2086.9,113,4,0,7,6,5260,experiments/runs/a-phase2-go-a1-20261010T190216Z/manifest.json
 go,phase3,1,success,10.384653400000001,173724,21548989,107,1623.5,106,0,1,8,4,4514,experiments/runs/a-phase3-go-a1-20261010T193717Z/manifest.json
@@ -59,6 +62,7 @@ common-lisp,change-decimal38,1,success,7.4481686,76437,18483412,103,1346.3,102,1
 common-lisp,change-union-all,1,success,4.5721582,50836,10626468,85,2935.8,83,1,4,6,1,483,experiments/runs/a-change-union-all-common-lisp-a1-20261011T053529Z/manifest.json
 common-lisp,debug-mutant,1,success,0.3427072,3099,401506,14,62.9,13,0,3,0,1,1,experiments/runs/a-debug-mutant-common-lisp-a1-20261011T054106Z/manifest.json
 common-lisp,native,1,success,12.352338800000004,171053,30145561,135,4785.8,134,1,1,0,9,1902,experiments/runs/a-native-common-lisp-a1-20261011T034930Z/manifest.json
+common-lisp,optimize-latency,1,success,18.6142822,209590,54720055,207,3407.1,206,3,0,10,16,1814,experiments/runs/a-optimize-latency-common-lisp-a1-20261011T071620Z/manifest.json
 common-lisp,phase1,1,success,16.7564782,181636,21813953,114,4962.1,174,3,8,5,5,4592,experiments/runs/a-phase1-common-lisp-a1-20261010T182901Z/manifest.json
 common-lisp,phase2,1,success,18.151204200000006,204235,29373803,117,4603.0,164,0,2,11,8,2765,experiments/runs/a-phase2-common-lisp-a1-20261010T195221Z/manifest.json
 common-lisp,phase3,1,success,11.952766000000002,168859,29494228,132,1892.7,131,1,2,7,5,2807,experiments/runs/a-phase3-common-lisp-a1-20261010T210913Z/manifest.json
