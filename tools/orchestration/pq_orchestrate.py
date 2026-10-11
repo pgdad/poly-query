@@ -1032,7 +1032,8 @@ def full_cycle(run_id: str, timeout_min: int, budget: float, max_turns: int | No
 
 
 def wave(task: str, langs: list[str], track: str, attempt: int, seed: int, timeout_min: int, budget: float,
-         max_turns: int | None, parallel: int) -> dict:
+         max_turns: int | None, parallel: int, base_refs: dict[str, str] | None = None,
+         attempts: dict[str, int] | None = None, record_only: bool = False) -> dict:
     rng = random.Random(seed)
     order = list(langs)
     rng.shuffle(order)
@@ -1050,10 +1051,17 @@ def wave(task: str, langs: list[str], track: str, attempt: int, seed: int, timeo
 
     run_ids = []
     for lang in order:
-        run_ids.append(prepare(lang, task, track, attempt, None, wave_id))
+        rid = prepare(lang, task, track, (attempts or {}).get(lang, attempt), (base_refs or {}).get(lang), wave_id)
+        if record_only:
+            # Repeat runs from an older base (e.g. HI-007 re-runs): recorded and benchmarked, never merged.
+            mm = load_manifest(rid)
+            mm["record_only"] = True
+            save_manifest(rid, mm)
+        run_ids.append(rid)
         time.sleep(1.1)  # distinct timestamps
     wm = {"wave_id": wave_id, "task": task, "track": track, "attempt": attempt, "seed": seed, "order": order,
-          "run_ids": run_ids, "started": now(), "parallel": parallel,
+          "run_ids": run_ids, "started": now(), "parallel": parallel, "base_refs": base_refs, "attempts": attempts,
+          "record_only": record_only,
           "limits": {"timeout_min": timeout_min, "budget_usd": budget, "max_turns": max_turns},
           "loadavg_start": os.getloadavg()}
     (RECORDS / f"{wave_id}.json").write_text(json.dumps(wm, indent=1) + "\n")
@@ -1121,6 +1129,9 @@ def main() -> int:
     w.add_argument("--budget-usd", type=float, default=150.0)
     w.add_argument("--max-turns", type=int)
     w.add_argument("--parallel", type=int, default=6)
+    w.add_argument("--base-refs", default="", help="per-language base commits: lang=ref,lang=ref")
+    w.add_argument("--attempts", default="", help="per-language attempt numbers: lang=n,lang=n")
+    w.add_argument("--record-only", action="store_true", help="accept.sh records but never merges these runs")
     sub.add_parser("status")
     sub.add_parser("watchdog", help="stop running agents that approach the usage limit or use overage")
     a = ap.parse_args()
@@ -1139,7 +1150,9 @@ def main() -> int:
     elif a.cmd == "import":
         print(import_run(a.run_id, a.merge))
     elif a.cmd == "wave":
-        wave(a.task, a.langs.split(","), a.track, a.attempt, a.seed, a.timeout_min, a.budget_usd, a.max_turns, a.parallel)
+        kv = lambda t: dict(x.split("=", 1) for x in t.split(",") if x)  # noqa: E731
+        wave(a.task, a.langs.split(","), a.track, a.attempt, a.seed, a.timeout_min, a.budget_usd, a.max_turns, a.parallel,
+             kv(a.base_refs), {k: int(v) for k, v in kv(a.attempts).items()}, a.record_only)
     elif a.cmd == "status":
         status()
     elif a.cmd == "watchdog":
