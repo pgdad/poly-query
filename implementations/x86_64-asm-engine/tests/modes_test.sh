@@ -59,6 +59,15 @@ SELECT x.b, x.c FROM (SELECT b, COUNT(*) AS c FROM t GROUP BY b) x WHERE x.c > 3
 SELECT a FROM t WHERE 1 = 0
 SELECT COUNT(*), SUM(a), MIN(s) FROM t WHERE 1 = 0
 SELECT b, COUNT(*) FROM t WHERE a < 0 GROUP BY b
+SELECT a FROM t WHERE 1 / 0 = 1 AND a < 0
+SELECT a FROM t WHERE a < 0 AND 1 / 0 = 1
+SELECT 1 / 0 FROM t WHERE a < 0
+SELECT CASE WHEN a < 0 THEN 1 / 0 ELSE 2 * 3 END FROM t WHERE a < 3
+SELECT a FROM t WHERE a / b > 1 AND 1 = 0
+SELECT a FROM t WHERE b > 3 AND 1 = 0
+SELECT a FROM t WHERE (1 = 1 AND b = 2) OR 2 < 1
+SELECT a, 10 * 10 + CAST('5' AS INT), UPPER('x') || s FROM t WHERE d > 100 + 0.5 AND TRUE
+SELECT COUNT(*) FROM t WHERE n = 2 + 1 OR NULL
 Q
 )
 
@@ -91,6 +100,6 @@ for opts in '{"mode":"row","threads":1}' \
     fi
   done < "$TMP/base"
 done
-grep -c '"ok":false' "$TMP/base" | sed 's/^/modes_test: error responses in the baseline: /'
+grep -n '"ok":false' "$TMP/base" | sed 's/"message".*//;s/^/modes_test: baseline error: request /'
 echo "modes_test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

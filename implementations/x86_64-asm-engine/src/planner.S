@@ -1018,6 +1018,10 @@ ENDF plan_fp
 FUNC plan_block
     ENTER 16
     mov %rdi, %rbx
+    cmpq $0, g_opt_optimize(%rip)   /* logical rewrites (optimizer.S) */
+    je 0f
+    call optimize_block
+0:
     cmpq $0, QP_FROM(%rbx)
     je 9f
     mov $PS_SIZE, %edi
