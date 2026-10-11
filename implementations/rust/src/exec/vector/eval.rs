@@ -22,7 +22,7 @@ use crate::exec::hash::FastSet;
 use crate::planner::expr::{ArithKind, Expr};
 use crate::sql::ast::BinaryOp;
 use crate::types::value::promote_int;
-use crate::types::{Value, datetime, decimal, float};
+use crate::types::{DataType, Value, datetime, decimal, float};
 
 /// Evaluates `e` over every row of `b`.
 pub fn eval(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
@@ -232,9 +232,14 @@ fn eval_owned(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
             else_expr,
             ..
         } => case(subject.as_deref(), whens, else_expr.as_deref(), b, ctx),
-        Expr::Negate { .. } | Expr::Cast { .. } | Expr::Function { .. } | Expr::Concat(..) => {
-            elementwise(e, b, ctx)
+        Expr::Cast { expr, to } => {
+            let v = eval_cow(expr, b, ctx)?;
+            match cast_vector(&v, *to) {
+                Some(r) => r,
+                None => elementwise(e, b, ctx),
+            }
         }
+        Expr::Negate { .. } | Expr::Function { .. } | Expr::Concat(..) => elementwise(e, b, ctx),
         Expr::ScalarSubquery { .. } | Expr::Exists { .. } | Expr::InSubquery { .. } => {
             rowwise(e, b, ctx)
         }
@@ -739,6 +744,67 @@ fn arith_float(
     )))
 }
 
+// ------------------------------------------------------------ CAST
+
+/// Typed kernels for the numeric and temporal casts (same results and
+/// errors as `cast_value`); None for other conversions.
+fn cast_vector(v: &Vector, to: DataType) -> Option<Result<Vector>> {
+    let valid = v.valid.clone();
+    let ok = |i: usize| valid.as_ref().is_none_or(|x| x[i]);
+    let overflow = || Error::overflow(format!("value does not fit {to}"));
+    let data = match (&v.data, to) {
+        (Data::Int(_), DataType::Int64)
+        | (Data::Float(_), DataType::Float64)
+        | (Data::Date(_), DataType::Date)
+        | (Data::Timestamp(_), DataType::Timestamp) => return Some(Ok(v.clone())),
+        (Data::Int(x), DataType::Float64) => Data::Float(x.iter().map(|&i| i as f64).collect()),
+        (Data::Decimal(x, s), DataType::Float64) => {
+            Data::Float(x.iter().map(|&u| decimal::to_f64(u, *s)).collect())
+        }
+        (Data::Decimal(x, s), DataType::Int64) => {
+            let d = 10i64.pow(*s as u32);
+            Data::Int(x.iter().map(|&u| u / d).collect())
+        }
+        (Data::Bool(x), DataType::Int64) => Data::Int(x.iter().map(|&b| b as i64).collect()),
+        (Data::Int(x), DataType::Decimal { precision, scale }) => {
+            let mut out = Vec::with_capacity(x.len());
+            for (i, &u) in x.iter().enumerate() {
+                if !ok(i) {
+                    out.push(0);
+                    continue;
+                }
+                match (u as i128).checked_mul(decimal::pow10(scale as u32)) {
+                    Some(r) if decimal::fits_precision(r, precision) => out.push(r as i64),
+                    _ => return Some(Err(overflow())),
+                }
+            }
+            Data::Decimal(out, scale)
+        }
+        (Data::Decimal(x, s), DataType::Decimal { precision, scale }) => {
+            let mut out = Vec::with_capacity(x.len());
+            for (i, &u) in x.iter().enumerate() {
+                if !ok(i) {
+                    out.push(0);
+                    continue;
+                }
+                match decimal::rescale(u as i128, *s, scale) {
+                    Some(r) if decimal::fits_precision(r, precision) => out.push(r as i64),
+                    _ => return Some(Err(overflow())),
+                }
+            }
+            Data::Decimal(out, scale)
+        }
+        (Data::Timestamp(x), DataType::Date) => {
+            Data::Date(x.iter().map(|&t| datetime::timestamp_to_date(t)).collect())
+        }
+        (Data::Date(x), DataType::Timestamp) => {
+            Data::Timestamp(x.iter().map(|&d| datetime::date_to_timestamp(d)).collect())
+        }
+        _ => return None,
+    };
+    Some(Ok(Vector::new(data, valid)))
+}
+
 // ------------------------------------------------------------ IN, LIKE
 
 /// `x [NOT] IN (literal, …)` over an INT64 or STRING operand, with a hash
@@ -1109,6 +1175,36 @@ mod tests {
                 negated: true,
             }),
         ));
+        for to in [
+            DataType::Float64,
+            DataType::decimal(18, 3),
+            DataType::decimal(3, 1),
+            DataType::Int64,
+            DataType::String,
+        ] {
+            agrees(&Expr::Cast {
+                expr: col(0, int),
+                to,
+            });
+        }
+        let dec = Expr::Cast {
+            expr: col(0, int),
+            to: DataType::decimal(18, 2),
+        };
+        agrees(&Expr::Cast {
+            expr: Box::new(dec.clone()),
+            to: DataType::decimal(4, 1),
+        });
+        agrees(&Expr::Cast {
+            expr: Box::new(dec),
+            to: DataType::Float64,
+        });
+        let too_small = Expr::Cast {
+            expr: col(0, int),
+            to: DataType::decimal(1, 1),
+        };
+        let err = eval(&too_small, &batch(), &ExecContext::default()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::NumericOverflow);
         agrees(&Expr::InList {
             expr: col(1, DataType::String),
             list: vec![
