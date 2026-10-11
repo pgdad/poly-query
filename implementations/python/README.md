@@ -807,9 +807,10 @@ worker error is reported as the error of the first failing partition,
 the one a serial run would hit first. Verified with the unit tests
 (`tests/test_parallel_pool.py`, `tests/test_vector_kernels.py`, which force
 the pool, range sorts, exchange aggregation, anti joins and memoized
-kernels onto small tables), `tools/difftest.py` with those paths forced
-(1,000+ random queries, 0 mismatches), the HTTP suite (18/18) and a manual
-`serve` run with concurrent, timed-out and cancelled 1M-row queries.
+kernels onto small tables), `tools/difftest.py` (900 random queries on
+the final code, 600 of them with those paths forced onto its small
+tables: 0 mismatches), the HTTP suite (18/18) and a manual `serve` run
+with concurrent, timed-out and cancelled 1M-row queries.
 
 ### Native kernels (M9)
 
