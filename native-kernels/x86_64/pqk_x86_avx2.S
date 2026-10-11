@@ -66,6 +66,7 @@
         TAB_NIB_LUT
         TAB_0F
         TAB_NIBMASK
+        TAB_IDX8
 
         DEFINE_LVP
 

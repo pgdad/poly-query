@@ -115,6 +115,29 @@
         .quad   0xffffffff00000000
         ENDOBJ  c_hi32
 .endm
+/* idx8: for every byte value m (entry m, 8 bytes): the positions 0..7 of
+ * the set bits of m in ascending order, packed from byte 0; unused bytes 0.
+ * (filter index emission: vpmovzxbd idx8(, m, 8) gives the row offsets.) */
+.macro TAB_IDX8
+        OBJ     idx8, 3
+        .set m, 0
+        .rept 256
+        .set c, 0
+        .set j, 0
+        .rept 8
+        .if (m >> j) & 1
+        .byte   j
+        .set c, c + 1
+        .endif
+        .set j, j + 1
+        .endr
+        .rept 8 - c
+        .byte   0
+        .endr
+        .set m, m + 1
+        .endr
+        ENDOBJ  idx8
+.endm
 /* nibmask: lane masks of 4 rows, entry k (32 bytes) = 4 qwords, qword j =
  * all-ones iff bit j of the nibble k is set (validity -> lane mask by one
  * table load). */

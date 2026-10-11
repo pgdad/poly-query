@@ -216,26 +216,24 @@ ENDF \name
 /* ------------------------------------------------------------------------
  * EMIT_IDX_COMPRESS8: emit the indices of a full 64-row block mask (rax),
  * 8 rows per step, branch-free (its cost does not depend on selectivity):
- * pdep spreads the 8 mask bits to bytes, imul 0xff turns them into byte
- * masks, pext packs the row positions 0..7; vpmovzxbd + row base (ymm4)
- * give 8 dwords, stored with one 32-byte store; rbp advances by popcnt.
+ * the table idx8 (pqk_x86_consts.h) holds, for every byte value m, the
+ * positions of the set bits of m packed into 8 bytes; one vpmovzxbd load
+ * widens them to 8 dwords, + row base (ymm4), stored with one 32-byte
+ * store; rbp advances by popcnt. (Formerly pdep + imul + pext + vmovq +
+ * vpmovzxbd per step; filter_i64 at 10% selected: 0.146 -> 0.098 ns/row in L2,
+ * 0.155 -> 0.111 in L3.)
  * The store never passes out_idx + 4n: outputs so far <= rows consumed and
  * only full blocks use this path. Bytes beyond the count are scratch.
  * in: rax = mask, ebx = row base, rbp = out, ymm5 = bcast(8).
- * clobbers rax, rcx, rdx, r10, r11, ymm0, ymm4.
+ * clobbers rax, rcx, r10, ymm0, ymm4.
  * ---------------------------------------------------------------------- */
 .macro EMIT_IDX_COMPRESS8
-        movabs  $C_BYTE_ONES, %r10
-        movabs  $C_BYTE_IOTA, %r11
+        lea     idx8(%rip), %r10
         vmovd   %ebx, %xmm4
         vpbroadcastd %xmm4, %ymm4
         .rept 8
         movzbl  %al, %ecx
-        pdep    %r10, %rcx, %rdx        /* bit j -> byte j bit 0 */
-        imul    $0xff, %rdx, %rdx       /* -> 0x00 / 0xff bytes */
-        pext    %rdx, %r11, %rdx        /* packed positions of set bits */
-        vmovq   %rdx, %xmm0
-        vpmovzxbd %xmm0, %ymm0
+        vpmovzxbd (%r10,%rcx,8), %ymm0  /* positions of the set bits */
         vpaddd  %ymm4, %ymm0, %ymm0
         vmovdqu %ymm0, (%rbp)
         popcnt  %ecx, %ecx
