@@ -1,0 +1,106 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-decimal38-clojure-a1-20261011T060221Z",
+ "language": "clojure",
+ "task": "change-decimal38",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-decimal38",
+ "prompt_sha256": "1c313417f0719807ec6023206fbdb50fe07ada6a6e52af511ea81e7586238274",
+ "session_id": "7114c66e-b580-4e40-a153-2e3074499ff9",
+ "tokens": {
+  "input": 220,
+  "output": 90967,
+  "cache_read": 21669140,
+  "cache_creation": 297033,
+  "thinking": null,
+  "thinking_estimated": 32847,
+  "source": "result events (summed over 2 segments)",
+  "api_messages": 110
+ },
+ "rate_limit": {
+  "events": 13,
+  "max_utilization": {
+   "five_hour": 0.31,
+   "seven_day": 0.28
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 8.530311999999997,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 112,
+ "result_segments": 2,
+ "assistant_messages": 242,
+ "tool_calls": {
+  "Bash": 109,
+  "Read": 1
+ },
+ "tool_calls_total": 110,
+ "tool_failures": 2,
+ "build_invocations": 96,
+ "build_failures_heuristic": 10,
+ "conformance_runs": 9,
+ "conformance_progress": [
+  [
+   591,
+   591
+  ],
+  [
+   68,
+   69
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   69,
+   69
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 7,
+ "time": {
+  "wall_seconds": 1353.6,
+  "model_api_seconds": 812.9,
+  "tool_seconds": 381.7,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 3,
+  "files_changed": 27,
+  "lines_added": 825,
+  "lines_removed": 157,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The background job that just reported \"stopped\" is the first 200k-row probe run, and it needs no restart. It hung because I had included the nested-loop join option, which forces a 200k \u00d7 200k pairwise comparison. I replaced it with a run that leaves out that option. The replacement finished in about 4 seconds, and all option combinations returned identical results.\n\nNo results are affected, and the summary above still stands. All required suites pass, and everything is committed (latest commit `c8e20bf`).",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

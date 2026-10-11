@@ -1,0 +1,25 @@
+{
+ "wave_id": "wave-a-refactor-plan-separation-a1-20261011T062513Z",
+ "task": "refactor-plan-separation",
+ "track": "A",
+ "attempt": 1,
+ "seed": 9264,
+ "order": [
+  "common-lisp"
+ ],
+ "run_ids": [
+  "a-refactor-plan-separation-common-lisp-a1-20261011T062513Z"
+ ],
+ "started": "2026-10-11T06:25:14+00:00",
+ "parallel": 1,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  7.29150390625,
+  7.3056640625,
+  6.4619140625
+ ]
+}
