@@ -1,0 +1,119 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-native-common-lisp-a1-20261011T034930Z",
+ "language": "common-lisp",
+ "task": "native",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-native",
+ "prompt_sha256": "2a5f3f42b80448545e63d1b61053b2c9dc1725664c7f8dd55066eb630f7db77c",
+ "session_id": "c545a533-2e8c-4ce2-baaf-4971d37e6b7e",
+ "tokens": {
+  "input": 262,
+  "output": 171053,
+  "cache_read": 29773354,
+  "cache_creation": 371945,
+  "thinking": null,
+  "thinking_estimated": 73273,
+  "source": "result events",
+  "api_messages": 131
+ },
+ "rate_limit": {
+  "events": 18,
+  "max_utilization": {
+   "seven_day": 0.24,
+   "five_hour": 0.4
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 12.352338800000004,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 135,
+ "result_segments": 1,
+ "assistant_messages": 294,
+ "tool_calls": {
+  "Bash": 125,
+  "Read": 3,
+  "Write": 6
+ },
+ "tool_calls_total": 134,
+ "tool_failures": 1,
+ "build_invocations": 41,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 11,
+ "conformance_progress": [
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 4785.8,
+  "model_api_seconds": 1510.1,
+  "tool_seconds": 3275.7,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 9,
+  "files_changed": 18,
+  "lines_added": 1902,
+  "lines_removed": 139,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The native kernel library is now integrated into the Common Lisp engine, and every check in the definition of done passes. All work is committed in 9 commits on `main`.\n\n## Test results\n- `make build test`: builds from a clean checkout; \"No tests failed\" (198 unit tests). `make lint` reports 0 warnings.\n- Conformance with `--native`: **569/569 pass**. With `--native --modes`: **3324/3324 pass**. Both have 0 fail, 0 error, 0 not-implemented.\n- The same `--modes` run passes under every kernel variant (`PQ_KERNELS_VARIANT=reference`, `scalar`, `avx2`, `avx512`), and also with tiny parallel work units.\n- Without the library: session 569/569, `--transport http` 569/569, `--modes` 3324/3324, and the HTTP suite 18/18 pass.\n- About 10,000 random queries were compared with and without native kernels. Serial runs had to match exactly (same rows, order and floats); there were no differences.\n\n## What I implemented\n- **Loading:** `--native-kernels PATH` loads the library at startup, checks the ABI version and initialises it. If the library can't be used (missing file, wrong ABI, missing function), the engine logs a warning and continues on its own code. `native.kernels` is claimed.\n- **Calling the kernels:** each C function is bound by address and called directly, about 5 ns per call. Column data is passed in place, with no copying or conversion. The executable has no build-time dependency on the library.\n- **Filters:** integer, decimal, date and timestamp comparisons, `BETWEEN`, short `IN` lists, column-to-column comparisons, `IS [NOT] NULL`, and NOT/AND/OR combinations of these all run in the kernels. SQL's NULL handling is preserved.\n- **Aggregation and hashing:** integer SUM/AVG (with and without GROUP BY), MIN/MAX and COUNT without GROUP BY, and hashing of integer keys for GROUP BY, DISTINCT and hash joins.\n- **Copy-free scans:** a filter, or a column aggregate without GROUP BY, sitting directly on a table scan runs the kernels on the stored columns. Only the rows that pass are copied. Before this, copying scanned rows took up to 88% of query time.\n- **Overflow flags are honoured exactly.** If a batch's integer sum overflows, that batch is summed again exactly in Lisp. For grouped sums, the batch's additions are undone and redone exactly.\n\n## Measurements (1m datasets, in the README)\n| Query type | Without native | With native (1 thread) |\n|---|---|---|\n| Filters and aggregates the kernels cover (q1, q18\u2013q23) | 5\u201332 ms | 0.5\u20133 ms (6\u201331\u00d7 faster) |\n| Mixed filters (q9, q17) | 20\u201326 ms | 1.6\u20132.2\u00d7 faster |\n| Joins, sorts, string keys, grouped work | unchanged within about \u00b110% run-to-run noise | |\n\nPer batch, the kernels are 2\u201351\u00d7 faster than the Lisp loops, including call overhead.\n\n## Main design decisions\n- The choice to use kernels is made when a query is compiled, so parallel workers make the same choice.\n- A condition is only handed to the kernels if it cannot raise an error. The remaining conditions run on exactly the rows the row executor would evaluate them on, so errors stay the same.\n- `pqk_sum_f64` is not used, because its different addition order could change float results.\n- `mode: row` stays pure Lisp as the baseline.\n- Each query response reports the active kernel variant in `stats.native_kernels`.\n\n## Known limitations\n- Float comparisons and sums, strings, and grouped MIN/MAX/COUNT still run in Lisp.\n- Grouped aggregations and joins still copy scanned rows.\n- The fuzzer found one case that existed before this work: with optimization on, a condition that raises an error (such as `CAST('a' AS INT64)`) is evaluated before a join that would discard every row. That query errors with optimization on and returns no rows with it off. The spec doesn't define error evaluation order, so I documented it rather than changing the existing optimizer.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

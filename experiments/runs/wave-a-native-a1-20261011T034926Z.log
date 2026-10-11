@@ -20,3 +20,7 @@
 2026-10-11T04:51:15+00:00 [a-native-python-a1-20261011T034927Z] agent finished; collecting telemetry
 2026-10-11T04:51:16+00:00 [a-native-python-a1-20261011T034927Z] validating (clean clone, sandboxed)
 2026-10-11T04:51:57+00:00 [a-native-python-a1-20261011T034927Z] outcome=success cost=$15.313467000000003 turns=164 wall=3697.2s
+2026-10-11T05:09:34+00:00 [a-native-common-lisp-a1-20261011T034930Z] agent finished; collecting telemetry
+2026-10-11T05:09:34+00:00 [a-native-common-lisp-a1-20261011T034930Z] validating (clean clone, sandboxed)
+2026-10-11T05:09:55+00:00 [a-native-common-lisp-a1-20261011T034930Z] outcome=success cost=$12.352338800000004 turns=135 wall=4785.8s
+2026-10-11T05:09:55+00:00 wave wave-a-native-a1-20261011T034926Z finished: go=success, clojure=success, java=isolation_violation, rust=success, python=success, common=success
