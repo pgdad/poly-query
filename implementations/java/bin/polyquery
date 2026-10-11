@@ -10,17 +10,23 @@ if [ ! -f "$JAR" ]; then
     echo "polyquery: $JAR not found; run 'make -C $HERE build' first" >&2
     exit 1
 fi
-if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+# The trimmed runtime made by `make build` (jlink, java.base only), else the JDK.
+if [ -x "$HERE/build/runtime/bin/java" ]; then
+    JAVA="$HERE/build/runtime/bin/java"
+elif [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
     JAVA="$JAVA_HOME/bin/java"
 else
     JAVA=java
 fi
+# JVM flags (the same as the Makefile's JVM_FLAGS; see README.md, "JVM tuning"): ParallelGC (less
+# memory than the default G1 at equal latency) and lower JIT compilation thresholds (hot query
+# code reaches optimized tiers sooner: faster first executions).
+FLAGS="-XX:+UseParallelGC -XX:CompileThresholdScaling=0.5"
 # The AOT cache made by `make build` (loaded classes and method profiles of a training run) cuts
 # start-up and JIT warm-up; a stale or unusable cache is ignored silently (JVM logging is off, as
 # stdout carries the protocol).
 AOT="$HERE/build/polyquery.aot"
 if [ -f "$AOT" ] && [ "$AOT" -nt "$JAR" ]; then
-    exec "$JAVA" -XX:+UseParallelGC -XX:-UsePerfData -XX:AOTCache="$AOT" -Xlog:disable -Xlog:all=off \
-        $POLYQUERY_JAVA_OPTS -jar "$JAR" "$@"
+    exec "$JAVA" $FLAGS -XX:AOTCache="$AOT" -Xlog:disable -Xlog:all=off $POLYQUERY_JAVA_OPTS -jar "$JAR" "$@"
 fi
-exec "$JAVA" -XX:+UseParallelGC -XX:-UsePerfData -Xshare:auto $POLYQUERY_JAVA_OPTS -jar "$JAR" "$@"
+exec "$JAVA" $FLAGS $POLYQUERY_JAVA_OPTS -jar "$JAR" "$@"

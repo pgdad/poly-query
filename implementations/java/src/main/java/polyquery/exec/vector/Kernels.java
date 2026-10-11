@@ -169,113 +169,201 @@ final class Kernels {
         }
     }
 
-    /** INT64 arithmetic with exact overflow and division-by-zero checks. */
-    static final class LongArith implements VecExpr {
-        private final ArithOp op;
+    /**
+     * INT64 arithmetic with exact overflow and division-by-zero checks. There is one kernel class
+     * per operator, each a small loop of its own: no dispatch on the operator per element, and
+     * each kernel is profiled and JIT-compiled separately (quickly, and specialized for its use)
+     * rather than as one large method over every operator.
+     */
+    abstract static sealed class LongArith implements VecExpr
+            permits LongArith.Add, LongArith.Sub, LongArith.Mul, LongArith.Div, LongArith.Mod {
         private final VecExpr left;
         private final VecExpr right;
         private final Vec out;
 
-        LongArith(ArithOp op, VecExpr left, VecExpr right) {
-            this.op = op;
+        private LongArith(VecExpr left, VecExpr right) {
             this.left = left;
             this.right = right;
             this.out = new Vec(DataType.INT64, 16);
         }
 
+        static LongArith of(ArithOp op, VecExpr left, VecExpr right) {
+            return switch (op) {
+                case ADD -> new Add(left, right);
+                case SUB -> new Sub(left, right);
+                case MUL -> new Mul(left, right);
+                case DIV -> new Div(left, right);
+                case MOD -> new Mod(left, right);
+            };
+        }
+
         @Override
-        public Vec eval(Batch b, int[] sel, int n) {
+        public final Vec eval(Batch b, int[] sel, int n) {
             Vec a = left.eval(b, sel, n);
             Vec c = right.eval(b, sel, n);
             out.ensure(b.size);
             boolean nul = unionNulls(out, a, c, sel, n, b.size);
-            long[] x = a.longs;
-            long[] y = c.longs;
-            long[] r = out.longs;
-            boolean[] m = out.nulls;
-            if (!nul && sel == null && (op == ArithOp.ADD || op == ArithOp.SUB)) {
-                long ov = 0;
-                if (op == ArithOp.ADD) {
+            apply(a.longs, c.longs, out.longs, nul ? out.nulls : null, sel, n);
+            return out;
+        }
+
+        /** Computes {@code r[i] = x[i] op y[i]} at the active positions, except where {@code nulls[i]}. */
+        abstract void apply(long[] x, long[] y, long[] r, boolean[] nulls, int[] sel, int n);
+
+        static final class Add extends LongArith {
+            Add(VecExpr left, VecExpr right) {
+                super(left, right);
+            }
+
+            @Override
+            void apply(long[] x, long[] y, long[] r, boolean[] nulls, int[] sel, int n) {
+                if (nulls == null && sel == null) {
+                    long ov = 0; // branch-free: overflow flags OR-ed, checked once
                     for (int i = 0; i < n; i++) {
                         long s = x[i] + y[i];
                         ov |= (x[i] ^ s) & (y[i] ^ s);
                         r[i] = s;
                     }
-                } else {
+                    if (ov < 0) {
+                        throw overflow();
+                    }
+                    return;
+                }
+                for (int k = 0; k < n; k++) {
+                    int i = sel == null ? k : sel[k];
+                    if (nulls == null || !nulls[i]) {
+                        r[i] = addExact(x[i], y[i]);
+                    }
+                }
+            }
+        }
+
+        static final class Sub extends LongArith {
+            Sub(VecExpr left, VecExpr right) {
+                super(left, right);
+            }
+
+            @Override
+            void apply(long[] x, long[] y, long[] r, boolean[] nulls, int[] sel, int n) {
+                if (nulls == null && sel == null) {
+                    long ov = 0;
                     for (int i = 0; i < n; i++) {
                         long s = x[i] - y[i];
                         ov |= (x[i] ^ y[i]) & (x[i] ^ s);
                         r[i] = s;
                     }
+                    if (ov < 0) {
+                        throw overflow();
+                    }
+                    return;
                 }
-                if (ov < 0) {
-                    throw overflow();
+                for (int k = 0; k < n; k++) {
+                    int i = sel == null ? k : sel[k];
+                    if (nulls == null || !nulls[i]) {
+                        r[i] = subtractExact(x[i], y[i]);
+                    }
                 }
-                return out;
             }
-            for (int k = 0; k < n; k++) {
-                int i = sel == null ? k : sel[k];
-                if (nul && m[i]) {
-                    continue;
+        }
+
+        static final class Mul extends LongArith {
+            Mul(VecExpr left, VecExpr right) {
+                super(left, right);
+            }
+
+            @Override
+            void apply(long[] x, long[] y, long[] r, boolean[] nulls, int[] sel, int n) {
+                for (int k = 0; k < n; k++) {
+                    int i = sel == null ? k : sel[k];
+                    if (nulls == null || !nulls[i]) {
+                        r[i] = multiplyExact(x[i], y[i]);
+                    }
                 }
-                long p = x[i];
-                long q = y[i];
-                r[i] = switch (op) {
-                    case ADD -> {
-                        long s = p + q;
-                        if (((p ^ s) & (q ^ s)) < 0) {
-                            throw overflow();
-                        }
-                        yield s;
-                    }
-                    case SUB -> {
-                        long s = p - q;
-                        if (((p ^ q) & (p ^ s)) < 0) {
-                            throw overflow();
-                        }
-                        yield s;
-                    }
-                    case MUL -> {
-                        long hi = Math.multiplyHigh(p, q);
-                        long lo = p * q;
-                        if ((hi != 0 || lo < 0) && (hi != -1 || lo >= 0)) {
-                            throw overflow();
-                        }
-                        yield lo;
-                    }
-                    case DIV -> {
+            }
+        }
+
+        static final class Div extends LongArith {
+            Div(VecExpr left, VecExpr right) {
+                super(left, right);
+            }
+
+            @Override
+            void apply(long[] x, long[] y, long[] r, boolean[] nulls, int[] sel, int n) {
+                for (int k = 0; k < n; k++) {
+                    int i = sel == null ? k : sel[k];
+                    if (nulls == null || !nulls[i]) {
+                        long q = y[i];
                         if (q == 0) {
                             throw divisionByZero();
                         }
-                        if (p == Long.MIN_VALUE && q == -1) {
+                        if (x[i] == Long.MIN_VALUE && q == -1) {
                             throw overflow();
                         }
-                        yield p / q;
+                        r[i] = x[i] / q;
                     }
-                    case MOD -> {
+                }
+            }
+        }
+
+        static final class Mod extends LongArith {
+            Mod(VecExpr left, VecExpr right) {
+                super(left, right);
+            }
+
+            @Override
+            void apply(long[] x, long[] y, long[] r, boolean[] nulls, int[] sel, int n) {
+                for (int k = 0; k < n; k++) {
+                    int i = sel == null ? k : sel[k];
+                    if (nulls == null || !nulls[i]) {
+                        long q = y[i];
                         if (q == 0) {
                             throw divisionByZero();
                         }
-                        yield q == -1 ? 0 : p % q;
+                        r[i] = q == -1 ? 0 : x[i] % q;
                     }
-                };
+                }
             }
-            return out;
         }
     }
 
-    /** DECIMAL +, -, * on unscaled values (exact, 18-digit results). */
-    static final class DecimalArith implements VecExpr {
-        private final ArithOp op;
+    private static long addExact(long p, long q) {
+        try {
+            return Math.addExact(p, q);
+        } catch (ArithmeticException e) {
+            throw overflow();
+        }
+    }
+
+    private static long subtractExact(long p, long q) {
+        try {
+            return Math.subtractExact(p, q);
+        } catch (ArithmeticException e) {
+            throw overflow();
+        }
+    }
+
+    private static long multiplyExact(long p, long q) {
+        try {
+            return Math.multiplyExact(p, q);
+        } catch (ArithmeticException e) {
+            throw overflow();
+        }
+    }
+
+    /**
+     * DECIMAL +, -, * on unscaled values (exact, 18-digit results); one kernel class per operator
+     * (see {@link LongArith}).
+     */
+    abstract static sealed class DecimalArith implements VecExpr
+            permits DecimalArith.Add, DecimalArith.Sub, DecimalArith.Mul {
         private final VecExpr left;
         private final VecExpr right;
-        private final int s1;
-        private final int s2;
-        private final int rs;
+        final int s1;
+        final int s2;
+        final int rs;
         private final Vec out;
 
-        DecimalArith(ArithOp op, VecExpr left, VecExpr right, int s1, int s2, DataType type) {
-            this.op = op;
+        private DecimalArith(VecExpr left, VecExpr right, int s1, int s2, DataType type) {
             this.left = left;
             this.right = right;
             this.s1 = s1;
@@ -284,43 +372,105 @@ final class Kernels {
             this.out = new Vec(type, 16);
         }
 
+        static DecimalArith of(ArithOp op, VecExpr left, VecExpr right, int s1, int s2, DataType type) {
+            return switch (op) {
+                case ADD -> new Add(left, right, s1, s2, type);
+                case SUB -> new Sub(left, right, s1, s2, type);
+                case MUL -> new Mul(left, right, s1, s2, type);
+                default -> throw new IllegalStateException("DECIMAL " + op);
+            };
+        }
+
         @Override
-        public Vec eval(Batch b, int[] sel, int n) {
+        public final Vec eval(Batch b, int[] sel, int n) {
             Vec a = left.eval(b, sel, n);
             Vec c = right.eval(b, sel, n);
             out.ensure(b.size);
             boolean nul = unionNulls(out, a, c, sel, n, b.size);
-            long[] x = a.longs;
-            long[] y = c.longs;
-            long[] r = out.longs;
-            boolean[] m = out.nulls;
-            if (!nul && s1 == rs && s2 == rs && (op == ArithOp.ADD || op == ArithOp.SUB)) {
-                // Same scales: plain long arithmetic; |operands| < 10^18 cannot overflow a long.
-                boolean bad = false;
+            apply(a.longs, c.longs, out.longs, nul ? out.nulls : null, sel, n);
+            return out;
+        }
+
+        /** Computes {@code r[i] = x[i] op y[i]} at the active positions, except where {@code nulls[i]}. */
+        abstract void apply(long[] x, long[] y, long[] r, boolean[] nulls, int[] sel, int n);
+
+        /** Same-scale + or -: plain long arithmetic; |operands| < 10^18 cannot overflow a long. */
+        final boolean sameScales() {
+            return s1 == rs && s2 == rs;
+        }
+
+        static final class Add extends DecimalArith {
+            Add(VecExpr left, VecExpr right, int s1, int s2, DataType type) {
+                super(left, right, s1, s2, type);
+            }
+
+            @Override
+            void apply(long[] x, long[] y, long[] r, boolean[] nulls, int[] sel, int n) {
+                if (nulls == null && sameScales()) {
+                    boolean bad = false;
+                    for (int k = 0; k < n; k++) {
+                        int i = sel == null ? k : sel[k];
+                        long s = x[i] + y[i];
+                        bad |= s > Decimals.MAX_UNSCALED || s < -Decimals.MAX_UNSCALED;
+                        r[i] = s;
+                    }
+                    if (bad) {
+                        throw Decimals.overflow();
+                    }
+                    return;
+                }
                 for (int k = 0; k < n; k++) {
                     int i = sel == null ? k : sel[k];
-                    long s = op == ArithOp.ADD ? x[i] + y[i] : x[i] - y[i];
-                    bad |= s > Decimals.MAX_UNSCALED || s < -Decimals.MAX_UNSCALED;
-                    r[i] = s;
+                    if (nulls == null || !nulls[i]) {
+                        r[i] = Decimals.add(x[i], s1, y[i], s2, rs);
+                    }
                 }
-                if (bad) {
-                    throw Decimals.overflow();
-                }
-                return out;
             }
-            for (int k = 0; k < n; k++) {
-                int i = sel == null ? k : sel[k];
-                if (nul && m[i]) {
-                    continue;
-                }
-                r[i] = switch (op) {
-                    case ADD -> Decimals.add(x[i], s1, y[i], s2, rs);
-                    case SUB -> Decimals.subtract(x[i], s1, y[i], s2, rs);
-                    case MUL -> Decimals.multiply(x[i], y[i]);
-                    default -> throw new IllegalStateException("DECIMAL " + op);
-                };
+        }
+
+        static final class Sub extends DecimalArith {
+            Sub(VecExpr left, VecExpr right, int s1, int s2, DataType type) {
+                super(left, right, s1, s2, type);
             }
-            return out;
+
+            @Override
+            void apply(long[] x, long[] y, long[] r, boolean[] nulls, int[] sel, int n) {
+                if (nulls == null && sameScales()) {
+                    boolean bad = false;
+                    for (int k = 0; k < n; k++) {
+                        int i = sel == null ? k : sel[k];
+                        long s = x[i] - y[i];
+                        bad |= s > Decimals.MAX_UNSCALED || s < -Decimals.MAX_UNSCALED;
+                        r[i] = s;
+                    }
+                    if (bad) {
+                        throw Decimals.overflow();
+                    }
+                    return;
+                }
+                for (int k = 0; k < n; k++) {
+                    int i = sel == null ? k : sel[k];
+                    if (nulls == null || !nulls[i]) {
+                        r[i] = Decimals.subtract(x[i], s1, y[i], s2, rs);
+                    }
+                }
+            }
+        }
+
+        static final class Mul extends DecimalArith {
+            Mul(VecExpr left, VecExpr right, int s1, int s2, DataType type) {
+                super(left, right, s1, s2, type);
+            }
+
+            @Override
+            void apply(long[] x, long[] y, long[] r, boolean[] nulls, int[] sel, int n) {
+                for (int k = 0; k < n; k++) {
+                    int i = sel == null ? k : sel[k];
+                    if (nulls == null || !nulls[i]) {
+                        r[i] = Decimals.multiply(x[i], y[i]);
+                    }
+                }
+            }
         }
     }
 
@@ -376,55 +526,131 @@ final class Kernels {
         }
     }
 
-    /** FLOAT64 arithmetic; infinite/NaN results are NUMERIC_OVERFLOW. */
-    static final class DoubleArith implements VecExpr {
-        private final ArithOp op;
+    /**
+     * FLOAT64 arithmetic; infinite/NaN results are NUMERIC_OVERFLOW. One kernel class per
+     * operator (see {@link LongArith}).
+     */
+    abstract static sealed class DoubleArith implements VecExpr
+            permits DoubleArith.Add, DoubleArith.Sub, DoubleArith.Mul, DoubleArith.Div {
         private final VecExpr left;
         private final VecExpr right;
         private final Vec out;
 
-        DoubleArith(ArithOp op, VecExpr left, VecExpr right) {
-            this.op = op;
+        private DoubleArith(VecExpr left, VecExpr right) {
             this.left = left;
             this.right = right;
             this.out = new Vec(DataType.FLOAT64, 16);
         }
 
+        static DoubleArith of(ArithOp op, VecExpr left, VecExpr right) {
+            return switch (op) {
+                case ADD -> new Add(left, right);
+                case SUB -> new Sub(left, right);
+                case MUL -> new Mul(left, right);
+                case DIV -> new Div(left, right);
+                case MOD -> throw new IllegalStateException("FLOAT64 %");
+            };
+        }
+
         @Override
-        public Vec eval(Batch b, int[] sel, int n) {
+        public final Vec eval(Batch b, int[] sel, int n) {
             Vec a = left.eval(b, sel, n);
             Vec c = right.eval(b, sel, n);
             out.ensure(b.size);
             boolean nul = unionNulls(out, a, c, sel, n, b.size);
-            double[] x = a.doubles;
-            double[] y = c.doubles;
-            double[] r = out.doubles;
-            boolean[] m = out.nulls;
-            boolean bad = false;
-            for (int k = 0; k < n; k++) {
-                int i = sel == null ? k : sel[k];
-                if (nul && m[i]) {
-                    continue;
-                }
-                double v = switch (op) {
-                    case ADD -> x[i] + y[i];
-                    case SUB -> x[i] - y[i];
-                    case MUL -> x[i] * y[i];
-                    case DIV -> {
-                        if (y[i] == 0.0) {
-                            throw divisionByZero();
-                        }
-                        yield x[i] / y[i];
-                    }
-                    case MOD -> throw new IllegalStateException("FLOAT64 %");
-                };
-                bad |= Double.isInfinite(v) || Double.isNaN(v);
-                r[i] = v;
-            }
-            if (bad) {
+            if (apply(a.doubles, c.doubles, out.doubles, nul ? out.nulls : null, sel, n)) {
                 throw overflow();
             }
             return out;
+        }
+
+        /**
+         * Computes {@code r[i] = x[i] op y[i]} at the active positions, except where
+         * {@code nulls[i]}; returns true if a result is infinite or NaN.
+         */
+        abstract boolean apply(double[] x, double[] y, double[] r, boolean[] nulls, int[] sel, int n);
+
+        static final class Add extends DoubleArith {
+            Add(VecExpr left, VecExpr right) {
+                super(left, right);
+            }
+
+            @Override
+            boolean apply(double[] x, double[] y, double[] r, boolean[] nulls, int[] sel, int n) {
+                boolean bad = false;
+                for (int k = 0; k < n; k++) {
+                    int i = sel == null ? k : sel[k];
+                    if (nulls == null || !nulls[i]) {
+                        double v = x[i] + y[i];
+                        bad |= !Double.isFinite(v);
+                        r[i] = v;
+                    }
+                }
+                return bad;
+            }
+        }
+
+        static final class Sub extends DoubleArith {
+            Sub(VecExpr left, VecExpr right) {
+                super(left, right);
+            }
+
+            @Override
+            boolean apply(double[] x, double[] y, double[] r, boolean[] nulls, int[] sel, int n) {
+                boolean bad = false;
+                for (int k = 0; k < n; k++) {
+                    int i = sel == null ? k : sel[k];
+                    if (nulls == null || !nulls[i]) {
+                        double v = x[i] - y[i];
+                        bad |= !Double.isFinite(v);
+                        r[i] = v;
+                    }
+                }
+                return bad;
+            }
+        }
+
+        static final class Mul extends DoubleArith {
+            Mul(VecExpr left, VecExpr right) {
+                super(left, right);
+            }
+
+            @Override
+            boolean apply(double[] x, double[] y, double[] r, boolean[] nulls, int[] sel, int n) {
+                boolean bad = false;
+                for (int k = 0; k < n; k++) {
+                    int i = sel == null ? k : sel[k];
+                    if (nulls == null || !nulls[i]) {
+                        double v = x[i] * y[i];
+                        bad |= !Double.isFinite(v);
+                        r[i] = v;
+                    }
+                }
+                return bad;
+            }
+        }
+
+        static final class Div extends DoubleArith {
+            Div(VecExpr left, VecExpr right) {
+                super(left, right);
+            }
+
+            @Override
+            boolean apply(double[] x, double[] y, double[] r, boolean[] nulls, int[] sel, int n) {
+                boolean bad = false;
+                for (int k = 0; k < n; k++) {
+                    int i = sel == null ? k : sel[k];
+                    if (nulls == null || !nulls[i]) {
+                        if (y[i] == 0.0) {
+                            throw divisionByZero();
+                        }
+                        double v = x[i] / y[i];
+                        bad |= !Double.isFinite(v);
+                        r[i] = v;
+                    }
+                }
+                return bad;
+            }
         }
     }
 

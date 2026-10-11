@@ -160,10 +160,10 @@ final class VecCompiler {
             return new Kernels.WideArith(a.op(), l, r, a.left().type().scale(), a.right().type().scale(), a.type());
         }
         return switch (a.type().kind()) {
-            case INT64 -> new Kernels.LongArith(a.op(), l, r);
-            case DECIMAL -> new Kernels.DecimalArith(a.op(), l, r, a.left().type().scale(), a.right().type().scale(),
+            case INT64 -> Kernels.LongArith.of(a.op(), l, r);
+            case DECIMAL -> Kernels.DecimalArith.of(a.op(), l, r, a.left().type().scale(), a.right().type().scale(),
                     a.type());
-            case FLOAT64 -> new Kernels.DoubleArith(a.op(), l, r);
+            case FLOAT64 -> Kernels.DoubleArith.of(a.op(), l, r);
             default -> new Kernels.Constant(a.type(), null);
         };
     }
