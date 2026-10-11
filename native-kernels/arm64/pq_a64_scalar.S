@@ -37,6 +37,12 @@
  *   - hash_i64 is the MurmurHash3 fmix64 finalizer with MUL.
  *   - group_sum_i64 validates all ids first, then accumulates with ADDS,
  *     collecting the V flag (signed wrap) via CSINC.
+ *   - 128-bit kernels (CR-4): one LDP per row; comparisons use the CMP/SBCS
+ *     multi-word chain (flags of the full 128-bit subtraction). filter/count
+ *     use the 128-bit range form (PRED128_SETUP/SPRED128), sum_i128 keeps an
+ *     exact 192-bit accumulator (ADDS/ADCS/ADC with the sign word; overflow
+ *     iff top != mid ASR 63), minmax_i128 is CSEL-based and branch-free
+ *     (validity folded in with CCMP). See the per-function comments.
  */
 #include "pq_a64_macros.h"
 

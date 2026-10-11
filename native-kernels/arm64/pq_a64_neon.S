@@ -71,6 +71,18 @@
  *                     ngroups); the scatter-add itself is scalar (no NEON
  *                     scatter), in row order with ADDS/CSINC overflow flag.
  *   gather_i64        4-way unrolled scalar loads (no NEON gather).
+ *   filter_i128 /     LD2 {.2d} splits 2 rows into lo/hi word vectors; the
+ *   count_i128        128-bit range predicate costs 8 lane ops per 2 rows
+ *                     (borrow via CMHI mask, CMHS/CMHI/CMEQ + BIF); 8 rows
+ *                     per iteration; filter packs an 8-bit mask and reuses
+ *                     EMIT8, count accumulates lane masks.
+ *   sum_i128          exact: LD4 {.4s} splits 4 rows into their 32-bit limbs
+ *                     (one vector per limb); UADALP (limbs 0-2) / SADALP
+ *                     (limb 3) into 64-bit lanes; blocks of 2^28 rows folded
+ *                     into a 192-bit GPR total; overflow iff the total is
+ *                     outside int128.
+ *   minmax_i128       signed 128-bit lane compares (CMGT/CMEQ/CMHI + BIT),
+ *                     two accumulator sets, GPR fold of the 4 lane pairs.
  */
 #include "pq_a64_macros.h"
 

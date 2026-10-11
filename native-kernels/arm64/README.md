@@ -1,20 +1,24 @@
 # PolyQuery native kernels: AArch64 assembly
 
-This directory has the AArch64 (GNU `as`, AAPCS64) implementations of all 16
-kernels declared in `../include/pq_kernels.h`:
+This directory has the AArch64 (GNU `as`, AAPCS64) implementations of all 20
+kernels declared in `../include/pq_kernels.h` (ABI version 1, revision 1:
+the 16 original kernels plus the four 128-bit kernels of change request CR-4,
+`../../spec/changes/kernels-i128.md`):
 
 | File | Variant | Status |
 |---|---|---|
-| `pq_a64_scalar.S` | `a64_scalar` (required) | 16/16 kernels, base A64 only (GPR + scalar FP) |
-| `pq_a64_neon.S`   | `a64_neon` (required)   | 16/16 kernels, Advanced SIMD |
-| `pq_a64_sve.S`    | `a64_sve` (optional)    | 16/16 kernels, SVE, vector-length agnostic |
-| `pq_a64_macros.h` | shared assembler macros | `FUNC`/`ENDF`, `PRED_SETUP`, `SPRED`, `VBIT`, fmix64 helpers |
+| `pq_a64_scalar.S` | `a64_scalar` (required) | 20/20 kernels, base A64 only (GPR + scalar FP) |
+| `pq_a64_neon.S`   | `a64_neon` (required)   | 20/20 kernels, Advanced SIMD |
+| `pq_a64_sve.S`    | `a64_sve` (optional)    | 20/20 kernels, SVE, vector-length agnostic |
+| `pq_a64_macros.h` | shared assembler macros | `FUNC`/`ENDF`, `PRED_SETUP`, `SPRED`, `VBIT`, fmix64 helpers, 128-bit helpers (`PRED128_SETUP`, `SPRED128`, `MIN128`/`MAX128`(`V`)) |
 
 Each kernel is exported as a global `pqk_<variant>_<kernel>` function with
 `.type`/`.size`. The dispatcher in `../reference-c/pq_dispatch.c` finds them
 through weak references. Every `.S` file ends with a `.note.GNU-stack`
 section. Each file starts with a header comment covering register usage and
-algorithms, and each function has a comment listing its register roles.
+algorithms, and each function has a comment listing its register roles. The
+comment of every 128-bit kernel also describes its algorithm and, for
+`sum_i128`, how exact overflow detection works.
 
 ## Test results
 
@@ -26,9 +30,9 @@ No AArch64 hardware was available.
 $ make -C native-kernels test-cross
 == AArch64 (qemu-user emulation; functional only) ==
 available variants: reference,a64_sve,a64_neon,a64_scalar (default: a64_sve)
-  a64_scalar  16/16 kernels  PASS
-  a64_neon    16/16 kernels  PASS
-  a64_sve     16/16 kernels  PASS
+  a64_scalar  20/20 kernels  PASS
+  a64_neon    20/20 kernels  PASS
+  a64_sve     20/20 kernels  PASS
 kernel tests: 3 variant(s) tested, 0 failure(s)
 ```
 
@@ -59,6 +63,27 @@ that is not committed, because the rules allow only assembly here:
   (2^24 groups for NEON, 2^24 rows for SVE) and `bitmap_popcount` blocks
   (2^20 iterations). Normal test sizes never reach them. I tested them by
   rebuilding a temporary copy with the block constants shrunk to 2–4.
+* **128-bit kernels (CR-4)**, with a separate throwaway harness:
+  * Guard pages, both directions: buffers end exactly at a `PROT_NONE`
+    page, or start right after one at a random offset. This applies to the
+    data, the validity bitmap (`ceil(n/8)` bytes), `out_idx` (exactly `n`
+    entries), `*a`, `*b` and the 16-byte outputs. `n` runs over 0..139 and
+    4096..4159, with NULL, random, all-ones, all-zero and sparse validity.
+    A one-row over-read was confirmed to fault.
+  * All ops with `a` and `b` drawn from 17 edge values (INT128_MIN/MAX and
+    neighbours, ±2^63, ±2^64 and their neighbours, ±2^32, -1/0/1). This
+    covers every (a, b) pair for BETWEEN, `a`/`b` pointing into `data`,
+    `b == NULL` for the other ops, and invalid ops (7, -5, INT_MIN) with
+    `a == b == NULL`.
+  * 3000 sums of up to 300 values near INT128_MIN/MAX that wrap many
+    times in both directions. Some come back into range and some do not.
+  * The sum block-flush paths (NEON every 2^28 rows, SVE every 2^24 rows)
+    were tested by rebuilding a temporary copy with the block sizes cut to
+    16 and 5 rows.
+  * SVE at VL = 128, 256, 384, 512, 640, 1024 and 2048 bits, for both the
+    official test and this harness.
+  * Register audit: the disassembly of all twelve new functions uses no
+    x19–x29, sp, v8–v15 or z8–z15.
 * **Shared library**: `-fPIC -shared` links with `-z text` and fatal linker
   warnings: no text relocations, and `GNU_STACK` is RW (not executable).
   The test also passes when linked dynamically against that `.so`.
@@ -86,6 +111,10 @@ counted from the source. They are **not** measurements.
 | bitmap_and (per byte) | ≈0.9 | ≈0.16 |
 | bitmap_popcount (per byte) | ≈1.75 (SWAR) | ≈0.19 (CNT) |
 | hash_i64 | 10 | ≈7.75 (4-way interleaved GPR, more ILP) |
+| filter_i128 | 13 | ≈7.25 (58 per 8 rows, branch-free) |
+| count_i128 | 12 | ≈5.4 |
+| sum_i128 (exact) | 9 | ≈1.6 (2×LD4 + 8×U/SADALP per 8 rows) |
+| minmax_i128 | 12 | ≈6.9 |
 
 ## Design decisions
 
@@ -206,6 +235,87 @@ bytes.
   which is position independent and works both static and in a shared
   library.
 
+### 128-bit kernels (CR-4)
+
+A `pqk_i128` is `{uint64 lo; int64 hi}`, which is the little-endian int128.
+Scalar code keeps a value in a GPR pair (one `LDP`). The SIMD variants split
+rows into a lo-word vector and a hi-word vector with structure loads (`LD2`
+/ `LD2D`). `LD4 {.4s}` splits them into 32-bit limbs.
+
+* **Comparisons.** In scalar code, `CMP lo; SBCS xzr, hi` leaves the flags
+  of the full 128-bit subtraction. `hs`/`lo` give unsigned order and
+  `lt`/`ge` give signed order. `Z` only reflects the high word, so the code
+  never uses eq/gt/le on such a chain. In vector code, each 128-bit compare
+  is three 64-bit lane compares plus one select:
+  `(hi <  hi') | (hi == hi' & lo <u lo')`, signed or unsigned on the high
+  word. That is `CMGT`/`CMHI`, `CMEQ`, `CMHI`/`CMHS` and `BIT`/`BIF` in
+  NEON, and three compares plus predicate `SEL` in SVE.
+* **One predicate form.** `filter_i128`/`count_i128` reuse the canonical
+  range form of the 64-bit kernels, widened to 128 bits:
+  `((x - lo) <=u span) ^ inv`. `PRED128_SETUP` builds `lo`/`span`/`inv`
+  from `(op, *a, *b)`. Subtracting or adding 2^127 only flips bit 63 of the
+  high word, so `span = a - MIN` and `MAX - lo` need no arithmetic. The
+  empty-set cases are detected with the `V` flag of the `SBCS`/`ADCS` that
+  forms `a ∓ 1`: LT with `a == INT128_MIN`, GT with `a == INT128_MAX`, and
+  BETWEEN with `a > b` (signed flags of `b - a`). `op` is validated before
+  `*a` is read, and `*b` is read only for BETWEEN, as the ABI requires.
+  `*a` is read even when `n == 0`. The NEON cost is 8 lane ops per 2 rows:
+  the borrow is a `CMHI` all-ones mask added to the high word, then
+  `CMHS`/`CMHI`/`CMEQ` + `BIF`.
+* **NEON filter_i128** handles 8 rows per iteration. It packs an 8-bit row
+  mask (`UZP1`×3, `XTN`, `AND` with bit weights, `ADDV`), ANDs it with one
+  validity byte, and reuses the `EMIT8` table compaction of `filter_i64`.
+  The 32-byte over-store is again bounded by `k <= i` and `i + 8 <= n`.
+  `count_i128` subtracts all-ones lane masks into two counters. With
+  validity, it applies the inversion per lane with `EOR`. Without validity,
+  it applies the inversion once at the end as `rows - count`.
+* **Exact sum_i128.** The exact sum of `n < 2^32` int128 values has
+  magnitude below 2^159, so a **192-bit** two's-complement accumulator
+  never wraps and holds the exact mathematical sum. Intermediate
+  excursions outside int128 therefore cancel by construction: for example,
+  `INT128_MAX, 1, -1` is OK. The result fits in int128 iff the top word
+  equals the sign extension of the middle word (`top == mid ASR 63`), and
+  this is the only overflow test. On overflow `*out_sum` is not written.
+  * Scalar: `ADDS`/`ADCS`/`ADC` with the value sign-extended to 192 bits,
+    3 additions per row.
+  * NEON: `LD4 {.4s}` gives one vector per 32-bit limb (lane j = row j).
+    `UADALP` accumulates limbs 0–2 and `SADALP` accumulates the signed top
+    limb 3 into 64-bit lanes, with two accumulator sets for 8 rows per
+    iteration. Invalid rows are zeroed by `AND` with `CMTST` masks. In
+    blocks of at most 2^28 rows, every lane stays below 2^58, so it cannot
+    wrap even after both sets and both lanes are added. Each block is
+    folded into the 192-bit GPR total as
+    `L0 + L1·2^32 + L2·2^64 + L3·2^96`, with L3 sign-extended.
+  * SVE: the same limb decomposition (`AND`/`LSR` of the lo word,
+    `AND`/`ASR` of the hi word), merging `ADD`s under the valid-row
+    predicate, and blocks of 2^24 rows. The block totals are below 2^56,
+    so the modular `UADDV` is exact.
+  * Why limbs and not a carry count: NEON has no add-with-carry. Splitting
+    into 32-bit limbs lets the widening pairwise accumulate instructions do
+    the work exactly at about 1 instruction per limb per 4 rows. The
+    alternative, `ADD` + `CMHI` carry detection + carry accumulation,
+    costs more and still needs a separate signed top word.
+* **minmax_i128.**
+  * Scalar: `CMP`/`SBCS` + two `CSEL`s per bound. With validity, `CCMP`
+    folds "lt and valid" into one condition, so the loop stays branch-free.
+  * NEON: lane-wise signed 128-bit compares (12 ops per 2 rows) with two
+    independent accumulator sets. This halves the loop-carried
+    `BIT`→compare chain. Validity is ANDed into the update masks. The 8
+    lane candidates are folded in GPRs.
+  * SVE: lane-wise compare + `SEL`, then a two-step horizontal reduction:
+    `SMINV` of the hi words, then `UMINV` of the lo words over the lanes
+    whose hi word equals that minimum. This works because int128 order is
+    the lexicographic order of (signed hi, unsigned lo).
+  * All variants start from INT128_MAX/INT128_MIN. For integers this is
+    indistinguishable from the reference's "first valid value"
+    initialisation, and outputs are written only when the count is > 0.
+* **Tails and unaligned data.** NEON main loops run only over whole 8-row
+  groups, which also makes validity a whole byte per iteration. The 0–7
+  remaining rows use the scalar GPR macros. SVE needs no tail: `WHILELO`
+  predicates the last vector. `LD2D` is addressed as
+  `[x0, 2·row, lsl #3]`, so a block loop can restart at any row. All
+  accesses are ordinary loads and stores, so any alignment works.
+
 ### SVE specifics
 * The file uses `.arch armv8.2-a+sve`, so no Makefile flags are needed. The
   code runs only when the dispatcher sees `HWCAP_SVE`.
@@ -222,7 +332,14 @@ bytes.
 * NEON `hash_i64`, `gather_i64` and `group_sum_i64` (accumulation pass) are
   scalar by design, for the reasons above.
 * `filter_i64` assumes `n < 2^32`, as the header specifies: indices are
-  formed in 32-bit lanes.
+  formed in 32-bit lanes. `sum_i128` relies on the same bound: the
+  192-bit accumulator is exact for up to 2^64 rows anyway, and the
+  per-block lane bounds do not depend on `n`.
+* The 128-bit SIMD kernels gain less than the 64-bit ones. A 128-bit
+  compare costs 3–4 lane ops plus a select, and a 128-bit register holds
+  only two rows. By instruction count, NEON filter/count/minmax are about
+  1.7–2.2× fewer instructions per row than scalar; `sum_i128` is about
+  5.6× fewer. This has not been measured on hardware.
 * SVE has been run only under emulation. `filter_i64_bitmap`/`compare_i64`
   and the validity gather are written for generality across vector lengths,
   not peak speed on a particular core.

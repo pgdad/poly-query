@@ -58,6 +58,15 @@
  *                     CSINC overflow flag), as SVE has no conflict-free
  *                     scatter-add.
  *   gather_i64        LD1W (zero-extend) + LD1D gather (scaled) + ST1D.
+ *   filter_i128 /     LD2D splits rows into lo/hi word vectors; 128-bit range
+ *   count_i128        predicate from 64-bit compares + predicate SEL
+ *                     (RANGE128); COMPACT + ST1W / INCP as for 64-bit.
+ *   sum_i128          exact: four 32-bit limbs per value accumulated in
+ *                     64-bit lanes (merging ADD under p1), blocks of 2^24
+ *                     rows, UADDV, folded into a 192-bit GPR total.
+ *   minmax_i128       lane-wise signed 128-bit compare + SEL; horizontal
+ *                     SMINV of hi words, then UMINV of lo words among the
+ *                     lanes holding that hi word (same for max).
  */
 #include "pq_a64_macros.h"
 
