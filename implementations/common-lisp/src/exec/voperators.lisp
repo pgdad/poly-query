@@ -800,11 +800,160 @@ BATCH-B under the ORDER BY KEYS ((pos type descending nulls-first) lists)."
 
 (defun sorted-permutation (batch keys &optional (threads 1))
   "Row indexes of BATCH in ORDER BY KEYS order (stable)."
-  (let ((perm (identity-index-vector (batch-count batch)))
-        (before (make-index-sort-predicate batch keys)))
-    (if (> threads 1)
-        (parallel-stable-sort perm before threads)
-        (stable-sort perm before))))
+  (let* ((n (batch-count batch))
+         (perm (identity-index-vector n))
+         (words (radix-key-words batch keys)))
+    (if words
+        (let ((chunk-sort (lambda (chunk) (radix-sort-permutation chunk words))))
+          (if (> threads 1)
+              (parallel-stable-sort perm nil threads chunk-sort
+                                    (lambda (src dst start mid end)
+                                      (merge-runs-by-words src dst start mid end words)))
+              (funcall chunk-sort perm)))
+        (let ((before (make-index-sort-predicate batch keys)))
+          (if (> threads 1)
+              (parallel-stable-sort perm before threads)
+              (stable-sort perm before))))))
+
+;;; Radix sorting. When every ORDER BY key is an INT64-like or FLOAT64
+;;; column, each key value maps to an unsigned 64-bit word whose order is
+;;; the key's order (sign bit flipped; IEEE bits of doubles with negative
+;;; values inverted, -0.0 as 0.0; complemented for DESC); a key with NULLs
+;;; also gets a more significant word holding its NULL flag (NULL values
+;;; get the value word 0, as they are equal). Rows then compare as their
+;;; word sequences, and a stable LSD radix sort over the words, least
+;;; significant first, yields exactly the stable comparison sort. Digits on
+;;; which all rows agree are skipped.
+
+(defconstant +radix-bits+ 11)
+(defconstant +u64-mask+ #xFFFFFFFFFFFFFFFF)
+
+(deftype u64-vector () '(simple-array (unsigned-byte 64) (*)))
+
+(declaim (inline radix-word))
+(defun radix-word (data i descending)
+  "Order-preserving unsigned word of DATA[I]."
+  (let ((w (etypecase data
+             (i64-vector (logxor (logand (aref data i) +u64-mask+) #x8000000000000000))
+             (f64-vector (let* ((d (aref data i))
+                                (bits (logand (sb-kernel:double-float-bits (if (zerop d) 0d0 d))
+                                              +u64-mask+)))
+                           (if (logbitp 63 bits)
+                               (logand (lognot bits) +u64-mask+)
+                               (logior bits #x8000000000000000)))))))
+    (declare (type (unsigned-byte 64) w))
+    (if descending (logxor w +u64-mask+) w)))
+
+(defun radix-key-words (batch keys)
+  "Simple vector of U64-VECTORs (most significant first) of the row words
+for sorting BATCH by KEYS ((pos type descending nulls-first) lists), or NIL
+when some key is not a typed INT64-like/FLOAT64 column (or holds NaN)."
+  (let ((n (batch-count batch))
+        (out '()))
+    (loop for (pos nil descending nulls-first) in keys
+          for vec = (svref (batch-columns batch) pos)
+          for data = (vec-data vec)
+          for validity = (vec-validity vec)
+          do (unless (or (typep data 'i64-vector)
+                         (and (typep data 'f64-vector)
+                              (let ((data data))
+                                (declare (type f64-vector data))
+                                (loop for d across data always (= d d))))) ; no NaN
+               (return-from radix-key-words nil))
+             (let ((words (make-array n :element-type '(unsigned-byte 64))))
+               (macrolet ((fill-words (type)
+                            `(let ((data data))
+                               (declare (type ,type data))
+                               (dotimes (i n)
+                                 (setf (aref words i) (radix-word data i descending))))))
+                 (if (typep data 'i64-vector) (fill-words i64-vector) (fill-words f64-vector)))
+               (when validity
+                 (let ((flags (make-array n :element-type '(unsigned-byte 64)))
+                       (null-flag (if nulls-first 0 1)))
+                   (dotimes (i n)
+                     (if (zerop (sbit validity i))
+                         (setf (aref flags i) null-flag
+                               (aref words i) 0)
+                         (setf (aref flags i) (- 1 null-flag))))
+                   (push flags out)))
+               (push words out)))
+    (coerce (nreverse out) 'simple-vector)))
+
+(defun radix-pass (perm words perm2 words2 shift bits)
+  "Stable counting sort of (PERM, WORDS) into (PERM2, WORDS2) by the digit of
+BITS bits at SHIFT; returns NIL (and does nothing) if all digits are equal."
+  (declare (type index-vector perm perm2) (type u64-vector words words2)
+           (type (integer 0 63) shift) (type (integer 1 16) bits))
+  (let* ((n (length perm))
+         (buckets (ash 1 bits))
+         (counts (make-array (1+ buckets) :element-type 'fixnum :initial-element 0)))
+    (declare (type fixnum n buckets))
+    (dotimes (i n)
+      (incf (aref counts (1+ (ldb (byte bits shift) (aref words i))))))
+    (when (= (aref counts (1+ (ldb (byte bits shift) (aref words 0)))) n)
+      (return-from radix-pass nil))
+    (loop for d from 1 to buckets
+          do (incf (aref counts d) (aref counts (1- d))))
+    (dotimes (i n t)
+      (let* ((w (aref words i))
+             (d (ldb (byte bits shift) w))
+             (k (aref counts d)))
+        (setf (aref perm2 k) (aref perm i)
+              (aref words2 k) w
+              (aref counts d) (1+ k))))))
+
+(defun radix-sort-permutation (perm key-words)
+  "PERM (row indexes) stably sorted by the row words KEY-WORDS (see
+RADIX-KEY-WORDS); may return a new vector."
+  (declare (type index-vector perm) (type simple-vector key-words))
+  (let* ((n (length perm))
+         (words (make-array n :element-type '(unsigned-byte 64)))
+         (perm2 (make-index-vector n))
+         (words2 (make-array n :element-type '(unsigned-byte 64))))
+    (declare (type u64-vector words words2) (type index-vector perm2))
+    (when (< n 2) (return-from radix-sort-permutation perm))
+    (loop for k from (1- (length key-words)) downto 0
+          do (let ((row-words (svref key-words k))
+                   (all-or 0) (all-and +u64-mask+))
+               (declare (type u64-vector row-words) (type (unsigned-byte 64) all-or all-and))
+               (dotimes (i n)
+                 (let ((w (aref row-words (aref perm i))))
+                   (setf (aref words i) w
+                         all-or (logior all-or w)
+                         all-and (logand all-and w))))
+               ;; Only digits containing bits that differ between rows matter.
+               (let ((varying (logxor all-or all-and)))
+                 (loop for shift from 0 below (integer-length varying) by +radix-bits+
+                       do (when (and (plusp (ldb (byte +radix-bits+ shift) varying))
+                                     (radix-pass perm words perm2 words2 shift
+                                                 (min +radix-bits+ (- 64 shift))))
+                            (rotatef perm perm2)
+                            (rotatef words words2))))))
+    perm))
+
+(defun merge-runs-by-words (src dst start mid end key-words)
+  "Stably merge the sorted runs SRC[START,MID) and SRC[MID,END) into DST,
+comparing rows by their KEY-WORDS."
+  (declare (type index-vector src dst) (type fixnum start mid end)
+           (type simple-vector key-words))
+  (flet ((before (a b)
+           (declare (type fixnum a b))
+           (loop for w across key-words
+                 do (let ((x (aref (the u64-vector w) a))
+                          (y (aref (the u64-vector w) b)))
+                      (cond ((< x y) (return t))
+                            ((> x y) (return nil))))
+                 finally (return nil))))
+    (declare (inline before))
+    (let ((i start) (j mid) (k start))
+      (declare (type fixnum i j k))
+      (loop while (and (< i mid) (< j end))
+            do (if (before (aref src j) (aref src i))
+                   (progn (setf (aref dst k) (aref src j)) (incf j))
+                   (progn (setf (aref dst k) (aref src i)) (incf i)))
+               (incf k))
+      (replace dst src :start1 k :start2 i :end2 mid)
+      (replace dst src :start1 (+ k (- mid i)) :start2 j :end2 end))))
 
 (defun drain-batches (open kinds)
   "All rows of the batch opener OPEN as one batch (charging memory)."

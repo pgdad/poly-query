@@ -198,8 +198,15 @@ code paths (native kernels are optional)."
        (run-server config (make-server-options-from options) out)))
     (t (usage-error "unknown mode ~A" mode))))
 
+(defparameter *nursery-bytes* (* 512 1024 1024)
+  "Allocation between two young-generation collections. Queries allocate
+their intermediate vectors at a high rate; a large nursery makes collections
+rare (each one also scans the cards of the old generation holding the tables).")
+
 (defun main ()
   "Process entry point."
+  (let ((mb (ignore-errors (parse-integer (sb-posix:getenv "PQ_NURSERY_MB")))))
+    (setf (sb-ext:bytes-consed-between-gcs) (if mb (* mb 1024 1024) *nursery-bytes*)))
   (let ((in (sb-sys:make-fd-stream 0 :input t :buffering :full
                                      :external-format (list :utf-8 :replacement
                                                             (code-char #xFFFD))))

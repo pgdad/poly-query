@@ -542,21 +542,27 @@ and wait for all; re-signal the first error."
     (replace dst src :start1 k :start2 i :end2 mid)
     (replace dst src :start1 (+ k (- mid i)) :start2 j :end2 end)))
 
-(defun parallel-stable-sort (perm before threads)
+(defun parallel-stable-sort (perm before threads &optional chunk-sort merge)
   "Stably sort the index vector PERM by the predicate BEFORE using up to
-THREADS threads; returns the sorted vector."
+THREADS threads; returns the sorted vector. CHUNK-SORT, if given, stably
+sorts a chunk (an index vector, returning the sorted one) and MERGE merges
+two runs (as MERGE-RUNS without the predicate) in the same order."
   (declare (type index-vector perm))
   (let* ((n (length perm))
-         (chunks (min threads (max 1 (floor n (* 2 (morsel-rows)))))))
+         (chunks (min threads (max 1 (floor n (* 2 (morsel-rows))))))
+         (chunk-sort (or chunk-sort (lambda (chunk) (stable-sort chunk before))))
+         (merge (or merge (lambda (src dst start mid end)
+                            (merge-runs src dst start mid end before)))))
+    (declare (type function chunk-sort merge))
     (if (<= chunks 1)
-        (stable-sort perm before)
+        (funcall chunk-sort perm)
         (let ((bounds (loop for k to chunks collect (floor (* k n) chunks))))
           (run-in-threads
            (loop for (a b) on bounds
                  while b
                  collect (let ((a a) (b b))
                            (lambda ()
-                             (replace perm (stable-sort (subseq perm a b) before) :start1 a)))))
+                             (replace perm (funcall chunk-sort (subseq perm a b)) :start1 a)))))
           (let ((src perm)
                 (dst (make-index-vector n))
                 (runs (loop for (a b) on bounds while b collect (cons a b))))
@@ -567,7 +573,7 @@ THREADS threads; returns the sorted vector."
                           (mapcar (lambda (pair)
                                     (destructuring-bind ((a . m) . r2) pair
                                       (if r2
-                                          (lambda () (merge-runs s d a m (cdr r2) before))
+                                          (lambda () (funcall merge s d a m (cdr r2)))
                                           (lambda () (replace d s :start1 a :start2 a :end2 m)))))
                                   pairs)))
                        (setf runs (mapcar (lambda (pair)
