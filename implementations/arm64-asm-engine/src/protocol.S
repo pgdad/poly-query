@@ -85,7 +85,7 @@ r_err:      .asciz ",\"ok\":false,\"error\":{\"code\":\""
 r_msg:      .asciz "\",\"message\":"
 r_details:  .asciz ",\"details\":{\"line\":"
 r_column:   .asciz ",\"column\":"
-r_caps:     .asciz ",\"protocol_version\":1,\"capabilities\":[\"phase1\",\"ingest.csv\",\"ingest.json\",\"ingest.jsonl\",\"sql.basic\",\"test.functions\",\"phase2\",\"sql.groupby\",\"sql.join\",\"sql.functions\",\"sql.subquery\",\"sql.cte\",\"sql.correlated_subquery\"]"
+r_caps:     .asciz ",\"protocol_version\":1,\"capabilities\":[\"phase1\",\"ingest.csv\",\"ingest.json\",\"ingest.jsonl\",\"sql.basic\",\"test.functions\",\"phase2\",\"sql.groupby\",\"sql.join\",\"sql.functions\",\"sql.subquery\",\"sql.cte\",\"sql.correlated_subquery\",\"phase3\",\"index.hash\",\"index.btree\"]"
 r_version:  .asciz ",\"engine\":\"polyquery-arm64-asm\",\"engine_version\":\"0.1.0\",\"language\":\"arm64-asm-engine\",\"protocol_version\":1,\"spec_version\":\"1.0.0\",\"runtime\":\"GNU as (AArch64) + glibc\",\"build\":{\"profile\":\"release\",\"flags\":\"-g\"}"
 r_tables:   .asciz ",\"tables\":["
 r_name:     .asciz "{\"name\":"
@@ -1577,7 +1577,21 @@ LFUNC op_explain
     mov  w2, #1
     bl   get_str
     mov  x20, x0
-    LDR_G x0, g_max_query_mem
+    ADR_L x9, g_use_indexes         // option use_indexes (default true)
+    mov  w10, #1
+    str  w10, [x9]
+    mov  x0, x19
+    ADR_L x1, k_options
+    mov  w2, #J_OBJ
+    mov  w3, #0
+    bl   get_field
+    cbz  x0, 01f
+    ADR_L x1, k_use_idx
+    mov  w2, #1
+    bl   get_bool
+    ADR_L x9, g_use_indexes
+    str  w0, [x9]
+01: LDR_G x0, g_max_query_mem
     ADR_L x1, g_arena_limit
     str  x0, [x1]
     add  x0, x20, #STR_DATA
@@ -1620,6 +1634,9 @@ LFUNC op_query
     mov  w2, #1
     bl   get_str
     mov  x25, x0                    // sql Str*
+    ADR_L x9, g_use_indexes
+    mov  w10, #1
+    str  w10, [x9]
     mov  x21, #-1
     mov  w22, #0
     mov  x0, x19
@@ -1696,6 +1713,8 @@ LFUNC op_query
     ADR_L x1, k_use_idx
     mov  w2, #1
     bl   get_bool
+    ADR_L x9, g_use_indexes
+    str  w0, [x9]
     mov  x0, x20
     ADR_L x1, k_native
     mov  w2, #0

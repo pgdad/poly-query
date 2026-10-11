@@ -580,7 +580,34 @@
 #define PN_RKEYS    64     // Node** right key expressions
 #define PN_LO       72     // u32 first rv of the subtree
 #define PN_HI       76     // u32 one past the last rv
-#define PN_SIZE     80
+#define PN_IDX      80     // scans: Index* used by an index scan, or 0
+#define PN_IXA      88     // scans: IxAccess* (index access path)
+#define PN_PREDS    96     // scans: Pred** simple predicates of PN_EXPR
+#define PN_NPREDS   104    // u64
+#define PN_EST      112    // u64 estimated output rows (tuple operators)
+#define PN_SWAP     120    // u32 1 = hash join inputs swapped (build = left)
+#define PN_RGSKIP   124    // u32 scans: row groups skipped (EXPLAIN)
+#define PN_SIZE     128
+
+// Simple predicate "column op constant" extracted from a scan filter
+// (index selection, row-group skipping, estimates). 48 bytes.
+#define PR_COL      0      // u64 column index
+#define PR_OP       8      // u32 OP_EQ/LT/LE/GT/GE or PRO_IN
+#define PR_TYPE     12     // u32 type of the constant(s)
+#define PR_VAL      16     // payload; PRO_IN: u64* payloads
+#define PR_N        24     // u64 number of values (PRO_IN), else 1
+#define PR_NULL     32     // u32 1 = the constant is NULL (never true)
+#define PR_SIZE     48
+#define PRO_IN      40
+
+// Index access path of an IndexScan (32 bytes)
+#define IA_KIND     0      // u32 IAK_EQ (PR_OP EQ / IN) or IAK_RANGE
+#define IA_EQ       8      // Pred* (IAK_EQ)
+#define IA_LO       16     // Pred* lower bound (GT/GE) or 0
+#define IA_HI       24     // Pred* upper bound (LT/LE) or 0
+#define IA_SIZE     32
+#define IAK_EQ      1
+#define IAK_RANGE   2
 
 #define PO_SCAN       1    // table scan of rv PN_RV (base / derived / CTE),
                            //   optional pushed-down filter PN_EXPR
