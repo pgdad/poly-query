@@ -1,2 +1,6 @@
 2026-10-11T04:35:01+00:00 wave wave-a-native-a2-20261011T043500Z: order=['java']
 2026-10-11T04:35:01+00:00 [a-native-java-a2-20261011T043500Z] agent queued (usage gate, then launch)
+2026-10-11T05:16:07+00:00 [a-native-java-a2-20261011T043500Z] agent finished; collecting telemetry
+2026-10-11T05:16:07+00:00 [a-native-java-a2-20261011T043500Z] validating (clean clone, sandboxed)
+2026-10-11T05:16:33+00:00 [a-native-java-a2-20261011T043500Z] outcome=success cost=$12.755314400000005 turns=150 wall=2465.4s
+2026-10-11T05:16:33+00:00 wave wave-a-native-a2-20261011T043500Z finished: java=success

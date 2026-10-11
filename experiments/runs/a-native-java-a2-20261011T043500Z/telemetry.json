@@ -1,0 +1,107 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-native-java-a2-20261011T043500Z",
+ "language": "java",
+ "task": "native",
+ "track": "A",
+ "attempt": 2,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-native",
+ "prompt_sha256": "c413e1e8c350d81af9074f2a14dca6893bec0be020578fef045eb491192f6462",
+ "session_id": "b07cda05-2186-4027-84dd-d1e73937f6c2",
+ "tokens": {
+  "input": 290,
+  "output": 170576,
+  "cache_read": 32581652,
+  "cache_creation": 353288,
+  "thinking": null,
+  "thinking_estimated": 69462,
+  "source": "result events",
+  "api_messages": 145
+ },
+ "rate_limit": {
+  "events": 6,
+  "max_utilization": {
+   "five_hour": 0.09,
+   "seven_day": 0.24
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 12.755314400000005,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 150,
+ "result_segments": 1,
+ "assistant_messages": 279,
+ "tool_calls": {
+  "Bash": 139,
+  "Write": 9,
+  "Read": 1
+ },
+ "tool_calls_total": 149,
+ "tool_failures": 3,
+ "build_invocations": 31,
+ "build_failures_heuristic": 6,
+ "conformance_runs": 10,
+ "conformance_progress": [
+  [
+   569,
+   569
+  ],
+  [
+   3282,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ]
+ ],
+ "repair_iterations": 8,
+ "time": {
+  "wall_seconds": 2465.4,
+  "model_api_seconds": 1516.3,
+  "tool_seconds": 946.4,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 7,
+  "files_changed": 33,
+  "lines_added": 2813,
+  "lines_removed": 123,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The native kernel library is now integrated into the Java engine, and every conformance run in the definition of done passes with 0 failures, 0 errors and 0 not-implemented. All work is committed in 7 commits on `main`, and nothing outside `implementations/java/` was changed.\n\n## Test results\n\n| Run | Result |\n|---|---|\n| `runner.py --native native-kernels/build/x86_64/libpqkernels.so` | **569/569 pass** |\n| same with `--modes` | **3324/3324 pass** |\n| same with `--transport http` | 569/569 pass |\n| without the library: session / `--transport http` / `--modes` | 569/569, 569/569, 3324/3324 pass |\n| `tests/concurrency/http_suite.py` | 18/18 passed |\n| `make build test` / `make lint` | 66 unit tests passed / no warnings |\n\n- **Every library variant:** with the library forced to `reference`, `scalar` and `avx2`, the native conformance runs (plain and `--modes`) all pass, and the unit tests pass for those three plus `avx512`.\n- **Random queries:** 800 random queries (two seeds), each run under all 48 option combinations including `native: true`, gave the same results as the row engine every time.\n- **Mutation check:** I deliberately broke the decimal rescaling and the NULL handling, and the tests caught it.\n\n## What was implemented\n\n- **Loading the library:** `--native-kernels PATH` loads it through Java's standard FFI (the Foreign Function & Memory API). It checks the ABI version, lets the library pick the best CPU variant (AVX-512 here) and logs that choice. If the library can't be loaded, the engine logs a warning and runs on its own code; it never fails at startup. The engine always claims `native.kernels`.\n- **No copying:** the kernels work directly on the engine's Java arrays.\n- **Filtering:** comparisons of integer, DECIMAL, DATE, TIMESTAMP and BOOLEAN columns against constants or other columns, BETWEEN, and IS [NOT] NULL run natively. Multiple conditions are combined with the bitmap kernels.\n- **Aggregation:** SUM/AVG, MIN/MAX and COUNT(x) use the kernels; grouped integer/DECIMAL SUM uses the grouped-sum kernel.\n- **Overflow flags are honoured exactly:**\n  - If a batch's exact sum overflows, the engine recomputes that batch with its own exact arithmetic.\n  - If the grouped-sum kernel reports a possible wrap, its additions are undone exactly and the batch is redone by the engine.\n- **Hashing:** single-column GROUP BY, DISTINCT and join keys are hashed by the library. The engine's own hash for these is now the same function, so results are identical with or without the library.\n\n## Main design decisions\n\n- **Row mode never uses the kernels.** `native: true` only affects vectorized execution (including the default `auto`); row mode stays the unoptimized baseline.\n- **Filter conditions can be reordered, safely.** The leading WHERE conditions that can never raise an error may run in any order, so eligible ones go native first. For example, in `status = 'approved' AND amount > 100` the numeric check runs natively before the string check. If a condition that can fail follows, rows where the native part is NULL are kept so any error is still raised exactly as before.\n- **Three kernels are deliberately unused:**\n  - the floating-point sum, because it adds in a different order and wouldn't give bit-identical results;\n  - the predicate count, because every consumer of a filter needs the matching rows, not just the count;\n  - the fixed-width byte comparison, because strings aren't stored as fixed-width records.\n\n## Measured impact (1m datasets, 1 thread, best median of 3 rounds in separate JVMs)\n\n| Query | Without native | With native |\n|---|---:|---:|\n| Q14 conjunctive filter | 3.6 ms | 1.2 ms (3\u00d7) |\n| Q17 range filter | 7.7 ms | 1.9 ms (4\u00d7) |\n| Q19 aggregates over NULL-heavy columns | 11.6 ms | 1.7 ms (\u22487\u00d7) |\n| Q20 filter on NULL-heavy columns | 9.7 ms | 1.4 ms (\u22487\u00d7) |\n| Q1 filter + aggregate | 3.6 ms | 2.0 ms (1.8\u00d7) |\n| Q2 / Q3 / Q18 grouped sums | \u2014 | 1.3\u20131.4\u00d7 |\n\n- **No measurable change** where Java already compiles the loop to S",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
