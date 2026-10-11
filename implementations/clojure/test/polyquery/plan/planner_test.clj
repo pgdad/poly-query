@@ -13,7 +13,7 @@
    (physical/plan-query (:query (analyzer/analyze-statement cat0 (parser/parse-statement sql) {})) opts)))
 
 (defn- nodes [p]
-  (tree-seq map? (fn [n] (keep n [:input :left :right])) p))
+  (tree-seq map? (fn [n] (concat (keep n [:input :left :right]) (:inputs n))) p))
 
 (defn- ops [p] (set (map :op (nodes p))))
 
@@ -44,3 +44,17 @@
   (is (contains? (ops (-> (plan "SELECT (SELECT COUNT(*) FROM b WHERE b.a_id = a.id) FROM a")
                           :exprs first :plan))
                  :lookup-scan)))
+
+(deftest union-all-plans
+  (let [p (plan "SELECT x FROM a WHERE id = 1 UNION ALL SELECT y FROM b ORDER BY 1 LIMIT 3")]
+    (testing "ORDER BY … LIMIT over the whole compound"
+      (is (= :top-n (:op p)))
+      (is (= :union-all (:op (:input p)))))
+    (testing "branches are optimized and pruned independently"
+      (let [[l r] (:inputs (:input p))
+            scans (fn [n] (filter #(= :table-scan (:op %)) (nodes n)))]
+        (is (some #(= :filter (:op %)) (nodes l)))
+        (is (= [[0 1]] (map :columns (scans l))))
+        (is (= [[2]] (map :columns (scans r)))))))
+  (testing "branches are parallelized independently"
+    (is (= [:gather :gather] (mapv :op (:inputs (plan "SELECT x FROM a UNION ALL SELECT y FROM b" {:threads 4})))))))

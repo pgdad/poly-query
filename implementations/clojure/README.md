@@ -24,13 +24,16 @@ tables — see [Phase 5](#phase-5-optimization) for the design and the
 measurements) and **M9 native kernel integration** (the C/assembly library
 `libpqkernels` loaded with `--native-kernels PATH` through the Java FFM API
 and used by vectorized filters, aggregation, hashing and join gathers when
-a query runs with `native: true` — see [Native kernels](#native-kernels-m9)).
+a query runs with `native: true` — see [Native kernels](#native-kernels-m9))
+and the **architectural change CR-1 `UNION ALL`** (`spec/changes/union-all.md`
+— see [UNION ALL](#change-cr-1-union-all)).
 
 Reported capabilities: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic
 test.functions phase2 sql.groupby sql.join sql.functions sql.subquery sql.cte
 sql.correlated_subquery phase3 storage.pqcf storage.mmap index.hash
 index.btree phase4 http.streaming phase5 exec.row exec.vectorized
-exec.parallel join.hash join.merge join.nested_loop native.kernels`.
+exec.parallel join.hash join.merge join.nested_loop native.kernels
+change.union_all`.
 
 ## Prerequisites and build
 
@@ -705,10 +708,57 @@ variation on the loaded host was ±20–40% for the join and sort queries);
 `--verify` confirmed identical results for all 17 queries in all
 configurations.
 
+## Change CR-1: UNION ALL
+
+`core UNION ALL core …` with ORDER BY/LIMIT/OFFSET over the whole compound,
+allowed wherever a query is (top level, CTE bodies, derived tables, scalar /
+`IN` / `EXISTS` subqueries, EXPLAIN), consistently under every execution
+option. The change follows the existing layer boundaries; the modules
+touched are:
+
+| layer | module | change |
+|---|---|---|
+| AST / parser | `sql/ast.clj`, `sql/parser.clj` | a query keeps its first select core in `:select` and the following ones in `:union-all`; `UNION` without `ALL` (also `UNION DISTINCT`) ⇒ `UNSUPPORTED`; a branch is a plain select core, so a parenthesized branch or a branch with its own ORDER BY/LIMIT is a `PARSE_ERROR` |
+| semantic analysis | `sql/analyzer.clj` | each branch is analyzed as a SELECT in the same environment (CTEs, enclosing queries for correlation); column-count check (`SEMANTIC_ERROR`); per-column common type with the CASE rule (`types/common-type`, `TYPE_ERROR` otherwise); each branch's outputs are wrapped in the implicit conversion to the column type (an INT64 that does not fit DECIMAL(18,s) ⇒ `NUMERIC_OVERFLOW` at execution); ORDER BY items must be output names of the first branch or positions. Result: a *bound compound query* `{:union [bound-query …] :order-by :limit :offset :columns}` |
+| logical plan | `plan/logical.clj` | new node `{:op :union-all :inputs [P …]}` under the shared sort/limit construction |
+| optimizer | `plan/optimizer.clj`, `plan/pruning.clj`, `plan/cost.clj` | branches are optimized as independent queries (like derived tables); column pruning passes the required output positions to every branch; the cardinality estimate is the sum of the branches |
+| physical plan | `plan/physical.clj`, `plan/parallel.clj` | `:union-all` physical node; ORDER BY … LIMIT over it becomes a TopN; with `threads` > 1 each branch is parallelized on its own (e.g. a Gather per branch) |
+| execution | `exec/operators.clj` | `:union-all` concatenates the branch re-reducibles (`eduction cat`, which stops early under LIMIT). Branches are built through the dispatcher, so each runs row-wise, vectorized, parallel and/or with native kernels exactly as a standalone query would |
+| EXPLAIN | `plan/explain.clj` | `UnionAll` node whose children are the branch plans in order |
+| protocol | `protocol.clj` | capability `change.union_all` |
+
+Decisions:
+
+* **Concatenation order.** Without ORDER BY the rows of branch 1 come
+  first, then branch 2, … (the spec leaves the order unspecified).
+* **ORDER BY in a compound** resolves bare names case-insensitively against
+  the first branch's output names; a name matching several output columns
+  is ambiguous (`SEMANTIC_ERROR`), as is anything that is not a name or an
+  in-range position (qualified names, expressions, aggregates).
+* **All-NULL columns** have the type of `SELECT NULL` (reported as STRING,
+  as before).
+* **DECIMAL widening.** As for CASE, two DECIMAL columns always combine to
+  `DECIMAL(18,max(s))`, even if identical.
+* **Branches run one after another.** Parallelism is inside branches, not
+  across them, which keeps the row order deterministic and memory bounded.
+* **`spec_version`** stays `1.0.0`: the CR says engines claiming the change
+  report `1.1.0-cr1`, but the Phase 1 conformance case `catalog.pqt:10`
+  requires `1.0.0`, and earlier phases must keep passing.
+* **Public case `union_all.pqt:51` (known failure).** It expects
+  `SELECT order_id AS v … UNION ALL SELECT amount …` to be
+  `DECIMAL(18,2)`, but the file loads `orders.csv` *without* a schema, and
+  CSV inference never yields DECIMAL (ingestion.md §1.1; the Phase 1 case
+  `ingest_csv.pqt:128` requires the identically formatted `ledger.amount`
+  to be inferred as FLOAT64). With `amount` FLOAT64 the CR's own rule gives
+  INT64 ∪ FLOAT64 = FLOAT64, which the engine answers. With `orders` loaded
+  as `amount:DECIMAL(10,2)` (as in the Phase 2 files) the engine returns
+  exactly the expected `DECIMAL(18,2)` rows `["99.99"], ["101.00"]`. The
+  case cannot pass without special-casing a table, which the rules forbid.
+
 ## Design decisions (where the spec is silent or open)
 
-* **Unsupported features.** `UNION`, `RIGHT`/`FULL` joins answer
-  `UNSUPPORTED`.
+* **Unsupported features.** `UNION` without `ALL`, `RIGHT`/`FULL` joins
+  answer `UNSUPPORTED`.
 * **CASE/COALESCE result type.** Types are combined pairwise in order; any two
   DECIMAL types (even identical ones) combine to `DECIMAL(18,max(s1,s2))` as
   semantics.md §13 states, INT64 with DECIMAL(p,s) to `DECIMAL(18,s)`, NULL
@@ -844,6 +894,12 @@ configurations.
   (`engine_phase5_test`). `PQ_STRICT_EXECUTION=1` disables the row-mode
   re-execution after unexpected exceptions, so tests see vectorized
   defects instead of correct fallback results.
+* UNION ALL: parser (compound structure, PARSE_ERROR/UNSUPPORTED forms),
+  analyzer (column typing and conversion, compound ORDER BY resolution,
+  errors), planner (TopN over UnionAll, per-branch optimization, pruning
+  and parallelization) and 11 compound queries in the Phase 5 differential
+  matrix (CTEs, derived tables, IN/EXISTS/correlated subqueries, GROUP BY,
+  DISTINCT, LIMIT, runtime errors in a branch).
 * Native kernels (`native_test`; uses
   `../../native-kernels/build/<arch>/libpqkernels.so` or
   `$PQ_NATIVE_KERNELS`, skipped when the library is not built): bitmap

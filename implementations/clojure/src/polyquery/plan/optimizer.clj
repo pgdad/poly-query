@@ -90,11 +90,15 @@
 
     (from-node? node) (push-down node [])
 
+    ;; UNION ALL branches are independent queries
+    (= :union-all (:op node)) (update node :inputs #(mapv optimize %))
+
     (:input node) (update node :input pushdown)
 
     :else node))
 
 (defn optimize
-  "Optimizes a logical plan (derived tables included, through pushdown)."
+  "Optimizes a logical plan (derived tables and UNION ALL branches included,
+  through pushdown)."
   [node]
   (-> node rewrite/simplify-plan pushdown reorder/reorder-joins))

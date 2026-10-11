@@ -14,6 +14,7 @@
     {:op :distinct :input P}
     {:op :sort    :input P :keys [{:index i :type T :desc? b :nulls-first? b}]}
     {:op :limit   :input P :limit e|nil :offset e|nil}
+    {:op :union-all :inputs [P …]}                 ; concatenation (UNION ALL)
   The root of a query plan also carries :columns [{:name :type}].")
 
 (set! *warn-on-reflection* true)
@@ -48,8 +49,22 @@
                             :nulls-first? (:nulls-first? item)})))
         acc))))
 
-(defn plan-query
-  "Builds the logical plan of a bound query."
+(defn- sort-and-limit
+  "node below ORDER BY (sort keys ks) and LIMIT/OFFSET, where present."
+  [node ks limit offset]
+  (let [sorted (if (seq ks) {:op :sort :input node :keys ks :width (:width node)} node)]
+    (if (or limit offset)
+      {:op :limit :input sorted :limit limit :offset offset :width (:width sorted)}
+      sorted)))
+
+(defn- plan-union-all
+  "Plan of a bound compound query: the concatenation of the branch plans,
+  sorted and limited as a whole (ORDER BY items are output columns)."
+  [{:keys [union order-by limit offset columns]}]
+  (let [node {:op :union-all :inputs (mapv plan-query union) :width (count columns)}]
+    (sort-and-limit node (sort-keys columns order-by) limit offset)))
+
+(defn- plan-select
   [bq]
   (let [{:keys [from where aggregated? group-keys aggregates having outputs distinct?
                 order-by limit offset]} bq
@@ -66,12 +81,7 @@
                  :names (into (mapv :name outputs) (map #(str "_sort" %) (range (count hidden))))
                  :width (+ n-out (count hidden))}
         distinct-node (if distinct? {:op :distinct :input project :width (:width project)} project)
-        ks (sort-keys outputs order-by)
-        sorted (if (seq ks) {:op :sort :input distinct-node :keys ks :width (:width distinct-node)}
-                   distinct-node)
-        limited (if (or limit offset)
-                  {:op :limit :input sorted :limit limit :offset offset :width (:width sorted)}
-                  sorted)
+        limited (sort-and-limit distinct-node (sort-keys outputs order-by) limit offset)
         result (if (seq hidden)
                  {:op :project :input limited
                   :exprs (vec (map-indexed (fn [i o] {:node :column :type (:type o) :index i :name (:name o)})
@@ -79,4 +89,9 @@
                   :names (mapv :name outputs)
                   :width n-out}
                  limited)]
-    (assoc result :columns (:columns bq))))
+    result))
+
+(defn plan-query
+  "Builds the logical plan of a bound query."
+  [bq]
+  (assoc (if (:union bq) (plan-union-all bq) (plan-select bq)) :columns (:columns bq)))

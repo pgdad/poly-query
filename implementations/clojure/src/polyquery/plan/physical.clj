@@ -41,6 +41,8 @@
     {:op :top-n :input P :keys [...] :limit e :offset e|nil}
         ; ORDER BY … LIMIT: sort keeping only the first LIMIT+OFFSET rows
     {:op :limit :input P :limit e|nil :offset e|nil}
+    {:op :union-all :inputs [P …]}
+        ; UNION ALL: the rows of every input, input after input
     {:op :gather :input P :partitions n}
         ; parallel execution of a partitionable pipeline (polyquery.plan.parallel)
   :hash-aggregate, :sort and :top-n may carry :partitions n (parallel
@@ -201,7 +203,8 @@
                 :names (:names node)}
       :distinct {:op :distinct :input (phys (:input node))}
       :sort {:op :sort :input (phys (:input node)) :keys (:keys node)}
-      :limit (plan-limit node options phys px))))
+      :limit (plan-limit node options phys px)
+      :union-all {:op :union-all :inputs (mapv phys (:inputs node))})))
 
 (defn plan-query
   "Plans a bound query: logical plan → optimization → physical plan.

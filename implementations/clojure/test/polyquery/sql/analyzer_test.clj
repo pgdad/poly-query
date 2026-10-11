@@ -64,3 +64,36 @@
     (is (= [{:output 0} {:output 1}] (mapv #(select-keys % [:output]) (take 2 (:order-by q)))))
     (is (= :column (:node (:expr (nth (:order-by q) 2)))))
     (is (= [false true true] (mapv :nulls-first? (:order-by q))))))
+
+(defn- column-types [sql] (mapv (comp t/type-name :type) (:columns (analyze sql))))
+
+(deftest union-all-typing
+  (is (= ["DECIMAL(18,2)" "STRING"] (column-types "SELECT id, name FROM people UNION ALL SELECT amount, NULL FROM people")))
+  (is (= ["FLOAT64"] (column-types "SELECT 1 UNION ALL SELECT 2.5 UNION ALL SELECT 1e0")))
+  (is (= ["DECIMAL(18,1)"] (column-types "SELECT NULL UNION ALL SELECT 1.5 UNION ALL SELECT 2")))
+  (is (= ["STRING"] (column-types "SELECT NULL UNION ALL SELECT NULL")))
+  (testing "names come from the first branch"
+    (is (= ["k" "_col2"] (mapv :name (:columns (analyze "SELECT id AS k, 1 FROM people UNION ALL SELECT 2 AS z, id FROM people"))))))
+  (testing "branch outputs are converted to the column type"
+    (let [q (analyze "SELECT id FROM people UNION ALL SELECT 1e0")]
+      (is (= [:cast :literal] (mapv #(:node (:expr (first (:outputs %)))) (:union q)))))))
+
+(deftest union-all-order-by
+  (let [q (analyze "SELECT id, name FROM people UNION ALL SELECT 1, 'x' ORDER BY NAME DESC, 1")]
+    (is (= [{:output 1 :desc? true :nulls-first? false} {:output 0 :desc? false :nulls-first? true}]
+           (:order-by q))))
+  (doseq [sql ["SELECT id FROM people UNION ALL SELECT 1 ORDER BY id + 1"
+               "SELECT id FROM people UNION ALL SELECT 1 ORDER BY people.id"
+               "SELECT id FROM people UNION ALL SELECT 1 ORDER BY name"
+               "SELECT id FROM people UNION ALL SELECT 1 ORDER BY 2"
+               "SELECT id AS a, name AS a FROM people UNION ALL SELECT 1, 'x' ORDER BY a"
+               "SELECT id FROM people UNION ALL SELECT 1 ORDER BY COUNT(*)"]]
+    (is (= "SEMANTIC_ERROR" (error-code (analyze sql))) sql)))
+
+(deftest union-all-errors
+  (doseq [[sql code] [["SELECT id, name FROM people UNION ALL SELECT id FROM people" "SEMANTIC_ERROR"]
+                      ["SELECT name FROM people UNION ALL SELECT id FROM people" "TYPE_ERROR"]
+                      ["SELECT DATE '2024-01-01' UNION ALL SELECT TIMESTAMP '2024-01-01 00:00:00'" "TYPE_ERROR"]
+                      ["SELECT 1 UNION ALL SELECT nope FROM people" "SEMANTIC_ERROR"]
+                      ["SELECT 1 UNION ALL SELECT 2 LIMIT 'x'" "TYPE_ERROR"]]]
+    (testing sql (is (= code (error-code (analyze sql)))))))

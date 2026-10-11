@@ -13,8 +13,9 @@
       (parallel scan, rows streamed in table order) — except below a LIMIT
       without an intervening blocking operator, where reading ahead would
       only waste work;
-    * the build sides of hash joins and the materialized inputs of
-      sort-merge and nested-loop joins are parallelized independently.
+    * the build sides of hash joins, the materialized inputs of
+      sort-merge and nested-loop joins and the branches of UNION ALL are
+      parallelized independently.
   Plans are left unchanged for threads = 1."
   (:require [polyquery.sql.bound :as b]))
 
@@ -82,6 +83,7 @@
                        (update (build-side node) par threads false)
                        (update (probe-side node) par threads limited?))
         :merge-join (-> node (update :left par threads false) (update :right par threads false))
+        :union-all (update node :inputs (fn [ins] (mapv #(par % threads limited?) ins)))
         :nested-loop-join (-> node
                               (update :left par threads limited?)
                               (update :right par threads false))
