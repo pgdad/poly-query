@@ -1,5 +1,6 @@
 /*
- * PolyQuery native kernels — stable C ABI, version 1.
+ * PolyQuery native kernels — stable C ABI, version 1 (revision 1: CR-4 added the
+ * 128-bit kernels 17-20; revision-0 users are unaffected).
  *
  * Normative semantics for every variant (reference C, x86-64 scalar/AVX2/AVX-512,
  * AArch64 scalar/NEON/SVE). All variants MUST produce bit-identical results for
@@ -24,6 +25,7 @@ extern "C" {
 #endif
 
 #define PQK_ABI_VERSION 1
+#define PQK_ABI_REVISION 1
 
 /* Status codes */
 #define PQK_OK        0
@@ -43,6 +45,9 @@ extern "C" {
 
 /* Returns PQK_ABI_VERSION. */
 int pqk_abi_version(void);
+
+/* Returns PQK_ABI_REVISION (additive revisions within one ABI version). */
+int pqk_abi_revision(void);
 
 /* Detects CPU features and selects variants. Honors env PQ_KERNELS_VARIANT
  * ("reference","scalar","avx2","avx512","neon","sve"); an unavailable requested
@@ -143,6 +148,34 @@ int pqk_group_sum_i64(const uint32_t *group_ids, const int64_t *values, const ui
 
 /* Gathers values by selection vector: out[j] = data[idx[j]] for j < m. */
 void pqk_gather_i64(const int64_t *data, const uint32_t *idx, size_t m, int64_t *out);
+
+/* ---- 9. 128-bit integer kernels (revision 1, spec/changes/kernels-i128.md) */
+
+/* Signed 128-bit two's-complement value hi * 2^64 + lo; in memory identical to a
+ * 16-byte little-endian int128 (PQCF v2 wide decimals). Arrays may be unaligned. */
+typedef struct pqk_i128 {
+  uint64_t lo;
+  int64_t hi;
+} pqk_i128;
+
+/* As pqk_filter_i64 / pqk_count_i64 with signed 128-bit comparison. For an
+ * unknown op return (size_t)-1 without dereferencing a or b. Otherwise *a is
+ * always read (even for n == 0); *b only for PQK_BETWEEN (b may be NULL
+ * otherwise). a and b may point into data. */
+size_t pqk_filter_i128(const pqk_i128 *data, const uint8_t *validity, size_t n,
+                       int op, const pqk_i128 *a, const pqk_i128 *b, uint32_t *out_idx);
+size_t pqk_count_i128(const pqk_i128 *data, const uint8_t *validity, size_t n,
+                      int op, const pqk_i128 *a, const pqk_i128 *b);
+
+/* Exact sum of valid values. Returns PQK_OVERFLOW iff the exact final sum is
+ * outside the int128 range (intermediate overflow that cancels out is NOT an
+ * error; n < 2^32 so the exact sum fits in 160 bits). *out_sum is meaningful
+ * only for PQK_OK. */
+int pqk_sum_i128(const pqk_i128 *data, const uint8_t *validity, size_t n, pqk_i128 *out_sum);
+
+/* Returns the number of valid values; if > 0 writes *out_min / *out_max. */
+size_t pqk_minmax_i128(const pqk_i128 *data, const uint8_t *validity, size_t n,
+                       pqk_i128 *out_min, pqk_i128 *out_max);
 
 #ifdef __cplusplus
 }

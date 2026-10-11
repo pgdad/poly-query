@@ -34,7 +34,11 @@
   W(v, compare_i64, size_t, (const int64_t *, const int64_t *, size_t, int, uint8_t *)) \
   W(v, compare_fixed, void, (const uint8_t *, const uint8_t *, size_t, size_t, int8_t *)) \
   W(v, group_sum_i64, int, (const uint32_t *, const int64_t *, const uint8_t *, size_t, int64_t *, int64_t *, size_t)) \
-  W(v, gather_i64, void, (const int64_t *, const uint32_t *, size_t, int64_t *))
+  W(v, gather_i64, void, (const int64_t *, const uint32_t *, size_t, int64_t *)) \
+  W(v, filter_i128, size_t, (const pqk_i128 *, const uint8_t *, size_t, int, const pqk_i128 *, const pqk_i128 *, uint32_t *)) \
+  W(v, count_i128, size_t, (const pqk_i128 *, const uint8_t *, size_t, int, const pqk_i128 *, const pqk_i128 *)) \
+  W(v, sum_i128, int, (const pqk_i128 *, const uint8_t *, size_t, pqk_i128 *)) \
+  W(v, minmax_i128, size_t, (const pqk_i128 *, const uint8_t *, size_t, pqk_i128 *, pqk_i128 *))
 #define WXV(v) WX(v)
 PQK_VARIANTS(WXV)
 
@@ -45,14 +49,15 @@ static void fill_reference(pqk_table *t) {
 
 int pqk_variant_table(const char *variant, pqk_table *t) {
   fill_reference(t);
-  if (strcmp(variant, "reference") == 0) return 16;
+  if (strcmp(variant, "reference") == 0) return PQK_NKERNELS;
   int provided = 0;
 #define TAKE(v, name) if (pqk_##v##_##name) { t->name = pqk_##v##_##name; provided++; }
 #define TAKE_ALL(v) \
   TAKE(v, filter_i64) TAKE(v, filter_i64_bitmap) TAKE(v, sum_i64) TAKE(v, sum_f64) TAKE(v, minmax_i64) \
   TAKE(v, minmax_f64) TAKE(v, count_i64) TAKE(v, bitmap_and) TAKE(v, bitmap_or) TAKE(v, bitmap_andnot) \
   TAKE(v, bitmap_popcount) TAKE(v, hash_i64) TAKE(v, compare_i64) TAKE(v, compare_fixed) \
-  TAKE(v, group_sum_i64) TAKE(v, gather_i64)
+  TAKE(v, group_sum_i64) TAKE(v, gather_i64) \
+  TAKE(v, filter_i128) TAKE(v, count_i128) TAKE(v, sum_i128) TAKE(v, minmax_i128)
 #define TRY(v) if (strcmp(variant, #v) == 0) { TAKE_ALL(v) return provided; }
   PQK_VARIANTS(TRY)
   return 0;
@@ -125,6 +130,7 @@ int pqk_init(void) {
 }
 
 int pqk_abi_version(void) { return PQK_ABI_VERSION; }
+int pqk_abi_revision(void) { return PQK_ABI_REVISION; }
 const char *pqk_variant(void) { pqk_init(); return active_name; }
 const char *pqk_available_variants(void) { pqk_init(); return available; }
 

@@ -761,12 +761,13 @@ if [ "{target}" = "test" ]; then ( make -C native-kernels bench ) > validate-ben
     status = dict(l.split("=", 1) for l in (vd / "validate-status").read_text().split() if "=" in l) \
         if (vd / "validate-status").exists() else {}
     log = (vd / "validate-kernels.log").read_text(errors="replace") if (vd / "validate-kernels.log").exists() else ""
-    variants = {mm.group(1): {"kernels": int(mm.group(2)), "status": mm.group(3)}
-                for mm in re.finditer(r"^\s+(\w+)\s+(\d+)/16 kernels\s+(PASS|FAIL)", log, re.M)}
+    # "<variant> <provided>/<total> kernels PASS|FAIL" (total grew from 16 to 20 with CR-4).
+    variants = {mm.group(1): {"kernels": int(mm.group(2)), "total": int(mm.group(3)), "status": mm.group(4)}
+                for mm in re.finditer(r"^\s+(\w+)\s+(\d+)/(\d+) kernels\s+(PASS|FAIL)", log, re.M)}
     prefix = L["variant_prefix"]
     simd = "x86_avx2" if prefix == "x86_" else "a64_neon"
     required = [f"{prefix}scalar", simd]
-    ok = status.get("test_exit") == "0" and all(variants.get(v, {}).get("kernels") == 16 and
+    ok = status.get("test_exit") == "0" and all(variants.get(v, {}).get("kernels") == variants.get(v, {}).get("total") and
                                                  variants.get(v, {}).get("status") == "PASS" for v in required)
     bench = []
     bf = vd / "native-kernels/build/x86_64/bench.jsonl"
@@ -811,6 +812,11 @@ if [ "{target}" = "test" ]; then ( make -C native-kernels bench ) > validate-ben
 ARM_NATIVE = ROOT / "tools/remote/arm_native.sh"
 
 
+def _passed(v: str) -> bool:
+    """'20/20 PASS' -> True. Completeness of the required variants is checked on the cross build's log."""
+    return bool(re.match(r"\d+/\d+ PASS$", v))
+
+
 def run_native_arm(kernels_dir: Path, out_dir: Path) -> dict:
     """Native AArch64 tests (+ASan/UBSan) and a pinned benchmark on the remote ARM host (PQ_ARM_HOST)."""
     host = os.environ.get("PQ_ARM_HOST", "spark")
@@ -828,14 +834,14 @@ def run_native_arm(kernels_dir: Path, out_dir: Path) -> dict:
     for log, key in (("arm-test.log", "native"), ("arm-asan.log", "asan")):
         p = out_dir / log
         if p.exists():
-            for mm in re.finditer(r"^\s+(\w+)\s+(\d+)/16 kernels\s+(PASS|FAIL)", p.read_text(errors="replace"), re.M):
-                variants.setdefault(mm.group(1), {})[key] = f"{mm.group(2)}/16 {mm.group(3)}"
+            for mm in re.finditer(r"^\s+(\w+)\s+(\d+)/(\d+) kernels\s+(PASS|FAIL)", p.read_text(errors="replace"), re.M):
+                variants.setdefault(mm.group(1), {})[key] = f"{mm.group(2)}/{mm.group(3)} {mm.group(4)}"
     bf = out_dir / "bench.jsonl"
     bench = [json.loads(l) for l in bf.read_text().splitlines() if l.strip().startswith("{")] if bf.exists() else []
     host_info = json.loads((out_dir / "arm-host.json").read_text()) if (out_dir / "arm-host.json").exists() else {}
     ok = st.get("test_exit") == "0" and st.get("asan_exit") == "0" and \
-        all(v.get("native", "").startswith("16/16 PASS") and v.get("asan", "").startswith("16/16 PASS")
-            for v in variants.values()) and bool(variants)
+        all(_passed(v.get("native", "")) and _passed(v.get("asan", "")) for v in variants.values()) \
+        and bool(variants)
     return {"available": True, "host": host, "status": st, "variants": variants, "ok": ok, "bench": bench,
             "bench_cpu": os.environ.get("PQ_ARM_BENCH_CPU", "9"),
             "host_info": {k: host_info.get(k) for k in ("hostname", "kernel", "os", "gcc",

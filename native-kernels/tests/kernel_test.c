@@ -35,6 +35,29 @@ static int64_t rand_i64(int mode) {
   }
 }
 
+static __int128 rand_i128(int mode) {
+  const __int128 MAX = (__int128)(((unsigned __int128)1 << 127) - 1), MIN = -MAX - 1;
+  const __int128 D38 = (__int128)10000000000000000000ULL * (__int128)10000000000000000000ULL - 1; /* 10^38 - 1 */
+  switch (mode) {
+  case 0: return (__int128)((int64_t)rnd_below(100) - 50);                          /* small, many duplicates */
+  case 1: return (__int128)(((unsigned __int128)rnd() << 64) | rnd());               /* full range */
+  case 2: { __int128 ex[] = {MIN, MIN + 1, -1, 0, 1, MAX - 1, MAX, D38, -D38, (__int128)INT64_MAX + 1,
+                             (__int128)INT64_MIN - 1, (__int128)1 << 64, -((__int128)1 << 64), (__int128)UINT64_MAX};
+            return ex[rnd_below(sizeof ex / sizeof ex[0])]; }
+  case 3: { /* hi in {-1, 0, 1}: exercises the signed-high / unsigned-low limb comparison */
+            int64_t hi = (int64_t)rnd_below(3) - 1;
+            return (__int128)(((unsigned __int128)(uint64_t)hi << 64) | rnd()); }
+  default: { /* decimal-like: |x| < 10^38, varying magnitude */
+            __int128 x = (__int128)(((unsigned __int128)(rnd() >> 1) << 64) | rnd()) >> rnd_below(126);
+            x %= D38 + 1;
+            return (rnd() & 1) ? x : -x; }
+  }
+}
+static pqk_i128 to_s(__int128 x) { pqk_i128 v = {(uint64_t)x, (int64_t)(x >> 64)}; return v; }
+static __int128 from_s(pqk_i128 v) { return (__int128)(((unsigned __int128)(uint64_t)v.hi << 64) | v.lo); }
+static __int128 load_u(const pqk_i128 *p) { pqk_i128 v; memcpy(&v, p, sizeof v); return from_s(v); }  /* unaligned */
+static int64_t load64_u(const int64_t *p) { int64_t v; memcpy(&v, p, sizeof v); return v; }
+
 /* Unaligned buffers: allocate with slack and offset by 0..7 bytes. */
 typedef struct { unsigned char *base; void *p; } ubuf;
 static ubuf ualloc(size_t bytes, size_t off) {
@@ -66,7 +89,7 @@ static void test_variant(const char *vname, const pqk_table *v, const pqk_table 
       for (size_t i = 0; i < nb; i++) validity[i] = (uint8_t)rnd();
     }
     int op = (int)rnd_below(7);
-    int64_t a = rnd() & 1 ? rand_i64(mode) : (n ? data[rnd_below(n)] : 0), b = rand_i64(mode);
+    int64_t a = rnd() & 1 ? rand_i64(mode) : (n ? load64_u(data + rnd_below(n)) : 0), b = rand_i64(mode);
     if (op == PQK_BETWEEN && a > b) { int64_t t = a; a = b; b = t; }
 
     /* filter (index) */
@@ -167,6 +190,39 @@ static void test_variant(const char *vname, const pqk_table *v, const pqk_table 
     r->gather_i64(data, idx, mm, g1); v->gather_i64(data, idx, mm, g2);
     CHECK(!memcmp(g1, g2, mm * 8), "gather_i64 m=%zu", mm);
 
+    /* 128-bit kernels (CR-4) */
+    int m128 = (int)rnd_below(5);
+    ubuf w = ualloc(n * 16 + 16, rnd_below(16)), cab = ualloc(2 * sizeof(pqk_i128), rnd_below(16));
+    pqk_i128 *wd = w.p, *ca = cab.p, *cb = ca + 1;
+    for (size_t i = 0; i < n; i++) {
+      __int128 x = (rnd() & 3) || i == 0 ? rand_i128(m128) : load_u(wd + rnd_below(i));
+      pqk_i128 v = to_s(x);
+      memcpy(wd + i, &v, sizeof v);
+    }
+    {
+      __int128 av = (rnd() & 1) && n ? load_u(wd + rnd_below(n)) : rand_i128(m128), bv = rand_i128(m128);
+      if (op == PQK_BETWEEN && av > bv) { __int128 t = av; av = bv; bv = t; }
+      pqk_i128 as = to_s(av), bs = to_s(bv);
+      memcpy(ca, &as, sizeof as);
+      memcpy(cb, &bs, sizeof bs);
+      const pqk_i128 *bp = op == PQK_BETWEEN ? cb : NULL;   /* b must not be read unless BETWEEN */
+      c1 = r->filter_i128(wd, validity, n, op, ca, bp, i1);
+      c2 = v->filter_i128(wd, validity, n, op, ca, bp, i2);
+      CHECK(c1 == c2 && !memcmp(i1, i2, c1 * 4), "filter_i128 n=%zu op=%d mode=%d: %zu vs %zu", n, op, m128, c1, c2);
+      CHECK(r->count_i128(wd, validity, n, op, ca, bp) == v->count_i128(wd, validity, n, op, ca, bp),
+            "count_i128 n=%zu op=%d mode=%d", n, op, m128);
+      CHECK(v->filter_i128(wd, validity, n, 7, NULL, NULL, i2) == (size_t)-1, "filter_i128 invalid op");
+      CHECK(v->count_i128(wd, validity, n, -1, NULL, NULL) == (size_t)-1, "count_i128 invalid op");
+      pqk_i128 q1 = {7, 7}, q2 = {7, 7}, x1 = {9, 9}, x2 = {9, 9};
+      r1 = r->sum_i128(wd, validity, n, &q1);
+      r2 = v->sum_i128(wd, validity, n, &q2);
+      CHECK(r1 == r2 && (r1 != PQK_OK || !memcmp(&q1, &q2, sizeof q1)), "sum_i128 n=%zu mode=%d: %d vs %d", n, m128, r1, r2);
+      c1 = r->minmax_i128(wd, validity, n, &q1, &x1);
+      c2 = v->minmax_i128(wd, validity, n, &q2, &x2);
+      CHECK(c1 == c2 && (!c1 || (!memcmp(&q1, &q2, sizeof q1) && !memcmp(&x1, &x2, sizeof x1))), "minmax_i128 n=%zu mode=%d", n, m128);
+    }
+    free(w.base); free(cab.base);
+
     free(d.base); free(d2.base); free(vb.base); free(i1); free(i2); free(b1); free(b2); free(fb.base);
     free(ba.base); free(bb.base); free(o1); free(o2); free(h1); free(h2); free(fa); free(fbx); free(co1); free(co2);
     free(gid); free(gs1); free(gs2); free(gc1); free(gc2); free(idx); free(g1); free(g2);
@@ -204,6 +260,40 @@ static void known_answers(const char *vname, const pqk_table *v) {
   v->hash_i64(hk, 3, 0, ho);
   CHECK(ho[0] == 0 && ho[1] == 0xb456bcfc34c2cb2cULL && ho[2] == 0x64b5720b4b825f21ULL,
         "hash known answers: %016llx %016llx %016llx", (unsigned long long)ho[0], (unsigned long long)ho[1], (unsigned long long)ho[2]);
+  /* 128-bit kernels: empty inputs, exact-sum overflow semantics, limb boundaries */
+  {
+    const __int128 MAX = (__int128)(((unsigned __int128)1 << 127) - 1), MIN = -MAX - 1;
+    pqk_i128 zero = {0, 0}, q = {5, 5}, x = {6, 6};
+    CHECK(v->filter_i128(NULL, NULL, 0, PQK_EQ, &zero, NULL, NULL) == 0, "filter_i128 of empty");
+    CHECK(v->count_i128(NULL, NULL, 0, PQK_BETWEEN, &zero, &zero) == 0, "count_i128 of empty");
+    CHECK(v->sum_i128(NULL, NULL, 0, &q) == PQK_OK && q.lo == 0 && q.hi == 0, "sum_i128 of empty");
+    CHECK(v->minmax_i128(NULL, NULL, 0, &q, &x) == 0 && q.lo == 0 && x.lo == 6, "minmax_i128 of empty");
+    pqk_i128 c1[] = {to_s(MAX), to_s(1), to_s(-1)};
+    CHECK(v->sum_i128(c1, NULL, 3, &q) == PQK_OK && from_s(q) == MAX, "sum_i128 intermediate overflow that cancels out");
+    pqk_i128 c2[] = {to_s(MAX), to_s(1)};
+    CHECK(v->sum_i128(c2, NULL, 2, &q) == PQK_OVERFLOW, "sum_i128 final overflow");
+    pqk_i128 c3[] = {to_s(MIN), to_s(-1)};
+    CHECK(v->sum_i128(c3, NULL, 2, &q) == PQK_OVERFLOW, "sum_i128 negative overflow");
+    CHECK(v->sum_i128(c2, &only_first, 2, &q) == PQK_OK && from_s(q) == MAX, "sum_i128 validity respected");
+    /* lane-wise accumulators must carry beyond 128 bits: 4*MAX + 4*MIN = -4 */
+    pqk_i128 c4[16];
+    for (int i = 0; i < 16; i++) c4[i] = to_s(i < 8 ? (i & 1 ? MAX : 0) : (i & 1 ? MIN : 0));
+    CHECK(v->sum_i128(c4, NULL, 16, &q) == PQK_OK && from_s(q) == -4, "sum_i128 multi-wrap cancels: got hi=%lld", (long long)q.hi);
+    size_t nb2 = 100003;
+    pqk_i128 *bw = malloc(nb2 * sizeof *bw);
+    for (size_t i = 0; i < nb2; i++) bw[i] = to_s(MAX / 50000);
+    CHECK(v->sum_i128(bw, NULL, nb2, &q) == PQK_OVERFLOW, "sum_i128 accumulated overflow over large n");
+    for (size_t i = 0; i < nb2; i++) bw[i] = to_s(i & 1 ? -(MAX / 3) : MAX / 3);
+    CHECK(v->sum_i128(bw, NULL, nb2, &q) == PQK_OK && from_s(q) == MAX / 3, "sum_i128 alternating large n");
+    free(bw);
+    /* signed-high / unsigned-low ordering: -1 < 0 < 2^63 < 2^64, MIN < everything */
+    pqk_i128 ord[] = {to_s((__int128)1 << 64), to_s(-1), to_s((__int128)INT64_MAX + 1), to_s(0), to_s(MIN), to_s(MAX)};
+    CHECK(v->minmax_i128(ord, NULL, 6, &q, &x) == 6 && from_s(q) == MIN && from_s(x) == MAX, "minmax_i128 extremes");
+    CHECK(v->minmax_i128(ord, NULL, 4, &q, &x) == 4 && from_s(q) == -1 && from_s(x) == (__int128)1 << 64, "minmax_i128 limb order");
+    pqk_i128 t63 = to_s((__int128)INT64_MAX + 1);
+    CHECK(v->count_i128(ord, NULL, 6, PQK_LT, &t63, NULL) == 3, "count_i128 LT 2^63 (signed-high/unsigned-low)");
+    CHECK(v->count_i128(ord, NULL, 6, PQK_GE, &t63, NULL) == 3, "count_i128 GE 2^63");
+  }
   /* popcount tail */
   uint8_t pb[] = {0xFF, 0xFF, 0x0F};
   CHECK(v->bitmap_popcount(pb, 19) == 19 && v->bitmap_popcount(pb, 16) == 16 && v->bitmap_popcount(pb, 20) == 20, "popcount tails");
@@ -226,13 +316,13 @@ int main(int argc, char **argv) {
     int provided = pqk_variant_table(vname, &t);
     if (provided == 0) continue;
     if (!pqk_cpu_supports(vname)) {
-      printf("  %-11s built (%d/16 kernels) but SKIPPED: CPU lacks required features\n", vname, provided);
+      printf("  %-11s built (%d/%d kernels) but SKIPPED: CPU lacks required features\n", vname, provided, PQK_NKERNELS);
       continue;
     }
     int before = failures;
     known_answers(vname, &t);
     test_variant(vname, &t, &ref, iters);
-    printf("  %-11s %2d/16 kernels  %s\n", vname, provided, failures == before ? "PASS" : "FAIL");
+    printf("  %-11s %2d/%d kernels  %s\n", vname, provided, PQK_NKERNELS, failures == before ? "PASS" : "FAIL");
     tested++;
   }
   printf("kernel tests: %d variant(s) tested, %d failure(s)\n", tested, failures);

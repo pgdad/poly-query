@@ -1,7 +1,8 @@
 # Native Kernels
 
 The native kernel library `libpqkernels` (`native-kernels/`) exposes a stable C
-ABI defined in `native-kernels/include/pq_kernels.h` (ABI version 1). It is
+ABI defined in `native-kernels/include/pq_kernels.h` (ABI version 1; revision 1
+adds the 128-bit kernels of CR-4, `../changes/kernels-i128.md`). It is
 built from:
 
 * `reference-c/` — portable C17 reference implementation (normative semantics);

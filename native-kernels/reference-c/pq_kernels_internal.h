@@ -21,7 +21,14 @@
   X(compare_i64, size_t, (const int64_t *a, const int64_t *b, size_t n, int op, uint8_t *out_bits), (a, b, n, op, out_bits)) \
   X(compare_fixed, void, (const uint8_t *a, const uint8_t *b, size_t width, size_t n, int8_t *out), (a, b, width, n, out)) \
   X(group_sum_i64, int, (const uint32_t *group_ids, const int64_t *values, const uint8_t *validity, size_t n, int64_t *sums, int64_t *counts, size_t ngroups), (group_ids, values, validity, n, sums, counts, ngroups)) \
-  X(gather_i64, void, (const int64_t *data, const uint32_t *idx, size_t m, int64_t *out), (data, idx, m, out))
+  X(gather_i64, void, (const int64_t *data, const uint32_t *idx, size_t m, int64_t *out), (data, idx, m, out)) \
+  X(filter_i128, size_t, (const pqk_i128 *data, const uint8_t *validity, size_t n, int op, const pqk_i128 *a, const pqk_i128 *b, uint32_t *out_idx), (data, validity, n, op, a, b, out_idx)) \
+  X(count_i128, size_t, (const pqk_i128 *data, const uint8_t *validity, size_t n, int op, const pqk_i128 *a, const pqk_i128 *b), (data, validity, n, op, a, b)) \
+  X(sum_i128, int, (const pqk_i128 *data, const uint8_t *validity, size_t n, pqk_i128 *out_sum), (data, validity, n, out_sum)) \
+  X(minmax_i128, size_t, (const pqk_i128 *data, const uint8_t *validity, size_t n, pqk_i128 *out_min, pqk_i128 *out_max), (data, validity, n, out_min, out_max))
+
+/* Number of kernels in the ABI (revision 1). */
+#define PQK_NKERNELS 20
 
 #define PQK_DECL_REF(name, ret, params, args) ret pqk_ref_##name params;
 PQK_KERNELS(PQK_DECL_REF)

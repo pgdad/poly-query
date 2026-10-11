@@ -34,10 +34,20 @@ int main(int argc, char **argv) {
   }
   for (size_t i = 0; i < n / 8 + 1; i++) { bm[i] = (uint8_t)(i * 37); bm2[i] = (uint8_t)(i * 91); val[i] = 0xF7; }
   int64_t *gs = calloc(1024, 8), *gc = calloc(1024, 8);
+  /* 128-bit decimals: unscaled = d * 10^20 (values need the high limb). */
+  pqk_i128 *w = malloc(n * sizeof *w);
+  const __int128 E20 = (__int128)10000000000ULL * 10000000000ULL;
+  for (size_t i = 0; i < n; i++) {
+    __int128 x = (__int128)d[i] * E20 * ((i & 3) ? 1 : -1);
+    w[i].lo = (uint64_t)x; w[i].hi = (int64_t)(x >> 64);
+  }
+  __int128 wa = (__int128)-500000 * E20, wb = (__int128)100000 * E20;
+  pqk_i128 ca = {(uint64_t)wa, (int64_t)(wa >> 64)}, cb = {(uint64_t)wb, (int64_t)(wb >> 64)};
   const char *variants[] = {"reference", "x86_scalar", "x86_avx2", "x86_avx512", "a64_scalar", "a64_neon", "a64_sve"};
   const char *kernels[] = {"filter_i64_sel10", "filter_i64_bitmap", "count_i64_between", "sum_i64", "sum_i64_validity",
                            "sum_f64", "minmax_i64", "bitmap_and", "bitmap_popcount", "hash_i64", "compare_i64",
-                           "group_sum_i64_1024", "gather_i64"};
+                           "group_sum_i64_1024", "gather_i64",
+                           "filter_i128_sel10", "count_i128_between", "sum_i128", "minmax_i128"};
   for (size_t vk = 0; vk < sizeof variants / sizeof *variants; vk++) {
     pqk_table t;
     if (!pqk_cpu_supports(variants[vk]) || pqk_variant_table(variants[vk], &t) == 0) continue;
@@ -60,6 +70,10 @@ int main(int argc, char **argv) {
         case 10: sink += t.compare_i64(d, d2, n, PQK_LT, bo); break;
         case 11: memset(gs, 0, 8192); t.group_sum_i64(gid, d, NULL, n, gs, gc, 1024); sink += (uint64_t)gs[3]; break;
         case 12: t.gather_i64(d, idx, n, out64); sink += (uint64_t)out64[n - 1]; break;
+        case 13: sink += t.filter_i128(w, NULL, n, PQK_LT, &ca, NULL, idx); break;
+        case 14: sink += t.count_i128(w, NULL, n, PQK_BETWEEN, &ca, &cb); break;
+        case 15: { pqk_i128 q; t.sum_i128(w, NULL, n, &q); sink += q.lo; } break;
+        case 16: { pqk_i128 q, x; t.minmax_i128(w, val, n, &q, &x); sink += q.lo + x.lo; } break;
         }
         double el = now_ns() - t0;
         if (r >= 0) ts[r] = el;

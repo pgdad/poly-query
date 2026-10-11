@@ -196,3 +196,81 @@ int pqk_ref_group_sum_i64(const uint32_t *group_ids, const int64_t *values, cons
 void pqk_ref_gather_i64(const int64_t *data, const uint32_t *idx, size_t m, int64_t *out) {
     for (size_t j = 0; j < m; j++) memcpy(out + j, data + idx[j], sizeof(int64_t));
 }
+
+/* ---- 128-bit kernels (CR-4) ------------------------------------------- */
+
+static inline __int128 load_i128(const pqk_i128 *p) {
+    pqk_i128 v;
+    memcpy(&v, p, sizeof v);
+    return (__int128)(((unsigned __int128)(uint64_t)v.hi << 64) | v.lo);
+}
+
+static inline void store_i128(pqk_i128 *p, __int128 x) {
+    pqk_i128 v = {(uint64_t)x, (int64_t)(x >> 64)};
+    memcpy(p, &v, sizeof v);
+}
+
+static inline int pred128(int op, __int128 x, __int128 a, __int128 b) {
+    switch (op) {
+    case PQK_EQ: return x == a;
+    case PQK_NE: return x != a;
+    case PQK_LT: return x < a;
+    case PQK_LE: return x <= a;
+    case PQK_GT: return x > a;
+    case PQK_GE: return x >= a;
+    case PQK_BETWEEN: return a <= x && x <= b;
+    default: return 0;
+    }
+}
+
+size_t pqk_ref_filter_i128(const pqk_i128 *data, const uint8_t *validity, size_t n,
+                           int op, const pqk_i128 *a, const pqk_i128 *b, uint32_t *out_idx) {
+    if (op < PQK_EQ || op > PQK_BETWEEN) return (size_t)-1;
+    __int128 av = load_i128(a), bv = op == PQK_BETWEEN ? load_i128(b) : 0;
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++)
+        if (valid_at(validity, i) && pred128(op, load_i128(data + i), av, bv)) out_idx[k++] = (uint32_t)i;
+    return k;
+}
+
+size_t pqk_ref_count_i128(const pqk_i128 *data, const uint8_t *validity, size_t n,
+                          int op, const pqk_i128 *a, const pqk_i128 *b) {
+    if (op < PQK_EQ || op > PQK_BETWEEN) return (size_t)-1;
+    __int128 av = load_i128(a), bv = op == PQK_BETWEEN ? load_i128(b) : 0;
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++)
+        k += valid_at(validity, i) && pred128(op, load_i128(data + i), av, bv);
+    return k;
+}
+
+int pqk_ref_sum_i128(const pqk_i128 *data, const uint8_t *validity, size_t n, pqk_i128 *out_sum) {
+    /* Exact sum = acc + wraps * 2^128; it is representable iff wraps == 0. */
+    __int128 acc = 0;
+    long long wraps = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (!valid_at(validity, i)) continue;
+        __int128 x = load_i128(data + i);
+        if (__builtin_add_overflow(acc, x, &acc)) wraps += x > 0 ? 1 : -1;
+    }
+    if (wraps) return PQK_OVERFLOW;
+    store_i128(out_sum, acc);
+    return PQK_OK;
+}
+
+size_t pqk_ref_minmax_i128(const pqk_i128 *data, const uint8_t *validity, size_t n,
+                           pqk_i128 *out_min, pqk_i128 *out_max) {
+    size_t k = 0;
+    __int128 lo = 0, hi = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (!valid_at(validity, i)) continue;
+        __int128 x = load_i128(data + i);
+        if (k == 0 || x < lo) lo = x;
+        if (k == 0 || x > hi) hi = x;
+        k++;
+    }
+    if (k) {
+        store_i128(out_min, lo);
+        store_i128(out_max, hi);
+    }
+    return k;
+}
