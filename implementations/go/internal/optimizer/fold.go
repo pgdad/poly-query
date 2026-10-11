@@ -5,29 +5,36 @@ import (
 	"polyquery/internal/types"
 )
 
-// Constant folding and predicate simplification.
-//
-// Every maximal constant subexpression (no column references, subqueries
-// or aggregates, and no PQ_SLEEP) is evaluated once at planning time and
-// replaced by a literal of the same type. An expression whose evaluation
-// fails is left alone, so the error is raised (or not) exactly as without
-// folding — e.g. 1/0 in the select list of an empty table never fails.
+// ConstantFolding evaluates every maximal constant subexpression (no
+// column references, subqueries or aggregates, and no PQ_SLEEP) once at
+// planning time and replaces it by a literal of the same type. An
+// expression whose evaluation fails is left alone, so the error is raised
+// (or not) exactly as without folding — e.g. 1/0 in the select list of an
+// empty table never fails.
 //
 // Boolean connectives with a constant operand are then simplified where
 // that cannot change results or errors: TRUE AND x ⇒ x, x AND TRUE ⇒ x,
 // FALSE AND x ⇒ FALSE (x is never evaluated), and dually for OR. x AND FALSE
 // is kept: x is evaluated first and may raise an error. Filters whose
-// predicate became TRUE disappear during predicate pushdown.
+// predicate became TRUE are removed by PredicatePushdown.
+type ConstantFolding struct {
+	// Eval evaluates constant expressions (nil: the rule does nothing).
+	Eval EvalFunc
+}
 
-func foldPlan(n plan.Node, eval EvalFunc) plan.Node {
-	if eval == nil {
+// Name implements Rule.
+func (ConstantFolding) Name() string { return "constant_folding" }
+
+// Apply implements Rule.
+func (r ConstantFolding) Apply(n plan.Node) plan.Node {
+	if r.Eval == nil {
 		return n
 	}
 	return plan.MapExprs(n, func(e plan.Expr) plan.Expr {
 		if _, ok := e.(*plan.Subquery); ok {
 			return nil // MapExprs folds inside the subquery plan
 		}
-		return simplify(foldExpr(e, eval))
+		return simplify(foldExpr(e, r.Eval))
 	})
 }
 

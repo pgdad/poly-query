@@ -1,18 +1,21 @@
-// Package optimizer applies result-preserving rewrites to logical plans
-// (all of them are skipped with the query option optimize: false):
+// Package optimizer is the rule-based logical optimizer: it rewrites
+// logical plans (package plan) into equivalent, cheaper logical plans. It
+// is composed of separately named rules, each in its own file and
+// individually testable:
 //
-//   - constant folding and boolean predicate simplification (fold.go);
-//   - predicate pushdown through joins (WHERE conjuncts that reference a
-//     single join input are evaluated below the join, conjuncts spanning
-//     both inputs of an inner/cross join become join conditions), through
-//     projections (derived tables and CTEs; output columns are replaced by
-//     their defining expressions), sorts, DISTINCT and UNION ALL (into
-//     every branch), and merging of stacked filters, so that predicates
-//     reach the table scans;
-//   - join reordering for chains of inner joins (reorder.go).
+//   - constant_folding (fold.go): constant folding and boolean predicate
+//     simplification;
+//   - predicate_pushdown (pushdown.go): filters move below joins,
+//     projections, sorts, DISTINCT and into UNION ALL branches;
+//   - join_reorder (reorder.go): chains of inner joins are rebuilt
+//     left-deep, smallest estimated input first;
+//   - column_pruning (prune.go): scans and projections keep only the
+//     columns some operator needs.
 //
-// Subquery plans are optimized recursively. Projection pushdown (column
-// pruning) is done by the physical planner.
+// Rules see only the logical plan: access paths, join algorithms,
+// execution mode and native kernels are chosen afterwards by the physical
+// planner (package physical). With the query option optimize: false no
+// rule is applied.
 package optimizer
 
 import (
@@ -20,142 +23,72 @@ import (
 	"polyquery/internal/types"
 )
 
+// Rule is a named, result-preserving rewrite of a logical plan. Rules
+// process the plans of nested subqueries too and never modify their input.
+type Rule interface {
+	Name() string
+	Apply(plan.Node) plan.Node
+}
+
 // EvalFunc evaluates a constant expression.
 type EvalFunc func(plan.Expr) (types.Value, error)
 
 // Options configure the optimizer.
 type Options struct {
+	// Disabled applies no rule at all (query option optimize: false).
+	Disabled bool
 	// EvalConst evaluates constant expressions (nil disables folding).
 	EvalConst EvalFunc
 }
 
-// Optimize returns an optimized copy of the plan.
-func Optimize(n plan.Node, opts Options) plan.Node {
-	n = foldPlan(n, opts.EvalConst)
-	return optimize(n)
+// Optimizer applies its rules in order.
+type Optimizer struct {
+	Rules []Rule
 }
 
-func optimize(n plan.Node) plan.Node {
-	n = reorder(push(n, nil))
-	return plan.MapExprs(n, func(e plan.Expr) plan.Expr {
-		if sq, ok := e.(*plan.Subquery); ok {
-			c := *sq
-			c.X = optimizeExpr(sq.X)
-			c.Plan = optimize(sq.Plan)
-			return &c
-		}
+// New returns the optimizer configured by opts: the default rule sequence,
+// or no rules when optimization is disabled.
+func New(opts Options) *Optimizer {
+	if opts.Disabled {
+		return &Optimizer{}
+	}
+	return &Optimizer{Rules: []Rule{
+		ConstantFolding{Eval: opts.EvalConst},
+		PredicatePushdown{},
+		JoinReorder{},
+		ColumnPruning{},
+	}}
+}
+
+// Optimize applies every rule to the plan in order.
+func (o *Optimizer) Optimize(n plan.Node) plan.Node {
+	for _, r := range o.Rules {
+		n = r.Apply(n)
+	}
+	return n
+}
+
+// Optimize returns the plan optimized with the rules selected by opts.
+func Optimize(n plan.Node, opts Options) plan.Node { return New(opts).Optimize(n) }
+
+// everyPlan applies a plan rewrite to n and then to the plans of all
+// subqueries nested in the result's expressions (recursively).
+func everyPlan(n plan.Node, f func(plan.Node) plan.Node) plan.Node {
+	return plan.MapExprs(f(n), func(e plan.Expr) plan.Expr { return subqueryPlans(e, f) })
+}
+
+// subqueryPlans returns a copy of subquery e whose plan (and those of the
+// subqueries in its tested value) is rewritten by everyPlan; nil if e is
+// not a subquery.
+func subqueryPlans(e plan.Expr, f func(plan.Node) plan.Node) plan.Expr {
+	sq, ok := e.(*plan.Subquery)
+	if !ok {
 		return nil
-	})
-}
-
-func optimizeExpr(e plan.Expr) plan.Expr {
-	return plan.Map(e, func(x plan.Expr) plan.Expr {
-		if sq, ok := x.(*plan.Subquery); ok {
-			c := *sq
-			c.X = optimizeExpr(sq.X)
-			c.Plan = optimize(sq.Plan)
-			return &c
-		}
-		return nil
-	})
-}
-
-// push rewrites n with the given predicates (conjuncts that must hold on n's
-// output) placed as low as possible.
-func push(n plan.Node, preds []plan.Expr) plan.Node {
-	switch x := n.(type) {
-	case *plan.Filter:
-		for _, c := range plan.Conjuncts(x.Pred) {
-			if !isTrue(c) {
-				preds = append(preds, c)
-			}
-		}
-		return push(x.Input, preds)
-	case *plan.Join:
-		return pushJoin(x, preds)
-	case *plan.Project:
-		down, keep := throughProject(x, preds)
-		return filter(&plan.Project{Input: push(x.Input, down), Exprs: x.Exprs, Cols: x.Cols}, keep)
-	case *plan.Aggregate:
-		c := *x
-		c.Input = push(x.Input, nil)
-		return filter(&c, preds)
-	case *plan.Sort:
-		return &plan.Sort{Input: push(x.Input, preds), Keys: x.Keys}
-	case *plan.Limit:
-		return filter(&plan.Limit{Input: push(x.Input, nil), Count: x.Count, Offset: x.Offset}, preds)
-	case *plan.Distinct:
-		return &plan.Distinct{Input: push(x.Input, preds)}
-	case *plan.UnionAll:
-		return pushUnion(x, preds)
 	}
-	return filter(n, preds)
-}
-
-// pushUnion pushes predicates over a UNION ALL's output into every branch,
-// rewritten in terms of the branch's columns. Predicates containing
-// subqueries stay above (their plans must not be duplicated).
-func pushUnion(u *plan.UnionAll, preds []plan.Expr) plan.Node {
-	var down, keep []plan.Expr
-	for _, p := range preds {
-		if hasSubquery(p) {
-			keep = append(keep, p)
-		} else {
-			down = append(down, p)
-		}
-	}
-	out := &plan.UnionAll{Inputs: make([]plan.Node, len(u.Inputs)), Cols: u.Cols}
-	for i, in := range u.Inputs {
-		branch := make(map[plan.ColumnID]plan.Column, len(u.Cols))
-		for j, c := range in.Schema() {
-			branch[u.Cols[j].ID] = c
-		}
-		mapped := make([]plan.Expr, len(down))
-		for k, p := range down {
-			mapped[k] = plan.Map(p, func(e plan.Expr) plan.Expr {
-				if ref, ok := e.(*plan.ColumnRef); ok {
-					if c, ok := branch[ref.ID]; ok {
-						return c.Ref()
-					}
-				}
-				return nil
-			})
-		}
-		out.Inputs[i] = push(in, mapped)
-	}
-	return filter(out, keep)
-}
-
-// throughProject splits predicates over a projection's output into those
-// that can be evaluated below it (rewritten in terms of the projection's
-// input) and those that stay above. Predicates containing subqueries, or
-// referencing outputs computed with subqueries or PQ_SLEEP, stay above.
-func throughProject(p *plan.Project, preds []plan.Expr) (down, keep []plan.Expr) {
-	defs := make(map[plan.ColumnID]plan.Expr, len(p.Cols))
-	for i, c := range p.Cols {
-		defs[c.ID] = p.Exprs[i]
-	}
-	for _, pred := range preds {
-		ok := !hasSubquery(pred)
-		for id := range plan.RefSet(pred) {
-			if def, isOutput := defs[id]; isOutput && !movable(def) {
-				ok = false
-			}
-		}
-		if !ok {
-			keep = append(keep, pred)
-			continue
-		}
-		down = append(down, plan.Map(pred, func(e plan.Expr) plan.Expr {
-			if ref, isRef := e.(*plan.ColumnRef); isRef {
-				if def, isOutput := defs[ref.ID]; isOutput {
-					return def
-				}
-			}
-			return nil
-		}))
-	}
-	return down, keep
+	c := *sq
+	c.X = plan.Map(sq.X, func(x plan.Expr) plan.Expr { return subqueryPlans(x, f) })
+	c.Plan = everyPlan(sq.Plan, f)
+	return &c
 }
 
 func hasSubquery(e plan.Expr) bool {
@@ -192,29 +125,6 @@ func filter(n plan.Node, preds []plan.Expr) plan.Node {
 	return &plan.Filter{Input: n, Pred: plan.And(preds)}
 }
 
-// side classifies a predicate by the join inputs whose columns it uses.
-type side uint8
-
-const (
-	sideNone side = iota
-	sideLeft
-	sideRight
-	sideBoth
-)
-
-func classify(e plan.Expr, left, right map[plan.ColumnID]bool) side {
-	s := sideNone
-	for id := range plan.RefSet(e) {
-		switch {
-		case left[id]:
-			s |= sideLeft
-		case right[id]:
-			s |= sideRight
-		}
-	}
-	return s
-}
-
 func idSet(cols []plan.Column) map[plan.ColumnID]bool {
 	m := make(map[plan.ColumnID]bool, len(cols))
 	for _, c := range cols {
@@ -223,43 +133,3 @@ func idSet(cols []plan.Column) map[plan.ColumnID]bool {
 	return m
 }
 
-func pushJoin(j *plan.Join, preds []plan.Expr) plan.Node {
-	left, right := idSet(j.Left.Schema()), idSet(j.Right.Schema())
-	var lp, rp, cond, above []plan.Expr
-	on := plan.Conjuncts(j.Cond)
-	if j.Kind == plan.JoinLeft {
-		// WHERE conjuncts on the preserved (left) side filter it directly;
-		// ON conjuncts on the right side filter the right input.
-		for _, p := range preds {
-			if s := classify(p, left, right); s == sideLeft {
-				lp = append(lp, p)
-			} else {
-				above = append(above, p)
-			}
-		}
-		for _, c := range on {
-			if s := classify(c, left, right); s == sideRight {
-				rp = append(rp, c)
-			} else {
-				cond = append(cond, c)
-			}
-		}
-		out := &plan.Join{Kind: plan.JoinLeft, Left: push(j.Left, lp), Right: push(j.Right, rp), Cond: plan.And(cond)}
-		return filter(out, above)
-	}
-	for _, p := range append(on, preds...) {
-		switch classify(p, left, right) {
-		case sideLeft, sideNone:
-			lp = append(lp, p)
-		case sideRight:
-			rp = append(rp, p)
-		default:
-			cond = append(cond, p)
-		}
-	}
-	kind := plan.JoinInner
-	if len(cond) == 0 {
-		kind = plan.JoinCross
-	}
-	return &plan.Join{Kind: kind, Left: push(j.Left, lp), Right: push(j.Right, rp), Cond: plan.And(cond)}
-}

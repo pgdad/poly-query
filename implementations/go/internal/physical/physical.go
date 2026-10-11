@@ -1,7 +1,11 @@
-// Package physical turns an (optimized) logical plan into a physical plan:
-// it chooses operator algorithms (hash join vs nested-loop join, hash
-// aggregation, top-N sort), prunes columns no operator needs so that table
-// scans only read referenced columns, and renders plans as EXPLAIN JSON
+// Package physical is the physical planner: it maps an (optimized) logical
+// plan to physical operators and alone takes every execution decision —
+// access paths (table scan with row-group skipping vs index scan, the
+// table columns a scan reads), join algorithms (hash with build side /
+// sort-merge / nested loop, honouring the join option), hash aggregation
+// and distinct, top-N sort, the operators of correlated subqueries
+// (parameter lookups, materialization), and the execution mode, thread
+// count and use of native kernels. It also renders plans as EXPLAIN JSON
 // (spec/storage/indexes-and-planning.md §4).
 package physical
 
@@ -256,10 +260,12 @@ func Exprs(n Node) []plan.Expr {
 }
 
 // Plan is a physical plan: the root operator plus the physical plans of all
-// subqueries referenced by its expressions (and theirs, transitively).
+// subqueries referenced by its expressions (and theirs, transitively), and
+// how they are executed.
 type Plan struct {
 	Root     Node
 	Subplans map[*plan.Subquery]Node
+	Exec     Execution
 }
 
 // Options influence physical planning.
@@ -274,4 +280,12 @@ type Options struct {
 	Indexes func(*storage.Table) []*index.Index
 	// EvalConst evaluates constant expressions (search arguments).
 	EvalConst func(plan.Expr) (types.Value, error)
+	// Mode is the requested execution model: "", "auto", "row" or
+	// "vectorized".
+	Mode string
+	// Threads is the requested number of worker threads (≤ 0: use
+	// DefaultThreads).
+	Threads, DefaultThreads int
+	// Native requests the native kernels (only set when they are loaded).
+	Native bool
 }

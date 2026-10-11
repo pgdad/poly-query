@@ -15,7 +15,9 @@ func Build(root plan.Node, opts Options) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Plan{Root: r, Subplans: p.subplans}, nil
+	out := &Plan{Root: r, Subplans: p.subplans}
+	out.Exec = chooseExecution(out, opts)
+	return out, nil
 }
 
 type planner struct {
@@ -417,7 +419,7 @@ func (p *planner) estimate(n plan.Node) float64 {
 func scanOrds(s *plan.Scan) map[plan.ColumnID]int {
 	ords := make(map[plan.ColumnID]int, len(s.Cols))
 	for i, c := range s.Cols {
-		ords[c.ID] = i
+		ords[c.ID] = s.Ords[i]
 	}
 	return ords
 }
@@ -429,7 +431,7 @@ func scanColumns(s *plan.Scan, req idset) ([]int, []plan.Column) {
 	var cols []plan.Column
 	for i, c := range s.Cols {
 		if req[c.ID] {
-			ords = append(ords, i)
+			ords = append(ords, s.Ords[i])
 			cols = append(cols, c)
 		}
 	}
