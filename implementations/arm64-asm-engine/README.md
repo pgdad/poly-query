@@ -366,10 +366,17 @@ in every mode); Aggregate, Distinct and Sort consume their whole input.
   into a key-only group table and keeps the first row of every value (O(n)
   instead of sorting); with threads, windows are deduplicated in parallel
   and merged like partial aggregates.
-* **ORDER BY** sorts with `qsort_r`; with threads, chunks are sorted in
-  parallel and merged pairwise in parallel rounds (`sort.S`). The key list
-  ends with every visible column as a tie-breaker, so rows that tie on the
-  ORDER BY keys still come out in one well-defined order in every mode.
+* **ORDER BY** (`sort.S`) uses normalized keys: the leading non-STRING
+  ORDER BY keys get exact order-preserving 64-bit codes (biased integers,
+  sign-folded floats, inverted for DESC), and a permutation of the rows is
+  radix sorted on them (stable LSD, last key first, constant bytes
+  skipped); only rows with equal codes go through the comparator. A STRING
+  first key is radix sorted on its 8-byte prefix; with threads, such sorts
+  (and sorts with a NULL in a radix key) are chunk-sorted in parallel and
+  merged pairwise in parallel rounds. The key list ends with every visible
+  column as a tie-breaker, so rows that tie on the ORDER BY keys still come
+  out in one well-defined order in every mode (row mode: `qsort_r` with the
+  same comparator).
 
 ### Parallelism (`parallel.S`)
 
@@ -476,14 +483,16 @@ other columns are this engine (`bench/results-after.txt`). Times in ms.
 
 | query | before | row | row, optimize=false | vectorized | vectorized, optimize=false | vectorized, 4 threads | vectorized, 8 threads | merge join (vectorized) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Q1 filter + aggregate (`status = 'approved' AND amount > 100`) | 18.0 | 18.8 | 19.3 | 4.2 | 4.3 | 2.1 | 1.1 | 4.4 |
-| Q2 GROUP BY category, 5 aggregates | 154.6 | 160.3 | 160.7 | 20.6 | 21.0 | 9.1 | 4.8 | 21.0 |
-| Q3 GROUP BY `bucket % 10` | 100.9 | 104.9 | 105.7 | 18.9 | 19.1 | 8.1 | 4.2 | 19.1 |
-| Q4 top-N (`ORDER BY amount DESC, tx_id LIMIT 10`) | 40.9 | 16.1 | 45.4 | 3.9 | 31.1 | 2.5 | 1.7 | 4.0 |
-| Q5 join 1M × 100k + GROUP BY | 140.7 | 147.0 | 147.7 | 37.5 | 37.4 | 21.4 | 14.3 | 103.0 |
-| Q6 arithmetic filter, 3 conjuncts | 19.7 | 18.5 | 20.6 | 7.2 | 7.2 | 3.5 | 1.9 | 7.2 |
-| Q7 GROUP BY customer_id (100k groups) + top-N | 116.3 | 115.3 | 120.5 | 18.8 | 28.1 | 15.7 | 12.0 | 19.0 |
-| Q8 3-way join (items, orders, filtered customers) | 35.3 | 22.7 | 41.6 | 12.6 | 46.7 | 10.4 | 8.8 | 41.4 |
+| Q1 filter + aggregate (`status = 'approved' AND amount > 100`) | 18.0 | 18.8 | 19.2 | 4.2 | 4.1 | 2.0 | 1.2 | 4.2 |
+| Q2 GROUP BY category, 5 aggregates | 158.3 | 159.3 | 151.5 | 20.8 | 20.1 | 9.3 | 5.4 | 19.9 |
+| Q3 GROUP BY `bucket % 10` | 100.5 | 104.6 | 97.4 | 18.7 | 18.8 | 8.2 | 4.3 | 18.8 |
+| Q4 top-N (`ORDER BY amount DESC, tx_id LIMIT 10`) | 41.0 | 15.9 | 41.3 | 3.7 | 12.6 | 2.5 | 1.7 | 3.8 |
+| Q5 join 1M × 100k + GROUP BY | 141.0 | 148.0 | 139.9 | 35.6 | 35.1 | 20.8 | 11.1 | 88.9 |
+| Q6 arithmetic filter, 3 conjuncts | 19.8 | 18.5 | 20.6 | 10.3 | 10.3 | 4.8 | 2.6 | 10.2 |
+| Q7 GROUP BY customer_id (80k groups) + top-N | 116.0 | 114.6 | 111.3 | 17.5 | 20.4 | 14.4 | 8.5 | 16.6 |
+| Q8 3-way join (items, orders, filtered customers) | 34.9 | 22.6 | 38.6 | 12.1 | 37.4 | 8.2 | 4.9 | 32.4 |
+| Q9 sort 1M rows (`ORDER BY amount, tx_id`) | 153.7 | 153.3 | 154.8 | 57.6 | 61.8 | 53.6 | 55.1 | 54.0 |
+| Q10 `SELECT DISTINCT customer_id, status` (1M rows) | 225.2 | 225.6 | 226.9 | 33.6 | 33.2 | 24.1 | 14.3 | 34.1 |
 
 Single-thread columns use `threads: 1`; all use `join: "hash"` except the
 last. Observations:
@@ -491,17 +500,17 @@ last. Observations:
 * The row-mode baseline (Volcano) performs like the Phase 4 executor; with
   `optimize` it gains from top-N (Q4) and join reordering (Q8: the filtered
   customers are joined first instead of joining all items with all orders).
-* Vectorization alone gives 2.5–8× — most for grouping (hash aggregation
-  instead of sorting key records: Q2, Q3, Q7) and for the dictionary-string
-  predicate (Q1, one byte lookup per row).
+* Vectorization alone gives 2–8× — most for grouping (hash aggregation
+  instead of sorting key records: Q2, Q3, Q7), DISTINCT (hashing, Q10) and
+  the dictionary-string predicate (Q1, one byte lookup per row); sorting
+  (Q9) gains 2.7× from the normalized-key radix sort.
 * Threads add up to another 3.5–4.5× on 8 cores for scans and grouping
-  (Q1–Q3, Q6); Q5 and Q7 scale less because the hash-join build, the
-  merge of 100,000 partial groups and the final projection run on one
-  thread.
-* The optimizer matters most where it changes the work: top-N (Q4: 31 →
-  3.9 ms vectorized) and join order (Q8: 46.7 → 12.6 ms). Constant folding
-  and predicate simplification remove per-row work only for queries that
-  contain constant expressions.
+  (Q1–Q3, Q6, Q10); joins (Q5, Q8) scale less because the hash-join build
+  is single-threaded; Q9 stays on the (memory-bound) single-threaded radix
+  sort.
+* The optimizer matters most where it changes the work: top-N (Q4) and join
+  order (Q8). Constant folding and predicate simplification remove per-row
+  work only for queries that contain constant expressions.
 * The merge join pays for sorting both inputs (Q5) and returns tuples in
   key order.
 
