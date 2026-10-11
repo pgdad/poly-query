@@ -298,11 +298,12 @@
         none? (.isEmpty s)
         has-null? (boolean (:has-null? e))
         xkey (v/key-fn (:type (:arg e)) (:cmp-type e))
+        null-result (if (:exists? e) false nil)
         not? (:not? e)]
     (fn [x]
       (let [r (cond
                 none? (if has-null? nil false)
-                (nil? x) nil
+                (nil? x) null-result
                 (.contains s (xkey x)) true
                 has-null? nil
                 :else false)]

@@ -25,10 +25,11 @@
     {:node :subquery :kind :scalar|:exists|:in :cell id :correlated? b
      :query bound-query (after analysis) | :plan physical-plan (after planning)
      [:arg e :cmp-type T :not? b]}               ; for :in
-    {:node :in-set :not? b :arg e :cmp-type T :keys java.util.Set :has-null? b}
-                                                ; x [NOT] IN (subquery) with the
+    {:node :in-set :not? b :arg e :cmp-type T :keys java.util.Set :has-null? b
+     :exists? b}                                ; x [NOT] IN (subquery) with the
                                                 ; subquery's values precomputed
-                                                ; (keys per values/key-fn)
+                                                ; (keys per values/key-fn); with
+                                                ; :exists?, NULL x gives FALSE
   Aggregate specs: {:fn :count-star|:count|:sum|:avg|:min|:max :distinct? b
                     :arg e :type T}"
   (:require [clojure.string :as str]

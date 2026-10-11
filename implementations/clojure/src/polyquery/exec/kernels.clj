@@ -725,6 +725,7 @@
         xk (compile-kernel env (:arg e))]
     (if (and (= :string (t/kind (:type (:arg e))))
              (not (:has-null? e))
+             (not (:exists? e))
              (not (.isEmpty ^java.util.Set (:keys e))))
       ;; NULL → NULL, else TRUE/FALSE
       (string-test-kernel xk test)

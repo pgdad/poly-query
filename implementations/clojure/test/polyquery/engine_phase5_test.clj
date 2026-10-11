@@ -193,6 +193,18 @@
    ["SELECT id FROM t WHERE g = 99 AND k IN (SELECT k / 0 FROM r)" false]
    ["SELECT id, k / g IN (SELECT k FROM r WHERE w > 100) FROM t" false]
    ["SELECT id FROM t WHERE k = (SELECT k FROM r WHERE w > 1)" false]
+   ;; correlated EXISTS as a precomputed key set (vectorized mode)
+   ["SELECT id FROM t WHERE EXISTS (SELECT 1 FROM r WHERE r.k = t.k AND r.w > 5)" false]
+   ["SELECT id, NOT EXISTS (SELECT * FROM r WHERE r.k = t.k) FROM t" false]
+   ["SELECT id FROM t WHERE NOT EXISTS (SELECT name FROM r WHERE t.d = r.w) AND g = 1" false]
+   ["SELECT id FROM t WHERE EXISTS (SELECT 1 FROM r WHERE r.name = t.u OR r.name = 'n3' AND r.k = t.g)" false]
+   ["SELECT id FROM t WHERE EXISTS (SELECT 1 FROM r WHERE r.name = t.s)" false]
+   ["SELECT id FROM t WHERE EXISTS (SELECT 1 FROM r WHERE r.k = t.k + 1 AND r.name IS NOT NULL)" false]
+   ["SELECT id FROM t WHERE EXISTS (SELECT 1 FROM r WHERE r.k = t.k AND 10 / (r.k - 7) > 1)" false]
+   ["SELECT id FROM t WHERE EXISTS (SELECT 1 FROM r WHERE r.k = t.k LIMIT 0)" false]
+   ["SELECT id FROM t WHERE EXISTS (SELECT 1 / 0 FROM r WHERE r.k = t.k)" false]
+   ["SELECT g, COUNT(*) FROM t WHERE EXISTS (SELECT 1 FROM s WHERE s.k = t.g) GROUP BY g" false]
+   ["SELECT id FROM t WHERE EXISTS (SELECT 1 FROM r WHERE r.k = t.k AND EXISTS (SELECT 1 FROM s WHERE s.k = r.k))" false]
    ;; runtime errors
    ["SELECT id, k / g FROM t" false]
    ["SELECT SUM(k * 4611686018427387) FROM t" false]

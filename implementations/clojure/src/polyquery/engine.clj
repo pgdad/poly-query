@@ -114,19 +114,19 @@
               (throw e))))))))
 
 (defn- subquery-rows-fn
-  "(fn [plan limit]) → the first `limit` (nil: all) rows of an uncorrelated
-  subquery plan, executed vectorized (polyquery.plan.physical/plan-expr)."
+  "(fn [plan]) → reducible of the rows of a subquery plan evaluated while
+  planning, executed vectorized (polyquery.plan.physical/plan-expr)."
   [qctx opts]
   (let [env (dispatch/environment qctx {:mode :vectorized :max-join-rows (:max-join-rows opts)
                                         :native (when (:native opts) (ffi/library))})]
-    (fn [plan limit]
-      (into [] (if limit (take limit) identity) (dispatch/build plan env)))))
+    (fn [plan] (dispatch/build plan env))))
 
 (defn- execution-plan
   "Physical plan of a query for execution. Unless it runs in row mode (the
-  unoptimized baseline), its uncorrelated subqueries are evaluated once
-  while planning and replaced by their results, so that the expressions
-  containing them can be vectorized and parallelized. When that evaluation
+  unoptimized baseline), its uncorrelated subqueries (and correlated EXISTS
+  subqueries that amount to a semi-join) are evaluated once while planning
+  and replaced by their results, so that the expressions containing them
+  can be vectorized and parallelized. When that evaluation
   fails as described above, the query is planned without it: its outcome is
   then decided by regular execution, which evaluates the subquery only
   where the row engine would."
