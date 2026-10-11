@@ -465,6 +465,22 @@ class VectorCompiler:
 
         return case
 
+    def _v_Exists(self, e: b.Exists) -> VecFn:
+        """A correlated EXISTS of semi-join form (see ``semi_join``) whose
+        lookup key is an outer column: a set membership test per row."""
+        from .semi_join import exists_semi_join  # local import: semi_join uses this module
+
+        semi = exists_semi_join(e, self.ctx)
+        outer_keys = e.subquery.outer_keys
+        if semi is None or not (isinstance(semi.key, b.ColumnRef) and semi.key.key in outer_keys):
+            return self._row_fallback(e)
+        arg = self.compile(e.args[outer_keys.index(semi.key.key)])
+
+        def exists(cols: Columns, n: int) -> Sequence[Any]:
+            return list(map(semi.keys().__contains__, arg(cols, n)))  # NULL is never a key
+
+        return exists
+
     def _v_Function(self, e: b.Function) -> VecFn:
         """Arguments are evaluated as vectors; the scalar kernel is mapped over
         them. Function kernels evaluate their arguments lazily (strict

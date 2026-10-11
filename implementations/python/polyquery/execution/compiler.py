@@ -466,6 +466,22 @@ class Compiler:
         return scalar
 
     def _c_Exists(self, e: b.Exists) -> RowFn:
+        from .semi_join import exists_semi_join  # local import: semi_join uses the vector compiler
+
+        semi = exists_semi_join(e, self.ctx)
+        if semi is not None:
+            # the subquery has a row iff the lookup key is one of its keys
+            outer_keys = e.subquery.outer_keys
+            arg_fns = [self.compile(a) for a in e.args]
+            params = self.ctx.params
+            key = compile_expr(semi.key, self.ctx)
+
+            def exists(row: tuple) -> bool:
+                for k, f in zip(outer_keys, arg_fns):
+                    params[k] = f(row)
+                return key(()) in semi.keys()  # NULL is never a key
+
+            return exists
         run = self._subquery_rows(e, 1)
         return lambda row: bool(run(row))
 
