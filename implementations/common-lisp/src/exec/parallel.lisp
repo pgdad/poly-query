@@ -233,9 +233,11 @@ morsel fails."
 ;;; ------------------------------------------------------------------
 ;;; Parallel scan with ordered gather
 
-(defun make-parallel-gather (node scan threads)
+(defun make-parallel-gather (node scan threads &key reduce)
   "Batch opener running the pipeline NODE (over SCAN) in up to THREADS
-workers, yielding the batches in serial order."
+workers, yielding the batches in serial order. REDUCE, when given, maps the
+list of output batches of each morsel to the batches handed on (in the
+worker)."
   (let ((morsel-count (length (scan-morsels scan)))
         (workers (min threads (length (scan-morsels scan)))))
     (multiple-value-bind (copies providers) (compile-pipeline-copies node workers)
@@ -259,8 +261,11 @@ workers, yielding the batches in serial order."
                                                   (charge-memory (* (batch-count b)
                                                                     (row-footprint (length (batch-columns b)))))
                                                   (push b batches))
+                                         (setf batches (nreverse batches))
+                                         (when reduce
+                                           (setf batches (funcall (the function reduce) batches)))
                                          (sb-thread:with-mutex ((prun-mutex run))
-                                           (setf (svref (prun-results run) m) (nreverse batches))
+                                           (setf (svref (prun-results run) m) batches)
                                            (sb-thread:condition-broadcast (prun-cv run))))))))
           (lambda ()
             (loop

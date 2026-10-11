@@ -905,63 +905,83 @@ gathered up front by up to THREADS threads (for large sorted outputs)."
                                  (permutation-batches batch perm 0 (batch-count batch)))))))
           (funcall (the function output)))))))
 
+(defun top-n-batch (next kinds keys keep)
+  "The best KEEP rows (ORDER BY KEYS, ties in input order) of the batches
+returned by NEXT, as one sorted batch, or NIL without rows. The buffered
+input is compacted whenever it holds twice KEEP rows."
+  (declare (type function next) (type fixnum keep))
+  (let ((buffer '()) (buffered 0) (best nil))
+    (declare (type fixnum buffered))
+    (flet ((compact ()
+             (let* ((batch (concatenate-batches
+                            (if best (cons best (nreverse buffer)) (nreverse buffer))
+                            kinds))
+                    (perm (sorted-permutation batch keys))
+                    (n (min keep (batch-count batch))))
+               (setf best (batch-gather batch perm n)
+                     buffer '()
+                     buffered 0))))
+      (unless (zerop keep)
+        (loop for b = (funcall next)
+              while b
+              do ;; Once KEEP rows are known, only rows sorting
+                 ;; strictly before the last of them can qualify.
+                 (when (and best (= (batch-count best) keep))
+                   (let ((before (make-row-order-predicate b best keys))
+                         (last (1- keep))
+                         (idx (make-index-vector (batch-count b)))
+                         (m 0))
+                     (declare (type function before) (type fixnum m))
+                     (dotimes (i (batch-count b))
+                       (when (funcall before i last)
+                         (setf (aref idx m) i)
+                         (incf m)))
+                     (setf b (cond ((zerop m) nil)
+                                   ((= m (batch-count b)) b)
+                                   (t (batch-gather b idx m))))))
+                 (when b
+                   (push b buffer)
+                   (incf buffered (batch-count b))
+                   (when (>= buffered (max +batch-size+ (* 2 keep)))
+                     (check-interrupts)
+                     (compact))))
+        (compact))
+      best)))
+
 (defmethod compile-batch-operator ((node pp-top-n))
-  ;; ORDER BY ... LIMIT: keep the best LIMIT+OFFSET rows, compacting the
-  ;; buffered input whenever it holds twice that many (ties keep input order).
-  (let* ((open-child (compile-batch-operator (pnode-child node)))
+  ;; ORDER BY ... LIMIT: keep the best LIMIT+OFFSET rows (ties keep input
+  ;; order). Over a parallel pipeline, the workers first reduce each morsel
+  ;; to its best rows; the reduced morsels, in input order, then go through
+  ;; the same selection, which yields exactly the serial result.
+  (let* ((child-node (pnode-child node))
          (kinds (output-kinds node))
          (keys (pp-top-n-keys node))
          (limit (evaluate-limit-expr (pp-top-n-limit node) "LIMIT"))
          (offset (or (evaluate-limit-expr (pp-top-n-offset node) "OFFSET") 0))
-         (keep (+ limit offset)))
+         (keep (+ limit offset))
+         (threads (parallel-threads))
+         (scan (and (> threads 1) (plusp keep) (pipeline-scan child-node)))
+         (open-child
+           (if (and scan (> (length (scan-morsels scan)) 1))
+               (let ((child-kinds (output-kinds child-node)))
+                 (make-parallel-gather
+                  child-node scan threads
+                  :reduce (lambda (batches)
+                            (let ((best (top-n-batch (lambda () (pop batches)) child-kinds keys keep)))
+                              (and best (list best))))))
+               (compile-batch-operator child-node))))
     (declare (type function open-child))
     (lambda ()
       (let ((output nil))
         (lambda ()
           (unless output
-            (let ((buffer '()) (buffered 0) (best nil))
-              (declare (type fixnum buffered))
-              (flet ((compact ()
-                       (let* ((batch (concatenate-batches
-                                      (if best (cons best (nreverse buffer)) (nreverse buffer))
-                                      kinds))
-                              (perm (sorted-permutation batch keys))
-                              (n (min keep (batch-count batch))))
-                         (setf best (batch-gather batch perm n)
-                               buffer '()
-                               buffered 0))))
-                (unless (zerop keep)
-                  (let ((child (funcall open-child)))
-                    (declare (type function child))
-                    (loop for b = (funcall child)
-                          while b
-                          do ;; Once KEEP rows are known, only rows sorting
-                             ;; strictly before the last of them can qualify.
-                             (when (and best (= (batch-count best) keep))
-                               (let ((before (make-row-order-predicate b best keys))
-                                     (last (1- keep))
-                                     (idx (make-index-vector (batch-count b)))
-                                     (m 0))
-                                 (declare (type function before) (type fixnum m))
-                                 (dotimes (i (batch-count b))
-                                   (when (funcall before i last)
-                                     (setf (aref idx m) i)
-                                     (incf m)))
-                                 (setf b (cond ((zerop m) nil)
-                                               ((= m (batch-count b)) b)
-                                               (t (batch-gather b idx m))))))
-                             (when b
-                               (push b buffer)
-                               (incf buffered (batch-count b))
-                               (when (>= buffered (max +batch-size+ (* 2 keep)))
-                                 (check-interrupts)
-                                 (compact)))))
-                  (compact))
-                (setf output (if best
-                                 (permutation-batches best (identity-index-vector (batch-count best))
-                                                      (min offset (batch-count best))
-                                                      (batch-count best))
-                                 (lambda () nil))))))
+            (let ((best (top-n-batch (if (zerop keep) (lambda () nil) (funcall open-child))
+                                     kinds keys keep)))
+              (setf output (if best
+                               (permutation-batches best (identity-index-vector (batch-count best))
+                                                    (min offset (batch-count best))
+                                                    (batch-count best))
+                               (lambda () nil)))))
           (funcall (the function output)))))))
 
 ;;; ------------------------------------------------------------------

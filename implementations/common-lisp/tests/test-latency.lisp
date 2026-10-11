@@ -52,3 +52,11 @@
              (table (polyquery::make-shared-results-table (polyquery::physical-query-root plan))))
         (and table (loop for v being the hash-values of table thereis (> v 1)) t)))
   t)
+
+(deftest latency.parallel-top-n-keeps-tie-order
+    ;; Many ties on grp: the parallel top-N returns the serial rows, in order.
+    (loop for sql in '("SELECT id, grp FROM g ORDER BY grp LIMIT 50 OFFSET 5"
+                       "SELECT id, label FROM g WHERE amount > 100 ORDER BY label DESC LIMIT 300")
+          always (equal (run-with sql (options :mode :row))
+                        (run-with sql (options :mode :vectorized :threads 4))))
+  t)
