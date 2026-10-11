@@ -100,7 +100,11 @@
         VOP128 vop128_ge, 1, 1
         VOP128 vop128_bt, 3, 1
         VOP128 vop128_rng, 4, 1
-        JUMPTABLE vop128_table, vop128_eq, vop128_ne, vop128_lt, vop128_le, vop128_gt, vop128_ge, vop128_bt, vop128_rng
+        VOP128F vop128f_lt, 1, 0, vop128_lt     /* high-word fast paths */
+        VOP128F vop128f_le, 2, 1, vop128_le
+        VOP128F vop128f_gt, 2, 0, vop128_gt
+        VOP128F vop128f_ge, 1, 1, vop128_ge
+        JUMPTABLE vop128_table, vop128_eq, vop128_ne, vop128f_lt, vop128f_le, vop128f_gt, vop128f_ge, vop128_bt, vop128_rng
 
         VCNT128 vcnt128_k0, 0
         VCNT128 vcnt128_k1, 1

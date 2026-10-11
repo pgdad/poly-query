@@ -612,6 +612,83 @@ LFUNC \name
 ENDF \name
 .endm
 
+/* VOP128F name, kind, inv, exact: mask routine like VOP128 (same
+ * convention) for kinds 1 (LT) and 2 (GT) with a high-word fast path for
+ * full blocks: per row T = "kind holds whatever the low word is" and F =
+ * "kind fails whatever the low word is" (see VCNT128_HI); if every row of
+ * the block is decided (T | F), the mask is T: 2 compares + vmovmskpd per
+ * group instead of 3 compares + blend + vmovmskpd (+ low-word
+ * de-interleave and bias). Otherwise, and for partial blocks, it jumps to
+ * the exact routine \exact; after a failed attempt the fast path is
+ * skipped for r8d blocks (exponential back-off in r9d, QR_BACKOFF ..
+ * QR_BACKOFF_MAX; set up by VDRIVER128).
+ * clobbers rcx, rdx, rdi, rsi, r10, r11, ymm0-ymm3, ymm13, ymm14. */
+.macro VOP128F name, kind, inv, exact
+LFUNC \name
+        cmp     $64, %esi
+        jne     \exact
+        test    %r8d, %r8d
+        jnz     .L\name\()_plain
+        .set g, 0
+        .rept 16
+        vmovdqu g*64(%rdi), %ymm0
+        vpunpckhqdq g*64+32(%rdi), %ymm0, %ymm2 /* H */
+.if \kind == 1
+        vpcmpgtq %ymm2, %ymm9, %ymm1            /* T: a.hi > hi */
+        vpcmpgtq %ymm9, %ymm2, %ymm3            /* F: hi > a.hi */
+.else
+        vpcmpgtq %ymm9, %ymm2, %ymm1
+        vpcmpgtq %ymm2, %ymm9, %ymm3
+.endif
+        vpor    %ymm1, %ymm3, %ymm3             /* decided */
+        .if g == 0
+        vmovdqa %ymm3, %ymm13
+        .elseif g == 1
+        vmovdqa %ymm3, %ymm14
+        .elseif g % 2
+        vpand   %ymm3, %ymm14, %ymm14
+        .else
+        vpand   %ymm3, %ymm13, %ymm13
+        .endif
+        vmovmskpd %ymm1, %ecx
+        .if g == 0
+        mov     %ecx, %eax
+        .elseif g == 1
+        shl     $4, %ecx
+        mov     %ecx, %r10d
+        .else
+        shl     $(4*g), %rcx
+        .if g % 2
+        or      %rcx, %r10
+        .else
+        or      %rcx, %rax
+        .endif
+        .endif
+        .set g, g + 1
+        .endr
+        vpand   %ymm14, %ymm13, %ymm13
+        vtestpd c_sign4(%rip), %ymm13           /* CF: all rows decided */
+        jnc     .L\name\()_fail
+        or      %r10, %rax
+        NIBFIX  %rax
+.if \inv
+        not     %rax
+.endif
+        mov     $QR_BACKOFF, %r9d
+        ret
+.L\name\()_fail:
+        mov     %r9d, %r8d
+        add     %r9d, %r9d
+        mov     $QR_BACKOFF_MAX, %ecx
+        cmp     %ecx, %r9d
+        cmova   %ecx, %r9d
+        jmp     \exact
+.L\name\()_plain:
+        dec     %r8d
+        jmp     \exact
+ENDF \name
+.endm
+
 /* VCNT128 name, kind: direct counter for count_i128 without validity.
  * in rdi = data, rdx = rows (multiple of 4, > 0). out rax = number of rows
  * where the KIND holds (inversion applied by the caller); rcx, rdx kept.
@@ -796,6 +873,8 @@ ENDF \name
         RANGE128_SETUP \k
         JTAB_LOAD vop128_table, %r15
         DRV_ARGS
+        xor     %r8d, %r8d              /* VOP128F back-off countdown */
+        mov     $QR_BACKOFF, %r9d       /* and length (a, b no longer needed) */
 .if \mode == MODE_FILTER
         vpbroadcastd c_eight_d(%rip), %ymm5
 .endif
