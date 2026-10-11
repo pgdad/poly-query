@@ -53,6 +53,9 @@ QUERIES = {
     "q14_distinct": "SELECT DISTINCT currency, category, status FROM tx",
     "q15_comma_join": "SELECT COUNT(*) FROM orders o, cust c WHERE o.customer_id = c.customer_id "
                       "AND c.segment = 'enterprise'",
+    # count: only the row count is returned (no result serialization)
+    "q16_full_sort": "count:SELECT id, dup_key, float_key FROM sk ORDER BY dup_key, float_key DESC, id",
+    "q17_scan_filter": "count:SELECT tx_id, amount, category FROM tx WHERE category LIKE '%e%' AND fee < 5",
 }
 
 CONFIGS = {
@@ -138,16 +141,20 @@ def main() -> int:
         for c in configs:
             samples = []
             for _ in range(args.repeat):
-                req = {"op": "query", "sql": sql}
-                if CONFIGS[c]:
-                    req["options"] = CONFIGS[c]
+                count_only = sql.startswith("count:")
+                req = {"op": "query", "sql": sql[6:] if count_only else sql}
+                options = dict(CONFIGS[c])
+                if count_only:
+                    options["result"] = "count"
+                if options:
+                    req["options"] = options
                 t = time.monotonic()
                 r = s.request(req)
                 samples.append(time.monotonic() - t)
                 if not r.get("ok"):
                     outputs[c] = ("error", r["error"]["code"])
                     break
-                outputs[c] = ("ok", r["rows"])
+                outputs[c] = ("ok", r["rows"] if "rows" in r else [[r["row_count"]]])
             times[c] = statistics.median(samples)
         ref = outputs[configs[0]]
         same = all(o[0] == ref[0] and (o[1] == ref[1] if o[0] == "error" else rows_equal(o[1], ref[1]))

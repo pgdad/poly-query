@@ -530,9 +530,13 @@ BATCH-B under the ORDER BY KEYS ((pos type descending nulls-first) lists)."
 (defun make-index-sort-predicate (batch keys)
   (make-row-order-predicate batch batch keys))
 
-(defun sorted-permutation (batch keys)
-  (let ((perm (identity-index-vector (batch-count batch))))
-    (stable-sort perm (make-index-sort-predicate batch keys))))
+(defun sorted-permutation (batch keys &optional (threads 1))
+  "Row indexes of BATCH in ORDER BY KEYS order (stable)."
+  (let ((perm (identity-index-vector (batch-count batch)))
+        (before (make-index-sort-predicate batch keys)))
+    (if (> threads 1)
+        (parallel-stable-sort perm before threads)
+        (stable-sort perm before))))
 
 (defun drain-batches (open kinds)
   "All rows of the batch opener OPEN as one batch (charging memory)."
@@ -561,14 +565,15 @@ BATCH-B under the ORDER BY KEYS ((pos type descending nulls-first) lists)."
 (defmethod compile-batch-operator ((node pp-sort))
   (let ((open-child (compile-batch-operator (pnode-child node)))
         (kinds (output-kinds node))
-        (keys (pp-sort-keys node)))
+        (keys (pp-sort-keys node))
+        (threads (parallel-threads)))
     (lambda ()
       (let ((output nil))
         (lambda ()
           (unless output
             (let ((batch (drain-batches open-child kinds)))
               (check-interrupts)
-              (setf output (permutation-batches batch (sorted-permutation batch keys)
+              (setf output (permutation-batches batch (sorted-permutation batch keys threads)
                                                 0 (batch-count batch)))))
           (funcall (the function output)))))))
 

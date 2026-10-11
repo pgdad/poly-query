@@ -310,6 +310,80 @@ THREADS workers, each aggregating into a partial group state."
             (funcall (the function output))))))))
 
 ;;; ------------------------------------------------------------------
+;;; Parallel sorting: contiguous chunks of the permutation are sorted
+;;; stably in worker threads, then adjacent runs are merged pairwise (in
+;;; parallel per round). Ties keep the left run first, so the result equals
+;;; a serial stable sort.
+
+(defun run-in-threads (thunks)
+  "Call every function of THUNKS in its own thread (the first in the caller)
+and wait for all; re-signal the first error."
+  (let* ((ctx *query-context*)
+         (errors '())
+         (threads (mapcar (lambda (thunk)
+                            (sb-thread:make-thread
+                             (lambda ()
+                               (let ((*query-context* ctx)
+                                     (*parallel-disabled* t))
+                                 (sb-int:with-float-traps-masked
+                                     (:overflow :invalid :divide-by-zero :inexact :underflow)
+                                   (handler-case (funcall thunk)
+                                     (serious-condition (e) (push e errors))))))
+                             :name "polyquery-sort-worker"))
+                          (rest thunks))))
+    (unwind-protect (funcall (first thunks))
+      (mapc (lambda (th) (sb-thread:join-thread th :default nil)) threads))
+    (when errors (error (first errors)))))
+
+(defun merge-runs (src dst start mid end before)
+  "Stably merge the sorted runs SRC[START,MID) and SRC[MID,END) into DST."
+  (declare (type index-vector src dst) (type fixnum start mid end) (type function before))
+  (let ((i start) (j mid) (k start))
+    (declare (type fixnum i j k))
+    (loop while (and (< i mid) (< j end))
+          do (if (funcall before (aref src j) (aref src i))
+                 (progn (setf (aref dst k) (aref src j)) (incf j))
+                 (progn (setf (aref dst k) (aref src i)) (incf i)))
+             (incf k))
+    (replace dst src :start1 k :start2 i :end2 mid)
+    (replace dst src :start1 (+ k (- mid i)) :start2 j :end2 end)))
+
+(defun parallel-stable-sort (perm before threads)
+  "Stably sort the index vector PERM by the predicate BEFORE using up to
+THREADS threads; returns the sorted vector."
+  (declare (type index-vector perm))
+  (let* ((n (length perm))
+         (chunks (min threads (max 1 (floor n (* 2 (morsel-rows)))))))
+    (if (<= chunks 1)
+        (stable-sort perm before)
+        (let ((bounds (loop for k to chunks collect (floor (* k n) chunks))))
+          (run-in-threads
+           (loop for (a b) on bounds
+                 while b
+                 collect (let ((a a) (b b))
+                           (lambda ()
+                             (replace perm (stable-sort (subseq perm a b) before) :start1 a)))))
+          (let ((src perm)
+                (dst (make-index-vector n))
+                (runs (loop for (a b) on bounds while b collect (cons a b))))
+            (loop while (rest runs)
+                  do (let ((pairs (loop for (r1 r2) on runs by #'cddr collect (cons r1 r2))))
+                       (let ((s src) (d dst))
+                         (run-in-threads
+                          (mapcar (lambda (pair)
+                                    (destructuring-bind ((a . m) . r2) pair
+                                      (if r2
+                                          (lambda () (merge-runs s d a m (cdr r2) before))
+                                          (lambda () (replace d s :start1 a :start2 a :end2 m)))))
+                                  pairs)))
+                       (setf runs (mapcar (lambda (pair)
+                                            (cons (car (car pair))
+                                                  (if (cdr pair) (cdr (cdr pair)) (cdr (car pair)))))
+                                          pairs))
+                       (rotatef src dst)))
+            src)))))
+
+;;; ------------------------------------------------------------------
 ;;; Hooking into the batch compiler
 
 (defun compile-parallel (node)

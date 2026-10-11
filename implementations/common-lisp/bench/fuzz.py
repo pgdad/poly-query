@@ -238,8 +238,8 @@ class Gen:
             where = f" {'AND' if ' WHERE ' in from_ else 'WHERE'} {self.expr('BOOLEAN', scope)}" if r.random() < 0.6 else ""
             order = ", ".join(f"{i + 1} {r.choice(['ASC', 'DESC'])} NULLS {r.choice(['FIRST', 'LAST'])}"
                               for i in range(len(items)))
-            return ("ORDERED", f"SELECT {', '.join(items)} FROM {from_}{where} ORDER BY {order} "
-                               f"LIMIT {r.randint(0, 40)} OFFSET {r.randint(0, 5)}")
+            limit = f" LIMIT {r.randint(0, 40)} OFFSET {r.randint(0, 5)}" if r.random() < 0.5 else ""
+            return ("ORDERED", f"SELECT {', '.join(items)} FROM {from_}{where} ORDER BY {order}{limit}")
         scope, from_ = self.scope_for()
         where = f" {'AND' if ' WHERE ' in from_ else 'WHERE'} {self.expr('BOOLEAN', scope)}" if r.random() < 0.7 else ""
         kinds = ["INT64", "DECIMAL", "FLOAT64", "STRING", "BOOLEAN", "DATE", "TIMESTAMP"]
