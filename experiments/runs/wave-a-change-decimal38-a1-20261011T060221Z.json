@@ -1,0 +1,25 @@
+{
+ "wave_id": "wave-a-change-decimal38-a1-20261011T060221Z",
+ "task": "change-decimal38",
+ "track": "A",
+ "attempt": 1,
+ "seed": 960,
+ "order": [
+  "clojure"
+ ],
+ "run_ids": [
+  "a-change-decimal38-clojure-a1-20261011T060221Z"
+ ],
+ "started": "2026-10-11T06:02:22+00:00",
+ "parallel": 1,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  14.28662109375,
+  8.029296875,
+  6.66845703125
+ ]
+}
