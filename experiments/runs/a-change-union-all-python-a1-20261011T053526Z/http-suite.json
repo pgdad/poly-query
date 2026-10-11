@@ -10,111 +10,111 @@
   {
    "check": "health_version_capabilities",
    "status": "pass",
-   "seconds": 0.49
+   "seconds": 0.41
   },
   {
    "check": "table_lifecycle",
    "status": "pass",
-   "seconds": 0.6
+   "seconds": 0.42
   },
   {
    "check": "query_and_error_mapping",
    "status": "pass",
-   "seconds": 0.55
+   "seconds": 0.46
   },
   {
    "check": "keep_alive",
    "status": "pass",
-   "seconds": 0.47
+   "seconds": 0.43
   },
   {
    "check": "streaming",
    "status": "pass",
-   "seconds": 0.44
+   "seconds": 0.46
   },
   {
    "check": "metrics",
    "status": "pass",
-   "seconds": 0.42
+   "seconds": 0.45
   },
   {
    "check": "timeout",
    "status": "pass",
-   "seconds": 0.67
+   "seconds": 0.63
   },
   {
    "check": "server_default_timeout",
    "status": "pass",
-   "seconds": 0.8
+   "seconds": 0.67
   },
   {
    "check": "cancellation",
    "status": "pass",
-   "seconds": 0.54
+   "seconds": 0.41
   },
   {
    "check": "backpressure_overloaded",
    "status": "pass",
-   "seconds": 4.45
+   "seconds": 4.29
   },
   {
    "check": "queued_time_counts_toward_timeout",
    "status": "pass",
-   "seconds": 2.09
+   "seconds": 1.91
   },
   {
    "check": "snapshot_isolation",
    "status": "pass",
-   "seconds": 2.13
+   "seconds": 1.79
   },
   {
    "check": "concurrent_readers",
    "status": "pass",
-   "seconds": 1.05
+   "seconds": 0.68
   },
   {
    "check": "client_disconnect_cancels",
    "status": "pass",
-   "seconds": 1.12
+   "seconds": 1.03
   },
   {
    "check": "request_size_limit",
    "status": "pass",
-   "seconds": 0.62
+   "seconds": 0.53
   },
   {
    "check": "structured_logs",
    "status": "pass",
-   "seconds": 0.8
+   "seconds": 0.87
   },
   {
    "check": "graceful_shutdown",
    "status": "pass",
-   "seconds": 1.89
+   "seconds": 2.01
   },
   {
    "check": "grace_expiry",
    "status": "pass",
-   "seconds": 1.09
+   "seconds": 1.1
   }
  ],
  "startup_seconds": [
-  0.31893386895535514,
-  0.41863743896828964,
-  0.3717528309789486,
-  0.3059637540136464,
-  0.23472914600279182,
-  0.24798000702867284,
-  0.293837892008014,
-  0.3211756439995952,
-  0.35688505799043924,
-  0.32768654997926205,
-  0.4683873850153759,
-  0.4161087350221351,
-  0.5265438500209711,
-  0.44713660900015384,
-  0.4062396980007179,
-  0.3363448219606653
+  0.24404388101538643,
+  0.24960852798540145,
+  0.28519596898695454,
+  0.26583738200133666,
+  0.24859197402838618,
+  0.27643021201947704,
+  0.26429734798148274,
+  0.24629273999016732,
+  0.23501117300475016,
+  0.2545569480280392,
+  0.2470037390012294,
+  0.26227679604198784,
+  0.3318158910260536,
+  0.3652858149725944,
+  0.3640256049693562,
+  0.4001400940469466
  ],
- "logs": "/tmp/pqhttp-logs-9m4m3y_m"
+ "logs": "/tmp/pqhttp-logs-l3k4w5jg"
 }
