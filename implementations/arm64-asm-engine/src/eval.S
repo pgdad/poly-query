@@ -14,6 +14,7 @@
 // §6 (three-valued logic), functions.md §2 (aggregates).
 // =============================================================================
 #include "pq.inc"
+#include "frame.inc"
 
 #define INT64_MIN_HI   0x8000          // INT64_MIN = 0x8000 << 48
 
@@ -22,47 +23,6 @@
 #define AS_LO       8       // SUM/AVG: i128 low word or f64 bits; MIN/MAX: value
 #define AS_HI       16      // SUM/AVG: i128 high word
 #define AS_SIZE     32
-
-// ------------------------------------------------------------ frame macros --
-.macro ENTER np
-    stp  x29, x30, [sp, #-(16 + 16 * \np)]!
-    mov  x29, sp
-    .if \np >= 1
-    stp  x19, x20, [sp, #16]
-    .endif
-    .if \np >= 2
-    stp  x21, x22, [sp, #32]
-    .endif
-    .if \np >= 3
-    stp  x23, x24, [sp, #48]
-    .endif
-    .if \np >= 4
-    stp  x25, x26, [sp, #64]
-    .endif
-    .if \np >= 5
-    stp  x27, x28, [sp, #80]
-    .endif
-.endm
-
-.macro LEAVE np
-    .if \np >= 5
-    ldp  x27, x28, [sp, #80]
-    .endif
-    .if \np >= 4
-    ldp  x25, x26, [sp, #64]
-    .endif
-    .if \np >= 3
-    ldp  x23, x24, [sp, #48]
-    .endif
-    .if \np >= 2
-    ldp  x21, x22, [sp, #32]
-    .endif
-    .if \np >= 1
-    ldp  x19, x20, [sp, #16]
-    .endif
-    ldp  x29, x30, [sp], #(16 + 16 * \np)
-    ret
-.endm
 
 // SCALE128 lo, hi, v, n: (hi:lo) = v * 10^n (signed 128-bit), n register (w)
 // Clobbers x16.
@@ -131,6 +91,14 @@ FUNC eval
     b.eq ev_inlist                      // functions.S
     cmp  w9, #NK_LIKE
     b.eq ev_like                        // functions.S
+    cmp  w9, #NK_GKEY
+    b.eq ev_gkey
+    cmp  w9, #NK_SUBQ
+    b.eq ev_subq                        // exec.S
+    cmp  w9, #NK_EXISTS
+    b.eq ev_exists                      // exec.S
+    cmp  w9, #NK_INSUB
+    b.eq ev_insub                       // exec.S
     RAISE ERR_INTERNAL, "eval: unexpected node kind"
 ENDF eval
 
@@ -145,21 +113,45 @@ LFUNC ev_lit
     ret
 ENDF ev_lit
 
-// ev_col: column N_VAL of EC_TABLE at row EC_ROW. (leaf)
+// ev_col: column N_VAL of range variable N_B, N_OP query levels up (outer
+// reference): row = EC_TUPLE[rv] of that level's context, table =
+// EC_TABLES[rv]; ROW_NULL (NULL-padded LEFT JOIN side) => NULL. (leaf)
 LFUNC ev_col
-    ldr  x9, [x1, #EC_TABLE]
-    ldr  x10, [x1, #EC_ROW]
+    ldr  w9, [x0, #N_OP]
+1:  cbz  w9, 2f
+    ldr  x1, [x1, #EC_OUTER]
+    sub  w9, w9, #1
+    b    1b
+2:  ldr  x10, [x1, #EC_TUPLE]
+    ldr  x11, [x0, #N_B]
+    ldr  w10, [x10, x11, lsl #2]        // row id
+    cmn  w10, #1
+    b.eq 4f                             // ROW_NULL
+    ldr  x9, [x1, #EC_TABLES]
+    ldr  x9, [x9, x11, lsl #3]
     ldr  x11, [x0, #N_VAL]
     ldr  x9, [x9, #TBL_COLS]
     add  x9, x9, x11, lsl #5            // COL_SIZE = 32
     ldr  x12, [x9, #COL_NULLS]
     ldr  x13, [x9, #COL_DATA]
     mov  x1, #0
-    cbz  x12, 1f
+    cbz  x12, 3f
     ldrb w1, [x12, x10]
-1:  ldr  x0, [x13, x10, lsl #3]
+3:  ldr  x0, [x13, x10, lsl #3]
+    ret
+4:  mov  x0, #0
+    mov  x1, #1
     ret
 ENDF ev_col
+
+// ev_gkey: GROUP BY key N_VAL of the current group (EC_GKEYS). (leaf)
+LFUNC ev_gkey
+    ldr  x9, [x1, #EC_GKEYS]
+    ldr  x10, [x0, #N_VAL]
+    add  x9, x9, x10, lsl #4
+    ldp  x0, x1, [x9]
+    ret
+ENDF ev_gkey
 
 // ev_agg: finished aggregate value from cell N_B of EC_AGGV. (leaf)
 LFUNC ev_agg
@@ -600,12 +592,14 @@ FUNC agg_init
 ENDF agg_init
 
 // =============================================================================
-// agg_step(x0 BoundQuery*, x1 state*, x2 EvalCtx*) — accumulate one row.
+// agg_step(x0 BoundQuery*, x1 state*, x2 EvalCtx*) — accumulate one row into
+// every non-DISTINCT slot (DISTINCT slots are fed by the executor through
+// agg_accum with de-duplicated values).
 //   x19 slot node cursor, x20 state record cursor, x21 ctx, x22 slots left,
-//   x23 node, x24 argument type, w25 function id
+//   x23 node
 // =============================================================================
 FUNC agg_step
-    ENTER 4
+    ENTER 3
     ldr  x19, [x0, #BQ_AGGS]
     ldr  x22, [x0, #BQ_NAGG]
     mov  x20, x1
@@ -613,56 +607,19 @@ FUNC agg_step
 .Last_loop:
     cbz  x22, .Last_end
     ldr  x23, [x19]
-    ldr  w25, [x23, #N_OP]
-    cmp  w25, #F_COUNT_STAR
+    ldr  w9, [x23, #N_FLAGS]
+    tbnz w9, #1, .Last_next             // NF_DISTINCT
+    ldr  w9, [x23, #N_OP]
+    cmp  w9, #F_COUNT_STAR
     b.eq .Last_count
     ldr  x0, [x23, #N_A]
-    ldr  w24, [x0, #N_TYPE]
     mov  x1, x21
     bl   eval
     cbnz x1, .Last_next                 // NULL inputs are ignored
-    ldr  x9, [x20, #AS_CNT]
-    add  x9, x9, #1
-    str  x9, [x20, #AS_CNT]
-    cmp  w25, #F_COUNT
-    b.eq .Last_next
-    cmp  w25, #F_MIN
-    b.eq .Last_minmax
-    cmp  w25, #F_MAX
-    b.eq .Last_minmax
-    // SUM / AVG
-    and  w10, w24, #T_KIND_MASK
-    cmp  w10, #T_FLOAT
-    b.ne 1f
-    ldr  d0, [x20, #AS_LO]
-    fmov d1, x0
-    fadd d0, d0, d1
-    str  d0, [x20, #AS_LO]
-    b    .Last_next
-1:  ldp  x10, x11, [x20, #AS_LO]        // exact 128-bit sum
-    asr  x12, x0, #63                   // sign extension of the input
-    adds x10, x10, x0
-    adc  x11, x11, x12
-    stp  x10, x11, [x20, #AS_LO]
-    b    .Last_next
-.Last_minmax:
-    cmp  x9, #1
-    b.eq 2f                             // first value
-    str  x0, [sp, #-16]!
-    ldr  x1, [x20, #AS_LO]
-    mov  w2, w24
-    mov  w3, w24
-    bl   cmp_typed
-    ldr  x9, [sp], #16
-    cmp  w25, #F_MIN
-    b.ne 3f
-    tbz  w0, #31, .Last_next            // MIN: replace if new < current
-    mov  x0, x9
-    b    2f
-3:  cmp  w0, #1                         // MAX: replace if new > current
-    b.ne .Last_next
-    mov  x0, x9
-2:  str  x0, [x20, #AS_LO]
+    mov  x2, x0
+    mov  x0, x23
+    mov  x1, x20
+    bl   agg_accum
     b    .Last_next
 .Last_count:
     ldr  x9, [x20, #AS_CNT]
@@ -674,8 +631,64 @@ FUNC agg_step
     sub  x22, x22, #1
     b    .Last_loop
 .Last_end:
-    LEAVE 4
+    LEAVE 3
 ENDF agg_step
+
+// =============================================================================
+// agg_accum(x0 NK_AGG node, x1 state record, x2 non-NULL payload)
+// Adds one input value to an aggregate's state.
+//   x19 node, x20 state record, x21 value, w24 argument type, w25 function id
+// =============================================================================
+FUNC agg_accum
+    ENTER 4
+    mov  x19, x0
+    mov  x20, x1
+    mov  x21, x2
+    ldr  w25, [x19, #N_OP]
+    ldr  x9, [x19, #N_A]
+    ldr  w24, [x9, #N_TYPE]
+    ldr  x9, [x20, #AS_CNT]
+    add  x9, x9, #1
+    str  x9, [x20, #AS_CNT]
+    cmp  w25, #F_COUNT
+    b.eq .Lacc_end
+    cmp  w25, #F_MIN
+    b.eq .Lacc_minmax
+    cmp  w25, #F_MAX
+    b.eq .Lacc_minmax
+    // SUM / AVG
+    and  w10, w24, #T_KIND_MASK
+    cmp  w10, #T_FLOAT
+    b.ne 1f
+    ldr  d0, [x20, #AS_LO]
+    fmov d1, x21
+    fadd d0, d0, d1
+    str  d0, [x20, #AS_LO]
+    b    .Lacc_end
+1:  ldp  x10, x11, [x20, #AS_LO]        // exact 128-bit sum
+    asr  x12, x21, #63                  // sign extension of the input
+    adds x10, x10, x21
+    adc  x11, x11, x12
+    stp  x10, x11, [x20, #AS_LO]
+    b    .Lacc_end
+.Lacc_minmax:
+    cmp  x9, #1
+    b.eq 2f                             // first value
+    mov  x0, x21
+    ldr  x1, [x20, #AS_LO]
+    mov  w2, w24
+    mov  w3, w24
+    bl   cmp_typed
+    cmp  w25, #F_MIN
+    b.ne 3f
+    tbz  w0, #31, .Lacc_end             // MIN: replace if new < current
+    b    2f
+3:  cmp  w0, #1                         // MAX: replace if new > current
+    b.ne .Lacc_end
+2:  str  x21, [x20, #AS_LO]
+.Lacc_end:
+    LEAVE 4
+ENDF agg_accum
 
 // =============================================================================
 // agg_finish(x0 BoundQuery*, x1 state*) -> x0 cells (16 bytes per slot)
