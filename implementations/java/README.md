@@ -790,7 +790,7 @@ POLYQUERY_JAVA_OPTS="-Dpolyquery.batchSize=3 -Dpolyquery.morselRows=5" \
     python3 tests/conformance/runner.py --engine implementations/java/bin/polyquery --modes
 # randomized differential testing of all option combinations (data dir with a copy of fixtures/)
 python3 implementations/java/tools/difftest.py --engine implementations/java/bin/polyquery \
-    --data /tmp/dtdata --queries 300 --seed 1
+    --data /tmp/dtdata --queries 300 --seed 1 [--native-kernels native-kernels/build/x86_64/libpqkernels.so]
 # benchmarks (see Phase 5: Measurements); native before/after with result verification
 python3 implementations/java/tools/bench.py --engine implementations/java/bin/polyquery --data /tmp/pqdata
 python3 implementations/java/tools/bench.py --engine implementations/java/bin/polyquery --data /tmp/pqdata \
@@ -817,7 +817,8 @@ IN/BETWEEN/LIKE, failing divisions and casts, grouping with all aggregates incl.
 generated fixtures — in-memory, row-layout, and PQCF files with small row groups opened with
 mmap (several dictionaries per column) — and compares every one of the 32 option combinations
 in two engines (default and tiny batch/morsel sizes) with the row-mode, unoptimized baseline:
-rows (FLOAT64 with the spec's tolerance) or error codes. Several thousand queries were run
+rows (FLOAT64 with the spec's tolerance) or error codes; with `--native-kernels` every vectorized
+combination also runs with `native: true`. Several thousand queries were run
 during development; every mismatch found was fixed (a few early ones were deferred-error and
 empty-input edge cases).
 
