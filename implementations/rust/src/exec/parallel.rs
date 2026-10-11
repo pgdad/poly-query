@@ -605,7 +605,7 @@ fn merge_partitioned(
             .collect();
         handles
             .into_iter()
-            .map(|h| h.join().unwrap_or_default())
+            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
             .collect()
     });
     let results: Vec<Result<Batch>> = std::thread::scope(|scope| {

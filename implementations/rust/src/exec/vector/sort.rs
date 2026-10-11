@@ -253,24 +253,24 @@ fn parallel_sort<T: Copy + Send + Sync>(
     }
     let size = items.len().div_ceil(chunks);
     let parts: Vec<Vec<T>> = items.chunks(size).map(<[T]>::to_vec).collect();
-    let runs: Option<Vec<Vec<T>>> = std::thread::scope(|scope| {
+    // A failure to start or a panic in a sort thread is propagated as a
+    // panic; the query layer turns it into a row-mode re-execution.
+    let runs: Vec<Vec<T>> = std::thread::scope(|scope| {
         let handles: Vec<_> = parts
             .into_iter()
             .map(|p| {
                 std::thread::Builder::new()
                     .stack_size(PARALLEL_STACK_BYTES)
                     .spawn_scoped(scope, move || sort(p))
+                    .unwrap_or_else(|e| panic!("cannot start sort thread: {e}"))
             })
             .collect();
         handles
             .into_iter()
-            .map(|h| h.ok().and_then(|h| h.join().ok()))
+            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
             .collect()
     });
-    match runs {
-        Some(runs) => merge_runs(runs, cmp),
-        None => Vec::new(),
-    }
+    merge_runs(runs, cmp)
 }
 
 /// The permutation that sorts `b` by `keys` (stable). With `top`, only the
