@@ -2,8 +2,10 @@
  * pqk_x86_scalar.S — PolyQuery native kernels, variant "x86_scalar".
  *
  * Baseline x86-64 only (no POPCNT/BMI/AVX; SSE2 scalar double ops only), so
- * this variant runs on every x86-64 CPU. All 16 kernels of pq_kernels.h are
- * provided as global symbols pqk_x86_scalar_<kernel>, System V AMD64 ABI.
+ * this variant runs on every x86-64 CPU. All 20 kernels of pq_kernels.h
+ * (ABI revision 1: the 16 original ones plus the CR-4 128-bit kernels, which
+ * are at the end of this file) are provided as global symbols
+ * pqk_x86_scalar_<kernel>, System V AMD64 ABI.
  * Every kernel is bit-identical to the reference, including sum_f64 (same
  * sequential addition order) and the sign of zero in minmax_f64.
  *
@@ -1143,5 +1145,580 @@ FUNC pqk_x86_scalar_gather_i64
         jnz     3b
 4:      ret
 ENDF pqk_x86_scalar_gather_i64
+
+
+/* ========================================================================
+ * 128-bit kernels (CR-4, ABI revision 1).
+ * A pqk_i128 is 16 bytes {lo, hi} (little-endian int128); rows are 16 bytes
+ * apart, so row i is at data + 16*i. All loads are plain unaligned GPR loads.
+ * ====================================================================== */
+
+/* POPC: rax <- popcount(\src) (SWAR, no POPCNT instruction). clobbers rcx,
+ * rdx. */
+.macro POPC src
+        mov     \src, %rax
+        mov     %rax, %rdx
+        shr     $1, %rdx
+        movabs  $0x5555555555555555, %rcx
+        and     %rcx, %rdx
+        sub     %rdx, %rax
+        movabs  $0x3333333333333333, %rcx
+        mov     %rax, %rdx
+        shr     $2, %rdx
+        and     %rcx, %rax
+        and     %rcx, %rdx
+        add     %rdx, %rax
+        mov     %rax, %rdx
+        shr     $4, %rdx
+        add     %rdx, %rax
+        movabs  $0x0f0f0f0f0f0f0f0f, %rcx
+        and     %rcx, %rax
+        movabs  $0x0101010101010101, %rcx
+        imul    %rcx, %rax
+        shr     $56, %rax
+.endm
+
+/* ------------------------------------------------------------------------
+ * P128: evaluate the "raw" predicate KIND for the row at \off(%rdi) and
+ * leave it in CF (the operator's inversion is applied to the whole block
+ * mask afterwards). Kinds and the operators built from them:
+ *   0 NE  : x != a                     EQ = !NE, NE
+ *   1 LT  : x <s a                     LT, GE = !LT
+ *   2 GT  : a <s x                     GT, LE = !GT
+ *   3 OUT : (x - a) >u (b - a)         BETWEEN = !OUT (needs a <= b)
+ * Registers: r8 = a.lo, r9 = a.hi (kinds 1, 2: a.hi ^ 2^63), r10:r11 =
+ * b - a (kind 3), r15 = 2^63; clobbers rax, rcx, rdx.
+ * Signed 128-bit comparison is done as an unsigned one on sign-biased high
+ * words (hi ^ 2^63), so that "cmp lo; sbb hi" leaves the result in CF.
+ * NE: (x.lo ^ a.lo) | (x.hi ^ a.hi) is non-zero; neg sets CF iff non-zero.
+ * OUT: the unsigned range trick, a <= x <= b <=> (x-a) mod 2^128 <=u b-a.
+ * ---------------------------------------------------------------------- */
+.macro P128 kind, off
+.if \kind == 0
+        mov     \off(%rdi), %rax
+        xor     %r8, %rax
+        mov     \off+8(%rdi), %rdx
+        xor     %r9, %rdx
+        or      %rdx, %rax
+        neg     %rax                    /* CF = (x != a) */
+.elseif \kind == 1
+        mov     \off+8(%rdi), %rdx
+        xor     %r15, %rdx
+        mov     \off(%rdi), %rax
+        cmp     %r8, %rax
+        sbb     %r9, %rdx               /* CF = x <s a */
+.elseif \kind == 2
+        mov     \off+8(%rdi), %rdx
+        xor     %r15, %rdx
+        mov     %r9, %rcx
+        cmp     \off(%rdi), %r8
+        sbb     %rdx, %rcx              /* CF = a <s x */
+.else
+        mov     \off(%rdi), %rax
+        mov     \off+8(%rdi), %rdx
+        sub     %r8, %rax
+        sbb     %r9, %rdx               /* d = x - a */
+        cmp     %rax, %r10
+        mov     %r11, %rcx
+        sbb     %rdx, %rcx              /* CF = (b - a) <u d */
+.endif
+.endm
+
+/* ------------------------------------------------------------------------
+ * P128_BODY: complete block loop of filter_i128 (mode 0) / count_i128
+ * (mode 2) for one operator (kind, inv), entered from the kernel prologue
+ * by the operator jump table and leaving to \done.
+ * Registers: rdi = row ptr, rsi = validity ptr (0 = all valid), r12 = rows
+ * remaining, r13 = block mask, r14 = loop counter, rbx = row base of the
+ * block (mode 0) / count (mode 2), rbp = output ptr (mode 0), r8..r11 and
+ * r15 as for P128; rax, rcx, rdx scratch.
+ * The block mask is built by rotating each row's CF in from the top
+ * (rcr $1): after len rows, row j sits at bit 64-len+j, so one shift right by
+ * 64-len (partial block only) moves it to bit j and clears everything above
+ * len. Walking forward keeps the hardware prefetcher happy; rcr is a 1-cycle
+ * op, so the mask chain costs at most one cycle per row.
+ * ---------------------------------------------------------------------- */
+.macro P128_BODY mode, kind, inv, done
+.if \kind == 1 || \kind == 2
+        xor     %r15, %r9               /* sign-biased a.hi */
+.endif
+.if \kind == 3
+        mov     %r10, %rax              /* a > b: no row can match */
+        cmp     %r8, %rax
+        mov     %r11, %rax
+        sbb     %r9, %rax
+        jl      \done
+        sub     %r8, %r10
+        sbb     %r9, %r11               /* r11:r10 = b - a (unsigned) */
+.endif
+        test    %r12, %r12
+        jz      \done
+.Lblk\@:
+        cmp     $64, %r12
+        jb      .Lpart\@
+        mov     $8, %r14d
+.Lfull\@:
+        .set j, 0
+        .rept 8
+        P128    \kind, j*16
+        rcr     $1, %r13
+        .set j, j + 1
+        .endr
+        sub     $-128, %rdi
+        dec     %r14d
+        jnz     .Lfull\@
+.if \inv
+        not     %r13
+.endif
+        test    %rsi, %rsi
+        jz      .Lvok\@
+        and     (%rsi), %r13
+        add     $8, %rsi
+        jmp     .Lvok\@
+.Lpart\@:
+        mov     %r12d, %r14d
+.Lprow\@:
+        P128    \kind, 0
+        rcr     $1, %r13
+        add     $16, %rdi
+        dec     %r14d
+        jnz     .Lprow\@
+.if \inv
+        not     %r13
+.endif
+        mov     $64, %ecx
+        sub     %r12d, %ecx
+        shr     %cl, %r13               /* row j -> bit j, bits >= len = 0 */
+        test    %rsi, %rsi
+        jz      .Lvok\@
+        mov     %r12d, %ecx
+        call    lvp                     /* exactly ceil(len/8) bytes */
+        and     %rax, %r13
+.Lvok\@:
+.if \mode == 0
+        test    %r13, %r13
+        jz      .Lnext\@
+.Lbits\@:
+        bsf     %r13, %rcx
+        add     %ebx, %ecx
+        mov     %ecx, (%rbp)
+        add     $4, %rbp
+        lea     -1(%r13), %rdx
+        and     %rdx, %r13
+        jnz     .Lbits\@
+.Lnext\@:
+        add     $64, %rbx
+.else
+        POPC    %r13
+        add     %rax, %rbx
+.endif
+        sub     $64, %r12
+        ja      .Lblk\@
+        jmp     \done
+.endm
+
+/* ------------------------------------------------------------------------
+ * P128_KERNEL: filter_i128 (mode 0) / count_i128 (mode 2).
+ * Args: rdi = data, rsi = validity, rdx = n, ecx = op, r8 = &a, r9 = &b,
+ *       [rsp+8] = out_idx (mode 0).
+ * The op is checked first (unsigned, so negative ints are rejected too); an
+ * invalid op returns (size_t)-1 before a or b is touched. Then b is loaded
+ * (BETWEEN only) into r10:r11, a into r8:r9, and the operator-specialised
+ * body is entered through a PIC-relative jump table. (%rsp) holds the start
+ * of out_idx; the result of filter is (rbp - start) / 4.
+ * ---------------------------------------------------------------------- */
+.macro P128_KERNEL mode, pfx
+        cmp     $6, %ecx
+        ja      \pfx\()_inval
+        push    %rbx
+        push    %rbp
+        push    %r12
+        push    %r13
+        push    %r14
+        push    %r15
+        mov     56(%rsp), %rbp          /* 7th argument (out_idx) */
+        push    %rbp
+        mov     %ecx, %ecx
+        cmp     $6, %ecx
+        jne     1f
+        mov     (%r9), %r10             /* b (BETWEEN only) */
+        mov     8(%r9), %r11
+1:      mov     8(%r8), %r9             /* a */
+        mov     (%r8), %r8
+        movabs  $0x8000000000000000, %r15
+        mov     %rdx, %r12
+        xor     %ebx, %ebx
+        xor     %r13d, %r13d
+        lea     \pfx\()_tab(%rip), %rax
+        movslq  (%rax,%rcx,4), %rdx
+        add     %rdx, %rax
+        jmp     *%rax
+\pfx\()_eq:
+        P128_BODY \mode, 0, 1, \pfx\()_done
+\pfx\()_ne:
+        P128_BODY \mode, 0, 0, \pfx\()_done
+\pfx\()_lt:
+        P128_BODY \mode, 1, 0, \pfx\()_done
+\pfx\()_le:
+        P128_BODY \mode, 2, 1, \pfx\()_done
+\pfx\()_gt:
+        P128_BODY \mode, 2, 0, \pfx\()_done
+\pfx\()_ge:
+        P128_BODY \mode, 1, 1, \pfx\()_done
+\pfx\()_bt:
+        P128_BODY \mode, 3, 1, \pfx\()_done
+\pfx\()_done:
+.if \mode == 0
+        mov     %rbp, %rax
+        sub     (%rsp), %rax
+        shr     $2, %rax
+.else
+        mov     %rbx, %rax
+.endif
+        pop     %rdx
+        pop     %r15
+        pop     %r14
+        pop     %r13
+        pop     %r12
+        pop     %rbp
+        pop     %rbx
+        ret
+\pfx\()_inval:
+        mov     $-1, %rax
+        ret
+        .section .rodata
+        .p2align 2
+        .type   \pfx\()_tab, @object
+\pfx\()_tab:
+        .long   \pfx\()_eq - \pfx\()_tab, \pfx\()_ne - \pfx\()_tab
+        .long   \pfx\()_lt - \pfx\()_tab, \pfx\()_le - \pfx\()_tab
+        .long   \pfx\()_gt - \pfx\()_tab, \pfx\()_ge - \pfx\()_tab
+        .long   \pfx\()_bt - \pfx\()_tab
+        .size   \pfx\()_tab, . - \pfx\()_tab
+        .text
+.endm
+
+/* ------------------------------------------------------------------------
+ * size_t pqk_x86_scalar_filter_i128(data, validity, n, op, a, b, out_idx)
+ * Register usage: see P128_KERNEL / P128_BODY / P128 above.
+ * Algorithm: 64-row blocks; per row one 128-bit compare (cmp/sbb on
+ * sign-biased high words, or xor/or/neg for (in)equality, or the unsigned
+ * range trick for BETWEEN) whose CF is rotated into a 64-bit block mask;
+ * mask &= validity word; indices are emitted with bsf / x &= x-1.
+ * ---------------------------------------------------------------------- */
+FUNC pqk_x86_scalar_filter_i128
+        P128_KERNEL 0, .Lsf128
+ENDF pqk_x86_scalar_filter_i128
+
+/* ------------------------------------------------------------------------
+ * size_t pqk_x86_scalar_count_i128(data, validity, n, op, a, b)
+ * Same block masks as filter_i128; each masked block is SWAR-popcounted.
+ * ---------------------------------------------------------------------- */
+FUNC pqk_x86_scalar_count_i128
+        P128_KERNEL 2, .Lsc128
+ENDF pqk_x86_scalar_count_i128
+
+/* ------------------------------------------------------------------------
+ * int pqk_x86_scalar_sum_i128(data=rdi, validity=rsi, n=rdx, out_sum=rcx)
+ * Register usage: r10:r9:r8 = 192-bit two's-complement accumulator
+ * (top:hi:lo), r11 = out_sum, r12 = rows remaining, r13 = 4-row steps
+ * left in a full validity block, rbx = validity word, rax/rcx/rdx scratch.
+ * Exact overflow detection: every row is sign-extended to 192 bits
+ * (hi, sar 63 of hi) and added with add/adc/adc, so the accumulator holds the
+ * exact sum (|sum| < 2^32 * 2^127 = 2^159 cannot wrap 192 bits). Wrap-arounds
+ * of the low 128 bits that cancel out are therefore invisible, as required.
+ * At the end the sum fits int128 iff the top word equals the sign extension
+ * of the hi word (sar 63); otherwise PQK_OVERFLOW and *out_sum is untouched.
+ * Invalid rows are zeroed branch-free (shr of the validity word -> CF,
+ * sbb -> 0/-1 mask, and). Both paths are unrolled 4x; the final partial
+ * validity block (exactly ceil(len/8) bytes via lvp) goes row by row.
+ * n == 0 stores 0 and returns PQK_OK.
+ * ---------------------------------------------------------------------- */
+
+/* SVADD128 off: as SADD128 for a row whose validity bit is the next bit of
+ * rbx (shr -> CF, sbb -> 0/-1 mask; invalid rows add 0). clobbers rax, rcx,
+ * rdx. */
+.macro SVADD128 off
+        shr     $1, %rbx                /* CF = validity bit */
+        sbb     %rdx, %rdx
+        mov     \off(%rdi), %rax
+        and     %rdx, %rax
+        and     \off+8(%rdi), %rdx
+        mov     %rdx, %rcx
+        sar     $63, %rcx
+        add     %rax, %r8
+        adc     %rdx, %r9
+        adc     %rcx, %r10
+.endm
+
+.macro SADD128 off
+        mov     \off+8(%rdi), %rax
+        mov     %rax, %rdx
+        sar     $63, %rdx
+        add     \off(%rdi), %r8
+        adc     %rax, %r9
+        adc     %rdx, %r10
+.endm
+
+FUNC pqk_x86_scalar_sum_i128
+        push    %rbx
+        push    %r12
+        push    %r13
+        xor     %r8d, %r8d
+        xor     %r9d, %r9d
+        xor     %r10d, %r10d
+        mov     %rcx, %r11
+        mov     %rdx, %r12
+        test    %r12, %r12
+        jz      .Ls128_fin
+        test    %rsi, %rsi
+        jnz     .Ls128_vblk
+        cmp     $4, %r12
+        jb      .Ls128_one
+.Ls128_four:
+        SADD128 0
+        SADD128 16
+        SADD128 32
+        SADD128 48
+        add     $64, %rdi
+        sub     $4, %r12
+        cmp     $4, %r12
+        jae     .Ls128_four
+        test    %r12, %r12
+        jz      .Ls128_fin
+.Ls128_one:
+        SADD128 0
+        add     $16, %rdi
+        dec     %r12
+        jnz     .Ls128_one
+        jmp     .Ls128_fin
+.Ls128_vblk:
+        cmp     $64, %r12
+        jb      .Ls128_vpart
+        mov     (%rsi), %rbx
+        mov     $16, %r13d
+.Ls128_vfour:
+        SVADD128 0
+        SVADD128 16
+        SVADD128 32
+        SVADD128 48
+        add     $64, %rdi
+        dec     %r13d
+        jnz     .Ls128_vfour
+        add     $8, %rsi
+        sub     $64, %r12
+        jnz     .Ls128_vblk
+        jmp     .Ls128_fin
+.Ls128_vpart:
+        mov     %r12d, %ecx
+        call    lvp                     /* exactly ceil(len/8) bytes */
+        mov     %rax, %rbx
+.Ls128_vone:
+        SVADD128 0
+        add     $16, %rdi
+        dec     %r12d
+        jnz     .Ls128_vone
+.Ls128_fin:
+        mov     %r9, %rax
+        sar     $63, %rax
+        cmp     %rax, %r10
+        jne     .Ls128_ovf
+        mov     %r8, (%r11)
+        mov     %r9, 8(%r11)
+        xor     %eax, %eax
+        pop     %r13
+        pop     %r12
+        pop     %rbx
+        ret
+.Ls128_ovf:
+        mov     $1, %eax
+        pop     %r13
+        pop     %r12
+        pop     %rbx
+        ret
+ENDF pqk_x86_scalar_sum_i128
+
+/* ------------------------------------------------------------------------
+ * size_t pqk_x86_scalar_minmax_i128(data=rdi, validity=rsi, n=rdx,
+ *                                   out_min=rcx, out_max=r8)
+ * Register usage: r13:r12 = min (hi:lo), r15:r14 = max, r10:r9 = w =
+ * max - min (unsigned), rbx = valid count, rbp = validity word, r11 = rows
+ * remaining, r8d = rows left in the block (validity path), rdi = row ptr,
+ * rsi = validity ptr, rax/rcx/rdx scratch; out_min/out_max are kept on the
+ * stack.
+ * Algorithm: min and max start at the first valid row f (found by a byte
+ * scan of the validity bitmap; f = 0 without validity). Then every row
+ * from the 64-row block containing f on is tested with ONE 128-bit
+ * compare: x is inside [min, max] iff (x - min) mod 2^128 <=u w. Inside
+ * (the common case once a few rows were seen) needs no update; outside, the
+ * out-of-line routine mm128_upd decides x < min or x > max (exactly one
+ * holds), updates it and recomputes w. Invalid rows get d = 0 (and-masked),
+ * i.e. they are always "inside". Rows of f's block before f are invalid, so
+ * the count (sbb mask subtracted per row) is exact.
+ * ---------------------------------------------------------------------- */
+
+/* mm128_upd: rax = pointer to a row outside [min, max]; updates min or max
+ * and w (registers as above). clobbers rax, rcx, rdx. */
+LFUNC mm128_upd
+        mov     8(%rax), %rdx
+        mov     (%rax), %rax
+        cmp     %r12, %rax
+        mov     %rdx, %rcx
+        sbb     %r13, %rcx
+        jl      1f                      /* x <s min */
+        mov     %rax, %r14
+        mov     %rdx, %r15
+        jmp     2f
+1:      mov     %rax, %r12
+        mov     %rdx, %r13
+2:      mov     %r14, %r9
+        mov     %r15, %r10
+        sub     %r12, %r9
+        sbb     %r13, %r10
+        ret
+ENDF mm128_upd
+
+/* MM128_ROW off, valid: test the row at off(%rdi); valid = 1 consumes one
+ * validity bit from rbp (count in rbx, invalid rows forced inside). */
+.macro MM128_ROW off, valid
+        mov     \off(%rdi), %rax
+        mov     \off+8(%rdi), %rdx
+        sub     %r12, %rax
+        sbb     %r13, %rdx              /* d = x - min */
+.if \valid
+        shr     $1, %rbp                /* CF = validity bit */
+        sbb     %rcx, %rcx
+        sub     %rcx, %rbx
+        and     %rcx, %rax
+        and     %rcx, %rdx
+.endif
+        cmp     %rax, %r9
+        mov     %r10, %rcx
+        sbb     %rdx, %rcx              /* CF = w <u d: outside */
+        jae     1f
+        lea     \off(%rdi), %rax
+        call    mm128_upd
+1:
+.endm
+
+FUNC pqk_x86_scalar_minmax_i128
+        push    %rbx
+        push    %rbp
+        push    %r12
+        push    %r13
+        push    %r14
+        push    %r15
+        push    %rcx                    /* 8(%rsp) = out_min */
+        push    %r8                     /* (%rsp) = out_max */
+        xor     %ebx, %ebx
+        mov     %rdx, %r11
+        test    %r11, %r11
+        jz      .Lm128_fin
+        test    %rsi, %rsi
+        jnz     .Lm128_scan
+        /* no validity: f = 0, count = n */
+        mov     %r11, %rbx
+        mov     (%rdi), %r12
+        mov     8(%rdi), %r13
+        mov     %r12, %r14
+        mov     %r13, %r15
+        xor     %r9d, %r9d
+        xor     %r10d, %r10d
+        cmp     $4, %r11
+        jb      .Lm128_one
+.Lm128_four:
+        MM128_ROW 0, 0
+        MM128_ROW 16, 0
+        MM128_ROW 32, 0
+        MM128_ROW 48, 0
+        add     $64, %rdi
+        sub     $4, %r11
+        cmp     $4, %r11
+        jae     .Lm128_four
+        test    %r11, %r11
+        jz      .Lm128_fin
+.Lm128_one:
+        MM128_ROW 0, 0
+        add     $16, %rdi
+        dec     %r11
+        jnz     .Lm128_one
+        jmp     .Lm128_fin
+.Lm128_scan:
+        /* first valid row f: first non-zero validity byte, then bsf */
+        lea     7(%r11), %rcx
+        shr     $3, %rcx                /* ceil(n/8) bytes */
+        xor     %edx, %edx
+1:      movzbl  (%rsi,%rdx), %eax
+        test    %eax, %eax
+        jnz     2f
+        inc     %rdx
+        cmp     %rcx, %rdx
+        jb      1b
+        jmp     .Lm128_fin              /* no valid row */
+2:      bsf     %eax, %eax
+        lea     (%rax,%rdx,8), %rax     /* f */
+        cmp     %r11, %rax
+        jae     .Lm128_fin              /* set bit beyond n only */
+        mov     %rax, %rcx
+        shl     $4, %rcx
+        mov     (%rdi,%rcx), %r12
+        mov     8(%rdi,%rcx), %r13
+        mov     %r12, %r14
+        mov     %r13, %r15
+        xor     %r9d, %r9d
+        xor     %r10d, %r10d
+        and     $-64, %rax              /* start of f's block */
+        sub     %rax, %r11
+        mov     %rax, %rcx
+        shr     $3, %rcx
+        add     %rcx, %rsi
+        shl     $4, %rax
+        add     %rax, %rdi
+.Lm128_vblk:
+        cmp     $64, %r11
+        jb      .Lm128_vpart
+        mov     (%rsi), %rbp
+        mov     $16, %r8d
+.Lm128_vfour:
+        MM128_ROW 0, 1
+        MM128_ROW 16, 1
+        MM128_ROW 32, 1
+        MM128_ROW 48, 1
+        add     $64, %rdi
+        dec     %r8d
+        jnz     .Lm128_vfour
+        add     $8, %rsi
+        sub     $64, %r11
+        jnz     .Lm128_vblk
+        jmp     .Lm128_fin
+.Lm128_vpart:
+        mov     %r11d, %ecx
+        call    lvp
+        mov     %rax, %rbp
+        mov     %r11d, %r8d
+.Lm128_vone:
+        MM128_ROW 0, 1
+        add     $16, %rdi
+        dec     %r8d
+        jnz     .Lm128_vone
+.Lm128_fin:
+        mov     %rbx, %rax
+        test    %rax, %rax
+        jz      1f
+        mov     8(%rsp), %rcx
+        mov     (%rsp), %rdx
+        mov     %r12, (%rcx)
+        mov     %r13, 8(%rcx)
+        mov     %r14, (%rdx)
+        mov     %r15, 8(%rdx)
+1:      add     $16, %rsp
+        pop     %r15
+        pop     %r14
+        pop     %r13
+        pop     %r12
+        pop     %rbp
+        pop     %rbx
+        ret
+ENDF pqk_x86_scalar_minmax_i128
 
         .section .note.GNU-stack, "", @progbits

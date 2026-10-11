@@ -1,14 +1,21 @@
 # PolyQuery native kernels — x86-64 assembly
 
-All 16 kernels of `include/pq_kernels.h` (ABI v1), hand-written in GNU `as`
-(AT&T syntax, `.S` files run through the C preprocessor only for `#define`
-constants). There are three complete variants:
+All 20 kernels of `include/pq_kernels.h` (ABI v1, revision 1), hand-written
+in GNU `as` (AT&T syntax, `.S` files run through the C preprocessor only for
+`#define` constants). That is the 16 original kernels plus the four 128-bit
+kernels of change request CR-4 (`filter_i128`, `count_i128`, `sum_i128`,
+`minmax_i128`; see [128-bit kernels (CR-4)](#128-bit-kernels-cr-4)). There are
+three complete variants:
 
 | file | variant | ISA | kernels |
 |---|---|---|---|
-| `pqk_x86_scalar.S` | `x86_scalar` | baseline x86-64 (GPRs + SSE2 scalar `addsd/minsd/maxsd` only; no POPCNT/BMI) | 16/16 |
-| `pqk_x86_avx2.S` | `x86_avx2` | AVX2 + BMI1 + BMI2 + POPCNT | 16/16 |
-| `pqk_x86_avx512.S` | `x86_avx512` (optional) | AVX-512 F/BW/VL/DQ (+BMI/POPCNT) | 16/16 |
+| `pqk_x86_scalar.S` | `x86_scalar` | baseline x86-64 (GPRs + SSE2 scalar `addsd/minsd/maxsd` only; no POPCNT/BMI) | 20/20 |
+| `pqk_x86_avx2.S` | `x86_avx2` | AVX2 + BMI1 + BMI2 + POPCNT | 20/20 |
+| `pqk_x86_avx512.S` | `x86_avx512` (optional) | AVX-512 F/BW/VL/DQ (+BMI/POPCNT) | 20/20 |
+
+The CR-4 kernels are appended to the end of each variant's file, after the
+original 16. The original kernels' code was not modified, so their behaviour
+is unchanged.
 
 The dispatcher finds the variants through their global symbols
 `pqk_<variant>_<kernel>`. On this host it picks `x86_avx512` by default, and
@@ -34,9 +41,9 @@ Result of `make -C native-kernels test` on the final commit:
 
 ```
 available variants: reference,x86_avx512,x86_avx2,x86_scalar (default: x86_avx512)
-  x86_scalar  16/16 kernels  PASS
-  x86_avx2    16/16 kernels  PASS
-  x86_avx512  16/16 kernels  PASS
+  x86_scalar  20/20 kernels  PASS
+  x86_avx2    20/20 kernels  PASS
+  x86_avx512  20/20 kernels  PASS
 kernel tests: 3 variant(s) tested, 0 failure(s)      (native, 3000 iterations)
 ... same with -fsanitize=address,undefined (1500 iterations)
 ```
@@ -210,6 +217,183 @@ System V AMD64 throughout:
 * The code is position independent: RIP-relative constants and
   self-relative jump tables.
 
+## 128-bit kernels (CR-4)
+
+`pqk_i128` is `{uint64_t lo; int64_t hi;}`: 16 bytes, little-endian, any
+alignment. Row *i* is at `data + 16*i`. Every new kernel has a header comment
+that covers register usage, the algorithm and, for `sum_i128`, the
+exact-overflow argument. This section summarizes them.
+
+### Common rules (all variants)
+
+* **Operator check first.** `op` is compared unsigned against 6, so negative
+  ints are rejected as well. An invalid op returns `(size_t)-1` before `a` or
+  `b` is touched. `b` is loaded only for `PQK_BETWEEN`. `a` is always
+  loaded, also for `n == 0`, as the spec requires. Both are loaded once into
+  registers before any row is read, so `a`/`b` aliasing `data` is harmless.
+* **Same structure as the 64-bit predicates.** `filter_i128` and
+  `count_i128` reuse the 64-row block-mask structure (mask routine, then
+  `& validity word`, then emit or popcount). The final partial validity
+  block loads exactly `ceil(len/8)` bytes (`lvp`), and filter index emission
+  is identical to `filter_i64`.
+* **Operators map to (kind, invert)** so each variant needs only 3–4
+  predicate kernels:
+  * scalar/AVX2: `EQ`, `LT` (x<a), `GT` (x>a), and `OUT` (x<a | x>b, or
+    the range trick); `BETWEEN = !OUT`.
+  * AVX-512: `IN` (a≤x≤b) directly.
+
+  With `a > b`, `BETWEEN` is empty automatically in the vector variants. The
+  scalar range trick needs `a ≤ b`, so the scalar code checks `a > b` up
+  front and returns 0.
+* **`sum_i128` writes `*out_sum` only on `PQK_OK`**, like the reference.
+  `n == 0` stores 0 and returns OK. **`minmax_i128` writes its outputs only
+  if the count is > 0.**
+
+### Signed 128-bit comparison
+
+* **scalar**: `cmp lo; sbb hi` on sign-biased high words (`hi ^ 2^63`), which
+  turns the signed compare into an unsigned one, so the result is in CF.
+  (In)equality is `(x.lo^a.lo) | (x.hi^a.hi)`, then `neg`, which sets CF iff
+  the value is non-zero. BETWEEN uses the unsigned range trick
+  `(x-a) mod 2^128 ≤u (b-a)`, with `sub/sbb` followed by `cmp/sbb`.
+  Each row's CF is rotated into the block mask with `rcr $1` (a 1-cycle op).
+  After `len` rows, row *j* sits at bit `64-len+j`, so one `shr` by `64-len`
+  aligns a partial block and clears the bits ≥ len. The rows are walked
+  forward, which keeps the prefetcher happy (see the i64 lesson below).
+* **AVX2** has only signed 64-bit `vpcmpgtq`/`vpcmpeqq`. A group of 4 rows is
+  two 32-byte loads, de-interleaved within lanes by
+  `vpunpcklqdq`/`vpunpckhqdq` into `L`/`H` in lane order (0,2,1,3). Low words
+  are biased with `^2^63`, so they compare as unsigned. Then:
+  * `x < c` is `c.hi >s x.hi | (c.hi == x.hi & c.lo' >s x.lo')`: three
+    compares plus one `vblendvpd`, which selects the low-word result where
+    the high words are equal.
+  * `vmovmskpd` nibbles arrive with bits 1 and 2 swapped. A SWAR delta swap
+    per 64-row mask (`NIBFIX`, 6 ops) restores row order.
+  * The 1–3 rows left in a partial block are evaluated one row at a time
+    as 16-byte xmm loads with the same code, so nothing past the buffer is
+    read.
+* **AVX-512** has unsigned compares into k-masks:
+  * `x < c` is `vpcmpq(hi <) | vpcmpuq(lo <u){vpcmpq(hi ==)}`, i.e. a
+    write-masked compare plus `korb`.
+  * filter/count de-interleave a group of 8 rows with in-lane `vpunpck`
+    (lane order 0,4,1,5,2,6,3,7). The 64-bit block mask is put back in row
+    order with `pext`/`pdep` (`KFIX`, 4 BMI2 ops per 64 rows).
+  * minmax uses `vpermt2q`, which gives natural order, so validity bytes
+    can be used directly as write masks.
+  * Tails use zero-masked loads (fault suppression), as elsewhere in the
+    AVX-512 file.
+* **count without validity** skips the masks in the SIMD variants:
+  * AVX2: `vpsubq` of all-ones lanes on two accumulators over `n & ~3`
+    rows; the remaining 1–3 rows go through the mask path.
+  * AVX-512: merge-masked `acc -= -1` per group. Tail groups are ANDed
+    with a row mask in permuted lane order (`pdep` with `0x55`/`0xaa`).
+  * The inversion is applied once at the end: `rows − count`.
+
+### Exact `sum_i128` (overflow beyond 128 bits)
+
+The exact sum needs at most 160 bits (`n < 2^32`), so every variant ends in a
+**192-bit scalar total** `T` (three GPRs). `PQK_OVERFLOW` ⇔ `T`'s top word ≠
+the sign extension (`sar 63`) of its middle word. So intermediate wrap-around
+of the low 128 bits that cancels out can never cause a false overflow, and
+any final sum outside `[-2^127, 2^127-1]` is always reported.
+
+* **scalar**: every row is sign-extended to 192 bits and added with
+  `add/adc/adc`, unrolled 4×. Invalid rows are and-masked to 0 (`shr` →
+  CF, `sbb` → 0/-1).
+* **AVX2 / AVX-512**: the interleaved words of a load (`[lo, hi, lo, hi…]`)
+  are treated as unsigned after biasing the high words,
+  `hi ^ 2^63 = hi + 2^63`. So `x = lo + 2^64·(hi^2^63) − 2^127`.
+  * Per 64-bit lane the variants keep `S = Σv mod 2^64` and
+    `H = Σ(v >>> 32)` (exact). The lane sum `E = H·2^32 + L` is exact with
+    `L = (S − H·2^32) mod 2^64`, as long as `L < 2^64`. Chunks of at most
+    2^28 rows keep `H, L < 2^60`.
+  * `E mod 2^64 = S`, and `E div 2^64 = (H>>32) + carry(H<<32 + L)`. The
+    fold computes this as `sub`, `add` (CF), `adc`.
+  * The fold adds even lanes into `T` at weight 1 and odd lanes at weight
+    2^64. At the end, `T −= cnt·2^127`, where `cnt` is the number of rows
+    that were biased.
+  * Cost: 4 vector ops per 2 rows (AVX2) or per 4 rows (AVX-512). The
+    `vpxor` with the bias constant is fused with the load.
+* **Validity handling** depends on the variant:
+  * AVX2: per 64-row block, `vpsllvq` with a table moves each row's bit into
+    the sign bit of both of its lanes, and `vpcmpgtq` against zero widens it
+    to a lane mask, which is then ANDed with the load. Invalid rows become 0
+    *before* the bias, so they still contribute exactly 2^127 and are
+    counted in `cnt`. The final partial block is scalar.
+  * AVX-512: the 64-bit validity word is expanded to a 128-bit lane mask
+    (`pdep 0x5555…` then `·3`). A zero-masking `vpxorq` removes invalid
+    rows entirely (not biased, not counted). Tails use the same mask on a
+    zero-masked load.
+* `SUM128_CHUNK_ROWS` (default 2^28, a multiple of 64) can be overridden
+  with `-D`. `verify/run.sh` builds `tests/kernel_test.c` and `edge_cases.c`
+  with 64-row chunks, so the fold path runs constantly.
+
+### `minmax_i128`
+
+* **scalar**: range test. `min = max =` the first valid row `f`, found by a
+  byte scan of the bitmap (or `f = 0` without validity).
+  * From `f`'s 64-row block on, each row is tested with **one** 128-bit
+    compare: `x ∈ [min,max]` ⇔ `(x−min) mod 2^128 ≤u w`, where
+    `w = max−min`.
+  * Inside, which is the common case, needs no update. Outside calls a
+    small out-of-line routine that decides `x<min` or `x>max` (exactly one
+    holds), updates it and recomputes `w`.
+  * Invalid rows get `d = 0` (and-masked), i.e. they always count as inside.
+  * The count is `n`, or the `sbb` masks summed per row.
+* **AVX2**: lane-wise 128-bit min/max on de-interleaved groups, with
+  accumulators that keep biased low words (all compares are signed).
+  * Two accumulator sets alternate between groups and start at the neutral
+    values `INT128_MAX`/`INT128_MIN`. If the true minimum is `INT128_MAX`
+    it is bit-identical to the neutral value, so no first-element case is
+    needed.
+  * Lazy update: `lt`/`gt` are computed, then one `vtestpd` (which reads
+    sign bits, so validity can be folded in) decides whether the four
+    `vblendvpd` are needed at all.
+  * The count is `popcnt` of the validity words (`bzhi`'d to `n`). The 0–3
+    tail rows run in scalar after the lanes are reduced.
+* **AVX-512**: natural-order groups (`vpermt2q`). Compares are write-masked
+  by the validity byte, and updates are merge-masked `vmovdqa64`, so this
+  path is branch-free. Tail groups use zero-masked loads, so there is no
+  scalar tail.
+
+### Performance decisions for CR-4 (measured on this host)
+
+* **AVX2 `vblendvpd` vs. `vpand`+`vpor`** for combining the high/low
+  compare results: no difference within noise (count/filter, L2-resident).
+  The blend was kept because it is one op.
+* **AVX2 minmax lazy update** vs. always blending, measured over 64K rows in
+  L2 (ns/row):
+  * random data: 0.27 → 0.22;
+  * ~50% of groups with unpredictable updates (row *i* is ±*i* with p = 1/6,
+    else 0): 0.27 → 0.24;
+  * strictly ascending data, where every group updates: 0.27 → 0.28.
+
+  It was adopted. For AVX-512 the same change was −7% on random data and
+  +6% on ascending data, so AVX-512 stays branch-free.
+* **AVX-512 de-interleave:** in-lane `vpunpck` + `KFIX` instead of
+  `vpermt2q` for filter/count gave count 0.185 → 0.163 ns/row and filter
+  0.167 → 0.160. For minmax it made no difference, so minmax keeps
+  `vpermt2q` and its natural row order.
+* **Scalar `sum_i128` with validity**, unrolled 4×: 0.41 → 0.36 ns/row (L2).
+* **Scalar minmax worst case.** The range test is data-dependent:
+
+  | data (64K rows, L2, ns/row) | x86_scalar | x86_avx2 | x86_avx512 |
+  |---|---|---|---|
+  | bench data (random decimals), validity / none | 0.44 / 0.28 | 0.22 / 0.20 | 0.20 / 0.19 |
+  | small values (hi = 0), validity / none | 0.44 / 0.28 | 0.23 / 0.19 | 0.20 / 0.19 |
+  | strictly ascending, validity / none | 0.80 / 0.79 | 0.28 / 0.24 | 0.20 / 0.19 |
+  | ±*i* with p = 1/6 (unpredictable updates), validity / none | 0.56 / 0.96 | 0.24 / 0.21 | 0.20 / 0.19 |
+
+  In the worst case the scalar kernel is about as fast as the reference
+  (reference: 0.83–1.4 ns/row on the same data, built with -O2 in this
+  harness). It is 1.6–1.8× faster on typical data. A branch-free cmov
+  version has a 3-cycle loop-carried chain per row, which would be about
+  0.6 ns/row everywhere, so the range test was kept.
+* All four kernels are **compute-bound when the data is cache-resident.**
+  An L2-resident run (64K rows) gives about the same ns/row as the
+  L3-resident run below. The AVX2/AVX-512 i128 kernels need 2–4 vector ops
+  per row versus about 1 for the i64 kernels.
+
 ## Verification
 
 Besides `make test`, `verify/run.sh` builds and runs:
@@ -239,6 +423,34 @@ Besides `make test`, `verify/run.sh` builds and runs:
   state left dirty means `vzeroupper` was missing). A negative control (a
   function that clobbers `rbx`, and one that leaves a dirty ymm) is detected.
   **Result: all variants ok.**
+
+For CR-4 the three tools were extended:
+
+* **`guard_pages.c`**:
+  * runs the 128-bit kernels for n = 0…300 with every buffer at a guard page:
+    the data (16·n bytes), validity, `out_idx`, `*a`, `*b` (separately, with
+    `b = NULL` unless BETWEEN), `*out_sum`, `*out_min` and `*out_max`;
+  * the values mix small numbers, all-ones/2^63 low words and high words
+    0, ±1, `INT64_MIN/MAX`, so equal-high-word comparisons on the low word
+    are exercised.
+* **`edge_cases.c`**:
+  * n = 300001 with all-`INT128_MAX`, all-`INT128_MIN`, random,
+    exactly-cancelling alternating, ascending and descending (high-limb)
+    columns, and a mixed MAX/MAX/MIN pattern. Each runs with and without
+    validity and with n not a multiple of the block size;
+  * count for all ops with `a`/`b` pointing into `data`, `a > b`, and
+    `{0, INT64_MIN}` / `{~0, INT64_MAX}` bounds;
+  * 2000 random columns whose exact sum is **exactly** `INT128_MAX` or
+    `INT128_MIN` (must be OK) plus one more ±1 row (must be
+    `PQK_OVERFLOW`);
+  * all rows invalid.
+* **`abi_check.c`**: adds the four new kernels, plus invalid ops with NULL
+  `a`/`b`.
+* **`-DSUM128_CHUNK_ROWS=64`** builds of `edge_cases.c` and
+  `tests/kernel_test.c` exercise the vector-sum fold path.
+
+A negative control (a scalar copy with a broken overflow check) is caught by
+`edge_cases`. **Result: all variants ok.**
 
 ## Performance decisions (measured on this host)
 
@@ -315,6 +527,10 @@ lower is better. The speedup columns are reference ns / variant ns. The
 reference is the C17 implementation compiled with `-O3` (gcc auto-vectorizes
 some loops with SSE2).
 
+The three tables below cover the 16 original kernels; they come from the
+original acceptance run of that code, which CR-4 did not change. The
+[128-bit kernels](#128-bit-kernels-cr-4-1) follow after them.
+
 ### Official `make bench` run (unpinned; it landed on the DRAM-bound CCD)
 
 | kernel | reference | x86_scalar | x86_avx2 | x86_avx512 | x86_scalar vs ref | x86_avx2 vs ref | x86_avx512 vs ref |
@@ -382,6 +598,71 @@ Reading the numbers:
   `sums[g]` and `counts[g]`). `gather_i64` is bounded by random-access latency.
   Both gain only modestly.
 
+### 128-bit kernels (CR-4)
+
+These are the four kernels that `tests/kernel_bench.c` added for CR-4:
+
+* `filter_i128_sel10`: LT, about 12% selected, no validity;
+* `count_i128_between`: no validity;
+* `sum_i128`: no validity;
+* `minmax_i128`: with validity, 7/8 valid.
+
+The column is 4,194,304 wide decimals with values `±d·10^20`, which need the
+high limb; it takes 64 MB. The numbers are ns per row, so lower is better.
+
+**Official `make -C native-kernels bench` (final commit, unpinned):**
+
+| kernel | reference | x86_scalar | x86_avx2 | x86_avx512 | x86_scalar vs ref | x86_avx2 vs ref | x86_avx512 vs ref |
+|---|---|---|---|---|---|---|---|
+| filter_i128_sel10 | 1.0794 | 0.4289 | 0.3731 | 0.3686 | 2.52x | 2.89x | 2.93x |
+| count_i128_between | 0.5867 | 0.3442 | 0.3115 | 0.3115 | 1.70x | 1.88x | 1.88x |
+| sum_i128 | 0.4324 | 0.3315 | 0.3031 | 0.2900 | 1.30x | 1.43x | 1.49x |
+| minmax_i128 | 0.8006 | 0.4833 | 0.3239 | 0.3264 | 1.66x | 2.47x | 2.45x |
+
+**Pinned to CPU 0 (V-cache CCD, column L3-resident), median of 3 runs:**
+
+| kernel | reference | x86_scalar | x86_avx2 | x86_avx512 | scalar/ref | avx2/ref | avx512/ref | avx2 vs scalar |
+|---|---|---|---|---|---|---|---|---|
+| filter_i128_sel10 | 1.1181 | 0.3533 | 0.2756 | 0.1952 | 3.16x | 4.06x | 5.73x | 1.28x |
+| count_i128_between | 0.5807 | 0.2730 | 0.1902 | 0.1931 | 2.13x | 3.05x | 3.01x | 1.44x |
+| sum_i128 | 0.3863 | 0.2159 | 0.1478 | 0.1458 | 1.79x | 2.61x | 2.65x | 1.46x |
+| minmax_i128 | 0.8124 | 0.4546 | 0.2051 | 0.2208 | 1.79x | 3.96x | 3.68x | 2.22x |
+
+**Pinned to CPU 8 (32 MB L3 CCD, column streams from DRAM), median of 3 runs:**
+
+| kernel | reference | x86_scalar | x86_avx2 | x86_avx512 | scalar/ref | avx2/ref | avx512/ref | avx2 vs scalar |
+|---|---|---|---|---|---|---|---|---|
+| filter_i128_sel10 | 1.0936 | 0.4265 | 0.3899 | 0.3568 | 2.56x | 2.80x | 3.07x | 1.09x |
+| count_i128_between | 0.6043 | 0.3582 | 0.3394 | 0.3288 | 1.69x | 1.78x | 1.84x | 1.06x |
+| sum_i128 | 0.4575 | 0.3424 | 0.3257 | 0.3119 | 1.34x | 1.40x | 1.47x | 1.05x |
+| minmax_i128 | 0.8180 | 0.5040 | 0.3371 | 0.3385 | 1.62x | 2.43x | 2.42x | 1.50x |
+
+The official unpinned run landed on the DRAM-bound CCD, so its numbers match
+the CPU 8 table. In the same run the 16 original kernels reproduced the
+tables above within noise (for example `filter_i64_sel10` 0.79 / 0.34 / 0.19
+/ 0.16 ns).
+
+Reading the 128-bit numbers:
+
+* **From DRAM** the SIMD variants converge at about 0.29–0.39 ns/row
+  (16-byte rows) and scalar at 0.33–0.50. That is memory-bound.
+  * The vector variants still beat scalar by 5–50%. Most of that comes from
+    `minmax` (1.5×).
+  * A standalone harness running the same kernels reached about 72 GB/s for
+    `sum_i128` on CPU 8, versus about 50 GB/s here. So part of the gap to
+    the 64-bit kernels' ~75 GB/s comes from the benchmark process (memory
+    placement), not from the kernels.
+* **In L3** the SIMD variants are 2.6–5.7× faster than the reference.
+  * AVX-512 is clearly ahead only for `filter_i128`, where `vpcompressd`
+    emission is cheap.
+  * For count, sum and minmax AVX-512 is on par with AVX2. Its k-mask
+    compare chains (3 compares + `korb` per 128-bit predicate) cost about
+    as much as AVX2's vector compares + blend at half the width.
+  * With its lazy update, AVX2 `minmax_i128` is slightly faster than the
+    branch-free AVX-512 version on this (random) data.
+* **Scalar** is 1.3–3.2× faster than the reference everywhere. The reference
+  pays for `__int128` compares through `memcpy` loads and branches.
+
 ## Limitations / notes
 
 * `x86_scalar` is GPR-only by design (so it runs on any x86-64). Its
@@ -403,6 +684,19 @@ Reading the numbers:
   and validity is NULL. Kernels with validity or with bitmap output keep their
   64-row/8-row block alignment relative to row 0, so the bitmap bits stay
   byte-aligned.
+* 128-bit kernels:
+  * The scalar `minmax_i128` range test is data-dependent. Monotonic data or
+    frequent unpredictable updates bring it down to about reference speed
+    (see the table under CR-4 performance decisions). The SIMD variants are
+    robust: AVX2 is at most +30% on ascending data, and AVX-512 is
+    branch-free.
+  * AVX2 handles the last 1–3 rows of a predicate block one row at a time,
+    and `sum_i128` with validity runs its final partial 64-row block in
+    scalar code. The cost is bounded by 63 rows per call.
+  * No AVX-512 instruction outside F/BW/VL/DQ (+BMI2) is used for CR-4
+    either. VPOPCNTDQ or AVX512-IFMA were not considered.
+  * Values outside the decimal(38) range are not special-cased. Following
+    CR-4, the kernels work on the full int128 domain.
 * All results come from this single Zen 5 host. Microarchitecture-specific
   choices (masked loads, gathers, POPCNT vs. `vpshufb`) may need revisiting on
   Intel cores.

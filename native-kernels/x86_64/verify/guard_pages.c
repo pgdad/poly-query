@@ -2,7 +2,9 @@
  * to a kernel ends exactly at a PROT_NONE page (mode 0) or starts right after one
  * (mode 1), for n = 0..maxn, with/without validity; results must equal the
  * reference. Catches any out-of-bounds read/write by the assembly, which
- * AddressSanitizer cannot see. Usage: guard_pages [maxn]. Build: see run.sh. */
+ * AddressSanitizer cannot see. The 128-bit kernels also get a, b, out_sum,
+ * out_min and out_max in separate guarded 16-byte buffers (b = NULL unless
+ * BETWEEN). Usage: guard_pages [maxn]. Build: see run.sh. */
 /* Guard-page harness: every buffer handed to a kernel ends exactly at a PROT_NONE
  * page (mode 0) or starts exactly after one (mode 1); compares with reference. */
 #define _GNU_SOURCE
@@ -16,7 +18,7 @@ static size_t PG;
 static uint64_t rs = 12345;
 static uint64_t rnd(void){uint64_t z=(rs+=0x9E3779B97F4A7C15ULL);z=(z^(z>>30))*0xBF58476D1CE4E5B9ULL;z=(z^(z>>27))*0x94D049BB133111EBULL;return z^(z>>31);}
 typedef struct { void *map; size_t len; } gb;
-static gb pool[512]; static int npool;
+static gb pool[1024]; static int npool;
 static void *gal(size_t bytes, int mode) {
   size_t body = (bytes + PG - 1) / PG * PG + PG;
   size_t len = body + 2 * PG;
@@ -85,6 +87,24 @@ int main(int argc, char **argv){
       /* gather */
       uint32_t *ix = gal(n*4,mode); for(int i=0;i<n;i++) ix[i]=(uint32_t)(rnd()%n);
       int64_t *g1=calloc(n+1,8),*g2=gal(n*8,mode); ref.gather_i64(d,ix,n,g1); v.gather_i64(d,ix,n,g2); CK(!memcmp(g1,g2,n*8),"gather %d",n);
+      /* 128-bit kernels: 16-byte rows; a, b and every output in its own guarded buffer */
+      { pqk_i128 *w = gal(n*16, mode), *ca = gal(16, mode), *cb = gal(16, mode);
+        static const int64_t his[] = {0, -1, 1, INT64_MAX, INT64_MIN};
+        for (int i=0;i<n;i++){ uint64_t lo = (rnd()&1) ? rnd()%5 : rnd(); if (rnd()%3==0) lo = (rnd()&1) ? UINT64_MAX - rnd()%3 : (uint64_t)1 << 63;
+          w[i].lo = lo; w[i].hi = (rnd()%4) ? his[rnd()%5] : (int64_t)rnd(); }
+        for (int op=0; op<7; op++){
+          if (n && (rnd()&1)) *ca = w[rnd()%n]; else { ca->lo = rnd()%5; ca->hi = his[rnd()%5]; }
+          *cb = *ca; cb->lo += rnd()%3; if (rnd()%4==0) cb->hi = his[rnd()%5];
+          const pqk_i128 *bp = op == 6 ? cb : NULL;
+          size_t c1 = ref.filter_i128(w,val,n,op,ca,bp,o1), c2 = v.filter_i128(w,val,n,op,ca,bp,o2);
+          CK(c1==c2 && !memcmp(o1,o2,c1*4), "filter_i128 n=%d op=%d mode=%d v=%d", n, op, mode, withv);
+          CK(ref.count_i128(w,val,n,op,ca,bp)==v.count_i128(w,val,n,op,ca,bp), "count_i128 n=%d op=%d v=%d", n, op, withv);
+        }
+        pqk_i128 *q2 = gal(16, mode), *x2 = gal(16, mode), q1 = {0,0}, x1 = {0,0};
+        int r1 = ref.sum_i128(w,val,n,&q1), r2 = v.sum_i128(w,val,n,q2);
+        CK(r1==r2 && (r1 || !memcmp(&q1,q2,16)), "sum_i128 n=%d v=%d", n, withv);
+        size_t k1 = ref.minmax_i128(w,val,n,&q1,&x1), k2 = v.minmax_i128(w,val,n,q2,x2);
+        CK(k1==k2 && (!k1 || (!memcmp(&q1,q2,16) && !memcmp(&x1,x2,16))), "minmax_i128 n=%d v=%d", n, withv); }
       free(o1); free(b1); free(h_1); free(z1); free(g1); gfree();
     }
     printf("guard %s: %s\n", vn, fails? "FAIL":"ok");
