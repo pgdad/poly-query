@@ -1,0 +1,88 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-refactor-plan-separation-common-lisp-a1-20261011T062513Z",
+ "language": "common-lisp",
+ "task": "refactor-plan-separation",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-refactor-plan-separation",
+ "prompt_sha256": "3c7f162da240ebaaf4eb18cd372220659299a42eec9d2f8bea2230e0db449847",
+ "session_id": "78399659-8eb2-48f8-9dad-9db3e9c0399f",
+ "tokens": {
+  "input": 180,
+  "output": 97285,
+  "cache_read": 12934735,
+  "cache_creation": 230004,
+  "thinking": null,
+  "thinking_estimated": 43937,
+  "source": "result events (summed over 2 segments)",
+  "api_messages": 90
+ },
+ "rate_limit": {
+  "events": 10,
+  "max_utilization": {
+   "five_hour": 0.42,
+   "seven_day": 0.3
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 6.373399000000003,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 95,
+ "result_segments": 2,
+ "assistant_messages": 179,
+ "tool_calls": {
+  "Bash": 82,
+  "Write": 9,
+  "Read": 1,
+  "ToolSearch": 1
+ },
+ "tool_calls_total": 93,
+ "tool_failures": 3,
+ "build_invocations": 17,
+ "build_failures_heuristic": 0,
+ "conformance_runs": 4,
+ "conformance_progress": [
+  [
+   591,
+   591
+  ],
+  [
+   591,
+   591
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 1663.6,
+  "model_api_seconds": 857.2,
+  "tool_seconds": 657.0,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 4,
+  "files_changed": 22,
+  "lines_added": 1520,
+  "lines_removed": 711,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The refactoring is done and committed, and every suite still passes 100%. One deliberate exception to \"no visible change\": predicate pushdown now goes below projections (the spec's rule requires it), which moved the Filter in the EXPLAIN output of 4 conformance queries. Their results are unchanged.\n\n## Test results (final clean build)\n```\nrunner.py                       TOTAL: 591/591 pass\nrunner.py --modes               TOTAL: 3456/3456 pass\nrunner.py --transport http      TOTAL: 591/591 pass\nrunner.py --native libpqkernels TOTAL: 591/591 pass\nhttp_suite.py                   http suite: 18/18 passed\n```\n- `make build`, `make lint` and `make test` (252 unit tests) all succeed.\n- The capabilities output is byte-identical to before.\n\n## What I implemented\nThe engine already had separate logical and physical node types, so most of the work was closing gaps:\n- **Logical plan** (`plan/logical.lisp`): now only the plan representation. I added a `SubqueryAlias` node for derived tables and CTE references. Expression subqueries now carry their own logical plan. There is a debug printer, `format-logical-plan`.\n- **Plan builder** (`plan/builder.lisp`): turns an analysed query into a logical plan, including the plans of its subqueries.\n- **Optimizer rules**, one file each in `plan/rules/`: constant folding, predicate simplification, predicate pushdown, join reordering and column pruning.\n- **Optimizer driver** (`plan/optimizer.lisp`): a named list of rules applied in order to the plan and its subquery plans. With `optimize: false` it now applies no rules at all; previously column pruning still ran.\n- **Estimates** (`plan/estimates.lisp`): predicate analysis and row-count estimates, split out of `access.lisp` so both join reordering and the physical planner can use them.\n- **Physical planner** (`plan/physical.lisp`): now also decides the execution mode, thread count and native kernels. The executors read that decision instead of the raw query options. EXPLAIN is still produced from the physical plan.\n- **README**: before/after module map and the design decisions below.\n\n## Main design decisions\n- **Column pruning without the optimizer:** Phase 3 requires scans to read only the columns a query uses, even with `optimize: false`. So the builder prunes every new plan, and the column-pruning rule prunes again after the other rules.\n- **Behaviour check:** I recorded the results and EXPLAIN output of every conformance query under 7 option combinations (6,845 records). They were byte-identical after the restructuring and before the pushdown change.\n- **Pushdown below projections:** a filter is only pushed into a derived table or CTE when none of its projected expressions can fail. Otherwise filtering first could hide an error the original plan raises.\n  - 42 extra derived-table/CTE/subquery queries \u00d7 8 option sets gave the same results and errors as the old engine.\n  - The new plans can use an index where the old ones did a full scan.\n\n## Known limitations\n- **Fuzzing:** 3,000 random queries found one disagreement between option combinations. It happens with the old engine too, and the README already listed it: a pushed-down conjunct that fails on rows a join would discard raises an error with some join algorithms but not others. I left it unchanged.\n- **CTEs** are still inlined once per reference rather than computed once and reused.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

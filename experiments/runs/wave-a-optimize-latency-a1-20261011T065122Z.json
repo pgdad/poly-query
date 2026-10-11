@@ -1,0 +1,25 @@
+{
+ "wave_id": "wave-a-optimize-latency-a1-20261011T065122Z",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 1,
+ "seed": 4878,
+ "order": [
+  "python"
+ ],
+ "run_ids": [
+  "a-optimize-latency-python-a1-20261011T065122Z"
+ ],
+ "started": "2026-10-11T06:51:23+00:00",
+ "parallel": 1,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  9.1640625,
+  8.6240234375,
+  7.63232421875
+ ]
+}

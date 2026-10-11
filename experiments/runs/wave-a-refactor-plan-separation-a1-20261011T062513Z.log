@@ -1,2 +1,6 @@
 2026-10-11T06:25:14+00:00 wave wave-a-refactor-plan-separation-a1-20261011T062513Z: order=['common-lisp']
 2026-10-11T06:25:14+00:00 [a-refactor-plan-separation-common-lisp-a1-20261011T062513Z] agent queued (usage gate, then launch)
+2026-10-11T06:52:58+00:00 [a-refactor-plan-separation-common-lisp-a1-20261011T062513Z] agent finished; collecting telemetry
+2026-10-11T06:52:58+00:00 [a-refactor-plan-separation-common-lisp-a1-20261011T062513Z] validating (clean clone, sandboxed)
+2026-10-11T06:53:19+00:00 [a-refactor-plan-separation-common-lisp-a1-20261011T062513Z] outcome=success cost=$6.373399000000003 turns=95 wall=1663.6s
+2026-10-11T06:53:19+00:00 wave wave-a-refactor-plan-separation-a1-20261011T062513Z finished: plan=success
