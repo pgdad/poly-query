@@ -22,7 +22,8 @@ import (
 
 // scatterMinRows and scatterGroupRatio decide when a worker switches to
 // scattering: after at least scatterMinRows (active) rows, when its table
-// has more than scatterGroupRatio groups per row. (Below that, e.g. 10,000
+// holds more than scatterGroupRatio groups and DISTINCT aggregate values
+// (see mergeWork) per row. (Below that, e.g. 10,000
 // groups seen twice on average in the first 16,384 rows, pre-aggregation
 // still reduces the data well over a whole table.)
 const (

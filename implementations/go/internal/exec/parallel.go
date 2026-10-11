@@ -632,7 +632,7 @@ func parallelAggregate(ec *Context, x *physical.HashAggregate) (BatchOperator, b
 			}
 			seen[w] += active
 			if scatters[w] == nil && len(keyTypes) > 0 && seen[w] >= scatterRows &&
-				float64(t.groups()) > ratio*float64(seen[w]) {
+				float64(t.mergeWork()) > ratio*float64(seen[w]) {
 				scatters[w] = newAggScatter(ec, seed, nw, keyTypes, x.Aggs)
 			}
 			return nil
