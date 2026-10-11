@@ -1941,6 +1941,12 @@ FUNC const_int
     movq $0, BS_ALLOWAGG(%rbx)
     call bind_expr
     movq $0, BS_NOCOLS(%rbx)
+    mov %rax, %r12
+    mov %rax, %rdi
+    call expr_is_const              /* literals and operators on them only */
+    test %eax, %eax
+    jz 5f
+    mov %r12, %rax
     movzbl N_TYPE(%rax), %ecx
     cmp $T_NULL, %ecx
     je 2f
@@ -1963,6 +1969,7 @@ FUNC const_int
     LEAVE
 3:  RAISE E_TYPE_ERROR, "LIMIT/OFFSET must be INT64"
 4:  RAISE E_INVALID_ARGUMENT, "LIMIT/OFFSET must not be negative"
+5:  RAISE E_SEMANTIC_ERROR, "LIMIT/OFFSET must be constant expressions"
 ENDF const_int
 
 /* bind_subplan(B rdi, subquery node rsi) -> rax plan (stored in V2) */
