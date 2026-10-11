@@ -33,11 +33,29 @@ pushdown / index selection stay on with `optimize:false` (the conformance
 `--modes` matrix expects IndexScans with optimize:false). README "Phase 5"
 has the full description and the measurements (`bench/bench.sh`).
 
+Later additions: stable ORDER BY everywhere (`sort_rows`: (row, sequence)
+pairs; top-N heaps tie-break on the sequence too), parallel sort
+(`pexec_sort`: sorted runs + pairwise parallel merges), parallel batch
+nested-loop join (`pexec_nl`, parts sized by pair count), merge join with
+radix sort for integer-like keys and vectorized key evaluation, error replay
+in `exec_query_result` (a data error in a batch/parallel run re-runs the
+query in the row baseline so multi-error queries report the baseline's
+error), optimizer moved *after* physical planning (so `optimize` never
+changes which rows are scanned).
+
+Verification beyond the suites: a random-expression fuzzer (kept outside
+the repo: generated queries over a table with NULLs in every column type,
+compared row/1-thread/optimize:false against vectorized and parallel
+option sets, multiset + 1e-9 float tolerance) ran >6,000 queries per
+option set, also on row-layout and mmap'd PQCF tables, with no differences.
+
 ## Invariants to keep
 
 * Output order of every mode = row baseline order (parts concatenated in
   order; groups sorted by first tuple; hash chains in build order; merge
-  join emits per left tuple). Breaking it makes `modes_test.sh` fail.
+  join emits per left tuple; ORDER BY is stable). Breaking it makes
+  `modes_test.sh` fail. (Exception by design: a hash join building on its
+  smaller left input emits right-input order, in every mode.)
 * Vectorized evaluation must only compute fallible operations on rows the
   row engine evaluates (active masks in `veval`).
 * Anything executed inside workers must not write shared state: plans with
@@ -47,8 +65,9 @@ has the full description and the measurements (`bench/bench.sh`).
 ## Next steps / ideas
 
 * Join reordering for chains of inner joins (not implemented).
-* Parallel hash build / merge-join sort; parallel final sort (merge of
-  sorted parts); DISTINCT via partitioned hashing.
+* Parallel hash build and merge-join sort; DISTINCT via partitioned
+  hashing; canonical (left-major) output order for hash joins that build
+  on the left input.
 * Vector fast paths for IN lists, BETWEEN, LIKE prefix patterns, CASE.
 * Possible improvements from Phase 4: release `cat_lock` during `save`,
   `stats` and `CREATE INDEX`; decode mmap'd PQCF columns once in the server
