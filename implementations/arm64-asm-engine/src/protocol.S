@@ -1862,10 +1862,28 @@ LFUNC op_query
     bl   bind_query                 // semantic analysis
     mov  x23, x0
     bl   plan_statement             // logical + physical plan
+    TLS_LDR x9, g_stream
+    cbnz x9, 43f
     mov  x1, #0
     bl   exec_plan                  // execution
     mov  x24, x0
     b    42f
+43: // HTTP streaming: rows of a final projection go out batch by batch
+    mov  x26, x0
+    mov  x0, x23
+    mov  x1, x21
+    bl   http_stream_open
+    mov  x0, x26
+    ADR_L x1, http_stream_sink
+    bl   exec_plan_stream
+    mov  x24, x0
+    cbz  x1, 42f                    // not streamable: materialised result
+    ldr  x0, [x24, #RS_NROWS]
+    TLS_ADDR x1, g_result_rows
+    str  x0, [x1]
+    bl   http_stream_end
+    bl   out_begin_ok
+    b    .Lq_ret
 41: ldr  x0, [x0, #ST_QUERY]        // EXPLAIN: one STRING column "plan"
     bl   explain_query
     bl   explain_result

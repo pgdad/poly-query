@@ -99,6 +99,8 @@ g_thread_attr:  .skip 64        // pthread_attr_t for connection threads
     .global g_stream
 g_stream:       .skip 8         // Conn* while serving /v1/query/stream
 g_stream_state: .skip 8         // 0 nothing sent, 1 header sent, 2 complete
+g_stream_bq:    .skip 8         // BoundQuery* of the streamed query
+g_stream_max:   .skip 8         // its max_rows option (-1 none)
 g_hdr:          .skip BUF_SIZE  // response head being built
 
     .section .rodata
@@ -556,17 +558,61 @@ LFUNC out_jstr
 ENDF out_jstr
 
 // =============================================================================
-// http_stream_result(x0 BoundQuery*, x1 ResultSet*) — called by op_query
-// for /v1/query/stream: writes the whole chunked NDJSON response.
-//   x19 bq, x20 rs, x21 conn, x22 row, x23 rows, x24 batch end
+// Streaming (/v1/query/stream), called from op_query inside the request:
+//   http_stream_open(x0 BoundQuery*, x1 max_rows or -1)
+//   http_stream_sink(x0 0, x1 total)  -> checks max_rows, sends the HTTP
+//                                        head and the header line
+//   http_stream_sink(x0 ResultSet*)   -> one "rows" line for its rows
+//   http_stream_end(x0 total)         -> end line and the last chunk
+//   http_stream_result(x0 BoundQuery*, x1 ResultSet*): all of the above for
+//                                        a materialised result
 // =============================================================================
-FUNC http_stream_result
-    ENTER 4
+FUNC http_stream_open
+    TLS_ADDR x9, g_stream_bq
+    stp  x0, x1, [x9]                   // g_stream_bq, g_stream_max
+    ret
+ENDF http_stream_open
+
+// http_stream_sink(x0 ResultSet* batch or 0, x1 total when x0 = 0)
+//   x19 rs, x20 conn, x21 bq
+FUNC http_stream_sink
+    ENTER 3
+    mov  x19, x0
+    TLS_LDR x20, g_stream
+    TLS_LDR x21, g_stream_bq
+    cbnz x19, 2f
+    TLS_ADDR x9, g_stream_bq            // begin: max_rows first
+    ldr  x9, [x9, #8]
+    tbnz x9, #63, 1f
+    cmp  x1, x9
+    b.ls 1f
+    RAISE ERR_RESOURCE_LIMIT, "result exceeds max_rows"
+1:  mov  x0, x20
+    mov  x1, x21
+    bl   stream_begin
+    LEAVE 3
+2:  bl   check_deadline                 // cancellation / timeout
+    bl   chunk_begin
+    ADR_L x0, j_rows
+    bl   out_cstr
+    mov  x0, x21
+    mov  x1, x19
+    mov  x2, #0
+    ldr  x3, [x19, #RS_NROWS]
+    bl   out_rows
+    ADR_L x0, j_rows_end
+    bl   out_cstr
+    mov  x0, x20
+    bl   send_chunk
+    LEAVE 3
+ENDF http_stream_sink
+
+// stream_begin(x0 conn, x1 BoundQuery*): response head and header line
+//   x19 conn, x20 bq
+LFUNC stream_begin
+    ENTER 2
     mov  x19, x0
     mov  x20, x1
-    TLS_LDR x21, g_stream
-    // response head
-    mov  x0, x21
     mov  w1, #200
     ADR_L x2, ct_ndjson
     bl   head_begin
@@ -577,21 +623,20 @@ FUNC http_stream_result
     ADR_L x1, s_crlf
     bl   buf_puts
     TLS_ADDR x9, g_hdr
-    ldr  w0, [x21, #CN_FD]
+    ldr  w0, [x19, #CN_FD]
     ldr  x1, [x9, #BUF_PTR]
     ldr  x2, [x9, #BUF_LEN]
     mov  w3, #1
     bl   write_all
     cbz  w0, 1f
     mov  x9, #1
-    str  x9, [x21, #CN_CLOSE]
+    str  x9, [x19, #CN_CLOSE]
     mov  w0, #ERR_CANCELLED
     ADR_L x1, m_disconnect
     bl   pq_raise
 1:  TLS_ADDR x9, g_stream_state
     mov  x10, #1
     str  x10, [x9]
-    // header line
     bl   chunk_begin
     ADR_L x0, j_header
     bl   out_cstr
@@ -599,13 +644,52 @@ FUNC http_stream_result
     bl   out_jstr
     ADR_L x0, j_columns
     bl   out_cstr
-    mov  x0, x19
+    mov  x0, x20
     bl   out_columns
     mov  w0, #'}'
     bl   out_c_nl
-    mov  x0, x21
+    mov  x0, x19
     bl   send_chunk
-    // row batches
+    LEAVE 2
+ENDF stream_begin
+
+// http_stream_end(x0 total rows)
+//   x19 total, x20 conn
+FUNC http_stream_end
+    ENTER 2
+    mov  x19, x0
+    TLS_LDR x20, g_stream
+    bl   chunk_begin
+    ADR_L x0, j_end
+    bl   out_cstr
+    TLS_ADDR x0, g_out
+    mov  x1, x19
+    bl   buf_put_u64
+    mov  w0, #'}'
+    bl   out_c_nl
+    mov  x0, x20
+    bl   send_chunk
+    ldr  w0, [x20, #CN_FD]
+    ADR_L x1, s_last_chunk
+    mov  x2, #5
+    mov  w3, #1
+    bl   write_all
+    TLS_ADDR x9, g_stream_state
+    mov  x10, #2
+    str  x10, [x9]
+    LEAVE 2
+ENDF http_stream_end
+
+// http_stream_result(x0 BoundQuery*, x1 ResultSet*): materialised result
+//   x19 bq, x20 rs, x21 conn, x22 row, x23 rows, x24 batch end
+FUNC http_stream_result
+    ENTER 4
+    mov  x19, x0
+    mov  x20, x1
+    TLS_LDR x21, g_stream
+    mov  x0, x21
+    mov  x1, x19
+    bl   stream_begin
     ldr  x23, [x20, #RS_NROWS]
     mov  x22, #0
 2:  cmp  x22, x23
@@ -628,25 +712,8 @@ FUNC http_stream_result
     bl   send_chunk
     mov  x22, x24
     b    2b
-3:  // end line and the last chunk
-    bl   chunk_begin
-    ADR_L x0, j_end
-    bl   out_cstr
-    TLS_ADDR x0, g_out
-    mov  x1, x23
-    bl   buf_put_u64
-    mov  w0, #'}'
-    bl   out_c_nl
-    mov  x0, x21
-    bl   send_chunk
-    ldr  w0, [x21, #CN_FD]
-    ADR_L x1, s_last_chunk
-    mov  x2, #5
-    mov  w3, #1
-    bl   write_all
-    TLS_ADDR x9, g_stream_state
-    mov  x10, #2
-    str  x10, [x9]
+3:  mov  x0, x23
+    bl   http_stream_end
     LEAVE 4
 ENDF http_stream_result
 

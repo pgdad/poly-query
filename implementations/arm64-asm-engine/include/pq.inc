@@ -668,6 +668,9 @@
 #define PO_SORT       10
 #define PO_LIMIT      11
 
+// Rows per batch handed to a streaming sink (exec_plan_stream)
+#define EXEC_STREAM_BATCH 1000
+
 // Tuple set produced by the lower operators
 #define TS_N        0      // u64 number of tuples
 #define TS_W        8      // u64 tuple width (BQ_NRV)
