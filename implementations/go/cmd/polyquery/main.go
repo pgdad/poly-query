@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"polyquery/internal/engine"
+	"polyquery/internal/native"
 	"polyquery/internal/protocol"
 	"polyquery/internal/server"
 )
@@ -29,7 +30,7 @@ options:
   --max-join-rows N           maximum join rows (default 100000000)
   --threads N                 worker threads per query (default: min(4, CPU count))
   --log-level LEVEL           debug, info, warn, error, off (default info)
-  --native-kernels PATH       native kernel library (unused)
+  --native-kernels PATH       load libpqkernels; queries with "native": true use it
   --request FILE|-            exec mode: request file, or - for stdin
 
 serve options:
@@ -48,6 +49,7 @@ type options struct {
 	hasPort bool
 	request string
 	level   string
+	native  string // --native-kernels PATH
 }
 
 func usageError(format string, args ...any) {
@@ -117,7 +119,7 @@ func parseArgs(mode string, args []string) options {
 				usageError("invalid log level %q", o.level)
 			}
 		case "--native-kernels":
-			next()
+			o.native = next()
 		case "--request":
 			if mode != "exec" {
 				usageError("option --request is only valid in exec mode")
@@ -201,6 +203,9 @@ func main() {
 	}
 	o := parseArgs(mode, os.Args[2:])
 	o.cfg.Logger = logger(o.level, os.Stderr)
+	if o.native != "" && mode != "version" && mode != "capabilities" {
+		loadNative(&o)
+	}
 
 	switch mode {
 	case "version":
@@ -242,6 +247,19 @@ func main() {
 			os.Exit(1)
 		}
 	}
+}
+
+// loadNative loads the native kernel library. Native kernels are optional:
+// if the library cannot be loaded the engine logs a warning and runs with
+// its own code paths only.
+func loadNative(o *options) {
+	lib, err := native.Load(o.native)
+	if err != nil {
+		o.cfg.Logger.Warn("native kernels unavailable", "path", o.native, "error", err.Error())
+		return
+	}
+	o.cfg.Native = lib
+	o.cfg.Logger.Info("native kernels loaded", "path", o.native, "variant", lib.Variant())
 }
 
 // serve runs the HTTP server until SIGTERM or SIGINT.

@@ -365,15 +365,16 @@ func rowPipeline(ec *Context, n physical.Node, pc *pipelineCtx) (Operator, error
 	case *physical.TableScan:
 		return pc.rowLeaf(x), nil
 	case *physical.Filter:
+		if scan, root, rest, ok := nativeScanFilter(ec, x); ok {
+			if s, isScan := pc.rowLeaf(scan).(*scanOp); isScan {
+				return nativeRowFilter(ec, x, s, root, rest)
+			}
+		}
 		in, err := rowPipeline(ec, x.Input, pc)
 		if err != nil {
 			return nil, err
 		}
-		pred, err := compile(ec, layoutOf(x.Input.Schema()), x.Pred)
-		if err != nil {
-			return nil, err
-		}
-		return &filterOp{ec: ec, input: in, pred: pred}, nil
+		return newFilterOp(ec, in, x.Input.Schema(), x.Pred)
 	case *physical.Project:
 		in, err := rowPipeline(ec, x.Input, pc)
 		if err != nil {

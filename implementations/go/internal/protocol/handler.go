@@ -670,9 +670,11 @@ func parseQueryOptions(req *request) (engine.QueryOptions, error) {
 			}
 			qo.NoIndexes = !b
 		case "native":
-			if _, err := decodeBool(raw, name); err != nil {
+			b, err := decodeBool(raw, name)
+			if err != nil {
 				return qo, err
 			}
+			qo.Native = b
 		case "query_id":
 			var s string
 			if json.Unmarshal(raw, &s) != nil || len(raw) == 0 || raw[0] != '"' {

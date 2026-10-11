@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"polyquery/internal/errs"
+	"polyquery/internal/native"
 	"polyquery/internal/physical"
 	"polyquery/internal/plan"
 	"polyquery/internal/types"
@@ -27,6 +28,9 @@ type Context struct {
 	Threads int
 	// MorselRows is the number of rows per parallel work unit (0: default).
 	MorselRows int
+	// Native is the kernel library used by native operators (nil: native
+	// execution is off — not requested or not loaded).
+	Native *native.Lib
 
 	// serial > 0 while building plans evaluated per outer row (correlated
 	// subqueries), which never use parallel workers.
