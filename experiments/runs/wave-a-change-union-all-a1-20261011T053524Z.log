@@ -13,3 +13,4 @@
 2026-10-11T05:43:46+00:00 [a-change-union-all-go-a1-20261011T053524Z] validating (clean clone, sandboxed)
 2026-10-11T05:44:06+00:00 [a-change-union-all-python-a1-20261011T053526Z] outcome=tests_failed cost=$3.480239 turns=71 wall=472.8s
 2026-10-11T05:44:09+00:00 [a-change-union-all-go-a1-20261011T053524Z] outcome=tests_failed cost=$3.616785200000001 turns=74 wall=495.0s
+2026-10-11T05:44:10+00:00 [a-change-union-all-rust-a1-20261011T053528Z] outcome=tests_failed cost=$3.743945800000001 turns=78 wall=476.4s
