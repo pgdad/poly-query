@@ -1,6 +1,6 @@
 # Plan: Clojure AOT compilation, direct linking and JVM start-up tuning
 
-Status: **proposal, not started** (2026-10-11).
+Status: **approved and queued** (2026-10-11): Track B, Java and Clojure, after the optimize-latency re-runs (HI-007) and their quiet-host benchmark. Task `jvm-tuning` in `experiments/prompts/tasks.json`.
 
 ## 1. Where the Clojure engine stands today (read from the code, not run)
 
