@@ -22,6 +22,9 @@ pub struct Config {
     pub query_timeout_ms: u64,
 }
 
+/// Upper bound of the default `--threads` (the CPU count otherwise).
+pub const DEFAULT_MAX_THREADS: usize = 16;
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -31,9 +34,13 @@ impl Default for Config {
             max_ingest_bytes: 4 * 1024 * 1024 * 1024,
             max_table_rows: 500_000_000,
             max_join_rows: 100_000_000,
+            // More workers per query rarely pay off (thread start-up and
+            // merging of partial results grow with the count) and would
+            // oversubscribe the CPUs under concurrent queries.
             threads: std::thread::available_parallelism()
                 .map(|n| n.get())
-                .unwrap_or(1),
+                .unwrap_or(1)
+                .min(DEFAULT_MAX_THREADS),
             log_level: LogLevel::Info,
             native_kernels: None,
             query_timeout_ms: 0,

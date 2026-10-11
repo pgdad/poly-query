@@ -349,7 +349,7 @@ connection.
 |---|---|
 | `mode: "row"` | the row-at-a-time Volcano engine (`exec::operators`), kept unchanged as the **baseline**; always single-threaded |
 | `mode: "vectorized"` / `"auto"` (default) | batch execution over column vectors (`exec::vector`), batches of 2,048 rows |
-| `threads: N` | parallel scans, filters, projections, join probes, aggregation and sorting in vectorized mode; default `--threads` (CPU count). `threads: 1` is fully serial |
+| `threads: N` | parallel scans, filters, projections, join probes, aggregation, DISTINCT and sorting in vectorized mode; default `--threads` (the CPU count, at most 16). `threads: 1` is fully serial |
 | `join: "hash"` | hash join for equi-joins (other joins: nested loop) |
 | `join: "merge"` | sort-merge join for equi-joins (INNER and LEFT) |
 | `join: "nested_loop"` | nested-loop join for every join, including equi-joins |
@@ -536,7 +536,7 @@ per query as seen by the client, best of 7, milliseconds). Machine:
 Phase 4 column comes from an earlier, quieter run). "Phase 4 engine" is the
 accepted engine before this phase (commit `978d364`).
 
-| Query | Phase 4 engine | `mode: row` | vectorized, 1 thread | vectorized, 8 threads | default (vectorized, 32 threads) |
+| Query | Phase 4 engine | `mode: row` | vectorized, 1 thread | vectorized, 8 threads | vectorized, 32 threads |
 |---|---:|---:|---:|---:|---:|
 | Q1 filter + COUNT (1M) | 86 | 85 | 3 | 1 | 1 |
 | Q2 GROUP BY 20 groups, 5 aggregates | 120 | 120 | 9 | 1 | 1 |
@@ -555,7 +555,8 @@ Vectorized execution alone is 10–30× faster than the row baseline; with 8
 threads, scan/aggregation/join queries gain another 2–9× (Q7: the scan and
 materialization run in parallel, the radix sort itself is one serial
 linear pass). With 32 threads the per-query thread start-up and merging
-of 32 partial results cost about as much as they gain on 1M-row tables.
+of 32 partial results cost about as much as they gain on 1M-row tables
+(hence the default of at most 16 threads).
 `mode: row` is the unchanged Phase 4 operator code; it benefits from the
 logical optimizer like every mode (Q11: join reordering).
 
