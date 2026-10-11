@@ -78,6 +78,12 @@ ENDF plan_statement
 // plan_query(x0 BoundQuery*) -> x0 physical PlanNode*
 LFUNC plan_query
     ENTER 1
+    mov  x19, x0
+    TLS_ADDR x9, g_x_optimize           // logical rewrites (optimize.S)
+    ldr  w9, [x9]
+    cbz  w9, 1f
+    bl   opt_query
+1:  mov  x0, x19
     bl   lp_build
     mov  x19, x0
     bl   pp_rewrite
