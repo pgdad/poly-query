@@ -27,6 +27,7 @@ import json
 import os
 import random
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -303,6 +304,23 @@ def _prepare_continuation(run_id: str, lang: str, task: str, track: str, attempt
 
 # ------------------------------------------------------------------ run
 
+# Languages whose agents run natively on a remote host (assembly-engines-plan §8: AArch64 on spark).
+REMOTE_SANDBOX = "/opt/pq/agent/sandbox.sh"   # installed by tools/remote/spark_agent_setup.sh
+REMOTE_RUN_ROOT = "/srv/pqagent/runs"
+
+
+def agent_host(lang: str) -> str | None:
+    return json.loads((PROMPTS / "languages.json").read_text()).get(lang, {}).get("agent_host")
+
+
+def ssh_cmd(host: str) -> list[str]:
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=30", host]
+
+
+def rsync(src: str, dst: str, *extra: str) -> None:
+    sh(["rsync", "-a", "--delete", *extra, src, dst])
+
+
 def claude_version() -> str | None:
     p = sh(["claude", "--version"], check=False)
     return p.stdout.strip() or None
@@ -343,7 +361,20 @@ def run(run_id: str, timeout_min: int, budget_usd: float, max_turns: int | None)
 
     prompt = ("Read TASK.md in the current directory carefully and complete the task it describes. "
               "Work autonomously until the definition of done is met.")
-    cmd = [str(SANDBOX), str(ws), str(cfg), str(scr), "--",
+    host = agent_host(m["language"])
+    rrd = f"{REMOTE_RUN_ROOT}/{run_id}"
+    if host:
+        # The agent runs natively on the remote host in the same kind of sandbox; the credential copy
+        # exists there only for the run's duration.
+        m["agent_host"] = host
+        save_manifest(run_id, m)
+        sh([*ssh_cmd(host), f"mkdir -p {rrd} && chmod 700 {rrd}"])
+        for d in ("workspace", "config", "scratch"):
+            rsync(f"{rd / d}/", f"{host}:{rrd}/{d}/")
+        sbx, rws, rcfg, rscr = REMOTE_SANDBOX, f"{rrd}/workspace", f"{rrd}/config", f"{rrd}/scratch"
+    else:
+        sbx, rws, rcfg, rscr = str(SANDBOX), str(ws), str(cfg), str(scr)
+    cmd = [sbx, rws, rcfg, rscr, "--",
            "timeout", "--signal=TERM", "--kill-after=60", f"{timeout_min * 60}",
            "claude", "-p", prompt, "--output-format", "stream-json", "--verbose",
            "--model", m["model"], "--effort", m["effort"],
@@ -351,6 +382,8 @@ def run(run_id: str, timeout_min: int, budget_usd: float, max_turns: int | None)
            "--max-budget-usd", str(budget_usd)]
     if max_turns:
         cmd += ["--max-turns", str(max_turns)]
+    if host:
+        cmd = [*ssh_cmd(host), shlex.join(cmd)]
     env = dict(os.environ)
     transcript = rd / "transcript.jsonl"
     t0 = time.time()
@@ -366,8 +399,16 @@ def run(run_id: str, timeout_min: int, budget_usd: float, max_turns: int | None)
             out.flush()
             if guard_reason is None and (guard_reason := usage_violation(ev)):
                 print(f"[{run_id}] usage guard: {guard_reason}; stopping agent", flush=True)
+                if host:  # closing ssh does not stop the remote sandbox
+                    sh([*ssh_cmd(host), f"sudo -n pkill -TERM -f {shlex.quote(rrd)}/workspace"], check=False)
                 proc.terminate()
         rc = proc.wait()
+    if host:
+        try:
+            rsync(f"{host}:{rrd}/workspace/", f"{ws}/")
+            rsync(f"{host}:{rrd}/config/", f"{cfg}/", "--exclude", ".credentials.json")
+        finally:
+            sh([*ssh_cmd(host), f"rm -f {rrd}/config/.credentials.json"], check=False)
     m = load_manifest(run_id)
     if guard_reason:
         m["termination_reason"] = "usage_guard"
@@ -762,11 +803,26 @@ fi
    --report conformance-modes.json -q > validate-modes.log 2>&1; echo "modes_exit=$?" >> validate-status
 """
         extra.append("conformance-modes.json")
-    (vscr / "validate.sh").write_text(script)
     cfg = rd / "config"
     t0 = time.time()
-    sh([str(SANDBOX), str(vd), str(cfg), str(vscr), "--", "bash", str(vscr / "validate.sh")], check=False, capture=True,
-       timeout=6 * 3600)
+    host = agent_host(lang)
+    if host:
+        # Native validation on the agent's host; the hidden tests exist there only while it runs.
+        rrd = f"{REMOTE_RUN_ROOT}/{run_id}"
+        (vscr / "validate.sh").write_text(script.replace(str(vd), f"{rrd}/validate"))
+        sh([*ssh_cmd(host), f"mkdir -p {rrd}/config && chmod 700 {rrd}"])
+        rsync(f"{vd}/", f"{host}:{rrd}/validate/")
+        rsync(f"{vscr}/", f"{host}:{rrd}/vscratch/")
+        try:
+            sh([*ssh_cmd(host), shlex.join([REMOTE_SANDBOX, f"{rrd}/validate", f"{rrd}/config", f"{rrd}/vscratch", "--",
+                                            "bash", f"{rrd}/vscratch/validate.sh"])], check=False, timeout=6 * 3600)
+            rsync(f"{host}:{rrd}/validate/", f"{vd}/", "--exclude", "datasets/generated")
+        finally:
+            sh([*ssh_cmd(host), f"rm -rf {rrd}/validate {rrd}/vscratch"], check=False)
+    else:
+        (vscr / "validate.sh").write_text(script)
+        sh([str(SANDBOX), str(vd), str(cfg), str(vscr), "--", "bash", str(vscr / "validate.sh")], check=False,
+           capture=True, timeout=6 * 3600)
     status = dict(l.split("=", 1) for l in (vd / "validate-status").read_text().split() if "=" in l) \
         if (vd / "validate-status").exists() else {}
     report = json.loads((vd / "conformance.json").read_text()) if (vd / "conformance.json").exists() else None
