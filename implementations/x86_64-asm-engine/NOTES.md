@@ -51,6 +51,7 @@ non-DISTINCT queries. See README "HTTP server" for details.
 ## Next steps / ideas
 
 * Phase 5 (execution modes, parallelism, join algorithms) not started.
-* Possible improvements: release `cat_lock` during `save` / `open` parsing
-  (like `load`); decode mmap'd PQCF columns once in the server instead of per
+* Possible improvements: release `cat_lock` during `save`, `stats` and
+  `CREATE INDEX` (needs care with lazily decoded columns); decode mmap'd PQCF
+  columns once in the server instead of per
   query child.
