@@ -9,7 +9,7 @@
     },
     "build_steps": [
       {
-        "step": "java $(JVM_FLAGS) -XX:AOTCacheOutput=build/polyquery.aot -cp build/polyquery.jar polyquery.training.AotTraining",
+        "step": "java $(JVM_FLAGS) -XX:AOTCacheOutput=build/polyquery.aot -cp build/polyquery.jar polyquery.training.AotTraining build/aot-training",
         "why": "classes pre-loaded and linked plus method profiles of a training run (synthetic data, generic queries, driven through the real session entry point); used by the launcher with -XX:AOTCache when newer than the jar, ignored silently when unusable; the build succeeds without it if training fails"
       }
     ],
@@ -30,6 +30,8 @@
     "code": [
       "sort: order-preserving 64-bit keys per sort column (plus a second string prefix and the length) compared in one loop, no per-comparison dispatch on the column kind",
       "INT64/DECIMAL/FLOAT64 arithmetic: one small kernel class per operator instead of a switch on the operator per element",
+      "column statistics: typed loops over the chunks' primitive arrays and a primitive exact distinct set instead of boxing every value into a HashSet",
+      "string comparison with a constant over small dictionaries: evaluated once per dictionary entry, rows map their codes",
       "object interning (group keys, DISTINCT aggregates, dictionary encoding): primitive open-addressing table instead of HashMap<Object, Integer>"
     ],
     "dropped": [
@@ -39,7 +41,9 @@
       "-XX:+UseTransparentHugePages, -XX:+AlwaysPreTouch, -Xms16g, -Xmn4g, -XX:ReservedCodeCacheSize=64m (no gain or slower; more RSS)",
       "G1 (default), ZGC, Serial GC (no latency gain; more RSS, or slower loading)",
       "-XX:CompileThresholdScaling=0.25 / 0.1 (no further gain / +5 ms start-up)",
-      "hoisting the operator switch out of the arithmetic loops within one class (C2 already unswitches it: no measurable effect)"
-    ]
+      "hoisting the operator switch out of the arithmetic loops within one class (C2 already unswitches it: no measurable effect)",
+      "plain instanceof instead of pattern switches at the call sites the parallel workers link concurrently (cold -5 %, within noise)"
+    ],
+    "launcher": "bin/polyquery locates the engine from $0 without starting processes (no dirname/readlink/cd subshell unless the launcher is a symlink)"
   }
 }

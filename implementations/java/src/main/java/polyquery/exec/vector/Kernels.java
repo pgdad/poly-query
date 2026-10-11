@@ -852,6 +852,13 @@ final class Kernels {
         private String[] cachedDict;
         private byte[] cache;
 
+        /**
+         * Dictionaries up to this size are compared with the constant entry by entry up front;
+         * rows then only map their codes (a small loop that is compiled early). Larger ones are
+         * compared lazily, for the codes that occur.
+         */
+        private static final int EAGER_DICTIONARY = 4096;
+
         /** @param constant the right operand if it is a non-null constant, else null */
         StringCompare(CompareOp op, VecExpr left, VecExpr right, String constant) {
             this.op = op;
@@ -870,6 +877,23 @@ final class Kernels {
             return test(op, Values.compareStrings(x, y));
         }
 
+        /** {@code r[i] = result of code i} at the active non-null positions (1 = true, 0 = false). */
+        private static void mapCodes(byte[] results, Vec a, int[] sel, int n, long[] r) {
+            int[] codes = a.codes;
+            if (!a.hasNulls && sel == null) {
+                for (int i = 0; i < n; i++) {
+                    r[i] = results[codes[i]] - 1;
+                }
+                return;
+            }
+            for (int k = 0; k < n; k++) {
+                int i = sel == null ? k : sel[k];
+                if (!a.hasNulls || !a.nulls[i]) {
+                    r[i] = results[codes[i]] - 1;
+                }
+            }
+        }
+
         @Override
         public Vec eval(Batch b, int[] sel, int n) {
             Vec a = left.eval(b, sel, n);
@@ -880,6 +904,15 @@ final class Kernels {
                 if (cachedDict != a.dict) {
                     cachedDict = a.dict;
                     cache = new byte[a.dict.length]; // 0 = unknown, 1 = false, 2 = true
+                    if (a.dict.length <= EAGER_DICTIONARY) {
+                        for (int code = 0; code < cache.length; code++) {
+                            cache[code] = compare(a.dict[code], constant) ? (byte) 2 : (byte) 1;
+                        }
+                    }
+                }
+                if (cache.length <= EAGER_DICTIONARY) {
+                    mapCodes(cache, a, sel, n, r);
+                    return out;
                 }
                 int[] codes = a.codes;
                 boolean nul = a.hasNulls;

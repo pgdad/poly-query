@@ -76,6 +76,44 @@ final class StorageTest {
         }
     }
 
+    /**
+     * Counting by {@code long} keys (no boxing) gives exactly the counts of the boxed values, on
+     * both sides of the switch from the exact set to the HyperLogLog sketch, for every key type.
+     */
+    static void testDistinctCounterLongKeysMatchBoxedValues() {
+        java.util.Random r = new java.util.Random(3);
+        for (int distinct : new int[] {0, 1, 1_000, 100_000, 100_001, 250_000}) {
+            polyquery.storage.DistinctCounter boxedLongs = new polyquery.storage.DistinctCounter();
+            polyquery.storage.DistinctCounter longs = new polyquery.storage.DistinctCounter();
+            polyquery.storage.DistinctCounter boxedDoubles = new polyquery.storage.DistinctCounter();
+            polyquery.storage.DistinctCounter doubles = new polyquery.storage.DistinctCounter();
+            polyquery.storage.DistinctCounter boxedInts = new polyquery.storage.DistinctCounter();
+            polyquery.storage.DistinctCounter ints = new polyquery.storage.DistinctCounter();
+            for (int i = 0; i < distinct * 2; i++) {
+                long v = (i % Math.max(1, distinct)) * 7_919L - 3 + (i == 5 ? Long.MIN_VALUE : 0);
+                boxedLongs.add(v);
+                longs.addLong(v);
+                double d = (i % Math.max(1, distinct)) * 0.25 - 100;
+                boxedDoubles.add(d);
+                doubles.addLong(Double.doubleToLongBits(d));
+                int day = i % Math.max(1, distinct) - 50_000;
+                boxedInts.add(day);
+                ints.addLong(day);
+            }
+            Assert.eq(boxedLongs.count(), longs.count());
+            Assert.eq(boxedDoubles.count(), doubles.count());
+            Assert.eq(boxedInts.count(), ints.count());
+            if (distinct <= 1_000) { // exact: the values plus the one shifted by Long.MIN_VALUE
+                Assert.eq(distinct > 5 ? distinct + 1L : (long) distinct, longs.count());
+            }
+        }
+        polyquery.storage.DistinctCounter bools = new polyquery.storage.DistinctCounter();
+        for (int i = 0; i < 1000; i++) {
+            bools.addLong(r.nextBoolean() ? 1 : 0);
+        }
+        Assert.eq(2L, bools.count());
+    }
+
     static void testCorruptFilesAreRejected() throws IOException {
         Path dir = tempDir();
         try {
