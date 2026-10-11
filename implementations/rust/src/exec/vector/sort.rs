@@ -5,16 +5,19 @@
 //! * Full sorts **normalize** the keys: every key becomes an unsigned code
 //!   per row whose natural order is the requested order (direction and NULL
 //!   placement folded in; numbers by an order-preserving bit encoding,
-//!   strings and dictionary codes by their dense rank), with the minimal
-//!   bit width. The codes of all keys are packed into one 64- or 128-bit key
-//!   per row, and `(packed key, row)` pairs are sorted: an MSD partition on
-//!   the top varying bits on several threads, then the partitions in
-//!   parallel (LSD radix sort or `sort_unstable`). Ties are broken by the
-//!   row number, which gives the stable order.
-//! * Keys needing more than 128 bits use a comparator over the codes;
-//!   generic (`Values`) key vectors a comparator over the values. Large
-//!   comparator-sorted inputs are cut into chunks sorted on separate
-//!   threads and merged.
+//!   dictionary codes by their dense rank, the first string key by the 8
+//!   bytes after the prefix all its strings share, later string keys by
+//!   their rank), with the minimal bit width. The top 64 bits of each
+//!   row's concatenated codes and the row number are sorted as
+//!   `(u64, u32)` pairs: an MSD partition on the top varying bits on
+//!   several threads, then the partitions in parallel (LSD radix sort or
+//!   `sort_unstable`). Ties are broken by the row number, which gives the
+//!   stable order. Where that key is inexact (string prefixes, codes
+//!   longer than 64 bits), runs of equal keys are then ordered by comparing
+//!   the full codes and strings.
+//! * Generic (`Values`) key vectors use a comparator over the values;
+//!   large inputs are cut into chunks sorted on separate threads and
+//!   merged.
 //! * Top-N uses selection (`select_nth_unstable`) with the row number as
 //!   final tie-breaker, i.e. the prefix of the stable order.
 
@@ -413,13 +416,11 @@ impl KeyCodes<'_> {
     }
 }
 
-/// The strings of a key coded by prefix: `offset` bytes are shared by all
-/// of them, the code holds the next 8.
+/// The strings of a key coded by prefix.
 struct Ties<'a> {
     strings: Strings<'a>,
     valid: Option<&'a [bool]>,
     descending: bool,
-    offset: usize,
 }
 
 /// Plain or dictionary-encoded strings of a vector.
@@ -440,32 +441,6 @@ impl<'a> Strings<'a> {
 }
 
 impl Ties<'_> {
-    /// Orders a run of pairs whose codes are equal up to this key: by the
-    /// full strings, then (later keys) by packed key and row.
-    fn order_run<K: PackedKey>(&self, run: &mut [(K, u32)]) {
-        let row0 = run[0].1 as usize;
-        if self.valid.is_some_and(|v| !v[row0]) {
-            return; // NULLs (a run is all NULL or all non-NULL)
-        }
-        // Equal codes and equal lengths within the coded bytes mean equal
-        // strings.
-        let len0 = self.strings.get(row0).len();
-        if len0 <= self.offset + 8
-            && run
-                .iter()
-                .all(|p| self.strings.get(p.1 as usize).len() == len0)
-        {
-            return;
-        }
-        run.sort_unstable_by(|a, b| {
-            let o = self
-                .strings
-                .get(a.1 as usize)
-                .cmp(self.strings.get(b.1 as usize));
-            (if self.descending { o.reverse() } else { o }).then(a.cmp(b))
-        });
-    }
-
     /// Compares rows `a` and `b` whose codes are equal.
     fn compare(&self, a: usize, b: usize) -> Ordering {
         if self.valid.is_some_and(|v| !v[a]) {
@@ -497,18 +472,16 @@ fn key_codes<'a>(
         Data::Bool(x) => x.iter().map(|&b| u64::from(b)).collect(),
         Data::Float(x) => x.iter().map(|&f| enc_f64(f)).collect(),
         Data::Str(x) if allow_ties => {
-            let (prefixes, offset) = string_prefixes(x, threads);
-            ties = Some((Strings::Plain(x), offset));
-            prefixes
+            ties = Some(Strings::Plain(x));
+            string_prefixes(x, threads)
         }
         Data::Str(x) => string_ranks(x, threads),
         Data::Dict(codes, dict) => {
             let rank = if dict.len() <= 4096 {
                 dict_ranks(dict)
             } else if allow_ties {
-                let (prefixes, offset) = string_prefixes(dict, threads);
-                ties = Some((Strings::Dict(codes, dict), offset));
-                prefixes
+                ties = Some(Strings::Dict(codes, dict));
+                string_prefixes(dict, threads)
             } else {
                 string_ranks(dict, threads)
             };
@@ -543,11 +516,10 @@ fn key_codes<'a>(
         .iter()
         .fold((u64::MAX, 0u64), |(lo, hi), &e| (lo.min(e), hi.max(e)));
     let bits = 64 - (hi - lo).leading_zeros();
-    let ties = ties.map(|(strings, offset)| Ties {
+    let ties = ties.map(|strings| Ties {
         strings,
         valid,
         descending: key.descending,
-        offset,
     });
     if bits > 0 || ties.is_some() {
         if key.descending {
@@ -565,12 +537,12 @@ fn key_codes<'a>(
 }
 
 /// Order-preserving codes of strings up to ties: the 8 bytes following
-/// the longest prefix shared by all strings (big-endian, zero padded), and
-/// the length of that shared prefix. Computed on up to `threads` threads.
-fn string_prefixes(v: &[Arc<str>], threads: usize) -> (Vec<u64>, usize) {
+/// the longest prefix shared by all strings (big-endian, zero padded).
+/// Computed on up to `threads` threads.
+fn string_prefixes(v: &[Arc<str>], threads: usize) -> Vec<u64> {
     let n = v.len();
     if n == 0 {
-        return (Vec::new(), 0);
+        return Vec::new();
     }
     let threads = if n < 2 * PARALLEL_SORT_MIN {
         1
@@ -609,7 +581,7 @@ fn string_prefixes(v: &[Arc<str>], threads: usize) -> (Vec<u64>, usize) {
             })
             .collect(),
     );
-    (codes, offset)
+    codes
 }
 
 /// Dense ranks of dictionary entries in byte order (equal strings share a
@@ -710,166 +682,45 @@ fn rank_segment(v: &[Arc<str>], base: usize, seg: &mut [(u64, u32)], ranks: &[At
     }
 }
 
-/// An unsigned integer holding the concatenated codes of a row's keys.
-trait PackedKey: Copy + Ord + Send + Sync + Default {
-    const BITS: u32;
-    /// `self` shifted left by `bits` with `code` in the low bits.
-    fn push(self, bits: u32, code: u64) -> Self;
-    /// The 8-bit digit starting at bit `shift`.
-    fn digit(self, shift: u32) -> usize;
-    fn xor(self, other: Self) -> Self;
-    fn or(self, other: Self) -> Self;
-    fn and(self, other: Self) -> Self;
-    fn leading_zeros(self) -> u32;
-    /// All bits set except the lowest `low` ones.
-    fn high_mask(low: u32) -> Self;
-}
+/// A `(key, row)` pair of a sort.
+type Pair = (u64, u32);
 
-impl PackedKey for u64 {
-    const BITS: u32 = 64;
-    #[inline]
-    fn push(self, bits: u32, code: u64) -> u64 {
-        self.checked_shl(bits).unwrap_or(0) | code
-    }
-    #[inline]
-    fn digit(self, shift: u32) -> usize {
-        ((self >> shift) & 0xff) as usize
-    }
-    fn xor(self, other: u64) -> u64 {
-        self ^ other
-    }
-    fn or(self, other: u64) -> u64 {
-        self | other
-    }
-    fn and(self, other: u64) -> u64 {
-        self & other
-    }
-    fn high_mask(low: u32) -> u64 {
-        u64::MAX.checked_shl(low).unwrap_or(0)
-    }
-    fn leading_zeros(self) -> u32 {
-        u64::leading_zeros(self)
-    }
-}
-
-/// A 128-bit packed key as two words (pairs with a row number take 24
-/// bytes, where `(u128, u32)` takes 32 because of `u128`'s alignment).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
-struct Wide {
-    hi: u64,
-    lo: u64,
-}
-
-impl PackedKey for Wide {
-    const BITS: u32 = 128;
-    #[inline]
-    fn push(self, bits: u32, code: u64) -> Wide {
-        match bits {
-            0 => self,
-            64.. => Wide {
-                hi: self.lo,
-                lo: code,
-            },
-            _ => Wide {
-                hi: (self.hi << bits) | (self.lo >> (64 - bits)),
-                lo: (self.lo << bits) | code,
-            },
-        }
-    }
-    #[inline]
-    fn digit(self, shift: u32) -> usize {
-        let x = match shift {
-            64.. => self.hi >> (shift - 64),
-            0 => self.lo,
-            _ => (self.lo >> shift) | (self.hi << (64 - shift)),
-        };
-        (x & 0xff) as usize
-    }
-    fn xor(self, other: Wide) -> Wide {
-        Wide {
-            hi: self.hi ^ other.hi,
-            lo: self.lo ^ other.lo,
-        }
-    }
-    fn or(self, other: Wide) -> Wide {
-        Wide {
-            hi: self.hi | other.hi,
-            lo: self.lo | other.lo,
-        }
-    }
-    fn and(self, other: Wide) -> Wide {
-        Wide {
-            hi: self.hi & other.hi,
-            lo: self.lo & other.lo,
-        }
-    }
-    fn high_mask(low: u32) -> Wide {
-        Wide {
-            hi: u64::MAX.checked_shl(low.saturating_sub(64)).unwrap_or(0),
-            lo: u64::MAX.checked_shl(low).unwrap_or(0),
-        }
-    }
-    fn leading_zeros(self) -> u32 {
-        if self.hi == 0 {
-            64 + self.lo.leading_zeros()
-        } else {
-            self.hi.leading_zeros()
-        }
-    }
-}
-
-/// Sorts rows `0..n` by the concatenated codes (first component most
-/// significant), ties by row number.
+/// Sorts rows `0..n` by the components' codes (first component most
+/// significant, ties by row number). The codes are concatenated and the
+/// top 64 bits sorted as integers. If that key is inexact — a string coded
+/// by prefix, or codes longer than 64 bits — runs of rows that are equal
+/// up to the inexact part are then ordered by comparing the components
+/// (rare in practice: they need equal prefixes or equal leading 64 bits).
 fn normalized_sort(codes: &[KeyCodes], n: usize, threads: usize) -> Vec<u32> {
-    let bits: u32 = codes.iter().map(|c| c.bits).sum();
-    let tie = codes.iter().position(|c| c.ties.is_some());
-    if bits == 0 && tie.is_none() {
-        (0..n as u32).collect()
-    } else if bits <= 64 {
-        packed_sort::<u64>(codes, tie, n, threads)
-    } else if bits <= 128 {
-        packed_sort::<Wide>(codes, tie, n, threads)
-    } else {
-        let cmp = |x: &u32, y: &u32| {
-            let (a, b) = (*x as usize, *y as usize);
-            codes
-                .iter()
-                .map(|c| {
-                    c.codes[a]
-                        .cmp(&c.codes[b])
-                        .then_with(|| c.ties.as_ref().map_or(Ordering::Equal, |t| t.compare(a, b)))
-                })
-                .find(|o| o.is_ne())
-                .unwrap_or(Ordering::Equal)
-                .then(x.cmp(y))
-        };
-        comparator_sort(n, threads, &cmp)
+    let total: u32 = codes.iter().map(|c| c.bits).sum();
+    // Bits (from the top) up to the end of the first prefix-coded string.
+    let tie_end = codes
+        .iter()
+        .scan(0, |end, c| {
+            *end += c.bits;
+            Some((*end, c.ties.is_some()))
+        })
+        .find(|&(_, ties)| ties)
+        .map(|(end, _)| end);
+    if total == 0 && tie_end.is_none() {
+        return (0..n as u32).collect();
     }
-}
-
-/// Sorts by the codes packed into `K`; then, if component `tie` codes
-/// strings by prefix, orders the runs of rows that are equal up to it by
-/// their strings.
-fn packed_sort<K: PackedKey>(
-    codes: &[KeyCodes],
-    tie: Option<usize>,
-    n: usize,
-    threads: usize,
-) -> Vec<u32> {
-    let (pairs, diff) = pairs_by(n, threads, |i| pack::<K>(codes, i));
+    let width = total.min(64);
+    let (pairs, diff) = pairs_by(n, threads, |i| pack(codes, i));
     let mut pairs = sort_pairs(pairs, diff, threads);
-    if let Some(t) = tie
-        && let Some(ties) = &codes[t].ties
-    {
-        let low: u32 = codes[t + 1..].iter().map(|c| c.bits).sum();
-        let mask = K::high_mask(low);
-        // Segments cut between runs, ordered on separate threads.
+    let exact_to = match tie_end {
+        Some(end) => Some(end.min(64)),
+        None => (total > 64).then_some(64),
+    };
+    if let Some(m) = exact_to {
+        // Runs: pairs equal in the key's top `m` bits.
+        let mask = u64::MAX.checked_shl(width - m).unwrap_or(0);
         let size = n.div_ceil(threads.max(1)).max(PARALLEL_SORT_MIN);
         let mut segments = Vec::new();
-        let mut rest: Pairs<K> = &mut pairs;
+        let mut rest: &mut [Pair] = &mut pairs;
         while !rest.is_empty() {
             let mut cut = size.min(rest.len());
-            while cut < rest.len() && rest[cut].0.and(mask) == rest[cut - 1].0.and(mask) {
+            while cut < rest.len() && rest[cut].0 & mask == rest[cut - 1].0 & mask {
                 cut += 1;
             }
             let (segment, tail) = std::mem::take(&mut rest).split_at_mut(cut);
@@ -879,47 +730,68 @@ fn packed_sort<K: PackedKey>(
         pool::scoped(
             segments
                 .into_iter()
-                .map(|segment| move || order_runs(segment, mask, ties))
+                .map(|segment| move || order_runs(segment, mask, codes))
                 .collect(),
         );
     }
-    sorted_rows(pairs)
+    pairs.into_iter().map(|(_, i)| i).collect()
 }
 
-/// Orders the runs of `pairs` that are equal under `mask` by `ties`.
-fn order_runs<K: PackedKey>(pairs: &mut [(K, u32)], mask: K, ties: &Ties) {
+/// The top 64 bits of the concatenated codes of row `i` (all of them,
+/// right-aligned, if they are shorter).
+#[inline]
+fn pack(codes: &[KeyCodes], i: usize) -> u64 {
+    let mut key = 0u64;
+    let mut room = 64;
+    for c in codes {
+        if c.bits <= room {
+            key = key.checked_shl(c.bits).unwrap_or(0) | c.codes[i];
+            room -= c.bits;
+        } else {
+            if room > 0 {
+                key = (key << room) | (c.codes[i] >> (c.bits - room));
+            }
+            break;
+        }
+    }
+    key
+}
+
+/// Orders the runs of `pairs` that are equal under `mask` by comparing the
+/// components (codes, then strings for prefix-coded ones), then rows.
+fn order_runs(pairs: &mut [Pair], mask: u64, codes: &[KeyCodes]) {
+    let cmp = |a: usize, b: usize| {
+        codes
+            .iter()
+            .map(|c| {
+                c.codes[a]
+                    .cmp(&c.codes[b])
+                    .then_with(|| c.ties.as_ref().map_or(Ordering::Equal, |t| t.compare(a, b)))
+            })
+            .find(|o| o.is_ne())
+            .unwrap_or(Ordering::Equal)
+            .then(a.cmp(&b))
+    };
     let mut i = 0;
     while i < pairs.len() {
-        let m = pairs[i].0.and(mask);
+        let m = pairs[i].0 & mask;
         let mut j = i + 1;
-        while j < pairs.len() && pairs[j].0.and(mask) == m {
+        while j < pairs.len() && pairs[j].0 & mask == m {
             j += 1;
         }
         if j - i > 1 {
-            ties.order_run(&mut pairs[i..j]);
+            pairs[i..j].sort_unstable_by(|x, y| cmp(x.1 as usize, y.1 as usize));
         }
         i = j;
     }
 }
 
-/// The packed key of row `i`.
-#[inline]
-fn pack<K: PackedKey>(codes: &[KeyCodes], i: usize) -> K {
-    codes
-        .iter()
-        .fold(K::default(), |k, c| k.push(c.bits, c.codes[i]))
-}
-
 /// The pairs `(key(i), i)` for rows `0..n`, computed on up to `threads`
 /// threads, and the bits in which the keys differ (OR of `key ^ key(0)`).
-fn pairs_by<K: PackedKey>(
-    n: usize,
-    threads: usize,
-    key: impl Fn(usize) -> K + Sync,
-) -> (Vec<(K, u32)>, K) {
-    let mut pairs = vec![(K::default(), 0u32); n];
+fn pairs_by(n: usize, threads: usize, key: impl Fn(usize) -> u64 + Sync) -> (Vec<Pair>, u64) {
+    let mut pairs = vec![(0u64, 0u32); n];
     if n == 0 {
-        return (pairs, K::default());
+        return (pairs, 0);
     }
     let first = key(0);
     let threads = threads.min(n / PARALLEL_SORT_MIN).max(1);
@@ -931,11 +803,11 @@ fn pairs_by<K: PackedKey>(
             .enumerate()
             .map(|(c, chunk)| {
                 move || {
-                    let mut diff = K::default();
+                    let mut diff = 0;
                     for (j, p) in chunk.iter_mut().enumerate() {
                         let i = c * size + j;
                         let k = key(i);
-                        diff = diff.or(k.xor(first));
+                        diff |= k ^ first;
                         *p = (k, i as u32);
                     }
                     diff
@@ -943,32 +815,30 @@ fn pairs_by<K: PackedKey>(
             })
             .collect(),
     );
-    let diff = diffs.into_iter().fold(K::default(), K::or);
-    (pairs, diff)
+    (pairs, diffs.into_iter().fold(0, |a, b| a | b))
 }
 
-fn sorted_rows<K>(pairs: Vec<(K, u32)>) -> Vec<u32> {
-    pairs.into_iter().map(|(_, i)| i).collect()
+/// The 8-bit digit of `key` starting at bit `shift`.
+#[inline]
+fn digit(key: u64, shift: u32) -> usize {
+    ((key >> shift) & 0xff) as usize
 }
-
-/// A mutable run of `(key, row)` pairs.
-type Pairs<'a, K> = &'a mut [(K, u32)];
 
 /// Sorts `(key, row)` pairs (rows unique, pairs in ascending row order) by
 /// key and row; `diff` has the bits in which keys differ. Large inputs are
 /// partitioned by their top varying bits (every thread scatters its chunk
 /// straight into the partitions), then the partitions are sorted in place
 /// in parallel.
-fn sort_pairs<K: PackedKey>(mut pairs: Vec<(K, u32)>, diff: K, threads: usize) -> Vec<(K, u32)> {
+fn sort_pairs(mut pairs: Vec<Pair>, diff: u64, threads: usize) -> Vec<Pair> {
     let n = pairs.len();
     if threads <= 1 || n < 2 * PARALLEL_SORT_MIN {
         sort_slice(&mut pairs, &mut Vec::new());
         return pairs;
     }
-    if diff == K::default() {
+    if diff == 0 {
         return pairs; // one key: row order
     }
-    let top = K::BITS - 1 - diff.leading_zeros();
+    let top = 63 - diff.leading_zeros();
     let shift = top.saturating_sub(7);
     let threads = threads.min(n / PARALLEL_SORT_MIN).max(1);
     let size = n.div_ceil(threads);
@@ -979,7 +849,7 @@ fn sort_pairs<K: PackedKey>(mut pairs: Vec<(K, u32)>, diff: K, threads: usize) -
                 move || {
                     let mut h = [0usize; 256];
                     for p in chunk {
-                        h[p.0.digit(shift)] += 1;
+                        h[digit(p.0, shift)] += 1;
                     }
                     h
                 }
@@ -988,9 +858,10 @@ fn sort_pairs<K: PackedKey>(mut pairs: Vec<(K, u32)>, diff: K, threads: usize) -
     );
     // Partition `d` is the concatenation of every chunk's part `d` (in
     // chunk order, so it stays in ascending row order).
-    let mut out = vec![(K::default(), 0u32); n];
-    let mut targets: Vec<Vec<Pairs<K>>> = hists.iter().map(|_| Vec::with_capacity(256)).collect();
-    let mut rest: &mut [(K, u32)] = &mut out;
+    let mut out = vec![(0u64, 0u32); n];
+    let mut targets: Vec<Vec<&mut [Pair]>> =
+        hists.iter().map(|_| Vec::with_capacity(256)).collect();
+    let mut rest: &mut [Pair] = &mut out;
     for d in 0..256 {
         for (c, h) in hists.iter().enumerate() {
             let (part, tail) = std::mem::take(&mut rest).split_at_mut(h[d]);
@@ -1006,7 +877,7 @@ fn sort_pairs<K: PackedKey>(mut pairs: Vec<(K, u32)>, diff: K, threads: usize) -
                 move || {
                     let mut pos = [0usize; 256];
                     for &p in chunk {
-                        let d = p.0.digit(shift);
+                        let d = digit(p.0, shift);
                         parts[d][pos[d]] = p;
                         pos[d] += 1;
                     }
@@ -1017,8 +888,8 @@ fn sort_pairs<K: PackedKey>(mut pairs: Vec<(K, u32)>, diff: K, threads: usize) -
     drop(pairs);
     // Sort the partitions, assigned to threads largest first (each to the
     // least loaded thread).
-    let mut parts: Vec<&mut [(K, u32)]> = Vec::with_capacity(256);
-    let mut rest: &mut [(K, u32)] = &mut out;
+    let mut parts: Vec<&mut [Pair]> = Vec::with_capacity(256);
+    let mut rest: &mut [Pair] = &mut out;
     for d in 0..256 {
         let len = hists.iter().map(|h| h[d]).sum();
         let (part, tail) = std::mem::take(&mut rest).split_at_mut(len);
@@ -1028,7 +899,7 @@ fn sort_pairs<K: PackedKey>(mut pairs: Vec<(K, u32)>, diff: K, threads: usize) -
         }
     }
     parts.sort_by_key(|p| std::cmp::Reverse(p.len()));
-    let mut work: Vec<(usize, Vec<Pairs<K>>)> = (0..threads).map(|_| (0, Vec::new())).collect();
+    let mut work: Vec<(usize, Vec<&mut [Pair]>)> = (0..threads).map(|_| (0, Vec::new())).collect();
     for part in parts {
         let w = work
             .iter_mut()
@@ -1056,7 +927,7 @@ fn sort_pairs<K: PackedKey>(mut pairs: Vec<(K, u32)>, diff: K, threads: usize) -
 /// on the current thread: `sort_unstable` for small inputs, else a stable
 /// LSD radix sort (8-bit digits; digits equal in every key are skipped)
 /// using `scratch` as the second buffer.
-fn sort_slice<K: PackedKey>(items: &mut [(K, u32)], scratch: &mut Vec<(K, u32)>) {
+fn sort_slice(items: &mut [Pair], scratch: &mut Vec<Pair>) {
     let n = items.len();
     if n < 4096 {
         items.sort_unstable();
@@ -1064,21 +935,19 @@ fn sort_slice<K: PackedKey>(items: &mut [(K, u32)], scratch: &mut Vec<(K, u32)>)
     }
     // Only the digits up to the highest varying bit are histogrammed.
     let first = items[0].0;
-    let diff = items
-        .iter()
-        .fold(K::default(), |acc, p| acc.or(p.0.xor(first)));
-    if diff == K::default() {
+    let diff = items.iter().fold(0, |acc, p| acc | (p.0 ^ first));
+    if diff == 0 {
         return; // one key: already in row order
     }
-    let digits = ((K::BITS - diff.leading_zeros()).div_ceil(8)) as usize;
+    let digits = (64 - diff.leading_zeros()).div_ceil(8) as usize;
     let mut hist = vec![[0usize; 256]; digits];
     for &(k, _) in items.iter() {
         for (d, h) in hist.iter_mut().enumerate() {
-            h[k.digit(8 * d as u32)] += 1;
+            h[digit(k, 8 * d as u32)] += 1;
         }
     }
     scratch.clear();
-    scratch.resize(n, (K::default(), 0));
+    scratch.resize(n, (0, 0));
     let mut in_items = true;
     for (d, h) in hist.iter().enumerate() {
         if h.contains(&n) {
@@ -1090,13 +959,13 @@ fn sort_slice<K: PackedKey>(items: &mut [(K, u32)], scratch: &mut Vec<(K, u32)>)
             *o = sum;
             sum += c;
         }
-        let (src, dst): (&[(K, u32)], Pairs<K>) = if in_items {
+        let (src, dst): (&[Pair], &mut [Pair]) = if in_items {
             (items, scratch)
         } else {
             (scratch, items)
         };
         for &it in src {
-            let b = it.0.digit(8 * d as u32);
+            let b = digit(it.0, 8 * d as u32);
             dst[offs[b]] = it;
             offs[b] += 1;
         }
@@ -1304,31 +1173,5 @@ mod tests {
             .map(|s| Arc::from(*s))
             .collect();
         assert_eq!(string_ranks(&v, 1), vec![6, 3, 1, 5, 4, 1, 0]);
-    }
-
-    #[test]
-    fn wide_keys_match_u128() {
-        let mut next = rand_seq(0x1234_5678_9abc_def1);
-        for _ in 0..2000 {
-            let parts: Vec<(u32, u64)> = (0..3)
-                .map(|_| {
-                    let b = (next() % 64 + 1) as u32;
-                    (b, next() & (u64::MAX >> (64 - b)))
-                })
-                .collect();
-            if parts.iter().map(|p| p.0).sum::<u32>() > 128 {
-                continue;
-            }
-            let (mut w, mut u) = (Wide::default(), 0u128);
-            for &(b, c) in &parts {
-                w = w.push(b, c);
-                u = u.checked_shl(b).unwrap_or(0) | c as u128;
-            }
-            assert_eq!(((w.hi as u128) << 64) | w.lo as u128, u);
-            for shift in (0..121).step_by(7) {
-                assert_eq!(w.digit(shift), ((u >> shift) & 0xff) as usize);
-            }
-            assert_eq!(w.leading_zeros(), u.leading_zeros());
-        }
     }
 }
