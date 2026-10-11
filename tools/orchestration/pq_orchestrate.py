@@ -219,7 +219,6 @@ def run(run_id: str, timeout_min: int, budget_usd: float, max_turns: int | None)
     ws, cfg, scr = rd / "workspace", rd / "config", rd / "scratch"
     creds = Path.home() / ".claude/.credentials.json"
     usage_gate(run_id)
-    print(f"{now()} [{run_id}] agent launched", flush=True)
     # Fresh copy of the OAuth credential at run start (never the rest of ~/.claude).
     # The run is capped to the access token's remaining lifetime so the agent never
     # needs to refresh it (refresh-token rotation across copies could invalidate the
@@ -231,6 +230,7 @@ def run(run_id: str, timeout_min: int, budget_usd: float, max_turns: int | None)
             break
         print(f"[{run_id}] waiting for host credential refresh (token valid {remaining_min:.0f} more min)", flush=True)
         time.sleep(120)
+    print(f"{now()} [{run_id}] agent launched (token valid {remaining_min:.0f} min)", flush=True)
     shutil.copy(creds, cfg / ".credentials.json")
     os.chmod(cfg / ".credentials.json", 0o600)
     timeout_min = int(min(timeout_min, remaining_min - 15))
