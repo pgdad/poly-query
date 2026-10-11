@@ -2,18 +2,54 @@ package polyquery.plan;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.UnaryOperator;
 import polyquery.storage.ColumnSchema;
 import polyquery.storage.Table;
 
-/** Logical relational operators. Each node knows its output schema. */
+/**
+ * Logical relational operators: what a query computes, independent of how (access paths, join
+ * algorithms and the execution model are chosen by physical planning). Each node knows its
+ * output schema. Subqueries are part of expressions ({@link Subquery} holds their plan); derived
+ * tables and CTE references are inlined as the plan of their query. {@link LogicalPlanPrinter}
+ * renders a plan for debugging.
+ */
 public sealed interface LogicalPlan {
     List<ColumnSchema> schema();
+
+    /** Input plans, in order. */
+    List<LogicalPlan> children();
+
+    /** This node with its inputs replaced by {@code inputs} (same number, same order). */
+    LogicalPlan withChildren(List<LogicalPlan> inputs);
+
+    /** Rewrites the plan bottom-up: {@code rule} is applied to every node after its inputs were rewritten. */
+    default LogicalPlan transformUp(UnaryOperator<LogicalPlan> rule) {
+        List<LogicalPlan> inputs = children();
+        if (inputs.isEmpty()) {
+            return rule.apply(this);
+        }
+        List<LogicalPlan> rewritten = new ArrayList<>(inputs.size());
+        for (LogicalPlan input : inputs) {
+            rewritten.add(input.transformUp(rule));
+        }
+        return rule.apply(withChildren(rewritten));
+    }
 
     /** Full scan of a catalog table snapshot. */
     record Scan(Table table, String alias) implements LogicalPlan {
         @Override
         public List<ColumnSchema> schema() {
             return table.columns();
+        }
+
+        @Override
+        public List<LogicalPlan> children() {
+            return List.of();
+        }
+
+        @Override
+        public LogicalPlan withChildren(List<LogicalPlan> inputs) {
+            return this;
         }
     }
 
@@ -23,12 +59,32 @@ public sealed interface LogicalPlan {
         public List<ColumnSchema> schema() {
             return List.of();
         }
+
+        @Override
+        public List<LogicalPlan> children() {
+            return List.of();
+        }
+
+        @Override
+        public LogicalPlan withChildren(List<LogicalPlan> inputs) {
+            return this;
+        }
     }
 
     record Filter(LogicalPlan input, BoundExpr predicate) implements LogicalPlan {
         @Override
         public List<ColumnSchema> schema() {
             return input.schema();
+        }
+
+        @Override
+        public List<LogicalPlan> children() {
+            return List.of(input);
+        }
+
+        @Override
+        public LogicalPlan withChildren(List<LogicalPlan> inputs) {
+            return new Filter(inputs.getFirst(), predicate);
         }
     }
 
@@ -44,6 +100,16 @@ public sealed interface LogicalPlan {
             List<ColumnSchema> out = new ArrayList<>(left.schema());
             out.addAll(right.schema());
             return out;
+        }
+
+        @Override
+        public List<LogicalPlan> children() {
+            return List.of(left, right);
+        }
+
+        @Override
+        public LogicalPlan withChildren(List<LogicalPlan> inputs) {
+            return new Join(inputs.get(0), inputs.get(1), kind, condition);
         }
     }
 
@@ -61,6 +127,16 @@ public sealed interface LogicalPlan {
             }
             return out;
         }
+
+        @Override
+        public List<LogicalPlan> children() {
+            return List.of(input);
+        }
+
+        @Override
+        public LogicalPlan withChildren(List<LogicalPlan> inputs) {
+            return new Aggregate(inputs.getFirst(), groupKeys, aggregates);
+        }
     }
 
     record Project(LogicalPlan input, List<BoundExpr> expressions, List<String> names) implements LogicalPlan {
@@ -72,6 +148,16 @@ public sealed interface LogicalPlan {
             }
             return out;
         }
+
+        @Override
+        public List<LogicalPlan> children() {
+            return List.of(input);
+        }
+
+        @Override
+        public LogicalPlan withChildren(List<LogicalPlan> inputs) {
+            return new Project(inputs.getFirst(), expressions, names);
+        }
     }
 
     /** Removes duplicate rows (NULLs equal). */
@@ -80,12 +166,32 @@ public sealed interface LogicalPlan {
         public List<ColumnSchema> schema() {
             return input.schema();
         }
+
+        @Override
+        public List<LogicalPlan> children() {
+            return List.of(input);
+        }
+
+        @Override
+        public LogicalPlan withChildren(List<LogicalPlan> inputs) {
+            return new Distinct(inputs.getFirst());
+        }
     }
 
     record Sort(LogicalPlan input, List<SortKey> keys) implements LogicalPlan {
         @Override
         public List<ColumnSchema> schema() {
             return input.schema();
+        }
+
+        @Override
+        public List<LogicalPlan> children() {
+            return List.of(input);
+        }
+
+        @Override
+        public LogicalPlan withChildren(List<LogicalPlan> inputs) {
+            return new Sort(inputs.getFirst(), keys);
         }
     }
 
@@ -99,7 +205,13 @@ public sealed interface LogicalPlan {
             return columns;
         }
 
-        public UnionAll withInputs(List<LogicalPlan> newInputs) {
+        @Override
+        public List<LogicalPlan> children() {
+            return inputs;
+        }
+
+        @Override
+        public LogicalPlan withChildren(List<LogicalPlan> newInputs) {
             return new UnionAll(List.copyOf(newInputs), columns);
         }
     }
@@ -109,6 +221,16 @@ public sealed interface LogicalPlan {
         @Override
         public List<ColumnSchema> schema() {
             return input.schema();
+        }
+
+        @Override
+        public List<LogicalPlan> children() {
+            return List.of(input);
+        }
+
+        @Override
+        public LogicalPlan withChildren(List<LogicalPlan> inputs) {
+            return new Limit(inputs.getFirst(), offset, limit);
         }
     }
 }

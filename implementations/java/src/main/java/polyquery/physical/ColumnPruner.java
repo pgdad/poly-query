@@ -7,23 +7,17 @@ import polyquery.plan.AggregateCall;
 import polyquery.plan.BoundExpr;
 import polyquery.plan.BoundExprs;
 import polyquery.plan.SortKey;
-import polyquery.plan.Subquery;
 
 /**
- * Column pruning (indexes-and-planning.md §3): determines, top-down, which input slots every
- * operator actually reads and restricts each scan to the columns referenced anywhere above it.
- * Row layouts are unchanged (pruned slots are simply left null), so no expression needs to
- * be rewritten.
+ * Column pruning (indexes-and-planning.md §3), the last physical planning step: determines,
+ * top-down, which input slots every operator actually reads and restricts each scan to the
+ * columns referenced anywhere above it; projected column references and constants nobody reads
+ * are not computed (as the logical {@code ProjectionPruning} rule does, so that
+ * {@code optimize: false} reads the same columns). Row layouts are unchanged (pruned slots are
+ * simply left null), so no expression needs to be rewritten.
  */
-public final class ColumnPruner {
+final class ColumnPruner {
     private ColumnPruner() {
-    }
-
-    /** Input slots read when evaluating {@code e} on a row (see {@link #addReferences}), ascending. */
-    public static int[] references(BoundExpr e) {
-        BitSet out = new BitSet();
-        addReferences(e, out);
-        return out.stream().toArray();
     }
 
     /** Prunes a plan whose output rows are fully consumed. */
@@ -44,7 +38,7 @@ public final class ColumnPruner {
             case PhysicalPlan.HashLookupFilter h -> {
                 BitSet need = (BitSet) required.clone();
                 for (BoundExpr e : h.expressions()) {
-                    addReferences(e, need);
+                    BoundExprs.addInputSlots(e, need);
                 }
                 yield new PhysicalPlan.HashLookupFilter(prune(h.input(), need), h.innerKeys(), h.outerKeys(),
                         h.staticPredicate(), h.dynamicPredicate());
@@ -59,7 +53,7 @@ public final class ColumnPruner {
                     if (!required.get(i) && (e instanceof BoundExpr.ColumnRef || e instanceof BoundExpr.Literal)) {
                         exprs.set(i, new BoundExpr.Literal(null, e.type()));
                     } else {
-                        addReferences(e, need);
+                        BoundExprs.addInputSlots(e, need);
                     }
                 }
                 yield new PhysicalPlan.Project(prune(p.input(), need), exprs, p.names());
@@ -67,11 +61,11 @@ public final class ColumnPruner {
             case PhysicalPlan.HashAggregate a -> {
                 BitSet need = new BitSet();
                 for (BoundExpr e : a.groupKeys()) {
-                    addReferences(e, need);
+                    BoundExprs.addInputSlots(e, need);
                 }
                 for (AggregateCall c : a.aggregates()) {
                     if (c.argument() != null) {
-                        addReferences(c.argument(), need);
+                        BoundExprs.addInputSlots(c.argument(), need);
                     }
                 }
                 yield new PhysicalPlan.HashAggregate(prune(a.input(), need), a.groupKeys(), a.aggregates());
@@ -104,8 +98,8 @@ public final class ColumnPruner {
                 BitSet need = j.residual() == null ? required : union(required, j.residual());
                 BitSet left = need.get(0, leftWidth);
                 BitSet right = shifted(need, leftWidth);
-                j.leftKeys().forEach(e -> addReferences(e, left));
-                j.rightKeys().forEach(e -> addReferences(e, right));
+                j.leftKeys().forEach(e -> BoundExprs.addInputSlots(e, left));
+                j.rightKeys().forEach(e -> BoundExprs.addInputSlots(e, right));
                 yield new PhysicalPlan.MergeJoin(prune(j.left(), left), prune(j.right(), right), j.kind(),
                         j.leftKeys(), j.rightKeys(), j.residual());
             }
@@ -114,8 +108,8 @@ public final class ColumnPruner {
                 BitSet need = j.residual() == null ? required : union(required, j.residual());
                 BitSet left = need.get(0, leftWidth);
                 BitSet right = shifted(need, leftWidth);
-                j.leftKeys().forEach(e -> addReferences(e, left));
-                j.rightKeys().forEach(e -> addReferences(e, right));
+                j.leftKeys().forEach(e -> BoundExprs.addInputSlots(e, left));
+                j.rightKeys().forEach(e -> BoundExprs.addInputSlots(e, right));
                 yield new PhysicalPlan.HashJoin(prune(j.left(), left), prune(j.right(), right), j.kind(), j.leftKeys(),
                         j.rightKeys(), j.residual(), j.buildLeft());
             }
@@ -130,7 +124,7 @@ public final class ColumnPruner {
 
     private static BitSet union(BitSet required, BoundExpr e) {
         BitSet out = (BitSet) required.clone();
-        addReferences(e, out);
+        BoundExprs.addInputSlots(e, out);
         return out;
     }
 
@@ -144,40 +138,5 @@ public final class ColumnPruner {
 
     private static int[] slots(BitSet required, int width) {
         return required.get(0, width).stream().toArray();
-    }
-
-    /**
-     * Adds the input slots an expression reads: its column references plus, for correlated
-     * subqueries evaluated on this row, the slots their outer references point to.
-     */
-    static void addReferences(BoundExpr e, BitSet out) {
-        BoundExprs.any(e, x -> {
-            if (x instanceof BoundExpr.ColumnRef c) {
-                out.set(c.index());
-            } else if (x instanceof BoundExpr.AggregateRef a) {
-                out.set(a.index());
-            } else {
-                Subquery sub = BoundExprs.subqueryOf(x);
-                if (sub != null) {
-                    addFrameReferences(sub, out);
-                }
-            }
-            return false;
-        });
-    }
-
-    private static void addFrameReferences(Subquery sub, BitSet out) {
-        int[] map = sub.frameMap();
-        List<BoundExpr.OuterRef> refs = sub.outerRefs();
-        for (BoundExpr.OuterRef r : refs) {
-            if (r.frame() != sub.frame()) {
-                continue;
-            }
-            if (map == null) {
-                out.set(r.index());
-            } else if (r.index() < map.length && map[r.index()] >= 0) {
-                out.set(map[r.index()]);
-            }
-        }
     }
 }

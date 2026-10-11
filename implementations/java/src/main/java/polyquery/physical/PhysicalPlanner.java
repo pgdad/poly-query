@@ -3,6 +3,9 @@ package polyquery.physical;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import polyquery.cost.Cardinality;
+import polyquery.cost.ColumnPredicates;
+import polyquery.exec.ExecMode;
 import polyquery.index.Index;
 import polyquery.index.KeyPredicate;
 import polyquery.plan.BoundExpr;
@@ -15,35 +18,51 @@ import polyquery.types.DateTimes;
 import polyquery.types.Decimals;
 
 /**
- * Chooses physical algorithms for a logical plan: table vs index scans (with row-group
- * skipping filters), hash / sort-merge / nested-loop joins and the hash join build side (basic
- * cost-based choices from table statistics), hash lookups for correlated filters, top-N for
- * {@code ORDER BY … LIMIT}; finally prunes the columns read by every scan.
+ * Physical planning: maps an (optimized) logical plan to physical operators. It alone decides
+ * access paths (table vs index scans, with row-group skipping filters), join algorithms
+ * (hash / sort-merge / nested loop, honouring the {@code join} option) and the hash join build
+ * side — basic cost-based choices from table statistics — hash lookups for correlated
+ * filters, top-N for {@code ORDER BY … LIMIT}, the columns every scan reads, and the execution
+ * strategy (row or vectorized model, worker threads, native kernels).
  */
 public final class PhysicalPlanner {
     /** Join algorithm preference (query option {@code join}). */
     public enum JoinStrategy { AUTO, HASH, MERGE, NESTED_LOOP }
+
+    /**
+     * Physical planning options (from the query options).
+     *
+     * @param joinStrategy  preferred join algorithm
+     * @param useIndexes    allow index scans
+     * @param topN          plan {@code ORDER BY … LIMIT} as a bounded top-N instead of a full sort
+     * @param mode          requested execution model
+     * @param threads       requested worker threads
+     * @param nativeKernels native kernels requested and loaded
+     */
+    public record Options(JoinStrategy joinStrategy, boolean useIndexes, boolean topN, ExecMode mode, int threads,
+                          boolean nativeKernels) {
+    }
 
     /** An index scan is chosen when at most this fraction of the table's rows is expected to match. */
     static final double INDEX_SELECTIVITY_THRESHOLD = 0.10;
     /** ... or when at most this many rows are expected (a lookup this small never loses to a scan). */
     static final double INDEX_ROWS_THRESHOLD = 3;
 
-    private final JoinStrategy joinStrategy;
-    private final boolean useIndexes;
-    private final boolean topN;
+    private final Options options;
 
-    public PhysicalPlanner(JoinStrategy joinStrategy, boolean useIndexes) {
-        this(joinStrategy, useIndexes, true);
+    public PhysicalPlanner(Options options) {
+        this.options = options;
     }
 
-    /** @param topN plan {@code ORDER BY … LIMIT} as a bounded top-N heap instead of a full sort */
-    public PhysicalPlanner(JoinStrategy joinStrategy, boolean useIndexes, boolean topN) {
-        this.joinStrategy = joinStrategy;
-        this.useIndexes = useIndexes;
-        this.topN = topN;
+    /** Plans a query together with its execution strategy. */
+    public PhysicalQuery planQuery(LogicalPlan plan) {
+        // the row engine is the single-threaded baseline; native kernels are batch kernels
+        boolean vectorized = options.mode() == ExecMode.VECTORIZED;
+        return new PhysicalQuery(plan(plan), options.mode(), vectorized ? options.threads() : 1,
+                vectorized && options.nativeKernels());
     }
 
+    /** The operator tree of a plan (subqueries run in the strategy of their enclosing query). */
     public PhysicalPlan plan(LogicalPlan plan) {
         return ColumnPruner.prune(build(plan));
     }
@@ -61,7 +80,8 @@ public final class PhysicalPlanner {
             case LogicalPlan.UnionAll u -> new PhysicalPlan.UnionAll(u.inputs().stream().map(this::build).toList(),
                     u.columns());
             case LogicalPlan.Sort s -> new PhysicalPlan.Sort(build(s.input()), s.keys());
-            case LogicalPlan.Limit l when topN && l.limit() != null && l.input() instanceof LogicalPlan.Sort s ->
+            case LogicalPlan.Limit l
+                    when options.topN() && l.limit() != null && l.input() instanceof LogicalPlan.Sort s ->
                     new PhysicalPlan.TopN(build(s.input()), s.keys(), l.offset(), l.limit());
             case LogicalPlan.Limit l -> new PhysicalPlan.Limit(build(l.input()), l.offset(), l.limit());
             case LogicalPlan.Join j -> join(j);
@@ -76,7 +96,7 @@ public final class PhysicalPlanner {
     private PhysicalPlan scan(LogicalPlan.Scan s, BoundExpr predicate) {
         Table table = s.table();
         Map<Integer, KeyPredicate> sargs = ColumnPredicates.extract(predicate, table.columns()).columns();
-        if (useIndexes && !sargs.isEmpty()) {
+        if (options.useIndexes() && !sargs.isEmpty()) {
             Index best = null;
             double bestSelectivity = Double.MAX_VALUE;
             for (Index index : table.indexes()) {
@@ -197,7 +217,7 @@ public final class PhysicalPlanner {
     private PhysicalPlan join(LogicalPlan.Join j) {
         PhysicalPlan left = build(j.left());
         PhysicalPlan right = build(j.right());
-        if (j.condition() == null || joinStrategy == JoinStrategy.NESTED_LOOP) {
+        if (j.condition() == null || options.joinStrategy() == JoinStrategy.NESTED_LOOP) {
             return new PhysicalPlan.NestedLoopJoin(left, right, j.kind(), j.condition());
         }
         int leftWidth = j.left().schema().size();
@@ -225,7 +245,7 @@ public final class PhysicalPlanner {
         if (leftKeys.isEmpty()) {
             return new PhysicalPlan.NestedLoopJoin(left, right, j.kind(), j.condition());
         }
-        if (joinStrategy == JoinStrategy.MERGE) {
+        if (options.joinStrategy() == JoinStrategy.MERGE) {
             return new PhysicalPlan.MergeJoin(left, right, j.kind(), leftKeys, rightKeys, BoundExprs.and(residual));
         }
         // Build on the input with the smaller estimated cardinality (inner joins only; a LEFT

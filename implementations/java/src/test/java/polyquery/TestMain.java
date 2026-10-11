@@ -14,7 +14,8 @@ public final class TestMain {
                 LexerTest.class, ParserTest.class, TypesTest.class, IngestTest.class,
                 EngineTest.class, QueryTest.class, ProtocolTest.class, StorageTest.class, IndexTest.class,
                 polyquery.server.ServerTest.class, Phase5Test.class, polyquery.exec.vector.VectorTest.class,
-                NativeKernelsTest.class, polyquery.exec.vector.NativeVectorTest.class);
+                NativeKernelsTest.class, polyquery.exec.vector.NativeVectorTest.class,
+                polyquery.optimizer.OptimizerRulesTest.class, polyquery.physical.PhysicalPlannerTest.class);
         int passed = 0;
         int failed = 0;
         for (Class<?> suite : suites) {

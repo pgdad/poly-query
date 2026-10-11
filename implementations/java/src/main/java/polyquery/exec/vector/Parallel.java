@@ -57,7 +57,7 @@ final class Parallel {
         boolean canFail() {
             for (PhysicalPlan stage : stages) {
                 for (BoundExpr e : PhysicalPlan.expressions(stage)) {
-                    if (polyquery.optimizer.LogicalOptimizer.canFail(e)) {
+                    if (polyquery.optimizer.ExprSafety.mayFail(e)) {
                         return true;
                     }
                 }

@@ -3,7 +3,7 @@ package polyquery.optimizer;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.List;
-import polyquery.physical.Cardinality;
+import polyquery.cost.Cardinality;
 import polyquery.plan.BoundExpr;
 import polyquery.plan.BoundExprs;
 import polyquery.plan.LogicalPlan;
@@ -23,10 +23,7 @@ import polyquery.storage.Table;
  * raise an error (a different order evaluates conditions on different row pairs). LEFT joins
  * and other operators are treated as opaque inputs (reordered inside separately).
  */
-final class JoinReorder {
-    private JoinReorder() {
-    }
-
+public final class JoinReorder implements OptimizerRule {
     /** An input of a join tree, at column {@code offset} of the tree's original layout. */
     private record Leaf(LogicalPlan plan, int offset, int width, double rows) {
     }
@@ -35,22 +32,18 @@ final class JoinReorder {
     private record Pred(BoundExpr expr, BitSet leaves) {
     }
 
-    static LogicalPlan reorder(LogicalPlan plan) {
-        return switch (plan) {
-            case LogicalPlan.Scan s -> s;
-            case LogicalPlan.SingleRow s -> s;
-            case LogicalPlan.Filter f -> new LogicalPlan.Filter(reorder(f.input()), f.predicate());
-            case LogicalPlan.Join j when j.kind() != LogicalPlan.JoinKind.LEFT -> tree(j);
-            case LogicalPlan.Join j -> new LogicalPlan.Join(reorder(j.left()), reorder(j.right()), j.kind(),
-                    j.condition());
-            case LogicalPlan.Aggregate a -> new LogicalPlan.Aggregate(reorder(a.input()), a.groupKeys(),
-                    a.aggregates());
-            case LogicalPlan.Project p -> new LogicalPlan.Project(reorder(p.input()), p.expressions(), p.names());
-            case LogicalPlan.Distinct d -> new LogicalPlan.Distinct(reorder(d.input()));
-            case LogicalPlan.UnionAll u -> u.withInputs(u.inputs().stream().map(JoinReorder::reorder).toList());
-            case LogicalPlan.Sort s -> new LogicalPlan.Sort(reorder(s.input()), s.keys());
-            case LogicalPlan.Limit l -> new LogicalPlan.Limit(reorder(l.input()), l.offset(), l.limit());
-        };
+    @Override
+    public String name() {
+        return "join_reordering";
+    }
+
+    /** Top-down, so that each maximal inner-join tree is reordered as a whole. */
+    @Override
+    public LogicalPlan apply(LogicalPlan plan) {
+        if (innerOrCross(plan)) {
+            return tree((LogicalPlan.Join) plan);
+        }
+        return plan.withChildren(plan.children().stream().map(this::apply).toList());
     }
 
     private static boolean innerOrCross(LogicalPlan p) {
@@ -86,14 +79,14 @@ final class JoinReorder {
         return inputs.next();
     }
 
-    private static LogicalPlan tree(LogicalPlan.Join root) {
+    private LogicalPlan tree(LogicalPlan.Join root) {
         List<LogicalPlan> inputs = new ArrayList<>();
         List<Integer> offsets = new ArrayList<>();
         List<BoundExpr> conds = new ArrayList<>();
         flatten(root, 0, inputs, offsets, conds);
         List<LogicalPlan> optimizedInputs = new ArrayList<>();
         for (LogicalPlan in : inputs) {
-            optimizedInputs.add(reorder(in));
+            optimizedInputs.add(apply(in));
         }
         LogicalPlan unchanged = withInputs(root, optimizedInputs.iterator());
         if (inputs.size() < 3) {

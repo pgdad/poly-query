@@ -1,6 +1,7 @@
 package polyquery.plan;
 
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.List;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -207,6 +208,47 @@ public final class BoundExprs {
         }
         for (BoundExpr c : children(e)) {
             collectRange(c, range);
+        }
+    }
+
+    /** Input slots read when evaluating {@code e} on a row (see {@link #addInputSlots}), ascending. */
+    public static int[] inputSlots(BoundExpr e) {
+        BitSet out = new BitSet();
+        addInputSlots(e, out);
+        return out.stream().toArray();
+    }
+
+    /**
+     * Adds the input slots an expression reads: its column references plus, for correlated
+     * subqueries evaluated on this row, the slots their outer references point to.
+     */
+    public static void addInputSlots(BoundExpr e, BitSet out) {
+        any(e, x -> {
+            if (x instanceof BoundExpr.ColumnRef c) {
+                out.set(c.index());
+            } else if (x instanceof BoundExpr.AggregateRef a) {
+                out.set(a.index());
+            } else {
+                Subquery sub = subqueryOf(x);
+                if (sub != null) {
+                    addFrameSlots(sub, out);
+                }
+            }
+            return false;
+        });
+    }
+
+    private static void addFrameSlots(Subquery sub, BitSet out) {
+        int[] map = sub.frameMap();
+        for (BoundExpr.OuterRef r : sub.outerRefs()) {
+            if (r.frame() != sub.frame()) {
+                continue;
+            }
+            if (map == null) {
+                out.set(r.index());
+            } else if (r.index() < map.length && map[r.index()] >= 0) {
+                out.set(map[r.index()]);
+            }
         }
     }
 

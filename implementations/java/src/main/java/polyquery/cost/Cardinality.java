@@ -1,4 +1,4 @@
-package polyquery.physical;
+package polyquery.cost;
 
 import java.util.Map;
 import polyquery.index.KeyDomain;
@@ -22,7 +22,7 @@ public final class Cardinality {
     }
 
     /** Fraction of the table's rows satisfying {@code predicate} on column {@code column}. */
-    static double selectivity(Table table, int column, KeyPredicate predicate) {
+    public static double selectivity(Table table, int column, KeyPredicate predicate) {
         if (predicate instanceof KeyPredicate.Empty) {
             return 0;
         }
