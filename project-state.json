@@ -1,6 +1,6 @@
 {
  "schema": "polyquery-project-state/1",
- "updated": "2026-10-11T16:44:00+00:00",
+ "updated": "2026-10-11T17:56:40+00:00",
  "current_milestone": "M10",
  "milestones": {
   "M0": {
@@ -52,9 +52,9 @@
   }
  },
  "outstanding_tasks": [
-  "Option B pilot running: x86-64 assembly engine Phase 1 (chain, <= 3 sessions x 120 min, $300 cap). Stop rule: no Phase 1 within the pilot -> record and stop; otherwise continue with x86 Phases 2-5, then AArch64 on spark (infrastructure ready and smoke-tested)",
-  "Track B jvm-tuning (java, clojure) running since 2026-10-11T15:01Z: accept, independent before/after (Track B only)",
-  "Fresh main-line 1m benchmark on a quiet host (reports 3/4/8 now exclude task-branch before/after benchmarks)",
+  "Option B: Phase 2 chains running for x86_64-asm-engine ($150 cap) and arm64-asm-engine ($100 cap, on spark); option-B spend so far $44.81 of the approved $300 - ask the owner before exceeding it (Phases 3-5)",
+  "Native-kernel validation path for the AArch64 engine (Phase 5) is x86-only (native-kernels/build/x86_64)",
+  "Main-line HTTP throughput not re-measured after INT-001 (bench.py run without the HTTP benchmark)",
   "Debugging family remains too easy for both engines and kernels (kernel variant with symptom-only report and hidden-only failures: fixed in ~1 min)",
   "AArch64 kernel review findings: verification harnesses not committed, no BTI/GNU property note, block-size test constants not overridable",
   "Python HTTP defect: negative chunk size bypasses --max-request-bytes (HTTP suite malformed_chunked_body fails 18/19) — fix via a sandboxed agent run (e.g. a regression/robustness task), not by hand",
@@ -94,8 +94,8 @@
   "interop": "6x6 + reference clean, incl. PQCF v2 wide-decimal files (results/correctness/interop.json)",
   "http_suite": "19/19 all engines except python 18/19 (malformed_chunked_body)"
  },
- "last_successful_commit": "1a909d421efded26bce01805c028e865c83e4e43",
- "next_recommended_action": "Watch the option-B pilot chain (chain-a-phase1-x86_64-asm-engine-a1-*) and the Track B jvm-tuning wave. Accept jvm-tuning (record-only) and run its Track B before/after; run a fresh main-line 1m benchmark (main now carries the real-workload optimizations, INT-001). On pilot success: accept/merge, then plan x86 Phase 2 and the AArch64 Phase 1 chain on spark.",
+ "last_successful_commit": "d3a18b6854307462e01afaed47d6244f9f94cfca",
+ "next_recommended_action": "When the Phase 2 chains finish: verify assembly-only compliance, accept (ARM via accept.sh -> arm_engines.sh on spark), report spend; then ask the owner about the budget for Phases 3-5.",
  "findings": [
   "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) — report as engine quality finding; clojure p95 16 ms",
   "CR-2 DECIMAL(38) was the most expensive change (6.25-16.50 USD); Go and Java needed a new wide-decimal representation",
@@ -106,7 +106,10 @@
   "Optimize-latency re-run on the real workload (HI-007): Python 4.97x, Go 3.24x, Common Lisp 3.18x, Rust 1.96x, Java 1.61x, Clojure 1.42x (vs 1.07-2.85x with stand-in workloads); digests identical; record-only",
   "Kernel code review (separate cohort): x86 5/4/5/4.5, ARM 4.5/4.5/4.5/3; no functional defects found",
   "HI-008: native conformance could pass with no library loaded (engines fall back silently); fixed fail-closed, 6 runs re-validated",
-  "Owner decision 2026-10-11: real-workload optimize-latency re-runs replace the first round on main (INT-001; all six 660/660)"
+  "Owner decision 2026-10-11: real-workload optimize-latency re-runs replace the first round on main (INT-001; all six 660/660)",
+  "Option B pilot: x86-64 and AArch64 assembly engines both passed Phase 1 in one session ($20.99 / $23.82, 37 / 28 min, 249/249 incl. hidden)",
+  "Track B jvm-tuning: Clojure startup 2.7x, first-run 5.8x, warm 1.39x (RSS +3 GiB); Java (timeout) startup 1.4x, warm 1.00x",
+  "HI-009: before/after trees kept stray files; clean re-measurement within the ~20% between-session spread"
  ],
  "totals": {
   "track_a_runs": 86,
