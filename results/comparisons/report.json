@@ -1,5 +1,5 @@
 {
- "generated": "2026-10-11T05:30:12.960567+00:00",
+ "generated": "2026-10-11T05:33:08.728527+00:00",
  "weights": {
   "correctness": 0.35,
   "development_effort": 0.2,
@@ -7,7 +7,7 @@
   "resources": 0.1,
   "maintainability": 0.15
  },
- "git_commit": "9bcf2eed87f80e7dff75fd4d191ae81b8a930d07",
+ "git_commit": "f896531c88f5163905681b87b6332de0bd1640a6",
  "runs": [
   {
    "run_id": "a-kernels-arm64-asm-a1-20261010T184024Z",
@@ -15164,12 +15164,12 @@
     "largest_file_loc": 798
    },
    "rust": {
-    "source_loc": 25395,
-    "test_loc": 0,
+    "source_loc": 22201,
+    "test_loc": 3194,
     "files": 78,
     "comment_lines": 1845,
-    "comment_density": 0.073,
-    "largest_file_loc": 1299
+    "comment_density": 0.083,
+    "largest_file_loc": 1051
    },
    "python": {
     "source_loc": 12222,

@@ -1,6 +1,6 @@
 {
  "schema": "polyquery-project-state/1",
- "updated": "2026-10-11T05:30:12+00:00",
+ "updated": "2026-10-11T05:33:08+00:00",
  "current_milestone": "M10",
  "milestones": {
   "M0": {
@@ -44,7 +44,11 @@
    "evidence": "All 6 engines claim native.kernels and pass 623/623 (public+hidden) and the 3738-case modes matrix with --native (x86-64 libpqkernels, AVX-512 dispatch), plus unchanged session/HTTP/modes/HTTP-suite without the library. Java needed attempt 2 (attempt 1 isolation_violation: stray files). Kernel micro-benchmarks: results/performance/kernels-x86-quiet, spark (experiments/runs/a-kernels-arm64-asm-a1-*/native-arm). End-to-end 1m: results/performance/20261011T051646Z-1m-m9-native (vectorized vs +native geomean over 4 queries: python 12.5x, common-lisp 1.23x, rust 1.17x, go 1.15x, java 0.67x, clojure 0.67x; results agree on all 20 queries). Runs: {\"a-native-clojure-a1-20261011T034926Z\": [\"success\", 10.14], \"a-native-common-lisp-a1-20261011T034930Z\": [\"success\", 12.35], \"a-native-go-a1-20261011T034928Z\": [\"success\", 8.98], \"a-native-java-a1-20261011T034931Z\": [\"isolation_violation\", 13.25], \"a-native-java-a2-20261011T043500Z\": [\"success\", 12.76], \"a-native-python-a1-20261011T034927Z\": [\"success\", 15.31], \"a-native-rust-a1-20261011T034932Z\": [\"success\", 12.01]}"
   },
   "M10": {
-   "status": "not_started"
+   "status": "complete_except_report_7",
+   "evidence": "Reports 1-6 and 8 generated as JSON/CSV/HTML from raw data (results/comparisons, docs/results/report.html) with links to run manifests; results narrative docs/results/README.md. Clean-clone reproduction (/srv/polyquery/repro from f896531) of the README quick start: all steps exit 0; 1m datasets match manifest checksums; Go benchmark result digests identical for all 20 queries, latency within 3%.",
+   "open": [
+    "Report 7 (architectural adaptability) needs the change/refactor/debug experiment families"
+   ]
   }
  },
  "outstanding_tasks": [
@@ -76,8 +80,8 @@
   "kernels_arm64_native": "pass on spark (scalar, neon, sve; native + asan)",
   "kernels_x86_native": "pass (scalar, avx2, avx512)"
  },
- "last_successful_commit": "9bcf2ee",
- "next_recommended_action": "M10: clean-clone reproduction (build + conformance + one benchmark via documented commands) and results narrative in docs/results; then Track B and later experiment families.",
+ "last_successful_commit": "f896531",
+ "next_recommended_action": "Schedule the later experiment families (write spec/changes/*.md first, then waves change-union-all, change-decimal38, refactor-plan-separation, debug-mutant, optimize-latency) to fill report 7; then Track B; ARM end-to-end on spark; rubric-based code review.",
  "findings": [
   "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) \u2014 report as engine quality finding; clojure p95 16 ms"
  ],

@@ -89,6 +89,13 @@ def code_metrics(lang: str) -> dict | None:
         cm = [l for l in code if l.strip().startswith(COMMENT[lang]) or l.strip().startswith(("/*", "*", '"""'))]
         n = len(code) - len(cm)
         is_test = bool(re.search(r"(^|/)(tests?|spec)(/|$)|_test\.|test_|Test\.java$|_tests?\.", str(p.relative_to(base))))
+        if not is_test and lang == "rust":
+            # Rust unit tests live in inline `#[cfg(test)]` modules (conventionally at the end of a file).
+            cut = next((i for i, l in enumerate(lines) if l.strip().startswith("#[cfg(test)]")), None)
+            if cut is not None:
+                tcode = [l for l in lines[cut:] if l.strip() and not l.strip().startswith(COMMENT[lang])]
+                tests += len(tcode)
+                n -= len(tcode)
         if is_test:
             tests += n
         else:
