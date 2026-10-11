@@ -380,8 +380,9 @@ by
   are delivered in morsel order (so row order equals the serial order),
   with workers at most 2×threads morsels ahead of the consumer;
 * *partial aggregation*: each worker aggregates into its own group state;
-  the states are merged at the end (DISTINCT is an aggregation without
-  aggregates);
+  the states are merged at the end — with many groups in parallel, one
+  thread per hash partition of the groups (DISTINCT is an aggregation
+  without aggregates);
 * *parallel sort*: chunks of the permutation are stable-sorted in parallel
   and merged pairwise in parallel rounds (stable, so equal to the serial
   sort).
@@ -399,8 +400,8 @@ exercise the parallel paths on small tables.
   evaluates them; test-only functions are never folded);
 * predicate simplification (TRUE/FALSE operands of AND/OR — an operand the
   unoptimized evaluation would evaluate is only dropped if it cannot fail —,
-  `NOT NOT x`,
-  `NOT (a < b)` → `a >= b`, duplicate conjuncts; a WHERE that folds to TRUE
+  `NOT NOT x`, `NOT (a < b)` → `a >= b`, duplicate conjuncts; conjuncts
+  without column references stay above joins; a WHERE that folds to TRUE
   disappears, one that folds to FALSE/NULL produces no rows without
   reading its input);
 * predicate pushdown and column (projection) pruning (Phase 3);
@@ -427,7 +428,10 @@ arithmetic loops it would accelerate.
 slices from the column stores (`subseq`/`replace`, i.e. memcpy); index
 vectors (selections, permutations, gather indexes) are `fixnum` arrays;
 aggregate states are dense arrays grown by doubling instead of per-group
-objects and closures; group keys are stored once in the key table.
+objects and closures; group keys are stored once in the key table; result
+rows are rendered into a reusable character buffer instead of through
+`FORMAT` and character streams; after a large table is published the heap
+is collected once so later queries do not repeatedly promote it.
 
 **Measurements.** See *Performance* below.
 
