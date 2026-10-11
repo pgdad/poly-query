@@ -307,6 +307,13 @@ def main() -> int:
                           "schema": schema, "layout": "row"})["ok"]
         schemas[name] = [(c["name"], c["type"]) for c in schema]
 
+    # Indexes, so that index scans (row operators behind batch adapters) run.
+    for stmt in ("CREATE INDEX fz_tx_cust ON tx (customer_id) USING HASH",
+                 "CREATE INDEX fz_tx_amount ON tx (amount)",
+                 "CREATE INDEX fz_orders_id ON orders (order_id)",
+                 "CREATE INDEX fz_items_product ON items (product_id) USING HASH",
+                 "CREATE INDEX fz_cust_seg ON cust (segment)"):
+        assert s.request({"op": "query", "sql": stmt})["ok"]
     # Edge values and an empty table.
     ext_schema = [("i", "INT64"), ("d", "DECIMAL(18,4)"), ("f", "FLOAT64"), ("s", "STRING"),
                   ("b", "BOOLEAN"), ("dt", "DATE"), ("ts", "TIMESTAMP")]
