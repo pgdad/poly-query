@@ -1,4 +1,4 @@
-//! Join reordering for chains of inner joins (query option `optimize`).
+//! Rule `join_reorder`: reorders chains of inner joins.
 //!
 //! A maximal tree of INNER/CROSS joins is flattened into its inputs
 //! ("leaves", which may be LEFT joins, derived tables, …) and the conjuncts
@@ -13,14 +13,27 @@
 
 use std::collections::HashSet;
 
-use super::expr::Expr;
-use super::logical::{JoinType, LogicalPlan};
-use super::physical::estimate_rows;
+use super::Rule;
+use crate::planner::cardinality::estimate_rows;
+use crate::planner::expr::Expr;
+use crate::planner::logical::{JoinType, LogicalPlan};
 use crate::sql::ast::BinaryOp;
 use crate::storage::Field;
 
+pub struct JoinReorder;
+
+impl Rule for JoinReorder {
+    fn name(&self) -> &'static str {
+        "join_reorder"
+    }
+
+    fn apply(&self, plan: LogicalPlan) -> LogicalPlan {
+        reorder_joins(plan)
+    }
+}
+
 /// Reorders every inner-join chain of `plan` (bottom-up).
-pub fn reorder_joins(plan: LogicalPlan) -> LogicalPlan {
+fn reorder_joins(plan: LogicalPlan) -> LogicalPlan {
     let b = |p: Box<LogicalPlan>| Box::new(reorder_joins(*p));
     match plan {
         LogicalPlan::Join {

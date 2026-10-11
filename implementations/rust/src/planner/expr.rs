@@ -136,9 +136,9 @@ impl ScalarFunc {
     }
 }
 
-/// A bound subquery: its own (optimized) logical plan, identified within the
-/// statement so that executions can be cached.
-#[derive(Debug)]
+/// A bound subquery: its own logical plan, identified within the statement
+/// (so that plans and executions can be cached per subquery).
+#[derive(Debug, Clone)]
 pub struct SubqueryPlan {
     pub id: usize,
     pub plan: LogicalPlan,
@@ -392,6 +392,32 @@ impl Expr {
             Expr::InSubquery { expr, params, .. } => std::iter::once(&mut **expr)
                 .chain(params.iter_mut())
                 .collect(),
+        }
+    }
+
+    /// Calls `f` for every subquery in this expression tree (not descending
+    /// into subquery plans); `correlated` tells whether the subquery
+    /// receives outer values as parameters.
+    pub fn visit_subqueries(&self, f: &mut dyn FnMut(&Arc<SubqueryPlan>, bool)) {
+        match self {
+            Expr::ScalarSubquery { sub, params, .. }
+            | Expr::Exists { sub, params }
+            | Expr::InSubquery { sub, params, .. } => f(sub, !params.is_empty()),
+            _ => {}
+        }
+        self.for_each_child(&mut |c| c.visit_subqueries(f));
+    }
+
+    /// Mutable variant of [`Expr::visit_subqueries`].
+    pub fn visit_subqueries_mut(&mut self, f: &mut dyn FnMut(&mut Arc<SubqueryPlan>)) {
+        match self {
+            Expr::ScalarSubquery { sub, .. }
+            | Expr::Exists { sub, .. }
+            | Expr::InSubquery { sub, .. } => f(sub),
+            _ => {}
+        }
+        for c in self.children_mut() {
+            c.visit_subqueries_mut(f);
         }
     }
 

@@ -12,7 +12,6 @@ use super::eval::{eval, normalize_key};
 use super::operators::{build, build_row};
 use crate::error::{Error, ErrorCode, Result};
 use crate::planner::expr::{Expr, KeyDomain, SubqueryPlan};
-use crate::planner::physical;
 use crate::types::Value;
 
 /// The materialized outcome of one subquery execution.
@@ -50,21 +49,12 @@ fn run(
     if let Some(r) = ctx.cached_result(&key) {
         return Ok(r);
     }
-    let plan = match ctx.cached_plan(sub.id) {
-        Some(p) => p,
-        None => {
-            let p = Rc::new(physical::lower(&sub.plan, ctx.physical));
-            ctx.cache_plan(sub.id, p.clone());
-            p
-        }
-    };
+    let plan = ctx.subquery_plan(sub.id)?;
     let result = ctx.with_params(key.1.clone().into(), || {
-        // Correlated subqueries run once per distinct parameter tuple on
-        // small inputs: the row engine's lower setup cost wins there.
-        let mut op = if params.is_empty() {
-            build((*plan).clone(), ctx)
+        let mut op = if plan.row_at_a_time {
+            build_row(plan.plan.clone())
         } else {
-            build_row((*plan).clone())
+            build(plan.plan.clone(), ctx)
         };
         Ok(match want {
             Want::Scalar => match op.next(ctx)? {

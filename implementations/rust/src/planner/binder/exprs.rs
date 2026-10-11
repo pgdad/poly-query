@@ -7,7 +7,6 @@ use super::scope::{Correlation, ExprScope};
 use super::{AggMode, Binder};
 use crate::error::{Error, Result};
 use crate::planner::expr::{Expr, KeyDomain, SubqueryPlan};
-use crate::planner::optimizer;
 use crate::planner::typing::{
     arithmetic_type, check_boolean, check_comparable, coerce, common_type, is_boolean,
 };
@@ -373,7 +372,6 @@ impl Binder<'_> {
     ) -> Result<(Arc<SubqueryPlan>, Vec<Expr>)> {
         let corr = Correlation::new(sc);
         let plan = self.query(q, Some(&corr), sc.env)?;
-        let plan = optimizer::optimize(plan, self.ctx.optimize);
         let sub = SubqueryPlan {
             id: self.next_subquery_id(),
             plan,

@@ -1,20 +1,34 @@
-//! Expression rewrites (query option `optimize`): constant folding and
-//! predicate simplification. Both preserve results and errors:
+//! Rule `constant_folding`: folds literal-only expressions to literals and
+//! simplifies boolean structure (filters and join conditions that become
+//! `TRUE` disappear). Both preserve results and errors:
 //!
 //! * a constant subexpression is replaced by its value only if evaluating
 //!   it succeeds (`1/0` stays, and fails at run time only if evaluated);
 //! * boolean simplifications only drop an operand the row engine would not
 //!   evaluate either (`FALSE AND x`) or one that cannot fail.
 
-use super::expr::{Expr, ScalarFunc};
-use super::logical::LogicalPlan;
+use super::Rule;
 use crate::exec::eval::eval_constant;
+use crate::planner::expr::{Expr, ScalarFunc};
+use crate::planner::logical::LogicalPlan;
 use crate::sql::ast::BinaryOp;
 use crate::types::Value;
 
+pub struct ConstantFolding;
+
+impl Rule for ConstantFolding {
+    fn name(&self) -> &'static str {
+        "constant_folding"
+    }
+
+    fn apply(&self, plan: LogicalPlan) -> LogicalPlan {
+        simplify_plan(plan)
+    }
+}
+
 /// Folds and simplifies every expression of `plan` (not descending into
-/// subquery plans, which are optimized when they are bound).
-pub fn simplify_plan(plan: LogicalPlan) -> LogicalPlan {
+/// subquery plans).
+fn simplify_plan(plan: LogicalPlan) -> LogicalPlan {
     let b = |p: Box<LogicalPlan>| Box::new(simplify_plan(*p));
     match plan {
         LogicalPlan::SingleRow | LogicalPlan::Scan { .. } => plan,

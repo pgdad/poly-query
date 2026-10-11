@@ -8,10 +8,9 @@ use super::ops::{
     AggregateOp, BoxedBatchOp, DistinctOp, FilterOp, IndexScanOp, LimitOp, ProjectOp, RowSource,
     ScanOp, SortOp, UnionAllOp, ValuesOp, full_ranges,
 };
-use std::sync::Arc;
 
 use crate::exec::ExecContext;
-use crate::exec::native_filter::{NativeFilter, NativeFilterScanOp};
+use crate::exec::native_filter::NativeFilterScanOp;
 use crate::exec::operators::build_row;
 use crate::exec::parallel;
 use crate::planner::expr::{Expr, KeyDomain};
@@ -40,33 +39,6 @@ fn build_with(plan: PhysicalPlan, ctx: &ExecContext, parallel: bool) -> BoxedBat
     build_serial(plan, ctx, parallel)
 }
 
-/// A filter directly above a table scan, evaluated with the native kernels
-/// (`native: true` with a loaded library) when its predicate allows it.
-fn native_filter_scan(
-    input: &PhysicalPlan,
-    predicate: &Expr,
-    ctx: &ExecContext,
-) -> Option<BoxedBatchOp> {
-    let kernels = ctx.exec.native?;
-    let PhysicalPlan::TableScan {
-        table,
-        columns,
-        groups,
-        ..
-    } = input
-    else {
-        return None;
-    };
-    let filter = NativeFilter::analyze(predicate, table, columns)?;
-    Some(Box::new(NativeFilterScanOp::new(
-        table.clone(),
-        columns.clone(),
-        full_ranges(table, groups),
-        Arc::new(filter),
-        kernels,
-    )))
-}
-
 fn build_serial(plan: PhysicalPlan, ctx: &ExecContext, parallel: bool) -> BoxedBatchOp {
     match plan {
         PhysicalPlan::Values => Box::new(ValuesOp { done: false }),
@@ -93,15 +65,23 @@ fn build_serial(plan: PhysicalPlan, ctx: &ExecContext, parallel: bool) -> BoxedB
             ids: None,
             pos: 0,
         }),
-        PhysicalPlan::Filter { input, predicate } => {
-            if let Some(op) = native_filter_scan(&input, &predicate, ctx) {
-                return op;
-            }
-            Box::new(FilterOp {
-                input: build_with(*input, ctx, parallel),
-                predicate,
-            })
+        PhysicalPlan::NativeFilterScan {
+            table,
+            columns,
+            groups,
+            filter,
+            kernels,
+            ..
+        } => {
+            let ranges = full_ranges(&table, &groups);
+            Box::new(NativeFilterScanOp::new(
+                table, columns, ranges, filter, kernels,
+            ))
         }
+        PhysicalPlan::Filter { input, predicate } => Box::new(FilterOp {
+            input: build_with(*input, ctx, parallel),
+            predicate,
+        }),
         PhysicalPlan::Project { input, exprs, .. } => Box::new(ProjectOp {
             input: build_with(*input, ctx, parallel),
             exprs,
@@ -226,8 +206,7 @@ fn build_serial(plan: PhysicalPlan, ctx: &ExecContext, parallel: bool) -> BoxedB
             // A small LIMIT over a scan pipeline is answered serially: the
             // scan stops after the first batches, whereas parallel workers
             // would read ahead.
-            let small =
-                limit.is_some_and(|l| offset.saturating_add(l) <= ctx.exec.morsel_rows as u64);
+            let small = limit.is_some_and(|l| offset.saturating_add(l) <= ctx.morsel_rows as u64);
             Box::new(LimitOp {
                 input: build_with(*input, ctx, !small),
                 offset,

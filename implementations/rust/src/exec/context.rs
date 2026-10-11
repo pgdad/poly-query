@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use super::operators::Row;
 use super::subquery::SubqueryResult;
 use crate::error::{Error, ErrorCode, Result};
-use crate::planner::{PhysicalOptions, PhysicalPlan};
+use crate::planner::physical::{Execution, PhysicalQuery, PhysicalSubquery, SubqueryPlans};
 use crate::types::Value;
 
 /// Maximum number of memoized subquery results per query.
@@ -23,31 +23,6 @@ pub type LookupTable = HashMap<Vec<Value>, Vec<Row>>;
 
 /// Cache key of a subquery execution: (subquery id, parameter values).
 type SubqueryKey = (usize, Vec<Value>);
-
-/// Execution model options (query options `mode` and `threads`).
-#[derive(Debug, Clone, Copy)]
-pub struct ExecOptions {
-    /// Batch-at-a-time execution (`mode: "vectorized"`) instead of the
-    /// row-at-a-time baseline.
-    pub vectorized: bool,
-    /// Worker threads for parallel scans/aggregation (vectorized mode).
-    pub threads: usize,
-    /// Rows per morsel of parallel scans.
-    pub morsel_rows: usize,
-    /// Native kernels to use (`native: true` with a loaded library).
-    pub native: Option<&'static crate::native::Kernels>,
-}
-
-impl Default for ExecOptions {
-    fn default() -> Self {
-        ExecOptions {
-            vectorized: false,
-            threads: 1,
-            morsel_rows: super::parallel::default_morsel_rows(),
-            native: None,
-        }
-    }
-}
 
 /// Budgets shared by all threads executing one query.
 #[derive(Debug, Default)]
@@ -68,15 +43,15 @@ pub struct ExecContext {
     shared: Arc<Shared>,
     /// Whether test-only functions may run.
     pub test_functions: bool,
-    /// Options for lowering subquery plans.
-    pub physical: PhysicalOptions,
-    /// Execution model.
-    pub exec: ExecOptions,
+    /// Execution model chosen by physical planning.
+    pub execution: Execution,
+    /// Rows per morsel of parallel scans.
+    pub morsel_rows: usize,
+    /// Physical plans of the statement's subqueries.
+    subqueries: Arc<SubqueryPlans>,
     /// Correlation parameters of the subquery executions in progress
     /// (innermost last).
     params: RefCell<Vec<Arc<[Value]>>>,
-    /// Lowered subquery plans by subquery id.
-    plans: RefCell<HashMap<usize, Rc<PhysicalPlan>>>,
     /// Subquery results by (subquery id, parameter values).
     results: RefCell<HashMap<SubqueryKey, Rc<SubqueryResult>>>,
     /// ParamLookup hash tables by node id.
@@ -99,10 +74,10 @@ impl ExecContext {
             max_join_rows: u64::MAX,
             shared: Arc::new(Shared::default()),
             test_functions,
-            physical: PhysicalOptions::default(),
-            exec: ExecOptions::default(),
+            execution: Execution::default(),
+            morsel_rows: super::parallel::default_morsel_rows(),
+            subqueries: Arc::default(),
             params: RefCell::new(Vec::new()),
-            plans: RefCell::new(HashMap::new()),
             results: RefCell::new(HashMap::new()),
             lookups: RefCell::new(HashMap::new()),
         }
@@ -124,13 +99,15 @@ impl ExecContext {
         self
     }
 
-    pub fn with_physical_options(mut self, opts: PhysicalOptions) -> Self {
-        self.physical = opts;
+    /// Executes `plan`: its execution model and subquery plans.
+    pub fn with_plan(mut self, plan: &PhysicalQuery) -> Self {
+        self.execution = plan.execution;
+        self.subqueries = plan.subqueries.clone();
         self
     }
 
-    pub fn with_exec_options(mut self, opts: ExecOptions) -> Self {
-        self.exec = opts;
+    pub fn with_morsel_rows(mut self, rows: usize) -> Self {
+        self.morsel_rows = rows;
         self
     }
 
@@ -145,8 +122,9 @@ impl ExecContext {
             max_join_rows: self.max_join_rows,
             shared: self.shared.clone(),
             test_functions: self.test_functions,
-            physical: self.physical,
-            exec: self.exec,
+            execution: self.execution,
+            morsel_rows: self.morsel_rows,
+            subqueries: self.subqueries.clone(),
             params: self.params.borrow().clone(),
         }
     }
@@ -250,12 +228,11 @@ impl ExecContext {
         r
     }
 
-    pub fn cached_plan(&self, id: usize) -> Option<Rc<PhysicalPlan>> {
-        self.plans.borrow().get(&id).cloned()
-    }
-
-    pub fn cache_plan(&self, id: usize, plan: Rc<PhysicalPlan>) {
-        self.plans.borrow_mut().insert(id, plan);
+    /// The physical plan of subquery `id`.
+    pub fn subquery_plan(&self, id: usize) -> Result<&PhysicalSubquery> {
+        self.subqueries
+            .get(&id)
+            .ok_or_else(|| Error::internal(format!("subquery {id} has no physical plan")))
     }
 
     pub fn cached_result(&self, key: &SubqueryKey) -> Option<Rc<SubqueryResult>> {
@@ -289,8 +266,9 @@ pub struct ContextSeed {
     max_join_rows: u64,
     shared: Arc<Shared>,
     test_functions: bool,
-    physical: PhysicalOptions,
-    exec: ExecOptions,
+    execution: Execution,
+    morsel_rows: usize,
+    subqueries: Arc<SubqueryPlans>,
     params: Vec<Arc<[Value]>>,
 }
 
@@ -304,10 +282,10 @@ impl ContextSeed {
             max_join_rows: self.max_join_rows,
             shared: self.shared.clone(),
             test_functions: self.test_functions,
-            physical: self.physical,
-            exec: self.exec,
+            execution: self.execution,
+            morsel_rows: self.morsel_rows,
+            subqueries: self.subqueries.clone(),
             params: RefCell::new(self.params.clone()),
-            plans: RefCell::new(HashMap::new()),
             results: RefCell::new(HashMap::new()),
             lookups: RefCell::new(HashMap::new()),
         }
