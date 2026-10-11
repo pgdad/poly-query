@@ -283,6 +283,7 @@ FUNC handle_request_noreset
     ENTER 16
     mov %rdi, 0(%rsp)
     movq $0, req_id(%rip)
+    movq $0, g_err_line(%rip)
     movq $0, g_out+BUF_LEN(%rip)
     movq $0, g_deadline_ns(%rip)
     lea jb_main(%rip), %rdi
@@ -370,7 +371,18 @@ hr_error:
     lea g_err_msg(%rip), %rsi
     mov %rax, %rdx
     call buf_put_json_str
-    PUTS %r15, "}}"
+    cmpq $0, g_err_line(%rip)       /* SQL position of a syntax error */
+    je 4f
+    PUTS %r15, ",\"details\":{\"line\":"
+    mov %r15, %rdi
+    mov g_err_line(%rip), %rsi
+    call buf_put_u64
+    PUTS %r15, ",\"column\":"
+    mov %r15, %rdi
+    mov g_err_col(%rip), %rsi
+    call buf_put_u64
+    PUTS %r15, "}"
+4:  PUTS %r15, "}}"
     call flush_out
     movq $0, g_jmpbuf(%rip)
     LEAVE

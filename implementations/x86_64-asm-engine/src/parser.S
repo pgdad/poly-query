@@ -121,6 +121,8 @@ FUNC p_error
     je 2f
 1:  mov TK_LINE(%rax), %edx
     mov TK_COL(%rax), %ecx
+    mov %rdx, g_err_line(%rip)
+    mov %rcx, g_err_col(%rip)
     mov $E_PARSE_ERROR, %edi
     CSTR %rsi, "syntax error at line %d, column %d"
     call pq_raisef
