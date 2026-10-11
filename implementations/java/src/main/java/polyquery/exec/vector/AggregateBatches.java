@@ -45,13 +45,13 @@ final class AggregateBatches {
         private long reserved;
 
         Table(List<BoundExpr> groupKeys, List<AggregateCall> calls, ExecContext ctx) {
-            this.keys = new GroupKeys(keyTypes(groupKeys));
+            this.keys = new GroupKeys(keyTypes(groupKeys), ctx.nativeKernels());
             this.states = new AggState[calls.size()];
             this.argSlot = new int[calls.size()];
             this.ctx = ctx;
             int slot = groupKeys.size();
             for (int a = 0; a < states.length; a++) {
-                states[a] = AggState.create(calls.get(a));
+                states[a] = AggState.create(calls.get(a), ctx.nativeKernels());
                 argSlot[a] = calls.get(a).argument() == null ? -1 : slot++;
             }
             if (groupKeys.isEmpty()) {
@@ -305,7 +305,7 @@ final class AggregateBatches {
 
         @Override
         public void open() {
-            seen = new GroupKeys(types);
+            seen = new GroupKeys(types, ctx.nativeKernels());
             input.open();
         }
 

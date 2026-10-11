@@ -206,7 +206,7 @@ final class Parallel {
     private record DistinctReducer(polyquery.types.DataType[] types) implements Reducer {
         @Override
         public MorselReduction start(int width, ExecContext ctx) {
-            GroupKeys seen = new GroupKeys(types);
+            GroupKeys seen = new GroupKeys(types, ctx.nativeKernels());
             List<Batch> out = new ArrayList<>();
             return new MorselReduction() {
                 private int[] gids = new int[0];
@@ -297,7 +297,7 @@ final class Parallel {
             if (c.distinct() || !safe(c.argument())) {
                 return false; // DISTINCT states are not merged
             }
-            if (!AggState.create(c).mergeable()) {
+            if (!AggState.create(c, null).mergeable()) {
                 return false;
             }
         }

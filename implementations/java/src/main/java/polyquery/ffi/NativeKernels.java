@@ -337,9 +337,10 @@ public final class NativeKernels {
         if (counts != null) {
             check(counts.length, ngroups);
         }
+        MemorySegment countSeg = counts == null ? MemorySegment.NULL : seg(counts);
         try {
             return (int) Bindings.GROUP_SUM_I64.invokeExact(seg(gids), seg(values), validity(validity, n), (long) n,
-                    seg(sums), counts == null ? MemorySegment.NULL : seg(counts), (long) ngroups);
+                    seg(sums), countSeg, (long) ngroups);
         } catch (Throwable t) {
             throw failure(t);
         }
@@ -350,6 +351,18 @@ public final class NativeKernels {
      * (the caller guarantees it; they are not checked one by one).
      */
     public void gather(long[] data, int[] idx, int m, long[] out) {
+        check(idx.length, m);
+        check(out.length, m);
+        Objects.requireNonNull(data);
+        try {
+            Bindings.GATHER_I64.invokeExact(seg(data), seg(idx), (long) m, seg(out));
+        } catch (Throwable t) {
+            throw failure(t);
+        }
+    }
+
+    /** {@link #gather(long[], int[], int, long[])} for doubles (the kernel moves 8-byte values). */
+    public void gather(double[] data, int[] idx, int m, double[] out) {
         check(idx.length, m);
         check(out.length, m);
         Objects.requireNonNull(data);

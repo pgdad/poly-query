@@ -21,6 +21,8 @@ final class BatchOperators {
     static final class Filter implements BatchOperator {
         private final BatchOperator input;
         private final VecExpr[] conjuncts;
+        /** Native evaluation of the leading conjuncts (option {@code native}), or null. */
+        private final NativeFilter nativeFilter;
         private final BatchExprs predicate;
         private final Batch out;
         private int[] sel = new int[0];
@@ -34,6 +36,7 @@ final class BatchOperators {
             for (int i = 0; i < conjuncts.length; i++) {
                 conjuncts[i] = compiler.compile(parts.get(i));
             }
+            this.nativeFilter = NativeFilter.create(compiler.nativeKernels(), conjuncts);
             this.predicate = new BatchExprs(compiler, List.of(predicate));
             this.out = new Batch(width);
         }
@@ -49,7 +52,19 @@ final class BatchOperators {
             int n = in.count;
             int[] dst = sel;
             boolean anyNull = false;
-            for (VecExpr c : conjuncts) {
+            int first = 0;
+            if (nativeFilter != null) {
+                int m = nativeFilter.select(in, dst, sawNull);
+                if (m >= 0) {
+                    first = nativeFilter.consumed;
+                    anyNull = nativeFilter.sawNulls;
+                    cur = dst;
+                    dst = tmp;
+                    n = m;
+                }
+            }
+            for (int ci = first; ci < conjuncts.length && n > 0; ci++) {
+                VecExpr c = conjuncts[ci];
                 Vec r = c.eval(in, cur, n);
                 long[] v = r.longs;
                 int m = 0;

@@ -201,7 +201,7 @@ final class JoinBatches {
         void build(BatchOperator input, BatchExprs keyExprs, long[] factors, DataType[] keyTypes, int expectedRows,
                    int threads) {
             boolean singleLong = keyTypes.length == 1 && Vec.kindOf(keyTypes[0]) == Vec.Kind.LONG;
-            keys = singleLong ? null : new GroupKeys(keyTypes);
+            keys = singleLong ? null : new GroupKeys(keyTypes, ctx.nativeKernels());
             longIndex = null;
             rowKeys = singleLong ? new long[Math.max(64, expectedRows)] : null;
             store = new ColumnStore(schema, expectedRows);

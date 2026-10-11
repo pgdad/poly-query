@@ -7,6 +7,7 @@ import java.util.Set;
 import polyquery.common.PolyQueryException;
 import polyquery.exec.ExecContext;
 import polyquery.exec.ExpressionCompiler;
+import polyquery.ffi.NativeKernels;
 import polyquery.physical.ColumnPruner;
 import polyquery.plan.BoundExpr;
 import polyquery.plan.BoundExpr.CompareOp;
@@ -34,6 +35,11 @@ final class VecCompiler {
 
     ExpressionCompiler rowCompiler() {
         return rows;
+    }
+
+    /** The native kernels the query may use, or null. */
+    NativeKernels nativeKernels() {
+        return ctx.nativeKernels();
     }
 
     VecExpr compile(BoundExpr e) {

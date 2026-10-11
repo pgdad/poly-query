@@ -28,6 +28,14 @@ public final class Vec {
     /** {@code nulls[i]} = position i is NULL; meaningful only when {@link #hasNulls}. */
     boolean[] nulls;
     boolean hasNulls;
+    /**
+     * The null mask as an LSB-first validity bitmap (bit i of word i / 64 set = position i is
+     * not NULL), the input format of the native kernels. Table scans fill it together with the
+     * mask; it is meaningful only while {@link #validityKnown} — every other way of preparing
+     * a null mask ({@link #nullMask}) clears that flag.
+     */
+    long[] validity;
+    boolean validityKnown;
 
     public Vec(DataType type, int capacity) {
         this.type = type;
@@ -110,7 +118,39 @@ public final class Vec {
             nulls = new boolean[Math.max(capacity, longs != null ? longs.length : 0)];
         }
         hasNulls = true;
+        validityKnown = false;
         return nulls;
+    }
+
+    /**
+     * The validity bitmap of positions {@code 0..n-1} for a native kernel: null if the vector has
+     * no NULLs (all valid), the scan-provided bitmap if known, else {@code scratch} (or a larger
+     * replacement, returned) filled from the null mask.
+     */
+    long[] validityBits(int n, long[][] scratch) {
+        if (!hasNulls) {
+            return null;
+        }
+        if (validityKnown) {
+            return validity;
+        }
+        int words = (n + 63) >>> 6;
+        long[] bits = scratch[0];
+        if (bits == null || bits.length < words) {
+            bits = new long[Math.max(words, 16)];
+            scratch[0] = bits;
+        }
+        boolean[] m = nulls;
+        for (int w = 0; w < words; w++) {
+            long word = 0;
+            int base = w << 6;
+            int end = Math.min(64, n - base);
+            for (int b = 0; b < end; b++) {
+                word |= (m[base + b] ? 0L : 1L) << b;
+            }
+            bits[w] = word;
+        }
+        return bits;
     }
 
     public boolean isNull(int i) {
@@ -220,6 +260,15 @@ public final class Vec {
         return v;
     }
 
+    /** The LONG representation of a non-null BOOLEAN, INT64, DECIMAL, DATE or TIMESTAMP runtime value. */
+    static long longValue(Object value) {
+        return switch (value) {
+            case Boolean b -> b ? 1L : 0L;
+            case Integer x -> (long) x;
+            default -> (Long) value;
+        };
+    }
+
     /** Sets positions {@code 0 .. n-1} to {@code value}. */
     void fill(Object value, int n) {
         if (value == null) {
@@ -231,11 +280,7 @@ public final class Vec {
         }
         hasNulls = false;
         switch (kind) {
-            case LONG -> Arrays.fill(longs, 0, n, switch (value) {
-                case Boolean b -> b ? 1L : 0L;
-                case Integer x -> (long) x;
-                default -> (Long) value;
-            });
+            case LONG -> Arrays.fill(longs, 0, n, longValue(value));
             case DOUBLE -> Arrays.fill(doubles, 0, n, (Double) value);
             case OBJECT -> Arrays.fill(objects, 0, n, value);
             case DICT -> throw new IllegalStateException("cannot fill a dictionary vector");

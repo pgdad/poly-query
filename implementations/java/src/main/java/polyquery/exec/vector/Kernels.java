@@ -76,7 +76,7 @@ final class Kernels {
     /** A constant broadcast to every position. */
     static final class Constant implements VecExpr {
         private final DataType type;
-        private final Object value;
+        final Object value;
         private Vec vec;
         private int filled;
 
@@ -393,9 +393,9 @@ final class Kernels {
 
     /** Comparison of LONG-represented values of one scale (INT64, DECIMAL, DATE, TIMESTAMP, BOOLEAN). */
     static final class LongCompare implements VecExpr {
-        private final CompareOp op;
-        private final VecExpr left;
-        private final VecExpr right;
+        final CompareOp op;
+        final VecExpr left;
+        final VecExpr right;
         private final Vec out = new Vec(DataType.BOOLEAN, 16);
 
         LongCompare(CompareOp op, VecExpr left, VecExpr right) {
@@ -616,8 +616,8 @@ final class Kernels {
     }
 
     static final class IsNull implements VecExpr {
-        private final VecExpr input;
-        private final boolean negated;
+        final VecExpr input;
+        final boolean negated;
         private final Vec out = new Vec(DataType.BOOLEAN, 16);
 
         IsNull(VecExpr input, boolean negated) {
@@ -655,9 +655,9 @@ final class Kernels {
      * only on rows where the left one does not already decide the result.
      */
     static final class AndOr implements VecExpr {
-        private final boolean and;
-        private final VecExpr left;
-        private final VecExpr right;
+        final boolean and;
+        final VecExpr left;
+        final VecExpr right;
         private final Vec out = new Vec(DataType.BOOLEAN, 16);
         private int[] rest = new int[16];
 
@@ -849,10 +849,10 @@ final class Kernels {
 
     /** {@code operand [NOT] BETWEEN low AND high}: lower AND upper over the shared operand. */
     static final class Between implements VecExpr {
-        private final VecExpr operand;
-        private final Operand holder;
-        private final VecExpr bounds;
-        private final boolean negated;
+        final VecExpr operand;
+        final Operand holder;
+        final VecExpr bounds;
+        final boolean negated;
         private final Vec out = new Vec(DataType.BOOLEAN, 16);
 
         /** @param bounds {@code lower AND upper}, reading the operand through {@code holder} */

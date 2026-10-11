@@ -5,6 +5,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import polyquery.ffi.NativeKernels;
 import polyquery.types.DataType;
 
 /**
@@ -20,10 +21,19 @@ import polyquery.types.DataType;
  * index ({@code int[]}, linear probing) holds only group ids, and the full hash of each group is
  * kept so most mismatches are rejected without touching the keys. Equality is that of GROUP BY
  * and DISTINCT: NULLs are equal to each other.
+ *
+ * <p>Single-column keys (the common case) are hashed with the MurmurHash3 finalizer
+ * {@code fmix64(value ^ SEED)}; with native kernels (option {@code native}) a batch is hashed by
+ * {@code pqk_hash_i64}, which computes exactly the same function, so tables built with and
+ * without the library are identical.
  */
 final class GroupKeys {
     private static final long M1 = 0x9E3779B97F4A7C15L;
     private static final long M2 = 0xC2B2AE3D27D4EB4FL;
+    /** Seed of single-column key hashes. */
+    private static final long SEED = 0x2545F4914F6CDD1DL;
+    /** Hash of a NULL single-column key. */
+    private static final long NULL_HASH = 0x6A09E667F3BCC909L;
 
     private final DataType[] types;
     private final Vec.Kind[] kinds;
@@ -49,8 +59,11 @@ final class GroupKeys {
     private long[] rowHash;
     private final long[] tupleCodes;
     private final long[] tupleNulls;
+    private final NativeKernels kernels;
 
-    GroupKeys(DataType[] types) {
+    /** @param kernels native kernels for hashing, or null */
+    GroupKeys(DataType[] types, NativeKernels kernels) {
+        this.kernels = kernels;
         this.types = types.clone();
         this.k = types.length;
         this.kinds = new Vec.Kind[k];
@@ -85,6 +98,7 @@ final class GroupKeys {
 
     /** A view sharing this (no longer modified) table with its own scratch space, for concurrent lookups. */
     private GroupKeys(GroupKeys t) {
+        this.kernels = t.kernels;
         this.types = t.types;
         this.kinds = t.kinds;
         this.k = t.k;
@@ -252,6 +266,10 @@ final class GroupKeys {
         for (int j = 0; j < k; j++) {
             encode(j, vecs[j], sel, n, insert);
         }
+        if (k == 1) {
+            hashSingle(vecs[0], sel, n);
+            return;
+        }
         for (int kk = 0; kk < n; kk++) {
             int i = sel == null ? kk : sel[kk];
             long h = M2;
@@ -262,6 +280,29 @@ final class GroupKeys {
                 h = mix(h, nulls[w][i]);
             }
             rowHash[i] = h;
+        }
+    }
+
+    /** Hashes of single-column keys: {@code fmix64(hashIn ^ SEED)}, NULL keys {@link #NULL_HASH}. */
+    private void hashSingle(Vec v, int[] sel, int n) {
+        long[] h = hashIn[0];
+        long[] nw = nulls[0];
+        if (kernels != null && n > 0) {
+            // dense over the positions up to the last active one (inactive ones are harmless)
+            kernels.hash(h, sel == null ? n : sel[n - 1] + 1, SEED, rowHash);
+            if (v.hasNulls || v.kind == Vec.Kind.OBJECT) {
+                for (int kk = 0; kk < n; kk++) {
+                    int i = sel == null ? kk : sel[kk];
+                    if (nw[i] != 0) {
+                        rowHash[i] = NULL_HASH;
+                    }
+                }
+            }
+            return;
+        }
+        for (int kk = 0; kk < n; kk++) {
+            int i = sel == null ? kk : sel[kk];
+            rowHash[i] = nw[i] != 0 ? NULL_HASH : NativeKernels.fmix64(h[i] ^ SEED);
         }
     }
 
