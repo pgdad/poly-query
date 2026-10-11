@@ -1337,9 +1337,15 @@ FUNC op_open
     mov %rax, OP_IX(%rsp)
     call arena_new
     mov %rax, g_pending_arena(%rip)
-    mov %r13, %rdi
+    mov $PQ_READ, %edx              /* mmap: lazy decoding (column layout) */
+    cmpq $0, OP_MMAP(%rsp)
+    je 21f
+    mov $PQ_MMAP_EAGER, %edx
+    cmpq $LAYOUT_COLUMN, OP_LAYOUT(%rsp)
+    jne 21f
+    mov $PQ_MMAP_LAZY, %edx
+21: mov %r13, %rdi
     mov OP_NAME(%rsp), %rsi
-    mov OP_MMAP(%rsp), %rdx
     mov OP_IX(%rsp), %rcx
     call pqcf_read
     mov %rax, OP_TABLE(%rsp)
@@ -1394,6 +1400,7 @@ FUNC op_open
     add $3, %r15
     jmp 7b
 71: movq $0, g_pending_arena(%rip)
+    movq $0, g_pending_map(%rip)    /* a lazy table now owns its mapping */
     mov OP_TABLE(%rsp), %r12
     mov %r12, %rdi
     call cat_put

@@ -23,7 +23,8 @@
 * CREATE/DROP INDEX (HASH, BTREE); `schema` lists indexes and layout.
 * Planner (`planner.S`): pushdown, index selection, row-group skipping,
   estimates, hash-join build side; EXPLAIN shows IndexScan/Filter/build.
-* PQCF v1 save/open (`pqcf.S`), all encodings, validation, atomic save, mmap.
+* PQCF v1 save/open (`pqcf.S`), all encodings, validation, atomic save;
+  `mmap:true` opens decode lazily per column (`pqcf_load_col` via `col_get`).
 
 ## Verification done outside the suite (scripts not part of the build)
 
@@ -41,4 +42,3 @@
 ## Next steps (Phase 4+)
 
 * HTTP server (`serve`), concurrency, streaming.
-* Optional: lazy (per-column) PQCF decoding for mmap opens.

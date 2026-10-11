@@ -85,6 +85,15 @@ for enc in plain dict rle auto; do
   check_seq "$(seq '{"op":"save","table":"t","path":"t.pqcf","options":{"encoding":"'$enc'","row_group_size":2}}' '{"op":"open","table":"u","path":"t.pqcf","options":{"mmap":true}}' '{"op":"query","sql":"SELECT * FROM u ORDER BY id"}')" '"rows":[[1,"a","1.50"],[2,"b",null],[3,"c, d","-2.25"]]'
 done
 check_seq "$(seq '{"op":"save","table":"t","path":"t.pqcf","options":{"row_group_size":1}}' '{"op":"open","table":"u","path":"t.pqcf"}' '{"op":"explain","sql":"SELECT name FROM u WHERE id > 2"}')" '"row_groups_skipped":2'
+# a damaged chunk: buffered open fails; a lazy (mmap) open fails on first access
+printf '%s\n' "$LOAD" '{"op":"save","table":"t","path":"flip.pqcf","options":{"encoding":"plain"}}' > "$TMP/mk.jsonl"
+"$BIN" session --data-dir "$TMP" < "$TMP/mk.jsonl" > /dev/null
+printf '\377' | dd of="$TMP/flip.pqcf" bs=1 seek=9 conv=notrunc 2>/dev/null
+check '{"op":"open","table":"f","path":"flip.pqcf"}' '"code":"STORAGE_CORRUPT"'
+printf '%s\n' '{"op":"open","table":"f","path":"flip.pqcf","options":{"mmap":true}}' '{"op":"query","sql":"SELECT name FROM f"}' > "$TMP/lazy1.jsonl"
+check_seq "$TMP/lazy1.jsonl" '"rows":[["a"],["b"],["c, d"]]'
+printf '%s\n' '{"op":"open","table":"f","path":"flip.pqcf","options":{"mmap":true}}' '{"op":"query","sql":"SELECT id FROM f"}' > "$TMP/lazy2.jsonl"
+check_seq "$TMP/lazy2.jsonl" '"code":"STORAGE_CORRUPT"'
 printf 'PQCF\001\000\000\000garbage' > "$TMP/bad.pqcf"
 check '{"op":"open","table":"b","path":"bad.pqcf"}' '"code":"STORAGE_CORRUPT"'
 check '{"op":"open","table":"b","path":"none.pqcf"}' '"code":"NOT_FOUND"'

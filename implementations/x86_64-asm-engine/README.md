@@ -89,9 +89,10 @@ Key decisions:
   bit stride and bit offset, dictionary), so one accessor (`col_get`) serves
   both layouts and the rest of the engine is layout-agnostic: results are
   identical by construction. `schema` reports the layout.
-* **Statistics** (`stats` op, planner): per column NULL count, exact
-  distinct count (hash set), min and max; computed on first use per column
-  and cached in the (immutable) table.
+* **Statistics** (`stats` op, planner): per column NULL count, distinct
+  count (exact with a hash set up to 200,000 values, then a HyperLogLog
+  sketch, so memory stays bounded), min and max; computed on first use per
+  column and cached in the (immutable) table.
 * **Indexes** (`index.S`) are single-column and belong to their table (dropped
   with it, or when it is replaced); names are global. `HASH`: bucket heads and
   a per-row `next` array over row ids. `BTREE`: an ordered structure realised
@@ -130,11 +131,18 @@ Key decisions:
   every chunk's CRC and every value (UTF-8, offsets, decimal precision,
   date/timestamp range, finite floats, RLE booleans and run lengths,
   dictionary codes, bitmap NULL counts, exact chunk sizes) before the table
-  is published, then recreates the file's indexes. With `"mmap":true` the
-  file is memory-mapped (`mmap(2)`) instead of read; chunks are decoded
-  eagerly at `open` (so corruption is always reported by `open`), and the
-  mapping is released afterwards — saving over an open file is therefore
-  always safe. Row-group min/max statistics are kept for skipping.
+  is published, then recreates the file's indexes. With `"mmap":true` (and
+  the default column layout) the file is memory-mapped (`mmap(2)`) and
+  decoded lazily: `open` validates header, footer, metadata checksum and the
+  complete metadata structure, and every column is decoded — its chunk CRCs
+  verified and every value validated — on its first access (`col_get` tests
+  one flag), so queries only decode the columns they reference; a corrupt
+  chunk then fails the query that touches it with `STORAGE_CORRUPT` and the
+  column stays undecoded. The table owns the mapping until it is dropped or
+  replaced; `save` always writes a new file and renames it, so saving over an
+  open file never disturbs the mapping. Without `mmap` (or with the row
+  layout) the file is read and decoded completely at `open`. Row-group
+  min/max statistics are kept for skipping.
 * **Types** are packed into one word (`kind | precision<<8 | scale<<16`). The
   binder inserts explicit promotion casts (INT→DECIMAL/FLOAT, DATE→TIMESTAMP),
   so the evaluator only sees same-kind operands (DECIMAL scales are aligned
@@ -222,11 +230,12 @@ Key decisions:
 
 ## Known limitations
 
-* PQCF chunks are decoded eagerly at `open` (also with `mmap`), so opening a
-  large file costs a full decode; a lazily decoding reader would only touch
-  the columns a query needs.
-* Statistics use exact distinct counts (one hash pass per column, on first
-  use).
+* Without `mmap`, PQCF files are decoded completely at `open`.
+* A lazily opened file must not be modified in place by other processes while
+  it is open (PQCF files are immutable; the engine itself only replaces files
+  by rename).
+* Distinct counts are exact up to 200,000 distinct values per column and
+  HyperLogLog estimates (2^14 registers, ~1% error) beyond.
 * Dropped indexes are freed, but indexes and statistics are rebuilt / recomputed
   per table and never persisted beyond the PQCF index metadata.
 * `serve` (HTTP, Phase 4) is not implemented and exits with status 1.

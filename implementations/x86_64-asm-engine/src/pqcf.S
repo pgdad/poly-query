@@ -10,14 +10,18 @@
  *       -> rax bytes written.  The file is assembled in memory, written to
  *       ".<name>.tmp-<pid>-<seq>" in the target's directory, fsync'ed,
  *       renamed over the target, and the directory is fsync'ed.
- *   pqcf_read(path pstr rdi, name pstr rsi, mmap edx, index specs Vec* rcx)
+ *   pqcf_read(path pstr rdi, name pstr rsi, mode edx, index specs Vec* rcx)
  *       -> rax staging Table* (allocated in g_pending_arena).  Validates
- *       header, footer, metadata CRC and structure, every chunk CRC and every
- *       value (STORAGE_CORRUPT / STORAGE_VERSION_UNSUPPORTED) and decodes all
- *       chunks eagerly; the file is memory-mapped while decoding when mmap is
- *       requested.  Row-group statistics are kept for row-group skipping
+ *       header, footer, metadata CRC and structure (STORAGE_CORRUPT /
+ *       STORAGE_VERSION_UNSUPPORTED).  PQ_READ and PQ_MMAP_EAGER then verify
+ *       every chunk CRC and decode and validate every value at once (the
+ *       file is read, or memory-mapped while decoding); PQ_MMAP_LAZY keeps
+ *       the mapping in the table (g_pending_map stays set until the caller
+ *       publishes the table) and marks the columns lazy: pqcf_load_col
+ *       verifies and decodes a column on its first access.  Row-group statistics are kept for row-group skipping
  *       (TB_RGS).  Index entries are appended to the Vec as triples
  *       (name pstr, column index, IXK_*).
+ *   pqcf_load_col(col rdi)    decodes a lazily opened column (col_get)
  */
 #include "pq.inc"
 #include "sql.inc"
@@ -57,6 +61,7 @@ save_seq:   .quad 0
     .globl g_pending_map, g_pending_map_len
 g_pending_map:      .quad 0     /* mapping of a file being read; unmapped on error */
 g_pending_map_len:  .quad 0
+g_decode_arena:     .quad 0     /* arena receiving decoded strings */
 
     .section .rodata
     .p2align 3
@@ -1052,7 +1057,7 @@ FUNC dc_strings
     call utf8_valid
     test %eax, %eax
     jz corrupt_value
-    mov g_pending_arena(%rip), %rdi
+    mov g_decode_arena(%rip), %rdi
     mov 24(%rsp), %rsi
     mov %r15, %rdx
     call pstr_new
@@ -1354,7 +1359,7 @@ FUNC parse_bound
     jmp 7f
 6:  mov %rsi, %rdx                  /* STRING: copy to the table arena */
     mov %rdi, %rsi
-    mov g_pending_arena(%rip), %rdi
+    mov g_decode_arena(%rip), %rdi
     call pstr_new
     mov %rax, %rdx
 7:  mov %rdx, (%r13)
@@ -1377,11 +1382,13 @@ ENDF parse_bound
 #define RD_TABLE  144
 #define RD_NROWS  152
 #define RD_MLEN   160
-#define RD_TMP    168   /* 168..183 */
-#define RD_STAT   192   /* struct stat 192..335 */
-#define RD_FRAME  336
+#define RD_TMP    168   /* 168..199 */
+#define RD_STAT   200   /* struct stat 200..343 */
+#define RD_FRAME  344
 FUNC pqcf_read
     ENTER RD_FRAME
+    mov g_pending_arena(%rip), %rax
+    mov %rax, g_decode_arena(%rip)
     mov %rsi, RD_NAME(%rsp)
     mov %rdx, RD_MMAP(%rsp)
     mov %rcx, RD_IX(%rsp)
@@ -1433,7 +1440,8 @@ FUNC pqcf_read
     mov %rax, g_pending_map(%rip)
     mov %r13, g_pending_map_len(%rip)
     jmp 6f
-4:  lea 8(%r13), %rdi
+4:  movq $0, RD_MMAP(%rsp)          /* buffered read: decode eagerly */
+    lea 8(%r13), %rdi
     call tmp_alloc
     mov %rax, RD_BASE(%rsp)
     xor %r14d, %r14d
@@ -1598,10 +1606,25 @@ FUNC pqcf_read
     shl $COL_SHIFT, %rsi
     mov RD_TABLE(%rsp), %rax
     add TB_COLS(%rax), %rsi
+    cmpq $PQ_MMAP_LAZY, RD_MMAP(%rsp)
+    je 23f
     mov g_pending_arena(%rip), %rdi
     mov %r14, %rdx
     mov RD_NROWS(%rsp), %r8
     call col_stage
+    inc %r12
+    jmp 20b
+23: mov %rsi, %r13                  /* lazy: decoded on first access */
+    mov %rcx, COL_TYPE(%r13)
+    movb $1, COL_LAZY(%r13)
+    mov RD_TABLE(%rsp), %rax
+    mov %rax, COL_TABLE(%r13)
+    mov %r12, COL_INDEX(%r13)
+    mov g_pending_arena(%rip), %rdi
+    lea 8(%r14), %rsi
+    mov (%r14), %rdx
+    call pstr_new
+    mov %rax, COL_NAME(%r13)
     inc %r12
     jmp 20b
 
@@ -1783,9 +1806,30 @@ FUNC pqcf_read
     jb corrupt_meta
     cmp %rcx, %rax
     ja corrupt_meta
+    mov RD_TMP+8(%rsp), %rcx        /* chunk record */
+    imul $RGC_SIZE, %rcx, %rcx
+    add RG_COLS(%rbx), %rcx
+    mov %rcx, RD_TMP+24(%rsp)       /* RGC* */
+    mov RD_DC+DC_P(%rsp), %rdx
+    mov %rdx, RGC_OFF(%rcx)
+    mov RD_DC+DC_L(%rsp), %rdx
+    mov %rdx, RGC_LEN(%rcx)
+    mov RD_DC+DC_ENC(%rsp), %rdx
+    mov %rdx, RGC_ENC(%rcx)
+    mov RD_DC+DC_NC(%rsp), %rdx
+    mov %rdx, RGC_NULLS(%rcx)
+    mov RD_DC+DC_TYPE(%rsp), %rdi   /* encoding allowed for the type? */
+    mov RD_DC+DC_ENC(%rsp), %rsi
+    call enc_fits_type
+    test %eax, %eax
+    jz corrupt_meta
     mov %r13, %rdi
     CSTR %rsi, "crc32"
     call m_int
+    mov RD_TMP+24(%rsp), %rcx
+    mov %rax, RGC_CRC(%rcx)
+    cmpq $PQ_MMAP_LAZY, RD_MMAP(%rsp)
+    je 37f                          /* checked and decoded on first access */
     mov %rax, RD_TMP+16(%rsp)
     mov RD_DC+DC_P(%rsp), %rdi      /* chunk checksum */
     add RD_BASE(%rsp), %rdi
@@ -1796,13 +1840,9 @@ FUNC pqcf_read
     jne corrupt_crc
     lea RD_DC(%rsp), %rdi
     call decode_chunk
-    /* chunk statistics for row-group skipping */
-    mov RD_TMP+8(%rsp), %rax
-    imul $RGC_SIZE, %rax, %rax
-    add RG_COLS(%rbx), %rax
+37: /* chunk statistics for row-group skipping */
+    mov RD_TMP+24(%rsp), %rax
     mov %rax, RD_TMP+16(%rsp)       /* RGC* */
-    mov RD_DC+DC_NC(%rsp), %rcx
-    mov %rcx, RGC_NULLS(%rax)
     mov %r13, %rdi
     CSTR %rsi, "min"
     call m_get
@@ -1832,7 +1872,16 @@ FUNC pqcf_read
     jmp 31b
 50: cmp RD_NROWS(%rsp), %r14
     jne corrupt_meta
-    /* ---- done: release the mapping */
+    cmpq $PQ_MMAP_LAZY, RD_MMAP(%rsp)
+    jne 501f
+    /* ---- lazy: the table keeps the mapping (the caller publishes it) */
+    mov RD_TABLE(%rsp), %rax
+    mov RD_BASE(%rsp), %rcx
+    mov %rcx, TB_MAP(%rax)
+    mov RD_SIZE(%rsp), %rcx
+    mov %rcx, TB_MAPLEN(%rax)
+    jmp 51f
+501: /* ---- done: release the mapping */
     mov g_pending_map(%rip), %rdi
     test %rdi, %rdi
     jz 51f
@@ -1843,3 +1892,84 @@ FUNC pqcf_read
     LEAVE
 98: RAISE E_RESOURCE_LIMIT, "table exceeds the maximum row count"
 ENDF pqcf_read
+
+/* enc_fits_type(type rdi, encoding rsi) -> eax 1 if the encoding is defined
+ * for the type (DICT: STRING; RLE: BOOLEAN, INT64, DECIMAL, DATE, TIMESTAMP) */
+FUNC enc_fits_type
+    movzbl %dil, %ecx
+    mov $1, %eax
+    cmp $EN_PLAIN, %rsi
+    je 9f
+    cmp $EN_DICT, %rsi
+    jne 1f
+    cmp $T_STR, %ecx
+    je 9f
+    xor %eax, %eax
+    ret
+1:  cmp $T_STR, %ecx
+    je 8f
+    cmp $T_FLOAT, %ecx
+    je 8f
+9:  ret
+8:  xor %eax, %eax
+    ret
+ENDF enc_fits_type
+
+/* pqcf_load_col(col rdi): decodes a lazily opened column - verifies every
+ * chunk's CRC, decodes and validates it into staging vectors, then turns
+ * the column into the column layout.  STORAGE_CORRUPT leaves the column
+ * undecoded (every later access fails the same way). */
+FUNC pqcf_load_col
+    ENTER DC_SIZE+16
+    mov %rdi, %r12                  /* Column* */
+    mov COL_TABLE(%r12), %rbx       /* Table* */
+    mov TB_ARENA(%rbx), %rax
+    mov %rax, g_decode_arena(%rip)
+    mov TB_ARENA(%rbx), %rdi        /* staging vectors */
+    mov TB_NROWS(%rbx), %rsi
+    lea 8(, %rsi, 8), %rsi
+    call arena_alloc
+    mov %rax, COL_DATA(%r12)
+    mov TB_ARENA(%rbx), %rdi
+    mov TB_NROWS(%rbx), %rsi
+    add $8, %rsi
+    call arena_zalloc
+    mov %rax, COL_NULLS(%r12)
+    xor %r13d, %r13d                /* row group */
+1:  cmp TB_NRG(%rbx), %r13
+    jae 8f
+    imul $RG_SIZE, %r13, %r14
+    add TB_RGS(%rbx), %r14          /* RowGroup* */
+    mov COL_INDEX(%r12), %r15
+    imul $RGC_SIZE, %r15, %r15
+    add RG_COLS(%r14), %r15         /* RGC* */
+    mov RGC_OFF(%r15), %rdi
+    add TB_MAP(%rbx), %rdi
+    mov %rdi, DC_P(%rsp)
+    mov RGC_LEN(%r15), %rsi
+    mov %rsi, DC_L(%rsp)
+    call crc32
+    cmp RGC_CRC(%r15), %rax
+    jne corrupt_crc
+    mov RG_N(%r14), %rax
+    mov %rax, DC_N(%rsp)
+    mov RGC_NULLS(%r15), %rax
+    mov %rax, DC_NC(%rsp)
+    mov %r12, DC_COL(%rsp)
+    mov RG_START(%r14), %rax
+    mov %rax, DC_ROW0(%rsp)
+    mov RGC_ENC(%r15), %rax
+    mov %rax, DC_ENC(%rsp)
+    mov COL_TYPE(%r12), %rax
+    mov %rax, DC_TYPE(%rsp)
+    lea 0(%rsp), %rdi
+    call decode_chunk
+    inc %r13
+    jmp 1b
+8:  movb $0, COL_LAZY(%r12)         /* decoded: dictionary encoding reads it */
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    mov TB_DICTMODE(%rbx), %rdx
+    call col_finalize
+    LEAVE
+ENDF pqcf_load_col

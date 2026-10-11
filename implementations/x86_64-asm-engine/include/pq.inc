@@ -111,7 +111,10 @@
 #define TB_INDEXES 72    /* Vec* of Index* (malloc'd, see index.S) or 0 */
 #define TB_NRG     80    /* PQCF-backed: number of row groups (0 otherwise) */
 #define TB_RGS     88    /* PQCF-backed: RowGroup[nrg] */
-#define TB_SIZE    96
+#define TB_MAP     96    /* lazily decoded PQCF file: its mapping, or 0 */
+#define TB_MAPLEN  104
+#define TB_DICTMODE 112  /* DICT_* requested at load / open */
+#define TB_SIZE    120
 
 #define LAYOUT_COLUMN 0
 #define LAYOUT_ROW    1
@@ -121,6 +124,11 @@
 #define ENC_PLAIN 1
 #define ENC_DICT  2
 #define ENC_RLE   3
+
+/* pqcf_read modes */
+#define PQ_READ       0
+#define PQ_MMAP_EAGER 1
+#define PQ_MMAP_LAZY  2
 
 /* dictionary encoding of STRING columns (table_finalize) */
 #define DICT_AUTO 0
@@ -148,8 +156,11 @@
 #define COL_NSTRIDE 40   /* bits from one row's NULL flag to the next */
 #define COL_NBIT    48   /* bit offset of row 0's NULL flag */
 #define COL_DICT    56   /* pstr*[] dictionary or 0 */
-#define COL_SIZE    64
-#define COL_SHIFT   6
+#define COL_TABLE   64   /* owning Table* (lazily decoded columns) */
+#define COL_INDEX   72   /* column number (lazily decoded columns) */
+#define COL_LAZY    80   /* u8: 1 = PQCF chunks not decoded yet (col_get loads) */
+#define COL_SIZE    128
+#define COL_SHIFT   7
 
 /* per-column statistics (TB_STATS) */
 #define CST_NULLS    0
@@ -170,7 +181,11 @@
 #define RGC_MIN  8
 #define RGC_MAX  16
 #define RGC_NULLS 24
-#define RGC_SIZE 32
+#define RGC_OFF  32       /* chunk byte range, checksum and encoding */
+#define RGC_LEN  40
+#define RGC_CRC  48
+#define RGC_ENC  56
+#define RGC_SIZE 64
 
 /* ------------------------------------------------------------ Index (index.S)
  * Each index owns an arena (freed by DROP INDEX / table drop). */

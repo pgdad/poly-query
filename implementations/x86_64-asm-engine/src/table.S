@@ -32,6 +32,8 @@
 
 /* col_get(col rdi, row rsi) -> rax payload (0 when NULL), edx NULL flag */
 FUNC col_get
+    cmpb $0, COL_LAZY(%rdi)
+    jne col_get_lazy
     mov COL_NULLS(%rdi), %rdx
     test %rdx, %rdx
     jz 1f
@@ -61,6 +63,19 @@ FUNC col_get
     mov $1, %edx
     ret
 ENDF col_get
+
+/* col_get_lazy: first access to a lazily decoded PQCF column (entered by a
+ * jump from col_get with its arguments): decodes it, then reads the value */
+FUNC col_get_lazy
+    push %rdi
+    push %rsi
+    sub $8, %rsp
+    call pqcf_load_col
+    add $8, %rsp
+    pop %rsi
+    pop %rdi
+    jmp col_get
+ENDF col_get_lazy
 
 /* table_new(arena, name pstr, ncols, nrows) -> Table* (staging) */
 FUNC table_new
@@ -141,47 +156,20 @@ FUNC table_finalize
     cmp $LAYOUT_ROW, %eax
     je 20f
     /* ---- column layout */
+    mov %rdx, TB_DICTMODE(%rbx)
     xor %r12d, %r12d
 1:  cmp TB_NCOLS(%rbx), %r12
     jae 99f
     mov %r12, %r13
     shl $COL_SHIFT, %r13
     add TB_COLS(%rbx), %r13         /* Column* */
-    movq $8, COL_STRIDE(%r13)
-    movq $1, COL_NSTRIDE(%r13)
-    movq $0, COL_NBIT(%r13)
-    mov COL_NULLS(%r13), %rdi
-    mov TB_NROWS(%rbx), %rsi
-    call any_null
-    test %eax, %eax
-    jnz 2f
-    movq $0, COL_NULLS(%r13)
-    jmp 5f
-2:  /* bytes -> bitmap */
-    mov TB_NROWS(%rbx), %rsi
-    add $71, %rsi
-    shr $3, %rsi
-    mov TB_ARENA(%rbx), %rdi
-    call arena_zalloc
-    mov COL_NULLS(%r13), %rsi       /* bytes */
-    xor %ecx, %ecx
-3:  cmp TB_NROWS(%rbx), %rcx
-    jae 4f
-    cmpb $0, (%rsi, %rcx)
-    je 31f
-    bts %rcx, (%rax)
-31: inc %rcx
-    jmp 3b
-4:  mov %rax, COL_NULLS(%r13)
-5:  cmpb $T_STR, COL_TYPE(%r13)
-    jne 6f
-    cmpq $DICT_OFF, 8(%rsp)
-    je 6f
+    cmpb $0, COL_LAZY(%r13)         /* decoded on first access */
+    jne 2f
     mov %rbx, %rdi
     mov %r13, %rsi
     mov 8(%rsp), %rdx
-    call dict_encode
-6:  inc %r12
+    call col_finalize
+2:  inc %r12
     jmp 1b
 
 20: /* ---- row layout: tuples of ncols slots + NULL bitmap words */
@@ -260,6 +248,51 @@ FUNC table_finalize
     jmp 26b
 99: LEAVE
 ENDF table_finalize
+
+/* col_finalize(t rdi, col rsi, dict rdx): turns one staging column into the
+ * column layout (NULL bitmap or none, optional dictionary encoding; the
+ * dictionary is built by reading the column through col_get) */
+FUNC col_finalize
+    ENTER 16
+    mov %rdi, %rbx
+    mov %rsi, %r13
+    mov %rdx, 0(%rsp)
+    movq $8, COL_STRIDE(%r13)
+    movq $1, COL_NSTRIDE(%r13)
+    movq $0, COL_NBIT(%r13)
+    mov COL_NULLS(%r13), %rdi
+    mov TB_NROWS(%rbx), %rsi
+    call any_null
+    test %eax, %eax
+    jnz 2f
+    movq $0, COL_NULLS(%r13)
+    jmp 5f
+2:  /* bytes -> bitmap */
+    mov TB_NROWS(%rbx), %rsi
+    add $71, %rsi
+    shr $3, %rsi
+    mov TB_ARENA(%rbx), %rdi
+    call arena_zalloc
+    mov COL_NULLS(%r13), %rsi       /* bytes */
+    xor %ecx, %ecx
+3:  cmp TB_NROWS(%rbx), %rcx
+    jae 4f
+    cmpb $0, (%rsi, %rcx)
+    je 31f
+    bts %rcx, (%rax)
+31: inc %rcx
+    jmp 3b
+4:  mov %rax, COL_NULLS(%r13)
+5:  cmpb $T_STR, COL_TYPE(%r13)
+    jne 9f
+    cmpq $DICT_OFF, 0(%rsp)
+    je 9f
+    mov %rbx, %rdi
+    mov %r13, %rsi
+    mov 0(%rsp), %rdx
+    call dict_encode
+9:  LEAVE
+ENDF col_finalize
 
 /* dict_encode(t rdi, col rsi, mode rdx): dictionary-encodes a finalized
  * STRING column (column layout).  DICT_AUTO encodes only when the distinct
@@ -575,7 +608,12 @@ FUNC table_free
     call idx_free
     inc %r13
     jmp 1b
-2:  mov TB_ARENA(%rbx), %rdi
+2:  mov TB_MAP(%rbx), %rdi          /* lazily decoded PQCF file */
+    test %rdi, %rdi
+    jz 3f
+    mov TB_MAPLEN(%rbx), %rsi
+    call munmap
+3:  mov TB_ARENA(%rbx), %rdi
     call arena_destroy
     LEAVE
 ENDF table_free
