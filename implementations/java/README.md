@@ -19,12 +19,15 @@ error-preserving logical optimizer (constant folding, predicate simplification a
 join reordering), top-N sorting, SIMD-friendly kernels and cache-conscious data structures —
 see [Phase 5: optimization](#phase-5-optimization); and (M9) the optional **native kernel
 library** `libpqkernels` bound through the Java FFM API and used for filtering, aggregation,
-bitmap and hashing work with `native: true` — see [Native kernels (M9)](#native-kernels-m9).
+bitmap and hashing work with `native: true` — see [Native kernels (M9)](#native-kernels-m9);
+and the requirement change **CR-1 `UNION ALL`** (`spec/changes/union-all.md`) — see
+[Change CR-1: UNION ALL](#change-cr-1-union-all).
 
 Capabilities: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic test.functions phase2
 sql.groupby sql.join sql.functions sql.subquery sql.cte sql.correlated_subquery phase3
 storage.pqcf storage.mmap index.hash index.btree phase4 http.streaming phase5 exec.row
-exec.vectorized exec.parallel join.hash join.merge join.nested_loop native.kernels`.
+exec.vectorized exec.parallel join.hash join.merge join.nested_loop native.kernels
+change.union_all`.
 
 ## Prerequisites and build
 
@@ -99,7 +102,8 @@ SQL text ─Lexer→ tokens ─Parser→ AST (Statement/Query/Expr)
 `EXPLAIN` renders the physical plan (`TableScan`/`IndexScan` with `table`, `index`, `kind` and
 the `columns` actually read, `Filter`, `Project`, `Aggregate`, `Distinct`,
 `HashJoin`/`MergeJoin`/`NestedLoopJoin` with `join_type` (and `build_side` for hash joins),
-`Sort`, `TopN`, `Limit`, `Values`, `HashLookupFilter`); the physical plan is the same in both
+`Sort`, `TopN`, `Limit`, `Values`, `HashLookupFilter`, `UnionAll` with the branch plans as
+`children`); the physical plan is the same in both
 execution modes; plans of subqueries appear under a `subqueries` property of the node that
 evaluates them. Scans also show `row_group_filters` (predicates used to skip row groups),
 `layout` and `estimated_rows`.
@@ -687,11 +691,68 @@ variants the dispatch chooses from:
 The unit tests and the conformance suite pass with every variant
 (`PQ_KERNELS_VARIANT=reference|scalar|avx2|avx512`).
 
+## Change CR-1: UNION ALL
+
+`spec/changes/union-all.md` (capability `change.union_all`): `UNION ALL` of any number of
+plain `select_core`s, wherever a query is allowed (top level, CTE bodies, derived tables,
+scalar / `IN` / `EXISTS` subqueries, `EXPLAIN`), identical under every `mode`, `threads`,
+`join`, `optimize` and `native` setting.
+
+The change is a new relational operator carried through every layer of the pipeline — no
+layer special-cases it beyond its own responsibility:
+
+| Module | Change |
+|---|---|
+| `sql.ast.Query` | A query has a list of `branches` (`Select` cores) instead of one `select`; `ORDER BY`/`LIMIT`/`OFFSET` stay on the query and apply to the whole compound (`compound()` = two or more branches) |
+| `sql.parser.Parser` | `query = [WITH] select_core {UNION ALL select_core} [ORDER BY] [LIMIT]`. `UNION` without `ALL` (incl. `UNION DISTINCT`) stays `UNSUPPORTED`; `UNION ALL` after a branch's `ORDER BY`/`LIMIT` is a `PARSE_ERROR`; parenthesized branches are `PARSE_ERROR`s by the grammar (a statement / branch must start with `SELECT`) |
+| `sql.analyzer.Analyzer` | `planUnionAll`: each branch is bound as its own query level (`bindQuery` now takes a branch plus optional ORDER BY/LIMIT) in a `Scope` nested in the compound's scope, so CTEs of the `WITH` and outer (correlated) columns are visible but other branches' range variables are not; outer references from any branch are collected on the compound's scope, so a subquery whose body is a `UNION ALL` is correlated iff some branch is. Column counts must match (`SEMANTIC_ERROR`); column *i* gets `TypeCoercion.commonType` over the branches (the CASE rule: numeric promotion, untyped NULL adopts the other type, all-NULL stays the untyped NULL type, reported as STRING like `SELECT NULL`; else `TYPE_ERROR`); names are the first branch's. ORDER BY items must be output names or positions (`resolveCompoundOrderItem`, else `SEMANTIC_ERROR`); then `Sort` and `Limit` over the union |
+| `plan.LogicalPlan` | `UnionAll(inputs, columns)` |
+| `optimizer` | `LogicalOptimizer` (folding, pushdown) and `JoinReorder` recurse into every branch; a union is an opaque input of joins above it |
+| `physical` | `PhysicalPlan.UnionAll`; `PhysicalPlanner` plans each branch independently (index scans, join algorithms, hash lookups per branch); `ColumnPruner` passes the consumer's required slots to every branch; `Cardinality` = sum of the branches; `PlanExplainer` renders `{"op":"UnionAll","columns":[…],"children":[branch plans in order]}` |
+| `exec` | `Operators.UnionAll` (row engine) |
+| `exec.vector` | `BatchOperators.UnionAll` (vectorized; passes the branches' batches through unchanged, incl. a pending row-exact error); `BatchBuilder` builds each branch with `build`, so a branch that is a scan pipeline still runs morsel-parallel and with native filters/aggregates |
+| `engine.Version` | claims `change.union_all` |
+
+Design decisions:
+
+* **Conversions live in the branches.** Values are converted to the output type by implicit
+  casts folded into the branch's final projection (so INT64→DECIMAL(18,s) overflow raises
+  `NUMERIC_OVERFLOW` exactly like promotion elsewhere, in every mode). After `SELECT DISTINCT`
+  the casts go into a projection *above* the branch's `Distinct`, because converting first could
+  merge values that are distinct in the branch's own type (e.g. large INT64s as FLOAT64).
+  Every branch therefore produces exactly the union's column types, and the union operators
+  just concatenate — no per-row work, no type dispatch.
+* **Branches run one after the other**, each opened only when the previous one is exhausted
+  (and closed then). Row order without ORDER BY is branch 1's rows, then branch 2's, … in every
+  mode; a `LIMIT` that is satisfied early never evaluates later branches (so it cannot raise
+  their errors), consistently in row and vectorized execution.
+* **ORDER BY over a compound**: an unqualified name matching several output columns is
+  ambiguous (`SEMANTIC_ERROR`) unless those columns are the same expression in every branch
+  (mirroring the single-SELECT rule). `NULLS FIRST/LAST`, `ASC/DESC`, `ORDER BY … LIMIT`
+  (top-N) work as for single queries. Error precedence: branch errors (in branch order), then
+  column count, then column types, then ORDER BY, then LIMIT/OFFSET.
+* **`spec_version` stays `1.0.0`.** CR-1 says engines claiming the change report
+  `1.1.0-cr1`, but the phase-1 conformance case `catalog.pqt` (which must keep passing) requires
+  `"spec_version":"1.0.0"`; the capability `change.union_all` signals the change instead.
+
+Conformance note: one public case cannot pass on a spec-conformant engine.
+`changes/union_all.pqt:51` (`SELECT order_id AS v FROM orders … UNION ALL SELECT amount FROM
+orders …`) expects `DECIMAL(18,2)`, but that file loads `orders.csv` *without* a schema, and
+CSV inference "NEVER yields DECIMAL" (ingestion.md §1.1) — `amount` is FLOAT64 there (the
+phase-2 files that expect DECIMAL amounts load it with `schema=…amount:DECIMAL(10,2)…`). By
+CR-1 §2, INT64 ∪ FLOAT64 is FLOAT64, which is what the engine returns (`[99.99], [101.0]`); the
+very next case checks exactly that rule (`age` ∪ `score`). Making the case pass would require
+violating the ingestion spec (breaking that next case and phase-1 inference tests) or
+special-casing the test, so it was left failing. With an explicit DECIMAL schema the same query
+returns the expected `DECIMAL(18,2)` rows `["99.99"], ["101.00"]` in every mode (checked
+during development; the INT64 ∪ DECIMAL rule itself is covered by `EngineTest.testUnionAll`).
+
 ## Design decisions / interpretations
 
 Where the spec leaves room, these choices were made:
 
-* `UNION`, `RIGHT JOIN` and `FULL JOIN` are `UNSUPPORTED`. Unknown function names are
+* `UNION` / `UNION DISTINCT` (without `ALL`), `RIGHT JOIN` and `FULL JOIN` are `UNSUPPORTED`
+  (`UNION ALL` is supported, see [Change CR-1](#change-cr-1-union-all)). Unknown function names are
   `SEMANTIC_ERROR`. `CREATE INDEX` checks the table and column (`SEMANTIC_ERROR`) before the
   index name (`ALREADY_EXISTS`, or a no-op with `IF NOT EXISTS`). Index names are matched
   case-insensitively. `EXPLAIN` (statement or `explain` op) of `CREATE/DROP INDEX` is a
@@ -825,7 +886,8 @@ empty-input edge cases).
 
 Unit tests (`src/test/java`, run by `make test`) cover the Phase 5 engine — `Phase5Test` runs
 a set of queries (grouping, joins of every kind, DISTINCT, sorts, top-N, subqueries, failing
-expressions) under every combination of mode × join × threads × optimize, also with tiny
+expressions, `UNION ALL` with mixed branch types / under aggregation and joins / in IN and
+correlated EXISTS subqueries / with LIMIT before a failing branch) under every combination of mode × join × threads × optimize, also with tiny
 batches and morsels, and checks row-exact error semantics; `VectorTest` covers the kernels
 (branch-free comparisons), group-key tables, exact sums (single-group SIMD path, overflow
 widening, partial merges), stable radix/merge sorting, the join index and the k-way merge —
@@ -871,6 +933,10 @@ and `use_indexes`/`optimize` off.
 * Non-streamed query responses are built in memory before being sent (use
   `/v1/query/stream` for large results). Request bodies are buffered in memory.
 * Index builds (`CREATE INDEX`) and ingestion are not cancellable.
+* `UNION ALL`: filters above a union (e.g. `WHERE` over a derived table that is a union) are not
+  pushed into the branches (the optimizer does not push predicates through projections at
+  all); the branches of a union run sequentially (each branch's own pipeline may be parallel),
+  and an aggregation over a union is not parallelized.
 * Indexes are used only for filters directly over a scan (no index nested-loop joins, no
   index-ordered output); OR-ed predicates are not used for index lookups or row-group
   skipping. In-memory tables are a single row group, so row-group skipping applies to

@@ -233,7 +233,9 @@ class Gen:
         where = f" WHERE {self.pred(scope)}" if r.random() < 0.7 else ""
         if required:
             where = f" WHERE {required}" + (f" AND {self.pred(scope)}" if where else "")
-        shape = r.randint(0, 9)
+        shape = r.randint(0, 11)
+        if shape >= 10:
+            return self.union_all(frm, scope, join, where)
         if shape <= 3:
             n = r.randint(1, 3)
             items = [f"{self.expr(scope, r.choice(['INT64', 'DEC', 'STRING', 'FLOAT64', 'DATE']))} AS c{i}"
@@ -278,6 +280,30 @@ class Gen:
         inner = f"SELECT {self.expr(scope, 'INT64')} AS x, {self.expr(scope, 'STRING')} AS y FROM {frm}{where}"
         return f"SELECT y, COUNT(*), SUM(x), MAX(x) FROM ({inner}) d GROUP BY y", False, False, join
 
+
+    def union_all(self, frm, scope, join, where):
+        """UNION ALL (CR-1) of 2-3 branches with mixed numeric types, optionally ordered/limited or aggregated."""
+        r = self.r
+        kinds = [r.choice([("INT64", "DEC"), ("DEC", "FLOAT64"), ("INT64", "INT64"), ("STRING", "STRING"),
+                           ("DATE", "DATE")]) for _ in range(r.randint(1, 2))]
+        branches = [f"SELECT {', '.join(f'{self.expr(scope, k[0])} AS c{i}' for i, k in enumerate(kinds))} "
+                    f"FROM {frm}{where}"]
+        for _ in range(r.randint(1, 2)):
+            frm2, scope2, join2, required2 = self.from_clause()
+            join = join or join2
+            where2 = f" WHERE {required2}" if required2 else (f" WHERE {self.pred(scope2)}" if r.random() < 0.6 else "")
+            items = ["NULL" if r.random() < 0.1 else self.expr(scope2, k[1]) for k in kinds]
+            distinct = "DISTINCT " if r.random() < 0.15 else ""
+            branches.append(f"SELECT {distinct}{', '.join(items)} FROM {frm2}{where2}")
+        q = " UNION ALL ".join(branches)
+        if r.random() < 0.3:
+            return f"SELECT c0, COUNT(*) FROM ({q}) u GROUP BY c0", False, False, join
+        if r.random() < 0.5:
+            order = " ORDER BY " + ", ".join(f"{i + 1}{r.choice(['', ' DESC'])}" for i in range(len(kinds)))
+            limit = f" LIMIT {r.randint(0, 20)}" if r.random() < 0.5 else ""
+            # every output column is a sort key: the order (and a LIMITed prefix) is deterministic
+            return q + order + limit, True, False, join
+        return q, False, False, join
 
 def canon(resp, ordered):
     if not resp.get("ok"):
