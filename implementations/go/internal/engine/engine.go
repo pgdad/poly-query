@@ -37,7 +37,7 @@ const (
 	Name            = "polyquery-go"
 	Version         = "0.3.0"
 	ProtocolVersion = 1
-	SpecVersion     = "1.1.0-cr1"
+	SpecVersion     = "1.0.0"
 )
 
 // Capabilities lists the capability strings this engine implements.

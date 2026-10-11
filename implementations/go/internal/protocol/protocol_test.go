@@ -91,7 +91,7 @@ func TestExecArray(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 2 || !strings.Contains(lines[0], `"spec_version":"1.1.0-cr1"`) || !strings.Contains(lines[1], `"rows":[[1]]`) {
+	if len(lines) != 2 || !strings.Contains(lines[0], `"spec_version":"1.0.0"`) || !strings.Contains(lines[1], `"rows":[[1]]`) {
 		t.Errorf("exec output: %q", out.String())
 	}
 }

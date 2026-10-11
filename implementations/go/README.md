@@ -47,7 +47,8 @@ None. Only the Go standard library is used (`ENGINE.json` lists no libraries).
 `sql.subquery`, `sql.cte`, `sql.correlated_subquery`, `phase3`,
 `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`, `phase4`,
 `http.streaming`, `phase5`, `exec.row`, `exec.vectorized`, `exec.parallel`,
-`join.hash`, `join.merge`, `join.nested_loop`, `native.kernels`.
+`join.hash`, `join.merge`, `join.nested_loop`, `change.union_all`,
+`native.kernels`.
 
 `native.kernels` is claimed by cgo builds (the default with a C compiler):
 `--native-kernels PATH` loads `libpqkernels` and queries with `native:
@@ -77,7 +78,7 @@ SQL text ─lexer→ tokens ─parser→ AST ─analyzer→ logical plan ─opti
 | `internal/sql/lexer` | Tokens with 1-based line/column positions; comments, quoted identifiers, reserved keywords |
 | `internal/sql/ast`, `internal/sql/parser` | Recursive-descent parser for the full v1 grammar producing an AST; `PARSE_ERROR` carries `line`/`column` |
 | `internal/analyzer` | Semantic validation: scopes and range variables, CTE environments, name resolution (incl. outer scopes for correlation), typing with implicit promotions, function signatures, aggregate/grouping rules, ORDER BY resolution; produces the logical plan |
-| `internal/plan` | Bound typed expressions and logical plan nodes (`Scan`, `Values`, `Filter`, `Project`, `Aggregate`, `Join`, `Sort`, `Limit`, `Distinct`); every produced column has a statement-unique `ColumnID` |
+| `internal/plan` | Bound typed expressions and logical plan nodes (`Scan`, `Values`, `Filter`, `Project`, `Aggregate`, `Join`, `Sort`, `Limit`, `Distinct`, `UnionAll`); every produced column has a statement-unique `ColumnID` |
 | `internal/optimizer` | Logical rewrites (all disabled by `optimize: false`): constant folding and boolean simplification; predicate pushdown through joins (WHERE/ON conjuncts on one input move below the join, spanning conjuncts become join conditions, so comma joins become inner joins) and through projections (derived tables, CTEs), sorts and DISTINCT, so that predicates end up directly above table scans; greedy reordering of inner-join chains |
 | `internal/physical` | Physical planning: access paths (index selection from statistics, row-group skipping filters), join algorithm (hash join with the build side by estimated cardinality, sort-merge join, nested loop), hash aggregation, hash distinct, top-N sort; column pruning (scans read only referenced columns); correlated-subquery helpers; EXPLAIN JSON |
 | `internal/exec` | Execution in two models over the same physical plan: Volcano row operators (`operators.go`, `join.go`, `merge.go`, `aggregate.go`; expressions compiled to closures against the input row layout) and vectorized batch operators (`vector.go`, `vexpr.go`, `vops.go`, `vagg.go`, `vjoin.go`, `vsort.go`, `simd_*.go`); morsel-driven parallelism (`parallel.go`); all scalar functions, LIKE, CASE, BETWEEN, IN; subquery evaluation; cancellation checks; approximate memory accounting; `--max-join-rows` |
@@ -128,8 +129,31 @@ get their references to grouped columns redirected to the key columns.
 `explain` op returns the same tree as an object. Nodes: `TableScan` (`table`,
 `columns` actually read), `Values`, `Filter`, `Project`, `Aggregate`,
 `HashJoin`/`MergeJoin`/`NestedLoopJoin` (`join_type`), `Sort` (`top_n` when combined with a
-literal LIMIT), `Limit`, `Distinct`, `ParamLookup`, `Materialize`, and
+literal LIMIT), `Limit`, `Distinct`, `UnionAll` (`columns`; one child per
+branch, in order), `ParamLookup`, `Materialize`, and
 `Subquery` (children of the operator that evaluates them).
+
+### UNION ALL (change request CR-1)
+
+`UNION ALL` is implemented as specified in `spec/changes/union-all.md`
+(capability `change.union_all`). It is a new plan operator carried
+through every layer; no existing operator was special-cased.
+
+| Module | Change |
+|---|---|
+| `internal/sql/ast` | `Query.Union` holds the branches after the first; the select-core fields of `Query` are the first branch, `With`/`OrderBy`/`Limit`/`Offset` belong to the compound |
+| `internal/sql/parser` | `query = [WITH] select_core {UNION ALL select_core} [ORDER BY] [LIMIT/OFFSET]`; `UNION` without `ALL` (incl. `UNION DISTINCT`) ⇒ `UNSUPPORTED`; a branch with its own ORDER BY/LIMIT or a parenthesized branch ⇒ `PARSE_ERROR` |
+| `internal/analyzer` | `compound.go`: branches are analyzed as ordinary select blocks in the same CTE environment and outer scope (so compounds work in CTEs, derived tables, scalar/IN/EXISTS and correlated subqueries); column-count check (`SEMANTIC_ERROR`); per-column type unification with the CASE rule (`TYPE_ERROR`); branches whose types differ are wrapped in a converting `Project` (casts, so an INT64 not fitting DECIMAL(18,s) raises `NUMERIC_OVERFLOW` at run time); names from the first branch; ORDER BY restricted to output names / positions |
+| `internal/plan` | `UnionAll{Inputs, Cols}` node (schema, children, `MapExprs`) |
+| `internal/optimizer` | predicates above a `UnionAll` are pushed into every branch (rewritten to the branch's columns; predicates with subqueries stay above); join reordering and cardinality estimates recurse into branches |
+| `internal/physical` | `UnionAll{Inputs, InputCols, Cols}`; column pruning keeps only the required outputs and asks each branch for the columns that feed them; EXPLAIN op `UnionAll` |
+| `internal/exec` | `union.go`: a row operator and a vectorized operator that build and drain the branches one after the other (vectorized output batches share the branch's vectors, no copying); each branch is planned/executed like any other subtree, so it gets parallel pipelines, native kernels, index scans and correlated-subquery helpers on its own |
+| `internal/engine` | claims `change.union_all` |
+
+The executor is unchanged otherwise: all `mode`/`threads`/`join`/
+`optimize`/`native` combinations run the same `UnionAll` operator over
+branch plans built by the existing code, which is why they agree (checked
+by `TestUnionAllModesAgree`).
 
 ### Value representation
 
@@ -780,6 +804,17 @@ Observations:
   `left_expr = right_expr` conjunct; other conjuncts are evaluated as a
   residual. For INNER joins the smaller (estimated) input is the build side.
 * `--max-join-rows` limits the output of every individual join operator.
+* **UNION ALL**: types of identical DECIMAL branch columns are kept
+  (`DECIMAL(10,2)` ∪ `DECIMAL(10,2)` is `DECIMAL(10,2)`), exactly as for CASE
+  results; differing DECIMALs and INT64/DECIMAL mixes give `DECIMAL(18,s)`.
+  An all-NULL column keeps the null type (reported as `STRING`, as for
+  `SELECT NULL`). ORDER BY names are matched case-insensitively against
+  the output names; a name matching two output columns is ambiguous
+  (`SEMANTIC_ERROR`); qualified names and any other expression are
+  `SEMANTIC_ERROR`. The `version` op keeps reporting `spec_version`
+  `1.0.0`: CR-1 mentions `1.1.0-cr1`, but it also requires that every
+  earlier phase keeps passing, and the phase-1 conformance case pins
+  `1.0.0`.
 * Defaults: `--max-query-memory-mb 4096`, `--max-ingest-bytes 4 GiB`,
   `--max-table-rows 500000000`. Memory accounting covers retained rows (sort
   buffers, hash tables, materialized join inputs and results).
@@ -818,6 +853,17 @@ Observations:
   the column (e.g. `col + 1 = 5`) or INT64/DECIMAL columns compared with
   FLOAT64 values, and not to produce ordered output. Predicates are not
   pushed through GROUP BY or LIMIT.
+* Public case `changes/union_all.pqt:51` fails, deliberately. It loads
+  `orders.csv` **without** a schema and expects
+  `order_id UNION ALL amount` to be `DECIMAL(18,2)`. ingestion.md §1.1
+  says inference never yields DECIMAL, so `amount` is FLOAT64, and
+  CR-1 (and the next public case, `age ∪ score`) say INT64 ∪ FLOAT64 is
+  FLOAT64. The engine follows the spec. With `amount` loaded as
+  `DECIMAL(10,2)` it returns exactly the expected `DECIMAL(18,2)` rows
+  `"99.99"`, `"101.00"`. Making the case pass would mean inferring
+  DECIMAL, which breaks the ingestion spec.
+* A hash aggregation, DISTINCT or sort directly over a `UNION ALL` runs
+  single-threaded. Its branches still use parallel pipelines.
 * Correlated subqueries whose correlation is not an equality (e.g.
   `q.age < p.age`) rescan their input per distinct outer value.
 
