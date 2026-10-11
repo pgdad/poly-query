@@ -216,6 +216,27 @@ func constFor(v types.Value, kt, ct types.Type) (x int64, null, ok bool) {
 	return v.I, false, true
 }
 
+// bound evaluates a constant compared with a column of type xt in the
+// comparison type ct and converts it to the column's representation. The
+// constant is first cast to ct as the engine's comparer does; if that cast
+// fails the predicate is left to the regular evaluator, which reports the
+// error.
+func (c *nativeCompiler) bound(e plan.Expr, ct, xt types.Type) (x int64, null, ok bool) {
+	v, ok := c.constant(e)
+	if !ok {
+		return 0, false, false
+	}
+	kt := e.Type()
+	if !v.Null && kt.Kind != ct.Kind && kt.Kind != types.KindNull {
+		var err error
+		if v, err = types.Cast(v, kt, ct); err != nil {
+			return 0, false, false
+		}
+		kt = ct
+	}
+	return constFor(v, kt, xt)
+}
+
 var cmpOps = map[plan.BinaryOp]native.Op{
 	plan.OpEq: native.EQ, plan.OpNe: native.NE, plan.OpLt: native.LT,
 	plan.OpLe: native.LE, plan.OpGt: native.GT, plan.OpGe: native.GE,
@@ -328,15 +349,8 @@ func (c *nativeCompiler) between(x *plan.Between, neg bool) (*npred, bool) {
 	if !ok || !intClass(xt) || x.LoType.Kind != xt.Kind || x.HiType.Kind != xt.Kind {
 		return nil, false
 	}
-	bound := func(e plan.Expr) (int64, bool, bool) {
-		v, ok := c.constant(e)
-		if !ok {
-			return 0, false, false
-		}
-		return constFor(v, e.Type(), xt)
-	}
-	lo, loNull, ok1 := bound(x.Lo)
-	hi, hiNull, ok2 := bound(x.Hi)
+	lo, loNull, ok1 := c.bound(x.Lo, x.LoType, xt)
+	hi, hiNull, ok2 := c.bound(x.Hi, x.HiType, xt)
 	if !ok1 || !ok2 {
 		return nil, false
 	}
@@ -369,11 +383,7 @@ func (c *nativeCompiler) inList(x *plan.InList, neg bool) (*npred, bool) {
 		if x.CmpTypes[i].Kind != xt.Kind {
 			return nil, false
 		}
-		v, ok := c.constant(e)
-		if !ok {
-			return nil, false
-		}
-		k, isNull, ok := constFor(v, e.Type(), xt)
+		k, isNull, ok := c.bound(e, x.CmpTypes[i], xt)
 		switch {
 		case !ok:
 			return nil, false

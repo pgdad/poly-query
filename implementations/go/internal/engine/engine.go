@@ -359,7 +359,10 @@ func (e *Engine) open(ctx context.Context, p *physical.Plan, opts QueryOptions) 
 		Threads:     threads,
 		MorselRows:  e.cfg.MorselRows,
 	}
-	if opts.Native {
+	if opts.Native && !callsSleep(p) {
+		// PQ_SLEEP's evaluation count is observable; native filters
+		// evaluate conjuncts in a different order, so such (test-only)
+		// queries keep the engine's own code paths.
 		ec.Native = e.cfg.Native
 	}
 	op, err := exec.BuildRoot(ec, p.Root)
