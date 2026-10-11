@@ -29,7 +29,7 @@ from typing import Any, Sequence
 
 from .. import errors, values
 from ..analysis import bound as b
-from ..datatypes import TypeKind
+from ..datatypes import NARROW_DECIMAL_PRECISION, TypeKind, result_precision
 from .aggregates import accumulator_for, non_null
 
 Runs = list[tuple[int, int, int]]
@@ -113,9 +113,13 @@ class CountState(CountStarState):
 class SumState(GroupState):
     """Exact SUM / AVG over INT64 and DECIMAL (unscaled) values."""
 
-    def __init__(self, kind: str, scale: int = 0) -> None:
+    def __init__(self, kind: str, scale: int = 0, precision: int = 18) -> None:
         self.kind = kind  # "int", "decimal" or "avg"
         self.divisor = values.POW10[scale]
+        # the DECIMAL precision of a "decimal" SUM result (W) and whether
+        # the values may exceed int64 (wide DECIMAL argument)
+        self.precision = precision
+        self.wide = precision > NARROW_DECIMAL_PRECISION
         self.totals: list[int] = []
         self.counts: list[int] = []
 
@@ -158,7 +162,7 @@ class SumState(GroupState):
             elif self.kind == "int":
                 out.append(values.check_int64(total))
             elif self.kind == "decimal":
-                out.append(values.check_decimal(total))
+                out.append(values.check_decimal(total, self.precision))
             else:
                 out.append(total / (count * self.divisor))
         return out
@@ -326,10 +330,14 @@ def make_state(call: b.AggCall) -> GroupState:
     if name == "SUM":
         if is_float:
             return FloatSumState(average=False)
-        return SumState("decimal" if arg_type.kind is TypeKind.DECIMAL else "int")
+        if arg_type.kind is TypeKind.DECIMAL:
+            return SumState("decimal", precision=result_precision(arg_type))
+        return SumState("int")
     if is_float:
         return FloatSumState(average=True)
-    return SumState("avg", arg_type.scale if arg_type.kind is TypeKind.DECIMAL else 0)
+    if arg_type.kind is TypeKind.DECIMAL:
+        return SumState("avg", arg_type.scale, result_precision(arg_type))
+    return SumState("avg")
 
 
 def merge_partials(partials: list[tuple[list[Any], list[GroupState]]]) -> tuple[list[Any], list[GroupState]]:

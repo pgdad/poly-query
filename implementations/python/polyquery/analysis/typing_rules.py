@@ -8,7 +8,7 @@ from ..datatypes import (
     BOOLEAN,
     FLOAT64,
     INT64,
-    MAX_DECIMAL_PRECISION,
+    COMPARISON_PRECISION,
     NULL,
     STRING,
     TIMESTAMP,
@@ -17,6 +17,9 @@ from ..datatypes import (
     common_numeric_type,
     common_type,
     comparable,
+    comparison_type,
+    decimal_result,
+    result_precision,
 )
 from . import bound as b
 
@@ -39,9 +42,6 @@ CAST_TARGETS: dict[TypeKind, frozenset[TypeKind]] = {
     TypeKind.TIMESTAMP: frozenset({TypeKind.STRING, TypeKind.DATE, TypeKind.TIMESTAMP}),
 }
 
-DECIMAL_18_0 = DataType(TypeKind.DECIMAL, MAX_DECIMAL_PRECISION, 0)
-
-
 def check_cast(source: DataType, target: DataType) -> None:
     if target.kind not in CAST_TARGETS[source.kind]:
         raise errors.type_error(f"cannot cast {source.name} to {target.name}")
@@ -52,6 +52,17 @@ def promote(expr: b.Expr, target: DataType) -> b.Expr:
     if expr.type == target or expr.type.is_null:
         return expr
     return b.Cast(target, expr, implicit=True)
+
+
+def promote_compared(expr: b.Expr, target: DataType) -> b.Expr:
+    """Promotes an operand to the comparison type ``target``. DECIMAL
+    operands that already have the target scale are left alone: their
+    unscaled values compare directly (which keeps column references
+    visible to index and native-kernel planning)."""
+    t = expr.type
+    if t.kind is TypeKind.DECIMAL and target.kind is TypeKind.DECIMAL and t.scale == target.scale:
+        return expr
+    return promote(expr, target)
 
 
 def _numeric_operand(expr: b.Expr, op: str, other: DataType | None = None) -> DataType:
@@ -75,18 +86,20 @@ def arithmetic(op: str, left: b.Expr, right: b.Expr) -> b.Expr:
     if TypeKind.DECIMAL in (lt.kind, rt.kind):
         if op == "%":
             raise errors.type_error("operator % requires INT64 operands")
-        left = promote(left, DECIMAL_18_0) if lt.kind is TypeKind.INT64 else left
-        right = promote(right, DECIMAL_18_0) if rt.kind is TypeKind.INT64 else right
+        # W = 38 as soon as one DECIMAL operand is wide (decimal38.md §2); an
+        # INT64 operand is promoted to DECIMAL(W, 0)
+        width = result_precision(lt, rt)
+        int_decimal = DataType(TypeKind.DECIMAL, width, 0)
+        left = promote(left, int_decimal) if lt.kind is TypeKind.INT64 else left
+        right = promote(right, int_decimal) if rt.kind is TypeKind.INT64 else right
         s1 = lt.scale if lt.kind is TypeKind.DECIMAL else 0
         s2 = rt.scale if rt.kind is TypeKind.DECIMAL else 0
         if op in ("+", "-"):
-            result = DataType(TypeKind.DECIMAL, MAX_DECIMAL_PRECISION, max(s1, s2))
+            result = decimal_result(max(s1, s2), lt, rt)
         elif op == "*":
-            if s1 + s2 > MAX_DECIMAL_PRECISION:
-                raise errors.type_error(
-                    f"DECIMAL product scale {s1 + s2} exceeds {MAX_DECIMAL_PRECISION}"
-                )
-            result = DataType(TypeKind.DECIMAL, MAX_DECIMAL_PRECISION, s1 + s2)
+            if s1 + s2 > width:
+                raise errors.type_error(f"DECIMAL product scale {s1 + s2} exceeds {width}")
+            result = decimal_result(s1 + s2, lt, rt)
         else:  # '/'
             result = FLOAT64
         return b.Arith(result, op, left, right)
@@ -108,13 +121,15 @@ def comparison(op: str, left: b.Expr, right: b.Expr) -> b.Expr:
         if common.kind is TypeKind.FLOAT64:
             left, right = promote(left, FLOAT64), promote(right, FLOAT64)
         elif common.kind is TypeKind.DECIMAL:
-            # an INT64 operand is promoted to DECIMAL(18, s) of the other side and
-            # overflows if it then needs more than 18 digits (types.md §2);
-            # two DECIMALs are compared exactly by value
+            # INT64 and DECIMAL values compare exactly (decimal38.md §4): an
+            # INT64 operand is promoted to the overflow-free comparison
+            # precision at the other side's scale; two DECIMALs are compared
+            # exactly by value whatever their scales
+            exact = DataType(TypeKind.DECIMAL, COMPARISON_PRECISION, common.scale)
             if lt.kind is TypeKind.INT64:
-                left = promote(left, common)
+                left = promote(left, exact)
             if rt.kind is TypeKind.INT64:
-                right = promote(right, common)
+                right = promote(right, exact)
     elif lt.is_temporal and rt.is_temporal and lt.kind is not rt.kind:
         left, right = promote(left, TIMESTAMP), promote(right, TIMESTAMP)
     return b.Compare(BOOLEAN, op, left, right)
@@ -170,7 +185,7 @@ def _common_comparison_type(exprs: list[b.Expr], what: str) -> DataType:
         for u in types[i + 1 :]:
             if not comparable(t, u):
                 raise errors.type_error(f"cannot compare {t.name} with {u.name} in {what}")
-    result = common_type(types)
+    result = comparison_type(types)
     assert result is not None
     return result
 
@@ -178,13 +193,19 @@ def _common_comparison_type(exprs: list[b.Expr], what: str) -> DataType:
 def between(operand: b.Expr, low: b.Expr, high: b.Expr, negated: bool) -> b.Expr:
     t = _common_comparison_type([operand, low, high], "BETWEEN")
     return b.Between(
-        BOOLEAN, promote(operand, t), promote(low, t), promote(high, t), negated
+        BOOLEAN,
+        promote_compared(operand, t),
+        promote_compared(low, t),
+        promote_compared(high, t),
+        negated,
     )
 
 
 def in_list(operand: b.Expr, items: list[b.Expr], negated: bool) -> b.Expr:
     t = _common_comparison_type([operand, *items], "IN")
-    return b.InList(BOOLEAN, promote(operand, t), tuple(promote(i, t) for i in items), negated)
+    return b.InList(
+        BOOLEAN, promote_compared(operand, t), tuple(promote_compared(i, t) for i in items), negated
+    )
 
 
 def in_subquery_type(operand: b.Expr, column_type: DataType) -> DataType:

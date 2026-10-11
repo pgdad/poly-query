@@ -3,9 +3,12 @@
 
 A vector holds the values of one column for a run of rows:
 
-* fixed-width types live in an ``array.array`` (``q`` for INT64, DECIMAL
-  unscaled values and TIMESTAMP, ``i`` for DATE, ``d`` for FLOAT64) and
-  BOOLEAN in a ``bytearray`` of 0/1 bytes; NULL slots hold 0;
+* fixed-width types live in an ``array.array`` (``q`` for INT64, narrow
+  DECIMAL unscaled values and TIMESTAMP, ``i`` for DATE, ``d`` for FLOAT64)
+  and BOOLEAN in a ``bytearray`` of 0/1 bytes; NULL slots hold 0;
+* wide DECIMAL (precision > 18) unscaled values do not fit 64 bits: they
+  are a list of Python ints (NULL slots 0), which has no int64 view, so
+  the native kernels never see them;
 * STRING is either plain (a list of ``str``, NULL slots ``""``) or
   dictionary-encoded (distinct strings plus an ``array('I')`` of codes);
 * NULLs are recorded in a validity bitmap (LSB-first, 1 = non-NULL, the PQCF
@@ -242,6 +245,8 @@ def build_vector(dtype: DataType, values: list[Any], dictionary: bool | None = N
     if kind is TypeKind.BOOLEAN:
         return PlainVector(dtype, bytearray([v is True for v in values]), validity, nulls)
     filled = [0 if v is None else v for v in values] if nulls else values
+    if dtype.is_wide:
+        return PlainVector(dtype, list(filled), validity, nulls)
     return PlainVector(dtype, array.array(TYPECODES[kind], filled), validity, nulls)
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from .. import errors
 from . import ast
-from .lexer import Token, TokenKind, tokenize
+from .lexer import FUTURE_KEYWORDS, Token, TokenKind, tokenize
 
 _COMPARISON_OPS = ("=", "<>", "!=", "<", "<=", ">", ">=")
 
@@ -65,6 +65,13 @@ class Parser:
         if self.tok.kind is not TokenKind.IDENT:
             raise self.error(f"expected {what}")
         return self.advance().value
+
+    def expect_alias(self, what: str) -> str:
+        """The alias after an explicit AS: an identifier, or a keyword that
+        is reserved only for future syntax (``AS full``)."""
+        if self.tok.kind is TokenKind.KEYWORD and self.tok.value in FUTURE_KEYWORDS:
+            return self.advance().text
+        return self.expect_ident(what)
 
     @staticmethod
     def pos(tok: Token) -> ast.Pos:
@@ -215,7 +222,7 @@ class Parser:
         expr = self.parse_expr()
         alias = None
         if self.accept_keyword("AS"):
-            alias = self.expect_ident("alias")
+            alias = self.expect_alias("alias")
         elif self.tok.kind is TokenKind.IDENT:
             alias = self.advance().value
         return ast.SelectItem(self.pos(start), expr, alias)
@@ -263,7 +270,7 @@ class Parser:
         name = self.expect_ident("table name")
         alias = None
         if self.accept_keyword("AS"):
-            alias = self.expect_ident("table alias")
+            alias = self.expect_alias("table alias")
         elif self.tok.kind is TokenKind.IDENT:
             alias = self.advance().value
         return ast.TableRef(self.pos(start), name, alias)

@@ -30,12 +30,11 @@ from functools import partial
 from itertools import compress
 from typing import Any, Callable, Sequence
 
-from .. import errors
+from .. import errors, values
 from ..analysis import bound as b
 from ..datatypes import TypeKind
 from .casts import cast_function, identity
 from .compiler import (
-    DEC_LIMIT,
     INT64_MAX,
     INT64_MIN,
     Layout,
@@ -91,10 +90,16 @@ def _check_int64(out: list[Any]) -> list[Any]:
     return out
 
 
-def _check_decimal(out: list[Any]) -> list[Any]:
-    if out and (max(out) >= DEC_LIMIT or min(out) <= -DEC_LIMIT):
-        raise _overflow()
-    return out
+def _decimal_check(precision: int) -> Callable[[list[Any]], list[Any]]:
+    """The batch overflow check of DECIMAL results of ``precision``."""
+    limit = values.POW10[precision]
+
+    def check(out: list[Any]) -> list[Any]:
+        if out and (max(out) >= limit or min(out) <= -limit):
+            raise _overflow()
+        return out
+
+    return check
 
 
 def _check_float(out: list[Any]) -> list[Any]:
@@ -271,7 +276,7 @@ class VectorCompiler:
             elif lt is TypeKind.DECIMAL and rt is TypeKind.DECIMAL and (
                 e.op == "*" or e.left.type.scale == e.right.type.scale
             ):
-                fast, check = _FAST_OPS[e.op], _check_decimal
+                fast, check = _FAST_OPS[e.op], _decimal_check(e.type.precision)
 
         def arith(cols: Columns, n: int) -> Sequence[Any]:
             a, c = operands(cols, n)

@@ -24,7 +24,6 @@ RowFn = Callable[[tuple], Any]
 
 INT64_MIN = values.INT64_MIN
 INT64_MAX = values.INT64_MAX
-DEC_LIMIT = values.POW10[18]
 _INF = float("inf")
 
 
@@ -103,7 +102,11 @@ def _float_div(a: float, c: float) -> float:
     return _float_check(a / c)
 
 
-def _decimal_kernel(op: str, s1: int, s2: int) -> Callable[[int, int], Any]:
+def _decimal_kernel(op: str, s1: int, s2: int, precision: int) -> Callable[[int, int], Any]:
+    """Exact DECIMAL arithmetic on unscaled values (Python ints are
+    unbounded, so narrow and wide operands share the kernels; only the
+    result ``precision`` (18 or 38) of the overflow check differs)."""
+    limit = values.POW10[precision]
     if op in ("+", "-"):
         scale = max(s1, s2)
         f1, f2 = values.POW10[scale - s1], values.POW10[scale - s2]
@@ -111,7 +114,7 @@ def _decimal_kernel(op: str, s1: int, s2: int) -> Callable[[int, int], Any]:
 
         def addsub(a: int, c: int) -> int:
             v = a * f1 + sign * c * f2
-            if -DEC_LIMIT < v < DEC_LIMIT:
+            if -limit < v < limit:
                 return v
             raise _overflow()
 
@@ -120,7 +123,7 @@ def _decimal_kernel(op: str, s1: int, s2: int) -> Callable[[int, int], Any]:
 
         def mul(a: int, c: int) -> int:
             v = a * c
-            if -DEC_LIMIT < v < DEC_LIMIT:
+            if -limit < v < limit:
                 return v
             raise _overflow()
 
@@ -156,13 +159,13 @@ def arith_kernel(e: b.Arith) -> Callable[[Any, Any], Any]:
     if TypeKind.DECIMAL in (lt.kind, rt.kind):
         s1 = lt.scale if lt.kind is TypeKind.DECIMAL else 0
         s2 = rt.scale if rt.kind is TypeKind.DECIMAL else 0
-        return _decimal_kernel(e.op, s1, s2)
+        return _decimal_kernel(e.op, s1, s2, e.type.precision)
     return _INT_KERNELS[e.op]
 
 
 def compare_kernel(e: b.Compare) -> Callable[[Any, Any], Any]:
     """The kernel of a comparison for two non-NULL operands (DECIMALs of
-    different scales are compared exactly by value)."""
+    different scales, narrow or wide, are compared exactly by value)."""
     cmp = _COMPARE[e.op]
     lt, rt = e.left.type, e.right.type
     if lt.kind is TypeKind.DECIMAL and rt.kind is TypeKind.DECIMAL and lt.scale != rt.scale:
