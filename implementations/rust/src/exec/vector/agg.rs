@@ -12,6 +12,7 @@ use super::keys::KeyTable;
 use crate::error::{Error, Result};
 use crate::exec::ExecContext;
 use crate::exec::aggregate::{AggState, Partial};
+use crate::exec::hash::FastSet;
 use crate::native::{GroupSum, Kernels, pack_bools};
 use crate::planner::expr::{AggFunc, AggregateCall};
 use crate::types::i256::I256;
@@ -64,11 +65,21 @@ enum Acc {
         best: Vec<f64>,
         has: Vec<bool>,
     },
-    /// Any other aggregate (DISTINCT, MIN/MAX of other types): row-mode states.
+    /// DISTINCT aggregates over fixed-width values of one representation:
+    /// the distinct values of each group (`kind` as for `ExtremeI64`).
+    DistinctI64 {
+        sets: Vec<FastSet<i64>>,
+        kind: Option<I64Kind>,
+    },
+    /// Any other aggregate (other DISTINCT aggregates, MIN/MAX of other
+    /// types): row-mode states.
     States(Vec<AggState>),
 }
 
 const NONE: u32 = u32::MAX;
+
+/// Retained bytes per distinct value (memory accounting, as row mode).
+const DISTINCT_VALUE_BYTES: usize = 40;
 
 /// Per-group `i64` sums of the native grouped-sum kernel.
 #[derive(Debug, Default)]
@@ -235,9 +246,22 @@ fn arg_type(call: &AggregateCall) -> DataType {
 
 impl Acc {
     fn new(call: &AggregateCall) -> Acc {
-        // DISTINCT and wide (128-bit) decimal arguments use row-mode states.
-        if call.distinct || arg_type(call).is_wide_decimal() {
+        // Wide (128-bit) decimal arguments and DISTINCT aggregates of
+        // other types use row-mode states.
+        if arg_type(call).is_wide_decimal() {
             return Acc::States(Vec::new());
+        }
+        if call.distinct {
+            return match arg_type(call) {
+                DataType::Int64
+                | DataType::Date
+                | DataType::Timestamp
+                | DataType::Decimal { .. } => Acc::DistinctI64 {
+                    sets: Vec::new(),
+                    kind: None,
+                },
+                _ => Acc::States(Vec::new()),
+            };
         }
         match call.func {
             AggFunc::CountStar => Acc::CountStar(Vec::new()),
@@ -304,6 +328,7 @@ impl Acc {
                 best.resize(groups, 0.0);
                 has.resize(groups, false);
             }
+            Acc::DistinctI64 { sets, .. } => sets.resize_with(groups, FastSet::default),
             Acc::States(s) => s.resize_with(groups, || AggState::new(call)),
         }
     }
@@ -315,6 +340,7 @@ impl Acc {
             Acc::SumInt { n, .. } | Acc::SumDec { n, .. } | Acc::SumFloat { n, .. } => n.len(),
             Acc::ExtremeI64 { has, .. } | Acc::ExtremeF64 { has, .. } => has.len(),
             Acc::ExtremeStr { best, .. } => best.len(),
+            Acc::DistinctI64 { sets, .. } => sets.len(),
             Acc::States(s) => s.len(),
         }
     }
@@ -322,7 +348,7 @@ impl Acc {
     /// Whether the typed accumulator can take values of this representation.
     fn accepts(&mut self, data: &Data) -> bool {
         match self {
-            Acc::ExtremeI64 { kind, .. } => {
+            Acc::ExtremeI64 { kind, .. } | Acc::DistinctI64 { kind, .. } => {
                 let k = I64Kind::of(data);
                 if k.is_none() || (kind.is_some() && *kind != k) {
                     return false;
@@ -336,12 +362,15 @@ impl Acc {
         }
     }
 
-    /// Converts a typed MIN/MAX accumulator to row-mode states (for values
-    /// of another representation).
+    /// Converts a typed MIN/MAX or DISTINCT accumulator to row-mode states
+    /// (for values of another representation).
     fn switch_to_states(&mut self, call: &AggregateCall) {
         if matches!(
             self,
-            Acc::ExtremeI64 { .. } | Acc::ExtremeStr { .. } | Acc::ExtremeF64 { .. }
+            Acc::ExtremeI64 { .. }
+                | Acc::ExtremeStr { .. }
+                | Acc::ExtremeF64 { .. }
+                | Acc::DistinctI64 { .. }
         ) {
             let states = (0..self.len()).map(|g| self.state_of(call, g)).collect();
             *self = Acc::States(states);
@@ -515,6 +544,27 @@ impl Acc {
                     }
                 }
             },
+            (
+                Acc::DistinctI64 { sets, .. },
+                Data::Int(vals) | Data::Timestamp(vals) | Data::Decimal(vals, _),
+            ) => {
+                let mut added = 0;
+                for (i, &x) in vals.iter().enumerate() {
+                    if ok(i) {
+                        added += usize::from(sets[g(i)].insert(x));
+                    }
+                }
+                return Ok(added * DISTINCT_VALUE_BYTES);
+            }
+            (Acc::DistinctI64 { sets, .. }, Data::Date(vals)) => {
+                let mut added = 0;
+                for (i, &x) in vals.iter().enumerate() {
+                    if ok(i) {
+                        added += usize::from(sets[g(i)].insert(x as i64));
+                    }
+                }
+                return Ok(added * DISTINCT_VALUE_BYTES);
+            }
             (Acc::SumFloat { sum, n: cnt }, Data::Float(vals)) => {
                 // Sequential adds keep the row-mode summation order.
                 for (i, &x) in vals.iter().enumerate() {
@@ -640,6 +690,7 @@ impl Acc {
             Acc::ExtremeI64 { .. }
             | Acc::ExtremeStr { .. }
             | Acc::ExtremeF64 { .. }
+            | Acc::DistinctI64 { .. }
             | Acc::States(_) => {
                 return Err(Error::internal("unexpected aggregate update"));
             }
@@ -770,6 +821,24 @@ impl Acc {
                     }
                 }
             }
+            (
+                Acc::DistinctI64 { sets: a, kind: ak },
+                Acc::DistinctI64 {
+                    sets: b, kind: bk, ..
+                },
+            ) if ak.is_none() || bk.is_none() || ak == bk => {
+                if ak.is_none() {
+                    *ak = *bk;
+                }
+                let mut added = 0;
+                for (g, t) in pairs() {
+                    a[t].reserve(b[g].len());
+                    for &x in &b[g] {
+                        added += usize::from(a[t].insert(x));
+                    }
+                }
+                return Ok(added * DISTINCT_VALUE_BYTES);
+            }
             _ => {
                 self.switch_to_states(call);
                 let mut retained = 0;
@@ -817,6 +886,16 @@ impl Acc {
                 call,
                 Partial::Extreme(has[g].then_some(Value::Float(best[g]))),
             ),
+            Acc::DistinctI64 { sets, kind } => {
+                let mut state = AggState::new(call);
+                if let Some(k) = kind {
+                    for &x in &sets[g] {
+                        // Cannot fail: the values have the argument's type.
+                        let _ = state.update(&k.value(x));
+                    }
+                }
+                state
+            }
         }
     }
 
@@ -946,6 +1025,20 @@ impl Acc {
                     Data::Float(best[..groups].to_vec()),
                     (!all).then_some(valid),
                 )
+            }
+            Acc::DistinctI64 { sets, .. } if call.func == AggFunc::Count => Vector::new(
+                Data::Int(sets[..groups].iter().map(|s| s.len() as i64).collect()),
+                None,
+            ),
+            Acc::DistinctI64 { .. } => {
+                let mut values = Vec::with_capacity(groups);
+                for g in 0..groups {
+                    if g % 4096 == 4095 {
+                        ctx.check_interrupt()?;
+                    }
+                    values.push(self.state_of(call, g).finish()?);
+                }
+                Vector::from_values(values)
             }
             Acc::States(states) => {
                 let mut values = Vec::with_capacity(groups);
@@ -1182,5 +1275,54 @@ mod tests {
         a.update(&[], &[Some(big)], 2).unwrap();
         let err = a.finish(&ExecContext::default()).unwrap_err();
         assert_eq!(err.code, crate::error::ErrorCode::NumericOverflow);
+    }
+
+    #[test]
+    fn distinct_aggregates_typed_and_merged() {
+        let distinct = |func, ty| AggregateCall {
+            distinct: true,
+            ..call(func, ty)
+        };
+        let calls = vec![
+            distinct(AggFunc::Count, DataType::Int64),
+            distinct(AggFunc::Sum, DataType::Int64),
+            distinct(AggFunc::Avg, DataType::Int64),
+        ];
+        let ctx = ExecContext::default();
+        let ints = |xs: &[Option<i64>]| {
+            Vector::from_values(
+                xs.iter()
+                    .map(|x| x.map_or(Value::Null, Value::Int))
+                    .collect(),
+            )
+        };
+        let k1 = vec![ints(&[Some(1), Some(1), Some(2), Some(1)])];
+        let v1 = ints(&[Some(5), Some(5), None, Some(7)]);
+        let k2 = vec![ints(&[Some(1), Some(2), Some(2)])];
+        let v2 = ints(&[Some(7), Some(4), Some(4)]);
+        let args = |v: &Vector| vec![Some(v.clone()), Some(v.clone()), Some(v.clone())];
+        let mut p1 = Aggregator::new(1, &calls, None);
+        p1.update(&k1, &args(&v1), 4).unwrap();
+        let mut p2 = Aggregator::new(1, &calls, None);
+        p2.update(&k2, &args(&v2), 3).unwrap();
+        p1.merge(p2).unwrap();
+        let rows = p1.finish(&ctx).unwrap().into_rows();
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    Value::Int(1),
+                    Value::Int(2),
+                    Value::Int(12),
+                    Value::Float(6.0)
+                ],
+                vec![
+                    Value::Int(2),
+                    Value::Int(1),
+                    Value::Int(4),
+                    Value::Float(4.0)
+                ],
+            ]
+        );
     }
 }
