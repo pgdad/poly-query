@@ -285,9 +285,6 @@ LFUNC it_combine
     ldr  x1, [x19, #IT_CUR]
     ldr  x3, [x19, #IT_W]
     ldr  x9, [x19, #IT_NODE]
-    ldr  x9, [x9, #PN_RIGHT]
-    ldr  w4, [x9, #PN_LO]
-    ldr  w5, [x9, #PN_HI]
     bl   combine
     ldr  x0, [x19, #IT_TUP]
     LEAVE 1

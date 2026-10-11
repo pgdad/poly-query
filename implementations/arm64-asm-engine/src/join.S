@@ -44,29 +44,30 @@
     .text
 
 // =============================================================================
-// combine(x0 dest tuple, x1 left tuple, x2 right tuple or 0, x3 width,
-//         w4 right lo, w5 right hi)
-// dest = left; dest[lo..hi) = right[lo..hi) (or ROW_NULL if right is 0). (leaf)
+// combine(x0 dest, x1 left tuple, x2 right tuple or 0, x3 width)
+// dest = left joined with right. The two inputs of a join cover disjoint
+// sets of range variables and hold ROW_NULL (all ones) in every other slot,
+// so a slot-wise AND merges them; right = 0 pads the right side with NULLs
+// (dest = left). (leaf)
 // =============================================================================
 FUNC combine
     mov  x9, #0
+    cbz  x2, 3f
 1:  cmp  x9, x3
     b.hs 2f
     ldr  w10, [x1, x9, lsl #2]
+    ldr  w11, [x2, x9, lsl #2]
+    and  w10, w10, w11
     str  w10, [x0, x9, lsl #2]
     add  x9, x9, #1
     b    1b
-2:  mov  w9, w4
-    mov  w11, #ROW_NULL
-3:  cmp  w9, w5
-    b.hs 5f
-    mov  w10, w11
-    cbz  x2, 4f
-    ldr  w10, [x2, x9, lsl #2]
-4:  str  w10, [x0, x9, lsl #2]
-    add  w9, w9, #1
+2:  ret
+3:  cmp  x9, x3
+    b.hs 2b
+    ldr  w10, [x1, x9, lsl #2]
+    str  w10, [x0, x9, lsl #2]
+    add  x9, x9, #1
     b    3b
-5:  ret
 ENDF combine
 
 // join_emit(x0 TupleSet*, x1 tuple) — append with the --max-join-rows check
@@ -228,9 +229,6 @@ FUNC ex_nljoin
     ldr  x2, [sp], #16
     mov  x0, x27
     ldr  x3, [x21, #TS_W]
-    ldr  x9, [x19, #PN_RIGHT]
-    ldr  w4, [x9, #PN_LO]
-    ldr  w5, [x9, #PN_HI]
     bl   combine
     ldr  x0, [x19, #PN_EXPR]
     cbz  x0, 2f
@@ -256,9 +254,6 @@ FUNC ex_nljoin
     mov  x0, x27
     mov  x2, #0
     ldr  x3, [x21, #TS_W]
-    ldr  x9, [x19, #PN_RIGHT]
-    ldr  w4, [x9, #PN_LO]
-    ldr  w5, [x9, #PN_HI]
     bl   combine
     mov  x0, x23
     mov  x1, x27
@@ -406,9 +401,6 @@ FUNC ex_mergejoin
     ldr  x2, [sp], #16
     mov  x0, x27
     ldr  x3, [x21, #TS_W]
-    ldr  x9, [x19, #PN_RIGHT]
-    ldr  w4, [x9, #PN_LO]
-    ldr  w5, [x9, #PN_HI]
     bl   combine
     ldr  x0, [x19, #PN_EXPR]
     cbz  x0, 6f
@@ -494,9 +486,6 @@ FUNC ex_mergejoin
     mov  x0, x27
     mov  x2, #0
     ldr  x3, [x21, #TS_W]
-    ldr  x9, [x19, #PN_RIGHT]
-    ldr  w4, [x9, #PN_LO]
-    ldr  w5, [x9, #PN_HI]
     bl   combine
     mov  x0, x23
     mov  x1, x27
@@ -1140,9 +1129,6 @@ FUNC hj_probe
     mov  x0, x27
     ldr  x9, [x21, #HS_L]
     ldr  x3, [x9, #TS_W]
-    ldr  x9, [x22, #PN_RIGHT]
-    ldr  w4, [x9, #PN_LO]
-    ldr  w5, [x9, #PN_HI]
     bl   combine
     ldr  x0, [x22, #PN_EXPR]
     cbz  x0, 2f
@@ -1171,9 +1157,6 @@ FUNC hj_probe
     mov  x2, #0
     ldr  x9, [x21, #HS_L]
     ldr  x3, [x9, #TS_W]
-    ldr  x9, [x22, #PN_RIGHT]
-    ldr  w4, [x9, #PN_LO]
-    ldr  w5, [x9, #PN_HI]
     bl   combine
     mov  x0, x23
     mov  x1, x27
