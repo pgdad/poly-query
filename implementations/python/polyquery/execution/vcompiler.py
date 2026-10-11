@@ -465,6 +465,23 @@ class VectorCompiler:
 
         return case
 
+    # ------------------------------------------------------------ subqueries
+
+    def _uncorrelated(self, e: b.SubqueryExpr) -> VecFn:
+        """A subquery that reads no column of an enclosing query has the same
+        value for every row: its row closure (which runs the subquery once
+        and caches the result) is evaluated once per non-empty batch."""
+        if e.subquery.correlated:
+            return self._row_fallback(e)
+        fn = compile_expr(e, self.ctx)
+        return lambda cols, n: [fn(())] * n if n else []
+
+    def _v_ScalarSubquery(self, e: b.ScalarSubquery) -> VecFn:
+        return self._uncorrelated(e)
+
+    def _v_Exists(self, e: b.Exists) -> VecFn:
+        return self._uncorrelated(e)
+
     def _v_Function(self, e: b.Function) -> VecFn:
         """Arguments are evaluated as vectors; the scalar kernel is mapped over
         them. Function kernels evaluate their arguments lazily (strict

@@ -524,6 +524,8 @@ class PhysicalPlanner:
     def __init__(self, options: PlanOptions):
         self.options = options
         self.subplans: dict[int, PhysicalNode] = {}
+        # ids of the uncorrelated subqueries (executed once per statement)
+        self.uncorrelated: set[int] = set()
         self.logical_subqueries: dict[int, lp.LogicalNode] = {}
         # base table of every scanned range variable (for statistics)
         self.rel_tables: dict[int, Table] = {}
@@ -534,8 +536,12 @@ class PhysicalPlanner:
         if isinstance(root, Project):
             root.names = [c.name for c in logical.columns]
         if self.options.threads > 1:
-            # subquery plans (executed per outer row) stay serial
-            root = parallelize(root, min(self.options.threads, MAX_PARTITIONS), self.options.parallel_min_rows)
+            partitions = min(self.options.threads, MAX_PARTITIONS)
+            root = parallelize(root, partitions, self.options.parallel_min_rows)
+            # uncorrelated subqueries run once; correlated ones (executed per
+            # outer row) stay serial
+            for sq_id in self.uncorrelated:
+                self.subplans[sq_id] = parallelize(self.subplans[sq_id], partitions, self.options.parallel_min_rows)
         kernels = self.options.kernels
         if kernels is not None and self.options.kernel_plan is not None:
             for tree in [root, *self.subplans.values()]:
@@ -549,6 +555,8 @@ class PhysicalPlanner:
             for sq in b.subqueries(expr):
                 if sq.id not in self.subplans:
                     self.subplans[sq.id] = self.plan(self.logical_subqueries[sq.id])
+                    if not sq.correlated:
+                        self.uncorrelated.add(sq.id)
         return result
 
     def _bind_kernels(self, node: PhysicalNode) -> None:

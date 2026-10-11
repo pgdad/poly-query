@@ -50,7 +50,7 @@ from .common import (
 )
 from .compiler import Layout
 from .context import ExecutionContext
-from .group_states import GroupState, make_state, merge_partials
+from .group_states import GroupState, make_state, merge_partials, merge_ranked_partials
 from .vcompiler import VecFn, compile_vector, take
 from .workers import dumps_result
 
@@ -308,32 +308,36 @@ def _build_hash_side(node: pp.HashJoin, ctx: ExecutionContext) -> _HashSide:
     table: dict = dict(zip(usable, positions))
     unique = len(table) == len(usable)
     if not unique:
-        table = {}
-        for key, i in zip(usable, range(n) if valid is None else compress(range(n), valid)):
-            bucket = table.get(key)
-            if bucket is None:
-                table[key] = [i]
-            else:
-                bucket.append(i)
+        table = _buckets(usable, range(n) if valid is None else list(compress(range(n), valid)))
     for c in cols:
         c.append(None)  # padding slot
     ctx.check()
     return _HashSide(cols, n, table, unique)
 
 
+def _buckets(keys: Sequence[Any], rows: Sequence[int]) -> dict[Any, list[int]]:
+    """key -> the ``rows`` (ascending) with that key. (A plain loop: measured
+    faster than sorting the positions by key and slicing the runs.)"""
+    table: dict[Any, list[int]] = {}
+    for key, i in zip(keys, rows):
+        bucket = table.get(key)
+        if bucket is None:
+            table[key] = [i]
+        else:
+            bucket.append(i)
+    return table
+
+
 def _probe(side: _HashSide, keys: Sequence[Any], n: int) -> tuple[list[int], list[int]]:
     """(probe position, build position) of every matching pair, in probe order."""
     found = list(map(side.table.get, keys))
+    mask = list(map(_is_not_none, found))
     if side.unique:
-        mask = list(map(_is_not_none, found))
         return list(compress(range(n), mask)), list(compress(found, mask))
-    probe: list[int] = []
-    build: list[int] = []
-    for i, matches in enumerate(found):
-        if matches is not None:
-            probe.extend(repeat(i, len(matches)))
-            build.extend(matches)
-    return probe, build
+    buckets = list(compress(found, mask))
+    rows = compress(range(n), mask)
+    probe = list(itertools.chain.from_iterable(map(repeat, rows, map(len, buckets))))
+    return probe, list(itertools.chain.from_iterable(buckets))
 
 
 def _filter_pairs(
@@ -565,11 +569,16 @@ def _update_sorted(ids: list[int], vectors: list, states: list[GroupState]) -> N
 def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Batches:
     native = native_ops.native_scan_aggregate(node)
     done = None if native is None else native_ops.run_scan_aggregate(native, node, ctx)
-    if done is not None:  # aggregated by the kernels from the column storage
-        keys, states = done
+    exchanged = None if done is not None else _exchange_aggregate(node, ctx)
+    if exchanged is not None:  # merged and finished by the pool workers
+        keys, results = exchanged
     else:
-        partials = partition_batches(node.input, ctx, partial(_aggregate_partition, node))
-        keys, states = merge_partials(partials)
+        if done is not None:  # aggregated by the kernels from the column storage
+            keys, states = done
+        else:
+            partials = partition_batches(node.input, ctx, partial(_aggregate_partition, node))
+            keys, states = merge_partials(partials)
+        results = [state.results() for state in states]
     n = len(keys)
     if not n:
         return
@@ -579,12 +588,94 @@ def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Batches:
         key_cols = [keys]
     else:
         key_cols = [list(c) for c in zip(*keys)]
-    cols = key_cols + [state.results() for state in states]
+    cols = key_cols + results
     if not cols:
         yield [], n
         return
     ctx.check()
     yield from _rebatch(cols, n)
+
+
+# grouped aggregations expected to produce at least this many groups merge
+# their partial states in the pool workers instead of the parent
+EXCHANGE_MIN_GROUPS = 16_384
+
+
+def _exchange_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> tuple[list[Any], Columns] | None:
+    """Parallel grouped aggregation with a hash exchange, in the worker pool.
+
+    1. Every partition aggregates its rows and splits its groups by key hash
+       into one pickled part per hash range; each group carries its rank
+       (partition, first-seen position in the partition).
+    2. Worker ``r`` receives the parts of hash range ``r`` (forwarded as raw
+       bytes), merges them in partition order and computes the results.
+
+    The parent orders the groups by rank: exactly the order of first
+    appearance of a serial scan, as with :func:`merge_partials`. Used for
+    many groups, whose merge would otherwise run serially in the parent.
+    None if not applicable."""
+    gather = node.input
+    pool = ctx.pool
+    if (
+        not node.keys
+        or not isinstance(gather, pp.Gather)
+        or node.estimated_rows < EXCHANGE_MIN_GROUPS
+        or pool is None
+        or ctx.native is not None
+        or not parallel.use_processes(gather, ctx)
+    ):
+        return None
+    ranges = min(gather.partitions, pool.max_workers)
+    if ranges < 2:
+        return None
+    split_task = partial(_consume_partition, partial(_aggregate_split, node, gather, ranges), gather.input)
+    parts = pool.run(gather, ctx, split_task, prepare_pipeline)
+    if parts is None:
+        return None
+    inputs = {r: [part[r] for part in parts] for r in range(ranges)}
+    merged = pool.run(gather, ctx, partial(_aggregate_merge, gather), None, count=ranges, inputs=inputs)
+    if merged is None:
+        return None
+    keys: list[Any] = []
+    ranks: list[int] = []
+    results: list[list[Any]] = [[] for _ in node.aggregates]
+    for part_keys, part_results, part_ranks in merged:
+        keys.extend(part_keys)
+        ranks.extend(part_ranks)
+        for column, values in zip(results, part_results):
+            column.extend(values)
+    ctx.reserve_rows(len(keys), len(node.layout))
+    order = sorted(range(len(ranks)), key=ranks.__getitem__)
+    return list(take(keys, order)), [list(take(column, order)) for column in results]
+
+
+def _aggregate_split(
+    node: pp.HashAggregate, gather: pp.Gather, ranges: int, batches: Batches, ctx: ExecutionContext
+) -> list[bytes]:
+    """The partition's partial aggregation, split by key hash into one pickled
+    ``(keys, states, ranks)`` part per hash range."""
+    keys, states = _aggregate_partition(node, batches, ctx)
+    base = ctx.partitions[id(gather.driver)][0] << 32
+    buckets = list(map(operator.mod, map(hash, keys), repeat(ranges)))
+    order = sorted(range(len(keys)), key=buckets.__getitem__)  # stable: ids ascend per range
+    counts = Counter(buckets)
+    out = []
+    start = 0
+    for r in range(ranges):
+        ids = order[start : start + counts[r]]
+        start += counts[r]
+        part_keys = [keys[i] for i in ids]
+        ranks = list(map(operator.or_, repeat(base), ids))
+        out.append(dumps_result((part_keys, [state.subset(ids) for state in states], ranks)))
+    return out
+
+
+def _aggregate_merge(gather: pp.Gather, ctx: ExecutionContext) -> tuple[list[Any], list[list[Any]], list[int]]:
+    """Hash range ``r`` (this task's index): its parts from every partition
+    merged in partition order, with the final aggregate values."""
+    r, _ = ctx.partitions[id(gather.driver)]
+    keys, states, ranks = merge_ranked_partials([pickle.loads(blob) for blob in ctx.task_inputs[r]])
+    return keys, [state.results() for state in states], ranks
 
 
 # ------------------------------------------------------------ distinct / sort / limit

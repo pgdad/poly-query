@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import statistics
 import subprocess
 import sys
@@ -75,6 +76,7 @@ def main() -> int:
     ap.add_argument("--engine", default=str(LAUNCHER))
     ap.add_argument("--engine-arg", action="append", default=[], help="extra engine CLI argument")
     ap.add_argument("--json", help="write timings as JSON to this file")
+    ap.add_argument("--needed-tables", action="store_true", help="load only the tables the selected queries use")
     ap.add_argument("--save-results")
     ap.add_argument("--check-results")
     args = ap.parse_args()
@@ -82,17 +84,21 @@ def main() -> int:
     workload = json.loads(Path(args.workload).read_text())
     data = Path(args.data)
     options = json.loads(args.options)
+    prefixes = args.only.split(",") if args.only else None
+    queries = [q for q in workload["queries"] if not prefixes or any(q["name"].startswith(p) for p in prefixes)]
     session = Session(str(data), args.engine, args.engine_arg)
     for name, base in workload["tables"].items():
+        if args.needed_tables and not any(re.search(rf"\b{name}\b", q["sql"]) for q in queries):
+            continue
         schema = json.loads((data / f"{base}.schema.json").read_text())
         t0 = time.monotonic()
         session.request({"op": "load", "table": name, "format": "csv", "path": f"{base}.csv", "schema": schema})
         print(f"load {name}: {time.monotonic() - t0:.1f}s", file=sys.stderr)
     for index in workload.get("indexes", []):
-        session.request({"op": "query", "sql": index["sql"]})
+        table = index["sql"].split(" ON ")[1].split()[0]
+        if not args.needed_tables or any(re.search(rf"\b{table}\b", q["sql"]) for q in queries):
+            session.request({"op": "query", "sql": index["sql"]})
 
-    prefixes = args.only.split(",") if args.only else None
-    queries = [q for q in workload["queries"] if not prefixes or any(q["name"].startswith(p) for p in prefixes)]
     expected = json.loads(Path(args.check_results).read_text()) if args.check_results else None
     results: dict[str, list] = {}
     timings: dict[str, dict] = {}

@@ -20,6 +20,7 @@ sums, fsum-based float sums, first-seen minima/maxima).
 
 from __future__ import annotations
 
+import copy
 import math
 import operator
 from collections import Counter
@@ -47,6 +48,17 @@ def _non_null_rows(ids: Sequence[int], vals: Sequence[Any]) -> tuple[Sequence[in
 class GroupState:
     """State of one aggregate for every group."""
 
+    # names of the attributes holding one entry per group
+    _per_group: tuple[str, ...] = ()
+
+    def subset(self, ids: Sequence[int]) -> GroupState:
+        """The state of the groups ``ids`` only (renumbered 0, 1, …)."""
+        part = copy.copy(self)
+        for name in self._per_group:
+            values = getattr(self, name)
+            setattr(part, name, [values[i] for i in ids])
+        return part
+
     def grow(self, n: int) -> None:
         """Adds ``n`` new (empty) groups."""
         raise NotImplementedError
@@ -66,6 +78,8 @@ class GroupState:
 
 
 class CountStarState(GroupState):
+    _per_group = ("counts",)
+
     def __init__(self) -> None:
         self.counts: list[int] = []
 
@@ -112,6 +126,8 @@ class CountState(CountStarState):
 
 class SumState(GroupState):
     """Exact SUM / AVG over INT64 and DECIMAL (unscaled) values."""
+
+    _per_group = ("totals", "counts")
 
     def __init__(self, kind: str, scale: int = 0, precision: int = 18) -> None:
         self.kind = kind  # "int", "decimal" or "avg"
@@ -170,6 +186,8 @@ class SumState(GroupState):
 
 class FloatSumState(GroupState):
     """SUM / AVG over FLOAT64: per group the values (compacted with fsum)."""
+
+    _per_group = ("parts", "counts")
 
     def __init__(self, average: bool) -> None:
         self.average = average
@@ -231,6 +249,8 @@ def _fsum(parts: list[float]) -> float:
 
 
 class MinMaxState(GroupState):
+    _per_group = ("values",)
+
     def __init__(self, is_min: bool) -> None:
         self.is_min = is_min
         self.values: list[Any] = []
@@ -281,6 +301,8 @@ class MinMaxState(GroupState):
 
 class DistinctState(GroupState):
     """Aggregates over DISTINCT values: per group the set of values."""
+
+    _per_group = ("sets",)
 
     def __init__(self, call: b.AggCall) -> None:
         assert call.arg is not None
@@ -356,3 +378,24 @@ def merge_partials(partials: list[tuple[list[Any], list[GroupState]]]) -> tuple[
         for state, other in zip(states, part_states):
             state.merge(other, mapping)
     return list(index), states
+
+
+def merge_ranked_partials(
+    partials: list[tuple[list[Any], list[GroupState], list[int]]],
+) -> tuple[list[Any], list[GroupState], list[int]]:
+    """Like :func:`merge_partials` for partials that also carry a rank per
+    group (its first-seen position); every merged group keeps the rank from
+    the first partial (in partition order) that has it."""
+    keys, states, ranks = partials[0]
+    ranks = list(ranks)
+    index = dict(zip(keys, range(len(keys))))
+    for part_keys, part_states, part_ranks in partials[1:]:
+        before = len(index)
+        mapping = [index.setdefault(key, len(index)) for key in part_keys]
+        if len(index) > before:
+            for state in states:
+                state.grow(len(index) - before)
+            ranks.extend(rank for rank, g in zip(part_ranks, mapping) if g >= before)
+        for state, other in zip(states, part_states):
+            state.merge(other, mapping)
+    return list(index), states, ranks
