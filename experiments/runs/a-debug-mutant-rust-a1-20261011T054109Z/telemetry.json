@@ -1,0 +1,93 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-debug-mutant-rust-a1-20261011T054109Z",
+ "language": "rust",
+ "task": "debug-mutant",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-debug-mutant",
+ "prompt_sha256": "cb5e1c88d46e3611cc8ebb013912355557947ee1af8e1d4b2824273f7e62bb04",
+ "session_id": "f8f57b91-8790-4589-ae05-d89199aadb5e",
+ "tokens": {
+  "input": 20,
+  "output": 2343,
+  "cache_read": 211919,
+  "cache_creation": 16616,
+  "thinking": null,
+  "thinking_estimated": 180,
+  "source": "result events",
+  "api_messages": 10
+ },
+ "rate_limit": {
+  "events": 2,
+  "max_utilization": {
+   "five_hour": 0.14,
+   "seven_day": 0.25
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 0.22225180000000005,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 10,
+ "result_segments": 1,
+ "assistant_messages": 16,
+ "tool_calls": {
+  "Bash": 9
+ },
+ "tool_calls_total": 9,
+ "tool_failures": 1,
+ "build_invocations": 2,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 4,
+ "conformance_progress": [
+  [
+   565,
+   569
+  ],
+  [
+   54,
+   57
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ]
+ ],
+ "repair_iterations": 3,
+ "time": {
+  "wall_seconds": 75.8,
+  "model_api_seconds": 31.7,
+  "tool_seconds": 43.3,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 1,
+  "files_changed": 1,
+  "lines_added": 1,
+  "lines_removed": 1,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "I found and fixed the injected defect, and all conformance suites pass again.\n\n**Root cause:** in `implementations/rust/src/exec/eval.rs:342`, inside `arithmetic()`, the code that handles both decimal addition and subtraction had `a - b` in both branches. So any addition involving a DECIMAL subtracted instead. That explains every failure in `DEFECT.md`:\n- `1.25 + 2.5` came out as `-1.25`.\n- `0.1 + 0.2 = 0.3` was false.\n- `99999999999999999.9 + 0.1` didn't overflow because it subtracted.\n- The `functions.pqt:317` case adds `ABS(...)` (a DECIMAL) to an integer, so it went wrong the same way.\n\n**Fix:** a one-line change so the `Add` branch computes `a + b`. Nothing else in the code changed.\n\n**Test results:**\n- Default runner: phase 1 225/225, phase 2 186/186, phase 3 143/143, phase 5 15/15; **TOTAL: 569/569 pass**.\n- `--modes`: phase 1 1350/1350, phase 2 1116/1116, phase 3 858/858; **TOTAL: 3324/3324 pass**.\n- `--transport http`: **TOTAL: 569/569 pass**.\n- The engine still reports 28 capabilities (`caps=28`), so the capability set is unchanged.\n- `make build test` succeeds: 126 unit tests passed, 0 failed.\n\nThe fix is committed as `79b4dfe`. There are no known limitations. I made no design changes and didn't touch the README, since a single-operator fix needed no decisions recorded.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
