@@ -161,6 +161,15 @@ final class Parallel {
             return new AggregateBatches.Distinct(new Gather(builder, c, new DistinctReducer(
                     BatchBuilder.types(d.schema()))), BatchBuilder.types(d.schema()), builder.context());
         }
+        if (plan instanceof PhysicalPlan.Sort s) {
+            // the input is materialized by the workers, morsel by morsel, then sorted in parallel
+            Chain c = chain(s.input());
+            if (c == null || !worthIt(c, builder.morselRows())) {
+                return null;
+            }
+            return new SortBatches.Sort(new Materialize(builder, c), s.keys(), s.schema(), builder.context(),
+                    builder.batchSize(), builder.threads());
+        }
         if (plan instanceof PhysicalPlan.TopN t) {
             // workers keep the best rows of their morsels; the final top-N picks among them
             Chain c = chain(t.input());
@@ -751,6 +760,109 @@ final class Parallel {
             merged.clear();
             emitter = null;
             shared.release();
+        }
+    }
+
+    // ------------------------------------------------------------------ materialization
+
+    /**
+     * Materializes a pipeline's output in parallel: workers run morsels into column stores of
+     * their own (reserving memory as the sequential sort does), which are then concatenated in
+     * morsel order — the rows in sequential order. A data error is that of the first failing
+     * morsel, raised after all workers stopped (a blocking consumer would read up to it anyway).
+     */
+    static final class Materialize {
+        private final Shared shared;
+        private final ExecContext ctx;
+        private final int threads;
+        private final List<polyquery.storage.ColumnSchema> schema;
+        private final AtomicLong bytes = new AtomicLong();
+
+        Materialize(BatchBuilder builder, Chain chain) {
+            this.shared = new Shared(builder, chain);
+            this.ctx = builder.context();
+            this.threads = builder.threads();
+            this.schema = chain.stages().isEmpty() ? chain.scan().schema() : chain.stages().getLast().schema();
+        }
+
+        /** Memory reserved for the materialized rows (to be released by the consumer). */
+        long reservedBytes() {
+            return bytes.get();
+        }
+
+        ColumnStore run() {
+            try {
+                shared.open();
+                List<Morsel> morsels = Morsel.of(shared.chain.scan(), shared.builder.morselRows());
+                ColumnStore[] parts = new ColumnStore[morsels.size()];
+                AtomicInteger next = new AtomicInteger();
+                Errors errors = new Errors();
+                int workers = Math.max(1, Math.min(threads, morsels.size()));
+                List<Runnable> tasks = new ArrayList<>();
+                for (int w = 0; w < workers; w++) {
+                    tasks.add(() -> work(morsels, parts, next, errors));
+                }
+                runAll(tasks, ctx);
+                if (errors.firstError() != null) {
+                    throw errors.firstError();
+                }
+                List<ColumnStore> list = new ArrayList<>(parts.length);
+                for (ColumnStore part : parts) {
+                    if (part != null) {
+                        list.add(part);
+                    }
+                }
+                return ColumnStore.concat(schema, list, ctx, threads);
+            } catch (RuntimeException e) {
+                ctx.release(bytes.getAndSet(0));
+                throw e;
+            } finally {
+                shared.release();
+            }
+        }
+
+        private void work(List<Morsel> morsels, ColumnStore[] parts, AtomicInteger next, Errors errors) {
+            Pipeline pipe = shared.instantiate();
+            int[] all = new int[0];
+            int m;
+            while ((m = next.getAndIncrement()) < morsels.size()) {
+                if (m > errors.firstMorsel()) {
+                    break; // an earlier morsel already failed
+                }
+                Morsel morsel = morsels.get(m);
+                ColumnStore store = new ColumnStore(schema, morsel.to() - morsel.from());
+                pipe.start(morsel);
+                try {
+                    Batch b;
+                    while ((b = pipe.top().next()) != null) {
+                        ctx.checkNow();
+                        if (b.count > 0) {
+                            if (all.length < b.count) {
+                                all = new int[Math.max(b.count, 16)];
+                            }
+                            for (int k = 0; k < b.count; k++) {
+                                all[k] = b.pos(k);
+                            }
+                            store.append(b, all, b.count);
+                            long size = ColumnStore.estimate(b, all, b.count);
+                            ctx.reserve(size);
+                            bytes.addAndGet(size);
+                        }
+                        if (b.error != null) {
+                            errors.data(m, b.error);
+                            break;
+                        }
+                    }
+                } catch (PolyQueryException e) {
+                    if (!BatchExprs.deferrable(e)) {
+                        throw e;
+                    }
+                    errors.data(m, e);
+                } finally {
+                    pipe.top().close();
+                }
+                parts[m] = store;
+            }
         }
     }
 

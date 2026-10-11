@@ -221,6 +221,60 @@ public final class VectorTest {
         }
     }
 
+    /** Concatenated stores hold the parts' rows in order, keeping a shared dictionary and NULLs. */
+    public static void testColumnStoreConcat() {
+        List<ColumnSchema> schema = List.of(new ColumnSchema("s", DataType.STRING),
+                new ColumnSchema("x", DataType.INT64));
+        String[] dictA = {"a", "b"};
+        String[] dictB = {"b", "c"};
+        List<Object[]> expected = new ArrayList<>();
+        for (boolean mixed : new boolean[] {false, true}) {
+            expected.clear();
+            List<ColumnStore> parts = new ArrayList<>();
+            for (int p = 0; p < 4; p++) {
+                int n = p == 2 ? 0 : 3 + p;
+                Batch b = new Batch(2);
+                b.cols[0] = new Vec(DataType.STRING, n);
+                b.cols[1] = new Vec(DataType.INT64, n);
+                b.cols[0].nullMask(n);
+                b.cols[1].nullMask(n);
+                boolean plain = mixed && p == 3;
+                String[] dict = mixed && p == 1 ? dictB : dictA;
+                if (!plain) {
+                    b.cols[0].toDict(dict, n);
+                }
+                for (int i = 0; i < n; i++) {
+                    boolean isNull = (i + p) % 3 == 0;
+                    String value = plain ? "z" + i : dict[i % 2];
+                    if (plain) {
+                        b.cols[0].set(i, isNull ? null : value);
+                    } else {
+                        b.cols[0].codes[i] = i % 2;
+                        b.cols[0].nulls[i] = isNull;
+                        b.cols[0].hasNulls |= isNull;
+                    }
+                    b.cols[1].set(i, (long) (10 * p + i));
+                    expected.add(new Object[] {isNull ? null : value, (long) (10 * p + i)});
+                }
+                b.reset(n);
+                int[] all = new int[n];
+                for (int i = 0; i < n; i++) {
+                    all[i] = i;
+                }
+                ColumnStore part = new ColumnStore(schema);
+                part.append(b, all, n);
+                parts.add(part);
+            }
+            ColumnStore out = ColumnStore.concat(schema, parts, ctx(), 3);
+            check(out.rows() == expected.size(), "concat rows");
+            check((out.column(0).kind == Vec.Kind.DICT) == !mixed, "dictionary kept only if shared");
+            for (int i = 0; i < out.rows(); i++) {
+                check(java.util.Objects.equals(out.column(0).get(i), expected.get(i)[0])
+                        && out.column(1).get(i).equals(expected.get(i)[1]), "concat row " + i + " mixed " + mixed);
+            }
+        }
+    }
+
     /** The single-key join index chains rows with equal keys in insertion order. */
     public static void testLongIndex() {
         JoinBatches.LongIndex index = new JoinBatches.LongIndex();

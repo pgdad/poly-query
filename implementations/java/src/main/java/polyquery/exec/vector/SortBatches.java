@@ -750,6 +750,8 @@ final class SortBatches {
      */
     static final class Sort implements BatchOperator {
         private final BatchOperator input;
+        /** Parallel materialization of the input (instead of {@code input}), or null. */
+        private final Parallel.Materialize source;
         private final List<SortKey> keys;
         private final List<ColumnSchema> schema;
         private final ExecContext ctx;
@@ -764,9 +766,21 @@ final class SortBatches {
         private int end;
         private long reserved;
 
+        /** Full sort of rows materialized by parallel workers. */
+        Sort(Parallel.Materialize source, List<SortKey> keys, List<ColumnSchema> schema, ExecContext ctx,
+             int batchSize, int threads) {
+            this(null, keys, schema, ctx, batchSize, threads, 0, -1, source);
+        }
+
         /** @param threads worker threads the sort itself may use (large inputs are sorted in parallel) */
         Sort(BatchOperator input, List<SortKey> keys, List<ColumnSchema> schema, ExecContext ctx, int batchSize,
              int threads, long offset, long limit) {
+            this(input, keys, schema, ctx, batchSize, threads, offset, limit, null);
+        }
+
+        private Sort(BatchOperator input, List<SortKey> keys, List<ColumnSchema> schema, ExecContext ctx,
+                     int batchSize, int threads, long offset, long limit, Parallel.Materialize source) {
+            this.source = source;
             this.input = input;
             this.keys = keys;
             this.schema = schema;
@@ -794,6 +808,13 @@ final class SortBatches {
             end = 0;
             if (limit == 0) {
                 return; // like LIMIT 0 over a sort: the input is never read
+            }
+            if (source != null) {
+                store = source.run();
+                reserved += source.reservedBytes();
+                perm = sort(store, keys, ctx, threads);
+                end = perm.length;
+                return;
             }
             long keep = limit < 0 ? Long.MAX_VALUE : offset + limit < 0 ? Long.MAX_VALUE : offset + limit;
             long compactAt = keep >= Integer.MAX_VALUE / 4 ? Long.MAX_VALUE : Math.max(2 * keep, 2L * batchSize);
