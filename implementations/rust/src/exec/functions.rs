@@ -181,23 +181,13 @@ pub fn call(func: ScalarFunc, args: Vec<Value>, ctx: &ExecContext) -> Result<Val
             _ => return Err(bad_arg(func, a)),
         },
         ScalarFunc::Year | ScalarFunc::Month | ScalarFunc::Day => {
-            let (y, m, d) = datetime::civil_from_days(day_number(func, a)?);
-            Value::Int(match func {
-                ScalarFunc::Year => y,
-                ScalarFunc::Month => m as i64,
-                _ => d as i64,
-            })
+            Value::Int(ymd_part(func, day_number(func, a)?))
         }
         ScalarFunc::Hour | ScalarFunc::Minute | ScalarFunc::Second => {
             let Value::Timestamp(t) = a else {
                 return Err(bad_arg(func, a));
             };
-            let secs = t.rem_euclid(MICROS_PER_DAY) / MICROS_PER_SECOND;
-            Value::Int(match func {
-                ScalarFunc::Hour => secs / 3600,
-                ScalarFunc::Minute => secs / 60 % 60,
-                _ => secs % 60,
-            })
+            Value::Int(hms_part(func, *t))
         }
         ScalarFunc::DateTrunc(unit) => {
             let t = match a {
@@ -205,17 +195,7 @@ pub fn call(func: ScalarFunc, args: Vec<Value>, ctx: &ExecContext) -> Result<Val
                 Value::Timestamp(t) => *t,
                 v => return Err(bad_arg(func, v)),
             };
-            let days = t.div_euclid(MICROS_PER_DAY);
-            let (y, m, _) = datetime::civil_from_days(days);
-            let hour = 3600 * MICROS_PER_SECOND;
-            let minute = 60 * MICROS_PER_SECOND;
-            Value::Timestamp(match unit {
-                TruncUnit::Year => datetime::days_from_civil(y, 1, 1) * MICROS_PER_DAY,
-                TruncUnit::Month => datetime::days_from_civil(y, m, 1) * MICROS_PER_DAY,
-                TruncUnit::Day => days * MICROS_PER_DAY,
-                TruncUnit::Hour => t - t.rem_euclid(hour),
-                TruncUnit::Minute => t - t.rem_euclid(minute),
-            })
+            Value::Timestamp(date_trunc(unit, t))
         }
         ScalarFunc::DateDiffDays => Value::Int(day_number(func, &args[1])? - day_number(func, a)?),
         ScalarFunc::PqSleep => {
@@ -267,6 +247,41 @@ fn map_ascii_case(s: &str, upper: bool) -> String {
 }
 
 /// Day number (days since 1970-01-01) of a DATE or TIMESTAMP.
+/// `YEAR`/`MONTH`/`DAY` of a day number (days since 1970-01-01).
+pub fn ymd_part(func: ScalarFunc, days: i64) -> i64 {
+    let (y, m, d) = datetime::civil_from_days(days);
+    match func {
+        ScalarFunc::Year => y,
+        ScalarFunc::Month => m as i64,
+        _ => d as i64,
+    }
+}
+
+/// `HOUR`/`MINUTE`/`SECOND` of a timestamp (microseconds).
+pub fn hms_part(func: ScalarFunc, t: i64) -> i64 {
+    let secs = t.rem_euclid(MICROS_PER_DAY) / MICROS_PER_SECOND;
+    match func {
+        ScalarFunc::Hour => secs / 3600,
+        ScalarFunc::Minute => secs / 60 % 60,
+        _ => secs % 60,
+    }
+}
+
+/// `DATE_TRUNC(unit, t)` of a timestamp (microseconds).
+pub fn date_trunc(unit: TruncUnit, t: i64) -> i64 {
+    let days = t.div_euclid(MICROS_PER_DAY);
+    let (y, m, _) = datetime::civil_from_days(days);
+    let hour = 3600 * MICROS_PER_SECOND;
+    let minute = 60 * MICROS_PER_SECOND;
+    match unit {
+        TruncUnit::Year => datetime::days_from_civil(y, 1, 1) * MICROS_PER_DAY,
+        TruncUnit::Month => datetime::days_from_civil(y, m, 1) * MICROS_PER_DAY,
+        TruncUnit::Day => days * MICROS_PER_DAY,
+        TruncUnit::Hour => t - t.rem_euclid(hour),
+        TruncUnit::Minute => t - t.rem_euclid(minute),
+    }
+}
+
 fn day_number(func: ScalarFunc, v: &Value) -> Result<i64> {
     match v {
         Value::Date(d) => Ok(*d as i64),

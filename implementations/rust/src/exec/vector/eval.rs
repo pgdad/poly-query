@@ -18,8 +18,9 @@ use super::batch::{Batch, Data, Vector, selection};
 use crate::error::{Error, Result};
 use crate::exec::ExecContext;
 use crate::exec::eval::{arithmetic, compare3, eval as eval_row, like_match};
+use crate::exec::functions;
 use crate::exec::hash::FastSet;
-use crate::planner::expr::{ArithKind, Expr};
+use crate::planner::expr::{ArithKind, Expr, ScalarFunc};
 use crate::sql::ast::BinaryOp;
 use crate::types::value::promote_int;
 use crate::types::{DataType, Value, datetime, decimal, float};
@@ -239,7 +240,21 @@ fn eval_owned(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
                 None => elementwise(e, b, ctx),
             }
         }
-        Expr::Negate { .. } | Expr::Function { .. } | Expr::Concat(..) => elementwise(e, b, ctx),
+        Expr::Function { func, args, .. } if args.len() == 1 => {
+            let v = eval_cow(&args[0], b, ctx)?;
+            match function_vector(*func, &v) {
+                Some(r) => r,
+                None => elementwise_with(e, vec![Operand::Vector(v)], b, ctx),
+            }
+        }
+        Expr::Negate { expr, .. } => {
+            let v = eval_cow(expr, b, ctx)?;
+            match negate_vector(&v) {
+                Some(r) => r,
+                None => elementwise_with(e, vec![Operand::Vector(v)], b, ctx),
+            }
+        }
+        Expr::Function { .. } | Expr::Concat(..) => elementwise(e, b, ctx),
         Expr::ScalarSubquery { .. } | Expr::Exists { .. } | Expr::InSubquery { .. } => {
             rowwise(e, b, ctx)
         }
@@ -805,6 +820,68 @@ fn cast_vector(v: &Vector, to: DataType) -> Option<Result<Vector>> {
     Some(Ok(Vector::new(data, valid)))
 }
 
+// ------------------------------------------------------------ functions
+
+/// Typed kernels for single-argument date/time functions and `ABS` (same
+/// results and errors as `functions::call`); None for anything else.
+fn function_vector(func: ScalarFunc, v: &Vector) -> Option<Result<Vector>> {
+    let valid = v.valid.clone();
+    let data = match (func, &v.data) {
+        (ScalarFunc::Year | ScalarFunc::Month | ScalarFunc::Day, Data::Date(x)) => Data::Int(
+            x.iter()
+                .map(|&d| functions::ymd_part(func, d as i64))
+                .collect(),
+        ),
+        (ScalarFunc::Year | ScalarFunc::Month | ScalarFunc::Day, Data::Timestamp(x)) => Data::Int(
+            x.iter()
+                .map(|&t| functions::ymd_part(func, t.div_euclid(datetime::MICROS_PER_DAY)))
+                .collect(),
+        ),
+        (ScalarFunc::Hour | ScalarFunc::Minute | ScalarFunc::Second, Data::Timestamp(x)) => {
+            Data::Int(x.iter().map(|&t| functions::hms_part(func, t)).collect())
+        }
+        (ScalarFunc::DateTrunc(unit), Data::Timestamp(x)) => {
+            Data::Timestamp(x.iter().map(|&t| functions::date_trunc(unit, t)).collect())
+        }
+        (ScalarFunc::DateTrunc(unit), Data::Date(x)) => Data::Timestamp(
+            x.iter()
+                .map(|&d| functions::date_trunc(unit, datetime::date_to_timestamp(d)))
+                .collect(),
+        ),
+        (ScalarFunc::Abs, Data::Int(x)) => {
+            let ovf: Vec<bool> = x.iter().map(|&i| i == i64::MIN).collect();
+            if any_valid(&ovf, valid.as_deref()) {
+                return Some(Err(Error::overflow("numeric overflow in ABS")));
+            }
+            Data::Int(x.iter().map(|&i| i.wrapping_abs()).collect())
+        }
+        (ScalarFunc::Abs, Data::Float(x)) => Data::Float(x.iter().map(|f| f.abs()).collect()),
+        (ScalarFunc::Abs, Data::Decimal(x, s)) => {
+            Data::Decimal(x.iter().map(|u| u.abs()).collect(), *s)
+        }
+        _ => return None,
+    };
+    Some(Ok(Vector::new(data, valid)))
+}
+
+/// Unary minus over typed numeric vectors (as the row evaluator).
+fn negate_vector(v: &Vector) -> Option<Result<Vector>> {
+    let valid = v.valid.clone();
+    let data = match &v.data {
+        Data::Int(x) => {
+            let ovf: Vec<bool> = x.iter().map(|&i| i == i64::MIN).collect();
+            if any_valid(&ovf, valid.as_deref()) {
+                return Some(Err(Error::overflow("integer overflow in negation")));
+            }
+            Data::Int(x.iter().map(|&i| i.wrapping_neg()).collect())
+        }
+        Data::Float(x) => Data::Float(x.iter().map(|&f| float::normalize(-f)).collect()),
+        Data::Decimal(x, s) => Data::Decimal(x.iter().map(|&u| -u).collect(), *s),
+        _ => return None,
+    };
+    Some(Ok(Vector::new(data, valid)))
+}
+
 // ------------------------------------------------------------ IN, LIKE
 
 /// `x [NOT] IN (literal, …)` over an INT64 or STRING operand, with a hash
@@ -981,12 +1058,17 @@ fn case(
 /// children vectorized: the node is copied with its children replaced by
 /// references to a small per-row tuple of child values.
 fn elementwise(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
-    let n = b.len;
     let children = e.children();
     let mut ops = Vec::with_capacity(children.len());
     for c in &children {
         ops.push(operand(c, b, ctx)?);
     }
+    elementwise_with(e, ops, b, ctx)
+}
+
+/// [`elementwise`] with the children of `e` already evaluated (`ops`).
+fn elementwise_with(e: &Expr, ops: Vec<Operand>, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
+    let n = b.len;
     let mut template = e.clone();
     for (k, c) in template.children_mut().into_iter().enumerate() {
         *c = Expr::Column {
@@ -1252,6 +1334,71 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn date_and_numeric_function_kernels() {
+        use crate::planner::expr::{ScalarFunc, TruncUnit};
+        let ts = Vector::from_values(vec![
+            Value::Timestamp(1_720_088_412_123_456),
+            Value::Null,
+            Value::Timestamp(-86_400_000_001),
+        ]);
+        let d = Vector::from_values(vec![Value::Date(19_000), Value::Date(-1), Value::Null]);
+        let f = Vector::from_values(vec![Value::Float(-1.5), Value::Float(0.0), Value::Null]);
+        let b = Batch::new(vec![ts, d, f], 3);
+        let ctx = ExecContext::default();
+        let funcs = [
+            ScalarFunc::Year,
+            ScalarFunc::Month,
+            ScalarFunc::Day,
+            ScalarFunc::Hour,
+            ScalarFunc::Minute,
+            ScalarFunc::Second,
+            ScalarFunc::DateTrunc(TruncUnit::Year),
+            ScalarFunc::DateTrunc(TruncUnit::Month),
+            ScalarFunc::DateTrunc(TruncUnit::Day),
+            ScalarFunc::DateTrunc(TruncUnit::Hour),
+            ScalarFunc::DateTrunc(TruncUnit::Minute),
+            ScalarFunc::Abs,
+        ];
+        let types = [DataType::Timestamp, DataType::Date, DataType::Float64];
+        for func in funcs {
+            for (c, ty) in types.iter().enumerate() {
+                let e = Expr::Function {
+                    func,
+                    args: vec![*col(c, *ty)],
+                    ty: DataType::Int64,
+                };
+                let rows: Vec<Result<Value>> =
+                    (0..3).map(|i| eval_row(&e, &b.row(i), &ctx)).collect();
+                if rows.iter().any(|r| r.is_err()) {
+                    continue; // argument type not accepted by the function
+                }
+                let got = eval(&e, &b, &ctx).unwrap();
+                for (i, r) in rows.into_iter().enumerate() {
+                    assert_eq!(got.value(i), r.unwrap(), "{e} row {i}");
+                }
+            }
+        }
+        let neg = Expr::Negate {
+            expr: col(2, DataType::Float64),
+            ty: DataType::Float64,
+        };
+        let got = eval(&neg, &b, &ctx).unwrap();
+        for i in 0..3 {
+            assert_eq!(got.value(i), eval_row(&neg, &b.row(i), &ctx).unwrap());
+        }
+        let min = Batch::new(vec![Vector::from_values(vec![Value::Int(i64::MIN)])], 1);
+        let abs = Expr::Function {
+            func: ScalarFunc::Abs,
+            args: vec![*col(0, DataType::Int64)],
+            ty: DataType::Int64,
+        };
+        assert_eq!(
+            eval(&abs, &min, &ctx).unwrap_err().code,
+            ErrorCode::NumericOverflow
+        );
     }
 
     #[test]
