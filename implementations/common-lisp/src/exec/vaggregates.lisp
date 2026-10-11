@@ -278,6 +278,7 @@ OTHER's group ids to STATE's (-1: the group is merged elsewhere)."))
 
 (defstruct (group-state (:constructor %make-group-state))
   (table nil)                            ; KEY-TABLE, or NIL without GROUP BY
+  (charged 0 :type fixnum)               ; groups charged to the memory budget
   (aggs #() :type simple-vector)         ; of AGG-STATE
   (gids (make-index-vector +batch-size+) :type index-vector))
 

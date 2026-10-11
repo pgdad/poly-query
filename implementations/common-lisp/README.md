@@ -754,6 +754,16 @@ removed sporadic 80–180 ms GC pauses from later queries (it adds about
   ones.
 * Sorting (and the hash-join build) materializes its whole input; a sort is
   not interruptible while the permutation is being sorted.
+* Parallel aggregation and DISTINCT emit their groups in hash-partition or
+  worker order rather than first-appearance order (row order without ORDER
+  BY, and the order of ORDER BY ties, are implementation-defined; results
+  are otherwise identical). Parallel FLOAT64 sums add partial sums, so they
+  can round differently from a serial sum.
+* A streamed (`/v1/query/stream`) vectorized query under a LIMIT evaluates
+  whole batches of the filters below the LIMIT, so a row past the limit can
+  raise an error that the row executor would not reach (LIMIT is pushed
+  below projections, so projections are exact). Non-streamed queries
+  re-run on the row executor after such an error.
 * Backpressure is enforced inside the server (bounded channel, blocking
   writes), but how much a stalled client can absorb before the query
   blocks also depends on kernel socket buffers (in some sandboxed network

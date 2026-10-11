@@ -169,6 +169,19 @@ by the first error of evaluating EXPRS row by row over BATCH."
   (make-batch-project (compile-batch-operator (pnode-child node)) (pp-project-exprs node)))
 
 (defmethod compile-batch-operator ((node pp-limit))
+  (let ((child (pnode-child node)))
+    (if (pp-project-p child)
+        ;; LIMIT commutes with a projection (one output row per input row):
+        ;; limiting first projects only the rows the row executor would.
+        (make-batch-project (compile-batch-operator
+                             (make-pp-limit :children (pnode-children child)
+                                            :columns (pnode-columns (pnode-child child))
+                                            :limit (pp-limit-limit node)
+                                            :offset (pp-limit-offset node)))
+                            (pp-project-exprs child))
+        (compile-batch-limit node))))
+
+(defun compile-batch-limit (node)
   (let ((open-child (compile-batch-operator (pnode-child node)))
         (limit (evaluate-limit-expr (pp-limit-limit node) "LIMIT"))
         (offset (or (evaluate-limit-expr (pp-limit-offset node) "OFFSET") 0)))
@@ -210,9 +223,7 @@ batch into it. Kernels are compiled once per call."
          (nkeys (length keys))
          (key-kinds (mapcar (lambda (k) (type-vec-kind (bexpr-type k))) keys))
          (guard (make-row-order-guard (append keys (mapcan (lambda (a) (copy-list (b-agg-args a)))
-                                                           aggs))))
-         (charged 0))
-    (declare (type fixnum charged))
+                                                           aggs)))))
     (values
      (lambda () (make-group-state key-kinds aggs))
      (lambda (gs batch)
@@ -224,10 +235,11 @@ batch into it. Kernels are compiled once per call."
                                 (mapcar (lambda (k) (and k (funcall (the function k) batch)))
                                         arg-kernels))))
            (group-state-consume gs key-vecs arg-vecs n))
-         (let ((groups (group-state-count gs)))
+         (let ((groups (group-state-count gs))
+               (charged (group-state-charged gs)))
            (when (>= (- groups charged) 1024)
              (charge-memory (* (- groups charged) (row-footprint (* 4 (+ nkeys (length aggs))))))
-             (setf charged groups))))))))
+             (setf (group-state-charged gs) groups))))))))
 
 (defun group-state-batches (gs node)
   "Iterator over the output batches of the finished group state GS."
@@ -706,15 +718,17 @@ BUILD-PROVIDER with the batches of OPEN-PROBE."
                               (bn (- null-order))
                               (t (let ((a (aref data-a i)) (b (aref data-b j)))
                                    (cond ((< a b) (- sign)) ((> a b) sign) (t 0))))))))))
-      (etypecase data-a
-        (i64-vector (typed (signed-byte 64)))
-        (f64-vector (typed double-float))
-        (simple-vector
+      (cond
+        ((and (typep data-a 'i64-vector) (typep data-b 'i64-vector)) (typed (signed-byte 64)))
+        ((and (typep data-a 'f64-vector) (typep data-b 'f64-vector)) (typed double-float))
+        (t
+         ;; Generic values (and mixed representations, e.g. a NULL-typed
+         ;; join key against an INT64 one).
          (let ((cmp (make-sort-key-comparator type descending nulls-first)))
            (declare (type function cmp))
            (lambda (i j)
              (declare (type fixnum i j))
-             (funcall cmp (svref data-a i) (svref data-b j)))))))))
+             (funcall cmp (vec-ref vec-a i) (vec-ref vec-b j)))))))))
 
 (defun make-row-order-predicate (batch-a batch-b keys)
   "Predicate (i j) -> T when row I of BATCH-A sorts strictly before row J of

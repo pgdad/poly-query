@@ -364,7 +364,7 @@ groups are merged in parallel, one thread per hash partition of the groups."
   "Call every function of THUNKS in its own thread (the first in the caller)
 and wait for all; re-signal the first error."
   (let* ((ctx *query-context*)
-         (errors '())
+         (errors (list nil))
          (threads (mapcar (lambda (thunk)
                             (sb-thread:make-thread
                              (lambda ()
@@ -373,12 +373,12 @@ and wait for all; re-signal the first error."
                                  (sb-int:with-float-traps-masked
                                      (:overflow :invalid :divide-by-zero :inexact :underflow)
                                    (handler-case (funcall thunk)
-                                     (serious-condition (e) (push e errors))))))
+                                     (serious-condition (e) (sb-ext:atomic-push e (car errors)))))))
                              :name "polyquery-sort-worker"))
                           (rest thunks))))
     (unwind-protect (funcall (first thunks))
       (mapc (lambda (th) (sb-thread:join-thread th :default nil)) threads))
-    (when errors (error (first errors)))))
+    (when (car errors) (error (first (car errors))))))
 
 (defun merge-runs (src dst start mid end before)
   "Stably merge the sorted runs SRC[START,MID) and SRC[MID,END) into DST."
