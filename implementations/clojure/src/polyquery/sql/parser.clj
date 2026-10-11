@@ -22,7 +22,7 @@
 
 (defn- advance! [st]
   (let [t (peek-tok st)]
-    (when-not (= :eof (:type t)) (vswap! (:cursor st) inc))
+    (when-not (= :eof (:type t)) (vswap! (:cursor st) #(inc (long %))))
     t))
 
 (defn- pos [tok] {:line (:line tok) :col (:col tok)})

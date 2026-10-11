@@ -14,6 +14,7 @@
   equal keys keep their input order, as with the row engine's sort."
   (:require [polyquery.exec.context :as ctx]
             [polyquery.types :as t]
+            [polyquery.util.text :as text]
             [polyquery.values :as v])
   (:import (java.util ArrayList Comparator List)))
 
@@ -50,50 +51,115 @@
             (if (nil? x) (aset nulls r true) (aset vals r x))))
         [vals nulls]))))
 
-(defn- key-comparator
-  "IndexComparator of one sort key, without the final tie-break."
-  [^objects rows n {:keys [index type desc? nulls-first?]}]
-  (let [[vals ^booleans nulls] (extract rows n index type)
-        sign (if desc? -1 1)
-        null-first (if nulls-first? -1 1)
-        nulls-cmp (fn ^long [^long a ^long b]
-                    (let [x (aget nulls a) y (aget nulls b)]
-                      (cond (and x y) 0 x null-first y (- null-first) :else 2)))]
-    (case (if (long-kind? type) :long (t/kind type))
-      :long
-      (let [^longs vals vals]
-        (reify IndexComparator
-          (compareIdx [_ a b]
-            (let [c (long (nulls-cmp a b))]
-              (if (== c 2) (* sign (Long/compare (aget vals a) (aget vals b))) c)))))
-      :float64
-      (let [^doubles vals vals]
-        (reify IndexComparator
-          (compareIdx [_ a b]
-            (let [c (long (nulls-cmp a b))]
-              (if (== c 2)
-                (let [x (aget vals a) y (aget vals b)]
-                  (* sign (cond (< x y) -1 (> x y) 1 :else 0)))
-                c)))))
-      (let [^objects vals vals
-            ^Comparator cmp (v/value-comparator type)]
-        (reify IndexComparator
-          (compareIdx [_ a b]
-            (let [c (long (nulls-cmp a b))]
-              (if (== c 2) (* sign (Integer/signum (.compare cmp (aget vals a) (aget vals b)))) c))))))))
+(defn- utf8-prefix
+  "Order-preserving 64-bit prefix of s: its first 8 UTF-8 bytes, big-endian
+  and zero-padded. UTF-8 byte order is code point order, so where the
+  prefixes of two strings differ, their unsigned order is the strings'
+  order. -1 (no UTF-8 sequence starts with 0xFF) when a surrogate occurs
+  before the 8 bytes are filled: such strings are always compared in full."
+  ^long [^String s]
+  (let [n (.length s)]
+    (loop [i 0 acc 0 nb 0]
+      (cond
+        (== nb 8) acc
+        (== i n) (bit-shift-left acc (* 8 (- 8 nb)))
+        :else
+        (let [c (long (int (.charAt s i)))]
+          (if (and (>= c 0xD800) (<= c 0xDFFF))
+            -1
+            (let [len (long (cond (< c 0x80) 1 (< c 0x800) 2 :else 3))
+                  enc (long (case len
+                        1 c
+                        2 (bit-or 0xC080 (bit-shift-left (bit-and c 0x7C0) 2) (bit-and c 0x3F))
+                        (bit-or 0xE08080 (bit-shift-left (bit-and c 0xF000) 4)
+                                (bit-shift-left (bit-and c 0xFC0) 2) (bit-and c 0x3F))))
+                  k (min len (- 8 nb))]
+              (recur (inc i)
+                     (bit-or (bit-shift-left acc (* 8 k)) (unsigned-bit-shift-right enc (* 8 (- len k))))
+                     (+ nb k)))))))))
+
+(def ^:private ^:const kind-long 0)
+(def ^:private ^:const kind-double 1)
+(def ^:private ^:const kind-string 2)
+(def ^:private ^:const kind-other 3)
+
+(defn- compare-strings
+  "Order of the strings of rows a and b: by their UTF-8 prefixes where these
+  decide, else in full."
+  ^long [^longs prefixes ^objects strings ^long a ^long b]
+  (let [pa (aget prefixes a)
+        pb (aget prefixes b)]
+    (if (or (== pa pb) (== pa -1) (== pb -1))
+      (let [^String sa (aget strings a) ^String sb (aget strings b)]
+        (if (identical? sa sb) 0 (text/compare-code-points sa sb)))
+      (long (Long/compareUnsigned pa pb)))))
+
+(defn- compare-doubles ^long [^doubles v ^long a ^long b]
+  (let [x (aget v a) y (aget v b)]
+    (if (< x y) -1 (if (> x y) 1 0))))
+
+(deftype SortKeys [^ints kinds ^objects vals ^objects prefixes ^objects nulls
+                   ^longs signs ^longs null-firsts ^objects comparators]
+  ;; One comparator class for every key combination, comparing the typed key
+  ;; arrays inline (a switch per key instead of a megamorphic call per key),
+  ;; ties broken by row index (stability).
+  IndexComparator
+  (compareIdx [_ a b]
+    (let [nk (alength kinds)]
+      (loop [i 0]
+        (if (< i nk)
+          (let [^booleans nl (aget nulls i)
+                x-null (if (nil? nl) false (aget nl a))
+                y-null (if (nil? nl) false (aget nl b))]
+            ;; `if` rather than `cond`: cond's implicit nil else would box
+            (if x-null
+              (if y-null (recur (inc i)) (aget null-firsts i))
+              (if y-null
+                (- (aget null-firsts i))
+                (let [v (aget vals i)
+                    c (case (aget kinds i)
+                        0 (long (Long/compare (aget ^longs v a) (aget ^longs v b)))
+                        1 (compare-doubles v a b)
+                        2 (compare-strings (aget prefixes i) v a b)
+                        (long (Integer/signum (.compare ^Comparator (aget comparators i)
+                                                        (aget ^objects v a) (aget ^objects v b)))))]
+                  (if (zero? c) (recur (inc i)) (if (pos? (aget signs i)) c (- c)))))))
+          (long (Long/compare a b)))))))
+
+(defn- any-true? [^booleans a]
+  (loop [i 0] (cond (== i (alength a)) false (aget a i) true :else (recur (inc i)))))
 
 (defn- index-comparator
   "Comparator of row indices by all keys, ties by index (stability)."
   ^polyquery.exec.sort.IndexComparator [rows n keys]
-  (let [^objects cs (into-array IndexComparator (map #(key-comparator rows n %) keys))
-        k (alength cs)]
-    (reify IndexComparator
-      (compareIdx [_ a b]
-        (loop [i 0]
-          (if (< i k)
-            (let [r (.compareIdx ^IndexComparator (aget cs i) a b)]
-              (if (zero? r) (recur (inc i)) r))
-            (Long/compare a b)))))))
+  (let [k (count keys)
+        kinds (int-array k)
+        vals (object-array k)
+        prefixes (object-array k)
+        nulls (object-array k)
+        signs (long-array k)
+        null-firsts (long-array k)
+        comparators (object-array k)]
+    (doseq [[i {:keys [index type desc? nulls-first?]}] (map-indexed vector keys)]
+      (let [[v ^booleans nl] (extract rows n index type)
+            kind (long (cond (long-kind? type) kind-long
+                             (= :float64 (t/kind type)) kind-double
+                             (= :string (t/kind type)) kind-string
+                             :else kind-other))]
+        (aset kinds i (int kind))
+        (aset vals i v)
+        (when (any-true? nl) (aset nulls i nl))
+        (aset signs i (if desc? -1 1))
+        (aset null-firsts i (if nulls-first? -1 1))
+        (case kind
+          2 (let [^objects v v
+                  p (long-array (alength v))]
+              (dotimes [r (alength v)]
+                (when-some [s (aget v r)] (aset p r (utf8-prefix s))))
+              (aset prefixes i p))
+          3 (aset comparators i (v/value-comparator type))
+          nil)))
+    (SortKeys. kinds vals prefixes nulls signs null-firsts comparators)))
 
 ;; ---------------------------------------------------------------------------
 ;; Merge sort of index arrays
@@ -146,17 +212,17 @@
   (let [n (long n)
         a (int-array n)
         tmp (int-array n)
-        parts (max 1 (min parts (quot n 32768)))
-        bounds (vec (for [i (range (inc parts))] (quot (* i n) parts)))]
+        parts (max 1 (min (long parts) (quot n 32768)))
+        bounds (vec (for [^long i (range (inc parts))] (quot (* i n) parts)))]
     (dotimes [i n] (aset a i i))
-    (let [_ (run-all (for [i (range parts)]
+    (let [_ (run-all (for [^long i (range parts)]
                             #(let [lo (long (nth bounds i)) hi (long (nth bounds (inc i)))]
                                (ctx/check! qctx)
                                (let [^ints r (merge-sort! a tmp lo hi c)]
                                  ;; leave every sorted chunk in `a`
                                  (when-not (identical? r a) (System/arraycopy r lo a lo (- hi lo)))
                                  nil))))]
-      (loop [runs (mapv (fn [i] [(nth bounds i) (nth bounds (inc i))]) (range parts))
+      (loop [runs (mapv (fn [^long i] [(nth bounds i) (nth bounds (inc i))]) (range parts))
              ^ints src a ^ints dst tmp]
         (ctx/check! qctx)
         (if (<= (count runs) 1)
@@ -210,10 +276,10 @@
   "Sorted permutation of the rows by one integer-like key."
   ^ints [^objects rows ^long n {:keys [index desc? nulls-first?]} qctx]
   (let [index (long index)
-        nn (loop [r 0 c 0]
-             (if (< r n)
-               (recur (inc r) (if (nil? (aget ^objects (aget rows r) index)) c (inc c)))
-               c))
+        nn (long (loop [r 0 c 0]
+                   (if (< r n)
+                     (recur (inc r) (if (nil? (aget ^objects (aget rows r) index)) c (inc c)))
+                     c)))
         ks (long-array nn)
         idx (int-array nn)
         nulls (int-array (- n nn))]

@@ -12,10 +12,10 @@
 
 (set! *warn-on-reflection* true)
 
-(def ^:private max-line-bytes 16384)
-(def ^:private max-header-count 128)
+(def ^:private ^:const max-line-bytes 16384)
+(def ^:private ^:const max-header-count 128)
 
-(def ^:private max-discard-bytes
+(def ^:private ^:const max-discard-bytes
   "An oversized body up to this size is read and discarded so that the
   connection can be kept; larger ones close the connection."
   (* 64 1024 1024))
@@ -158,7 +158,7 @@
                  (if (::oversized (ex-data e)) (too-large true) (throw e)))))
 
       cl
-      (let [n (or (parse-long cl) -1)]
+      (let [n (long (or (parse-long cl) -1))]
         (cond
           (neg? n) (bad-request "malformed Content-Length")
           (> n max-bytes) (cond

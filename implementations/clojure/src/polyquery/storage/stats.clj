@@ -14,8 +14,8 @@
 
 (set! *warn-on-reflection* true)
 
-(def ^:private exact-limit 65536)
-(def ^:private hll-bits 14)
+(def ^:private ^:const exact-limit 65536)
+(def ^:private ^:const hll-bits 14)
 (def ^:private hll-size (bit-shift-left 1 hll-bits))
 
 (defn- mix64

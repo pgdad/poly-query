@@ -37,7 +37,7 @@
   [^long digits ^double x]
   (String/format Locale/ROOT (str "%." digits "f") (object-array [x])))
 
-(defn- value [m k] (.get ^AtomicLong (get m k)))
+(defn- value ^long [m k] (.get ^AtomicLong (get m k)))
 
 (defn render
   "Prometheus text for the metrics plus the gauges {:in-flight :queued

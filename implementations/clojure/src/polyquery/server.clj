@@ -146,7 +146,7 @@
     (.remove (queries srv) (:id entry) entry)
     (when (.compareAndSet ^AtomicBoolean (:holds-worker entry) true false)
       (adm/release! (:admission srv)))
-    (let [duration (- (System/nanoTime) (:start-ns entry))]
+    (let [duration (- (System/nanoTime) (long (:start-ns entry)))]
       (metrics/record-query! (:metrics srv) error-code duration)
       (log/info "query finished"
                 (cond-> {"query_id" (:id entry)
@@ -408,7 +408,7 @@
                                (mapv (fn [^QueryEntry e]
                                        {"query_id" (:id e)
                                         "state" @(:state e)
-                                        "elapsed_ms" (quot (- now (:start-ns e)) 1000000)})))})))
+                                        "elapsed_ms" (quot (- now (long (:start-ns e))) 1000000)})))})))
 
 (defn- cancel-query [srv id]
   (if-let [^QueryEntry e (.get (queries srv) id)]

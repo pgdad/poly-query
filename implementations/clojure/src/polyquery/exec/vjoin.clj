@@ -216,7 +216,8 @@
               gid (cond
                     (nil? key) -1
                     hashed? (.findHashed ids (long key) (aget hashes p))
-                    :else (.find ids (long key)))]
+                    :else (.find ids (long key)))
+              gid (long gid)]
           (if (neg? gid)
             (recur (inc i) (if left-join? (add acc bt p empty-row) acc))
             (recur (inc i)

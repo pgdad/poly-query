@@ -138,7 +138,7 @@
 
 (defn- string-plain-size ^long [^objects encoded]
   (+ (* 4 (inc (alength encoded)))
-     (areduce encoded i acc 0 (+ acc (long (if-let [b (aget encoded i)] (alength ^bytes b) 0))))))
+     (long (areduce encoded i acc 0 (+ acc (long (if-let [b (aget encoded i)] (alength ^bytes b) 0)))))))
 
 (defn- dictionary-of
   "[dictionary entries (byte arrays), codes] of a STRING chunk."
@@ -166,7 +166,7 @@
       (cond
         (= kind :string)
         (let [[entries] dict
-              dict-size (+ 4 (* 4 (inc (count entries))) (reduce + 0 (map #(alength ^bytes %) entries))
+              dict-size (+ 4 (* 4 (inc (count entries))) (long (reduce + 0 (map #(alength ^bytes %) entries)))
                            (* 4 n))]
           (if (< dict-size (string-plain-size encoded-strings)) "DICT" "PLAIN"))
         (rle-type? t)
@@ -199,8 +199,9 @@
                               :string (string-plain-size encoded))
                     "DICT" (let [[entries] dict]
                              (+ 4 (* 4 (inc (count entries)))
-                                (reduce + 0 (map #(alength ^bytes %) entries)) (* 4 n)))
+                                (long (reduce + 0 (map #(alength ^bytes %) entries))) (* 4 n)))
                     "RLE" (+ 4 (* (if (= kind :wide) 20 12) (count runs))))
+        body-size (long body-size)
         buf (le (ByteBuffer/allocate (+ validity-size body-size)))]
     (when (pos? nulls) (put-bitmap! buf n #(some? (aget vals (int %)))))
     (case encoding
@@ -254,7 +255,7 @@
                        "encoding" encoding "null_count" null-count)
       (some? mn) (assoc "min" (v/value->json t mn) "max" (v/value->json t mx)))))
 
-(defn- write-padding! [^OutputStream out ^long pos]
+(defn- write-padding! ^long [^OutputStream out ^long pos]
   (let [pad (rem (- 8 (rem pos 8)) 8)]
     (dotimes [_ pad] (.write out 0))
     (+ pos pad)))
@@ -271,7 +272,7 @@
   [^OutputStream out tbl {:keys [row-group-size encoding]}]
   (let [n (long (:row-count tbl))
         rg (long (or row-group-size default-row-group-size))
-        groups (vec (for [start (range 0 n rg)] [start (min rg (- n start))]))
+        groups (vec (for [start (range 0 n rg)] [start (min rg (- n (long start)))]))
         columns (:columns tbl)
         format-version (table-format-version columns)
         header (le (ByteBuffer/allocate 8))
@@ -283,7 +284,8 @@
                   (let [^objects vals (table/column-array tbl ci)
                         t (:type c)]
                     (reduce (fn [[pos acc] [start len]]
-                              (let [pos (write-padding! out pos)
+                              (let [start (long start) len (long len)
+                                    pos (write-padding! out pos)
                                     chunk-vals (java.util.Arrays/copyOfRange vals (int start) (int (+ start len)))
                                     enc (encode-chunk t chunk-vals encoding)
                                     size (.remaining ^ByteBuffer (:bytes enc))]
@@ -389,7 +391,7 @@
     (dotimes [i n]
       (when-not (zero? (bit-and (.get buf (int (+ pos (quot i 8)))) (bit-shift-left 1 (rem i 8))))
         (col/set-bit! bits i)))
-    (let [valid (reduce + 0 (map #(Long/bitCount %) bits))]
+    (let [valid (long (reduce + 0 (map #(Long/bitCount %) bits)))]
       (when-not (= (- n valid) null-count)
         (corrupt! "validity bitmap does not match null_count")))
     bits))
@@ -640,7 +642,7 @@
     (when-not (string? encoding) (corrupt! "chunk encoding missing"))
     (when-not (encodings encoding)
       (unsupported! (str "unknown chunk encoding '" encoding "'")))
-    (when (> (+ offset length) data-end) (corrupt! "chunk extends beyond the data region"))
+    (when (> (+ (long offset) (long length)) (long data-end)) (corrupt! "chunk extends beyond the data region"))
     {:offset offset :length length :crc crc :encoding encoding :null-count null-count
      :min (parse-stat t (get c "min")) :max (parse-stat t (get c "max"))}))
 

@@ -48,7 +48,7 @@
 (defn- range-var
   [name columns offset]
   {:name name
-   :columns (vec (map-indexed (fn [i c] {:name (:name c) :type (:type c) :index (+ offset i)}) columns))})
+   :columns (vec (map-indexed (fn [^long i c] {:name (:name c) :type (:type c) :index (+ (long offset) i)}) columns))})
 
 (defn- shift-scope [scope ^long delta]
   (mapv (fn [rv] (update rv :columns (fn [cs] (mapv #(update % :index + delta) cs)))) scope))
@@ -139,7 +139,7 @@
   [scope items g]
   (if-let [k (ordinal g)]
     (if (<= 1 k (count items))
-      (:expr (nth items (dec k)))
+      (:expr (nth items (dec (long k))))
       (semantic! (str "GROUP BY position " k " is out of range") (:pos g)))
     (or (when-let [nm (bare-name g)]
           (when-not (binder/lookup-column scope g)
@@ -153,7 +153,7 @@
         pos (:pos e)]
     (if-let [k (ordinal e)]
       (if (<= 1 k (count outputs))
-        {:output (dec k)}
+        {:output (dec (long k))}
         (semantic! (str "ORDER BY position " k " is out of range") pos))
       (let [by-name (when-let [nm (bare-name e)]
                       (filter #(binder/same-name? nm (:name (nth outputs %))) (range (count outputs))))]
@@ -237,7 +237,7 @@
              (assoc base :mode :post-agg :aggs aggs :group-keys group-keys)
              (assoc base :agg-error "aggregates are not allowed here"))
         outputs (vec (map-indexed
-                      (fn [i item]
+                      (fn [^long i item]
                         (let [bound (binder/bind cx (:expr item))]
                           {:name (output-name item bound (inc i)) :type (:type bound) :expr bound}))
                       items))
@@ -269,7 +269,7 @@
   (reduce (fn [acc bq]
             (let [ct (:type (nth (:columns bq) i))]
               (or (t/common-type acc ct)
-                  (binder/type-error! (str "UNION ALL column " (inc i) " has incompatible types "
+                  (binder/type-error! (str "UNION ALL column " (inc (long i)) " has incompatible types "
                                            (t/describe acc) " and " (t/describe ct))
                                       pos))))
           :null branches))
@@ -288,7 +288,7 @@
         pos (:pos e)
         idx (if-let [k (ordinal e)]
               (if (<= 1 k (count columns))
-                (dec k)
+                (dec (long k))
                 (semantic! (str "ORDER BY position " k " is out of range") pos))
               (let [nm (or (bare-name e)
                            (semantic! (str "ORDER BY items of a UNION ALL query must be output column "

@@ -55,7 +55,7 @@
 (def ^:private flipped-op
   {"=" "=" "<>" "<>" "<" ">" ">" "<" "<=" ">=" ">=" "<="})
 
-(def ^:private max-in-items 16)
+(def ^:private ^:const max-in-items 16)
 
 (defn- long-kind? [type] (= :long (b/vec-kind type)))
 
@@ -333,7 +333,7 @@
   (let [lib (:native env)]
     (or (when lib
           (let [nslots (volatile! 2)
-                alloc! #(dec (long (vswap! nslots inc)))
+                alloc! #(dec (long (vswap! nslots (fn [^long k] (inc k)))))
                 compiled (mapv (fn [c] [c (compile-pred lib c false alloc!)]) (bound/conjuncts e))
                 natives (filterv second compiled)
                 others (mapv first (remove second compiled))]

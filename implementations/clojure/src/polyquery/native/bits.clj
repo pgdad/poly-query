@@ -67,7 +67,7 @@
             end (min 64 (- span base))]
         (aset out w (long (loop [j 0 acc 0]
                             (if (< j end)
-                              (recur (inc j) (if (not= neg (aget v (+ base j)))
+                              (recur (inc j) (if (not (= neg (aget v (+ base j))))
                                                (bit-or acc (bit-shift-left 1 j))
                                                acc))
                               acc)))))))
@@ -109,22 +109,26 @@
   (let [r (bit-and span 63)]
     (if (zero? r) -1 (dec (bit-shift-left 1 r)))))
 
+(defn- word-at
+  "Word w of an nw-word bitmap, the last one masked with lm."
+  ^long [^longs bits ^long nw ^long lm ^long w]
+  (if (= w (dec nw)) (bit-and (aget bits w) lm) (aget bits w)))
+
 (defn bitmap->sel
   "[sel n] of the set bits among positions [0, span) of a bitmap; the
   identity selection when that is every position 0..span-1 (span = n)."
   [^longs bits ^long span identity-ok?]
   (let [nw (nwords span)
         lm (last-mask span)
-        word (fn ^long [^long w] (if (= w (dec nw)) (bit-and (aget bits w) lm) (aget bits w)))
-        cnt (loop [w 0 c 0]
-              (if (< w nw) (recur (inc w) (+ c (Long/bitCount (word w)))) c))]
+        cnt (long (loop [w 0 c 0]
+                    (if (< w nw) (recur (inc w) (+ c (Long/bitCount (word-at bits nw lm w)))) c)))]
     (if (and identity-ok? (= cnt span))
       [b/identity-sel cnt]
       (let [out (int-array cnt)]
         (loop [w 0 c 0]
           (when (< w nw)
             (let [base (* 64 w)
-                  c (long (loop [x (word w) c c]
+                  c (long (loop [x (word-at bits nw lm w) c c]
                             (if (zero? x)
                               c
                               (do (aset out c (int (+ base (Long/numberOfTrailingZeros x))))

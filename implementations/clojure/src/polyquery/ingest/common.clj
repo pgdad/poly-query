@@ -19,8 +19,8 @@
 (defn validate-column-names!
   [names]
   (when-let [i (first (keep-indexed (fn [i n] (when (empty? n) i)) names))]
-    (ingest-error! (str "column " (inc i) " has an empty name")))
-  (let [dups (->> names (map text/ascii-lower) frequencies (filter #(> (val %) 1)) keys)]
+    (ingest-error! (str "column " (inc (long i)) " has an empty name")))
+  (let [dups (->> names (map text/ascii-lower) frequencies (filter #(> (long (val %)) 1)) keys)]
     (when (seq dups)
       (ingest-error! (str "duplicate column name '" (first dups) "'")))))
 
@@ -32,11 +32,11 @@
 ;; ---------------------------------------------------------------------------
 ;; CSV text inference (ingestion.md §1.1)
 
-(def ^:private bit-bool 1)
-(def ^:private bit-int 2)
-(def ^:private bit-float 4)
-(def ^:private bit-date 8)
-(def ^:private bit-ts 16)
+(def ^:private ^:const bit-bool 1)
+(def ^:private ^:const bit-int 2)
+(def ^:private ^:const bit-float 4)
+(def ^:private ^:const bit-date 8)
+(def ^:private ^:const bit-ts 16)
 
 (defn- text-matches
   "Bitmask of candidate types (among `mask`) matched by trimmed text s."

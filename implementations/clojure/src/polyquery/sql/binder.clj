@@ -90,9 +90,9 @@
       (str/includes? body ".")
       (let [dot (str/index-of body ".")
             ip (str/replace (subs body 0 dot) #"^0+" "")
-            fp (subs body (inc dot))
+            fp (subs body (inc (long dot)))
             s (count fp)
-            p (max (+ (count ip) s) s 1)]
+            p (long (max (+ (count ip) s) s 1))]
         (if (> p t/max-decimal-precision)
           {:node :literal :type :float64 :value (Double/parseDouble text)}
           (let [digits (str ip fp)
@@ -143,8 +143,8 @@
           :else (case op
                   ;; result precision W (decimal38.md §2)
                   ("+" "-") (t/decimal (t/result-precision lt' rt') (max (t/scale lt') (t/scale rt')))
-                  "*" (let [s (+ (t/scale lt') (t/scale rt'))
-                            w (t/result-precision lt' rt')]
+                  "*" (let [s (+ (long (t/scale lt')) (long (t/scale rt')))
+                            w (long (t/result-precision lt' rt'))]
                         (when (> s w)
                           (type-error! (str "DECIMAL multiplication result scale " s " exceeds " w) pos))
                         (t/decimal w s))
@@ -205,7 +205,7 @@
           aggs (:aggs cx)
           idx (or (first (keep-indexed (fn [i a] (when (= a spec) i)) @aggs))
                   (do (vswap! aggs conj spec) (dec (count @aggs))))]
-      (b/column-ref (+ (count (:group-keys cx)) idx) (:type spec) (str "agg" idx)))))
+      (b/column-ref (+ (count (:group-keys cx)) (long idx)) (:type spec) (str "agg" idx)))))
 
 (defn- group-key-ref
   "In post-agg mode: a reference to the GROUP BY key structurally equal to

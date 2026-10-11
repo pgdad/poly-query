@@ -112,10 +112,10 @@
 (defn- trim-spaces ^String [^String s left? right?]
   (let [n (.length s)
         start (if left?
-                (loop [i 0] (if (and (< i n) (= (.charAt s i) \space)) (recur (inc i)) i))
+                (long (loop [i 0] (if (and (< i n) (= (.charAt s i) \space)) (recur (inc i)) i)))
                 0)
         end (if right?
-              (loop [i n] (if (and (> i start) (= (.charAt s (dec i)) \space)) (recur (dec i)) i))
+              (long (loop [i n] (if (and (> i start) (= (.charAt s (dec i)) \space)) (recur (dec i)) i)))
               n)]
     (.substring s start end)))
 

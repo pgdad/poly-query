@@ -21,7 +21,7 @@
 
 (set! *warn-on-reflection* true)
 
-(def max-index-selectivity
+(def ^:const max-index-selectivity
   "An index scan is chosen when at most this fraction of rows qualifies."
   0.1)
 
@@ -118,15 +118,17 @@
           lo0 (k-double col-type k mn)
           hi0 (k-double col-type k mx)
           bound (fn [p] (let [pv (first (:values p))] (k-double (:type pv) (:cmp-type pv) (:value pv))))
-          lo (reduce max lo0 (map bound (filter #(#{">" ">="} (:op %)) range-preds)))
-          hi (reduce min hi0 (map bound (filter #(#{"<" "<="} (:op %)) range-preds)))]
+          lo (double (reduce max lo0 (map bound (filter #(#{">" ">="} (:op %)) range-preds))))
+          hi (double (reduce min hi0 (map bound (filter #(#{"<" "<="} (:op %)) range-preds))))
+          lo0 (double lo0)
+          hi0 (double hi0)]
       (cond
         (> lo hi) 0.0
         (== hi0 lo0) 1.0
         :else (/ (- hi lo) (- hi0 lo0))))))
 
 (defn equality-selectivity
-  [^long distinct ^long nvalues]
+  ^double [^long distinct ^long nvalues]
   (if (pos? distinct) (min 1.0 (/ (double nvalues) distinct)) 0.0))
 
 (defn- range-pred? [p] (contains? #{"<" "<=" ">" ">="} (:op p)))

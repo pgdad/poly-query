@@ -117,7 +117,7 @@
         (let [[idx next-hidden] (if (contains? item :output)
                                   [(:output item) hidden-idx]
                                   [hidden-idx (inc hidden-idx)])
-              t (if (< idx n-out) (:type (nth outputs idx)) (:type (:expr item)))]
+              t (if (< (long idx) n-out) (:type (nth outputs idx)) (:type (:expr item)))]
           (recur (rest items) (long next-hidden)
                  (conj acc {:index idx :type t :desc? (:desc? item)
                             :nulls-first? (:nulls-first? item)})))

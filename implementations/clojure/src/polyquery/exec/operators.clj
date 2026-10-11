@@ -25,7 +25,7 @@
 
 (set! *warn-on-reflection* true)
 
-(def ^:private check-interval 4096)
+(def ^:private ^:const check-interval 4096)
 
 (defmulti build
   "Compiles physical plan node `plan` into a re-reducible of rows."

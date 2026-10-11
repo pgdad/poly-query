@@ -63,7 +63,7 @@
         distinct (volatile! 0)
         lookup (when (= kind :hash) (HashMap.))]
     (runs keys (fn [k start end]
-                 (vswap! distinct inc)
+                 (vswap! distinct #(inc (long %)))
                  (when lookup (.put ^HashMap lookup k (long-array [start end])))))
     {:name idx-name :column (:name c) :column-index i :kind kind
      :data (->IndexData keys row-ids @distinct lookup)}))
@@ -116,7 +116,7 @@
   (let [start (reduce max 0 (map #(lower-bound keys (:cmp %) (:value %) (not (:inclusive? %))) lowers))
         end (reduce min (alength keys)
                     (map #(lower-bound keys (:cmp %) (:value %) (boolean (:inclusive? %))) uppers))]
-    [start (max start end)]))
+    [start (max (long start) (long end))]))
 
 (defn lookup-equal
   "Row ids whose key equals one of `keys` (hash-domain keys, see

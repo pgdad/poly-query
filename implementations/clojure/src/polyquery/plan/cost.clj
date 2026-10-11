@@ -21,7 +21,7 @@
             covered (set (map :sql preds))
             others (remove #(contains? covered (b/->sql %)) conjuncts)]
         (* rows
-           (reduce * 1.0 (map #(access/predicate-selectivity (:table input) %) preds))
+           (double (reduce * 1.0 (map #(access/predicate-selectivity (:table input) %) preds)))
            (Math/pow default-selectivity (count others))))
       (* rows (Math/pow default-selectivity (count conjuncts))))))
 

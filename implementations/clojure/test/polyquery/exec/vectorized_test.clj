@@ -108,6 +108,49 @@
         (is (= (sort-by (fn [r] [(r 0) (r 1)]) (map vec big))
                (map vec out)))))))
 
+(defn- random-string
+  "Short strings over an alphabet with ASCII, 2- and 3-byte UTF-8 characters,
+  surrogate pairs, a lone surrogate and U+0000, so that 8-byte prefixes tie
+  often and every UTF-8 length is cut at the prefix boundary."
+  [^java.util.Random rnd]
+  (let [alphabet ["a" "b" "\u0000" "\u00e9" "\u07ff" "\u0800" "\uffee" "\ud83d\ude00" "\ud800" "\ue000"]]
+    (apply str (repeatedly (.nextInt rnd 7) #(alphabet (.nextInt rnd (count alphabet)))))))
+
+(deftest multi-key-sort-matches-reference-order
+  ;; reference: compare key by key with the value comparators (NULLs per
+  ;; nulls-first?, DESC reverses), ties by input position
+  (let [rnd (java.util.Random. 11)
+        rows (vec (for [i (range 20000)]
+                    (object-array [(when (pos? (.nextInt rnd 8)) (random-string rnd))
+                                   (when (pos? (.nextInt rnd 8)) ([-0.0 0.0 1.5 -2.25 1e300] (.nextInt rnd 5)))
+                                   (when (pos? (.nextInt rnd 8)) (long (.nextInt rnd 5)))
+                                   (when (pos? (.nextInt rnd 8)) (.nextBoolean rnd))
+                                   i])))
+        types [:string :float64 :int64 :boolean]
+        reference (fn [keys]
+                    (sort (fn [^objects x ^objects y]
+                            (or (some (fn [{:keys [index type desc? nulls-first?]}]
+                                        (let [a (aget x index) b (aget y index)
+                                              c (cond (and (nil? a) (nil? b)) 0
+                                                      (nil? a) (if nulls-first? -1 1)
+                                                      (nil? b) (if nulls-first? 1 -1)
+                                                      :else (* (if desc? -1 1)
+                                                               (Integer/signum
+                                                                (.compare (polyquery.values/value-comparator type) a b))))]
+                                          (when-not (zero? c) c)))
+                                      keys)
+                                (compare (aget x 4) (aget y 4))))
+                          rows))]
+    (doseq [perm [[0 1 2 3] [1 0 3 2] [2 3 0 1] [3 2 1 0]]
+            flags [[false false] [true false] [false true] [true true]]]
+      (let [keys (vec (for [i perm]
+                        {:index i :type (types i) :desc? (first flags) :nulls-first? (second flags)}))
+            out (sort/sort-rows (java.util.ArrayList. ^java.util.Collection rows) keys (ctx/make-context {})
+                                (fn [thunks] (mapv deref (mapv #(future (%)) thunks))) 3)]
+        (is (= (map #(aget ^objects % 4) (reference keys))
+               (map #(aget ^objects % 4) out))
+            (str "keys " perm " flags " flags))))))
+
 (deftest parallelizable-pipelines
   (let [scan {:op :table-scan :table {:row-count 10} :columns []}
         sub {:node :subquery :kind :scalar}]

@@ -134,7 +134,7 @@
       (semantic! (str "unknown function '" fname "'") e))
     (when (or (:star? e) (:distinct? e))
       (semantic! (str "invalid use of " (if (:star? e) "*" "DISTINCT") " in " u) e))
-    (when (or (< (count args) lo) (and hi (> (count args) hi)))
+    (when (or (< (count args) (long lo)) (and hi (> (count args) (long hi))))
       (semantic! (str u " expects " (if (= lo hi) lo (str lo ".." (or hi "n"))) " argument(s), got "
                       (count args)) e))
     (bind-typed u args e eval-constant)))

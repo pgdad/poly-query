@@ -86,7 +86,7 @@
 (defn- non-null-sel
   "[sel' n'] of the positions of (sel, n) that are not NULL in mask."
   [^booleans nulls ^ints sel ^long n]
-  (b/positions-where sel n (fn [^long i] (not (aget nulls i)))))
+  (b/positions-where [i sel n] (not (aget nulls i))))
 
 (defn may-fail?
   "True when evaluating e can raise an error for some row."
@@ -590,15 +590,15 @@
   [env e and?]
   (let [lk (bool-kernel env (:left e))
         rk (bool-kernel env (:right e))
-        decided (not and?)]
+        decided (boolean (not and?))]
     (reify Kernel
       (eval [_ bt sel n]
         (let [l ^BoolVec (ev lk bt sel n)
               lv ^booleans (.-v l)
               ln ^booleans (.-nulls l)
               ;; rows where the left operand does not decide
-              [sel2 n2] (b/positions-where sel n (fn [^long i] (or (b/nulls-at? ln i)
-                                                                   (not= decided (aget lv i)))))
+              [sel2 n2] (b/positions-where [i sel n] (or (b/nulls-at? ln i)
+                                                         (not (= decided (aget lv i)))))
               n2 (long n2)]
           (if (zero? n2)
             l
@@ -638,7 +638,7 @@
               nulls (nulls-of x sel n)
               out (boolean-array cap)]
           (cond
-            nulls (each-sel [i sel n] (aset out i (not= not? (aget nulls i))))
+            nulls (each-sel [i sel n] (aset out i (not (= not? (aget nulls i)))))
             not? (each-sel [i sel n] (aset out i true)))
           (BoolVec. out nil))))))
 
@@ -743,7 +743,7 @@
       (let [xk (compile-kernel env (:arg e))
             not? (boolean (:not? e))]
         (if-let [m (when (some? (:value pat)) (functions/like-matcher (:value pat)))]
-          (string-test-kernel xk (fn [s] (not= not? (boolean (m s)))))
+          (string-test-kernel xk (fn [s] (not (= not? (boolean (m s))))))
           (literal-kernel {:type :boolean :value nil})))
       (row-kernel env e))))
 
@@ -840,9 +840,9 @@
               (if-let [[wk rk] (first ws)]
                 (let [c ^BoolVec (ev wk bt sel n)
                       [tsel tn] (b/true-positions c sel n)
-                      [rsel rn] (b/positions-where sel n (let [cv ^booleans (.-v c) cn ^booleans (.-nulls c)]
-                                                           (fn [^long i] (or (b/nulls-at? cn i)
-                                                                             (not (aget cv i))))))]
+                      cv ^booleans (.-v c)
+                      cn ^booleans (.-nulls c)
+                      [rsel rn] (b/positions-where [i sel n] (or (b/nulls-at? cn i) (not (aget cv i))))]
                   (when (pos? (long tn))
                     (copy-into! out (ev rk bt tsel tn) tsel tn))
                   (recur (rest ws) rsel (long rn)))
@@ -865,7 +865,7 @@
                       (copy-into! out x sel n)
                       (let [nulls (nulls-of x sel n)]
                         (if nulls
-                          (let [[s2 n2] (b/positions-where sel n (fn [^long i] (aget ^booleans nulls i)))]
+                          (let [[s2 n2] (b/positions-where [i sel n] (aget ^booleans nulls i))]
                             (recur (rest ks) s2 (long n2)))
                           out))))))))))
 

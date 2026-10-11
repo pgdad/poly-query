@@ -45,7 +45,7 @@
         cols (ArrayList.)
         nrows (long (count objects))]
     (c/check-row-limit! nrows limits)
-    (doseq [[row obj] (map-indexed vector objects)]
+    (doseq [[^long row obj] (map-indexed vector objects)]
       (when-not (and (map? obj) (contains? obj ::pairs))
         (c/ingest-error! (str "record " (inc row) " is not a JSON object") {"record" (inc row)}))
       (doseq [[k x] (::pairs obj)]

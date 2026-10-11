@@ -115,7 +115,7 @@
   "`parts` contiguous row ranges covering [0, rows) (at least one)."
   [^long rows ^long parts]
   (let [parts (max 1 parts)]
-    (vec (for [i (range parts)]
+    (vec (for [^long i (range parts)]
            [(quot (* i rows) parts) (quot (* (inc i) rows) parts)]))))
 
 (defn- table-rows ^long [input] (long (:row-count (:table (chain-leaf input)))))

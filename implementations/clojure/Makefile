@@ -44,11 +44,11 @@ target/polyquery.aot: target/polyquery.jar script/training.clj bin/polyquery
 test:
 	$(CLOJURE) -M:test
 
-# Reflection warnings are treated as lint failures.
+# Fails on any reflection or boxed-math warning (script/lint.clj).
 lint:
+	@rm -rf target/lint-classes
 	@mkdir -p target/lint-classes
-	$(CLOJURE) -M -e "(binding [*compile-path* \"target/lint-classes\" *warn-on-reflection* true] (compile 'polyquery.main))" 2>&1 | tee target/lint.log
-	@! grep -q "Reflection warning" target/lint.log
+	$(CLOJURE) -M script/lint.clj
 
 # No third-party formatter is allowed; normalise whitespace only.
 fmt:

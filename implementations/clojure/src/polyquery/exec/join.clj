@@ -152,7 +152,7 @@
             (fn [acc r]
               (let [k (rkey r)
                     ^ArrayList bucket (when (some? k) (.get table k))
-                    n (if bucket (.size bucket) 0)]
+                    n (if bucket (long (.size bucket)) 0)]
                 (loop [i 0 acc acc]
                   (cond
                     (reduced? acc) acc
@@ -169,7 +169,7 @@
             (fn [acc l]
               (let [k (lkey l)
                     ^ArrayList bucket (when (some? k) (.get table k))
-                    n (if bucket (.size bucket) 0)]
+                    n (if bucket (long (.size bucket)) 0)]
                 (loop [i 0 acc acc matched? false]
                   (cond
                     (reduced? acc) acc

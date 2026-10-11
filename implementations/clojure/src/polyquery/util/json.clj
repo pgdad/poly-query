@@ -96,16 +96,17 @@
         digits-end (fn ^long [^long k] (loop [k k] (if (digit? (ch k)) (recur (inc k)) k)))
         j (if (= (ch i) \-) (inc i) i)
         _ (when-not (digit? (ch j)) (syntax-error "invalid number" i))
-        k (if (= (ch j) \0) (inc j) (digits-end j))
+        k (if (= (ch j) \0) (inc j) (long (digits-end j)))
         _ (when (digit? (ch k)) (syntax-error "leading zeros are not allowed" i))
         [k frac?] (if (= (ch k) \.)
-                    (let [k2 (digits-end (inc k))]
+                    (let [k2 (long (digits-end (inc k)))]
                       (when (= k2 (inc k)) (syntax-error "invalid number" i))
                       [k2 true])
                     [k false])
+        k (long k)
         [k exp?] (if (or (= (ch k) \e) (= (ch k) \E))
                    (let [k1 (if (or (= (ch (inc k)) \+) (= (ch (inc k)) \-)) (+ k 2) (inc k))
-                         k2 (digits-end k1)]
+                         k2 (long (digits-end k1))]
                      (when (= k2 k1) (syntax-error "invalid number" i))
                      [k2 true])
                    [k false])]
@@ -133,7 +134,7 @@
                    (let [[k i] (read-string-lit s i)
                          i (skip-ws s i)
                          _ (when-not (and (< i n) (= (.charAt s i) \:)) (syntax-error "expected ':'" i))
-                         [v i] (read-value s (inc i) number-fn object-fn (inc depth))
+                         [v i] (read-value s (inc i) number-fn object-fn (inc (long depth)))
                          i (skip-ws s i)
                          pairs (conj! pairs [k v])]
                      (cond
@@ -145,7 +146,7 @@
              (if (and (< i n) (= (.charAt s i) \]))
                [[] (inc i)]
                (loop [i i items (transient [])]
-                 (let [[v i] (read-value s i number-fn object-fn (inc depth))
+                 (let [[v i] (read-value s i number-fn object-fn (inc (long depth)))
                        i (skip-ws s i)
                        items (conj! items v)]
                    (cond

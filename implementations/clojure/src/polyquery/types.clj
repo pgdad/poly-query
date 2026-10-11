@@ -20,9 +20,9 @@
 
 (set! *warn-on-reflection* true)
 
-(def max-decimal-precision 38)
+(def ^:const max-decimal-precision 38)
 
-(def narrow-precision
+(def ^:const narrow-precision
   "Largest precision of a *narrow* decimal (a Long unscaled value); also the
   result precision W of decimal rules whose operands are all narrow."
   18)

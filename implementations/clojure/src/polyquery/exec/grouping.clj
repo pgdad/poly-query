@@ -597,14 +597,14 @@
       (each-sel [i sel n]
         (when-not (b/nulls-at? nulls i)
           (let [g (aget gids i) y (aget vals i)]
-            (when (or (not (aget has g)) (neg? (* sign (Long/compare y (aget best g)))))
+            (when (or (not (aget has g)) (if (pos? sign) (< y (aget best g)) (> y (aget best g))))
               (aset best g y)
               (aset has g true)))))))
   (mergeFrom [_ other from to]
     (let [y (.result ^AggState other from)]
       (when (some? y)
         (let [y (long y)]
-          (when (or (not (aget has to)) (neg? (* sign (Long/compare y (aget best to)))))
+          (when (or (not (aget has to)) (if (pos? sign) (< y (aget best to)) (> y (aget best to))))
             (aset best to y)
             (aset has to true))))))
   (result [_ gid] (when (aget has gid) (aget best gid)))
@@ -618,7 +618,7 @@
             m (ffi/minmax-i64 lib (.-v x) (bits/valid-sel-bits! (.-nulls x) sel n vbits) span out)]
         (when (pos? m)
           (let [y (if (pos? sign) (aget out 0) (aget out 1))]
-            (when (or (not (aget has 0)) (neg? (* sign (Long/compare y (aget best 0)))))
+            (when (or (not (aget has 0)) (if (pos? sign) (< y (aget best 0)) (> y (aget best 0))))
               (aset best 0 y)
               (aset has 0 true))))
         true))))

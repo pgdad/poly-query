@@ -72,7 +72,7 @@
                    :left (prune (:left node) (set (filter #(< (long %) lw) cols)))
                    :right (prune (:right node) (set (keep #(when (>= (long %) lw) (- (long %) lw)) cols)))))
     :aggregate (let [nk (count (:group-keys node))
-                     aggs (vec (map-indexed (fn [j a] (if (contains? required (+ nk j)) a (unused-aggregate a)))
+                     aggs (vec (map-indexed (fn [^long j a] (if (contains? required (+ nk j)) a (unused-aggregate a)))
                                             (:aggregates node)))]
                  (-> node
                      (assoc :aggregates aggs)

@@ -41,11 +41,11 @@
                         (recur (inc i) (if (= (.charAt sql i) \newline) (conj acc (inc i)) acc))
                         acc))
         pos->lc (fn [^long p]
-                  (let [li (loop [lo 0 hi (dec (count line-starts))]
-                             (if (< lo hi)
-                               (let [mid (quot (+ lo hi 1) 2)]
-                                 (if (<= (long (nth line-starts mid)) p) (recur mid hi) (recur lo (dec mid))))
-                               lo))]
+                  (let [li (long (loop [lo 0 hi (dec (count line-starts))]
+                                   (if (< lo hi)
+                                     (let [mid (quot (+ lo hi 1) 2)]
+                                       (if (<= (long (nth line-starts mid)) p) (recur mid hi) (recur lo (dec mid))))
+                                     lo)))]
                     [(inc li) (inc (- p (long (nth line-starts li))))]))
         fail (fn [msg p] (let [[l c] (pos->lc p)] (parse-error! msg l c)))
         ch (fn [^long i] (when (< i n) (.charAt sql i)))
@@ -108,13 +108,13 @@
 
             (or (digit? c) (and (= c \.) (some-> (ch (inc i)) digit?)))
             (let [digits (fn [^long j] (loop [j j] (if (and (< j n) (digit? (.charAt sql j))) (recur (inc j)) j)))
-                  j (digits i)
-                  j (if (= (ch j) \.) (digits (inc j)) j)
-                  j (if (and (#{\e \E} (ch j))
-                             (or (some-> (ch (inc j)) digit?)
-                                 (and (#{\+ \-} (ch (inc j))) (some-> (ch (+ j 2)) digit?))))
-                      (digits (+ j 2))
-                      j)]
+                  j (long (digits i))
+                  j (long (if (= (ch j) \.) (digits (inc j)) j))
+                  j (long (if (and (#{\e \E} (ch j))
+                                   (or (some-> (ch (inc j)) digit?)
+                                       (and (#{\+ \-} (ch (inc j))) (some-> (ch (+ j 2)) digit?))))
+                            (digits (+ j 2))
+                            j))]
               (when (and (< j n) (or (ident-char? (.charAt sql j)) (= (.charAt sql j) \.)))
                 (fail "malformed numeric literal" i))
               (emit :number (subs sql i j) i)

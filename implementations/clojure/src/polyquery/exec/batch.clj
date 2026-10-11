@@ -158,18 +158,22 @@
                   c)))]
     [out cnt]))
 
-(defn positions-where
-  "Sub-selection of (sel, n) of the positions for which (keep? i) is true."
-  [^ints sel ^long n keep?]
-  (let [out (int-array n)
-        cnt (loop [k 0 c 0]
-              (if (< k n)
-                (let [i (aget sel k)]
-                  (if (keep? i)
-                    (do (aset out c i) (recur (inc k) (inc c)))
-                    (recur (inc k) c)))
-                c))]
-    [out cnt]))
+(defmacro positions-where
+  "Sub-selection [sel' n'] of (sel, n): the positions i for which `keep?`
+  is true. The test is inlined, so i stays a primitive int (no boxed
+  predicate call per row)."
+  [[i sel n] keep?]
+  `(let [sel# ~sel
+         n# (long ~n)
+         out# (int-array n#)
+         cnt# (long (loop [k# 0 c# 0]
+                      (if (< k# n#)
+                        (let [~i (aget ^"[I" sel# k#)]
+                          (if ~keep?
+                            (do (aset out# c# ~i) (recur (inc k#) (inc c#)))
+                            (recur (inc k#) c#)))
+                        c#)))]
+     [out# cnt#]))
 
 ;; ---------------------------------------------------------------------------
 ;; Table segments → batches
