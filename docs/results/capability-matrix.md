@@ -32,7 +32,7 @@ A capability is listed only if the engine claims it **and** its conformance repo
 | `join.hash` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
 | `join.merge` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
 | `join.nested_loop` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
-| `native.kernels` | · | · | · | · | · | · |
+| `native.kernels` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
 
 | phase passed (public suite) | java | clojure | rust | python | go | common-lisp |
 |---|---|---|---|---|---|---|

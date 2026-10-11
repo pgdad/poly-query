@@ -1,7 +1,7 @@
 {
  "schema": "polyquery-project-state/1",
- "updated": "2026-10-11T03:21:56+00:00",
- "current_milestone": "M9",
+ "updated": "2026-10-11T05:30:12+00:00",
+ "current_milestone": "M10",
  "milestones": {
   "M0": {
    "status": "complete",
@@ -40,14 +40,15 @@
    "evidence": "C reference: unit + differential + ASan/UBSan. x86_64-asm a1 (scalar/avx2/avx512 16/16, native x86-64) and arm64-asm a1 (scalar/neon/sve 16/16 native on spark incl. ASan/UBSan; SVE VL 128-2048 under qemu). Runs: experiments/runs/a-kernels-*-a1-*. x86 bench numbers taken under concurrent agent load: re-run on a quiet host."
   },
   "M9": {
-   "status": "not_started"
+   "status": "complete",
+   "evidence": "All 6 engines claim native.kernels and pass 623/623 (public+hidden) and the 3738-case modes matrix with --native (x86-64 libpqkernels, AVX-512 dispatch), plus unchanged session/HTTP/modes/HTTP-suite without the library. Java needed attempt 2 (attempt 1 isolation_violation: stray files). Kernel micro-benchmarks: results/performance/kernels-x86-quiet, spark (experiments/runs/a-kernels-arm64-asm-a1-*/native-arm). End-to-end 1m: results/performance/20261011T051646Z-1m-m9-native (vectorized vs +native geomean over 4 queries: python 12.5x, common-lisp 1.23x, rust 1.17x, go 1.15x, java 0.67x, clojure 0.67x; results agree on all 20 queries). Runs: {\"a-native-clojure-a1-20261011T034926Z\": [\"success\", 10.14], \"a-native-common-lisp-a1-20261011T034930Z\": [\"success\", 12.35], \"a-native-go-a1-20261011T034928Z\": [\"success\", 8.98], \"a-native-java-a1-20261011T034931Z\": [\"isolation_violation\", 13.25], \"a-native-java-a2-20261011T043500Z\": [\"success\", 12.76], \"a-native-python-a1-20261011T034927Z\": [\"success\", 15.31], \"a-native-rust-a1-20261011T034932Z\": [\"success\", 12.01]}"
   },
   "M10": {
    "status": "not_started"
   }
  },
  "outstanding_tasks": [
-  "M9: native kernel integration per engine (native.kernels capability, `native: true` option), dispatch policy from measured performance (NEON > SVE on spark at VL=128)",
+  "ARM end-to-end: engines + native kernels on spark (needs toolchains on spark; conformance --native with the aarch64 library)",
   "M10: clean-clone reproduction of one engine build + conformance + benchmark via documented commands; finalize docs/results narrative",
   "Track B (ecosystem-optimized) runs",
   "Later experiment families: write spec/changes/*.md when scheduled, then change-union-all, change-decimal38, refactor-plan-separation, debug-mutant (tools/orchestration/mutate.py), optimize-latency",
@@ -75,13 +76,13 @@
   "kernels_arm64_native": "pass on spark (scalar, neon, sve; native + asan)",
   "kernels_x86_native": "pass (scalar, avx2, avx512)"
  },
- "last_successful_commit": "dc87b97",
- "next_recommended_action": "Run `just fuzz <lang>` for all six engines, then start M9 native integration (spec phases/native-kernels.md) or Track B, per experiment-design priority.",
+ "last_successful_commit": "9bcf2ee",
+ "next_recommended_action": "M10: clean-clone reproduction (build + conformance + one benchmark via documented commands) and results narrative in docs/results; then Track B and later experiment families.",
  "findings": [
   "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) \u2014 report as engine quality finding; clojure p95 16 ms"
  ],
  "totals": {
-  "track_a_runs": 30,
-  "track_a_cost_usd_list": 446.91
+  "track_a_runs": 39,
+  "track_a_cost_usd_list": 531.71
  }
 }
