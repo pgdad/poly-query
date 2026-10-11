@@ -82,7 +82,12 @@ to 9 significant digits (summation order is implementation-defined)."
     "SELECT id FROM g WHERE grp IN (SELECT k FROM small) AND EXISTS (SELECT 1 FROM small s WHERE s.k = g.grp)"
     "SELECT SUM(id * 4611686018427387) FROM g"
     "SELECT id / (grp - grp) FROM g"
-    "SELECT COUNT(*) FROM g a, gr b, small c WHERE a.id = b.id AND b.grp = c.k"))
+    "SELECT COUNT(*) FROM g a, gr b, small c WHERE a.id = b.id AND b.grp = c.k"
+    ;; regressions: NULL-typed join keys (merge join), LIMIT over a projection
+    "SELECT g.id FROM g JOIN (SELECT NULL AS z FROM small) x ON g.id = x.z"
+    "SELECT g.id, x.z FROM g LEFT JOIN (SELECT NULL AS z FROM small) x ON g.id = x.z"
+    "SELECT id, 100 / (id - 2500) FROM g LIMIT 2400"
+    "SELECT COUNT(*) FROM g JOIN small ON g.grp = small.k AND FALSE WHERE CAST(g.label AS INT64) > 0"))
 
 (deftest phase5.modes-agree
     (remove-if #'same-in-all-modes *equivalence-queries*)
