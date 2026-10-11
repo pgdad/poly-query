@@ -94,78 +94,79 @@ by `verify/cmp.sh`, pinned to one CPU. Every run takes the median of 15
 repetitions like `make bench`. The left half of each table is the median of
 9 such runs, the right half ("min") the minimum over all repetitions. The
 minimum is the more robust figure here: other jobs were running on this
-machine the whole time (load average 7–11), so a run can be slowed down at
-random, never sped up. The CPU 10 medians in particular are dominated by that
-interference (unchanged code: `sum_f64` 1.54×, `compare_i64` 0.74×); use
-its min columns.
+machine (these final runs were made at load average 4–6, earlier runs during
+development at 7–11), so a run can be slowed down at random, never sped up.
+Unchanged code (`sum_f64`, `bitmap_and`, `compare_i64`) moves by up to ±5 %
+between runs; a dedicated 12-round alternating run of `compare_i64` gave
+0.134 → 0.127 (min).
 
 **Pinned to CPU 2 (V-cache CCD, columns L3-resident; this is where an unpinned run usually lands when the machine is idle)**
 
 | kernel | before | after | speedup | before (min) | after (min) | speedup (min) |
 |---|---|---|---|---|---|---|
-| filter_i64_sel10 | 0.1619 | 0.1154 | 1.40x | 0.1554 | 0.1104 | 1.41x |
-| filter_i64_bitmap | 0.0742 | 0.0764 | 0.97x | 0.0702 | 0.0676 | 1.04x |
-| count_i64_between | 0.0699 | 0.0660 | 1.06x | 0.0601 | 0.0524 | 1.15x |
-| sum_i64 | 0.0737 | 0.0597 | 1.23x | 0.0706 | 0.0520 | 1.36x |
-| sum_i64_validity | 0.1198 | 0.0954 | 1.26x | 0.1154 | 0.0769 | 1.50x |
-| sum_f64 | 0.0554 | 0.0551 | 1.01x | 0.0515 | 0.0521 | 0.99x |
-| minmax_i64 | 0.1089 | 0.0571 | 1.91x | 0.1046 | 0.0532 | 1.97x |
-| bitmap_and | 0.0025 | 0.0025 | 1.00x | 0.0023 | 0.0023 | 1.00x |
-| bitmap_popcount | 0.0020 | 0.0010 | 2.00x | 0.0019 | 0.0010 | 1.97x |
-| hash_i64 | 0.4284 | 0.3075 | 1.39x | 0.3693 | 0.2380 | 1.55x |
-| compare_i64 | 0.2777 | 0.2430 | 1.14x | 0.1629 | 0.1603 | 1.02x |
-| group_sum_i64_1024 | 0.4501 | 0.2994 | 1.50x | 0.4276 | 0.2762 | 1.55x |
-| gather_i64 | 1.0361 | 0.9982 | 1.04x | 0.7391 | 0.7149 | 1.03x |
-| filter_i128_sel10 | 0.3689 | 0.2617 | 1.41x | 0.2804 | 0.2216 | 1.27x |
-| count_i128_between | 0.2857 | 0.2024 | 1.41x | 0.2157 | 0.1696 | 1.27x |
-| sum_i128 | 0.2957 | 0.1980 | 1.49x | 0.1776 | 0.1681 | 1.06x |
-| minmax_i128 | 0.3100 | 0.1915 | 1.62x | 0.2368 | 0.1569 | 1.51x |
-| **geometric mean** | | | **1.31x** | | | **1.30x** |
+| filter_i64_sel10 | 0.1546 | 0.1114 | 1.39x | 0.1515 | 0.1091 | 1.39x |
+| filter_i64_bitmap | 0.0769 | 0.0736 | 1.04x | 0.0709 | 0.0615 | 1.15x |
+| count_i64_between | 0.0685 | 0.0537 | 1.28x | 0.0586 | 0.0506 | 1.16x |
+| sum_i64 | 0.0732 | 0.0540 | 1.36x | 0.0698 | 0.0506 | 1.38x |
+| sum_i64_validity | 0.1179 | 0.0808 | 1.46x | 0.1130 | 0.0713 | 1.59x |
+| sum_f64 | 0.0538 | 0.0554 | 0.97x | 0.0509 | 0.0531 | 0.96x |
+| minmax_i64 | 0.1075 | 0.0549 | 1.96x | 0.1037 | 0.0527 | 1.97x |
+| bitmap_and | 0.0025 | 0.0025 | 1.00x | 0.0024 | 0.0024 | 1.00x |
+| bitmap_popcount | 0.0020 | 0.0010 | 2.00x | 0.0020 | 0.0010 | 1.95x |
+| hash_i64 | 0.3675 | 0.2433 | 1.51x | 0.3536 | 0.2243 | 1.58x |
+| compare_i64 | 0.1581 | 0.1638 | 0.97x | 0.1302 | 0.1365 | 0.95x |
+| group_sum_i64_1024 | 0.4310 | 0.2843 | 1.52x | 0.4233 | 0.2670 | 1.59x |
+| gather_i64 | 0.7799 | 0.7440 | 1.05x | 0.6801 | 0.6684 | 1.02x |
+| filter_i128_sel10 | 0.3141 | 0.2251 | 1.40x | 0.2566 | 0.1830 | 1.40x |
+| count_i128_between | 0.2297 | 0.1716 | 1.34x | 0.1885 | 0.1452 | 1.30x |
+| sum_i128 | 0.1828 | 0.1537 | 1.19x | 0.1463 | 0.1337 | 1.09x |
+| minmax_i128 | 0.2453 | 0.1724 | 1.42x | 0.2083 | 0.1361 | 1.53x |
+| **geometric mean** | | | **1.31x** | | | **1.32x** |
 
 **Pinned to CPU 10 (32 MB L3 CCD, columns stream from DRAM)**
 
 | kernel | before | after | speedup | before (min) | after (min) | speedup (min) |
 |---|---|---|---|---|---|---|
-| filter_i64_sel10 | 0.3450 | 0.3001 | 1.15x | 0.2156 | 0.2041 | 1.06x |
-| filter_i64_bitmap | 0.2689 | 0.2653 | 1.01x | 0.1577 | 0.1686 | 0.94x |
-| count_i64_between | 0.2596 | 0.2362 | 1.10x | 0.1467 | 0.1456 | 1.01x |
-| sum_i64 | 0.2835 | 0.2362 | 1.20x | 0.1604 | 0.1581 | 1.01x |
-| sum_i64_validity | 0.3145 | 0.2836 | 1.11x | 0.1727 | 0.1729 | 1.00x |
-| sum_f64 | 0.2919 | 0.1895 | 1.54x | 0.1162 | 0.1277 | 0.91x |
-| minmax_i64 | 0.3197 | 0.2186 | 1.46x | 0.1749 | 0.1529 | 1.14x |
-| bitmap_and | 0.0030 | 0.0035 | 0.86x | 0.0023 | 0.0023 | 1.00x |
-| bitmap_popcount | 0.0020 | 0.0009 | 2.22x | 0.0019 | 0.0009 | 2.10x |
-| hash_i64 | 1.0948 | 0.8619 | 1.27x | 0.5625 | 0.5446 | 1.03x |
-| compare_i64 | 0.6232 | 0.8439 | 0.74x | 0.3515 | 0.3711 | 0.95x |
-| group_sum_i64_1024 | 0.6987 | 0.5653 | 1.24x | 0.4978 | 0.4260 | 1.17x |
-| gather_i64 | 5.9623 | 2.4854 | 2.40x | 2.5654 | 1.7835 | 1.44x |
-| filter_i128_sel10 | 0.8635 | 0.7564 | 1.14x | 0.5056 | 0.4197 | 1.20x |
-| count_i128_between | 0.7681 | 0.6259 | 1.23x | 0.4478 | 0.3844 | 1.16x |
-| sum_i128 | 0.7767 | 0.5740 | 1.35x | 0.4082 | 0.3736 | 1.09x |
-| minmax_i128 | 0.7277 | 0.6007 | 1.21x | 0.4300 | 0.3573 | 1.20x |
-| **geometric mean** | | | **1.25x** | | | **1.12x** |
+| filter_i64_sel10 | 0.2679 | 0.2128 | 1.26x | 0.2071 | 0.1664 | 1.24x |
+| filter_i64_bitmap | 0.1757 | 0.1794 | 0.98x | 0.1440 | 0.1386 | 1.04x |
+| count_i64_between | 0.1681 | 0.1650 | 1.02x | 0.1423 | 0.1376 | 1.03x |
+| sum_i64 | 0.1775 | 0.1653 | 1.07x | 0.1508 | 0.1428 | 1.06x |
+| sum_i64_validity | 0.2112 | 0.1874 | 1.13x | 0.1760 | 0.1389 | 1.27x |
+| sum_f64 | 0.1615 | 0.1617 | 1.00x | 0.1100 | 0.1085 | 1.01x |
+| minmax_i64 | 0.2098 | 0.1754 | 1.20x | 0.1522 | 0.1321 | 1.15x |
+| bitmap_and | 0.0026 | 0.0025 | 1.04x | 0.0023 | 0.0022 | 1.04x |
+| bitmap_popcount | 0.0019 | 0.0010 | 1.90x | 0.0018 | 0.0009 | 1.95x |
+| hash_i64 | 0.5399 | 0.5021 | 1.08x | 0.4681 | 0.4256 | 1.10x |
+| compare_i64 | 0.3791 | 0.3722 | 1.02x | 0.3068 | 0.3024 | 1.01x |
+| group_sum_i64_1024 | 0.5070 | 0.4387 | 1.16x | 0.4898 | 0.3685 | 1.33x |
+| gather_i64 | 2.8157 | 1.7976 | 1.57x | 2.3531 | 1.5326 | 1.54x |
+| filter_i128_sel10 | 0.5566 | 0.4733 | 1.18x | 0.4178 | 0.3940 | 1.06x |
+| count_i128_between | 0.4503 | 0.4086 | 1.10x | 0.3692 | 0.3412 | 1.08x |
+| sum_i128 | 0.4397 | 0.3960 | 1.11x | 0.3421 | 0.3438 | 1.00x |
+| minmax_i128 | 0.4520 | 0.3802 | 1.19x | 0.3617 | 0.3400 | 1.06x |
+| **geometric mean** | | | **1.16x** | | | **1.16x** |
 
 **Pinned to CPU 2, n = 32,768 (L2-resident: compute speed), minimum of 5 x 2001 repetitions**
 
 | kernel | before | after | speedup |
 |---|---|---|---|
-| filter_i64_sel10 | 0.1446 | 0.0966 | 1.50x |
-| filter_i64_bitmap | 0.0517 | 0.0514 | 1.01x |
-| count_i64_between | 0.0556 | 0.0483 | 1.15x |
-| sum_i64 | 0.0660 | 0.0489 | 1.35x |
-| sum_i64_validity | 0.1073 | 0.0685 | 1.57x |
-| sum_f64 | 0.0364 | 0.0376 | 0.97x |
-| minmax_i64 | 0.0991 | 0.0508 | 1.95x |
+| filter_i64_sel10 | 0.1410 | 0.0954 | 1.48x |
+| filter_i64_bitmap | 0.0514 | 0.0511 | 1.01x |
+| count_i64_between | 0.0556 | 0.0480 | 1.16x |
+| sum_i64 | 0.0657 | 0.0486 | 1.35x |
+| sum_i64_validity | 0.1061 | 0.0682 | 1.56x |
+| sum_f64 | 0.0361 | 0.0373 | 0.97x |
+| minmax_i64 | 0.0988 | 0.0504 | 1.96x |
 | bitmap_and | 0.0012 | 0.0012 | 1.00x |
 | bitmap_popcount | 0.0021 | 0.0015 | 1.40x |
-| hash_i64 | 0.3400 | 0.2049 | 1.66x |
-| compare_i64 | 0.0782 | 0.0761 | 1.03x |
-| group_sum_i64_1024 | 0.4103 | 0.2788 | 1.47x |
-| gather_i64 | 0.2097 | 0.2085 | 1.01x |
-| filter_i128_sel10 | 0.2330 | 0.1406 | 1.66x |
-| count_i128_between | 0.1633 | 0.1009 | 1.62x |
-| sum_i128 | 0.0978 | 0.0969 | 1.01x |
-| minmax_i128 | 0.1865 | 0.1174 | 1.59x |
+| hash_i64 | 0.3366 | 0.2045 | 1.65x |
+| compare_i64 | 0.0786 | 0.0752 | 1.05x |
+| group_sum_i64_1024 | 0.4070 | 0.2737 | 1.49x |
+| gather_i64 | 0.2094 | 0.2085 | 1.00x |
+| filter_i128_sel10 | 0.2314 | 0.1397 | 1.66x |
+| count_i128_between | 0.1617 | 0.1003 | 1.61x |
+| sum_i128 | 0.0972 | 0.0966 | 1.01x |
+| minmax_i128 | 0.1853 | 0.1168 | 1.59x |
 | **geometric mean** | | | **1.32x** |
 
 Reading the numbers:
@@ -175,14 +176,12 @@ Reading the numbers:
   `bitmap_and` and `filter_i64_bitmap` were already at the L3 bandwidth limit
   (≈ 0.05 ns per 8-byte row), and `compare_i64` reads two columns
   (16 bytes per row) and is close to that limit too, so they did not change.
-* On the DRAM-bound CCD almost every 8-byte streaming kernel is limited by
-  memory bandwidth (≈ 0.15–0.17 ns per row by the min column), so the
-  compute savings mostly disappear there. The exceptions are
-  `bitmap_popcount` (2.1×; its 512 KB bitmap stays in L2), `gather_i64`
-  (software prefetch: 1.44× by the min column, 2.4× by the median; 2.85 →
-  1.47 ns/row in a separate 5-round alternating run), the compute-bound
-  `group_sum_i64` (1.17×) and `minmax_i64` (1.14×), and the 128-bit
-  kernels (1.1–1.2×).
+* On the DRAM-bound CCD most 8-byte streaming kernels are limited by
+  memory bandwidth (≈ 0.14–0.17 ns per row), so the compute savings mostly
+  disappear there. The exceptions are `bitmap_popcount` (1.9×; its 512 KB
+  bitmap stays in L2), `gather_i64` (software prefetch: 1.55×), the
+  compute-heavier `group_sum_i64` (1.2–1.3×), `filter_i64` (1.25×),
+  `sum_i64` with validity, `minmax_i64` and `minmax_i128` (1.1–1.2×).
 * The L2-resident run (n = 32,768; 256 KB per 8-byte column, 512 KB per
   128-bit column) shows the compute speed of the kernels without memory
   effects. (`bitmap_*` are only 4 KB at this n and mostly measure call
@@ -275,7 +274,7 @@ dependent / independent instruction loops (cycles at 5.4 GHz):
   Otherwise the table is discarded (`sums`/`counts` are untouched up to that
   point) and the original exact row-order loop runs, so the overflow flag
   is always exactly the reference's.
-* **`gather_i64` (DRAM: 1.4–2.4×).** Random rows are latency-bound, and the
+* **`gather_i64` (DRAM: 1.5×).** Random rows are latency-bound, and the
   out-of-order window alone keeps too few misses in flight. Rows
   `j+128 … j+135` are now software-prefetched while rows `j … j+7` are
   loaded (the look-ahead index loads stop 128 rows before the end of `idx`).
