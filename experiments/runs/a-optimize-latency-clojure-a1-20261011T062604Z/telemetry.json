@@ -1,0 +1,139 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-optimize-latency-clojure-a1-20261011T062604Z",
+ "language": "clojure",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-optimize-latency",
+ "prompt_sha256": "8b493a42053c3e9befe241b3fb99bd5cbe695fa4d2d3245efc01904dcb3099cf",
+ "session_id": "c79eb1c2-a347-466f-984f-b333fa6ade4b",
+ "tokens": {
+  "input": 292,
+  "output": 133864,
+  "cache_read": 27446015,
+  "cache_creation": 331289,
+  "thinking": null,
+  "thinking_estimated": 61588,
+  "source": "result events",
+  "api_messages": 146
+ },
+ "rate_limit": {
+  "events": 20,
+  "max_utilization": {
+   "five_hour": 0.48,
+   "seven_day": 0.31
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 10.817963000000002,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 152,
+ "result_segments": 1,
+ "assistant_messages": 345,
+ "tool_calls": {
+  "Bash": 147,
+  "Write": 3,
+  "ToolSearch": 1
+ },
+ "tool_calls_total": 151,
+ "tool_failures": 2,
+ "build_invocations": 77,
+ "build_failures_heuristic": 6,
+ "conformance_runs": 18,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   320,
+   660
+  ],
+  [
+   0,
+   57
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 16,
+ "time": {
+  "wall_seconds": 2440.3,
+  "model_api_seconds": 1251.5,
+  "tool_seconds": 1223.7,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 11,
+  "files_changed": 22,
+  "lines_added": 1409,
+  "lines_removed": 134,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The analytics workload now runs 1.7\u00d7 faster in total (1494 \u2192 874 ms over 30 queries), and every query returns the same results as before. One caveat up front: `benchmarks/workloads/analytics.json`, the workload file TASK.md names, doesn't exist in the workspace. I wrote a 30-query stand-in, `implementations/clojure/bench/workloads/analytics.json`, and noted this in the README; the speed-ups below are measured on that stand-in, not the official workload. If the real file turns up, `bench/workload.py --workload FILE` runs it as is, provided it uses the same layout (a table list plus queries with id, name and sql).\n\n**Test results** (all work is committed):\n- Conformance: `TOTAL: 660/660 pass` (phase 1 225/225, phase 2 208/208, phase 3 212/212, phase 5 15/15), the same as before.\n- Option matrix (`--modes`): `TOTAL: 3870/3870 pass`.\n- `make build` from clean and `make test` succeed: 115 tests, 1699 assertions, 0 failures. About 45 new queries cover the new code, each run under seven option combinations and compared against the unoptimized row mode.\n- Full results of every workload query are identical before and after (`bench/workload.py --digest` / `--check`).\n\n**How it was measured:** `bench/workload.py --baseline <old launcher>` runs the original commit and the new engine side by side through `bin/polyquery session`, alternating their runs (3 warm-ups, median of 9). The machine is shared and single runs vary by about \u00b130%, so differences within \u00b110% are noise. The README has the full table; the main changes:\n\n| query | before | after | speed-up |\n|---|---:|---:|---:|\n| A28 correlated EXISTS | 264 ms | 6.0 ms | 44\u00d7 |\n| A20 IN subquery | 53 ms | 4.9 ms | 11\u00d7 |\n| A25 scalar subquery | 44 ms | 4.7 ms | 9\u00d7 |\n| A26 SELECT DISTINCT | 22 ms | 3.0 ms | 7\u00d7 |\n| A14 COUNT DISTINCT | 119 ms | 29 ms | 4\u00d7 |\n| A29 wide result, 68K rows | 78 ms | 44 ms | 1.8\u00d7 |\n| A16 date functions + group by | 13 ms | 8.4 ms | 1.6\u00d7 |\n| A8 full sort, 1M rows | 524 ms | 441 ms | 1.2\u00d7 (1.2\u20131.4\u00d7 across runs) |\n\nThe other queries, which were already vectorized and parallel, are unchanged within noise.\n\n**What changed:**\n1. **Results are written straight to JSON text.** Each column type has its own encoder, and dates, timestamps and decimals are formatted without intermediate strings.\n2. **Uncorrelated subqueries are evaluated once while planning,** so filters containing them can run vectorized and in parallel. Error behaviour is unchanged: a scalar subquery returning several rows still fails only where a row actually evaluates it, any failure falls back to the original plan, and row mode is untouched.\n3. **Correlated EXISTS of the common lookup form becomes a precomputed key set.** A NULL key gives FALSE, so NOT EXISTS stays correct.\n4. **DISTINCT aggregates on integer-like values use primitive per-group sets.** Large partial results from parallel workers are now merged in parallel.\n5. **SELECT DISTINCT is planned as a hash aggregation** outside row mode.\n6. **String functions on dictionary-encoded columns run once per dictionary entry.** This is correct but gave no measurable gain on A23.\n7. **GROUP BY on several keys uses a primitive key table** instead of a boxed key list per row.\n\n**Known limitations:**\n- The 1M-row sort (A8) is bounded by reading rows in sorted (scattered) memory order, and by the client: Python's `json.loads` alone takes about 170 ms on its 29 MB response.\n- High-cardinality GROUP BY still builds a nearly full table in every parallel partition.\n- Correlated scalar and IN subqueries still run once per outer row.\n\nThese are listed in the README as next candidates.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

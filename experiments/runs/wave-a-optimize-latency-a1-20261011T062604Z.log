@@ -1,2 +1,6 @@
 2026-10-11T06:26:05+00:00 wave wave-a-optimize-latency-a1-20261011T062604Z: order=['clojure']
 2026-10-11T06:26:05+00:00 [a-optimize-latency-clojure-a1-20261011T062604Z] agent queued (usage gate, then launch)
+2026-10-11T07:06:46+00:00 [a-optimize-latency-clojure-a1-20261011T062604Z] agent finished; collecting telemetry
+2026-10-11T07:06:46+00:00 [a-optimize-latency-clojure-a1-20261011T062604Z] validating (clean clone, sandboxed)
+2026-10-11T07:07:45+00:00 [a-optimize-latency-clojure-a1-20261011T062604Z] outcome=success cost=$10.817963000000002 turns=152 wall=2440.3s
+2026-10-11T07:07:45+00:00 wave wave-a-optimize-latency-a1-20261011T062604Z finished: latency=success
