@@ -1,0 +1,21 @@
+{
+ "chain_id": "chain-a-phase5-x86_64-asm-engine-a1-20261011T195444Z",
+ "task": "phase5",
+ "language": "x86_64-asm-engine",
+ "track": "A",
+ "attempt": 1,
+ "max_sessions": 3,
+ "total_budget_usd": 120.0,
+ "timeout_min": 120,
+ "sessions": [
+  {
+   "run_id": "a-phase5-x86_64-asm-engine-a1-20261011T195444Z",
+   "session": 1,
+   "outcome": "success",
+   "cost_usd": 20.200703200000003
+  }
+ ],
+ "spent_usd": 20.2,
+ "outcome": "success",
+ "finished": "2026-10-11T20:45:39+00:00"
+}
