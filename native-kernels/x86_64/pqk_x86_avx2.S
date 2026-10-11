@@ -11,18 +11,31 @@
  *    per-operator mask routine (vop_* / vcmp_*) turns one block into a
  *    64-bit mask (16 x vpcmpeqq/vpcmpgtq on 4 qwords + vmovmskpd); operators
  *    map to (kind, invert), see pqk_x86_avx2.h.
- *  - filter emits indices with an 8-row pdep/pext compress step for full
- *    blocks with a hit, tzcnt/blsr otherwise.
+ *  - filter emits indices 8 rows at a time from a 256-entry table of
+ *    packed bit positions (vpmovzxbd) for full blocks with a hit,
+ *    tzcnt/blsr otherwise. BETWEEN with a <= b is one unsigned range
+ *    compare (kind 4); i128 LT/GT/BETWEEN decide on the high words first.
  *  - Validity in vector loops: the 64-bit validity word of a full block is
  *    broadcast and shifted per lane with vpsllvq (tables shc*) so that the
- *    row's bit lands in the lane's sign bit; vblendvpd consumes it directly,
- *    sums widen it to a lane mask (vpcmpgtq against zero) and AND it with a
- *    plain load. vpmaskmovq/vmaskmovpd are deliberately NOT used (up to 4x
+ *    row's bit lands in the lane's sign bit, which vblendvpd consumes
+ *    directly; the integer sums instead load a lane mask from a small table
+ *    (nibmask / pairmask) indexed by the validity bits (rorx + and on the
+ *    integer side) and AND it with a plain load. vpmaskmovq/vmaskmovpd are deliberately NOT used (up to 4x
  *    slower from DRAM on Zen 5; fault behaviour of masked-off elements is
  *    implementation dependent on AMD). Final partial blocks run scalar code.
- *  - sum_i64 / sum_i128 are exact (lane sums folded into a 128-/192-bit
- *    scalar total per chunk); hash_i64 emulates the 64x64 multiply with
- *    three vpmuludq.
+ *  - sum_i64 / sum_i128 are exact (2^63-biased unsigned lane sums S and
+ *    S >>> 32 folded into a 128-/192-bit scalar total per chunk); hash_i64
+ *    emulates the 64x64 multiply with vpmulld + vpmuludq and runs a
+ *    scalar imul stream in parallel; minmax_i64 / minmax_i128 skip 64-row
+ *    blocks that cannot change the result (quick reject); group_sum_i64
+ *    accumulates {sum, count} pairs in a stack table when no addition can
+ *    wrap; bitmap_popcount combines a Harley-Seal CSA tree with scalar
+ *    POPCNT; gather_i64 prefetches 128 rows ahead.
+ *  - Zen 5 facts that shaped the code (measured): vector integer ops have
+ *    2-cycle latency (so accumulators are split 4 ways); vpaddq / vpand /
+ *    vpxor / vpunpck issue 4 per cycle, but vpcmpgtq, vblendvpd, shifts,
+ *    multiplies, vpshufb and vmovmskpd only 2 per cycle, so their count
+ *    per row decides most compute-bound loops.
  *
  * Layout of this file:
  *   1. constant tables and file-local helpers used by several kernels
@@ -55,10 +68,9 @@
         TAB_SHC
         TAB_EIGHT_D
         TAB_SIGN_D
-        TAB_FMIX_HALVES
+        TAB_FMIX_LO
         TAB_FMIX_SWAP
         TAB_PINF_NINF
-        TAB_SHC128S
         TAB_SHC128M
         TAB_HIBIAS
         TAB_I64MIN
@@ -122,8 +134,9 @@
  *           (rbx, rbp, r12-r15 saved and restored)
  * Algorithm: VDRIVER: 64-row blocks; vop_<op> builds the block mask, &
  *           validity word; full blocks with a hit emit indices with
- *           EMIT_IDX_COMPRESS8 (pdep/pext, 8 rows per 32-byte store), other
- *           blocks with tzcnt/blsr (EMIT_IDX_BITS).
+ *           EMIT_IDX_COMPRESS8 (bit-position table idx8 + vpmovzxbd, 8 rows
+ *           per 32-byte store), other blocks with tzcnt/blsr
+ *           (EMIT_IDX_BITS). BETWEEN with a <= b: kind 4 (RANGE_SETUP).
  * Tail:     the last block (len < 64) runs through the same loop: vop_*
  *           compares whole vectors while >= 4 rows remain and the last 1..3
  *           rows in scalar code; lvp loads exactly ceil(len/8) bytes.
@@ -159,7 +172,8 @@ ENDF pqk_x86_avx2_filter_i64_bitmap
  *           accumulates the compare results (vpsubq of all-ones lanes,
  *           4 accumulators) over n & ~15 rows; the operator's inversion is
  *           applied once (rows - count). Otherwise (and for the rest) the
- *           block masks of filter_i64 are popcnt-ed.
+ *           block masks of filter_i64 are popcnt-ed. BETWEEN with a <= b
+ *           is kind 4: one vpsubq + vpcmpgtq per 4 rows (RANGE_SETUP).
  * Tail:     the 0..15 rows after the direct counter, or the last block,
  *           through the mask routine (len < 64).
  * ====================================================================== */
@@ -1900,13 +1914,19 @@ ENDF pqk_x86_avx2_gather_i64
  *           8(%rsp) = out_idx
  * Returns:  rax = number of indices written; (size_t)-1 for an invalid op
  *           (then a and b are not dereferenced)
- * Clobbers: rax, rcx, rdx, rsi, rdi, r10, r11, ymm0-ymm5, ymm8-ymm14, flags
+ * Clobbers: rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, ymm0-ymm5,
+ *           ymm8-ymm14, flags
  *           (rbx, rbp, r12-r15 saved and restored)
  * Algorithm: VDRIVER128: 64-row blocks; vop128_<op> evaluates groups of 4
  *           de-interleaved rows (VG128: 3 compares + blend per 128-bit
  *           predicate), NIBFIX restores row order; mask & validity word;
  *           emission as filter_i64 (EMIT_IDX_COMPRESS8 / tzcnt-blsr; the
  *           32-byte stores stay inside out_idx since outputs <= rows).
+ *           LT/LE/GT/GE use vop128f_<op> (VOP128F): full blocks are first
+ *           decided on the high words alone (2 compares per group); a
+ *           block with a row whose high word equals a.hi goes to the exact
+ *           routine (back-off in r8d/r9d). BETWEEN with a <= b uses kind 4
+ *           (one unsigned 128-bit range test, RANGE128_SETUP).
  * Tail:     last block: whole groups while >= 4 rows remain, then 1..3
  *           single rows as 16-byte xmm loads; lvp for the validity bytes.
  * ====================================================================== */
@@ -1918,12 +1938,16 @@ ENDF pqk_x86_avx2_filter_i128
  * size_t pqk_x86_avx2_count_i128(data, validity, n, op, a, b)
  * Args:     rdi = data, rsi = validity, rdx = n, ecx = op, r8 = &a, r9 = &b
  * Returns:  rax = number of valid rows satisfying op; (size_t)-1 if invalid
- * Clobbers: rax, rcx, rdx, rsi, rdi, r10, r11, ymm0-ymm4, ymm6, ymm8-ymm15,
+ * Clobbers: rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, ymm0-ymm15,
  *           flags (rbx, rbp, r12-r15 saved and restored)
  * Algorithm: VDRIVER128: without validity the direct counter
  *           vcnt128_<kind> (vpsubq of all-ones lanes, two accumulators) over
  *           n & ~3 rows, inversion applied once (rows - count); otherwise
- *           the block masks of filter_i128 are popcnt-ed.
+ *           the block masks of filter_i128 are popcnt-ed. BETWEEN with
+ *           a <= b is kind 4 (unsigned 128-bit range test). Kinds 1, 2, 4
+ *           count 64-row blocks on the high words first (VCNT128_HI, 2
+ *           compares per group) and recount a block exactly only if a row
+ *           is undecided (high word equal to a bound), with back-off.
  * Tail:     the 1..3 rows after the direct counter, or the last block,
  *           through the mask routine.
  * ====================================================================== */

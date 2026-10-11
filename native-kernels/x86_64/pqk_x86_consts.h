@@ -28,7 +28,6 @@
 #define C_BITS_2OF4     0x3333333333333333      /* low 2 bits of every nibble */
 #define C_NIBBLE_LO     0x0f0f0f0f0f0f0f0f      /* low nibble of every byte */
 #define C_BYTE_ONES     0x0101010101010101      /* bit 0 of every byte */
-#define C_BYTE_IOTA     0x0706050403020100      /* byte j = j */
 #define C_NIB_BIT1      0x2222222222222222      /* bit 1 of every nibble */
 #define LO32(x)         ((x) & 0xffffffff)
 #define HI32(x)         (((x) >> 32) & 0xffffffff)
@@ -47,18 +46,6 @@
         .set r, r + 1
         .endr
         ENDOBJ  shc
-.endm
-/* shc128s: vpsllvq counts for 128-bit rows in load order [lo hi lo hi]:
- * pair k (rows 2k, 2k+1) -> 63-2k, 63-2k, 62-2k, 62-2k, so a row's validity
- * bit lands in the sign bit of both of its lanes. 32 x 4 quads. */
-.macro TAB_SHC128S
-        OBJ     shc128s, 5
-        .set k, 0
-        .rept 32
-        .quad 63 - 2*k, 63 - 2*k, 62 - 2*k, 62 - 2*k
-        .set k, k + 1
-        .endr
-        ENDOBJ  shc128s
 .endm
 /* shc128m: vpsllvq counts for de-interleaved 128-bit groups, lane order
  * (0, 2, 1, 3): group g -> 63-4g, 61-4g, 62-4g, 60-4g. 16 x 4 quads. */
@@ -81,21 +68,15 @@
         .long   C_SIGN32
         ENDOBJ  c_sign_d
 .endm
-/* fmix64 multipliers split into 32-bit halves (AVX2 has no 64x64 multiply;
- * vpmuludq multiplies the low dwords of each qword). */
-.macro TAB_FMIX_HALVES
+/* low 32-bit halves of the fmix64 multipliers (vpmuludq multiplies the low
+ * dwords of each qword: lo * lo32(C)). */
+.macro TAB_FMIX_LO
         OBJ     c_fmix1_lo, 3
         .quad   LO32(C_FMIX1)
         ENDOBJ  c_fmix1_lo
-        OBJ     c_fmix1_hi, 3
-        .quad   HI32(C_FMIX1)
-        ENDOBJ  c_fmix1_hi
         OBJ     c_fmix2_lo, 3
         .quad   LO32(C_FMIX2)
         ENDOBJ  c_fmix2_lo
-        OBJ     c_fmix2_hi, 3
-        .quad   HI32(C_FMIX2)
-        ENDOBJ  c_fmix2_hi
 .endm
 /* fmix64 multipliers as dword pairs (hi32, lo32) per qword, 32 bytes (vpmulld
  * memory operand: lo*hi32 and hi*lo32 in one multiply), and the high-dword
