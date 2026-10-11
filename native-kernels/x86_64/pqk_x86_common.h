@@ -478,7 +478,7 @@ ENDF lvp
 .macro GATHER_I64 unroll
         cmp     $\unroll, %rdx
         jb      .Lga_tail\@
-.Lga_main\@:
+.Lga_main\@:                            /* [main] unroll rows */
         .set q, 0
         .rept \unroll / 4
         mov     q*16(%rsi), %eax
@@ -500,7 +500,7 @@ ENDF lvp
         sub     $\unroll, %rdx
         cmp     $\unroll, %rdx
         jae     .Lga_main\@
-.Lga_tail\@:
+.Lga_tail\@:                            /* [tail] single rows */
         test    %rdx, %rdx
         jz      .Lga_done\@
 .Lga_row\@:
