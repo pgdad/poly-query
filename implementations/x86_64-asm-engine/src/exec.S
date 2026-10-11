@@ -1320,7 +1320,15 @@ FUNC exec_plan
     mov %rbx, %rdi
     lea XS_CTX(%r12), %rsi
     call build_row
-    lea XS_ROWS(%r12), %rdi
+    cmp g_sink_plan(%rip), %rbx     /* streamed top-level query: hand the */
+    jne 841f                        /* row to the sink instead of keeping it */
+    mov %rax, %rdi
+    call *g_row_sink(%rip)
+    inc %r13
+    test %eax, %eax
+    jnz 85f                         /* sink reached LIMIT */
+    jmp 83b
+841: lea XS_ROWS(%r12), %rdi
     mov %rax, %rsi
     call vec_push
     inc %r13
@@ -1662,3 +1670,6 @@ ENDF exec_query
     .p2align 3
     .globl g_result_rows
 g_result_rows: .quad 0          /* row count of the last executed query */
+    .globl g_sink_plan, g_row_sink
+g_sink_plan:   .quad 0          /* plan whose projected rows go to g_row_sink */
+g_row_sink:    .quad 0          /* sink(row rdi) -> eax 1 to stop (streaming) */

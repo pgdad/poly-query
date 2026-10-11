@@ -88,6 +88,12 @@ n_starting:  .quad 0                /* admitted queries waiting to fork */
 g_cat_threaded: .quad 0             /* catalog worker thread in use */
 g_cat_locked:   .quad 0             /* worker: holds cat_lock */
 stream_hdr:  .quad 0                /* child: stream header already sent */
+ss_plan:     .quad 0                /* child: streamed plan and sink state */
+ss_seen:     .quad 0
+ss_emitted:  .quad 0
+ss_batch:    .quad 0                /* rows in the batch being built in g_out */
+ss_offset:   .quad 0
+ss_limit:    .quad -1
 
 /* metrics */
 m_ok:        .quad 0
@@ -104,6 +110,7 @@ g_req:      .zero RQ_SIZE           /* request being routed */
 srv_buf:    .zero BUF_SIZE          /* parent-built response bodies */
 log_buf:    .zero BUF_SIZE
 jb_stream:  .zero 512
+ss_head:    .zero BUF_SIZE          /* child: the stream's header line */
     .p2align 6
 cat_lock:   .zero 64                /* pthread_mutex_t: catalog consistency for fork() */
 q_mutex:    .zero 64
@@ -1199,7 +1206,10 @@ r_post_query:
     call sql_mutates
     test %eax, %eax
     jz 21f
-    mov $1, %r8d                    /* CREATE / DROP INDEX: catalog job */
+    mov %r12, %rdi                  /* CREATE / DROP INDEX: catalog job */
+    call query_id_of
+    mov %rax, CN_QID(%rbx)
+    mov $1, %r8d
     jmp r_post_job
 21: mov %rbx, %rdi
     mov %r13, %rsi
@@ -1455,15 +1465,18 @@ FUNC finish_inline
     ENTER 0
     mov %rdi, %rbx
     decq n_inline(%rip)
+    mov CN_QID(%rbx), %rax
+    mov %rax, g_resp_qid(%rip)
     mov %rbx, %rdi
     mov CN_RSTATUS(%rbx), %esi
     lea ctype_json(%rip), %rdx
     mov CN_RESP(%rbx), %rcx
     mov CN_RESPLEN(%rbx), %r8
     call respond
+    movq $0, g_resp_qid(%rip)
     cmpq $0, CN_JQUERY(%rbx)
     je 1f
-    CSTR %rdi, "inline"
+    mov CN_QID(%rbx), %rdi
     mov CN_QSTART(%rbx), %rsi
     mov CN_ISTATUS(%rbx), %rdx
     xor %ecx, %ecx
@@ -1644,6 +1657,36 @@ ENDF cat_parse_end
 
 /* ================================================================ queries */
 
+/* query_id_of(request node rdi) -> rax malloc'd query id: options.query_id
+ * or a server-assigned "q-<n>" */
+FUNC query_id_of
+    ENTER 32
+    CSTR %rsi, "options"
+    call json_obj_get
+    mov %rax, %rdi
+    CSTR %rsi, "query_id"
+    call json_obj_get               /* (0 / non-objects give 0) */
+    test %rax, %rax
+    jz 2f
+    cmpq $J_STRING, JN_TYPE(%rax)
+    jne 2f
+    mov JN_PTR(%rax), %rdi
+    mov JN_LEN(%rax), %rsi
+    call xstrdup_mem
+    LEAVE
+2:  incq id_seq(%rip)
+    lea 0(%rsp), %rdi
+    mov $24, %esi
+    CSTR %rdx, "q-%lu"
+    mov id_seq(%rip), %rcx
+    xor %eax, %eax
+    call snprintf
+    lea 0(%rsp), %rdi
+    mov %rax, %rsi
+    call xstrdup_mem
+    LEAVE
+ENDF query_id_of
+
 /* query_admit(c rdi, req rsi, node rdx, kind ecx): admission control for a
  * query (QK_*); the request is an object */
 FUNC query_admit
@@ -1661,31 +1704,9 @@ FUNC query_admit
     cmpq $J_OBJECT, JN_TYPE(%rax)
     jne 1f
     mov %rax, 0(%rsp)
-1:  /* query id */
-    mov 0(%rsp), %rdi
-    test %rdi, %rdi
-    jz 2f
-    CSTR %rsi, "query_id"
-    call json_obj_get
-    test %rax, %rax
-    jz 2f
-    cmpq $J_STRING, JN_TYPE(%rax)
-    jne 2f
-    mov JN_PTR(%rax), %rdi
-    mov JN_LEN(%rax), %rsi
-    call xstrdup_mem
-    jmp 3f
-2:  incq id_seq(%rip)
-    lea 8(%rsp), %rdi
-    mov $24, %esi
-    CSTR %rdx, "q-%lu"
-    mov id_seq(%rip), %rcx
-    xor %eax, %eax
-    call snprintf
-    lea 8(%rsp), %rdi
-    mov %rax, %rsi
-    call xstrdup_mem
-3:  mov %rax, CN_QID(%rbx)
+1:  mov %r12, %rdi
+    call query_id_of
+    mov %rax, CN_QID(%rbx)
     mov %r14, CN_QKIND(%rbx)
     movq $1, CN_QMETRIC(%rbx)
     /* request id (/v1/request) for parent-generated errors */
@@ -2526,7 +2547,10 @@ ENDF stream_chunk
 
 #define STREAM_BATCH 1000
 /* child_stream(c rdi, node rsi): POST /v1/query/stream - NDJSON header,
- * row batches (<= STREAM_BATCH rows) and end line, chunked */
+ * row batches (<= STREAM_BATCH rows) and end line, chunked.  Queries
+ * without ORDER BY / aggregation / DISTINCT are streamed while they execute
+ * (stream_sink); others are materialized first.  The header is sent with
+ * the first batch, so errors before that get an ordinary error response. */
 FUNC child_stream
     ENTER 48
     mov %rdi, %rbx
@@ -2554,67 +2578,64 @@ FUNC child_stream
 1:  mov ST_QUERY(%r14), %rdi
     call bind_statement
     mov %rax, %r15                  /* plan */
+    mov %r15, ss_plan(%rip)
+    mov %r15, %rdi
+    call cs_head
+    lea g_out(%rip), %r13
+    movq $0, BUF_LEN(%r13)
+    cmpq $0, QP_AGG(%r15)
+    jne 20f
+    cmpq $0, QP_NKEYS(%r15)
+    jne 20f
+    cmpq $0, QP_DISTINCT(%r15)
+    jne 20f
+    /* ---- pipelined: rows go to stream_sink as they are projected */
+    mov QP_OFFSET(%r15), %rax
+    mov %rax, ss_offset(%rip)
+    mov QP_LIMIT(%r15), %rax
+    mov %rax, ss_limit(%rip)
+    lea stream_sink(%rip), %rax
+    mov %rax, g_row_sink(%rip)
+    mov %r15, g_sink_plan(%rip)
+    mov %r15, %rdi
+    xor %esi, %esi
+    call exec_plan
+    movq $0, g_sink_plan(%rip)
+    call stream_flush
+    mov ss_emitted(%rip), %rax
+    mov %rax, 16(%rsp)
+    jmp 5f
+20: /* ---- materialized */
     mov %r15, %rdi
     mov g_q_max_rows(%rip), %rsi
     call exec_query_result
     mov %rax, 0(%rsp)               /* result */
-    /* header line */
-    lea g_out(%rip), %r13
-    movq $0, BUF_LEN(%r13)
-    PUTS %r13, "{\"type\":\"header\",\"query_id\":"
-    mov CN_QID(%rbx), %rdi
-    call strlen
-    mov %r13, %rdi
-    mov CN_QID(%rbx), %rsi
-    mov %rax, %rdx
-    call buf_put_json_str
-    mov %r13, %rdi
-    mov $',', %esi
-    call buf_putc
-    mov %r15, %rdi
-    mov %r13, %rsi
-    call exec_put_columns
-    PUTS %r13, "}\n"
-    call cs_begin
-    /* row batches */
     movq $0, 8(%rsp)                /* next row */
 2:  mov 0(%rsp), %rax
     mov 8(%rsp), %rcx
     cmp RS_NROWS(%rax), %rcx
-    jae 5f
+    jae 4f
     call check_deadline
-    PUTS %r13, "{\"type\":\"rows\",\"rows\":["
-    xor %r14d, %r14d                /* rows in this batch */
-3:  mov 0(%rsp), %rax
-    mov 8(%rsp), %rcx
-    cmp RS_NROWS(%rax), %rcx
-    jae 4f
-    cmp $STREAM_BATCH, %r14
-    jae 4f
-    test %r14, %r14
-    jz 31f
-    mov %r13, %rdi
-    mov $',', %esi
-    call buf_putc
-31: mov 0(%rsp), %rax
+    mov 0(%rsp), %rax
     mov RS_ROWS(%rax), %rax
     mov 8(%rsp), %rcx
     mov (%rax, %rcx, 8), %rsi
-    mov %r15, %rdi
-    mov %r13, %rdx
-    call exec_put_row
+    call stream_add_row
     incq 8(%rsp)
-    inc %r14
-    jmp 3b
-4:  PUTS %r13, "]}\n"
-    mov %r12d, %edi
-    call stream_chunk
+    cmpq $STREAM_BATCH, ss_batch(%rip)
+    jb 2b
+    call stream_flush
     jmp 2b
-5:  PUTS %r13, "{\"type\":\"end\",\"row_count\":"
+4:  call stream_flush
     mov 0(%rsp), %rax
-    mov RS_NROWS(%rax), %rsi
-    mov %rsi, 16(%rsp)
+    mov RS_NROWS(%rax), %rax
+    mov %rax, 16(%rsp)
+5:  cmpq $0, stream_hdr(%rip)       /* no rows: the header still goes first */
+    jne 51f
+    call cs_begin
+51: PUTS %r13, "{\"type\":\"end\",\"row_count\":"
     mov %r13, %rdi
+    mov 16(%rsp), %rsi
     call buf_put_u64
     PUTS %r13, "}\n"
     xor %edi, %edi
@@ -2625,12 +2646,12 @@ FUNC child_stream
     mov ST_QUERY(%r14), %rdi
     call bind_statement
     mov %rax, %r15
-    lea 16(%rsp), %rdi
+    lea 24(%rsp), %rdi
     call buf_init
     mov %r15, %rdi
-    lea 16(%rsp), %rsi
+    lea 24(%rsp), %rsi
     call explain_plan
-    lea g_out(%rip), %r13
+    lea ss_head(%rip), %r13
     movq $0, BUF_LEN(%r13)
     PUTS %r13, "{\"type\":\"header\",\"query_id\":"
     mov CN_QID(%rbx), %rdi
@@ -2641,10 +2662,12 @@ FUNC child_stream
     call buf_put_json_str
     PUTS %r13, ",\"columns\":[{\"name\":\"plan\",\"type\":\"STRING\"}]}\n"
     call cs_begin
+    lea g_out(%rip), %r13
+    movq $0, BUF_LEN(%r13)
     PUTS %r13, "{\"type\":\"rows\",\"rows\":[["
     mov %r13, %rdi
-    mov 16+BUF_DATA(%rsp), %rsi
-    mov 16+BUF_LEN(%rsp), %rdx
+    mov 24+BUF_DATA(%rsp), %rsi
+    mov 24+BUF_LEN(%rsp), %rdx
     call buf_put_json_str
     PUTS %r13, "]]}\n"
     mov %r12d, %edi
@@ -2665,12 +2688,13 @@ cs_end:
 cs_invalid:
     RAISE E_INVALID_REQUEST, "request body must be a JSON object"
 cs_error:
+    movq $0, g_sink_plan(%rip)
     mov child_conn(%rip), %rbx
     mov CN_FD(%rbx), %r12
     lea g_out(%rip), %r13
     movq $0, BUF_LEN(%r13)
     cmpq $0, stream_hdr(%rip)
-    jne 20f
+    jne 30f
     /* nothing sent yet: an ordinary error response */
     PUTS %r13, "{\"id\":null,\"ok\":false,\"error\":"
     mov %r13, %rdi
@@ -2694,7 +2718,7 @@ cs_error:
     call http_send
     xor %edi, %edi
     call _exit
-20: /* after the header: a final error line */
+30: /* after the header: a final error line, no end line */
     PUTS %r13, "{\"type\":\"error\",\"error\":"
     mov %r13, %rdi
     call proto_put_error
@@ -2706,8 +2730,102 @@ cs_error:
     jmp cs_end
 ENDF child_stream
 
-/* cs_begin(): (child_stream helper, frame-less) sends the response head and
- * the header line in g_out; uses child_conn */
+/* cs_head(plan rdi): builds the header line in ss_head */
+FUNC cs_head
+    ENTER 0
+    mov %rdi, %r12
+    mov child_conn(%rip), %rbx
+    lea ss_head(%rip), %r13
+    movq $0, BUF_LEN(%r13)
+    PUTS %r13, "{\"type\":\"header\",\"query_id\":"
+    mov CN_QID(%rbx), %rdi
+    call strlen
+    mov %r13, %rdi
+    mov CN_QID(%rbx), %rsi
+    mov %rax, %rdx
+    call buf_put_json_str
+    mov %r13, %rdi
+    mov $',', %esi
+    call buf_putc
+    mov %r12, %rdi
+    mov %r13, %rsi
+    call exec_put_columns
+    PUTS %r13, "}\n"
+    LEAVE
+ENDF cs_head
+
+/* stream_add_row(row rsi): appends a row to the batch in g_out */
+FUNC stream_add_row
+    ENTER 0
+    mov %rsi, %rbx
+    lea g_out(%rip), %r15
+    cmpq $0, ss_batch(%rip)
+    jne 1f
+    PUTS %r15, "{\"type\":\"rows\",\"rows\":["
+    jmp 2f
+1:  mov %r15, %rdi
+    mov $',', %esi
+    call buf_putc
+2:  mov ss_plan(%rip), %rdi
+    mov %rbx, %rsi
+    mov %r15, %rdx
+    call exec_put_row
+    incq ss_batch(%rip)
+    LEAVE
+ENDF stream_add_row
+
+/* stream_flush(): sends the batch in g_out (and before it the header) */
+FUNC stream_flush
+    sub $8, %rsp
+    cmpq $0, ss_batch(%rip)
+    je 9f
+    cmpq $0, stream_hdr(%rip)
+    jne 1f
+    call cs_begin
+1:  lea g_out(%rip), %rdi
+    CSTR %rsi, "]}\n"
+    call buf_puts
+    movq $0, ss_batch(%rip)
+    mov child_conn(%rip), %rax
+    mov CN_FD(%rax), %edi
+    call stream_chunk
+9:  add $8, %rsp
+    ret
+ENDF stream_flush
+
+/* stream_sink(row rdi) -> eax 1 when LIMIT is reached: row sink of a
+ * pipelined streamed query (applies OFFSET / LIMIT and max_rows) */
+FUNC stream_sink
+    ENTER 0
+    mov %rdi, %rbx
+    incq ss_seen(%rip)
+    mov ss_seen(%rip), %rax
+    cmp ss_offset(%rip), %rax
+    jbe 8f
+    incq ss_emitted(%rip)
+    mov g_q_max_rows(%rip), %rcx
+    test %rcx, %rcx
+    js 1f
+    cmp %rcx, ss_emitted(%rip)
+    jbe 1f
+    RAISE E_RESOURCE_LIMIT, "result exceeds max_rows"
+1:  mov %rbx, %rsi
+    call stream_add_row
+    cmpq $STREAM_BATCH, ss_batch(%rip)
+    jb 2f
+    call stream_flush
+2:  mov ss_limit(%rip), %rax
+    test %rax, %rax
+    js 8f
+    cmp %rax, ss_emitted(%rip)
+    jb 8f
+    mov $1, %eax
+    LEAVE
+8:  xor %eax, %eax
+    LEAVE
+ENDF stream_sink
+
+/* cs_begin(): sends the response head and the header line (ss_head) */
 FUNC cs_begin
     push %rbx
     mov child_conn(%rip), %rdi
@@ -2721,7 +2839,11 @@ FUNC cs_begin
     jnz 1f
     movq $1, stream_hdr(%rip)
     mov CN_FD(%rbx), %edi
-    call stream_chunk
+    mov ss_head+BUF_DATA(%rip), %rsi
+    mov ss_head+BUF_LEN(%rip), %rdx
+    call http_send_chunk
+    test %eax, %eax
+    jnz 1f
     pop %rbx
     ret
 1:  mov $1, %edi
