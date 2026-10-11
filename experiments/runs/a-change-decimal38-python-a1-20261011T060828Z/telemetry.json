@@ -1,0 +1,99 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-decimal38-python-a1-20261011T060828Z",
+ "language": "python",
+ "task": "change-decimal38",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-decimal38",
+ "prompt_sha256": "835cadf2b7abc326f075533adfbae4b2461c577902b270124388ecc466312626",
+ "session_id": "c6d6a140-63d4-419f-bf94-f6febbd39001",
+ "tokens": {
+  "input": 198,
+  "output": 66526,
+  "cache_read": 15287382,
+  "cache_creation": 232933,
+  "thinking": null,
+  "thinking_estimated": 24509,
+  "source": "result events",
+  "api_messages": 99
+ },
+ "rate_limit": {
+  "events": 9,
+  "max_utilization": {
+   "five_hour": 0.41,
+   "seven_day": 0.3
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 6.252252400000002,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 104,
+ "result_segments": 1,
+ "assistant_messages": 205,
+ "tool_calls": {
+  "Bash": 100,
+  "ToolSearch": 1,
+  "Write": 2
+ },
+ "tool_calls_total": 103,
+ "tool_failures": 4,
+ "build_invocations": 15,
+ "build_failures_heuristic": 4,
+ "conformance_runs": 6,
+ "conformance_progress": [
+  [
+   591,
+   591
+  ],
+  [
+   68,
+   69
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 4,
+ "time": {
+  "wall_seconds": 2530.8,
+  "model_api_seconds": 594.8,
+  "tool_seconds": 1935.8,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 2,
+  "files_changed": 22,
+  "lines_added": 505,
+  "lines_removed": 110,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "DECIMAL precision 38 is implemented and every required suite passes with zero failures, errors or not-implemented cases. Everything is committed in two commits on `main`.\n\n## Test results\n| Run | Result |\n|---|---|\n| `runner.py` (session) | `TOTAL: 660/660 pass` (phase 1 225/225, phase 2 208/208, phase 3 212/212, phase 5 15/15) |\n| `runner.py --modes` | `TOTAL: 3870/3870 pass` |\n| `runner.py --transport http` | `TOTAL: 660/660 pass` |\n| `runner.py --native libpqkernels.so` | `TOTAL: 660/660 pass` |\n| `tests/concurrency/http_suite.py` | `http suite: 18/18 passed` |\n| `make build test` | OK, 169 unit tests (10 skipped) |\n\nThe engine claims both `change.decimal38` and `change.union_all`.\n\nI also ran my own check on a 200,000-row table with wide and narrow decimal columns. Every query gave the same answer under all six option combinations, with native kernels on and off, apart from the FLOAT64 point under limitations. That covered filters, aggregates, GROUP BY, ORDER BY, joins and subqueries. Saving that table as PQCF v2 (plain, RLE and auto encodings), reopening it with and without mmap, and querying it with BTREE and HASH indexes gave the same results as the in-memory table.\n\n## Main design decisions\n- **How wide values are stored:** wide decimals are Python `int`s holding the unscaled value, the same as narrow ones. Python integers have no size limit, so one set of arithmetic code covers both and intermediate results are exact. The type only decides the overflow limit (18 or 38 digits) and the storage form.\n- **In memory:** a wide column is a plain list of ints rather than a 64-bit array. Because of that, it can never be handed to the native kernels; the native code also explicitly skips wide columns and wide SUM/AVG.\n- **Result precision:** whether a result is 18 or 38 digits is decided once when the query is analysed. Execution just checks against the precision of the result type.\n- **Exact comparisons:** INT64 and DECIMAL values are compared at an internal precision of 77 digits, which nothing can overflow. This covers comparisons, BETWEEN, IN, simple CASE, NULLIF and join keys. It never appears as a result type, and columns that already have the right scale are left unwrapped so index planning still works.\n- **Files:** a table with a wide column is saved as PQCF v2 with 128-bit little-endian values; every other table stays v1. The reader rejects version/metadata mismatches and wide columns in v1 files as `STORAGE_CORRUPT`, and versions above 2 as `STORAGE_VERSION_UNSUPPORTED`.\n\n## Things that go beyond or against the spec text\n- **`AS full`:** one public case names a column `full`, but the grammar lists FULL as a reserved word. I followed the test and accept FULL and RIGHT as an alias only right after an explicit `AS`. Anywhere else they still raise `UNSUPPORTED` as before.\n- **`spec_version`:** it stays `1.0.0` because a public catalog case expects that, even though the change request names `1.2.0-cr2`.\n- **Old unit tests:** four tests that encoded the old 18-digit rules (including the old \"version 2 is unsupported\" check) were updated to the new rules.\n- **README:** I removed a known-limitations note claiming a UNION ALL case fails; that case now passes.\n\n## Known limitations\n- FLOAT64 sums can differ in the last bits between execution modes. This is existing behaviour, not caused by this change; it showed up when wide values were divided into FLOAT64 and summed.\n- Comparisons that mix INT64 and DECIMAL put a cast on the INT64 side, so if that side is an INT64 column it can't use its index. The results are still correct.\n\nThe README documents the wide-decimal representation, how narrow and wide arithmetic is dispatched, and which modules were touched, with a table by layer.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
