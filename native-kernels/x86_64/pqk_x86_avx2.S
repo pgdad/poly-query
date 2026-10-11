@@ -1,9 +1,11 @@
 /*
  * pqk_x86_avx2.S — PolyQuery native kernels, variant "x86_avx2".
  *
- * Requires AVX2 + BMI1 + BMI2 + POPCNT (checked by the dispatcher). All 16
- * kernels of pq_kernels.h as global symbols pqk_x86_avx2_<kernel>, System V
- * AMD64 ABI; every public function ends with vzeroupper.
+ * Requires AVX2 + BMI1 + BMI2 + POPCNT (checked by the dispatcher). All 20
+ * kernels of pq_kernels.h (ABI revision 1; the CR-4 128-bit kernels are at
+ * the end of this file, with their own design notes) as global symbols
+ * pqk_x86_avx2_<kernel>, System V AMD64 ABI; every public function ends with
+ * vzeroupper.
  *
  * Design overview (details at each function):
  *  - Predicates (filter/bitmap/count/compare): blocks of 64 rows. A

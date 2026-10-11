@@ -3,9 +3,10 @@
  *
  * Requires AVX-512 F/BW/VL/DQ (+ BMI1/BMI2/POPCNT, implied on every CPU with
  * those). Only F/BW/VL/DQ instructions are used (no VPOPCNTDQ/CD/VBMI2,
- * which the dispatcher does not check). All 16 kernels as global symbols
- * pqk_x86_avx512_<kernel>, System V AMD64 ABI; every public function that
- * touches vector registers ends with vzeroupper.
+ * which the dispatcher does not check). All 20 kernels (ABI revision 1; the
+ * CR-4 128-bit kernels are at the end of this file, with their own design
+ * notes) as global symbols pqk_x86_avx512_<kernel>, System V AMD64 ABI;
+ * every public function that touches vector registers ends with vzeroupper.
  *
  * Design overview (details at each function):
  *  - Predicates: vpcmpq writes k-masks directly. With x in memory as the

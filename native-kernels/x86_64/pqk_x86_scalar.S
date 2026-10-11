@@ -2,8 +2,10 @@
  * pqk_x86_scalar.S — PolyQuery native kernels, variant "x86_scalar".
  *
  * Baseline x86-64 only (no POPCNT/BMI/AVX; SSE2 scalar double ops only), so
- * this variant runs on every x86-64 CPU. All 16 kernels of pq_kernels.h are
- * provided as global symbols pqk_x86_scalar_<kernel>, System V AMD64 ABI.
+ * this variant runs on every x86-64 CPU. All 20 kernels of pq_kernels.h
+ * (ABI revision 1: the 16 original ones plus the CR-4 128-bit kernels, which
+ * are at the end of this file) are provided as global symbols
+ * pqk_x86_scalar_<kernel>, System V AMD64 ABI.
  * Every kernel is bit-identical to the reference, including sum_f64 (same
  * sequential addition order) and the sign of zero in minmax_f64.
  *
