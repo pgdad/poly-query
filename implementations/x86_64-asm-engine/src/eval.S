@@ -212,12 +212,17 @@ ev_lit:
     LEAVE
 
 ev_col:
-    mov EC_TABLE(%r12), %rcx
+    mov N_V2(%rbx), %rax            /* range variable */
+    mov EC_TUPLE(%r12), %rsi
+    mov (%rsi, %rax, 8), %rsi       /* row index */
+    cmp $-1, %rsi
+    je ev_ret_null
+    mov EC_TABLES(%r12), %rcx
+    mov (%rcx, %rax, 8), %rcx
     mov TB_COLS(%rcx), %rcx
     mov N_V1(%rbx), %rdx
     shl $5, %rdx
     add %rdx, %rcx                  /* Column* */
-    mov EC_ROW(%r12), %rsi
     mov COL_DATA(%rcx), %rax
     mov (%rax, %rsi, 8), %rax
     mov COL_NULLS(%rcx), %rdx

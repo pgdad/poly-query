@@ -26,15 +26,17 @@
 #define X_MAXROWS 8
 #define X_COUNTO  16
 #define X_OUT     24
-#define X_CTX     32   /* EC_SIZE bytes: 32..55 */
-#define X_ROWS    56   /* Vec: 56..87 */
-#define X_NROWS   88   /* rows to scan */
-#define X_STOP    96   /* stop after this many produced rows */
-#define X_STATES  104
-#define X_NCELLS  112
-#define X_START   120
-#define X_END     128
-#define X_LOCALS  144
+#define X_CTX     32   /* EC_SIZE bytes: 32..95 */
+#define X_ROWS    96   /* Vec: 96..127 */
+#define X_NROWS   128  /* rows to scan */
+#define X_STOP    136  /* stop after this many produced rows */
+#define X_STATES  144
+#define X_NCELLS  152
+#define X_START   160
+#define X_END     168
+#define X_ROWIDX  176  /* current row index (EC_TUPLE target) */
+#define X_TABPTR  184  /* Table* (EC_TABLES target) */
+#define X_LOCALS  192
 
     .text
 
@@ -331,9 +333,14 @@ FUNC exec_query
     mov %rdi, %rbx                  /* plan */
     lea X_CTX(%rsp), %r12           /* ctx */
     mov QP_TABLE(%rbx), %rax
-    mov %rax, EC_TABLE(%r12)
-    movq $0, EC_ROW(%r12)
+    mov %rax, X_TABPTR(%rsp)
+    lea X_TABPTR(%rsp), %rax
+    mov %rax, EC_TABLES(%r12)
+    movq $0, X_ROWIDX(%rsp)
+    lea X_ROWIDX(%rsp), %rax
+    mov %rax, EC_TUPLE(%r12)
     movq $0, EC_AGGV(%r12)
+    movq $0, EC_OUTER(%r12)
     lea X_ROWS(%rsp), %rdi
     mov g_arena(%rip), %rsi
     call vec_init
@@ -373,7 +380,7 @@ FUNC exec_query
     test $1023, %r13
     jnz 5f
     call check_deadline
-5:  mov %r13, EC_ROW(%r12)
+5:  mov %r13, X_ROWIDX(%rsp)
     mov %rbx, %rdi
     mov %r12, %rsi
     call row_passes

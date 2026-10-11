@@ -721,7 +721,7 @@ ENDF expand_star
 
 /* const_int(B rdi, expr rsi, default rdx) -> rax value (validated constant INT64 >= 0) */
 FUNC const_int
-    ENTER 32
+    ENTER 80
     mov %rdi, %rbx
     mov %rdx, %r13
     movq $1, BS_NOCOLS(%rbx)
@@ -735,10 +735,11 @@ FUNC const_int
     jne 3f
     /* evaluate with an empty context */
     mov %rax, %r12
+    lea 0(%rsp), %rdi
+    xor %esi, %esi
+    mov $EC_SIZE, %edx
+    call memset
     lea 0(%rsp), %rsi
-    movq $0, EC_TABLE(%rsi)
-    movq $0, EC_ROW(%rsi)
-    movq $0, EC_AGGV(%rsi)
     mov %r12, %rdi
     call eval
     test %rdx, %rdx
