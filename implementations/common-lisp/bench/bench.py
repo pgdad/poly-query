@@ -60,6 +60,15 @@ QUERIES = {
     # count: only the row count is returned (no result serialization)
     "q16_full_sort": "count:SELECT id, dup_key, float_key FROM sk ORDER BY dup_key, float_key DESC, id",
     "q17_scan_filter": "count:SELECT tx_id, amount, category FROM tx WHERE category LIKE '%e%' AND fee < 5",
+    # Native-kernel oriented: integer/date predicates and global aggregates of columns.
+    "q18_global_agg": "SELECT COUNT(*), SUM(amount), MIN(ts), MAX(bucket), COUNT(fee) FROM tx",
+    "q19_range_filter": "SELECT COUNT(*), SUM(unit_price), MAX(discount) FROM items "
+                        "WHERE quantity BETWEEN 3 AND 5 AND product_id < 5000",
+    "q20_in_list": "SELECT category, COUNT(*) AS n FROM tx WHERE bucket IN (1, 7, 42, 99, 500) GROUP BY category",
+    "q21_date_range": "SELECT status, COUNT(*) AS n, SUM(item_count) AS s FROM orders "
+                      "WHERE order_date >= DATE '2024-01-01' AND order_date < DATE '2024-04-01' GROUP BY status",
+    "q22_null_filter": "SELECT COUNT(*), SUM(n90), MIN(d99) FROM nh WHERE n50 IS NOT NULL AND n90 > 100",
+    "q23_float_minmax": "SELECT MIN(temperature), MAX(temperature), MIN(pressure), MAX(humidity) FROM sensors",
 }
 
 CONFIGS = {
