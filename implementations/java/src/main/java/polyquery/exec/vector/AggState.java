@@ -2,6 +2,7 @@ package polyquery.exec.vector;
 
 import java.math.BigInteger;
 import java.util.Arrays;
+import java.util.List;
 import polyquery.exec.Accumulator;
 import polyquery.ffi.NativeKernels;
 import polyquery.plan.AggregateCall;
@@ -58,7 +59,7 @@ abstract class AggState {
                 return new Generic(call);
             }
             AggregateCall plain = new AggregateCall(call.function(), call.argument(), false, call.type());
-            return new Distinct(create(plain, kernels), in);
+            return new Distinct(() -> create(plain, kernels), in);
         }
         // wide DECIMAL arguments never go to the kernels (their ABI covers 64-bit values only)
         NativeAgg nat = kernels == null || in != null && in.isWideDecimal() ? null : new NativeAgg(kernels);
@@ -665,6 +666,7 @@ abstract class AggState {
      * hash set, plus a list in insertion order so partial states of parallel workers can be merged.
      */
     static final class Distinct extends AggState {
+        private final java.util.function.Supplier<AggState> plain;
         private final AggState inner;
         private final DataType type;
         private final Vec.Kind kind;
@@ -685,8 +687,10 @@ abstract class AggState {
         private Vec scratch;
         private int[] scratchGids = new int[0];
 
-        Distinct(AggState inner, DataType type) {
-            this.inner = inner;
+        /** @param plain creates the (non-DISTINCT) state of the aggregate function */
+        Distinct(java.util.function.Supplier<AggState> plain, DataType type) {
+            this.plain = plain;
+            this.inner = plain.get();
             this.type = type;
             this.kind = Vec.kindOf(type);
             boolean str = kind == Vec.Kind.OBJECT;
@@ -834,6 +838,89 @@ abstract class AggState {
         @Override
         Object result(int g) {
             return inner.result(g);
+        }
+
+        /**
+         * Merges the pairs of all {@code partials} into this (empty) state, in parallel: the value
+         * space is split into hash partitions, each deduplicated by its own task into its own
+         * plain state, and the plain states are merged per group at the end. Partial group g of
+         * partial w belongs to group {@code groupMap[w][g]} here ({@code groups} groups). Used
+         * when there are few groups, where merging group by group would run on one thread.
+         */
+        void mergeParallel(List<Distinct> partials, int[][] groupMap, int groups, int parts,
+                           java.util.function.Consumer<List<Runnable>> runAll) {
+            AggState[] states = new AggState[parts];
+            List<Runnable> tasks = new java.util.ArrayList<>();
+            for (int part = 0; part < parts; part++) {
+                int p = part;
+                tasks.add(() -> states[p] = mergePartition(partials, groupMap, groups, p, parts));
+            }
+            runAll.accept(tasks);
+            inner.grow(groups);
+            for (AggState st : states) {
+                for (int g = 0; g < groups; g++) {
+                    inner.merge(st, g, g);
+                }
+            }
+        }
+
+        private AggState mergePartition(List<Distinct> partials, int[][] groupMap, int groups, int part, int parts) {
+            AggState out = plain.get();
+            out.grow(groups);
+            PairSet set = new PairSet();
+            java.util.Map<Object, Integer> localIds = kind == Vec.Kind.OBJECT ? new java.util.HashMap<>() : null;
+            int cap = 1024;
+            Vec buf = new Vec(type, cap);
+            buf.hasNulls = false;
+            int[] gids = new int[cap];
+            int m = 0;
+            for (int w = 0; w < partials.size(); w++) {
+                Distinct o = partials.get(w);
+                int[] map = groupMap[w];
+                for (int q = 0; q < o.pairs; q++) {
+                    long raw = o.pairValue[q];
+                    long k;
+                    Object str = null;
+                    int h;
+                    if (kind == Vec.Kind.OBJECT) {
+                        str = o.strings.get((int) raw);
+                        h = str.hashCode();
+                    } else {
+                        k = key(raw);
+                        h = Long.hashCode(k * 0x9E3779B97F4A7C15L);
+                    }
+                    if (((h & 0x7fffffff) % parts) != part) {
+                        continue;
+                    }
+                    if (str != null) {
+                        Integer id = localIds.get(str);
+                        if (id == null) {
+                            id = localIds.size();
+                            localIds.put(str, id);
+                        }
+                        k = id;
+                    } else {
+                        k = key(raw);
+                    }
+                    int g = map[o.pairGroup[q]];
+                    if (set.add(g, k)) {
+                        switch (kind) {
+                            case LONG -> buf.longs[m] = raw;
+                            case DOUBLE -> buf.doubles[m] = Double.longBitsToDouble(raw);
+                            default -> buf.objects[m] = str;
+                        }
+                        gids[m++] = g;
+                        if (m == cap) {
+                            out.update(buf, null, m, gids);
+                            m = 0;
+                        }
+                    }
+                }
+            }
+            if (m > 0) {
+                out.update(buf, null, m, gids);
+            }
+            return out;
         }
     }
 

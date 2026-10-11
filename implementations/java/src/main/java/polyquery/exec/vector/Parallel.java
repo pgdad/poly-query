@@ -741,13 +741,22 @@ final class Parallel {
                 total += p.table().groupCount();
             }
             int parts = total < 16_384 ? 1 : partitions();
+            if (parts == 1 && results.size() > 1 && results.getFirst().table().hasDistinct()) {
+                // few groups: merging DISTINCT states group by group would run on one thread
+                Merged m = mergePartition(results, 0, 1, true);
+                ctx.checkNow();
+                this.merged.add(m.table());
+                emitter = new AggregateBatches.Emitter(m.table(), plan.groupKeys(), plan.aggregates(),
+                        shared.builder.batchSize());
+                return;
+            }
             List<Future<Merged>> futures = new ArrayList<>();
             for (int part = 1; part < parts; part++) {
                 int pp = part;
-                futures.add(POOL.submit(() -> mergePartition(results, pp, parts)));
+                futures.add(POOL.submit(() -> mergePartition(results, pp, parts, false)));
             }
             List<Merged> merged = new ArrayList<>();
-            merged.add(mergePartition(results, 0, parts));
+            merged.add(mergePartition(results, 0, parts, false));
             for (Future<Merged> f : futures) {
                 merged.add(await(f, ctx));
             }
@@ -774,8 +783,14 @@ final class Parallel {
                     shared.builder.batchSize());
         }
 
-        private Merged mergePartition(List<Partial> results, int part, int parts) {
+        /**
+         * Merges hash partition {@code part} of the partial tables. With {@code parallelDistinct}
+         * (a single partition), DISTINCT states are merged afterwards by value-hash partitioned
+         * parallel tasks.
+         */
+        private Merged mergePartition(List<Partial> results, int part, int parts, boolean parallelDistinct) {
             AggregateBatches.Table table = new AggregateBatches.Table(plan.groupKeys(), plan.aggregates(), ctx);
+            table.deferDistinct = parallelDistinct;
             int k = results.size();
             int[][] members = new int[k][];
             long[][] firsts = new long[k][];
@@ -805,9 +820,18 @@ final class Parallel {
             }
             table.ensureCapacity(bound);
             long[][] out = {new long[Math.max(16, bound)]};
+            int[][] groupMap = new int[k][];
+            if (parallelDistinct) {
+                for (int w = 0; w < k; w++) {
+                    groupMap[w] = new int[results.get(w).table().groupCount()];
+                }
+            }
             kWayMerge(firsts, sizes, (w, idx, i) -> {
                 int before = table.groupCount();
                 int to = table.merge(results.get(w).table(), members[w][idx]);
+                if (parallelDistinct) {
+                    groupMap[w][members[w][idx]] = to;
+                }
                 if (table.groupCount() > before) {
                     if (out[0].length <= to) {
                         out[0] = Arrays.copyOf(out[0], Math.max(to + 1, out[0].length * 2));
@@ -816,6 +840,14 @@ final class Parallel {
                 }
             });
             table.flushReservation();
+            if (parallelDistinct) {
+                List<AggregateBatches.Table> tables = new ArrayList<>();
+                for (Partial p : results) {
+                    tables.add(p.table());
+                }
+                table.mergeDistinct(tables, groupMap, Math.max(1, Math.min(64, threads)),
+                        tasks -> runAll(tasks, ctx));
+            }
             ctx.checkNow();
             return new Merged(table, out[0]);
         }
