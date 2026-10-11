@@ -349,19 +349,15 @@ def merge_groups(partials: list[dict[tuple, list]]) -> dict[tuple, list]:
 
 def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Rows:
     native = native_ops.native_scan_aggregate(node, ctx)
-    if native is not None:  # aggregates computed by the kernels from the column storage
-        try:
-            # serially: the kernels leave too little work for worker processes
-            keys, states = native.partition(ctx)
-        except native_ops.NativeFallback:
-            pass
-        else:
-            results = [state.results() for state in states]
-            width = len(node.keys)
-            for i, key in enumerate(keys):
-                prefix = () if width == 0 else (key,) if width == 1 else key
-                yield prefix + tuple(r[i] for r in results)
-            return
+    done = None if native is None else native_ops.run_scan_aggregate(native, node, ctx)
+    if done is not None:  # aggregated by the kernels from the column storage
+        keys, states = done
+        results = [state.results() for state in states]
+        width = len(node.keys)
+        for i, key in enumerate(keys):
+            prefix = () if width == 0 else (key,) if width == 1 else key
+            yield prefix + tuple(r[i] for r in results)
+        return
     partials = partition_rows(node.input, ctx, lambda rows: _aggregate_partition(node, ctx, rows))
     groups = merge_groups(partials)
     if not node.keys and not groups:

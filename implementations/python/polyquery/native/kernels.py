@@ -111,6 +111,7 @@ class NativeKernels:
         self._filter_bitmap = lib.pqk_filter_i64_bitmap
         self._filter = lib.pqk_filter_i64
         self._count = lib.pqk_count_i64
+        self._compare = lib.pqk_compare_i64
         self._sum = lib.pqk_sum_i64
         self._minmax_i64 = lib.pqk_minmax_i64
         self._minmax_f64 = lib.pqk_minmax_f64
@@ -155,6 +156,14 @@ class NativeKernels:
         count = self._count(data, validity, n, op, a, b)
         if count == _SIZE_ERROR:
             raise NativeKernelError(f"pqk_count_i64: invalid op {op}")
+        return count
+
+    def compare(self, a: int, b: int, n: int, op: int, out: array.array) -> int:
+        """Bitmap of ``op(a[i], b[i])`` (validity not consulted) into ``out``;
+        returns the number of set bits."""
+        count = self._compare(a, b, n, op, out.buffer_info()[0])
+        if count == _SIZE_ERROR:
+            raise NativeKernelError(f"pqk_compare_i64: invalid op {op}")
         return count
 
     # ------------------------------------------------------------ aggregation
@@ -225,6 +234,10 @@ class NativeKernels:
         """``a &= ~b`` (``b`` an address)."""
         pa = a.buffer_info()[0]
         self._andnot(pa, b, pa, nbytes)
+
+    def bitmap_and_raw(self, a: int, b: int, out: int, nbytes: int) -> None:
+        """``out = a & b`` over ``nbytes`` bytes (addresses; ``out`` may alias)."""
+        self._and(a, b, out, nbytes)
 
     def popcount(self, bits: int | None, nbits: int) -> int:
         return self._popcount(bits, nbits)

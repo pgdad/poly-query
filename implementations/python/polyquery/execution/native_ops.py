@@ -57,6 +57,7 @@ from ..planner import physical as pp
 from ..planner.access import column_predicate, group_may_match
 from ..storage.table import ColumnTable, RowGroup
 from ..storage.vectors import ColumnVector, DictVector, PlainVector, bits_to_flags, flags_to_bits
+from . import parallel
 from .common import scan_range
 from .compiler import evaluate_constant
 from .context import ExecutionContext
@@ -75,6 +76,11 @@ INT64_MIN, INT64_MAX = nk.INT64_MIN, nk.INT64_MAX
 _INT_KINDS = frozenset({TypeKind.INT64, TypeKind.DECIMAL, TypeKind.DATE, TypeKind.TIMESTAMP})
 _TERM_KINDS = _INT_KINDS | {TypeKind.STRING}
 _FLIPPED = {"=": "=", "<>": "<>", "<": ">", "<=": ">=", ">": "<", ">=": "<="}
+
+class NativeFallback(Exception):
+    """A native path cannot finish exactly (a kernel reported a possible
+    int64 wrap-around); the caller reruns the operator with its own code."""
+
 
 # an all-zero int64 buffer: pqk_filter_i64 over it with an always-true
 # predicate and a selection bitmap as validity lists the set bits
@@ -98,12 +104,15 @@ Interval = tuple[int, int]  # inclusive bounds within the int64 range
 @dataclass(frozen=True, eq=False)
 class Term:
     """A conjunct ``column op constants`` on a table column. ``values`` are
-    runtime values of the column's type (two for BETWEEN, any number for IN)."""
+    runtime values of the column's type (two for BETWEEN, any number for IN).
+    With ``other`` set the conjunct is ``column op other`` between two
+    columns of the same integer-represented type (``pqk_compare_i64``)."""
 
     column: int
     kind: TypeKind
     op: str  # = <> < <= > >= BETWEEN IN
     values: tuple[Any, ...]
+    other: int | None = None
 
     def matches(self, v: Any) -> bool:
         """The predicate on one non-NULL value (Python reference semantics)."""
@@ -115,6 +124,7 @@ class Term:
         return _COMPARE[op](v, values[0])
 
 
+_KERNEL_OPS = {"=": nk.EQ, "<>": nk.NE, "<": nk.LT, "<=": nk.LE, ">": nk.GT, ">=": nk.GE}
 _COMPARE: dict[str, Callable[[Any, Any], bool]] = {
     "=": operator.eq,
     "<>": operator.ne,
@@ -253,6 +263,8 @@ class NativeFilter:
         return bits, kernels.popcount(bits.buffer_info()[0], window.n)
 
     def _term_bits(self, kernels: NativeKernels, window: Window, term: Term, vector: ColumnVector) -> array.array:
+        if term.other is not None:
+            return self._columns_bits(kernels, window, term, vector, window.group.vector(term.other))
         n = window.n
         validity = window.validity(vector)
         data = vector.int64_view()
@@ -271,6 +283,26 @@ class NativeFilter:
         if self.keep_null and validity is not None:
             nulls = window.all_rows()
             kernels.bitmap_andnot(nulls, validity, window.nbytes)
+            kernels.bitmap_or(bits, nulls, window.nbytes)
+        return bits
+
+
+    def _columns_bits(
+        self, kernels: NativeKernels, window: Window, term: Term, left: ColumnVector, right: ColumnVector
+    ) -> array.array:
+        """``left op right`` on the rows where both are non-NULL (and, with
+        ``keep_null``, every row where one of them is NULL)."""
+        a, c = left.int64_view(), right.int64_view()
+        assert a is not None and c is not None
+        bits = new_bitmap(window.n)
+        kernels.compare(address(a, window.base), address(c, window.base), window.n, _KERNEL_OPS[term.op], bits)
+        valid = _valid_bits(kernels, window, left)  # the kernel ignores validity
+        if right.validity is not None:
+            kernels.bitmap_and(valid, window.validity(right), window.nbytes)
+        kernels.bitmap_and(bits, valid.buffer_info()[0], window.nbytes)
+        if self.keep_null and (left.validity is not None or right.validity is not None):
+            nulls = window.all_rows()
+            kernels.bitmap_andnot(nulls, valid.buffer_info()[0], window.nbytes)
             kernels.bitmap_or(bits, nulls, window.nbytes)
         return bits
 
@@ -361,6 +393,13 @@ def compile_filter(node: pp.Filter, ctx: ExecutionContext) -> NativeFilter | Non
 
 def _term(conjunct: b.Expr, scan: pp.TableScan, keep_null: bool) -> Term | None:
     table = scan.table
+    if isinstance(conjunct, b.Compare) and conjunct.op in _KERNEL_OPS:
+        left, right = conjunct.left, conjunct.right
+        if isinstance(left, b.ColumnRef) and isinstance(right, b.ColumnRef):
+            same = left.rel == right.rel == scan.rel and left.type == right.type
+            if same and left.type.kind in _INT_KINDS:
+                return Term(left.index, left.type.kind, conjunct.op, (), right.index)
+            return None
     negated = isinstance(conjunct, b.Compare) and conjunct.op == "<>"
     probe = conjunct
     if negated:
@@ -536,7 +575,14 @@ class NativeScanAggregate:
         keep = (lambda group: group_may_match(group, skip)) if skip else None
         start, stop = scan_range(scan, ctx, table.row_count)
         ctx.check()
+        counter = self._counter()
         for window in windows(table, keep, start, stop):
+            if counter is not None and not window.first:  # only COUNT(*) WHERE <one comparison>
+                count = counter(kernels, window)
+                if count:
+                    states[0].counts[0] += count  # type: ignore[attr-defined]
+                ctx.check()
+                continue
             if self.filter is not None:
                 sel, count = self.filter.select(kernels, window)
             else:
@@ -552,6 +598,37 @@ class NativeScanAggregate:
                         _accumulate(kernels, window, bits, n, spec, state, gid)
             ctx.check()
         return list(index), states
+
+    def _counter(self) -> Callable[[NativeKernels, Window], int] | None:
+        """``SELECT COUNT(*) … WHERE col op constant`` on a plain integer
+        column: one ``pqk_count_i64`` call per window."""
+        native = self.filter
+        if self.key is not None or len(self.specs) != 1 or self.specs[0].column is not None:
+            return None
+        if native is None or native.keep_null or len(native.terms) != 1:
+            return None
+        term = native.terms[0]
+        if term.other is not None or term.kind is TypeKind.STRING:
+            return None
+        intervals = _int_intervals(term)
+        if intervals is None:
+            if not INT64_MIN <= term.values[0] <= INT64_MAX:
+                return None
+            args: tuple[int, int, int] | None = (nk.NE, term.values[0], 0)
+        elif len(intervals) == 1:
+            args = _interval_kernel_args(*intervals[0])
+        else:
+            return None
+        op, a, c = args if args is not None else (nk.GE, INT64_MIN, 0)
+
+        def count(kernels: NativeKernels, window: Window) -> int:
+            vector = window.group.vector(term.column)
+            data = vector.int64_view()
+            if data is None or isinstance(vector, DictVector):
+                raise NativeFallback()
+            return kernels.count(address(data, window.base), window.validity(vector), window.n, op, a, c)
+
+        return count
 
     def _groups(
         self,
@@ -748,11 +825,6 @@ def compile_scan_aggregate(
     return NativeHashScanAggregate(scan, native, specs, keys, len(node.layout))  # type: ignore[arg-type]
 
 
-class NativeFallback(Exception):
-    """A native path cannot finish exactly (a kernel reported a possible
-    int64 wrap-around); the caller reruns the operator with its own code."""
-
-
 @dataclass(eq=False)
 class NativeHashScanAggregate:
     """GROUP BY columns of a (natively filtered) TableScan with COUNT and
@@ -762,7 +834,13 @@ class NativeHashScanAggregate:
     counts, reading them directly from the column storage when the whole
     window is selected (else from natively gathered values). If the kernel
     reports a possible wrap-around, :class:`NativeFallback` is raised and
-    the aggregation runs again in the engine's exact Python arithmetic."""
+    the aggregation runs again in the engine's exact Python arithmetic.
+
+    With parallel workers and a single integer key the groups are *hash
+    partitioned* (:meth:`hash_partition`): every worker scans the whole
+    table but keeps only the rows whose key hashes (``pqk_hash_i64``) into
+    its share of the hash range, so the workers' groups are disjoint and
+    merging their results is a concatenation instead of a lookup per group."""
 
     scan: pp.TableScan
     filter: NativeFilter | None
@@ -771,6 +849,55 @@ class NativeHashScanAggregate:
     width: int
 
     def partition(self, ctx: ExecutionContext) -> tuple[list[Any], list[GroupState]]:
+        """Serial aggregation of the scan range (raises NativeFallback)."""
+        start, stop = scan_range(self.scan, ctx, self.scan.table.row_count)
+        index, sums, counts, _ = self._aggregate(ctx, start, stop, None)
+        return list(index), self._states(sums, counts)
+
+    def hash_partitionable(self) -> bool:
+        return len(self.keys) == 1 and self.scan.table.columns[self.keys[0]].type.kind in _INT_KINDS
+
+    def hash_partition(self, ctx: ExecutionContext) -> tuple[list[Any], list[array.array], list[array.array], list[int]] | None:
+        """The groups of hash partition ``ctx.partitions[scan]`` over the whole
+        scan: (keys, sums, counts, first row of each group); None if the
+        kernels reported a possible overflow."""
+        part = ctx.partitions[id(self.scan)]
+        try:
+            index, sums, counts, firsts = self._aggregate(ctx, 0, None, part)
+        except NativeFallback:
+            return None
+        return list(index), sums, counts, firsts
+
+    def merge_hash_partitions(
+        self, parts: list[tuple[list[Any], list[array.array], list[array.array], list[int]]]
+    ) -> tuple[list[Any], list[GroupState]]:
+        """Concatenates the disjoint groups of the hash partitions and orders
+        them by their first row, i.e. as a serial scan would have found them."""
+        keys: list[Any] = []
+        firsts: list[int] = []
+        sums: list[list[int]] = [[] for _ in self.specs]
+        counts: list[list[int]] = [[] for _ in self.specs]
+        for part_keys, part_sums, part_counts, part_firsts in parts:
+            keys += part_keys
+            firsts += part_firsts
+            for k in range(len(self.specs)):
+                sums[k] += part_sums[k].tolist()
+                counts[k] += part_counts[k].tolist()
+        order = sorted(range(len(keys)), key=firsts.__getitem__)
+        states = self._states([take_list(s, order) for s in sums], [take_list(c, order) for c in counts])
+        return take_list(keys, order), states
+
+    def _states(self, sums: Sequence[Sequence[int]], counts: Sequence[Sequence[int]]) -> list[GroupState]:
+        states = [make_state(spec.call) for spec in self.specs]
+        for state, total, count in zip(states, sums, counts):
+            state.counts = list(count)  # type: ignore[attr-defined]
+            if isinstance(state, SumState):
+                state.totals = list(total)
+        return states
+
+    def _aggregate(
+        self, ctx: ExecutionContext, start: int, stop: int | None, part: tuple[int, int] | None
+    ) -> tuple[dict[Any, int], list[array.array], list[array.array], list[int]]:
         kernels = ctx.native
         assert kernels is not None
         scan = self.scan
@@ -779,10 +906,10 @@ class NativeHashScanAggregate:
         index: dict[Any, int] = {}
         sums = [array.array("q") for _ in self.specs]
         counts = [array.array("q") for _ in self.specs]
+        firsts: list[int] = []  # (hash partitions) global first row of each group
         reserved = ctx.memory_used
         skip = scan.skip
         keep = (lambda group: group_may_match(group, skip)) if skip else None
-        start, stop = scan_range(scan, ctx, table.row_count)
         ctx.check()
         try:
             for window in windows(table, keep, start, stop):
@@ -791,18 +918,15 @@ class NativeHashScanAggregate:
                 else:
                     sel = window.all_rows()
                     count = window.n - window.first
+                if count and part is not None:
+                    count = _hash_select(kernels, window, window.group.vector(self.keys[0]), part, sel)
                 if count:
-                    self._window(kernels, window, sel, count, index, sums, counts, ctx)
+                    self._window(kernels, window, sel, count, index, sums, counts, ctx, firsts if part else None)
                 ctx.check()
         except NativeFallback:
             ctx.memory_used = reserved  # the engine's own path accounts again
             raise
-        states = [make_state(spec.call) for spec in self.specs]
-        for state, total, count_ in zip(states, sums, counts):
-            state.counts = count_.tolist()  # type: ignore[attr-defined]
-            if isinstance(state, SumState):
-                state.totals = total.tolist()
-        return list(index), states
+        return index, sums, counts, firsts
 
     def _window(
         self,
@@ -814,6 +938,7 @@ class NativeHashScanAggregate:
         sums: list[array.array],
         counts: list[array.array],
         ctx: ExecutionContext,
+        firsts: list[int] | None,
     ) -> None:
         group = window.group
         whole = count == window.n  # every row of the window: no gathering
@@ -832,6 +957,12 @@ class NativeHashScanAggregate:
             for arr in itertools.chain(sums, counts):
                 arr.frombytes(zeros)
             ctx.reserve_rows(len(missing), self.width)
+            if firsts is not None:
+                # position of each new key's first row (reversed: the earliest wins)
+                at = dict(zip(reversed(keys), range(len(keys) - 1, -1, -1)))
+                offset = group.start + window.base
+                rows = [at[k] for k in missing]
+                firsts.extend(offset + (r if idx is None else idx[r]) for r in rows)
         ids = array.array("I", map(index.__getitem__, keys))
         ngroups = len(index)
         zero = _zero_data(count)
@@ -856,6 +987,72 @@ class NativeHashScanAggregate:
                         values = gathered.buffer_info()[0]
             if not kernels.group_sum_i64(ids, values, validity, count, total, count_, ngroups):
                 raise NativeFallback()
+
+
+# hash partitioning: partitions own contiguous ranges of the low HASH_BITS bits
+HASH_BITS = 16
+HASH_SEED = 0x9E3779B97F4A7C15
+_hash_masks = array.array("q")
+
+
+def _hash_mask(n: int) -> int:
+    """Address of n int64 masks selecting the low HASH_BITS bits."""
+    global _hash_masks
+    masks = _hash_masks
+    if len(masks) < n:
+        masks = _hash_masks = array.array("q", [(1 << HASH_BITS) - 1]) * max(n, WINDOW_ROWS)
+    return masks.buffer_info()[0]
+
+
+def _hash_select(
+    kernels: NativeKernels, window: Window, key: ColumnVector, part: tuple[int, int], sel: array.array
+) -> int:
+    """Restricts ``sel`` to the rows whose key hashes into partition
+    ``part = (index, count)``; returns the remaining row count. NULL keys
+    (stored as 0) all hash alike, so the NULL group stays in one partition."""
+    data = key.int64_view()
+    if data is None:
+        raise NativeFallback()
+    n = window.n
+    hashes = array.array("q", bytes(8 * n))
+    kernels.hash_i64(address(data, window.base), n, HASH_SEED, hashes)
+    pa = hashes.buffer_info()[0]
+    kernels.bitmap_and_raw(pa, _hash_mask(n), pa, 8 * n)  # low HASH_BITS bits
+    index, count = part
+    space = 1 << HASH_BITS
+    lo, hi = space * index // count, space * (index + 1) // count - 1
+    mine = new_bitmap(n)
+    kernels.filter_bitmap(pa, None, n, nk.BETWEEN, lo, hi, mine)
+    kernels.bitmap_and(sel, mine.buffer_info()[0], window.nbytes)
+    return kernels.popcount(sel.buffer_info()[0], n)
+
+
+def take_list(values: Sequence[Any], order: Sequence[int]) -> list[Any]:
+    return [values[i] for i in order] if len(order) < 2 else list(operator.itemgetter(*order)(values))
+
+
+def run_scan_aggregate(
+    native: NativeScanAggregate | NativeHashScanAggregate, node: pp.HashAggregate, ctx: ExecutionContext
+) -> tuple[list[Any], list[GroupState]] | None:
+    """Runs a native scan aggregation: hash partitioned in worker processes
+    when the plan has a parallel pipeline below and the input is large,
+    else serially (the kernels leave too little work per row to pay for
+    worker processes). None if the engine must aggregate itself."""
+    gather = node.input if isinstance(node.input, pp.Gather) else None
+    if (
+        isinstance(native, NativeHashScanAggregate)
+        and gather is not None
+        and native.hash_partitionable()
+        and parallel.use_processes(gather, ctx)
+    ):
+        parts = parallel.run_partitions(gather, ctx, lambda: native.hash_partition(ctx))
+        if any(part is None for part in parts):
+            return None
+        return native.merge_hash_partitions(parts)  # type: ignore[arg-type]
+    try:
+        return native.partition(ctx)
+    except NativeFallback:
+        return None
 
 
 def _gathered_validity(window: Window, vector: ColumnVector, idx: array.array) -> array.array:

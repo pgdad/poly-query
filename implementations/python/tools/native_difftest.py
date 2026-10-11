@@ -125,6 +125,9 @@ class QueryGen:
             return f"{col} IS {self.pick(['', 'NOT '])}NULL"
         if r < 0.9:  # may fail: keeps NULL rows of earlier terms in play
             return self.pick(["100 / (a - a) = 1", "a / (id - 7) >= 0", "big * 3 > 0", "CAST(u AS INT64) > 0"])
+        if r < 0.93:
+            return f"{self.pick(['a', 'id', 'big', 'a'])} {self.pick(['=', '<>', '<', '<=', '>', '>='])} " \
+                   f"{self.pick(['id', 'a', 'big'])}"
         if r < 0.95:
             return f"({self.term()} OR {self.term()})"
         return self.pick(["a + 1 > 3", "LENGTH(s) > 1", "f * 2 < 10", "bo", "NOT bo", "s LIKE 'a%'"])
@@ -134,6 +137,8 @@ class QueryGen:
 
     def query(self, table: str) -> str:
         r = self.rng.random()
+        if r < 0.08:
+            return f"SELECT COUNT(*) FROM {table} WHERE {self.term()}"
         if r < 0.4:
             cols = ", ".join(self.rng.sample([c for c, _ in SCHEMA], self.rng.randint(1, 4)))
             order = " ORDER BY id" if self.rng.random() < 0.3 else ""
