@@ -6,6 +6,7 @@ import (
 	"math/bits"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"polyquery/internal/errs"
@@ -193,7 +194,7 @@ func buildVSort(ec *Context, x *physical.Sort) (BatchOperator, error) {
 		if err != nil {
 			return nil, err
 		}
-		op.par = &sortInput{ranges: ranges, ops: ops, srcs: srcs}
+		op.par = &sortInput{ranges: ranges, ops: ops, srcs: srcs, exact: rowPreserving(x.Input)}
 		return op, nil
 	}
 	in, err := BuildBatch(ec, x.Input)
@@ -211,10 +212,20 @@ type sortInput struct {
 	ranges []scanRange
 	ops    []BatchOperator
 	srcs   []*singleRange
+	// exact: the pipeline is a table scan with projections, so every
+	// morsel yields exactly its range's rows and workers write them straight to their
+	// final positions.
+	exact bool
 }
 
 // materialize runs the input pipelines and returns the concatenated store.
 func (p *sortInput) materialize(ec *Context, classes []vclass) (*colStore, error) {
+	if p.exact {
+		st, ok, err := p.materializeExact(ec, classes)
+		if ok || err != nil {
+			return st, err
+		}
+	}
 	stores := make([]*colStore, len(p.ranges))
 	width := int64(len(classes))
 	err := runMorsels(ec, p.ranges, len(p.ops), func(w, i int) error {
@@ -240,6 +251,122 @@ func (p *sortInput) materialize(ec *Context, classes []vclass) (*colStore, error
 		return nil, err
 	}
 	return concatStores(stores, classes, len(p.ops)), nil
+}
+
+// rowPreserving reports whether a pipeline yields every row of its table
+// scan: projections over the scan.
+func rowPreserving(n physical.Node) bool {
+	for {
+		switch x := n.(type) {
+		case *physical.TableScan:
+			return true
+		case *physical.Project:
+			n = x.Input
+		default:
+			return false
+		}
+	}
+}
+
+// materializeExact materializes a plain table scan: morsel i's rows go to
+// positions offs[i]…offs[i+1]-1 of a store allocated up front. ok is false
+// if a morsel did not yield exactly its rows (then nothing is returned).
+func (p *sortInput) materializeExact(ec *Context, classes []vclass) (st *colStore, ok bool, err error) {
+	offs := make([]int, len(p.ranges)+1)
+	for i, r := range p.ranges {
+		offs[i+1] = offs[i] + r.end - r.start
+	}
+	n := offs[len(p.ranges)]
+	st = newColStore(classes)
+	st.n = n
+	for k, cls := range classes {
+		c := &st.cols[k]
+		switch cls {
+		case vInt:
+			c.I = make([]int64, n)
+		case vFloat:
+			c.F = make([]float64, n)
+		case vWide:
+			c.W = make([]types.Int128, n)
+		default:
+			c.S = make([]string, n)
+		}
+	}
+	var nullsMu sync.Mutex
+	nullsOf := func(k int) []bool {
+		nullsMu.Lock()
+		defer nullsMu.Unlock()
+		if st.cols[k].Nulls == nil {
+			st.cols[k].Nulls = make([]bool, n)
+		}
+		return st.cols[k].Nulls
+	}
+	var short atomic.Bool
+	width := int64(len(classes))
+	err = runMorsels(ec, p.ranges, len(p.ops), func(w, i int) error {
+		p.srcs[w].set(p.ranges[i])
+		pos, end := offs[i], offs[i+1]
+		for {
+			b, err := p.ops[w].NextBatch()
+			if err != nil {
+				return err
+			}
+			if b == nil {
+				if pos != end {
+					short.Store(true)
+				}
+				return nil
+			}
+			if err := ec.Check(); err != nil {
+				return err
+			}
+			m := b.Len()
+			if pos+m > end {
+				short.Store(true)
+				return nil
+			}
+			var bytes int64
+			for k, v := range b.Cols {
+				c := &st.cols[k]
+				switch classes[k] {
+				case vInt:
+					copyActive(c.I[pos:pos+m], v.I, b.N, b.Sel)
+				case vFloat:
+					copyActive(c.F[pos:pos+m], v.F, b.N, b.Sel)
+				case vWide:
+					copyActive(c.W[pos:pos+m], v.W, b.N, b.Sel)
+				default:
+					dst := c.S[pos : pos+m]
+					copyActive(dst, v.strs(b.N), b.N, b.Sel)
+					for _, str := range dst {
+						bytes += int64(len(str))
+					}
+				}
+				if v.Nulls != nil {
+					copyActive(nullsOf(k)[pos:pos+m], v.Nulls, b.N, b.Sel)
+				}
+			}
+			pos += m
+			if err := ec.Mem.Reserve(int64(m)*(28+16*width) + bytes); err != nil {
+				return err
+			}
+		}
+	})
+	if err != nil || short.Load() {
+		return nil, false, err
+	}
+	return st, true, nil
+}
+
+// copyActive copies the rows sel (nil: 0..n-1) of src to dst.
+func copyActive[T any](dst, src []T, n int, sel []int32) {
+	if sel == nil {
+		copy(dst, src[:n])
+		return
+	}
+	for o, i := range sel {
+		dst[o] = src[i]
+	}
 }
 
 // concatStores concatenates column stores (copying with up to workers
