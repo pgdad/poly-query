@@ -116,19 +116,19 @@ def main():
     print("| query | " + " | ".join(configs) + " |")
     print("|---|" + "---:|" * len(configs))
     for q in args.queries.split(","):
-        cells = []
-        for c in configs:
-            times = []
-            rc = None
-            for _ in range(args.repeat):
+        # Configurations are interleaved within each repetition so that load
+        # drift on the machine affects all of them alike.
+        times = {c: [] for c in configs}
+        status = {}
+        for _ in range(args.repeat):
+            for c in configs:
+                if c in status and not isinstance(status[c], int):
+                    continue
                 t0 = time.monotonic()
                 r = s.req({"op": "query", "sql": QUERIES[q], "options": {**CONFIGS[c], "result": "count", "timeout_ms": args.timeout_ms}})
-                times.append((time.monotonic() - t0) * 1000)
-                if not r.get("ok"):
-                    rc = r["error"]["code"]
-                    break
-                rc = r["row_count"]
-            cells.append(f"{statistics.median(times):.0f}" if isinstance(rc, int) else str(rc))
+                times[c].append((time.monotonic() - t0) * 1000)
+                status[c] = r["row_count"] if r.get("ok") else r["error"]["code"]
+        cells = [f"{statistics.median(times[c]):.1f}" if isinstance(status[c], int) else str(status[c]) for c in configs]
         print(f"| {q} | " + " | ".join(cells) + " |", flush=True)
     s.close()
 

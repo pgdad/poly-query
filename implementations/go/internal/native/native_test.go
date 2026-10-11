@@ -1,6 +1,7 @@
 package native
 
 import (
+	"fmt"
 	"math"
 	"math/bits"
 	"math/rand/v2"
@@ -12,7 +13,7 @@ import (
 
 // testLib loads the library from $PQ_NATIVE_KERNELS or the workspace build
 // directory, skipping the test when it is unavailable.
-func testLib(t *testing.T) *Lib {
+func testLib(t testing.TB) *Lib {
 	t.Helper()
 	path := os.Getenv("PQ_NATIVE_KERNELS")
 	if path == "" {
@@ -195,4 +196,101 @@ func TestGroupSum(t *testing.T) {
 	if st := lib.GroupSumI64([]uint32{3}, []int64{1}, nil, sums, nil); st != Invalid {
 		t.Fatalf("invalid status %d", st)
 	}
+}
+
+// Benchmarks: kernel calls through cgo vs equivalent Go loops, at the
+// engine's batch size (2,048) and its native aggregation window (65,536).
+
+func benchData(n int) ([]int64, []byte) {
+	r := rand.New(rand.NewPCG(3, 4))
+	data := make([]int64, n)
+	for i := range data {
+		data[i] = r.Int64N(1000)
+	}
+	valid := make([]byte, BitmapBytes(n))
+	for i := range valid {
+		valid[i] = 0xFF
+	}
+	return data, valid
+}
+
+func BenchmarkCallOverhead(b *testing.B) {
+	lib := testLib(b)
+	for b.Loop() {
+		lib.SumI64(nil, nil)
+	}
+}
+
+func BenchmarkFilterSel(b *testing.B) {
+	lib := testLib(b)
+	for _, n := range []int{2048, 65536} {
+		data, valid := benchData(n)
+		out := make([]uint32, n)
+		b.Run(fmt.Sprintf("kernel/%d", n), func(b *testing.B) {
+			for b.Loop() {
+				lib.FilterI64(data, valid, LT, 100, 0, out)
+			}
+		})
+		b.Run(fmt.Sprintf("go/%d", n), func(b *testing.B) {
+			for b.Loop() {
+				k := 0
+				for i, x := range data {
+					out[k] = uint32(i)
+					if valid[i>>3]&(1<<(i&7)) != 0 && x < 100 {
+						k++
+					}
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkSum(b *testing.B) {
+	lib := testLib(b)
+	for _, n := range []int{2048, 65536} {
+		data, valid := benchData(n)
+		b.Run(fmt.Sprintf("kernel/%d", n), func(b *testing.B) {
+			for b.Loop() {
+				lib.SumI64(data, valid)
+			}
+		})
+		b.Run(fmt.Sprintf("go/%d", n), func(b *testing.B) {
+			for b.Loop() {
+				var s int64
+				ok := true
+				for i, x := range data {
+					if valid[i>>3]&(1<<(i&7)) != 0 {
+						c := s + x
+						ok = ok && (c > s) == (x > 0)
+						s = c
+					}
+				}
+				_ = ok
+			}
+		})
+	}
+}
+
+func BenchmarkHash(b *testing.B) {
+	lib := testLib(b)
+	data, _ := benchData(2048)
+	out := make([]uint64, len(data))
+	b.Run("kernel", func(b *testing.B) {
+		for b.Loop() {
+			lib.HashI64(data, 1, out)
+		}
+	})
+	b.Run("go", func(b *testing.B) {
+		for b.Loop() {
+			for i, x := range data {
+				k := uint64(x) ^ 1
+				k ^= k >> 33
+				k *= 0xff51afd7ed558ccd
+				k ^= k >> 33
+				k *= 0xc4ceb9fe1a85ec53
+				k ^= k >> 33
+				out[i] = k
+			}
+		}
+	})
 }

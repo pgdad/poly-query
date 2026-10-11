@@ -9,7 +9,9 @@ HTTP/1.1 with streamed results, admission control, timeouts, cancellation,
 metrics, structured logs and graceful shutdown — executed either
 row-at-a-time (the Volcano baseline) or vectorized over column batches, with
 morsel-driven intra-query parallelism, hash / sort-merge / nested-loop joins,
-a switchable logical optimizer and explicit SIMD kernels.
+a switchable logical optimizer and explicit SIMD kernels — and optionally
+accelerated by the native kernel library `libpqkernels` loaded through cgo
+(M9).
 
 ## Build prerequisites
 
@@ -20,6 +22,9 @@ a switchable logical optimizer and explicit SIMD kernels.
   `simd/archsimd` package; without it (plain `go build`, other
   architectures) portable loops are used and results are identical.
 * `make`.
+* A C compiler (`cc`) for cgo, used only by `internal/native` to load the
+  optional native kernel library at run time; with `CGO_ENABLED=0` the
+  engine builds without native kernel support.
 
 ```bash
 make build      # → build/polyquery
@@ -42,12 +47,13 @@ None. Only the Go standard library is used (`ENGINE.json` lists no libraries).
 `sql.subquery`, `sql.cte`, `sql.correlated_subquery`, `phase3`,
 `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`, `phase4`,
 `http.streaming`, `phase5`, `exec.row`, `exec.vectorized`, `exec.parallel`,
-`join.hash`, `join.merge`, `join.nested_loop`.
+`join.hash`, `join.merge`, `join.nested_loop`, `native.kernels`.
 
-`native.kernels` is not claimed: native kernels are optional
-(native-kernels.md) and this engine uses Go code only (cgo would be needed
-to load `libpqkernels`). `--native-kernels PATH` is accepted and ignored,
-and `native: true` is accepted and has no effect.
+`native.kernels` is claimed by cgo builds (the default with a C compiler):
+`--native-kernels PATH` loads `libpqkernels` and queries with `native:
+true` use it (see [Native kernels](#native-kernels-m9)). Builds without cgo
+(`CGO_ENABLED=0`) accept `--native-kernels` and `native: true` but always
+use the Go code paths and do not claim the capability.
 
 `storage.mmap` uses real memory mapping (`syscall.Mmap`, standard library)
 on all Unix platforms; on other platforms `open` falls back to reading the
@@ -82,6 +88,7 @@ SQL text ─lexer→ tokens ─parser→ AST ─analyzer→ logical plan ─opti
 | `internal/ingest` | CSV (RFC 4180 + spec rules) and strict JSON/JSONL parsers, schema inference and explicit-schema conversion |
 | `internal/types` | Type system: canonical names/aliases, values, exact DECIMAL arithmetic (int64 unscaled + 128-bit products, big-int sums), proleptic Gregorian DATE/TIMESTAMP, CAST matrix, text parsing/formatting, ordering |
 | `internal/errs` | Structured errors with stable codes and optional details |
+| `internal/native` | cgo binding of `libpqkernels`: run-time `dlopen`/`dlsym`, ABI check, length-checked Go wrappers per kernel (stub without cgo) |
 
 ### Column IDs instead of positions
 
@@ -505,6 +512,197 @@ another binary, e.g. a build of the baseline commit), or with Go benchmarks:
 `POLYQUERY_BENCH_DATA=/tmp/pqdata/1m go test ./internal/engine -run - -bench
 Queries`.
 
+### Native kernels (M9)
+
+`--native-kernels PATH` loads the native kernel library `libpqkernels`
+(`native-kernels/`, C ABI v1 in `native-kernels/include/pq_kernels.h`;
+build it with `make -C native-kernels`). Queries that run with the option
+`native: true` then use its kernels for filtering, aggregation, bitmap,
+hashing and gather work; without the option, without the library, or where
+no kernel applies, the engine's own Go code paths run. Results are
+identical either way (verified by the conformance suite in every mode, by
+differential unit tests and by `scripts/difftest.py --native`).
+
+#### FFI design
+
+* **Go's standard FFI, cgo** (part of the Go toolchain; a C compiler is
+  needed, as for any cgo build). Package `internal/native` is the only cgo
+  code: `native_cgo.go` (build tag `cgo && unix`) and `native_stub.go` (all
+  other builds, where `Load` fails and `native.kernels` is not claimed).
+* **Run-time loading, no link-time dependency**: the engine builds and runs
+  without the library. `native.Load` calls `dlopen(path, RTLD_NOW |
+  RTLD_LOCAL)` and resolves every kernel with `dlsym` into a C function
+  table (`pq_lib`, allocated in C memory); small `static` C trampolines call
+  through the table. `Load` then checks `pqk_abi_version() == 1` and calls
+  `pqk_init()`, whose runtime dispatch picks the best variant for the CPU
+  (AVX-512 on the measurement machine) and honours `PQ_KERNELS_VARIANT`. A
+  missing file, a missing symbol or a wrong ABI version is logged as a
+  warning (`native kernels unavailable`) and the engine continues with its
+  own code paths; the loaded variant is logged at startup.
+* **Zero-copy calls**: the kernels read Go memory directly — storage vectors
+  (`[]int64`, `[]float64`), selection vectors and bitmaps contain no Go
+  pointers, so passing them obeys the cgo pointer rules, and the
+  trampolines are declared `#cgo noescape` / `#cgo nocallback` (the kernels
+  neither retain pointers nor call back), so arguments are not forced to
+  the heap. A call costs about 21 ns (`BenchmarkCallOverhead`); the engine
+  calls kernels once per batch (2,048 rows) or per window (up to 65,536
+  rows), never per row.
+* **Bitmaps**: the engine's validity bitmaps (`storage.Bitmap`, `[]uint64`,
+  bit *i* of word *i*/64) are byte-identical to the kernels' LSB-first byte
+  bitmaps on little-endian hosts and are passed as `[]byte` views; a window
+  starting at a row that is not a multiple of 8 (small morsels) is shifted
+  into a scratch buffer. Big-endian hosts refuse to load the library.
+* **Safety**: the Go wrappers (`Lib.FilterI64`, `Lib.SumI64`, …) check
+  buffer lengths and panic instead of letting C overrun Go memory, and
+  translate the C conventions (`(size_t)-1`, status codes) into Go results.
+  `Lib` is safe for concurrent use (the kernels are thread-safe after
+  `pqk_init`), so parallel workers and concurrent HTTP queries share it.
+* **Per query**: `exec.Context.Native` is the library when the query has
+  `native: true` and the library is loaded (`nil` otherwise); every native
+  operator is chosen when the operator tree is built, so `EXPLAIN` plans
+  are unchanged. Plans calling `PQ_SLEEP` keep the Go paths (native
+  filters reorder conjunct evaluation, and its evaluation count is
+  observable).
+
+#### Which kernels are used where
+
+| Engine operation | Kernels | Modes |
+|---|---|---|
+| **Scan filters** (`nfilter.go`): conjuncts of a filter directly above a table scan built from int-class comparisons (BOOLEAN, INT64, DECIMAL, DATE, TIMESTAMP; column vs constant or column vs column), `BETWEEN`, `IN` lists, `IS [NOT] NULL` (any type), boolean columns and literals, combined with `AND`/`OR`/`NOT` | `pqk_filter_i64` (single comparison → selection vector), `pqk_filter_i64_bitmap`, `pqk_compare_i64`, `pqk_bitmap_and` / `_or` / `_andnot` | row and vectorized, serial and parallel pipelines |
+| **Scan aggregation** (`nagg.go`): aggregates without `GROUP BY` over a scan, natively filtered scan or pass-through projection: `COUNT(*)`, `COUNT(col)`, `SUM`/`AVG` of INT64/DECIMAL, `MIN`/`MAX` of int-class and FLOAT64 columns | `pqk_bitmap_popcount`, `pqk_count_i64`, `pqk_sum_i64`, `pqk_minmax_i64`, `pqk_minmax_f64`, `pqk_bitmap_and` | row and vectorized; parallel over morsels with `threads > 1` |
+| **Grouped SUM/AVG** of INT64/DECIMAL (`exactSumState`) | `pqk_group_sum_i64` into per-group int64 partial sums | vectorized |
+| **GROUP BY a single int-class key**: batch key hashing for an open-addressing group table | `pqk_hash_i64` | vectorized |
+| **Hash join probe output** (int columns of the probe side) and **compaction** of parallel scan batches | `pqk_gather_i64` | vectorized |
+
+How three-valued logic maps onto bitmaps: a filter keeps rows whose
+predicate is TRUE, so every predicate is compiled into the bitmap of its
+TRUE rows. A comparison is TRUE on valid rows where it holds (the kernels
+take the validity bitmap), `AND`/`OR` of TRUE-sets are intersection/union,
+and `NOT` is pushed to the leaves (De Morgan, negated operators, `NOT
+BETWEEN` → `x < lo OR x > hi`), which is exact because NOT keeps NULL as
+NULL. Comparisons with a NULL constant and `x NOT IN (…, NULL)` select no
+row. Constants are evaluated and converted exactly as the row evaluator
+does (DECIMAL constants rescaled to the column's scale, BETWEEN/IN bounds
+cast to the comparison type first); anything not exactly representable —
+or a constant whose evaluation fails — leaves the conjunct to the Go
+evaluator. Conjuncts that are not native are evaluated by the regular
+filter on the natively selected rows (short-circuiting is permitted by
+types.md §6; tests avoid errors in operands that need not be evaluated).
+
+**Overflow flags are honoured exactly.** `pqk_sum_i64` reports
+`PQK_OVERFLOW` when the exact sum of a window leaves the int64 range; that
+window is then summed exactly in Go (128-bit/big-integer sums), so the
+overflow decision (`NUMERIC_OVERFLOW`, DECIMAL precision bounds) is taken on
+the exact total as without kernels — intermediate overflow that cancels out
+is not an error. `pqk_group_sum_i64` accumulates into int64 partial sums
+with wrapping arithmetic and reports `PQK_OVERFLOW` if an addition may have
+wrapped: the batch is then subtracted again (wrapping addition is exactly
+invertible) and added through the exact Go path; `PQK_EINVAL` (impossible
+by construction) also falls back. Partial sums are folded into the exact
+per-group sums before results are computed or merged.
+
+Kernels deliberately **not** used:
+
+* `pqk_sum_f64` — lane-wise reassociated summation is not bit-identical to
+  the engine's sequential FLOAT64 sums, and results must be identical with
+  and without native kernels.
+* `pqk_hash_i64` for **hash joins** — measured on the 1m datasets, its
+  avalanche turns clustered (often sequential) join keys into random
+  bucket accesses: probing `order_items ⋈ orders` became 1.6× slower
+  (41 → 66 ms) than with the engine's locality-preserving multiplicative
+  hash. It is used for GROUP BY, where it wins (below).
+* `pqk_compare_fixed` — the engine has no fixed-width binary keys (strings
+  are variable length; sorting uses typed comparisons).
+
+Not accelerated (Go paths): predicates on FLOAT64 or STRING values,
+expressions over columns (`a + 1 > 5`), filters that are not directly
+above a scan (e.g. with `optimize: false` above a join), index scans,
+grouped MIN/MAX/COUNT, multi-column or non-integer group keys, and the
+nested-loop / sort-merge joins.
+
+#### Verification
+
+* `internal/native` unit tests compare every kernel with a Go reference on
+  random data incl. NULLs and values at the int64 limits (run them under
+  each variant with `PQ_KERNELS_VARIANT=reference|scalar|avx2|avx512`).
+* `internal/engine/native_test.go` runs ~60 filter/aggregate/join queries
+  over three storage layouts (large column groups, odd group sizes, row
+  layout) in five mode/thread/optimize configurations and requires
+  byte-identical results (and identical errors) with and without
+  `native: true`, plus exact SUM overflow cases (overflow in the final sum,
+  intermediate overflow that cancels out, grouped and global).
+* The conformance suite passes with `--native` and `--native --modes`, also
+  with tiny morsels (`POLYQUERY_MORSEL_ROWS`, unaligned bitmap windows,
+  parallel native aggregation) and with every kernel variant forced through
+  `PQ_KERNELS_VARIANT`; `scripts/difftest.py --native LIB` adds `native:
+  true` variants to its random differential test.
+
+#### Measurements
+
+Same machine and method as above (AMD Ryzen 9 9950X3D, AVX-512 variant
+selected; session protocol, column layout, `result: "count"`, client-side
+milliseconds incl. the protocol round trip; median of 11 runs with the
+configurations interleaved within each run; the machine had a load
+average around 10 from other work, so differences below ~10% are noise).
+`*_nat` is the same configuration with `native: true`:
+
+```
+python3 implementations/go/scripts/bench.py --data /tmp/pqdata/1m \
+    --native native-kernels/build/x86_64/libpqkernels.so \
+    --configs row1,row1_nat,vec1,vec1_nat,vec8,vec8_nat --repeat 11
+```
+
+| query | row1 | row1_nat | vec1 | vec1_nat | vec8 | vec8_nat |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| filter_count (int + string predicate) | 69.0 | 16.1 | 4.1 | 3.8 | 1.1 | 0.7 |
+| agg_lowcard | 125.8 | 129.4 | 14.7 | 13.1 | 2.9 | 2.2 |
+| agg_highcard (100k int groups) | 174.8 | 210.0 | 31.3 | 21.9 | 24.3 | 22.0 |
+| agg_expr | 171.2 | 141.0 | 19.9 | 18.2 | 3.6 | 3.3 |
+| sensor_agg | 154.2 | 153.1 | 16.7 | 17.2 | 4.2 | 3.8 |
+| items_sum | 128.0 | 88.2 | 32.7 | 29.3 | 5.3 | 4.9 |
+| join_agg | 428.7 | 404.6 | 70.5 | 68.1 | 11.1 | 10.8 |
+| join_big | 327.4 | 297.7 | 36.7 | 35.5 | 13.8 | 14.3 |
+| join_filter | 24.4 | 24.4 | 2.0 | 1.9 | 1.6 | 1.3 |
+| topn | 43.5 | 41.9 | 11.3 | 11.2 | 2.3 | 2.0 |
+| sort_full | 1820.8 | 1855.4 | 257.5 | 274.6 | 143.4 | 135.5 |
+| distinct | 49.9 | 49.0 | 7.9 | 7.2 | 5.1 | 4.5 |
+| const_fold (DECIMAL comparisons) | 67.1 | 0.9 | 3.5 | 0.6 | 0.8 | 0.3 |
+| join_small | 7.2 | 4.1 | 0.8 | 0.7 | 0.7 | 0.7 |
+| int_filter (BETWEEN + comparison) | 99.9 | 0.9 | 88.5 | 1.0 | 12.5 | 0.6 |
+| int_filter_rows (OR of equalities, rows) | 97.1 | 1.2 | 2.8 | 0.9 | 1.1 | 0.6 |
+| global_agg (5 aggregates, no filter) | 80.6 | 2.1 | 7.7 | 1.7 | 1.9 | 1.0 |
+| global_agg_filter | 121.1 | 1.6 | 6.7 | 1.7 | 2.0 | 0.9 |
+| nulls_agg (NULL-heavy, IS NOT NULL OR flag) | 78.8 | 1.5 | 14.4 | 1.5 | 2.3 | 0.5 |
+| join3_reorder | 76.0 | 77.2 | 11.0 | 10.9 | 4.4 | 4.0 |
+
+Observations:
+
+* **Filters on integer columns** gain the most: `int_filter` (`bucket
+  BETWEEN 10 AND 40 AND merchant_id < 500`) drops from 100 to 0.9 ms in row
+  mode and from 88 to 1.0 ms vectorized (the vectorized engine evaluates
+  BETWEEN element-wise; the kernels test 1M rows in two calls per batch).
+  Selective scans also skip materializing rows (row mode) or slicing
+  column vectors (vectorized) for batches without qualifying rows.
+* **Aggregates without GROUP BY** (`global_agg`, `global_agg_filter`,
+  `nulls_agg`, `const_fold`) run straight on the storage vectors: 38–75×
+  faster than row mode and 4–10× faster than the (already vectorized and
+  SIMD) Go path at one thread.
+* **Grouped aggregation**: `agg_highcard` (100k groups) improves 1.4×
+  vectorized from the kernel-hashed group table; low-cardinality grouping,
+  string keys and FLOAT64 aggregates are unchanged (no applicable kernel or
+  already cheap).
+* **Joins, sorts, DISTINCT** are essentially unchanged (gathers and group
+  sums are a small part of their time); filters below joins (`join_small`)
+  profit in row mode.
+* Kernel micro-benchmarks (`go test ./internal/native -bench .`, per call
+  through cgo, AVX-512 variant): `pqk_filter_i64` 2,048 rows 225 ns vs
+  1,144 ns for the equivalent Go loop (65,536 rows: 4.8 vs 38 µs);
+  `pqk_sum_i64` with validity 2,048 rows 86 ns vs 1,728 ns (65,536 rows:
+  2.1 vs 53 µs); `pqk_hash_i64` 2,048 keys 142 ns vs 2,103 ns. The
+  library's own benchmark (`native-kernels/build/x86_64/kernel_bench`, 4M
+  elements) reports 0.06–0.10 ns/element for filter, count and sum with
+  AVX-512 vs 0.33–0.78 ns for the reference C build.
+
 ## Decisions on points the spec leaves open
 
 * **INT64 ↔ DECIMAL comparison** follows types.md §2 literally: the INT64 side
@@ -539,7 +737,8 @@ Queries`.
   always use a nested loop); `optimize: false` skips the logical optimizer
   (physical planning — column pruning, index selection, row-group skipping,
   build-side choice — stays on; `use_indexes: false` disables indexes);
-  `native` is accepted and ignored. Other values of the enumerated options ⇒
+  `native: true` uses the native kernels when the library is loaded and is
+  ignored otherwise. Other values of the enumerated options ⇒
   `UNSUPPORTED`; ill-typed values or `threads < 1` (the request schema's
   minimum) ⇒ `INVALID_REQUEST`.
 * **PQ_SLEEP** queries (test-only function) always execute row-at-a-time
@@ -587,7 +786,13 @@ Queries`.
 
 ## Known limitations
 
-* Native kernels (`native.kernels`) are not supported (no cgo).
+* Native kernels accelerate integer filters directly above scans,
+  aggregates without GROUP BY over scans, grouped integer SUM/AVG, integer
+  GROUP BY hashing and gathers; FLOAT64/STRING predicates, expressions over
+  columns and other operators always use Go code (see
+  [Native kernels](#native-kernels-m9)). `--native-kernels` takes a path
+  to the shared library; a bare file name is resolved by the dynamic loader
+  (`LD_LIBRARY_PATH`).
 * Parallelism covers pipelines of scans, filters, projections and hash join
   probes feeding a hash aggregation, DISTINCT, a sort, a top-N or the
   result; sort-merge and nested-loop joins, index scans and plans that
