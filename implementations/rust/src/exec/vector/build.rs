@@ -206,7 +206,9 @@ fn build_serial(plan: PhysicalPlan, ctx: &ExecContext, parallel: bool) -> BoxedB
             // A small LIMIT over a scan pipeline is answered serially: the
             // scan stops after the first batches, whereas parallel workers
             // would read ahead.
-            let small = limit.is_some_and(|l| offset.saturating_add(l) <= ctx.morsel_rows as u64);
+            // (A top-N sort reads its whole input either way.)
+            let small = !matches!(*input, PhysicalPlan::Sort { .. })
+                && limit.is_some_and(|l| offset.saturating_add(l) <= ctx.morsel_rows as u64);
             Box::new(LimitOp {
                 input: build_with(*input, ctx, !small),
                 offset,

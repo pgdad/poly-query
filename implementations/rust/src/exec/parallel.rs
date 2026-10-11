@@ -15,6 +15,11 @@
 //! * [`ParallelAggregateOp`] aggregates each worker's morsels into a
 //!   private partial [`Aggregator`] and merges the partials at the end
 //!   (also used for DISTINCT: grouping by all columns).
+//! * [`ParallelTopNOp`] (`ORDER BY … LIMIT n`): each worker keeps the best
+//!   `n` rows of its morsels and returns them as a sorted run; the runs are
+//!   merged until `n` rows are out. Rows carry their scan position as the
+//!   last sort key, so ties keep scan order exactly as the serial (stable)
+//!   sort does.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -25,23 +30,26 @@ use std::time::Duration;
 use super::context::ContextSeed;
 use super::vector::agg::Aggregator;
 use super::vector::batch::{BATCH_SIZE, Batch};
+use super::vector::batch::{Data, Vector};
 use super::vector::build::{build, side_keys};
 use super::vector::join::{
     HashJoinOp, HashTable, JoinSpec, NestedLoopJoinOp, build_table, materialize,
 };
 use super::vector::ops::{
     BatchOperator, BoxedBatchOp, FilterOp, ProjectOp, ScanOp, ScanRange, aggregate_batch,
-    full_ranges,
+    emit_slices, full_ranges,
 };
+use super::vector::sort::{SortedRun, merge_top, sorted_run, top_rows};
 use crate::error::{Error, Result};
 use crate::exec::ExecContext;
 use crate::exec::native_filter::{NativeFilter, NativeFilterScanOp};
 use crate::native::Kernels;
 use crate::planner::expr::{AggregateCall, Expr, KeyDomain};
-use crate::planner::logical::JoinType;
+use crate::planner::logical::{JoinType, SortKey};
 use crate::planner::physical::PhysicalPlan;
 use crate::protocol::catch_panic;
 use crate::storage::Table;
+use crate::types::DataType;
 
 /// Stack size of parallel worker threads (expression evaluation recurses
 /// over the expression tree, whose depth the parser bounds).
@@ -315,6 +323,34 @@ pub fn try_build(plan: &PhysicalPlan, ctx: &ExecContext) -> Option<BoxedBatchOp>
                 threads,
                 seed: ctx.seed(),
                 morsel_rows: morsel,
+            }))
+        }
+        PhysicalPlan::Sort {
+            input,
+            keys,
+            top: Some(n),
+        } => {
+            let morsels = split(input)?;
+            let width = input.schema().len();
+            // Scan position: the last (unique) sort key.
+            let mut keys = keys.clone();
+            keys.push(SortKey {
+                expr: Expr::Column {
+                    index: width,
+                    ty: DataType::Int64,
+                },
+                descending: false,
+                nulls_first: true,
+            });
+            Some(Box::new(ParallelTopNOp {
+                plan: Some((**input).clone()),
+                keys: Arc::new(keys),
+                n: *n,
+                width,
+                morsels,
+                threads,
+                seed: ctx.seed(),
+                output: None,
             }))
         }
         _ => {
@@ -633,19 +669,169 @@ impl BatchOperator for ParallelAggregateOp {
         let out = if partials.len() > 1 && total >= self.morsel_rows {
             merge_partitioned(partials, &self.seed, ctx)?
         } else {
-            let mut iter = partials.into_iter();
-            let mut agg = iter.next().unwrap_or_else(|| {
+            let agg = if partials.is_empty() {
                 Aggregator::new(self.group_by.len(), &self.aggregates, ctx.execution.native)
-            });
-            for p in iter {
-                let retained = agg.merge(p)?;
-                if retained > 0 {
-                    ctx.reserve(retained)?;
-                }
-            }
+            } else {
+                Aggregator::merge_all(partials, self.threads, ctx)?
+            };
             agg.finish(ctx)?
         };
         Ok((out.len > 0).then_some(out))
+    }
+}
+
+/// Parallel top-N: per-worker sorted runs of the best `n` rows, merged.
+pub struct ParallelTopNOp {
+    plan: Option<PhysicalPlan>,
+    /// The sort keys followed by the scan-position column (index `width`).
+    keys: Arc<Vec<SortKey>>,
+    n: usize,
+    /// Columns of the input.
+    width: usize,
+    morsels: Vec<Vec<ScanRange>>,
+    threads: usize,
+    seed: ContextSeed,
+    output: Option<(Batch, usize)>,
+}
+
+struct TopNShared {
+    frag: Frag,
+    morsels: Vec<Vec<ScanRange>>,
+    keys: Arc<Vec<SortKey>>,
+    n: usize,
+    width: usize,
+    seed: ContextSeed,
+    next: AtomicUsize,
+    stop: AtomicBool,
+}
+
+impl TopNShared {
+    /// This worker's best `n` rows (with the scan-position column) as a
+    /// sorted run, and the bytes reserved for them.
+    fn work(&self) -> (Result<Option<SortedRun>>, usize) {
+        let ctx = self.seed.context();
+        let mut parts: Vec<Batch> = Vec::new();
+        let mut rows = 0usize;
+        let mut reserved = 0usize;
+        let width = self.width + 1;
+        let r = catch_panic(|| {
+            loop {
+                if self.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let m = self.next.fetch_add(1, Ordering::Relaxed);
+                if m >= self.morsels.len() {
+                    break;
+                }
+                let mut op = self.frag.instantiate(&self.morsels[m]);
+                let mut pos = (m as i64) << 32;
+                while let Some(mut b) = op.next_batch(&ctx)? {
+                    if b.len == 0 {
+                        continue;
+                    }
+                    b.columns.push(Vector::new(
+                        Data::Int((pos..pos + b.len as i64).collect()),
+                        None,
+                    ));
+                    pos += b.len as i64;
+                    let size = b.approx_size();
+                    ctx.reserve(size)?;
+                    reserved += size;
+                    rows += b.len;
+                    parts.push(b);
+                    if rows >= self.n.saturating_mul(2).max(8 * BATCH_SIZE) {
+                        let all = Batch::concat(&parts, width);
+                        let kept = all.gather(&top_rows(&all, &self.keys, self.n, &ctx)?);
+                        ctx.release(reserved);
+                        reserved = kept.approx_size();
+                        ctx.reserve(reserved)?;
+                        rows = kept.len;
+                        parts = vec![kept];
+                    }
+                }
+            }
+            if parts.is_empty() {
+                return Ok(None);
+            }
+            sorted_run(Batch::concat(&parts, width), &self.keys, Some(self.n), &ctx).map(Some)
+        });
+        if r.is_err() {
+            self.stop.store(true, Ordering::Relaxed);
+        }
+        (r, reserved)
+    }
+}
+
+impl ParallelTopNOp {
+    fn compute(&mut self, plan: PhysicalPlan, ctx: &ExecContext) -> Result<Batch> {
+        let frag = Frag::prepare(plan, ctx)?;
+        let morsels = std::mem::take(&mut self.morsels);
+        let workers = self.threads.min(morsels.len()).max(1);
+        let shared = Arc::new(TopNShared {
+            frag,
+            morsels,
+            keys: self.keys.clone(),
+            n: self.n,
+            width: self.width,
+            seed: self.seed.clone(),
+            next: AtomicUsize::new(0),
+            stop: AtomicBool::new(false),
+        });
+        let mut handles = Vec::with_capacity(workers);
+        for i in 0..workers {
+            let s = shared.clone();
+            match spawn(&format!("pq-topn-{i}"), move || s.work()) {
+                Ok(h) => handles.push(h),
+                Err(e) => {
+                    shared.stop.store(true, Ordering::Relaxed);
+                    for h in handles {
+                        if let Ok((_, bytes)) = h.join() {
+                            ctx.release(bytes);
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let mut runs = Vec::with_capacity(workers);
+        let mut reserved = 0;
+        let mut first_err = None;
+        for h in handles {
+            match h.join() {
+                Ok((r, bytes)) => {
+                    reserved += bytes;
+                    match r {
+                        Ok(run) => runs.extend(run),
+                        Err(e) => {
+                            first_err.get_or_insert(e);
+                        }
+                    }
+                }
+                Err(_) => {
+                    first_err.get_or_insert(Error::internal("top-N worker panicked"));
+                }
+            }
+        }
+        let result = match first_err {
+            Some(e) => Err(e),
+            None => ctx.check_interrupt().and_then(|()| {
+                let mut out = merge_top(runs, &self.keys, self.n, self.width + 1, ctx)?;
+                out.columns.truncate(self.width);
+                Ok(out)
+            }),
+        };
+        ctx.release(reserved);
+        result
+    }
+}
+
+impl BatchOperator for ParallelTopNOp {
+    fn next_batch(&mut self, ctx: &ExecContext) -> Result<Option<Batch>> {
+        if let Some(plan) = self.plan.take() {
+            let sorted = self.compute(plan, ctx)?;
+            self.output = Some((sorted, 0));
+        }
+        emit_slices(&mut self.output)
     }
 }
 
