@@ -546,6 +546,7 @@ FUNC op_query
     mov %rax, %r12                  /* sql pstr */
     movq $-1, 0(%rsp)               /* max_rows */
     movq $0, 8(%rsp)                /* count only */
+    xor %r13d, %r13d
     mov %rbx, %rdi
     CSTR %rsi, "options"
     mov $J_OBJECT, %edx
@@ -564,6 +565,9 @@ FUNC op_query
     call opt_uint
     test %rax, %rax
     jz 1f
+    mov $1000000000000, %rcx        /* > ~31 years: effectively no timeout */
+    cmp %rcx, %rax
+    ja 1f
     imul $1000000, %rax, %r14
     call now_ns
     add %r14, %rax
@@ -588,7 +592,11 @@ FUNC op_query
     movq $1, 8(%rsp)
     jmp 3f
 2:  RAISE E_UNSUPPORTED, "unsupported result mode"
-3:  /* per-query memory budget */
+3:  test %r13, %r13
+    jz 4f
+    mov %r13, %rdi                  /* validate the remaining known options */
+    call check_exec_options
+4:  /* per-query memory budget */
     mov g_arena(%rip), %rax
     mov g_max_query_mem(%rip), %rcx
     mov %rcx, AR_LIMIT(%rax)
@@ -953,3 +961,96 @@ FUNC op_load
     call put_columns
     LEAVE
 ENDF op_load
+
+/* opt_enum(options rdi, key rsi, NUL-separated allowed list rdx):
+ * UNSUPPORTED if the option is present and not one of the allowed strings */
+FUNC opt_enum
+    ENTER 0
+    mov %rdx, %r12
+    call json_obj_get
+    test %rax, %rax
+    jz 9f
+    cmpq $J_NULL, JN_TYPE(%rax)
+    je 9f
+    cmpq $J_STRING, JN_TYPE(%rax)
+    jne 8f
+    mov JN_PTR(%rax), %rbx
+1:  cmpb $0, (%r12)
+    je 8f
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    call strcmp
+    test %eax, %eax
+    jz 9f
+    mov %r12, %rdi
+    call strlen
+    lea 1(%r12, %rax), %r12
+    jmp 1b
+8:  RAISE E_UNSUPPORTED, "unsupported value for a query option"
+9:  LEAVE
+ENDF opt_enum
+
+/* opt_boolean(options rdi, key rsi): UNSUPPORTED unless absent/null/boolean */
+FUNC opt_boolean
+    sub $8, %rsp
+    call json_obj_get
+    test %rax, %rax
+    jz 9f
+    mov JN_TYPE(%rax), %rcx
+    cmp $J_TRUE, %ecx
+    ja 8f
+    add $8, %rsp
+    ret
+8:  RAISE E_UNSUPPORTED, "unsupported value for a query option"
+9:  add $8, %rsp
+    ret
+ENDF opt_boolean
+
+    .section .rodata
+modes_ok: .asciz "auto"
+          .asciz "row"
+          .asciz "vectorized"
+          .byte 0
+joins_ok: .asciz "auto"
+          .asciz "hash"
+          .asciz "merge"
+          .asciz "nested_loop"
+          .byte 0
+    .text
+
+/* check_exec_options(options rdi) */
+FUNC check_exec_options
+    ENTER 0
+    mov %rdi, %rbx
+    CSTR %rsi, "mode"
+    lea modes_ok(%rip), %rdx
+    call opt_enum
+    mov %rbx, %rdi
+    CSTR %rsi, "join"
+    lea joins_ok(%rip), %rdx
+    call opt_enum
+    mov %rbx, %rdi
+    CSTR %rsi, "optimize"
+    call opt_boolean
+    mov %rbx, %rdi
+    CSTR %rsi, "use_indexes"
+    call opt_boolean
+    mov %rbx, %rdi
+    CSTR %rsi, "native"
+    call opt_boolean
+    mov %rbx, %rdi
+    CSTR %rsi, "threads"
+    call json_obj_get
+    test %rax, %rax
+    jz 9f
+    cmpq $J_NULL, JN_TYPE(%rax)
+    je 9f
+    mov %rax, %rdi
+    call json_is_int
+    test %eax, %eax
+    jz 8f
+    cmp $1, %rdx
+    jl 8f
+9:  LEAVE
+8:  RAISE E_UNSUPPORTED, "unsupported value for threads"
+ENDF check_exec_options

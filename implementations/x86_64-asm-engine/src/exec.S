@@ -307,7 +307,8 @@ FUNC agg_finish
     lea pow10_u64(%rip), %rax
     cvtsi2sdq (%rax, %rcx, 8), %xmm1
     divsd %xmm1, %xmm0
-7:  mov 8(%rsp), %rcx
+7:  call check_finite                /* FLOAT64 sum overflow */
+    mov 8(%rsp), %rcx
     cvtsi2sdq AS_COUNT(%rcx), %xmm1
     divsd %xmm1, %xmm0
     mov 0(%rsp), %r8
