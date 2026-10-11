@@ -24,7 +24,8 @@ checksums, atomic crash-safe saves and memory-mapped reads).
 
 ```
 make build        # -> out/polyquery
-make test         # assembly unit tests + end-to-end session tests
+make test         # assembly unit tests (text, JSON, ingest, hash, SQL,
+                  # storage, planner) + end-to-end session tests
 make lint         # verifies every object carries a non-executable .note.GNU-stack
 make fmt          # whitespace normalisation
 make clean

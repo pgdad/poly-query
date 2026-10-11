@@ -8,8 +8,9 @@
   optional correlated-subquery file, phase 3 143/143).
 * `make build test lint` pass: unit tests `test_text`, `test_json`,
   `test_ingest`, `test_hash`, `test_sql`, `test_storage` (CRC-32, UTF-8,
-  layouts, statistics, indexes) and `tests/session_test.sh` (e2e incl.
-  Phase 3 storage/index cases).
+  layouts, statistics, indexes), `test_planner` (index choice, pushdown,
+  LEFT JOIN safety, build side, options) and `tests/session_test.sh` (e2e
+  incl. Phase 3 storage/index cases).
 * Capabilities claimed: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic
   test.functions phase2 sql.groupby sql.join sql.functions sql.subquery
   sql.cte sql.correlated_subquery phase3 storage.pqcf storage.mmap index.hash

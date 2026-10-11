@@ -1,0 +1,332 @@
+/*
+ * test_planner.S - unit tests for planner.S on catalog tables
+ *   t(a = 0..99, b = a % 10) with a BTREE index on a and a HASH index on b,
+ *   u(a = 0..9):
+ *   - equality / range / non-selective predicates -> index choice and mode
+ *   - pushdown: single-table conjuncts leave the WHERE, mixed ones stay
+ *   - LEFT JOIN: conjuncts on the NULL-padded side are not pushed
+ *   - hash-join build side follows the estimated cardinalities
+ *   - optimize = false disables pushdown, use_indexes = false index use
+ */
+#include "pq.inc"
+#include "sql.inc"
+
+    .section .note.GNU-stack, "", @progbits
+
+    .data
+    .p2align 3
+passed:  .quad 0
+failed:  .quad 0
+    .p2align 3
+s_t:     .quad 1
+         .asciz "t"
+    .p2align 3
+s_u:     .quad 1
+         .asciz "u"
+    .p2align 3
+s_a:     .quad 1
+         .asciz "a"
+    .p2align 3
+s_b:     .quad 1
+         .asciz "b"
+    .p2align 3
+s_ixa:   .quad 4
+         .asciz "ix_a"
+    .p2align 3
+s_hxb:   .quad 4
+         .asciz "hx_b"
+ix_a:    .quad 0
+hx_b:    .quad 0
+
+    .section .rodata
+fmt_fail: .asciz "FAIL: %s\n"
+fmt_done: .asciz "test_planner: %ld passed, %ld failed\n"
+    .text
+
+/* check(cond edi, name rsi) */
+FUNC check
+    sub $8, %rsp
+    test %edi, %edi
+    jz 1f
+    incq passed(%rip)
+    add $8, %rsp
+    ret
+1:  incq failed(%rip)
+    lea fmt_fail(%rip), %rdi
+    xor %eax, %eax
+    call printf
+    add $8, %rsp
+    ret
+ENDF check
+
+/* mk_int_table(name pstr rdi, ncols rsi, nrows rdx): column 0 "a" = row,
+ * column 1 "b" = row % 10 (when ncols = 2); finalized and in the catalog */
+FUNC mk_int_table
+    ENTER 16
+    mov %rdi, %r12
+    mov %rsi, %r13
+    mov %rdx, %r14
+    call arena_new
+    mov %rax, %r15
+    mov %r15, %rdi
+    mov %r12, %rsi
+    mov %r13, %rdx
+    mov %r14, %rcx
+    call table_new
+    mov %rax, %rbx
+    mov %r15, %rdi
+    mov TB_COLS(%rbx), %rsi
+    lea s_a(%rip), %rdx
+    mov $T_INT, %ecx
+    mov %r14, %r8
+    call col_stage
+    cmp $2, %r13
+    jb 1f
+    mov %r15, %rdi
+    mov TB_COLS(%rbx), %rsi
+    add $COL_SIZE, %rsi
+    lea s_b(%rip), %rdx
+    mov $T_INT, %ecx
+    mov %r14, %r8
+    call col_stage
+1:  xor %ecx, %ecx
+2:  cmp %r14, %rcx
+    jae 4f
+    mov TB_COLS(%rbx), %rsi
+    mov COL_DATA(%rsi), %rax
+    mov %rcx, (%rax, %rcx, 8)
+    cmp $2, %r13
+    jb 3f
+    mov %rcx, %rax
+    xor %edx, %edx
+    mov $10, %edi
+    div %rdi
+    mov COL_SIZE+COL_DATA(%rsi), %rax
+    mov %rdx, (%rax, %rcx, 8)
+3:  inc %rcx
+    jmp 2b
+4:  mov %rbx, %rdi
+    mov $LAYOUT_COLUMN, %esi
+    mov $DICT_OFF, %edx
+    call table_finalize
+    mov %rbx, %rdi
+    call cat_put
+    mov %rbx, %rax
+    LEAVE
+ENDF mk_int_table
+
+/* plan_of(sql cstr rdi) -> rax bound and planned query block */
+FUNC plan_of
+    ENTER 0
+    mov %rdi, %rbx
+    call strlen
+    mov %rbx, %rdi
+    mov %rax, %rsi
+    call sql_parse
+    mov ST_QUERY(%rax), %rdi
+    call bind_statement
+    LEAVE
+ENDF plan_of
+
+FUNC main
+    ENTER 32
+    call arena_new
+    mov %rax, g_arena(%rip)
+    lea s_t(%rip), %rdi
+    mov $2, %esi
+    mov $100, %edx
+    call mk_int_table
+    mov %rax, %rbx                  /* t */
+    lea s_u(%rip), %rdi
+    mov $1, %esi
+    mov $10, %edx
+    call mk_int_table
+    mov %rbx, %rdi                  /* indexes on t */
+    xor %esi, %esi
+    mov $IXK_BTREE, %edx
+    lea s_ixa(%rip), %rcx
+    call idx_build
+    mov %rax, ix_a(%rip)
+    mov %rbx, %rdi
+    mov %rax, %rsi
+    call idx_attach
+    mov %rbx, %rdi
+    mov $1, %esi
+    mov $IXK_HASH, %edx
+    lea s_hxb(%rip), %rcx
+    call idx_build
+    mov %rax, hx_b(%rip)
+    mov %rbx, %rdi
+    mov %rax, %rsi
+    call idx_attach
+
+    /* ---- equality on the BTREE column */
+    CSTR %rdi, "SELECT a FROM t WHERE a = 5"
+    call plan_of
+    mov %rax, %r12
+    mov QP_FROM(%r12), %r13
+    xor %edi, %edi
+    mov ix_a(%rip), %rax
+    cmp FP_INDEX(%r13), %rax
+    jne 1f
+    cmpq $IM_EQ, FP_IMODE(%r13)
+    sete %dil
+1:  CSTR %rsi, "a = 5 uses ix_a (equality)"
+    call check
+    xor %edi, %edi
+    cmpq $0, QP_WHERE(%r12)
+    jne 1f
+    cmpq $0, FP_FILTER(%r13)
+    setne %dil
+1:  CSTR %rsi, "a = 5 is pushed into the scan"
+    call check
+
+    /* ---- selective range: BTREE range lookup */
+    CSTR %rdi, "SELECT a FROM t WHERE a > 95"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    mov ix_a(%rip), %rax
+    cmp FP_INDEX(%r13), %rax
+    jne 1f
+    cmpq $IM_RANGE, FP_IMODE(%r13)
+    jne 1f
+    cmpq $RF_LO, FP_IFLAGS(%r13)
+    sete %dil
+1:  CSTR %rsi, "a > 95 uses an exclusive range on ix_a"
+    call check
+
+    /* ---- intersected bounds */
+    CSTR %rdi, "SELECT a FROM t WHERE a >= 10 AND 15 > a AND a >= 12"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    cmpq $RF_LO|RF_LOI|RF_HI, FP_IFLAGS(%r13)
+    jne 1f
+    cmpq $12, FP_IVALS(%r13)
+    jne 1f
+    cmpq $15, FP_INV(%r13)
+    sete %dil
+1:  CSTR %rsi, "range bounds are intersected to [12, 15)"
+    call check
+
+    /* ---- non-selective range: full scan */
+    CSTR %rdi, "SELECT a FROM t WHERE a > 5"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    cmpq $0, FP_INDEX(%r13)
+    sete %dil
+    CSTR %rsi, "a > 5 is a full scan"
+    call check
+
+    /* ---- HASH equality at exactly 10% */
+    CSTR %rdi, "SELECT a FROM t WHERE b = 3"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    mov hx_b(%rip), %rax
+    cmp FP_INDEX(%r13), %rax
+    sete %dil
+    CSTR %rsi, "b = 3 uses hx_b"
+    call check
+
+    /* ---- IN list of 3 values: 30% -> full scan */
+    CSTR %rdi, "SELECT a FROM t WHERE b IN (1, 2, 3)"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    cmpq $0, FP_INDEX(%r13)
+    sete %dil
+    CSTR %rsi, "b IN (1,2,3) is a full scan"
+    call check
+
+    /* ---- join: pushdown to both sides, mixed conjunct stays, build side */
+    CSTR %rdi, "SELECT t.a FROM t JOIN u ON t.a = u.a WHERE u.a = 1 AND t.b > 0 AND t.a + u.a > 3"
+    call plan_of
+    mov %rax, %r12
+    mov QP_FROM(%r12), %r13
+    xor %edi, %edi
+    mov QP_WHERE(%r12), %rax
+    test %rax, %rax
+    jz 1f
+    cmpl $B_GT, N_OP(%rax)          /* the residual is the mixed conjunct */
+    jne 1f
+    mov FP_LEFT(%r13), %rax
+    cmpq $0, FP_FILTER(%rax)
+    je 1f
+    mov FP_RIGHT(%r13), %rax
+    cmpq $0, FP_FILTER(%rax)
+    setne %dil
+1:  CSTR %rsi, "join: single-table conjuncts pushed, mixed one residual"
+    call check
+    xor %edi, %edi
+    cmpq $0, FP_BUILDL(%r13)
+    sete %dil
+    CSTR %rsi, "join: builds on the smaller right input"
+    call check
+    CSTR %rdi, "SELECT t.a FROM u JOIN t ON t.a = u.a WHERE u.a = 1"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    cmpq $1, FP_BUILDL(%r13)
+    sete %dil
+    CSTR %rsi, "join: builds on the smaller left input"
+    call check
+
+    /* ---- LEFT JOIN: the NULL-padded side keeps its WHERE conjuncts */
+    CSTR %rdi, "SELECT t.a FROM t LEFT JOIN u ON t.a = u.a WHERE u.a IS NULL AND t.b = 1"
+    call plan_of
+    mov %rax, %r12
+    mov QP_FROM(%r12), %r13
+    xor %edi, %edi
+    cmpq $0, QP_WHERE(%r12)
+    je 1f
+    mov FP_RIGHT(%r13), %rax
+    cmpq $0, FP_FILTER(%rax)
+    jne 1f
+    mov FP_LEFT(%r13), %rax
+    cmpq $0, FP_FILTER(%rax)
+    je 1f
+    cmpq $0, FP_BUILDL(%r13)
+    sete %dil
+1:  CSTR %rsi, "left join: right-side conjunct not pushed, left-side pushed"
+    call check
+
+    /* ---- options */
+    movq $0, g_opt_indexes(%rip)
+    CSTR %rdi, "SELECT a FROM t WHERE a = 5"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    cmpq $0, FP_INDEX(%r13)
+    jne 1f
+    cmpq $0, FP_FILTER(%r13)
+    setne %dil
+1:  CSTR %rsi, "use_indexes = false: pushed but no index"
+    call check
+    movq $1, g_opt_indexes(%rip)
+    movq $0, g_opt_optimize(%rip)
+    CSTR %rdi, "SELECT a FROM t WHERE a = 5"
+    call plan_of
+    mov %rax, %r12
+    mov QP_FROM(%r12), %r13
+    xor %edi, %edi
+    cmpq $0, FP_FILTER(%r13)
+    jne 1f
+    cmpq $0, QP_WHERE(%r12)
+    setne %dil
+1:  CSTR %rsi, "optimize = false: no pushdown"
+    call check
+    movq $1, g_opt_optimize(%rip)
+
+    lea fmt_done(%rip), %rdi
+    mov passed(%rip), %rsi
+    mov failed(%rip), %rdx
+    xor %eax, %eax
+    call printf
+    xor %eax, %eax
+    cmpq $0, failed(%rip)
+    setne %al
+    LEAVE
+ENDF main
