@@ -572,6 +572,8 @@ func BuildBatch(ec *Context, n physical.Node) (BatchOperator, error) {
 		return buildVAggregate(ec, &physical.HashAggregate{Input: x.Input, Keys: keys, KeyCols: cols})
 	case *physical.Sort:
 		return buildVSort(ec, x)
+	case *physical.UnionAll:
+		return newVUnionOp(ec, x), nil
 	}
 	// Row-at-a-time island (nested-loop and merge joins, index scans,
 	// VALUES, correlated-subquery nodes).

@@ -49,6 +49,12 @@ func reorder(n plan.Node) plan.Node {
 		return &plan.Limit{Input: reorder(x.Input), Count: x.Count, Offset: x.Offset}
 	case *plan.Distinct:
 		return &plan.Distinct{Input: reorder(x.Input)}
+	case *plan.UnionAll:
+		c := &plan.UnionAll{Inputs: make([]plan.Node, len(x.Inputs)), Cols: x.Cols}
+		for i, in := range x.Inputs {
+			c.Inputs[i] = reorder(in)
+		}
+		return c
 	}
 	return n
 }
@@ -95,6 +101,12 @@ func estimate(n plan.Node) float64 {
 		if c, ok := x.Count.(*plan.Literal); ok && !c.Val.Null && c.T.Kind == types.KindInt64 {
 			return min(float64(c.Val.I), estimate(x.Input))
 		}
+	case *plan.UnionAll:
+		sum := 0.0
+		for _, in := range x.Inputs {
+			sum += estimate(in)
+		}
+		return sum
 	}
 	if c := n.Children(); len(c) == 1 {
 		return estimate(c[0])

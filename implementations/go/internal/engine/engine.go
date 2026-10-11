@@ -37,7 +37,7 @@ const (
 	Name            = "polyquery-go"
 	Version         = "0.3.0"
 	ProtocolVersion = 1
-	SpecVersion     = "1.0.0"
+	SpecVersion     = "1.1.0-cr1"
 )
 
 // Capabilities lists the capability strings this engine implements.
@@ -48,6 +48,7 @@ var Capabilities = append([]string{
 	"phase3", "storage.pqcf", "storage.mmap", "index.hash", "index.btree",
 	"phase4", "http.streaming",
 	"phase5", "exec.row", "exec.vectorized", "exec.parallel", "join.hash", "join.merge", "join.nested_loop",
+	"change.union_all",
 }, nativeCapabilities()...)
 
 func nativeCapabilities() []string {

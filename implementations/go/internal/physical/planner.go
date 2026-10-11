@@ -166,8 +166,37 @@ func (p *planner) node(n plan.Node, req idset) (Node, error) {
 			return nil, err
 		}
 		return &HashDistinct{Input: in}, nil
+	case *plan.UnionAll:
+		return p.unionAll(x, req)
 	}
 	return nil, errs.New(errs.InternalError, "cannot plan logical node %T", n)
+}
+
+// unionAll plans a UNION ALL: only the required output columns are kept,
+// and each branch is asked for the columns that feed them.
+func (p *planner) unionAll(u *plan.UnionAll, req idset) (Node, error) {
+	out := &UnionAll{InputCols: make([][]plan.Column, len(u.Inputs))}
+	var keep []int
+	for j, c := range u.Cols {
+		if req[c.ID] {
+			keep = append(keep, j)
+			out.Cols = append(out.Cols, c)
+		}
+	}
+	for i, in := range u.Inputs {
+		schema := in.Schema()
+		need := idset{}
+		for _, j := range keep {
+			out.InputCols[i] = append(out.InputCols[i], schema[j])
+			need[schema[j].ID] = true
+		}
+		n, err := p.node(in, need)
+		if err != nil {
+			return nil, err
+		}
+		out.Inputs = append(out.Inputs, n)
+	}
+	return out, nil
 }
 
 // paramLookup plans a filter of a correlated subquery whose input is
@@ -371,6 +400,12 @@ func (p *planner) estimate(n plan.Node) float64 {
 			return 1
 		}
 		return p.estimate(x.Input) / 2
+	case *plan.UnionAll:
+		sum := 0.0
+		for _, in := range x.Inputs {
+			sum += p.estimate(in)
+		}
+		return sum
 	}
 	if c := n.Children(); len(c) == 1 {
 		return p.estimate(c[0])
