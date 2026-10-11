@@ -476,9 +476,11 @@ uses the native kernels."
             (grow-array positions (max groups (* 2 (length positions))) most-positive-fixnum)))))
 
 (defun group-state-consume (gs key-vecs arg-vecs n &optional (base 0))
-  "Aggregate N rows given their key VECs and aggregate argument VECs; BASE is
-the input position of the first row (when positions are tracked)."
-  (declare (type fixnum n base))
+  "Aggregate N rows given their key VECs and aggregate argument VECs. BASE
+is the input position of the first row (rows are consecutive), or an index
+vector of the rows' input positions (in any order); used when positions are
+tracked."
+  (declare (type fixnum n) (type (or fixnum index-vector) base))
   (let ((gids (group-state-gids gs))
         (table (group-state-table gs)))
     (declare (type index-vector gids))
@@ -489,13 +491,22 @@ the input position of the first row (when positions are tracked)."
     (when table
       (let ((before (key-table-count table)))
         (key-table-map-batch table key-vecs n gids t)
-        (when (and (group-state-positions gs) (> (key-table-count table) before))
-          (group-state-reserve-positions gs (key-table-count table))
-          (let ((positions (group-state-positions gs)))
-            (dotimes (i n)
-              (let ((g (aref gids i)))
-                (when (and (>= g before) (= (aref positions g) most-positive-fixnum))
-                  (setf (aref positions g) (+ base i)))))))))
+        (cond
+          ((null (group-state-positions gs)))
+          ((typep base 'index-vector)
+           (group-state-reserve-positions gs (key-table-count table))
+           (let ((positions (group-state-positions gs)))
+             (declare (type index-vector positions base))
+             (dotimes (i n)
+               (let ((g (aref gids i)))
+                 (setf (aref positions g) (min (aref positions g) (aref base i)))))))
+          ((> (key-table-count table) before)
+           (group-state-reserve-positions gs (key-table-count table))
+           (let ((positions (group-state-positions gs)))
+             (dotimes (i n)
+               (let ((g (aref gids i)))
+                 (when (and (>= g before) (= (aref positions g) most-positive-fixnum))
+                   (setf (aref positions g) (+ base i))))))))))
     (let ((groups (group-state-count gs))
           (gids32 nil))
       (flet ((gids32 ()
@@ -543,6 +554,10 @@ OTHER's group ids) is given, just those groups."
          (mapping (make-index-vector count))
          (table (group-state-table gs))
          (other-table (group-state-table other)))
+    (when table
+      ;; One resize up front instead of repeated doubling while merging.
+      (key-table-reserve table (+ (key-table-count table)
+                                  (if only (length (the index-vector only)) count))))
     (cond ((null table) (fill mapping 0))
           (only
            (fill mapping -1)

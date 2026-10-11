@@ -437,10 +437,16 @@ NULL, else FALSE. Constant lists sharing one comparison type use a hash set."
 (defun compile-subquery (e fns)
   (let* ((sq (b-op-info e))
          (kind (subquery-kind sq))
-         (open (let ((*parallel-disabled* t)) (compile-plan (subquery-plan sq))))
-         (env (subquery-param-env sq))
          (param-fns (coerce (if (eq kind :in) (rest fns) fns) 'simple-vector))
          (nparams (length param-fns))
+         ;; A correlated subquery runs serially (once per outer row, maybe
+         ;; inside a worker). An uncorrelated one runs once, in the thread
+         ;; evaluating the expression: never a worker, as expressions with
+         ;; subqueries are not parallelized (PARALLEL-SAFE-NODE-P), so its
+         ;; own plan may use parallel workers.
+         (open (let ((*parallel-disabled* (or *parallel-disabled* (plusp nparams))))
+                 (compile-plan (subquery-plan sq))))
+         (env (subquery-param-env sq))
          (column-type (column-def-type (first (bound-query-columns (subquery-query sq)))))
          (operand-type (when (eq kind :in) (bexpr-type (first (b-op-args e)))))
          (compute

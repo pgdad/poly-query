@@ -176,34 +176,40 @@ NATIVE hashes INT64-like keys with the native kernel."
         (replace new (svref keys k))
         (setf (svref keys k) new)))))
 
-(defun key-table-grow (table)
-  "Double the slot array and the per-group arrays."
+(defun key-table-grow (table &optional (factor 2))
+  "Multiply the size of the slot array and the per-group arrays by FACTOR
+(a power of two)."
+  (declare (type fixnum factor))
   (if (key-table-int-slots table)
-      (let* ((size (* 2 (1+ (key-table-mask table))))
+      (let* ((size (* factor (1+ (key-table-mask table))))
              (slots (make-array (* 2 size) :element-type '(signed-byte 64) :initial-element 0))
              (mask (1- size))
              (keys (svref (key-table-keys table) 0)))
-        (declare (type simple-vector keys))
+        (declare (type simple-vector keys) (type i64-vector slots) (type fixnum size mask))
         (dotimes (g (key-table-count table))
           (let ((v (svref keys g)))
             (unless (eq v +null+)
-              (let ((pos (logand (hash-i64 v) mask)))
-                (declare (type fixnum pos))
-                (loop until (zerop (aref slots (1+ (* 2 pos))))
-                      do (setf pos (logand (1+ pos) mask)))
-                (setf (aref slots (* 2 pos)) v
-                      (aref slots (1+ (* 2 pos))) (1+ g))))))
+              (let ((v v))
+                (declare (type (signed-byte 64) v))
+                (let ((pos (logand (hash-i64 v) mask)))
+                  (declare (type fixnum pos))
+                  (loop until (zerop (aref slots (1+ (* 2 pos))))
+                        do (setf pos (logand (1+ pos) mask)))
+                  (setf (aref slots (* 2 pos)) v
+                        (aref slots (1+ (* 2 pos))) (1+ g)))))))
         (grow-key-columns table (floor size 2))
         (setf (key-table-int-slots table) slots
               (key-table-mask table) mask))
-      (let* ((size (* 2 (length (key-table-slots table))))
+      (let* ((size (* factor (length (key-table-slots table))))
              (slots (make-array size :element-type 'fixnum :initial-element -1))
              (mask (1- size))
              (count (key-table-count table))
              (hashes (make-index-vector (floor size 2))))
+        (declare (type index-vector slots hashes) (type fixnum size mask count))
         (replace hashes (key-table-hashes table))
         (dotimes (g count)
           (let ((pos (logand (aref hashes g) mask)))
+            (declare (type fixnum pos))
             (loop until (= (aref slots pos) -1)
                   do (setf pos (logand (1+ pos) mask)))
             (setf (aref slots pos) g)))
@@ -211,6 +217,14 @@ NATIVE hashes INT64-like keys with the native kernel."
         (setf (key-table-slots table) slots
               (key-table-mask table) mask
               (key-table-hashes table) hashes))))
+
+(defun key-table-reserve (table groups)
+  "Grow TABLE at once so that it holds GROUPS groups without growing."
+  (let ((factor 1))
+    (loop while (< (* factor (key-table-capacity table)) (1+ groups))
+          do (setf factor (* 2 factor)))
+    (when (> factor 1)
+      (key-table-grow table factor))))
 
 (defun key-table-new-group (table values-fn)
   "Allocate the next group id with key values (VALUES-FN k)."

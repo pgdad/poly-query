@@ -226,11 +226,15 @@ by the first error of evaluating EXPRS row by row over BATCH."
 ;;; Aggregation
 
 (defun make-aggregate-consumer (node &key track-positions)
-  "(values new-state consume lazy) for vectorized aggregation of NODE:
-NEW-STATE creates an empty GROUP-STATE, (CONSUME state batch [base])
-aggregates one input batch (whose first row has input position BASE) into
-it; LAZY is true when CONSUME also accepts lazy scan batches (native
-kernels, see GROUP-STATE-CONSUME-LAZY). Kernels are compiled once per call."
+  "(values new-state consume lazy evaluate consume-vecs) for vectorized
+aggregation of NODE: NEW-STATE creates an empty GROUP-STATE, (CONSUME state
+batch [base]) aggregates one input batch (whose first row has input position
+BASE) into it; LAZY is true when CONSUME also accepts lazy scan batches
+(native kernels, see GROUP-STATE-CONSUME-LAZY). The two steps of CONSUME are
+also available separately: (EVALUATE batch) returns the key and argument
+vectors of a batch, (CONSUME-VECS state key-vecs arg-vecs n positions)
+aggregates such vectors (POSITIONS: see GROUP-STATE-CONSUME). Kernels are
+compiled once per call."
   (let* ((keys (pp-hash-aggregate-group-by node))
          (aggs (pp-hash-aggregate-aggregates node))
          (key-kernels (mapcar #'compile-vexpr keys))
@@ -246,25 +250,32 @@ kernels, see GROUP-STATE-CONSUME-LAZY). Kernels are compiled once per call."
                       ok)))
          (guard (make-row-order-guard (append keys (mapcan (lambda (a) (copy-list (b-agg-args a)))
                                                            aggs)))))
-    (values
-     (lambda () (make-group-state key-kinds aggs track-positions native))
-     (lambda (gs batch &optional (base 0))
-       (let ((n (batch-count batch)))
+    (labels ((evaluate (batch)
+               (funcall (the function guard) batch
+                        (lambda ()
+                          (values (mapcar (lambda (k) (funcall (the function k) batch)) key-kernels)
+                                  (mapcar (lambda (k) (and k (funcall (the function k) batch)))
+                                          arg-kernels)))))
+             (charge-groups (gs)
+               (let ((groups (group-state-count gs))
+                     (charged (group-state-charged gs)))
+                 (when (>= (- groups charged) 1024)
+                   (charge-memory (* (- groups charged) (row-footprint (* 4 (+ nkeys (length aggs))))))
+                   (setf (group-state-charged gs) groups))))
+             (consume-vecs (gs key-vecs arg-vecs n positions)
+               (group-state-consume gs key-vecs arg-vecs n positions)
+               (charge-groups gs)))
+      (values
+       (lambda () (make-group-state key-kinds aggs track-positions native))
+       (lambda (gs batch &optional (base 0))
          (if (batch-source batch)
-             (group-state-consume-lazy gs batch lazy-columns)
-             (multiple-value-bind (key-vecs arg-vecs)
-                 (funcall (the function guard) batch
-                          (lambda ()
-                            (values (mapcar (lambda (k) (funcall (the function k) batch)) key-kernels)
-                                    (mapcar (lambda (k) (and k (funcall (the function k) batch)))
-                                            arg-kernels))))
-               (group-state-consume gs key-vecs arg-vecs n base)))
-         (let ((groups (group-state-count gs))
-               (charged (group-state-charged gs)))
-           (when (>= (- groups charged) 1024)
-             (charge-memory (* (- groups charged) (row-footprint (* 4 (+ nkeys (length aggs))))))
-             (setf (group-state-charged gs) groups)))))
-     lazy)))
+             (progn (group-state-consume-lazy gs batch lazy-columns)
+                    (charge-groups gs))
+             (multiple-value-bind (key-vecs arg-vecs) (evaluate batch)
+               (consume-vecs gs key-vecs arg-vecs (batch-count batch) base))))
+       lazy
+       #'evaluate
+       #'consume-vecs))))
 
 (defun group-state-batches (gs node)
   "Iterator over the output batches of the finished group state GS."
@@ -820,6 +831,29 @@ normalized keys for large inputs (vsort.lisp), else by comparison sort."
           (setf pos stop)
           (batch-gather batch idx (length idx)))))))
 
+(defun parallel-permutation-batches (batch perm threads)
+  "Iterator over the rows PERM of BATCH a batch at a time, the batches
+gathered up front by up to THREADS threads (for large sorted outputs)."
+  (declare (type index-vector perm))
+  (let* ((n (length perm))
+         (count (ceiling n +batch-size+))
+         (batches (make-array count)))
+    (map-row-ranges count threads
+                    (lambda (start end)
+                      (loop for k from start below end
+                            do (let* ((a (* k +batch-size+))
+                                      (b (min n (+ a +batch-size+)))
+                                      (idx (subseq perm a b)))
+                                 (setf (svref batches k) (batch-gather batch idx (length idx))))))
+                    4)
+    (let ((k 0))
+      (declare (type fixnum k))
+      (lambda ()
+        (when (< k count)
+          (prog1 (svref batches k)
+            (setf (svref batches k) nil)
+            (incf k)))))))
+
 (defmethod compile-batch-operator ((node pp-sort))
   (let ((open-child (compile-batch-operator (pnode-child node)))
         (kinds (output-kinds node))
@@ -831,8 +865,10 @@ normalized keys for large inputs (vsort.lisp), else by comparison sort."
           (unless output
             (let ((batch (drain-batches open-child kinds)))
               (check-interrupts)
-              (setf output (permutation-batches batch (sorted-permutation batch keys threads)
-                                                0 (batch-count batch)))))
+              (let ((perm (sorted-permutation batch keys threads)))
+                (setf output (if (and (> threads 1) (> (batch-count batch) (* 4 (morsel-rows))))
+                                 (parallel-permutation-batches batch perm threads)
+                                 (permutation-batches batch perm 0 (batch-count batch)))))))
           (funcall (the function output)))))))
 
 (defmethod compile-batch-operator ((node pp-top-n))

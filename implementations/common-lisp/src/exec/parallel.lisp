@@ -288,32 +288,91 @@ workers, yielding the batches in serial order."
 
 ;;; ------------------------------------------------------------------
 ;;; Parallel aggregation
+;;;
+;;; Every worker aggregates the morsels it claims into its own partial
+;;; group state. With many groups, merging the partial states (each holding
+;;; most of the groups) costs about as much as the aggregation itself, so a
+;;; worker whose partial state exceeds *PARTITION-GROUPS-THRESHOLD* groups
+;;; switches to *partitioning*: it only evaluates the key and argument
+;;; vectors of its later batches and files their rows by key hash into one
+;;; chunk list per partition (one partition per worker). Afterwards every
+;;; partition is aggregated by its own thread: the chunks filed for it by all
+;;; workers, plus its share (by the same hash) of the workers' partial
+;;; states. Each row is then hashed into a table once, and every partition's
+;;; table holds only its share of the groups.
+
+(defparameter *partition-groups-threshold* 4096
+  "Partial-state size above which a worker of a parallel aggregation
+switches to partitioning its input rows.")
+
+(defstruct (row-chunk (:constructor make-row-chunk (key-vecs arg-vecs count positions)))
+  "Rows of one batch filed for a partition: their key and aggregate argument
+vectors and input positions."
+  key-vecs arg-vecs (count 0 :type fixnum) (positions nil :type index-vector))
+
+(defun partition-rows (key-vecs arg-vecs n base chunk-lists)
+  "File the N rows of KEY-VECS/ARG-VECS (input positions BASE + i) into the
+CHUNK-LISTS (one list per partition) by key hash, the partition of a group
+as in GROUP-STATE-PARTITIONS."
+  (declare (type fixnum n base) (type simple-vector chunk-lists))
+  (let* ((parts (length chunk-lists))
+         (hashes (hash-key-vecs key-vecs n))
+         (sizes (make-array parts :element-type 'fixnum :initial-element 0)))
+    (declare (type index-vector hashes))
+    (dotimes (i n)
+      (let ((p (mod (aref hashes i) parts)))
+        (setf (aref hashes i) p)
+        (incf (aref sizes p))))
+    (let ((indexes (map 'simple-vector #'make-index-vector sizes)))
+      (fill sizes 0)
+      (dotimes (i n)
+        (let ((p (aref hashes i)))
+          (setf (aref (the index-vector (svref indexes p)) (aref sizes p)) i)
+          (incf (aref sizes p))))
+      (dotimes (p parts)
+        (let ((m (aref sizes p))
+              (idx (svref indexes p)))
+          (declare (type index-vector idx))
+          (when (plusp m)
+            (let ((positions (make-index-vector m)))
+              (dotimes (j m) (setf (aref positions j) (+ base (aref idx j))))
+              (push (make-row-chunk (mapcar (lambda (v) (vec-gather v idx m)) key-vecs)
+                                    (mapcar (lambda (v) (and v (vec-gather v idx m))) arg-vecs)
+                                    m positions)
+                    (svref chunk-lists p)))))))))
 
 (defun make-parallel-aggregate (node scan threads)
   "Batch opener of a HashAggregate whose input pipeline runs in up to
-THREADS workers, each aggregating into a partial group state."
+THREADS workers, each aggregating into a partial group state (or
+partitioning its rows, see above)."
   (let* ((child (pnode-child node))
          (morsel-count (length (scan-morsels scan)))
          (workers (min threads morsel-count))
          (consumers (loop repeat workers
                           collect (multiple-value-list
                                    (let ((*parallel-disabled* t))
-                                     (make-aggregate-consumer node :track-positions t))))))
+                                     (make-aggregate-consumer node :track-positions t)))))
+         (lazy (third (first consumers)))
+         (partitionable (and (pp-hash-aggregate-group-by node) (not lazy))))
     (multiple-value-bind (copies providers)
-        (compile-pipeline-copies child workers (and (third (first consumers)) (pp-table-scan-p child)))
+        (compile-pipeline-copies child workers (and lazy (pp-table-scan-p child)))
       (lambda ()
         (let ((output nil))
           (lambda ()
             (unless output
               (mapc #'funcall providers)
               (let ((run (make-prun (scan-morsels scan)))
-                    (states (make-array workers :initial-element nil)))
+                    (states (make-array workers :initial-element nil))
+                    (chunk-lists (make-array workers :initial-element nil)))
                 (prun-start run workers
                             (lambda (w)
-                              (destructuring-bind (new-state consume &optional lazy) (nth w consumers)
-                                (declare (ignore lazy))
-                                (declare (type function new-state consume))
-                                (let ((gs (funcall new-state)))
+                              (destructuring-bind (new-state consume lazy evaluate consume-vecs)
+                                  (nth w consumers)
+                                (declare (ignore lazy consume-vecs))
+                                (declare (type function new-state consume evaluate))
+                                (let ((gs (funcall new-state))
+                                      (width (length (pnode-columns child)))
+                                      (partitioning nil))
                                   (setf (svref states w) gs)
                                   (run-morsels run (svref copies w)
                                                (lambda (m iter)
@@ -323,17 +382,66 @@ THREADS workers, each aggregating into a partial group state."
                                                    (loop for b = (funcall iter)
                                                          while b
                                                          do (when (prun-stopped run) (return-from nil))
-                                                            (funcall consume gs b base)
-                                                            (incf base (batch-count b))))))))))
+                                                            (if partitioning
+                                                                (multiple-value-bind (key-vecs arg-vecs)
+                                                                    (funcall evaluate b)
+                                                                  (charge-memory (* (batch-count b)
+                                                                                    (row-footprint width)))
+                                                                  (partition-rows key-vecs arg-vecs
+                                                                                  (batch-count b) base
+                                                                                  partitioning))
+                                                                (funcall consume gs b base))
+                                                            (incf base (batch-count b))))
+                                                 (when (and partitionable (not partitioning)
+                                                            (> (group-state-count gs)
+                                                               *partition-groups-threshold*))
+                                                   (setf partitioning (make-array workers :initial-element '())
+                                                         (svref chunk-lists w) partitioning))))))))
                 ;; Wait for all workers, then merge their partial states in order.
                 (loop for th in (prun-threads run)
                       do (sb-thread:join-thread th :default nil))
                 (setf (prun-threads run) '())
                 (prun-raise run)
                 (check-interrupts)
-                (setf output (merge-partial-states states node (first (first consumers))))))
+                (setf output
+                      (if (some #'identity chunk-lists)
+                          (merge-partitioned-states states chunk-lists node
+                                                    (first (first consumers))
+                                                    (fifth (first consumers)))
+                          (merge-partial-states states node (first (first consumers)))))))
             (funcall (the function output))))))))
 
+(defun merge-partitioned-states (states chunk-lists node new-state consume-vecs)
+  "Batch iterator over the groups of a parallel aggregation in which some
+workers partitioned their rows into CHUNK-LISTS (per worker: NIL, or a
+vector of chunk lists by partition): each partition aggregates, in its own
+thread, its chunks and its groups of the partial STATES."
+  (declare (type simple-vector states chunk-lists) (type function new-state consume-vecs))
+  (let* ((workers (length states))
+         (parts (coerce (loop repeat workers collect (funcall new-state)) 'simple-vector))
+         (partitioned (make-array workers)))
+    (run-in-threads
+     (loop for w below workers
+           collect (let ((w w))
+                     (lambda ()
+                       (setf (svref partitioned w)
+                             (group-state-partitions (svref states w) workers))))))
+    (run-in-threads
+     (loop for p below workers
+           collect (let ((p p))
+                     (lambda ()
+                       (let ((gs (svref parts p)))
+                         (loop for lists across chunk-lists
+                               when lists
+                                 do (dolist (chunk (reverse (svref lists p)))
+                                      (funcall consume-vecs gs (row-chunk-key-vecs chunk)
+                                               (row-chunk-arg-vecs chunk) (row-chunk-count chunk)
+                                               (row-chunk-positions chunk))))
+                         (loop for w below workers
+                               do (group-state-merge gs (svref states w)
+                                                     (svref (svref partitioned w) p))))))))
+    (check-interrupts)
+    (ordered-group-batches parts node)))
 
 (defun merge-partial-states (states node new-state)
   "Batch iterator over the merged groups of the partial group STATES, in

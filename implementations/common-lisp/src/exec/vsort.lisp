@@ -117,54 +117,86 @@ them does not fit 64 bits."
       (unless (and nulls (= (sbit nulls i) 1))
         (setf (aref w i) (logxor (if (svref data i) 1 0) flip))))))
 
-(defun string-key-length (s)
-  "Characters of S that are encoded: up to and including its first character
-with a code above 254 (clamped to 255, it does not order the characters
-after it)."
-  (declare (type simple-string s))
-  (let ((p (position-if (lambda (c) (> (char-code c) 254)) s)))
-    (if p (1+ p) (length s))))
+(deftype inexact-flags () '(simple-array (unsigned-byte 8) (*)))
 
-(defun string-key-word (s start len)
-  "Prefix word of the characters [START, START+8) of the first LEN of S
-(codes clamped to 255, zero padded)."
-  (declare (type simple-string s) (type fixnum start len) (optimize speed))
-  (let ((w 0))
-    (declare (type (unsigned-byte 64) w))
-    (loop for k of-type fixnum from start below (+ start 8)
-          do (setf w (logior (logand (ash w 8) +u64-mask+)
-                             (if (< k len) (min 255 (char-code (schar s k))) 0))))
-    w))
+(defun make-inexact-flags (n)
+  "Per-row flags (bytes, so that threads may set those of their own rows)."
+  (make-array n :element-type '(unsigned-byte 8) :initial-element 0))
 
-(defun exact-string-key-p (s words)
-  "True when the WORDS prefix words of S determine S."
-  (declare (type simple-string s) (type fixnum words))
-  (and (<= (length s) (* 8 words))
-       (every (lambda (c) (< 0 (char-code c) 255)) s)))
+(defun encode-string-row (s words i flip)
+  "Store the prefix words of the string S as row I of the u64 vectors WORDS
+(a SIMPLE-VECTOR), complemented when FLIP is all ones. Characters are
+encoded up to and including the first one with a code above 254 (clamped
+to 255, it does not order the characters after it). Returns true when the
+words determine S: at most 8 characters per word, no code 0 or above 254."
+  (declare (type simple-vector words) (type fixnum i) (type (unsigned-byte 64) flip)
+           (optimize speed))
+  (let* ((count (length words))
+         (limit (* 8 count))
+         (exact t))
+    (declare (type fixnum count limit))
+    (dotimes (w count)
+      (setf (aref (the u64-vector (svref words w)) i) 0))
+    (macrolet ((encode (string-type)
+                 `(let ((s s))
+                    (declare (type ,string-type s))
+                    (let ((len (length s)))
+                      (when (> len limit) (setf exact nil))
+                      (loop for k of-type fixnum below (min len limit)
+                            do (let* ((code (char-code (schar s k)))
+                                      (byte (min code 255))
+                                      (word (svref words (ash k -3))))
+                                 (declare (type u64-vector word))
+                                 (setf (aref word i)
+                                       (logior (aref word i)
+                                               (logand (ash byte (- 56 (* 8 (logand k 7)))) +u64-mask+)))
+                                 (when (or (zerop code) (> code 254))
+                                   (setf exact nil))
+                                 (when (> code 254) (return))))))))
+      (typecase s
+        ((simple-array character (*)) (encode (simple-array character (*))))
+        (t (encode simple-string))))
+    (unless (zerop flip)
+      (dotimes (w count)
+        (let ((word (svref words w)))
+          (declare (type u64-vector word))
+          (setf (aref word i) (logxor (aref word i) flip)))))
+    exact))
 
-(defun encode-string-words (data nulls n flip inexact)
+(defun encode-string-words (data nulls n flip inexact threads)
   "Prefix words of a SIMPLE-VECTOR of strings, setting INEXACT[i] for rows
 whose words do not determine their string."
-  (declare (type simple-vector data) (type fixnum n) (type simple-bit-vector inexact)
+  (declare (type simple-vector data) (type fixnum n) (type inexact-flags inexact)
            (type (unsigned-byte 64) flip))
   (let* ((max-length (loop for i below n
                            for v = (svref data i)
                            unless (and nulls (= (sbit nulls i) 1))
                              maximize (length (the simple-string v))))
          (count (max 1 (min *string-key-max-words* (ceiling max-length 8))))
-         (words (loop repeat count collect (make-u64-vector n))))
-    (dotimes (i n)
-      (unless (and nulls (= (sbit nulls i) 1))
-        (let* ((s (svref data i))
-               (len (string-key-length s)))
-          (loop for w in words
-                for start of-type fixnum from 0 by 8
-                do (setf (aref (the u64-vector w) i) (logxor (string-key-word s start len) flip)))
-          (unless (exact-string-key-p s count)
-            (setf (sbit inexact i) 1)))))
-    words))
+         (words (coerce (loop repeat count collect (make-u64-vector n)) 'simple-vector)))
+    (map-row-ranges n threads
+                    (lambda (start end)
+                      (declare (type fixnum start end))
+                      (loop for i of-type fixnum from start below end
+                            unless (and nulls (= (sbit nulls i) 1))
+                              do (unless (encode-string-row (svref data i) words i flip)
+                                   (setf (aref inexact i) 1)))))
+    (coerce words 'list)))
 
-(defun encode-sort-key (vec type descending nulls-first n inexact)
+(defun map-row-ranges (n threads fn &optional (grain (morsel-rows)))
+  "Call (FN start end) on consecutive ranges covering [0, N), in up to THREADS
+threads, each range holding at least GRAIN elements."
+  (declare (type function fn))
+  (let ((chunks (min threads (max 1 (floor n grain)))))
+    (if (<= chunks 1)
+        (funcall fn 0 n)
+        (run-in-threads
+         (loop for k below chunks
+               collect (let ((start (floor (* k n) chunks))
+                             (end (floor (* (1+ k) n) chunks)))
+                         (lambda () (funcall fn start end))))))))
+
+(defun encode-sort-key (vec type descending nulls-first n inexact threads)
   "(values words supported): the key words of the first N rows of VEC for one
 ORDER BY key (most significant first); SUPPORTED is NIL for keys the radix
 sort cannot encode. Sets INEXACT[i] for string rows needing the full
@@ -182,7 +214,7 @@ comparison."
         ((not (simple-vector-p data)) (values nil nil))
         (t
          (case (type-kind type)
-           (:string (done (encode-string-words data nulls n flip inexact)))
+           (:string (done (encode-string-words data nulls n flip inexact threads)))
            (:boolean (done (list (encode-boolean-word data nulls n flip))))
            ((:int64 :decimal :date :timestamp)
             (let ((w (encode-any-integer-word data nulls n flip)))
@@ -190,18 +222,19 @@ comparison."
            (:null (done '()))
            (t (values nil nil))))))))
 
-(defun encode-sort-keys (batch keys n)
+(defun encode-sort-keys (batch keys n threads)
   "(values words inexact-run-words inexact): the key words of all ORDER BY
 KEYS, the number of leading words through the first string key (NIL when no
-row is inexact) and the inexact-row bit vector; NIL when some key is not
+row is inexact) and the inexact-row flags; NIL when some key is not
 supported."
-  (let ((inexact (make-array n :element-type 'bit :initial-element 0))
+  (let ((inexact (make-inexact-flags n))
         (words '())
         (run-words nil))
     (dolist (key keys)
       (destructuring-bind (pos type descending nulls-first) key
         (multiple-value-bind (key-words supported)
-            (encode-sort-key (svref (batch-columns batch) pos) type descending nulls-first n inexact)
+            (encode-sort-key (svref (batch-columns batch) pos) type descending nulls-first n
+                             inexact threads)
           (unless supported
             (return-from encode-sort-keys nil))
           (setf words (append words key-words))
@@ -342,7 +375,7 @@ rows; NIL when all rows have equal words."
 (defun resort-inexact-runs (perm words run-words inexact before)
   "Re-sort with the comparison predicate BEFORE every run of PERM whose first
 RUN-WORDS words are equal and that holds an INEXACT row."
-  (declare (type index-vector perm) (type simple-bit-vector inexact) (type function before)
+  (declare (type index-vector perm) (type inexact-flags inexact) (type function before)
            (type fixnum run-words))
   (let ((words (coerce (subseq words 0 run-words) 'simple-vector))
         (n (length perm)))
@@ -353,10 +386,10 @@ RUN-WORDS words are equal and that holds an INEXACT row."
         (declare (type fixnum start))
         (loop while (< start n)
               do (let ((end (1+ start))
-                       (any (= 1 (sbit inexact (aref perm start)))))
+                       (any (= 1 (aref inexact (aref perm start)))))
                    (declare (type fixnum end))
                    (loop while (and (< end n) (same-words-p (aref perm start) (aref perm end)))
-                         do (when (= 1 (sbit inexact (aref perm end))) (setf any t))
+                         do (when (= 1 (aref inexact (aref perm end))) (setf any t))
                             (incf end))
                    (when (and any (> (- end start) 1))
                      (replace perm (stable-sort (subseq perm start end) before) :start1 start))
@@ -367,7 +400,7 @@ RUN-WORDS words are equal and that holds an INEXACT row."
   "Row indexes of BATCH in ORDER BY KEYS order (stable), or NIL when a key
 cannot be encoded. BEFORE is the comparison predicate for inexact runs."
   (let ((n (batch-count batch)))
-    (multiple-value-bind (words run-words inexact) (encode-sort-keys batch keys n)
+    (multiple-value-bind (words run-words inexact) (encode-sort-keys batch keys n threads)
       (when (or words (null keys))
         (let ((perm (radix-sort-rows words n threads)))
           (if run-words
