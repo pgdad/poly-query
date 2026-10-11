@@ -19,7 +19,7 @@ final class TypesTest {
         Assert.eq(DataType.INT64, DataType.parse("bigint"));
         Assert.eq(DataType.STRING, DataType.parse("text"));
         Assert.eq("STRING", DataType.NULL.toString());
-        Assert.fails(ErrorCode.SEMANTIC_ERROR, () -> DataType.parse("DECIMAL(19,2)"));
+        Assert.fails(ErrorCode.SEMANTIC_ERROR, () -> DataType.parse("DECIMAL(39,2)"));
     }
 
     static void testDecimalArithmetic() {

@@ -51,15 +51,14 @@ final class TypeCoercion {
         TypeKind lk = lt.kind();
         TypeKind rk = rt.kind();
         if (lt.isNumeric() && rt.isNumeric()) {
-            if (lk == rk) {
-                return new BoundExpr[] {l, r};
-            }
             if (lk == TypeKind.FLOAT64 || rk == TypeKind.FLOAT64) {
-                return new BoundExpr[] {implicit(l, DataType.FLOAT64), implicit(r, DataType.FLOAT64)};
+                return lk == rk ? new BoundExpr[] {l, r}
+                        : new BoundExpr[] {implicit(l, DataType.FLOAT64), implicit(r, DataType.FLOAT64)};
             }
             // INT64 / DECIMAL: compared by exact value (CR-2 §4). INT64 and narrow DECIMAL operands
-            // of any scales are compared as they are; with a wide operand both become wide.
-            if (lt.isWideDecimal() || rt.isWideDecimal()) {
+            // of any scales are compared as they are; with a wide operand both become wide (one
+            // representation), the scales may still differ.
+            if (lt.isWideDecimal() != rt.isWideDecimal()) {
                 return new BoundExpr[] {implicit(l, wide(lt)), implicit(r, wide(rt))};
             }
             return new BoundExpr[] {l, r};
