@@ -1,10 +1,19 @@
 //! Logical query plans: the relational algebra produced by semantic analysis
-//! and rewritten by the optimizer.
+//! and rewritten by the optimizer. A logical plan says *what* is computed,
+//! never *how*: access paths, join algorithms and the execution model are
+//! chosen later by physical planning ([`super::physical`]).
+//!
+//! Subqueries are expressions ([`Expr::ScalarSubquery`], [`Expr::Exists`],
+//! [`Expr::InSubquery`]) owning their own logical plan; CTEs are inlined by
+//! the binder at every reference. `Display` prints a plan tree (with its
+//! subquery plans) for debugging and tests.
 
+use std::collections::HashSet;
+use std::fmt;
 use std::sync::Arc;
 
-use super::expr::{AggregateCall, Expr};
-use crate::storage::{Field, Index, Table};
+use super::expr::{AggregateCall, Expr, SubqueryPlan};
+use crate::storage::{Field, Table};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SortKey {
@@ -35,14 +44,11 @@ impl JoinType {
 pub enum LogicalPlan {
     /// A single row with no columns (`SELECT` without `FROM`).
     SingleRow,
-    /// Scan of a table, producing the listed columns in order. `indexes`
-    /// are the catalog's indexes on this table version (for access-path
-    /// selection).
+    /// Scan of a table, producing the listed columns in order.
     Scan {
         table: Arc<Table>,
         columns: Vec<usize>,
         schema: Vec<Field>,
-        indexes: Vec<Arc<Index>>,
     },
     Filter {
         input: Box<LogicalPlan>,
@@ -193,5 +199,156 @@ impl LogicalPlan {
                 }
             }
         }
+    }
+
+    /// Calls `f` for every expression of this plan tree, mutably (not
+    /// descending into subquery plans).
+    pub fn visit_exprs_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
+        match self {
+            LogicalPlan::SingleRow | LogicalPlan::Scan { .. } => {}
+            LogicalPlan::Filter { input, predicate } => {
+                f(predicate);
+                input.visit_exprs_mut(f);
+            }
+            LogicalPlan::Project { input, exprs, .. } => {
+                exprs.iter_mut().for_each(&mut *f);
+                input.visit_exprs_mut(f);
+            }
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                aggregates,
+                ..
+            } => {
+                group_by.iter_mut().for_each(&mut *f);
+                for a in aggregates {
+                    if let Some(arg) = &mut a.arg {
+                        f(arg);
+                    }
+                }
+                input.visit_exprs_mut(f);
+            }
+            LogicalPlan::Join {
+                left, right, on, ..
+            } => {
+                if let Some(on) = on {
+                    f(on);
+                }
+                left.visit_exprs_mut(f);
+                right.visit_exprs_mut(f);
+            }
+            LogicalPlan::Distinct { input } | LogicalPlan::Limit { input, .. } => {
+                input.visit_exprs_mut(f)
+            }
+            LogicalPlan::Sort { input, keys } => {
+                for k in keys {
+                    f(&mut k.expr);
+                }
+                input.visit_exprs_mut(f);
+            }
+            LogicalPlan::UnionAll { inputs, .. } => {
+                for input in inputs {
+                    input.visit_exprs_mut(f);
+                }
+            }
+        }
+    }
+
+    /// Calls `f` for every subquery referenced by this plan's expressions
+    /// (not descending into the subquery plans themselves); `correlated`
+    /// tells whether the reference passes outer values as parameters.
+    pub fn visit_subqueries(&self, f: &mut dyn FnMut(&Arc<SubqueryPlan>, bool)) {
+        self.visit_exprs(&mut |e| e.visit_subqueries(&mut *f));
+    }
+
+    fn fmt_tree(&self, f: &mut fmt::Formatter<'_>, depth: usize) -> fmt::Result {
+        let list = |items: &mut dyn Iterator<Item = String>| items.collect::<Vec<_>>().join(", ");
+        let names = |schema: &[Field]| list(&mut schema.iter().map(|c| c.name.clone()));
+        write!(f, "{:indent$}", "", indent = depth * 2)?;
+        match self {
+            LogicalPlan::SingleRow => writeln!(f, "SingleRow")?,
+            LogicalPlan::Scan { table, schema, .. } => {
+                writeln!(f, "Scan {} [{}]", table.name, names(schema))?
+            }
+            LogicalPlan::Filter { predicate, .. } => writeln!(f, "Filter {predicate}")?,
+            LogicalPlan::Project { exprs, schema, .. } => writeln!(
+                f,
+                "Project [{}]",
+                list(
+                    &mut schema
+                        .iter()
+                        .zip(exprs)
+                        .map(|(c, e)| format!("{} := {e}", c.name))
+                )
+            )?,
+            LogicalPlan::Aggregate {
+                group_by,
+                aggregates,
+                ..
+            } => writeln!(
+                f,
+                "Aggregate group_by=[{}] aggregates=[{}]",
+                list(&mut group_by.iter().map(Expr::to_string)),
+                list(&mut aggregates.iter().map(AggregateCall::to_string))
+            )?,
+            LogicalPlan::Join { join_type, on, .. } => match on {
+                Some(on) => writeln!(f, "Join {} ON {on}", join_type.name())?,
+                None => writeln!(f, "Join {}", join_type.name())?,
+            },
+            LogicalPlan::Distinct { .. } => writeln!(f, "Distinct")?,
+            LogicalPlan::Sort { keys, .. } => writeln!(
+                f,
+                "Sort [{}]",
+                list(&mut keys.iter().map(|k| format!(
+                    "{} {} NULLS {}",
+                    k.expr,
+                    if k.descending { "DESC" } else { "ASC" },
+                    if k.nulls_first { "FIRST" } else { "LAST" }
+                )))
+            )?,
+            LogicalPlan::Limit { offset, limit, .. } => match limit {
+                Some(limit) => writeln!(f, "Limit offset={offset} limit={limit}")?,
+                None => writeln!(f, "Limit offset={offset}")?,
+            },
+            LogicalPlan::UnionAll { schema, .. } => writeln!(f, "UnionAll [{}]", names(schema))?,
+        }
+        match self {
+            LogicalPlan::SingleRow | LogicalPlan::Scan { .. } => Ok(()),
+            LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Project { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Distinct { input }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Limit { input, .. } => input.fmt_tree(f, depth + 1),
+            LogicalPlan::Join { left, right, .. } => {
+                left.fmt_tree(f, depth + 1)?;
+                right.fmt_tree(f, depth + 1)
+            }
+            LogicalPlan::UnionAll { inputs, .. } => inputs
+                .iter()
+                .try_for_each(|input| input.fmt_tree(f, depth + 1)),
+        }
+    }
+}
+
+/// Indented operator tree, one node per line (`#i` is input column `i`),
+/// followed by the plans of the subqueries it references.
+impl fmt::Display for LogicalPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.fmt_tree(f, 0)?;
+        let mut shown = HashSet::new();
+        let mut pending = Vec::new();
+        self.visit_subqueries(&mut |sub, _| pending.push(sub.clone()));
+        let mut next = 0;
+        while let Some(sub) = pending.get(next).cloned() {
+            next += 1;
+            if shown.insert(sub.id) {
+                writeln!(f, "$subquery{}:", sub.id)?;
+                sub.plan.fmt_tree(f, 1)?;
+                sub.plan
+                    .visit_subqueries(&mut |sub, _| pending.push(sub.clone()));
+            }
+        }
+        Ok(())
     }
 }

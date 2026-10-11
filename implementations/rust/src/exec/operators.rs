@@ -8,10 +8,9 @@ use std::sync::Arc;
 use super::aggregate::AggState;
 use super::context::{ExecContext, LookupTable};
 use super::eval::{eval, eval_predicate, normalize_key};
-use super::native_filter::{NativeFilter, NativeFilterRowOp};
+use super::native_filter::NativeFilterRowOp;
 use super::vector::ops::full_ranges;
 use crate::error::Result;
-use crate::native::Kernels;
 use crate::planner::access::IndexLookup;
 use crate::planner::expr::{AggregateCall, Expr, KeyDomain};
 use crate::planner::logical::{JoinType, SortKey};
@@ -72,25 +71,17 @@ pub trait Operator {
 /// Builds the operator tree for a physical plan in the execution mode of
 /// `ctx` (row-at-a-time or vectorized).
 pub fn build(plan: PhysicalPlan, ctx: &ExecContext) -> Box<dyn Operator> {
-    if ctx.exec.vectorized {
+    if ctx.execution.vectorized {
         Box::new(crate::exec::vector::ops::RowSink::new(
             crate::exec::vector::build(plan, ctx),
         ))
     } else {
-        build_row_with(plan, ctx.exec.native)
+        build_row(plan)
     }
 }
 
 /// Builds the row-at-a-time (Volcano) operator tree for a physical plan.
 pub fn build_row(plan: PhysicalPlan) -> Box<dyn Operator> {
-    build_row_with(plan, None)
-}
-
-/// Builds the row operator tree of `plan`; with `native` kernels, filters
-/// directly above scans of column-oriented tables select their rows with
-/// the kernels (see [`crate::exec::native_filter`]).
-pub fn build_row_with(plan: PhysicalPlan, native: Option<&'static Kernels>) -> Box<dyn Operator> {
-    let build = |p: PhysicalPlan| build_row_with(p, native);
     match plan {
         PhysicalPlan::Values => Box::new(SingleRowOp { done: false }),
         PhysicalPlan::TableScan {
@@ -121,33 +112,25 @@ pub fn build_row_with(plan: PhysicalPlan, native: Option<&'static Kernels>) -> B
             pos: 0,
             batch: Vec::new().into_iter(),
         }),
-        PhysicalPlan::Filter { input, predicate } => {
-            if let (
-                Some(kernels),
-                PhysicalPlan::TableScan {
-                    table,
-                    columns,
-                    groups,
-                    ..
-                },
-            ) = (native, &*input)
-                && let Some(filter) = NativeFilter::analyze(&predicate, table, columns)
-            {
-                return Box::new(NativeFilterRowOp::new(
-                    table.clone(),
-                    columns.clone(),
-                    full_ranges(table, groups),
-                    Arc::new(filter),
-                    kernels,
-                ));
-            }
-            Box::new(FilterOp {
-                input: build(*input),
-                predicate,
-            })
+        PhysicalPlan::NativeFilterScan {
+            table,
+            columns,
+            groups,
+            filter,
+            kernels,
+            ..
+        } => {
+            let ranges = full_ranges(&table, &groups);
+            Box::new(NativeFilterRowOp::new(
+                table, columns, ranges, filter, kernels,
+            ))
         }
+        PhysicalPlan::Filter { input, predicate } => Box::new(FilterOp {
+            input: build_row(*input),
+            predicate,
+        }),
         PhysicalPlan::Project { input, exprs, .. } => Box::new(ProjectOp {
-            input: build(*input),
+            input: build_row(*input),
             exprs,
         }),
         PhysicalPlan::HashAggregate {
@@ -156,7 +139,7 @@ pub fn build_row_with(plan: PhysicalPlan, native: Option<&'static Kernels>) -> B
             aggregates,
             ..
         } => Box::new(AggregateOp {
-            input: Some(build(*input)),
+            input: Some(build_row(*input)),
             group_by,
             aggregates,
             output: Vec::new().into_iter(),
@@ -178,8 +161,8 @@ pub fn build_row_with(plan: PhysicalPlan, native: Option<&'static Kernels>) -> B
                 (left, right)
             };
             Box::new(HashJoinOp {
-                probe: build(*probe),
-                build_input: Some(build(*build_side)),
+                probe: build_row(*probe),
+                build_input: Some(build_row(*build_side)),
                 keys,
                 residual,
                 left_join: join_type == JoinType::Left,
@@ -200,8 +183,8 @@ pub fn build_row_with(plan: PhysicalPlan, native: Option<&'static Kernels>) -> B
         } => {
             let right_width = right.schema().len();
             Box::new(NestedLoopJoinOp {
-                left: build(*left),
-                right_input: Some(build(*right)),
+                left: build_row(*left),
+                right_input: Some(build_row(*right)),
                 right_rows: Vec::new(),
                 predicate,
                 left_join: join_type == JoinType::Left,
@@ -219,7 +202,7 @@ pub fn build_row_with(plan: PhysicalPlan, native: Option<&'static Kernels>) -> B
         } => {
             let right_width = right.schema().len();
             Box::new(MergeJoinOp {
-                inputs: Some((build(*left), build(*right))),
+                inputs: Some((build_row(*left), build_row(*right))),
                 keys,
                 residual,
                 left_join: join_type == JoinType::Left,
@@ -243,21 +226,23 @@ pub fn build_row_with(plan: PhysicalPlan, native: Option<&'static Kernels>) -> B
             pos: 0,
         }),
         PhysicalPlan::Distinct { input } => Box::new(DistinctOp {
-            input: build(*input),
+            input: build_row(*input),
             seen: HashSet::new(),
         }),
-        PhysicalPlan::Sort { input, keys, top } => Box::new(SortOp::new(build(*input), keys, top)),
+        PhysicalPlan::Sort { input, keys, top } => {
+            Box::new(SortOp::new(build_row(*input), keys, top))
+        }
         PhysicalPlan::Limit {
             input,
             offset,
             limit,
         } => Box::new(LimitOp {
-            input: build(*input),
+            input: build_row(*input),
             offset,
             remaining: limit,
         }),
         PhysicalPlan::UnionAll { inputs, .. } => Box::new(UnionAllOp {
-            inputs: inputs.into_iter().map(build).collect(),
+            inputs: inputs.into_iter().map(build_row).collect(),
         }),
     }
 }

@@ -98,7 +98,8 @@ enum Frag {
 /// a fragment).
 fn fragment_scan(plan: &PhysicalPlan) -> Option<(&Arc<Table>, &[usize])> {
     match plan {
-        PhysicalPlan::TableScan { table, groups, .. } => Some((table, groups)),
+        PhysicalPlan::TableScan { table, groups, .. }
+        | PhysicalPlan::NativeFilterScan { table, groups, .. } => Some((table, groups)),
         PhysicalPlan::Filter { input, .. } | PhysicalPlan::Project { input, .. } => {
             fragment_scan(input)
         }
@@ -118,23 +119,22 @@ impl Frag {
     fn prepare(plan: PhysicalPlan, ctx: &ExecContext) -> Result<Frag> {
         Ok(match plan {
             PhysicalPlan::TableScan { table, columns, .. } => Frag::Scan { table, columns },
-            PhysicalPlan::Filter { input, predicate } => {
-                if let (Some(kernels), PhysicalPlan::TableScan { table, columns, .. }) =
-                    (ctx.exec.native, &*input)
-                    && let Some(filter) = NativeFilter::analyze(&predicate, table, columns)
-                {
-                    return Ok(Frag::NativeFilterScan {
-                        table: table.clone(),
-                        columns: columns.clone(),
-                        filter: Arc::new(filter),
-                        kernels,
-                    });
-                }
-                Frag::Filter {
-                    input: Box::new(Frag::prepare(*input, ctx)?),
-                    predicate,
-                }
-            }
+            PhysicalPlan::NativeFilterScan {
+                table,
+                columns,
+                filter,
+                kernels,
+                ..
+            } => Frag::NativeFilterScan {
+                table,
+                columns,
+                filter,
+                kernels,
+            },
+            PhysicalPlan::Filter { input, predicate } => Frag::Filter {
+                input: Box::new(Frag::prepare(*input, ctx)?),
+                predicate,
+            },
             PhysicalPlan::Project { input, exprs, .. } => Frag::Project {
                 input: Box::new(Frag::prepare(*input, ctx)?),
                 exprs,
@@ -267,11 +267,11 @@ fn morsels(table: &Table, groups: &[usize], morsel: usize) -> Vec<Vec<ScanRange>
 
 /// Returns a parallel operator for `plan` if it is worth parallelizing.
 pub fn try_build(plan: &PhysicalPlan, ctx: &ExecContext) -> Option<BoxedBatchOp> {
-    let threads = ctx.exec.threads;
+    let threads = ctx.execution.threads;
     if threads <= 1 || ctx.in_subquery() {
         return None;
     }
-    let morsel = ctx.exec.morsel_rows.max(1);
+    let morsel = ctx.morsel_rows.max(1);
     let split = |fragment: &PhysicalPlan| {
         let (table, groups) = fragment_scan(fragment)?;
         let m = morsels(table, groups, morsel);
@@ -555,7 +555,7 @@ struct AggShared {
 impl AggShared {
     fn work(&self) -> Result<Aggregator> {
         let ctx = self.seed.context();
-        let mut agg = Aggregator::new(self.group_by.len(), &self.aggregates, ctx.exec.native);
+        let mut agg = Aggregator::new(self.group_by.len(), &self.aggregates, ctx.execution.native);
         loop {
             if self.stop.load(Ordering::Relaxed) {
                 return Ok(agg);
@@ -635,7 +635,7 @@ impl BatchOperator for ParallelAggregateOp {
         } else {
             let mut iter = partials.into_iter();
             let mut agg = iter.next().unwrap_or_else(|| {
-                Aggregator::new(self.group_by.len(), &self.aggregates, ctx.exec.native)
+                Aggregator::new(self.group_by.len(), &self.aggregates, ctx.execution.native)
             });
             for p in iter {
                 let retained = agg.merge(p)?;
@@ -679,7 +679,7 @@ fn merge_partitioned(
                     .spawn_scoped(scope, move || {
                         catch_panic(|| {
                             let wctx = seed.context();
-                            let mut agg = Aggregator::new(key_count, calls, wctx.exec.native);
+                            let mut agg = Aggregator::new(key_count, calls, wctx.execution.native);
                             for (w, partial) in partials.iter().enumerate() {
                                 if let Some(groups) = split[w].get(p) {
                                     let retained = agg.merge_groups(partial, groups)?;

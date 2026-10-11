@@ -1,20 +1,34 @@
-//! Expression rewrites (query option `optimize`): constant folding and
-//! predicate simplification. Both preserve results and errors:
+//! Rule `constant_folding`: folds literal-only expressions to literals and
+//! simplifies boolean structure (filters and join conditions that become
+//! `TRUE` disappear). Both preserve results and errors:
 //!
 //! * a constant subexpression is replaced by its value only if evaluating
 //!   it succeeds (`1/0` stays, and fails at run time only if evaluated);
 //! * boolean simplifications only drop an operand the row engine would not
 //!   evaluate either (`FALSE AND x`) or one that cannot fail.
 
-use super::expr::{Expr, ScalarFunc};
-use super::logical::LogicalPlan;
+use super::Rule;
 use crate::exec::eval::eval_constant;
+use crate::planner::expr::{Expr, ScalarFunc};
+use crate::planner::logical::LogicalPlan;
 use crate::sql::ast::BinaryOp;
 use crate::types::Value;
 
+pub struct ConstantFolding;
+
+impl Rule for ConstantFolding {
+    fn name(&self) -> &'static str {
+        "constant_folding"
+    }
+
+    fn apply(&self, plan: LogicalPlan) -> LogicalPlan {
+        simplify_plan(plan)
+    }
+}
+
 /// Folds and simplifies every expression of `plan` (not descending into
-/// subquery plans, which are optimized when they are bound).
-pub fn simplify_plan(plan: LogicalPlan) -> LogicalPlan {
+/// subquery plans).
+fn simplify_plan(plan: LogicalPlan) -> LogicalPlan {
     let b = |p: Box<LogicalPlan>| Box::new(simplify_plan(*p));
     match plan {
         LogicalPlan::SingleRow | LogicalPlan::Scan { .. } => plan,
@@ -162,7 +176,7 @@ fn foldable(e: &Expr) -> bool {
 }
 
 /// Folds constants and simplifies boolean structure, bottom-up.
-pub fn simplify(mut e: Expr) -> Expr {
+fn simplify(mut e: Expr) -> Expr {
     for c in e.children_mut() {
         *c = simplify(std::mem::replace(c, placeholder()));
     }
@@ -282,5 +296,39 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn removes_filters_and_join_conditions_that_fold_to_true() {
+        use crate::planner::logical::JoinType;
+        use crate::planner::optimizer::test_util::{self, apply_checked, scan, show, table};
+        let t = table("t", &["a"], 5);
+        let u = table("u", &["b"], 3);
+        let always = || test_util::cmp(BinaryOp::Lt, *int(1), *int(2));
+        let joined = test_util::join(scan(&t), scan(&u), JoinType::Inner, Some(always()));
+        let plan = apply_checked(&ConstantFolding, test_util::filter(joined, always()));
+        assert_eq!(show(&plan), "Join INNER\n  Scan t [a]\n  Scan u [b]");
+    }
+
+    #[test]
+    fn folds_projections_and_keeps_failing_constants() {
+        use crate::planner::optimizer::test_util::{project, scan, show, table};
+        let t = table("t", &["a"], 2);
+        let mut plan = project(scan(&t), &[0, 0]);
+        if let LogicalPlan::Project { exprs, .. } = &mut plan {
+            let arith = |op, right| Expr::Arith {
+                op,
+                kind: ArithKind::Int,
+                left: int(6),
+                right,
+                ty: DataType::Int64,
+            };
+            exprs[0] = arith(BinaryOp::Mul, int(7));
+            exprs[1] = arith(BinaryOp::Div, int(0));
+        }
+        assert_eq!(
+            show(&ConstantFolding.apply(plan)),
+            "Project [a := 42, a := (6 / 0)]\n  Scan t [a]"
+        );
     }
 }

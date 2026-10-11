@@ -293,7 +293,7 @@ pub fn sort_permutation(
     let threads = if ctx.in_subquery() {
         1
     } else {
-        ctx.exec.threads
+        ctx.execution.threads
     };
     let out = if let [single] = cols.as_slice()
         && !matches!(single.col, SortCol::Values(_))

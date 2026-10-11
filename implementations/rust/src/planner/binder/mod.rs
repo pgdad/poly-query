@@ -36,12 +36,9 @@ pub struct BindContext<'a> {
     pub catalog: &'a Catalog,
     /// Whether test-only functions (`PQ_SLEEP`) are enabled.
     pub test_functions: bool,
-    /// Whether logical rewrites are enabled (query option `optimize`).
-    pub optimize: bool,
 }
 
-/// Binds a query AST into a (not yet optimized) logical plan. Subquery plans
-/// embedded in expressions are optimized as they are bound.
+/// Binds a query AST into a (not yet optimized) logical plan.
 pub fn plan_query(q: &ast::Query, ctx: &BindContext<'_>) -> Result<LogicalPlan> {
     let binder = Binder {
         ctx,
@@ -421,7 +418,6 @@ impl Binder<'_> {
                 let plan = LogicalPlan::Scan {
                     columns: (0..fields.len()).collect(),
                     schema: fields.clone(),
-                    indexes: self.ctx.catalog.indexes_for(&table),
                     table,
                 };
                 Ok((plan, Scope::single(var, fields)))

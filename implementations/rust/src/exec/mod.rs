@@ -12,5 +12,5 @@ pub mod parallel;
 pub mod subquery;
 pub mod vector;
 
-pub use context::{ExecContext, ExecOptions};
+pub use context::ExecContext;
 pub use operators::{Operator, Row, build};

@@ -10,11 +10,13 @@ use crate::catalog::Catalog;
 use crate::config::Config;
 use crate::error::{Error, ErrorCode, Result};
 use crate::exec::parallel::default_morsel_rows;
-use crate::exec::{ExecContext, ExecOptions, Operator, Row, build};
+use crate::exec::{ExecContext, Operator, Row, build};
 use crate::ingest::{self, Format, IngestOptions};
 use crate::json::Json;
 use crate::planner::physical::{self, JoinStrategy};
-use crate::planner::{BindContext, PhysicalOptions, PhysicalPlan, optimizer, plan_query};
+use crate::planner::{
+    BindContext, LogicalPlan, Optimizer, PhysicalOptions, PhysicalPlan, PhysicalQuery, plan_query,
+};
 use crate::sql::ast::Ident;
 use crate::sql::ast::{Query, Statement};
 use crate::sql::parse_statement;
@@ -120,15 +122,6 @@ impl Default for QueryOptions {
             morsel_rows: None,
             native: false,
             query_id: None,
-        }
-    }
-}
-
-impl QueryOptions {
-    fn physical(&self) -> PhysicalOptions {
-        PhysicalOptions {
-            join: self.join,
-            use_indexes: self.use_indexes,
         }
     }
 }
@@ -440,73 +433,46 @@ impl Engine {
             .ok_or_else(|| Error::not_found(format!("table '{name}' does not exist")))
     }
 
-    /// Binds, optimizes and physically plans a query against a catalog snapshot.
-    fn plan_query(
+    /// Binds a query against a catalog snapshot and optimizes it.
+    fn logical_plan(
         &self,
         catalog: &Catalog,
         q: &Query,
         opts: &QueryOptions,
-    ) -> Result<PhysicalPlan> {
+    ) -> Result<LogicalPlan> {
         let ctx = BindContext {
             catalog,
             test_functions: self.config.test_functions,
-            optimize: opts.optimize,
         };
-        let logical = optimizer::optimize(plan_query(q, &ctx)?, opts.optimize);
-        Ok(physical::lower(&logical, opts.physical()))
+        Ok(Optimizer::for_query(opts.optimize).optimize(plan_query(q, &ctx)?))
+    }
+
+    /// The query options that steer physical planning.
+    fn physical_options(&self, opts: &QueryOptions) -> PhysicalOptions {
+        PhysicalOptions {
+            join: opts.join,
+            use_indexes: opts.use_indexes,
+            vectorized: opts.mode != ExecMode::Row,
+            threads: opts.threads.unwrap_or(self.config.threads),
+            native: opts.native,
+        }
     }
 
     /// The physical plan of a query (`explain` op; also accepts `EXPLAIN …`).
     pub fn explain(&self, sql: &str, opts: &QueryOptions) -> Result<Json> {
         match parse_statement(sql)? {
-            Statement::Query(q) | Statement::Explain(q) => {
-                let plan = self.plan_query(&self.catalog(), &q, opts)?;
-                Ok(self.annotated_plan(&plan, opts))
-            }
+            Statement::Query(q) | Statement::Explain(q) => self.explain_query(&q, opts),
             Statement::CreateIndex { .. } | Statement::DropIndex { .. } => {
                 Err(Error::unsupported("only queries can be explained"))
             }
         }
     }
 
-    /// Plan JSON with the execution model on the root node
-    /// (`"execution": {"mode": …, "threads": …}`).
-    fn annotated_plan(&self, plan: &PhysicalPlan, opts: &QueryOptions) -> Json {
-        let native = crate::native::loaded().filter(|_| opts.native);
-        // Filters evaluated with the kernels: `"native": [conjuncts]`.
-        let annotate = |p: &PhysicalPlan| match (native, p) {
-            (Some(_), PhysicalPlan::Filter { input, predicate }) => match &**input {
-                PhysicalPlan::TableScan { table, columns, .. } => {
-                    crate::exec::native_filter::NativeFilter::analyze(predicate, table, columns)
-                        .map(|f| vec![("native", Json::uint(f.native_conjuncts() as u64))])
-                        .unwrap_or_default()
-                }
-                _ => Vec::new(),
-            },
-            _ => Vec::new(),
-        };
-        let mut json = plan.to_json_with(&annotate);
-        let (mode, threads) = match opts.mode {
-            ExecMode::Row => ("row", 1),
-            _ => (
-                "vectorized",
-                opts.threads.unwrap_or(self.config.threads).max(1),
-            ),
-        };
-        if let Json::Object(fields) = &mut json {
-            let mut props = vec![
-                ("mode", Json::str(mode)),
-                ("threads", Json::uint(threads as u64)),
-            ];
-            if let Some(k) = native {
-                props.push(("native", Json::str(k.variant())));
-            }
-            let execution = Json::object(props);
-            // Before "children", so the node's own properties stay together.
-            let at = fields.len().saturating_sub(1);
-            fields.insert(at, ("execution".to_string(), execution));
-        }
-        json
+    /// The EXPLAIN plan JSON of a query.
+    fn explain_query(&self, q: &Query, opts: &QueryOptions) -> Result<Json> {
+        let catalog = self.catalog();
+        let logical = self.logical_plan(&catalog, q, opts)?;
+        Ok(physical::plan(&logical, &catalog, self.physical_options(opts)).to_json())
     }
 
     /// Executes a SQL statement and materializes its result.
@@ -536,7 +502,10 @@ impl Engine {
         };
         match parse_statement(sql)? {
             Statement::Query(q) => {
-                let plan = self.plan_query(&self.catalog(), &q, opts)?;
+                let catalog = self.catalog();
+                let logical = self.logical_plan(&catalog, &q, opts)?;
+                let physical_opts = self.physical_options(opts);
+                let plan = physical::plan(&logical, &catalog, physical_opts);
                 let columns = plan
                     .schema()
                     .iter()
@@ -554,37 +523,31 @@ impl Engine {
                 let memory =
                     usize::try_from(self.config.max_query_memory_mb.saturating_mul(1024 * 1024))
                         .unwrap_or(usize::MAX);
-                let exec = ExecOptions {
-                    vectorized: opts.mode != ExecMode::Row,
-                    threads: opts.threads.unwrap_or(self.config.threads).max(1),
-                    morsel_rows: opts.morsel_rows.unwrap_or_else(default_morsel_rows),
-                    native: if opts.native {
-                        crate::native::loaded()
-                    } else {
-                        None
-                    },
-                };
-                let make_ctx = |exec: ExecOptions| {
+                let morsel_rows = opts.morsel_rows.unwrap_or_else(default_morsel_rows);
+                let make_ctx = |plan: &PhysicalQuery| {
                     let ctx = ExecContext::new(None, memory, self.config.test_functions)
                         .with_deadline(deadline)
                         .with_max_join_rows(self.config.max_join_rows)
-                        .with_physical_options(opts.physical())
-                        .with_exec_options(exec);
+                        .with_plan(plan)
+                        .with_morsel_rows(morsel_rows);
                     match &control.cancel {
                         Some(flag) => ctx.with_cancel_flag(flag.clone()),
                         None => ctx,
                     }
                 };
-                let ctx = make_ctx(exec);
+                let ctx = make_ctx(&plan);
                 ctx.check_interrupt()?;
                 // A vectorized/parallel execution that fails is re-run with
-                // the row-at-a-time reference engine (see `QueryCursor`).
-                let replay = exec
-                    .vectorized
-                    .then(|| (plan.clone(), make_ctx(ExecOptions::default())));
+                // the row-at-a-time reference engine (see `QueryCursor`),
+                // planned from the same logical plan.
+                let replay = plan.execution.vectorized.then(|| {
+                    let baseline = physical::plan(&logical, &catalog, physical_opts.row_baseline());
+                    let ctx = make_ctx(&baseline);
+                    (baseline.root, ctx)
+                });
                 Ok(QueryCursor {
                     columns,
-                    source: CursorSource::Plan(build(plan, &ctx)),
+                    source: CursorSource::Plan(build(plan.root, &ctx)),
                     ctx,
                     max_rows: opts.max_rows,
                     row_count: 0,
@@ -592,8 +555,7 @@ impl Engine {
                 })
             }
             Statement::Explain(q) => {
-                let plan = self.plan_query(&self.catalog(), &q, opts)?;
-                let text = self.annotated_plan(&plan, opts).to_string_compact();
+                let text = self.explain_query(&q, opts)?.to_string_compact();
                 Ok(ready(
                     vec![Field::new("plan", DataType::String)],
                     vec![vec![Value::str(&text)]],
