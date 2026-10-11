@@ -12,6 +12,7 @@
 //! like row mode does.
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use super::batch::{Batch, Data, Vector, selection};
 use crate::error::{Error, Result};
@@ -928,6 +929,19 @@ fn elementwise(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
         };
     }
     let mut row = vec![Value::Null; ops.len()];
+    let vectors: Vec<usize> = (0..ops.len())
+        .filter(|&k| matches!(ops[k], Operand::Vector(_)))
+        .collect();
+    if let [k] = vectors[..]
+        && let Operand::Vector(v) = &ops[k]
+        && let Data::Dict(codes, dict) = &v.data
+        && dict.len() <= n
+    {
+        for (slot, o) in row.iter_mut().zip(&ops) {
+            *slot = o.value(0);
+        }
+        return per_dictionary_code(&template, &mut row, k, v, codes, dict, ctx);
+    }
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         for (slot, o) in row.iter_mut().zip(&ops) {
@@ -936,6 +950,69 @@ fn elementwise(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
         out.push(eval_row(&template, &row, ctx)?);
     }
     Ok(Vector::from_values(out))
+}
+
+/// Evaluates `template` (whose only non-constant input, slot `k` of `row`,
+/// is the dictionary-encoded `v`) once per distinct code occurring in the
+/// batch — in row order, so errors surface at the same row as row by row.
+/// String results stay dictionary-encoded.
+fn per_dictionary_code(
+    template: &Expr,
+    row: &mut [Value],
+    k: usize,
+    v: &Vector,
+    codes: &[u32],
+    dict: &Arc<[Arc<str>]>,
+    ctx: &ExecContext,
+) -> Result<Vector> {
+    let n = v.len();
+    // Result slot of each code (`dict.len()` is the NULL input), in order
+    // of first occurrence.
+    let null_slot = dict.len();
+    let mut slot_of = vec![u32::MAX; dict.len() + 1];
+    let mut results: Vec<Value> = Vec::new();
+    let mut slots = Vec::with_capacity(n);
+    for (i, &code) in codes.iter().enumerate() {
+        let c = if v.is_null(i) {
+            null_slot
+        } else {
+            code as usize
+        };
+        if slot_of[c] == u32::MAX {
+            row[k] = if c == null_slot {
+                Value::Null
+            } else {
+                Value::Str(dict[c].clone())
+            };
+            slot_of[c] = results.len() as u32;
+            results.push(eval_row(template, row, ctx)?);
+        }
+        slots.push(slot_of[c]);
+    }
+    if results
+        .iter()
+        .all(|r| matches!(r, Value::Str(_) | Value::Null))
+    {
+        let valid: Vec<bool> = slots
+            .iter()
+            .map(|&s| !results[s as usize].is_null())
+            .collect();
+        let all = valid.iter().all(|&x| x);
+        let strings: Vec<Arc<str>> = results
+            .into_iter()
+            .map(|r| match r {
+                Value::Str(s) => s,
+                _ => Arc::from(""),
+            })
+            .collect();
+        return Ok(Vector::new(
+            Data::Dict(slots, strings.into()),
+            (!all).then_some(valid),
+        ));
+    }
+    Ok(Vector::from_values(
+        slots.iter().map(|&s| results[s as usize].clone()).collect(),
+    ))
 }
 
 /// Evaluates `e` row by row over full rows (subquery expressions).
@@ -1040,6 +1117,45 @@ mod tests {
             ],
             negated: false,
         });
+    }
+
+    #[test]
+    fn functions_over_dictionary_codes() {
+        use crate::planner::expr::ScalarFunc;
+        let dict: Arc<[Arc<str>]> = vec![Arc::from("ab"), Arc::from("Cd")].into();
+        let v = Vector::new(
+            Data::Dict(vec![1, 0, 1, 0], dict),
+            Some(vec![true, true, false, true]),
+        );
+        let b = Batch::new(vec![v], 4);
+        let ctx = ExecContext::default();
+        let s = DataType::String;
+        for e in [
+            Expr::Function {
+                func: ScalarFunc::Upper,
+                args: vec![*col(0, s)],
+                ty: s,
+            },
+            Expr::Function {
+                func: ScalarFunc::Coalesce,
+                args: vec![*col(0, s), *lit(Value::str("none"), s)],
+                ty: s,
+            },
+            Expr::Function {
+                func: ScalarFunc::Length,
+                args: vec![*col(0, s)],
+                ty: DataType::Int64,
+            },
+        ] {
+            let got = eval(&e, &b, &ctx).unwrap();
+            for i in 0..4 {
+                assert_eq!(
+                    got.value(i),
+                    eval_row(&e, &b.row(i), &ctx).unwrap(),
+                    "{e} row {i}"
+                );
+            }
+        }
     }
 
     #[test]
