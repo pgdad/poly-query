@@ -762,9 +762,8 @@ FUNC plan_scan
     mov FP_FILTER(%r12), %rsi
     call analyze_conj
     /* ---- selectivities; best overall (estimate) and best index */
-    movsd f_third(%rip), %xmm0
-    movsd %xmm0, 32(%rsp)           /* best selectivity of any constraint */
     movsd f_huge(%rip), %xmm0
+    movsd %xmm0, 32(%rsp)           /* best selectivity of any constraint */
     movsd %xmm0, 40(%rsp)           /* best index selectivity */
     movq $0, 48(%rsp)               /* best index */
     movq $0, 56(%rsp)               /* its mode */
@@ -932,9 +931,14 @@ FUNC plan_scan
     jmp 42b
 49: incq 96(%rsp)
     jmp 41b
-50: /* ---- estimate */
-    cvtsi2sdq TB_NROWS(%r13), %xmm0
-    mulsd 32(%rsp), %xmm0
+50: /* ---- estimate: best constraint, or 1/3 when nothing is analyzable */
+    movsd 32(%rsp), %xmm1
+    minsd f_one(%rip), %xmm1
+    ucomisd f_huge(%rip), %xmm1
+    jb 51f
+    movsd f_third(%rip), %xmm1
+51: cvtsi2sdq TB_NROWS(%r13), %xmm0
+    mulsd %xmm1, %xmm0
     cvttsd2si %xmm0, %rax
 95: mov %rax, FP_EST(%r12)
     LEAVE

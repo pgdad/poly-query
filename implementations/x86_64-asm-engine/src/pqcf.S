@@ -1521,8 +1521,6 @@ FUNC pqcf_read
     CSTR %rsi, "row_count"
     call m_int
     mov %rax, RD_NROWS(%rsp)
-    cmp g_max_table_rows(%rip), %rax
-    ja 98f
     mov RD_META(%rsp), %rdi
     CSTR %rsi, "columns"
     call m_arr
@@ -1531,6 +1529,26 @@ FUNC pqcf_read
     CSTR %rsi, "row_groups"
     call m_arr
     mov %rax, RD_RGS(%rsp)
+    /* row_count must be the sum of the row groups' row counts */
+    xor %r12d, %r12d                /* group */
+    xor %r14d, %r14d                /* sum */
+14: mov RD_RGS(%rsp), %rax
+    cmp JN_LEN(%rax), %r12
+    jae 15f
+    mov JN_PTR(%rax), %rax
+    mov (%rax, %r12, 8), %rdi
+    cmpq $J_OBJECT, JN_TYPE(%rdi)
+    jne corrupt_meta
+    CSTR %rsi, "row_count"
+    call m_int
+    add %rax, %r14
+    jc corrupt_meta
+    inc %r12
+    jmp 14b
+15: cmp RD_NROWS(%rsp), %r14
+    jne corrupt_meta
+    cmp g_max_table_rows(%rip), %r14
+    ja 98f
     /* table and columns */
     mov g_pending_arena(%rip), %rdi
     mov RD_NAME(%rsp), %rsi
