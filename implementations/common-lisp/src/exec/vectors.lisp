@@ -387,6 +387,16 @@ count`), so that no row vectors are built."
                      +null+
                      (svref dict (aref codes i)))))
          (make-vec out nil codes store)))
+      ((and (eq kind :any) (bool-column-p store))
+       (let ((bits (bool-column-values store))
+             (out (make-array n)))
+         (declare (type simple-bit-vector bits) (type fixnum start))
+         (dotimes (i n)
+           (setf (svref out i)
+                 (if (and vslice (zerop (sbit vslice i)))
+                     +null+
+                     (= 1 (sbit bits (+ start i))))))
+         (make-vec out)))
       (t
        (let ((read (column-reader store)))
          (declare (type function read))

@@ -16,6 +16,8 @@
     ;; one-argument string functions over dictionary codes (derived codes)
     "SELECT UPPER(label), COUNT(*), MAX(LENGTH(label)) FROM g WHERE LOWER(UPPER(label)) <> 'beta' GROUP BY UPPER(label)"
     "SELECT COUNT(*), SUM(CASE WHEN TRIM(label) LIKE '%a%' THEN 1 ELSE 0 END) FROM g WHERE UPPER(label) = 'GAMMA' OR label IS NULL"
+    ;; BOOLEAN columns compared with constants
+    "SELECT COUNT(*), SUM(CASE WHEN flag = true THEN 1 ELSE 0 END), SUM(CASE WHEN flag < true THEN 1 END) FROM g WHERE flag <> false OR flag IS NULL OR false >= flag"
     ;; ORDER BY on every key type (radix sort with a low threshold)
     "SELECT id, label, amount FROM g ORDER BY label DESC NULLS FIRST, amount, id"
     "SELECT id, ratio, day, flag FROM g ORDER BY flag NULLS LAST, ratio DESC, day, id"
