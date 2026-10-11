@@ -97,6 +97,18 @@
         .quad   HI32(C_FMIX2)
         ENDOBJ  c_fmix2_hi
 .endm
+/* nibmask: lane masks of 4 rows, entry k (32 bytes) = 4 qwords, qword j =
+ * all-ones iff bit j of the nibble k is set (validity -> lane mask by one
+ * table load). */
+.macro TAB_NIBMASK
+        OBJ     nibmask, 5
+        .set k, 0
+        .rept 16
+        .quad   -((k >> 0) & 1), -((k >> 1) & 1), -((k >> 2) & 1), -((k >> 3) & 1)
+        .set k, k + 1
+        .endr
+        ENDOBJ  nibmask
+.endm
 /* vop_inv: AVX2 operator -> "invert the kind's result" (EQ NE LT LE GT GE
  * BETWEEN; BETWEEN = !OUT). Used by count_i64 / count_i128 direct counters. */
 .macro TAB_VOP_INV

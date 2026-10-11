@@ -64,6 +64,7 @@
         TAB_VOP_INV
         TAB_NIB_LUT
         TAB_0F
+        TAB_NIBMASK
 
         DEFINE_LVP
 
@@ -305,43 +306,55 @@ ENDF pqk_x86_avx2_compare_i64
  * int pqk_x86_avx2_sum_i64(data, validity, n, out_sum)
  * Args:     rdi = data, rsi = validity, rdx = n, rcx = out_sum
  * Returns:  eax = PQK_OK (sum stored) or PQK_OVERFLOW (*out_sum untouched)
- * Clobbers: rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, ymm0-ymm7,
- *           ymm10-ymm13, ymm15, flags (rbx, r12 saved and restored)
- * Algorithm: exact: per lane S = sum(x) mod 2^64, HU = sum(x >>> 32) and
- *           N = number of negative x. With LU = sum of the low 32-bit
- *           halves, sum(x) = HU*2^32 + LU - N*2^64 and LU = S - HU*2^32
- *           (mod 2^64, exact while < 2^64). Chunks of at most
- *           SUM_CHUNK_ROWS (2^28) rows keep HU and LU below 2^60; each
- *           chunk is folded (SFOLD) into the 128-bit scalar total r9:r8.
- *           Validity: per full block the word is broadcast (ymm12), shifted
- *           per lane (vpsllvq, table shc) and widened to a lane mask
- *           (vpcmpgtq against zero, ymm15 = 0) that is ANDed with the load.
+ * Clobbers: rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, ymm0-ymm13, flags
+ *           (rbx, rbp, r12, r13 saved and restored)
+ * Algorithm: exact, with biased values: x' = x ^ 2^63 = x + 2^63 is an
+ *           UNSIGNED 64-bit number, and per lane S = sum(x') mod 2^64 and
+ *           U = sum(x' >>> 32) give the exact unsigned lane sum
+ *           U*2^32 + LU with LU = S - U*2^32 (mod 2^64, exact while
+ *           < 2^64). Chunks of at most SUM_CHUNK_ROWS (2^28) rows keep U
+ *           and LU below 2^60; each chunk is folded (SFOLD) into the
+ *           128-bit scalar total r9:r8, and the bias c * 2^63 (c = rows of
+ *           the chunk that went through the vector path, rbp) is
+ *           subtracted. 4 vector ops per 4 rows (xor, add, shift, add)
+ *           instead of 5 with the former "count the negatives" form, and
+ *           only one of them (the shift) on the two Zen 5 shift pipes.
+ *           Four accumulator sets (S ymm0-ymm3, U ymm4-ymm7; vpaddq has
+ *           2-cycle latency on Zen 5), ymm8 = bcast(2^63).
+ *           Validity: invalid rows must contribute exactly 0, so
+ *           x'' = (x ^ 2^63) & lane mask and c counts the valid rows
+ *           (popcnt of the validity words). The lane mask of 4 rows comes
+ *           from the 512-byte table nibmask (16 x 4 qwords), indexed by the
+ *           row nibble of the validity word with rorx + and on the integer
+ *           side (r13 = table base); this replaces vpsllvq + vpcmpgtq
+ *           (two ops on the busy vector pipes) per 4 rows.
  *           Overflow iff hi is not the sign extension of lo (JNE_SEXT).
- *           Lane accumulators (two sets for ILP): S ymm0/ymm1, HU ymm2/ymm3,
- *           N ymm4/ymm5; temps ymm6/ymm7/ymm10/ymm11; r10 = rows remaining,
- *           r11 = out_sum, r12 = rows / blocks left in the chunk.
- * Tail:     no validity: the last 0..7 rows in scalar code (cqo/adc).
+ *           r10 = rows remaining, r11 = out_sum, r12 = rows / blocks left
+ *           in the chunk, rcx = validity word, temps ymm9-ymm13.
+ * Tail:     no validity: 16-row iterations, then 4-row steps (set A),
+ *           then the last 0..3 rows in scalar code (cqo/adc).
  *           Validity: the final partial block (lvp) row by row, scalar.
  * ====================================================================== */
 #ifndef SUM_CHUNK_BLOCKS                /* = SUM_CHUNK_ROWS / 64 */
 #define SUM_CHUNK_BLOCKS (1 << 22)
 #endif
 
-/* SACC x, set, t: accumulate ymm x into accumulator set 0 or 1 (S, HU, N);
- * clobbers x, t. */
-.macro SACC x, set, t
-.if \set == 0
-        vpaddq  \x, %ymm0, %ymm0
-        vpsrlq  $32, \x, \t
-        vpaddq  \t, %ymm2, %ymm2
-        vpsrlq  $63, \x, \x
-        vpaddq  \x, %ymm4, %ymm4
+/* SACC x, set: accumulate the biased vector x into set 0..3 (S ymm<set>,
+ * U ymm<set+4>); clobbers x. */
+.macro SACC2 x, s, u
+        vpaddq  \x, \s, \s
+        vpsrlq  $32, \x, \x
+        vpaddq  \x, \u, \u
+.endm
+.macro SACC x, set
+.if (\set) == 0
+        SACC2   \x, %ymm0, %ymm4
+.elseif (\set) == 1
+        SACC2   \x, %ymm1, %ymm5
+.elseif (\set) == 2
+        SACC2   \x, %ymm2, %ymm6
 .else
-        vpaddq  \x, %ymm1, %ymm1
-        vpsrlq  $32, \x, \t
-        vpaddq  \t, %ymm3, %ymm3
-        vpsrlq  $63, \x, \x
-        vpaddq  \x, %ymm5, %ymm5
+        SACC2   \x, %ymm3, %ymm7
 .endif
 .endm
 
@@ -352,58 +365,87 @@ ENDF pqk_x86_avx2_compare_i64
         vpxor   %xmm3, %xmm3, %xmm3
         vpxor   %xmm4, %xmm4, %xmm4
         vpxor   %xmm5, %xmm5, %xmm5
+        vpxor   %xmm6, %xmm6, %xmm6
+        vpxor   %xmm7, %xmm7, %xmm7
 .endm
 
-/* SFOLD: total(r9:r8) += HU*2^32 + (S - HU*2^32 mod 2^64) - N*2^64.
- * clobbers rax, rcx, rdx, rbx and the accumulators. */
+/* SFOLD: total(r9:r8) += U*2^32 + (S - U*2^32 mod 2^64) - c*2^63 with
+ * c = rbp; rbp = 0. clobbers rax, rcx, rbx, ymm0-ymm7 (zeroed by the
+ * caller's SZERO before reuse), xmm9. */
 .macro SFOLD
         vpaddq  %ymm1, %ymm0, %ymm0
         vpaddq  %ymm3, %ymm2, %ymm2
         vpaddq  %ymm5, %ymm4, %ymm4
-        HSUMQ   %ymm0, %xmm0, %xmm6, %rax       /* S  */
-        HSUMQ   %ymm2, %xmm2, %xmm6, %rcx       /* HU */
-        HSUMQ   %ymm4, %xmm4, %xmm6, %rdx       /* N  */
+        vpaddq  %ymm7, %ymm6, %ymm6
+        vpaddq  %ymm2, %ymm0, %ymm0
+        vpaddq  %ymm6, %ymm4, %ymm4
+        HSUMQ   %ymm0, %xmm0, %xmm9, %rax       /* S  */
+        HSUMQ   %ymm4, %xmm4, %xmm9, %rcx       /* U  */
         mov     %rcx, %rbx
         shl     $32, %rbx
         sub     %rbx, %rax                      /* LU */
-        shr     $32, %rcx                       /* HU >> 32 (before the adds: shr clobbers CF) */
+        shr     $32, %rcx                       /* U >> 32 (before the adds: shr clobbers CF) */
         add     %rax, %r8
         adc     $0, %r9
         add     %rbx, %r8
         adc     %rcx, %r9
-        sub     %rdx, %r9
+        mov     %rbp, %rax                      /* - c * 2^63 */
+        shl     $63, %rax
+        shr     $1, %rbp
+        sub     %rax, %r8
+        sbb     %rbp, %r9
+        xor     %ebp, %ebp
 .endm
 
-#define SAVED %rbx, %r12
+#define SAVED %rbx, %rbp, %r12, %r13
 FUNC pqk_x86_avx2_sum_i64
         PROLOGUE SAVED
         xor     %r8d, %r8d                              /* [check] */
         xor     %r9d, %r9d
+        xor     %ebp, %ebp
         mov     %rcx, %r11
         mov     %rdx, %r10
+        vpbroadcastq c_i64min(%rip), %ymm8
         test    %rsi, %rsi
         jnz     .Lsum_i64_vmain
 .Lsum_i64_chunk:                        /* [main] no validity, per chunk */
-        cmp     $8, %r10
+        cmp     $4, %r10
         jb      .Lsum_i64_tail
         mov     %r10, %r12
-        and     $-8, %r12
         mov     $SUM_CHUNK_ROWS, %eax
         cmp     %rax, %r12
         cmova   %rax, %r12
+        and     $-4, %r12
         sub     %r12, %r10
+        mov     %r12, %rbp                      /* c = rows of the chunk */
         SZERO
-.Lsum_i64_main:                                         /* 8 rows */
-        vmovdqu (%rdi), %ymm6
-        vmovdqu 32(%rdi), %ymm7
-        SACC    %ymm6, 0, %ymm10
-        SACC    %ymm7, 1, %ymm11
-        add     $64, %rdi
-        sub     $8, %r12
-        jnz     .Lsum_i64_main
+        cmp     $16, %r12
+        jb      .Lsum_i64_quad
+.Lsum_i64_main:                                         /* 16 rows */
+        vpxor   (%rdi), %ymm8, %ymm9
+        vpxor   32(%rdi), %ymm8, %ymm10
+        vpxor   64(%rdi), %ymm8, %ymm11
+        vpxor   96(%rdi), %ymm8, %ymm12
+        SACC    %ymm9, 0
+        SACC    %ymm10, 1
+        SACC    %ymm11, 2
+        SACC    %ymm12, 3
+        sub     $-128, %rdi
+        sub     $16, %r12
+        cmp     $16, %r12
+        jae     .Lsum_i64_main
+.Lsum_i64_quad:                                         /* 4 rows */
+        test    %r12, %r12
+        jz      .Lsum_i64_fold
+        vpxor   (%rdi), %ymm8, %ymm9
+        SACC    %ymm9, 0
+        add     $32, %rdi
+        sub     $4, %r12
+        jmp     .Lsum_i64_quad
+.Lsum_i64_fold:
         SFOLD
         jmp     .Lsum_i64_chunk
-.Lsum_i64_tail:                                         /* [tail] 0..7 */
+.Lsum_i64_tail:                                         /* [tail] 0..3 */
         test    %r10, %r10
         jz      .Lsum_i64_result
 .Lsum_i64_row:
@@ -418,18 +460,21 @@ FUNC pqk_x86_avx2_sum_i64
 
 .Lsum_i64_vmain:                        /* [main] validity, 64-row blocks */
         SZERO
-        vpxor   %xmm15, %xmm15, %xmm15
+        lea     nibmask(%rip), %r13
         xor     %r12d, %r12d
 .Lsum_i64_vblk:
         cmp     $64, %r10
         jb      .Lsum_i64_vtail
-        vpbroadcastq (%rsi), %ymm12
+        mov     (%rsi), %rcx
+        popcnt  %rcx, %rax
+        add     %rax, %rbp                      /* c += valid rows */
         .set g, 0
         .rept 16
-        vpsllvq shc+g*32(%rip), %ymm12, %ymm13
-        vpcmpgtq %ymm13, %ymm15, %ymm13         /* 0 > m: full lane mask */
-        vpand   g*32(%rdi), %ymm13, %ymm6
-        SACC    %ymm6, (g % 2), %ymm10
+        rorx    $((4*g - 5) & 63), %rcx, %rax   /* nibble g -> bits 5..8 */
+        and     $0x1e0, %eax                    /* * 32: table entry */
+        vpxor   g*32(%rdi), %ymm8, %ymm9
+        vpand   (%r13,%rax), %ymm9, %ymm9       /* invalid rows -> 0 */
+        SACC    %ymm9, (g % 4)
         .set g, g + 1
         .endr
         add     $512, %rdi
