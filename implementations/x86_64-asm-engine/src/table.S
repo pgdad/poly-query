@@ -17,6 +17,7 @@
  *   col_get(col rdi, row rsi) -> rax payload, edx 1 if NULL     (leaf)
  *   table_finalize(table rdi, layout esi, dict edx)   dict: DICT_*
  *   table_stats(table rdi) -> rax ColStats[ncols] (lazily computed, cached)
+ *   table_col_stats(table rdi, col rsi) -> rax ColStats* of one column
  *   table_free(table rdi)  destroys the table's indexes and its arena
  *   table_new(arena rdi, name pstr rsi, ncols rdx, nrows rcx) -> rax Table*
  *                          staging table with zeroed columns
@@ -356,33 +357,51 @@ ENDF dict_encode
 
 /* ================================================================ statistics */
 
-/* table_stats(t) -> rax ColStats[ncols] */
+/* table_stats(t) -> rax ColStats[ncols], every column computed */
 FUNC table_stats
+    ENTER 0
+    mov %rdi, %rbx
+    xor %r12d, %r12d
+1:  cmp TB_NCOLS(%rbx), %r12
+    jae 9f
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    call table_col_stats
+    inc %r12
+    jmp 1b
+9:  mov TB_STATS(%rbx), %rax
+    LEAVE
+ENDF table_stats
+
+/* table_col_stats(t rdi, c rsi) -> rax ColStats* of column c (computed on
+ * first use and cached in the table: tables are immutable) */
+FUNC table_col_stats
     ENTER 64
     mov %rdi, %rbx
-    mov TB_STATS(%rbx), %rax
-    test %rax, %rax
-    jnz 99f
+    mov %rsi, %r12
+    cmpq $0, TB_STATS(%rbx)
+    jne 1f
     mov TB_NCOLS(%rbx), %rsi
     imul $CST_SIZE, %rsi
     add $8, %rsi
     mov TB_ARENA(%rbx), %rdi
     call arena_zalloc
-    mov %rax, 0(%rsp)               /* stats */
-    xor %r12d, %r12d                /* column */
-1:  cmp TB_NCOLS(%rbx), %r12
-    jae 9f
+    mov %rax, TB_STATS(%rbx)
+1:  imul $CST_SIZE, %r12, %r15
+    add TB_STATS(%rbx), %r15        /* ColStats* */
+    cmpq $0, CST_DONE(%r15)
+    jne 99f
     mov %r12, %r13
     shl $COL_SHIFT, %r13
     add TB_COLS(%rbx), %r13         /* Column* */
-    imul $CST_SIZE, %r12, %r15
-    add 0(%rsp), %r15               /* ColStats* */
     mov COL_TYPE(%r13), %rax
     mov %rax, 8(%rsp)
     mov $1, %edi
     lea 8(%rsp), %rsi
     call ht_new
     mov %rax, 16(%rsp)
+    movq $0, CST_NULLS(%r15)
+    movq $0, CST_HAS(%r15)
     xor %r14d, %r14d                /* row */
 2:  cmp TB_NROWS(%rbx), %r14
     jae 8f
@@ -436,12 +455,10 @@ FUNC table_stats
 8:  mov 16(%rsp), %rax
     mov HT_N(%rax), %rax
     mov %rax, CST_DISTINCT(%r15)
-    inc %r12
-    jmp 1b
-9:  mov 0(%rsp), %rax
-    mov %rax, TB_STATS(%rbx)
-99: LEAVE
-ENDF table_stats
+    movq $1, CST_DONE(%r15)
+99: mov %r15, %rax
+    LEAVE
+ENDF table_col_stats
 
 /* table_free(t): destroys the table's indexes, then its arena */
 FUNC table_free

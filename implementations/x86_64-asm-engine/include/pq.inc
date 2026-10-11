@@ -151,7 +151,8 @@
 #define CST_HAS      16   /* 1 if there is a non-null value */
 #define CST_MIN      24
 #define CST_MAX      32
-#define CST_SIZE     40
+#define CST_DONE     40   /* 1 = computed */
+#define CST_SIZE     48
 
 /* PQCF row group (TB_RGS): first row, row count, then per column
  * RGC entries with the chunk's min/max (when known). */

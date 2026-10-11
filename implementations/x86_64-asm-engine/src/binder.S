@@ -2139,6 +2139,8 @@ FUNC bind_query
     mov %rax, QP_OFFSET(%r12)
 82: mov BS_CORR(%r13), %rax
     mov %rax, QP_CORR(%r12)
+    mov %r12, %rdi                  /* physical planning (planner.S) */
+    call plan_block
     mov %r12, %rax
     LEAVE
 bq_where_type:

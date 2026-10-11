@@ -76,17 +76,56 @@ FUNC explain_from
     mov QP_RVS(%r12), %rax
     mov FP_RV(%r13), %rcx
     mov (%rax, %rcx, 8), %r14       /* rv */
-    cmpq $0, RV_TABLE(%r14)
+    cmpq $0, FP_FILTER(%r13)        /* pushed-down WHERE conjuncts */
+    je 81f
+    mov %rbx, %rdi
+    CSTR %rsi, "Filter"
+    call open_node
+    PUTS %rbx, ",\"predicate\":\"WHERE (pushed down)\",\"children\":["
+81: cmpq $0, RV_TABLE(%r14)
     je 4f
-    /* TableScan: catalog name and the columns actually read */
+    /* TableScan / IndexScan: catalog name and the columns actually read */
+    cmpq $0, FP_INDEX(%r13)
+    jne 82f
     mov %rbx, %rdi
     CSTR %rsi, "TableScan"
     call open_node
-    PUTS %rbx, ",\"table\":"
+    jmp 83f
+82: mov %rbx, %rdi
+    CSTR %rsi, "IndexScan"
+    call open_node
+    PUTS %rbx, ",\"index\":"
+    mov FP_INDEX(%r13), %rax
+    mov IX_NAME(%rax), %rsi
+    mov %rbx, %rdi
+    call buf_put_json_pstr
+    PUTS %rbx, ",\"kind\":\""
+    mov FP_INDEX(%r13), %rax
+    mov IX_KIND(%rax), %rdi
+    call idx_kind_name
+    mov %rbx, %rdi
+    mov %rax, %rsi
+    call buf_puts
+    cmpq $IM_EQ, FP_IMODE(%r13)
+    jne 821f
+    PUTS %rbx, "\",\"lookup\":\"equality\""
+    jmp 83f
+821: PUTS %rbx, "\",\"lookup\":\"range\""
+83: PUTS %rbx, ",\"table\":"
     mov RV_TABLE(%r14), %rax
     mov TB_NAME(%rax), %rsi
     mov %rbx, %rdi
     call buf_put_json_pstr
+    cmpq $0, FP_RGSKIP(%r13)
+    je 84f
+    mov %rbx, %rdi
+    CSTR %rsi, "row_groups_skipped"
+    mov FP_NSKIP(%r13), %rdx
+    call put_int_prop
+84: mov %rbx, %rdi
+    CSTR %rsi, "estimated_rows"
+    mov FP_EST(%r13), %rdx
+    call put_int_prop
     PUTS %rbx, ",\"alias\":"
     mov RV_NAME(%r14), %rsi
     mov %rbx, %rdi
@@ -114,7 +153,7 @@ FUNC explain_from
 2:  inc %r15
     jmp 1b
 3:  PUTS %rbx, "],\"children\":[]}"
-    LEAVE
+    jmp 49f
 4:  /* derived table / CTE */
     mov %rbx, %rdi
     CSTR %rsi, "SubqueryScan"
@@ -128,7 +167,10 @@ FUNC explain_from
     mov RV_PLAN(%r14), %rdi
     call explain_plan
     PUTS %rbx, "]}"
-    LEAVE
+49: cmpq $0, FP_FILTER(%r13)
+    je 491f
+    PUTS %rbx, "]}"
+491: LEAVE
 5:  /* join */
     CSTR %rsi, "NestedLoopJoin"
     cmpq $0, FP_LKEY(%r13)
@@ -142,7 +184,14 @@ FUNC explain_from
     mov (%rax, %rcx, 8), %rsi
     mov %rbx, %rdi
     call buf_puts
-    PUTS %rbx, "\",\"children\":["
+    cmpq $0, FP_LKEY(%r13)
+    je 7f
+    cmpq $0, FP_BUILDL(%r13)
+    jne 61f
+    PUTS %rbx, "\",\"build\":\"right"
+    jmp 7f
+61: PUTS %rbx, "\",\"build\":\"left"
+7:  PUTS %rbx, "\",\"children\":["
     mov %rbx, %rdi
     mov %r12, %rsi
     mov FP_LEFT(%r13), %rdx

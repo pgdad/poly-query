@@ -313,7 +313,21 @@
 #define FP_RKEY  56    /* matching key over the right input */
 #define FP_RLO   64    /* range variables [RLO, RHI) come from the right input */
 #define FP_RHI   72
-#define FP_SIZE  80
+/* physical planning (planner.S) */
+#define FP_FILTER 80   /* scan: pushed-down WHERE conjuncts (AND chain) or 0 */
+#define FP_INDEX  88   /* scan: Index* of an IndexScan or 0 */
+#define FP_IMODE  96   /* IM_EQ or IM_RANGE */
+#define FP_IVALS  104  /* IM_EQ: u64 values[FP_INV]; IM_RANGE: lower bound */
+#define FP_INV    112  /* IM_EQ: value count; IM_RANGE: upper bound */
+#define FP_IFLAGS 120  /* IM_RANGE: RF_* */
+#define FP_RGSKIP 128  /* scan of a PQCF-backed table: u8[nrg], 1 = skip, or 0 */
+#define FP_NSKIP  136  /* number of skipped row groups */
+#define FP_EST    144  /* estimated output rows */
+#define FP_BUILDL 152  /* hash join: 1 = build on the left input */
+#define FP_SIZE   160
+
+#define IM_EQ    1
+#define IM_RANGE 2
 
 /* materialised query result */
 #define RS_NCOLS 0

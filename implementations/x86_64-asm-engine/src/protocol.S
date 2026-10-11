@@ -287,6 +287,8 @@ FUNC handle_request_noreset
     movq $0, g_err_line(%rip)
     movq $0, g_out+BUF_LEN(%rip)
     movq $0, g_deadline_ns(%rip)
+    movq $1, g_opt_optimize(%rip)
+    movq $1, g_opt_indexes(%rip)
     lea jb_main(%rip), %rdi
     mov %rdi, g_jmpbuf(%rip)
     call _setjmp
@@ -759,6 +761,15 @@ FUNC op_explain
     CSTR %rsi, "sql"
     call req_str
     mov %rax, %r12
+    mov %rbx, %rdi
+    CSTR %rsi, "options"
+    mov $J_OBJECT, %edx
+    call opt_field
+    test %rax, %rax
+    jz 2f
+    mov %rax, %rdi
+    call check_exec_options
+2:
     mov g_arena(%rip), %rax
     mov g_max_query_mem(%rip), %rcx
     mov %rcx, AR_LIMIT(%rax)
@@ -1207,7 +1218,8 @@ FUNC opt_enum
 9:  LEAVE
 ENDF opt_enum
 
-/* opt_boolean(options rdi, key rsi): UNSUPPORTED unless absent/null/boolean */
+/* opt_boolean(options rdi, key rsi) -> eax 0 if false, else 1 (absent / null
+ * count as the default true); UNSUPPORTED unless absent/null/boolean */
 FUNC opt_boolean
     sub $8, %rsp
     call json_obj_get
@@ -1216,10 +1228,14 @@ FUNC opt_boolean
     mov JN_TYPE(%rax), %rcx
     cmp $J_TRUE, %ecx
     ja 8f
+    xor %eax, %eax
+    cmp $J_FALSE, %ecx
+    setne %al
     add $8, %rsp
     ret
 8:  RAISE E_UNSUPPORTED, "unsupported value for a query option"
-9:  add $8, %rsp
+9:  mov $1, %eax
+    add $8, %rsp
     ret
 ENDF opt_boolean
 
@@ -1249,9 +1265,11 @@ FUNC check_exec_options
     mov %rbx, %rdi
     CSTR %rsi, "optimize"
     call opt_boolean
+    mov %rax, g_opt_optimize(%rip)
     mov %rbx, %rdi
     CSTR %rsi, "use_indexes"
     call opt_boolean
+    mov %rax, g_opt_indexes(%rip)
     mov %rbx, %rdi
     CSTR %rsi, "native"
     call opt_boolean
