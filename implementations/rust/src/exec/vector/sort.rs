@@ -28,7 +28,7 @@ use super::batch::{Batch, Data, Vector};
 use super::eval::eval_cow;
 use crate::error::Result;
 use crate::exec::ExecContext;
-use crate::exec::parallel::PARALLEL_STACK_BYTES;
+use crate::exec::pool;
 use crate::planner::logical::SortKey;
 use crate::types::Value;
 
@@ -230,23 +230,9 @@ fn parallel_sort<T: Copy + Send + Sync>(
     }
     let size = items.len().div_ceil(chunks);
     let parts: Vec<Vec<T>> = items.chunks(size).map(<[T]>::to_vec).collect();
-    // A failure to start or a panic in a sort thread is propagated as a
-    // panic; the query layer turns it into a row-mode re-execution.
-    let runs: Vec<Vec<T>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = parts
-            .into_iter()
-            .map(|p| {
-                std::thread::Builder::new()
-                    .stack_size(PARALLEL_STACK_BYTES)
-                    .spawn_scoped(scope, move || sort(p))
-                    .unwrap_or_else(|e| panic!("cannot start sort thread: {e}"))
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-            .collect()
-    });
+    // A panic in a sort job is propagated; the query layer turns it into
+    // a row-mode re-execution.
+    let runs: Vec<Vec<T>> = pool::scoped(parts.into_iter().map(|p| move || sort(p)).collect());
     merge_runs(runs, cmp)
 }
 
@@ -514,7 +500,7 @@ fn string_ranks(v: &[Arc<str>], threads: usize) -> Vec<u64> {
     }
     let ranks: Vec<AtomicU64> = (0..n).map(|_| AtomicU64::new(0)).collect();
     let ranks_ref = &ranks;
-    run_threads(
+    pool::scoped(
         segments
             .into_iter()
             .map(|(base, seg)| move || rank_segment(v, base, seg, ranks_ref))
@@ -669,7 +655,7 @@ fn pairs_by<K: PackedKey>(
     let threads = threads.min(n / PARALLEL_SORT_MIN).max(1);
     let size = n.div_ceil(threads);
     let key = &key;
-    let diffs = run_threads(
+    let diffs = pool::scoped(
         pairs
             .chunks_mut(size)
             .enumerate()
@@ -718,7 +704,7 @@ fn sort_pairs<K: PackedKey>(pairs: Vec<(K, u32)>, diff: K, threads: usize) -> Ve
     let threads = threads.min(n / PARALLEL_SORT_MIN).max(1);
     let size = n.div_ceil(threads);
     // Phase 1: every thread partitions its chunk by digit (stable).
-    let locals: Vec<Partitioned<K>> = run_threads(
+    let locals: Vec<Partitioned<K>> = pool::scoped(
         pairs
             .chunks(size)
             .map(|chunk| {
@@ -770,7 +756,7 @@ fn sort_pairs<K: PackedKey>(pairs: Vec<(K, u32)>, diff: K, threads: usize) -> Ve
         w.1.push(part);
     }
     let locals = &locals;
-    run_threads(
+    pool::scoped(
         work.into_iter()
             .map(|(_, parts)| {
                 move || {
@@ -789,30 +775,6 @@ fn sort_pairs<K: PackedKey>(pairs: Vec<(K, u32)>, diff: K, threads: usize) -> Ve
             .collect(),
     );
     out
-}
-
-/// Runs the closures on scoped threads and returns their results in order.
-/// A failure to start or a panic in a thread is propagated as a panic; the
-/// query layer turns it into a row-mode re-execution.
-fn run_threads<R: Send, F: FnOnce() -> R + Send>(mut jobs: Vec<F>) -> Vec<R> {
-    if jobs.len() == 1 {
-        return jobs.pop().map(|job| job()).into_iter().collect();
-    }
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = jobs
-            .into_iter()
-            .map(|job| {
-                std::thread::Builder::new()
-                    .stack_size(PARALLEL_STACK_BYTES)
-                    .spawn_scoped(scope, job)
-                    .unwrap_or_else(|e| panic!("cannot start sort thread: {e}"))
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-            .collect()
-    })
 }
 
 /// Sorts `(key, row)` pairs that are in ascending row order by key and row

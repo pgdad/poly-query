@@ -19,10 +19,10 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 use super::context::ContextSeed;
+use super::pool::{self, Task};
 use super::vector::agg::Aggregator;
 use super::vector::batch::{BATCH_SIZE, Batch};
 use super::vector::build::{build, side_keys};
@@ -330,17 +330,6 @@ pub fn try_build(plan: &PhysicalPlan, ctx: &ExecContext) -> Option<BoxedBatchOp>
     }
 }
 
-fn spawn<T: Send + 'static>(
-    name: &str,
-    f: impl FnOnce() -> T + Send + 'static,
-) -> Result<JoinHandle<T>> {
-    std::thread::Builder::new()
-        .name(name.to_string())
-        .stack_size(PARALLEL_STACK_BYTES)
-        .spawn(f)
-        .map_err(|e| Error::internal(format!("cannot start worker thread: {e}")))
-}
-
 /// Shared state of a gather: morsel results in scan order.
 struct GatherShared {
     frag: Frag,
@@ -405,7 +394,7 @@ impl GatherShared {
 
 struct GatherState {
     shared: Arc<GatherShared>,
-    workers: Vec<JoinHandle<()>>,
+    workers: Vec<Task<()>>,
     next: usize,
     pending: VecDeque<Batch>,
 }
@@ -441,11 +430,12 @@ impl GatherOp {
             window: 2 * workers.max(1),
             changed: Condvar::new(),
         });
-        let mut handles = Vec::with_capacity(workers);
-        for i in 0..workers {
-            let s = shared.clone();
-            handles.push(spawn(&format!("pq-gather-{i}"), move || s.work())?);
-        }
+        let handles = (0..workers)
+            .map(|_| {
+                let s = shared.clone();
+                pool::spawn(move || s.work())
+            })
+            .collect();
         self.state = Some(GatherState {
             shared,
             workers: handles,
@@ -596,20 +586,12 @@ impl BatchOperator for ParallelAggregateOp {
             next: AtomicUsize::new(0),
             stop: AtomicBool::new(false),
         });
-        let mut handles = Vec::with_capacity(workers);
-        for i in 0..workers {
-            let s = shared.clone();
-            match spawn(&format!("pq-agg-{i}"), move || s.work()) {
-                Ok(h) => handles.push(h),
-                Err(e) => {
-                    shared.stop.store(true, Ordering::Relaxed);
-                    for h in handles {
-                        let _ = h.join();
-                    }
-                    return Err(e);
-                }
-            }
-        }
+        let handles: Vec<Task<Result<Aggregator>>> = (0..workers)
+            .map(|_| {
+                let s = shared.clone();
+                pool::spawn(move || s.work())
+            })
+            .collect();
         let mut partials = Vec::with_capacity(workers);
         let mut first_err = None;
         for h in handles {
@@ -660,47 +642,32 @@ fn merge_partitioned(
     let parts = partials.len();
     let key_count = partials[0].key_count();
     let calls = partials[0].calls().to_vec();
-    let split: Vec<Vec<Vec<u32>>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = partials
+    let split: Vec<Vec<Vec<u32>>> = pool::scoped(
+        partials
             .iter()
-            .map(|p| scope.spawn(move || p.partition_groups(parts)))
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-            .collect()
-    });
-    let results: Vec<Result<Batch>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..parts)
+            .map(|p| move || p.partition_groups(parts))
+            .collect(),
+    );
+    let (partials, split, calls) = (&partials, &split, &calls);
+    let results: Vec<Result<Batch>> = pool::scoped(
+        (0..parts)
             .map(|p| {
-                let (partials, split, calls) = (&partials, &split, &calls);
-                std::thread::Builder::new()
-                    .stack_size(PARALLEL_STACK_BYTES)
-                    .spawn_scoped(scope, move || {
-                        catch_panic(|| {
-                            let wctx = seed.context();
-                            let mut agg = Aggregator::new(key_count, calls, wctx.execution.native);
-                            for (w, partial) in partials.iter().enumerate() {
-                                if let Some(groups) = split[w].get(p) {
-                                    let retained = agg.merge_groups(partial, groups)?;
-                                    wctx.reserve(retained)?;
-                                }
+                move || {
+                    catch_panic(|| {
+                        let wctx = seed.context();
+                        let mut agg = Aggregator::new(key_count, calls, wctx.execution.native);
+                        for (w, partial) in partials.iter().enumerate() {
+                            if let Some(groups) = split[w].get(p) {
+                                let retained = agg.merge_groups(partial, groups)?;
+                                wctx.reserve(retained)?;
                             }
-                            agg.finish(&wctx)
-                        })
+                        }
+                        agg.finish(&wctx)
                     })
+                }
             })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| match h {
-                Ok(h) => h
-                    .join()
-                    .unwrap_or_else(|_| Err(Error::internal("aggregation merge panicked"))),
-                Err(e) => Err(Error::internal(format!("cannot start worker thread: {e}"))),
-            })
-            .collect()
-    });
+            .collect(),
+    );
     let mut batches = Vec::with_capacity(parts);
     for r in results {
         let b = r?;

@@ -9,6 +9,7 @@ pub mod hash;
 pub mod native_filter;
 pub mod operators;
 pub mod parallel;
+pub mod pool;
 pub mod subquery;
 pub mod vector;
 
