@@ -11,7 +11,9 @@ and change request **CR-2 `DECIMAL` precision 38**
 [Change CR-2](#change-cr-2-decimal-precision-38)),
 restructured by the refactoring **CR-3 logical/physical plan separation**
 (`spec/changes/refactor-plan-separation.md`, see
-[Change CR-3](#change-cr-3-logicalphysical-plan-separation)).
+[Change CR-3](#change-cr-3-logicalphysical-plan-separation)), and tuned
+for latency on an analytics workload (see
+[Latency optimization](#latency-optimization-analytics-workload)).
 Capabilities claimed:
 `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`, `sql.basic`,
 `test.functions`, `phase2`, `sql.groupby`, `sql.join`, `sql.functions`,
@@ -74,8 +76,8 @@ Layers, bottom-up:
 | `planner::access` | access-path analysis: recognizes `col <op> const` / `BETWEEN` / `IN` / `IS NULL` conjuncts, estimates selectivity from statistics, chooses index scans, selects PQCF row groups by min/max |
 | `planner::physical` | physical planning (`plan`): column selection, access paths, hash / merge / nested-loop join (equi-keys, build side by estimated cardinality; LEFT builds right), hash aggregate, top-N sort, `ParamLookup` for correlated subqueries, the execution model (mode, threads, native kernels, native filter scans) and the subquery plans, in a `PhysicalQuery`; EXPLAIN JSON |
 | `exec` | row-at-a-time (Volcano) operators (`operators`); row expression evaluator; scalar functions; aggregate accumulators; subquery evaluation with memoization; per-query context (timeout, cancellation flag, shared memory budget, join-row limit, execution options) |
-| `exec::vector` | vectorized engine: column vectors and batches (`batch`), vectorized expression kernels (`eval`), key interning (`keys`), aggregation (`agg`), joins (`join`), sorting (`sort`), batch operators (`ops`) and the plan builder (`build`) |
-| `exec::parallel` | morsel-driven parallel scan pipelines: ordered gather and parallel (partitioned) aggregation |
+| `exec::vector` | vectorized engine: column vectors and batches (`batch`), vectorized expression kernels (`eval`), key interning (`keys`), aggregation (`agg`), typed DISTINCT aggregates (`distinct`), joins (`join`), semi-join probes for `IN`/`EXISTS` subqueries (`semi`), sorting (`sort`), batch operators (`ops`) and the plan builder (`build`) |
+| `exec::parallel` | morsel-driven parallel scan pipelines: ordered gather, parallel (partitioned) aggregation and parallel top-N (merged sorted runs) |
 | `exec::hash` | fast non-cryptographic hasher for execution hash tables |
 | `exec::native_filter` | analysis of filters above column-table scans for the native kernels (used by physical planning) and their vectorized and row operators |
 | `native` | `libpqkernels` integration: `dlopen`/`dlsym` FFI (`native::ffi`), typed function-pointer table with safe slice wrappers (`Kernels`), bitmap helpers |
@@ -1100,15 +1102,190 @@ with patched execution options.
   `use_indexes`), both `query` and `explain`: all 10,090 responses were
   byte-identical.
 
+## Latency optimization (analytics workload)
+
+Task: improve query latency on the analytics workload at scale 1m while
+keeping results identical.
+
+### The workload
+
+`TASK.md` names `benchmarks/workloads/analytics.json`, but that file is
+not in the workspace (there is no `benchmarks/` directory, and the rules
+forbid adding files outside `implementations/rust/`). **Decision:** the
+workload is defined in [`bench/workloads/analytics.json`](bench/workloads/analytics.json):
+24 analytical queries (A01–A24) over the eight pqgen tables (`wide` is not
+used), covering filtered and grouped aggregation of low/high cardinality,
+`DATE_TRUNC`/`YEAR`/`HOUR` grouping, CASE, 2-, 3- and 4-way joins, a LEFT
+join, `IN`/`NOT EXISTS`/scalar subqueries, a CTE, `COUNT(DISTINCT)`,
+string predicates (`LIKE`, `UPPER`, `SUBSTR`), a selective range scan with
+15k result rows, top-N, a deep multi-key sort page (`ORDER BY` three keys
+`LIMIT 1000 OFFSET 100000`), `NULL`-heavy aggregation and `UNION ALL`.
+Every query is written to be deterministic (`ORDER BY` with a total order
+where order matters), so results can be compared exactly.
+
+### Method
+
+```bash
+python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pqdata --jobs 1
+cd implementations/rust
+# one session: load the 8 tables (CSV + schema), then per query 1 warm-up
+# and 7 timed runs; save timings and result rows
+python3 bench/workload.py --engine bin/polyquery --data /tmp/pqdata/1m \
+    --workload bench/workloads/analytics.json --runs 7 --save after.json
+# before/after table from alternating sessions of the two builds
+python3 bench/combine.py --workload bench/workloads/analytics.json \
+    --before b1.json,b2.json,b3.json --after a1.json,a2.json,a3.json
+```
+
+Timing is the client-side wall clock of one `query` request/response
+through `bin/polyquery session` with **default options** (vectorized,
+16 threads) and full result rows, i.e. parsing, planning, execution and
+JSON serialization (plus the client's JSON decoding). "Before" is the
+baseline commit (`5cb08cb`) built with the same toolchain, "after" this
+version. The sessions alternated before/after three times (B A B A B A);
+the table shows the median of the 21 timed runs of each side. The machine
+(32 cores) was shared with other jobs (load average 6–11), so differences
+below ~10–15 % are noise. `combine.py` also checks that every run of both
+builds returned the same result (`identical`: exact, FLOAT64 within
+1e-9 relative, multiset for unordered queries).
+
+### Results (scale 1m, median ms)
+
+| query | description | before median (ms) | after median (ms) | speedup | result |
+|---|---|---:|---:|---:|---|
+| A01 | revenue by category | 0.9 | 0.9 | 1.04x | identical |
+| A02 | monthly trend | 1.9 | 1.7 | 1.12x | identical |
+| A03 | fraud rate by currency | 1.9 | 1.8 | 1.08x | identical |
+| A04 | top customers by spend | 5.7 | 5.0 | 1.14x | identical |
+| A05 | segment x country revenue (join) | 3.8 | 3.7 | 1.01x | identical |
+| A06 | order gross by status and year (join) | 11.6 | 12.0 | 0.97x | identical |
+| A07 | delivered sales by category/brand (3-way join) | 4.0 | 3.6 | 1.10x | identical |
+| A08 | active-customer country revenue (4-way join) | 30.7 | 15.1 | 2.04x | identical |
+| A09 | sensor hourly profile | 1.7 | 1.4 | 1.24x | identical |
+| A10 | sensor anomalies (filter, having, top-N) | 1.0 | 0.8 | 1.17x | identical |
+| A11 | customers with large transactions (IN subquery) | 19.3 | 1.5 | 12.80x | identical |
+| A12 | customers without orders (correlated NOT EXISTS) | 140.3 | 2.0 | 71.80x | identical |
+| A13 | transactions above 3x average (scalar subquery) | 3.3 | 3.7 | 0.90x | identical |
+| A14 | spend per segment (CTE + join) | 10.1 | 10.6 | 0.95x | identical |
+| A15 | distinct merchants/customers per category | 144.7 | 15.3 | 9.47x | identical |
+| A16 | string predicates (LIKE, UPPER, SUBSTR) | 4.7 | 4.8 | 0.99x | identical |
+| A17 | selective range scan, wide rows | 10.5 | 10.7 | 0.99x | identical |
+| A18 | top-100 electronics transactions | 2.4 | 1.0 | 2.28x | identical |
+| A19 | deep sort page (multi-key sort + offset) | 436.1 | 55.6 | 7.85x | identical |
+| A20 | product coverage (LEFT JOIN) | 5.8 | 5.0 | 1.16x | identical |
+| A21 | null-heavy aggregates | 1.6 | 1.3 | 1.22x | identical |
+| A22 | signup-to-order latency by segment (join, date math) | 5.4 | 4.0 | 1.33x | identical |
+| A23 | status summary (UNION ALL) | 1.4 | 1.3 | 1.07x | identical |
+| A24 | full-table global aggregates | 1.0 | 0.9 | 1.11x | identical |
+| **sum** | | **849.8** | **163.7** | **5.19x** | |
+
+The slowest queries before the work (A19, A15, A12, A08, A11) improved
+2–70×; the many queries that already ran in
+1–5 ms are dominated by fixed costs (request parsing, planning, thread
+start-up, serialization) and are unchanged within noise. A17's wall time
+is mostly the client decoding 1.2 MB of JSON (the engine reports 3.7 ms
+in `stats.elapsed_us`).
+
+### What changed
+
+1. **Typed DISTINCT aggregates** (`exec/vector/distinct.rs`). `COUNT/SUM/
+   AVG/MIN/MAX(DISTINCT x)` in the vectorized engine used one row-mode
+   `HashSet<Value>` per group. Now one hash set of `(group id, u64)` pairs
+   per aggregate holds the distinct values, encoded so that equal values
+   have equal codes: the raw `i64` of INT64/DATE/TIMESTAMP/narrow DECIMAL
+   (one scale per vector), normalized FLOAT64 bits (`-0.0` = `0.0`),
+   BOOLEAN 0/1 and interned string ids (dictionary codes are interned once
+   per dictionary entry). Other representations (generic values, wide
+   decimals) fall back to the row-mode states. Partials of parallel workers
+   with many pairs are merged **in parallel, one hash shard of the merged
+   pairs per thread** (shards are disjoint, so finishing just counts/sums
+   per group). A15: 87–145 ms → 14–17 ms (medians of the different sessions); A08 (`COUNT(DISTINCT order_id)`)
+   ~2×.
+2. **Sorting** (`exec/vector/sort.rs`, `exec/parallel.rs`).
+   * Multi-key sorts use **normalized keys**: per row a short array of
+     `u64` words (NULL-placement word, order-preserving value encoding,
+     bit-inverted for DESC; strings as big-endian 8-byte prefix plus
+     `min(len, 9)`, which decide unless both strings are longer than
+     8 bytes and the prefixes tie) compared lexicographically, instead of
+     a per-key enum dispatch. When no string key is involved and the
+     words' value ranges fit, the words are **packed into one `u64`/`u128`**
+     (row number in the low bits) and sorted as plain integers (radix sort
+     for `u64`).
+   * Top-N compaction (`ORDER BY … LIMIT n` keeps the best `n` rows
+     whenever `2n` rows are buffered) only *selects* the best rows; it
+     used to fully sort them each time, which made a large `n` quadratic-
+     ish (A19 spent 250 of its 280 ms there).
+   * **Parallel top-N** (`ParallelTopNOp`): over a scan pipeline each
+     worker keeps the best `n` rows of its morsels and returns them as a
+     *sorted run* with normalized keys; the main thread merges the runs
+     with a heap until `n` rows are out, gathering the output rows straight
+     from the runs. Every row carries its scan position as a final sort
+     key, so ties are broken exactly like the serial stable sort. A
+     `LIMIT` over a sort is no longer forced onto the serial path.
+   * `Batch::concat` no longer clones each column before copying it (every
+     `Arc<str>` was reference-counted twice).
+   A19: 253–436 ms → 45–56 ms; `ORDER BY dup_key LIMIT 10` over 1M rows:
+   25 ms → 4 ms; A18 ~2×.
+3. **Semi-join probes for subqueries** (`exec/vector/semi.rs`). In the
+   vectorized engine `IN (subquery)` and `EXISTS` were evaluated row by row
+   through the row engine (each worker thread executing the subquery
+   itself, per distinct outer value for correlated ones). Now:
+   * uncorrelated `x [NOT] IN (subquery)`: the subquery runs once per
+     query into a key set (typed `i64` set for INT64 keys), shared by all
+     worker threads; batches probe it with full three-valued semantics
+     (empty set, NULL in the set, NULL probe);
+   * correlated `EXISTS` whose subquery is only an existence check of a
+     `ParamLookup` (`inner = <outer value>` conjuncts over a
+     parameter-independent input, no residual; above it only LIMIT without
+     OFFSET and projections of columns/literals, which cannot fail): the
+     input's keys are collected once per query and each row probes them
+     with its parameter values — a hash semi-join (and anti-join under
+     `NOT`). Keys are normalized for their comparison domain exactly like
+     the row engine's lookup tables.
+   A12 (`NOT EXISTS`): 122–140 ms → 2 ms; A11 (`IN`): 17–19 ms → 1.5 ms.
+
+The row-at-a-time engine (`mode: "row"`, the baseline) is unchanged.
+
+### Verification
+
+* Conformance suite: 660/660 before and after.
+* `bench/difftest.py` (random queries, every mode × join × threads ×
+  optimize combination, with tiny morsels so that the parallel operators —
+  including parallel top-N and the sharded DISTINCT merge — run on small
+  tables): several runs of 250–300 queries, 0 mismatches.
+* Cross-mode checks on the 1m data (row vs vectorized 1/4/16 threads) of
+  DISTINCT aggregates (grouped and global, ints/floats/dates/booleans/
+  strings/NULL-heavy), IN/NOT IN with NULLs, empty subqueries and mixed
+  numeric domains, EXISTS/NOT EXISTS with LIMIT/OFFSET/failing projections:
+  identical results and errors.
+* New unit tests: normalized-key multi-key sort and run merging vs the
+  generic comparator (strings around the 8-byte prefix boundary, NULLs,
+  DESC), DISTINCT accumulator (dictionaries, `-0.0`, sharded vs serial
+  merge), key sets.
+* Every workload query returned identical results before and after
+  (`identical` column).
+
+### Not done (measured, left for later)
+
+* Hash-join **build** sides are still built serially (A06, A14, A20:
+  ~8–10 ms each are mostly the 250k–1M-row build); a partitioned parallel
+  build would be the next step.
+* Strings are `Arc<str>` values: moving many string rows (sort, gather)
+  costs a reference-count update per value; a string arena / view
+  representation would remove most of the remaining A19 time.
+* `IN (subquery)` with correlation and `EXISTS` with residual predicates
+  still use the per-row path.
+
 ## Known limitations
 
 * The HTTP server uses a thread per connection and per running query
   (no event loop); idle keep-alive connections each hold a thread.
 * `mode: "row"` is single-threaded by design (it is the baseline).
 * Parallelism covers scan pipelines (filters, projections, join probes),
-  aggregation, DISTINCT and comparator sorts; merge joins, hash-table
-  building and operators above pipeline breakers run serially. Subqueries
-  run serially.
+  aggregation, DISTINCT, top-N and comparator sorts; merge joins,
+  hash-table building and operators above pipeline breakers run serially.
+  Subqueries run serially (uncorrelated `IN` sets and `EXISTS` lookup key
+  sets are built once per query and shared by the threads).
 * Native kernels: see [Native kernels → Limitations](#limitations-of-the-native-integration).
 * Join reordering only considers inner/cross joins; LEFT joins are fixed
   points of the order.
@@ -1116,6 +1293,8 @@ with patched execution options.
   predicates, or to produce ordered output.
 * Correlated subqueries whose correlation is not an equality on a
   parameter-independent input are re-executed per distinct outer value
-  (memoized), i.e. nested-loop cost.
+  (memoized), i.e. nested-loop cost. In vectorized mode, `EXISTS` over such
+  an equality without residual predicate runs as a hash semi-join (see
+  [Latency optimization](#latency-optimization-analytics-workload)).
 * Filters are pushed through projections only for conjuncts over
   pass-through columns (not through aggregations, DISTINCT or LIMIT).
