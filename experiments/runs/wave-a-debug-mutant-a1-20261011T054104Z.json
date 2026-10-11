@@ -31,5 +31,37 @@
   11.6259765625,
   7.40185546875,
   5.4560546875
+ ],
+ "finished": "2026-10-11T05:44:00+00:00",
+ "loadavg_end": [
+  18.2021484375,
+  11.60302734375,
+  7.34423828125
+ ],
+ "results": [
+  {
+   "run_id": "a-debug-mutant-go-a1-20261011T054104Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-debug-mutant-python-a1-20261011T054107Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-debug-mutant-common-lisp-a1-20261011T054106Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-debug-mutant-rust-a1-20261011T054109Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-debug-mutant-java-a1-20261011T054108Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-debug-mutant-clojure-a1-20261011T054110Z",
+   "outcome": "success"
+  }
  ]
 }

@@ -1,0 +1,89 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-debug-mutant-clojure-a1-20261011T054110Z",
+ "language": "clojure",
+ "task": "debug-mutant",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-debug-mutant",
+ "prompt_sha256": "1323656f7d2fe45c0281efa54936e5e90162def632ea66e3d0c8d06527c889f6",
+ "session_id": "b0a5b31e-aef3-4fd6-9e6e-e8ec1096aedc",
+ "tokens": {
+  "input": 28,
+  "output": 2708,
+  "cache_read": 432850,
+  "cache_creation": 30970,
+  "thinking": null,
+  "thinking_estimated": 1076,
+  "source": "result events",
+  "api_messages": 14
+ },
+ "rate_limit": {
+  "events": 2,
+  "max_utilization": {
+   "seven_day": 0.25,
+   "five_hour": 0.15
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 0.388602,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 14,
+ "result_segments": 1,
+ "assistant_messages": 23,
+ "tool_calls": {
+  "Bash": 13
+ },
+ "tool_calls_total": 13,
+ "tool_failures": 0,
+ "build_invocations": 8,
+ "build_failures_heuristic": 2,
+ "conformance_runs": 5,
+ "conformance_progress": [
+  [
+   33,
+   34
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ]
+ ],
+ "repair_iterations": 4,
+ "time": {
+  "wall_seconds": 87.1,
+  "model_api_seconds": 27.9,
+  "tool_seconds": 58.5,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 1,
+  "files_changed": 1,
+  "lines_added": 1,
+  "lines_removed": 1,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "I found and fixed the injected defect, and all conformance suites pass 100% again.\n\n**Root cause:** `implementations/clojure/src/polyquery/storage/table.clj:101`, in `segment-index`. This function finds which segment (row group) holds a given row number by binary search. It should return the last segment whose start is less than or equal to that row number. The injected change used `<` where it needed `<=`. So any row number exactly at the start of a segment was assigned to the segment before it. For example, row 300 went to the segment covering rows 0\u2013299, and reading it failed with \"Index 300 out of bounds for length 300\". The failing case at `storage_golden.pqt:59` was the only one to hit this because its index lookup on `id` asks for rows 300 and 2000. Both sit exactly on segment starts in the PQCF fixture, which has more than one segment.\n\n**Fix:** I changed that one character back (`<` \u2192 `<=`). The commit changes only that line.\n\n**Test results:**\n- Default run: `TOTAL: 569/569 pass` (phase 1: 225, phase 2: 186, phase 3: 143, phase 5: 15)\n- `--modes`: `TOTAL: 3324/3324 pass`\n- `--transport http`: `TOTAL: 569/569 pass`\n- Capabilities are unchanged (`caps=28`).\n- `make build test` succeeded: 76 tests with 1010 assertions, 0 failures and 0 errors.\n\n**Commit:** `8a5e347` \u2014 \"Fix segment-index off-by-one: row equal to a segment start mapped to the previous segment\".\n\n**Known limitations / design decisions:** None new. I didn't add a regression unit test, to keep the diff to the one line. The conformance case already covers this.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

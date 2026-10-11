@@ -1,0 +1,120 @@
+{
+ "schema": "polyquery-http-suite/1",
+ "engine": "/srv/polyquery/runs/a-debug-mutant-clojure-a1-20261011T054110Z/validate/implementations/clojure/bin/polyquery",
+ "summary": {
+  "total": 18,
+  "passed": 18,
+  "failed": 0
+ },
+ "checks": [
+  {
+   "check": "health_version_capabilities",
+   "status": "pass",
+   "seconds": 0.5
+  },
+  {
+   "check": "table_lifecycle",
+   "status": "pass",
+   "seconds": 0.43
+  },
+  {
+   "check": "query_and_error_mapping",
+   "status": "pass",
+   "seconds": 0.44
+  },
+  {
+   "check": "keep_alive",
+   "status": "pass",
+   "seconds": 0.38
+  },
+  {
+   "check": "streaming",
+   "status": "pass",
+   "seconds": 0.55
+  },
+  {
+   "check": "metrics",
+   "status": "pass",
+   "seconds": 0.39
+  },
+  {
+   "check": "timeout",
+   "status": "pass",
+   "seconds": 0.58
+  },
+  {
+   "check": "server_default_timeout",
+   "status": "pass",
+   "seconds": 0.69
+  },
+  {
+   "check": "cancellation",
+   "status": "pass",
+   "seconds": 0.47
+  },
+  {
+   "check": "backpressure_overloaded",
+   "status": "pass",
+   "seconds": 4.44
+  },
+  {
+   "check": "queued_time_counts_toward_timeout",
+   "status": "pass",
+   "seconds": 1.89
+  },
+  {
+   "check": "snapshot_isolation",
+   "status": "pass",
+   "seconds": 1.9
+  },
+  {
+   "check": "concurrent_readers",
+   "status": "pass",
+   "seconds": 0.5
+  },
+  {
+   "check": "client_disconnect_cancels",
+   "status": "pass",
+   "seconds": 0.88
+  },
+  {
+   "check": "request_size_limit",
+   "status": "pass",
+   "seconds": 0.41
+  },
+  {
+   "check": "structured_logs",
+   "status": "pass",
+   "seconds": 0.68
+  },
+  {
+   "check": "graceful_shutdown",
+   "status": "pass",
+   "seconds": 1.89
+  },
+  {
+   "check": "grace_expiry",
+   "status": "pass",
+   "seconds": 1.06
+  }
+ ],
+ "startup_seconds": [
+  0.4232109129661694,
+  0.39022008498432115,
+  0.38011443603318185,
+  0.3402642449946143,
+  0.3462651679874398,
+  0.3384187170304358,
+  0.3569342030095868,
+  0.3460095289628953,
+  0.3900049739750102,
+  0.40120533597655594,
+  0.35118925996357575,
+  0.39491564099444076,
+  0.3972671959782019,
+  0.35737854201579466,
+  0.37081568996654823,
+  0.34232247999170795
+ ],
+ "logs": "/tmp/pqhttp-logs-vw_0egpw"
+}

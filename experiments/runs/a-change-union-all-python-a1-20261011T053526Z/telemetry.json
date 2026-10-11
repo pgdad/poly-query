@@ -1,0 +1,94 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-union-all-python-a1-20261011T053526Z",
+ "language": "python",
+ "task": "change-union-all",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-union-all",
+ "prompt_sha256": "c4b7430c6e7c8b909c5a8ea12b36952ab949e2a6dbc54c813202b21bde4e519f",
+ "session_id": "a15fbed4-4086-4993-bf60-a232e386c6d9",
+ "tokens": {
+  "input": 134,
+  "output": 39272,
+  "cache_read": 7437595,
+  "cache_creation": 150843,
+  "thinking": null,
+  "thinking_estimated": 16366,
+  "source": "result events",
+  "api_messages": 67
+ },
+ "rate_limit": {
+  "events": 8,
+  "max_utilization": {
+   "five_hour": 0.15,
+   "seven_day": 0.25
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 3.480239,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 71,
+ "result_segments": 1,
+ "assistant_messages": 130,
+ "tool_calls": {
+  "Bash": 69,
+  "Write": 1
+ },
+ "tool_calls_total": 70,
+ "tool_failures": 1,
+ "build_invocations": 8,
+ "build_failures_heuristic": 0,
+ "conformance_runs": 5,
+ "conformance_progress": [
+  [
+   21,
+   22
+  ],
+  [
+   590,
+   591
+  ],
+  [
+   126,
+   132
+  ],
+  [
+   590,
+   591
+  ]
+ ],
+ "repair_iterations": 4,
+ "time": {
+  "wall_seconds": 472.8,
+  "model_api_seconds": 405.5,
+  "tool_seconds": 66.9,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 1,
+  "files_changed": 15,
+  "lines_added": 417,
+  "lines_removed": 21,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "`UNION ALL` is implemented and committed (`9ac3ce6`), and the engine claims `change.union_all`. One public test still fails in every run. I believe the test is wrong, not the engine, so the definition of done (0 failures) isn't fully met. I left that test failing rather than special-casing it.\n\n## Test results\n| Run | Result |\n|---|---|\n| `runner.py` | phase 1 225/225, **phase 2 207/208**, phase 3 143/143, phase 5 15/15 \u2014 TOTAL 590/591 |\n| `runner.py --modes` | phase 1 1350/1350, **phase 2 1242/1248**, phase 3 858/858 \u2014 TOTAL 3450/3456 |\n| `runner.py --transport http` | TOTAL 590/591 (same breakdown as session) |\n| `http_suite.py` | 18/18 passed |\n| `make build test` | OK, 137 unit tests (10 skipped) |\n\nThere are 0 errors and 0 not-implemented. Every failure is the same case, `changes/union_all.pqt:51`, which fails once per mode under `--modes`:\n- **What it expects:** `SELECT order_id \u2026 UNION ALL SELECT amount FROM orders \u2026` should return `DECIMAL(18,2)`.\n- **Why that can't be right:** this file loads `orders.csv` without a schema, and the spec says CSV inference never yields DECIMAL (ingestion.md \u00a71.1). So `amount` comes in as FLOAT64, the same way `people.score` does in the same file.\n- **What the engine returns:** INT64 combined with FLOAT64 is FLOAT64, so it gives `[99.99], [101.0]`.\n- **Why not change inference:** making `amount` DECIMAL would mean special-casing the test or breaking earlier phases.\n\n## What was implemented\n- **Grammar:** chains of `UNION ALL` between plain `SELECT`s, allowed anywhere a query is: top level, CTEs, derived tables, scalar/`IN`/`EXISTS` subqueries (including correlated ones), and `EXPLAIN`.\n  - Bare `UNION` and `UNION DISTINCT` give `UNSUPPORTED`.\n  - A branch with its own `ORDER BY`/`LIMIT`, or a parenthesized branch, gives `PARSE_ERROR`.\n- **Typing:**\n  - Numbers are promoted to a common type; otherwise each column must have the same type in every branch.\n  - An untyped `NULL` column takes the other branches' type.\n  - Mismatched column counts give `SEMANTIC_ERROR`; incompatible types give `TYPE_ERROR`.\n  - An INT64 too big for the DECIMAL target gives `NUMERIC_OVERFLOW`.\n  - Output names come from the first branch.\n- **ORDER BY / LIMIT / OFFSET** apply to the whole result. ORDER BY accepts only output names or positions; anything else is `SEMANTIC_ERROR`.\n- **EXPLAIN** shows a `UnionAll` node whose children are the branch plans, in order.\n- **Execution options:** `mode`, `threads`, `join`, `optimize` and `native` all give identical results. I checked this on the public fixtures and on the 100k generated dataset, including parallel worker processes. The native kernel library isn't in this workspace (`native-kernels/` holds only headers), so `native: true` was checked only through the engine's built-in fallback.\n\n## Main design decisions\n- **Wrapper query:** a compound is treated as `SELECT * FROM (b1 UNION ALL b2 \u2026) ORDER BY \u2026 LIMIT \u2026`, using a new `UnionRelation`. Everything that already handles a query (subqueries, CTEs, derived tables, `max_rows`) then works without changes.\n- **Type conversion** happens in a small projection added on top of any branch whose types differ. That way a branch's own `DISTINCT` runs on its original values.\n- **Optimizer:** simplification and pushdown run inside each branch, and unneeded columns are dropped in every branch. With `threads > 1`, each branch that filters out most of its rows gets its own `Gather` (runs partitioned).\n- **DATE and TIMESTAMP** branches are not unified; they give `TYPE_ERROR`, following the spec's CASE rule literally. This differs from how the engine's existing CASE/COALESCE behaves.\n- **`spec_version` stays `1.0.0`.** The change spec names `1.1.0-cr1`, but `phase1/catalog.pqt` asserts `1.0.0`, and earlier phases must keep passing.\n\n## Known limitations\n- An aggregate or ORDER BY over a union reads the combined rows; there is no per-branch partial aggregation.\n- If a name appears twice in the first branch, `ORDER BY` that name is tre",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

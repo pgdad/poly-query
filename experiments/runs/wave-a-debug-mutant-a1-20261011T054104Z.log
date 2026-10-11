@@ -22,3 +22,5 @@
 2026-10-11T05:43:04+00:00 [a-debug-mutant-clojure-a1-20261011T054110Z] validating (clean clone, sandboxed)
 2026-10-11T05:43:12+00:00 [a-debug-mutant-rust-a1-20261011T054109Z] outcome=success cost=$0.22225180000000005 turns=10 wall=75.8s
 2026-10-11T05:43:13+00:00 [a-debug-mutant-java-a1-20261011T054108Z] outcome=success cost=$0.2830554 turns=14 wall=80.9s
+2026-10-11T05:44:00+00:00 [a-debug-mutant-clojure-a1-20261011T054110Z] outcome=success cost=$0.388602 turns=14 wall=87.1s
+2026-10-11T05:44:00+00:00 wave wave-a-debug-mutant-a1-20261011T054104Z finished: mutant=success, mutant=success, mutant=success, mutant=success, mutant=success, mutant=success
