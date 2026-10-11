@@ -25,22 +25,22 @@
   {
    "check": "keep_alive",
    "status": "pass",
-   "seconds": 0.01
+   "seconds": 0.0
   },
   {
    "check": "streaming",
    "status": "pass",
-   "seconds": 0.04
+   "seconds": 0.02
   },
   {
    "check": "metrics",
    "status": "pass",
-   "seconds": 0.01
+   "seconds": 0.0
   },
   {
    "check": "timeout",
    "status": "pass",
-   "seconds": 0.21
+   "seconds": 0.2
   },
   {
    "check": "server_default_timeout",
@@ -50,7 +50,7 @@
   {
    "check": "cancellation",
    "status": "pass",
-   "seconds": 0.07
+   "seconds": 0.06
   },
   {
    "check": "backpressure_overloaded",
@@ -65,27 +65,27 @@
   {
    "check": "snapshot_isolation",
    "status": "pass",
-   "seconds": 1.46
+   "seconds": 1.52
   },
   {
    "check": "concurrent_readers",
    "status": "pass",
-   "seconds": 0.03
+   "seconds": 0.09
   },
   {
    "check": "client_disconnect_cancels",
    "status": "pass",
-   "seconds": 0.4
+   "seconds": 0.41
   },
   {
    "check": "request_size_limit",
    "status": "pass",
-   "seconds": 0.0
+   "seconds": 0.01
   },
   {
    "check": "structured_logs",
    "status": "pass",
-   "seconds": 0.3
+   "seconds": 0.31
   },
   {
    "check": "graceful_shutdown",
@@ -95,26 +95,26 @@
   {
    "check": "grace_expiry",
    "status": "pass",
-   "seconds": 0.67
+   "seconds": 0.62
   }
  ],
  "startup_seconds": [
-  0.004827258992008865,
-  0.006230028986465186,
-  0.0057116689858958125,
-  0.004966353997588158,
-  0.004699643992353231,
-  0.0038473749882541597,
-  0.004835213010665029,
-  0.0030084910104051232,
-  0.003717677027452737,
-  0.005425982002634555,
-  0.002638673991896212,
-  0.0027182860067114234,
-  0.00256654602708295,
-  0.002108260989189148,
-  0.002035480982158333,
-  0.0019268039613962173
+  0.003842865990009159,
+  0.004265013034455478,
+  0.0040944970096461475,
+  0.0022849380038678646,
+  0.0019986910047009587,
+  0.002069185022264719,
+  0.001879513030871749,
+  0.0023252349928952754,
+  0.003223853011149913,
+  0.002315085963346064,
+  0.0036746039986610413,
+  0.0037642259849235415,
+  0.004898304003290832,
+  0.006909830030053854,
+  0.006184122001286596,
+  0.006208478007465601
  ],
- "logs": "/tmp/pqhttp-logs-pb2443vy"
+ "logs": "/tmp/pqhttp-logs-2d0sdru4"
 }
