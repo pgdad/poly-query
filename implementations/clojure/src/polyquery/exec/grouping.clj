@@ -250,11 +250,12 @@
 (defn group-table
   "A group table for keys of the given types (lib: the native kernel
   library or nil)."
-  ^polyquery.exec.grouping.GroupTable [key-types lib]
-  (cond
-    (empty? key-types) (GlobalTable.)
-    (and (= 1 (count key-types)) (= :long (b/vec-kind (first key-types)))) (long-key-table lib)
-    :else (ObjKeyTable. (HashMap.) (ArrayList.) (count key-types) (IdentityHashMap.))))
+  (^polyquery.exec.grouping.GroupTable [key-types] (group-table key-types nil))
+  (^polyquery.exec.grouping.GroupTable [key-types lib]
+   (cond
+     (empty? key-types) (GlobalTable.)
+     (and (= 1 (count key-types)) (= :long (b/vec-kind (first key-types)))) (long-key-table lib)
+     :else (ObjKeyTable. (HashMap.) (ArrayList.) (count key-types) (IdentityHashMap.)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Aggregate states
@@ -525,32 +526,33 @@
 (defn agg-state
   "A fresh aggregate state for aggregate spec (polyquery.sql.bound); lib:
   the native kernel library or nil."
-  ^polyquery.exec.grouping.AggState [{f :fn distinct? :distinct? arg :arg :as spec} lib]
-  (let [at (:type arg)
-        k (t/kind at)
-        vbits (when lib (bits/bitmap))]
-    (cond
-      (= f :count-star) (CountState. true (long-array 16))
-      distinct? (AccState. (agg/accumulator-factory spec) (object-array 16))
-      (= f :count) (CountState. false (long-array 16))
+  (^polyquery.exec.grouping.AggState [spec] (agg-state spec nil))
+  (^polyquery.exec.grouping.AggState [{f :fn distinct? :distinct? arg :arg :as spec} lib]
+   (let [at (:type arg)
+         k (t/kind at)
+         vbits (when lib (bits/bitmap))]
+     (cond
+       (= f :count-star) (CountState. true (long-array 16))
+       distinct? (AccState. (agg/accumulator-factory spec) (object-array 16))
+       (= f :count) (CountState. false (long-array 16))
 
-      (and (#{:sum :avg} f) (#{:int64 :decimal} k))
-      (LongSumState. (case [f k]
-                       [:sum :int64] (fn [s _] (agg/int-sum-result s))
-                       [:sum :decimal] (fn [s _] (agg/dec-sum-result s))
-                       (let [scale (t/scale at)] (fn [s cnt] (agg/exact-avg-result s cnt scale))))
-                     (long-array 16) (long-array 16) nil lib vbits)
+       (and (#{:sum :avg} f) (#{:int64 :decimal} k))
+       (LongSumState. (case [f k]
+                        [:sum :int64] (fn [s _] (agg/int-sum-result s))
+                        [:sum :decimal] (fn [s _] (agg/dec-sum-result s))
+                        (let [scale (t/scale at)] (fn [s cnt] (agg/exact-avg-result s cnt scale))))
+                      (long-array 16) (long-array 16) nil lib vbits)
 
-      (and (#{:sum :avg} f) (= :float64 k))
-      (DoubleSumState. (= f :avg) (double-array 16) (long-array 16))
+       (and (#{:sum :avg} f) (= :float64 k))
+       (DoubleSumState. (= f :avg) (double-array 16) (long-array 16))
 
-      (and (#{:min :max} f) (= :long (b/vec-kind at)))
-      (LongExtremeState. (if (= f :min) 1 -1) (long-array 16) (boolean-array 16) lib vbits)
+       (and (#{:min :max} f) (= :long (b/vec-kind at)))
+       (LongExtremeState. (if (= f :min) 1 -1) (long-array 16) (boolean-array 16) lib vbits)
 
-      (and (#{:min :max} f) (= :float64 k))
-      (DoubleExtremeState. (if (= f :min) 1 -1) (double-array 16) (boolean-array 16) lib vbits)
+       (and (#{:min :max} f) (= :float64 k))
+       (DoubleExtremeState. (if (= f :min) 1 -1) (double-array 16) (boolean-array 16) lib vbits)
 
-      :else (AccState. (agg/accumulator-factory spec) (object-array 16)))))
+       :else (AccState. (agg/accumulator-factory spec) (object-array 16))))))
 
 (defn merge-mapping
   "int[] mapping every group of table `from` to its group in table `into`

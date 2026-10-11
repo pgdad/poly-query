@@ -6,7 +6,10 @@ sorts over the conformance generator fixtures and checks that every
 combination of mode × join × threads × optimize returns the same result (or
 the same error code) as the row-mode baseline.
 
-usage: fuzz.py [--seed N] [--queries N]     (run from anywhere)
+With --native LIB the engine loads the native kernel library and the
+matrix additionally runs vectorized configurations with `native: true`.
+
+usage: fuzz.py [--seed N] [--queries N] [--native LIB]    (run from anywhere)
 """
 from __future__ import annotations
 
@@ -30,6 +33,12 @@ CONFIGS = [
     {"mode": "vectorized", "join": "merge", "threads": 1, "optimize": False},
     {"mode": "vectorized", "join": "nested_loop", "threads": 4, "optimize": True},
     {},
+]
+
+NATIVE_CONFIGS = [
+    {"mode": "vectorized", "join": "hash", "threads": 1, "native": True},
+    {"mode": "vectorized", "join": "hash", "threads": 4, "optimize": False, "native": True},
+    {"native": True},
 ]
 
 TABLES = {
@@ -196,9 +205,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--queries", type=int, default=300)
+    ap.add_argument("--native", metavar="LIB", help="libpqkernels: also compare native: true configurations")
     args = ap.parse_args()
     env = dict(os.environ, PQ_STRICT_EXECUTION="1")
-    p = subprocess.Popen([str(LAUNCHER), "session", "--data-dir", str(CONFORMANCE)], stdin=subprocess.PIPE,
+    configs = CONFIGS + (NATIVE_CONFIGS if args.native else [])
+    extra = ["--native-kernels", str(Path(args.native).resolve())] if args.native else []
+    p = subprocess.Popen([str(LAUNCHER), "session", "--data-dir", str(CONFORMANCE)] + extra, stdin=subprocess.PIPE,
                          stdout=subprocess.PIPE, text=True, env=env)
 
     def req(r):
@@ -215,7 +227,7 @@ def main() -> int:
     for i in range(args.queries):
         sql, ordered = query(rnd)
         results = []
-        for c in CONFIGS:
+        for c in configs:
             r = req({"op": "query", "sql": sql, "options": c})
             if not r.get("ok"):
                 results.append("error " + r["error"]["code"])
@@ -227,7 +239,7 @@ def main() -> int:
         if any(x != results[0] for x in results[1:]):
             bad += 1
             print(f"MISMATCH #{i}: {sql}")
-            for c, x in zip(CONFIGS, results):
+            for c, x in zip(configs, results):
                 print(f"   {json.dumps(c)}: {x if isinstance(x, str) else str(len(x)) + ' rows ' + str(x[:3])}")
     p.stdin.close()
     p.wait()

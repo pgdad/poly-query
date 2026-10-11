@@ -84,7 +84,7 @@
 
 (defn- slot ^longs [^objects scratch ^long i] (aget scratch i))
 
-(defn- column-long ^LongVec [^Batch bt ^long idx type]
+(defn- column-long ^LongVec [^Batch bt idx type]
   (b/typed-column bt idx type))
 
 (defn- const-leaf
@@ -273,7 +273,7 @@
 
 (defn- scratch-pool
   "Per-thread scratch bitmaps: slot i of the Object[] is a batch bitmap."
-  ^ThreadLocal [^long nslots]
+  ^ThreadLocal [nslots]
   (ThreadLocal/withInitial
    (reify java.util.function.Supplier
      (get [_] (let [a (object-array nslots)]

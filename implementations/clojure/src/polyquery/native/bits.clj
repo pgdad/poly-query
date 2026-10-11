@@ -128,6 +128,6 @@
                             (if (zero? x)
                               c
                               (do (aset out c (int (+ base (Long/numberOfTrailingZeros x))))
-                                  (recur (bit-and x (dec x)) (inc c))))))]
+                                  (recur (bit-and x (unchecked-dec x)) (inc c))))))]
               (recur (inc w) c))))
         [out cnt]))))
