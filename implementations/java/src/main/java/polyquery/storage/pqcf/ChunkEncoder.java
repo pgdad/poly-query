@@ -1,12 +1,9 @@
 package polyquery.storage.pqcf;
 
 import java.math.BigInteger;
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
 import java.util.Set;
+import polyquery.common.ObjectIds;
 import polyquery.types.DataType;
 import polyquery.types.TypeKind;
 import polyquery.types.Values;
@@ -135,24 +132,19 @@ final class ChunkEncoder {
     // ---------------------------------------------------------------- DICT
 
     private static void writeDict(ByteSink out, Object[] values) {
-        Map<String, Integer> codes = new HashMap<>();
-        List<String> dict = new ArrayList<>();
+        ObjectIds codes = new ObjectIds();
         int[] rowCodes = new int[values.length];
         for (int i = 0; i < values.length; i++) {
-            String s = (String) values[i];
-            if (s == null) {
-                continue;
+            if (values[i] != null) {
+                rowCodes[i] = codes.intern(values[i]);
             }
-            Integer code = codes.get(s);
-            if (code == null) {
-                code = dict.size();
-                codes.put(s, code);
-                dict.add(s);
-            }
-            rowCodes[i] = code;
         }
-        out.putInt(dict.size());
-        writeStrings(out, dict.toArray(new String[0]));
+        String[] dict = new String[codes.size()];
+        for (int c = 0; c < dict.length; c++) {
+            dict[c] = (String) codes.get(c);
+        }
+        out.putInt(dict.length);
+        writeStrings(out, dict);
         for (int c : rowCodes) {
             out.putInt(c);
         }

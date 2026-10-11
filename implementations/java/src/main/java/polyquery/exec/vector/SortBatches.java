@@ -24,15 +24,27 @@ final class SortBatches {
         int compare(int a, int b);
     }
 
+    /** Characters of a string covered by {@link #prefix} and {@link #prefix2} together. */
+    private static final int PREFIX_CHARS = 8;
+
     /**
      * An unsigned 64-bit prefix of a string consistent with code point order: the first four
      * UTF-16 units mapped like {@link Values#compareStrings} (surrogates above the BMP), zero
      * padded. Different prefixes order like the strings; equal prefixes need a full comparison.
      */
     static long prefix(String s) {
+        return prefix(s, 0);
+    }
+
+    /** Like {@link #prefix}, for UTF-16 units 4..7 (zero padded). */
+    static long prefix2(String s) {
+        return prefix(s, 4);
+    }
+
+    private static long prefix(String s, int from) {
         long p = 0;
-        int n = Math.min(4, s.length());
-        for (int i = 0; i < 4; i++) {
+        int n = Math.min(from + 4, s.length());
+        for (int i = from; i < from + 4; i++) {
             int c = 0;
             if (i < n) {
                 c = s.charAt(i);
@@ -45,50 +57,91 @@ final class SortBatches {
         return p;
     }
 
-    /** Lexicographic order of rows by the sort keys (NULL placement independent of direction). */
-    static RowOrder order(ColumnStore store, List<SortKey> keys) {
-        int n = keys.size();
-        Vec[] cols = new Vec[n];
-        long[][] prefixes = new long[n][];
-        boolean[] desc = new boolean[n];
+    /**
+     * Lexicographic order of rows by the sort keys (NULL placement independent of direction),
+     * starting at key {@code from} (the keys before it are known to be equal).
+     *
+     * <p>Every key is turned into an unsigned 64-bit key per row that orders like the values in
+     * the key's direction ({@link #sortKey}: exact for numbers, a prefix for strings and wide
+     * DECIMALs), so the comparison is one loop over long arrays whatever the key types — no
+     * per-comparison dispatch on the column kind, and nothing a JIT type profile could specialize
+     * for one query's key types only. Strings also get a second 4-unit prefix and their length:
+     * with equal 8-unit prefixes, a string of at most 8 units orders by length alone, so the
+     * (scattered) string objects are only read when both strings are longer than 8 units.
+     */
+    static RowOrder order(ColumnStore store, List<SortKey> keys, int from) {
+        int n = keys.size() - from;
+        long[][] norm = new long[n][];
+        long[][] norm2 = new long[n][];
+        int[][] lengths = new int[n][];
+        boolean[][] nulls = new boolean[n][];
         boolean[] nullsFirst = new boolean[n];
+        boolean[] desc = new boolean[n];
+        Vec[] cols = new Vec[n];
+        int rows = store.rows();
         for (int j = 0; j < n; j++) {
-            cols[j] = store.column(keys.get(j).column());
-            desc[j] = keys.get(j).descending();
-            nullsFirst[j] = keys.get(j).nullsFirst();
-            if (cols[j].kind == Vec.Kind.OBJECT || cols[j].kind == Vec.Kind.DICT) {
-                long[] p = new long[store.rows()];
-                for (int i = 0; i < p.length; i++) {
-                    if (!cols[j].isNull(i)) {
-                        p[i] = sortKey(cols[j], i);
+            SortKey key = keys.get(from + j);
+            Vec v = store.column(key.column());
+            cols[j] = v;
+            desc[j] = key.descending();
+            nullsFirst[j] = key.nullsFirst();
+            nulls[j] = v.hasNulls ? v.nulls : null;
+            long flip = desc[j] ? -1L : 0L;
+            long[] k = new long[rows];
+            if ((v.kind == Vec.Kind.OBJECT || v.kind == Vec.Kind.DICT) && !v.type.isWideDecimal()) {
+                long[] k2 = new long[rows];
+                int[] len = new int[rows];
+                for (int i = 0; i < rows; i++) {
+                    if (!v.isNull(i)) {
+                        String str = v.string(i);
+                        k[i] = prefix(str) ^ flip;
+                        k2[i] = prefix2(str) ^ flip;
+                        len[i] = str.length();
                     }
                 }
-                prefixes[j] = p;
+                norm2[j] = k2;
+                lengths[j] = len;
+            } else {
+                for (int i = 0; i < rows; i++) {
+                    if (!v.isNull(i)) {
+                        k[i] = sortKey(v, i) ^ flip;
+                    }
+                }
             }
+            norm[j] = k;
         }
         return (a, b) -> {
             for (int j = 0; j < n; j++) {
-                Vec v = cols[j];
-                boolean na = v.isNull(a);
-                boolean nb = v.isNull(b);
-                if (na || nb) {
-                    if (na && nb) {
+                boolean[] m = nulls[j];
+                if (m != null && (m[a] || m[b])) {
+                    if (m[a] && m[b]) {
                         continue;
                     }
-                    return na == nullsFirst[j] ? -1 : 1;
+                    return m[a] == nullsFirst[j] ? -1 : 1;
                 }
-                int c = switch (v.kind) {
-                    case LONG -> Long.compare(v.longs[a], v.longs[b]);
-                    case DOUBLE -> Values.compareDoubles(v.doubles[a], v.doubles[b]);
-                    default -> {
-                        int pc = Long.compareUnsigned(prefixes[j][a], prefixes[j][b]);
-                        if (pc != 0) {
-                            yield pc;
-                        }
-                        yield v.type.isWideDecimal() ? ((BigInteger) v.objects[a]).compareTo((BigInteger) v.objects[b])
-                                : Values.compareStrings(v.string(a), v.string(b));
+                long x = norm[j][a];
+                long y = norm[j][b];
+                if (x != y) {
+                    return Long.compareUnsigned(x, y);
+                }
+                Vec v = cols[j];
+                int c;
+                long[] k2 = norm2[j];
+                if (k2 != null) {
+                    x = k2[a];
+                    y = k2[b];
+                    if (x != y) {
+                        return Long.compareUnsigned(x, y);
                     }
-                };
+                    int la = lengths[j][a];
+                    int lb = lengths[j][b];
+                    c = Math.min(la, lb) <= PREFIX_CHARS ? Integer.compare(la, lb)
+                            : Values.compareStrings(v.string(a), v.string(b));
+                } else if (v.kind == Vec.Kind.OBJECT) {
+                    c = ((BigInteger) v.objects[a]).compareTo((BigInteger) v.objects[b]);
+                } else {
+                    continue; // numbers: the 64-bit keys are the values
+                }
                 if (c != 0) {
                     return desc[j] ? -c : c;
                 }
@@ -114,7 +167,8 @@ final class SortBatches {
         if (keys.size() == 1 && (v.kind == Vec.Kind.LONG || v.kind == Vec.Kind.DOUBLE)) {
             return idx; // the radix key is the whole sort key
         }
-        RowOrder order = order(store, keys);
+        // within a run of equal radix keys a numeric first key is equal, so the comparison starts after it
+        RowOrder order = order(store, keys, v.kind == Vec.Kind.LONG || v.kind == Vec.Kind.DOUBLE ? 1 : 0);
         int[] tmp = new int[n];
         int i = 0;
         while (i < n) {

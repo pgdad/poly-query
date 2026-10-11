@@ -1,10 +1,7 @@
 package polyquery.exec.vector;
 
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import polyquery.common.ObjectIds;
 import polyquery.ffi.NativeKernels;
 import polyquery.types.DataType;
 
@@ -47,8 +44,7 @@ final class GroupKeys {
     private int[] index;
     private int mask;
     // STRING and wide DECIMAL key columns (object representation): interning
-    private final List<Map<Object, Integer>> interned;
-    private final List<List<Object>> strings;
+    private final ObjectIds[] interned;
     private final String[][] seenDict;
     private final int[][] dictIds;
     // per-batch scratch
@@ -68,12 +64,10 @@ final class GroupKeys {
         this.types = types.clone();
         this.k = types.length;
         this.kinds = new Vec.Kind[k];
-        this.interned = new ArrayList<>();
-        this.strings = new ArrayList<>();
+        this.interned = new ObjectIds[k];
         for (int j = 0; j < k; j++) {
             kinds[j] = Vec.kindOf(types[j]);
-            interned.add(kinds[j] == Vec.Kind.OBJECT ? new HashMap<>() : null);
-            strings.add(kinds[j] == Vec.Kind.OBJECT ? new ArrayList<>() : null);
+            interned[j] = kinds[j] == Vec.Kind.OBJECT ? new ObjectIds() : null;
         }
         this.nullWords = Math.max(1, (k + 63) >>> 6);
         this.seenDict = new String[k][];
@@ -111,7 +105,6 @@ final class GroupKeys {
         this.index = t.index;
         this.mask = t.mask;
         this.interned = t.interned;
-        this.strings = t.strings;
         this.seenDict = new String[k][];
         this.dictIds = new int[k][];
         this.codes = new long[k][0];
@@ -147,20 +140,12 @@ final class GroupKeys {
     }
 
     private int internId(int j, Object s) {
-        Map<Object, Integer> map = interned.get(j);
-        Integer id = map.get(s);
-        if (id == null) {
-            id = map.size();
-            map.put(s, id);
-            strings.get(j).add(s);
-        }
-        return id;
+        return interned[j].intern(s);
     }
 
     /** Id of {@code s} in column j's interning dictionary, or -1 (lookup only). */
     private int lookupId(int j, Object s) {
-        Integer id = interned.get(j).get(s);
-        return id == null ? -1 : id;
+        return interned[j].lookup(s);
     }
 
     /**
@@ -531,14 +516,14 @@ final class GroupKeys {
         int[] m = idMap[j];
         if (m == null || m.length <= id) {
             int old = m == null ? 0 : m.length;
-            m = m == null ? new int[Math.max(16, other.strings.get(j).size())] : Arrays.copyOf(m, Math.max(id + 1,
-                    Math.max(old * 2, other.strings.get(j).size())));
+            m = m == null ? new int[Math.max(16, other.interned[j].size())] : Arrays.copyOf(m, Math.max(id + 1,
+                    Math.max(old * 2, other.interned[j].size())));
             Arrays.fill(m, old, m.length, -1);
             idMap[j] = m;
         }
         int mine = m[id];
         if (mine < 0) {
-            mine = internId(j, other.strings.get(j).get(id));
+            mine = internId(j, other.interned[j].get(id));
             m[id] = mine;
         }
         return mine;
@@ -572,7 +557,7 @@ final class GroupKeys {
         switch (kinds[j]) {
             case LONG -> out.longs[pos] = c;
             case DOUBLE -> out.doubles[pos] = Double.longBitsToDouble(c);
-            default -> out.objects[pos] = strings.get(j).get((int) c);
+            default -> out.objects[pos] = interned[j].get((int) c);
         }
     }
 

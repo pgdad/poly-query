@@ -57,7 +57,8 @@ public final class Main {
         System.exit(exit[0]);
     }
 
-    static int run(String[] args) {
+    /** Runs one command; returns the process exit code (also used by the AOT training run). */
+    public static int run(String[] args) {
         PrintStream stdout = new PrintStream(System.out, false, StandardCharsets.UTF_8);
         if (args.length == 0) {
             System.err.println("usage: polyquery (version|capabilities|session|exec|serve) [options]");

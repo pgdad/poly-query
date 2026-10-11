@@ -2,11 +2,10 @@ package polyquery.storage;
 
 import java.util.Arrays;
 import java.util.BitSet;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
+import polyquery.common.ObjectIds;
 import polyquery.types.TypeKind;
 
 /** Conversions between physical table representations. */
@@ -86,8 +85,7 @@ public final class Layouts {
         if (policy == Dictionary.AUTO && n > 4 * SAMPLE && mostlyDistinct(v)) {
             return v;
         }
-        Map<String, Integer> codes = new HashMap<>();
-        String[] dict = new String[Math.max(16, Math.min(n, 1024))];
+        ObjectIds codes = new ObjectIds();
         int[] rowCodes = new int[n];
         BitSet nulls = new BitSet();
         int limit = policy == Dictionary.ALWAYS ? Integer.MAX_VALUE : n / 2;
@@ -97,21 +95,17 @@ public final class Layouts {
                 nulls.set(i);
                 continue;
             }
-            Integer code = codes.get(s);
-            if (code == null) {
-                code = codes.size();
-                if (code >= limit) {
-                    return v;
-                }
-                codes.put(s, code);
-                if (code == dict.length) {
-                    dict = Arrays.copyOf(dict, dict.length * 2);
-                }
-                dict[code] = s;
+            int code = codes.intern(s);
+            if (code >= limit) {
+                return v;
             }
             rowCodes[i] = code;
         }
-        return ColumnVector.ofDictionary(Arrays.copyOf(dict, codes.size()), rowCodes, nulls);
+        String[] dict = new String[codes.size()];
+        for (int c = 0; c < dict.length; c++) {
+            dict[c] = (String) codes.get(c);
+        }
+        return ColumnVector.ofDictionary(dict, rowCodes, nulls);
     }
 
     private static final int SAMPLE = 10_000;

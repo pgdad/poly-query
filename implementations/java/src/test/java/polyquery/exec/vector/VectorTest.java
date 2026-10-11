@@ -151,7 +151,7 @@ public final class VectorTest {
         for (List<SortKey> keys : List.of(List.of(new SortKey(0, true, false)),
                 List.of(new SortKey(1, false, true)), List.of(new SortKey(1, true, false), new SortKey(0, false, true)))) {
             int[] perm = SortBatches.sort(store, keys, ctx());
-            SortBatches.RowOrder order = SortBatches.order(store, keys);
+            SortBatches.RowOrder order = SortBatches.order(store, keys, 0);
             for (int i = 1; i < n; i++) {
                 int c = order.compare(perm[i - 1], perm[i]);
                 check(c < 0 || c == 0 && perm[i - 1] < perm[i], "stable order at " + i + " for " + keys);
@@ -160,6 +160,85 @@ public final class VectorTest {
         check(Values.compareStrings("😀", "｡") > 0, "code point order");
         check(Long.compareUnsigned(SortBatches.prefix("😀"), SortBatches.prefix("｡")) > 0,
                 "prefix keeps code point order");
+    }
+
+    /**
+     * The sort agrees with an independent reference (a stable sort of row objects with
+     * {@link Values#compareStrings} / numeric comparisons) for string keys around the 4- and
+     * 8-unit prefix boundaries, embedded U+0000, surrogate pairs and NULLs, in both directions,
+     * combined with numeric keys (first and later keys).
+     */
+    public static void testSortMatchesReference() {
+        Random r = new Random(11);
+        String[] alphabet = {"a", "b", "\0", "z", "😀", "｡", "é"};
+        int n = 3000;
+        Object[][] rows = new Object[n][];
+        for (int i = 0; i < n; i++) {
+            StringBuilder sb = new StringBuilder();
+            int len = r.nextInt(12);
+            for (int c = 0; c < len; c++) {
+                sb.append(alphabet[r.nextInt(r.nextInt(10) == 0 ? alphabet.length : 2)]);
+            }
+            rows[i] = new Object[] {
+                r.nextInt(9) == 0 ? null : sb.toString(),
+                r.nextInt(9) == 0 ? null : (long) r.nextInt(5) - 2,
+                r.nextInt(9) == 0 ? null : (r.nextInt(7) - 3) * 0.5,
+                (long) i};
+        }
+        List<ColumnSchema> schema = List.of(new ColumnSchema("s", DataType.STRING),
+                new ColumnSchema("k", DataType.INT64), new ColumnSchema("f", DataType.FLOAT64),
+                new ColumnSchema("seq", DataType.INT64));
+        Batch b = new Batch(4);
+        for (int c = 0; c < 4; c++) {
+            b.cols[c] = new Vec(schema.get(c).type(), n);
+            b.cols[c].nullMask(n);
+            for (int i = 0; i < n; i++) {
+                b.cols[c].set(i, rows[i][c]);
+            }
+        }
+        b.reset(n);
+        int[] all = new int[n];
+        for (int i = 0; i < n; i++) {
+            all[i] = i;
+        }
+        ColumnStore store = new ColumnStore(schema);
+        store.append(b, all, n);
+        List<List<SortKey>> cases = List.of(
+                List.of(new SortKey(0, false, false)),
+                List.of(new SortKey(0, true, true)),
+                List.of(new SortKey(0, false, true), new SortKey(1, true, false)),
+                List.of(new SortKey(1, false, false), new SortKey(0, true, false)),
+                List.of(new SortKey(2, true, true), new SortKey(0, false, false), new SortKey(1, false, true)),
+                List.of(new SortKey(1, true, false), new SortKey(2, false, false)));
+        for (List<SortKey> keys : cases) {
+            Integer[] expected = new Integer[n];
+            for (int i = 0; i < n; i++) {
+                expected[i] = i;
+            }
+            Arrays.sort(expected, (x, y) -> {
+                for (SortKey k : keys) {
+                    Object a = rows[x][k.column()];
+                    Object c = rows[y][k.column()];
+                    if (a == null || c == null) {
+                        if (a == null && c == null) {
+                            continue;
+                        }
+                        return (a == null) == k.nullsFirst() ? -1 : 1;
+                    }
+                    int cmp = a instanceof String sa ? Values.compareStrings(sa, (String) c)
+                            : a instanceof Long la ? Long.compare(la, (Long) c)
+                            : Values.compareDoubles((Double) a, (Double) c);
+                    if (cmp != 0) {
+                        return k.descending() ? -cmp : cmp;
+                    }
+                }
+                return 0;
+            });
+            int[] perm = SortBatches.sort(store, keys, ctx());
+            for (int i = 0; i < n; i++) {
+                check(perm[i] == expected[i], "sort by " + keys + " differs at " + i);
+            }
+        }
     }
 
     /** The single-key join index chains rows with equal keys in insertion order. */

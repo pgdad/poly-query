@@ -3,6 +3,7 @@ package polyquery.exec.vector;
 import java.math.BigInteger;
 import java.util.Arrays;
 import java.util.List;
+import polyquery.common.ObjectIds;
 import polyquery.exec.Accumulator;
 import polyquery.ffi.NativeKernels;
 import polyquery.plan.AggregateCall;
@@ -676,8 +677,7 @@ abstract class AggState {
         private long[] pairValue = new long[16];
         private int pairs;
         // STRING interning, with a code -> id cache per dictionary
-        private final java.util.Map<Object, Integer> ids;
-        private final java.util.List<Object> strings;
+        private final ObjectIds strings;
         private String[] seenDict;
         private int[] dictIds;
         private int[] fresh = new int[0];
@@ -694,8 +694,7 @@ abstract class AggState {
             this.type = type;
             this.kind = Vec.kindOf(type);
             boolean str = kind == Vec.Kind.OBJECT;
-            this.ids = str ? new java.util.HashMap<>() : null;
-            this.strings = str ? new java.util.ArrayList<>() : null;
+            this.strings = str ? new ObjectIds() : null;
         }
 
         @Override
@@ -704,13 +703,7 @@ abstract class AggState {
         }
 
         private int intern(Object v) {
-            Integer id = ids.get(v);
-            if (id == null) {
-                id = strings.size();
-                ids.put(v, id);
-                strings.add(v);
-            }
-            return id;
+            return strings.intern(v);
         }
 
         private long raw(Vec arg, int i) {
@@ -868,7 +861,7 @@ abstract class AggState {
             AggState out = plain.get();
             out.grow(groups);
             PairSet set = new PairSet();
-            java.util.Map<Object, Integer> localIds = kind == Vec.Kind.OBJECT ? new java.util.HashMap<>() : null;
+            ObjectIds localIds = kind == Vec.Kind.OBJECT ? new ObjectIds() : null;
             int cap = 1024;
             Vec buf = new Vec(type, cap);
             buf.hasNulls = false;
@@ -893,12 +886,7 @@ abstract class AggState {
                         continue;
                     }
                     if (str != null) {
-                        Integer id = localIds.get(str);
-                        if (id == null) {
-                            id = localIds.size();
-                            localIds.put(str, id);
-                        }
-                        k = id;
+                        k = localIds.intern(str);
                     } else {
                         k = key(raw);
                     }
