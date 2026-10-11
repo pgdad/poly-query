@@ -1201,7 +1201,13 @@ build-side choice only applies with threads > 1).
 path — partitioned aggregation, probing, parallel top-N, parallel distinct
 union — runs on the conformance data), native kernels (`--native`, plain and
 with `--modes`), `--transport http`, the HTTP concurrency suite (18/18) and
-`make test`.
+`make test` (with new unit tests, `tests/test-latency.lisp`). At the end,
+`bench/fuzz.py` with `POLYQUERY_MORSEL_ROWS=37`: 600 random queries (seed 7)
+gave one mismatch — a merge join with 3 threads raising CONVERSION_ERROR
+where row mode returns no rows — which the baseline engine reproduces
+identically with the same seed (the evaluation-order limitation of pushed
+conjuncts described under *Known limitations*); 500 queries with
+`--native` (seed 11): no mismatch.
 
 ## Performance
 
