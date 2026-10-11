@@ -1378,6 +1378,14 @@ copy-free scans for grouped aggregation.
   key tables, string functions over dictionaries, boolean comparisons,
   radix ORDER BY, parallel top-N tie order and shared CTE results against
   the row executor, with low thresholds so every path runs).
+* After the latency work, `POLYQUERY_MORSEL_ROWS=37 bench/fuzz.py --count
+  1500 --seed 7` found one bug (parallel DISTINCT aggregates over empty
+  inputs, fixed and covered by `tests/test-latency.lisp`); the one remaining
+  difference of that run (a conversion error raised under a forced merge
+  join where other modes return no rows) is produced identically by the
+  engine before this work (error evaluation order, see *Known limitations*).
+  The conformance suite also passes with `--modes` (3870/3870) and with
+  `POLYQUERY_MORSEL_ROWS=7`.
 * `bench/workload.py` — times the benchmark workload through `bin/polyquery
   session` and compares the results of two builds (see *Latency
   optimization*).
