@@ -13,7 +13,8 @@
    (:module "util" :serial t
     :components ((:file "errors")
                  (:file "numbers")
-                 (:file "json")))
+                 (:file "json")
+                 (:file "system")))
    (:module "types" :serial t
     :components ((:file "types")
                  (:file "temporal")
@@ -65,6 +66,7 @@
                  (:file "vectors")
                  (:file "vexpressions")
                  (:file "keytable")
+                 (:file "vsubqueries")
                  (:file "vaggregates")
                  (:file "vnative")
                  (:file "voperators")
@@ -99,7 +101,8 @@
                (:file "test-native")
                (:file "test-union")
                (:file "test-decimal38")
-               (:file "test-plan"))
+               (:file "test-plan")
+               (:file "test-latency"))
   :perform (test-op (o c)
              (unless (uiop:symbol-call '#:polyquery-tests '#:run-all-tests)
                (error "unit tests failed"))))

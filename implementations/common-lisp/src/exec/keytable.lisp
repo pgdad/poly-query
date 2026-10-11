@@ -353,6 +353,14 @@ are added when ADD, else their id is -1. Returns GIDS."
                                        -1)))))))
   gids)
 
+(declaim (inline hash-partition))
+(defun hash-partition (hash partitions)
+  "Partition in [0, PARTITIONS) of a key HASH. It is taken from the hash's
+high bits: the low bits choose the slot within a partition's own table, and
+keys sharing their low bits would cluster in it."
+  (declare (type (unsigned-byte 61) hash) (type (integer 1 65536) partitions))
+  (ash (* (ldb (byte 16 45) hash) partitions) -16))
+
 (defun key-table-group-hash (table g)
   "Hash of the key of group G (used to partition groups)."
   (if (key-table-int-slots table)

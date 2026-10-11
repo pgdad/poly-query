@@ -229,7 +229,33 @@ everywhere else."
         (when (vec-validity v)
           (replace validity (vec-validity v) :start1 pos))
         (incf pos n)))
-    (make-vec data validity)))
+    (let ((dict (and vecs (vec-dict (first vecs)))))
+      (if (and dict (every (lambda (v) (and (vec-codes v) (eq (vec-dict v) dict))) vecs))
+          ;; Strings of one dictionary keep their codes.
+          (let ((codes (make-array total :element-type '(unsigned-byte 32)))
+                (pos 0))
+            (declare (type fixnum pos))
+            (dolist (v vecs)
+              (replace codes (vec-codes v) :start1 pos)
+              (incf pos (vec-length v)))
+            (make-vec data validity codes dict))
+          (make-vec data validity)))))
+
+(defun vec-concatenate-any (vecs total)
+  "One VEC holding the values of the VECS (TOTAL rows) in order, in their
+common representation."
+  (let* ((kind (vec-actual-kind (first vecs))))
+    (if (every (lambda (v) (eq (vec-actual-kind v) kind)) vecs)
+        (vec-concatenate vecs kind total)
+        ;; Mixed representations (e.g. an all-NULL vector): generic values.
+        (let ((values (make-array total))
+              (pos 0))
+          (declare (type fixnum pos))
+          (dolist (v vecs)
+            (dotimes (i (vec-length v))
+              (setf (svref values pos) (vec-ref v i))
+              (incf pos)))
+          (make-vec values)))))
 
 (defun batch-gather (batch idx n)
   "Batch of the rows IDX[0..N) of BATCH (-1 yields a row of NULLs)."
@@ -284,17 +310,21 @@ all are; NIL when none is)."
   "Row opener (see COMPILE-OPERATOR) producing the rows of a batch opener."
   (declare (type function open-batches))
   (lambda ()
-    (let ((next-batch (funcall open-batches))
-          (batch nil)
-          (i 0) (n 0))
-      (declare (type function next-batch) (type fixnum i n))
-      (lambda ()
-        (loop
-          (when (< i n)
-            (return (prog1 (batch-row batch i) (incf i))))
-          (setf batch (funcall next-batch))
-          (unless batch (return nil))
-          (setf i 0 n (batch-count batch)))))))
+    (batch-iterator-rows (funcall open-batches))))
+
+(defun batch-iterator-rows (next-batch)
+  "Row iterator over the rows of the batch iterator NEXT-BATCH."
+  (declare (type function next-batch))
+  (let ((batch nil)
+        (i 0) (n 0))
+    (declare (type fixnum i n))
+    (lambda ()
+      (loop
+        (when (< i n)
+          (return (prog1 (batch-row batch i) (incf i))))
+        (setf batch (funcall next-batch))
+        (unless batch (return nil))
+        (setf i 0 n (batch-count batch))))))
 
 (defun rows-to-batch (rows n kinds)
   "Batch of the first N row vectors of ROWS (column kinds KINDS)."

@@ -452,13 +452,14 @@ NULL, else FALSE. Constant lists sharing one comparison type use a hash set."
          (result-for
            (cond
              ((zerop nparams)
-              ;; Uncorrelated: evaluate lazily, once.
+              ;; Uncorrelated: evaluate lazily, once per query (shared by
+              ;; the parallel workers' copies of the plan).
               (if (subquery-cacheable sq)
                   (let ((done nil) (cached nil))
                     (lambda (row)
                       (declare (ignore row))
                       (unless done
-                        (setf cached (funcall (the function compute)) done t))
+                        (setf cached (query-shared-value sq compute) done t))
                       cached))
                   (lambda (row) (declare (ignore row)) (funcall (the function compute)))))
              (t
