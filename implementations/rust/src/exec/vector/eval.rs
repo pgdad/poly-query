@@ -12,7 +12,6 @@
 //! like row mode does.
 
 use std::borrow::Cow;
-use std::sync::Arc;
 
 use super::batch::{Batch, Data, Vector, selection};
 use crate::error::{Error, Result};
@@ -953,10 +952,6 @@ fn rowwise(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
     Ok(Vector::from_values(out))
 }
 
-/// Shared empty string for padding typed string vectors.
-pub fn empty_str() -> Arc<str> {
-    Arc::from("")
-}
 
 #[cfg(test)]
 mod tests {

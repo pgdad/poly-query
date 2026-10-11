@@ -207,29 +207,6 @@ impl Vector {
         Vector::new(data, valid)
     }
 
-    /// Rows of a stored column at the given (ascending or arbitrary) positions.
-    pub fn from_column_rows(col: &Column, rows: &[u32]) -> Vector {
-        let has_null = rows.iter().any(|&r| col.is_null(r as usize));
-        let valid = has_null.then(|| rows.iter().map(|&r| !col.is_null(r as usize)).collect());
-        let data = match &col.data {
-            ColumnData::Boolean(v) => Data::Bool(gather_slice(v, rows)),
-            ColumnData::Int64(v) => Data::Int(gather_slice(v, rows)),
-            ColumnData::Float64(v) => Data::Float(gather_slice(v, rows)),
-            ColumnData::Decimal(v) => {
-                let scale = match col.data_type {
-                    DataType::Decimal { scale, .. } => scale,
-                    _ => 0,
-                };
-                Data::Decimal(gather_slice(v, rows), scale)
-            }
-            ColumnData::String(v) => Data::Str(gather_slice(v, rows)),
-            ColumnData::Dict { codes, dict } => Data::Dict(gather_slice(codes, rows), dict.clone()),
-            ColumnData::Date(v) => Data::Date(gather_slice(v, rows)),
-            ColumnData::Timestamp(v) => Data::Timestamp(gather_slice(v, rows)),
-        };
-        Vector::new(data, valid)
-    }
-
     #[inline]
     pub fn is_null(&self, i: usize) -> bool {
         match &self.data {
