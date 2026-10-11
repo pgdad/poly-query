@@ -267,20 +267,60 @@
 #define OI_NULLS 16    /* 0 default, 1 NULLS FIRST, 2 NULLS LAST */
 #define OI_SIZE  24
 
-/* ------------------------------------------------------------ bound query plan (binder output) */
-#define QP_TABLE  0    /* Table* or 0 (SELECT without FROM) */
-#define QP_WHERE  8    /* bound predicate or 0 */
-#define QP_NOUT   16
-#define QP_OUT    24   /* OutCol[nout] */
-#define QP_NKEYS  32
-#define QP_KEYS   40   /* SortKey[nkeys] */
-#define QP_AGG    48   /* 1 = aggregated (single group) */
-#define QP_NAGGS  56
-#define QP_AGGS   64   /* EK_AGG node*[] */
-#define QP_LIMIT  72   /* -1 = none */
-#define QP_OFFSET 80
-#define QP_RANGE  88   /* range variable name pstr */
-#define QP_SIZE   96
+/* ------------------------------------------------------------ bound query plan (binder output)
+ * One plan per SELECT (top level, subquery, derived table, CTE). */
+#define QP_FROM     0    /* FromPlan* or 0 (SELECT without FROM) */
+#define QP_WHERE    8    /* bound predicate or 0 */
+#define QP_NOUT     16
+#define QP_OUT      24   /* OutCol[nout] */
+#define QP_NKEYS    32
+#define QP_KEYS     40   /* SortKey[nkeys] */
+#define QP_AGG      48   /* 1 = aggregated query */
+#define QP_NAGGS    56
+#define QP_AGGS     64   /* EK_AGG node*[] */
+#define QP_LIMIT    72   /* -1 = none */
+#define QP_OFFSET   80
+#define QP_NRV      88   /* number of range variables */
+#define QP_RVS      96   /* RangeVar*[nrv] */
+#define QP_NGROUP   104
+#define QP_GROUP    112  /* bound GROUP BY expressions node*[] */
+#define QP_HAVING   120
+#define QP_DISTINCT 128
+#define QP_CORR     136  /* references an enclosing query: never cached */
+#define QP_CACHE    144  /* cached Result* of an uncorrelated plan */
+#define QP_SIZE     152
+
+/* range variable */
+#define RV_NAME  0     /* pstr: alias or table/CTE name */
+#define RV_TABLE 8     /* base Table* or 0 */
+#define RV_PLAN  16    /* plan of a derived table / CTE */
+#define RV_NCOLS 24
+#define RV_COLS  32    /* RVC entries: pstr name, u64 packed type */
+#define RV_USED  40    /* u8[ncols], 1 = column referenced by the query */
+#define RV_SIZE  48
+#define RVC_NAME 0
+#define RVC_TYPE 8
+#define RVC_SIZE 16
+
+/* FROM plan node */
+#define FP_KIND  0     /* FK_TABLE (scan of range variable FP_RV) or FK_JOIN */
+#define FP_RV    8
+#define FP_LEFT  16
+#define FP_RIGHT 24
+#define FP_JTYPE 32    /* JT_* */
+#define FP_ON    40    /* bound join condition or 0 */
+#define FP_LKEY  48    /* equi-join key over the left input (hash join) or 0 */
+#define FP_RKEY  56    /* matching key over the right input */
+#define FP_RLO   64    /* range variables [RLO, RHI) come from the right input */
+#define FP_RHI   72
+#define FP_SIZE  80
+
+/* materialised query result */
+#define RS_NCOLS 0
+#define RS_NROWS 8
+#define RS_ROWS  16    /* row*[]; a row is VAL cells (outputs, then sort keys) */
+#define RS_PLAN  24
+#define RS_SIZE  32
 
 #define OC_EXPR 0
 #define OC_NAME 8      /* pstr */
@@ -301,6 +341,20 @@
 #define EC_AGGV   16   /* aggregate values: 16 bytes per slot (payload, null) */
 #define EC_OUTER  24   /* enclosing query's context (correlated subqueries) or 0 */
 #define EC_SIZE   64
+
+/* ------------------------------------------------------------ hash table over value-cell keys (hash.S) */
+#define HT_NB    0     /* bucket count (power of two) */
+#define HT_BKT   8     /* Entry*[nb] */
+#define HT_N     16    /* entries */
+#define HT_NK    24    /* key cells per entry */
+#define HT_TYPES 32    /* u64 packed type per key cell (low 32 bits used) */
+#define HT_SIZE  40
+#define EN_NEXT  0
+#define EN_HASH  8
+#define EN_KEY   16    /* VAL cells[nk] (owned by the caller, must stay alive) */
+#define EN_D0    24    /* user data */
+#define EN_D1    32
+#define EN_SIZE  40
 
 /* runtime value cell (rows, aggregate results) */
 #define VAL_P    0

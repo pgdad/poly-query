@@ -1,7 +1,7 @@
 /*
  * test_sql.S - unit tests for the SQL pipeline: lexer, parser, binder,
  * evaluator and executor on FROM-less queries.  Each case runs
- * sql_parse -> bind_select -> exec_query and compares the serialized result
+ * sql_parse -> bind_statement -> exec_query and compares the serialized result
  * (or the raised error code) with the expectation.
  */
 #include "pq.inc"
@@ -98,8 +98,8 @@ FUNC run_case
     mov %rbx, %rdi
     mov %rax, %rsi
     call sql_parse
-    mov %rax, %rdi
-    call bind_select
+    mov ST_QUERY(%rax), %rdi
+    call bind_statement
     mov %rax, %rdi
     mov $-1, %rsi
     xor %edx, %edx

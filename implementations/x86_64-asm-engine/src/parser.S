@@ -105,14 +105,29 @@ FUNC p_accept_op
 1:  ret
 ENDF p_accept_op
 
-/* p_error(P): raise PARSE_ERROR at the current token */
+/* p_error(P): raise PARSE_ERROR at the current token; a syntax error at one
+ * of the keywords reserved for future use (UNION, RIGHT, FULL) is UNSUPPORTED */
 FUNC p_error
     sub $8, %rsp
     call p_cur
-    mov TK_LINE(%rax), %edx
+    cmpl $TOK_KEYWORD, TK_KIND(%rax)
+    jne 1f
+    mov TK_ID(%rax), %ecx
+    cmp $KW_UNION, %ecx
+    je 2f
+    cmp $KW_RIGHT, %ecx
+    je 2f
+    cmp $KW_FULL, %ecx
+    je 2f
+1:  mov TK_LINE(%rax), %edx
     mov TK_COL(%rax), %ecx
     mov $E_PARSE_ERROR, %edi
     CSTR %rsi, "syntax error at line %d, column %d"
+    call pq_raisef
+2:  mov TK_LINE(%rax), %edx
+    mov TK_COL(%rax), %ecx
+    mov $E_UNSUPPORTED, %edi
+    CSTR %rsi, "unsupported SQL feature at line %d, column %d"
     call pq_raisef
 ENDF p_error
 
@@ -222,7 +237,7 @@ ENDF p_enter
 
 /* ================================================================ statement */
 
-/* sql_parse(ptr, len) -> SelectStmt* */
+/* sql_parse(ptr, len) -> rax Stmt* (ST_*) */
 FUNC sql_parse
     ENTER 16
     call sql_lex
@@ -233,46 +248,225 @@ FUNC sql_parse
     mov %rax, %rbx
     mov %r12, PS_TOKS(%rbx)
     mov %r13, PS_NTOK(%rbx)
-    /* statements of later phases */
+    mov $ST_SIZE, %edi
+    call tmp_zalloc
+    mov %rax, %r12                  /* stmt */
     mov %rbx, %rdi
     call p_cur
     cmpl $TOK_KEYWORD, TK_KIND(%rax)
-    jne 2f
+    jne 9f
     mov TK_ID(%rax), %ecx
-    cmp $KW_WITH, %ecx
-    je 1f
     cmp $KW_EXPLAIN, %ecx
-    je 1f
+    je 2f
     cmp $KW_CREATE, %ecx
-    je 1f
+    je 3f
     cmp $KW_DROP, %ecx
-    je 1f
+    je 4f
     cmp $KW_SELECT, %ecx
-    jne 2f
+    je 1f
+    cmp $KW_WITH, %ecx
+    jne 9f
+1:  movq $STMT_QUERY, ST_KIND(%r12)
     mov %rbx, %rdi
-    call parse_select
-    mov %rax, %r12
+    call parse_query
+    mov %rax, ST_QUERY(%r12)
+    jmp 8f
+2:  movq $STMT_EXPLAIN, ST_KIND(%r12)
+    mov %rbx, %rdi
+    call p_next
+    mov %rbx, %rdi
+    call parse_query
+    mov %rax, ST_QUERY(%r12)
+    jmp 8f
+3:  mov %rbx, %rdi
+    mov %r12, %rsi
+    call parse_create_index
+    jmp 8f
+4:  mov %rbx, %rdi
+    mov %r12, %rsi
+    call parse_drop_index
+8:  /* optional single ';', then end of input */
     mov %rbx, %rdi
     mov $OP_SEMI, %esi
     call p_accept_op
     mov %rbx, %rdi
     call p_cur
     cmpl $TOK_EOF, TK_KIND(%rax)
-    je 3f
-    mov %rbx, %rdi
-    mov $KW_UNION, %esi
-    call p_is_kw
-    test %eax, %eax
-    jnz 1f
-2:  mov %rbx, %rdi
-    call p_error
-1:  mov %rbx, %rdi
-    call p_unsupported
-3:  mov %r12, %rax
+    jne 9f
+    mov %r12, %rax
     LEAVE
+9:  mov %rbx, %rdi
+    call p_error
 ENDF sql_parse
 
-/* parse_select(P) -> SelectStmt* */
+/* parse_create_index(P, stmt):
+ * CREATE INDEX [IF NOT EXISTS] name ON table ( column ) [USING HASH|BTREE] */
+FUNC parse_create_index
+    ENTER 0
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    movq $STMT_CREATE_INDEX, ST_KIND(%r12)
+    call p_next
+    mov %rbx, %rdi
+    mov $KW_INDEX, %esi
+    call p_expect_kw
+    mov %rbx, %rdi
+    mov $KW_IF, %esi
+    call p_accept_kw
+    test %eax, %eax
+    jz 1f
+    mov %rbx, %rdi
+    mov $KW_NOT, %esi
+    call p_expect_kw
+    mov %rbx, %rdi
+    mov $KW_EXISTS, %esi
+    call p_expect_kw
+    movq $1, ST_IFX(%r12)
+1:  mov %rbx, %rdi
+    call p_ident
+    mov %rax, ST_NAME(%r12)
+    mov %rbx, %rdi
+    mov $KW_ON, %esi
+    call p_expect_kw
+    mov %rbx, %rdi
+    call p_ident
+    mov %rax, ST_TABLE(%r12)
+    mov %rbx, %rdi
+    mov $OP_LPAREN, %esi
+    call p_expect_op
+    mov %rbx, %rdi
+    call p_ident
+    mov %rax, ST_COLUMN(%r12)
+    mov %rbx, %rdi
+    mov $OP_RPAREN, %esi
+    call p_expect_op
+    mov %rbx, %rdi
+    mov $KW_USING, %esi
+    call p_accept_kw
+    test %eax, %eax
+    jz 9f
+    mov %rbx, %rdi
+    call p_cur
+    mov %rax, %r13
+    cmpl $TOK_IDENT, TK_KIND(%r13)
+    jne 8f
+    mov TK_PTR(%r13), %rdi
+    mov TK_LEN(%r13), %rsi
+    CSTR %rdx, "HASH"
+    call cstr_ieq
+    test %eax, %eax
+    jz 2f
+    movq $1, ST_USING(%r12)
+    jmp 3f
+2:  mov TK_PTR(%r13), %rdi
+    mov TK_LEN(%r13), %rsi
+    CSTR %rdx, "BTREE"
+    call cstr_ieq
+    test %eax, %eax
+    jz 8f
+    movq $2, ST_USING(%r12)
+3:  mov %rbx, %rdi
+    call p_next
+9:  LEAVE
+8:  mov %rbx, %rdi
+    call p_error
+ENDF parse_create_index
+
+/* parse_drop_index(P, stmt): DROP INDEX [IF EXISTS] name */
+FUNC parse_drop_index
+    ENTER 0
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    movq $STMT_DROP_INDEX, ST_KIND(%r12)
+    call p_next
+    mov %rbx, %rdi
+    mov $KW_INDEX, %esi
+    call p_expect_kw
+    mov %rbx, %rdi
+    mov $KW_IF, %esi
+    call p_accept_kw
+    test %eax, %eax
+    jz 1f
+    mov %rbx, %rdi
+    mov $KW_EXISTS, %esi
+    call p_expect_kw
+    movq $1, ST_IFX(%r12)
+1:  mov %rbx, %rdi
+    call p_ident
+    mov %rax, ST_NAME(%r12)
+    LEAVE
+ENDF parse_drop_index
+
+/* parse_query(P) -> SelectStmt*:  [WITH cte {, cte}] select_core [ORDER BY] [LIMIT] */
+FUNC parse_query
+    ENTER 16
+    mov %rdi, %rbx
+    call p_enter
+    xor %r13d, %r13d                /* WITH list */
+    mov %rbx, %rdi
+    mov $KW_WITH, %esi
+    call p_accept_kw
+    test %eax, %eax
+    jz 5f
+    mov g_arena(%rip), %rdi
+    call vec_new
+    mov %rax, %r13
+1:  /* cte = ident [ ( ident {, ident} ) ] AS ( query ) */
+    mov $CTE_SIZE, %edi
+    call tmp_zalloc
+    mov %rax, %r12
+    mov %r13, %rdi
+    mov %r12, %rsi
+    call vec_push
+    mov %rbx, %rdi
+    call p_ident
+    mov %rax, CTE_NAME(%r12)
+    mov %rbx, %rdi
+    mov $OP_LPAREN, %esi
+    call p_accept_op
+    test %eax, %eax
+    jz 3f
+    mov g_arena(%rip), %rdi
+    call vec_new
+    mov %rax, CTE_COLS(%r12)
+2:  mov %rbx, %rdi
+    call p_ident
+    mov CTE_COLS(%r12), %rdi
+    mov %rax, %rsi
+    call vec_push
+    mov %rbx, %rdi
+    mov $OP_COMMA, %esi
+    call p_accept_op
+    test %eax, %eax
+    jnz 2b
+    mov %rbx, %rdi
+    mov $OP_RPAREN, %esi
+    call p_expect_op
+3:  mov %rbx, %rdi
+    mov $KW_AS, %esi
+    call p_expect_kw
+    mov %rbx, %rdi
+    mov $OP_LPAREN, %esi
+    call p_expect_op
+    mov %rbx, %rdi
+    call parse_query
+    mov %rax, CTE_QUERY(%r12)
+    mov %rbx, %rdi
+    mov $OP_RPAREN, %esi
+    call p_expect_op
+    mov %rbx, %rdi
+    mov $OP_COMMA, %esi
+    call p_accept_op
+    test %eax, %eax
+    jnz 1b
+5:  mov %rbx, %rdi
+    call parse_select
+    mov %r13, SS_WITH(%rax)
+    decq PS_DEPTH(%rbx)
+    LEAVE
+ENDF parse_query
+
+/* parse_select(P) -> SelectStmt* (select_core, ORDER BY, LIMIT/OFFSET) */
 FUNC parse_select
     ENTER 16
     mov %rdi, %rbx
@@ -311,47 +505,8 @@ FUNC parse_select
     test %eax, %eax
     jz 5f
     mov %rbx, %rdi
-    mov $OP_LPAREN, %esi
-    call p_is_op
-    test %eax, %eax
-    jnz ps_unsupported
-    mov %rbx, %rdi
-    call p_ident
+    call parse_from_item
     mov %rax, SS_FROM(%r12)
-    mov %rbx, %rdi
-    mov $KW_AS, %esi
-    call p_accept_kw
-    test %eax, %eax
-    jnz 3f
-    mov %rbx, %rdi
-    call p_is_ident
-    test %eax, %eax
-    jz 4f
-3:  mov %rbx, %rdi
-    call p_ident
-    mov %rax, SS_ALIAS(%r12)
-4:  /* joins / derived tables are later-phase features */
-    mov %rbx, %rdi
-    call p_cur
-    cmpl $TOK_OP, TK_KIND(%rax)
-    jne 41f
-    cmpl $OP_COMMA, TK_ID(%rax)
-    je ps_unsupported
-41: cmpl $TOK_KEYWORD, TK_KIND(%rax)
-    jne 5f
-    mov TK_ID(%rax), %ecx
-    cmp $KW_JOIN, %ecx
-    je ps_unsupported
-    cmp $KW_INNER, %ecx
-    je ps_unsupported
-    cmp $KW_LEFT, %ecx
-    je ps_unsupported
-    cmp $KW_CROSS, %ecx
-    je ps_unsupported
-    cmp $KW_RIGHT, %ecx
-    je ps_unsupported
-    cmp $KW_FULL, %ecx
-    je ps_unsupported
 
 5:  /* WHERE */
     mov %rbx, %rdi
@@ -451,10 +606,163 @@ FUNC parse_select
     mov %rax, SS_LIMIT(%r12)
 99: mov %r12, %rax
     LEAVE
-ps_unsupported:
-    mov %rbx, %rdi
-    call p_unsupported
 ENDF parse_select
+
+/* new_from(kind edi) -> rax zeroed FromItem */
+FUNC new_from
+    push %rbx
+    mov %edi, %ebx
+    mov $FI_SIZE, %edi
+    call tmp_zalloc
+    mov %rbx, FI_KIND(%rax)
+    pop %rbx
+    ret
+ENDF new_from
+
+/* parse_from_item(P) -> FromItem*:  table_ref { join_clause }  (left-associative) */
+FUNC parse_from_item
+    ENTER 16
+    mov %rdi, %rbx
+    call p_enter
+    mov %rbx, %rdi
+    call parse_table_ref
+    mov %rax, %r12                  /* left */
+1:  mov %rbx, %rdi
+    call p_cur
+    mov %rax, %r14
+    mov TK_KIND(%r14), %ecx
+    mov TK_ID(%r14), %edx
+    cmp $TOK_OP, %ecx
+    jne 2f
+    cmp $OP_COMMA, %edx
+    jne 9f
+    mov $JT_CROSS, %r13d            /* ',' */
+    mov %rbx, %rdi
+    call p_next
+    jmp 5f
+2:  cmp $TOK_KEYWORD, %ecx
+    jne 9f
+    cmp $KW_CROSS, %edx
+    jne 3f
+    mov $JT_CROSS, %r13d
+    jmp 4f
+3:  mov $JT_INNER, %r13d
+    cmp $KW_JOIN, %edx
+    je 41f
+    cmp $KW_INNER, %edx
+    je 4f
+    cmp $KW_RIGHT, %edx
+    je 8f
+    cmp $KW_FULL, %edx
+    je 8f
+    cmp $KW_LEFT, %edx
+    jne 9f
+    mov $JT_LEFT, %r13d
+    mov %rbx, %rdi
+    call p_next
+    mov %rbx, %rdi
+    mov $KW_OUTER, %esi
+    call p_accept_kw
+    jmp 41f
+4:  mov %rbx, %rdi                  /* CROSS / INNER */
+    call p_next
+41: mov %rbx, %rdi
+    mov $KW_JOIN, %esi
+    call p_expect_kw
+5:  mov %rbx, %rdi
+    call parse_table_ref
+    mov %rax, %r15                  /* right */
+    mov $FK_JOIN, %edi
+    call new_from
+    mov %r12, FI_LEFT(%rax)
+    mov %r15, FI_RIGHT(%rax)
+    mov %r13, FI_JTYPE(%rax)
+    mov %rax, %r12
+    cmp $JT_CROSS, %r13d
+    je 1b
+    mov %rbx, %rdi
+    mov $KW_ON, %esi
+    call p_expect_kw
+    mov %rbx, %rdi
+    call parse_expr
+    mov %rax, FI_ON(%r12)
+    jmp 1b
+8:  mov %rbx, %rdi
+    call p_unsupported
+9:  decq PS_DEPTH(%rbx)
+    mov %r12, %rax
+    LEAVE
+ENDF parse_from_item
+
+/* parse_table_ref(P) -> FromItem*:
+ *   ident [[AS] alias] | ( query ) [AS] alias | ( from_item ) */
+FUNC parse_table_ref
+    ENTER 16
+    mov %rdi, %rbx
+    mov $OP_LPAREN, %esi
+    call p_is_op
+    test %eax, %eax
+    jz 5f
+    mov %rbx, %rdi
+    mov $1, %esi
+    call p_peek
+    cmpl $TOK_KEYWORD, TK_KIND(%rax)
+    jne 3f
+    mov TK_ID(%rax), %ecx
+    cmp $KW_SELECT, %ecx
+    je 1f
+    cmp $KW_WITH, %ecx
+    jne 3f
+1:  /* derived table: alias required */
+    mov %rbx, %rdi
+    call p_next
+    mov $FK_DERIVED, %edi
+    call new_from
+    mov %rax, %r12
+    mov %rbx, %rdi
+    call parse_query
+    mov %rax, FI_QUERY(%r12)
+    mov %rbx, %rdi
+    mov $OP_RPAREN, %esi
+    call p_expect_op
+    mov %rbx, %rdi
+    mov $KW_AS, %esi
+    call p_accept_kw
+    mov %rbx, %rdi
+    call p_ident
+    mov %rax, FI_ALIAS(%r12)
+    jmp 9f
+3:  /* parenthesised from_item */
+    mov %rbx, %rdi
+    call p_next
+    mov %rbx, %rdi
+    call parse_from_item
+    mov %rax, %r12
+    mov %rbx, %rdi
+    mov $OP_RPAREN, %esi
+    call p_expect_op
+    jmp 9f
+5:  mov $FK_TABLE, %edi
+    call new_from
+    mov %rax, %r12
+    mov %rbx, %rdi
+    call p_ident
+    mov %rax, FI_NAME(%r12)
+    mov %rbx, %rdi
+    mov $KW_AS, %esi
+    call p_accept_kw
+    test %eax, %eax
+    jnz 6f
+    mov %rbx, %rdi
+    call p_is_ident
+    test %eax, %eax
+    jz 9f
+6:  mov %rbx, %rdi
+    call p_ident
+    mov %rax, FI_ALIAS(%r12)
+9:  mov %r12, %rax
+    LEAVE
+ENDF parse_table_ref
 
 /* parse_select_item(P) -> SelectItem* */
 FUNC parse_select_item

@@ -54,7 +54,9 @@ version_fields:
     .asciz ",\"build\":{\"profile\":\"release\",\"flags\":\"gcc -no-pie (assembler/linker driver only)\"}"
 caps_fields:
     .ascii ",\"protocol_version\":1,\"capabilities\":[\"phase1\",\"ingest.csv\",\"ingest.json\""
-    .asciz ",\"ingest.jsonl\",\"sql.basic\",\"test.functions\"]"
+    .ascii ",\"ingest.jsonl\",\"sql.basic\",\"test.functions\""
+    .ascii ",\"phase2\",\"sql.groupby\",\"sql.join\",\"sql.functions\",\"sql.subquery\""
+    .asciz ",\"sql.cte\",\"sql.correlated_subquery\"]"
 
 /* operation table: name, handler */
 op_names:
@@ -76,7 +78,7 @@ op_names:
 op_handlers:
     .quad op_query, op_load, op_tables, op_schema, op_drop, op_reset
     .quad op_version, op_capabilities, op_sleep
-    .quad op_unsupported, op_unsupported, op_unsupported, op_unsupported
+    .quad op_explain, op_unsupported, op_unsupported, op_unsupported
 
     .text
 
@@ -539,7 +541,7 @@ ENDF op_sleep
 /* ================================================================ query */
 
 FUNC op_query
-    ENTER 32
+    ENTER 48
     mov %rdi, %rbx
     CSTR %rsi, "sql"
     call req_str
@@ -603,8 +605,15 @@ FUNC op_query
     lea 8(%r12), %rdi
     mov (%r12), %rsi
     call sql_parse
-    mov %rax, %rdi
-    call bind_select
+    mov %rax, %r14                  /* statement */
+    mov ST_KIND(%r14), %rax
+    cmp $STMT_QUERY, %rax
+    je 5f
+    cmp $STMT_EXPLAIN, %rax
+    je 6f
+    RAISE E_UNSUPPORTED, "indexes are not supported by this engine"
+5:  mov ST_QUERY(%r14), %rdi
+    call bind_statement
     mov %rax, %r13
     lea g_out(%rip), %rdi
     mov $',', %esi
@@ -614,10 +623,65 @@ FUNC op_query
     mov 8(%rsp), %rdx
     lea g_out(%rip), %rcx
     call exec_query
-    mov g_arena(%rip), %rax
+    jmp 9f
+6:  /* EXPLAIN statement: one STRING column "plan", one row with the plan JSON */
+    mov ST_QUERY(%r14), %rdi
+    call bind_statement
+    mov %rax, %r13
+    lea 16(%rsp), %rdi              /* Buf at 16..39 */
+    call buf_init
+    mov %r13, %rdi
+    lea 16(%rsp), %rsi
+    call explain_plan
+    lea g_out(%rip), %r15
+    PUTS %r15, ",\"columns\":[{\"name\":\"plan\",\"type\":\"STRING\"}]"
+    cmpq $0, 8(%rsp)
+    jne 7f
+    PUTS %r15, ",\"rows\":[["
+    mov %r15, %rdi
+    mov 16+BUF_DATA(%rsp), %rsi
+    mov 16+BUF_LEN(%rsp), %rdx
+    call buf_put_json_str
+    PUTS %r15, "]]"
+7:  PUTS %r15, ",\"row_count\":1"
+    lea 16(%rsp), %rdi
+    call buf_free
+9:  mov g_arena(%rip), %rax
     movq $0, AR_LIMIT(%rax)
     LEAVE
 ENDF op_query
+
+/* op_explain: {"op":"explain","sql":...} => "plan":{...} */
+FUNC op_explain
+    ENTER 16
+    mov %rdi, %rbx
+    CSTR %rsi, "sql"
+    call req_str
+    mov %rax, %r12
+    mov g_arena(%rip), %rax
+    mov g_max_query_mem(%rip), %rcx
+    mov %rcx, AR_LIMIT(%rax)
+    lea 8(%r12), %rdi
+    mov (%r12), %rsi
+    call sql_parse
+    mov ST_KIND(%rax), %rcx
+    cmp $STMT_QUERY, %rcx
+    je 1f
+    cmp $STMT_EXPLAIN, %rcx
+    je 1f
+    RAISE E_UNSUPPORTED, "indexes are not supported by this engine"
+1:  mov ST_QUERY(%rax), %rdi
+    call bind_statement
+    mov %rax, %r13
+    lea g_out(%rip), %r15
+    PUTS %r15, ",\"plan\":"
+    mov %r13, %rdi
+    mov %r15, %rsi
+    call explain_plan
+    mov g_arena(%rip), %rax
+    movq $0, AR_LIMIT(%rax)
+    LEAVE
+ENDF op_explain
 
 /* ================================================================ load */
 
