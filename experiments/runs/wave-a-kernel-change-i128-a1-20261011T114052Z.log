@@ -1,3 +1,10 @@
 2026-10-11T11:40:54+00:00 wave wave-a-kernel-change-i128-a1-20261011T114052Z: order=['arm64-asm', 'x86_64-asm']
 2026-10-11T11:40:54+00:00 [a-kernel-change-i128-arm64-asm-a1-20261011T114052Z] agent queued (usage gate, then launch)
 2026-10-11T11:40:59+00:00 [a-kernel-change-i128-x86_64-asm-a1-20261011T114053Z] agent queued (usage gate, then launch)
+2026-10-11T11:52:37+00:00 [a-kernel-change-i128-arm64-asm-a1-20261011T114052Z] agent finished; collecting telemetry
+2026-10-11T11:52:37+00:00 [a-kernel-change-i128-arm64-asm-a1-20261011T114052Z] validating (clean clone, sandboxed)
+2026-10-11T11:53:14+00:00 [a-kernel-change-i128-arm64-asm-a1-20261011T114052Z] outcome=success cost=$3.2430976 turns=27 wall=702.6s
+2026-10-11T12:07:05+00:00 [a-kernel-change-i128-x86_64-asm-a1-20261011T114053Z] agent finished; collecting telemetry
+2026-10-11T12:07:05+00:00 [a-kernel-change-i128-x86_64-asm-a1-20261011T114053Z] validating (clean clone, sandboxed)
+2026-10-11T12:07:13+00:00 [a-kernel-change-i128-x86_64-asm-a1-20261011T114053Z] outcome=success cost=$7.367618800000002 turns=54 wall=1566.3s
+2026-10-11T12:07:13+00:00 wave wave-a-kernel-change-i128-a1-20261011T114052Z finished: change=success, change=success

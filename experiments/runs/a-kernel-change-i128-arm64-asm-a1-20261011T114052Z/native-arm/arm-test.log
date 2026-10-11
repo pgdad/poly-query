@@ -1,0 +1,8 @@
+mkdir -p build/aarch64
+cc -O2 -g -std=c17 -Wall -Wextra -Werror -Wno-unused-parameter -Iinclude -Ireference-c -o build/aarch64/kernel_test tests/kernel_test.c reference-c/pq_kernels_ref.c reference-c/pq_dispatch.c arm64/pq_a64_neon.S arm64/pq_a64_scalar.S arm64/pq_a64_sve.S -lm
+build/aarch64/kernel_test 3000
+available variants: reference,a64_sve,a64_neon,a64_scalar (default: a64_sve)
+  a64_scalar  20/20 kernels  PASS
+  a64_neon    20/20 kernels  PASS
+  a64_sve     20/20 kernels  PASS
+kernel tests: 3 variant(s) tested, 0 failure(s)

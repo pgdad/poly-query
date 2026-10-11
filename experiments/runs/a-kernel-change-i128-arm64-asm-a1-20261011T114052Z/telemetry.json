@@ -1,0 +1,76 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-kernel-change-i128-arm64-asm-a1-20261011T114052Z",
+ "language": "arm64-asm",
+ "task": "kernel-change-i128",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-kernel-change-i128",
+ "prompt_sha256": "f299307281f956bb5d80b03e054276147dc5ac330ec9998c66dff5550b224e55",
+ "session_id": "245c069c-6539-4fc4-a3b2-7071c7f2c0f8",
+ "tokens": {
+  "input": 52,
+  "output": 80043,
+  "cache_read": 2470828,
+  "cache_creation": 143483,
+  "thinking": null,
+  "thinking_estimated": 44292,
+  "source": "result events",
+  "api_messages": 26
+ },
+ "rate_limit": {
+  "events": 2,
+  "max_utilization": {
+   "seven_day": 0.37,
+   "five_hour": 0.09
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 3.2430976,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 27,
+ "result_segments": 1,
+ "assistant_messages": 62,
+ "tool_calls": {
+  "Bash": 26
+ },
+ "tool_calls_total": 26,
+ "tool_failures": 0,
+ "build_invocations": 11,
+ "build_failures_heuristic": 0,
+ "conformance_runs": 0,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 702.6,
+  "model_api_seconds": 685.3,
+  "tool_seconds": 16.6,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 4,
+  "files_changed": 5,
+  "lines_added": 1203,
+  "lines_removed": 12,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "I implemented all four CR-4 kernels (`filter_i128`, `count_i128`, `sum_i128`, `minmax_i128`) in both required variants, `a64_scalar` and `a64_neon`, and also in the optional `a64_sve` variant. `make -C native-kernels test-cross` passes with **20/20 kernels PASS** for all three variants, and `make test` passes too. Everything is committed in four commits on `main`. All tests ran under qemu emulation only, so they show correctness, not speed.\n\n**How it works**\n- **Shared helpers** (`arm64/pq_a64_macros.h`): new macros for 128-bit compares and min/max. Filter and count use the same \"value minus lower bound, compare against a span\" trick as the existing 64-bit kernels, widened to 128 bits. The operator is checked before `*a` is read, and `*b` is only read for BETWEEN.\n- **Exact overflow in `sum_i128`:** every variant keeps a 192-bit running total. With fewer than 2\u00b3\u00b2 rows the true sum stays below 2\u00b9\u2076\u2070, so this total never wraps and is always exact. That means a sum that goes out of range and comes back (e.g. `MAX, 1, -1`) is reported as OK. Overflow is reported only when the final total doesn't fit in 128 bits.\n  - NEON and SVE split each value into 32-bit pieces and add them in 64-bit lanes. They fold into the 192-bit total every 2\u00b2\u2078 rows (NEON) or 2\u00b2\u2074 rows (SVE), early enough that no lane can wrap.\n- **NEON:** processes 8 rows per pass. Filter reuses the existing table-driven index writer, and the last 0\u20137 rows go through the scalar code.\n- **SVE:** works at any vector length. Min/max finds the smallest high half first, then the smallest low half among the lanes that share it.\n- Each new kernel's header comment covers register usage, the algorithm and the overflow method. The README has a new design section for these kernels.\n\n**Extra checks beyond the official test** (a throwaway harness, not committed):\n- **Buffer bounds:** every input and output sat right against a protected memory page at either end, with odd offsets and sizes from 0 to 4159 rows. A deliberate one-row over-read was confirmed to crash, so the check works.\n- **Edge values:** every operator with 17 edge values for `a` and `b`, including all pairs for BETWEEN. Also `a`/`b` pointing into the data and invalid operators with NULL pointers.\n- **Sums:** 3,000 sums that wrap around many times.\n- **Fold points:** I shrank the block sizes in a temporary copy so the fold code actually runs in tests.\n- **SVE vector lengths:** 128 to 2048 bits.\n- **Register rules:** no protected (callee-saved) registers are touched.\n- **Shared library:** it builds without text relocations and with a non-executable stack.\n\n**Speed:** there are no measurements, because there is no ARM hardware here. Counting instructions per row in the source, NEON should be about 1.7\u20132.2\u00d7 better than scalar for filter, count and min/max, and about 5.6\u00d7 for sum. The gain is smaller than for the 64-bit kernels because a 128-bit compare takes several vector instructions and a NEON register holds only two rows.\n\n**Limitations:** the SVE variant has only run under emulation. `sum_i128` depends on the ABI's guarantee that n < 2\u00b3\u00b2; the per-block lane limits don't depend on n.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

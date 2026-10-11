@@ -23,5 +23,21 @@
   1.267578125,
   1.412109375,
   1.18115234375
+ ],
+ "finished": "2026-10-11T12:07:13+00:00",
+ "loadavg_end": [
+  0.65283203125,
+  0.556640625,
+  0.640625
+ ],
+ "results": [
+  {
+   "run_id": "a-kernel-change-i128-arm64-asm-a1-20261011T114052Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-kernel-change-i128-x86_64-asm-a1-20261011T114053Z",
+   "outcome": "success"
+  }
  ]
 }

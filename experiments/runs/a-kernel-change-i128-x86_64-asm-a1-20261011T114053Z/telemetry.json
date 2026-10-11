@@ -1,0 +1,76 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-kernel-change-i128-x86_64-asm-a1-20261011T114053Z",
+ "language": "x86_64-asm",
+ "task": "kernel-change-i128",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-kernel-change-i128",
+ "prompt_sha256": "d2c16406a19f317ad8b497cabeb430506a09ad96c9654e5acad11be6c7adaa61",
+ "session_id": "8817c80a-bb9c-4660-9d4e-1ad5016aa97c",
+ "tokens": {
+  "input": 104,
+  "output": 165086,
+  "cache_read": 9604654,
+  "cache_creation": 268069,
+  "thinking": null,
+  "thinking_estimated": 86786,
+  "source": "result events",
+  "api_messages": 52
+ },
+ "rate_limit": {
+  "events": 4,
+  "max_utilization": {
+   "seven_day": 0.37,
+   "five_hour": 0.11
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 7.367618800000002,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 54,
+ "result_segments": 1,
+ "assistant_messages": 125,
+ "tool_calls": {
+  "Bash": 53
+ },
+ "tool_calls_total": 53,
+ "tool_failures": 1,
+ "build_invocations": 22,
+ "build_failures_heuristic": 4,
+ "conformance_runs": 0,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 1566.3,
+  "model_api_seconds": 1483.5,
+  "tool_seconds": 82.5,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 7,
+  "files_changed": 8,
+  "lines_added": 2715,
+  "lines_removed": 23,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The four 128-bit kernels (`filter_i128`, `count_i128`, `sum_i128`, `minmax_i128`) are in all three variants, and `make -C native-kernels test` reports `20/20 kernels PASS` for each variant, both natively and under ASan/UBSan. Everything is committed and the working tree is clean.\n\n**What was built** (new code appended to the end of each existing `.S` file; the original 16 kernels are untouched):\n- **`x86_scalar`**: plain integer code. Filter and count compare one row at a time and collect results into a 64-row mask. `sum_i128` keeps a 192-bit running total, so it is always exact. `minmax_i128` does one range check per row and updates only when a value falls outside the current min/max.\n- **`x86_avx2`**: compares 4 rows per step. `sum_i128` splits each 64-bit word into halves so the vector lanes stay exact, then folds them into a 192-bit total. `minmax_i128` skips the update step when no lane needs it.\n- **`x86_avx512`** (optional, and the default on this machine): 8 rows per step using mask registers and unsigned compares; the sum uses the same exact method as AVX2. Min/max never branches on the data.\n- **Overflow detection** works the same way everywhere: the sum is `PQK_OVERFLOW` exactly when the final 192-bit total doesn't fit in int128. So an overflow in the middle that cancels out is fine, and any final sum out of range is always reported.\n- Every new kernel's header comment covers register usage, the algorithm and (for the sum) how exact overflow detection works.\n\n**Extra testing:** I extended the checks in `verify/`; all pass for all three variants:\n- reads and writes stopping exactly at protected memory pages (including `a`, `b` and every output);\n- 300,001-row extreme columns, and 2,000 sums landing exactly on `INT128_MAX`/`INT128_MIN` (must pass) or one past them (must overflow);\n- register and stack preservation (ABI);\n- a build with tiny sum chunks so the folding code runs constantly.\n\nI also deliberately broke a copy of the scalar overflow check, and the new tests caught it.\n\n**Measured speedups** vs the C reference (64 MB column, ns per row):\n\n| kernel | L3-resident: scalar / AVX2 / AVX-512 | from DRAM: scalar / AVX2 / AVX-512 |\n|---|---|---|\n| filter_i128 | 3.2\u00d7 / 4.1\u00d7 / 5.7\u00d7 | 2.6\u00d7 / 2.8\u00d7 / 3.1\u00d7 |\n| count_i128 | 2.1\u00d7 / 3.1\u00d7 / 3.0\u00d7 | 1.7\u00d7 / 1.8\u00d7 / 1.8\u00d7 |\n| sum_i128 | 1.8\u00d7 / 2.6\u00d7 / 2.7\u00d7 | 1.3\u00d7 / 1.4\u00d7 / 1.5\u00d7 |\n| minmax_i128 | 1.8\u00d7 / 4.0\u00d7 / 3.7\u00d7 | 1.6\u00d7 / 2.4\u00d7 / 2.4\u00d7 |\n\nThe official unpinned `make bench` run landed on the slower-memory half of the chip and matches the DRAM column. The full tables, tuning experiments and design notes are in `native-kernels/x86_64/README.md`.\n\n**Limitations:**\n- The scalar `minmax_i128` slows down on unfavourable data (steadily increasing values, or frequent unpredictable new extremes). It then runs at roughly reference speed, about 0.8\u20130.96 ns/row.\n- AVX-512 only matches AVX2 for count, sum and min/max; it is clearly faster only for filter.\n- From DRAM the benchmark program reaches only about 50 GB/s on these kernels, against about 72 GB/s for the same kernel in my own test harness. I attribute that gap to how the benchmark process places memory, not to the kernels, but I didn't confirm the cause.\n- All numbers come from this one AMD Zen 5 machine.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
