@@ -44,6 +44,7 @@
 #define CN_EXPECT   92      // u32 Expect: 100-continue
 #define CN_BODY     96      // body Str* (malloc: len, bytes, NUL) or 0
 #define CN_STATUS   104     // status of the response being sent
+#define CN_T0       112     // µs when the request head was complete
 #define CN_TARGET   128     // request target copy
 #define TARGET_MAX  8192
 #define CN_SIZE     (CN_TARGET + TARGET_MAX + 16)
@@ -213,6 +214,15 @@ l_stopped:    .asciz "server stopped"
 k_port:       .asciz "port"
 k_workers:    .asciz "workers"
 k_inflight:   .asciz "in_flight"
+l_request:    .asciz "request"
+k_method:     .asciz "method"
+k_path:       .asciz "path"
+k_hstatus:    .asciz "http_status"
+k_duration:   .asciz "duration_ms"
+    .p2align 3
+method_names:
+    .quad s_other, s_get, s_post, s_put, s_delete
+s_other:      .asciz "OTHER"
 
 reasons:
     .quad 100, r_100, 200, r_200, 201, r_201, 400, r_400, 403, r_403
@@ -2091,6 +2101,10 @@ LFUNC conn_main
     cmp  w0, #0
     b.eq .Lcm_close
     b.lt .Lcm_head_large
+    str  x1, [sp, #-16]!                // head end offset
+    bl   now_us
+    str  x0, [x19, #CN_T0]
+    ldr  x1, [sp], #16
     mov  x0, x19
     bl   parse_head
     mov  x9, #1
@@ -2126,6 +2140,8 @@ LFUNC conn_main
     ADR_L x2, m_toolarge
     bl   send_error
 .Lcm_done:
+    mov  x0, x19
+    bl   log_request
     bl   request_cleanup
     ldr  x0, [x19, #CN_BODY]
     str  xzr, [x19, #CN_BODY]
@@ -2210,6 +2226,44 @@ LFUNC drain_input
 9:  add  sp, sp, #528
     LEAVE 2
 ENDF drain_input
+
+// log_request(x0 conn): debug event per request (method, path, status,
+// duration); never the body or query parameters
+//   x19 conn
+LFUNC log_request
+    ENTER 1
+    mov  x19, x0
+    mov  w0, #LOG_DEBUG
+    ADR_L x1, l_request
+    bl   log_begin
+    cbz  w0, 9f
+    ldr  x9, [x19, #CN_METHOD]
+    ADR_L x10, method_names
+    ldr  x1, [x10, x9, lsl #3]
+    mov  x0, x1
+    str  x1, [sp, #-16]!
+    bl   strlen
+    mov  x2, x0
+    ldr  x1, [sp], #16
+    ADR_L x0, k_method
+    bl   log_str
+    ADR_L x0, k_path
+    add  x1, x19, #CN_TARGET
+    ldr  x2, [x19, #CN_PATHLEN]
+    bl   log_str
+    ADR_L x0, k_hstatus
+    ldr  x1, [x19, #CN_STATUS]
+    bl   log_int
+    bl   now_us
+    ldr  x9, [x19, #CN_T0]
+    sub  x1, x0, x9
+    mov  x9, #1000
+    udiv x1, x1, x9
+    ADR_L x0, k_duration
+    bl   log_int
+    bl   log_end
+9:  LEAVE 1
+ENDF log_request
 
 // request_cleanup(): per-request state of the connection thread
 LFUNC request_cleanup
