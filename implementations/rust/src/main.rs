@@ -6,6 +6,9 @@ use polyquery::cli::{Mode, USAGE, parse_args};
 use polyquery::engine::Engine;
 use polyquery::protocol::{WORKER_STACK_BYTES, capabilities_json, session, version_json};
 
+#[global_allocator]
+static GLOBAL: polyquery::alloc::ArenaLocalAlloc = polyquery::alloc::ArenaLocalAlloc;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cli = match parse_args(&args) {
