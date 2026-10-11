@@ -25,7 +25,11 @@ and the requirement change **CR-1 `UNION ALL`** (`spec/changes/union-all.md`) �
 plan separation** (`spec/changes/refactor-plan-separation.md`) — see
 [Change CR-3](#change-cr-3-logicalphysical-plan-separation); and the architectural change
 **CR-2 DECIMAL precision 38** with PQCF v2 (`spec/changes/decimal38.md`) — see
-[Change CR-2](#change-cr-2-decimal-precision-38).
+[Change CR-2](#change-cr-2-decimal-precision-38). Most recently, query **latency** on the
+`analytics` benchmark workload was optimized (parallel sorting with normalized keys, top-N
+cutoff, parallel DISTINCT aggregates, shared CTE aggregations, cheaper parallel merges and join
+builds, JIT warm-up through an AOT cache) — see
+[Latency optimization](#latency-optimization-analytics-workload).
 
 Capabilities: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic test.functions phase2
 sql.groupby sql.join sql.functions sql.subquery sql.cte sql.correlated_subquery phase3
@@ -550,11 +554,13 @@ e.g. Q1 single-threaded measured 2.7–5.0 ms across runs).
 
 ### Configuration for experiments
 
-`-Dpolyquery.batchSize=N`, `-Dpolyquery.morselRows=N` and `-Dpolyquery.parallelBuildRows=N` (via
-`POLYQUERY_JAVA_OPTS`) change the batch and morsel sizes and the build size from which hash-join
-indexes are built in parallel. Tiny values (e.g. 3 and 5) make every batch boundary, adapter, parallel
-worker and deferred-error path run on the small conformance fixtures; the conformance suite,
-the `--modes` matrix and the unit tests pass that way too.
+`-Dpolyquery.batchSize=N`, `-Dpolyquery.morselRows=N`, `-Dpolyquery.parallelBuildRows=N` and
+`-Dpolyquery.parallelSortRows=N` (via `POLYQUERY_JAVA_OPTS`) change the batch and morsel sizes,
+the build size from which hash-join indexes are built in parallel and the input size from which
+sorts run in parallel. Tiny values (e.g. 3, 5 and 4) make every batch boundary, adapter, parallel
+worker, parallel sort and deferred-error path run on the small conformance fixtures; the
+conformance suite, the `--modes` matrix and the unit tests pass that way too.
+`POLYQUERY_AOT=off` starts the engine without its AOT cache (see JIT warm-up below).
 
 ## Native kernels (M9)
 

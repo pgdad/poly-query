@@ -826,6 +826,16 @@ abstract class AggState {
             return true;
         }
 
+        /** Makes room for {@code entries} entries without growing or rehashing (an empty set only). */
+        private void presize(int entries) {
+            if (size == 0 && entries > owners.length) {
+                keys = new long[entries];
+                owners = new int[entries];
+                hashes = new int[entries];
+                slots = new int[Integer.highestOneBit(Math.max(64, 2 * entries - 1)) << 1];
+            }
+        }
+
         /** A new entry of {@code group} with hash {@code h} (the caller stores the value); returns its index. */
         private int newEntry(int group, int h) {
             if (size == owners.length) {
@@ -874,6 +884,34 @@ abstract class AggState {
             int parts = Math.max(1, Math.min(64, threads));
             DataType type = plain.argument().type();
             Vec.Kind kind = Vec.kindOf(type);
+            // each partial's entries grouped by partition (in parallel), so that every partition
+            // thread visits only its own entries
+            int[][] order = new int[partials.size()][];
+            int[][] starts = new int[partials.size()][];
+            List<Runnable> grouping = new ArrayList<>(partials.size());
+            for (int w = 0; w < partials.size(); w++) {
+                int worker = w;
+                grouping.add(() -> {
+                    Distinct d = partials.get(worker);
+                    int[] partOf = new int[d.size];
+                    int[] start = new int[parts + 1];
+                    for (int e = 0; e < d.size; e++) {
+                        partOf[e] = (int) (((d.hashes[e] & 0xFFFFFFFFL) * parts) >>> 32);
+                        start[partOf[e] + 1]++;
+                    }
+                    for (int p = 0; p < parts; p++) {
+                        start[p + 1] += start[p];
+                    }
+                    int[] fill = Arrays.copyOf(start, parts);
+                    int[] byPart = new int[d.size];
+                    for (int e = 0; e < d.size; e++) {
+                        byPart[fill[partOf[e]]++] = e;
+                    }
+                    order[worker] = byPart;
+                    starts[worker] = start;
+                });
+            }
+            Parallel.runAll(grouping, ctx);
             AggState[] results = new AggState[parts];
             List<Runnable> tasks = new ArrayList<>(parts);
             for (int p = 0; p < parts; p++) {
@@ -881,15 +919,19 @@ abstract class AggState {
                 tasks.add(() -> {
                     Distinct local = new Distinct(plain, kernels);
                     local.inner.grow(1);
+                    int bound = 0;
+                    for (int w = 0; w < partials.size(); w++) {
+                        bound += starts[w][part + 1] - starts[w][part];
+                    }
+                    local.presize(bound);
                     int cap = 1024;
                     Vec values = new Vec(type, cap);
                     int[] zeros = new int[cap];
                     int n = 0;
-                    for (Distinct d : partials) {
-                        for (int e = 0; e < d.size; e++) {
-                            if ((int) (((d.hashes[e] & 0xFFFFFFFFL) * parts) >>> 32) != part) {
-                                continue;
-                            }
+                    for (int w = 0; w < partials.size(); w++) {
+                        Distinct d = partials.get(w);
+                        for (int k = starts[w][part]; k < starts[w][part + 1]; k++) {
+                            int e = order[w][k];
                             boolean added = d.objects != null && d.objects[e] != null
                                     ? local.addObject(0, d.objects[e]) : local.addLong(0, d.keys[e]);
                             if (!added) {

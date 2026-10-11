@@ -1,6 +1,7 @@
 package polyquery.physical;
 
 import java.lang.reflect.Array;
+import java.lang.reflect.Method;
 import java.lang.reflect.RecordComponent;
 import java.util.ArrayList;
 import java.util.List;
@@ -12,6 +13,20 @@ import polyquery.plan.Subquery;
  * (e.g. a CTE referenced twice is inlined twice and planned the same way both times).
  */
 public final class PlanKeys {
+    /** The (accessible) component accessors of each record class. */
+    private static final ClassValue<Method[]> ACCESSORS = new ClassValue<>() {
+        @Override
+        protected Method[] computeValue(Class<?> type) {
+            RecordComponent[] parts = type.getRecordComponents();
+            Method[] out = new Method[parts.length];
+            for (int i = 0; i < parts.length; i++) {
+                out[i] = parts[i].getAccessor();
+                out[i].setAccessible(true);
+            }
+            return out;
+        }
+    };
+
     private PlanKeys() {
     }
 
@@ -45,12 +60,10 @@ public final class PlanKeys {
             throw new Variant();
         }
         if (v instanceof Record r) {
-            RecordComponent[] parts = r.getClass().getRecordComponents();
-            List<Object> out = new ArrayList<>(parts.length + 1);
+            Method[] accessors = ACCESSORS.get(r.getClass());
+            List<Object> out = new ArrayList<>(accessors.length + 1);
             out.add(r.getClass());
-            for (RecordComponent c : parts) {
-                var accessor = c.getAccessor();
-                accessor.setAccessible(true);
+            for (Method accessor : accessors) {
                 out.add(key(accessor.invoke(r)));
             }
             return out;
