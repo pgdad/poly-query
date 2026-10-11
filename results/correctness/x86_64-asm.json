@@ -1,0 +1,48 @@
+{
+ "language": "x86_64-asm",
+ "generated": "2026-10-11T11:39:45+00:00",
+ "commit": "6775395fbe69c414a539f19e3069abf5d4d3a24e",
+ "suites": {
+  "public": {
+   "exit": 0,
+   "environment": "native x86-64 (sandbox)"
+  },
+  "asan": {
+   "exit": 0,
+   "environment": "native x86-64 (sandbox)"
+  },
+  "hidden": {
+   "exit": 0,
+   "environment": "native x86-64 (sandbox), ASan/UBSan"
+  }
+ },
+ "variants": {
+  "x86_scalar": {
+   "provided": 16,
+   "total": 20,
+   "public": "PASS",
+   "asan": "PASS",
+   "hidden": "PASS"
+  },
+  "x86_avx2": {
+   "provided": 16,
+   "total": 20,
+   "public": "PASS",
+   "asan": "PASS",
+   "hidden": "PASS"
+  },
+  "x86_avx512": {
+   "provided": 16,
+   "total": 20,
+   "public": "PASS",
+   "asan": "PASS",
+   "hidden": "PASS"
+  }
+ },
+ "summary": {
+  "variants": 3,
+  "all_pass": true,
+  "complete_variants": [],
+  "suites_exit_ok": true
+ }
+}

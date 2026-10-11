@@ -1,0 +1,14 @@
+{
+ "language": "x86_64-asm",
+ "seed": null,
+ "operator": "index_truncation_16bit",
+ "file": "native-kernels/x86_64/pqk_x86_avx2.S",
+ "line": 389,
+ "variant": "x86_avx2",
+ "kernel": "filter_i64",
+ "failing_cases": [],
+ "failing_hidden": "tests/kernels-hidden/kernel_hidden_test.c: large filter_i64 (n >= 131073), 28 checks",
+ "public_tests": "pass",
+ "report_style": "symptom-only (no failing tests named)",
+ "description": "row-base for selection indices kept in 16-bit lanes/registers, so indices wrap at 65536 in the SIMD dense path"
+}

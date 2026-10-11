@@ -1,0 +1,68 @@
+{
+ "language": "arm64-asm",
+ "generated": "2026-10-11T11:39:50+00:00",
+ "commit": "6775395fbe69c414a539f19e3069abf5d4d3a24e",
+ "suites": {
+  "public_emulated": {
+   "exit": 0,
+   "environment": "qemu-aarch64 (functional only)"
+  },
+  "hidden_emulated": {
+   "exit": 0,
+   "environment": "qemu-aarch64 (functional only)"
+  },
+  "native_arm": {
+   "exit": 0,
+   "environment": "native AArch64 on spark (Ubuntu 24.04.4 LTS), pqrunner systemd unit"
+  }
+ },
+ "variants_emulated": {
+  "a64_scalar": {
+   "provided": 16,
+   "total": 20,
+   "public": "PASS",
+   "hidden": "PASS"
+  },
+  "a64_neon": {
+   "provided": 16,
+   "total": 20,
+   "public": "PASS",
+   "hidden": "PASS"
+  },
+  "a64_sve": {
+   "provided": 16,
+   "total": 20,
+   "public": "PASS",
+   "hidden": "PASS"
+  }
+ },
+ "variants": {
+  "a64_scalar": {
+   "provided": 16,
+   "total": 20,
+   "public": "PASS",
+   "asan": "PASS",
+   "hidden": "PASS"
+  },
+  "a64_neon": {
+   "provided": 16,
+   "total": 20,
+   "public": "PASS",
+   "asan": "PASS",
+   "hidden": "PASS"
+  },
+  "a64_sve": {
+   "provided": 16,
+   "total": 20,
+   "public": "PASS",
+   "asan": "PASS",
+   "hidden": "PASS"
+  }
+ },
+ "summary": {
+  "variants": 3,
+  "all_pass": true,
+  "complete_variants": [],
+  "suites_exit_ok": true
+ }
+}

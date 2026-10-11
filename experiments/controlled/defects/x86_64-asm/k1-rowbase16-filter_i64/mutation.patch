@@ -1,0 +1,12 @@
+--- a/native-kernels/x86_64/pqk_x86_avx2.S	2026-10-11 07:36:18.158522565 -0400
++++ b/native-kernels/x86_64/pqk_x86_avx2.S	2026-10-11 07:36:18.170522941 -0400
+@@ -386,7 +386,8 @@
+         /* dense: 8 x compress 8 rows */
+         movabs  $0x0101010101010101, %r10
+         movabs  $0x0706050403020100, %r11
+-        vmovd   %ebx, %xmm4
++        movzwl  %bx, %ecx
++        vmovd   %ecx, %xmm4
+         vpbroadcastd %xmm4, %ymm4
+         .rept 8
+         movzbl  %al, %ecx

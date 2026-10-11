@@ -42,8 +42,14 @@ PROMPTS = ROOT / "experiments/prompts"
 RECORDS = ROOT / "experiments/runs"
 LANGS = ["java", "clojure", "rust", "python", "go", "common-lisp"]
 ASM_LANGS = ["x86_64-asm", "arm64-asm"]
+# Native-kernel experiment family (assembly languages only).
+KERNEL_TASKS = {"kernels", "kernel-change-i128", "kernel-refactor", "kernel-debug-mutant", "kernel-optimize"}
+# Kernels each required variant must provide after the task (revision-1 tasks need all 20;
+# the original task and the debugging task, whose baseline is revision-0 code, need the 16 of revision 0).
+KERNEL_MIN_PROVIDED = {"kernels": 16, "kernel-debug-mutant": 16}
+DEBUG_TASKS = {"debug-mutant", "kernel-debug-mutant"}
 KERNEL_WORKSPACE_PATHS = [
-    "spec/README.md", "spec/phases/native-kernels.md",
+    "spec/README.md", "spec/phases/native-kernels.md", "spec/changes/kernels-i128.md", "spec/changes/kernel-refactor.md",
     "native-kernels/include", "native-kernels/reference-c", "native-kernels/tests", "native-kernels/Makefile",
     "LICENSE",
 ]
@@ -77,7 +83,7 @@ PHASE_TASKS = {"phase1", "phase2", "phase3", "phase4", "phase5"}
 
 TRUSTED_PATHS = ["tests", "spec"]
 TRUSTED_KERNEL_PATHS = ["spec", "native-kernels/Makefile", "native-kernels/include", "native-kernels/reference-c",
-                        "native-kernels/tests"]
+                        "native-kernels/tests", "tests/kernels-hidden"]
 
 
 def load_json_file(p: Path) -> dict | None:
@@ -155,7 +161,7 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
     langs = json.loads((PROMPTS / "languages.json").read_text())
     if lang not in langs:
         raise SystemExit(f"unknown language {lang}")
-    if (lang in ASM_LANGS) != (task == "kernels"):
+    if (lang in ASM_LANGS) != (task in KERNEL_TASKS):
         raise SystemExit(f"task {task} does not apply to {lang}")
     if task not in tasks:
         raise SystemExit(f"unknown task {task}")
@@ -171,8 +177,8 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
     ref = base_ref or git(["rev-parse", "HEAD"], ROOT)
     # Export the allowed paths at `ref` (committed state only) into the workspace.
     impl_path = L["work_dir"]
-    export = (KERNEL_WORKSPACE_PATHS if task == "kernels" else WORKSPACE_PATHS) + [impl_path]
-    if task not in PHASE_TASKS and task != "kernels":
+    export = (KERNEL_WORKSPACE_PATHS if task in KERNEL_TASKS else WORKSPACE_PATHS) + [impl_path]
+    if task not in PHASE_TASKS and task not in KERNEL_TASKS:
         export += NATIVE_EXTRA_PATHS
     present = [p for p in export if sh(["git", "cat-file", "-e", f"{ref}:{p}"], cwd=ROOT, check=False).returncode == 0]
     archive = subprocess.run(["git", "archive", "--format=tar", ref, *present], cwd=ROOT, check=True, capture_output=True)
@@ -188,11 +194,13 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
         "RUNNER_ARGS": t["runner_args"], "DONE_CRITERIA": t["done"],
         "LANGUAGE": L["language"], "LANG_DIR": L["lang_dir"], "TOOLCHAIN": L["toolchain"],
         "STDLIB_NOTE": L["stdlib_note"],
+        "BENCH_NOTE": L.get("bench_note", ""), "BENCH_DONE": L.get("bench_done", ""),
+        "BENCH_TABLE_NOTE": L.get("bench_table_note", ""), "OPTIONAL_SIMD_OPT": L.get("optional_simd_opt", ""),
     }
     task_md = render(template, values)
     (ws / "TASK.md").write_text(task_md)
     defect_id = None
-    if task == "debug-mutant":
+    if task in DEBUG_TASKS:
         # Inject the pre-generated defect (tools/orchestration/mutate.py) before the baseline commit,
         # so the workspace history contains no trace of the original line.
         cands = sorted(p for p in (ROOT / "experiments/controlled/defects" / lang).glob("*/mutation.patch"))
@@ -625,7 +633,7 @@ def validate(run_id: str, phases: list[int] | None = None) -> dict:
     # Only the agent's own work directory is taken from the workspace; the harness, spec and kernel
     # test scaffolding come from the trusted repository (incl. hidden tests), so edits an agent made
     # to them cannot influence its verdict.
-    for rel in TRUSTED_KERNEL_PATHS if m["task"] == "kernels" else \
+    for rel in TRUSTED_KERNEL_PATHS if m["task"] in KERNEL_TASKS else \
             TRUSTED_PATHS + (NATIVE_EXTRA_PATHS if m["task"] not in PHASE_TASKS else []):
         dst = vd / rel
         if dst.is_dir():
@@ -637,7 +645,7 @@ def validate(run_id: str, phases: list[int] | None = None) -> dict:
             shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "build"))
         elif src.exists():
             shutil.copy2(src, dst)
-    if m["task"] == "kernels":
+    if m["task"] in KERNEL_TASKS:
         return validate_kernels(run_id, m, vd)
     task_phase = {"phase1": [1], "phase2": [1, 2], "phase3": [1, 2, 3], "phase4": [1, 2, 3], "phase5": [1, 2, 3],
                   "native": [1, 2, 3]}
@@ -748,6 +756,11 @@ make -C native-kernels clean >/dev/null 2>&1
 ( make -C native-kernels {target} ) > validate-kernels.log 2>&1; echo "test_exit=$?" > validate-status
 if [ "{target}" = "test" ]; then ( make -C native-kernels bench ) > validate-bench.log 2>&1; echo "bench_exit=$?" >> validate-status; fi
 """
+    # Hidden acceptance tests (tests/kernels-hidden, never in a workspace): large inputs, extra seeds.
+    hidden_target = "test-hidden" if target == "test" else "test-hidden-cross"
+    script += f"""( make -C native-kernels {hidden_target} HIDDEN_SRC=../tests/kernels-hidden/kernel_hidden_test.c ) \
+  > validate-hidden.log 2>&1; echo "hidden_exit=$?" >> validate-status
+"""
     if L["variant_prefix"] == "a64_":
         # SVE code must be vector-length agnostic: sweep 128..2048-bit vectors under qemu.
         script += """for vl in 16 32 64 128 256; do echo "VL=$vl"; \
@@ -767,8 +780,15 @@ if [ "{target}" = "test" ]; then ( make -C native-kernels bench ) > validate-ben
     prefix = L["variant_prefix"]
     simd = "x86_avx2" if prefix == "x86_" else "a64_neon"
     required = [f"{prefix}scalar", simd]
-    ok = status.get("test_exit") == "0" and all(variants.get(v, {}).get("kernels") == variants.get(v, {}).get("total") and
+    need = KERNEL_MIN_PROVIDED.get(m["task"])
+
+    def complete(v: dict) -> bool:
+        return v.get("kernels", -1) >= need if need else v.get("kernels") == v.get("total")
+    ok = status.get("test_exit") == "0" and all(complete(variants.get(v, {})) and
                                                  variants.get(v, {}).get("status") == "PASS" for v in required)
+    hlog = (vd / "validate-hidden.log").read_text(errors="replace") if (vd / "validate-hidden.log").exists() else ""
+    hidden = {mm.group(1): mm.group(2) for mm in re.finditer(r"^\s+(\w+)\s+\d+/\d+ kernels\s+hidden (PASS|FAIL)", hlog, re.M)}
+    ok = ok and status.get("hidden_exit") == "0" and all(hidden.get(v) == "PASS" for v in required)
     bench = []
     bf = vd / "native-kernels/build/x86_64/bench.jsonl"
     if bf.exists():
@@ -781,24 +801,33 @@ if [ "{target}" = "test" ]; then ( make -C native-kernels bench ) > validate-ben
                 vl = str(int(line[3:]) * 8)
             elif vl and "a64_sve" in line:
                 sve_vl[vl] = "PASS" in line
+    if m["task"] != "kernels" and sve_vl:
+        ok = ok and all(sve_vl.values())
     native_arm = None
     if prefix == "a64_":
+        hd = vd / "native-kernels/hidden"
+        hd.mkdir(exist_ok=True)
+        shutil.copy(ROOT / "tests/kernels-hidden/kernel_hidden_test.c", hd / "kernel_hidden_test.c")
         native_arm = run_native_arm(vd / "native-kernels", rd / "native-arm")
         if native_arm.get("available"):
             ok = ok and native_arm["ok"]
             if native_arm["bench"]:
                 bench = native_arm["bench"]
-    for f in ["validate-kernels.log", "validate-bench.log", "validate-sve.log"]:
+    for f in ["validate-kernels.log", "validate-bench.log", "validate-sve.log", "validate-hidden.log"]:
         if (vd / f).exists():
             shutil.copy(vd / f, rd / f)
     out = {"seconds": round(time.time() - t0, 1), "status": status, "variants": variants, "required": required,
            "emulated": prefix == "a64_" and not (native_arm or {}).get("available"),
-           "bench": bench, "sve_vector_lengths_bits": sve_vl or None,
-           "native_arm": {k: v for k, v in (native_arm or {}).items() if k != "bench"} or None}
+           "hidden": hidden or None, "bench": bench, "sve_vector_lengths_bits": sve_vl or None,
+           "native_arm": {k: v for k, v in (native_arm or {}).items() if k != "bench"} or None,
+           "validated_at": now(), "harness_commit": git_head()}
     out["outcome"] = "success" if ok else ("build_failed" if not variants else "tests_failed")
+    if m.get("agent_exit_code") in (124, 137):
+        out["outcome"] = "timeout"
     tel_path = rd / "telemetry.json"
     if tel_path.exists() and (json.loads(tel_path.read_text()).get("git") or {}).get("paths_outside_language_dir"):
         out["outcome"] = "isolation_violation"
+    archive_validation(rd)
     (rd / "validation.json").write_text(json.dumps(out, indent=1) + "\n")
     if bench:
         (rd / "kernel-bench.json").write_text(json.dumps(bench, indent=1) + "\n")
@@ -824,7 +853,8 @@ def run_native_arm(kernels_dir: Path, out_dir: Path) -> dict:
         return {"available": False, "reason": "disabled (PQ_ARM_HOST empty)"}
     if out_dir.exists():
         shutil.rmtree(out_dir)
-    r = subprocess.run([str(ARM_NATIVE), str(kernels_dir), str(out_dir), "--bench", "--asan"],
+    hidden = ["--hidden"] if (kernels_dir / "hidden/kernel_hidden_test.c").exists() else []
+    r = subprocess.run([str(ARM_NATIVE), str(kernels_dir), str(out_dir), "--bench", "--asan", *hidden],
                        capture_output=True, text=True, timeout=3 * 3600)
     st_file = out_dir / "arm-status"
     if not st_file.exists():
@@ -839,7 +869,12 @@ def run_native_arm(kernels_dir: Path, out_dir: Path) -> dict:
     bf = out_dir / "bench.jsonl"
     bench = [json.loads(l) for l in bf.read_text().splitlines() if l.strip().startswith("{")] if bf.exists() else []
     host_info = json.loads((out_dir / "arm-host.json").read_text()) if (out_dir / "arm-host.json").exists() else {}
+    hv = {mm.group(1): mm.group(2) for mm in re.finditer(r"^\s+(\w+)\s+\d+/\d+ kernels\s+hidden (PASS|FAIL)",
+          (out_dir / "arm-hidden.log").read_text(errors="replace") if (out_dir / "arm-hidden.log").exists() else "", re.M)}
+    for k, v in hv.items():
+        variants.setdefault(k, {})["hidden"] = v
     ok = st.get("test_exit") == "0" and st.get("asan_exit") == "0" and \
+        (not hidden or (st.get("hidden_exit") == "0" and bool(hv) and all(v == "PASS" for v in hv.values()))) and \
         all(_passed(v.get("native", "")) and _passed(v.get("asan", "")) for v in variants.values()) \
         and bool(variants)
     return {"available": True, "host": host, "status": st, "variants": variants, "ok": ok, "bench": bench,

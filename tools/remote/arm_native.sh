@@ -7,12 +7,13 @@
 # network, /home hidden, a read-only system and only the job directory writable.
 # Benchmarks are pinned to one Cortex-X925 core.
 #
-# Usage: arm_native.sh <native-kernels-dir> <out-dir> [--bench] [--asan]
-# Outputs in <out-dir>: arm-test.log, arm-asan.log, arm-bench.log, bench.jsonl, arm-host.json, arm-status
+# Usage: arm_native.sh <native-kernels-dir> <out-dir> [--bench] [--asan] [--hidden]
+#   --hidden runs `make test-hidden` (expects <native-kernels-dir>/hidden/kernel_hidden_test.c)
+# Outputs in <out-dir>: arm-test.log, arm-asan.log, arm-hidden.log, arm-bench.log, bench.jsonl, arm-host.json, arm-status
 set -euo pipefail
 SRC=$(realpath "$1"); OUT=$(realpath -m "$2"); shift 2
-BENCH=0; ASAN=0
-for a in "$@"; do case $a in --bench) BENCH=1;; --asan) ASAN=1;; *) echo "unknown arg $a" >&2; exit 2;; esac; done
+BENCH=0; ASAN=0; HIDDEN=0
+for a in "$@"; do case $a in --bench) BENCH=1;; --asan) ASAN=1;; --hidden) HIDDEN=1;; *) echo "unknown arg $a" >&2; exit 2;; esac; done
 HOST=${PQ_ARM_HOST:-spark}
 BENCH_CPU=${PQ_ARM_BENCH_CPU:-9}          # a Cortex-X925 core on spark
 TEST_CPUS=${PQ_ARM_TEST_CPUS:-5-9,15-19}  # all X925 cores
@@ -24,9 +25,9 @@ SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST")
 rsync -a --delete --exclude build/ "$SRC/" "$HOST:.pq-stage/$JOB/native-kernels/"
 
 # One remote script; each step runs in its own locked-down transient unit.
-"${SSH[@]}" "bash -s" -- "$JOB" "$BENCH" "$ASAN" "$BENCH_CPU" "$TEST_CPUS" <<'REMOTE' > "$OUT/arm-remote.log" 2>&1 || true
+"${SSH[@]}" "bash -s" -- "$JOB" "$BENCH" "$ASAN" "$BENCH_CPU" "$TEST_CPUS" "$HIDDEN" <<'REMOTE' > "$OUT/arm-remote.log" 2>&1 || true
 set -uo pipefail
-JOB=$1; BENCH=$2; ASAN=$3; BENCH_CPU=$4; TEST_CPUS=$5
+JOB=$1; BENCH=$2; ASAN=$3; BENCH_CPU=$4; TEST_CPUS=$5; HIDDEN=$6
 J=/srv/pqrunner/jobs/$JOB
 L=~/.pq-out/$JOB   # logs are written by the ssh user, outside pqrunner's private tree
 mkdir -p "$L"
@@ -47,6 +48,7 @@ unit() {  # unit <cpus> <timeout-s> <cmd...>
 }
 unit "$TEST_CPUS" 1800 make test-native > "$L/arm-test.log" 2>&1; echo "test_exit=$?" > "$L/arm-status"
 if [ "$ASAN" = 1 ]; then unit "$TEST_CPUS" 1800 make test-asan > "$L/arm-asan.log" 2>&1; echo "asan_exit=$?" >> "$L/arm-status"; fi
+if [ "$HIDDEN" = 1 ]; then unit "$TEST_CPUS" 1800 make test-hidden > "$L/arm-hidden.log" 2>&1; echo "hidden_exit=$?" >> "$L/arm-status"; fi
 if [ "$BENCH" = 1 ]; then unit "$BENCH_CPU" 3600 make bench > "$L/arm-bench.log" 2>&1; echo "bench_exit=$?" >> "$L/arm-status"; fi
 python3 - "$L/arm-host.json" <<'PY'
 import json, platform, subprocess, sys

@@ -1,0 +1,11 @@
+--- a/native-kernels/arm64/pq_a64_neon.S	2026-10-11 07:36:18.158522565 -0400
++++ b/native-kernels/arm64/pq_a64_neon.S	2026-10-11 07:36:18.171522973 -0400
+@@ -184,7 +184,7 @@
+     add     v1.4s, v1.4s, v20.4s
+     stp     q0, q1, [x11]
+     add     x11, x11, x\m, lsl #2
+-    add     v20.4s, v20.4s, v21.4s
++    add     v20.8h, v20.8h, v21.8h
+     .endm
+ 
+ FUNC pqk_a64_neon_filter_i64

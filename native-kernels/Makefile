@@ -2,6 +2,8 @@
 #   make            build native library (build/<arch>/libpqkernels.so) and tests
 #   make test       differential tests (native) + AArch64 cross build under qemu (functional only)
 #   make test-asan  native tests with AddressSanitizer + UBSan
+#   make test-hidden HIDDEN_SRC=<file>  hidden acceptance tests (validation only; native)
+#   make test-hidden-cross HIDDEN_SRC=<file>  the same for AArch64 under qemu (functional only)
 #   make bench      micro-benchmarks (native only; JSON lines in build/<arch>/bench.jsonl)
 ARCH      := $(shell uname -m)
 CC        ?= gcc
@@ -24,7 +26,7 @@ endif
 B := build/$(ARCH)
 BA := build/aarch64-cross
 
-.PHONY: all test test-native test-cross test-asan bench clean
+.PHONY: all test test-native test-cross test-asan test-hidden test-hidden-cross bench clean
 all: $(B)/libpqkernels.so $(B)/kernel_test $(B)/kernel_bench
 
 $(B):
@@ -61,6 +63,15 @@ test-cross: $(BA)/kernel_test
 test: test-native test-asan
 	@if command -v $(CROSS_CC) >/dev/null && command -v $(firstword $(QEMU)) >/dev/null; then $(MAKE) test-cross; \
 	 else echo "SKIPPED AArch64 cross tests: $(CROSS_CC) or qemu not installed"; fi
+
+HIDDEN_SRC ?= hidden/kernel_hidden_test.c
+test-hidden: $(HIDDEN_SRC) $(C_SRC) $(NATIVE_ASM) | $(B)
+	$(CC) -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $(WARN) $(INC) -Itests -o $(B)/kernel_hidden $(HIDDEN_SRC) $(C_SRC) $(NATIVE_ASM) -lm
+	$(B)/kernel_hidden 600
+
+test-hidden-cross: $(HIDDEN_SRC) $(C_SRC) $(A64_ASM) | $(BA)
+	$(CROSS_CC) $(CFLAGS) $(WARN) $(INC) -Itests -static -o $(BA)/kernel_hidden $(HIDDEN_SRC) $(C_SRC) $(A64_ASM) -lm
+	$(QEMU) $(BA)/kernel_hidden 200
 
 bench: $(B)/kernel_bench
 	$(B)/kernel_bench 4194304 15 | tee $(B)/bench.jsonl

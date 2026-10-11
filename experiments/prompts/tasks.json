@@ -82,5 +82,33 @@
     "runner_args": "--native native-kernels/build/x86_64/libpqkernels.so",
     "goal": "The workspace contains your accepted Phase 1–5 engine in `implementations/{{LANG_DIR}}/` and the native kernel library sources in `native-kernels/` (C ABI `native-kernels/include/pq_kernels.h`, C reference, runtime dispatch, x86-64 and AArch64 assembly). Build the library with `make -C native-kernels` (it produces `native-kernels/build/x86_64/libpqkernels.so`; never modify anything under `native-kernels/`). Integrate it into the engine through {{LANGUAGE}}'s standard FFI (see `spec/phases/native-kernels.md`): load it when `--native-kernels PATH` is given, use the kernels for filtering, aggregation, bitmap and hashing work when a query runs with the option `native: true` (and in vectorized mode where applicable), fall back to the engine's own code paths when the library is absent or a kernel does not apply, and claim the capability `native.kernels`. Results with and without native kernels MUST be identical (kernel overflow flags must be honoured exactly). Measure end-to-end impact on the generated 1m datasets and document it.",
     "done": "`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery --native native-kernels/build/x86_64/libpqkernels.so` and the same with `--modes` report 0 failures, 0 errors and 0 not-implemented (except optionally correlated subqueries); all earlier conformance (session, `--transport http`, `--modes`) and the HTTP suite still pass without the library; `make build test` succeed; README.md documents the FFI design, which kernels are used where, and before/after measurements with `native: true`; all work is committed."
+  },
+  "kernel-change-i128": {
+    "title": "Requirement change — 128-bit kernels (CR-4)",
+    "phase_file": "native-kernels.md",
+    "runner_args": "",
+    "goal": "Requirement change (identical for both assembly languages): your accepted kernels are in `{{WORK_DIR}}/`. Implement the four new 128-bit kernels of change request CR-4 (`spec/changes/kernels-i128.md`; declarations and normative semantics in `native-kernels/include/pq_kernels.h` section 9, C reference at the end of `native-kernels/reference-c/pq_kernels_ref.c`): `filter_i128`, `count_i128`, `sum_i128` (exact, with overflow detection beyond 128 bits) and `minmax_i128`, in both required variants (`{{VARIANT_PREFIX}}scalar` and {{SIMD_NAME}}). {{OPTIONAL_SIMD}} If you ship that optional variant, implement them there too or document why it falls back to the C reference for them. All existing kernels must keep their behaviour. Correctness first, then throughput.",
+    "done": "`make -C native-kernels {{TEST_TARGET}}` passes and reports `20/20 kernels  PASS` for both required variants (`{{VARIANT_PREFIX}}scalar` and the SIMD variant) and PASS for every other variant you build; the header comment of every new kernel describes register usage, the algorithm and how exact overflow detection works; `{{WORK_DIR}}/README.md` documents the design decisions{{BENCH_DONE}}; all work is committed."
+  },
+  "kernel-refactor": {
+    "title": "Refactoring — behaviour-preserving restructuring (CR-5)",
+    "phase_file": "native-kernels.md",
+    "runner_args": "",
+    "goal": "Behaviour-preserving refactoring (identical for both assembly languages): your accepted kernels (all 20 kernels of ABI revision 1) are in `{{WORK_DIR}}/`. Restructure them as specified in `spec/changes/kernel-refactor.md`: shared building blocks defined once in shared include files, a uniform documented shape for every kernel, per-kernel header comments and a before/after module map. Shared include files must not end in `.S` (the Makefile assembles every `{{WORK_DIR}}/*.S` file as a translation unit); use for example `.h` (C preprocessor `#include`) or `.inc` (`.include`). No externally visible behaviour may change and performance should not regress{{BENCH_NOTE}}",
+    "done": "`make -C native-kernels {{TEST_TARGET}}` passes and reports `20/20 kernels  PASS` for both required variants (`{{VARIANT_PREFIX}}scalar` and the SIMD variant) and PASS for every other variant you build (the same variants and the same kernel counts as before); every shared building block is defined in exactly one place; `{{WORK_DIR}}/README.md` contains the before/after module map and the list of shared building blocks with their users; all work is committed."
+  },
+  "kernel-debug-mutant": {
+    "title": "Debugging — reported defect",
+    "phase_file": "native-kernels.md",
+    "runner_args": "",
+    "goal": "A defect has been introduced into your accepted kernels in `{{WORK_DIR}}/` (a single small source change). `DEFECT.md` in the workspace root contains the bug report as an engine developer wrote it: it describes the symptom, not the cause, and the public tests do not detect it. Reproduce the problem, find the root cause and fix it with a minimal change; do not rewrite unrelated code. You may write throwaway reproduction programs outside `{{WORK_DIR}}/` (for example in /tmp), but do not commit them.",
+    "done": "`make -C native-kernels {{TEST_TARGET}}` passes for every variant (with the same kernel counts as before); the diff inside `{{WORK_DIR}}/` is minimal; your final summary names the root cause (file, line, what was wrong) and how you reproduced it; all work is committed."
+  },
+  "kernel-optimize": {
+    "title": "Optimization — kernel throughput",
+    "phase_file": "native-kernels.md",
+    "runner_args": "",
+    "goal": "Improve the throughput (ns/element) of your SIMD variant {{SIMD_NAME}} on the kernel micro-benchmark (`make -C native-kernels bench`, 4M elements; it covers 17 kernel workloads including the 128-bit kernels) while preserving bit-identical results. {{OPTIONAL_SIMD_OPT}}Do not change the scalar variant's algorithms. {{BENCH_NOTE}}",
+    "done": "`make -C native-kernels {{TEST_TARGET}}` passes and reports `20/20 kernels  PASS` for both required variants (`{{VARIANT_PREFIX}}scalar` and the SIMD variant) and PASS for every other variant you build; `{{WORK_DIR}}/README.md` contains a before/after table for every benchmarked kernel of the SIMD variant{{BENCH_TABLE_NOTE}} and explains each optimization; all work is committed."
   }
 }

@@ -95,7 +95,11 @@
     "stdlib_note": "",
     "simd_name": "`x86_avx2` (AVX2 with BMI1/BMI2/POPCNT)",
     "optional_simd": "Optionally add a third variant `x86_avx512` (AVX-512F/BW/VL/DQ) \u2014 the host supports it.",
-    "test_target": "test"
+    "test_target": "test",
+    "bench_note": "You can measure on the native x86-64 host (AMD Zen 5); timings are noisy because other jobs may run concurrently, so repeat measurements. An independent before/after measurement on a quiet host follows your run.",
+    "bench_done": " and benchmark results from `make -C native-kernels bench` for the new kernels",
+    "bench_table_note": " (measured)",
+    "optional_simd_opt": "You may also optimize the optional `x86_avx512` variant. "
   },
   "arm64-asm": {
     "language": "AArch64 assembly",
@@ -109,6 +113,10 @@
     "stdlib_note": "",
     "simd_name": "`a64_neon` (Advanced SIMD / NEON)",
     "optional_simd": "Optionally add a third variant `a64_sve` (SVE, vector-length agnostic); note that it can only be validated under emulation.",
-    "test_target": "test-cross"
+    "test_target": "test-cross",
+    "bench_note": "There is no native AArch64 hardware in your workspace and emulated timings are meaningless, so you cannot measure: reason from the target microarchitecture (Arm Cortex-X925 cores: 4 x 128-bit SIMD pipes, SVE2 with 128-bit vectors) and state the expected effect of each change. An independent before/after measurement on the native target follows your run.",
+    "bench_done": "",
+    "bench_table_note": " (expected effects with your reasoning, since you cannot measure)",
+    "optional_simd_opt": "You may also optimize the optional `a64_sve` variant. "
   }
 }
