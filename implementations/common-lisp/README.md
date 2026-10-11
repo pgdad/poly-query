@@ -973,9 +973,9 @@ same kernels at 0.15–0.5 ns/element in the AVX2/AVX-512 variants.
   vectorized configuration; serial twins must return byte-identical
   results (same rows, order and floats), parallel ones the same rows in the
   same order with floats within the tolerance (parallel FLOAT64 summation
-  order varies between runs). About 7,000 random queries were run this way
+  order varies between runs). About 10,000 random queries were run this way
   with `POLYQUERY_MORSEL_ROWS=37` (morsels not aligned to bytes of the
-  validity bitmaps).
+  validity bitmaps) without a native/non-native difference.
 * HTTP: `python3 tests/concurrency/http_suite.py --engine
   implementations/common-lisp/bin/polyquery` and the conformance runner with
   `--transport http`.
@@ -997,6 +997,14 @@ same kernels at 0.15–0.5 ns/element in the AVX2/AVX-512 variants.
   aggregations and joins still read copied batches.
 * The library is loaded once at startup; a library that fails to load
   only produces a warning (queries then run without it).
+* Predicate pushdown (`optimize: true`) evaluates a single-table conjunct on
+  every row of that table, also rows a join would later discard. A conjunct
+  that fails on such a row (e.g. a constant `CAST('a' AS INT64)` combined
+  with a join that produces no rows) therefore raises an error with
+  pushdown and not without it. The spec does not define evaluation order
+  for errors; pushdown is kept for all conjuncts because arithmetic (which
+  may overflow) is common in single-table filters. This is independent of
+  native kernels (found by `bench/fuzz.py`).
 * `threads` parallelizes the vectorized executor only; `mode: row` is the
   single-threaded baseline. Pipelines containing subqueries, and everything
   inside subqueries, run serially. The final merge of partial aggregates is
