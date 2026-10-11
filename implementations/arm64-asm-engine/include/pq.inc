@@ -667,6 +667,20 @@
 #define PO_DISTINCT   9
 #define PO_SORT       10
 #define PO_LIMIT      11
+#define PO_MERGEJOIN  12   // physical: sort-merge on the equi keys + residual
+
+// Execution options of the current request (Phase 5, protocol.md §5.2),
+// thread-local settings defined in exec.S:
+//   g_x_mode (u32 XM_*), g_x_join (u32 XJ_*), g_x_threads (u64 >= 1),
+//   g_x_optimize (u32 0/1). g_def_threads (process-wide, --threads).
+#define XM_AUTO     0
+#define XM_ROW      1
+#define XM_VEC      2
+#define XJ_AUTO     0
+#define XJ_HASH     1
+#define XJ_MERGE    2
+#define XJ_NL       3
+#define MAX_THREADS 64
 
 // Rows per batch handed to a streaming sink (exec_plan_stream)
 #define EXEC_STREAM_BATCH 1000

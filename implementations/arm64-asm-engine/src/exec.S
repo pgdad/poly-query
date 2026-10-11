@@ -22,9 +22,7 @@
 //   Sort       qsort_r on the ORDER BY key cells
 //   Limit      OFFSET then LIMIT (applied before projection when the Limit
 //              sits directly on a Project)
-// Joins: HashJoin (build on the right input, chained hash table over the key
-// cells, NULL keys never match) and NestedLoopJoin; both handle LEFT JOIN
-// padding and enforce --max-join-rows.
+// Join operators live in join.S.
 // =============================================================================
 #include "pq.inc"
 #include "frame.inc"
@@ -45,6 +43,21 @@
 #define IS_TYPE    24               // u32 type of the values
 #define IS_SIZE    32
 
+// Execution settings (pq.inc XM_* / XJ_*): per request (protocol.S
+// parse_exec_opts) and process-wide defaults (main.S).
+    TDATA
+    .p2align 3
+    .global g_x_threads, g_x_mode, g_x_join, g_x_optimize
+g_x_threads:    .quad 1
+g_x_mode:       .word XM_AUTO
+g_x_join:       .word XJ_AUTO
+g_x_optimize:   .word 1
+    .data
+    .p2align 3
+    .global g_def_threads, g_par_min_rows
+g_def_threads:  .quad 0             // --threads (0 until main sets it)
+g_par_min_rows: .quad 16384         // smallest input share of a parallel task
+
     .text
 
 // =============================================================================
@@ -52,7 +65,7 @@
 // ts_new(x0 width, x1 capacity) -> x0 TupleSet*
 //   x19 width, x20 capacity
 // =============================================================================
-LFUNC ts_new
+FUNC ts_new
     ENTER 2
     mov  x19, x0
     cmp  x1, #16
@@ -75,7 +88,7 @@ ENDF ts_new
 
 // ts_push(x0 TupleSet*, x1 u32* tuple) — appends a copy of the tuple
 //   x19 ts, x20 tuple, x21 new capacity, x22 new data
-LFUNC ts_push
+FUNC ts_push
     ENTER 3
     mov  x19, x0
     mov  x20, x1
@@ -114,7 +127,7 @@ LFUNC ts_push
 ENDF ts_push
 
 // ts_tuple(x0 TupleSet*, x1 index) -> x0 u32* tuple   (leaf)
-LFUNC ts_tuple
+FUNC ts_tuple
     ldr  x9, [x0, #TS_W]
     ldr  x10, [x0, #TS_DATA]
     mul  x9, x9, x1
@@ -123,7 +136,7 @@ LFUNC ts_tuple
 ENDF ts_tuple
 
 // eval_true(x0 Node*, x1 EvalCtx*) -> w0 1 iff the predicate is TRUE
-LFUNC eval_true
+FUNC eval_true
     ENTER 0
     bl   eval
     cmp  x1, #0
@@ -816,7 +829,7 @@ ENDF cmp_vals
 
 // cmp_group_rec(x0 rec a, x1 rec b, x2 key info) -> w0 (NULLs equal, first)
 //   x19 a cells, x20 b cells, x21 keys left, x22 type cursor
-LFUNC cmp_group_rec
+FUNC cmp_group_rec
     ENTER 3
     add  x19, x0, #8
     add  x20, x1, #8
@@ -1023,7 +1036,7 @@ ENDF distinct_rows
 // ex_tuples(x0 PlanNode*, x1 ctx) -> x0 TupleSet*   (lower operators)
 //   x19 node, x20 ctx, x21 bq
 // =============================================================================
-LFUNC ex_tuples
+FUNC ex_tuples
     ENTER 2
     ldr  w9, [x0, #PN_OP]
     cmp  w9, #PO_SCAN
@@ -1034,6 +1047,8 @@ LFUNC ex_tuples
     b.eq 3f
     cmp  w9, #PO_NLJOIN
     b.eq 4f
+    cmp  w9, #PO_MERGEJOIN
+    b.eq 8f
     cmp  w9, #PO_VALUES
     b.eq 5f
     RAISE ERR_INTERNAL, "executor: unexpected tuple operator"
@@ -1044,6 +1059,8 @@ LFUNC ex_tuples
 3:  bl   ex_hashjoin
     LEAVE 2
 4:  bl   ex_nljoin
+    LEAVE 2
+8:  bl   ex_mergejoin
     LEAVE 2
 5:  ldr  x9, [x0, #PN_BQ]               // one tuple (all ROW_NULL)
     ldr  x19, [x9, #BQ_NRV]
@@ -1426,432 +1443,6 @@ LFUNC ex_filter
 4:  mov  x0, x22
     LEAVE 3
 ENDF ex_filter
-
-// =============================================================================
-// combine(x0 dest tuple, x1 left tuple, x2 right tuple or 0, x3 width,
-//         w4 right lo, w5 right hi)
-// dest = left; dest[lo..hi) = right[lo..hi) (or ROW_NULL if right is 0). (leaf)
-// =============================================================================
-LFUNC combine
-    mov  x9, #0
-1:  cmp  x9, x3
-    b.hs 2f
-    ldr  w10, [x1, x9, lsl #2]
-    str  w10, [x0, x9, lsl #2]
-    add  x9, x9, #1
-    b    1b
-2:  mov  w9, w4
-    mov  w11, #ROW_NULL
-3:  cmp  w9, w5
-    b.hs 5f
-    mov  w10, w11
-    cbz  x2, 4f
-    ldr  w10, [x2, x9, lsl #2]
-4:  str  w10, [x0, x9, lsl #2]
-    add  w9, w9, #1
-    b    3b
-5:  ret
-ENDF combine
-
-// join_emit(x0 TupleSet*, x1 tuple) — append with the --max-join-rows check
-LFUNC join_emit
-    ENTER 0
-    ldr  x9, [x0, #TS_N]
-    LDR_G x10, g_max_join_rows
-    cmp  x9, x10
-    b.hs 1f
-    bl   ts_push
-    LEAVE 0
-1:  RAISE ERR_RESOURCE_LIMIT, "join result exceeds --max-join-rows"
-ENDF join_emit
-
-// =============================================================================
-// ex_nljoin(x0 PlanNode*, x1 ctx) -> x0 TupleSet*   nested loop join
-//   x19 node, x20 ctx, x21 left ts, x22 right ts, x23 out, x24 li,
-//   x25 ri, x26 matched, x27 combined tuple, x28 iteration counter
-// =============================================================================
-LFUNC ex_nljoin
-    ENTER 5
-    mov  x19, x0
-    mov  x20, x1
-    ldr  x0, [x19, #PN_LEFT]
-    bl   ex_tuples
-    mov  x21, x0
-    ldr  x0, [x19, #PN_RIGHT]
-    mov  x1, x20
-    bl   ex_tuples
-    mov  x22, x0
-    ldr  x0, [x21, #TS_W]
-    ldr  x1, [x21, #TS_N]
-    bl   ts_new
-    mov  x23, x0
-    ldr  x9, [x21, #TS_W]
-    lsl  x0, x9, #2
-    add  x0, x0, #16
-    bl   arena_alloc
-    mov  x27, x0
-    mov  x28, #0
-    mov  x24, #0
-.Lnl_left:
-    ldr  x9, [x21, #TS_N]
-    cmp  x24, x9
-    b.hs .Lnl_end
-    mov  x26, #0
-    mov  x25, #0
-.Lnl_right:
-    ldr  x9, [x22, #TS_N]
-    cmp  x25, x9
-    b.hs .Lnl_pad
-    add  x28, x28, #1
-    tst  x28, #DEADLINE_MASK
-    b.ne 1f
-    bl   check_deadline
-1:  mov  x0, x22
-    mov  x1, x25
-    bl   ts_tuple
-    mov  x2, x0
-    mov  x0, x21
-    mov  x1, x24
-    str  x2, [sp, #-16]!
-    bl   ts_tuple
-    mov  x1, x0
-    ldr  x2, [sp], #16
-    mov  x0, x27
-    ldr  x3, [x21, #TS_W]
-    ldr  x9, [x19, #PN_RIGHT]
-    ldr  w4, [x9, #PN_LO]
-    ldr  w5, [x9, #PN_HI]
-    bl   combine
-    ldr  x0, [x19, #PN_EXPR]
-    cbz  x0, 2f
-    str  x27, [x20, #EC_TUPLE]
-    mov  x1, x20
-    bl   eval_true
-    cbz  w0, 3f
-2:  mov  x0, x23
-    mov  x1, x27
-    bl   join_emit
-    mov  x26, #1
-3:  add  x25, x25, #1
-    b    .Lnl_right
-.Lnl_pad:
-    cbnz x26, 4f
-    ldr  w9, [x19, #PN_JT]
-    cmp  w9, #JT_LEFT
-    b.ne 4f
-    mov  x0, x21
-    mov  x1, x24
-    bl   ts_tuple
-    mov  x1, x0
-    mov  x0, x27
-    mov  x2, #0
-    ldr  x3, [x21, #TS_W]
-    ldr  x9, [x19, #PN_RIGHT]
-    ldr  w4, [x9, #PN_LO]
-    ldr  w5, [x9, #PN_HI]
-    bl   combine
-    mov  x0, x23
-    mov  x1, x27
-    bl   join_emit
-4:  add  x24, x24, #1
-    b    .Lnl_left
-.Lnl_end:
-    mov  x0, x23
-    LEAVE 5
-ENDF ex_nljoin
-
-// =============================================================================
-// Hashing of key cells
-// hash_cell(x0 payload, w1 type) -> x0 64-bit hash (non-NULL value)
-//   x19 payload
-// =============================================================================
-FUNC hash_cell
-    and  w9, w1, #T_KIND_MASK
-    cmp  w9, #T_STR
-    b.eq 2f
-    cmp  w9, #T_FLOAT
-    b.ne 1f
-    mov  x10, #0x8000000000000000       // -0.0 hashes like 0.0
-    cmp  x0, x10
-    csel x0, xzr, x0, eq
-1:  b    mix64
-2:  ldr  x10, [x0, #STR_LEN]            // FNV-1a over the bytes
-    add  x11, x0, #STR_DATA
-    ldr  x0, =0xcbf29ce484222325
-    ldr  x12, =0x100000001b3
-3:  cbz  x10, 1b
-    ldrb w13, [x11], #1
-    eor  x0, x0, x13
-    mul  x0, x0, x12
-    sub  x10, x10, #1
-    b    3b
-ENDF hash_cell
-
-// mix64(x0) -> x0 (finaliser of MurmurHash3)   (leaf)
-FUNC mix64
-    eor  x0, x0, x0, lsr #33
-    ldr  x9, =0xff51afd7ed558ccd
-    mul  x0, x0, x9
-    eor  x0, x0, x0, lsr #33
-    ldr  x9, =0xc4ceb9fe1a85ec53
-    mul  x0, x0, x9
-    eor  x0, x0, x0, lsr #33
-    ret
-ENDF mix64
-
-// eval_keys(x0 Node** keys, x1 count, x2 ctx, x3 dest cells)
-//   -> x0 hash of the cells, x1 1 if any key is NULL
-//   x19 keys, x20 count, x21 ctx, x22 dest, x23 hash, x24 anynull, x25 key
-LFUNC eval_keys
-    ENTER 4
-    mov  x19, x0
-    mov  x20, x1
-    mov  x21, x2
-    mov  x22, x3
-    mov  x23, #0
-    mov  x24, #0
-1:  cbz  x20, 3f
-    ldr  x25, [x19], #8
-    mov  x0, x25
-    mov  x1, x21
-    bl   eval
-    stp  x0, x1, [x22], #16
-    cbz  x1, 2f
-    mov  x24, #1
-    b    21f
-2:  ldr  w1, [x25, #N_TYPE]
-    bl   hash_cell
-    eor  x23, x23, x0
-    ldr  x9, =0x9e3779b97f4a7c15
-    mul  x23, x23, x9
-    add  x23, x23, #1
-21: sub  x20, x20, #1
-    b    1b
-3:  mov  x0, x23
-    mov  x1, x24
-    LEAVE 4
-ENDF eval_keys
-
-// keys_equal(x0 cells a, x1 cells b, x2 Node** keys (types), x3 count)
-//   -> w0 1 if all key values are equal (both non-NULL)
-//   x19 a, x20 b, x21 keys, x22 count
-LFUNC keys_equal
-    ENTER 3
-    mov  x19, x0
-    mov  x20, x1
-    mov  x21, x2
-    mov  x22, x3
-1:  cbz  x22, 3f
-    ldr  x0, [x19], #16
-    ldr  x1, [x20], #16
-    ldr  x9, [x21], #8
-    ldr  w2, [x9, #N_TYPE]
-    and  w10, w2, #T_KIND_MASK
-    cmp  w10, #T_STR
-    b.eq 2f
-    cmp  w10, #T_FLOAT
-    b.eq 2f
-    cmp  x0, x1                         // same encoding: payload equality
-    b.ne 4f
-    sub  x22, x22, #1
-    b    1b
-2:  mov  w3, w2
-    bl   cmp_typed
-    cbnz w0, 4f
-    sub  x22, x22, #1
-    b    1b
-3:  mov  w0, #1
-    LEAVE 3
-4:  mov  w0, #0
-    LEAVE 3
-ENDF keys_equal
-
-// =============================================================================
-// ex_hashjoin(x0 PlanNode*, x1 ctx) -> x0 TupleSet*
-// Build: hash the right input's key cells into a chained table (NULL keys are
-// skipped). Probe: for each left tuple walk the chain, compare keys, check
-// the residual condition; LEFT JOIN pads unmatched left tuples.
-//   x19 node, x20 ctx, x21 left ts, x22 right ts, x23 out, x24 index,
-//   x25 key cells of the right input, x26 heads, x27 next, x28 mask
-// Stack: [sp] combined tuple, [sp+8] left key cells, [sp+16] chain cursor,
-//        [sp+24] matched, [sp+32] probe counter, [sp+40] nkeys*16
-// =============================================================================
-LFUNC ex_hashjoin
-    ENTER 5
-    sub  sp, sp, #48
-    mov  x19, x0
-    mov  x20, x1
-    ldr  x0, [x19, #PN_LEFT]
-    bl   ex_tuples
-    mov  x21, x0
-    ldr  x0, [x19, #PN_RIGHT]
-    mov  x1, x20
-    bl   ex_tuples
-    mov  x22, x0
-    ldr  x9, [x19, #PN_NKEYS]
-    lsl  x9, x9, #4
-    str  x9, [sp, #40]
-    // ---- build -------------------------------------------------------------
-    ldr  x9, [x22, #TS_N]
-    ldr  x10, [sp, #40]
-    mul  x0, x9, x10
-    add  x0, x0, #16
-    bl   arena_alloc
-    mov  x25, x0
-    ldr  x9, [x22, #TS_N]               // table size: power of two >= 2n
-    lsl  x9, x9, #1
-    mov  x28, #16
-1:  cmp  x28, x9
-    b.hs 2f
-    lsl  x28, x28, #1
-    b    1b
-2:  lsl  x0, x28, #2
-    bl   arena_alloc
-    mov  x26, x0
-    mov  w1, #0xff
-    lsl  x2, x28, #2
-    bl   memset
-    sub  x28, x28, #1                   // mask
-    ldr  x9, [x22, #TS_N]
-    lsl  x0, x9, #2
-    add  x0, x0, #16
-    bl   arena_alloc
-    mov  x27, x0
-    mov  x24, #0
-3:  ldr  x9, [x22, #TS_N]
-    cmp  x24, x9
-    b.hs .Lhj_probe
-    tst  x24, #DEADLINE_MASK
-    b.ne 31f
-    bl   check_deadline
-31: mov  x0, x22
-    mov  x1, x24
-    bl   ts_tuple
-    str  x0, [x20, #EC_TUPLE]
-    ldr  x0, [x19, #PN_RKEYS]
-    ldr  x1, [x19, #PN_NKEYS]
-    mov  x2, x20
-    ldr  x9, [sp, #40]
-    madd x3, x24, x9, x25
-    bl   eval_keys
-    cbnz x1, 4f                         // NULL key: never matches
-    and  x0, x0, x28
-    ldr  w9, [x26, x0, lsl #2]
-    str  w9, [x27, x24, lsl #2]
-    str  w24, [x26, x0, lsl #2]
-4:  add  x24, x24, #1
-    b    3b
-    // ---- probe -------------------------------------------------------------
-.Lhj_probe:
-    ldr  x0, [x21, #TS_W]
-    ldr  x1, [x21, #TS_N]
-    bl   ts_new
-    mov  x23, x0
-    ldr  x9, [x21, #TS_W]
-    lsl  x0, x9, #2
-    add  x0, x0, #16
-    bl   arena_alloc
-    str  x0, [sp]
-    ldr  x0, [sp, #40]
-    add  x0, x0, #16
-    bl   arena_alloc
-    str  x0, [sp, #8]
-    str  xzr, [sp, #32]
-    mov  x24, #0
-.Lhj_left:
-    ldr  x9, [x21, #TS_N]
-    cmp  x24, x9
-    b.hs .Lhj_end
-    str  xzr, [sp, #24]                 // matched = 0
-    mov  x0, x21
-    mov  x1, x24
-    bl   ts_tuple
-    str  x0, [x20, #EC_TUPLE]
-    ldr  x0, [x19, #PN_LKEYS]
-    ldr  x1, [x19, #PN_NKEYS]
-    mov  x2, x20
-    ldr  x3, [sp, #8]
-    bl   eval_keys
-    cbnz x1, .Lhj_pad
-    and  x0, x0, x28
-    ldr  w9, [x26, x0, lsl #2]
-.Lhj_chain:
-    cmn  w9, #1
-    b.eq .Lhj_pad
-    str  x9, [sp, #16]
-    ldr  x10, [sp, #32]
-    add  x10, x10, #1
-    str  x10, [sp, #32]
-    tst  x10, #DEADLINE_MASK
-    b.ne 5f
-    bl   check_deadline
-5:  ldr  x9, [sp, #16]
-    ldr  x0, [sp, #8]
-    ldr  x10, [sp, #40]
-    madd x1, x9, x10, x25
-    ldr  x2, [x19, #PN_LKEYS]
-    ldr  x3, [x19, #PN_NKEYS]
-    bl   keys_equal
-    cbz  w0, .Lhj_next
-    ldr  x1, [sp, #16]                  // combine left + right tuple
-    mov  x0, x22
-    bl   ts_tuple
-    mov  x2, x0
-    mov  x0, x21
-    mov  x1, x24
-    str  x2, [sp, #-16]!
-    bl   ts_tuple
-    mov  x1, x0
-    ldr  x2, [sp], #16
-    ldr  x0, [sp]
-    ldr  x3, [x21, #TS_W]
-    ldr  x9, [x19, #PN_RIGHT]
-    ldr  w4, [x9, #PN_LO]
-    ldr  w5, [x9, #PN_HI]
-    bl   combine
-    ldr  x0, [x19, #PN_EXPR]
-    cbz  x0, 6f
-    ldr  x9, [sp]
-    str  x9, [x20, #EC_TUPLE]
-    mov  x1, x20
-    bl   eval_true
-    cbz  w0, .Lhj_next
-6:  mov  x0, x23
-    ldr  x1, [sp]
-    bl   join_emit
-    mov  x9, #1
-    str  x9, [sp, #24]
-.Lhj_next:
-    ldr  x9, [sp, #16]
-    ldr  w9, [x27, x9, lsl #2]
-    b    .Lhj_chain
-.Lhj_pad:
-    ldr  x9, [sp, #24]
-    cbnz x9, 7f
-    ldr  w9, [x19, #PN_JT]
-    cmp  w9, #JT_LEFT
-    b.ne 7f
-    mov  x0, x21
-    mov  x1, x24
-    bl   ts_tuple
-    mov  x1, x0
-    ldr  x0, [sp]
-    mov  x2, #0
-    ldr  x3, [x21, #TS_W]
-    ldr  x9, [x19, #PN_RIGHT]
-    ldr  w4, [x9, #PN_LO]
-    ldr  w5, [x9, #PN_HI]
-    bl   combine
-    mov  x0, x23
-    ldr  x1, [sp]
-    bl   join_emit
-7:  add  x24, x24, #1
-    b    .Lhj_left
-.Lhj_end:
-    mov  x0, x23
-    add  sp, sp, #48
-    LEAVE 5
-ENDF ex_hashjoin
 
 // =============================================================================
 // Subquery expressions (semantics.md §8)

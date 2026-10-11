@@ -17,7 +17,9 @@
 //   * join conditions are split again: single-side conjuncts move into the
 //     children (only the right child for LEFT JOIN), equality conjuncts
 //     between the two sides become hash keys, the rest stays as residual;
-//   * join algorithm: HashJoin when there are equi keys, else NestedLoopJoin;
+//   * join algorithm (option "join"): with equi keys HashJoin (auto, hash),
+//     MergeJoin (merge) or NestedLoopJoin (nested_loop: the keys are kept and
+//     compared per pair); without equi keys always NestedLoopJoin;
 //   * column pruning: scans read only referenced columns (RV_USED, collected
 //     by the binder) — reported by EXPLAIN as the TableScan column list.
 // =============================================================================
@@ -421,10 +423,18 @@ LFUNC pp_joins
     str  x9, [x19, #PN_LKEYS]
     ldr  x9, [sp, #72]
     str  x9, [x19, #PN_RKEYS]
-    mov  w9, #PO_NLJOIN
+    mov  w9, #PO_NLJOIN                 // algorithm: option "join"
     ldr  x10, [x19, #PN_NKEYS]
-    cbz  x10, 3f
-    mov  w9, #PO_HASHJOIN
+    cbz  x10, 3f                        // no equi keys: nested loop
+    TLS_ADDR x11, g_x_join
+    ldr  w11, [x11]
+    mov  w9, #PO_HASHJOIN               // auto / hash
+    cmp  w11, #XJ_MERGE
+    b.ne 31f
+    mov  w9, #PO_MERGEJOIN
+31: cmp  w11, #XJ_NL                    // keys stay: compared per pair
+    b.ne 3f
+    mov  w9, #PO_NLJOIN
 3:  str  w9, [x19, #PN_OP]
     ldr  w9, [x19, #PN_JT]              // a cross join that got a condition
     cmp  w9, #JT_CROSS
@@ -467,9 +477,14 @@ LFUNC pp_access
     ldr  x0, [x19, #PN_RIGHT]
     bl   pp_access
     mov  x21, x0
+    ldr  x9, [x19, #PN_NKEYS]
+    cbz  x9, 3f
     ldr  w9, [x19, #PN_OP]
     cmp  w9, #PO_HASHJOIN
-    b.ne 3f
+    b.ne 2f
+    TLS_ADDR x9, g_x_optimize           // build-side choice is an optimization
+    ldr  w9, [x9]
+    cbz  w9, 2f
     ldr  w9, [x19, #PN_JT]
     cmp  w9, #JT_INNER
     b.ne 2f
@@ -749,6 +764,8 @@ FUNC plan_explain
     b.eq .Lpe_join
     cmp  w9, #PO_NLJOIN
     b.eq .Lpe_join
+    cmp  w9, #PO_MERGEJOIN
+    b.eq .Lpe_join
     cmp  w9, #PO_PROJECT
     b.eq .Lpe_project
     cmp  w9, #PO_AGGREGATE
@@ -991,6 +1008,10 @@ LFUNC pe_subplans
     ldr  w9, [x20, #PN_OP]
     cmp  w9, #PO_HASHJOIN
     b.eq .Lps_keys
+    cmp  w9, #PO_MERGEJOIN
+    b.eq .Lps_keys
+    cmp  w9, #PO_NLJOIN
+    b.eq .Lps_keys
     cmp  w9, #PO_PROJECT
     b.eq .Lps_out
     cmp  w9, #PO_AGGREGATE
@@ -1109,6 +1130,7 @@ ENDF pe_expr
 op_names:
     .quad s_unknown, s_scan, s_values, s_filter, s_join, s_hashjoin
     .quad s_nljoin, s_aggregate, s_project, s_distinct, s_sort, s_limit
+    .quad s_mergejoin
 jt_names:
     .quad s_unknown, s_inner, s_left, s_cross
 s_unknown:   .asciz "Unknown"
@@ -1120,6 +1142,7 @@ s_filter:    .asciz "Filter"
 s_join:      .asciz "Join"
 s_hashjoin:  .asciz "HashJoin"
 s_nljoin:    .asciz "NestedLoopJoin"
+s_mergejoin: .asciz "MergeJoin"
 s_aggregate: .asciz "Aggregate"
 s_project:   .asciz "Project"
 s_distinct:  .asciz "Distinct"
