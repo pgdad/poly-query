@@ -266,7 +266,7 @@ pub fn sort_permutation(
     if top == Some(0) {
         return Ok(Vec::new());
     }
-    let threads = if ctx.in_subquery() {
+    let threads = if ctx.serial_only() {
         1
     } else {
         ctx.execution.threads

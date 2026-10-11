@@ -20,6 +20,7 @@ use crate::exec::ExecContext;
 use crate::exec::eval::{arithmetic, compare3, eval as eval_row, like_match};
 use crate::exec::functions;
 use crate::exec::hash::FastSet;
+use crate::exec::subquery;
 use crate::planner::expr::{ArithKind, Expr, ScalarFunc};
 use crate::sql::ast::BinaryOp;
 use crate::types::value::promote_int;
@@ -257,6 +258,33 @@ fn eval_owned(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
             }
         }
         Expr::Function { .. } | Expr::Concat(..) => elementwise(e, b, ctx),
+        // Uncorrelated subqueries run once (memoized); their result is
+        // broadcast, or probed per row for IN.
+        Expr::ScalarSubquery { sub, params, .. } if params.is_empty() => Ok(Vector::broadcast(
+            &subquery::scalar(sub, &[], &[], ctx)?,
+            b.len,
+        )),
+        Expr::Exists { sub, params } if params.is_empty() => Ok(Vector::broadcast(
+            &Value::Bool(subquery::exists(sub, &[], &[], ctx)?),
+            b.len,
+        )),
+        Expr::InSubquery {
+            expr,
+            sub,
+            params,
+            negated,
+            domain,
+        } if params.is_empty() => {
+            let x = eval_cow(expr, b, ctx)?;
+            let set = subquery::uncorrelated_set(sub, *domain, ctx)?;
+            let mut out = Vec::with_capacity(b.len);
+            for i in 0..b.len {
+                let r = subquery::set_contains(&set, &x.value(i), *domain)?;
+                let r = if *negated { r.map(|t| !t) } else { r };
+                out.push(r.map_or(Value::Null, Value::Bool));
+            }
+            Ok(Vector::from_values(out))
+        }
         Expr::ScalarSubquery { .. } | Expr::Exists { .. } | Expr::InSubquery { .. } => {
             rowwise(e, b, ctx)
         }

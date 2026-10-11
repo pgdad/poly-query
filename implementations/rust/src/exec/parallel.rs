@@ -268,7 +268,7 @@ fn morsels(table: &Table, groups: &[usize], morsel: usize) -> Vec<Vec<ScanRange>
 /// Returns a parallel operator for `plan` if it is worth parallelizing.
 pub fn try_build(plan: &PhysicalPlan, ctx: &ExecContext) -> Option<BoxedBatchOp> {
     let threads = ctx.execution.threads;
-    if threads <= 1 || ctx.in_subquery() {
+    if threads <= 1 || ctx.serial_only() {
         return None;
     }
     let morsel = ctx.morsel_rows.max(1);

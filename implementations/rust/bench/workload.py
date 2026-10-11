@@ -57,9 +57,14 @@ class Session:
 
 
 def digest(resp: dict) -> str:
+    """Digest of a response; FLOAT64 values are rounded to 9 significant
+    digits (their summation order, hence last bits, may vary with threads)."""
     if not resp.get("ok"):
         return "error:" + resp.get("error", {}).get("code", "?")
-    body = {"columns": resp.get("columns"), "row_count": resp.get("row_count"), "rows": resp.get("rows")}
+    rows = resp.get("rows")
+    if rows is not None:
+        rows = [[f"{v:.9g}" if isinstance(v, float) else v for v in row] for row in rows]
+    body = {"columns": resp.get("columns"), "row_count": resp.get("row_count"), "rows": rows}
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:16]
 
 

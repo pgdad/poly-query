@@ -47,6 +47,8 @@ pub struct ExecContext {
     pub execution: Execution,
     /// Rows per morsel of parallel scans.
     pub morsel_rows: usize,
+    /// Whether this context belongs to a parallel worker thread.
+    worker: bool,
     /// Physical plans of the statement's subqueries.
     subqueries: Arc<SubqueryPlans>,
     /// Correlation parameters of the subquery executions in progress
@@ -76,6 +78,7 @@ impl ExecContext {
             test_functions,
             execution: Execution::default(),
             morsel_rows: super::parallel::default_morsel_rows(),
+            worker: false,
             subqueries: Arc::default(),
             params: RefCell::new(Vec::new()),
             results: RefCell::new(HashMap::new()),
@@ -129,9 +132,12 @@ impl ExecContext {
         }
     }
 
-    /// True while executing (correlated) subquery code.
-    pub fn in_subquery(&self) -> bool {
-        !self.params.borrow().is_empty()
+    /// True if execution must stay on the current thread: on a parallel
+    /// worker (no nested worker pools) or inside a correlated subquery
+    /// (one small execution per outer row). Uncorrelated subqueries run
+    /// once per query and may use parallel operators.
+    pub fn serial_only(&self) -> bool {
+        self.worker || self.params.borrow().iter().any(|p| !p.is_empty())
     }
 
     /// Fails with TIMEOUT or CANCELLED if the query must stop.
@@ -284,6 +290,7 @@ impl ContextSeed {
             test_functions: self.test_functions,
             execution: self.execution,
             morsel_rows: self.morsel_rows,
+            worker: true,
             subqueries: self.subqueries.clone(),
             params: RefCell::new(self.params.clone()),
             results: RefCell::new(HashMap::new()),
