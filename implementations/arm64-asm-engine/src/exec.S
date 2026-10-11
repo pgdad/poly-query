@@ -29,6 +29,16 @@
 
 #define DEADLINE_MASK 4095          // check the timeout every 4096 iterations
 
+// Scan task (ex_scan / scan_task), one per thread
+#define SS_NODE    0                // PlanNode* (the scan)
+#define SS_CTX     8                // EvalCtx* (own copy for worker tasks)
+#define SS_TS      16               // TupleSet* result (ts_concat: offset 16)
+#define SS_RANGES  24               // u64 (lo, hi) candidate row ranges
+#define SS_NR      32               // u64 number of ranges
+#define SS_WLO     40               // window of candidate ordinals [lo, hi)
+#define SS_WHI     48
+#define SS_SIZE    64
+
 // Sort key descriptor used by the row comparator (24 bytes)
 #define SK_OFF    0                 // byte offset of the cell in the row
 #define SK_TYPE   8                 // u32 type
@@ -125,6 +135,44 @@ FUNC ts_push
     b    2b
 3:  LEAVE 3
 ENDF ts_push
+
+// ts_reserve(x0 TupleSet*, x1 count) -> x0 u32* where the next tuple goes;
+// grows the set so that `count` more tuples fit (the caller writes them and
+// adds count to TS_N)
+//   x19 ts, x20 count, x21 new capacity, x22 new data
+FUNC ts_reserve
+    ENTER 3
+    mov  x19, x0
+    mov  x20, x1
+    ldr  x9, [x19, #TS_N]
+    ldr  x10, [x19, #TS_CAP]
+    add  x9, x9, x20
+    cmp  x9, x10
+    b.ls 1f
+    lsl  x21, x10, #1                   // max(2 * cap, needed)
+    cmp  x21, x9
+    csel x21, x21, x9, hs
+    ldr  x9, [x19, #TS_W]
+    mul  x0, x9, x21
+    lsl  x0, x0, #2
+    add  x0, x0, #16
+    bl   arena_alloc
+    mov  x22, x0
+    ldr  x1, [x19, #TS_DATA]
+    ldr  x9, [x19, #TS_W]
+    ldr  x2, [x19, #TS_N]
+    mul  x2, x2, x9
+    lsl  x2, x2, #2
+    bl   memcpy
+    str  x22, [x19, #TS_DATA]
+    str  x21, [x19, #TS_CAP]
+1:  ldr  x9, [x19, #TS_N]
+    ldr  x10, [x19, #TS_W]
+    ldr  x0, [x19, #TS_DATA]
+    mul  x9, x9, x10
+    add  x0, x0, x9, lsl #2
+    LEAVE 3
+ENDF ts_reserve
 
 // ts_tuple(x0 TupleSet*, x1 index) -> x0 u32* tuple   (leaf)
 FUNC ts_tuple
@@ -1083,14 +1131,19 @@ ENDF ex_tuples
 // =============================================================================
 // ex_scan(x0 PlanNode*, x1 ctx) -> x0 TupleSet*
 // Resolves the range variable's table (materialising derived tables / CTEs)
-// and returns the rows passing the pushed-down filter. Rows come from
+// and returns the rows passing the pushed-down filter, in row order. The
+// candidate rows are a list of row ranges:
 //   * an index lookup (PN_IDX: sorted, de-duplicated row ids), or
 //   * every row group the predicates do not exclude (PQCF-backed tables
 //     with min/max statistics), or
 //   * the whole table.
-// The complete filter is evaluated on every candidate row either way.
-//   x19 node, x20 ctx, x21 bq, x22 rv, x23 table, x24 ts, x25 row, x26 end,
-//   x27 tuple scratch, x28 filter; [sp] RowVec (index scans), [sp+24] rg
+// The complete filter is evaluated on every candidate row either way. The
+// ranges are cut into contiguous windows of candidate rows, one per scan
+// task (scan_task); with option threads > 1 and enough rows the tasks run
+// in parallel (par_run) and their results are concatenated in order.
+//   x19 node, x20 ctx, x21 bq, x22 rv, x23 table, x24 ranges, x25 range
+//   count, x26 total rows, x27 tasks, x28 task records
+//   [sp] RowVec (index scans), [sp+24] row group cursor
 // =============================================================================
 LFUNC ex_scan
     ENTER 5
@@ -1106,27 +1159,8 @@ LFUNC ex_scan
     mov  x23, x0
     ldr  x9, [x20, #EC_TABLES]
     str  x23, [x9, x22, lsl #3]
-    ldr  x26, [x23, #TBL_NROWS]
-    ldr  x28, [x19, #PN_EXPR]
-    ldr  x0, [x21, #BQ_NRV]
-    mov  x1, x26
-    cbz  x28, 1f
-    lsr  x1, x26, #2                    // filtered: start smaller
-1:  bl   ts_new
-    mov  x24, x0
-    ldr  x9, [x21, #BQ_NRV]
-    lsl  x0, x9, #2
-    add  x0, x0, #16
-    bl   arena_alloc
-    mov  x27, x0
-    ldr  x9, [x21, #BQ_NRV]             // other slots: ROW_NULL
-    mov  x10, x27
-    mov  w11, #ROW_NULL
-2:  cbz  x9, 3f
-    str  w11, [x10], #4
-    sub  x9, x9, #1
-    b    2b
-3:  str  x27, [x20, #EC_TUPLE]
+    mov  x25, #0
+    mov  x26, #0
     ldr  x9, [x19, #PN_IDX]
     cbnz x9, .Lsc_index
     ldr  x9, [x23, #TBL_NRG]
@@ -1134,15 +1168,24 @@ LFUNC ex_scan
     ldr  x9, [x19, #PN_NPREDS]
     cbnz x9, .Lsc_groups
 .Lsc_full:
-    mov  x25, #0
-    bl   .Lsc_range
-    b    .Lsc_end
+    mov  x0, #32
+    bl   arena_alloc
+    mov  x24, x0
+    mov  x0, #0
+    ldr  x1, [x23, #TBL_NROWS]
+    bl   .Lsc_add
+    b    .Lsc_tasks
 .Lsc_groups:                            // row-group skipping
+    ldr  x9, [x23, #TBL_NRG]
+    lsl  x0, x9, #4
+    add  x0, x0, #16
+    bl   arena_alloc
+    mov  x24, x0
     str  xzr, [sp, #24]
 4:  ldr  x9, [sp, #24]
     ldr  x10, [x23, #TBL_NRG]
     cmp  x9, x10
-    b.hs .Lsc_end
+    b.hs .Lsc_tasks
     ldr  x3, [x23, #TBL_RGS]
     add  x3, x3, x9, lsl #5             // RG_SIZE = 32
     add  x9, x9, #1
@@ -1154,12 +1197,12 @@ LFUNC ex_scan
     bl   rg_skippable
     cbnz x0, 4b
     ldr  x3, [sp, #16]
-    ldr  x25, [x3, #RG_START]
-    ldr  x26, [x3, #RG_NROWS]
-    add  x26, x26, x25
-    bl   .Lsc_range
+    ldr  x0, [x3, #RG_START]
+    ldr  x1, [x3, #RG_NROWS]
+    add  x1, x1, x0
+    bl   .Lsc_add
     b    4b
-.Lsc_index:                             // index scan
+.Lsc_index:                             // index scan: runs of row ids
     stp  xzr, xzr, [sp]
     str  xzr, [sp, #16]
     mov  x0, x19
@@ -1167,45 +1210,348 @@ LFUNC ex_scan
     bl   index_rows
     mov  x0, sp
     bl   rowvec_sort_unique
+    ldr  x9, [sp]
+    lsl  x0, x9, #4
+    add  x0, x0, #16
+    bl   arena_alloc
+    mov  x24, x0
     str  xzr, [sp, #24]
 5:  ldr  x9, [sp, #24]
     ldr  x10, [sp]
     cmp  x9, x10
-    b.hs .Lsc_end
+    b.hs .Lsc_tasks
     ldr  x10, [sp, #16]
-    ldr  w25, [x10, x9, lsl #2]
+    ldr  w0, [x10, x9, lsl #2]
     add  x9, x9, #1
     str  x9, [sp, #24]
-    add  x26, x25, #1
-    bl   .Lsc_range
+    add  x1, x0, #1
+    cbz  x25, 51f                       // extend the previous range?
+    sub  x11, x25, #1
+    add  x11, x24, x11, lsl #4
+    ldr  x12, [x11, #8]
+    cmp  x12, x0
+    b.ne 51f
+    str  x1, [x11, #8]
+    add  x26, x26, #1
     b    5b
-.Lsc_end:
-    mov  x0, x24
+51: bl   .Lsc_add
+    b    5b
+
+.Lsc_tasks:
+    // number of tasks: threads, at most one per g_par_min_rows rows
+    mov  x27, #1
+    TLS_LDR x9, g_x_threads
+    cmp  x9, #1
+    b.ls 6f
+    LDR_G x10, g_par_min_rows
+    udiv x10, x26, x10
+    cmp  x10, x9
+    csel x10, x10, x9, lo
+    cmp  x10, #2
+    b.lo 6f
+    str  x10, [sp]
+    ldr  x0, [x19, #PN_EXPR]
+    bl   expr_par_safe
+    cbz  w0, 6f
+    ldr  x27, [sp]
+6:  mov  x9, #SS_SIZE
+    mul  x0, x9, x27
+    bl   arena_zalloc
+    mov  x28, x0
+    add  x9, x26, x27                   // window size: ceil(total / tasks)
+    sub  x9, x9, #1
+    udiv x9, x9, x27
+    mov  x10, #0
+    mov  x11, x28
+7:  cmp  x10, x27
+    b.hs 8f
+    str  x19, [x11, #SS_NODE]
+    str  x24, [x11, #SS_RANGES]
+    str  x25, [x11, #SS_NR]
+    mul  x12, x10, x9
+    cmp  x12, x26
+    csel x12, x12, x26, lo
+    str  x12, [x11, #SS_WLO]
+    add  x12, x12, x9
+    cmp  x12, x26
+    csel x12, x12, x26, lo
+    str  x12, [x11, #SS_WHI]
+    str  x20, [x11, #SS_CTX]
+    add  x10, x10, #1
+    add  x11, x11, #SS_SIZE
+    b    7b
+8:  cmp  x27, #1
+    b.ne 9f
+    mov  x0, x28                        // one task: on this thread
+    bl   scan_task
+    ldr  x0, [x28, #SS_TS]
+    add  sp, sp, #32
+    LEAVE 5
+9:  mov  x10, #0                        // tasks get their own contexts
+    mov  x11, x28
+91: cmp  x10, x27
+    b.hs 92f
+    stp  x10, x11, [sp]
+    mov  x0, #EC_SIZE
+    bl   arena_alloc
+    ldp  x10, x11, [sp]
+    ldp  x12, x13, [x20]
+    stp  x12, x13, [x0]
+    ldp  x12, x13, [x20, #16]
+    stp  x12, x13, [x0, #16]
+    ldp  x12, x13, [x20, #32]
+    stp  x12, x13, [x0, #32]
+    str  x0, [x11, #SS_CTX]
+    add  x10, x10, #1
+    add  x11, x11, #SS_SIZE
+    b    91b
+92: ADR_L x0, scan_task
+    mov  x1, x28
+    mov  x2, #SS_SIZE
+    mov  x3, x27
+    bl   par_run
+    mov  x0, x28
+    mov  x1, x27
+    mov  x2, #SS_SIZE
+    bl   ts_concat
     add  sp, sp, #32
     LEAVE 5
 
-// local helper sharing the frame: rows [x25, x26) through the filter
-.Lsc_range:
-    stp  x29, x30, [sp, #-16]!
-6:  cmp  x25, x26
-    b.hs 8f
-    tst  x25, #DEADLINE_MASK
-    b.ne 61f
-    bl   check_deadline
-61: str  w25, [x27, x22, lsl #2]
-    cbz  x28, 7f
-    mov  x0, x28
-    mov  x1, x20
-    bl   eval_true
-    cbz  w0, 71f
-7:  mov  x0, x24
-    mov  x1, x27
-    bl   ts_push
-71: add  x25, x25, #1
-    b    6b
-8:  ldp  x29, x30, [sp], #16
+// local helper sharing the frame: append range [x0, x1) (x1 > x0)
+.Lsc_add:
+    add  x9, x24, x25, lsl #4
+    stp  x0, x1, [x9]
+    add  x25, x25, #1
+    sub  x9, x1, x0
+    add  x26, x26, x9
     ret
 ENDF ex_scan
+
+// =============================================================================
+// ts_concat(x0 records, x1 count, x2 record stride) -> x0 TupleSet*
+// Concatenates the TupleSets at offset 16 (SS_TS / XT_TS) of the records,
+// in order.
+//   x19 records, x20 count, x21 stride, x22 result, x23 index, x24 bytes
+// =============================================================================
+FUNC ts_concat
+    ENTER 4
+    mov  x19, x0
+    mov  x20, x1
+    mov  x21, x2
+    mov  x9, #0                         // total tuples
+    mov  x10, #0
+1:  cmp  x10, x20
+    b.hs 2f
+    madd x11, x10, x21, x19
+    ldr  x11, [x11, #16]
+    ldr  x12, [x11, #TS_N]
+    add  x9, x9, x12
+    add  x10, x10, #1
+    b    1b
+2:  ldr  x11, [x19, #16]
+    ldr  x0, [x11, #TS_W]
+    mov  x1, x9
+    str  x9, [sp, #-16]!
+    bl   ts_new
+    ldr  x9, [sp], #16
+    mov  x22, x0
+    str  x9, [x22, #TS_N]
+    ldr  x24, [x22, #TS_DATA]
+    mov  x23, #0
+3:  cmp  x23, x20
+    b.hs 4f
+    madd x11, x23, x21, x19
+    ldr  x11, [x11, #16]
+    ldr  x12, [x11, #TS_N]
+    ldr  x13, [x11, #TS_W]
+    mul  x2, x12, x13
+    lsl  x2, x2, #2
+    ldr  x1, [x11, #TS_DATA]
+    mov  x0, x24
+    add  x24, x24, x2
+    bl   memcpy
+    add  x23, x23, #1
+    b    3b
+4:  mov  x0, x22
+    LEAVE 4
+ENDF ts_concat
+
+// =============================================================================
+// scan_task(x0 ScanTask*) — scans the candidate rows of its window
+// [SS_WLO, SS_WHI) (ordinals over the concatenated SS_RANGES) through the
+// filter into a new TupleSet SS_TS: row at a time (mode "row") or in
+// batches through the vectorized evaluator.
+//   x19 task, x20 ctx, x21 node, x22 width, x23 rv, x24 filter, x25 ts,
+//   x26 range index, x27 ordinal of the range start, x28 scratch
+//   [sp] piece lo, [sp+8] piece hi, [sp+16] VBatch*, [sp+24] sel,
+//   [sp+32] batch tuples
+// =============================================================================
+FUNC scan_task
+    ENTER 5
+    sub  sp, sp, #48
+    mov  x19, x0
+    ldr  x20, [x19, #SS_CTX]
+    ldr  x21, [x19, #SS_NODE]
+    ldr  x9, [x21, #PN_BQ]
+    ldr  x22, [x9, #BQ_NRV]
+    ldr  x23, [x21, #PN_RV]
+    ldr  x24, [x21, #PN_EXPR]
+    ldp  x9, x10, [x19, #SS_WLO]
+    sub  x1, x10, x9
+    cbz  x24, 1f
+    lsr  x1, x1, #2                     // filtered: start smaller
+1:  mov  x0, x22
+    bl   ts_new
+    mov  x25, x0
+    str  x25, [x19, #SS_TS]
+    // tuple scratch: VBATCH tuples, all ROW_NULL
+    mov  x9, #VBATCH
+    mul  x0, x9, x22
+    lsl  x0, x0, #2
+    mov  x28, x0
+    bl   arena_alloc
+    str  x0, [sp, #32]
+    mov  w1, #0xff
+    mov  x2, x28
+    bl   memset
+    str  xzr, [sp, #16]
+    TLS_ADDR x9, g_x_mode
+    ldr  w9, [x9]
+    cmp  w9, #XM_ROW
+    b.eq 2f
+    mov  x0, x20
+    mov  x1, x22
+    bl   vb_new
+    str  x0, [sp, #16]
+    ldr  x9, [sp, #32]
+    str  x9, [x0, #VB_TUP]
+    mov  x0, #(VBATCH * 2)
+    bl   arena_alloc
+    str  x0, [sp, #24]
+2:  ldr  x9, [sp, #32]
+    str  x9, [x20, #EC_TUPLE]
+    mov  x26, #0
+    mov  x27, #0
+.Lst_range:
+    ldr  x9, [x19, #SS_NR]
+    cmp  x26, x9
+    b.hs .Lst_end
+    ldr  x9, [x19, #SS_RANGES]
+    add  x9, x9, x26, lsl #4
+    ldp  x10, x11, [x9]                 // range [lo, hi)
+    sub  x12, x11, x10                  // length
+    ldp  x13, x14, [x19, #SS_WLO]
+    add  x15, x27, x12                  // ordinal end of the range
+    cmp  x27, x13                       // a = max(ord, wlo)
+    csel x16, x27, x13, hi
+    cmp  x15, x14                       // b = min(ord + len, whi)
+    csel x17, x15, x14, lo
+    add  x26, x26, #1
+    mov  x27, x15
+    cmp  x16, x17
+    b.hs .Lst_range
+    sub  x16, x16, x15                  // piece: lo + (a - ord), lo + (b - ord)
+    sub  x17, x17, x15
+    add  x16, x16, x11
+    add  x17, x17, x11
+    stp  x16, x17, [sp]
+    ldr  x9, [sp, #16]
+    cbz  x9, .Lst_rows
+    bl   .Lst_batches
+    b    .Lst_range
+.Lst_rows:
+    bl   .Lst_rowloop
+    b    .Lst_range
+.Lst_end:
+    add  sp, sp, #48
+    LEAVE 5
+
+// local helper: row at a time over [sp, sp+8) (frame shared; the return
+// address is kept on the stack, so the piece is at [sp+16])
+.Lst_rowloop:
+    stp  x29, x30, [sp, #-16]!
+    ldr  x28, [sp, #16]
+1:  ldr  x9, [sp, #24]
+    cmp  x28, x9
+    b.hs 4f
+    tst  x28, #DEADLINE_MASK
+    b.ne 2f
+    bl   check_deadline
+2:  ldr  x10, [sp, #(16 + 32)]
+    str  w28, [x10, x23, lsl #2]
+    cbz  x24, 3f
+    mov  x0, x24
+    mov  x1, x20
+    bl   eval_true
+    cbz  w0, 31f
+3:  mov  x0, x25
+    ldr  x1, [sp, #(16 + 32)]
+    bl   ts_push
+31: add  x28, x28, #1
+    b    1b
+4:  ldp  x29, x30, [sp], #16
+    ret
+
+// local helper: batches over the piece
+.Lst_batches:
+    stp  x29, x30, [sp, #-16]!
+1:  ldp  x9, x10, [sp, #16]             // lo, hi
+    cmp  x9, x10
+    b.hs 6f
+    bl   check_deadline
+    ldp  x9, x10, [sp, #16]
+    sub  x11, x10, x9
+    mov  x12, #VBATCH
+    cmp  x11, x12
+    csel x28, x11, x12, lo              // batch size
+    add  x10, x9, x28
+    str  x10, [sp, #16]                 // next lo
+    ldr  x11, [sp, #(16 + 32)]          // tuples: slot rv = row
+    lsl  x13, x22, #2
+    add  x11, x11, x23, lsl #2
+    mov  x12, #0
+2:  cmp  x12, x28
+    b.hs 3f
+    add  w14, w9, w12
+    str  w14, [x11]
+    add  x11, x11, x13
+    add  x12, x12, #1
+    b    2b
+3:  ldr  x0, [sp, #(16 + 16)]
+    str  x28, [x0, #VB_N]
+    cbz  x24, 4f
+    mov  x0, x24
+    ldr  x1, [sp, #(16 + 16)]
+    ldr  x2, [sp, #(16 + 24)]
+    bl   vfilter
+    mov  x28, x0
+    ldr  x2, [sp, #(16 + 24)]           // selected positions
+    b    5f
+4:  ADR_L x2, vsel_ident                // no filter: every position
+5:  str  x2, [sp, #-16]!
+    mov  x0, x25
+    mov  x1, x28
+    bl   ts_reserve
+    ldr  x2, [sp], #16
+    ldr  x9, [x25, #TS_N]
+    add  x9, x9, x28
+    str  x9, [x25, #TS_N]
+    ldr  x10, [sp, #(16 + 32)]          // copy the selected tuples
+    lsl  x11, x22, #2
+51: cbz  x28, 1b
+    ldrh w12, [x2], #2
+    mul  x12, x12, x11
+    add  x12, x10, x12
+    mov  x13, x22
+52: ldr  w14, [x12], #4
+    str  w14, [x0], #4
+    subs x13, x13, #1
+    b.ne 52b
+    sub  x28, x28, #1
+    b    51b
+6:  ldp  x29, x30, [sp], #16
+    ret
+ENDF scan_task
 
 // =============================================================================
 // index_rows(x0 scan PlanNode* with PN_IDX, x1 RowVec*) — candidate rows of

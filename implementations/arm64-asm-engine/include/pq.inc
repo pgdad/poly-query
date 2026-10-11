@@ -682,6 +682,25 @@
 #define XJ_NL       3
 #define MAX_THREADS 64
 
+// ----------------------------------------------------- vectorized execution --
+// (vexec.S) Expressions are evaluated for a batch of up to VBATCH tuples at a
+// time. A Vec holds one payload and one NULL byte per batch position; a
+// selection vector (u16 positions) lists the positions to evaluate.
+#define VBATCH      1024
+#define VEC_VALS    0              // u64 [VBATCH]
+#define VEC_NULLS   8192           // u8  [VBATCH]
+#define VEC_SIZE    9216
+// Batch context (one per thread)
+#define VB_TUP      0              // u32* tuples of the batch (stride VB_W)
+#define VB_W        8              // u64 tuple width (u32 row ids)
+#define VB_N        16             // u64 tuples in the batch
+#define VB_EC       24             // EvalCtx* (EC_TABLES; EC_TUPLE set for
+                                   //   row-at-a-time fallbacks)
+#define VB_POOL     32             // Vec** scratch vectors [VPOOL_MAX]
+#define VB_POOLN    40             // u64 vectors in use (stack discipline)
+#define VB_SIZE     48
+#define VPOOL_MAX   64
+
 // Rows per batch handed to a streaming sink (exec_plan_stream)
 #define EXEC_STREAM_BATCH 1000
 

@@ -167,6 +167,43 @@ FUNC pq_raise
     b    raise_common
 ENDF pq_raise
 
+// pq_raise_n(w0 code, x1 msg ptr, x2 msg len) — noreturn (re-raises an
+// error recorded elsewhere, e.g. by a worker thread)
+FUNC pq_raise_n
+    stp  x29, x30, [sp, #-32]!
+    mov  x29, sp
+    str  x19, [sp, #16]
+    mov  w19, w0
+    mov  x0, #0
+    bl   copy_errmsg
+    mov  w0, w19
+    mov  w2, #0
+    mov  w3, #0
+    b    raise_common
+ENDF pq_raise_n
+
+// arena_adopt(x0 dst Arena*, x1 src Arena*): moves every chunk of src into
+// dst (freed with dst); src becomes empty.
+FUNC arena_adopt
+    ldr  x2, [x1, #AR_CHUNKS]
+    cbz  x2, 3f
+1:  ldr  x3, [x2]                       // find the tail of src's list
+    cbz  x3, 2f
+    mov  x2, x3
+    b    1b
+2:  ldr  x3, [x0, #AR_CHUNKS]
+    str  x3, [x2]
+    ldr  x3, [x1, #AR_CHUNKS]
+    str  x3, [x0, #AR_CHUNKS]
+    ldr  x3, [x0, #AR_TOTAL]
+    ldr  x4, [x1, #AR_TOTAL]
+    add  x3, x3, x4
+    str  x3, [x0, #AR_TOTAL]
+3:  stp  xzr, xzr, [x1, #AR_CUR]
+    stp  xzr, xzr, [x1, #AR_CHUNKS]
+    ret
+ENDF arena_adopt
+
 // pq_raise_pos(w0 code, x1 msg, w2 line, w3 col) — noreturn
 FUNC pq_raise_pos
     stp  x29, x30, [sp, #-48]!
