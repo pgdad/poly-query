@@ -133,15 +133,15 @@ final class JoinBatches {
         }
 
         /** Consumes the build input completely (raising its deferred error, if any, at the end). */
-        void build(BatchOperator input, BatchExprs keyExprs, long[] factors, DataType[] keyTypes) {
+        void build(BatchOperator input, BatchExprs keyExprs, long[] factors, DataType[] keyTypes, int expectedRows) {
             boolean singleLong = keyTypes.length == 1 && Vec.kindOf(keyTypes[0]) == Vec.Kind.LONG;
             keys = singleLong ? null : new GroupKeys(keyTypes);
             longIndex = singleLong ? new LongIndex() : null;
-            store = new ColumnStore(schema);
+            store = new ColumnStore(schema, expectedRows);
             first = new int[16];
             Arrays.fill(first, -1);
             last = new int[16];
-            next = new int[64];
+            next = new int[Math.max(64, expectedRows)];
             Vec[] scratch = new Vec[factors.length];
             int[] gids = new int[0];
             int[] keep = new int[0];
@@ -329,6 +329,7 @@ final class JoinBatches {
         private final BatchExprs buildKeys;
         private final long[] buildFactors;
         private final DataType[] keyTypes;
+        private final int expectedBuildRows;
         private final BatchExprs probeKeys;
         private final long[] probeFactors;
         private final BatchExprs residual;
@@ -361,7 +362,7 @@ final class JoinBatches {
          * @param buildIsLeft the build input supplies the left columns (INNER joins only)
          */
         Probe(BatchOperator input, JoinTable table, BatchOperator buildInput, BatchExprs buildKeys, long[] buildFactors,
-              DataType[] keyTypes, BatchExprs probeKeys, long[] probeFactors, BatchExprs residual, boolean leftOuter,
+              DataType[] keyTypes, int expectedBuildRows, BatchExprs probeKeys, long[] probeFactors, BatchExprs residual, boolean leftOuter,
               boolean buildIsLeft, List<ColumnSchema> outSchema, int probeWidth, ExecContext ctx, JoinCounter counter,
               int capacity) {
             this.input = input;
@@ -373,6 +374,7 @@ final class JoinBatches {
             this.buildKeys = buildKeys;
             this.buildFactors = buildFactors;
             this.keyTypes = keyTypes;
+            this.expectedBuildRows = expectedBuildRows;
             this.probeKeys = probeKeys;
             this.probeFactors = probeFactors;
             this.residual = residual;
@@ -405,7 +407,7 @@ final class JoinBatches {
         public void open() {
             if (ownsTable) {
                 counter.reset();
-                table.build(buildInput, buildKeys, buildFactors, keyTypes);
+                table.build(buildInput, buildKeys, buildFactors, keyTypes, expectedBuildRows);
             }
             keys = table.prober();
             input.open();
@@ -545,17 +547,7 @@ final class JoinBatches {
                     if (dst.kind == Vec.Kind.DICT) {
                         dst.toObjects(capacity);
                     }
-                    for (int e = 0; e < m; e++) {
-                        int r = entryRow[e];
-                        if (r < 0) {
-                            nm[e] = true;
-                            if (dst.kind == Vec.Kind.OBJECT) {
-                                dst.objects[e] = null;
-                            }
-                        } else {
-                            dst.copyFrom(src, r, e);
-                        }
-                    }
+                    ColumnStore.gatherOrNull(src, entryRow, m, dst);
                 } else {
                     ColumnStore.gather(src, entryRow, m, dst, 0);
                 }

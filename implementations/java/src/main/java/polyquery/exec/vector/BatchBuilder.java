@@ -128,11 +128,17 @@ public final class BatchBuilder {
         BatchOperator buildInput = table == null ? build(buildPlan) : null;
         BatchExprs buildKeys = table == null ? new BatchExprs(comp, buildKeyExprs) : null;
         return new JoinBatches.Probe(probe, table, buildInput, buildKeys,
-                JoinBatches.scaleFactors(buildKeyExprs, probeKeyExprs), keyTypes, new BatchExprs(comp, probeKeyExprs),
+                JoinBatches.scaleFactors(buildKeyExprs, probeKeyExprs), keyTypes, expectedRows(buildPlan),
+                new BatchExprs(comp, probeKeyExprs),
                 JoinBatches.scaleFactors(probeKeyExprs, buildKeyExprs),
                 j.residual() == null ? null : new BatchExprs(comp, List.of(j.residual())),
                 j.kind() == LogicalPlan.JoinKind.LEFT, buildLeft, j.schema(), probePlan.schema().size(), ctx,
                 counter, batchSize);
+    }
+
+    /** Rows a plan produces if known exactly before running it (a plain table scan), else 0. */
+    static int expectedRows(PhysicalPlan plan) {
+        return plan instanceof PhysicalPlan.TableScan s && s.skipFilters().isEmpty() ? s.table().rowCount() : 0;
     }
 
     static DataType[] types(List<ColumnSchema> schema) {

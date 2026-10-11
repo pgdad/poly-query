@@ -16,15 +16,29 @@ final class ColumnStore {
     private int capacity;
 
     ColumnStore(List<ColumnSchema> schema) {
+        this(schema, 0);
+    }
+
+    /** @param expectedRows rows expected (an exact count avoids regrowing; 0 = unknown) */
+    ColumnStore(List<ColumnSchema> schema, int expectedRows) {
         this.schema = schema;
-        this.capacity = 64;
+        this.capacity = Math.max(64, expectedRows);
         this.cols = new Vec[schema.size()];
         this.populated = new boolean[cols.length];
-        for (int c = 0; c < cols.length; c++) {
-            cols[c] = new Vec(schema.get(c).type(), capacity);
-            cols[c].nullMask(capacity);
-            cols[c].hasNulls = false; // set once a NULL is stored
+    }
+
+    /** The vector of slot c, allocated when the slot is first filled. */
+    private Vec allocate(int c) {
+        Vec v = cols[c];
+        if (v == null) {
+            v = new Vec(schema.get(c).type(), capacity);
+            v.nullMask(capacity);
+            java.util.Arrays.fill(v.nulls, 0, rows, true);
+            v.hasNulls = rows > 0; // set once a NULL is stored
+            cols[c] = v;
+            populated[c] = true;
         }
+        return v;
     }
 
     int rows() {
@@ -43,16 +57,17 @@ final class ColumnStore {
         if (need > capacity) {
             capacity = Math.max(need, capacity * 2);
             for (Vec v : cols) {
-                v.grow(capacity);
+                if (v != null) {
+                    v.grow(capacity);
+                }
             }
         }
         for (int c = 0; c < cols.length; c++) {
-            Vec dst = cols[c];
             Vec src = b.cols[c];
             if (src == null) {
                 continue; // a slot nobody reads
             }
-            populated[c] = true;
+            Vec dst = allocate(c);
             if (dst.kind == Vec.Kind.DICT && (src.kind != Vec.Kind.DICT || src.dict != dst.dict)) {
                 decode(dst, start);
             } else if (start == 0 && src.kind == Vec.Kind.DICT && dst.kind == Vec.Kind.OBJECT) {
@@ -112,18 +127,12 @@ final class ColumnStore {
 
     /** A new store with rows {@code perm[0..count)} of this one, in that order. */
     ColumnStore select(int[] perm, int count) {
-        ColumnStore out = new ColumnStore(schema);
-        if (count > out.capacity) {
-            out.capacity = count;
-            for (Vec v : out.cols) {
-                v.grow(count);
-            }
-        }
+        ColumnStore out = new ColumnStore(schema, count);
         for (int c = 0; c < cols.length; c++) {
             if (!populated[c]) {
                 continue;
             }
-            out.populated[c] = true;
+            out.allocate(c);
             if (cols[c].kind == Vec.Kind.DICT) {
                 out.cols[c].toDict(cols[c].dict, out.capacity);
             }
@@ -132,6 +141,45 @@ final class ColumnStore {
         }
         out.rows = count;
         return out;
+    }
+
+    /**
+     * {@code dst[k] = src[idx[k]]} for k in [0, m), NULL where {@code idx[k] < 0} (LEFT JOIN
+     * padding); {@code src} is not dictionary-encoded, the null mask of dst is prepared.
+     */
+    static void gatherOrNull(Vec src, int[] idx, int m, Vec dst) {
+        boolean[] dn = dst.nulls;
+        for (int k = 0; k < m; k++) {
+            int r = idx[k];
+            dn[k] = r < 0 || src.isNull(r);
+        }
+        switch (src.kind) {
+            case LONG -> {
+                long[] s = src.longs;
+                long[] d = dst.longs;
+                for (int k = 0; k < m; k++) {
+                    int r = idx[k];
+                    d[k] = r < 0 ? 0 : s[r];
+                }
+            }
+            case DOUBLE -> {
+                double[] s = src.doubles;
+                double[] d = dst.doubles;
+                for (int k = 0; k < m; k++) {
+                    int r = idx[k];
+                    d[k] = r < 0 ? 0 : s[r];
+                }
+            }
+            case OBJECT -> {
+                Object[] s = src.objects;
+                Object[] d = dst.objects;
+                for (int k = 0; k < m; k++) {
+                    int r = idx[k];
+                    d[k] = r < 0 ? null : s[r];
+                }
+            }
+            case DICT -> throw new IllegalStateException("dictionary source");
+        }
     }
 
     /** {@code dst[at + k] = src[idx[k]]} for k in [0, m) (null mask of dst prepared). */

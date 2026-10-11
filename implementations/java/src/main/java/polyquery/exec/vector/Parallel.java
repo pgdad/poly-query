@@ -368,7 +368,8 @@ final class Parallel {
                 PhysicalPlan buildPlan = left ? j.left() : j.right();
                 JoinBatches.JoinTable t = new JoinBatches.JoinTable(buildPlan.schema(), ctx);
                 t.build(builder.build(buildPlan), new BatchExprs(builder.compiler(), buildKeys),
-                        JoinBatches.scaleFactors(buildKeys, probeKeys), keyTypes(buildKeys));
+                        JoinBatches.scaleFactors(buildKeys, probeKeys), keyTypes(buildKeys),
+                        BatchBuilder.expectedRows(buildPlan));
                 joins.add(j);
                 tables.add(t);
                 counters.add(new JoinBatches.JoinCounter(ctx.maxJoinRows()));
