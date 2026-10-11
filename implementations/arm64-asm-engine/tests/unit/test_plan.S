@@ -138,6 +138,12 @@ cases_start:
     TE  "SELECT (SELECT i FROM u) FROM t", ERR_SUBQUERY_CARDINALITY
     TE  "SELECT i FROM t JOIN u ON t.i = u.i", ERR_SEMANTIC
     TE  "SELECT s FROM t GROUP BY i", ERR_SEMANTIC
+    TE  "SELECT i, (SELECT COUNT(*) FROM u WHERE u.v = t.s) FROM t GROUP BY i", ERR_SEMANTIC
+    TR  "SELECT i, (SELECT COUNT(*) FROM u WHERE u.i = t.i) FROM t GROUP BY i", 4
+    TE  "SELECT * FROM t a JOIN (t b JOIN u ON u.i = a.i) ON a.i = b.i", ERR_SEMANTIC
+    TR  "SELECT * FROM t a JOIN (t b JOIN u ON u.i = b.i) ON a.i = b.i", 3
+    TP  "SELECT s FROM t WHERE i IN (SELECT i FROM u)", "\"table\":\"u\"", M_HAS
+    TP  "SELECT (SELECT MAX(v) FROM u)", "\"op\":\"Values\",\"children\":[]},{\"op\":\"Aggregate\"", M_HAS
 cases_end:
 
     .section .rodata

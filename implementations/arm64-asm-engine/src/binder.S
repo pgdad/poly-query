@@ -43,7 +43,11 @@
 #define BC_CTES     96      // CteList* visible CTEs (innermost first)
 #define BC_CORR     104     // u64 1 = references an enclosing query
 #define BC_SPV      112     // Vec* statement-wide SubPlan list
-#define BC_SIZE     128
+#define BC_RVLO     120     // u64 first range variable visible (ON clauses
+                            //   see only their own from_item)
+#define BC_OREFS    128     // Vec of outer references from subqueries in
+                            //   SELECT / HAVING / ORDER BY (grouping check)
+#define BC_SIZE     160
 
 #define MAX_RV      64
 
@@ -513,9 +517,13 @@ LFUNC bind_from
     ldr  x1, [x20, #FR_ON]
     cbz  x1, 5f
     str  wzr, [x19, #BC_FLAGS]
+    ldr  x22, [x19, #BC_RVLO]           // ON sees only this from_item
+    ldr  w9, [x21, #BF_LO]
+    str  x9, [x19, #BC_RVLO]
     mov  x0, x19
     bl   bind_expr
     str  x0, [x21, #BF_ON]
+    str  x22, [x19, #BC_RVLO]
     bl   check_bool
 5:  mov  x0, x21
     LEAVE 4
@@ -727,7 +735,7 @@ LFUNC bind_col
     mov  x27, #0
 .Lbc_level:
     mov  x24, #-1
-    mov  x21, #0
+    ldr  x21, [x19, #BC_RVLO]
 .Lbc_rv:
     ldr  x9, [x19, #BC_NRV]
     cmp  x21, x9
@@ -794,7 +802,15 @@ LFUNC bind_col
     ldr  w9, [x20, #N_FLAGS]
     bic  w9, w9, #NF_CONST
     str  w9, [x20, #N_FLAGS]
-    mov  x9, x28                        // mark correlated levels
+    cbz  x27, 31f                       // outer reference from a
+    ldr  w9, [x19, #BC_FLAGS]           // grouped-context clause: remember
+    and  w9, w9, #(BF_AGG_OK | BF_IN_AGG)
+    cmp  w9, #BF_AGG_OK
+    b.ne 31f
+    add  x0, x19, #BC_OREFS
+    mov  x1, x20
+    bl   vec_push
+31: mov  x9, x28                        // mark correlated levels
     mov  x10, #1
 3:  cmp  x9, x19
     b.eq 4f
@@ -1949,6 +1965,8 @@ LFUNC finish_aggregation
     cbz  x9, 9f
     mov  x9, #1
     str  x9, [x20, #BQ_ISAGG]
+    mov  x0, x19
+    bl   check_outer_refs
     mov  x21, #0
     ldr  x22, [x20, #BQ_NOUT]
 1:  cmp  x21, x22
@@ -1982,6 +2000,52 @@ LFUNC finish_aggregation
     b    4b
 9:  LEAVE 2
 ENDF finish_aggregation
+
+// =============================================================================
+// check_outer_refs(x0 ctx) — in an aggregated query, a column of this query
+// referenced from a subquery in SELECT / HAVING / ORDER BY must itself be a
+// GROUP BY expression (semantics.md §5); it is then evaluated on the group's
+// representative tuple.
+//   x19 ctx, x20 index, x21 reference, x22 group index, x23 bq
+// =============================================================================
+LFUNC check_outer_refs
+    ENTER 3
+    mov  x19, x0
+    ldr  x23, [x19, #BC_BQ]
+    mov  x20, #0
+1:  ldr  x9, [x19, #BC_OREFS + V_N]
+    cmp  x20, x9
+    b.hs 5f
+    ldr  x9, [x19, #BC_OREFS + V_DATA]
+    ldr  x21, [x9, x20, lsl #3]
+    mov  x22, #0
+2:  ldr  x9, [x23, #BQ_NGROUP]
+    cmp  x22, x9
+    b.hs .Lcor_bad
+    ldr  x9, [x23, #BQ_GROUP]
+    ldr  x9, [x9, x22, lsl #3]
+    ldr  w10, [x9, #N_KIND]
+    cmp  w10, #NK_COL
+    b.ne 3f
+    ldr  w10, [x9, #N_OP]
+    cbnz w10, 3f
+    ldr  x10, [x9, #N_B]
+    ldr  x11, [x21, #N_B]
+    cmp  x10, x11
+    b.ne 3f
+    ldr  x10, [x9, #N_VAL]
+    ldr  x11, [x21, #N_VAL]
+    cmp  x10, x11
+    b.eq 4f
+3:  add  x22, x22, #1
+    b    2b
+4:  add  x20, x20, #1
+    b    1b
+5:  LEAVE 3
+.Lcor_bad:
+    ldr  x9, [x21, #N_NAME]
+    RAISE_S ERR_SEMANTIC, "column must appear in GROUP BY or be used in an aggregate: ", x9
+ENDF check_outer_refs
 
 // =============================================================================
 // group_rewrite(x0 BoundQuery*, x1 Node*) -> x0 Node*

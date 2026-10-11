@@ -114,23 +114,28 @@ Key decisions:
 * DECIMAL ± DECIMAL with different scales is aligned exactly in 128-bit
   arithmetic (no spurious overflow); INT64 operands are promoted to
   DECIMAL(18,s) as the spec requires.
-* Arithmetic on an untyped NULL is typed INT64 (`NULL + NULL`, `-NULL`).
 * SQL nesting deeper than 256 levels is `RESOURCE_LIMIT`.
 * `save`, `open`, `stats` ops, `CREATE/DROP INDEX` and the `serve` mode
   answer `UNSUPPORTED` / exit 1 (later phases).
 * `UPPER`/`LOWER` map ASCII letters only, and leave a whitespace-delimited
   word that contains a non-ASCII character unchanged as a whole
   (`UPPER('abc Ünï')` = `'ABC Ünï'`, as the conformance suite requires).
-* `COALESCE`/`CASE` of identical DECIMAL types keep that type; different
-  DECIMALs (or INT64 + DECIMAL) give DECIMAL(18, max scale). DATE and
+* `COALESCE`/`CASE` unify any two DECIMALs (or INT64 + DECIMAL) to
+  DECIMAL(18, max scale); a single DECIMAL branch keeps its type. DATE and
   TIMESTAMP are not promoted to a common CASE/COALESCE type (TYPE_ERROR).
-* `ABS/ROUND/FLOOR/CEIL(NULL)` are typed INT64 (like `-NULL`).
+* `-NULL`, `ABS/ROUND/FLOOR/CEIL(NULL)` keep the null type (reported as
+  STRING); binary arithmetic on two untyped NULLs is INT64.
+* `CAST(string AS TIMESTAMP)` requires the timestamp syntax (a bare date is a
+  CONVERSION_ERROR); ingestion still accepts dates for TIMESTAMP columns.
 * An ORDER BY expression that is structurally equal to a select-list
   expression refers to that output column (so it is also allowed with
   SELECT DISTINCT).
-* In a parenthesised join, an `ON` condition may syntactically name range
-  variables introduced earlier outside the parentheses; their columns
-  evaluate to NULL there.
+* An `ON` condition sees only the range variables of its own `from_item`
+  (inside parentheses: only those within the parentheses).
+* In an aggregated query, a subquery in SELECT / HAVING / ORDER BY may refer
+  to an outer column only if that column is a GROUP BY expression.
+* EXPLAIN shows the plans of expression subqueries (scalar / IN / EXISTS) as
+  additional children of the node whose expression uses them.
 
 ## Known limitations
 

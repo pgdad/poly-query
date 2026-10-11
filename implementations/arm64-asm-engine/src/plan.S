@@ -744,9 +744,10 @@ FUNC plan_explain
     bl   buf_putc
     bl   .Lpe_filter_prop
     mov  x0, x19
-    ADR_L x1, ex_nochildren
+    ADR_L x1, ex_children
     bl   buf_puts
-    b    .Lpe_close
+    mov  x22, #0
+    b    .Lpe_subplans
 
 .Lpe_subscan:
     mov  x0, x19
@@ -769,10 +770,8 @@ FUNC plan_explain
 5:  mov  x0, x19
     ldr  x1, [x9, #SP_PLAN]
     bl   plan_explain
-    mov  x0, x19
-    ADR_L x1, ex_close_arr
-    bl   buf_puts
-    b    .Lpe_close
+    mov  x22, #1
+    b    .Lpe_subplans
 
 .Lpe_join:
     mov  x0, x19
@@ -820,19 +819,27 @@ FUNC plan_explain
     mov  x0, x19
     ADR_L x1, ex_children
     bl   buf_puts
+    mov  x22, #0
     ldr  x1, [x20, #PN_LEFT]
-    cbz  x1, 8f
+    cbz  x1, .Lpe_subplans
     mov  x0, x19
     bl   plan_explain
+    mov  x22, #1
     ldr  x1, [x20, #PN_RIGHT]
-    cbz  x1, 8f
+    cbz  x1, .Lpe_subplans
     mov  x0, x19
     mov  w1, #','
     bl   buf_putc
     mov  x0, x19
     ldr  x1, [x20, #PN_RIGHT]
     bl   plan_explain
-8:  mov  x0, x19
+    mov  x22, #2
+.Lpe_subplans:                          // plans of expression subqueries
+    mov  x0, x19
+    mov  x1, x20
+    mov  x2, x22
+    bl   pe_subplans
+    mov  x0, x19
     mov  w1, #']'
     bl   buf_putc
 .Lpe_close:
@@ -853,6 +860,138 @@ FUNC plan_explain
     ldp  x29, x30, [sp], #16
 9:  ret
 ENDF plan_explain
+
+// =============================================================================
+// pe_subplans(x0 Buf*, x1 PlanNode*, x2 children written) -> x0 children
+// Appends the plans of the subqueries used in the node's expressions.
+//   x19 buf, x20 node, x21 count, x22 bq, x23 index
+// =============================================================================
+LFUNC pe_subplans
+    ENTER 4
+    mov  x19, x0
+    mov  x20, x1
+    mov  x21, x2
+    ldr  x22, [x20, #PN_BQ]
+    mov  x0, x19
+    ldr  x1, [x20, #PN_EXPR]
+    mov  x2, x21
+    bl   pe_expr
+    mov  x21, x0
+    ldr  w9, [x20, #PN_OP]
+    cmp  w9, #PO_HASHJOIN
+    b.eq .Lps_keys
+    cmp  w9, #PO_PROJECT
+    b.eq .Lps_out
+    cmp  w9, #PO_AGGREGATE
+    b.eq .Lps_out
+    b    .Lps_end
+.Lps_keys:
+    mov  x23, #0
+1:  ldr  x9, [x20, #PN_NKEYS]
+    cmp  x23, x9
+    b.hs .Lps_end
+    ldr  x9, [x20, #PN_LKEYS]
+    ldr  x1, [x9, x23, lsl #3]
+    mov  x0, x19
+    mov  x2, x21
+    bl   pe_expr
+    ldr  x9, [x20, #PN_RKEYS]
+    ldr  x1, [x9, x23, lsl #3]
+    mov  x2, x0
+    mov  x0, x19
+    bl   pe_expr
+    mov  x21, x0
+    add  x23, x23, #1
+    b    1b
+.Lps_out:
+    mov  x23, #0
+2:  ldr  x9, [x22, #BQ_NOUT]
+    cmp  x23, x9
+    b.hs 3f
+    ldr  x9, [x22, #BQ_OUT]
+    add  x9, x9, x23, lsl #5
+    ldr  x1, [x9, #OC_EXPR]
+    mov  x0, x19
+    mov  x2, x21
+    bl   pe_expr
+    mov  x21, x0
+    add  x23, x23, #1
+    b    2b
+3:  mov  x23, #0
+4:  ldr  x9, [x22, #BQ_NEXTRA]
+    cmp  x23, x9
+    b.hs 5f
+    ldr  x9, [x22, #BQ_EXTRA]
+    ldr  x1, [x9, x23, lsl #3]
+    mov  x0, x19
+    mov  x2, x21
+    bl   pe_expr
+    mov  x21, x0
+    add  x23, x23, #1
+    b    4b
+5:  ldr  w9, [x20, #PN_OP]
+    cmp  w9, #PO_AGGREGATE
+    b.ne .Lps_end
+    mov  x23, #0
+6:  ldr  x9, [x22, #BQ_NGROUP]
+    cmp  x23, x9
+    b.hs .Lps_end
+    ldr  x9, [x22, #BQ_GROUP]
+    ldr  x1, [x9, x23, lsl #3]
+    mov  x0, x19
+    mov  x2, x21
+    bl   pe_expr
+    mov  x21, x0
+    add  x23, x23, #1
+    b    6b
+.Lps_end:
+    mov  x0, x21
+    LEAVE 4
+ENDF pe_subplans
+
+// pe_expr(x0 Buf*, x1 Node* or 0, x2 children written) -> x0 children
+//   x19 buf, x20 node, x21 count, x22 index, x23 child count
+LFUNC pe_expr
+    ENTER 4
+    mov  x19, x0
+    mov  x20, x1
+    mov  x21, x2
+    cbz  x20, 9f
+    ldr  w9, [x20, #N_KIND]
+    cmp  w9, #NK_SUBQ
+    b.eq 1f
+    cmp  w9, #NK_EXISTS
+    b.eq 1f
+    cmp  w9, #NK_INSUB
+    b.ne 2f
+1:  cbz  x21, 11f
+    mov  x0, x19
+    mov  w1, #','
+    bl   buf_putc
+11: ldr  x9, [x20, #N_C]
+    mov  x0, x19
+    ldr  x1, [x9, #SP_PLAN]
+    bl   plan_explain
+    add  x21, x21, #1
+2:  mov  x0, x20
+    bl   expr_nchildren
+    mov  x23, x0
+    mov  x22, #0
+3:  cmp  x22, x23
+    b.hs 9f
+    mov  x0, x20
+    mov  x1, x22
+    bl   expr_child_slot
+    ldr  x1, [x0]
+    mov  x0, x19
+    mov  x2, x21
+    bl   pe_expr
+    mov  x21, x0
+    add  x22, x22, #1
+    b    3b
+9:  mov  x0, x21
+    LEAVE 4
+ENDF pe_expr
 
     .section .rodata
     .p2align 3
@@ -885,8 +1024,6 @@ ex_filter:      .asciz ",\"filter\":true"
 ex_jtype:       .asciz ",\"join_type\":"
 ex_nkeys:       .asciz ",\"hash_keys\":"
 ex_children:    .asciz ",\"children\":["
-ex_nochildren:  .asciz ",\"children\":[]"
-ex_close_arr:   .asciz "]"
     .text
 
     NOTE_GNU_STACK
