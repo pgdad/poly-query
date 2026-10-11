@@ -897,24 +897,28 @@ FUNC vfilter_sel
 ENDF vfilter_sel
 
 // =============================================================================
-// vkey_cells(x0 TupleSet*, x1 Node** keys, x2 nkeys (<= VKEY_MAX), x3 ctx,
-//            x4 cells out, x5 u64* hashes out, x6 u8* NULL flags out)
-// The key cells of every tuple (nkeys cells each), evaluated in batches,
-// with the hash and NULL flag of join.S eval_keys (same hash function).
+// vkey_cells(x0 VKeyTask*) — the key cells of the tuples [VK_LO, VK_HI)
+// (nkeys cells each, at the tuple's index in VK_CELLS), evaluated in
+// batches, with the hash and NULL flag of join.S eval_keys (same hash
+// function). A task function: join.S runs windows of one input in parallel.
 //   x19 ts, x20 keys, x21 nkeys, x22 vb, x23 cells, x24 hashes, x25 flags,
 //   x26 batch start, x27 batch size, x28 key vectors
-// Stack: [sp] position, [sp+8] key, [sp+16] hash, [sp+24] any NULL
+// Stack: [sp] position, [sp+8] key, [sp+16] hash, [sp+24] any NULL,
+//        [sp+32] end of the window
 // =============================================================================
 FUNC vkey_cells
     ENTER 5
-    sub  sp, sp, #32
-    mov  x19, x0
-    mov  x20, x1
-    mov  x21, x2
-    mov  x23, x4
-    mov  x24, x5
-    mov  x25, x6
-    mov  x0, x3
+    sub  sp, sp, #48
+    ldr  x19, [x0, #VK_TS]
+    ldr  x20, [x0, #VK_KEYS]
+    ldr  x21, [x0, #VK_NKEYS]
+    ldr  x23, [x0, #VK_CELLS]
+    ldr  x24, [x0, #VK_HASH]
+    ldr  x25, [x0, #VK_FLAGS]
+    ldr  x26, [x0, #VK_LO]
+    ldr  x9, [x0, #VK_HI]
+    str  x9, [sp, #32]
+    ldr  x0, [x0, #VK_CTX]
     ldr  x1, [x19, #TS_W]
     bl   vb_new
     mov  x22, x0
@@ -925,7 +929,7 @@ FUNC vkey_cells
     str  xzr, [sp, #8]
 1:  ldr  x9, [sp, #8]
     cmp  x9, x21
-    b.hs 2f
+    b.hs .Lvk_batch
     mov  x0, x22
     bl   vpool_get
     ldr  x9, [sp, #8]
@@ -933,13 +937,12 @@ FUNC vkey_cells
     add  x9, x9, #1
     str  x9, [sp, #8]
     b    1b
-2:  mov  x26, #0
 .Lvk_batch:
-    ldr  x9, [x19, #TS_N]
+    ldr  x9, [sp, #32]
     cmp  x26, x9
     b.hs .Lvk_end
     bl   check_deadline
-    ldr  x9, [x19, #TS_N]
+    ldr  x9, [sp, #32]
     sub  x27, x9, x26
     mov  x10, #VBATCH
     cmp  x27, x10
@@ -1011,7 +1014,7 @@ FUNC vkey_cells
 8:  add  x26, x26, x27
     b    .Lvk_batch
 .Lvk_end:
-    add  sp, sp, #32
+    add  sp, sp, #48
     LEAVE 5
 ENDF vkey_cells
 

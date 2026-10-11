@@ -381,8 +381,10 @@ windows, at most `threads`, each at least `g_par_min_rows` = 16384 rows
   index row runs) are cut into windows of candidate rows; each task filters
   its window; outputs are concatenated in order;
 * **filters / projections** over tuple sets (`ops.S`);
-* **hash-join probes** (the build side and all key cells are computed
-  first, the probe of the left tuples is split);
+* **join keys**: the key cells and hashes of both join inputs are computed
+  by tasks over windows of the input (`vkey_cells`);
+* **hash-join probes** (after the build of the chained table, the probe of
+  the left tuples is split);
 * **aggregation**: each task aggregates its window into its own group table
   (partial aggregation); the partial tables are then merged by parallel
   merge tasks, one per hash partition (each takes its partition's groups

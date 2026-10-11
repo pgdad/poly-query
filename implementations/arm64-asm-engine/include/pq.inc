@@ -704,6 +704,17 @@
 #define VB_SIZE     64
 #define VPOOL_MAX   64
 #define VKEY_MAX    32             // most keys evaluated as vectors at once
+// Join key task (vexec.S vkey_cells)
+#define VK_TS       0              // TupleSet*
+#define VK_KEYS     8              // Node** key expressions
+#define VK_NKEYS    16
+#define VK_CTX      24             // EvalCtx* (own copy for worker tasks)
+#define VK_CELLS    32             // out: nkeys cells per tuple
+#define VK_HASH     40             // out: u64 hash per tuple
+#define VK_FLAGS    48             // out: u8 1 = a key is NULL
+#define VK_LO       56             // tuples [lo, hi)
+#define VK_HI       64
+#define VK_SIZE     80
 
 // Rows per batch handed to a streaming sink (exec_plan_stream)
 #define EXEC_STREAM_BATCH 1000

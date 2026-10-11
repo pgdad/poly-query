@@ -1024,14 +1024,7 @@ FUNC join_keys
     b.eq 1f
     cmp  x21, #VKEY_MAX
     b.hi 1f
-    mov  x0, x19
-    mov  x1, x20
-    mov  x2, x21
-    mov  x3, x22
-    mov  x4, x23
-    mov  x5, x24
-    mov  x6, x25
-    bl   vkey_cells
+    bl   .Ljk_tasks
     b    3f
 1:  mov  x26, #0
 2:  ldr  x9, [x19, #TS_N]
@@ -1059,6 +1052,89 @@ FUNC join_keys
     mov  x1, x24
     mov  x2, x25
     LEAVE 5
+
+// local helper: vectorized key cells by vkey_cells tasks over windows of
+// the tuples (in parallel with threads > 1, at most one task per
+// g_par_min_rows tuples, when the keys are safe for worker threads)
+//   uses x26 (tasks), x27 (records), x28 (index)
+.Ljk_tasks:
+    stp  x29, x30, [sp, #-16]!
+    mov  x26, #1
+    TLS_LDR x9, g_x_threads
+    cmp  x9, #1
+    b.ls 2f
+    LDR_G x10, g_par_min_rows
+    ldr  x11, [x19, #TS_N]
+    udiv x10, x11, x10
+    cmp  x10, x9
+    csel x10, x10, x9, lo
+    cmp  x10, #2
+    b.lo 2f
+    mov  x26, x10
+    mov  x28, #0                        // every key safe for workers?
+1:  cmp  x28, x21
+    b.hs 2f
+    ldr  x0, [x20, x28, lsl #3]
+    bl   expr_par_safe
+    add  x28, x28, #1
+    cbnz w0, 1b
+    mov  x26, #1
+2:  mov  x9, #VK_SIZE
+    mul  x0, x9, x26
+    bl   arena_alloc
+    mov  x27, x0
+    ldr  x9, [x19, #TS_N]               // window: ceil(n / tasks)
+    add  x10, x9, x26
+    sub  x10, x10, #1
+    udiv x10, x10, x26
+    mov  x28, #0
+3:  cmp  x28, x26
+    b.hs 5f
+    mov  x11, #VK_SIZE
+    madd x12, x28, x11, x27
+    str  x19, [x12, #VK_TS]
+    str  x20, [x12, #VK_KEYS]
+    str  x21, [x12, #VK_NKEYS]
+    str  x22, [x12, #VK_CTX]
+    str  x23, [x12, #VK_CELLS]
+    str  x24, [x12, #VK_HASH]
+    str  x25, [x12, #VK_FLAGS]
+    ldr  x9, [x19, #TS_N]
+    mul  x13, x28, x10
+    cmp  x13, x9
+    csel x13, x13, x9, lo
+    str  x13, [x12, #VK_LO]
+    add  x13, x13, x10
+    cmp  x13, x9
+    csel x13, x13, x9, lo
+    str  x13, [x12, #VK_HI]
+    cmp  x26, #1
+    b.eq 4f
+    stp  x10, x12, [sp, #-16]!          // worker tasks: own contexts
+    mov  x0, #EC_SIZE
+    bl   arena_alloc
+    ldp  x10, x12, [sp], #16
+    ldp  x13, x14, [x22]
+    stp  x13, x14, [x0]
+    ldp  x13, x14, [x22, #16]
+    stp  x13, x14, [x0, #16]
+    ldp  x13, x14, [x22, #32]
+    stp  x13, x14, [x0, #32]
+    str  x0, [x12, #VK_CTX]
+4:  add  x28, x28, #1
+    b    3b
+5:  cmp  x26, #1
+    b.ne 6f
+    mov  x0, x27
+    bl   vkey_cells
+    b    7f
+6:  ADR_L x0, vkey_cells
+    mov  x1, x27
+    mov  x2, #VK_SIZE
+    mov  x3, x26
+    bl   par_run
+7:  ldp  x29, x30, [sp], #16
+    ret
 ENDF join_keys
 
 // =============================================================================
