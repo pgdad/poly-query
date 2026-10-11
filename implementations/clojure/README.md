@@ -1287,7 +1287,7 @@ start-up, peak (VmHWM) of a workload session otherwise.
 |---|---|---|---|---|---|
 | **Run from a jar** (`target/polyquery.jar`) | kept (needed by the AOT cache) | 346 → 352 ms (no effect alone) | – | – | – |
 | **JDK AOT cache** trained by `make build` | kept | 343 → 119 ms | total 3416 → 1370 ms | total 623 → 561 ms | start-up 135 → 124 MB; peak within noise |
-| … share of the *training* in it (cache recorded from a `version`-only session instead) | – | 125 vs 127 ms (classes alone give the start-up gain) | 1597 vs 600 ms (the profiles give the cold gain) | 244 vs 251 ms | 133 vs 149 MB |
+| … share of the *training* in it: cache recorded from a `version`-only session vs the trained cache | – | 125 vs 127 ms (classes alone give the start-up gain) | 1597 vs 600 ms (the profiles give the cold gain) | 244 vs 251 ms | 133 vs 149 MB |
 | … training data with NULLs in every column type | kept | – | total 596 → 513 ms (q18 78 → 36, q04 66 → 29, q05 35 → 12) | 254 → 228 ms (q08 outlier in the old run; others equal) | equal |
 | `-XX:CompileThresholdScaling=0.3` | kept | 138 vs 138 ms | total 1367 → 847 ms (−38%) | 407 vs 414 ms (noise) | start-up +22 MB (132 → 154 MB), peak equal |
 | `-XX:+UseTransparentHugePages` (kernel THP mode `madvise`) | kept | 135 vs 129 ms (noise) | full workload 812 vs 819 ms; sort/group subset 544 → 483 ms | 368 → 337 ms; subset 266 → 251 ms (q14 139 → 124) | peak +120 MB (+2.5%); subset +230 MB (+9%) |
@@ -1307,7 +1307,7 @@ start-up, peak (VmHWM) of a workload session otherwise.
 | Sort: one comparator type, no boxing, UTF-8 prefixes | kept | – | – | q14 ≈ 320 → 145 ms, q15 ≈ 130 → 100 ms | – |
 | Sort: merge-path parallel merges, parallel key extraction | kept | – | – | q14 ≈ 145 → 62 ms, q15 ≈ 100 → 62 ms | – |
 | Kernels: `positions-where` macro, no `not=` on primitives, MIN/MAX without `*` | kept | – | q18 alone 55 vs 60 ms (noise) | 6 filter/aggregate queries 24.1 → 21.4 ms (−11%) | equal |
-| CSV reader: `^:const` character constants | kept | – | – | – | loading 12.2 → 8.0 s |
+| CSV reader: `^:const` character constants (table loading 12.2 → 8.0 s, same JVM flags) | kept | – | – | – | – |
 | Aggregate merges reading primitive sums/counts | dropped | – | 221 → 215 ms | 54.1 → 54.1 ms | – |
 | `Math/addExact`, `subtractExact`, `multiplyExact` in arithmetic kernels | dropped | – | 297 → 285 ms | 27.5 → 39.9 ms (q08 outlier; arithmetic queries 3.3 → 3.4, 3.2 → 3.2 ms) | – |
 | `-XX:TieredStopAtLevel=1` | not tried (excluded by the task: trades steady-state speed for start-up) | | | | |
@@ -1316,10 +1316,12 @@ start-up, peak (VmHWM) of a workload session otherwise.
 
 * **Fully AOT-compiled.** `make build` compiles `polyquery.main` and
   everything it requires into class files. Checked with
-  `POLYQUERY_JAVA_OPTS=-Xlog:class+load:file=…`: every `polyquery.*` and
-  `clojure.*` class comes from the jar (without the AOT cache) or from the
-  cache ("shared objects file", 5411 classes); the only dynamically defined
-  classes are 7 JDK `LambdaForm`s — no `fn__` class from a
+  `POLYQUERY_JAVA_OPTS=-Xlog:class+load:file=…` on a session with a load and
+  a GROUP BY query: with `-XX:AOTMode=off` all 1599 `polyquery.*` classes
+  come from `polyquery.jar` and the `clojure.*` ones from the Clojure jars;
+  with the cache, 5436 classes come from it ("shared objects file"). In both
+  cases the only dynamically defined classes are JDK `LambdaForm`s
+  (`__JVM_LookupDefineClass__`, 7–10) — no `fn__` class from a
   `DynamicClassLoader`, i.e. nothing is compiled or loaded from source at
   run time. (`clojure.core.server`, `clojure.main` and `clojure.spec.alpha`
   are loaded by Clojure's own runtime initialization — `RT` starts the
