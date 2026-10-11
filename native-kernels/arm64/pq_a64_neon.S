@@ -55,40 +55,66 @@
  * Args:      x0 data, x1 validity (NULL = all valid), x2 n, w3 op, x4 a,
  *            x5 b, x6 out_idx
  * Result:    x0 = number of selected rows, (size_t)-1 for an invalid op
- * Clobbers:  x0, x1, x3, x7-x17, v0-v7, v16-v18, v20, v21, flags
- * Registers: x3 original validity, x7 lo, x8 span, w9 inv (0/0xffff),
- *            x10 row i, x11 output cursor, x12 .Lneon_selpos,
+ * Clobbers:  x0, x1, x3, x7-x17, v0-v7, v16-v31, flags
+ * Registers: x3 original validity, x7 lo, x8 span, w9 inv (0/~0),
+ *            x10 row i, x11 output cursor, x12 .Lneon_selpos16,
  *            x13 .Lneon_selcnt, x15 main-loop row limit, w16 row mask,
- *            x17 temp; v16 lo, v17 span, v18 bit weights, v20 row base
- *            (u32 x4), v21 = 8 (u32 x4)
- * Algorithm: PRED_SETUP range form. 16 rows per iteration: RANGE16 (SUB +
- *            CMHS per 2 rows, PACK16) -> 16-bit mask, EOR inversion, AND
- *            the validity halfword; each mask byte is compacted with EMIT8
- *            (positions table, 8 indices stored branch-free, cursor += count
- *            from the popcount table).
- * Tail:      0-15 rows: scalar SPRED + AND_VBIT, unconditional index store,
+ *            x17 temp; v16 lo, v17 hi/span (PRED64_FORM), v18 bit weights,
+ *            v19 row base (u32 x4), v20 = 8 (u32 x4), v21/v30/v31 EMIT8
+ *            temps, v0-v7/v22-v29 rows and lane masks
+ * Algorithm: PRED_SETUP range form; PRED64_FORM picks the cheapest lane
+ *            test (one CMEQ/CMGE per 2 rows for every op but a genuine
+ *            BETWEEN, which keeps SUB + CMHS) and enters the main-loop copy
+ *            of that form. 32 rows per iteration: PRED32 -> 32-bit mask
+ *            (PACK32), EOR inversion, AND the validity word; each mask byte
+ *            is compacted with EMIT8 (u16 positions table, 8 indices stored
+ *            branch-free, cursor += count from the popcount table).
+ * Tail:      0-31 rows: scalar SPRED + AND_VBIT, unconditional index store,
  *            cursor advanced by the predicate bit.
  * ======================================================================== */
+/* FILTER32_LOOP form, loop, tail: main loop (label `loop`) of one predicate
+ * form: PRED32, inversion, validity, 4 x EMIT8; then branches to `tail`. */
+    .macro  FILTER32_LOOP form, loop, tail
+\loop:
+    PRED32  \form, x0, w16
+    eor     w16, w16, w9
+    cbz     x1, .Lfilter32_loop_emit\@
+    ldr     w17, [x1], #4                   // validity of rows i..i+31
+    and     w16, w16, w17
+.Lfilter32_loop_emit\@:
+    and     w17, w16, #0xff
+    EMIT8   17, 19, 20, 21, 30, 31
+    ubfx    w17, w16, #8, #8
+    EMIT8   17, 19, 20, 21, 30, 31
+    ubfx    w17, w16, #16, #8
+    EMIT8   17, 19, 20, 21, 30, 31
+    lsr     w17, w16, #24
+    EMIT8   17, 19, 20, 21, 30, 31
+    add     x10, x10, #32
+    cmp     x10, x15
+    b.lo    \loop
+    b       \tail
+    .endm
+
 FUNC pqk_a64_neon_filter_i64
     // -- 1. arguments / empty input
-    FILTER16_PROLOGUE .Lneon_filter_i64_inval, .Lneon_filter_i64_tail
-    EMIT8_SETUP
-    // -- 2. main loop: 16 rows
-.Lneon_filter_i64_main:
-    RANGE16 x0, w16
-    eor     w16, w16, w9
-    cbz     x1, .Lneon_filter_i64_emit
-    ldrh    w17, [x1], #2                   // validity of rows i..i+15
-    and     w16, w16, w17
-.Lneon_filter_i64_emit:
-    and     w17, w16, #0xff
-    EMIT8   17
-    lsr     w17, w16, #8
-    EMIT8   17
-    add     x10, x10, #16
-    cmp     x10, x15
-    b.lo    .Lneon_filter_i64_main
-    // -- 3. tail: 0-15 rows
+    PRED_SETUP w3, x4, x5, x7, x8, x9, x10, .Lneon_filter_i64_inval
+    mov     x3, x1
+    mov     x10, #0
+    mov     x11, x6
+    and     x15, x2, #~31
+    cbz     x15, .Lneon_filter_i64_tail
+    LOADADDR x12, .Lneon_bitsel16
+    ld1     {v18.16b}, [x12]
+    EMIT8_SETUP 19, 20
+    PRED64_FORM .Lneon_filter_i64_main_eq, .Lneon_filter_i64_main_le, \
+                .Lneon_filter_i64_main_ge, .Lneon_filter_i64_main_rng, x14, x16
+    // -- 2. main loop: 32 rows, one copy per predicate form
+    FILTER32_LOOP eq, .Lneon_filter_i64_main_eq, .Lneon_filter_i64_tail
+    FILTER32_LOOP le, .Lneon_filter_i64_main_le, .Lneon_filter_i64_tail
+    FILTER32_LOOP ge, .Lneon_filter_i64_main_ge, .Lneon_filter_i64_tail
+    FILTER32_LOOP rng, .Lneon_filter_i64_main_rng, .Lneon_filter_i64_tail
+    // -- 3. tail: 0-31 rows
 .Lneon_filter_i64_tail:
     cmp     x10, x2
     b.hs    .Lneon_filter_i64_result
@@ -116,32 +142,52 @@ ENDF pqk_a64_neon_filter_i64
  * Args:      x0 data, x1 validity (NULL = all valid), x2 n, w3 op, x4 a,
  *            x5 b, x6 out_bits
  * Result:    x0 = number of set bits, (size_t)-1 for an invalid op
- * Clobbers:  x0-x4, x6-x17, v0-v7, v16-v18, flags (includes the popcount
- *            tail call)
+ * Clobbers:  x0-x4, x6-x17, v0-v7, v16-v18, v22-v29, flags (includes the
+ *            popcount tail call)
  * Registers: as filter_i64; w12 tail bits, x13 tail row, w14 tail bit
- * Algorithm: 16 rows per iteration: RANGE16, EOR inversion, AND validity,
- *            one STRH of the 16-bit mask. The count is the popcount of the
- *            finished bitmap (POPCOUNT_TAILCALL into bitmap_popcount: about
- *            1/64 of the input bytes, keeps the main loop short).
- * Tail:      0-15 rows: scalar SPRED + AND_VBIT into w12 (BITS_TAIL_PUT),
- *            stored as 1-2 zero-padded bytes (BITS_TAIL_STORE).
+ * Algorithm: PRED64_FORM as filter_i64. 32 rows per iteration: PRED32,
+ *            EOR inversion, AND validity, one 32-bit STR of the mask. The
+ *            count is the popcount of the finished bitmap
+ *            (POPCOUNT_TAILCALL into bitmap_popcount: about 1/64 of the
+ *            input bytes, keeps the main loop short).
+ * Tail:      0-31 rows: scalar SPRED + AND_VBIT into w12 (BITS_TAIL_PUT),
+ *            stored as 1-4 zero-padded bytes (BITS_TAIL_STORE).
  * ======================================================================== */
+/* BITMAP32_LOOP form, loop, tail: main loop (label `loop`) of one predicate
+ * form: PRED32, inversion, validity, STR; then branches to `tail`. */
+    .macro  BITMAP32_LOOP form, loop, tail
+\loop:
+    PRED32  \form, x0, w16
+    eor     w16, w16, w9
+    cbz     x1, .Lbitmap32_loop_store\@
+    ldr     w17, [x1], #4
+    and     w16, w16, w17
+.Lbitmap32_loop_store\@:
+    str     w16, [x11], #4
+    add     x10, x10, #32
+    cmp     x10, x15
+    b.lo    \loop
+    b       \tail
+    .endm
+
 FUNC pqk_a64_neon_filter_i64_bitmap
     // -- 1. arguments / empty input
-    FILTER16_PROLOGUE .Lneon_filter_i64_bitmap_inval, .Lneon_filter_i64_bitmap_tail
-    // -- 2. main loop: 16 rows
-.Lneon_filter_i64_bitmap_main:
-    RANGE16 x0, w16
-    eor     w16, w16, w9
-    cbz     x1, .Lneon_filter_i64_bitmap_store
-    ldrh    w17, [x1], #2
-    and     w16, w16, w17
-.Lneon_filter_i64_bitmap_store:
-    strh    w16, [x11], #2
-    add     x10, x10, #16
-    cmp     x10, x15
-    b.lo    .Lneon_filter_i64_bitmap_main
-    // -- 3. tail: 0-15 rows -> 1-2 bytes
+    PRED_SETUP w3, x4, x5, x7, x8, x9, x10, .Lneon_filter_i64_bitmap_inval
+    mov     x3, x1
+    mov     x10, #0
+    mov     x11, x6
+    and     x15, x2, #~31
+    cbz     x15, .Lneon_filter_i64_bitmap_tail
+    LOADADDR x12, .Lneon_bitsel16
+    ld1     {v18.16b}, [x12]
+    PRED64_FORM .Lneon_filter_i64_bitmap_main_eq, .Lneon_filter_i64_bitmap_main_le, \
+                .Lneon_filter_i64_bitmap_main_ge, .Lneon_filter_i64_bitmap_main_rng, x14, x16
+    // -- 2. main loop: 32 rows, one copy per predicate form
+    BITMAP32_LOOP eq, .Lneon_filter_i64_bitmap_main_eq, .Lneon_filter_i64_bitmap_tail
+    BITMAP32_LOOP le, .Lneon_filter_i64_bitmap_main_le, .Lneon_filter_i64_bitmap_tail
+    BITMAP32_LOOP ge, .Lneon_filter_i64_bitmap_main_ge, .Lneon_filter_i64_bitmap_tail
+    BITMAP32_LOOP rng, .Lneon_filter_i64_bitmap_main_rng, .Lneon_filter_i64_bitmap_tail
+    // -- 3. tail: 0-31 rows -> 1-4 bytes
 .Lneon_filter_i64_bitmap_tail:
     cmp     x10, x2
     b.hs    .Lneon_filter_i64_bitmap_result
@@ -156,7 +202,7 @@ FUNC pqk_a64_neon_filter_i64_bitmap
     add     x13, x13, #1
     cmp     x13, x2
     b.lo    .Lneon_filter_i64_bitmap_tail_row
-    BITS_TAIL_STORE .Lneon_filter_i64_bitmap_result
+    BITS_TAIL_STORE
     // -- 4. result: popcount of the bitmap
 .Lneon_filter_i64_bitmap_result:
     POPCOUNT_TAILCALL x6
@@ -534,13 +580,15 @@ ENDF pqk_a64_neon_minmax_f64
  * Args:      x0 data, x1 validity (NULL = all valid), x2 n, w3 op, x4 a,
  *            x5 b
  * Result:    x0 = number of selected valid rows, (size_t)-1 for an invalid op
- * Clobbers:  x0, x1, x6-x15, v0-v7, v16-v21, v26-v29, flags
+ * Clobbers:  x0, x1, x6-x16, v0-v7, v16-v21, v26-v29, flags
  * Registers: x6 groups / tail rows, x7 lo, x8 span, x9 inv (0/-1), x11
  *            original validity, x12 count, x13 temp, w14 tail validity,
- *            x15 tail value; v16 lo, v17 span, v18 inv, v19 validity byte,
- *            v20/v21 lane counters, v4-v7 row masks, v26-v29 .Lneon_bits2d
- * Algorithm: 8 rows per iteration, SUB + CMHS per 2 rows (RANGE8); the
- *            all-ones lane masks are subtracted from two 2x64 counters.
+ *            x15 tail value, x16 temp; v16 lo, v17 hi/span (PRED64_FORM),
+ *            v18 inv, v19 validity byte, v20/v21 lane counters, v4-v7 row
+ *            masks, v26-v29 .Lneon_bits2d
+ * Algorithm: 8 rows per iteration in the lane form chosen by PRED64_FORM
+ *            (one CMEQ/CMGE per 2 rows, SUB + CMHS for a genuine BETWEEN);
+ *            the all-ones lane masks are subtracted from two 2x64 counters.
  *            With validity each mask is EORed with the inversion and ANDed
  *            with the VMASK2D mask; without validity the inversion is
  *            applied algebraically at the end (count = rows - count).
@@ -554,27 +602,16 @@ ENDF pqk_a64_neon_minmax_f64
     sub     v21.2d, v21.2d, v3.2d
     .endm
 
-FUNC pqk_a64_neon_count_i64
-    // -- 1. arguments / empty input
-    PRED_SETUP w3, x4, x5, x7, x8, x9, x10, .Lneon_count_i64_inval
-    mov     x11, x1
-    mov     x12, #0
-    lsr     x6, x2, #3
-    cbz     x6, .Lneon_count_i64_tail
-    dup     v16.2d, x7
-    dup     v17.2d, x8
-    dup     v18.2d, x9
-    movi    v20.2d, #0
-    movi    v21.2d, #0
-    cbz     x1, .Lneon_count_i64_main_nv
-    LOADADDR x10, .Lneon_bits2d
-    ld1     {v26.2d-v29.2d}, [x10]
-    // -- 2. main loop: 8 rows
-.Lneon_count_i64_main_v:
+/* COUNT_FORM form: entry .Lneon_count_i64_<form> and the with-validity /
+ * without-validity main loops of one predicate form. */
+    .macro  COUNT_FORM form
+.Lneon_count_i64_\form:
+    cbz     x1, .Lneon_count_i64_main_nv_\form
+.Lneon_count_i64_main_v_\form:
     ld1r    {v19.16b}, [x1], #1
     ld1     {v0.2d-v3.2d}, [x0], #64
     VMASK2D 19, 4, 5, 6, 7, 26, 27, 28, 29
-    RANGE_LANES 0, 1, 2, 3
+    PRED_LANES \form, 0, 1, 2, 3
     eor     v0.16b, v0.16b, v18.16b
     eor     v1.16b, v1.16b, v18.16b
     eor     v2.16b, v2.16b, v18.16b
@@ -585,15 +622,40 @@ FUNC pqk_a64_neon_count_i64
     and     v3.16b, v3.16b, v7.16b
     COUNT8
     subs    x6, x6, #1
-    b.ne    .Lneon_count_i64_main_v
-    ADDV2X  x12, 20, 21
-    b       .Lneon_count_i64_tail
-.Lneon_count_i64_main_nv:
+    b.ne    .Lneon_count_i64_main_v_\form
+    b       .Lneon_count_i64_reduce_v
+.Lneon_count_i64_main_nv_\form:
     ld1     {v0.2d-v3.2d}, [x0], #64
-    RANGE_LANES 0, 1, 2, 3
+    PRED_LANES \form, 0, 1, 2, 3
     COUNT8
     subs    x6, x6, #1
-    b.ne    .Lneon_count_i64_main_nv
+    b.ne    .Lneon_count_i64_main_nv_\form
+    b       .Lneon_count_i64_reduce_nv
+    .endm
+
+FUNC pqk_a64_neon_count_i64
+    // -- 1. arguments / empty input
+    PRED_SETUP w3, x4, x5, x7, x8, x9, x10, .Lneon_count_i64_inval
+    mov     x11, x1
+    mov     x12, #0
+    lsr     x6, x2, #3
+    cbz     x6, .Lneon_count_i64_tail
+    dup     v18.2d, x9
+    movi    v20.2d, #0
+    movi    v21.2d, #0
+    LOADADDR x10, .Lneon_bits2d
+    ld1     {v26.2d-v29.2d}, [x10]
+    PRED64_FORM .Lneon_count_i64_eq, .Lneon_count_i64_le, \
+                .Lneon_count_i64_ge, .Lneon_count_i64_rng, x13, x16
+    // -- 2. main loop: 8 rows, one copy per predicate form
+    COUNT_FORM eq
+    COUNT_FORM le
+    COUNT_FORM ge
+    COUNT_FORM rng
+.Lneon_count_i64_reduce_v:
+    ADDV2X  x12, 20, 21
+    b       .Lneon_count_i64_tail
+.Lneon_count_i64_reduce_nv:
     ADDV2X  x12, 20, 21
     cbz     x9, .Lneon_count_i64_tail
     and     x13, x2, #~7                    // inverted: rows - in-range rows
@@ -817,23 +879,24 @@ ENDF pqk_a64_neon_hash_i64
  * compare_i64
  * Args:      x0 a, x1 b, x2 n, w3 op, x4 out_bits
  * Result:    x0 = number of set bits, (size_t)-1 for an invalid op
- * Clobbers:  x0-x7, x9-x16, v0-v7, v16, v18, v20-v27, flags (includes the
+ * Clobbers:  x0-x7, x9-x16, v0-v7, v16, v18, v20-v31, flags (includes the
  *            popcount tail call)
  * Registers: w5 type (0 = EQ-based, 1 = GT-based; also the swap temp),
- *            w9 inversion mask (0/0xffff), x10 row, x11 output cursor,
- *            x15 main-loop row limit, w16 mask, v18 bit weights,
- *            v0-v7 lanes of a, v20-v27 lanes of b; tail: w12 bits, x13 row,
- *            x14/x15 operands, w14/w16 predicate bits
+ *            w9 inversion mask (0/~0), x10 row, x11 output cursor,
+ *            x15 main-loop row limit, w16 mask, v18 bit weights;
+ *            rows 0-15: v0-v7 (a), v20-v27 (b); rows 16-31: v1-v4/v28-v31
+ *            (a), v20-v27 (b); tail: w12 bits, x13 row, x14/x15 operands,
+ *            w14/w16 predicate bits
  * Algorithm: CMPOP_CHECK / CMPOP_SWAP reduce every op to EQ or GT plus an
  *            inversion (LT/GE swap the operands, NE/LE/GE invert the mask).
- *            16 rows per iteration: CMEQ or CMGT (one loop copy each,
- *            CMP16), PACK16, EOR, STRH. The count is the popcount of the
- *            finished bitmap (POPCOUNT_TAILCALL).
- * Tail:      0-15 rows: scalar CMP + CSET eq/gt selected by w5, collected by
- *            BITS_TAIL_PUT and stored by BITS_TAIL_STORE.
+ *            32 rows per iteration: CMEQ or CMGT (one loop copy each,
+ *            CMP32), PACK16B twice + PACK32, EOR, one 32-bit STR. The count
+ *            is the popcount of the finished bitmap (POPCOUNT_TAILCALL).
+ * Tail:      0-31 rows: scalar CMP + CSET eq/gt selected by w5, collected
+ *            by BITS_TAIL_PUT and stored by BITS_TAIL_STORE.
  * ======================================================================== */
-/* CMP16 insn, wout: 16 rows of a and b -> 16-bit mask of `insn`. */
-    .macro  CMP16 insn, wout
+/* CMP32 insn, wout: 32 rows of a and b -> 32-bit mask of `insn`. */
+    .macro  CMP32 insn, wout
     ld1     {v0.2d-v3.2d}, [x0], #64
     ld1     {v4.2d-v7.2d}, [x0], #64
     ld1     {v20.2d-v23.2d}, [x1], #64
@@ -846,17 +909,31 @@ ENDF pqk_a64_neon_hash_i64
     \insn   v5.2d, v5.2d, v25.2d
     \insn   v6.2d, v6.2d, v26.2d
     \insn   v7.2d, v7.2d, v27.2d
-    PACK16  \wout
+    PACK16B 0, 1, 2, 3, 4, 5, 6, 7
+    ld1     {v1.2d-v4.2d}, [x0], #64
+    ld1     {v28.2d-v31.2d}, [x0], #64
+    ld1     {v20.2d-v23.2d}, [x1], #64
+    ld1     {v24.2d-v27.2d}, [x1], #64
+    \insn   v1.2d, v1.2d, v20.2d
+    \insn   v2.2d, v2.2d, v21.2d
+    \insn   v3.2d, v3.2d, v22.2d
+    \insn   v4.2d, v4.2d, v23.2d
+    \insn   v28.2d, v28.2d, v24.2d
+    \insn   v29.2d, v29.2d, v25.2d
+    \insn   v30.2d, v30.2d, v26.2d
+    \insn   v31.2d, v31.2d, v27.2d
+    PACK16B 1, 2, 3, 4, 28, 29, 30, 31
+    PACK32  \wout, 0, 1
     .endm
 
-/* CMP16_LOOP insn, loop: main loop (label `loop`) of one compare type:
- * CMP16, EOR inversion, STRH, while x10 < x15. */
-    .macro  CMP16_LOOP insn, loop
+/* CMP32_LOOP insn, loop: main loop (label `loop`) of one compare type:
+ * CMP32, EOR inversion, STR, while x10 < x15. */
+    .macro  CMP32_LOOP insn, loop
 \loop:
-    CMP16   \insn, w16
+    CMP32   \insn, w16
     eor     w16, w16, w9
-    strh    w16, [x11], #2
-    add     x10, x10, #16
+    str     w16, [x11], #4
+    add     x10, x10, #32
     cmp     x10, x15
     b.lo    \loop
     .endm
@@ -865,23 +942,22 @@ FUNC pqk_a64_neon_compare_i64
     // -- 1. arguments / empty input
     CMPOP_CHECK w3, w9, .Lneon_compare_i64_inval
     neg     w9, w9
-    and     w9, w9, #0xffff
     CMPOP_SWAP w3, x0, x1, x5
     cmp     w3, #PQK_LT
     cset    w5, hs
     mov     x10, #0
     mov     x11, x4
-    and     x15, x2, #~15
+    and     x15, x2, #~31
     cbz     x15, .Lneon_compare_i64_tail
     LOADADDR x12, .Lneon_bitsel16
     ld1     {v18.16b}, [x12]
     cbnz    w5, .Lneon_compare_i64_main_gt
-    // -- 2. main loop: 16 rows, EQ-based ops
-    CMP16_LOOP cmeq, .Lneon_compare_i64_main_eq
+    // -- 2. main loop: 32 rows, EQ-based ops
+    CMP32_LOOP cmeq, .Lneon_compare_i64_main_eq
     b       .Lneon_compare_i64_tail
-    // -- 2. main loop: 16 rows, GT-based ops
-    CMP16_LOOP cmgt, .Lneon_compare_i64_main_gt
-    // -- 3. tail: 0-15 rows -> 1-2 bytes
+    // -- 2. main loop: 32 rows, GT-based ops
+    CMP32_LOOP cmgt, .Lneon_compare_i64_main_gt
+    // -- 3. tail: 0-31 rows -> 1-4 bytes
 .Lneon_compare_i64_tail:
     cmp     x10, x2
     b.hs    .Lneon_compare_i64_result
@@ -901,7 +977,7 @@ FUNC pqk_a64_neon_compare_i64
     add     x13, x13, #1
     cmp     x13, x2
     b.lo    .Lneon_compare_i64_tail_row
-    BITS_TAIL_STORE .Lneon_compare_i64_result
+    BITS_TAIL_STORE
     // -- 4. result: popcount of the bitmap
 .Lneon_compare_i64_result:
     POPCOUNT_TAILCALL x4
@@ -1150,32 +1226,53 @@ ENDF pqk_a64_neon_gather_i64
  * Args:      x0 data, x1 validity (NULL = all valid), x2 n, w3 op, x4 &a,
  *            x5 &b (read only for BETWEEN), x6 out_idx
  * Result:    x0 = number of selected rows, (size_t)-1 for an invalid op
- * Clobbers:  x0, x1, x3-x5, x7-x17, v0-v7, v16-v25, v28, flags
+ * Clobbers:  x0, x1, x3-x5, x7-x17, v0-v7, v16-v26, v28, v30, v31, flags
  * Registers: x8:x7 lo, x10:x9 span (scalar copies for the tail), w5 mask
  *            inversion (0/0xff), w4 row inversion (0/1), x3 validity base,
- *            x14 row i, x11 output cursor, x12 .Lneon_selpos,
+ *            x14 row i, x11 output cursor, x12 .Lneon_selpos16,
  *            x13 .Lneon_selcnt, x15 main-loop row limit, w16 row mask,
- *            w17 validity byte; v16:v17 lo, v18:v19 span, v20 row base
- *            (u32 x4), v21 = 8 (u32 x4), v28 bit weights, v0-v7 / v22-v25
- *            work
- * Algorithm: PRED128_SETUP (op validated before *a / *b are read). 8 rows
- *            per iteration: RNG8 (LD2 + 8 lane ops per 2 rows), PACK8 to an
- *            8-bit mask, EOR inversion, AND the validity byte, then EMIT8
- *            (cursor k <= i and i + 8 <= n, so the 32-byte over-store stays
- *            inside the documented capacity >= n).
+ *            w17 validity byte; v16-v19 predicate constants
+ *            (PRED128_FORM), v20 row base (u32 x4), v21 = 8 (u32 x4),
+ *            v28 = .Lneon_bits8h, v0-v7 / v22-v25 work, v26/v30/v31 EMIT8
+ *            temps
+ * Algorithm: PRED128_SETUP (op validated before *a / *b are read);
+ *            PRED128_FORM picks the cheapest lane test (3-4 ops per 2 rows
+ *            for EQ/NE/LT/LE/GT/GE, RNG2 with 8 ops only for a genuine
+ *            BETWEEN) and enters the main-loop copy of that form. 8 rows per
+ *            iteration: PRED128_8, PACK8 to an 8-bit mask, EOR inversion,
+ *            AND the validity byte, then EMIT8 (cursor k <= i and
+ *            i + 8 <= n, so the 32-byte over-store stays inside the
+ *            documented capacity >= n).
  * Tail:      0-7 rows: scalar SPRED128 + AND_VBIT, unconditional store.
  * ======================================================================== */
 /* PACK8 wout: narrows the lane masks v0,v2,v4,v6 (rows 0..7) to an 8-bit row
- * mask (bit j = row j). Needs v28 = .Lneon_bitsel16 (low 8 bytes).
- * Clobbers v0, v4. */
+ * mask (bit j = row j): UZP1 x3 to 8 halfword masks, AND with the weights
+ * v28 = .Lneon_bits8h, ADDV. Clobbers v0, v4. */
     .macro  PACK8 wout
     uzp1    v0.4s, v0.4s, v2.4s
     uzp1    v4.4s, v4.4s, v6.4s
     uzp1    v0.8h, v0.8h, v4.8h
-    xtn     v0.8b, v0.8h
-    and     v0.8b, v0.8b, v28.8b
-    addv    b0, v0.8b
-    umov    \wout, v0.b[0]
+    and     v0.16b, v0.16b, v28.16b
+    addv    h0, v0.8h
+    umov    \wout, v0.h[0]
+    .endm
+
+/* FILTER128_LOOP form, loop, tail: main loop (label `loop`) of one
+ * predicate form; then branches to `tail`. */
+    .macro  FILTER128_LOOP form, loop, tail
+\loop:
+    PRED128_8 \form, x0
+    PACK8   w16
+    eor     w16, w16, w5
+    cbz     x1, .Lfilter128_loop_emit\@
+    ldrb    w17, [x1], #1                   // validity of rows i..i+7
+    and     w16, w16, w17
+.Lfilter128_loop_emit\@:
+    EMIT8   16, 20, 21, 26, 30, 31
+    add     x14, x14, #8
+    cmp     x14, x15
+    b.lo    \loop
+    b       \tail
     .endm
 
 FUNC pqk_a64_neon_filter_i128
@@ -1189,22 +1286,16 @@ FUNC pqk_a64_neon_filter_i128
     and     x15, x2, #~7
     cbz     x15, .Lneon_filter_i128_tail
     PRED128_BCAST
-    LOADADDR x12, .Lneon_bitsel16
-    ldr     d28, [x12]
-    EMIT8_SETUP
-    // -- 2. main loop: 8 rows
-.Lneon_filter_i128_main:
-    RNG8    x0
-    PACK8   w16
-    eor     w16, w16, w5
-    cbz     x1, .Lneon_filter_i128_emit
-    ldrb    w17, [x1], #1                   // validity of rows i..i+7
-    and     w16, w16, w17
-.Lneon_filter_i128_emit:
-    EMIT8   16
-    add     x14, x14, #8
-    cmp     x14, x15
-    b.lo    .Lneon_filter_i128_main
+    LOADADDR x12, .Lneon_bits8h
+    ldr     q28, [x12]
+    EMIT8_SETUP 20, 21
+    PRED128_FORM .Lneon_filter_i128_main_eq, .Lneon_filter_i128_main_le, \
+                 .Lneon_filter_i128_main_ge, .Lneon_filter_i128_main_rng, x16, x17
+    // -- 2. main loop: 8 rows, one copy per predicate form
+    FILTER128_LOOP eq, .Lneon_filter_i128_main_eq, .Lneon_filter_i128_tail
+    FILTER128_LOOP le, .Lneon_filter_i128_main_le, .Lneon_filter_i128_tail
+    FILTER128_LOOP ge, .Lneon_filter_i128_main_ge, .Lneon_filter_i128_tail
+    FILTER128_LOOP rng, .Lneon_filter_i128_main_rng, .Lneon_filter_i128_tail
     // -- 3. tail: 0-7 rows
 .Lneon_filter_i128_tail:
     cmp     x14, x2
@@ -1236,14 +1327,15 @@ ENDF pqk_a64_neon_filter_i128
  * Registers: x8:x7 lo, x10:x9 span, x11 inv (0/-1), w4 row inversion (0/1),
  *            x3 validity base, x6 count, x14 row i, x15 main-loop row
  *            limit, x16/x17/x12/x13 tail temps; v16-v19 predicate
- *            constants, v26/v27 lane counters, v20 lane inversion,
- *            v21 replicated validity byte, v22-v25 validity lane masks,
- *            v28-v31 .Lneon_bits2d
- * Algorithm: 8 rows per iteration through RNG8; selected lanes (all-ones)
- *            are subtracted from two 2x64 counters. Without validity the
- *            inversion is applied algebraically once (count = rows - count);
- *            with validity each lane mask is EORed with the inversion and
- *            ANDed with the VMASK2D mask.
+ *            constants (PRED128_FORM), v26/v27 lane counters, v20 lane
+ *            inversion, v21 replicated validity byte, v22-v25 validity lane
+ *            masks, v28-v31 .Lneon_bits2d
+ * Algorithm: 8 rows per iteration through PRED128_8 in the form chosen by
+ *            PRED128_FORM; selected lanes (all-ones) are subtracted from two
+ *            2x64 counters. Without validity the inversion is applied
+ *            algebraically once (count = rows - count); with validity each
+ *            lane mask is EORed with the inversion and ANDed with the
+ *            VMASK2D mask.
  * Tail:      0-7 rows: scalar SPRED128 + AND_VBIT.
  * ======================================================================== */
 /* COUNT128_8: v26/v27 -= lane masks v0, v2, v4, v6 (all-ones = +1). */
@@ -1252,6 +1344,37 @@ ENDF pqk_a64_neon_filter_i128
     sub     v27.2d, v27.2d, v2.2d
     sub     v26.2d, v26.2d, v4.2d
     sub     v27.2d, v27.2d, v6.2d
+    .endm
+
+/* COUNT128_FORM form: entry .Lneon_count_i128_<form> and the with-validity
+ * / without-validity main loops of one predicate form. */
+    .macro  COUNT128_FORM form
+.Lneon_count_i128_\form:
+    cbz     x1, .Lneon_count_i128_main_nv_\form
+.Lneon_count_i128_main_v_\form:
+    PRED128_8 \form, x0
+    ld1r    {v21.16b}, [x1], #1
+    VMASK2D 21, 22, 23, 24, 25, 28, 29, 30, 31
+    eor     v0.16b, v0.16b, v20.16b
+    eor     v2.16b, v2.16b, v20.16b
+    eor     v4.16b, v4.16b, v20.16b
+    eor     v6.16b, v6.16b, v20.16b
+    and     v0.16b, v0.16b, v22.16b
+    and     v2.16b, v2.16b, v23.16b
+    and     v4.16b, v4.16b, v24.16b
+    and     v6.16b, v6.16b, v25.16b
+    COUNT128_8
+    add     x14, x14, #8
+    cmp     x14, x15
+    b.lo    .Lneon_count_i128_main_v_\form
+    b       .Lneon_count_i128_reduce_v
+.Lneon_count_i128_main_nv_\form:
+    PRED128_8 \form, x0
+    COUNT128_8
+    add     x14, x14, #8
+    cmp     x14, x15
+    b.lo    .Lneon_count_i128_main_nv_\form
+    b       .Lneon_count_i128_reduce_nv
     .endm
 
 FUNC pqk_a64_neon_count_i128
@@ -1266,35 +1389,20 @@ FUNC pqk_a64_neon_count_i128
     PRED128_BCAST
     movi    v26.2d, #0
     movi    v27.2d, #0
-    cbz     x1, .Lneon_count_i128_main_nv
     dup     v20.2d, x11
     LOADADDR x12, .Lneon_bits2d
     ld1     {v28.2d-v31.2d}, [x12]
-    // -- 2. main loop: 8 rows
-.Lneon_count_i128_main_v:
-    RNG8    x0
-    ld1r    {v21.16b}, [x1], #1
-    VMASK2D 21, 22, 23, 24, 25, 28, 29, 30, 31
-    eor     v0.16b, v0.16b, v20.16b
-    eor     v2.16b, v2.16b, v20.16b
-    eor     v4.16b, v4.16b, v20.16b
-    eor     v6.16b, v6.16b, v20.16b
-    and     v0.16b, v0.16b, v22.16b
-    and     v2.16b, v2.16b, v23.16b
-    and     v4.16b, v4.16b, v24.16b
-    and     v6.16b, v6.16b, v25.16b
-    COUNT128_8
-    add     x14, x14, #8
-    cmp     x14, x15
-    b.lo    .Lneon_count_i128_main_v
+    PRED128_FORM .Lneon_count_i128_eq, .Lneon_count_i128_le, \
+                 .Lneon_count_i128_ge, .Lneon_count_i128_rng, x16, x17
+    // -- 2. main loop: 8 rows, one copy per predicate form
+    COUNT128_FORM eq
+    COUNT128_FORM le
+    COUNT128_FORM ge
+    COUNT128_FORM rng
+.Lneon_count_i128_reduce_v:
     ADDV2X  x6, 26, 27
     b       .Lneon_count_i128_tail
-.Lneon_count_i128_main_nv:
-    RNG8    x0
-    COUNT128_8
-    add     x14, x14, #8
-    cmp     x14, x15
-    b.lo    .Lneon_count_i128_main_nv
+.Lneon_count_i128_reduce_nv:
     ADDV2X  x6, 26, 27
     cbz     x11, .Lneon_count_i128_tail
     sub     x6, x15, x6                     // inverted op: rows - in-range
