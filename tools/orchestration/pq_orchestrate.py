@@ -69,6 +69,10 @@ WORKSPACE_PATHS = [
 ]
 
 
+# The engine-integration task builds the accepted kernel library (read-only for the agent).
+NATIVE_EXTRA_PATHS = ["native-kernels/Makefile", "native-kernels/reference-c", "native-kernels/x86_64",
+                      "native-kernels/arm64", "native-kernels/tests"]
+
 TRUSTED_PATHS = ["tests", "spec"]
 TRUSTED_KERNEL_PATHS = ["spec", "native-kernels/Makefile", "native-kernels/include", "native-kernels/reference-c",
                         "native-kernels/tests"]
@@ -159,6 +163,8 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
     # Export the allowed paths at `ref` (committed state only) into the workspace.
     impl_path = L["work_dir"]
     export = (KERNEL_WORKSPACE_PATHS if task == "kernels" else WORKSPACE_PATHS) + [impl_path]
+    if task == "native":
+        export += NATIVE_EXTRA_PATHS
     present = [p for p in export if sh(["git", "cat-file", "-e", f"{ref}:{p}"], cwd=ROOT, check=False).returncode == 0]
     archive = subprocess.run(["git", "archive", "--format=tar", ref, *present], cwd=ROOT, check=True, capture_output=True)
     subprocess.run(["tar", "-x", "-C", str(ws)], input=archive.stdout, check=True)
@@ -585,7 +591,8 @@ def validate(run_id: str, phases: list[int] | None = None) -> dict:
     # Only the agent's own work directory is taken from the workspace; the harness, spec and kernel
     # test scaffolding come from the trusted repository (incl. hidden tests), so edits an agent made
     # to them cannot influence its verdict.
-    for rel in TRUSTED_KERNEL_PATHS if m["task"] == "kernels" else TRUSTED_PATHS:
+    for rel in TRUSTED_KERNEL_PATHS if m["task"] == "kernels" else \
+            TRUSTED_PATHS + (NATIVE_EXTRA_PATHS if m["task"] == "native" else []):
         dst = vd / rel
         if dst.is_dir():
             shutil.rmtree(dst)
@@ -598,14 +605,21 @@ def validate(run_id: str, phases: list[int] | None = None) -> dict:
             shutil.copy2(src, dst)
     if m["task"] == "kernels":
         return validate_kernels(run_id, m, vd)
-    task_phase = {"phase1": [1], "phase2": [1, 2], "phase3": [1, 2, 3], "phase4": [1, 2, 3], "phase5": [1, 2, 3]}
+    task_phase = {"phase1": [1], "phase2": [1, 2], "phase3": [1, 2, 3], "phase4": [1, 2, 3], "phase5": [1, 2, 3],
+                  "native": [1, 2, 3]}
     phases = phases or task_phase.get(m["task"], [1])
     phase_args = " ".join(f"--phase {p}" for p in phases)
     vscr = rd / "vscratch"
     vscr.mkdir(exist_ok=True)
     script = f"""set -u
 cd {vd}
-( make -C implementations/{lang} build ) > validate-build.log 2>&1; echo "build_exit=$?" > validate-status
+: > validate-status
+"""
+    if m["task"] == "native":
+        # The library is built from the trusted kernel sources inside the sandbox.
+        script += """( make -C native-kernels all ) > validate-native-lib.log 2>&1; echo "native_lib_exit=$?" >> validate-status
+"""
+    script += f"""( make -C implementations/{lang} build ) > validate-build.log 2>&1; echo "build_exit=$?" >> validate-status
 python3 tests/conformance/runner.py --engine implementations/{lang}/bin/polyquery {phase_args} --include-hidden \
    --report conformance.json --logs engine-logs -q > validate-conformance.log 2>&1; echo "conformance_exit=$?" >> validate-status
 """
@@ -616,6 +630,21 @@ python3 tests/conformance/runner.py --engine implementations/{lang}/bin/polyquer
 python3 tests/concurrency/http_suite.py --engine implementations/{lang}/bin/polyquery --report http-suite.json > validate-http-suite.log 2>&1; echo "http_suite_exit=$?" >> validate-status
 """
         extra = ["conformance-http.json", "http-suite.json"]
+    if m["task"] == "native":
+        # Trusted kernel sources replace the workspace copy; the library is built inside the sandbox.
+        lib = "native-kernels/build/x86_64/libpqkernels.so"
+        script += f"""python3 tests/conformance/runner.py --engine implementations/{lang}/bin/polyquery {phase_args} --include-hidden \
+   --native {lib} --report conformance-native.json -q > validate-native.log 2>&1; echo "native_exit=$?" >> validate-status
+python3 tests/conformance/runner.py --engine implementations/{lang}/bin/polyquery --modes --include-hidden \
+   --native {lib} --report conformance-native-modes.json -q > validate-native-modes.log 2>&1; echo "native_modes_exit=$?" >> validate-status
+python3 tests/conformance/runner.py --engine implementations/{lang}/bin/polyquery --modes --include-hidden \
+   --report conformance-modes.json -q > validate-modes.log 2>&1; echo "modes_exit=$?" >> validate-status
+python3 tests/conformance/runner.py --engine implementations/{lang}/bin/polyquery {phase_args} --include-hidden \
+   --transport http --report conformance-http.json -q > validate-http.log 2>&1; echo "http_exit=$?" >> validate-status
+python3 tests/concurrency/http_suite.py --engine implementations/{lang}/bin/polyquery --report http-suite.json > validate-http-suite.log 2>&1; echo "http_suite_exit=$?" >> validate-status
+"""
+        extra = ["conformance-native.json", "conformance-native-modes.json", "conformance-modes.json",
+                 "conformance-http.json", "http-suite.json"]
     if m["task"] == "phase5":
         script += f"""python3 tests/conformance/runner.py --engine implementations/{lang}/bin/polyquery --modes --include-hidden \
    --report conformance-modes.json -q > validate-modes.log 2>&1; echo "modes_exit=$?" >> validate-status

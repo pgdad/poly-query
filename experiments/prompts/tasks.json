@@ -1,36 +1,36 @@
 {
   "phase1": {
-    "title": "Phase 1 \u2014 In-Memory Data Engine",
+    "title": "Phase 1 — In-Memory Data Engine",
     "phase_file": "phase-1.md",
-    "goal": "Create the PolyQuery engine for {{LANGUAGE}} from scratch and implement **Phase 1** (`spec/phases/phase-1.md`): the CLI and JSON-lines session protocol, the catalog operations, CSV/JSON/JSONL ingestion with schema inference and explicit schemas, all data types (including exact DECIMAL, DATE, TIMESTAMP and NULL semantics), and the `sql.basic` SQL subset (single-table SELECT with expressions, WHERE, ORDER BY, LIMIT/OFFSET, CAST and whole-table aggregates), plus resource limits and the test functions. Design the code so that later phases (full SQL with joins/grouping/subqueries, columnar storage with indexes, an HTTP server with concurrency, and vectorized/parallel execution) can be added without a rewrite \u2014 a proper lexer, parser and AST are expected already now.",
+    "goal": "Create the PolyQuery engine for {{LANGUAGE}} from scratch and implement **Phase 1** (`spec/phases/phase-1.md`): the CLI and JSON-lines session protocol, the catalog operations, CSV/JSON/JSONL ingestion with schema inference and explicit schemas, all data types (including exact DECIMAL, DATE, TIMESTAMP and NULL semantics), and the `sql.basic` SQL subset (single-table SELECT with expressions, WHERE, ORDER BY, LIMIT/OFFSET, CAST and whole-table aggregates), plus resource limits and the test functions. Design the code so that later phases (full SQL with joins/grouping/subqueries, columnar storage with indexes, an HTTP server with concurrency, and vectorized/parallel execution) can be added without a rewrite — a proper lexer, parser and AST are expected already now.",
     "runner_args": "--phase 1",
     "done": "`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery --phase 1` reports 0 failures, 0 errors and 0 not-implemented cases (the capabilities you report must include every capability listed for Phase 1), `make -C implementations/{{LANG_DIR}} build test` succeed, and all work is committed."
   },
   "phase2": {
-    "title": "Phase 2 \u2014 SQL Parser and Query Engine",
+    "title": "Phase 2 — SQL Parser and Query Engine",
     "phase_file": "phase-2.md",
     "goal": "The workspace contains your accepted Phase 1 engine in `implementations/{{LANG_DIR}}/`. Extend it to **Phase 2** (`spec/phases/phase-2.md`): the complete SQL grammar and semantics (GROUP BY/HAVING, DISTINCT, INNER/LEFT/CROSS joins, all scalar functions, CASE/LIKE/BETWEEN/IN, uncorrelated subqueries, derived tables, CTEs, EXPLAIN) with distinct lexer, parser/AST, semantic validation, logical plan, physical plan and execution stages, and structured errors. Correlated subqueries (`sql.correlated_subquery`) are optional: implement them if you can; otherwise answer UNSUPPORTED and do not claim the capability. Phase 1 must keep passing.",
     "runner_args": "--phase 1 --phase 2",
     "done": "`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery --phase 1 --phase 2` reports 0 failures, 0 errors and 0 not-implemented cases except, optionally, the `sql.correlated_subquery` file; `make build test` succeed; all work is committed."
   },
   "phase3": {
-    "title": "Phase 3 \u2014 Storage and Indexing",
+    "title": "Phase 3 — Storage and Indexing",
     "phase_file": "phase-3.md",
-    "goal": "The workspace contains your accepted Phase 1\u20132 engine. Extend it to **Phase 3** (`spec/phases/phase-3.md`, `spec/storage/pqcf-v1.md`, `spec/storage/indexes-and-planning.md`): row- and column-oriented in-memory layouts, dictionary encoding, null bitmaps, the persistent PQCF v1 columnar file format (PLAIN/DICT/RLE, CRC-32 checksums, atomic crash-safe writes, memory-mapped reads), table statistics, hash and ordered (B-tree or equivalent) indexes, index selection, predicate pushdown with row-group skipping, column pruning and basic cost-based planning, with accurate EXPLAIN plans. Your PQCF files must be readable by any other conforming implementation and you must read theirs \u2014 follow the format byte-exactly. Phases 1\u20132 must keep passing.",
+    "goal": "The workspace contains your accepted Phase 1–2 engine. Extend it to **Phase 3** (`spec/phases/phase-3.md`, `spec/storage/pqcf-v1.md`, `spec/storage/indexes-and-planning.md`): row- and column-oriented in-memory layouts, dictionary encoding, null bitmaps, the persistent PQCF v1 columnar file format (PLAIN/DICT/RLE, CRC-32 checksums, atomic crash-safe writes, memory-mapped reads), table statistics, hash and ordered (B-tree or equivalent) indexes, index selection, predicate pushdown with row-group skipping, column pruning and basic cost-based planning, with accurate EXPLAIN plans. Your PQCF files must be readable by any other conforming implementation and you must read theirs — follow the format byte-exactly. Phases 1–2 must keep passing.",
     "runner_args": "--phase 1 --phase 2 --phase 3",
     "done": "`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery --phase 1 --phase 2 --phase 3` reports 0 failures, 0 errors and 0 not-implemented cases (except optionally the correlated-subquery file); `make build test` succeed; all work is committed."
   },
   "phase4": {
-    "title": "Phase 4 \u2014 Networking and Concurrency",
+    "title": "Phase 4 — Networking and Concurrency",
     "phase_file": "phase-4.md",
-    "goal": "The workspace contains your accepted Phase 1\u20133 engine. Extend it to **Phase 4** (`spec/phases/phase-4.md`, `spec/protocol/protocol.md` \u00a77, `spec/concurrency/concurrency.md`): the `serve` HTTP/1.1 server with all endpoints, streaming NDJSON results with backpressure, Prometheus metrics, structured JSON logs, snapshot-isolated concurrent readers, worker limits with bounded queueing and OVERLOADED rejection, query timeouts, cancellation and graceful shutdown. Phases 1\u20133 must keep passing in both session and HTTP transports.",
+    "goal": "The workspace contains your accepted Phase 1–3 engine. Extend it to **Phase 4** (`spec/phases/phase-4.md`, `spec/protocol/protocol.md` §7, `spec/concurrency/concurrency.md`): the `serve` HTTP/1.1 server with all endpoints, streaming NDJSON results with backpressure, Prometheus metrics, structured JSON logs, snapshot-isolated concurrent readers, worker limits with bounded queueing and OVERLOADED rejection, query timeouts, cancellation and graceful shutdown. Phases 1–3 must keep passing in both session and HTTP transports.",
     "runner_args": "--phase 1 --phase 2 --phase 3 --transport http",
     "done": "Both `python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery --transport http` and `python3 tests/concurrency/http_suite.py --engine implementations/{{LANG_DIR}}/bin/polyquery` report 0 failures (and the session-transport run still passes); `make build test` succeed; all work is committed."
   },
   "phase5": {
-    "title": "Phase 5 \u2014 Optimization",
+    "title": "Phase 5 — Optimization",
     "phase_file": "phase-5.md",
-    "goal": "The workspace contains your accepted Phase 1\u20134 engine. Extend it to **Phase 5** (`spec/phases/phase-5.md`): keep a row-at-a-time baseline (`mode: row`) and add vectorized/batch execution (`mode: vectorized`), parallel scans and aggregations (`threads`), hash, sort-merge and nested-loop joins selectable via the `join` option, a switchable logical optimizer (`optimize`), SIMD-friendly or explicitly SIMD filtering/aggregation where the standard library permits, memory-allocation optimizations and cache-aware layouts. Measure your improvements with the generated datasets (e.g. `pqgen.py generate --scale 1m`). Every option combination must produce identical results.",
+    "goal": "The workspace contains your accepted Phase 1–4 engine. Extend it to **Phase 5** (`spec/phases/phase-5.md`): keep a row-at-a-time baseline (`mode: row`) and add vectorized/batch execution (`mode: vectorized`), parallel scans and aggregations (`threads`), hash, sort-merge and nested-loop joins selectable via the `join` option, a switchable logical optimizer (`optimize`), SIMD-friendly or explicitly SIMD filtering/aggregation where the standard library permits, memory-allocation optimizations and cache-aware layouts. Measure your improvements with the generated datasets (e.g. `pqgen.py generate --scale 1m`). Every option combination must produce identical results.",
     "runner_args": "--modes",
     "done": "`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery` (all phases) and `... --modes` both report 0 failures, 0 errors and 0 not-implemented (except optionally correlated subqueries), the HTTP suite still passes, `make build test` succeed, and README.md documents the optimizations with before/after measurements you took; all work is committed."
   },
@@ -42,38 +42,45 @@
     "runner_args": ""
   },
   "change-union-all": {
-    "title": "Architectural change \u2014 UNION ALL",
+    "title": "Architectural change — UNION ALL",
     "phase_file": "phase-2.md",
     "runner_args": "",
     "goal": "Requirement change (identical for every language): add `UNION ALL` to the engine as specified in `spec/changes/union-all.md`. The new public cases in `tests/conformance/cases/changes/union_all.pqt` must pass.",
     "done": "The `changes/union_all` cases pass. All public conformance phases the engine previously passed still pass (`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery`), plus the task-specific criteria above; `make build test` succeed; all work is committed."
   },
   "change-decimal38": {
-    "title": "Architectural change \u2014 DECIMAL precision 38",
+    "title": "Architectural change — DECIMAL precision 38",
     "phase_file": "phase-1.md",
     "runner_args": "",
     "goal": "Requirement change (identical for every language): raise the maximum DECIMAL precision from 18 to 38 digits as specified in `spec/changes/decimal38.md` (storage format PQCF v2 for wide decimals included). New cases: `tests/conformance/cases/changes/decimal38.pqt`.",
     "done": "The `changes/decimal38` cases pass. All public conformance phases the engine previously passed still pass (`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery`), plus the task-specific criteria above; `make build test` succeed; all work is committed."
   },
   "refactor-plan-separation": {
-    "title": "Refactoring \u2014 logical/physical plan separation",
+    "title": "Refactoring — logical/physical plan separation",
     "phase_file": "phase-2.md",
     "runner_args": "",
     "goal": "Behaviour-preserving refactoring (identical for every language): ensure the engine has an explicit, inspectable logical plan representation, a rule-based optimizer operating only on it, and a separate physical planning step, as described in `spec/changes/refactor-plan-separation.md`. No externally visible behaviour may change.",
     "done": "Every conformance case that passed before still passes, no new capabilities are claimed, and README.md documents the new structure with a before/after module map. All public conformance phases the engine previously passed still pass (`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery`), plus the task-specific criteria above; `make build test` succeed; all work is committed."
   },
   "debug-mutant": {
-    "title": "Debugging \u2014 injected defect",
+    "title": "Debugging — injected defect",
     "phase_file": "phase-1.md",
     "runner_args": "",
     "goal": "A defect has been introduced into the engine in `implementations/{{LANG_DIR}}/` (a single small source change). The following conformance cases now fail: see `DEFECT.md` in the workspace root. Find and fix the root cause with a minimal change. Do not rewrite unrelated code.",
     "done": "All conformance cases pass again with a minimal diff; your summary names the root cause and location. All public conformance phases the engine previously passed still pass (`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery`), plus the task-specific criteria above; `make build test` succeed; all work is committed."
   },
   "optimize-latency": {
-    "title": "Optimization \u2014 benchmark latency",
+    "title": "Optimization — benchmark latency",
     "phase_file": "phase-5.md",
     "runner_args": "",
     "goal": "Improve the engine's query latency on the benchmark workload `benchmarks/workloads/analytics.json` at scale 1m (generate with `python3 datasets/generators/pqgen.py generate --scale 1m`) while preserving correctness. Measure before/after with your own timing of the workload queries through `bin/polyquery session` and report results in README.md.",
     "done": "Conformance is unchanged (no regressions) and README.md contains a before/after table for every workload query. All public conformance phases the engine previously passed still pass (`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery`), plus the task-specific criteria above; `make build test` succeed; all work is committed."
+  },
+  "native": {
+    "title": "Native kernel integration (M9)",
+    "phase_file": "native-kernels.md",
+    "runner_args": "--native native-kernels/build/x86_64/libpqkernels.so",
+    "goal": "The workspace contains your accepted Phase 1–5 engine in `implementations/{{LANG_DIR}}/` and the native kernel library sources in `native-kernels/` (C ABI `native-kernels/include/pq_kernels.h`, C reference, runtime dispatch, x86-64 and AArch64 assembly). Build the library with `make -C native-kernels` (it produces `native-kernels/build/x86_64/libpqkernels.so`; never modify anything under `native-kernels/`). Integrate it into the engine through {{LANGUAGE}}'s standard FFI (see `spec/phases/native-kernels.md`): load it when `--native-kernels PATH` is given, use the kernels for filtering, aggregation, bitmap and hashing work when a query runs with the option `native: true` (and in vectorized mode where applicable), fall back to the engine's own code paths when the library is absent or a kernel does not apply, and claim the capability `native.kernels`. Results with and without native kernels MUST be identical (kernel overflow flags must be honoured exactly). Measure end-to-end impact on the generated 1m datasets and document it.",
+    "done": "`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery --native native-kernels/build/x86_64/libpqkernels.so` and the same with `--modes` report 0 failures, 0 errors and 0 not-implemented (except optionally correlated subqueries); all earlier conformance (session, `--transport http`, `--modes`) and the HTTP suite still pass without the library; `make build test` succeed; README.md documents the FFI design, which kernels are used where, and before/after measurements with `native: true`; all work is committed."
   }
 }

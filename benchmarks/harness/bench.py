@@ -257,6 +257,10 @@ def bench_engine(lang: str, launcher: str, info: dict, workload: dict, scale: st
 
     # 2. main session: ingestion, indexes, queries
     extra = ["--enable-test-functions"] if "test.functions" in caps else []
+    native_lib = ROOT / "native-kernels/build" / os.uname().machine / "libpqkernels.so"
+    if "native.kernels" in caps and native_lib.exists():
+        extra += ["--native-kernels", str(native_lib)]
+        res["native_library"] = str(native_lib.relative_to(ROOT))
     eng = SessionEngine(str(wl.path), scale_dir, extra, timeout=args.query_timeout)
     sampler = Sampler(eng.proc.pid)
     try:

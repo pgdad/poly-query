@@ -200,7 +200,8 @@ def run_file(f: PqtFile, launcher: str, caps: set[str], args: argparse.Namespace
     try:
         cls = HttpEngine if args.transport == "http" else SessionEngine
         try:
-            engine = cls(launcher, tmp, f.engine_args, timeout=args.timeout, stderr_path=stderr_path)
+            eargs = list(f.engine_args) + (["--native-kernels", str(Path(args.native).resolve())] if args.native else [])
+            engine = cls(launcher, tmp, eargs, timeout=args.timeout, stderr_path=stderr_path)
         except EngineError as e:
             result["status"] = "error"
             result["cases"] = [{"line": s.line, "kind": s.kind, "status": "error", "message": f"engine start: {e}"} for s in cases]
@@ -285,6 +286,9 @@ def main() -> int:
     ap.add_argument("--timeout", type=float, default=30.0, help="per-request timeout seconds")
     ap.add_argument("--report", help="write JSON report here")
     ap.add_argument("--logs", help="directory for engine stderr logs")
+    ap.add_argument("--native", metavar="LIBPQKERNELS",
+                    help="pass --native-kernels LIB to the engine and run every query with native: true "
+                         "(requires capability native.kernels; combinable with --modes)")
     ap.add_argument("--claimed", action="store_true",
                     help="restrict to the phases the engine claims (capability phaseN); not_implemented is "
                          "tolerated only in files that need an optional capability the engine does not claim")
@@ -322,15 +326,18 @@ def main() -> int:
             if f.phase > 3:
                 continue
             for k, ov in enumerate(MODE_MATRIX):
-                jobs.append((f, ov, f"modes{k}"))
+                jobs.append((f, {**ov, "native": True} if args.native else ov, f"modes{k}" + ("-native" if args.native else "")))
     else:
         mode_missing = []
-        jobs = [(f, None, args.transport) for f in files]
+        jobs = [(f, {"native": True} if args.native else None, args.transport + ("-native" if args.native else ""))
+                for f in files]
+    if args.native and "native.kernels" not in caps:
+        mode_missing = sorted(set(mode_missing) | {"native.kernels"})
 
     started = dt.datetime.now(dt.timezone.utc).isoformat()
     results: list[dict] = []
     t0 = time.monotonic()
-    if args.modes and mode_missing:
+    if mode_missing:
         for f, ov, label in jobs:
             results.append({"file": str(f.path.name), "phase": f.phase, "variant": label, "status": "not_implemented",
                             "cases": [{"line": s.line, "kind": s.kind, "status": "not_implemented",
