@@ -181,5 +181,7 @@
  "wall_seconds": 4727.5,
  "agent_exit_code": 0,
  "outcome": "success",
- "import_branch": "track-a/java/optimize-latency/a3"
+ "import_branch": "track-a/java/optimize-latency/a3",
+ "merged_into": "master",
+ "merge_note": "merged after the fact by owner decision (2026-10-11): real-workload re-runs replace the first-round optimize-latency results on main; the run itself was executed record-only"
 }

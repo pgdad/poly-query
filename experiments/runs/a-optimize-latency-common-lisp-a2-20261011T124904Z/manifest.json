@@ -180,5 +180,8 @@
  "finished": "2026-10-11T14:34:24+00:00",
  "wall_seconds": 6293.1,
  "agent_exit_code": 0,
- "outcome": "success"
+ "outcome": "success",
+ "import_branch": "track-a/common-lisp/optimize-latency/a2",
+ "merged_into": "master",
+ "merge_note": "merged after the fact by owner decision (2026-10-11): real-workload re-runs replace the first-round optimize-latency results on main; the run itself was executed record-only"
 }
