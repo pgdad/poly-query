@@ -54,9 +54,9 @@ python3 tools/native_bench.py --lib LIB      # kernel micro-benchmarks vs the CP
 option; without it the engine chooses automatically (one partition per CPU,
 at most 16, for vectorized queries over large inputs — see *Latency
 optimization* below). Engine-specific flag: `--parallel-min-rows N` (default
-200,000): parallel pipelines whose driving scan has fewer rows run their
-partitions in-process, and automatic parallelism only partitions pipelines
-at least this large (see Phase 5).
+50,000; 200,000 before the latency work): parallel pipelines whose driving
+scan has fewer rows run their partitions in-process, and automatic
+parallelism only partitions pipelines at least this large (see Phase 5).
 
 `bin/polyquery` is a POSIX shell launcher that resolves its own location and
 runs `entry.py` with `python3 -I` (isolated mode: neither the current directory
@@ -480,7 +480,7 @@ partitioning. Correlated subquery plans stay serial; uncorrelated ones
 
 *Why processes:* CPython's GIL serializes threads, so threads cannot make
 CPU-bound operators faster. When the driving scan has at least
-`--parallel-min-rows` rows (default 200,000), the partitions run in
+`--parallel-min-rows` rows (default 50,000), the partitions run in
 worker processes: normally in the engine's persistent worker pool
 (`execution/workers.py`, see *Latency optimization*), else — while
 another query uses the pool, or with `native: true` — in processes forked

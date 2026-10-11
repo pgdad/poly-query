@@ -360,9 +360,13 @@ def close_inherited_streams(keep: set[int]) -> None:
     workers' pipes, client connections, listening sockets) except ``keep``,
     so that the child never keeps them open for others. Regular files stay
     open (memory-mapped tables own their descriptors)."""
-    try:
-        fds = [int(name) for name in os.listdir("/proc/self/fd")]
-    except OSError:
+    for directory in ("/proc/self/fd", "/dev/fd"):
+        try:
+            fds = [int(name) for name in os.listdir(directory)]
+            break
+        except (OSError, ValueError):
+            continue
+    else:
         return
     for fd in fds:
         if fd < 3 or fd in keep:
