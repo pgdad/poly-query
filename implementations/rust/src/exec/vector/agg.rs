@@ -871,3 +871,95 @@ impl Aggregator {
         Ok(Batch::new(columns, groups))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planner::expr::Expr;
+
+    fn call(func: AggFunc, ty: DataType) -> AggregateCall {
+        AggregateCall {
+            func,
+            arg: (func != AggFunc::CountStar).then_some(Expr::Column { index: 1, ty }),
+            distinct: false,
+            ty,
+        }
+    }
+
+    fn batch(keys: &[i64], vals: &[Option<&str>]) -> (Vec<Vector>, Vec<Option<Vector>>) {
+        let k = Vector::from_values(keys.iter().map(|&k| Value::Int(k)).collect());
+        let v = Vector::from_values(
+            vals.iter()
+                .map(|v| v.map_or(Value::Null, Value::str))
+                .collect(),
+        );
+        (vec![k], vec![None, Some(v.clone()), Some(v)])
+    }
+
+    #[test]
+    fn grouped_and_merged_partials_agree() {
+        let calls = vec![
+            call(AggFunc::CountStar, DataType::Int64),
+            call(AggFunc::Min, DataType::String),
+            call(AggFunc::Max, DataType::String),
+        ];
+        let ctx = ExecContext::default();
+        let (k1, a1) = batch(&[1, 2, 1], &[Some("b"), None, Some("a")]);
+        let (k2, a2) = batch(&[2, 3, 1], &[Some("z"), Some("c"), Some("c")]);
+        // One aggregator over both batches …
+        let mut whole = Aggregator::new(1, &calls);
+        whole.update(&k1, &a1, 3).unwrap();
+        whole.update(&k2, &a2, 3).unwrap();
+        let whole = whole.finish(&ctx).unwrap().into_rows();
+        // … equals two partials merged (by partition).
+        let mut p1 = Aggregator::new(1, &calls);
+        p1.update(&k1, &a1, 3).unwrap();
+        let mut p2 = Aggregator::new(1, &calls);
+        p2.update(&k2, &a2, 3).unwrap();
+        let mut merged = Aggregator::new(1, &calls);
+        for p in [&p1, &p2] {
+            for part in p.partition_groups(2) {
+                merged.merge_groups(p, &part).unwrap();
+            }
+        }
+        let mut merged = merged.finish(&ctx).unwrap().into_rows();
+        merged.sort_by(|a, b| a[0].sort_cmp(&b[0]));
+        assert_eq!(merged, whole);
+        assert_eq!(
+            whole[0],
+            vec![
+                Value::Int(1),
+                Value::Int(3),
+                Value::str("a"),
+                Value::str("c")
+            ]
+        );
+        assert_eq!(
+            whole[1],
+            vec![
+                Value::Int(2),
+                Value::Int(2),
+                Value::str("z"),
+                Value::str("z")
+            ]
+        );
+    }
+
+    #[test]
+    fn exact_sums_and_overflow() {
+        let calls = vec![
+            call(AggFunc::Sum, DataType::Int64),
+            call(AggFunc::Avg, DataType::Int64),
+        ];
+        let v = Vector::from_values(vec![Value::Int(i64::MAX), Value::Int(1), Value::Int(-2)]);
+        let mut a = Aggregator::new(0, &calls);
+        a.update(&[], &[Some(v.clone()), Some(v)], 3).unwrap();
+        let out = a.finish(&ExecContext::default()).unwrap().into_rows();
+        assert_eq!(out[0][0], Value::Int(i64::MAX - 1));
+        let big = Vector::from_values(vec![Value::Int(i64::MAX), Value::Int(1)]);
+        let mut a = Aggregator::new(0, &calls[..1]);
+        a.update(&[], &[Some(big)], 2).unwrap();
+        let err = a.finish(&ExecContext::default()).unwrap_err();
+        assert_eq!(err.code, crate::error::ErrorCode::NumericOverflow);
+    }
+}

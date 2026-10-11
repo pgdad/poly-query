@@ -602,3 +602,69 @@ impl BatchOperator for MergeJoinOp {
         emit(&self.spec, &mut self.cursor, &s.left, &s.right, s, ctx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{DataType, Value};
+
+    fn ints(v: &[Option<i64>]) -> Vector {
+        Vector::from_values(
+            v.iter()
+                .map(|x| x.map_or(Value::Null, Value::Int))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn hash_left_join_order_and_padding() {
+        let ctx = ExecContext::default();
+        let key = (
+            Expr::Column {
+                index: 0,
+                ty: DataType::Int64,
+            },
+            KeyDomain::Exact,
+        );
+        // Build side (right): keys 1, 2, 1, NULL.
+        let build = Batch::new(vec![ints(&[Some(1), Some(2), Some(1), None])], 4);
+        let table = HashTable::build(build, std::slice::from_ref(&key), &ctx).unwrap();
+        // Probe side (left): keys 1, 3, NULL, 2.
+        let probe = Batch::new(vec![ints(&[Some(1), Some(3), None, Some(2)])], 4);
+        let kv = key_vectors(std::slice::from_ref(&key), &probe, &ctx).unwrap();
+        let mut ids = Vec::new();
+        let mut caches = vec![DictCache::default()];
+        table.keys.lookup(&kv, 4, &mut ids, &mut caches);
+        let spec = JoinSpec {
+            left_join: true,
+            outer_is_left: true,
+            residual: None,
+            outer_width: 1,
+            inner_width: 1,
+        };
+        let pairs = HashPairs {
+            ids: &ids,
+            table: &table,
+        };
+        let mut cursor = Cursor::default();
+        let out = emit(&spec, &mut cursor, &probe, &table.rows, &pairs, &ctx)
+            .unwrap()
+            .unwrap();
+        let v = |x: i64| Value::Int(x);
+        assert_eq!(
+            out.into_rows(),
+            vec![
+                vec![v(1), v(1)],
+                vec![v(1), v(1)],
+                vec![v(3), Value::Null],
+                vec![Value::Null, Value::Null],
+                vec![v(2), v(2)],
+            ]
+        );
+        assert!(
+            emit(&spec, &mut cursor, &probe, &table.rows, &pairs, &ctx)
+                .unwrap()
+                .is_none()
+        );
+    }
+}
