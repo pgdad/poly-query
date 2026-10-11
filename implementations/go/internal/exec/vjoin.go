@@ -243,6 +243,7 @@ func (t *joinTable) index() {
 type joinBuild struct {
 	ec       *Context
 	input    BatchOperator
+	rows     int // exact number of build rows if known (else 0)
 	keys     *exprSet
 	keyTypes []types.Type
 	classes  []vclass
@@ -267,7 +268,7 @@ func newJoinBuild(ec *Context, x *physical.HashJoin) (*joinBuild, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &joinBuild{ec: ec, input: input, keyTypes: exprTypes(buildKeys)}
+	s := &joinBuild{ec: ec, input: input, keyTypes: exprTypes(buildKeys), rows: exactRows(buildNode)}
 	if s.keys, err = newExprSet(ec, buildNode.Schema(), buildKeys); err != nil {
 		return nil, err
 	}
@@ -284,9 +285,39 @@ func (s *joinBuild) get() (*joinTable, error) {
 	return s.table, s.err
 }
 
+// exactRows returns the number of rows n produces if it is an unfiltered
+// table scan (under projections), else 0.
+func exactRows(n physical.Node) int {
+	switch x := n.(type) {
+	case *physical.Project:
+		return exactRows(x.Input)
+	case *physical.TableScan:
+		if len(x.Filters) == 0 {
+			return x.Table.Rows
+		}
+	}
+	return 0
+}
+
 func (s *joinBuild) build() (*joinTable, error) {
 	t := &joinTable{seed: maphash.MakeSeed(), classes: s.classes, intKey: s.intKey}
 	t.cols = make([]Vec, len(t.classes))
+	if n := s.rows; n > 0 {
+		// Allocate the columns at their final size.
+		for k, c := range t.classes {
+			switch c {
+			case vInt:
+				t.cols[k].I = make([]int64, 0, n)
+			case vFloat:
+				t.cols[k].F = make([]float64, 0, n)
+			case vWide:
+				t.cols[k].W = make([]types.Int128, 0, n)
+			}
+		}
+		if t.intKey {
+			t.intKeys = make([]int64, 0, n)
+		}
+	}
 	keys := make([]*Vec, len(s.keyTypes))
 	var keyBuf []byte
 	for {
