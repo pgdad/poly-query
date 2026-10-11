@@ -1,7 +1,7 @@
 {
- "seconds": 17.1,
+ "seconds": 18.3,
  "status": {
-  "native_lib_exit": "2",
+  "native_lib_exit": "0",
   "build_exit": "0",
   "conformance_exit": "0",
   "http_exit": "0",
@@ -187,6 +187,6 @@
   }
  },
  "outcome": "success",
- "validated_at": "2026-10-11T14:34:41+00:00",
- "harness_commit": "3e786c7"
+ "validated_at": "2026-10-11T14:44:15+00:00",
+ "harness_commit": "2e717ab"
 }
