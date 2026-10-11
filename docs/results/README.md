@@ -62,19 +62,28 @@ Per run: [`results/comparisons/development.csv`](../../results/comparisons/devel
 Phase 5 (optimization) was the most expensive phase for every language
 ($16–$47), Phase 4 (HTTP/concurrency) the cheapest ($4–$6.50).
 
-## Runtime performance (1m rows, Phase 5 + native engines)
+## Runtime performance (1m rows, main line)
 
-Source: [`results/performance/20261011T051646Z-1m-m9-native`](../../results/performance/20261011T051646Z-1m-m9-native/summary.json)
-(and the pre-native run `20261011T030826Z-1m-final-p5-all`).
+Source: [`results/performance/20261011T172247Z-1m-main-after-reruns`](../../results/performance/20261011T172247Z-1m-main-after-reruns/summary.json),
+the engines on main after the real-workload optimization re-runs were merged
+(INT-001). HTTP throughput is from the earlier run
+[`20261011T051646Z-1m-m9-native`](../../results/performance/20261011T051646Z-1m-m9-native/summary.json)
+(before the optimization tasks); the new run did not include the HTTP benchmark.
 
-| engine | startup | load 9 tables | peak RSS | query latency, geomean of 20 medians | HTTP q/s (16 clients) |
+| engine | startup | load 9 tables | peak RSS | query latency, geomean of 20 medians | HTTP q/s (16 clients, earlier run) |
 |---|---:|---:|---:|---:|---:|
-| Rust | 1.3 ms | 2.6 s | 0.95 GiB | 2.8–3.0 ms | 451 |
-| Java | 24 ms | 5.6 s | 6.7 GiB | 5.1–5.2 ms | 1,137 |
-| Go | 1.4 ms | 2.6 s | 2.3 GiB | 5.3–5.4 ms | 295 |
-| Clojure | 355 ms | 9.6 s | 9.1 GiB | 8.0 ms | 569 |
-| Common Lisp | 3.3 ms | 6.1 s | 1.4 GiB | 21.4–21.5 ms | 206 |
-| Python | 208 ms | 24.4 s | 16 GiB | 122–124 ms | 10 |
+| Rust | 1.2 ms | 2.6 s | 1.3 GiB | 1.6 ms | 451 |
+| Go | 1.9 ms | 2.7 s | 2.4 GiB | 1.8 ms | 295 |
+| Java | 25 ms | 4.8 s | 3.0 GiB | 3.2 ms | 1,137 |
+| Clojure | 127 ms | 10.7 s | 8.7 GiB | 5.5 ms | 569 |
+| Common Lisp | 4.2 ms | 6.5 s | 1.7 GiB | 7.0 ms | 206 |
+| Python | 222 ms | 25.0 s | 15.8 GiB | 22.9 ms | 10 |
+
+The same engine code measured in three separate sessions on the quiet host varied
+by up to ~20 % in geomean latency (Go 1.65–2.03 ms; others 5–10 %), so differences
+smaller than that between engines are not meaningful.
+
+The figures below come from the Phase 5 / native run (before the optimization tasks).
 
 Optimization effectiveness (each engine's own row-at-a-time baseline vs its
 best vectorized mode, geomean over 4 queries): Rust 121×, Java 24×,
@@ -153,12 +162,12 @@ on a quiet host (1m rows, same harness and data):
 
 | engine | geomean latency before → after | speedup | caveat |
 |---|---|---:|---|
-| Python | 123.5 → 43.3 ms | 2.85× | peak RSS 15.4 → 21.2 GiB |
-| Common Lisp | 21.9 → 8.9 ms | 2.48× | |
-| Go | 5.3 → 3.0 ms | 1.74× | attempt 2 **timed out** (120 min); committed work passes all checks but is not merged |
-| Java | 5.3 → 3.9 ms | 1.38× | |
-| Clojure | 8.0 → 7.1 ms | 1.13× | |
-| Rust | 3.1 → 2.9 ms | 1.07× | `q15_sort_multi_key` significantly slower (0.66×) |
+| Python | 129.0 → 42.5 ms | 3.04× | peak RSS 15.4 → 21.3 GiB |
+| Common Lisp | 22.1 → 8.6 ms | 2.56× | |
+| Go | 5.4 → 3.1 ms | 1.76× | attempt 2 **timed out** (120 min); committed work passes all checks |
+| Java | 5.5 → 3.9 ms | 1.41× | `q14_sort_full_string` significantly slower |
+| Clojure | 7.8 → 6.9 ms | 1.13× | |
+| Rust | 3.1 → 2.7 ms | 1.13× | `q15_sort_multi_key` significantly slower |
 
 Result digests were identical before and after for every engine and query.
 
@@ -172,21 +181,44 @@ workload. The family was therefore re-run with the workload available (attempt
 
 | engine | geomean latency before → after | speedup | queries ≥ 2× faster | peak RSS | caveat |
 |---|---|---:|---:|---|---|
-| Python | 120.2 → 24.2 ms | 4.97× | 18/20 | 15.4 → 15.8 GiB | run `tests_failed`: HTTP suite 18/19 (the known `malformed_chunked_body` defect, present before the run) |
-| Go | 5.3 → 1.6 ms | 3.24× | 15/20 | 2.2 → 2.4 GiB | |
-| Common Lisp | 21.3 → 6.7 ms | 3.18× | 12/20 | 1.4 → 1.7 GiB | `q14_sort_full` 52.6× |
-| Rust | 3.1 → 1.6 ms | 1.96× | 5/20 | 1.0 → 1.3 GiB | |
-| Java | 5.3 → 3.3 ms | 1.61× | 7/20 | 7.6 → 3.2 GiB | |
-| Clojure | 7.8 → 5.5 ms | 1.42× | 4/20 | 5.4 → 8.6 GiB | `q08_groupby_uniform_multi` significantly slower (0.77×) |
+| Python | 122.1 → 25.3 ms | 4.83× | 18/20 | 15.4 → 15.8 GiB | run `tests_failed`: HTTP suite 18/19 (the known `malformed_chunked_body` defect, present before the run) |
+| Common Lisp | 21.8 → 6.8 ms | 3.21× | 13/20 | 1.4 → 1.7 GiB | `q14_sort_full` ~52× |
+| Go | 5.3 → 2.0 ms | 2.63× | 10/20 | 2.4 → 2.4 GiB | |
+| Rust | 3.0 → 1.7 ms | 1.75× | 5/20 | 1.0 → 1.2 GiB | |
+| Java | 5.1 → 3.1 ms | 1.64× | 7/20 | 8.1 → 2.9 GiB | |
+| Clojure | 8.2 → 5.2 ms | 1.58× | 4/20 | 5.4 → 8.6 GiB | |
+
+Both tables are clean re-measurements (HI-009: the first measurements kept stray files
+from HEAD in the measured trees; the figures moved by less than the between-session
+spread, e.g. Go round 2 3.24× → 2.63×, Python round 1 2.85× → 3.04×).
 
 With the real workload in hand, every agent achieved more (1.4–5.0× vs. 1.1–2.9×),
 and the gains are broad, not one-query tricks (Python and Go improved at least
 2× on 15+ of 20 queries). The agents could see the benchmark queries, so the
 gains may partly be fitted to these 20 queries; correctness is unaffected
 (public + hidden conformance, the full mode matrix and native kernels pass,
-digests identical). The re-runs are recorded on branches
-`track-a/<lang>/optimize-latency/a<n>` and not merged, so the main-line engines
-are those of the first round.
+digests identical). By owner decision the re-runs **replace** the first round on
+main (INT-001 in `experiments/telemetry/interventions.jsonl`; all six pass 660/660
+afterwards). Python's re-run is merged although its outcome is `tests_failed`,
+because its only failure is the defect the first-round engine already had.
+
+### Track B: JVM tuning (Java and Clojure)
+
+A separate Track B task let the Java and Clojure agents tune their JVM build and
+start-up: AOT compilation, a JDK AOT cache trained on synthetic data and generic
+queries, JIT and GC flags, and boxing in hot loops. Both started from the
+first-round engines. Measured independently on the quiet host:
+[`jvm-tuning-before-after.json`](../../results/performance/jvm-tuning-before-after.json).
+These figures belong to Track B only and are never combined with Track A.
+
+| engine | outcome | start-up | first run of each query (geomean) | warm latency (geomean) | peak RSS |
+|---|---|---|---|---|---|
+| Clojure | success, $17.45 | 360 → 133 ms (2.7×) | 108 → 19 ms (5.8×) | 6.9 → 5.0 ms (1.39×) | 5.7 → 8.8 GiB |
+| Java | timeout (120 min) | 22 → 16 ms (1.4×) | 37 → 28 ms (1.3×) | 3.8 → 3.8 ms (1.00×; `q18_nulls` slower) | 9.0 → 8.8 GiB |
+
+For Clojure the cache and earlier JIT compilation mainly remove start-up and
+first-query cost; Java was already fast to start (its first optimization run had
+added an AOT cache).
 
 ## Assembly kernel family (ADR-0016)
 
@@ -206,6 +238,26 @@ on different machines and are never ranked against each other or against the eng
 The AArch64 agent could not measure (no ARM hardware in its sandbox): it reasoned
 from the Cortex-X925 and predicted that most kernels are memory-bound, which the
 spark measurement confirmed. Sources: `results/performance/kernels-{x86,arm}-{before,after}-{change,refactor,optimize}/`.
+
+## Assembly engine cohort (option B, ADR-0016)
+
+The owner approved a pilot for complete engines in assembly: $300 cap, glibc
+allowed (no C and no compiler-generated assembly), AArch64 agents running
+natively on spark. A phase may take up to three 120-minute sessions, each
+recorded as its own run. The cohort is never ranked with the six engines.
+
+| engine | phase | sessions | outcome | cost | time | conformance | code |
+|---|---|---:|---|---:|---:|---|---|
+| x86-64 assembly | 1 | 1 | success | $20.99 | 37 min | 225/225 public, 249/249 with hidden | ~9.9 k LOC in 12 `.S` modules |
+| AArch64 assembly | 1 | 1 | success | $23.82 | 28 min | 249/249 with hidden, natively on spark | ~11.0 k LOC in 15 `.S` modules |
+
+Both were checked for compliance: no C or other high-level sources, no
+compiler-generated assembly, and a launcher that only execs the assembled
+binary. The transcripts show no C was ever compiled; Python served only as a
+calculator and test-data generator. The AArch64 agent split the work across
+sub-agents (an available tool; its cost is included). Phase 1 cost more than for the
+high-level languages ($21–24 vs. $8–17) but took no longer (28–37 min vs.
+24–106 min), far below the plan's estimate. Phase 2 is running for both.
 
 ## AArch64 end to end
 
@@ -232,7 +284,7 @@ functional defect.
 
 ## Harness incidents
 
-Eight harness defects were found during the runs and fixed; each is logged with
+Nine harness defects were found during the runs and fixed; each is logged with
 its impact in [`experiments/telemetry/harness-incidents.jsonl`](../../experiments/telemetry/harness-incidents.jsonl).
 HI-002 (the runner overwrote explicit request ids) was visible to the Phase 1
 agents as two spurious failures. HI-005 (a CR-1 case expected DECIMAL from an
@@ -245,7 +297,9 @@ optimization workload was never exported to workspaces, so the first optimizatio
 round optimized stand-in workloads (re-run above). HI-008: after the CR-4 kernel
 change, engine validation built the kernel library from mismatched sources and the
 native conformance check passed without native kernels; the six affected
-record-only runs were re-validated and all passed native conformance.
+record-only runs were re-validated and all passed native conformance. HI-009: the
+before/after benchmark script kept stray files from HEAD in the measured trees;
+all before/after sets were re-measured.
 
 ## Reproducibility
 
