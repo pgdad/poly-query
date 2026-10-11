@@ -46,6 +46,12 @@
       (and (stringp a) (stringp b) (string= a b))
       (and (floatp a) (floatp b) (= a b))))
 
+(declaim (inline combine-hash))
+(defun combine-hash (h k)
+  "Hash of a key tuple extended by a value with hash K (modular arithmetic)."
+  (declare (type (unsigned-byte 61) h k))
+  (logand (+ (logand (* h 31) #xFFFFFFFFFFFFFFFF) k) +hash-mask+))
+
 (defun hash-key-vecs (vecs n)
   "Index vector of the combined hashes of rows [0, N) of the key VECS."
   (declare (type fixnum n))
@@ -56,7 +62,7 @@
             (validity (vec-validity vec)))
         (macrolet ((combine (i h)
                      `(setf (aref hashes ,i)
-                            (logand (+ (* (aref hashes ,i) 31) ,h) +hash-mask+))))
+                            (combine-hash (aref hashes ,i) ,h))))
           (etypecase data
             (i64-vector
              (if validity

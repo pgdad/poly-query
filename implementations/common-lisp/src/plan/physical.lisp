@@ -271,9 +271,18 @@ inputs, as no operator delivers sorted output)."
            (make-pp-merge-join :kind kind :children (list pleft pright) :columns (lnode-columns node)
                                :left-keys lkeys :right-keys rkeys :residual (conjoin residual)))
           (t
-           (make-pp-nested-loop-join :kind (if (and (null condition) (eq kind :inner)) :cross kind)
-                                     :children (list pleft pright)
-                                     :columns (lnode-columns node) :condition condition)))))))
+           ;; Equality conjuncts first: like the other algorithms, the
+           ;; remaining conjuncts are only evaluated for pairs with equal keys.
+           (make-pp-nested-loop-join
+            :kind (if (and (null condition) (eq kind :inner)) :cross kind)
+            :children (list pleft pright)
+            :columns (lnode-columns node)
+            :condition (if lkeys
+                           (conjoin (append (mapcar (lambda (l r)
+                                                      (make-b-op :boolean := (list l (bexpr-shift-columns r (lnode-width left)))))
+                                                    lkeys rkeys)
+                                            residual))
+                           condition))))))))
 
 ;;; ------------------------------------------------------------------
 ;;; EXPLAIN rendering (indexes-and-planning.md §4)

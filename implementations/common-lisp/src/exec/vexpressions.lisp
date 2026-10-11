@@ -26,10 +26,21 @@
       (and (member (type-kind from) '(:int64 :decimal)) (eq (type-kind to) :float64))))
 
 (defun mixes-int-and-decimal-p (exprs)
-  "True if EXPRS include both INT64 and DECIMAL operands (their comparison
-promotes the INT64 operand, which can overflow; types.md §2)."
-  (let ((kinds (mapcar (lambda (e) (type-kind (bexpr-type e))) exprs)))
-    (and (member :int64 kinds) (member :decimal kinds))))
+  "True if EXPRS include both INT64 and DECIMAL operands whose comparison may
+overflow: the INT64 operand is promoted to DECIMAL(18,s), which fails for
+values of more than 18-s digits (types.md §2). Literals are checked now."
+  (let* ((decimals (remove-if-not #'decimal-type-p exprs :key #'bexpr-type))
+         (scale (reduce #'max decimals :key (lambda (e) (decimal-scale (bexpr-type e)))
+                                       :initial-value 0)))
+    (and decimals
+         (some (lambda (e)
+                 (and (eq (type-kind (bexpr-type e)) :int64)
+                      (not (and (b-literal-p e)
+                                (let ((v (b-literal-value e)))
+                                  (or (eq v +null+)
+                                      (fits-precision-p (* v (pow10 scale))
+                                                        +max-decimal-precision+)))))))
+               exprs))))
 
 (defun node-may-fail-p (e)
   (and (b-op-p e)
@@ -55,7 +66,8 @@ promotes the INT64 operand, which can overflow; types.md §2)."
     (make-batch m out)))
 
 (defun eval-subset (kernel refs batch idx m)
-  "Value VEC (M rows, aligned with IDX) of KERNEL on the rows IDX[0..M) of BATCH."
+  "Value VEC (M rows, aligned with IDX) of KERNEL on the rows IDX[0..M) of
+BATCH. IDX must be ascending."
   (declare (type function kernel) (type fixnum m))
   (if (= m (batch-count batch))
       (funcall kernel batch)
@@ -63,7 +75,7 @@ promotes the INT64 operand, which can overflow; types.md §2)."
 
 (defun eval-on-rows (kernel refs kind batch idx m)
   "Value VEC (all rows of BATCH) of KERNEL evaluated only on the rows
-IDX[0..M); the other rows are NULL."
+IDX[0..M) (ascending); the other rows are NULL."
   (let ((n (batch-count batch)))
     (cond ((= m n) (funcall kernel batch))
           ((zerop m) (null-vec kind n))
@@ -593,6 +605,9 @@ only where the left one is not FALSE, OR only where it is not TRUE."
            (kind (type-vec-kind (bexpr-type e))))
       (flet ((eval-op (op batch idx m)
                (eval-subset (operand-kernel op) (operand-refs op) batch idx m)))
+        (if (and (not simple-p)
+                 (notany #'operand-may-fail (append whens thens (and else (list else)))))
+            (compile-eager-case whens thens else kind)
         (lambda (batch)
           (let* ((n (batch-count batch))
                  (out (make-array n :initial-element +null+))
@@ -632,14 +647,40 @@ only where the left one is not FALSE, OR only where it is not TRUE."
                              (setf (svref out (aref hits j)) (vec-ref values j)))))
                        (setf remaining rest rcount r)))
             (when else
-              (let* ((extra (length unmatched-null-operand))
-                     (idx (make-index-vector (+ rcount extra)))
-                     (m 0))
+              ;; The ELSE rows (ascending): unmatched rows and NULL operands.
+              (let ((pending (make-array n :element-type 'bit :initial-element 0))
+                    (idx (make-index-vector n))
+                    (m 0))
                 (declare (type fixnum m))
-                (dotimes (j rcount) (setf (aref idx m) (aref remaining j)) (incf m))
-                (dolist (row unmatched-null-operand) (setf (aref idx m) row) (incf m))
+                (dotimes (j rcount) (setf (sbit pending (aref remaining j)) 1))
+                (dolist (row unmatched-null-operand) (setf (sbit pending row) 1))
+                (dotimes (i n)
+                  (when (= 1 (sbit pending i))
+                    (setf (aref idx m) i)
+                    (incf m)))
                 (when (plusp m)
-                  (let ((values (eval-op else batch (sort idx #'<) m)))
+                  (let ((values (eval-op else batch idx m)))
                     (dotimes (j m)
                       (setf (svref out (aref idx j)) (vec-ref values j)))))))
-            (vec-from-values kind out n)))))))
+            (vec-from-values kind out n))))))))
+
+(defun compile-eager-case (whens thens else kind)
+  "Searched CASE whose operands cannot fail: every operand is evaluated on
+the whole batch and each row picks its branch."
+  (let ((when-kernels (map 'simple-vector #'operand-kernel whens))
+        (then-kernels (map 'simple-vector #'operand-kernel thens))
+        (else-kernel (and else (operand-kernel else))))
+    (lambda (batch)
+      (let* ((n (batch-count batch))
+             (conds (map 'simple-vector (lambda (k) (vec-data (funcall (the function k) batch)))
+                         when-kernels))
+             (results (map 'simple-vector (lambda (k) (funcall (the function k) batch)) then-kernels))
+             (else-vec (and else-kernel (funcall (the function else-kernel) batch)))
+             (m (length conds)))
+        (declare (type simple-vector conds results) (type fixnum n m))
+        (build-vec kind n
+                   (lambda (i)
+                     (declare (type fixnum i))
+                     (dotimes (k m (if else-vec (vec-ref else-vec i) +null+))
+                       (when (eq (svref (the simple-vector (svref conds k)) i) t)
+                         (return (vec-ref (svref results k) i))))))))))
