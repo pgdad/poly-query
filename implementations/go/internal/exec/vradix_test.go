@@ -33,6 +33,8 @@ func TestParallelSortMatchesComparator(t *testing.T) {
 		{{index: 1, nullsFirst: true}, {index: 2}},
 		{{index: 2, desc: true}, {index: 0, nullsFirst: true}},
 		{{index: 3, desc: true}},
+		{{index: 3}, {index: 1, desc: true}},
+		{{index: 0, desc: true, nullsFirst: true}, {index: 2}, {index: 1}},
 		{{index: 0}},
 		{{index: 1}},
 	} {

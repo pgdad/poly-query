@@ -190,14 +190,14 @@ func parallelDo(workers int, f func(w int)) {
 	wg.Wait()
 }
 
-// parallelChunks calls f for contiguous chunks of 0..n-1, with up to
-// threads goroutines for large n.
-func parallelChunks(n, threads int, f func(lo, hi int)) {
+// parallelChunks calls f(w, lo, hi) for contiguous chunks of 0..n-1, with
+// up to threads goroutines (w < threads) for large n.
+func parallelChunks(n, threads int, f func(w, lo, hi int)) {
 	workers := 1
 	if threads > 1 && n >= minRadixParallel {
 		workers = min(threads, n/(minRadixParallel/4))
 	}
-	parallelDo(workers, func(w int) { f(n*w/workers, n*(w+1)/workers) })
+	parallelDo(workers, func(w int) { f(w, n*w/workers, n*(w+1)/workers) })
 }
 
 // sortTies orders every run of items with equal normalized first keys

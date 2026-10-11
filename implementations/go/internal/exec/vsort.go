@@ -3,6 +3,7 @@ package exec
 import (
 	"container/heap"
 	"math"
+	"math/bits"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -30,6 +31,23 @@ type colStore struct {
 
 func newColStore(classes []vclass) *colStore {
 	return &colStore{classes: classes, cols: make([]Vec, len(classes))}
+}
+
+// reserve gives the (empty) store room for n rows.
+func (s *colStore) reserve(n int) {
+	for k, cls := range s.classes {
+		c := &s.cols[k]
+		switch cls {
+		case vInt:
+			c.I = make([]int64, 0, n)
+		case vFloat:
+			c.F = make([]float64, 0, n)
+		case vWide:
+			c.W = make([]types.Int128, 0, n)
+		default:
+			c.S = make([]string, 0, n)
+		}
+	}
 }
 
 // append adds the active rows of b and returns the bytes of string data
@@ -202,6 +220,7 @@ func (p *sortInput) materialize(ec *Context, classes []vclass) (*colStore, error
 	err := runMorsels(ec, p.ranges, len(p.ops), func(w, i int) error {
 		p.srcs[w].set(p.ranges[i])
 		st := newColStore(classes)
+		st.reserve(p.ranges[i].end - p.ranges[i].start)
 		stores[i] = st
 		for {
 			b, err := p.ops[w].NextBatch()
@@ -439,9 +458,9 @@ type sortItem struct {
 // items builds the sort items of rows 0..n-1.
 func (c *colComparator) items(n, threads int) []sortItem {
 	items := make([]sortItem, n)
-	parallelChunks(n, threads, func(lo, hi int) {
+	parallelChunks(n, threads, func(_, lo, hi int) {
 		for i := lo; i < hi; i++ {
-			items[i] = sortItem{key: c.norm(0, int32(i)), row: int32(i)}
+			items[i] = sortItem{key: c.norm0(int32(i)), row: int32(i)}
 		}
 	})
 	return items
@@ -484,8 +503,8 @@ func (c *colComparator) norm(k int, i int32) uint64 {
 	return u
 }
 
-// equal reports whether rows a and b have equal values (or are both NULL)
-// for sort key k.
+// equal reports whether rows a and b, whose normalized values of sort key k
+// are equal, have equal values (or are both NULL) for that key.
 func (c *colComparator) equal(k int, a, b int32) bool {
 	key := &c.keys[k]
 	if key.nulls != nil {
@@ -493,6 +512,9 @@ func (c *colComparator) equal(k int, a, b int32) bool {
 		if an || bn {
 			return an && bn
 		}
+	}
+	if key.exact != nil && key.exact[a] && key.exact[b] {
+		return true
 	}
 	switch key.cls {
 	case vInt:
@@ -519,6 +541,15 @@ func (c *colComparator) compareItems(a, b sortItem) int {
 // by row index.
 type colComparator struct {
 	keys []colKey
+	// With pack set, the normalized first key combines a range code of
+	// the first key (an INT-class key with a small value range, packBits
+	// wide) with the top bits of the second key's normalized value, so the
+	// radix sort already orders most rows with equal first keys.
+	pack         bool
+	packLo       int64
+	packHi       int64
+	packBits     uint
+	packNullCode uint64
 }
 
 type colKey struct {
@@ -528,6 +559,7 @@ type colKey struct {
 	floats     []float64
 	strs       []string
 	prefix     []uint64 // STRING keys: first 8 bytes, big-endian (byte order)
+	exact      []bool   // STRING keys: the prefix determines the string
 	nulls      []bool
 	desc       bool
 	nullsFirst bool
@@ -541,15 +573,80 @@ func newColComparator(s *colStore, keys []sortKey, threads int) *colComparator {
 			nulls: col.Nulls, desc: k.desc, nullsFirst: k.nullsFirst}
 		if ck.cls == vStr {
 			ck.prefix = make([]uint64, len(col.S))
-			parallelChunks(len(col.S), threads, func(lo, hi int) {
+			ck.exact = make([]bool, len(col.S))
+			parallelChunks(len(col.S), threads, func(_, lo, hi int) {
 				for i, str := range col.S[lo:hi] {
 					ck.prefix[lo+i] = stringPrefix(str)
+					// Up to 8 bytes without NUL: no other string has the
+					// same zero-padded prefix.
+					ck.exact[lo+i] = len(str) <= 8 && strings.IndexByte(str, 0) < 0
 				}
 			})
 		}
 		c.keys = append(c.keys, ck)
 	}
+	if len(c.keys) > 1 && c.keys[0].cls == vInt {
+		c.planPacking(threads)
+	}
 	return c
+}
+
+// maxPackBits bounds the bits of the first key's range code in packed
+// normalized keys (the rest holds the second key's prefix).
+const maxPackBits = 40
+
+// planPacking enables packed normalized keys if the first key's values
+// span a small range.
+func (c *colComparator) planPacking(threads int) {
+	k := &c.keys[0]
+	n := len(k.ints)
+	type bounds struct {
+		lo, hi int64
+		any    bool
+	}
+	parts := make([]bounds, max(threads, 1))
+	parallelChunks(n, threads, func(w, lo, hi int) {
+		b := bounds{lo: math.MaxInt64, hi: math.MinInt64}
+		for i := lo; i < hi; i++ {
+			if k.nulls != nil && k.nulls[i] {
+				continue
+			}
+			b.lo, b.hi, b.any = min(b.lo, k.ints[i]), max(b.hi, k.ints[i]), true
+		}
+		parts[w] = b
+	})
+	all := bounds{lo: math.MaxInt64, hi: math.MinInt64}
+	for _, b := range parts {
+		if b.any {
+			all.lo, all.hi, all.any = min(all.lo, b.lo), max(all.hi, b.hi), true
+		}
+	}
+	if !all.any || all.hi-all.lo < 0 || uint64(all.hi-all.lo) >= 1<<maxPackBits {
+		return
+	}
+	// Codes: values 1..R (R = hi-lo+1), NULL 0 or R+1.
+	r := uint64(all.hi-all.lo) + 1
+	c.pack, c.packLo, c.packHi, c.packBits = true, all.lo, all.hi, uint(bits.Len64(r+1))
+	if !k.nullsFirst {
+		c.packNullCode = r + 1
+	}
+}
+
+// norm0 returns the normalized first key of row i (packed if enabled).
+func (c *colComparator) norm0(i int32) uint64 {
+	if !c.pack {
+		return c.norm(0, i)
+	}
+	k := &c.keys[0]
+	code := c.packNullCode
+	if k.nulls == nil || !k.nulls[i] {
+		if k.desc {
+			code = uint64(c.packHi-k.ints[i]) + 1
+		} else {
+			code = uint64(k.ints[i]-c.packLo) + 1
+		}
+	}
+	return code<<(64-c.packBits) | c.norm(1, i)>>c.packBits
 }
 
 // clampInt64 saturates a 128-bit value to the int64 range: an
