@@ -1186,4 +1186,41 @@ mod tests {
             }
         }
     }
+
+    /// Consumers that stop early (LIMIT) stop the parallel workers; this
+    /// must neither hang nor change results.
+    #[test]
+    fn parallel_early_stop() {
+        let e = Engine::new(Config::default());
+        let mut csv = String::from("id,v\n");
+        for i in 0..3000 {
+            csv.push_str(&format!("{i},{}\n", i % 17));
+        }
+        load(&e, "t", &csv);
+        for round in 0..200u64 {
+            let limit = 30 + (round * 37) % 2000;
+            let opts = QueryOptions {
+                threads: Some(1 + (round as usize % 7)),
+                morsel_rows: Some(5 + (round as usize % 11)),
+                ..Default::default()
+            };
+            let sql = format!("SELECT id FROM t WHERE v <> 3 LIMIT {limit}");
+            let r = e.query(&sql, &opts).unwrap();
+            assert_eq!(r.row_count, limit);
+            // Ordered gather: the first `limit` qualifying rows in scan order.
+            let first: Vec<i64> = (0..3000)
+                .filter(|i| i % 17 != 3)
+                .take(limit as usize)
+                .collect();
+            let got: Vec<i64> = r
+                .rows
+                .iter()
+                .map(|row| match row[0] {
+                    Value::Int(i) => i,
+                    _ => -1,
+                })
+                .collect();
+            assert_eq!(got, first);
+        }
+    }
 }
