@@ -61,6 +61,14 @@ parameter expressions, which are evaluated in the enclosing row."
 (defun subquery-op-p (e)
   (and (b-op-p e) (eq (b-op-op e) :subquery)))
 
+(defun uncorrelated-subquery-p (e)
+  "True if E is a subquery whose result is the same for every row (no
+correlation parameters), so it can be evaluated once per query."
+  (and (subquery-op-p e)
+       (let ((sq (b-op-info e)))
+         (and (subquery-cacheable sq)
+              (null (if (eq (subquery-kind sq) :in) (rest (b-op-args e)) (b-op-args e)))))))
+
 (defun bexpr-children (e)
   (typecase e
     (b-op (b-op-args e))

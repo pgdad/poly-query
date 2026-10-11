@@ -66,6 +66,7 @@
                  (:file "vectors")
                  (:file "vexpressions")
                  (:file "keytable")
+                 (:file "vsubqueries")
                  (:file "vaggregates")
                  (:file "vnative")
                  (:file "voperators")

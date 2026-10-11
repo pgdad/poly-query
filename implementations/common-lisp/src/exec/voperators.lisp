@@ -226,17 +226,19 @@ by the first error of evaluating EXPRS row by row over BATCH."
 ;;; Aggregation
 
 (defun make-aggregate-consumer (node &key track-positions)
-  "(values new-state consume lazy) for vectorized aggregation of NODE:
+  "(values new-state consume lazy prepare) for vectorized aggregation of NODE:
 NEW-STATE creates an empty GROUP-STATE, (CONSUME state batch [base])
 aggregates one input batch (whose first row has input position BASE) into
 it; LAZY is true when CONSUME also accepts lazy scan batches (native
-kernels, see GROUP-STATE-CONSUME-LAZY). Kernels are compiled once per call."
+kernels, see GROUP-STATE-CONSUME-LAZY). (PREPARE batch) returns the key and
+argument VECs of a batch, i.e. CONSUME's work before GROUP-STATE-CONSUME
+(parallel.lisp aggregates them elsewhere). Kernels are compiled once per
+call."
   (let* ((keys (pp-hash-aggregate-group-by node))
          (aggs (pp-hash-aggregate-aggregates node))
          (key-kernels (mapcar #'compile-vexpr keys))
          (arg-kernels (mapcar (lambda (a) (and (b-agg-args a) (compile-vexpr (first (b-agg-args a)))))
                               aggs))
-         (nkeys (length keys))
          (key-kinds (mapcar (lambda (k) (type-vec-kind (bexpr-type k))) keys))
          (native (native-kernels-enabled-p))
          (lazy-columns nil)
@@ -245,26 +247,37 @@ kernels, see GROUP-STATE-CONSUME-LAZY). Kernels are compiled once per call."
                       (setf lazy-columns columns)
                       ok)))
          (guard (make-row-order-guard (append keys (mapcan (lambda (a) (copy-list (b-agg-args a)))
-                                                           aggs)))))
+                                                           aggs))))
+         (prepare (lambda (batch)
+                    (batch-materialize batch)
+                    (funcall (the function guard) batch
+                             (lambda ()
+                               (values (mapcar (lambda (k) (funcall (the function k) batch)) key-kernels)
+                                       (mapcar (lambda (k) (and k (funcall (the function k) batch)))
+                                               arg-kernels)))))))
     (values
      (lambda () (make-group-state key-kinds aggs track-positions native))
      (lambda (gs batch &optional (base 0))
        (let ((n (batch-count batch)))
          (if (batch-source batch)
              (group-state-consume-lazy gs batch lazy-columns)
-             (multiple-value-bind (key-vecs arg-vecs)
-                 (funcall (the function guard) batch
-                          (lambda ()
-                            (values (mapcar (lambda (k) (funcall (the function k) batch)) key-kernels)
-                                    (mapcar (lambda (k) (and k (funcall (the function k) batch)))
-                                            arg-kernels))))
+             (multiple-value-bind (key-vecs arg-vecs) (funcall prepare batch)
                (group-state-consume gs key-vecs arg-vecs n base)))
-         (let ((groups (group-state-count gs))
-               (charged (group-state-charged gs)))
-           (when (>= (- groups charged) 1024)
-             (charge-memory (* (- groups charged) (row-footprint (* 4 (+ nkeys (length aggs))))))
-             (setf (group-state-charged gs) groups)))))
-     lazy)))
+         (group-state-charge gs)))
+     lazy
+     prepare)))
+
+(defun group-state-charge (gs)
+  "Charge the groups GS added since the last charge to the memory budget."
+  (let ((groups (group-state-count gs))
+        (charged (group-state-charged gs)))
+    (when (>= (- groups charged) 1024)
+      (charge-memory (* (- groups charged)
+                        (row-footprint (* 4 (+ (if (group-state-table gs)
+                                                   (key-table-width (group-state-table gs))
+                                                   0)
+                                               (length (group-state-aggs gs)))))))
+      (setf (group-state-charged gs) groups))))
 
 (defun group-state-batches (gs node)
   "Iterator over the output batches of the finished group state GS."

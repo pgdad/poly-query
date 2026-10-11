@@ -116,6 +116,10 @@ are non-NULL (the other rows get NULL), as in the row evaluator."
     (b-agg (error "internal: aggregate call outside an aggregation context"))))
 
 (defun compile-vop (e)
+  (or (compile-with-subquery-values e)
+      (compile-vop-1 e)))
+
+(defun compile-vop-1 (e)
   (let ((op (b-op-op e))
         (args (b-op-args e)))
     (ecase op
@@ -138,7 +142,7 @@ are non-NULL (the other rows get NULL), as in the row evaluator."
                                        (> (length args) 2))
                                    :eager
                                    :strict)))
-      (:subquery (compile-lifted e :eager)))))
+      (:subquery (or (compile-vin-subquery e) (compile-lifted e :eager))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Generic paths
@@ -288,9 +292,16 @@ the error at the right time)."
   (destructuring-bind (a b) (b-op-args e)
     (let ((op (b-op-op e))
           (lt (bexpr-type a)) (rt (bexpr-type b)))
-      (multiple-value-bind (nl nr) (comparison-normalizers lt rt)
+      (multiple-value-bind (nl nr ct) (comparison-normalizers lt rt)
         (let ((ka (type-vec-kind lt)) (kb (type-vec-kind rt)))
           (cond
+            ;; INT64/DECIMAL column op FLOAT64 constant: integer bounds.
+            ((and (eq ct :float64) (eq ka :i64) (eq nr #'identity)
+                  (bexpr-constant-p b) (not (bexpr-constant-p a)))
+             (compile-vcompare-float-constant op a nl b))
+            ((and (eq ct :float64) (eq kb :i64) (eq nl #'identity)
+                  (bexpr-constant-p a) (not (bexpr-constant-p b)))
+             (compile-vcompare-float-constant (flip-comparison-op op) b nr a))
             ;; column op constant (either order); the constant is normalized once.
             ((and (bexpr-constant-p b) (not (bexpr-constant-p a)) (eq nl #'identity))
              (compile-vcompare-constant op a (type-vec-kind lt) b nr))
@@ -357,6 +368,61 @@ the error at the right time)."
                                      (if (eq a +null+) +null+ ,test))))))))
            (comparison-dispatch op generic))))
       (t nil))))
+
+(defun first-true-integer (predicate)
+  "Smallest (SIGNED-BYTE 64) integer for which the monotone PREDICATE (false
+below some point, true from it on) holds, or NIL."
+  (declare (type function predicate))
+  (let ((lo (- (expt 2 63))) (hi (1- (expt 2 63))))
+    (cond ((funcall predicate lo) lo)
+          ((not (funcall predicate hi)) nil)
+          (t ;; invariant: (predicate lo) false, (predicate hi) true
+           (loop while (> (- hi lo) 1)
+                 do (let ((mid (floor (+ lo hi) 2)))
+                      (if (funcall predicate mid) (setf hi mid) (setf lo mid))))
+           hi))))
+
+(defun compile-vcompare-float-constant (op column-expr to-double constant-expr)
+  "Kernel for COLUMN-EXPR op CONSTANT-EXPR where the INT64-like column values
+are compared as doubles (TO-DOUBLE, monotone) with a FLOAT64 constant, or NIL.
+The comparison holds exactly for the column values within an integer range
+[LO, HI] (or outside it, for <>), found once by binary search, so rows are
+compared as integers without converting them."
+  (multiple-value-bind (c ok) (constant-operand-value constant-expr)
+    (when (and ok (typep c 'double-float) (= c c))
+      (let* ((to-double to-double)
+             (min (- (expt 2 63))) (max (1- (expt 2 63)))
+             (first-ge (first-true-integer (lambda (v) (>= (funcall to-double v) c))))
+             (first-gt (first-true-integer (lambda (v) (> (funcall to-double v) c))))
+             (negate (eq op :<>))
+             (lo (ecase op
+                   ((:= :<> :>=) first-ge)
+                   (:> first-gt)
+                   ((:< :<=) min)))
+             (hi (ecase op
+                   (:< (if first-ge (1- first-ge) max))
+                   ((:= :<> :<=) (if first-gt (1- first-gt) max))
+                   ((:> :>=) max)))
+             (kernel (compile-vexpr column-expr)))
+        (declare (type function kernel to-double))
+        (when (or (null lo) (null hi) (> lo hi))
+          ;; No column value satisfies the comparison.
+          (setf lo 0 hi -1))
+        (let ((lo lo) (hi hi))
+          (declare (type (signed-byte 64) lo) (type (signed-byte 64) hi))
+          (lambda (batch)
+            (let* ((n (batch-count batch))
+                   (va (funcall kernel batch))
+                   (x (vec-data va))
+                   (validity (vec-validity va))
+                   (out (make-array n)))
+              (declare (type fixnum n) (type i64-vector x) (type (or null simple-bit-vector) validity))
+              (do-valid-rows (i n validity)
+                (setf (svref out i)
+                      (let ((v (aref x i)))
+                        (if (and (<= lo v) (<= v hi)) (not negate) negate)))
+                (setf (svref out i) +null+))
+              (make-vec out))))))))
 
 (defun comparison-test (op)
   "Function of a comparator result (-1/0/1) implementing comparison OP."

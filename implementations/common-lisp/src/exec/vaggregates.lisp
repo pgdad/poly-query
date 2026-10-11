@@ -477,8 +477,9 @@ uses the native kernels."
 
 (defun group-state-consume (gs key-vecs arg-vecs n &optional (base 0))
   "Aggregate N rows given their key VECs and aggregate argument VECs; BASE is
-the input position of the first row (when positions are tracked)."
-  (declare (type fixnum n base))
+the input position of the first row, or an index vector of the rows' input
+positions (when positions are tracked)."
+  (declare (type fixnum n) (type (or fixnum index-vector) base))
   (let ((gids (group-state-gids gs))
         (table (group-state-table gs)))
     (declare (type index-vector gids))
@@ -489,13 +490,21 @@ the input position of the first row (when positions are tracked)."
     (when table
       (let ((before (key-table-count table)))
         (key-table-map-batch table key-vecs n gids t)
-        (when (and (group-state-positions gs) (> (key-table-count table) before))
+        (when (group-state-positions gs)
           (group-state-reserve-positions gs (key-table-count table))
           (let ((positions (group-state-positions gs)))
-            (dotimes (i n)
-              (let ((g (aref gids i)))
-                (when (and (>= g before) (= (aref positions g) most-positive-fixnum))
-                  (setf (aref positions g) (+ base i)))))))))
+            (declare (type index-vector positions))
+            (if (typep base 'fixnum)
+                ;; Rows in input order: a group's first row is its first position.
+                (when (> (key-table-count table) before)
+                  (dotimes (i n)
+                    (let ((g (aref gids i)))
+                      (when (and (>= g before) (= (aref positions g) most-positive-fixnum))
+                        (setf (aref positions g) (+ base i))))))
+                ;; Rows of several inputs in any order: keep the minimum.
+                (dotimes (i n)
+                  (let ((g (aref gids i)))
+                    (setf (aref positions g) (min (aref positions g) (aref base i))))))))))
     (let ((groups (group-state-count gs))
           (gids32 nil))
       (flet ((gids32 ()
@@ -526,7 +535,7 @@ the partition number modulo PARTITIONS."
          (parts (make-array count :element-type 'fixnum))
          (sizes (make-array partitions :element-type 'fixnum :initial-element 0)))
     (dotimes (g count)
-      (let ((p (mod (key-table-group-hash table g) partitions)))
+      (let ((p (hash-partition (key-table-group-hash table g) partitions)))
         (setf (aref parts g) p)
         (incf (aref sizes p))))
     (let ((out (map 'simple-vector #'make-index-vector sizes)))

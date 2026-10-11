@@ -20,7 +20,7 @@
 ;;;; Errors in a worker stop the run and are re-signalled by the consumer.
 ;;;; Every run registers a query cleanup that stops and joins its workers,
 ;;;; so no thread outlives the query (also when a LIMIT stops reading early).
-;;;; Pipelines whose expressions contain subqueries or correlation
+;;;; Pipelines whose expressions contain correlated subqueries or correlation
 ;;;; parameters run serially, as does everything inside subqueries.
 
 (in-package #:polyquery)
@@ -42,9 +42,14 @@
 ;;; Pipelines
 
 (defun parallel-safe-node-p (node)
-  "True if NODE's expressions can be evaluated by independent workers."
+  "True if NODE's expressions can be evaluated by independent workers: no
+correlation parameters, and only subqueries evaluated once per query (their
+result is shared, see QUERY-SHARED-VALUE)."
   (notany (lambda (e)
-            (and e (bexpr-some (lambda (x) (or (b-param-p x) (subquery-op-p x))) e)))
+            (and e (bexpr-some (lambda (x)
+                                 (or (b-param-p x)
+                                     (and (subquery-op-p x) (not (uncorrelated-subquery-p x)))))
+                               e)))
           (node-expressions node)))
 
 (defun hash-join-probe-node (node)
@@ -288,13 +293,75 @@ workers, yielding the batches in serial order."
 
 ;;; ------------------------------------------------------------------
 ;;; Parallel aggregation
+;;;
+;;; Workers aggregate the morsels they claim into private partial states,
+;;; which are merged at the end. That suits few groups; with many groups
+;;; every worker would build (and the merge re-insert) a table of nearly
+;;; all groups. So after its first morsel a worker checks how many groups
+;;; that morsel produced (the first worker to finish one decides for the
+;;; run): beyond +PARTITION-GROUP-RATIO+ of its rows, the run switches to
+;;; *partitioned* aggregation: workers only evaluate the keys and arguments
+;;; of later morsels and split their rows by key hash into one partition per
+;;; worker; each partition is then aggregated by one thread, into a table of
+;;; only its share of the groups, together with that partition's groups of
+;;; the partial states. Every row carries its input position, so the groups
+;;; are still emitted in serial first-appearance order.
+
+(defconstant +partition-group-ratio+ 1/8
+  "Groups per input row of a worker's first morsel above which a parallel
+aggregation partitions its rows instead of pre-aggregating them.")
+
+(defstruct (partitioned-batch (:constructor make-partitioned-batch (key-vecs arg-vecs rows positions)))
+  "One input batch of a partitioned aggregation: its key and argument VECs
+and, per partition, the batch rows of that partition (an index vector) and
+their input positions."
+  key-vecs arg-vecs
+  (rows #() :type simple-vector)
+  (positions #() :type simple-vector))
+
+(defun partition-batch (key-vecs arg-vecs n base partitions native)
+  "PARTITIONED-BATCH of N rows (input positions BASE + i) split into
+PARTITIONS by the hash of their keys, as GROUP-STATE-PARTITIONS splits groups."
+  (declare (type fixnum n base partitions))
+  (let ((hashes (hash-key-vecs key-vecs n native))
+        (parts (make-array n :element-type '(unsigned-byte 16)))
+        (sizes (make-array partitions :element-type 'fixnum :initial-element 0)))
+    (declare (type index-vector hashes))
+    (dotimes (i n)
+      (let ((p (hash-partition (aref hashes i) partitions)))
+        (setf (aref parts i) p)
+        (incf (aref sizes p))))
+    (let ((rows (map 'simple-vector #'make-index-vector sizes))
+          (positions (map 'simple-vector #'make-index-vector sizes)))
+      (fill sizes 0)
+      (dotimes (i n)
+        (let* ((p (aref parts i))
+               (k (aref sizes p)))
+          (setf (aref (the index-vector (svref rows p)) k) i
+                (aref (the index-vector (svref positions p)) k) (+ base i)
+                (aref sizes p) (1+ k))))
+      (make-partitioned-batch key-vecs arg-vecs rows positions))))
+
+(defun consume-partitioned-batch (gs pb p)
+  "Aggregate the rows of partition P of the PARTITIONED-BATCH PB into GS."
+  (let* ((idx (svref (partitioned-batch-rows pb) p))
+         (m (length idx)))
+    (when (plusp m)
+      (group-state-consume gs
+                           (mapcar (lambda (v) (vec-gather v idx m)) (partitioned-batch-key-vecs pb))
+                           (mapcar (lambda (v) (and v (vec-gather v idx m)))
+                                   (partitioned-batch-arg-vecs pb))
+                           m
+                           (svref (partitioned-batch-positions pb) p)))))
 
 (defun make-parallel-aggregate (node scan threads)
   "Batch opener of a HashAggregate whose input pipeline runs in up to
-THREADS workers, each aggregating into a partial group state."
+THREADS workers, each aggregating into a partial group state (or, with
+many groups, partitioning its rows; see above)."
   (let* ((child (pnode-child node))
          (morsel-count (length (scan-morsels scan)))
          (workers (min threads morsel-count))
+         (grouped (and (pp-hash-aggregate-group-by node) t))
          (consumers (loop repeat workers
                           collect (multiple-value-list
                                    (let ((*parallel-disabled* t))
@@ -307,41 +374,74 @@ THREADS workers, each aggregating into a partial group state."
             (unless output
               (mapc #'funcall providers)
               (let ((run (make-prun (scan-morsels scan)))
-                    (states (make-array workers :initial-element nil)))
+                    (states (make-array workers :initial-element nil))
+                    (buffers (make-array workers :initial-element '()))
+                    (mode (list nil)))   ; NIL until decided, then :LOCAL or :PARTITION
                 (prun-start run workers
                             (lambda (w)
-                              (destructuring-bind (new-state consume &optional lazy) (nth w consumers)
+                              (destructuring-bind (new-state consume lazy prepare) (nth w consumers)
                                 (declare (ignore lazy))
-                                (declare (type function new-state consume))
-                                (let ((gs (funcall new-state)))
+                                (declare (type function new-state consume prepare))
+                                (let ((gs (funcall new-state))
+                                      (first-morsel t)
+                                      (partition nil))
                                   (setf (svref states w) gs)
-                                  (run-morsels run (svref copies w)
-                                               (lambda (m iter)
-                                                 (declare (type function iter))
-                                                 ;; Input position: morsel, then row within it.
-                                                 (let ((base (* m (expt 2 32))))
-                                                   (loop for b = (funcall iter)
-                                                         while b
-                                                         do (when (prun-stopped run) (return-from nil))
-                                                            (funcall consume gs b base)
-                                                            (incf base (batch-count b))))))))))
+                                  (run-morsels
+                                   run (svref copies w)
+                                   (lambda (m iter)
+                                     (declare (type function iter))
+                                     ;; Input position: morsel, then row within it.
+                                     (let ((base (* m (expt 2 32)))
+                                           (rows 0))
+                                       (declare (type fixnum base rows))
+                                       (loop for b = (funcall iter)
+                                             while b
+                                             do (when (prun-stopped run) (return-from nil))
+                                                (let ((n (batch-count b)))
+                                                  (if partition
+                                                      (multiple-value-bind (key-vecs arg-vecs)
+                                                          (funcall prepare b)
+                                                        (charge-memory
+                                                         (* n (row-footprint (+ (length key-vecs)
+                                                                                (length arg-vecs)))))
+                                                        (push (partition-batch key-vecs arg-vecs n base
+                                                                               workers (group-state-native gs))
+                                                              (svref buffers w)))
+                                                      (funcall consume gs b base))
+                                                  (incf base n)
+                                                  (incf rows n)))
+                                       (when first-morsel
+                                         (setf first-morsel nil
+                                               partition
+                                               (and grouped (> workers 1)
+                                                    (eq (decide-aggregation-mode
+                                                         mode (> (group-state-count gs)
+                                                                 (* rows +partition-group-ratio+)))
+                                                        :partition)))))))))))
                 ;; Wait for all workers, then merge their partial states in order.
                 (loop for th in (prun-threads run)
                       do (sb-thread:join-thread th :default nil))
                 (setf (prun-threads run) '())
                 (prun-raise run)
                 (check-interrupts)
-                (setf output (merge-partial-states states node (first (first consumers))))))
+                (setf output (merge-partial-states states node (first (first consumers)) buffers))))
             (funcall (the function output))))))))
 
+(defun decide-aggregation-mode (mode many-groups)
+  "The aggregation mode of a run: decided once, by the first worker to finish
+a morsel (MODE is a cons cell holding the decision)."
+  (let ((wanted (if many-groups :partition :local)))
+    (or (sb-ext:compare-and-swap (car mode) nil wanted) wanted)))
 
-(defun merge-partial-states (states node new-state)
-  "Batch iterator over the merged groups of the partial group STATES, in
-order of first input position (the order a serial aggregation produces).
-Many groups are merged in parallel, one thread per hash partition."
+(defun merge-partial-states (states node new-state &optional buffers)
+  "Batch iterator over the merged groups of the partial group STATES (and of
+the partitioned batches in BUFFERS, one list per worker), in order of first
+input position (the order a serial aggregation produces). Many groups are
+merged in parallel, one thread per hash partition."
   (declare (type simple-vector states) (type function new-state))
   (let ((workers (length states))
-        (groups (reduce #'+ states :key #'group-state-count)))
+        (groups (reduce #'+ states :key #'group-state-count))
+        (partitioned (and buffers (some #'identity buffers))))
     (cond
       ((null (pp-hash-aggregate-group-by node))
        (let ((total (svref states 0)))
@@ -349,31 +449,40 @@ Many groups are merged in parallel, one thread per hash partition."
                do (group-state-merge total (svref states w)))
          (group-state-batches total node)))
       ;; Few groups (below a quarter morsel): a serial merge is cheaper.
-      ((or (= workers 1) (< groups (floor (morsel-rows) 4)))
+      ((and (not partitioned)
+            (or (= workers 1) (< groups (floor (morsel-rows) 4))))
        (let ((total (svref states 0)))
          (loop for w from 1 below workers
                do (group-state-merge total (svref states w)))
          (ordered-group-batches (vector total) node)))
       (t
-       ;; Partition p collects the groups whose hash is p modulo the number
-       ;; of partitions, from every partial state.
+       ;; Partition p collects the groups whose hash is in partition p, from
+       ;; every partial state, and the rows of partition p of every
+       ;; partitioned batch.
        (let ((parts (coerce (loop repeat workers collect (funcall new-state)) 'simple-vector))
-             (partitioned (make-array workers)))
+             (split (make-array workers)))
          ;; Each partial state's groups split by partition (in parallel) ...
          (run-in-threads
           (loop for w below workers
                 collect (let ((w w))
                           (lambda ()
-                            (setf (svref partitioned w)
+                            (setf (svref split w)
                                   (group-state-partitions (svref states w) workers))))))
-         ;; ... then each partition merges its groups of every partial state.
+         ;; ... then each partition merges its groups of every partial state
+         ;; and aggregates its rows of the partitioned batches.
          (run-in-threads
           (loop for p below workers
                 collect (let ((p p))
                           (lambda ()
-                            (loop for w below workers
-                                  do (group-state-merge (svref parts p) (svref states w)
-                                                        (svref (svref partitioned w) p)))))))
+                            (let ((gs (svref parts p)))
+                              (loop for w below workers
+                                    do (group-state-merge gs (svref states w)
+                                                          (svref (svref split w) p)))
+                              (when buffers
+                                (loop for w below workers
+                                      do (dolist (pb (svref buffers w))
+                                           (consume-partitioned-batch gs pb p)
+                                           (group-state-charge gs)))))))))
          (check-interrupts)
          (ordered-group-batches parts node))))))
 
