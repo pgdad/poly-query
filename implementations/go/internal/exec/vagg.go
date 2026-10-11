@@ -151,11 +151,15 @@ func growZero[T any](s []T, g int) []T {
 	return out
 }
 
-// exactSumState is SUM/AVG over INT64 or DECIMAL: exact (wide) sums.
-// With native kernels, batches are first added to int64 partial sums
-// (fast) by pqk_group_sum_i64; a group's sum is sums[g] + fast[g].
+// exactSumState is SUM/AVG over INT64 or DECIMAL: exact sums. A group's
+// sum is kept in an int64 (small); when adding to it would overflow, the
+// int64 part moves to an unbounded spill sum, so the sum is spill[g] +
+// small[g]. With native kernels, batches are first added to int64 partial
+// sums (fast) by pqk_group_sum_i64; they are settled into the exact sum
+// at the end.
 type exactSumState struct {
-	sums  []types.BigDecimalSum
+	small []int64
+	spill map[int32]*types.BigDecimalSum
 	n     []int64
 	limit int64 // DECIMAL SUM: exclusive bound of the result
 	avg   bool
@@ -167,21 +171,47 @@ type exactSumState struct {
 }
 
 func (s *exactSumState) grow(g int) {
-	s.sums = growZero(s.sums, g)
+	s.small = growZero(s.small, g)
 	s.n = growZero(s.n, g)
 	if s.lib != nil {
 		s.fast = growZero(s.fast, g)
 	}
 }
 
+// add adds x to the sum of group g.
+func (s *exactSumState) add(g int32, x int64) {
+	c := s.small[g] + x
+	if (c > s.small[g]) == (x > 0) {
+		s.small[g] = c
+		return
+	}
+	s.spillAdd(g, s.small[g])
+	s.small[g] = x
+}
+
+// spillAdd adds x to the spill sum of group g.
+func (s *exactSumState) spillAdd(g int32, x int64) {
+	b := s.spill[g]
+	if b == nil {
+		if s.spill == nil {
+			s.spill = map[int32]*types.BigDecimalSum{}
+		}
+		b = &types.BigDecimalSum{}
+		s.spill[g] = b
+	}
+	b.Add(x)
+}
+
 func (s *exactSumState) update(gids []int32, n int, sel []int32, v *Vec) {
 	if s.lib != nil && n > 0 && s.nativeUpdate(gids, n, sel, v) {
 		return
 	}
-	sums, cnt, vals, nulls := s.sums, s.n, v.I, v.Nulls
+	sums, cnt, vals, nulls := s.small, s.n, v.I, v.Nulls
 	add := func(g int32, x int64) {
-		if p := &sums[g]; !p.AddSmall(x) {
-			p.Add(x)
+		if c := sums[g] + x; (c > sums[g]) == (x > 0) {
+			sums[g] = c
+		} else {
+			s.add(g, x)
 		}
 		cnt[g]++
 	}
@@ -234,31 +264,56 @@ func (s *exactSumState) nativeUpdate(gids []int32, n int, sel []int32, v *Vec) b
 }
 
 // settle folds the fast partial sum of group g into its exact sum.
-func (s *exactSumState) settle(g int) {
+func (s *exactSumState) settle(g int32) {
 	if s.fast != nil && s.fast[g] != 0 {
-		s.sums[g].Add(s.fast[g])
+		s.add(g, s.fast[g])
 		s.fast[g] = 0
 	}
 }
 
 func (s *exactSumState) merge(g int32, src aggState, sg int32) {
 	o := src.(*exactSumState)
-	s.sums[g].Merge(&o.sums[sg])
+	s.add(g, o.small[sg])
 	if o.fast != nil {
-		s.sums[g].Add(o.fast[sg])
+		s.add(g, o.fast[sg])
+	}
+	if b := o.spill[sg]; b != nil {
+		s.spillAdd(g, 0)
+		s.spill[g].Merge(b)
 	}
 	s.n[g] += o.n[sg]
 }
 
+// total returns the exact sum of group g.
+func (s *exactSumState) total(g int32) types.BigDecimalSum {
+	var t types.BigDecimalSum
+	if b := s.spill[g]; b != nil {
+		t.Merge(b)
+	}
+	t.Add(s.small[g])
+	return t
+}
+
 func (s *exactSumState) result(g int) (types.Value, error) {
-	s.settle(g)
+	s.settle(int32(g))
 	if s.n[g] == 0 {
 		return null, nil
 	}
-	if s.avg {
-		return types.FloatValue(s.sums[g].RatioFloat(s.n[g], s.scale)), nil
+	if s.spill[int32(g)] == nil {
+		v := s.small[g]
+		if s.avg {
+			return types.FloatValue(types.RatioFloat64(v, s.n[g], s.scale)), nil
+		}
+		if s.limit > 0 && (v <= -s.limit || v >= s.limit) {
+			return null, errs.New(errs.NumericOverflow, "SUM overflow")
+		}
+		return types.IntValue(v), nil
 	}
-	v, ok := s.sums[g].Int64()
+	t := s.total(int32(g))
+	if s.avg {
+		return types.FloatValue(t.RatioFloat(s.n[g], s.scale)), nil
+	}
+	v, ok := t.Int64()
 	if !ok || (s.limit > 0 && (v <= -s.limit || v >= s.limit)) {
 		return null, errs.New(errs.NumericOverflow, "SUM overflow")
 	}
@@ -519,18 +574,21 @@ type aggTable struct {
 	imap      *intGroupMap           // single INT-class key
 	wideMap   map[types.Int128]int32 // single wide DECIMAL key
 	nmap      *nativeIntMap          // replaces imap with native kernels
-	floatMap  map[uint64]int32
-	smap      *strGroupMap     // single STRING key
-	hashes    []uint64         // per group: hash of its single STRING key
-	strMap    map[string]int32 // encoded multi-column (and FLOAT64) keys
-	nullGroup int32            // group of the NULL key (single key)
-	dict      []string         // dictionary of the code→group cache
+	smap      *strGroupMap           // single STRING key
+	hashes    []uint64               // per group: hash of its single STRING key
+	strMap    map[string]int32       // encoded multi-column (and FLOAT64) keys
+	nullGroup int32                  // group of the NULL key (single key)
+	dict      []string               // dictionary of the code→group cache
 	dictGids  []int32
 	key       []byte
 
 	keys  []types.Row // key values per group
 	first []int64     // position of each group's first row (ordering)
 	gids  []int32
+	// rowPos, if set, holds the positions of the rows of the batch being
+	// folded (partitioned aggregation, whose batches gather rows from
+	// anywhere in the input); else row i of a batch at pos is at pos+i.
+	rowPos []int64
 
 	slab       []types.Value // storage for key rows
 	unreserved int64         // memory accounted but not yet reserved
@@ -539,7 +597,7 @@ type aggTable struct {
 func newAggTable(ec *Context, keyTypes []types.Type, calls []*plan.AggCall) *aggTable {
 	t := &aggTable{ec: ec, keyTypes: keyTypes, calls: calls, nullGroup: -1,
 		imap: newIntGroupMap(), smap: newStrGroupMap(),
-		wideMap: map[types.Int128]int32{}, floatMap: map[uint64]int32{}, strMap: map[string]int32{}}
+		wideMap: map[types.Int128]int32{}, strMap: map[string]int32{}}
 	for _, kt := range keyTypes {
 		t.keyClasses = append(t.keyClasses, classOf(kt))
 	}
@@ -644,6 +702,14 @@ func (t *aggTable) resolve(keys []*Vec, n int, sel []int32, pos int64) error {
 	return t.resolveString(v, n, sel, pos)
 }
 
+// posAt returns the input position of row i of a batch at pos.
+func (t *aggTable) posAt(pos int64, i int) int64 {
+	if t.rowPos != nil {
+		return t.rowPos[i]
+	}
+	return pos + int64(i)
+}
+
 // nullKey returns the group of the NULL key (single key), creating it.
 func (t *aggTable) nullKey(pos int64) (int32, error) {
 	if t.nullGroup >= 0 {
@@ -661,7 +727,7 @@ func (t *aggTable) resolveInt(v *Vec, n int, sel []int32, pos int64) error {
 	gids, vals, nulls := t.gids, v.I, v.Nulls
 	one := func(i int) error {
 		if nulls != nil && nulls[i] {
-			g, err := t.nullKey(pos + int64(i))
+			g, err := t.nullKey(t.posAt(pos, i))
 			gids[i] = g
 			return err
 		}
@@ -669,7 +735,7 @@ func (t *aggTable) resolveInt(v *Vec, n int, sel []int32, pos int64) error {
 		g, slot, ok := t.imap.find(k)
 		if !ok {
 			var err error
-			if g, err = t.newGroup(t.key1(types.IntValue(k)), pos+int64(i)); err != nil {
+			if g, err = t.newGroup(t.key1(types.IntValue(k)), t.posAt(pos, i)); err != nil {
 				return err
 			}
 			t.imap.insert(slot, k, g)
@@ -699,7 +765,7 @@ func (t *aggTable) resolveIntNative(v *Vec, n int, sel []int32, pos int64) error
 	hashes := m.hashBatch(vals[:n])
 	one := func(i int) error {
 		if nulls != nil && nulls[i] {
-			g, err := t.nullKey(pos + int64(i))
+			g, err := t.nullKey(t.posAt(pos, i))
 			gids[i] = g
 			return err
 		}
@@ -707,7 +773,7 @@ func (t *aggTable) resolveIntNative(v *Vec, n int, sel []int32, pos int64) error
 		g, ok := m.get(k, h)
 		if !ok {
 			var err error
-			if g, err = t.newGroup(t.key1(types.IntValue(k)), pos+int64(i)); err != nil {
+			if g, err = t.newGroup(t.key1(types.IntValue(k)), t.posAt(pos, i)); err != nil {
 				return err
 			}
 			m.put(k, h, g)
@@ -735,11 +801,11 @@ func (t *aggTable) resolveString(v *Vec, n int, sel []int32, pos int64) error {
 	gids, vals, nulls := t.gids, v.S, v.Nulls
 	one := func(i int) error {
 		if nulls != nil && nulls[i] {
-			g, err := t.nullKey(pos + int64(i))
+			g, err := t.nullKey(t.posAt(pos, i))
 			gids[i] = g
 			return err
 		}
-		g, err := t.findOrAddStr(vals[i], strKeyHash(vals[i]), pos+int64(i))
+		g, err := t.findOrAddStr(vals[i], strKeyHash(vals[i]), t.posAt(pos, i))
 		gids[i] = g
 		return err
 	}
@@ -772,12 +838,12 @@ func (t *aggTable) resolveDict(v *Vec, n int, sel []int32, pos int64) error {
 	cache, codes, gids, nulls := t.dictGids, v.Codes, t.gids, v.Nulls
 	slow := func(i int) error {
 		if nulls != nil && nulls[i] {
-			g, err := t.nullKey(pos + int64(i))
+			g, err := t.nullKey(t.posAt(pos, i))
 			gids[i] = g
 			return err
 		}
 		c := codes[i]
-		g, err := t.findOrAddStr(v.Dict[c], strKeyHash(v.Dict[c]), pos+int64(i))
+		g, err := t.findOrAddStr(v.Dict[c], strKeyHash(v.Dict[c]), t.posAt(pos, i))
 		if err != nil {
 			return err
 		}
@@ -815,14 +881,14 @@ func (t *aggTable) resolveEncoded(keys []*Vec, n int, sel []int32, pos int64) er
 			t.key = appendKey(t.key, v.value(i, t.keyClasses[k]), t.keyTypes[k])
 		}
 		if len(keys) == 1 && t.key[0] == 0 {
-			g, err := t.nullKey(pos + int64(i))
+			g, err := t.nullKey(t.posAt(pos, i))
 			gids[i] = g
 			return err
 		}
 		g, ok := t.strMap[string(t.key)]
 		if !ok {
 			var err error
-			if g, err = t.newGroup(t.keyRow(keys, i), pos+int64(i)); err != nil {
+			if g, err = t.newGroup(t.keyRow(keys, i), t.posAt(pos, i)); err != nil {
 				return err
 			}
 			t.strMap[string(t.key)] = g
@@ -852,6 +918,15 @@ func (t *aggTable) update(keys, args []*Vec, n int, sel []int32, pos int64) erro
 	if err := t.resolve(keys, n, sel, pos); err != nil {
 		return err
 	}
+	if t.rowPos != nil {
+		// Rows do not arrive in input order: an existing group may first
+		// appear at an earlier row.
+		forActive(n, sel, func(i int) {
+			if g := t.gids[i]; t.rowPos[i] < t.first[g] {
+				t.first[g] = t.rowPos[i]
+			}
+		})
+	}
 	for i, s := range t.states {
 		s.update(t.gids, n, sel, args[i])
 	}
@@ -859,12 +934,14 @@ func (t *aggTable) update(keys, args []*Vec, n int, sel []int32, pos int64) erro
 }
 
 // findOrAdd returns the group of a key (created at position pos if new;
-// otherwise its first position is lowered to pos if earlier).
+// otherwise its first position is lowered to pos if earlier). Keys are
+// looked up in the same maps as resolve uses.
 func (t *aggTable) findOrAdd(key types.Row, pos int64) (int32, error) {
 	var g int32
 	var ok bool
 	var put func(int32)
-	if len(key) == 1 {
+	single := len(key) == 1 && (key[0].Null || t.keyClasses[0] != vFloat)
+	if single {
 		v := key[0]
 		switch {
 		case v.Null:
@@ -881,18 +958,11 @@ func (t *aggTable) findOrAdd(key types.Row, pos int64) (int32, error) {
 		case t.keyClasses[0] == vWide:
 			g, ok = t.wideMap[v.Wide()]
 			put = func(g int32) { t.wideMap[v.Wide()] = g }
-		case t.keyClasses[0] == vFloat:
-			f := v.F
-			if f == 0 {
-				f = 0
-			}
-			k := math.Float64bits(f)
-			g, ok = t.floatMap[k]
-			put = func(g int32) { t.floatMap[k] = g }
 		default:
 			return t.findOrAddStr(v.S, strKeyHash(v.S), pos)
 		}
 	} else {
+		// Several keys, or a FLOAT64 key: canonical encoding (resolveEncoded).
 		t.key = t.key[:0]
 		for k, v := range key {
 			t.key = appendKey(t.key, v, t.keyTypes[k])
@@ -970,32 +1040,44 @@ func (t *aggTable) mergeWork() int {
 }
 
 // partitionGroups splits the groups of t by key hash into parts lists
-// (merge partitioning).
+// (merge partitioning, see groupPartHash).
 func (t *aggTable) partitionGroups(seed maphash.Seed, parts int) [][]int32 {
 	out := make([][]int32, parts)
 	for p := range out {
 		out[p] = make([]int32, 0, len(t.keys)/parts+len(t.keys)/(4*parts)+8)
 	}
 	var buf []byte
-	for g, key := range t.keys {
+	for g := range t.keys {
 		var h uint64
-		switch {
-		case len(key) == 1 && !key[0].Null && t.keyClasses[0] == vInt:
-			h = (uint64(key[0].I) * 0x9E3779B97F4A7C15) >> 32
-		case len(key) == 1 && !key[0].Null && t.keyClasses[0] == vStr:
-			h = t.hashes[g] >> 40 // the low bits choose map slots
-		default:
-			buf = buf[:0]
-			for k, v := range key {
-				buf = appendKey(buf, v, t.keyTypes[k])
-			}
-			h = maphash.Bytes(seed, buf)
-		}
+		h, buf = t.groupPartHash(seed, int32(g), buf)
 		p := h % uint64(parts)
 		out[p] = append(out[p], int32(g))
 	}
 	return out
 }
+
+// groupPartHash is the partitioning hash of group g's key; rowPartHash
+// computes the same for the keys of a row. buf is scratch space.
+func (t *aggTable) groupPartHash(seed maphash.Seed, g int32, buf []byte) (uint64, []byte) {
+	key := t.keys[g]
+	switch {
+	case len(key) == 1 && !key[0].Null && t.keyClasses[0] == vInt:
+		return intPartHash(key[0].I), buf
+	case len(key) == 1 && !key[0].Null && t.keyClasses[0] == vStr:
+		return strPartHash(t.hashes[g]), buf
+	}
+	buf = buf[:0]
+	for k, v := range key {
+		buf = appendKey(buf, v, t.keyTypes[k])
+	}
+	return maphash.Bytes(seed, buf), buf
+}
+
+// intPartHash and strPartHash partition single INT-class and STRING keys
+// (STRING by strKeyHash). They use other bits than the group tables'
+// slot selection.
+func intPartHash(k int64) uint64  { return (uint64(k) * 0x9E3779B97F4A7C15) >> 32 }
+func strPartHash(h uint64) uint64 { return h >> 40 }
 
 // results computes the output rows of all groups (keys then aggregates)
 // with their first positions. If results fail, err is the failure of the
@@ -1203,9 +1285,18 @@ func newVAggInput(ec *Context, x *physical.HashAggregate) (*vaggInput, error) {
 	return in, nil
 }
 
-// fold evaluates a batch and folds it into t; on a vectorized failure the
-// batch is evaluated row by row to report the first row's error.
+// fold evaluates a batch and folds it into t.
 func (in *vaggInput) fold(t *aggTable, b *Batch, pos int64) error {
+	if err := in.evalBatch(b); err != nil {
+		return err
+	}
+	return t.update(in.keys, in.args, b.N, b.Sel, pos)
+}
+
+// evalBatch evaluates the keys and arguments of a batch (into in.keys and
+// in.args); on a vectorized failure the batch is evaluated row by row to
+// report the first row's error.
+func (in *vaggInput) evalBatch(b *Batch) error {
 	if err := in.exprs.eval(b, b.Sel, in.vals); err != nil {
 		if rowErr := in.exprs.firstError(b); rowErr != nil {
 			return rowErr
@@ -1220,7 +1311,7 @@ func (in *vaggInput) fold(t *aggTable, b *Batch, pos int64) error {
 			in.args[i] = nil
 		}
 	}
-	return t.update(in.keys, in.args, b.N, b.Sel, pos)
+	return nil
 }
 
 // vaggregateOp is a (serial) vectorized hash aggregation.

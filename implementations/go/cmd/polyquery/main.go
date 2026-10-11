@@ -70,6 +70,11 @@ func parseArgs(mode string, args []string) options {
 	if v, err := strconv.Atoi(os.Getenv("POLYQUERY_MORSEL_ROWS")); err == nil && v > 0 {
 		o.cfg.MorselRows = v
 	}
+	// Testing aid: a small threshold makes small tables use partitioned
+	// (scattering) parallel aggregation.
+	if v, err := strconv.Atoi(os.Getenv("POLYQUERY_SCATTER_ROWS")); err == nil && v > 0 {
+		o.cfg.ScatterRows = v
+	}
 	for i := 0; i < len(args); i++ {
 		name, value, hasValue := strings.Cut(args[i], "=")
 		next := func() string {

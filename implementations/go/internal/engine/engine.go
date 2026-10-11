@@ -71,6 +71,10 @@ type Config struct {
 	// executor default; small values are useful to test parallelism on
 	// small tables).
 	MorselRows int
+	// ScatterRows is the number of rows after which a parallel
+	// aggregation worker may switch to scattering rows into partitions
+	// (0: the executor default; small values test that path).
+	ScatterRows int
 	// Native is the loaded native kernel library (nil: none); queries use
 	// it when they run with the option native: true.
 	Native *native.Lib
@@ -355,6 +359,7 @@ func (e *Engine) open(ctx context.Context, p *physical.Plan, opts QueryOptions) 
 		Vectorized:  p.Exec.Vectorized,
 		Threads:     p.Exec.Threads,
 		MorselRows:  e.cfg.MorselRows,
+		ScatterRows: e.cfg.ScatterRows,
 	}
 	if p.Exec.Native {
 		ec.Native = e.cfg.Native

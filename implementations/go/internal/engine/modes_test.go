@@ -133,6 +133,23 @@ func TestExecutionModesAgree(t *testing.T) {
 		"SELECT cat, SUM(price) FILTERED FROM t GROUP BY cat",
 		"SELECT COALESCE(grp, 'none'), NULLIF(cat, 'red'), ROUND(price, 1) FROM t WHERE id % 97 = 0",
 		"WITH x AS (SELECT grp, COUNT(*) AS n FROM t GROUP BY grp) SELECT a.grp, a.n + b.n FROM x a JOIN x b ON a.grp = b.grp",
+		// Vector kernels: CASE, COALESCE, casts, calendar functions.
+		"SELECT CASE WHEN amount < 100 THEN 'low' WHEN grp IS NULL THEN NULL WHEN amount < 300 THEN cat ELSE 'high' END AS c, COUNT(*) FROM t GROUP BY 1",
+		"SELECT SUM(CASE WHEN flag THEN amount ELSE 0 END), SUM(CASE WHEN cat = 'red' THEN 1 END), MAX(CASE WHEN id > 10 THEN price END) FROM t",
+		"SELECT CASE WHEN id % 2 = 0 THEN 100 / (id % 3) ELSE 0 END FROM t WHERE id < 50",
+		"SELECT COALESCE(grp, id % 5, 0), COALESCE(NULLIF(cat, 'red'), cat, 'x') FROM t WHERE id % 11 = 0",
+		"SELECT YEAR(day), MONTH(day), DAY(day), COUNT(*) FROM t GROUP BY YEAR(day), MONTH(day), DAY(day)",
+		"SELECT DATE_TRUNC('month', day), HOUR(CAST(day AS TIMESTAMP)), SUM(CAST(amount AS FLOAT64)), AVG(CAST(id AS FLOAT64)) FROM t GROUP BY DATE_TRUNC('month', day), HOUR(CAST(day AS TIMESTAMP))",
+		// Subqueries: uncorrelated scalar / IN over strings, correlated aggregates, NOT EXISTS.
+		"SELECT COUNT(*) FROM t WHERE amount > (SELECT AVG(amount) FROM t)",
+		"SELECT COUNT(*) FROM t WHERE amount > (SELECT AVG(amount) FROM t WHERE id < 0)",
+		"SELECT cat, COUNT(*) FROM t WHERE cat NOT IN (SELECT label FROM d) GROUP BY cat",
+		"SELECT cat, COUNT(*) FROM t WHERE grp NOT IN (SELECT grp FROM d WHERE label <> 'one') GROUP BY cat",
+		"SELECT COUNT(*) FROM t WHERE cat NOT IN (SELECT CASE WHEN grp = 1 THEN NULL ELSE label END FROM d)",
+		"SELECT COUNT(*) FROM t WHERE cat IN (SELECT CASE WHEN grp = 1 THEN 'red' ELSE 'blue' END FROM d)",
+		"SELECT id, (SELECT COUNT(*) FROM d WHERE d.grp = t.id % 13 AND d.label <> 'acht') FROM t WHERE id < 60",
+		"SELECT id FROM t WHERE NOT EXISTS (SELECT 1 FROM d WHERE d.grp = t.id % 13 AND d.label LIKE '%e%') AND id < 80",
+		"SELECT d.label FROM d WHERE d.grp < (SELECT COUNT(*) FROM t WHERE CAST(t.grp AS INT64) = d.grp) / 100",
 	}
 	for _, q := range queries {
 		want := canonical(e, q, modeConfig{"row", "hash", 1, true})
@@ -315,9 +332,18 @@ func TestOptimizerFoldsConstants(t *testing.T) {
 // aggregation tables (many groups) and the choice of the error of the
 // first-appearing failing group.
 func TestParallelHighCardinality(t *testing.T) {
+	// Default heuristics, and workers that always switch to partitioned
+	// (scattering) aggregation after a few morsels.
+	for _, scatter := range []int{0, 1, 2500} {
+		t.Run(fmt.Sprint("scatter", scatter), func(t *testing.T) { testParallelHighCardinality(t, scatter) })
+	}
+}
+
+func testParallelHighCardinality(t *testing.T, scatterRows int) {
 	cfg := DefaultConfig()
 	cfg.DataDir = t.TempDir()
 	cfg.MorselRows = 1000
+	cfg.ScatterRows = scatterRows
 	e := New(cfg)
 	var sb strings.Builder
 	sb.WriteString("id,v,s\n")
@@ -338,6 +364,9 @@ func TestParallelHighCardinality(t *testing.T) {
 		"SELECT s, id % 3, COUNT(DISTINCT v) FROM h WHERE v < 100 GROUP BY s, id % 3",
 		"SELECT DISTINCT s FROM h",
 		"SELECT id % 12000 AS g, SUM(v) + SUM(v) FROM h GROUP BY id % 12000",
+		"SELECT id % 12000 AS g, SUM(v) FROM h GROUP BY id % 12000",
+		"SELECT CAST(id % 5000 AS FLOAT64) / 4, COUNT(*), MAX(s) FROM h GROUP BY CAST(id % 5000 AS FLOAT64) / 4",
+		"SELECT s, COUNT(DISTINCT id % 7), SUM(DISTINCT v), MIN(id) FROM h WHERE v < 100 GROUP BY s",
 	}
 	for _, q := range queries {
 		want := canonical(e, q, modeConfig{"row", "hash", 1, true})

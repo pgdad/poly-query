@@ -29,6 +29,10 @@ type Context struct {
 	Threads int
 	// MorselRows is the number of rows per parallel work unit (0: default).
 	MorselRows int
+	// ScatterRows > 0 makes parallel aggregation workers switch to
+	// scattering after that many rows, whatever their tables' reduction
+	// (testing; 0: the default heuristic).
+	ScatterRows int
 	// Native is the kernel library used by native operators (nil: native
 	// execution is off — not requested or not loaded).
 	Native *native.Lib

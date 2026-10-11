@@ -360,6 +360,20 @@ func (s *BigDecimalSum) Big() *big.Int {
 	return big.NewInt(s.small)
 }
 
+// RatioFloat64 returns sum / (count · 10^scale) correctly rounded to
+// FLOAT64, like BigDecimalSum.RatioFloat.
+func RatioFloat64(sum, count int64, scale int) float64 {
+	const exact = 1 << 53 // integers up to 2^53 convert to FLOAT64 exactly
+	if scale < len(Pow10) && sum > -exact && sum < exact && count > 0 && count < exact/Pow10[scale] {
+		// Both operands are exact, so the single division is correctly
+		// rounded.
+		return float64(sum) / float64(count*Pow10[scale])
+	}
+	var s BigDecimalSum
+	s.Add(sum)
+	return s.RatioFloat(count, scale)
+}
+
 // RatioFloat returns sum / (count · 10^scale) correctly rounded to FLOAT64.
 func (s *BigDecimalSum) RatioFloat(count int64, scale int) float64 {
 	den := big.NewInt(count)

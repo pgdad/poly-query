@@ -214,13 +214,13 @@ func (t *aggTable) resolveWide(v *Vec, n int, sel []int32, pos int64) error {
 			return
 		}
 		if nulls != nil && nulls[i] {
-			gids[i], err = t.nullKey(pos + int64(i))
+			gids[i], err = t.nullKey(t.posAt(pos, i))
 			return
 		}
 		k := vals[i]
 		g, ok := t.wideMap[k]
 		if !ok {
-			if g, err = t.newGroup(t.key1(types.WideValue(k)), pos+int64(i)); err != nil {
+			if g, err = t.newGroup(t.key1(types.WideValue(k)), t.posAt(pos, i)); err != nil {
 				return
 			}
 			t.wideMap[k] = g

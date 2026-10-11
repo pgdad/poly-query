@@ -1,7 +1,9 @@
 package exec
 
 import (
+	"hash/maphash"
 	"math"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -66,15 +68,16 @@ func morsels(ec *Context, scan *physical.TableScan) []scanRange {
 }
 
 // parallelSafe reports whether an expression can be evaluated by parallel
-// workers: no subqueries (their caches are per query), no PQ_SLEEP and no
-// references outside the input (outer references of correlated
-// subqueries).
-func parallelSafe(e plan.Expr, input map[plan.ColumnID]bool) bool {
+// workers: no correlated subqueries (their caches are per query), no
+// PQ_SLEEP and no references outside the input (outer references of
+// correlated subqueries). Uncorrelated subqueries are computed before the
+// workers start (see subqueryReady).
+func parallelSafe(ec *Context, e plan.Expr, input map[plan.ColumnID]bool) bool {
 	ok := true
 	plan.Walk(e, func(x plan.Expr) {
 		switch y := x.(type) {
 		case *plan.Subquery:
-			ok = false
+			ok = ok && ec.subqueryReady(y)
 		case *plan.Func:
 			if y.Name == "PQ_SLEEP" {
 				ok = false
@@ -101,48 +104,49 @@ func columnIDs(cols []plan.Column) map[plan.ColumnID]bool {
 // expressions are parallel safe. (The build sides of the joins are
 // computed once and shared; they must not evaluate subqueries either,
 // since they are consumed by a worker.)
-func pipelineScan(n physical.Node) (*physical.TableScan, bool) {
+func pipelineScan(ec *Context, n physical.Node) (*physical.TableScan, bool) {
 	switch x := n.(type) {
 	case *physical.TableScan:
 		return x, true
 	case *physical.Filter:
-		if !parallelSafe(x.Pred, columnIDs(x.Input.Schema())) {
+		if !parallelSafe(ec, x.Pred, columnIDs(x.Input.Schema())) {
 			return nil, false
 		}
-		return pipelineScan(x.Input)
+		return pipelineScan(ec, x.Input)
 	case *physical.Project:
 		ids := columnIDs(x.Input.Schema())
 		for _, e := range x.Exprs {
-			if !parallelSafe(e, ids) {
+			if !parallelSafe(ec, e, ids) {
 				return nil, false
 			}
 		}
-		return pipelineScan(x.Input)
+		return pipelineScan(ec, x.Input)
 	case *physical.HashJoin:
 		ids := columnIDs(x.Schema())
 		for _, e := range physical.Exprs(x) {
-			if !parallelSafe(e, ids) {
+			if !parallelSafe(ec, e, ids) {
 				return nil, false
 			}
 		}
 		build, probe, _, _ := buildSide(x)
-		if !subtreeParallelSafe(build) {
+		if !subtreeParallelSafe(ec, build) {
 			return nil, false
 		}
-		return pipelineScan(probe)
+		return pipelineScan(ec, probe)
 	}
 	return nil, false
 }
 
 // subtreeParallelSafe reports whether no operator of a subtree evaluates
-// subqueries or PQ_SLEEP.
-func subtreeParallelSafe(n physical.Node) bool {
+// correlated subqueries or PQ_SLEEP (uncorrelated subqueries are computed
+// before the workers start).
+func subtreeParallelSafe(ec *Context, n physical.Node) bool {
 	for _, e := range physical.Exprs(n) {
 		ok := true
 		plan.Walk(e, func(x plan.Expr) {
 			switch y := x.(type) {
 			case *plan.Subquery:
-				ok = false
+				ok = ok && ec.subqueryReady(y)
 			case *plan.Func:
 				if y.Name == "PQ_SLEEP" {
 					ok = false
@@ -154,11 +158,28 @@ func subtreeParallelSafe(n physical.Node) bool {
 		}
 	}
 	for _, c := range n.Children() {
-		if !subtreeParallelSafe(c) {
+		if !subtreeParallelSafe(ec, c) {
 			return false
 		}
 	}
 	return true
+}
+
+// subqueryReady reports whether x is an uncorrelated subquery whose result
+// is available, computing it now if necessary: parallel workers then only
+// read the cached result. If the computation fails, the expression is
+// evaluated serially instead, where the subquery runs (and fails) exactly
+// when row-at-a-time evaluation first needs it.
+func (ec *Context) subqueryReady(x *plan.Subquery) bool {
+	if len(x.Correlated) > 0 {
+		return false
+	}
+	sub, ok := ec.Plan.Subplans[x]
+	if !ok {
+		return false
+	}
+	_, err := ec.uncorrelated(x, sub)
+	return err == nil
 }
 
 // parallelMorsels decides whether the pipeline rooted at n runs in
@@ -167,7 +188,7 @@ func parallelMorsels(ec *Context, n physical.Node) ([]scanRange, bool) {
 	if ec.Threads <= 1 || ec.serial > 0 {
 		return nil, false
 	}
-	scan, ok := pipelineScan(n)
+	scan, ok := pipelineScan(ec, n)
 	if !ok {
 		return nil, false
 	}
@@ -554,11 +575,8 @@ func morselPos(i int, k int64) int64 { return int64(i)<<32 | k }
 // parallelAggregate builds a parallel vectorized aggregation if
 // parallelism applies to its input.
 func parallelAggregate(ec *Context, x *physical.HashAggregate) (BatchOperator, bool, error) {
-	if !aggParallelSafe(x) {
-		return nil, false, nil
-	}
 	ranges, ok := parallelMorsels(ec, x.Input)
-	if !ok {
+	if !ok || !aggParallelSafe(ec, x) {
 		return nil, false, nil
 	}
 	nw := workers(ec, len(ranges))
@@ -577,24 +595,56 @@ func parallelAggregate(ec *Context, x *physical.HashAggregate) (BatchOperator, b
 	}
 	run := func() ([]types.Row, error) {
 		mark := ec.Mem.Mark()
+		// Workers whose partial tables do not reduce the data switch to
+		// scattering rows into partitions (see vaggpart.go).
+		seed := maphash.MakeSeed()
+		scatterRows, ratio := int64(scatterMinRows), int64(scatterGroupRatio)
+		if ec.ScatterRows > 0 {
+			scatterRows, ratio = int64(ec.ScatterRows), math.MaxInt32 // testing: always switch
+		}
+		scatters := make([]*aggScatter, nw)
+		seen := make([]int64, nw)
 		err := runMorsels(ec, ranges, nw, func(w, i int) error {
 			srcs[w].set(ranges[i])
+			in, t := inputs[w], tables[w]
 			var k int64
 			for {
 				b, err := ops[w].NextBatch()
-				if b == nil || err != nil {
+				if err != nil {
 					return err
 				}
-				if err := inputs[w].fold(tables[w], b, morselPos(i, k)); err != nil {
+				if b == nil {
+					break
+				}
+				if s := scatters[w]; s != nil {
+					if err := in.evalBatch(b); err != nil {
+						return err
+					}
+					err = s.add(in.keys, in.args, b.N, b.Sel, morselPos(i, k))
+				} else {
+					err = in.fold(t, b, morselPos(i, k))
+				}
+				if err != nil {
 					return err
 				}
 				k += int64(b.N)
 			}
+			seen[w] += k
+			if scatters[w] == nil && len(keyTypes) > 0 && seen[w] >= scatterRows &&
+				int64(t.groups())*ratio > seen[w] {
+				scatters[w] = newAggScatter(ec, seed, nw, keyTypes, x.Aggs)
+			}
+			return nil
 		})
 		if err != nil {
 			return nil, err
 		}
-		rows, err := mergeTables(ec, tables, keyTypes, x.Aggs)
+		var rows []types.Row
+		if slices.ContainsFunc(scatters, func(s *aggScatter) bool { return s != nil }) {
+			rows, err = mergePartitioned(ec, seed, tables, scatters, keyTypes, x.Aggs)
+		} else {
+			rows, err = mergeTables(ec, tables, keyTypes, x.Aggs)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -609,10 +659,10 @@ func parallelAggregate(ec *Context, x *physical.HashAggregate) (BatchOperator, b
 
 // aggParallelSafe reports whether the aggregation's own expressions can be
 // evaluated by workers.
-func aggParallelSafe(x *physical.HashAggregate) bool {
+func aggParallelSafe(ec *Context, x *physical.HashAggregate) bool {
 	ids := columnIDs(x.Input.Schema())
 	for _, e := range physical.Exprs(x) {
-		if !parallelSafe(e, ids) {
+		if !parallelSafe(ec, e, ids) {
 			return false
 		}
 	}
@@ -621,11 +671,8 @@ func aggParallelSafe(x *physical.HashAggregate) bool {
 
 // parallelRowAggregate is the row-mode counterpart of parallelAggregate.
 func parallelRowAggregate(ec *Context, x *physical.HashAggregate) (Operator, bool, error) {
-	if !aggParallelSafe(x) {
-		return nil, false, nil
-	}
 	ranges, ok := parallelMorsels(ec, x.Input)
-	if !ok {
+	if !ok || !aggParallelSafe(ec, x) {
 		return nil, false, nil
 	}
 	nw := workers(ec, len(ranges))

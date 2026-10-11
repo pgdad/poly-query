@@ -258,9 +258,12 @@ func (w *naggWorker) window(g *storage.RowGroup, lo, hi int) error {
 		case *exactSumState:
 			vals := v.Ints[lo:hi]
 			if sum, ok := w.lib.SumI64(vals, mask); ok {
-				s.sums[0].Add(sum)
+				s.add(0, sum)
 			} else {
-				exactMaskedSum(&s.sums[0], vals, mask)
+				var t types.BigDecimalSum
+				exactMaskedSum(&t, vals, mask)
+				s.spillAdd(0, 0)
+				s.spill[0].Merge(&t)
 			}
 			s.n[0] += count()
 		case *intMinMax:

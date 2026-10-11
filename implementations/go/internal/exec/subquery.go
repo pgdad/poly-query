@@ -340,7 +340,13 @@ func collectRows(ec *Context, x *plan.Subquery, sub physical.Node, op Operator) 
 // order[offsets[g]:offsets[g+1]]); other keys use their canonical encoding
 // (index).
 type lookupTable struct {
-	rows    []types.Row
+	rows []types.Row
+	// With an uncorrelated residual, rows for which it is FALSE or NULL are
+	// left out when the table is built; checked reports that, and recheck
+	// flags the rows whose residual failed (re-evaluated when probed, so
+	// that the error is raised exactly when row-by-row evaluation would).
+	checked bool
+	recheck []bool
 	index   map[string][]int32
 	ints    *intGroupMap
 	strs    *strGroupMap
@@ -396,8 +402,62 @@ func (t *lookupTable) matches(outer []evalFn, outTypes []types.Type) ([]int32, e
 	return t.order[t.offsets[g]:t.offsets[g+1]], nil
 }
 
+// add appends row r of rows (whose residual failed if failed[r]).
+func (t *lookupTable) add(row types.Row, failed []bool, r int) {
+	t.rows = append(t.rows, row)
+	if t.checked {
+		t.recheck = append(t.recheck, failed[r])
+	}
+}
+
+// refsWithin reports whether e references only the given columns.
+func refsWithin(e plan.Expr, cols []plan.Column) bool {
+	ids := columnIDs(cols)
+	for id := range plan.RefSet(e) {
+		if !ids[id] {
+			return false
+		}
+	}
+	return true
+}
+
+// materializeChecked is materialize, leaving out the rows for which
+// resid (if not nil) is FALSE or NULL; failed flags the rows for which it
+// failed.
+func materializeChecked(ec *Context, op Operator, resid evalFn) (rows []types.Row, failed []bool, err error) {
+	if resid == nil {
+		rows, err = materialize(ec, op)
+		return rows, nil, err
+	}
+	var arena rowArena
+	for n := 0; ; n++ {
+		row, err := op.Next()
+		if err != nil {
+			return nil, nil, err
+		}
+		if row == nil {
+			return rows, failed, nil
+		}
+		if n%checkEvery == 0 {
+			if err := ec.Check(); err != nil {
+				return nil, nil, err
+			}
+		}
+		v, err := resid(row)
+		if err == nil && !v.IsTrue() {
+			continue
+		}
+		cp := arena.copy(row)
+		if err := ec.Mem.Reserve(RowSize(cp)); err != nil {
+			return nil, nil, err
+		}
+		rows = append(rows, cp)
+		failed = append(failed, err != nil)
+	}
+}
+
 // buildDirect indexes rows by their single key (see lookupTable).
-func (t *lookupTable) buildDirect(rows []types.Row, key evalFn, cls vclass) error {
+func (t *lookupTable) buildDirect(rows []types.Row, failed []bool, key evalFn, cls vclass) error {
 	if cls == vInt {
 		t.ints = newIntGroupMap()
 	} else {
@@ -405,7 +465,7 @@ func (t *lookupTable) buildDirect(rows []types.Row, key evalFn, cls vclass) erro
 	}
 	gids := make([]int32, 0, len(rows))
 	var groups int32
-	for _, row := range rows {
+	for r, row := range rows {
 		v, err := key(row)
 		if err != nil {
 			return err
@@ -413,7 +473,7 @@ func (t *lookupTable) buildDirect(rows []types.Row, key evalFn, cls vclass) erro
 		if v.Null {
 			continue
 		}
-		t.rows = append(t.rows, row)
+		t.add(row, failed, r)
 		var g int32
 		var slot int
 		var ok bool
@@ -476,9 +536,10 @@ func (o *paramLookupOp) Next() (types.Row, error) {
 		}
 	}
 	for o.pos < len(o.matches) {
-		row := o.table.rows[o.matches[o.pos]]
+		idx := o.matches[o.pos]
+		row := o.table.rows[idx]
 		o.pos++
-		if o.residual != nil {
+		if o.residual != nil && (!o.table.checked || o.table.recheck[idx]) {
 			v, err := o.residual(row)
 			if err != nil {
 				return nil, err
@@ -508,15 +569,22 @@ func (ec *Context) lookupTable(n *physical.ParamLookup) (*lookupTable, error) {
 	for i, k := range n.InnerKeys {
 		ts[i] = k.Type()
 	}
-	rows, err := materialize(ec, in)
+	t := &lookupTable{}
+	var resid evalFn
+	if n.Residual != nil && !volatile(n.Residual) && refsWithin(n.Residual, n.Input.Schema()) {
+		if resid, err = compile(ec, layoutOf(n.Input.Schema()), n.Residual); err != nil {
+			return nil, err
+		}
+		t.checked = true
+	}
+	rows, failed, err := materializeChecked(ec, in, resid)
 	if err != nil {
 		return nil, err
 	}
-	t := &lookupTable{}
 	if cls, ok := directLookupKey(n); ok {
-		err = t.buildDirect(rows, keys[0], cls)
+		err = t.buildDirect(rows, failed, keys[0], cls)
 	} else {
-		err = t.buildEncoded(rows, keys, ts)
+		err = t.buildEncoded(rows, failed, keys, ts)
 	}
 	if err != nil {
 		return nil, err
@@ -529,17 +597,17 @@ func (ec *Context) lookupTable(n *physical.ParamLookup) (*lookupTable, error) {
 }
 
 // buildEncoded indexes rows by the canonical encoding of their keys.
-func (t *lookupTable) buildEncoded(rows []types.Row, keys []evalFn, ts []types.Type) error {
+func (t *lookupTable) buildEncoded(rows []types.Row, failed []bool, keys []evalFn, ts []types.Type) error {
 	t.index = map[string][]int32{}
 	var key []byte
-	for _, row := range rows {
+	for r, row := range rows {
 		k, ok, err := joinKey(key[:0], keys, ts, row)
 		key = k
 		if err != nil {
 			return err
 		}
 		if ok {
-			t.rows = append(t.rows, row)
+			t.add(row, failed, r)
 			t.index[string(k)] = append(t.index[string(k)], int32(len(t.rows)-1))
 		}
 	}

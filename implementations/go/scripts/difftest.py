@@ -328,6 +328,16 @@ def canon(resp):
     return ("ok", json.dumps(resp["columns"]), rows)
 
 
+def describe(base, got):
+    """Shows the rows that differ between two canonical results."""
+    if base[0] != "ok" or got[0] != "ok" or base[1] != got[1]:
+        return f"  base: {str(base)[:400]}\n  got:  {str(got)[:400]}"
+    only_b = sorted(set(base[2]) - set(got[2]))
+    only_g = sorted(set(got[2]) - set(base[2]))
+    return (f"  {len(base[2])} vs {len(got[2])} rows\n  only base: {only_b[:5]}\n"
+            f"  only got:  {only_g[:5]}")
+
+
 def main():
     global FIXTURES, JOIN_OPT
     ap = argparse.ArgumentParser()
@@ -390,7 +400,7 @@ def main():
                 cv = canon(s.req({"op": "query", "sql": q, "options": opts}))
                 if cv != cb:
                     failures += 1
-                    print(f"MISMATCH [{json.dumps(opts)}] {q}\n  base: {str(cb)[:400]}\n  got:  {str(cv)[:400]}")
+                    print(f"MISMATCH [{json.dumps(opts)}] {q}\n{describe(cb, cv)}")
         oks = {k: v for k, v in results.items() if v[0] == "ok"}
         if len(set(map(str, oks.values()))) > 1:
             failures += 1
@@ -399,6 +409,10 @@ def main():
                 print(f"  {k}: {str(v)[:300]}")
     s.p.stdin.close()
     s.p.wait()
+    log = Path(s.dir, "stderr").read_text()
+    if "DATA RACE" in log or "panic" in log:
+        failures += 1
+        print("engine stderr reports a data race or panic:\n" + log[:4000])
     shutil.rmtree(s.dir, ignore_errors=True)
     print(f"{args.queries} queries, {failures} mismatches, {errors} baseline errors")
     sys.exit(1 if failures else 0)
