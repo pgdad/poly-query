@@ -332,7 +332,7 @@ final class SortBatches {
                 chunked(n, tasks, ctx, (from, to) -> {
                     for (int i = from; i < to; i++) {
                         double d = s[i];
-                        long bits = Double.doubleToLongBits(d == 0.0 ? 0.0 : d);
+                        long bits = Double.doubleToRawLongBits(d == 0.0 ? 0.0 : d); // FLOAT64 values are finite
                         keys[i] = bits < 0 ? ~bits : bits ^ Long.MIN_VALUE;
                     }
                 });
@@ -714,7 +714,7 @@ final class SortBatches {
                 k = v.longs[i] ^ Long.MIN_VALUE;
             } else {
                 double d = v.doubles[i];
-                long bits = Double.doubleToLongBits(d == 0.0 ? 0.0 : d);
+                long bits = Double.doubleToRawLongBits(d == 0.0 ? 0.0 : d); // FLOAT64 values are finite
                 k = bits < 0 ? ~bits : bits ^ Long.MIN_VALUE;
             }
             return k ^ flip;
