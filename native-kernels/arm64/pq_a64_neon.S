@@ -47,7 +47,7 @@
 /* Block sizes of the bounded accumulation loops (see the kernels). Shrink
  * them to a few iterations to exercise the block-flush paths in testing. */
 #define NEON_SUM64_BLOCK     (1<<24)        /* sum_i64: 8-row groups per block */
-#define NEON_POPCNT_BLOCK    (1<<20)        /* bitmap_popcount: 64-byte steps per block */
+#define NEON_POPCNT_BLOCK    256            /* bitmap_popcount: 128-byte steps per block */
 #define NEON_SUM128_BLOCK    (1<<28)        /* sum_i128: rows per block */
 
 /* ========================================================================
@@ -380,16 +380,22 @@ ENDF pqk_a64_neon_sum_f64
  * Args:      x0 data, x1 validity (NULL = all valid), x2 n, x3 out_min,
  *            x4 out_max
  * Result:    x0 = number of valid rows (outputs written only if > 0)
- * Clobbers:  x0, x1, x5-x14, v0-v5, v16-v24, v26-v30, flags
+ * Clobbers:  x0, x1, x5-x14, v0-v7, v16-v31, flags
  * Registers: x5 min, x6 max, x7 groups / tail rows, x8/x9 temps,
  *            x10 original validity, x11 count, w12 tail validity,
- *            x13 INT64_MAX, x14 INT64_MIN; v16/v18 min accumulators,
- *            v17/v19 max accumulators, v4/v5 update masks, v20 validity
- *            byte, v21-v24 row masks, v26-v29 .Lneon_bits2d, v30 valid count
- * Algorithm: NEON has no 64-bit SMIN/SMAX: CMGT + BIT (MMSTEP), two
- *            accumulator pairs, validity ANDed into the update masks; valid
- *            rows counted by subtracting the all-ones masks. Reduction:
- *            merge the pairs, then GPR CMP/CSEL of the two lanes.
+ *            x13 INT64_MAX, x14 INT64_MIN; four (min, max) accumulator
+ *            pairs v16/v17, v18/v19, v6/v7, v25/v31 (one per input vector
+ *            of an iteration), v4/v5 update masks, v20 validity byte,
+ *            v21-v24 row masks, v26-v29 .Lneon_bits2d, v30 valid count
+ * Algorithm: NEON has no 64-bit SMIN/SMAX: CMGT + BIT (MMSTEP). Each of
+ *            the 4 vectors of an 8-row iteration has its own accumulator
+ *            pair, so every accumulator is updated once per iteration: the
+ *            loop-carried CMGT -> BIT chain (2 dependent ops) no longer
+ *            limits the loop, which runs at the throughput of its 16
+ *            (unmasked) vector ops. Validity is ANDed into the update masks;
+ *            valid rows counted by subtracting the all-ones masks.
+ *            Reduction: merge the four pairs, then GPR CMP/CSEL of the two
+ *            lanes.
  * Tail:      0-7 rows: scalar CMP/CSEL, invalid rows replaced by the
  *            neutral extremes.
  * ======================================================================== */
@@ -412,8 +418,12 @@ FUNC pqk_a64_neon_minmax_i64
     mov     x14, #PQ_INT64_MIN
     dup     v16.2d, x13
     dup     v18.2d, x13
+    dup     v6.2d, x13
+    dup     v25.2d, x13
     dup     v17.2d, x14
     dup     v19.2d, x14
+    dup     v7.2d, x14
+    dup     v31.2d, x14
     movi    v30.2d, #0
     lsr     x7, x2, #3
     cbz     x7, .Lneon_minmax_i64_reduce
@@ -426,8 +436,8 @@ FUNC pqk_a64_neon_minmax_i64
     COUNT_VALID8
     MMSTEP  v0, v21, v16, v17
     MMSTEP  v1, v22, v18, v19
-    MMSTEP  v2, v23, v16, v17
-    MMSTEP  v3, v24, v18, v19
+    MMSTEP  v2, v23, v6, v7
+    MMSTEP  v3, v24, v25, v31
     subs    x7, x7, #1
     b.ne    .Lneon_minmax_i64_main_v
     b       .Lneon_minmax_i64_reduce
@@ -435,15 +445,23 @@ FUNC pqk_a64_neon_minmax_i64
     ld1     {v0.2d-v3.2d}, [x0], #64
     MMSTEP  v0, none, v16, v17
     MMSTEP  v1, none, v18, v19
-    MMSTEP  v2, none, v16, v17
-    MMSTEP  v3, none, v18, v19
+    MMSTEP  v2, none, v6, v7
+    MMSTEP  v3, none, v25, v31
     subs    x7, x7, #1
     b.ne    .Lneon_minmax_i64_main_nv
 .Lneon_minmax_i64_reduce:
-    cmgt    v4.2d, v16.2d, v18.2d           // merge the two accumulator pairs
+    cmgt    v4.2d, v16.2d, v18.2d           // merge the four accumulator pairs
     bit     v16.16b, v18.16b, v4.16b
     cmgt    v5.2d, v19.2d, v17.2d
     bit     v17.16b, v19.16b, v5.16b
+    cmgt    v4.2d, v6.2d, v25.2d
+    bit     v6.16b, v25.16b, v4.16b
+    cmgt    v5.2d, v31.2d, v7.2d
+    bit     v7.16b, v31.16b, v5.16b
+    cmgt    v4.2d, v16.2d, v6.2d
+    bit     v16.16b, v6.16b, v4.16b
+    cmgt    v5.2d, v7.2d, v17.2d
+    bit     v17.16b, v7.16b, v5.16b
     mov     x8, v16.d[0]
     mov     x9, v16.d[1]
     cmp     x9, x8
@@ -685,32 +703,41 @@ ENDF pqk_a64_neon_count_i64
  * bitmap_and / bitmap_or / bitmap_andnot (one template, NEON_BITOP)
  * Args:      x0 a, x1 b, x2 out, x3 nbytes
  * Result:    none
- * Clobbers:  x0-x5, v0-v7, flags
- * Registers: v0-v3 op v4-v7 (64-byte blocks), q0/q4 (16-byte steps),
- *            x4/x5 (8-byte step and bytes); x0-x3 advanced in place
- * Algorithm: 64-byte LD1/ST1 blocks. Every chunk is loaded from both inputs
- *            before it is stored, so out == a or out == b is safe (no
- *            overlapping re-processing of already written bytes, which would
- *            be wrong for andnot with out == b).
+ * Clobbers:  x0-x5, v0-v7, v16-v23, flags
+ * Registers: v0-v3/v16-v19 op v4-v7/v20-v23 (128-byte blocks), q0/q4
+ *            (16-byte steps), x4/x5 (8-byte step and bytes); x0-x3
+ *            advanced in place
+ * Algorithm: 128-byte blocks: 4 LD1 x4 + 8 ops + 2 ST1 x4 per iteration
+ *            (half the loop overhead of 64-byte blocks). Every chunk is
+ *            loaded from both inputs before it is stored, so out == a or
+ *            out == b is safe (no overlapping re-processing of already
+ *            written bytes, which would be wrong for andnot with out == b).
  * Tail:      16-byte steps, one 8-byte step (BITOP_STEP8), then bytes
  *            (BITOP_BYTES).
  * ======================================================================== */
     .macro  NEON_BITOP name, insn
 FUNC pqk_a64_neon_bitmap_\name
-    // -- 1. arguments / empty input: fewer than 64 bytes -> tail only
-    cmp     x3, #64
+    // -- 1. arguments / empty input: fewer than 128 bytes -> tail only
+    cmp     x3, #128
     b.lo    .Lneon_bitmap_\name\()_tail
-    // -- 2. main loop: 64 bytes
+    // -- 2. main loop: 128 bytes
 .Lneon_bitmap_\name\()_main:
     ld1     {v0.16b-v3.16b}, [x0], #64
     ld1     {v4.16b-v7.16b}, [x1], #64
+    ld1     {v16.16b-v19.16b}, [x0], #64
+    ld1     {v20.16b-v23.16b}, [x1], #64
     \insn   v0.16b, v0.16b, v4.16b
     \insn   v1.16b, v1.16b, v5.16b
     \insn   v2.16b, v2.16b, v6.16b
     \insn   v3.16b, v3.16b, v7.16b
+    \insn   v16.16b, v16.16b, v20.16b
+    \insn   v17.16b, v17.16b, v21.16b
+    \insn   v18.16b, v18.16b, v22.16b
+    \insn   v19.16b, v19.16b, v23.16b
     st1     {v0.16b-v3.16b}, [x2], #64
-    sub     x3, x3, #64
-    cmp     x3, #64
+    st1     {v16.16b-v19.16b}, [x2], #64
+    sub     x3, x3, #128
+    cmp     x3, #128
     b.hs    .Lneon_bitmap_\name\()_main
     // -- 3. tail: 16-byte steps, one 8-byte step, bytes; 4. result: ret
 .Lneon_bitmap_\name\()_tail:
@@ -742,13 +769,15 @@ ENDF pqk_a64_neon_bitmap_\name
  *            of filter_i64_bitmap / compare_i64): x0 pointer, x1 whole
  *            bytes, x6 extra bits (0..7) of one more partial byte
  * Result:    x0 = number of set bits
- * Clobbers:  x0-x4, x6, x7, v0-v3, v16, flags
+ * Clobbers:  x0-x4, x6, x7, v0-v7, v16, flags
  * Registers: x1 bytes left, x2 iterations in the block, x3/x4 temps,
- *            x6 partial bits, x7 total; v16 4x32-bit accumulator
- * Algorithm: 64-byte blocks: CNT per byte, ADD x3 (<= 32 per byte), UADDLP
- *            (<= 64 per halfword), UADALP into 4x32-bit (<= 128 per word per
- *            iteration). Blocks of NEON_POPCNT_BLOCK = 2^20 iterations keep
- *            the words below 2^27; each block is reduced with UADDLV.
+ *            x6 partial bits, x7 total; v16 8x16-bit accumulator
+ * Algorithm: 128 bytes per iteration: CNT per byte (8 ops), ADD tree
+ *            (7 ops, <= 64 per byte), one UADALP into 8x16-bit lanes
+ *            (<= 128 per halfword per iteration): 2 vector ops per 16
+ *            bytes, the minimum for CNT-based counting. Blocks of
+ *            NEON_POPCNT_BLOCK = 256 iterations keep the halfwords
+ *            <= 32768; each block is reduced with UADDLV into x7.
  * Tail:      16-byte steps (CNT + UADDLV), single bytes (ADD_CNT8), then the
  *            masked partial byte (ADD_POPCNT_LOW).
  * ======================================================================== */
@@ -758,33 +787,41 @@ FUNC pqk_a64_neon_bitmap_popcount
     lsr     x1, x1, #3
 .Lneon_bitmap_popcount_bytes:
     mov     x7, #0
-    cmp     x1, #64
+    cmp     x1, #128
     b.lo    .Lneon_bitmap_popcount_tail
-    // -- 2. main loop: blocks of 64-byte iterations
+    // -- 2. main loop: blocks of 128-byte iterations
 .Lneon_bitmap_popcount_block:
-    lsr     x2, x1, #6
+    lsr     x2, x1, #7
     mov     x3, #NEON_POPCNT_BLOCK
     cmp     x2, x3
     csel    x2, x2, x3, lo
-    sub     x1, x1, x2, lsl #6
+    sub     x1, x1, x2, lsl #7
     movi    v16.2d, #0
 .Lneon_bitmap_popcount_main:
     ld1     {v0.16b-v3.16b}, [x0], #64
+    ld1     {v4.16b-v7.16b}, [x0], #64
     cnt     v0.16b, v0.16b
     cnt     v1.16b, v1.16b
     cnt     v2.16b, v2.16b
     cnt     v3.16b, v3.16b
+    cnt     v4.16b, v4.16b
+    cnt     v5.16b, v5.16b
+    cnt     v6.16b, v6.16b
+    cnt     v7.16b, v7.16b
     add     v0.16b, v0.16b, v1.16b
     add     v2.16b, v2.16b, v3.16b
-    add     v0.16b, v0.16b, v2.16b          // <= 32 per byte
-    uaddlp  v0.8h, v0.16b                   // <= 64 per halfword
-    uadalp  v16.4s, v0.8h                   // <= 128 per word per iteration
+    add     v4.16b, v4.16b, v5.16b
+    add     v6.16b, v6.16b, v7.16b
+    add     v0.16b, v0.16b, v2.16b
+    add     v4.16b, v4.16b, v6.16b
+    add     v0.16b, v0.16b, v4.16b          // <= 64 per byte
+    uadalp  v16.8h, v0.16b                  // <= 128 per halfword per iteration
     subs    x2, x2, #1
     b.ne    .Lneon_bitmap_popcount_main
-    uaddlv  d16, v16.4s
-    fmov    x3, d16
+    uaddlv  s16, v16.8h                     // <= 8 * 32768
+    fmov    w3, s16
     add     x7, x7, x3
-    cmp     x1, #64
+    cmp     x1, #128
     b.hs    .Lneon_bitmap_popcount_block
     // -- 3. tail: 16-byte steps, bytes, partial byte
 .Lneon_bitmap_popcount_tail:

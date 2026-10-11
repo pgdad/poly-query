@@ -465,12 +465,12 @@
     b.gt    .Lbits_tail_store_byte\@
     .endm
 
-/* POPCOUNT_TAILCALL xbits: result section of the 16-row bitmap writers.
+/* POPCOUNT_TAILCALL xbits: result section of the 32-row bitmap writers.
  * Returns popcount(xbits, ceil(n/8) bytes) by a tail call (plain branch) to
  * the internal entry .Lneon_bitmap_popcount_bytes of the bitmap_popcount
  * kernel (x0 = pointer, x1 = whole bytes, x6 = extra bits = 0). The trailing
  * bits of the bitmap are already zero. Clobbers what bitmap_popcount
- * clobbers (x0-x4, x6, x7, v0-v3, v16). */
+ * clobbers (x0-x4, x6, x7, v0-v7, v16). */
     .macro  POPCOUNT_TAILCALL xbits
     mov     x0, \xbits
     add     x1, x2, #7
