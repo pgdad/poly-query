@@ -77,17 +77,13 @@ FUNC hash_cells
     add $8, %rdi
     sub $8, %rsi
     jmp 4b
-41: test %rsi, %rsi                 /* tail: up to 7 bytes, never read past */
-    jz 5f
-    xor %eax, %eax
-    xor %r9d, %r9d                  /* shift */
-42: movzbl (%rdi), %edx
-    shlx %r9, %rdx, %rdx
-    or %rdx, %rax
-    add $8, %r9d
-    inc %rdi
-    dec %rsi
-    jnz 42b
+41: test %rsi, %rsi                 /* tail of t = 1..7 bytes: the 8 bytes */
+    jz 5f                           /* ending at the last one (in bounds: */
+    mov -8(%rdi, %rsi), %rax        /* at worst the length word), shifted */
+    lea (, %rsi, 8), %r9            /* so that the t bytes remain */
+    neg %r9
+    add $64, %r9
+    shrx %r9, %rax, %rax
     xor %rax, %rcx
     imul %r8, %rcx
     mov %rcx, %rax
