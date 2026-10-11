@@ -5,7 +5,7 @@ import (
 	"math"
 	"slices"
 	"strings"
-	"sync"
+	"sync/atomic"
 
 	"polyquery/internal/errs"
 	"polyquery/internal/physical"
@@ -36,35 +36,48 @@ func newColStore(classes []vclass) *colStore {
 // added.
 func (s *colStore) append(b *Batch) int64 {
 	var bytes int64
+	n, sel := b.N, b.Sel
 	for k, v := range b.Cols {
 		c := &s.cols[k]
-		cls := s.classes[k]
-		var strs []string
-		if cls == vStr {
-			strs = v.strs(b.N)
+		switch s.classes[k] {
+		case vInt:
+			c.I = appendActive(c.I, v.I, n, sel)
+		case vFloat:
+			c.F = appendActive(c.F, v.F, n, sel)
+		case vWide:
+			c.W = appendActive(c.W, v.W, n, sel)
+		default:
+			old := len(c.S)
+			c.S = appendActive(c.S, v.strs(n), n, sel)
+			for _, str := range c.S[old:] {
+				bytes += int64(len(str))
+			}
 		}
 		if v.Nulls != nil && c.Nulls == nil {
 			c.Nulls = make([]bool, s.n, max(s.n, 16))
 		}
-		forActive(b.N, b.Sel, func(i int) {
-			switch cls {
-			case vInt:
-				c.I = append(c.I, v.I[i])
-			case vFloat:
-				c.F = append(c.F, v.F[i])
-			case vWide:
-				c.W = append(c.W, v.W[i])
-			default:
-				c.S = append(c.S, strs[i])
-				bytes += int64(len(strs[i]))
+		if c.Nulls != nil {
+			if v.Nulls != nil {
+				c.Nulls = appendActive(c.Nulls, v.Nulls, n, sel)
+			} else {
+				c.Nulls = append(c.Nulls, make([]bool, b.Len())...)
 			}
-			if c.Nulls != nil {
-				c.Nulls = append(c.Nulls, v.isNull(i))
-			}
-		})
+		}
 	}
 	s.n += b.Len()
 	return bytes
+}
+
+// appendActive appends the rows sel (nil: 0..n-1) of src to dst.
+func appendActive[T any](dst, src []T, n int, sel []int32) []T {
+	if sel == nil {
+		return append(dst, src[:n]...)
+	}
+	dst = slices.Grow(dst, len(sel))
+	for _, i := range sel {
+		dst = append(dst, src[i])
+	}
+	return dst
 }
 
 // gather fills out with the rows idx (in that order).
@@ -133,6 +146,8 @@ type vsortOp struct {
 	bufs    []vecBuf
 	out     Batch
 	threads int
+	emit    *sortEmitter // parallel output gathering (large sorts)
+	par     *sortInput   // parallel input (instead of input)
 }
 
 func buildVSort(ec *Context, x *physical.Sort) (BatchOperator, error) {
@@ -143,10 +158,6 @@ func buildVSort(ec *Context, x *physical.Sort) (BatchOperator, error) {
 	if x.Limit >= 0 {
 		return buildVTopN(ec, x, keys)
 	}
-	in, err := BuildBatch(ec, x.Input)
-	if err != nil {
-		return nil, err
-	}
 	ts := schemaTypes(x.Schema())
 	classes := make([]vclass, len(ts))
 	for i, t := range ts {
@@ -156,9 +167,112 @@ func buildVSort(ec *Context, x *physical.Sort) (BatchOperator, error) {
 	if ec.serial > 0 {
 		threads = 1
 	}
-	op := &vsortOp{ec: ec, input: in, keys: keys, store: newColStore(classes), bufs: make([]vecBuf, len(ts)), threads: threads}
+	op := &vsortOp{ec: ec, keys: keys, store: newColStore(classes), bufs: make([]vecBuf, len(ts)), threads: threads}
 	op.out.Cols = make([]*Vec, len(ts))
+	if ranges, ok := parallelMorsels(ec, x.Input); ok {
+		nw := workers(ec, len(ranges))
+		ops, srcs, err := batchPipelines(ec, x.Input, nw)
+		if err != nil {
+			return nil, err
+		}
+		op.par = &sortInput{ranges: ranges, ops: ops, srcs: srcs}
+		return op, nil
+	}
+	in, err := BuildBatch(ec, x.Input)
+	if err != nil {
+		return nil, err
+	}
+	op.input = in
 	return op, nil
+}
+
+// sortInput is the parallel input pipeline of a sort: every worker
+// materializes the morsels it takes into a column store of their own, and
+// the stores are concatenated in morsel (table) order.
+type sortInput struct {
+	ranges []scanRange
+	ops    []BatchOperator
+	srcs   []*singleRange
+}
+
+// materialize runs the input pipelines and returns the concatenated store.
+func (p *sortInput) materialize(ec *Context, classes []vclass) (*colStore, error) {
+	stores := make([]*colStore, len(p.ranges))
+	width := int64(len(classes))
+	err := runMorsels(ec, p.ranges, len(p.ops), func(w, i int) error {
+		p.srcs[w].set(p.ranges[i])
+		st := newColStore(classes)
+		stores[i] = st
+		for {
+			b, err := p.ops[w].NextBatch()
+			if b == nil || err != nil {
+				return err
+			}
+			if err := ec.Check(); err != nil {
+				return err
+			}
+			bytes := st.append(b)
+			if err := ec.Mem.Reserve(int64(b.Len())*(28+16*width) + bytes); err != nil {
+				return err
+			}
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return concatStores(stores, classes, len(p.ops)), nil
+}
+
+// concatStores concatenates column stores (copying with up to workers
+// goroutines).
+func concatStores(stores []*colStore, classes []vclass, workers int) *colStore {
+	out := newColStore(classes)
+	offs := make([]int, len(stores)+1)
+	for i, st := range stores {
+		offs[i+1] = offs[i] + st.n
+	}
+	out.n = offs[len(stores)]
+	for k, cls := range classes {
+		c := &out.cols[k]
+		switch cls {
+		case vInt:
+			c.I = make([]int64, out.n)
+		case vFloat:
+			c.F = make([]float64, out.n)
+		case vWide:
+			c.W = make([]types.Int128, out.n)
+		default:
+			c.S = make([]string, out.n)
+		}
+		for _, st := range stores {
+			if st.cols[k].Nulls != nil {
+				c.Nulls = make([]bool, out.n)
+				break
+			}
+		}
+	}
+	parallelDo(min(workers, len(stores)), func(w int) {
+		for i := w; i < len(stores); i += workers {
+			st, off := stores[i], offs[i]
+			for k := range classes {
+				src, dst := &st.cols[k], &out.cols[k]
+				switch classes[k] {
+				case vInt:
+					copy(dst.I[off:], src.I)
+				case vFloat:
+					copy(dst.F[off:], src.F)
+				case vWide:
+					copy(dst.W[off:], src.W)
+				default:
+					copy(dst.S[off:], src.S)
+				}
+				if src.Nulls != nil {
+					copy(dst.Nulls[off:], src.Nulls)
+				}
+			}
+		}
+	})
+	return out
 }
 
 func (s *vsortOp) NextBatch() (*Batch, error) {
@@ -167,6 +281,9 @@ func (s *vsortOp) NextBatch() (*Batch, error) {
 		if err := s.run(); err != nil {
 			return nil, err
 		}
+	}
+	if s.emit != nil {
+		return s.emit.next()
 	}
 	if s.pos >= len(s.perm) {
 		return nil, nil
@@ -177,7 +294,101 @@ func (s *vsortOp) NextBatch() (*Batch, error) {
 	return &s.out, nil
 }
 
+// minParallelEmit is the number of sorted rows from which output batches
+// are gathered by parallel workers.
+const minParallelEmit = 1 << 15
+
+// sortEmitter gathers the output batches of a sort with parallel workers,
+// a bounded window of batches ahead of the consumer; batches are returned
+// in order. Each window slot owns its vectors, which are reused once the
+// consumer has moved past the slot's batch.
+type sortEmitter struct {
+	ec      *Context
+	store   *colStore
+	perm    []int32
+	batches int
+	taken   atomic.Int64 // batches taken by workers
+	slots   []emitSlot
+	cur     int // batch returned last (-1: none)
+	started bool
+	workers int
+}
+
+type emitSlot struct {
+	out   Batch
+	bufs  []vecBuf
+	ready chan struct{} // the slot's batch is gathered
+	free  chan struct{} // the consumer has released the slot
+}
+
+func newSortEmitter(ec *Context, store *colStore, perm []int32, workers int) *sortEmitter {
+	e := &sortEmitter{ec: ec, store: store, perm: perm, cur: -1, workers: workers,
+		batches: (len(perm) + BatchSize - 1) / BatchSize}
+	e.slots = make([]emitSlot, 2*workers)
+	for i := range e.slots {
+		sl := &e.slots[i]
+		sl.out.Cols = make([]*Vec, len(store.classes))
+		sl.bufs = make([]vecBuf, len(store.classes))
+		sl.ready = make(chan struct{}, 1)
+		sl.free = make(chan struct{}, 1)
+		sl.free <- struct{}{}
+	}
+	return e
+}
+
+func (e *sortEmitter) start() {
+	done := e.ec.Ctx.Done()
+	for w := 0; w < e.workers; w++ {
+		go func() {
+			for {
+				j := int(e.taken.Add(1) - 1)
+				if j >= e.batches {
+					return
+				}
+				sl := &e.slots[j%len(e.slots)]
+				select {
+				case <-sl.free:
+				case <-done:
+					return
+				}
+				lo := j * BatchSize
+				e.store.gather(e.perm[lo:min(lo+BatchSize, len(e.perm))], sl.bufs, &sl.out)
+				sl.ready <- struct{}{}
+			}
+		}()
+	}
+}
+
+func (e *sortEmitter) next() (*Batch, error) {
+	if !e.started {
+		e.started = true
+		e.start()
+	}
+	if e.cur >= 0 {
+		e.slots[e.cur%len(e.slots)].free <- struct{}{}
+	}
+	e.cur++
+	if e.cur >= e.batches {
+		return nil, nil
+	}
+	sl := &e.slots[e.cur%len(e.slots)]
+	select {
+	case <-sl.ready:
+	case <-e.ec.Ctx.Done():
+		return nil, ContextError(e.ec.Ctx.Err())
+	}
+	return &sl.out, nil
+}
+
 func (s *vsortOp) run() error {
+	if s.par != nil {
+		st, err := s.par.materialize(s.ec, s.store.classes)
+		if err != nil {
+			return err
+		}
+		s.store = st
+		return s.sort()
+	}
 	width := int64(len(s.store.classes))
 	for {
 		b, err := s.input.NextBatch()
@@ -195,8 +406,13 @@ func (s *vsortOp) run() error {
 			return err
 		}
 	}
-	cmp := newColComparator(s.store, s.keys)
-	items := cmp.items(s.store.n)
+	return s.sort()
+}
+
+// sort sorts the materialized input.
+func (s *vsortOp) sort() error {
+	cmp := newColComparator(s.store, s.keys, s.threads)
+	items := cmp.items(s.store.n, s.threads)
 	sorted, err := parallelSort(s.ec, items, cmp, s.threads)
 	if err != nil {
 		return err
@@ -204,6 +420,9 @@ func (s *vsortOp) run() error {
 	s.perm = make([]int32, len(sorted))
 	for i, it := range sorted {
 		s.perm[i] = it.row
+	}
+	if s.threads > 1 && len(s.perm) >= minParallelEmit {
+		s.emit = newSortEmitter(s.ec, s.store, s.perm, min(s.threads, len(s.perm)/BatchSize))
 	}
 	return nil
 }
@@ -218,43 +437,72 @@ type sortItem struct {
 }
 
 // items builds the sort items of rows 0..n-1.
-func (c *colComparator) items(n int) []sortItem {
+func (c *colComparator) items(n, threads int) []sortItem {
 	items := make([]sortItem, n)
-	k := &c.keys[0]
-	for i := range items {
-		items[i].row = int32(i)
-		if k.nulls != nil && k.nulls[i] {
-			if !k.nullsFirst {
-				items[i].key = math.MaxUint64
-			}
-			continue
+	parallelChunks(n, threads, func(lo, hi int) {
+		for i := lo; i < hi; i++ {
+			items[i] = sortItem{key: c.norm(0, int32(i)), row: int32(i)}
 		}
-		var u uint64
-		switch k.cls {
-		case vInt:
-			u = uint64(k.ints[i]) ^ 1<<63
-		case vWide:
-			u = uint64(clampInt64(k.wides[i])) ^ 1<<63
-		case vFloat:
-			f := k.floats[i]
-			if f == 0 {
-				f = 0 // -0 equals 0
-			}
-			u = math.Float64bits(f)
-			if u&(1<<63) != 0 {
-				u = ^u
-			} else {
-				u |= 1 << 63
-			}
-		default:
-			u = k.prefix[i]
-		}
-		if k.desc {
-			u = ^u
-		}
-		items[i].key = u
-	}
+	})
 	return items
+}
+
+// norm returns the normalized value of sort key k for row i: an unsigned
+// integer whose order is the key order (NULLs first or last as the key
+// requires); equal normalized values need the full comparison.
+func (c *colComparator) norm(k int, i int32) uint64 {
+	key := &c.keys[k]
+	if key.nulls != nil && key.nulls[i] {
+		if key.nullsFirst {
+			return 0
+		}
+		return math.MaxUint64
+	}
+	var u uint64
+	switch key.cls {
+	case vInt:
+		u = uint64(key.ints[i]) ^ 1<<63
+	case vWide:
+		u = uint64(clampInt64(key.wides[i])) ^ 1<<63
+	case vFloat:
+		f := key.floats[i]
+		if f == 0 {
+			f = 0 // -0 equals 0
+		}
+		u = math.Float64bits(f)
+		if u&(1<<63) != 0 {
+			u = ^u
+		} else {
+			u |= 1 << 63
+		}
+	default:
+		u = key.prefix[i]
+	}
+	if key.desc {
+		u = ^u
+	}
+	return u
+}
+
+// equal reports whether rows a and b have equal values (or are both NULL)
+// for sort key k.
+func (c *colComparator) equal(k int, a, b int32) bool {
+	key := &c.keys[k]
+	if key.nulls != nil {
+		an, bn := key.nulls[a], key.nulls[b]
+		if an || bn {
+			return an && bn
+		}
+	}
+	switch key.cls {
+	case vInt:
+		return key.ints[a] == key.ints[b]
+	case vWide:
+		return key.wides[a] == key.wides[b]
+	case vFloat:
+		return key.floats[a] == key.floats[b]
+	}
+	return key.strs[a] == key.strs[b]
 }
 
 func (c *colComparator) compareItems(a, b sortItem) int {
@@ -285,7 +533,7 @@ type colKey struct {
 	nullsFirst bool
 }
 
-func newColComparator(s *colStore, keys []sortKey) *colComparator {
+func newColComparator(s *colStore, keys []sortKey, threads int) *colComparator {
 	c := &colComparator{}
 	for _, k := range keys {
 		col := &s.cols[k.index]
@@ -293,9 +541,11 @@ func newColComparator(s *colStore, keys []sortKey) *colComparator {
 			nulls: col.Nulls, desc: k.desc, nullsFirst: k.nullsFirst}
 		if ck.cls == vStr {
 			ck.prefix = make([]uint64, len(col.S))
-			for i, str := range col.S {
-				ck.prefix[i] = stringPrefix(str)
-			}
+			parallelChunks(len(col.S), threads, func(lo, hi int) {
+				for i, str := range col.S[lo:hi] {
+					ck.prefix[lo+i] = stringPrefix(str)
+				}
+			})
 		}
 		c.keys = append(c.keys, ck)
 	}
@@ -380,63 +630,24 @@ func (c *colComparator) compare(a, b int32) int {
 	return int(a) - int(b)
 }
 
-// minParallelSort is the input size from which sorting uses several
-// goroutines.
-const minParallelSort = 1 << 14
-
-// parallelSort sorts items by cmp: in parallel runs merged pairwise when
-// threads > 1. It checks for cancellation every checkEvery comparisons.
-func parallelSort(ec *Context, perm []sortItem, c *colComparator, threads int) ([]sortItem, error) {
-	runs := 1
-	if threads > 1 && len(perm) >= minParallelSort {
-		runs = min(threads, len(perm)/(minParallelSort/2))
+// parallelSort sorts items by cmp: a radix sort by the normalized first
+// key, then the full comparator for runs of equal normalized keys (unless
+// the normalized key decides the order alone). Both phases use up to
+// threads goroutines.
+func parallelSort(ec *Context, items []sortItem, c *colComparator, threads int) ([]sortItem, error) {
+	sorted, err := radixSortItems(ec, items, threads)
+	if err != nil {
+		return nil, err
 	}
-	bounds := make([]int, runs+1)
-	for i := range bounds {
-		bounds[i] = len(perm) * i / runs
+	if k := &c.keys[0]; len(c.keys) == 1 && k.cls == vInt && k.nulls == nil {
+		// Distinct INT-class values have distinct normalized keys, and the
+		// stable radix sort kept equal ones in input order.
+		return sorted, nil
 	}
-	errs := make([]error, runs)
-	var wg sync.WaitGroup
-	for r := 0; r < runs; r++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			errs[r] = sortRun(ec, perm[bounds[r]:bounds[r+1]], c)
-		}()
+	if err := sortTies(ec, sorted, c, threads); err != nil {
+		return nil, err
 	}
-	wg.Wait()
-	for _, err := range errs {
-		if err != nil {
-			return nil, err
-		}
-	}
-	// Merge rounds: runs (lo, mid, hi) pairs merged in parallel.
-	src, dst := perm, make([]sortItem, len(perm))
-	for len(bounds) > 2 {
-		var next []int
-		var wg sync.WaitGroup
-		for i := 0; i+1 < len(bounds); i += 2 {
-			lo := bounds[i]
-			next = append(next, lo)
-			if i+2 >= len(bounds) {
-				copy(dst[lo:], src[lo:bounds[i+1]])
-				continue
-			}
-			mid, hi := bounds[i+1], bounds[i+2]
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				mergeRuns(dst[lo:hi], src[lo:mid], src[mid:hi], c)
-			}()
-		}
-		next = append(next, len(perm))
-		wg.Wait()
-		if err := ec.Check(); err != nil {
-			return nil, err
-		}
-		src, dst, bounds = dst, src, next
-	}
-	return src, nil
+	return sorted, nil
 }
 
 func sortRun(ec *Context, run []sortItem, c *colComparator) (err error) {
@@ -459,22 +670,6 @@ func sortRun(ec *Context, run []sortItem, c *colComparator) (err error) {
 		return c.compareItems(a, b)
 	})
 	return nil
-}
-
-func mergeRuns(dst, a, b []sortItem, c *colComparator) {
-	i, j, k := 0, 0, 0
-	for i < len(a) && j < len(b) {
-		if c.compareItems(a[i], b[j]) <= 0 {
-			dst[k] = a[i]
-			i++
-		} else {
-			dst[k] = b[j]
-			j++
-		}
-		k++
-	}
-	k += copy(dst[k:], a[i:])
-	copy(dst[k:], b[j:])
 }
 
 // ---------------------------------------------------------------- top-N
