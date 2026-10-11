@@ -167,6 +167,9 @@ func nativeRowFilter(ec *Context, x *physical.Filter, scan *scanOp, root *npred,
 }
 
 func buildAggregate(ec *Context, x *physical.HashAggregate, vec bool) (Operator, error) {
+	if p, ok := planNativeAggregate(ec, x); ok {
+		return &nativeAggOp{ec: ec, p: p}, nil
+	}
 	if !vec {
 		if op, ok, err := parallelRowAggregate(ec, x); ok || err != nil {
 			return op, err

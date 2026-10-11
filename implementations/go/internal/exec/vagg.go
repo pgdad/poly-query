@@ -1071,6 +1071,9 @@ type vaggregateOp struct {
 }
 
 func buildVAggregate(ec *Context, x *physical.HashAggregate) (BatchOperator, error) {
+	if p, ok := planNativeAggregate(ec, x); ok {
+		return &nativeAggOp{ec: ec, p: p}, nil
+	}
 	if op, ok, err := parallelAggregate(ec, x); ok || err != nil {
 		return op, err
 	}
