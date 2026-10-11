@@ -1,6 +1,6 @@
 {
  "schema": "polyquery-project-state/1",
- "updated": "2026-10-11T05:33:08+00:00",
+ "updated": "2026-10-11T10:41:11+00:00",
  "current_milestone": "M10",
  "milestones": {
   "M0": {
@@ -44,23 +44,30 @@
    "evidence": "All 6 engines claim native.kernels and pass 623/623 (public+hidden) and the 3738-case modes matrix with --native (x86-64 libpqkernels, AVX-512 dispatch), plus unchanged session/HTTP/modes/HTTP-suite without the library. Java needed attempt 2 (attempt 1 isolation_violation: stray files). Kernel micro-benchmarks: results/performance/kernels-x86-quiet, spark (experiments/runs/a-kernels-arm64-asm-a1-*/native-arm). End-to-end 1m: results/performance/20261011T051646Z-1m-m9-native (vectorized vs +native geomean over 4 queries: python 12.5x, common-lisp 1.23x, rust 1.17x, go 1.15x, java 0.67x, clojure 0.67x; results agree on all 20 queries). Runs: {\"a-native-clojure-a1-20261011T034926Z\": [\"success\", 10.14], \"a-native-common-lisp-a1-20261011T034930Z\": [\"success\", 12.35], \"a-native-go-a1-20261011T034928Z\": [\"success\", 8.98], \"a-native-java-a1-20261011T034931Z\": [\"isolation_violation\", 13.25], \"a-native-java-a2-20261011T043500Z\": [\"success\", 12.76], \"a-native-python-a1-20261011T034927Z\": [\"success\", 15.31], \"a-native-rust-a1-20261011T034932Z\": [\"success\", 12.01]}"
   },
   "M10": {
-   "status": "complete_except_report_7",
-   "evidence": "Reports 1-6 and 8 generated as JSON/CSV/HTML from raw data (results/comparisons, docs/results/report.html) with links to run manifests; results narrative docs/results/README.md. Clean-clone reproduction (/srv/polyquery/repro from f896531) of the README quick start: all steps exit 0; 1m datasets match manifest checksums; Go benchmark result digests identical for all 20 queries, latency within 3%.",
+   "status": "complete",
+   "evidence": "Reports 1-6 and 8 generated as JSON/CSV/HTML from raw data (results/comparisons, docs/results/report.html) with links to run manifests; results narrative docs/results/README.md. Clean-clone reproduction (/srv/polyquery/repro from f896531) of the README quick start: all steps exit 0; 1m datasets match manifest checksums; Go benchmark result digests identical for all 20 queries, latency within 3%. Report 7 (architectural adaptability) generated from the later experiment families (change-union-all, refactor-plan-separation, change-decimal38, debug-mutant, optimize-latency) with per-attempt outcome/cost/turns/time/diff size; independent before/after optimization benchmark results/performance/optimize-latency-before-after.json.",
    "open": [
     "Report 7 (architectural adaptability) needs the change/refactor/debug experiment families"
    ]
   }
  },
  "outstanding_tasks": [
-  "ARM end-to-end: engines + native kernels on spark (needs toolchains on spark; conformance --native with the aarch64 library)",
-  "M10: clean-clone reproduction of one engine build + conformance + benchmark via documented commands; finalize docs/results narrative",
   "Track B (ecosystem-optimized) runs",
-  "Later experiment families: write spec/changes/*.md when scheduled, then change-union-all, change-decimal38, refactor-plan-separation, debug-mutant (tools/orchestration/mutate.py), optimize-latency",
-  "Resolve SPEC-Q-001 (INT64 vs DECIMAL comparison overflow) via change control",
-  "10m-scale benchmark; fuzz/differential suites for all engines (just fuzz <lang>)"
+  "Python HTTP defect: negative chunk size bypasses --max-request-bytes (HTTP suite malformed_chunked_body fails 18/19) — fix via a sandboxed agent run (e.g. a regression/robustness task), not by hand",
+  "Go optimize-latency: two timeouts (88 min, 120 min); committed a2 work passes all checks (1.74x speedup) but is unmerged — decide on attempt 3 or accept timeout as the result",
+  "Debug family is too easy (one-line fixes in < 90 s because DEFECT.md names failing cases): add a harder variant (symptom-only report or hidden-only failures)",
+  "Resolve SPEC-Q-002 (expression size/nesting implementation limits) via change control",
+  "Repeated attempts (n>1) per language/task for statistics (docs/methodology/statistics.md)",
+  "10m-scale benchmark",
+  "Unverified code-review findings: Go worker goroutines without recover, session stdin lines without length cap (Rust/Java/Go/Common Lisp), symlink-following data paths"
  ],
  "known_defects": [
-  "See experiments/telemetry/harness-incidents.jsonl (HI-001..003 fixed; SPEC-Q-001 open)"
+  "See experiments/telemetry/harness-incidents.jsonl (HI-001..003 fixed; SPEC-Q-001 open)",
+  {
+   "engine": "python",
+   "defect": "HTTP chunked body: negative chunk size read to end-of-stream (bypasses --max-request-bytes)",
+   "evidence": "results/correctness/python-http.json, results/development/code-review/README.md"
+  }
  ],
  "blockers": [],
  "risks": [
@@ -78,15 +85,24 @@
    "clojure": "phase1 225/225 public, 249/249 incl. hidden"
   },
   "kernels_arm64_native": "pass on spark (scalar, neon, sve; native + asan)",
-  "kernels_x86_native": "pass (scalar, avx2, avx512)"
+  "kernels_x86_native": "pass (scalar, avx2, avx512)",
+  "conformance_public_all_engines": "660/660 (go, rust, java, clojure, python, common-lisp)",
+  "conformance_public_plus_hidden_arm64": "746/746 all six engines, with and without native kernels (results/correctness/arm64)",
+  "interop": "6x6 + reference clean, incl. PQCF v2 wide-decimal files (results/correctness/interop.json)",
+  "http_suite": "19/19 all engines except python 18/19 (malformed_chunked_body)"
  },
- "last_successful_commit": "f896531",
- "next_recommended_action": "Schedule the later experiment families (write spec/changes/*.md first, then waves change-union-all, change-decimal38, refactor-plan-separation, debug-mutant, optimize-latency) to fill report 7; then Track B; ARM end-to-end on spark; rubric-based code review.",
+ "last_successful_commit": "6c55145272f4f2db60d7f6b7dc660cb974d6aae7",
+ "next_recommended_action": "Run Track B (ecosystem-optimized) waves; schedule a Python robustness fix run for the chunked-body defect; decide Go optimize attempt 3; add a harder debugging variant; resolve SPEC-Q-002.",
  "findings": [
-  "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) \u2014 report as engine quality finding; clojure p95 16 ms"
+  "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) — report as engine quality finding; clojure p95 16 ms",
+  "CR-2 DECIMAL(38) was the most expensive change (6.25-16.50 USD); Go and Java needed a new wide-decimal representation",
+  "Independent optimization speedups (geomean, 1m): Python 2.85x, Common Lisp 2.48x, Go 1.74x (timed out), Java 1.38x, Clojure 1.13x, Rust 1.07x; results identical before/after",
+  "AI code review: high inter-reviewer agreement (92% exact, kappa 0.84) but compressed scale (4-5); concrete findings more informative than scores",
+  "SPEC-Q-001 resolved for CR-2 engines: exact INT64/DECIMAL comparison"
  ],
  "totals": {
-  "track_a_runs": 39,
-  "track_a_cost_usd_list": 531.71
+  "track_a_runs": 72,
+  "track_a_cost_usd_list": 713.1,
+  "note": "cost excludes 4 timed-out runs with no reported cost"
  }
 }
