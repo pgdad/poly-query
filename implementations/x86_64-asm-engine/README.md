@@ -44,6 +44,7 @@ structure layouts and macros in `include/`:
 | storage | `catalog.S`, `ingest.S` | immutable columnar tables; CSV / JSON / JSONL ingestion with inference and explicit schemas |
 | SQL front end | `lexer.S`, `parser.S` | tokens → AST (`include/sql.inc`) |
 | semantic analysis / planning | `binder.S` | name resolution, typing, implicit promotions, aggregate validation, output naming, ORDER BY resolution, constant LIMIT/OFFSET → query plan |
+| functions | `functions.S` | scalar functions (functions.md) and `CASE` / `BETWEEN` / `IN` lists / `LIKE`: type checking, implicit casts, evaluation |
 | execution | `eval.S`, `exec.S` | expression interpreter (incl. exact DECIMAL arithmetic with 128-bit intermediates, CAST matrix), scan → filter → aggregate → project → sort → offset/limit, JSON result serialization |
 | protocol | `protocol.S`, `main.S` | CLI, JSON-lines session loop, `exec` mode, request validation, operations, path safety, fault guard |
 
@@ -79,10 +80,19 @@ Key decisions:
 
 ## Implementation-defined choices
 
-* Phase-2 syntax (`GROUP BY`, `HAVING`, `DISTINCT`, joins, subqueries, `CASE`,
-  `IN`, `BETWEEN`, `LIKE`, `WITH`, `EXPLAIN`, `CREATE/DROP INDEX`, scalar
-  functions such as `UPPER`) is parsed or recognised and answered with
-  `UNSUPPORTED`; unknown function names give `SEMANTIC_ERROR`.
+* Phase-2 syntax not implemented yet (`GROUP BY`, `HAVING`, `DISTINCT`, joins,
+  subqueries, `WITH`, `EXPLAIN`, `CREATE/DROP INDEX`) is parsed or recognised
+  and answered with `UNSUPPORTED`; unknown function names give `SEMANTIC_ERROR`.
+* `UPPER`/`LOWER` map ASCII letters only, and leave a whole word (maximal run
+  of ASCII letters/digits and non-ASCII characters) unchanged when it contains
+  a non-ASCII character: `UPPER('abc Ünï')` is `'ABC Ünï'` (as the conformance
+  suite expects).
+* `ROUND(x, n)` with a NULL `n` is NULL; `DATE_TRUNC`/`DATE_DIFF` with a NULL
+  unit are NULL. Constant arguments (`ROUND`'s `n`, units) are evaluated at
+  validation time.
+* Comparisons inside `IN` lists, `BETWEEN`, simple `CASE` and `NULLIF` promote
+  per pair at run time (INT64 vs DECIMAL compares exactly; DATE vs TIMESTAMP
+  uses midnight).
 * In DECIMAL arithmetic an INT64 operand takes part as `DECIMAL(18,0)`
   (e.g. `1.5 * 2` is `DECIMAL(18,1)`); in comparisons the INT64 side is
   promoted to the other operand's scale.
