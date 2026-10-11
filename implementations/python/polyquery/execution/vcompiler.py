@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import operator
 from functools import partial
-from itertools import compress
+from itertools import compress, repeat
 from typing import Any, Callable, Sequence
 
 from .. import errors, values
@@ -160,6 +160,77 @@ def _like_predicate(pattern: str) -> Callable[[str], bool]:
     return lambda v: match(v) is not None
 
 
+def _arith_vector(e: b.Arith) -> Callable[[Sequence[Any], Sequence[Any]], list[Any] | None] | None:
+    """A kernel over whole NULL-free operand vectors running in C-level
+    loops, with the overflow check done once on the result (``min``/``max``);
+    it may return None for batches it does not handle (the scalar kernel
+    then runs per row). None if the operator has no such kernel."""
+    op, kind = e.op, e.type.kind
+    lt, rt = e.left.type, e.right.type
+    if kind is TypeKind.INT64:
+        if op in _FAST_OPS:
+            fast = _FAST_OPS[op]
+            return lambda a, c: _check_int64(list(map(fast, a, c)))
+        # truncating division / remainder equal Python's floor versions when
+        # the dividend is >= 0 and the divisor > 0 (and cannot overflow)
+        floor_op = operator.floordiv if op == "/" else operator.mod
+        return lambda a, c: list(map(floor_op, a, c)) if a and min(a) >= 0 and min(c) > 0 else None
+    if kind is TypeKind.FLOAT64 and TypeKind.DECIMAL not in (lt.kind, rt.kind):
+        if op in _FAST_OPS:
+            fast = _FAST_OPS[op]
+            return lambda a, c: _check_float(list(map(fast, a, c)))
+        return None
+    if kind is not TypeKind.DECIMAL or op not in _FAST_OPS:
+        return None
+    if not all(t.kind in (TypeKind.DECIMAL, TypeKind.INT64) for t in (lt, rt)):
+        return None
+    check = _decimal_check(e.type.precision)
+    if op == "*":  # unscaled product: the result scale is the sum of the scales
+        return lambda a, c: check(list(map(operator.mul, a, c)))
+    # + / -: both operands rescaled to the result scale (INT64: scale 0)
+    s1 = lt.scale if lt.kind is TypeKind.DECIMAL else 0
+    s2 = rt.scale if rt.kind is TypeKind.DECIMAL else 0
+    scale = max(s1, s2)
+    f1, f2 = values.POW10[scale - s1], values.POW10[scale - s2]
+    fast = _FAST_OPS[op]
+
+    def rescaled(a: Sequence[Any], c: Sequence[Any]) -> list[Any]:
+        if f1 != 1:
+            a = list(map(operator.mul, a, repeat(f1)))
+        if f2 != 1:
+            c = list(map(operator.mul, c, repeat(f2)))
+        return check(list(map(fast, a, c)))
+
+    return rescaled
+
+
+# batches with at most 1/DISTINCT_FRACTION distinct values evaluate
+# functions and LIKE once per distinct value
+DISTINCT_FRACTION = 4
+_DISTINCT_PROBE = 256
+
+
+def _map_distinct(fn: Callable[[Any], Any], values_: Sequence[Any]) -> list[Any]:
+    """``fn`` mapped over ``values_``, computed once per distinct value when
+    the batch has few distinct values (e.g. a dictionary-encoded column).
+    Distinct values are visited in order of first appearance, so the first
+    error raised is the one a row-by-row evaluation would raise. Only for
+    deterministic ``fn`` and values whose equality implies identical
+    results (not FLOAT64: -0.0 == 0.0)."""
+    n = len(values_)
+    if n >= 4 * _DISTINCT_PROBE and len(set(values_[:_DISTINCT_PROBE])) * DISTINCT_FRACTION <= _DISTINCT_PROBE:
+        results = dict.fromkeys(values_)
+        if len(results) * DISTINCT_FRACTION <= n:
+            for v in results:
+                results[v] = fn(v)
+            return list(map(results.__getitem__, values_))
+    return list(map(fn, values_))
+
+
+def _memoizable(expr: b.Expr) -> bool:
+    return expr.type.kind is not TypeKind.FLOAT64 and not b.has_side_effects(expr)
+
+
 class VectorCompiler:
     def __init__(self, ctx: ExecutionContext, layout: Layout):
         self.ctx = ctx
@@ -265,26 +336,17 @@ class VectorCompiler:
     def _v_Arith(self, e: b.Arith) -> VecFn:
         operands = self._operands(e.left, e.right)
         kernel = arith_kernel(e)
-        lt, rt = e.left.type.kind, e.right.type.kind
-        fast: Callable[[Any, Any], Any] | None = None
-        check: Callable[[list[Any]], list[Any]] | None = None
-        if e.op in _FAST_OPS:
-            if e.type.kind is TypeKind.INT64:
-                fast, check = _FAST_OPS[e.op], _check_int64
-            elif e.type.kind is TypeKind.FLOAT64 and TypeKind.DECIMAL not in (lt, rt):
-                fast, check = _FAST_OPS[e.op], _check_float
-            elif lt is TypeKind.DECIMAL and rt is TypeKind.DECIMAL and (
-                e.op == "*" or e.left.type.scale == e.right.type.scale
-            ):
-                fast, check = _FAST_OPS[e.op], _decimal_check(e.type.precision)
+        vector = _arith_vector(e)
 
         def arith(cols: Columns, n: int) -> Sequence[Any]:
             a, c = operands(cols, n)
             if None in a or None in c:
                 return [None if x is None or y is None else kernel(x, y) for x, y in zip(a, c)]
-            if fast is None:
-                return list(map(kernel, a, c))
-            return check(list(map(fast, a, c)))  # type: ignore[misc]
+            if vector is not None:
+                out = vector(a, c)
+                if out is not None:
+                    return out
+            return list(map(kernel, a, c))
 
         return arith
 
@@ -386,7 +448,7 @@ class VectorCompiler:
             if None in a:
                 out = [None if v is None else matches(v) for v in a]
                 return [None if v is None else not v for v in out] if negated else out
-            out = list(map(matches, a))
+            out = _map_distinct(matches, a)
             return list(map(operator.not_, out)) if negated else out
 
         return like
@@ -494,6 +556,24 @@ class VectorCompiler:
         scalar = compile_function(e, getters, self.ctx, evaluate_constant)  # type: ignore[arg-type]
         if not args:
             return lambda cols, n: [scalar(()) for _ in range(n)]
+        varying = [i for i, a in enumerate(e.args) if not b.is_constant(a)]
+        if len(varying) == 1 and _memoizable(e.args[varying[0]]) and not b.has_side_effects(e):
+            # one varying argument: evaluated once per distinct value of it
+            k = varying[0]
+            consts = [None if i == k else fn for i, fn in enumerate(args)]
+
+            def one_varying(cols: Columns, n: int) -> Sequence[Any]:
+                if not n:
+                    return []
+                fixed = [None if f is None else f(cols, 1)[0] for f in consts]
+
+                def call(v: Any) -> Any:
+                    fixed[k] = v
+                    return scalar(tuple(fixed))
+
+                return _map_distinct(call, args[k](cols, n))
+
+            return one_varying
 
         def function(cols: Columns, n: int) -> Sequence[Any]:
             return list(map(scalar, zip(*[arg(cols, n) for arg in args])))

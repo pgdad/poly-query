@@ -125,6 +125,14 @@ class _Collector:
 
 def _materialize(node: pp.PhysicalNode, ctx: ExecutionContext) -> tuple[list[list[Any]], int]:
     width = len(node.layout)
+    if isinstance(node, pp.TableScan) and not node.skip and ctx.partitions.get(id(node)) is None:
+        # a whole table: decode every column at once instead of batch by batch
+        ctx.check()
+        n = node.table.row_count
+        ctx.reserve_rows(n, width)
+        cols = [node.table.column_values(i) for i in node.columns]
+        ctx.check()
+        return cols, n
     out = _Collector(width)
     for batch in execute(node, ctx):
         ctx.reserve_rows(batch[1], width)
