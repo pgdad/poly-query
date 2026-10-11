@@ -652,7 +652,19 @@ ENDF build_row
 /* row_cmp(pa rdi, pb rsi, plan rdx) -> eax  (qsort_r comparator) */
 FUNC row_cmp
     ENTER 0
-    mov (%rdi), %rbx                /* row a */
+    incq cmp_count(%rip)            /* deadline / cancellation while sorting */
+    testl $0xffff, cmp_count(%rip)
+    jnz 0f
+    push %rdi
+    push %rsi
+    push %rdx
+    push %rdx
+    call check_deadline
+    pop %rdx
+    pop %rdx
+    pop %rsi
+    pop %rdi
+0:  mov (%rdi), %rbx                /* row a */
     mov (%rsi), %r12                /* row b */
     mov %rdx, %r13
     xor %r14d, %r14d
@@ -1320,7 +1332,15 @@ FUNC exec_plan
     mov %rbx, %rdi
     lea XS_CTX(%r12), %rsi
     call build_row
-    lea XS_ROWS(%r12), %rdi
+    cmp g_sink_plan(%rip), %rbx     /* streamed top-level query: hand the */
+    jne 841f                        /* row to the sink instead of keeping it */
+    mov %rax, %rdi
+    call *g_row_sink(%rip)
+    inc %r13
+    test %eax, %eax
+    jnz 85f                         /* sink reached LIMIT */
+    jmp 83b
+841: lea XS_ROWS(%r12), %rdi
     mov %rax, %rsi
     call vec_push
     inc %r13
@@ -1529,34 +1549,42 @@ ENDF eval_subquery
 
 /* ================================================================ top level */
 
-/* exec_query(plan, max_rows, count_only, out) */
-FUNC exec_query
-    ENTER 32
-    mov %rdi, %rbx                  /* plan */
-    mov %rsi, 0(%rsp)               /* max rows */
-    mov %rdx, 8(%rsp)               /* count only */
-    mov %rcx, %r15                  /* out */
+/* exec_query_result(plan rdi, max_rows rsi) -> rax Result*: runs the plan;
+ * RESOURCE_LIMIT when the result has more than max_rows (>= 0) rows.  The row
+ * count is also left in g_result_rows (logged by the server). */
+FUNC exec_query_result
+    ENTER 16
+    mov %rsi, 0(%rsp)
     xor %esi, %esi
     call exec_plan
-    mov %rax, %r12                  /* result */
+    mov %rax, %r12
     mov RS_NROWS(%r12), %r14
+    mov %r14, g_result_rows(%rip)
     mov 0(%rsp), %rax
     test %rax, %rax
-    js 12f
+    js 1f
     cmp %rax, %r14
-    jbe 12f
+    jbe 1f
     RAISE E_RESOURCE_LIMIT, "result exceeds max_rows"
-12: /* ---- serialize */
+1:  mov %r12, %rax
+    LEAVE
+ENDF exec_query_result
+
+/* exec_put_columns(plan rdi, out rsi): "columns":[{"name":..,"type":..},..] */
+FUNC exec_put_columns
+    ENTER 0
+    mov %rdi, %rbx
+    mov %rsi, %r15
     PUTS %r15, "\"columns\":["
     xor %r13d, %r13d
-13: cmp QP_NOUT(%rbx), %r13
-    jae 15f
+1:  cmp QP_NOUT(%rbx), %r13
+    jae 3f
     test %r13, %r13
-    jz 14f
+    jz 2f
     mov %r15, %rdi
     mov $',', %esi
     call buf_putc
-14: PUTS %r15, "{\"name\":"
+2:  PUTS %r15, "{\"name\":"
     imul $OC_SIZE, %r13, %rax
     add QP_OUT(%rbx), %rax
     mov OC_NAME(%rax), %rsi
@@ -1570,8 +1598,60 @@ FUNC exec_query
     call fmt_type
     PUTS %r15, "\"}"
     inc %r13
-    jmp 13b
-15: PUTS %r15, "]"
+    jmp 1b
+3:  PUTS %r15, "]"
+    LEAVE
+ENDF exec_put_columns
+
+/* exec_put_row(plan rdi, row rsi, out rdx): one result row as a JSON array */
+FUNC exec_put_row
+    ENTER 0
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %rdx, %r15
+    mov %r15, %rdi
+    mov $'[', %esi
+    call buf_putc
+    xor %r14d, %r14d
+1:  cmp QP_NOUT(%rbx), %r14
+    jae 4f
+    test %r14, %r14
+    jz 2f
+    mov %r15, %rdi
+    mov $',', %esi
+    call buf_putc
+2:  mov %r14, %rcx
+    shl $4, %rcx
+    add %r12, %rcx
+    cmpq $0, VAL_NULL(%rcx)
+    je 3f
+    PUTS %r15, "null"
+    jmp 31f
+3:  mov VAL_P(%rcx), %rdx
+    imul $OC_SIZE, %r14, %rax
+    add QP_OUT(%rbx), %rax
+    mov OC_TYPE(%rax), %rsi
+    mov %r15, %rdi
+    call fmt_value_json
+31: inc %r14
+    jmp 1b
+4:  mov %r15, %rdi
+    mov $']', %esi
+    call buf_putc
+    LEAVE
+ENDF exec_put_row
+
+/* exec_query(plan, max_rows, count_only, out) */
+FUNC exec_query
+    ENTER 32
+    mov %rdi, %rbx                  /* plan */
+    mov %rdx, 8(%rsp)               /* count only */
+    mov %rcx, %r15                  /* out */
+    call exec_query_result
+    mov %rax, %r12                  /* result */
+    mov %rbx, %rdi
+    mov %r15, %rsi
+    call exec_put_columns
     cmpq $0, 8(%rsp)
     jne 20f
     PUTS %r15, ",\"rows\":["
@@ -1583,38 +1663,14 @@ FUNC exec_query
     mov %r15, %rdi
     mov $',', %esi
     call buf_putc
-17: mov %r15, %rdi
-    mov $'[', %esi
-    call buf_putc
-    mov RS_ROWS(%r12), %rax
-    mov (%rax, %r13, 8), %rax
-    mov %rax, 16(%rsp)              /* row */
-    xor %r14d, %r14d
-171: cmp QP_NOUT(%rbx), %r14
-    jae 18f
-    test %r14, %r14
-    jz 172f
-    mov %r15, %rdi
-    mov $',', %esi
-    call buf_putc
-172: mov %r14, %rcx
-    shl $4, %rcx
-    add 16(%rsp), %rcx
-    cmpq $0, VAL_NULL(%rcx)
-    je 173f
-    PUTS %r15, "null"
-    jmp 174f
-173: mov VAL_P(%rcx), %rdx
-    imul $OC_SIZE, %r14, %rax
-    add QP_OUT(%rbx), %rax
-    mov OC_TYPE(%rax), %rsi
-    mov %r15, %rdi
-    call fmt_value_json
-174: inc %r14
-    jmp 171b
-18: mov %r15, %rdi
-    mov $']', %esi
-    call buf_putc
+17: test $1023, %r13
+    jnz 171f
+    call check_deadline
+171: mov RS_ROWS(%r12), %rax
+    mov (%rax, %r13, 8), %rsi
+    mov %rbx, %rdi
+    mov %r15, %rdx
+    call exec_put_row
     inc %r13
     jmp 16b
 19: PUTS %r15, "]"
@@ -1624,3 +1680,12 @@ FUNC exec_query
     call buf_put_u64
     LEAVE
 ENDF exec_query
+
+    .bss
+    .p2align 3
+    .globl g_result_rows
+g_result_rows: .quad 0          /* row count of the last executed query */
+    .globl g_sink_plan, g_row_sink
+g_sink_plan:   .quad 0          /* plan whose projected rows go to g_row_sink */
+g_row_sink:    .quad 0          /* sink(row rdi) -> eax 1 to stop (streaming) */
+cmp_count:     .quad 0          /* row_cmp calls (periodic deadline checks) */

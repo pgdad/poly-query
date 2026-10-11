@@ -1,45 +1,57 @@
 # Working notes — x86-64 assembly engine
 
-## Status (Phase 3)
+## Status (Phase 4)
 
-* Public conformance suite: `python3 tests/conformance/runner.py --engine
-  implementations/x86_64-asm-engine/bin/polyquery --phase 1 --phase 2
-  --phase 3` → 554/554 pass (phase 1 225/225, phase 2 186/186 incl. the
-  optional correlated-subquery file, phase 3 143/143).
+* Public conformance suite, both transports:
+  `python3 tests/conformance/runner.py --engine implementations/x86_64-asm-engine/bin/polyquery [--transport http]`
+  → phase 1 225/225, phase 2 186/186, phase 3 143/143 (phase 5 not claimed:
+  15 not_implemented).
+* `python3 tests/concurrency/http_suite.py --engine implementations/x86_64-asm-engine/bin/polyquery`
+  → 19/19.
 * `make build test lint` pass: unit tests `test_text`, `test_json`,
-  `test_ingest`, `test_hash`, `test_sql`, `test_storage` (CRC-32, UTF-8,
-  layouts, statistics, indexes), `test_planner` (index choice, pushdown,
-  LEFT JOIN safety, build side, options) and `tests/session_test.sh` (e2e
-  incl. Phase 3 storage/index cases).
+  `test_ingest`, `test_hash`, `test_sql`, `test_storage`, `test_planner`,
+  `test_http` (HTTP parser, URL helpers, status mapping),
+  `tests/session_test.sh` and `tests/server_test.sh` (serve end-to-end with
+  curl: endpoints, errors, streaming, admission, cancellation, metrics, logs,
+  graceful shutdown).
 * Capabilities claimed: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic
   test.functions phase2 sql.groupby sql.join sql.functions sql.subquery
   sql.cte sql.correlated_subquery phase3 storage.pqcf storage.mmap index.hash
-  index.btree`.
+  index.btree phase4 http.streaming`.
 
-## What works (Phase 3 additions)
+## Phase 4 design in one paragraph
 
-* Row / column layouts (`table.S`), NULL bitmaps, dictionary encoding,
-  `col_get` accessor used by the evaluator.
-* `stats` op; lazily computed per-column statistics.
-* CREATE/DROP INDEX (HASH, BTREE); `schema` lists indexes and layout.
-* Planner (`planner.S`): pushdown, index selection, row-group skipping,
-  estimates, hash-join build side; EXPLAIN shows IndexScan/Filter/build.
-* PQCF v1 save/open (`pqcf.S`), all encodings, validation, atomic save;
-  `mmap:true` opens decode lazily per column (`pqcf_load_col` via `col_get`).
+`server.S`: network thread (poll loop: HTTP, health, metrics, query registry,
+admission) + catalog worker thread (all catalog operations, serialized,
+holding `cat_lock` except while `load` parses). Each admitted query runs in a
+`fork()`ed child (snapshot = copy-on-write address space), forked under
+`trylock(cat_lock)`; the child writes the response directly to the socket and
+reports status/rows in a MAP_SHARED record. Cancellation = SIGUSR1 →
+`g_cancel_flag` → `check_deadline` raises CANCELLED. Streaming: row sink hook
+in `exec_plan` (`g_sink_plan`/`g_row_sink`) for unsorted, non-aggregated,
+non-DISTINCT queries. See README "HTTP server" for details.
 
-## Verification done outside the suite (scripts not part of the build)
+## Verification done outside the suites (scripts in /tmp, not part of the build)
 
-* Independent Python PQCF decoder over every table × encoding × row-group
-  size the engine writes: byte-exact agreement (alignment, CRCs, trailing
-  bitmap bits, min/max).
-* Corruption fuzzing (bit flips, truncation, metadata mutation with fixed CRC):
-  only STORAGE_CORRUPT / STORAGE_VERSION_UNSUPPORTED or correct data.
-* Hand-crafted files for every §3.4 validity rule.
-* Differential planner test: random predicates/joins with indexes on/off,
-  optimize off, row layout and PQCF-backed tables with small row groups.
-* SIGKILL during repeated saves: the target is always complete.
-* 1M-row transactions: load 0.3 s, save 0.3 s, open 0.2 s, indexed lookups ms.
+* 1M-row load (49 MB CSV) through `/v1/request` while polling `/health` and
+  querying another table: health ~0.5 ms, queries ~4 ms during the load.
+* Streaming 1M rows: first byte after ~5 ms (pipelined) vs ~75 ms (ORDER BY).
+* curl: `Expect: 100-continue` uploads, chunked PUT (49 MB chunked upload
+  ~0.3 s thanks to resumable chunk scanning), HTTP/1.0, pipelined requests,
+  percent-encoded table names.
+* Timeouts on 1M-row ORDER BY / scans answer within ~1 ms of the deadline
+  (checks in the sort comparator and the serialization loop).
+* 20 s stress run, 24 client threads mixing queries, streams, replaces,
+  cancellations, timeouts and abrupt disconnects with `--workers 4
+  --queue-depth 8`: no errors, empty registry and consistent metrics at the
+  end, exit 0 on SIGTERM.
+* HTTP suite repeated 4x, once while the HTTP conformance run used 16 jobs:
+  19/19 each time.
 
-## Next steps (Phase 4+)
+## Next steps / ideas
 
-* HTTP server (`serve`), concurrency, streaming.
+* Phase 5 (execution modes, parallelism, join algorithms) not started.
+* Possible improvements: release `cat_lock` during `save`, `stats` and
+  `CREATE INDEX` (needs care with lazily decoded columns); decode mmap'd PQCF
+  columns once in the server instead of per
+  query child.
