@@ -164,13 +164,17 @@ pushing each conjunct as far down as is valid."
       ;; Conjuncts of the join's own condition come first, so that (as
       ;; without pushdown) conjuncts from above are only evaluated for rows
       ;; satisfying them.
+      ;; Conjuncts without column references (constants, outer references)
+      ;; stay above the join: a FALSE one then skips the whole join.
       (dolist (c (and (lp-join-condition node) (split-conjuncts (lp-join-condition node))))
-        (cond ((and (not outer-join) (columns-within-p c 0 lw)) (push c to-left))
+        (cond ((and (not outer-join) (null (bexpr-column-indexes c))) (push c above))
+              ((and (not outer-join) (columns-within-p c 0 lw)) (push c to-left))
               ((columns-within-p c lw width) (push c to-right))
               (t (push c to-join))))
       ;; Conjuncts from above the join (WHERE or enclosing filters).
       (dolist (c conjuncts)
-        (cond ((columns-within-p c 0 lw) (push c to-left))
+        (cond ((null (bexpr-column-indexes c)) (push c above))
+              ((columns-within-p c 0 lw) (push c to-left))
               (outer-join (push c above))
               ((columns-within-p c lw width) (push c to-right))
               (t (push c to-join))))
