@@ -514,7 +514,8 @@ Goal: lower the latency of the queries of
 result. All changes are general engine improvements (no query-specific
 code paths); every query returns exactly the rows it returned before
 (`bench/workload.py --digest` on the baseline, `--check` afterwards: all 20
-result digests identical), and conformance is unchanged.
+result digests identical; the baseline digests are in
+`bench/results/baseline-digests.json`), and conformance is unchanged.
 
 ### Method
 
@@ -535,34 +536,36 @@ numbers vary by roughly ±20 %.
 
 | query | first run before | first run after | warm before | warm after | warm speed-up |
 |---|---:|---:|---:|---:|---:|
-| q01_filter_selective | 13 ms | 3 ms | 1.0 ms | 1.0 ms | 1.0× |
-| q02_filter_low_selectivity | 312 ms | 192 ms | 3.2 ms | 4.6 ms | 0.7× |
-| q03_range_filter_time | 25 ms | 8 ms | 4.5 ms | 2.5 ms | 1.8× |
-| q04_arith_aggregate | 301 ms | 168 ms | 5.3 ms | 4.2 ms | 1.3× |
-| q05_groupby_low_card | 150 ms | 14 ms | 3.3 ms | 1.3 ms | 2.5× |
-| q06_groupby_high_card | 147 ms | 24 ms | 5.6 ms | 5.8 ms | 1.0× |
-| q07_groupby_skewed | 12 ms | 15 ms | 10.1 ms | 12.3 ms | 0.8× |
-| q08_groupby_uniform_multi | 221 ms | 33 ms | 9.7 ms | 10.1 ms | 1.0× |
-| q09_distinct_count | 115 ms | 66 ms | 16.8 ms | 8.3 ms | 2.0× |
-| q10_join_customers | 263 ms | 155 ms | 18.8 ms | 15.9 ms | 1.2× |
-| q11_join_star | 305 ms | 24 ms | 13.2 ms | 12.4 ms | 1.1× |
-| q12_left_join_anti | 129 ms | 19 ms | 19.1 ms | 11.9 ms | 1.6× |
-| q13_sort_topn | 60 ms | 6 ms | 5.4 ms | 5.3 ms | 1.0× |
-| q14_sort_full_string | 639 ms | 153 ms | 397.9 ms | 73.8 ms | 5.4× |
-| q15_sort_multi_key | 208 ms | 128 ms | 191.8 ms | 65.1 ms | 2.9× |
-| q16_timeseries_hourly | 168 ms | 12 ms | 3.3 ms | 3.7 ms | 0.9× |
-| q17_wide_projection | 29 ms | 5 ms | 0.6 ms | 0.5 ms | 1.2× |
-| q18_nulls | 313 ms | 203 ms | 6.8 ms | 5.9 ms | 1.2× |
-| q19_cte_subquery | 70 ms | 27 ms | 24.4 ms | 15.3 ms | 1.6× |
-| q20_string_functions | 326 ms | 171 ms | 18.9 ms | 3.2 ms | 5.9× |
-| **total** | **3806 ms** | **1427 ms** | **760 ms** | **263 ms** | **2.9×** |
+| q01_filter_selective | 11 ms | 3 ms | 0.9 ms | 0.8 ms | 1.1× |
+| q02_filter_low_selectivity | 287 ms | 179 ms | 3.1 ms | 2.1 ms | 1.5× |
+| q03_range_filter_time | 23 ms | 7 ms | 3.8 ms | 2.7 ms | 1.4× |
+| q04_arith_aggregate | 292 ms | 177 ms | 3.9 ms | 2.5 ms | 1.6× |
+| q05_groupby_low_card | 156 ms | 11 ms | 3.3 ms | 1.1 ms | 3.0× |
+| q06_groupby_high_card | 151 ms | 20 ms | 5.5 ms | 4.6 ms | 1.2× |
+| q07_groupby_skewed | 10 ms | 11 ms | 9.8 ms | 10.3 ms | 1.0× |
+| q08_groupby_uniform_multi | 221 ms | 63 ms | 8.9 ms | 8.6 ms | 1.0× |
+| q09_distinct_count | 116 ms | 42 ms | 18.4 ms | 7.6 ms | 2.4× |
+| q10_join_customers | 284 ms | 142 ms | 15.3 ms | 11.4 ms | 1.3× |
+| q11_join_star | 289 ms | 20 ms | 11.6 ms | 10.6 ms | 1.1× |
+| q12_left_join_anti | 113 ms | 17 ms | 15.1 ms | 10.9 ms | 1.4× |
+| q13_sort_topn | 51 ms | 7 ms | 4.9 ms | 4.2 ms | 1.2× |
+| q14_sort_full_string | 544 ms | 119 ms | 324.0 ms | 58.8 ms | 5.5× |
+| q15_sort_multi_key | 248 ms | 77 ms | 183.5 ms | 40.3 ms | 4.6× |
+| q16_timeseries_hourly | 167 ms | 10 ms | 2.6 ms | 2.3 ms | 1.1× |
+| q17_wide_projection | 24 ms | 7 ms | 0.6 ms | 0.4 ms | 1.5× |
+| q18_nulls | 278 ms | 213 ms | 5.6 ms | 5.3 ms | 1.1× |
+| q19_cte_subquery | 66 ms | 26 ms | 23.3 ms | 14.2 ms | 1.6× |
+| q20_string_functions | 316 ms | 138 ms | 18.4 ms | 3.0 ms | 6.1× |
+| **total** | **3647 ms** | **1290 ms** | **662 ms** | **202 ms** | **3.3×** |
 
-Warm latency fell 2.9× in total, driven by the full sorts (q14 5×, q15 3×),
-the string functions (q20 6×), COUNT(DISTINCT) (q09 2×), the CTE (q19) and
-the joins (q10–q12); first runs fell 2.7× in total, mostly through the AOT
-cache. Queries that were already a few milliseconds (q01, q02, q06–q08,
-q13, q16) are unchanged within the noise of this machine: their individual
-rounds overlap (e.g. q02 after: 3.0–4.8 ms; 2.5 ms when run alone).
+Warm latency fell 3.3× in total, driven by the full sorts (q14 5.5×, q15
+4.6×), the string functions (q20 6×), COUNT(DISTINCT) (q09 2.4×), the CTE
+(q19) and the joins (q10–q12); first runs fell 2.8× in total, mostly
+through the AOT cache. Queries that already took a few milliseconds (q01,
+q06–q08, q13, q16, q18) changed by less than the noise of this machine
+(their individual rounds overlap). The first run of the first scans
+(q02, q04, q18, q20) is still dominated by the JIT compiling the hot loops
+while they run.
 
 ### What changed
 
@@ -580,9 +583,13 @@ rounds overlap (e.g. q02 after: 3.0–4.8 ms; 2.5 ms when run alone).
   of all codes). Runs of ≤ 32 rows, wide decimals and common string
   prefixes longer than 60 units fall back to the typed comparator, which
   breaks ties by input position, so the result is the same stable order as
-  before. The runs found on the first key are sorted in parallel. The
-  parallel sort also concatenates its partitions directly into an
-  `ArrayList` (it went through a persistent vector).
+  before. The key columns are extracted in parallel and the runs found on
+  the first key are sorted in parallel. The parallel sort also concatenates
+  its partitions directly into an `ArrayList` (it went through a persistent
+  vector).
+* **`result: count`** (q14, q15; `engine/collect`): count-only results are
+  counted instead of being collected into a vector of one placeholder per
+  row (same timeout checks, memory accounting and `max_rows` check).
 * **CTEs referenced more than once** (q19; `polyquery.exec.dispatch`,
   `operators/shared-input`). A subquery-scan input (CTE or derived table)
   that occurs several times in a query, is uncorrelated, does not call
@@ -1265,6 +1272,16 @@ Decisions:
   (`engine_phase5_test`). `PQ_STRICT_EXECUTION=1` disables the row-mode
   re-execution after unexpected exceptions, so tests see vectorized
   defects instead of correct fallback results.
+* Latency work: `exec/sort_test` checks the radix/MSD sort against a
+  reference stable comparison sort on 60 random tables (1–3 keys of every
+  sortable type, NULLs, ASC/DESC, NULLS FIRST/LAST, strings with shared
+  prefixes, `\u0000`, surrogate pairs and > 60-unit prefixes, -0.0,
+  extreme longs, 1–4 parallel parts); `vectorized_test` covers the
+  primitive DISTINCT states (merge, zero, extremes); 11 queries were added
+  to the Phase 5 differential matrix (functions over dictionary-encoded
+  strings incl. CONCAT/NULLIF with NULLs, column-wise join build sides with
+  LEFT joins and grouping by several dictionary keys, CTEs referenced
+  several times incl. ones whose evaluation fails).
 * UNION ALL: parser (compound structure, PARSE_ERROR/UNSUPPORTED forms),
   analyzer (column typing and conversion, compound ORDER BY resolution,
   errors), planner (TopN over UnionAll, per-branch optimization, pruning

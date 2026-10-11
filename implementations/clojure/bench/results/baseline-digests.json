@@ -1,0 +1,22 @@
+{
+ "q01_filter_selective": "59ca3cb82c78d023 (1 rows)",
+ "q02_filter_low_selectivity": "2229583c8a146bb7 (1 rows)",
+ "q03_range_filter_time": "aafb5bf5efbaeff6 (1 rows)",
+ "q04_arith_aggregate": "3ac816eadf89d940 (1 rows)",
+ "q05_groupby_low_card": "8f8cdc831a1b3d8d (5 rows)",
+ "q06_groupby_high_card": "652b8baa09fb7ef2 (10 rows)",
+ "q07_groupby_skewed": "89393c613c0aa839 (10 rows)",
+ "q08_groupby_uniform_multi": "001906ea5fa147f5 (50 rows)",
+ "q09_distinct_count": "8ee92f4fc5fd6da9 (1 rows)",
+ "q10_join_customers": "191e3e472cffc32b (120 rows)",
+ "q11_join_star": "2252627c9ba14a2c (20 rows)",
+ "q12_left_join_anti": "bc4c54e3325704d8 (1 rows)",
+ "q13_sort_topn": "b76db3bf996f7502 (100 rows)",
+ "q14_sort_full_string": "b3bb6d796fe49a20 (1000000 rows)",
+ "q15_sort_multi_key": "c29e07d78ec3b0c9 (1000000 rows)",
+ "q16_timeseries_hourly": "c000c1d1b3655565 (100 rows)",
+ "q17_wide_projection": "9897a8b0d94e607f (1 rows)",
+ "q18_nulls": "86e5faa649cbec4d (1 rows)",
+ "q19_cte_subquery": "bfe9c3c5714f2f37 (1 rows)",
+ "q20_string_functions": "80ce83f7dca2df02 (1 rows)"
+}
