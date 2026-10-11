@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::agg::Aggregator;
-use super::batch::{BATCH_SIZE, Batch, Vector};
+use super::batch::{BATCH_SIZE, Batch, Data, Vector};
 use super::eval::{eval, eval_mask};
 use super::keys::KeyTable;
 use super::sort::sort_permutation;
@@ -327,15 +327,32 @@ impl SortedRows {
     /// access into the input is latency-bound, so this scales well).
     fn gathered(rows: Batch, perm: Vec<u32>, threads: usize) -> SortedRows {
         let per_thread = perm.len().div_ceil(threads).next_multiple_of(BATCH_SIZE);
-        let rows = &rows;
+        let input = &rows;
         let parts: Vec<Vec<Batch>> = pool::scoped(
             perm.chunks(per_thread)
-                .map(|range| move || range.chunks(BATCH_SIZE).map(|c| rows.gather(c)).collect())
+                .map(|range| move || range.chunks(BATCH_SIZE).map(|c| input.gather(c)).collect())
                 .collect(),
         );
-        let mut out = SortedRows::lazy(Batch::new(Vec::new(), 0), Vec::new());
+        // The input is kept (see `finish`); no rows are left to gather.
+        let mut out = SortedRows::lazy(rows, Vec::new());
         out.ready = parts.into_iter().flatten().collect();
         out
+    }
+
+    /// Releases the rows once every output batch was taken. The input
+    /// shares string dictionaries with the output batches, so freeing it
+    /// may mean releasing millions of strings: that happens on a pool
+    /// thread, after the consumer dropped the output batches, instead of
+    /// delaying the query's response.
+    pub fn finish(self) {
+        let strings = self
+            .rows
+            .columns
+            .iter()
+            .any(|c| matches!(c.data, Data::Str(_) | Data::Dict(..) | Data::Values(_)));
+        if strings && self.rows.len > PARALLEL_GATHER_ROWS {
+            pool::drop_in_background(self);
+        }
     }
 
     /// The next output batch.
@@ -409,8 +426,10 @@ impl BatchOperator for SortOp {
             self.output = Some(self.compute(input, ctx)?);
         }
         let next = self.output.as_mut().and_then(SortedRows::take_batch);
-        if next.is_none() {
-            self.output = None;
+        if next.is_none()
+            && let Some(out) = self.output.take()
+        {
+            out.finish();
         }
         Ok(next)
     }

@@ -105,6 +105,13 @@ pub fn spawn<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Task<
     Task { result: rx }
 }
 
+/// Drops `value` on a pool thread: freeing a large materialized input
+/// (e.g. a million reference-counted strings) then does not delay the
+/// query's response.
+pub fn drop_in_background<T: Send + 'static>(value: T) {
+    let _ = spawn(move || drop(value));
+}
+
 /// Runs the jobs in parallel (the first on the calling thread, the others
 /// on pool threads) and returns their results in order. Returns only after
 /// every job has finished; a panic in a job is then propagated.
