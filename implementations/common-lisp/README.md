@@ -292,7 +292,7 @@ summation order, which functions.md leaves implementation-defined):
 |---|---|
 | `mode: "row"` | the row-at-a-time Volcano executor (`operators.lisp`), kept unchanged as the unoptimized baseline; single-threaded |
 | `mode: "vectorized"` / `"auto"` (default) | the batch executor (`v*.lisp`) |
-| `threads: N` | morsel-driven parallelism of the vectorized executor (scans, filters, projections, hash-join probes, aggregation, DISTINCT, sorting) |
+| `threads: N` | morsel-driven parallelism of the vectorized executor (scans, filters, projections, hash-join probes, aggregation, DISTINCT, sorting); default: the `--threads` command line option of `session`/`exec`/`serve`, else 1 |
 | `join: "hash"` / `"merge"` / `"nested_loop"` | forces the algorithm of every equi-join (`HashJoin`, `MergeJoin`, `NestedLoopJoin` in EXPLAIN); joins without an equality conjunct are always nested loops. `auto` = hash join (linear in both inputs; no operator produces sorted output a merge join could exploit) |
 | `optimize: false` | disables constant folding, predicate simplification, predicate pushdown and join reordering. Column pruning stays on: Phase 3 requires pruned scans and the engine guarantees unreferenced expressions are not evaluated |
 | `native: true` | accepted; no native kernel library is loaded, so the Lisp kernels run |

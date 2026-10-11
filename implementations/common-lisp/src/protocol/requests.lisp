@@ -132,7 +132,7 @@ alternating keys and JSON values appended after ts, level and msg."
              (options (or (request-field request "options" :type :object) (jobj))))
          (validate-query-options options)
          (success-response id "plan" (explain-sql session sql
-                                                  :options (query-exec-options options)))))
+                                                  :options (session-exec-options session options)))))
       ((string= op "save") (op-save session id request))
       ((string= op "open") (op-open session id request))
       ((string= op "stats") (op-stats session id request))
@@ -191,15 +191,20 @@ alternating keys and JSON values appended after ts, level and msg."
   (query-exec-options options)
   (request-field options "query_id" :type :string))
 
+(defun session-exec-options (session options)
+  "EXEC-OPTIONS of a request of SESSION (defaults from its configuration)."
+  (query-exec-options options (engine-config-threads (session-config session))))
+
 (defun boolean-option (options key default)
   "Value of a boolean option; DEFAULT when absent or null."
   (if (member (json-get options key) '(:true :false))
       (request-field options key :type :boolean)
       (progn (request-field options key :type :boolean) default)))
 
-(defun query-exec-options (options)
+(defun query-exec-options (options &optional (default-threads 1))
   "The EXEC-OPTIONS described by the request OPTIONS object; invalid values
-signal INVALID_REQUEST, unsupported ones UNSUPPORTED."
+signal INVALID_REQUEST, unsupported ones UNSUPPORTED. Without a `threads`
+option, DEFAULT-THREADS (the --threads command line option) is used."
   (let ((mode (option-in options "mode" '("auto" "row" "vectorized")))
         (join (option-in options "join" '("auto" "hash" "merge" "nested_loop")))
         (threads (request-field options "threads" :type :integer)))
@@ -210,7 +215,7 @@ signal INVALID_REQUEST, unsupported ones UNSUPPORTED."
                  ((string= mode "row") :row)
                  ((string= mode "vectorized") :vectorized)
                  (t :auto))
-     :threads (min (or threads 1) 256)
+     :threads (min (or threads (max 1 default-threads)) 256)
      :join (cond ((null join) :auto)
                  ((string= join "hash") :hash)
                  ((string= join "merge") :merge)
@@ -233,7 +238,7 @@ in (the HTTP server creates it at admission so queued time counts)."
            (count-only (string= result-mode "count"))
            (result (execute-sql session sql :max-rows max-rows :timeout-ms timeout-ms
                                             :collect-rows (not count-only)
-                                            :options (query-exec-options options)
+                                            :options (session-exec-options session options)
                                             :context context))
            (elapsed-us (floor (* (- (get-internal-real-time) start) 1000000)
                               internal-time-units-per-second)))
