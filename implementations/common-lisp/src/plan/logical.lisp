@@ -213,8 +213,9 @@ positions that survive, in their new order."
       (lp-distinct "Distinct")
       (lp-sort (format nil "Sort [~{~A~^, ~}]"
                        (loop for (pos nil desc nulls-first) in (lp-sort-keys node)
-                             collect (format nil "#~D ~:[ASC~;DESC~] NULLS ~:[LAST~;FIRST~]"
-                                             pos desc nulls-first))))
+                             collect (format nil "~A ~:[ASC~;DESC~] NULLS ~:[LAST~;FIRST~]"
+                                             (column-def-name (nth pos (lnode-columns node)))
+                                             desc nulls-first))))
       (lp-limit (format nil "Limit ~A offset ~A"
                         (if (lp-limit-limit node) (bexpr-describe (lp-limit-limit node)) "-")
                         (if (lp-limit-offset node) (bexpr-describe (lp-limit-offset node)) "-")))
