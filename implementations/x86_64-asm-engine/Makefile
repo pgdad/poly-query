@@ -36,6 +36,7 @@ $(BUILD) $(BUILD)/tests:
 test: build $(TEST_BINS)
 	@set -e; for t in $(TEST_BINS); do echo "== $$t"; $$t; done
 	@sh tests/session_test.sh
+	@sh tests/server_test.sh
 
 # lint: assemble everything with warnings as errors and check every object
 # carries a non-executable .note.GNU-stack section.
