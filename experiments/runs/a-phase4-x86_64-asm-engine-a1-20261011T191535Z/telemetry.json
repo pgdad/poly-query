@@ -1,0 +1,106 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase4-x86_64-asm-engine-a1-20261011T191535Z",
+ "language": "x86_64-asm-engine",
+ "task": "phase4",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase4",
+ "prompt_sha256": "2446622a25402816603d9d8e819b2fcaa3990842d1d585791325229a03d39d6b",
+ "session_id": "b8402b12-de73-46d5-b9ce-bf59b4d35ea1",
+ "tokens": {
+  "input": 214,
+  "output": 225676,
+  "cache_read": 26654992,
+  "cache_creation": 357049,
+  "thinking": null,
+  "thinking_estimated": 102164,
+  "source": "result events",
+  "api_messages": 107
+ },
+ "rate_limit": {
+  "events": 8,
+  "max_utilization": {
+   "seven_day": 0.54,
+   "five_hour": 0.49
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 12.701766400000006,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 109,
+ "result_segments": 1,
+ "assistant_messages": 228,
+ "tool_calls": {
+  "Bash": 102,
+  "Write": 6
+ },
+ "tool_calls_total": 108,
+ "tool_failures": 3,
+ "build_invocations": 29,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 7,
+ "conformance_progress": [
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ]
+ ],
+ "repair_iterations": 6,
+ "time": {
+  "wall_seconds": 2221.0,
+  "model_api_seconds": 1982.7,
+  "tool_seconds": 235.4,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 12,
+  "files_changed": 12,
+  "lines_added": 5266,
+  "lines_removed": 133,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 4 is finished and committed, and every check in the definition of done reports 0 failures:\n\n- **Conformance over HTTP** (`runner.py --transport http`): phase 1 225/225, phase 2 186/186, phase 3 143/143, `TOTAL: 554/569 pass`. The other 15 are the phase 5 cases, reported as \"not implemented\" because the engine doesn't claim phase 5.\n- **Conformance over the session transport:** the same 554/569, still passing.\n- **HTTP/concurrency suite** (`http_suite.py`): `19/19 passed`. I ran it 5 times in total, once while a 16-job HTTP conformance run was loading the machine; it passed every time.\n- **`make build test lint`:** all pass. I added two tests: `test_http`, an assembly unit test of the HTTP parser (35 checks), and `server_test.sh`, an end-to-end test of `serve` driven by curl (35 checks).\n\n**What I built** (two new modules, `src/http.S` and `src/server.S`):\n- **The `serve` command:** a keep-alive HTTP/1.1 server with every endpoint in protocol.md \u00a77, the error-to-status mapping, the 404/405/413 responses, and immediate rejection of malformed chunked bodies.\n- **Streaming:** `/v1/query/stream` sends rows while the query runs for queries without ORDER BY, GROUP BY or DISTINCT; the first byte of a 1M-row stream arrives in about 5 ms. A client that stops reading blocks the query.\n- **Metrics and logs:** Prometheus metrics and JSON-line logs on stderr; logs never contain data, SQL or error messages.\n- **Concurrency controls:** the `--workers` limit with a first-come queue and immediate OVERLOADED rejection, timeouts that include time spent queued, cancellation by query id or by client disconnect, and graceful shutdown on SIGTERM/SIGINT.\n\n**Main design decisions:**\n- **Each query runs in a forked child process.** The child's copy-on-write memory is the query's snapshot of the catalog, so replacing or dropping a table never affects running queries and queries never block each other. The child writes its response straight to the socket.\n- **Table-changing operations run on one separate worker thread**, one at a time, so they are atomic. A lock taken around each fork prevents a query from seeing a half-finished change. `load` and `open` release it while reading their input, so a large load doesn't hold up queries: during a 1M-row load, `/health` answered in about 0.5 ms and queries on another table in about 4 ms.\n- **The main network thread never touches the catalog**, so health, metrics, query listing and cancellation stay responsive while all workers are busy.\n\n**Correctness fixes found along the way:** a 50 ms timeout on a 1M-row ORDER BY was being ignored, because the sort and the output formatting never checked the deadline. Both now check it, and timeouts land within about 1 ms. Large chunked uploads were being re-scanned on every read; that is fixed too.\n\n**Known limitations** (also in the README):\n- Queries with ORDER BY, GROUP BY or DISTINCT compute their full result before streaming starts.\n- A long `save`, `stats` or `CREATE INDEX` makes new queries wait for the catalog lock until it finishes.\n- Tables opened with `mmap` are decoded again by each query rather than once by the server.\n- The server listens on IPv4 only, with at most 1000 connections.\n- A client that half-closes its socket while waiting is treated as disconnected, and its query is cancelled.\n- Phase 5 is not implemented.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

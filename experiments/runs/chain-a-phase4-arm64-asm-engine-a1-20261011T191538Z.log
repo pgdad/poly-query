@@ -1,0 +1,6 @@
+2026-10-11T19:15:38+00:00 chain chain-a-phase4-arm64-asm-engine-a1-20261011T191538Z: session 1 -> a-phase4-arm64-asm-engine-a1-20261011T191538Z (budget $100.00)
+2026-10-11T19:15:38+00:00 [a-phase4-arm64-asm-engine-a1-20261011T191538Z] agent queued (usage gate, then launch)
+2026-10-11T19:45:00+00:00 [a-phase4-arm64-asm-engine-a1-20261011T191538Z] agent finished; collecting telemetry
+2026-10-11T19:45:00+00:00 [a-phase4-arm64-asm-engine-a1-20261011T191538Z] validating (clean clone, sandboxed)
+2026-10-11T19:45:14+00:00 [a-phase4-arm64-asm-engine-a1-20261011T191538Z] outcome=success cost=$10.1815308 turns=98 wall=1760.7s
+2026-10-11T19:45:14+00:00 chain chain-a-phase4-arm64-asm-engine-a1-20261011T191538Z finished: outcome=success sessions=1 spent=$10.18

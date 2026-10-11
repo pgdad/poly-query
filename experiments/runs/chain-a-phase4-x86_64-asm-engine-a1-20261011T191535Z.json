@@ -1,0 +1,21 @@
+{
+ "chain_id": "chain-a-phase4-x86_64-asm-engine-a1-20261011T191535Z",
+ "task": "phase4",
+ "language": "x86_64-asm-engine",
+ "track": "A",
+ "attempt": 1,
+ "max_sessions": 3,
+ "total_budget_usd": 100.0,
+ "timeout_min": 120,
+ "sessions": [
+  {
+   "run_id": "a-phase4-x86_64-asm-engine-a1-20261011T191535Z",
+   "session": 1,
+   "outcome": "success",
+   "cost_usd": 12.701766400000006
+  }
+ ],
+ "spent_usd": 12.7,
+ "outcome": "success",
+ "finished": "2026-10-11T19:52:47+00:00"
+}

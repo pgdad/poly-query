@@ -1,0 +1,106 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase4-arm64-asm-engine-a1-20261011T191538Z",
+ "language": "arm64-asm-engine",
+ "task": "phase4",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase4",
+ "prompt_sha256": "3a974b83b2a4cc29ae147eb93be424a1fe6f14999d83f458d7697c2cda637410",
+ "session_id": "c02df7f6-64cb-4a81-b97f-c34776b4154e",
+ "tokens": {
+  "input": 180,
+  "output": 183768,
+  "cache_read": 18858494,
+  "cache_creation": 341719,
+  "thinking": null,
+  "thinking_estimated": 64347,
+  "source": "result events",
+  "api_messages": 90
+ },
+ "rate_limit": {
+  "events": 8,
+  "max_utilization": {
+   "five_hour": 0.49,
+   "seven_day": 0.54
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 10.1815308,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 98,
+ "result_segments": 1,
+ "assistant_messages": 203,
+ "tool_calls": {
+  "Bash": 91,
+  "Write": 6
+ },
+ "tool_calls_total": 97,
+ "tool_failures": 3,
+ "build_invocations": 22,
+ "build_failures_heuristic": 3,
+ "conformance_runs": 7,
+ "conformance_progress": [
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   554
+  ],
+  [
+   554,
+   554
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ]
+ ],
+ "repair_iterations": 6,
+ "time": {
+  "wall_seconds": 1760.7,
+  "model_api_seconds": 1616.1,
+  "tool_seconds": 139.9,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 5,
+  "files_changed": 27,
+  "lines_added": 5306,
+  "lines_removed": 467,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 4 is finished and committed: the `serve` HTTP server works, both required suites report 0 failures, and session mode still passes. One caveat: the HTTP runner run with no phase filter exits non-zero, because the 15 public Phase 5 cases are reported as \"not implemented\". Phase 5 isn't part of this task, and those cases count as neither fail nor error.\n\n**Test results**\n- `runner.py --transport http`: phase 1 225/225, phase 2 186/186, phase 3 143/143, phase 5 0/15 (15 not implemented). TOTAL 554/569, 0 fail, 0 error.\n- `runner.py` (session transport): same numbers.\n- `http_suite.py`: **19/19 passed**. I ran it four times, once while the HTTP conformance suite was running with 16 parallel jobs, and it passed every time.\n- `make build test lint` all pass, including two new tests: `test_catalog.S` (12 checks) and `run_http_tests.sh` (44 checks).\n- Extra checks with throwaway scripts outside the repo:\n  - a 20-second, 16-thread mix of loads, replaces, drops, index changes, save/open, queries, streams and cancels: no errors, no snapshot inconsistencies, clean exit 0;\n  - memory use stayed flat over repeated load/query rounds (no leaks).\n\n**What I built**\n- **Per-thread state:** everything a request touches (memory arena, response buffer, error record, deadline, file-format scratch, current catalog version) is now thread-local. That let the existing single-threaded engine code run unchanged on many threads.\n- **Versioned catalog (`catalog.S`):** the catalog is a series of immutable, reference-counted versions.\n  - A query pins the current version for its whole run.\n  - A change (load, open, drop, reset, CREATE/DROP INDEX) edits a private copy and publishes it in one step only if it succeeds, so a failed request changes nothing.\n  - A dropped or replaced table stays readable by queries already using it and is freed when the last one finishes.\n  - Parsing a load never blocks readers; changes are serialised with each other.\n- **Admission control (`server.S`):**\n  - at most `--workers` queries run, up to `--queue-depth` more wait in arrival order, and any further query gets `OVERLOADED` immediately;\n  - the timeout counts from arrival, so queued time is included;\n  - cancellation (explicit `DELETE`, client disconnect, or end of the shutdown grace period) sets a flag that the engine's existing timeout checks also read;\n  - a watchdog thread checks every 20 ms for clients that have disconnected.\n  - It also produces the metrics and the per-query completion log line.\n- **HTTP server (`http.S`):**\n  - one thread per connection, with keep-alive;\n  - Content-Length and strictly parsed chunked bodies, `Expect: 100-continue`, and 413 for oversized bodies;\n  - every endpoint from \u00a77 with the required error-to-status mapping;\n  - graceful shutdown on SIGTERM/SIGINT.\n- **Streaming:** when a query ends in a plain projection (optionally with LIMIT/OFFSET), rows are computed and sent in batches of 1000. The header goes out before any row is evaluated, a client that stops reading pauses the query, and an error after the header becomes a final error line. Sorted, grouped and DISTINCT results are computed in full first, because they need all rows anyway.\n- **Logs (`log.S`):** one JSON line per event on stderr. Info level logs startup, each finished query and shutdown; debug level adds one line per HTTP request. No SQL text, data or request bodies are logged.\n\n**Known limitations** (also listed in `README.md`)\n- Each query runs on a single thread; Phase 5 options are not supported.\n- Sorting can't be interrupted, so a cancelled or timed-out query stops only after a large sort finishes (about 130 ms for 1M rows here).\n- Sorted, grouped and DISTINCT results are fully computed before the first streamed row is sent.\n- There is no connection limit beyond what the operating system allows.\n- A client that half-closes its socket while waiting for an answer is treated as disconnected, so its query is cancelled.\n\nThe design and decisions are documented in `REA",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
