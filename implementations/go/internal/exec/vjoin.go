@@ -146,6 +146,7 @@ func (t *joinTable) appendRows(b *Batch, keys []*Vec, keyTypes []types.Type, key
 	if t.intKey {
 		t.intKeys = appendActive(t.intKeys, keys[0].I, n, sel)
 	} else {
+		t.strKeys = growFor(t.strKeys, len(rows))
 		for _, i := range rows {
 			kb := (*keyBuf)[:0]
 			for k, kv := range keys {
@@ -165,7 +166,7 @@ func (t *joinTable) appendRows(b *Batch, keys []*Vec, keyTypes []types.Type, key
 			if v.Nulls != nil {
 				c.Nulls = appendActive(c.Nulls, v.Nulls, n, sel)
 			} else {
-				c.Nulls = append(c.Nulls, make([]bool, len(rows))...)
+				c.Nulls = append(growFor(c.Nulls, len(rows)), make([]bool, len(rows))...)
 			}
 		}
 		switch t.classes[k] {
@@ -177,6 +178,7 @@ func (t *joinTable) appendRows(b *Batch, keys []*Vec, keyTypes []types.Type, key
 			c.W = appendActive(c.W, v.W, n, sel)
 		default:
 			if d := t.enc[k]; d != nil {
+				c.Codes = growFor(c.Codes, len(rows))
 				for _, i := range rows {
 					var code uint32
 					if !v.isNull(int(i)) {
@@ -266,6 +268,7 @@ func (t *joinTable) index() {
 type joinBuild struct {
 	ec       *Context
 	input    BatchOperator
+	par      *buildInput // parallel input (instead of input)
 	keys     *exprSet
 	keyTypes []types.Type
 	classes  []vclass
@@ -286,13 +289,19 @@ func buildSide(x *physical.HashJoin) (build, probe physical.Node, buildKeys, pro
 
 func newJoinBuild(ec *Context, x *physical.HashJoin) (*joinBuild, error) {
 	buildNode, _, buildKeys, probeKeys := buildSide(x)
-	input, err := BuildBatch(ec, buildNode)
-	if err != nil {
+	s := &joinBuild{ec: ec, keyTypes: exprTypes(buildKeys)}
+	keyExprs := func() (*exprSet, error) { return newExprSet(ec, buildNode.Schema(), buildKeys) }
+	var err error
+	if s.par, err = newBuildInput(ec, buildNode, keyExprs); err != nil {
 		return nil, err
 	}
-	s := &joinBuild{ec: ec, input: input, keyTypes: exprTypes(buildKeys)}
-	if s.keys, err = newExprSet(ec, buildNode.Schema(), buildKeys); err != nil {
-		return nil, err
+	if s.par == nil {
+		if s.input, err = BuildBatch(ec, buildNode); err != nil {
+			return nil, err
+		}
+		if s.keys, err = keyExprs(); err != nil {
+			return nil, err
+		}
 	}
 	for _, c := range buildNode.Schema() {
 		s.classes = append(s.classes, classOf(c.Type))
@@ -308,6 +317,9 @@ func (s *joinBuild) get() (*joinTable, error) {
 }
 
 func (s *joinBuild) build() (*joinTable, error) {
+	if s.par != nil {
+		return s.buildParallel()
+	}
 	t := &joinTable{seed: maphash.MakeSeed(), classes: s.classes, intKey: s.intKey}
 	t.cols = make([]Vec, len(t.classes))
 	keys := make([]*Vec, len(s.keyTypes))

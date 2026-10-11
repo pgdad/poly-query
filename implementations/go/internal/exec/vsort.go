@@ -87,12 +87,27 @@ func (s *colStore) append(b *Batch) int64 {
 	return bytes
 }
 
-// appendActive appends the rows sel (nil: 0..n-1) of src to dst.
+// growFor returns s with room for m more elements, doubling its capacity
+// if it has to grow.
+func growFor[T any](s []T, m int) []T {
+	if cap(s)-len(s) < m {
+		s = slices.Grow(s, max(m, len(s)))
+	}
+	return s
+}
+
+// appendActive appends the rows sel (nil: 0..n-1) of src to dst. Storage
+// grows by doubling (append grows large slices by only 1.25x, which copies
+// a column many times while materializing it batch by batch).
 func appendActive[T any](dst, src []T, n int, sel []int32) []T {
+	m := n
+	if sel != nil {
+		m = len(sel)
+	}
+	dst = growFor(dst, m)
 	if sel == nil {
 		return append(dst, src[:n]...)
 	}
-	dst = slices.Grow(dst, len(sel))
 	for _, i := range sel {
 		dst = append(dst, src[i])
 	}
