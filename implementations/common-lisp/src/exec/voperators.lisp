@@ -227,10 +227,11 @@ compiled once per call."
                               aggs))
          (nkeys (length keys))
          (key-kinds (mapcar (lambda (k) (type-vec-kind (bexpr-type k))) keys))
+         (native (native-kernels-enabled-p))
          (guard (make-row-order-guard (append keys (mapcan (lambda (a) (copy-list (b-agg-args a)))
                                                            aggs)))))
     (values
-     (lambda () (make-group-state key-kinds aggs track-positions))
+     (lambda () (make-group-state key-kinds aggs track-positions native))
      (lambda (gs batch &optional (base 0))
        (let ((n (batch-count batch)))
          (multiple-value-bind (key-vecs arg-vecs)
@@ -284,11 +285,12 @@ compiled once per call."
 ;;; DISTINCT streams: a row is emitted when its key tuple is seen first.
 (defmethod compile-batch-operator ((node pp-hash-distinct))
   (let ((open-child (compile-batch-operator (pnode-child node)))
-        (width (length (pnode-columns node))))
+        (width (length (pnode-columns node)))
+        (native (native-kernels-enabled-p)))
     (declare (type function open-child))
     (lambda ()
       (let ((child (funcall open-child))
-            (table (make-key-table width 16 (coerce (output-kinds node) 'list))))
+            (table (make-key-table width 16 (coerce (output-kinds node) 'list) native)))
         (declare (type function child))
         (lambda ()
           (loop
@@ -501,20 +503,21 @@ first."
 ;;; Hash join: the build rows of each key are chained in input order.
 
 (defun prepare-hash-build (kernels normalizers)
-  (lambda (batch)
-    (let* ((n (batch-count batch))
-           (table (make-key-table (length kernels) (max 16 n) (mapcar #'second normalizers)))
-           (gids (make-index-vector n))
-           (next (make-array n :element-type 'fixnum :initial-element -1)))
-      (multiple-value-bind (key-vecs null-rows) (join-key-vecs kernels normalizers batch)
-        (key-table-map-batch table key-vecs n gids t)
-        (let ((first (make-array (key-table-count table) :element-type 'fixnum :initial-element -1)))
-          (loop for i from (1- n) downto 0
-                unless (and null-rows (= 1 (sbit null-rows i)))
-                  do (let ((g (aref gids i)))
-                       (setf (aref next i) (aref first g)
-                             (aref first g) i)))
-          (make-join-build :table table :first-row first :next-row next :batch batch))))))
+  (let ((native (native-kernels-enabled-p)))
+    (lambda (batch)
+      (let* ((n (batch-count batch))
+             (table (make-key-table (length kernels) (max 16 n) (mapcar #'second normalizers) native))
+             (gids (make-index-vector n))
+             (next (make-array n :element-type 'fixnum :initial-element -1)))
+        (multiple-value-bind (key-vecs null-rows) (join-key-vecs kernels normalizers batch)
+          (key-table-map-batch table key-vecs n gids t)
+          (let ((first (make-array (key-table-count table) :element-type 'fixnum :initial-element -1)))
+            (loop for i from (1- n) downto 0
+                  unless (and null-rows (= 1 (sbit null-rows i)))
+                    do (let ((g (aref gids i)))
+                         (setf (aref next i) (aref first g)
+                               (aref first g) i)))
+            (make-join-build :table table :first-row first :next-row next :batch batch)))))))
 
 (defun make-join-build-provider (build-node open-build build-keys probe-keys)
   "Build provider of a hash join (see MAKE-BUILD-PROVIDER)."

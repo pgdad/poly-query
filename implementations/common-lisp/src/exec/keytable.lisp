@@ -10,6 +10,9 @@
 ;;;; Key values are runtime values (NULL is :NULL, a valid key: NULLs group
 ;;;; together); FLOAT64 -0.0 is normalized to 0.0. Lookups never modify the
 ;;;; table, so a built table may be probed by several threads at once.
+;;;;
+;;;; A table made for a query with native kernels hashes INT64-like key
+;;;; columns with pqk_hash_i64, the same murmur3 finalizer as HASH-I64.
 
 (in-package #:polyquery)
 
@@ -52,8 +55,14 @@
   (declare (type (unsigned-byte 61) h k))
   (logand (+ (logand (* h 31) #xFFFFFFFFFFFFFFFF) k) +hash-mask+))
 
-(defun hash-key-vecs (vecs n)
-  "Index vector of the combined hashes of rows [0, N) of the key VECS."
+(defun native-key-hashes (data n)
+  "(UNSIGNED-BYTE 64) vector of the HASH-I64 hashes (before masking) of the
+first N values of DATA, computed by pqk_hash_i64."
+  (native-hash-i64 data n (make-array n :element-type '(unsigned-byte 64))))
+
+(defun hash-key-vecs (vecs n &optional native)
+  "Index vector of the combined hashes of rows [0, N) of the key VECS
+(INT64-like keys hashed by the native kernel when NATIVE)."
   (declare (type fixnum n))
   (let ((hashes (make-index-vector n)))
     (fill hashes 0)
@@ -65,11 +74,18 @@
                             (combine-hash (aref hashes ,i) ,h))))
           (etypecase data
             (i64-vector
+             (if native
+                 (let ((native-hashes (native-key-hashes data n)))
+                   (declare (type (simple-array (unsigned-byte 64) (*)) native-hashes))
+                   (dotimes (i n)
+                     (combine i (if (and validity (zerop (sbit validity i)))
+                                    +null-key-hash+
+                                    (logand (aref native-hashes i) +hash-mask+)))))
              (if validity
                  (dotimes (i n)
                    (combine i (if (zerop (sbit validity i)) +null-key-hash+ (hash-i64 (aref data i)))))
                  (dotimes (i n)
-                   (combine i (hash-i64 (aref data i))))))
+                   (combine i (hash-i64 (aref data i)))))))
             (f64-vector
              (dotimes (i n)
                (combine i (if (and validity (zerop (sbit validity i)))
@@ -111,14 +127,17 @@
   (int-slots nil :type (or null i64-vector))           ; (key, gid + 1) pairs (integer tables)
   (null-gid -1 :type fixnum)                           ; group of the NULL key (integer tables)
   (mask 0 :type fixnum)
-  (count 0 :type fixnum))
+  (count 0 :type fixnum)
+  (native nil))                                        ; hash with pqk_hash_i64
 
-(defun make-key-table (width &optional (expected 16) kinds)
-  "Empty table for keys of WIDTH columns (of vector KINDS, when known)."
+(defun make-key-table (width &optional (expected 16) kinds native)
+  "Empty table for keys of WIDTH columns (of vector KINDS, when known);
+NATIVE hashes INT64-like keys with the native kernel."
   (let ((size 16)
         (int-mode (and (= width 1) (equal kinds '(:i64)))))
     (loop while (< size (* 2 expected)) do (setf size (* 2 size)))
     (%make-key-table :width width
+                     :native native
                      :keys (let ((v (make-array width)))
                              (dotimes (k width v) (setf (svref v k) (make-array (floor size 2)))))
                      :hashes (make-index-vector (if int-mode 0 (floor size 2)))
@@ -198,13 +217,14 @@
 
 ;;; Integer tables
 
-(declaim (inline int-key-probe))
-(defun int-key-probe (table v add)
-  "Group id of the integer key V (added when ADD, else -1 if absent)."
-  (declare (type (signed-byte 64) v))
+(declaim (inline int-key-probe-hashed int-key-probe))
+(defun int-key-probe-hashed (table v hash add)
+  "Group id of the integer key V whose HASH-I64 is HASH (added when ADD,
+else -1 if absent)."
+  (declare (type (signed-byte 64) v) (type (unsigned-byte 64) hash))
   (let* ((slots (key-table-int-slots table))
          (mask (key-table-mask table))
-         (pos (logand (hash-i64 v) mask)))
+         (pos (logand hash mask)))
     (declare (type i64-vector slots) (type fixnum mask pos))
     (loop
       (let ((g1 (aref slots (1+ (* 2 pos)))))
@@ -219,6 +239,11 @@
                      -1)))
               ((= (aref slots (* 2 pos)) v) (return (1- g1)))))
       (setf pos (logand (1+ pos) mask)))))
+
+(defun int-key-probe (table v add)
+  "Group id of the integer key V (added when ADD, else -1 if absent)."
+  (declare (type (signed-byte 64) v))
+  (int-key-probe-hashed table v (hash-i64 v) add))
 
 (defun int-key-null-group (table add)
   (let ((g (key-table-null-gid table)))
@@ -275,18 +300,28 @@ are added when ADD, else their id is -1. Returns GIDS."
       (let* ((vec (first vecs))
              (data (vec-data vec))
              (validity (vec-validity vec)))
-        (if (typep data 'i64-vector)
-            (if validity
-                (dotimes (i n)
-                  (setf (aref gids i)
-                        (if (zerop (sbit validity i))
-                            (int-key-null-group table add)
-                            (int-key-probe table (aref data i) add))))
-                (dotimes (i n)
-                  (setf (aref gids i) (int-key-probe table (aref data i) add))))
-            (dotimes (i n)
-              (setf (aref gids i) (int-key-group table (vec-ref vec i) add)))))
-      (let ((hashes (hash-key-vecs vecs n))
+        (cond
+          ((and (typep data 'i64-vector) (key-table-native table))
+           (let ((hashes (native-key-hashes data n)))
+             (declare (type (simple-array (unsigned-byte 64) (*)) hashes))
+             (dotimes (i n)
+               (setf (aref gids i)
+                     (if (and validity (zerop (sbit validity i)))
+                         (int-key-null-group table add)
+                         (int-key-probe-hashed table (aref data i) (aref hashes i) add))))))
+          ((typep data 'i64-vector)
+           (if validity
+               (dotimes (i n)
+                 (setf (aref gids i)
+                       (if (zerop (sbit validity i))
+                           (int-key-null-group table add)
+                           (int-key-probe table (aref data i) add))))
+               (dotimes (i n)
+                 (setf (aref gids i) (int-key-probe table (aref data i) add)))))
+          (t
+           (dotimes (i n)
+             (setf (aref gids i) (int-key-group table (vec-ref vec i) add))))))
+      (let ((hashes (hash-key-vecs vecs n (key-table-native table)))
             (vecs (coerce vecs 'simple-vector))
             (width (length vecs)))
         (dotimes (i n)
