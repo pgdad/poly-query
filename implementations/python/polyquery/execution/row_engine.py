@@ -93,7 +93,7 @@ def _union_all(node: pp.UnionAll, ctx: ExecutionContext) -> Rows:
 
 
 def _filter(node: pp.Filter, ctx: ExecutionContext) -> Rows:
-    native = native_ops.native_filter(node, ctx)
+    native = native_ops.native_filter(node)
     if native is not None:
         # the kernels select rows of the scan below; the engine evaluates the rest
         residual = native.residual
@@ -353,7 +353,7 @@ def merge_groups(partials: list[dict[tuple, list]]) -> dict[tuple, list]:
 
 
 def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Rows:
-    native = native_ops.native_scan_aggregate(node, ctx)
+    native = native_ops.native_scan_aggregate(node)
     done = None if native is None else native_ops.run_scan_aggregate(native, node, ctx)
     if done is not None:  # aggregated by the kernels from the column storage
         keys, states = done

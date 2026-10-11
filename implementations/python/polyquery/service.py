@@ -13,12 +13,14 @@ from . import errors
 from .analysis.binder import Binder
 from .datatypes import STRING
 from .execution.compiler import evaluate_constant
-from .execution.context import DEFAULT_PARALLEL_MIN_ROWS, ROW, VECTORIZED, ExecutionContext
+from .execution.context import DEFAULT_PARALLEL_MIN_ROWS, ExecutionContext
 from .execution.executor import QueryResult, run_plan, stream_plan
+from .execution.native_ops import kernel_plan
 from .ingest.limits import DEFAULT_MAX_INGEST_BYTES, DEFAULT_MAX_TABLE_ROWS, IngestLimits
 from .ingest.loader import load_table
 from .native import NativeKernels, load_kernels
-from .planner.physical import PhysicalPlan, PlanOptions, plan_statement
+from .planner.physical import PhysicalPlan, PlanOptions
+from .planner.pipeline import plan_statement
 from .sql import ast
 from .sql.parser import parse
 from .storage import pqcf
@@ -191,10 +193,10 @@ class Engine:
             test_functions=self.config.test_functions,
             cancel_event=options.cancel_event,
             max_join_rows=self.config.max_join_rows,
-            mode=ROW if options.mode == ROW else VECTORIZED,
+            mode=plan.mode,
             threads=self._threads(options),
             parallel_min_rows=self.config.parallel_min_rows,
-            native=self.native if options.native else None,
+            native=plan.native,
         )
         return plan, ctx
 
@@ -248,8 +250,11 @@ class Engine:
             join=options.join,
             use_indexes=options.use_indexes,
             threads=self._threads(options),
+            mode=options.mode,
             indexes_of=snapshot.indexes_of,
             evaluate=evaluate_constant,
+            kernels=self.native if options.native else None,
+            kernel_plan=kernel_plan,
         )
         return plan_statement(bound, plan_options)
 

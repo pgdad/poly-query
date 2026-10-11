@@ -12,6 +12,7 @@ from typing import Any, Callable, TypeVar
 
 from .. import errors
 from ..native import NativeKernels
+from ..planner.physical import VECTORIZED
 
 T = TypeVar("T")
 
@@ -19,8 +20,6 @@ T = TypeVar("T")
 ROW_OVERHEAD_BYTES = 64
 VALUE_BYTES = 16
 
-ROW = "row"
-VECTORIZED = "vectorized"
 # parallel pipelines whose driving scan has fewer rows run their partitions
 # one after the other in the calling thread instead of in worker processes
 DEFAULT_PARALLEL_MIN_ROWS = 200_000
