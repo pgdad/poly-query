@@ -1,0 +1,10 @@
+2026-10-11T03:49:33+00:00 wave wave-a-native-a1-20261011T034926Z: order=['clojure', 'python', 'go', 'common-lisp', 'java', 'rust']
+2026-10-11T03:49:33+00:00 [a-native-clojure-a1-20261011T034926Z] agent queued (usage gate, then launch)
+2026-10-11T03:49:38+00:00 [a-native-python-a1-20261011T034927Z] agent queued (usage gate, then launch)
+2026-10-11T03:49:43+00:00 [a-native-go-a1-20261011T034928Z] agent queued (usage gate, then launch)
+2026-10-11T03:49:48+00:00 [a-native-common-lisp-a1-20261011T034930Z] agent queued (usage gate, then launch)
+2026-10-11T03:49:53+00:00 [a-native-java-a1-20261011T034931Z] agent queued (usage gate, then launch)
+2026-10-11T03:49:58+00:00 [a-native-rust-a1-20261011T034932Z] agent queued (usage gate, then launch)
+2026-10-11T04:26:31+00:00 [a-native-go-a1-20261011T034928Z] agent finished; collecting telemetry
+2026-10-11T04:26:31+00:00 [a-native-go-a1-20261011T034928Z] validating (clean clone, sandboxed)
+2026-10-11T04:26:51+00:00 [a-native-go-a1-20261011T034928Z] outcome=success cost=$8.982767200000001 turns=119 wall=2208.0s

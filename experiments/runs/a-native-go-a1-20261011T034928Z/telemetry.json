@@ -1,0 +1,115 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-native-go-a1-20261011T034928Z",
+ "language": "go",
+ "task": "native",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-native",
+ "prompt_sha256": "e0e6430f6dc4e8b9521311bb033c36c3b6f13905e1de7d1a379c88813e517447",
+ "session_id": "4bd59cbe-5a5f-482b-81dd-11eeaa7897bb",
+ "tokens": {
+  "input": 228,
+  "output": 130521,
+  "cache_read": 20421536,
+  "cache_creation": 285891,
+  "thinking": null,
+  "thinking_estimated": 53579,
+  "source": "result events",
+  "api_messages": 114
+ },
+ "rate_limit": {
+  "events": 17,
+  "max_utilization": {
+   "seven_day": 0.23,
+   "five_hour": 0.4
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 8.982767200000001,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 119,
+ "result_segments": 1,
+ "assistant_messages": 232,
+ "tool_calls": {
+  "Bash": 108,
+  "Write": 8,
+  "Read": 2
+ },
+ "tool_calls_total": 118,
+ "tool_failures": 3,
+ "build_invocations": 34,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 11,
+ "conformance_progress": [
+  [
+   569,
+   569
+  ],
+  [
+   564,
+   569
+  ],
+  [
+   564,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ]
+ ],
+ "repair_iterations": 9,
+ "time": {
+  "wall_seconds": 2208.0,
+  "model_api_seconds": 1472.1,
+  "tool_seconds": 735.9,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 8,
+  "files_changed": 21,
+  "lines_added": 2805,
+  "lines_removed": 76,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The native kernel integration is finished and committed, and every required suite reports 0 failures, 0 errors and 0 not-implemented.\n\n## What I built\n- **Loading the library (`internal/native`):** the engine opens `libpqkernels` through cgo with `dlopen`/`dlsym` only when `--native-kernels PATH` is given. Nothing links against it at build time. It checks that the library's ABI version is 1, then calls `pqk_init`, which honours `PQ_KERNELS_VARIANT`. If the file is missing, a symbol is missing or the version is wrong, it logs a warning and runs on the engine's own code. The Go wrappers check buffer lengths, and Go slices and bitmaps go straight to C without copying (about 21 ns per call). A build with `CGO_ENABLED=0` falls back to a stub and doesn't claim `native.kernels`; otherwise the capability is claimed.\n- **Where the kernels run when a query has `native: true`:**\n  - **Integer filters directly above a table scan:** comparisons, BETWEEN, IN, IS NULL, AND/OR/NOT. Each condition becomes a bitmap of the rows where it is TRUE, so NULL handling stays exact. Any conditions the kernels can't handle run afterwards in the normal filter. Works in row and vectorized mode, serial and parallel.\n  - **Aggregates without GROUP BY over a scan:** computed directly from storage using the count, sum, min/max and popcount kernels.\n  - **Grouped integer SUM/AVG:** uses the group-sum kernel.\n  - **GROUP BY on a single integer key:** keys are hashed by the kernel.\n  - **Joins and parallel scans:** integer columns are copied with the gather kernel.\n- **Overflow is honoured exactly.** If the sum kernel reports overflow, that block of rows is re-summed exactly in Go, so the overflow error depends only on the final total. If the group-sum kernel reports possible overflow, the batch is subtracted back out and re-added exactly.\n- **Kernels deliberately left unused:**\n  - The float sum kernel: it adds in a different order, so results would not be bit-identical.\n  - The hash kernel in joins: measured 1.6\u00d7 slower (41 \u2192 66 ms) because it scatters clustered keys across the hash table.\n  - The fixed-width compare kernel: nothing in the engine uses fixed-width keys.\n\n## Test results\n- `--native`: `TOTAL: 569/569 pass` (phases 1, 2, 3 and 5 all at 100%). The same with `--transport http`, and under each kernel variant forced (reference, scalar, avx2).\n- `--native --modes`: `TOTAL: 3324/3324 pass`, also with tiny morsels (3, 5, 13 rows) to force parallel runs.\n- Without the library: session 569/569, `--transport http` 569/569, `--modes` 3324/3324, HTTP suite 18/18.\n- `make build test lint` pass, including a fresh clone.\n- New tests:\n  - Kernel unit tests against a Go reference, run under all four variants.\n  - Engine tests requiring byte-identical results with and without native across three storage layouts and five configurations, including overflow cases.\n  - The race detector passes on these packages.\n  - `difftest.py --native`: 1,000 random queries, 0 mismatches.\n\n## Measured impact (1m datasets, milliseconds, without \u2192 with native)\n| query | row mode, 1 thread | vectorized, 1 thread | vectorized, 8 threads |\n|---|---|---|---|\n| integer filter (BETWEEN + comparison) | 99.9 \u2192 0.9 | 88.5 \u2192 1.0 | 12.5 \u2192 0.6 |\n| aggregates, no GROUP BY | 80.6 \u2192 2.1 | 7.7 \u2192 1.7 | 1.9 \u2192 1.0 |\n| GROUP BY 100k integer groups | \u2014 | 31.3 \u2192 21.9 | \u2014 |\n\nJoins, sorts and DISTINCT are essentially unchanged. The machine was under other load (load average around 10), so differences under about 10% are noise. The README has the full table and the kernel micro-benchmarks.\n\n## Known limitations\n- No acceleration for float or string predicates, conditions on expressions like `a + 1 > 5`, filters not directly above a scan (e.g. with `optimize: false`), index scans, grouped MIN/MAX/COUNT, or multi-column group keys.\n- Queries that call `PQ_SLEEP` always use the engine's own code, because pre-filtering would change how often it runs.\n\n## Main design decisions\n- Native operators are chosen when th",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
