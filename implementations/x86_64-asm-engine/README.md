@@ -2,9 +2,11 @@
 
 An in-memory analytical database engine implementing the PolyQuery
 specification (`spec/`), written entirely in hand-written x86-64 assembly
-(GNU as, AT&T syntax). Status: **Phase 1** (protocol, catalog, CSV/JSON/JSONL
-ingestion, all data types, the `sql.basic` SQL subset, resource limits, test
-functions).
+(GNU as, AT&T syntax). Status: **Phase 2** (protocol, catalog, CSV/JSON/JSONL
+ingestion, all data types, the complete SQL grammar: GROUP BY/HAVING,
+DISTINCT, INNER/LEFT/CROSS joins, all scalar functions, CASE/LIKE/BETWEEN/IN,
+uncorrelated and correlated subqueries, derived tables, CTEs, EXPLAIN,
+structured errors, resource limits, test functions).
 
 ## Build prerequisites
 
@@ -42,10 +44,17 @@ structure layouts and macros in `include/`:
 | text | `text.S` | number/date/timestamp/decimal parsing and canonical formatting, type names |
 | JSON | `json.S` | strict RFC 8259 parser to a DOM, serializer |
 | storage | `catalog.S`, `ingest.S` | immutable columnar tables; CSV / JSON / JSONL ingestion with inference and explicit schemas |
-| SQL front end | `lexer.S`, `parser.S` | tokens → AST (`include/sql.inc`) |
-| semantic analysis / planning | `binder.S` | name resolution, typing, implicit promotions, aggregate validation, output naming, ORDER BY resolution, constant LIMIT/OFFSET → query plan |
-| execution | `eval.S`, `exec.S` | expression interpreter (incl. exact DECIMAL arithmetic with 128-bit intermediates, CAST matrix), scan → filter → aggregate → project → sort → offset/limit, JSON result serialization |
-| protocol | `protocol.S`, `main.S` | CLI, JSON-lines session loop, `exec` mode, request validation, operations, path safety, fault guard |
+| lexer | `lexer.S` | SQL text → tokens with line/column |
+| parser / AST | `parser.S`, `ast.S` | recursive descent over the full grammar → statement, query, FROM-item and expression nodes (`include/sql.inc`); `ast.S` gives generic child access to every expression kind |
+| semantic analysis + logical plan | `binder.S` | scopes and range variables, CTE visibility, name resolution (incl. correlation), typing with implicit promotions, aggregate / GROUP BY validation by structural equality, output naming, ORDER BY resolution, constant LIMIT/OFFSET → plan tree (`QP_*` per query block, `FP_*` FROM tree, `RV_*` range variables) |
+| scalar functions | `functions.S` | binding (typing) and evaluation of all scalar functions, CASE, LIKE, BETWEEN, IN lists |
+| physical planning / EXPLAIN | `binder.S` (`find_equi`), `explain.S` | join algorithm choice (hash join on an equi-key conjunct, else nested loop); JSON plan rendering |
+| execution | `eval.S`, `exec.S`, `hash.S` | expression interpreter (exact DECIMAL with 128-bit intermediates, CAST matrix); materialising operators: scan, hash / nested-loop join, filter, hash aggregation, projection, DISTINCT, sort, offset/limit; subquery evaluation; generic hash table on value cells |
+| protocol | `protocol.S`, `main.S` | CLI, JSON-lines session loop, `exec` mode, request validation, operations (`query`, `explain`, …), path safety, fault guard |
+
+The SQL pipeline is lex → parse (AST) → bind (semantic validation, typed
+AST) → plan (logical plan tree with the physical join choice) → execute.
+Errors detected before execution are reported without executing anything.
 
 Key decisions:
 
@@ -67,8 +76,29 @@ Key decisions:
   so the evaluator only sees same-kind operands (DECIMAL scales are aligned
   exactly with 128-bit arithmetic).
 * **Evaluation** is a tree-walking interpreter returning `(payload, null)` in
-  `rax:rdx`. Aggregates are bound to slots; the same mechanism will serve
-  GROUP BY in Phase 2.
+  `rax:rdx`. The evaluation context holds one row index per range variable
+  (a *tuple*), the range variables' tables, the current group's aggregate
+  values and a link to the enclosing query's context (correlation).
+* **Query blocks** execute as materialising operators. The FROM clause
+  produces a tuple set (row indices only: base tables are never copied;
+  `-1` marks a NULL-padded LEFT JOIN side). Derived tables and CTEs are
+  executed once (results of uncorrelated plans are cached in the plan) and
+  converted into columnar tables, so every range variable is a table.
+* **Joins**: the binder extracts the first `left_expr = right_expr` conjunct
+  of `ON` whose sides reference only the left resp. right input; such joins
+  run as hash joins (build on the right input, which is also the correct
+  side for LEFT JOIN), others as nested loops. The full `ON` predicate is
+  always re-checked. `--max-join-rows` bounds every join output.
+* **Grouping** hashes the GROUP BY key cells (NULLs group together); each
+  group keeps a representative tuple and aggregate states. Because every
+  column reference outside aggregates must be (structurally) a GROUP BY
+  expression, outputs, HAVING and ORDER BY are evaluated on the
+  representative tuple. DISTINCT aggregates keep a per-group hash set.
+* **Subqueries**: scalar, `IN` and `EXISTS` subqueries are bound in a child
+  scope; an uncorrelated one is executed once and its value / hash set is
+  cached in the expression node. A correlated one (a column resolves to an
+  enclosing scope, bound as `EK_OUTER` with a level count) is re-executed for
+  each evaluation with the outer context chain.
 * **Sorting** uses `qsort_r` over row pointers with a multi-key comparator
   (NULLS FIRST/LAST, ASC/DESC).
 * **Robustness**: SIGSEGV/SIGBUS/SIGFPE handlers on an alternate stack turn an
@@ -79,10 +109,21 @@ Key decisions:
 
 ## Implementation-defined choices
 
-* Phase-2 syntax (`GROUP BY`, `HAVING`, `DISTINCT`, joins, subqueries, `CASE`,
-  `IN`, `BETWEEN`, `LIKE`, `WITH`, `EXPLAIN`, `CREATE/DROP INDEX`, scalar
-  functions such as `UPPER`) is parsed or recognised and answered with
-  `UNSUPPORTED`; unknown function names give `SEMANTIC_ERROR`.
+* `CREATE INDEX` / `DROP INDEX` are parsed and answered with `UNSUPPORTED`
+  (indexes are Phase 3). `UNION`, `RIGHT` and `FULL` joins are `UNSUPPORTED`.
+* `PARSE_ERROR` responses carry `details.line`/`details.column` of the
+  offending token (lexical errors: of the current scan position).
+* EXPLAIN plan nodes: `Limit`, `Sort`, `Distinct`, `Project`, `Filter`
+  (`predicate` is `"WHERE"` or `"HAVING"`), `Aggregate`, `HashJoin` /
+  `NestedLoopJoin` (with `join_type`), `TableScan` (catalog `table`, `alias`,
+  `columns` actually referenced), `SubqueryScan` (derived table / CTE, with
+  its plan as child) and `Values` (SELECT without FROM). Subqueries inside
+  expressions are not shown.
+* Common type of CASE / COALESCE branches: identical types stay as they are;
+  otherwise numeric promotion per types.md §2 (so two different DECIMAL types
+  give `DECIMAL(18, max scale)`); otherwise all must be equal.
+* `HAVING` and `WHERE` cannot reference SELECT aliases (only GROUP BY and
+  ORDER BY can, as the spec defines).
 * In DECIMAL arithmetic an INT64 operand takes part as `DECIMAL(18,0)`
   (e.g. `1.5 * 2` is `DECIMAL(18,1)`); in comparisons the INT64 side is
   promoted to the other operand's scale.
@@ -96,6 +137,6 @@ Key decisions:
 
 ## Known limitations
 
-* Only Phase 1 capabilities are implemented (see `NOTES.md`).
+* Phase 3+ features (indexes, statistics, PQCF storage) are not implemented.
 * `serve` (HTTP, Phase 4) is not implemented and exits with status 1.
 * Single-threaded execution.

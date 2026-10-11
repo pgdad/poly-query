@@ -26,7 +26,7 @@ $(ENGINE): $(OBJS)
 $(BUILD)/%.o: src/%.S include/pq.inc include/sql.inc | $(BUILD)
 	$(AS_DRIVER) $(ASFLAGS) -o $@ $<
 
-$(BUILD)/tests/%: tests/%.S $(LIBOBJS) include/pq.inc | $(BUILD)/tests
+$(BUILD)/tests/%: tests/%.S $(LIBOBJS) include/pq.inc include/sql.inc | $(BUILD)/tests
 	$(AS_DRIVER) $(ASFLAGS) -o $@.o $<
 	$(AS_DRIVER) $(LDFLAGS) -o $@ $@.o $(LIBOBJS) $(LDLIBS)
 
