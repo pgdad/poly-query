@@ -275,6 +275,9 @@ public final class Engine {
     }
 
     private ExecContext newContext(QueryOptions opts, QueryControl control) {
-        return new ExecContext(control, config.maxQueryMemoryBytes(), opts.maxRows(), config.maxJoinRows());
+        ExecContext ctx = new ExecContext(control, config.maxQueryMemoryBytes(), opts.maxRows(), config.maxJoinRows());
+        // native kernels are batch kernels: they serve the vectorized engine; the row engine is the baseline
+        boolean useNative = opts.useNative() && opts.mode() == ExecMode.VECTORIZED;
+        return ctx.withNativeKernels(useNative ? config.nativeKernels() : null);
     }
 }

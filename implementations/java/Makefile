@@ -10,21 +10,28 @@ ENGINE_JAR := $(BUILD)/polyquery.jar
 SRC      := $(shell find src/main/java -name '*.java')
 TEST_SRC := $(shell find src/test/java -name '*.java')
 
-.PHONY: build test lint fmt clean
+.PHONY: build test lint fmt clean bench-kernels
+
+# Native kernel library used by the unit tests and bench-kernels (tests are skipped without it).
+NATIVE_LIB ?= ../../native-kernels/build/$(shell uname -m)/libpqkernels.so
 
 build: $(ENGINE_JAR)
 
-$(ENGINE_JAR): $(SRC)
+$(ENGINE_JAR): $(SRC) src/main/resources/MANIFEST.MF
 	rm -rf $(CLASSES)
 	mkdir -p $(CLASSES)
 	$(JAVAC) --release $(RELEASE) -encoding UTF-8 -Xlint:all,-serial -d $(CLASSES) $(SRC)
-	$(JAR) --create --file $(ENGINE_JAR) --main-class polyquery.Main -C $(CLASSES) .
+	$(JAR) --create --file $(ENGINE_JAR) --main-class polyquery.Main --manifest src/main/resources/MANIFEST.MF -C $(CLASSES) .
 
 test: build
 	rm -rf $(TCLASSES)
 	mkdir -p $(TCLASSES)
 	$(JAVAC) --release $(RELEASE) -encoding UTF-8 -cp $(CLASSES) -d $(TCLASSES) $(TEST_SRC)
-	$(JAVA) -ea -cp $(CLASSES):$(TCLASSES) polyquery.TestMain
+	$(JAVA) -ea --enable-native-access=ALL-UNNAMED -Dpolyquery.nativeKernels=$(NATIVE_LIB) -cp $(CLASSES):$(TCLASSES) polyquery.TestMain
+
+# FFM kernel calls vs the engine's Java loops (needs the library: make -C ../../native-kernels).
+bench-kernels: test
+	$(JAVA) --enable-native-access=ALL-UNNAMED -cp $(CLASSES):$(TCLASSES) polyquery.KernelBench $(NATIVE_LIB)
 
 lint:
 	rm -rf $(BUILD)/lint

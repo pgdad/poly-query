@@ -103,6 +103,15 @@ final class ScanBatches {
             m[i] = ((words[i >>> 6] >>> i) & 1) != 0;
         }
         java.util.Arrays.fill(m, full, n, false);
+        // the same information as a validity bitmap for the native kernels (n / 64 word operations)
+        int nwords = (n + 63) >>> 6;
+        if (v.validity == null || v.validity.length < nwords) {
+            v.validity = new long[(cap + 63) >>> 6];
+        }
+        for (int w = 0; w < nwords; w++) {
+            v.validity[w] = w < words.length ? ~words[w] : -1L;
+        }
+        v.validityKnown = true;
     }
 
     /**

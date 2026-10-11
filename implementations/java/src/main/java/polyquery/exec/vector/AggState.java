@@ -3,6 +3,7 @@ package polyquery.exec.vector;
 import java.math.BigInteger;
 import java.util.Arrays;
 import polyquery.exec.Accumulator;
+import polyquery.ffi.NativeKernels;
 import polyquery.plan.AggregateCall;
 import polyquery.types.DataType;
 import polyquery.types.Values;
@@ -38,28 +39,34 @@ abstract class AggState {
         return true;
     }
 
-    static AggState create(AggregateCall call) {
+    /**
+     * The state of {@code call}; with {@code kernels} (option {@code native}), COUNT(x), INT64/
+     * DECIMAL SUM/AVG and MIN/MAX of INT64-like and FLOAT64 values use the native kernels where
+     * they give the same result (see {@link NativeAgg}).
+     */
+    static AggState create(AggregateCall call, NativeKernels kernels) {
         if (call.distinct()) {
             return new Generic(call);
         }
+        NativeAgg nat = kernels == null ? null : new NativeAgg(kernels);
         DataType in = call.argument() == null ? null : call.argument().type();
         return switch (call.function()) {
-            case COUNT_STAR -> new Count(false);
-            case COUNT -> new Count(true);
+            case COUNT_STAR -> new Count(false, null);
+            case COUNT -> new Count(true, nat);
             case SUM, AVG -> {
                 boolean avg = call.function() == AggregateCall.AggregateFunction.AVG;
                 yield switch (in.kind()) {
-                    case FLOAT64 -> new DoubleSum(avg);
-                    case DECIMAL -> new LongSum(avg, in.scale(), true);
-                    case INT64 -> new LongSum(avg, 0, false);
+                    case FLOAT64 -> new DoubleSum(avg); // native sums reassociate: not bit-identical
+                    case DECIMAL -> new LongSum(avg, in.scale(), true, nat);
+                    case INT64 -> new LongSum(avg, 0, false, nat);
                     default -> new Generic(call);
                 };
             }
             case MIN, MAX -> {
                 boolean min = call.function() == AggregateCall.AggregateFunction.MIN;
                 yield switch (Vec.kindOf(in)) {
-                    case LONG -> in.isNull() ? new Generic(call) : new LongMinMax(in, min);
-                    case DOUBLE -> new DoubleMinMax(min);
+                    case LONG -> in.isNull() ? new Generic(call) : new LongMinMax(in, min, nat);
+                    case DOUBLE -> new DoubleMinMax(min, nat);
                     default -> in.isNull() ? new Generic(call) : new StringMinMax(min);
                 };
             }
@@ -69,10 +76,12 @@ abstract class AggState {
     /** COUNT(*) ({@code nonNull == false}) or COUNT(x). */
     static final class Count extends AggState {
         private final boolean nonNull;
+        private final NativeAgg nat;
         private long[] counts = new long[16];
 
-        Count(boolean nonNull) {
+        Count(boolean nonNull, NativeAgg nat) {
             this.nonNull = nonNull;
+            this.nat = nat;
         }
 
         @Override
@@ -100,6 +109,10 @@ abstract class AggState {
                 counts[0] += n;
                 return;
             }
+            if (nat != null && sel == null && arg.validityKnown) {
+                counts[0] += nat.kernels.popcount(arg.validity, n);
+                return;
+            }
             long c = 0;
             boolean[] nulls = arg.nulls;
             for (int k = 0; k < n; k++) {
@@ -124,14 +137,16 @@ abstract class AggState {
         private final boolean average;
         private final int scale;
         private final boolean decimal;
+        private final NativeAgg nat;
         private long[] sums = new long[16];
         private long[] counts = new long[16];
         private BigInteger[] big;
 
-        LongSum(boolean average, int scale, boolean decimal) {
+        LongSum(boolean average, int scale, boolean decimal, NativeAgg nat) {
             this.average = average;
             this.scale = scale;
             this.decimal = decimal;
+            this.nat = nat;
         }
 
         @Override
@@ -159,6 +174,9 @@ abstract class AggState {
 
         @Override
         void update(Vec arg, int[] sel, int n, int[] gids) {
+            if (nat != null && big == null && nat.groupSum(arg, sel, n, gids, sums, counts)) {
+                return; // exact: no sum wrapped
+            }
             long[] x = arg.longs;
             boolean nul = arg.hasNulls;
             for (int k = 0; k < n; k++) {
@@ -185,6 +203,10 @@ abstract class AggState {
 
         @Override
         void updateSingle(Vec arg, int[] sel, int n, int[] zeros) {
+            if (nat != null && (big == null || big[0] == null) && nat.sum(arg, sel, n)) {
+                addExact(nat.sum, nat.valid);
+                return;
+            }
             if (arg.hasNulls) {
                 update(arg, sel, n, zeros);
                 return;
@@ -223,6 +245,22 @@ abstract class AggState {
                 big = new BigInteger[sums.length];
             }
             big[0] = total(0).add(add);
+            sums[0] = 0;
+        }
+
+        /** Adds the exact sum {@code total} of {@code valid} values to group 0 (widening on overflow). */
+        private void addExact(long total, long valid) {
+            counts[0] += valid;
+            long s0 = sums[0];
+            long r = s0 + total;
+            if (((s0 ^ r) & (total ^ r)) >= 0) {
+                sums[0] = r;
+                return;
+            }
+            if (big == null) {
+                big = new BigInteger[sums.length];
+            }
+            big[0] = BigInteger.valueOf(s0).add(BigInteger.valueOf(total));
             sums[0] = 0;
         }
 
@@ -326,12 +364,14 @@ abstract class AggState {
     static final class LongMinMax extends AggState {
         private final DataType type;
         private final boolean min;
+        private final NativeAgg nat;
         private long[] best = new long[16];
         private boolean[] has = new boolean[16];
 
-        LongMinMax(DataType type, boolean min) {
+        LongMinMax(DataType type, boolean min, NativeAgg nat) {
             this.type = type;
             this.min = min;
+            this.nat = nat;
         }
 
         @Override
@@ -366,6 +406,12 @@ abstract class AggState {
 
         @Override
         void updateSingle(Vec arg, int[] sel, int n, int[] zeros) {
+            if (nat != null && n > 0 && nat.minMax(arg, sel, n)) {
+                if (nat.valid > 0) {
+                    offer(0, min ? nat.min : nat.max);
+                }
+                return;
+            }
             if (arg.hasNulls || n == 0) {
                 update(arg, sel, n, zeros);
                 return;
@@ -414,11 +460,13 @@ abstract class AggState {
 
     static final class DoubleMinMax extends AggState {
         private final boolean min;
+        private final NativeAgg nat;
         private double[] best = new double[16];
         private boolean[] has = new boolean[16];
 
-        DoubleMinMax(boolean min) {
+        DoubleMinMax(boolean min, NativeAgg nat) {
             this.min = min;
+            this.nat = nat;
         }
 
         @Override
@@ -449,6 +497,21 @@ abstract class AggState {
                     offer(gids[i], x[i]);
                 }
             }
+        }
+
+        @Override
+        void updateSingle(Vec arg, int[] sel, int n, int[] zeros) {
+            if (nat != null && n > 0 && nat.minMaxDouble(arg, sel, n)) {
+                double v = min ? nat.minDouble : nat.maxDouble;
+                if (nat.valid == 0) {
+                    return;
+                }
+                if (v != 0.0) { // for ±0.0, the engine keeps the zero it meets first
+                    offer(0, v);
+                    return;
+                }
+            }
+            update(arg, sel, n, zeros);
         }
 
         @Override

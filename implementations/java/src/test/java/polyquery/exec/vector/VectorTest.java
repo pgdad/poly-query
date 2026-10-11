@@ -65,7 +65,7 @@ public final class VectorTest {
 
     /** Group ids follow first appearance; NULLs form one group; dictionary and plain strings agree. */
     public static void testGroupKeys() {
-        GroupKeys keys = new GroupKeys(new DataType[] {DataType.INT64, DataType.STRING});
+        GroupKeys keys = new GroupKeys(new DataType[] {DataType.INT64, DataType.STRING}, null);
         Vec a = longs(DataType.INT64, 5L, 5L, null, 7L, null, 5L);
         Vec b = strings("x", "y", null, "x", null, "x");
         int[] gids = new int[6];
@@ -81,7 +81,7 @@ public final class VectorTest {
         keys.groupIds(new Vec[] {a2, dict}, null, 3, 3, gids);
         check(gids[0] == 3 && gids[1] == 1 && gids[2] == 4, "dictionary gids " + Arrays.toString(gids));
         // a second table hashes equal keys equally (partitioned parallel merge relies on it)
-        GroupKeys other = new GroupKeys(new DataType[] {DataType.INT64, DataType.STRING});
+        GroupKeys other = new GroupKeys(new DataType[] {DataType.INT64, DataType.STRING}, null);
         other.groupIds(new Vec[] {longs(DataType.INT64, 7L), strings("x")}, null, 1, 1, gids);
         check(other.hash(0) == keys.hash(3), "value-based hashes");
         check(keys.addFrom(other, 0) == 3, "merge into existing group");
@@ -92,17 +92,17 @@ public final class VectorTest {
         AggregateCall sum = new AggregateCall(AggregateCall.AggregateFunction.SUM,
                 new BoundExpr.ColumnRef(0, DataType.INT64, "x"), false, DataType.INT64);
         Vec big = longs(DataType.INT64, Long.MAX_VALUE, Long.MAX_VALUE, -Long.MAX_VALUE, -10L);
-        AggState single = AggState.create(sum);
+        AggState single = AggState.create(sum, null);
         single.grow(1);
         single.updateSingle(big, null, 4, new int[4]);
         check(Long.valueOf(Long.MAX_VALUE - 10).equals(single.result(0)), "single-group sum");
         single.updateSingle(longs(DataType.INT64, Long.MIN_VALUE, Long.MAX_VALUE), null, 2, new int[2]);
         check(Long.valueOf(Long.MAX_VALUE - 11).equals(single.result(0)), "single-group sum after widening");
-        AggState grouped = AggState.create(sum);
+        AggState grouped = AggState.create(sum, null);
         grouped.grow(1);
         grouped.update(longs(DataType.INT64, Long.MAX_VALUE, 10L, -20L), null, 3, new int[3]);
         check(Long.valueOf(Long.MAX_VALUE - 10).equals(grouped.result(0)), "grouped overflowing sum");
-        AggState overflow = AggState.create(sum);
+        AggState overflow = AggState.create(sum, null);
         overflow.grow(1);
         overflow.updateSingle(longs(DataType.INT64, Long.MAX_VALUE, 1L), null, 2, new int[2]);
         try {
@@ -112,8 +112,8 @@ public final class VectorTest {
             check(e.code() == polyquery.common.ErrorCode.NUMERIC_OVERFLOW, "overflow code");
         }
         // merging partial states is exact as well
-        AggState p1 = AggState.create(sum);
-        AggState p2 = AggState.create(sum);
+        AggState p1 = AggState.create(sum, null);
+        AggState p2 = AggState.create(sum, null);
         p1.grow(1);
         p2.grow(1);
         p1.updateSingle(longs(DataType.INT64, Long.MAX_VALUE), null, 1, new int[1]);

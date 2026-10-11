@@ -7,6 +7,9 @@ morsel sizes; all results must equal the row-mode baseline (multiset comparison 
 query orders all output columns; FLOAT64 with relative tolerance; errors by code).
 
   python3 tools/difftest.py --engine bin/polyquery --data ../../tests/conformance --queries 300 --seed 1
+
+With --native-kernels LIB the engines load the native kernel library and every vectorized
+combination also runs with `native: true`.
 """
 import argparse
 import itertools
@@ -27,10 +30,11 @@ TABLES = {
 
 
 class Engine:
-    def __init__(self, launcher, data, jvm_opts):
+    def __init__(self, launcher, data, jvm_opts, native=None):
         env = dict(__import__("os").environ)
         env["POLYQUERY_JAVA_OPTS"] = jvm_opts
-        self.p = subprocess.Popen([launcher, "session", "--data-dir", data], stdin=subprocess.PIPE,
+        extra = ["--native-kernels", native] if native else []
+        self.p = subprocess.Popen([launcher, "session", "--data-dir", data] + extra, stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, env=env, text=True)
         self.n = 0
 
@@ -308,9 +312,10 @@ def main():
     ap.add_argument("--queries", type=int, default=200)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--quick", action="store_true", help="only the runner's mode matrix")
+    ap.add_argument("--native-kernels", metavar="LIB", help="also run vectorized combinations with native: true")
     args = ap.parse_args()
     variants = ["", "-Dpolyquery.batchSize=7 -Dpolyquery.morselRows=40 -Dpolyquery.parallelBuildRows=16"]
-    engines = [Engine(args.engine, args.data, v) for v in variants]
+    engines = [Engine(args.engine, args.data, v, args.native_kernels) for v in variants]
     schemas = None
     for e in engines:
         schemas = setup(e, args.data)
@@ -318,6 +323,8 @@ def main():
               itertools.product(["row", "vectorized"], ["hash", "merge", "nested_loop", "auto"], [1, 4], [True, False])]
     if args.quick:
         combos = combos[::5]
+    if args.native_kernels:
+        combos += [dict(c, native=True) for c in combos if c["mode"] == "vectorized"]
     gen = Gen(random.Random(args.seed), schemas)
     failures = 0
     outcomes = {}

@@ -2,6 +2,7 @@ package polyquery.exec;
 
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
+import polyquery.ffi.NativeKernels;
 
 /**
  * Per-query execution state: lifetime control (timeout, cancellation), memory budget accounting
@@ -16,6 +17,7 @@ public final class ExecContext {
     private final long memoryBudget;
     private final long maxResultRows;
     private final long maxJoinRows;
+    private NativeKernels nativeKernels;
     private Object[][] frames = new Object[8][];
     private final java.util.concurrent.atomic.AtomicLong memoryUsed = new java.util.concurrent.atomic.AtomicLong();
     private int counter;
@@ -35,6 +37,17 @@ public final class ExecContext {
         this.memoryBudget = memoryBudget;
         this.maxResultRows = maxResultRows;
         this.maxJoinRows = maxJoinRows;
+    }
+
+    /** The native kernels this query may use (option {@code native} with a loaded library), or null. */
+    public NativeKernels nativeKernels() {
+        return nativeKernels;
+    }
+
+    /** Lets the query use {@code kernels} (null: engine code only). */
+    public ExecContext withNativeKernels(NativeKernels kernels) {
+        this.nativeKernels = kernels;
+        return this;
     }
 
     public long maxResultRows() {
