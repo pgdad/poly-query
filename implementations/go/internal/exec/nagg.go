@@ -14,7 +14,8 @@ import (
 // through — and whose aggregates all read scan columns directly is computed
 // from the storage vectors, window by window, without materializing rows:
 //
-//   - COUNT(*): row count, or pqk_bitmap_popcount of the filter bitmap;
+//   - COUNT(*): row count, pqk_bitmap_popcount of the filter bitmap, or
+//     pqk_count_i64 when the filter is a single comparison;
 //   - COUNT(col): popcount of the validity bitmap (ANDed with the filter
 //     bitmap by pqk_bitmap_and);
 //   - SUM/AVG of INT64/DECIMAL: pqk_sum_i64 under that mask; when it
@@ -164,15 +165,22 @@ type naggWorker struct {
 	p      *naggPlan
 	table  *aggTable
 	filter *nfilter
-	fbits  []byte
-	mask   []byte
-	valid  []byte
+	// countOnly is set when every aggregate is COUNT(*) and there is a
+	// filter.
+	countOnly bool
+	fbits     []byte
+	mask      []byte
+	valid     []byte
 }
 
 func newNaggWorker(ec *Context, p *naggPlan) (*naggWorker, error) {
 	w := &naggWorker{ec: ec, lib: ec.Native, p: p, table: newAggTable(ec, nil, p.node.Aggs)}
 	if p.filter != nil {
 		w.filter = newNFilter(ec.Native, p.filter)
+		w.countOnly = true
+		for _, c := range p.calls {
+			w.countOnly = w.countOnly && c.fn == plan.AggCountStar
+		}
 	}
 	_, err := w.table.newGroup(types.Row{}, 0)
 	return w, err
@@ -196,6 +204,18 @@ func (w *naggWorker) window(g *storage.RowGroup, lo, hi int) error {
 	n := hi - lo
 	var fb []byte // filter bitmap (nil: every row)
 	rows := n     // number of qualifying rows
+	if w.countOnly && w.p.filter.kind == nConst {
+		// COUNT(*) … WHERE <one comparison>: count without a bitmap.
+		f := w.p.filter
+		c, err := w.filter.column(g, f.ord, lo, hi)
+		if err != nil {
+			return err
+		}
+		for _, s := range w.table.states {
+			s.(*countState).n[0] += int64(w.lib.CountI64(c.ints, c.valid, f.op, f.a, f.b))
+		}
+		return nil
+	}
 	if w.filter != nil {
 		var err error
 		if fb, err = w.filter.bitmap(g, lo, hi, &w.fbits); err != nil {

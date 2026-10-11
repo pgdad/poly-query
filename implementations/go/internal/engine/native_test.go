@@ -159,6 +159,8 @@ var nativeQueries = []string{
 	"SELECT AVG(big), COUNT(big) FROM %s",
 	"SELECT SUM(big) FROM %s WHERE big > 0",
 	"SELECT COUNT(*) FROM %s WHERE a IS NULL",
+	"SELECT COUNT(*), COUNT(*) AS again FROM %s WHERE b >= 7",
+	"SELECT COUNT(*) FROM %s WHERE d BETWEEN 1 AND 100",
 	"SELECT COUNT(*), SUM(a) FROM %s WHERE a > 1000",
 	"SELECT MAX(DISTINCT a), MIN(DISTINCT d) FROM %s",
 	"SELECT COUNT(DISTINCT a), SUM(a) FROM %s",

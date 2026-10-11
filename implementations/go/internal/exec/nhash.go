@@ -8,13 +8,18 @@ import (
 
 // Native hashing and gathering helpers (option native: true).
 //
-// Hash tables keyed by a single int64 column hash the keys of a whole
-// batch at once with pqk_hash_i64 (MurmurHash3's fmix64 finalizer) and then
-// probe with the precomputed hashes: the GROUP BY table below and the
-// bucket chains of the vectorized hash join (vjoin.go). Single lookups
-// outside batches (merging partial tables) use the identical Go fmix64.
-// Hashes only choose buckets — group numbering and join output order are
-// independent of them, so results are those of the Go code paths.
+// GROUP BY tables keyed by a single int-class column hash the keys of a
+// whole batch at once with pqk_hash_i64 (MurmurHash3's fmix64 finalizer)
+// and probe an open-addressing table with the precomputed hashes; single
+// lookups outside batches (merging partial tables) use the identical Go
+// fmix64. Hashes only choose slots — group numbering follows first
+// appearance — so results are those of the Go code paths.
+//
+// The vectorized hash join keeps its multiplicative hash even with native
+// kernels: measured on the 1m datasets, fmix64's avalanche turns the
+// clustered (often sequential) join keys into random bucket accesses,
+// which made probing about 1.6x slower than the locality-preserving
+// multiplicative hash. Joins use pqk_gather_i64 for probe columns instead.
 
 // nativeHashSeed seeds pqk_hash_i64.
 const nativeHashSeed = 0x9E3779B97F4A7C15
