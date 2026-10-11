@@ -17,15 +17,19 @@ cancellation (explicit and on client disconnect) and graceful shutdown, and
 the Phase 5 execution engine: the row-at-a-time (Volcano) baseline, a
 vectorized batch executor over typed column vectors, morsel-driven parallel
 scans, aggregation, DISTINCT and sorting, hash / sort-merge / nested-loop
-joins selectable per query, and a switchable logical optimizer (constant
-folding, predicate simplification, predicate pushdown, join reordering,
-column pruning, top-N); and the M9 native kernel integration: the
+joins selectable per query, and a switchable rule-based logical optimizer
+(constant folding, predicate simplification, predicate pushdown, join
+reordering, column pruning) followed by a separate physical planner (access
+paths, join algorithms, top-N, execution mode, threads, native kernels);
+and the M9 native kernel integration: the
 `libpqkernels` library (`native-kernels/`) is loaded through SBCL's FFI
 (`sb-alien`) with `--native-kernels PATH` and used for filtering,
 aggregation, bitmap and hashing work of queries run with `native: true`
 (see *Native kernels*). On top of that, change request CR-1 adds
 `UNION ALL` (`spec/changes/union-all.md`, capability `change.union_all`;
-see *Change request CR-1: UNION ALL*).
+see *Change request CR-1: UNION ALL*), and the refactoring CR-3 separates
+logical and physical planning (`spec/changes/refactor-plan-separation.md`;
+see *Change request CR-3: logical/physical plan separation*).
 
 ## Build prerequisites
 
@@ -75,8 +79,8 @@ data structures and module (`src/`, loaded in this order by `polyquery.asd`):
 
 ```
 SQL text --lexer--> tokens --parser--> AST --binder--> BOUND-QUERY
-  --planner--> logical plan (LP-*) --optimizer--> logical plan
-  --physical planner--> physical plan (PP-*)
+  --plan builder--> logical plan (LP-*) --optimizer rules--> logical plan
+  --physical planner--> physical plan (PP-*) + execution settings
   --compiler--> row iterators (mode: row)
              or batch iterators over column vectors (mode: vectorized/auto,
                 parallel pipelines with threads > 1) --> rows
@@ -90,7 +94,7 @@ SQL text --lexer--> tokens --parser--> AST --binder--> BOUND-QUERY
 | ingest | `common`, `csv`, `json` | CSV parsing on raw UTF-8 octets, JSON/JSONL; type inference and explicit-schema conversion |
 | sql | `lexer`, `ast`, `parser` | tokenizer with line/column positions; AST structures; recursive-descent parser for the full grammar of `grammar.md` (`PARSE_ERROR` carries `details.line`/`column`) |
 | analyzer | `bound`, `functions`, `binder`, `query` | semantic validation. `bound`: bound expression nodes and the analysed-query representation; `functions`: the scalar function registry (typing + implementation per function); `binder`: expressions — name resolution through nested scopes, typing, implicit promotions, CASE/LIKE/BETWEEN/IN, subqueries; `query`: CTEs, FROM/joins/derived tables, `*` expansion, output naming, GROUP BY alias/ordinal resolution, the structural grouping rewrite, HAVING, DISTINCT, ORDER BY resolution, constant LIMIT/OFFSET |
-| plan | `logical`, `optimizer`, `access`, `physical` | logical plan construction (`Scan`, `Values`, `Filter`, `Join`, `Aggregate`, `Project`, `Distinct`, `Sort`, `Limit`); logical rewrites (predicate pushdown, column pruning); access paths (predicate analysis, selectivity and cardinality estimates, index choice, segment skipping); physical operator selection and EXPLAIN JSON rendering |
+| plan | `logical`, `estimates`, `rules/*`, `builder`, `optimizer`, `access`, `physical` | the logical plan representation (`Scan`, `Values`, `Filter`, `Project`, `Join`, `Aggregate`, `Distinct`, `Sort`, `Limit`, `UnionAll`, `SubqueryAlias`; subquery plans on the subquery descriptors) and its printer; predicate analysis, selectivity and cardinality estimates; one file per optimizer rule; plan construction from analysed queries; the optimizer (rule registry and driver); access paths (index choice, segment skipping); physical planning (operators, join algorithms, top-N, execution settings) and EXPLAIN JSON rendering. See *Change request CR-3* |
 | native | `kernels` | FFI bindings to `libpqkernels` (`sb-alien`): run-time loading, ABI check, entry points, array-level wrappers |
 | exec | `context`, `expressions`, `aggregates`, `operators`, `vectors`, `vexpressions`, `keytable`, `vaggregates`, `vnative`, `voperators`, `parallel` | query context (deadline, cancellation flag, memory budget, join row limit, cleanups) and execution options; expression compiler to closures (incl. subquery evaluation); aggregate accumulators; Volcano-style row operators. Vectorized executor: typed column vectors and batches; vector kernels; hash table of key tuples; columnar mergeable aggregate states; native-kernel predicates, filters and lazy scan batches; batch operators; morsel-driven parallelism |
 | protocol | `requests`, `cli` | JSON-lines request dispatch (`query`, `explain`, catalog ops), validation and responses, structured logging; CLI modes `version`, `capabilities`, `session`, `exec`, `serve` |
@@ -115,18 +119,23 @@ at compile time.
 
 * **Logical plan.** The FROM row is the concatenation of all range
   variables' columns; joins associate left to right; derived tables and CTE
-  references are planned as nested sub-plans. Aggregated queries project from
-  an aggregation row `[group keys..., aggregates...]` produced by the
-  structural GROUP BY rewrite of semantics.md §5.
-* **Optimizer.** (All rewrites except column pruning are skipped with
-  `optimize: false`; see Phase 5 for constant folding, predicate
-  simplification and join reordering.) *Predicate pushdown* splits WHERE and ON conditions into
+  references are planned as nested sub-plans under a `SubqueryAlias` node;
+  expression subqueries carry their own logical plans. Aggregated queries
+  project from an aggregation row `[group keys..., aggregates...]` produced
+  by the structural GROUP BY rewrite of semantics.md §5. The plan builder
+  prunes columns as it builds (scans read only referenced columns, also with
+  `optimize: false`).
+* **Optimizer.** A sequence of named rules (no rule runs with `optimize:
+  false`; see Phase 5 for constant folding, predicate simplification and
+  join reordering). *Predicate pushdown* splits WHERE and ON conditions into
   conjuncts and moves each one to the lowest valid place: the preserved side
   of a LEFT JOIN, either side of an inner join, or an inner join's condition
-  (so comma joins with a WHERE equality become hash joins); conjuncts on the
-  NULL-supplying side of a LEFT JOIN stay above it. *Column pruning*
-  propagates the set of required columns top-down and renumbers column
-  positions, so every `TableScan` reads only referenced columns.
+  (so comma joins with a WHERE equality become hash joins), and below the
+  Project of a derived table or CTE whose expressions cannot fail;
+  conjuncts on the NULL-supplying side of a LEFT JOIN stay above it.
+  *Column pruning* propagates the set of required columns top-down and
+  renumbers column positions, so every `TableScan` reads only referenced
+  columns.
 * **Access paths.** A filter directly above a scan (where pushdown puts
   every single-table conjunct) is analysed into `column op constant`,
   `column IN (constants)` and `column BETWEEN constant AND constant`
@@ -215,7 +224,8 @@ against the memory budget.
 ### Subqueries and correlation
 
 A subquery used as an expression is a `:SUBQUERY` op whose descriptor holds
-its analysed query, physical plan and a *parameter environment*. While a
+its analysed query, logical and physical plans and a *parameter
+environment*. While a
 subquery is analysed, column references it cannot resolve itself are looked
 up in the enclosing scopes; each such outer reference becomes a correlation
 parameter: a `B-PARAM` inside the subquery and a parameter expression (an
@@ -303,7 +313,7 @@ summation order, which functions.md leaves implementation-defined):
 | `mode: "vectorized"` / `"auto"` (default) | the batch executor (`v*.lisp`) |
 | `threads: N` | morsel-driven parallelism of the vectorized executor (scans, filters, projections, hash-join probes, aggregation, DISTINCT, sorting); default: the `--threads` command line option of `session`/`exec`/`serve`, else 1 |
 | `join: "hash"` / `"merge"` / `"nested_loop"` | forces the algorithm of every equi-join (`HashJoin`, `MergeJoin`, `NestedLoopJoin` in EXPLAIN); joins without an equality conjunct are always nested loops. `auto` = hash join (linear in both inputs; no operator produces sorted output a merge join could exploit) |
-| `optimize: false` | disables constant folding, predicate simplification, predicate pushdown and join reordering. Column pruning stays on: Phase 3 requires pruned scans and the engine guarantees unreferenced expressions are not evaluated |
+| `optimize: false` | applies no optimizer rule (no constant folding, predicate simplification, predicate pushdown, join reordering or re-pruning). Scans still read only referenced columns: Phase 3 requires pruned scans, so the plan builder prunes every new plan, which also guarantees that unreferenced expressions are not evaluated |
 | `native: true` | the vectorized executor uses the native kernels of `libpqkernels` when the library was loaded with `--native-kernels` (see *Native kernels*); otherwise, and in `mode: "row"`, the Lisp code runs |
 
 **Vectorized executor.** Operators exchange *batches* of up to 2048 rows
@@ -406,7 +416,8 @@ cleanup that stops and joins its threads, so no worker outlives its query
 `POLYQUERY_MORSEL_ROWS` (environment) shrinks morsels so the test suites
 exercise the parallel paths on small tables.
 
-**Logical optimizer** (`optimizer.lisp`), implemented rewrites:
+**Logical optimizer** (`optimizer.lisp`, one rule per file in `plan/rules/`),
+implemented rewrites:
 * constant folding (constant subexpressions whose evaluation succeeds become
   literals; failing ones stay, so the error is raised only if a row
   evaluates them; test-only functions are never folded);
@@ -416,7 +427,8 @@ exercise the parallel paths on small tables.
   without column references stay above joins; a WHERE that folds to TRUE
   disappears, one that folds to FALSE/NULL produces no rows without
   reading its input);
-* predicate pushdown and column (projection) pruning (Phase 3);
+* predicate pushdown (also into derived tables and CTE references) and
+  column (projection) pruning (Phase 3);
 * join reordering for chains of ≥ 3 inner joins whose written order
   contains a cross product: greedy left-deep order starting from the
   smallest estimated input and always adding the smallest input connected
@@ -425,8 +437,8 @@ exercise the parallel paths on small tables.
   their written order: without join-selectivity statistics, "smallest
   input first" was measured to pick worse orders for typical foreign-key
   chains with a selective filter on a later table (`q7`);
-* top-N for `ORDER BY … LIMIT` (already used since Phase 2; now vectorized
-  with threshold pruning).
+* top-N for `ORDER BY … LIMIT` (a physical operator choice, already used
+  since Phase 2; now vectorized with threshold pruning).
 
 **SIMD.** SBCL has no auto-vectorizer; the batch kernels are written as
 straight typed loops over specialized arrays (no boxing, no generic
@@ -566,15 +578,71 @@ concatenation operator.
 | AST | `sql/ast.lisp` | `AST-UNION-ALL` (list of `AST-SELECT` branches); `AST-QUERY-BODY` is an `AST-SELECT` or an `AST-UNION-ALL` |
 | Parser | `sql/parser.lisp` | `parse-compound` implements `compound = select_core { UNION ALL select_core }`; `UNION` without `ALL` (incl. `UNION DISTINCT`) ⇒ `UNSUPPORTED`; `UNION` after a branch's `ORDER BY`/`LIMIT`, or a parenthesized branch ⇒ `PARSE_ERROR` |
 | Analysis | `analyzer/query.lisp`, `analyzer/bound.lisp` | `bind-query` dispatches to `bind-select` (the former body, unchanged) or `bind-union-all`: every branch is bound as a query of its own in the environment that sees the WITH clause and the enclosing queries (correlated branches work); arity mismatch ⇒ `SEMANTIC_ERROR`; column types are unified with the CASE rule (`unify-result-types`) ⇒ `TYPE_ERROR` on mismatch; names come from the first branch. The result is a `BOUND-QUERY` whose FROM is a new `BF-UNION` node and whose outputs are its columns. ORDER BY resolution (`bind-order-by`, factored out of the old code) accepts only output names and positions in a compound (anything else, incl. qualified names ⇒ `SEMANTIC_ERROR`; ambiguous names as for plain queries) |
-| Logical plan | `plan/logical.lisp` | `LP-UNION-ALL`; each branch plan ends in a Project that casts to the common types (`implicit-cast`, the same conversion as CASE — an INT64 that does not fit DECIMAL(18,s) ⇒ `NUMERIC_OVERFLOW`). The cast is folded into the branch's final Project; a branch ending in `DISTINCT` gets a Project above it, so DISTINCT compares the branch's own values. No identity Project is added above the union |
-| Optimizer | `plan/optimizer.lisp`, `plan/access.lisp` | column pruning pushes the required columns into every branch (a Project realigns a branch if needed); predicates above a union stay above it; row estimate = sum of the branches |
+| Logical plan | `plan/logical.lisp`, `plan/builder.lisp` | `LP-UNION-ALL`; each branch plan ends in a Project that casts to the common types (`implicit-cast`, the same conversion as CASE — an INT64 that does not fit DECIMAL(18,s) ⇒ `NUMERIC_OVERFLOW`). The cast is folded into the branch's final Project; a branch ending in `DISTINCT` gets a Project above it, so DISTINCT compares the branch's own values. No identity Project is added above the union |
+| Optimizer | `plan/rules/column-pruning.lisp`, `plan/estimates.lisp` | column pruning pushes the required columns into every branch (a Project realigns a branch if needed); predicates above a union stay above it; row estimate = sum of the branches |
 | Physical plan / EXPLAIN | `plan/physical.lisp` | `PP-UNION-ALL`, rendered as `{"op":"UnionAll","columns":[…],"children":[branch plans in order]}` |
 | Execution | `exec/operators.lisp`, `exec/voperators.lisp` | row executor: `concatenating-opener` runs the branches one after another (each opened when the previous one is exhausted); the vectorized executor concatenates the branches' batch streams with the same function. Each branch is compiled independently, so it is parallelized (`threads`), uses native kernels and the forced join algorithm exactly like a stand-alone query; `mode: row` fallback after data errors applies to the whole statement as before |
 | Facade | `engine.lisp` | claims `change.union_all` |
 | Tests | `tests/test-union.lisp` | parser, typing, errors, ORDER BY/LIMIT, nesting, correlation, EXPLAIN, pruning, and agreement of all option combinations |
 
+### Change request CR-3: logical/physical plan separation
+
+`spec/changes/refactor-plan-separation.md`: a behaviour-preserving
+restructuring of planning into an explicit logical plan, a rule-based
+logical optimizer and a separate physical planning step. The engine already
+had logical (`LP-*`) and physical (`PP-*`) node types; the refactoring
+closed the gaps: the optimizer was one hard-wired function (and ran column
+pruning even with `optimize: false`), plan construction and rewrites shared a
+file, subqueries were planned from inside the physical planner, statistics
+estimates lived in the access-path module, derived tables/CTEs had no plan
+node, and the executors read the raw `mode`/`threads`/`native` options
+themselves.
+
+**Module map, before:**
+
+| Concern | Module |
+|---|---|
+| Logical plan nodes **and** plan construction | `plan/logical.lisp` |
+| All rewrites in one pipeline (`simplify-plan` = folding + simplification, `push-down-predicates`, `reorder-joins`, `prune-columns`; only pruning with `optimize: false`) | `plan/optimizer.lisp` |
+| Predicate analysis, selectivity/cardinality estimates, index choice, segment skipping | `plan/access.lisp` |
+| Physical operators, planning of subqueries (calling the whole pipeline), EXPLAIN | `plan/physical.lisp` |
+| Execution mode / threads / native kernels: read from the query options by the executors | `exec/context.lisp`, `exec/parallel.lisp`, `native/kernels.lisp` |
+
+**Module map, after** (`src/plan/`, in load order):
+
+| Concern | Module | Main entry points |
+|---|---|---|
+| Logical plan representation: `Scan`, `Values`, `Filter`, `Project`, `Join` (kind + condition), `Aggregate` (keys + aggregate calls), `Distinct`, `Sort`, `Limit`, `UnionAll`, `SubqueryAlias` (derived table / CTE reference); expression subqueries keep their logical plan in `SUBQUERY-LOGICAL-PLAN`; traversal helpers; debug printer | `plan/logical.lisp` | `lp-*` structs, `map-plan-expressions`, `map-plan-subqueries`, `format-logical-plan` |
+| Predicate analysis and statistics-based estimates (shared by join reordering and the physical planner) | `plan/estimates.lisp` | `analyse-conjunct`, `estimate-rows` |
+| Rule **constant folding** | `plan/rules/constant-folding.lisp` | `constant-folding` |
+| Rule **predicate simplification** | `plan/rules/predicate-simplification.lisp` | `predicate-simplification` |
+| Rule **predicate pushdown** (into join inputs and conditions, below projections, through SubqueryAlias) | `plan/rules/predicate-pushdown.lisp` | `predicate-pushdown` |
+| Rule **join reordering** | `plan/rules/join-reordering.lisp` | `join-reordering` |
+| Rule **projection / column pruning** | `plan/rules/column-pruning.lisp` | `column-pruning`, `prune-columns` |
+| Plan builder: analysed query → logical plan (pruned scans, subquery plans) | `plan/builder.lisp` | `build-logical-plan` |
+| Optimizer: rule registry and driver; applies the rules in order to the plan and its subquery plans; `optimize: false` applies none | `plan/optimizer.lisp` | `*optimizer-rules*`, `optimize-logical-plan`, `apply-optimizer-rule` |
+| Access paths: index choice, segment skipping | `plan/access.lisp` | `choose-index-access`, `make-skip-predicates` |
+| Physical planner: logical → physical operators (TableScan / IndexScan / HashLookupScan, Hash / Merge / NestedLoop join honouring `join`, build side, TopN), execution settings (`mode`, `threads`, native kernels), EXPLAIN from the physical plan | `plan/physical.lisp` | `plan-bound-query` → `physical-query`, `choose-execution-settings`, `explain-plan-json` |
+| Executors read the planner's `EXECUTION-SETTINGS`, not the options | `exec/context.lisp` (`*execution-settings*`), `exec/parallel.lisp`, `native/kernels.lisp`, `engine.lisp` | `vectorized-execution-p`, `parallel-threads`, `native-kernels-enabled-p` |
+
+Pipeline (`plan-bound-query`): `build-logical-plan` →
+`optimize-logical-plan` (`:enabled` = the `optimize` option) →
+`physical-plan` + `choose-execution-settings`. The logical layer never
+consults `join`, `mode`, `threads`, `native` or `use_indexes`.
+
+**Verification.** Before/after snapshots of the results and EXPLAIN JSON of
+every conformance query under seven option combinations were identical for
+the restructuring itself. The only intended plan change is the extended
+predicate pushdown (below): it changed the EXPLAIN of 4 conformance queries
+(a Filter moved below a derived table's Project; results identical), and on
+an additional set of 42 derived-table/CTE/subquery queries × 8 option sets
+results and errors were identical to the previous engine.
+
 ### Extensibility notes
 
+* A logical rewrite is a function from logical plan to logical plan in
+  `plan/rules/`, registered in `*optimizer-rules*` (`plan/optimizer.lisp`);
+  it can be unit-tested on its own with `apply-optimizer-rule`.
 * Physical operator choice is isolated in `plan/physical.lisp`; the batch
   executor adds implementations per physical node (`compile-batch-operator`)
   and falls back to the row implementation for the others.
@@ -598,6 +666,50 @@ concatenation operator.
   output names is `SEMANTIC_ERROR` (ambiguous), as for plain queries.
 * Predicates over a derived table / CTE that is a union are not pushed into
   the branches (they are applied above the UnionAll); column pruning is.
+
+### Plan separation (CR-3)
+
+* **Column pruning with `optimize: false`.** CR-3 requires that
+  `optimize: false` applies no rule, while Phase 3 requires scans to read
+  only referenced columns regardless. Pruning is therefore part of building
+  the plan (`build-logical-plan` prunes every new plan) *and* a rule
+  (`column-pruning`) that re-prunes after the other rules removed or moved
+  expressions. Results and EXPLAIN are unchanged for both settings.
+* **Constant folding and predicate simplification** were one pass; they are
+  now two rules applied in sequence, which composes to exactly the old
+  rewrite (fold, then simplify bottom-up, then drop TRUE filters).
+* **Pushdown below projections.** CR-3 lists it as part of the predicate
+  pushdown rule; the previous engine stopped at a derived table's Project.
+  It is valid only where the result cannot change: a conjunct is pushed
+  below a Project only when none of the projected expressions can fail
+  (`may-fail-p`: no arithmetic that may overflow, calls, subqueries,
+  failing casts), because otherwise filtering first would skip evaluating
+  an expression on rows where the original plan raises an error. The
+  conjunct is rewritten by inlining the projected expressions. Conjuncts
+  stay above Aggregate, Distinct, Sort, Limit and UnionAll. Of a Filter
+  directly over a Filter (which now arises inside derived tables), the
+  lower filter's conjuncts are evaluated first, as before the merge. This is
+  the one place where EXPLAIN output can differ from the previous engine
+  (a Filter placed lower, possibly an IndexScan instead of a full scan);
+  results, errors and the properties the conformance tests inspect are
+  otherwise unchanged.
+* **Subqueries and CTEs in the logical plan.** Derived tables and CTE
+  references become a `SubqueryAlias` node over the inlined plan (CTEs are
+  inlined per reference, as before); the physical planner drops it, so
+  EXPLAIN is unchanged. Expression subqueries are not plan nodes (they are
+  evaluated by the expression that uses them); their logical plans are
+  built with the plan, optimized by the same rules and printed by
+  `format-logical-plan` under the node that uses them.
+* **Execution settings.** `mode: auto` resolves to the vectorized executor,
+  `native` is on only for vectorized execution with the library loaded;
+  these decisions moved from the executors into
+  `choose-execution-settings`, and the plan carries them
+  (`physical-query-settings`). The row-mode fallback after data errors
+  re-plans with row-mode options, as before.
+* **Join reordering** uses statistics estimates (`estimate-rows`). Cost
+  estimation is shared with the physical planner (`plan/estimates.lisp`),
+  but the rule only reorders the logical plan; the join algorithm and build
+  side remain physical decisions.
 
 ### General
 
@@ -766,10 +878,10 @@ concatenation operator.
 * `join: "auto"` chooses a hash join for every equi-join; forced `merge` /
   `hash` on a join without equality conjuncts plan a nested-loop join
   (phase-5.md: `nested_loop` "also for non-equi").
-* `optimize: false` disables constant folding, predicate simplification,
-  predicate pushdown and join reordering, but not column pruning (Phase 3's
-  scan-column contract) and not index selection for a filter directly over
-  a scan (`use_indexes` controls that).
+* `optimize: false` applies no optimizer rule. Column pruning at plan
+  construction (Phase 3's scan-column contract) and index selection for a
+  filter directly over a scan (a physical decision; `use_indexes` controls
+  it) still happen.
 * `native: true` uses the native kernels in the vectorized executor
   (`auto`/`vectorized`) when `--native-kernels` loaded the library; with
   `mode: "row"` it has no effect (row mode stays the pure-Lisp baseline),
@@ -973,6 +1085,13 @@ same kernels at 0.15–0.5 ns/element in the AVX2/AVX-512 variants.
   rendering.
 * UNION ALL unit tests (`tests/test-union.lisp`): see *Change request
   CR-1*.
+* Planning unit tests (`tests/test-plan.lisp`): the plan builder (plan
+  shapes, pruned scans, SubqueryAlias, UNION ALL, subquery plans), every
+  optimizer rule applied on its own (`apply-optimizer-rule`), the optimizer
+  driver (rule order, `optimize: false` returns the plan untouched, nested
+  subquery plans) and the physical planner (index vs table scan,
+  `use_indexes`, forced join algorithms, build side, top-N, subquery plans,
+  execution settings). Logical plans are compared in their printed form.
 * Phase 5 unit tests (`tests/test-phase5.lisp`): option validation, forced
   join algorithms in EXPLAIN, constant folding and join reordering, vector
   gather, generic and integer key tables, partial aggregate merging, and a
