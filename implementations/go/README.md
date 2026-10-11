@@ -967,7 +967,7 @@ Observations:
   `NULL` ⇒ no limit.
 * **Query options**: `mode` is `auto` (= vectorized), `row` or `vectorized`;
   `threads` (≥ 1, capped at 256) defaults to `--threads`, whose default is
-  min(4, CPU count); `join` is `auto` (= hash for equi-joins), `hash`, `merge`
+  min(12, CPU count); `join` is `auto` (= hash for equi-joins), `hash`, `merge`
   or `nested_loop` (joins without an equality conjunct between the inputs
   always use a nested loop); `optimize: false` applies no optimizer rule
   (physical planning — scan column selection, index selection, row-group

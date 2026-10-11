@@ -89,10 +89,16 @@ func DefaultConfig() Config {
 		MaxIngestBytes:   4 << 30,
 		MaxTableRows:     500_000_000,
 		MaxJoinRows:      100_000_000,
-		Threads:          min(4, runtime.NumCPU()),
+		Threads:          min(DefaultThreads, runtime.NumCPU()),
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
+
+// DefaultThreads caps the default number of worker threads per query
+// (--threads): on the 1m analytics workload, 12 threads are about 20%
+// faster than 4 and as fast as 16 (which slows down aggregations into
+// mid-sized tables that every worker sees whole).
+const DefaultThreads = 12
 
 // Engine is a PolyQuery database instance.
 type Engine struct {
