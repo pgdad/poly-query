@@ -18,6 +18,17 @@ g_out:      .zero BUF_SIZE      /* response being built */
 req_id:     .quad 0             /* JSON node of the request id (or 0) */
 jb_main:    .zero 512           /* jmp_buf of the request handler */
 
+    .data
+    .p2align 3
+    .globl g_http_capture, g_req_status, g_force_op, g_forced_deadline
+    .globl g_q_max_rows, g_q_count
+g_http_capture:    .quad 0     /* 1: leave the response in g_out (HTTP server) */
+g_req_status:      .quad 0     /* error code of the last request, 0 = ok */
+g_force_op:        .quad 0     /* C string: op to run instead of the "op" field */
+g_forced_deadline: .quad 0     /* absolute query deadline set by the server */
+g_q_max_rows:      .quad -1    /* options of the query being prepared */
+g_q_count:         .quad 0
+
     .section .rodata
 err_names:
     .quad 0
@@ -57,7 +68,8 @@ caps_fields:
     .ascii ",\"ingest.jsonl\",\"sql.basic\",\"test.functions\""
     .ascii ",\"phase2\",\"sql.groupby\",\"sql.join\",\"sql.functions\",\"sql.subquery\""
     .ascii ",\"sql.cte\",\"sql.correlated_subquery\""
-    .asciz ",\"phase3\",\"storage.pqcf\",\"storage.mmap\",\"index.hash\",\"index.btree\"]"
+    .ascii ",\"phase3\",\"storage.pqcf\",\"storage.mmap\",\"index.hash\",\"index.btree\""
+    .asciz ",\"phase4\",\"http.streaming\"]"
 
 /* operation table: name, handler */
 op_names:
@@ -110,9 +122,13 @@ FUNC write_all
 9:  LEAVE
 ENDF write_all
 
-/* flush_out(): writes g_out + newline to stdout */
+/* flush_out(): writes g_out + newline to stdout (HTTP capture mode: keeps
+ * the response in g_out for the server) */
 FUNC flush_out
-    sub $8, %rsp
+    cmpq $0, g_http_capture(%rip)
+    je 1f
+    ret
+1:  sub $8, %rsp
     lea g_out(%rip), %rdi
     mov $'\n', %esi
     call buf_putc
@@ -284,6 +300,7 @@ FUNC handle_request_noreset
     ENTER 16
     mov %rdi, 0(%rsp)
     movq $0, req_id(%rip)
+    movq $0, g_req_status(%rip)
     movq $0, g_err_line(%rip)
     movq $0, g_out+BUF_LEN(%rip)
     movq $0, g_deadline_ns(%rip)
@@ -303,6 +320,9 @@ FUNC handle_request_noreset
     CSTR %rsi, "id"
     call json_obj_get
     mov %rax, req_id(%rip)
+    mov g_force_op(%rip), %r12      /* endpoint-implied op (HTTP) */
+    test %r12, %r12
+    jnz 0f
     mov %rbx, %rdi
     CSTR %rsi, "op"
     mov $J_STRING, %edx
@@ -310,6 +330,7 @@ FUNC handle_request_noreset
     test %rax, %rax
     jz hr_invalid
     mov JN_PTR(%rax), %r12          /* op name */
+0:
     lea g_out(%rip), %r15
     PUTS %r15, "{\"id\":"
     call put_id
@@ -361,16 +382,31 @@ hr_error:
     lea g_out(%rip), %r15
     PUTS %r15, "{\"id\":"
     call put_id
-    PUTS %r15, ",\"ok\":false,\"error\":{\"code\":\""
-    mov g_err_code(%rip), %rax
-    cmp $E_TIMEOUT, %rax
+    PUTS %r15, ",\"ok\":false,\"error\":"
+    mov %r15, %rdi
+    call proto_put_error
+    mov %rax, g_req_status(%rip)
+    PUTS %r15, "}"
+    call flush_out
+    movq $0, g_jmpbuf(%rip)
+    LEAVE
+ENDF handle_request_noreset
+
+/* proto_put_error(buf rdi) -> rax error code: appends the error object
+ * {"code":..,"message":..,"details":..} of the last raised error */
+FUNC proto_put_error
+    ENTER 0
+    mov %rdi, %r15
+    PUTS %r15, "{\"code\":\""
+    mov g_err_code(%rip), %rbx
+    cmp $E_TIMEOUT, %rbx
     jbe 2f
-    mov $E_INTERNAL_ERROR, %eax
-2:  test %rax, %rax
+    mov $E_INTERNAL_ERROR, %ebx
+2:  test %rbx, %rbx
     jnz 3f
-    mov $E_INTERNAL_ERROR, %eax
+    mov $E_INTERNAL_ERROR, %ebx
 3:  lea err_names(%rip), %rcx
-    mov (%rcx, %rax, 8), %rsi
+    mov (%rcx, %rbx, 8), %rsi
     mov %r15, %rdi
     call buf_puts
     PUTS %r15, "\",\"message\":"
@@ -391,11 +427,20 @@ hr_error:
     mov g_err_col(%rip), %rsi
     call buf_put_u64
     PUTS %r15, "}"
-4:  PUTS %r15, "}}"
-    call flush_out
-    movq $0, g_jmpbuf(%rip)
+4:  PUTS %r15, "}"
+    mov %rbx, %rax
     LEAVE
-ENDF handle_request_noreset
+ENDF proto_put_error
+
+/* proto_err_name(code rdi) -> rax C string name of an error code */
+FUNC proto_err_name
+    cmp $E_TIMEOUT, %rdi
+    jbe 1f
+    mov $E_INTERNAL_ERROR, %edi
+1:  lea err_names(%rip), %rax
+    mov (%rax, %rdi, 8), %rax
+    ret
+ENDF proto_err_name
 
 /* proto_write_static(which edi: 0 version, 1 capabilities) */
 FUNC proto_write_static
@@ -626,29 +671,41 @@ FUNC op_sleep
     call opt_uint
     cmp $-1, %rax
     je 1f
-    xor %edx, %edx
-    mov $1000, %ecx
-    div %rcx
-    mov %rax, 0(%rsp)
-    imul $1000000, %rdx, %rdx
-    mov %rdx, 8(%rsp)
+    mov %rax, %r12                  /* remaining ms */
+    mov g_forced_deadline(%rip), %rax
+    mov %rax, g_deadline_ns(%rip)
+2:  call check_deadline             /* 10 ms slices: deadline / cancellation */
+    test %r12, %r12
+    jz 3f
+    mov $10, %eax
+    cmp %rax, %r12
+    cmovb %r12, %rax
+    sub %rax, %r12
+    imul $1000000, %rax, %rax
+    movq $0, 0(%rsp)
+    mov %rax, 8(%rsp)
     lea 0(%rsp), %rdi
     xor %esi, %esi
     call nanosleep
-    LEAVE
+    jmp 2b
+3:  LEAVE
 1:  RAISE E_INVALID_REQUEST, "sleep requires --enable-test-functions and an ms field"
 ENDF op_sleep
 
 /* ================================================================ query */
 
-FUNC op_query
-    ENTER 48
+/* query_setup(request node rdi) -> rax Statement*: reads "sql" and the
+ * options (max_rows / result into g_q_max_rows / g_q_count, timeout_ms or the
+ * server-imposed deadline), sets the memory budget and parses the SQL */
+FUNC query_setup
+    ENTER 16
     mov %rdi, %rbx
     CSTR %rsi, "sql"
     call req_str
     mov %rax, %r12                  /* sql pstr */
-    movq $-1, 0(%rsp)               /* max_rows */
-    movq $0, 8(%rsp)                /* count only */
+    movq $-1, g_q_max_rows(%rip)
+    movq $0, g_q_count(%rip)
+    movq $0, g_result_rows(%rip)
     xor %r13d, %r13d
     mov %rbx, %rdi
     CSTR %rsi, "options"
@@ -661,7 +718,7 @@ FUNC op_query
     CSTR %rsi, "max_rows"
     mov $-1, %rdx
     call opt_uint
-    mov %rax, 0(%rsp)
+    mov %rax, g_q_max_rows(%rip)
     mov %r13, %rdi
     CSTR %rsi, "timeout_ms"
     xor %edx, %edx
@@ -692,20 +749,35 @@ FUNC op_query
     call strcmp
     test %eax, %eax
     jnz 2f
-    movq $1, 8(%rsp)
+    movq $1, g_q_count(%rip)
     jmp 3f
 2:  RAISE E_UNSUPPORTED, "unsupported result mode"
 3:  test %r13, %r13
     jz 4f
     mov %r13, %rdi                  /* validate the remaining known options */
     call check_exec_options
-4:  /* per-query memory budget */
+4:  mov g_forced_deadline(%rip), %rax   /* server: queue time counts */
+    test %rax, %rax
+    jz 5f
+    mov %rax, g_deadline_ns(%rip)
+5:  call check_deadline
+    /* per-query memory budget */
     mov g_arena(%rip), %rax
     mov g_max_query_mem(%rip), %rcx
     mov %rcx, AR_LIMIT(%rax)
     lea 8(%r12), %rdi
     mov (%r12), %rsi
     call sql_parse
+    LEAVE
+ENDF query_setup
+
+FUNC op_query
+    ENTER 48
+    call query_setup
+    mov g_q_max_rows(%rip), %rcx
+    mov %rcx, 0(%rsp)
+    mov g_q_count(%rip), %rcx
+    mov %rcx, 8(%rsp)
     mov %rax, %r14                  /* statement */
     mov ST_KIND(%r14), %rax
     cmp $STMT_QUERY, %rax

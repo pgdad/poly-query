@@ -131,6 +131,53 @@ FUNC parse_size
     call usage_error
 ENDF parse_size
 
+    .section .rodata
+    .p2align 3
+/* targets of the numeric options by valopts index, from 5 (--threads) */
+serve_opt_vars:
+    .quad 0                         /* 5 --threads (validated only) */
+    .quad 0, 0, 0, 0                /* 6..9 handled separately */
+    .quad g_srv_port                /* 10 */
+    .quad g_srv_workers             /* 11 */
+    .quad g_srv_queue               /* 12 */
+    .quad g_srv_timeout_ms          /* 13 */
+    .quad g_srv_grace_ms            /* 14 */
+    .quad g_srv_max_req             /* 15 */
+log_levels:
+    .asciz "debug"
+    .asciz "info"
+    .asciz "warn"
+    .asciz "error"
+    .asciz "off"
+    .byte 0
+    .text
+
+/* parse_log_level(value rdi, option rbx of the caller) -> rax 0..4
+ * (debug, info, warn, error, off); exit 2 if unknown */
+FUNC parse_log_level
+    ENTER 0
+    mov %rdi, %r12
+    lea log_levels(%rip), %r13
+    xor %r14d, %r14d
+1:  cmpb $0, (%r13)
+    je 8f
+    mov %r12, %rdi
+    mov %r13, %rsi
+    call strcmp
+    test %eax, %eax
+    jz 9f
+    mov %r13, %rdi
+    call strlen
+    lea 1(%r13, %rax), %r13
+    inc %r14
+    jmp 1b
+8:  CSTR %rdi, "invalid value for --log-level: "
+    mov %r12, %rsi
+    call usage_error
+9:  mov %r14, %rax
+    LEAVE
+ENDF parse_log_level
+
 /* main(argc, argv) */
 FUNC main
     ENTER 32
@@ -262,14 +309,34 @@ FUNC main
     mov %rax, g_max_join_rows(%rip)
     jmp 2b
 121:
-    cmp $5, %rax
-    je 13f
-    cmp $10, %rax
-    jb 2b                           /* log level, native kernels: accepted */
+    cmp $6, %rax
+    jne 122f
+    call parse_log_level            /* --log-level */
+    mov %rax, g_log_level(%rip)
+    jmp 2b
+122: cmp $7, %rax
+    je 2b                           /* --native-kernels: accepted, unused */
     cmp $9, %rax
-    je 2b                           /* --host */
-13: mov %rbx, %rsi
+    jne 123f
+    mov %rdi, g_srv_host(%rip)      /* --host */
+    jmp 2b
+123: mov %rax, 24(%rsp)
+    mov %rbx, %rsi                  /* numeric serve options, --threads */
     call parse_size
+    mov 24(%rsp), %rcx
+    lea serve_opt_vars(%rip), %rdx
+    mov -40(%rdx, %rcx, 8), %rdx    /* index 5 = first entry */
+    test %rdx, %rdx
+    jz 2b
+    mov %rax, (%rdx)
+    cmp $10, %rcx                   /* --port */
+    jne 124f
+    cmp $65535, %rax
+    ja m_bad_value
+124: cmp $11, %rcx                  /* --workers >= 1 */
+    jne 2b
+    test %rax, %rax
+    jz m_bad_value
     jmp 2b
 
 20: /* dispatch */
@@ -288,11 +355,8 @@ FUNC main
     LEAVE
 22: cmp $MODE_SERVE, %r14d
     jne 23f
-    mov stderr(%rip), %rdi
-    CSTR %rsi, "polyquery: serve mode is not supported by this engine (phase 1)\n"
-    call fputs
-    mov $1, %eax
-    LEAVE
+    cmpq $-1, g_srv_port(%rip)
+    je m_no_port
 23: call install_fault_handlers
     cmp $MODE_EXEC, %r14d
     jne 24f
@@ -331,6 +395,14 @@ m_unknown_option:
     CSTR %rdi, "unknown option "
     mov %rbx, %rsi
     call usage_error
+m_no_port:
+    CSTR %rdi, "serve requires --port N"
+    CSTR %rsi, ""
+    call usage_error
+m_bad_value:
+    CSTR %rdi, "invalid value for "
+    mov %rbx, %rsi
+    call usage_error
 m_no_request:
     CSTR %rdi, "exec requires --request FILE|-"
     CSTR %rsi, ""
@@ -341,6 +413,12 @@ ENDF main
  * re-derived from opt_request) */
 FUNC run_mode
     sub $8, %rsp
+    cmpq $MODE_SERVE, cur_mode(%rip)
+    jne 0f
+    call serve_main
+    add $8, %rsp
+    ret
+0:
     mov opt_request(%rip), %rdi
     test %rdi, %rdi
     jz 1f

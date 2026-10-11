@@ -25,6 +25,8 @@ g_test_functions:   .quad 0
 g_data_dir:         .quad 0        /* C string */
 g_deadline_ns:      .quad 0        /* CLOCK_MONOTONIC deadline of the running query, 0 = none */
 g_pending_arena:    .quad 0        /* arena of a table under construction; destroyed on error */
+    .globl g_cancel_flag
+g_cancel_flag:      .quad 0        /* set asynchronously when the running query is cancelled */
 
     .bss
     .p2align 4
@@ -735,8 +737,11 @@ FUNC now_ns
     ret
 ENDF now_ns
 
-/* check_deadline(): raises TIMEOUT when the current query deadline has passed */
+/* check_deadline(): raises CANCELLED when the query was cancelled (server
+ * child: SIGUSR1) and TIMEOUT when the current query deadline has passed */
 FUNC check_deadline
+    cmpq $0, g_cancel_flag(%rip)
+    jne 3f
     cmpq $0, g_deadline_ns(%rip)
     jne 1f
     ret
@@ -748,4 +753,6 @@ FUNC check_deadline
     ret
 2:  sub $8, %rsp
     RAISE E_TIMEOUT, "query timeout exceeded"
+3:  sub $8, %rsp
+    RAISE E_CANCELLED, "query cancelled"
 ENDF check_deadline
