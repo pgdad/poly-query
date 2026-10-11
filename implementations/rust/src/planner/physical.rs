@@ -503,6 +503,29 @@ impl PhysicalPlan {
 
     /// Plan as a JSON tree (indexes-and-planning.md §4 node format).
     pub fn to_json(&self) -> Json {
+        self.to_json_with(&|_| Vec::new())
+    }
+
+    /// Plan JSON with extra properties per node from `annotate` (placed
+    /// before the node's `children`).
+    pub fn to_json_with(
+        &self,
+        annotate: &dyn Fn(&PhysicalPlan) -> Vec<(&'static str, Json)>,
+    ) -> Json {
+        let mut json = self.node_json(annotate);
+        let extra = annotate(self);
+        if !extra.is_empty()
+            && let Json::Object(fields) = &mut json
+        {
+            let at = fields.len().saturating_sub(1);
+            for (k, (name, v)) in extra.into_iter().enumerate() {
+                fields.insert(at + k, (name.to_string(), v));
+            }
+        }
+        json
+    }
+
+    fn node_json(&self, annotate: &dyn Fn(&PhysicalPlan) -> Vec<(&'static str, Json)>) -> Json {
         let names =
             |fields: &[Field]| Json::Array(fields.iter().map(|f| Json::str(&f.name)).collect());
         let exprs =
@@ -512,7 +535,12 @@ impl PhysicalPlan {
             fields.append(&mut props);
             fields.push((
                 "children",
-                Json::Array(children.into_iter().map(|c| c.to_json()).collect()),
+                Json::Array(
+                    children
+                        .into_iter()
+                        .map(|c| c.to_json_with(annotate))
+                        .collect(),
+                ),
             ));
             Json::object(fields)
         };

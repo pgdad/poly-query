@@ -5,6 +5,7 @@ pub mod agg;
 pub mod batch;
 pub mod build;
 pub mod eval;
+pub mod hashtab;
 pub mod join;
 pub mod keys;
 pub mod ops;

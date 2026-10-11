@@ -232,7 +232,7 @@ impl BatchOperator for AggregateOp {
         let Some(mut input) = self.input.take() else {
             return Ok(None);
         };
-        let mut agg = Aggregator::new(self.group_by.len(), &self.aggregates);
+        let mut agg = Aggregator::new(self.group_by.len(), &self.aggregates, ctx.exec.native);
         while let Some(b) = input.next_batch(ctx)? {
             aggregate_batch(&mut agg, &self.group_by, &self.aggregates, &b, ctx)?;
         }
@@ -251,7 +251,9 @@ pub struct DistinctOp {
 impl BatchOperator for DistinctOp {
     fn next_batch(&mut self, ctx: &ExecContext) -> Result<Option<Batch>> {
         while let Some(b) = self.input.next_batch(ctx)? {
-            let keys = self.keys.get_or_insert_with(|| KeyTable::new(b.width()));
+            let keys = self
+                .keys
+                .get_or_insert_with(|| KeyTable::with_native(b.width(), ctx.exec.native));
             let mut next = keys.len() as u32;
             let before = next;
             if b.width() == 0 {

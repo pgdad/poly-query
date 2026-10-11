@@ -12,7 +12,11 @@ whenever both succeed (whether a failing predicate is evaluated at all may
 depend on the plan, types.md §6; such cases are only counted). Rows are
 compared as multisets with a float tolerance.
 
-Usage: difftest.py --engine bin/polyquery [--queries 500] [--seed 1] [-v]
+With --native LIB the engines load libpqkernels and every variant is also
+run with `native: true` (compared with the reference executions, which do
+not use the kernels).
+
+Usage: difftest.py --engine bin/polyquery [--queries 500] [--seed 1] [--native LIB] [-v]
 """
 from __future__ import annotations
 
@@ -75,8 +79,8 @@ BASELINE = {"mode": "row", "join": "hash", "threads": 1, "optimize": True}
 
 
 class Engine:
-    def __init__(self, launcher: str, data: str, env: dict):
-        self.p = subprocess.Popen([launcher, "session", "--data-dir", data], stdin=subprocess.PIPE,
+    def __init__(self, launcher: str, data: str, env: dict, extra=()):
+        self.p = subprocess.Popen([launcher, "session", "--data-dir", data, *extra], stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env)
         self.n = 0
 
@@ -98,9 +102,39 @@ class Engine:
 # ------------------------------------------------------------ query generator
 
 class Gen:
-    def __init__(self, rng: random.Random, schemas: dict):
+    def __init__(self, rng: random.Random, schemas: dict, simple: float = 0.0):
         self.r = rng
         self.schemas = schemas  # table -> [(col, type)]
+        # Probability of a simple column predicate (the shapes the native
+        # kernels evaluate: col <op> constant, BETWEEN, IS NULL, col <op> col).
+        self.simple = simple
+
+    def simple_pred(self, scope):
+        r = self.r
+        kinds = [k for k in ["int", "dec", "date", "ts"] if self.cols(scope, k)]
+        if not kinds:
+            return None
+        k = r.choice(kinds)
+        col = r.choice(self.cols(scope, k))[0]
+        c = r.randrange(5)
+        if c == 0:
+            return f"{col} IS {r.choice(['', 'NOT '])}NULL"
+        other = k
+        if k in ("int", "dec") and r.random() < 0.5:
+            other = r.choice(["int", "dec"])
+        if k in ("date", "ts") and r.random() < 0.5:
+            other = r.choice(["date", "ts"])
+        if c == 1:
+            return f"{col} BETWEEN {self.lit(other)} AND {self.lit(other)}"
+        if c == 2:
+            same = [x for x, _ in self.cols(scope, k) if x != col]
+            if same:
+                return f"{col} {r.choice(['=', '<>', '<', '<=', '>', '>='])} {r.choice(same)}"
+        lit = self.lit(other)
+        if k in ("int", "dec") and r.random() < 0.3:
+            lit = r.choice(["9223372036854775807", "-9223372036854775807", "99999999999999.99", "0.001", "-0.5"])
+        op = r.choice(["=", "<>", "<", "<=", ">", ">="])
+        return f"{lit} {op} {col}" if r.random() < 0.3 else f"{col} {op} {lit}"
 
     def cols(self, scope, kind):
         out = []
@@ -212,6 +246,10 @@ class Gen:
     def pred(self, scope, depth=0):
         r = self.r
         d = depth + 1
+        if self.simple and r.random() < self.simple:
+            p = self.simple_pred(scope)
+            if p:
+                return p
         c = r.randrange(10) if depth < 3 else r.randrange(3, 10)
         if c == 0:
             return f"({self.pred(scope, d)} AND {self.pred(scope, d)})"
@@ -415,16 +453,21 @@ def main() -> int:
     ap.add_argument("--engine", required=True)
     ap.add_argument("--queries", type=int, default=300)
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--native", metavar="LIB", help="libpqkernels: also run every variant with native: true")
+    ap.add_argument("--simple", type=float, default=0.0,
+                    help="probability of simple column predicates (native kernel shapes)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     launcher = str(Path(args.engine).resolve())
+    extra = ["--native-kernels", str(Path(args.native).resolve())] if args.native else []
+    variants = VARIANTS + ([dict(v, native=True) for v in VARIANTS] if args.native else [])
 
     tmp = Path(tempfile.mkdtemp(prefix="pqdiff-"))
     (tmp / "fixtures").symlink_to(FIXTURES)
     (tmp / "out").mkdir()
     engines = [
-        Engine(launcher, str(tmp), dict(os.environ)),
-        Engine(launcher, str(tmp), dict(os.environ, POLYQUERY_MORSEL_ROWS="37")),
+        Engine(launcher, str(tmp), dict(os.environ), extra),
+        Engine(launcher, str(tmp), dict(os.environ, POLYQUERY_MORSEL_ROWS="37"), extra),
     ]
     schemas = {}
     for name, base in TABLES.items():
@@ -449,7 +492,7 @@ def main() -> int:
                             "options": {"layout": "row"}})
             assert r.get("ok"), r
 
-    gen = Gen(random.Random(args.seed), schemas)
+    gen = Gen(random.Random(args.seed), schemas, args.simple)
     failures = 0
     errors = 0
     def same(x, y, ordered, sql):
@@ -481,7 +524,7 @@ def main() -> int:
             errors += 1
         bad = False
         for e in engines:
-            for v in VARIANTS:
+            for v in variants:
                 expect = ref(v.get("join", "hash"), v.get("optimize", True))
                 got = outcome(e.call({"op": "query", "sql": sql, "options": dict(v)}))
                 if not same(expect, got, ordered, sql):

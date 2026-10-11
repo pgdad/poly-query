@@ -12,6 +12,7 @@ use super::keys::KeyTable;
 use crate::error::{Error, Result};
 use crate::exec::ExecContext;
 use crate::exec::aggregate::{AggState, Partial};
+use crate::native::{GroupSum, Kernels, pack_bools};
 use crate::planner::expr::{AggFunc, AggregateCall};
 use crate::types::{DataType, Value, decimal};
 
@@ -20,15 +21,20 @@ use crate::types::{DataType, Value, decimal};
 enum Acc {
     CountStar(Vec<i64>),
     Count(Vec<i64>),
+    /// Exact sums: `sum[g] + wrap[g]` (`wrap` holds the per-group sums
+    /// accumulated by the native grouped-sum kernel while it reports no
+    /// overflow; empty when unused).
     SumInt {
         sum: Vec<i128>,
         n: Vec<i64>,
+        wrap: Wrap,
     },
     /// Unscaled sums at `scale` (the argument type's scale).
     SumDec {
         sum: Vec<i128>,
         n: Vec<i64>,
         scale: u8,
+        wrap: Wrap,
     },
     SumFloat {
         sum: Vec<f64>,
@@ -62,6 +68,97 @@ enum Acc {
 }
 
 const NONE: u32 = u32::MAX;
+
+/// Per-group `i64` sums of the native grouped-sum kernel.
+#[derive(Debug, Default)]
+struct Wrap {
+    sums: Vec<i64>,
+    /// Set after the kernel reported a (possible) overflow: the sums were
+    /// folded into the exact accumulator and the engine's loop is used.
+    disabled: bool,
+    /// Validity bitmap scratch.
+    bits: Vec<u8>,
+}
+
+impl Wrap {
+    #[inline]
+    fn get(&self, g: usize) -> i128 {
+        self.sums.get(g).map_or(0, |&x| x as i128)
+    }
+}
+
+/// Exact sum of group `g`.
+#[inline]
+fn exact_sum(sum: &[i128], wrap: &Wrap, g: usize) -> i128 {
+    sum[g] + wrap.get(g)
+}
+
+impl Wrap {
+    /// Sums `vals` (valid rows) per group with the native grouped-sum
+    /// kernel (counts into `cnt`). Returns false (nothing changed) if the
+    /// kernel cannot be used, in which case the caller runs its own loop.
+    fn add(
+        &mut self,
+        k: &Kernels,
+        gids: &[u32],
+        vals: &[i64],
+        valid: Option<&[bool]>,
+        sum: &mut [i128],
+        cnt: &mut [i64],
+    ) -> bool {
+        let wrap = self;
+        if wrap.disabled {
+            return false;
+        }
+        if wrap.sums.len() < cnt.len() {
+            wrap.sums.resize(cnt.len(), 0);
+        }
+        let vbits = valid.map(|v| {
+            pack_bools(v, &mut wrap.bits);
+            wrap.bits.as_slice()
+        });
+        match k.group_sum_i64(gids, vals, vbits, &mut wrap.sums, cnt) {
+            GroupSum::Exact => true,
+            GroupSum::Wrapped => {
+                // Undo the batch (wrapping addition is invertible), fold the
+                // kernel's sums into the exact accumulator and stop using it.
+                for (i, (&g, &x)) in gids.iter().zip(vals).enumerate() {
+                    if valid.is_none_or(|v| v[i]) {
+                        let g = g as usize;
+                        wrap.sums[g] = wrap.sums[g].wrapping_sub(x);
+                        cnt[g] -= 1;
+                    }
+                }
+                for (s, w) in sum.iter_mut().zip(&wrap.sums) {
+                    *s += *w as i128;
+                }
+                wrap.sums = Vec::new();
+                wrap.disabled = true;
+                false
+            }
+        }
+    }
+}
+
+/// Exact sum and count of the valid values with the native sum kernel
+/// (None if the kernel reports that the sum leaves the INT64 range; the
+/// caller then sums exactly itself).
+fn native_sum(
+    k: &Kernels,
+    vals: &[i64],
+    valid: Option<&[bool]>,
+    bits: &mut Vec<u8>,
+) -> Option<(i128, i64)> {
+    let count = match valid {
+        None => vals.len(),
+        Some(v) => {
+            pack_bools(v, bits);
+            k.popcount(bits, v.len())
+        }
+    };
+    let vbits = valid.map(|_| bits.as_slice());
+    k.sum_i64(vals, vbits).map(|s| (s as i128, count as i64))
+}
 
 /// Strings referenced by a string MIN/MAX accumulator.
 #[derive(Debug, Default)]
@@ -152,10 +249,12 @@ impl Acc {
                     sum: Vec::new(),
                     n: Vec::new(),
                     scale,
+                    wrap: Wrap::default(),
                 },
                 _ => Acc::SumInt {
                     sum: Vec::new(),
                     n: Vec::new(),
+                    wrap: Wrap::default(),
                 },
             },
             AggFunc::Min | AggFunc::Max => match arg_type(call) {
@@ -186,7 +285,7 @@ impl Acc {
     fn resize(&mut self, groups: usize, call: &AggregateCall) {
         match self {
             Acc::CountStar(c) | Acc::Count(c) => c.resize(groups, 0),
-            Acc::SumInt { sum, n } | Acc::SumDec { sum, n, .. } => {
+            Acc::SumInt { sum, n, .. } | Acc::SumDec { sum, n, .. } => {
                 sum.resize(groups, 0);
                 n.resize(groups, 0);
             }
@@ -255,6 +354,8 @@ impl Acc {
         gids: Option<&[u32]>,
         v: Option<&Vector>,
         n: usize,
+        native: Option<&Kernels>,
+        bits: &mut Vec<u8>,
     ) -> Result<usize> {
         let g = |i: usize| gids.map_or(0, |x| x[i] as usize);
         if let Acc::CountStar(c) = self {
@@ -279,6 +380,28 @@ impl Acc {
         if !self.accepts(&v.data) {
             self.switch_to_states(call);
         }
+        // Native kernels: integer sums whose representation matches the
+        // accumulator, and global MIN/MAX of FLOAT64 (a zero extreme is
+        // left to the engine's loop, which keeps the sign of the first zero
+        // seen, so results stay bit-identical).
+        let sum_kernel = native.is_some()
+            && match (&*self, &v.data) {
+                (Acc::SumInt { .. }, Data::Int(_)) => true,
+                (Acc::SumDec { scale, .. }, Data::Decimal(_, s)) => s == scale,
+                _ => false,
+            };
+        let f64_extreme = match (&*self, &v.data, gids, native) {
+            (Acc::ExtremeF64 { max, .. }, Data::Float(vals), None, Some(k)) => {
+                let vbits = valid.map(|v| {
+                    pack_bools(v, bits);
+                    bits.as_slice()
+                });
+                k.minmax_f64(vals, vbits)
+                    .map(|(lo, hi)| if *max { hi } else { lo })
+                    .filter(|&x| x != 0.0)
+            }
+            _ => None,
+        };
         match (&mut *self, &v.data) {
             (Acc::Count(c), Data::Values(vals)) => {
                 for (i, x) in vals.iter().enumerate() {
@@ -289,6 +412,10 @@ impl Acc {
             }
             (Acc::Count(c), _) => match (gids, valid) {
                 (None, None) => c[0] += n as i64,
+                (None, Some(valid)) if let Some(k) = native => {
+                    pack_bools(valid, bits);
+                    c[0] += k.popcount(bits, n) as i64;
+                }
                 (None, Some(valid)) => c[0] += valid.iter().filter(|&&x| x).count() as i64,
                 (Some(gids), _) => {
                     for (i, &gi) in gids.iter().enumerate() {
@@ -298,7 +425,60 @@ impl Acc {
                     }
                 }
             },
-            (Acc::SumInt { sum, n: cnt }, Data::Int(vals)) => match (gids, valid) {
+            (Acc::SumInt { sum, n: cnt, wrap }, Data::Int(vals))
+            | (
+                Acc::SumDec {
+                    sum, n: cnt, wrap, ..
+                },
+                Data::Decimal(vals, _),
+            ) if sum_kernel => {
+                let k = native.expect("native kernels");
+                let done = match gids {
+                    None => match native_sum(k, vals, valid, bits) {
+                        Some((s, c)) => {
+                            sum[0] += s;
+                            cnt[0] += c;
+                            true
+                        }
+                        None => false,
+                    },
+                    Some(gids) => wrap.add(k, gids, vals, valid, sum, cnt),
+                };
+                if !done {
+                    for (i, &x) in vals.iter().enumerate() {
+                        if ok(i) {
+                            let gi = g(i);
+                            sum[gi] += x as i128;
+                            cnt[gi] += 1;
+                        }
+                    }
+                }
+            }
+            (
+                Acc::ExtremeI64 { max, best, has, .. },
+                Data::Int(vals) | Data::Timestamp(vals) | Data::Decimal(vals, _),
+            ) if gids.is_none() && native.is_some() => {
+                let k = native.expect("native kernels");
+                let vbits = valid.map(|v| {
+                    pack_bools(v, bits);
+                    bits.as_slice()
+                });
+                if let Some((lo, hi)) = k.minmax_i64(vals, vbits) {
+                    let x = if *max { hi } else { lo };
+                    if !has[0] || (if *max { x > best[0] } else { x < best[0] }) {
+                        best[0] = x;
+                        has[0] = true;
+                    }
+                }
+            }
+            (Acc::ExtremeF64 { max, best, has }, Data::Float(_)) if f64_extreme.is_some() => {
+                let x = f64_extreme.unwrap_or(0.0);
+                if !has[0] || (if *max { x > best[0] } else { x < best[0] }) {
+                    best[0] = x;
+                    has[0] = true;
+                }
+            }
+            (Acc::SumInt { sum, n: cnt, .. }, Data::Int(vals)) => match (gids, valid) {
                 (None, None) => {
                     sum[0] += vals.iter().map(|&x| x as i128).sum::<i128>();
                     cnt[0] += n as i64;
@@ -313,23 +493,26 @@ impl Acc {
                     }
                 }
             },
-            (Acc::SumDec { sum, n: cnt, scale }, Data::Decimal(vals, s)) if *s == *scale => {
-                match (gids, valid) {
-                    (None, None) => {
-                        sum[0] += vals.iter().map(|&x| x as i128).sum::<i128>();
-                        cnt[0] += n as i64;
-                    }
-                    _ => {
-                        for (i, &x) in vals.iter().enumerate() {
-                            if ok(i) {
-                                let gi = g(i);
-                                sum[gi] += x as i128;
-                                cnt[gi] += 1;
-                            }
+            (
+                Acc::SumDec {
+                    sum, n: cnt, scale, ..
+                },
+                Data::Decimal(vals, s),
+            ) if *s == *scale => match (gids, valid) {
+                (None, None) => {
+                    sum[0] += vals.iter().map(|&x| x as i128).sum::<i128>();
+                    cnt[0] += n as i64;
+                }
+                _ => {
+                    for (i, &x) in vals.iter().enumerate() {
+                        if ok(i) {
+                            let gi = g(i);
+                            sum[gi] += x as i128;
+                            cnt[gi] += 1;
                         }
                     }
                 }
-            }
+            },
             (Acc::SumFloat { sum, n: cnt }, Data::Float(vals)) => {
                 // Sequential adds keep the row-mode summation order.
                 for (i, &x) in vals.iter().enumerate() {
@@ -431,14 +614,14 @@ impl Acc {
     fn update_value(&mut self, g: usize, v: &Value) -> Result<()> {
         match self {
             Acc::CountStar(c) | Acc::Count(c) => c[g] += 1,
-            Acc::SumInt { sum, n } => match v {
+            Acc::SumInt { sum, n, .. } => match v {
                 Value::Int(i) => {
                     sum[g] += *i as i128;
                     n[g] += 1;
                 }
                 _ => return Err(Error::internal("SUM over non-integer value")),
             },
-            Acc::SumDec { sum, n, scale } => {
+            Acc::SumDec { sum, n, scale, .. } => {
                 match v {
                     Value::Decimal(u, vs) => {
                         sum[g] += decimal::rescale(*u as i128, *vs, *scale).unwrap_or(*u as i128)
@@ -484,10 +667,25 @@ impl Acc {
                     a[t] += b[g];
                 }
             }
-            (Acc::SumInt { sum: a, n: an }, Acc::SumInt { sum: b, n: bn })
-            | (Acc::SumDec { sum: a, n: an, .. }, Acc::SumDec { sum: b, n: bn, .. }) => {
+            (
+                Acc::SumInt { sum: a, n: an, .. },
+                Acc::SumInt {
+                    sum: b,
+                    n: bn,
+                    wrap: bw,
+                },
+            )
+            | (
+                Acc::SumDec { sum: a, n: an, .. },
+                Acc::SumDec {
+                    sum: b,
+                    n: bn,
+                    wrap: bw,
+                    ..
+                },
+            ) => {
                 for (g, t) in pairs() {
-                    a[t] += b[g];
+                    a[t] += exact_sum(b, bw, g);
                     an[t] += bn[g];
                 }
             }
@@ -590,9 +788,11 @@ impl Acc {
         match self {
             Acc::States(s) => s[g].clone(),
             Acc::CountStar(c) | Acc::Count(c) => AggState::from_partial(call, Partial::Count(c[g])),
-            Acc::SumInt { sum, n } => AggState::from_partial(call, Partial::SumInt(sum[g], n[g])),
-            Acc::SumDec { sum, n, .. } => {
-                AggState::from_partial(call, Partial::SumDecimal(sum[g], n[g]))
+            Acc::SumInt { sum, n, wrap } => {
+                AggState::from_partial(call, Partial::SumInt(exact_sum(sum, wrap, g), n[g]))
+            }
+            Acc::SumDec { sum, n, wrap, .. } => {
+                AggState::from_partial(call, Partial::SumDecimal(exact_sum(sum, wrap, g), n[g]))
             }
             Acc::SumFloat { sum, n } => {
                 AggState::from_partial(call, Partial::SumFloat(sum[g], n[g]))
@@ -626,9 +826,15 @@ impl Acc {
             let v: Vec<bool> = n[..groups].iter().map(|&c| c > 0).collect();
             (!v.iter().all(|&x| x)).then_some(v)
         };
+        if let Acc::SumInt { sum, wrap, .. } | Acc::SumDec { sum, wrap, .. } = self {
+            for (s, w) in sum.iter_mut().zip(&wrap.sums) {
+                *s += *w as i128;
+            }
+            wrap.sums = Vec::new();
+        }
         Ok(match self {
             Acc::CountStar(c) | Acc::Count(c) => Vector::new(Data::Int(c[..groups].to_vec()), None),
-            Acc::SumInt { sum, n } if avg => Vector::new(
+            Acc::SumInt { sum, n, .. } if avg => Vector::new(
                 Data::Float(
                     (0..groups)
                         .map(|g| {
@@ -642,7 +848,7 @@ impl Acc {
                 ),
                 valid_of(n),
             ),
-            Acc::SumInt { sum, n } => {
+            Acc::SumInt { sum, n, .. } => {
                 let mut out = Vec::with_capacity(groups);
                 for g in 0..groups {
                     out.push(if n[g] > 0 {
@@ -653,7 +859,7 @@ impl Acc {
                 }
                 Vector::new(Data::Int(out), valid_of(n))
             }
-            Acc::SumDec { sum, n, scale } if avg => {
+            Acc::SumDec { sum, n, scale, .. } if avg => {
                 let div = decimal::pow10(*scale as u32) as f64;
                 Vector::new(
                     Data::Float(
@@ -670,7 +876,7 @@ impl Acc {
                     valid_of(n),
                 )
             }
-            Acc::SumDec { sum, n, scale } => {
+            Acc::SumDec { sum, n, scale, .. } => {
                 let mut out = Vec::with_capacity(groups);
                 for g in 0..groups {
                     if n[g] > 0 && !decimal::fits18(sum[g]) {
@@ -761,16 +967,28 @@ pub struct Aggregator {
     gids: Vec<u32>,
     /// Groups for which accumulator slots exist.
     groups: usize,
+    /// Native kernels (key hashing, sums, MIN/MAX, counts), if enabled.
+    native: Option<&'static Kernels>,
+    /// Validity bitmap scratch for the kernels.
+    bits: Vec<u8>,
 }
 
 impl Aggregator {
-    pub fn new(key_count: usize, calls: &[AggregateCall]) -> Aggregator {
+    /// An aggregator over `key_count` group keys; with `native`, keys are
+    /// hashed and typed accumulators updated with the native kernels.
+    pub fn new(
+        key_count: usize,
+        calls: &[AggregateCall],
+        native: Option<&'static Kernels>,
+    ) -> Aggregator {
         let mut a = Aggregator {
             calls: calls.to_vec(),
-            keys: KeyTable::new(key_count),
+            keys: KeyTable::with_native(key_count, native),
             accs: calls.iter().map(Acc::new).collect(),
             gids: Vec::new(),
             groups: 0,
+            native,
+            bits: Vec::new(),
         };
         if key_count == 0 {
             // A global aggregate has exactly one group, even without input.
@@ -808,7 +1026,7 @@ impl Aggregator {
         let gids = (!global).then_some(self.gids.as_slice());
         let mut retained = 0;
         for ((acc, call), arg) in self.accs.iter_mut().zip(&self.calls).zip(args) {
-            retained += acc.update(call, gids, arg.as_ref(), n)?;
+            retained += acc.update(call, gids, arg.as_ref(), n, self.native, &mut self.bits)?;
         }
         let per_group = 48 + 32 * (keys.len() + self.calls.len());
         Ok(retained + (self.groups - before) * per_group)
@@ -907,16 +1125,16 @@ mod tests {
         let (k1, a1) = batch(&[1, 2, 1], &[Some("b"), None, Some("a")]);
         let (k2, a2) = batch(&[2, 3, 1], &[Some("z"), Some("c"), Some("c")]);
         // One aggregator over both batches …
-        let mut whole = Aggregator::new(1, &calls);
+        let mut whole = Aggregator::new(1, &calls, None);
         whole.update(&k1, &a1, 3).unwrap();
         whole.update(&k2, &a2, 3).unwrap();
         let whole = whole.finish(&ctx).unwrap().into_rows();
         // … equals two partials merged (by partition).
-        let mut p1 = Aggregator::new(1, &calls);
+        let mut p1 = Aggregator::new(1, &calls, None);
         p1.update(&k1, &a1, 3).unwrap();
-        let mut p2 = Aggregator::new(1, &calls);
+        let mut p2 = Aggregator::new(1, &calls, None);
         p2.update(&k2, &a2, 3).unwrap();
-        let mut merged = Aggregator::new(1, &calls);
+        let mut merged = Aggregator::new(1, &calls, None);
         for p in [&p1, &p2] {
             for part in p.partition_groups(2) {
                 merged.merge_groups(p, &part).unwrap();
@@ -952,12 +1170,12 @@ mod tests {
             call(AggFunc::Avg, DataType::Int64),
         ];
         let v = Vector::from_values(vec![Value::Int(i64::MAX), Value::Int(1), Value::Int(-2)]);
-        let mut a = Aggregator::new(0, &calls);
+        let mut a = Aggregator::new(0, &calls, None);
         a.update(&[], &[Some(v.clone()), Some(v)], 3).unwrap();
         let out = a.finish(&ExecContext::default()).unwrap().into_rows();
         assert_eq!(out[0][0], Value::Int(i64::MAX - 1));
         let big = Vector::from_values(vec![Value::Int(i64::MAX), Value::Int(1)]);
-        let mut a = Aggregator::new(0, &calls[..1]);
+        let mut a = Aggregator::new(0, &calls[..1], None);
         a.update(&[], &[Some(big)], 2).unwrap();
         let err = a.finish(&ExecContext::default()).unwrap_err();
         assert_eq!(err.code, crate::error::ErrorCode::NumericOverflow);

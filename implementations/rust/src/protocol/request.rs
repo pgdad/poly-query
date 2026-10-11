@@ -306,7 +306,9 @@ fn parse_query_options(req: &Json) -> Result<QueryOptions> {
     if let Some(u) = optional_bool(opts, "use_indexes")? {
         o.use_indexes = u;
     }
-    optional_bool(opts, "native")?;
+    if let Some(n) = optional_bool(opts, "native")? {
+        o.native = n;
+    }
     o.query_id = optional_str(opts, "query_id")?.map(str::to_string);
     Ok(o)
 }

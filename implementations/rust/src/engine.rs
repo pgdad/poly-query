@@ -91,6 +91,8 @@ pub struct QueryOptions {
     pub morsel_rows: Option<usize>,
     /// Client-assigned id used for cancellation (HTTP).
     pub query_id: Option<String>,
+    /// `native: true`: use the native kernels when a library is loaded.
+    pub native: bool,
 }
 
 /// Query option `mode`.
@@ -116,6 +118,7 @@ impl Default for QueryOptions {
             threads: None,
             optimize: true,
             morsel_rows: None,
+            native: false,
             query_id: None,
         }
     }
@@ -165,8 +168,34 @@ pub struct Engine {
     writer: Mutex<()>,
 }
 
+/// Loads the library given with `--native-kernels`. A library that cannot
+/// be loaded is reported and ignored: queries then use the engine's own
+/// code paths (native kernels are optional, native-kernels.md).
+fn load_native_kernels(config: &Config) {
+    let Some(path) = &config.native_kernels else {
+        return;
+    };
+    let path_json = Json::String(path.display().to_string());
+    match crate::native::init(Some(path)) {
+        Ok(Some(k)) => crate::log::info(
+            "native kernels loaded",
+            vec![
+                ("path", path_json),
+                ("variant", Json::str(k.variant())),
+                ("available", Json::str(k.available_variants())),
+            ],
+        ),
+        Ok(None) => {}
+        Err(e) => crate::log::warn(
+            "native kernels unavailable; using built-in code paths",
+            vec![("path", path_json), ("error", Json::String(e))],
+        ),
+    }
+}
+
 impl Engine {
     pub fn new(config: Config) -> Self {
+        load_native_kernels(&config);
         Engine {
             config,
             catalog: RwLock::new(Arc::new(Catalog::default())),
@@ -443,7 +472,20 @@ impl Engine {
     /// Plan JSON with the execution model on the root node
     /// (`"execution": {"mode": …, "threads": …}`).
     fn annotated_plan(&self, plan: &PhysicalPlan, opts: &QueryOptions) -> Json {
-        let mut json = plan.to_json();
+        let native = crate::native::loaded().filter(|_| opts.native);
+        // Filters evaluated with the kernels: `"native": [conjuncts]`.
+        let annotate = |p: &PhysicalPlan| match (native, p) {
+            (Some(_), PhysicalPlan::Filter { input, predicate }) => match &**input {
+                PhysicalPlan::TableScan { table, columns, .. } => {
+                    crate::exec::native_filter::NativeFilter::analyze(predicate, table, columns)
+                        .map(|f| vec![("native", Json::uint(f.native_conjuncts() as u64))])
+                        .unwrap_or_default()
+                }
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        let mut json = plan.to_json_with(&annotate);
         let (mode, threads) = match opts.mode {
             ExecMode::Row => ("row", 1),
             _ => (
@@ -452,10 +494,14 @@ impl Engine {
             ),
         };
         if let Json::Object(fields) = &mut json {
-            let execution = Json::object(vec![
+            let mut props = vec![
                 ("mode", Json::str(mode)),
                 ("threads", Json::uint(threads as u64)),
-            ]);
+            ];
+            if let Some(k) = native {
+                props.push(("native", Json::str(k.variant())));
+            }
+            let execution = Json::object(props);
             // Before "children", so the node's own properties stay together.
             let at = fields.len().saturating_sub(1);
             fields.insert(at, ("execution".to_string(), execution));
@@ -512,6 +558,11 @@ impl Engine {
                     vectorized: opts.mode != ExecMode::Row,
                     threads: opts.threads.unwrap_or(self.config.threads).max(1),
                     morsel_rows: opts.morsel_rows.unwrap_or_else(default_morsel_rows),
+                    native: if opts.native {
+                        crate::native::loaded()
+                    } else {
+                        None
+                    },
                 };
                 let make_ctx = |exec: ExecOptions| {
                     let ctx = ExecContext::new(None, memory, self.config.test_functions)
@@ -1185,6 +1236,118 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `native: true` (with the library built by `make -C native-kernels`)
+    /// gives exactly the results and errors of the engine's own code.
+    #[test]
+    fn native_kernels_agree() {
+        let lib = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../native-kernels/build/x86_64/libpqkernels.so");
+        if !lib.exists() {
+            eprintln!("libpqkernels not built; skipping");
+            return;
+        }
+        let e = Engine::new(Config {
+            native_kernels: Some(lib),
+            ..Config::default()
+        });
+        assert!(crate::native::loaded().is_some());
+        let mut f = String::from("id,k,grp,amt,d,ts\n");
+        for i in 0..3000 {
+            let k = if i % 11 == 0 {
+                String::new()
+            } else {
+                (i % 37).to_string()
+            };
+            f.push_str(&format!(
+                "{i},{k},{},{}.{:02},2024-01-{:02},2024-01-01 {:02}:00:00\n",
+                i % 7,
+                i * 3 % 101,
+                i % 100,
+                1 + i % 28,
+                i % 24
+            ));
+        }
+        load(&e, "f", &f);
+        load(
+            &e,
+            "big",
+            "g,v\n1,9223372036854775807\n1,1\n1,-5\n2,9223372036854775807\n2,1\n3,-9223372036854775808\n3,4\n",
+        );
+        let queries = [
+            "SELECT id, amt FROM f WHERE k > 5 AND amt < 50.5",
+            "SELECT id FROM f WHERE k < 2.5 OR k IS NULL",
+            "SELECT id FROM f WHERE k = 2.5 OR id = 7",
+            "SELECT COUNT(*) FROM f WHERE k <> 2.5",
+            "SELECT id FROM f WHERE k BETWEEN 3 AND 9 AND grp >= 2 AND amt > 1",
+            "SELECT id FROM f WHERE k < grp AND k IS NOT NULL",
+            "SELECT id FROM f WHERE k IS NULL",
+            "SELECT id FROM f WHERE d >= DATE '2024-01-15' AND d < TIMESTAMP '2024-01-20 00:00:01'",
+            "SELECT id FROM f WHERE ts > DATE '2024-01-01' AND id > 2990",
+            "SELECT id FROM f WHERE k > 9223372036854775807 OR k < -9223372036854775807",
+            "SELECT id FROM f WHERE id < 2000 AND 100 / (grp - 3) < 0 LIMIT 3",
+            "SELECT id FROM f WHERE id < 2000 AND 100 / (grp - 3) < 0 LIMIT 4",
+            "SELECT grp, COUNT(*), SUM(k), AVG(k), MIN(k), MAX(amt), SUM(amt), COUNT(k) FROM f GROUP BY grp",
+            "SELECT SUM(k), MIN(ts), MAX(ts), MIN(d), COUNT(k), SUM(amt), MIN(amt) FROM f WHERE id > 10",
+            "SELECT DISTINCT k FROM f",
+            "SELECT g, SUM(v), AVG(v), COUNT(v) FROM big WHERE g <> 2 GROUP BY g",
+            "SELECT g, SUM(v) FROM big GROUP BY g",
+            "SELECT SUM(v) FROM big WHERE g = 1",
+            "SELECT SUM(v) FROM big",
+            "SELECT a.id, b.v FROM f a JOIN big b ON b.g = a.grp WHERE a.id < 30",
+        ];
+        for sql in queries {
+            for mode in [ExecMode::Row, ExecMode::Vectorized] {
+                for threads in [1, 4] {
+                    let opts = |native| QueryOptions {
+                        mode,
+                        threads: Some(threads),
+                        morsel_rows: Some(64),
+                        native,
+                        ..Default::default()
+                    };
+                    let run = |native| match e.query(sql, &opts(native)) {
+                        Ok(r) => {
+                            // Parallel FLOAT64 sums depend on the morsel
+                            // assignment (last bits), with or without kernels.
+                            let fmt = |v: &Value| match v {
+                                Value::Float(f) if threads > 1 => format!("{f:.9e}"),
+                                v => format!("{v:?}"),
+                            };
+                            let mut rows: Vec<String> = r
+                                .rows
+                                .iter()
+                                .map(|r| r.iter().map(fmt).collect::<Vec<_>>().join("|"))
+                                .collect();
+                            rows.sort();
+                            Ok(rows)
+                        }
+                        Err(err) => Err(err.code),
+                    };
+                    assert_eq!(run(true), run(false), "{sql} ({mode:?}, {threads} threads)");
+                }
+            }
+        }
+        let code = |sql: &str| {
+            e.query(
+                sql,
+                &QueryOptions {
+                    native: true,
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(
+            code("SELECT SUM(v) FROM big WHERE g = 1").unwrap().rows,
+            vec![vec![Value::Int(i64::MAX - 4)]]
+        );
+        assert_eq!(
+            code("SELECT g, SUM(v) FROM big GROUP BY g")
+                .unwrap_err()
+                .code,
+            ErrorCode::NumericOverflow
+        );
     }
 
     /// Consumers that stop early (LIMIT) stop the parallel workers; this

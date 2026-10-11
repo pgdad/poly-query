@@ -8,7 +8,10 @@ use super::ops::{
     AggregateOp, BoxedBatchOp, DistinctOp, FilterOp, IndexScanOp, LimitOp, ProjectOp, RowSource,
     ScanOp, SortOp, ValuesOp, full_ranges,
 };
+use std::sync::Arc;
+
 use crate::exec::ExecContext;
+use crate::exec::native_filter::{NativeFilter, NativeFilterScanOp};
 use crate::exec::operators::build_row;
 use crate::exec::parallel;
 use crate::planner::expr::{Expr, KeyDomain};
@@ -37,6 +40,33 @@ fn build_with(plan: PhysicalPlan, ctx: &ExecContext, parallel: bool) -> BoxedBat
     build_serial(plan, ctx, parallel)
 }
 
+/// A filter directly above a table scan, evaluated with the native kernels
+/// (`native: true` with a loaded library) when its predicate allows it.
+fn native_filter_scan(
+    input: &PhysicalPlan,
+    predicate: &Expr,
+    ctx: &ExecContext,
+) -> Option<BoxedBatchOp> {
+    let kernels = ctx.exec.native?;
+    let PhysicalPlan::TableScan {
+        table,
+        columns,
+        groups,
+        ..
+    } = input
+    else {
+        return None;
+    };
+    let filter = NativeFilter::analyze(predicate, table, columns)?;
+    Some(Box::new(NativeFilterScanOp::new(
+        table.clone(),
+        columns.clone(),
+        full_ranges(table, groups),
+        Arc::new(filter),
+        kernels,
+    )))
+}
+
 fn build_serial(plan: PhysicalPlan, ctx: &ExecContext, parallel: bool) -> BoxedBatchOp {
     match plan {
         PhysicalPlan::Values => Box::new(ValuesOp { done: false }),
@@ -63,10 +93,15 @@ fn build_serial(plan: PhysicalPlan, ctx: &ExecContext, parallel: bool) -> BoxedB
             ids: None,
             pos: 0,
         }),
-        PhysicalPlan::Filter { input, predicate } => Box::new(FilterOp {
-            input: build_with(*input, ctx, parallel),
-            predicate,
-        }),
+        PhysicalPlan::Filter { input, predicate } => {
+            if let Some(op) = native_filter_scan(&input, &predicate, ctx) {
+                return op;
+            }
+            Box::new(FilterOp {
+                input: build_with(*input, ctx, parallel),
+                predicate,
+            })
+        }
         PhysicalPlan::Project { input, exprs, .. } => Box::new(ProjectOp {
             input: build_with(*input, ctx, parallel),
             exprs,
