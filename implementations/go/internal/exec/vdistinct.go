@@ -2,6 +2,7 @@ package exec
 
 import (
 	"math"
+	"math/bits"
 
 	"polyquery/internal/plan"
 	"polyquery/internal/types"
@@ -19,6 +20,12 @@ type distinctState struct {
 
 	nums pairSet                  // vInt, vFloat (bits of the value, -0 folded)
 	strs map[distinctStr]struct{} // vStr
+
+	// For aggregations without keys over an int-class argument with a
+	// known small value range: a bitmap of the values seen in group 0
+	// (values outside the range, if any, use nums).
+	bitLo int64
+	bits  []uint64
 
 	// Per group: singly linked list of its distinct values (entry index +
 	// 1; 0 = none).
@@ -87,7 +94,28 @@ func (s *distinctState) numKey(v *Vec, i int) int64 {
 	return v.I[i]
 }
 
+// setBitmap tracks the values lo..hi of group 0 in a bitmap.
+func (s *distinctState) setBitmap(lo, hi int64) {
+	if s.bits == nil && s.cls == vInt && len(s.next) == 0 {
+		s.bitLo, s.bits = lo, make([]uint64, (hi-lo)/64+1)
+	}
+}
+
+// inBitmap returns the bit index of value k of group g, if bitmapped.
+func (s *distinctState) inBitmap(g int32, k int64) (uint64, bool) {
+	i := uint64(k - s.bitLo)
+	return i, g == 0 && i < uint64(len(s.bits))*64
+}
+
 func (s *distinctState) addNum(g int32, k int64) bool {
+	if i, ok := s.inBitmap(g, k); s.bits != nil && ok {
+		w, m := &s.bits[i>>6], uint64(1)<<(i&63)
+		if *w&m != 0 {
+			return false
+		}
+		*w |= m
+		return true
+	}
 	if !s.nums.add(g, k) {
 		return false
 	}
@@ -136,6 +164,20 @@ func (s *distinctState) update(gids []int32, n int, sel []int32, v *Vec) {
 func (s *distinctState) merge(g int32, src aggState, sg int32) {
 	o := src.(*distinctState)
 	s.g1[0] = g
+	if o.bits != nil && sg == 0 {
+		// Values of the source bitmap, in value order (int-class values
+		// aggregate exactly in any order).
+		for w, word := range o.bits {
+			for word != 0 {
+				b := bits.TrailingZeros64(word)
+				word &= word - 1
+				if k := o.bitLo + int64(w*64+b); s.addNum(g, k) {
+					s.one.I = append(s.one.I[:0], k)
+					s.inner.update(s.g1[:], 1, nil, &s.one)
+				}
+			}
+		}
+	}
 	for e := o.head[sg]; e != 0; e = o.next[e-1] {
 		switch s.cls {
 		case vStr:

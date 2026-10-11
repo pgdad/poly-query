@@ -150,6 +150,10 @@ func TestExecutionModesAgree(t *testing.T) {
 		"WITH x AS (SELECT grp, SUM(amount) AS s FROM t GROUP BY grp) SELECT COUNT(*) FROM x WHERE s > (SELECT AVG(s) FROM x)",
 		"SELECT grp, COUNT(*) AS n FROM t GROUP BY grp ORDER BY n DESC, grp LIMIT 4",
 		"SELECT id % 50, cat, COUNT(*) FROM t GROUP BY id % 50, cat ORDER BY 1, 2",
+		// Global DISTINCT aggregates over columns with known ranges.
+		"SELECT COUNT(DISTINCT id), SUM(DISTINCT id), AVG(DISTINCT amount), COUNT(DISTINCT day), COUNT(DISTINCT flag) FROM t",
+		"SELECT COUNT(DISTINCT id), SUM(DISTINCT amount) FROM t WHERE id % 3 = 0 OR grp IS NULL",
+		"SELECT COUNT(DISTINCT id) FROM t WHERE id < 0",
 	}
 	for _, q := range queries {
 		want := canonical(e, q, modeConfig{"row", "hash", 1, true})

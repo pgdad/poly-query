@@ -567,6 +567,13 @@ const maxReserve = 1 << 20
 // prepare sizes an empty table for about n groups of the aggregation x
 // (nil: unknown), with a directly indexed key range if x has one.
 func (t *aggTable) prepare(x *physical.HashAggregate, n int) {
+	if x != nil && x.ArgRanges != nil && len(t.keyTypes) == 0 {
+		for i, st := range t.states {
+			if ds, ok := st.(*distinctState); ok && x.ArgRanges[i].OK {
+				ds.setBitmap(x.ArgRanges[i].Lo, x.ArgRanges[i].Hi)
+			}
+		}
+	}
 	if x != nil && x.KeyRange && len(t.keys) == 0 && len(t.keyClasses) == 1 && t.keyClasses[0] == vInt &&
 		t.nmap == nil && t.intMap.dense == nil {
 		t.intMap.setWindow(x.KeyLo, int(x.KeyHi-x.KeyLo+1))

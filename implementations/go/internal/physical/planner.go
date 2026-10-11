@@ -149,6 +149,7 @@ func (p *planner) node(n plan.Node, req idset) (Node, error) {
 		agg := &HashAggregate{Input: in, Keys: x.Keys, KeyCols: x.KeyCols, Aggs: x.Aggs, AggCols: x.AggCols,
 			EstGroups: p.estimateGroups(x)}
 		agg.KeyRange, agg.KeyLo, agg.KeyHi = keyRange(x, agg.EstGroups)
+		agg.ArgRanges = distinctArgRanges(x)
 		return agg, nil
 	case *plan.Join:
 		return p.join(x, req)
@@ -493,17 +494,36 @@ func orderFreeAggregate(n Node, keys []plan.SortKey) *HashAggregate {
 	}
 }
 
-// maxDenseKeys bounds the key range of directly indexed group tables.
-const maxDenseKeys = 1 << 22
+// maxBitmapValues bounds the value range of DISTINCT bitmaps.
+const maxBitmapValues = 1 << 23
 
-// keyRange returns the value range of a single int-class grouping key
-// that is a base table column, if the range is small: at most
-// maxDenseKeys values and not much sparser than the estimated groups.
-func keyRange(x *plan.Aggregate, estGroups int64) (bool, int64, int64) {
-	if len(x.Keys) != 1 || estGroups <= 0 {
-		return false, 0, 0
+// distinctArgRanges returns the value ranges of the int-class base column
+// arguments of DISTINCT aggregates of an aggregation without keys.
+func distinctArgRanges(x *plan.Aggregate) []ValueRange {
+	if len(x.Keys) != 0 {
+		return nil
 	}
-	ref, ok := x.Keys[0].(*plan.ColumnRef)
+	var out []ValueRange
+	for i, a := range x.Aggs {
+		if !a.Distinct || a.Arg == nil {
+			continue
+		}
+		ok, lo, hi := intColumnRange(x.Input, a.Arg)
+		if !ok || float64(hi)-float64(lo)+1 > maxBitmapValues {
+			continue
+		}
+		if out == nil {
+			out = make([]ValueRange, len(x.Aggs))
+		}
+		out[i] = ValueRange{OK: true, Lo: lo, Hi: hi}
+	}
+	return out
+}
+
+// intColumnRange returns the value range of e if it is an int-class base
+// table column (narrow DECIMALs: unscaled values).
+func intColumnRange(input plan.Node, e plan.Expr) (bool, int64, int64) {
+	ref, ok := e.(*plan.ColumnRef)
 	if !ok {
 		return false, 0, 0
 	}
@@ -516,11 +536,27 @@ func keyRange(x *plan.Aggregate, estGroups int64) (bool, int64, int64) {
 	default:
 		return false, 0, 0
 	}
-	st, ok := columnStats(x.Input, ref.ID)
+	st, ok := columnStats(input, ref.ID)
 	if !ok || st.Min.Null || st.Max.Null {
 		return false, 0, 0
 	}
-	lo, hi := st.Min.I, st.Max.I
+	return true, st.Min.I, st.Max.I
+}
+
+// maxDenseKeys bounds the key range of directly indexed group tables.
+const maxDenseKeys = 1 << 22
+
+// keyRange returns the value range of a single int-class grouping key
+// that is a base table column, if the range is small: at most
+// maxDenseKeys values and not much sparser than the estimated groups.
+func keyRange(x *plan.Aggregate, estGroups int64) (bool, int64, int64) {
+	if len(x.Keys) != 1 || estGroups <= 0 {
+		return false, 0, 0
+	}
+	ok, lo, hi := intColumnRange(x.Input, x.Keys[0])
+	if !ok {
+		return false, 0, 0
+	}
 	span := float64(hi) - float64(lo) + 1
 	if span > maxDenseKeys || span > 4*float64(estGroups)+4096 {
 		return false, 0, 0

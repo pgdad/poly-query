@@ -87,6 +87,16 @@ type HashAggregate struct {
 	// matter: a sort above it orders by all grouping keys (otherwise
 	// groups come out in order of first appearance).
 	AnyOrder bool
+	// ArgRanges (parallel to Aggs; nil if none applies) gives the value
+	// range of int-class DISTINCT arguments of aggregations without
+	// grouping keys, when small enough for a bitmap of seen values.
+	ArgRanges []ValueRange
+}
+
+// ValueRange is a range [Lo, Hi] of int-class values (OK: known).
+type ValueRange struct {
+	OK     bool
+	Lo, Hi int64
 }
 
 // HashJoin is an equi-join: rows match when LeftKeys equal RightKeys (NULL
