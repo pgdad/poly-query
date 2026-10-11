@@ -37,7 +37,8 @@ bin/polyquery session --data-dir DIR
 None besides glibc (`ENGINE.json`: `"libraries": []`). From glibc the engine
 uses: malloc/realloc/free, memcpy/memcmp/memset/strlen/strcmp, strtod and
 snprintf (float text conversion), qsort/qsort_r, setjmp/longjmp, getline,
-open/read/fstat/close, clock_gettime, usleep.
+open/read/write/fstat/close/fsync/rename/unlink/mmap/munmap/getpid,
+clock_gettime, usleep.
 
 ## Design overview
 
@@ -82,6 +83,28 @@ Key decisions:
   row's null bitmap). Tables are built column-wise by ingestion / the PQCF
   reader and then converted (`table_finalize`). The evaluator's column access
   (`ev_col`) and the generic accessor `tbl_get` handle every representation.
+* **PQCF v1 (`pqcf.S`).** `save` builds the whole file in memory (8-byte
+  aligned chunks, metadata JSON with per-chunk min/max for every type,
+  CRC-32 via the ARMv8 `crc32` instructions with a table fallback) and writes
+  it atomically: temporary file `.<name>.tmp-<pid>-<n>` in the target's
+  directory, `fsync`, `rename`, `fsync` of the directory; on failure the
+  temporary file is removed. Encodings per chunk: forced `plain` / `dict`
+  (STRING) / `rle` (BOOLEAN, INT64, DECIMAL, DATE, TIMESTAMP), or `auto`: RLE
+  when runs < n/4, DICT when distinct < n/2, else PLAIN. Default row group
+  size 65536 (`row_group_size` option). `open` validates everything at open
+  time — header, footer, metadata CRC, JSON structure and consistency rules,
+  every chunk CRC, exact decoded sizes, null counts, value validity (UTF-8,
+  decimal precision, date/timestamp ranges, finite floats, RLE booleans,
+  dictionary codes) — then decodes into a plain columnar table which is
+  finalized like a loaded one (`layout` option honoured). Index entries of the
+  metadata are recreated (names checked for conflicts before anything
+  changes), and the row groups' min/max/null statistics are kept for
+  row-group skipping. **mmap:** with `"mmap":true` the file is memory-mapped
+  (`mmap(PROT_READ, MAP_PRIVATE)`) instead of `read()` into a buffer; it is
+  decoded eagerly and unmapped before `open` returns (no lazy decoding).
+  Error precedence: header magic, version/flags (`0` ⇒ CORRUPT, `>1` or
+  flags ≠ 0 ⇒ VERSION_UNSUPPORTED), footer, metadata CRC, JSON, structure;
+  an unknown encoding name ⇒ VERSION_UNSUPPORTED.
 * **Statistics.** `table_stats` computes per column null count, min, max and
   the exact distinct count (hash set) on first use and caches them (tables
   are immutable).
@@ -186,6 +209,9 @@ Key decisions:
 
 * Correlated subqueries are re-executed per outer row (no decorrelation).
 * Single-threaded execution; no HTTP server.
+* Temporary files left behind by a crash during `save` are not cleaned up by
+  later saves (they are ignored by readers).
+* PQCF format_version 2 (the DECIMAL(38) change) is not supported.
 * Ingestion builds a plain columnar table first; converting it (row layout,
   dictionary encoding) rebuilds it into a fresh arena, so loading needs
   transient memory for both representations.
