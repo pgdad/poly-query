@@ -80,7 +80,7 @@
         null-digits? (and n (nil? digits))
         d (long (or digits 0))
         type (case (t/kind xt)
-               :decimal (t/decimal 18 (max 0 (min d (t/scale xt))))
+               :decimal (t/decimal (t/result-precision xt) (max 0 (min d (t/scale xt))))
                xt)]
     (call "ROUND" type [x] :digits d :null-digits? (boolean null-digits?))))
 
@@ -92,7 +92,7 @@
       "ABS" (call u (same-numeric-type u x e) args)
       "ROUND" (bind-round args e eval-constant)
       ("FLOOR" "CEIL") (let [xt (same-numeric-type u x e)]
-                         (call u (if (t/decimal-type? xt) (t/decimal 18 0) xt) args))
+                         (call u (if (t/decimal-type? xt) (t/decimal (t/result-precision xt) 0) xt) args))
       "SQRT" (do (check-type! u args t/numeric? "a numeric argument" e) (call u :float64 args))
       "POWER" (do (check-type! u args t/numeric? "numeric arguments" e) (call u :float64 args))
       "MOD" (do (check-type! u args int64? "INT64 arguments" e) (call u :int64 args))

@@ -2,7 +2,7 @@
   "SQL tokenizer (spec/sql/grammar.md §1).
 
   Tokens are maps {:type :text :line :col} where :type is one of
-  :keyword (text upper-cased), :ident (unquoted identifier), :qident (quoted
+  :keyword (text upper-cased, original spelling in :raw), :ident (unquoted identifier), :qident (quoted
   identifier, text unescaped), :number, :string (text unescaped), :op
   (operator/punctuation) or :eof."
   (:require [polyquery.errors :as err]
@@ -49,9 +49,13 @@
                     [(inc li) (inc (- p (long (nth line-starts li))))]))
         fail (fn [msg p] (let [[l c] (pos->lc p)] (parse-error! msg l c)))
         ch (fn [^long i] (when (< i n) (.charAt sql i)))
-        emit (fn [type text start]
-               (let [[l c] (pos->lc start)]
-                 (conj! tokens {:type type :text text :line l :col c})))]
+        emit (fn
+               ([type text start]
+                (let [[l c] (pos->lc start)]
+                  (conj! tokens {:type type :text text :line l :col c})))
+               ([type text start raw]
+                (let [[l c] (pos->lc start)]
+                  (conj! tokens {:type type :text text :line l :col c :raw raw}))))]
     (loop [i 0]
       (if (>= i n)
         (let [[l c] (pos->lc n)]
@@ -73,7 +77,7 @@
                   word (subs sql i j)
                   up (text/ascii-upper word)]
               (if (reserved up)
-                (emit :keyword up i)
+                (emit :keyword up i word)
                 (emit :ident word i))
               (recur (long j)))
 

@@ -60,12 +60,20 @@
       "/" (fn [a b] (let [y (double (dr b))]
                       (if (== y 0.0) (div-zero!) (finite (/ (double (dl a)) y))))))))
 
-(defn- decimal-arith [op lt rt]
+(defn- decimal-arith
+  "DECIMAL + - *: long arithmetic for narrow results, BigInteger arithmetic
+  for wide ones (the result type is wide iff an operand is wide)."
+  [op lt rt type]
   (let [sl (t/scale lt) sr (t/scale rt)]
-    (case op
-      "+" (fn [a b] (v/dec-add (long a) sl (long b) sr))
-      "-" (fn [a b] (v/dec-add (long a) sl (- (long b)) sr))
-      "*" (fn [a b] (v/dec-mul (long a) (long b))))))
+    (if (t/wide? type)
+      (case op
+        "+" (fn [a b] (v/wide-add a sl b sr))
+        "-" (fn [a b] (v/wide-sub a sl b sr))
+        "*" (fn [a b] (v/wide-mul a b)))
+      (case op
+        "+" (fn [a b] (v/dec-add (long a) sl (long b) sr))
+        "-" (fn [a b] (v/dec-add (long a) sl (- (long b)) sr))
+        "*" (fn [a b] (v/dec-mul (long a) (long b)))))))
 
 (defn- compile-arith [c e]
   (let [{:keys [op type left right]} e
@@ -74,7 +82,7 @@
             :null nil
             :int64 (int-arith op)
             :float64 (float-arith op lt rt)
-            :decimal (decimal-arith op lt rt))]
+            :decimal (decimal-arith op lt rt type))]
     (if f
       (binary-op (compile-expr c left) (compile-expr c right) f)
       (constantly nil))))
@@ -84,7 +92,7 @@
     (case (t/kind (:type e))
       :int64 (fn [row] (when-let [x (af row)]
                          (if (= (long x) Long/MIN_VALUE) (overflow!) (- (long x)))))
-      :decimal (fn [row] (when-let [x (af row)] (- (long x))))
+      :decimal (fn [row] (when-let [x (af row)] (v/dec-negate x)))
       :float64 (fn [row] (when-let [x (af row)] (- (double x))))
       :null (constantly nil))))
 

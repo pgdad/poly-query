@@ -102,7 +102,8 @@
       (and (= ck :timestamp) (= fk :timestamp)) 1
       (and (= ck :timestamp) (= fk :date)) v/micros-per-day
       (and (= ck :date) (= fk :date)) 1
-      (and (= ck :decimal) (#{:int64 :decimal} fk)) (v/dec-rescale-up 1 (- (t/scale ct) (t/scale from)))
+      (and (= ck :decimal) (#{:int64 :decimal} fk) (not (t/wide? ct)))
+      (v/dec-rescale-up 1 (- (t/scale ct) (t/scale from)))
       :else nil)))
 
 (defn- scaled

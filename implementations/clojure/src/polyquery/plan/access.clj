@@ -142,7 +142,8 @@
   "True when values compared in type k have the same hash keys as the
   column's own values (so a HASH index can be probed)."
   [col-type k]
-  (and (= (t/kind col-type) (t/kind k)) (= (t/scale col-type) (t/scale k))))
+  (and (= (t/kind col-type) (t/kind k)) (= (t/scale col-type) (t/scale k))
+       (= (t/wide? col-type) (t/wide? k))))
 
 (defn- bound [pv inclusive?]
   (assoc (select-keys pv [:value :type :cmp-type]) :inclusive? inclusive?))

@@ -30,7 +30,8 @@
             [polyquery.sql.functions :as functions]
             [polyquery.types :as t]
             [polyquery.util.text :as text]
-            [polyquery.values :as v]))
+            [polyquery.values :as v])
+  (:import (java.math BigInteger)))
 
 (set! *warn-on-reflection* true)
 
@@ -95,8 +96,8 @@
         (if (> p t/max-decimal-precision)
           {:node :literal :type :float64 :value (Double/parseDouble text)}
           (let [digits (str ip fp)
-                u (if (empty? digits) 0 (Long/parseLong digits))]
-            {:node :literal :type (t/decimal p s) :value (if neg? (- u) u)})))
+                u (if (empty? digits) BigInteger/ZERO (BigInteger. digits))]
+            {:node :literal :type (t/decimal p s) :value (v/dec-value (if neg? (.negate u) u) p)})))
 
       :else
       (try {:node :literal :type :int64 :value (Long/parseLong text)}
@@ -140,11 +141,13 @@
           (or (= kl :float64) (= kr :float64)) (if (= op "%") (bad) :float64)
           (and (= kl :int64) (= kr :int64)) :int64
           :else (case op
-                  ("+" "-") (t/decimal 18 (max (t/scale lt') (t/scale rt')))
-                  "*" (let [s (+ (t/scale lt') (t/scale rt'))]
-                        (when (> s t/max-decimal-precision)
-                          (type-error! (str "DECIMAL multiplication result scale " s " exceeds 18") pos))
-                        (t/decimal 18 s))
+                  ;; result precision W (decimal38.md §2)
+                  ("+" "-") (t/decimal (t/result-precision lt' rt') (max (t/scale lt') (t/scale rt')))
+                  "*" (let [s (+ (t/scale lt') (t/scale rt'))
+                            w (t/result-precision lt' rt')]
+                        (when (> s w)
+                          (type-error! (str "DECIMAL multiplication result scale " s " exceeds " w) pos))
+                        (t/decimal w s))
                   "/" :float64
                   "%" (bad)))))))
 
@@ -190,7 +193,7 @@
                              (type-error! (str "SUM requires a numeric argument, got " (t/describe at)) pos))
                            {:fn :sum :arg arg
                             :type (case (t/kind at)
-                                    :decimal (t/decimal 18 (t/scale at))
+                                    :decimal (t/decimal (t/result-precision at) (t/scale at))
                                     :null :null
                                     at)})
                  "AVG" (do (when-not (or (= at :null) (t/numeric? at))

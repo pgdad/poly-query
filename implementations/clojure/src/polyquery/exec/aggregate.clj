@@ -1,7 +1,8 @@
 (ns polyquery.exec.aggregate
   "Aggregate accumulators (spec/sql/functions.md §2). Integer and DECIMAL
   sums are exact: they accumulate in a long and switch to BigInteger on
-  overflow, so only the final result is range-checked."
+  overflow (wide DECIMAL sums accumulate in a BigInteger), so only the final
+  result is range-checked."
   (:require [polyquery.errors :as err]
             [polyquery.types :as t]
             [polyquery.values :as v])
@@ -73,6 +74,26 @@
 
 (defn- exact-sum ^ExactSum [] (ExactSum. 0 nil 0))
 
+(deftype BigSum [^:unsynchronized-mutable ^BigInteger sum
+                 ^:unsynchronized-mutable ^long n]
+  Accumulator
+  (add [_ x]
+    (when (some? x)
+      (set! n (inc n))
+      (set! sum (.add sum (v/->big x))))
+    nil)
+  (result [_] (when (pos? n) sum))
+  (state [_] (object-array [sum n]))
+  (merge [_ other]
+    (let [^objects st (.state ^Accumulator other)]
+      (set! sum (.add sum (v/->big (aget st 0))))
+      (set! n (+ n (long (aget st 1)))))
+    nil)
+  Counted
+  (valueCount [_] n))
+
+(defn- big-sum ^BigSum [] (BigSum. BigInteger/ZERO 0))
+
 (defn- sum-count ^long [^Counted acc] (.valueCount acc))
 
 (deftype FloatSum [^:unsynchronized-mutable ^double sum ^:unsynchronized-mutable ^long n avg?]
@@ -135,6 +156,13 @@
     (let [l (int-sum-result x)]
       (v/check-dec18 (long l) "SUM"))))
 
+(defn wide-sum-result
+  "Final wide DECIMAL SUM (DECIMAL(38,s)) of an exact unscaled sum (nil for
+  no values)."
+  [x]
+  (when (some? x)
+    (v/check-dec38 (v/->big x) "SUM")))
+
 (defn exact-avg-result
   "AVG of INT64/DECIMAL values from their exact unscaled sum s (Long or
   BigInteger, nil for no values) and count."
@@ -144,7 +172,7 @@
                           (int scale))]
       (.doubleValue (.divide bd (BigDecimal/valueOf (long cnt)) MathContext/DECIMAL128)))))
 
-(defn- exact-avg [^ExactSum acc ^long scale]
+(defn- exact-avg [^Accumulator acc ^long scale]
   (exact-avg-result (.result acc) (sum-count acc) scale))
 
 (defn accumulator-factory
@@ -156,12 +184,15 @@
                :count #(CountValues. 0)
                :sum (case (t/kind at)
                       :int64 #(Wrapped. (exact-sum) (fn [^Accumulator a] (int-sum-result (.result a))))
-                      :decimal #(Wrapped. (exact-sum) (fn [^Accumulator a] (dec-sum-result (.result a))))
+                      :decimal (if (t/wide? at)
+                                 #(Wrapped. (big-sum) (fn [^Accumulator a] (wide-sum-result (.result a))))
+                                 #(Wrapped. (exact-sum) (fn [^Accumulator a] (dec-sum-result (.result a)))))
                       :float64 #(FloatSum. 0.0 0 false)
                       :null #(CountStar. 0))
                :avg (case (t/kind at)
-                      (:int64 :decimal) (let [s (t/scale at)]
-                                          #(Wrapped. (exact-sum) (fn [a] (exact-avg a s))))
+                      (:int64 :decimal) (let [s (t/scale at)
+                                              make (if (t/wide? at) big-sum exact-sum)]
+                                          #(Wrapped. (make) (fn [a] (exact-avg a s))))
                       :float64 #(FloatSum. 0.0 0 true)
                       :null #(CountStar. 0))
                (:min :max) (let [cmp (v/value-comparator at)

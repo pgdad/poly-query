@@ -18,8 +18,9 @@
   the JIT can unroll and auto-vectorize them. Comparisons against
   dictionary-encoded strings are evaluated once per dictionary entry.
   Expressions without a vectorized implementation (subqueries, correlated
-  references, functions with failing arguments) fall back to the row
-  closure, applied per selected row."
+  references, functions with failing arguments, arithmetic and comparisons
+  over wide DECIMAL values) fall back to the row closure, applied per
+  selected row. Wide DECIMAL values (BigIntegers) travel in ObjVecs."
   (:require [polyquery.errors :as err]
             [polyquery.exec.batch :as b :refer [each-sel]]
             [polyquery.exec.expr :as expr]
@@ -525,6 +526,7 @@
               (compare-long-const op (.-v x) c (.-nulls x) sel n)))))
 
       (and (= :decimal k) (= :decimal (t/kind xt)) (<= (t/scale ct) (t/scale xt))
+           (not-any? t/wide? [cmp-type xt ct])
            (instance? Long (v/dec-rescale-up (long c) (- (t/scale xt) (t/scale ct)))))
       ;; constant rescaled to the column's scale
       (let [c (long (v/dec-rescale-up (long c) (- (t/scale xt) (t/scale ct))))]
@@ -767,7 +769,7 @@
             (each-sel [i sel n] (aset out i (* (aget src i) v/micros-per-day)))
             (LongVec. out ^booleans (.-nulls x)))))
 
-      (and (= :int64 (t/kind from)) (= :decimal (t/kind to)))
+      (and (= :int64 (t/kind from)) (= :decimal (t/kind to)) (not (t/wide? to)))
       (let [p (t/precision to)
             f (long (v/dec-rescale-up 1 (t/scale to)))
             bound (long (v/dec-rescale-up 1 p))]
@@ -894,6 +896,13 @@
                   (when (some? c) (aset out i (str a c)))))))
           (ObjVec. out))))))
 
+(defn- wide-operands?
+  "True when arithmetic or a comparison node e computes on wide DECIMAL
+  values, which the primitive kernels do not handle."
+  [e]
+  (boolean (some t/wide? (concat [(:type e) (:cmp-type e) (:low-type e) (:high-type e)]
+                                 (map :type (bound/children e))))))
+
 (defn compile-kernel
   "Compiles bound expression e into a Kernel. env is the row compiler's
   environment (polyquery.exec.expr)."
@@ -902,14 +911,18 @@
     :literal (literal-kernel e)
     ::vec-literal (literal-kernel e)
     :column (column-kernel e)
-    :arith (arith-kernel env e)
-    :neg (neg-kernel env e)
-    :compare (compare-kernel env e)
+    (:arith :neg :compare :between)
+    (if (wide-operands? e)
+      (row-kernel env e)
+      (case (:node e)
+        :arith (arith-kernel env e)
+        :neg (neg-kernel env e)
+        :compare (compare-kernel env e)
+        :between (between-kernel env e)))
     :and (logic-kernel env e true)
     :or (logic-kernel env e false)
     :not (not-kernel env e)
     :is-null (is-null-kernel env e)
-    :between (between-kernel env e)
     :in-list (in-list-kernel env e)
     :like (like-kernel env e)
     :cast (cast-kernel env e)

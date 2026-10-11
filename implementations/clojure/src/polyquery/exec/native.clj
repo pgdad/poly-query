@@ -73,7 +73,9 @@
       (and (#{:int64 :date :timestamp} k) (= (t/kind ct) k) (= (t/kind xt) k))
       (long c)
 
-      (and (= :decimal k) (= :decimal (t/kind xt)) (<= (t/scale ct) (t/scale xt)))
+      ;; wide values never reach the kernels (their ABI is 64-bit only)
+      (and (= :decimal k) (= :decimal (t/kind xt)) (<= (t/scale ct) (t/scale xt))
+           (not-any? t/wide? [cmp-type xt ct]))
       (let [r (v/dec-rescale-up (long c) (- (t/scale xt) (t/scale ct)))]
         (when (instance? Long r) r))
 
@@ -182,8 +184,10 @@
 
       (and (column? left) (column? right))
       (let [k (t/kind cmp-type) lt (:type left) rt (:type right)]
-        (when (or (and (#{:int64 :date :timestamp} k) (= k (t/kind lt) (t/kind rt)))
-                  (and (= :decimal k (t/kind lt) (t/kind rt)) (= (t/scale lt) (t/scale rt))))
+        (when (and
+               (long-kind? lt) (long-kind? rt)
+               (or (and (#{:int64 :date :timestamp} k) (= k (t/kind lt) (t/kind rt)))
+                  (and (= :decimal k (t/kind lt) (t/kind rt)) (= (t/scale lt) (t/scale rt)))))
           (compare-columns-leaf lib (:index left) lt (:index right) rt (op-codes op) alloc!)))
 
       :else nil)))
@@ -252,7 +256,8 @@
     :in-list (in-list-pred lib e negated? alloc!)
 
     :is-null
-    (when (column? (:arg e))
+    ;; wide DECIMAL columns are never handed to the kernels
+    (when (and (column? (:arg e)) (not (t/wide? (:type (:arg e)))))
       (is-null-leaf lib (:index (:arg e)) (:type (:arg e))
                     ;; IS NULL, or NOT (… IS NOT NULL)
                     (= (boolean (:not? e)) (boolean negated?)) alloc!))

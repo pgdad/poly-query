@@ -278,11 +278,25 @@
 ;; ---------------------------------------------------------------------------
 ;; Queries
 
+(def ^:private future-join-words
+  "Keywords reserved only for future join syntax (grammar.md §1). After an
+  explicit AS they cannot start any construct, so they are accepted as alias
+  names there (e.g. `SELECT x AS full`)."
+  #{"FULL" "RIGHT"})
+
+(defn- expect-alias!
+  "The alias name following an explicit AS."
+  [st]
+  (let [tok (peek-tok st)]
+    (if (and (= :keyword (:type tok)) (future-join-words (:text tok)))
+      (do (advance! st) (:raw tok))
+      (expect-ident! st "alias"))))
+
 (defn- parse-alias
   "Optional [AS] alias."
   [st]
   (if (accept-kw! st "AS")
-    (expect-ident! st "alias")
+    (expect-alias! st)
     (when (ident-token? (peek-tok st))
       (:text (advance! st)))))
 

@@ -32,7 +32,7 @@
    "phase4" "http.streaming"
    "phase5" "exec.row" "exec.vectorized" "exec.parallel" "join.hash" "join.merge" "join.nested_loop"
    "native.kernels"
-   "change.union_all"])
+   "change.union_all" "change.decimal38"])
 
 (defn version-info []
   {"ok" true

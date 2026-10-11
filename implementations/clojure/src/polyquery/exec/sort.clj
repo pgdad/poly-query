@@ -25,14 +25,14 @@
 ;; ---------------------------------------------------------------------------
 ;; Key extraction
 
-(defn- long-kind? [type] (contains? #{:int64 :decimal :date :timestamp} (t/kind type)))
+(defn- long-kind? [type] (t/long-repr? type))
 
 (defn- extract
   "Typed column of sort key `index` over the rows: [values nulls]."
   [^objects rows ^long n ^long index type]
   (let [nulls (boolean-array n)]
-    (case (t/kind type)
-      (:int64 :decimal :date :timestamp)
+    (case (if (long-kind? type) :long (t/kind type))
+      :long
       (let [vals (long-array n)]
         (dotimes [r n]
           (let [x (aget ^objects (aget rows r) index)]
@@ -59,8 +59,8 @@
         nulls-cmp (fn ^long [^long a ^long b]
                     (let [x (aget nulls a) y (aget nulls b)]
                       (cond (and x y) 0 x null-first y (- null-first) :else 2)))]
-    (case (t/kind type)
-      (:int64 :decimal :date :timestamp)
+    (case (if (long-kind? type) :long (t/kind type))
+      :long
       (let [^longs vals vals]
         (reify IndexComparator
           (compareIdx [_ a b]
