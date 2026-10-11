@@ -5,7 +5,8 @@
   phase 2 186/186 incl. the optional `sql.correlated_subquery` file).
 - `make build test lint` pass. Unit tests: test_rt, test_values, test_json,
   test_parser, test_ingest, test_binder (SQL -> bind -> plan -> exec),
-  test_functions + tests/sh CLI smoke tests.
+  test_functions, test_plan (EXPLAIN shape, joins, grouping, subqueries)
+  + tests/sh CLI smoke tests.
 - Performance (100k-row generated data): joins, GROUP BY, DISTINCT,
   IN-subqueries all run in ~1-15 ms.
 
@@ -29,6 +30,15 @@ CteDef, PlanNode, TupleSet, EvalCtx). Frame macros: include/frame.inc.
   replaced by NK_GKEY (group_rewrite).
 - UPPER/LOWER: a whitespace-delimited word containing non-ASCII is left
   unchanged (required by phase2/functions.pqt).
+
+## Hardening done
+- Two QA passes (≈2000 random join/group/subquery queries vs sqlite3, several
+  hundred hand-written function/type cases): fixed DECIMAL common type,
+  null-typed unary/ABS/ROUND/FLOOR, strict CAST to TIMESTAMP, grouping check
+  for outer references from subqueries, ON-clause scope of parenthesised
+  joins, subquery plans in EXPLAIN.
+- Possible next steps: column pruning through derived tables/CTEs, hash-join
+  build-side selection by cardinality (Phase 3), decorrelation.
 
 ## What is missing (later phases)
 - Phase 3+: storage (PQCF), indexes (CREATE/DROP INDEX answer UNSUPPORTED),
