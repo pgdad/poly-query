@@ -6,6 +6,7 @@ pub mod context;
 pub mod eval;
 pub mod functions;
 pub mod hash;
+pub mod native_filter;
 pub mod operators;
 pub mod parallel;
 pub mod subquery;

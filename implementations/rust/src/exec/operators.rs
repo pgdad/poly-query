@@ -8,7 +8,10 @@ use std::sync::Arc;
 use super::aggregate::AggState;
 use super::context::{ExecContext, LookupTable};
 use super::eval::{eval, eval_predicate, normalize_key};
+use super::native_filter::{NativeFilter, NativeFilterRowOp};
+use super::vector::ops::full_ranges;
 use crate::error::Result;
+use crate::native::Kernels;
 use crate::planner::access::IndexLookup;
 use crate::planner::expr::{AggregateCall, Expr, KeyDomain};
 use crate::planner::logical::{JoinType, SortKey};
@@ -74,13 +77,20 @@ pub fn build(plan: PhysicalPlan, ctx: &ExecContext) -> Box<dyn Operator> {
             crate::exec::vector::build(plan, ctx),
         ))
     } else {
-        build_row(plan)
+        build_row_with(plan, ctx.exec.native)
     }
 }
 
 /// Builds the row-at-a-time (Volcano) operator tree for a physical plan.
 pub fn build_row(plan: PhysicalPlan) -> Box<dyn Operator> {
-    let build = build_row;
+    build_row_with(plan, None)
+}
+
+/// Builds the row operator tree of `plan`; with `native` kernels, filters
+/// directly above scans of column-oriented tables select their rows with
+/// the kernels (see [`crate::exec::native_filter`]).
+pub fn build_row_with(plan: PhysicalPlan, native: Option<&'static Kernels>) -> Box<dyn Operator> {
+    let build = |p: PhysicalPlan| build_row_with(p, native);
     match plan {
         PhysicalPlan::Values => Box::new(SingleRowOp { done: false }),
         PhysicalPlan::TableScan {
@@ -111,10 +121,24 @@ pub fn build_row(plan: PhysicalPlan) -> Box<dyn Operator> {
             pos: 0,
             batch: Vec::new().into_iter(),
         }),
-        PhysicalPlan::Filter { input, predicate } => Box::new(FilterOp {
-            input: build(*input),
-            predicate,
-        }),
+        PhysicalPlan::Filter { input, predicate } => {
+            if let (Some(kernels), PhysicalPlan::TableScan { table, columns, groups, .. }) =
+                (native, &*input)
+                && let Some(filter) = NativeFilter::analyze(&predicate, table)
+            {
+                return Box::new(NativeFilterRowOp::new(
+                    table.clone(),
+                    columns.clone(),
+                    full_ranges(table, groups),
+                    Arc::new(filter),
+                    kernels,
+                ));
+            }
+            Box::new(FilterOp {
+                input: build(*input),
+                predicate,
+            })
+        }
         PhysicalPlan::Project { input, exprs, .. } => Box::new(ProjectOp {
             input: build(*input),
             exprs,

@@ -53,6 +53,33 @@ impl Bitmap {
         }
     }
 
+    /// Copies bits `[start, start + n)` into `out` as LSB-first bytes
+    /// (`out` is overwritten; trailing bits of the last byte are 0).
+    /// Word-at-a-time, for the native kernels' validity arguments.
+    pub fn copy_lsb_bytes(&self, start: usize, n: usize, out: &mut Vec<u8>) {
+        debug_assert!(start + n <= self.len);
+        out.clear();
+        out.reserve(n.div_ceil(8) + 8);
+        let shift = start % 64;
+        let mut w = start / 64;
+        let mut produced = 0;
+        while produced < n {
+            let mut bits = self.words[w] >> shift;
+            if shift != 0 && w + 1 < self.words.len() {
+                bits |= self.words[w + 1] << (64 - shift);
+            }
+            out.extend_from_slice(&bits.to_le_bytes());
+            produced += 64;
+            w += 1;
+        }
+        out.truncate(n.div_ceil(8));
+        if !n.is_multiple_of(8)
+            && let Some(last) = out.last_mut()
+        {
+            *last &= (1u8 << (n % 8)) - 1;
+        }
+    }
+
     pub fn push(&mut self, bit: bool) {
         if self.len.is_multiple_of(64) {
             self.words.push(0);

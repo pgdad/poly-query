@@ -35,6 +35,8 @@ use super::vector::ops::{
 };
 use crate::error::{Error, Result};
 use crate::exec::ExecContext;
+use crate::exec::native_filter::{NativeFilter, NativeFilterScanOp};
+use crate::native::Kernels;
 use crate::planner::expr::{AggregateCall, Expr, KeyDomain};
 use crate::planner::logical::JoinType;
 use crate::planner::physical::PhysicalPlan;
@@ -67,6 +69,13 @@ enum Frag {
     Filter {
         input: Box<Frag>,
         predicate: Expr,
+    },
+    /// Scan + filter evaluated with the native kernels.
+    NativeFilterScan {
+        table: Arc<Table>,
+        columns: Vec<usize>,
+        filter: Arc<NativeFilter>,
+        kernels: &'static Kernels,
     },
     Project {
         input: Box<Frag>,
@@ -109,10 +118,23 @@ impl Frag {
     fn prepare(plan: PhysicalPlan, ctx: &ExecContext) -> Result<Frag> {
         Ok(match plan {
             PhysicalPlan::TableScan { table, columns, .. } => Frag::Scan { table, columns },
-            PhysicalPlan::Filter { input, predicate } => Frag::Filter {
-                input: Box::new(Frag::prepare(*input, ctx)?),
-                predicate,
-            },
+            PhysicalPlan::Filter { input, predicate } => {
+                if let (Some(kernels), PhysicalPlan::TableScan { table, columns, .. }) =
+                    (ctx.exec.native, &*input)
+                    && let Some(filter) = NativeFilter::analyze(&predicate, table)
+                {
+                    return Ok(Frag::NativeFilterScan {
+                        table: table.clone(),
+                        columns: columns.clone(),
+                        filter: Arc::new(filter),
+                        kernels,
+                    });
+                }
+                Frag::Filter {
+                    input: Box::new(Frag::prepare(*input, ctx)?),
+                    predicate,
+                }
+            }
             PhysicalPlan::Project { input, exprs, .. } => Frag::Project {
                 input: Box::new(Frag::prepare(*input, ctx)?),
                 exprs,
@@ -179,6 +201,18 @@ impl Frag {
             Frag::Scan { table, columns } => {
                 Box::new(ScanOp::new(table.clone(), columns.clone(), ranges.to_vec()))
             }
+            Frag::NativeFilterScan {
+                table,
+                columns,
+                filter,
+                kernels,
+            } => Box::new(NativeFilterScanOp::new(
+                table.clone(),
+                columns.clone(),
+                ranges.to_vec(),
+                filter.clone(),
+                kernels,
+            )),
             Frag::Filter { input, predicate } => Box::new(FilterOp {
                 input: input.instantiate(ranges),
                 predicate: predicate.clone(),
