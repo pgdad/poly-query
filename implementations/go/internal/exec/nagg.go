@@ -330,7 +330,7 @@ func (p *naggPlan) run(ec *Context) ([]types.Row, error) {
 				return nil, err
 			}
 		}
-		return w.table.rows()
+		return w.table.rows(true)
 	}
 	nw := workers(ec, len(ranges))
 	ws := make([]*naggWorker, nw)
@@ -350,7 +350,7 @@ func (p *naggPlan) run(ec *Context) ([]types.Row, error) {
 			s.merge(0, o.table.states[k], 0)
 		}
 	}
-	return t.rows()
+	return t.rows(true)
 }
 
 // nativeAggOp is the operator of a native scan aggregation (row and batch

@@ -414,6 +414,10 @@ func TestOrderedLimitModesAgree(t *testing.T) {
 		"SELECT id, cat FROM t ORDER BY cat DESC NULLS LAST LIMIT 20000 OFFSET 10",
 		"SELECT id, flag FROM t ORDER BY flag, amount DESC LIMIT 100000",
 		"SELECT cat, COUNT(*) FROM t GROUP BY cat ORDER BY COUNT(*) LIMIT 20000",
+		// The sort covers all group keys: the aggregation's order is free.
+		"SELECT cat, grp, COUNT(*) AS n FROM t GROUP BY cat, grp HAVING COUNT(*) > 1 ORDER BY n DESC, grp, cat LIMIT 12",
+		"SELECT id % 500 AS k, SUM(id % 7) AS s FROM t GROUP BY id % 500 ORDER BY s, k",
+		"SELECT grp, MAX(id) FROM t GROUP BY grp ORDER BY grp DESC NULLS FIRST LIMIT 30000",
 	}
 	for _, q := range queries {
 		run := func(c modeConfig) string {

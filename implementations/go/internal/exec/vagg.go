@@ -1175,15 +1175,15 @@ func (t *aggTable) results() (rows []types.Row, first []int64, errPos int64, err
 
 // rows computes the output rows (keys then aggregates) ordered by first
 // appearance; without keys there is exactly one row.
-func (t *aggTable) rows() ([]types.Row, error) {
+func (t *aggTable) rows(ordered bool) ([]types.Row, error) {
 	if len(t.keyTypes) == 0 && len(t.keys) == 0 {
 		if _, err := t.newGroup(types.Row{}, 0); err != nil {
 			return nil, err
 		}
 	}
 	rows, first, _, err := t.results()
-	if err != nil {
-		return nil, err
+	if err != nil || !ordered {
+		return rows, err
 	}
 	return orderByFirst(rows, first), nil
 }
@@ -1215,6 +1215,15 @@ func orderByFirst(rows []types.Row, first []int64) []types.Row {
 	}
 	copy(first, firsts)
 	return out
+}
+
+// concatOrMerge merges row lists ordered by first position (ordered), or
+// concatenates them.
+func concatOrMerge(rows [][]types.Row, first [][]int64, ordered bool) []types.Row {
+	if ordered {
+		return mergeByFirst(rows, first)
+	}
+	return slices.Concat(rows...)
 }
 
 // mergeByFirst merges row lists that are each ordered by first position
@@ -1273,7 +1282,7 @@ const minPartitionedMerge = 1 << 13
 // the result rows in first-appearance order. Large merges are partitioned
 // by key hash: partition p of every partial table is merged into final
 // table p by its own goroutine.
-func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls []*plan.AggCall) ([]types.Row, error) {
+func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls []*plan.AggCall, ordered bool) ([]types.Row, error) {
 	total := 0
 	for _, t := range tables {
 		total += t.mergeWork()
@@ -1286,7 +1295,7 @@ func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls [
 				return nil, err
 			}
 		}
-		return final.rows()
+		return final.rows(ordered)
 	}
 	seed := maphash.MakeSeed()
 	partGroups := make([][][]int32, len(tables)) // table → partition → groups
@@ -1321,7 +1330,7 @@ func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls [
 			}
 			r := &results[p]
 			r.rows, r.first, r.errPos, r.err = final.results()
-			if r.err == nil {
+			if r.err == nil && ordered {
 				r.rows = orderByFirst(r.rows, r.first)
 			}
 		}()
@@ -1340,7 +1349,7 @@ func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls [
 	if err != nil {
 		return nil, err
 	}
-	return mergeByFirst(rows, first), nil
+	return concatOrMerge(rows, first, ordered), nil
 }
 
 // ---------------------------------------------------------------- operator
@@ -1460,5 +1469,5 @@ func (a *vaggregateOp) run() ([]types.Row, error) {
 		}
 		pos += int64(b.N)
 	}
-	return t.rows()
+	return t.rows(!a.ec.unordered[a.node])
 }

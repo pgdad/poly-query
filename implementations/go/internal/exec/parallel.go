@@ -639,9 +639,9 @@ func parallelAggregate(ec *Context, x *physical.HashAggregate) (BatchOperator, b
 		}
 		var rows []types.Row
 		if slices.ContainsFunc(scatters, func(s *aggScatter) bool { return s != nil }) {
-			rows, err = mergePartitioned(ec, seed, tables, scatters, keyTypes, x.Aggs)
+			rows, err = mergePartitioned(ec, seed, tables, scatters, keyTypes, x.Aggs, !ec.unordered[x])
 		} else {
-			rows, err = mergeTables(ec, tables, keyTypes, x.Aggs)
+			rows, err = mergeTables(ec, tables, keyTypes, x.Aggs, !ec.unordered[x])
 		}
 		if err != nil {
 			return nil, err

@@ -44,6 +44,10 @@ type Context struct {
 	// params holds the current values of outer columns referenced by the
 	// correlated subquery being built (column ID → cell).
 	params map[plan.ColumnID]*types.Value
+	// unordered lists aggregations whose output order does not matter (a
+	// sort above them orders by all their group keys, see
+	// totalOrderAggregate): they skip ordering groups by first appearance.
+	unordered map[*physical.HashAggregate]bool
 	// subCache memoizes uncorrelated subquery results.
 	subCache map[*plan.Subquery]*subResult
 	// lookups and cached hold the per-query state of ParamLookup and

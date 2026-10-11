@@ -245,7 +245,7 @@ func (s *aggScatter) foldInto(t *aggTable, p int) error {
 // mergePartitioned computes the result rows of a parallel aggregation in
 // which some workers scattered rows (scatters[w] non-nil): partition p
 // of every partial table and every scatter is aggregated by goroutine p.
-func mergePartitioned(ec *Context, seed maphash.Seed, tables []*aggTable, scatters []*aggScatter, keyTypes []types.Type, calls []*plan.AggCall) ([]types.Row, error) {
+func mergePartitioned(ec *Context, seed maphash.Seed, tables []*aggTable, scatters []*aggScatter, keyTypes []types.Type, calls []*plan.AggCall, ordered bool) ([]types.Row, error) {
 	parts := len(tables)
 	partGroups := make([][][]int32, len(tables)) // table → partition → groups
 	var wg sync.WaitGroup
@@ -288,7 +288,7 @@ func mergePartitioned(ec *Context, seed maphash.Seed, tables []*aggTable, scatte
 				}
 			}
 			r.rows, r.first, r.errPos, r.err = final.results()
-			if r.err == nil {
+			if r.err == nil && ordered {
 				r.rows = orderByFirst(r.rows, r.first)
 			}
 		}()
@@ -307,5 +307,5 @@ func mergePartitioned(ec *Context, seed maphash.Seed, tables []*aggTable, scatte
 	if err != nil {
 		return nil, err
 	}
-	return mergeByFirst(rows, first), nil
+	return concatOrMerge(rows, first, ordered), nil
 }

@@ -135,6 +135,46 @@ type vsortOp struct {
 	threads int
 }
 
+// totalOrderAggregate returns the aggregation below a sort (through
+// projections and filters) whose output order the sort makes irrelevant:
+// every group key is a sort key, so no two rows tie (FLOAT64 keys are
+// excluded: NaNs of different payloads are separate groups but compare
+// equal), or nil.
+func totalOrderAggregate(x *physical.Sort) *physical.HashAggregate {
+	ids := map[plan.ColumnID]bool{}
+	for _, k := range x.Keys {
+		if ref, ok := k.Expr.(*plan.ColumnRef); ok {
+			ids[ref.ID] = true
+		}
+	}
+	for n := x.Input; ; {
+		switch y := n.(type) {
+		case *physical.Filter:
+			n = y.Input
+		case *physical.Project:
+			next := map[plan.ColumnID]bool{}
+			for i, c := range y.Cols {
+				if ref, ok := y.Exprs[i].(*plan.ColumnRef); ok && ids[c.ID] {
+					next[ref.ID] = true
+				}
+			}
+			ids, n = next, y.Input
+		case *physical.HashAggregate:
+			if len(y.Keys) == 0 {
+				return nil
+			}
+			for _, c := range y.KeyCols {
+				if !ids[c.ID] || c.Type.Kind == types.KindFloat64 {
+					return nil
+				}
+			}
+			return y
+		default:
+			return nil
+		}
+	}
+}
+
 // maxTopN is the largest LIMIT (plus OFFSET) sorted with a bounded heap;
 // beyond it, sorting all rows (normalized keys, parallel runs) is faster
 // than maintaining the heap, with the same (stable) order.
@@ -144,6 +184,12 @@ func buildVSort(ec *Context, x *physical.Sort) (BatchOperator, error) {
 	keys, err := sortKeys(x)
 	if err != nil {
 		return nil, err
+	}
+	if agg := totalOrderAggregate(x); agg != nil {
+		if ec.unordered == nil {
+			ec.unordered = map[*physical.HashAggregate]bool{}
+		}
+		ec.unordered[agg] = true
 	}
 	if x.Limit >= 0 && x.Limit <= maxTopN {
 		return buildVTopN(ec, x, keys)
