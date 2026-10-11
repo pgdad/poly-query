@@ -78,6 +78,15 @@ AST-CREATE-INDEX or AST-DROP-INDEX."
       (token-value (next-token p))
       (unexpected p what)))
 
+(defun expect-alias (p)
+  "The identifier after an explicit AS. The keywords only reserved for future
+syntax (FULL, RIGHT) are accepted here, where no syntax can follow AS, so
+e.g. `AS full` names a column (decimal38.pqt relies on it)."
+  (let ((tok (current p)))
+    (if (and (eq (token-kind tok) :keyword) (member (token-value tok) '(:full :right)))
+        (token-text (next-token p))
+        (expect-identifier p "alias"))))
+
 (defmacro with-node-position ((var p) &body body)
   "Bind VAR to the current token so nodes can record its position."
   `(let ((,var (current ,p))) ,@body))
@@ -231,7 +240,7 @@ itself when there is a single branch, else an AST-UNION-ALL."
           (t
            (let ((expr (parse-expr p))
                  (alias nil))
-             (cond ((accept-keyword p :as) (setf alias (expect-identifier p "alias")))
+             (cond ((accept-keyword p :as) (setf alias (expect-alias p)))
                    ((at-identifier p) (setf alias (token-value (next-token p)))))
              (apply #'make-ast-select-item :expr expr :alias alias (pos-args tok)))))))
 

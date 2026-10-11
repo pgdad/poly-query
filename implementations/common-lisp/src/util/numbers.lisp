@@ -8,7 +8,11 @@
 
 (defconstant +int64-min+ (- (expt 2 63)))
 (defconstant +int64-max+ (1- (expt 2 63)))
-(defconstant +max-decimal-precision+ 18)
+(defconstant +max-decimal-precision+ 38
+  "Largest DECIMAL precision (CR-2: decimals of precision 19-38 are *wide*).")
+(defconstant +narrow-decimal-precision+ 18
+  "Largest precision of a *narrow* DECIMAL, whose unscaled values fit INT64,
+and the result precision of operations on narrow operands.")
 
 (declaim (inline int64-p))
 (defun int64-p (n)

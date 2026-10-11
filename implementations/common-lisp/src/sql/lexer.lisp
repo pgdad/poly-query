@@ -14,11 +14,12 @@
     (dolist (k *reserved-keywords* h)
       (setf (gethash k h) (intern k :keyword)))))
 
-(defstruct (token (:constructor make-token (kind value line column)))
-  "KIND is one of :KEYWORD (VALUE a keyword symbol), :IDENT (VALUE the name),
-:QIDENT (quoted identifier), :INTEGER / :NUMBER (VALUE the literal text),
-:STRING, :OP (VALUE an operator string) or :EOF."
-  kind value
+(defstruct (token (:constructor make-token (kind value line column &optional text)))
+  "KIND is one of :KEYWORD (VALUE a keyword symbol, TEXT the word as
+written), :IDENT (VALUE the name), :QIDENT (quoted identifier), :INTEGER /
+:NUMBER (VALUE the literal text), :STRING, :OP (VALUE an operator string) or
+:EOF."
+  kind value text
   (line 1 :type fixnum)
   (column 1 :type fixnum))
 
@@ -43,8 +44,8 @@
                (when (char= (char sql i) #\Newline)
                  (incf line) (setf line-start (1+ i)))
                (incf i))
-             (emit (kind value tline tcol)
-               (push (make-token kind value tline tcol) tokens))
+             (emit (kind value tline tcol &optional text)
+               (push (make-token kind value tline tcol text) tokens))
              (scan-quoted (quote-char what tline tcol)
                ;; I points at the opening quote.
                (advance)
@@ -82,7 +83,7 @@
                (let* ((word (subseq sql start i))
                       (kw (gethash (ascii-upcase word) *keyword-table*)))
                  (if kw
-                     (emit :keyword kw tline tcol)
+                     (emit :keyword kw tline tcol word)
                      (emit :ident word tline tcol)))))
             ((char= c #\")
              (let* ((tline line) (tcol (col))

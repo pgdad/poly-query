@@ -184,17 +184,19 @@ the name is unknown everywhere. Ambiguous references are SEMANTIC_ERROR."
         ((or (eq lk :float64) (eq rk :float64) (eq op :/))
          (make-b-op :float64 op (list (implicit-cast left :float64) (implicit-cast right :float64))))
         (t
-         ;; DECIMAL arithmetic: INT64 operands become DECIMAL(18,0); each
-         ;; operand keeps its own scale.
-         (let* ((l (if (eq lk :int64) (implicit-cast left (make-decimal-type 18 0)) left))
-                (r (if (eq rk :int64) (implicit-cast right (make-decimal-type 18 0)) right))
-                (ls (decimal-scale (if (eq lk :int64) (make-decimal-type 18 0) lt)))
-                (rs (decimal-scale (if (eq rk :int64) (make-decimal-type 18 0) rt))))
+         ;; DECIMAL arithmetic in result precision W (18, or 38 when an
+         ;; operand is a wide DECIMAL): INT64 operands become DECIMAL(W,0);
+         ;; each operand keeps its own scale.
+         (let* ((w (decimal-result-precision lt rt))
+                (l (if (eq lk :int64) (implicit-cast left (make-decimal-type w 0)) left))
+                (r (if (eq rk :int64) (implicit-cast right (make-decimal-type w 0)) right))
+                (ls (if (eq lk :int64) 0 (decimal-scale lt)))
+                (rs (if (eq rk :int64) 0 (decimal-scale rt))))
            (ecase op
-             ((:+ :-) (make-b-op (make-decimal-type 18 (max ls rs)) op (list l r)))
-             (:* (when (> (+ ls rs) +max-decimal-precision+)
-                   (bind-error-at node "TYPE_ERROR" "DECIMAL product scale ~D exceeds 18" (+ ls rs)))
-                 (make-b-op (make-decimal-type 18 (+ ls rs)) op (list l r))))))))))
+             ((:+ :-) (make-b-op (make-decimal-type w (max ls rs)) op (list l r)))
+             (:* (when (> (+ ls rs) w)
+                   (bind-error-at node "TYPE_ERROR" "DECIMAL product scale ~D exceeds ~D" (+ ls rs) w))
+                 (make-b-op (make-decimal-type w (+ ls rs)) op (list l r))))))))))
 
 (defun check-comparable (left right node &optional (what "compare"))
   (unless (comparison-type (bexpr-type left) (bexpr-type right))
@@ -369,7 +371,8 @@ parameters. Returns (values SUBQUERY parameter-expressions)."
               (bind-error-at node "TYPE_ERROR" "SUM expects a numeric argument, got ~A"
                              (type-name-string arg-type)))
             (cond ((null-type-p arg-type) :null)
-                  ((decimal-type-p ty) (make-decimal-type 18 (decimal-scale ty)))
+                  ((decimal-type-p ty)
+                   (make-decimal-type (decimal-result-precision ty) (decimal-scale ty)))
                   (t ty))))
     (:avg (unless (numeric-type-p (arithmetic-operand-type arg-type))
             (bind-error-at node "TYPE_ERROR" "AVG expects a numeric argument, got ~A"

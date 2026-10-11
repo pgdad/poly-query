@@ -119,7 +119,7 @@ a bare date for TIMESTAMP (ingestion does; CAST requires timestamp syntax)."
            (:decimal
             (let ((s (decimal-scale from)))
               (ecase k
-                (:int64 (fn (truncate v (pow10 s))))
+                (:int64 (fn (check-int64 (truncate v (pow10 s)))))
                 (:float64 (fn (rational-to-double (/ v (pow10 s)))))
                 (:decimal (let ((p2 (decimal-precision to)) (s2 (decimal-scale to)))
                             (fn (check-decimal-fits (rescale-decimal v s s2) p2)))))))

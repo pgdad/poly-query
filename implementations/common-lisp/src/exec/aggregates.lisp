@@ -62,16 +62,16 @@
                   (lambda () (if any (check-finite sum) +null+)))))
       ;; INT64 and DECIMAL sums are exact (unbounded integers); only the final
       ;; result is range checked.
-      (let ((decimal (decimal-type-p arg-type)))
+      (let ((decimal (and (decimal-type-p arg-type) (decimal-result-precision arg-type))))
         (lambda ()
           (let ((sum 0) (any nil))
             (declare (type integer sum))
             (values (lambda (v) (unless (null-value-p v) (setf any t) (incf sum v)))
                     (lambda ()
                       (cond ((not any) +null+)
-                            (decimal (if (fits-precision-p sum +max-decimal-precision+)
+                            (decimal (if (fits-precision-p sum decimal)
                                          sum
-                                         (overflow-error "DECIMAL SUM exceeds 18 digits")))
+                                         (overflow-error "DECIMAL SUM exceeds ~D digits" decimal)))
                             (t (check-int64 sum))))))))))
 
 (defun make-avg-factory (arg-type)

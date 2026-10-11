@@ -92,7 +92,8 @@ documented as constant). Non-constant expressions are SEMANTIC_ERROR."
 (defun round-result-type (type n)
   (ecase (type-kind type)
     ((:int64 :float64 :null) type)
-    (:decimal (make-decimal-type 18 (max 0 (min n (decimal-scale type)))))))
+    (:decimal (make-decimal-type (decimal-result-precision type)
+                                 (max 0 (min n (decimal-scale type)))))))
 
 (defun round-rational (r n)
   "Round the rational R to N fractional digits (N may be negative), half away from zero."
@@ -131,7 +132,7 @@ documented as constant). Non-constant expressions are SEMANTIC_ERROR."
                            (lambda (v)
                              (check-decimal-fits
                               (* (round-rational (/ v (pow10 s)) n) (pow10 target))
-                              +max-decimal-precision+)))))))
+                              (decimal-precision type))))))))
                (if (rest args)
                    (lambda (v digits) (declare (ignore digits)) (funcall impl v))
                    impl))))
@@ -150,7 +151,7 @@ documented as constant). Non-constant expressions are SEMANTIC_ERROR."
   (lambda (args)
     (check-arg-types name args '(numeric-type-p "a numeric argument"))
     (let ((type (bexpr-type (first args))))
-      (if (decimal-type-p type) (make-decimal-type 18 0) type))))
+      (if (decimal-type-p type) (make-decimal-type (decimal-result-precision type) 0) type))))
 
 (define-scalar-function "FLOOR" (:min 1)
   :typer (floor-ceil-typer "FLOOR")

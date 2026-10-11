@@ -3,13 +3,15 @@
 ;;;; A BATCH holds up to +BATCH-SIZE+ rows as one VEC per column. The physical
 ;;;; representation of a VEC follows the static type of its column (its
 ;;;; *kind*, see TYPE-VEC-KIND):
-;;;;   :I64  INT64, DECIMAL (unscaled), DATE (days), TIMESTAMP (micros) in a
+;;;;   :I64  INT64, narrow DECIMAL (unscaled), DATE (days), TIMESTAMP (micros) in a
 ;;;;         (SIGNED-BYTE 64) vector plus a validity bitmap (1 = non-NULL; NIL
 ;;;;         when no value is NULL) — the same layout as the column stores, so
 ;;;;         scans copy whole slices and kernels run tight typed loops;
 ;;;;   :F64  FLOAT64 in a DOUBLE-FLOAT vector plus a validity bitmap;
-;;;;   :ANY  every other type (BOOLEAN, STRING, the NULL type) as a
-;;;;         SIMPLE-VECTOR of runtime values, NULL being :NULL.
+;;;;   :ANY  every other type (BOOLEAN, STRING, wide DECIMAL, the NULL type)
+;;;;         as a SIMPLE-VECTOR of runtime values, NULL being :NULL. Wide
+;;;;         DECIMALs (p > 18) hold unbounded integers, so they never reach
+;;;;         the (SIGNED-BYTE 64) kernels or the native ones.
 ;;;; Vectors are immutable once built: kernels never modify their inputs, so
 ;;;; batches, gathered copies and materialized inputs may share them.
 
@@ -39,7 +41,7 @@ for a batch's vectors to stay in the CPU caches.")
   (source nil))
 
 (defun type-vec-kind (type)
-  (case (type-kind type)
+  (case (if (wide-decimal-type-p type) :wide-decimal (type-kind type))
     ((:int64 :decimal :date :timestamp) :i64)
     (:float64 :f64)
     (t :any)))
@@ -337,8 +339,11 @@ all are; NIL when none is)."
        (make-vec (subseq (int-column-values store) start end) vslice))
       ((and (eq kind :f64) (float-column-p store))
        (make-vec (subseq (float-column-values store) start end) vslice))
-      ((and (eq kind :any) (string-column-p store))
-       (let ((values (subseq (string-column-values store) start end)))
+      ((and (eq kind :any) (or (string-column-p store) (wide-column-p store)))
+       (let ((values (subseq (if (string-column-p store)
+                                 (string-column-values store)
+                                 (wide-column-values store))
+                             start end)))
          (when vslice
            (dotimes (i n) (when (zerop (sbit vslice i)) (setf (svref values i) +null+))))
          (make-vec values)))

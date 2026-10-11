@@ -2,6 +2,6 @@
 
 (in-package #:polyquery)
 
-(defparameter *engine-version* "0.3.0")
+(defparameter *engine-version* "0.4.0")
 (defparameter *spec-version* "1.0.0")
 (defparameter *protocol-version* 1)
