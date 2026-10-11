@@ -1,2 +1,6 @@
 2026-10-11T06:30:18+00:00 wave wave-a-change-decimal38-a1-20261011T063016Z: order=['java']
 2026-10-11T06:30:18+00:00 [a-change-decimal38-java-a1-20261011T063016Z] agent queued (usage gate, then launch)
+2026-10-11T06:53:23+00:00 [a-change-decimal38-java-a1-20261011T063016Z] agent finished; collecting telemetry
+2026-10-11T06:53:23+00:00 [a-change-decimal38-java-a1-20261011T063016Z] validating (clean clone, sandboxed)
+2026-10-11T06:53:47+00:00 [a-change-decimal38-java-a1-20261011T063016Z] outcome=success cost=$13.923582400000006 turns=175 wall=1385.4s
+2026-10-11T06:53:47+00:00 wave wave-a-change-decimal38-a1-20261011T063016Z finished: decimal38=success

@@ -1,0 +1,106 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-decimal38-java-a1-20261011T063016Z",
+ "language": "java",
+ "task": "change-decimal38",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-decimal38",
+ "prompt_sha256": "94c1ceedd7bd4c5b83f2b3fc31e9255fe56a00a7cc5005d0c9bf02c48039177c",
+ "session_id": "fd7691fd-59dc-4e11-a09a-6a790210db55",
+ "tokens": {
+  "input": 346,
+  "output": 137382,
+  "cache_read": 40333152,
+  "cache_creation": 388491,
+  "thinking": null,
+  "thinking_estimated": 58018,
+  "source": "result events",
+  "api_messages": 173
+ },
+ "rate_limit": {
+  "events": 13,
+  "max_utilization": {
+   "five_hour": 0.42,
+   "seven_day": 0.3
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 13.923582400000006,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 175,
+ "result_segments": 1,
+ "assistant_messages": 346,
+ "tool_calls": {
+  "Bash": 173,
+  "Write": 1
+ },
+ "tool_calls_total": 174,
+ "tool_failures": 0,
+ "build_invocations": 29,
+ "build_failures_heuristic": 4,
+ "conformance_runs": 8,
+ "conformance_progress": [
+  [
+   68,
+   69
+  ],
+  [
+   69,
+   69
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ]
+ ],
+ "repair_iterations": 7,
+ "time": {
+  "wall_seconds": 1385.4,
+  "model_api_seconds": 1274.8,
+  "tool_seconds": 111.1,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 3,
+  "files_changed": 44,
+  "lines_added": 1552,
+  "lines_removed": 280,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "CR-2 (DECIMAL precision 38 with PQCF v2) is implemented and committed, and every check in the definition of done reports 0 failures, 0 errors and 0 not-implemented.\n\n## Test results\n| Run | Result |\n|---|---|\n| `runner.py` (default; includes `changes/decimal38`, 69/69) | `TOTAL: 660/660 pass` |\n| `runner.py --modes` | `TOTAL: 3870/3870 pass` |\n| `runner.py --transport http` | `TOTAL: 660/660 pass` |\n| `http_suite.py` | `http suite: 18/18 passed` |\n| `make build test` | `102 passed, 0 failed` (includes a new `WideDecimalTest` suite) |\n| Extra: `--native --modes`, `--native --transport http`, tiny batches/morsels `--modes` | 3870/3870, 660/660, 3870/3870 |\n| Extra: random queries comparing every option combination (my extended `tools/difftest.py`) | 550+ queries with wide decimals, 0 mismatches after one fix (below) |\n\nThe engine claims both `change.decimal38` and `change.union_all`.\n\n## What I implemented\n- **Representation:** a decimal with precision up to 18 (\"narrow\") still holds its value in a `long`, so the existing narrow code paths are unchanged. Precision 19\u201338 (\"wide\") uses `java.math.BigInteger`. The column's type alone decides which, so values carry no tags. Wide columns get their own storage vector; in the vectorized engine they use the existing object slots.\n- **Typing:** result precision is 18, or 38 when any decimal operand is wide. This applies to arithmetic, common types (CASE, COALESCE, UNION ALL), SUM, ROUND, FLOOR and CEIL. Literals with a decimal point are decimals up to 38 digits.\n- **Comparisons are exact:** INT64 and narrow decimals are compared as they are, so the old cast that could overflow is gone. If only one side is wide, the other is cast exactly to a wide type, so joins, indexes and filters always see both sides in one representation.\n- **Execution:** both engines handle wide arithmetic, comparisons, aggregates (including parallel merging), grouping, sorting, joins and indexes. Wide data is never passed to the native kernels.\n- **Storage:** a table with a wide column is saved as PQCF v2 (128-bit values, plain and run-length encoded); every other table stays v1. The reader accepts both and rejects a version mismatch, wide columns in a v1 file, and values too large for their precision. It reports version 3 and above as unsupported.\n- **README:** documents the representation, how narrow/wide dispatch works, a table of modules touched, and the decisions below.\n\n## Decisions to be aware of\n- **`AS full` is now accepted.** The grammar reserves `FULL` (and `RIGHT`) for future use, but a public CR-2 case uses `\u2026 AS full`. I accept these two words only directly after an explicit `AS`; `FULL JOIN` and `RIGHT JOIN` are still `UNSUPPORTED`.\n- **FLOAT64 \u2192 DECIMAL now uses the exact binary value of the double** for all precisions, as CR-2 \u00a75 says. Narrow casts change too: `2.675e0` now becomes `2.67` instead of `2.68`. No existing test was affected.\n- **`spec_version` stays `1.0.0`**, because the phase-1 catalog test requires it; the capability signals the change.\n\nThe random-query testing found one real bug: a join between a narrow and a wide decimal key lost its cast and crashed or returned wrong rows in vectorized mode. It is fixed and covered by unit tests.\n\n## Known limitations\n- Wide values are one object each, so their arithmetic, hashing and sorting run per value, without SIMD or native kernels, and use more memory than narrow values. Narrow performance is unaffected; a 1M-row wide self-join runs in about 0.4 s.\n- Wide negation and casts to or from wide types run the row engine's code per value inside vectorized expressions.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
