@@ -616,12 +616,129 @@ ENDF \name
  * in rdi = data, rdx = rows (multiple of 4, > 0). out rax = number of rows
  * where the KIND holds (inversion applied by the caller); rcx, rdx kept.
  * Two groups per iteration on two accumulators (vpsubq of all-ones lanes).
- * clobbers rdi, r10, ymm0-ymm4, ymm6, ymm13-ymm15. */
+ * Kinds 1, 2, 4 first run 64-row blocks through VCNT128_HI (high words
+ * only); a block with an undecided row is recounted exactly (VCNT128_EXACT)
+ * and the fast test is then skipped for r11d blocks (exponential back-off
+ * in esi, as for minmax: QR_BACKOFF .. QR_BACKOFF_MAX).
+ * clobbers rsi, rdi, r10, r11, ymm0-ymm7, ymm13-ymm15; 32 bytes of stack
+ * (kind 4). */
+.macro VCNT128_EXACT kind
+        .set g, 0
+        .rept 8
+        VG128   \kind, y, g*128, 13, 14
+        vpsubq  %ymm13, %ymm4, %ymm4
+        VG128   \kind, y, g*128+64, 15, 14
+        vpsubq  %ymm15, %ymm6, %ymm6
+        .set g, g + 1
+        .endr
+.endm
+/* VCNT128_HI kind: one 64-row block on the high words: per row T = "kind
+ * holds whatever the low word is", F = "kind fails whatever the low word
+ * is"; a row with neither (high word equal to a bound) is undecided.
+ *   kind 1 (x < a): T = a.hi > hi, F = hi > a.hi        (ymm9 = a.hi)
+ *   kind 2 (x > a): T = hi > a.hi, F = a.hi > hi
+ *   kind 4 (OUT):   T = hi outside [a.hi, b.hi], F = hi inside (a.hi, b.hi),
+ *                   both as unsigned range tests (cf. VPRED kind 4):
+ *                   T = (hi - a.hi) >u b.hi - a.hi, F = (hi - a.hi - 1) <u
+ *                   b.hi - a.hi - 1 (never if b.hi <= a.hi); ymm9 =
+ *                   a.hi ^ 2^63, ymm7 = (a.hi + 1) ^ 2^63, (%rsp) =
+ *                   bcast((b.hi - a.hi) ^ 2^63), ymm5 = bcast(W2 ^ 2^63).
+ * 2 compares per group instead of 3 compares + blend (+ the low-word
+ * de-interleave and bias). Every lane sees 16 rows; if T + F == 16 in all
+ * lanes, ymm4 += T counts and CF = 1, else CF = 0 (ymm4 unchanged).
+ * clobbers ymm0-ymm3, ymm13-ymm15. */
+.macro VCNT128_HI kind
+        vpxor   %xmm13, %xmm13, %xmm13
+        vpxor   %xmm14, %xmm14, %xmm14
+        .set g, 0
+        .rept 16
+        vmovdqu g*64(%rdi), %ymm0
+        vpunpckhqdq g*64+32(%rdi), %ymm0, %ymm2 /* H */
+.if \kind == 1
+        vpcmpgtq %ymm2, %ymm9, %ymm1
+        vpcmpgtq %ymm9, %ymm2, %ymm3
+.elseif \kind == 2
+        vpcmpgtq %ymm9, %ymm2, %ymm1
+        vpcmpgtq %ymm2, %ymm9, %ymm3
+.else
+        vpsubq  %ymm9, %ymm2, %ymm1
+        vpcmpgtq (%rsp), %ymm1, %ymm1           /* outside [a.hi, b.hi] */
+        vpsubq  %ymm7, %ymm2, %ymm3
+        vpcmpgtq %ymm3, %ymm5, %ymm3            /* inside (a.hi, b.hi) */
+.endif
+        vpsubq  %ymm1, %ymm13, %ymm13
+        vpsubq  %ymm3, %ymm14, %ymm14
+        .set g, g + 1
+        .endr
+        vpaddq  %ymm14, %ymm13, %ymm15
+        vpcmpeqq c_sixteen_q(%rip), %ymm15, %ymm15
+        vtestpd c_sign4(%rip), %ymm15           /* CF: all lanes decided */
+        jnc     .Lvh_und\@
+        vpaddq  %ymm13, %ymm4, %ymm4
+        stc
+.Lvh_und\@:
+.endm
 .macro VCNT128 name, kind
 LFUNC \name
         vpxor   %xmm4, %xmm4, %xmm4
         vpxor   %xmm6, %xmm6, %xmm6
         mov     %rdx, %r10
+.if \kind == 1 || \kind == 2 || \kind == 4
+.if \kind == 4
+        sub     $32, %rsp
+        vmovq   %xmm9, %rax             /* a.hi ^ 2^63 */
+        vmovq   %xmm8, %rsi             /* a.lo ^ 2^63 */
+        vmovq   %xmm10, %r11            /* w.lo ^ 2^63 */
+        btc     $63, %rsi
+        btc     $63, %r11
+        add     %r11, %rsi              /* CF: carry of a.lo + w.lo */
+        vmovq   %xmm11, %r11            /* w.hi ^ 2^63 */
+        adc     $0, %r11                /* (b.hi - a.hi) ^ 2^63 */
+        vmovq   %r11, %xmm0
+        vpbroadcastq %xmm0, %ymm0
+        vmovdqu %ymm0, (%rsp)
+        btc     $63, %r11               /* D = b.hi - a.hi (unsigned) */
+        sub     $1, %r11                /* W2 = D - 1 */
+        jnc     .L\name\()_w2
+        xor     %r11d, %r11d            /* D == 0: no interior, W2 = 0 */
+.L\name\()_w2:
+        btc     $63, %r11
+        vmovq   %r11, %xmm5
+        vpbroadcastq %xmm5, %ymm5
+        inc     %rax                    /* (a.hi + 1) ^ 2^63 */
+        vmovq   %rax, %xmm7
+        vpbroadcastq %xmm7, %ymm7
+.endif
+        xor     %r11d, %r11d            /* back-off countdown / length */
+        mov     $QR_BACKOFF, %esi
+.L\name\()_blk:
+        cmp     $64, %r10
+        jb      .L\name\()_rest
+        test    %r11d, %r11d
+        jnz     .L\name\()_plain
+        VCNT128_HI \kind
+        jnc     .L\name\()_fail
+        mov     $QR_BACKOFF, %esi
+        jmp     .L\name\()_next
+.L\name\()_fail:
+        mov     %esi, %r11d
+        add     %esi, %esi
+        mov     $QR_BACKOFF_MAX, %eax
+        cmp     %eax, %esi
+        cmova   %eax, %esi
+        jmp     .L\name\()_exact
+.L\name\()_plain:
+        dec     %r11d
+.L\name\()_exact:
+        VCNT128_EXACT \kind
+.L\name\()_next:
+        add     $1024, %rdi
+        sub     $64, %r10
+        jmp     .L\name\()_blk
+.L\name\()_rest:
+        test    %r10, %r10
+        jz      .L\name\()_sum
+.endif
         test    $4, %r10d
         jz      .L\name\()_loop
         VG128   \kind, y, 0, 13, 14
@@ -640,6 +757,9 @@ LFUNC \name
 .L\name\()_sum:
         vpaddq  %ymm6, %ymm4, %ymm4
         HSUMQ   %ymm4, %xmm4, %xmm0, %rax
+.if \kind == 4
+        add     $32, %rsp
+.endif
         ret
 ENDF \name
 .endm

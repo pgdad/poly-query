@@ -69,6 +69,7 @@
         TAB_IDX8
         TAB_PAIRMASK
         TAB_SIGN4
+        TAB_SIXTEEN_Q
 
         DEFINE_LVP
 

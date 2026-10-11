@@ -148,6 +148,11 @@
         .quad   -1, -1, -1, -1
         ENDOBJ  pairmask
 .endm
+.macro TAB_SIXTEEN_Q                    /* 4 x qword 16 (32-byte memory operand) */
+        OBJ     c_sixteen_q, 5
+        .quad   16, 16, 16, 16
+        ENDOBJ  c_sixteen_q
+.endm
 .macro TAB_SIGN4                        /* 4 x 2^63 (32-byte memory operand) */
         OBJ     c_sign4, 5
         .quad   C_SIGN64, C_SIGN64, C_SIGN64, C_SIGN64
