@@ -1,48 +1,49 @@
 # Working notes (arm64-asm-engine)
 
-## Status (Phase 5, session 1) — complete
+## Status (Phase 5, session 1) — complete (definition of done met)
 - Conformance: all phases 569/569, `--modes` 3324/3324 (also with
   `PQ_PARALLEL_MIN_ROWS=1`, which forces parallel tasks on tiny inputs —
   use it to test the parallel code paths), `--transport http` 569/569,
-  http_suite 19/19. `make build test lint` pass (new
-  tests/sh/run_mode_tests.sh: 8 option sets must agree).
+  http_suite 19/19. `make build test lint` pass (new: tests/unit/
+  test_exec5.S — 30 cases x 6 settings; tests/sh/run_mode_tests.sh — 30
+  queries x 8 option sets).
 - Options: protocol.S parse_exec_opts -> TLS g_x_mode / g_x_join /
   g_x_threads / g_x_optimize (exec.S); default threads = --threads or
-  min(nprocs, 8); g_par_min_rows (16384, env PQ_PARALLEL_MIN_ROWS).
-- Modules: join.S (hash / merge / nested-loop), vexec.S (veval, vfilter,
-  vkey_cells, dict truth tables, NEON compare), vagg.S (hash aggregation,
-  partial tables merged in task order), ops.S (filter / project tasks),
-  parallel.S (par_run: worker threads with own arena + setjmp, arenas
-  adopted by the caller), optimize.S (constant folding via try_eval,
-  predicate simplification). exec.S: scan tasks over candidate ranges,
-  top-N (topn_rows), agg_emit_row.
+  min(nprocs, 8); threads < 1 UNSUPPORTED; g_par_min_rows (16384, env
+  PQ_PARALLEL_MIN_ROWS).
 - mode row = Volcano iterators (volcano.S: it_open / it_next; ex_tuples
   and ex_project dispatch to it_drain / it_project), sort-based grouping,
-  single-threaded.
-- optimize=false disables folding/simplification, top-N, hash build-side
+  qsort_r sorting, single-threaded.
+- vectorized: vexec.S (veval kernels + row fallback, vfilter_sel, dict
+  truth tables, NEON compare, vkey_cells tasks), vagg.S (hash aggregation,
+  partial tables, gt_pmerge partitioned parallel merge, emit_groups,
+  vdistinct), ops.S (filter / project tasks), join.S (hash join: hj_table,
+  parallel probe; merge join: mj_side radix/qsort index sort; NL with
+  keys), sort.S (normalized-key radix sort, parallel chunk sort + merge
+  rounds for string keys), exec.S scan tasks over scan_ranges.
+- parallel.S: par_run (worker threads with own arena + setjmp, arenas
+  adopted by the caller, first error re-raised), wk_inline fallback,
+  expr_par_safe.
+- optimize.S: constant folding (try_eval), predicate simplification,
+  join reordering (opt_join_order, regions >= 3 inputs; PN_MASK + combine()
+  slot-wise AND). optimize=false also disables top-N and the hash build-side
   swap. Pushdown / pruning / index choice stay (Phase 3 suite runs with
   optimize=false in --modes and expects them).
+- order_keys appends every visible column as a tie-breaker: ORDER BY output
+  is identical in every mode even with ties.
 - Benchmark: bench/bench.sh DATA_DIR (data: pqgen.py generate --scale 1m
   --out /tmp/pqbench/1m --jobs 1 — multiprocessing fails in the sandbox);
-  before: bench/baseline-before.txt, after: bench/results-after.txt,
-  README table.
+  before (commit d21cf39): bench/baseline-before.txt, after:
+  bench/results-after.txt, README table.
 - Fuzzing: /tmp/fz/fuzz.py (throw-away, outside the repo) compared 5
-  option sets on ~4000 random queries over the fixture data: 0 mismatches.
-
-- Join reordering (optimize.S opt_join_order, called from plan.S
-  pp_rewrite after WHERE pushdown): PN_MASK (rv bitmask) on scans / joins
-  replaces PN_LO/PN_HI ranges; join.S combine() merges tuples slot-wise
-  (AND), so subtrees need not cover contiguous rv ranges.
-
-- vagg.S also: gt_pmerge (partitioned parallel merge of partial tables,
-  groups ordered by first tuple), emit_groups (parallel HAVING /
-  projection), vdistinct (hash DISTINCT). sort.S: parallel chunk sort +
-  pairwise merge rounds. order_keys appends all visible columns as
-  tie-breakers (deterministic ORDER BY across modes).
+  option sets on > 5000 random queries (2-4-way joins, LEFT, grouping,
+  DISTINCT, ORDER BY with ties / DESC / NULLS, LIMIT): 0 mismatches after
+  fixing vfilter (right operand of AND must also be evaluated where the
+  left one is NULL, like the row evaluator).
 
 ## Possible next steps
-- vectorized streaming projection; better join estimates; parallel
-  hash-join build.
+- vectorized streaming projection; better join cardinality estimates;
+  parallel hash-join build; radix sort with NULLs in the keys.
 
 ## Gotchas (phase 5)
 - Tuple width can be 0 (SELECT without FROM): copy loops must check it.
@@ -50,6 +51,9 @@
   gate every parallel operator with expr_par_safe.
 - Unit tests run with default (vectorized) mode: unordered results come
   in first-appearance order, not sorted.
+- ENTER n saves x19..x(18+2n) only: a function using x25 needs ENTER 4.
+- Every mode must evaluate the same operands as eval (errors!): AND/OR
+  short-circuit only on the deciding value.
 
 ## Status (Phase 4, session 1) — complete
 - Conformance: session and `--transport http` both 554/554 for phases 1-3
