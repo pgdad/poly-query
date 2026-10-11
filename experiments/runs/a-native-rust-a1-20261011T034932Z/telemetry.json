@@ -1,0 +1,113 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-native-rust-a1-20261011T034932Z",
+ "language": "rust",
+ "task": "native",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-native",
+ "prompt_sha256": "e67159e807a0ab6f637d9d39d7b0cba03c7d8fe3723288defaedc09265dfd930",
+ "session_id": "26099d7f-0745-49fd-81d2-6b78bf2d846d",
+ "tokens": {
+  "input": 274,
+  "output": 150091,
+  "cache_read": 31126730,
+  "cache_creation": 347463,
+  "thinking": null,
+  "thinking_estimated": 56556,
+  "source": "result events",
+  "api_messages": 137
+ },
+ "rate_limit": {
+  "events": 20,
+  "max_utilization": {
+   "five_hour": 0.41,
+   "seven_day": 0.23
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 12.007966000000003,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 142,
+ "result_segments": 1,
+ "assistant_messages": 271,
+ "tool_calls": {
+  "Bash": 133,
+  "Write": 5,
+  "Edit": 1,
+  "ToolSearch": 1,
+  "Read": 1
+ },
+ "tool_calls_total": 141,
+ "tool_failures": 4,
+ "build_invocations": 34,
+ "build_failures_heuristic": 5,
+ "conformance_runs": 8,
+ "conformance_progress": [
+  [
+   0,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ]
+ ],
+ "repair_iterations": 7,
+ "time": {
+  "wall_seconds": 2859.6,
+  "model_api_seconds": 1634.4,
+  "tool_seconds": 1225.2,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 7,
+  "files_changed": 23,
+  "lines_added": 2873,
+  "lines_removed": 96,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The native kernel library is now wired into the engine, and every required suite passes: 0 failures, 0 errors and 0 not-implemented, including correlated subqueries. All work is committed and the tree is clean.\n\n## Test results\n| Run | Result |\n|---|---|\n| `--native libpqkernels.so` | phase 1: 225/225, phase 2: 186/186, phase 3: 143/143, phase 5: 15/15; **TOTAL 569/569** |\n| `--native \u2026 --modes` | phase 1: 1350/1350, phase 2: 1116/1116, phase 3: 858/858; **TOTAL 3324/3324** |\n| No library: session / `--transport http` / `--modes` | 569/569, 569/569, 3324/3324 |\n| `tests/concurrency/http_suite.py` | 18/18 |\n| `--native --transport http` | 569/569 |\n| `make build test` | succeeds, 126 unit tests pass; `make lint` (clippy) is clean |\n\nThe native conformance run also passes 569/569 with each kernel variant forced via `PQ_KERNELS_VARIANT` (reference, scalar, AVX2, AVX-512). The random differential tester (`bench/difftest.py`, now with a `--native` flag) ran 1,250 queries comparing every option combination with and without native against the plain row engine, with no differences.\n\n## What I implemented\n- **Loading the library** (`src/native/`): `--native-kernels PATH` loads it once at startup through `dlopen`/`dlsym`, declared directly against the C library (no crates). It checks the ABI version, runs the CPU dispatch, and calls every kernel through safe wrappers that check buffer lengths and status codes. If the library can't be loaded, the engine logs a warning and runs on its own code. `native.kernels` is claimed.\n- **Filtering** (`src/exec/native_filter.rs`): for a filter directly on top of a table scan, simple conditions run as kernels on the stored columns:\n  - comparisons with a constant, `BETWEEN`, column-vs-column comparisons, and `IS [NOT] NULL`;\n  - this works in vectorized, parallel and row mode;\n  - only the rows that pass are copied out of the table.\n  - EXPLAIN marks these filters and shows which kernel variant is active.\n- **Aggregation**: whole-table SUM/MIN/MAX/COUNT and grouped SUM/AVG/COUNT on integer and decimal columns use the kernels. When a sum kernel reports overflow, the engine recomputes that batch exactly, so overflow errors are unchanged.\n- **Hashing**: keys for GROUP BY, DISTINCT and hash joins are hashed in batches by the kernel. The hashes go into Rust's standard hash table, because my hand-written tables were 1.5\u20132\u00d7 slower.\n\n## Main design decisions\n- **Same answers by construction:** constants are converted exactly into the column's integer form (e.g. `int_col < 2.5` becomes `int_col <= 2`).\n- **Errors and NULLs:** rows where a kernel-evaluated condition is NULL still have the rest of the predicate evaluated. Error behaviour and row order therefore match the reference engine, including errors that `LIMIT` hides.\n- **Excluded predicates:** predicates containing `PQ_SLEEP` or subqueries are never split, so their cost and timing stay as before.\n- **Floating point:** float sums never use the kernel, because it adds in a different order and results would not be bit-identical. A float MIN/MAX that comes out as zero is recomputed by the engine, because the kernel could return `-0.0` instead of `0.0`.\n\n## Measured impact (1m datasets, AVX-512 variant)\nThe machine was shared and busy (load about 10), so differences under about 15% are noise.\n\n| Query type | Without native (ms) | With native (ms) | Speed-up |\n|---|---|---|---|\n| Filters on scans, vectorized (N1, N2, N5, N6) | 0.8\u20135.0 | 0.4\u20133.2 | 1.5\u20133\u00d7 |\n| Filters on scans, row mode (Q1, N1\u2013N5) | 22\u2013125 | 2.1\u201320 | 4\u201320\u00d7 |\n| Whole-table aggregates (N4, N9) | 5.0\u20136.9 | 2.3\u20132.5 | 2\u20132.8\u00d7 |\n| Grouping, joins, DISTINCT (Q3\u2013Q5, Q10, Q12, N7, N8) | \u2014 | \u2014 | no change (\u00b110%) |\n\n- **Regression with the portable variant:** with the plain C reference variant, native filters are 10\u201350% slower than the engine's own code.\n- **Joins:** Q4 and Q5 were about 10% slower with native in this run.\n\nBoth are written up in the README. `bench/bench.py` gained a `--native` flag, ten ne",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

@@ -1,0 +1,25 @@
+{
+ "wave_id": "wave-a-native-a2-20261011T043500Z",
+ "task": "native",
+ "track": "A",
+ "attempt": 2,
+ "seed": 9191,
+ "order": [
+  "java"
+ ],
+ "run_ids": [
+  "a-native-java-a2-20261011T043500Z"
+ ],
+ "started": "2026-10-11T04:35:01+00:00",
+ "parallel": 1,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  10.42919921875,
+  10.86328125,
+  9.01220703125
+ ]
+}
