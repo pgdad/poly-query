@@ -2,6 +2,8 @@
 (execution/worker_pool.py)."""
 
 import json
+import os
+import select
 import unittest
 
 from tests.helpers import make_handler
@@ -77,6 +79,24 @@ class WorkerPoolTests(unittest.TestCase):
         self.assertEqual(resp["error"]["code"], "TIMEOUT")
         self.assertEqual(self.pids(), [])
         self.assertEqual(self.rows("SELECT COUNT(*) FROM t", threads=4), [json.dumps([120])])
+
+    def test_workers_do_not_hold_inherited_pipes(self):
+        # e.g. the result pipe of a concurrent fork-per-query worker (HTTP
+        # server): its reader waits for EOF, which a long-lived worker
+        # holding the write end would prevent forever
+        read_fd, write_fd = os.pipe()
+        try:
+            self.rows("SELECT g, COUNT(*) FROM t GROUP BY g", threads=2)  # forks the workers
+            self.assertEqual(len(self.pids()), 2)
+            os.close(write_fd)
+            write_fd = -1
+            ready, _, _ = select.select([read_fd], [], [], 5)
+            self.assertEqual(ready, [read_fd])
+            self.assertEqual(os.read(read_fd, 1), b"")  # EOF: no worker holds the write end
+        finally:
+            os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
 
     def test_busy_pool_falls_back_to_forking_per_query(self):
         pool = self.handler.engine.pool

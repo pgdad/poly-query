@@ -36,6 +36,7 @@ import os
 import pickle
 import selectors
 import signal
+import stat
 import struct
 import threading
 from dataclasses import dataclass
@@ -213,6 +214,7 @@ class WorkerPool:
                     for fd in (*parent_fds, task_write, result_read):
                         os.close(fd)
                     _detach_stdio()
+                    _close_inherited_streams({task_read, result_write})
                     _serve(task_read, result_write, self._registry)
                 os.close(task_read)
                 os.close(result_write)
@@ -272,6 +274,27 @@ def _detach_stdio() -> None:  # pragma: no cover - child
     os.dup2(devnull, 0)
     os.dup2(devnull, 1)
     os.close(devnull)
+
+
+def _close_inherited_streams(keep: set[int]) -> None:  # pragma: no cover - child
+    """Closes the pipes and sockets inherited from the engine process (other
+    than ``keep``). A worker lives long: holding, e.g., the write end of a
+    concurrent query's fork-per-query result pipe would keep its reader from
+    ever seeing EOF, and holding a server connection would keep it open after
+    the server closed it. Regular files (mmap-backed tables) stay open."""
+    try:
+        fds = [int(name) for name in os.listdir("/proc/self/fd")]
+    except OSError:
+        return
+    for fd in fds:
+        if fd <= 2 or fd in keep:
+            continue
+        try:
+            mode = os.fstat(fd).st_mode
+            if stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode):
+                os.close(fd)
+        except OSError:
+            pass
 
 
 def _serve(task_fd: int, result_fd: int, registry: dict[int, object]) -> None:  # pragma: no cover - child
