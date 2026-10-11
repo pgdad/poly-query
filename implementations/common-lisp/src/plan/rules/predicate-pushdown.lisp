@@ -5,9 +5,14 @@
 ;;;;  * into the inputs of joins (never into the NULL-supplying side of a
 ;;;;    LEFT JOIN from above) and into the conditions of inner joins, so comma
 ;;;;    joins become equi-joins;
-;;;;  * through SubqueryAlias nodes (derived tables, CTE references).
+;;;;  * below Projects (in practice: into derived tables and CTE references)
+;;;;    when the projected expressions cannot fail, so evaluating them for
+;;;;    fewer rows hides no error: the conjuncts are rewritten over the
+;;;;    Project's input by inlining the projected expressions;
+;;;;  * through SubqueryAlias nodes.
 ;;;; Conjuncts from above a node are evaluated after the node's own ones, so
 ;;;; they are only evaluated for rows that satisfy them (as without pushdown).
+;;;; Conjuncts stay above Aggregate, Distinct, Sort, Limit and UnionAll.
 
 (in-package #:polyquery)
 
@@ -27,8 +32,9 @@ pushing each conjunct as far down as is valid."
   (typecase node
     (lp-filter
      (push-conjuncts (lnode-child node)
-                     (append conjuncts (split-conjuncts (lp-filter-predicate node)))))
+                     (append (split-conjuncts (lp-filter-predicate node)) conjuncts)))
     (lp-join (push-into-join node conjuncts))
+    (lp-project (push-into-project node conjuncts))
     (lp-subquery-alias
      (rebuild-with-children node (list (push-conjuncts (lnode-child node) conjuncts))))
     (t (make-filter (push-down-predicates node) (conjoin conjuncts)))))
@@ -63,3 +69,24 @@ pushing each conjunct as far down as is valid."
                                                            (nreverse to-right)))
                              (conjoin (nreverse to-join)))))
         (make-filter join (conjoin (nreverse above)))))))
+
+(defun project-pushdown-valid-p (node)
+  "True if filtering the input of the Project NODE instead of its output is
+equivalent: its expressions cannot fail and contain no aggregates."
+  (notany (lambda (e) (or (may-fail-p e) (bexpr-contains-aggregate-p e)))
+          (lp-project-exprs node)))
+
+(defun inline-project-exprs (e exprs)
+  "E (over a Project's output) rewritten over the Project's input: every
+column reference is replaced by the projected expression EXPRS defines it by."
+  (let ((v (coerce exprs 'simple-vector)))
+    (bexpr-rewrite (lambda (x) (and (b-column-p x) (svref v (b-column-index x)))) e)))
+
+(defun push-into-project (node conjuncts)
+  (if (and conjuncts (project-pushdown-valid-p node))
+      (let ((exprs (lp-project-exprs node)))
+        (rebuild-with-children node
+                               (list (push-conjuncts (lnode-child node)
+                                                     (mapcar (lambda (c) (inline-project-exprs c exprs))
+                                                             conjuncts)))))
+      (make-filter (push-down-predicates node) (conjoin conjuncts))))
