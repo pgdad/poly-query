@@ -1,5 +1,22 @@
 # Working notes (arm64-asm-engine)
 
+## Status (Phase 3, session 1) — in progress
+- Done: null bitmaps (COL_NULLS), row layout (TBL_LAYOUT/TBL_ROWS) and
+  dictionary-encoded STRING columns (COL_ENC = CENC_DICT) built by
+  storage.S table_finalize after ingestion; load options layout/dictionary;
+  table_stats + `stats` op; index.S (HASH chained table, BTREE = sorted
+  permutation + sorted values), CREATE/DROP INDEX, schema "indexes";
+  access.S (simple predicates, selectivity estimates, index selection,
+  row-group skip test); exec.S ex_scan index scans / row-group skipping;
+  plan.S pp_access (estimates, inner hash join builds on the smaller input
+  by swapping children), EXPLAIN IndexScan/index/kind/estimated_rows.
+- PQCF (src/pqcf.S: crc32, pqcf_save, pqcf_load, op_save/op_open) was being
+  written by a helper in a separate worktree; merge it, then run all of
+  phase 3.
+- Fuzz check used during development: /tmp/fz/fuzz.py (not in repo) compares
+  use_indexes true/false and row/column/dict layouts — 0 mismatches.
+
+
 ## Status (Phase 2, session 1)
 - Conformance: `--phase 1 --phase 2` reports 411/411 pass (phase 1 225/225,
   phase 2 186/186 incl. the optional `sql.correlated_subquery` file).
