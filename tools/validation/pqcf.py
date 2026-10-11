@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Reference reader/writer/validator for PQCF v1 (spec/storage/pqcf-v1.md).
+"""Reference reader/writer/validator for PQCF v1 (spec/storage/pqcf-v1.md) and v2
+(spec/changes/decimal38.md: 128-bit wide decimals).
 
 Used to (a) produce golden and deliberately-corrupted fixture files and (b)
 independently validate files written by engines in the interop suite. Not an
@@ -26,6 +27,14 @@ import pqref  # noqa: E402
 
 MAGIC = b"PQCF"
 FIXED = {"INT64": "<q", "FLOAT64": "<d", "TIMESTAMP": "<q", "DATE": "<i"}
+
+
+def is_wide(typ: str) -> bool:
+    return typ.startswith("DECIMAL") and pqref.dec_params(typ)[0] > 18
+
+
+def i128(v: int) -> bytes:
+    return v.to_bytes(16, "little", signed=True)
 
 
 class Corrupt(Exception):
@@ -100,6 +109,8 @@ def encode_chunk(values: list[Any], typ: str, encoding: str) -> tuple[bytes, dic
                 data += p or b""
                 offs.append(len(data))
             out += struct.pack(f"<{n + 1}I", *offs) + data
+        elif is_wide(typ):
+            out += b"".join(i128(p or 0) for p in phys)
         elif typ.startswith("DECIMAL"):
             out += struct.pack(f"<{n}q", *[p or 0 for p in phys])
         else:
@@ -126,7 +137,10 @@ def encode_chunk(values: list[Any], typ: str, encoding: str) -> tuple[bytes, dic
                 runs[-1][1] += 1
             else:
                 runs.append([v, 1])
-        out += struct.pack("<I", len(runs)) + b"".join(struct.pack("<qI", v, c) for v, c in runs)
+        if is_wide(typ):
+            out += struct.pack("<I", len(runs)) + b"".join(i128(v) + struct.pack("<I", c) for v, c in runs)
+        else:
+            out += struct.pack("<I", len(runs)) + b"".join(struct.pack("<qI", v, c) for v, c in runs)
     else:
         raise ValueError(encoding)
     meta: dict = {"encoding": encoding, "null_count": nulls}
@@ -156,7 +170,8 @@ def choose_encoding(values: list[Any], typ: str, mode: str) -> str:
 def write(path: Path, table: str, columns: list[tuple[str, str]], rows: list[list[Any]],
           row_group_size: int = 65536, mode: str = "auto", indexes: list | None = None,
           writer: str = "pqcf.py reference 1.0", extra_meta: dict | None = None) -> bytes:
-    body = bytearray(MAGIC + struct.pack("<HH", 1, 0))
+    version = 2 if any(is_wide(t) for _, t in columns) else 1
+    body = bytearray(MAGIC + struct.pack("<HH", version, 0))
     groups = []
     for g0 in range(0, len(rows), row_group_size) if rows else []:
         grows = rows[g0:g0 + row_group_size]
@@ -170,7 +185,7 @@ def write(path: Path, table: str, columns: list[tuple[str, str]], rows: list[lis
             chunks.append({"offset": len(body), "length": len(data), "crc32": crc32(data), **meta})
             body += data
         groups.append({"row_count": len(grows), "chunks": chunks})
-    meta = {"format_version": 1, "writer": writer, "table": table, "row_count": len(rows),
+    meta = {"format_version": version, "writer": writer, "table": table, "row_count": len(rows),
             "columns": [{"name": n, "type": t} for n, t in columns], "indexes": indexes or [],
             "row_groups": groups}
     if extra_meta:
@@ -194,7 +209,7 @@ def read(data: bytes) -> tuple[dict, list[list[Any]]]:
     _check(data[:4] == MAGIC, "bad header magic")
     ver, flags = struct.unpack_from("<HH", data, 4)
     _check(ver != 0, "version 0")
-    _check(ver == 1, f"unsupported version {ver}", "STORAGE_VERSION_UNSUPPORTED")
+    _check(ver in (1, 2), f"unsupported version {ver}", "STORAGE_VERSION_UNSUPPORTED")
     _check(flags == 0, f"unsupported flags {flags}", "STORAGE_VERSION_UNSUPPORTED")
     _check(data[-4:] == MAGIC, "bad trailing magic")
     M, mcrc = struct.unpack_from("<II", data, S - 12)
@@ -207,7 +222,7 @@ def read(data: bytes) -> tuple[dict, list[list[Any]]]:
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise Corrupt("STORAGE_CORRUPT", f"metadata json: {e}") from e
     _check(isinstance(meta, dict), "metadata not an object")
-    _check(meta.get("format_version") == 1, "format_version mismatch")
+    _check(meta.get("format_version") == ver, "format_version mismatch")
     cols = meta.get("columns")
     _check(isinstance(cols, list), "columns missing")
     names = set()
@@ -217,7 +232,7 @@ def read(data: bytes) -> tuple[dict, list[list[Any]]]:
         _check(c["name"].lower() not in names, "duplicate column")
         names.add(c["name"].lower())
         try:
-            types.append(pqref.canonical_type(c.get("type", "")))
+            types.append(pqref.canonical_type(c.get("type", ""), 38 if ver == 2 else 18))
         except pqref.IngestError as e:
             raise Corrupt("STORAGE_CORRUPT", f"bad type {c.get('type')}") from e
     for ix in meta.get("indexes") or []:
@@ -277,6 +292,9 @@ def decode_chunk(blob: bytes, n: int, typ: str, ch: dict) -> list[Any]:
                     vals.append(blob[dstart + offs[i]:dstart + offs[i + 1]].decode("utf-8"))
                 except UnicodeDecodeError as e:
                     raise Corrupt("STORAGE_CORRUPT", "invalid utf-8") from e
+        elif is_wide(typ):
+            _check(len(blob) - pos == 16 * n, "fixed-width size mismatch")
+            vals = [int.from_bytes(blob[pos + 16 * i:pos + 16 * i + 16], "little", signed=True) for i in range(n)]
         else:
             fmt = "<q" if typ.startswith("DECIMAL") else FIXED[typ]
             w = struct.calcsize(fmt)
@@ -312,10 +330,15 @@ def decode_chunk(blob: bytes, n: int, typ: str, ch: dict) -> list[Any]:
         _check(len(blob) - pos >= 4, "truncated rle")
         R = struct.unpack_from("<I", blob, pos)[0]
         pos += 4
-        _check(len(blob) - pos == 12 * R, "rle size mismatch")
+        rw = 20 if is_wide(typ) else 12
+        _check(len(blob) - pos == rw * R, "rle size mismatch")
         vals = []
         for r in range(R):
-            v, c = struct.unpack_from("<qI", blob, pos + 12 * r)
+            if rw == 20:
+                o = pos + 20 * r
+                v, c = int.from_bytes(blob[o:o + 16], "little", signed=True), struct.unpack_from("<I", blob, o + 16)[0]
+            else:
+                v, c = struct.unpack_from("<qI", blob, pos + 12 * r)
             _check(c >= 1, "zero-length run")
             vals.extend([v] * c)
         _check(len(vals) == n, "rle length mismatch")
@@ -364,6 +387,25 @@ def _types_table():
     return cols, rows
 
 
+def _wide_table():
+    cols = [("id", "INT64"), ("amt", "DECIMAL(38,10)"), ("big", "DECIMAL(30,0)"), ("small", "DECIMAL(10,2)")]
+    unit = Decimal("123456789012345678.9012345678")
+    rows = []
+    for i in range(1, 61):
+        rows.append([
+            i,
+            None if i % 9 == 0 else unit * i * (-1 if i % 4 == 0 else 1),
+            Decimal((i // 10) * 10**29 + 7),                    # long runs -> RLE friendly
+            None if i % 7 == 0 else Decimal(i) * Decimal("1.25"),
+        ])
+    top = Decimal("9999999999999999999999999999.9999999999")
+    rows += [[61, top, Decimal(10**30 - 1), Decimal("99999999.99")],
+             [62, -top, Decimal(-(10**30 - 1)), Decimal("-99999999.99")],
+             [63, Decimal(0), Decimal(0), Decimal(0)],
+             [64, None, None, None]]
+    return cols, rows
+
+
 def golden(outdir: Path) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     cols, rows = _types_table()
@@ -399,7 +441,7 @@ def golden(outdir: Path) -> None:
 
     put("bad_header_magic.pqcf", b"PQCX" + small[4:])
     put("bad_trailer_magic.pqcf", small[:-4] + b"PQCX")
-    put("version2.pqcf", small[:4] + struct.pack("<HH", 2, 0) + small[8:])
+    put("version3.pqcf", small[:4] + struct.pack("<HH", 3, 0) + small[8:])
     put("flags.pqcf", small[:4] + struct.pack("<HH", 1, 1) + small[8:])
     put("truncated_half.pqcf", small[: len(small) // 2])
     put("truncated_tail.pqcf", small[:-1])
@@ -437,6 +479,27 @@ def golden(outdir: Path) -> None:
     put("invalid_utf8.pqcf", bytes(body) + mb + struct.pack("<II", len(mb), crc32(mb)) + MAGIC)
     put("not_json_meta.pqcf", small[:mstart] + b"{not json" + struct.pack("<II", 9, crc32(b"{not json")) + MAGIC)
 
+    # ---- PQCF v2 (CR-2 wide decimals)
+    wcols, wrows = _wide_table()
+    write(outdir / "wide_plain.pqcf", "wide", wcols, wrows, row_group_size=40, mode="plain",
+          indexes=[{"name": "wide_amt_idx", "column": "amt", "kind": "BTREE"}])
+    wide_rle = write(outdir / "wide_rle.pqcf", "wide", wcols, wrows, row_group_size=25, mode="rle")
+    wl = struct.unpack_from("<I", wide_rle, len(wide_rle) - 12)[0]
+    wstart = len(wide_rle) - 12 - wl
+    wmeta = json.loads(wide_rle[wstart:len(wide_rle) - 12])
+
+    def rewide(m: dict, version: int) -> bytes:
+        mb = json.dumps(m, separators=(",", ":")).encode()
+        return MAGIC + struct.pack("<HH", version, 0) + wide_rle[8:wstart] + mb + struct.pack("<II", len(mb), crc32(mb)) + MAGIC
+
+    m = json.loads(json.dumps(wmeta))
+    m["format_version"] = 1
+    put("wide_in_v1.pqcf", rewide(m, 1))
+    put("wide_version_mismatch.pqcf", rewide(wmeta, 1))
+    over = write(bad / "wide_overprecision.pqcf", "wide", [("id", "INT64"), ("amt", "DECIMAL(38,10)")],
+                 [[1, Decimal("1.5")], [2, Decimal(10) ** 28]], mode="plain")
+    del over
+
     # sanity: all goldens valid, all corrupt invalid
     for p in sorted(outdir.glob("*.pqcf")):
         read(p.read_bytes())
@@ -468,7 +531,7 @@ def main() -> int:
             encs = sorted({c["encoding"] for g in meta["row_groups"] for c in g["chunks"]})
             print(f"{f}: OK table={meta['table']} rows={meta['row_count']} groups={len(meta['row_groups'])} encodings={encs} writer={meta.get('writer')}")
         elif cmd == "dump":
-            types = [pqref.canonical_type(c["type"]) for c in meta["columns"]]
+            types = [pqref.canonical_type(c["type"], 38) for c in meta["columns"]]
             print(json.dumps({k: v for k, v in meta.items() if k != "row_groups"}))
             for r in rows:
                 print(json.dumps([pqref.serialize(v, t) for v, t in zip(r, types)], ensure_ascii=False))

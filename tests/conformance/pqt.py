@@ -205,6 +205,12 @@ def parse_file(path: Path) -> PqtFile:
             steps.append(Step("corrupt", lineno, request={"op": "open", "table": toks[1], "path": toks[2]},
                               expect_error=toks[3]))
             i += 1
+        elif word == "pqcf":
+            toks = shlex.split(line)
+            if len(toks) != 3 or not toks[2].isdigit():
+                raise PqtSyntaxError(f"{path}:{lineno}: pqcf <path> <format_version>")
+            steps.append(Step("pqcf", lineno, request={"path": toks[1], "format_version": int(toks[2])}))
+            i += 1
         elif word == "data":
             toks = shlex.split(line)
             opts, _ = _parse_opts(toks[3:], lineno)

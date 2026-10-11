@@ -1,0 +1,336 @@
+# CR-2 DECIMAL precision 38 — spec/changes/decimal38.md
+# Expected values computed with Python's decimal module (100-digit context) and
+# reviewed by hand; the SQLite oracle cannot represent 38-digit decimals.
+@phase 3
+@requires phase3 change.decimal38 sql.groupby sql.join storage.pqcf index.btree ingest.csv ingest.json
+
+load bd fixtures/bigdec.csv schema=id:INT64;grp:STRING;amt:DECIMAL(38,10);big:DECIMAL(30,0);small:DECIMAL(10,2)
+load people fixtures/people.csv
+
+# ---- types and literals
+request
+{"op":"schema","table":"bd"}
+----
+match {"ok":true,"row_count":6,"columns":[{"name":"id","type":"INT64"},{"name":"grp","type":"STRING"},{"name":"amt","type":"DECIMAL(38,10)"},{"name":"big","type":"DECIMAL(30,0)"},{"name":"small","type":"DECIMAL(10,2)"}]}
+
+query
+SELECT 12345678901234567890.5 AS v
+----
+v DECIMAL(21,1)
+["12345678901234567890.5"]
+
+query
+SELECT 0.12345678901234567890123456789012345678 AS v
+----
+v DECIMAL(38,38)
+["0.12345678901234567890123456789012345678"]
+
+# more than 38 significant digits: still FLOAT64
+query
+SELECT 123456789012345678901234567890123456789.0 AS v
+----
+v FLOAT64
+[1.2345678901234568e38]
+
+query
+SELECT CAST('99999999999999999999999999999999999999' AS DECIMAL(38,0)) AS v, CAST('-12.5' AS NUMERIC(25,3)) AS w
+----
+v DECIMAL(38,0) | w DECIMAL(25,3)
+["99999999999999999999999999999999999999", "-12.500"]
+
+error SEMANTIC_ERROR
+SELECT CAST(1 AS DECIMAL(39,0))
+
+error SEMANTIC_ERROR
+SELECT CAST(1 AS DECIMAL(30,31))
+
+# ---- arithmetic: narrow rules unchanged, W = 38 as soon as one operand is wide
+query
+SELECT 1.5 + 2.25 AS narrow, CAST(1.5 AS DECIMAL(19,1)) + 2.25 AS wide
+----
+narrow DECIMAL(18,2) | wide DECIMAL(38,2)
+["3.75", "3.75"]
+
+error NUMERIC_OVERFLOW
+SELECT 999999999999999999 + 1.0
+
+query
+SELECT CAST('99999999999999999999999999999999999998' AS DECIMAL(38,0)) + 1 AS v
+----
+v DECIMAL(38,0)
+["99999999999999999999999999999999999999"]
+
+error NUMERIC_OVERFLOW
+SELECT CAST('99999999999999999999999999999999999998' AS DECIMAL(38,0)) + 2
+
+query
+SELECT 9223372036854775807 + CAST(1 AS DECIMAL(19,0)) AS v
+----
+v DECIMAL(38,0)
+["9223372036854775808"]
+
+query
+SELECT CAST(2.5 AS DECIMAL(20,1)) * 1.25 AS v
+----
+v DECIMAL(38,3)
+["3.125"]
+
+query
+SELECT CAST('12345678901234567890' AS DECIMAL(20,0)) * CAST('12345678901234567' AS DECIMAL(20,0)) AS v
+----
+v DECIMAL(38,0)
+["152415787532388356514250977776253630"]
+
+error NUMERIC_OVERFLOW
+SELECT CAST('100000000000000000000' AS DECIMAL(21,0)) * CAST('10000000000000000000' AS DECIMAL(20,0))
+
+query
+SELECT CAST(1 AS DECIMAL(20,10)) * CAST(1 AS DECIMAL(10,9)) AS v
+----
+v DECIMAL(38,19)
+["1.0000000000000000000"]
+
+error TYPE_ERROR
+SELECT CAST(1 AS DECIMAL(38,20)) * CAST(1 AS DECIMAL(38,19))
+
+error TYPE_ERROR
+SELECT CAST(7 AS DECIMAL(30,0)) % 2
+
+query
+SELECT CAST('1' AS DECIMAL(38,10)) / 4 AS v, -CAST('12345678901234567890.25' AS DECIMAL(22,2)) AS n
+----
+v FLOAT64 | n DECIMAL(22,2)
+[0.25, "-12345678901234567890.25"]
+
+query ordered
+SELECT id, amt + small AS t, amt * small AS m FROM bd WHERE id IN (1, 2, 6) ORDER BY id
+----
+id INT64 | t DECIMAL(38,10) | m DECIMAL(38,12)
+[1, "12345678901234567891.3734567890", "15432098626543209862.654320986250"]
+[2, "2.4999999999", "-0.000000000250"]
+[6, "0.5100000000", "0.005000000000"]
+
+# 29 integer digits + scale 12 = 41 digits
+error NUMERIC_OVERFLOW
+SELECT amt * small FROM bd WHERE id = 3
+
+# ---- comparison is exact (SPEC-Q-001)
+query
+SELECT 9223372036854775807 > 1.5 AS a, CAST('12345678901234567890.00' AS DECIMAL(22,2)) = 12345678901234567890.0 AS b, CAST('0.1' AS DECIMAL(38,37)) = 0.1 AS c, CAST('1.5' AS DECIMAL(30,1)) < 2.0e0 AS d
+----
+a BOOLEAN | b BOOLEAN | c BOOLEAN | d BOOLEAN
+[true, true, true, true]
+
+query ordered
+SELECT id FROM bd WHERE amt > small ORDER BY id
+----
+id INT64
+[1]
+[3]
+[5]
+[6]
+
+query ordered
+SELECT id FROM bd WHERE big > 9223372036854775807 ORDER BY id
+----
+id INT64
+[1]
+[2]
+
+query ordered
+SELECT a.id AS x, b.id AS y FROM bd a JOIN bd b ON a.amt = b.amt AND a.id < b.id
+----
+x INT64 | y INT64
+[1, 5]
+
+# ---- CAST
+query
+SELECT CAST(CAST('-12345.99' AS DECIMAL(30,2)) AS INT64) AS i, CAST(CAST('12345678901234567890123456789' AS DECIMAL(38,0)) AS FLOAT64) AS f, CAST(0.1e0 AS DECIMAL(38,30)) AS d, CAST(CAST('-0.0000000001' AS DECIMAL(38,10)) AS STRING) AS s
+----
+i INT64 | f FLOAT64 | d DECIMAL(38,30) | s STRING
+[-12345, 1.2345678901234568e28, "0.100000000000000005551115123126", "-0.0000000001"]
+
+error NUMERIC_OVERFLOW
+SELECT CAST(CAST('9223372036854775808' AS DECIMAL(20,0)) AS INT64)
+
+query
+SELECT CAST(CAST('1.25' AS DECIMAL(30,2)) AS DECIMAL(30,1)) AS up, CAST(CAST('-1.25' AS DECIMAL(30,2)) AS DECIMAL(30,1)) AS down, CAST('12345678901234567890123456789.123456789' AS DECIMAL(38,9)) AS full
+----
+up DECIMAL(30,1) | down DECIMAL(30,1) | full DECIMAL(38,9)
+["1.3", "-1.3", "12345678901234567890123456789.123456789"]
+
+error NUMERIC_OVERFLOW
+SELECT CAST('1234567890123456789012345678901234567890' AS DECIMAL(38,0))
+
+# ---- functions and common types
+query
+SELECT ROUND(CAST('2.345' AS DECIMAL(30,3)), 2) AS r, FLOOR(CAST('-2.5' AS DECIMAL(30,1))) AS fl, CEIL(CAST('-2.5' AS DECIMAL(30,1))) AS ce, ABS(CAST('-7.50' AS DECIMAL(25,2))) AS ab
+----
+r DECIMAL(38,2) | fl DECIMAL(38,0) | ce DECIMAL(38,0) | ab DECIMAL(25,2)
+["2.35", "-3", "-2", "7.50"]
+
+query
+SELECT COALESCE(NULL, CAST(1 AS DECIMAL(20,2)), 1.5) AS c, CASE WHEN TRUE THEN 1.5 ELSE 2.25 END AS n
+----
+c DECIMAL(38,2) | n DECIMAL(18,2)
+["1.00", "1.50"]
+
+# ---- aggregates
+query ordered
+SELECT grp, COUNT(amt) AS n, SUM(amt) AS s, MIN(amt) AS lo, MAX(amt) AS hi, SUM(big) AS b FROM bd GROUP BY grp ORDER BY grp
+----
+grp STRING | n INT64 | s DECIMAL(38,10) | lo DECIMAL(38,10) | hi DECIMAL(38,10) | b DECIMAL(38,0)
+["a", 2, "12345678901234567890.1234567889", "-0.0000000001", "12345678901234567890.1234567890", "1123456789012345678901234567889"]
+["b", 1, "9999999999999999999999999999.9999999999", "9999999999999999999999999999.9999999999", "9999999999999999999999999999.9999999999", "1"]
+["c", 2, "12345678901234567890.6234567890", "0.5000000000", "12345678901234567890.1234567890", "-499999999999999999999999999993"]
+
+# the total needs 39 digits
+error NUMERIC_OVERFLOW
+SELECT SUM(amt) FROM bd
+
+query
+SELECT SUM(amt) AS s, AVG(amt) AS a, COUNT(DISTINCT amt) AS d FROM bd WHERE grp <> 'b'
+----
+s DECIMAL(38,10) | a FLOAT64 | d INT64
+["24691357802469135780.7469135779", 6.172839450617284e18, 3]
+
+query
+SELECT SUM(small) AS narrow, SUM(CAST(small AS DECIMAL(38,2))) AS wide FROM bd
+----
+narrow DECIMAL(18,2) | wide DECIMAL(38,2)
+["100000000.00", "100000000.00"]
+
+query ordered
+SELECT amt, COUNT(*) AS n FROM bd GROUP BY amt ORDER BY amt DESC
+----
+amt DECIMAL(38,10) | n INT64
+["9999999999999999999999999999.9999999999", 1]
+["12345678901234567890.1234567890", 2]
+["0.5000000000", 1]
+["-0.0000000001", 1]
+[null, 1]
+
+# ---- indexes on wide columns (6 rows: index use is not asserted, results are)
+statement ok
+CREATE INDEX bd_amt ON bd (amt)
+
+query ordered
+SELECT id FROM bd WHERE amt = 0.5 OR amt = 12345678901234567890.123456789 ORDER BY id
+----
+id INT64
+[1]
+[5]
+[6]
+
+query ordered
+SELECT id FROM bd WHERE amt BETWEEN 0 AND 12345678901234567890.1234567890 ORDER BY id
+----
+id INT64
+[1]
+[5]
+[6]
+
+# ---- storage: v2 exactly when a wide column exists
+save bd out/bd.pqcf
+pqcf out/bd.pqcf 2
+open bd2 out/bd.pqcf
+
+query ordered
+SELECT * FROM bd2 ORDER BY id
+----
+id INT64 | grp STRING | amt DECIMAL(38,10) | big DECIMAL(30,0) | small DECIMAL(10,2)
+[1, "a", "12345678901234567890.1234567890", "999999999999999999999999999999", "1.25"]
+[2, "a", "-0.0000000001", "123456789012345678901234567890", "2.50"]
+[3, "b", "9999999999999999999999999999.9999999999", "1", "-3.75"]
+[4, "b", null, null, null]
+[5, "c", "12345678901234567890.1234567890", "-500000000000000000000000000000", "99999999.99"]
+[6, "c", "0.5000000000", "7", "0.01"]
+
+request
+{"op":"schema","table":"bd2"}
+----
+match {"ok":true,"indexes":[{"name":"bd_amt","column":"amt","kind":"BTREE"}]}
+
+save bd out/bd_rle.pqcf encoding=rle row_group_size=4
+pqcf out/bd_rle.pqcf 2
+open bd3 out/bd_rle.pqcf mmap=true
+
+query ordered
+SELECT id, amt, big FROM bd3 WHERE big < 0 OR amt < 0 ORDER BY id
+----
+id INT64 | amt DECIMAL(38,10) | big DECIMAL(30,0)
+[2, "-0.0000000001", "123456789012345678901234567890"]
+[5, "12345678901234567890.1234567890", "-500000000000000000000000000000"]
+
+save people out/people.pqcf
+pqcf out/people.pqcf 1
+
+data led csv schema=id:INT64;amount:DECIMAL(18,2)
+id,amount
+1,9999999999999999.99
+.
+
+save led out/led.pqcf
+pqcf out/led.pqcf 1
+
+# reference-writer v2 files
+open wp fixtures/pqcf/wide_plain.pqcf
+open wr fixtures/pqcf/wide_rle.pqcf
+
+request
+{"op":"schema","table":"wr"}
+----
+match {"ok":true,"row_count":64,"columns":[{"name":"id","type":"INT64"},{"name":"amt","type":"DECIMAL(38,10)"},{"name":"big","type":"DECIMAL(30,0)"},{"name":"small","type":"DECIMAL(10,2)"}]}
+
+query
+SELECT COUNT(*) AS n, COUNT(amt) AS na, SUM(amt) AS s, MIN(amt) AS lo, MAX(amt) AS hi, SUM(big) AS b, MIN(big) AS blo, SUM(small) AS sm FROM wp
+----
+n INT64 | na INT64 | s DECIMAL(38,10) | lo DECIMAL(38,10) | hi DECIMAL(38,10) | b DECIMAL(38,0) | blo DECIMAL(30,0) | sm DECIMAL(18,2)
+[64, 57, "92962962126296296212.6296295534", "-9999999999999999999999999999.9999999999", "9999999999999999999999999999.9999999999", "15600000000000000000000000000420", "-999999999999999999999999999999", "1972.50"]
+
+query
+SELECT COUNT(*) AS n, COUNT(amt) AS na, SUM(amt) AS s, MIN(amt) AS lo, MAX(amt) AS hi, SUM(big) AS b, MIN(big) AS blo, SUM(small) AS sm FROM wr
+----
+n INT64 | na INT64 | s DECIMAL(38,10) | lo DECIMAL(38,10) | hi DECIMAL(38,10) | b DECIMAL(38,0) | blo DECIMAL(30,0) | sm DECIMAL(18,2)
+[64, 57, "92962962126296296212.6296295534", "-9999999999999999999999999999.9999999999", "9999999999999999999999999999.9999999999", "15600000000000000000000000000420", "-999999999999999999999999999999", "1972.50"]
+
+query ordered
+SELECT id, amt FROM wr WHERE id IN (4, 8, 12, 59) ORDER BY id
+----
+id INT64 | amt DECIMAL(38,10)
+[4, "-493827156049382715.6049382712"]
+[8, "-987654312098765431.2098765424"]
+[12, "-1481481468148148146.8148148136"]
+[59, "7283950551728395055.1728395002"]
+
+corrupt c1 fixtures/pqcf/corrupt/wide_in_v1.pqcf STORAGE_CORRUPT
+corrupt c2 fixtures/pqcf/corrupt/wide_version_mismatch.pqcf STORAGE_CORRUPT
+corrupt c3 fixtures/pqcf/corrupt/wide_overprecision.pqcf STORAGE_CORRUPT
+corrupt c4 fixtures/pqcf/corrupt/version3.pqcf STORAGE_VERSION_UNSUPPORTED
+
+# ---- ingestion
+data j1 json schema=a:DECIMAL(38,0);b:DECIMAL(38,19)
+[{"a": 12345678901234567890123456789012345678, "b": 0.1234567890123456789}, {"a": -1, "b": "-1.5"}]
+.
+
+query ordered
+SELECT a, b FROM j1 ORDER BY a
+----
+a DECIMAL(38,0) | b DECIMAL(38,19)
+["-1", "-1.5000000000000000000"]
+["12345678901234567890123456789012345678", "0.1234567890123456789"]
+
+data bad1 csv schema=a:DECIMAL(38,2) expect=CONVERSION_ERROR
+a
+123.456
+.
+
+data bad2 csv schema=a:DECIMAL(38,0) expect=CONVERSION_ERROR
+a
+123456789012345678901234567890123456789
+.
+
+data bad3 csv schema=a:DECIMAL(39,0) expect=INVALID_REQUEST
+a
+1
+.

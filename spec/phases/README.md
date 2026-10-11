@@ -49,3 +49,4 @@ for other engines.
 | capability | phase | meaning |
 |---|---|---|
 | `change.union_all` | CR-1 | `UNION ALL` per [`../changes/union-all.md`](../changes/union-all.md) |
+| `change.decimal38` | CR-2 | `DECIMAL` precision 38 and PQCF v2 per [`../changes/decimal38.md`](../changes/decimal38.md) |

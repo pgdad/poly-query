@@ -50,10 +50,10 @@
   },
   "change-decimal38": {
     "title": "Architectural change — DECIMAL precision 38",
-    "phase_file": "phase-1.md",
+    "phase_file": "phase-3.md",
     "runner_args": "",
-    "goal": "Requirement change (identical for every language): raise the maximum DECIMAL precision from 18 to 38 digits as specified in `spec/changes/decimal38.md` (storage format PQCF v2 for wide decimals included). New cases: `tests/conformance/cases/changes/decimal38.pqt`.",
-    "done": "The `changes/decimal38` cases pass. All public conformance phases the engine previously passed still pass (`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery`), plus the task-specific criteria above; `make build test` succeed; all work is committed."
+    "goal": "Requirement change (identical for every language): your accepted engine (Phases 1–5, native kernels, `UNION ALL`) is in `implementations/{{LANG_DIR}}/`. Raise the maximum DECIMAL precision from 18 to 38 digits exactly as specified in `spec/changes/decimal38.md`: narrow (p ≤ 18) behaviour stays unchanged, wide decimals use result precision 38, comparisons between INT64/DECIMAL values are exact, CAST/ingestion/protocol accept up to 38 digits, and tables with a wide decimal column are saved as PQCF v2 (128-bit values) while all other tables stay PQCF v1. Keep everything consistent across all execution options (`mode`, `threads`, `join`, `optimize`, `native`; wide columns never go to native kernels) and claim the capability `change.decimal38` (keep `change.union_all`). The public cases are in `tests/conformance/cases/changes/decimal38.pqt`; reference-writer PQCF v2 files are in `tests/conformance/fixtures/pqcf/`.",
+    "done": "`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery` (which now includes the `changes/decimal38` cases), the same with `--modes`, with `--transport http`, and `python3 tests/concurrency/http_suite.py --engine implementations/{{LANG_DIR}}/bin/polyquery` all report 0 failures, 0 errors and 0 not-implemented (except optionally correlated subqueries); the engine claims `change.decimal38` and `change.union_all`; `make build test` succeed; README.md documents the wide-decimal representation and which modules the change touched; all work is committed."
   },
   "refactor-plan-separation": {
     "title": "Refactoring — logical/physical plan separation",

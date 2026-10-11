@@ -187,6 +187,8 @@ def open_pqcf(con: sqlite3.Connection, table: str, file: Path, replace: bool) ->
 
 def process(path: Path, fill: bool) -> tuple[int, int, list[str]]:
     f = parse_file(path)
+    if not any(st.kind == "query" and st.oracle for st in f.steps):
+        return 0, 0, []
     con = connect()
     saved: dict[str, str] = {}   # path -> source table (oracle models save/open as a copy)
     checked, failed, msgs = 0, 0, []

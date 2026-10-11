@@ -8,8 +8,12 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
+import decimal
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
+
+# 38-digit decimals (CR-2) and their products exceed the default 28-digit context.
+decimal.getcontext().prec = 100
 
 INT64_MIN, INT64_MAX = -(2**63), 2**63 - 1
 
@@ -28,7 +32,7 @@ class IngestError(Exception):
         self.code = code
 
 
-def canonical_type(t: str) -> str:
+def canonical_type(t: str, max_p: int = 18) -> str:
     u = t.strip().upper().replace(" ", "")
     alias = {"BOOL": "BOOLEAN", "BOOLEAN": "BOOLEAN", "INT": "INT64", "INTEGER": "INT64", "BIGINT": "INT64",
              "INT64": "INT64", "DOUBLE": "FLOAT64", "FLOAT": "FLOAT64", "REAL": "FLOAT64", "FLOAT64": "FLOAT64",
@@ -39,7 +43,7 @@ def canonical_type(t: str) -> str:
     if m:
         p = int(m.group(1) or 18)
         s = int(m.group(2) or 0)
-        if not (1 <= p <= 18 and 0 <= s <= p):
+        if not (1 <= p <= max_p and 0 <= s <= p):
             raise IngestError("INVALID_REQUEST", f"bad decimal type {t}")
         return f"DECIMAL({p},{s})"
     raise IngestError("INVALID_REQUEST", f"unknown type {t}")

@@ -18,6 +18,7 @@ import datetime as dt
 import json
 import os
 import shutil
+import struct
 import sys
 import tempfile
 import time
@@ -161,6 +162,26 @@ def check_step(step: Step, resp: dict) -> tuple[str, str]:
     return "error", f"unknown step kind {step.kind}"
 
 
+def check_pqcf_version(path: Path, expected: int) -> tuple[str, str]:
+    """Checks the header and metadata format_version of a file the engine saved (not a full validation)."""
+    try:
+        data = path.read_bytes()
+    except OSError as e:
+        return "fail", f"cannot read {path.name}: {e}"
+    if len(data) < 20 or data[:4] != b"PQCF" or data[-4:] != b"PQCF":
+        return "fail", f"{path.name}: not a PQCF file"
+    header = struct.unpack_from("<H", data, 4)[0]
+    mlen = struct.unpack_from("<I", data, len(data) - 12)[0]
+    try:
+        meta = json.loads(data[len(data) - 12 - mlen:len(data) - 12])
+    except ValueError:
+        return "fail", f"{path.name}: metadata is not JSON"
+    got = (header, meta.get("format_version") if isinstance(meta, dict) else None)
+    if got != (expected, expected):
+        return "fail", f"{path.name}: header/metadata format_version {got}, expected {expected}"
+    return "pass", ""
+
+
 def step_request(step: Step, overlay: dict | None) -> dict:
     if step.kind in ("load", "data", "request", "open", "save", "corrupt"):
         return dict(step.request or {})
@@ -212,6 +233,10 @@ def run_file(f: PqtFile, launcher: str, caps: set[str], args: argparse.Namespace
             if broken:
                 if step.is_case:
                     result["cases"].append({**entry, "status": "error", "message": broken})
+                continue
+            if step.kind == "pqcf":
+                status, msg = check_pqcf_version(tmp / step.request["path"], step.request["format_version"])
+                result["cases"].append({**entry, "status": status, **({"message": msg} if msg else {})})
                 continue
             req = step_request(step, overlay)
             # A request step may test id echoing with its own id (any JSON value); keep it.

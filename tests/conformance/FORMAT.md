@@ -40,6 +40,13 @@ that opening a damaged PQCF file fails with CODE — either at `open`, or (for
 engines that verify chunk checksums lazily) at a subsequent full scan
 `SELECT * FROM <table>`, which the runner issues automatically when `open` succeeds.
 
+```
+pqcf <path> <format_version>
+```
+A test case evaluated by the runner itself (no protocol request): the file the
+engine saved at `<path>` must carry `<format_version>` in both its header and its
+footer metadata (used by CR-2, which selects PQCF v1 or v2 by column types).
+
 ## Query blocks
 
 ```

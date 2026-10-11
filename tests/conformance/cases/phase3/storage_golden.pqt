@@ -129,7 +129,7 @@ corrupt c12 fixtures/pqcf/corrupt/row_count_mismatch.pqcf STORAGE_CORRUPT
 corrupt c13 fixtures/pqcf/corrupt/truncated_half.pqcf STORAGE_CORRUPT
 corrupt c14 fixtures/pqcf/corrupt/truncated_tail.pqcf STORAGE_CORRUPT
 corrupt c15 fixtures/pqcf/corrupt/unknown_encoding.pqcf STORAGE_VERSION_UNSUPPORTED
-corrupt c16 fixtures/pqcf/corrupt/version2.pqcf STORAGE_VERSION_UNSUPPORTED
+corrupt c16 fixtures/pqcf/corrupt/version3.pqcf STORAGE_VERSION_UNSUPPORTED
 
 # failed opens leave no table behind
 request
