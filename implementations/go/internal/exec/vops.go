@@ -74,6 +74,8 @@ type vscanOp struct {
 	wasDict []bool
 	bufs    []vecBuf // row layout
 	batch   Batch
+	// filter, if set, selects the rows of each batch with native kernels.
+	filter *nfilter
 }
 
 func newVScan(ec *Context, x *physical.TableScan, src rangeSource) *vscanOp {
@@ -114,31 +116,46 @@ func (s *vscanOp) open(r scanRange) error {
 }
 
 func (s *vscanOp) NextBatch() (*Batch, error) {
-	for !s.active || s.pos >= s.cur.end {
-		r, ok := s.src.next()
-		if !ok {
-			return nil, nil
+	for {
+		for !s.active || s.pos >= s.cur.end {
+			r, ok := s.src.next()
+			if !ok {
+				return nil, nil
+			}
+			if err := s.ec.Check(); err != nil {
+				return nil, err
+			}
+			if err := s.open(r); err != nil {
+				return nil, err
+			}
 		}
-		if err := s.ec.Check(); err != nil {
-			return nil, err
+		lo := s.pos
+		hi := min(lo+BatchSize, s.cur.end)
+		s.pos = hi
+		n := hi - lo
+		var sel []int32
+		if s.filter != nil {
+			var err error
+			if sel, err = s.filter.selection(s.table.Groups[s.cur.group], lo, hi); err != nil {
+				return nil, err
+			}
+			if len(sel) == 0 {
+				continue
+			}
+			if len(sel) == n {
+				sel = nil
+			}
 		}
-		if err := s.open(r); err != nil {
-			return nil, err
+		if s.tuples != nil {
+			s.gatherTuples(lo, hi)
+		} else {
+			for k, v := range s.vecs {
+				s.sliceColumn(k, v, lo, hi)
+			}
 		}
+		s.batch.N, s.batch.Sel = n, sel
+		return &s.batch, nil
 	}
-	lo := s.pos
-	hi := min(lo+BatchSize, s.cur.end)
-	s.pos = hi
-	n := hi - lo
-	if s.tuples != nil {
-		s.gatherTuples(lo, hi)
-	} else {
-		for k, v := range s.vecs {
-			s.sliceColumn(k, v, lo, hi)
-		}
-	}
-	s.batch.N, s.batch.Sel = n, nil
-	return &s.batch, nil
 }
 
 func (s *vscanOp) sliceColumn(k int, v *storage.Vector, lo, hi int) {
@@ -599,15 +616,33 @@ func (pc *pipelineCtx) rowJoinBuild(ec *Context, x *physical.HashJoin) (*rowJoin
 // buildVFilter builds a filter (as part of a parallel pipeline if pc is
 // non-nil).
 func buildVFilter(ec *Context, x *physical.Filter, pc *pipelineCtx) (BatchOperator, error) {
+	if scan, root, rest, ok := nativeScanFilter(ec, x); ok {
+		in, err := buildPipelineInput(ec, scan, pc)
+		if err != nil {
+			return nil, err
+		}
+		if vs, isScan := in.(*vscanOp); isScan {
+			vs.filter = newNFilter(ec.Native, root)
+			if rest == nil {
+				return vs, nil
+			}
+			return newVFilter(ec, vs, x.Input.Schema(), rest)
+		}
+		return newVFilter(ec, in, x.Input.Schema(), x.Pred)
+	}
 	in, err := buildPipelineInput(ec, x.Input, pc)
 	if err != nil {
 		return nil, err
 	}
-	pred, err := newExprSet(ec, x.Input.Schema(), []plan.Expr{x.Pred})
+	return newVFilter(ec, in, x.Input.Schema(), x.Pred)
+}
+
+func newVFilter(ec *Context, in BatchOperator, cols []plan.Column, pred plan.Expr) (BatchOperator, error) {
+	exprs, err := newExprSet(ec, cols, []plan.Expr{pred})
 	if err != nil {
 		return nil, err
 	}
-	return &vfilterOp{ec: ec, input: in, pred: pred, res: make([]*Vec, 1)}, nil
+	return &vfilterOp{ec: ec, input: in, pred: exprs, res: make([]*Vec, 1)}, nil
 }
 
 func buildVProject(ec *Context, x *physical.Project, pc *pipelineCtx) (BatchOperator, error) {

@@ -433,9 +433,7 @@ func (j *vhashJoinOp) gatherProbe(k int, v *Vec, n int) *Vec {
 	idx := j.pairP[:n]
 	switch {
 	case cls == vInt:
-		for o, i := range idx {
-			out.I[o] = v.I[i]
-		}
+		gatherInts(j.ec.Native, v.I, idx, out.I)
 	case cls == vFloat:
 		for o, i := range idx {
 			out.F[o] = v.F[i]

@@ -32,6 +32,14 @@ type scanOp struct {
 	end    int
 	n      int
 	buf    types.Row
+	// filter, if set, selects rows with native kernels window by window;
+	// sel lists the qualifying rows of the current window (relative to
+	// base) and next indexes it.
+	filter *nfilter
+	group  *storage.RowGroup
+	sel    []int32
+	base   int
+	next   int
 }
 
 func newScan(ec *Context, x *physical.TableScan, src rangeSource) *scanOp {
@@ -42,6 +50,9 @@ func newScan(ec *Context, x *physical.TableScan, src rangeSource) *scanOp {
 }
 
 func (s *scanOp) Next() (types.Row, error) {
+	if s.filter != nil {
+		return s.nextFiltered()
+	}
 	for s.reader == nil || s.pos >= s.end {
 		r, ok := s.src.next()
 		if !ok {
@@ -62,6 +73,37 @@ func (s *scanOp) Next() (types.Row, error) {
 	s.n++
 	s.reader.Read(s.pos, s.buf)
 	s.pos++
+	return s.buf, nil
+}
+
+// nextFiltered returns the next row qualifying for the native filter.
+func (s *scanOp) nextFiltered() (types.Row, error) {
+	for s.next >= len(s.sel) {
+		for s.reader == nil || s.pos >= s.end {
+			r, ok := s.src.next()
+			if !ok {
+				return nil, nil
+			}
+			s.group = s.table.Groups[r.group]
+			reader, err := s.group.Reader(s.ords)
+			if err != nil {
+				return nil, err
+			}
+			s.reader, s.pos, s.end = reader, r.start, r.end
+		}
+		if err := s.ec.Check(); err != nil {
+			return nil, err
+		}
+		lo, hi := s.pos, min(s.pos+BatchSize, s.end)
+		s.pos = hi
+		sel, err := s.filter.selection(s.group, lo, hi)
+		if err != nil {
+			return nil, err
+		}
+		s.sel, s.base, s.next = sel, lo, 0
+	}
+	s.reader.Read(s.base+int(s.sel[s.next]), s.buf)
+	s.next++
 	return s.buf, nil
 }
 

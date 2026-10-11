@@ -21,6 +21,7 @@ import (
 	"polyquery/internal/exec"
 	"polyquery/internal/index"
 	"polyquery/internal/ingest"
+	"polyquery/internal/native"
 	"polyquery/internal/optimizer"
 	"polyquery/internal/physical"
 	"polyquery/internal/plan"
@@ -40,12 +41,20 @@ const (
 )
 
 // Capabilities lists the capability strings this engine implements.
-var Capabilities = []string{
+// native.kernels is claimed when the build can load libpqkernels (cgo).
+var Capabilities = append([]string{
 	"phase1", "ingest.csv", "ingest.json", "ingest.jsonl", "sql.basic", "test.functions",
 	"phase2", "sql.groupby", "sql.join", "sql.functions", "sql.subquery", "sql.cte", "sql.correlated_subquery",
 	"phase3", "storage.pqcf", "storage.mmap", "index.hash", "index.btree",
 	"phase4", "http.streaming",
 	"phase5", "exec.row", "exec.vectorized", "exec.parallel", "join.hash", "join.merge", "join.nested_loop",
+}, nativeCapabilities()...)
+
+func nativeCapabilities() []string {
+	if native.Supported() {
+		return []string{"native.kernels"}
+	}
+	return nil
 }
 
 // Config holds engine-wide settings (CLI options).
@@ -61,7 +70,10 @@ type Config struct {
 	// executor default; small values are useful to test parallelism on
 	// small tables).
 	MorselRows int
-	Logger     *slog.Logger
+	// Native is the loaded native kernel library (nil: none); queries use
+	// it when they run with the option native: true.
+	Native *native.Lib
+	Logger *slog.Logger
 }
 
 // DefaultConfig returns the default configuration.
@@ -208,6 +220,7 @@ type QueryOptions struct {
 	Mode       string // execution model ("", "auto", "row", "vectorized")
 	Threads    int    // worker threads (0: the engine default)
 	QueryID    string // client-assigned query id (HTTP cancellation)
+	Native     bool   // use the native kernels if loaded (native: true)
 }
 
 // Result is a query result.
@@ -345,6 +358,12 @@ func (e *Engine) open(ctx context.Context, p *physical.Plan, opts QueryOptions) 
 		Vectorized:  opts.Mode != "row" && !callsSleep(p),
 		Threads:     threads,
 		MorselRows:  e.cfg.MorselRows,
+	}
+	if opts.Native && !callsSleep(p) {
+		// PQ_SLEEP's evaluation count is observable; native filters
+		// evaluate conjuncts in a different order, so such (test-only)
+		// queries keep the engine's own code paths.
+		ec.Native = e.cfg.Native
 	}
 	op, err := exec.BuildRoot(ec, p.Root)
 	if err != nil {

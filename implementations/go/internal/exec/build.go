@@ -53,15 +53,14 @@ func build(ec *Context, n physical.Node, vec bool) (Operator, error) {
 		if op, ok, err := parallelRowPipeline(ec, x); ok || err != nil {
 			return op, err
 		}
+		if scan, root, rest, ok := nativeScanFilter(ec, x); ok && !vec {
+			return nativeRowFilter(ec, x, newScan(ec, scan, nil), root, rest)
+		}
 		in, err := input(ec, x.Input, vec)
 		if err != nil {
 			return nil, err
 		}
-		pred, err := compile(ec, layoutOf(x.Input.Schema()), x.Pred)
-		if err != nil {
-			return nil, err
-		}
-		return &filterOp{ec: ec, input: in, pred: pred}, nil
+		return newFilterOp(ec, in, x.Input.Schema(), x.Pred)
 	case *physical.Project:
 		if op, ok, err := parallelRowPipeline(ec, x); ok || err != nil {
 			return op, err
@@ -149,7 +148,28 @@ func build(ec *Context, n physical.Node, vec bool) (Operator, error) {
 	return nil, errs.New(errs.InternalError, "cannot execute plan node %T", n)
 }
 
+func newFilterOp(ec *Context, in Operator, cols []plan.Column, pred plan.Expr) (Operator, error) {
+	f, err := compile(ec, layoutOf(cols), pred)
+	if err != nil {
+		return nil, err
+	}
+	return &filterOp{ec: ec, input: in, pred: f}, nil
+}
+
+// nativeRowFilter attaches the native part of a filter to its scan and
+// filters the remaining conjuncts (if any) row by row.
+func nativeRowFilter(ec *Context, x *physical.Filter, scan *scanOp, root *npred, rest plan.Expr) (Operator, error) {
+	scan.filter = newNFilter(ec.Native, root)
+	if rest == nil {
+		return scan, nil
+	}
+	return newFilterOp(ec, scan, x.Input.Schema(), rest)
+}
+
 func buildAggregate(ec *Context, x *physical.HashAggregate, vec bool) (Operator, error) {
+	if p, ok := planNativeAggregate(ec, x); ok {
+		return &nativeAggOp{ec: ec, p: p}, nil
+	}
 	if !vec {
 		if op, ok, err := parallelRowAggregate(ec, x); ok || err != nil {
 			return op, err

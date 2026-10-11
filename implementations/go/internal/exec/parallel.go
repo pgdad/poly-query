@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	"polyquery/internal/errs"
+	"polyquery/internal/native"
 	"polyquery/internal/physical"
 	"polyquery/internal/plan"
 	"polyquery/internal/types"
@@ -365,15 +366,16 @@ func rowPipeline(ec *Context, n physical.Node, pc *pipelineCtx) (Operator, error
 	case *physical.TableScan:
 		return pc.rowLeaf(x), nil
 	case *physical.Filter:
+		if scan, root, rest, ok := nativeScanFilter(ec, x); ok {
+			if s, isScan := pc.rowLeaf(scan).(*scanOp); isScan {
+				return nativeRowFilter(ec, x, s, root, rest)
+			}
+		}
 		in, err := rowPipeline(ec, x.Input, pc)
 		if err != nil {
 			return nil, err
 		}
-		pred, err := compile(ec, layoutOf(x.Input.Schema()), x.Pred)
-		if err != nil {
-			return nil, err
-		}
-		return &filterOp{ec: ec, input: in, pred: pred}, nil
+		return newFilterOp(ec, in, x.Input.Schema(), x.Pred)
 	case *physical.Project:
 		in, err := rowPipeline(ec, x.Input, pc)
 		if err != nil {
@@ -423,7 +425,7 @@ func parallelBatchPipeline(ec *Context, n physical.Node) (BatchOperator, bool, e
 			if b == nil || err != nil {
 				return out, err
 			}
-			out = append(out, compactBatch(b, classes))
+			out = append(out, compactBatch(b, classes, ec.Native))
 		}
 	}
 	return &gatherBatchOp{g: newGather(ec, ranges, nw, run)}, true, nil
@@ -463,8 +465,9 @@ func parallelRowPipeline(ec *Context, n physical.Node) (Operator, bool, error) {
 }
 
 // compactBatch copies the active rows of a batch into newly allocated,
-// dense vectors (dictionary vectors keep their immutable dictionary).
-func compactBatch(b *Batch, classes []vclass) *Batch {
+// dense vectors (dictionary vectors keep their immutable dictionary); int
+// columns are gathered with pqk_gather_i64 if lib is non-nil.
+func compactBatch(b *Batch, classes []vclass, lib *native.Lib) *Batch {
 	n := b.Len()
 	out := &Batch{N: n, Cols: make([]*Vec, len(b.Cols))}
 	idx := func(k int) int {
@@ -476,11 +479,11 @@ func compactBatch(b *Batch, classes []vclass) *Batch {
 	for c, v := range b.Cols {
 		nv := &Vec{}
 		switch {
-		case classes[c] == vInt:
+		case classes[c] == vInt && b.Sel != nil:
 			nv.I = make([]int64, n)
-			for k := range nv.I {
-				nv.I[k] = v.I[idx(k)]
-			}
+			gatherInts(lib, v.I, b.Sel, nv.I)
+		case classes[c] == vInt:
+			nv.I = append([]int64(nil), v.I[:n]...)
 		case classes[c] == vFloat:
 			nv.F = make([]float64, n)
 			for k := range nv.F {
