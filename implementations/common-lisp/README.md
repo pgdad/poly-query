@@ -1062,39 +1062,39 @@ usable CPU up to 16, i.e. 16 here); *after, 1 thread* = this engine with
 
 | query | before | after | speed-up | after, 1 thread | speed-up |
 |---|---:|---:|---:|---:|---:|
-| q01_filter_count | 14.3 | 6.6 | 2.2× | 13.6 | 1.1× |
-| q02_group_low | 31.9 | 6.8 | 4.7× | 34.4 | 0.9× |
-| q03_group_high | 21.2 | 18.1 | 1.2× | 18.1 | 1.2× |
-| q04_join_agg | 86.4 | 18.5 | 4.7× | 59.3 | 1.5× |
-| q05_topn | 10.8 | 5.9 | 1.8× | 10.0 | 1.1× |
-| q06_float_agg | 20.3 | 7.3 | 2.8× | 20.3 | 1.0× |
-| q07_join3 | 39.9 | 15.9 | 2.5× | 39.4 | 1.0× |
-| q08_count_distinct | 32.4 | 12.3 | 2.6× | 15.7 | 2.1× |
-| q09_project | 14.4 | 8.1 | 1.8× | 12.5 | 1.2× |
-| q10_nulls | 52.9 | 6.8 | 7.8× | 51.9 | 1.0× |
-| q11_case_expr | 50.2 | 11.2 | 4.5× | 48.6 | 1.0× |
-| q12_sort_offset | 13.3 | 8.0 | 1.7× | 14.6 | 0.9× |
-| q13_left_join | 39.2 | 17.5 | 2.2× | 37.6 | 1.0× |
-| q14_distinct | 42.8 | 6.7 | 6.4× | 42.2 | 1.0× |
-| q15_comma_join | 7.3 | 3.0 | 2.4× | 7.2 | 1.0× |
-| q16_full_sort | 449 | 52.7 | 8.5× | 114 | 4.0× |
-| q17_scan_filter | 25.5 | 8.4 | 3.1× | 22.4 | 1.1× |
-| q18_global_agg | 13.9 | 4.4 | 3.1× | 13.8 | 1.0× |
-| q19_range_filter | 33.7 | 8.3 | 4.1× | 34.6 | 1.0× |
-| q20_in_list | 23.5 | 5.4 | 4.3× | 24.0 | 1.0× |
-| q21_date_range | 5.2 | 2.3 | 2.3× | 5.4 | 1.0× |
-| q22_null_filter | 16.4 | 7.2 | 2.3× | 16.7 | 1.0× |
-| q23_float_minmax | 7.8 | 3.5 | 2.2× | 8.0 | 1.0× |
-| q24_monthly | 27.2 | 5.5 | 5.0× | 28.5 | 1.0× |
-| q25_top_customers | 15.4 | 17.3 | 0.9× | 16.6 | 0.9× |
-| q26_in_subquery | 31.5 | 8.7 | 3.6× | 21.0 | 1.5× |
-| q27_cte_join | 71.2 | 54.0 | 1.3× | 71.1 | 1.0× |
-| q28_country_revenue | 40.4 | 15.6 | 2.6× | 37.0 | 1.1× |
-| q29_string_funcs | 2.3 | 2.2 | 1.0× | 2.1 | 1.1× |
-| q30_sensor_hourly | 47.6 | 8.9 | 5.4× | 46.7 | 1.0× |
-| q31_scalar_subquery | 56.5 | 5.4 | 10.4× | 7.0 | 8.1× |
-| q32_derived_table | 3.6 | 4.0 | 0.9× | 3.6 | 1.0× |
-| **total** | **1348** | **366** | **3.7×** | **897** | **1.5×** |
+| q01_filter_count | 13.5 | 5.1 | 2.6× | 13.8 | 1.0× |
+| q02_group_low | 31.1 | 5.4 | 5.7× | 34.8 | 0.9× |
+| q03_group_high | 19.4 | 15.8 | 1.2× | 18.0 | 1.1× |
+| q04_join_agg | 77.9 | 15.8 | 4.9× | 58.7 | 1.3× |
+| q05_topn | 10.9 | 5.6 | 1.9× | 10.1 | 1.1× |
+| q06_float_agg | 19.7 | 6.9 | 2.9× | 20.3 | 1.0× |
+| q07_join3 | 38.9 | 14.2 | 2.7× | 35.9 | 1.1× |
+| q08_count_distinct | 31.3 | 28.4 | 1.1× | 14.8 | 2.1× |
+| q09_project | 14.0 | 7.8 | 1.8× | 12.6 | 1.1× |
+| q10_nulls | 52.7 | 6.7 | 7.9× | 50.6 | 1.0× |
+| q11_case_expr | 58.9 | 11.1 | 5.3× | 48.3 | 1.2× |
+| q12_sort_offset | 12.7 | 7.9 | 1.6× | 14.4 | 0.9× |
+| q13_left_join | 29.0 | 15.1 | 1.9× | 31.9 | 0.9× |
+| q14_distinct | 41.9 | 5.6 | 7.4× | 41.4 | 1.0× |
+| q15_comma_join | 7.1 | 2.6 | 2.7× | 7.1 | 1.0× |
+| q16_full_sort | 378 | 44.7 | 8.5× | 94.9 | 4.0× |
+| q17_scan_filter | 25.3 | 8.2 | 3.1× | 20.8 | 1.2× |
+| q18_global_agg | 13.3 | 4.1 | 3.2× | 13.1 | 1.0× |
+| q19_range_filter | 31.7 | 7.9 | 4.0× | 32.2 | 1.0× |
+| q20_in_list | 23.0 | 5.1 | 4.5× | 22.8 | 1.0× |
+| q21_date_range | 5.1 | 2.2 | 2.3× | 5.0 | 1.0× |
+| q22_null_filter | 15.7 | 6.8 | 2.3× | 15.7 | 1.0× |
+| q23_float_minmax | 7.6 | 3.2 | 2.4× | 7.4 | 1.0× |
+| q24_monthly | 26.9 | 5.3 | 5.1× | 26.6 | 1.0× |
+| q25_top_customers | 15.0 | 15.6 | 1.0× | 14.6 | 1.0× |
+| q26_in_subquery | 31.7 | 6.6 | 4.8× | 19.6 | 1.6× |
+| q27_cte_join | 63.3 | 40.0 | 1.6× | 59.9 | 1.1× |
+| q28_country_revenue | 37.4 | 12.9 | 2.9× | 31.9 | 1.2× |
+| q29_string_funcs | 2.2 | 2.1 | 1.1× | 2.0 | 1.1× |
+| q30_sensor_hourly | 46.7 | 8.3 | 5.7× | 46.0 | 1.0× |
+| q31_scalar_subquery | 55.3 | 5.3 | 10.5× | 6.6 | 8.4× |
+| q32_derived_table | 3.5 | 3.9 | 0.9× | 3.5 | 1.0× |
+| **total** | **1240** | **336** | **3.7×** | **835** | **1.5×** |
 
 ### What changed
 
@@ -1119,7 +1119,7 @@ Ordered by impact on this workload:
    first evaluation, with the subquery's value as a literal, so it gets the
    typed column/constant kernels instead of the per-row generic path.
    `x IN (subquery)` over INT64-like values probes an integer key table
-   built once from the subquery's rows. (q31: 57 → 5 ms; q26: 32 → 9 ms.)
+   built once from the subquery's rows. (q31: 55 → 5 ms; q26: 32 → 7 ms.)
 3. **INT64/DECIMAL column vs. FLOAT64 constant** comparisons (e.g. against
    an `AVG`) used to convert every row through a rational division. The
    comparison holds exactly for the column values in one integer range
@@ -1132,8 +1132,9 @@ Ordered by impact on this workload:
    (11-bit digits, skipping digits on which all rows agree) sorts each
    parallel chunk; the chunks are merged pairwise by comparing these words
    instead of calling comparator closures. The sorted output batches are
-   gathered in parallel. Other key types keep the comparator sort. (q16:
-   449 → 53 ms; 114 ms single-threaded.)
+   gathered in parallel. Other key types keep the comparator sort. The sort keys' words are computed, and a large
+   sort input is concatenated, by several threads. (q16: 378 → 45 ms; 95 ms
+   single-threaded.)
 5. **Partitioned parallel aggregation** for many groups. Before, every
    worker built a table of nearly all groups and the merge re-inserted all
    of them. Now the first worker to finish a morsel checks its group count:
@@ -1154,11 +1155,15 @@ Ordered by impact on this workload:
    size of its input and often far too high) rather than on a scan
    pipeline estimated up to 4× smaller, so the scan side remains a parallel
    probe pipeline and the aggregation above it runs in parallel too.
-   (q27: 71 → 54 ms in the final run, 42–47 ms in others.)
+   (q27: 63 → 40 ms.)
 7. **COUNT/SUM/AVG(DISTINCT) of INT64-like values** keep each group's
    distinct values in an integer key table instead of an `EQUAL` hash table
    plus a list. Without GROUP BY, the workers' sets are united in parallel
-   by hash partition. (q08: 32 → 12 ms; 16 ms single-threaded.)
+   by hash partition. (q08: 31 → 15 ms single-threaded; with 16 threads
+   11–12 ms in most runs, but 28 ms in the final table: in both rounds
+   one of q08's runs took ~70 ms and the next few ~30 ms before returning
+   to ~11 ms — presumably a garbage collection followed by the cost of
+   touching freshly zeroed nursery pages.)
 8. **Parallel top-N** for `ORDER BY … LIMIT` over a scan pipeline: every
    worker keeps the best LIMIT+OFFSET rows of its morsels, ordered by the
    keys and then by the rows' input position (an extra column), and these
@@ -1186,14 +1191,16 @@ aggregation of q27/q32), result rendering below 16384 rows, and fixed costs
 of starting workers on small inputs (a 1M-row filtered COUNT takes ~2.5 ms
 with 4–16 threads versus ~6.5 ms serially; q21, q15 and q29 are ~2–3 ms).
 Three queries did not improve: q25 (GROUP BY of 80,777 groups, HAVING,
-top-N; 15.4 → 17.3 ms) and q32 (250k rows grouped into ~100k groups, then
-grouped again; 3.6 → 4.0 ms) are slightly slower in the final run, and
+top-N; 15.0 → 15.6 ms) and q32 (250k rows grouped into ~100k groups, then
+grouped again; 3.5 → 3.9 ms) are slightly slower in the final run, and
 q29 (20k rows) is unchanged. Both slower queries are dominated by
 high-cardinality hash aggregation, which is memory-bound and scales poorly;
 q32 now aggregates serially (see the probe in 5), and its timing depends on
 the heap state: in isolation both engines took 5.5–6.8 ms for it. q03 (same
-grouping as q25) gained only 1.2×. q27 single-threaded is unchanged (the
-build-side choice only applies with threads > 1).
+grouping as q25) gained only 1.2×. The single-threaded column is within
+noise of the baseline except where an algorithm changed (sort, subqueries,
+DISTINCT sets, dictionary codes kept through joins: q04, q08, q16, q26,
+q31); q02/q12/q13 at 0.9× there are run-to-run variation.
 
 **Correctness checks.** After every step: the full conformance suite
 (660/660), the option matrix (`--modes`, 3870/3870) also with
