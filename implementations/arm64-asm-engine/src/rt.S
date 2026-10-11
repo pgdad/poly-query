@@ -22,7 +22,8 @@ g_err_msg:      .skip ERRMSG_MAX
 
     .p2align 3
     .global g_deadline, g_test_functions, g_pending_table, g_err_code
-    .global g_err_line, g_err_col, g_arena_limit
+    .global g_err_line, g_err_col, g_arena_limit, g_data_dir
+g_data_dir:      .skip 8       // cstr data directory (set by main)
 g_deadline:      .skip 8       // µs (CLOCK_MONOTONIC); 0 = no deadline
 g_pending_table: .skip 8       // Table* under construction (freed on error)
 g_arena_limit:   .skip 8       // max bytes in g_arena chunks; 0 = unlimited

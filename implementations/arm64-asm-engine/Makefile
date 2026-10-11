@@ -21,17 +21,17 @@ build: build/polyquery
 build/polyquery: $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 
-build/%.o: src/%.S include/pq.inc | build
+build/%.o: src/%.S $(wildcard include/*.inc) | build/.dir
 	$(CC) $(ASFLAGS) -c -o $@ $<
 
-build/tests/%: tests/unit/%.S $(LIBOBJS) include/pq.inc | build
+build/tests/%: tests/unit/%.S $(LIBOBJS) include/pq.inc | build/.dir
 	@mkdir -p build/tests
 	$(CC) $(ASFLAGS) $(LDFLAGS) -o $@ $< $(LIBOBJS) $(LIBS)
 
-build:
-	@mkdir -p build
+build/.dir:
+	@mkdir -p build/tests && touch $@
 
-test: build $(TESTBIN)
+test: build/polyquery $(TESTBIN)
 	@set -e; for t in $(TESTBIN); do echo "== $$t"; $$t; done
 	@sh tests/sh/run_cli_tests.sh
 

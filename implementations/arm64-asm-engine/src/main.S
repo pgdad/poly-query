@@ -10,8 +10,6 @@
 
     .bss
     .p2align 3
-    .global g_data_dir
-g_data_dir:     .skip 8        // cstr (default ".")
 g_request_file: .skip 8        // cstr or 0
 g_mode:         .skip 8        // 1 version, 2 capabilities, 3 session, 4 exec, 5 serve
 
@@ -81,8 +79,7 @@ LFUNC usage_exit
     mov  x3, x2
     mov  x2, x1
     mov  x1, x0
-    ADR_L x0, stderr
-    ldr  x0, [x0]
+    GOT_LOAD x0, stderr
     bl   fprintf
     mov  w0, #2
     bl   exit
@@ -230,8 +227,7 @@ FUNC main
     b.ne 4f
     bl   exec_mode
     b    .Lexit0
-4:  ADR_L x0, stderr                // serve: Phase 4
-    ldr  x1, [x0]
+4:  GOT_LOAD x1, stderr            // serve: Phase 4
     ADR_L x0, m_serve
     bl   fputs
     mov  w0, #1
@@ -259,8 +255,7 @@ LFUNC session_loop
     stp  xzr, xzr, [sp, #32]        // char *line = 0; size_t cap = 0
 1:  add  x0, sp, #32
     add  x1, sp, #40
-    ADR_L x2, stdin
-    ldr  x2, [x2]
+    GOT_LOAD x2, stdin
     bl   getline
     cmp  x0, #0
     b.lt 9f
@@ -313,16 +308,14 @@ LFUNC exec_mode
     ADR_L x1, s_dash
     bl   strcmp
     cbnz w0, 2f
-    ADR_L x0, stdin
-    ldr  x20, [x0]
+    GOT_LOAD x20, stdin
     b    3f
 2:  mov  x0, x19
     ADR_L x1, s_rb
     bl   fopen
     mov  x20, x0
     cbnz x0, 3f
-    ADR_L x0, stderr
-    ldr  x0, [x0]
+    GOT_LOAD x0, stderr
     ADR_L x1, m_readfail
     mov  x2, x19
     bl   fprintf

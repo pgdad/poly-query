@@ -56,6 +56,13 @@
     ldr  \reg, [\reg, :lo12:\sym]
 .endm
 
+// Load the value of an external (glibc) data symbol through the GOT.
+.macro GOT_LOAD reg, sym
+    adrp \reg, :got:\sym
+    ldr  \reg, [\reg, :got_lo12:\sym]
+    ldr  \reg, [\reg]
+.endm
+
 // Raise an error with a constant message: RAISE ERR_X, "message"
 .macro RAISE code, msg
     mov  w0, #\code
