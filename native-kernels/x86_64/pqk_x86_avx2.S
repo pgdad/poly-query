@@ -1531,17 +1531,65 @@ ENDF pqk_x86_avx2_group_sum_i64
  * void pqk_x86_avx2_gather_i64(data, idx, m, out)
  * Args:     rdi = data, rsi = idx, rdx = m, rcx = out
  * Returns:  -
- * Clobbers: rax, rcx, rdx, rsi, r8, r9, r10, flags
- * Algorithm: GATHER_I64 8: 8 independent scalar load pairs per iteration
- *           (idx zero-extended by the 32-bit mov, so indices >= 2^31 are
- *           fine). vpgatherqq was measured: ~5% faster when data is cache
- *           resident, but 15-20% slower from DRAM (random access is latency
- *           bound; the gather exposes less memory-level parallelism on
- *           Zen 5), so plain loads are used. No vector registers.
- * Tail:     0..7 single rows.
+ * Clobbers: rax, rcx, rdx, rsi, r8, r9, r10, r11, flags
+ * Algorithm: plain scalar loads, 8 rows per iteration (idx zero-extended by
+ *           the 32-bit mov, so indices >= 2^31 are fine). vpgatherqq was
+ *           measured: ~5% faster when data is cache resident, but 15-20%
+ *           slower from DRAM, so it is not used.
+ *           The loop is latency-bound (random rows); the out-of-order window
+ *           alone keeps too few misses in flight, so rows j+GATHER_PF ..
+ *           j+GATHER_PF+7 are software-prefetched (prefetcht0 at
+ *           data + 8 * idx[j + GATHER_PF]) while rows j..j+7 are loaded.
+ *           Measured with the bench's 32 MB column (noisy host, ns/row):
+ *           DRAM-bound CCD 2.9-7.1 -> 1.8-2.5; L3-resident about unchanged
+ *           (0.71-0.79). Distances 32..512 rows were tried: 256 is best
+ *           from DRAM but costs ~10% when the column is L3-resident; 128
+ *           is neutral there and still 2-3x from DRAM.
+ *           Prefetch never faults, but the look-ahead idx loads must stay
+ *           inside idx, so the prefetching loop stops GATHER_PF rows before
+ *           the end. r11 = rows for the prefetching loop.
+ * Tail:     the last >= GATHER_PF rows (or all rows if m is small) with
+ *           GATHER_I64 8 (8-row iterations, then 0..7 single rows).
  * ====================================================================== */
+#define GATHER_PF 128
 FUNC pqk_x86_avx2_gather_i64
-        GATHER_I64 8                    /* [check] m < 8 -> [tail] */
+        mov     %rdx, %r11                              /* [check] */
+        sub     $GATHER_PF, %r11
+        jbe     .Lgather_i64_rest
+        and     $-8, %r11
+        jz      .Lgather_i64_rest
+        sub     %r11, %rdx
+.Lgather_i64_pf:                        /* [main] 8 rows + prefetch ahead */
+        .set q, 0
+        .rept 2
+        mov     GATHER_PF*4+q*16(%rsi), %eax
+        mov     GATHER_PF*4+q*16+4(%rsi), %r8d
+        mov     GATHER_PF*4+q*16+8(%rsi), %r9d
+        mov     GATHER_PF*4+q*16+12(%rsi), %r10d
+        prefetcht0 (%rdi,%rax,8)
+        prefetcht0 (%rdi,%r8,8)
+        prefetcht0 (%rdi,%r9,8)
+        prefetcht0 (%rdi,%r10,8)
+        mov     q*16(%rsi), %eax
+        mov     q*16+4(%rsi), %r8d
+        mov     q*16+8(%rsi), %r9d
+        mov     q*16+12(%rsi), %r10d
+        mov     (%rdi,%rax,8), %rax
+        mov     (%rdi,%r8,8), %r8
+        mov     (%rdi,%r9,8), %r9
+        mov     (%rdi,%r10,8), %r10
+        mov     %rax, q*32(%rcx)
+        mov     %r8, q*32+8(%rcx)
+        mov     %r9, q*32+16(%rcx)
+        mov     %r10, q*32+24(%rcx)
+        .set q, q + 1
+        .endr
+        add     $32, %rsi
+        add     $64, %rcx
+        sub     $8, %r11
+        jnz     .Lgather_i64_pf
+.Lgather_i64_rest:                                      /* [tail] */
+        GATHER_I64 8
         ret                             /* [result] */
 ENDF pqk_x86_avx2_gather_i64
 
