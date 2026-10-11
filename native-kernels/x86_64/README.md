@@ -169,6 +169,34 @@ between runs; a dedicated 12-round alternating run of `compare_i64` gave
 | minmax_i128 | 0.1853 | 0.1168 | 1.59x |
 | **geometric mean** | | | **1.32x** |
 
+**Official `make -C native-kernels bench` after the change** (unpinned, one
+run at load average ≈ 5; it landed on the DRAM-bound CCD, as did the original
+official run in [Benchmark results](#benchmark-results), whose AVX2 column is
+repeated for reference). Runs made at different times on this shared host
+differ by ±10 % for unchanged code (compare the reference and AVX-512
+columns with the original tables), so the pinned, interleaved tables above
+are the before/after evidence.
+
+| kernel | reference | x86_scalar | x86_avx2 (original official run) | x86_avx2 (now) | x86_avx512 |
+|---|---|---|---|---|---|
+| filter_i64_sel10 | 0.8095 | 0.3516 | 0.1972 | 0.1701 | 0.1611 |
+| filter_i64_bitmap | 2.6459 | 0.2518 | 0.1364 | 0.1387 | 0.1427 |
+| count_i64_between | 0.3787 | 0.2863 | 0.1364 | 0.1258 | 0.1255 |
+| sum_i64 | 0.2337 | 0.2329 | 0.1376 | 0.1329 | 0.1117 |
+| sum_i64_validity | 0.3865 | 0.3391 | 0.1543 | 0.1386 | 0.1229 |
+| sum_f64 | 0.3757 | 0.3831 | 0.1247 | 0.1217 | 0.1001 |
+| minmax_i64 | 0.5489 | 0.5484 | 0.1533 | 0.1310 | 0.1172 |
+| bitmap_and | 0.0024 | 0.0030 | 0.0024 | 0.0025 | 0.0024 |
+| bitmap_popcount | 0.1122 | 0.0136 | 0.0018 | 0.0009 | 0.0008 |
+| hash_i64 | 0.6103 | 0.5894 | 0.4572 | 0.4288 | 0.4094 |
+| compare_i64 | 2.7654 | 0.3368 | 0.3095 | 0.3031 | 0.3157 |
+| group_sum_i64_1024 | 0.7615 | 0.6065 | 0.4717 | 0.3632 | 0.4839 |
+| gather_i64 | 2.7500 | 2.5581 | 2.2942 | 1.4716 | 2.2950 |
+| filter_i128_sel10 | 1.1020 | 0.4528 | 0.3731 | 0.3841 | 0.3946 |
+| count_i128_between | 0.6213 | 0.3828 | 0.3115 | 0.3367 | 0.4133 |
+| sum_i128 | 0.4789 | 0.3718 | 0.3031 | 0.3353 | 0.3382 |
+| minmax_i128 | 0.8179 | 0.5311 | 0.3239 | 0.3273 | 0.3617 |
+
 Reading the numbers:
 
 * On the V-cache CCD the 32 MB columns are L3-resident. Everything with real
