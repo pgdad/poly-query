@@ -133,6 +133,14 @@ func TestExecutionModesAgree(t *testing.T) {
 		"SELECT cat, SUM(price) FILTERED FROM t GROUP BY cat",
 		"SELECT COALESCE(grp, 'none'), NULLIF(cat, 'red'), ROUND(price, 1) FROM t WHERE id % 97 = 0",
 		"WITH x AS (SELECT grp, COUNT(*) AS n FROM t GROUP BY grp) SELECT a.grp, a.n + b.n FROM x a JOIN x b ON a.grp = b.grp",
+		// Vectorized evaluation fails (100 / 0) where row-at-a-time
+		// evaluation skips the operand (grp is NULL): batches are then
+		// evaluated row by row.
+		"SELECT NULLIF(grp, 100 / (id % 7)) AS k, COUNT(*) FROM t GROUP BY NULLIF(grp, 100 / (id % 7))",
+		"SELECT NULLIF(d.grp, 100 / (t.id % 7)) AS k, COUNT(*) FROM t LEFT JOIN d ON t.grp = d.grp GROUP BY NULLIF(d.grp, 100 / (t.id % 7))",
+		"SELECT NULLIF(t.grp, 100 / (t.id % 7)) AS k, COUNT(*) FROM t JOIN d ON t.flag = (d.grp > 3) GROUP BY NULLIF(t.grp, 100 / (t.id % 7))",
+		"SELECT COUNT(*) FROM t JOIN d ON NULLIF(t.grp, 100 / (t.id % 7)) = d.grp",
+		"SELECT COUNT(*) FROM d JOIN t a ON d.grp = a.grp JOIN t b ON NULLIF(d.grp, 100 / (a.id % 7)) = b.id",
 		// Vector kernels: CASE, COALESCE, casts, calendar functions.
 		"SELECT CASE WHEN amount < 100 THEN 'low' WHEN grp IS NULL THEN NULL WHEN amount < 300 THEN cat ELSE 'high' END AS c, COUNT(*) FROM t GROUP BY 1",
 		"SELECT SUM(CASE WHEN flag THEN amount ELSE 0 END), SUM(CASE WHEN cat = 'red' THEN 1 END), MAX(CASE WHEN id > 10 THEN price END) FROM t",

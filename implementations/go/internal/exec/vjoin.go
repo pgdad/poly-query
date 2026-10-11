@@ -185,10 +185,9 @@ func (s *joinBuild) build() (*joinTable, error) {
 			return nil, err
 		}
 		if err := s.keys.eval(b, b.Sel, keys); err != nil {
-			if rowErr := s.keys.firstError(b); rowErr != nil {
-				return nil, rowErr
+			if _, err := s.keys.evalRows(b, b.Sel, keys); err != nil {
+				return nil, err
 			}
-			return nil, errs.New(errs.InternalError, "vectorized join key evaluation failed: %v", err)
 		}
 		bytes := t.appendRows(b, keys, s.keyTypes, &keyBuf)
 		width := int64(len(t.classes))
@@ -294,12 +293,7 @@ func (j *vhashJoinOp) nextProbeBatch() (bool, error) {
 	j.active = b.Len()
 	if err := j.probeKeys.eval(b, b.Sel, j.pkeys); err != nil {
 		// Process the rows before the first failing one, then fail.
-		j.active, j.batchErr = j.firstKeyError(b)
-		if j.active > 0 {
-			if err := j.probeKeys.eval(b, b.Sel[:j.active:j.active], j.pkeys); err != nil {
-				return false, j.batchErr
-			}
-		}
+		j.active, j.batchErr = j.probeKeys.evalRows(b, b.Sel, j.pkeys)
 	}
 	if j.kind == plan.JoinLeft && j.residual != nil {
 		j.matched = grow(j.matched, b.N)
@@ -314,26 +308,6 @@ func (j *vhashJoinOp) nextProbeBatch() (bool, error) {
 		b.Sel = sel
 	}
 	return true, nil
-}
-
-// firstKeyError evaluates the probe keys row by row and returns the number
-// of rows before the first error and that error.
-func (j *vhashJoinOp) firstKeyError(b *Batch) (int, error) {
-	dst := make(types.Row, len(j.pkeys))
-	n := b.Len()
-	if b.Sel == nil {
-		sel := make([]int32, n)
-		for i := range sel {
-			sel[i] = int32(i)
-		}
-		b.Sel = sel
-	}
-	for k := 0; k < n; k++ {
-		if err := j.probeKeys.evalRow(b, int(b.Sel[k]), dst); err != nil {
-			return k, err
-		}
-	}
-	return n, nil
 }
 
 func (j *vhashJoinOp) rowAt(k int) int {

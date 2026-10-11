@@ -233,6 +233,7 @@ type exprSet struct {
 	classes []vclass // input column classes
 	out     []vclass // result classes
 	buf     types.Row
+	bufs    []vecBuf // results of evalRows
 }
 
 func newExprSet(ec *Context, cols []plan.Column, exprs []plan.Expr) (*exprSet, error) {
@@ -284,22 +285,38 @@ func (s *exprSet) evalRow(b *Batch, i int, dst types.Row) error {
 	return nil
 }
 
-// firstError evaluates the expressions row by row over the active rows of
-// b and returns the first error (nil if row-at-a-time evaluation
-// succeeds).
-func (s *exprSet) firstError(b *Batch) error {
-	dst := make(types.Row, len(s.row))
-	n := b.Len()
+// evalRows is the fallback after a failed vectorized evaluation: it
+// evaluates the expressions row by row for the active rows of b (sel, nil:
+// 0..N-1) into dst and returns the number of rows evaluated before the
+// first failing one and its error. (Vectorized evaluation may fail where
+// row-at-a-time evaluation does not, e.g. for an operand that row mode
+// skips; then all rows are evaluated.)
+func (s *exprSet) evalRows(b *Batch, sel []int32, dst []*Vec) (int, error) {
+	if len(s.bufs) < len(s.row) {
+		s.bufs = make([]vecBuf, len(s.row))
+	}
+	for k := range s.row {
+		dst[k] = s.bufs[k].reset(b.N, s.out[k])
+		s.bufs[k].withNulls(b.N)
+	}
+	vals := make(types.Row, len(s.row))
+	n := b.N
+	if sel != nil {
+		n = len(sel)
+	}
 	for k := 0; k < n; k++ {
 		i := k
-		if b.Sel != nil {
-			i = int(b.Sel[k])
+		if sel != nil {
+			i = int(sel[k])
 		}
-		if err := s.evalRow(b, i, dst); err != nil {
-			return err
+		if err := s.evalRow(b, i, vals); err != nil {
+			return k, err
+		}
+		for c, v := range vals {
+			dst[c].set(i, v, s.out[c])
 		}
 	}
-	return nil
+	return n, nil
 }
 
 // ---------------------------------------------------------------- filter

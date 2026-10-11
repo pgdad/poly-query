@@ -1298,10 +1298,9 @@ func (in *vaggInput) fold(t *aggTable, b *Batch, pos int64) error {
 // report the first row's error.
 func (in *vaggInput) evalBatch(b *Batch) error {
 	if err := in.exprs.eval(b, b.Sel, in.vals); err != nil {
-		if rowErr := in.exprs.firstError(b); rowErr != nil {
-			return rowErr
+		if _, err := in.exprs.evalRows(b, b.Sel, in.vals); err != nil {
+			return err
 		}
-		return errs.New(errs.InternalError, "vectorized aggregation failed: %v", err)
 	}
 	in.keys = in.vals[:in.nkeys]
 	for i, a := range in.argOf {

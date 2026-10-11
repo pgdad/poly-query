@@ -344,11 +344,12 @@ func (v *vbranches) eval(b *Batch, sel []int32) (*Vec, error) {
 
 // ---------------------------------------------------------------- subqueries
 
-// subqueryKernel compiles an uncorrelated scalar, EXISTS or IN subquery,
-// or returns nil (correlated subqueries are evaluated row by row).
+// subqueryKernel compiles an uncorrelated scalar, EXISTS or IN subquery
+// or a correlated subquery of a shape correlatedKernel supports, or
+// returns nil.
 func (c *vcompiler) subqueryKernel(x *plan.Subquery) (vexpr, error) {
 	if len(x.Correlated) > 0 {
-		return nil, nil
+		return c.correlatedKernel(x)
 	}
 	sub, ok := c.ec.Plan.Subplans[x]
 	if !ok {
