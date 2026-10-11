@@ -41,6 +41,7 @@
 #define CN_CONT    56    /* "100 Continue" sent for the pending request */
 #define CN_DRAINDL 64    /* lingering close deadline (ns) */
 #define CN_HUP     72    /* peer hung up while a query was pending */
+#define CN_CRES    296   /* chunked body scan state (2 words, see http_parse) */
 #define CN_QSTATE  80    /* QS_* */
 #define CN_QID     88    /* query id (malloc'd C string) */
 #define CN_QKIND   96    /* QK_* */
@@ -69,7 +70,7 @@
 #define CN_JNLEN   272
 #define CN_JNULPOS 280   /* body terminator written in place, restored when done */
 #define CN_JNULVAL 288
-#define CN_SIZE    296
+#define CN_SIZE    320
 
 #define CS_FREE    0
 #define CS_READ    1     /* reading / parsing requests */

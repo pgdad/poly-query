@@ -185,6 +185,7 @@ parse_cases:
     mov %r12, %rsi
     mov %r14, %rdx
     lea req(%rip), %rcx
+    xor %r8d, %r8d
     call http_parse
     CSTR %rdi, "NEED"
     cmp $HP_NEED, %eax
@@ -211,6 +212,56 @@ parse_cases:
     lea 1(%r15, %rax), %rbx
     jmp 1b
 9:  LEAVE
+
+    .section .rodata
+inc_req: .asciz "PUT /t HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6;ext=1\r\n world\r\n0\r\n\r\n"
+    .text
+
+/* incremental(): feeds growing prefixes of a chunked request with a resume
+ * state (as the server does); every proper prefix is incomplete and the
+ * whole request decodes to the same body */
+incremental:
+    ENTER 32
+    movq $0, 0(%rsp)                /* resume state */
+    movq $0, 8(%rsp)
+    lea inc_req(%rip), %rdi
+    call strlen
+    mov %rax, %r12                  /* full length */
+    mov $1, %r13d                   /* prefix length */
+    xor %r14d, %r14d                /* bad results */
+1:  lea scratch(%rip), %rdi
+    lea inc_req(%rip), %rsi
+    mov %r13, %rdx
+    call memcpy
+    lea scratch(%rip), %rdi
+    mov %r13, %rsi
+    mov $100, %edx
+    lea req(%rip), %rcx
+    lea 0(%rsp), %r8
+    call http_parse
+    cmp %r12, %r13
+    je 2f
+    cmp $HP_NEED, %eax
+    je 3f
+    inc %r14
+3:  inc %r13
+    jmp 1b
+2:  cmp $HP_OK, %eax
+    jne 4f
+    call summarize
+    mov sum+BUF_DATA(%rip), %rdi
+    CSTR %rsi, "PUT|/t||hello world|79|0"
+    call strcmp
+    test %eax, %eax
+    jz 5f
+4:  inc %r14
+5:  test %r14, %r14
+    sete %al
+    movzbl %al, %edi
+    CSTR %rsi, "incremental chunked parse"
+    mov sum+BUF_DATA(%rip), %rdx
+    call t_assert
+    LEAVE
 
 /* misc(): url_decode, query_param, http_status_for */
 misc:
@@ -327,6 +378,7 @@ FUNC main
     call arena_new
     mov %rax, g_arena(%rip)
     call parse_cases
+    call incremental
     call misc
     CSTR %rdi, "test_http: %ld passed, %ld failed\n"
     mov n_pass(%rip), %rsi

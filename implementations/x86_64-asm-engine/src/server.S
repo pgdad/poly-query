@@ -664,7 +664,13 @@ FUNC conn_process
     mov %r12, %rsi
     mov g_srv_max_req(%rip), %rdx
     mov %r13, %rcx
+    lea CN_CRES(%rbx), %r8
     call http_parse
+    cmp $HP_NEED, %eax
+    je 21f
+    movq $0, CN_CRES(%rbx)          /* the next request starts afresh */
+    movq $0, CN_CRES+8(%rbx)
+21:
     cmp $HP_OK, %eax
     je 5f
     cmp $HP_BAD, %eax

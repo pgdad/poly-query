@@ -4,7 +4,7 @@
  * URL helpers and the error code -> HTTP status mapping.  Stateless: the
  * server (server.S) owns connections and buffers.
  *
- *   http_parse(buf, len, max_body, Req*) -> eax HP_*
+ *   http_parse(buf, len, max_body, Req*, resume*) -> eax HP_*
  *   http_send(fd, status, ctype, body, len, flags) -> eax 0 / -1
  *   http_send_head_chunked(fd, ctype) -> eax 0 / -1
  *   http_send_chunk(fd, ptr, len) -> eax 0 / -1 (len 0 = last chunk)
@@ -146,20 +146,32 @@ FUNC trailer_end
     LEAVE
 ENDF trailer_end
 
-/* chunked_body(buf rdi, len rsi, max rdx, Req* rcx) -> eax HP_*: scans the
- * chunked body after the header; when complete, decodes it in place */
+/* chunked_body(buf rdi, len rsi, max rdx, Req* rcx, resume r8) -> eax HP_*:
+ * scans the chunked body after the header; when complete, decodes it in
+ * place.  resume (optional, 2 words: position, data total) remembers how
+ * far complete chunks were already validated, so a body arriving in many
+ * reads is scanned once. */
 #define CB_MAX   0
 #define CB_TOTAL 8
 #define CB_W     16
-#define CB_DONE  24
+#define CB_RES   24
 FUNC chunked_body
     ENTER 32
     mov %rdi, %rbx
     mov %rsi, %r12
     mov %rdx, CB_MAX(%rsp)
     mov %rcx, %r13
+    mov %r8, CB_RES(%rsp)
     movq $0, CB_TOTAL(%rsp)
     mov RQ_HDRLEN(%r13), %r14       /* pos */
+    test %r8, %r8
+    jz 1f
+    mov (%r8), %rax
+    test %rax, %rax
+    jz 1f
+    mov %rax, %r14                  /* resume after the chunks already seen */
+    mov 8(%r8), %rax
+    mov %rax, CB_TOTAL(%rsp)
 1:  mov %rbx, %rdi                  /* pass 1: validate, find the end */
     mov %r14, %rsi
     mov %r12, %rdx
@@ -171,9 +183,9 @@ FUNC chunked_body
     mov %rdx, %r15                  /* data offset */
     test %rax, %rax
     jz 3f
-    add %rax, CB_TOTAL(%rsp)
-    mov CB_TOTAL(%rsp), %rcx
-    cmp CB_MAX(%rsp), %rcx
+    mov CB_TOTAL(%rsp), %rdx
+    add %rax, %rdx                  /* total with this chunk */
+    cmp CB_MAX(%rsp), %rdx
     ja 6f
     lea 2(%r15, %rax), %rcx         /* data + CRLF */
     cmp %r12, %rcx
@@ -182,6 +194,7 @@ FUNC chunked_body
     jne 8f
     cmpb $'\n', -1(%rbx, %rcx)
     jne 8f
+    mov %rdx, CB_TOTAL(%rsp)
     mov %rcx, %r14
     jmp 1b
 3:  mov %rbx, %rdi                  /* last chunk: trailers */
@@ -218,7 +231,13 @@ FUNC chunked_body
     LEAVE
 6:  mov $HP_TOOBIG, %eax
     LEAVE
-7:  mov $HP_NEED, %eax
+7:  mov CB_RES(%rsp), %rax          /* incomplete: remember the progress */
+    test %rax, %rax
+    jz 71f
+    mov %r14, (%rax)
+    mov CB_TOTAL(%rsp), %rcx
+    mov %rcx, 8(%rax)
+71: mov $HP_NEED, %eax
     LEAVE
 8:  mov $HP_BAD, %eax
     LEAVE
@@ -246,7 +265,8 @@ FUNC parse_clen
 9:  ret
 ENDF parse_clen
 
-/* http_parse(buf rdi, len rsi, max_body rdx, Req* rcx) -> eax HP_* */
+/* http_parse(buf rdi, len rsi, max_body rdx, Req* rcx, resume r8 (0 or
+ * the connection's chunk-scan state, zeroed for each new request)) -> eax HP_* */
 #define HPL_MAX  0
 #define HPL_LE   8      /* end of the current line (offset of '\n') */
 #define HPL_HDR  16     /* header field: name ptr */
@@ -255,14 +275,16 @@ ENDF parse_clen
 #define HPL_VLEN 40
 #define HPL_HASCL 48
 #define HPL_SKIP 56     /* blank lines skipped before the request line */
+#define HPL_RES  64
 FUNC http_parse
-    ENTER 64
+    ENTER 80
     mov %rdi, %rbx
     mov %rsi, %r12
     mov %rdx, HPL_MAX(%rsp)
     mov %rcx, %r13
     movq $0, HPL_HASCL(%rsp)
     movq $0, HPL_SKIP(%rsp)
+    mov %r8, HPL_RES(%rsp)
     mov %r13, %rdi
     xor %esi, %esi
     mov $RQ_SIZE, %edx
@@ -488,6 +510,7 @@ FUNC http_parse
     mov %r12, %rsi
     mov HPL_MAX(%rsp), %rdx
     mov %r13, %rcx
+    mov HPL_RES(%rsp), %r8
     call chunked_body
     jmp 29f
 21: mov RQ_CLEN(%r13), %rax
