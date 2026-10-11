@@ -373,7 +373,7 @@ impl Binder<'_> {
     ) -> Result<(Arc<SubqueryPlan>, Vec<Expr>)> {
         let corr = Correlation::new(sc);
         let plan = self.query(q, Some(&corr), sc.env)?;
-        let plan = optimizer::optimize(plan);
+        let plan = optimizer::optimize(plan, self.ctx.optimize);
         let sub = SubqueryPlan {
             id: self.next_subquery_id(),
             plan,

@@ -18,6 +18,7 @@ pub enum JoinStrategy {
     #[default]
     Auto,
     Hash,
+    Merge,
     NestedLoop,
 }
 
@@ -90,6 +91,16 @@ pub enum PhysicalPlan {
         residual: Option<Expr>,
         /// Build the hash table on the left input (INNER joins only).
         build_left: bool,
+        schema: Vec<Field>,
+    },
+    /// Sort-merge equi-join: both inputs are sorted on the keys and merged;
+    /// `residual` is evaluated over the combined row.
+    MergeJoin {
+        left: Box<PhysicalPlan>,
+        right: Box<PhysicalPlan>,
+        join_type: JoinType,
+        keys: Vec<JoinKey>,
+        residual: Option<Expr>,
         schema: Vec<Field>,
     },
     NestedLoopJoin {
@@ -298,15 +309,26 @@ fn lower_join(
             schema: schema.to_vec(),
         };
     }
+    let join_type = if join_type == JoinType::Cross {
+        JoinType::Inner
+    } else {
+        join_type
+    };
+    if opts.join == JoinStrategy::Merge {
+        return PhysicalPlan::MergeJoin {
+            left: l,
+            right: r,
+            join_type,
+            keys,
+            residual: Expr::conjunction(residual),
+            schema: schema.to_vec(),
+        };
+    }
     let build_left = join_type != JoinType::Left && estimate_rows(left) < estimate_rows(right);
     PhysicalPlan::HashJoin {
         left: l,
         right: r,
-        join_type: if join_type == JoinType::Cross {
-            JoinType::Inner
-        } else {
-            join_type
-        },
+        join_type,
         keys,
         residual: Expr::conjunction(residual),
         build_left,
@@ -469,6 +491,7 @@ impl PhysicalPlan {
             | PhysicalPlan::Project { schema, .. }
             | PhysicalPlan::HashAggregate { schema, .. }
             | PhysicalPlan::HashJoin { schema, .. }
+            | PhysicalPlan::MergeJoin { schema, .. }
             | PhysicalPlan::NestedLoopJoin { schema, .. } => schema,
             PhysicalPlan::Filter { input, .. }
             | PhysicalPlan::ParamLookup { input, .. }
@@ -596,6 +619,34 @@ impl PhysicalPlan {
                     (
                         "build_side",
                         Json::str(if *build_left { "left" } else { "right" }),
+                    ),
+                ],
+                vec![left, right],
+            ),
+            PhysicalPlan::MergeJoin {
+                left,
+                right,
+                join_type,
+                keys,
+                residual,
+                ..
+            } => node(
+                "MergeJoin",
+                vec![
+                    ("join_type", Json::str(join_type.name())),
+                    (
+                        "keys",
+                        Json::Array(
+                            keys.iter()
+                                .map(|k| Json::String(format!("{} = {}", k.left, k.right)))
+                                .collect(),
+                        ),
+                    ),
+                    (
+                        "residual",
+                        residual
+                            .as_ref()
+                            .map_or(Json::Null, |r| Json::String(r.to_string())),
                     ),
                 ],
                 vec![left, right],

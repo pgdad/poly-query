@@ -18,6 +18,20 @@ enum Acc {
     Max(Option<Value>),
 }
 
+/// A partial aggregate result (see [`AggState::from_partial`]).
+#[derive(Debug, Clone)]
+pub enum Partial {
+    /// COUNT / COUNT(*).
+    Count(i64),
+    /// SUM/AVG over INT64: exact sum and number of inputs.
+    SumInt(i128, i64),
+    /// SUM/AVG over DECIMAL: exact unscaled sum at the input type's scale.
+    SumDecimal(i128, i64),
+    SumFloat(f64, i64),
+    /// MIN/MAX: the extreme value so far (None if no input).
+    Extreme(Option<Value>),
+}
+
 /// Running state of one aggregate within one group.
 #[derive(Debug, Clone)]
 pub struct AggState {
@@ -111,6 +125,71 @@ impl AggState {
             }
         }
         Ok(retained)
+    }
+
+    /// A state holding a partial result computed elsewhere (vectorized
+    /// accumulators), so that `finish` applies the same final semantics.
+    pub fn from_partial(call: &AggregateCall, partial: Partial) -> AggState {
+        let mut s = AggState::new(call);
+        match partial {
+            Partial::Count(n) => s.acc = Acc::Count(n),
+            Partial::SumInt(sum, n) => {
+                s.acc = Acc::SumInt(sum);
+                s.count = n;
+            }
+            Partial::SumDecimal(sum, n) => {
+                s.acc = Acc::SumDecimal(sum);
+                s.count = n;
+            }
+            Partial::SumFloat(sum, n) => {
+                s.acc = Acc::SumFloat(sum);
+                s.count = n;
+            }
+            Partial::Extreme(v) => {
+                s.count = i64::from(v.is_some());
+                s.acc = match s.acc {
+                    Acc::Max(_) => Acc::Max(v),
+                    _ => Acc::Min(v),
+                };
+            }
+        }
+        s
+    }
+
+    /// Folds another partial state of the same aggregate into this one
+    /// (parallel aggregation). DISTINCT states re-add the other state's
+    /// distinct values, so values seen by both are counted once. Returns
+    /// the approximate number of bytes newly retained.
+    pub fn merge(&mut self, other: AggState) -> Result<usize> {
+        if let Some(values) = other.distinct {
+            let mut retained = 0;
+            for v in values {
+                retained += self.update(&v)?;
+            }
+            return Ok(retained);
+        }
+        self.count += other.count;
+        match (&mut self.acc, other.acc) {
+            (Acc::Count(a), Acc::Count(b)) => *a += b,
+            (Acc::SumInt(a), Acc::SumInt(b)) | (Acc::SumDecimal(a), Acc::SumDecimal(b)) => *a += b,
+            (Acc::SumFloat(a), Acc::SumFloat(b)) => *a += b,
+            (Acc::Min(a), Acc::Min(b)) => {
+                if let Some(b) = b
+                    && a.as_ref().is_none_or(|cur| b.sort_cmp(cur).is_lt())
+                {
+                    *a = Some(b);
+                }
+            }
+            (Acc::Max(a), Acc::Max(b)) => {
+                if let Some(b) = b
+                    && a.as_ref().is_none_or(|cur| b.sort_cmp(cur).is_gt())
+                {
+                    *a = Some(b);
+                }
+            }
+            _ => return Err(Error::internal("merging incompatible aggregate states")),
+        }
+        Ok(0)
     }
 
     /// Final aggregate value.

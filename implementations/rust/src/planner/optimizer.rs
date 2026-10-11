@@ -4,9 +4,12 @@
 use super::expr::Expr;
 use super::logical::{JoinType, LogicalPlan};
 
-/// Runs all logical rewrites.
-pub fn optimize(plan: LogicalPlan) -> LogicalPlan {
-    let plan = push_down(plan);
+/// Optimizes a logical plan. With `rewrites` (query option `optimize`,
+/// default true) the logical rewrites run; column pruning (projection
+/// pushdown) is always applied, since scans must read only referenced
+/// columns.
+pub fn optimize(plan: LogicalPlan, rewrites: bool) -> LogicalPlan {
+    let plan = if rewrites { push_down(plan) } else { plan };
     let width = plan.width();
     let (plan, _) = prune(plan, &(0..width).collect::<Vec<_>>());
     plan

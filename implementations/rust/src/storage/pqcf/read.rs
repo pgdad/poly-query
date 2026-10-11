@@ -589,7 +589,10 @@ fn decode_chunk(file: &[u8], meta: &ChunkMeta, ty: DataType, n: usize) -> Result
                     return Err(corrupt("dictionary code out of range"));
                 }
             }
-            ColumnData::Dict { codes, dict }
+            ColumnData::Dict {
+                codes,
+                dict: dict.into(),
+            }
         }
         (Encoding::Rle, _) => {
             let r = cur.u32()? as usize;

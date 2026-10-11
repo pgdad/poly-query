@@ -32,6 +32,8 @@ pub struct BindContext<'a> {
     pub catalog: &'a Catalog,
     /// Whether test-only functions (`PQ_SLEEP`) are enabled.
     pub test_functions: bool,
+    /// Whether logical rewrites are enabled (query option `optimize`).
+    pub optimize: bool,
 }
 
 /// Binds a query AST into a (not yet optimized) logical plan. Subquery plans

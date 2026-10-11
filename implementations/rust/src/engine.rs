@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::catalog::Catalog;
 use crate::config::Config;
 use crate::error::{Error, ErrorCode, Result};
-use crate::exec::{ExecContext, Operator, Row, build};
+use crate::exec::{ExecContext, ExecOptions, Operator, Row, build};
 use crate::ingest::{self, Format, IngestOptions};
 use crate::json::Json;
 use crate::planner::physical::{self, JoinStrategy};
@@ -80,8 +80,25 @@ pub struct QueryOptions {
     pub join: JoinStrategy,
     /// `use_indexes: false` ⇒ never use indexes.
     pub use_indexes: bool,
+    /// Execution model (`mode`).
+    pub mode: ExecMode,
+    /// Worker threads (`threads`; None = the `--threads` default).
+    pub threads: Option<usize>,
+    /// `optimize: false` disables logical rewrites.
+    pub optimize: bool,
     /// Client-assigned id used for cancellation (HTTP).
     pub query_id: Option<String>,
+}
+
+/// Query option `mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExecMode {
+    /// Vectorized execution (the engine's default).
+    #[default]
+    Auto,
+    /// Row-at-a-time baseline.
+    Row,
+    Vectorized,
 }
 
 impl Default for QueryOptions {
@@ -92,6 +109,9 @@ impl Default for QueryOptions {
             count_only: false,
             join: JoinStrategy::Auto,
             use_indexes: true,
+            mode: ExecMode::Auto,
+            threads: None,
+            optimize: true,
             query_id: None,
         }
     }
@@ -394,8 +414,9 @@ impl Engine {
         let ctx = BindContext {
             catalog,
             test_functions: self.config.test_functions,
+            optimize: opts.optimize,
         };
-        let logical = optimizer::optimize(plan_query(q, &ctx)?);
+        let logical = optimizer::optimize(plan_query(q, &ctx)?, opts.optimize);
         Ok(physical::lower(&logical, opts.physical()))
     }
 
@@ -455,17 +476,22 @@ impl Engine {
                 let memory =
                     usize::try_from(self.config.max_query_memory_mb.saturating_mul(1024 * 1024))
                         .unwrap_or(usize::MAX);
+                let exec = ExecOptions {
+                    vectorized: opts.mode != ExecMode::Row,
+                    threads: opts.threads.unwrap_or(self.config.threads).max(1),
+                };
                 let mut ctx = ExecContext::new(None, memory, self.config.test_functions)
                     .with_deadline(deadline)
                     .with_max_join_rows(self.config.max_join_rows)
-                    .with_physical_options(opts.physical());
+                    .with_physical_options(opts.physical())
+                    .with_exec_options(exec);
                 if let Some(flag) = control.cancel {
                     ctx = ctx.with_cancel_flag(flag);
                 }
                 ctx.check_interrupt()?;
                 Ok(QueryCursor {
                     columns,
-                    source: CursorSource::Plan(build(plan)),
+                    source: CursorSource::Plan(build(plan, &ctx)),
                     ctx,
                     max_rows: opts.max_rows,
                     row_count: 0,

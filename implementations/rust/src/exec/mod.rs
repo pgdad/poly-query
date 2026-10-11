@@ -5,8 +5,11 @@ pub mod aggregate;
 pub mod context;
 pub mod eval;
 pub mod functions;
+pub mod hash;
 pub mod operators;
+pub mod parallel;
 pub mod subquery;
+pub mod vector;
 
-pub use context::ExecContext;
+pub use context::{ExecContext, ExecOptions};
 pub use operators::{Operator, Row, build};

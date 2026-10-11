@@ -78,6 +78,28 @@ impl Bitmap {
     pub fn count_ones(&self) -> usize {
         self.words.iter().map(|w| w.count_ones() as usize).sum()
     }
+
+    /// Bits `[from, to)` as booleans, or None if they are all set (the
+    /// common no-NULL case is detected word-wise without materializing).
+    pub fn range_bools(&self, from: usize, to: usize) -> Option<Vec<bool>> {
+        let mut all = true;
+        let mut i = from;
+        while i < to {
+            let w = self.words[i / 64];
+            let bit = i % 64;
+            let n = (64 - bit).min(to - i);
+            let mask = if n == 64 { u64::MAX } else { ((1u64 << n) - 1) << bit };
+            if w & mask != mask {
+                all = false;
+                break;
+            }
+            i += n;
+        }
+        if all {
+            return None;
+        }
+        Some((from..to).map(|i| self.get(i)).collect())
+    }
 }
 
 /// Physical storage of one column's values. Slots of NULL entries hold a
@@ -94,7 +116,7 @@ pub enum ColumnData {
     /// slots are 0 and ignored).
     Dict {
         codes: Vec<u32>,
-        dict: Vec<Arc<str>>,
+        dict: Arc<[Arc<str>]>,
     },
     Date(Vec<i32>),
     Timestamp(Vec<i64>),
@@ -199,7 +221,10 @@ impl Column {
         }
         Column {
             data_type: self.data_type,
-            data: ColumnData::Dict { codes, dict },
+            data: ColumnData::Dict {
+                codes,
+                dict: dict.into(),
+            },
             validity: self.validity,
         }
     }

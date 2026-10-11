@@ -44,6 +44,13 @@ pub const CAPABILITIES: &[&str] = &[
     "index.btree",
     "phase4",
     "http.streaming",
+    "phase5",
+    "exec.row",
+    "exec.vectorized",
+    "exec.parallel",
+    "join.hash",
+    "join.merge",
+    "join.nested_loop",
 ];
 
 /// The `version` response body (without id).

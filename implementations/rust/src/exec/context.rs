@@ -2,11 +2,11 @@
 //! size limit, and the state of subquery evaluation (correlation parameters
 //! and result caches).
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use super::operators::Row;
@@ -24,21 +24,48 @@ pub type LookupTable = HashMap<Vec<Value>, Vec<Row>>;
 /// Cache key of a subquery execution: (subquery id, parameter values).
 type SubqueryKey = (usize, Vec<Value>);
 
+/// Execution model options (query options `mode` and `threads`).
+#[derive(Debug, Clone, Copy)]
+pub struct ExecOptions {
+    /// Batch-at-a-time execution (`mode: "vectorized"`) instead of the
+    /// row-at-a-time baseline.
+    pub vectorized: bool,
+    /// Worker threads for parallel scans/aggregation (vectorized mode).
+    pub threads: usize,
+}
+
+impl Default for ExecOptions {
+    fn default() -> Self {
+        ExecOptions {
+            vectorized: false,
+            threads: 1,
+        }
+    }
+}
+
+/// Budgets shared by all threads executing one query.
+#[derive(Debug, Default)]
+struct Shared {
+    memory_used: AtomicUsize,
+    join_rows: AtomicU64,
+}
+
 #[derive(Debug)]
 pub struct ExecContext {
     deadline: Option<Instant>,
     cancel: Option<Arc<AtomicBool>>,
     memory_limit: usize,
-    memory_used: Cell<usize>,
     max_join_rows: u64,
-    join_rows: Cell<u64>,
+    shared: Arc<Shared>,
     /// Whether test-only functions may run.
     pub test_functions: bool,
     /// Options for lowering subquery plans.
     pub physical: PhysicalOptions,
+    /// Execution model.
+    pub exec: ExecOptions,
     /// Correlation parameters of the subquery executions in progress
     /// (innermost last).
-    params: RefCell<Vec<Rc<[Value]>>>,
+    params: RefCell<Vec<Arc<[Value]>>>,
     /// Lowered subquery plans by subquery id.
     plans: RefCell<HashMap<usize, Rc<PhysicalPlan>>>,
     /// Subquery results by (subquery id, parameter values).
@@ -59,11 +86,11 @@ impl ExecContext {
             deadline: timeout.map(|t| Instant::now() + t),
             cancel: None,
             memory_limit,
-            memory_used: Cell::new(0),
             max_join_rows: u64::MAX,
-            join_rows: Cell::new(0),
+            shared: Arc::new(Shared::default()),
             test_functions,
             physical: PhysicalOptions::default(),
+            exec: ExecOptions::default(),
             params: RefCell::new(Vec::new()),
             plans: RefCell::new(HashMap::new()),
             results: RefCell::new(HashMap::new()),
@@ -90,6 +117,33 @@ impl ExecContext {
     pub fn with_physical_options(mut self, opts: PhysicalOptions) -> Self {
         self.physical = opts;
         self
+    }
+
+    pub fn with_exec_options(mut self, opts: ExecOptions) -> Self {
+        self.exec = opts;
+        self
+    }
+
+    /// Everything a worker thread needs to build its own context for the
+    /// same query (deadline, cancellation, shared budgets, options and the
+    /// current correlation parameters).
+    pub fn seed(&self) -> ContextSeed {
+        ContextSeed {
+            deadline: self.deadline,
+            cancel: self.cancel.clone(),
+            memory_limit: self.memory_limit,
+            max_join_rows: self.max_join_rows,
+            shared: self.shared.clone(),
+            test_functions: self.test_functions,
+            physical: self.physical,
+            exec: self.exec,
+            params: self.params.borrow().clone(),
+        }
+    }
+
+    /// True while executing (correlated) subquery code.
+    pub fn in_subquery(&self) -> bool {
+        !self.params.borrow().is_empty()
     }
 
     /// Fails with TIMEOUT or CANCELLED if the query must stop.
@@ -122,8 +176,11 @@ impl ExecContext {
 
     /// Accounts `bytes` of materialized state against the memory budget.
     pub fn reserve(&self, bytes: usize) -> Result<()> {
-        let used = self.memory_used.get().saturating_add(bytes);
-        self.memory_used.set(used);
+        let used = self
+            .shared
+            .memory_used
+            .fetch_add(bytes, Ordering::Relaxed)
+            .saturating_add(bytes);
         if used > self.memory_limit {
             return Err(Error::resource_limit(format!(
                 "query exceeded its memory budget of {} MiB",
@@ -134,14 +191,21 @@ impl ExecContext {
     }
 
     pub fn release(&self, bytes: usize) {
-        self.memory_used
-            .set(self.memory_used.get().saturating_sub(bytes));
+        let _ = self
+            .shared
+            .memory_used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |u| {
+                Some(u.saturating_sub(bytes))
+            });
     }
 
     /// Counts rows produced by join operators against `--max-join-rows`.
     pub fn count_join_rows(&self, n: u64) -> Result<()> {
-        let total = self.join_rows.get().saturating_add(n);
-        self.join_rows.set(total);
+        let total = self
+            .shared
+            .join_rows
+            .fetch_add(n, Ordering::Relaxed)
+            .saturating_add(n);
         if total > self.max_join_rows {
             return Err(Error::resource_limit(format!(
                 "join produced more than {} rows (--max-join-rows)",
@@ -161,7 +225,7 @@ impl ExecContext {
     }
 
     /// Runs `f` with `params` as the innermost correlation parameters.
-    pub fn with_params<T>(&self, params: Rc<[Value]>, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    pub fn with_params<T>(&self, params: Arc<[Value]>, f: impl FnOnce() -> Result<T>) -> Result<T> {
         self.params.borrow_mut().push(params);
         let r = f();
         self.params.borrow_mut().pop();
@@ -193,5 +257,40 @@ impl ExecContext {
 
     pub fn cache_lookup(&self, id: usize, table: Rc<LookupTable>) {
         self.lookups.borrow_mut().insert(id, table);
+    }
+}
+
+/// Sendable description of a query's execution context (see
+/// [`ExecContext::seed`]); worker threads build their own context from it.
+/// Subquery result caches are per context.
+#[derive(Debug, Clone)]
+pub struct ContextSeed {
+    deadline: Option<Instant>,
+    cancel: Option<Arc<AtomicBool>>,
+    memory_limit: usize,
+    max_join_rows: u64,
+    shared: Arc<Shared>,
+    test_functions: bool,
+    physical: PhysicalOptions,
+    exec: ExecOptions,
+    params: Vec<Arc<[Value]>>,
+}
+
+impl ContextSeed {
+    pub fn context(&self) -> ExecContext {
+        ExecContext {
+            deadline: self.deadline,
+            cancel: self.cancel.clone(),
+            memory_limit: self.memory_limit,
+            max_join_rows: self.max_join_rows,
+            shared: self.shared.clone(),
+            test_functions: self.test_functions,
+            physical: self.physical,
+            exec: self.exec,
+            params: RefCell::new(self.params.clone()),
+            plans: RefCell::new(HashMap::new()),
+            results: RefCell::new(HashMap::new()),
+            lookups: RefCell::new(HashMap::new()),
+        }
     }
 }

@@ -59,7 +59,7 @@ fn run(
         }
     };
     let result = ctx.with_params(key.1.clone().into(), || {
-        let mut op = build((*plan).clone());
+        let mut op = build((*plan).clone(), ctx);
         Ok(match want {
             Want::Scalar => match op.next(ctx)? {
                 None => SubqueryResult::Scalar(Value::Null),

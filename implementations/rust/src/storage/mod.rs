@@ -213,6 +213,27 @@ impl Table {
         }
     }
 
+    /// The decoded chunk of column `col` in row group `rg` for column-oriented
+    /// representations; None for the row layout (use [`Table::row_slice`]).
+    pub fn column_chunk(&self, rg: usize, col: usize) -> Result<Option<&Column>> {
+        match &self.data {
+            Data::Rows(_) => Ok(None),
+            _ => self.chunk(rg, col).map(Some),
+        }
+    }
+
+    /// Rows `[from, to)` of row group `rg` of a row-layout table (None for
+    /// column-oriented representations).
+    pub fn row_slice(&self, rg: usize, from: usize, to: usize) -> Option<&[Box<[Value]>]> {
+        match &self.data {
+            Data::Rows(rows) => {
+                let start = self.groups[rg].start;
+                Some(&rows[start + from..start + to])
+            }
+            _ => None,
+        }
+    }
+
     /// Appends rows `[from, to)` (relative to row group `rg`) projected to
     /// `columns`.
     pub fn read_group(

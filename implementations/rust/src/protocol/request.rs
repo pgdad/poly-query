@@ -1,6 +1,6 @@
 //! Validation of protocol requests into typed values (protocol.md §4–§5).
 
-use crate::engine::{LoadRequest, OpenRequest, QueryOptions, SaveRequest, Source};
+use crate::engine::{ExecMode, LoadRequest, OpenRequest, QueryOptions, SaveRequest, Source};
 use crate::error::{Error, Result};
 use crate::ingest::Format;
 use crate::json::Json;
@@ -250,6 +250,9 @@ fn parse_open(req: &Json) -> Result<OpenRequest> {
     })
 }
 
+/// Upper bound for the `threads` query option.
+const MAX_QUERY_THREADS: usize = 256;
+
 fn parse_query_options(req: &Json) -> Result<QueryOptions> {
     let mut o = QueryOptions::default();
     let Some(opts) = optional_object(req, "options")? else {
@@ -267,7 +270,9 @@ fn parse_query_options(req: &Json) -> Result<QueryOptions> {
         }
     }
     match optional_str(opts, "mode")? {
-        None | Some("auto") | Some("row") => {}
+        None | Some("auto") => {}
+        Some("row") => o.mode = ExecMode::Row,
+        Some("vectorized") => o.mode = ExecMode::Vectorized,
         Some(other) => {
             return Err(Error::unsupported(format!(
                 "execution mode '{other}' is not supported"
@@ -275,8 +280,9 @@ fn parse_query_options(req: &Json) -> Result<QueryOptions> {
         }
     }
     match optional_str(opts, "join")? {
-        None | Some("auto") | Some("merge") => {}
+        None | Some("auto") => {}
         Some("hash") => o.join = JoinStrategy::Hash,
+        Some("merge") => o.join = JoinStrategy::Merge,
         Some("nested_loop") => o.join = JoinStrategy::NestedLoop,
         Some(other) => {
             return Err(Error::unsupported(format!(
@@ -284,12 +290,15 @@ fn parse_query_options(req: &Json) -> Result<QueryOptions> {
             )));
         }
     }
-    if let Some(t) = optional_uint(opts, "threads")?
-        && t == 0
-    {
-        return Err(invalid("threads must be at least 1"));
+    if let Some(t) = optional_uint(opts, "threads")? {
+        if t == 0 {
+            return Err(invalid("threads must be at least 1"));
+        }
+        o.threads = Some(usize::try_from(t).unwrap_or(usize::MAX).min(MAX_QUERY_THREADS));
     }
-    optional_bool(opts, "optimize")?;
+    if let Some(b) = optional_bool(opts, "optimize")? {
+        o.optimize = b;
+    }
     if let Some(u) = optional_bool(opts, "use_indexes")? {
         o.use_indexes = u;
     }
@@ -326,7 +335,7 @@ mod tests {
         );
         assert_eq!(code(r#"{"op":"sleep","ms":5}"#), ErrorCode::InvalidRequest);
         assert_eq!(
-            code(r#"{"op":"query","sql":"x","options":{"mode":"vectorized"}}"#),
+            code(r#"{"op":"query","sql":"x","options":{"mode":"quantum"}}"#),
             ErrorCode::Unsupported
         );
         assert_eq!(

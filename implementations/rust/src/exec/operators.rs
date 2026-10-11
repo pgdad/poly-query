@@ -26,8 +26,19 @@ pub trait Operator {
     fn next(&mut self, ctx: &ExecContext) -> Result<Option<Row>>;
 }
 
-/// Builds the operator tree for a physical plan.
-pub fn build(plan: PhysicalPlan) -> Box<dyn Operator> {
+/// Builds the operator tree for a physical plan in the execution mode of
+/// `ctx` (row-at-a-time or vectorized).
+pub fn build(plan: PhysicalPlan, ctx: &ExecContext) -> Box<dyn Operator> {
+    if ctx.exec.vectorized {
+        Box::new(crate::exec::vector::ops::RowSink::new(crate::exec::vector::build(plan, ctx)))
+    } else {
+        build_row(plan)
+    }
+}
+
+/// Builds the row-at-a-time (Volcano) operator tree for a physical plan.
+pub fn build_row(plan: PhysicalPlan) -> Box<dyn Operator> {
+    let build = build_row;
     match plan {
         PhysicalPlan::Values => Box::new(SingleRowOp { done: false }),
         PhysicalPlan::TableScan {
@@ -122,6 +133,26 @@ pub fn build(plan: PhysicalPlan) -> Box<dyn Operator> {
                 predicate,
                 left_join: join_type == JoinType::Left,
                 right_width,
+                out: VecDeque::new(),
+            })
+        }
+        PhysicalPlan::MergeJoin {
+            left,
+            right,
+            join_type,
+            keys,
+            residual,
+            ..
+        } => {
+            let right_width = right.schema().len();
+            Box::new(MergeJoinOp {
+                inputs: Some((build(*left), build(*right))),
+                keys,
+                residual,
+                left_join: join_type == JoinType::Left,
+                right_width,
+                state: None,
+                pos: 0,
                 out: VecDeque::new(),
             })
         }
@@ -329,6 +360,153 @@ impl Operator for NestedLoopJoinOp {
     }
 }
 
+/// Lexicographic comparison of two join keys.
+fn compare_join_keys(a: &[Value], b: &[Value]) -> Ordering {
+    for (x, y) in a.iter().zip(b) {
+        let o = x.sort_cmp(y);
+        if o != Ordering::Equal {
+            return o;
+        }
+    }
+    Ordering::Equal
+}
+
+/// Join key of row `i` (empty for a NULL key).
+fn key(keys: &[Option<Vec<Value>>], i: usize) -> &[Value] {
+    keys[i].as_deref().unwrap_or(&[])
+}
+
+/// Materialized, sorted inputs of a merge join.
+struct MergeState {
+    left: Vec<Row>,
+    right: Vec<Row>,
+    /// Left rows in emission order (NULL keys first, then ascending keys)
+    /// with the range of matching positions in `right_sorted`.
+    order: Vec<(usize, usize, usize)>,
+    right_sorted: Vec<usize>,
+}
+
+/// Sort-merge equi-join: both inputs are materialized and sorted on their
+/// (normalized) keys, then merged group by group. LEFT joins keep left rows
+/// without a match (NULL-padded).
+struct MergeJoinOp {
+    inputs: Option<(Box<dyn Operator>, Box<dyn Operator>)>,
+    keys: Vec<JoinKey>,
+    residual: Option<Expr>,
+    left_join: bool,
+    right_width: usize,
+    state: Option<MergeState>,
+    pos: usize,
+    out: VecDeque<Row>,
+}
+
+impl MergeJoinOp {
+    fn prepare(
+        &self,
+        mut left: Box<dyn Operator>,
+        mut right: Box<dyn Operator>,
+        ctx: &ExecContext,
+    ) -> Result<MergeState> {
+        let read = |input: &mut Box<dyn Operator>, is_left: bool| -> Result<(Vec<Row>, Vec<Option<Vec<Value>>>)> {
+            let mut rows = Vec::new();
+            let mut keys = Vec::new();
+            while let Some(row) = input.next(ctx)? {
+                let key = join_key(
+                    &mut self
+                        .keys
+                        .iter()
+                        .map(|k| (if is_left { &k.left } else { &k.right }, k.domain)),
+                    &row,
+                    ctx,
+                )?;
+                ctx.reserve(row_size(&row) + key.as_ref().map_or(0, |k| row_size(k)))?;
+                rows.push(row);
+                keys.push(key);
+            }
+            Ok((rows, keys))
+        };
+        let (left_rows, lkeys) = read(&mut left, true)?;
+        let (right_rows, rkeys) = read(&mut right, false)?;
+        let mut lsorted: Vec<usize> = (0..left_rows.len()).filter(|&i| lkeys[i].is_some()).collect();
+        let mut rsorted: Vec<usize> = (0..right_rows.len()).filter(|&i| rkeys[i].is_some()).collect();
+        lsorted.sort_by(|&a, &b| compare_join_keys(key(&lkeys, a), key(&lkeys, b)));
+        rsorted.sort_by(|&a, &b| compare_join_keys(key(&rkeys, a), key(&rkeys, b)));
+        ctx.check_interrupt()?;
+        let mut order: Vec<(usize, usize, usize)> = (0..left_rows.len())
+            .filter(|&i| lkeys[i].is_none())
+            .map(|i| (i, 0, 0))
+            .collect();
+        let (mut i, mut j) = (0, 0);
+        while i < lsorted.len() {
+            let k = key(&lkeys, lsorted[i]);
+            let mut i2 = i + 1;
+            while i2 < lsorted.len() && compare_join_keys(key(&lkeys, lsorted[i2]), k).is_eq() {
+                i2 += 1;
+            }
+            while j < rsorted.len() && compare_join_keys(key(&rkeys, rsorted[j]), k).is_lt() {
+                j += 1;
+            }
+            let mut j2 = j;
+            while j2 < rsorted.len() && compare_join_keys(key(&rkeys, rsorted[j2]), k).is_eq() {
+                j2 += 1;
+            }
+            order.extend(lsorted[i..i2].iter().map(|&l| (l, j, j2)));
+            i = i2;
+            j = j2;
+        }
+        Ok(MergeState {
+            left: left_rows,
+            right: right_rows,
+            order,
+            right_sorted: rsorted,
+        })
+    }
+}
+
+impl Operator for MergeJoinOp {
+    fn next(&mut self, ctx: &ExecContext) -> Result<Option<Row>> {
+        if let Some((l, r)) = self.inputs.take() {
+            self.state = Some(self.prepare(l, r, ctx)?);
+        }
+        let Some(state) = &self.state else {
+            return Ok(None);
+        };
+        loop {
+            if let Some(row) = self.out.pop_front() {
+                return Ok(Some(row));
+            }
+            let Some(&(l, from, to)) = state.order.get(self.pos) else {
+                return Ok(None);
+            };
+            self.pos += 1;
+            if self.pos % CHECK_INTERVAL == 0 {
+                ctx.check_interrupt()?;
+            }
+            let left = &state.left[l];
+            let mut matched = false;
+            for &r in &state.right_sorted[from..to] {
+                let mut combined = Vec::with_capacity(left.len() + self.right_width);
+                combined.extend_from_slice(left);
+                combined.extend_from_slice(&state.right[r]);
+                if let Some(p) = &self.residual
+                    && !eval_predicate(p, &combined, ctx)?
+                {
+                    continue;
+                }
+                matched = true;
+                ctx.count_join_rows(1)?;
+                self.out.push_back(combined);
+            }
+            if !matched && self.left_join {
+                let mut padded = left.clone();
+                padded.resize(left.len() + self.right_width, Value::Null);
+                ctx.count_join_rows(1)?;
+                self.out.push_back(padded);
+            }
+        }
+    }
+}
+
 /// Probes a per-query hash table of a parameter-independent input with the
 /// current correlation parameters (see `PhysicalPlan::ParamLookup`).
 struct ParamLookupOp {
@@ -348,7 +526,7 @@ impl ParamLookupOp {
         }
         let mut table = LookupTable::new();
         if let Some(plan) = self.input.take() {
-            let mut input = build(*plan);
+            let mut input = build_row(*plan);
             while let Some(row) = input.next(ctx)? {
                 let key = join_key(
                     &mut self.keys.iter().map(|k| (&k.left, k.domain)),
@@ -637,7 +815,8 @@ struct SortOp {
     output: std::vec::IntoIter<Row>,
 }
 
-type SortEntry = (Vec<Value>, Row);
+/// Sort keys, input sequence number (tie-breaker), row.
+type SortEntry = (Vec<Value>, usize, Row);
 
 impl SortOp {
     fn new(input: Box<dyn Operator>, keys: Vec<SortKey>, top: Option<usize>) -> Self {
@@ -649,6 +828,8 @@ impl SortOp {
         }
     }
 
+    /// Total order: the sort keys, then input order (so that top-N
+    /// selection keeps exactly the prefix of a stable sort).
     fn compare(&self, a: &SortEntry, b: &SortEntry) -> Ordering {
         for (i, k) in self.keys.iter().enumerate() {
             let o = compare_keys(&a.0[i], &b.0[i], k);
@@ -656,7 +837,7 @@ impl SortOp {
                 return o;
             }
         }
-        Ordering::Equal
+        a.1.cmp(&b.1)
     }
 
     /// Keeps only the `n` smallest entries.
@@ -673,12 +854,14 @@ impl SortOp {
 
     fn compute(&self, mut input: Box<dyn Operator>, ctx: &ExecContext) -> Result<Vec<Row>> {
         let mut entries: Vec<SortEntry> = Vec::new();
+        let mut seq = 0;
         while let Some(row) = input.next(ctx)? {
             let mut key = Vec::with_capacity(self.keys.len());
             for k in &self.keys {
                 key.push(eval(&k.expr, &row, ctx)?);
             }
-            let entry = (key, row);
+            let entry = (key, seq, row);
+            seq += 1;
             ctx.reserve(entry_size(&entry))?;
             entries.push(entry);
             if let Some(n) = self.top
@@ -691,14 +874,14 @@ impl SortOp {
             self.truncate_top(&mut entries, n, ctx);
         }
         ctx.check_interrupt()?;
-        entries.sort_by(|a, b| self.compare(a, b));
-        Ok(entries.into_iter().map(|(_, row)| row).collect())
+        entries.sort_unstable_by(|a, b| self.compare(a, b));
+        Ok(entries.into_iter().map(|(_, _, row)| row).collect())
     }
 }
 
 fn entry_size(e: &SortEntry) -> usize {
     e.0.iter()
-        .chain(e.1.iter())
+        .chain(e.2.iter())
         .map(|v| v.approx_size())
         .sum::<usize>()
         + 48
