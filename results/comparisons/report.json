@@ -1,5 +1,5 @@
 {
- "generated": "2026-10-11T11:45:44.024126+00:00",
+ "generated": "2026-10-11T12:08:56.682988+00:00",
  "weights": {
   "correctness": 0.35,
   "development_effort": 0.2,
@@ -7,7 +7,7 @@
   "resources": 0.1,
   "maintainability": 0.15
  },
- "git_commit": "e5c39f4e6851e8a82561bea00d892b8091ad532a",
+ "git_commit": "276fae6c2363bbac3283e2098e8adb6c6161d763",
  "runs": [
   {
    "run_id": "a-change-decimal38-clojure-a1-20261011T060221Z",
@@ -170,6 +170,24 @@
    "attempt": 1,
    "outcome": "success",
    "manifest": "experiments/runs/a-debug-mutant-rust-a1-20261011T054109Z/manifest.json"
+  },
+  {
+   "run_id": "a-kernel-change-i128-arm64-asm-a1-20261011T114052Z",
+   "language": "arm64-asm",
+   "task": "kernel-change-i128",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-kernel-change-i128-arm64-asm-a1-20261011T114052Z/manifest.json"
+  },
+  {
+   "run_id": "a-kernel-change-i128-x86_64-asm-a1-20261011T114053Z",
+   "language": "x86_64-asm",
+   "task": "kernel-change-i128",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-kernel-change-i128-x86_64-asm-a1-20261011T114053Z/manifest.json"
   },
   {
    "run_id": "a-kernel-debug-mutant-arm64-asm-a1-20261011T114058Z",
@@ -1363,26 +1381,30 @@
      "summary": {
       "variants": 3,
       "all_pass": true,
-      "complete_variants": [],
+      "complete_variants": [
+       "x86_avx2",
+       "x86_avx512",
+       "x86_scalar"
+      ],
       "suites_exit_ok": true
      },
      "variants": {
       "x86_scalar": {
-       "provided": 16,
+       "provided": 20,
        "total": 20,
        "public": "PASS",
        "asan": "PASS",
        "hidden": "PASS"
       },
       "x86_avx2": {
-       "provided": 16,
+       "provided": 20,
        "total": 20,
        "public": "PASS",
        "asan": "PASS",
        "hidden": "PASS"
       },
       "x86_avx512": {
-       "provided": 16,
+       "provided": 20,
        "total": 20,
        "public": "PASS",
        "asan": "PASS",
@@ -1404,33 +1426,37 @@
        "environment": "native x86-64 (sandbox), ASan/UBSan"
       }
      },
-     "commit": "6775395fbe69c414a539f19e3069abf5d4d3a24e",
+     "commit": "1ab9b775d80000ff86b2cd4e9ff6e8b3c2cb336a",
      "source": "results/correctness/x86_64-asm.json"
     },
     "arm64-asm": {
      "summary": {
       "variants": 3,
       "all_pass": true,
-      "complete_variants": [],
+      "complete_variants": [
+       "a64_neon",
+       "a64_scalar",
+       "a64_sve"
+      ],
       "suites_exit_ok": true
      },
      "variants": {
       "a64_scalar": {
-       "provided": 16,
+       "provided": 20,
        "total": 20,
        "public": "PASS",
        "asan": "PASS",
        "hidden": "PASS"
       },
       "a64_neon": {
-       "provided": 16,
+       "provided": 20,
        "total": 20,
        "public": "PASS",
        "asan": "PASS",
        "hidden": "PASS"
       },
       "a64_sve": {
-       "provided": 16,
+       "provided": 20,
        "total": 20,
        "public": "PASS",
        "asan": "PASS",
@@ -1439,19 +1465,19 @@
      },
      "variants_emulated": {
       "a64_scalar": {
-       "provided": 16,
+       "provided": 20,
        "total": 20,
        "public": "PASS",
        "hidden": "PASS"
       },
       "a64_neon": {
-       "provided": 16,
+       "provided": 20,
        "total": 20,
        "public": "PASS",
        "hidden": "PASS"
       },
       "a64_sve": {
-       "provided": 16,
+       "provided": 20,
        "total": 20,
        "public": "PASS",
        "hidden": "PASS"
@@ -1471,7 +1497,7 @@
        "environment": "native AArch64 on spark (Ubuntu 24.04.4 LTS), pqrunner systemd unit"
       }
      },
-     "commit": "6775395fbe69c414a539f19e3069abf5d4d3a24e",
+     "commit": "931d447b87823101aafc11ca8a3ddfe6afb73aca",
      "source": "results/correctness/arm64-asm.json"
     }
    }
@@ -3442,6 +3468,28 @@
     ]
    },
    "x86_64-asm": {
+    "kernel-change-i128": [
+     {
+      "run_id": "a-kernel-change-i128-x86_64-asm-a1-20261011T114053Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-kernel-change-i128-x86_64-asm-a1-20261011T114053Z/manifest.json",
+      "cost_usd": 7.367618800000002,
+      "tokens_output": 165086,
+      "tokens_input_total": 9872827,
+      "turns": 54,
+      "wall_seconds": 1566.3,
+      "tool_calls": 53,
+      "tool_failures": 1,
+      "build_failures": 4,
+      "repair_iterations": 0,
+      "commits": 7,
+      "lines_added": 2715,
+      "lines_removed": 23,
+      "files_changed": 8,
+      "conformance": null
+     }
+    ],
     "kernel-debug-mutant": [
      {
       "run_id": "a-kernel-debug-mutant-x86_64-asm-a1-20261011T114057Z",
@@ -3488,6 +3536,28 @@
     ]
    },
    "arm64-asm": {
+    "kernel-change-i128": [
+     {
+      "run_id": "a-kernel-change-i128-arm64-asm-a1-20261011T114052Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-kernel-change-i128-arm64-asm-a1-20261011T114052Z/manifest.json",
+      "cost_usd": 3.2430976,
+      "tokens_output": 80043,
+      "tokens_input_total": 2614363,
+      "turns": 27,
+      "wall_seconds": 702.6,
+      "tool_calls": 26,
+      "tool_failures": 0,
+      "build_failures": 0,
+      "repair_iterations": 0,
+      "commits": 4,
+      "lines_added": 1203,
+      "lines_removed": 12,
+      "files_changed": 5,
+      "conformance": null
+     }
+    ],
     "kernel-debug-mutant": [
      {
       "run_id": "a-kernel-debug-mutant-arm64-asm-a1-20261011T114058Z",
@@ -26763,91 +26833,91 @@
     }
    },
    "arm64-asm": {
-    "source": "results/performance/kernels-arm-rev0",
-    "label": "rev0",
+    "source": "results/performance/kernels-arm-after-change",
+    "label": "after-change",
     "host": "spark",
     "ns_per_elem": {
      "a64_neon": {
-      "filter_i64_sel10": 0.2502,
-      "filter_i64_bitmap": 0.2293,
-      "count_i64_between": 0.2223,
-      "sum_i64": 0.215,
-      "sum_i64_validity": 0.2257,
-      "sum_f64": 0.2269,
-      "minmax_i64": 0.2841,
-      "bitmap_and": 0.002,
+      "filter_i64_sel10": 0.2542,
+      "filter_i64_bitmap": 0.2301,
+      "count_i64_between": 0.224,
+      "sum_i64": 0.2168,
+      "sum_i64_validity": 0.226,
+      "sum_f64": 0.2264,
+      "minmax_i64": 0.2845,
+      "bitmap_and": 0.0021,
       "bitmap_popcount": 0.0011,
-      "hash_i64": 0.3815,
-      "compare_i64": 0.435,
-      "group_sum_i64_1024": 0.7811,
-      "gather_i64": 5.0747,
-      "filter_i128_sel10": 1.3225,
-      "count_i128_between": 2.1922,
-      "sum_i128": 0.4927,
-      "minmax_i128": 0.9535
+      "hash_i64": 0.3817,
+      "compare_i64": 0.4381,
+      "group_sum_i64_1024": 0.782,
+      "gather_i64": 5.0937,
+      "filter_i128_sel10": 0.5172,
+      "count_i128_between": 0.4819,
+      "sum_i128": 0.462,
+      "minmax_i128": 0.6752
      },
      "a64_scalar": {
-      "filter_i64_sel10": 0.5128,
-      "filter_i64_bitmap": 0.7232,
-      "count_i64_between": 0.5543,
-      "sum_i64": 0.4503,
-      "sum_i64_validity": 0.6305,
-      "sum_f64": 0.5538,
-      "minmax_i64": 0.5986,
-      "bitmap_and": 0.0051,
-      "bitmap_popcount": 0.0118,
-      "hash_i64": 0.5894,
-      "compare_i64": 0.7002,
-      "group_sum_i64_1024": 0.935,
-      "gather_i64": 5.1158,
-      "filter_i128_sel10": 1.3511,
-      "count_i128_between": 2.1944,
-      "sum_i128": 0.4955,
-      "minmax_i128": 0.9514
+      "filter_i64_sel10": 0.5123,
+      "filter_i64_bitmap": 0.7428,
+      "count_i64_between": 0.5542,
+      "sum_i64": 0.4488,
+      "sum_i64_validity": 0.6419,
+      "sum_f64": 0.5543,
+      "minmax_i64": 0.5996,
+      "bitmap_and": 0.0052,
+      "bitmap_popcount": 0.0119,
+      "hash_i64": 0.5885,
+      "compare_i64": 0.6991,
+      "group_sum_i64_1024": 0.9373,
+      "gather_i64": 5.1337,
+      "filter_i128_sel10": 0.6526,
+      "count_i128_between": 0.6507,
+      "sum_i128": 0.5137,
+      "minmax_i128": 1.1645
      },
      "a64_sve": {
-      "filter_i64_sel10": 0.6805,
-      "filter_i64_bitmap": 0.7048,
-      "count_i64_between": 0.5816,
-      "sum_i64": 0.292,
-      "sum_i64_validity": 0.4318,
-      "sum_f64": 0.2927,
-      "minmax_i64": 0.2918,
+      "filter_i64_sel10": 0.6791,
+      "filter_i64_bitmap": 0.6641,
+      "count_i64_between": 0.578,
+      "sum_i64": 0.2915,
+      "sum_i64_validity": 0.4315,
+      "sum_f64": 0.2912,
+      "minmax_i64": 0.2924,
       "bitmap_and": 0.0022,
       "bitmap_popcount": 0.0031,
-      "hash_i64": 0.3545,
-      "compare_i64": 0.6202,
-      "group_sum_i64_1024": 0.9327,
-      "gather_i64": 5.134,
-      "filter_i128_sel10": 1.3208,
-      "count_i128_between": 2.1933,
-      "sum_i128": 0.4942,
-      "minmax_i128": 0.9516
+      "hash_i64": 0.3574,
+      "compare_i64": 0.6193,
+      "group_sum_i64_1024": 0.9316,
+      "gather_i64": 5.1672,
+      "filter_i128_sel10": 1.2221,
+      "count_i128_between": 1.0431,
+      "sum_i128": 0.4821,
+      "minmax_i128": 1.7867
      },
      "reference": {
-      "filter_i64_sel10": 1.2041,
-      "filter_i64_bitmap": 2.7874,
-      "count_i64_between": 0.6832,
-      "sum_i64": 0.3562,
-      "sum_i64_validity": 0.5366,
-      "sum_f64": 0.5447,
-      "minmax_i64": 0.5427,
+      "filter_i64_sel10": 1.2028,
+      "filter_i64_bitmap": 2.7941,
+      "count_i64_between": 0.6816,
+      "sum_i64": 0.3553,
+      "sum_i64_validity": 0.5347,
+      "sum_f64": 0.5444,
+      "minmax_i64": 0.5426,
       "bitmap_and": 0.0021,
       "bitmap_popcount": 0.0421,
-      "hash_i64": 0.5575,
-      "compare_i64": 2.3284,
-      "group_sum_i64_1024": 0.9373,
-      "gather_i64": 5.1477,
-      "filter_i128_sel10": 1.3495,
-      "count_i128_between": 2.1946,
-      "sum_i128": 0.494,
-      "minmax_i128": 0.9471
+      "hash_i64": 0.5578,
+      "compare_i64": 2.3286,
+      "group_sum_i64_1024": 0.9358,
+      "gather_i64": 5.1852,
+      "filter_i128_sel10": 1.3491,
+      "count_i128_between": 2.2893,
+      "sum_i128": 0.4929,
+      "minmax_i128": 0.9529
      }
     },
     "speedup_vs_reference": {
-     "a64_neon": 2.2852301477236834,
-     "a64_scalar": 1.2237159479709767,
-     "a64_sve": 1.612895043791789
+     "a64_neon": 2.6960374435502086,
+     "a64_scalar": 1.3505045675923053,
+     "a64_sve": 1.6436625511509
     }
    }
   },
@@ -27327,9 +27397,9 @@
    },
    "arm64-asm": {
     "text_bytes_per_source": {
-     "pq_a64_neon.S": 4928,
-     "pq_a64_scalar.S": 2332,
-     "pq_a64_sve.S": 2808
+     "pq_a64_neon.S": 7644,
+     "pq_a64_scalar.S": 3148,
+     "pq_a64_sve.S": 4004
     },
     "note": "Kernels never allocate (ABI rule); resource figures are machine-code size and time per element."
    }
@@ -27516,21 +27586,21 @@
     }
    },
    "x86_64-asm": {
-    "source_loc": 4010,
+    "source_loc": 5876,
     "test_loc": 0,
     "files": 4,
-    "comment_lines": 533,
-    "comment_density": 0.133,
-    "largest_file_loc": 1572,
+    "comment_lines": 925,
+    "comment_density": 0.157,
+    "largest_file_loc": 2262,
     "rubric_review": null
    },
    "arm64-asm": {
-    "source_loc": 2039,
+    "source_loc": 2809,
     "test_loc": 0,
     "files": 4,
-    "comment_lines": 464,
-    "comment_density": 0.228,
-    "largest_file_loc": 1053,
+    "comment_lines": 738,
+    "comment_density": 0.263,
+    "largest_file_loc": 1439,
     "rubric_review": null
    }
   },
@@ -48060,11 +48130,38 @@
    },
    "arm64-asm": {
     "simd_and_scalar_speedup_vs_reference": {
-     "a64_neon": 2.2852301477236834,
-     "a64_scalar": 1.2237159479709767,
-     "a64_sve": 1.612895043791789
+     "a64_neon": 2.6960374435502086,
+     "a64_scalar": 1.3505045675923053,
+     "a64_sve": 1.6436625511509
     },
-    "independent_before_after": {}
+    "independent_before_after": {
+     "kernel-change-i128": {
+      "variant": "a64_neon",
+      "before": "results/performance/kernels-arm-before-change",
+      "after": "results/performance/kernels-arm-after-change",
+      "per_kernel": {
+       "bitmap_and": 0.952,
+       "bitmap_popcount": 1.0,
+       "compare_i64": 0.993,
+       "count_i128_between": 4.549,
+       "count_i64_between": 0.992,
+       "filter_i128_sel10": 2.557,
+       "filter_i64_bitmap": 0.997,
+       "filter_i64_sel10": 0.984,
+       "gather_i64": 0.996,
+       "group_sum_i64_1024": 0.999,
+       "hash_i64": 0.999,
+       "minmax_i128": 1.412,
+       "minmax_i64": 0.999,
+       "sum_f64": 1.002,
+       "sum_i128": 1.066,
+       "sum_i64": 0.992,
+       "sum_i64_validity": 0.999
+      },
+      "geomean": 1.1766979939358728,
+      "slower_kernels": []
+     }
+    }
    }
   },
   "7_architectural_adaptability": {
@@ -48999,6 +49096,28 @@
     ]
    },
    "x86_64-asm": {
+    "kernel-change-i128": [
+     {
+      "run_id": "a-kernel-change-i128-x86_64-asm-a1-20261011T114053Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-kernel-change-i128-x86_64-asm-a1-20261011T114053Z/manifest.json",
+      "cost_usd": 7.367618800000002,
+      "tokens_output": 165086,
+      "tokens_input_total": 9872827,
+      "turns": 54,
+      "wall_seconds": 1566.3,
+      "tool_calls": 53,
+      "tool_failures": 1,
+      "build_failures": 4,
+      "repair_iterations": 0,
+      "commits": 7,
+      "lines_added": 2715,
+      "lines_removed": 23,
+      "files_changed": 8,
+      "conformance": null
+     }
+    ],
     "kernel-debug-mutant": [
      {
       "run_id": "a-kernel-debug-mutant-x86_64-asm-a1-20261011T114057Z",
@@ -49023,6 +49142,28 @@
     ]
    },
    "arm64-asm": {
+    "kernel-change-i128": [
+     {
+      "run_id": "a-kernel-change-i128-arm64-asm-a1-20261011T114052Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-kernel-change-i128-arm64-asm-a1-20261011T114052Z/manifest.json",
+      "cost_usd": 3.2430976,
+      "tokens_output": 80043,
+      "tokens_input_total": 2614363,
+      "turns": 27,
+      "wall_seconds": 702.6,
+      "tool_calls": 26,
+      "tool_failures": 0,
+      "build_failures": 0,
+      "repair_iterations": 0,
+      "commits": 4,
+      "lines_added": 1203,
+      "lines_removed": 12,
+      "files_changed": 5,
+      "conformance": null
+     }
+    ],
     "kernel-debug-mutant": [
      {
       "run_id": "a-kernel-debug-mutant-arm64-asm-a1-20261011T114058Z",
@@ -49094,7 +49235,7 @@
    "kernel_cohort": {
     "x86_64-asm": {
      "correctness_gate": true,
-     "dev_cost_usd": 12.397960799999998,
+     "dev_cost_usd": 19.7655796,
      "simd_variant": "x86_avx2",
      "simd_geomean_ns_per_elem": 0.07726980958731465,
      "simd_speedup_vs_reference": 4.875782471227629,
@@ -49102,10 +49243,10 @@
     },
     "arm64-asm": {
      "correctness_gate": true,
-     "dev_cost_usd": 5.281492999999999,
+     "dev_cost_usd": 8.5245906,
      "simd_variant": "a64_neon",
-     "simd_geomean_ns_per_elem": 0.25446266379218335,
-     "simd_speedup_vs_reference": 2.2852301477236834,
+     "simd_geomean_ns_per_elem": 0.2162514639300481,
+     "simd_speedup_vs_reference": 2.6960374435502086,
      "host": "spark"
     }
    },

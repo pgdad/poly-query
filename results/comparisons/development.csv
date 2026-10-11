@@ -69,7 +69,9 @@ common-lisp,phase3,1,success,11.952766000000002,168859,29494228,132,1892.7,131,1
 common-lisp,phase4,1,success,6.461978200000001,120599,11407204,78,1214.0,77,4,1,6,5,1891,experiments/runs/a-phase4-common-lisp-a1-20261010T224856Z/manifest.json
 common-lisp,phase5,1,success,47.31045240000007,413439,142868156,321,8713.7,381,8,2,39,29,5211,experiments/runs/a-phase5-common-lisp-a1-20261011T004241Z/manifest.json
 common-lisp,refactor-plan-separation,1,success,6.373399000000003,97285,13164919,95,1663.6,93,3,0,0,4,1520,experiments/runs/a-refactor-plan-separation-common-lisp-a1-20261011T062513Z/manifest.json
+x86_64-asm,kernel-change-i128,1,success,7.367618800000002,165086,9872827,54,1566.3,53,1,4,0,7,2715,experiments/runs/a-kernel-change-i128-x86_64-asm-a1-20261011T114053Z/manifest.json
 x86_64-asm,kernel-debug-mutant,1,success,0.4134343999999999,4886,456089,15,58.5,14,1,0,0,1,16,experiments/runs/a-kernel-debug-mutant-x86_64-asm-a1-20261011T114057Z/manifest.json
 x86_64-asm,kernels,1,success,11.984526399999998,274268,18839166,83,2468.0,82,2,3,0,11,5290,experiments/runs/a-kernels-x86_64-asm-a1-20261010T184025Z/manifest.json
+arm64-asm,kernel-change-i128,1,success,3.2430976,80043,2614363,27,702.6,26,0,0,0,4,1203,experiments/runs/a-kernel-change-i128-arm64-asm-a1-20261011T114052Z/manifest.json
 arm64-asm,kernel-debug-mutant,1,success,0.4827568000000001,6526,598106,19,78.0,18,0,0,0,2,9,experiments/runs/a-kernel-debug-mutant-arm64-asm-a1-20261011T114058Z/manifest.json
 arm64-asm,kernels,1,success,4.7987362,137298,3339378,26,1698.6,25,0,0,0,4,2803,experiments/runs/a-kernels-arm64-asm-a1-20261010T184024Z/manifest.json
