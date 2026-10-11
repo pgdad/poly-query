@@ -115,7 +115,9 @@ def collect_performance() -> list[dict]:
     out = []
     for s in sorted((ROOT / "results/performance").glob("*/summary.json")):
         d = load_json(s)
-        if d:
+        # Harness-validation runs (taken under concurrent agent load to prove the harness works)
+        # are functional evidence only, never results.
+        if d and "harness-validation" not in (d.get("meta") or {}).get("bench_id", s.parent.name):
             d["_path"] = str(s.relative_to(ROOT))
             out.append(d)
     return out

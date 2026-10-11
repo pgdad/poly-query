@@ -5,39 +5,39 @@ A capability is listed only if the engine claims it **and** its conformance repo
 
 | capability | java | clojure | rust | python | go | common-lisp |
 |---|---|---|---|---|---|---|
-| `phase1` | · | · | · | · | · | · |
-| `ingest.csv` | · | · | · | · | · | · |
-| `ingest.json` | · | · | · | · | · | · |
-| `ingest.jsonl` | · | · | · | · | · | · |
-| `sql.basic` | · | · | · | · | · | · |
-| `test.functions` | · | · | · | · | · | · |
-| `phase2` | · | · | · | · | · | · |
-| `sql.groupby` | · | · | · | · | · | · |
-| `sql.join` | · | · | · | · | · | · |
-| `sql.functions` | · | · | · | · | · | · |
-| `sql.subquery` | · | · | · | · | · | · |
-| `sql.cte` | · | · | · | · | · | · |
-| `sql.correlated_subquery` | · | · | · | · | · | · |
-| `phase3` | · | · | · | · | · | · |
-| `storage.pqcf` | · | · | · | · | · | · |
-| `storage.mmap` | · | · | · | · | · | · |
-| `index.hash` | · | · | · | · | · | · |
-| `index.btree` | · | · | · | · | · | · |
-| `phase4` | · | · | · | · | · | · |
-| `http.streaming` | · | · | · | · | · | · |
-| `phase5` | · | · | · | · | · | · |
-| `exec.row` | · | · | · | · | · | · |
-| `exec.vectorized` | · | · | · | · | · | · |
-| `exec.parallel` | · | · | · | · | · | · |
-| `join.hash` | · | · | · | · | · | · |
-| `join.merge` | · | · | · | · | · | · |
-| `join.nested_loop` | · | · | · | · | · | · |
+| `phase1` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `ingest.csv` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `ingest.json` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `ingest.jsonl` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `sql.basic` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `test.functions` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `phase2` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `sql.groupby` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `sql.join` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `sql.functions` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `sql.subquery` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `sql.cte` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `sql.correlated_subquery` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `phase3` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `storage.pqcf` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `storage.mmap` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `index.hash` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `index.btree` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `phase4` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `http.streaming` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| `phase5` | ✔ | ✔ | · | ✔ | ✔ | · |
+| `exec.row` | ✔ | ✔ | · | ✔ | ✔ | · |
+| `exec.vectorized` | ✔ | ✔ | · | ✔ | ✔ | · |
+| `exec.parallel` | ✔ | ✔ | · | ✔ | ✔ | · |
+| `join.hash` | ✔ | ✔ | · | ✔ | ✔ | · |
+| `join.merge` | ✔ | ✔ | · | ✔ | ✔ | · |
+| `join.nested_loop` | ✔ | ✔ | · | ✔ | ✔ | · |
 | `native.kernels` | · | · | · | · | · | · |
 
 | phase passed (public suite) | java | clojure | rust | python | go | common-lisp |
 |---|---|---|---|---|---|---|
-| phase 1 | – | – | – | – | – | – |
-| phase 2 | – | – | – | – | – | – |
-| phase 3 | – | – | – | – | – | – |
+| phase 1 | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| phase 2 | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| phase 3 | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
 | phase 4 | – | – | – | – | – | – |
-| phase 5 | – | – | – | – | – | – |
+| phase 5 | ✔ | ✔ | – | ✔ | ✔ | – |
