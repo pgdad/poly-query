@@ -55,10 +55,23 @@
   (declare (type (unsigned-byte 61) h k))
   (logand (+ (logand (* h 31) #xFFFFFFFFFFFFFFFF) k) +hash-mask+))
 
-(defun native-key-hashes (data n)
-  "(UNSIGNED-BYTE 64) vector of the HASH-I64 hashes (before masking) of the
-first N values of DATA, computed by pqk_hash_i64."
-  (native-hash-i64 data n (make-array n :element-type '(unsigned-byte 64))))
+(defmacro with-native-key-hashes ((var data n) &body body)
+  "Run BODY with VAR bound to an (UNSIGNED-BYTE 64) vector of the HASH-I64
+hashes (before masking) of the first N values of DATA, computed by
+pqk_hash_i64. Up to a batch of hashes live on the stack (no garbage);
+larger inputs (a hash join's whole build side) use the heap."
+  (let ((d (gensym "DATA")) (count (gensym "N")) (fn (gensym "BODY")))
+    `(let ((,d ,data) (,count ,n))
+       (declare (type fixnum ,count))
+       (flet ((,fn (,var)
+                (declare (type (simple-array (unsigned-byte 64) (*)) ,var))
+                (native-hash-i64 ,d ,count ,var)
+                ,@body))
+         (if (<= ,count +batch-size+)
+             (let ((,var (make-array ,count :element-type '(unsigned-byte 64))))
+               (declare (dynamic-extent ,var))
+               (,fn ,var))
+             (,fn (make-array ,count :element-type '(unsigned-byte 64))))))))
 
 (defun hash-key-vecs (vecs n &optional native)
   "Index vector of the combined hashes of rows [0, N) of the key VECS
@@ -75,8 +88,7 @@ first N values of DATA, computed by pqk_hash_i64."
           (etypecase data
             (i64-vector
              (if native
-                 (let ((native-hashes (native-key-hashes data n)))
-                   (declare (type (simple-array (unsigned-byte 64) (*)) native-hashes))
+                 (with-native-key-hashes (native-hashes data n)
                    (dotimes (i n)
                      (combine i (if (and validity (zerop (sbit validity i)))
                                     +null-key-hash+
@@ -302,8 +314,7 @@ are added when ADD, else their id is -1. Returns GIDS."
              (validity (vec-validity vec)))
         (cond
           ((and (typep data 'i64-vector) (key-table-native table))
-           (let ((hashes (native-key-hashes data n)))
-             (declare (type (simple-array (unsigned-byte 64) (*)) hashes))
+           (with-native-key-hashes (hashes data n)
              (dotimes (i n)
                (setf (aref gids i)
                      (if (and validity (zerop (sbit validity i)))
