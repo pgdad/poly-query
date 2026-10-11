@@ -473,6 +473,9 @@ class PlanOptions:
     join: str = "auto"  # auto, hash, merge, nested_loop
     use_indexes: bool = True
     threads: int = 1  # > 1: parallel pipelines (Gather)
+    # only pipelines whose driving scan is expected to read at least this
+    # many rows are parallelized (automatic parallelism; 0 for ``threads``)
+    parallel_min_rows: float = 0
     mode: str = "auto"  # auto (= vectorized), row, vectorized
     # the indexes of a table (catalog lookup)
     indexes_of: Callable[[Table], list[Index]] = lambda table: []
@@ -532,7 +535,7 @@ class PhysicalPlanner:
             root.names = [c.name for c in logical.columns]
         if self.options.threads > 1:
             # subquery plans (executed per outer row) stay serial
-            root = parallelize(root, min(self.options.threads, MAX_PARTITIONS))
+            root = parallelize(root, min(self.options.threads, MAX_PARTITIONS), self.options.parallel_min_rows)
         kernels = self.options.kernels
         if kernels is not None and self.options.kernel_plan is not None:
             for tree in [root, *self.subplans.values()]:
@@ -822,17 +825,25 @@ MAX_PARTITIONS = 64
 ROOT_GATHER_MAX_SELECTIVITY = 0.25
 
 
-def parallelize(root: PhysicalNode, partitions: int) -> PhysicalNode:
+def parallelize(root: PhysicalNode, partitions: int, min_rows: float = 0) -> PhysicalNode:
     """Inserts Gathers below the operators that merge partial results
     (aggregation, top-N, distinct), and above selective pipelines that
     filter or join at the root or below a full sort (whose input rows are
-    all returned to the parent anyway)."""
-    _parallelize_inputs(root, partitions)
-    return _gather_selective(root, partitions)
+    all returned to the parent anyway). Pipelines whose driving scan is
+    expected to read fewer than ``min_rows`` rows stay serial."""
+    _parallelize_inputs(root, partitions, min_rows)
+    return _gather_selective(root, partitions, min_rows)
 
 
-def _gather_selective(node: PhysicalNode, partitions: int) -> PhysicalNode:
+def _parallel_path(node: PhysicalNode, min_rows: float) -> list[PhysicalNode] | None:
     path = pipeline_path(node)
+    if path is None or path[-1].estimated_rows < min_rows:
+        return None
+    return path
+
+
+def _gather_selective(node: PhysicalNode, partitions: int, min_rows: float) -> PhysicalNode:
+    path = _parallel_path(node, min_rows)
     if path is None or not any(isinstance(n, (Filter, _Join)) for n in path):
         return node
     if node.estimated_rows > ROOT_GATHER_MAX_SELECTIVITY * max(path[-1].estimated_rows, 1.0):
@@ -840,17 +851,17 @@ def _gather_selective(node: PhysicalNode, partitions: int) -> PhysicalNode:
     return _estimated(Gather(node, partitions, path[-1]), node.estimated_rows)
 
 
-def _parallelize_inputs(node: PhysicalNode, partitions: int) -> None:
+def _parallelize_inputs(node: PhysicalNode, partitions: int, min_rows: float) -> None:
     for child in node.inputs():
-        _parallelize_inputs(child, partitions)
+        _parallelize_inputs(child, partitions, min_rows)
     if isinstance(node, (HashAggregate, TopN, Distinct)):
-        path = pipeline_path(node.input)
+        path = _parallel_path(node.input, min_rows)
         if path is not None:
             node.input = _estimated(Gather(node.input, partitions, path[-1]), node.input.estimated_rows)
     elif isinstance(node, Sort):
-        node.input = _gather_selective(node.input, partitions)
+        node.input = _gather_selective(node.input, partitions, min_rows)
     elif isinstance(node, UnionAll):
-        node.branches = [_gather_selective(branch, partitions) for branch in node.branches]
+        node.branches = [_gather_selective(branch, partitions, min_rows) for branch in node.branches]
 
 
 def _estimated(node: PhysicalNode, rows: float) -> PhysicalNode:

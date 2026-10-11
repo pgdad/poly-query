@@ -4,6 +4,7 @@ owns the catalog and runs loads and SQL statements."""
 from __future__ import annotations
 
 import json
+import os
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -47,7 +48,9 @@ class EngineConfig:
     max_ingest_bytes: int = DEFAULT_MAX_INGEST_BYTES
     max_table_rows: int = DEFAULT_MAX_TABLE_ROWS
     max_join_rows: int = 100_000_000
-    threads: int = 1  # default parallelism of queries without a ``threads`` option
+    # default parallelism of queries without a ``threads`` option; None:
+    # automatic (see ``auto_threads``), for large pipelines only
+    threads: int | None = None
     # parallel pipelines over fewer rows run their partitions in-process
     parallel_min_rows: int = DEFAULT_PARALLEL_MIN_ROWS
     log_level: str = "info"
@@ -77,6 +80,17 @@ class QueryCursor:
 
     columns: list[Column]
     batches: Iterator[list[tuple]]
+
+
+# automatic parallelism uses at most this many partitions: beyond it the
+# serial merge of the partial results and the per-worker fixed costs (join
+# build sides, subqueries) outweigh the shorter scans
+AUTO_THREADS_MAX = 8
+
+
+def auto_threads() -> int:
+    """The parallelism of queries without ``threads`` when ``--threads`` is not given."""
+    return max(1, min(AUTO_THREADS_MAX, os.process_cpu_count() or 1))
 
 
 class Engine:
@@ -209,7 +223,12 @@ class Engine:
         return plan, ctx
 
     def _threads(self, options: QueryOptions) -> int:
-        return options.threads if options.threads is not None else self.config.threads
+        if options.threads is not None:
+            return options.threads
+        return self.config.threads if self.config.threads is not None else auto_threads()
+
+    def _automatic_threads(self, options: QueryOptions) -> bool:
+        return options.threads is None and self.config.threads is None
 
     def create_index(self, statement: ast.CreateIndex) -> None:
         table = self.catalog.get(statement.table)
@@ -258,6 +277,8 @@ class Engine:
             join=options.join,
             use_indexes=options.use_indexes,
             threads=self._threads(options),
+            # automatic parallelism: only for pipelines worth worker processes
+            parallel_min_rows=self.config.parallel_min_rows if self._automatic_threads(options) else 0,
             mode=options.mode,
             indexes_of=snapshot.indexes_of,
             evaluate=evaluate_constant,
