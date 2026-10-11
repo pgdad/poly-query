@@ -112,6 +112,60 @@ pub fn parse_date_or_timestamp(s: &str) -> Option<i64> {
     }
 }
 
+/// Appends `v` zero-padded to `width` digits (`v` ≥ 0).
+fn push_padded(out: &mut String, v: i64, width: usize) {
+    let mut buf = [b'0'; 20];
+    let mut i = buf.len();
+    let mut x = v.unsigned_abs();
+    while x > 0 {
+        i -= 1;
+        buf[i] = b'0' + (x % 10) as u8;
+        x /= 10;
+    }
+    let start = (buf.len() - width).min(i);
+    out.push_str(std::str::from_utf8(&buf[start..]).unwrap_or_default());
+}
+
+fn push_date(out: &mut String, y: i64, m: u32, d: u32) {
+    // Like `{y:04}`: the sign counts toward the width.
+    if y < 0 {
+        out.push('-');
+        push_padded(out, y.abs(), 3);
+    } else {
+        push_padded(out, y, 4);
+    }
+    out.push('-');
+    push_padded(out, m as i64, 2);
+    out.push('-');
+    push_padded(out, d as i64, 2);
+}
+
+/// Appends `format_date(days)` without allocating.
+pub fn write_date(out: &mut String, days: i32) {
+    let (y, m, d) = civil_from_days(days as i64);
+    push_date(out, y, m, d);
+}
+
+/// Appends `format_timestamp(micros)` without allocating.
+pub fn write_timestamp(out: &mut String, micros: i64) {
+    let days = micros.div_euclid(MICROS_PER_DAY);
+    let rem = micros.rem_euclid(MICROS_PER_DAY);
+    let (y, m, d) = civil_from_days(days);
+    let secs = rem / MICROS_PER_SECOND;
+    let frac = rem % MICROS_PER_SECOND;
+    push_date(out, y, m, d);
+    out.push(' ');
+    push_padded(out, secs / 3600, 2);
+    out.push(':');
+    push_padded(out, (secs / 60) % 60, 2);
+    out.push(':');
+    push_padded(out, secs % 60, 2);
+    if frac != 0 {
+        out.push('.');
+        push_padded(out, frac, 6);
+    }
+}
+
 pub fn format_date(days: i32) -> String {
     let (y, m, d) = civil_from_days(days as i64);
     format!("{y:04}-{m:02}-{d:02}")
@@ -182,5 +236,37 @@ mod tests {
             timestamp_to_date(parse_timestamp("1969-12-31 23:59:59").unwrap()),
             -1
         );
+    }
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+
+    #[test]
+    fn writers_match_formatters() {
+        for days in [-719_528, -1, 0, 1, 19_000, 2_932_896, -800_000] {
+            let mut s = String::new();
+            write_date(&mut s, days);
+            assert_eq!(s, format_date(days));
+        }
+        for micros in [
+            0,
+            1,
+            -1,
+            1_700_000_000_123_456,
+            -62_000_000_000_000_000,
+            86_399_999_999,
+        ] {
+            let mut s = String::new();
+            write_timestamp(&mut s, micros);
+            assert_eq!(s, format_timestamp(micros));
+        }
+        let mut s = String::new();
+        crate::types::decimal::write(&mut s, -5, 3);
+        assert_eq!(s, crate::types::decimal::format(-5, 3));
+        s.clear();
+        crate::types::decimal::write_i64(&mut s, i64::MIN);
+        assert_eq!(s, i64::MIN.to_string());
     }
 }

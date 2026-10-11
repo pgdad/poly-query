@@ -55,6 +55,64 @@ pub fn compare(a: i64, sa: u8, b: i64, sb: u8) -> std::cmp::Ordering {
     x.cmp(&y)
 }
 
+/// Appends the decimal digits of `v` (no allocation).
+pub fn write_u64(out: &mut String, mut v: u64) {
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    out.push_str(std::str::from_utf8(&buf[i..]).unwrap_or_default());
+}
+
+/// Appends a signed integer.
+pub fn write_i64(out: &mut String, v: i64) {
+    if v < 0 {
+        out.push('-');
+    }
+    write_u64(out, v.unsigned_abs());
+}
+
+/// Appends the canonical text of a decimal (see [`format`]) without
+/// allocating.
+pub fn write(out: &mut String, unscaled: i64, scale: u8) {
+    if unscaled < 0 {
+        out.push('-');
+    }
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+    let mut v = unscaled.unsigned_abs();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    let digits = std::str::from_utf8(&buf[i..]).unwrap_or_default();
+    let scale = scale as usize;
+    if scale == 0 {
+        out.push_str(digits);
+    } else if digits.len() > scale {
+        let (int, frac) = digits.split_at(digits.len() - scale);
+        out.push_str(int);
+        out.push('.');
+        out.push_str(frac);
+    } else {
+        out.push_str("0.");
+        for _ in 0..scale - digits.len() {
+            out.push('0');
+        }
+        out.push_str(digits);
+    }
+}
+
 /// Canonical text: exactly `scale` fractional digits, at least one integer digit.
 pub fn format(unscaled: i64, scale: u8) -> String {
     let neg = unscaled < 0;
