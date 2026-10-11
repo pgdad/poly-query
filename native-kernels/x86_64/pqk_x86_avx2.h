@@ -419,6 +419,15 @@ ENDF \name
  * operators are (kind, invert): EQ (0,0) NE (0,1) LT (1,0) LE (2,1)
  * GT (2,0) GE (1,1) BETWEEN (3,1). "a > b" needs no special case: OUT is
  * then true for every x, so BETWEEN is empty, as required.
+ * Kind 4 ROUT (pseudo operator PQK_OP_RANGE = BETWEEN with a <= b): OUT as
+ * one unsigned 128-bit range test, d = x - a (mod 2^128) >u w = b - a:
+ *   dL' = L - (a.lo ^ 2^63)                    (= dL ^ 2^63)
+ *   borrow = L <u a.lo                         (L' <s a.lo ^ 2^63)
+ *   dH' = H - borrow - (a.hi ^ 2^63)           (= dH ^ 2^63)
+ *   out = dH' >s wH' | (dH' == wH' & dL' >s wL')   (w' = w ^ 2^63 halves)
+ * 4 compares + 1 blend per group instead of 6 + 2 (+ vpor) for kind 3;
+ * constants ymm8 = bcast(a.lo ^ 2^63), ymm9 = bcast(a.hi ^ 2^63),
+ * ymm10 = bcast(w.lo ^ 2^63), ymm11 = bcast(w.hi ^ 2^63) (RANGE128_SETUP).
  * ====================================================================== */
 
 /* LTX / GTX w, cl, ch, R: lane-wise x < c / x > c with x = (L' in reg 0,
@@ -450,6 +459,17 @@ ENDF \name
         vpunpckhqdq %xmm0, %xmm0, %xmm2
         vpunpcklqdq %xmm0, %xmm0, %xmm0
 .endif
+.if \kind == 4
+        vpxor   %\w\()mm12, %\w\()mm0, %\w\()mm3 /* L' */
+        vpsubq  %\w\()mm8, %\w\()mm0, %\w\()mm0  /* dL' = L - (a.lo ^ 2^63) */
+        vpcmpgtq %\w\()mm3, %\w\()mm8, %\w\()mm3 /* borrow: L <u a.lo */
+        vpaddq  %\w\()mm3, %\w\()mm2, %\w\()mm2
+        vpsubq  %\w\()mm9, %\w\()mm2, %\w\()mm2  /* dH' = H - borrow - (a.hi ^ 2^63) */
+        vpcmpgtq %\w\()mm11, %\w\()mm2, %\w\()mm1
+        vpcmpeqq %\w\()mm11, %\w\()mm2, %\w\()mm3
+        vpcmpgtq %\w\()mm10, %\w\()mm0, %\w\()mm\R
+        vblendvpd %\w\()mm3, %\w\()mm\R, %\w\()mm1, %\w\()mm\R /* d >u w */
+.else
         vpxor   %\w\()mm12, %\w\()mm0, %\w\()mm0 /* L' = L ^ 2^63 */
 .if \kind == 0
         vpcmpeqq %\w\()mm0, %\w\()mm8, %\w\()mm1
@@ -464,6 +484,41 @@ ENDF \name
         GTX     \w, 10, 11, \R
         vpor    %\w\()mm\T, %\w\()mm\R, %\w\()mm\R
 .endif
+.endif
+.endm
+
+/* RANGE128_SETUP k: if op (ecx) is BETWEEN and *a (r8) <= *b (r9) (signed
+ * 128-bit): ecx = PQK_OP_RANGE and ymm8-ymm11 = the kind-4 constants
+ * (a.lo ^ 2^63, a.hi ^ 2^63, w.lo ^ 2^63, w.hi ^ 2^63 with w = b - a).
+ * clobbers rax, r10, r11. */
+.macro RANGE128_SETUP k
+        cmp     $PQK_BETWEEN, %ecx
+        jne     .L\k\()_norange
+        mov     8(%r8), %rax            /* a.hi */
+        cmp     8(%r9), %rax
+        jg      .L\k\()_norange          /* a > b: empty, kind 3 */
+        jl      .L\k\()_range
+        mov     (%r8), %rax
+        cmp     (%r9), %rax
+        ja      .L\k\()_norange
+.L\k\()_range:
+        mov     $PQK_OP_RANGE, %ecx
+        mov     (%r9), %r10             /* w = b - a */
+        mov     8(%r9), %r11
+        sub     (%r8), %r10
+        sbb     8(%r8), %r11
+        movabs  $C_SIGN64, %rax
+        xor     %rax, %r10
+        xor     %rax, %r11
+        vmovq   %r10, %xmm10
+        vpbroadcastq %xmm10, %ymm10
+        vmovq   %r11, %xmm11
+        vpbroadcastq %xmm11, %ymm11
+        mov     8(%r8), %r10
+        xor     %rax, %r10
+        vmovq   %r10, %xmm9
+        vpbroadcastq %xmm9, %ymm9       /* ymm8 = a.lo ^ 2^63 already */
+.L\k\()_norange:
 .endm
 
 /* NIBFIX m: vmovmskpd of a group yields rows in bit order (0, 2, 1, 3); swap
@@ -602,7 +657,6 @@ ENDF \name
  * ---------------------------------------------------------------------- */
 .macro VDRIVER128 mode, k
         DRV_ENTER PQK_OP_LAST, .L\k\()_inval            /* [check] */
-        JTAB_LOAD vop128_table, %r15
         vpbroadcastq c_i64min(%rip), %ymm12
         cmp     $PQK_BETWEEN, %ecx
         jne     .L\k\()_a
@@ -613,6 +667,8 @@ ENDF \name
         vpbroadcastq (%r8), %ymm8       /* a */
         vpbroadcastq 8(%r8), %ymm9
         vpxor   %ymm12, %ymm8, %ymm8
+        RANGE128_SETUP \k
+        JTAB_LOAD vop128_table, %r15
         DRV_ARGS
 .if \mode == MODE_FILTER
         vpbroadcastd c_eight_d(%rip), %ymm5

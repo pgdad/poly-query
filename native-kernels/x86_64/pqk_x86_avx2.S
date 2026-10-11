@@ -97,13 +97,15 @@
         VOP128 vop128_gt, 2, 0
         VOP128 vop128_ge, 1, 1
         VOP128 vop128_bt, 3, 1
-        OPTABLE vop128_table, vop128
+        VOP128 vop128_rng, 4, 1
+        JUMPTABLE vop128_table, vop128_eq, vop128_ne, vop128_lt, vop128_le, vop128_gt, vop128_ge, vop128_bt, vop128_rng
 
         VCNT128 vcnt128_k0, 0
         VCNT128 vcnt128_k1, 1
         VCNT128 vcnt128_k2, 2
         VCNT128 vcnt128_k3, 3
-        JUMPTABLE vcnt128_table, vcnt128_k0, vcnt128_k0, vcnt128_k1, vcnt128_k2, vcnt128_k2, vcnt128_k1, vcnt128_k3
+        VCNT128 vcnt128_k4, 4
+        JUMPTABLE vcnt128_table, vcnt128_k0, vcnt128_k0, vcnt128_k1, vcnt128_k2, vcnt128_k2, vcnt128_k1, vcnt128_k3, vcnt128_k4
 
 /* ========================================================================
  * size_t pqk_x86_avx2_filter_i64(data, validity, n, op, a, b, out_idx)
