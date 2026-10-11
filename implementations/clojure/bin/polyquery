@@ -5,12 +5,23 @@ set -e
 HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(dirname -- "$HERE")"
 CP_FILE="$ROOT/target/classpath"
-if [ ! -f "$CP_FILE" ] || [ ! -d "$ROOT/target/classes" ]; then
+JAR="$ROOT/target/polyquery.jar"
+if [ ! -f "$CP_FILE" ] || [ ! -f "$JAR" ]; then
   echo "polyquery: engine is not built; run 'make -C $ROOT build'" >&2
   exit 1
 fi
 JAVA="${JAVA_HOME:+$JAVA_HOME/bin/}java"
+# JDK AOT cache (written by `make build`; POLYQUERY_AOT_OUTPUT is set only by
+# its training run). A stale or unusable cache is ignored by the JVM; its
+# aot/cds log output is switched off so that this happens silently.
+AOT=""
+if [ -n "${POLYQUERY_AOT_OUTPUT:-}" ]; then
+  AOT="-XX:AOTCacheOutput=$POLYQUERY_AOT_OUTPUT"
+elif [ -f "$ROOT/target/polyquery.aot" ]; then
+  AOT="-XX:AOTCache=$ROOT/target/polyquery.aot"
+fi
 # -Xlog settings keep JVM warnings off stdout, which carries the protocol;
 # native access is enabled for the optional kernel library (--native-kernels).
-exec "$JAVA" --enable-native-access=ALL-UNNAMED -Xss16m -XX:+UseParallelGC -XX:+DisplayVMOutputToStderr -Xlog:disable -Xlog:all=warning:stderr \
-  ${POLYQUERY_JAVA_OPTS:-} -cp "$ROOT/target/classes:$(cat "$CP_FILE")" polyquery.main "$@"
+exec "$JAVA" --enable-native-access=ALL-UNNAMED -Xss16m -XX:+UseParallelGC \
+  -XX:+DisplayVMOutputToStderr -Xlog:disable -Xlog:all=warning:stderr -Xlog:aot*=off:stderr -Xlog:cds*=off:stderr \
+  $AOT ${POLYQUERY_JAVA_OPTS:-} -cp "$JAR:$(cat "$CP_FILE")" polyquery.main "$@"
