@@ -280,14 +280,20 @@ OTHER's group ids to STATE's (-1: the group is merged elsewhere)."))
   (table nil)                            ; KEY-TABLE, or NIL without GROUP BY
   (charged 0 :type fixnum)               ; groups charged to the memory budget
   (aggs #() :type simple-vector)         ; of AGG-STATE
-  (gids (make-index-vector +batch-size+) :type index-vector))
+  (gids (make-index-vector +batch-size+) :type index-vector)
+  ;; Partial states of parallel aggregation record each group's first input
+  ;; position, so the merged groups can be emitted in serial order.
+  (positions nil :type (or null index-vector)))
 
-(defun make-group-state (key-kinds aggs)
+(defun make-group-state (key-kinds aggs &optional track-positions)
   "Empty group state for keys of KEY-KINDS (a list of vector kinds) and the
-aggregate calls AGGS."
+aggregate calls AGGS; TRACK-POSITIONS records first input positions."
   (let ((gs (%make-group-state :table (and key-kinds
                                            (make-key-table (length key-kinds) 16 key-kinds))
-                               :aggs (map 'simple-vector #'make-agg-state aggs))))
+                               :aggs (map 'simple-vector #'make-agg-state aggs)
+                               :positions (and track-positions key-kinds
+                                               (make-array 16 :element-type 'fixnum
+                                                              :initial-element most-positive-fixnum)))))
     (unless (group-state-table gs)
       (fill (group-state-gids gs) 0)
       (loop for s across (group-state-aggs gs) do (agg-reserve s 1)))
@@ -297,9 +303,16 @@ aggregate calls AGGS."
   (let ((table (group-state-table gs)))
     (if table (key-table-count table) 1)))
 
-(defun group-state-consume (gs key-vecs arg-vecs n)
-  "Aggregate N rows given their key VECs and aggregate argument VECs."
-  (declare (type fixnum n))
+(defun group-state-reserve-positions (gs groups)
+  (let ((positions (group-state-positions gs)))
+    (when (and positions (< (length positions) groups))
+      (setf (group-state-positions gs)
+            (grow-array positions (max groups (* 2 (length positions))) most-positive-fixnum)))))
+
+(defun group-state-consume (gs key-vecs arg-vecs n &optional (base 0))
+  "Aggregate N rows given their key VECs and aggregate argument VECs; BASE is
+the input position of the first row (when positions are tracked)."
+  (declare (type fixnum n base))
   (let ((gids (group-state-gids gs))
         (table (group-state-table gs)))
     (when (> n (length gids))
@@ -307,7 +320,15 @@ aggregate calls AGGS."
             (group-state-gids gs) gids)
       (unless table (fill gids 0)))
     (when table
-      (key-table-map-batch table key-vecs n gids t))
+      (let ((before (key-table-count table)))
+        (key-table-map-batch table key-vecs n gids t)
+        (when (and (group-state-positions gs) (> (key-table-count table) before))
+          (group-state-reserve-positions gs (key-table-count table))
+          (let ((positions (group-state-positions gs)))
+            (dotimes (i n)
+              (let ((g (aref gids i)))
+                (when (and (>= g before) (= (aref positions g) most-positive-fixnum))
+                  (setf (aref positions g) (+ base i)))))))))
     (let ((groups (group-state-count gs)))
       (loop for s across (group-state-aggs gs)
             for v in arg-vecs
@@ -329,11 +350,90 @@ groups whose key hash falls into PARTITION."
                     (key-table-intern-group table other-table g)
                     -1)))
         (fill mapping 0))
+    (when (and (group-state-positions gs) (group-state-positions other))
+      (group-state-reserve-positions gs (group-state-count gs))
+      (let ((positions (group-state-positions gs))
+            (theirs (group-state-positions other)))
+        (dotimes (g count)
+          (let ((to (aref mapping g)))
+            (when (>= to 0)
+              (setf (aref positions to) (min (aref positions to) (aref theirs g))))))))
     (let ((groups (group-state-count gs)))
       (loop for s across (group-state-aggs gs)
             for o across (group-state-aggs other)
             do (agg-reserve s groups)
                (agg-merge s o mapping)))))
+
+(defun radix-sort-by-keys (keys)
+  "Permutation of [0, n) ordering the non-negative fixnum KEYS ascending
+(LSD radix sort, stable)."
+  (declare (type index-vector keys))
+  (let* ((n (length keys))
+         (perm (identity-index-vector n))
+         (tmp (make-index-vector n))
+         (counts (make-array 2049 :element-type 'fixnum))
+         (max-key (if (zerop n) 0 (reduce #'max keys))))
+    (declare (type index-vector perm tmp) (type fixnum max-key))
+    (loop for shift of-type fixnum from 0 by 11
+          while (< shift (integer-length max-key))
+          do (fill counts 0)
+             (dotimes (i n)
+               (incf (aref counts (1+ (ldb (byte 11 shift) (aref keys (aref perm i)))))))
+             (loop for d from 1 to 2048
+                   do (incf (aref counts d) (aref counts (1- d))))
+             (dotimes (i n)
+               (let* ((e (aref perm i))
+                      (d (ldb (byte 11 shift) (aref keys e))))
+                 (setf (aref tmp (aref counts d)) e)
+                 (incf (aref counts d))))
+             (rotatef perm tmp))
+    perm))
+
+(defun groups-in-position-order (states)
+  "Vectors (states gids) listing the groups of the merged group STATES in
+order of their first input position."
+  (let* ((n (reduce #'+ states :key #'group-state-count))
+         (keys (make-index-vector n))
+         (owners (make-array n))
+         (gids (make-index-vector n))
+         (k 0))
+    (declare (type fixnum k))
+    (loop for gs across states
+          do (let ((positions (group-state-positions gs)))
+               (dotimes (g (group-state-count gs))
+                 (setf (aref keys k) (if positions (aref positions g) g)
+                       (svref owners k) gs
+                       (aref gids k) g)
+                 (incf k))))
+    (let ((perm (radix-sort-by-keys keys))
+          (sorted-owners (make-array n))
+          (sorted-gids (make-index-vector n)))
+      (dotimes (i n)
+        (let ((e (aref perm i)))
+          (setf (svref sorted-owners i) (svref owners e)
+                (aref sorted-gids i) (aref gids e))))
+      (values sorted-owners sorted-gids))))
+
+(defun group-entries-batch (states gids start end key-kinds agg-kinds)
+  "Output batch of the groups (STATES[i], GIDS[i]) for i in [START, END)."
+  (let* ((n (- end start))
+         (nkeys (length key-kinds))
+         (columns (make-array (+ nkeys (length agg-kinds)))))
+    (dotimes (k nkeys)
+      (let ((k k))
+        (setf (svref columns k)
+              (build-vec (svref key-kinds k) n
+                         (lambda (i)
+                           (key-table-key (group-state-table (svref states (+ start i))) k
+                                          (aref gids (+ start i))))))))
+    (dotimes (j (length agg-kinds))
+      (let ((j j))
+        (setf (svref columns (+ nkeys j))
+              (build-vec (svref agg-kinds j) n
+                         (lambda (i)
+                           (agg-result (svref (group-state-aggs (svref states (+ start i))) j)
+                                       (aref gids (+ start i))))))))
+    (make-batch n columns)))
 
 (defun group-state-batch (gs start end key-kinds agg-kinds)
   "Output batch of groups [START, END): key columns then aggregate results."

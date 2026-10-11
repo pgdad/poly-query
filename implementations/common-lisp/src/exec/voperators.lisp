@@ -211,10 +211,11 @@ by the first error of evaluating EXPRS row by row over BATCH."
 ;;; ------------------------------------------------------------------
 ;;; Aggregation
 
-(defun make-aggregate-consumer (node)
+(defun make-aggregate-consumer (node &key track-positions)
   "(values new-state consume) for vectorized aggregation of NODE: NEW-STATE
-creates an empty GROUP-STATE, (CONSUME state batch) aggregates one input
-batch into it. Kernels are compiled once per call."
+creates an empty GROUP-STATE, (CONSUME state batch [base]) aggregates one
+input batch (whose first row has input position BASE) into it. Kernels are
+compiled once per call."
   (let* ((keys (pp-hash-aggregate-group-by node))
          (aggs (pp-hash-aggregate-aggregates node))
          (key-kernels (mapcar #'compile-vexpr keys))
@@ -225,8 +226,8 @@ batch into it. Kernels are compiled once per call."
          (guard (make-row-order-guard (append keys (mapcan (lambda (a) (copy-list (b-agg-args a)))
                                                            aggs)))))
     (values
-     (lambda () (make-group-state key-kinds aggs))
-     (lambda (gs batch)
+     (lambda () (make-group-state key-kinds aggs track-positions))
+     (lambda (gs batch &optional (base 0))
        (let ((n (batch-count batch)))
          (multiple-value-bind (key-vecs arg-vecs)
              (funcall (the function guard) batch
@@ -234,7 +235,7 @@ batch into it. Kernels are compiled once per call."
                         (values (mapcar (lambda (k) (funcall (the function k) batch)) key-kernels)
                                 (mapcar (lambda (k) (and k (funcall (the function k) batch)))
                                         arg-kernels))))
-           (group-state-consume gs key-vecs arg-vecs n))
+           (group-state-consume gs key-vecs arg-vecs n base))
          (let ((groups (group-state-count gs))
                (charged (group-state-charged gs)))
            (when (>= (- groups charged) 1024)

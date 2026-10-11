@@ -382,7 +382,10 @@ by
 * *partial aggregation*: each worker aggregates into its own group state;
   the states are merged at the end — with many groups in parallel, one
   thread per hash partition of the groups (DISTINCT is an aggregation
-  without aggregates);
+  without aggregates). Every group records its first input position
+  (morsel, row); the merged groups are emitted sorted by it (radix sort),
+  i.e. in exactly the first-appearance order of a serial aggregation, so
+  even LIMIT without ORDER BY returns the same rows;
 * *parallel sort*: chunks of the permutation are stable-sorted in parallel
   and merged pairwise in parallel rounds (stable, so equal to the serial
   sort).
@@ -754,11 +757,8 @@ removed sporadic 80–180 ms GC pauses from later queries (it adds about
   ones.
 * Sorting (and the hash-join build) materializes its whole input; a sort is
   not interruptible while the permutation is being sorted.
-* Parallel aggregation and DISTINCT emit their groups in hash-partition or
-  worker order rather than first-appearance order (row order without ORDER
-  BY, and the order of ORDER BY ties, are implementation-defined; results
-  are otherwise identical). Parallel FLOAT64 sums add partial sums, so they
-  can round differently from a serial sum.
+* Parallel FLOAT64 sums add partial sums, so they can round differently
+  from a serial sum (summation order is implementation-defined).
 * A streamed (`/v1/query/stream`) vectorized query under a LIMIT evaluates
   whole batches of the filters below the LIMIT, so a row past the limit can
   raise an error that the row executor would not reach (LIMIT is pushed

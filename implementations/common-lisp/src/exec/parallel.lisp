@@ -291,7 +291,7 @@ THREADS workers, each aggregating into a partial group state."
          (consumers (loop repeat workers
                           collect (multiple-value-list
                                    (let ((*parallel-disabled* t))
-                                     (make-aggregate-consumer node))))))
+                                     (make-aggregate-consumer node :track-positions t))))))
     (multiple-value-bind (copies providers) (compile-pipeline-copies child workers)
       (lambda ()
         (let ((output nil))
@@ -308,11 +308,14 @@ THREADS workers, each aggregating into a partial group state."
                                   (setf (svref states w) gs)
                                   (run-morsels run (svref copies w)
                                                (lambda (m iter)
-                                                 (declare (ignore m) (type function iter))
-                                                 (loop for b = (funcall iter)
-                                                       while b
-                                                       do (when (prun-stopped run) (return-from nil))
-                                                          (funcall consume gs b))))))))
+                                                 (declare (type function iter))
+                                                 ;; Input position: morsel, then row within it.
+                                                 (let ((base (* m (expt 2 32))))
+                                                   (loop for b = (funcall iter)
+                                                         while b
+                                                         do (when (prun-stopped run) (return-from nil))
+                                                            (funcall consume gs b base)
+                                                            (incf base (batch-count b))))))))))
                 ;; Wait for all workers, then merge their partial states in order.
                 (loop for th in (prun-threads run)
                       do (sb-thread:join-thread th :default nil))
@@ -324,35 +327,54 @@ THREADS workers, each aggregating into a partial group state."
 
 
 (defun merge-partial-states (states node new-state)
-  "Batch iterator over the merged groups of the partial group STATES. Many
-groups are merged in parallel, one thread per hash partition of the groups."
+  "Batch iterator over the merged groups of the partial group STATES, in
+order of first input position (the order a serial aggregation produces).
+Many groups are merged in parallel, one thread per hash partition."
   (declare (type simple-vector states) (type function new-state))
   (let ((workers (length states))
         (groups (reduce #'+ states :key #'group-state-count)))
-    (if (or (= workers 1)
-            (null (pp-hash-aggregate-group-by node))
-            ;; Few groups (below a quarter morsel): a serial merge is cheaper.
-            (< groups (floor (morsel-rows) 4)))
-        (let ((total (svref states 0)))
-          (loop for w from 1 below workers
-                do (group-state-merge total (svref states w)))
-          (group-state-batches total node))
-        ;; Partition p collects the groups whose hash is p modulo the number
-        ;; of partitions, from every partial state.
-        (let ((parts (coerce (loop repeat workers collect (funcall new-state)) 'simple-vector)))
-          (run-in-threads
-           (loop for p below workers
-                 collect (let ((p p))
-                           (lambda ()
-                             (loop for w below workers
-                                   do (group-state-merge (svref parts p) (svref states w)
-                                                         p workers))))))
-          (check-interrupts)
-          (let ((iterators (map 'list (lambda (gs) (group-state-batches gs node)) parts)))
-            (lambda ()
-              (loop while iterators
-                    do (let ((b (funcall (the function (first iterators)))))
-                         (if b (return b) (pop iterators))))))))))
+    (cond
+      ((null (pp-hash-aggregate-group-by node))
+       (let ((total (svref states 0)))
+         (loop for w from 1 below workers
+               do (group-state-merge total (svref states w)))
+         (group-state-batches total node)))
+      ;; Few groups (below a quarter morsel): a serial merge is cheaper.
+      ((or (= workers 1) (< groups (floor (morsel-rows) 4)))
+       (let ((total (svref states 0)))
+         (loop for w from 1 below workers
+               do (group-state-merge total (svref states w)))
+         (ordered-group-batches (vector total) node)))
+      (t
+       ;; Partition p collects the groups whose hash is p modulo the number
+       ;; of partitions, from every partial state.
+       (let ((parts (coerce (loop repeat workers collect (funcall new-state)) 'simple-vector)))
+         (run-in-threads
+          (loop for p below workers
+                collect (let ((p p))
+                          (lambda ()
+                            (loop for w below workers
+                                  do (group-state-merge (svref parts p) (svref states w)
+                                                        p workers))))))
+         (check-interrupts)
+         (ordered-group-batches parts node))))))
+
+(defun ordered-group-batches (states node)
+  "Iterator over the output batches of the groups of STATES in order of
+their first input position."
+  (multiple-value-bind (owners gids) (groups-in-position-order states)
+    (let* ((nkeys (length (pp-hash-aggregate-group-by node)))
+           (kinds (output-kinds node))
+           (key-kinds (subseq kinds 0 nkeys))
+           (agg-kinds (subseq kinds nkeys))
+           (count (length gids))
+           (pos 0))
+      (declare (type fixnum pos))
+      (lambda ()
+        (when (< pos count)
+          (let ((end (min count (+ pos +batch-size+))))
+            (prog1 (group-entries-batch owners gids pos end key-kinds agg-kinds)
+              (setf pos end))))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Parallel sorting: contiguous chunks of the permutation are sorted
