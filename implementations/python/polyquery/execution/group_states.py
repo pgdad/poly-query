@@ -22,10 +22,10 @@ from __future__ import annotations
 
 import math
 import operator
-from collections import Counter
+from collections import Counter, deque
 from functools import partial
-from itertools import compress
-from typing import Any, Sequence
+from itertools import compress, filterfalse, repeat
+from typing import Any, Iterable, Sequence
 
 from .. import errors, values
 from ..analysis import bound as b
@@ -35,6 +35,24 @@ from .aggregates import accumulator_for, non_null
 Runs = list[tuple[int, int, int]]
 _is_not_none = partial(operator.is_not, None)
 _FLOAT_COMPACT = 4096
+
+
+def _gather(values_: list[Any], positions: Sequence[int]) -> list[Any]:
+    return list(map(values_.__getitem__, positions))
+
+
+def _consume(calls: Iterable[Any]) -> None:
+    """Runs a lazy ``map`` of calls to completion inside C."""
+    deque(calls, maxlen=0)
+
+
+def _scatter(target: list[Any], positions: Sequence[int], values_: Iterable[Any]) -> None:
+    """``target[p] = v`` for every pair (C-level calls, no Python loop)."""
+    _consume(map(target.__setitem__, positions, values_))
+
+
+def _merge_counts(counts: list[int], mapping: Sequence[int], other: list[int]) -> None:
+    _scatter(counts, mapping, map(operator.add, _gather(counts, mapping), other))
 
 
 def _non_null_rows(ids: Sequence[int], vals: Sequence[Any]) -> tuple[Sequence[int], Sequence[Any]]:
@@ -84,9 +102,7 @@ class CountStarState(GroupState):
 
     def merge(self, other: GroupState, mapping: Sequence[int]) -> None:
         assert isinstance(other, CountStarState)
-        counts = self.counts
-        for g, c in zip(mapping, other.counts):
-            counts[g] += c
+        _merge_counts(self.counts, mapping, other.counts)
 
     def results(self) -> list[Any]:
         return self.counts
@@ -149,14 +165,20 @@ class SumState(GroupState):
 
     def merge(self, other: GroupState, mapping: Sequence[int]) -> None:
         assert isinstance(other, SumState)
-        totals, counts = self.totals, self.counts
-        for g, t, c in zip(mapping, other.totals, other.counts):
-            totals[g] += t
-            counts[g] += c
+        _merge_counts(self.totals, mapping, other.totals)
+        _merge_counts(self.counts, mapping, other.counts)
 
     def results(self) -> list[Any]:
+        totals, counts = self.totals, self.counts
+        if totals and min(counts) > 0:  # no empty group: whole-list kernels
+            if self.kind == "avg":
+                return list(map(operator.truediv, totals, map(operator.mul, counts, repeat(self.divisor))))
+            limit = values.INT64_MAX if self.kind == "int" else values.POW10[self.precision] - 1
+            low = values.INT64_MIN if self.kind == "int" else -limit
+            if max(totals) <= limit and min(totals) >= low:
+                return list(totals)
         out: list[Any] = []
-        for total, count in zip(self.totals, self.counts):
+        for total, count in zip(totals, counts):
             if not count:
                 out.append(None)
             elif self.kind == "int":
@@ -208,9 +230,8 @@ class FloatSumState(GroupState):
 
     def merge(self, other: GroupState, mapping: Sequence[int]) -> None:
         assert isinstance(other, FloatSumState)
-        for g, p, c in zip(mapping, other.parts, other.counts):
-            self.parts[g].extend(p)
-            self.counts[g] += c
+        _consume(map(list.extend, _gather(self.parts, mapping), other.parts))
+        _merge_counts(self.counts, mapping, other.counts)
 
     def results(self) -> list[Any]:
         out: list[Any] = []
@@ -304,8 +325,7 @@ class DistinctState(GroupState):
 
     def merge(self, other: GroupState, mapping: Sequence[int]) -> None:
         assert isinstance(other, DistinctState)
-        for g, s in zip(mapping, other.sets):
-            self.sets[g] |= s
+        _consume(map(set.update, _gather(self.sets, mapping), other.sets))
 
     def results(self) -> list[Any]:
         out = []
@@ -348,11 +368,13 @@ def merge_partials(partials: list[tuple[list[Any], list[GroupState]]]) -> tuple[
         return keys, states
     index = dict(zip(keys, range(len(keys))))
     for part_keys, part_states in partials[1:]:
-        before = len(index)
-        mapping = [index.setdefault(key, len(index)) for key in part_keys]
-        if len(index) > before:
+        # the keys of a partial are distinct: new ones get the next group ids
+        new = list(filterfalse(index.__contains__, part_keys))
+        if new:
+            index.update(zip(new, range(len(index), len(index) + len(new))))
             for state in states:
-                state.grow(len(index) - before)
+                state.grow(len(new))
+        mapping = list(map(index.__getitem__, part_keys))
         for state, other in zip(states, part_states):
             state.merge(other, mapping)
     return list(index), states

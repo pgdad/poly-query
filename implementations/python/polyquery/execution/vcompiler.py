@@ -27,12 +27,12 @@ from __future__ import annotations
 
 import operator
 from functools import partial
-from itertools import compress
+from itertools import compress, repeat
 from typing import Any, Callable, Sequence
 
 from .. import errors, values
 from ..analysis import bound as b
-from ..datatypes import TypeKind
+from ..datatypes import DataType, TypeKind
 from .casts import cast_function, identity
 from .compiler import (
     INT64_MAX,
@@ -100,6 +100,30 @@ def _decimal_check(precision: int) -> Callable[[list[Any]], list[Any]]:
         return out
 
     return check
+
+
+def _rescaling_cast(source: DataType, target: DataType) -> Callable[[Sequence[Any]], list[Any]] | None:
+    """A batch kernel for the casts that multiply by a power of ten (INT64 →
+    DECIMAL, DECIMAL → DECIMAL of a larger or equal scale), with the result
+    range checked once per batch; None for other casts."""
+    if target.kind is not TypeKind.DECIMAL:
+        return None
+    if source.kind is TypeKind.INT64:
+        factor = values.POW10[target.scale]
+    elif source.kind is TypeKind.DECIMAL and target.scale >= source.scale:
+        factor = values.POW10[target.scale - source.scale]
+    else:
+        return None
+    limit = values.POW10[target.precision]
+    precision = target.precision
+
+    def cast(a: Sequence[Any]) -> list[Any]:
+        out = list(a) if factor == 1 else list(map(operator.mul, a, repeat(factor)))
+        if out and (max(out) >= limit or min(out) <= -limit):
+            raise errors.numeric_overflow(f"value does not fit DECIMAL precision {precision}")
+        return out
+
+    return cast
 
 
 def _check_float(out: list[Any]) -> list[Any]:
@@ -306,11 +330,14 @@ class VectorCompiler:
         convert = cast_function(e.operand.type, e.type)
         if convert is identity:
             return operand
+        rescale = _rescaling_cast(e.operand.type, e.type)
 
         def cast(cols: Columns, n: int) -> Sequence[Any]:
             a = operand(cols, n)
             if None in a:
                 return [None if v is None else convert(v) for v in a]
+            if rescale is not None:
+                return rescale(a)
             return list(map(convert, a))
 
         return cast

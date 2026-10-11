@@ -32,6 +32,7 @@ from functools import partial
 from itertools import compress, repeat
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
+from ..analysis import bound as b
 from ..planner import physical as pp
 from ..planner.access import group_may_match
 from . import native_ops, parallel
@@ -53,6 +54,7 @@ from .vcompiler import VecFn, compile_vector, take
 from .worker_pool import PartitionTask, register_engine
 
 _is_not_none = partial(operator.is_not, None)
+_is_none = partial(operator.is_, None)
 
 Columns = list[Sequence[Any]]
 Batch = tuple[Columns, int]
@@ -616,18 +618,51 @@ def _sorted_partition(batches: Batches, node: pp.Sort | pp.TopN, ctx: ExecutionC
     width = len(node.layout)
     buffer = _Collector(width)
     limit = None if keep is None else max(2 * keep, VECTOR_BATCH_ROWS)
+    bound: Callable[[Columns, int], Batch] | None = None
     for batch in batches:
+        if bound is not None:
+            batch = bound(*batch)
         buffer.add(batch)
         if keep is None:
             ctx.reserve_rows(batch[1], width)
         elif buffer.n >= limit:  # type: ignore[operator]
             cols, buffer.n = _sorted(buffer.cols, buffer.n, node, keep)
             buffer.cols = [list(c) for c in cols]
+            if buffer.n == keep:
+                bound = _top_bound(node.keys[0], buffer.cols, keep)
         ctx.check()
     cols, n = _sorted(buffer.cols, buffer.n, node, keep)
     if keep is not None:
         ctx.reserve_rows(n, width)
     return cols, n
+
+
+def _top_bound(key: b.SortKey, cols: Columns, n: int) -> Callable[[Columns, int], Batch] | None:
+    """A top-N prefilter: drops the rows whose first sort key is strictly
+    worse than that of the last of the ``n`` rows kept so far (such a row
+    sorts after ``n`` kept rows, so it cannot be in the top ``n``). Rows that
+    tie on the first key are kept for the full sort."""
+    column = key.position
+    last = cols[column][n - 1]
+    nulls_first = key.nulls_first
+    if last is None and not nulls_first:
+        return None  # NULLs sort last: every row ties or is better
+    compare = operator.ge if key.descending else operator.le
+
+    def prefilter(batch_cols: Columns, size: int) -> Batch:
+        values = batch_cols[column]
+        if last is None:  # only NULLs tie
+            mask = list(map(_is_none, values))
+        elif None in values:
+            mask = [nulls_first if v is None else compare(v, last) for v in values]
+        else:
+            mask = list(map(compare, values, repeat(last)))
+        kept = mask.count(True)
+        if kept == size:
+            return batch_cols, size
+        return [list(compress(c, mask)) for c in batch_cols], kept
+
+    return prefilter
 
 
 def _sorted(cols: Columns, n: int, node: pp.Sort | pp.TopN, keep: int | None) -> tuple[Columns, int]:
