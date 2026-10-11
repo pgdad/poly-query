@@ -439,12 +439,7 @@
    (global: no GROUP BY, every gid is 0). Returns false, with the state
    unchanged, when the batch must go through `update` instead."))
 
-(definterface Counts
-  (^long countAt [^long g] "The count of group g."))
-
 (deftype CountState [star? ^:unsynchronized-mutable ^longs c]
-  Counts
-  (countAt [_ g] (aget c g))
   AggState
   (grow [_ size] (set! c (grow-longs c size)))
   (update [_ gids arg sel n]
@@ -455,14 +450,12 @@
           (when-not (.isNullAt arg i)
             (let [g (aget gids i)] (aset c g (inc (aget c g)))))))))
   (mergeFrom [_ other from to]
-    (aset c to (+ (aget c to) (.countAt ^Counts other from))))
+    (aset c to (+ (aget c to) (long (.result ^AggState other from)))))
   (result [_ gid] (aget c gid)))
 
 (definterface ExactSums
   (counts [])
   (exact [^long g] "The exact sum of group g (Long or BigInteger).")
-  (^boolean isBig [^long g] "True when the sum of group g is held as a BigInteger.")
-  (^long sumAt [^long g] "The sum of group g when it is not big.")
   (addBig [^long g ^java.math.BigInteger y]))
 
 (deftype LongSumState [finish
@@ -495,14 +488,15 @@
     (let [^LongSumState o other
           m (aget ^longs (.counts o) from)]
       (when (pos? m)
-        (if (.isBig o from)
-          (.addBig this to (.exact o from))
-          (let [y (.sumAt o from) s (aget sums to) r (unchecked-add s y)]
-            (if (or (neg? (bit-and (bit-xor s r) (bit-xor y r)))
-                    (and bigs (some? (aget bigs to))))
-              (.addBig this to (BigInteger/valueOf y))
-              (aset sums to r))))
-        (aset cnts to (+ (aget cnts to) m)))))
+        (let [x (.exact o from)]
+          (if (instance? BigInteger x)
+            (.addBig this to x)
+            (let [y (long x) s (aget sums to) r (unchecked-add s y)]
+              (if (or (neg? (bit-and (bit-xor s r) (bit-xor y r)))
+                      (and bigs (some? (aget bigs to))))
+                (.addBig this to (BigInteger/valueOf y))
+                (aset sums to r))))
+          (aset cnts to (+ (aget cnts to) m))))))
   (result [this gid]
     (let [m (aget cnts gid)]
       (finish (when (pos? m) (.exact this gid)) m)))
@@ -546,8 +540,6 @@
   ExactSums
   (counts [_] cnts)
   (exact [_ g] (or (when bigs (aget bigs g)) (aget sums g)))
-  (isBig [_ g] (boolean (and bigs (some? (aget bigs g)))))
-  (sumAt [_ g] (aget sums g))
   (addBig [_ g y]
     (when-not bigs (set! bigs (object-array (alength sums))))
     (let [^BigInteger cur (or (aget bigs g) (BigInteger/valueOf (aget sums g)))]
