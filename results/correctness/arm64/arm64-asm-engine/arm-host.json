@@ -1,0 +1,11 @@
+{
+ "hostname": "spark",
+ "kernel": "7.0.0-1019-nvidia",
+ "machine": "aarch64",
+ "os": "Ubuntu 24.04.5 LTS",
+ "gcc": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+ "cpus": "CPU MODELNAME      MAXMHZ\n  0 Cortex-A725 2808.0000\n  1 Cortex-A725 2808.0000\n  2 Cortex-A725 2808.0000\n  3 Cortex-A725 2808.0000\n  4 Cortex-A725 2808.0000\n  5 Cortex-X925 3900.0000\n  6 Cortex-X925 3900.0000\n  7 Cortex-X925 3900.0000\n  8 Cortex-X925 3900.0000\n  9 Cortex-X925 3900.0000\n 10 Cortex-A725 2808.0000\n 11 Cortex-A725 2808.0000\n 12 Cortex-A725 2808.0000\n 13 Cortex-A725 2808.0000\n 14 Cortex-A725 2808.0000\n 15 Cortex-X925 3900.0000\n 16 Cortex-X925 3900.0000\n 17 Cortex-X925 3900.0000\n 18 Cortex-X925 3900.0000\n 19 Cortex-X925 3900.0000",
+ "cpu_flags": "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm sb paca pacg dcpodp sve2 sveaes svepmull svebitperm svesha3 svesm4 flagm2 frint svei8mm svebf16 i8mm bf16 dgh bti ecv afp wfxt",
+ "sve_default_vector_length_bytes": "16",
+ "mem_total": "MemTotal:       127598548 kB"
+}

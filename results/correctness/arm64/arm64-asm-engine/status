@@ -1,0 +1,4 @@
+native_lib_exit=0
+arm64-asm-engine_build_exit=0
+arm64-asm-engine_conformance_exit=0
+arm64-asm-engine_native_exit=1
