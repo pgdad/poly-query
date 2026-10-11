@@ -24,8 +24,8 @@
  "rate_limit": {
   "events": 16,
   "max_utilization": {
-   "seven_day": 0.48,
-   "five_hour": 0.17
+   "five_hour": 0.17,
+   "seven_day": 0.48
   },
   "statuses": [
    "allowed"
