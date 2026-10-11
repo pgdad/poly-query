@@ -1,4 +1,5 @@
-make: Entering directory '/srv/pqrunner/jobs/engines-20261011T183057Z-1406904/repo/implementations/arm64-asm-engine'
+make: Entering directory '/srv/pqrunner/jobs/engines-20261011T190946Z-1453946/repo/implementations/arm64-asm-engine'
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/access.o src/access.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/binder.o src/binder.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/catalog.o src/catalog.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/datetime.o src/datetime.S
@@ -6,16 +7,19 @@ cc -Iinclude -g -Wa,--fatal-warnings -c -o build/decimal.o src/decimal.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/eval.o src/eval.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/exec.o src/exec.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/functions.o src/functions.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/index.o src/index.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/ingest.o src/ingest.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/json.o src/json.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/lexer.o src/lexer.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/main.o src/main.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/parser.o src/parser.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/plan.o src/plan.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/pqcf.o src/pqcf.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/protocol.o src/protocol.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/rt.o src/rt.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/storage.o src/storage.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/strfuncs.o src/strfuncs.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/types.o src/types.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/values.o src/values.S
-cc -g -o build/polyquery build/binder.o build/catalog.o build/datetime.o build/decimal.o build/eval.o build/exec.o build/functions.o build/ingest.o build/json.o build/lexer.o build/main.o build/parser.o build/plan.o build/protocol.o build/rt.o build/strfuncs.o build/types.o build/values.o -lm -lpthread
-make: Leaving directory '/srv/pqrunner/jobs/engines-20261011T183057Z-1406904/repo/implementations/arm64-asm-engine'
+cc -g -o build/polyquery build/access.o build/binder.o build/catalog.o build/datetime.o build/decimal.o build/eval.o build/exec.o build/functions.o build/index.o build/ingest.o build/json.o build/lexer.o build/main.o build/parser.o build/plan.o build/pqcf.o build/protocol.o build/rt.o build/storage.o build/strfuncs.o build/types.o build/values.o -lm -lpthread
+make: Leaving directory '/srv/pqrunner/jobs/engines-20261011T190946Z-1453946/repo/implementations/arm64-asm-engine'

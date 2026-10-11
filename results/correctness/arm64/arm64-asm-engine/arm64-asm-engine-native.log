@@ -1,12 +1,13 @@
-engine: polyquery-arm64-asm caps=13
+engine: polyquery-arm64-asm caps=18
   phase 1: 0/249 pass, 0 fail, 0 error, 249 not implemented
   phase 2: 0/202 pass, 0 fail, 0 error, 202 not implemented
-  TOTAL: 0/451 pass
+  phase 3: 0/172 pass, 0 fail, 0 error, 172 not implemented
+  TOTAL: 0/623 pass
 Traceback (most recent call last):
-  File "/srv/pqrunner/jobs/engines-20261011T183057Z-1406904/repo/tests/conformance/runner.py", line 432, in <module>
+  File "/srv/pqrunner/jobs/engines-20261011T190946Z-1453946/repo/tests/conformance/runner.py", line 432, in <module>
     sys.exit(main())
              ^^^^^^
-  File "/srv/pqrunner/jobs/engines-20261011T183057Z-1406904/repo/tests/conformance/runner.py", line 426, in main
+  File "/srv/pqrunner/jobs/engines-20261011T190946Z-1453946/repo/tests/conformance/runner.py", line 426, in main
     (c["status"] == "not_implemented" and not (set(r["requires"]) & OPTIONAL_CAPS - caps))]
                                                    ~^^^^^^^^^^^^
 KeyError: 'requires'
