@@ -18,6 +18,7 @@ from pathlib import Path
 from polyquery.native import kernels as nk
 from polyquery.native.kernels import address, load_kernels, new_bitmap
 from polyquery.protocol.handlers import capabilities_info
+from polyquery.storage import pqcf
 from polyquery.storage.vectors import bits_to_flags
 from tests.helpers import make_handler
 
@@ -248,6 +249,33 @@ class NativeExecutionTests(unittest.TestCase):
                             expected = self.run_query(handler, sql, options)
                             got = self.run_query(handler, sql, {**options, "native": True})
                             self.assertEqual(got, expected)
+
+    def test_corrupt_chunk_parity(self):
+        """A corrupt chunk of a memory-mapped table fails the query even if
+        the kernels select no row of its row group."""
+        handler = make_handler(data_dir=self.tmp.name, native_kernels=LIB)
+        csv = _table_csv(4000, 5)
+        for req in [
+            {"op": "load", "table": "t", "format": "csv", "data": csv},
+            {"op": "save", "table": "t", "path": "c.pqcf", "options": {"row_group_size": 1000}},
+        ]:
+            self.assertTrue(handler.handle(req)["ok"])
+        path = Path(self.tmp.name) / "c.pqcf"
+        chunk = pqcf.read_file(str(path), use_mmap=False).groups[2].chunks[-1]  # column u, rows 2000..2999
+        raw = bytearray(path.read_bytes())
+        raw[chunk.offset + chunk.length // 2] ^= 0xFF
+        path.write_bytes(bytes(raw))
+        self.assertTrue(handler.handle({"op": "open", "table": "c", "path": "c.pqcf", "options": {"mmap": True}})["ok"])
+        outcomes = set()
+        # no row matches, but min/max statistics cannot skip row group 2
+        for sql in ["SELECT id, u FROM c WHERE id = 2500 AND id = 2501",
+                    "SELECT COUNT(*), SUM(a), MAX(u) FROM c WHERE id = 2500 AND id = 2501",
+                    "SELECT s, COUNT(u) FROM c WHERE id = 2500 AND id = 2501 GROUP BY s"]:
+            for options in ({}, {"mode": "row"}):
+                expected = self.run_query(handler, sql, options)
+                outcomes.add(str(expected))
+                self.assertEqual(self.run_query(handler, sql, {**options, "native": True}), expected, sql)
+        self.assertIn("STORAGE_CORRUPT", outcomes)
 
     def test_native_paths_are_used(self):
         from polyquery.execution import native_ops

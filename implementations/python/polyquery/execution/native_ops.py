@@ -222,8 +222,20 @@ class Window:
             bits[0] &= 0xFF ^ ((1 << first) - 1)
 
 
-def windows(table: ColumnTable, keep: Callable[[RowGroup], bool] | None, start: int, stop: int | None) -> Iterator[Window]:
+def windows(
+    table: ColumnTable,
+    keep: Callable[[RowGroup], bool] | None,
+    start: int,
+    stop: int | None,
+    columns: Sequence[int],
+) -> Iterator[Window]:
+    """Windows of the row groups read by a scan. Like the engine's own scan,
+    every scanned column of a row group is loaded (and, when memory-mapped,
+    verified) before any of its rows is used, so a corrupt chunk fails the
+    query whether or not the kernels select rows from that group."""
     for group, lo, hi in table.row_ranges(keep, start, stop):
+        for column in columns:
+            group.vector(column)
         base = lo & ~7
         first = lo - base
         while base < hi:
@@ -492,7 +504,7 @@ def filtered_batches(
     keep = (lambda group: group_may_match(group, skip)) if skip else None
     start, stop = scan_range(scan, ctx, table.row_count)
     ctx.check()
-    for window in windows(table, keep, start, stop):
+    for window in windows(table, keep, start, stop, scan.columns):
         bits, count = native.select(kernels, window)
         if count:
             group = window.group
@@ -576,7 +588,7 @@ class NativeScanAggregate:
         start, stop = scan_range(scan, ctx, table.row_count)
         ctx.check()
         counter = self._counter()
-        for window in windows(table, keep, start, stop):
+        for window in windows(table, keep, start, stop, scan.columns):
             if counter is not None and not window.first:  # only COUNT(*) WHERE <one comparison>
                 count = counter(kernels, window)
                 if count:
@@ -912,7 +924,7 @@ class NativeHashScanAggregate:
         keep = (lambda group: group_may_match(group, skip)) if skip else None
         ctx.check()
         try:
-            for window in windows(table, keep, start, stop):
+            for window in windows(table, keep, start, stop, scan.columns):
                 if self.filter is not None:
                     sel, count = self.filter.select(kernels, window)
                 else:
