@@ -1419,8 +1419,8 @@ ENDF pqk_x86_scalar_count_i128
 /* ------------------------------------------------------------------------
  * int pqk_x86_scalar_sum_i128(data=rdi, validity=rsi, n=rdx, out_sum=rcx)
  * Register usage: r10:r9:r8 = 192-bit two's-complement accumulator
- * (top:hi:lo), r11 = out_sum, r12 = rows remaining, r13 = rows left in the
- * block (validity path), rbx = validity word, rax/rcx/rdx scratch.
+ * (top:hi:lo), r11 = out_sum, r12 = rows remaining, r13 = 4-row steps
+ * left in a full validity block, rbx = validity word, rax/rcx/rdx scratch.
  * Exact overflow detection: every row is sign-extended to 192 bits
  * (hi, sar 63 of hi) and added with add/adc/adc, so the accumulator holds the
  * exact sum (|sum| < 2^32 * 2^127 = 2^159 cannot wrap 192 bits). Wrap-arounds
@@ -1428,8 +1428,27 @@ ENDF pqk_x86_scalar_count_i128
  * At the end the sum fits int128 iff the top word equals the sign extension
  * of the hi word (sar 63); otherwise PQK_OVERFLOW and *out_sum is untouched.
  * Invalid rows are zeroed branch-free (shr of the validity word -> CF,
- * sbb -> 0/-1 mask, and). n == 0 stores 0 and returns PQK_OK.
+ * sbb -> 0/-1 mask, and). Both paths are unrolled 4x; the final partial
+ * validity block (exactly ceil(len/8) bytes via lvp) goes row by row.
+ * n == 0 stores 0 and returns PQK_OK.
  * ---------------------------------------------------------------------- */
+
+/* SVADD128 off: as SADD128 for a row whose validity bit is the next bit of
+ * rbx (shr -> CF, sbb -> 0/-1 mask; invalid rows add 0). clobbers rax, rcx,
+ * rdx. */
+.macro SVADD128 off
+        shr     $1, %rbx                /* CF = validity bit */
+        sbb     %rdx, %rdx
+        mov     \off(%rdi), %rax
+        and     %rdx, %rax
+        and     \off+8(%rdi), %rdx
+        mov     %rdx, %rcx
+        sar     $63, %rcx
+        add     %rax, %r8
+        adc     %rdx, %r9
+        adc     %rcx, %r10
+.endm
+
 .macro SADD128 off
         mov     \off+8(%rdi), %rax
         mov     %rax, %rdx
@@ -1472,33 +1491,31 @@ FUNC pqk_x86_scalar_sum_i128
         jnz     .Ls128_one
         jmp     .Ls128_fin
 .Ls128_vblk:
-        mov     $64, %r13d
-        cmp     %r13, %r12
+        cmp     $64, %r12
         jb      .Ls128_vpart
         mov     (%rsi), %rbx
-        jmp     .Ls128_vrow
-.Ls128_vpart:
-        mov     %r12d, %ecx
-        call    lvp
-        mov     %rax, %rbx
-        mov     %r12d, %r13d
-.Ls128_vrow:
-        shr     $1, %rbx                /* CF = validity bit */
-        sbb     %rdx, %rdx
-        mov     (%rdi), %rax
-        and     %rdx, %rax
-        and     8(%rdi), %rdx
-        mov     %rdx, %rcx
-        sar     $63, %rcx
-        add     %rax, %r8
-        adc     %rdx, %r9
-        adc     %rcx, %r10
-        add     $16, %rdi
+        mov     $16, %r13d
+.Ls128_vfour:
+        SVADD128 0
+        SVADD128 16
+        SVADD128 32
+        SVADD128 48
+        add     $64, %rdi
         dec     %r13d
-        jnz     .Ls128_vrow
+        jnz     .Ls128_vfour
         add     $8, %rsi
         sub     $64, %r12
-        ja      .Ls128_vblk
+        jnz     .Ls128_vblk
+        jmp     .Ls128_fin
+.Ls128_vpart:
+        mov     %r12d, %ecx
+        call    lvp                     /* exactly ceil(len/8) bytes */
+        mov     %rax, %rbx
+.Ls128_vone:
+        SVADD128 0
+        add     $16, %rdi
+        dec     %r12d
+        jnz     .Ls128_vone
 .Ls128_fin:
         mov     %r9, %rax
         sar     $63, %rax
