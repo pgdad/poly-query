@@ -21,6 +21,7 @@ pub mod exec;
 pub mod ingest;
 pub mod json;
 pub mod log;
+pub mod native;
 pub mod planner;
 pub mod protocol;
 pub mod server;

@@ -91,6 +91,8 @@ pub struct QueryOptions {
     pub morsel_rows: Option<usize>,
     /// Client-assigned id used for cancellation (HTTP).
     pub query_id: Option<String>,
+    /// `native: true`: use the native kernels when a library is loaded.
+    pub native: bool,
 }
 
 /// Query option `mode`.
@@ -116,6 +118,7 @@ impl Default for QueryOptions {
             threads: None,
             optimize: true,
             morsel_rows: None,
+            native: false,
             query_id: None,
         }
     }
@@ -165,8 +168,34 @@ pub struct Engine {
     writer: Mutex<()>,
 }
 
+/// Loads the library given with `--native-kernels`. A library that cannot
+/// be loaded is reported and ignored: queries then use the engine's own
+/// code paths (native kernels are optional, native-kernels.md).
+fn load_native_kernels(config: &Config) {
+    let Some(path) = &config.native_kernels else {
+        return;
+    };
+    let path_json = Json::String(path.display().to_string());
+    match crate::native::init(Some(path)) {
+        Ok(Some(k)) => crate::log::info(
+            "native kernels loaded",
+            vec![
+                ("path", path_json),
+                ("variant", Json::str(k.variant())),
+                ("available", Json::str(k.available_variants())),
+            ],
+        ),
+        Ok(None) => {}
+        Err(e) => crate::log::warn(
+            "native kernels unavailable; using built-in code paths",
+            vec![("path", path_json), ("error", Json::String(e))],
+        ),
+    }
+}
+
 impl Engine {
     pub fn new(config: Config) -> Self {
+        load_native_kernels(&config);
         Engine {
             config,
             catalog: RwLock::new(Arc::new(Catalog::default())),
@@ -512,6 +541,11 @@ impl Engine {
                     vectorized: opts.mode != ExecMode::Row,
                     threads: opts.threads.unwrap_or(self.config.threads).max(1),
                     morsel_rows: opts.morsel_rows.unwrap_or_else(default_morsel_rows),
+                    native: if opts.native {
+                        crate::native::loaded()
+                    } else {
+                        None
+                    },
                 };
                 let make_ctx = |exec: ExecOptions| {
                     let ctx = ExecContext::new(None, memory, self.config.test_functions)

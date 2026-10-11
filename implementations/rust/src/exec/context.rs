@@ -34,6 +34,8 @@ pub struct ExecOptions {
     pub threads: usize,
     /// Rows per morsel of parallel scans.
     pub morsel_rows: usize,
+    /// Native kernels to use (`native: true` with a loaded library).
+    pub native: Option<&'static crate::native::Kernels>,
 }
 
 impl Default for ExecOptions {
@@ -42,6 +44,7 @@ impl Default for ExecOptions {
             vectorized: false,
             threads: 1,
             morsel_rows: super::parallel::default_morsel_rows(),
+            native: None,
         }
     }
 }
