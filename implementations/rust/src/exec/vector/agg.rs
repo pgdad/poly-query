@@ -5,12 +5,10 @@
 //! Final values follow [`AggState::finish`] exactly (typed accumulators
 //! are finished column-wise with the same arithmetic and overflow checks).
 
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use super::batch::{Batch, Data, Vector};
 use super::keys::KeyTable;
-use crate::exec::hash::FastHasher;
 use crate::error::{Error, Result};
 use crate::exec::ExecContext;
 use crate::exec::aggregate::{AggState, Partial};
@@ -44,10 +42,14 @@ enum Acc {
         has: Vec<bool>,
         kind: Option<I64Kind>,
     },
-    /// MIN/MAX over strings.
+    /// MIN/MAX over strings: `best[g]` indexes `strings` (`NONE` = no
+    /// value yet). Strings of dictionary-encoded inputs are taken once per
+    /// dictionary entry, so groups share them (no per-group reference
+    /// counting).
     ExtremeStr {
         max: bool,
-        best: Vec<Option<Arc<str>>>,
+        best: Vec<u32>,
+        strings: StrTable,
     },
     /// MIN/MAX over FLOAT64.
     ExtremeF64 {
@@ -57,6 +59,44 @@ enum Acc {
     },
     /// Any other aggregate (DISTINCT, MIN/MAX of other types): row-mode states.
     States(Vec<AggState>),
+}
+
+const NONE: u32 = u32::MAX;
+
+/// Strings referenced by a string MIN/MAX accumulator.
+#[derive(Debug, Default)]
+struct StrTable {
+    strings: Vec<Arc<str>>,
+    /// Dictionary of the last dictionary-encoded input and the index of
+    /// each of its codes in `strings` (`NONE` if not taken yet).
+    dict: Option<Arc<[Arc<str>]>>,
+    codes: Vec<u32>,
+}
+
+impl StrTable {
+    fn push(&mut self, s: &Arc<str>) -> u32 {
+        self.strings.push(s.clone());
+        (self.strings.len() - 1) as u32
+    }
+
+    fn get(&self, i: u32) -> &str {
+        &self.strings[i as usize]
+    }
+
+    /// Index of dictionary entry `code` of `dict`.
+    fn dict_entry(&mut self, dict: &Arc<[Arc<str>]>, code: u32) -> u32 {
+        if !self.dict.as_ref().is_some_and(|d| Arc::ptr_eq(d, dict)) {
+            self.dict = Some(dict.clone());
+            self.codes.clear();
+            self.codes.resize(dict.len(), NONE);
+        }
+        let c = code as usize;
+        if self.codes[c] == NONE {
+            self.strings.push(dict[c].clone());
+            self.codes[c] = (self.strings.len() - 1) as u32;
+        }
+        self.codes[c]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +171,7 @@ impl Acc {
                 DataType::String => Acc::ExtremeStr {
                     max: call.func == AggFunc::Max,
                     best: Vec::new(),
+                    strings: StrTable::default(),
                 },
                 DataType::Float64 => Acc::ExtremeF64 {
                     max: call.func == AggFunc::Max,
@@ -157,7 +198,7 @@ impl Acc {
                 best.resize(groups, 0);
                 has.resize(groups, false);
             }
-            Acc::ExtremeStr { best, .. } => best.resize(groups, None),
+            Acc::ExtremeStr { best, .. } => best.resize(groups, NONE),
             Acc::ExtremeF64 { best, has, .. } => {
                 best.resize(groups, 0.0);
                 has.resize(groups, false);
@@ -317,28 +358,37 @@ impl Acc {
                     }
                 }
             }
-            (Acc::ExtremeStr { max, best }, data) => {
+            (Acc::ExtremeStr { max, best, strings }, data) => {
                 let max = *max;
-                for i in 0..n {
-                    if !ok(i) {
-                        continue;
+                let better = |strings: &StrTable, cur: u32, x: &str| {
+                    cur == NONE || {
+                        let o = x.as_bytes().cmp(strings.get(cur).as_bytes());
+                        if max { o.is_gt() } else { o.is_lt() }
                     }
-                    let x: &Arc<str> = match data {
-                        Data::Str(v) => &v[i],
-                        Data::Dict(c, d) => &d[c[i] as usize],
-                        _ => unreachable!(),
-                    };
-                    let gi = g(i);
-                    let better = match &best[gi] {
-                        None => true,
-                        Some(b) => {
-                            let o = x.as_bytes().cmp(b.as_bytes());
-                            if max { o.is_gt() } else { o.is_lt() }
+                };
+                match data {
+                    Data::Dict(codes, dict) => {
+                        for i in 0..n {
+                            if ok(i) {
+                                let gi = g(i);
+                                let x = &dict[codes[i] as usize];
+                                if better(strings, best[gi], x) {
+                                    best[gi] = strings.dict_entry(dict, codes[i]);
+                                }
+                            }
                         }
-                    };
-                    if better {
-                        best[gi] = Some(x.clone());
                     }
+                    Data::Str(v) => {
+                        for i in 0..n {
+                            if ok(i) {
+                                let gi = g(i);
+                                if better(strings, best[gi], &v[i]) {
+                                    best[gi] = strings.push(&v[i]);
+                                }
+                            }
+                        }
+                    }
+                    _ => unreachable!(),
                 }
             }
             (Acc::ExtremeF64 { max, best, has }, Data::Float(vals)) => {
@@ -422,7 +472,12 @@ impl Acc {
         groups: &[u32],
         map: &[u32],
     ) -> Result<usize> {
-        let pairs = || groups.iter().map(|&g| g as usize).zip(map.iter().map(|&t| t as usize));
+        let pairs = || {
+            groups
+                .iter()
+                .map(|&g| g as usize)
+                .zip(map.iter().map(|&t| t as usize))
+        };
         match (&mut *self, other) {
             (Acc::CountStar(a), Acc::CountStar(b)) | (Acc::Count(a), Acc::Count(b)) => {
                 for (g, t) in pairs() {
@@ -466,19 +521,35 @@ impl Acc {
                     }
                 }
             }
-            (Acc::ExtremeStr { max, best: a }, Acc::ExtremeStr { best: b, .. }) => {
+            (
+                Acc::ExtremeStr {
+                    max,
+                    best: a,
+                    strings: sa,
+                },
+                Acc::ExtremeStr {
+                    best: b,
+                    strings: sb,
+                    ..
+                },
+            ) => {
+                // Index here of each of `other`'s strings, taken on first use.
+                let mut taken = vec![NONE; sb.strings.len()];
                 for (g, t) in pairs() {
-                    if let Some(x) = &b[g] {
-                        let better = match &a[t] {
-                            None => true,
-                            Some(cur) => {
-                                let o = x.as_bytes().cmp(cur.as_bytes());
-                                if *max { o.is_gt() } else { o.is_lt() }
-                            }
-                        };
-                        if better {
-                            a[t] = Some(x.clone());
+                    if b[g] == NONE {
+                        continue;
+                    }
+                    let x = sb.get(b[g]);
+                    let better = a[t] == NONE || {
+                        let o = x.as_bytes().cmp(sa.get(a[t]).as_bytes());
+                        if *max { o.is_gt() } else { o.is_lt() }
+                    };
+                    if better {
+                        let k = b[g] as usize;
+                        if taken[k] == NONE {
+                            taken[k] = sa.push(&sb.strings[k]);
                         }
+                        a[t] = taken[k];
                     }
                 }
             }
@@ -523,16 +594,22 @@ impl Acc {
             Acc::SumDec { sum, n, .. } => {
                 AggState::from_partial(call, Partial::SumDecimal(sum[g], n[g]))
             }
-            Acc::SumFloat { sum, n } => AggState::from_partial(call, Partial::SumFloat(sum[g], n[g])),
+            Acc::SumFloat { sum, n } => {
+                AggState::from_partial(call, Partial::SumFloat(sum[g], n[g]))
+            }
             Acc::ExtremeI64 {
                 best, has, kind, ..
             } => AggState::from_partial(
                 call,
                 Partial::Extreme(has[g].then(|| kind.map(|k| k.value(best[g]))).flatten()),
             ),
-            Acc::ExtremeStr { best, .. } => {
-                AggState::from_partial(call, Partial::Extreme(best[g].clone().map(Value::Str)))
-            }
+            Acc::ExtremeStr { best, strings, .. } => AggState::from_partial(
+                call,
+                Partial::Extreme(
+                    (best[g] != NONE)
+                        .then(|| Value::Str(strings.strings[best[g] as usize].clone())),
+                ),
+            ),
             Acc::ExtremeF64 { best, has, .. } => AggState::from_partial(
                 call,
                 Partial::Extreme(has[g].then_some(Value::Float(best[g]))),
@@ -554,7 +631,13 @@ impl Acc {
             Acc::SumInt { sum, n } if avg => Vector::new(
                 Data::Float(
                     (0..groups)
-                        .map(|g| if n[g] > 0 { sum[g] as f64 / n[g] as f64 } else { 0.0 })
+                        .map(|g| {
+                            if n[g] > 0 {
+                                sum[g] as f64 / n[g] as f64
+                            } else {
+                                0.0
+                            }
+                        })
                         .collect(),
                 ),
                 valid_of(n),
@@ -632,13 +715,28 @@ impl Acc {
                     Some(I64Kind::Dec(s)) => Vector::new(Data::Decimal(vals, *s), valid),
                 }
             }
-            Acc::ExtremeStr { best, .. } => {
-                Vector::from_values(best[..groups].iter().map(|b| b.clone().map_or(Value::Null, Value::Str)).collect())
+            Acc::ExtremeStr { best, strings, .. } => {
+                // Dictionary-encoded result: codes index the taken strings.
+                let valid: Vec<bool> = best[..groups].iter().map(|&b| b != NONE).collect();
+                let all = valid.iter().all(|&x| x);
+                let codes = best[..groups]
+                    .iter()
+                    .map(|&b| if b == NONE { 0 } else { b })
+                    .collect();
+                let dict: Arc<[Arc<str>]> = std::mem::take(&mut strings.strings).into();
+                if dict.is_empty() {
+                    Vector::null(groups)
+                } else {
+                    Vector::new(Data::Dict(codes, dict), (!all).then_some(valid))
+                }
             }
             Acc::ExtremeF64 { best, has, .. } => {
                 let valid: Vec<bool> = has[..groups].to_vec();
                 let all = valid.iter().all(|&x| x);
-                Vector::new(Data::Float(best[..groups].to_vec()), (!all).then_some(valid))
+                Vector::new(
+                    Data::Float(best[..groups].to_vec()),
+                    (!all).then_some(valid),
+                )
             }
             Acc::States(states) => {
                 let mut values = Vec::with_capacity(groups);
@@ -652,7 +750,6 @@ impl Acc {
             }
         })
     }
-
 }
 
 /// Grouped aggregation state over batches.
@@ -733,7 +830,7 @@ impl Aggregator {
         } else {
             groups
                 .iter()
-                .map(|&g| self.keys.assign_values(&other.keys.key(g)))
+                .map(|&g| self.keys.assign_from(&other.keys, g))
                 .collect()
         };
         self.grow(self.keys.len());
@@ -751,9 +848,7 @@ impl Aggregator {
     pub fn partition_groups(&self, parts: usize) -> Vec<Vec<u32>> {
         let mut out = vec![Vec::new(); parts];
         for g in 0..self.groups as u32 {
-            let mut h = FastHasher::default();
-            self.keys.key(g).hash(&mut h);
-            out[(h.finish() % parts as u64) as usize].push(g);
+            out[(self.keys.hash_key(g) % parts as u64) as usize].push(g);
         }
         out
     }

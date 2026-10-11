@@ -583,7 +583,11 @@ impl BatchOperator for ParallelAggregateOp {
 /// Merges partial aggregators in parallel: each worker's groups are split
 /// into hash partitions; partition `p` of every partial is merged (and
 /// finished) by thread `p`. Equal keys always meet in the same partition.
-fn merge_partitioned(partials: Vec<Aggregator>, seed: &ContextSeed, ctx: &ExecContext) -> Result<Batch> {
+fn merge_partitioned(
+    partials: Vec<Aggregator>,
+    seed: &ContextSeed,
+    ctx: &ExecContext,
+) -> Result<Batch> {
     let parts = partials.len();
     let key_count = partials[0].key_count();
     let calls = partials[0].calls().to_vec();

@@ -52,7 +52,11 @@ fn enc_i64(x: i64) -> u64 {
 fn enc_f64(f: f64) -> u64 {
     // -0.0 sorts equal to 0.0 (types.md §7).
     let bits = (if f == 0.0 { 0.0 } else { f }).to_bits();
-    if bits >> 63 == 1 { !bits } else { bits | (1 << 63) }
+    if bits >> 63 == 1 {
+        !bits
+    } else {
+        bits | (1 << 63)
+    }
 }
 
 impl SortColumn {
@@ -74,7 +78,8 @@ impl SortColumn {
             Data::Dict(codes, dict) => {
                 // Rank dictionary entries once; equal strings share a rank.
                 let mut order: Vec<u32> = (0..dict.len() as u32).collect();
-                order.sort_by(|&a, &b| dict[a as usize].as_bytes().cmp(dict[b as usize].as_bytes()));
+                order
+                    .sort_by(|&a, &b| dict[a as usize].as_bytes().cmp(dict[b as usize].as_bytes()));
                 let mut rank = vec![0u64; dict.len()];
                 let mut r = 0;
                 for (k, &e) in order.iter().enumerate() {
@@ -355,10 +360,9 @@ fn sort_single(col: &SortColumn, n: usize, top: Option<usize>, threads: usize) -
             let pairs: Vec<(u64, u32)> = rows.map(|i| (prefix(&v[i as usize]), i)).collect();
             let desc = col.descending;
             let cmp = |a: &(u64, u32), b: &(u64, u32)| {
-                let o = a
-                    .0
-                    .cmp(&b.0)
-                    .then_with(|| v[a.1 as usize].as_bytes().cmp(v[b.1 as usize].as_bytes()));
+                let o =
+                    a.0.cmp(&b.0)
+                        .then_with(|| v[a.1 as usize].as_bytes().cmp(v[b.1 as usize].as_bytes()));
                 (if desc { o.reverse() } else { o }).then(a.1.cmp(&b.1))
             };
             let pairs = match top {
@@ -416,7 +420,9 @@ mod tests {
 
     #[test]
     fn radix_is_stable_and_ordered() {
-        let items: Vec<(u64, u32)> = (0..5000u32).map(|i| (((i * 7919) % 97) as u64, i)).collect();
+        let items: Vec<(u64, u32)> = (0..5000u32)
+            .map(|i| (((i * 7919) % 97) as u64, i))
+            .collect();
         let sorted = radix_sort(items.clone());
         let mut expect = items;
         expect.sort();
@@ -444,7 +450,11 @@ mod tests {
                 let got = sort_permutation(&b, std::slice::from_ref(&k), top, &ctx).unwrap();
                 let mut expect: Vec<u32> = (0..values.len() as u32).collect();
                 expect.sort_by(|&x, &y| {
-                    crate::exec::operators::compare_keys(&values[x as usize], &values[y as usize], &k)
+                    crate::exec::operators::compare_keys(
+                        &values[x as usize],
+                        &values[y as usize],
+                        &k,
+                    )
                 });
                 if let Some(t) = top {
                     expect.truncate(t);

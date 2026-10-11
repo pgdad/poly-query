@@ -14,8 +14,10 @@
 
 use std::sync::{Arc, OnceLock};
 
+use std::hash::{Hash, Hasher};
+
 use super::batch::{Data, NO_ROW, Vector};
-use crate::exec::hash::FastMap;
+use crate::exec::hash::{FastHasher, FastMap};
 use crate::types::Value;
 
 /// Representation class of `i64`-keyed values.
@@ -577,6 +579,45 @@ impl KeyTable {
                         map.get(key.as_slice()).copied().unwrap_or(NO_ROW)
                     });
                 }
+            }
+        }
+    }
+
+    /// Value of key column `c` of group `g`.
+    pub fn key_value(&self, g: u32, c: usize) -> &Value {
+        match self.composite {
+            Composite::One => self.interners[0].value(g),
+            _ => {
+                let w = self.interners.len();
+                self.interners[c].value(self.group_ids[g as usize * w + c])
+            }
+        }
+    }
+
+    /// Hash of the key of group `g` (consistent across tables: it hashes
+    /// the key values).
+    pub fn hash_key(&self, g: u32) -> u64 {
+        let mut h = FastHasher::default();
+        for c in 0..self.width() {
+            self.key_value(g, c).hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Group id here of group `g` of `other` (same key columns), inserting
+    /// it if new.
+    pub fn assign_from(&mut self, other: &KeyTable, g: u32) -> u32 {
+        match self.composite {
+            Composite::Zero => {
+                self.groups = 1;
+                0
+            }
+            Composite::One => self.interners[0].intern_value(other.key_value(g, 0)),
+            _ => {
+                let key: Vec<Value> = (0..self.width())
+                    .map(|c| other.key_value(g, c).clone())
+                    .collect();
+                self.assign_values(&key)
             }
         }
     }
