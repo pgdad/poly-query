@@ -41,8 +41,9 @@ def _decimal_to_int(source: DataType) -> CastFn:
     divisor = values.POW10[source.scale]
 
     def cast(v: int) -> int:
+        # truncation toward zero; a wide DECIMAL may not fit INT64
         q = abs(v) // divisor
-        return q if v >= 0 else -q
+        return values.check_int64(q if v >= 0 else -q)
 
     return cast
 

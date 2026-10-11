@@ -9,7 +9,7 @@ from typing import Any, Callable, Sequence
 
 from .. import errors
 from ..analysis import bound as b
-from ..datatypes import MAX_DECIMAL_PRECISION, DataType, TypeKind
+from ..datatypes import COMPARISON_PRECISION, DataType, TypeKind
 from ..planner import physical as pp
 from .compiler import compile_expr
 from .context import ExecutionContext
@@ -49,7 +49,8 @@ def aligned_keys(left: list[b.Expr], right: list[b.Expr]) -> tuple[list[b.Expr],
     for lk, rk in zip(left, right):
         ls, rs = _decimal_scale(lk.type), _decimal_scale(rk.type)
         if ls is not None and rs is not None and ls != rs:
-            target = DataType(TypeKind.DECIMAL, MAX_DECIMAL_PRECISION, max(ls, rs))
+            # exact rescaling: the comparison precision never overflows
+            target = DataType(TypeKind.DECIMAL, COMPARISON_PRECISION, max(ls, rs))
             lk = lk if ls == target.scale else b.Cast(target, lk, implicit=True)
             rk = rk if rs == target.scale else b.Cast(target, rk, implicit=True)
         out_left.append(lk)

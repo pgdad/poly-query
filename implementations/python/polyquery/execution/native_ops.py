@@ -59,7 +59,7 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from .. import errors
 from ..analysis import bound as b
-from ..datatypes import TypeKind
+from ..datatypes import DataType, TypeKind
 from ..native import kernels as nk
 from ..native.kernels import NativeKernels, address, new_bitmap
 from ..planner import physical as pp
@@ -84,6 +84,13 @@ MAX_GROUP_CODES = 64
 INT64_MIN, INT64_MAX = nk.INT64_MIN, nk.INT64_MAX
 _INT_KINDS = frozenset({TypeKind.INT64, TypeKind.DECIMAL, TypeKind.DATE, TypeKind.TIMESTAMP})
 _TERM_KINDS = _INT_KINDS | {TypeKind.STRING}
+
+
+def _int64_type(dtype: DataType) -> bool:
+    """Whether values of ``dtype`` are stored as int64 for the kernels. Wide
+    DECIMALs (precision > 18) are not: the kernel ABI covers 64-bit values
+    only, so they always stay with the engine's own code (decimal38.md §6)."""
+    return dtype.kind in _INT_KINDS and not dtype.is_wide
 
 
 class NativeFallback(Exception):
@@ -422,7 +429,7 @@ def _term(conjunct: b.Expr, scan: pp.TableScan, keep_null: bool) -> Term | None:
         left, right = conjunct.left, conjunct.right
         if isinstance(left, b.ColumnRef) and isinstance(right, b.ColumnRef):
             same = left.rel == right.rel == scan.rel and left.type == right.type
-            if same and left.type.kind in _INT_KINDS:
+            if same and _int64_type(left.type):
                 return Term(left.index, left.type.kind, conjunct.op, (), right.index)
             return None
     negated = isinstance(conjunct, b.Compare) and conjunct.op == "<>"
@@ -443,8 +450,9 @@ def _term(conjunct: b.Expr, scan: pp.TableScan, keep_null: bool) -> Term | None:
     column = pred.column
     if column not in scan.columns:
         return None
-    kind = table.columns[column].type.kind
-    if kind not in _TERM_KINDS:
+    dtype = table.columns[column].type
+    kind = dtype.kind
+    if kind not in _TERM_KINDS or dtype.is_wide:
         return None
     op = "<>" if negated else pred.op
     if op == "IN" and len(pred.values) > MAX_IN_ITEMS:
@@ -853,6 +861,9 @@ def compile_scan_aggregate(node: pp.HashAggregate) -> NativeScanAggregate | Nati
     if None in keys:
         return None
     columns = scan.table.columns
+    used = [*keys, *(spec.column for spec in specs if spec.column is not None)]
+    if any(columns[c].type.is_wide for c in used):  # type: ignore[index]
+        return None
     if not keys:
         return NativeScanAggregate(scan, native, specs, None, len(node.layout))
     if len(keys) == 1 and columns[keys[0]].type.kind is TypeKind.STRING and node.estimated_rows <= MAX_GROUP_CODES:
@@ -896,7 +907,7 @@ class NativeHashScanAggregate:
         return list(index), self._states(sums, counts)
 
     def hash_partitionable(self) -> bool:
-        return len(self.keys) == 1 and self.scan.table.columns[self.keys[0]].type.kind in _INT_KINDS
+        return len(self.keys) == 1 and _int64_type(self.scan.table.columns[self.keys[0]].type)
 
     def hash_partition(self, ctx: ExecutionContext) -> tuple[list[Any], list[array.array], list[array.array], list[int]] | None:
         """The groups of hash partition ``ctx.partitions[scan]`` over the whole
@@ -1129,7 +1140,8 @@ class NativeGroupSums:
     """Buffers the (group id, value) pairs of SUM / AVG / COUNT states of a
     vectorized hash aggregation and folds them into the states with
     ``pqk_group_sum_i64`` (one call per ~1M rows instead of a Python loop
-    per row). Values are INT64 or unscaled DECIMAL, so they fit in int64."""
+    per row). Values are INT64 or unscaled narrow DECIMAL, so they fit in
+    int64; sums of wide DECIMALs stay with their states' own code."""
 
     FLUSH_ROWS = 1 << 20
 
@@ -1138,7 +1150,8 @@ class NativeGroupSums:
         # per handled state: [ids, values]; COUNT(*) needs only ids
         self.buffers: dict[int, tuple[GroupState, array.array, array.array | None]] = {}
         for k, state in enumerate(states):
-            if type(state) in (CountStarState, CountState, SumState):
+            wide = isinstance(state, SumState) and state.wide
+            if type(state) in (CountStarState, CountState, SumState) and not wide:
                 values = array.array("q") if isinstance(state, SumState) else None
                 self.buffers[k] = (state, array.array("I"), values)
         self.pending = 0

@@ -10,14 +10,14 @@ from .. import errors
 from ..datatypes import (
     FLOAT64,
     INT64,
-    MAX_DECIMAL_PRECISION,
     NULL,
     STRING,
     TIMESTAMP,
     DataType,
     TypeKind,
-    common_type,
     comparable,
+    comparison_type,
+    decimal_result,
 )
 from . import bound as b
 from .typing_rules import unify
@@ -79,7 +79,7 @@ def _round(args: list[b.Expr], evaluate: ConstEvaluator) -> tuple[DataType, list
         value = _constant(args[1], "ROUND", evaluate)
         n = t.scale if value is None else value
     if t.kind is TypeKind.DECIMAL:
-        return DataType(TypeKind.DECIMAL, MAX_DECIMAL_PRECISION, max(0, min(n, t.scale))), args
+        return decimal_result(max(0, min(n, t.scale)), t), args
     return t, args
 
 
@@ -88,7 +88,7 @@ def _floor_ceil(fname: str) -> Callable:
         _expect(args[0], _NUMERIC, fname)
         t = _numeric_type(args[0])
         if t.kind is TypeKind.DECIMAL:
-            return DataType(TypeKind.DECIMAL, MAX_DECIMAL_PRECISION, 0), args
+            return decimal_result(0, t), args
         return t, args
 
     return resolve
@@ -194,10 +194,10 @@ def aggregate_result_type(name: str, arg: b.Expr | None) -> DataType:
     if name == "AVG":
         return FLOAT64
     if t.kind is TypeKind.DECIMAL:
-        return DataType(TypeKind.DECIMAL, MAX_DECIMAL_PRECISION, t.scale)
+        return decimal_result(t.scale, t)
     return t
 
 
 def nullif_compare_type(a: DataType, c: DataType) -> DataType:
     """Type in which NULLIF compares its arguments."""
-    return common_type([a, c]) or NULL
+    return comparison_type([a, c]) or NULL

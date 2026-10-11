@@ -22,8 +22,9 @@ _EPOCH_ORDINAL = datetime.date(1970, 1, 1).toordinal()
 MIN_DATE = datetime.date(1, 1, 1).toordinal() - _EPOCH_ORDINAL
 MAX_DATE = datetime.date(9999, 12, 31).toordinal() - _EPOCH_ORDINAL
 
-POW10 = [10**i for i in range(40)]
-MAX_DECIMAL_DIGITS = 18
+# up to 10**77: rescaled comparison operands have at most 76 digits
+POW10 = [10**i for i in range(80)]
+MAX_DECIMAL_DIGITS = 38
 
 INT_RE = re.compile(r"[+-]?[0-9]+")
 FLOAT_RE = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
@@ -92,7 +93,7 @@ def decimal_fits(unscaled: int, precision: int) -> bool:
     return -POW10[precision] < unscaled < POW10[precision]
 
 
-def check_decimal(unscaled: int, precision: int = 18) -> int:
+def check_decimal(unscaled: int, precision: int) -> int:
     if not decimal_fits(unscaled, precision):
         raise errors.numeric_overflow(f"value does not fit DECIMAL precision {precision}")
     return unscaled
@@ -165,12 +166,13 @@ def parse_decimal_text(text: str, scale: int, *, exact: bool) -> int | None:
 
 def decimal_literal_type(text: str) -> tuple[int, int, int] | None:
     """For a SQL numeric literal without exponent containing '.', returns
-    ``(unscaled, precision, scale)`` or None if the precision exceeds 18."""
+    ``(unscaled, precision, scale)`` or None if the precision exceeds 38
+    (spec/changes/decimal38.md §3)."""
     int_part, _, frac = text.partition(".")
     scale = len(frac)
     significant = int_part.lstrip("0")
     precision = max(len(significant) + scale, scale, 1)
-    if precision > 18:
+    if precision > MAX_DECIMAL_DIGITS:
         return None
     return int((int_part or "0") + frac or "0"), precision, scale
 

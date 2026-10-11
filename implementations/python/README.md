@@ -18,7 +18,9 @@ Capabilities reported: `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`,
 `exec.parallel`, `join.hash`, `join.merge`, `join.nested_loop`,
 `native.kernels` (M9: the native kernel library `libpqkernels` is used
 through `ctypes` when loaded, see *Native kernels* below), `change.union_all`
-(change request CR-1, `UNION ALL`, see *UNION ALL (CR-1)* below).
+(change request CR-1, `UNION ALL`, see *UNION ALL (CR-1)* below),
+`change.decimal38` (change request CR-2, DECIMAL precision 38 and PQCF v2,
+see *DECIMAL precision 38 (CR-2)* below).
 
 ## Build prerequisites
 
@@ -84,7 +86,8 @@ logical plan → optimizer → physical plan → execution**.
 * **Layouts.** `load`/`open` accept `{"options":{"layout":"row"|"column"}}`
   (default `column`; anything else is `INVALID_REQUEST`). A `RowTable` keeps a
   list of row tuples. A `ColumnTable` keeps row groups of typed vectors:
-  `array('q')` for INT64 / DECIMAL (unscaled) / TIMESTAMP, `array('i')` for
+  `array('q')` for INT64 / narrow DECIMAL (unscaled) / TIMESTAMP, a list of
+  Python ints for wide DECIMAL (precision > 18, CR-2), `array('i')` for
   DATE, `array('d')` for FLOAT64, a 0/1 `bytearray` for BOOLEAN, and STRING
   either as a list of `str` or dictionary-encoded (`array('I')` codes + the
   distinct strings); NULLs are tracked in an LSB-first validity bitmap that
@@ -160,8 +163,9 @@ logical plan → optimizer → physical plan → execution**.
 
 `BOOLEAN` → `bool`, `INT64` → `int` (range-checked after every operation),
 `FLOAT64` → `float` (non-finite results raise `NUMERIC_OVERFLOW`),
-`DECIMAL(p,s)` → `int` holding the unscaled value (exact arbitrary-precision
-intermediates; results checked against 18 digits), `STRING` → `str`,
+`DECIMAL(p,s)` → `int` holding the unscaled value, for narrow and wide
+decimals alike (exact arbitrary-precision intermediates; results checked
+against the result precision, 18 or 38 digits), `STRING` → `str`,
 `DATE` → `int` days since 1970-01-01, `TIMESTAMP` → `int` microseconds since
 the epoch, `NULL` → `None`. Values are converted to their canonical JSON form
 only at the protocol boundary.
@@ -257,6 +261,65 @@ Branch scopes are children of a compound scope without range variables, so
 correlated references inside a branch pass through it and make the whole
 compound subquery correlated. `max_rows` applies to the final result as for
 any query. Unit tests: `tests/test_union_all.py`.
+
+### DECIMAL precision 38 (CR-2, `spec/changes/decimal38.md`)
+
+**Representation.** A wide decimal (`DECIMAL(p,s)`, 19 ≤ p ≤ 38) is, like a
+narrow one, a Python `int` holding the unscaled value. Python integers are
+arbitrary precision, so there is no separate 128-bit type: one set of
+kernels serves both widths, and intermediates are exact (a product of two
+wide operands may have 76 digits before the overflow check). The type
+decides only the overflow limit (10^18 or 10^38) and the storage form:
+
+* in column tables a narrow DECIMAL vector is an `array('q')`, a wide one a
+  `list` of ints (NULL slots 0). A list has no int64 view, so wide columns
+  can never reach the native kernels;
+* in PQCF files wide values are 128-bit two's-complement little-endian
+  integers (`int.to_bytes(16, "little", signed=True)`); narrow DECIMAL
+  columns keep the 64-bit layout, also inside v2 files.
+
+**Narrow / wide dispatch.** Every rule that produced precision 18 now
+produces `W = result_precision(operand types)`: 38 if any DECIMAL operand is
+wide (`DataType.is_wide`), else 18 (INT64 operands do not count). This is
+decided once at bind time (`datatypes.decimal_result`), so the runtime only
+sees a result type: arithmetic kernels (`compiler._decimal_kernel`, the
+vectorized `_decimal_check`), `SUM` (`SumDecimal`, `SumState`), `ROUND` and
+the casts check against `e.type.precision`. An INT64 arithmetic operand is
+promoted to `DECIMAL(W,0)`.
+
+**Exact comparison (SPEC-Q-001).** INT64/DECIMAL mixes are compared in an
+internal type `DECIMAL(77, max scale)` (`COMPARISON_PRECISION`; INT64 or
+DECIMAL values rescaled to a scale ≤ 38 have at most 76 digits), so the
+implicit promotion can never overflow. It is used by comparisons, BETWEEN,
+IN lists and subqueries, simple CASE, NULLIF and join-key alignment; it never
+appears as a result type (comparisons yield BOOLEAN). DECIMAL operands that
+already have the comparison scale are not wrapped in a cast, so index and
+native-kernel planning still see the bare column. MIN/MAX, ORDER BY, GROUP BY
+and DISTINCT compare Python ints, which is exact anyway.
+
+**Storage.** `pqcf.format_version_for(columns)`: v2 if a column is wide,
+else v1. The reader accepts v1 and v2; header/metadata version mismatch, a
+wide column in a v1 file, or a value with |unscaled| ≥ 10^p is
+`STORAGE_CORRUPT`; version > 2 or flags ≠ 0 is `STORAGE_VERSION_UNSUPPORTED`.
+
+**Modules touched.**
+
+| Layer | Module | Change |
+|---|---|---|
+| Types | `datatypes.py` | max precision 38, `is_wide`, `result_precision` / `decimal_result` (W), `comparison_type`, `COMPARISON_PRECISION`; `DECIMAL` alias stays `DECIMAL(18,0)` |
+| Values | `values.py` | decimal literals up to 38 digits, `check_decimal` takes the precision, `POW10` up to 10^79 |
+| Lexer / parser | `sql/lexer.py`, `sql/parser.py` | `FULL` / `RIGHT` (reserved only for future syntax) accepted as an alias after an explicit `AS` (the public case uses `… AS full`) |
+| Analysis | `analysis/typing_rules.py`, `analysis/functions.py` | W rule for `+ - *`, product-scale limit W, common types; exact comparison promotion (`promote_compared`); `SUM`/`ROUND`/`FLOOR`/`CEIL` result precision; NULLIF comparison type |
+| Execution | `execution/compiler.py`, `vcompiler.py`, `functions.py`, `aggregates.py`, `group_states.py`, `casts.py`, `common.py` | overflow checks at the result precision; DECIMAL → INT64 range check; join keys aligned in the comparison type |
+| Native | `execution/native_ops.py` | wide columns and wide SUM/AVG states are never given to kernels (`_int64_type`, `NativeGroupSums`) |
+| Storage | `storage/vectors.py`, `storage/pqcf.py` | list vectors for wide columns; PQCF v2 writer/reader (i128 PLAIN and RLE) |
+| Protocol | `protocol/handlers.py` | capability `change.decimal38` |
+
+Ingestion needed no change: schemas are parsed by `parse_type` (now up to
+38, `INVALID_REQUEST` beyond), conversion is exact text parsing, and JSON
+numbers keep their literal text. `spec_version` stays `1.0.0`, which the
+public catalog case expects (CR-2 names `1.2.0-cr2`). Unit tests:
+`tests/test_decimal38.py`.
 
 ### Logical / physical plan separation (CR-3, `spec/changes/refactor-plan-separation.md`)
 
@@ -874,10 +937,9 @@ python3 tools/native_difftest.py --lib ../../native-kernels/build/x86_64/libpqke
   but not for DATE/TIMESTAMP. FLOAT64 → STRING uses Python's shortest
   round-trip `repr` (`-0.0` → `0.0`).
 * **Promotion**: in arithmetic an INT64 operand combined with a DECIMAL keeps
-  scale 0 (`DECIMAL(18,0)`, as `1.5 * 2` → `DECIMAL(18,1)` requires); in
-  comparisons an INT64 operand is promoted to `DECIMAL(18, s)` of the DECIMAL
-  side; if it then needs more than 18 digits that raises `NUMERIC_OVERFLOW`
-  (types.md §2). Two DECIMALs compare exactly by value. The untyped `NULL` literal in arithmetic
+  scale 0 (`DECIMAL(W,0)`, as `1.5 * 2` → `DECIMAL(18,1)` requires); in
+  comparisons INT64 and DECIMAL values compare exactly (CR-2 §4, see above),
+  never raising `NUMERIC_OVERFLOW`. Two DECIMALs compare exactly by value. The untyped `NULL` literal in arithmetic
   takes the other operand's type (INT64 if both are NULL); unary minus keeps the
   null type. `SUM(NULL)` is INT64, `AVG(NULL)` FLOAT64.
 * **ORDER BY**: only an unsigned integer literal is an ordinal (`0` is out of
@@ -925,8 +987,9 @@ python3 tools/native_difftest.py --lib ../../native-kernels/build/x86_64/libpqke
   produce; the word rule is the simplest rule consistent with both.
 * **Common types** (CASE, COALESCE, IN, BETWEEN): identical types stay as they
   are (two `DECIMAL(3,2)` stay `DECIMAL(3,2)`); otherwise numeric promotion
-  (two different DECIMALs → `DECIMAL(18,max(s))`), DATE+TIMESTAMP → TIMESTAMP.
-  IN lists and BETWEEN promote the operand and all items to one common type.
+  (two different DECIMALs → `DECIMAL(W,max(s))`), DATE+TIMESTAMP → TIMESTAMP.
+  IN lists and BETWEEN compare the operand and all items exactly in one
+  comparison type.
 * **Function argument typing**: `ABS`/`ROUND`/`FLOOR`/`CEIL` return "the same
   type" as their argument, so an untyped `NULL` argument stays the null type
   (reported as STRING); other functions have fixed result types;
@@ -963,7 +1026,7 @@ python3 tools/native_difftest.py --lib ../../native-kernels/build/x86_64/libpqke
   COALESCE, `DATE` and `TIMESTAMP` branches are therefore *not* unified
   (`TYPE_ERROR`). Identical DECIMAL types are kept as they are
   (`DECIMAL(5,2)` ∪ `DECIMAL(5,2)` = `DECIMAL(5,2)`); different DECIMALs or
-  INT64 with DECIMAL become `DECIMAL(18, max scale)`.
+  INT64 with DECIMAL become `DECIMAL(W, max scale)`.
 * **UNION ALL ORDER BY**: an output name that occurs more than once in the
   first branch (`SELECT a, a … UNION ALL … ORDER BY a`) is ambiguous
   (`SEMANTIC_ERROR`); a position is always accepted. Rows are concatenated in
@@ -977,12 +1040,6 @@ python3 tools/native_difftest.py --lib ../../native-kernels/build/x86_64/libpqke
 
 ## Known limitations
 
-* Public case `changes/union_all.pqt:51` (`SELECT order_id … UNION ALL SELECT
-  amount FROM orders …`) expects `DECIMAL(18,2)`, but that file loads
-  `fixtures/orders.csv` without a schema, and CSV inference never yields
-  DECIMAL (ingestion.md §1.1; `amount` is inferred FLOAT64 like `people.score`
-  in the same file). INT64 ∪ FLOAT64 is FLOAT64, which the engine returns
-  (`[99.99], [101.0]`). The case is left failing rather than special-cased.
 * UNION ALL branches are not merged into partial aggregation / top-N: an
   aggregate or ORDER BY over a union consumes the concatenated branch rows
   (each branch can still run partitioned in parallel).

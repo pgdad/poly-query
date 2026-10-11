@@ -38,7 +38,8 @@ class DecimalTests(unittest.TestCase):
         self.assertEqual(values.decimal_literal_type("0.05"), (5, 2, 2))
         self.assertEqual(values.decimal_literal_type("00012.5"), (125, 3, 1))
         self.assertEqual(values.decimal_literal_type("3."), (3, 1, 0))
-        self.assertIsNone(values.decimal_literal_type("1234567890123456789.5"))
+        self.assertEqual(values.decimal_literal_type("1234567890123456789.5"), (12345678901234567895, 20, 1))
+        self.assertIsNone(values.decimal_literal_type("1" * 38 + ".5"))
 
 
 class TemporalTests(unittest.TestCase):
@@ -66,7 +67,7 @@ class TypeNameTests(unittest.TestCase):
         self.assertEqual(parse_type("decimal(5)").name, "DECIMAL(5,0)")
 
     def test_invalid(self):
-        for text in ("WIDGET", "DECIMAL(19,2)", "DECIMAL(3,4)", "INT(3)"):
+        for text in ("WIDGET", "DECIMAL(39,2)", "DECIMAL(3,4)", "INT(3)"):
             with self.assertRaises(InvalidTypeError):
                 parse_type(text)
 

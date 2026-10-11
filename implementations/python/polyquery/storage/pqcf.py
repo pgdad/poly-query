@@ -1,4 +1,10 @@
-"""PQCF v1, the persistent columnar file format (spec/storage/pqcf-v1.md).
+"""PQCF v1 and v2, the persistent columnar file format
+(spec/storage/pqcf-v1.md; v2: spec/changes/decimal38.md §7).
+
+PQCF v2 differs from v1 only in its version numbers and in allowing wide
+DECIMAL columns (precision > 18), whose values are 128-bit two's-complement
+little-endian integers (PLAIN: 16 bytes per value, RLE: 20-byte runs). A
+table with a wide DECIMAL column is written as v2, every other table as v1.
 
 Writing (:func:`save_table`) streams the chunks of one row group after the
 other into a temporary file in the target directory, appends the JSON
@@ -24,7 +30,7 @@ import struct
 import sys
 import zlib
 from dataclasses import dataclass
-from typing import Any, BinaryIO, Callable
+from typing import Any, BinaryIO, Callable, Iterator
 
 from .. import ENGINE_VERSION, errors
 from ..datatypes import DataType, InvalidTypeError, TypeKind, parse_type
@@ -57,7 +63,9 @@ from .vectors import (
 )
 
 MAGIC = b"PQCF"
-FORMAT_VERSION = 1
+FORMAT_VERSION_1 = 1
+FORMAT_VERSION_2 = 2  # wide DECIMAL columns
+MAX_FORMAT_VERSION = FORMAT_VERSION_2
 HEADER_SIZE = 8
 FOOTER_SIZE = 12
 WRITER = "polyquery-python"
@@ -77,6 +85,8 @@ MAX_TIMESTAMP = (MAX_DATE + 1) * MICROS_PER_DAY - 1
 _BIG_ENDIAN = sys.byteorder != "little"
 _RUN = struct.Struct("<qI")
 _U32 = struct.Struct("<I")
+I128_BYTES = 16
+_WIDE_RUN_BYTES = I128_BYTES + 4
 
 
 def _corrupt(message: str) -> errors.PolyQueryError:
@@ -182,10 +192,16 @@ def _fsync_directory(directory: str) -> None:
         os.close(fd)
 
 
+def format_version_for(columns: list[Column]) -> int:
+    """The writer rule: v2 exactly when the table has a wide DECIMAL column."""
+    return FORMAT_VERSION_2 if any(c.type.is_wide for c in columns) else FORMAT_VERSION_1
+
+
 def _write_table(
     f: BinaryIO, table: Table, indexes: list[dict[str, str]], options: SaveOptions
 ) -> None:
-    f.write(MAGIC + struct.pack("<HH", FORMAT_VERSION, 0))
+    version = format_version_for(table.columns)
+    f.write(MAGIC + struct.pack("<HH", version, 0))
     offset = HEADER_SIZE
     columns = [table.column_values(i) for i in range(len(table.columns))]
     groups: list[dict[str, Any]] = []
@@ -203,7 +219,7 @@ def _write_table(
             offset += len(body)
         groups.append({"row_count": stop - start, "chunks": chunks})
     meta = {
-        "format_version": FORMAT_VERSION,
+        "format_version": version,
         "writer": f"{WRITER} {ENGINE_VERSION}",
         "table": table.name,
         "row_count": table.row_count,
@@ -288,8 +304,14 @@ def _encode_strings(strings: list[bytes]) -> bytes:
     return _array_bytes("I", offsets) + b"".join(strings)
 
 
+def _i128_bytes(v: int) -> bytes:
+    return v.to_bytes(I128_BYTES, "little", signed=True)
+
+
 def _encode_plain(dtype: DataType, values: list[Any]) -> bytes:
     kind = dtype.kind
+    if dtype.is_wide:
+        return b"".join([_i128_bytes(0 if v is None else v) for v in values])
     if kind is TypeKind.BOOLEAN:
         return flags_to_bits(bytes([v is True for v in values]))
     if kind is TypeKind.STRING:
@@ -314,8 +336,13 @@ def _encode_dict(values: list[Any]) -> bytes:
 
 def _encode_rle(dtype: DataType, values: list[Any]) -> bytes:
     runs: list[bytes] = []
+    wide = dtype.is_wide
     for value, group in itertools.groupby(_rle_values(dtype, values)):
-        runs.append(_RUN.pack(value, sum(1 for _ in group)))
+        length = sum(1 for _ in group)
+        if wide:
+            runs.append(_i128_bytes(value) + _U32.pack(length))
+        else:
+            runs.append(_RUN.pack(value, length))
     return _U32.pack(len(runs)) + b"".join(runs)
 
 
@@ -394,7 +421,7 @@ def parse_file(buffer: Any) -> PqcfFile:
     version, flags = struct.unpack("<HH", buffer[4:8])
     if version == 0:
         raise _corrupt("invalid format version 0")
-    if version > FORMAT_VERSION:
+    if version > MAX_FORMAT_VERSION:
         raise errors.storage_version_unsupported(f"PQCF format version {version} is not supported")
     if flags != 0:
         raise errors.storage_version_unsupported(f"unsupported PQCF header flags {flags}")
@@ -411,7 +438,7 @@ def parse_file(buffer: Any) -> PqcfFile:
         meta = json.loads(meta_bytes.decode("utf-8"), parse_constant=_reject_constant)
     except (UnicodeDecodeError, ValueError, RecursionError):
         raise _corrupt("metadata is not valid JSON") from None
-    return _parse_metadata(meta, buffer, meta_start)
+    return _parse_metadata(meta, buffer, meta_start, version)
 
 
 def _reject_constant(name: str) -> Any:
@@ -427,10 +454,10 @@ def _require(condition: bool, message: str) -> None:
         raise _corrupt(message)
 
 
-def _parse_metadata(meta: Any, buffer: Any, meta_start: int) -> PqcfFile:
+def _parse_metadata(meta: Any, buffer: Any, meta_start: int, version: int) -> PqcfFile:
     _require(isinstance(meta, dict), "metadata is not a JSON object")
     _require(
-        _is_int(meta.get("format_version")) and meta["format_version"] == FORMAT_VERSION,
+        _is_int(meta.get("format_version")) and meta["format_version"] == version,
         "metadata format_version does not match the header",
     )
     table = meta.get("table")
@@ -438,6 +465,8 @@ def _parse_metadata(meta: Any, buffer: Any, meta_start: int) -> PqcfFile:
     row_count = meta.get("row_count")
     _require(_is_int(row_count) and row_count >= 0, "invalid row_count")
     columns = _parse_columns(meta.get("columns"))
+    if version < FORMAT_VERSION_2:
+        _require(not any(c.type.is_wide for c in columns), "a PQCF v1 file cannot have wide DECIMAL columns")
     raw_groups = meta.get("row_groups")
     _require(isinstance(raw_groups, list), "'row_groups' must be an array")
     groups = [_parse_group(g, columns, meta_start) for g in raw_groups]
@@ -625,12 +654,24 @@ def _decode_plain(
         offsets = _unpack_array("I", body[: 4 * (n + 1)])
         strings = _decode_strings(bytes(body[4 * (n + 1) :]), offsets, flags)
         return PlainVector(dtype, strings, validity, nulls)
+    if dtype.is_wide:
+        _require(len(body) == I128_BYTES * n, f"{dtype.name} chunk has the wrong size")
+        wide = _unpack_i128(body)
+        _check_values(dtype, wide, flags)
+        return PlainVector(dtype, _zero_nulls(wide, flags), validity, nulls)
     typecode = TYPECODES[kind]
     width = 4 if typecode == "i" else 8
     _require(len(body) == width * n, f"{dtype.name} chunk has the wrong size")
     values = _unpack_array(typecode, body)
     _check_values(dtype, values, flags)
     return PlainVector(dtype, values, validity, nulls)
+
+
+def _unpack_i128(data: Any) -> list[int]:
+    """Consecutive 128-bit two's-complement little-endian integers."""
+    raw = bytes(data)
+    from_bytes = int.from_bytes
+    return [from_bytes(raw[i : i + I128_BYTES], "little", signed=True) for i in range(0, len(raw), I128_BYTES)]
 
 
 def _decode_strings(blob: bytes, offsets: array.array, flags: bytes | None) -> list[str]:
@@ -678,10 +719,11 @@ def _decode_rle(
 ) -> ColumnVector:
     _require(len(body) >= 4, "RLE chunk too short")
     (count,) = _U32.unpack(body[:4])
-    _require(len(body) == 4 + 12 * count, "RLE chunk has the wrong size")
+    wide = dtype.is_wide
+    _require(len(body) == 4 + (_WIDE_RUN_BYTES if wide else _RUN.size) * count, "RLE chunk has the wrong size")
     values: list[int] = []
     total = 0
-    for value, run in _RUN.iter_unpack(body[4:]):
+    for value, run in _wide_runs(body[4:]) if wide else _RUN.iter_unpack(body[4:]):
         _require(run >= 1, "RLE run length must be at least 1")
         total += run
         _require(total <= n, "RLE runs exceed the row count")
@@ -691,7 +733,18 @@ def _decode_rle(
     values = _zero_nulls(values, flags)
     if dtype.kind is TypeKind.BOOLEAN:
         return PlainVector(dtype, bytearray(values), validity, nulls)
+    if wide:
+        return PlainVector(dtype, values, validity, nulls)
     return PlainVector(dtype, array.array(TYPECODES[dtype.kind], values), validity, nulls)
+
+
+def _wide_runs(data: Any) -> Iterator[tuple[int, int]]:
+    """The (i128 value, u32 run length) pairs of a wide RLE chunk."""
+    raw = bytes(data)
+    for i in range(0, len(raw), _WIDE_RUN_BYTES):
+        value = int.from_bytes(raw[i : i + I128_BYTES], "little", signed=True)
+        (run,) = _U32.unpack_from(raw, i + I128_BYTES)
+        yield value, run
 
 
 # ---------------------------------------------------------------- tables

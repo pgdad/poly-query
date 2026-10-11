@@ -59,6 +59,7 @@ CAPABILITIES = [
     "join.nested_loop",
     "native.kernels",
     "change.union_all",
+    "change.decimal38",
 ]
 
 

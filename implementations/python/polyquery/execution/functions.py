@@ -117,10 +117,11 @@ def _round(e: b.Function, n: int) -> Callable[[Any], Any]:
             return lambda v: v
         if n >= 0:
             return lambda v: values.rescale(v, s, n)
-        if n < -19:
-            return lambda v: 0  # |value| < 10**18
+        precision = e.type.precision
+        if n < -t.precision - 1:
+            return lambda v: 0  # |value| < 10**precision
         divisor, factor = 10 ** (s - n), 10 ** (-n)
-        return lambda v: values.check_decimal(values.round_div(v, divisor) * factor)
+        return lambda v: values.check_decimal(values.round_div(v, divisor) * factor, precision)
     # INT64 (|v| < 10**19, so rounding to 10**20 or coarser gives 0)
     if n >= 0:
         return lambda v: v

@@ -21,7 +21,7 @@ from typing import Any
 
 from .. import errors, values
 from ..analysis import bound as b
-from ..datatypes import DataType, TypeKind
+from ..datatypes import DataType, TypeKind, result_precision
 
 _not_null = partial(operator.is_not, None)
 
@@ -126,12 +126,18 @@ class SumInt(_ExactSum):
 
 
 class SumDecimal(_ExactSum):
-    __slots__ = ()
+    """SUM over DECIMAL(p, s): the result is DECIMAL(W, s)."""
+
+    __slots__ = ("precision",)
+
+    def __init__(self, precision: int) -> None:
+        super().__init__()
+        self.precision = precision
 
     def result(self) -> Any:
         if not self.count:
             return None
-        return values.check_decimal(self.total)
+        return values.check_decimal(self.total, self.precision)
 
 
 class _FloatSum(Accumulator):
@@ -264,7 +270,7 @@ def accumulator_for(name: str, arg_type: DataType, distinct: bool) -> Accumulato
         if arg_type.kind is TypeKind.FLOAT64:
             acc = SumFloat()
         elif arg_type.kind is TypeKind.DECIMAL:
-            acc = SumDecimal()
+            acc = SumDecimal(result_precision(arg_type))
         else:
             acc = SumInt()
     else:  # AVG

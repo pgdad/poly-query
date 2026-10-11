@@ -78,7 +78,8 @@ class QueryTests(EngineTestMixin, unittest.TestCase):
     def test_int_decimal_comparison_promotion(self):
         self.assertEqual(self.rows("SELECT 1 = 1.0, 2 > 1.5, 0.10 = 0.1, 99999999999999999.9 > 0.01"),
                          [[True, True, True, True]])
-        self.assertEqual(self.error_code("SELECT 100000000000000000 > 0.5"), "NUMERIC_OVERFLOW")
+        # exact since CR-2 (decimal38.md §4): no NUMERIC_OVERFLOW
+        self.assertEqual(self.rows("SELECT 100000000000000000 > 0.5, 9223372036854775807 > 1.5"), [[True, True]])
 
     def test_null_literal_typing(self):
         resp = self.query("SELECT -NULL, NULL * 1.5, NULL / 0")

@@ -14,6 +14,9 @@ RESERVED_KEYWORDS = frozenset(
     LAST LEFT LIKE LIMIT NOT NULL NULLS OFFSET ON OR ORDER OUTER RIGHT SELECT THEN
     TIMESTAMP TRUE UNION USING WHEN WHERE WITH""".split()
 )
+# reserved only for future syntax (grammar.md §1): no construct starts with
+# them, so after an explicit AS they are accepted as an alias
+FUTURE_KEYWORDS = frozenset({"FULL", "RIGHT"})
 
 
 class TokenKind(enum.Enum):
@@ -32,6 +35,7 @@ class Token:
     line: int
     column: int
     quoted: bool = False  # for identifiers written as "..."
+    text: str = ""  # the source spelling of a keyword
 
     def is_keyword(self, *words: str) -> bool:
         return self.kind is TokenKind.KEYWORD and self.value in words
@@ -110,7 +114,7 @@ class Lexer:
                 word = text[start:i]
                 upper = word.upper()
                 if upper in RESERVED_KEYWORDS:
-                    tokens.append(Token(TokenKind.KEYWORD, upper, line, col))
+                    tokens.append(Token(TokenKind.KEYWORD, upper, line, col, text=word))
                 else:
                     tokens.append(Token(TokenKind.IDENT, word, line, col))
             elif _is_digit(c) or (c == "." and i + 1 < n and _is_digit(text[i + 1])):
