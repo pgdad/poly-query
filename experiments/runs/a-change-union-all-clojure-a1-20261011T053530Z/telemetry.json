@@ -1,0 +1,101 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-union-all-clojure-a1-20261011T053530Z",
+ "language": "clojure",
+ "task": "change-union-all",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-union-all",
+ "prompt_sha256": "42d3e6bd0861cf25ba447990f099d7688be302927852819c7f4ca60ede2d430d",
+ "session_id": "5865f1c3-bc80-4921-97d5-455f59f1e6a7",
+ "tokens": {
+  "input": 138,
+  "output": 42345,
+  "cache_read": 8075640,
+  "cache_creation": 161616,
+  "thinking": null,
+  "thinking_estimated": 18775,
+  "source": "result events",
+  "api_messages": 69
+ },
+ "rate_limit": {
+  "events": 8,
+  "max_utilization": {
+   "five_hour": 0.15,
+   "seven_day": 0.25
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 3.755507999999999,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 73,
+ "result_segments": 1,
+ "assistant_messages": 141,
+ "tool_calls": {
+  "Bash": 72
+ },
+ "tool_calls_total": 72,
+ "tool_failures": 1,
+ "build_invocations": 26,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 9,
+ "conformance_progress": [
+  [
+   569,
+   569
+  ],
+  [
+   21,
+   22
+  ],
+  [
+   3444,
+   3456
+  ],
+  [
+   589,
+   591
+  ],
+  [
+   3450,
+   3456
+  ],
+  [
+   590,
+   591
+  ]
+ ],
+ "repair_iterations": 7,
+ "time": {
+  "wall_seconds": 545.6,
+  "model_api_seconds": 384.8,
+  "tool_seconds": 160.5,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 1,
+  "files_changed": 17,
+  "lines_added": 312,
+  "lines_removed": 39,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "`UNION ALL` is implemented and the engine now claims `change.union_all`, but the definition of done is not fully met. One public case, `union_all.pqt:51`, still fails, and I don't believe it can pass without breaking the spec or special-casing a table. Everything else passes and the work is committed (`330f7fd`).\n\n**Why that case fails**\n- The file loads `orders.csv` without a schema. CSV type inference never produces DECIMAL (spec `ingestion.md` \u00a71.1), so `amount` comes in as FLOAT64.\n- A Phase 1 case, `ingest_csv.pqt:128`, requires exactly that: a similarly formatted `ledger.amount` column must be inferred as FLOAT64.\n- By the change's own typing rule, INT64 combined with FLOAT64 gives FLOAT64, which is what the engine returns. The test expects DECIMAL(18,2).\n- When I load `orders` with `amount:DECIMAL(10,2)` (as the Phase 2 test files do), the engine returns exactly the expected `[\"99.99\"], [\"101.00\"]`. The test seems to assume a schema the file never declares. I documented this in the README.\n\n**Test results**\n- Default runner: phases 1, 3 and 5 all pass; phase 2 is 207/208. `TOTAL: 590/591 pass`.\n- `--modes`: phase 1 1350/1350, phase 3 858/858, phase 2 1242/1248. `TOTAL: 3450/3456 pass`. All 6 failures are that same case, once per option set.\n- `--transport http`: `TOTAL: 590/591 pass`, same single case.\n- `http_suite.py`: `18/18 passed`.\n- `make clean build test`: builds; 81 tests, 1137 assertions, 0 failures. Lint is clean.\n\n**What I implemented**\n- **Parser:** queries can now be `SELECT \u2026 UNION ALL SELECT \u2026`, followed by `ORDER BY`/`LIMIT` for the whole result. `UNION` or `UNION DISTINCT` returns `UNSUPPORTED`. A branch in parentheses, or with its own `ORDER BY`/`LIMIT`, is a `PARSE_ERROR`.\n- **Analyzer:**\n  - Each branch is analyzed like a normal SELECT, so CTEs and correlated subqueries work inside branches.\n  - Branches with different column counts give `SEMANTIC_ERROR`.\n  - Column types follow the CASE rule; incompatible types give `TYPE_ERROR`, and values are converted to the common type.\n  - `ORDER BY` accepts only output names from the first branch or positions.\n- **Planner:** a new `UnionAll` node. Each branch is optimized, pruned and parallelized as its own query. `ORDER BY \u2026 LIMIT` over the union becomes a top-N sort. EXPLAIN shows `UnionAll` with the branch plans as children, in order.\n- **Execution:** branches run one after another and stop early under `LIMIT`. Each branch goes through the normal dispatcher, so every `mode`/`threads`/`join`/`optimize`/`native` setting applies to it unchanged.\n- **Tests:** parser, analyzer and planner unit tests, plus 11 union queries added to the existing test that checks identical results across 7 option combinations.\n\n**Main design decisions**\n- Without `ORDER BY`, rows come in branch order. Parallelism happens inside branches, not across them.\n- An `ORDER BY` name that matches several output columns is an error, as is an expression, a qualified name or an out-of-range position.\n- `spec_version` stays `1.0.0`. The change document says engines claiming it report `1.1.0-cr1`, but the Phase 1 case `catalog.pqt:10` requires `1.0.0`.\n\n**Known limitations**\n- This workspace ships only the native-kernel header, with no library or sources, so `native: true` couldn't be tested against real kernels. Union adds no native-specific code; branches use the same paths as any other query.\n- Two DECIMAL columns always combine to DECIMAL(18,s), even when their types are identical (same as CASE).",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

@@ -1,0 +1,120 @@
+{
+ "schema": "polyquery-http-suite/1",
+ "engine": "/srv/polyquery/runs/a-change-union-all-clojure-a1-20261011T053530Z/validate/implementations/clojure/bin/polyquery",
+ "summary": {
+  "total": 18,
+  "passed": 18,
+  "failed": 0
+ },
+ "checks": [
+  {
+   "check": "health_version_capabilities",
+   "status": "pass",
+   "seconds": 0.5
+  },
+  {
+   "check": "table_lifecycle",
+   "status": "pass",
+   "seconds": 0.46
+  },
+  {
+   "check": "query_and_error_mapping",
+   "status": "pass",
+   "seconds": 0.48
+  },
+  {
+   "check": "keep_alive",
+   "status": "pass",
+   "seconds": 0.41
+  },
+  {
+   "check": "streaming",
+   "status": "pass",
+   "seconds": 0.72
+  },
+  {
+   "check": "metrics",
+   "status": "pass",
+   "seconds": 0.82
+  },
+  {
+   "check": "timeout",
+   "status": "pass",
+   "seconds": 0.68
+  },
+  {
+   "check": "server_default_timeout",
+   "status": "pass",
+   "seconds": 0.75
+  },
+  {
+   "check": "cancellation",
+   "status": "pass",
+   "seconds": 0.45
+  },
+  {
+   "check": "backpressure_overloaded",
+   "status": "pass",
+   "seconds": 4.48
+  },
+  {
+   "check": "queued_time_counts_toward_timeout",
+   "status": "pass",
+   "seconds": 1.98
+  },
+  {
+   "check": "snapshot_isolation",
+   "status": "pass",
+   "seconds": 1.92
+  },
+  {
+   "check": "concurrent_readers",
+   "status": "pass",
+   "seconds": 0.54
+  },
+  {
+   "check": "client_disconnect_cancels",
+   "status": "pass",
+   "seconds": 0.95
+  },
+  {
+   "check": "request_size_limit",
+   "status": "pass",
+   "seconds": 0.43
+  },
+  {
+   "check": "structured_logs",
+   "status": "pass",
+   "seconds": 0.73
+  },
+  {
+   "check": "graceful_shutdown",
+   "status": "pass",
+   "seconds": 1.97
+  },
+  {
+   "check": "grace_expiry",
+   "status": "pass",
+   "seconds": 1.03
+  }
+ ],
+ "startup_seconds": [
+  0.45688839798094705,
+  0.4293532609590329,
+  0.414733832993079,
+  0.39233513397630304,
+  0.4191423309966922,
+  0.7341711409972049,
+  0.4449674499919638,
+  0.41081356804352254,
+  0.4059751990134828,
+  0.42868001403985545,
+  0.4472991569782607,
+  0.4067358839674853,
+  0.41520488302921876,
+  0.4293162699905224,
+  0.4141148389899172,
+  0.39396011002827436
+ ],
+ "logs": "/tmp/pqhttp-logs-rwj130ci"
+}
