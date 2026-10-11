@@ -6,6 +6,7 @@
   python3 tools/workload_bench.py --engine bin/polyquery \
       --workload ../../benchmarks/workloads/analytics.json --data ../../datasets/generated --scale 1m \
       [--rounds 3] [--reps 10] [--warmup 5] [--save results.json] [--compare before.json]
+  python3 tools/workload_bench.py --engine bin/polyquery --baseline-engine OTHER/bin/polyquery ...
 
 Every round starts a fresh session, loads the workload's tables (CSV + schema), creates its
 indexes, then runs each query with the engine's default options: the first execution is
@@ -15,7 +16,9 @@ of the warm medians and of the cold times (client-side wall time in milliseconds
 marked `"result": "count"` in the workload are run with `result: count`; all others return
 their rows, so serialization is included. A digest of every result is recorded (FLOAT64
 values rounded to 9 significant digits); with `--compare FILE` (a file written by `--save`),
-the digests must match and a before/after Markdown table is printed.
+the digests must match and a before/after Markdown table is printed. With
+`--baseline-engine`, every round runs the baseline engine and then this one (alternating, so
+that both see the same machine load) and the table compares the two.
 """
 import argparse
 import hashlib
@@ -62,8 +65,8 @@ def digest(resp):
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def run_round(args, workload, data, only):
-    s = Session(os.path.abspath(args.engine), data, args.jvm)
+def run_round(args, engine, workload, data, only):
+    s = Session(os.path.abspath(engine), data, args.jvm)
     for name, base in workload["tables"].items():
         schema = json.load(open(f"{data}/{args.scale}/{base}.schema.json"))
         r = s.req({"op": "load", "table": name, "path": f"{args.scale}/{base}.csv", "format": "csv",
@@ -95,6 +98,18 @@ def run_round(args, workload, data, only):
     return out
 
 
+def summarize(rounds):
+    """Per query: medians over rounds of the warm medians and of the cold times."""
+    results = {}
+    for name in rounds[0]:
+        digests = {r[name]["digest"] for r in rounds}
+        assert len(digests) == 1, f"{name}: result differs between rounds"
+        results[name] = {"warm_ms": round(statistics.median(r[name]["warm"] for r in rounds), 2),
+                         "cold_ms": round(statistics.median(r[name]["cold"] for r in rounds), 2),
+                         "rows": rounds[0][name]["rows"], "digest": digests.pop()}
+    return results
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", required=True)
@@ -108,29 +123,34 @@ def main():
     ap.add_argument("--only", help="comma-separated query name prefixes")
     ap.add_argument("--save", help="write the results to this JSON file")
     ap.add_argument("--compare", help="earlier --save file: check digests, print a before/after table")
+    ap.add_argument("--baseline-engine", help="also measure this engine, alternating rounds, and compare")
     args = ap.parse_args()
 
     workload = json.load(open(args.workload))
     data = os.path.abspath(args.data)
     only = args.only.split(",") if args.only else None
-    rounds = []
+    rounds, base_rounds = [], []
     for i in range(args.rounds):
-        rounds.append(run_round(args, workload, data, only))
+        if args.baseline_engine:
+            base_rounds.append(run_round(args, args.baseline_engine, workload, data, only))
+        rounds.append(run_round(args, args.engine, workload, data, only))
         print(f"round {i + 1}/{args.rounds} done", flush=True)
-    results = {}
-    for name in rounds[0]:
-        digests = {r[name]["digest"] for r in rounds}
-        assert len(digests) == 1, f"{name}: result differs between rounds"
-        results[name] = {"warm_ms": round(statistics.median(r[name]["warm"] for r in rounds), 2),
-                         "cold_ms": round(statistics.median(r[name]["cold"] for r in rounds), 2),
-                         "rows": rounds[0][name]["rows"], "digest": digests.pop()}
-        print(f"{name:28s} warm {results[name]['warm_ms']:8.2f} ms  cold {results[name]['cold_ms']:8.2f} ms  "
-              f"rows {results[name]['rows']}  {results[name]['digest']}", flush=True)
+    results = summarize(rounds)
+    for name, r in results.items():
+        print(f"{name:28s} warm {r['warm_ms']:8.2f} ms  cold {r['cold_ms']:8.2f} ms  rows {r['rows']}  {r['digest']}",
+              flush=True)
     if args.save:
         with open(args.save, "w") as f:
             json.dump(results, f, indent=1)
-    if args.compare:
+    before = None
+    if args.baseline_engine:
+        before = summarize(base_rounds)
+        if args.save:
+            with open(args.save.replace(".json", "") + ".baseline.json", "w") as f:
+                json.dump(before, f, indent=1)
+    elif args.compare:
         before = json.load(open(args.compare))
+    if before is not None:
         mismatches = []
         print("\n| query | warm before (ms) | warm after (ms) | speed-up | cold before (ms) | cold after (ms) | speed-up |")
         print("|---|---:|---:|---:|---:|---:|---:|")

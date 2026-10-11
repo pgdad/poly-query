@@ -957,6 +957,189 @@ count and native kernels were chosen by `Engine` outside planning.
 * **Projection pruning** uses the physical pruner's pass-through criterion (column references
   and constants), so scans read the same columns with and without `optimize`.
 
+## Latency optimization (analytics workload)
+
+Task: lower the latency of the queries of `benchmarks/workloads/analytics.json` at scale `1m`
+(`python3 datasets/generators/pqgen.py generate --scale 1m`), keeping every result and error
+identical.
+
+### How it was measured
+
+`tools/workload_bench.py` drives `bin/polyquery session` exactly like a client: per round it
+starts a fresh session, loads the workload's nine tables from the generated CSV files (with
+their schema files), creates the workload's two indexes, then runs every query with the
+default options (`result: count` where the workload says so, otherwise the rows are returned
+and serialized). The **first** execution of each query is recorded as its *cold* time (JIT
+compilation included); then 5 unmeasured and 10 measured runs give the round's *warm* median.
+The tables report the median over rounds (client-side wall time, ms). A digest of every result
+(FLOAT64 values rounded to 9 significant digits) is compared between all runs, rounds and both
+engines — they are identical for all 20 queries.
+
+```
+python3 tools/workload_bench.py --engine bin/polyquery --baseline-engine /tmp/base/implementations/java/bin/polyquery \
+    --workload ../../benchmarks/workloads/analytics.json --data ../../datasets/generated --scale 1m --rounds 7
+```
+
+*Before* is the engine as this task started (commit `35418c3`, built in a separate git
+worktree), *after* is the final engine. The rounds alternate — baseline session, new session,
+baseline, … (7 each) — so both see the same machine load. Machine: 32 hardware threads,
+250 GB RAM, OpenJDK 27, default options of `bin/polyquery` (all cores). The machine was
+**shared**: other jobs kept a load average of 8–12 throughout, so single measurements of the
+parallel queries vary by ±30% or more (a descheduled worker thread delays a whole query), and
+whole runs drifted by up to 25% within an hour; medians over the interleaved rounds are
+reasonably stable, but differences below ~1 ms (or ±20% on the few-millisecond queries) are
+noise.
+
+| query | what it does | warm before (ms) | warm after (ms) | speed-up | cold before (ms) | cold after (ms) | speed-up |
+|---|---|---:|---:|---:|---:|---:|---:|
+| q01_filter_selective | selective filter (hash index) | 0.3 | 0.3 | 0.9× | 69.7 | 34.1 | 2.0× |
+| q02_filter_low_selectivity | filter, 3 aggregates | 1.1 | 1.0 | 1.1× | 68.8 | 54.0 | 1.3× |
+| q03_range_filter_time | timestamp range (B-tree index) | 2.0 | 0.9 | 2.3× | 33.9 | 23.9 | 1.4× |
+| q04_arith_aggregate | DECIMAL arithmetic aggregates | 1.3 | 1.2 | 1.0× | 117.0 | 177.3 | 0.7× |
+| q05_groupby_low_card | GROUP BY 5 currencies | 4.7 | 6.0 | 0.8× | 88.4 | 15.2 | 5.8× |
+| q06_groupby_high_card | GROUP BY 10k merchants, top 10 | 10.2 | 9.8 | 1.0× | 165.6 | 35.7 | 4.6× |
+| q07_groupby_skewed | GROUP BY 81k customers, top 10 | 19.1 | 8.5 | 2.3× | 28.3 | 10.2 | 2.8× |
+| q08_groupby_uniform_multi | GROUP BY expression × category | 3.5 | 3.0 | 1.2× | 56.2 | 11.6 | 4.8× |
+| q09_distinct_count | 2 × COUNT(DISTINCT) | 27.0 | 4.9 | 5.5× | 39.2 | 39.5 | 1.0× |
+| q10_join_customers | join 1M × 100k, GROUP BY | 18.2 | 5.0 | 3.6× | 146.9 | 20.3 | 7.2× |
+| q11_join_star | 3-way join, GROUP BY | 6.7 | 3.5 | 1.9× | 139.1 | 50.8 | 2.7× |
+| q12_left_join_anti | LEFT JOIN … IS NULL | 10.1 | 8.4 | 1.2× | 43.6 | 12.3 | 3.6× |
+| q13_sort_topn | ORDER BY … LIMIT 100 | 6.4 | 0.7 | 9.4× | 83.3 | 1.6 | 50.8× |
+| q14_sort_full_string | full sort, 1M strings | 166.1 | 28.9 | 5.7× | 333.4 | 80.3 | 4.2× |
+| q15_sort_multi_key | full sort, 3 keys, 1M rows | 140.8 | 30.8 | 4.6× | 183.3 | 36.2 | 5.1× |
+| q16_timeseries_hourly | DATE_TRUNC grouping, top 100 | 1.4 | 1.3 | 1.0× | 56.1 | 47.2 | 1.2× |
+| q17_wide_projection | 100-column table | 0.8 | 1.5 | 0.5× | 3.5 | 5.4 | 0.7× |
+| q18_nulls | NULL-heavy, OR filter | 2.5 | 2.4 | 1.1× | 93.0 | 133.4 | 0.7× |
+| q19_cte_subquery | CTE used twice + scalar subquery | 26.8 | 13.4 | 2.0× | 49.8 | 16.0 | 3.1× |
+| q20_string_functions | UPPER/LENGTH/LIKE | 2.1 | 3.0 | 0.7× | 169.7 | 46.4 | 3.7× |
+| **total** | | **451.0** | **134.4** | **3.4×** | **1969.0** | **851.4** | **2.3×** |
+
+Warm = steady state (median of 10 runs after 5 warm-up runs); cold = the query's first
+execution in a fresh session (after loading, with all earlier workload queries run before it,
+in workload order). The result digests of all 20 queries are identical before and after.
+
+Reading the table:
+
+* The big wins are the sorts (q13–q15: 5–9× warm), COUNT(DISTINCT) (q09: 5.5×), the
+  high-cardinality grouping and joins (q07, q10, q11, q19: 2–3.6×), and first executions
+  across the board (2.3× in total, up to 7× for joins and aggregations) from the AOT cache.
+* Sub-2-ms queries (q01, q02, q04, q16, q17, q20) are dominated by fixed costs (request
+  handling, waking worker threads) and host noise. q05, q17 and q20 are ~1 ms slower warm in
+  this run. Mostly this is the cost of starting from training profiles — the JIT compiles some
+  kernels for the training's broader mix of types and branches: without the AOT cache they
+  measured q05 4.5 ms, q17 1.1 ms, q20 2.2 ms (before: 4.3, 0.7, 2.0 in that run). Over the
+  whole workload the cache still wins on warm times too (see below); q17's remaining ~0.4 ms
+  is the parallel aggregation over a 100,000-row table (two morsels) — not addressed.
+* Cold times of individual queries vary a lot between sessions (q04's first execution measured
+  32–185 ms in different runs; q18's 89–133 ms), as they depend on what the JIT compiles
+  concurrently; q04, q17 and q18 came out slower cold in this run. The totals are stable.
+
+Effect of the JIT warm-up alone (an earlier back-to-back measurement, 5 rounds each, same
+code except the cache): with `POLYQUERY_AOT=off` the warm total was 130.0 ms and the cold
+total 1756.6 ms, against 116.8 ms and 719.5 ms with the cache (baseline in that run: 407.4 ms
+warm, 1939.3 ms cold) — the engine changes give the warm speed-up, the AOT cache most of the
+cold one.
+
+
+### What changed, and why
+
+Profiles (JFR with `-XX:+DebugNonSafepoints`, plus timing instrumentation of operator phases)
+showed where the time went; the changes, by the queries they target:
+
+* **Sorting (q14, q15).** The full sorts of 1,000,000 rows were single-threaded, and string
+  sorts compared `String`s scattered over the heap (cache misses) whenever the 4-character
+  radix prefix tied. Now every sort key is normalized to a 64-bit key per row: dictionary
+  strings get the rank of their value (the dictionary is sorted once), other strings 7 Latin-1
+  characters + min(length, 8) (or 3 UTF-16 units + min(length, 4) if some string needs them)
+  — equal keys imply equal strings up to 7 (3) characters, so short strings are never
+  compared; numbers are exact. Large sorts are a parallel sample sort: splitters from a sample
+  of the first key, a stable parallel counting scatter into key-range buckets, then radix sort
+  and refinement per bucket on the workers (stable, so ties keep input order exactly). The
+  input of a full sort over a pipeline is materialized by the workers (each morsel into its own
+  store, memory reserved with the same estimate as before, then concatenated in parallel in
+  morsel order) instead of being appended batch by batch on the query thread, and the sorted
+  rows are moved into order by the workers so the output is read sequentially.
+* **Top-N (q13; q06/q07 over their groups).** `ORDER BY … LIMIT n` kept every row of a morsel
+  and sorted it. Now, once the best `offset + n` rows are known, the first sort key of the
+  last of them is a cutoff: rows whose first key ranks strictly after it are dropped before
+  they are copied (equal keys are kept — later keys and input order decide). Per-morsel top-N
+  of the workers compacts as it goes.
+* **COUNT(DISTINCT) (q09).** DISTINCT aggregates went through the row engine's accumulators
+  (`HashSet<Object>` of boxed values) on one thread. Now a vectorized state keeps a primitive
+  open-addressing set of (group, value) pairs (objects only for strings and wide DECIMALs) and
+  feeds first occurrences to the plain aggregate's state, in input order. Without GROUP BY,
+  the aggregation is parallel: workers deduplicate their morsels, the merge unions the workers'
+  sets in parallel by hash partition (each partition feeding a fresh plain state) and merges
+  the partition states — exact for COUNT/MIN/MAX and INT64/DECIMAL sums; FLOAT64 SUM/AVG of
+  DISTINCT values may differ in the last bits like any parallel float sum.
+* **CTE referenced twice (q19).** CTEs are inlined, so `per_c` aggregated the 1M-row table
+  twice. Physical subplans now have a structural key (`PlanKeys`: records compared
+  component-wise, tables and indexes of the query's snapshot by identity); an aggregation
+  whose key matches one already completed in the same query, and which cannot depend on
+  anything but the snapshot (no outer references, no subqueries, no `PQ_SLEEP`), emits the
+  completed tables of the first one with its own emitter (aggregation is blocking, and
+  emitting only reads the tables). Errors raised while emitting (e.g. SUM overflow of a group)
+  are raised at the same group by both.
+* **Parallel aggregation merge (q06, q07, q19).** Every merged group did a k-way heap step
+  across all partials and a reservation on the query's shared memory counter (contended by all
+  merging threads). Partitions now merge the partials in worker order keeping each group's
+  earliest first position, reserve memory in 64 KiB steps, and the final group order (order of
+  first appearance, as in sequential execution) is a radix sort of first positions.
+* **Joins (q10, q11, q12).** The join row limit (`--max-join-rows`) was counted with one
+  atomic increment per output row on a counter shared by all probing workers — the top item of
+  the q10 profile; it is now counted once per output batch, with the same row-exact cut-off.
+  The single-integer-key join index is presized for the build side's row count instead of
+  growing (and rehashing) from 64 slots.
+* **JIT warm-up (cold times).** A query's first execution was dominated by interpretation and
+  JIT compilation of the engine's kernels (the cold total was ~4× the warm total). `make build`
+  now runs a training workload (`polyquery.Training`: synthetic tables of the usual analytical
+  shapes — integer keys of low/high cardinality, DECIMAL amounts, FLOAT64, timestamps,
+  dictionary and free-text strings, NULL-heavy columns — loaded through the protocol, and ~40
+  generic query shapes — filters, grouping, DISTINCT, joins, sorts, top-N, CTEs/subqueries —
+  run through the session request path) under `-XX:AOTCacheOutput` (JEP 483/515: the
+  classes loaded and linked and the method profiles are stored). `bin/polyquery` starts the JVM
+  with `-XX:AOTCache` when the cache exists, so hot methods are compiled much sooner. The
+  cache is an optimization only: if training fails the build still succeeds, a stale or
+  mismatching cache is ignored by the JVM, and `-Xlog:disable` keeps the JVM's messages about
+  it off stdout (which carries only protocol responses). The training is not the benchmark: it
+  uses its own tables and query texts.
+* **Memory settings.** The JVM started with an 8 MB heap that grew in steps, with frequent
+  young collections (6–50 ms pauses) while the loaded tables were still young. On machines
+  with at least 16 GiB (the smaller of physical memory and a cgroup limit), the launcher now
+  uses a 4 GiB initial heap with a fixed 2 GiB young generation (`bin/jvm-options`); otherwise
+  JVM defaults apply.
+
+### Tried and rejected
+
+* **Partition-first ("radix") parallel aggregation** for high-cardinality GROUP BY (workers
+  hash-partition their rows, every partition aggregated by one thread, decided adaptively from
+  the rate of new groups): correct, but on this machine slower or equal for q06/q07/q19 than
+  pre-aggregation with the cheaper merge (the scatter costs about as much as the duplicated
+  aggregation it saves, and late-starting partition threads dominate). Removed.
+* **Smaller morsels** (16,384 rows, for better load balancing): no clear difference.
+* **Fewer default threads** (16 instead of all 32): within noise; the default stays all cores.
+* **Eager AOT compilation** (`-XX:+AOTCompileEagerly`, experimental): worse cold and warm
+  totals; and no experimental options are used.
+* **A very large initial heap** (6% of RAM, 15 GB young generation): fewer collections, but
+  slower queries — every allocation touched fresh pages (page-fault cost); a moderate fixed
+  young generation that stays mapped is better. `-XX:+AlwaysPreTouch` made no difference.
+
+### Correctness
+
+Every change keeps results, row order and errors identical (the result digests of all 20
+workload queries match the original engine's). New tests: the parallel sort and the
+normalized string keys (Latin-1 and UTF-16, short and long strings, dictionary ranks, NULLs
+first/last, descending, several keys) against the reference comparator, with 1 and 8 threads;
+store concatenation (shared/different dictionaries, plain strings, NULLs, empty parts); and in
+the Phase 5 option matrix (every mode × join × threads × optimize, also with tiny batches and
+morsels): top-N with NULLS FIRST/LAST, descending, ties broken against input order, DECIMAL and
+FLOAT64 keys; DISTINCT aggregates without GROUP BY (strings, DECIMAL, FLOAT64, overflow
+widening); CTEs referenced twice (scalar subquery, self-join, an overflow raised while
+emitting). Mutations of the top-N cutoff (dropping equal keys) and of the DISTINCT merge were
+checked to be caught. The conformance suite, `--modes`, `--transport http`, the HTTP
+concurrency suite and the stress configuration (`-Dpolyquery.batchSize=3
+-Dpolyquery.morselRows=5 -Dpolyquery.parallelSortRows=4`) pass.
+
 ## Design decisions / interpretations
 
 Where the spec leaves room, these choices were made:
