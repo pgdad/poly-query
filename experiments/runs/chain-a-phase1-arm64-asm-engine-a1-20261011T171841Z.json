@@ -1,0 +1,21 @@
+{
+ "chain_id": "chain-a-phase1-arm64-asm-engine-a1-20261011T171841Z",
+ "task": "phase1",
+ "language": "arm64-asm-engine",
+ "track": "A",
+ "attempt": 1,
+ "max_sessions": 3,
+ "total_budget_usd": 100.0,
+ "timeout_min": 120,
+ "sessions": [
+  {
+   "run_id": "a-phase1-arm64-asm-engine-a1-20261011T171841Z",
+   "session": 1,
+   "outcome": "success",
+   "cost_usd": 23.816887999999988
+  }
+ ],
+ "spent_usd": 23.82,
+ "outcome": "success",
+ "finished": "2026-10-11T17:47:01+00:00"
+}

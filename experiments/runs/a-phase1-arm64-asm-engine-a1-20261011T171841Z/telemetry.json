@@ -1,0 +1,101 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase1-arm64-asm-engine-a1-20261011T171841Z",
+ "language": "arm64-asm-engine",
+ "task": "phase1",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase1",
+ "prompt_sha256": "9aaea8e98390fc9458a842ec1e4690ed05b6b062d5e198d7714faaaef2b9e31e",
+ "session_id": "9b1dfcf4-e18f-441d-9a79-54d34adf20a3",
+ "tokens": {
+  "input": 100,
+  "output": 130761,
+  "cache_read": 8596681,
+  "cache_creation": 228777,
+  "thinking": null,
+  "thinking_estimated": 39560,
+  "source": "result events (summed over 3 segments)",
+  "api_messages": 206
+ },
+ "rate_limit": {
+  "events": 10,
+  "max_utilization": {
+   "five_hour": 0.28,
+   "seven_day": 0.5
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 23.816887999999988,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 62,
+ "result_segments": 3,
+ "assistant_messages": 440,
+ "tool_calls": {
+  "Bash": 173,
+  "Write": 25,
+  "Agent": 4,
+  "Read": 2,
+  "ScheduleWakeup": 3,
+  "Edit": 3,
+  "ToolSearch": 1,
+  "Monitor": 1,
+  "SendMessage": 2
+ },
+ "tool_calls_total": 214,
+ "tool_failures": 13,
+ "build_invocations": 79,
+ "build_failures_heuristic": 22,
+ "conformance_runs": 6,
+ "conformance_progress": [
+  [
+   225,
+   225
+  ],
+  [
+   0,
+   186
+  ],
+  [
+   225,
+   225
+  ],
+  [
+   225,
+   225
+  ]
+ ],
+ "repair_iterations": 4,
+ "time": {
+  "wall_seconds": 1695.9,
+  "model_api_seconds": 5413.0,
+  "tool_seconds": 21.2,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 4,
+  "files_changed": 30,
+  "lines_added": 18237,
+  "lines_removed": 0,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 1 of the PolyQuery engine is finished and committed. It is written entirely in hand-written AArch64 assembly under `implementations/arm64-asm-engine/`. The conformance runner passes every Phase 1 case, and `make build test lint` succeeds from a clean tree. The hidden acceptance tests haven't been run; they only run after I finish.\n\n## Test results\n- **Conformance runner** (`--phase 1`):\n  ```\n  phase 1: 225/225 pass, 0 fail, 0 error, 0 not implemented\n  TOTAL: 225/225 pass\n  ```\n- **Unit tests (`make test`)**, all passing:\n  - runtime (`test_rt`)\n  - value library: 486\n  - JSON: 150\n  - parser: 152\n  - ingestion: 89\n  - binder/evaluator: 218\n  - CLI shell tests: 14\n- **Performance:** on the generated 100k-row dataset, three loads of 100k rows plus aggregate and sort queries took about 0.13 s in total. Query timeouts fire as expected.\n\n## What was implemented\n- **Command line:** `version`, `capabilities`, `session` and `exec` (one request or an array). Unknown options exit with code 2.\n- **Protocol operations:** `load`, `query`, `tables`, `schema`, `drop`, `reset`, `version`, `capabilities` and `sleep`. Path safety, `max_rows`, `timeout_ms`, the query memory budget, and the ingest-size and table-row limits are all enforced.\n- **Ingestion:** CSV, JSON and JSONL, with type inference and explicit schemas, following the ingestion spec.\n- **Types:** all of them, including exact DECIMAL using 128-bit intermediate values, DATE, TIMESTAMP, NULL handling, the full CAST rules and the required output formats.\n- **SQL:** a proper lexer and parser for the whole SQL grammar in the spec, a binder that resolves names and types, and an executor for the `sql.basic` subset (single-table SELECT, WHERE, ORDER BY, LIMIT/OFFSET, whole-table aggregates). `PQ_SLEEP` is available as a test function.\n\n## Main design decisions\n- **Errors:** each request runs under `setjmp`, and any error jumps back to the request handler. All per-request memory comes from one arena that is freed after each response, so errors never leak memory. A half-built table is freed if its load fails, so a failed `load` leaves the catalog unchanged.\n- **Storage:** tables are stored column by column (64-bit values plus a null flag per row) in a memory area owned by the table, which is freed on drop or replace.\n- **Typing:** the binder inserts explicit conversions for numeric promotion and DATE\u2192TIMESTAMP, so the evaluator only ever combines values of the same kind.\n- **Execution:** a filtered scan, then aggregation or projection, then sorting with `qsort_r`, then offset/limit. Without ORDER BY, offset/limit are applied before projection.\n- **Code layout:** module interfaces are fixed in `include/pq.inc` and `include/API.md`. That let four subagents write the value library and JSON, the parser, ingestion, and the binder/evaluator in parallel while I wrote the runtime, protocol, catalog and executor.\n- **Recorded choices:** decisions where the spec is unclear are listed in the README. For example, a CSV field of only spaces or tabs is NULL in non-STRING columns, and an unknown type name in a `load` schema returns `INVALID_REQUEST`.\n\n## Known limitations\n- Phase 2 SQL is parsed but answered with `UNSUPPORTED`. That covers GROUP BY, DISTINCT, joins, subqueries, CTEs, CASE/IN/BETWEEN/LIKE, and scalar functions other than `PQ_SLEEP`.\n- There is no persistent storage, no indexes, no HTTP server and no parallel execution yet. The `explain`, `save`, `open` and `stats` operations answer `UNSUPPORTED`, and `serve` exits with code 1.\n\n`NOTES.md` records the current status and where to start on Phase 2 in the binder and executor.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
