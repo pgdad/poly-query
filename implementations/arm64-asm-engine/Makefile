@@ -33,7 +33,7 @@ build/.dir:
 
 test: build/polyquery $(TESTBIN)
 	@set -e; for t in $(TESTBIN); do echo "== $$t"; $$t; done
-	@sh tests/sh/run_cli_tests.sh
+	@set -e; for s in tests/sh/*.sh; do sh $$s; done
 
 # lint: assemble everything with warnings as errors and check every object
 # carries a non-executable .note.GNU-stack section.

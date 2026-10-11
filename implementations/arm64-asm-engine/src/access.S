@@ -558,13 +558,34 @@ FUNC ap_scan
     b.hs .Lap_choose
     ldr  x9, [x19, #PN_PREDS]
     ldr  x26, [x9, x23, lsl #3]
+    ldr  w9, [x26, #PR_NULL]            // ranges: both bounds of a column
+    cbnz w9, 52f                        // count once, combined
+    ldr  w9, [x26, #PR_OP]
+    cmp  w9, #OP_LT
+    b.lo 52f
+    cmp  w9, #OP_GE
+    b.hi 52f
     mov  x0, x26
+    bl   find_bounds
+    cmp  x0, x26
+    b.eq 53f
+    cbnz x0, 54f                        // counted with its lower bound
+    cmp  x1, x26
+    b.ne 54f
+53: mov  x2, x20
+    mov  x3, x24
+    ldr  x9, [x26, #PR_COL]
+    add  x3, x3, x9, lsl #5
+    bl   range_sel
+    b    55f
+52: mov  x0, x26
     mov  x1, x20
     mov  x2, x24
     bl   pred_sel
-    ldr  d1, [sp, #56]
+55: ldr  d1, [sp, #56]
     fmul d1, d1, d0
     str  d1, [sp, #56]
+54:
     // index candidate for this predicate
     ADR_L x9, g_use_indexes
     ldr  w9, [x9]
