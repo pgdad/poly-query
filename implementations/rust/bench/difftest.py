@@ -51,6 +51,15 @@ JOINS = [
     ("tx_row", "customer_id", "cust", "customer_id"),
     ("items_pq", "order_id", "orders", "order_id"),
     ("tx", "bucket", "sortk", "dup_key"),
+    # string keys (dictionary vs plain), decimal and mixed-type keys
+    ("tx", "category", "products", "category"),
+    ("tx", "status", "orders", "status"),
+    ("tx", "amount", "items", "unit_price"),
+    ("cust", "credit_limit", "tx", "amount"),
+    ("items", "quantity", "tx", "amount"),
+    ("sensor", "sensor_id", "nulls", "n50"),
+    ("nulls", "n90", "sortk", "dup_key"),
+    ("sortk", "float_key", "sensor", "temperature"),
 ]
 
 VARIANTS = [
@@ -252,8 +261,18 @@ class Gen:
     def from_clause(self):
         r = self.r
         c = r.random()
-        if c < 0.45:
+        if c < 0.08:
+            # derived table (pushdown through projections, pruning)
             t = r.choice(list(self.schemas))
+            inner = [("s", t)]
+            cols = self.cols(inner, None)
+            picked = r.sample(cols, min(len(cols), r.randrange(2, 5)))
+            items = ", ".join(f"{c} AS {c.split('.')[1]}" for c, _ in picked)
+            where = f" WHERE {self.pred(inner, 2)}" if r.random() < 0.5 else ""
+            self.schemas["dt"] = [(c.split(".")[1], ty) for c, ty in picked]
+            return f"(SELECT {items} FROM {t} s{where}) a", [("a", "dt")]
+        if c < 0.45:
+            t = r.choice([t for t in self.schemas if t != "dt"])
             return f"{t} a", [("a", t)]
         if c < 0.85:
             lt, lk, rt, rk = r.choice(JOINS)
@@ -290,7 +309,8 @@ class Gen:
             sql = f"SELECT {distinct}{', '.join(items)} FROM {frm}{where}"
             ordered = False
             if r.random() < 0.4:
-                keys = ", ".join(f"{i + 1} {r.choice(['ASC', 'DESC'])}" for i in range(n))
+                keys = ", ".join(f"{i + 1} {r.choice(['ASC', 'DESC'])}{r.choice(['', '', ' NULLS FIRST', ' NULLS LAST'])}"
+                                 for i in range(n))
                 sql += f" ORDER BY {keys}"
                 ordered = True
                 if r.random() < 0.6:
@@ -315,7 +335,7 @@ class Gen:
         if not cols:
             return f"SELECT COUNT(*) FROM {frm}{where}", False
         col, _ = r.choice(cols)
-        other = r.choice(list(self.schemas))
+        other = r.choice([t for t in self.schemas if t != "dt"])
         ocols = self.cols([("s", other)], k)
         if not ocols:
             return f"SELECT COUNT(*) FROM {frm}{where}", False
