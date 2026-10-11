@@ -369,46 +369,78 @@ again with unbounded integers."
   (svref (minmax-state-best s) gid))
 
 ;;; ------------------------------------------------------------------
-;;; DISTINCT aggregates: the distinct values of each group, in order of
-;;; first appearance, are fed to a row accumulator when the result is needed.
+;;; DISTINCT aggregates: the distinct values of each group are the keys of a
+;;; per-group KEY-TABLE (in order of first appearance; a NULL key, if any,
+;;; is skipped), fed to a row accumulator when the result is needed. Rows of
+;;; a batch that all belong to one group (no GROUP BY) are added to its
+;;; table a batch at a time.
 
 (defstruct (distinct-state (:include agg-state))
   (factory nil :type function)           ; row accumulator factory (aggregates.lisp)
-  (seen #() :type simple-vector)         ; per group: EQUAL hash table or NIL
-  (values #() :type simple-vector))      ; per group: list of values, newest first
+  (kind :any)                            ; vector kind of the argument
+  (tables #() :type simple-vector)       ; per group: KEY-TABLE or NIL
+  (gids nil :type (or null index-vector))) ; scratch group ids of batch inserts
 
 (defmethod agg-reserve ((s distinct-state) groups)
   (when (> groups (agg-state-capacity s))
     (let ((c (next-capacity s groups)))
-      (setf (distinct-state-seen s) (grow-array (distinct-state-seen s) c nil)
-            (distinct-state-values s) (grow-array (distinct-state-values s) c nil)
+      (setf (distinct-state-tables s) (grow-array (distinct-state-tables s) c nil)
             (agg-state-capacity s) c))))
 
-(defun distinct-add (s g v)
-  (let ((seen (or (svref (distinct-state-seen s) g)
-                  (setf (svref (distinct-state-seen s) g) (make-hash-table :test 'equal))))
-        (k (distinct-key v)))
-    (unless (gethash k seen)
-      (setf (gethash k seen) t)
-      (push v (svref (distinct-state-values s) g)))))
+(defun distinct-table (s g)
+  "The key table of the distinct values of group G (created on first use)."
+  (or (svref (distinct-state-tables s) g)
+      (setf (svref (distinct-state-tables s) g)
+            (make-key-table 1 16 (list (distinct-state-kind s))))))
+
+(defun distinct-add-vec (s g vec n)
+  "Add the values of rows [0, N) of VEC to the distinct values of group G."
+  (declare (type fixnum n))
+  (let ((gids (distinct-state-gids s)))
+    (when (or (null gids) (< (length gids) n))
+      (setf gids (make-index-vector (max n +batch-size+))
+            (distinct-state-gids s) gids))
+    (key-table-map-batch (distinct-table s g) (list vec) n gids t)))
+
+(defun distinct-values (s g)
+  "The distinct non-NULL values of group G, in order of first appearance
+(per partition, after MERGE-DISTINCT-STATES-IN-PARALLEL)."
+  (let ((entry (svref (distinct-state-tables s) g)))
+    (loop for table in (if (listp entry) entry (list entry))
+          nconc (loop for i below (key-table-count table)
+                      for v = (key-table-key table 0 i)
+                      unless (eq v +null+) collect v))))
 
 (defmethod agg-update ((s distinct-state) gids vec n)
   (declare (type index-vector gids) (type fixnum n))
-  (dotimes (i n)
-    (let ((v (vec-ref vec i)))
-      (unless (eq v +null+)
-        (distinct-add s (aref gids i) v)))))
+  (when (plusp n)
+    (let ((g0 (aref gids 0)))
+      (if (loop for i of-type fixnum from 1 below n always (= (aref gids i) g0))
+          (distinct-add-vec s g0 vec n)
+          (dotimes (i n)
+            (let ((v (vec-ref vec i)))
+              (unless (eq v +null+)
+                (let ((table (distinct-table s (aref gids i))))
+                  (if (key-table-int-slots table)
+                      (int-key-group table v t)
+                      (key-table-probe-row table (list vec) i t))))))))))
 
 (defmethod agg-merge ((s distinct-state) other mapping)
   (dotimes (g (length mapping))
-    (when (>= (aref mapping g) 0)
-      (dolist (v (reverse (svref (distinct-state-values other) g)))
-        (distinct-add s (aref mapping g) v)))))
+    (let ((to (aref mapping g))
+          (table (svref (distinct-state-tables other) g)))
+      (when (and (>= to 0) table (plusp (key-table-count table)))
+        (let ((n (key-table-count table)))
+          (distinct-add-vec s to
+                            (vec-from-values (distinct-state-kind s)
+                                             (subseq (the simple-vector (svref (key-table-keys table) 0)) 0 n)
+                                             n)
+                            n))))))
 
 (defmethod agg-result ((s distinct-state) gid)
   (multiple-value-bind (step finish) (funcall (distinct-state-factory s))
     (declare (type function step finish))
-    (dolist (v (reverse (svref (distinct-state-values s) gid)))
+    (dolist (v (distinct-values s gid))
       (funcall step v))
     (funcall finish)))
 
@@ -422,7 +454,8 @@ again with unbounded integers."
          (float-p (eq (type-kind arg-type) :float64)))
     (cond
       ((and (b-agg-distinct agg) (not (member fn '(:min :max :count-star))))
-       (make-distinct-state :factory (make-base-accumulator-factory fn arg-type)))
+       (make-distinct-state :factory (make-base-accumulator-factory fn arg-type)
+                            :kind (type-vec-kind arg-type)))
       (t
        (ecase fn
          (:count-star (make-count-state :star t))
@@ -464,6 +497,50 @@ uses the native kernels."
       (fill (group-state-gids gs) 0)
       (loop for s across (group-state-aggs gs) do (agg-reserve s 1)))
     gs))
+
+(defun merge-distinct-states-in-parallel (total states)
+  "Without GROUP BY: merge the DISTINCT aggregate states of the partial group
+STATES into those of TOTAL (one of them), one thread per hash partition of
+the values; group 0 of TOTAL's states then holds a list of partition tables
+and the other partial states are emptied."
+  (let ((threads (length states)))
+    (dotimes (j (length (group-state-aggs total)))
+      (let ((s (svref (group-state-aggs total) j)))
+        (when (distinct-state-p s)
+          (let* ((sources (coerce (loop for gs across states
+                                        for table = (svref (distinct-state-tables
+                                                            (svref (group-state-aggs gs) j))
+                                                           0)
+                                        when table collect table)
+                                  'simple-vector))
+                 (split (make-array (length sources)))
+                 (parts (make-array threads))
+                 ;; Partition size guess: twice the largest source's share.
+                 (expected (max 16 (ceiling (* 2 (reduce #'max sources :key #'key-table-count
+                                                                         :initial-value 0))
+                                            threads))))
+            ;; Each source's values split by partition (in parallel) ...
+            (run-in-threads
+             (loop for k below (length sources)
+                   collect (let ((k k))
+                             (lambda ()
+                               (setf (svref split k)
+                                     (key-table-partitions (svref sources k) threads))))))
+            ;; ... then each partition interns its values of every source.
+            (run-in-threads
+             (loop for p below threads
+                   collect (let ((p p))
+                             (lambda ()
+                               (let ((table (make-key-table 1 expected (list (distinct-state-kind s)))))
+                                 (dotimes (k (length sources))
+                                   (let ((src (svref sources k)))
+                                     (loop for g across (the index-vector (svref (svref split k) p))
+                                           do (key-table-intern-group table src g))))
+                                 (setf (svref parts p) table))))))
+            (setf (svref (distinct-state-tables s) 0) (coerce parts 'list))
+            (loop for gs across states
+                  unless (eq gs total)
+                    do (setf (svref (distinct-state-tables (svref (group-state-aggs gs) j)) 0) nil))))))))
 
 (defun group-state-count (gs)
   (let ((table (group-state-table gs)))

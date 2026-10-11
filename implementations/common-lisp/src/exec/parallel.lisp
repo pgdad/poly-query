@@ -455,6 +455,8 @@ Many groups are merged in parallel, one thread per hash partition."
     (cond
       ((null (pp-hash-aggregate-group-by node))
        (let ((total (svref states 0)))
+         (when (> workers 1)
+           (merge-distinct-states-in-parallel total states))
          (loop for w from 1 below workers
                do (group-state-merge total (svref states w)))
          (group-state-batches total node)))

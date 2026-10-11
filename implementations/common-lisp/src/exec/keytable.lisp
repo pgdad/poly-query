@@ -451,6 +451,23 @@ are added when ADD, else their id is -1. Returns GIDS."
         (if (eq v +null+) +null-key-hash+ (hash-i64 v)))
       (aref (key-table-hashes table) g)))
 
+(defun key-table-partitions (table partitions)
+  "Vector of PARTITIONS index vectors: the group ids of TABLE whose key hash
+is the partition number modulo PARTITIONS."
+  (let* ((count (key-table-count table))
+         (parts (make-index-vector count))
+         (sizes (make-array partitions :element-type 'fixnum :initial-element 0)))
+    (dotimes (g count)
+      (let ((p (mod (key-table-group-hash table g) partitions)))
+        (setf (aref parts g) p)
+        (incf (aref sizes p))))
+    (let ((out (map 'simple-vector #'make-index-vector sizes)))
+      (fill sizes 0)
+      (dotimes (g count out)
+        (let ((p (aref parts g)))
+          (setf (aref (the index-vector (svref out p)) (aref sizes p)) g)
+          (incf (aref sizes p)))))))
+
 (defun key-table-intern-group (table other g)
   "Group id in TABLE of the key of group G of the key table OTHER (added if
 new); both tables have the same key kinds."
