@@ -440,7 +440,8 @@ def main():
     ap.add_argument("--quick", action="store_true", help="only the runner's mode matrix")
     ap.add_argument("--native-kernels", metavar="LIB", help="also run vectorized combinations with native: true")
     args = ap.parse_args()
-    variants = ["", "-Dpolyquery.batchSize=7 -Dpolyquery.morselRows=40 -Dpolyquery.parallelBuildRows=16"]
+    variants = ["", "-Dpolyquery.batchSize=7 -Dpolyquery.morselRows=40 -Dpolyquery.parallelBuildRows=16 "
+                "-Dpolyquery.parallelSortRows=16"]
     engines = [Engine(args.engine, args.data, v, args.native_kernels) for v in variants]
     schemas = None
     for e in engines:
