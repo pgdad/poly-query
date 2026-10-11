@@ -129,6 +129,19 @@ Globals (rt.S): `g_arena` (Arena), `g_out` (Buf, response line), `g_deadline`,
 | `agg_accum` | x0 NK_AGG node, x1 state record, x2 payload | – (one non-NULL value) |
 | `agg_finish` | x0 BoundQuery*, x1 state* | x0 cell array (16 bytes/slot) |
 
+## pqcf.S — PQCF v1 files (storage/pqcf-v1.md)
+
+| function | in | out |
+|---|---|---|
+| `crc32` | x0 ptr, x1 len | w0 CRC-32 (ISO-HDLC / zlib; ARMv8 CRC32 instructions when available, else table) |
+| `crc32_update` | w0 crc, x1 ptr, x2 len | w0 — continues a CRC: `crc32_update(crc32(a), b) = crc32(a ++ b)` |
+| `utf8_valid` | x0 ptr, x1 len | w0 1/0 strict UTF-8 (no overlongs, surrogates, > U+10FFFF) |
+| `pqcf_save` | x0 Table*, x1 path Str* (validated, relative to the data dir), x2 row_group_size (0 = 65536), w3 PENC_* | x0 file size; values read with `tbl_get` (any layout); index metadata from `index_list`; atomic (temp file `.<base>.tmp-<pid>-<seq>` in the target directory, fsync, rename, directory fsync; the temp file is removed on any error); raises IO_ERROR (also for a missing directory), RESOURCE_LIMIT |
+| `pqcf_load` | x0 path Str* (validated), w1 use_mmap | x0 Table* (calloc'ed, registered in `g_pending_table`, TBL_NAME not set; plain columns + null bitmaps; TBL_NRG/TBL_RGS with ChunkStat null counts and min/max), x1 XS* index specs (request arena), x2 count; raises NOT_FOUND, IO_ERROR, STORAGE_CORRUPT, STORAGE_VERSION_UNSUPPORTED, RESOURCE_LIMIT (> --max-table-rows) |
+
+Global `g_crc_mode` (pqcf.S): 0 = not probed yet, 1 = CRC32 instructions, 2 = table
+(tests force 2).
+
 ## catalog.S / protocol.S / main.S
 
 | function | in | out |
