@@ -57,6 +57,9 @@ struct Shared {
 pub struct ExecContext {
     deadline: Option<Instant>,
     cancel: Option<Arc<AtomicBool>>,
+    /// Set when the consumer of a parallel worker's output no longer needs
+    /// it (the worker then stops like a cancelled query).
+    stop: Option<Arc<AtomicBool>>,
     memory_limit: usize,
     max_join_rows: u64,
     shared: Arc<Shared>,
@@ -88,6 +91,7 @@ impl ExecContext {
         ExecContext {
             deadline: timeout.map(|t| Instant::now() + t),
             cancel: None,
+            stop: None,
             memory_limit,
             max_join_rows: u64::MAX,
             shared: Arc::new(Shared::default()),
@@ -155,6 +159,14 @@ impl ExecContext {
             && flag.load(Ordering::Relaxed)
         {
             return Err(Error::new(ErrorCode::Cancelled, "query was cancelled"));
+        }
+        if let Some(flag) = &self.stop
+            && flag.load(Ordering::Relaxed)
+        {
+            return Err(Error::new(
+                ErrorCode::Cancelled,
+                "parallel work is no longer needed",
+            ));
         }
         if let Some(d) = self.deadline
             && Instant::now() >= d
@@ -284,6 +296,7 @@ impl ContextSeed {
         ExecContext {
             deadline: self.deadline,
             cancel: self.cancel.clone(),
+            stop: None,
             memory_limit: self.memory_limit,
             max_join_rows: self.max_join_rows,
             shared: self.shared.clone(),
@@ -295,5 +308,12 @@ impl ContextSeed {
             results: RefCell::new(HashMap::new()),
             lookups: RefCell::new(HashMap::new()),
         }
+    }
+
+    /// A worker context that also stops when `stop` is set.
+    pub fn worker_context(&self, stop: Arc<AtomicBool>) -> ExecContext {
+        let mut ctx = self.context();
+        ctx.stop = Some(stop);
+        ctx
     }
 }

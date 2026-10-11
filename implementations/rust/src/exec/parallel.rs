@@ -313,7 +313,7 @@ struct GatherShared {
     morsels: Vec<Vec<ScanRange>>,
     seed: ContextSeed,
     next: AtomicUsize,
-    stop: AtomicBool,
+    stop: Arc<AtomicBool>,
     /// Morsels allowed to be claimed ahead of the consumer.
     window: usize,
     slots: Mutex<GatherSlots>,
@@ -330,7 +330,7 @@ struct GatherSlots {
 
 impl GatherShared {
     fn work(&self) {
-        let ctx = self.seed.context();
+        let ctx = self.seed.worker_context(self.stop.clone());
         loop {
             if self.stop.load(Ordering::Relaxed) {
                 return;
@@ -403,7 +403,7 @@ impl GatherOp {
             morsels,
             seed: self.seed.clone(),
             next: AtomicUsize::new(0),
-            stop: AtomicBool::new(false),
+            stop: Arc::new(AtomicBool::new(false)),
             window: 2 * workers.max(1),
             changed: Condvar::new(),
         });
