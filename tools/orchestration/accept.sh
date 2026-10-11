@@ -25,7 +25,13 @@ if [[ $record_only == True ]]; then
   echo "accept: $RUN recorded and imported (record-only run, not merged)"; exit 0
 fi
 "${PQ[@]}" import "$RUN" --merge | tail -n 1
-if [[ $lang == *-asm ]]; then
+host=$(python3 -c "import json,sys;print(json.load(open('experiments/prompts/languages.json')).get(sys.argv[1],{}).get('agent_host',''))" "$lang")
+if [[ -n $host ]]; then
+  # Built and tested natively on the agent's host (public + hidden; the binary cannot run here).
+  tools/remote/arm_engines.sh "results/correctness/arm64/$lang" "$lang" | tail -n 3 || true
+  cp "results/correctness/arm64/$lang/$lang.json" "results/correctness/$lang.json"
+  git add "results/correctness/arm64/$lang"
+elif [[ $lang == *-asm ]]; then
   # Kernel cohort: public, ASan/UBSan and hidden kernel tests (AArch64 also natively on the ARM host).
   python3 tools/validation/kernel_correctness.py "$lang" | tail -n 1
 else
