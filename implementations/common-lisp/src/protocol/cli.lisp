@@ -1,4 +1,4 @@
-;;;; cli.lisp — command line entry point: version, capabilities, session, exec.
+;;;; cli.lisp — command line entry point: version, capabilities, session, exec, serve.
 
 (in-package #:polyquery)
 
@@ -21,7 +21,7 @@
     ("--log-level" :string . :log-level)
     ("--native-kernels" :string . :native-kernels)
     ("--request" :string . :request)
-    ;; serve-mode options (accepted for interface compatibility)
+    ;; serve-mode options
     ("--host" :string . :host)
     ("--port" :integer . :port)
     ("--workers" :integer . :workers)
@@ -90,6 +90,25 @@
         (opt :max-join-rows engine-config-max-join-rows)
         (opt :threads engine-config-threads))
       config)))
+
+(defun make-server-options-from (options)
+  "SERVER-OPTIONS for `serve` from the parsed command line options."
+  (unless (getf options :port)
+    (usage-error "serve requires --port N"))
+  (when (> (getf options :port) 65535)
+    (usage-error "invalid port ~D" (getf options :port)))
+  (let ((server-options (make-server-options :port (getf options :port))))
+    (macrolet ((opt (key accessor)
+                 `(when (getf options ,key) (setf (,accessor server-options) (getf options ,key)))))
+      (opt :host server-options-host)
+      (opt :queue-depth server-options-queue-depth)
+      (opt :query-timeout-ms server-options-query-timeout-ms)
+      (opt :shutdown-grace-ms server-options-shutdown-grace-ms)
+      (opt :max-request-bytes server-options-max-request-bytes))
+    ;; --workers 0 means "the default" (one per CPU)
+    (when (and (getf options :workers) (plusp (getf options :workers)))
+      (setf (server-options-workers server-options) (getf options :workers)))
+    server-options))
 
 ;;; ------------------------------------------------------------------
 ;;; Modes
@@ -163,8 +182,8 @@
      (let ((config (make-config-from-options options)))
        (run-exec config (getf options :request) in out)))
     ((string= mode "serve")
-     (format *error-output* "serve mode is not supported by this engine (Phase 4)~%")
-     1)
+     (let ((config (make-config-from-options options)))
+       (run-server config (make-server-options-from options) out)))
     (t (usage-error "unknown mode ~A" mode))))
 
 (defun main ()

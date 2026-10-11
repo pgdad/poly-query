@@ -1,7 +1,7 @@
 # PolyQuery — Common Lisp implementation
 
 An in-memory analytical SQL engine implementing the PolyQuery specification
-(`spec/`) in ANSI Common Lisp on SBCL. Current scope: **Phases 1–3**
+(`spec/`) in ANSI Common Lisp on SBCL. Current scope: **Phases 1–4**
 (protocol, catalog, CSV/JSON/JSONL ingestion, all data types, the complete
 SQL grammar and semantics — joins, grouping, DISTINCT, all scalar functions,
 CASE/LIKE/BETWEEN/IN, uncorrelated *and correlated* subqueries, derived
@@ -9,7 +9,11 @@ tables, CTEs, EXPLAIN — resource limits, test functions; row and column
 layouts, dictionary encoding, null bitmaps, the PQCF v1 file format with
 memory-mapped reads, statistics, hash and ordered indexes, index selection,
 predicate pushdown with row-group skipping, column pruning and cost-based
-join build sides).
+join build sides), and the Phase 4 HTTP/1.1 server (`serve`): every
+endpoint of protocol.md §7, NDJSON streaming with backpressure, Prometheus
+metrics, structured JSON logs, snapshot-isolated concurrent readers, worker
+limits with a bounded FIFO queue and `OVERLOADED` rejection, timeouts,
+cancellation (explicit and on client disconnect) and graceful shutdown.
 
 ## Build prerequisites
 
@@ -35,15 +39,18 @@ SBCL's runtime does not interpret any command-line arguments; the heap
 
 None. Only ANSI Common Lisp, SBCL extensions (`sb-ext`, `sb-sys`, `sb-int`,
 `sb-impl`, `sb-kernel`, `sb-thread`, `sb-unix`) and the bundled
-`asdf`/`uiop`/`sb-posix`/`sb-rt` contribs are used (`ENGINE.json` lists no
-libraries). `sb-posix` provides `mmap`, `fsync`, `rename` and `fstat`.
+`asdf`/`uiop`/`sb-posix`/`sb-bsd-sockets`/`sb-rt` contribs are used (`ENGINE.json` lists
+no libraries). `sb-posix` provides `mmap`, `fsync`, `rename` and `fstat`;
+`sb-bsd-sockets` provides TCP sockets; threads, mutexes and condition
+variables come from `sb-thread`.
 
 ## Capabilities
 
 `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`, `sql.basic`,
 `test.functions`, `phase2`, `sql.groupby`, `sql.join`, `sql.functions`,
 `sql.subquery`, `sql.cte`, `sql.correlated_subquery`, `phase3`,
-`storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`.
+`storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`, `phase4`,
+`http.streaming`.
 
 ## Architecture
 
@@ -66,7 +73,8 @@ SQL text --lexer--> tokens --parser--> AST --binder--> BOUND-QUERY
 | analyzer | `bound`, `functions`, `binder`, `query` | semantic validation. `bound`: bound expression nodes and the analysed-query representation; `functions`: the scalar function registry (typing + implementation per function); `binder`: expressions — name resolution through nested scopes, typing, implicit promotions, CASE/LIKE/BETWEEN/IN, subqueries; `query`: CTEs, FROM/joins/derived tables, `*` expansion, output naming, GROUP BY alias/ordinal resolution, the structural grouping rewrite, HAVING, DISTINCT, ORDER BY resolution, constant LIMIT/OFFSET |
 | plan | `logical`, `optimizer`, `access`, `physical` | logical plan construction (`Scan`, `Values`, `Filter`, `Join`, `Aggregate`, `Project`, `Distinct`, `Sort`, `Limit`); logical rewrites (predicate pushdown, column pruning); access paths (predicate analysis, selectivity and cardinality estimates, index choice, segment skipping); physical operator selection and EXPLAIN JSON rendering |
 | exec | `context`, `expressions`, `aggregates`, `operators` | query context (deadline, cancellation flag, memory budget, join row limit); expression compiler to closures (incl. subquery evaluation); aggregate accumulators; Volcano-style operators |
-| protocol | `requests`, `cli` | JSON-lines request dispatch (`query`, `explain`, catalog ops), validation and responses; CLI modes `version`, `capabilities`, `session`, `exec` |
+| protocol | `requests`, `cli` | JSON-lines request dispatch (`query`, `explain`, catalog ops), validation and responses, structured logging; CLI modes `version`, `capabilities`, `session`, `exec`, `serve` |
+| server | `http`, `scheduler`, `metrics`, `server` | HTTP/1.1 message parsing and response writing; admission control (worker pool, bounded queue, query registry, timeouts, cancellation, bounded streaming channel); Prometheus counters; routing, endpoint handlers, connection threads, listener and graceful shutdown |
 
 ### Values and expressions
 
@@ -196,6 +204,69 @@ subquery plan is re-opened; results are memoized per distinct parameter
 tuple. Uncorrelated subqueries are evaluated once, lazily, so nothing runs
 before the whole statement has been analysed.
 
+### HTTP server and concurrency (Phase 4)
+
+* **Threads.** The main thread accepts connections (non-blocking listener
+  polled every 50 ms, so a shutdown request is noticed promptly) and starts
+  one thread per connection. A connection thread parses requests (keep-alive,
+  pipelining, `Content-Length` and chunked bodies, `Expect: 100-continue`)
+  and answers every non-query endpoint itself, so `/health`, `/metrics`,
+  `/v1/queries` and cancellation stay responsive when all workers are busy.
+* **Admission control** (`scheduler.lisp`). `--workers N` persistent worker
+  threads take query jobs from a FIFO queue. A query is admitted while
+  running + queued < N + `--queue-depth`, otherwise it is rejected at once
+  with `OVERLOADED` (503). Every admitted job is registered under its query
+  id (client-chosen `options.query_id` or a server-assigned `q<n>`); a
+  duplicate active id is `ALREADY_EXISTS` (409). Queries come from
+  `/v1/query`, `/v1/query/stream` and `query` ops sent to `/v1/request`;
+  all other operations (including `explain` and loads) run on the
+  connection thread.
+* **Completion protocol.** A job completes exactly once (first writer wins
+  under the scheduler mutex): normally by its worker; or by the waiting
+  connection thread when it is cancelled or its deadline passes while still
+  queued, or when a running job has not stopped by itself 50 ms after its
+  cancellation/deadline (the worker then finishes in the background and its
+  result is discarded). Completion updates the metrics and writes the
+  `query finished` log event.
+* **Timeouts.** The query context (deadline, cancellation flag, memory
+  budget) is created at admission, so queued time counts; the effective
+  timeout is `options.timeout_ms` if > 0, else `--query-timeout-ms`.
+  Operators check the context every 4096 rows and `PQ_SLEEP` every 5 ms.
+* **Cancellation.** `DELETE /v1/queries/{id}` sets the cancellation flag
+  (a queued job completes immediately). While a connection thread waits for
+  its query it polls the socket every 10 ms; end of input (`recv` with
+  `MSG_PEEK` returning 0) or a failed write means the client disconnected
+  and the query is cancelled.
+* **Streaming.** The worker plans the query (errors so far become a normal
+  error response with its HTTP status), then pushes the header, batches of
+  up to 1000 rows (a partial batch is flushed after 50 ms) and the end or
+  error item into a channel bounded to 8 batches; the connection thread
+  serializes items as NDJSON chunks. A full channel blocks the worker
+  (checking for cancellation/timeout every 5 ms), and responses are written
+  with blocking `write(2)` calls rather than SBCL fd-streams (which queue
+  unwritten output without bound), so a client that stops reading stalls
+  the query. The socket send buffer of a streaming connection is limited
+  to 256 KiB. A runtime error after the header is reported as a final
+  `{"type":"error",…}` line without an `end` line.
+* **Snapshot isolation.** A query analyses and plans against a private copy
+  of the catalog's name → table/index maps taken when it starts executing;
+  tables are immutable, so the query sees exactly those versions even if
+  they are replaced or dropped meanwhile. Catalog mutations are atomic under
+  the catalog mutex; loads parse outside the lock and publish at the end.
+* **Graceful shutdown.** SIGTERM/SIGINT set a flag; the main thread then
+  closes the listener (new connections are refused), marks the server as
+  draining (`/health` answers 503, requests on existing connections get
+  `SHUTTING_DOWN`), waits until no query is queued or running and no
+  request is in progress, up to `--shutdown-grace-ms`, then cancels the
+  remaining queries (their clients receive `CANCELLED`), waits up to 2 s for
+  those responses to be written and exits with status 0.
+* **Logs** are JSON lines on stderr (`ts` in RFC 3339 UTC with
+  milliseconds, `level`, `msg`, plus event fields), serialized by a mutex.
+  At `info`: startup, query completion (`query_id`, `status`,
+  `duration_ms`, `rows`, `error_code`), rejections, cancellation requests
+  and shutdown; SQL text and data never appear. `debug` adds one line per
+  HTTP request (method and path).
+
 ### Extensibility notes (later phases)
 
 * Physical operator choice is isolated in `plan/physical.lisp`; forced join
@@ -213,8 +284,7 @@ before the whole statement has been analysed.
 
 ### General
 
-* `UNION`, `RIGHT`/`FULL` joins answer `UNSUPPORTED` (reserved syntax);
-  `serve` exits 1.
+* `UNION`, `RIGHT`/`FULL` joins answer `UNSUPPORTED` (reserved syntax).
 * A NULL literal combined with a typed operand takes that operand's role
   (`NULL + 1` is INT64, `NULL / 0` is NULL); when nothing determines a type
   (`-NULL`, `NULL + NULL`, `SUM(NULL)`) the expression keeps the null type and
@@ -338,6 +408,38 @@ before the whole statement has been analysed.
   name is `STORAGE_VERSION_UNSUPPORTED`. Values in NULL slots are ignored.
 * `stats` and `schema` responses also report the table's `layout`.
 
+### HTTP server (Phase 4)
+
+* `--workers` defaults to the number of online CPUs; `--workers 0` also
+  means that default. `--host` accepts IPv4 dotted quads, IPv6 literals and
+  resolvable names (IPv4).
+* `PUT /v1/tables/{name}` accepts the query parameters `format` (required),
+  `replace`, `header` (`true`/`false`, else `INVALID_REQUEST`) and
+  `delimiter`. `header=false` needs an explicit schema, which a PUT cannot
+  carry, so it is `INVALID_REQUEST` (use `/v1/request` with a `load` op).
+  Path segments and query parameters are percent-decoded (UTF-8).
+* `/v1/query` and `/v1/query/stream` take the body of a `query` request
+  (`sql`, `options`); responses carry `"id"` from the body (`null` when
+  absent). `/v1/explain` accepts `options` like the `explain` op. REST
+  endpoints other than `/v1/request` omit `id`.
+* `polyquery_queries_total` counts every query request that produced a
+  response, including requests that failed validation before admission
+  (`status="error"`), but not `OVERLOADED` rejections (counted only in
+  `polyquery_queries_rejected_total`) or `SHUTTING_DOWN` refusals. The
+  duration summary covers admitted queries (admission to completion).
+  `polyquery_http_requests_total` is an extra counter.
+* An oversized body (`--max-request-bytes`) is answered with 413
+  `RESOURCE_LIMIT`; bodies up to 64 MiB are read and discarded so the
+  connection stays usable, larger ones (or `Expect: 100-continue`) close the
+  connection after a short lingering drain. A malformed request line or
+  header is 400 `INVALID_REQUEST` and closes the connection. A wrong method
+  on a known path is 405 with an `Allow` header.
+* A client that half-closes its connection (shutdown of its write side)
+  while its query runs is treated as disconnected.
+* During shutdown, every endpoint except `/health`, `/metrics`,
+  `/v1/version`, `/v1/capabilities`, the table/schema/stats reads and the
+  query list/cancel endpoints answers `SHUTTING_DOWN`.
+
 ## Testing
 
 * `make test` — unit tests (sb-rt) for numeric parsing/formatting, temporal
@@ -349,6 +451,14 @@ before the whole statement has been analysed.
   row/column layout equivalence, statistics, hash/B-tree lookups, PQCF round
   trips for every encoding and row-group size (buffered and mmap), empty
   tables, corruption detection, index selection and save/open requests.
+  Server tests cover HTTP request parsing (chunked bodies, percent-decoding,
+  keep-alive, size limits, header sanitizing), routing and 404/405, the
+  error → HTTP status table, admission/overload, cancellation of queued and
+  running jobs, queued timeouts, the bounded streaming channel and metrics
+  rendering.
+* HTTP: `python3 tests/concurrency/http_suite.py --engine
+  implementations/common-lisp/bin/polyquery` and the conformance runner with
+  `--transport http`.
 * Conformance: `python3 tests/conformance/runner.py --engine
   implementations/common-lisp/bin/polyquery --phase 1 --phase 2 --phase 3`.
 * During development, written files were additionally cross-checked with an
@@ -359,8 +469,18 @@ before the whole statement has been analysed.
 
 ## Known limitations
 
-* The HTTP server (Phase 4) and the Phase 5 execution options are not
-  implemented yet.
+* The Phase 5 execution options are not implemented yet.
+* Backpressure is enforced inside the server (bounded channel, blocking
+  writes), but how much a stalled client can absorb before the query
+  blocks also depends on kernel socket buffers (in some sandboxed network
+  stacks, loopback buffering is effectively unbounded).
+* Each connection has its own thread; there is no limit on the number of
+  connections. Request bodies are held in memory (up to
+  `--max-request-bytes`).
+* Operators that run for a long time between row boundaries (e.g. a large
+  in-memory sort) notice cancellation only at their next check; the client
+  still receives `CANCELLED`/`TIMEOUT` within ~50 ms, but the worker stays
+  busy (and counted in `polyquery_queries_in_flight`) until the check.
 * Indexes are not used to produce ordered output, for joins, or for
   disjunctions (`a = 1 OR a = 2` is not rewritten to `IN`).
 * Loaded (CSV/JSON) tables form a single segment, so row-group skipping

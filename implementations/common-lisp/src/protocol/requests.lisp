@@ -10,20 +10,36 @@
 
 (defparameter *log-levels* '(:debug 0 :info 1 :warn 2 :error 3 :off 4))
 (defvar *log-level* :info)
+(sb-ext:defglobal **log-lock** (sb-thread:make-mutex :name "log"))
+
+(defun log-enabled-p (level)
+  (and (not (eq *log-level* :off))
+       (>= (getf *log-levels* level) (getf *log-levels* *log-level*))))
+
+(defun log-event (level msg &rest fields)
+  "Write one structured JSON log line (protocol.md §7.4) to stderr. FIELDS are
+alternating keys and JSON values appended after ts, level and msg."
+  (when (log-enabled-p level)
+    (let ((line (json-to-string
+                 (apply #'jobj "ts" (format-log-timestamp)
+                        "level" (string-downcase (symbol-name level))
+                        "msg" msg fields))))
+      (sb-thread:with-mutex (**log-lock**)
+        (ignore-errors
+         (let ((stream *error-output*))
+           (write-line line stream)
+           (force-output stream)))))))
 
 (defun log-message (level format-control &rest args)
-  (when (and (not (eq *log-level* :off))
-             (>= (getf *log-levels* level) (getf *log-levels* *log-level*)))
-    (let ((stream *error-output*))
-      (write-json (jobj "ts" (format-log-timestamp) "level" (string-downcase (symbol-name level))
-                        "msg" (apply #'format nil format-control args))
-                  stream)
-      (terpri stream)
-      (force-output stream))))
+  (when (log-enabled-p level)
+    (log-event level (apply #'format nil format-control args))))
 
 (defun format-log-timestamp ()
-  (multiple-value-bind (s mi h d mo y) (decode-universal-time (get-universal-time) 0)
-    (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ" y mo d h mi s)))
+  "The current time in RFC 3339 UTC with millisecond precision."
+  (multiple-value-bind (seconds microseconds) (sb-ext:get-time-of-day)
+    (multiple-value-bind (s mi h d mo y) (decode-universal-time (+ seconds #.(encode-universal-time 0 0 0 1 1 1970 0)) 0)
+      (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0D.~3,'0DZ"
+              y mo d h mi s (floor microseconds 1000)))))
 
 ;;; ------------------------------------------------------------------
 ;;; Request field access
@@ -62,23 +78,32 @@
 ;;; ------------------------------------------------------------------
 ;;; Dispatch
 
+(defun request-id (request)
+  (if (json-object-p request) (json-get request "id" :null) :null))
+
+(defun call-with-error-response (id thunk)
+  "Call THUNK and return its response; any failure becomes an error response."
+  (handler-case (funcall thunk)
+    (pq-error (e)
+      (error-response id (pq-error-code e) (pq-error-message e) (pq-error-details e)))
+    (storage-condition ()
+      (error-response id "RESOURCE_LIMIT" "out of memory while processing the request"))
+    (error (e)
+      (log-message :error "internal error: ~A" e)
+      (error-response id "INTERNAL_ERROR"
+                      (format nil "internal error: ~A" (type-of e))))))
+
+(defmacro with-error-response ((id) &body body)
+  `(call-with-error-response ,id (lambda () ,@body)))
+
 (defun handle-request (session request)
   "Execute one protocol REQUEST and return the response object."
-  (let ((id (if (json-object-p request) (json-get request "id" :null) :null)))
-    (handler-case
-        (progn
-          (unless (json-object-p request)
-            (invalid-request-error "request must be a JSON object"))
-          (let ((op (request-field request "op" :required t :type :string)))
-            (dispatch-op session op id request)))
-      (pq-error (e)
-        (error-response id (pq-error-code e) (pq-error-message e) (pq-error-details e)))
-      (storage-condition ()
-        (error-response id "RESOURCE_LIMIT" "out of memory while processing the request"))
-      (error (e)
-        (log-message :error "internal error: ~A" e)
-        (error-response id "INTERNAL_ERROR"
-                        (format nil "internal error: ~A" (type-of e)))))))
+  (let ((id (request-id request)))
+    (with-error-response (id)
+      (unless (json-object-p request)
+        (invalid-request-error "request must be a JSON object"))
+      (let ((op (request-field request "op" :required t :type :string)))
+        (dispatch-op session op id request)))))
 
 (defun dispatch-op (session op id request)
   (let ((config (session-config session)))
@@ -178,7 +203,9 @@
       (request-field options "use_indexes" :type :boolean)
       t))
 
-(defun op-query (session id request)
+(defun op-query (session id request &optional context)
+  "Run a query request. CONTEXT, when given, is the QUERY-CONTEXT to execute
+in (the HTTP server creates it at admission so queued time counts)."
   (let* ((sql (request-field request "sql" :required t :type :string))
          (options (or (request-field request "options" :type :object) (jobj)))
          (max-rows (request-field options "max_rows" :type :non-negative-integer))
@@ -189,7 +216,8 @@
            (count-only (string= result-mode "count"))
            (result (execute-sql session sql :max-rows max-rows :timeout-ms timeout-ms
                                             :collect-rows (not count-only)
-                                            :use-indexes (use-indexes-option options)))
+                                            :use-indexes (use-indexes-option options)
+                                            :context context))
            (elapsed-us (floor (* (- (get-internal-real-time) start) 1000000)
                               internal-time-units-per-second)))
       (success-response id
@@ -200,8 +228,12 @@
 
 (defun rows-json (result)
   "A JSON-RAW writing the result rows with type-directed serialization."
-  (let ((types (coerce (mapcar #'column-def-type (query-result-columns result)) 'simple-vector))
-        (rows (query-result-rows result)))
+  (rows-json-raw (query-result-columns result) (query-result-rows result)))
+
+(defun rows-json-raw (columns rows)
+  "A JSON-RAW writing ROWS (a list of value vectors) as a JSON array of arrays,
+serializing each value according to the type of its column in COLUMNS."
+  (let ((types (coerce (mapcar #'column-def-type columns) 'simple-vector)))
     (make-json-raw
      (lambda (stream)
        (write-char #\[ stream)
@@ -263,7 +295,9 @@
                    (parse-type-string (request-field item "type" :required t :type :string)
                                       "INVALID_REQUEST")))))
 
-(defun op-load (session id request)
+(defun op-load (session id request &optional octets)
+  "Load a table. OCTETS, when given, is the raw input (an HTTP upload) and
+replaces the request's path/data fields."
   (let* ((config (session-config session))
          (name (request-field request "table" :required t :type :string))
          (format-name (request-field request "format" :required t :type :string))
@@ -292,16 +326,16 @@
                          :auto)))
     (when (zerop (length name))
       (invalid-request-error "table name must not be empty"))
-    (when (or (and path data) (and (null path) (null data)))
+    (when (and (null octets) (or (and path data) (and (null path) (null data))))
       (invalid-request-error "exactly one of path or data is required"))
     (when (and (eq format :csv) (not header) (null schema))
       (invalid-request-error "header=false requires an explicit schema"))
     (when (and (not replace) (catalog-table-exists-p (session-catalog session) name))
       (signal-pq-error "ALREADY_EXISTS" "table ~A already exists" name))
     (let* ((max-bytes (engine-config-max-ingest-bytes config))
-           (octets (if path
-                       (read-file-octets (resolve-data-path config path) max-bytes)
-                       (sb-ext:string-to-octets data :external-format :utf-8)))
+           (octets (cond (octets)
+                         (path (read-file-octets (resolve-data-path config path) max-bytes))
+                         (t (sb-ext:string-to-octets data :external-format :utf-8))))
            (spec (make-ingest-spec :table-name name :format format :schema schema
                                    :header header :delimiter delimiter
                                    :max-rows (engine-config-max-table-rows config))))
