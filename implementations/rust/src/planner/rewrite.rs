@@ -85,6 +85,10 @@ pub fn simplify_plan(plan: LogicalPlan) -> LogicalPlan {
             offset,
             limit,
         },
+        LogicalPlan::UnionAll { inputs, schema } => LogicalPlan::UnionAll {
+            inputs: inputs.into_iter().map(simplify_plan).collect(),
+            schema,
+        },
     }
 }
 

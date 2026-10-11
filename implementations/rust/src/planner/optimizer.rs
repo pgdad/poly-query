@@ -108,6 +108,10 @@ fn push_down(plan: LogicalPlan) -> LogicalPlan {
             offset,
             limit,
         },
+        LogicalPlan::UnionAll { inputs, schema } => LogicalPlan::UnionAll {
+            inputs: inputs.into_iter().map(push_down).collect(),
+            schema,
+        },
     }
 }
 
@@ -193,6 +197,15 @@ fn push_conjuncts(plan: LogicalPlan, preds: Vec<Expr>) -> LogicalPlan {
             };
             LogicalPlan::filter(project, Expr::conjunction(above))
         }
+        // A filter over a concatenation filters every branch (the branches
+        // produce the union's columns in order).
+        LogicalPlan::UnionAll { inputs, schema } => LogicalPlan::UnionAll {
+            inputs: inputs
+                .into_iter()
+                .map(|input| push_conjuncts(input, preds.clone()))
+                .collect(),
+            schema,
+        },
         other => LogicalPlan::filter(other, Expr::conjunction(preds)),
     }
 }
@@ -208,6 +221,28 @@ fn remap(e: &mut Expr, map: &[usize]) {
         debug_assert_ne!(j, DROPPED, "reference to a pruned column");
         j
     });
+}
+
+/// `plan` restricted to its output columns `columns` (in that order),
+/// projecting only if that is not already its exact output.
+fn select_columns(plan: LogicalPlan, columns: &[usize]) -> LogicalPlan {
+    if columns.iter().copied().eq(0..plan.width()) {
+        return plan;
+    }
+    let schema: Vec<_> = columns.iter().map(|&i| plan.schema()[i].clone()).collect();
+    let exprs = columns
+        .iter()
+        .zip(&schema)
+        .map(|(&index, f)| Expr::Column {
+            index,
+            ty: f.data_type,
+        })
+        .collect();
+    LogicalPlan::Project {
+        input: Box::new(plan),
+        exprs,
+        schema,
+    }
 }
 
 fn union(required: &[usize], extra: impl IntoIterator<Item = usize>) -> Vec<usize> {
@@ -380,6 +415,24 @@ fn prune(plan: LogicalPlan, required: &[usize]) -> (LogicalPlan, Vec<usize>) {
                 },
                 map,
             )
+        }
+        // Every branch is pruned to exactly the required columns, so that
+        // all branches keep producing the same layout.
+        LogicalPlan::UnionAll { inputs, schema } => {
+            let inputs = inputs
+                .into_iter()
+                .map(|input| {
+                    let (input, map) = prune(input, required);
+                    let columns: Vec<usize> = required.iter().map(|&i| map[i]).collect();
+                    select_columns(input, &columns)
+                })
+                .collect();
+            let mut map = vec![DROPPED; schema.len()];
+            for (new, &old) in required.iter().enumerate() {
+                map[old] = new;
+            }
+            let schema = required.iter().map(|&i| schema[i].clone()).collect();
+            (LogicalPlan::UnionAll { inputs, schema }, map)
         }
     }
 }

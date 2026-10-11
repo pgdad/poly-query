@@ -1092,6 +1092,60 @@ mod tests {
     }
 
     #[test]
+    fn union_all() {
+        let e = engine2();
+        let r = rows(
+            &e,
+            "SELECT id FROM t UNION ALL SELECT id FROM u WHERE id = 1 ORDER BY 1 DESC LIMIT 3",
+        );
+        assert_eq!(r, ints(&[3, 2, 1]));
+        let r = rows(
+            &e,
+            "SELECT COUNT(*) FROM (SELECT id FROM t UNION ALL SELECT id FROM u) x",
+        );
+        assert_eq!(r, ints(&[8]));
+        // Output types are the common types; names come from the first branch.
+        let q = e
+            .query(
+                "SELECT NULL AS a, id AS b FROM t UNION ALL SELECT tag, amt FROM u, t",
+                &QueryOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            q.columns,
+            vec![
+                Field::new("a", DataType::String),
+                Field::new("b", DataType::Float64)
+            ]
+        );
+        let code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
+        assert_eq!(
+            code("SELECT id, name FROM t UNION ALL SELECT id FROM u"),
+            ErrorCode::SemanticError
+        );
+        assert_eq!(
+            code("SELECT name FROM t UNION ALL SELECT id FROM u"),
+            ErrorCode::TypeError
+        );
+        assert_eq!(
+            code("SELECT id FROM t UNION ALL SELECT id FROM u ORDER BY name"),
+            ErrorCode::SemanticError
+        );
+        assert_eq!(
+            code("SELECT 9223372036854775807 UNION ALL SELECT CAST(1 AS DECIMAL(2,1))"),
+            ErrorCode::NumericOverflow
+        );
+        let plan = e
+            .explain(
+                "SELECT id FROM t UNION ALL SELECT id FROM u",
+                &QueryOptions::default(),
+            )
+            .unwrap()
+            .to_string_compact();
+        assert!(plan.contains(r#""op":"UnionAll""#), "{plan}");
+    }
+
+    #[test]
     fn explain() {
         let e = engine2();
         let plan = e
@@ -1185,6 +1239,25 @@ mod tests {
                 false,
             ),
             ("SELECT SUM(id * 4611686018427387904) FROM f", false),
+            (
+                "SELECT k, amt FROM f WHERE grp = 1 UNION ALL SELECT k, 0.5 FROM d \
+                 UNION ALL SELECT k, id FROM f WHERE tag = 'red'",
+                false,
+            ),
+            (
+                "SELECT x, COUNT(*), SUM(y) FROM (SELECT tag AS x, amt AS y FROM f \
+                 UNION ALL SELECT label, k FROM d) t GROUP BY x",
+                false,
+            ),
+            (
+                "SELECT id AS v FROM f UNION ALL SELECT k FROM d ORDER BY v DESC LIMIT 30",
+                true,
+            ),
+            (
+                "SELECT u.v, d.label FROM (SELECT k AS v FROM f UNION ALL SELECT k FROM d) u \
+                 JOIN d ON d.k = u.v WHERE u.v > 30",
+                false,
+            ),
         ];
         let base = QueryOptions {
             mode: ExecMode::Row,

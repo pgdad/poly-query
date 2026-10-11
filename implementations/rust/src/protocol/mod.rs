@@ -53,6 +53,7 @@ pub const CAPABILITIES: &[&str] = &[
     "join.merge",
     "join.nested_loop",
     "native.kernels",
+    "change.union_all",
 ];
 
 /// The `version` response body (without id).

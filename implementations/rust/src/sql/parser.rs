@@ -223,8 +223,14 @@ impl Parser {
             }
         }
         let body = self.select_core()?;
-        if self.is_keyword(Keyword::UNION) {
-            return Err(self.unsupported("UNION"));
+        let mut union_all = Vec::new();
+        while self.is_keyword(Keyword::UNION) {
+            if !matches!(self.peek_at(1), TokenKind::Keyword(Keyword::ALL)) {
+                return Err(self.unsupported("UNION without ALL"));
+            }
+            self.advance();
+            self.advance();
+            union_all.push(self.select_core()?);
         }
         let mut order_by = Vec::new();
         if self.eat_keyword(Keyword::ORDER) {
@@ -271,12 +277,17 @@ impl Parser {
             }
         }
         if self.is_keyword(Keyword::UNION) {
-            return Err(self.unsupported("UNION"));
+            // A branch cannot carry its own ORDER BY / LIMIT (CR-1 §1).
+            if matches!(self.peek_at(1), TokenKind::Keyword(Keyword::ALL)) {
+                return Err(self.unexpected("end of query"));
+            }
+            return Err(self.unsupported("UNION without ALL"));
         }
         self.leave();
         Ok(Query {
             with,
             body,
+            union_all,
             order_by,
             limit,
             offset,
@@ -980,9 +991,42 @@ mod tests {
         assert_eq!(code("SELECT a < b IS NULL"), ErrorCode::ParseError);
         assert_eq!(code("SELECT 1 UNION SELECT 2"), ErrorCode::Unsupported);
         assert_eq!(
+            code("SELECT 1 UNION DISTINCT SELECT 2"),
+            ErrorCode::Unsupported
+        );
+        assert_eq!(
+            code("SELECT 1 UNION ALL SELECT 2 UNION SELECT 3"),
+            ErrorCode::Unsupported
+        );
+        assert_eq!(
+            code("SELECT 1 AS a ORDER BY a UNION ALL SELECT 2"),
+            ErrorCode::ParseError
+        );
+        assert_eq!(
+            code("SELECT 1 LIMIT 1 UNION ALL SELECT 2"),
+            ErrorCode::ParseError
+        );
+        assert_eq!(
+            code("(SELECT 1) UNION ALL (SELECT 2)"),
+            ErrorCode::ParseError
+        );
+        assert_eq!(code("SELECT 1 UNION ALL (SELECT 2)"), ErrorCode::ParseError);
+        assert_eq!(
             code("SELECT * FROM a RIGHT JOIN b ON a.x = b.x"),
             ErrorCode::Unsupported
         );
+    }
+
+    #[test]
+    fn union_all_branches() {
+        let q =
+            q("SELECT a FROM t UNION ALL SELECT b FROM u UNION ALL SELECT 1 ORDER BY 1 LIMIT 2");
+        assert_eq!(q.union_all.len(), 2);
+        assert!(q.is_compound());
+        assert_eq!(q.branches().count(), 3);
+        assert_eq!(q.order_by.len(), 1);
+        assert!(q.limit.is_some());
+        assert!(q.union_all[0].from.is_some());
     }
 
     #[test]
@@ -1017,6 +1061,9 @@ mod tests {
             "DROP INDEX IF EXISTS i",
             "EXPLAIN SELECT 1",
             "SELECT CAST(x AS DECIMAL(10, 2)), CAST(y AS DATE) FROM t",
+            "WITH u AS (SELECT 1 UNION ALL SELECT 2) SELECT * FROM (SELECT x FROM u UNION ALL SELECT 3) d",
+            "SELECT 1 WHERE 1 IN (SELECT 1 UNION ALL SELECT 2) AND EXISTS (SELECT 1 UNION ALL SELECT 2)",
+            "EXPLAIN SELECT 1 UNION ALL SELECT 2",
         ] {
             parse_statement(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
         }
