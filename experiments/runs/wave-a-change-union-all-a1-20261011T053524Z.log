@@ -17,3 +17,6 @@
 2026-10-11T05:45:02+00:00 [a-change-union-all-clojure-a1-20261011T053530Z] agent finished; collecting telemetry
 2026-10-11T05:45:02+00:00 [a-change-union-all-clojure-a1-20261011T053530Z] validating (clean clone, sandboxed)
 2026-10-11T05:45:51+00:00 [a-change-union-all-clojure-a1-20261011T053530Z] outcome=success cost=$3.755507999999999 turns=73 wall=545.6s
+2026-10-11T06:06:53+00:00 [a-change-union-all-java-a1-20261011T053525Z] agent finished; collecting telemetry
+2026-10-11T06:06:53+00:00 [a-change-union-all-java-a1-20261011T053525Z] validating (clean clone, sandboxed)
+2026-10-11T06:07:12+00:00 [a-change-union-all-java-a1-20261011T053525Z] outcome=success cost=$4.9248474 turns=88 wall=1876.3s

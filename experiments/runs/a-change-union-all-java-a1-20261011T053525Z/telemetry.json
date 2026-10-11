@@ -1,0 +1,100 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-union-all-java-a1-20261011T053525Z",
+ "language": "java",
+ "task": "change-union-all",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-union-all",
+ "prompt_sha256": "4106109a20109a47307e2777f5bf341b0cf9bb1b2f2d1211895e07f4a58c3ee8",
+ "session_id": "0d4eb3bc-e4d2-4003-af3c-ad37b70c03ca",
+ "tokens": {
+  "input": 168,
+  "output": 49714,
+  "cache_read": 11699117,
+  "cache_creation": 198759,
+  "thinking": null,
+  "thinking_estimated": 20448,
+  "source": "result events (summed over 2 segments)",
+  "api_messages": 84
+ },
+ "rate_limit": {
+  "events": 11,
+  "max_utilization": {
+   "five_hour": 0.23,
+   "seven_day": 0.27
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 4.9248474,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 88,
+ "result_segments": 2,
+ "assistant_messages": 182,
+ "tool_calls": {
+  "Bash": 83,
+  "Read": 1,
+  "Edit": 1,
+  "ToolSearch": 1
+ },
+ "tool_calls_total": 86,
+ "tool_failures": 1,
+ "build_invocations": 7,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 6,
+ "conformance_progress": [
+  [
+   21,
+   22
+  ],
+  [
+   3450,
+   3456
+  ],
+  [
+   126,
+   132
+  ],
+  [
+   590,
+   591
+  ],
+  [
+   3450,
+   3456
+  ]
+ ],
+ "repair_iterations": 5,
+ "time": {
+  "wall_seconds": 1876.3,
+  "model_api_seconds": 603.7,
+  "tool_seconds": 700.6,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 3,
+  "files_changed": 21,
+  "lines_added": 475,
+  "lines_removed": 25,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "A background wait loop I'd started was stopped when it hit its time limit. It never exited because `pgrep -f \"difftest.py\"` matched the loop's own command line. It was only waiting for the randomized test, and that run had already finished on its own: 400 queries, 0 mismatches. Nothing needs restarting, and the results and commits in my summary stand.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

@@ -1,0 +1,157 @@
+{
+ "seconds": 19.6,
+ "status": {
+  "build_exit": "0",
+  "conformance_exit": "0",
+  "http_exit": "0",
+  "http_suite_exit": "0",
+  "modes_exit": "0"
+ },
+ "phases": [
+  1,
+  2,
+  3
+ ],
+ "summary": {
+  "by_phase": {
+   "1": {
+    "total": 249,
+    "pass": 249,
+    "fail": 0,
+    "error": 0,
+    "not_implemented": 0
+   },
+   "2": {
+    "total": 229,
+    "pass": 229,
+    "fail": 0,
+    "error": 0,
+    "not_implemented": 0
+   },
+   "3": {
+    "total": 172,
+    "pass": 172,
+    "fail": 0,
+    "error": 0,
+    "not_implemented": 0
+   }
+  },
+  "total": {
+   "total": 650,
+   "pass": 650,
+   "fail": 0,
+   "error": 0,
+   "not_implemented": 0
+  }
+ },
+ "phase_passed": {
+  "1": true,
+  "2": true,
+  "3": true
+ },
+ "capabilities": [
+  "change.union_all",
+  "exec.parallel",
+  "exec.row",
+  "exec.vectorized",
+  "http.streaming",
+  "index.btree",
+  "index.hash",
+  "ingest.csv",
+  "ingest.json",
+  "ingest.jsonl",
+  "join.hash",
+  "join.merge",
+  "join.nested_loop",
+  "native.kernels",
+  "phase1",
+  "phase2",
+  "phase3",
+  "phase4",
+  "phase5",
+  "sql.basic",
+  "sql.correlated_subquery",
+  "sql.cte",
+  "sql.functions",
+  "sql.groupby",
+  "sql.join",
+  "sql.subquery",
+  "storage.mmap",
+  "storage.pqcf",
+  "test.functions"
+ ],
+ "extra": {
+  "conformance-http.json": {
+   "by_phase": {
+    "1": {
+     "total": 249,
+     "pass": 249,
+     "fail": 0,
+     "error": 0,
+     "not_implemented": 0
+    },
+    "2": {
+     "total": 229,
+     "pass": 229,
+     "fail": 0,
+     "error": 0,
+     "not_implemented": 0
+    },
+    "3": {
+     "total": 172,
+     "pass": 172,
+     "fail": 0,
+     "error": 0,
+     "not_implemented": 0
+    }
+   },
+   "total": {
+    "total": 650,
+    "pass": 650,
+    "fail": 0,
+    "error": 0,
+    "not_implemented": 0
+   }
+  },
+  "http-suite.json": {
+   "total": 18,
+   "passed": 18,
+   "failed": 0
+  },
+  "conformance-modes.json": {
+   "by_phase": {
+    "1": {
+     "total": 1494,
+     "pass": 1494,
+     "fail": 0,
+     "error": 0,
+     "not_implemented": 0
+    },
+    "2": {
+     "total": 1374,
+     "pass": 1374,
+     "fail": 0,
+     "error": 0,
+     "not_implemented": 0
+    },
+    "3": {
+     "total": 1032,
+     "pass": 1032,
+     "fail": 0,
+     "error": 0,
+     "not_implemented": 0
+    }
+   },
+   "total": {
+    "total": 3900,
+    "pass": 3900,
+    "fail": 0,
+    "error": 0,
+    "not_implemented": 0
+   }
+  }
+ },
+ "outcome": "success",
+ "validated_at": "2026-10-11T06:07:12+00:00",
+ "harness_commit": "62248ea"
+}
