@@ -295,35 +295,48 @@ batch into it. Kernels are compiled once per call."
                       ((plusp m) (return (batch-gather batch idx m))))))))))))
 
 ;;; ------------------------------------------------------------------
-;;; Hash join
+;;; Joins
+;;;
+;;; All three join algorithms share one driver: the rows of a materialized
+;;; *build* input are paired with the rows of each batch of the streamed
+;;; *probe* input by an algorithm-specific pair generator (hash chains,
+;;; merging of sorted runs, or all pairs). The driver gathers the (probe row,
+;;; build row) index pairs into output batches, evaluates the residual
+;;; condition on them and, for LEFT joins, pads the probe rows left without
+;;; a qualifying pair with NULLs.
 
 (defstruct join-build
-  "The hashed (build) input of a hash join."
+  "The materialized build input of a join."
+  (batch nil)                            ; all build rows as one BATCH
+  ;; hash joins
   (table nil)                            ; KEY-TABLE of the normalized keys
   (first-row (make-index-vector 0) :type index-vector)   ; per group: first build row
   (next-row (make-index-vector 0) :type index-vector)    ; per build row: next row, or -1
-  (batch nil))                           ; all build rows as one BATCH
+  ;; merge joins
+  (keys '())                             ; normalized key VECs
+  (perm (make-index-vector 0) :type index-vector))       ; rows with non-NULL keys, sorted
 
 (defun join-key-normalizers (exprs other-exprs)
-  "Per key: NIL (identity) or the function normalizing values of the key
-expression for comparison with the other side (see HASH-KEY-NORMALIZER),
-and the vector kind of normalized keys."
+  "Per key: (normalizer . kind . compare-type): NIL (identity) or the function
+normalizing values of the key expression for comparison with the other side
+(see HASH-KEY-NORMALIZER), the vector kind and the type of normalized keys."
   (loop for a in exprs
         for b in other-exprs
         collect (let ((norm (hash-key-normalizer (bexpr-type a) (bexpr-type b))))
                   (multiple-value-bind (nl nr kind) (comparison-normalizers (bexpr-type a) (bexpr-type b))
                     (declare (ignore nl nr))
-                    (cons (if (eq norm #'identity) nil norm)
-                          (type-vec-kind kind))))))
+                    (list* (if (eq norm #'identity) nil norm)
+                           (type-vec-kind kind)
+                           kind)))))
 
 (defun join-key-vecs (kernels normalizers batch)
-  "Normalized key VECs of BATCH, and an index vector of the rows having a
-NULL key (or NIL)."
+  "Normalized key VECs of BATCH, and a bitmap of the rows having a NULL key
+(or NIL)."
   (let* ((n (batch-count batch))
          (null-rows nil))
     (values
      (loop for kernel in kernels
-           for (norm . kind) in normalizers
+           for (norm kind) in normalizers
            collect (let ((vec (funcall (the function kernel) batch)))
                      (when (vec-has-nulls-p vec n)
                        (unless null-rows (setf null-rows (make-array n :element-type 'bit :initial-element 0)))
@@ -346,71 +359,70 @@ NULL key (or NIL)."
                           (vec-concatenate (mapcar (lambda (b) (svref (batch-columns b) k)) batches)
                                            (svref kinds k) total)))))))
 
-(defun build-join-input (open-build kernels normalizers kinds)
-  "Drain the build input and hash it on its normalized keys."
-  (declare (type function open-build))
-  (let ((batches '())
-        (child (funcall open-build)))
-    (declare (type function child))
-    (loop for b = (funcall child)
-          while b
-          do (charge-memory (* (batch-count b) (row-footprint (+ 3 (length kinds)))))
-             (push b batches))
-    (let* ((batch (concatenate-batches (nreverse batches) kinds))
-           (n (batch-count batch))
-           (table (make-key-table (length kernels) (max 16 n) (mapcar #'cdr normalizers)))
-           (gids (make-index-vector n))
-           (next (make-array n :element-type 'fixnum :initial-element -1)))
-      (multiple-value-bind (key-vecs null-rows) (join-key-vecs kernels normalizers batch)
-        (key-table-map-batch table key-vecs n gids t)
-        (let ((first (make-array (key-table-count table) :element-type 'fixnum :initial-element -1)))
-          ;; Chain the rows of each key in input order.
-          (loop for i from (1- n) downto 0
-                unless (and null-rows (= 1 (sbit null-rows i)))
-                  do (let ((g (aref gids i)))
-                       (setf (aref next i) (aref first g)
-                             (aref first g) i)))
-          (make-join-build :table table :first-row first :next-row next :batch batch))))))
-
-(defun make-join-build-provider (build-node open-build build-keys probe-keys)
-  "Function returning the JOIN-BUILD of BUILD-NODE's rows: built on first
-use, and only once when the build input is invariant (otherwise rebuilt by
-every call, e.g. per execution of a correlated subquery)."
-  (let ((kernels (mapcar #'compile-vexpr build-keys))
-        (normalizers (join-key-normalizers build-keys probe-keys))
-        (kinds (output-kinds build-node))
+(defun make-build-provider (build-node open-build prepare)
+  "Function returning the JOIN-BUILD of BUILD-NODE's rows, made by PREPARE
+from the materialized batch: built on first use, and only once when the build
+input is invariant (otherwise rebuilt per call, e.g. per execution of a
+correlated subquery)."
+  (declare (type function prepare))
+  (let ((kinds (output-kinds build-node))
         (invariant (plan-invariant-p build-node))
         (cached nil))
     (lambda ()
       (if (and invariant cached)
           cached
-          (let ((build (build-join-input open-build kernels normalizers kinds)))
+          (let ((build (funcall prepare (drain-batches open-build kinds))))
             (when invariant (setf cached build))
             build)))))
 
-(defun make-batch-hash-join (node open-probe build-provider &optional row-cell)
-  "Batch opener of a hash join probing the JOIN-BUILD returned by
-BUILD-PROVIDER with the batches of OPEN-PROBE. Output rows of one probe row
-follow each other; for LEFT joins a probe row without match is padded with
-NULLs."
-  (declare (type function open-probe build-provider))
-  (let* ((build-left (eq (pp-hash-join-build node) :left))
-         (kind (pp-hash-join-kind node))
-         (outer (eq kind :left))
-         (probe-keys (if build-left (pp-hash-join-right-keys node) (pp-hash-join-left-keys node)))
-         (build-keys (if build-left (pp-hash-join-left-keys node) (pp-hash-join-right-keys node)))
-         (kernels (mapcar #'compile-vexpr probe-keys))
-         (normalizers (join-key-normalizers probe-keys build-keys))
-         (residual (and (pp-hash-join-residual node) (compile-vexpr (pp-hash-join-residual node)))))
+(defun join-key-comparator (vecs-a vecs-b normalizers)
+  "Function (i j) -> -1/0/1 comparing the normalized keys of row I (VECS-A)
+and row J (VECS-B)."
+  (let ((comparators (mapcar (lambda (a b norm)
+                               (make-key-comparator a b (cddr norm) nil nil))
+                             vecs-a vecs-b normalizers)))
+    (if (= (length comparators) 1)
+        (first comparators)
+        (lambda (i j)
+          (dolist (cmp comparators 0)
+            (let ((c (funcall (the function cmp) i j)))
+              (declare (type fixnum c))
+              (unless (zerop c) (return c))))))))
+
+(defun sorted-key-permutation (key-vecs null-rows normalizers n threads)
+  "Rows [0, N) without NULL keys, stably sorted by their normalized keys."
+  (let* ((cmp (join-key-comparator key-vecs key-vecs normalizers))
+         (before (lambda (i j) (minusp (the fixnum (funcall (the function cmp) i j)))))
+         (perm (make-index-vector (- n (if null-rows (count 1 null-rows) 0))))
+         (m 0))
+    (declare (type fixnum m))
+    (dotimes (i n)
+      (unless (and null-rows (= 1 (sbit null-rows i)))
+        (setf (aref perm m) i)
+        (incf m)))
+    (if (> threads 1)
+        (parallel-stable-sort perm before threads)
+        (stable-sort perm before))))
+
+(defun make-pair-join (open-probe build-provider make-generator
+                       &key residual outer build-left row-cell)
+  "Batch opener of the join driver. MAKE-GENERATOR is called with each probe
+batch and the JOIN-BUILD; it returns a generator, a function returning
+(values pidx bidx m finished unpaired done): up to a batch of M candidate
+pairs, the probe rows completed in this call (FINISHED) and those of them
+that had no candidate at all (UNPAIRED), and whether the batch is done.
+RESIDUAL is a BEXPR over the output row; BUILD-LEFT puts the build columns
+first."
+  (declare (type function open-probe build-provider make-generator))
+  (let ((residual (and residual (compile-vexpr residual))))
     (lambda ()
       (let ((build nil)
             (probe (funcall open-probe))
-            (batch nil) (n 0) (gids nil) (i 0) (chain -2)
-            (row-had-pair nil)
+            (batch nil)
+            (generator nil)
             (matched #())
             (counter (join-row-counter row-cell)))
-        (declare (type function probe counter) (type fixnum n i chain)
-                 (type simple-vector matched))
+        (declare (type function probe counter) (type simple-vector matched))
         (labels ((assemble (pidx bidx m)
                    ;; Output batch of M (probe row, build row) pairs.
                    (let ((probe-cols (map 'simple-vector (lambda (v) (and v (vec-gather v pidx m)))
@@ -420,83 +432,124 @@ NULLs."
                      (make-batch m (if build-left
                                        (concatenate 'simple-vector build-cols probe-cols)
                                        (concatenate 'simple-vector probe-cols build-cols)))))
-                 (next-probe-batch ()
-                   (setf batch (funcall probe))
-                   (when batch
-                     (setf n (batch-count batch) i 0 chain -2)
-                     (multiple-value-bind (key-vecs null-rows) (join-key-vecs kernels normalizers batch)
-                       (setf gids (key-table-map-batch (join-build-table build) key-vecs n
-                                                       (make-index-vector n) nil))
-                       (when null-rows
-                         (dotimes (r n)
-                           (when (= 1 (sbit null-rows r)) (setf (aref gids r) -1)))))
-                     t))
-                 (fill-pairs ()
-                   ;; Up to a batch of candidate pairs; for LEFT joins without a
-                   ;; residual, unmatched probe rows become (row, -1) pairs.
-                   (let ((pidx (make-index-vector +batch-size+))
-                         (bidx (make-index-vector +batch-size+))
-                         (finished '())
-                         (m 0)
-                         (first-row (join-build-first-row build))
-                         (next-row (join-build-next-row build)))
-                     (declare (type fixnum m) (type index-vector first-row next-row gids))
-                     (loop while (and (< m +batch-size+) (< i n))
-                           do (when (= chain -2)
-                                (let ((g (aref gids i)))
-                                  (setf chain (if (< g 0) -1 (aref first-row g))
-                                        row-had-pair nil)))
-                              (loop while (and (>= chain 0) (< m +batch-size+))
-                                    do (setf (aref pidx m) i (aref bidx m) chain
-                                             row-had-pair t)
-                                       (incf m)
-                                       (setf chain (aref next-row chain)))
-                              (when (< chain 0)
-                                (when outer
-                                  (if residual
-                                      (push i finished)
-                                      (unless row-had-pair
-                                        (if (< m +batch-size+)
-                                            (progn (setf (aref pidx m) i (aref bidx m) -1)
-                                                   (incf m))
-                                            (return)))))
-                                (incf i)
-                                (setf chain -2)))
-                     (values pidx bidx m (nreverse finished))))
-                 (apply-residual (pidx bidx m finished)
-                   ;; Keep the pairs satisfying the residual; pad the finished
-                   ;; probe rows of LEFT joins that kept no pair.
-                   (let* ((pairs (assemble pidx bidx m))
-                          (keep (if (plusp m)
-                                    (vec-data (funcall (the function residual) pairs))
-                                    #()))
-                          (opidx (make-index-vector (+ m (length finished))))
-                          (obidx (make-index-vector (+ m (length finished))))
+                 (qualify (pidx bidx m finished unpaired)
+                   ;; The pairs to output: without a residual all candidates
+                   ;; (plus padded unpaired rows of LEFT joins); with one, those
+                   ;; satisfying it (plus padded finished rows that kept none).
+                   (let* ((pads (if outer (if residual finished unpaired) '()))
+                          (keep (and residual (plusp m)
+                                     (vec-data (funcall (the function residual)
+                                                        (assemble pidx bidx m)))))
+                          (opidx (make-index-vector (+ m (length pads))))
+                          (obidx (make-index-vector (+ m (length pads))))
                           (k 0))
-                     (declare (type fixnum k) (type simple-vector keep))
+                     (declare (type fixnum k))
                      (dotimes (j m)
-                       (when (eq (svref keep j) t)
+                       (when (or (null residual) (eq (svref keep j) t))
                          (setf (aref opidx k) (aref pidx j) (aref obidx k) (aref bidx j))
                          (incf k)
-                         (when outer (setf (svref matched (aref pidx j)) t))))
-                     (dolist (r finished)
-                       (unless (svref matched r)
+                         (when (and outer residual) (setf (svref matched (aref pidx j)) t))))
+                     (dolist (r pads)
+                       (unless (and residual (svref matched r))
                          (setf (aref opidx k) r (aref obidx k) -1)
                          (incf k)))
                      (values opidx obidx k))))
-          (declare (ignorable #'apply-residual))
           (lambda ()
             (unless build (setf build (funcall build-provider)))
             (loop
-              (when (or (null batch) (>= i n))
-                (unless (next-probe-batch) (return nil))
-                (when (and outer residual) (setf matched (make-array n :initial-element nil))))
-              (multiple-value-bind (pidx bidx m finished) (fill-pairs)
-                (multiple-value-bind (pidx bidx m)
-                    (if residual (apply-residual pidx bidx m finished) (values pidx bidx m))
+              (unless generator
+                (setf batch (funcall probe))
+                (unless batch (return nil))
+                (setf generator (funcall make-generator batch build))
+                (when (and outer residual)
+                  (setf matched (make-array (batch-count batch) :initial-element nil))))
+              (multiple-value-bind (pidx bidx m finished unpaired done)
+                  (funcall (the function generator))
+                (when done (setf generator nil))
+                (multiple-value-bind (pidx bidx m) (qualify pidx bidx m finished unpaired)
                   (when (plusp m)
-                    (dotimes (k m) (funcall counter))
+                    (funcall counter m)
                     (return (assemble pidx bidx m))))))))))))
+
+(defmacro with-pair-buffers ((pidx bidx m finished unpaired) &body body)
+  "Bind fresh pair buffers for a generator call; BODY fills them."
+  `(let ((,pidx (make-index-vector +batch-size+))
+         (,bidx (make-index-vector +batch-size+))
+         (,m 0)
+         (,finished '())
+         (,unpaired '()))
+     (declare (type fixnum ,m) (ignorable ,finished ,unpaired))
+     ,@body))
+
+;;; Hash join: the build rows of each key are chained in input order.
+
+(defun prepare-hash-build (kernels normalizers)
+  (lambda (batch)
+    (let* ((n (batch-count batch))
+           (table (make-key-table (length kernels) (max 16 n) (mapcar #'second normalizers)))
+           (gids (make-index-vector n))
+           (next (make-array n :element-type 'fixnum :initial-element -1)))
+      (multiple-value-bind (key-vecs null-rows) (join-key-vecs kernels normalizers batch)
+        (key-table-map-batch table key-vecs n gids t)
+        (let ((first (make-array (key-table-count table) :element-type 'fixnum :initial-element -1)))
+          (loop for i from (1- n) downto 0
+                unless (and null-rows (= 1 (sbit null-rows i)))
+                  do (let ((g (aref gids i)))
+                       (setf (aref next i) (aref first g)
+                             (aref first g) i)))
+          (make-join-build :table table :first-row first :next-row next :batch batch))))))
+
+(defun make-join-build-provider (build-node open-build build-keys probe-keys)
+  "Build provider of a hash join (see MAKE-BUILD-PROVIDER)."
+  (make-build-provider build-node open-build
+                       (prepare-hash-build (mapcar #'compile-vexpr build-keys)
+                                           (join-key-normalizers build-keys probe-keys))))
+
+(defun hash-pair-generator (kernels normalizers)
+  (lambda (batch build)
+    (let* ((n (batch-count batch))
+           (gids (multiple-value-bind (key-vecs null-rows) (join-key-vecs kernels normalizers batch)
+                   (let ((gids (key-table-map-batch (join-build-table build) key-vecs n
+                                                    (make-index-vector n) nil)))
+                     (when null-rows
+                       (dotimes (r n)
+                         (when (= 1 (sbit null-rows r)) (setf (aref gids r) -1))))
+                     gids)))
+           (first-row (join-build-first-row build))
+           (next-row (join-build-next-row build))
+           (i 0) (chain -2) (had-pair nil))
+      (declare (type fixnum n i chain) (type index-vector gids first-row next-row))
+      (lambda ()
+        (with-pair-buffers (pidx bidx m finished unpaired)
+          (loop while (and (< m +batch-size+) (< i n))
+                do (when (= chain -2)
+                     (let ((g (aref gids i)))
+                       (setf chain (if (< g 0) -1 (aref first-row g))
+                             had-pair nil)))
+                   (loop while (and (>= chain 0) (< m +batch-size+))
+                         do (setf (aref pidx m) i (aref bidx m) chain had-pair t)
+                            (incf m)
+                            (setf chain (aref next-row chain)))
+                   (when (< chain 0)
+                     (push i finished)
+                     (unless had-pair (push i unpaired))
+                     (incf i)
+                     (setf chain -2)))
+          (values pidx bidx m finished unpaired (>= i n)))))))
+
+(defun make-batch-hash-join (node open-probe build-provider &optional row-cell)
+  "Batch opener of a hash join probing the JOIN-BUILD returned by
+BUILD-PROVIDER with the batches of OPEN-PROBE."
+  (let* ((build-left (eq (pp-hash-join-build node) :left))
+         (probe-keys (if build-left (pp-hash-join-right-keys node) (pp-hash-join-left-keys node)))
+         (build-keys (if build-left (pp-hash-join-left-keys node) (pp-hash-join-right-keys node))))
+    (make-pair-join open-probe build-provider
+                    (hash-pair-generator (mapcar #'compile-vexpr probe-keys)
+                                         (join-key-normalizers probe-keys build-keys))
+                    :residual (pp-hash-join-residual node)
+                    :outer (eq (pp-hash-join-kind node) :left)
+                    :build-left build-left
+                    :row-cell row-cell)))
 
 (defmethod compile-batch-operator ((node pp-hash-join))
   (destructuring-bind (left right) (pnode-children node)
@@ -509,6 +562,123 @@ NULLs."
        (make-join-build-provider build-node (compile-batch-operator build-node)
                                  (if build-left (pp-hash-join-left-keys node) (pp-hash-join-right-keys node))
                                  (if build-left (pp-hash-join-right-keys node) (pp-hash-join-left-keys node)))))))
+
+;;; Sort-merge join: both inputs are materialized and their rows with
+;;; non-NULL keys sorted; each left row is paired with the run of right rows
+;;; having an equal key.
+
+(defun single-batch-opener (open kinds)
+  "Batch opener yielding all rows of OPEN as one batch."
+  (lambda ()
+    (let ((done nil))
+      (lambda ()
+        (unless done
+          (setf done t)
+          (drain-batches open kinds))))))
+
+(defun merge-pair-generator (kernels normalizers threads)
+  (lambda (batch build)
+    (multiple-value-bind (left-keys null-rows) (join-key-vecs kernels normalizers batch)
+      (let* ((n (batch-count batch))
+             (left (sorted-key-permutation left-keys null-rows normalizers n threads))
+             (right (join-build-perm build))
+             (nl (length left)) (nr (length right))
+             (cmp-lr (join-key-comparator left-keys (join-build-keys build) normalizers))
+             (cmp-rr (join-key-comparator (join-build-keys build) (join-build-keys build) normalizers))
+             (li 0) (j 0) (gs 0) (ge 0) (k 0) (emitting nil)
+             (null-key-rows (and null-rows
+                                 (loop for i below n when (= 1 (sbit null-rows i)) collect i))))
+        (declare (type index-vector left right) (type fixnum n nl nr li j gs ge k)
+                 (type function cmp-lr cmp-rr))
+        (lambda ()
+          (with-pair-buffers (pidx bidx m finished unpaired)
+            ;; Rows with a NULL key never match.
+            (setf finished null-key-rows unpaired null-key-rows null-key-rows '())
+            (loop while (< m +batch-size+)
+                  do (cond
+                       (emitting
+                        (let ((row (aref left li)))
+                          (loop while (and (< k ge) (< m +batch-size+))
+                                do (setf (aref pidx m) row (aref bidx m) (aref right k))
+                                   (incf m) (incf k))
+                          (when (>= k ge)
+                            (push row finished)
+                            (incf li)
+                            (setf emitting nil))))
+                       ((>= li nl) (return))
+                       (t
+                        (let ((row (aref left li)))
+                          (if (and (< gs ge) (zerop (funcall cmp-lr row (aref right gs))))
+                              ;; Same key as the previous left row: same run.
+                              (setf emitting t k gs)
+                              (progn
+                                (setf j (max j ge))
+                                (loop while (and (< j nr) (plusp (funcall cmp-lr row (aref right j))))
+                                      do (incf j))
+                                (if (and (< j nr) (zerop (funcall cmp-lr row (aref right j))))
+                                    (progn
+                                      (setf gs j ge (1+ j))
+                                      (loop while (and (< ge nr)
+                                                       (zerop (funcall cmp-rr (aref right gs) (aref right ge))))
+                                            do (incf ge))
+                                      (setf j ge emitting t k gs))
+                                    (progn
+                                      (push row finished)
+                                      (push row unpaired)
+                                      (incf li)))))))))
+            (values pidx bidx m finished unpaired (and (>= li nl) (not emitting)))))))))
+
+(defmethod compile-batch-operator ((node pp-merge-join))
+  (destructuring-bind (left right) (pnode-children node)
+    (let* ((lkeys (pp-merge-join-left-keys node))
+           (rkeys (pp-merge-join-right-keys node))
+           (right-kernels (mapcar #'compile-vexpr rkeys))
+           (right-normalizers (join-key-normalizers rkeys lkeys))
+           (threads (parallel-threads)))
+      (make-pair-join
+       (single-batch-opener (compile-batch-operator left) (output-kinds left))
+       (make-build-provider
+        right (compile-batch-operator right)
+        (lambda (batch)
+          (multiple-value-bind (keys null-rows) (join-key-vecs right-kernels right-normalizers batch)
+            (make-join-build :batch batch :keys keys
+                             :perm (sorted-key-permutation keys null-rows right-normalizers
+                                                           (batch-count batch) threads)))))
+       (merge-pair-generator (mapcar #'compile-vexpr lkeys) (join-key-normalizers lkeys rkeys) threads)
+       :residual (pp-merge-join-residual node)
+       :outer (eq (pp-merge-join-kind node) :left)))))
+
+;;; Nested-loop join: every left row is paired with every right row; the
+;;; whole join condition is the residual.
+
+(defun nested-loop-pair-generator ()
+  (lambda (batch build)
+    (let ((n (batch-count batch))
+          (nb (batch-count (join-build-batch build)))
+          (i 0) (j 0))
+      (declare (type fixnum n nb i j))
+      (lambda ()
+        (with-pair-buffers (pidx bidx m finished unpaired)
+          (loop while (and (< m +batch-size+) (< i n))
+                do (loop while (and (< j nb) (< m +batch-size+))
+                         do (setf (aref pidx m) i (aref bidx m) j)
+                            (incf m) (incf j))
+                   (when (>= j nb)
+                     (push i finished)
+                     (when (zerop nb) (push i unpaired))
+                     (incf i)
+                     (setf j 0)))
+          (values pidx bidx m finished unpaired (>= i n)))))))
+
+(defmethod compile-batch-operator ((node pp-nested-loop-join))
+  (destructuring-bind (left right) (pnode-children node)
+    (make-pair-join
+     (compile-batch-operator left)
+     (make-build-provider right (compile-batch-operator right)
+                          (lambda (batch) (make-join-build :batch batch)))
+     (nested-loop-pair-generator)
+     :residual (pp-nested-loop-join-condition node)
+     :outer (eq (pp-nested-loop-join-kind node) :left))))
 
 ;;; ------------------------------------------------------------------
 ;;; Sorting: the input is materialized as one batch and a permutation of its

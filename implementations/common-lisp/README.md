@@ -326,16 +326,30 @@ Expressions compile to *kernels* (batch → vector):
 Filters compute a selection and gather the surviving rows into a dense batch.
 Aggregation maps each batch's keys to dense group ids in a hash table and
 updates *columnar* aggregate states (counts, exact sums, min/max, distinct
-sets: one array slot per group) in a loop per aggregate. Hash joins
-materialize the build side as one batch, chain its rows per key in index
-arrays and emit (probe row, build row) index pairs that are gathered into
-output batches; residuals are evaluated on the pair batch, LEFT joins pad
-probe rows without a surviving pair. Sort materializes its input and sorts a
-permutation of row indexes with comparators over the typed key vectors; Top-N
-keeps the best LIMIT+OFFSET rows and discards, with one comparison per row,
-everything that cannot beat the current K-th row. Merge and nested-loop joins,
-index scans and correlated lookups run their row implementation over
-adapted inputs (batches ↔ rows), which keeps a single implementation of each.
+sets: one array slot per group) in a loop per aggregate. The three join
+algorithms share one driver: the build input is materialized as one batch,
+a pair generator emits (probe row, build row) index pairs a batch at a time,
+the pairs are gathered into output batches, the residual condition is
+evaluated on them and LEFT joins pad probe rows left without a qualifying
+pair. The generators are: *hash* (build rows chained per key in index arrays,
+probed batch-wise through the key table), *sort-merge* (both inputs'
+rows with non-NULL keys are stably sorted on their normalized keys — in
+parallel with `threads` > 1 — and each left row is paired with the run of
+equal right keys) and *nested loop* (all pairs; the whole join condition is
+the residual). Sort materializes its input and sorts a permutation of row
+indexes with comparators over the typed key vectors; Top-N keeps the best
+LIMIT+OFFSET rows and discards, with one comparison per row, everything that
+cannot beat the current K-th row. Index scans, correlated hash lookups and
+`Values` run their row implementation behind batch adapters.
+
+**Errors.** Kernels evaluate an expression for a whole batch before the next
+expression, while the row executor finishes a row before the next one. To
+report the same error when different rows fail differently, a data error
+raised by a filter, projection or aggregation kernel makes the operator
+replay that batch row by row with the row implementation and signal the
+first error in row order. Parallel runs report the error of the earliest
+failing morsel (morsels before it are completed, later ones are not
+started), which is the error a serial run would have raised.
 
 **Cache-aware hash tables** (`keytable.lisp`). Group ids are assigned by an
 open-addressing table with linear probing over a flat `fixnum` slot array
@@ -376,7 +390,9 @@ exercise the parallel paths on small tables.
 * constant folding (constant subexpressions whose evaluation succeeds become
   literals; failing ones stay, so the error is raised only if a row
   evaluates them; test-only functions are never folded);
-* predicate simplification (TRUE/FALSE operands of AND/OR, `NOT NOT x`,
+* predicate simplification (TRUE/FALSE operands of AND/OR — an operand the
+  unoptimized evaluation would evaluate is only dropped if it cannot fail —,
+  `NOT NOT x`,
   `NOT (a < b)` → `a >= b`, duplicate conjuncts; a WHERE that folds to TRUE
   disappears, one that folds to FALSE/NULL produces no rows without
   reading its input);

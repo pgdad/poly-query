@@ -58,18 +58,21 @@ a literal of the same type."
   (let ((op (b-op-op e))
         (args (b-op-args e)))
     (case op
+      ;; An operand is only dropped when the unoptimized evaluation would not
+      ;; evaluate it either (left operand decides) or it cannot fail, so the
+      ;; rewrite never hides an error.
       (:and (destructuring-bind (a b) args
               (cond ((boolean-literal-p a t) b)
                     ((boolean-literal-p b t) a)
                     ((boolean-literal-p a nil) a)
-                    ((boolean-literal-p b nil) b)
+                    ((and (boolean-literal-p b nil) (not (may-fail-p a))) b)
                     ((bexpr-equal a b) a)
                     (t e))))
       (:or (destructuring-bind (a b) args
              (cond ((boolean-literal-p a nil) b)
                    ((boolean-literal-p b nil) a)
                    ((boolean-literal-p a t) a)
-                   ((boolean-literal-p b t) b)
+                   ((and (boolean-literal-p b t) (not (may-fail-p a))) b)
                    ((bexpr-equal a b) a)
                    (t e))))
       (:not (let ((a (first args)))

@@ -140,16 +140,22 @@ workers start)."
   (consumed 0 :type fixnum)              ; morsels taken by an ordered consumer
   (window nil)                           ; max morsels ahead of CONSUMED, or NIL
   (results #() :type simple-vector)
-  (error nil)
+  (error nil)                            ; the error of the earliest failed morsel
+  (error-morsel most-positive-fixnum :type fixnum)
   (stopped nil)
   (mutex (sb-thread:make-mutex :name "parallel run"))
   (cv (sb-thread:make-waitqueue :name "parallel run"))
   (threads '()))
 
-(defun prun-fail (run condition)
+(defun prun-fail (run condition &optional (morsel -1))
+  "Record CONDITION, signalled while processing MORSEL (-1: outside any
+morsel). The run reports the error of the earliest failed morsel, as a
+serial execution would: morsels before it are still completed, later ones
+are no longer started."
   (sb-thread:with-mutex ((prun-mutex run))
-    (unless (prun-error run) (setf (prun-error run) condition))
-    (setf (prun-stopped run) t)
+    (when (< morsel (prun-error-morsel run))
+      (setf (prun-error run) condition
+            (prun-error-morsel run) morsel))
     (sb-thread:condition-broadcast (prun-cv run))))
 
 (defun prun-stop (run)
@@ -169,6 +175,7 @@ workers start)."
             (window (prun-window run)))
         (cond ((prun-stopped run) (return nil))
               ((>= next (length (prun-morsels run))) (return nil))
+              ((>= next (prun-error-morsel run)) (return nil))
               ((or (null window) (< next (+ (prun-consumed run) window)))
                (setf (prun-next run) (1+ next))
                (return next))
@@ -201,11 +208,20 @@ environment; register their shutdown as a query cleanup."
       (prun-stop run)
       (error e))))
 
-(defun run-morsel (copy morsel run)
-  "Open the pipeline COPY on MORSEL; returns its iterator."
-  (declare (ignore run))
-  (setf (car (pipeline-copy-cell copy)) morsel)
-  (funcall (the function (pipeline-copy-opener copy))))
+(defun run-morsels (run copy fn)
+  "Worker loop: claim morsels of RUN and call FN with the morsel index and
+the iterator of the pipeline COPY opened on it, until the run is over or a
+morsel fails."
+  (declare (type function fn))
+  (loop for m = (prun-claim run)
+        while m
+        do (handler-case
+               (progn
+                 (setf (car (pipeline-copy-cell copy)) (svref (prun-morsels run) m))
+                 (funcall fn m (funcall (the function (pipeline-copy-opener copy)))))
+             (serious-condition (e)
+               (prun-fail run e m)
+               (return)))))
 
 ;;; ------------------------------------------------------------------
 ;;; Parallel scan with ordered gather
@@ -226,39 +242,41 @@ workers, yielding the batches in serial order."
                 (prun-window run) (* 2 workers))
           (prun-start run workers
                       (lambda (w)
-                        (let ((copy (svref copies w)))
-                          (loop for m = (prun-claim run)
-                                while m
-                                do (let ((iter (run-morsel copy (svref (prun-morsels run) m) run))
-                                         (batches '()))
-                                     (declare (type function iter))
-                                     (loop for b = (funcall iter)
-                                           while b
-                                           do (when (prun-stopped run) (return-from nil))
-                                              (charge-memory (* (batch-count b)
-                                                                (row-footprint (length (batch-columns b)))))
-                                              (push b batches))
-                                     (sb-thread:with-mutex ((prun-mutex run))
-                                       (setf (svref (prun-results run) m) (nreverse batches))
-                                       (sb-thread:condition-broadcast (prun-cv run))))))))
+                        (run-morsels run (svref copies w)
+                                     (lambda (m iter)
+                                       (declare (type function iter))
+                                       (let ((batches '()))
+                                         (loop for b = (funcall iter)
+                                               while b
+                                               do (when (prun-stopped run) (return-from nil))
+                                                  (charge-memory (* (batch-count b)
+                                                                    (row-footprint (length (batch-columns b)))))
+                                                  (push b batches))
+                                         (sb-thread:with-mutex ((prun-mutex run))
+                                           (setf (svref (prun-results run) m) (nreverse batches))
+                                           (sb-thread:condition-broadcast (prun-cv run))))))))
           (lambda ()
             (loop
               (when pending (return (pop pending)))
               (when (>= k morsel-count) (return nil))
               (let ((ready nil))
                 (sb-thread:with-mutex ((prun-mutex run))
-                  (loop until (or (prun-error run)
+                  (loop until (or (<= (prun-error-morsel run) k)
                                   (not (eq (svref (prun-results run) k) :pending)))
                         do (timed-condition-wait (prun-cv run) (prun-mutex run) 0.05)
                            (return))
-                  (unless (or (prun-error run) (eq (svref (prun-results run) k) :pending))
+                  (unless (or (<= (prun-error-morsel run) k)
+                              (eq (svref (prun-results run) k) :pending))
                     (setf pending (svref (prun-results run) k)
                           (svref (prun-results run) k) nil
                           ready t)
                     (incf k)
                     (setf (prun-consumed run) k)
                     (sb-thread:condition-broadcast (prun-cv run))))
-                (prun-raise run)
+                ;; Morsels before K all succeeded: an error at K is the first
+                ;; one in serial order.
+                (when (<= (prun-error-morsel run) k)
+                  (prun-raise run))
                 (unless ready (check-interrupts))))))))))
 
 ;;; ------------------------------------------------------------------
@@ -286,17 +304,15 @@ THREADS workers, each aggregating into a partial group state."
                             (lambda (w)
                               (destructuring-bind (new-state consume) (nth w consumers)
                                 (declare (type function new-state consume))
-                                (let ((gs (funcall new-state))
-                                      (copy (svref copies w)))
+                                (let ((gs (funcall new-state)))
                                   (setf (svref states w) gs)
-                                  (loop for m = (prun-claim run)
-                                        while m
-                                        do (let ((iter (run-morsel copy (svref (prun-morsels run) m) run)))
-                                             (declare (type function iter))
-                                             (loop for b = (funcall iter)
-                                                   while b
-                                                   do (when (prun-stopped run) (return-from nil))
-                                                      (funcall consume gs b))))))))
+                                  (run-morsels run (svref copies w)
+                                               (lambda (m iter)
+                                                 (declare (ignore m) (type function iter))
+                                                 (loop for b = (funcall iter)
+                                                       while b
+                                                       do (when (prun-stopped run) (return-from nil))
+                                                          (funcall consume gs b))))))))
                 ;; Wait for all workers, then merge their partial states in order.
                 (loop for th in (prun-threads run)
                       do (sb-thread:join-thread th :default nil))

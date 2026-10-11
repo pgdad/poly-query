@@ -222,18 +222,21 @@ statement's `mode` option."
   (count 0 :type sb-ext:word))
 
 (defun join-row-counter (&optional cell)
-  "Function to call per produced join row; enforces --max-join-rows (counted
-in CELL when the operator runs in several parallel copies)."
+  "Function to call with the number of rows a join produced (default 1);
+enforces --max-join-rows (counted in CELL when the operator runs in several
+parallel copies) and checks for interrupts every few thousand rows."
   (let ((count 0)
         (limit (and *query-context* (query-context-max-join-rows *query-context*))))
     (declare (type fixnum count))
-    (lambda ()
-      (incf count)
-      (when limit
-        (when (> (if cell (1+ (sb-ext:atomic-incf (row-cell-count cell))) count) limit)
-          (resource-limit-error "join produced more than ~D rows (--max-join-rows)" limit)))
-      (when (zerop (logand count 4095))
-        (check-interrupts)))))
+    (lambda (&optional (n 1))
+      (declare (type fixnum n))
+      (let ((before count))
+        (incf count n)
+        (when limit
+          (when (> (if cell (+ (sb-ext:atomic-incf (row-cell-count cell) n) n) count) limit)
+            (resource-limit-error "join produced more than ~D rows (--max-join-rows)" limit)))
+        (unless (= (ash before -12) (ash count -12))
+          (check-interrupts))))))
 
 (defun make-join-iterator (kind left matches-fn right-width)
   "Common driver for joins. MATCHES-FN maps a left row to a generator: a
