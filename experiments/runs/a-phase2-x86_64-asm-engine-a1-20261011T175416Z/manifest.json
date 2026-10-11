@@ -157,5 +157,6 @@
  "finished": "2026-10-11T18:19:13+00:00",
  "wall_seconds": 1496.4,
  "agent_exit_code": 0,
- "outcome": "success"
+ "outcome": "success",
+ "import_branch": "track-a/x86_64-asm-engine/phase2/a1"
 }
