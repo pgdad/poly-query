@@ -1,0 +1,119 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-optimize-latency-java-a2-20261011T080849Z",
+ "language": "java",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 2,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-optimize-latency",
+ "prompt_sha256": "8e2db5104933b83f2b94f2aee1bf817ed0cf7eb7041927c19f4f965272d58595",
+ "session_id": "a973e255-de70-4d50-999b-a3c66009cc2d",
+ "tokens": {
+  "input": 268,
+  "output": 134747,
+  "cache_read": 27713155,
+  "cache_creation": 350390,
+  "thinking": null,
+  "thinking_estimated": 60551,
+  "source": "result events",
+  "api_messages": 134
+ },
+ "rate_limit": {
+  "events": 13,
+  "max_utilization": {
+   "five_hour": 0.73,
+   "seven_day": 0.35
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 11.041763,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 138,
+ "result_segments": 1,
+ "assistant_messages": 294,
+ "tool_calls": {
+  "Bash": 133,
+  "Write": 2,
+  "Read": 2
+ },
+ "tool_calls_total": 137,
+ "tool_failures": 3,
+ "build_invocations": 25,
+ "build_failures_heuristic": 3,
+ "conformance_runs": 10,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 2745.9,
+  "model_api_seconds": 1414.0,
+  "tool_seconds": 1332.4,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 6,
+  "files_changed": 23,
+  "lines_added": 1764,
+  "lines_removed": 97,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "I've cut the analytics workload's warm latency in half at scale 1m (sum of per-query medians 296.6 \u2192 148.4 ms), and first executions are 1.7\u00d7 faster (1,908 \u2192 1,101 ms in total). Conformance is unchanged and all work is committed.\n\n**The workload file doesn't exist.** There is no `benchmarks/` directory in this workspace, so `benchmarks/workloads/analytics.json` couldn't be used. I wrote a stand-in, `bench/analytics.json`: 25 typical analytical queries over the pqgen 1m tables (filters, low/high-cardinality GROUP BY, 2\u20134-way and LEFT joins, top-N, date grouping, `COUNT(DISTINCT)`, HAVING, CASE, IN/scalar subqueries, a CTE, DISTINCT, LIKE, NULL-heavy data, string sort). The numbers above are for my queries, not the official ones, and the README says so.\n\n**How I measured.** `tools/workload.py` starts a fresh engine per round. It times each query's first run (\"cold\"), then 3 warm-ups and 9 measured runs, client-side through `bin/polyquery session` with default options. It keeps the best of 3 rounds and checks that results match the old engine (all 25 identical). The machine was shared (load \u2248 4), so single numbers move about \u00b115%. The README has the before/after table for every query; raw timings are in `bench/results-1m.json`.\n\n**What changed** (each fix came from profiling a slow query):\n1. **Join row counting:** parallel join workers bumped one shared atomic counter per output row; it's now once per batch. A04 2.8\u00d7, A22 3.0\u00d7.\n2. **Uncorrelated subqueries:** they ran row by row and forced single-threading. Now each runs once per query, is evaluated a batch at a time, and no longer stops the rest of the query running in parallel. Errors are still raised only by rows that actually need the subquery. A14 and A16 about 12\u00d7.\n3. **`COUNT(DISTINCT)` and other DISTINCT aggregates:** replaced boxed per-group hash sets with primitive hash sets that combine across threads, so these queries now run in parallel. A09 5.7\u00d7.\n4. **Parallel top-N:** workers no longer fully sort each chunk of rows; they keep only the best rows and skip rows that can't make the cut. A24 4.4\u00d7, A06 2.6\u00d7.\n5. **Start-up:** `make build` now runs a training workload (synthetic data and generic queries, not the benchmark's) to produce a JVM AOT cache, which the launcher uses when present. For example A03's first run went from 194 to 33 ms. A stale cache is ignored silently, and the build still succeeds if training fails. The build now takes about 8 s longer.\n\n**Test results:**\n- Conformance: 660/660 pass (phase 1: 225/225, phase 2: 208/208, phase 3: 212/212, phase 5: 15/15).\n- `--modes`: 3870/3870, also with tiny batch and chunk sizes.\n- HTTP transport: 660/660; HTTP/concurrency suite: 18/18.\n- `make build test lint`: all succeed, 105 unit tests passed (new tests cover the new hash sets, DISTINCT merging and subquery cases).\n- Randomized differential testing, extended with subquery and DISTINCT-aggregate queries: 0 mismatches.\n\n**Known limitations:**\n- High-cardinality GROUP BY (A03, A15, A17) didn't improve; each worker's hash table holds most of the keys, so building and merging them dominates.\n- Two first runs got slower: A09 133 \u2192 190 ms and A16 95 \u2192 121 ms, because new parallel code compiles on the first run. From the second run on they are 6\u201312\u00d7 faster.\n- Join build sides are still built by a single thread.\n- Two ideas didn't help and were dropped: pre-sizing per-worker tables from statistics, and smaller work chunks.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

@@ -1,0 +1,29 @@
+{
+ "wave_id": "wave-a-optimize-latency-a2-20261011T080847Z",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 2,
+ "seed": 4444,
+ "order": [
+  "go",
+  "python",
+  "java"
+ ],
+ "run_ids": [
+  "a-optimize-latency-go-a2-20261011T080847Z",
+  "a-optimize-latency-python-a2-20261011T080848Z",
+  "a-optimize-latency-java-a2-20261011T080849Z"
+ ],
+ "started": "2026-10-11T08:08:51+00:00",
+ "parallel": 3,
+ "limits": {
+  "timeout_min": 120,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  3.27587890625,
+  5.77099609375,
+  5.43408203125
+ ]
+}
