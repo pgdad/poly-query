@@ -1,6 +1,9 @@
 package exec
 
 import (
+	"strings"
+	"unicode/utf8"
+
 	"polyquery/internal/physical"
 	"polyquery/internal/plan"
 	"polyquery/internal/types"
@@ -515,5 +518,324 @@ func (v *vinSubquery) eval(b *Batch, sel []int32) (*Vec, error) {
 			}
 		}
 	})
+	return out, nil
+}
+
+// ---------------------------------------------------------------- IN lists, LIKE
+
+// vinList is `x [NOT] IN (constants)` whose value and constants have one
+// INT-class (BOOLEAN, INT64, DATE, TIMESTAMP) or STRING type, so that they
+// compare by representation.
+type vinList struct {
+	x        vexpr
+	cls      vclass
+	ints     []int64 // short lists are scanned
+	strs     []string
+	intSet   map[int64]struct{}
+	strSet   map[string]struct{}
+	hasNull  bool // the list contains NULL
+	not      bool
+	out      vecBuf
+	dict     []string // dictionary of the cached results
+	dictRes  []int8   // per entry: 1 found, 0 not
+	dictDone []bool
+}
+
+// shortInList is the longest list that is scanned instead of hashed.
+const shortInList = 8
+
+func (c *vcompiler) inListKernel(x *plan.InList) (vexpr, error) {
+	t := x.X.Type()
+	v := &vinList{not: x.Not}
+	switch t.Kind {
+	case types.KindInt64, types.KindBoolean, types.KindDate, types.KindTimestamp:
+		v.cls = vInt
+	case types.KindString:
+		v.cls = vStr
+	default:
+		return nil, nil
+	}
+	if volatile(x.X) {
+		return nil, nil
+	}
+	for i, item := range x.List {
+		it := item.Type()
+		if it.Kind != types.KindNull && (it != t || x.CmpTypes[i] != t) {
+			return nil, nil
+		}
+		val, err := evalConstant(c.ec, item)
+		if err != nil {
+			return nil, nil // the row evaluator reports it
+		}
+		switch {
+		case val.Null:
+			v.hasNull = true
+		case v.cls == vInt:
+			v.ints = append(v.ints, val.I)
+		default:
+			v.strs = append(v.strs, val.S)
+		}
+	}
+	if len(v.ints) > shortInList {
+		v.intSet = map[int64]struct{}{}
+		for _, k := range v.ints {
+			v.intSet[k] = struct{}{}
+		}
+	}
+	if len(v.strs) > shortInList {
+		v.strSet = map[string]struct{}{}
+		for _, s := range v.strs {
+			v.strSet[s] = struct{}{}
+		}
+	}
+	var err error
+	if v.x, err = c.compile(x.X); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+func (v *vinList) hasInt(k int64) bool {
+	if v.intSet != nil {
+		_, ok := v.intSet[k]
+		return ok
+	}
+	for _, c := range v.ints {
+		if c == k {
+			return true
+		}
+	}
+	return false
+}
+
+func (v *vinList) hasStr(s string) bool {
+	if v.strSet != nil {
+		_, ok := v.strSet[s]
+		return ok
+	}
+	for _, c := range v.strs {
+		if c == s {
+			return true
+		}
+	}
+	return false
+}
+
+// dictFound reports whether dictionary entry c of dict is in the list
+// (cached per dictionary).
+func (v *vinList) dictFound(dict []string, c uint32) bool {
+	if !sameDict(v.dict, dict) {
+		v.dict = dict
+		v.dictRes = grow(v.dictRes, len(dict))
+		v.dictDone = grow(v.dictDone, len(dict))
+		clear(v.dictDone)
+	}
+	if !v.dictDone[c] {
+		v.dictRes[c] = int8(b2i(v.hasStr(dict[c])))
+		v.dictDone[c] = true
+	}
+	return v.dictRes[c] == 1
+}
+
+func (v *vinList) eval(b *Batch, sel []int32) (*Vec, error) {
+	xv, err := v.x.eval(b, sel)
+	if err != nil {
+		return nil, err
+	}
+	n := b.N
+	out := v.out.reset(n, vInt)
+	nulls := v.out.withNulls(n)
+	// IN: TRUE if found, else NULL if the list has a NULL, else FALSE.
+	notFound, found := int64(0), int64(1)
+	if v.not {
+		notFound, found = 1, 0
+	}
+	forNeeded(n, sel, nil, func(i int) {
+		if xv.isNull(i) {
+			nulls[i] = true
+			return
+		}
+		var ok bool
+		switch {
+		case v.cls == vInt:
+			ok = v.hasInt(xv.I[i])
+		case xv.Dict != nil:
+			ok = v.dictFound(xv.Dict, xv.Codes[i])
+		default:
+			ok = v.hasStr(xv.S[i])
+		}
+		switch {
+		case ok:
+			out.I[i] = found
+		case v.hasNull:
+			nulls[i] = true
+		default:
+			out.I[i] = notFound
+		}
+	})
+	return out, nil
+}
+
+// vlike is `x [NOT] LIKE 'constant pattern'`.
+type vlike struct {
+	x        vexpr
+	pat      *likePattern
+	not      bool
+	out      vecBuf
+	dict     []string
+	dictRes  []int8
+	dictDone []bool
+}
+
+func (c *vcompiler) likeKernel(x *plan.Like) (vexpr, error) {
+	lit, ok := x.Pattern.(*plan.Literal)
+	if !ok || lit.Val.Null || x.X.Type().Kind != types.KindString || volatile(x.X) {
+		return nil, nil
+	}
+	in, err := c.compile(x.X)
+	if err != nil {
+		return nil, err
+	}
+	return &vlike{x: in, pat: newLikePattern(lit.Val.S), not: x.Not}, nil
+}
+
+func (v *vlike) eval(b *Batch, sel []int32) (*Vec, error) {
+	xv, err := v.x.eval(b, sel)
+	if err != nil {
+		return nil, err
+	}
+	n := b.N
+	out := v.out.reset(n, vInt)
+	if xv.Nulls != nil {
+		copy(v.out.withNulls(n), xv.Nulls[:n])
+	}
+	if xv.Dict != nil {
+		if !sameDict(v.dict, xv.Dict) {
+			v.dict = xv.Dict
+			v.dictRes = grow(v.dictRes, len(xv.Dict))
+			v.dictDone = grow(v.dictDone, len(xv.Dict))
+			clear(v.dictDone)
+		}
+		forNeeded(n, sel, xv.Nulls, func(i int) {
+			c := xv.Codes[i]
+			if !v.dictDone[c] {
+				v.dictRes[c] = int8(b2i(v.pat.match(xv.Dict[c]) != v.not))
+				v.dictDone[c] = true
+			}
+			out.I[i] = int64(v.dictRes[c])
+		})
+		return out, nil
+	}
+	strs := xv.S
+	forNeeded(n, sel, xv.Nulls, func(i int) { out.I[i] = b2i(v.pat.match(strs[i]) != v.not) })
+	return out, nil
+}
+
+// vstrFunc applies a STRING function that cannot fail (LENGTH, UPPER,
+// LOWER, TRIM, LTRIM, RTRIM, SUBSTR with constant bounds) to the non-NULL
+// values of a vector;
+// dictionary-encoded input is mapped once per dictionary entry (STRING
+// results stay dictionary-encoded).
+type vstrFunc struct {
+	x       vexpr
+	toStr   func(string) string
+	toInt   func(string) int64
+	out     vecBuf
+	dict    []string // input dictionary of the cached mapping
+	dictStr []string // mapped dictionary (immutable once published)
+	dictInt []int64
+}
+
+func (c *vcompiler) strFuncKernel(x *plan.Func) (vexpr, error) {
+	if x.NullParam || len(x.Args) == 0 || x.Args[0].Type().Kind != types.KindString || volatile(x.Args[0]) {
+		return nil, nil
+	}
+	v := &vstrFunc{}
+	if x.Name == "SUBSTR" {
+		// Constant, non-NULL bounds (a negative length fails: row path).
+		bounds := []int64{0, -1}
+		for i, a := range x.Args[1:] {
+			if !plan.IsConstant(a) {
+				return nil, nil
+			}
+			val, err := evalConstant(c.ec, a)
+			if err != nil || val.Null || (i == 1 && val.I < 0) {
+				return nil, nil
+			}
+			bounds[i] = val.I
+		}
+		start, length := bounds[0], bounds[1]
+		v.toStr = func(s string) string { return substr(s, start, length) }
+	} else if len(x.Args) != 1 {
+		return nil, nil
+	}
+	switch x.Name {
+	case "SUBSTR":
+	case "LENGTH":
+		v.toInt = func(s string) int64 { return int64(utf8.RuneCountInString(s)) }
+	case "UPPER":
+		v.toStr = func(s string) string { return asciiMap(s, 'a', 'z', -32) }
+	case "LOWER":
+		v.toStr = func(s string) string { return asciiMap(s, 'A', 'Z', 32) }
+	case "TRIM":
+		v.toStr = func(s string) string { return strings.Trim(s, " ") }
+	case "LTRIM":
+		v.toStr = func(s string) string { return strings.TrimLeft(s, " ") }
+	case "RTRIM":
+		v.toStr = func(s string) string { return strings.TrimRight(s, " ") }
+	default:
+		return nil, nil
+	}
+	var err error
+	if v.x, err = c.compile(x.Args[0]); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+func (v *vstrFunc) eval(b *Batch, sel []int32) (*Vec, error) {
+	xv, err := v.x.eval(b, sel)
+	if err != nil {
+		return nil, err
+	}
+	n := b.N
+	cls := vStr
+	if v.toInt != nil {
+		cls = vInt
+	}
+	out := v.out.reset(n, cls)
+	if xv.Nulls != nil {
+		copy(v.out.withNulls(n), xv.Nulls[:n])
+	}
+	if xv.Dict != nil {
+		if !sameDict(v.dict, xv.Dict) {
+			v.dict = xv.Dict
+			if v.toInt != nil {
+				v.dictInt = make([]int64, len(xv.Dict))
+				for k, s := range xv.Dict {
+					v.dictInt[k] = v.toInt(s)
+				}
+			} else {
+				v.dictStr = make([]string, len(xv.Dict))
+				for k, s := range xv.Dict {
+					v.dictStr[k] = v.toStr(s)
+				}
+			}
+		}
+		if v.toInt != nil {
+			lens := v.dictInt
+			forNeeded(n, sel, xv.Nulls, func(i int) { out.I[i] = lens[xv.Codes[i]] })
+			return out, nil
+		}
+		out.S = out.S[:0]
+		out.Dict, out.Codes = v.dictStr, xv.Codes[:n]
+		return out, nil
+	}
+	strs := xv.S
+	if v.toInt != nil {
+		forNeeded(n, sel, xv.Nulls, func(i int) { out.I[i] = v.toInt(strs[i]) })
+	} else {
+		forNeeded(n, sel, xv.Nulls, func(i int) { out.S[i] = v.toStr(strs[i]) })
+	}
 	return out, nil
 }

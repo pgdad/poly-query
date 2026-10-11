@@ -146,6 +146,14 @@ func TestExecutionModesAgree(t *testing.T) {
 		"SELECT COUNT(*), SUM(a.id) FROM t a JOIN t b ON a.id - 1500 = 1500 - b.id WHERE b.id % 3 = 0",
 		"SELECT COUNT(*), MIN(b.id) FROM t a JOIN t b ON a.id * 1000000 = b.id * 1000 + 999000",
 		"SELECT d.label, COUNT(*) FROM t JOIN d ON t.grp = d.grp GROUP BY d.label",
+		// LIKE, IN lists and string functions over plain (CAST) and
+		// dictionary-encoded (cat) strings, with NULLs.
+		"SELECT COUNT(*) FROM t WHERE CAST(id AS STRING) LIKE '1%' AND cat NOT LIKE 'b%'",
+		"SELECT CAST(grp AS STRING) LIKE '%1', cat LIKE '_l%' FROM t WHERE id < 40",
+		"SELECT COUNT(*) FROM t WHERE CAST(id AS STRING) IN ('1', '22', NULL) OR id NOT IN (1, 2, 3)",
+		"SELECT grp IN (1, 2, NULL), cat IN ('red', 'blue'), grp NOT IN (5, 6), day IN (DATE '2024-02-03') FROM t WHERE id < 30",
+		"SELECT COUNT(*) FROM t WHERE grp IN (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10) AND cat NOT IN ('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'red')",
+		"SELECT LENGTH(CAST(id AS STRING)), UPPER(cat), SUBSTR(CAST(id * 7 AS STRING), 2, 2), TRIM(cat), LOWER(CAST(grp AS STRING)) FROM t WHERE id % 50 = 0",
 		// Vector kernels: CASE, COALESCE, casts, calendar functions.
 		"SELECT CASE WHEN amount < 100 THEN 'low' WHEN grp IS NULL THEN NULL WHEN amount < 300 THEN cat ELSE 'high' END AS c, COUNT(*) FROM t GROUP BY 1",
 		"SELECT SUM(CASE WHEN flag THEN amount ELSE 0 END), SUM(CASE WHEN cat = 'red' THEN 1 END), MAX(CASE WHEN id > 10 THEN price END) FROM t",

@@ -114,13 +114,21 @@ func (c *vcompiler) compile(e plan.Expr) (vexpr, error) {
 			return k, err
 		}
 		return c.elementwise(e)
-	case *plan.Like, *plan.Between:
+	case *plan.Like:
+		if k, err := c.likeKernel(x); k != nil || err != nil {
+			return k, err
+		}
+		return c.elementwise(e)
+	case *plan.Between:
 		return c.elementwise(e)
 	case *plan.InList:
 		for _, item := range x.List {
 			if !plan.IsConstant(item) {
 				return c.fallback(e)
 			}
+		}
+		if k, err := c.inListKernel(x); k != nil || err != nil {
+			return k, err
 		}
 		return c.elementwise(e)
 	case *plan.Func:
@@ -134,6 +142,9 @@ func (c *vcompiler) compile(e plan.Expr) (vexpr, error) {
 			return c.fallback(e)
 		}
 		if k, err := c.mapKernel(e); k != nil || err != nil {
+			return k, err
+		}
+		if k, err := c.strFuncKernel(x); k != nil || err != nil {
 			return k, err
 		}
 		return c.elementwise(e)
