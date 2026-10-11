@@ -84,16 +84,18 @@ class NativeFallback(Exception):
 
 
 # an all-zero int64 buffer: pqk_filter_i64 over it with an always-true
-# predicate and a selection bitmap as validity lists the set bits
+# predicate and a selection bitmap as validity lists the set bits. It is
+# replaced when a larger one is needed; callers hold the buffer they got
+# while a kernel reads it (other threads may replace it meanwhile).
 _zeros = array.array("q")
 
 
-def _zero_data(n: int) -> int:
+def _zero_buffer(n: int) -> array.array:
     global _zeros
     zeros = _zeros
     if len(zeros) < n:
         zeros = _zeros = array.array("q", bytes(8 * max(n, WINDOW_ROWS)))
-    return zeros.buffer_info()[0]
+    return zeros
 
 
 # ------------------------------------------------------------------ terms
@@ -448,7 +450,8 @@ def _term(conjunct: b.Expr, scan: pp.TableScan, keep_null: bool) -> Term | None:
 def selected_positions(kernels: NativeKernels, bits: array.array, n: int, count: int) -> array.array:
     """Window-relative positions of the set bits (ascending)."""
     idx = array.array("I", bytes(4 * n))  # the kernel's output capacity must be n
-    found = kernels.filter_indices(_zero_data(n), bits.buffer_info()[0], n, nk.GE, INT64_MIN, 0, idx)
+    zeros = _zero_buffer(n)
+    found = kernels.filter_indices(address(zeros), bits.buffer_info()[0], n, nk.GE, INT64_MIN, 0, idx)
     if found != count:
         raise nk.NativeKernelError(f"pqk_filter_i64 selected {found} rows, popcount {count}")
     del idx[count:]
@@ -992,9 +995,9 @@ class NativeHashScanAggregate:
                 firsts.extend(offset + (r if idx is None else idx[r]) for r in rows)
         ids = array.array("I", map(index.__getitem__, keys))
         ngroups = len(index)
-        zero = _zero_data(count)
+        zeros = _zero_buffer(count)
         for spec, total, count_ in zip(self.specs, sums, counts):
-            values: int = zero
+            values: int = address(zeros)  # type: ignore[assignment]
             validity: int | None = None
             gathered = valid_bits = None  # (kept alive until the kernel call)
             if spec.column is not None:
@@ -1022,13 +1025,14 @@ HASH_SEED = 0x9E3779B97F4A7C15
 _hash_masks = array.array("q")
 
 
-def _hash_mask(n: int) -> int:
-    """Address of n int64 masks selecting the low HASH_BITS bits."""
+def _hash_mask_buffer(n: int) -> array.array:
+    """At least n int64 masks selecting the low HASH_BITS bits (held by the
+    caller during the kernel call, like :func:`_zero_buffer`)."""
     global _hash_masks
     masks = _hash_masks
     if len(masks) < n:
         masks = _hash_masks = array.array("q", [(1 << HASH_BITS) - 1]) * max(n, WINDOW_ROWS)
-    return masks.buffer_info()[0]
+    return masks
 
 
 def _hash_select(
@@ -1044,7 +1048,8 @@ def _hash_select(
     hashes = array.array("q", bytes(8 * n))
     kernels.hash_i64(address(data, window.base), n, HASH_SEED, hashes)
     pa = hashes.buffer_info()[0]
-    kernels.bitmap_and_raw(pa, _hash_mask(n), pa, 8 * n)  # low HASH_BITS bits
+    masks = _hash_mask_buffer(n)
+    kernels.bitmap_and_raw(pa, address(masks), pa, 8 * n)  # low HASH_BITS bits
     index, count = part
     space = 1 << HASH_BITS
     lo, hi = space * index // count, space * (index + 1) // count - 1
@@ -1151,7 +1156,8 @@ class NativeGroupSums:
             counts = array.array("q", bytes(8 * ngroups))
             if values is None:
                 sums = array.array("q", bytes(8 * ngroups))
-                self.kernels.group_sum_i64(ids, _zero_data(n), None, n, sums, counts, ngroups)
+                zeros = _zero_buffer(n)
+                self.kernels.group_sum_i64(ids, address(zeros), None, n, sums, counts, ngroups)
             else:
                 sums = array.array("q", bytes(8 * ngroups))
                 if not self.kernels.group_sum_i64(ids, values.buffer_info()[0], None, n, sums, counts, ngroups):
