@@ -181,6 +181,12 @@
    ["SELECT NULLIF(s, 'blue') AS x, COUNT(*) FROM t GROUP BY NULLIF(s, 'blue')" false]
    ["SELECT CONCAT(s, 'x') AS x, COUNT(*) FROM t GROUP BY CONCAT(s, 'x')" false]
    ["SELECT id FROM t WHERE UPPER(s) = 'RED' AND LENGTH(SUBSTR(u, 2)) > 2" false]
+   ;; multi-key group tables (code tuples)
+   ["SELECT f, d, COUNT(*) FROM t GROUP BY f, d" false]
+   ["SELECT dt, b, g, MIN(ts), COUNT(*) FROM t GROUP BY dt, b, g" false]
+   ["SELECT YEAR(ts), MONTH(dt), s, SUM(d) FROM t GROUP BY YEAR(ts), MONTH(dt), s" false]
+   ["SELECT -0.0 * f, g, COUNT(*) FROM t GROUP BY -0.0 * f, g" false]
+   ["SELECT t.g, r.name, COUNT(*), SUM(r.w) FROM t JOIN r ON r.k = t.k GROUP BY t.g, r.name" false]
    ;; SELECT DISTINCT (a hash aggregation outside row mode)
    ["SELECT DISTINCT g, s, b FROM t" false]
    ["SELECT DISTINCT f, d FROM t WHERE g = 2" false]
