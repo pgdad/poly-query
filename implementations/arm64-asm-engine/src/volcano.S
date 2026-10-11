@@ -501,9 +501,12 @@ ENDF it_drain
 // pulled to its end either way.
 //   x19 node, x20 ctx, x21 bq, x22 iterator, x23 input position, x24 rows,
 //   x25 rs, x26 row capacity, x27 offset, x28 end (offset + limit)
+// Stack: [sp] next free cells in the current block, [sp+8] rows left there
 // =============================================================================
 FUNC it_project
     ENTER 5
+    sub  sp, sp, #16
+    stp  xzr, xzr, [sp]                 // cell block cursor, rows left
     mov  x19, x0
     mov  x20, x1
     ldr  x21, [x19, #PN_BQ]
@@ -540,10 +543,17 @@ FUNC it_project
     str  x0, [x25, #RS_ROWS]
     lsl  x2, x24, #3
     bl   memcpy
-3:  ldr  x9, [x25, #RS_WIDTH]
-    lsl  x0, x9, #4
+3:  ldp  x0, x10, [sp]                 // cells: from blocks of 256 rows
+    cbnz x10, 31f
+    ldr  x9, [x25, #RS_WIDTH]
+    lsl  x0, x9, #12                    // 256 rows * 16 bytes per cell
     add  x0, x0, #16
     bl   arena_alloc
+    mov  x10, #256
+31: sub  x10, x10, #1
+    ldr  x9, [x25, #RS_WIDTH]
+    add  x11, x0, x9, lsl #4
+    stp  x11, x10, [sp]
     ldr  x9, [x25, #RS_ROWS]
     str  x0, [x9, x24, lsl #3]
     add  x24, x24, #1
@@ -555,6 +565,7 @@ FUNC it_project
     b    2b
 5:  str  x24, [x25, #RS_NROWS]
     mov  x0, x25
+    add  sp, sp, #16
     LEAVE 5
 ENDF it_project
 
