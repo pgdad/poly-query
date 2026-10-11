@@ -23,7 +23,7 @@ build: $(ENGINE)
 $(ENGINE): $(OBJS)
 	$(AS_DRIVER) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
 
-$(BUILD)/%.o: src/%.S include/pq.inc | $(BUILD)
+$(BUILD)/%.o: src/%.S include/pq.inc include/sql.inc | $(BUILD)
 	$(AS_DRIVER) $(ASFLAGS) -o $@ $<
 
 $(BUILD)/tests/%: tests/%.S $(LIBOBJS) include/pq.inc | $(BUILD)/tests

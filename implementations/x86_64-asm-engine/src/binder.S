@@ -446,7 +446,7 @@ bb_arith:
     je bind_type_error
     cmp $B_DIV, %r10d
     je ba_float
-    /* scales: INT side adopts the other side's scale */
+    /* scales: an INT64 operand takes part as DECIMAL(18,0) */
     mov 0(%rsp), %eax
     shr $16, %eax
     and $0xff, %eax
@@ -457,30 +457,30 @@ bb_arith:
     mov %eax, 12(%rsp)              /* s2 */
     cmp $T_INT, %r8d
     jne 7f
-    mov 12(%rsp), %eax
-    mov %eax, 8(%rsp)
+    movl $0, 8(%rsp)
     movzbl %r13b, %ecx
     cmp $T_NULL, %ecx
-    je 7f
-    mov 12(%rsp), %esi
-    shl $16, %esi
-    or $MKDEC(18, 0), %esi
+    je 71f
     mov N_A(%r12), %rdi
+    mov $MKDEC(18, 0), %esi
     call wrap_cast
     mov %rax, N_A(%r12)
+    jmp 7f
+71: mov 12(%rsp), %eax              /* NULL operand: mirror the other scale */
+    mov %eax, 8(%rsp)
 7:  cmp $T_INT, %r9d
     jne 8f
-    mov 8(%rsp), %eax
-    mov %eax, 12(%rsp)
+    movl $0, 12(%rsp)
     movzbl %r14b, %ecx
     cmp $T_NULL, %ecx
-    je 8f
-    mov 8(%rsp), %esi
-    shl $16, %esi
-    or $MKDEC(18, 0), %esi
+    je 72f
     mov N_B(%r12), %rdi
+    mov $MKDEC(18, 0), %esi
     call wrap_cast
     mov %rax, N_B(%r12)
+    jmp 8f
+72: mov 8(%rsp), %eax
+    mov %eax, 12(%rsp)
 8:  mov 8(%rsp), %eax
     mov 12(%rsp), %ecx
     cmpl $B_MUL, N_OP(%r12)

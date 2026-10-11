@@ -118,7 +118,7 @@
 
 /* ------------------------------------------------------------ Schema (explicit load schema) */
 #define SC_NCOLS 0
-#define SC_COLS  8     /* entries of 16 bytes: pstr* name, u64 packed type */
+#define SC_COLS  8     /* pointer to entries of 16 bytes: pstr* name, u64 packed type */
 #define SCE_NAME 0
 #define SCE_TYPE 8
 #define SCE_SIZE 16

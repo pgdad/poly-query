@@ -609,10 +609,10 @@ FUNC cast_value
     movzbl %r12b, %ecx
     cmp $T_STR, %ecx
     je cv_to_str
-    cmp $T_STR, %eax
-    je cv_from_str
     cmp $T_DEC, %ecx
     je cv_to_dec
+    cmp $T_STR, %eax
+    je cv_from_str
     cmp %eax, %ecx
     je cv_same
     cmp $T_BOOL, %ecx

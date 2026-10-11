@@ -251,6 +251,17 @@ col_init:
     mov %rax, COL_NULLS(%rbx)
     LEAVE
 
+/* check_input_size(len rdi): RESOURCE_LIMIT above g_max_ingest_bytes */
+check_input_size:
+    cmp g_max_ingest_bytes(%rip), %rdi
+    ja 1f
+    ret
+1:  sub $8, %rsp
+    mov $E_RESOURCE_LIMIT, %edi
+    CSTR %rsi, "input exceeds the maximum ingest size (%ld bytes)"
+    mov g_max_ingest_bytes(%rip), %rdx
+    call pq_raisef
+
 /* raise_row_limit(): RESOURCE_LIMIT */
 raise_row_limit:
     sub $8, %rsp
@@ -640,6 +651,8 @@ FUNC ingest_csv
     movzbl %r9b, %r14d              /* delimiter */
     call arena_new
     mov %rax, g_pending_arena(%rip)
+    mov %r13, %rdi
+    call check_input_size
     /* skip a UTF-8 BOM */
     cmp $3, %r13
     jb 1f
@@ -1086,6 +1099,8 @@ FUNC ingest_json
     mov %rax, g_pending_arena(%rip)
     mov J_DATA(%rsp), %r12
     mov J_LEN(%rsp), %r13
+    mov %r13, %rdi
+    call check_input_size
     cmp $3, %r13
     jb 1f
     cmpb $0xEF, (%r12)

@@ -234,6 +234,7 @@ FUNC sql_parse
     mov %r12, PS_TOKS(%rbx)
     mov %r13, PS_NTOK(%rbx)
     /* statements of later phases */
+    mov %rbx, %rdi
     call p_cur
     cmpl $TOK_KEYWORD, TK_KIND(%rax)
     jne 2f
