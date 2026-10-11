@@ -40,6 +40,8 @@ done
 for side in before after; do
   (cd "$BASE/$side" && python3 benchmarks/harness/bench.py --engines "$list" --scale "$SCALE" --label "$side-optimize")
   for d in "$BASE/$side"/results/performance/*"-$SCALE-$side-optimize"; do
+    # The worktree also contains earlier, already committed result dirs.
+    [[ -e "results/performance/$(basename "$d")" ]] && continue
     cp -r "$d" "results/performance/$(basename "$d")"
   done
 done
