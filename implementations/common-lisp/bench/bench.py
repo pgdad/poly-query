@@ -65,6 +65,8 @@ CONFIGS = {
     "vec4": {"mode": "vectorized", "threads": 4},
     "vec8": {"mode": "vectorized", "threads": 8},
     "vec4_merge": {"mode": "vectorized", "threads": 4, "join": "merge"},
+    "vec1_merge": {"mode": "vectorized", "threads": 1, "join": "merge"},
+    "vec1_noopt": {"mode": "vectorized", "threads": 1, "optimize": False},
     "row_merge": {"mode": "row", "threads": 1, "join": "merge"},
     "baseline": {},          # an engine without Phase 5 options (use --engine of that build)
 }

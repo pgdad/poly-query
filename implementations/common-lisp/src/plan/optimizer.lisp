@@ -10,9 +10,10 @@
 ;;;;    and moves each one as close to the scans as possible: below joins
 ;;;;    (never into the NULL-supplying side of a LEFT JOIN from above) and
 ;;;;    into the conditions of inner joins, so comma joins become equi-joins.
-;;;;  * REORDER-JOINS rewrites chains of three or more inner joins into a
-;;;;    left-deep order that starts with the smallest input and always adds a
-;;;;    connected input (avoiding cross products), smallest first.
+;;;;  * REORDER-JOINS rewrites chains of three or more inner joins whose
+;;;;    written order contains a cross product into a left-deep order that
+;;;;    starts with the smallest input and always adds a connected input
+;;;;    (avoiding cross products), smallest first.
 ;;;;  * PRUNE-COLUMNS removes every column a parent does not need, so scans
 ;;;;    read only referenced columns.
 ;;;; With `optimize: false` only column pruning runs (Phase 3 requires the
@@ -206,9 +207,17 @@ conjuncts, with column positions relative to the tree's row (NODE at OFFSET)."
                                          (split-conjuncts (lp-join-condition node)))))))))
       (values (list (list (reorder-joins node) offset)) '())))
 
+(defun cross-product-p (node)
+  "True if the inner-join tree NODE contains a join without condition."
+  (and (inner-join-node-p node)
+       (or (null (lp-join-condition node))
+           (some #'cross-product-p (lnode-children node)))))
+
 (defun reorder-joins (node)
-  "Reorder every chain of at least three inner joins in NODE."
-  (if (inner-join-node-p node)
+  "Reorder every chain of at least three inner joins in NODE whose written
+order contains a cross product (other orders are kept: without join
+selectivity estimates the written order is the better guess)."
+  (if (and (inner-join-node-p node) (cross-product-p node))
       (multiple-value-bind (leaves conjuncts) (collect-inner-joins node 0)
         (if (< (length leaves) 3)
             (rebuild-with-children node (mapcar #'reorder-joins (lnode-children node)))

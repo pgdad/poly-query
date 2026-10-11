@@ -404,10 +404,14 @@ exercise the parallel paths on small tables.
   disappears, one that folds to FALSE/NULL produces no rows without
   reading its input);
 * predicate pushdown and column (projection) pruning (Phase 3);
-* join reordering for chains of ≥ 3 inner joins: greedy left-deep order
-  starting from the smallest estimated input and always adding the smallest
-  input connected by a join conjunct (cross products only when unavoidable);
-  a Project restores the original column order;
+* join reordering for chains of ≥ 3 inner joins whose written order
+  contains a cross product: greedy left-deep order starting from the
+  smallest estimated input and always adding the smallest input connected
+  by a join conjunct (cross products only when unavoidable); a Project
+  restores the original column order. Chains without a cross product keep
+  their written order: without join-selectivity statistics, "smallest
+  input first" was measured to pick worse orders for typical foreign-key
+  chains with a selective filter on a later table (`q7`);
 * top-N for `ORDER BY … LIMIT` (already used since Phase 2; now vectorized
   with threshold pruning).
 
@@ -597,6 +601,95 @@ objects and closures; group keys are stored once in the key table.
 * During shutdown, every endpoint except `/health`, `/metrics`,
   `/v1/version`, `/v1/capabilities`, the table/schema/stats reads and the
   query list/cancel endpoints answers `SHUTTING_DOWN`.
+
+## Performance
+
+Measured with `bench/bench.py` (median of 5 runs, wall time seen by the
+client: parsing, planning, execution and JSON serialization of the result)
+on the `1m` datasets of `datasets/generators/pqgen.py generate --scale 1m`
+(transactions, sensor_readings, order_items, nulls_heavy and sort_keys with
+1,000,000 rows each, orders 250,000, customers 100,000, products 20,000;
+CSV loaded with their schemas, column layout). Machine: AMD Ryzen 9 9950X3D
+(16 cores / 32 threads), SBCL 2.6.9. The script checks that all
+configurations return the same rows. Queries are listed in `bench/bench.py`
+(`q16`/`q17` return only the row count); times in milliseconds.
+
+* *baseline*: the Phase 4 engine (commit `a7f07a6`, row-at-a-time, before any
+  Phase 5 work);
+* *row*: `mode: "row"` of this engine (the same Volcano executor; it gains from
+  the engine-wide changes: faster result serialization, heap settling after
+  loads, NOT/constant rewrites);
+* *vec1/vec4/vec8*: `mode: "vectorized"` with `threads` 1, 4, 8.
+
+| query | baseline | row | vec1 | vec4 | vec8 | baseline/vec1 | baseline/vec8 |
+|---|---|---|---|---|---|---|---|
+| q1_filter_count | 31 | 31 | 13 | 6.7 | 5.3 | 2.4× | 5.8× |
+| q2_group_low | 84 | 74 | 29 | 9.2 | 6.0 | 2.9× | 14.0× |
+| q3_group_high | 144 | 129 | 29 | 27 | 27 | 5.0× | 5.4× |
+| q4_join_agg | 127 | 120 | 65 | 29 | 19 | 2.0× | 6.7× |
+| q5_topn | 54 | 54 | 9.9 | 5.1 | 4.7 | 5.5× | 11.6× |
+| q6_float_agg | 78 | 77 | 20 | 7.9 | 6.5 | 3.9× | 11.9× |
+| q7_join3 | 89 | 95 | 49 | 19 | 14 | 1.8× | 6.4× |
+| q8_count_distinct | 47 | 46 | 32 | 16 | 14 | 1.5× | 3.3× |
+| q9_project | 53 | 40 | 21 | 15 | 15 | 2.6× | 3.6× |
+| q10_nulls | 85 | 88 | 50 | 16 | 8.7 | 1.7× | 9.8× |
+| q11_case_expr | 74 | 75 | 47 | 16 | 11 | 1.6× | 6.5× |
+| q12_sort | 225 | 199 | 12 | 9.5 | 9.8 | 18.0× | 23.0× |
+| q13_left_join | 68 | 67 | 29 | 16 | 13 | 2.3× | 5.3× |
+| q14_distinct | 62 | 62 | 41 | 12 | 6.6 | 1.5× | 9.4× |
+| q15_comma_join | 16 | 17 | 6.7 | 3.1 | 2.5 | 2.4× | 6.6× |
+| q16_full_sort | 1067 | 1061 | 351 | 148 | 115 | 3.0× | 9.3× |
+| q17_scan_filter | 75 | 70 | 24 | 10 | 11 | 3.1× | 6.8× |
+
+Observations: the vectorized executor alone is 1.5–18× faster than the
+baseline (typed loops, no per-row allocation, dictionary-aware string
+predicates, integer-keyed hash tables; top-N with threshold pruning turns
+`q12` from a full re-sorting buffer into one comparison per row).
+Parallelism scales scans, filters, joins and low-cardinality aggregation
+almost linearly up to 4–8 threads; high-cardinality aggregation (`q3`,
+80,777 groups) and result-heavy queries (`q9`, 50k rows) are bounded by
+the serial result serialization and the merge of partial states.
+
+**Join algorithms** (`join` option, vectorized unless noted):
+
+| query | hash (vec1) | merge (vec1) | merge (vec4) | merge (row) |
+|---|---|---|---|---|
+| q4_join_agg | 82 | 320 | 135 | 775 |
+| q7_join3 | 46 | 197 | 90 | 171 |
+| q13_left_join | 32 | 71 | 43 | 78 |
+
+The vectorized sort-merge join is 2.4× faster than the row merge join on
+`q4` (1M × 100k rows; the row version sorts row vectors with consed key
+lists), similar on `q7`, and scales with threads (parallel sorts); hash
+joins remain the best choice for these unsorted inputs, which is why
+`join: "auto"` picks them.
+
+**Logical optimizer** (`optimize` option):
+
+| query | row | row, optimize=false | vec1 | vec1, optimize=false |
+|---|---|---|---|---|
+| q2_group_low | 85 | 81 | 30 | 34 |
+| q4_join_agg | 121 | 126 | 70 | 71 |
+| q7_join3 | 93 | 199 | 36 | 147 |
+| q13_left_join | 66 | 102 | 30 | 86 |
+| q15_comma_join | 20 | RESOURCE_LIMIT after 2.1 s | 7.1 | RESOURCE_LIMIT after 3.9 s |
+
+Without pushdown the comma join of `q15` (orders × customers) becomes a
+cross product of 25 billion pairs and stops at the 100,000,000 join-row
+limit; with it, it is a 7 ms hash join. Pushdown of the filter on
+`orders` below the joins halves `q7`; in `q13` it moves the `quantity`
+condition of the LEFT join's ON clause into the scan of `items`. Join
+reordering: on the conformance fixtures,
+`SELECT COUNT(*) FROM orders o, products p, items i WHERE
+i.order_id = o.order_id AND i.product_id = p.product_id` (written with a
+cross product between its first two tables) takes 3 ms optimized versus
+1.6 s with `optimize: false` (50 million nested-loop pairs).
+
+Other engine-wide measurements: rendering 50,000 result rows of four columns
+dropped from about 21 ms to 10 ms (buffered serialization without
+`FORMAT`); a full collection after loading tables of more than 100,000 rows
+removed sporadic 80–180 ms GC pauses from later queries (it adds about
+0.2–0.5 s to such loads).
 
 ## Testing
 
