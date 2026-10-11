@@ -3,7 +3,7 @@
 
 AS_DRIVER ?= gcc
 ASFLAGS   := -c -Iinclude -Wa,--noexecstack -g
-LDFLAGS   := -no-pie -Wl,-z,noexecstack
+LDFLAGS   := -no-pie -Wl,-z,noexecstack -Wl,-z,now
 LDLIBS    := -lm -lpthread
 
 BUILD     := out
