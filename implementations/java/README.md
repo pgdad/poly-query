@@ -39,10 +39,12 @@ change.union_all change.decimal38`.
 ## Prerequisites and build
 
 * OpenJDK 27 (`java`, `javac`, `jar` on `PATH`, or `JAVA_HOME` set). No other tools,
-  no network, no third-party libraries (Track A: standard library only).
+  no network, no third-party libraries (Track B: tuning of build and runtime allowed, still
+  standard library only).
 * `make build` — compiles with `javac --release 27` into `build/polyquery.jar`, then records
-  the JVM AOT cache `build/polyquery.aot` with a training run (~8 s; see
-  [Latency optimization](#latency-optimization-analytics-workload)).
+  the JVM AOT cache `build/polyquery.aot` with a training run (~11 s in total; see
+  [JVM tuning](#jvm-tuning-track-b)). If the training run fails, the build still succeeds and the
+  engine runs without the cache.
 * `make test` — builds and runs the unit tests (`src/test/java`, plain Java with a small
   runner in `polyquery.TestMain`; JUnit is not used). The native-kernel tests use
   `NATIVE_LIB` (default `../../native-kernels/build/<arch>/libpqkernels.so`, built with
@@ -55,8 +57,8 @@ change.union_all change.decimal38`.
 * `make clean`.
 
 `bin/polyquery` is a POSIX shell launcher that works from any directory (it resolves its
-own location); it uses the AOT cache when it exists and is newer than the jar. Extra JVM flags
-can be passed with `POLYQUERY_JAVA_OPTS`.
+own location); it runs `$JAVA_HOME/bin/java` (else `java`) with the engine's JVM flags, and uses
+the AOT cache when it exists and is newer than the jar. Extra JVM flags can be passed with `POLYQUERY_JAVA_OPTS`.
 
 ```
 bin/polyquery version | capabilities
@@ -69,7 +71,8 @@ bin/polyquery serve --port N [--host H] [--workers N] [--queue-depth N] [--query
 
 ## Libraries
 
-None. `ENGINE.json`: `{"language": "java", "track": "A", "libraries": []}`.
+None. `ENGINE.json`: `"language": "java"`, `"track": "B"`, `"libraries": []`, and under `"tuning"` the
+kept build and runtime tuning (see [JVM tuning](#jvm-tuning-track-b)).
 
 ## Architecture
 
@@ -662,6 +665,7 @@ Hot spots were found by profiling each slow query with JFR
    with its logging off (`-Xlog:disable -Xlog:all=off`), because the JVM reports an unusable
    cache (moved jar, other JDK) on stdout, which carries the protocol; the engine then simply
    starts without it. If the training run fails, the build still succeeds without a cache.
+   (Track B revised the training run and the launcher's JVM; see [JVM tuning](#jvm-tuning-track-b).)
 
 Tried and dropped (no measurable gain within the noise): presizing workers' partial aggregation
 tables from column statistics (helped DISTINCT, hurt high-cardinality GROUP BY through
@@ -678,6 +682,216 @@ failing subqueries, subqueries behind AND/OR, in the select list) — all with 0
 Remaining limits: high-cardinality GROUP BY (A03, A15, A17) is bound by building and merging
 per-worker hash tables (each worker's table holds most keys); a radix-partitioned exchange
 would be the next step. Hash-join build sides are still materialized by one thread.
+
+## JVM tuning (Track B)
+
+Task: tune the build and the runtime of the accepted engine for **start-up** (process spawn to
+first protocol response), **first-query (cold)** and **warm** latency of
+[`benchmarks/workloads/analytics.json`](../../benchmarks/workloads/analytics.json) at scale `1m`,
+without changing any result. Only changes whose effect was measured beyond run-to-run noise are
+kept; everything tried is listed below with its measured effect.
+
+### Method
+
+* **Workload**: the 20 queries of `benchmarks/workloads/analytics.json` over the pqgen `1m` tables
+  (generated with `python3 datasets/generators/pqgen.py generate --scale 1m`; all 9 tables
+  loaded from CSV with the generator's schema files, the workload's two indexes created), default
+  query options, `result: count` where the workload asks for it.
+* **Tool**: [`tools/jvmbench.py`](tools/jvmbench.py), everything through `bin/polyquery session`.
+  *Start-up* = client-side time from spawning the process to reading the response to its first
+  request (`{"op":"version"}`); *cold* = first execution of a query in a fresh process (after
+  loading; class loading, interpretation and JIT compilation included); *warm* = median of 9
+  executions after 3 warm-up executions; *RSS* = VmRSS after start-up and after loading, and the
+  process's peak (VmHWM). With several `--engine`s the engines' rounds alternate, so changes in
+  machine load hit all of them alike; every comparison below was run that way (interleaved),
+  and results were compared (all identical).
+* **Code changes** were also measured with [`tools/microbench.py`](tools/microbench.py): one session
+  per engine, a query repeated 30 times in turns, median of the engine's own `elapsed_us` over the
+  last 20 runs.
+* **Noise**: the machine (AMD Ryzen 9 9950X3D, 16 cores / 32 threads, 249 GB, OpenJDK 27) is
+  shared with other jobs (load average 4–11 during the runs). Measured A/A spread: start-up medians
+  ±1 ms (100 spawns), workload totals ±5 % (cold) and ±8 % (warm) within an interleaved run, single
+  warm queries up to ±30 % (they still include JIT tier changes after only 3 warm-ups), micro
+  benchmarks ±4 %. Peak RSS varies by ±500 MB between rounds of the same engine (ParallelGC's
+  adaptive heap sizing reacts to the allocation rate).
+
+### Result
+
+*Before* = the engine this task started from (commit `7aa4612`, its `make build` and launcher,
+AOT cache included), *after* = this version; 8 interleaved rounds (start-up: 100 interleaved
+spawns each). Raw numbers: [`bench/jvm-tuning-1m.json`](bench/jvm-tuning-1m.json).
+
+| | before | after | change |
+|---|---:|---:|---:|
+| start-up (spawn → first response) | 23.1 ms | 18.6 ms | −19 % |
+| cold, sum of the 20 queries | 1150 ms | 738 ms | −36 % |
+| warm, sum of the 20 medians | 352.9 ms | 281.5 ms | −20 % |
+| RSS after start-up | 47.2 MB | 46.1 MB | −1 MB |
+| RSS after loading the tables | 4168 MB | 4223 MB | ≈ |
+| peak RSS | 5152 MB | 5507 MB | +7 % (heap sizing, see Method) |
+
+| query | before cold | after cold | before warm | after warm |
+|---|---:|---:|---:|---:|
+| q01_filter_selective | 30.0 | 30.9 | 0.29 | 0.40 |
+| q02_filter_low_selectivity | 44.0 | 49.6 | 0.93 | 1.16 |
+| q03_range_filter_time | 26.8 | 18.5 | 1.08 | 0.96 |
+| q04_arith_aggregate | 139.5 | 48.8 | 1.26 | 1.16 |
+| q05_groupby_low_card | 13.8 | 14.2 | 6.68 | 5.77 |
+| q06_groupby_high_card | 35.5 | 16.1 | 12.92 | 12.69 |
+| q07_groupby_skewed | 19.1 | 23.3 | 15.90 | 16.40 |
+| q08_groupby_uniform_multi | 12.3 | 9.6 | 2.89 | 2.90 |
+| q09_distinct_count | 122.2 | 93.7 | 6.59 | 7.35 |
+| q10_join_customers | 20.3 | 21.7 | 5.74 | 5.60 |
+| q11_join_star | 93.3 | 75.7 | 4.30 | 4.39 |
+| q12_left_join_anti | 13.7 | 11.4 | 7.48 | 7.37 |
+| q13_sort_topn | 40.4 | 11.0 | 0.80 | 0.85 |
+| q14_sort_full_string | 165.4 | 131.4 | 170.33 | 113.47 |
+| q15_sort_multi_key | 109.5 | 68.6 | 84.55 | 71.21 |
+| q16_timeseries_hourly | 44.4 | 37.2 | 3.60 | 1.30 |
+| q17_wide_projection | 3.7 | 2.2 | 1.34 | 1.56 |
+| q18_nulls | 62.6 | 41.6 | 2.21 | 2.37 |
+| q19_cte_subquery | 27.5 | 25.1 | 22.10 | 21.33 |
+| q20_string_functions | 126.0 | 7.9 | 1.90 | 3.30 |
+| **total** | **1150.0** | **738.3** | **352.89** | **281.54** |
+
+Most first executions are much faster (q04, q13, q20: 3–16×), the full sorts are faster cold
+and warm, and start-up lost a fifth. Single warm values below ~2 ms that moved (q01, q02, q20)
+are early-JIT effects of individual queries: q20, for example, runs its planning code and the
+aggregation coordinator loop in C1-compiled tiers for a few more repetitions than before (its
+last repetitions take 2 ms as before); they are within the per-query noise described above.
+
+### Techniques: kept and dropped
+
+Effects are differences between interleaved runs of otherwise identical engines (start-up:
+median of 60–120 spawns; cold/warm: workload totals; RSS: after start-up unless noted). The
+first rows were measured on the final engine by removing one technique at a time (7 rounds),
+the others when they were tried.
+
+| technique | decision | start-up | cold total | warm total | RSS |
+|---|---|---:|---:|---:|---:|
+| AOT cache (`-XX:AOTCache`, existing; re-verified) | kept | 54.0 → 19.8 ms | 1803 → 728 ms | 284 → 282 (≈) | +6–8 MB (mapped cache) |
+| AOT training through the real session entry point, broader generic query mix | kept | 23.5 → 18.2 ms | 1088 → 974 ms (−10 %) | ≈ (334 → 333) | −2.5 MB |
+| `-XX:CompileThresholdScaling=0.5` | kept | ≈ (19.0 / 19.8) | 870 → 728 ms (−16 %); 3 other runs −18 to −25 % | ≈ (286 / 282) | ≈ (peak 5669 / 5712 MB) |
+| `-XX:+UseParallelGC` (existing) vs default G1 | kept | ≈ (19.9 / 19.8) | ≈ (757 / 728) | ≈ (287 / 282) | after loading −2.2 GB, peak −0.95 GB |
+| sort: typed 64-bit sort keys, no per-comparison dispatch | kept | – | q14 165 → 131, q15 110 → 69 | q14 170 → 113, q15 85 → 71 | +20 MB transient per 1M-row string sort |
+| one arithmetic kernel class per operator | kept | – | 714 → 644 ms (−10 %) | 266 → 247 ms (−7 %; q08 6.5 → 2.9) | ≈ |
+| primitive object interning (`ObjectIds`) instead of `HashMap<Object, Integer>` | kept | – | ≈ (workload strings are dictionary-encoded) | ≈ | ≈ |
+| trimmed runtime image (`jlink`, `java.base` only) | dropped | ≈ (−0.3 / +0.8 ms in two 120-spawn runs) | ≈ (728 / 795) | ≈ (282 / 272) | −2.7 MB |
+| `-XX:-UsePerfData` (existing) | dropped | ≈ (18.4 / 18.0 ms, 100 spawns) | ≈ (1053 / 1109) | ≈ (298 / 293) | ≈ |
+| `-XX:+AOTCompileEagerly` (experimental) | dropped | ≈ (21.7 / 22.8) | ≈ (1046 / 1054) | ≈ (278 / 288) | +4 MB |
+| `-XX:CompileThresholdScaling=0.25` / `0.1` | dropped | ≈ / +5 ms | 882 / 703 vs 790 (0.5) | ≈ (310 / 330 vs 353) | +1 / +6 MB |
+| `-XX:+UseTransparentHugePages` | dropped | ≈ (21.0 / 19.9) | +2 % | +3 % | +9 MB |
+| `-XX:+AlwaysPreTouch` | dropped | +6 ms | −4 % (noise level) | ≈ | +14 MB; after loading +1 GB |
+| `-Xms16g` | dropped | +7 ms | ≈ | +4 % | +32 MB; peak +3.3 GB |
+| `-Xmn4g` | dropped | +4 ms | +5 % | +19 % | ≈ |
+| `-XX:ReservedCodeCacheSize=64m` | dropped | ≈ | ≈ | ≈ | ≈ |
+| Serial GC | dropped | ≈ | ≈ | ≈ | peak −1.4 GB, but loading 7.5 → 8.3 s and no parallel collection |
+| ZGC | dropped | +5 ms | +14 % | +9 % | peak +3.3 GB |
+| switch on the operator hoisted out of the loops, one class for all operators | dropped (replaced by per-operator classes) | – | – | micro: −3 % (A/A ±4 %) | – |
+
+`≈` = within noise. The flags and the training run were tried on the engine of that time, the
+GC/heap/THP rows sequentially (5 rounds each) against the starting engine.
+
+### Compilation
+
+* **javac**: `--release 27 -encoding UTF-8 -Xlint:all,-serial` (unchanged). Verified: the class
+  files are version 71 (Java 27); javac's default debug attributes (source file, line numbers, no
+  local variable tables) do not affect JIT-compiled code; no reflection anywhere in `src/main`
+  (`Class.forName`, `getMethod`, `invoke`, `newInstance`: none).
+* **AOT cache** (JEP 483/514/515; existing, re-verified with `-Xlog:class+load` and
+  `-Xlog:aot`): the cache maps, AOT-linked classes, archived heap objects, training profiles and
+  cached adapters/stubs are used. Before this task, 65 classes were still loaded from outside the
+  cache up to the first response, among them `polyquery.Main` and its option parsing, because the
+  training run called the request handler directly. **AotTraining now drives `Main.run` in
+  `session` mode** (stdin/stdout redirected; a stream checks every response for `"ok":true`),
+  starting with `{"op":"version"}`, loading its synthetic tables from CSV *with explicit schemas*
+  (like the workload), creating a hash and a B-tree index, and running a broader generic query mix
+  (index lookups, DECIMAL arithmetic in aggregates, full and multi-key sorts with `result:
+  count`, anti joins, NULL-heavy predicates, CTEs referenced twice, …) — none of them a benchmark
+  query, all over its own synthetic `fact`/`dim` tables. Now only 4 classes are created outside the
+  cache before the first response (a lambda in `Main.main`, a pattern-switch helper of
+  `JsonWriter`, two small JDK classes); the engine's first response comes 0.7 ms after that of a
+  hello-world JVM on the same machine (19.0 vs 18.4 ms), i.e. start-up is at the JVM's floor.
+  The training run uses the launcher's JVM flags (`JVM_FLAGS` in the Makefile) and JVM; 30
+  consecutive training runs all succeeded. A stale cache (older than the jar) is not passed; an
+  unusable one (other JDK, moved jar) is rejected by the JVM silently, since `-Xlog:disable
+  -Xlog:all=off` keeps the JVM's warnings off stdout.
+* A broader training profile is not free: profiles of generic kernels became more polymorphic,
+  which first made two warm queries slower (q15 sort 60 → 88 ms, q08 3 → 6.5 ms: the generic
+  comparator and the all-operator arithmetic kernel compiled later / less specialized). Both were
+  fixed at the root by the two dispatch changes below, which make those kernels small and
+  type-stable.
+* **jlink** (dropped): the engine needs only `java.base` (`jdeps --print-module-deps`); a
+  `java.base`-only image (`--strip-debug --no-man-pages --no-header-files`, built in 1 s) worked
+  with the AOT cache and saved 2.7 MB RSS, but start-up was not measurably faster with the AOT
+  cache in place (the full module graph and the classes come from the cache either way).
+
+### Boxing and dispatch in hot loops
+
+* **Sorting** (`SortBatches.order`): rows were compared by a lambda that switched on each key
+  column's kind (`LONG`/`DOUBLE`/strings/wide DECIMAL) per comparison and read string objects for
+  every tie. Its JIT profile is shared by all queries, so after a string sort it was compiled for
+  strings and numeric multi-key sorts got slower (and vice versa). Now every sort key becomes an
+  order-preserving unsigned 64-bit key per row (direction folded in; exact for numbers, a prefix
+  for strings and wide DECIMALs), compared in one loop over `long[]`s; strings also get a second
+  4-unit prefix and their length, so two strings with equal 8-unit prefixes are ordered by length
+  alone unless both are longer than 8 units (the scattered `String` objects were 25 % of the
+  string sort's samples: cache misses). Within runs of equal radix keys a numeric first key is
+  skipped. Micro benchmark (full sort of 1M rows): `ORDER BY str_key, id` 170 → 110 ms (−35 %),
+  `ORDER BY dup_key DESC, float_key, id` 102 → 74 ms (−27 %), `ORDER BY float_key, dup_key`
+  45 → 34 ms (−24 %), `customers ORDER BY email DESC` 22.2 → 18.6 ms. A new unit test checks the
+  sort against an independent reference over strings around the 4/8-unit boundaries, embedded
+  U+0000, surrogate pairs, NULLs and both directions (it catches a wrong length rule).
+* **Arithmetic kernels** (`Kernels.LongArith/DecimalArith/DoubleArith`): one class evaluated
+  every operator with a `switch (op)` per element. Hoisting the switch out of the loops alone gave
+  nothing measurable (C2 already unswitches the loop-invariant switch: −3 % at ±4 % noise; dropped).
+  What mattered was the size of the method: `LongArith.eval` was 583 bytes of bytecode, and in the
+  workload its C2 version arrived only after q08's last measured repetition (C1 code until then).
+  Each operator is now its own small final class (`Add`, `Sub`, `Mul`, `Div`, `Mod`; a sealed
+  base class does the null handling), so each kernel is profiled and compiled separately and
+  quickly. Overflow semantics are unchanged and exact: `Math.addExact` / `subtractExact` /
+  `multiplyExact` (or the equivalent branch-free sign test on the null-free fast path), division
+  by zero and `Long.MIN_VALUE / -1` checked, DECIMAL results checked against 18 digits.
+* **Boxed collections**: string (and wide DECIMAL) interning in group keys, DISTINCT aggregates,
+  in-memory dictionary encoding and PQCF dictionary encoding used `HashMap<Object, Integer>` plus a
+  `List` (a boxed `Integer` per new value, two lookups per insert). `common.ObjectIds` is a
+  primitive open-addressing table (values, cached hash codes, `int` ids). Micro benchmark:
+  `GROUP BY str_key` over 1M mostly distinct strings 94 → 84 ms (−10 %), `COUNT(DISTINCT email)
+  GROUP BY country` 7.9 → 6.4 ms (−20 %); the workload's string columns are dictionary-encoded, so
+  its queries do not reach this path.
+* Not changed: the row engine (`exec/Accumulator`, `ExpressionCompiler`, `ScalarFunctions`) works
+  on boxed values by design — it is the retained Phase 5 baseline (`mode: row`), not used by the
+  workload's default vectorized execution; scalar functions without a batch kernel (e.g. `UPPER`)
+  run per distinct dictionary value, not per row.
+
+### JVM flags
+
+Final flags (`bin/polyquery`, and the same in the Makefile's training run):
+`-XX:+UseParallelGC -XX:CompileThresholdScaling=0.5 -XX:AOTCache=build/polyquery.aot
+-Xlog:disable -Xlog:all=off`. JDK 27's ergonomics on this machine: initial heap 8 MB, maximum
+30 GB, 15 compiler threads, compact object headers on by default.
+
+* `CompileThresholdScaling=0.5` halves the invocation/back-edge thresholds of the tiered
+  compiler: hot kernels reach C1 and C2 sooner during a query's first execution. `0.25` gave no
+  further gain, `0.1` cost 5 ms of start-up (more compilations during boot). It does not trade
+  steady-state speed (C2 still compiles everything hot; `TieredStopAtLevel` is not used).
+* GC: ParallelGC kept (same latency as G1, ~1 GB less peak and 2.2 GB less after loading, because
+  G1 grows the heap earlier); Serial uses less memory but loads more slowly and collects
+  single-threaded, ZGC is slower and larger.
+* `-XX:-UsePerfData` was dropped: no measurable effect on start-up (perf data is a 32 KB mapped
+  file) or anything else.
+
+### Known limitations of the tuning
+
+* The AOT cache's method profiles come from a timing-dependent training run, so individual cold
+  times vary between builds (q06's first execution measured 16–100 ms with caches from different
+  training runs of the same code); totals are stable.
+* Warm medians after 3 warm-ups still include JIT tier transitions for some queries; with more
+  repetitions every query reaches the steady state of the starting engine or better.
+* Pattern-matching `switch`es create a small hidden class at first use (`SwitchBootstraps`, not
+  archived by the AOT cache in JDK 27); about 25 such sites run during the workload's first
+  queries. Rewriting them as `instanceof` chains was not attempted (idiomatic code; the cost is
+  within the cold-latency noise).
 
 ## Native kernels (M9)
 

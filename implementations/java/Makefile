@@ -1,5 +1,6 @@
 # PolyQuery Java engine — plain javac/jar build (no third-party dependencies).
-JAVA     ?= java
+# the JVM bin/polyquery runs (the AOT cache must be recorded with the same one)
+JAVA     ?= $(if $(JAVA_HOME),$(JAVA_HOME)/bin/java,java)
 JAVAC    ?= javac
 JAR      ?= jar
 RELEASE  := 27
@@ -7,9 +8,6 @@ BUILD    := build
 CLASSES  := $(BUILD)/classes
 TCLASSES := $(BUILD)/test-classes
 ENGINE_JAR := $(BUILD)/polyquery.jar
-# Trimmed Java runtime (jlink, java.base only); used by bin/polyquery when present
-JLINK    ?= $(if $(JAVA_HOME),$(JAVA_HOME)/bin/jlink,jlink)
-RUNTIME  := $(BUILD)/runtime
 # AOT cache (classes + method profiles from a training run); used by bin/polyquery when present
 AOT_CACHE := $(BUILD)/polyquery.aot
 # JVM flags of the engine; bin/polyquery passes the same ones (see README.md, "JVM tuning")
@@ -22,7 +20,7 @@ TEST_SRC := $(shell find src/test/java -name '*.java')
 # Native kernel library used by the unit tests and bench-kernels (tests are skipped without it).
 NATIVE_LIB ?= ../../native-kernels/build/$(shell uname -m)/libpqkernels.so
 
-build: $(ENGINE_JAR) $(RUNTIME)/release $(AOT_CACHE)
+build: $(ENGINE_JAR) $(AOT_CACHE)
 
 $(ENGINE_JAR): $(SRC) src/main/resources/MANIFEST.MF
 	rm -rf $(CLASSES)
@@ -30,21 +28,14 @@ $(ENGINE_JAR): $(SRC) src/main/resources/MANIFEST.MF
 	$(JAVAC) --release $(RELEASE) -encoding UTF-8 -Xlint:all,-serial -d $(CLASSES) $(SRC)
 	$(JAR) --create --file $(ENGINE_JAR) --main-class polyquery.Main --manifest src/main/resources/MANIFEST.MF -C $(CLASSES) .
 
-# The engine needs only java.base (jdeps --print-module-deps); a runtime image of just that module
-# starts a little faster and smaller. If jlink is unavailable or fails, the launcher uses the JDK.
-$(RUNTIME)/release: $(ENGINE_JAR)
-	rm -rf $(RUNTIME)
-	$(JLINK) --add-modules java.base --strip-debug --no-man-pages --no-header-files --output $(RUNTIME) \
-		|| rm -rf $(RUNTIME)
-
-# Training run recording the AOT cache, with the JVM and flags the launcher uses (the trimmed
-# runtime if it was built). The class path must be the absolute jar path the launcher uses. The
-# cache only speeds up start-up and JIT warm-up; if it cannot be created, the engine runs without it.
-$(AOT_CACHE): $(ENGINE_JAR) $(RUNTIME)/release
+# Training run recording the AOT cache, with the JVM flags the launcher uses. The class path must
+# be the absolute jar path the launcher uses. The cache only speeds up start-up and JIT warm-up;
+# if it cannot be created, the engine runs without it.
+$(AOT_CACHE): $(ENGINE_JAR)
 	rm -f $(AOT_CACHE)
-	JVM=$(CURDIR)/$(RUNTIME)/bin/java; [ -x "$$JVM" ] || JVM=$(JAVA); \
-	"$$JVM" $(JVM_FLAGS) -Xlog:disable -Xlog:all=off -XX:AOTCacheOutput=$(CURDIR)/$(AOT_CACHE) \
-		-cp $(CURDIR)/$(ENGINE_JAR) polyquery.training.AotTraining || rm -f $(AOT_CACHE)
+	$(JAVA) $(JVM_FLAGS) -Xlog:disable -Xlog:all=off -XX:AOTCacheOutput=$(CURDIR)/$(AOT_CACHE) \
+		-cp $(CURDIR)/$(ENGINE_JAR) polyquery.training.AotTraining $(CURDIR)/$(BUILD)/aot-training \
+		|| rm -f $(AOT_CACHE)
 
 test: build
 	rm -rf $(TCLASSES)

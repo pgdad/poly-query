@@ -1,1 +1,45 @@
-{"language": "java", "track": "A", "libraries": []}
+{
+  "language": "java",
+  "track": "B",
+  "libraries": [],
+  "tuning": {
+    "javac": {
+      "options": "--release 27 -encoding UTF-8 -Xlint:all,-serial",
+      "notes": "unchanged; class files are version 71 (Java 27); javac's default debug info (source, lines) has no effect on JIT-compiled code"
+    },
+    "build_steps": [
+      {
+        "step": "java $(JVM_FLAGS) -XX:AOTCacheOutput=build/polyquery.aot -cp build/polyquery.jar polyquery.training.AotTraining",
+        "why": "classes pre-loaded and linked plus method profiles of a training run (synthetic data, generic queries, driven through the real session entry point); used by the launcher with -XX:AOTCache when newer than the jar, ignored silently when unusable; the build succeeds without it if training fails"
+      }
+    ],
+    "jvm_flags": [
+      {
+        "flag": "-XX:+UseParallelGC",
+        "why": "same latency as the default G1 at about 1.5 GB less peak RSS on the 1m workload"
+      },
+      {
+        "flag": "-XX:CompileThresholdScaling=0.5",
+        "why": "hot query code reaches C1/C2 sooner: first executions about 20-25 % faster, start-up and RSS unchanged"
+      },
+      {
+        "flag": "-XX:AOTCache=build/polyquery.aot -Xlog:disable -Xlog:all=off",
+        "why": "AOT cache (see build_steps); JVM logging off because stdout carries the protocol"
+      }
+    ],
+    "code": [
+      "sort: order-preserving 64-bit keys per sort column (plus a second string prefix and the length) compared in one loop, no per-comparison dispatch on the column kind",
+      "INT64/DECIMAL/FLOAT64 arithmetic: one small kernel class per operator instead of a switch on the operator per element",
+      "object interning (group keys, DISTINCT aggregates, dictionary encoding): primitive open-addressing table instead of HashMap<Object, Integer>"
+    ],
+    "dropped": [
+      "jlink runtime image with java.base only (start-up not measurably faster; only -2.7 MB idle RSS)",
+      "-XX:-UsePerfData (no measurable effect)",
+      "-XX:+AOTCompileEagerly (no measurable effect)",
+      "-XX:+UseTransparentHugePages, -XX:+AlwaysPreTouch, -Xms16g, -Xmn4g, -XX:ReservedCodeCacheSize=64m (no gain or slower; more RSS)",
+      "G1 (default), ZGC, Serial GC (no latency gain; more RSS, or slower loading)",
+      "-XX:CompileThresholdScaling=0.25 / 0.1 (no further gain / +5 ms start-up)",
+      "hoisting the operator switch out of the arithmetic loops within one class (C2 already unswitches it: no measurable effect)"
+    ]
+  }
+}

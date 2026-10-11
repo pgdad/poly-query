@@ -11,10 +11,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Random;
-import java.util.stream.Stream;
 import polyquery.Main;
 import polyquery.json.JsonWriter;
 
@@ -29,6 +27,11 @@ import polyquery.json.JsonWriter;
  * already loaded and linked plus the method profiles of its hot paths, so a fresh engine process
  * starts faster and compiles them early: first executions of queries are several times faster.
  * Neither the data nor the queries are those of any benchmark.
+ *
+ * <p>Everything this run loads goes into the cache and is loaded at every start-up, so the run
+ * itself avoids library code the engine does not use (temporary-file naming via
+ * {@code SecureRandom}, {@code String.format}, file-tree walking): its scratch directory is
+ * given as the argument ({@code make build} uses {@code build/aot-training}).
  */
 public final class AotTraining {
     private static final int FACT_ROWS = 300_000;
@@ -117,7 +120,11 @@ public final class AotTraining {
     }
 
     public static void main(String[] args) throws IOException {
-        Path dir = Files.createTempDirectory("polyquery-aot");
+        if (args.length != 1) {
+            throw new IllegalArgumentException("usage: AotTraining SCRATCH_DIR");
+        }
+        Path dir = Path.of(args[0]).toAbsolutePath();
+        Files.createDirectories(dir);
         try {
             writeFact(dir.resolve("fact.csv"));
             writeDim(dir.resolve("dim.csv"));
@@ -141,9 +148,9 @@ public final class AotTraining {
             }
             session(dir, requests);
         } finally {
-            try (Stream<Path> files = Files.walk(dir)) {
-                files.sorted(Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
-            }
+            Files.deleteIfExists(dir.resolve("fact.csv"));
+            Files.deleteIfExists(dir.resolve("dim.csv"));
+            Files.deleteIfExists(dir);
         }
     }
 
@@ -239,11 +246,15 @@ public final class AotTraining {
                 if (r.nextInt(5) < 2) {
                     sb.append('x').append(r.nextInt(300));
                 }
-                sb.append(',')
-                        .append(String.format("2023-%02d-%02d", month, day)).append(',')
-                        .append(String.format("2024-%02d-%02d %02d:%02d:%02d.%06d", month, day, r.nextInt(24),
-                                r.nextInt(60), r.nextInt(60), r.nextInt(1000) * 1000)).append(',')
-                        .append(r.nextBoolean()).append(',');
+                sb.append(",2023-");
+                pad(sb, month, 2).append('-');
+                pad(sb, day, 2).append(",2024-");
+                pad(sb, month, 2).append('-');
+                pad(sb, day, 2).append(' ');
+                pad(sb, r.nextInt(24), 2).append(':');
+                pad(sb, r.nextInt(60), 2).append(':');
+                pad(sb, r.nextInt(60), 2).append('.');
+                pad(sb, r.nextInt(1000) * 1000, 6).append(',').append(r.nextBoolean()).append(',');
                 if (r.nextInt(3) != 0) {
                     sb.append(r.nextInt(1000));
                 }
@@ -253,6 +264,15 @@ public final class AotTraining {
         } catch (UncheckedIOException e) {
             throw e.getCause();
         }
+    }
+
+    /** Appends {@code v} (non-negative) zero-padded to {@code width} digits. */
+    private static StringBuilder pad(StringBuilder sb, int v, int width) {
+        String digits = Integer.toString(v);
+        for (int i = digits.length(); i < width; i++) {
+            sb.append('0');
+        }
+        return sb.append(digits);
     }
 
     private static void writeDim(Path file) throws IOException {
