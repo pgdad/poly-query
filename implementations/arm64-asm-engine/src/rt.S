@@ -46,6 +46,7 @@ err_names:
     .quad s_none, s_parse, s_semantic, s_type, s_overflow, s_div0, s_conv
     .quad s_invarg, s_invreq, s_ingest, s_unsup, s_access, s_notfound
     .quad s_exists, s_reslimit, s_io, s_internal, s_timeout, s_subq, s_cancel
+    .quad s_corrupt, s_version
 s_none:     .asciz "INTERNAL_ERROR"
 s_parse:    .asciz "PARSE_ERROR"
 s_semantic: .asciz "SEMANTIC_ERROR"
@@ -66,6 +67,8 @@ s_internal: .asciz "INTERNAL_ERROR"
 s_timeout:  .asciz "TIMEOUT"
 s_subq:     .asciz "SUBQUERY_CARDINALITY"
 s_cancel:   .asciz "CANCELLED"
+s_corrupt:  .asciz "STORAGE_CORRUPT"
+s_version:  .asciz "STORAGE_VERSION_UNSUPPORTED"
 s_oom:      .asciz "out of memory"
 s_qmem:     .asciz "query memory budget exceeded"
 s_timeoutm: .asciz "query timeout exceeded"
@@ -76,7 +79,7 @@ fmt_g:      .asciz "%.*g"
 
 // err_code_name(w0 code) -> x0 cstr
 FUNC err_code_name
-    cmp  w0, #ERR_CANCELLED
+    cmp  w0, #ERR_LAST
     b.ls 1f
     mov  w0, #ERR_INTERNAL
 1:  ADR_L x1, err_names
@@ -99,6 +102,41 @@ LFUNC copy_errmsg
 2:  strb wzr, [x3, x0]
     ret
 ENDF copy_errmsg
+
+// data_path(x0 Str* relative path) -> x0 cstr "<data_dir>/<path>" (request
+// arena). The caller has validated the path (protocol.md §6).
+//   x19 path, x20 dir length, x21 result
+FUNC data_path
+    stp  x29, x30, [sp, #-48]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    str  x21, [sp, #32]
+    mov  x19, x0
+    LDR_G x0, g_data_dir
+    bl   strlen
+    mov  x20, x0
+    ldr  x1, [x19, #STR_LEN]
+    add  x0, x20, x1
+    add  x0, x0, #2
+    bl   arena_alloc
+    mov  x21, x0
+    LDR_G x1, g_data_dir
+    mov  x2, x20
+    bl   memcpy
+    mov  w1, #'/'
+    strb w1, [x21, x20]
+    add  x0, x21, x20
+    add  x0, x0, #1
+    add  x1, x19, #STR_DATA
+    ldr  x2, [x19, #STR_LEN]
+    add  x2, x2, #1                 // include the NUL
+    bl   memcpy
+    mov  x0, x21
+    ldp  x19, x20, [sp, #16]
+    ldr  x21, [sp, #32]
+    ldp  x29, x30, [sp], #48
+    ret
+ENDF data_path
 
 // pq_raise(w0 code, x1 msg cstr) — noreturn
 FUNC pq_raise

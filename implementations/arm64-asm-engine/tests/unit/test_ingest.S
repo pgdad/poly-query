@@ -639,7 +639,7 @@ LFUNC render
     bl   rprintf
 61: add  x25, x21, x24, lsl #5
     ldr  x9, [x25, #COL_NULLS]
-    ldrb w9, [x9, x23]
+    NULLBIT_TEST 9, 9, 23, 10
     cbz  w9, 62f
     ADR_L x0, s_null
     bl   rprintf

@@ -939,12 +939,18 @@ ENDF ex_tuples
 // =============================================================================
 // ex_scan(x0 PlanNode*, x1 ctx) -> x0 TupleSet*
 // Resolves the range variable's table (materialising derived tables / CTEs)
-// and returns the rows passing the pushed-down filter.
-//   x19 node, x20 ctx, x21 bq, x22 rv, x23 table, x24 ts, x25 row, x26 nrows,
-//   x27 tuple scratch, x28 filter
+// and returns the rows passing the pushed-down filter. Rows come from
+//   * an index lookup (PN_IDX: sorted, de-duplicated row ids), or
+//   * every row group the predicates do not exclude (PQCF-backed tables
+//     with min/max statistics), or
+//   * the whole table.
+// The complete filter is evaluated on every candidate row either way.
+//   x19 node, x20 ctx, x21 bq, x22 rv, x23 table, x24 ts, x25 row, x26 end,
+//   x27 tuple scratch, x28 filter; [sp] RowVec (index scans), [sp+24] rg
 // =============================================================================
 LFUNC ex_scan
     ENTER 5
+    sub  sp, sp, #32
     mov  x19, x0
     mov  x20, x1
     ldr  x21, [x19, #PN_BQ]
@@ -977,26 +983,162 @@ LFUNC ex_scan
     sub  x9, x9, #1
     b    2b
 3:  str  x27, [x20, #EC_TUPLE]
+    ldr  x9, [x19, #PN_IDX]
+    cbnz x9, .Lsc_index
+    ldr  x9, [x23, #TBL_NRG]
+    cbz  x9, .Lsc_full
+    ldr  x9, [x19, #PN_NPREDS]
+    cbnz x9, .Lsc_groups
+.Lsc_full:
     mov  x25, #0
-4:  cmp  x25, x26
-    b.hs 7f
+    bl   .Lsc_range
+    b    .Lsc_end
+.Lsc_groups:                            // row-group skipping
+    str  xzr, [sp, #24]
+4:  ldr  x9, [sp, #24]
+    ldr  x10, [x23, #TBL_NRG]
+    cmp  x9, x10
+    b.hs .Lsc_end
+    ldr  x3, [x23, #TBL_RGS]
+    add  x3, x3, x9, lsl #5             // RG_SIZE = 32
+    add  x9, x9, #1
+    str  x9, [sp, #24]
+    str  x3, [sp, #16]
+    ldr  x0, [x19, #PN_PREDS]
+    ldr  x1, [x19, #PN_NPREDS]
+    mov  x2, x23
+    bl   rg_skippable
+    cbnz x0, 4b
+    ldr  x3, [sp, #16]
+    ldr  x25, [x3, #RG_START]
+    ldr  x26, [x3, #RG_NROWS]
+    add  x26, x26, x25
+    bl   .Lsc_range
+    b    4b
+.Lsc_index:                             // index scan
+    stp  xzr, xzr, [sp]
+    str  xzr, [sp, #16]
+    mov  x0, x19
+    mov  x1, sp
+    bl   index_rows
+    mov  x0, sp
+    bl   rowvec_sort_unique
+    str  xzr, [sp, #24]
+5:  ldr  x9, [sp, #24]
+    ldr  x10, [sp]
+    cmp  x9, x10
+    b.hs .Lsc_end
+    ldr  x10, [sp, #16]
+    ldr  w25, [x10, x9, lsl #2]
+    add  x9, x9, #1
+    str  x9, [sp, #24]
+    add  x26, x25, #1
+    bl   .Lsc_range
+    b    5b
+.Lsc_end:
+    mov  x0, x24
+    add  sp, sp, #32
+    LEAVE 5
+
+// local helper sharing the frame: rows [x25, x26) through the filter
+.Lsc_range:
+    stp  x29, x30, [sp, #-16]!
+6:  cmp  x25, x26
+    b.hs 8f
     tst  x25, #DEADLINE_MASK
-    b.ne 5f
+    b.ne 61f
     bl   check_deadline
-5:  str  w25, [x27, x22, lsl #2]
-    cbz  x28, 6f
+61: str  w25, [x27, x22, lsl #2]
+    cbz  x28, 7f
     mov  x0, x28
     mov  x1, x20
     bl   eval_true
-    cbz  w0, 61f
-6:  mov  x0, x24
+    cbz  w0, 71f
+7:  mov  x0, x24
     mov  x1, x27
     bl   ts_push
-61: add  x25, x25, #1
-    b    4b
-7:  mov  x0, x24
-    LEAVE 5
+71: add  x25, x25, #1
+    b    6b
+8:  ldp  x29, x30, [sp], #16
+    ret
 ENDF ex_scan
+
+// =============================================================================
+// index_rows(x0 scan PlanNode* with PN_IDX, x1 RowVec*) — candidate rows of
+// an index scan (unsorted, may repeat for IN lists with repeated values).
+//   x19 node, x20 vec, x21 IxAccess, x22 Pred, x23 i; [sp] Range (40 bytes)
+// =============================================================================
+LFUNC index_rows
+    ENTER 3
+    sub  sp, sp, #48
+    mov  x19, x0
+    mov  x20, x1
+    ldr  x21, [x19, #PN_IXA]
+    ldr  w9, [x21, #IA_KIND]
+    cmp  w9, #IAK_EQ
+    b.ne .Lir_range
+    ldr  x22, [x21, #IA_EQ]
+    ldr  w9, [x22, #PR_NULL]
+    cbnz w9, .Lir_done
+    ldr  w9, [x22, #PR_OP]
+    cmp  w9, #PRO_IN
+    b.eq 1f
+    ldr  x0, [x19, #PN_IDX]
+    ldr  x1, [x22, #PR_VAL]
+    ldr  w2, [x22, #PR_TYPE]
+    mov  x3, x20
+    bl   index_lookup_eq
+    b    .Lir_done
+1:  mov  x23, #0
+2:  ldr  x9, [x22, #PR_N]
+    cmp  x23, x9
+    b.hs .Lir_done
+    ldr  x0, [x19, #PN_IDX]
+    ldr  x9, [x22, #PR_VAL]
+    ldr  x1, [x9, x23, lsl #3]
+    ldr  w2, [x22, #PR_TYPE]
+    mov  x3, x20
+    bl   index_lookup_eq
+    add  x23, x23, #1
+    b    2b
+.Lir_range:
+    stp  xzr, xzr, [sp]
+    stp  xzr, xzr, [sp, #16]
+    str  xzr, [sp, #32]
+    ldr  x22, [x21, #IA_LO]             // lower bound: GE inclusive, GT not
+    cbz  x22, 3f
+    ldr  w9, [x22, #PR_NULL]
+    cbnz w9, .Lir_done
+    ldr  x9, [x22, #PR_VAL]
+    ldr  w10, [x22, #PR_OP]
+    cmp  w10, #OP_GE
+    mov  x11, #1
+    mov  x12, #2
+    csel x10, x11, x12, eq
+    stp  x9, x10, [sp]
+    ldr  w9, [x22, #PR_TYPE]
+    str  w9, [sp, #32]
+3:  ldr  x22, [x21, #IA_HI]             // upper bound: LE inclusive, LT not
+    cbz  x22, 4f
+    ldr  w9, [x22, #PR_NULL]
+    cbnz w9, .Lir_done
+    ldr  x9, [x22, #PR_VAL]
+    ldr  w10, [x22, #PR_OP]
+    cmp  w10, #OP_LE
+    mov  x11, #1
+    mov  x12, #2
+    csel x10, x11, x12, eq
+    stp  x9, x10, [sp, #16]
+    ldr  w9, [x22, #PR_TYPE]
+    str  w9, [sp, #36]
+4:  ldr  x0, [x19, #PN_IDX]
+    mov  x1, sp
+    mov  x2, x20
+    bl   index_lookup_range
+.Lir_done:
+    add  sp, sp, #48
+    LEAVE 3
+ENDF index_rows
 
 // =============================================================================
 // rv_table(x0 BoundQuery*, x1 rv index, x2 ctx) -> x0 Table*
@@ -1079,9 +1221,11 @@ LFUNC materialize
     add  x0, x0, #8
     bl   arena_alloc
     str  x0, [x25, #COL_DATA]
-    ldr  x0, [x20, #RS_NROWS]
+    ldr  x0, [x20, #RS_NROWS]           // null bitmap
+    add  x0, x0, #7
+    lsr  x0, x0, #3
     add  x0, x0, #8
-    bl   arena_alloc
+    bl   arena_zalloc
     str  x0, [x25, #COL_NULLS]
     mov  x24, #0
 3:  ldr  x9, [x20, #RS_NROWS]
@@ -1093,8 +1237,16 @@ LFUNC materialize
     ldp  x10, x11, [x9]
     ldr  x12, [x25, #COL_DATA]
     str  x10, [x12, x24, lsl #3]
+    cbz  x11, 31f
     ldr  x12, [x25, #COL_NULLS]
-    strb w11, [x12, x24]
+    lsr  x13, x24, #3
+    ldrb w14, [x12, x13]
+    and  w15, w24, #7
+    mov  w16, #1
+    lsl  w16, w16, w15
+    orr  w14, w14, w16
+    strb w14, [x12, x13]
+31:
     add  x24, x24, #1
     b    3b
 4:  add  x23, x23, #1
@@ -1286,7 +1438,7 @@ ENDF ex_nljoin
 // hash_cell(x0 payload, w1 type) -> x0 64-bit hash (non-NULL value)
 //   x19 payload
 // =============================================================================
-LFUNC hash_cell
+FUNC hash_cell
     and  w9, w1, #T_KIND_MASK
     cmp  w9, #T_STR
     b.eq 2f
@@ -1309,7 +1461,7 @@ LFUNC hash_cell
 ENDF hash_cell
 
 // mix64(x0) -> x0 (finaliser of MurmurHash3)   (leaf)
-LFUNC mix64
+FUNC mix64
     eor  x0, x0, x0, lsr #33
     ldr  x9, =0xff51afd7ed558ccd
     mul  x0, x0, x9

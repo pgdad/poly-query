@@ -115,7 +115,8 @@ ENDF ev_lit
 
 // ev_col: column N_VAL of range variable N_B, N_OP query levels up (outer
 // reference): row = EC_TUPLE[rv] of that level's context, table =
-// EC_TABLES[rv]; ROW_NULL (NULL-padded LEFT JOIN side) => NULL. (leaf)
+// EC_TABLES[rv]; ROW_NULL (NULL-padded LEFT JOIN side) => NULL. Handles the
+// column layout (PLAIN / DICT columns, null bitmap) and the row layout. (leaf)
 LFUNC ev_col
     ldr  w9, [x0, #N_OP]
 1:  cbz  w9, 2f
@@ -130,17 +131,34 @@ LFUNC ev_col
     ldr  x9, [x1, #EC_TABLES]
     ldr  x9, [x9, x11, lsl #3]
     ldr  x11, [x0, #N_VAL]
+    ldr  w12, [x9, #TBL_LAYOUT]
+    cbnz w12, 6f
     ldr  x9, [x9, #TBL_COLS]
     add  x9, x9, x11, lsl #5            // COL_SIZE = 32
     ldr  x12, [x9, #COL_NULLS]
-    ldr  x13, [x9, #COL_DATA]
     mov  x1, #0
     cbz  x12, 3f
-    ldrb w1, [x12, x10]
-3:  ldr  x0, [x13, x10, lsl #3]
+    NULLBIT_TEST 1, 12, 10, 14
+3:  ldr  w14, [x9, #COL_ENC]
+    ldr  x13, [x9, #COL_DATA]
+    cbnz w14, 5f
+    ldr  x0, [x13, x10, lsl #3]
     ret
 4:  mov  x0, #0
     mov  x1, #1
+    ret
+5:  ldr  x14, [x13, #DC_CODES]          // dictionary-encoded STRING
+    ldr  w14, [x14, x10, lsl #2]
+    ldr  x13, [x13, #DC_DICT]
+    ldr  x0, [x13, x14, lsl #3]
+    ret
+6:  ldr  x12, [x9, #TBL_STRIDE]         // row layout
+    ldr  x13, [x9, #TBL_ROWS]
+    madd x13, x10, x12, x13             // row record
+    ldr  x0, [x13, x11, lsl #3]
+    ldr  x12, [x9, #TBL_NCOLS]
+    add  x13, x13, x12, lsl #3          // row null bitmap
+    NULLBIT_TEST 1, 13, 11, 14
     ret
 ENDF ev_col
 

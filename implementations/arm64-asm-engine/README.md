@@ -9,7 +9,13 @@ HAVING / DISTINCT / COUNT(DISTINCT), INNER / LEFT / CROSS joins, all scalar
 functions, CASE / LIKE / BETWEEN / IN, uncorrelated **and correlated**
 subqueries (scalar, IN, EXISTS), derived tables, CTEs, and `EXPLAIN`
 (statement and `explain` op) — with distinct lexer, parser/AST, semantic
-analysis, logical plan, physical plan and execution stages.
+analysis, logical plan, physical plan and execution stages — and **Phase 3**:
+row- and column-oriented in-memory layouts, dictionary encoding, null
+bitmaps, the PQCF v1 file format (`save` / `open`, PLAIN / DICT / RLE,
+CRC-32, atomic crash-safe writes, memory-mapped reads), table statistics
+(`stats`), HASH and BTREE indexes (`CREATE` / `DROP INDEX`), cost-based
+index selection, predicate pushdown with PQCF row-group skipping, column
+pruning, join build-side selection and EXPLAIN plans with `IndexScan`.
 
 ## Build prerequisites
 
@@ -31,7 +37,8 @@ bin/polyquery session --data-dir DIR
 None besides glibc (`ENGINE.json`: `"libraries": []`). From glibc the engine
 uses: malloc/realloc/free, memcpy/memcmp/memset/strlen/strcmp, strtod and
 snprintf (float text conversion), qsort/qsort_r, setjmp/longjmp, getline,
-open/read/fstat/close, clock_gettime, usleep.
+open/read/write/fstat/close/fsync/rename/unlink/mmap/munmap/getpid,
+clock_gettime, usleep.
 
 ## Design overview
 
@@ -45,10 +52,10 @@ frame macros in `include/frame.inc`, the internal API contract in
 | protocol | `main.S`, `protocol.S` | CLI options, session loop, exec mode, request dispatch, all ops (incl. `explain`) |
 | JSON | `json.S` | strict RFC 8259 parser into a DOM, serializer |
 | values | `values.S`, `decimal.S`, `datetime.S`, `types.S` | text parsing/formatting of every type, CAST matrix, comparisons, type names |
-| storage | `catalog.S`, `ingest.S` | catalog of immutable columnar tables; CSV/JSON/JSONL ingestion |
+| storage | `catalog.S`, `ingest.S`, `storage.S`, `pqcf.S`, `index.S` | catalog of immutable tables; CSV/JSON/JSONL ingestion; row / column layouts, dictionary encoding, statistics; PQCF v1 reader/writer; HASH / BTREE indexes |
 | lexer / parser | `lexer.S`, `parser.S` | tokenizer and recursive-descent parser for the full v1 grammar into an AST |
 | semantic analysis | `binder.S`, `functions.S`, `strfuncs.S` | scopes (range variables, outer scopes, CTEs), name resolution, typing with implicit casts, aggregate / GROUP BY validation, subquery binding; scalar functions, CASE, LIKE, BETWEEN, IN lists |
-| planning | `plan.S` | logical plan, physical rewrite (predicate pushdown, hash-join keys, join algorithm, column pruning), EXPLAIN JSON |
+| planning | `plan.S`, `access.S` | logical plan, physical rewrite (predicate pushdown, hash-join keys, join algorithm, column pruning, build side), access paths (simple predicates, selectivity estimates, index selection, row-group skipping), EXPLAIN JSON |
 | execution | `exec.S`, `eval.S` | plan operators (scan, filter, hash / nested-loop join, sort-based aggregation, project, distinct, sort, limit), subquery evaluation; expression evaluator and aggregate accumulators |
 
 Query processing: `parse_sql` → `bind_query` (BoundQuery per query level,
@@ -66,8 +73,65 @@ Key decisions:
   `x0`/`x1`; the type is static (from the AST). DECIMAL is a scaled `i64`
   (precision ≤ 18) with exact 128-bit intermediates; DATE is days and
   TIMESTAMP microseconds since the epoch; strings are length-prefixed objects.
-* **Storage.** Tables are columnar: per column an array of 64-bit payloads and
-  a null-flag byte array, all inside a per-table arena (freed on drop/replace).
+* **Storage.** Every table lives in its own arena (freed on drop/replace).
+  Two in-memory layouts (`load`/`open` option `layout`, default `column`):
+  *column*: per column a vector of 64-bit payloads, or for STRING columns a
+  dictionary encoding (u32 codes + dictionary of distinct strings; applied
+  automatically when distinct values ≤ rows/2, or forced with
+  `"dictionary":true`), plus a null bitmap (absent when the column has no
+  NULL); *row*: a row store of fixed-size records (payloads followed by the
+  row's null bitmap). Tables are built column-wise by ingestion / the PQCF
+  reader and then converted (`table_finalize`). The evaluator's column access
+  (`ev_col`) and the generic accessor `tbl_get` handle every representation.
+* **PQCF v1 (`pqcf.S`).** `save` builds the whole file in memory (8-byte
+  aligned chunks, metadata JSON with per-chunk min/max for every type,
+  CRC-32 via the ARMv8 `crc32` instructions with a table fallback) and writes
+  it atomically: temporary file `.<name>.tmp-<pid>-<n>` in the target's
+  directory, `fsync`, `rename`, `fsync` of the directory; on failure the
+  temporary file is removed. Encodings per chunk: forced `plain` / `dict`
+  (STRING) / `rle` (BOOLEAN, INT64, DECIMAL, DATE, TIMESTAMP), or `auto`: RLE
+  when runs < n/4, DICT when distinct < n/2, else PLAIN. Default row group
+  size 65536 (`row_group_size` option). `open` validates everything at open
+  time — header, footer, metadata CRC, JSON structure and consistency rules,
+  every chunk CRC, exact decoded sizes, null counts, value validity (UTF-8,
+  decimal precision, date/timestamp ranges, finite floats, RLE booleans,
+  dictionary codes) — then decodes into a plain columnar table which is
+  finalized like a loaded one (`layout` option honoured). Index entries of the
+  metadata are recreated (names checked for conflicts before anything
+  changes), and the row groups' min/max/null statistics are kept for
+  row-group skipping. **mmap:** with `"mmap":true` the file is memory-mapped
+  (`mmap(PROT_READ, MAP_PRIVATE)`) instead of `read()` into a buffer; it is
+  decoded eagerly and unmapped before `open` returns (no lazy decoding).
+  Error precedence: header magic, version/flags (`0` ⇒ CORRUPT, `>1` or
+  flags ≠ 0 ⇒ VERSION_UNSUPPORTED), footer, metadata CRC, JSON, structure;
+  an unknown encoding name ⇒ VERSION_UNSUPPORTED.
+* **Statistics.** `table_stats` computes per column null count, min, max and
+  the exact distinct count (hash set) on first use and caches them (tables
+  are immutable).
+* **Indexes.** Single-column, global names. HASH: chained hash table over row
+  ids (heads per bucket, next per row). BTREE: the "equivalent ordered
+  structure" of the spec — a sorted permutation of the non-NULL row ids with
+  the sorted values, searched by binary search for equality and ranges.
+  NULLs are never indexed. Indexes are rebuilt from the table data when
+  created / opened and dropped with their table.
+* **Access paths.** Pushed-down scan filters are split into conjuncts;
+  `column op constant` (op `= < <= > >=`, `BETWEEN` → two bounds) and
+  `column IN (constants)` become *simple predicates* with the constant
+  evaluated at planning time (literals, negation and the binder's implicit
+  casts only, so planning never raises). Selectivity: equality 1/distinct,
+  IN k/distinct, ranges by linear interpolation between min and max for
+  numeric/temporal columns (both bounds of a column combined), 1/3 otherwise.
+  The most selective indexable predicate is executed through its index when
+  its selectivity is ≤ 10%, or when it is an equality / IN lookup expected to
+  return at most 16 rows (cheaper than any scan). An index scan sorts and
+  de-duplicates the candidate row ids and still evaluates the complete filter,
+  so results never depend on the access path (`use_indexes:false` disables
+  indexes). For PQCF-backed tables, row groups whose min/max/null statistics
+  exclude a simple predicate are skipped.
+* **Joins (Phase 3).** Scan and join cardinalities are estimated bottom-up;
+  an inner hash join builds on the input with the smaller estimate (the
+  inputs are swapped — tuples keep one slot per range variable, so the
+  output does not depend on the order); LEFT joins build on the right.
 * **Typing.** The binder inserts explicit CAST nodes for numeric promotion and
   DATE→TIMESTAMP, so the evaluator only ever combines operands of one kind.
 * **Execution.** Selection vectors (row ids) from the filtered scan; result
@@ -115,8 +179,12 @@ Key decisions:
   arithmetic (no spurious overflow); INT64 operands are promoted to
   DECIMAL(18,s) as the spec requires.
 * SQL nesting deeper than 256 levels is `RESOURCE_LIMIT`.
-* `save`, `open`, `stats` ops, `CREATE/DROP INDEX` and the `serve` mode
-  answer `UNSUPPORTED` / exit 1 (later phases).
+* The `serve` mode answers exit 1 (Phase 4).
+* `CREATE INDEX` without `USING` creates a BTREE index.
+* An unknown table or column in `CREATE INDEX` is `SEMANTIC_ERROR`.
+* EXPLAIN shows `estimated_rows` on scans and joins, `index`/`kind` on
+  `IndexScan`, and `row_groups` / `row_groups_skipped` on scans of
+  PQCF-backed tables; `schema` reports `layout`.
 * `UPPER`/`LOWER` map ASCII letters only, and leave a whitespace-delimited
   word that contains a non-ASCII character unchanged as a whole
   (`UPPER('abc Ünï')` = `'ABC Ünï'`, as the conformance suite requires).
@@ -140,4 +208,10 @@ Key decisions:
 ## Known limitations
 
 * Correlated subqueries are re-executed per outer row (no decorrelation).
-* Single-threaded execution; no HTTP server; no persistent storage yet.
+* Single-threaded execution; no HTTP server.
+* Temporary files left behind by a crash during `save` are not cleaned up by
+  later saves (they are ignored by readers).
+* PQCF format_version 2 (the DECIMAL(38) change) is not supported.
+* Ingestion builds a plain columnar table first; converting it (row layout,
+  dictionary encoding) rebuilds it into a fresh arena, so loading needs
+  transient memory for both representations.

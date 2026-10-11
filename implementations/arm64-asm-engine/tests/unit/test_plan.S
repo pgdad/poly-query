@@ -58,10 +58,10 @@
     .p2align 4
 tbl_t:
     .quad s_t, 2, 4, cols_t
-    .skip AR_SIZE
+    .skip TBL_SIZE - TBL_ARENA
 tbl_u:
     .quad s_u, 2, 4, cols_u
-    .skip AR_SIZE
+    .skip TBL_SIZE - TBL_ARENA
 cols_t:
     .quad s_i;   .word T_INT, 0;   .quad t_i, t_inull
     .quad s_s;   .word T_STR, 0;   .quad t_s, nonull
@@ -69,10 +69,10 @@ cols_u:
     .quad s_i;   .word T_INT, 0;   .quad u_i, u_inull
     .quad s_v;   .word T_STR, 0;   .quad u_v, nonull
 t_i:     .quad 1, 2, 0, 3
-t_inull: .byte 0, 0, 1, 0
+t_inull: .byte 0x04, 0, 0, 0    // null bitmaps
 t_s:     .quad s_a, s_b, s_c, s_d
 u_i:     .quad 1, 1, 2, 0
-u_inull: .byte 0, 0, 0, 1
+u_inull: .byte 0x08, 0, 0, 0
 u_v:     .quad s_x, s_y, s_z, s_w
 nonull:  .byte 0, 0, 0, 0
     PSTR s_t, "t"
@@ -88,6 +88,8 @@ nonull:  .byte 0, 0, 0, 0
     PSTR s_y, "y"
     PSTR s_z, "z"
     PSTR s_w, "w"
+    PSTR s_ti, "ti"
+    PSTR s_ui, "ui"
 
 // ------------------------------------------------------------------ cases ---
     .section .data.cases, "aw"
@@ -144,6 +146,24 @@ cases_start:
     TR  "SELECT * FROM t a JOIN (t b JOIN u ON u.i = b.i) ON a.i = b.i", 3
     TP  "SELECT s FROM t WHERE i IN (SELECT i FROM u)", "\"table\":\"u\"", M_HAS
     TP  "SELECT (SELECT MAX(v) FROM u)", "\"op\":\"Values\",\"children\":[]},{\"op\":\"Aggregate\"", M_HAS
+    // --- indexes (t.i HASH index "ti", u.i BTREE index "ui"), access paths
+    TP  "SELECT s FROM t WHERE i = 2", "\"op\":\"IndexScan\",\"table\":\"t\",\"alias\":\"t\",\"columns\":[\"i\",\"s\"],\"filter\":true,\"index\":\"ti\",\"kind\":\"HASH\"", M_HAS
+    TP  "SELECT s FROM t WHERE 2 = i AND s <> 'x'", "\"index\":\"ti\"", M_HAS
+    TP  "SELECT s FROM t WHERE i > 1", "IndexScan", M_HASNOT
+    TP  "SELECT v FROM u WHERE i > 5 AND i <= 7", "\"index\":\"ui\",\"kind\":\"BTREE\"", M_HAS
+    TP  "SELECT v FROM u WHERE i = 1 OR i = 2", "IndexScan", M_HASNOT
+    TP  "SELECT * FROM t JOIN u ON t.i = u.i WHERE u.v = 'x'", "\"alias\":\"t\",\"columns\":[\"i\",\"s\"],\"estimated_rows\":4", M_HAS
+    TR  "SELECT s FROM t WHERE i = 2", 1
+    TR  "SELECT s FROM t WHERE i = NULL", 0
+    TR  "SELECT s FROM t WHERE i IN (1, 3, 3, NULL)", 2
+    TR  "SELECT s FROM t WHERE i = 2.0", 1
+    TR  "SELECT s FROM t WHERE i = 2.5", 0
+    TR  "SELECT v FROM u WHERE i >= 1", 3
+    TR  "SELECT v FROM u WHERE i > 1", 1
+    TR  "SELECT v FROM u WHERE i BETWEEN 1 AND 1", 2
+    TR  "SELECT v FROM u WHERE i < 1", 0
+    TR  "SELECT v FROM u WHERE i <= -1 OR i IS NULL", 1
+    TR  "SELECT * FROM t JOIN u ON t.i = u.i WHERE u.i = 1", 2
 cases_end:
 
     .section .rodata
@@ -258,6 +278,16 @@ FUNC main
     bl   catalog_add
     ADR_L x0, tbl_u
     bl   catalog_add
+    ADR_L x0, tbl_t                     // indexes: t(i) HASH, u(i) BTREE
+    ADR_L x1, s_ti
+    mov  x2, #0
+    mov  w3, #IXK_HASH
+    bl   index_create
+    ADR_L x0, tbl_u
+    ADR_L x1, s_ui
+    mov  x2, #0
+    mov  w3, #IXK_BTREE
+    bl   index_create
     ADR_L x19, cases_start
     ADR_L x20, cases_end
     mov  x21, #0

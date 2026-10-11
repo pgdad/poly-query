@@ -96,7 +96,7 @@ FUNC table_free
     ret
 ENDF table_free
 
-// catalog_remove(x0 Table*): unlink and free.
+// catalog_remove(x0 Table*): unlink, drop its indexes and free.
 FUNC catalog_remove
     stp  x29, x30, [sp, #-16]!
     mov  x29, sp
@@ -121,6 +121,9 @@ FUNC catalog_remove
     b    3b
 4:  ADR_L x4, g_ntables
     str  x2, [x4]
+    str  x0, [sp, #-16]!
+    bl   index_drop_table           // its indexes go with it
+    ldr  x0, [sp], #16
     bl   table_free
 9:  ldp  x29, x30, [sp], #16
     ret
@@ -131,6 +134,7 @@ FUNC catalog_reset
     stp  x29, x30, [sp, #-32]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
+    bl   index_reset
     LDR_G x19, g_tables
     LDR_G x20, g_ntables
 1:  cbz  x20, 2f

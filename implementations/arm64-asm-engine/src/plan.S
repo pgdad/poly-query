@@ -258,6 +258,8 @@ LFUNC pp_rewrite
 .Lpp_joins:
     mov  x0, x20
     bl   pp_joins
+    mov  x0, x20
+    bl   pp_access
 .Lpp_end:
     add  sp, sp, #32
     LEAVE 4
@@ -444,6 +446,64 @@ ENDF pp_joins
 
 
 // =============================================================================
+// pp_access(x0 PlanNode*) -> x0 estimated rows
+// Access paths and cardinality estimates of a FROM tree: scans choose their
+// access path (access.S: index selection, row-group skipping); an inner hash
+// join builds on the input with the smaller estimate (inputs swapped, the
+// tuple layout does not depend on the order); LEFT joins build on the right.
+//   x19 node, x20 left estimate, x21 right estimate
+// =============================================================================
+LFUNC pp_access
+    ENTER 3
+    mov  x19, x0
+    ldr  w9, [x19, #PN_OP]
+    cmp  w9, #PO_SCAN
+    b.ne 1f
+    bl   ap_scan
+    LEAVE 3
+1:  ldr  x0, [x19, #PN_LEFT]
+    bl   pp_access
+    mov  x20, x0
+    ldr  x0, [x19, #PN_RIGHT]
+    bl   pp_access
+    mov  x21, x0
+    ldr  w9, [x19, #PN_OP]
+    cmp  w9, #PO_HASHJOIN
+    b.ne 3f
+    ldr  w9, [x19, #PN_JT]
+    cmp  w9, #JT_INNER
+    b.ne 2f
+    cmp  x20, x21
+    b.hs 2f
+    ldp  x9, x10, [x19, #PN_LEFT]       // swap: build on the smaller left
+    stp  x10, x9, [x19, #PN_LEFT]
+    ldr  x9, [x19, #PN_LKEYS]
+    ldr  x10, [x19, #PN_RKEYS]
+    str  x10, [x19, #PN_LKEYS]
+    str  x9, [x19, #PN_RKEYS]
+    mov  w9, #1
+    str  w9, [x19, #PN_SWAP]
+2:  cmp  x20, x21                       // equi-join: about the larger input
+    csel x0, x20, x21, hs
+    b    9f
+3:  umulh x9, x20, x21                  // nested loop: product (saturating)
+    mul  x0, x20, x21
+    cmp  x9, #0
+    csinv x0, x0, xzr, eq
+    ldr  x9, [x19, #PN_EXPR]
+    cbz  x9, 9f
+    mov  x9, #3                         // with a condition: a third
+    udiv x0, x0, x9
+9:  ldr  w9, [x19, #PN_JT]              // LEFT JOIN keeps every left row
+    cmp  w9, #JT_LEFT
+    b.ne 10f
+    cmp  x0, x20
+    csel x0, x0, x20, hs
+10: str  x0, [x19, #PN_EST]
+    LEAVE 3
+ENDF pp_access
+
+// =============================================================================
 // try_hash_key(x0 conjunct, x1 left mask, x2 right mask, x3 lkeys Vec*,
 //              x4 rkeys Vec*) -> w0 1 if the conjunct became a hash key pair
 // An equality whose operands reference disjoint sides, and whose operand
@@ -519,7 +579,7 @@ ENDF try_hash_key
 // split_conj(x0 Vec*, x1 Node* or 0) — appends the AND-conjuncts of x1
 //   x19 vec, x20 node
 // =============================================================================
-LFUNC split_conj
+FUNC split_conj
     ENTER 2
     mov  x19, x0
     mov  x20, x1
@@ -567,7 +627,7 @@ ENDF and_append
 
 // pvec_push(x0 Vec* {n, cap, data}, x1 item)
 //   x19 vec, x20 item, x21 new cap
-LFUNC pvec_push
+FUNC pvec_push
     ENTER 3
     mov  x19, x0
     mov  x20, x1
@@ -671,8 +731,12 @@ FUNC plan_explain
     madd x23, x22, x10, x23
     ldr  w10, [x23, #RV_KIND]
     cmp  w10, #RVK_BASE
-    b.eq 1f
+    b.eq 11f
     ADR_L x1, s_subscan
+    b    1f
+11: ldr  x9, [x20, #PN_IDX]
+    cbz  x9, 1f
+    ADR_L x1, s_indexscan
 1:  mov  x0, x19
     bl   buf_puts
     mov  x0, x19
@@ -743,6 +807,40 @@ FUNC plan_explain
     mov  w1, #']'
     bl   buf_putc
     bl   .Lpe_filter_prop
+    ldr  x22, [x20, #PN_IDX]            // index scan: "index", "kind"
+    cbz  x22, 41f
+    mov  x0, x19
+    ADR_L x1, ex_index
+    bl   buf_puts
+    ldr  x9, [x22, #IX_NAME]
+    mov  x0, x19
+    add  x1, x9, #STR_DATA
+    ldr  x2, [x9, #STR_LEN]
+    bl   buf_put_jstr
+    ldr  w9, [x22, #IX_KIND]
+    ADR_L x1, ex_kind_hash
+    cmp  w9, #IXK_HASH
+    b.eq 40f
+    ADR_L x1, ex_kind_btree
+40: mov  x0, x19
+    bl   buf_puts
+41: ldr  x9, [x23, #RV_TABLE]           // PQCF row groups
+    ldr  x9, [x9, #TBL_NRG]
+    cbz  x9, 42f
+    mov  x0, x19
+    ADR_L x1, ex_rgs
+    bl   buf_puts
+    ldr  x9, [x23, #RV_TABLE]
+    mov  x0, x19
+    ldr  x1, [x9, #TBL_NRG]
+    bl   buf_put_u64
+    mov  x0, x19
+    ADR_L x1, ex_rgskip
+    bl   buf_puts
+    mov  x0, x19
+    ldr  w1, [x20, #PN_RGSKIP]
+    bl   buf_put_u64
+42: bl   .Lpe_est_prop
     mov  x0, x19
     ADR_L x1, ex_children
     bl   buf_puts
@@ -788,6 +886,7 @@ FUNC plan_explain
     mov  x0, x19
     ldr  x1, [x20, #PN_NKEYS]
     bl   buf_put_u64
+    bl   .Lpe_est_prop
     b    .Lpe_children
 
 .Lpe_project:
@@ -859,6 +958,18 @@ FUNC plan_explain
     bl   buf_puts
     ldp  x29, x30, [sp], #16
 9:  ret
+
+// local helper: ,"estimated_rows":N for tuple operators. Clobbers x0-x2, x9.
+.Lpe_est_prop:
+    stp  x29, x30, [sp, #-16]!
+    mov  x0, x19
+    ADR_L x1, ex_est
+    bl   buf_puts
+    mov  x0, x19
+    ldr  x1, [x20, #PN_EST]
+    bl   buf_put_u64
+    ldp  x29, x30, [sp], #16
+    ret
 ENDF plan_explain
 
 // =============================================================================
@@ -1003,6 +1114,7 @@ jt_names:
 s_unknown:   .asciz "Unknown"
 s_scan:      .asciz "TableScan"
 s_subscan:   .asciz "SubqueryScan"
+s_indexscan: .asciz "IndexScan"
 s_values:    .asciz "Values"
 s_filter:    .asciz "Filter"
 s_join:      .asciz "Join"
@@ -1024,6 +1136,12 @@ ex_filter:      .asciz ",\"filter\":true"
 ex_jtype:       .asciz ",\"join_type\":"
 ex_nkeys:       .asciz ",\"hash_keys\":"
 ex_children:    .asciz ",\"children\":["
+ex_index:       .asciz ",\"index\":"
+ex_kind_hash:   .asciz ",\"kind\":\"HASH\""
+ex_kind_btree:  .asciz ",\"kind\":\"BTREE\""
+ex_rgs:         .asciz ",\"row_groups\":"
+ex_rgskip:      .asciz ",\"row_groups_skipped\":"
+ex_est:         .asciz ",\"estimated_rows\":"
     .text
 
     NOTE_GNU_STACK

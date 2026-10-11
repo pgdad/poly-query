@@ -99,6 +99,9 @@
 #define ERR_TIMEOUT             17
 #define ERR_SUBQUERY_CARDINALITY 18
 #define ERR_CANCELLED           19
+#define ERR_STORAGE_CORRUPT     20
+#define ERR_STORAGE_VERSION     21     // STORAGE_VERSION_UNSUPPORTED
+#define ERR_LAST                21
 
 // ----------------------------------------------------------------- types -----
 // A type is a u32:  kind | (precision << 8) | (scale << 16)
@@ -146,22 +149,110 @@
 #define BUF_SIZE  32
 
 // --------------------------------------------------------------- catalog -----
-// Column (32 bytes). Column data is columnar: one u64 payload per row plus
-// one null flag byte per row (1 = NULL).
+// Column (32 bytes). Two physical encodings (COL_ENC):
+//   CENC_PLAIN  COL_DATA = u64 payload vector [nrows]
+//   CENC_DICT   COL_DATA = DictCol* (STRING only): u32 codes + dictionary
+// COL_NULLS is the null bitmap (LSB-first, bit i set = row i is NULL), or 0
+// if the column has no NULLs. In the row layout (TBL_LAYOUT = LAYOUT_ROW)
+// COL_DATA/COL_NULLS are 0 and values live in the row store.
 #define COL_NAME   0       // Str*
 #define COL_TYPE   8       // u32 type
-#define COL_DATA   16      // u64* payloads [nrows]
-#define COL_NULLS  24      // u8*  null flags [nrows]
+#define COL_ENC    12      // u32 CENC_*
+#define COL_DATA   16      // u64* payloads [nrows] or DictCol*
+#define COL_NULLS  24      // u8* null bitmap or 0
 #define COL_SIZE   32
+#define CENC_PLAIN 0
+#define CENC_DICT  1
 
-// Table (64 bytes + embedded arena). All table memory (columns, strings)
+// Dictionary-encoded STRING column
+#define DC_CODES   0       // u32* codes [nrows]
+#define DC_DICT    8       // Str** distinct values [ndict]
+#define DC_NDICT   16      // u64
+#define DC_SIZE    32
+
+// Null bitmap helpers; all arguments are register *numbers* (9 = x9/w9).
+//   NULLBIT_CLEAR base, idx, t1, t2, t3, t4   clear bit idx of bitmap base
+//   NULLBIT_TEST  dst, base, idx, t1          w<dst> = bit idx (0/1)
+.macro NULLBIT_CLEAR base, idx, t1, t2, t3, t4
+    lsr  x\t1, x\idx, #3
+    ldrb w\t2, [x\base, x\t1]
+    and  w\t3, w\idx, #7
+    mov  w\t4, #1
+    lsl  w\t4, w\t4, w\t3
+    bic  w\t2, w\t2, w\t4
+    strb w\t2, [x\base, x\t1]
+.endm
+.macro NULLBIT_TEST dst, base, idx, t1
+    lsr  x\t1, x\idx, #3
+    ldrb w\dst, [x\base, x\t1]
+    and  w\t1, w\idx, #7
+    lsr  w\dst, w\dst, w\t1
+    and  w\dst, w\dst, #1
+.endm
+
+// Table (128 bytes). All table memory (columns, strings, row store, stats)
 // lives in the table's own arena, freed by table_free.
 #define TBL_NAME   0       // Str* (allocated in the table arena)
 #define TBL_NCOLS  8       // u64
 #define TBL_NROWS  16      // u64
 #define TBL_COLS   24      // Column* [ncols]
 #define TBL_ARENA  32      // embedded Arena (AR_SIZE bytes)
-#define TBL_SIZE   64
+#define TBL_LAYOUT 64      // u32 LAYOUT_COLUMN / LAYOUT_ROW
+#define TBL_ROWS   72      // row layout: u8* row store [nrows * stride]
+#define TBL_STRIDE 80      // row layout: bytes per row (8*ncols + bitmap, 8-aligned)
+#define TBL_STATS  88      // ColStats* [ncols] (computed lazily) or 0
+#define TBL_NRG    96      // u64 row groups (PQCF-backed tables) or 0
+#define TBL_RGS    104     // RowGroup* [nrg]
+#define TBL_SIZE   128
+#define LAYOUT_COLUMN 0
+#define LAYOUT_ROW    1
+// Row store: row r at TBL_ROWS + r*TBL_STRIDE holds ncols u64 payloads
+// followed by a null bitmap of ceil(ncols/8) bytes (bit c set = NULL).
+
+// Per-column statistics (32 bytes), see storage.S table_stats
+#define CST_NULLS     0    // u64 null count
+#define CST_DISTINCT  8    // u64 distinct non-null values
+#define CST_MIN       16   // payload (valid if null count < nrows)
+#define CST_MAX       24   // payload
+#define CST_SIZE      32
+
+// PQCF row group (32 bytes) and its per-chunk min/max (32 bytes per column)
+#define RG_START   0       // u64 first row
+#define RG_NROWS   8       // u64
+#define RG_CHUNKS  16      // ChunkStat* [ncols]
+#define RG_SIZE    32
+#define CK_HASMM   0       // u32 1 = CK_MIN/CK_MAX valid
+#define CK_MIN     8       // payload (Str* for STRING)
+#define CK_MAX     16      // payload
+#define CK_NULLS   24      // u64 null count
+#define CK_SIZE    32
+
+// Index (index.S). Single-column; NULLs are never indexed.
+#define IX_NAME    0       // Str* (malloc'ed copy)
+#define IX_TABLE   8       // Table*
+#define IX_COL     16      // u64 column index
+#define IX_KIND    24      // u32 IXK_*
+#define IX_N       32      // u64 indexed (non-NULL) rows
+#define IX_ROWS    40      // u32* row ids: BTREE sorted by value (ties by row)
+#define IX_HEADS   48      // HASH: u32* bucket heads (ROW_NULL = empty)
+#define IX_NEXT    56      // HASH: u32* next row in chain [nrows]
+#define IX_MASK    64      // HASH: u64 bucket mask
+#define IX_ARENA   72      // embedded Arena
+#define IX_SIZE    112
+#define IXK_HASH   1
+#define IXK_BTREE  2
+
+// Index specification (from PQCF metadata), 24 bytes
+#define XS_NAME    0       // Str*
+#define XS_COL     8       // u64 column index
+#define XS_KIND    16      // u32 IXK_*
+#define XS_SIZE    24
+
+// PQCF save encodings
+#define PENC_AUTO  0
+#define PENC_PLAIN 1
+#define PENC_DICT  2
+#define PENC_RLE   3
 
 // Explicit schema for ingestion (allocated in the request arena).
 #define SCH_N      0       // u64 number of columns
@@ -489,7 +580,34 @@
 #define PN_RKEYS    64     // Node** right key expressions
 #define PN_LO       72     // u32 first rv of the subtree
 #define PN_HI       76     // u32 one past the last rv
-#define PN_SIZE     80
+#define PN_IDX      80     // scans: Index* used by an index scan, or 0
+#define PN_IXA      88     // scans: IxAccess* (index access path)
+#define PN_PREDS    96     // scans: Pred** simple predicates of PN_EXPR
+#define PN_NPREDS   104    // u64
+#define PN_EST      112    // u64 estimated output rows (tuple operators)
+#define PN_SWAP     120    // u32 1 = hash join inputs swapped (build = left)
+#define PN_RGSKIP   124    // u32 scans: row groups skipped (EXPLAIN)
+#define PN_SIZE     128
+
+// Simple predicate "column op constant" extracted from a scan filter
+// (index selection, row-group skipping, estimates). 48 bytes.
+#define PR_COL      0      // u64 column index
+#define PR_OP       8      // u32 OP_EQ/LT/LE/GT/GE or PRO_IN
+#define PR_TYPE     12     // u32 type of the constant(s)
+#define PR_VAL      16     // payload; PRO_IN: u64* payloads
+#define PR_N        24     // u64 number of values (PRO_IN), else 1
+#define PR_NULL     32     // u32 1 = the constant is NULL (never true)
+#define PR_SIZE     48
+#define PRO_IN      40
+
+// Index access path of an IndexScan (32 bytes)
+#define IA_KIND     0      // u32 IAK_EQ (PR_OP EQ / IN) or IAK_RANGE
+#define IA_EQ       8      // Pred* (IAK_EQ)
+#define IA_LO       16     // Pred* lower bound (GT/GE) or 0
+#define IA_HI       24     // Pred* upper bound (LT/LE) or 0
+#define IA_SIZE     32
+#define IAK_EQ      1
+#define IAK_RANGE   2
 
 #define PO_SCAN       1    // table scan of rv PN_RV (base / derived / CTE),
                            //   optional pushed-down filter PN_EXPR

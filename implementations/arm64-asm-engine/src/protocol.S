@@ -38,6 +38,10 @@ k_join:     .asciz "join"
 k_optimize: .asciz "optimize"
 k_use_idx:  .asciz "use_indexes"
 k_native:   .asciz "native"
+k_layout:   .asciz "layout"
+k_dict:     .asciz "dictionary"
+v_row:      .asciz "row"
+v_column:   .asciz "column"
 v_csv:      .asciz "csv"
 v_json:     .asciz "json"
 v_jsonl:    .asciz "jsonl"
@@ -56,9 +60,9 @@ op_names:
     .quad o_caps, op_capabilities
     .quad o_sleep, op_sleep
     .quad o_explain, op_explain
-    .quad o_save, op_unsupported
-    .quad o_open, op_unsupported
-    .quad o_stats, op_unsupported
+    .quad o_save, op_save
+    .quad o_open, op_open
+    .quad o_stats, op_stats
     .quad 0, 0
 o_load:     .asciz "load"
 o_query:    .asciz "query"
@@ -81,7 +85,7 @@ r_err:      .asciz ",\"ok\":false,\"error\":{\"code\":\""
 r_msg:      .asciz "\",\"message\":"
 r_details:  .asciz ",\"details\":{\"line\":"
 r_column:   .asciz ",\"column\":"
-r_caps:     .asciz ",\"protocol_version\":1,\"capabilities\":[\"phase1\",\"ingest.csv\",\"ingest.json\",\"ingest.jsonl\",\"sql.basic\",\"test.functions\",\"phase2\",\"sql.groupby\",\"sql.join\",\"sql.functions\",\"sql.subquery\",\"sql.cte\",\"sql.correlated_subquery\"]"
+r_caps:     .asciz ",\"protocol_version\":1,\"capabilities\":[\"phase1\",\"ingest.csv\",\"ingest.json\",\"ingest.jsonl\",\"sql.basic\",\"test.functions\",\"phase2\",\"sql.groupby\",\"sql.join\",\"sql.functions\",\"sql.subquery\",\"sql.cte\",\"sql.correlated_subquery\",\"phase3\",\"storage.pqcf\",\"storage.mmap\",\"index.hash\",\"index.btree\"]"
 r_version:  .asciz ",\"engine\":\"polyquery-arm64-asm\",\"engine_version\":\"0.1.0\",\"language\":\"arm64-asm-engine\",\"protocol_version\":1,\"spec_version\":\"1.0.0\",\"runtime\":\"GNU as (AArch64) + glibc\",\"build\":{\"profile\":\"release\",\"flags\":\"-g\"}"
 r_tables:   .asciz ",\"tables\":["
 r_name:     .asciz "{\"name\":"
@@ -89,7 +93,16 @@ r_rowcount: .asciz ",\"row_count\":"
 r_table:    .asciz ",\"table\":"
 r_columns:  .asciz ",\"columns\":["
 r_type:     .asciz ",\"type\":\""
-r_indexes:  .asciz ",\"indexes\":[]"
+r_indexes:  .asciz ",\"indexes\":["
+r_column_k: .asciz ",\"column\":"
+r_kind_h:   .asciz ",\"kind\":\"HASH\"}"
+r_kind_b:   .asciz ",\"kind\":\"BTREE\"}"
+r_layout_c: .asciz ",\"layout\":\"column\""
+r_layout_r: .asciz ",\"layout\":\"row\""
+r_nullcnt:  .asciz ",\"null_count\":"
+r_distinct: .asciz ",\"distinct_count\":"
+r_min:      .asciz ",\"min\":"
+r_max:      .asciz ",\"max\":"
 r_rows:     .asciz ",\"rows\":["
 r_stats:    .asciz ",\"stats\":{\"elapsed_us\":"
 r_plan:     .asciz ",\"plan\":"
@@ -729,7 +742,7 @@ ENDF write_table_header
 LFUNC op_schema
     stp  x29, x30, [sp, #-32]!
     mov  x29, sp
-    str  x19, [sp, #16]
+    stp  x19, x20, [sp, #16]
     bl   lookup_table_field
     mov  x19, x0
     bl   out_begin_ok
@@ -737,12 +750,141 @@ LFUNC op_schema
     bl   write_table_header
     mov  x0, x19
     bl   write_table_columns
-    ADR_L x0, r_indexes
-    bl   out_puts
-    ldr  x19, [sp, #16]
+    mov  x0, x19
+    bl   write_table_indexes
+    ADR_L x0, r_layout_c
+    ldr  w9, [x19, #TBL_LAYOUT]
+    cbz  w9, 1f
+    ADR_L x0, r_layout_r
+1:  bl   out_puts
+    ldp  x19, x20, [sp, #16]
     ldp  x29, x30, [sp], #32
     ret
 ENDF op_schema
+
+// write_table_indexes(x0 Table*): ,"indexes":[{"name":..,"column":..,"kind":..}]
+//   x19 Index** list, x20 count, x21 index, x22 Index*, x23 table
+LFUNC write_table_indexes
+    stp  x29, x30, [sp, #-64]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    stp  x21, x22, [sp, #32]
+    str  x23, [sp, #48]
+    mov  x23, x0
+    bl   index_list
+    mov  x19, x0
+    mov  x20, x1
+    ADR_L x0, r_indexes
+    bl   out_puts
+    mov  x21, #0
+1:  cmp  x21, x20
+    b.hs 3f
+    cbz  x21, 2f
+    mov  w0, #','
+    bl   out_c
+2:  ldr  x22, [x19, x21, lsl #3]
+    ADR_L x0, r_name
+    bl   out_puts
+    ldr  x0, [x22, #IX_NAME]
+    bl   out_str
+    ADR_L x0, r_column_k
+    bl   out_puts
+    ldr  x9, [x23, #TBL_COLS]
+    ldr  x10, [x22, #IX_COL]
+    add  x9, x9, x10, lsl #5
+    ldr  x0, [x9, #COL_NAME]
+    bl   out_str
+    ldr  w9, [x22, #IX_KIND]
+    ADR_L x0, r_kind_h
+    cmp  w9, #IXK_HASH
+    b.eq 21f
+    ADR_L x0, r_kind_b
+21: bl   out_puts
+    add  x21, x21, #1
+    b    1b
+3:  mov  w0, #']'
+    bl   out_c
+    ldp  x19, x20, [sp, #16]
+    ldp  x21, x22, [sp, #32]
+    ldr  x23, [sp, #48]
+    ldp  x29, x30, [sp], #64
+    ret
+ENDF write_table_indexes
+
+// op_stats: {"op":"stats","table":"t"} => row count and per-column
+// null_count / distinct_count / min / max (protocol.md §5.8)
+//   x19 table, x20 ColStats*, x21 column index, x22 Column*, x23 ColStats,
+//   x24 1 if min/max are unknown
+LFUNC op_stats
+    stp  x29, x30, [sp, #-64]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    stp  x21, x22, [sp, #32]
+    stp  x23, x24, [sp, #48]
+    bl   lookup_table_field
+    mov  x19, x0
+    bl   table_stats
+    mov  x20, x0
+    bl   out_begin_ok
+    mov  x0, x19
+    bl   write_table_header
+    ADR_L x0, r_columns
+    bl   out_puts
+    mov  x21, #0
+1:  ldr  x9, [x19, #TBL_NCOLS]
+    cmp  x21, x9
+    b.hs 4f
+    cbz  x21, 2f
+    mov  w0, #','
+    bl   out_c
+2:  ldr  x22, [x19, #TBL_COLS]
+    add  x22, x22, x21, lsl #5
+    add  x23, x20, x21, lsl #5
+    ldr  x0, [x22, #COL_NAME]
+    ldr  w1, [x22, #COL_TYPE]
+    bl   write_column_desc
+    ADR_L x0, g_out                     // reopen the object written above
+    ldr  x9, [x0, #BUF_LEN]
+    sub  x9, x9, #1
+    str  x9, [x0, #BUF_LEN]
+    ADR_L x0, r_nullcnt
+    bl   out_puts
+    ldr  x0, [x23, #CST_NULLS]
+    bl   out_i64
+    ADR_L x0, r_distinct
+    bl   out_puts
+    ldr  x0, [x23, #CST_DISTINCT]
+    bl   out_i64
+    ldr  x9, [x23, #CST_NULLS]          // all NULL (or no rows): min/max null
+    ldr  x10, [x19, #TBL_NROWS]
+    cmp  x9, x10
+    cset x24, hs
+    ADR_L x0, r_min
+    bl   out_puts
+    ADR_L x0, g_out
+    ldr  x1, [x23, #CST_MIN]
+    mov  x2, x24
+    ldr  w3, [x22, #COL_TYPE]
+    bl   write_value_json
+    ADR_L x0, r_max
+    bl   out_puts
+    ADR_L x0, g_out
+    ldr  x1, [x23, #CST_MAX]
+    mov  x2, x24
+    ldr  w3, [x22, #COL_TYPE]
+    bl   write_value_json
+    mov  w0, #'}'
+    bl   out_c
+    add  x21, x21, #1
+    b    1b
+4:  mov  w0, #']'
+    bl   out_c
+    ldp  x19, x20, [sp, #16]
+    ldp  x21, x22, [sp, #32]
+    ldp  x23, x24, [sp, #48]
+    ldp  x29, x30, [sp], #64
+    ret
+ENDF op_stats
 
 // qsort comparator: two Table** by name, case-insensitive
 LFUNC cmp_table_names
@@ -834,6 +976,49 @@ LFUNC op_sleep
 ENDF op_sleep
 
 // ------------------------------------------------------------------ load -----
+
+// layout_options(x0 options JNode* or 0) -> w0 layout (LAYOUT_*, -1 default),
+// w1 dictionary mode (0 auto, 1 forced). Bad values => INVALID_REQUEST.
+//   x19 options, x20 layout Str*
+FUNC layout_options
+    stp  x29, x30, [sp, #-32]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    mov  x19, x0
+    mov  w0, #-1
+    mov  w1, #0
+    cbz  x19, 9f
+    mov  x0, x19
+    ADR_L x1, k_layout
+    mov  w2, #0
+    bl   get_str
+    mov  x20, x0
+    mov  w0, #-1
+    cbz  x20, 3f
+    mov  x0, x20
+    ADR_L x1, v_row
+    bl   str_eq_c
+    cbz  w0, 1f
+    mov  w0, #LAYOUT_ROW
+    b    3f
+1:  mov  x0, x20
+    ADR_L x1, v_column
+    bl   str_eq_c
+    cbz  w0, 2f
+    mov  w0, #LAYOUT_COLUMN
+    b    3f
+2:  RAISE ERR_INVALID_REQUEST, "layout must be \"row\" or \"column\""
+3:  mov  w20, w0
+    mov  x0, x19
+    ADR_L x1, k_dict
+    mov  w2, #0
+    bl   get_bool
+    mov  w1, w0
+    mov  w0, w20
+9:  ldp  x19, x20, [sp, #16]
+    ldp  x29, x30, [sp], #32
+    ret
+ENDF layout_options
 
 // check_path(x0 Str*): ACCESS_DENIED for empty / absolute / NUL / '..' component
 LFUNC check_path
@@ -1080,6 +1265,10 @@ LFUNC op_load
     stp  x23, x24, [sp, #48]
     stp  x25, x26, [sp, #64]
     stp  x27, x28, [sp, #80]
+    sub  sp, sp, #16                // [sp] u32 layout, [sp+4] u32 dictionary
+    mov  w9, #-1
+    str  w9, [sp]
+    str  wzr, [sp, #4]
     mov  x19, x0
     ADR_L x1, k_table
     mov  w2, #1
@@ -1146,6 +1335,10 @@ LFUNC op_load
     bl   get_field
     cbz  x0, 6f
     mov  x28, x0
+    bl   layout_options
+    str  w0, [sp]
+    str  w1, [sp, #4]
+    mov  x0, x28
     ADR_L x1, k_header
     mov  w2, #1
     bl   get_bool
@@ -1222,6 +1415,10 @@ LFUNC op_load
     mov  w5, w25
     mov  w6, w26
     bl   ingest
+    mov  x0, x28
+    ldr  w1, [sp]
+    ldr  w2, [sp, #4]
+    bl   table_finalize
     add  x0, x28, #TBL_ARENA
     add  x1, x20, #STR_DATA
     ldr  x2, [x20, #STR_LEN]
@@ -1242,6 +1439,7 @@ LFUNC op_load
     bl   write_table_header
     mov  x0, x28
     bl   write_table_columns
+    add  sp, sp, #16
     ldp  x19, x20, [sp, #16]
     ldp  x21, x22, [sp, #32]
     ldp  x23, x24, [sp, #48]
@@ -1351,6 +1549,23 @@ LFUNC explain_result
     ret
 ENDF explain_result
 
+// empty_result() -> x0 BoundQuery* (no columns), x1 ResultSet* (no rows)
+LFUNC empty_result
+    stp  x29, x30, [sp, #-32]!
+    mov  x29, sp
+    str  x19, [sp, #16]
+    mov  x0, #BQ_SIZE
+    bl   arena_zalloc
+    mov  x19, x0
+    mov  x0, #RS_SIZE
+    bl   arena_zalloc
+    mov  x1, x0
+    mov  x0, x19
+    ldr  x19, [sp, #16]
+    ldp  x29, x30, [sp], #32
+    ret
+ENDF empty_result
+
 // op_explain: {"op":"explain","sql":…} => {"ok":true,"plan":{…}}
 //   x19 request, x20 plan text
 LFUNC op_explain
@@ -1362,7 +1577,21 @@ LFUNC op_explain
     mov  w2, #1
     bl   get_str
     mov  x20, x0
-    LDR_G x0, g_max_query_mem
+    ADR_L x9, g_use_indexes         // option use_indexes (default true)
+    mov  w10, #1
+    str  w10, [x9]
+    mov  x0, x19
+    ADR_L x1, k_options
+    mov  w2, #J_OBJ
+    mov  w3, #0
+    bl   get_field
+    cbz  x0, 01f
+    ADR_L x1, k_use_idx
+    mov  w2, #1
+    bl   get_bool
+    ADR_L x9, g_use_indexes
+    str  w0, [x9]
+01: LDR_G x0, g_max_query_mem
     ADR_L x1, g_arena_limit
     str  x0, [x1]
     add  x0, x20, #STR_DATA
@@ -1405,6 +1634,9 @@ LFUNC op_query
     mov  w2, #1
     bl   get_str
     mov  x25, x0                    // sql Str*
+    ADR_L x9, g_use_indexes
+    mov  w10, #1
+    str  w10, [x9]
     mov  x21, #-1
     mov  w22, #0
     mov  x0, x19
@@ -1481,6 +1713,8 @@ LFUNC op_query
     ADR_L x1, k_use_idx
     mov  w2, #1
     bl   get_bool
+    ADR_L x9, g_use_indexes
+    str  w0, [x9]
     mov  x0, x20
     ADR_L x1, k_native
     mov  w2, #0
@@ -1498,7 +1732,11 @@ LFUNC op_query
     b.eq 4f
     cmp  w1, #SK_EXPLAIN
     b.eq 41f
-    RAISE ERR_UNSUPPORTED, "CREATE/DROP INDEX are not supported in this engine phase"
+    bl   index_stmt                 // CREATE / DROP INDEX
+    bl   empty_result
+    mov  x23, x0
+    mov  x24, x1
+    b    42f
 4:  ldr  x0, [x0, #ST_QUERY]
     bl   bind_query                 // semantic analysis
     mov  x23, x0
@@ -1597,5 +1835,225 @@ LFUNC op_query
     ldp  x29, x30, [sp], #96
     ret
 ENDF op_query
+
+// ------------------------------------------------------------ save / open ----
+// PQCF files (protocol.md §5.7, storage/pqcf-v1.md; implementation in pqcf.S)
+
+    .section .rodata
+kp_rgsize:  .asciz "row_group_size"
+kp_encoding: .asciz "encoding"
+kp_mmap:    .asciz "mmap"
+kp_layout:  .asciz "layout"
+vp_plain:   .asciz "plain"
+vp_dict:    .asciz "dict"
+vp_rle:     .asciz "rle"
+vp_row:     .asciz "row"
+vp_column:  .asciz "column"
+rp_path:    .asciz ",\"path\":"
+rp_bytes:   .asciz ",\"bytes\":"
+    .text
+
+// op_save: {"op":"save","table":"t","path":"t.pqcf",
+//           "options":{"row_group_size":N,"encoding":"auto|plain|dict|rle"}}
+// => {"ok":true,"path":"t.pqcf","bytes":N}
+// Register use: x19 request, x20 Table*, x21 path Str*, x22 row group size,
+// w23 encoding PENC_*, x24 options / encoding Str* / file size
+LFUNC op_save
+    stp  x29, x30, [sp, #-64]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    stp  x21, x22, [sp, #32]
+    stp  x23, x24, [sp, #48]
+    mov  x19, x0
+    bl   lookup_table_field         // NOT_FOUND
+    mov  x20, x0
+    mov  x0, x19
+    ADR_L x1, k_path
+    mov  w2, #1
+    bl   get_str
+    mov  x21, x0
+    bl   check_path                 // ACCESS_DENIED
+    mov  x22, #0
+    mov  w23, #PENC_AUTO
+    mov  x0, x19
+    ADR_L x1, k_options
+    mov  w2, #J_OBJ
+    mov  w3, #0
+    bl   get_field
+    cbz  x0, 3f
+    mov  x24, x0
+    ADR_L x1, kp_rgsize
+    mov  x2, #0
+    mov  x3, #1
+    bl   get_int
+    mov  x22, x0
+    mov  x0, x24
+    ADR_L x1, kp_encoding
+    mov  w2, #0
+    bl   get_str
+    cbz  x0, 3f
+    mov  x24, x0
+    ADR_L x1, v_auto
+    bl   str_eq_c
+    cbnz w0, 3f
+    mov  w23, #PENC_PLAIN
+    mov  x0, x24
+    ADR_L x1, vp_plain
+    bl   str_eq_c
+    cbnz w0, 3f
+    mov  w23, #PENC_DICT
+    mov  x0, x24
+    ADR_L x1, vp_dict
+    bl   str_eq_c
+    cbnz w0, 3f
+    mov  w23, #PENC_RLE
+    mov  x0, x24
+    ADR_L x1, vp_rle
+    bl   str_eq_c
+    cbnz w0, 3f
+    RAISE ERR_INVALID_REQUEST, "encoding must be auto, plain, dict or rle"
+3:  mov  x0, x20
+    mov  x1, x21
+    mov  x2, x22
+    mov  w3, w23
+    bl   pqcf_save
+    mov  x24, x0
+    bl   out_begin_ok
+    ADR_L x0, rp_path
+    bl   out_puts
+    mov  x0, x21
+    bl   out_str
+    ADR_L x0, rp_bytes
+    bl   out_puts
+    mov  x0, x24
+    bl   out_i64
+    ldp  x19, x20, [sp, #16]
+    ldp  x21, x22, [sp, #32]
+    ldp  x23, x24, [sp, #48]
+    ldp  x29, x30, [sp], #64
+    ret
+ENDF op_save
+
+// op_open: {"op":"open","table":"t","path":"t.pqcf","replace":false,
+//           "options":{"mmap":true,"layout":"row|column"}}
+// => {"ok":true,"table":"t","row_count":N,"columns":[...]} (like load).
+// Nothing changes unless the whole open succeeds: an existing table without
+// replace is ALREADY_EXISTS before the file is read; the new table stays in
+// g_pending_table (freed on error) until it is added to the catalog; index
+// name conflicts are checked before the catalog is modified.
+// Register use: x19 request, x20 table name Str*, x21 path Str*, w22 mmap,
+// w23 layout (-1 = default), x24 options / table being replaced (or 0),
+// x25 new Table*, x26 index specs, x27 spec count
+LFUNC op_open
+    stp  x29, x30, [sp, #-96]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    stp  x21, x22, [sp, #32]
+    stp  x23, x24, [sp, #48]
+    stp  x25, x26, [sp, #64]
+    stp  x27, x28, [sp, #80]
+    mov  x19, x0
+    ADR_L x1, k_table
+    mov  w2, #1
+    bl   get_str
+    mov  x20, x0
+    ldr  x1, [x20, #STR_LEN]
+    cbnz x1, 1f
+    RAISE ERR_INVALID_REQUEST, "table name must not be empty"
+1:  mov  x0, x19
+    ADR_L x1, k_path
+    mov  w2, #1
+    bl   get_str
+    mov  x21, x0
+    bl   check_path                 // ACCESS_DENIED
+    mov  w22, #0
+    mov  w23, #-1
+    mov  x0, x19
+    ADR_L x1, k_options
+    mov  w2, #J_OBJ
+    mov  w3, #0
+    bl   get_field
+    cbz  x0, 3f
+    mov  x24, x0
+    ADR_L x1, kp_mmap
+    mov  w2, #0
+    bl   get_bool
+    mov  w22, w0
+    mov  x0, x24
+    ADR_L x1, kp_layout
+    mov  w2, #0
+    bl   get_str
+    cbz  x0, 3f
+    mov  x24, x0
+    mov  w23, #LAYOUT_ROW
+    ADR_L x1, vp_row
+    bl   str_eq_c
+    cbnz w0, 3f
+    mov  w23, #LAYOUT_COLUMN
+    mov  x0, x24
+    ADR_L x1, vp_column
+    bl   str_eq_c
+    cbnz w0, 3f
+    RAISE ERR_INVALID_REQUEST, "layout must be row or column"
+3:  mov  x0, x19
+    ADR_L x1, k_replace
+    mov  w2, #0
+    bl   get_bool
+    mov  w28, w0
+    add  x0, x20, #STR_DATA
+    ldr  x1, [x20, #STR_LEN]
+    bl   catalog_find
+    mov  x24, x0
+    cbz  x24, 4f
+    cbnz w28, 4f
+    mov  w0, #ERR_ALREADY_EXISTS
+    ADR_L x1, m_exists
+    add  x2, x20, #STR_DATA
+    ldr  x3, [x20, #STR_LEN]
+    bl   pq_raise_s
+4:  mov  x0, x21
+    mov  w1, w22
+    bl   pqcf_load                  // registers g_pending_table
+    mov  x25, x0
+    mov  x26, x1
+    mov  x27, x2
+    mov  x0, x26
+    mov  x1, x27
+    mov  x2, x24
+    bl   index_check_specs          // ALREADY_EXISTS (nothing changed yet)
+    mov  x0, x25
+    mov  w1, w23
+    mov  w2, #0
+    bl   table_finalize
+    add  x0, x25, #TBL_ARENA
+    add  x1, x20, #STR_DATA
+    ldr  x2, [x20, #STR_LEN]
+    bl   str_new_in
+    str  x0, [x25, #TBL_NAME]
+    // commit
+    cbz  x24, 5f
+    mov  x0, x24
+    bl   catalog_remove
+5:  mov  x0, x25
+    bl   catalog_add
+    ADR_L x1, g_pending_table
+    str  xzr, [x1]
+    mov  x0, x25
+    mov  x1, x26
+    mov  x2, x27
+    bl   index_create_specs
+    bl   out_begin_ok
+    mov  x0, x25
+    bl   write_table_header
+    mov  x0, x25
+    bl   write_table_columns
+    ldp  x19, x20, [sp, #16]
+    ldp  x21, x22, [sp, #32]
+    ldp  x23, x24, [sp, #48]
+    ldp  x25, x26, [sp, #64]
+    ldp  x27, x28, [sp, #80]
+    ldp  x29, x30, [sp], #96
+    ret
+ENDF op_open
 
     NOTE_GNU_STACK
