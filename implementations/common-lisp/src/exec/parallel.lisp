@@ -375,6 +375,10 @@ position of its first row."
                            m
                            (svref (partitioned-batch-positions pb) p)))))
 
+(defconstant +probe-morsels+ 32
+  "Grouped parallel aggregations of at most this many morsels first aggregate
+one morsel in the consumer thread to detect many groups (see PROBE-AGGREGATE).")
+
 (defun make-parallel-aggregate (node scan threads)
   "Batch opener of a HashAggregate whose input pipeline runs in up to
 THREADS workers, each aggregating into a partial group state (or, with
@@ -383,15 +387,18 @@ many groups, partitioning its rows; see above)."
          (morsel-count (length (scan-morsels scan)))
          (workers (min threads morsel-count))
          (grouped (and (pp-hash-aggregate-group-by node) t))
-         ;; Per worker: (new-state consume lazy prepare), see MAKE-AGGREGATE-CONSUMER.
-         (consumers (coerce (loop repeat workers
+         (probe (and grouped (<= morsel-count +probe-morsels+)))
+         ;; Per worker, plus one for the probe: (new-state consume lazy
+         ;; prepare), see MAKE-AGGREGATE-CONSUMER.
+         (consumers (coerce (loop repeat (if probe (1+ workers) workers)
                                   collect (multiple-value-list
                                            (let ((*parallel-disabled* t))
                                              (make-aggregate-consumer node :track-positions t))))
                             'simple-vector))
          (first-consumer (svref consumers 0)))
     (multiple-value-bind (copies providers)
-        (compile-pipeline-copies child workers (and (third first-consumer) (pp-table-scan-p child)))
+        (compile-pipeline-copies child (if probe (1+ workers) workers)
+                                 (and (third first-consumer) (pp-table-scan-p child)))
       (lambda ()
         (let ((output nil))
           (lambda ()
@@ -400,60 +407,110 @@ many groups, partitioning its rows; see above)."
               (let ((run (make-prun (scan-morsels scan)))
                     (states (make-array workers :initial-element nil))
                     (buffers (make-array workers :initial-element '()))
-                    (mode (list nil)))   ; NIL until decided, then :LOCAL or :PARTITION
-                (prun-start run workers
-                            (lambda (w)
-                              (destructuring-bind (new-state consume lazy prepare) (svref consumers w)
-                                (declare (ignore lazy))
-                                (declare (type function new-state consume prepare))
-                                (let ((gs (funcall new-state (if grouped +partial-state-groups+ 16)))
-                                      (first-morsel t)
-                                      (partition nil))
-                                  (setf (svref states w) gs)
-                                  (run-morsels
-                                   run (svref copies w)
-                                   (lambda (m iter)
-                                     (declare (type function iter))
-                                     ;; Input position: morsel, then row within it.
-                                     (let ((base (* m (expt 2 32)))
-                                           (rows 0)
-                                           (prepared '()))
-                                       (declare (type fixnum base rows))
-                                       (loop for b = (funcall iter)
-                                             while b
-                                             do (when (prun-stopped run) (return-from nil))
-                                                (let ((n (batch-count b)))
-                                                  (if partition
-                                                      (multiple-value-bind (key-vecs arg-vecs)
-                                                          (funcall prepare b)
-                                                        (charge-memory
-                                                         (* n (row-footprint (+ (length key-vecs)
-                                                                                (length arg-vecs)))))
-                                                        (push (list* n key-vecs arg-vecs) prepared))
-                                                      (funcall consume gs b base))
-                                                  (incf rows n)))
-                                       ;; The whole morsel's rows are split at once, so
-                                       ;; partitions receive few, large pieces.
-                                       (when prepared
-                                         (push (partition-morsel (nreverse prepared) base workers
-                                                                 (group-state-native gs))
-                                               (svref buffers w)))
-                                       (when first-morsel
-                                         (setf first-morsel nil
-                                               partition
-                                               (and grouped (> workers 1)
-                                                    (eq (decide-aggregation-mode
-                                                         mode (> (group-state-count gs)
-                                                                 (* rows +partition-group-ratio+)))
-                                                        :partition)))))))))))
-                ;; Wait for all workers, then merge their partial states in order.
-                (loop for th in (prun-threads run)
-                      do (sb-thread:join-thread th :default nil))
-                (setf (prun-threads run) '())
-                (prun-raise run)
-                (check-interrupts)
-                (setf output (merge-partial-states states node (first first-consumer) buffers))))
+                    (mode (list nil))    ; NIL until decided, then :LOCAL or :PARTITION
+                    (probe-state nil))
+                (when probe
+                  ;; A small input: aggregate its first morsel here first. With
+                  ;; many groups, aggregating the rest serially is cheaper than
+                  ;; any parallel scheme; otherwise the workers take the rest.
+                  (multiple-value-bind (gs serial)
+                      (probe-aggregate (svref consumers workers) (svref copies workers)
+                                       (prun-morsels run))
+                    (if serial
+                        ;; One state filled in input order: its group ids are
+                        ;; already in first-appearance order.
+                        (setf output (group-state-batches gs node))
+                        (setf probe-state gs
+                              (car mode) :local
+                              (prun-next run) 1))))
+                (unless output
+                  (prun-start run workers
+                              (lambda (w)
+                                (destructuring-bind (new-state consume lazy prepare) (svref consumers w)
+                                  (declare (ignore lazy))
+                                  (declare (type function new-state consume prepare))
+                                  (let ((gs (funcall new-state (if grouped +partial-state-groups+ 16)))
+                                        (first-morsel t)
+                                        (partition nil))
+                                    (setf (svref states w) gs)
+                                    (run-morsels
+                                     run (svref copies w)
+                                     (lambda (m iter)
+                                       (declare (type function iter))
+                                       ;; Input position: morsel, then row within it.
+                                       (let ((base (* m (expt 2 32)))
+                                             (rows 0)
+                                             (prepared '()))
+                                         (declare (type fixnum base rows))
+                                         (loop for b = (funcall iter)
+                                               while b
+                                               do (when (prun-stopped run) (return-from nil))
+                                                  (let ((n (batch-count b)))
+                                                    (if partition
+                                                        (multiple-value-bind (key-vecs arg-vecs)
+                                                            (funcall prepare b)
+                                                          (charge-memory
+                                                           (* n (row-footprint (+ (length key-vecs)
+                                                                                  (length arg-vecs)))))
+                                                          (push (list* n key-vecs arg-vecs) prepared))
+                                                        (funcall consume gs b base))
+                                                    (incf rows n)))
+                                         ;; The whole morsel's rows are split at once, so
+                                         ;; partitions receive few, large pieces.
+                                         (when prepared
+                                           (push (partition-morsel (nreverse prepared) base workers
+                                                                   (group-state-native gs))
+                                                 (svref buffers w)))
+                                         (when first-morsel
+                                           (setf first-morsel nil
+                                                 partition
+                                                 (and grouped (> workers 1)
+                                                      (eq (decide-aggregation-mode
+                                                           mode (> (group-state-count gs)
+                                                                   (* rows +partition-group-ratio+)))
+                                                          :partition)))))))))))
+                  ;; Wait for all workers, then merge their partial states in order.
+                  (loop for th in (prun-threads run)
+                        do (sb-thread:join-thread th :default nil))
+                  (setf (prun-threads run) '())
+                  (prun-raise run)
+                  (check-interrupts)
+                  (setf output (if probe-state
+                                   (merge-partial-states (concatenate 'simple-vector states
+                                                                      (vector probe-state))
+                                                         node (first first-consumer)
+                                                         (concatenate 'simple-vector buffers #(())))
+                                   (merge-partial-states states node (first first-consumer) buffers))))))
             (funcall (the function output))))))))
+
+(defun probe-aggregate (consumer copy morsels)
+  "Aggregate the first of MORSELS with the pipeline COPY and the aggregate
+CONSUMER (new-state consume ...) in this thread. Returns its group state,
+or, when that morsel has many groups, the group state of all MORSELS,
+aggregated here serially, as (values state :serial)."
+  (destructuring-bind (new-state consume &rest rest) consumer
+    (declare (ignore rest) (type function new-state consume))
+    (let ((gs (funcall new-state +partial-state-groups+))
+          (rows 0)
+          (*parallel-disabled* t))
+      (declare (type fixnum rows))
+      (flet ((consume-morsel (m)
+               (setf (car (pipeline-copy-cell copy)) (svref morsels m))
+               (let ((iter (funcall (the function (pipeline-copy-opener copy))))
+                     (base (* m (expt 2 32))))
+                 (declare (type function iter) (type fixnum base))
+                 (loop for b = (funcall iter)
+                       while b
+                       do (funcall consume gs b base)
+                          (incf base (batch-count b))
+                          (incf rows (batch-count b))))))
+        (consume-morsel 0)
+        (if (> (group-state-count gs) (* rows +partition-group-ratio+))
+            (progn
+              (loop for m from 1 below (length morsels)
+                    do (consume-morsel m))
+              (values gs :serial))
+            gs)))))
 
 (defun decide-aggregation-mode (mode many-groups)
   "The aggregation mode of a run: decided once, by the first worker to finish
