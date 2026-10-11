@@ -1,0 +1,43 @@
+{
+ "wave_id": "wave-a-kernel-refactor-a1-20261011T120845Z",
+ "task": "kernel-refactor",
+ "track": "A",
+ "attempt": 1,
+ "seed": 2881,
+ "order": [
+  "arm64-asm",
+  "x86_64-asm"
+ ],
+ "run_ids": [
+  "a-kernel-refactor-arm64-asm-a1-20261011T120845Z",
+  "a-kernel-refactor-x86_64-asm-a1-20261011T120846Z"
+ ],
+ "started": "2026-10-11T12:08:47+00:00",
+ "parallel": 2,
+ "limits": {
+  "timeout_min": 120,
+  "budget_usd": 60.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  0.4921875,
+  0.52099609375,
+  0.62109375
+ ],
+ "finished": "2026-10-11T12:48:50+00:00",
+ "loadavg_end": [
+  1.169921875,
+  0.9140625,
+  0.84423828125
+ ],
+ "results": [
+  {
+   "run_id": "a-kernel-refactor-arm64-asm-a1-20261011T120845Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-kernel-refactor-x86_64-asm-a1-20261011T120846Z",
+   "outcome": "success"
+  }
+ ]
+}

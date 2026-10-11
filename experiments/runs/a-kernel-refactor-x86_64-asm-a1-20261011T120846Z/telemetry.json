@@ -1,0 +1,78 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-kernel-refactor-x86_64-asm-a1-20261011T120846Z",
+ "language": "x86_64-asm",
+ "task": "kernel-refactor",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-kernel-refactor",
+ "prompt_sha256": "609787784e3ca2c67d717888bd1d2d97e0377df64abda47fe231f08f6fc2c455",
+ "session_id": "e31eb30a-04d8-4433-a5cd-83fb5235d83d",
+ "tokens": {
+  "input": 130,
+  "output": 301047,
+  "cache_read": 21434676,
+  "cache_creation": 506028,
+  "thinking": null,
+  "thinking_estimated": 101673,
+  "source": "result events",
+  "api_messages": 65
+ },
+ "rate_limit": {
+  "events": 10,
+  "max_utilization": {
+   "five_hour": 0.18,
+   "seven_day": 0.39
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 14.356619199999995,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 73,
+ "result_segments": 1,
+ "assistant_messages": 164,
+ "tool_calls": {
+  "Bash": 45,
+  "Read": 14,
+  "Write": 13
+ },
+ "tool_calls_total": 72,
+ "tool_failures": 1,
+ "build_invocations": 20,
+ "build_failures_heuristic": 0,
+ "conformance_runs": 0,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 2389.4,
+  "model_api_seconds": 2339.4,
+  "tool_seconds": 50.8,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 6,
+  "files_changed": 13,
+  "lines_added": 5739,
+  "lines_removed": 4579,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "All remaining mentions of the old names are intentional (the \"before\" module map, or the scalar `PRED_DRIVER`, which is still its name). The work is complete and committed (working tree clean).\n\nThe three x86-64 variant files are restructured as CR-5 asks, with no change in behaviour and no performance regression.\n\n## What I did\n\n- **Six shared include files** (`.h`, pulled in with `#include`, and they emit no bytes on their own):\n  - `pqk_x86_common.h` is used by all variants. It holds the ABI constants, symbol directives, prologue/epilogue, operator validation and jump-table dispatch, validity-bit extraction, the 64-row block-driver pieces, and shared scalar parts (overflow test, fmix64, gather, group_sum pass 2, \u2026).\n  - `pqk_x86_consts.h` holds every constant value and every rodata table.\n  - `pqk_x86_simd.h` holds blocks shared by AVX2 and AVX-512.\n  - `pqk_x86_scalar.h`, `pqk_x86_avx2.h` and `pqk_x86_avx512.h` hold blocks used by two or more kernels of one variant.\n- **Variant `.S` files** now contain only the kernels (plus emitting their helpers). Each kernel has a header comment (arguments, result, clobbered registers, algorithm, tail strategy) and the `[check] / [main] / [tail] / [result]` skeleton tags. Labels follow one scheme everywhere: `.L<kernel>_<step>`, and no numeric labels.\n- **README** has the before/after module map with line counts (6896 \u2192 7054 lines total; assembly code without comments 5801 \u2192 5035), every shared building block with the kernels that use it, the skeleton and label rules, the verification method and the before/after timings.\n- **Two new verification tools** in `verify/`; `run.sh` now runs them:\n  - `disasm_compare.py` compares the machine code with a git revision, symbol by symbol.\n  - `structure_check.py` checks that every block is defined once (232 definitions), that headers emit nothing, the 20/20 kernel set, the label scheme, the header comments and skeleton tags, and every kernel's documented clobber list against its actual machine code.\n\n## Results\n\n- `make -C native-kernels test`: `20/20 kernels PASS` for `x86_scalar`, `x86_avx2` and `x86_avx512`, both native and under ASan/UBSan. The guard-page, edge-case, small-chunk and ABI checks also pass, and the structure check reports ok.\n- **Machine code**: 138 of the 140 functions are instruction-identical to the pre-CR-5 commit. The deliberate differences:\n  - In the scalar `filter_i128` and `count_i128`, one `add` in the operator dispatch has its operands swapped. It is the same length and jumps to the same place.\n  - AVX2's `c_sign_q` is merged into the identical `c_i64min` table.\n  - `c_hibias` is now one 32-byte table for both SIMD variants; AVX-512 still reads the same first 16 bytes.\n- The exported symbols of `libpqkernels.so` are identical (108), with no text relocations and a non-executable stack.\n- **Performance** (9 runs each, old and new binaries alternating, pinned to each of the two CPU complexes): new/old ratio is 0.994 (L3-resident data) and 0.999 (data from DRAM), geometric mean. Every kernel stays within run-to-run noise, judged against the unchanged reference C code measured alongside. That is expected, since the instructions are the same.\n\n## Limitations\n\n- The Makefile, which I was not allowed to change, does not list the `.h` files as dependencies. After editing a header, run `make clean` before `make test`.\n- Helpers and tables are written once in the source but still appear once in each variant's object file that uses them, as before. Sharing them between objects would have meant new cross-file symbols and moving code around, for no benefit.\n- The skeleton tags follow the existing code order rather than reordering code, so a few kernels, such as `compare_fixed`, have a part placed after their `ret`.\n\nDuring the refactor the compare tool also caught one bug of mine before it was committed: a constant used before its definition, which the assembler had silently turned into an undefined symbol.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

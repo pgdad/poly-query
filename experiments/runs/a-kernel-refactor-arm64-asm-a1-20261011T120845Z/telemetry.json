@@ -1,0 +1,79 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-kernel-refactor-arm64-asm-a1-20261011T120845Z",
+ "language": "arm64-asm",
+ "task": "kernel-refactor",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-kernel-refactor",
+ "prompt_sha256": "b668537b59de761424a6b52ef9cb965aeb9efe05e770dbd1e2a544c8773ac4b1",
+ "session_id": "53b12b34-72ca-485f-950f-ef7e2836cf07",
+ "tokens": {
+  "input": 104,
+  "output": 195075,
+  "cache_read": 11726523,
+  "cache_creation": 326228,
+  "thinking": null,
+  "thinking_estimated": 62543,
+  "source": "result events",
+  "api_messages": 52
+ },
+ "rate_limit": {
+  "events": 7,
+  "max_utilization": {
+   "five_hour": 0.16,
+   "seven_day": 0.38
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 8.857044599999998,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 55,
+ "result_segments": 1,
+ "assistant_messages": 124,
+ "tool_calls": {
+  "Bash": 42,
+  "Read": 4,
+  "Write": 7,
+  "Edit": 1
+ },
+ "tool_calls_total": 54,
+ "tool_failures": 3,
+ "build_invocations": 13,
+ "build_failures_heuristic": 0,
+ "conformance_runs": 0,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 1512.2,
+  "model_api_seconds": 1496.9,
+  "tool_seconds": 15.0,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 6,
+  "files_changed": 8,
+  "lines_added": 3637,
+  "lines_removed": 2520,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "I restructured the three AArch64 kernel files as CR-5 asks, and the machine code they produce is byte-for-byte the same as before. `make -C native-kernels test-cross` reports `20/20 kernels PASS` for `a64_scalar`, `a64_neon` and `a64_sve`, the same variants and counts as before. Everything is committed, and only files under `native-kernels/arm64/` changed.\n\n**What changed**\n- **Shared code is defined once**, in three include files. The Makefile does not assemble them, because they end in `.h`:\n  - `pq_a64_common.h` is used by all three variants. It holds the operator checks for the comparison kernels, validity-bit extraction, the function start/end and symbol directives, return helpers, the 128/192-bit exact-sum steps and their overflow checks, and the min/max helpers. It also has the helpers for bitmaps, popcount, hashing, `compare_fixed` and `group_sum`, plus named constants.\n  - `pq_a64_neon.h` holds the NEON constant tables (written out once, from one place) and the NEON-only shared code.\n  - `pq_a64_sve.h` holds the SVE-only shared code: validity predicates, row loads, range checks and the 64-row bitmap writer.\n  - The old `pq_a64_macros.h` is gone; its contents moved into these files. A helper used by only one kernel sits directly above that kernel, so one kernel can be read or changed on its own.\n- **Every kernel has the same shape**: argument check / empty input, main loop, tail, result. Each has a header comment listing arguments, result, clobbered registers, register roles, algorithm and tail handling.\n- **Labels follow one scheme**: `.L<variant>_<kernel>_<step>` in kernels and `.L<macro>_<step>\\@` in macros. The 122 numeric labels are gone.\n- **`README.md`** has the before/after module map with line counts (3,649 \u2192 4,542 source lines; most of the growth is the new per-kernel comments) and a table of every shared building block with the kernels that use it.\n\n**How I checked nothing changed**\n- I kept the original object files and compared each new build against them after every step. The code bytes, constant tables, symbols (addresses and sizes), section layout and relocations are all identical, and the comparison does flag a deliberately altered instruction.\n- The \"clobbered registers\" line in each of the 60 functions' comments was checked against the disassembly and matches exactly.\n- No function touches the callee-saved registers (x19\u2013x29, v8\u2013v15).\n- `make test` passes.\n- SVE passes at vector lengths of 128, 384, 512 and 2048 bits.\n- The library still builds as a position-independent shared library without text relocations.\n\n**Speed:** I measured nothing; there is no AArch64 hardware here, and timings under the qemu emulator are meaningless. Because every kernel runs exactly the same instructions at the same addresses and alignments as before, I expect no change on the Cortex-X925 target. The planned before/after measurement should show only run-to-run noise.\n\n**Limitations:** the comparison and checking scripts are throwaway tools kept outside the repository, like the earlier test harnesses; the README explains how to repeat the main comparison. The extensive edge-case and guard-page testing from before CR-5 was not re-run. It still applies because the machine code is identical.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

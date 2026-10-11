@@ -1,0 +1,49 @@
+{
+ "wave_id": "wave-a-optimize-latency-a2-20261011T124859Z",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 2,
+ "seed": 27716,
+ "order": [
+  "java",
+  "go",
+  "clojure",
+  "python",
+  "rust",
+  "common-lisp"
+ ],
+ "run_ids": [
+  "a-optimize-latency-java-a3-20261011T124859Z",
+  "a-optimize-latency-go-a3-20261011T124900Z",
+  "a-optimize-latency-clojure-a2-20261011T124901Z",
+  "a-optimize-latency-python-a3-20261011T124902Z",
+  "a-optimize-latency-rust-a2-20261011T124903Z",
+  "a-optimize-latency-common-lisp-a2-20261011T124904Z"
+ ],
+ "started": "2026-10-11T12:49:06+00:00",
+ "parallel": 6,
+ "base_refs": {
+  "rust": "92e508f972",
+  "clojure": "8182024720",
+  "go": "a2fa770467",
+  "java": "a2fa770467",
+  "python": "a2fa770467",
+  "common-lisp": "23936d9073"
+ },
+ "attempts": {
+  "go": 3,
+  "java": 3,
+  "python": 3
+ },
+ "record_only": true,
+ "limits": {
+  "timeout_min": 120,
+  "budget_usd": 60.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  1.0517578125,
+  0.9013671875,
+  0.84130859375
+ ]
+}

@@ -1,0 +1,10 @@
+2026-10-11T12:08:47+00:00 wave wave-a-kernel-refactor-a1-20261011T120845Z: order=['arm64-asm', 'x86_64-asm']
+2026-10-11T12:08:47+00:00 [a-kernel-refactor-arm64-asm-a1-20261011T120845Z] agent queued (usage gate, then launch)
+2026-10-11T12:08:52+00:00 [a-kernel-refactor-x86_64-asm-a1-20261011T120846Z] agent queued (usage gate, then launch)
+2026-10-11T12:34:00+00:00 [a-kernel-refactor-arm64-asm-a1-20261011T120845Z] agent finished; collecting telemetry
+2026-10-11T12:34:00+00:00 [a-kernel-refactor-arm64-asm-a1-20261011T120845Z] validating (clean clone, sandboxed)
+2026-10-11T12:34:37+00:00 [a-kernel-refactor-arm64-asm-a1-20261011T120845Z] outcome=success cost=$8.857044599999998 turns=55 wall=1512.2s
+2026-10-11T12:48:42+00:00 [a-kernel-refactor-x86_64-asm-a1-20261011T120846Z] agent finished; collecting telemetry
+2026-10-11T12:48:42+00:00 [a-kernel-refactor-x86_64-asm-a1-20261011T120846Z] validating (clean clone, sandboxed)
+2026-10-11T12:48:50+00:00 [a-kernel-refactor-x86_64-asm-a1-20261011T120846Z] outcome=success cost=$14.356619199999995 turns=73 wall=2389.4s
+2026-10-11T12:48:50+00:00 wave wave-a-kernel-refactor-a1-20261011T120845Z finished: refactor=success, refactor=success

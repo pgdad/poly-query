@@ -1,0 +1,3 @@
+2026-10-11T12:49:06+00:00 wave wave-a-optimize-latency-a2-20261011T124859Z: order=['java', 'go', 'clojure', 'python', 'rust', 'common-lisp']
+2026-10-11T12:49:06+00:00 [a-optimize-latency-java-a3-20261011T124859Z] agent queued (usage gate, then launch)
+2026-10-11T12:49:11+00:00 [a-optimize-latency-go-a3-20261011T124900Z] agent queued (usage gate, then launch)
