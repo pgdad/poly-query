@@ -1261,23 +1261,18 @@ FUNC ex_tuples
 ENDF ex_tuples
 
 // =============================================================================
-// ex_scan(x0 PlanNode*, x1 ctx) -> x0 TupleSet*
-// Resolves the range variable's table (materialising derived tables / CTEs)
-// and returns the rows passing the pushed-down filter, in row order. The
-// candidate rows are a list of row ranges:
-//   * an index lookup (PN_IDX: sorted, de-duplicated row ids), or
+// scan_ranges(x0 scan PlanNode*, x1 ctx) -> x0 u64* (lo, hi) ranges,
+//   x1 range count, x2 total rows
+// Resolves the range variable's table (materialising derived tables / CTEs,
+// EC_TABLES[rv]) and lists its candidate rows as row ranges, in row order:
+//   * an index lookup (PN_IDX: sorted, de-duplicated row ids, runs merged),
 //   * every row group the predicates do not exclude (PQCF-backed tables
 //     with min/max statistics), or
 //   * the whole table.
-// The complete filter is evaluated on every candidate row either way. The
-// ranges are cut into contiguous windows of candidate rows, one per scan
-// task (scan_task); with option threads > 1 and enough rows the tasks run
-// in parallel (par_run) and their results are concatenated in order.
 //   x19 node, x20 ctx, x21 bq, x22 rv, x23 table, x24 ranges, x25 range
-//   count, x26 total rows, x27 tasks, x28 task records
-//   [sp] RowVec (index scans), [sp+24] row group cursor
+//   count, x26 total rows; [sp] RowVec (index scans), [sp+24] cursor
 // =============================================================================
-LFUNC ex_scan
+FUNC scan_ranges
     ENTER 5
     sub  sp, sp, #32
     mov  x19, x0
@@ -1294,20 +1289,20 @@ LFUNC ex_scan
     mov  x25, #0
     mov  x26, #0
     ldr  x9, [x19, #PN_IDX]
-    cbnz x9, .Lsc_index
+    cbnz x9, .Lsr_index
     ldr  x9, [x23, #TBL_NRG]
-    cbz  x9, .Lsc_full
+    cbz  x9, .Lsr_full
     ldr  x9, [x19, #PN_NPREDS]
-    cbnz x9, .Lsc_groups
-.Lsc_full:
+    cbnz x9, .Lsr_groups
+.Lsr_full:
     mov  x0, #32
     bl   arena_alloc
     mov  x24, x0
     mov  x0, #0
     ldr  x1, [x23, #TBL_NROWS]
-    bl   .Lsc_add
-    b    .Lsc_tasks
-.Lsc_groups:                            // row-group skipping
+    bl   .Lsr_add
+    b    .Lsr_done
+.Lsr_groups:                            // row-group skipping
     ldr  x9, [x23, #TBL_NRG]
     lsl  x0, x9, #4
     add  x0, x0, #16
@@ -1317,7 +1312,7 @@ LFUNC ex_scan
 4:  ldr  x9, [sp, #24]
     ldr  x10, [x23, #TBL_NRG]
     cmp  x9, x10
-    b.hs .Lsc_tasks
+    b.hs .Lsr_done
     ldr  x3, [x23, #TBL_RGS]
     add  x3, x3, x9, lsl #5             // RG_SIZE = 32
     add  x9, x9, #1
@@ -1332,9 +1327,9 @@ LFUNC ex_scan
     ldr  x0, [x3, #RG_START]
     ldr  x1, [x3, #RG_NROWS]
     add  x1, x1, x0
-    bl   .Lsc_add
+    bl   .Lsr_add
     b    4b
-.Lsc_index:                             // index scan: runs of row ids
+.Lsr_index:                             // index scan: runs of row ids
     stp  xzr, xzr, [sp]
     str  xzr, [sp, #16]
     mov  x0, x19
@@ -1351,7 +1346,7 @@ LFUNC ex_scan
 5:  ldr  x9, [sp, #24]
     ldr  x10, [sp]
     cmp  x9, x10
-    b.hs .Lsc_tasks
+    b.hs .Lsr_done
     ldr  x10, [sp, #16]
     ldr  w0, [x10, x9, lsl #2]
     add  x9, x9, #1
@@ -1366,9 +1361,44 @@ LFUNC ex_scan
     str  x1, [x11, #8]
     add  x26, x26, #1
     b    5b
-51: bl   .Lsc_add
+51: bl   .Lsr_add
     b    5b
+.Lsr_done:
+    mov  x0, x24
+    mov  x1, x25
+    mov  x2, x26
+    add  sp, sp, #32
+    LEAVE 5
 
+// local helper sharing the frame: append range [x0, x1) (x1 > x0)
+.Lsr_add:
+    add  x9, x24, x25, lsl #4
+    stp  x0, x1, [x9]
+    add  x25, x25, #1
+    sub  x9, x1, x0
+    add  x26, x26, x9
+    ret
+ENDF scan_ranges
+
+// =============================================================================
+// ex_scan(x0 PlanNode*, x1 ctx) -> x0 TupleSet*
+// The rows of scan_ranges passing the pushed-down filter, in row order (the
+// complete filter is evaluated on every candidate row whatever the access
+// path). The candidate rows are cut into contiguous windows, one per scan
+// task (scan_task); with option threads > 1 and enough rows the tasks run
+// in parallel (par_run) and their results are concatenated in order.
+//   x19 node, x20 ctx, x24 ranges, x25 range count, x26 total rows,
+//   x27 tasks, x28 task records; [sp] scratch
+// =============================================================================
+LFUNC ex_scan
+    ENTER 5
+    sub  sp, sp, #32
+    mov  x19, x0
+    mov  x20, x1
+    bl   scan_ranges
+    mov  x24, x0
+    mov  x25, x1
+    mov  x26, x2
 .Lsc_tasks:
     // number of tasks: threads, at most one per g_par_min_rows rows
     mov  x27, #1
@@ -1449,14 +1479,6 @@ LFUNC ex_scan
     add  sp, sp, #32
     LEAVE 5
 
-// local helper sharing the frame: append range [x0, x1) (x1 > x0)
-.Lsc_add:
-    add  x9, x24, x25, lsl #4
-    stp  x0, x1, [x9]
-    add  x25, x25, #1
-    sub  x9, x1, x0
-    add  x26, x26, x9
-    ret
 ENDF ex_scan
 
 // =============================================================================
