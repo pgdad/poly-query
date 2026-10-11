@@ -1,6 +1,7 @@
 package polyquery.exec;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -291,6 +292,177 @@ public final class JoinOperators {
             reserved = 0;
             table = null;
             candidates = List.of();
+        }
+    }
+
+    /**
+     * Sort-merge equi-join (INNER or LEFT). Both inputs are materialized (right first) with their
+     * key tuples, sorted stably by key and merged; each run of equal left keys is paired with the
+     * run of equal right keys. Rows with a NULL key component never match (LEFT join: they are
+     * padded, after the merged rows).
+     */
+    public static final class MergeJoin implements Operator {
+        private record Keyed(Object[] key, Object[] row) {
+        }
+
+        private final Operator left;
+        private final Operator right;
+        private final Evaluator[] leftKeys;
+        private final Evaluator[] rightKeys;
+        private final Comparator<Object[]> leftOrder;
+        private final Comparator<Object[]> rightOrder;
+        private final Comparator<Object[]> crossOrder;
+        private final Evaluator residual;
+        private final boolean leftOuter;
+        private final int rightWidth;
+        private final ExecContext ctx;
+        private List<Keyed> lefts;
+        private List<Keyed> rights;
+        private List<Object[]> unmatchedNullKeys;
+        private long reserved;
+        private long produced;
+        private int li;
+        private int runStart;
+        private int runEnd;
+        private int ri;
+        private boolean matched;
+        private int nullPos;
+
+        /**
+         * @param leftOrder  orders left key tuples
+         * @param rightOrder orders right key tuples
+         * @param crossOrder compares a left key tuple with a right key tuple
+         */
+        public MergeJoin(Operator left, Operator right, Evaluator[] leftKeys, Evaluator[] rightKeys,
+                         Comparator<Object[]> leftOrder, Comparator<Object[]> rightOrder,
+                         Comparator<Object[]> crossOrder, Evaluator residual, boolean leftOuter, int rightWidth,
+                         ExecContext ctx) {
+            this.left = left;
+            this.right = right;
+            this.leftKeys = leftKeys;
+            this.rightKeys = rightKeys;
+            this.leftOrder = leftOrder;
+            this.rightOrder = rightOrder;
+            this.crossOrder = crossOrder;
+            this.residual = residual;
+            this.leftOuter = leftOuter;
+            this.rightWidth = rightWidth;
+            this.ctx = ctx;
+        }
+
+        private List<Keyed> materialize(Operator input, Evaluator[] keys, List<Object[]> nullKeyed) {
+            List<Keyed> out = new ArrayList<>();
+            Object[] r;
+            while ((r = input.next()) != null) {
+                ctx.checkpoint();
+                Object[] k = new Object[keys.length];
+                boolean hasNull = false;
+                for (int i = 0; i < k.length && !hasNull; i++) {
+                    k[i] = keys[i].eval(r);
+                    hasNull = k[i] == null;
+                }
+                long size = ExecContext.estimateRow(r) + ExecContext.estimateRow(k) + 32;
+                ctx.reserve(size);
+                reserved += size;
+                if (!hasNull) {
+                    out.add(new Keyed(k, r));
+                } else if (nullKeyed != null) {
+                    nullKeyed.add(r);
+                }
+            }
+            return out;
+        }
+
+        @Override
+        public void open() {
+            produced = 0;
+            right.open();
+            rights = materialize(right, rightKeys, null);
+            left.open();
+            unmatchedNullKeys = new ArrayList<>();
+            lefts = materialize(left, leftKeys, leftOuter ? unmatchedNullKeys : null);
+            ctx.checkNow();
+            rights.sort((a, b) -> {
+                ctx.checkpoint();
+                return rightOrder.compare(a.key(), b.key());
+            });
+            lefts.sort((a, b) -> {
+                ctx.checkpoint();
+                return leftOrder.compare(a.key(), b.key());
+            });
+            li = -1;
+            runStart = 0;
+            runEnd = 0;
+            ri = 0;
+            nullPos = 0;
+            advanceLeft();
+        }
+
+        /** Moves to the next left row and positions the run of right rows with an equal key. */
+        private void advanceLeft() {
+            li++;
+            matched = false;
+            if (li >= lefts.size()) {
+                return;
+            }
+            Object[] key = lefts.get(li).key();
+            if (li > 0 && leftOrder.compare(lefts.get(li - 1).key(), key) == 0) {
+                ri = runStart; // same key as the previous left row: reuse its run
+                return;
+            }
+            int pos = runEnd;
+            while (pos < rights.size() && crossOrder.compare(key, rights.get(pos).key()) > 0) {
+                pos++;
+            }
+            runStart = pos;
+            while (pos < rights.size() && crossOrder.compare(key, rights.get(pos).key()) == 0) {
+                pos++;
+            }
+            runEnd = pos;
+            ri = runStart;
+        }
+
+        @Override
+        public Object[] next() {
+            while (li < lefts.size()) {
+                Object[] leftRow = lefts.get(li).row();
+                while (ri < runEnd) {
+                    Object[] combined = JoinBase.concat(leftRow, rights.get(ri++).row());
+                    ctx.checkpoint();
+                    if (residual == null || Boolean.TRUE.equals(residual.eval(combined))) {
+                        matched = true;
+                        return emit(combined);
+                    }
+                }
+                boolean pad = leftOuter && !matched;
+                advanceLeft();
+                if (pad) {
+                    return emit(JoinBase.concat(leftRow, new Object[rightWidth]));
+                }
+            }
+            if (nullPos < unmatchedNullKeys.size()) {
+                return emit(JoinBase.concat(unmatchedNullKeys.get(nullPos++), new Object[rightWidth]));
+            }
+            return null;
+        }
+
+        private Object[] emit(Object[] row) {
+            if (++produced > ctx.maxJoinRows()) {
+                throw new PolyQueryException(ErrorCode.RESOURCE_LIMIT,
+                        "join produced more than " + ctx.maxJoinRows() + " rows");
+            }
+            return row;
+        }
+
+        @Override
+        public void close() {
+            left.close();
+            right.close();
+            ctx.release(reserved);
+            reserved = 0;
+            lefts = null;
+            rights = null;
+            unmatchedNullKeys = null;
         }
     }
 }

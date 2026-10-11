@@ -6,6 +6,8 @@ import polyquery.common.PolyQueryException;
 /**
  * Per-query execution state: lifetime control (timeout, cancellation), memory budget accounting
  * and row limits. Operators call {@link #checkpoint()} regularly so long-running queries stop promptly.
+ * Parallel workers share the context: {@link #checkNow()}, {@link #reserve} and {@link #release}
+ * are thread-safe; correlation frames are used only by the query's own thread.
  */
 public final class ExecContext {
     private static final int CHECK_INTERVAL = 1024;
@@ -15,7 +17,7 @@ public final class ExecContext {
     private final long maxResultRows;
     private final long maxJoinRows;
     private Object[][] frames = new Object[8][];
-    private long memoryUsed;
+    private final java.util.concurrent.atomic.AtomicLong memoryUsed = new java.util.concurrent.atomic.AtomicLong();
     private int counter;
 
     /**
@@ -79,17 +81,16 @@ public final class ExecContext {
         return control.remainingNanos();
     }
 
-    /** Accounts for retained memory; RESOURCE_LIMIT when the budget is exceeded. */
+    /** Accounts for retained memory; RESOURCE_LIMIT when the budget is exceeded. Thread-safe. */
     public void reserve(long bytes) {
-        memoryUsed += bytes;
-        if (memoryUsed > memoryBudget) {
+        if (memoryUsed.addAndGet(bytes) > memoryBudget) {
             throw new PolyQueryException(ErrorCode.RESOURCE_LIMIT,
                     "query exceeded its memory budget of " + (memoryBudget >> 20) + " MiB");
         }
     }
 
     public void release(long bytes) {
-        memoryUsed -= bytes;
+        memoryUsed.addAndGet(-bytes);
     }
 
     /** Rough heap size of a materialized row. */

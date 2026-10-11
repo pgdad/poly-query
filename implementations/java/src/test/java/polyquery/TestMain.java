@@ -13,7 +13,7 @@ public final class TestMain {
         List<Class<?>> suites = List.of(
                 LexerTest.class, ParserTest.class, TypesTest.class, IngestTest.class,
                 EngineTest.class, QueryTest.class, ProtocolTest.class, StorageTest.class, IndexTest.class,
-                polyquery.server.ServerTest.class);
+                polyquery.server.ServerTest.class, Phase5Test.class, polyquery.exec.vector.VectorTest.class);
         int passed = 0;
         int failed = 0;
         for (Class<?> suite : suites) {
@@ -22,6 +22,7 @@ public final class TestMain {
                     continue;
                 }
                 try {
+                    m.setAccessible(true);
                     m.invoke(null);
                     passed++;
                 } catch (java.lang.reflect.InvocationTargetException e) {

@@ -92,6 +92,15 @@ public final class PlanExplainer {
                     node.put("residual", ExprFormatter.format(j.residual()));
                 }
             }
+            case PhysicalPlan.MergeJoin j -> {
+                node.put("op", "MergeJoin");
+                node.put("join_type", j.kind().name());
+                node.put("left_keys", formatAll(j.leftKeys()));
+                node.put("right_keys", formatAll(j.rightKeys()));
+                if (j.residual() != null) {
+                    node.put("residual", ExprFormatter.format(j.residual()));
+                }
+            }
             case PhysicalPlan.NestedLoopJoin j -> {
                 node.put("op", "NestedLoopJoin");
                 node.put("join_type", j.kind().name());
@@ -101,13 +110,15 @@ public final class PlanExplainer {
             }
             case PhysicalPlan.Sort s -> {
                 node.put("op", "Sort");
-                List<String> keys = new ArrayList<>();
-                List<ColumnSchema> schema = s.input().schema();
-                for (SortKey k : s.keys()) {
-                    keys.add(schema.get(k.column()).name() + (k.descending() ? " DESC" : " ASC")
-                            + (k.nullsFirst() ? " NULLS FIRST" : " NULLS LAST"));
+                node.put("keys", sortKeys(s.keys(), s.input().schema()));
+            }
+            case PhysicalPlan.TopN t -> {
+                node.put("op", "TopN");
+                node.put("keys", sortKeys(t.keys(), t.input().schema()));
+                if (t.offset() != null) {
+                    node.put("offset", ExprFormatter.format(t.offset()));
                 }
-                node.put("keys", keys);
+                node.put("limit", ExprFormatter.format(t.limit()));
             }
             case PhysicalPlan.Limit l -> {
                 node.put("op", "Limit");
@@ -132,6 +143,15 @@ public final class PlanExplainer {
         }
         node.put("children", children);
         return node;
+    }
+
+    private static List<String> sortKeys(List<SortKey> keys, List<ColumnSchema> schema) {
+        List<String> out = new ArrayList<>();
+        for (SortKey k : keys) {
+            out.add(schema.get(k.column()).name() + (k.descending() ? " DESC" : " ASC")
+                    + (k.nullsFirst() ? " NULLS FIRST" : " NULLS LAST"));
+        }
+        return out;
     }
 
     private void collectSubqueries(BoundExpr e, List<Object> out) {

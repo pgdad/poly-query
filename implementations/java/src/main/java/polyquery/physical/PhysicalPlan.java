@@ -190,6 +190,24 @@ public sealed interface PhysicalPlan {
         }
     }
 
+    /**
+     * Sort-merge equi-join (INNER or LEFT): both inputs are sorted on their join keys and merged;
+     * keys and residual as for {@link HashJoin}. Output rows are the left columns followed by
+     * the right columns.
+     */
+    record MergeJoin(PhysicalPlan left, PhysicalPlan right, LogicalPlan.JoinKind kind, List<BoundExpr> leftKeys,
+                     List<BoundExpr> rightKeys, BoundExpr residual) implements PhysicalPlan {
+        @Override
+        public List<ColumnSchema> schema() {
+            return concat(left, right);
+        }
+
+        @Override
+        public List<PhysicalPlan> children() {
+            return List.of(left, right);
+        }
+    }
+
     /** Join evaluating {@code condition} (null = TRUE) for every pair of rows. */
     record NestedLoopJoin(PhysicalPlan left, PhysicalPlan right, LogicalPlan.JoinKind kind, BoundExpr condition)
             implements PhysicalPlan {
@@ -216,6 +234,22 @@ public sealed interface PhysicalPlan {
         }
     }
 
+    /**
+     * {@code ORDER BY … OFFSET o LIMIT n} computed with a bounded heap of {@code o + n} rows
+     * instead of a full sort (ties keep their input order, exactly like the stable sort).
+     */
+    record TopN(PhysicalPlan input, List<SortKey> keys, BoundExpr offset, BoundExpr limit) implements PhysicalPlan {
+        @Override
+        public List<ColumnSchema> schema() {
+            return input.schema();
+        }
+
+        @Override
+        public List<PhysicalPlan> children() {
+            return List.of(input);
+        }
+    }
+
     /** OFFSET then LIMIT; expressions are constant INT64 (null = absent). */
     record Limit(PhysicalPlan input, BoundExpr offset, BoundExpr limit) implements PhysicalPlan {
         @Override
@@ -230,7 +264,7 @@ public sealed interface PhysicalPlan {
     }
 
     /** The expressions evaluated by a node itself (not its children). */
-    static List<BoundExpr> expressions(PhysicalPlan p) {
+    public static List<BoundExpr> expressions(PhysicalPlan p) {
         List<BoundExpr> out = new ArrayList<>();
         switch (p) {
             case TableScan t -> { }
@@ -256,10 +290,23 @@ public sealed interface PhysicalPlan {
                     out.add(j.residual());
                 }
             }
+            case MergeJoin j -> {
+                out.addAll(j.leftKeys());
+                out.addAll(j.rightKeys());
+                if (j.residual() != null) {
+                    out.add(j.residual());
+                }
+            }
             case NestedLoopJoin j -> {
                 if (j.condition() != null) {
                     out.add(j.condition());
                 }
+            }
+            case TopN t -> {
+                if (t.offset() != null) {
+                    out.add(t.offset());
+                }
+                out.add(t.limit());
             }
             case Limit l -> {
                 if (l.offset() != null) {

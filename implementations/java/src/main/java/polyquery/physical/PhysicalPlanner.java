@@ -16,13 +16,13 @@ import polyquery.types.Decimals;
 
 /**
  * Chooses physical algorithms for a logical plan: table vs index scans (with row-group
- * skipping filters), hash vs nested-loop joins and the hash join build side (basic
- * cost-based choices from table statistics), hash lookups for correlated filters; finally
- * prunes the columns read by every scan.
+ * skipping filters), hash / sort-merge / nested-loop joins and the hash join build side (basic
+ * cost-based choices from table statistics), hash lookups for correlated filters, top-N for
+ * {@code ORDER BY … LIMIT}; finally prunes the columns read by every scan.
  */
 public final class PhysicalPlanner {
     /** Join algorithm preference (query option {@code join}). */
-    public enum JoinStrategy { AUTO, HASH, NESTED_LOOP }
+    public enum JoinStrategy { AUTO, HASH, MERGE, NESTED_LOOP }
 
     /** An index scan is chosen when at most this fraction of the table's rows is expected to match. */
     static final double INDEX_SELECTIVITY_THRESHOLD = 0.10;
@@ -31,10 +31,17 @@ public final class PhysicalPlanner {
 
     private final JoinStrategy joinStrategy;
     private final boolean useIndexes;
+    private final boolean topN;
 
     public PhysicalPlanner(JoinStrategy joinStrategy, boolean useIndexes) {
+        this(joinStrategy, useIndexes, true);
+    }
+
+    /** @param topN plan {@code ORDER BY … LIMIT} as a bounded top-N heap instead of a full sort */
+    public PhysicalPlanner(JoinStrategy joinStrategy, boolean useIndexes, boolean topN) {
         this.joinStrategy = joinStrategy;
         this.useIndexes = useIndexes;
+        this.topN = topN;
     }
 
     public PhysicalPlan plan(LogicalPlan plan) {
@@ -52,6 +59,8 @@ public final class PhysicalPlanner {
             case LogicalPlan.Aggregate a -> new PhysicalPlan.HashAggregate(build(a.input()), a.groupKeys(), a.aggregates());
             case LogicalPlan.Distinct d -> new PhysicalPlan.HashDistinct(build(d.input()));
             case LogicalPlan.Sort s -> new PhysicalPlan.Sort(build(s.input()), s.keys());
+            case LogicalPlan.Limit l when topN && l.limit() != null && l.input() instanceof LogicalPlan.Sort s ->
+                    new PhysicalPlan.TopN(build(s.input()), s.keys(), l.offset(), l.limit());
             case LogicalPlan.Limit l -> new PhysicalPlan.Limit(build(l.input()), l.offset(), l.limit());
             case LogicalPlan.Join j -> join(j);
         };
@@ -213,6 +222,9 @@ public final class PhysicalPlanner {
         }
         if (leftKeys.isEmpty()) {
             return new PhysicalPlan.NestedLoopJoin(left, right, j.kind(), j.condition());
+        }
+        if (joinStrategy == JoinStrategy.MERGE) {
+            return new PhysicalPlan.MergeJoin(left, right, j.kind(), leftKeys, rightKeys, BoundExprs.and(residual));
         }
         // Build on the input with the smaller estimated cardinality (inner joins only; a LEFT
         // join must build on its right input).

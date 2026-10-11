@@ -15,7 +15,7 @@ import polyquery.types.DataType;
  * equality ≈ 1/distinct, ranges by linear interpolation between min and max for
  * numeric/temporal columns (1/3 otherwise); other predicates use fixed guesses.
  */
-final class Cardinality {
+public final class Cardinality {
     static final double DEFAULT_SELECTIVITY = 1.0 / 3;
 
     private Cardinality() {
@@ -61,7 +61,7 @@ final class Cardinality {
     }
 
     /** Estimated output rows of a logical plan. */
-    static double rows(LogicalPlan plan) {
+    public static double rows(LogicalPlan plan) {
         return switch (plan) {
             case LogicalPlan.Scan s -> s.table().rowCount();
             case LogicalPlan.SingleRow s -> 1;

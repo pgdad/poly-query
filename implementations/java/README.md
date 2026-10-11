@@ -1,7 +1,7 @@
 # PolyQuery — Java engine
 
-An analytical database engine implementing the PolyQuery specification (`spec/`), currently
-at **Phase 4**: protocol, catalog, CSV/JSON/JSONL ingestion, all data types, the complete
+An analytical database engine implementing the PolyQuery specification (`spec/`), at
+**Phase 5**: protocol, catalog, CSV/JSON/JSONL ingestion, all data types, the complete
 SQL v1 grammar (GROUP BY/HAVING, DISTINCT, INNER/LEFT/CROSS joins, all scalar functions,
 CASE/LIKE/BETWEEN/IN, uncorrelated **and correlated** subqueries, derived tables, CTEs,
 EXPLAIN), structured errors, resource limits and test functions; row- and column-oriented
@@ -12,11 +12,17 @@ skipping, column pruning and cost-based join build-side selection; and the `serv
 server with every endpoint of protocol.md §7, streaming NDJSON results with backpressure,
 Prometheus metrics, structured JSON logs, snapshot-isolated concurrent readers, a worker
 limit with a bounded FIFO queue (`OVERLOADED` beyond it), query timeouts, cancellation
-(explicit and on client disconnect) and graceful shutdown.
+(explicit and on client disconnect) and graceful shutdown; and (Phase 5) a retained
+row-at-a-time baseline plus a **vectorized** batch engine with **morsel-driven parallel** scans,
+aggregation, DISTINCT and top-N, hash / sort-merge / nested-loop joins selectable per query, an
+error-preserving logical optimizer (constant folding, predicate simplification and pushdown,
+join reordering), top-N sorting, SIMD-friendly kernels and cache-conscious data structures —
+see [Phase 5: optimization](#phase-5-optimization).
 
 Capabilities: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic test.functions phase2
 sql.groupby sql.join sql.functions sql.subquery sql.cte sql.correlated_subquery phase3
-storage.pqcf storage.mmap index.hash index.btree phase4 http.streaming`.
+storage.pqcf storage.mmap index.hash index.btree phase4 http.streaming phase5 exec.row
+exec.vectorized exec.parallel join.hash join.merge join.nested_loop`.
 
 ## Prerequisites and build
 
@@ -59,9 +65,10 @@ Source lives in `src/main/java/polyquery/`, one package per layer:
 | `sql.parser` | Recursive-descent parser (WITH, joins, subqueries, CASE, IN, LIKE, BETWEEN, EXPLAIN, CREATE/DROP INDEX); `PARSE_ERROR` carries `line`/`column` |
 | `sql.analyzer` | Semantic validation: `Scope` (range variables, correlation), `ExpressionBinder` + `TypeCoercion` + `ScalarFunctionBinder` (typing), `Analyzer` (per query level: FROM/joins/derived tables/CTEs, GROUP BY rewriting, ORDER BY resolution → `BoundQuery`), `LogicalPlanner` (`BoundQuery` → logical plan) |
 | `plan` | Bound (typed) expressions (`BoundExpr`, `BoundExprs` traversal), aggregate calls, subqueries, logical plan nodes, expression formatter |
-| `optimizer` | `LogicalOptimizer`: predicate pushdown into joins and scans, CROSS→INNER join conversion (disabled by `optimize: false`) |
-| `physical` | `PhysicalPlan` nodes, `PhysicalPlanner` (table vs index scans, hash vs nested-loop joins and build side, hash lookup for correlated filters), `ColumnPredicates` (sargable conjuncts → key predicates), `Cardinality` (estimates from statistics), `ColumnPruner`, `PlanExplainer` (EXPLAIN JSON) |
-| `exec` | Volcano operators (table/index scans, filter, project, hash aggregate, distinct, hash/nested-loop join, sort, limit, hash-lookup filter), `OperatorBuilder` (physical plan → operators), `ExpressionCompiler` (bound expression → closures), `ScalarFunctions`, `SubqueryRunner`, `ExecContext` (timeout, memory budget, row/join limits, correlation frames) |
+| `optimizer` | `LogicalOptimizer`: constant folding, predicate simplification, error-preserving predicate pushdown into joins and scans, CROSS→INNER join conversion; `ExprSafety` (can an expression fail / be NULL — with interval arithmetic over column statistics); `JoinReorder` (inner-join trees). All disabled by `optimize: false` |
+| `physical` | `PhysicalPlan` nodes, `PhysicalPlanner` (table vs index scans, hash / merge / nested-loop joins and build side, top-N, hash lookup for correlated filters), `ColumnPredicates` (sargable conjuncts → key predicates), `Cardinality` (estimates from statistics), `ColumnPruner`, `PlanExplainer` (EXPLAIN JSON) |
+| `exec` | Row engine (`mode: row`): Volcano operators (table/index scans, filter, project, hash aggregate, distinct, hash/merge/nested-loop joins, sort, top-N, limit, hash-lookup filter), `OperatorBuilder` (physical plan → operators), `ExpressionCompiler` (bound expression → closures), `ScalarFunctions`, `SubqueryRunner`, `ExecContext` (timeout, memory budget, row/join limits, correlation frames) |
+| `exec.vector` | Vectorized engine (`mode: vectorized`): `Vec`/`Batch` (column vectors + selection vectors), `VecCompiler` + `Kernels` (batch expression kernels), `BatchExprs` (row-exact error semantics), scan/filter/project/limit, `AggregateBatches` + `GroupKeys` + `AggState` (hash aggregation, DISTINCT), `JoinBatches` (hash join), `SortBatches` (sort, top-N), `ColumnStore`, `Parallel` (morsel-driven workers), `BatchBuilder` (plan → batch operators), `VectorExecutor` |
 | `storage` | Immutable table snapshots (`Table` = schema + `TableData` + indexes + statistics); `ColumnarData` (`ColumnVector`s: primitive arrays + null bitmaps, dictionary-encoded strings), `RowData` (row tuples), `Layouts` (conversions, dictionary policy), `TableStatistics`/`DistinctCounter`, thread-safe `Catalog` (tables and global index names) |
 | `storage.pqcf` | PQCF v1: `PqcfWriter` (atomic save), `ChunkEncoder`, `PqcfReader` (header/footer/metadata validation), `ChunkDecoder` (CRC + value validation), `PqcfTableData` (row groups, lazy chunks over a memory-mapped file) |
 | `index` | `HashIndex`, `OrderedIndex` (sorted permutation), `KeyDomain`/`KeyPredicate` (typed lookup keys and predicates) |
@@ -77,13 +84,15 @@ Query pipeline (each stage is a separate class and data structure):
 SQL text ─Lexer→ tokens ─Parser→ AST (Statement/Query/Expr)
    ─Analyzer/ExpressionBinder→ BoundQuery per query level (typed BoundExpr, resolved names)
    ─LogicalPlanner→ LogicalPlan ─LogicalOptimizer→ LogicalPlan
-   ─PhysicalPlanner→ PhysicalPlan ─OperatorBuilder/ExpressionCompiler→ Operator tree ─Executor→ rows
+   ─PhysicalPlanner→ PhysicalPlan ─┬─ OperatorBuilder/ExpressionCompiler→ Operator tree ─Executor→ rows      (mode: row)
+                                   └─ BatchBuilder/VecCompiler→ BatchOperator tree ─VectorExecutor→ rows   (mode: vectorized)
 ```
 
 `EXPLAIN` renders the physical plan (`TableScan`/`IndexScan` with `table`, `index`, `kind` and
 the `columns` actually read, `Filter`, `Project`, `Aggregate`, `Distinct`,
-`HashJoin`/`NestedLoopJoin` with `join_type` and `build_side`, `Sort`, `Limit`, `Values`,
-`HashLookupFilter`); plans of subqueries appear under a `subqueries` property of the node that
+`HashJoin`/`MergeJoin`/`NestedLoopJoin` with `join_type` (and `build_side` for hash joins),
+`Sort`, `TopN`, `Limit`, `Values`, `HashLookupFilter`); the physical plan is the same in both
+execution modes; plans of subqueries appear under a `subqueries` property of the node that
 evaluates them. Scans also show `row_group_filters` (predicates used to skip row groups),
 `layout` and `estimated_rows`.
 
@@ -187,12 +196,14 @@ from the group keys; referencing an ungrouped column there is a `SEMANTIC_ERROR`
 ### Joins
 
 Joins associate left to right. ON conditions are split into equi-join keys
-(`left_expr = right_expr`) and a residual; with at least one key a hash join is used (hash
-table on the right input; for LEFT JOIN the right side must be the build side), otherwise a
-nested-loop join over the materialized right input. NULL keys never match. Equal values of
-different DECIMAL scales hash identically. Every join operator counts its output rows against
-`--max-join-rows` (`RESOURCE_LIMIT`). The `join` query option `hash`/`nested_loop` forces an
-algorithm where applicable (`merge` and `auto` currently mean "choose").
+(`left_expr = right_expr`) and a residual. With at least one key the join is a hash join (hash
+table on the input with the smaller estimated cardinality; for LEFT JOIN the right side must be
+the build side) — or, with `join: "merge"`, a sort-merge join (both inputs materialized with
+their key tuples, sorted stably, runs of equal keys paired; LEFT JOIN pads unmatched rows,
+including rows with NULL keys) — or, with `join: "nested_loop"`, a nested-loop join. Joins
+without equi keys (and CROSS joins) are always nested-loop joins. `auto` (default) picks a
+hash join. NULL keys never match. Equal values of different DECIMAL scales match. Every join
+operator counts its output rows against `--max-join-rows` (`RESOURCE_LIMIT`).
 
 ### HTTP server and concurrency (Phase 4)
 
@@ -255,6 +266,239 @@ DECIMAL arithmetic is exact: 64-bit fast paths with `Math.*Exact`, falling back 
 SUM/AVG over INT64/DECIMAL accumulate exactly (widening to `BigInteger`); only the final
 INT64/DECIMAL result is range-checked.
 
+## Phase 5: optimization
+
+Every query runs in one of two execution models, selected per query (`mode`):
+
+* **`row`** — the unoptimized baseline, kept permanently: the Volcano operators of Phases 1–4
+  (`polyquery.exec`), one boxed `Object[]` row at a time, single-threaded.
+* **`vectorized`** (also `auto`, the default) — batch execution over column vectors
+  (`polyquery.exec.vector`), parallel when `threads` > 1.
+
+Both run the same physical plan, so `EXPLAIN` is identical; `optimize` and `join` act on
+planning and apply to both. Every combination of `mode` × `join` × `threads` × `optimize`
+returns the same rows (multiset; ordered queries in the same order; FLOAT64 sums within
+rounding) **and the same errors** — the one exception being queries whose outcome depends on
+the unspecified row order of a join (see Known limitations).
+
+### Vectorized execution
+
+* **Batches** (`Batch`, 2048 rows by default) hold one `Vec` per slot of the operator's row
+  layout plus a **selection vector** of active positions; filters only narrow the selection
+  (no copying), evaluating the conjuncts of a WHERE one after the other on the rows still
+  undecided, so most rows are discarded by the first, cheapest loops. A `Vec` is struct-of-arrays: `long[]` (INT64, DECIMAL unscaled, DATE, TIMESTAMP,
+  BOOLEAN 0/1), `double[]` or `Object[]`, a `boolean[]` null mask, or — for dictionary-encoded
+  STRING columns — `int[]` codes into the table's dictionary, which flow through scans, joins,
+  sorts and parallel exchange unchanged, so string predicates (`=`, `LIKE`, `IN`) are evaluated
+  once per distinct value and GROUP BY maps codes to group ids through a per-dictionary cache.
+* **Expressions** are compiled by `VecCompiler` into batch kernels (`Kernels`): column refs,
+  constants (folded at compile time), arithmetic with exact overflow checks, comparisons, AND /
+  OR / NOT with the row engine's short-circuit (the right side is evaluated only on undecided
+  rows), IS NULL, IN lists (hash sets), BETWEEN, LIKE, CASE (each branch only on its rows),
+  NULLIF, `||`, numeric/temporal casts. Scalar functions and CASTs without a kernel apply the row
+  engine's compiled code to one vectorized argument; subqueries and anything else fall back to
+  row-at-a-time evaluation of that subexpression — so every expression is supported.
+* **Operators**: table/index scans, filter, project, LIMIT/OFFSET, hash aggregation, DISTINCT,
+  hash join, sort and top-N are batch operators; sort-merge and nested-loop joins and correlated
+  hash lookups are the row engine's operators, connected through `BatchToRow`/`RowToBatch`
+  adapters (so `join: merge`/`nested_loop` work in vectorized mode too).
+* **Row-exact errors.** Batch-wise evaluation must not change *which* error a query raises, or
+  whether it raises one (e.g. `SELECT 1/(x-3) FROM t LIMIT 2`). `BatchExprs` runs the kernels;
+  if one raises a data error the batch is re-evaluated row by row with the row engine's code to
+  find the first failing row; the batch is truncated before it and the error is attached to the
+  batch (`Batch.error`) and raised by the consumer only when it needs the next row. Since every
+  later pipeline stage only sees the rows before the error, the error raised is exactly the one
+  of row-at-a-time execution, and a LIMIT satisfied earlier never raises it. Timeouts,
+  cancellation and resource limits are never deferred.
+
+### Parallel execution (`threads`)
+
+`Parallel` runs *pipelines* — a table scan followed by filters, projections and hash-join
+probes (with their hash tables built first and then shared read-only) — on a shared pool of
+daemon worker threads. Row groups are cut into **morsels** (65,536 rows) handed out in scan
+order; each worker compiles its own copy of the pipeline (expressions have per-instance
+buffers). Pipelines with subqueries or correlated references stay on the query thread, and a
+pipeline over fewer than two morsels is not parallelized.
+
+* **Aggregation**: each worker aggregates whole morsels into a private partial table and
+  records, per group, the position (morsel, row) of its first row. The partial tables are
+  partitioned by key hash (hashes are computed from the values, so they agree across tables)
+  and the partitions are merged in parallel, each with a k-way merge in first-position order;
+  the output interleaves the partitions by first position — so groups come out in exactly the
+  order of sequential execution. INT64/DECIMAL sums merge exactly (BigInteger on overflow).
+* **DISTINCT** runs as a keys-only parallel aggregation when no pipeline expression can fail;
+  otherwise workers drop duplicates within their morsels and the final DISTINCT streams over
+  the rest. **Top-N**: workers keep the best `offset + limit` rows of each morsel (stable), the
+  final top-N picks among them.
+* **Everything else** is gathered **in morsel order** with a bounded number of morsels in
+  flight, so row order (and therefore LIMIT without ORDER BY) is the same as sequential.
+* **Errors**: a data error of morsel *m* is raised only after the results of all earlier
+  morsels — workers skip later morsels once an earlier one failed — i.e. the error of the
+  first failing row in scan order, as in sequential execution.
+
+### Joins
+
+* **Hash join** (vectorized): the build input is materialized in a `ColumnStore` (presized
+  when the input is a plain table scan); a single integer-like key uses `LongIndex`, an
+  open-addressing table with the key stored inline in the slot (one cache miss per probe) — for
+  large build sides (≥ 131,072 rows) with several threads, built as hash partitions in parallel;
+  other keys use the generic tuple table. Rows with equal keys
+  are chained in input order. The probe emits (probe row, build row) pairs in probe order and,
+  per probe row, in build order, gathering only the columns some consumer reads; LEFT JOIN
+  padding rows are placed right after their row's candidates — the row engine's exact order.
+* **Sort-merge join** and **nested-loop join**: row operators (see Joins above).
+* `join: auto` chooses a hash join for equi-joins; the build side is the smaller estimated input.
+
+### Logical optimizer (`optimize`)
+
+* **Constant folding** of every constant subexpression (once, at planning) — unless its
+  evaluation fails; then it is left for the rows that evaluate it.
+* **Predicate simplification**: `TRUE AND x → x`, `FALSE AND x → FALSE`, `x OR FALSE → x`,
+  `NOT NOT x → x`, … (`x AND FALSE → FALSE` only when `x` cannot fail), always-TRUE filters vanish.
+* **Predicate pushdown** into join inputs and scans (also enabling index scans and row-group
+  skipping), CROSS→INNER join conversion. **Error-preserving**: moving a predicate changes the
+  rows the others are evaluated on, so a conjunct moves only if it precedes every conjunct that
+  may raise an error — and, when such a conjunct exists, only if it can never be NULL (a NULL
+  conjunct does not stop the evaluation of the following ones; a pushed-down filter would) —
+  and nothing moves across a join condition that may fail. `ExprSafety` decides both, using
+  column statistics: interval arithmetic over min/max proves e.g. that `price * 2` cannot
+  overflow or that a divisor range excludes 0; null counts prove columns non-NULL. So
+  `optimize: true` and `false` agree on errors too, while the usual shapes (comma joins with
+  the join condition first, arithmetic on stored values) are still fully optimized.
+* **Join reordering** (`JoinReorder`) of inner-join trees with ≥ 3 inputs: start with the
+  connected pair with the smallest estimated join result, then repeatedly add the connected
+  input with the smallest estimated result (equi-join selectivity 1/max(distinct counts) from
+  table statistics); conditions are placed at the lowest join where their inputs are available
+  and a projection restores the original column order. Only when all conditions are free of
+  subqueries and cannot fail.
+* **Projection pushdown**: the column pruner (Phase 3) reads only referenced columns.
+* **Top-N** (physical planning, also disabled by `optimize: false`): `ORDER BY … LIMIT n`
+  keeps only the best `offset + n` rows (row engine: bounded heap; vectorized: column store
+  re-sorted and truncated whenever it doubles). Ties keep input order, exactly like the stable
+  full sort.
+
+### Sorting
+
+The vectorized sort materializes its input in a `ColumnStore` and sorts row indices stably: an
+**LSD radix sort** (8-bit digits, constant digits skipped) on an order-preserving 64-bit key of
+the first sort key — the value for numbers (sign-flipped; doubles via their IEEE bits with
+-0.0 = 0.0), a 4-UTF-16-unit prefix for strings (mapped to code-point order) — then a merge
+sort with full typed comparisons only within runs of equal radix keys.
+
+### SIMD, memory and cache
+
+* **SIMD**: kernels are counted loops over primitive arrays without branches in the common
+  null-free case — comparisons produce 0/1 with bit arithmetic (`(d ^ ((x ^ y) & (d ^ x))) >>> 63`
+  for `x < y`), overflow checks OR flags across the loop instead of branching, SUM over INT64/
+  DECIMAL without GROUP BY is two overflow-free reductions over the 32-bit halves (exact),
+  MIN/MAX use `Math.min/max` reductions — which HotSpot's SuperWord pass compiles to AVX2/
+  AVX-512 instructions. The JDK's explicit SIMD API (`jdk.incubator.vector`) was evaluated and
+  rejected: it is an incubator module whose use makes the JVM print an unsuppressible
+  non-JSON `WARNING: Using incubator modules` line on stderr, violating the structured-log
+  contract (every stderr line is JSON; checked by the HTTP suite).
+* **Memory pooling**: operators and expression kernels own their output vectors and reuse them
+  for every batch (no per-row and almost no per-batch allocation); rows are boxed only at the
+  very end (result rows) — `result: count` boxes nothing.
+* **Cache-aware layouts**: aggregate states are primitive arrays indexed by group id (no
+  per-group objects); group keys are stored flat in a `long[]` with the full hash kept per group
+  and an `int[]` open-addressing index (linear probing), so most probes touch one index slot and
+  one hash; the join index stores keys inline; parallel aggregation merges hash partitions
+  independently.
+
+### Measurements
+
+Generated data at scale `1m` (`python3 datasets/generators/pqgen.py generate --scale 1m`:
+transactions 1,000,000 rows, customers 100,000, orders 250,000, order_items 1,000,000,
+products 20,000, sensor_readings / nulls_heavy / sort_keys 1,000,000), loaded as in-memory
+column tables. `tools/bench.py` loads them into one session and reports the median wall time
+(ms, client side, `result: count`) of 7 runs after 2 warm-up runs. Machine: AMD Ryzen 9 9950X3D
+(16 cores / 32 threads, AVX-512), OpenJDK 27, default JVM flags of `bin/polyquery`.
+
+Queries (tables `tx` = transactions, `cust` = customers, `items` = order_items, `sensor`,
+`nh` = nulls_heavy, `sk` = sort_keys; the exact SQL is in `tools/bench.py`):
+
+* **Q1** (filter+agg): `SELECT COUNT(*), SUM(amount), AVG(fee) FROM tx WHERE status = 'approved' AND amount > 100`
+* **Q2** (group by, low cardinality): `SELECT category, COUNT(*), SUM(amount), MIN(ts), MAX(amount) FROM tx GROUP BY category` (20 groups)
+* **Q3** (group by, high cardinality): `SELECT customer_id, COUNT(*), SUM(amount) FROM tx GROUP BY customer_id` (80,777 groups)
+* **Q4** (join+group): `SELECT c.segment, COUNT(*), SUM(t.amount) FROM tx t JOIN cust c ON c.customer_id = t.customer_id GROUP BY c.segment`
+* **Q5** (3-way join): orders ⋈ order_items ⋈ products, `WHERE o.status = 'delivered'`, `GROUP BY p.category`
+* **Q6** (top-N): `SELECT tx_id, amount FROM tx WHERE status = 'approved' ORDER BY amount DESC, tx_id LIMIT 10`
+* **Q7** (sort): `SELECT id, float_key FROM sk ORDER BY float_key` (1,000,000 rows out)
+* **Q8** (sensor avg): `SELECT sensor_id, AVG(temperature), MAX(humidity) FROM sensor GROUP BY sensor_id`
+* **Q9** (distinct): `SELECT DISTINCT merchant_id, category FROM tx` (181,642 rows)
+* **Q10** (string filter): `SELECT COUNT(*) FROM cust WHERE email LIKE '%1@example.com' AND country IN ('US', 'GB')` (100,000 rows)
+* **Q11** (projection): `SELECT tx_id, amount * 2 + fee, UPPER(currency) FROM tx WHERE bucket < 500` (499,822 rows out)
+* **Q12** (nulls): `SELECT n50 % 10, COUNT(*), SUM(n90), COUNT(f95) FROM nh GROUP BY 1` (50–95% NULLs)
+* **Q13** (join order): items ⋈ orders ⋈ products ⋈ customers written in a bad order, selective filters on products and customers
+* **Q14** (conjunctive filter): `SELECT COUNT(*) FROM tx WHERE bucket < 500 AND merchant_id > 10 AND customer_id <> 7`
+* **Q15** (reductions): `SELECT SUM(tx_id), MIN(bucket), MAX(merchant_id), COUNT(*) FROM tx`
+* **Q16** (left join): `SELECT o.status, COUNT(i.order_id), SUM(i.quantity) FROM orders o LEFT JOIN items i ON i.order_id = o.order_id GROUP BY o.status` (builds on the 1M-row side)
+
+Median milliseconds. *Before* is the Phase-4 engine this phase started from (row-at-a-time,
+its default optimizations); the other columns are this engine with the given options
+(`join: auto`); speed-up = before ÷ best vectorized time.
+
+| query | before (Phase 4) | row, `optimize:false` (baseline) | row | vectorized, 1 thread | vectorized, 4 threads | vectorized, 16 threads | speed-up |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Q1 filter+agg | 23.3 | 24.0 | 32.3 | 5.0 | 1.0 | 1.1 | 23× |
+| Q2 group by (low card.) | 44.7 | 28.4 | 28.0 | 8.6 | 3.4 | 4.6 | 13× |
+| Q3 group by (high card.) | 58.8 | 58.7 | 59.9 | 14.9 | 14.4 | 13.5 | 4× |
+| Q4 join+group | 61.0 | 64.2 | 66.6 | 19.5 | 10.7 | 12.7 | 6× |
+| Q5 3-way join | 48.5 | 74.7 | 65.3 | 13.4 | 7.0 | 6.1 | 8× |
+| Q6 top-N | 99.6 | 99.2 | 18.5 | 5.3 | 1.7 | 1.5 | 66× |
+| Q7 sort | 397.5 | 405.5 | 406.3 | 24.1 | 24.9 | 23.5 | 17× |
+| Q8 sensor avg | 30.2 | 29.0 | 28.9 | 8.0 | 2.4 | 1.6 | 19× |
+| Q9 distinct | 86.1 | 79.6 | 80.5 | 19.6 | 24.7 | 19.0 | 5× |
+| Q10 string filter | 4.2 | 3.9 | 3.9 | 3.3 | 2.1 | 2.0 | 2× |
+| Q11 projection | 44.2 | 44.6 | 43.8 | 5.1 | 1.9 | 1.4 | 32× |
+| Q12 nulls | 33.6 | 33.7 | 32.2 | 17.4 | 5.4 | 2.7 | 12× |
+| Q13 join order | 53.7 | 109.5 | 38.1 | 11.0 | 6.9 | 10.6 | 8× |
+| Q14 conjunctive filter | 30.9 | 32.0 | 30.9 | 2.9 | 0.9 | 0.6 | 52× |
+| Q15 reductions | 23.9 | 23.3 | 23.6 | 1.0 | 0.4 | 0.2 | 119× |
+| Q16 left join | 72.8 | 47.3 | 47.0 | 29.8 | 17.9 | 16.8 | 4× |
+
+Observations:
+
+* Vectorized execution alone (1 thread) is 2–30× faster than row-at-a-time (except the tiny
+  Q10, where both are a few milliseconds): no boxing,
+  no per-row `Object[]`, primitive hash tables and accumulators, dictionary codes for strings.
+  Largest single-thread gains: reductions and filters (Q14/Q15: tight loops over primitive
+  arrays), sorting (Q7: radix sort instead of a boxed comparator sort, 16×), projection (Q11).
+* Threads add another 2–10× where the work is per row (Q1, Q8, Q11, Q12, Q14). Small or
+  already-fast queries are bounded by fixed costs (thread hand-off, merging) — Q10 is a
+  100,000-row table, i.e. two morsels. High-cardinality grouping/DISTINCT (Q3, Q9) gain
+  little: each worker's partial table holds most groups, so merging costs about as much as
+  the aggregation saved. Joins (Q4, Q13, Q16) are limited by materializing the build side
+  (one thread; the single-key index itself is built in parallel for large inputs).
+* Logical optimization matters most for multi-way joins written in a poor order: Q13 runs
+  110 → 38 ms in row mode (pushdown + join reordering), Q5 75 → 65 ms (pushdown).
+  Top-N turns Q6 from a full sort (99 ms) into an 18 ms heap scan even in row mode.
+* Results are identical in every configuration (`tools/bench.py` asserts equal row counts;
+  the conformance `--modes` matrix and `tools/difftest.py` compare contents).
+
+**SIMD.** The same vectorized runs (1 thread) with HotSpot's auto-vectorizer disabled
+(`-XX:-UseSuperWord`) show where the SIMD-friendly loops pay off; elsewhere the costs are
+hashing, memory access and selection-vector bookkeeping, which do not vectorize:
+
+| query | SuperWord on | SuperWord off |
+|---|---:|---:|
+| Q6 top-N | 5.3 | 8.5 |
+| Q7 sort | 24.1 | 36.5 |
+| Q14 conjunctive filter | 2.9 | 3.7 |
+| Q15 reductions | 1.0 | 2.2 |
+
+End-to-end queries dominated by hashing or row output (Q1, Q2, Q11, …) show no difference
+beyond the run-to-run variance of a few milliseconds (JIT compilation varies between JVM runs;
+e.g. Q1 single-threaded measured 2.7–5.0 ms across runs).
+
+### Configuration for experiments
+
+`-Dpolyquery.batchSize=N`, `-Dpolyquery.morselRows=N` and `-Dpolyquery.parallelBuildRows=N` (via
+`POLYQUERY_JAVA_OPTS`) change the batch and morsel sizes and the build size from which hash-join
+indexes are built in parallel. Tiny values (e.g. 3 and 5) make every batch boundary, adapter, parallel
+worker and deferred-error path run on the small conformance fixtures; the conformance suite,
+the `--modes` matrix and the unit tests pass that way too.
+
 ## Design decisions / interpretations
 
 Where the spec leaves room, these choices were made:
@@ -314,12 +558,14 @@ Where the spec leaves room, these choices were made:
   Inferred FLOAT64 numbers that overflow are `INGEST_ERROR`.
 * An invalid type name in a `load` schema is `INVALID_REQUEST`; duplicate or empty
   schema column names are `INGEST_ERROR`.
-* Query options: `mode` accepts `auto`/`row` (this engine is row-at-a-time);
-  `vectorized` is `UNSUPPORTED`. `optimize: false` disables logical optimization; `join`
-  selects the join algorithm (see Joins); `use_indexes: false` disables index scans.
-  `threads` and `native` are validated and otherwise ignored; `query_id` names the query in
-  the HTTP server (session mode only echoes it in the response's `query_id`). Ill-typed option values are
-  `INVALID_REQUEST`; unknown values of known enum options are `UNSUPPORTED`.
+* Query options: `mode` is `auto` (= `vectorized`), `row` or `vectorized`; `threads` (1–1024,
+  default `--threads`, which defaults to the number of CPUs) bounds the worker threads of a
+  query; `optimize: false` disables logical optimization and top-N; `join` selects the join
+  algorithm (see Joins); `use_indexes: false` disables index scans; `native` is validated and
+  ignored (the engine does not load native kernels and does not claim `native.kernels`);
+  `query_id` names the query in the HTTP server (session mode only echoes it in the response's
+  `query_id`). Ill-typed option values (and `threads` outside 1–1024) are `INVALID_REQUEST`;
+  unknown values of known enum options are `UNSUPPORTED`.
 * The per-query memory budget (`--max-query-memory-mb`, default 4096, capped at 70% of
   the JVM heap) is enforced approximately for sort buffers, aggregation groups and
   result materialization. `OutOfMemoryError` and `StackOverflowError` are reported as
@@ -342,11 +588,36 @@ Where the spec leaves room, these choices were made:
 ```
 make -C implementations/java build test
 python3 tests/conformance/runner.py --engine implementations/java/bin/polyquery
+python3 tests/conformance/runner.py --engine implementations/java/bin/polyquery --modes
 python3 tests/conformance/runner.py --engine implementations/java/bin/polyquery --transport http
 python3 tests/concurrency/http_suite.py --engine implementations/java/bin/polyquery
+# Phase 5 stress: every batch boundary, worker and deferred-error path on the small fixtures
+POLYQUERY_JAVA_OPTS="-Dpolyquery.batchSize=3 -Dpolyquery.morselRows=5" \
+    python3 tests/conformance/runner.py --engine implementations/java/bin/polyquery --modes
+# randomized differential testing of all option combinations (data dir with a copy of fixtures/)
+python3 implementations/java/tools/difftest.py --engine implementations/java/bin/polyquery \
+    --data /tmp/dtdata --queries 300 --seed 1
+# benchmarks (see Phase 5: Measurements)
+python3 implementations/java/tools/bench.py --engine implementations/java/bin/polyquery --data /tmp/pqdata
 ```
 
-Unit tests (`src/test/java`, run by `make test`) cover the lexer, parser, types, ingestion,
+`tools/difftest.py` generates random queries (expressions of every type, predicates, CASE,
+IN/BETWEEN/LIKE, failing divisions and casts, grouping with all aggregates incl. DISTINCT,
+2- to 3-way inner/left joins, subqueries, derived tables, ORDER BY/LIMIT/OFFSET) over the
+generated fixtures — in-memory, row-layout, and PQCF files with small row groups opened with
+mmap (several dictionaries per column) — and compares every one of the 32 option combinations
+in two engines (default and tiny batch/morsel sizes) with the row-mode, unoptimized baseline:
+rows (FLOAT64 with the spec's tolerance) or error codes. Several thousand queries were run
+during development; every mismatch found was fixed (a few early ones were deferred-error and
+empty-input edge cases).
+
+Unit tests (`src/test/java`, run by `make test`) cover the Phase 5 engine — `Phase5Test` runs
+a set of queries (grouping, joins of every kind, DISTINCT, sorts, top-N, subqueries, failing
+expressions) under every combination of mode × join × threads × optimize, also with tiny
+batches and morsels, and checks row-exact error semantics; `VectorTest` covers the kernels
+(branch-free comparisons), group-key tables, exact sums (single-group SIMD path, overflow
+widening, partial merges), stable radix/merge sorting, the join index and the k-way merge —
+and the lexer, parser, types, ingestion,
 protocol, the HTTP layer (admission/queueing/timeouts, query control, metrics, endpoints
 over a real socket incl. streaming), and end-to-end SQL (grouping, joins with every join strategy and with optimization
 disabled, functions, subqueries, CTEs, EXPLAIN), PQCF round trips with every encoding and
@@ -364,7 +635,19 @@ and `use_indexes`/`optimize` off.
 
 ## Known limitations
 
-* No Phase 5 features yet: vectorized/parallel execution, merge join.
+* Native kernels (`native: true`, `--native-kernels`) are not used: the option is accepted and
+  ignored, `native.kernels` is not claimed.
+* In vectorized mode, sort-merge and nested-loop joins and correlated hash lookups are the row
+  engine's operators behind adapters. Hash join build inputs are materialized by one thread
+  (their input pipelines and, for single integer keys, the index may run in parallel).
+* Parallelism applies to pipelines that start with a table scan and contain no subqueries;
+  index scans and pipelines over fewer than two morsels (131,072 rows) run on one thread.
+  High-cardinality GROUP BY / DISTINCT scale only moderately (partial aggregation reduces
+  little when most keys are distinct; there is no radix-partitioned exchange).
+* Row order without ORDER BY depends on the join algorithm (hash vs merge vs build side), so
+  `LIMIT` without `ORDER BY` over joins may pick different rows — or, if a failing expression
+  is evaluated on the rows read before the limit is reached, differ in raising that error.
+  Everything else (row order of scans/filters/aggregations, errors) is identical in all modes.
 * The HTTP server uses one platform thread per connection (plus one per running/queued
   query); it is meant for tens to a few hundreds of concurrent clients, not tens of thousands.
   Idle keep-alive connections are closed after 5 minutes.
@@ -376,5 +659,4 @@ and `use_indexes`/`optimize` off.
   skipping. In-memory tables are a single row group, so row-group skipping applies to
   PQCF-backed tables only. STRING chunk min/max are not written (they are read and used).
 * Decoded chunks of memory-mapped files stay cached for the lifetime of the table.
-* Execution is single-threaded and row-at-a-time.
 * Each ingestion reads the whole input into memory before parsing.

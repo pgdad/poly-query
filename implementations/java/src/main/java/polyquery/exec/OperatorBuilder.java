@@ -14,14 +14,20 @@ import polyquery.plan.LogicalPlan;
 import polyquery.plan.SortKey;
 import polyquery.storage.ColumnSchema;
 import polyquery.types.DataType;
+import polyquery.types.Decimals;
 import polyquery.types.TypeKind;
 import polyquery.types.Values;
 
-/** Turns a physical plan into a tree of row-at-a-time (Volcano) operators. */
+/**
+ * Turns a physical plan into a tree of row-at-a-time (Volcano) operators. Child operators (and
+ * the plans of subqueries) are built through a replaceable {@link #setDelegate delegate}, which
+ * lets the vectorized engine substitute batch operators wherever it has them.
+ */
 public final class OperatorBuilder {
     private final ExecContext ctx;
     private final Function<LogicalPlan, PhysicalPlan> subqueryPlanner;
     private final ExpressionCompiler compiler;
+    private Function<PhysicalPlan, Operator> delegate = this::buildNode;
 
     /** @param subqueryPlanner optimizes and physically plans subqueries met in expressions */
     public OperatorBuilder(ExecContext ctx, Function<LogicalPlan, PhysicalPlan> subqueryPlanner) {
@@ -30,7 +36,31 @@ public final class OperatorBuilder {
         this.compiler = new ExpressionCompiler(ctx, logical -> build(this.subqueryPlanner.apply(logical)));
     }
 
+    /** Replaces how plans are turned into operators (default: {@link #buildNode}). */
+    public void setDelegate(Function<PhysicalPlan, Operator> delegate) {
+        this.delegate = delegate;
+    }
+
+    public ExecContext context() {
+        return ctx;
+    }
+
+    public Function<LogicalPlan, PhysicalPlan> subqueryPlanner() {
+        return subqueryPlanner;
+    }
+
+    /** The expression compiler of this query (shared by all its operators; not thread-safe). */
+    public ExpressionCompiler compiler() {
+        return compiler;
+    }
+
+    /** Operator tree for a plan (through the delegate). */
     public Operator build(PhysicalPlan plan) {
+        return delegate.apply(plan);
+    }
+
+    /** A row operator for the root node of {@code plan}; its children are built with {@link #build}. */
+    public Operator buildNode(PhysicalPlan plan) {
         return switch (plan) {
             case PhysicalPlan.TableScan s -> new ScanOperators.TableScan(s, ctx);
             case PhysicalPlan.IndexScan s -> new ScanOperators.IndexScan(s, ctx);
@@ -54,7 +84,17 @@ public final class OperatorBuilder {
             case PhysicalPlan.NestedLoopJoin j -> new JoinOperators.NestedLoopJoin(build(j.left()), build(j.right()),
                     j.condition() == null ? null : compiler.compile(j.condition()),
                     j.kind() == LogicalPlan.JoinKind.LEFT, j.right().schema().size(), ctx);
+            case PhysicalPlan.MergeJoin j -> mergeJoin(j);
             case PhysicalPlan.Sort s -> new Operators.Sort(build(s.input()), comparator(s.keys(), s.input().schema()), ctx);
+            case PhysicalPlan.TopN t -> {
+                long offset = t.offset() == null ? 0 : constant(t.offset(), "OFFSET", 0);
+                long limit = constant(t.limit(), "LIMIT", -1);
+                Comparator<Object[]> order = comparator(t.keys(), t.input().schema());
+                if (limit < 0) { // LIMIT NULL: a full sort
+                    yield new Operators.Limit(new Operators.Sort(build(t.input()), order, ctx), offset, -1);
+                }
+                yield new Operators.TopN(build(t.input()), order, offset, limit, ctx);
+            }
             case PhysicalPlan.Limit l -> {
                 long offset = l.offset() == null ? 0 : constant(l.offset(), "OFFSET", 0);
                 long limit = l.limit() == null ? -1 : constant(l.limit(), "LIMIT", -1);
@@ -88,6 +128,37 @@ public final class OperatorBuilder {
                 j.kind() == LogicalPlan.JoinKind.LEFT, j.right().schema().size(), ctx);
     }
 
+    private Operator mergeJoin(PhysicalPlan.MergeJoin j) {
+        int n = j.leftKeys().size();
+        DataType[] lt = types(j.leftKeys());
+        DataType[] rt = types(j.rightKeys());
+        Evaluator residual = j.residual() == null ? null : compiler.compile(j.residual());
+        return new JoinOperators.MergeJoin(build(j.left()), build(j.right()), compileAll(j.leftKeys()),
+                compileAll(j.rightKeys()), keyOrder(lt, lt, n), keyOrder(rt, rt, n), keyOrder(lt, rt, n), residual,
+                j.kind() == LogicalPlan.JoinKind.LEFT, j.right().schema().size(), ctx);
+    }
+
+    /** Lexicographic order of non-null key tuples of types {@code a} (left operand) and {@code b}. */
+    static Comparator<Object[]> keyOrder(DataType[] a, DataType[] b, int n) {
+        return (x, y) -> {
+            for (int i = 0; i < n; i++) {
+                int c = compareKeys(x[i], a[i], y[i], b[i]);
+                if (c != 0) {
+                    return c;
+                }
+            }
+            return 0;
+        };
+    }
+
+    /** Compares two non-null values of comparable types (DECIMALs of different scales allowed). */
+    static int compareKeys(Object x, DataType xt, Object y, DataType yt) {
+        if (xt.kind() == TypeKind.DECIMAL && yt.kind() == TypeKind.DECIMAL && xt.scale() != yt.scale()) {
+            return Decimals.compare((Long) x, xt.scale(), (Long) y, yt.scale());
+        }
+        return Values.compare(x, y, xt);
+    }
+
     private Evaluator[] compileAll(List<BoundExpr> exprs) {
         Evaluator[] out = new Evaluator[exprs.size()];
         for (int i = 0; i < out.length; i++) {
@@ -104,7 +175,8 @@ public final class OperatorBuilder {
         return out;
     }
 
-    private long constant(BoundExpr e, String clause, long ifNull) {
+    /** Value of a constant LIMIT/OFFSET expression ({@code ifNull} for NULL; negative ⇒ INVALID_ARGUMENT). */
+    public long constant(BoundExpr e, String clause, long ifNull) {
         Object v = compiler.compile(e).eval(new Object[0]);
         if (v == null) {
             return ifNull;
@@ -117,7 +189,7 @@ public final class OperatorBuilder {
     }
 
     /** Lexicographic row comparator honoring direction and NULL placement per key. */
-    static Comparator<Object[]> comparator(List<SortKey> keys, List<ColumnSchema> schema) {
+    public static Comparator<Object[]> comparator(List<SortKey> keys, List<ColumnSchema> schema) {
         int n = keys.size();
         int[] cols = new int[n];
         DataType[] types = new DataType[n];
