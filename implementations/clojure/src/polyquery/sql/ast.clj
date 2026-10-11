@@ -20,8 +20,11 @@
     :exists    {:query}
     :subquery  {:query}
 
-  Query: {:node :query :with [cte…] :select core :order-by [{:expr :desc? :nulls}]
-          :limit :offset}
+  Query: {:node :query :with [cte…] :select core :union-all [core …]
+          :order-by [{:expr :desc? :nulls}] :limit :offset}
+         (:select is the first branch of `core UNION ALL core …`, :union-all
+         the following ones — empty for a simple query; ORDER BY, LIMIT and
+         OFFSET then apply to the whole compound)
   Select core: {:distinct? :items [{:kind :star :table} | {:kind :expr :expr :alias}]
                 :from :where :group-by :having}
   From items: {:node :table :name :alias} | {:node :derived :query :alias}

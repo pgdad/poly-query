@@ -39,6 +39,7 @@
              (if (or (= :cross (:kind node)) (nil? (:condition node)))
                (* l r)
                (max l r)))
+     :union-all (reduce + 0.0 (map estimate (:inputs node)))
      :aggregate (if (seq (:group-keys node)) (max 1.0 (* 0.1 (estimate (:input node)))) 1.0)
      :limit (let [n (estimate (:input node))
                   lim (:limit node)]

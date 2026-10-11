@@ -31,7 +31,8 @@
    "phase3" "storage.pqcf" "storage.mmap" "index.hash" "index.btree"
    "phase4" "http.streaming"
    "phase5" "exec.row" "exec.vectorized" "exec.parallel" "join.hash" "join.merge" "join.nested_loop"
-   "native.kernels"])
+   "native.kernels"
+   "change.union_all"])
 
 (defn version-info []
   {"ok" true

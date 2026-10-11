@@ -85,4 +85,6 @@
                    (update :input prune (into #{} (mapcat expr-columns) exprs))))
     :distinct (update node :input #(prune % (all-columns %)))
     :sort (update node :input prune (into required (map :index) (:keys node)))
-    :limit (update node :input prune required)))
+    :limit (update node :input prune required)
+    ;; branch outputs are the union's columns, position for position
+    :union-all (update node :inputs (fn [ins] (mapv #(prune % required) ins)))))

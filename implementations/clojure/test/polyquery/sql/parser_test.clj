@@ -34,6 +34,27 @@
     (is (some? (:limit q)))
     (is (some? (:offset q)))))
 
+(deftest union-all-structure
+  (let [q (:query (parser/parse-statement
+                   "SELECT a FROM t UNION ALL SELECT b FROM u UNION ALL SELECT 1 ORDER BY 1 LIMIT 2"))]
+    (is (= {:node :table :name "t" :alias nil} (strip (-> q :select :from))))
+    (is (= 2 (count (:union-all q))))
+    (is (= 1 (count (:order-by q))))
+    (is (some? (:limit q))))
+  (testing "allowed wherever a query is"
+    (doseq [sql ["WITH c AS (SELECT 1 UNION ALL SELECT 2) SELECT * FROM c"
+                 "SELECT * FROM (SELECT 1 AS x UNION ALL SELECT 2) d"
+                 "SELECT 1 WHERE 1 IN (SELECT 1 UNION ALL SELECT 2) AND EXISTS (SELECT 1 UNION ALL SELECT 2)"
+                 "EXPLAIN SELECT 1 UNION ALL SELECT 2"]]
+      (is (= :no-error (error-code (parser/parse-statement sql))) sql)))
+  (testing "branches are plain select cores"
+    (doseq [sql ["SELECT 1 ORDER BY 1 UNION ALL SELECT 2"
+                 "SELECT 1 LIMIT 1 UNION ALL SELECT 2"
+                 "(SELECT 1) UNION ALL (SELECT 2)"
+                 "SELECT 1 UNION ALL (SELECT 2)"
+                 "SELECT 1 UNION ALL"]]
+      (is (= "PARSE_ERROR" (error-code (parser/parse-statement sql))) sql))))
+
 (deftest parse-errors
   (doseq [sql ["SELEC 1" "SELECT 1 = 1 = 1" "SELECT 1; SELECT 2" "SELECT (1" "SELECT 1 +"
                "SELECT a FROM t LIMIT 1 LIMIT 2" "SELECT a, FROM t" "SELECT a < b IS NULL"
@@ -42,4 +63,5 @@
 
 (deftest unsupported-syntax
   (is (= "UNSUPPORTED" (error-code (parser/parse-statement "SELECT 1 UNION SELECT 2"))))
+  (is (= "UNSUPPORTED" (error-code (parser/parse-statement "SELECT 1 UNION DISTINCT SELECT 2"))))
   (is (= "UNSUPPORTED" (error-code (parser/parse-statement "SELECT * FROM a RIGHT JOIN b ON x")))))

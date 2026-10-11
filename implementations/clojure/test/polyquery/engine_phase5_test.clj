@@ -163,6 +163,18 @@
    ["SELECT id, 1 + 2 * 3, CASE WHEN 1 = 1 THEN 'a' END, ABS(-4.5) FROM t WHERE 2 > 1 AND (g = 1 OR 1 = 0)" false]
    ["SELECT id FROM t WHERE TRUE AND NOT NOT (g = 3) AND (g = 3 OR FALSE) AND g = 3" false]
    ["SELECT id FROM t WHERE k / 0 = 1 AND FALSE" false]
+   ;; UNION ALL (spec/changes/union-all.md)
+   ["SELECT id, d FROM t WHERE g = 1 UNION ALL SELECT k, w FROM r" false]
+   ["SELECT g, COUNT(*), SUM(d) FROM t GROUP BY g UNION ALL SELECT k, COUNT(*), SUM(w) FROM r GROUP BY k" false]
+   ["SELECT s FROM t UNION ALL SELECT name FROM r UNION ALL SELECT NULL ORDER BY 1 DESC NULLS LAST" true]
+   ["SELECT id, f FROM t UNION ALL SELECT k, w FROM r ORDER BY 2, 1 LIMIT 20 OFFSET 5" true]
+   ["SELECT COUNT(*), SUM(x) FROM (SELECT k AS x FROM t UNION ALL SELECT k FROM r UNION ALL SELECT k FROM s) u" false]
+   ["SELECT id FROM t WHERE k IN (SELECT k FROM r WHERE w > 9 UNION ALL SELECT k FROM s WHERE w < 1)" false]
+   ["SELECT id FROM t WHERE EXISTS (SELECT 1 FROM r WHERE r.k = t.k AND r.w < 1 UNION ALL SELECT 1 FROM s WHERE s.k = t.k AND s.w > 9)" false]
+   ["WITH u AS (SELECT k, name FROM r UNION ALL SELECT k, name FROM s) SELECT t.id, u.name FROM t JOIN u ON u.k = t.k WHERE t.g = 3" false]
+   ["SELECT DISTINCT g FROM t UNION ALL SELECT DISTINCT k FROM s" false]
+   ["SELECT k FROM s UNION ALL SELECT k FROM t LIMIT 100" false]
+   ["SELECT id FROM t UNION ALL SELECT k / g FROM t" false]
    ;; runtime errors
    ["SELECT id, k / g FROM t" false]
    ["SELECT SUM(k * 4611686018427387) FROM t" false]
@@ -208,4 +220,5 @@
     (is (contains? (ops "SELECT id FROM t ORDER BY d LIMIT 3" {}) "TopN"))
     (is (not (contains? (ops "SELECT id FROM t ORDER BY d LIMIT 3" {:optimize false}) "TopN")))
     (is (contains? (ops "SELECT id FROM t WHERE g = 1" {:threads 4}) "Gather"))
+    (is (contains? (ops "SELECT id FROM t UNION ALL SELECT k FROM r" {:threads 4}) "UnionAll"))
     (is (not (contains? (ops "SELECT id FROM t WHERE g = 1" {:threads 1}) "Gather")))))

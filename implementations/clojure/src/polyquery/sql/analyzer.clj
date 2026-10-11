@@ -22,6 +22,9 @@
      :having e :outputs [{:name :type :expr}] :distinct? b
      :order-by [{:output i | :expr e, :desc? b, :nulls-first? b}]
      :limit e :offset e :columns [{:name :type}]}
+  or, for `core UNION ALL core …`, a bound compound query
+    {:union [bound-query …] :order-by [{:output i …}] :limit e :offset e
+     :columns [{:name :type}]}
   Relations (rel):
     {:rel :scan :table T :name alias :columns [{:name :type}]}
     {:rel :query :query bound-query :name alias :columns [{:name :type}]}
@@ -31,7 +34,9 @@
   aggregation: GROUP BY keys followed by aggregate values)."
   (:require [polyquery.catalog :as catalog]
             [polyquery.sql.ast :as ast]
-            [polyquery.sql.binder :as binder :refer [semantic!]]))
+            [polyquery.sql.binder :as binder :refer [semantic!]]
+            [polyquery.sql.bound :as b]
+            [polyquery.types :as t]))
 
 (set! *warn-on-reflection* true)
 
@@ -167,6 +172,22 @@
                                    pos)
               :else {:expr bound})))))))
 
+(defn- order-direction
+  "Direction and NULL placement of an ORDER BY item (types.md: NULLs sort
+  before every value, unless NULLS FIRST/LAST says otherwise)."
+  [item]
+  {:desc? (:desc? item)
+   :nulls-first? (case (:nulls item)
+                   :first true
+                   :last false
+                   (not (:desc? item)))})
+
+(defn- bind-limits
+  "LIMIT and OFFSET of a query."
+  [env q]
+  {:limit (some-> (:limit q) (#(binder/bind-constant-int env % "LIMIT")))
+   :offset (some-> (:offset q) (#(binder/bind-constant-int env % "OFFSET")))})
+
 ;; ---------------------------------------------------------------------------
 ;; Queries
 
@@ -222,14 +243,9 @@
                       items))
         having (when-let [h (:having core)]
                  (binder/check-boolean! (binder/bind cx h) "HAVING condition" (:pos h)))
-        order-by (mapv (fn [item]
-                         (assoc (resolve-order-item cx outputs (:distinct? core) item)
-                                :desc? (:desc? item)
-                                :nulls-first? (case (:nulls item)
-                                                :first true
-                                                :last false
-                                                (not (:desc? item)))))
-                       (:order-by q))]
+        order-by (mapv #(merge (resolve-order-item cx outputs (:distinct? core) %) (order-direction %))
+                       (:order-by q))
+        limits (bind-limits env q)]
     {:from rel
      :where where
      :aggregated? aggregated?
@@ -239,14 +255,83 @@
      :outputs outputs
      :distinct? (boolean (:distinct? core))
      :order-by order-by
-     :limit (some-> (:limit q) (#(binder/bind-constant-int env % "LIMIT")))
-     :offset (some-> (:offset q) (#(binder/bind-constant-int env % "OFFSET")))
+     :limit (:limit limits)
+     :offset (:offset limits)
      :columns (mapv #(select-keys % [:name :type]) outputs)}))
 
-(defn analyze-query
-  "Analyzes a :query AST node in env; returns the bound query."
+;; ---------------------------------------------------------------------------
+;; UNION ALL (spec/changes/union-all.md)
+
+(defn- union-column-type
+  "Common type of output column i of all branches (CASE result rule: numeric
+  promotion, untyped NULL adopts the other types), or TYPE_ERROR."
+  [branches i pos]
+  (reduce (fn [acc bq]
+            (let [ct (:type (nth (:columns bq) i))]
+              (or (t/common-type acc ct)
+                  (binder/type-error! (str "UNION ALL column " (inc i) " has incompatible types "
+                                           (t/describe acc) " and " (t/describe ct))
+                                      pos))))
+          :null branches))
+
+(defn- coerce-outputs
+  "Branch bq with its outputs converted to the compound's column types."
+  [bq types]
+  (let [outputs (mapv (fn [o ty] (assoc o :type ty :expr (b/coerce (:expr o) ty))) (:outputs bq) types)]
+    (assoc bq :outputs outputs :columns (mapv #(select-keys % [:name :type]) outputs))))
+
+(defn- compound-order-item
+  "ORDER BY item of a compound query: an output column name (of the first
+  branch) or a 1-based position; anything else is a SEMANTIC_ERROR."
+  [columns item]
+  (let [e (:expr item)
+        pos (:pos e)
+        idx (if-let [k (ordinal e)]
+              (if (<= 1 k (count columns))
+                (dec k)
+                (semantic! (str "ORDER BY position " k " is out of range") pos))
+              (let [nm (or (bare-name e)
+                           (semantic! (str "ORDER BY items of a UNION ALL query must be output column "
+                                           "names or positions") pos))
+                    hits (filter #(binder/same-name? nm (:name (nth columns %))) (range (count columns)))]
+                (case (count hits)
+                  0 (semantic! (str "ORDER BY column '" nm "' is not an output column of the UNION ALL")
+                               pos)
+                  1 (first hits)
+                  (semantic! (str "ORDER BY column '" nm "' is ambiguous") pos))))]
+    (assoc (order-direction item) :output idx)))
+
+(defn- analyze-union-all
+  "Analyzes `core UNION ALL core …` with ORDER BY/LIMIT over the whole
+  result. The bound compound query is
+    {:union [bound-query …] :order-by [{:output i :desc? :nulls-first?}]
+     :limit e :offset e :columns [{:name :type}]}
+  whose branches' outputs are already converted to the column types."
   [env q]
-  (analyze-select (analyze-ctes env (:with q)) q))
+  (let [cores (into [(:select q)] (:union-all q))
+        branches (mapv #(analyze-select env {:select %}) cores)
+        width (count (:columns (first branches)))
+        _ (doseq [[bq core] (map vector branches cores)]
+            (when (not= width (count (:columns bq)))
+              (semantic! (str "UNION ALL branches must have the same number of columns: " width
+                              " and " (count (:columns bq)))
+                         (:pos core))))
+        types (mapv #(union-column-type branches % (:pos q)) (range width))
+        branches (mapv #(coerce-outputs % types) branches)
+        columns (mapv (fn [c ty] {:name (:name c) :type ty}) (:columns (first branches)) types)]
+    (merge {:union branches
+            :order-by (mapv #(compound-order-item columns %) (:order-by q))
+            :columns columns}
+           (bind-limits env q))))
+
+(defn analyze-query
+  "Analyzes a :query AST node in env; returns the bound query (or bound
+  compound query, see analyze-union-all)."
+  [env q]
+  (let [env (analyze-ctes env (:with q))]
+    (if (seq (:union-all q))
+      (analyze-union-all env q)
+      (analyze-select env q))))
 
 (defn root-env
   [catalog options]

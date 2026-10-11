@@ -86,6 +86,7 @@
     :top-n (cond-> {"op" "TopN" "keys" (sort-keys node) "limit" (b/->sql (:limit node))}
              (:offset node) (assoc "offset" (b/->sql (:offset node))))
     :gather {"op" "Gather"}
+    :union-all {"op" "UnionAll"}
     :limit (cond-> {"op" "Limit"}
              (:limit node) (assoc "limit" (b/->sql (:limit node)))
              (:offset node) (assoc "offset" (b/->sql (:offset node))))))
@@ -94,6 +95,7 @@
   (case (:op node)
     :lookup-scan [(assoc node :op :table-scan)]
     (:hash-join :merge-join :nested-loop-join) [(:left node) (:right node)]
+    :union-all (:inputs node)
     (if (:input node) [(:input node)] [])))
 
 (defn plan->json

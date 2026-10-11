@@ -398,13 +398,27 @@
     (expect-op! st ")")
     {:name nm :columns cols :query q :pos (pos tok)}))
 
+(defn- parse-union-all-branches
+  "The select cores following the first one in `core { UNION ALL core }`
+  (CR-1). UNION without ALL (incl. UNION DISTINCT) is reserved: UNSUPPORTED.
+  Branches are plain select cores, so a parenthesized branch or a branch
+  with its own ORDER BY/LIMIT is a PARSE_ERROR (left to the callers'
+  end-of-query checks)."
+  [st]
+  (loop [branches []]
+    (if-let [tok (accept-kw! st "UNION")]
+      (if (accept-kw! st "ALL")
+        (recur (conj branches (parse-select-core st)))
+        (unsupported! tok "UNION without ALL"))
+      branches)))
+
 (defn parse-query [st]
   (let [tok (peek-tok st)
         with (when (accept-kw! st "WITH")
                (loop [ctes [(parse-cte st)]]
                  (if (accept-op! st ",") (recur (conj ctes (parse-cte st))) ctes)))
         core (parse-select-core st)
-        _ (when (at-kw? st "UNION") (unsupported! (peek-tok st) "UNION"))
+        more (parse-union-all-branches st)
         order-by (when (accept-kw! st "ORDER")
                    (expect-kw! st "BY")
                    (parse-order-by st))
@@ -416,9 +430,8 @@
                          (let [o (parse-expr st)]
                            [(when (accept-kw! st "LIMIT") (parse-expr st)) o])
                          :else nil)]
-    (when (at-kw? st "UNION") (unsupported! (peek-tok st) "UNION"))
-    {:node :query :with with :select core :order-by order-by :limit limit :offset offset
-     :pos (pos tok)}))
+    {:node :query :with with :select core :union-all more
+     :order-by order-by :limit limit :offset offset :pos (pos tok)}))
 
 ;; ---------------------------------------------------------------------------
 ;; Statements

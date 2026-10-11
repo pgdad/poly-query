@@ -245,6 +245,10 @@
         (err/fail! "INVALID_ARGUMENT" (str what " must not be negative")))
       x)))
 
+(defmethod build :union-all [plan env]
+  ;; UNION ALL: input after input (`cat` stops early on reduced)
+  (eduction cat (mapv #(build-input % env) (:inputs plan))))
+
 (defmethod build :limit [plan env]
   (let [limit (eval-count-clause env (:limit plan) "LIMIT")
         offset (eval-count-clause env (:offset plan) "OFFSET")
