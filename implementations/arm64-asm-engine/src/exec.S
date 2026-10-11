@@ -370,7 +370,7 @@ ENDF ex_rows
 // pointer array of the given capacity; width = BQ_NOUT + BQ_NEXTRA)
 //   x19 bq, x20 capacity, x21 rs
 // =============================================================================
-LFUNC rs_new
+FUNC rs_new
     ENTER 3
     mov  x19, x0
     mov  x20, x1
@@ -394,7 +394,7 @@ ENDF rs_new
 // Evaluates the visible and hidden expressions of one result row.
 //   x19 bq, x20 ctx, x21 dest, x22 cursor, x23 count
 // =============================================================================
-LFUNC project_row
+FUNC project_row
     ENTER 3
     mov  x19, x0
     mov  x20, x1
@@ -557,6 +557,18 @@ LFUNC ex_aggregate
     mov  x19, x0
     mov  x20, x1
     ldr  x21, [x19, #PN_BQ]
+    TLS_ADDR x9, g_x_mode               // vectorized: hash aggregation
+    ldr  w9, [x9]
+    cmp  w9, #XM_ROW
+    b.eq 0f
+    mov  x0, x21
+    bl   vagg_ok
+    cbz  w0, 0f
+    mov  x0, x19
+    mov  x1, x20
+    bl   vagg_aggregate
+    LEAVE 5
+0:
     ldr  x0, [x19, #PN_LEFT]
     mov  x1, x20
     bl   ex_tuples
@@ -743,41 +755,65 @@ LFUNC agg_group
     bl   ts_tuple
     str  x0, [x20, #EC_TUPLE]
     b    5f
-4:  ldr  x9, [x22, #TS_W]               // empty input: all-NULL tuple
-    lsl  x0, x9, #2
-    add  x0, x0, #4
-    bl   arena_alloc
-    ldr  x9, [x22, #TS_W]
-    mov  x10, x0
-    mov  w11, #ROW_NULL
-41: cbz  x9, 42f
-    str  w11, [x10], #4
-    sub  x9, x9, #1
-    b    41b
-42: str  x0, [x20, #EC_TUPLE]
+4:  ldr  x0, [x22, #TS_W]               // empty input: all-NULL tuple
+    bl   null_tuple
+    str  x0, [x20, #EC_TUPLE]
     str  xzr, [x20, #EC_GKEYS]
-5:  ldr  x0, [x19, #PN_EXPR]            // HAVING
-    cbz  x0, 6f
+5:  mov  x0, x19
     mov  x1, x20
-    bl   eval_true
-    cbz  w0, 7f
-6:  ldr  x27, [sp]                      // append a projected row
-    ldr  x9, [x27, #RS_WIDTH]
-    lsl  x0, x9, #4
-    add  x0, x0, #16
-    bl   arena_alloc
-    ldr  x9, [x27, #RS_NROWS]
-    ldr  x10, [x27, #RS_ROWS]
-    str  x0, [x10, x9, lsl #3]
-    add  x9, x9, #1
-    str  x9, [x27, #RS_NROWS]
-    mov  x2, x0
-    mov  x0, x21
-    mov  x1, x20
-    bl   project_row
+    ldr  x2, [sp]
+    bl   agg_emit_row
 7:  add  sp, sp, #16
     LEAVE 5
 ENDF agg_group
+
+// =============================================================================
+// agg_emit_row(x0 Aggregate node, x1 ctx with EC_AGGV / EC_GKEYS / EC_TUPLE
+// of a finished group, x2 ResultSet*): if HAVING holds, appends the group's
+// projected row
+//   x19 node, x20 ctx, x21 rs
+// =============================================================================
+FUNC agg_emit_row
+    ENTER 3
+    mov  x19, x0
+    mov  x20, x1
+    mov  x21, x2
+    ldr  x0, [x19, #PN_EXPR]            // HAVING
+    cbz  x0, 1f
+    mov  x1, x20
+    bl   eval_true
+    cbz  w0, 2f
+1:  ldr  x9, [x21, #RS_WIDTH]
+    lsl  x0, x9, #4
+    add  x0, x0, #16
+    bl   arena_alloc
+    ldr  x9, [x21, #RS_NROWS]
+    ldr  x10, [x21, #RS_ROWS]
+    str  x0, [x10, x9, lsl #3]
+    add  x9, x9, #1
+    str  x9, [x21, #RS_NROWS]
+    mov  x2, x0
+    ldr  x0, [x19, #PN_BQ]
+    mov  x1, x20
+    bl   project_row
+2:  LEAVE 3
+ENDF agg_emit_row
+
+// null_tuple(x0 width) -> x0 u32* tuple of ROW_NULL ids
+FUNC null_tuple
+    ENTER 1
+    mov  x19, x0
+    lsl  x0, x0, #2
+    add  x0, x0, #4
+    bl   arena_alloc
+    mov  x10, x0
+    mov  w11, #ROW_NULL
+1:  cbz  x19, 2f
+    str  w11, [x10], #4
+    sub  x19, x19, #1
+    b    1b
+2:  LEAVE 1
+ENDF null_tuple
 
 // =============================================================================
 // agg_distinct(x0 node, x1 ctx, x2 ts, x3 records, x4 rec size, x5 first,
