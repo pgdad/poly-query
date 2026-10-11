@@ -14,12 +14,17 @@ Capabilities reported: `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`,
 `sql.functions`, `sql.subquery`, `sql.cte`, `sql.correlated_subquery`,
 `phase3`, `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`,
 `phase4`, `http.streaming`, `phase5`, `exec.row`, `exec.vectorized`,
-`exec.parallel`, `join.hash`, `join.merge`, `join.nested_loop`
-(`native.kernels` is not claimed, see Phase 5 below).
+`exec.parallel`, `join.hash`, `join.merge`, `join.nested_loop`,
+`native.kernels` (M9: the native kernel library `libpqkernels` is used
+through `ctypes` when loaded, see *Native kernels* below).
 
 ## Build prerequisites
 
 * CPython 3.14 (`python3` on `PATH`). No other dependencies.
+* Optional: the native kernel library, built with `make -C native-kernels`
+  (`native-kernels/build/x86_64/libpqkernels.so`) and passed with
+  `--native-kernels PATH`. It is loaded with the standard library's `ctypes`;
+  the engine works identically without it.
 * **Libraries:** none. Only the Python standard library is used
   (`json`, `csv`, `decimal`-free integer arithmetic, `datetime`, `argparse`,
   `array`, `mmap`, `zlib` (CRC-32), `struct`, `bisect`, `unittest`, …).
@@ -37,6 +42,8 @@ bin/polyquery serve --port N [--workers N --queue-depth Q --query-timeout-ms T .
 bin/polyquery version | capabilities
 python3 tools/bench.py --data DIR       # Phase 5 benchmarks over pqgen.py datasets
 python3 tools/difftest.py --seed N      # random queries under the whole option matrix
+python3 tools/native_difftest.py --lib LIB   # native: true vs false on random queries
+python3 tools/native_bench.py --lib LIB      # kernel micro-benchmarks vs the CPython code
 ```
 
 Engine-specific flag: `--parallel-min-rows N` (default 200,000): parallel
@@ -56,12 +63,14 @@ logical plan → optimizer → physical plan → execution**.
 | Package | Responsibility |
 |---|---|
 | `polyquery/datatypes.py`, `values.py`, `names.py` | SQL types, runtime value representation, exact decimal / date / timestamp helpers, ASCII identifier folding |
+| `polyquery/native/` | `kernels.py`: `ctypes` binding of the `libpqkernels` C ABI (signatures, ABI check, zero-copy buffer addresses, loading with fallback) |
 | `polyquery/storage/` | `table.py` (immutable `RowTable` / `ColumnTable` with row groups, lazily computed column statistics), `vectors.py` (typed column vectors, null bitmaps, dictionary encoding), `indexes.py` (hash and ordered indexes), `catalog.py` (tables + globally named indexes), `pqcf.py` (PQCF v1 writer with atomic replace, validating reader, lazy memory-mapped decoding) |
 | `polyquery/ingest/` | CSV (stdlib `csv` reader in `QUOTE_NOTNULL` mode to distinguish `""` from empty) and JSON/JSONL ingestion, type inference, explicit-schema conversion, ingestion limits |
 | `polyquery/sql/` | `lexer.py` (tokens with line/column), `parser.py` (recursive descent, complete v1 grammar), `ast.py` |
 | `polyquery/analysis/` | `binder.py` (name resolution, CTE/derived-table/subquery binding, aggregate extraction, GROUP BY validation, ORDER BY resolution), `scope.py` (range variables, correlation tracking, CTE environments), `typing_rules.py` (promotion lattice, CAST matrix, CASE/IN/BETWEEN/LIKE typing), `functions.py` (function signatures & result types), `bound.py` (bound expression / query model) |
 | `polyquery/planner/` | `planner.py` (bound query → logical plan), `logical.py` (Scan, Values, SubqueryScan, Filter, Join, Aggregate, Project, Distinct, Sort, Limit), `optimizer.py` (expression rewrites, predicate pushdown, join-condition extraction, column pruning), `rewrite.py` (constant folding, predicate simplification), `physical.py` (algorithm and access-path choice: TableScan, IndexScan, LookupScan, HashJoin, MergeJoin, NestedLoopJoin, HashAggregate, TopN, Gather, … with cardinality estimates, join reordering, parallel pipelines, and the EXPLAIN JSON), `access.py` (index-usable predicates, selectivity estimation, index selection, row-group skipping), `explain.py` (expression rendering) |
 | `polyquery/execution/` | `compiler.py` (bound expression → row closure, incl. subquery evaluation), `vcompiler.py` (bound expression → vector function over column batches), `row_engine.py` (row-at-a-time Volcano operators, `mode:"row"`), `vector_engine.py` (column-batch operators, `mode:"vectorized"`/`auto`), `parallel.py` (partitioned execution of `Gather` pipelines, in-process or in forked workers), `common.py` (algorithms shared by both engines: merge pairing, sort orders, join limits, LookupScan tables), `group_states.py` (columnar aggregation state of the vectorized engine), `aggregates.py` (accumulators of the row engine), `functions.py` (scalar function kernels), `casts.py`, `executor.py` (mode dispatch, result streaming), `context.py` (timeout / cancellation / memory budget / join-row limit, correlation parameters, per-statement caches, GC pausing) |
+| `polyquery/execution/native_ops.py` | Execution paths that use the kernels (`native: true`): scan filtering, gathers, scan aggregation, group sums, hash partitioning |
 | `polyquery/service.py` | `Engine` facade: owns the catalog, runs `load`, SQL and `explain` |
 | `polyquery/protocol/` | Transport-independent request handler (validation, path safety, responses, streaming cursor), JSON-lines session loop, exec mode, canonical value serialization |
 | `polyquery/server/` | `serve` mode: `http.py` (HTTP/1.1 routing, bodies, JSON / NDJSON responses, query lifecycle), `queries.py` (query registry + admission control), `watcher.py` (client-disconnect detection), `metrics.py` (Prometheus text), `app.py` (server lifecycle, signals, graceful shutdown) |
@@ -369,10 +378,8 @@ homogeneous values (`map(operator.add, a, b)`, `compress`, `sum`,
 `min`/`max`), which is the closest CPython equivalent. Explicit SIMD would
 need the optional native kernels.
 
-**`native: true`** is accepted (boolean, else `INVALID_REQUEST`) and has
-no effect: no native kernel library is built or loaded (`--native-kernels`
-is accepted and ignored), so `native.kernels` is not claimed. That is
-allowed, since native kernels are optional (native-kernels.md).
+**`native: true`** (boolean, else `INVALID_REQUEST`) runs the operators
+that the kernel library supports with it, see *Native kernels* below.
 
 **Verification.** `tools/difftest.py` generates random queries (joins of
 all kinds, grouping, DISTINCT, ORDER BY/LIMIT/OFFSET, IN/EXISTS/scalar/
@@ -565,8 +572,8 @@ python3 tools/bench.py --data /tmp/pqdata/1m --repeat 5 --variant auto --engine 
   `vectorized`; `join` is `auto`, `hash`, `merge` or `nested_loop`; unknown
   values of these enum options are `UNSUPPORTED`; ill-typed option values
   (also `threads` < 1) are `INVALID_REQUEST`. A query without `threads`
-  uses the engine's `--threads`. `native` is validated and has no effect
-  (no native kernels).
+  uses the engine's `--threads`. `native: true` uses the native kernels
+  when `--native-kernels` loaded them and is a no-op otherwise.
 * **Phase 5 result order**: without ORDER BY the row order may differ
   between join algorithms (a merge join emits in key order); for a given
   plan it is the same in row and vectorized mode and with any number of
@@ -638,8 +645,10 @@ python3 tools/bench.py --data /tmp/pqdata/1m --repeat 5 --variant auto --engine 
   Hash-join build sides and subquery plans are always built serially.
 * Worker processes each enforce `--max-query-memory-mb` on their own
   partition, so a parallel query may use up to (workers + 1) × the budget.
-* No native kernels (`native: true` has no effect) and no explicit SIMD:
-  the standard library provides neither.
+* The native kernels only cover the work listed under *Native kernels*:
+  joins, sorts, DISTINCT, expressions and row-layout tables run the
+  engine's own code with `native: true` too (they profit only from
+  natively filtered inputs). Without the library there is no explicit SIMD.
 * A single in-memory sort (`ORDER BY`) runs `list.sort` without interruption,
   so cancellation/timeouts take effect only after the sort of a large input
   finishes; all other operators check at least every 65,536 rows.

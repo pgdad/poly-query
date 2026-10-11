@@ -20,18 +20,26 @@ Python objects), which is where they save time in CPython:
   into Python values. Remaining conjuncts are evaluated by the engine on
   the selected rows.
 * **Scan aggregation** (:class:`NativeScanAggregate`): an aggregation
-  without GROUP BY directly over such a (filtered) scan, whose aggregates
-  are ``COUNT(*)``, ``COUNT(col)``, ``SUM``/``AVG`` of INT64 / DECIMAL
-  columns and ``MIN``/``MAX`` of INT64 / DECIMAL / DATE / TIMESTAMP /
-  FLOAT64 columns, is computed by ``pqk_sum_i64`` / ``pqk_minmax_i64`` /
-  ``pqk_minmax_f64`` / popcounts with the selection bitmap as validity.
+  directly over such a (filtered) scan whose arguments are columns of it,
+  without GROUP BY or grouped by one low-cardinality STRING column (each
+  dictionary code's rows form a bitmap): ``COUNT`` from popcounts,
+  ``SUM``/``AVG`` of INT64 / DECIMAL by ``pqk_sum_i64``, ``MIN``/``MAX`` by
+  ``pqk_minmax_i64`` / ``pqk_minmax_f64``, all with the group's bitmap as
+  validity (``pqk_count_i64`` for ``COUNT(*)`` with one comparison); other
+  aggregates get the natively gathered values.
+* **Grouped scan aggregation** (:class:`NativeHashScanAggregate`): any
+  GROUP BY columns with ``COUNT`` / integer ``SUM`` / ``AVG``: dict lookups
+  give group ids, ``pqk_group_sum_i64`` adds the value columns straight
+  from the storage. With worker processes the groups are hash partitioned
+  (``pqk_hash_i64`` + bitmap masking + ``pqk_filter_i64_bitmap``).
 * **Grouped sums** (:class:`NativeGroupSums`): ``SUM`` / ``AVG`` / ``COUNT``
-  states of the vectorized hash aggregation buffer (group id, value) pairs
-  and fold them with ``pqk_group_sum_i64``.
+  states of the vectorized hash aggregation over any other input buffer
+  (group id, value) pairs and fold them with ``pqk_group_sum_i64``.
 
 Exactness: ``pqk_sum_i64`` reports results outside int64 and
 ``pqk_group_sum_i64`` reports possible wrap-around; in both cases the sum
-is recomputed with Python integers, so overflow errors (and sums whose
+is recomputed with Python integers (or the engine's own aggregation runs:
+:class:`NativeFallback`), so overflow errors (and sums whose
 partial results overflow but whose total does not) are unchanged. Float
 sums stay with ``math.fsum`` (the kernel's reassociated sum could differ in
 the last bits); float MIN/MAX results equal to zero are recomputed in
@@ -76,7 +84,7 @@ MAX_GROUP_CODES = 64
 INT64_MIN, INT64_MAX = nk.INT64_MIN, nk.INT64_MAX
 _INT_KINDS = frozenset({TypeKind.INT64, TypeKind.DECIMAL, TypeKind.DATE, TypeKind.TIMESTAMP})
 _TERM_KINDS = _INT_KINDS | {TypeKind.STRING}
-_FLIPPED = {"=": "=", "<>": "<>", "<": ">", "<=": ">=", ">": "<", ">=": "<="}
+
 
 class NativeFallback(Exception):
     """A native path cannot finish exactly (a kernel reported a possible
@@ -283,18 +291,20 @@ class NativeFilter:
         n = window.n
         validity = window.validity(vector)
         data = vector.int64_view()
-        if data is None:
+        if data is None:  # plain strings
             bits = _python_term_bits(window, term, vector)
+        elif not isinstance(vector, DictVector):
+            bits = _int_term_bits(kernels, window, term, address(data, window.base), validity)
         else:
-            if isinstance(vector, DictVector):
-                ranges, negate = _dictionary_ranges(vector, term)
+            ranges, negate = _dictionary_ranges(vector, term)
+            if len(ranges) > MAX_CODE_RANGES:  # scattered codes: one pass in Python
+                bits = _python_term_bits(window, term, vector)
+            else:
                 bits = _union_bits(kernels, address(data, window.base), validity, n, ranges, window.nbytes)
                 if negate:  # the term holds for the valid rows outside the ranges
                     rest = _valid_bits(kernels, window, vector)
                     kernels.bitmap_andnot(rest, bits.buffer_info()[0], window.nbytes)
                     bits = rest
-            else:
-                bits = _int_term_bits(kernels, window, term, address(data, window.base), validity)
         if self.keep_null and validity is not None:
             nulls = window.all_rows()
             kernels.bitmap_andnot(nulls, validity, window.nbytes)
@@ -540,17 +550,22 @@ def filtered_batches(
         ctx.check()
 
 
+# a row selected by the kernels costs a fraction of a row the engine scans
+# and filters itself (no decoding of rejected rows, no predicate evaluation)
+NATIVE_ROW_COST = 0.5
+
+
 def python_rows(gather: pp.Gather, ctx: ExecutionContext) -> float:
-    """Estimated number of rows a parallel pipeline turns into Python values
-    (which is what worker processes can speed up): the rows of its driving
-    scan, or only those selected by the kernels if the scan is filtered
-    natively."""
+    """Estimated work of a parallel pipeline in rows the engine processes
+    in Python (which is what worker processes can speed up): the rows of
+    its driving scan, or, if the scan is filtered natively, the rows
+    selected by the kernels, weighted by NATIVE_ROW_COST."""
     rows = gather.driver.estimated_rows
     path = pp.pipeline_path(gather.input)
     if ctx.native is not None and path and len(path) >= 2:
         parent = path[-2]
         if isinstance(parent, pp.Filter) and native_filter(parent, ctx) is not None:
-            rows = parent.estimated_rows
+            rows = parent.estimated_rows * NATIVE_ROW_COST
     return rows
 
 

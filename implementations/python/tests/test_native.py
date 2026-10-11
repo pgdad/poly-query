@@ -277,6 +277,20 @@ class NativeExecutionTests(unittest.TestCase):
                 self.assertEqual(self.run_query(handler, sql, {**options, "native": True}), expected, sql)
         self.assertIn("STORAGE_CORRUPT", outcomes)
 
+    def test_scattered_dictionary_codes(self):
+        """A range over a dictionary in first-seen order matches many code
+        ranges (computed in Python instead of one kernel pass each)."""
+        rng = random.Random(11)
+        csv = "k,x\n" + "".join(f"{i},w{rng.randint(0, 99):02d}\n" for i in range(3001))
+        handler = make_handler(native_kernels=LIB)
+        self.assertTrue(handler.handle({"op": "load", "table": "w", "format": "csv", "data": csv,
+                                        "options": {"dictionary": True}})["ok"])
+        for sql in ["SELECT k FROM w WHERE x > 'w37' AND x <= 'w91'", "SELECT COUNT(*) FROM w WHERE x < 'w50'",
+                    "SELECT x, COUNT(*) FROM w WHERE x BETWEEN 'w10' AND 'w60' GROUP BY x"]:
+            expected = self.run_query(handler, sql, {})
+            self.assertGreater(len(expected), 0)
+            self.assertEqual(self.run_query(handler, sql, {"native": True}), expected, sql)
+
     def test_native_paths_are_used(self):
         from polyquery.execution import native_ops
 
