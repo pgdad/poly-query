@@ -1,0 +1,85 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-debug-mutant-common-lisp-a1-20261011T054106Z",
+ "language": "common-lisp",
+ "task": "debug-mutant",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-debug-mutant",
+ "prompt_sha256": "1dcd078061069c4fb5c126cf4252248bbebcc9e5893d072e37b1ce5ef7a56353",
+ "session_id": "3a60c916-34ce-4afb-a47a-834aeae25e47",
+ "tokens": {
+  "input": 28,
+  "output": 3099,
+  "cache_read": 375796,
+  "cache_creation": 25682,
+  "thinking": null,
+  "thinking_estimated": 987,
+  "source": "result events",
+  "api_messages": 14
+ },
+ "rate_limit": {
+  "events": 2,
+  "max_utilization": {
+   "seven_day": 0.25,
+   "five_hour": 0.14
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 0.3427072,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 14,
+ "result_segments": 1,
+ "assistant_messages": 27,
+ "tool_calls": {
+  "Bash": 13
+ },
+ "tool_calls_total": 13,
+ "tool_failures": 0,
+ "build_invocations": 6,
+ "build_failures_heuristic": 3,
+ "conformance_runs": 3,
+ "conformance_progress": [
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 62.9,
+  "model_api_seconds": 33.7,
+  "tool_seconds": 28.3,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 1,
+  "files_changed": 1,
+  "lines_added": 1,
+  "lines_removed": 1,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "I found and fixed the injected defect with a one-line change, and every conformance suite now passes. The fix is committed as `b5e3806`.\n\n**Root cause:** in `implementations/common-lisp/src/sql/parser.lisp:484`, the CAST parser started the target type's parameter list as `T` (\"true\") instead of `NIL` (empty). So every CAST target written without parentheses, such as `INT64`, `DATE` or `STRING`, reached the type resolver looking as if it had parameters. The resolver then rejected it with `SEMANTIC_ERROR: type X takes no parameters`. That caused all 11 failures listed in `DEFECT.md`: the expected results, and the expected `CONVERSION_ERROR` / `NUMERIC_OVERFLOW` / `TYPE_ERROR` results, never got a chance to happen. `DECIMAL` with no parameters still worked only because its default-handling code ignores that value.\n\n**Fix:** `(params t)` \u2192 `(params nil)`. Nothing else changed, and the set of supported features is the same.\n\n**Test results:**\n- Default runner: `TOTAL: 569/569 pass`\n- `--modes`: `TOTAL: 3324/3324 pass`\n- `--transport http`: `TOTAL: 569/569 pass`\n- `make build`: succeeds.\n- `make test`: succeeds, \"No tests failed.\" (198 tests), but only after building the native kernel library.\n\n**About `make test`:** before the fix, 3 unit tests failed. `EVAL.CAST-STRING` was the injected defect. The other two, `NATIVE.SUM-OVERFLOW` and `NATIVE.GROUP-SUM-OVERFLOW-RECOVERY`, fail because the native kernel library hadn't been built in this workspace. I built it with `make` in `native-kernels/`; the output goes to `native-kernels/build/`, which git ignores, so no tracked files changed. Without that library, these two tests will still fail. Their skip helper (`with-native` in `tests/test-native.lisp`) returns `T`, but they expect a list. I didn't touch that, to keep the change to the defect alone.\n\n**Known limitations and design decisions:** none new; the engine's architecture and behaviour are as they were.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
