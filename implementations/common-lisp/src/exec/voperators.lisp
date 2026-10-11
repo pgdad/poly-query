@@ -51,10 +51,11 @@
                  (or (zerop (segment-count seg)) (and skip-p (funcall skip-p seg))))
                (coerce (table-segments (pp-table-scan-table node)) 'list))))
 
-(defun make-batch-scan (node &key ranges)
+(defun make-batch-scan (node &key ranges lazy)
   "Batch opener of a TableScan. RANGES, when given, is a function returning
 the next (segment start end) range to read or NIL (parallel morsels);
-otherwise all unskipped segments are read in order."
+otherwise all unskipped segments are read in order. With LAZY, batches of
+column-layout segments are lazy (see SCAN-SOURCE)."
   (let ((column-indexes (pp-table-scan-column-indexes node))
         (kinds (output-kinds node)))
     (lambda ()
@@ -78,7 +79,9 @@ otherwise all unskipped segments are read in order."
           (loop
             (when (< pos end)
               (let ((stop (min end (+ pos +batch-size+))))
-                (return (prog1 (segment-batch seg column-indexes kinds pos stop)
+                (return (prog1 (if (and lazy (null (segment-rows seg)))
+                                   (make-lazy-scan-batch seg column-indexes kinds pos stop)
+                                   (segment-batch seg column-indexes kinds pos stop))
                           (setf pos stop)))))
             (let ((range (funcall next-range)))
               (unless range (return nil))
@@ -149,9 +152,11 @@ by the first error of evaluating EXPRS row by row over BATCH."
                 (when out (return out))))))))))
 
 (defmethod compile-batch-operator ((node pp-filter))
-  (if (never-true-p (pp-filter-predicate node))
-      (lambda () (lambda () nil))
-      (make-batch-filter (compile-batch-operator (pnode-child node)) (pp-filter-predicate node))))
+  (let ((child (pnode-child node))
+        (predicate (pp-filter-predicate node)))
+    (cond ((never-true-p predicate) (lambda () (lambda () nil)))
+          ((and (pp-table-scan-p child) (make-native-scan-filter child predicate)))
+          (t (make-batch-filter (compile-batch-operator child) predicate)))))
 
 (defun make-batch-project (open-child exprs)
   (let ((kernels (map 'simple-vector #'compile-vexpr exprs))

@@ -437,6 +437,7 @@ the input position of the first row (when positions are tracked)."
   (declare (type fixnum n base))
   (let ((gids (group-state-gids gs))
         (table (group-state-table gs)))
+    (declare (type index-vector gids))
     (when (> n (length gids))
       (setf gids (make-index-vector n)
             (group-state-gids gs) gids)
@@ -460,7 +461,9 @@ the input position of the first row (when positions are tracked)."
                      (when (or (null out) (< (length out) n))
                        (setf out (make-array (max n +batch-size+) :element-type '(unsigned-byte 32))
                              (group-state-gids32 gs) out))
-                     (dotimes (i n) (setf (aref out i) (aref gids i)))
+                     (let ((out out))
+                       (declare (type u32-vector out))
+                       (dotimes (i n) (setf (aref out i) (the (unsigned-byte 32) (aref gids i)))))
                      (setf gids32 out)))))
         (loop for s across (group-state-aggs gs)
               for v in arg-vecs

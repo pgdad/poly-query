@@ -21,6 +21,12 @@
 ;;;; then evaluated (by the Lisp kernels) on exactly the rows where the row
 ;;;; executor would evaluate them, so errors are the same as without native
 ;;;; kernels. The surviving rows are gathered with pqk_gather_i64.
+;;;;
+;;;; A native Filter directly above a TableScan reads *lazy* batches (a
+;;;; segment and a row range, no vectors): its predicates run on the column
+;;;; stores in place (kernels take an element offset) and only the rows that
+;;;; pass are copied out of the stores, instead of copying every scanned row
+;;;; into batch vectors first.
 
 (in-package #:polyquery)
 
@@ -60,18 +66,23 @@
 ;;; ------------------------------------------------------------------
 ;;; Gathering with a U32 selection
 
+(defun gather-validity (src-validity idx m &optional (offset 0))
+  "Validity of the rows OFFSET+IDX[0..M) of SRC-VALIDITY (NIL: no NULLs)."
+  (declare (type (or null simple-bit-vector) src-validity) (type u32-vector idx)
+           (type fixnum m offset))
+  (let ((validity nil))
+    (when src-validity
+      (dotimes (k m)
+        (when (zerop (sbit src-validity (+ offset (aref idx k))))
+          (unless validity (setf validity (make-validity m)))
+          (setf (sbit validity k) 0))))
+    validity))
+
 (defun vec-gather-u32 (vec idx m)
   "VEC of the rows IDX[0..M) of VEC (IDX a U32-VECTOR of valid row numbers)."
   (declare (type u32-vector idx) (type fixnum m))
-  (let* ((data (vec-data vec))
-         (src-validity (vec-validity vec))
-         (validity nil))
-    (declare (type (or null simple-bit-vector) src-validity))
-    (when src-validity
-      (dotimes (k m)
-        (when (zerop (sbit src-validity (aref idx k)))
-          (unless validity (setf validity (make-validity m)))
-          (setf (sbit validity k) 0))))
+  (let ((data (vec-data vec))
+        (validity (gather-validity (vec-validity vec) idx m)))
     (etypecase data
       (i64-vector
        (make-vec (native-gather data idx m (make-array m :element-type '(signed-byte 64)))
@@ -96,12 +107,166 @@
                      (batch-columns batch))))
 
 ;;; ------------------------------------------------------------------
+;;; Lazy scan batches
+
+(defstruct (scan-source (:constructor make-scan-source (segment start end column-indexes kinds)))
+  "The rows [START, END) of the column-layout SEGMENT, of which a TableScan
+reads the table columns COLUMN-INDEXES (vector kinds KINDS)."
+  segment
+  (start 0 :type fixnum)
+  (end 0 :type fixnum)
+  (column-indexes #() :type simple-vector)
+  (kinds #() :type simple-vector))
+
+(defun make-lazy-scan-batch (segment column-indexes kinds start end)
+  (make-lazy-batch (- end start)
+                   (make-array (length kinds) :initial-element nil)
+                   (make-scan-source segment start end
+                                     (coerce column-indexes 'simple-vector)
+                                     (coerce kinds 'simple-vector))))
+
+(defun source-store (source k)
+  "The column store of batch column K of the SCAN-SOURCE."
+  (segment-column (scan-source-segment source) (svref (scan-source-column-indexes source) k)))
+
+(defun batch-materialize (batch)
+  "BATCH with its column vectors (built now for a lazy batch)."
+  (let ((source (batch-source batch)))
+    (when source
+      (let ((start (scan-source-start source))
+            (end (scan-source-end source))
+            (columns (batch-columns batch)))
+        (dotimes (k (length columns))
+          (setf (svref columns k) (store-vec (source-store source k) start end
+                                             (svref (scan-source-kinds source) k))))
+        (setf (batch-source batch) nil)))
+    batch))
+
+(defun store-gather (store kind start idx m)
+  "VEC of KIND holding the rows START+IDX[0..M) of the column STORE, equal to
+gathering them from (STORE-VEC STORE ...)."
+  (declare (type u32-vector idx) (type fixnum start m))
+  (let ((validity (column-store-validity store)))
+    (cond
+      ((and (eq kind :i64) (int-column-p store))
+       (make-vec (native-gather (int-column-values store) idx m
+                                (make-array m :element-type '(signed-byte 64)) start)
+                 (gather-validity validity idx m start)))
+      ((and (eq kind :f64) (float-column-p store))
+       (make-vec (native-gather (float-column-values store) idx m
+                                (make-array m :element-type 'double-float) start)
+                 (gather-validity validity idx m start)))
+      ((and (eq kind :any) (dict-column-p store))
+       (let ((codes (dict-column-codes store))
+             (dict (dict-column-dictionary store))
+             (out (make-array m))
+             (out-codes (make-array m :element-type '(unsigned-byte 32))))
+         (declare (type u32-vector codes) (type simple-vector dict))
+         (dotimes (k m)
+           (let* ((row (+ start (aref idx k)))
+                  (code (aref codes row)))
+             (setf (aref out-codes k) code
+                   (svref out k) (if (and validity (zerop (sbit validity row)))
+                                     +null+
+                                     (svref dict code)))))
+         (make-vec out nil out-codes store)))
+      ((and (eq kind :any) (string-column-p store))
+       (let ((values (string-column-values store))
+             (out (make-array m)))
+         (dotimes (k m)
+           (let ((row (+ start (aref idx k))))
+             (setf (svref out k) (if (and validity (zerop (sbit validity row)))
+                                     +null+
+                                     (svref values row)))))
+         (make-vec out)))
+      (t
+       (let ((read (column-reader store)))
+         (declare (type function read))
+         (build-vec kind m (lambda (k) (funcall read (+ start (aref idx k))))))))))
+
+(defun select-rows (batch idx m)
+  "The rows IDX[0..M) (ascending) of BATCH as a materialized batch: BATCH
+itself when all its rows are selected, NIL when none is."
+  (let ((n (batch-count batch))
+        (source (batch-source batch)))
+    (cond ((zerop m) nil)
+          ((= m n) (batch-materialize batch))
+          (source
+           (let ((kinds (scan-source-kinds source))
+                 (start (scan-source-start source)))
+             (make-batch m (let ((columns (make-array (length kinds))))
+                             (dotimes (k (length kinds) columns)
+                               (setf (svref columns k)
+                                     (store-gather (source-store source k) (svref kinds k)
+                                                   start idx m)))))))
+          (t (batch-gather-u32 batch idx m)))))
+
+;;; ------------------------------------------------------------------
+;;; Operands: (batch) -> (values data offset validity), the operand's values
+;;; being DATA[OFFSET + i] for the batch's rows i.
+
+(defun compile-i64-operand (e)
+  "Accessor of the INT64-like expression E. A column of a lazy batch is read
+in place from an INT64 column store."
+  (let ((kernel (compile-vexpr e)))
+    (declare (type function kernel))
+    (flet ((evaluate (batch)
+             (multiple-value-bind (data validity)
+                 (vec-i64-data (funcall kernel (batch-materialize batch)) (batch-count batch))
+               (values data 0 validity))))
+      (if (b-column-p e)
+          (let ((k (b-column-index e)))
+            (lambda (batch)
+              (let* ((source (batch-source batch))
+                     (store (and source (source-store source k))))
+                (if (and store (int-column-p store))
+                    (let ((start (scan-source-start source))
+                          (validity (column-store-validity store)))
+                      (values (int-column-values store) start
+                              (and validity (subseq validity start (scan-source-end source)))))
+                    (evaluate batch)))))
+          #'evaluate))))
+
+(defun compile-validity-operand (e)
+  "Function (batch) -> the validity bitmap of E's values (NIL: no NULLs)."
+  (let ((kernel (compile-vexpr e)))
+    (declare (type function kernel))
+    (flet ((evaluate (batch)
+             (vec-validity-bits (funcall kernel (batch-materialize batch)) (batch-count batch))))
+      (if (b-column-p e)
+          (let ((k (b-column-index e)))
+            (lambda (batch)
+              (let ((source (batch-source batch)))
+                (if source
+                    (let ((validity (column-store-validity (source-store source k))))
+                      (and validity
+                           (subseq validity (scan-source-start source) (scan-source-end source))))
+                    (evaluate batch)))))
+          #'evaluate))))
+
+(defun vec-i64-data (vec n)
+  "(values data validity) of VEC as a (SIGNED-BYTE 64) vector."
+  (if (typep (vec-data vec) 'i64-vector)
+      (values (vec-data vec) (vec-validity vec))
+      (let ((v (build-vec :i64 n (lambda (i) (vec-ref vec i)))))
+        (values (vec-data v) (vec-validity v)))))
+
+(defun vec-validity-bits (vec n)
+  "Validity bitmap of VEC (NIL: no NULLs)."
+  (if (simple-vector-p (vec-data vec))
+      (and (vec-has-nulls-p vec n)
+           (let ((bits (make-bits n 1)))
+             (dotimes (i n bits)
+               (when (eq (vec-ref vec i) +null+) (setf (sbit bits i) 0)))))
+      (vec-validity vec)))
+
+;;; ------------------------------------------------------------------
 ;;; Native predicates
 
 (defstruct (native-predicate (:constructor make-native-predicate (fn &optional simple)))
   ;; FN: (batch) -> (values true-bits valid-bits); VALID-BITS NIL = never NULL.
   (fn nil :type function)
-  ;; For `x op constant(s)`: (kernel op a b), evaluated by pqk_filter_i64
+  ;; For `x op constant(s)`: (operand op a b), evaluated by pqk_filter_i64
   ;; when it is a filter's only conjunct.
   (simple nil))
 
@@ -122,34 +287,18 @@ or cannot be evaluated."
       (multiple-value-bind (c ok) (normalized-constant constant-expr nr)
         (and ok (typep c '(signed-byte 64)) c)))))
 
-(defun vec-i64-data (vec n)
-  "(values data validity) of VEC as a (SIGNED-BYTE 64) vector."
-  (if (typep (vec-data vec) 'i64-vector)
-      (values (vec-data vec) (vec-validity vec))
-      (let ((v (build-vec :i64 n (lambda (i) (vec-ref vec i)))))
-        (values (vec-data v) (vec-validity v)))))
-
-(defun vec-validity-bits (vec n)
-  "Validity bitmap of VEC (NIL: no NULLs)."
-  (if (simple-vector-p (vec-data vec))
-      (and (vec-has-nulls-p vec n)
-           (let ((bits (make-bits n 1)))
-             (dotimes (i n bits)
-               (when (eq (vec-ref vec i) +null+) (setf (sbit bits i) 0)))))
-      (vec-validity vec)))
-
 (defun native-filter-predicate (operand op a b)
   "Native predicate op(OPERAND, A, B) for constants A, B."
-  (let ((kernel (compile-vexpr operand)))
-    (declare (type function kernel))
+  (let ((access (compile-i64-operand operand)))
+    (declare (type function access))
     (make-native-predicate
      (lambda (batch)
        (let ((n (batch-count batch)))
-         (multiple-value-bind (data validity) (vec-i64-data (funcall kernel batch) n)
+         (multiple-value-bind (data offset validity) (funcall access batch)
            (let ((out (make-bits n)))
-             (native-filter-i64-bitmap data validity n op a b out)
+             (native-filter-i64-bitmap data validity n op a b out offset)
              (values out validity)))))
-     (list kernel op a b))))
+     (list access op a b))))
 
 (defun native-comparison (op a b)
   (cond
@@ -161,18 +310,18 @@ or cannot be evaluated."
     ((and (i64-operand-p a) (i64-operand-p b))
      (multiple-value-bind (nl nr) (comparison-normalizers (bexpr-type a) (bexpr-type b))
        (when (and (eq nl #'identity) (eq nr #'identity))
-         (let ((ka (compile-vexpr a))
-               (kb (compile-vexpr b))
+         (let ((access-a (compile-i64-operand a))
+               (access-b (compile-i64-operand b))
                (pqk-op (pqk-comparison-op op)))
-           (declare (type function ka kb))
+           (declare (type function access-a access-b))
            (make-native-predicate
             (lambda (batch)
               (let ((n (batch-count batch)))
-                (multiple-value-bind (x vx) (vec-i64-data (funcall ka batch) n)
-                  (multiple-value-bind (y vy) (vec-i64-data (funcall kb batch) n)
+                (multiple-value-bind (x ox vx) (funcall access-a batch)
+                  (multiple-value-bind (y oy vy) (funcall access-b batch)
                     (let ((out (make-bits n))
                           (valid (cond ((and vx vy) (bits-and vx vy n)) (vx) (vy))))
-                      (native-compare-i64 x y n pqk-op out)
+                      (native-compare-i64 x y n pqk-op out ox oy)
                       (values (if valid (native-bitmap-and out valid out n) out)
                               valid)))))))))))
     (t nil)))
@@ -191,28 +340,28 @@ or cannot be evaluated."
              (every #'bexpr-constant-p items))
     (let ((values (mapcar (lambda (item) (native-constant (bexpr-type x) item)) items)))
       (when (every #'identity values)
-        (let ((kernel (compile-vexpr x))
+        (let ((access (compile-i64-operand x))
               (values (remove-duplicates values)))
-          (declare (type function kernel))
+          (declare (type function access))
           (make-native-predicate
            (lambda (batch)
              (let ((n (batch-count batch))
                    (bits nil))
-               (multiple-value-bind (data validity) (vec-i64-data (funcall kernel batch) n)
+               (multiple-value-bind (data offset validity) (funcall access batch)
                  (dolist (c values)
                    (let ((out (make-bits n)))
-                     (native-filter-i64-bitmap data validity n +pqk-eq+ c 0 out)
+                     (native-filter-i64-bitmap data validity n +pqk-eq+ c 0 out offset)
                      (setf bits (if bits (native-bitmap-or bits out bits n) out))))
                  (values bits validity))))))))))
 
 (defun native-null-test (x want-null)
   (when (and (not (bexpr-constant-p x)) (member (type-vec-kind (bexpr-type x)) '(:i64 :f64)))
-    (let ((kernel (compile-vexpr x)))
-      (declare (type function kernel))
+    (let ((access (compile-validity-operand x)))
+      (declare (type function access))
       (make-native-predicate
        (lambda (batch)
          (let* ((n (batch-count batch))
-                (validity (vec-validity-bits (funcall kernel batch) n)))
+                (validity (funcall access batch)))
            (values (cond ((not want-null) (if validity (bits-and validity validity n) (make-bits n 1)))
                          (validity (bits-andnot (make-bits n 1) validity n))
                          (t (make-bits n 0)))
@@ -279,9 +428,10 @@ fail."
 ;;; Filters
 
 (defun compile-native-filter (predicate)
-  "Function (batch) -> the rows of the batch satisfying PREDICATE (the batch
-itself when all do, NIL when none does), evaluating its leading conjuncts
-with native kernels; NIL when no conjunct has a native evaluation."
+  "Function (batch) -> the rows of the (possibly lazy) batch satisfying
+PREDICATE as a materialized batch (the batch itself when all rows do, NIL
+when none does), evaluating its leading conjuncts with native kernels; NIL
+when no conjunct has a native evaluation."
   (let* ((conjuncts (split-conjuncts predicate))
          (first-may-fail (or (position-if #'may-fail-p conjuncts) (length conjuncts)))
          (natives '())
@@ -296,23 +446,17 @@ with native kernels; NIL when no conjunct has a native evaluation."
              (simple (and (null rest) (null (rest natives)) (native-predicate-simple (first natives))))
              (rest-expr (conjoin rest))
              (rest-kernel (and rest-expr (compile-vexpr rest-expr)))
-             (rest-refs (and rest-expr (bexpr-column-indexes rest-expr)))
              (rest-may-fail (and rest-expr (may-fail-p rest-expr)))
              (guard (make-row-order-guard (list predicate))))
         (declare (type function guard))
-        (labels ((select (batch idx m)
-                   (let ((n (batch-count batch)))
-                     (cond ((= m n) batch)
-                           ((zerop m) nil)
-                           (t (batch-gather-u32 batch idx m)))))
-                 (simple-filter (batch)
+        (labels ((simple-filter (batch)
                    ;; One `x op constant(s)` conjunct: indices straight from
                    ;; pqk_filter_i64.
-                   (destructuring-bind (kernel op a b) simple
+                   (destructuring-bind (access op a b) simple
                      (let ((n (batch-count batch)))
-                       (multiple-value-bind (data validity) (vec-i64-data (funcall (the function kernel) batch) n)
+                       (multiple-value-bind (data offset validity) (funcall (the function access) batch)
                          (let ((idx (make-array n :element-type '(unsigned-byte 32))))
-                           (select batch idx (native-filter-i64 data validity n op a b idx)))))))
+                           (select-rows batch idx (native-filter-i64 data validity n op a b idx offset)))))))
                  (general-filter (batch)
                    (let ((n (batch-count batch))
                          (true nil)
@@ -326,25 +470,41 @@ with native kernels; NIL when no conjunct has a native evaluation."
                            (let ((nf (if vk (bits-or tk (bits-andnot (make-bits n 1) vk n) n) tk)))
                              (setf not-false (if not-false (bits-and not-false nf n) nf))))))
                      (if (null rest-kernel)
-                         (multiple-value-call #'select batch (bits-selection true n))
-                         ;; The other conjuncts, on the rows the row executor
-                         ;; evaluates them for.
+                         (multiple-value-call #'select-rows batch (bits-selection true n))
+                         ;; The other conjuncts, on (a batch of) the rows the
+                         ;; row executor evaluates them for; a data error is
+                         ;; replaced by the row executor's first one on them.
                          (multiple-value-bind (sidx sm) (bits-selection (if rest-may-fail not-false true) n)
                            (declare (type u32-vector sidx) (type fixnum sm))
-                           (when (plusp sm)
-                             (let ((idx (make-index-vector sm)))
-                               (dotimes (j sm) (setf (aref idx j) (aref sidx j)))
-                               (let ((values (vec-data (funcall guard batch
-                                                                (lambda ()
-                                                                  (eval-subset rest-kernel rest-refs
-                                                                               batch idx sm)))))
+                           (let ((candidates (select-rows batch sidx sm)))
+                             (when candidates
+                               (let ((values (vec-data (funcall guard candidates
+                                                                (lambda () (funcall rest-kernel candidates)))))
                                      (out (make-array sm :element-type '(unsigned-byte 32)))
                                      (m 0))
                                  (declare (type simple-vector values) (type fixnum m))
                                  (dotimes (j sm)
-                                   (let ((row (aref sidx j)))
-                                     (when (and (= 1 (sbit true row)) (eq (svref values j) t))
-                                       (setf (aref out m) row)
-                                       (incf m))))
-                                 (select batch out m)))))))))
+                                   (when (and (eq (svref values j) t)
+                                              (or (not rest-may-fail) (= 1 (sbit true (aref sidx j)))))
+                                     (setf (aref out m) j)
+                                     (incf m)))
+                                 (select-rows candidates out m)))))))))
           (if simple #'simple-filter #'general-filter))))))
+
+(defun make-native-scan-filter (scan predicate &key ranges)
+  "Batch opener of Filter(PREDICATE) directly above the TableScan SCAN
+reading lazy batches (see MAKE-BATCH-SCAN), or NIL unless the statement
+uses native kernels and some conjunct of PREDICATE has a native evaluation."
+  (let ((filter (and (native-kernels-enabled-p) (compile-native-filter predicate))))
+    (when filter
+      (let ((open-scan (make-batch-scan scan :ranges ranges :lazy t)))
+        (declare (type function filter open-scan))
+        (lambda ()
+          (let ((child (funcall open-scan)))
+            (declare (type function child))
+            (lambda ()
+              (loop
+                (let ((batch (funcall child)))
+                  (unless batch (return nil))
+                  (let ((out (funcall filter batch)))
+                    (when out (return out))))))))))))

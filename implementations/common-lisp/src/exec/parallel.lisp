@@ -92,8 +92,13 @@ pipeline's hash joins to their shared build providers and row counters."
                         (etypecase n
                           (pp-table-scan
                            (make-batch-scan n :ranges (lambda () (shiftf (car cell) nil))))
-                          (pp-filter (make-batch-filter (compile-node (pnode-child n))
-                                                        (pp-filter-predicate n)))
+                          (pp-filter
+                           (or (and (pp-table-scan-p (pnode-child n))
+                                    (make-native-scan-filter
+                                     (pnode-child n) (pp-filter-predicate n)
+                                     :ranges (lambda () (shiftf (car cell) nil))))
+                               (make-batch-filter (compile-node (pnode-child n))
+                                                  (pp-filter-predicate n))))
                           (pp-project (make-batch-project (compile-node (pnode-child n))
                                                           (pp-project-exprs n)))
                           (pp-hash-join (make-batch-hash-join n (compile-node (hash-join-probe-node n))

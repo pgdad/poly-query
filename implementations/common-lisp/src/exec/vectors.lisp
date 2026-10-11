@@ -30,9 +30,13 @@ for a batch's vectors to stay in the CPU caches.")
   (codes nil :type (or null u32-vector))
   (dict nil))
 
-(defstruct (batch (:constructor make-batch (count columns)))
+(defstruct (batch (:constructor make-batch (count columns))
+                  (:constructor make-lazy-batch (count columns source)))
   (count 0 :type fixnum)
-  (columns #() :type simple-vector))     ; of VEC (NIL for columns a kernel never reads)
+  (columns #() :type simple-vector)      ; of VEC (NIL for columns a kernel never reads)
+  ;; A *lazy* batch of a TableScan read by a native filter (vnative.lisp)
+  ;; has no column vectors yet, only the SCAN-SOURCE of its rows.
+  (source nil))
 
 (defun type-vec-kind (type)
   (case (type-kind type)

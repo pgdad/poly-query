@@ -188,21 +188,31 @@ the array (a NULL pointer for NIL), keeping the arrays pinned during BODY."
 
 (deftype validity-bits () '(or null simple-bit-vector))
 
-(defun native-filter-i64 (data validity n op a b out)
-  "Indices (into the U32-VECTOR OUT) of the valid rows i < N with
-op(DATA[i], A, B); returns their count."
-  (declare (type i64-vector data) (type validity-bits validity) (type u32-vector out)
-           (type fixnum n op) (type (signed-byte 64) a b))
-  (with-data-pointers ((d data) (v validity) (o out))
-    (%pqk-filter-i64 d v n op a b o)))
+(declaim (inline element-sap))
+(defun element-sap (sap offset)
+  "SAP of the 8-byte element OFFSET of the array data at SAP."
+  (declare (type fixnum offset))
+  (sb-sys:sap+ sap (* 8 offset)))
 
-(defun native-filter-i64-bitmap (data validity n op a b out)
-  "Sets bit i of the bit vector OUT for the valid rows i < N with
-op(DATA[i], A, B); returns their count."
-  (declare (type i64-vector data) (type validity-bits validity) (type simple-bit-vector out)
-           (type fixnum n op) (type (signed-byte 64) a b))
+;;; DATA arguments are read from element OFFSET on (rows i < N are
+;;; DATA[OFFSET + i]), so kernels can run on a slice of a column store
+;;; without copying it. Validity bitmaps always start at row 0.
+
+(defun native-filter-i64 (data validity n op a b out &optional (offset 0))
+  "Indices (into the U32-VECTOR OUT) of the valid rows i < N with
+op(DATA[OFFSET+i], A, B); returns their count."
+  (declare (type i64-vector data) (type validity-bits validity) (type u32-vector out)
+           (type fixnum n op offset) (type (signed-byte 64) a b))
   (with-data-pointers ((d data) (v validity) (o out))
-    (%pqk-filter-i64-bitmap d v n op a b o)))
+    (%pqk-filter-i64 (element-sap d offset) v n op a b o)))
+
+(defun native-filter-i64-bitmap (data validity n op a b out &optional (offset 0))
+  "Sets bit i of the bit vector OUT for the valid rows i < N with
+op(DATA[OFFSET+i], A, B); returns their count."
+  (declare (type i64-vector data) (type validity-bits validity) (type simple-bit-vector out)
+           (type fixnum n op offset) (type (signed-byte 64) a b))
+  (with-data-pointers ((d data) (v validity) (o out))
+    (%pqk-filter-i64-bitmap (element-sap d offset) v n op a b o)))
 
 (defun native-count-i64 (data validity n op a b)
   "Number of valid rows i < N with op(DATA[i], A, B)."
@@ -273,12 +283,12 @@ op(DATA[i], A, B); returns their count."
     (%pqk-hash-i64 d n 0 o))
   out)
 
-(defun native-compare-i64 (a b n op out)
-  "Bit i of OUT := op(A[i], B[i]) for i < N (validity not consulted);
-returns the number of set bits."
-  (declare (type i64-vector a b) (type simple-bit-vector out) (type fixnum n op))
+(defun native-compare-i64 (a b n op out &optional (offset-a 0) (offset-b 0))
+  "Bit i of OUT := op(A[OFFSET-A+i], B[OFFSET-B+i]) for i < N (validity not
+consulted); returns the number of set bits."
+  (declare (type i64-vector a b) (type simple-bit-vector out) (type fixnum n op offset-a offset-b))
   (with-data-pointers ((pa a) (pb b) (po out))
-    (%pqk-compare-i64 pa pb n op po)))
+    (%pqk-compare-i64 (element-sap pa offset-a) (element-sap pb offset-b) n op po)))
 
 (defun native-group-sum-i64 (gids values validity n sums counts ngroups)
   "Accumulate the valid VALUES[i] (i < N) into SUMS[GIDS[i]] and count them
@@ -289,10 +299,10 @@ in COUNTS[GIDS[i]] (wrapping arithmetic). Returns the kernel status:
   (with-data-pointers ((g gids) (v values) (b validity) (s sums) (c counts))
     (%pqk-group-sum-i64 g v b n s c ngroups)))
 
-(defun native-gather (data idx m out)
-  "OUT[j] := DATA[IDX[j]] for j < M. DATA and OUT are both 64-bit integer or
-both DOUBLE-FLOAT vectors (the kernel copies 8-byte elements)."
-  (declare (type (or i64-vector f64-vector) data out) (type u32-vector idx) (type fixnum m))
+(defun native-gather (data idx m out &optional (offset 0))
+  "OUT[j] := DATA[OFFSET+IDX[j]] for j < M. DATA and OUT are both 64-bit
+integer or both DOUBLE-FLOAT vectors (the kernel copies 8-byte elements)."
+  (declare (type (or i64-vector f64-vector) data out) (type u32-vector idx) (type fixnum m offset))
   (with-data-pointers ((d data) (i idx) (o out))
-    (%pqk-gather-i64 d i m o))
+    (%pqk-gather-i64 (element-sap d offset) i m o))
   out)
