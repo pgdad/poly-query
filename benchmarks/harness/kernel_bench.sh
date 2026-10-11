@@ -5,7 +5,8 @@
 # pinned to one Cortex-X925 core). Run with no agents active for x86 numbers.
 #
 # Usage: kernel_bench.sh x86|arm <label> [git-ref]
-# Output: results/performance/kernels-<arch>-<label>/{bench.jsonl, environment.json|arm-host.json, ref}
+# Output: results/performance/kernels-<arch>-<label>/{bench.jsonl, environment.json|arm-host.json,
+#         codesize.json (.text bytes per assembly source), meta.json}
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ARCH=$1; LABEL=$2; REF=${3:-HEAD}
@@ -28,6 +29,12 @@ else
   cp "$BASE/$LABEL-arm-out/bench.jsonl" "$BASE/$LABEL-arm-out/arm-host.json" "$OUT/"
   rm -rf "${BASE:?}/$LABEL-arm-out"
 fi
-echo "$SHA" > "$OUT/ref"
+# Code size of each assembly source (assembling only; nothing is executed).
+if [[ $ARCH == x86 ]]; then DIR=x86_64 CC=gcc SIZE=size; else DIR=arm64 CC=aarch64-linux-gnu-gcc SIZE=aarch64-linux-gnu-size; fi
+"$W/tools/orchestration/sandboxed.sh" bash -c "cd native-kernels && for f in $DIR/*.S; do \
+  $CC -c -Iinclude -Ireference-c -o /tmp/k.o \$f && printf '%s %s\n' \$(basename \$f) \$($SIZE -A /tmp/k.o | awk '\$1==\".text\"{print \$2}'); done" \
+  | python3 -c 'import json,sys; print(json.dumps({l.split()[0]: int(l.split()[1]) for l in sys.stdin if len(l.split()) == 2}, indent=1))' \
+  > "$OUT/codesize.json"
+printf '{"label": "%s", "arch": "%s", "ref": "%s", "measured": "%s"}\n' "$LABEL" "$ARCH" "$SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$OUT/meta.json"
 git worktree remove --force "$W"
 echo "kernel_bench: $(grep -c '^{' "$OUT/bench.jsonl") rows -> $OUT"

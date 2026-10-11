@@ -9,6 +9,11 @@ Pareto analysis from raw records only:
   experiments/runs/*/{manifest,telemetry,validation}.json   (agent runs)
   results/correctness/*.json                                 (conformance reports)
   results/performance/*/summary.json                         (benchmarks)
+  results/correctness/{x86_64,arm64}-asm.json, results/performance/kernels-*/  (kernel cohort)
+  results/development/code-review/*.json                     (rubric reviews)
+
+The assembly languages form a separate *kernel cohort* (ADR-0016): their results
+appear in every report next to, never ranked with, the engines.
 
 Outputs: results/comparisons/{report.json, *.csv}, docs/results/report.html,
 docs/results/capability-matrix.md.
@@ -39,7 +44,7 @@ COLORS = {"java": "#2a78d6", "clojure": "#eb6834", "rust": "#1baf7a", "python": 
 COLORS_DARK = {"java": "#3987e5", "clojure": "#d95926", "rust": "#199e70", "python": "#c98500", "go": "#d55181",
                "common-lisp": "#008300", "x86_64-asm": "#9085e9", "arm64-asm": "#e66767"}
 SRC_EXT = {"java": [".java"], "clojure": [".clj", ".cljc", ".edn"], "rust": [".rs"], "python": [".py"],
-           "go": [".go"], "common-lisp": [".lisp", ".asd", ".cl"], "x86_64-asm": [".S", ".s"], "arm64-asm": [".S", ".s"]}
+           "go": [".go"], "common-lisp": [".lisp", ".asd", ".cl"], "x86_64-asm": [".S", ".s", ".h", ".inc"], "arm64-asm": [".S", ".s", ".h", ".inc"]}
 COMMENT = {"java": "//", "clojure": ";", "rust": "//", "python": "#", "go": "//", "common-lisp": ";",
            "x86_64-asm": "#", "arm64-asm": "//"}
 DEFAULT_WEIGHTS = {"correctness": 0.35, "development_effort": 0.2, "performance": 0.2, "resources": 0.1,
@@ -130,6 +135,94 @@ def collect_performance() -> list[dict]:
     return out
 
 
+KARCH = {"x86": "x86_64-asm", "arm": "arm64-asm"}
+SIMD_VARIANT = {"x86_64-asm": "x86_avx2", "arm64-asm": "a64_neon"}
+
+
+def geomean(xs: list[float]) -> float | None:
+    xs = [x for x in xs if x and x > 0]
+    if not xs:
+        return None
+    g = 1.0
+    for x in xs:
+        g *= x
+    return g ** (1 / len(xs))
+
+
+def collect_kernel_benches() -> dict[str, list[dict]]:
+    """results/performance/kernels-<arch>-<label>/ -> {lang: [bench sets, oldest first]}."""
+    out: dict[str, list[dict]] = {l: [] for l in ASM}
+    for d in sorted((ROOT / "results/performance").glob("kernels-*")):
+        bf = d / "bench.jsonl"
+        if not bf.exists():
+            continue
+        arch, _, label = d.name[len("kernels-"):].partition("-")
+        meta = load_json(d / "meta.json") or {"label": label, "measured": ""}
+        rows = [json.loads(l) for l in bf.read_text().splitlines() if l.strip().startswith("{")]
+        host = (load_json(d / "environment.json") or {}).get("hardware", {}).get("model") or \
+            (load_json(d / "arm-host.json") or {}).get("hostname")
+        out[KARCH[arch]].append({"label": meta["label"], "measured": meta.get("measured", ""), "ref": meta.get("ref"),
+                                 "source": str(d.relative_to(ROOT)), "host": host,
+                                 "ns_per_elem": {(r["variant"], r["kernel"]): r["ns_per_elem"] for r in rows},
+                                 "codesize": load_json(d / "codesize.json")})
+    for l in out:
+        out[l].sort(key=lambda b: b["measured"])
+    return out
+
+
+def bench_speedup(before: dict, after: dict, variant: str) -> dict:
+    """Per-kernel speedup before/after for one variant (>1 = faster) and the geomean."""
+    ks = sorted({k for v, k in after["ns_per_elem"] if v == variant and (variant, k) in before["ns_per_elem"]})
+    per = {k: before["ns_per_elem"][(variant, k)] / after["ns_per_elem"][(variant, k)] for k in ks
+           if after["ns_per_elem"][(variant, k)] > 0}
+    return {"variant": variant, "before": before["source"], "after": after["source"],
+            "per_kernel": {k: round(v, 3) for k, v in per.items()}, "geomean": geomean(list(per.values())),
+            "slower_kernels": sorted(k for k, v in per.items() if v < 0.95)}
+
+
+def collect_kernels() -> dict:
+    benches = collect_kernel_benches()
+    out = {}
+    for l in ASM:
+        corr = load_json(ROOT / "results/correctness" / f"{l}.json")
+        bs = benches[l]
+        latest = bs[-1] if bs else None
+        perf = None
+        if latest:
+            variants = sorted({v for v, _ in latest["ns_per_elem"]})
+            perf = {"source": latest["source"], "label": latest["label"], "host": latest["host"],
+                    "ns_per_elem": {v: {k: x for (vv, k), x in latest["ns_per_elem"].items() if vv == v} for v in variants},
+                    # speedup of each variant over the C reference (same binary, same run)
+                    "speedup_vs_reference": {v: geomean([latest["ns_per_elem"][("reference", k)] / x
+                                                         for (vv, k), x in latest["ns_per_elem"].items()
+                                                         if vv == v and ("reference", k) in latest["ns_per_elem"] and x > 0])
+                                             for v in variants if v != "reference"}}
+        by_label = {b["label"]: b for b in bs}
+        pairs = {}
+        for name, (a, b) in {"kernel-optimize": ("before-optimize", "after-optimize"),
+                             "kernel-refactor": ("before-refactor", "after-refactor"),
+                             "kernel-change-i128": ("before-change", "after-change")}.items():
+            if a in by_label and b in by_label:
+                pairs[name] = bench_speedup(by_label[a], by_label[b], SIMD_VARIANT[l])
+        out[l] = {"correctness": {"summary": (corr or {}).get("summary"), "variants": (corr or {}).get("variants"),
+                                  "variants_emulated": (corr or {}).get("variants_emulated"),
+                                  "suites": (corr or {}).get("suites"), "commit": (corr or {}).get("commit"),
+                                  "source": f"results/correctness/{l}.json" if corr else None},
+                  "performance": perf, "codesize": latest["codesize"] if latest else None,
+                  "before_after": pairs}
+    return out
+
+
+def collect_reviews() -> dict:
+    out: dict[str, dict] = {}
+    for f in sorted((ROOT / "results/development/code-review").glob("*-[AB].json")):
+        d = load_json(f) or {}
+        if d.get("language") and d.get("scores"):
+            out.setdefault(d["language"], {})[d.get("reviewer", f.stem[-1])] = d["scores"]
+    return {l: {"reviewers": r, "mean": {c: sum(x[c] for x in r.values()) / len(r) for c in next(iter(r.values()))}}
+            for l, r in out.items()}
+
+
 # ------------------------------------------------------------------ analysis
 
 def latest_by(runs: list[dict], lang: str, task: str) -> list[dict]:
@@ -153,6 +246,8 @@ def build(weights: dict) -> dict:
     perf = collect_performance()
     tasks = sorted({r["task"] for r in runs})
     langs_all = LANGS + ASM
+    kern = collect_kernels()
+    reviews = collect_reviews()
 
     # 1. correctness
     correctness = {l: corr.get(l, {"summary": None}) for l in LANGS}
@@ -201,10 +296,11 @@ def build(weights: dict) -> dict:
                 "storage": r.get("storage"), "thread_scaling": r.get("thread_scaling"), "modes": r.get("modes"),
                 "joins": r.get("joins"), "http": r.get("http")}
         perf_rep.append(entry)
-    # 5. code quality (automated metrics only)
-    quality = {l: code_metrics(l) for l in langs_all}
-    # 7. architectural adaptability: change-task runs
-    adapt = {l: {t: v for t, v in d.items() if t.startswith(("change", "refactor", "debug", "regress", "optimize"))}
+    # 5. code quality: automated metrics + rubric review scores (AI reviewers, labelled as such)
+    quality = {l: {**(code_metrics(l) or {}), "rubric_review": reviews.get(l)} for l in langs_all}
+    # 7. architectural adaptability: change-task runs (engines and kernel cohort)
+    adapt = {l: {t: v for t, v in d.items()
+                 if t.startswith(("change", "refactor", "debug", "regress", "optimize", "kernel-"))}
              for l, d in dev.items()}
 
     # capability matrix
@@ -232,19 +328,44 @@ def build(weights: dict) -> dict:
                 overall[l]["geomean_latency_s"] = geo
                 pts[l] = (overall[l]["dev_cost_usd"], -overall[l]["pass_rate"], geo)
     front = pareto(pts) if pts else []
+    # Kernel cohort (8): correctness gate, development cost, SIMD throughput on its own hardware.
+    # x86 and ARM kernels run on different machines: reported side by side, never ranked.
+    kernel_overall = {}
+    for l in ASM:
+        k = kern[l]
+        simd = SIMD_VARIANT[l]
+        kernel_overall[l] = {
+            "correctness_gate": bool(((k["correctness"] or {}).get("summary") or {}).get("all_pass")),
+            "dev_cost_usd": sum((a["cost_usd"] or 0) for t in dev.get(l, {}).values() for a in t) or None,
+            "simd_variant": simd,
+            "simd_geomean_ns_per_elem": geomean(list(((k["performance"] or {}).get("ns_per_elem") or {}).get(simd, {}).values())),
+            "simd_speedup_vs_reference": ((k["performance"] or {}).get("speedup_vs_reference") or {}).get(simd),
+            "host": (k["performance"] or {}).get("host")}
     return {"generated": dt.datetime.now(dt.timezone.utc).isoformat(), "weights": weights,
             "git_commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip(),
             "runs": [{k: v for k, v in r.items() if k not in ("telemetry", "validation")} for r in runs],
             "capability_matrix": matrix, "reports": {
-                "1_functional_correctness": correctness, "2_development_effort": dev,
-                "3_runtime_performance": perf_rep, "4_resource_efficiency": [
+                "1_functional_correctness": {**correctness, "kernel_cohort": {l: kern[l]["correctness"] for l in ASM}},
+                "2_development_effort": dev,
+                "3_runtime_performance": perf_rep,
+                "3_runtime_performance_kernel_cohort": {l: kern[l]["performance"] for l in ASM},
+                "4_resource_efficiency": [
                     {"bench_id": p["bench_id"], "engines": {l: {k: e[k] for k in ("peak_rss_mib", "query_cpu_s", "query_wall_s", "startup_median_s", "ingest_mb_s")}
                                                           for l, e in p["engines"].items()}} for p in perf_rep],
+                "4_resource_efficiency_kernel_cohort": {
+                    l: {"text_bytes_per_source": kern[l]["codesize"],
+                        "note": "Kernels never allocate (ABI rule); resource figures are machine-code size and time per element."}
+                    for l in ASM},
                 "5_code_quality": quality, "6_optimization_effectiveness": [
                     {"bench_id": p["bench_id"], "engines": {l: {k: e[k] for k in ("modes", "joins", "thread_scaling")}
                                                           for l, e in p["engines"].items()}} for p in perf_rep],
+                "6_optimization_effectiveness_kernel_cohort": {
+                    l: {"simd_and_scalar_speedup_vs_reference": (kern[l]["performance"] or {}).get("speedup_vs_reference"),
+                        "independent_before_after": kern[l]["before_after"]} for l in ASM},
                 "7_architectural_adaptability": adapt, "8_overall": {"per_language": overall, "pareto_front": front,
-                                                                      "note": "Correctness-gated: a language without a 100% pass rate is never ranked above one with 100%. Track A and Track B are never combined."}}}
+                                                                      "note": "Correctness-gated: a language without a 100% pass rate is never ranked above one with 100%. Track A and Track B are never combined.",
+                                                                      "kernel_cohort": kernel_overall,
+                                                                      "kernel_cohort_note": "Assembly kernels are a separate cohort (ADR-0016), never ranked with the engines; x86-64 and AArch64 are measured on different machines and are not ranked against each other."}}}
 
 
 # ------------------------------------------------------------------ rendering
@@ -270,6 +391,72 @@ def bar_chart(title: str, unit: str, data: dict[str, float | None], fmt=lambda v
             f'<svg viewBox="0 0 {w} {h}" role="img" aria-label="{html.escape(title)}">'
             f'<line x1="{left}" y1="0" x2="{left}" y2="{h}" class="axis"/>{"".join(rows)}</svg>'
             f'<details><summary>Table</summary><table><tr><th>Language</th><th>{html.escape(unit)}</th></tr>{table}</table></details></figure>')
+
+
+def render_kernel_cohort(R: dict) -> str:
+    """Kernel cohort (assembly languages) across reports 1-8; never ranked with the engines."""
+    def f(v, fmt="{:.3f}"):
+        return "—" if v is None else fmt.format(v)
+    parts = ['<h2>Kernel cohort: x86-64 and AArch64 assembly (reports 1–8)</h2>',
+             '<p class="muted">The assembly languages implement the native kernels, not complete engines (ADR-0016). '
+             'Their results are shown next to the engines in every report but never ranked with them, and x86-64 and '
+             'AArch64 are measured on different machines (x86-64: the quiet Zen 5 host; AArch64: the GB10 ARM host), '
+             'so they are not ranked against each other either. Development effort and the change, refactoring, '
+             'debugging and optimization runs appear in the charts and the adaptability table above.</p>']
+    rows = []
+    for l, c in R["1_functional_correctness"]["kernel_cohort"].items():
+        for v, x in sorted(((c or {}).get("variants") or {}).items()):
+            rows.append(f"<tr><td>{html.escape(l)}</td><td>{html.escape(v)}</td><td>{x['provided']}/{x['total']}</td>"
+                        f"<td>{x.get('public', '—')}</td><td>{x.get('asan', '—')}</td><td>{x.get('hidden', '—')}</td>"
+                        f"<td><a href='../../{html.escape(c.get('source') or '')}'>record</a></td></tr>")
+    parts.append("<h3>1. Correctness</h3><p class='muted'>Differential tests against the C reference, the ASan/UBSan "
+                 "build and the hidden acceptance tests; AArch64 natively on the ARM host.</p><table><tr><th>language</th>"
+                 "<th>variant</th><th>kernels</th><th>public</th><th>ASan/UBSan</th><th>hidden</th><th></th></tr>"
+                 + "".join(rows) + "</table>")
+    for l, p in R["3_runtime_performance_kernel_cohort"].items():
+        if not p:
+            continue
+        vs = list(p["ns_per_elem"])
+        ks = sorted({k for v in vs for k in p["ns_per_elem"][v]})
+        body = "".join(f"<tr><td>{html.escape(k)}</td>" + "".join(f"<td>{f(p['ns_per_elem'][v].get(k))}</td>" for v in vs)
+                       + "</tr>" for k in ks)
+        parts.append(f"<h3>3. Throughput — {html.escape(l)} on {html.escape(str(p['host']))}</h3>"
+                     f"<p class='muted'>Median ns per element, 4M elements, 15 repetitions, one pinned core "
+                     f"(<a href='../../{html.escape(p['source'])}'>{html.escape(p['source'])}</a>). Lower is better.</p>"
+                     f"<table><tr><th>kernel</th>{''.join(f'<th>{html.escape(v)}</th>' for v in vs)}</tr>{body}</table>")
+    cs = R["4_resource_efficiency_kernel_cohort"]
+    parts.append("<h3>4. Resources</h3><p class='muted'>" + html.escape(next(iter(cs.values()))["note"]) + "</p><table>"
+                 "<tr><th>language</th><th>source</th><th>.text bytes</th></tr>" + "".join(
+                     f"<tr><td>{html.escape(l)}</td><td>{html.escape(src)}</td><td>{n:,}</td></tr>"
+                     for l, c in cs.items() for src, n in sorted((c["text_bytes_per_source"] or {}).items())) + "</table>")
+    q = R["5_code_quality"]
+    parts.append("<h3>5. Code quality</h3><table><tr><th>language</th><th>source LOC</th><th>files</th><th>comment density</th>"
+                 "<th>largest file LOC</th></tr>" + "".join(
+                     f"<tr><td>{html.escape(l)}</td><td>{f((q.get(l) or {}).get('source_loc'), '{:,}')}</td>"
+                     f"<td>{f((q.get(l) or {}).get('files'), '{}')}</td><td>{f((q.get(l) or {}).get('comment_density'), '{:.2f}')}</td>"
+                     f"<td>{f((q.get(l) or {}).get('largest_file_loc'), '{:,}')}</td></tr>" for l in ASM) +
+                 "</table><p class='muted'>Rubric scores for the assembly kernels are in the rubric table above.</p>")
+    o = R["6_optimization_effectiveness_kernel_cohort"]
+    rows = []
+    for l, x in o.items():
+        for v, g in sorted((x["simd_and_scalar_speedup_vs_reference"] or {}).items()):
+            rows.append(f"<tr><td>{html.escape(l)}</td><td>{html.escape(v)} vs C reference</td><td>{f(g, '{:.2f}')}×</td><td>—</td></tr>")
+        for task, ba in x["independent_before_after"].items():
+            rows.append(f"<tr><td>{html.escape(l)}</td><td>{html.escape(task)}: {html.escape(ba['variant'])} before → after</td>"
+                        f"<td>{f(ba['geomean'], '{:.2f}')}×</td><td>{html.escape(', '.join(ba['slower_kernels']) or 'none')}</td></tr>")
+    parts.append("<h3>6. Optimization effectiveness</h3><p class='muted'>Geometric-mean speedup over the benchmarked kernels "
+                 "(>1 = faster). Before/after pairs are measured independently after the agent run; slower = kernels more "
+                 "than 5% slower.</p><table><tr><th>language</th><th>comparison</th><th>geomean</th><th>slower kernels</th></tr>"
+                 + "".join(rows) + "</table>")
+    ko = R["8_overall"]["kernel_cohort"]
+    parts.append("<h3>8. Overall (kernel cohort, not ranked)</h3><p class='muted'>" + html.escape(R["8_overall"]["kernel_cohort_note"])
+                 + "</p><table><tr><th>language</th><th>correctness gate</th><th>agent cost USD (all kernel tasks)</th>"
+                 "<th>SIMD variant</th><th>geomean ns/elem</th><th>speedup vs C reference</th><th>host</th></tr>" + "".join(
+                     f"<tr><td>{html.escape(l)}</td><td>{'pass' if k['correctness_gate'] else 'fail'}</td><td>{f(k['dev_cost_usd'], '{:,.2f}')}</td>"
+                     f"<td>{html.escape(k['simd_variant'])}</td><td>{f(k['simd_geomean_ns_per_elem'])}</td>"
+                     f"<td>{f(k['simd_speedup_vs_reference'], '{:.2f}')}×</td><td>{html.escape(str(k['host']))}</td></tr>"
+                     for l, k in ko.items()) + "</table>")
+    return "\n".join(parts)
 
 
 def render_html(rep: dict) -> str:
@@ -337,6 +524,12 @@ def render_html(rep: dict) -> str:
     cap_rows = "".join("<tr><td><code>" + c + "</code></td>" + "".join(
         f"<td>{'✔' if c in (caps.get(l) or []) else '·'}</td>" for l in LANGS) + "</tr>" for c in CAPS_ORDER)
     ov = R["8_overall"]
+    kernel_html = render_kernel_cohort(R)
+    rubric_rows = "".join(
+        f"<tr><td>{html.escape(l)}</td>" + "".join(
+            f"<td>{' / '.join(str(r[c]) for r in q['rubric_review']['reviewers'].values())}</td>"
+            for c in ("architecture", "readability", "robustness", "testability")) + "</tr>"
+        for l, q in R["5_code_quality"].items() if (q or {}).get("rubric_review"))
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PolyQuery Results</title><style>
 :root{{color-scheme:light;--bg:#fcfcfb;--fg:#0b0b0b;--muted:#52514e;--grid:#d9d8d4;{css_vars}}}
@@ -360,6 +553,11 @@ Missing bars mean the measurement has not been run — nothing is estimated.</p>
 before reporting it (timeouts). Lines and files count the agent's diff inside its language directory.</p>
 <table><tr><th>task</th><th>language</th><th>attempt</th><th>outcome</th><th>cost USD</th><th>turns</th><th>wall min</th>
 <th>lines +/−</th><th>files</th></tr>{adapt_rows}</table>
+<h2>Code-quality rubric (AI reviewers A / B)</h2>
+<p class="muted">Two independent read-only AI reviewers per language score rubric items 1–4 (1–5 scale). Subjective
+judgements, not measurements; evidence per score in <code>results/development/code-review/</code>.</p>
+<table><tr><th>language</th><th>architecture</th><th>readability</th><th>robustness</th><th>testability</th></tr>{rubric_rows}</table>
+{kernel_html}
 <h2>Capability matrix (claimed and tested)</h2><table><tr><th>capability</th>{''.join(f'<th>{l}</th>' for l in LANGS)}</tr>{cap_rows}</table>
 <h2>All agent attempts (failures included)</h2><table><tr><th>language</th><th>task</th><th>attempt</th><th>outcome</th><th>manifest</th></tr>{runs_rows}</table>
 </body></html>"""

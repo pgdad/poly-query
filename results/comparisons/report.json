@@ -1,5 +1,5 @@
 {
- "generated": "2026-10-11T10:40:26.668425+00:00",
+ "generated": "2026-10-11T11:45:44.024126+00:00",
  "weights": {
   "correctness": 0.35,
   "development_effort": 0.2,
@@ -7,7 +7,7 @@
   "resources": 0.1,
   "maintainability": 0.15
  },
- "git_commit": "14405b8f2ac58f4b0c02e86eb3d858da8443c271",
+ "git_commit": "e5c39f4e6851e8a82561bea00d892b8091ad532a",
  "runs": [
   {
    "run_id": "a-change-decimal38-clojure-a1-20261011T060221Z",
@@ -170,6 +170,24 @@
    "attempt": 1,
    "outcome": "success",
    "manifest": "experiments/runs/a-debug-mutant-rust-a1-20261011T054109Z/manifest.json"
+  },
+  {
+   "run_id": "a-kernel-debug-mutant-arm64-asm-a1-20261011T114058Z",
+   "language": "arm64-asm",
+   "task": "kernel-debug-mutant",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-kernel-debug-mutant-arm64-asm-a1-20261011T114058Z/manifest.json"
+  },
+  {
+   "run_id": "a-kernel-debug-mutant-x86_64-asm-a1-20261011T114057Z",
+   "language": "x86_64-asm",
+   "task": "kernel-debug-mutant",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-kernel-debug-mutant-x86_64-asm-a1-20261011T114057Z/manifest.json"
   },
   {
    "run_id": "a-kernels-arm64-asm-a1-20261010T184024Z",
@@ -1339,6 +1357,123 @@
     ],
     "started": "2026-10-11T09:16:02.124292+00:00",
     "source": "results/correctness/common-lisp.json"
+   },
+   "kernel_cohort": {
+    "x86_64-asm": {
+     "summary": {
+      "variants": 3,
+      "all_pass": true,
+      "complete_variants": [],
+      "suites_exit_ok": true
+     },
+     "variants": {
+      "x86_scalar": {
+       "provided": 16,
+       "total": 20,
+       "public": "PASS",
+       "asan": "PASS",
+       "hidden": "PASS"
+      },
+      "x86_avx2": {
+       "provided": 16,
+       "total": 20,
+       "public": "PASS",
+       "asan": "PASS",
+       "hidden": "PASS"
+      },
+      "x86_avx512": {
+       "provided": 16,
+       "total": 20,
+       "public": "PASS",
+       "asan": "PASS",
+       "hidden": "PASS"
+      }
+     },
+     "variants_emulated": null,
+     "suites": {
+      "public": {
+       "exit": 0,
+       "environment": "native x86-64 (sandbox)"
+      },
+      "asan": {
+       "exit": 0,
+       "environment": "native x86-64 (sandbox)"
+      },
+      "hidden": {
+       "exit": 0,
+       "environment": "native x86-64 (sandbox), ASan/UBSan"
+      }
+     },
+     "commit": "6775395fbe69c414a539f19e3069abf5d4d3a24e",
+     "source": "results/correctness/x86_64-asm.json"
+    },
+    "arm64-asm": {
+     "summary": {
+      "variants": 3,
+      "all_pass": true,
+      "complete_variants": [],
+      "suites_exit_ok": true
+     },
+     "variants": {
+      "a64_scalar": {
+       "provided": 16,
+       "total": 20,
+       "public": "PASS",
+       "asan": "PASS",
+       "hidden": "PASS"
+      },
+      "a64_neon": {
+       "provided": 16,
+       "total": 20,
+       "public": "PASS",
+       "asan": "PASS",
+       "hidden": "PASS"
+      },
+      "a64_sve": {
+       "provided": 16,
+       "total": 20,
+       "public": "PASS",
+       "asan": "PASS",
+       "hidden": "PASS"
+      }
+     },
+     "variants_emulated": {
+      "a64_scalar": {
+       "provided": 16,
+       "total": 20,
+       "public": "PASS",
+       "hidden": "PASS"
+      },
+      "a64_neon": {
+       "provided": 16,
+       "total": 20,
+       "public": "PASS",
+       "hidden": "PASS"
+      },
+      "a64_sve": {
+       "provided": 16,
+       "total": 20,
+       "public": "PASS",
+       "hidden": "PASS"
+      }
+     },
+     "suites": {
+      "public_emulated": {
+       "exit": 0,
+       "environment": "qemu-aarch64 (functional only)"
+      },
+      "hidden_emulated": {
+       "exit": 0,
+       "environment": "qemu-aarch64 (functional only)"
+      },
+      "native_arm": {
+       "exit": 0,
+       "environment": "native AArch64 on spark (Ubuntu 24.04.4 LTS), pqrunner systemd unit"
+      }
+     },
+     "commit": "6775395fbe69c414a539f19e3069abf5d4d3a24e",
+     "source": "results/correctness/arm64-asm.json"
+    }
    }
   },
   "2_development_effort": {
@@ -3307,6 +3442,28 @@
     ]
    },
    "x86_64-asm": {
+    "kernel-debug-mutant": [
+     {
+      "run_id": "a-kernel-debug-mutant-x86_64-asm-a1-20261011T114057Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-kernel-debug-mutant-x86_64-asm-a1-20261011T114057Z/manifest.json",
+      "cost_usd": 0.4134343999999999,
+      "tokens_output": 4886,
+      "tokens_input_total": 456089,
+      "turns": 15,
+      "wall_seconds": 58.5,
+      "tool_calls": 14,
+      "tool_failures": 1,
+      "build_failures": 0,
+      "repair_iterations": 0,
+      "commits": 1,
+      "lines_added": 16,
+      "lines_removed": 1,
+      "files_changed": 2,
+      "conformance": null
+     }
+    ],
     "kernels": [
      {
       "run_id": "a-kernels-x86_64-asm-a1-20261010T184025Z",
@@ -3331,6 +3488,28 @@
     ]
    },
    "arm64-asm": {
+    "kernel-debug-mutant": [
+     {
+      "run_id": "a-kernel-debug-mutant-arm64-asm-a1-20261011T114058Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-kernel-debug-mutant-arm64-asm-a1-20261011T114058Z/manifest.json",
+      "cost_usd": 0.4827568000000001,
+      "tokens_output": 6526,
+      "tokens_input_total": 598106,
+      "turns": 19,
+      "wall_seconds": 78.0,
+      "tool_calls": 18,
+      "tool_failures": 0,
+      "build_failures": 0,
+      "repair_iterations": 0,
+      "commits": 2,
+      "lines_added": 9,
+      "lines_removed": 1,
+      "files_changed": 2,
+      "conformance": null
+     }
+    ],
     "kernels": [
      {
       "run_id": "a-kernels-arm64-asm-a1-20261010T184024Z",
@@ -26510,6 +26689,168 @@
     }
    }
   ],
+  "3_runtime_performance_kernel_cohort": {
+   "x86_64-asm": {
+    "source": "results/performance/kernels-x86-quiet",
+    "label": "quiet",
+    "host": "AMD Ryzen 9 9950X3D 16-Core Processor",
+    "ns_per_elem": {
+     "reference": {
+      "filter_i64_sel10": 0.7683,
+      "filter_i64_bitmap": 2.7945,
+      "count_i64_between": 0.3422,
+      "sum_i64": 0.2003,
+      "sum_i64_validity": 0.3481,
+      "sum_f64": 0.3664,
+      "minmax_i64": 0.5507,
+      "bitmap_and": 0.0029,
+      "bitmap_popcount": 0.1148,
+      "hash_i64": 0.628,
+      "compare_i64": 2.8982,
+      "group_sum_i64_1024": 0.684,
+      "gather_i64": 0.7192
+     },
+     "x86_avx2": {
+      "filter_i64_sel10": 0.15,
+      "filter_i64_bitmap": 0.077,
+      "count_i64_between": 0.0826,
+      "sum_i64": 0.076,
+      "sum_i64_validity": 0.1137,
+      "sum_f64": 0.0517,
+      "minmax_i64": 0.1054,
+      "bitmap_and": 0.0025,
+      "bitmap_popcount": 0.002,
+      "hash_i64": 0.3606,
+      "compare_i64": 0.1441,
+      "group_sum_i64_1024": 0.4262,
+      "gather_i64": 0.7037
+     },
+     "x86_avx512": {
+      "filter_i64_sel10": 0.0939,
+      "filter_i64_bitmap": 0.0651,
+      "count_i64_between": 0.0569,
+      "sum_i64": 0.0491,
+      "sum_i64_validity": 0.0532,
+      "sum_f64": 0.0509,
+      "minmax_i64": 0.0498,
+      "bitmap_and": 0.0024,
+      "bitmap_popcount": 0.0009,
+      "hash_i64": 0.1237,
+      "compare_i64": 0.1596,
+      "group_sum_i64_1024": 0.4283,
+      "gather_i64": 0.7009
+     },
+     "x86_scalar": {
+      "filter_i64_sel10": 0.3396,
+      "filter_i64_bitmap": 0.2151,
+      "count_i64_between": 0.2582,
+      "sum_i64": 0.1915,
+      "sum_i64_validity": 0.3538,
+      "sum_f64": 0.3677,
+      "minmax_i64": 0.5511,
+      "bitmap_and": 0.004,
+      "bitmap_popcount": 0.014,
+      "hash_i64": 0.6033,
+      "compare_i64": 0.2968,
+      "group_sum_i64_1024": 0.5794,
+      "gather_i64": 0.7134
+     }
+    },
+    "speedup_vs_reference": {
+     "x86_avx2": 4.875782471227629,
+     "x86_avx512": 7.040872899626819,
+     "x86_scalar": 1.845012904902338
+    }
+   },
+   "arm64-asm": {
+    "source": "results/performance/kernels-arm-rev0",
+    "label": "rev0",
+    "host": "spark",
+    "ns_per_elem": {
+     "a64_neon": {
+      "filter_i64_sel10": 0.2502,
+      "filter_i64_bitmap": 0.2293,
+      "count_i64_between": 0.2223,
+      "sum_i64": 0.215,
+      "sum_i64_validity": 0.2257,
+      "sum_f64": 0.2269,
+      "minmax_i64": 0.2841,
+      "bitmap_and": 0.002,
+      "bitmap_popcount": 0.0011,
+      "hash_i64": 0.3815,
+      "compare_i64": 0.435,
+      "group_sum_i64_1024": 0.7811,
+      "gather_i64": 5.0747,
+      "filter_i128_sel10": 1.3225,
+      "count_i128_between": 2.1922,
+      "sum_i128": 0.4927,
+      "minmax_i128": 0.9535
+     },
+     "a64_scalar": {
+      "filter_i64_sel10": 0.5128,
+      "filter_i64_bitmap": 0.7232,
+      "count_i64_between": 0.5543,
+      "sum_i64": 0.4503,
+      "sum_i64_validity": 0.6305,
+      "sum_f64": 0.5538,
+      "minmax_i64": 0.5986,
+      "bitmap_and": 0.0051,
+      "bitmap_popcount": 0.0118,
+      "hash_i64": 0.5894,
+      "compare_i64": 0.7002,
+      "group_sum_i64_1024": 0.935,
+      "gather_i64": 5.1158,
+      "filter_i128_sel10": 1.3511,
+      "count_i128_between": 2.1944,
+      "sum_i128": 0.4955,
+      "minmax_i128": 0.9514
+     },
+     "a64_sve": {
+      "filter_i64_sel10": 0.6805,
+      "filter_i64_bitmap": 0.7048,
+      "count_i64_between": 0.5816,
+      "sum_i64": 0.292,
+      "sum_i64_validity": 0.4318,
+      "sum_f64": 0.2927,
+      "minmax_i64": 0.2918,
+      "bitmap_and": 0.0022,
+      "bitmap_popcount": 0.0031,
+      "hash_i64": 0.3545,
+      "compare_i64": 0.6202,
+      "group_sum_i64_1024": 0.9327,
+      "gather_i64": 5.134,
+      "filter_i128_sel10": 1.3208,
+      "count_i128_between": 2.1933,
+      "sum_i128": 0.4942,
+      "minmax_i128": 0.9516
+     },
+     "reference": {
+      "filter_i64_sel10": 1.2041,
+      "filter_i64_bitmap": 2.7874,
+      "count_i64_between": 0.6832,
+      "sum_i64": 0.3562,
+      "sum_i64_validity": 0.5366,
+      "sum_f64": 0.5447,
+      "minmax_i64": 0.5427,
+      "bitmap_and": 0.0021,
+      "bitmap_popcount": 0.0421,
+      "hash_i64": 0.5575,
+      "compare_i64": 2.3284,
+      "group_sum_i64_1024": 0.9373,
+      "gather_i64": 5.1477,
+      "filter_i128_sel10": 1.3495,
+      "count_i128_between": 2.1946,
+      "sum_i128": 0.494,
+      "minmax_i128": 0.9471
+     }
+    },
+    "speedup_vs_reference": {
+     "a64_neon": 2.2852301477236834,
+     "a64_scalar": 1.2237159479709767,
+     "a64_sve": 1.612895043791789
+    }
+   }
+  },
   "4_resource_efficiency": [
    {
     "bench_id": "20261010T215430Z-1m-phase5-quiet",
@@ -26979,6 +27320,20 @@
     }
    }
   ],
+  "4_resource_efficiency_kernel_cohort": {
+   "x86_64-asm": {
+    "text_bytes_per_source": null,
+    "note": "Kernels never allocate (ABI rule); resource figures are machine-code size and time per element."
+   },
+   "arm64-asm": {
+    "text_bytes_per_source": {
+     "pq_a64_neon.S": 4928,
+     "pq_a64_scalar.S": 2332,
+     "pq_a64_sve.S": 2808
+    },
+    "note": "Kernels never allocate (ABI rule); resource figures are machine-code size and time per element."
+   }
+  },
   "5_code_quality": {
    "java": {
     "source_loc": 23381,
@@ -26986,7 +27341,29 @@
     "files": 166,
     "comment_lines": 2330,
     "comment_density": 0.1,
-    "largest_file_loc": 1298
+    "largest_file_loc": 1298,
+    "rubric_review": {
+     "reviewers": {
+      "A": {
+       "architecture": 5,
+       "readability": 4,
+       "robustness": 4,
+       "testability": 3
+      },
+      "B": {
+       "architecture": 5,
+       "readability": 4,
+       "robustness": 4,
+       "testability": 3
+      }
+     },
+     "mean": {
+      "architecture": 5.0,
+      "readability": 4.0,
+      "robustness": 4.0,
+      "testability": 3.0
+     }
+    }
    },
    "clojure": {
     "source_loc": 12441,
@@ -26994,7 +27371,29 @@
     "files": 63,
     "comment_lines": 389,
     "comment_density": 0.031,
-    "largest_file_loc": 869
+    "largest_file_loc": 869,
+    "rubric_review": {
+     "reviewers": {
+      "A": {
+       "architecture": 5,
+       "readability": 4,
+       "robustness": 4,
+       "testability": 4
+      },
+      "B": {
+       "architecture": 5,
+       "readability": 4,
+       "robustness": 4,
+       "testability": 4
+      }
+     },
+     "mean": {
+      "architecture": 5.0,
+      "readability": 4.0,
+      "robustness": 4.0,
+      "testability": 4.0
+     }
+    }
    },
    "rust": {
     "source_loc": 24488,
@@ -27002,7 +27401,29 @@
     "files": 84,
     "comment_lines": 2233,
     "comment_density": 0.091,
-    "largest_file_loc": 1083
+    "largest_file_loc": 1083,
+    "rubric_review": {
+     "reviewers": {
+      "A": {
+       "architecture": 5,
+       "readability": 4,
+       "robustness": 4,
+       "testability": 4
+      },
+      "B": {
+       "architecture": 5,
+       "readability": 4,
+       "robustness": 4,
+       "testability": 4
+      }
+     },
+     "mean": {
+      "architecture": 5.0,
+      "readability": 4.0,
+      "robustness": 4.0,
+      "testability": 4.0
+     }
+    }
    },
    "python": {
     "source_loc": 13523,
@@ -27010,7 +27431,29 @@
     "files": 79,
     "comment_lines": 865,
     "comment_density": 0.064,
-    "largest_file_loc": 988
+    "largest_file_loc": 988,
+    "rubric_review": {
+     "reviewers": {
+      "A": {
+       "architecture": 5,
+       "readability": 4,
+       "robustness": 5,
+       "testability": 4
+      },
+      "B": {
+       "architecture": 5,
+       "readability": 4,
+       "robustness": 4,
+       "testability": 4
+      }
+     },
+     "mean": {
+      "architecture": 5.0,
+      "readability": 4.0,
+      "robustness": 4.5,
+      "testability": 4.0
+     }
+    }
    },
    "go": {
     "source_loc": 22902,
@@ -27018,7 +27461,29 @@
     "files": 86,
     "comment_lines": 2176,
     "comment_density": 0.095,
-    "largest_file_loc": 1084
+    "largest_file_loc": 1084,
+    "rubric_review": {
+     "reviewers": {
+      "A": {
+       "architecture": 5,
+       "readability": 4,
+       "robustness": 4,
+       "testability": 4
+      },
+      "B": {
+       "architecture": 5,
+       "readability": 4,
+       "robustness": 4,
+       "testability": 4
+      }
+     },
+     "mean": {
+      "architecture": 5.0,
+      "readability": 4.0,
+      "robustness": 4.0,
+      "testability": 4.0
+     }
+    }
    },
    "common-lisp": {
     "source_loc": 14113,
@@ -27026,7 +27491,29 @@
     "files": 64,
     "comment_lines": 1274,
     "comment_density": 0.09,
-    "largest_file_loc": 974
+    "largest_file_loc": 974,
+    "rubric_review": {
+     "reviewers": {
+      "A": {
+       "architecture": 4,
+       "readability": 4,
+       "robustness": 4,
+       "testability": 3
+      },
+      "B": {
+       "architecture": 4,
+       "readability": 4,
+       "robustness": 4,
+       "testability": 4
+      }
+     },
+     "mean": {
+      "architecture": 4.0,
+      "readability": 4.0,
+      "robustness": 4.0,
+      "testability": 3.5
+     }
+    }
    },
    "x86_64-asm": {
     "source_loc": 4010,
@@ -27034,15 +27521,17 @@
     "files": 4,
     "comment_lines": 533,
     "comment_density": 0.133,
-    "largest_file_loc": 1572
+    "largest_file_loc": 1572,
+    "rubric_review": null
    },
    "arm64-asm": {
-    "source_loc": 1961,
+    "source_loc": 2039,
     "test_loc": 0,
-    "files": 3,
-    "comment_lines": 418,
-    "comment_density": 0.213,
-    "largest_file_loc": 1053
+    "files": 4,
+    "comment_lines": 464,
+    "comment_density": 0.228,
+    "largest_file_loc": 1053,
+    "rubric_review": null
    }
   },
   "6_optimization_effectiveness": [
@@ -47560,6 +48049,24 @@
     }
    }
   ],
+  "6_optimization_effectiveness_kernel_cohort": {
+   "x86_64-asm": {
+    "simd_and_scalar_speedup_vs_reference": {
+     "x86_avx2": 4.875782471227629,
+     "x86_avx512": 7.040872899626819,
+     "x86_scalar": 1.845012904902338
+    },
+    "independent_before_after": {}
+   },
+   "arm64-asm": {
+    "simd_and_scalar_speedup_vs_reference": {
+     "a64_neon": 2.2852301477236834,
+     "a64_scalar": 1.2237159479709767,
+     "a64_sve": 1.612895043791789
+    },
+    "independent_before_after": {}
+   }
+  },
   "7_architectural_adaptability": {
    "java": {
     "change-decimal38": [
@@ -48491,8 +48998,54 @@
      }
     ]
    },
-   "x86_64-asm": {},
-   "arm64-asm": {}
+   "x86_64-asm": {
+    "kernel-debug-mutant": [
+     {
+      "run_id": "a-kernel-debug-mutant-x86_64-asm-a1-20261011T114057Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-kernel-debug-mutant-x86_64-asm-a1-20261011T114057Z/manifest.json",
+      "cost_usd": 0.4134343999999999,
+      "tokens_output": 4886,
+      "tokens_input_total": 456089,
+      "turns": 15,
+      "wall_seconds": 58.5,
+      "tool_calls": 14,
+      "tool_failures": 1,
+      "build_failures": 0,
+      "repair_iterations": 0,
+      "commits": 1,
+      "lines_added": 16,
+      "lines_removed": 1,
+      "files_changed": 2,
+      "conformance": null
+     }
+    ]
+   },
+   "arm64-asm": {
+    "kernel-debug-mutant": [
+     {
+      "run_id": "a-kernel-debug-mutant-arm64-asm-a1-20261011T114058Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-kernel-debug-mutant-arm64-asm-a1-20261011T114058Z/manifest.json",
+      "cost_usd": 0.4827568000000001,
+      "tokens_output": 6526,
+      "tokens_input_total": 598106,
+      "turns": 19,
+      "wall_seconds": 78.0,
+      "tool_calls": 18,
+      "tool_failures": 0,
+      "build_failures": 0,
+      "repair_iterations": 0,
+      "commits": 2,
+      "lines_added": 9,
+      "lines_removed": 1,
+      "files_changed": 2,
+      "conformance": null
+     }
+    ]
+   }
   },
   "8_overall": {
    "per_language": {
@@ -48537,7 +49090,26 @@
     "go",
     "rust"
    ],
-   "note": "Correctness-gated: a language without a 100% pass rate is never ranked above one with 100%. Track A and Track B are never combined."
+   "note": "Correctness-gated: a language without a 100% pass rate is never ranked above one with 100%. Track A and Track B are never combined.",
+   "kernel_cohort": {
+    "x86_64-asm": {
+     "correctness_gate": true,
+     "dev_cost_usd": 12.397960799999998,
+     "simd_variant": "x86_avx2",
+     "simd_geomean_ns_per_elem": 0.07726980958731465,
+     "simd_speedup_vs_reference": 4.875782471227629,
+     "host": "AMD Ryzen 9 9950X3D 16-Core Processor"
+    },
+    "arm64-asm": {
+     "correctness_gate": true,
+     "dev_cost_usd": 5.281492999999999,
+     "simd_variant": "a64_neon",
+     "simd_geomean_ns_per_elem": 0.25446266379218335,
+     "simd_speedup_vs_reference": 2.2852301477236834,
+     "host": "spark"
+    }
+   },
+   "kernel_cohort_note": "Assembly kernels are a separate cohort (ADR-0016), never ranked with the engines; x86-64 and AArch64 are measured on different machines and are not ranked against each other."
   }
  }
 }

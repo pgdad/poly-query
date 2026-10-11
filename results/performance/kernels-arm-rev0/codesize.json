@@ -1,0 +1,5 @@
+{
+ "pq_a64_neon.S": 4928,
+ "pq_a64_scalar.S": 2332,
+ "pq_a64_sve.S": 2808
+}
