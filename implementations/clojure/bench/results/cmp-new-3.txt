@@ -1,0 +1,22 @@
+| query | first run | warm median | warm min |
+|---|---:|---:|---:|
+| q01_filter_selective | 5.7 ms | 1.3 ms | 1.0 ms |
+| q02_filter_low_selectivity | 196.4 ms | 4.6 ms | 3.0 ms |
+| q03_range_filter_time | 12.7 ms | 3.3 ms | 2.6 ms |
+| q04_arith_aggregate | 56.8 ms | 3.9 ms | 2.4 ms |
+| q05_groupby_low_card | 14.2 ms | 1.3 ms | 1.0 ms |
+| q06_groupby_high_card | 21.7 ms | 6.1 ms | 5.0 ms |
+| q07_groupby_skewed | 14.8 ms | 10.6 ms | 10.1 ms |
+| q08_groupby_uniform_multi | 32.5 ms | 9.6 ms | 7.6 ms |
+| q09_distinct_count | 35.9 ms | 7.2 ms | 7.0 ms |
+| q10_join_customers | 134.1 ms | 13.1 ms | 12.0 ms |
+| q11_join_star | 29.4 ms | 12.4 ms | 11.4 ms |
+| q12_left_join_anti | 16.9 ms | 10.7 ms | 10.3 ms |
+| q13_sort_topn | 5.3 ms | 4.2 ms | 3.6 ms |
+| q14_sort_full_string | 111.3 ms | 73.8 ms | 66.9 ms |
+| q15_sort_multi_key | 128.3 ms | 69.3 ms | 57.7 ms |
+| q16_timeseries_hourly | 10.9 ms | 2.6 ms | 2.4 ms |
+| q17_wide_projection | 6.3 ms | 0.5 ms | 0.4 ms |
+| q18_nulls | 211.1 ms | 5.5 ms | 4.5 ms |
+| q19_cte_subquery | 22.9 ms | 16.6 ms | 14.2 ms |
+| q20_string_functions | 182.5 ms | 2.9 ms | 2.8 ms |

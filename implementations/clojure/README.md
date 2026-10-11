@@ -46,7 +46,9 @@ change.union_all change.decimal38`.
 * GNU make
 
 ```sh
-make build    # AOT-compiles src/ into target/classes, writes target/classpath
+make build    # AOT-compiles src/ into target/classes, packages target/polyquery.jar,
+              # writes target/classpath and records the JVM AOT cache
+              # target/polyquery.aot (training session, ~10 s; see "Latency")
 make test     # clojure.test unit tests (test/)
 make lint     # compiles with *warn-on-reflection*; fails on reflection warnings
 make fmt      # whitespace normalisation (no third-party formatter is allowed)
@@ -65,7 +67,10 @@ and start the engine with `--native-kernels PATH`; queries then use them
 with the option `"native": true`. The engine builds, runs and passes
 conformance without them.
 
-Development tools (Python, not part of the build): `bench/bench.py DATA_DIR`
+Development tools (Python, not part of the build): `bench/workload.py
+DATA_DIR` times the queries of `benchmarks/workloads/analytics.json` through
+one session (first run and warm median; `--digest FILE` / `--check FILE`
+record and compare result digests), `bench/bench.py DATA_DIR`
 times a fixed query set on the generated datasets under several option
 combinations (`--verify` compares full results instead), `bench/fuzz.py`
 is a differential fuzzer of the option matrix (random expressions,
@@ -312,10 +317,15 @@ timeout/cancellation checks.
     output batches (probe columns gathered from the typed vectors, build
     columns converted lazily). INNER joins and LEFT joins without residual.
   * **Sorting** (`polyquery.exec.sort`): sort keys are extracted into
-    primitive columns; a single integer-like key is sorted by an LSD radix
-    sort (8-bit digits, constant digits skipped), other keys by a merge sort
-    of the index permutation with typed comparisons (parallel chunks +
-    pairwise merges). Ties keep input order (stable), as in row mode.
+    primitive columns, then an MSD sort over the keys orders a permutation:
+    NULLs are split off, the other rows get an order-preserving unsigned
+    64-bit code of the key (integers/decimals/dates/timestamps, FLOAT64
+    bits, booleans, and for strings three UTF-16 units in code point order
+    plus a "more follows" bit) that is LSD radix sorted (8-bit digits, only
+    digits that vary); runs of equal codes recurse into the next key (or
+    the next three units of the string). Small runs and wide decimals use a
+    typed comparator; the runs of the first key are processed in parallel.
+    Ties keep input order (stable), as in row mode.
   * Other operators (DISTINCT, LIMIT, index scans, merge and nested-loop
     joins) run row at a time; rows and batches are converted at the
     boundaries (batch columns built from rows are typed lazily, on first
@@ -496,6 +506,139 @@ Results are identical across all configurations: `bench/bench.py --verify`
 compares the full results of every query under every configuration above
 (sorted unless ordered, FLOAT64 to 6 significant digits) — all match
 (Q10's baseline fails with `RESOURCE_LIMIT` instead).
+
+## Latency optimization (benchmark workload)
+
+Goal: lower the latency of the queries of
+`benchmarks/workloads/analytics.json` at scale 1m without changing any
+result. All changes are general engine improvements (no query-specific
+code paths); every query returns exactly the rows it returned before
+(`bench/workload.py --digest` on the baseline, `--check` afterwards: all 20
+result digests identical), and conformance is unchanged.
+
+### Method
+
+`bench/workload.py /tmp/pqdata/1m` (data from `pqgen.py generate --scale
+1m`): one `bin/polyquery session` with default options and JVM flags, the
+nine workload tables loaded from CSV with their schemas (column layout),
+the workload's two indexes created, then for every query in workload
+order: one **first run** (cold: the JIT has not seen that query shape yet),
+3 warm-up runs and the **median of 9 warm runs**; wall clock measured by
+the client including the protocol round trip. q14/q15 use `result: count`
+as the workload specifies; the others return their rows. "Before" is the
+starting point of this task (commit `c3b8327`, built in a separate
+worktree), "after" is this version; the two were run alternately, three
+rounds each, on the same 32-core machine, and the table shows per query the
+median over the three rounds (raw outputs: `bench/results/cmp-{base,new}-N.txt`).
+The machine was shared with other jobs (load average ≈ 8), so single
+numbers vary by roughly ±20 %.
+
+| query | first run before | first run after | warm before | warm after | warm speed-up |
+|---|---:|---:|---:|---:|---:|
+| q01_filter_selective | 13 ms | 3 ms | 1.0 ms | 1.0 ms | 1.0× |
+| q02_filter_low_selectivity | 312 ms | 192 ms | 3.2 ms | 4.6 ms | 0.7× |
+| q03_range_filter_time | 25 ms | 8 ms | 4.5 ms | 2.5 ms | 1.8× |
+| q04_arith_aggregate | 301 ms | 168 ms | 5.3 ms | 4.2 ms | 1.3× |
+| q05_groupby_low_card | 150 ms | 14 ms | 3.3 ms | 1.3 ms | 2.5× |
+| q06_groupby_high_card | 147 ms | 24 ms | 5.6 ms | 5.8 ms | 1.0× |
+| q07_groupby_skewed | 12 ms | 15 ms | 10.1 ms | 12.3 ms | 0.8× |
+| q08_groupby_uniform_multi | 221 ms | 33 ms | 9.7 ms | 10.1 ms | 1.0× |
+| q09_distinct_count | 115 ms | 66 ms | 16.8 ms | 8.3 ms | 2.0× |
+| q10_join_customers | 263 ms | 155 ms | 18.8 ms | 15.9 ms | 1.2× |
+| q11_join_star | 305 ms | 24 ms | 13.2 ms | 12.4 ms | 1.1× |
+| q12_left_join_anti | 129 ms | 19 ms | 19.1 ms | 11.9 ms | 1.6× |
+| q13_sort_topn | 60 ms | 6 ms | 5.4 ms | 5.3 ms | 1.0× |
+| q14_sort_full_string | 639 ms | 153 ms | 397.9 ms | 73.8 ms | 5.4× |
+| q15_sort_multi_key | 208 ms | 128 ms | 191.8 ms | 65.1 ms | 2.9× |
+| q16_timeseries_hourly | 168 ms | 12 ms | 3.3 ms | 3.7 ms | 0.9× |
+| q17_wide_projection | 29 ms | 5 ms | 0.6 ms | 0.5 ms | 1.2× |
+| q18_nulls | 313 ms | 203 ms | 6.8 ms | 5.9 ms | 1.2× |
+| q19_cte_subquery | 70 ms | 27 ms | 24.4 ms | 15.3 ms | 1.6× |
+| q20_string_functions | 326 ms | 171 ms | 18.9 ms | 3.2 ms | 5.9× |
+| **total** | **3806 ms** | **1427 ms** | **760 ms** | **263 ms** | **2.9×** |
+
+Warm latency fell 2.9× in total, driven by the full sorts (q14 5×, q15 3×),
+the string functions (q20 6×), COUNT(DISTINCT) (q09 2×), the CTE (q19) and
+the joins (q10–q12); first runs fell 2.7× in total, mostly through the AOT
+cache. Queries that were already a few milliseconds (q01, q02, q06–q08,
+q13, q16) are unchanged within the noise of this machine: their individual
+rounds overlap (e.g. q02 after: 3.0–4.8 ms; 2.5 ms when run alone).
+
+### What changed
+
+* **Sorting** (q14, q15; `polyquery.exec.sort`). The comparator merge sort
+  spent most of its time in string comparisons that chase pointers
+  (`compare-code-points` on random strings) and in megamorphic
+  per-key comparator calls. Now every key is turned into order-preserving
+  unsigned 64-bit codes that are radix sorted, MSD over the keys: NULLs
+  are partitioned off, equal-code runs recurse into the next key, strings
+  are consumed three UTF-16 units per pass (17 bits each, remapped so that
+  unit order is code point order, plus a "more units follow" bit, so equal
+  codes without that bit mean equal strings), FLOAT64 codes are the IEEE
+  bits mapped to unsigned order (`-0.0` = `0.0`), DESC complements the
+  code. Only the radix digits that differ somewhere are processed (OR/AND
+  of all codes). Runs of ≤ 32 rows, wide decimals and common string
+  prefixes longer than 60 units fall back to the typed comparator, which
+  breaks ties by input position, so the result is the same stable order as
+  before. The runs found on the first key are sorted in parallel. The
+  parallel sort also concatenates its partitions directly into an
+  `ArrayList` (it went through a persistent vector).
+* **CTEs referenced more than once** (q19; `polyquery.exec.dispatch`,
+  `operators/shared-input`). A subquery-scan input (CTE or derived table)
+  that occurs several times in a query, is uncorrelated, does not call
+  `PQ_SLEEP` and ends in a blocking operator (aggregation, sort, top-N,
+  DISTINCT, LIMIT — it is materialized anyway) is executed once per query
+  execution and its rows are reused by every reference (keyed by plan
+  equality, computed under a per-query `ConcurrentHashMap` + `delay`, so
+  parallel partitions share it). Only in vectorized mode: row mode — also
+  the re-execution after runtime errors — still evaluates every reference,
+  so error behaviour is exactly that of the baseline.
+* **`COUNT(DISTINCT …)` and other DISTINCT aggregates over integer-like
+  values** (q09; `grouping/LongDistinctState`): per group an
+  open-addressing `long` hash set (no boxing, no `Long.equals`) instead of
+  a `HashSet<Long>`; parallel partial states merge set into set; SUM/AVG/
+  MIN/MAX DISTINCT feed the distinct values to the ordinary accumulator.
+* **Scalar functions over dictionary-encoded strings** (q20;
+  `kernels/dict-call`). A function call whose only non-literal argument is
+  a dictionary vector, and which cannot fail (UPPER, LOWER, LENGTH, TRIM,
+  CONCAT, NULLIF, …), is evaluated once per dictionary entry and once for
+  NULL (cached per dictionary), then mapped through the codes; STRING
+  results stay dictionary-encoded, so e.g. `UPPER(currency) = 'EUR'` is
+  also compared once per dictionary entry. Functions that may fail keep the
+  per-row path (a dictionary can hold values of rows that are filtered out).
+* **Column-wise hash-join build sides** (q10, q11, q12; `vjoin`,
+  `batch/RowsColumn`, `batch/GatherCol`). For the primitive single-key join
+  table every build column becomes, on first use, one typed vector over all
+  build rows (STRING columns dictionary-encoded when at most about half of
+  the values are distinct), shared by the parallel partitions. Output
+  batches reference build rows by id and gather typed values (or dictionary
+  codes) from it; a further join gathers through the composed ids. Before,
+  every output batch boxed the build values row by row. LEFT joins point
+  unmatched rows at an extra all-NULL build row.
+* **GROUP BY several dictionary-encoded keys** (q10, q11;
+  `grouping/ObjKeyTable`): the tuple of codes indexes a flat `int[]` of
+  group ids per combination of dictionaries (when the product of the
+  dictionary sizes is ≤ 2²⁰) instead of building a key list and hashing it
+  per row.
+* **Startup / first execution: JVM AOT cache** (all first runs). The engine
+  now runs from `target/polyquery.jar`, and `make build` records a JDK AOT
+  cache (`-XX:AOTCacheOutput`, JEPs 483/514/515: classes loaded and linked
+  ahead of time plus method profiles) from a training session
+  (`script/training.clj`: ~300K synthetic rows in three tables, a mix of 30
+  generic query shapes — filters, aggregations, joins, sorts, subqueries,
+  string/date functions — repeated 12 times; it does not contain the
+  benchmark queries). The launcher passes `-XX:AOTCache` when the file
+  exists; the JVM validates it against the JDK build and class path and
+  otherwise ignores it with a warning on stderr. This mostly removes class
+  loading/linking and lets the JIT compile hot loops earlier, which is what
+  dominates the first execution of each query shape.
+
+Decisions and things tried but not adopted: the default number of worker
+threads stays `min(8, cores)` — 16 threads helped scan-only queries by
+≈ 0.5 ms but made high-cardinality aggregations slower (more partial
+states to merge). Training the AOT cache on the benchmark queries
+themselves gave somewhat better first runs but would tune the engine to
+the benchmark; the synthetic generic mix is used instead.
 
 ## Native kernels (M9)
 
@@ -1199,3 +1342,10 @@ Decisions:
   decimals keep all primitive fast paths.
 * Correlated subqueries other than equality lookups over a single table scan
   are re-executed per outer row (correct, but O(outer × inner)).
+* The JVM AOT cache (`target/polyquery.aot`) is only valid for the JDK build
+  and the absolute class path it was recorded with: after moving the
+  checkout, changing the JDK or the Maven cache location, run `make build`
+  again (until then the engine runs without it — slower first executions,
+  a JVM warning on stderr). It is recorded with the launcher's default JVM
+  flags; `POLYQUERY_JAVA_OPTS` that change the heap layout (e.g. a heap
+  size that switches compressed oops) also disable it.
