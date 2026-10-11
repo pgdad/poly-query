@@ -467,6 +467,7 @@ merged in parallel, one thread per hash partition."
     (cond
       ((null (pp-hash-aggregate-group-by node))
        (let ((total (svref states 0)))
+         (merge-int-distinct-sets states)
          (loop for w from 1 below workers
                do (group-state-merge total (svref states w)))
          (group-state-batches total node)))
@@ -507,6 +508,42 @@ merged in parallel, one thread per hash partition."
                                            (group-state-charge gs)))))))))
          (check-interrupts)
          (ordered-group-batches parts node workers))))))
+
+(defun merge-int-distinct-sets (states)
+  "Without GROUP BY: merge the value sets of the INT-DISTINCT-STATE
+aggregates of the partial group STATES into the first state, in parallel:
+thread p collects the values of hash partition p from every set. The other
+states' sets are emptied, so the regular merge adds nothing."
+  (let ((workers (length states)))
+    (dotimes (j (length (group-state-aggs (svref states 0))))
+      (when (typep (svref (group-state-aggs (svref states 0)) j) 'int-distinct-state)
+        (let* ((sets (remove nil (map 'list (lambda (gs)
+                                              (svref (int-distinct-state-sets
+                                                      (svref (group-state-aggs gs) j))
+                                                     0))
+                                      states)))
+               (total (reduce #'+ sets :key #'key-table-count)))
+          (when (and (> workers 1) (>= total (morsel-rows)))
+            (let ((parts (make-array workers)))
+              (run-in-threads
+               (loop for p below workers
+                     collect (let ((p p))
+                               (lambda ()
+                                 (let ((part (make-key-table 1 (ceiling total (* 2 workers)) '(:i64))))
+                                   (dolist (set sets)
+                                     (let ((keys (svref (key-table-keys set) 0)))
+                                       (declare (type simple-vector keys))
+                                       (dotimes (k (key-table-count set))
+                                         (let ((v (svref keys k)))
+                                           (when (= (hash-partition (hash-i64 v) workers) p)
+                                             (int-key-probe part v t))))))
+                                   (setf (svref parts p) part))))))
+              (let ((union (make-key-table 1 (reduce #'+ parts :key #'key-table-count) '(:i64))))
+                (loop for part across parts do (int-set-add-all union part))
+                (loop for gs across states
+                      for w from 0
+                      do (setf (svref (int-distinct-state-sets (svref (group-state-aggs gs) j)) 0)
+                               (if (zerop w) union nil)))))))))))
 
 (defun ordered-group-batches (states node &optional (threads 1))
   "Iterator over the output batches of the groups of STATES in order of

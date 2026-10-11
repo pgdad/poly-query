@@ -412,6 +412,71 @@ again with unbounded integers."
       (funcall step v))
     (funcall finish)))
 
+;;; DISTINCT aggregates of INT64-like values (INT64, narrow DECIMAL, DATE,
+;;; TIMESTAMP): the distinct values of each group are kept in an integer
+;;; KEY-TABLE (in order of first appearance). Their result depends only on
+;;; the set of values (COUNT, and exact integer SUM/AVG), so sets may be
+;;; merged in any order (see MERGE-INT-DISTINCT-SETS).
+
+(defstruct (int-distinct-state (:include agg-state))
+  (factory nil :type function)           ; row accumulator factory (aggregates.lisp)
+  (sets #() :type simple-vector))        ; per group: integer KEY-TABLE or NIL
+
+(defmethod agg-reserve ((s int-distinct-state) groups)
+  (when (> groups (agg-state-capacity s))
+    (let ((c (next-capacity s groups)))
+      (setf (int-distinct-state-sets s) (grow-array (int-distinct-state-sets s) c nil)
+            (agg-state-capacity s) c))))
+
+(defun int-distinct-set (s g)
+  (let ((sets (int-distinct-state-sets s)))
+    (or (svref sets g)
+        (setf (svref sets g) (make-key-table 1 16 '(:i64))))))
+
+(defmethod agg-update ((s int-distinct-state) gids vec n)
+  (declare (type index-vector gids) (type fixnum n))
+  (let ((data (vec-data vec))
+        (validity (vec-validity vec)))
+    (if (typep data 'i64-vector)
+        (let ((data data)
+              (last-g -1)
+              (set nil))
+          (declare (type i64-vector data) (type fixnum last-g))
+          (do-valid-rows (i n validity)
+            (let ((g (aref gids i)))
+              (unless (= g last-g)
+                (setf set (int-distinct-set s g) last-g g))
+              (int-key-probe set (aref data i) t))))
+        (dotimes (i n)
+          (let ((v (vec-ref vec i)))
+            (unless (eq v +null+)
+              (int-key-probe (int-distinct-set s (aref gids i)) v t)))))))
+
+(defun int-set-add-all (set other)
+  "Add the keys of the integer key table OTHER to SET."
+  (let ((keys (svref (key-table-keys other) 0)))
+    (declare (type simple-vector keys))
+    (dotimes (k (key-table-count other))
+      (int-key-probe set (svref keys k) t))))
+
+(defmethod agg-merge ((s int-distinct-state) other mapping)
+  (let ((theirs (int-distinct-state-sets other)))
+    (dotimes (g (length mapping))
+      (let ((to (aref mapping g))
+            (set (svref theirs g)))
+        (when (and set (>= to 0))
+          (int-set-add-all (int-distinct-set s to) set))))))
+
+(defmethod agg-result ((s int-distinct-state) gid)
+  (multiple-value-bind (step finish) (funcall (int-distinct-state-factory s))
+    (declare (type function step finish))
+    (let ((set (svref (int-distinct-state-sets s) gid)))
+      (when set
+        (let ((keys (svref (key-table-keys set) 0)))
+          (dotimes (k (key-table-count set))
+            (funcall step (svref keys k))))))
+    (funcall finish)))
+
 ;;; ------------------------------------------------------------------
 ;;; Construction
 
@@ -421,6 +486,9 @@ again with unbounded integers."
          (arg-type (if (b-agg-args agg) (bexpr-type (first (b-agg-args agg))) :int64))
          (float-p (eq (type-kind arg-type) :float64)))
     (cond
+      ((and (b-agg-distinct agg) (not (member fn '(:min :max :count-star)))
+            (eq (type-vec-kind arg-type) :i64))
+       (make-int-distinct-state :factory (make-base-accumulator-factory fn arg-type)))
       ((and (b-agg-distinct agg) (not (member fn '(:min :max :count-star))))
        (make-distinct-state :factory (make-base-accumulator-factory fn arg-type)))
       (t
