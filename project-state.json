@@ -1,6 +1,6 @@
 {
  "schema": "polyquery-project-state/1",
- "updated": "2026-10-11T10:41:11+00:00",
+ "updated": "2026-10-11T15:04:07+00:00",
  "current_milestone": "M10",
  "milestones": {
   "M0": {
@@ -52,17 +52,21 @@
   }
  },
  "outstanding_tasks": [
-  "Track B (ecosystem-optimized) runs",
+  "Track B jvm-tuning (java, clojure) running since 2026-10-11T15:01Z: accept, independent before/after (Track B only)",
+  "Fresh main-line 1m benchmark on a quiet host (reports 3/4/8 now exclude task-branch before/after benchmarks)",
+  "Decide whether to merge the real-workload optimize-latency re-runs (record-only branches track-a/<lang>/optimize-latency/a<n>; Python's failed only the pre-existing HTTP defect)",
+  "Option B (complete assembly engines): awaiting owner decisions on pilot budget, libc policy and ARM development loop (docs/methodology/assembly-engines-plan.md)",
+  "Debugging family remains too easy for both engines and kernels (kernel variant with symptom-only report and hidden-only failures: fixed in ~1 min)",
+  "AArch64 kernel review findings: verification harnesses not committed, no BTI/GNU property note, block-size test constants not overridable",
   "Python HTTP defect: negative chunk size bypasses --max-request-bytes (HTTP suite malformed_chunked_body fails 18/19) — fix via a sandboxed agent run (e.g. a regression/robustness task), not by hand",
   "Go optimize-latency: two timeouts (88 min, 120 min); committed a2 work passes all checks (1.74x speedup) but is unmerged — decide on attempt 3 or accept timeout as the result",
-  "Debug family is too easy (one-line fixes in < 90 s because DEFECT.md names failing cases): add a harder variant (symptom-only report or hidden-only failures)",
   "Resolve SPEC-Q-002 (expression size/nesting implementation limits) via change control",
   "Repeated attempts (n>1) per language/task for statistics (docs/methodology/statistics.md)",
   "10m-scale benchmark",
   "Unverified code-review findings: Go worker goroutines without recover, session stdin lines without length cap (Rust/Java/Go/Common Lisp), symlink-following data paths"
  ],
  "known_defects": [
-  "See experiments/telemetry/harness-incidents.jsonl (HI-001..003 fixed; SPEC-Q-001 open)",
+  "See experiments/telemetry/harness-incidents.jsonl (HI-001..008 fixed; SPEC-Q-001 resolved for CR-2 engines)",
   {
    "engine": "python",
    "defect": "HTTP chunked body: negative chunk size read to end-of-stream (bypasses --max-request-bytes)",
@@ -76,7 +80,7 @@
  ],
  "test_results": {
   "spec_validate": "pass (incl. Phase-1 syntax lint)",
-  "oracle_check": "pass (177 oracle queries)",
+  "oracle_check": "pass (191 oracle queries)",
   "harness_selftest": "pass (10 tests)",
   "kernels_reference": "pass (native, asan, aarch64-qemu)",
   "engines": {
@@ -84,25 +88,29 @@
    "go": "phase1 225/225 public, 249/249 incl. hidden",
    "clojure": "phase1 225/225 public, 249/249 incl. hidden"
   },
-  "kernels_arm64_native": "pass on spark (scalar, neon, sve; native + asan)",
-  "kernels_x86_native": "pass (scalar, avx2, avx512)",
+  "kernels_arm64_native": "pass 20/20 on spark (scalar, neon, sve; public, ASan, hidden) after kernel-optimize; SVE VL 128-2048 under qemu",
+  "kernels_x86_native": "pass 20/20 (scalar, avx2, avx512; public, ASan/UBSan, hidden) after kernel-optimize",
   "conformance_public_all_engines": "660/660 (go, rust, java, clojure, python, common-lisp)",
   "conformance_public_plus_hidden_arm64": "746/746 all six engines, with and without native kernels (results/correctness/arm64)",
   "interop": "6x6 + reference clean, incl. PQCF v2 wide-decimal files (results/correctness/interop.json)",
   "http_suite": "19/19 all engines except python 18/19 (malformed_chunked_body)"
  },
- "last_successful_commit": "6c55145272f4f2db60d7f6b7dc660cb974d6aae7",
- "next_recommended_action": "Run Track B (ecosystem-optimized) waves; schedule a Python robustness fix run for the chunked-body defect; decide Go optimize attempt 3; add a harder debugging variant; resolve SPEC-Q-002.",
+ "last_successful_commit": "1a909d421efded26bce01805c028e865c83e4e43",
+ "next_recommended_action": "When the Track B jvm-tuning wave (java, clojure; record-only) finishes: accept both runs, run a quiet-host before/after (benchmarks/harness/before_after.sh-style, reported as Track B: start-up, cold first query, warm latency, RSS), then run a fresh main-line 1m benchmark (reports 3/4/8 currently use the m9-native benchmark, which predates the merged optimizations). Then decide whether the real-workload optimize re-runs replace the first-round results on main (they are record-only).",
  "findings": [
   "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) — report as engine quality finding; clojure p95 16 ms",
   "CR-2 DECIMAL(38) was the most expensive change (6.25-16.50 USD); Go and Java needed a new wide-decimal representation",
   "Independent optimization speedups (geomean, 1m): Python 2.85x, Common Lisp 2.48x, Go 1.74x (timed out), Java 1.38x, Clojure 1.13x, Rust 1.07x; results identical before/after",
   "AI code review: high inter-reviewer agreement (92% exact, kappa 0.84) but compressed scale (4-5); concrete findings more informative than scores",
-  "SPEC-Q-001 resolved for CR-2 engines: exact INT64/DECIMAL comparison"
+  "SPEC-Q-001 resolved for CR-2 engines: exact INT64/DECIMAL comparison",
+  "Kernel family (ADR-0016): CR-4 i128 kernels, CR-5 refactor, kernel debug and kernel optimize all succeeded first attempt on both architectures; x86 AVX2 optimize 1.34x (quiet host), ARM NEON 1.02x (memory-bound, as the agent predicted without hardware); x86 refactor byte-identical machine code",
+  "Optimize-latency re-run on the real workload (HI-007): Python 4.97x, Go 3.24x, Common Lisp 3.18x, Rust 1.96x, Java 1.61x, Clojure 1.42x (vs 1.07-2.85x with stand-in workloads); digests identical; record-only",
+  "Kernel code review (separate cohort): x86 5/4/5/4.5, ARM 4.5/4.5/4.5/3; no functional defects found",
+  "HI-008: native conformance could pass with no library loaded (engines fall back silently); fixed fail-closed, 6 runs re-validated"
  ],
  "totals": {
-  "track_a_runs": 72,
-  "track_a_cost_usd_list": 713.1,
-  "note": "cost excludes 4 timed-out runs with no reported cost"
+  "track_a_runs": 86,
+  "track_a_cost_usd_list": 927.7,
+  "note": "cost excludes 4 timed-out runs with no reported cost; includes kernel family and record-only re-runs; Track B runs in progress"
  }
 }

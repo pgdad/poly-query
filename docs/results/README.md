@@ -137,7 +137,8 @@ Per-attempt data (outcome, cost, turns, time, diff size) is in the report-7 tabl
 | CR-3 plan separation (refactoring) | 6/6 success | 3.67–6.37 | behaviour and capabilities unchanged; named optimizer rules with unit tests |
 | CR-2 `DECIMAL(38)` + PQCF v2 (change) | 6/6 success | 6.25–16.50 | the most expensive change; Go (16.50) and Java (13.92) needed a new wide-decimal value representation |
 | debugging (one injected defect each) | 6/6 success | 0.21–0.39 | one-line fixes in 36–87 s: too easy, because the defect report names the failing cases |
-| latency optimization | 5/6 success; Go timed out twice | 10.22–18.61 (successes) | see below |
+| latency optimization | 5/6 success; Go timed out twice | 10.22–18.61 (successes) | agents optimized self-written stand-in workloads (HI-007); see below |
+| latency optimization, re-run on the real workload (record-only) | 5/6 success; Python tests_failed (HTTP `malformed_chunked_body`, pre-existing) | 10.48–31.19 | not merged; see below |
 
 All merged engines pass 660/660 public cases (746 with hidden) after the chain,
 and the 6 × 6 PQCF interop matrix — now including v2 files with 128-bit decimals —
@@ -161,6 +162,51 @@ on a quiet host (1m rows, same harness and data):
 
 Result digests were identical before and after for every engine and query.
 
+**These runs did not optimize the official workload.** The task named
+`benchmarks/workloads/analytics.json`, but that file was never exported into
+workspaces (HI-007), so every agent wrote its own stand-in queries. The table
+above measures how well each agent's optimization transferred to the real
+workload. The family was therefore re-run with the workload available (attempt
+2 or 3, from the same base commits, 120 minutes, record-only):
+[`optimize-latency-before-after-a2.json`](../../results/performance/optimize-latency-before-after-a2.json).
+
+| engine | geomean latency before → after | speedup | queries ≥ 2× faster | peak RSS | caveat |
+|---|---|---:|---:|---|---|
+| Python | 120.2 → 24.2 ms | 4.97× | 18/20 | 15.4 → 15.8 GiB | run `tests_failed`: HTTP suite 18/19 (the known `malformed_chunked_body` defect, present before the run) |
+| Go | 5.3 → 1.6 ms | 3.24× | 15/20 | 2.2 → 2.4 GiB | |
+| Common Lisp | 21.3 → 6.7 ms | 3.18× | 12/20 | 1.4 → 1.7 GiB | `q14_sort_full` 52.6× |
+| Rust | 3.1 → 1.6 ms | 1.96× | 5/20 | 1.0 → 1.3 GiB | |
+| Java | 5.3 → 3.3 ms | 1.61× | 7/20 | 7.6 → 3.2 GiB | |
+| Clojure | 7.8 → 5.5 ms | 1.42× | 4/20 | 5.4 → 8.6 GiB | `q08_groupby_uniform_multi` significantly slower (0.77×) |
+
+With the real workload in hand, every agent achieved more (1.4–5.0× vs. 1.1–2.9×),
+and the gains are broad, not one-query tricks (Python and Go improved at least
+2× on 15+ of 20 queries). The agents could see the benchmark queries, so the
+gains may partly be fitted to these 20 queries; correctness is unaffected
+(public + hidden conformance, the full mode matrix and native kernels pass,
+digests identical). The re-runs are recorded on branches
+`track-a/<lang>/optimize-latency/a<n>` and not merged, so the main-line engines
+are those of the first round.
+
+## Assembly kernel family (ADR-0016)
+
+The two assembly languages received their own versions of the later experiment
+families, each with hidden acceptance tests (`tests/kernels-hidden/`) validated
+natively on x86-64 and on spark. Throughput is measured independently before and
+after each run (x86-64: quiet host, pinned; AArch64: spark). The two architectures run
+on different machines and are never ranked against each other or against the engines.
+
+| task | x86-64: outcome, cost, time | AArch64: outcome, cost, time | measured effect (SIMD variant: x86 AVX2 / ARM NEON) |
+|---|---|---|---|
+| CR-4: four 128-bit kernels, ABI revision 1 | success, $7.37, 26 min | success, $3.24, 12 min | new kernels vs. the C fallback: x86 1.7–6.1× (all variants), ARM NEON 1.07–4.5×; existing kernels unchanged |
+| CR-5: behaviour-preserving restructuring | success, $14.36, 40 min | success, $8.86, 25 min | x86 machine code byte-identical; ARM geomean 0.99×, no kernel > 5 % slower, NEON `.text` 4.9 → 7.6 KB |
+| debugging (one injected defect, symptom-only report, failures only in hidden tests) | success, $0.41, 1 min | success, $0.48, 1 min | one-line fixes; still too easy |
+| throughput optimization | success, $27.74, 88 min | success, $10.77, 35 min | x86 AVX2 1.34× (agent's own figure 1.31×), AVX-512 1.03×; ARM NEON 1.02× (`minmax_i128` 1.41×), NEON `.text` 7.6 → 13.3 KB |
+
+The AArch64 agent could not measure (no ARM hardware in its sandbox): it reasoned
+from the Cortex-X925 and predicted that most kernels are memory-bound, which the
+spark measurement confirmed. Sources: `results/performance/kernels-{x86,arm}-{before,after}-{change,refactor,optimize}/`.
+
 ## AArch64 end to end
 
 All six engines and the native kernel library were built natively on spark
@@ -177,9 +223,16 @@ concrete findings; one was verified by a new black-box check: the Python HTTP
 server accepts a negative chunk size and then reads the body past
 `--max-request-bytes` (HTTP suite 18/19; all others 19/19).
 
+The assembly kernel libraries were reviewed the same way after the optimize merge
+(a separate cohort, not comparable with the engine scores): x86-64 5/5, 4/4, 5/5,
+5/4 and AArch64 5/4, 5/4, 4/5, 3/3 for architecture, readability, robustness and
+testability. Both AArch64 reviewers marked testability down because the agent kept
+its guard-page and mutation harnesses out of the repository; no reviewer found a
+functional defect.
+
 ## Harness incidents
 
-Six harness defects were found during the runs and fixed; each is logged with
+Eight harness defects were found during the runs and fixed; each is logged with
 its impact in [`experiments/telemetry/harness-incidents.jsonl`](../../experiments/telemetry/harness-incidents.jsonl).
 HI-002 (the runner overwrote explicit request ids) was visible to the Phase 1
 agents as two spurious failures. HI-005 (a CR-1 case expected DECIMAL from an
@@ -187,7 +240,12 @@ untyped load) was visible to every UNION ALL agent. HI-006: run time limits
 depended on the login token's remaining lifetime, and killed agents were counted
 as successes; three optimization runs were re-classified as timeouts and the
 family was re-run with a uniform 120-minute limit. Affected runs were re-validated; earlier
-verdicts are kept in each run's `validation-history/`.
+verdicts are kept in each run's `validation-history/`. HI-007: the
+optimization workload was never exported to workspaces, so the first optimization
+round optimized stand-in workloads (re-run above). HI-008: after the CR-4 kernel
+change, engine validation built the kernel library from mismatched sources and the
+native conformance check passed without native kernels; the six affected
+record-only runs were re-validated and all passed native conformance.
 
 ## Reproducibility
 
