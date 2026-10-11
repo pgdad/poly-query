@@ -416,6 +416,9 @@ carries `"execution": {"mode": …, "threads": …}`.
   selection). Ties are broken by input position, so results are exactly
   the stable order of the row engine (whose top-N now uses the same
   tie-breaker).
+* Subqueries: uncorrelated ones run vectorized; correlated ones (one
+  small execution per distinct outer value) use the row engine, whose
+  setup cost is lower.
 * Results are serialized to JSON straight from the column vectors
   (allocation-free number/date formatting, no per-row value tuples);
   `result: "count"` counts whole batches without touching the values.
@@ -441,9 +444,6 @@ are built once, before the workers start, and shared read-only (`Arc`).
 * **Parallel DISTINCT**: executed as a parallel aggregation grouping by
   every column (no aggregates).
 * **Parallel sort**: see above.
-* Correlated subqueries (one small execution per distinct outer value)
-  use the row engine, whose setup cost is lower; uncorrelated subqueries
-  run vectorized.
 * Tables smaller than two morsels, subqueries, and scan pipelines under a
   `LIMIT` of at most one morsel (which a serial scan answers from its
   first batches) run serially.
@@ -501,7 +501,10 @@ with many small row groups (lazily decoded) and row-layout copies, and
 compares every option combination — once with default morsels and once
 with 37-row morsels — against the row-mode execution of the same plan
 (thousands of queries, no differences; different plans agree whenever
-both succeed).
+both succeed). `bench/bigdiff.py` compares row mode with the vectorized,
+parallel and merge-join configurations on the 1M-row datasets (including
+a memory-mapped PQCF copy with 16 row groups), where the real morsel sizes,
+partitioned merges and radix sorts are active.
 
 ### Memory and cache-oriented techniques
 
