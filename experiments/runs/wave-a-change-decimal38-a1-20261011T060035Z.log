@@ -1,2 +1,6 @@
 2026-10-11T06:00:36+00:00 wave wave-a-change-decimal38-a1-20261011T060035Z: order=['go']
 2026-10-11T06:00:36+00:00 [a-change-decimal38-go-a1-20261011T060035Z] agent queued (usage gate, then launch)
+2026-10-11T06:37:41+00:00 [a-change-decimal38-go-a1-20261011T060035Z] agent finished; collecting telemetry
+2026-10-11T06:37:41+00:00 [a-change-decimal38-go-a1-20261011T060035Z] validating (clean clone, sandboxed)
+2026-10-11T06:37:59+00:00 [a-change-decimal38-go-a1-20261011T060035Z] outcome=success cost=$16.4993488 turns=179 wall=2225.1s
+2026-10-11T06:37:59+00:00 wave wave-a-change-decimal38-a1-20261011T060035Z finished: decimal38=success

@@ -1,0 +1,110 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-decimal38-go-a1-20261011T060035Z",
+ "language": "go",
+ "task": "change-decimal38",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-decimal38",
+ "prompt_sha256": "956a5bc14d7d5a318e12fb2c1ea322d3ec8b6eb2787616613a77ab9631f3d2c5",
+ "session_id": "b027b9c9-49ac-4a4e-8013-95c59dd7bb8f",
+ "tokens": {
+  "input": 356,
+  "output": 163665,
+  "cache_read": 48664164,
+  "cache_creation": 436474,
+  "thinking": null,
+  "thinking_estimated": 62355,
+  "source": "result events",
+  "api_messages": 178
+ },
+ "rate_limit": {
+  "events": 18,
+  "max_utilization": {
+   "seven_day": 0.29,
+   "five_hour": 0.36
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 16.4993488,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 179,
+ "result_segments": 1,
+ "assistant_messages": 367,
+ "tool_calls": {
+  "Bash": 174,
+  "Write": 4
+ },
+ "tool_calls_total": 178,
+ "tool_failures": 1,
+ "build_invocations": 48,
+ "build_failures_heuristic": 3,
+ "conformance_runs": 8,
+ "conformance_progress": [
+  [
+   591,
+   591
+  ],
+  [
+   68,
+   69
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 6,
+ "time": {
+  "wall_seconds": 2225.1,
+  "model_api_seconds": 1471.7,
+  "tool_seconds": 754.0,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 11,
+  "files_changed": 45,
+  "lines_added": 2595,
+  "lines_removed": 231,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "DECIMAL precision 38 is implemented and all of it is committed. Every check in the definition of done passes with 0 failures, 0 errors and 0 not-implemented, and the engine claims `change.decimal38` alongside `change.union_all`.\n\n**Test results**\n- `runner.py`: `TOTAL: 660/660 pass` (all 69 decimal38 cases included).\n- `runner.py --modes`: `TOTAL: 3870/3870 pass`.\n- `runner.py --transport http`: `TOTAL: 660/660 pass`.\n- `http_suite.py`: `http suite: 18/18 passed`.\n- Also run: `--native` and `--modes --native` with a native kernel library I built in `/tmp` both pass; `make clean build test lint` succeeds.\n- Beyond the public cases, I added an oracle harness, `scripts/widecheck.py`. It generates random data with values at the 38-digit and INT64 limits and checks each query against Python's `decimal` module. That's about 25,000\u201332,000 checks per run, across every execution option including native kernels, with 0 failures.\n\n**What I implemented**\n- **Representation:** wide values (more than 18 digits) are stored as a 128-bit integer, `types.Int128`. Arithmetic, rescaling, rounding, parsing and formatting are built on 64-bit pieces. `types.Value` gained one field, `Hi`, holding the high 64 bits; it is zero for every other type. Column storage and vectorized batches use `[]Int128`.\n- **Dispatch:** narrow decimals keep their old 64-bit code paths unchanged. The choice is made once per expression from its type, never per value.\n- **Typing:** result precision is 38 when any decimal operand is wide, else 18. Decimal literals of up to 38 digits are DECIMAL.\n- **Exact comparisons:** INT64-vs-DECIMAL comparisons no longer insert a cast that can overflow; values are compared exactly. INT64 and DECIMAL values of any precision now produce the same hash key when equal, so joins, IN, GROUP BY and DISTINCT on mixed keys are exact too.\n- **Execution:** the row engine handles wide values throughout, and the vectorized engine has its own 128-bit paths for comparisons, `+ - *`, SUM/AVG/MIN/MAX, grouping, joins and sorting. Indexes and planner constant handling cover wide columns.\n- **Native kernels:** they never receive a wide column. My test harness found one real bug here: comparing a DECIMAL(18,0) column with a DECIMAL(30,0) column crashed with `native: true`. It's fixed, and a regression test now catches it.\n- **Storage:** tables with a wide column are saved as PQCF v2, all others as v1. The reader enforces the version rules, and CSV/JSON ingestion accepts up to 38 digits.\n- **README:** documents the representation, the dispatch, the modules touched and the decisions. I also removed a stale note claiming `union_all.pqt:51` fails; it passes.\n\n**Decisions you might trip over**\n- **`AS full`:** the spec lists FULL as reserved, but a public CR-2 case uses it as a column name. Any word is now accepted as a select-list name after an explicit `AS`; everywhere else reserved words are still a parse error.\n- **FLOAT64 \u2192 DECIMAL:** this now rounds the double's exact binary value, as CR-2 says, including for narrow targets. So `CAST(2.675e0 AS DECIMAL(4,2))` gives `2.67` instead of the old `2.68`.\n- **`spec_version`:** it stays `1.0.0` because a base test asserts it, even though CR-2 names `1.2.0-cr2`.\n\n**Known limitations**\n- In vectorized mode, wide decimals are about 1.5\u20134\u00d7 slower than narrow ones on 1M rows. DISTINCT aggregates, CASE/COALESCE and most casts involving wide values are evaluated one value at a time.\n- Narrow performance matches the baseline. `items_sum` (`quantity * unit_price`) got a new kernel and dropped from about 29 ms to 7 ms.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

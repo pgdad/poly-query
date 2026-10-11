@@ -1,0 +1,25 @@
+{
+ "wave_id": "wave-a-change-decimal38-a1-20261011T063016Z",
+ "task": "change-decimal38",
+ "track": "A",
+ "attempt": 1,
+ "seed": 3007,
+ "order": [
+  "java"
+ ],
+ "run_ids": [
+  "a-change-decimal38-java-a1-20261011T063016Z"
+ ],
+ "started": "2026-10-11T06:30:18+00:00",
+ "parallel": 1,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  9.3564453125,
+  9.13427734375,
+  7.6181640625
+ ]
+}

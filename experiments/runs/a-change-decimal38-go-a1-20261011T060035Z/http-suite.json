@@ -1,0 +1,120 @@
+{
+ "schema": "polyquery-http-suite/1",
+ "engine": "/srv/polyquery/runs/a-change-decimal38-go-a1-20261011T060035Z/validate/implementations/go/bin/polyquery",
+ "summary": {
+  "total": 18,
+  "passed": 18,
+  "failed": 0
+ },
+ "checks": [
+  {
+   "check": "health_version_capabilities",
+   "status": "pass",
+   "seconds": 0.01
+  },
+  {
+   "check": "table_lifecycle",
+   "status": "pass",
+   "seconds": 0.0
+  },
+  {
+   "check": "query_and_error_mapping",
+   "status": "pass",
+   "seconds": 0.0
+  },
+  {
+   "check": "keep_alive",
+   "status": "pass",
+   "seconds": 0.0
+  },
+  {
+   "check": "streaming",
+   "status": "pass",
+   "seconds": 0.02
+  },
+  {
+   "check": "metrics",
+   "status": "pass",
+   "seconds": 0.0
+  },
+  {
+   "check": "timeout",
+   "status": "pass",
+   "seconds": 0.2
+  },
+  {
+   "check": "server_default_timeout",
+   "status": "pass",
+   "seconds": 0.31
+  },
+  {
+   "check": "cancellation",
+   "status": "pass",
+   "seconds": 0.01
+  },
+  {
+   "check": "backpressure_overloaded",
+   "status": "pass",
+   "seconds": 4.01
+  },
+  {
+   "check": "queued_time_counts_toward_timeout",
+   "status": "pass",
+   "seconds": 1.5
+  },
+  {
+   "check": "snapshot_isolation",
+   "status": "pass",
+   "seconds": 1.46
+  },
+  {
+   "check": "concurrent_readers",
+   "status": "pass",
+   "seconds": 0.03
+  },
+  {
+   "check": "client_disconnect_cancels",
+   "status": "pass",
+   "seconds": 0.4
+  },
+  {
+   "check": "request_size_limit",
+   "status": "pass",
+   "seconds": 0.0
+  },
+  {
+   "check": "structured_logs",
+   "status": "pass",
+   "seconds": 0.3
+  },
+  {
+   "check": "graceful_shutdown",
+   "status": "pass",
+   "seconds": 1.51
+  },
+  {
+   "check": "grace_expiry",
+   "status": "pass",
+   "seconds": 0.62
+  }
+ ],
+ "startup_seconds": [
+  0.00305056304205209,
+  0.0018652239814400673,
+  0.0017292450065724552,
+  0.001762708998285234,
+  0.0016588009893894196,
+  0.0017019930528476834,
+  0.001696161984000355,
+  0.0021006129682064056,
+  0.001988128002267331,
+  0.0016301959985867143,
+  0.002036741003394127,
+  0.0022480239858850837,
+  0.0024988820077851415,
+  0.0019364500185474753,
+  0.0026732440455816686,
+  0.0018882190342992544
+ ],
+ "logs": "/tmp/pqhttp-logs-l046undf"
+}
