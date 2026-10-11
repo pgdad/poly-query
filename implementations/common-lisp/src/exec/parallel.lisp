@@ -172,7 +172,7 @@ workers start)."
               ((or (null window) (< next (+ (prun-consumed run) window)))
                (setf (prun-next run) (1+ next))
                (return next))
-              (t (sb-thread:condition-wait (prun-cv run) (prun-mutex run) :timeout 0.1)))))))
+              (t (timed-condition-wait (prun-cv run) (prun-mutex run) 0.1)))))))
 
 (defun prun-start (run count body)
   "Start COUNT workers calling (BODY worker-index) with the query's dynamic
@@ -249,7 +249,7 @@ workers, yielding the batches in serial order."
                 (sb-thread:with-mutex ((prun-mutex run))
                   (loop until (or (prun-error run)
                                   (not (eq (svref (prun-results run) k) :pending)))
-                        do (sb-thread:condition-wait (prun-cv run) (prun-mutex run) :timeout 0.05)
+                        do (timed-condition-wait (prun-cv run) (prun-mutex run) 0.05)
                            (return))
                   (unless (or (prun-error run) (eq (svref (prun-results run) k) :pending))
                     (setf pending (svref (prun-results run) k)

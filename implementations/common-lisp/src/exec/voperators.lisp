@@ -97,11 +97,42 @@ otherwise all unskipped segments are read in order."
           (make-batch 1 (vector)))))))
 
 ;;; ------------------------------------------------------------------
+;;; Errors in row order
+;;;
+;;; Kernels evaluate an expression for a whole batch before the next one, so
+;;; when several rows would fail with different errors, the vectorized order
+;;; could report another error than the row executor (which finishes all
+;;; expressions of a row before the next row). When a kernel signals a data
+;;; error, the batch is therefore replayed row by row with the row
+;;; implementation of the operator's expressions, and the first error in row
+;;; order is signalled (the kernel's own error if the replay succeeds).
+
+(defparameter *data-error-codes*
+  '("NUMERIC_OVERFLOW" "DIVISION_BY_ZERO" "CONVERSION_ERROR" "INVALID_ARGUMENT"
+    "SUBQUERY_CARDINALITY"))
+
+(defun make-row-order-guard (exprs)
+  "Function (batch thunk) calling THUNK; a data error it signals is replaced
+by the first error of evaluating EXPRS row by row over BATCH."
+  (let ((fns nil))
+    (lambda (batch thunk)
+      (declare (type function thunk))
+      (handler-case (funcall thunk)
+        (pq-error (e)
+          (when (member (pq-error-code e) *data-error-codes* :test #'string=)
+            (unless fns (setf fns (mapcar #'compile-bexpr exprs)))
+            (dotimes (i (batch-count batch))
+              (let ((row (batch-row batch i)))
+                (dolist (f fns) (funcall (the function f) row)))))
+          (error e))))))
+
+;;; ------------------------------------------------------------------
 ;;; Filter, projection, limit
 
 (defun make-batch-filter (open-child predicate)
-  (let ((kernel (compile-vexpr predicate)))
-    (declare (type function open-child kernel))
+  (let ((kernel (compile-vexpr predicate))
+        (guard (make-row-order-guard (list predicate))))
+    (declare (type function open-child kernel guard))
     (lambda ()
       (let ((child (funcall open-child)))
         (declare (type function child))
@@ -109,7 +140,8 @@ otherwise all unskipped segments are read in order."
           (loop
             (let ((batch (funcall child)))
               (unless batch (return nil))
-              (let ((out (filter-batch batch (funcall kernel batch))))
+              (let ((out (filter-batch batch (funcall guard batch
+                                                      (lambda () (funcall kernel batch))))))
                 (when out (return out))))))))))
 
 (defmethod compile-batch-operator ((node pp-filter))
@@ -118,8 +150,9 @@ otherwise all unskipped segments are read in order."
       (make-batch-filter (compile-batch-operator (pnode-child node)) (pp-filter-predicate node))))
 
 (defun make-batch-project (open-child exprs)
-  (let ((kernels (map 'simple-vector #'compile-vexpr exprs)))
-    (declare (type function open-child))
+  (let ((kernels (map 'simple-vector #'compile-vexpr exprs))
+        (guard (make-row-order-guard exprs)))
+    (declare (type function open-child guard))
     (lambda ()
       (let ((child (funcall open-child)))
         (declare (type function child))
@@ -127,8 +160,10 @@ otherwise all unskipped segments are read in order."
           (let ((batch (funcall child)))
             (when batch
               (make-batch (batch-count batch)
-                          (map 'simple-vector (lambda (k) (funcall (the function k) batch))
-                               kernels)))))))))
+                          (funcall guard batch
+                                   (lambda ()
+                                     (map 'simple-vector (lambda (k) (funcall (the function k) batch))
+                                          kernels)))))))))))
 
 (defmethod compile-batch-operator ((node pp-project))
   (make-batch-project (compile-batch-operator (pnode-child node)) (pp-project-exprs node)))
@@ -174,16 +209,21 @@ batch into it. Kernels are compiled once per call."
                               aggs))
          (nkeys (length keys))
          (key-kinds (mapcar (lambda (k) (type-vec-kind (bexpr-type k))) keys))
+         (guard (make-row-order-guard (append keys (mapcan (lambda (a) (copy-list (b-agg-args a)))
+                                                           aggs))))
          (charged 0))
     (declare (type fixnum charged))
     (values
      (lambda () (make-group-state key-kinds aggs))
      (lambda (gs batch)
        (let ((n (batch-count batch)))
-         (group-state-consume gs
-                              (mapcar (lambda (k) (funcall (the function k) batch)) key-kernels)
-                              (mapcar (lambda (k) (and k (funcall (the function k) batch))) arg-kernels)
-                              n)
+         (multiple-value-bind (key-vecs arg-vecs)
+             (funcall (the function guard) batch
+                      (lambda ()
+                        (values (mapcar (lambda (k) (funcall (the function k) batch)) key-kernels)
+                                (mapcar (lambda (k) (and k (funcall (the function k) batch)))
+                                        arg-kernels))))
+           (group-state-consume gs key-vecs arg-vecs n))
          (let ((groups (group-state-count gs)))
            (when (>= (- groups charged) 1024)
              (charge-memory (* (- groups charged) (row-footprint (* 4 (+ nkeys (length aggs))))))

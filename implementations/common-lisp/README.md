@@ -590,6 +590,26 @@ objects and closures; group keys are stored once in the key table.
   error → HTTP status table, admission/overload, cancellation of queued and
   running jobs, queued timeouts, the bounded streaming channel and metrics
   rendering.
+* Phase 5 unit tests (`tests/test-phase5.lisp`): option validation, forced
+  join algorithms in EXPLAIN, constant folding and join reordering, vector
+  gather, generic and integer key tables, partial aggregate merging, and a
+  set of queries (grouping, DISTINCT aggregates, joins, CASE, ORDER BY …
+  LIMIT, subqueries, errors) that must give identical results under every
+  option combination with tiny morsels (so the parallel paths run).
+* `--modes`: `python3 tests/conformance/runner.py --engine
+  implementations/common-lisp/bin/polyquery --modes`; additionally run with
+  `POLYQUERY_MORSEL_ROWS=7` so that every Phase 1–3 test exercises parallel
+  scans, aggregation, merges and sorts.
+* `bench/fuzz.py` — randomized differential testing: random queries
+  (expressions over every type and most functions, NULL-heavy and edge-value
+  tables, an empty table, PQCF multi-row-group and row-layout copies, 2- and
+  3-way joins, LEFT joins, comma joins, subqueries, CTEs, derived tables,
+  GROUP BY/HAVING, DISTINCT, ORDER BY with and without LIMIT) run under seven
+  option combinations and must agree. Tens of thousands of queries were run
+  during development (it found and fixed a CASE alignment bug and a
+  lock-reacquisition bug after timed condition waits).
+* `bench/bench.py` — benchmark and consistency check on generated datasets
+  (see Performance); `bench/profile.lisp` — statistical profile of one query.
 * HTTP: `python3 tests/concurrency/http_suite.py --engine
   implementations/common-lisp/bin/polyquery` and the conformance runner with
   `--transport http`.

@@ -14,6 +14,15 @@
 (defvar *query-context* nil
   "The context of the query currently executing in this thread.")
 
+(defun timed-condition-wait (queue mutex timeout)
+  "CONDITION-WAIT on QUEUE for at most TIMEOUT seconds, returning with MUTEX
+held in every case (SBCL's CONDITION-WAIT returns from a timeout without
+re-acquiring the mutex). Returns true if woken up."
+  (or (sb-thread:condition-wait queue mutex :timeout timeout)
+      (progn (unless (sb-thread:holding-mutex-p mutex)
+               (sb-thread:grab-mutex mutex))
+             nil)))
+
 (defun make-deadline (timeout-ms)
   (when (and timeout-ms (plusp timeout-ms))
     (+ (get-internal-real-time)

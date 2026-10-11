@@ -124,23 +124,33 @@ class Gen:
                     lambda: f"CASE WHEN {e('BOOLEAN')} THEN {e()} ELSE {e()} END",
                     lambda: f"COALESCE({e()}, {e()})", lambda: f"NULLIF({e()}, {e()})",
                     lambda: f"CAST({e('DECIMAL')} AS INT64)", lambda: f"YEAR({e('DATE')})",
-                    lambda: f"MONTH({e('TIMESTAMP')})", lambda: f"MOD({e()}, 4)", lambda: f"FLOOR({e()})"]
+                    lambda: f"MONTH({e('TIMESTAMP')})", lambda: f"MOD({e()}, 4)", lambda: f"FLOOR({e()})",
+                    lambda: f"HOUR({e('TIMESTAMP')})", lambda: f"SECOND({e('TIMESTAMP')})",
+                    lambda: f"DATE_DIFF('day', {e('DATE')}, {e('TIMESTAMP')})",
+                    lambda: f"CAST({e('STRING')} AS INT64)", lambda: f"CEIL({e('DECIMAL')})",
+                    lambda: f"ROUND({e('FLOAT64')})" if False else f"LENGTH(CAST({e()} AS STRING))"]
         elif kind == "DECIMAL":
             opts = [lambda: f"({e()} + {e()})", lambda: f"({e()} - {e()})", lambda: f"({e()} * 2)",
                     lambda: f"ROUND({e()}, 1)", lambda: f"ABS({e()})", lambda: f"-{e()}",
                     lambda: f"CASE WHEN {e('BOOLEAN')} THEN {e()} ELSE {e()} END",
-                    lambda: f"COALESCE({e()}, {self.lit('DECIMAL')})", lambda: f"({e()} + {e('INT64')})"]
+                    lambda: f"COALESCE({e()}, {self.lit('DECIMAL')})", lambda: f"({e()} + {e('INT64')})",
+                    lambda: f"CAST({e('FLOAT64')} AS DECIMAL(12,2))", lambda: f"CEIL({e()})",
+                    lambda: f"NULLIF({e()}, {self.lit('DECIMAL')})", lambda: f"({e()} * {e()})"]
         elif kind == "FLOAT64":
             opts = [lambda: f"({e()} + {e()})", lambda: f"({e()} * {e()})", lambda: f"({e()} / {r.choice(['2.0e0', e()])})",
                     lambda: f"SQRT(ABS({e()}))", lambda: f"CAST({e('INT64')} AS FLOAT64)", lambda: f"-{e()}",
                     lambda: f"CAST({e('DECIMAL')} AS FLOAT64)", lambda: f"({e()} - {e('INT64')})",
-                    lambda: f"CASE WHEN {e('BOOLEAN')} THEN {e()} END"]
+                    lambda: f"CASE WHEN {e('BOOLEAN')} THEN {e()} END",
+                    lambda: f"POWER({e()}, 2)", lambda: f"ROUND({e()}, 2)", lambda: f"FLOOR({e()})",
+                    lambda: f"COALESCE({e()}, {e('INT64')})"]
         elif kind == "STRING":
             opts = [lambda: f"UPPER({e()})", lambda: f"LOWER({e()})", lambda: f"SUBSTR({e()}, 2, 3)",
                     lambda: f"TRIM({e()})", lambda: f"({e()} || {e()})", lambda: f"CONCAT({e()}, '-', {e('INT64')})",
                     lambda: f"REPLACE({e()}, 'a', 'b')", lambda: f"CAST({e('INT64')} AS STRING)",
                     lambda: f"CASE {e()} WHEN {self.lit('STRING')} THEN 'one' WHEN {e()} THEN 'two' ELSE {e()} END",
-                    lambda: f"COALESCE({e()}, 'none')"]
+                    lambda: f"COALESCE({e()}, 'none')", lambda: f"LTRIM({e()})", lambda: f"RTRIM({e()})",
+                    lambda: f"NULLIF({e()}, 'ok')", lambda: f"CAST({e('DATE')} AS STRING)",
+                    lambda: f"CAST({e('DECIMAL')} AS STRING)", lambda: f"SUBSTR({e()}, {e('INT64')})"]
         elif kind == "BOOLEAN":
             k = r.choice(["INT64", "INT64", "DECIMAL", "FLOAT64", "STRING", "DATE", "TIMESTAMP"])
             op = r.choice(["=", "<>", "<", "<=", ">", ">="])
@@ -166,7 +176,7 @@ class Gen:
         r = self.r
         shape = r.random()
         if shape < 0.5:
-            t = r.choice(list(self.schemas))
+            t = r.choice(list(self.schemas) + ["ext", "ext", "empty"])
             return [("a", t)], f"{t} a"
         if shape < 0.62:
             # Three inputs (join reordering): explicit joins or a comma list.
@@ -296,6 +306,27 @@ def main() -> int:
         assert s.request({"op": "load", "table": name, "format": "csv", "path": f"fixtures/gen/{base}.csv",
                           "schema": schema, "layout": "row"})["ok"]
         schemas[name] = [(c["name"], c["type"]) for c in schema]
+
+    # Edge values and an empty table.
+    ext_schema = [("i", "INT64"), ("d", "DECIMAL(18,4)"), ("f", "FLOAT64"), ("s", "STRING"),
+                  ("b", "BOOLEAN"), ("dt", "DATE"), ("ts", "TIMESTAMP")]
+    rng = random.Random(args.seed * 7919)
+    ints = ["9223372036854775807", "-9223372036854775808", "0", "1", "-1", "", "4611686018427387904", "42"]
+    decs = ["99999999999999.9999", "-0.0001", "0", "", "12345.6789", "-99999999999999.9999", "1"]
+    floats = ["1e300", "-0.0", "0.0", "1.5", "", "-2.25", "3e-300", "123456.789"]
+    strs = ["", "Ünïcödé", "a%b", "_x_", "", "  pad  ", "ok", "approved", "zzz", "A"]
+    lines = ["i,d,f,s,b,dt,ts"]
+    for k in range(60):
+        lines.append(",".join([rng.choice(ints), rng.choice(decs), rng.choice(floats),
+                               '"%s"' % rng.choice(strs) if rng.random() < 0.9 else "",
+                               rng.choice(["true", "false", ""]),
+                               rng.choice(["2024-02-29", "0001-01-01", "9999-12-31", "1970-01-01", ""]),
+                               rng.choice(["2024-02-29 23:59:59.999999", "1970-01-01 00:00:00", ""])]))
+    for name, data in (("ext", "\n".join(lines) + "\n"), ("empty", "i,d,f,s,b,dt,ts\n")):
+        r = s.request({"op": "load", "table": name, "format": "csv", "data": data,
+                       "schema": [{"name": c, "type": t} for c, t in ext_schema]})
+        assert r["ok"], r
+        schemas[name] = ext_schema
 
     gen = Gen(random.Random(args.seed), schemas)
     bad = 0
