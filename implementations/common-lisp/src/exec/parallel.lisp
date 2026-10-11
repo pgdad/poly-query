@@ -139,25 +139,9 @@ workers start). LAZY: see COMPILE-PIPELINE-COPY."
                            (let ((provider (cdr b)) (value nil))
                              (cons (car b) (lambda () (or value (setf value (funcall provider)))))))
                          builds)))
-    ;; Each copy is compiled on first use, i.e. by its worker: compiling
-    ;; them up front would serialize that work in the consumer thread.
-    (values (coerce (loop repeat count collect (make-promise
-                                                (lambda () (compile-pipeline-copy node shared cells lazy))))
+    (values (coerce (loop repeat count collect (compile-pipeline-copy node shared cells lazy))
                     'simple-vector)
             (mapcar #'cdr shared))))
-
-(defun make-promise (thunk)
-  "Function returning the value of (THUNK), computed on its first call."
-  (declare (type function thunk))
-  (let ((done nil) (value nil))
-    (lambda ()
-      (unless done
-        (setf value (funcall thunk) done t))
-      value)))
-
-(defun force (promises w)
-  "The value of promise W of the vector PROMISES."
-  (funcall (the function (svref promises w))))
 
 ;;; ------------------------------------------------------------------
 ;;; Runs: workers, morsel dispatch, errors, cleanup
@@ -270,7 +254,7 @@ workers, yielding the batches in serial order."
                 (prun-window run) (* 2 workers))
           (prun-start run workers
                       (lambda (w)
-                        (run-morsels run (force copies w)
+                        (run-morsels run (svref copies w)
                                      (lambda (m iter)
                                        (declare (type function iter))
                                        (let ((batches '()))
@@ -396,17 +380,13 @@ many groups, partitioning its rows; see above)."
          (morsel-count (length (scan-morsels scan)))
          (workers (min threads morsel-count))
          (grouped (and (pp-hash-aggregate-group-by node) t))
-         ;; Per worker (compiled by the worker; the first one now, as its
-         ;; LAZY flag and NEW-STATE are needed here):
-         ;; (new-state consume lazy prepare), see MAKE-AGGREGATE-CONSUMER.
+         ;; Per worker: (new-state consume lazy prepare), see MAKE-AGGREGATE-CONSUMER.
          (consumers (coerce (loop repeat workers
-                                  collect (make-promise
-                                           (lambda ()
-                                             (multiple-value-list
-                                              (let ((*parallel-disabled* t))
-                                                (make-aggregate-consumer node :track-positions t))))))
+                                  collect (multiple-value-list
+                                           (let ((*parallel-disabled* t))
+                                             (make-aggregate-consumer node :track-positions t))))
                             'simple-vector))
-         (first-consumer (force consumers 0)))
+         (first-consumer (svref consumers 0)))
     (multiple-value-bind (copies providers)
         (compile-pipeline-copies child workers (and (third first-consumer) (pp-table-scan-p child)))
       (lambda ()
@@ -420,7 +400,7 @@ many groups, partitioning its rows; see above)."
                     (mode (list nil)))   ; NIL until decided, then :LOCAL or :PARTITION
                 (prun-start run workers
                             (lambda (w)
-                              (destructuring-bind (new-state consume lazy prepare) (force consumers w)
+                              (destructuring-bind (new-state consume lazy prepare) (svref consumers w)
                                 (declare (ignore lazy))
                                 (declare (type function new-state consume prepare))
                                 (let ((gs (funcall new-state))
@@ -428,7 +408,7 @@ many groups, partitioning its rows; see above)."
                                       (partition nil))
                                   (setf (svref states w) gs)
                                   (run-morsels
-                                   run (force copies w)
+                                   run (svref copies w)
                                    (lambda (m iter)
                                      (declare (type function iter))
                                      ;; Input position: morsel, then row within it.
@@ -725,7 +705,7 @@ two runs (as MERGE-RUNS without the predicate) in the same order."
                                       (let ((*parallel-disabled* t))
                                         (make-top-n-collector keys keep kinds))
                                     (declare (type function add finish))
-                                    (run-morsels run (force copies w)
+                                    (run-morsels run (svref copies w)
                                                  (lambda (m iter)
                                                    (declare (type function iter))
                                                    (let ((base (* m (expt 2 32))))
