@@ -4,7 +4,7 @@
   :description "PolyQuery analytical database engine (Common Lisp implementation)"
   :version "0.1.0"
   :license "MIT"
-  :depends-on ("sb-posix")
+  :depends-on ("sb-posix" "sb-bsd-sockets")
   :serial t
   :pathname "src/"
   :components
@@ -54,8 +54,14 @@
                  (:file "operators")))
    (:file "engine")
    (:module "protocol" :serial t
-    :components ((:file "requests")
-                 (:file "cli"))))
+    :components ((:file "requests")))
+   (:module "server" :serial t
+    :components ((:file "http")
+                 (:file "scheduler")
+                 (:file "metrics")
+                 (:file "server")))
+   (:module "cli" :pathname "protocol" :serial t
+    :components ((:file "cli"))))
   :in-order-to ((test-op (test-op "polyquery/tests"))))
 
 (defsystem "polyquery/tests"

@@ -8,7 +8,8 @@
   '("phase1" "ingest.csv" "ingest.json" "ingest.jsonl" "sql.basic" "test.functions"
     "phase2" "sql.groupby" "sql.join" "sql.functions" "sql.subquery" "sql.cte"
     "sql.correlated_subquery"
-    "phase3" "storage.pqcf" "storage.mmap" "index.hash" "index.btree"))
+    "phase3" "storage.pqcf" "storage.mmap" "index.hash" "index.btree"
+    "phase4" "http.streaming"))
 
 (defstruct engine-config
   (data-dir nil)                         ; pathname of the data directory (with trailing /)
@@ -40,11 +41,13 @@
      :max-join-rows (engine-config-max-join-rows config))))
 
 (defun plan-statement (session ast use-indexes)
-  "Analyse and plan the query statement AST. Returns (values plan bound-query)."
-  (let ((bound (bind-statement ast (session-catalog session)
-                               :test-functions (engine-config-test-functions
-                                                (session-config session)))))
-    (let ((*planning-catalog* (session-catalog session))
+  "Analyse and plan the query statement AST against a snapshot of the catalog
+(concurrency.md §1). Returns (values plan bound-query)."
+  (let* ((catalog (catalog-snapshot (session-catalog session)))
+         (bound (bind-statement ast catalog
+                                :test-functions (engine-config-test-functions
+                                                 (session-config session)))))
+    (let ((*planning-catalog* catalog)
           (*use-indexes* use-indexes))
       (values (plan-bound-query bound) bound))))
 
@@ -52,31 +55,40 @@
   (loop for c in (bound-query-columns bound)
         collect (make-column-def (column-def-name c) (output-type (column-def-type c)))))
 
-(defun statement-result ()
-  (make-query-result :columns '() :rows '() :row-count 0))
+(defun open-sql (session sql &key (use-indexes t))
+  "Parse, analyse and plan SQL in the current *QUERY-CONTEXT*. Index
+statements are executed immediately. Returns (values columns iterator): the
+result COLUMN-DEFs and a function returning the next result row or NIL."
+  (let ((ast (parse-sql sql)))
+    (flet ((no-rows () nil))
+      (typecase ast
+        (ast-create-index (execute-create-index session ast) (values '() #'no-rows))
+        (ast-drop-index (execute-drop-index session ast) (values '() #'no-rows))
+        (t
+         (multiple-value-bind (plan bound) (plan-statement session ast use-indexes)
+           (if (ast-explain-p ast)
+               (let ((row (vector (json-to-string (explain-plan-json plan)))))
+                 (values (list (make-column-def "plan" :string))
+                         (lambda () (shiftf row nil))))
+               (values (result-columns bound)
+                       (funcall (the function (compile-plan plan)))))))))))
 
-(defun execute-sql (session sql &key max-rows timeout-ms (collect-rows t) (use-indexes t))
-  "Run SQL against the session catalog and return a QUERY-RESULT."
-  (let ((*query-context* (make-context-for session timeout-ms))
-        (ast (parse-sql sql)))
-    (typecase ast
-      (ast-create-index (execute-create-index session ast) (statement-result))
-      (ast-drop-index (execute-drop-index session ast) (statement-result))
-      (t
-       (multiple-value-bind (plan bound) (plan-statement session ast use-indexes)
-         (if (ast-explain-p ast)
-             (make-query-result :columns (list (make-column-def "plan" :string))
-                                :rows (list (vector (json-to-string (explain-plan-json plan))))
-                                :row-count 1)
-             (run-plan plan bound max-rows collect-rows)))))))
+(defun execute-sql (session sql &key max-rows timeout-ms (collect-rows t) (use-indexes t)
+                                     context)
+  "Run SQL against the session catalog and return a QUERY-RESULT. CONTEXT is
+the QUERY-CONTEXT to run in (by default a fresh one with TIMEOUT-MS)."
+  (let ((*query-context* (or context (make-context-for session timeout-ms))))
+    (multiple-value-bind (columns next) (open-sql session sql :use-indexes use-indexes)
+      (collect-rows columns next max-rows collect-rows))))
 
-(defun run-plan (plan bound max-rows collect-rows)
-  (let* ((columns (result-columns bound))
-         (next (funcall (the function (compile-plan plan))))
-         (width (length columns))
-         (rows '())
-         (count 0))
-    (declare (type function next) (type fixnum count))
+(defun collect-rows (columns next max-rows collect-rows)
+  "Drain the row iterator NEXT into a QUERY-RESULT (only counting rows unless
+COLLECT-ROWS), enforcing MAX-ROWS and the memory budget."
+  (declare (type function next))
+  (let ((width (length columns))
+        (rows '())
+        (count 0))
+    (declare (type fixnum count))
     (loop for row = (funcall next)
           while row
           do (incf count)

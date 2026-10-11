@@ -56,6 +56,25 @@ indexes are dropped first. Nothing changes if any step fails."
         (%catalog-put-index catalog index))
       table)))
 
+(defun catalog-snapshot (catalog)
+  "A private copy of CATALOG's current tables and indexes. Tables and indexes
+are immutable, so a query analysed against the copy sees one consistent
+version of everything it references, whatever happens to CATALOG later."
+  (with-catalog-lock (catalog)
+    (flet ((copy-table (table)
+             (let ((copy (make-hash-table :test 'equal :size (max 16 (hash-table-count table)))))
+               (maphash (lambda (k v) (setf (gethash k copy) v)) table)
+               copy)))
+      (let ((snapshot (make-catalog)))
+        (setf (catalog-tables snapshot) (copy-table (catalog-tables catalog))
+              (catalog-indexes snapshot) (copy-table (catalog-indexes catalog))
+              (catalog-index-sequence snapshot) (catalog-index-sequence catalog))
+        snapshot))))
+
+(defun catalog-table-count (catalog)
+  (with-catalog-lock (catalog)
+    (hash-table-count (catalog-tables catalog))))
+
 (defun catalog-table-exists-p (catalog name)
   (not (null (catalog-find-table catalog name))))
 
