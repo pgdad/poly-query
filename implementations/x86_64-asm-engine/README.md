@@ -231,12 +231,12 @@ in a FIFO queue if fewer than Q wait, else is rejected at once with
 `--query-timeout-ms`); the server fails queued queries at their deadline
 (`TIMEOUT`, 504) and the child passes the same absolute deadline to the
 engine's checks (every 1024 rows, `PQ_SLEEP` every 10 ms). As a safety net a
-child still running 1 s after its deadline is killed.
+child still running 300 ms after its deadline is killed.
 
 **Cancellation**: `DELETE /v1/queries/{id}` removes a queued query (it is
 answered `CANCELLED`, 409) or sends SIGUSR1 to the running child, whose
 handler sets a flag tested by the same checks, so the query ends with
-`CANCELLED` within ~10 ms (SIGKILL after 1 s). A client disconnect
+`CANCELLED` within ~10 ms (SIGKILL after 300 ms). A client disconnect
 (`POLLRDHUP` on the connection) kills the query's child. Finished or unknown
 ids are `NOT_FOUND`.
 
@@ -275,7 +275,7 @@ SQL text and data are never logged. `--log-level` filters (`off` disables).
 **Shutdown** (SIGTERM / SIGINT): the listening socket is closed, `/health`
 answers 503 and new queries / mutations get `SHUTTING_DOWN`; queued and
 running queries continue for `--shutdown-grace-ms`, then queued ones are
-answered `CANCELLED` and running ones are cancelled (SIGUSR1, SIGKILL 1 s
+answered `CANCELLED` and running ones are cancelled (SIGUSR1, SIGKILL 300 ms
 later); the process exits 0 once nothing is left.
 
 ## Implementation-defined choices

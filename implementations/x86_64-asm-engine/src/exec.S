@@ -652,7 +652,19 @@ ENDF build_row
 /* row_cmp(pa rdi, pb rsi, plan rdx) -> eax  (qsort_r comparator) */
 FUNC row_cmp
     ENTER 0
-    mov (%rdi), %rbx                /* row a */
+    incq cmp_count(%rip)            /* deadline / cancellation while sorting */
+    testl $0xffff, cmp_count(%rip)
+    jnz 0f
+    push %rdi
+    push %rsi
+    push %rdx
+    push %rdx
+    call check_deadline
+    pop %rdx
+    pop %rdx
+    pop %rsi
+    pop %rdi
+0:  mov (%rdi), %rbx                /* row a */
     mov (%rsi), %r12                /* row b */
     mov %rdx, %r13
     xor %r14d, %r14d
@@ -1651,7 +1663,10 @@ FUNC exec_query
     mov %r15, %rdi
     mov $',', %esi
     call buf_putc
-17: mov RS_ROWS(%r12), %rax
+17: test $1023, %r13
+    jnz 171f
+    call check_deadline
+171: mov RS_ROWS(%r12), %rax
     mov (%rax, %r13, 8), %rsi
     mov %rbx, %rdi
     mov %r15, %rdx
@@ -1673,3 +1688,4 @@ g_result_rows: .quad 0          /* row count of the last executed query */
     .globl g_sink_plan, g_row_sink
 g_sink_plan:   .quad 0          /* plan whose projected rows go to g_row_sink */
 g_row_sink:    .quad 0          /* sink(row rdi) -> eax 1 to stop (streaming) */
+cmp_count:     .quad 0          /* row_cmp calls (periodic deadline checks) */

@@ -33,7 +33,7 @@
 #define WORKER_STACK (1024*1024*1024)
 #define READ_CHUNK  262144
 #define NS_PER_MS   1000000
-#define KILL_AFTER  1000000000      /* ns after a deadline / cancel before SIGKILL */
+#define KILL_AFTER  300000000       /* ns after a deadline / cancel before SIGKILL */
 #define DRAIN_NS    2000000000      /* lingering close */
 
 #define SIGINT_  2
