@@ -359,7 +359,9 @@
   ^List [^List rows keys qctx run-all parts]
   (let [^objects arr (.toArray rows)
         n (alength arr)
-        cols (mapv #(extract arr n (:index %) (:type %)) keys)
+        cols (if (and (> (long parts) 1) (> (count keys) 1))
+               (vec (run-all (mapv (fn [k] #(extract arr n (:index k) (:type k))) keys)))
+               (mapv #(extract arr n (:index %) (:type %)) keys))
         kcs (mapv key-comparator cols keys)
         sorter (Sorter. (mapv (fn [k [vals nulls]]
                                 (assoc k :kind (code-kind (:type k)) :vals vals :nulls nulls))

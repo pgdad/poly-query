@@ -150,24 +150,43 @@
            (transient [])
            rows)))
 
+(defn- count-rows
+  "The number of rows (count-only results: nothing is kept), with the same
+  checks and accounting as collect-rows."
+  [rows qctx ^long ncols]
+  (reduce (fn [^long n _]
+            (when (zero? (rem n 4096))
+              (ctx/check! qctx)
+              (ctx/reserve! qctx (* 4096 (ctx/row-bytes ncols))))
+            (inc n))
+          0
+          rows))
+
 (defn collect
   "Materializes an opened statement (see open-statement!) into
   {:columns :rows [serialized rows] :row-count n}, accounting the result
-  against the query's memory budget."
-  [{:keys [columns rows ctx primary fallback]}]
+  against the query's memory budget. With :count-only? only the rows are
+  counted (:rows is empty)."
+  [{:keys [columns rows ctx primary fallback count-only?]}]
   (let [ncols (count columns)
+        run (if count-only?
+              (fn [rows ctx] (count-rows rows ctx ncols))
+              (fn [rows ctx] (collect-rows rows ctx ncols)))
         out (if fallback
               (try
-                (collect-rows (:rows primary) (:ctx primary) ncols)
+                (run (:rows primary) (:ctx primary))
                 (catch RuntimeException e
                   (if (retry-in-row-mode? e)
                     (let [{:keys [rows ctx]} (force fallback)]
-                      (collect-rows rows ctx ncols))
+                      (run rows ctx))
                     (throw e))))
-              (collect-rows rows ctx ncols))]
-    {:columns columns :rows out :row-count (count out)}))
+              (run rows ctx))]
+    (if count-only?
+      {:columns columns :rows [] :row-count out}
+      {:columns columns :rows out :row-count (count out)})))
 
-(defn- run-plan [planned opts] (collect (open-plan planned opts)))
+(defn- run-plan [planned opts]
+  (collect (assoc (open-plan planned opts) :count-only? (:count-only? opts))))
 
 (defn run-query
   "Executes one SQL query against a catalog snapshot. opts:
