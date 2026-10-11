@@ -94,20 +94,40 @@ With ALLOW-DATE-ONLY, a bare date means midnight."
                   frac))))
           (t nil))))
 
-(defun format-date (days)
+(defun render-date (days cb)
+  "Append the DATE text YYYY-MM-DD of DAYS to the CHARBUF CB."
   (multiple-value-bind (y m d) (civil-from-days days)
-    (format nil "~4,'0D-~2,'0D-~2,'0D" y m d)))
+    (cb-integer cb y 4)
+    (cb-char cb #\-)
+    (cb-integer cb m 2)
+    (cb-char cb #\-)
+    (cb-integer cb d 2)))
 
-(defun format-timestamp (micros)
+(defun render-timestamp (micros cb)
+  "Append the TIMESTAMP text of MICROS (fraction only when non-zero)."
   (multiple-value-bind (days rem) (floor micros +micros-per-day+)
     (multiple-value-bind (secs frac) (floor rem +micros-per-second+)
-      (multiple-value-bind (y m d) (civil-from-days days)
-        (multiple-value-bind (hh r) (floor secs 3600)
-          (multiple-value-bind (mi ss) (floor r 60)
-            (if (zerop frac)
-                (format nil "~4,'0D-~2,'0D-~2,'0D ~2,'0D:~2,'0D:~2,'0D" y m d hh mi ss)
-                (format nil "~4,'0D-~2,'0D-~2,'0D ~2,'0D:~2,'0D:~2,'0D.~6,'0D"
-                        y m d hh mi ss frac))))))))
+      (multiple-value-bind (hh r) (floor secs 3600)
+        (multiple-value-bind (mi ss) (floor r 60)
+          (render-date days cb)
+          (cb-char cb #\Space)
+          (cb-integer cb hh 2)
+          (cb-char cb #\:)
+          (cb-integer cb mi 2)
+          (cb-char cb #\:)
+          (cb-integer cb ss 2)
+          (unless (zerop frac)
+            (cb-char cb #\.)
+            (cb-integer cb frac 6)))))))
+
+(defun charbuf-string (cb)
+  (subseq (charbuf-chars cb) 0 (charbuf-fill cb)))
+
+(defun format-date (days)
+  (let ((cb (make-charbuf 16))) (render-date days cb) (charbuf-string cb)))
+
+(defun format-timestamp (micros)
+  (let ((cb (make-charbuf 32))) (render-timestamp micros cb) (charbuf-string cb)))
 
 (defun date-to-timestamp (days) (* days +micros-per-day+))
 

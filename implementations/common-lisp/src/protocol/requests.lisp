@@ -132,7 +132,7 @@ alternating keys and JSON values appended after ts, level and msg."
              (options (or (request-field request "options" :type :object) (jobj))))
          (validate-query-options options)
          (success-response id "plan" (explain-sql session sql
-                                                  :use-indexes (use-indexes-option options)))))
+                                                  :options (session-exec-options session options)))))
       ((string= op "save") (op-save session id request))
       ((string= op "open") (op-open session id request))
       ((string= op "stats") (op-stats session id request))
@@ -188,20 +188,43 @@ alternating keys and JSON values appended after ts, level and msg."
 
 (defun validate-query-options (options)
   "Check the execution options shared by query and explain (protocol.md §5.2)."
-  (option-in options "mode" '("auto" "row"))
-  (option-in options "join" '("auto" "hash" "merge" "nested_loop"))
-  (let ((threads (request-field options "threads" :type :integer)))
-    (when (and threads (< threads 1))
-      (invalid-request-error "option threads must be >= 1")))
-  (request-field options "optimize" :type :boolean)
-  (use-indexes-option options)
-  (request-field options "native" :type :boolean)
+  (query-exec-options options)
   (request-field options "query_id" :type :string))
 
-(defun use-indexes-option (options)
-  (if (nth-value 1 (json-get options "use_indexes"))
-      (request-field options "use_indexes" :type :boolean)
-      t))
+(defun session-exec-options (session options)
+  "EXEC-OPTIONS of a request of SESSION (defaults from its configuration)."
+  (query-exec-options options (engine-config-threads (session-config session))))
+
+(defun boolean-option (options key default)
+  "Value of a boolean option; DEFAULT when absent or null."
+  (if (member (json-get options key) '(:true :false))
+      (request-field options key :type :boolean)
+      (progn (request-field options key :type :boolean) default)))
+
+(defun query-exec-options (options &optional (default-threads 1))
+  "The EXEC-OPTIONS described by the request OPTIONS object; invalid values
+signal INVALID_REQUEST, unsupported ones UNSUPPORTED. Without a `threads`
+option, DEFAULT-THREADS (the --threads command line option) is used."
+  (let ((mode (option-in options "mode" '("auto" "row" "vectorized")))
+        (join (option-in options "join" '("auto" "hash" "merge" "nested_loop")))
+        (threads (request-field options "threads" :type :integer)))
+    ;; A well-typed but out-of-range value is an unsupported value (§5.2).
+    (when (and threads (< threads 1))
+      (unsupported-error "unsupported value ~D for option threads (must be >= 1)" threads))
+    (make-exec-options
+     :mode (cond ((null mode) :auto)
+                 ((string= mode "row") :row)
+                 ((string= mode "vectorized") :vectorized)
+                 (t :auto))
+     :threads (min (or threads (max 1 default-threads)) 256)
+     :join (cond ((null join) :auto)
+                 ((string= join "hash") :hash)
+                 ((string= join "merge") :merge)
+                 ((string= join "nested_loop") :nested-loop)
+                 (t :auto))
+     :optimize (boolean-option options "optimize" t)
+     :use-indexes (boolean-option options "use_indexes" t)
+     :native (boolean-option options "native" nil))))
 
 (defun op-query (session id request &optional context)
   "Run a query request. CONTEXT, when given, is the QUERY-CONTEXT to execute
@@ -216,7 +239,7 @@ in (the HTTP server creates it at admission so queued time counts)."
            (count-only (string= result-mode "count"))
            (result (execute-sql session sql :max-rows max-rows :timeout-ms timeout-ms
                                             :collect-rows (not count-only)
-                                            :use-indexes (use-indexes-option options)
+                                            :options (session-exec-options session options)
                                             :context context))
            (elapsed-us (floor (* (- (get-internal-real-time) start) 1000000)
                               internal-time-units-per-second)))
@@ -236,16 +259,20 @@ serializing each value according to the type of its column in COLUMNS."
   (let ((types (coerce (mapcar #'column-def-type columns) 'simple-vector)))
     (make-json-raw
      (lambda (stream)
-       (write-char #\[ stream)
-       (loop for first = t then nil
-             for row in rows
-             do (unless first (write-char #\, stream))
-                (write-char #\[ stream)
-                (dotimes (k (length types))
-                  (unless (zerop k) (write-char #\, stream))
-                  (write-value (svref row k) (svref types k) stream))
-                (write-char #\] stream))
-       (write-char #\] stream)))))
+       (let ((cb (make-charbuf 65536)))
+         (cb-char cb #\[)
+         (loop for first = t then nil
+               for row in rows
+               do (unless first (cb-char cb #\,))
+                  (cb-char cb #\[)
+                  (dotimes (k (length types))
+                    (unless (zerop k) (cb-char cb #\,))
+                    (render-value (svref row k) (svref types k) cb))
+                  (cb-char cb #\])
+                  (when (> (charbuf-fill cb) 60000)
+                    (cb-flush cb stream)))
+         (cb-char cb #\])
+         (cb-flush cb stream))))))
 
 ;;; ------------------------------------------------------------------
 ;;; load

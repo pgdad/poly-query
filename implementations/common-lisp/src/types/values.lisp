@@ -134,19 +134,36 @@ a bare date for TIMESTAMP (ingestion does; CAST requires timestamp syntax)."
 ;;; ------------------------------------------------------------------
 ;;; Serialization (types.md §9)
 
+(defun render-decimal (unscaled scale cb)
+  "Append the canonical DECIMAL text of UNSCALED with SCALE (as FORMAT-DECIMAL)."
+  (if (zerop scale)
+      (cb-integer cb unscaled)
+      (multiple-value-bind (int frac) (truncate (abs unscaled) (pow10 scale))
+        (when (minusp unscaled) (cb-char cb #\-))
+        (cb-integer cb int)
+        (cb-char cb #\.)
+        (cb-integer cb frac scale))))
+
+(defun render-value (value type cb)
+  "Append the canonical JSON representation of VALUE of TYPE to the CHARBUF CB."
+  (if (null-value-p value)
+      (cb-string cb "null")
+      (ecase (type-kind type)
+        (:boolean (cb-string cb (if value "true" "false")))
+        (:int64 (cb-integer cb value))
+        (:float64 (cb-string cb (format-float value)))
+        ;; DECIMAL, DATE and TIMESTAMP texts never need JSON escaping.
+        (:decimal (cb-char cb #\") (render-decimal value (decimal-scale type) cb) (cb-char cb #\"))
+        (:string (cb-json-string cb value))
+        (:date (cb-char cb #\") (render-date value cb) (cb-char cb #\"))
+        (:timestamp (cb-char cb #\") (render-timestamp value cb) (cb-char cb #\"))
+        (:null (cb-string cb "null")))))
+
 (defun write-value (value type stream)
   "Write VALUE of TYPE as its canonical JSON representation."
-  (if (null-value-p value)
-      (write-string "null" stream)
-      (ecase (type-kind type)
-        (:boolean (write-string (if value "true" "false") stream))
-        (:int64 (format stream "~D" value))
-        (:float64 (write-string (format-float value) stream))
-        (:decimal (write-json-string (format-decimal value (decimal-scale type)) stream))
-        (:string (write-json-string value stream))
-        (:date (write-json-string (format-date value) stream))
-        (:timestamp (write-json-string (format-timestamp value) stream))
-        (:null (write-string "null" stream)))))
+  (let ((cb (make-charbuf 64)))
+    (render-value value type cb)
+    (cb-flush cb stream)))
 
 (defun value-to-json (value type)
   "Convert VALUE of TYPE into a JSON value suitable for WRITE-JSON."
