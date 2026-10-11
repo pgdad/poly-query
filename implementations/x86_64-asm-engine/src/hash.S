@@ -62,18 +62,37 @@ FUNC hash_cells
     jnz 5f
     xor %ecx, %ecx
     jmp 5f
-3:  mov (%rcx), %rsi                /* FNV-1a over the string bytes */
+3:  mov (%rcx), %rsi                /* string: 8 bytes per step */
     lea 8(%rcx), %rdi
     mov $0xcbf29ce484222325, %rcx
-    mov $0x100000001b3, %r8
-4:  test %rsi, %rsi
-    jz 5f
-    movzbl (%rdi), %eax
-    xor %rax, %rcx
+    xor %rsi, %rcx                  /* seeded with the length */
+    mov $HASH_MUL, %r8
+4:  cmp $8, %rsi
+    jb 41f
+    xor (%rdi), %rcx
     imul %r8, %rcx
+    mov %rcx, %rax
+    shr $31, %rax
+    xor %rax, %rcx
+    add $8, %rdi
+    sub $8, %rsi
+    jmp 4b
+41: test %rsi, %rsi                 /* tail: up to 7 bytes, never read past */
+    jz 5f
+    xor %eax, %eax
+    xor %r9d, %r9d                  /* shift */
+42: movzbl (%rdi), %edx
+    shlx %r9, %rdx, %rdx
+    or %rdx, %rax
+    add $8, %r9d
     inc %rdi
     dec %rsi
-    jmp 4b
+    jnz 42b
+    xor %rax, %rcx
+    imul %r8, %rcx
+    mov %rcx, %rax
+    shr $31, %rax
+    xor %rax, %rcx
 5:  xor %rcx, %r14
     mov $HASH_MUL, %rax
     imul %rax, %r14

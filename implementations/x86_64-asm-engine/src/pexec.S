@@ -1226,6 +1226,122 @@ gagg_flush:
 9:  ret
 ENDF gagg_part
 
+/* gfused_part(task rdi, part rsi, lo rdx, hi rcx): single-pass grouping of
+ * [lo, hi) (used when one part does all the work): per batch the key
+ * cells, their groups and then the aggregate updates; groups in first-seen
+ * order -> PT_OUT[part] */
+FUNC gfused_part
+    ENTER 160
+    mov %rdi, %rbx
+    mov %rsi, 64(%rsp)
+    mov %rdx, %r14                  /* batch start */
+    mov %rcx, 72(%rsp)
+    mov PT_XS(%rbx), %r13
+    lea 0(%rsp), %rdi
+    mov %r13, %rsi
+    call wctx_init
+    mov XS_PLAN(%r13), %rax
+    mov QP_NGROUP(%rax), %rdi
+    mov PT_C(%rbx), %rsi
+    call ht_new
+    mov %rax, 80(%rsp)
+    call cur_arena
+    mov %rax, %rdi
+    call vec_new
+    mov %rax, 88(%rsp)
+    mov XS_PLAN(%r13), %rax
+    mov QP_NGROUP(%rax), %rax
+    shl $4, %rax
+    mov %rax, 112(%rsp)             /* key bytes per tuple */
+    imul $VB, %rax, %rdi
+    call tmp_alloc
+    mov %rax, 96(%rsp)              /* batch key cells */
+    mov $VB*8, %edi
+    call tmp_alloc
+    mov %rax, 104(%rsp)             /* batch states */
+    mov XS_W(%r13), %r12
+    shl $3, %r12                    /* tuple bytes */
+1:  cmp 72(%rsp), %r14
+    jae 9f
+    call check_deadline
+    mov 72(%rsp), %r15
+    sub %r14, %r15
+    cmp $VB, %r15
+    jbe 2f
+    mov $VB, %r15d
+2:  mov XS_TS(%r13), %rax
+    mov %r14, %rdx
+    imul %r12, %rdx
+    add TS_DATA(%rax), %rdx
+    mov %rdx, 128(%rsp)             /* batch tuples */
+    lea 0(%rsp), %rdi
+    mov XS_PLAN(%r13), %rsi
+    mov %r15, %rcx
+    mov XS_W(%r13), %r8
+    mov 96(%rsp), %r9
+    call k_group_keys
+    movq $0, 136(%rsp)
+3:  mov 136(%rsp), %rax             /* group of each tuple */
+    cmp %r15, %rax
+    jae 6f
+    imul 112(%rsp), %rax
+    add 96(%rsp), %rax
+    mov %rax, 144(%rsp)             /* its key cells */
+    mov %rax, %rdi
+    mov XS_PLAN(%r13), %rsi
+    mov QP_NGROUP(%rsi), %rsi
+    mov PT_C(%rbx), %rdx
+    call hash_cells
+    mov %rax, %rcx
+    mov 80(%rsp), %rdi
+    mov 144(%rsp), %rsi
+    mov $1, %edx
+    call ht_lookup_h
+    mov %rax, 152(%rsp)
+    test %edx, %edx
+    jz 5f
+    mov 112(%rsp), %rdi             /* new group: persistent key copy */
+    call tmp_alloc
+    mov 152(%rsp), %rcx
+    mov %rax, EN_KEY(%rcx)
+    mov %rax, %rdi
+    mov 144(%rsp), %rsi
+    mov 112(%rsp), %rdx
+    call memcpy
+    mov 136(%rsp), %rax             /* representative = first tuple */
+    imul %r12, %rax
+    add 128(%rsp), %rax
+    mov 152(%rsp), %rcx
+    mov %rax, EN_D1(%rcx)
+    mov XS_PLAN(%r13), %rdi
+    call agg_states_new
+    mov 152(%rsp), %rcx
+    mov %rax, EN_D0(%rcx)
+    mov 88(%rsp), %rdi
+    mov %rcx, %rsi
+    call vec_push
+5:  mov 152(%rsp), %rax
+    mov EN_D0(%rax), %rax
+    mov 104(%rsp), %rcx
+    mov 136(%rsp), %rdx
+    mov %rax, (%rcx, %rdx, 8)
+    incq 136(%rsp)
+    jmp 3b
+6:  lea 0(%rsp), %rdi
+    mov XS_PLAN(%r13), %rsi
+    mov 128(%rsp), %rdx
+    mov %r15, %rcx
+    mov XS_W(%r13), %r8
+    mov 104(%rsp), %r9
+    call k_agg_groups
+    add %r15, %r14
+    jmp 1b
+9:  mov 64(%rsp), %rcx
+    mov 88(%rsp), %rax
+    mov %rax, PT_OUT(%rbx, %rcx, 8)
+    LEAVE
+ENDF gfused_part
+
 /* entry_cmp(a rdi, b rsi) -> eax: orders group entries by first tuple */
 FUNC entry_cmp
     mov (%rdi), %rax
@@ -1316,7 +1432,18 @@ FUNC pexec_aggregate
     mov %rdx, (%rsi, %rcx, 8)
     inc %rcx
     jmp 21b
-22: mov PT_N(%r13), %rdi
+22: mov PT_N(%r13), %rdi            /* one part: single pass */
+    call par_parts
+    cmp $1, %rax
+    jne 220f
+    movq $1, PT_D(%r13)
+    mov PT_N(%r13), %rdi
+    mov $1, %esi
+    lea gfused_part(%rip), %rdx
+    mov %r13, %rcx
+    call par_run
+    jmp 221f
+220: mov PT_N(%r13), %rdi
     imul QP_NGROUP(%r12), %rdi
     shl $4, %rdi
     add $16, %rdi
@@ -1336,7 +1463,7 @@ FUNC pexec_aggregate
     lea gagg_part(%rip), %rdx
     mov %r13, %rcx
     call par_run
-    /* all groups, ordered by their first tuple */
+221: /* all groups, ordered by their first tuple */
     call cur_arena
     mov %rax, %rdi
     call vec_new
