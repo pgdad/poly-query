@@ -2,16 +2,18 @@
  * optimizer.S - logical rewrites of a bound query block (option
  * `optimize`, default true; `optimize: false` is the unoptimized baseline).
  *
- *   optimize_block(plan rdi)   called by plan_block before pushdown
+ *   optimize_block(plan rdi)   called by plan_block after the physical
+ *                              planning (pushdown, index selection, row-group
+ *                              skipping), so that `optimize` never changes
+ *                              which rows are scanned - and thereby which rows
+ *                              could raise errors
  *
  * Rewrites (in place, so every reference to a node sees the new form):
  *   - constant folding: a subtree without column, aggregate or outer
  *     references, subqueries or PQ_SLEEP is evaluated once and replaced by a
  *     literal of the same type.  If the evaluation raises an error the
  *     subtree is left alone, so the error still happens exactly when (and
- *     only if) the row engine evaluates it.  Folded casts and arithmetic on
- *     literals also let index selection and row-group skipping see plain
- *     constants (`a = 2 + 3` can use an index on a).
+ *     only if) the row engine evaluates it.
  *   - predicate simplification: TRUE AND x -> x, x AND TRUE -> x,
  *     FALSE OR x -> x, x OR FALSE -> x, TRUE OR x -> TRUE; FALSE AND x,
  *     x AND FALSE -> FALSE and x OR TRUE -> TRUE only when x cannot raise
@@ -266,12 +268,17 @@ FUNC fold_pred
     ret
 ENDF fold_pred
 
-/* fold_fp(fp rdi): join conditions of the FROM tree */
+/* fold_fp(fp rdi): pushed-down scan filters and join conditions of the
+ * FROM tree */
 FUNC fold_fp
     ENTER 0
     mov %rdi, %rbx
     cmpq $FK_JOIN, FP_KIND(%rbx)
-    jne 9f
+    je 1f
+    lea FP_FILTER(%rbx), %rdi
+    call fold_pred
+    jmp 9f
+1:
     mov FP_ON(%rbx), %rdi
     call fold_expr
     mov FP_LEFT(%rbx), %rdi

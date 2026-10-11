@@ -390,9 +390,11 @@ also passes with `PQ_PAR_MIN=1`.
   references, subqueries or `PQ_SLEEP`, evaluated once at planning and
   replaced by a literal - unless the evaluation raises an error, in which
   case the subtree stays and fails at run time exactly when the baseline
-  does. Folding happens before predicate pushdown, so `a = 2 + 3` or
-  `d > CAST('2024-01-01' AS DATE)` become index / row-group-skipping
-  candidates.
+  does. The rewrites run after the physical planning (on the residual WHERE,
+  the pushed-down scan filters, join conditions, HAVING, outputs, keys and
+  aggregate arguments), so `optimize` never changes which rows are scanned
+  (index selection and row-group skipping see the same predicates) - and
+  thereby never which rows could raise errors.
 * **Predicate simplification**: `TRUE AND x → x`, `x AND TRUE → x`,
   `FALSE OR x → x`, `x OR FALSE → x`, `TRUE OR x → TRUE`;
   `FALSE AND x → FALSE`, `x AND FALSE → FALSE` and `x OR TRUE → TRUE` only

@@ -1018,10 +1018,6 @@ ENDF plan_fp
 FUNC plan_block
     ENTER 16
     mov %rdi, %rbx
-    cmpq $0, g_opt_optimize(%rip)   /* logical rewrites (optimizer.S) */
-    je 0f
-    call optimize_block
-0:
     cmpq $0, QP_FROM(%rbx)
     je 9f
     mov $PS_SIZE, %edi
@@ -1050,5 +1046,9 @@ FUNC plan_block
 5:  mov %r12, %rdi
     mov QP_FROM(%rbx), %rsi
     call plan_fp
-9:  LEAVE
+9:  cmpq $0, g_opt_optimize(%rip)   /* logical rewrites (optimizer.S), after */
+    je 10f                          /* the physical decisions so that both */
+    mov %rbx, %rdi                  /* settings scan the same rows */
+    call optimize_block
+10: LEAVE
 ENDF plan_block
