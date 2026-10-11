@@ -1,0 +1,120 @@
+{
+ "schema": "polyquery-http-suite/1",
+ "engine": "/home/esa/git/poly-query/implementations/common-lisp/bin/polyquery",
+ "summary": {
+  "total": 18,
+  "passed": 18,
+  "failed": 0
+ },
+ "checks": [
+  {
+   "check": "health_version_capabilities",
+   "status": "pass",
+   "seconds": 0.09
+  },
+  {
+   "check": "table_lifecycle",
+   "status": "pass",
+   "seconds": 0.08
+  },
+  {
+   "check": "query_and_error_mapping",
+   "status": "pass",
+   "seconds": 0.08
+  },
+  {
+   "check": "keep_alive",
+   "status": "pass",
+   "seconds": 0.08
+  },
+  {
+   "check": "streaming",
+   "status": "pass",
+   "seconds": 0.1
+  },
+  {
+   "check": "metrics",
+   "status": "pass",
+   "seconds": 0.08
+  },
+  {
+   "check": "timeout",
+   "status": "pass",
+   "seconds": 0.28
+  },
+  {
+   "check": "server_default_timeout",
+   "status": "pass",
+   "seconds": 0.4
+  },
+  {
+   "check": "cancellation",
+   "status": "pass",
+   "seconds": 0.14
+  },
+  {
+   "check": "backpressure_overloaded",
+   "status": "pass",
+   "seconds": 4.08
+  },
+  {
+   "check": "queued_time_counts_toward_timeout",
+   "status": "pass",
+   "seconds": 1.58
+  },
+  {
+   "check": "snapshot_isolation",
+   "status": "pass",
+   "seconds": 1.57
+  },
+  {
+   "check": "concurrent_readers",
+   "status": "pass",
+   "seconds": 0.11
+  },
+  {
+   "check": "client_disconnect_cancels",
+   "status": "pass",
+   "seconds": 0.57
+  },
+  {
+   "check": "request_size_limit",
+   "status": "pass",
+   "seconds": 0.08
+  },
+  {
+   "check": "structured_logs",
+   "status": "pass",
+   "seconds": 0.38
+  },
+  {
+   "check": "graceful_shutdown",
+   "status": "pass",
+   "seconds": 1.52
+  },
+  {
+   "check": "grace_expiry",
+   "status": "pass",
+   "seconds": 0.72
+  }
+ ],
+ "startup_seconds": [
+  0.010024168994277716,
+  0.008034448022954166,
+  0.009083912998903543,
+  0.010251814033836126,
+  0.009468648000620306,
+  0.01040283200563863,
+  0.009832883020862937,
+  0.009604627033695579,
+  0.010132687049917877,
+  0.00665229803416878,
+  0.010380869964137673,
+  0.010722311970312148,
+  0.011245772009715438,
+  0.009508833987638354,
+  0.010192029003519565,
+  0.008403461950365454
+ ],
+ "logs": "/tmp/pqhttp-logs-sc7_hsfg"
+}
