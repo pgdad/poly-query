@@ -34,7 +34,8 @@ switchable logical optimizer and top-N sorting - see
 ```
 make build        # -> out/polyquery
 make test         # assembly unit tests (text, JSON, ingest, hash, SQL,
-                  # storage, planner, HTTP parser) + end-to-end session
+                  # storage, planner + optimizer, HTTP parser, parallel
+                  # runner + vector scratch) + end-to-end session
                   # tests + end-to-end serve tests (curl) + the Phase 5
                   # differential test of all execution options
 make lint         # verifies every object carries a non-executable .note.GNU-stack
