@@ -51,7 +51,6 @@
 #define BF_NO_COLS  4       // column references forbidden (LIMIT / OFFSET)
 
 // Function table ids local to the binder
-#define F_UNSUP     0xfe    // known later-phase function => UNSUPPORTED
 
 #define DEC18       (T_DEC | (18 << T_PREC_SHIFT))   // DECIMAL(18,0)
 
@@ -78,6 +77,13 @@
 .endm
 
 .macro LEAVE np
+    LEAVE_NORET \np
+    ret
+.endm
+
+// LEAVE_NORET np: restore registers and pop the frame without returning
+// (for tail calls).
+.macro LEAVE_NORET np
     .if \np >= 5
     ldp  x27, x28, [sp, #80]
     .endif
@@ -94,7 +100,6 @@
     ldp  x19, x20, [sp, #16]
     .endif
     ldp  x29, x30, [sp], #(16 + 16 * \np)
-    ret
 .endm
 
 // RAISE_S code, "prefix", strreg: raise with message prefix + 'Str contents'
@@ -331,7 +336,7 @@ ENDF vec_push
 // returned unchanged (they always evaluate to NULL).
 //   x19 operand, w20 target type
 // =============================================================================
-LFUNC mk_cast
+FUNC mk_cast
     ldrb w9, [x0, #N_TYPE]
     cbnz w9, 1f
     ret                                 // T_NULL operand: no cast needed
@@ -358,7 +363,7 @@ ENDF mk_cast
 // bind_expr(x0 ctx, x1 Node*) -> x0 bound Node*  (may differ from the input)
 // Dispatcher: tail-calls the binder of the node kind (no frame of its own).
 // =============================================================================
-LFUNC bind_expr
+FUNC bind_expr
     ldr  w9, [x1, #N_KIND]
     cmp  w9, #NK_LIT
     b.eq bind_lit
@@ -375,13 +380,13 @@ LFUNC bind_expr
     cmp  w9, #NK_ISNULL
     b.eq bind_isnull
     cmp  w9, #NK_CASE
-    b.eq .Lbe_case
+    b.eq bind_case                      // functions.S
     cmp  w9, #NK_BETWEEN
-    b.eq .Lbe_between
+    b.eq bind_between                   // functions.S
     cmp  w9, #NK_IN
-    b.eq .Lbe_in
+    b.eq bind_inlist                    // functions.S
     cmp  w9, #NK_LIKE
-    b.eq .Lbe_like
+    b.eq bind_like                      // functions.S
     cmp  w9, #NK_INSUB
     b.eq .Lbe_subq
     cmp  w9, #NK_EXISTS
@@ -389,14 +394,6 @@ LFUNC bind_expr
     cmp  w9, #NK_SUBQ
     b.eq .Lbe_subq
     RAISE ERR_INTERNAL, "binder: unexpected expression node"
-.Lbe_case:
-    RAISE ERR_UNSUPPORTED, "CASE is not supported"
-.Lbe_between:
-    RAISE ERR_UNSUPPORTED, "BETWEEN is not supported"
-.Lbe_in:
-    RAISE ERR_UNSUPPORTED, "IN is not supported"
-.Lbe_like:
-    RAISE ERR_UNSUPPORTED, "LIKE is not supported"
 .Lbe_subq:
     RAISE ERR_UNSUPPORTED, "subqueries are not supported"
 ENDF bind_expr
@@ -589,22 +586,59 @@ LFUNC bind_cast
 ENDF bind_cast
 
 // =============================================================================
-// bind_binary(x0 ctx, x1 Node*) -> x0 Node*
-// Types the operator (types.md §2, §4-§6) and inserts implicit casts.
-//   x19 ctx, x20 node, x21 left, x22 right, w23 left type, w24 right type,
-//   w25 op, w26 left kind, w27 right kind, w28 result type
+// bind_binary(x0 ctx, x1 Node*) -> x0 Node*: binds both operands, then types.
+//   x19 ctx, x20 node
 // =============================================================================
 LFUNC bind_binary
-    ENTER 5
+    ENTER 2
     mov  x19, x0
     mov  x20, x1
     ldr  x1, [x20, #N_A]
     bl   bind_expr
-    mov  x21, x0
+    str  x0, [x20, #N_A]
     mov  x0, x19
     ldr  x1, [x20, #N_B]
     bl   bind_expr
-    mov  x22, x0
+    str  x0, [x20, #N_B]
+    mov  x0, x20
+    bl   bind_binary_typed
+    LEAVE 2
+ENDF bind_binary
+
+// =============================================================================
+// make_compare(w0 op, x1 bound left, x2 bound right) -> x0 bound NK_BINARY
+// Builds and types a binary node over already bound operands (used for the
+// rewrites of BETWEEN, IN lists and simple CASE). Position from the left.
+// =============================================================================
+FUNC make_compare
+    ENTER 2
+    mov  w19, w0
+    mov  x20, x1
+    mov  x21, x2
+    mov  x0, #N_SIZE
+    bl   arena_zalloc
+    mov  w9, #NK_BINARY
+    str  w9, [x0, #N_KIND]
+    str  w19, [x0, #N_OP]
+    str  x20, [x0, #N_A]
+    str  x21, [x0, #N_B]
+    ldr  x9, [x20, #N_LINE]
+    str  x9, [x0, #N_LINE]
+    bl   bind_binary_typed
+    LEAVE 2
+ENDF make_compare
+
+// =============================================================================
+// bind_binary_typed(x0 Node* with bound N_A / N_B) -> x0 Node*
+// Types the operator (types.md §2, §4-§6) and inserts implicit casts.
+//   x20 node, x21 left, x22 right, w23 left type, w24 right type,
+//   w25 op, w26 left kind, w27 right kind, w28 result type
+// =============================================================================
+FUNC bind_binary_typed
+    ENTER 5
+    mov  x20, x0
+    ldr  x21, [x20, #N_A]
+    ldr  x22, [x20, #N_B]
     ldr  w23, [x21, #N_TYPE]
     ldr  w24, [x22, #N_TYPE]
     and  w26, w23, #T_KIND_MASK
@@ -808,7 +842,7 @@ LFUNC bind_binary
     RAISE ERR_TYPE, "% requires INT64 operands"
 .Lbb_scale_type:
     RAISE ERR_TYPE, "DECIMAL product scale exceeds 18"
-ENDF bind_binary
+ENDF bind_binary_typed
 
 // =============================================================================
 // Function table: 12-byte NUL padded upper-case name + u32 id.
@@ -828,36 +862,6 @@ func_table:
     FENTRY "MIN",        F_MIN
     FENTRY "MAX",        F_MAX
     FENTRY "AVG",        F_AVG
-    FENTRY "PQ_SLEEP",   F_PQ_SLEEP
-    // Phase-2 scalar functions: recognised, reported as UNSUPPORTED
-    FENTRY "ABS",        F_UNSUP
-    FENTRY "ROUND",      F_UNSUP
-    FENTRY "FLOOR",      F_UNSUP
-    FENTRY "CEIL",       F_UNSUP
-    FENTRY "CEILING",    F_UNSUP
-    FENTRY "SQRT",       F_UNSUP
-    FENTRY "POWER",      F_UNSUP
-    FENTRY "MOD",        F_UNSUP
-    FENTRY "LENGTH",     F_UNSUP
-    FENTRY "UPPER",      F_UNSUP
-    FENTRY "LOWER",      F_UNSUP
-    FENTRY "SUBSTR",     F_UNSUP
-    FENTRY "SUBSTRING",  F_UNSUP
-    FENTRY "TRIM",       F_UNSUP
-    FENTRY "LTRIM",      F_UNSUP
-    FENTRY "RTRIM",      F_UNSUP
-    FENTRY "REPLACE",    F_UNSUP
-    FENTRY "CONCAT",     F_UNSUP
-    FENTRY "COALESCE",   F_UNSUP
-    FENTRY "NULLIF",     F_UNSUP
-    FENTRY "YEAR",       F_UNSUP
-    FENTRY "MONTH",      F_UNSUP
-    FENTRY "DAY",        F_UNSUP
-    FENTRY "HOUR",       F_UNSUP
-    FENTRY "MINUTE",     F_UNSUP
-    FENTRY "SECOND",     F_UNSUP
-    FENTRY "DATE_TRUNC", F_UNSUP
-    FENTRY "DATE_DIFF",  F_UNSUP
     .word 0                             // end marker (empty name)
     .text
 
@@ -883,8 +887,8 @@ ENDF func_lookup
 
 // =============================================================================
 // bind_func(x0 ctx, x1 Node*) -> x0 Node*
-// Scalar functions (PQ_SLEEP) stay NK_FUNC with N_OP = F_*; aggregates become
-// NK_AGG nodes registered as slots.
+// Aggregates become NK_AGG nodes registered as slots; everything else is a
+// scalar function bound by bind_scalar_func (functions.S).
 //   x19 ctx, x20 node, w21 function id, x22 bound argument, w23 saved flags,
 //   w24 result type
 // =============================================================================
@@ -895,41 +899,11 @@ LFUNC bind_func
     ldr  x0, [x20, #N_NAME]
     bl   func_lookup
     mov  w21, w0
-    cbz  w21, .Lbfn_unknown
-    cmp  w21, #F_UNSUP
-    b.eq .Lbfn_unsup
-    cmp  w21, #F_PQ_SLEEP
-    b.ne .Lbfn_agg
-
-    // ---- PQ_SLEEP(ms INT64) -> INT64 (only with test functions enabled) ----
-    adrp x9, g_test_functions
-    ldr  w9, [x9, :lo12:g_test_functions]
-    cbz  w9, .Lbfn_unknown
-    ldr  w9, [x20, #N_FLAGS]
-    tst  w9, #(NF_STAR | NF_DISTINCT)
-    b.ne .Lbfn_badargs
-    ldr  x9, [x20, #N_VAL]
-    cmp  x9, #1
-    b.ne .Lbfn_arity
-    mov  x0, x19
-    ldr  x9, [x20, #N_C]
-    ldr  x1, [x9]
-    bl   bind_expr
-    ldr  x9, [x20, #N_C]
-    str  x0, [x9]
-    ldrb w9, [x0, #N_TYPE]
-    cmp  w9, #T_NULL
-    ccmp w9, #T_INT, #4, ne
-    b.ne .Lbfn_argtype
-    mov  w9, #F_PQ_SLEEP
-    str  w9, [x20, #N_OP]
-    mov  w9, #T_INT
-    str  w9, [x20, #N_TYPE]
-    ldr  w9, [x20, #N_FLAGS]            // side effect: never constant
-    bic  w9, w9, #NF_CONST
-    str  w9, [x20, #N_FLAGS]
-    mov  x0, x20
-    LEAVE 3
+    cbnz w21, .Lbfn_agg
+    mov  x0, x19                        // not an aggregate: scalar function
+    mov  x1, x20
+    LEAVE_NORET 3
+    b    bind_scalar_func               // functions.S (tail call)
 
     // ---- aggregates ----------------------------------------------------------
 .Lbfn_agg:
@@ -1002,18 +976,9 @@ LFUNC bind_func
     mov  x0, x20
     LEAVE 3
 
-.Lbfn_unknown:
-    ldr  x9, [x20, #N_NAME]
-    RAISE_S ERR_SEMANTIC, "unknown function ", x9
-.Lbfn_unsup:
-    ldr  x9, [x20, #N_NAME]
-    RAISE_S ERR_UNSUPPORTED, "function not supported: ", x9
 .Lbfn_arity:
     ldr  x9, [x20, #N_NAME]
     RAISE_S ERR_SEMANTIC, "wrong number of arguments for ", x9
-.Lbfn_badargs:
-    ldr  x9, [x20, #N_NAME]
-    RAISE_S ERR_SEMANTIC, "invalid arguments for ", x9
 .Lbfn_star:
     RAISE ERR_SEMANTIC, "only COUNT accepts *"
 .Lbfn_argtype:
@@ -1578,8 +1543,12 @@ LFUNC eval_limit
 1:  ENTER 1
     sub  sp, sp, #EC_SIZE
     mov  x19, x1
-    stp  xzr, xzr, [sp]                 // EvalCtx: no table, row 0
-    stp  xzr, xzr, [sp, #16]            //          no aggregate values
+    mov  x20, x0
+    mov  x0, sp                         // zeroed EvalCtx (constant context)
+    mov  w1, #0
+    mov  x2, #EC_SIZE
+    bl   memset
+    mov  x0, x20
     mov  x1, sp
     bl   eval
     add  sp, sp, #EC_SIZE

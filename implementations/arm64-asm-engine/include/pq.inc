@@ -230,6 +230,20 @@
 #define NK_EXISTS   14     // N_C Query*
 #define NK_SUBQ     15     // N_C Query* (scalar subquery)
 #define NK_OUTREF   16     // binder-internal: reference to output column N_VAL
+#define NK_GKEY     17     // grouped context: value of GROUP BY key N_VAL
+                           // (read from EC_GKEYS)
+
+// Shapes of the *bound* nodes produced by the binder (Phase 2):
+//   NK_COL     N_B rv index, N_VAL column index, N_OP outer depth (0 = this query)
+//   NK_FUNC    scalar function: N_OP function id (private to functions.S),
+//              N_C Node** bound args, N_VAL argc
+//   NK_CASE    searched form only: N_A = 0, N_C Node** [w1,t1,...], N_VAL pairs,
+//              N_B ELSE or 0 (simple CASE is rewritten to x = v comparisons)
+//   NK_IN      N_A = 0, N_C Node** bound comparison nodes (x = e_i), N_VAL count,
+//              N_OP 1 if NOT IN
+//   NK_LIKE    N_A string, N_B pattern, N_OP 1 if NOT LIKE
+//   BETWEEN    rewritten to AND / NOT nodes (no NK_BETWEEN after binding)
+//   NK_SUBQ / NK_EXISTS / NK_INSUB: N_C SubPlan* (see plan.S); NK_INSUB N_A x
 
 // Unary operators
 #define OP_NEG      1
@@ -375,11 +389,14 @@
 #define OK_NFIRST 12       // u32 1 = NULLs sort first
 #define OK_SIZE   16
 
-// Evaluation context (32 bytes) passed to eval
+// Evaluation context (48 bytes) passed to eval. A zeroed context is valid
+// for constant expressions.
 #define EC_TABLE   0       // Table* (or 0)
 #define EC_ROW     8       // u64 row index
 #define EC_AGGV    16      // cell array of aggregate results (16 bytes per slot) or 0
-#define EC_SIZE    32
+#define EC_GKEYS   24      // cell array of GROUP BY key values or 0
+#define EC_OUTER   32      // EvalCtx* of the enclosing query (correlation) or 0
+#define EC_SIZE    48
 
 // Result set produced by exec_query (rows already sorted, offset/limit applied)
 #define RS_WIDTH   0       // u64 cells per row (nout + nextra)

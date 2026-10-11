@@ -95,11 +95,11 @@ p10tab:
     .text
 
 // Shared error exits (branch targets; never return).
-LFUNC raise_overflow
+FUNC raise_overflow
     RAISE ERR_NUMERIC_OVERFLOW, "numeric overflow"
 ENDF raise_overflow
 
-LFUNC raise_div0
+FUNC raise_div0
     RAISE ERR_DIVISION_BY_ZERO, "division by zero"
 ENDF raise_div0
 
@@ -124,7 +124,13 @@ FUNC eval
     cmp  w9, #NK_ISNULL
     b.eq ev_isnull
     cmp  w9, #NK_FUNC
-    b.eq ev_func
+    b.eq ev_func                        // functions.S
+    cmp  w9, #NK_CASE
+    b.eq ev_case                        // functions.S
+    cmp  w9, #NK_IN
+    b.eq ev_inlist                      // functions.S
+    cmp  w9, #NK_LIKE
+    b.eq ev_like                        // functions.S
     RAISE ERR_INTERNAL, "eval: unexpected node kind"
 ENDF eval
 
@@ -271,62 +277,6 @@ LFUNC ev_isnull
     mov  x1, #0
     LEAVE 1
 ENDF ev_isnull
-
-// =============================================================================
-// ev_func: scalar functions. Phase 1: PQ_SLEEP(ms) — sleeps ms milliseconds
-// in slices of at most 10 ms, calling check_deadline between slices, and
-// returns ms. NULL => NULL (no sleep).
-//   x19 node, x20 ms, x21 target time (µs)
-// =============================================================================
-LFUNC ev_func
-    ENTER 2
-    sub  sp, sp, #16                    // struct timespec
-    mov  x19, x0
-    ldr  w9, [x19, #N_OP]
-    cmp  w9, #F_PQ_SLEEP
-    b.ne .Lfn_bad
-    ldr  x9, [x19, #N_C]
-    ldr  x0, [x9]
-    bl   eval
-    cbnz x1, .Lfn_null
-    mov  x20, x0
-    cmp  x20, #0
-    b.le .Lfn_done
-    ldr  x9, =1000000000000             // clamp to ~31 years (no overflow)
-    cmp  x20, x9
-    csel x21, x20, x9, lt
-    mov  x9, #1000
-    mul  x21, x21, x9                   // duration in µs
-    bl   now_us
-    add  x21, x21, x0                   // target
-1:  bl   check_deadline                 // raises TIMEOUT
-    bl   now_us
-    cmp  x0, x21
-    b.hs .Lfn_done
-    sub  x9, x21, x0                    // remaining µs, at most 10 000 per slice
-    mov  x10, #10000
-    cmp  x9, x10
-    csel x9, x9, x10, lo
-    mov  x10, #1000
-    mul  x9, x9, x10                    // ns
-    stp  xzr, x9, [sp]                  // tv_sec = 0, tv_nsec
-    mov  x0, sp
-    mov  x1, #0
-    bl   nanosleep
-    b    1b
-.Lfn_done:
-    mov  x0, x20
-    mov  x1, #0
-    add  sp, sp, #16
-    LEAVE 2
-.Lfn_null:
-    mov  x0, #0
-    mov  x1, #1
-    add  sp, sp, #16
-    LEAVE 2
-.Lfn_bad:
-    RAISE ERR_INTERNAL, "eval: unknown function"
-ENDF ev_func
 
 // =============================================================================
 // ev_binary: arithmetic, ||, comparisons, AND/OR.
@@ -482,7 +432,7 @@ ENDF ev_binary
 // =============================================================================
 // arith_int(x0 a, x1 b, w2 op) -> x0   INT64 + - * / %   (leaf)
 // =============================================================================
-LFUNC arith_int
+FUNC arith_int
     cmp  w2, #OP_ADD
     b.ne 1f
     adds x0, x0, x1
@@ -524,7 +474,7 @@ ENDF arith_int
 // arith_float(x0 a, x1 b, w2 op) -> x0   FLOAT64 + - * /   (leaf)
 // Division by zero (also 0/0) => DIVISION_BY_ZERO; non-finite => overflow.
 // =============================================================================
-LFUNC arith_float
+FUNC arith_float
     fmov d0, x0
     fmov d1, x1
     cmp  w2, #OP_ADD
@@ -555,7 +505,7 @@ ENDF arith_float
 // + -: operands are aligned to the result scale max(s1,s2).
 // *  : product of the unscaled values, result scale s1+s2.
 // =============================================================================
-LFUNC arith_dec
+FUNC arith_dec
     cmp  w2, #OP_MUL
     b.ne 1f
     mul  x9, x0, x1
@@ -585,7 +535,7 @@ ENDF arith_dec
 // differ; they are compared exactly). Also used by MIN/MAX.   (leaf, or tail
 // call to bytes_cmp)
 // =============================================================================
-LFUNC cmp_typed
+FUNC cmp_typed
     and  w9, w2, #T_KIND_MASK
     cmp  w9, #T_FLOAT
     b.eq .Lct_float
