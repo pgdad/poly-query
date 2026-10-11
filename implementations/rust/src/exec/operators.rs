@@ -14,7 +14,7 @@ use crate::planner::expr::{AggregateCall, Expr, KeyDomain};
 use crate::planner::logical::{JoinType, SortKey};
 use crate::planner::physical::{JoinKey, PhysicalPlan};
 use crate::storage::{Index, Table};
-use crate::types::Value;
+use crate::types::{DataType, Value};
 
 pub type Row = Vec<Value>;
 
@@ -30,6 +30,36 @@ pub trait Operator {
     fn skip(&mut self, ctx: &ExecContext, max: u64) -> Result<u64> {
         let mut n = 0;
         while n < max && self.next(ctx)?.is_some() {
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// Appends up to `max` further rows to a JSON array under construction
+    /// in `out` (each preceded by `,` unless it is the first element) and
+    /// returns how many there were; 0 at the end. Vectorized roots
+    /// serialize straight from their batches.
+    fn write_json(
+        &mut self,
+        ctx: &ExecContext,
+        out: &mut String,
+        types: &[DataType],
+        max: u64,
+    ) -> Result<u64> {
+        let mut n = 0;
+        while n < max {
+            let Some(row) = self.next(ctx)? else { break };
+            if out.len() > 1 {
+                out.push(',');
+            }
+            out.push('[');
+            for (j, v) in row.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                v.write_json(types[j], out);
+            }
+            out.push(']');
             n += 1;
         }
         Ok(n)

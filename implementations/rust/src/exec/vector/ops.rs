@@ -14,6 +14,7 @@ use crate::planner::access::IndexLookup;
 use crate::planner::expr::{AggregateCall, Expr};
 use crate::planner::logical::SortKey;
 use crate::storage::{Index, Table};
+use crate::types::DataType;
 
 /// A pull-based operator producing batches (never empty ones).
 pub trait BatchOperator {
@@ -451,6 +452,49 @@ impl Operator for RowSink {
                 None => return Ok(None),
             }
         }
+    }
+
+    fn write_json(
+        &mut self,
+        ctx: &ExecContext,
+        out: &mut String,
+        types: &[DataType],
+        max: u64,
+    ) -> Result<u64> {
+        if self.rows.len() > 0 {
+            // Rows already converted by `next` are written first.
+            let mut n = 0;
+            while n < max {
+                let Some(row) = self.rows.next() else { break };
+                if out.len() > 1 {
+                    out.push(',');
+                }
+                crate::protocol::write_row(&row, types, out);
+                n += 1;
+            }
+            return Ok(n);
+        }
+        let Some(b) = self.input.next_batch(ctx)? else {
+            return Ok(0);
+        };
+        if b.len as u64 > max {
+            self.rows = b.into_rows().into_iter();
+            return self.write_json(ctx, out, types, max);
+        }
+        for i in 0..b.len {
+            if out.len() > 1 {
+                out.push(',');
+            }
+            out.push('[');
+            for (j, c) in b.columns.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                c.write_json(i, types[j], out);
+            }
+            out.push(']');
+        }
+        Ok(b.len as u64)
     }
 
     fn skip(&mut self, ctx: &ExecContext, max: u64) -> Result<u64> {

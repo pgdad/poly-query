@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::exec::Row;
 use crate::storage::{Column, ColumnData};
-use crate::types::{DataType, Value};
+use crate::types::{DataType, Value, datetime, decimal};
 
 /// Rows per batch produced by scans.
 pub const BATCH_SIZE: usize = 2048;
@@ -250,6 +250,36 @@ impl Vector {
             Data::Date(v) => Value::Date(v[i]),
             Data::Timestamp(v) => Value::Timestamp(v[i]),
             Data::Values(v) => v[i].clone(),
+        }
+    }
+
+    /// Serializes element `i` like `Value::write_json` (types.md §9);
+    /// `ty` is the column type.
+    pub fn write_json(&self, i: usize, ty: DataType, out: &mut String) {
+        if self.is_null(i) {
+            out.push_str("null");
+            return;
+        }
+        match &self.data {
+            Data::Int(v) => decimal::write_i64(out, v[i]),
+            Data::Str(v) => crate::json::write_escaped(out, &v[i]),
+            Data::Dict(c, d) => crate::json::write_escaped(out, &d[c[i] as usize]),
+            Data::Decimal(v, s) if !matches!(ty, DataType::Decimal { scale, .. } if scale != *s) => {
+                out.push('"');
+                decimal::write(out, v[i], *s);
+                out.push('"');
+            }
+            Data::Date(v) => {
+                out.push('"');
+                datetime::write_date(out, v[i]);
+                out.push('"');
+            }
+            Data::Timestamp(v) => {
+                out.push('"');
+                datetime::write_timestamp(out, v[i]);
+                out.push('"');
+            }
+            _ => self.value(i).write_json(ty, out),
         }
     }
 

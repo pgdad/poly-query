@@ -952,7 +952,6 @@ fn rowwise(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
     Ok(Vector::from_values(out))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

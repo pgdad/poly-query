@@ -133,9 +133,12 @@ impl QueryOptions {
 #[derive(Debug)]
 pub struct QueryResult {
     pub columns: Vec<Field>,
-    /// Empty when `count_only` was requested.
+    /// Empty when `count_only` was requested or the rows were serialized
+    /// directly (`rows_json`).
     pub rows: Vec<Row>,
     pub row_count: u64,
+    /// The rows as a JSON array (from [`QueryCursor::collect_json`]).
+    pub rows_json: Option<String>,
 }
 
 /// How a running query is interrupted (concurrency.md §3–§4).
@@ -672,6 +675,71 @@ impl QueryCursor {
             columns: self.columns,
             rows: Vec::new(),
             row_count: self.row_count,
+            rows_json: None,
+        })
+    }
+
+    /// Runs the query to completion, serializing the rows directly into a
+    /// JSON array (types.md §9) instead of materializing them; vectorized
+    /// plans write straight from their column vectors.
+    pub fn collect_json(mut self, count_only: bool) -> Result<QueryResult> {
+        if count_only {
+            return self.count();
+        }
+        let types: Vec<DataType> = self.columns.iter().map(|f| f.data_type).collect();
+        let max = self.max_rows.map_or(u64::MAX, |m| m.saturating_add(1));
+        let mut out = String::from("[");
+        loop {
+            let before = out.len();
+            let step = match &mut self.source {
+                CursorSource::Plan(root) if self.replay.is_some() => {
+                    let ctx = &self.ctx;
+                    let left = max - self.row_count;
+                    let out = &mut out;
+                    crate::protocol::catch_panic(|| root.write_json(ctx, out, &types, left))
+                }
+                CursorSource::Plan(root) => {
+                    root.write_json(&self.ctx, &mut out, &types, max - self.row_count)
+                }
+                CursorSource::Ready(rows) => {
+                    let mut n = 0;
+                    for row in rows.by_ref().take((max - self.row_count) as usize) {
+                        if out.len() > 1 {
+                            out.push(',');
+                        }
+                        crate::protocol::write_row(&row, &types, &mut out);
+                        n += 1;
+                    }
+                    Ok(n)
+                }
+            };
+            match step {
+                Ok(0) => break,
+                Ok(n) => {
+                    self.row_count += n;
+                    if let Some(m) = self.max_rows
+                        && self.row_count > m
+                    {
+                        return Err(Error::resource_limit(format!(
+                            "result exceeds max_rows = {m}"
+                        )));
+                    }
+                    self.ctx.reserve(out.len() - before)?;
+                }
+                Err(e) => {
+                    if !self.try_replay(&e) {
+                        return Err(e);
+                    }
+                    out.truncate(1);
+                }
+            }
+        }
+        out.push(']');
+        Ok(QueryResult {
+            columns: self.columns,
+            rows: Vec::new(),
+            row_count: self.row_count,
+            rows_json: Some(out),
         })
     }
 
@@ -703,6 +771,7 @@ impl QueryCursor {
             columns: self.columns,
             rows,
             row_count: self.row_count,
+            rows_json: None,
         })
     }
 }
