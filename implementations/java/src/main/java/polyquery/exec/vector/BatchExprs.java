@@ -6,8 +6,8 @@ import java.util.List;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.exec.Evaluator;
-import polyquery.physical.ColumnPruner;
 import polyquery.plan.BoundExpr;
+import polyquery.plan.BoundExprs;
 
 /**
  * The expressions an operator evaluates per input row (e.g. a projection list, or group keys
@@ -77,7 +77,7 @@ final class BatchExprs {
             for (int j = 0; j < rowCode.length; j++) {
                 rowCode[j] = compiler.rowCompiler().compile(exprs.get(j));
                 fallback[j] = new Vec(exprs.get(j).type(), 16);
-                for (int s : ColumnPruner.references(exprs.get(j))) {
+                for (int s : BoundExprs.inputSlots(exprs.get(j))) {
                     read.set(s);
                 }
             }

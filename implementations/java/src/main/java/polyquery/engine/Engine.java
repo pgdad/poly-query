@@ -29,9 +29,7 @@ import polyquery.ingest.CsvIngest;
 import polyquery.ingest.IngestOptions;
 import polyquery.ingest.JsonIngest;
 import polyquery.json.JsonWriter;
-import polyquery.optimizer.LogicalOptimizer;
-import polyquery.physical.PhysicalPlan;
-import polyquery.physical.PhysicalPlanner;
+import polyquery.physical.PhysicalQuery;
 import polyquery.physical.PlanExplainer;
 import polyquery.plan.LogicalPlan;
 import polyquery.sql.analyzer.Analyzer;
@@ -212,10 +210,11 @@ public final class Engine {
         ResultSink sink = sinkFactory.apply(ctx);
         return switch (stmt) {
             case Statement.QueryStatement qs -> {
-                Function<LogicalPlan, PhysicalPlan> planner = planner(opts);
-                PhysicalPlan plan = planner.apply(analyze(qs.query(), catalog.snapshot()));
-                yield opts.mode() == ExecMode.ROW ? Executor.stream(plan, ctx, planner, sink)
-                        : VectorExecutor.stream(plan, ctx, planner, sink, threads(opts));
+                QueryPlanner planner = planner(opts);
+                PhysicalQuery query = planner.planQuery(analyze(qs.query(), catalog.snapshot()));
+                ctx.withNativeKernels(query.nativeKernels() ? config.nativeKernels() : null);
+                yield query.mode() == ExecMode.ROW ? Executor.stream(query.root(), ctx, planner::plan, sink)
+                        : VectorExecutor.stream(query.root(), ctx, planner::plan, sink, query.threads());
             }
             case Statement.Explain e -> {
                 String text = JsonWriter.write(explainQuery(e.query(), opts, catalog.snapshot()));
@@ -253,9 +252,20 @@ public final class Engine {
         };
     }
 
+    /**
+     * The logical plan of a query before optimization — an internal debugging and test API
+     * (render it with {@link polyquery.plan.LogicalPlanPrinter}); not part of the protocol.
+     */
+    public LogicalPlan logicalPlan(String sql) {
+        if (!(Parser.parse(sql) instanceof Statement.QueryStatement qs)) {
+            throw new PolyQueryException(ErrorCode.SEMANTIC_ERROR, "not a query");
+        }
+        return analyze(qs.query(), catalog.snapshot());
+    }
+
     private Map<String, Object> explainQuery(Query query, QueryOptions opts, Catalog.Snapshot snapshot) {
-        Function<LogicalPlan, PhysicalPlan> planner = planner(opts);
-        return new PlanExplainer(planner).explain(planner.apply(analyze(query, snapshot)));
+        QueryPlanner planner = planner(opts);
+        return new PlanExplainer(planner::plan).explain(planner.plan(analyze(query, snapshot)));
     }
 
     /** Name resolution sees exactly the table versions of {@code snapshot} (concurrency.md §1). */
@@ -263,10 +273,8 @@ public final class Engine {
         return new Analyzer(snapshot, functions).analyze(query);
     }
 
-    /** Logical optimization (unless disabled) followed by physical planning; also used for subqueries. */
-    private static Function<LogicalPlan, PhysicalPlan> planner(QueryOptions opts) {
-        PhysicalPlanner physical = new PhysicalPlanner(opts.joinStrategy(), opts.useIndexes(), opts.optimize());
-        return logical -> physical.plan(opts.optimize() ? LogicalOptimizer.optimize(logical) : logical);
+    private QueryPlanner planner(QueryOptions opts) {
+        return new QueryPlanner(opts, threads(opts), config.nativeKernels() != null);
     }
 
     /** Worker threads a query may use: its {@code threads} option, else the engine's {@code --threads}. */
@@ -275,9 +283,6 @@ public final class Engine {
     }
 
     private ExecContext newContext(QueryOptions opts, QueryControl control) {
-        ExecContext ctx = new ExecContext(control, config.maxQueryMemoryBytes(), opts.maxRows(), config.maxJoinRows());
-        // native kernels are batch kernels: they serve the vectorized engine; the row engine is the baseline
-        boolean useNative = opts.useNative() && opts.mode() == ExecMode.VECTORIZED;
-        return ctx.withNativeKernels(useNative ? config.nativeKernels() : null);
+        return new ExecContext(control, config.maxQueryMemoryBytes(), opts.maxRows(), config.maxJoinRows());
     }
 }

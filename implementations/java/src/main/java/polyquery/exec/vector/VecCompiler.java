@@ -8,7 +8,6 @@ import polyquery.common.PolyQueryException;
 import polyquery.exec.ExecContext;
 import polyquery.exec.ExpressionCompiler;
 import polyquery.ffi.NativeKernels;
-import polyquery.physical.ColumnPruner;
 import polyquery.plan.BoundExpr;
 import polyquery.plan.BoundExpr.CompareOp;
 import polyquery.plan.BoundExprs;
@@ -110,10 +109,10 @@ final class VecCompiler {
         if (BoundExprs.any(e, x -> x instanceof BoundExpr.Placeholder)) {
             // also reads the enclosing shared operand: pass its value through a placeholder cell
             Object[] cell = new Object[1];
-            return new Kernels.RowEval(rows.compileWithOperand(e, cell), ColumnPruner.references(e), e.type(), operand,
+            return new Kernels.RowEval(rows.compileWithOperand(e, cell), BoundExprs.inputSlots(e), e.type(), operand,
                     cell);
         }
-        return new Kernels.RowEval(rows.compile(e), ColumnPruner.references(e), e.type(), null, null);
+        return new Kernels.RowEval(rows.compile(e), BoundExprs.inputSlots(e), e.type(), null, null);
     }
 
     /**

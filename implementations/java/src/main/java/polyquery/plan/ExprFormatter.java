@@ -2,10 +2,11 @@ package polyquery.plan;
 
 import java.util.ArrayList;
 import java.util.List;
+import polyquery.storage.ColumnSchema;
 import polyquery.types.TypeKind;
 import polyquery.types.Values;
 
-/** Renders bound expressions as SQL-like text (EXPLAIN output, diagnostics). */
+/** Renders bound expressions, aggregate calls and sort keys as SQL-like text (EXPLAIN output, diagnostics). */
 public final class ExprFormatter {
     private ExprFormatter() {
     }
@@ -64,6 +65,20 @@ public final class ExprFormatter {
             case BoundExpr.Exists x -> "EXISTS(subquery)";
             case BoundExpr.InSubquery i -> "(" + format(i.operand()) + (i.negated() ? " NOT IN " : " IN ") + "(subquery))";
         };
+    }
+
+    public static String aggregate(AggregateCall c) {
+        String name = c.function() == AggregateCall.AggregateFunction.COUNT_STAR ? "COUNT" : c.function().name();
+        if (c.argument() == null) {
+            return name + "(*)";
+        }
+        return name + "(" + (c.distinct() ? "DISTINCT " : "") + format(c.argument()) + ")";
+    }
+
+    /** A sort key over rows of {@code schema}, e.g. {@code total DESC NULLS LAST}. */
+    public static String sortKey(SortKey k, List<ColumnSchema> schema) {
+        return schema.get(k.column()).name() + (k.descending() ? " DESC" : " ASC")
+                + (k.nullsFirst() ? " NULLS FIRST" : " NULLS LAST");
     }
 
     /** Right-hand side of a comparison against a placeholder. */

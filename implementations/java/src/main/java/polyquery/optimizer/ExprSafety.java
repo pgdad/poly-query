@@ -19,7 +19,7 @@ import polyquery.types.TypeKind;
  * {@code price * 2} cannot overflow if the stored prices are small enough. Interval arithmetic
  * is exact (BigDecimal).
  */
-final class ExprSafety {
+public final class ExprSafety {
     private static final BigDecimal LONG_MIN = BigDecimal.valueOf(Long.MIN_VALUE);
     private static final BigDecimal LONG_MAX = BigDecimal.valueOf(Long.MAX_VALUE);
     private static final BigDecimal DECIMAL_LIMIT = BigDecimal.valueOf(999_999_999_999_999_999L);
@@ -51,6 +51,15 @@ final class ExprSafety {
     /** @param origins per input slot, its stored column (or null); null = no statistics */
     ExprSafety(Origin[] origins) {
         this.origins = origins;
+    }
+
+    /**
+     * Conservative: false only if evaluating {@code e} can never raise an error (overflow,
+     * division by zero, conversion, subquery cardinality, …) on any row. Without statistics;
+     * predicate pushdown uses the statistics-aware {@link #canFail}.
+     */
+    public static boolean mayFail(BoundExpr e) {
+        return new ExprSafety(null).canFail(e);
     }
 
     /** The stored column each output slot of {@code plan} passes through, if any. */

@@ -1,4 +1,4 @@
-package polyquery.physical;
+package polyquery.cost;
 
 import java.math.BigInteger;
 import java.util.ArrayList;
@@ -23,7 +23,7 @@ import polyquery.types.TypeKind;
  * column's key domain. The result is used for index selection and row-group skipping; the
  * filter itself is still evaluated on every produced row.
  */
-final class ColumnPredicates {
+public final class ColumnPredicates {
     private ColumnPredicates() {
     }
 
@@ -33,10 +33,10 @@ final class ColumnPredicates {
      * @param columns        per column position, the conjunction of all sargable conjuncts on it
      * @param otherConjuncts number of conjuncts that are not sargable
      */
-    record Extraction(Map<Integer, KeyPredicate> columns, int otherConjuncts) {
+    public record Extraction(Map<Integer, KeyPredicate> columns, int otherConjuncts) {
     }
 
-    static Extraction extract(BoundExpr predicate, List<ColumnSchema> schema) {
+    public static Extraction extract(BoundExpr predicate, List<ColumnSchema> schema) {
         List<DataType> columnTypes = new ArrayList<>();
         for (ColumnSchema c : schema) {
             columnTypes.add(c.type());

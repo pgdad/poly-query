@@ -77,7 +77,7 @@ public final class PlanExplainer {
                 node.put("group_by", formatAll(a.groupKeys()));
                 List<String> aggs = new ArrayList<>();
                 for (AggregateCall c : a.aggregates()) {
-                    aggs.add(aggregate(c));
+                    aggs.add(ExprFormatter.aggregate(c));
                 }
                 node.put("aggregates", aggs);
             }
@@ -152,8 +152,7 @@ public final class PlanExplainer {
     private static List<String> sortKeys(List<SortKey> keys, List<ColumnSchema> schema) {
         List<String> out = new ArrayList<>();
         for (SortKey k : keys) {
-            out.add(schema.get(k.column()).name() + (k.descending() ? " DESC" : " ASC")
-                    + (k.nullsFirst() ? " NULLS FIRST" : " NULLS LAST"));
+            out.add(ExprFormatter.sortKey(k, schema));
         }
         return out;
     }
@@ -166,14 +165,6 @@ public final class PlanExplainer {
             }
             return false;
         });
-    }
-
-    private static String aggregate(AggregateCall c) {
-        String name = c.function() == AggregateCall.AggregateFunction.COUNT_STAR ? "COUNT" : c.function().name();
-        if (c.argument() == null) {
-            return name + "(*)";
-        }
-        return name + "(" + (c.distinct() ? "DISTINCT " : "") + ExprFormatter.format(c.argument()) + ")";
     }
 
     private static List<String> formatAll(List<BoundExpr> exprs) {
