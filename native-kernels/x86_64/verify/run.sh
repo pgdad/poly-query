@@ -2,6 +2,8 @@
 # Extra verification for the x86-64 assembly kernels (test tools only; nothing
 # here is linked into libpqkernels). Usage: sh x86_64/verify/run.sh
 # (run from native-kernels/). Builds into build/verify/.
+# Optional: BASE=<git rev> also compares the machine code with that revision
+# (disasm_compare.py; e.g. BASE=16e68a2 for the pre-CR-5 sources).
 set -e
 D=$(cd "$(dirname "$0")/../.." && pwd)
 O=$D/build/verify
@@ -18,3 +20,7 @@ gcc $CF -o "$O/abi_check" "$D/x86_64/verify/abi_check.c" "$D/x86_64/verify/abi_t
 "$O/edge_cases_chunk"
 "$O/kernel_test_chunk" 2000 | tail -1
 "$O/abi_check"
+python3 -I "$D/x86_64/verify/structure_check.py" | tail -1
+if [ -n "$BASE" ]; then
+  python3 -I "$D/x86_64/verify/disasm_compare.py" "$BASE" -R c_sign_q=c_i64min | tail -1
+fi

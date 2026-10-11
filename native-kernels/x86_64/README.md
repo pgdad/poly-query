@@ -1,21 +1,27 @@
 # PolyQuery native kernels — x86-64 assembly
 
 All 20 kernels of `include/pq_kernels.h` (ABI v1, revision 1), hand-written
-in GNU `as` (AT&T syntax, `.S` files run through the C preprocessor only for
-`#define` constants). That is the 16 original kernels plus the four 128-bit
-kernels of change request CR-4 (`filter_i128`, `count_i128`, `sum_i128`,
-`minmax_i128`; see [128-bit kernels (CR-4)](#128-bit-kernels-cr-4)). There are
-three complete variants:
+in GNU `as` (AT&T syntax). The `.S` files are run through the C preprocessor,
+which pulls in the shared include files (`*.h`) and the `#define` constants.
+That is the 16 original kernels plus the four 128-bit kernels of change
+request CR-4 (`filter_i128`, `count_i128`, `sum_i128`, `minmax_i128`; see
+[128-bit kernels (CR-4)](#128-bit-kernels-cr-4)). There are three complete
+variants:
 
-| file | variant | ISA | kernels |
+| variant source | variant | ISA | kernels |
 |---|---|---|---|
 | `pqk_x86_scalar.S` | `x86_scalar` | baseline x86-64 (GPRs + SSE2 scalar `addsd/minsd/maxsd` only; no POPCNT/BMI) | 20/20 |
 | `pqk_x86_avx2.S` | `x86_avx2` | AVX2 + BMI1 + BMI2 + POPCNT | 20/20 |
 | `pqk_x86_avx512.S` | `x86_avx512` (optional) | AVX-512 F/BW/VL/DQ (+BMI/POPCNT) | 20/20 |
 
-The CR-4 kernels are appended to the end of each variant's file, after the
-original 16. The original kernels' code was not modified, so their behaviour
-is unchanged.
+Change request CR-5 restructured the three sources without changing
+behaviour. Building blocks are now defined once in shared include files, and
+every kernel has the same documented shape and a header comment. See
+[Source structure (CR-5)](#source-structure-cr-5) for the module map, the
+list of shared building blocks with their users, and how "no behaviour
+change" was verified. The machine code of 138 of the 140 functions is
+identical to before CR-5; the two exceptions are the operand order of one
+`add` in the scalar i128 jump-table dispatch.
 
 The dispatcher finds the variants through their global symbols
 `pqk_<variant>_<kernel>`. On this host it picks `x86_avx512` by default, and
@@ -24,18 +30,26 @@ uses only instructions from the F/BW/VL/DQ subsets, because those are the only
 ones the dispatcher checks. It does **not** use VPOPCNTDQ, CD, VBMI2 or the
 like, even though this Zen 5 has them.
 
-`verify/` holds extra test tools (C and one test trampoline). They are **not**
-part of the library: the Makefile only assembles `x86_64/*.S`, and `verify/`
-is not matched by that wildcard. See [Verification](#verification).
+`verify/` holds extra test and verification tools (C, Python and one test
+trampoline). They are **not** part of the library: the Makefile only
+assembles `x86_64/*.S`, and `verify/` is not matched by that wildcard. See
+[Verification](#verification).
 
 ## Build, test, benchmark
 
 ```bash
 make -C native-kernels test        # differential tests (native + ASan/UBSan) + AArch64 cross (reference only)
 make -C native-kernels bench       # micro-benchmarks, JSON lines in build/x86_64/bench.jsonl
-sh native-kernels/x86_64/verify/run.sh   # extra checks: guard pages, edge cases, ABI (run from anywhere)
+sh native-kernels/x86_64/verify/run.sh   # extra checks: guard pages, edge cases, ABI, CR-5 structure (run from anywhere)
+BASE=16e68a2 sh native-kernels/x86_64/verify/run.sh   # ... plus machine-code comparison with the pre-CR-5 sources
+python3 -I native-kernels/x86_64/verify/structure_check.py -v   # CR-5 structure + per-kernel clobber lists
+python3 -I native-kernels/x86_64/verify/disasm_compare.py 16e68a2 -R c_sign_q=c_i64min
 python3 native-kernels/x86_64/verify/bench_table.py native-kernels/build/x86_64/bench.jsonl
 ```
+
+The Makefile lists only the `*.S` files as prerequisites, not the `*.h`
+include files. After editing a header, run `make -C native-kernels clean`
+(or touch the `.S` files) before `make test`.
 
 Result of `make -C native-kernels test` on the final commit:
 
@@ -52,6 +66,334 @@ The ASan/UBSan run prints one `runtime error: load of misaligned address` at
 `tests/kernel_test.c:69`. That load is in the test program's own C code
 (`data[rnd_below(n)]` on a deliberately misaligned buffer), not in a kernel.
 It is non-fatal, and it was there before any assembly existed.
+
+## Source structure (CR-5)
+
+CR-5 (`spec/changes/kernel-refactor.md`) asks for building blocks defined
+once, a uniform kernel shape, per-kernel header comments and this module map.
+The refactoring keeps every instruction of every kernel. Code was only
+moved into macros and include files, labels were renamed, and comments were
+added. So results and performance are unchanged by construction, and that
+claim is checked mechanically (see
+[How "no behaviour change" was verified](#how-no-behaviour-change-was-verified)).
+
+### Module map
+
+**Before CR-5** (commit `16e68a2`): three self-contained files, 6896 lines.
+Each file had its own copies of the shared machinery.
+
+| file | lines (code only¹) | contents |
+|---|---|---|
+| `pqk_x86_scalar.S` | 1724 (1424) | own `FUNC/LFUNC/ENDF` macros; `popcnt64` helper **and** a second inline SWAR popcount (`POPC`); `lvp`; `sop_*`/`scmp_*` mask routines and tables; `PRED_DRIVER`; the 20 kernels with mixed label styles (`.Lsi_*`, `.Lgs_*`, `1:`…); i128 predicate macros |
+| `pqk_x86_avx2.S` | 2682 (2268) | own `FUNC/LFUNC/ENDF`, `lvp`, `HSUMQ`, rodata tables (`shc`, `c_pinf`, …); `vop_*/vcnt_*/vcmp_*`; `PRED_DRIVER`; the 20 kernels; i128 tables, `VG128`/`NIBFIX`/`P128_DRIVER`, `SMIN128/SMAX128`, `fold128` |
+| `pqk_x86_avx512.S` | 2490 (2109) | own `FUNC/LFUNC/ENDF`, `lvp`, `HSUMZ`, rodata tables (again `c_pinf`, `c_ninf`, `c_hibias`, …); `kop_*/kcnt_*/kcmp_*`; `PRED_DRIVER`; the 20 kernels; i128 macros, `P128_DRIVER`, `SMIN128/SMAX128` (copy of AVX2), `fold512` |
+| `verify/` | 384 | guard-page, edge-case and ABI test tools |
+
+Code that existed more than once before CR-5: the symbol macros (3×), `lvp`
+(3×), operator check + jump-table dispatch (18×), the 64-row block driver
+loop (6×), index emission (6×), the partial bitmap store (6×), the sum
+overflow test (6×), SWAR popcount (2× in the scalar file), scalar `fmix64`
+(2×), `SMIN128/SMAX128` (2×), the scalar half of the i128 lane fold (2×), the
+2^127 bias removal (2×), the signed-zero fix-up (2×), `group_sum` pass 2
+(3×), `gather_i64` (3×), the byte tail of the bitmap ops (2×), index
+compress (2× per SIMD file), and the constants `c_pinf`/`c_ninf`/`c_hibias`,
+`INT64_MIN`, `SUM_CHUNK_ROWS`, `SUM128_CHUNK_ROWS` (2× each).
+
+**After CR-5**: three variant sources that contain only kernels and the
+instantiation of their helpers, plus six include files.
+
+| file | lines (code only¹) | contents | included by |
+|---|---|---|---|
+| `pqk_x86_common.h` | 618 (387) | ABI constants (status, operators, `ARG7`, driver modes); symbol directives `FUNC LFUNC ENDF OBJ ENDOBJ`; `PROLOGUE EPILOGUE VRET`; operator validation and dispatch `OP_CHECK OP_INVALID JTAB_LOAD JUMPTABLE OPTABLE CMPTABLE`; validity extraction `DEFINE_LVP VBIT_* VWORD_BLOCK`; 64-row driver pieces `DRV_* EMIT_IDX_BITS STORE_BITS_*`; GPR parts `JNE_SEXT FMIX64 LOWMASK BYTE_BITOP GATHER_I64 GSUM_PASS2`. Also documents the kernel skeleton and the label scheme. Includes `pqk_x86_consts.h`. | all three |
+| `pqk_x86_consts.h` | 191 (126) | every constant value (`#define C_*`) and every rodata table (emit macros `TAB_*`) | via `common.h` |
+| `pqk_x86_simd.h` | 171 (109) | shared by AVX2 and AVX-512: `HSUMQ HSUMZ F64_ZERO_FIXUP SMIN128 SMAX128 FOLD_LANES128 UNBIAS192`, chunk sizes | avx2, avx512 |
+| `pqk_x86_scalar.h` | 410 (304) | scalar blocks used by ≥ 2 scalar kernels: SWAR popcount, `sop_*` generator, `PRED_DRIVER`, `BITOP`, i128 `P128*` | scalar |
+| `pqk_x86_avx2.h` | 632 (475) | AVX2 blocks used by ≥ 2 AVX2 kernels: `VPRED ROWPRED VOP VCNT EMIT_IDX_COMPRESS8 VDRIVER VBITOP`, i128 `LTX GTX VG128 NIBFIX VOP128 VCNT128 VDRIVER128` | avx2 |
+| `pqk_x86_avx512.h` | 666 (494) | AVX-512 blocks used by ≥ 2 AVX-512 kernels: `LANES8 PEELMASK GROUPMASK KPRED KOP KCNT EMIT_IDX_COMPRESS16 KDRIVER ZBITOP`, i128 `LG128 LGU128 KFIX GLANES KP128 KOP128 KCNT128 KDRIVER128` | avx512 |
+| `pqk_x86_scalar.S` | 1098 (742) | section 1: helper/table instantiation (`popcnt64`, `lvp`, `sop_*`, `sop_table`); section 2: the 20 kernels with header comments, plus the scalar-only kernel-private blocks (`SCMP`, `SADD128/SVADD128`, `mm128_upd/MM128_ROW`) | — |
+| `pqk_x86_avx2.S` | 1718 (1266) | section 1: tables, `lvp`, `vop_* vcnt_* vop128_* vcnt128_*` + jump tables; section 2: the 20 kernels, plus kernel-private blocks (`VCMP`, `SACC/SZERO/SFOLD`, `MMI_STEP`, `MUL64/VFMIX`, `fold128/SV128`, `MMG128`) | — |
+| `pqk_x86_avx512.S` | 1550 (1132) | section 1: tables, `lvp`, `kop_* kcnt_* kop128_* kcnt128_*` + jump tables; section 2: the 20 kernels, plus kernel-private blocks (`KCMP`, `MULA`, `ZFMIX`, `fold512/ZS128/DOUBLE2`, `ZMM128/ZTAIL`) | — |
+| `verify/` | 1012 | as before, plus `disasm_compare.py` (213) and `structure_check.py` (409); `run.sh` runs them | — |
+
+¹ Code only: non-blank lines after removing comments
+(`cpp -P -fpreprocessed`). Assembly code went from 5801 to 5035 lines. The
+total grew (6896 → 7054) because every kernel now has a full header comment
+and every block has a usage comment.
+
+Rules for the include files (stated at the top of `pqk_x86_common.h`):
+
+* **Headers emit no bytes.** They only define `#define` constants and gas
+  macros. Every instruction and table of a variant comes from a statement in
+  its `.S` file, usually a macro invocation. File-local helpers (`lvp`,
+  `popcnt64`, mask routines, `fold128`) and tables (`shc`, `c_pinf`, …) are
+  therefore *defined* once in source but *emitted* once per variant object
+  that uses them, as local symbols. That keeps each variant object
+  self-contained. The library's exported symbol set and the variant/kernel
+  set are unchanged, and no cross-file references were introduced.
+* **Names end in `.h`.** The Makefile assembles every `x86_64/*.S` as a
+  translation unit, so headers must not end in `.S`. They are pulled in with
+  cpp `#include`, so `#define` constants work inside macro bodies.
+* **Constants before use.** `pqk_x86_common.h` includes `pqk_x86_consts.h`
+  before any macro. Otherwise cpp would leave an unknown constant name in a
+  macro body, and gas would silently turn it into an undefined symbol.
+  `disasm_compare.py` rejects objects with undefined symbols; this
+  actually happened once during the refactoring.
+* **ISA switch.** Blocks with a baseline and a BMI form (`LOWEST_IDX`,
+  `CLEAR_LOWEST`, `EMIT_IDX_BITS`, `GSUM_PASS2`) test the gas symbol
+  `PQK_BMI`. Each variant sets it once (`scalar`: 0, `avx2`/`avx512`: 1).
+* **Placement.** A block lives in the most specific header that covers all
+  its users: all variants → `common.h`, both SIMD variants → `simd.h`,
+  several kernels of one variant → `pqk_x86_<variant>.h`. Blocks used by a
+  single kernel stay next to that kernel in the `.S` file, so a kernel can
+  be read and changed without opening the others.
+
+### Kernel skeleton and label scheme
+
+Every kernel of every variant follows one skeleton. Each part is marked with
+the same comment tag in the code. When the part is in a shared body macro
+such as `PRED_DRIVER` or `VBITOP`, the tag is in that macro.
+
+| tag | part | typical content |
+|---|---|---|
+| `[check]` | argument check / empty input | `OP_CHECK` (invalid op → `(size_t)-1` before any memory is touched), `n == 0`, `PROLOGUE`, accumulator setup |
+| `[main]` | main (vector) loop(s) | full steps, or full 64-row blocks; often two flavours: no validity (`_main`) and validity (`_vmain`) |
+| `[tail]` | rows left over by the main loop | 1–3 / 1–7 single rows, masked groups, or the final partial 64-row block (`_tail`, `_vtail`) |
+| `[result]` | result | lane reduction, output stores, status (`JNE_SEXT` for sums), `EPILOGUE`, `ret`/`VRET` |
+
+The tags appear in the order the code is laid out. Two exceptions keep the
+original layout, because moving code would change code alignment and branch
+layout: `compare_fixed`, which has an out-of-line tail after the `ret`, and
+the 64-row block drivers, whose last block goes through the same loop
+(marked `[main] + [tail]`).
+
+Labels follow one scheme in all files:
+
+* inside a kernel: `.L<kernel>_<step>`, where `<kernel>` is the ABI name
+  without variant prefix. The same step names are used in every variant,
+  e.g. `.Lsum_i64_main`, `.Lsum_i64_vmain`, `.Lsum_i64_tail`,
+  `.Lsum_i64_vtail`, `.Lsum_i64_result`, `.Lsum_i64_ovf`, `.Lsum_i64_ret`,
+  `.Lfilter_i64_inval`;
+* inside a helper: `.L<helper>_<step>` (e.g. `.Lvop_eq_part`);
+* inside a building-block macro: `.L<block>_<step>\@` (unique per expansion,
+  e.g. `.Ldv_part\@`, `.Lgs_vrow\@`), or `.L\k\()_<step>` when the macro is
+  a whole kernel body and gets the kernel name `k`;
+* no numeric labels (`1:`, `2f`) anywhere. Before CR-5 they were common,
+  and one macro had to use `77:` to avoid colliding with them.
+
+Every kernel starts with a header comment block in the same format:
+
+```
+/* ========================================================================
+ * <C prototype with pqk_x86_<variant>_ name>
+ * Args:     argument registers (7th argument: 8(%rsp))
+ * Returns:  result register and meaning (status / count / -1)
+ * Clobbers: caller-saved registers written, flags
+ *           (callee-saved registers saved and restored; stack use)
+ * Algorithm: algorithm, shared blocks used, register roles
+ * Tail:     tail strategy (no out-of-bounds access)
+ * ====================================================================== */
+```
+
+The `Clobbers:` lines are checked against the machine code by
+`structure_check.py`. Callee-saved registers are listed once per kernel in a
+`#define SAVED …`, which `PROLOGUE SAVED` and `EPILOGUE SAVED` use, so the
+push and pop sequences cannot drift apart.
+
+### Shared building blocks and their users
+
+Kernel names below are ABI names. "all" = all three variants; `s`/`a2`/`a5`
+= scalar / AVX2 / AVX-512.
+
+**`pqk_x86_common.h`** (used by all variants)
+
+| block | what | users |
+|---|---|---|
+| `PQK_OK … PQK_EINVAL`, `PQK_EQ … PQK_BETWEEN`, `PQK_OP_LAST`, `PQK_CMP_OP_LAST`, `ARG7()`, `MODE_*` | ABI constants (mirror `pq_kernels.h`) | all kernels returning a status or taking an op / 7th argument |
+| `FUNC`, `ENDF` | global `@function`, 32-byte aligned, `.size` | all 60 kernels |
+| `LFUNC` | local helper `@function`, 16-byte aligned | every helper: `lvp`, `popcnt64`, `sop_* scmp_* sop_false mm128_upd` (s), `vop_* vcnt_* vcmp_* vop128_* vcnt128_* fold128` (a2), `kop_* kcnt_* kcmp_* kop128_* kcnt128_* fold512` (a5) |
+| `OBJ`, `ENDOBJ` | rodata `@object` with `.size` | every table (`TAB_*`, `JUMPTABLE`) |
+| `PROLOGUE`, `EPILOGUE` | push / reverse-pop of the kernel's `SAVED` list | every kernel that uses callee-saved registers (all except `bitmap_popcount`, `compare_fixed`, `gather_i64` (s); `sum_f64`, bitmap ops, `bitmap_popcount`, `hash_i64`, `gather_i64` (a2); `sum_f64`, `minmax_i64`, bitmap ops, `bitmap_popcount`, `hash_i64`, `gather_i64` (a5)) |
+| `VRET` | `vzeroupper; ret` | every AVX2/AVX-512 kernel exit after vector use (all a2/a5 kernels except a2 `bitmap_popcount` and both `gather_i64`, which use no vector registers; `compare_fixed` spells out `vzeroupper` / `ret` because its `n == 0` exit jumps between them) |
+| `OP_CHECK`, `OP_INVALID` | operator validation (unsigned, so negative ints fail too), `(size_t)-1` exit | `filter_i64`, `filter_i64_bitmap`, `count_i64`, `compare_i64`, `filter_i128`, `count_i128` (all) |
+| `JTAB_LOAD` | target of a self-relative jump table entry | the same six kernels (all), plus the direct-counter tables of `count_i64`/`count_i128` (a2, a5) |
+| `JUMPTABLE`, `OPTABLE`, `CMPTABLE` | PIC jump tables in ABI operator order | `sop_table` `.L<k>_tab` `scmp_table` (s); `vop_table vcnt_table vcmp_table vop128_table vcnt128_table` (a2); `kop_table kcnt_table kcmp_table kop128_table kcnt128_table` (a5) |
+| `DEFINE_LVP` → `lvp` | partial validity word, exactly ceil(len/8) bytes | s: `filter_i64`, `filter_i64_bitmap`, `count_i64`, `sum_i64`, `sum_f64`, `minmax_i64`, `minmax_f64`, `bitmap_popcount`, `group_sum_i64`, `filter_i128`, `count_i128`, `sum_i128`, `minmax_i128`; a2: the same; a5: `filter_i64`, `filter_i64_bitmap`, `count_i64`, `bitmap_popcount`, `group_sum_i64`, `filter_i128`, `count_i128`, `sum_i128`, `minmax_i128` |
+| `VBIT_CF` | CF = next validity bit | s: `minmax_i64`, `minmax_f64`, `group_sum_i64`; a2: `minmax_i64`, `minmax_f64`, `minmax_i128` |
+| `VBIT_MASK` | 0/-1 mask of the next validity bit | s: `sum_i64`, `sum_f64`, `sum_i128`, `minmax_i128`; a2: `sum_i64`, `sum_f64`, `sum_i128` |
+| `VBIT_TEST` | CF = validity bit of row r | a2: `group_sum_i64`; `F64_ZERO_FIXUP` (a2, a5 `minmax_f64`) |
+| `VWORD_BLOCK` | full/partial validity word of a scalar 64-row block | s: `sum_i64`, `sum_f64`, `minmax_i64`, `minmax_f64` |
+| `DRV_ENTER`, `DRV_LEAVE` | driver entry (op check, saves, output start) / exit | `filter_i64`, `filter_i64_bitmap`, `count_i64`, `filter_i128`, `count_i128` (all) |
+| `DRV_ARGS`, `DRV_MASK`, `DRV_VALIDITY`, `DRV_NEXT` | 64-row block loop: mask routine call, `& validity word` | `filter_i64`, `filter_i64_bitmap`, `count_i64` (all); `filter_i128`, `count_i128` (a2, a5) |
+| `LOWEST_IDX`, `CLEAR_LOWEST` | bsf / x&(x-1) or tzcnt / blsr (`PQK_BMI`) | `EMIT_IDX_BITS`, `GSUM_PASS2` |
+| `EMIT_IDX_BITS` | indices of the set bits of a block mask | `filter_i64`, `filter_i128` (all) |
+| `STORE_BITS_FULL`, `STORE_BITS_TAIL` | 8-byte / ceil(len/8)-byte bitmap store | `filter_i64_bitmap`, `compare_i64` (all) |
+| `JNE_SEXT` | exact-overflow test (hi ≠ sign extension of lo) | `sum_i64`, `sum_i128` (all) |
+| `FMIX_CONSTS`, `FMIX64` | scalar MurmurHash3 finalizer | s `hash_i64`; a2 `hash_i64` (tail rows) |
+| `LOWMASK` | (1 << n) - 1 without bzhi | s: `bitmap_popcount`, `GSUM_PASS2` (baseline path) |
+| `BYTE_BITOP` | byte loop of and/or/andnot | `bitmap_and`, `bitmap_or`, `bitmap_andnot` (s, a2) |
+| `GATHER_I64` | whole gather body (unroll 4 or 8) | `gather_i64` (all) |
+| `GSUM_PASS2` | group_sum scatter-add in row order + overflow flag | `group_sum_i64` (all) |
+
+**`pqk_x86_consts.h`** (constants and tables)
+
+| constant / table | users |
+|---|---|
+| `C_I64MAX`, `C_SIGN64` | s `minmax_i64`, s `P128_KERNEL`, a2 `minmax_i64`, a2 `minmax_i128`, `UNBIAS192`, tables below |
+| `C_F64_PINF`, `C_F64_NINF` | s `minmax_f64`, `TAB_PINF_NINF` |
+| `C_FMIX1`, `C_FMIX2` | `FMIX_CONSTS`, `TAB_FMIX_HALVES`, `TAB_FMIX` |
+| `C_BITS_EVEN`, `C_BITS_2OF4`, `C_NIBBLE_LO`, `C_BYTE_ONES` | `SWAR_POPCNT` (s), `KFIX`, `DOUBLE2` (a5), `EMIT_IDX_COMPRESS8` (a2) |
+| `C_BYTE_IOTA`, `C_NIB_BIT1`, `C_SIGN32` | `EMIT_IDX_COMPRESS8`, `NIBFIX`, a2 `group_sum_i64` / `TAB_SIGN_D` |
+| `TAB_SHC` → `shc` | a2 `sum_i64`, `sum_f64`, `minmax_i64`, `minmax_f64` |
+| `TAB_SHC128S`, `TAB_SHC128M` | a2 `sum_i128`; a2 `minmax_i128` |
+| `TAB_EIGHT_D`, `TAB_SIGN_D`, `TAB_FMIX_HALVES`, `TAB_VOP_INV` | a2 `filter_i64`/`filter_i128`; a2 `group_sum_i64`; a2 `hash_i64`; a2 `count_i64`/`count_i128` |
+| `TAB_IOTA16`, `TAB_SIXTEEN_D` | a5 `filter_i64`, `filter_i128` |
+| `TAB_FMIX`, `TAB_I64MAX`, `TAB_NIB_LUT`, `TAB_0F`, `TAB_IDX_EVEN_ODD`, `TAB_KINV128` | a5 `hash_i64`; a5 `minmax_i64`/`minmax_i128`; a5 `bitmap_popcount` (2); a5 `minmax_i128`; a5 `count_i128` |
+| `TAB_PINF_NINF` | `minmax_f64` (a2, a5) |
+| `TAB_I64MIN` → `c_i64min` | a2 `filter_i128`, `count_i128`, `minmax_i128`; a5 `minmax_i64`, `minmax_i128` |
+| `TAB_HIBIAS` → `c_hibias` | `sum_i128` (a2, a5) |
+
+**`pqk_x86_simd.h`** (AVX2 and AVX-512)
+
+| block | users |
+|---|---|
+| `HSUMQ` | a2: `count_i64` (`VCNT`), `count_i128` (`VCNT128`), `sum_i64`; `HSUMZ` |
+| `HSUMZ` | a5: `count_i64` (`KCNT`), `count_i128` (`KCNT128`), `sum_i64`, `bitmap_popcount` |
+| `F64_ZERO_FIXUP` | `minmax_f64` (a2, a5) |
+| `SMIN128`, `SMAX128` | `minmax_i128` (a2, a5) |
+| `FOLD_LANES128`, `UNBIAS192`, `SUM128_CHUNK_ROWS` | `sum_i128` (a2 via `fold128`, a5 via `fold512`) |
+| `SUM_CHUNK_ROWS` | `sum_i64` (a2, a5) |
+
+**`pqk_x86_scalar.h`**, **`pqk_x86_avx2.h`**, **`pqk_x86_avx512.h`** (one variant each)
+
+| block | users |
+|---|---|
+| s `SWAR_POPCNT`, `DEFINE_POPCNT64` → `popcnt64`, `POPC` | `filter_i64_bitmap`, `count_i64`, `compare_i64`, `bitmap_popcount`; `count_i128` (`POPC`) |
+| s `SPRED`, `SOP` → `sop_*`, `PRED_DRIVER` | `filter_i64`, `filter_i64_bitmap`, `count_i64` |
+| s `BQ`, `BITOP` | `bitmap_and`, `bitmap_or`, `bitmap_andnot` |
+| s `P128`, `P128_BODY`, `P128_KERNEL` | `filter_i128`, `count_i128` |
+| a2 `VPRED`, `ROWPRED`, `VOP` → `vop_*`, `VDRIVER` | `filter_i64`, `filter_i64_bitmap`, `count_i64` (`VCNT` → `vcnt_*`: `count_i64`) |
+| a2 `EMIT_IDX_COMPRESS8` | `filter_i64`, `filter_i128` |
+| a2 `VBOP`, `VBITOP` | `bitmap_and`, `bitmap_or`, `bitmap_andnot` |
+| a2 `LTX`, `GTX`, `VG128`, `NIBFIX`, `VOP128` → `vop128_*`, `VDRIVER128` | `filter_i128`, `count_i128` (`VCNT128` → `vcnt128_*`: `count_i128`) |
+| a5 `LANES8` | `KOP`, `KCNT`, `GROUPMASK`; `compare_i64` (`KCMP`), `hash_i64` |
+| a5 `PEELMASK` | `count_i64` (`KCNT`), `sum_i64`, `sum_f64`, `minmax_i64`, `minmax_f64` |
+| a5 `GROUPMASK` | `sum_i64`, `sum_f64`, `minmax_i64`, `minmax_f64` |
+| a5 `KPRED`, `KOP` → `kop_*`, `KCNT` → `kcnt_*`, `KDRIVER` | `filter_i64`, `filter_i64_bitmap`, `count_i64` |
+| a5 `EMIT_IDX_COMPRESS16` | `filter_i64`, `filter_i128` |
+| a5 `ZBOP`, `ZBITOP` | `bitmap_and`, `bitmap_or`, `bitmap_andnot` |
+| a5 `LG128`, `GLANES` | `minmax_i128` (`ZTAIL`); `GLANES` also `KOP128`, `KCNT128` |
+| a5 `LGU128`, `KFIX`, `KP128`, `KOP128` → `kop128_*`, `KCNT128` → `kcnt128_*`, `KDRIVER128` | `filter_i128`, `count_i128` |
+
+`structure_check.py` verifies that each of these macros, constants, helpers
+and tables is defined in exactly one place (232 definitions).
+
+### How "no behaviour change" was verified
+
+1. **Machine code.** `verify/disasm_compare.py <rev>` assembles the variant
+   files of a git revision and of the working tree, links each into a
+   throw-away shared object, and compares every function and every rodata
+   object by name. Addresses are normalised; branch, call and RIP-relative
+   targets are compared as `<symbol+offset>`. Against the pre-CR-5 commit
+   (`16e68a2`, with `-R c_sign_q=c_i64min`): **138 of 140 functions and all
+   but one object are identical**, also with the test-only chunk overrides
+   (`-D SUM_CHUNK_ROWS=24 -D SUM_CHUNK_BLOCKS=1 -D SUM128_CHUNK_ROWS=64`).
+   The intentional differences:
+   * `pqk_x86_scalar_filter_i128` and `pqk_x86_scalar_count_i128`: the
+     operator dispatch now uses the shared `JTAB_LOAD`. It computes the
+     target as `add %rax,%rdx; jmp *%rdx` instead of
+     `add %rdx,%rax; jmp *%rax`: same length, same jump target, executed once
+     per call.
+   * AVX2 `c_sign_q` (2^63) was the same constant as AVX-512 `c_i64min`. It
+     is now one table, `TAB_I64MIN`, so the AVX2 code references
+     `c_i64min`, which has the same 8 bytes.
+   * `c_hibias` is one 32-byte table for both SIMD variants. AVX-512 used to
+     have a 16-byte copy; its `vbroadcasti32x4` still reads the same first 16
+     bytes.
+   The tool caught one real refactoring bug on the way (a constant used
+   before its `#define`), see the include-file rules above.
+2. **Tests.** `make -C native-kernels test` (native and ASan/UBSan) and
+   `verify/run.sh` pass: guard pages, edge cases, small-chunk fold builds,
+   the ABI register/stack/vzeroupper check, and the structure check.
+3. **Structure.** `verify/structure_check.py` checks, on every run:
+   building blocks are defined once; headers emit no bytes; each variant has
+   exactly the 20 kernels of `pq_kernels.h`; the label scheme; header
+   comments and skeleton tags; and each kernel's `Clobbers:` list against
+   the registers its machine code can write (following helper calls and
+   jump tables), including that every written callee-saved register is
+   saved. Negative controls were run: a missing tag, a wrongly named label,
+   a removed `PROLOGUE` and an undocumented clobber are each reported.
+
+### Performance before / after CR-5
+
+Because the instructions are identical, no change is expected. Measured with
+`tests/kernel_bench.c` (n = 4,194,304, 15 repetitions per run, median). The
+pre-CR-5 binary (`16e68a2`) and the CR-5 binary ran interleaved, 9 runs
+each, pinned to CPU 0 (V-cache CCD, data L3-resident) and to CPU 8 (data
+from DRAM). Shown: median ns per element, and the ratio new / before. The
+last column is the reference C implementation, which is the same code in
+both binaries, so it shows the measurement noise.
+
+CPU 0 (L3-resident):
+
+| kernel | scalar before | scalar after | ratio | avx2 before | avx2 after | ratio | avx512 before | avx512 after | ratio | reference ratio (noise) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| filter_i64_sel10 | 0.3326 | 0.3307 | 0.994 | 0.1538 | 0.1538 | 1.000 | 0.1041 | 0.1046 | 1.005 | 1.001 |
+| filter_i64_bitmap | 0.2171 | 0.2177 | 1.003 | 0.0938 | 0.0919 | 0.980 | 0.0660 | 0.0666 | 1.009 | 0.994 |
+| count_i64_between | 0.2596 | 0.2597 | 1.000 | 0.0902 | 0.0880 | 0.976 | 0.0508 | 0.0508 | 1.000 | 1.001 |
+| sum_i64 | 0.1903 | 0.1906 | 1.002 | 0.0786 | 0.0759 | 0.966 | 0.0501 | 0.0500 | 0.998 | 1.002 |
+| sum_i64_validity | 0.3241 | 0.3224 | 0.995 | 0.1157 | 0.1172 | 1.013 | 0.0522 | 0.0523 | 1.002 | 1.001 |
+| sum_f64 | 0.3686 | 0.3687 | 1.000 | 0.0574 | 0.0540 | 0.941 | 0.0514 | 0.0512 | 0.996 | 1.000 |
+| minmax_i64 | 0.5542 | 0.5540 | 1.000 | 0.1068 | 0.1067 | 0.999 | 0.0502 | 0.0502 | 1.000 | 1.001 |
+| bitmap_and | 0.0039 | 0.0039 | 1.000 | 0.0025 | 0.0025 | 1.000 | 0.0024 | 0.0023 | 0.958 | 1.000 |
+| bitmap_popcount | 0.0141 | 0.0141 | 1.000 | 0.0020 | 0.0020 | 1.000 | 0.0009 | 0.0009 | 1.000 | 1.002 |
+| hash_i64 | 0.5971 | 0.5909 | 0.990 | 0.3637 | 0.3634 | 0.999 | 0.1257 | 0.1245 | 0.990 | 0.991 |
+| compare_i64 | 0.2832 | 0.2805 | 0.990 | 0.1420 | 0.1400 | 0.986 | 0.1617 | 0.1577 | 0.975 | 0.997 |
+| group_sum_i64_1024 | 0.5810 | 0.5803 | 0.999 | 0.4337 | 0.4333 | 0.999 | 0.4340 | 0.4321 | 0.996 | 1.001 |
+| gather_i64 | 0.7555 | 0.7502 | 0.993 | 0.7676 | 0.7491 | 0.976 | 0.7803 | 0.7408 | 0.949 | 1.031 |
+| filter_i128_sel10 | 0.3576 | 0.3580 | 1.001 | 0.2803 | 0.2752 | 0.982 | 0.2035 | 0.1999 | 0.982 | 1.000 |
+| count_i128_between | 0.2789 | 0.2794 | 1.002 | 0.2020 | 0.2006 | 0.993 | 0.2037 | 0.2063 | 1.013 | 0.998 |
+| sum_i128 | 0.2235 | 0.2258 | 1.010 | 0.1553 | 0.1597 | 1.028 | 0.1555 | 0.1564 | 1.006 | 0.998 |
+| minmax_i128 | 0.4674 | 0.4644 | 0.994 | 0.2143 | 0.2124 | 0.991 | 0.2292 | 0.2323 | 1.014 | 1.000 |
+
+Geometric mean of the ratios over the 51 variant kernels: **0.994**
+(range 0.941–1.028).
+
+CPU 8 (DRAM):
+
+| kernel | scalar before | scalar after | ratio | avx2 before | avx2 after | ratio | avx512 before | avx512 after | ratio | reference ratio (noise) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| filter_i64_sel10 | 0.3487 | 0.3498 | 1.003 | 0.1971 | 0.1976 | 1.003 | 0.1624 | 0.1565 | 0.964 | 1.009 |
+| filter_i64_bitmap | 0.2470 | 0.2466 | 0.998 | 0.1335 | 0.1340 | 1.004 | 0.1376 | 0.1394 | 1.013 | 0.998 |
+| count_i64_between | 0.2843 | 0.2850 | 1.002 | 0.1265 | 0.1295 | 1.024 | 0.1206 | 0.1218 | 1.010 | 1.013 |
+| sum_i64 | 0.2237 | 0.2224 | 0.994 | 0.1355 | 0.1360 | 1.004 | 0.1079 | 0.1084 | 1.005 | 1.008 |
+| sum_i64_validity | 0.3382 | 0.3386 | 1.001 | 0.1543 | 0.1569 | 1.017 | 0.1207 | 0.1220 | 1.011 | 1.001 |
+| sum_f64 | 0.3754 | 0.3760 | 1.002 | 0.1214 | 0.1208 | 0.995 | 0.0954 | 0.0972 | 1.019 | 1.002 |
+| minmax_i64 | 0.5417 | 0.5421 | 1.001 | 0.1479 | 0.1488 | 1.006 | 0.1139 | 0.1116 | 0.980 | 1.001 |
+| bitmap_and | 0.0033 | 0.0032 | 0.970 | 0.0022 | 0.0023 | 1.045 | 0.0023 | 0.0022 | 0.957 | 0.923 |
+| bitmap_popcount | 0.0137 | 0.0137 | 1.000 | 0.0019 | 0.0019 | 1.000 | 0.0010 | 0.0010 | 1.000 | 1.003 |
+| hash_i64 | 0.5957 | 0.5860 | 0.984 | 0.4661 | 0.4686 | 1.005 | 0.4209 | 0.4231 | 1.005 | 0.995 |
+| compare_i64 | 0.3626 | 0.3587 | 0.989 | 0.3123 | 0.3105 | 0.994 | 0.3201 | 0.3191 | 0.997 | 0.994 |
+| group_sum_i64_1024 | 0.6107 | 0.6102 | 0.999 | 0.4805 | 0.4782 | 0.995 | 0.4826 | 0.4814 | 0.998 | 1.005 |
+| gather_i64 | 2.4984 | 2.5064 | 1.003 | 2.2686 | 2.2726 | 1.002 | 2.2734 | 2.2606 | 0.994 | 1.001 |
+| filter_i128_sel10 | 0.4442 | 0.4503 | 1.014 | 0.4074 | 0.4033 | 0.990 | 0.3791 | 0.3766 | 0.993 | 1.000 |
+| count_i128_between | 0.3797 | 0.3803 | 1.002 | 0.3459 | 0.3459 | 1.000 | 0.3463 | 0.3468 | 1.001 | 1.002 |
+| sum_i128 | 0.3645 | 0.3614 | 0.991 | 0.3327 | 0.3341 | 1.004 | 0.3260 | 0.3186 | 0.977 | 0.997 |
+| minmax_i128 | 0.5252 | 0.5235 | 0.997 | 0.3558 | 0.3548 | 0.997 | 0.3617 | 0.3625 | 1.002 | 0.999 |
+
+Geometric mean over the 51 variant kernels: **0.999** (range 0.957–1.045).
+
+All deviations are within run-to-run noise (the reference column moves by up
+to ±3 %, and up to 8 % for the 0.002 ns/bit `bitmap_and`). There is no
+regression. That is as expected: the instructions are identical, and
+functions are still 32-byte aligned (helpers 16), so loop alignment within
+each function is unchanged.
+
+An unpinned `make -C native-kernels bench` on the final commit reproduced
+the earlier official numbers within noise (for example `filter_i64_sel10`
+0.82 / 0.34 / 0.19 / 0.16 ns for reference / scalar / AVX2 / AVX-512). In
+that run the process moved between the two CCDs (AVX2 `sum_f64` got the L3
+figure 0.058, AVX-512 the DRAM figure 0.095), which is why the pinned,
+interleaved runs above are the before/after comparison.
 
 ## Common architecture
 
@@ -203,15 +545,19 @@ System V AMD64 throughout:
 * Arguments arrive in `rdi, rsi, rdx, rcx, r8, r9`, with the 7th
   (`out_idx`/`out_bits`/`ngroups`) at `8(%rsp)` on entry.
 * Every callee-saved register that is used (`rbx, rbp, r12–r15`) is pushed and
-  popped. The direction flag is never touched. MXCSR is not modified.
+  popped (`PROLOGUE` / `EPILOGUE` over one `SAVED` list per kernel;
+  `structure_check.py` verifies against the machine code that no written
+  callee-saved register is left unsaved). The direction flag is never
+  touched. MXCSR is not modified.
 * No red zone is used. Internal helpers (mask routines, `lvp`, `popcnt64`)
   have documented private register conventions and use the stack only for
   `call/ret`, so stack alignment is irrelevant to them. No external function
   is ever called.
-* Every function that touches ymm/zmm ends with `vzeroupper`. AVX-512 code
-  uses only zmm0–15, so `vzeroupper` leaves no dirty upper or Hi16 state.
-* Every symbol has `.type`/`.size`: functions as `@function`, rodata tables as
-  `@object`.
+* Every function that touches ymm/zmm ends with `vzeroupper` (`VRET`).
+  AVX-512 code uses only zmm0–15, so `vzeroupper` leaves no dirty upper or
+  Hi16 state.
+* Every symbol has `.type`/`.size`: functions as `@function` (`FUNC`,
+  `LFUNC`, `ENDF`), rodata tables as `@object` (`OBJ`, `ENDOBJ`).
 * Each file ends with `.section .note.GNU-stack,"",@progbits`, and the
   resulting `.so` has a non-executable `GNU_STACK` and no `TEXTREL`.
 * The code is position independent: RIP-relative constants and
@@ -220,9 +566,9 @@ System V AMD64 throughout:
 ## 128-bit kernels (CR-4)
 
 `pqk_i128` is `{uint64_t lo; int64_t hi;}`: 16 bytes, little-endian, any
-alignment. Row *i* is at `data + 16*i`. Every new kernel has a header comment
-that covers register usage, the algorithm and, for `sum_i128`, the
-exact-overflow argument. This section summarizes them.
+alignment. Row *i* is at `data + 16*i`. Each kernel's header comment covers
+register usage, the algorithm and, for `sum_i128`, the exact-overflow
+argument. This section summarizes them.
 
 ### Common rules (all variants)
 
@@ -452,6 +798,17 @@ For CR-4 the three tools were extended:
 A negative control (a scalar copy with a broken overflow check) is caught by
 `edge_cases`. **Result: all variants ok.**
 
+For CR-5 two tools were added, and `run.sh` runs them as well:
+
+* **`structure_check.py`**: building blocks defined once, headers emit no
+  bytes, 20/20 kernels per variant, label scheme, header comments and
+  skeleton tags, and every `Clobbers:` list checked against the machine code
+  (see [How "no behaviour change" was verified](#how-no-behaviour-change-was-verified)).
+  **Result: ok** (232 definitions, 60/60 clobber lists).
+* **`disasm_compare.py <rev>`**: per-symbol machine-code comparison with a
+  git revision (`BASE=<rev> sh verify/run.sh`). **Result against `16e68a2`:
+  identical except the three documented changes.**
+
 ## Performance decisions (measured on this host)
 
 Host: AMD Ryzen 9 9950X3D (Zen 5, 16 cores on two CCDs, AVX-512 with full
@@ -528,7 +885,9 @@ reference is the C17 implementation compiled with `-O3` (gcc auto-vectorizes
 some loops with SSE2).
 
 The three tables below cover the 16 original kernels; they come from the
-original acceptance run of that code, which CR-4 did not change. The
+original acceptance run of that code, which neither CR-4 nor CR-5 changed
+(CR-5 kept the instructions; see
+[Performance before / after CR-5](#performance-before--after-cr-5)). The
 [128-bit kernels](#128-bit-kernels-cr-4-1) follow after them.
 
 ### Official `make bench` run (unpinned; it landed on the DRAM-bound CCD)
@@ -700,3 +1059,18 @@ Reading the 128-bit numbers:
 * All results come from this single Zen 5 host. Microarchitecture-specific
   choices (masked loads, gathers, POPCNT vs. `vpshufb`) may need revisiting on
   Intel cores.
+* CR-5 structure:
+  * The Makefile does not list the `*.h` include files as prerequisites
+    (the Makefile is outside this directory and was not changed). After
+    editing a header, `make clean` first.
+  * Helpers and tables defined once in a header are emitted once per variant
+    object that uses them (e.g. `lvp` is in all three objects, as before
+    CR-5). Sharing them across objects would have needed cross-file hidden
+    symbols, and it would have changed code placement for no benefit.
+  * The skeleton tags follow the existing code layout instead of reordering
+    code (see [Kernel skeleton](#kernel-skeleton-and-label-scheme)), so a few
+    kernels have an out-of-line part after their `ret`.
+  * `structure_check.py` checks `Clobbers:` against the registers the code
+    *can* write (all paths, all reachable helpers). A register that a kernel
+    pushes and pops around a helper call may be listed or omitted; such
+    cases say "preserved" in the header comment.
