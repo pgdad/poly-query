@@ -20,16 +20,51 @@ import (
 // rows are folded in batch by batch. Groups keep their first position, so
 // the output order is the same as with any other strategy.
 
-// scatterMinRows and scatterGroupRatio decide when a worker switches to
-// scattering: after at least scatterMinRows (active) rows, when its table
-// holds more than scatterGroupRatio groups and DISTINCT aggregate values
-// (see mergeWork) per row. (Below that, e.g. 10,000
-// groups seen twice on average in the first 16,384 rows, pre-aggregation
-// still reduces the data well over a whole table.)
+// scatterCheck decides when a worker switches to scattering, from the
+// growth of its table's merge work (groups and DISTINCT values, see
+// mergeWork) relative to the rows it folded, checked after every morsel
+// once it folded at least scatterMinRows rows: at the first check, if the
+// table holds more than scatterFirstRatio entries per row; later, if the
+// entries added since the previous check exceed scatterRate per row. (A
+// table's ratio overstates its final reduction: 10,000 uniformly
+// distributed keys give 0.5 entries per row after 16,384 rows, but only
+// 0.09 new ones per row over the next 16,384; skewed keys keep adding
+// groups.)
+type scatterCheck struct {
+	minRows          int64
+	firstRatio, rate float64
+	rows, work       int64 // at the previous check
+	checked          bool
+}
+
 const (
 	scatterMinRows    = 1 << 13
-	scatterGroupRatio = 0.75
+	scatterFirstRatio = 0.75
+	scatterRate       = 0.2
 )
+
+func newScatterCheck(ec *Context) scatterCheck {
+	if ec.ScatterRows > 0 { // testing: always switch
+		return scatterCheck{minRows: int64(ec.ScatterRows)}
+	}
+	return scatterCheck{minRows: scatterMinRows, firstRatio: scatterFirstRatio, rate: scatterRate}
+}
+
+// scatter records that rows more rows were folded into a table that now
+// has the given merge work, and reports whether to switch to scattering.
+func (c *scatterCheck) scatter(rows, work int64) bool {
+	rows += c.rows
+	if rows < c.minRows {
+		c.rows = rows
+		return false
+	}
+	ratio, dr, dw := c.rate, rows-c.rows, work-c.work
+	if !c.checked {
+		ratio, dr, dw = c.firstRatio, rows, work
+	}
+	c.rows, c.work, c.checked = rows, work, true
+	return float64(dw) > ratio*float64(dr)
+}
 
 // aggChunk holds up to BatchSize buffered rows of a partition: key and
 // argument columns (arguments only for calls with one) and input

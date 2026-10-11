@@ -598,12 +598,11 @@ func parallelAggregate(ec *Context, x *physical.HashAggregate) (BatchOperator, b
 		// Workers whose partial tables do not reduce the data switch to
 		// scattering rows into partitions (see vaggpart.go).
 		seed := maphash.MakeSeed()
-		scatterRows, ratio := int64(scatterMinRows), scatterGroupRatio
-		if ec.ScatterRows > 0 {
-			scatterRows, ratio = int64(ec.ScatterRows), 0 // testing: always switch
-		}
 		scatters := make([]*aggScatter, nw)
-		seen := make([]int64, nw)
+		checks := make([]scatterCheck, nw)
+		for w := range checks {
+			checks[w] = newScatterCheck(ec)
+		}
 		err := runMorsels(ec, ranges, nw, func(w, i int) error {
 			srcs[w].set(ranges[i])
 			in, t := inputs[w], tables[w]
@@ -630,9 +629,7 @@ func parallelAggregate(ec *Context, x *physical.HashAggregate) (BatchOperator, b
 				k += int64(b.N)
 				active += int64(b.Len())
 			}
-			seen[w] += active
-			if scatters[w] == nil && len(keyTypes) > 0 && seen[w] >= scatterRows &&
-				float64(t.mergeWork()) > ratio*float64(seen[w]) {
+			if scatters[w] == nil && len(keyTypes) > 0 && checks[w].scatter(active, int64(t.mergeWork())) {
 				scatters[w] = newAggScatter(ec, seed, nw, keyTypes, x.Aggs)
 			}
 			return nil
