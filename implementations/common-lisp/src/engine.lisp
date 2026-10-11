@@ -153,6 +153,18 @@ COLLECT-ROWS), enforcing MAX-ROWS and the memory budget."
 ;;; ------------------------------------------------------------------
 ;;; Loading
 
+(defparameter *settle-heap-rows* 100000
+  "Tables with more rows trigger a full garbage collection when published.")
+
+(defun settle-heap (table)
+  "After publishing a large TABLE, collect all generations once so its data
+moves to the oldest generation. Otherwise the young-generation collections
+that queries trigger keep promoting and rescanning the freshly loaded data,
+which shows up as pauses of 100 ms and more in later queries."
+  (when (> (table-row-count table) *settle-heap-rows*)
+    (sb-ext:gc :full t))
+  table)
+
 (defun load-table (session spec source &key replace (layout :column) (dictionary :auto))
   "Create a table from SOURCE (octets for CSV, a string for JSON/JSONL) per the
 INGEST-SPEC and publish it atomically. Returns the new table."
@@ -160,10 +172,10 @@ INGEST-SPEC and publish it atomically. Returns the new table."
       (ecase (ingest-spec-format spec)
         (:csv (ingest-csv source spec))
         ((:json :jsonl) (ingest-json source spec)))
-    (catalog-add-table (session-catalog session)
-                       (make-table (ingest-spec-table-name spec) defs data row-count
-                                   :layout layout :dictionary dictionary)
-                       :replace replace)))
+    (settle-heap (catalog-add-table (session-catalog session)
+                                    (make-table (ingest-spec-table-name spec) defs data row-count
+                                                :layout layout :dictionary dictionary)
+                                    :replace replace))))
 
 ;;; ------------------------------------------------------------------
 ;;; Persistent storage
@@ -195,4 +207,4 @@ lists. The catalog is only changed if everything succeeds."
                            collect (build-table-index index-name table
                                                       (find-column-index table column-name)
                                                       kind))))
-        (catalog-add-table catalog table :replace replace :indexes indexes)))))
+        (settle-heap (catalog-add-table catalog table :replace replace :indexes indexes))))))
