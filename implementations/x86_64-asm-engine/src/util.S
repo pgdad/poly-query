@@ -11,12 +11,16 @@
     .p2align 3
     .globl g_arena, g_jmpbuf, g_err_code, g_max_table_rows, g_max_ingest_bytes
     .globl g_max_query_mem, g_test_functions, g_data_dir, g_deadline_ns, g_pending_arena
+    .globl g_max_join_rows, g_err_line, g_err_col
 g_arena:            .quad 0        /* Arena* for the current request */
 g_jmpbuf:           .quad 0        /* jmp_buf* of the active error handler */
 g_err_code:         .quad 0
 g_max_table_rows:   .quad 200000000
 g_max_ingest_bytes: .quad 0x7fffffffffffffff
 g_max_query_mem:    .quad 4096*1024*1024
+g_max_join_rows:    .quad 100000000
+g_err_line:         .quad 0        /* SQL position of the error (details), 0 = none */
+g_err_col:          .quad 0
 g_test_functions:   .quad 0
 g_data_dir:         .quad 0        /* C string */
 g_deadline_ns:      .quad 0        /* CLOCK_MONOTONIC deadline of the running query, 0 = none */

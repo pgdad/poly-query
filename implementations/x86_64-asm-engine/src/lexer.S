@@ -401,8 +401,20 @@ lex_quoted:
     jmp lex_emit
 
 lex_err_unterminated:
+    mov 0(%rsp), %rax               /* position for the error details */
+    mov %rax, g_err_line(%rip)
+    mov %r13, %rax
+    sub %r15, %rax
+    inc %rax
+    mov %rax, g_err_col(%rip)
     RAISE E_PARSE_ERROR, "unterminated string literal or quoted identifier"
 lex_err_comment:
+    mov 0(%rsp), %rax               /* position for the error details */
+    mov %rax, g_err_line(%rip)
+    mov %r13, %rax
+    sub %r15, %rax
+    inc %rax
+    mov %rax, g_err_col(%rip)
     RAISE E_PARSE_ERROR, "unterminated block comment"
 
 /* ---------------------------------------------------------- operators */
@@ -483,6 +495,12 @@ lex_op:
     jmp lex_emit_src
 
 lex_err_char:
+    mov 0(%rsp), %rax               /* position for the error details */
+    mov %rax, g_err_line(%rip)
+    mov %r13, %rax
+    sub %r15, %rax
+    inc %rax
+    mov %rax, g_err_col(%rip)
     RAISE E_PARSE_ERROR, "unexpected character in SQL text"
 
 /* ---------------------------------------------------------- emit

@@ -195,7 +195,25 @@ FUNC eval
     je ev_agg
     cmp $EK_FUNC, %eax
     je ev_func
-    RAISE E_INTERNAL_ERROR, "cannot evaluate expression node"
+    cmp $EK_OUTER, %eax
+    je ev_outer
+    cmp $EK_SUBQ, %eax
+    jb 1f
+    cmp $EK_EXISTS, %eax
+    ja 1f
+    mov %rbx, %rdi                  /* subqueries: exec.S */
+    mov %r12, %rsi
+    call eval_subquery
+    LEAVE
+1:  cmp $EK_CASE, %eax              /* functions.S hook */
+    jb 2f
+    cmp $EK_LIKE, %eax
+    ja 2f
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    call eval_special
+    LEAVE
+2:  RAISE E_INTERNAL_ERROR, "cannot evaluate expression node"
 
 ev_ret_null:
     xor %eax, %eax
@@ -212,17 +230,29 @@ ev_lit:
     LEAVE
 
 ev_col:
-    mov EC_TABLE(%r12), %rcx
+    mov N_V2(%rbx), %rax            /* range variable */
+    mov EC_TUPLE(%r12), %rsi
+    mov (%rsi, %rax, 8), %rsi       /* row index */
+    cmp $-1, %rsi
+    je ev_ret_null
+    mov EC_TABLES(%r12), %rcx
+    mov (%rcx, %rax, 8), %rcx
     mov TB_COLS(%rcx), %rcx
     mov N_V1(%rbx), %rdx
     shl $5, %rdx
     add %rdx, %rcx                  /* Column* */
-    mov EC_ROW(%r12), %rsi
     mov COL_DATA(%rcx), %rax
     mov (%rax, %rsi, 8), %rax
     mov COL_NULLS(%rcx), %rdx
     movzbl (%rdx, %rsi), %edx
     LEAVE
+
+ev_outer:                           /* correlated column: V3 contexts up */
+    mov N_V3(%rbx), %rcx
+1:  mov EC_OUTER(%r12), %r12
+    dec %rcx
+    jnz 1b
+    jmp ev_col
 
 ev_agg:
     mov EC_AGGV(%r12), %rcx
@@ -276,33 +306,11 @@ ev_unary:
 2:  btc $63, %rax
     jmp ev_ret
 
-ev_func:
-    /* PQ_SLEEP(ms) */
-    mov N_A(%rbx), %rax
-    mov (%rax), %rdi
+ev_func:                            /* functions.S hook */
+    mov %rbx, %rdi
     mov %r12, %rsi
-    call eval
-    test %edx, %edx
-    jnz ev_ret_null
-    mov %rax, %r13                  /* result */
-    mov %rax, %r14                  /* remaining ms */
-1:  test %r14, %r14
-    jle 3f
-    mov %r14, %rcx
-    cmp $10, %rcx
-    jbe 2f
-    mov $10, %ecx
-2:  sub %rcx, %r14
-    imul $1000000, %rcx, %rcx
-    movq $0, 0(%rsp)
-    mov %rcx, 8(%rsp)
-    lea 0(%rsp), %rdi
-    xor %esi, %esi
-    call nanosleep
-    call check_deadline
-    jmp 1b
-3:  mov %r13, %rax
-    jmp ev_ret
+    call eval_scalar_func
+    LEAVE
 
 /* ---------------------------------------------------------------- binary */
 ev_binary:

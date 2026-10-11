@@ -255,8 +255,13 @@ FUNC main
     jne 12f
     mov %rdi, opt_request(%rip)     /* --request */
     jmp 2b
-12: cmp $4, %rax                    /* --max-join-rows, --threads: numeric */
-    je 13f
+12: cmp $4, %rax                    /* --max-join-rows */
+    jne 121f
+    mov %rbx, %rsi
+    call parse_size
+    mov %rax, g_max_join_rows(%rip)
+    jmp 2b
+121:
     cmp $5, %rax
     je 13f
     cmp $10, %rax

@@ -129,12 +129,23 @@
 #define EK_CAST   6    /* A operand, V1 target packed type */
 #define EK_FUNC   7    /* B name pstr, A node*[] args, V1 nargs; NF_STAR, NF_DISTINCT; bound: OP = F_* */
 #define EK_AGG    8    /* bound aggregate: OP AGG_*, A argument (0 for COUNT(*)), V2 slot */
+#define EK_CASE    9   /* A operand (simple CASE) or 0; B node*[2*V1] = when1,then1,when2,then2..;
+                          V1 number of WHEN pairs; V2 ELSE expr or 0 */
+#define EK_BETWEEN 10  /* A x, B low, V1 high; OP 1 = NOT BETWEEN */
+#define EK_INLIST  11  /* A x, B node*[V1] list items; OP 1 = NOT IN */
+#define EK_LIKE    12  /* A string, B pattern; OP 1 = NOT LIKE */
+#define EK_SUBQ    13  /* scalar subquery: V1 SelectStmt*; bound: V2 plan*, V3 cached value */
+#define EK_INSUBQ  14  /* A x, V1 SelectStmt*; OP 1 = NOT IN; bound: V2 plan*, V3 cached set */
+#define EK_EXISTS  15  /* V1 SelectStmt*; bound: V2 plan*, V3 cached result */
+#define EK_OUTER   16  /* bound correlated column: V1 column, V2 range variable, V3 scope levels up */
 
 #define NF_NULL     1  /* literal NULL */
 #define NF_STAR     2  /* f(*) */
 #define NF_DISTINCT 4  /* f(DISTINCT x) */
 #define NF_MINLIT   8  /* integer literal 9223372036854775808 awaiting unary minus */
 #define NF_PAREN    16 /* expression was parenthesised */
+#define NF_CACHED   32 /* subquery result cached in V3 */
+#define NF_CORR     64 /* subquery references an enclosing query */
 
 #define U_NEG 1
 #define U_POS 2
@@ -155,8 +166,34 @@
 #define B_AND 13
 #define B_OR 14
 
-/* scalar functions */
+/* scalar functions (EK_FUNC N_OP after binding) */
 #define F_PQ_SLEEP 1
+#define F_ABS 2
+#define F_ROUND 3
+#define F_FLOOR 4
+#define F_CEIL 5
+#define F_SQRT 6
+#define F_POWER 7
+#define F_MOD 8
+#define F_LENGTH 9
+#define F_UPPER 10
+#define F_LOWER 11
+#define F_SUBSTR 12
+#define F_TRIM 13
+#define F_LTRIM 14
+#define F_RTRIM 15
+#define F_REPLACE 16
+#define F_CONCAT 17
+#define F_COALESCE 18
+#define F_NULLIF 19
+#define F_YEAR 20
+#define F_MONTH 21
+#define F_DAY 22
+#define F_HOUR 23
+#define F_MINUTE 24
+#define F_SECOND 25
+#define F_DATE_TRUNC 26
+#define F_DATE_DIFF 27
 
 /* aggregates */
 #define AGG_COUNT_STAR 1
@@ -177,7 +214,47 @@
 #define SS_LIMIT    56
 #define SS_OFFSET   64
 #define SS_DISTINCT 72
-#define SS_SIZE     80
+#define SS_WITH     80 /* Vec* of Cte* or 0 */
+#define SS_SIZE     88
+
+/* ------------------------------------------------------------ statement (sql_parse output) */
+#define STMT_QUERY        1
+#define STMT_EXPLAIN      2
+#define STMT_CREATE_INDEX 3
+#define STMT_DROP_INDEX   4
+#define ST_KIND   0
+#define ST_QUERY  8    /* SelectStmt* (query / explain) */
+#define ST_NAME   16   /* index name pstr */
+#define ST_TABLE  24   /* table pstr (create index) */
+#define ST_COLUMN 32   /* column pstr (create index) */
+#define ST_IFX    40   /* IF [NOT] EXISTS given */
+#define ST_USING  48   /* 0 default, 1 HASH, 2 BTREE */
+#define ST_SIZE   56
+
+/* ------------------------------------------------------------ FROM items (parser output) */
+#define FK_TABLE   1
+#define FK_DERIVED 2
+#define FK_JOIN    3
+#define FI_KIND  0
+#define FI_NAME  8     /* table / CTE name pstr (FK_TABLE) */
+#define FI_ALIAS 16    /* alias pstr or 0 (FK_TABLE, FK_DERIVED) */
+#define FI_QUERY 24    /* SelectStmt* (FK_DERIVED) */
+#define FI_LEFT  32    /* FK_JOIN */
+#define FI_RIGHT 40
+#define FI_JTYPE 48    /* JT_* */
+#define FI_ON    56    /* expr or 0 */
+#define FI_SIZE  64
+
+#define JT_INNER 1
+#define JT_LEFT  2
+#define JT_CROSS 3
+
+/* CTE */
+#define CTE_NAME  0    /* pstr */
+#define CTE_COLS  8    /* Vec* of pstr or 0 */
+#define CTE_QUERY 16   /* SelectStmt* */
+#define CTE_PLAN  24   /* bound plan (binder) */
+#define CTE_SIZE  32
 
 #define SI_EXPR  0
 #define SI_ALIAS 8     /* pstr or 0 */
@@ -190,20 +267,60 @@
 #define OI_NULLS 16    /* 0 default, 1 NULLS FIRST, 2 NULLS LAST */
 #define OI_SIZE  24
 
-/* ------------------------------------------------------------ bound query plan (binder output) */
-#define QP_TABLE  0    /* Table* or 0 (SELECT without FROM) */
-#define QP_WHERE  8    /* bound predicate or 0 */
-#define QP_NOUT   16
-#define QP_OUT    24   /* OutCol[nout] */
-#define QP_NKEYS  32
-#define QP_KEYS   40   /* SortKey[nkeys] */
-#define QP_AGG    48   /* 1 = aggregated (single group) */
-#define QP_NAGGS  56
-#define QP_AGGS   64   /* EK_AGG node*[] */
-#define QP_LIMIT  72   /* -1 = none */
-#define QP_OFFSET 80
-#define QP_RANGE  88   /* range variable name pstr */
-#define QP_SIZE   96
+/* ------------------------------------------------------------ bound query plan (binder output)
+ * One plan per SELECT (top level, subquery, derived table, CTE). */
+#define QP_FROM     0    /* FromPlan* or 0 (SELECT without FROM) */
+#define QP_WHERE    8    /* bound predicate or 0 */
+#define QP_NOUT     16
+#define QP_OUT      24   /* OutCol[nout] */
+#define QP_NKEYS    32
+#define QP_KEYS     40   /* SortKey[nkeys] */
+#define QP_AGG      48   /* 1 = aggregated query */
+#define QP_NAGGS    56
+#define QP_AGGS     64   /* EK_AGG node*[] */
+#define QP_LIMIT    72   /* -1 = none */
+#define QP_OFFSET   80
+#define QP_NRV      88   /* number of range variables */
+#define QP_RVS      96   /* RangeVar*[nrv] */
+#define QP_NGROUP   104
+#define QP_GROUP    112  /* bound GROUP BY expressions node*[] */
+#define QP_HAVING   120
+#define QP_DISTINCT 128
+#define QP_CORR     136  /* references an enclosing query: never cached */
+#define QP_CACHE    144  /* cached Result* of an uncorrelated plan */
+#define QP_SIZE     152
+
+/* range variable */
+#define RV_NAME  0     /* pstr: alias or table/CTE name */
+#define RV_TABLE 8     /* base Table* or 0 */
+#define RV_PLAN  16    /* plan of a derived table / CTE */
+#define RV_NCOLS 24
+#define RV_COLS  32    /* RVC entries: pstr name, u64 packed type */
+#define RV_USED  40    /* u8[ncols], 1 = column referenced by the query */
+#define RV_SIZE  48
+#define RVC_NAME 0
+#define RVC_TYPE 8
+#define RVC_SIZE 16
+
+/* FROM plan node */
+#define FP_KIND  0     /* FK_TABLE (scan of range variable FP_RV) or FK_JOIN */
+#define FP_RV    8
+#define FP_LEFT  16
+#define FP_RIGHT 24
+#define FP_JTYPE 32    /* JT_* */
+#define FP_ON    40    /* bound join condition or 0 */
+#define FP_LKEY  48    /* equi-join key over the left input (hash join) or 0 */
+#define FP_RKEY  56    /* matching key over the right input */
+#define FP_RLO   64    /* range variables [RLO, RHI) come from the right input */
+#define FP_RHI   72
+#define FP_SIZE  80
+
+/* materialised query result */
+#define RS_NCOLS 0
+#define RS_NROWS 8
+#define RS_ROWS  16    /* row*[]; a row is VAL cells (outputs, then sort keys) */
+#define RS_PLAN  24
+#define RS_SIZE  32
 
 #define OC_EXPR 0
 #define OC_NAME 8      /* pstr */
@@ -217,11 +334,27 @@
 #define SK_TYPE   32
 #define SK_SIZE   40
 
-/* ------------------------------------------------------------ evaluation context */
-#define EC_TABLE 0     /* Table* */
-#define EC_ROW   8     /* current row index */
-#define EC_AGGV  16    /* aggregate values: 16 bytes per slot (payload, null) */
-#define EC_SIZE  24
+/* ------------------------------------------------------------ evaluation context
+ * A zero-filled context is valid for constant expressions. */
+#define EC_TUPLE  0    /* u64 row index per range variable (-1 = NULL-padded) */
+#define EC_TABLES 8    /* Table*[] per range variable */
+#define EC_AGGV   16   /* aggregate values: 16 bytes per slot (payload, null) */
+#define EC_OUTER  24   /* enclosing query's context (correlated subqueries) or 0 */
+#define EC_SIZE   64
+
+/* ------------------------------------------------------------ hash table over value-cell keys (hash.S) */
+#define HT_NB    0     /* bucket count (power of two) */
+#define HT_BKT   8     /* Entry*[nb] */
+#define HT_N     16    /* entries */
+#define HT_NK    24    /* key cells per entry */
+#define HT_TYPES 32    /* u64 packed type per key cell (low 32 bits used) */
+#define HT_SIZE  40
+#define EN_NEXT  0
+#define EN_HASH  8
+#define EN_KEY   16    /* VAL cells[nk] (owned by the caller, must stay alive) */
+#define EN_D0    24    /* user data */
+#define EN_D1    32
+#define EN_SIZE  40
 
 /* runtime value cell (rows, aggregate results) */
 #define VAL_P    0
