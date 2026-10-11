@@ -34,8 +34,8 @@ final class AggregateBatches {
 
     /**
      * A completed aggregation shared within a query: identical aggregation subplans (see
-     * {@link polyquery.physical.PlanKeys}) emit the same groups from the same tables, each
-     * consumer with its own emitter (emission only reads the tables).
+     * {@link SharedAggregates}) emit the same groups from the same tables, each consumer with
+     * its own emitter (emission only reads the tables).
      */
     interface Shared {
         Emitter emitter();
@@ -280,22 +280,22 @@ final class AggregateBatches {
         private final VecCompiler compiler;
         private final ExecContext ctx;
         private final int batchSize;
-        private final Object resultKey;
+        private final SharedAggregates.Candidate shared;
         private BatchExprs exprs;
         private Table table;
         private Emitter emitter;
         private boolean inputOpen;
 
-        /** @param resultKey structural key of the aggregation subplan if its result may be shared, else null */
+        /** @param shared the aggregation subplan, for sharing its result within the query (null: never) */
         HashAggregate(BatchOperator input, List<BoundExpr> groupKeys, List<AggregateCall> calls, VecCompiler compiler,
-                      ExecContext ctx, int batchSize, Object resultKey) {
+                      ExecContext ctx, int batchSize, SharedAggregates.Candidate shared) {
             this.input = input;
             this.groupKeys = groupKeys;
             this.calls = calls;
             this.compiler = compiler;
             this.ctx = ctx;
             this.batchSize = batchSize;
-            this.resultKey = resultKey;
+            this.shared = shared;
         }
 
         @Override
@@ -304,8 +304,9 @@ final class AggregateBatches {
                 table.release();
                 table = null;
             }
-            if (resultKey != null && ctx.sharedResult(resultKey) instanceof Shared s) {
-                emitter = s.emitter(); // the same subplan was aggregated earlier in this query
+            Shared earlier = SharedAggregates.find(ctx, shared);
+            if (earlier != null) {
+                emitter = earlier.emitter(); // the same subplan was aggregated earlier in this query
                 return;
             }
             inputOpen = true;
@@ -326,10 +327,8 @@ final class AggregateBatches {
                 }
             }
             emitter = new Emitter(table, groupKeys, calls, batchSize);
-            if (resultKey != null) {
-                Table done = table;
-                ctx.shareResult(resultKey, (Shared) () -> new Emitter(done, groupKeys, calls, batchSize));
-            }
+            Table done = table;
+            SharedAggregates.register(ctx, shared, () -> new Emitter(done, groupKeys, calls, batchSize));
         }
 
         @Override

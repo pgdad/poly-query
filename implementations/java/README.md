@@ -41,7 +41,11 @@ change.union_all change.decimal38`.
 
 * OpenJDK 27 (`java`, `javac`, `jar` on `PATH`, or `JAVA_HOME` set). No other tools,
   no network, no third-party libraries (Track A: standard library only).
-* `make build` — compiles with `javac --release 27` into `build/polyquery.jar`.
+* `make build` — compiles with `javac --release 27` into `build/polyquery.jar`, then runs a
+  ~10 s JIT training run (`bin/aot-train`, all cores) that writes the JVM AOT cache
+  `build/polyquery.aot` used by the launcher (see JIT warm-up in
+  [Latency optimization](#latency-optimization-analytics-workload)); if training fails, the
+  build still succeeds and the engine runs without the cache (log: `build/aot-training.log`).
 * `make test` — builds and runs the unit tests (`src/test/java`, plain Java with a small
   runner in `polyquery.TestMain`; JUnit is not used). The native-kernel tests use
   `NATIVE_LIB` (default `../../native-kernels/build/<arch>/libpqkernels.so`, built with
@@ -54,7 +58,8 @@ change.union_all change.decimal38`.
 * `make clean`.
 
 `bin/polyquery` is a POSIX shell launcher that works from any directory (it resolves its
-own location). Extra JVM flags can be passed with `POLYQUERY_JAVA_OPTS`.
+own location); its JVM options (shared with `bin/aot-train`) are in `bin/jvm-options`. Extra
+JVM flags can be passed with `POLYQUERY_JAVA_OPTS`; `POLYQUERY_AOT=off` disables the AOT cache.
 
 ```
 bin/polyquery version | capabilities
@@ -85,7 +90,7 @@ Source lives in `src/main/java/polyquery/`, one package per layer:
 | `plan` | Bound (typed) expressions (`BoundExpr`, `BoundExprs` traversal and input-slot analysis), aggregate calls, subqueries, the logical plan (`LogicalPlan`: `Scan`, `SingleRow`, `Filter`, `Project`, `Join`, `Aggregate`, `Distinct`, `Sort`, `Limit`, `UnionAll`), `LogicalPlanPrinter` (debug text), expression formatter |
 | `optimizer` | Rule-based logical optimizer on the logical plan only: `OptimizerRule`, `LogicalOptimizer` (`STANDARD` rule sequence, `DISABLED` for `optimize: false`), rules `ConstantFolding`, `PredicateSimplification`, `PredicatePushdown` (below projections, into join inputs, CROSS→INNER), `JoinReorder` (inner-join trees), `ProjectionPruning`; `ExprSafety` (can an expression fail / be NULL — with interval arithmetic over column statistics) |
 | `cost` | Estimates shared by both planning layers: `Cardinality` (rows and selectivities from statistics), `ColumnPredicates` (sargable conjuncts → key predicates) |
-| `physical` | `PhysicalPlan` nodes, `PhysicalPlanner` (table vs index scans, hash / merge / nested-loop joins and build side, top-N, hash lookup for correlated filters, execution model / threads / native kernels → `PhysicalQuery`), `ColumnPruner` (columns each scan reads), `PlanExplainer` (EXPLAIN JSON) |
+| `physical` | `PhysicalPlan` nodes, `PhysicalPlanner` (table vs index scans, hash / merge / nested-loop joins and build side, top-N, hash lookup for correlated filters, execution model / threads / native kernels → `PhysicalQuery`), `ColumnPruner` (columns each scan reads), `PlanExplainer` (EXPLAIN JSON), `PlanKeys` (structural keys of invariant subplans, for reusing a result within a query) |
 | `exec` | Row engine (`mode: row`): Volcano operators (table/index scans, filter, project, hash aggregate, distinct, hash/merge/nested-loop joins, sort, top-N, limit, hash-lookup filter), `OperatorBuilder` (physical plan → operators), `ExpressionCompiler` (bound expression → closures), `ScalarFunctions`, `SubqueryRunner`, `ExecContext` (timeout, memory budget, row/join limits, correlation frames) |
 | `exec.vector` | Vectorized engine (`mode: vectorized`): `Vec`/`Batch` (column vectors + selection vectors), `VecCompiler` + `Kernels` (batch expression kernels), `BatchExprs` (row-exact error semantics), scan/filter/project/limit, `AggregateBatches` + `GroupKeys` + `AggState` (hash aggregation, DISTINCT), `JoinBatches` (hash join), `SortBatches` (sort, top-N), `ColumnStore`, `Parallel` (morsel-driven workers), `BatchBuilder` (plan → batch operators), `VectorExecutor`; with `native: true`, `NativeFilter` (WHERE conjuncts) and `NativeAgg` (aggregate states) call the native kernels |
 | `ffi` | `NativeKernels`: FFM binding of `libpqkernels` (C ABI v1) — loading, ABI check, critical downcall handles over Java arrays, argument checks; the only class that touches `java.lang.foreign` |
@@ -97,6 +102,7 @@ Source lives in `src/main/java/polyquery/`, one package per layer:
 | `protocol` | JSON request handling/validation (`RequestHandler`, `QueryRequest`), the `QueryRunner` policy hook, result serialization, structured logger |
 | `server` | HTTP/1.1 server (Phase 4): `HttpServer` (accept loop, connection threads, graceful shutdown), `HttpConnection` (request parsing, fixed/chunked responses, disconnect detection), `ApiRouter` (endpoints → protocol ops), `QueryStream` (NDJSON streaming with backpressure), `QueryManager` (query registry, timeouts, metrics, logs), `Admission` (worker limit + FIFO queue), `Metrics` (Prometheus text) |
 | `Main` | CLI (`version`, `capabilities`, `session`, `exec`, `serve`) |
+| `Training` | JIT training run for the build-time AOT cache (synthetic tables, a broad query mix through the session request path) |
 
 Query pipeline (each stage is a separate class and data structure):
 
@@ -1051,11 +1057,14 @@ python3 tests/conformance/runner.py --engine implementations/java/bin/polyquery 
     --native native-kernels/build/x86_64/libpqkernels.so [--modes | --transport http]
 # … also with each variant: PQ_KERNELS_VARIANT=reference|scalar|avx2|avx512 python3 …
 # Phase 5 stress: every batch boundary, worker and deferred-error path on the small fixtures
-POLYQUERY_JAVA_OPTS="-Dpolyquery.batchSize=3 -Dpolyquery.morselRows=5" \
+POLYQUERY_JAVA_OPTS="-Dpolyquery.batchSize=3 -Dpolyquery.morselRows=5 -Dpolyquery.parallelSortRows=4" \
     python3 tests/conformance/runner.py --engine implementations/java/bin/polyquery --modes
 # randomized differential testing of all option combinations (data dir with a copy of fixtures/)
 python3 implementations/java/tools/difftest.py --engine implementations/java/bin/polyquery \
     --data /tmp/dtdata --queries 300 --seed 1 [--native-kernels native-kernels/build/x86_64/libpqkernels.so]
+# latency of the benchmark workload (see Latency optimization): cold and warm times, result digests
+python3 implementations/java/tools/workload_bench.py --engine implementations/java/bin/polyquery \
+    --workload benchmarks/workloads/analytics.json --data datasets/generated --scale 1m --rounds 5
 # benchmarks (see Phase 5: Measurements); native before/after with result verification
 python3 implementations/java/tools/bench.py --engine implementations/java/bin/polyquery --data /tmp/pqdata
 python3 implementations/java/tools/bench.py --engine implementations/java/bin/polyquery --data /tmp/pqdata \
@@ -1146,7 +1155,18 @@ and `use_indexes`/`optimize` off.
 * Parallelism applies to pipelines that start with a table scan and contain no subqueries;
   index scans and pipelines over fewer than two morsels (131,072 rows) run on one thread.
   High-cardinality GROUP BY / DISTINCT scale only moderately (partial aggregation reduces
-  little when most keys are distinct; there is no radix-partitioned exchange).
+  little when most keys are distinct; a radix-partitioned exchange was tried and was not
+  faster here — see Latency optimization). Aggregates over DISTINCT values run in parallel
+  only without GROUP BY.
+* Sharing of identical subplan results within a query covers aggregations only (e.g. a CTE
+  with GROUP BY referenced twice); other repeated subplans (joins, sorts, plain scans of a
+  CTE) are executed once per reference. The top-N cutoff applies to INT64-like and FLOAT64
+  first sort keys (strings and wide DECIMALs are only compacted, not pre-filtered).
+* The AOT cache (`build/polyquery.aot`) belongs to the JVM build and the jar it was trained
+  with; `make build` recreates it whenever the jar changes. Another JVM, a moved jar without
+  its cache, or different heap-limit settings (compressed oops) make the JVM ignore it — the
+  engine then just warms up more slowly. First executions still include JIT compilation (the
+  cache holds profiles, not compiled code).
 * Row order without ORDER BY depends on the join algorithm (hash vs merge vs build side), so
   `LIMIT` without `ORDER BY` over joins may pick different rows — or, if a failing expression
   is evaluated on the rows read before the limit is reached, differ in raising that error.

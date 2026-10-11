@@ -135,7 +135,7 @@ final class Parallel {
             Chain c = chain(a.input());
             if (c != null && safe(a.groupKeys()) && aggregatesSafe(a.aggregates(), a.groupKeys().isEmpty())
                     && worthIt(c, builder.morselRows())) {
-                return new Aggregate(builder, c, a, polyquery.physical.PlanKeys.resultKey(a));
+                return new Aggregate(builder, c, a, new SharedAggregates.Candidate(a));
             }
             return null;
         }
@@ -519,15 +519,16 @@ final class Parallel {
         private final List<AggregateBatches.Table> merged = new ArrayList<>();
         private AggregateBatches.Emitter emitter;
         private final List<AggregateBatches.Table> partials = new ArrayList<>();
-        private final Object resultKey;
+        private final SharedAggregates.Candidate sharedResult;
 
-        /** @param resultKey structural key of the aggregation subplan if its result may be shared, else null */
-        Aggregate(BatchBuilder builder, Chain chain, PhysicalPlan.HashAggregate plan, Object resultKey) {
+        /** @param sharedResult the aggregation subplan, for sharing its result within the query (null: never) */
+        Aggregate(BatchBuilder builder, Chain chain, PhysicalPlan.HashAggregate plan,
+                  SharedAggregates.Candidate sharedResult) {
             this.shared = new Shared(builder, chain);
             this.plan = plan;
             this.ctx = builder.context();
             this.threads = builder.threads();
-            this.resultKey = resultKey;
+            this.sharedResult = sharedResult;
         }
 
         /**
@@ -565,8 +566,9 @@ final class Parallel {
         @Override
         public void open() {
             close();
-            if (resultKey != null && ctx.sharedResult(resultKey) instanceof AggregateBatches.Shared s) {
-                emitter = s.emitter(); // the same subplan was aggregated earlier in this query
+            AggregateBatches.Shared done = SharedAggregates.find(ctx, sharedResult);
+            if (done != null) {
+                emitter = done.emitter(); // the same subplan was aggregated earlier in this query
                 return;
             }
             shared.open();
@@ -722,11 +724,9 @@ final class Parallel {
             }
             emitter = new AggregateBatches.Emitter(tables, sortedTable, sortedGroup, plan.groupKeys(),
                     plan.aggregates(), shared.builder.batchSize());
-            if (resultKey != null) {
-                int batchSize = shared.builder.batchSize();
-                ctx.shareResult(resultKey, (AggregateBatches.Shared) () -> new AggregateBatches.Emitter(tables,
-                        sortedTable, sortedGroup, plan.groupKeys(), plan.aggregates(), batchSize));
-            }
+            int batchSize = shared.builder.batchSize();
+            SharedAggregates.register(ctx, sharedResult, () -> new AggregateBatches.Emitter(tables, sortedTable,
+                    sortedGroup, plan.groupKeys(), plan.aggregates(), batchSize));
         }
 
         /** Merges partition {@code part} of every partial table (in worker order), keeping the earliest first positions. */
