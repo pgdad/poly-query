@@ -416,7 +416,7 @@ carries `"execution": {"mode": …, "threads": …}`.
 ### Parallel execution (`exec/parallel.rs`)
 
 Morsel-driven: a scan pipeline (scan → filters / projections / probe side
-of hash or nested-loop joins) is cut into morsels of 32,768 rows (within
+of hash or nested-loop joins) is cut into morsels of 16,384 rows (within
 row groups); worker threads claim morsels from an atomic counter and run
 the pipeline on them with their own execution context (sharing the
 query's deadline, cancellation flag and memory budget). Join build sides

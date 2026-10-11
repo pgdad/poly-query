@@ -46,7 +46,7 @@ use crate::storage::Table;
 pub const PARALLEL_STACK_BYTES: usize = 64 * 1024 * 1024;
 
 /// Default rows per morsel.
-const DEFAULT_MORSEL_ROWS: usize = 16 * BATCH_SIZE;
+const DEFAULT_MORSEL_ROWS: usize = 8 * BATCH_SIZE;
 
 /// Default rows per morsel (`POLYQUERY_MORSEL_ROWS` overrides it; used by
 /// tests to exercise the parallel operators on small tables).
