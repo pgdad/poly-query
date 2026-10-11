@@ -245,6 +245,9 @@ def claude_version() -> str | None:
     return p.stdout.strip() or None
 
 
+MAX_TOKEN_WAIT_MIN = float(os.environ.get("PQ_MAX_TOKEN_WAIT_MIN", "160"))
+
+
 def run(run_id: str, timeout_min: int, budget_usd: float, max_turns: int | None) -> dict:
     rd = run_dir(run_id)
     m = load_manifest(run_id)
@@ -255,10 +258,13 @@ def run(run_id: str, timeout_min: int, budget_usd: float, max_turns: int | None)
     # The run is capped to the access token's remaining lifetime so the agent never
     # needs to refresh it (refresh-token rotation across copies could invalidate the
     # host's or other runs' credentials).
+    # Wait for a token that covers the whole requested limit (up to what a fresh token
+    # offers), so limits are uniform across languages instead of depending on launch time.
+    need_min = max(75, min(timeout_min + 15, MAX_TOKEN_WAIT_MIN))
     while True:
         cred = json.loads(creds.read_text())
         remaining_min = ((cred.get("claudeAiOauth") or {}).get("expiresAt", 0) / 1000 - time.time()) / 60
-        if remaining_min >= 75:
+        if remaining_min >= need_min:
             break
         print(f"[{run_id}] waiting for host credential refresh (token valid {remaining_min:.0f} more min)", flush=True)
         time.sleep(120)
@@ -306,6 +312,8 @@ def run(run_id: str, timeout_min: int, budget_usd: float, max_turns: int | None)
     m["finished"] = now()
     m["wall_seconds"] = round(time.time() - t0, 1)
     m["agent_exit_code"] = rc
+    if rc in (124, 137) and not guard_reason:
+        m["termination_reason"] = "timeout"
     m["status"] = "ran"
     save_manifest(run_id, m)
     return m
@@ -873,11 +881,14 @@ def classify(m: dict, v: dict) -> str:
             ok = False
         elif isinstance(s, dict) and "failed" in s and s["failed"]:
             ok = False
+    rc = m.get("agent_exit_code")
+    # A killed agent did not finish its task, even if what it had committed passes.
+    if rc in (124, 137):
+        return "timeout"
     if ok:
         return "success"
-    rc = m.get("agent_exit_code")
     subtype = tel.get("result_subtype")
-    if rc in (124, 137) or (m.get("wall_seconds") or 0) >= (m.get("limits") or {}).get("timeout_min", 1e9) * 60:
+    if (m.get("wall_seconds") or 0) >= (m.get("limits") or {}).get("timeout_min", 1e9) * 60:
         return "timeout"
     if subtype and "budget" in str(subtype):
         return "budget_exhausted"
