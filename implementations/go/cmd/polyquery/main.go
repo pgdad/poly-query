@@ -28,7 +28,7 @@ options:
   --max-ingest-bytes N        ingestion size limit (default 4 GiB)
   --max-table-rows N          maximum rows per table (default 500000000)
   --max-join-rows N           maximum join rows (default 100000000)
-  --threads N                 worker threads per query (default: min(4, CPU count))
+  --threads N                 worker threads per query (default: min(16, CPU count))
   --log-level LEVEL           debug, info, warn, error, off (default info)
   --native-kernels PATH       load libpqkernels; queries with "native": true use it
   --request FILE|-            exec mode: request file, or - for stdin
