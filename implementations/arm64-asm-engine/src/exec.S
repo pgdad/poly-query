@@ -485,27 +485,15 @@ LFUNC ex_project
     mul  x0, x26, x24
     add  x0, x0, #16
     bl   arena_alloc
-    mov  x28, x0                        // cell matrix
-    mov  x27, #0
-2:  cmp  x27, x24
-    b.hs 4f
-    tst  x27, #DEADLINE_MASK
-    b.ne 3f
-    bl   check_deadline
-3:  mov  x0, x22
-    add  x1, x23, x27
-    bl   ts_tuple
-    str  x0, [x20, #EC_TUPLE]
-    ldr  x9, [x25, #RS_ROWS]
-    str  x28, [x9, x27, lsl #3]
-    mov  x0, x21
+    mov  x6, x0                         // cell matrix
+    mov  x0, x19                        // rows (ops.S: modes, threads)
     mov  x1, x20
-    mov  x2, x28
-    bl   project_row
-    add  x28, x28, x26
-    add  x27, x27, #1
-    b    2b
-4:  mov  x0, x25
+    mov  x2, x22
+    mov  x3, x23
+    mov  x4, x24
+    mov  x5, x25
+    bl   project_rows
+    mov  x0, x25
     add  sp, sp, #32
     LEAVE 5
 .Lxp_stream:
@@ -1895,44 +1883,7 @@ LFUNC materialize
     LEAVE 4
 ENDF materialize
 
-// =============================================================================
-// ex_filter(x0 PlanNode*, x1 ctx) -> x0 TupleSet*
-//   x19 node, x20 ctx, x21 input, x22 output, x23 index
-// =============================================================================
-LFUNC ex_filter
-    ENTER 3
-    mov  x19, x0
-    mov  x20, x1
-    ldr  x0, [x19, #PN_LEFT]
-    bl   ex_tuples
-    mov  x21, x0
-    ldr  x0, [x21, #TS_W]
-    ldr  x1, [x21, #TS_N]
-    bl   ts_new
-    mov  x22, x0
-    mov  x23, #0
-1:  ldr  x9, [x21, #TS_N]
-    cmp  x23, x9
-    b.hs 4f
-    tst  x23, #DEADLINE_MASK
-    b.ne 2f
-    bl   check_deadline
-2:  mov  x0, x21
-    mov  x1, x23
-    bl   ts_tuple
-    str  x0, [x20, #EC_TUPLE]
-    ldr  x0, [x19, #PN_EXPR]
-    mov  x1, x20
-    bl   eval_true
-    cbz  w0, 3f
-    ldr  x1, [x20, #EC_TUPLE]
-    mov  x0, x22
-    bl   ts_push
-3:  add  x23, x23, #1
-    b    1b
-4:  mov  x0, x22
-    LEAVE 3
-ENDF ex_filter
+// ex_filter: ops.S
 
 // =============================================================================
 // Subquery expressions (semantics.md §8)
