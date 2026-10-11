@@ -773,7 +773,7 @@ python3 tests/concurrency/http_suite.py --engine implementations/{lang}/bin/poly
         extra = ["conformance-http.json", "http-suite.json"]
     if m["task"] == "native":
         # Trusted kernel sources replace the workspace copy; the library is built inside the sandbox.
-        lib = "native-kernels/build/x86_64/libpqkernels.so"
+        lib = f"native-kernels/build/{'aarch64' if agent_host(lang) else 'x86_64'}/libpqkernels.so"
         script += f"""python3 tests/conformance/runner.py --engine implementations/{lang}/bin/polyquery {phase_args} --include-hidden \
    --native {lib} --report conformance-native.json -q > validate-native.log 2>&1; echo "native_exit=$?" >> validate-status
 python3 tests/conformance/runner.py --engine implementations/{lang}/bin/polyquery --modes --include-hidden \
@@ -787,7 +787,7 @@ python3 tests/concurrency/http_suite.py --engine implementations/{lang}/bin/poly
         extra = ["conformance-native.json", "conformance-native-modes.json", "conformance-modes.json",
                  "conformance-http.json", "http-suite.json"]
     if full and m["task"] != "phase5":
-        lib = "native-kernels/build/x86_64/libpqkernels.so"
+        lib = f"native-kernels/build/{'aarch64' if agent_host(lang) else 'x86_64'}/libpqkernels.so"
         # Engines may silently fall back when the library cannot be loaded (phase-5.md), so a missing
         # library must fail the native check instead of letting it pass without native kernels (HI-008).
         script += f"""if implementations/{lang}/bin/polyquery capabilities | grep -q native.kernels; then
