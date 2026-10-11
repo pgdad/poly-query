@@ -11,7 +11,8 @@
     "test_note": "",
     "simd_name": "",
     "optional_simd": "",
-    "test_target": ""
+    "test_target": "",
+    "tuning_note": "verify the build's `javac` settings and the existing launcher/AOT-cache set-up (if any) actually take effect (check with class-loading logs); consider whether a trimmed runtime image (`jlink`) helps start-up; keep the code free of reflection in hot paths."
   },
   "clojure": {
     "language": "Clojure",
@@ -25,7 +26,8 @@
     "test_note": "",
     "simd_name": "",
     "optional_simd": "",
-    "test_target": ""
+    "test_target": "",
+    "tuning_note": "verify that the engine is fully ahead-of-time compiled (no namespace compiled or loaded from source at run time; check with class-loading logs) and that direct linking is in effect on hot call sites (inspect bytecode with `javap -c`); consider compiler options such as `:elide-meta`; enable `*unchecked-math* :warn-on-boxed` in the lint build and make lint fail on boxed math in hot namespaces; keep `*warn-on-reflection*` everywhere."
   },
   "rust": {
     "language": "Rust",

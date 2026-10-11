@@ -19,7 +19,11 @@ task=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['task'])" 
 # A debug-mutant fix is relative to a baseline with an injected defect that main never had: record only.
 if [[ $task == debug-mutant || $task == kernel-debug-mutant ]]; then echo "accept: $RUN recorded (debug-mutant runs are not merged)"; exit 0; fi
 record_only=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('record_only', False))" "/srv/polyquery/runs/$RUN/manifest.json")
-if [[ $record_only == True ]]; then echo "accept: $RUN recorded (record-only run, not merged)"; exit 0; fi
+if [[ $record_only == True ]]; then
+  # Import as a branch (for the before/after benchmark) without merging into main.
+  "${PQ[@]}" import "$RUN" | tail -n 1
+  echo "accept: $RUN recorded and imported (record-only run, not merged)"; exit 0
+fi
 "${PQ[@]}" import "$RUN" --merge | tail -n 1
 if [[ $lang == *-asm ]]; then
   # Kernel cohort: public, ASan/UBSan and hidden kernel tests (AArch64 also natively on the ARM host).

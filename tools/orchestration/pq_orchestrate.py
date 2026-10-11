@@ -81,7 +81,7 @@ NATIVE_EXTRA_PATHS = ["native-kernels/Makefile", "native-kernels/reference-c", "
 
 PHASE_TASKS = {"phase1", "phase2", "phase3", "phase4", "phase5"}
 # Inputs a task's prompt names explicitly (HI-007: optimize-latency named a workload that was never exported).
-TASK_EXTRA_PATHS = {"optimize-latency": ["benchmarks/workloads"]}
+TASK_EXTRA_PATHS = {"optimize-latency": ["benchmarks/workloads"], "jvm-tuning": ["benchmarks/workloads"]}
 
 TRUSTED_PATHS = ["tests", "spec"]
 TRUSTED_KERNEL_PATHS = ["spec", "native-kernels/Makefile", "native-kernels/include", "native-kernels/reference-c",
@@ -188,7 +188,7 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
     subprocess.run(["tar", "-x", "-C", str(ws)], input=archive.stdout, check=True)
     (ws / impl_path).mkdir(parents=True, exist_ok=True)
 
-    template = (PROMPTS / L["template"]).read_text()
+    template = (PROMPTS / t.get("template", L["template"])).read_text()
     values = {
         "WORK_DIR": L["work_dir"], "VARIANT_PREFIX": L["variant_prefix"], "ABI": L["abi"],
         "TEST_NOTE": L["test_note"], "SIMD_NAME": L["simd_name"], "OPTIONAL_SIMD": L["optional_simd"],
@@ -199,6 +199,7 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
         "STDLIB_NOTE": L["stdlib_note"],
         "BENCH_NOTE": L.get("bench_note", ""), "BENCH_DONE": L.get("bench_done", ""),
         "BENCH_TABLE_NOTE": L.get("bench_table_note", ""), "OPTIONAL_SIMD_OPT": L.get("optional_simd_opt", ""),
+        "TUNING_NOTE": L.get("tuning_note", ""),
     }
     task_md = render(template, values)
     (ws / "TASK.md").write_text(task_md)
@@ -234,7 +235,7 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
         "run_id": run_id, "wave": wave, "language": lang, "task": task, "track": track, "attempt": attempt,
         "created": now(), "repo_ref": ref, "baseline_commit": baseline,
         "spec_hash": tree_hash([ROOT / "spec"]),
-        "prompt_template": f"experiments/prompts/{L['template']}", "work_dir": L["work_dir"],
+        "prompt_template": f"experiments/prompts/{t.get('template', L['template'])}", "work_dir": L["work_dir"],
         "prompt_id": f"track-{track.lower()}-{task}", "prompt_sha256": prompt_hash,
         "model": DEFAULT_MODEL, "effort": DEFAULT_EFFORT,
         "agent_harness": None, "limits": {}, "status": "prepared",
@@ -886,7 +887,7 @@ def run_native_arm(kernels_dir: Path, out_dir: Path) -> dict:
                                                          "sve_default_vector_length_bytes", "governor")}}
 
 
-CAPS_UNCHANGED_TASKS = {"refactor-plan-separation", "debug-mutant", "optimize-latency"}
+CAPS_UNCHANGED_TASKS = {"refactor-plan-separation", "debug-mutant", "optimize-latency", "jvm-tuning"}
 TASK_REQUIRED_CAPS = {"change-union-all": "change.union_all", "change-decimal38": "change.decimal38",
                       "native": "native.kernels"}
 
