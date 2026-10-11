@@ -96,6 +96,9 @@ public final class ColumnPruner {
                 yield new PhysicalPlan.TopN(prune(t.input(), need), t.keys(), t.offset(), t.limit());
             }
             case PhysicalPlan.Limit l -> new PhysicalPlan.Limit(prune(l.input(), required), l.offset(), l.limit());
+            // Every branch fills the same output slots.
+            case PhysicalPlan.UnionAll u -> new PhysicalPlan.UnionAll(
+                    u.inputs().stream().map(in -> prune(in, required)).toList(), u.columns());
             case PhysicalPlan.MergeJoin j -> {
                 int leftWidth = j.left().schema().size();
                 BitSet need = j.residual() == null ? required : union(required, j.residual());

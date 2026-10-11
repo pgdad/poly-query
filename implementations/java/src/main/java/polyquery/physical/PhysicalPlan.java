@@ -250,6 +250,19 @@ public sealed interface PhysicalPlan {
         }
     }
 
+    /** The rows of every input, one input after the other, duplicates kept ({@code UNION ALL}). */
+    record UnionAll(List<PhysicalPlan> inputs, List<ColumnSchema> columns) implements PhysicalPlan {
+        @Override
+        public List<ColumnSchema> schema() {
+            return columns;
+        }
+
+        @Override
+        public List<PhysicalPlan> children() {
+            return inputs;
+        }
+    }
+
     /** OFFSET then LIMIT; expressions are constant INT64 (null = absent). */
     record Limit(PhysicalPlan input, BoundExpr offset, BoundExpr limit) implements PhysicalPlan {
         @Override
@@ -271,6 +284,7 @@ public sealed interface PhysicalPlan {
             case IndexScan t -> { }
             case Values v -> { }
             case HashDistinct d -> { }
+            case UnionAll u -> { }
             case Sort s -> { }
             case Filter f -> out.add(f.predicate());
             case HashLookupFilter h -> out.addAll(h.expressions());

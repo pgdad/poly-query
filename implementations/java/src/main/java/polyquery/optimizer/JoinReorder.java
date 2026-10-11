@@ -47,6 +47,7 @@ final class JoinReorder {
                     a.aggregates());
             case LogicalPlan.Project p -> new LogicalPlan.Project(reorder(p.input()), p.expressions(), p.names());
             case LogicalPlan.Distinct d -> new LogicalPlan.Distinct(reorder(d.input()));
+            case LogicalPlan.UnionAll u -> u.withInputs(u.inputs().stream().map(JoinReorder::reorder).toList());
             case LogicalPlan.Sort s -> new LogicalPlan.Sort(reorder(s.input()), s.keys());
             case LogicalPlan.Limit l -> new LogicalPlan.Limit(reorder(l.input()), l.offset(), l.limit());
         };

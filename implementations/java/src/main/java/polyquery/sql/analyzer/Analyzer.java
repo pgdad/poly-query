@@ -17,6 +17,7 @@ import polyquery.sql.ast.Query;
 import polyquery.storage.Catalog;
 import polyquery.storage.ColumnSchema;
 import polyquery.storage.Table;
+import polyquery.types.DataType;
 import polyquery.types.TypeKind;
 
 /**
@@ -71,7 +72,10 @@ public final class Analyzer {
     private PlannedQuery planQuery(Query q, Scope parent, boolean barrier, CteEnv env) {
         Scope scope = new Scope(parent, barrier, nextFrame++);
         CteEnv inner = bindWith(q.with(), scope, env);
-        BoundQuery bound = bindQuery(q, scope, inner);
+        if (q.compound()) {
+            return planUnionAll(q, scope, inner);
+        }
+        BoundQuery bound = bindQuery(q.branches().getFirst(), q.orderBy(), q.limit(), q.offset(), scope, inner);
         List<ColumnSchema> columns = new ArrayList<>();
         for (int i = 0; i < bound.visibleCount(); i++) {
             columns.add(new ColumnSchema(bound.names().get(i), bound.projections().get(i).type()));
@@ -176,8 +180,8 @@ public final class Analyzer {
 
     // ---------------------------------------------------------------- query level
 
-    private BoundQuery bindQuery(Query q, Scope scope, CteEnv env) {
-        Query.Select sel = q.select();
+    private BoundQuery bindQuery(Query.Select sel, List<Query.OrderItem> orderItems, Expr limitExpr,
+                                 Expr offsetExpr, Scope scope, CteEnv env) {
         LogicalPlan source = sel.from() == null ? new LogicalPlan.SingleRow() : bindFrom(sel.from(), scope, env);
 
         BoundExpr where = null;
@@ -187,7 +191,7 @@ public final class Analyzer {
         }
 
         List<SelectEntry> entries = expandSelectList(sel, scope);
-        boolean aggregated = !sel.groupBy().isEmpty() || sel.having() != null || containsAggregate(sel, q.orderBy());
+        boolean aggregated = !sel.groupBy().isEmpty() || sel.having() != null || containsAggregate(sel, orderItems);
 
         List<BoundExpr> keys = new ArrayList<>();
         for (Expr g : sel.groupBy()) {
@@ -214,19 +218,143 @@ public final class Analyzer {
 
         ExpressionBinder orderBinder = binder(scope, aggs, "ORDER BY", env);
         List<SortKey> orderBy = new ArrayList<>();
-        for (Query.OrderItem item : q.orderBy()) {
+        for (Query.OrderItem item : orderItems) {
             int column = resolveOrderItem(item.expr(), projections, names, visible, orderBinder, keys, scope,
                     aggregated, sel.distinct());
             boolean nullsFirst = item.nullsFirst() != null ? item.nullsFirst() : !item.descending();
             orderBy.add(new SortKey(column, item.descending(), nullsFirst));
         }
 
-        BoundExpr limit = q.limit() == null ? null : constantInt(q.limit(), "LIMIT");
-        BoundExpr offset = q.offset() == null ? null : constantInt(q.offset(), "OFFSET");
+        BoundExpr limit = limitExpr == null ? null : constantInt(limitExpr, "LIMIT");
+        BoundExpr offset = offsetExpr == null ? null : constantInt(offsetExpr, "OFFSET");
 
         return new BoundQuery(source, where, aggregated, List.copyOf(keys),
                 aggs == null ? List.of() : List.copyOf(aggs.calls()), having, projections, names, visible,
                 sel.distinct(), orderBy, limit, offset);
+    }
+
+    // ---------------------------------------------------------------- UNION ALL
+
+    /**
+     * Plans {@code b1 UNION ALL b2 …} (spec/changes/union-all.md): every branch is its own query
+     * level (a scope nested in the compound's, so CTEs and outer columns are visible but the
+     * other branches' range variables are not); output column i has the common type of the
+     * branches' column i (CASE rules), each branch converting its values to it; names come
+     * from the first branch. ORDER BY (output names or positions only) and LIMIT/OFFSET apply
+     * to the concatenation.
+     */
+    private PlannedQuery planUnionAll(Query q, Scope scope, CteEnv env) {
+        List<BoundQuery> branches = new ArrayList<>();
+        for (Query.Select sel : q.branches()) {
+            Scope branchScope = new Scope(scope, false, nextFrame++);
+            branches.add(bindQuery(sel, List.of(), null, null, branchScope, env));
+        }
+        BoundQuery first = branches.getFirst();
+        int width = first.visibleCount();
+        for (BoundQuery b : branches) {
+            if (b.visibleCount() != width) {
+                throw semantic("each UNION ALL branch must have the same number of columns (%d vs %d)", width,
+                        b.visibleCount());
+            }
+        }
+        List<ColumnSchema> columns = new ArrayList<>();
+        for (int i = 0; i < width; i++) {
+            List<DataType> types = new ArrayList<>();
+            for (BoundQuery b : branches) {
+                types.add(b.projections().get(i).type());
+            }
+            columns.add(new ColumnSchema(first.names().get(i), TypeCoercion.commonType(types, "UNION ALL")));
+        }
+        List<LogicalPlan> inputs = new ArrayList<>();
+        for (BoundQuery b : branches) {
+            inputs.add(convertBranch(b, columns));
+        }
+        LogicalPlan plan = new LogicalPlan.UnionAll(List.copyOf(inputs), List.copyOf(columns));
+
+        List<SortKey> orderBy = new ArrayList<>();
+        for (Query.OrderItem item : q.orderBy()) {
+            int column = resolveCompoundOrderItem(item.expr(), branches, columns);
+            boolean nullsFirst = item.nullsFirst() != null ? item.nullsFirst() : !item.descending();
+            orderBy.add(new SortKey(column, item.descending(), nullsFirst));
+        }
+        if (!orderBy.isEmpty()) {
+            plan = new LogicalPlan.Sort(plan, orderBy);
+        }
+        BoundExpr limit = q.limit() == null ? null : constantInt(q.limit(), "LIMIT");
+        BoundExpr offset = q.offset() == null ? null : constantInt(q.offset(), "OFFSET");
+        if (limit != null || offset != null) {
+            plan = new LogicalPlan.Limit(plan, offset, limit);
+        }
+        return new PlannedQuery(plan, List.copyOf(columns), scope.externalRefs());
+    }
+
+    /**
+     * The logical plan of one branch producing the compound's column types: the conversions
+     * are folded into the branch's projection, or (after SELECT DISTINCT, where converting
+     * first could merge distinct values) applied by a projection on top.
+     */
+    private static LogicalPlan convertBranch(BoundQuery b, List<ColumnSchema> columns) {
+        boolean converts = false;
+        for (int i = 0; i < columns.size(); i++) {
+            converts |= !b.projections().get(i).type().equals(columns.get(i).type());
+        }
+        if (!converts) {
+            return LogicalPlanner.plan(b);
+        }
+        if (!b.distinct()) {
+            List<BoundExpr> projections = new ArrayList<>(b.projections());
+            for (int i = 0; i < columns.size(); i++) {
+                projections.set(i, TypeCoercion.implicit(projections.get(i), columns.get(i).type()));
+            }
+            return LogicalPlanner.plan(new BoundQuery(b.source(), b.where(), b.aggregated(), b.groupKeys(),
+                    b.aggregates(), b.having(), projections, b.names(), b.visibleCount(), b.distinct(), b.orderBy(),
+                    b.limit(), b.offset()));
+        }
+        List<BoundExpr> converted = new ArrayList<>();
+        for (int i = 0; i < columns.size(); i++) {
+            ColumnSchema c = columns.get(i);
+            BoundExpr ref = new BoundExpr.ColumnRef(i, b.projections().get(i).type(), b.names().get(i));
+            converted.add(TypeCoercion.implicit(ref, c.type()));
+        }
+        return new LogicalPlan.Project(LogicalPlanner.plan(b), converted, b.names());
+    }
+
+    /** A compound query's ORDER BY item: an output column name (of the first branch) or a 1-based position. */
+    private static int resolveCompoundOrderItem(Expr expr, List<BoundQuery> branches, List<ColumnSchema> columns) {
+        Integer ordinal = ordinal(expr);
+        if (ordinal != null) {
+            if (ordinal < 1 || ordinal > columns.size()) {
+                throw semantic("ORDER BY position %d is out of range", ordinal);
+            }
+            return ordinal - 1;
+        }
+        if (expr instanceof Expr.ColumnRef c && c.qualifier() == null) {
+            int match = -1;
+            for (int i = 0; i < columns.size(); i++) {
+                if (Names.equal(columns.get(i).name(), c.name())) {
+                    if (match >= 0 && !sameColumnInAllBranches(branches, match, i)) {
+                        throw semantic("ORDER BY name '%s' is ambiguous", c.name());
+                    }
+                    if (match < 0) {
+                        match = i;
+                    }
+                }
+            }
+            if (match >= 0) {
+                return match;
+            }
+            throw semantic("ORDER BY of a UNION ALL must name an output column; unknown column '%s'", c.name());
+        }
+        throw semantic("ORDER BY of a UNION ALL may only use output column names or positions");
+    }
+
+    private static boolean sameColumnInAllBranches(List<BoundQuery> branches, int a, int b) {
+        for (BoundQuery q : branches) {
+            if (!q.projections().get(a).equals(q.projections().get(b))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     static void requireCondition(BoundExpr e, String clause) {

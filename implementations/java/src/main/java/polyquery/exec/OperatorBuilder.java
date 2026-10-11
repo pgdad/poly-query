@@ -80,6 +80,7 @@ public final class OperatorBuilder {
                 yield new AggregateOperator(build(a.input()), compileAll(a.groupKeys()), a.aggregates(), args, ctx);
             }
             case PhysicalPlan.HashDistinct d -> new DistinctOperator(build(d.input()), ctx);
+            case PhysicalPlan.UnionAll u -> new Operators.UnionAll(u.inputs().stream().map(this::build).toList());
             case PhysicalPlan.HashJoin j -> hashJoin(j);
             case PhysicalPlan.NestedLoopJoin j -> new JoinOperators.NestedLoopJoin(build(j.left()), build(j.right()),
                     j.condition() == null ? null : compiler.compile(j.condition()),

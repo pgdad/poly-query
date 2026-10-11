@@ -82,6 +82,10 @@ public final class PlanExplainer {
                 node.put("aggregates", aggs);
             }
             case PhysicalPlan.HashDistinct d -> node.put("op", "Distinct");
+            case PhysicalPlan.UnionAll u -> {
+                node.put("op", "UnionAll");
+                node.put("columns", names(u.schema(), null));
+            }
             case PhysicalPlan.HashJoin j -> {
                 node.put("op", "HashJoin");
                 node.put("join_type", j.kind().name());

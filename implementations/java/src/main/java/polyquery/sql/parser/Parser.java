@@ -199,9 +199,14 @@ public final class Parser {
                 with.add(new Query.Cte(SourcePos.of(ct), name, cols, q));
             } while (accept(TokenType.COMMA));
         }
-        Query.Select select = selectCore();
-        if (peek().isKeyword("UNION")) {
-            throw unsupported(peek(), "UNION");
+        List<Query.Select> branches = new ArrayList<>();
+        branches.add(selectCore());
+        while (peek().isKeyword("UNION")) {
+            Token union = next();
+            if (!acceptKeyword("ALL")) {
+                throw unsupported(union, "UNION without ALL");
+            }
+            branches.add(selectCore());
         }
         List<Query.OrderItem> orderBy = List.of();
         if (peek().isKeyword("ORDER")) {
@@ -242,8 +247,12 @@ public final class Parser {
                 limit = expr();
             }
         }
+        if (peek().isKeyword("UNION") && peek(1).isKeyword("ALL")) {
+            // ORDER BY / LIMIT can only follow the last branch of a compound query.
+            throw error(peek(), "ORDER BY and LIMIT are only allowed after the last branch of UNION ALL");
+        }
         depth--;
-        return new Query(SourcePos.of(start), with, select, orderBy, limit, offset);
+        return new Query(SourcePos.of(start), with, List.copyOf(branches), orderBy, limit, offset);
     }
 
     private Query.Select selectCore() {

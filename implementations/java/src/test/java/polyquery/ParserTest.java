@@ -12,7 +12,7 @@ final class ParserTest {
 
     private static Expr firstItem(String sql) {
         Statement.QueryStatement s = (Statement.QueryStatement) Parser.parse(sql);
-        return ((Query.ExprItem) s.query().select().items().get(0)).expr();
+        return ((Query.ExprItem) s.query().branches().getFirst().items().get(0)).expr();
     }
 
     static void testPrecedence() {
@@ -38,8 +38,8 @@ final class ParserTest {
         Statement.QueryStatement s = (Statement.QueryStatement) Parser.parse(
                 "SELECT p.*, x AS y FROM people p WHERE a IS NOT NULL ORDER BY 1 DESC NULLS FIRST OFFSET 2 LIMIT 3;");
         Query q = s.query();
-        Assert.eq(2, q.select().items().size());
-        Assert.check(q.select().from() instanceof Query.TableRef t && t.alias().equals("p"), "alias");
+        Assert.eq(2, q.branches().getFirst().items().size());
+        Assert.check(q.branches().getFirst().from() instanceof Query.TableRef t && t.alias().equals("p"), "alias");
         Assert.eq(true, q.orderBy().get(0).descending());
         Assert.eq(Boolean.TRUE, q.orderBy().get(0).nullsFirst());
         Assert.check(q.limit() != null && q.offset() != null, "limit/offset");
@@ -64,5 +64,26 @@ final class ParserTest {
         Assert.fails(ErrorCode.PARSE_ERROR, () -> Parser.parse("SELECT FROM t"));
         Assert.fails(ErrorCode.UNSUPPORTED, () -> Parser.parse("SELECT 1 UNION SELECT 2"));
         Assert.fails(ErrorCode.UNSUPPORTED, () -> Parser.parse("SELECT 1 FROM a RIGHT JOIN b ON TRUE"));
+    }
+
+    static void testUnionAll() {
+        Statement.QueryStatement s = (Statement.QueryStatement) Parser.parse(
+                "WITH c AS (SELECT 1 AS x UNION ALL SELECT 2) SELECT x FROM c UNION ALL SELECT 3 UNION ALL SELECT 4 "
+                        + "ORDER BY 1 LIMIT 2");
+        Query q = s.query();
+        Assert.eq(3, q.branches().size());
+        Assert.check(q.compound(), "compound");
+        Assert.eq(2, q.with().getFirst().query().branches().size());
+        Assert.eq(1, q.orderBy().size());
+        Assert.check(q.limit() != null, "limit applies to the compound");
+        Parser.parse("SELECT a FROM (SELECT 1 AS a UNION ALL SELECT 2) t WHERE a IN (SELECT 1 UNION ALL SELECT 2)");
+        Parser.parse("EXPLAIN SELECT 1 UNION ALL SELECT 2");
+        Assert.fails(ErrorCode.UNSUPPORTED, () -> Parser.parse("SELECT 1 UNION DISTINCT SELECT 2"));
+        Assert.fails(ErrorCode.UNSUPPORTED, () -> Parser.parse("SELECT 1 UNION ALL SELECT 2 UNION SELECT 3"));
+        Assert.fails(ErrorCode.PARSE_ERROR, () -> Parser.parse("SELECT 1 ORDER BY 1 UNION ALL SELECT 2"));
+        Assert.fails(ErrorCode.PARSE_ERROR, () -> Parser.parse("SELECT 1 LIMIT 1 UNION ALL SELECT 2"));
+        Assert.fails(ErrorCode.PARSE_ERROR, () -> Parser.parse("(SELECT 1) UNION ALL (SELECT 2)"));
+        Assert.fails(ErrorCode.PARSE_ERROR, () -> Parser.parse("SELECT 1 UNION ALL (SELECT 2)"));
+        Assert.fails(ErrorCode.PARSE_ERROR, () -> Parser.parse("SELECT 1 UNION ALL"));
     }
 }
