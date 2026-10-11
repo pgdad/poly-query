@@ -1,0 +1,107 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase4-common-lisp-a1-20261010T224856Z",
+ "language": "common-lisp",
+ "task": "phase4",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase4",
+ "prompt_sha256": "956ea10403e695ec9a4b321b9890bcd6c8eb318e629779e3c5ab50a8f246740e",
+ "session_id": "69454930-4e0a-4ff3-87cb-c1996b894803",
+ "tokens": {
+  "input": 146,
+  "output": 120599,
+  "cache_read": 11180391,
+  "cache_creation": 226667,
+  "thinking": null,
+  "thinking_estimated": 57526,
+  "source": "result events",
+  "api_messages": 73
+ },
+ "rate_limit": {
+  "events": 4,
+  "max_utilization": {
+   "five_hour": 0.09,
+   "seven_day": 0.17
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 6.461978200000001,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 78,
+ "result_segments": 1,
+ "assistant_messages": 174,
+ "tool_calls": {
+  "Bash": 71,
+  "Write": 5,
+  "Read": 1
+ },
+ "tool_calls_total": 77,
+ "tool_failures": 4,
+ "build_invocations": 26,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 7,
+ "conformance_progress": [
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ],
+  [
+   554,
+   569
+  ]
+ ],
+ "repair_iterations": 6,
+ "time": {
+  "wall_seconds": 1214.0,
+  "model_api_seconds": 1067.8,
+  "tool_seconds": 145.9,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 5,
+  "files_changed": 11,
+  "lines_added": 1891,
+  "lines_removed": 83,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 4 is finished and committed. Every required check passes:\n\n| Check | Result |\n|---|---|\n| Conformance, `--transport http` | phase 1: 225/225, phase 2: 186/186, phase 3: 143/143, 0 fail, 0 error |\n| Conformance, session | same: 554/554 for phases 1\u20133 |\n| `tests/concurrency/http_suite.py` | **18/18 passed** (also passed 3 more times in a row, once with the conformance suite running in parallel) |\n| `make build test` | build succeeds (no warnings, `make lint` clean); unit tests report \"No tests failed.\" |\n\nThe runner prints `TOTAL: 554/569` and exits with a failure code because the 15 phase\u20115 cases are reported as \"not implemented\". Phase 5 isn't part of this task, and the engine doesn't claim those capabilities.\n\n**What I built** (`src/server/`, plus small changes to the engine):\n- **`http.lisp`:** HTTP/1.1 parsing (keep\u2011alive, chunked and fixed\u2011length bodies, `Expect: 100-continue`, percent\u2011decoding) and response writing.\n- **`scheduler.lisp`:** a fixed pool of `--workers` threads and a FIFO queue of `--queue-depth`. When both are full, a query is rejected immediately with `OVERLOADED`. It also keeps the list of active query ids and handles timeouts (time spent queued counts) and cancellation.\n- **`metrics.lisp` / `server.lisp`:** every endpoint in protocol.md \u00a77, Prometheus metrics, JSON logs, NDJSON streaming, cancelling a query when its client disconnects, and SIGTERM/SIGINT shutdown that waits up to `--shutdown-grace-ms` and exits with status 0.\n- **Engine:** each query now plans against its own copy of the catalog, so a concurrent replace or drop doesn't affect a query that has already started (snapshot isolation). Logs are written under a lock with millisecond timestamps.\n- Unit tests for the server parts, and README sections on the design, decisions and limitations.\n\n**Main design decisions:**\n- One thread per connection. Health, metrics, query listing and cancellation run on that thread, so they still respond when every worker is busy.\n- A query finishes exactly once, whichever side gets there first: the worker, or the waiting connection thread when the query is cancelled or times out while queued. If a running query hasn't stopped 50 ms after its deadline or cancel, the client gets `TIMEOUT`/`CANCELLED` anyway.\n- Streaming: the worker can be at most 8 batches of 1000 rows ahead of the client before it blocks. Responses are written with plain blocking `write(2)` calls, because SBCL's own socket streams were found to queue unsent output without any limit, which would defeat backpressure.\n\n**Known limitations:**\n- In this sandbox, loopback sockets buffer without a real limit (89 MB went through a 64 KB receive buffer). So a client that simply stops reading can't make the query block here. The server's own limits are covered by unit tests.\n- A client that half\u2011closes its connection while its query runs is treated as disconnected, and the query is cancelled.\n- The number of connections is unlimited, and request bodies are held in memory up to `--max-request-bytes`.\n- A long operation with no row checks in between (e.g. a big sort) keeps its worker busy until the next check, even though the client has already been answered.\n- `PUT ...?header=false` returns `INVALID_REQUEST`, because the spec requires an explicit schema and a PUT has no way to send one.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

@@ -1,2 +1,6 @@
 2026-10-10T22:48:58+00:00 wave wave-a-phase4-a1-20261010T224856Z: order=['common-lisp']
 2026-10-10T22:48:58+00:00 [a-phase4-common-lisp-a1-20261010T224856Z] agent queued (usage gate, then launch)
+2026-10-11T00:42:12+00:00 [a-phase4-common-lisp-a1-20261010T224856Z] agent finished; collecting telemetry
+2026-10-11T00:42:12+00:00 [a-phase4-common-lisp-a1-20261010T224856Z] validating (clean clone, sandboxed)
+2026-10-11T00:42:27+00:00 [a-phase4-common-lisp-a1-20261010T224856Z] outcome=success cost=$6.461978200000001 turns=78 wall=1214.0s
+2026-10-11T00:42:27+00:00 wave wave-a-phase4-a1-20261010T224856Z finished: common=success
