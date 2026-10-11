@@ -1091,75 +1091,203 @@ ENDF pqk_a64_neon_compare_fixed
  * Args:      x0 group_ids, x1 values, x2 validity (NULL = all valid), x3 n,
  *            x4 sums, x5 counts (may be NULL), x6 ngroups
  * Result:    w0 = PQK_OK, PQK_OVERFLOW or PQK_EINVAL (outputs untouched)
- * Clobbers:  x0, x1, x3, x7-x13, v0, v1, v16, v17, v20-v22, v26, v27, flags
- * Registers: pass 1: x8 id cursor, x9 validity cursor, x10 groups / rows,
- *            w11 max id, w12 tail validity, w13 tail id; v16/v17 UMAX
- *            accumulators, v20 validity byte, v21/v22 masks, v26/v27
- *            .Lneon_bits4s. pass 2: w9 overflow flag, x10 row, x11 id,
- *            x12/x13 temps.
- * Algorithm: pass 1 (vector) computes the max id over valid rows (invalid
- *            ids masked to 0 with VMASK4S) and compares it with ngroups
- *            before any output is written; ngroups == 0 (EINVAL iff a valid
- *            row exists) and ngroups >= 2^32 (every id is in range) are
- *            handled separately. Pass 2 is the scalar scatter-add in row
- *            order (GSUM_ADD: ADDS + CSINC overflow flag), as NEON has no
- *            conflict-free scatter.
- * Tail:      pass 1: 0-7 rows scalar (TAIL_VBYTE); pass 2: none (rows).
+ * Clobbers:  x7-x17, v0, v1, v16, v17, v20-v22, v26, v27, flags
+ * Registers: x8 first row of the current chunk, x12 rows of the chunk /
+ *            rows left; check: x10 id cursor, x17 validity cursor, x13
+ *            groups / rows, w11 max id, w14 tail validity, w15 tail id,
+ *            v16/v17 UMAX accumulators, v20 validity byte, v21/v22 masks,
+ *            v26/v27 .Lneon_bits4s; accumulate: x10 id cursor, x11 value
+ *            cursor, x13/x14 ids (w13 validity bits with validity), x15/x16
+ *            values (x16 validity cursor with validity), x17 temp,
+ *            w9/w7 overflow flags (even / odd rows)
+ * Algorithm: rows are processed in chunks of NEON_GSUM_CHUNK = 2048 (8 KiB
+ *            of ids, L1-resident). Per chunk: (1) vector check: max id of
+ *            the valid rows (invalid ids masked to 0 with VMASK4S, UMAX),
+ *            compared with ngroups; (2) scalar scatter-add of the chunk in
+ *            row order (GS_ADD: ADDS + CSINC overflow flag, 4 rows per
+ *            iteration with LDP of ids and values, separate loop copies with
+ *            / without counts, two flag registers so that the flag is not a
+ *            serial chain). The ids are therefore read from DRAM once (the
+ *            check re-reads nothing: the accumulation finds them in L1)
+ *            instead of in a separate full pass. If a chunk fails the check,
+ *            the rows of all earlier chunks are subtracted again (sums -= v,
+ *            counts -= 1, wrapping arithmetic is exactly invertible), so the
+ *            outputs are bit-for-bit untouched when EINVAL is returned.
+ *            ngroups == 0 (EINVAL iff a valid row exists) is handled
+ *            separately; ngroups >= 2^32 needs no special case (the 64-bit
+ *            compare with the max id never fails).
+ * Tail:      the last chunk may end with 1-7 rows: scalar check
+ *            (TAIL_VBYTE) and 1-row accumulation steps.
  * ======================================================================== */
+#define NEON_GSUM_CHUNK 2048                /* rows per chunk, multiple of 8 */
+
+/* GS_ADD xid, xv, xt, wf, cnt: sums[xid] += xv with the signed-overflow
+ * flag collected in wf (CSINC on V); counts[xid] += 1 if cnt is 1. x4 sums,
+ * x5 counts. Clobbers xt. */
+    .macro  GS_ADD xid, xv, xt, wf, cnt
+    ldr     \xt, [x4, \xid, lsl #3]
+    adds    \xt, \xt, \xv
+    csinc   \wf, \wf, wzr, vc               // wf = 1 on signed wrap
+    str     \xt, [x4, \xid, lsl #3]
+    .if     \cnt
+    ldr     \xt, [x5, \xid, lsl #3]
+    add     \xt, \xt, #1
+    str     \xt, [x5, \xid, lsl #3]
+    .endif
+    .endm
+
+/* GS_ACC_NV cnt, loop, done: accumulation of x12 rows without validity (ids
+ * at x10, values at x11): 4 rows per iteration, then single rows; then
+ * branches to `done`. */
+    .macro  GS_ACC_NV cnt, loop, done
+\loop:
+    cmp     x12, #4
+    b.lo    .Lgs_acc_nv_rows\@
+    ldp     w13, w14, [x10], #8
+    ldp     x15, x16, [x11], #16
+    GS_ADD  x13, x15, x17, w9, \cnt
+    GS_ADD  x14, x16, x17, w7, \cnt
+    ldp     w13, w14, [x10], #8
+    ldp     x15, x16, [x11], #16
+    GS_ADD  x13, x15, x17, w9, \cnt
+    GS_ADD  x14, x16, x17, w7, \cnt
+    sub     x12, x12, #4
+    b       \loop
+.Lgs_acc_nv_rows\@:
+    cbz     x12, \done
+    ldr     w13, [x10], #4
+    ldr     x15, [x11], #8
+    GS_ADD  x13, x15, x17, w9, \cnt
+    sub     x12, x12, #1
+    b       .Lgs_acc_nv_rows\@
+    .endm
+
+/* GS_ACC_V cnt, done: accumulation of x12 (>= 1) rows with validity (ids at
+ * x10, values at x11, validity bytes at x16, starting at a byte boundary):
+ * one row per step; the byte is reloaded with a sentinel bit 8 that marks
+ * the end of its 8 rows. Then branches to `done`. */
+    .macro  GS_ACC_V cnt, done
+.Lgs_acc_v_byte\@:
+    ldrb    w13, [x16], #1
+    orr     w13, w13, #0x100
+.Lgs_acc_v_row\@:
+    ldr     w14, [x10], #4
+    ldr     x15, [x11], #8
+    tbz     w13, #0, .Lgs_acc_v_next\@
+    GS_ADD  x14, x15, x17, w9, \cnt
+.Lgs_acc_v_next\@:
+    lsr     w13, w13, #1
+    subs    x12, x12, #1
+    b.eq    \done
+    cmp     w13, #1
+    b.ne    .Lgs_acc_v_row\@
+    b       .Lgs_acc_v_byte\@
+    .endm
+
 FUNC pqk_a64_neon_group_sum_i64
     // -- 1. arguments / empty input
     cbz     x3, .Lneon_group_sum_i64_ok
-    lsr     x7, x6, #32
-    cbnz    x7, .Lneon_group_sum_i64_acc    // every uint32 id is in range
     cbz     x6, .Lneon_group_sum_i64_any
-    mov     x8, x0
-    mov     x9, x2
+    mov     w9, #0
+    mov     w7, #0
+    mov     x8, #0
+    cbz     x2, .Lneon_group_sum_i64_chunk
+    LOADADDR x10, .Lneon_bits4s
+    ld1     {v26.4s, v27.4s}, [x10]
+    // -- 2. main loop: chunks
+.Lneon_group_sum_i64_chunk:
+    sub     x12, x3, x8                     // rows of this chunk
+    mov     x16, #NEON_GSUM_CHUNK
+    cmp     x12, x16
+    csel    x12, x12, x16, lo
+    add     x10, x0, x8, lsl #2
+    add     x17, x2, x8, lsr #3
     movi    v16.4s, #0
     movi    v17.4s, #0
-    lsr     x10, x3, #3
-    cbz     x10, .Lneon_group_sum_i64_check_tail
+    lsr     x13, x12, #3
+    cbz     x13, .Lneon_group_sum_i64_check_tail
     cbz     x2, .Lneon_group_sum_i64_check_nv
-    LOADADDR x7, .Lneon_bits4s
-    ld1     {v26.4s, v27.4s}, [x7]
-    // -- 2. main loop, pass 1: max id of valid rows, 8 rows
+    //    (1) check, 8 rows per step: max id of valid rows
 .Lneon_group_sum_i64_check_v:
-    ld1r    {v20.16b}, [x9], #1
-    ld1     {v0.4s, v1.4s}, [x8], #32
+    ld1r    {v20.16b}, [x17], #1
+    ld1     {v0.4s, v1.4s}, [x10], #32
     VMASK4S 20, 21, 22, 26, 27
     and     v0.16b, v0.16b, v21.16b
     and     v1.16b, v1.16b, v22.16b
     umax    v16.4s, v16.4s, v0.4s
     umax    v17.4s, v17.4s, v1.4s
-    subs    x10, x10, #1
+    subs    x13, x13, #1
     b.ne    .Lneon_group_sum_i64_check_v
     b       .Lneon_group_sum_i64_check_tail
 .Lneon_group_sum_i64_check_nv:
-    ld1     {v0.4s, v1.4s}, [x8], #32
+    ld1     {v0.4s, v1.4s}, [x10], #32
     umax    v16.4s, v16.4s, v0.4s
     umax    v17.4s, v17.4s, v1.4s
-    subs    x10, x10, #1
+    subs    x13, x13, #1
     b.ne    .Lneon_group_sum_i64_check_nv
-    // -- 3. tail, pass 1: 0-7 rows
+    // -- 3. tail of the check: 0-7 rows (last chunk only)
 .Lneon_group_sum_i64_check_tail:
     umax    v16.4s, v16.4s, v17.4s
     umaxv   s16, v16.4s
     fmov    w11, s16
-    ands    x10, x3, #7
+    ands    x13, x12, #7
     b.eq    .Lneon_group_sum_i64_check
-    TAIL_VBYTE w12, x2, x9
+    TAIL_VBYTE w14, x2, x17
 .Lneon_group_sum_i64_check_tail_row:
-    ldr     w13, [x8], #4
-    tst     w12, #1
-    csel    w13, w13, wzr, ne
-    cmp     w13, w11
-    csel    w11, w13, w11, hi
-    lsr     w12, w12, #1
-    subs    x10, x10, #1
+    ldr     w15, [x10], #4
+    tst     w14, #1
+    csel    w15, w15, wzr, ne
+    cmp     w15, w11
+    csel    w11, w15, w11, hi
+    lsr     w14, w14, #1
+    subs    x13, x13, #1
     b.ne    .Lneon_group_sum_i64_check_tail_row
 .Lneon_group_sum_i64_check:
     cmp     x11, x6
+    b.hs    .Lneon_group_sum_i64_undo
+    //    (2) scatter-add of the chunk in row order
+    add     x10, x0, x8, lsl #2
+    add     x11, x1, x8, lsl #3
+    add     x16, x2, x8, lsr #3
+    add     x8, x8, x12
+    cbnz    x2, .Lneon_group_sum_i64_acc_v
+    cbz     x5, .Lneon_group_sum_i64_acc_nv_nc
+    GS_ACC_NV 1, .Lneon_group_sum_i64_acc_nv_c, .Lneon_group_sum_i64_next
+.Lneon_group_sum_i64_acc_nv_nc:
+    GS_ACC_NV 0, .Lneon_group_sum_i64_acc_nv_nc_loop, .Lneon_group_sum_i64_next
+.Lneon_group_sum_i64_acc_v:
+    cbz     x5, .Lneon_group_sum_i64_acc_v_nc
+    GS_ACC_V 1, .Lneon_group_sum_i64_next
+.Lneon_group_sum_i64_acc_v_nc:
+    GS_ACC_V 0, .Lneon_group_sum_i64_next
+.Lneon_group_sum_i64_next:
+    cmp     x8, x3
+    b.lo    .Lneon_group_sum_i64_chunk
+    // -- 4. result
+    orr     w9, w9, w7
+    RET_W   w9
+    // EINVAL in a later chunk: subtract rows 0 .. x8-1 again
+.Lneon_group_sum_i64_undo:
+    mov     x10, #0
+.Lneon_group_sum_i64_undo_row:
+    cmp     x10, x8
     b.hs    .Lneon_group_sum_i64_inval
-    b       .Lneon_group_sum_i64_acc
+    cbz     x2, .Lneon_group_sum_i64_undo_sub
+    VBIT    12, 2, 10, 13
+    tbz     w12, #0, .Lneon_group_sum_i64_undo_next
+.Lneon_group_sum_i64_undo_sub:
+    ldr     w11, [x0, x10, lsl #2]
+    ldr     x12, [x1, x10, lsl #3]
+    ldr     x13, [x4, x11, lsl #3]
+    sub     x13, x13, x12
+    str     x13, [x4, x11, lsl #3]
+    cbz     x5, .Lneon_group_sum_i64_undo_next
+    ldr     x13, [x5, x11, lsl #3]
+    sub     x13, x13, #1
+    str     x13, [x5, x11, lsl #3]
+.Lneon_group_sum_i64_undo_next:
+    add     x10, x10, #1
+    b       .Lneon_group_sum_i64_undo_row
     // ngroups == 0: EINVAL iff a valid row exists
 .Lneon_group_sum_i64_any:
     cbz     x2, .Lneon_group_sum_i64_inval
@@ -1178,33 +1306,6 @@ FUNC pqk_a64_neon_group_sum_i64
     LOWBITS w13, w10
     tst     w12, w13
     b.ne    .Lneon_group_sum_i64_inval
-    b       .Lneon_group_sum_i64_ok
-    // -- 2. main loop, pass 2: row-order accumulation
-.Lneon_group_sum_i64_acc:
-    mov     w9, #0
-    cbnz    x2, .Lneon_group_sum_i64_acc_v
-.Lneon_group_sum_i64_acc_nv:
-    ldr     w11, [x0], #4                   // no validity
-    ldr     x12, [x1], #8
-    GSUM_ADD .Lneon_group_sum_i64_acc_nv_next
-.Lneon_group_sum_i64_acc_nv_next:
-    subs    x3, x3, #1
-    b.ne    .Lneon_group_sum_i64_acc_nv
-    RET_W   w9
-.Lneon_group_sum_i64_acc_v:
-    mov     x10, #0
-.Lneon_group_sum_i64_acc_v_row:
-    VBIT    12, 2, 10, 13
-    tbz     w12, #0, .Lneon_group_sum_i64_acc_v_next
-    ldr     w11, [x0, x10, lsl #2]
-    ldr     x12, [x1, x10, lsl #3]
-    GSUM_ADD .Lneon_group_sum_i64_acc_v_next
-.Lneon_group_sum_i64_acc_v_next:
-    add     x10, x10, #1
-    cmp     x10, x3
-    b.lo    .Lneon_group_sum_i64_acc_v_row
-    // -- 4. result
-    RET_W   w9
 .Lneon_group_sum_i64_ok:
     RET_STATUS PQK_OK
 .Lneon_group_sum_i64_inval:
@@ -1215,19 +1316,26 @@ ENDF pqk_a64_neon_group_sum_i64
  * gather_i64
  * Args:      x0 data, x1 idx, x2 m, x3 out
  * Result:    none
- * Clobbers:  x1-x7, flags
- * Registers: w4-w7 indices (zero-extended), then x4-x7 values; x1-x3
- *            advanced
- * Algorithm: NEON has no gather: 4-way unrolled scalar loads (LDP of the
- *            indices, 4 independent LDR, 2 STP).
- * Tail:      0-3 rows one at a time.
+ * Clobbers:  x1-x12, flags
+ * Registers: w4-w7 indices (zero-extended), then x4-x7 values; x8 index
+ *            cursor NEON_GATHER_AHEAD rows ahead, w9-w12 indices to
+ *            prefetch; x1-x3 advanced
+ * Algorithm: NEON has no gather: unrolled scalar loads (LDP of the indices,
+ *            independent LDR, STP). The random loads miss the caches, so
+ *            the loop is bound by the number of misses in flight. While at
+ *            least NEON_GATHER_AHEAD + 8 rows remain, each 8-row iteration
+ *            also reads the indices NEON_GATHER_AHEAD rows ahead (always
+ *            inside idx[0..m)) and issues PRFM PLDL2KEEP for their rows:
+ *            prefetches retire without waiting for the data, so the misses
+ *            in flight are no longer limited by the loads the out-of-order
+ *            window can hold, and the demand loads later hit L2.
+ * Tail:      the last NEON_GATHER_AHEAD + 7 rows: 4-row steps without
+ *            prefetch, then 0-3 rows one at a time.
  * ======================================================================== */
-FUNC pqk_a64_neon_gather_i64
-    // -- 1. arguments / empty input
-    cmp     x2, #4
-    b.lo    .Lneon_gather_i64_tail
-    // -- 2. main loop: 4 rows
-.Lneon_gather_i64_main:
+#define NEON_GATHER_AHEAD 64                /* prefetch distance in rows */
+
+/* GATHER4: 4 rows: indices from [x1], values to [x3]. */
+    .macro  GATHER4
     ldp     w4, w5, [x1], #8
     ldp     w6, w7, [x1], #8
     ldr     x4, [x0, x4, lsl #3]
@@ -1236,10 +1344,39 @@ FUNC pqk_a64_neon_gather_i64
     ldr     x7, [x0, x7, lsl #3]
     stp     x4, x5, [x3], #16
     stp     x6, x7, [x3], #16
-    sub     x2, x2, #4
-    cmp     x2, #4
+    .endm
+
+/* GATHER_PF4: prefetch the rows of the 4 indices at [x8] (x8 += 16). */
+    .macro  GATHER_PF4
+    ldp     w9, w10, [x8], #8
+    ldp     w11, w12, [x8], #8
+    prfm    pldl2keep, [x0, x9, lsl #3]
+    prfm    pldl2keep, [x0, x10, lsl #3]
+    prfm    pldl2keep, [x0, x11, lsl #3]
+    prfm    pldl2keep, [x0, x12, lsl #3]
+    .endm
+
+FUNC pqk_a64_neon_gather_i64
+    // -- 1. arguments / empty input
+    cmp     x2, #(NEON_GATHER_AHEAD + 8)
+    b.lo    .Lneon_gather_i64_tail4
+    add     x8, x1, #(4 * NEON_GATHER_AHEAD)
+    // -- 2. main loop: 8 rows + prefetch of 8 rows NEON_GATHER_AHEAD ahead
+.Lneon_gather_i64_main:
+    GATHER_PF4
+    GATHER_PF4
+    GATHER4
+    GATHER4
+    sub     x2, x2, #8
+    cmp     x2, #(NEON_GATHER_AHEAD + 8)
     b.hs    .Lneon_gather_i64_main
-    // -- 3. tail: 0-3 rows
+    // -- 3. tail: 4-row steps, then single rows
+.Lneon_gather_i64_tail4:
+    cmp     x2, #4
+    b.lo    .Lneon_gather_i64_tail
+    GATHER4
+    sub     x2, x2, #4
+    b       .Lneon_gather_i64_tail4
 .Lneon_gather_i64_tail:
     cbz     x2, .Lneon_gather_i64_result
     ldr     w4, [x1], #4
