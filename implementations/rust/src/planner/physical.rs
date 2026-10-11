@@ -948,3 +948,112 @@ impl PhysicalQuery {
         self.root.schema()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planner::expr::SubqueryPlan;
+    use crate::planner::optimizer::test_util::*;
+    use crate::types::DataType;
+
+    fn plan_with(logical: &LogicalPlan, opts: PhysicalOptions) -> PhysicalQuery {
+        plan(logical, &Catalog::default(), opts)
+    }
+
+    fn equi_join() -> LogicalPlan {
+        let t = table("t", &["a"], 50);
+        let u = table("u", &["b"], 5);
+        join(
+            scan(&t),
+            scan(&u),
+            JoinType::Inner,
+            Some(cmp(BinaryOp::Eq, col(0), col(1))),
+        )
+    }
+
+    #[test]
+    fn the_join_option_selects_the_algorithm() {
+        let op = |join| {
+            let opts = PhysicalOptions {
+                join,
+                ..PhysicalOptions::default()
+            };
+            match plan_with(&equi_join(), opts).root {
+                PhysicalPlan::HashJoin { build_left, .. } => {
+                    // The smaller input (u, on the right) is the build side.
+                    assert!(!build_left);
+                    "hash"
+                }
+                PhysicalPlan::MergeJoin { .. } => "merge",
+                PhysicalPlan::NestedLoopJoin { .. } => "nested_loop",
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        assert_eq!(op(JoinStrategy::Auto), "hash");
+        assert_eq!(op(JoinStrategy::Hash), "hash");
+        assert_eq!(op(JoinStrategy::Merge), "merge");
+        assert_eq!(op(JoinStrategy::NestedLoop), "nested_loop");
+    }
+
+    #[test]
+    fn row_execution_is_serial() {
+        let opts = PhysicalOptions {
+            vectorized: true,
+            threads: 4,
+            ..PhysicalOptions::default()
+        };
+        let vectorized = plan_with(&equi_join(), opts).execution;
+        assert!(vectorized.vectorized);
+        assert_eq!(vectorized.threads, 4);
+        let row = plan_with(&equi_join(), opts.row_baseline()).execution;
+        assert!(!row.vectorized);
+        assert_eq!(row.threads, 1);
+        assert!(row.native.is_none());
+    }
+
+    #[test]
+    fn unoptimized_plans_scan_only_the_columns_they_use() {
+        let t = table("t", &["a", "b", "c"], 4);
+        let logical = project(scan(&t), &[2]);
+        let root = plan_with(&logical, PhysicalOptions::default()).root;
+        let PhysicalPlan::Project { input, .. } = root else {
+            panic!("expected a projection");
+        };
+        let PhysicalPlan::TableScan { columns, .. } = *input else {
+            panic!("expected a table scan");
+        };
+        assert_eq!(columns, [2]);
+    }
+
+    #[test]
+    fn correlated_subqueries_are_planned_for_the_row_engine() {
+        let t = table("t", &["a"], 4);
+        let u = table("u", &["b"], 4);
+        let param = Expr::Param {
+            index: 0,
+            ty: DataType::Int64,
+        };
+        let sub = |id, plan, params| Expr::Exists {
+            sub: Arc::new(SubqueryPlan { id, plan }),
+            params,
+        };
+        let correlated = sub(
+            0,
+            filter(scan(&u), cmp(BinaryOp::Eq, col(0), param)),
+            vec![col(0)],
+        );
+        let uncorrelated = sub(1, scan(&u), Vec::new());
+        let logical = filter(scan(&t), and(correlated, uncorrelated));
+        let opts = PhysicalOptions {
+            vectorized: true,
+            ..PhysicalOptions::default()
+        };
+        let query = plan_with(&logical, opts);
+        assert!(query.subqueries[&0].row_at_a_time);
+        assert!(matches!(
+            query.subqueries[&0].plan,
+            PhysicalPlan::ParamLookup { .. }
+        ));
+        assert!(!query.subqueries[&1].row_at_a_time);
+    }
+}

@@ -366,3 +366,74 @@ fn reorder_chain(plan: LogicalPlan) -> LogicalPlan {
         schema,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planner::optimizer::test_util::*;
+    use crate::sql::ast::BinaryOp::Eq;
+
+    /// `big CROSS JOIN mid JOIN small ON big.x = small.x AND small.y = mid.y`:
+    /// the written order starts with a cross product.
+    fn three_way() -> LogicalPlan {
+        let big = table("big", &["x"], 200);
+        let mid = table("mid", &["y"], 40);
+        let small = table("small", &["x", "y"], 5);
+        let on = and(cmp(Eq, col(0), col(2)), cmp(Eq, col(3), col(1)));
+        join(
+            join(scan(&big), scan(&mid), JoinType::Cross, None),
+            scan(&small),
+            JoinType::Inner,
+            Some(on),
+        )
+    }
+
+    #[test]
+    fn avoids_cross_products_and_restores_the_column_order() {
+        let plan = apply_checked(&JoinReorder, three_way());
+        assert_eq!(
+            show(&plan),
+            "Project [x := #0, y := #3, x := #1, y := #2]\n\
+             \x20 Join INNER ON (#2 = #3)\n\
+             \x20   Join INNER ON (#0 = #1)\n\
+             \x20     Scan big [x]\n\
+             \x20     Scan small [x, y]\n\
+             \x20   Scan mid [y]"
+        );
+    }
+
+    #[test]
+    fn leaves_two_way_joins_alone() {
+        let t = table("t", &["a"], 50);
+        let u = table("u", &["b"], 5);
+        let plan = join(
+            scan(&t),
+            scan(&u),
+            JoinType::Inner,
+            Some(cmp(Eq, col(0), col(1))),
+        );
+        let before = show(&plan);
+        assert_eq!(show(&apply_checked(&JoinReorder, plan)), before);
+    }
+
+    #[test]
+    fn does_not_reorder_across_left_joins() {
+        let t = table("t", &["a"], 50);
+        let u = table("u", &["b"], 5);
+        let v = table("v", &["c"], 20);
+        let left = join(
+            scan(&t),
+            scan(&u),
+            JoinType::Left,
+            Some(cmp(Eq, col(0), col(1))),
+        );
+        let plan = join(
+            left,
+            scan(&v),
+            JoinType::Inner,
+            Some(cmp(Eq, col(1), col(2))),
+        );
+        let before = show(&plan);
+        assert_eq!(show(&apply_checked(&JoinReorder, plan)), before);
+    }
+}

@@ -203,3 +203,125 @@ fn push_conjuncts(plan: LogicalPlan, preds: Vec<Expr>) -> LogicalPlan {
         other => LogicalPlan::filter(other, Expr::conjunction(preds)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planner::expr::ArithKind;
+    use crate::planner::optimizer::test_util::*;
+    use crate::sql::ast::BinaryOp::{self, Eq, Gt, Lt};
+    use crate::types::DataType;
+
+    fn tables() -> (LogicalPlan, LogicalPlan) {
+        let t = table("t", &["a", "b"], 12);
+        let u = table("u", &["c", "d"], 8);
+        (scan(&t), scan(&u))
+    }
+
+    #[test]
+    fn splits_a_filter_over_an_inner_join_into_its_inputs() {
+        let (t, u) = tables();
+        // WHERE t.a > 2 AND u.d < 20 AND t.a = u.c over a cross join.
+        let pred = and(
+            and(cmp(Gt, col(0), int(2)), cmp(Lt, col(3), int(10))),
+            cmp(Eq, col(0), col(2)),
+        );
+        let plan = filter(join(t, u, JoinType::Cross, None), pred);
+        let plan = apply_checked(&PredicatePushdown, plan);
+        assert_eq!(
+            show(&plan),
+            "Join INNER ON (#0 = #2)\n\
+             \x20 Filter (#0 > 2)\n\
+             \x20   Scan t [a, b]\n\
+             \x20 Filter (#1 < 10)\n\
+             \x20   Scan u [c, d]"
+        );
+    }
+
+    #[test]
+    fn keeps_right_side_where_conjuncts_above_a_left_join() {
+        let (t, u) = tables();
+        let on = cmp(Eq, col(0), col(2));
+        let pred = and(cmp(Gt, col(1), int(3)), cmp(Lt, col(3), int(10)));
+        let plan = filter(join(t, u, JoinType::Left, Some(on)), pred);
+        let plan = apply_checked(&PredicatePushdown, plan);
+        assert_eq!(
+            show(&plan),
+            "Filter (#3 < 10)\n\
+             \x20 Join LEFT ON (#0 = #2)\n\
+             \x20   Filter (#1 > 3)\n\
+             \x20     Scan t [a, b]\n\
+             \x20   Scan u [c, d]"
+        );
+    }
+
+    #[test]
+    fn pushes_right_only_on_conditions_of_a_left_join_into_the_right_input() {
+        let (t, u) = tables();
+        let on = and(
+            and(cmp(Eq, col(0), col(2)), cmp(Lt, col(3), int(10))),
+            cmp(Gt, col(1), int(3)),
+        );
+        let plan = join(t, u, JoinType::Left, Some(on));
+        let plan = apply_checked(&PredicatePushdown, plan);
+        // The left-only condition must stay: it does not remove left rows.
+        assert_eq!(
+            show(&plan),
+            "Join LEFT ON ((#0 = #2) AND (#1 > 3))\n\
+             \x20 Scan t [a, b]\n\
+             \x20 Filter (#1 < 10)\n\
+             \x20   Scan u [c, d]"
+        );
+    }
+
+    #[test]
+    fn pushes_through_pass_through_columns_of_a_projection() {
+        let (t, _) = tables();
+        // SELECT * FROM (SELECT b, a + 1 AS a1 FROM t) WHERE b > 3 AND a1 > 5
+        let a_plus_1 = Expr::Arith {
+            op: BinaryOp::Add,
+            kind: ArithKind::Int,
+            left: Box::new(col(0)),
+            right: Box::new(int(1)),
+            ty: DataType::Int64,
+        };
+        let mut derived = project(t, &[1, 0]);
+        if let LogicalPlan::Project { exprs, .. } = &mut derived {
+            exprs[1] = a_plus_1;
+        }
+        let plan = filter(
+            derived,
+            and(cmp(Gt, col(0), int(3)), cmp(Gt, col(1), int(5))),
+        );
+        let plan = apply_checked(&PredicatePushdown, plan);
+        assert_eq!(
+            show(&plan),
+            "Filter (#1 > 5)\n\
+             \x20 Project [b := #1, a := (#0 + 1)]\n\
+             \x20   Filter (#1 > 3)\n\
+             \x20     Scan t [a, b]"
+        );
+    }
+
+    #[test]
+    fn filters_every_branch_of_a_union() {
+        let (t, u) = tables();
+        let schema = t.schema().to_vec();
+        let plan = filter(
+            LogicalPlan::UnionAll {
+                inputs: vec![t, u],
+                schema,
+            },
+            cmp(Gt, col(1), int(4)),
+        );
+        let plan = apply_checked(&PredicatePushdown, plan);
+        assert_eq!(
+            show(&plan),
+            "UnionAll [a, b]\n\
+             \x20 Filter (#1 > 4)\n\
+             \x20   Scan t [a, b]\n\
+             \x20 Filter (#1 > 4)\n\
+             \x20   Scan u [c, d]"
+        );
+    }
+}

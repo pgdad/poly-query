@@ -248,3 +248,87 @@ fn prune(plan: LogicalPlan, required: &[usize]) -> (LogicalPlan, Vec<usize>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planner::logical::JoinType;
+    use crate::planner::optimizer::test_util::*;
+    use crate::sql::ast::BinaryOp::{Eq, Gt};
+
+    #[test]
+    fn scans_read_only_referenced_columns() {
+        let t = table("t", &["a", "b", "c"], 6);
+        // SELECT c FROM t WHERE a > 2
+        let plan = project(filter(scan(&t), cmp(Gt, col(0), int(2))), &[2]);
+        let plan = apply_checked(&ColumnPruning, plan);
+        assert_eq!(
+            show(&plan),
+            "Project [c := #1]\n\
+             \x20 Filter (#0 > 2)\n\
+             \x20   Scan t [a, c]"
+        );
+    }
+
+    #[test]
+    fn prunes_both_join_inputs_and_remaps_the_condition() {
+        let t = table("t", &["a", "b", "c"], 6);
+        let u = table("u", &["d", "e"], 4);
+        // SELECT u.e FROM t JOIN u ON t.c = u.d
+        let joined = join(
+            scan(&t),
+            scan(&u),
+            JoinType::Inner,
+            Some(cmp(Eq, col(2), col(3))),
+        );
+        let plan = apply_checked(&ColumnPruning, project(joined, &[4]));
+        assert_eq!(
+            show(&plan),
+            "Project [e := #2]\n\
+             \x20 Join INNER ON (#0 = #1)\n\
+             \x20   Scan t [c]\n\
+             \x20   Scan u [d, e]"
+        );
+    }
+
+    #[test]
+    fn drops_unused_expressions_of_inner_projections() {
+        let t = table("t", &["a", "b", "c"], 6);
+        // SELECT b FROM (SELECT a, b, c FROM t)
+        let plan = project(project(scan(&t), &[0, 1, 2]), &[1]);
+        let plan = apply_checked(&ColumnPruning, plan);
+        assert_eq!(
+            show(&plan),
+            "Project [b := #0]\n\
+             \x20 Project [b := #0]\n\
+             \x20   Scan t [b]"
+        );
+    }
+
+    #[test]
+    fn keeps_every_column_below_distinct() {
+        let t = table("t", &["a", "b"], 6);
+        let plan = LogicalPlan::Distinct {
+            input: Box::new(scan(&t)),
+        };
+        let plan = apply_checked(&ColumnPruning, plan);
+        assert_eq!(show(&plan), "Distinct\n  Scan t [a, b]");
+    }
+
+    #[test]
+    fn is_idempotent() {
+        // Physical planning prunes plans again (for `optimize: false`), so
+        // pruning a pruned plan must not change it.
+        let t = table("t", &["a", "b", "c"], 6);
+        let u = table("u", &["d", "e"], 4);
+        let plan = project(
+            filter(
+                join(scan(&t), scan(&u), JoinType::Cross, None),
+                cmp(Eq, col(1), col(3)),
+            ),
+            &[4, 0],
+        );
+        let once = prune_columns(plan);
+        assert_eq!(show(&prune_columns(once.clone())), show(&once));
+    }
+}

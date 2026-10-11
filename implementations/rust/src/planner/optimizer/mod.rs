@@ -111,8 +111,12 @@ impl<'r> Optimizer<'r> {
 pub(crate) mod test_util {
     use std::sync::Arc;
 
+    use crate::catalog::Catalog;
+    use crate::exec::ExecContext;
+    use crate::exec::operators::build_row;
     use crate::planner::expr::Expr;
     use crate::planner::logical::{JoinType, LogicalPlan};
+    use crate::planner::physical::{self, PhysicalOptions};
     use crate::sql::ast::BinaryOp;
     use crate::storage::{Field, Table};
     use crate::types::{DataType, Value};
@@ -189,6 +193,33 @@ pub(crate) mod test_util {
     /// The plan printed without trailing whitespace, for comparisons.
     pub fn show(plan: &LogicalPlan) -> String {
         plan.to_string().trim_end().to_string()
+    }
+
+    /// The rows `plan` produces (row engine), sorted, for result comparisons.
+    pub fn rows(plan: &LogicalPlan) -> Vec<String> {
+        let query = physical::plan(plan, &Catalog::default(), PhysicalOptions::default());
+        let ctx = ExecContext::default().with_plan(&query);
+        let mut op = build_row(query.root);
+        let mut out = Vec::new();
+        while let Some(row) = op.next(&ctx).expect("plan executes") {
+            out.push(format!("{row:?}"));
+        }
+        out.sort();
+        out
+    }
+
+    /// Asserts that `rule` keeps the result of `plan` and returns its output.
+    pub fn apply_checked(rule: &dyn super::Rule, plan: LogicalPlan) -> LogicalPlan {
+        let (schema, before) = (plan.schema().to_vec(), rows(&plan));
+        let after = rule.apply(plan);
+        assert_eq!(
+            after.schema(),
+            schema,
+            "{} changed the output columns",
+            rule.name()
+        );
+        assert_eq!(rows(&after), before, "{} changed the result", rule.name());
+        after
     }
 }
 

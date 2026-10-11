@@ -297,4 +297,38 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn removes_filters_and_join_conditions_that_fold_to_true() {
+        use crate::planner::logical::JoinType;
+        use crate::planner::optimizer::test_util::{self, apply_checked, scan, show, table};
+        let t = table("t", &["a"], 5);
+        let u = table("u", &["b"], 3);
+        let always = || test_util::cmp(BinaryOp::Lt, *int(1), *int(2));
+        let joined = test_util::join(scan(&t), scan(&u), JoinType::Inner, Some(always()));
+        let plan = apply_checked(&ConstantFolding, test_util::filter(joined, always()));
+        assert_eq!(show(&plan), "Join INNER\n  Scan t [a]\n  Scan u [b]");
+    }
+
+    #[test]
+    fn folds_projections_and_keeps_failing_constants() {
+        use crate::planner::optimizer::test_util::{project, scan, show, table};
+        let t = table("t", &["a"], 2);
+        let mut plan = project(scan(&t), &[0, 0]);
+        if let LogicalPlan::Project { exprs, .. } = &mut plan {
+            let arith = |op, right| Expr::Arith {
+                op,
+                kind: ArithKind::Int,
+                left: int(6),
+                right,
+                ty: DataType::Int64,
+            };
+            exprs[0] = arith(BinaryOp::Mul, int(7));
+            exprs[1] = arith(BinaryOp::Div, int(0));
+        }
+        assert_eq!(
+            show(&ConstantFolding.apply(plan)),
+            "Project [a := 42, a := (6 / 0)]\n  Scan t [a]"
+        );
+    }
 }
