@@ -46,6 +46,12 @@
 .L\k\()_norange:
 .endm
 
+/* minmax_i64 / minmax_i128 quick reject: after a failed attempt it is not
+ * tried for the next QR_BACKOFF blocks, doubling per further failure up to
+ * QR_BACKOFF_MAX blocks (see MM64_GLOBAL / MM128_BLOCK). */
+#define QR_BACKOFF 8
+#define QR_BACKOFF_MAX 1024
+
 /* filter: a full block with at least DENSE_MIN hits uses the compress step
  * (swept 1, 2, 3, 4, 8, 16: 1 is flattest across selectivities). */
 #define DENSE_MIN 1

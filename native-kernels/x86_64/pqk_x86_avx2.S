@@ -631,18 +631,20 @@ ENDF pqk_x86_avx2_sum_f64
  * size_t pqk_x86_avx2_minmax_i64(data, validity, n, out_min, out_max)
  * Args:     rdi = data, rsi = validity, rdx = n, rcx = out_min, r8 = out_max
  * Returns:  rax = number of valid rows; *out_min / *out_max written if > 0
- * Clobbers: rax, rdx, rsi, rdi, r9, r10, r11, ymm0-ymm13,
- *           flags (rbx, r12-r14 saved and restored; rcx is preserved)
+ * Clobbers: rax, rdx, rsi, rdi, r9, r10, r11, ymm0-ymm15,
+ *           flags (rbx, rbp, r12-r15 saved and restored; rcx is preserved)
  * Algorithm: four accumulator sets, min ymm0/ymm2/ymm8/ymm10, max
  *           ymm1/ymm3/ymm9/ymm11 (no 64-bit min/max in AVX2: vpcmpgtq +
  *           vblendvpd, MMI_STEP). Four sets because one set's
  *           compare -> blend chain is 4 cycles on Zen 5 (2-cycle latency
  *           each); with the former two sets the loop was latency-bound
- *           (0.10 -> 0.075 ns/row, L2 and L3). No validity: 32 rows per
- *           iteration, then groups of 4 rows (set A). A tournament tree
- *           (3.5 instead of 4 compare/blend ops per 4 rows) and a lazy
- *           "any lane outside [min, max]?" test were measured: no faster
- *           in L3, so the data-independent form was kept.
+ *           (0.10 -> 0.075 ns/row, L2 and L3). No validity: 64-row blocks
+ *           with a quick reject against the current overall min / max
+ *           (see MM64_GLOBAL), then 32-row iterations, then groups of 4
+ *           rows (set A). A tournament tree (3.5 instead of 4
+ *           compare/blend ops per 4 rows) was measured: no faster.
+ *           ebx/ebp = quick-reject back-off counter / length, r15d = G
+ *           dirty, ymm14/ymm15 = quick-reject constants.
  *           With validity the compare result is ANDed with the vpsllvq
  *           sign mask (blendv only looks
  *           at sign bits); the count is popcnt of the validity words.
@@ -667,7 +669,66 @@ ENDF pqk_x86_avx2_sum_f64
         vblendvpd %ymm7, \x, \mx, \mx
 .endm
 
-#define SAVED %rbx, %r12, %r13, %r14
+/* Quick reject for the no-validity loop (64-row blocks), as in
+ * minmax_i128 (MM128_BLOCK): G = the current overall min / max over all
+ * lanes and sets is the value of a processed row, so a row with
+ * gmin < x < gmax cannot become the result. As an unsigned range test
+ * (cf. VPRED kind 4): gmin < x < gmax <=> (x - (gmin + 1)) <u W with
+ * W = gmax - gmin - 1 (W = 0, i.e. never, if gmax <= gmin + 1; this also
+ * covers the start values INT64_MAX / INT64_MIN), i.e. one vpsubq + one
+ * vpcmpgtq per 4 rows instead of 2 compares + 2 blends. If all 64 rows of
+ * a block are strictly inside, the block is skipped; otherwise it runs through MMI_STEP and the quick
+ * reject is not tried for the next ebp blocks (ebx counts down; ebp
+ * starts at QR_BACKOFF, doubles after each failed attempt up to
+ * QR_BACKOFF_MAX, reset by a success), so sorted or otherwise
+ * update-heavy data pays < 1%. G is recomputed (MM64_GLOBAL) before an
+ * attempt when a full block ran since the last one (r15d = dirty).
+ * MM64_GLOBAL: G from the 16 lanes of the min sets / max sets, then
+ * ymm14 = bcast((gmin + 1) ^ 2^63), ymm15 = bcast(W ^ 2^63).
+ * in: r11 = 2^63. clobbers rax, rdx, ymm4-ymm7. */
+.macro MM64_RED a, b, dst, rmax
+.if \rmax
+        vpcmpgtq \a, \b, %ymm6                  /* b > a */
+.else
+        vpcmpgtq \b, \a, %ymm6                  /* a > b */
+.endif
+        vblendvpd %ymm6, \b, \a, \dst
+.endm
+.macro MM64_GLOBAL
+        MM64_RED %ymm0, %ymm2, %ymm4, 0
+        MM64_RED %ymm8, %ymm10, %ymm5, 0
+        MM64_RED %ymm4, %ymm5, %ymm4, 0
+        vperm2i128 $0x01, %ymm4, %ymm4, %ymm5
+        MM64_RED %ymm4, %ymm5, %ymm4, 0
+        vpshufd $0x4e, %ymm4, %ymm5
+        MM64_RED %ymm4, %ymm5, %ymm14, 0
+        MM64_RED %ymm1, %ymm3, %ymm4, 1
+        MM64_RED %ymm9, %ymm11, %ymm5, 1
+        MM64_RED %ymm4, %ymm5, %ymm4, 1
+        vperm2i128 $0x01, %ymm4, %ymm4, %ymm5
+        MM64_RED %ymm4, %ymm5, %ymm4, 1
+        vpshufd $0x4e, %ymm4, %ymm5
+        MM64_RED %ymm4, %ymm5, %ymm15, 1
+        vmovq   %xmm14, %rax                    /* gmin */
+        vmovq   %xmm15, %rdx                    /* gmax */
+        cmp     %rax, %rdx
+        jle     .Lmm64g_empty\@                 /* no interior: W = 0 */
+        sub     %rax, %rdx
+        dec     %rdx                            /* W = gmax - gmin - 1 */
+        inc     %rax                            /* gmin + 1 */
+        xor     %r11, %rax
+        vmovq   %rax, %xmm14
+        vpbroadcastq %xmm14, %ymm14             /* (gmin + 1) ^ 2^63 */
+        jmp     .Lmm64g_w\@
+.Lmm64g_empty\@:
+        xor     %edx, %edx
+.Lmm64g_w\@:
+        xor     %r11, %rdx
+        vmovq   %rdx, %xmm15
+        vpbroadcastq %xmm15, %ymm15             /* W ^ 2^63 */
+.endm
+
+#define SAVED %rbx, %rbp, %r12, %r13, %r14, %r15
 FUNC pqk_x86_avx2_minmax_i64
         PROLOGUE SAVED
         movabs  $C_I64MAX, %r9                          /* [check] */
@@ -689,9 +750,91 @@ FUNC pqk_x86_avx2_minmax_i64
         test    %rsi, %rsi
         jnz     .Lminmax_i64_vmain
         mov     %r10, %r14
+        xor     %ebx, %ebx                      /* quick-reject back-off */
+        mov     $QR_BACKOFF, %ebp
+        mov     $1, %r15d                       /* G not computed yet */
+.Lminmax_i64_blk:                                       /* [main] 64 rows */
+        cmp     $64, %r10
+        jb      .Lminmax_i64_rest
+        test    %ebx, %ebx
+        jnz     .Lminmax_i64_plain
+        test    %r15d, %r15d
+        jz      .Lminmax_i64_qr
+        MM64_GLOBAL
+        xor     %r15d, %r15d
+.Lminmax_i64_qr:
+        .set g, 0
+        .rept 16
+        vmovdqu g*32(%rdi), %ymm4
+        vpsubq  %ymm14, %ymm4, %ymm4            /* x - (gmin + 1) ^ 2^63 */
+        vpcmpgtq %ymm4, %ymm15, %ymm12          /* inside (gmin, gmax) */
+        .if g == 0
+        vmovdqa %ymm12, %ymm6
+        .elseif g == 1
+        vmovdqa %ymm12, %ymm7
+        .elseif g % 2
+        vpand   %ymm12, %ymm7, %ymm7
+        .else
+        vpand   %ymm12, %ymm6, %ymm6
+        .endif
+        .set g, g + 1
+        .endr
+        vpand   %ymm7, %ymm6, %ymm6
+        vtestpd c_sign4(%rip), %ymm6            /* CF: all rows inside */
+        jc      .Lminmax_i64_skip
+        mov     %ebp, %ebx                      /* failed: back off */
+        add     %ebp, %ebp
+        mov     $QR_BACKOFF_MAX, %eax
+        cmp     %eax, %ebp
+        cmova   %eax, %ebp
+        jmp     .Lminmax_i64_full
+.Lminmax_i64_plain:
+        dec     %ebx
+.Lminmax_i64_full:
+        mov     $1, %r15d
+        vmovdqu (%rdi), %ymm4
+        vmovdqu 32(%rdi), %ymm5
+        vmovdqu 64(%rdi), %ymm12
+        vmovdqu 96(%rdi), %ymm13
+        MMI_STEP %ymm4, %ymm0, %ymm1, none
+        MMI_STEP %ymm5, %ymm2, %ymm3, none
+        MMI_STEP %ymm12, %ymm8, %ymm9, none
+        MMI_STEP %ymm13, %ymm10, %ymm11, none
+        vmovdqu 128(%rdi), %ymm4
+        vmovdqu 160(%rdi), %ymm5
+        vmovdqu 192(%rdi), %ymm12
+        vmovdqu 224(%rdi), %ymm13
+        MMI_STEP %ymm4, %ymm0, %ymm1, none
+        MMI_STEP %ymm5, %ymm2, %ymm3, none
+        MMI_STEP %ymm12, %ymm8, %ymm9, none
+        MMI_STEP %ymm13, %ymm10, %ymm11, none
+        vmovdqu 256(%rdi), %ymm4
+        vmovdqu 32+256(%rdi), %ymm5
+        vmovdqu 64+256(%rdi), %ymm12
+        vmovdqu 96+256(%rdi), %ymm13
+        MMI_STEP %ymm4, %ymm0, %ymm1, none
+        MMI_STEP %ymm5, %ymm2, %ymm3, none
+        MMI_STEP %ymm12, %ymm8, %ymm9, none
+        MMI_STEP %ymm13, %ymm10, %ymm11, none
+        vmovdqu 128+256(%rdi), %ymm4
+        vmovdqu 160+256(%rdi), %ymm5
+        vmovdqu 192+256(%rdi), %ymm12
+        vmovdqu 224+256(%rdi), %ymm13
+        MMI_STEP %ymm4, %ymm0, %ymm1, none
+        MMI_STEP %ymm5, %ymm2, %ymm3, none
+        MMI_STEP %ymm12, %ymm8, %ymm9, none
+        MMI_STEP %ymm13, %ymm10, %ymm11, none
+        jmp     .Lminmax_i64_next
+.Lminmax_i64_skip:
+        mov     $QR_BACKOFF, %ebp
+.Lminmax_i64_next:
+        add     $512, %rdi
+        sub     $64, %r10
+        jmp     .Lminmax_i64_blk
+.Lminmax_i64_rest:
         cmp     $32, %r10
         jb      .Lminmax_i64_quad
-.Lminmax_i64_main:                                      /* [main] 32 rows */
+.Lminmax_i64_main:                                      /* 32 rows */
         vmovdqu (%rdi), %ymm4
         vmovdqu 32(%rdi), %ymm5
         vmovdqu 64(%rdi), %ymm12
@@ -1913,8 +2056,6 @@ ENDF pqk_x86_avx2_sum_i128
  * words equal) to < 1%.
  * valid = 1: ymm13 = bcast(validity word). 0(%rsp) = bcast(gminH),
  * ymm12 = bcast(gmaxH). clobbers ymm0-ymm3, ymm14, ymm15. */
-#define QR_BACKOFF 8
-#define QR_BACKOFF_MAX 1024
 /* GLOBAL_HI: 0(%rsp) = bcast(min of the 8 lanes of ymm5, ymm9), ymm12 =
  * bcast(max of the 8 lanes of ymm7, ymm11). clobbers ymm0-ymm3. */
 .macro HMIN8 a, b, rmax

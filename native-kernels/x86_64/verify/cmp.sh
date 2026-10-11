@@ -33,11 +33,13 @@ import sys,json,statistics as st
 def load(p):
   d={}
   for l in open(p):
-    r=json.loads(l); d.setdefault(r['kernel'],[]).append(r['ns_per_elem'])
+    r=json.loads(l); d.setdefault(r['kernel'],[]).append((r['ns_per_elem'],r['min_ns']/r['n']))
   return d
 b,n=load(sys.argv[1]),load(sys.argv[2])
-print('%-20s %8s %8s %7s   (min base/new)'%('kernel','base','new','speedup'))
+print('%-20s %8s %8s %7s | %8s %8s %7s' % ('kernel','base','new','speedup','minbase','minnew','speedup'))
+print('%-20s %33s   (median of run medians | min of all reps)' % ('',''))
 for k in b:
-  mb,mn=st.median(b[k]),st.median(n[k])
-  print('%-20s %8.4f %8.4f %6.2fx   %.4f/%.4f'%(k,mb,mn,mb/mn,min(b[k]),min(n[k])))
+  mb,mn=st.median(x[0] for x in b[k]),st.median(x[0] for x in n[k])
+  ib,inn=min(x[1] for x in b[k]),min(x[1] for x in n[k])
+  print('%-20s %8.4f %8.4f %6.2fx | %8.4f %8.4f %6.2fx' % (k,mb,mn,mb/mn,ib,inn,ib/inn))
 PY
