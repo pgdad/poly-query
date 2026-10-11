@@ -2,13 +2,14 @@
 //! independent of the transport (session, exec, HTTP).
 
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
+use std::time::{Duration, Instant};
 
 use crate::catalog::Catalog;
 use crate::config::Config;
 use crate::error::{Error, ErrorCode, Result};
-use crate::exec::{ExecContext, Row, build};
+use crate::exec::{ExecContext, Operator, Row, build};
 use crate::ingest::{self, Format, IngestOptions};
 use crate::json::Json;
 use crate::planner::physical::{self, JoinStrategy};
@@ -79,6 +80,8 @@ pub struct QueryOptions {
     pub join: JoinStrategy,
     /// `use_indexes: false` ⇒ never use indexes.
     pub use_indexes: bool,
+    /// Client-assigned id used for cancellation (HTTP).
+    pub query_id: Option<String>,
 }
 
 impl Default for QueryOptions {
@@ -89,6 +92,7 @@ impl Default for QueryOptions {
             count_only: false,
             join: JoinStrategy::Auto,
             use_indexes: true,
+            query_id: None,
         }
     }
 }
@@ -110,32 +114,66 @@ pub struct QueryResult {
     pub row_count: u64,
 }
 
-impl QueryResult {
-    /// The result of a statement: no columns, no rows.
-    fn empty() -> Self {
-        QueryResult {
-            columns: Vec::new(),
-            rows: Vec::new(),
-            row_count: 0,
-        }
-    }
+/// How a running query is interrupted (concurrency.md §3–§4).
+#[derive(Debug, Clone, Default)]
+pub struct QueryControl {
+    /// Absolute deadline; overrides `QueryOptions::timeout_ms` when set
+    /// (the HTTP server counts queue time toward the timeout).
+    pub deadline: Option<Instant>,
+    /// Set to request cancellation.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
+/// The engine: configuration plus a catalog shared by concurrent requests.
+///
+/// The catalog is an immutable value behind a lock that is only held long
+/// enough to clone or swap an `Arc`: every statement works on a snapshot
+/// (concurrency.md §1), and mutations build a new catalog version and publish
+/// it atomically. Mutations are serialized by `writer`; expensive work
+/// (parsing input, opening files, building indexes) happens before the
+/// catalog lock is taken, so readers are never blocked by it.
 pub struct Engine {
     pub config: Config,
-    catalog: Catalog,
+    catalog: RwLock<Arc<Catalog>>,
+    writer: Mutex<()>,
 }
 
 impl Engine {
     pub fn new(config: Config) -> Self {
         Engine {
             config,
-            catalog: Catalog::default(),
+            catalog: RwLock::new(Arc::new(Catalog::default())),
+            writer: Mutex::new(()),
         }
     }
 
-    pub fn catalog(&self) -> &Catalog {
-        &self.catalog
+    /// The current catalog version.
+    pub fn catalog(&self) -> Arc<Catalog> {
+        self.catalog
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Serializes catalog mutations.
+    fn lock_writer(&self) -> MutexGuard<'_, ()> {
+        self.writer.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Applies `f` to a copy of the current catalog and publishes the result
+    /// if `f` succeeds (atomic: on error nothing changes). The caller must
+    /// hold the writer lock.
+    fn publish<T>(&self, f: impl FnOnce(&mut Catalog) -> Result<T>) -> Result<T> {
+        let mut next = Catalog::clone(&self.catalog());
+        let out = f(&mut next)?;
+        *self.catalog.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(next);
+        Ok(out)
+    }
+
+    /// Runs a mutation of the catalog, serialized with all other mutations.
+    fn mutate<T>(&self, f: impl FnOnce(&mut Catalog) -> Result<T>) -> Result<T> {
+        let _guard = self.lock_writer();
+        self.publish(f)
     }
 
     /// Resolves a request path inside the data directory (protocol.md §6).
@@ -192,22 +230,22 @@ impl Engine {
     }
 
     /// Loads a table (parse first, then publish atomically).
-    pub fn load(&mut self, req: LoadRequest) -> Result<Arc<Table>> {
-        if !req.replace && self.catalog.contains(&req.table) {
+    pub fn load(&self, mut req: LoadRequest) -> Result<Arc<Table>> {
+        if !req.replace && self.catalog().contains(&req.table) {
             return Err(Error::new(
                 ErrorCode::AlreadyExists,
                 format!("table '{}' already exists", req.table),
             ));
         }
-        let text = match &req.source {
-            Source::Path(p) => self.read_input(p)?,
+        let text = match std::mem::replace(&mut req.source, Source::Data(String::new())) {
+            Source::Path(p) => self.read_input(&p)?,
             Source::Data(d) => {
                 if d.len() as u64 > self.config.max_ingest_bytes {
                     return Err(Error::resource_limit(
                         "inline data exceeds the ingestion limit",
                     ));
                 }
-                d.clone()
+                d
             }
         };
         let opts = IngestOptions {
@@ -218,7 +256,7 @@ impl Engine {
         };
         let table = ingest::ingest(&req.table, req.format, &text, &opts)?
             .into_layout(req.layout, req.dictionary)?;
-        self.catalog.insert(table, req.replace)
+        self.mutate(|c| c.insert(table, req.replace))
     }
 
     fn max_rows(&self) -> usize {
@@ -230,7 +268,7 @@ impl Engine {
         let table = self.table(&req.table)?;
         let path = self.resolve_path(&req.path)?;
         let indexes: Vec<IndexMeta> = self
-            .catalog
+            .catalog()
             .indexes_for(&table)
             .iter()
             .map(|ix| IndexMeta {
@@ -243,8 +281,8 @@ impl Engine {
     }
 
     /// Opens a PQCF file as a table, recreating the indexes it lists.
-    pub fn open(&mut self, req: &OpenRequest) -> Result<Arc<Table>> {
-        if !req.replace && self.catalog.contains(&req.table) {
+    pub fn open(&self, req: &OpenRequest) -> Result<Arc<Table>> {
+        if !req.replace && self.catalog().contains(&req.table) {
             return Err(Error::new(
                 ErrorCode::AlreadyExists,
                 format!("table '{}' already exists", req.table),
@@ -258,8 +296,7 @@ impl Engine {
         } else if req.dictionary == Some(true) {
             table = table.into_layout(Layout::Column, Some(true))?;
         }
-        self.catalog
-            .insert_with_indexes(table, req.replace, &opened.indexes)
+        self.mutate(|c| c.insert_with_indexes(table, req.replace, &opened.indexes))
     }
 
     /// Statistics of a table (`stats` op).
@@ -271,19 +308,22 @@ impl Engine {
 
     /// Indexes on a table, in creation order.
     pub fn indexes(&self, table: &Arc<Table>) -> Vec<Arc<Index>> {
-        self.catalog.indexes_for(table)
+        self.catalog().indexes_for(table)
     }
 
     /// `CREATE INDEX` (semantics.md §14).
     fn create_index(
-        &mut self,
+        &self,
         name: &Ident,
         if_not_exists: bool,
         table: &Ident,
         column: &Ident,
         using: Option<&Ident>,
     ) -> Result<()> {
-        let t = self.catalog.get(&table.value).ok_or_else(|| {
+        // Index builds are serialized with other mutations; queries keep
+        // running on their snapshots meanwhile.
+        let _guard = self.lock_writer();
+        let t = self.catalog().get(&table.value).ok_or_else(|| {
             table
                 .pos
                 .error(Error::semantic(format!("unknown table '{}'", table.value)))
@@ -300,7 +340,7 @@ impl Engine {
                 Error::unsupported(format!("index kind '{}' is not supported", k.value))
             })?,
         };
-        if self.catalog.index(&name.value).is_some() {
+        if self.catalog().index(&name.value).is_some() {
             if if_not_exists {
                 return Ok(());
             }
@@ -309,39 +349,50 @@ impl Engine {
                 format!("index '{}' already exists", name.value),
             ));
         }
-        self.catalog.create_index(&name.value, &t, col, kind)
+        let index = Arc::new(Index::build(&name.value, t, col, kind)?);
+        self.publish(|c| c.add_index(index))
     }
 
     /// `DROP INDEX` (semantics.md §14).
-    fn drop_index(&mut self, name: &Ident, if_exists: bool) -> Result<()> {
-        if self.catalog.drop_index(&name.value) || if_exists {
+    fn drop_index(&self, name: &Ident, if_exists: bool) -> Result<()> {
+        self.mutate(|c| {
+            if c.drop_index(&name.value) || if_exists {
+                Ok(())
+            } else {
+                Err(Error::not_found(format!(
+                    "index '{}' does not exist",
+                    name.value
+                )))
+            }
+        })
+    }
+
+    pub fn drop_table(&self, name: &str) -> Result<()> {
+        self.mutate(|c| c.drop_table(name))
+    }
+
+    pub fn reset(&self) {
+        let _ = self.mutate(|c| {
+            c.clear();
             Ok(())
-        } else {
-            Err(Error::not_found(format!(
-                "index '{}' does not exist",
-                name.value
-            )))
-        }
-    }
-
-    pub fn drop_table(&mut self, name: &str) -> Result<()> {
-        self.catalog.drop_table(name)
-    }
-
-    pub fn reset(&mut self) {
-        self.catalog.clear();
+        });
     }
 
     pub fn table(&self, name: &str) -> Result<Arc<Table>> {
-        self.catalog
+        self.catalog()
             .get(name)
             .ok_or_else(|| Error::not_found(format!("table '{name}' does not exist")))
     }
 
-    /// Binds, optimizes and physically plans a query.
-    fn plan_query(&self, q: &Query, opts: &QueryOptions) -> Result<PhysicalPlan> {
+    /// Binds, optimizes and physically plans a query against a catalog snapshot.
+    fn plan_query(
+        &self,
+        catalog: &Catalog,
+        q: &Query,
+        opts: &QueryOptions,
+    ) -> Result<PhysicalPlan> {
         let ctx = BindContext {
-            catalog: &self.catalog,
+            catalog,
             test_functions: self.config.test_functions,
         };
         let logical = optimizer::optimize(plan_query(q, &ctx)?);
@@ -351,32 +402,77 @@ impl Engine {
     /// The physical plan of a query (`explain` op; also accepts `EXPLAIN …`).
     pub fn explain(&self, sql: &str, opts: &QueryOptions) -> Result<Json> {
         match parse_statement(sql)? {
-            Statement::Query(q) | Statement::Explain(q) => Ok(self.plan_query(&q, opts)?.to_json()),
+            Statement::Query(q) | Statement::Explain(q) => {
+                Ok(self.plan_query(&self.catalog(), &q, opts)?.to_json())
+            }
             Statement::CreateIndex { .. } | Statement::DropIndex { .. } => {
                 Err(Error::unsupported("only queries can be explained"))
             }
         }
     }
 
-    /// Executes a SQL statement.
-    pub fn query(&mut self, sql: &str, opts: &QueryOptions) -> Result<QueryResult> {
+    /// Executes a SQL statement and materializes its result.
+    pub fn query(&self, sql: &str, opts: &QueryOptions) -> Result<QueryResult> {
+        self.start_query(sql, opts, QueryControl::default())?
+            .collect(opts.count_only)
+    }
+
+    /// Parses and plans a SQL statement and returns a cursor producing its
+    /// result rows incrementally. Statements (`CREATE/DROP INDEX`) are
+    /// executed here and yield an empty cursor. A query plans against a
+    /// snapshot of the catalog and keeps the table versions it references
+    /// for its whole execution.
+    pub fn start_query(
+        &self,
+        sql: &str,
+        opts: &QueryOptions,
+        control: QueryControl,
+    ) -> Result<QueryCursor> {
+        let ready = |columns: Vec<Field>, rows: Vec<Row>| QueryCursor {
+            columns,
+            source: CursorSource::Ready(rows.into_iter()),
+            ctx: ExecContext::default(),
+            max_rows: opts.max_rows,
+            row_count: 0,
+        };
         match parse_statement(sql)? {
             Statement::Query(q) => {
-                let plan = self.plan_query(&q, opts)?;
-                self.execute(plan, opts)
+                let plan = self.plan_query(&self.catalog(), &q, opts)?;
+                let columns = plan
+                    .schema()
+                    .iter()
+                    .map(|f| Field::new(f.name.clone(), f.data_type.result_type()))
+                    .collect();
+                let timeout = (opts.timeout_ms > 0).then(|| Duration::from_millis(opts.timeout_ms));
+                let deadline = control
+                    .deadline
+                    .or_else(|| timeout.map(|t| Instant::now() + t));
+                let memory =
+                    usize::try_from(self.config.max_query_memory_mb.saturating_mul(1024 * 1024))
+                        .unwrap_or(usize::MAX);
+                let mut ctx = ExecContext::new(None, memory, self.config.test_functions)
+                    .with_deadline(deadline)
+                    .with_max_join_rows(self.config.max_join_rows)
+                    .with_physical_options(opts.physical());
+                if let Some(flag) = control.cancel {
+                    ctx = ctx.with_cancel_flag(flag);
+                }
+                ctx.check_interrupt()?;
+                Ok(QueryCursor {
+                    columns,
+                    source: CursorSource::Plan(build(plan)),
+                    ctx,
+                    max_rows: opts.max_rows,
+                    row_count: 0,
+                })
             }
             Statement::Explain(q) => {
-                let plan = self.plan_query(&q, opts)?;
+                let plan = self.plan_query(&self.catalog(), &q, opts)?;
                 let text = plan.to_json().to_string_compact();
-                Ok(QueryResult {
-                    columns: vec![Field::new("plan", DataType::String)],
-                    rows: if opts.count_only {
-                        Vec::new()
-                    } else {
-                        vec![vec![Value::str(&text)]]
-                    },
-                    row_count: 1,
-                })
+                Ok(ready(
+                    vec![Field::new("plan", DataType::String)],
+                    vec![vec![Value::str(&text)]],
+                ))
             }
             Statement::CreateIndex {
                 name,
@@ -386,48 +482,82 @@ impl Engine {
                 using,
             } => {
                 self.create_index(&name, if_not_exists, &table, &column, using.as_ref())?;
-                Ok(QueryResult::empty())
+                Ok(ready(Vec::new(), Vec::new()))
             }
             Statement::DropIndex { name, if_exists } => {
                 self.drop_index(&name, if_exists)?;
-                Ok(QueryResult::empty())
+                Ok(ready(Vec::new(), Vec::new()))
             }
         }
     }
+}
 
-    fn execute(&self, plan: PhysicalPlan, opts: &QueryOptions) -> Result<QueryResult> {
-        let columns = plan
-            .schema()
-            .iter()
-            .map(|f| Field::new(f.name.clone(), f.data_type.result_type()))
-            .collect();
-        let timeout = (opts.timeout_ms > 0).then(|| Duration::from_millis(opts.timeout_ms));
-        let memory = usize::try_from(self.config.max_query_memory_mb.saturating_mul(1024 * 1024))
-            .unwrap_or(usize::MAX);
-        let ctx = ExecContext::new(timeout, memory, self.config.test_functions)
-            .with_max_join_rows(self.config.max_join_rows)
-            .with_physical_options(opts.physical());
-        let mut root = build(plan);
-        let mut rows = Vec::new();
-        let mut row_count: u64 = 0;
-        while let Some(row) = root.next(&ctx)? {
-            row_count += 1;
-            if let Some(max) = opts.max_rows
-                && row_count > max
+enum CursorSource {
+    /// A physical operator tree being executed.
+    Plan(Box<dyn Operator>),
+    /// Precomputed rows (EXPLAIN, statements).
+    Ready(std::vec::IntoIter<Row>),
+}
+
+/// An executing statement: pulls result rows one at a time, enforcing
+/// `max_rows`, the timeout and cancellation.
+pub struct QueryCursor {
+    columns: Vec<Field>,
+    source: CursorSource,
+    ctx: ExecContext,
+    max_rows: Option<u64>,
+    row_count: u64,
+}
+
+impl QueryCursor {
+    /// Result columns (types are the protocol result types).
+    pub fn columns(&self) -> &[Field] {
+        &self.columns
+    }
+
+    /// Rows produced so far.
+    pub fn row_count(&self) -> u64 {
+        self.row_count
+    }
+
+    /// The next result row, or None at the end.
+    pub fn next_row(&mut self) -> Result<Option<Row>> {
+        let row = match &mut self.source {
+            CursorSource::Plan(root) => root.next(&self.ctx)?,
+            CursorSource::Ready(rows) => rows.next(),
+        };
+        if row.is_some() {
+            self.row_count += 1;
+            if let Some(max) = self.max_rows
+                && self.row_count > max
             {
                 return Err(Error::resource_limit(format!(
                     "result exceeds max_rows = {max}"
                 )));
             }
-            if !opts.count_only {
-                ctx.reserve(row.iter().map(|v| v.approx_size()).sum::<usize>() + 24)?;
+        }
+        Ok(row)
+    }
+
+    /// Fails with TIMEOUT or CANCELLED if the query must stop.
+    pub fn check_interrupt(&self) -> Result<()> {
+        self.ctx.check_interrupt()
+    }
+
+    /// Runs the query to completion, keeping the rows unless `count_only`.
+    pub fn collect(mut self, count_only: bool) -> Result<QueryResult> {
+        let mut rows = Vec::new();
+        while let Some(row) = self.next_row()? {
+            if !count_only {
+                self.ctx
+                    .reserve(row.iter().map(|v| v.approx_size()).sum::<usize>() + 24)?;
                 rows.push(row);
             }
         }
         Ok(QueryResult {
-            columns,
+            columns: self.columns,
             rows,
-            row_count,
+            row_count: self.row_count,
         })
     }
 }
@@ -449,12 +579,12 @@ mod tests {
     use crate::types::Value;
 
     fn engine() -> Engine {
-        let mut e = Engine::new(Config::default());
-        load(&mut e, "t", "id,name,amt\n1,a,1.5\n2,b,\n3,c,0.25\n");
+        let e = Engine::new(Config::default());
+        load(&e, "t", "id,name,amt\n1,a,1.5\n2,b,\n3,c,0.25\n");
         e
     }
 
-    fn rows(e: &mut Engine, sql: &str) -> Vec<Row> {
+    fn rows(e: &Engine, sql: &str) -> Vec<Row> {
         e.query(sql, &QueryOptions::default())
             .unwrap_or_else(|err| panic!("{sql}: {err}"))
             .rows
@@ -475,13 +605,13 @@ mod tests {
 
     #[test]
     fn select_filter_order_limit() {
-        let mut e = engine();
+        let e = engine();
         let r = rows(
-            &mut e,
+            &e,
             "SELECT name FROM t WHERE id > 1 ORDER BY id DESC LIMIT 1",
         );
         assert_eq!(r, vec![vec![Value::str("c")]]);
-        let r = rows(&mut e, "SELECT id FROM t ORDER BY amt NULLS LAST, id");
+        let r = rows(&e, "SELECT id FROM t ORDER BY amt NULLS LAST, id");
         assert_eq!(
             r,
             vec![
@@ -494,11 +624,8 @@ mod tests {
 
     #[test]
     fn aggregates() {
-        let mut e = engine();
-        let r = rows(
-            &mut e,
-            "SELECT COUNT(*), COUNT(amt), SUM(id), MAX(name) FROM t",
-        );
+        let e = engine();
+        let r = rows(&e, "SELECT COUNT(*), COUNT(amt), SUM(id), MAX(name) FROM t");
         assert_eq!(
             r,
             vec![vec![
@@ -512,8 +639,8 @@ mod tests {
 
     #[test]
     fn errors() {
-        let mut e = engine();
-        let mut code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
+        let e = engine();
+        let code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
         assert_eq!(code("SELECT nope FROM t"), ErrorCode::SemanticError);
         assert_eq!(
             code("SELECT id FROM t WHERE name = 1"),
@@ -534,7 +661,7 @@ mod tests {
         );
     }
 
-    fn load(e: &mut Engine, table: &str, csv: &str) {
+    fn load(e: &Engine, table: &str, csv: &str) {
         e.load(LoadRequest {
             table: table.into(),
             format: Format::Csv,
@@ -551,8 +678,8 @@ mod tests {
 
     /// `t` plus `u(id, tag)` with a NULL key and an unmatched key.
     fn engine2() -> Engine {
-        let mut e = engine();
-        load(&mut e, "u", "id,tag\n1,x\n1,y\n3,z\n,w\n9,q\n");
+        let e = engine();
+        load(&e, "u", "id,tag\n1,x\n1,y\n3,z\n,w\n9,q\n");
         e
     }
 
@@ -562,9 +689,9 @@ mod tests {
 
     #[test]
     fn joins() {
-        let mut e = engine2();
+        let e = engine2();
         let r = rows(
-            &mut e,
+            &e,
             "SELECT t.id, u.tag FROM t JOIN u ON t.id = u.id ORDER BY u.tag",
         );
         assert_eq!(
@@ -576,14 +703,14 @@ mod tests {
             ]
         );
         let r = rows(
-            &mut e,
+            &e,
             "SELECT t.id FROM t LEFT JOIN u ON u.id = t.id WHERE u.tag IS NULL",
         );
         assert_eq!(r, ints(&[2]));
-        let r = rows(&mut e, "SELECT COUNT(*) FROM t, u");
+        let r = rows(&e, "SELECT COUNT(*) FROM t, u");
         assert_eq!(r, ints(&[15]));
         // Non-equi join (nested loop) and the explicit nested-loop strategy.
-        let r = rows(&mut e, "SELECT COUNT(*) FROM t JOIN u ON t.id < u.id");
+        let r = rows(&e, "SELECT COUNT(*) FROM t JOIN u ON t.id < u.id");
         assert_eq!(r, ints(&[5]));
         let nl = QueryOptions {
             join: JoinStrategy::NestedLoop,
@@ -598,13 +725,13 @@ mod tests {
 
     #[test]
     fn grouping_and_distinct() {
-        let mut e = engine2();
+        let e = engine2();
         let r = rows(
-            &mut e,
+            &e,
             "SELECT id, COUNT(*) AS n FROM u GROUP BY id HAVING COUNT(*) > 1",
         );
         assert_eq!(r, vec![vec![Value::Int(1), Value::Int(2)]]);
-        let r = rows(&mut e, "SELECT DISTINCT id FROM u ORDER BY id NULLS LAST");
+        let r = rows(&e, "SELECT DISTINCT id FROM u ORDER BY id NULLS LAST");
         assert_eq!(
             r,
             vec![
@@ -615,11 +742,11 @@ mod tests {
             ]
         );
         let r = rows(
-            &mut e,
+            &e,
             "SELECT id + 1 AS k FROM u GROUP BY 1 ORDER BY k DESC LIMIT 1",
         );
         assert_eq!(r, ints(&[10]));
-        let mut code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
+        let code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
         assert_eq!(
             code("SELECT tag FROM u GROUP BY id"),
             ErrorCode::SemanticError
@@ -632,21 +759,18 @@ mod tests {
 
     #[test]
     fn subqueries_and_ctes() {
-        let mut e = engine2();
+        let e = engine2();
         let r = rows(
-            &mut e,
+            &e,
             "SELECT id FROM t WHERE id IN (SELECT id FROM u) ORDER BY id",
         );
         assert_eq!(r, ints(&[1, 3]));
         // NOT IN over a set containing NULL is never TRUE.
-        let r = rows(
-            &mut e,
-            "SELECT id FROM t WHERE id NOT IN (SELECT id FROM u)",
-        );
+        let r = rows(&e, "SELECT id FROM t WHERE id NOT IN (SELECT id FROM u)");
         assert!(r.is_empty());
         // Correlated scalar subquery.
         let r = rows(
-            &mut e,
+            &e,
             "SELECT t.id, (SELECT COUNT(*) FROM u WHERE u.id = t.id) FROM t ORDER BY 1",
         );
         assert_eq!(
@@ -658,12 +782,12 @@ mod tests {
             ]
         );
         let r = rows(
-            &mut e,
+            &e,
             "WITH a AS (SELECT id FROM t WHERE id > 1), b(x) AS (SELECT id * 10 FROM a) \
              SELECT x FROM b ORDER BY x",
         );
         assert_eq!(r, ints(&[20, 30]));
-        let mut code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
+        let code = |sql: &str| e.query(sql, &QueryOptions::default()).unwrap_err().code;
         assert_eq!(
             code("SELECT (SELECT id FROM u)"),
             ErrorCode::SubqueryCardinality
@@ -680,7 +804,7 @@ mod tests {
 
     #[test]
     fn explain() {
-        let mut e = engine2();
+        let e = engine2();
         let plan = e
             .explain(
                 "SELECT t.name FROM t JOIN u ON t.id = u.id WHERE u.tag = 'x'",

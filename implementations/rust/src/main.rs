@@ -4,10 +4,7 @@ use std::process::ExitCode;
 
 use polyquery::cli::{Mode, USAGE, parse_args};
 use polyquery::engine::Engine;
-use polyquery::protocol::{capabilities_json, session, version_json};
-
-/// Stack size of the request-processing thread (deep expressions recurse).
-const WORKER_STACK_BYTES: usize = 256 * 1024 * 1024;
+use polyquery::protocol::{WORKER_STACK_BYTES, capabilities_json, session, version_json};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -38,8 +35,17 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Mode::Serve => {
-            eprintln!("polyquery: serve (HTTP, Phase 4) is not implemented by this engine");
-            ExitCode::from(1)
+            if !cli.config.data_dir.is_dir() {
+                polyquery::log::error(
+                    "data directory does not exist",
+                    vec![(
+                        "data_dir",
+                        polyquery::json::Json::String(cli.config.data_dir.display().to_string()),
+                    )],
+                );
+                return ExitCode::from(1);
+            }
+            ExitCode::from(polyquery::server::serve(cli.config, cli.serve))
         }
         Mode::Session | Mode::Exec { .. } => {
             if !cli.config.data_dir.is_dir() {
@@ -55,10 +61,10 @@ fn main() -> ExitCode {
                 .name("session".into())
                 .stack_size(WORKER_STACK_BYTES)
                 .spawn(move || {
-                    let mut engine = Engine::new(config);
+                    let engine = Engine::new(config);
                     match &mode {
-                        Mode::Exec { request } => session::run_exec(&mut engine, request),
-                        _ => session::run_session(&mut engine),
+                        Mode::Exec { request } => session::run_exec(&engine, request),
+                        _ => session::run_session(&engine),
                     }
                 });
             match worker.map(|h| h.join()) {

@@ -8,7 +8,7 @@ use crate::error::Error;
 use crate::json::{self, Json};
 
 /// Runs the request/response loop until EOF on stdin.
-pub fn run_session(engine: &mut Engine) -> io::Result<()> {
+pub fn run_session(engine: &Engine) -> io::Result<()> {
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let stdout = io::stdout();
@@ -43,7 +43,7 @@ pub fn run_session(engine: &mut Engine) -> io::Result<()> {
 
 /// Executes a request file (a single request or an array of requests),
 /// printing one response per line.
-pub fn run_exec(engine: &mut Engine, source: &str) -> io::Result<()> {
+pub fn run_exec(engine: &Engine, source: &str) -> io::Result<()> {
     let text = if source == "-" {
         let mut s = String::new();
         io::stdin().read_to_string(&mut s)?;

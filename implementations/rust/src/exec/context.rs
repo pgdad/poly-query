@@ -71,6 +71,12 @@ impl ExecContext {
         }
     }
 
+    /// Replaces the deadline (None = no timeout).
+    pub fn with_deadline(mut self, deadline: Option<Instant>) -> Self {
+        self.deadline = deadline;
+        self
+    }
+
     pub fn with_cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
         self.cancel = Some(flag);
         self

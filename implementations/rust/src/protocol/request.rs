@@ -294,7 +294,7 @@ fn parse_query_options(req: &Json) -> Result<QueryOptions> {
         o.use_indexes = u;
     }
     optional_bool(opts, "native")?;
-    optional_str(opts, "query_id")?;
+    o.query_id = optional_str(opts, "query_id")?.map(str::to_string);
     Ok(o)
 }
 

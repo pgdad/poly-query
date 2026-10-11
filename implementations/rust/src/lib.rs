@@ -10,6 +10,7 @@
 //! * [`exec`]     — physical operators and expression evaluation
 //! * [`engine`]   — transport-independent facade
 //! * [`protocol`] — JSON request/response protocol, session and exec modes
+//! * [`server`]   — HTTP/1.1 server (`serve`): admission, streaming, metrics, shutdown
 
 pub mod catalog;
 pub mod cli;
@@ -22,6 +23,7 @@ pub mod json;
 pub mod log;
 pub mod planner;
 pub mod protocol;
+pub mod server;
 pub mod sql;
 pub mod storage;
 pub mod types;
