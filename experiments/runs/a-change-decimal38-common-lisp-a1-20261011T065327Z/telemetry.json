@@ -1,0 +1,111 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-decimal38-common-lisp-a1-20261011T065327Z",
+ "language": "common-lisp",
+ "task": "change-decimal38",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-decimal38",
+ "prompt_sha256": "6698f97df2ec06acd17df29c14ead69eaf33f30d117853b0448eb5d6b52c2ec9",
+ "session_id": "38756de7-3fcf-4cca-988e-69235f231462",
+ "tokens": {
+  "input": 198,
+  "output": 76437,
+  "cache_read": 18198343,
+  "cache_creation": 284871,
+  "thinking": null,
+  "thinking_estimated": 26361,
+  "source": "result events",
+  "api_messages": 99
+ },
+ "rate_limit": {
+  "events": 9,
+  "max_utilization": {
+   "seven_day": 0.31,
+   "five_hour": 0.49
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 7.4481686,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 103,
+ "result_segments": 1,
+ "assistant_messages": 202,
+ "tool_calls": {
+  "Bash": 95,
+  "Read": 6,
+  "Write": 1
+ },
+ "tool_calls_total": 102,
+ "tool_failures": 1,
+ "build_invocations": 30,
+ "build_failures_heuristic": 3,
+ "conformance_runs": 9,
+ "conformance_progress": [
+  [
+   591,
+   591
+  ],
+  [
+   68,
+   69
+  ],
+  [
+   69,
+   69
+  ],
+  [
+   3864,
+   3870
+  ],
+  [
+   29,
+   29
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   22,
+   22
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 7,
+ "time": {
+  "wall_seconds": 1346.3,
+  "model_api_seconds": 724.5,
+  "tool_seconds": 621.6,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 3,
+  "files_changed": 26,
+  "lines_added": 526,
+  "lines_removed": 132,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "DECIMAL now supports precision 38 in the Common Lisp engine, and every suite in the definition of done passes with 0 failures, 0 errors and 0 not-implemented. The engine claims `change.decimal38` alongside `change.union_all`, and all work is committed in three commits.\n\n## Test results (from a clean build)\n| Run | Result |\n|---|---|\n| `runner.py` (session) | phase 1: 225/225, phase 2: 208/208, phase 3: 212/212 (includes the 69 decimal38 cases), phase 5: 15/15 \u2014 **TOTAL: 660/660 pass** |\n| `--transport http` | **TOTAL: 660/660 pass** |\n| `--modes` | 1350/1350, 1248/1248, 1272/1272 \u2014 **TOTAL: 3870/3870 pass** |\n| `--native` and `--modes --native` (kernel library built under /tmp) | 660/660 and 3870/3870 pass |\n| `tests/concurrency/http_suite.py` | **18/18 passed** |\n| `make build test` / `make lint` | succeed, no warnings, no unit-test failures |\n\nExtra checks:\n- **6,000-row wide-decimal table:** 44 queries gave identical results across all 6 option combinations, native mode, a PQCF/mmap copy and the row layout. Sampled results matched Python's `decimal` exactly.\n- **Fuzzer:** `bench/fuzz.py` ran 1,500 random queries with 0 mismatches.\n\n## What was implemented\n- **Types and results:** precision 1\u201338 is accepted. Literals with up to 38 digits are DECIMAL. If any DECIMAL operand has more than 18 digits (\"wide\"), the result has precision 38; otherwise it stays 18. This applies to `+ - *`, common types (CASE, COALESCE, UNION ALL), SUM, ROUND and FLOOR/CEIL.\n- **Exact comparisons:** INT64 and DECIMAL values are compared exactly and never overflow, so `9223372036854775807 > 1.5` is TRUE.\n- **CAST:** converting a DECIMAL to INT64 now checks the INT64 range, since wide values can exceed it.\n- **Storage:** a table with a wide column is saved as PQCF v2 with 128-bit values (PLAIN and RLE); every other table is saved as v1. The reader rejects a header/metadata version mismatch and a v1 file declaring a wide column as STORAGE_CORRUPT, and version > 2 as STORAGE_VERSION_UNSUPPORTED.\n\n## Main design decisions\n- **Representation:** a wide value is still the unscaled integer, as before. Lisp integers have no size limit, so exact 76-digit intermediate products cost nothing extra and only the final result is checked against 38 digits. Wide columns are stored in a new `WIDE-COLUMN` (a plain vector of integers).\n- **Narrow/wide dispatch:** the static type decides. Narrow decimals keep their 64-bit vectors, typed loops and native kernels. Wide decimals run through generic vectors, so they cannot reach the native kernels. The README documents this and lists every module touched.\n\n## Things you should know\n- **`AS full`:** the public decimal38 test names a column `full`, which the grammar lists as reserved. I now accept `FULL` and `RIGHT` (the two keywords reserved only for future syntax) as an alias, but only after an explicit `AS`. `FULL JOIN` still returns UNSUPPORTED and `SELECT 1 full` still fails to parse.\n- **`spec_version` stays \"1.0.0\"**, not the \"1.2.0-cr2\" the change request names, because a phase 1 conformance test requires \"1.0.0\". The UNION ALL change made the same choice.\n- **Three existing unit tests updated:** they asserted the old behaviour (precision 19 being invalid, the INT64-vs-DECIMAL comparison overflow, a version-2 header being unsupported).\n- **README cleanup:** I removed a stale \"known limitation\" about `union_all.pqt:51` failing; that test now passes.\n\n## Known limitations\n- Wide-decimal arithmetic, comparisons and sums run value by value without native kernels. On 300k rows this took 1.3\u20131.6\u00d7 the time of narrow decimals, and very large values cost more.\n- Comparing an INT64 column with a DECIMAL of a different scale also takes this slower per-value path.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

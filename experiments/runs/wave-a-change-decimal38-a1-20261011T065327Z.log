@@ -1,2 +1,6 @@
 2026-10-11T06:53:28+00:00 wave wave-a-change-decimal38-a1-20261011T065327Z: order=['common-lisp']
 2026-10-11T06:53:28+00:00 [a-change-decimal38-common-lisp-a1-20261011T065327Z] agent queued (usage gate, then launch)
+2026-10-11T07:15:55+00:00 [a-change-decimal38-common-lisp-a1-20261011T065327Z] agent finished; collecting telemetry
+2026-10-11T07:15:55+00:00 [a-change-decimal38-common-lisp-a1-20261011T065327Z] validating (clean clone, sandboxed)
+2026-10-11T07:16:13+00:00 [a-change-decimal38-common-lisp-a1-20261011T065327Z] outcome=success cost=$7.4481686 turns=103 wall=1346.3s
+2026-10-11T07:16:13+00:00 wave wave-a-change-decimal38-a1-20261011T065327Z finished: decimal38=success
