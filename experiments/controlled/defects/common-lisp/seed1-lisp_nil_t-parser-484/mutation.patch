@@ -1,0 +1,11 @@
+--- a/implementations/common-lisp/src/sql/parser.lisp
++++ b/implementations/common-lisp/src/sql/parser.lisp
+@@ -481,7 +481,7 @@
+                               ((or (keyword-p type-tok :date) (keyword-p type-tok :timestamp))
+                                (next-token p) (symbol-name (token-value type-tok)))
+                               (t (unexpected p "type name"))))
+-             (params nil))
++             (params t))
+         (when (accept-op p "(")
+           (setf params (parse-comma-list
+                         p (lambda (p)

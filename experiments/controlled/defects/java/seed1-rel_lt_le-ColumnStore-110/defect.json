@@ -1,0 +1,10 @@
+{
+ "language": "java",
+ "seed": 1,
+ "operator": "rel_lt_le",
+ "file": "implementations/java/src/main/java/polyquery/exec/vector/ColumnStore.java",
+ "line": 110,
+ "failing_cases": [
+  "cases/phase2/groupby.pqt:242"
+ ]
+}

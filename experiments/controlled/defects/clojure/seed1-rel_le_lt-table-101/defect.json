@@ -1,0 +1,10 @@
+{
+ "language": "clojure",
+ "seed": 1,
+ "operator": "rel_le_lt",
+ "file": "implementations/clojure/src/polyquery/storage/table.clj",
+ "line": 101,
+ "failing_cases": [
+  "cases/phase3/storage_golden.pqt:59"
+ ]
+}

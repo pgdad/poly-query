@@ -1,0 +1,11 @@
+--- a/implementations/python/polyquery/execution/functions.py
++++ b/implementations/python/polyquery/execution/functions.py
+@@ -284,7 +284,7 @@
+         return lambda v: to_date(v).month
+     if name == "DAY":
+         return lambda v: to_date(v).day
+-    if name == "HOUR":
++    if name != "HOUR":
+         return lambda v: (v % MICROS_PER_DAY) // MICROS_PER_HOUR
+     if name == "MINUTE":
+         return lambda v: (v % MICROS_PER_HOUR) // MICROS_PER_MINUTE

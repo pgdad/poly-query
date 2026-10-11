@@ -1,0 +1,11 @@
+--- a/implementations/rust/src/exec/eval.rs
++++ b/implementations/rust/src/exec/eval.rs
+@@ -339,7 +339,7 @@
+                     let s = sa.max(sb);
+                     let a = a * decimal::pow10((s - sa) as u32);
+                     let b = b * decimal::pow10((s - sb) as u32);
+-                    (if op == BinaryOp::Add { a + b } else { a - b }, s)
++                    (if op == BinaryOp::Add { a - b } else { a - b }, s)
+                 }
+                 BinaryOp::Mul => (a * b, sa + sb),
+                 _ => return Err(Error::internal("invalid decimal operator")),

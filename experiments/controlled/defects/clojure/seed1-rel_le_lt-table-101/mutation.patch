@@ -1,0 +1,11 @@
+--- a/implementations/clojure/src/polyquery/storage/table.clj
++++ b/implementations/clojure/src/polyquery/storage/table.clj
+@@ -98,7 +98,7 @@
+       (if (>= lo hi)
+         lo
+         (let [mid (unsigned-bit-shift-right (+ lo hi 1) 1)]
+-          (if (<= (long (:start (nth segs mid))) r)
++          (if (< (long (:start (nth segs mid))) r)
+             (recur mid hi)
+             (recur lo (dec mid))))))))
+ 

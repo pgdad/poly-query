@@ -1,0 +1,11 @@
+{
+ "language": "python",
+ "seed": 1,
+ "operator": "eq_ne",
+ "file": "implementations/python/polyquery/execution/functions.py",
+ "line": 287,
+ "failing_cases": [
+  "cases/phase2/functions.pqt:123",
+  "cases/phase2/functions.pqt:161"
+ ]
+}
