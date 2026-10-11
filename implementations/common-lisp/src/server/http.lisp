@@ -227,6 +227,46 @@ ON-CONTINUE is called before reading a body the client is waiting to send
 
 ;;; ------------------------------------------------------------------
 ;;; Writing
+;;;
+;;; Output bypasses SBCL's fd-streams, which queue whatever the kernel does
+;;; not accept immediately: a response is assembled into one octet vector and
+;;; written with blocking write(2) calls, so a client that stops reading
+;;; blocks the writer (the basis of streaming backpressure).
+
+(define-condition http-write-error (error)
+  ((errno :initarg :errno :reader http-write-error-errno))
+  (:report (lambda (c s)
+             (format s "cannot write to the client: ~A"
+                     (sb-int:strerror (http-write-error-errno c))))))
+
+(defstruct (http-output (:constructor make-http-output (fd)))
+  (fd -1 :type fixnum))
+
+(defun write-octets (out octets)
+  "Write all of OCTETS to the file descriptor of OUT, blocking as needed."
+  (let ((fd (http-output-fd out))
+        (octets (coerce octets '(simple-array (unsigned-byte 8) (*))))
+        (start 0))
+    (loop while (< start (length octets))
+          do (multiple-value-bind (n errno)
+                 (sb-sys:with-pinned-objects (octets)
+                   (sb-unix:unix-write fd octets start (- (length octets) start)))
+               (cond (n (incf start n))
+                     ((= errno sb-unix:eintr))
+                     ((= errno sb-unix:eagain) (sb-sys:wait-until-fd-usable fd :output))
+                     (t (error 'http-write-error :errno errno)))))))
+
+(defun octets-of (&rest parts)
+  "Concatenate PARTS (strings, sent as UTF-8, or octet vectors) into octets."
+  (let ((vectors (mapcar (lambda (p)
+                           (if (stringp p) (sb-ext:string-to-octets p :external-format :utf-8) p))
+                         parts)))
+    (let ((result (make-array (reduce #'+ vectors :key #'length)
+                              :element-type '(unsigned-byte 8)))
+          (pos 0))
+      (dolist (v vectors result)
+        (replace result v :start1 pos)
+        (incf pos (length v))))))
 
 (defparameter *http-reason-phrases*
   '((100 . "Continue") (200 . "OK") (201 . "Created") (400 . "Bad Request")
@@ -234,8 +274,7 @@ ON-CONTINUE is called before reading a body the client is waiting to send
     (409 . "Conflict") (413 . "Content Too Large") (500 . "Internal Server Error")
     (503 . "Service Unavailable") (504 . "Gateway Timeout")))
 
-(defun write-ascii (string stream)
-  (loop for c across string do (write-byte (logand (char-code c) 255) stream)))
+(defparameter *crlf* (coerce '(#\Return #\Newline) 'string))
 
 (defun header-safe-value (value)
   "VALUE with every octet outside printable ASCII percent-encoded, so a
@@ -249,53 +288,46 @@ client-chosen string can never break the header framing."
                        (write-char (code-char b) s)
                        (format s "%~2,'0X" b)))))))
 
-(defun write-status-and-headers (stream status headers)
-  "Write the status line and HEADERS (alist of name . value) and the blank line."
-  (write-ascii (format nil "HTTP/1.1 ~D ~A~C~C" status
-                       (or (cdr (assoc status *http-reason-phrases*)) "Unknown")
-                       #\Return #\Newline)
-               stream)
-  (loop for (name . value) in headers
-        do (write-ascii (format nil "~A: ~A~C~C" name (header-safe-value (princ-to-string value))
-                                #\Return #\Newline)
-                        stream))
-  (write-ascii (format nil "~C~C" #\Return #\Newline) stream))
+(defun status-and-headers (status headers)
+  "The status line, HEADERS (alist of name . value) and the blank line."
+  (with-output-to-string (s)
+    (format s "HTTP/1.1 ~D ~A~A" status
+            (or (cdr (assoc status *http-reason-phrases*)) "Unknown") *crlf*)
+    (loop for (name . value) in headers
+          do (format s "~A: ~A~A" name (header-safe-value (princ-to-string value)) *crlf*))
+    (write-string *crlf* s)))
 
-(defun write-continue (stream)
-  (write-ascii (format nil "HTTP/1.1 100 Continue~C~C~C~C" #\Return #\Newline #\Return #\Newline)
-               stream)
-  (finish-output stream))
+(defun write-continue (out)
+  (write-octets out (octets-of (format nil "HTTP/1.1 100 Continue~A~A" *crlf* *crlf*))))
 
-(defun write-http-response (stream status content-type body &key headers (keep-alive t))
+(defun write-http-response (out status content-type body &key headers (keep-alive t))
   "Write a complete response whose BODY is a string (sent as UTF-8) or octets."
   (let ((octets (if (stringp body)
                     (sb-ext:string-to-octets body :external-format :utf-8)
                     body)))
-    (write-status-and-headers stream status
+    (write-octets out
+                  (octets-of (status-and-headers
+                              status
                               (append (list (cons "Content-Type" content-type)
                                             (cons "Content-Length" (length octets))
                                             (cons "Connection" (if keep-alive "keep-alive" "close")))
                                       headers))
-    (write-sequence octets stream)
-    (finish-output stream)))
+                             octets))))
 
-(defun start-chunked-response (stream status content-type &key headers (keep-alive t))
-  (write-status-and-headers stream status
+(defun start-chunked-response (out status content-type &key headers (keep-alive t))
+  (write-octets out
+                (octets-of (status-and-headers
+                            status
                             (append (list (cons "Content-Type" content-type)
                                           (cons "Transfer-Encoding" "chunked")
                                           (cons "Connection" (if keep-alive "keep-alive" "close")))
-                                    headers))
-  (finish-output stream))
+                                    headers)))))
 
-(defun write-chunk (stream string)
-  "Send STRING (UTF-8) as one chunk and push it to the client."
+(defun write-chunk (out string)
+  "Send STRING (UTF-8) as one chunk."
   (let ((octets (sb-ext:string-to-octets string :external-format :utf-8)))
     (when (plusp (length octets))
-      (write-ascii (format nil "~X~C~C" (length octets) #\Return #\Newline) stream)
-      (write-sequence octets stream)
-      (write-ascii (format nil "~C~C" #\Return #\Newline) stream)
-      (finish-output stream))))
+      (write-octets out (octets-of (format nil "~X~A" (length octets) *crlf*) octets *crlf*)))))
 
-(defun end-chunked-response (stream)
-  (write-ascii (format nil "0~C~C~C~C" #\Return #\Newline #\Return #\Newline) stream)
-  (finish-output stream))
+(defun end-chunked-response (out)
+  (write-octets out (octets-of (format nil "0~A~A" *crlf* *crlf*))))

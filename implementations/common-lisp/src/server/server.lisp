@@ -28,15 +28,19 @@
   (active-requests 0 :type fixnum)       ; requests being processed right now
   (draining nil))                        ; set once shutdown has begun
 
-(defstruct (connection (:constructor make-connection (socket stream)))
+(defstruct (connection (:constructor make-connection (socket stream output)))
   socket
-  stream
+  stream                                 ; binary input stream
+  output                                 ; HTTP-OUTPUT on the socket
   (gone nil)                             ; the client disconnected
   (peek-buffer (make-array 1 :element-type '(unsigned-byte 8))))
 
 (defconstant +stream-batch-rows+ 1000 "Rows per streamed `rows` line (spec: <= 10,000).")
 (defconstant +stream-channel-batches+ 8 "Batches buffered ahead of a slow client (spec: <= 16).")
 (defconstant +stream-flush-seconds+ 0.05 "A partial batch older than this is sent anyway.")
+(defconstant +stream-socket-buffer+ (* 256 1024)
+  "Kernel send buffer of a streaming connection, so that a client that stops
+reading stalls the query after a bounded amount of output.")
 
 (sb-ext:defglobal **shutdown-requested** nil)
 
@@ -77,7 +81,7 @@
       (error-http-status (response-error-code response))))
 
 (defun send-json (conn status object &optional headers)
-  (write-http-response (connection-stream conn) status "application/json"
+  (write-http-response (connection-output conn) status "application/json"
                        (json-to-string object) :headers headers :keep-alive *keep-alive*))
 
 (defun send-response (conn response &key (success-status 200) headers)
@@ -244,6 +248,8 @@ called with the query context and returns the job's thunk."
                                  (unless (response-ok-p result)
                                    (channel-put channel (list :error result) :force t))
                                  result))))))
+    (ignore-errors
+     (setf (sb-bsd-sockets:sockopt-send-buffer (connection-socket conn)) +stream-socket-buffer+))
     (relay-stream server conn job channel)))
 
 (defun job-done-p (scheduler job)
@@ -252,7 +258,7 @@ called with the query context and returns the job's thunk."
 
 (defun relay-stream (server conn job channel)
   "Connection side of a streamed query: write channel items as NDJSON chunks."
-  (let ((stream (connection-stream conn))
+  (let ((stream (connection-output conn))
         (scheduler (server-scheduler server))
         (watch (disconnect-watcher server conn job))
         (header-sent nil))
@@ -295,7 +301,7 @@ called with the query context and returns the job's thunk."
                    (funcall watch)
                    (when (connection-gone conn) (return))
                    (poll-job scheduler job))))))
-        ((or stream-error sb-bsd-sockets:socket-error) ()
+        ((or stream-error http-write-error sb-bsd-sockets:socket-error) ()
           (setf (connection-gone conn) t *keep-alive* nil)
           (cancel-job scheduler job))))))
 
@@ -311,7 +317,7 @@ called with the query context and returns the job's thunk."
 (defun handle-metrics (server conn request)
   (declare (ignore request))
   (multiple-value-bind (running queued) (scheduler-counts (server-scheduler server))
-    (write-http-response (connection-stream conn) 200 "text/plain; version=0.0.4; charset=utf-8"
+    (write-http-response (connection-output conn) 200 "text/plain; version=0.0.4; charset=utf-8"
                          (render-metrics (server-metrics server)
                                          :running running :queued queued
                                          :tables (catalog-table-count
@@ -510,7 +516,8 @@ response is not destroyed by a TCP reset when the socket is closed."
          (max-bytes (server-options-max-request-bytes (server-options server)))
          (request (handler-case
                       (read-http-request stream max-bytes
-                                         :on-continue (lambda () (write-continue stream)))
+                                         :on-continue (lambda ()
+                                                        (write-continue (connection-output conn))))
                     (http-protocol-error (e)
                       (let ((*keep-alive* nil))
                         (send-error conn "INVALID_REQUEST" (http-protocol-error-message e)))
@@ -536,11 +543,12 @@ response is not destroyed by a TCP reset when the socket is closed."
     (unwind-protect
          (handler-case
              (let* ((stream (sb-bsd-sockets:socket-make-stream
-                             socket :input t :output t :element-type '(unsigned-byte 8)
-                                    :buffering :full))
-                    (conn (make-connection socket stream)))
+                             socket :input t :element-type '(unsigned-byte 8) :buffering :full))
+                    (conn (make-connection socket stream
+                                           (make-http-output
+                                            (sb-bsd-sockets:socket-file-descriptor socket)))))
                (loop while (serve-one-request server conn)))
-           ((or stream-error sb-bsd-sockets:socket-error) () nil)
+           ((or stream-error http-write-error sb-bsd-sockets:socket-error) () nil)
            (serious-condition (e)
              (log-message :error "connection handler failed: ~A" e)))
       (ignore-errors (sb-bsd-sockets:socket-close socket :abort t)))))
