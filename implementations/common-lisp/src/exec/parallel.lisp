@@ -342,6 +342,24 @@ PARTITIONS by the hash of their keys, as GROUP-STATE-PARTITIONS splits groups."
                 (aref sizes p) (1+ k))))
       (make-partitioned-batch key-vecs arg-vecs rows positions))))
 
+(defun partition-morsel (prepared base partitions native)
+  "PARTITIONED-BATCH of the rows of one morsel, given as the list of its
+batches' (row-count key-vecs . arg-vecs), in order; BASE is the input
+position of its first row."
+  (if (null (rest prepared))
+      (destructuring-bind (n key-vecs . arg-vecs) (first prepared)
+        (partition-batch key-vecs arg-vecs n base partitions native))
+      (let ((total (reduce #'+ prepared :key #'first)))
+        (flet ((column (k kind-of)
+                 (let ((vecs (mapcar (lambda (p) (nth k (funcall kind-of p))) prepared)))
+                   (and (first vecs)
+                        (vec-concatenate-any vecs total)))))
+          (let ((nkeys (length (second (first prepared))))
+                (nargs (length (cddr (first prepared)))))
+            (partition-batch (loop for k below nkeys collect (column k #'second))
+                             (loop for k below nargs collect (column k #'cddr))
+                             total base partitions native))))))
+
 (defun consume-partitioned-batch (gs pb p)
   "Aggregate the rows of partition P of the PARTITIONED-BATCH PB into GS."
   (let* ((idx (svref (partitioned-batch-rows pb) p))
@@ -392,7 +410,8 @@ many groups, partitioning its rows; see above)."
                                      (declare (type function iter))
                                      ;; Input position: morsel, then row within it.
                                      (let ((base (* m (expt 2 32)))
-                                           (rows 0))
+                                           (rows 0)
+                                           (prepared '()))
                                        (declare (type fixnum base rows))
                                        (loop for b = (funcall iter)
                                              while b
@@ -404,12 +423,15 @@ many groups, partitioning its rows; see above)."
                                                         (charge-memory
                                                          (* n (row-footprint (+ (length key-vecs)
                                                                                 (length arg-vecs)))))
-                                                        (push (partition-batch key-vecs arg-vecs n base
-                                                                               workers (group-state-native gs))
-                                                              (svref buffers w)))
+                                                        (push (list* n key-vecs arg-vecs) prepared))
                                                       (funcall consume gs b base))
-                                                  (incf base n)
                                                   (incf rows n)))
+                                       ;; The whole morsel's rows are split at once, so
+                                       ;; partitions receive few, large pieces.
+                                       (when prepared
+                                         (push (partition-morsel (nreverse prepared) base workers
+                                                                 (group-state-native gs))
+                                               (svref buffers w)))
                                        (when first-morsel
                                          (setf first-morsel nil
                                                partition
@@ -484,24 +506,40 @@ merged in parallel, one thread per hash partition."
                                            (consume-partitioned-batch gs pb p)
                                            (group-state-charge gs)))))))))
          (check-interrupts)
-         (ordered-group-batches parts node))))))
+         (ordered-group-batches parts node workers))))))
 
-(defun ordered-group-batches (states node)
+(defun ordered-group-batches (states node &optional (threads 1))
   "Iterator over the output batches of the groups of STATES in order of
-their first input position."
+their first input position. With THREADS > 1 and many groups, the batches
+are built in parallel up front."
   (multiple-value-bind (owners gids) (groups-in-position-order states)
     (let* ((nkeys (length (pp-hash-aggregate-group-by node)))
            (kinds (output-kinds node))
            (key-kinds (subseq kinds 0 nkeys))
            (agg-kinds (subseq kinds nkeys))
            (count (length gids))
+           (nbatches (ceiling count +batch-size+))
            (pos 0))
       (declare (type fixnum pos))
-      (lambda ()
-        (when (< pos count)
-          (let ((end (min count (+ pos +batch-size+))))
-            (prog1 (group-entries-batch owners gids pos end key-kinds agg-kinds)
-              (setf pos end))))))))
+      (flet ((batch (k)
+               (let ((start (* k +batch-size+)))
+                 (group-entries-batch owners gids start (min count (+ start +batch-size+))
+                                      key-kinds agg-kinds))))
+        (if (and (> threads 1) (> nbatches 4))
+            (let ((batches (make-array nbatches))
+                  (workers (min threads nbatches)))
+              (run-in-threads
+               (loop for w below workers
+                     collect (let ((w w))
+                               (lambda ()
+                                 (loop for k from w below nbatches by workers
+                                       do (setf (svref batches k) (batch k)))))))
+              (lambda ()
+                (when (< pos nbatches)
+                  (prog1 (svref batches pos) (incf pos)))))
+            (lambda ()
+              (when (< pos nbatches)
+                (prog1 (batch pos) (incf pos)))))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Parallel sorting: contiguous chunks of the permutation are sorted

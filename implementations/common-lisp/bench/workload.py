@@ -5,7 +5,8 @@ Loads the workload's tables (CSV + schema from a pqgen output directory) into
 one session, then runs every query `--warmup` + `--repeat` times with the
 engine's default execution options (no `options` object, as a client would
 send) and reports the median and minimum wall time seen by the client
-(request written -> response line read: parse, plan, execute, serialize).
+(request written -> complete response line read: parse, plan, execute,
+serialize; the client's own JSON decoding is not included).
 
 Results are canonicalised (rows sorted unless the query has ORDER BY, floats
 rounded to 9 significant digits) and hashed, so two runs (e.g. before/after an
@@ -31,10 +32,38 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+FLOAT_REL_TOL = 1e-9   # as the conformance runner
+
+
 def canon_value(v):
+    # FLOAT64 sums of parallel runs may differ in the last bits (summation
+    # order is implementation-defined); the digest rounds them, and results
+    # small enough to be kept are compared with FLOAT_REL_TOL.
     if isinstance(v, float):
-        return "%.9g" % v
+        return "%.6g" % v
     return json.dumps(v)
+
+
+def canon_rows(sql: str, resp: dict):
+    rows = resp["rows"]
+    if "ORDER BY" not in sql.upper():
+        rows = sorted(rows, key=lambda r: [canon_value(v) for v in r])
+    return rows
+
+
+def rows_close(a, b) -> bool:
+    if len(a) != len(b):
+        return False
+    for ra, rb in zip(a, b):
+        for x, y in zip(ra, rb):
+            if isinstance(x, float) or isinstance(y, float):
+                if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
+                    return False
+                if abs(x - y) > FLOAT_REL_TOL * max(1.0, abs(x), abs(y)):
+                    return False
+            elif x != y:
+                return False
+    return True
 
 
 def result_digest(sql: str, resp: dict) -> str:
@@ -54,9 +83,15 @@ class Session:
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
     def request(self, req: dict) -> dict:
+        return json.loads(self.request_raw(req)[0])
+
+    def request_raw(self, req: dict):
+        """(response line, seconds until the whole line was read)."""
+        t = time.monotonic()
         self.proc.stdin.write((json.dumps(req) + "\n").encode())
         self.proc.stdin.flush()
-        return json.loads(self.proc.stdout.readline())
+        line = self.proc.stdout.readline()
+        return line, time.monotonic() - t
 
     def close(self) -> None:
         self.proc.stdin.close()
@@ -107,9 +142,8 @@ def main() -> int:
         digest = None
         rows = None
         for i in range(args.warmup + args.repeat):
-            t = time.monotonic()
-            r = s.request(req)
-            dt = time.monotonic() - t
+            line, dt = s.request_raw(req)
+            r = json.loads(line)
             if i >= args.warmup:
                 samples.append(dt * 1000.0)
             d = result_digest(q["sql"], r)
@@ -119,15 +153,19 @@ def main() -> int:
             digest = d
             rows = r.get("row_count") if r.get("ok") else r["error"]["code"]
         med, lo = statistics.median(samples), min(samples)
+        kept = canon_rows(q["sql"], r) if r.get("ok") and "rows" in r and len(r["rows"]) <= 2000 else None
         line = "%-22s %10.1f %10.1f %8s  %s" % (q["name"], med, lo, rows, digest)
         if q["name"] in before:
             b = before[q["name"]]
-            same = b["digest"] == digest
+            if kept is not None and b.get("rows_kept") is not None:
+                same = rows_close(kept, b["rows_kept"])
+            else:
+                same = b["digest"] == digest
             mismatches += not same
             line += "   %9.1f  %6.2fx %s" % (b["median_ms"], b["median_ms"] / med, "yes" if same else "NO")
         print(line, flush=True)
         results[q["name"]] = {"sql": q["sql"], "median_ms": med, "min_ms": lo, "rows": rows,
-                              "digest": digest, "samples_ms": samples}
+                              "digest": digest, "samples_ms": samples, "rows_kept": kept}
     s.close()
     total = sum(r["median_ms"] for r in results.values())
     print(f"total of medians: {total:.1f} ms")
