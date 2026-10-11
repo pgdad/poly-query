@@ -313,7 +313,8 @@ pub struct SortedRows {
 const PARALLEL_GATHER_ROWS: usize = 16 * BATCH_SIZE;
 
 impl SortedRows {
-    fn lazy(rows: Batch, perm: Vec<u32>) -> SortedRows {
+    /// The rows `rows` in the order `perm`, gathered batch by batch.
+    pub fn lazy(rows: Batch, perm: Vec<u32>) -> SortedRows {
         SortedRows {
             ready: VecDeque::new(),
             rows,
@@ -337,7 +338,8 @@ impl SortedRows {
         out
     }
 
-    fn next(&mut self) -> Option<Batch> {
+    /// The next output batch.
+    pub fn take_batch(&mut self) -> Option<Batch> {
         if let Some(b) = self.ready.pop_front() {
             return Some(b);
         }
@@ -406,7 +408,7 @@ impl BatchOperator for SortOp {
         if let Some(input) = self.input.take() {
             self.output = Some(self.compute(input, ctx)?);
         }
-        let next = self.output.as_mut().and_then(SortedRows::next);
+        let next = self.output.as_mut().and_then(SortedRows::take_batch);
         if next.is_none() {
             self.output = None;
         }
