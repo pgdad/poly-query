@@ -173,8 +173,8 @@ final class Parallel {
                 return null;
             }
             return new SortBatches.Sort(new Gather(builder, c, new TopNReducer(t.keys(), t.input().schema(),
-                    (int) (offset + limit))), t.keys(), t.schema(), builder.context(), builder.batchSize(), offset,
-                    limit);
+                    (int) (offset + limit))), t.keys(), t.schema(), builder.context(), builder.batchSize(),
+                    builder.threads(), offset, limit);
         }
         Chain c = chain(plan);
         if (c != null && worthIt(c, builder.morselRows())) {

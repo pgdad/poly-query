@@ -98,12 +98,12 @@ public final class BatchBuilder {
                 yield new BatchOperators.Limit(build(l.input()), offset, limit, l.schema().size());
             }
             case PhysicalPlan.Sort s -> new SortBatches.Sort(build(s.input()), s.keys(), s.schema(), ctx, batchSize,
-                    0, -1);
+                    threads, 0, -1);
             case PhysicalPlan.TopN t -> {
                 long offset = t.offset() == null ? 0 : rows.constant(t.offset(), "OFFSET", 0);
                 long limit = rows.constant(t.limit(), "LIMIT", -1);
                 BatchOperator sorted = new SortBatches.Sort(build(t.input()), t.keys(), t.schema(), ctx, batchSize,
-                        limit < 0 ? 0 : offset, limit);
+                        threads, limit < 0 ? 0 : offset, limit);
                 yield limit < 0 && offset > 0 ? new BatchOperators.Limit(sorted, offset, -1, t.schema().size())
                         : sorted;
             }

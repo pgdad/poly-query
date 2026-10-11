@@ -162,6 +162,65 @@ public final class VectorTest {
                 "prefix keeps code point order");
     }
 
+    /**
+     * The parallel bucket sort and the normalized string keys (Latin-1 and UTF-16, short and
+     * long strings, dictionary ranks) order exactly like the reference comparator, stably.
+     */
+    public static void testParallelSortMatchesReference() {
+        List<ColumnSchema> schema = List.of(new ColumnSchema("s", DataType.STRING),
+                new ColumnSchema("k", DataType.INT64), new ColumnSchema("d", DataType.STRING),
+                new ColumnSchema("f", DataType.FLOAT64));
+        Random r = new Random(11);
+        int n = SortBatches.PARALLEL_SORT_ROWS + 4321;
+        String[] dict = {"pear", "apple", "fig", "apple", "", "kiwi\u0000", "kiwi"};
+        for (boolean latin1 : new boolean[] {true, false}) {
+            Batch b = new Batch(4);
+            b.cols[0] = new Vec(DataType.STRING, n);
+            b.cols[1] = new Vec(DataType.INT64, n);
+            b.cols[2] = new Vec(DataType.STRING, n);
+            b.cols[3] = new Vec(DataType.FLOAT64, n);
+            for (Vec v : b.cols) {
+                v.nullMask(n);
+            }
+            b.cols[2].toDict(dict, n);
+            for (int i = 0; i < n; i++) {
+                StringBuilder sb = new StringBuilder();
+                int len = r.nextInt(11);
+                for (int c = 0; c < len; c++) {
+                    sb.append(latin1 || r.nextInt(5) > 0 ? (char) ('a' + r.nextInt(3)) : "😀｡\u0000é".charAt(r.nextInt(5)));
+                }
+                b.cols[0].set(i, r.nextInt(50) == 0 ? null : sb.toString());
+                b.cols[1].set(i, r.nextInt(30) == 0 ? null : (long) r.nextInt(100) - 50);
+                b.cols[2].codes[i] = r.nextInt(dict.length);
+                b.cols[2].nulls[i] = r.nextInt(20) == 0;
+                b.cols[3].set(i, (double) r.nextInt(7) - 3.0);
+            }
+            b.reset(n);
+            int[] all = new int[n];
+            for (int i = 0; i < n; i++) {
+                all[i] = i;
+            }
+            ColumnStore store = new ColumnStore(schema);
+            store.append(b, all, n);
+            for (List<SortKey> keys : List.of(List.of(new SortKey(0, false, true)),
+                    List.of(new SortKey(0, true, false), new SortKey(1, false, true)),
+                    List.of(new SortKey(1, true, true), new SortKey(0, false, false)),
+                    List.of(new SortKey(2, false, false), new SortKey(3, true, false)),
+                    List.of(new SortKey(3, false, false), new SortKey(2, true, true), new SortKey(1, false, true)))) {
+                SortBatches.RowOrder order = SortBatches.order(store, keys);
+                for (int threads : new int[] {1, 8}) {
+                    int[] perm = SortBatches.sort(store, keys, ctx(), threads);
+                    check(perm.length == n, "permutation size");
+                    for (int i = 1; i < n; i++) {
+                        int c = order.compare(perm[i - 1], perm[i]);
+                        check(c < 0 || c == 0 && perm[i - 1] < perm[i],
+                                "stable order at " + i + " for " + keys + " threads " + threads + " latin1 " + latin1);
+                    }
+                }
+            }
+        }
+    }
+
     /** The single-key join index chains rows with equal keys in insertion order. */
     public static void testLongIndex() {
         JoinBatches.LongIndex index = new JoinBatches.LongIndex();
