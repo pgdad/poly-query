@@ -76,6 +76,15 @@ Key decisions:
 * An unknown type name in a `load` schema is `INVALID_REQUEST`.
 * JSON keys that differ only in case map to the same column (first spelling
   wins); the same key twice within one object is `INGEST_ERROR`.
+* A CSV field consisting only of spaces/tabs is ignored by type inference and
+  is NULL in non-STRING columns.
+* CAST(FLOAT64 AS DECIMAL) rounds half away from zero on the exact binary
+  value of the double (so `2.5e0` → `3`, but the double nearest 1.005 → `1.00`).
+* DECIMAL ± DECIMAL with different scales is aligned exactly in 128-bit
+  arithmetic (no spurious overflow); INT64 operands are promoted to
+  DECIMAL(18,s) as the spec requires.
+* Arithmetic on an untyped NULL is typed INT64 (`NULL + NULL`, `-NULL`).
+* SQL nesting deeper than 256 levels is `RESOURCE_LIMIT`.
 * `explain`, `save`, `open`, `stats` ops and the `serve` mode answer
   `UNSUPPORTED` / exit 1 (later phases).
 
