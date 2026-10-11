@@ -237,7 +237,8 @@ Key decisions:
   by rename).
 * Distinct counts are exact up to 200,000 distinct values per column and
   HyperLogLog estimates (2^14 registers, ~1% error) beyond.
-* Dropped indexes are freed, but indexes and statistics are rebuilt / recomputed
-  per table and never persisted beyond the PQCF index metadata.
+* Index contents are rebuilt whenever a table is loaded or opened (PQCF
+  persists only index definitions); statistics are recomputed per table on
+  first use.
 * `serve` (HTTP, Phase 4) is not implemented and exits with status 1.
 * Single-threaded execution.
