@@ -8,3 +8,6 @@
 2026-10-11T04:26:31+00:00 [a-native-go-a1-20261011T034928Z] agent finished; collecting telemetry
 2026-10-11T04:26:31+00:00 [a-native-go-a1-20261011T034928Z] validating (clean clone, sandboxed)
 2026-10-11T04:26:51+00:00 [a-native-go-a1-20261011T034928Z] outcome=success cost=$8.982767200000001 turns=119 wall=2208.0s
+2026-10-11T04:27:36+00:00 [a-native-clojure-a1-20261011T034926Z] agent finished; collecting telemetry
+2026-10-11T04:27:36+00:00 [a-native-clojure-a1-20261011T034926Z] validating (clean clone, sandboxed)
+2026-10-11T04:28:41+00:00 [a-native-clojure-a1-20261011T034926Z] outcome=success cost=$10.135164 turns=115 wall=2282.7s

@@ -1,0 +1,111 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-native-clojure-a1-20261011T034926Z",
+ "language": "clojure",
+ "task": "native",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-native",
+ "prompt_sha256": "65f2ca737243fa5d15cfcaa39bcfc8cde1126161cf4810cdb3d38dece63cf1ea",
+ "session_id": "1348327d-ba66-4ff0-9a65-2b893b85ec47",
+ "tokens": {
+  "input": 226,
+  "output": 143192,
+  "cache_read": 23480020,
+  "cache_creation": 321802,
+  "thinking": null,
+  "thinking_estimated": 66336,
+  "source": "result events",
+  "api_messages": 113
+ },
+ "rate_limit": {
+  "events": 19,
+  "max_utilization": {
+   "five_hour": 0.41,
+   "seven_day": 0.23
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 10.135164,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 115,
+ "result_segments": 1,
+ "assistant_messages": 266,
+ "tool_calls": {
+  "Bash": 109,
+  "Read": 1,
+  "Write": 4
+ },
+ "tool_calls_total": 114,
+ "tool_failures": 2,
+ "build_invocations": 69,
+ "build_failures_heuristic": 5,
+ "conformance_runs": 9,
+ "conformance_progress": [
+  [
+   569,
+   569
+  ],
+  [
+   550,
+   569
+  ],
+  [
+   550,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   569,
+   569
+  ],
+  [
+   3324,
+   3324
+  ]
+ ],
+ "repair_iterations": 7,
+ "time": {
+  "wall_seconds": 2282.7,
+  "model_api_seconds": 1298.3,
+  "tool_seconds": 984.4,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 3,
+  "files_changed": 18,
+  "lines_added": 1570,
+  "lines_removed": 97,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The native kernel library is now wired into the Clojure engine, and every check in the Definition of Done passes. All work is committed (3 commits on `main`, working tree clean).\n\n## Test results\n| Suite | Result |\n|---|---|\n| Conformance with `--native` | `TOTAL: 569/569 pass` (also passes over `--transport http`) |\n| Conformance with `--native --modes` | `TOTAL: 3324/3324 pass` |\n| Both of the above with `PQ_STRICT_EXECUTION=1` | all pass |\n| Without the library: session / `--transport http` / `--modes` | 569/569, 569/569, 3324/3324 |\n| HTTP suite | `http suite: 18/18 passed` |\n| `make build test lint` | `Ran 76 tests containing 1349 assertions. 0 failures, 0 errors`; no reflection warnings |\n\n`PQ_STRICT_EXECUTION=1` turns off the engine's automatic retry in row mode, so a bug in the native code can't be hidden by that retry.\n\nI extended the existing random-query tester (`bench/fuzz.py`) to compare results with and without native kernels. It found 0 differences across 1,600 queries \u00d7 10 configurations for each CPU variant (`reference`, `scalar`, `avx2`, `avx512`). It did find two real bugs earlier, both fixed: a crash when converting a bitmap to a row list if row 63 of a word was set, and silent slow reflection calls in the new filter code.\n\n## What I built\n- **Loading and calling the library** (`polyquery.native.ffi`): `--native-kernels PATH` loads it through Java's FFM API, checks ABI version 1 and calls `pqk_init`. Clojure can't make fast direct calls to these function handles, so each C function is wrapped as a small typed Java interface. The C code reads and writes the engine's arrays in place, with no copying (~95 ns per 1,024-row filter call vs ~310 ns for the Java loop).\n- **If the library is missing or unusable**, the engine logs a warning and uses its own code. `native.kernels` is always claimed, and `native: true` without a library simply runs the Java code.\n- **Filters**: comparisons, `BETWEEN`, `IN` lists, column-vs-column comparisons, `IS [NOT] NULL` and boolean columns, combined with AND/OR/NOT, are evaluated natively. Conditions it can't handle are evaluated by the existing Java code on the rows the native part kept. If one of them could raise an error, the whole condition stays in Java so errors match the baseline exactly.\n- **Aggregation**: `SUM`/`AVG` (with and without `GROUP BY`) and `MIN`/`MAX` without `GROUP BY`. When the library flags a possible integer overflow, the batch is undone and recomputed by the exact Java code.\n- **Hashing and joins**: batch hashing of single integer group/join keys, and gathering join output columns.\n\n## Measured impact (1m datasets, median ms, Java \u2192 native)\n| Query | 1 thread | 8 threads |\n|---|---|---|\n| Q17 `IN` list OR | 28.2 \u2192 4.6 | 4.9 \u2192 1.1 |\n| Q13 integer filters + aggregates | 28.4 \u2192 6.9 | 3.9 \u2192 1.0 |\n| Q1 filter + count | 10.7 \u2192 4.3 | 2.6 \u2192 2.1 |\n| Q15 NULL-heavy filter | 19.8 \u2192 9.7 | 3.3 \u2192 1.8 |\n\nQueries dominated by strings, sorting or join building are unchanged within noise. The host was shared (load average ~10), so I measured by alternating with/without native in one process; separate benchmark sessions varied \u00b120\u201340%. The README has the full tables plus a per-CPU-variant comparison.\n\n## Known limitations\n- **Native hashing is slightly slower (~5%, about 0.4 ms per 1M rows)** on integer `GROUP BY` keys and joins (e.g. Q9, Q10). The cause is the library's hash function, which collides a bit more on sequential integer keys than the engine's own hash; the call itself isn't the cost. I kept it because the task asks for hashing to use the kernels, and documented the trade-off.\n- **Row mode never uses native kernels**, so the unoptimized baseline stays unchanged.\n- **Not covered natively**: filters on decimal (`FLOAT64`) and string columns, grouped `MIN`/`MAX`, and `COUNT`.\n- **Three kernels are deliberately unused**: `pqk_sum_f64` (it changes float sums in the last bits, which would break identical results), `pqk_count_i64` and `pqk_compare_fixed` (no operator in",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
