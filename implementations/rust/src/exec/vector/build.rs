@@ -6,7 +6,7 @@ use super::join::{HashJoinOp, JoinSpec, MergeJoinOp, NestedLoopJoinOp};
 use super::keys::KeyTable;
 use super::ops::{
     AggregateOp, BoxedBatchOp, DistinctOp, FilterOp, IndexScanOp, LimitOp, ProjectOp, RowSource,
-    ScanOp, SortOp, ValuesOp, full_ranges,
+    ScanOp, SortOp, UnionAllOp, ValuesOp, full_ranges,
 };
 use std::sync::Arc;
 
@@ -234,5 +234,11 @@ fn build_serial(plan: PhysicalPlan, ctx: &ExecContext, parallel: bool) -> BoxedB
                 remaining: limit,
             })
         }
+        PhysicalPlan::UnionAll { inputs, .. } => Box::new(UnionAllOp {
+            inputs: inputs
+                .into_iter()
+                .map(|p| build_with(p, ctx, parallel))
+                .collect(),
+        }),
     }
 }

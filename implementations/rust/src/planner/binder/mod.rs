@@ -7,7 +7,9 @@
 //!
 //! This module binds whole queries: WITH, FROM (joins, derived tables),
 //! WHERE, GROUP BY / HAVING (with the grouping rule of semantics.md §5),
-//! the SELECT list, DISTINCT, ORDER BY and LIMIT/OFFSET.
+//! the SELECT list, DISTINCT, ORDER BY and LIMIT/OFFSET, and `UNION ALL`
+//! compounds (CR-1: branch column counts, common output types, ORDER BY
+//! restricted to output columns).
 
 mod exprs;
 mod functions;
@@ -20,7 +22,9 @@ use super::logical::{JoinType, LogicalPlan, SortKey};
 use crate::catalog::Catalog;
 use crate::error::{Error, Result};
 use crate::exec::eval::eval_constant;
+use crate::planner::typing::{coerce, common_type};
 use crate::sql::ast::{self, ExprKind, FromItem, JoinKind, Literal, SelectItem};
+use crate::sql::lexer::Pos;
 use crate::storage::Field;
 use crate::types::{DataType, Value};
 use scope::{Correlation, CteDef, CteEnv, ExprScope, Scope, corr_key};
@@ -68,6 +72,86 @@ struct Output {
     name: String,
     /// Named by an explicit `AS alias` (eligible for GROUP BY alias lookup).
     aliased: bool,
+}
+
+/// The clauses that follow the SELECT core(s) of a query: `ORDER BY` and
+/// `LIMIT`/`OFFSET`. Branches of a compound have none of them.
+#[derive(Clone, Copy, Default)]
+struct Tail<'q> {
+    order_by: &'q [ast::OrderItem],
+    limit: Option<&'q ast::Expr>,
+    offset: Option<&'q ast::Expr>,
+}
+
+impl<'q> Tail<'q> {
+    fn of(q: &'q ast::Query) -> Tail<'q> {
+        Tail {
+            order_by: &q.order_by,
+            limit: q.limit.as_ref(),
+            offset: q.offset.as_ref(),
+        }
+    }
+}
+
+/// Adds `Sort` and `Limit` nodes on top of `plan` as requested.
+fn sort_and_limit(
+    mut plan: LogicalPlan,
+    keys: Vec<SortKey>,
+    limit: Option<u64>,
+    offset: u64,
+) -> LogicalPlan {
+    if !keys.is_empty() {
+        plan = LogicalPlan::Sort {
+            input: Box::new(plan),
+            keys,
+        };
+    }
+    if limit.is_some() || offset > 0 {
+        plan = LogicalPlan::Limit {
+            input: Box::new(plan),
+            offset,
+            limit,
+        };
+    }
+    plan
+}
+
+/// Converts the output of a compound branch to the compound's column types
+/// (`schema`), wrapping it in a projection of casts where a type differs.
+fn conform_branch(plan: LogicalPlan, schema: &[Field]) -> LogicalPlan {
+    let types_match = plan
+        .schema()
+        .iter()
+        .zip(schema)
+        .all(|(f, out)| f.data_type == out.data_type);
+    if types_match {
+        return plan;
+    }
+    let exprs = plan
+        .schema()
+        .iter()
+        .zip(schema)
+        .enumerate()
+        .map(|(index, (f, out))| {
+            let column = Expr::Column {
+                index,
+                ty: f.data_type,
+            };
+            match (f.data_type, out.data_type) {
+                // An untyped NULL column adopts the common type.
+                (DataType::Null, to) if to != DataType::Null => Expr::Cast {
+                    expr: Box::new(column),
+                    to,
+                },
+                (_, to) => coerce(column, to),
+            }
+        })
+        .collect();
+    LogicalPlan::Project {
+        input: Box::new(plan),
+        exprs,
+        schema: schema.to_vec(),
+    }
 }
 
 /// True if the AST expression contains an aggregate call outside subqueries.
@@ -140,7 +224,7 @@ impl Binder<'_> {
         env: &CteEnv<'_>,
     ) -> Result<LogicalPlan> {
         if q.with.is_empty() {
-            return self.select(q, corr, env);
+            return self.query_body(q, corr, env);
         }
         let mut local = CteEnv {
             defs: Vec::new(),
@@ -181,7 +265,134 @@ impl Binder<'_> {
                 correlated,
             });
         }
-        self.select(q, corr, &local)
+        self.query_body(q, corr, &local)
+    }
+
+    /// Binds the body of a query (after its WITH clause): a single SELECT
+    /// or a `UNION ALL` compound, with ORDER BY / LIMIT.
+    fn query_body(
+        &self,
+        q: &ast::Query,
+        corr: Option<&Correlation<'_>>,
+        env: &CteEnv<'_>,
+    ) -> Result<LogicalPlan> {
+        if q.is_compound() {
+            self.compound(q, corr, env)
+        } else {
+            self.select(&q.body, Tail::of(q), q.pos, corr, env)
+        }
+    }
+
+    /// Binds `core UNION ALL core …` with the ORDER BY / LIMIT of the whole
+    /// compound (CR-1 §2).
+    fn compound(
+        &self,
+        q: &ast::Query,
+        corr: Option<&Correlation<'_>>,
+        env: &CteEnv<'_>,
+    ) -> Result<LogicalPlan> {
+        let branches = q
+            .branches()
+            .map(|core| self.select(core, Tail::default(), q.pos, corr, env))
+            .collect::<Result<Vec<_>>>()?;
+        let first = branches[0].schema();
+        if let Some(b) = branches.iter().find(|b| b.width() != first.len()) {
+            return Err(q.pos.error(Error::semantic(format!(
+                "UNION ALL branches have different numbers of columns ({} and {})",
+                first.len(),
+                b.width()
+            ))));
+        }
+        let schema = first
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let types: Vec<DataType> =
+                    branches.iter().map(|b| b.schema()[i].data_type).collect();
+                let ty = common_type(&types).map_err(|e| {
+                    q.pos.error(Error::type_error(format!(
+                        "UNION ALL column {} ('{}'): {}",
+                        i + 1,
+                        f.name,
+                        e.message
+                    )))
+                })?;
+                Ok(Field::new(f.name.clone(), ty))
+            })
+            .collect::<Result<Vec<Field>>>()?;
+        let inputs = branches
+            .into_iter()
+            .map(|b| conform_branch(b, &schema))
+            .collect();
+
+        // ORDER BY: output column names (of the first branch) or positions.
+        let mut keys = Vec::with_capacity(q.order_by.len());
+        for item in &q.order_by {
+            let index = self.compound_order_target(&item.expr, &schema)?;
+            keys.push(SortKey {
+                expr: Expr::Column {
+                    index,
+                    ty: schema[index].data_type,
+                },
+                descending: item.descending,
+                nulls_first: item.nulls_first.unwrap_or(!item.descending),
+            });
+        }
+        let (limit, offset) = self.limit_offset(Tail::of(q), env)?;
+        let plan = LogicalPlan::UnionAll { inputs, schema };
+        Ok(sort_and_limit(plan, keys, limit, offset))
+    }
+
+    /// Resolves an ORDER BY item of a compound query: a 1-based position or
+    /// the unqualified name of an output column; anything else is an error.
+    fn compound_order_target(&self, e: &ast::Expr, schema: &[Field]) -> Result<usize> {
+        if let Some(text) = ordinal(e) {
+            let k: usize = text.parse().unwrap_or(0);
+            if k == 0 || k > schema.len() {
+                return Err(e.pos.error(Error::semantic(format!(
+                    "ORDER BY position {text} is out of range"
+                ))));
+            }
+            return Ok(k - 1);
+        }
+        if let ExprKind::Column {
+            qualifier: None,
+            name,
+        } = &e.kind
+        {
+            let mut matches = schema
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| name.matches(&f.name))
+                .map(|(i, _)| i);
+            return match (matches.next(), matches.next()) {
+                (Some(i), None) => Ok(i),
+                (Some(_), Some(_)) => Err(name.pos.error(Error::semantic(format!(
+                    "ORDER BY '{}' is ambiguous",
+                    name.value
+                )))),
+                (None, _) => Err(name.pos.error(Error::semantic(format!(
+                    "ORDER BY '{}' is not an output column of the UNION ALL",
+                    name.value
+                )))),
+            };
+        }
+        Err(e.pos.error(Error::semantic(
+            "ORDER BY of a UNION ALL must name an output column or position",
+        )))
+    }
+
+    /// Evaluates the LIMIT and OFFSET clauses (no limit, offset 0 if absent).
+    fn limit_offset(&self, tail: Tail<'_>, env: &CteEnv<'_>) -> Result<(Option<u64>, u64)> {
+        let limit = match tail.limit {
+            Some(e) => self.limit_value(e, "LIMIT", env)?,
+            None => None,
+        };
+        let offset = match tail.offset {
+            Some(e) => self.limit_value(e, "OFFSET", env)?.unwrap_or(0),
+            None => 0,
+        };
+        Ok((limit, offset))
     }
 
     /// Binds a FROM item, returning its plan and range variables.
@@ -254,14 +465,16 @@ impl Binder<'_> {
         }
     }
 
-    /// Binds the SELECT core plus ORDER BY / LIMIT of a query.
+    /// Binds a SELECT core plus the ORDER BY / LIMIT in `tail`; `pos` is
+    /// the position of the query (for errors without a better location).
     fn select(
         &self,
-        q: &ast::Query,
+        core: &ast::SelectCore,
+        tail: Tail<'_>,
+        pos: Pos,
         corr: Option<&Correlation<'_>>,
         env: &CteEnv<'_>,
     ) -> Result<LogicalPlan> {
-        let core = &q.body;
         let (input, scope) = match &core.from {
             None => (LogicalPlan::SingleRow, Scope::default()),
             Some(f) => self.bind_from(f, corr, env)?,
@@ -289,7 +502,7 @@ impl Binder<'_> {
                 .items
                 .iter()
                 .any(|i| matches!(i, SelectItem::Expr { expr, .. } if contains_aggregate(expr)))
-            || q.order_by.iter().any(|o| contains_aggregate(&o.expr));
+            || tail.order_by.iter().any(|o| contains_aggregate(&o.expr));
         let mut aggregates: Vec<AggregateCall> = Vec::new();
 
         // SELECT list (expressions over the input; aggregates as placeholders)
@@ -365,7 +578,7 @@ impl Binder<'_> {
         // matched against the select list or become hidden columns.
         let mut hidden: Vec<Expr> = Vec::new();
         let mut sort_keys: Vec<SortKey> = Vec::new();
-        for item in &q.order_by {
+        for item in tail.order_by {
             let index = match self.order_target(&item.expr, &outputs)? {
                 Some(i) => i,
                 None => {
@@ -398,15 +611,7 @@ impl Binder<'_> {
             });
         }
 
-        // LIMIT / OFFSET
-        let limit = match &q.limit {
-            Some(e) => self.limit_value(e, "LIMIT", env)?,
-            None => None,
-        };
-        let offset = match &q.offset {
-            Some(e) => self.limit_value(e, "OFFSET", env)?.unwrap_or(0),
-            None => 0,
-        };
+        let (limit, offset) = self.limit_offset(tail, env)?;
 
         // Grouping rule and aggregation.
         let mut project_exprs: Vec<Expr> = outputs
@@ -417,7 +622,7 @@ impl Binder<'_> {
         let mut plan = LogicalPlan::filter(input, predicate);
         if aggregated {
             for e in project_exprs.iter_mut().chain(having.iter_mut()) {
-                rewrite_grouped(e, &group_by).map_err(|err| q.pos.error(err))?;
+                rewrite_grouped(e, &group_by).map_err(|err| pos.error(err))?;
             }
             let schema = group_by
                 .iter()
@@ -457,19 +662,7 @@ impl Binder<'_> {
                 input: Box::new(plan),
             };
         }
-        if !sort_keys.is_empty() {
-            plan = LogicalPlan::Sort {
-                input: Box::new(plan),
-                keys: sort_keys,
-            };
-        }
-        if limit.is_some() || offset > 0 {
-            plan = LogicalPlan::Limit {
-                input: Box::new(plan),
-                offset,
-                limit,
-            };
-        }
+        plan = sort_and_limit(plan, sort_keys, limit, offset);
         if has_hidden {
             let schema: Vec<Field> = plan.schema()[..visible].to_vec();
             let exprs = schema

@@ -1,5 +1,6 @@
 //! Batch (vectorized) physical operators.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::agg::Aggregator;
@@ -396,6 +397,24 @@ impl BatchOperator for LimitOp {
                 b.slice(from, to)
             }));
         }
+    }
+}
+
+/// `UNION ALL`: the batches of each input in turn. Exhausted inputs are
+/// dropped right away, releasing their state.
+pub struct UnionAllOp {
+    pub inputs: VecDeque<BoxedBatchOp>,
+}
+
+impl BatchOperator for UnionAllOp {
+    fn next_batch(&mut self, ctx: &ExecContext) -> Result<Option<Batch>> {
+        while let Some(input) = self.inputs.front_mut() {
+            if let Some(b) = input.next_batch(ctx)? {
+                return Ok(Some(b));
+            }
+            self.inputs.pop_front();
+        }
+        Ok(None)
     }
 }
 

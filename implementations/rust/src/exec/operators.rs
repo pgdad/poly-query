@@ -256,6 +256,9 @@ pub fn build_row_with(plan: PhysicalPlan, native: Option<&'static Kernels>) -> B
             offset,
             remaining: limit,
         }),
+        PhysicalPlan::UnionAll { inputs, .. } => Box::new(UnionAllOp {
+            inputs: inputs.into_iter().map(build).collect(),
+        }),
     }
 }
 
@@ -1000,5 +1003,23 @@ impl Operator for LimitOp {
             *r -= 1;
         }
         Ok(row)
+    }
+}
+
+/// `UNION ALL`: the rows of each input in turn. Exhausted inputs are dropped
+/// right away, releasing their state.
+struct UnionAllOp {
+    inputs: VecDeque<Box<dyn Operator>>,
+}
+
+impl Operator for UnionAllOp {
+    fn next(&mut self, ctx: &ExecContext) -> Result<Option<Row>> {
+        while let Some(input) = self.inputs.front_mut() {
+            if let Some(row) = input.next(ctx)? {
+                return Ok(Some(row));
+            }
+            self.inputs.pop_front();
+        }
+        Ok(None)
     }
 }

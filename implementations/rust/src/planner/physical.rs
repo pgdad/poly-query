@@ -135,6 +135,11 @@ pub enum PhysicalPlan {
         offset: u64,
         limit: Option<u64>,
     },
+    /// The rows of every input in turn (`UNION ALL`).
+    UnionAll {
+        inputs: Vec<PhysicalPlan>,
+        schema: Vec<Field>,
+    },
 }
 
 /// Lowers an optimized logical plan.
@@ -221,6 +226,10 @@ pub fn lower(plan: &LogicalPlan, opts: PhysicalOptions) -> PhysicalPlan {
                 limit: *limit,
             }
         }
+        LogicalPlan::UnionAll { inputs, schema } => PhysicalPlan::UnionAll {
+            inputs: inputs.iter().map(|p| lower(p, opts)).collect(),
+            schema: schema.clone(),
+        },
     }
 }
 
@@ -479,6 +488,7 @@ pub fn estimate_rows(plan: &LogicalPlan) -> f64 {
             let n = estimate_rows(input);
             limit.map_or(n, |l| n.min(l as f64))
         }
+        LogicalPlan::UnionAll { inputs, .. } => inputs.iter().map(estimate_rows).sum(),
     }
 }
 
@@ -492,7 +502,8 @@ impl PhysicalPlan {
             | PhysicalPlan::HashAggregate { schema, .. }
             | PhysicalPlan::HashJoin { schema, .. }
             | PhysicalPlan::MergeJoin { schema, .. }
-            | PhysicalPlan::NestedLoopJoin { schema, .. } => schema,
+            | PhysicalPlan::NestedLoopJoin { schema, .. }
+            | PhysicalPlan::UnionAll { schema, .. } => schema,
             PhysicalPlan::Filter { input, .. }
             | PhysicalPlan::ParamLookup { input, .. }
             | PhysicalPlan::Distinct { input }
@@ -757,6 +768,11 @@ impl PhysicalPlan {
                     ("limit", limit.map(Json::uint).unwrap_or(Json::Null)),
                 ],
                 vec![input],
+            ),
+            PhysicalPlan::UnionAll { inputs, schema } => node(
+                "UnionAll",
+                vec![("columns", names(schema))],
+                inputs.iter().collect(),
             ),
         }
     }

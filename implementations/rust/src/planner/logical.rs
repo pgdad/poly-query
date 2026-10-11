@@ -81,6 +81,13 @@ pub enum LogicalPlan {
         offset: u64,
         limit: Option<u64>,
     },
+    /// Concatenation of the rows of all inputs (`UNION ALL`, duplicates
+    /// kept). Every input produces exactly `schema`'s columns, already
+    /// converted to the output types.
+    UnionAll {
+        inputs: Vec<LogicalPlan>,
+        schema: Vec<Field>,
+    },
 }
 
 impl LogicalPlan {
@@ -90,7 +97,8 @@ impl LogicalPlan {
             LogicalPlan::Scan { schema, .. }
             | LogicalPlan::Project { schema, .. }
             | LogicalPlan::Aggregate { schema, .. }
-            | LogicalPlan::Join { schema, .. } => schema,
+            | LogicalPlan::Join { schema, .. }
+            | LogicalPlan::UnionAll { schema, .. } => schema,
             LogicalPlan::Filter { input, .. }
             | LogicalPlan::Distinct { input }
             | LogicalPlan::Sort { input, .. }
@@ -178,6 +186,11 @@ impl LogicalPlan {
                     f(&k.expr);
                 }
                 input.visit_exprs(f);
+            }
+            LogicalPlan::UnionAll { inputs, .. } => {
+                for input in inputs {
+                    input.visit_exprs(f);
+                }
             }
         }
     }

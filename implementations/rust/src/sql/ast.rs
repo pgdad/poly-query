@@ -36,11 +36,27 @@ pub enum Statement {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
     pub with: Vec<Cte>,
+    /// The first (or only) branch of the compound.
     pub body: SelectCore,
+    /// Further branches, each preceded by `UNION ALL` (CR-1). `ORDER BY` and
+    /// `LIMIT`/`OFFSET` apply to the whole compound.
+    pub union_all: Vec<SelectCore>,
     pub order_by: Vec<OrderItem>,
     pub limit: Option<Expr>,
     pub offset: Option<Expr>,
     pub pos: Pos,
+}
+
+impl Query {
+    /// Whether this query is a `UNION ALL` compound.
+    pub fn is_compound(&self) -> bool {
+        !self.union_all.is_empty()
+    }
+
+    /// All branches of the compound, in order.
+    pub fn branches(&self) -> impl Iterator<Item = &SelectCore> {
+        std::iter::once(&self.body).chain(&self.union_all)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
