@@ -34,7 +34,7 @@ the **architectural change CR-2 `DECIMAL` precision 38 / PQCF v2**
 and the **latency optimization of the analytics workload** (direct JSON
 result encoding, precomputed subqueries and semi-joins, primitive DISTINCT
 aggregation, parallel merges, DISTINCT as aggregation, per-dictionary
-function evaluation — see [Latency optimization](#latency-optimization-analytics-workload)).
+function evaluation, a primitive multi-key group table — see [Latency optimization](#latency-optimization-analytics-workload)).
 
 Reported capabilities: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic
 test.functions phase2 sql.groupby sql.join sql.functions sql.subquery sql.cte
@@ -541,47 +541,50 @@ options, full results; `bench/workload.py /tmp/pq1m/1m --baseline
 
 | id | query | rows | before | after | speed-up |
 |---|---|---:|---:|---:|---:|
-| A1 | filter + count | 1 | 3.4 ms | 3.1 ms | 1.1x |
-| A2 | group by, low cardinality | 20 | 6.3 ms | 5.1 ms | 1.2x |
-| A3 | group by, 80K groups | 80777 | 37.0 ms | 28.9 ms | 1.3x |
-| A4 | projection + filter, 200K rows | 199765 | 61.7 ms | 40.5 ms | 1.5x |
-| A5 | join 1M x 100K + group by | 4 | 11.2 ms | 11.7 ms | 1.0x |
-| A6 | join 1M x 250K + group by | 6 | 14.5 ms | 15.9 ms | 0.9x |
-| A7 | top-N | 10 | 3.9 ms | 4.4 ms | 0.9x |
-| A8 | full sort, 1M rows | 1000000 | 488.2 ms | 387.0 ms | 1.3x |
-| A9 | filter + group by (sensor) | 1000 | 6.3 ms | 5.6 ms | 1.1x |
-| A10 | 3-way join, comma syntax | 1 | 24.4 ms | 25.5 ms | 1.0x |
-| A11 | CASE / LIKE / IN + group by | 5 | 5.7 ms | 6.2 ms | 0.9x |
-| A12 | integer filters + global aggregates | 1 | 5.6 ms | 5.2 ms | 1.1x |
-| A13 | NULL-heavy filter | 1 | 4.1 ms | 4.2 ms | 1.0x |
-| A14 | COUNT DISTINCT | 20 | 126.9 ms | 29.9 ms | 4.3x |
-| A15 | group by + HAVING + ORDER BY aggregate + LIMIT | 20 | 4.9 ms | 4.7 ms | 1.0x |
-| A16 | date functions + group by | 24 | 12.1 ms | 11.3 ms | 1.1x |
-| A17 | DATE_TRUNC group by | 144 | 4.7 ms | 4.3 ms | 1.1x |
-| A18 | multi-key group by | 400 | 9.9 ms | 10.2 ms | 1.0x |
-| A19 | LEFT JOIN + COUNT | 30 | 21.8 ms | 25.2 ms | 0.9x |
-| A20 | IN subquery | 1 | 50.2 ms | 4.8 ms | 10.4x |
-| A21 | CTE + join of aggregates | 4 | 23.6 ms | 23.8 ms | 1.0x |
-| A22 | 4-way join + group by + top-N | 10 | 21.2 ms | 22.3 ms | 1.0x |
-| A23 | string functions + group by | 20 | 22.4 ms | 23.2 ms | 1.0x |
-| A24 | derived table + filter on aggregate | 1 | 32.7 ms | 25.9 ms | 1.3x |
-| A25 | scalar subquery comparison | 1 | 43.1 ms | 5.1 ms | 8.4x |
-| A26 | DISTINCT | 20 | 23.1 ms | 6.0 ms | 3.8x |
-| A27 | top-N on string key | 25 | 1.4 ms | 1.3 ms | 1.0x |
-| A28 | EXISTS (correlated) | 1 | 240.1 ms | 5.6 ms | 43.0x |
-| A29 | wide result, 100K rows | 68226 | 70.7 ms | 41.1 ms | 1.7x |
-| A30 | sensor time buckets | 100 | 14.3 ms | 15.9 ms | 0.9x |
-| | **total** | | **1395 ms** | **804 ms** | **1.7x** |
+| A1 | filter + count | 1 | 3.2 ms | 3.1 ms | 1.0x |
+| A2 | group by, low cardinality | 20 | 6.2 ms | 6.5 ms | 1.0x |
+| A3 | group by, 80K groups | 80777 | 44.7 ms | 35.0 ms | 1.3x |
+| A4 | projection + filter, 200K rows | 199765 | 84.0 ms | 53.9 ms | 1.6x |
+| A5 | join 1M x 100K + group by | 4 | 12.4 ms | 12.5 ms | 1.0x |
+| A6 | join 1M x 250K + group by | 6 | 17.6 ms | 19.3 ms | 0.9x |
+| A7 | top-N | 10 | 5.3 ms | 5.6 ms | 0.9x |
+| A8 | full sort, 1M rows | 1000000 | 523.9 ms | 440.8 ms | 1.2x |
+| A9 | filter + group by (sensor) | 1000 | 4.6 ms | 4.8 ms | 0.9x |
+| A10 | 3-way join, comma syntax | 1 | 21.2 ms | 21.8 ms | 1.0x |
+| A11 | CASE / LIKE / IN + group by | 5 | 8.0 ms | 9.0 ms | 0.9x |
+| A12 | integer filters + global aggregates | 1 | 5.7 ms | 5.5 ms | 1.0x |
+| A13 | NULL-heavy filter | 1 | 4.3 ms | 4.1 ms | 1.0x |
+| A14 | COUNT DISTINCT | 20 | 118.9 ms | 29.4 ms | 4.1x |
+| A15 | group by + HAVING + ORDER BY aggregate + LIMIT | 20 | 5.4 ms | 4.8 ms | 1.1x |
+| A16 | date functions + group by | 24 | 13.0 ms | 8.4 ms | 1.6x |
+| A17 | DATE_TRUNC group by | 144 | 4.3 ms | 3.5 ms | 1.2x |
+| A18 | multi-key group by | 400 | 8.5 ms | 7.0 ms | 1.2x |
+| A19 | LEFT JOIN + COUNT | 30 | 18.5 ms | 19.8 ms | 0.9x |
+| A20 | IN subquery | 1 | 53.3 ms | 4.9 ms | 10.8x |
+| A21 | CTE + join of aggregates | 4 | 27.2 ms | 29.3 ms | 0.9x |
+| A22 | 4-way join + group by + top-N | 10 | 22.0 ms | 23.2 ms | 0.9x |
+| A23 | string functions + group by | 20 | 23.0 ms | 22.4 ms | 1.0x |
+| A24 | derived table + filter on aggregate | 1 | 33.0 ms | 27.6 ms | 1.2x |
+| A25 | scalar subquery comparison | 1 | 43.9 ms | 4.7 ms | 9.4x |
+| A26 | DISTINCT | 20 | 22.4 ms | 3.0 ms | 7.4x |
+| A27 | top-N on string key | 25 | 1.5 ms | 1.5 ms | 1.0x |
+| A28 | EXISTS (correlated) | 1 | 263.6 ms | 6.0 ms | 43.7x |
+| A29 | wide result, 100K rows | 68226 | 77.9 ms | 44.3 ms | 1.8x |
+| A30 | sensor time buckets | 100 | 16.0 ms | 12.7 ms | 1.3x |
+| | **total** | | **1494 ms** | **874 ms** | **1.7x** |
 
 How to read the table:
-* Rows within about ±10% are noise. A repeat run of A6, A10, A19, A23 and A30
-  with 15 runs each gave 1.0×, 1.2×, 1.0×, 1.0× and 0.9×.
-* The large wins come from removing serial row-at-a-time work: A28 43×,
-  A20 10×, A25 8×, A14 4×, A26 4×.
-* Big results gain 1.3–1.7× from the direct JSON encoding (A3, A4, A8,
+* Rows within about ±10% are noise. Repeat runs of single queries with 15
+  runs each confirmed A5–A7, A9–A11, A19, A21 and A22 at 1.0× (±0.1). A8
+  ranged from 1.2× to 1.4× across full runs.
+* The large wins come from removing serial row-at-a-time work: A28 44×,
+  A20 11×, A25 9×, A26 7×, A14 4×.
+* Big results gain 1.3–1.8× from the direct JSON encoding (A3, A4, A8,
   A29). What remains for them is mostly the client's own JSON parsing.
-* Queries that were already vectorized and parallel (A1, A2, A5–A7, A9–A13,
-  A15–A19, A22, A27, A30) are unchanged within noise.
+* Multi-key GROUP BYs gain 1.2–1.6× from the primitive key-tuple table
+  (A16–A18, A30).
+* Queries that were already vectorized and parallel are unchanged within
+  noise.
 
 The A8 ceiling is the client: on its 28.8 MB response, Python's `json.loads`
 alone takes ~170 ms and reading the pipe ~30 ms.
@@ -670,8 +673,18 @@ the generic writer for every type and edge value.
    STRING result stays dictionary-encoded, so a GROUP BY on it keeps the
    per-dictionary code → group fast path. This holds only when no entry,
    and no NULL input, maps to NULL; `CONCAT` and `NULLIF` are handled
-   correctly. For A23 the measured gain is within noise: its two-key
-   GROUP BY table dominates (in-process 15 ms at 8 threads).
+   correctly. For A23 the gain is within noise: most of its time goes to the
+   two-key GROUP BY and to computing two string functions per batch.
+8. **A primitive multi-key group table** (`grouping/MultiKeyTable`) for
+   GROUP BY on 2–30 keys. Each key value becomes a long code: the value
+   for integer-like keys, the normalized bits for FLOAT64, 0/1 for
+   BOOLEAN, or an interned id for strings and wide decimals (dictionary
+   codes are mapped once per dictionary). Groups are found by open
+   addressing over the code tuples, which are stored in one `long[]`, plus
+   a NULL bitmask per group. Before, every row allocated an `Object[]`
+   and a key list for a `HashMap` lookup. Group order (first appearance)
+   and key values (`-0.0` = `0.0`, NULLs grouped) are unchanged. Gains:
+   A16, A17, A18, A30.
 
 Not done (candidates, in order of expected gain):
 * **Columnar sort output.** A8 materializes rows before sorting and then
@@ -682,9 +695,6 @@ Not done (candidates, in order of expected gain):
   A21, A24). Every partition currently builds a table with nearly all
   groups.
 * **Decorrelating correlated scalar subqueries** into grouped joins.
-* **A primitive multi-key group table** for GROUP BY on several
-  integer or dictionary keys (A16, A18, A23, A30). These currently use a
-  `HashMap` over boxed key lists.
 
 ## Native kernels (M9)
 
