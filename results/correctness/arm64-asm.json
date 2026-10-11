@@ -1,7 +1,7 @@
 {
  "language": "arm64-asm",
- "generated": "2026-10-11T11:39:50+00:00",
- "commit": "6775395fbe69c414a539f19e3069abf5d4d3a24e",
+ "generated": "2026-10-11T12:08:08+00:00",
+ "commit": "931d447b87823101aafc11ca8a3ddfe6afb73aca",
  "suites": {
   "public_emulated": {
    "exit": 0,
@@ -18,19 +18,19 @@
  },
  "variants_emulated": {
   "a64_scalar": {
-   "provided": 16,
+   "provided": 20,
    "total": 20,
    "public": "PASS",
    "hidden": "PASS"
   },
   "a64_neon": {
-   "provided": 16,
+   "provided": 20,
    "total": 20,
    "public": "PASS",
    "hidden": "PASS"
   },
   "a64_sve": {
-   "provided": 16,
+   "provided": 20,
    "total": 20,
    "public": "PASS",
    "hidden": "PASS"
@@ -38,21 +38,21 @@
  },
  "variants": {
   "a64_scalar": {
-   "provided": 16,
+   "provided": 20,
    "total": 20,
    "public": "PASS",
    "asan": "PASS",
    "hidden": "PASS"
   },
   "a64_neon": {
-   "provided": 16,
+   "provided": 20,
    "total": 20,
    "public": "PASS",
    "asan": "PASS",
    "hidden": "PASS"
   },
   "a64_sve": {
-   "provided": 16,
+   "provided": 20,
    "total": 20,
    "public": "PASS",
    "asan": "PASS",
@@ -62,7 +62,11 @@
  "summary": {
   "variants": 3,
   "all_pass": true,
-  "complete_variants": [],
+  "complete_variants": [
+   "a64_neon",
+   "a64_scalar",
+   "a64_sve"
+  ],
   "suites_exit_ok": true
  }
 }
