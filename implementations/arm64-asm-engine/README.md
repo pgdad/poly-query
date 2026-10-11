@@ -15,7 +15,13 @@ bitmaps, the PQCF v1 file format (`save` / `open`, PLAIN / DICT / RLE,
 CRC-32, atomic crash-safe writes, memory-mapped reads), table statistics
 (`stats`), HASH and BTREE indexes (`CREATE` / `DROP INDEX`), cost-based
 index selection, predicate pushdown with PQCF row-group skipping, column
-pruning, join build-side selection and EXPLAIN plans with `IndexScan`.
+pruning, join build-side selection and EXPLAIN plans with `IndexScan` — and
+**Phase 4**: the multi-threaded `serve` HTTP/1.1 server with every endpoint
+of protocol.md §7, chunked NDJSON streaming with backpressure, Prometheus
+metrics, structured JSON logs, snapshot-isolated concurrent readers over a
+versioned catalog, worker limits with a bounded FIFO queue and `OVERLOADED`
+rejection, query timeouts (queued time included), cancellation (explicit or
+by client disconnect) and graceful shutdown.
 
 ## Build prerequisites
 
@@ -30,6 +36,7 @@ make test         # assembly unit tests (tests/unit) + CLI smoke tests (tests/sh
 make lint         # checks every object has a non-executable .note.GNU-stack
 make fmt          # whitespace normalisation
 bin/polyquery session --data-dir DIR
+bin/polyquery serve --port 8080 [--workers N --queue-depth Q ...]
 ```
 
 ## Libraries
@@ -38,7 +45,10 @@ None besides glibc (`ENGINE.json`: `"libraries": []`). From glibc the engine
 uses: malloc/realloc/free, memcpy/memcmp/memset/strlen/strcmp, strtod and
 snprintf (float text conversion), qsort/qsort_r, setjmp/longjmp, getline,
 open/read/write/fstat/close/fsync/rename/unlink/mmap/munmap/getpid,
-clock_gettime, usleep.
+clock_gettime, usleep; for the server (libpthread / libc): pthread_create,
+mutexes and condition variables, sem_* (unit test), socket/bind/listen/
+accept4/setsockopt/getsockname/inet_pton, send/read/poll/shutdown, pipe2,
+signal, gmtime_r, get_nprocs.
 
 ## Design overview
 
@@ -56,11 +66,83 @@ frame macros in `include/frame.inc`, the internal API contract in
 | lexer / parser | `lexer.S`, `parser.S` | tokenizer and recursive-descent parser for the full v1 grammar into an AST |
 | semantic analysis | `binder.S`, `functions.S`, `strfuncs.S` | scopes (range variables, outer scopes, CTEs), name resolution, typing with implicit casts, aggregate / GROUP BY validation, subquery binding; scalar functions, CASE, LIKE, BETWEEN, IN lists |
 | planning | `plan.S`, `access.S` | logical plan, physical rewrite (predicate pushdown, hash-join keys, join algorithm, column pruning, build side), access paths (simple predicates, selectivity estimates, index selection, row-group skipping), EXPLAIN JSON |
-| execution | `exec.S`, `eval.S` | plan operators (scan, filter, hash / nested-loop join, sort-based aggregation, project, distinct, sort, limit), subquery evaluation; expression evaluator and aggregate accumulators |
+| execution | `exec.S`, `eval.S` | plan operators (scan, filter, hash / nested-loop join, sort-based aggregation, project, distinct, sort, limit), subquery evaluation, batched projection for streaming; expression evaluator and aggregate accumulators |
+| server | `http.S`, `server.S`, `log.S` | HTTP/1.1 listener and connection threads, routing, request framing, streaming, shutdown; query registry, admission control, cancellation, disconnect watchdog, metrics; structured logs |
 
 Query processing: `parse_sql` → `bind_query` (BoundQuery per query level,
 SubPlans for every subquery / derived table / CTE) → `plan_statement`
 (PlanNode trees) → `exec_plan` (ResultSet).
+
+### Concurrency and the server (Phase 4)
+
+* **Threads.** `serve` runs one accept thread (poll on the listening socket
+  and a self-pipe written by the SIGTERM/SIGINT handler), one thread per
+  connection (requests on a keep-alive connection are processed in order)
+  and a watchdog thread. A query executes on its connection's thread once
+  admitted; non-query endpoints (`/health`, `/metrics`, `/v1/queries`,
+  cancellation, catalog operations) never wait for a worker slot.
+* **Per-thread state.** All per-request runtime state (request arena,
+  response buffer, `setjmp` buffer, error record, deadline, PQCF writer /
+  reader scratch, current catalog version, log line) is thread-local
+  (`.tbss`/`.tdata`, local-exec TLS model, macros `TLS_ADDR`/`TLS_LDR` in
+  `pq.inc`), so the single-threaded engine code runs unchanged on any number
+  of threads. Process-wide settings are written once before threads start.
+* **Versioned catalog (snapshot isolation).** The catalog is a sequence of
+  immutable, reference-counted versions (`CV_*`): a request pins the current
+  version for its whole duration (`cat_read_begin`); a mutation (`load`,
+  `open`, `drop`, `reset`, `CREATE/DROP INDEX`) takes the writer mutex,
+  edits a private copy and publishes it atomically on success (`cat_end`),
+  or discards it on error, so failed requests never change anything and
+  readers never see half a mutation. Tables and indexes are reference
+  counted by the versions that contain them and freed with the last one:
+  a dropped or replaced table stays readable by queries already using it.
+  Parsing a `load` happens before the publish and never blocks readers
+  (only other mutations, which are serialised). Table statistics are
+  computed when a table is published, so published tables are never
+  written again (no lazy caches shared between threads).
+* **Admission control** (`server.S`). Queries are registered (id, state,
+  arrival time, cancellation flag) in arrival order. At most `--workers`
+  run; up to `--queue-depth` wait FIFO on a condition variable; further
+  queries fail at once with `OVERLOADED`. A query's snapshot is taken when it
+  starts executing (after admission). The timeout is measured from the
+  arrival of the request, so queued time counts; a queued query gives up
+  with `TIMEOUT` or `CANCELLED` while waiting.
+* **Cancellation / timeouts.** The executor's existing interruption point
+  `check_deadline` (every 4096 rows in operator loops, every ≤10 ms slice of
+  `PQ_SLEEP`, between streamed batches and while a streamed write is
+  blocked) also polls the query's cancellation flag. `DELETE
+  /v1/queries/{id}`, a client disconnect (the watchdog polls the sockets of
+  registered queries for `POLLRDHUP` every 20 ms) and the end of the shutdown
+  grace period set the flag; the query unwinds with `CANCELLED` (409).
+* **Streaming.** `/v1/query/stream` answers with chunked NDJSON. When the
+  plan ends in a projection (optionally under LIMIT/OFFSET),
+  `exec_plan_stream` projects the rows in batches of 1000 and hands each
+  batch to the HTTP sink, which writes it before the next batch is computed:
+  the header line goes out before any row is evaluated, a runtime error after
+  the header becomes a final `{"type":"error",…}` line, and a client that
+  stops reading blocks the query in `send` (backpressure; one batch is
+  buffered). Sorted, grouped and DISTINCT results are materialised first
+  (they need all rows) and then written in batches the same way.
+* **HTTP framing.** Content-Length and chunked bodies (strict chunk-size
+  syntax: `1*HEXDIG`, optional extensions; anything else is `400` and the
+  connection is closed), `Expect: 100-continue`, keep-alive (HTTP/1.1
+  default, `Connection: close`), pipelining. Bodies over
+  `--max-request-bytes` are `413` (a declared Content-Length body up to
+  64 MiB is read and discarded so the connection stays usable). When the
+  server closes a connection with unread input it half-closes and drains
+  briefly so the client still receives the response.
+* **Shutdown.** SIGTERM/SIGINT: the listening socket is closed, `/health`
+  answers 503 and new queries `SHUTTING_DOWN`; the server waits for all
+  in-flight requests up to `--shutdown-grace-ms`, then cancels the remaining
+  queries, waits up to 2 s for their responses and exits with status 0.
+* **Logs** (`log.S`): JSON lines on stderr (`ts` RFC 3339 UTC with
+  milliseconds, `level`, `msg`); `info`: startup, one `query finished` event
+  per query (`query_id`, `status`, `code`, `duration_ms`, `rows`), shutdown;
+  `debug`: one event per HTTP request (method, path, status, duration). No
+  SQL text, data values or bodies are logged. Each line is written with one
+  `write(2)`.
+* **Metrics**: the required families plus HELP/TYPE lines; durations are a
+  summary in seconds.
 
 Key decisions:
 
@@ -106,8 +188,8 @@ Key decisions:
   flags ≠ 0 ⇒ VERSION_UNSUPPORTED), footer, metadata CRC, JSON, structure;
   an unknown encoding name ⇒ VERSION_UNSUPPORTED.
 * **Statistics.** `table_stats` computes per column null count, min, max and
-  the exact distinct count (hash set) on first use and caches them (tables
-  are immutable).
+  the exact distinct count (hash set) once, when the table is published to
+  the catalog, and caches them (tables are immutable).
 * **Indexes.** Single-column, global names. HASH: chained hash table over row
   ids (heads per bucket, next per row). BTREE: the "equivalent ordered
   structure" of the spec — a sorted permutation of the non-NULL row ids with
@@ -179,7 +261,19 @@ Key decisions:
   arithmetic (no spurious overflow); INT64 operands are promoted to
   DECIMAL(18,s) as the spec requires.
 * SQL nesting deeper than 256 levels is `RESOURCE_LIMIT`.
-* The `serve` mode answers exit 1 (Phase 4).
+* `serve` without `--port` is a usage error (exit 2); `--workers 0` (or
+  absent) means the number of online CPUs.
+* HTTP: `GET /v1/tables/{name}` with another method than PUT/DELETE, and
+  any other method on a known path, is `405 INVALID_REQUEST`. Table names
+  and query ids in paths are percent-decoded. `PUT /v1/tables/{name}` also
+  accepts `delimiter=`; `replace` / `header` accept `true`/`1` (anything else
+  is false).
+* Server-assigned query ids are `q-<n>`. OVERLOADED and duplicate-id
+  rejections are counted only in `polyquery_queries_rejected_total` /
+  not at all; every admitted query is counted once in
+  `polyquery_queries_total` (`ok` or `error`).
+* Every query op is subject to admission control, including `CREATE/DROP
+  INDEX` statements and queries sent through `/v1/request`; `explain` is not.
 * `CREATE INDEX` without `USING` creates a BTREE index.
 * An unknown table or column in `CREATE INDEX` is `SEMANTIC_ERROR`.
 * EXPLAIN shows `estimated_rows` on scans and joins, `index`/`kind` on
@@ -208,7 +302,15 @@ Key decisions:
 ## Known limitations
 
 * Correlated subqueries are re-executed per outer row (no decorrelation).
-* Single-threaded execution; no HTTP server.
+* Single-threaded execution of each query (no intra-query parallelism;
+  `threads` is validated but ignored). Phase 5 options are not supported.
+* One thread per HTTP connection (no connection limit besides the OS).
+* Sorting (`qsort_r`) is not interruptible: a cancelled / timed-out query
+  stops at the next check after a large sort finishes.
+* Streaming materialises sorted / grouped / DISTINCT results before the
+  first row is sent; projections stream incrementally, but values computed
+  for earlier batches (strings) stay in the request arena until the query
+  ends.
 * Temporary files left behind by a crash during `save` are not cleaned up by
   later saves (they are ignored by readers).
 * PQCF format_version 2 (the DECIMAL(38) change) is not supported.

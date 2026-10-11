@@ -1,5 +1,36 @@
 # Working notes (arm64-asm-engine)
 
+## Status (Phase 4, session 1) — complete
+- Conformance: session and `--transport http` both 554/554 for phases 1-3
+  (phase 5: 15 not_implemented, out of scope). `tests/concurrency/http_suite.py`
+  19/19. `make build test lint` pass (new: test_catalog.S, tests/sh/run_http_tests.sh).
+- New modules: http.S (listener, connection threads, HTTP framing, routing,
+  streaming, shutdown), server.S (query registry, admission control,
+  cancellation, disconnect watchdog, metrics), log.S (JSON logs).
+- Runtime state moved to TLS (TLS_ADDR / TLS_LDR macros, pq.inc).
+- catalog.S rewritten: immutable refcounted versions (snapshot isolation);
+  index registry lives in the version (index.S CAT_FIELD macro).
+- protocol.S: handle_request (transport independent, forced op / prebuilt
+  JNode for HTTP endpoints), op table with catalog access mode, op_query
+  admission + streaming hooks; out_columns / out_rows / put_error_object.
+- exec.S: exec_plan_stream (batched projection to a sink).
+- Verified with throw-away scripts outside the repo (/tmp/pqt): 16-thread
+  mixed stress (loads/replaces/drops/indexes/save/open/queries/streams/
+  cancels) for 20 s with snapshot-consistency checks — no errors, clean
+  exit; RSS stable over repeated load/query rounds (no leaks).
+- Possible next steps: interruptible sorts; Phase 5 (intra-query threads,
+  execution modes, join algorithms).
+
+## Gotchas (phase 4)
+- Never `pkill -f 'polyquery serve'` from a shell whose own command line
+  contains that text (kills the shell). Use PIDs.
+- Every request must begin its catalog access explicitly (op table CA_*,
+  op_query calls cat_read_begin / cat_write_begin); catalog functions called
+  with no active version silently start a *write* transaction (unit tests).
+- `.irp` with quoted arguments: cpp does not expand macros inside quotes.
+- handle_request's g_jmpbuf frame is dead after it returns: code outside it
+  (http.S) must not call anything that raises.
+
 ## Status (Phase 3, session 1) — complete
 - Conformance: `--phase 1 --phase 2 --phase 3` = 554/554 (phase 3 143/143).
   `make build test lint` pass (new unit tests test_storage, test_pqcf,
@@ -66,8 +97,7 @@ CteDef, PlanNode, TupleSet, EvalCtx). Frame macros: include/frame.inc.
   build-side selection by cardinality (Phase 3), decorrelation.
 
 ## What is missing (later phases)
-- Phase 3+: storage (PQCF), indexes (CREATE/DROP INDEX answer UNSUPPORTED),
-  stats, HTTP server, parallelism, execution options.
+- Phase 5: parallelism, execution options (mode/join/optimize/threads).
 
 ## Gotchas
 - Library modules must not reference globals defined in main.S (unit tests
