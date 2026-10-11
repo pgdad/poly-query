@@ -1549,6 +1549,23 @@ LFUNC explain_result
     ret
 ENDF explain_result
 
+// empty_result() -> x0 BoundQuery* (no columns), x1 ResultSet* (no rows)
+LFUNC empty_result
+    stp  x29, x30, [sp, #-32]!
+    mov  x29, sp
+    str  x19, [sp, #16]
+    mov  x0, #BQ_SIZE
+    bl   arena_zalloc
+    mov  x19, x0
+    mov  x0, #RS_SIZE
+    bl   arena_zalloc
+    mov  x1, x0
+    mov  x0, x19
+    ldr  x19, [sp, #16]
+    ldp  x29, x30, [sp], #32
+    ret
+ENDF empty_result
+
 // op_explain: {"op":"explain","sql":…} => {"ok":true,"plan":{…}}
 //   x19 request, x20 plan text
 LFUNC op_explain
@@ -1696,7 +1713,11 @@ LFUNC op_query
     b.eq 4f
     cmp  w1, #SK_EXPLAIN
     b.eq 41f
-    RAISE ERR_UNSUPPORTED, "CREATE/DROP INDEX are not supported in this engine phase"
+    bl   index_stmt                 // CREATE / DROP INDEX
+    bl   empty_result
+    mov  x23, x0
+    mov  x24, x1
+    b    42f
 4:  ldr  x0, [x0, #ST_QUERY]
     bl   bind_query                 // semantic analysis
     mov  x23, x0
