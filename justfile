@@ -62,7 +62,7 @@ test-crash lang:
 
 # Robustness fuzzing / randomized differential testing for one language
 fuzz lang seconds="120":
-    {{sbx}} {{py}} tests/fuzz/sql_fuzz.py --engine implementations/{{lang}}/bin/polyquery --seconds {{seconds}}
+    {{sbx}} {{py}} tests/fuzz/sql_fuzz.py --engine implementations/{{lang}}/bin/polyquery --seconds {{seconds}} --report results/correctness/{{lang}}-fuzz.json
     {{sbx}} {{py}} tests/property-based/differential.py --engine implementations/{{lang}}/bin/polyquery --cases 300
 
 # Native kernels: build + differential tests (x86-64 natively, AArch64 under qemu = functional only)

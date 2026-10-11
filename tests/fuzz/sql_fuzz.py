@@ -43,8 +43,14 @@ BAD_REQUESTS = [
     '{"op":"load","table":"t","format":"csv","path":"fixtures/people.csv","schema":[{"name":"x"}]}',
     '{"op":"query","sql":"SELECT 1","options":{"max_rows":-1}}', '{"op":"query","sql":"SELECT 1","options":"x"}',
     '{"op":"save","table":"people","path":"\\u0000"}', '{"op":"schema"}', '{"op":"drop","table":5}',
-    '{"op":"query","sql":"' + "(" * 5000 + '"}', '{"op":"query","sql":"SELECT ' + "1+" * 20000 + '1"}',
+    '{"op":"query","sql":"' + "(" * 5000 + '"}',
 ]
+
+
+# Valid SQL the spec puts no size limit on: the engine must return the correct
+# result or a clean (non-INTERNAL) error, and must not crash or hang.
+STRESS = [("SELECT " + "1+" * 20000 + "1", [[20001]]),
+          ("SELECT " + "(" * 2000 + "1" + ")" * 2000, [[1]])]
 
 
 def mutate(rng: random.Random, s: str) -> str:
@@ -76,10 +82,13 @@ def main() -> int:
 
     def start():
         e = SessionEngine(launcher, data, timeout=20)
-        e.request({"op": "load", "table": "people", "format": "csv", "path": "fixtures/people.csv"})
+        r = e.request({"op": "load", "table": "people", "format": "csv", "path": "fixtures/people.csv"})
+        if r.get("ok") is not True:  # without the table most queries would only exercise NOT_FOUND
+            raise SystemExit(f"fuzz setup failed: {r}")
         return e
     eng = start()
-    problems, sent = [], 0
+    problems, sent, ok_responses = [], 0, 0
+    stress_outcomes: list = []
     deadline = time.monotonic() + a.seconds
     # protocol-level garbage first
     for raw in BAD_REQUESTS:
@@ -102,6 +111,19 @@ def main() -> int:
             problems.append({"input": raw[:200], "problem": f"{type(e).__name__}: {e}"})
             eng.kill()
             eng = start()
+    for sql, expected in STRESS:
+        sent += 1
+        try:
+            resp = eng.request({"op": "query", "sql": sql}, timeout=60)
+            if resp.get("ok") is True and resp.get("rows") != expected:
+                problems.append({"input": sql[:200], "problem": f"wrong result {str(resp.get('rows'))[:100]}"})
+            elif resp.get("ok") is False and (resp.get("error") or {}).get("code") == "INTERNAL_ERROR":
+                problems.append({"input": sql[:200], "problem": "INTERNAL_ERROR"})
+            else:
+                stress_outcomes.append("ok" if resp.get("ok") else (resp.get("error") or {}).get("code"))
+        except EngineError as e:
+            problems.append({"input": sql[:200], "problem": str(e)})
+            eng = start()
     while time.monotonic() < deadline:
         k = rng.random()
         if k < 0.45:
@@ -116,17 +138,19 @@ def main() -> int:
         sent += 1
         try:
             resp = eng.request(req)
+            ok_responses += resp.get("ok") is True
             if (resp.get("error") or {}).get("code") == "INTERNAL_ERROR":
                 problems.append({"input": json.dumps(req)[:300], "problem": "INTERNAL_ERROR: " + str(resp["error"].get("message"))[:200]})
         except EngineError as e:
             problems.append({"input": json.dumps(req)[:300], "problem": str(e)})
             eng = start()
     eng.close()
-    print(f"fuzz: {sent} inputs, {len(problems)} problems")
+    print(f"fuzz: {sent} inputs ({ok_responses} succeeded), {len(problems)} problems; stress: {stress_outcomes}")
     for p in problems[:20]:
         print(f"  {p['problem'][:120]}  <- {p['input'][:160]!r}")
     if a.report:
-        Path(a.report).write_text(json.dumps({"inputs": sent, "problems": problems, "seed": a.seed}, indent=1) + "\n")
+        Path(a.report).write_text(json.dumps({"inputs": sent, "ok_responses": ok_responses, "stress": stress_outcomes,
+                                              "problems": problems, "seed": a.seed}, indent=1) + "\n")
     return 0 if not problems else 1
 
 
