@@ -31,6 +31,7 @@
     .section .note.GNU-stack, "", @progbits
 
 #define SMALL_LOOKUP 16
+#define NL_PAIRS     64     /* auto join: nested loop up to this many pairs */
 
 /* planner state */
 #define PS_PLAN  0
@@ -50,9 +51,12 @@
 
     .data
     .p2align 3
-    .globl g_opt_optimize, g_opt_indexes
+    .globl g_opt_optimize, g_opt_indexes, g_opt_mode, g_opt_join, g_opt_threads
 g_opt_optimize: .quad 1
 g_opt_indexes:  .quad 1
+g_opt_mode:     .quad MODE_AUTO /* MODE_*: execution model */
+g_opt_join:     .quad JOIN_AUTO /* JOIN_*: forced join algorithm */
+g_opt_threads:  .quad 1         /* worker threads for scans / aggregation */
 
     .section .rodata
     .p2align 3
@@ -944,6 +948,33 @@ FUNC plan_scan
     LEAVE
 ENDF plan_scan
 
+/* choose_join(fp rdi, left estimate rsi, right estimate rdx): FP_ALGO.
+ * Joins without an equi-key conjunct (and CROSS joins) always run as
+ * nested loops; equi-joins use the algorithm forced by the `join` option,
+ * or with `auto` a hash join unless both inputs are tiny (estimated
+ * product <= NL_PAIRS), where a nested loop avoids building anything. */
+FUNC choose_join
+    movq $JA_NL, FP_ALGO(%rdi)
+    cmpq $0, FP_LKEY(%rdi)
+    je 9f
+    mov g_opt_join(%rip), %rax
+    cmp $JOIN_HASH, %rax
+    je 1f
+    cmp $JOIN_MERGE, %rax
+    je 2f
+    cmp $JOIN_NL, %rax
+    je 9f
+    mov %rsi, %rax                  /* auto: cost-based */
+    mul %rdx
+    jo 1f
+    cmp $NL_PAIRS, %rax
+    jbe 9f
+1:  movq $JA_HASH, FP_ALGO(%rdi)
+    ret
+2:  movq $JA_MERGE, FP_ALGO(%rdi)
+9:  ret
+ENDF choose_join
+
 /* plan_fp(ps rdi, fp rsi) -> rax estimated rows */
 FUNC plan_fp
     ENTER 16
@@ -960,6 +991,10 @@ FUNC plan_fp
     mov FP_RIGHT(%r12), %rsi
     call plan_fp
     mov %rax, %r14                  /* right estimate */
+    mov %r12, %rdi
+    mov %r13, %rsi
+    mov %r14, %rdx
+    call choose_join
     cmpq $0, FP_LKEY(%r12)
     je 2f
     mov %r13, %rax                  /* equi join: max of the inputs */
@@ -1001,8 +1036,6 @@ FUNC plan_block
     mov PS_NULL(%r12), %rsi
     xor %edx, %edx
     call mark_nullable
-    cmpq $0, g_opt_optimize(%rip)
-    je 5f
     mov QP_WHERE(%rbx), %rsi
     test %rsi, %rsi
     jz 5f

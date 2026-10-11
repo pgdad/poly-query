@@ -324,7 +324,22 @@
 #define FP_NSKIP  136  /* number of skipped row groups */
 #define FP_EST    144  /* estimated output rows */
 #define FP_BUILDL 152  /* hash join: 1 = build on the left input */
-#define FP_SIZE   160
+#define FP_ALGO   160  /* join: JA_* physical algorithm (planner.S) */
+#define FP_SIZE   168
+
+#define JA_NL    0     /* nested loop (any condition, CROSS joins) */
+#define JA_HASH  1     /* hash join on FP_LKEY = FP_RKEY */
+#define JA_MERGE 2     /* sort-merge join on FP_LKEY = FP_RKEY */
+
+/* Phase 5 execution options (protocol.S parses, planner.S / exec.S read) */
+#define MODE_AUTO 0
+#define MODE_ROW  1
+#define MODE_VEC  2
+#define JOIN_AUTO 0
+#define JOIN_HASH 1
+#define JOIN_MERGE 2
+#define JOIN_NL   3
+#define MAX_THREADS 64
 
 #define IM_EQ    1
 #define IM_RANGE 2

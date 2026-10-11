@@ -69,7 +69,9 @@ caps_fields:
     .ascii ",\"phase2\",\"sql.groupby\",\"sql.join\",\"sql.functions\",\"sql.subquery\""
     .ascii ",\"sql.cte\",\"sql.correlated_subquery\""
     .ascii ",\"phase3\",\"storage.pqcf\",\"storage.mmap\",\"index.hash\",\"index.btree\""
-    .asciz ",\"phase4\",\"http.streaming\"]"
+    .ascii ",\"phase4\",\"http.streaming\""
+    .ascii ",\"phase5\",\"exec.row\",\"exec.vectorized\",\"exec.parallel\""
+    .asciz ",\"join.hash\",\"join.merge\",\"join.nested_loop\"]"
 
 /* operation table: name, handler */
 op_names:
@@ -306,6 +308,9 @@ FUNC handle_request_noreset
     movq $0, g_deadline_ns(%rip)
     movq $1, g_opt_optimize(%rip)
     movq $1, g_opt_indexes(%rip)
+    movq $MODE_AUTO, g_opt_mode(%rip)
+    movq $JOIN_AUTO, g_opt_join(%rip)
+    movq $1, g_opt_threads(%rip)
     lea jb_main(%rip), %rdi
     mov %rdi, g_jmpbuf(%rip)
     call _setjmp
@@ -1537,11 +1542,13 @@ FUNC op_open
 9:  RAISE E_ALREADY_EXISTS, "an index of the file already exists"
 ENDF op_open
 
-/* opt_enum(options rdi, key rsi, NUL-separated allowed list rdx):
+/* opt_enum(options rdi, key rsi, NUL-separated allowed list rdx) -> rax
+ * index of the value in the list (0 when absent or null);
  * UNSUPPORTED if the option is present and not one of the allowed strings */
 FUNC opt_enum
     ENTER 0
     mov %rdx, %r12
+    xor %r13d, %r13d                /* index */
     call json_obj_get
     test %rax, %rax
     jz 9f
@@ -1560,9 +1567,11 @@ FUNC opt_enum
     mov %r12, %rdi
     call strlen
     lea 1(%r12, %rax), %r12
+    inc %r13
     jmp 1b
 8:  RAISE E_UNSUPPORTED, "unsupported value for a query option"
-9:  LEAVE
+9:  mov %r13, %rax
+    LEAVE
 ENDF opt_enum
 
 /* opt_boolean(options rdi, key rsi) -> eax 0 if false, else 1 (absent / null
@@ -1605,10 +1614,12 @@ FUNC check_exec_options
     CSTR %rsi, "mode"
     lea modes_ok(%rip), %rdx
     call opt_enum
+    mov %rax, g_opt_mode(%rip)
     mov %rbx, %rdi
     CSTR %rsi, "join"
     lea joins_ok(%rip), %rdx
     call opt_enum
+    mov %rax, g_opt_join(%rip)
     mov %rbx, %rdi
     CSTR %rsi, "optimize"
     call opt_boolean
@@ -1633,6 +1644,10 @@ FUNC check_exec_options
     jz 8f
     cmp $1, %rdx
     jl 8f
+    mov $MAX_THREADS, %eax          /* more workers than that never help */
+    cmp %rax, %rdx
+    cmova %rax, %rdx
+    mov %rdx, g_opt_threads(%rip)
 9:  LEAVE
 8:  RAISE E_UNSUPPORTED, "unsupported value for threads"
 ENDF check_exec_options
