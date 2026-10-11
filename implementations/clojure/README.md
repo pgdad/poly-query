@@ -34,7 +34,10 @@ the **architectural change CR-2 `DECIMAL` precision 38 / PQCF v2**
 and the **latency optimization of the analytics workload** (direct JSON
 result encoding, precomputed subqueries and semi-joins, primitive DISTINCT
 aggregation, parallel merges, DISTINCT as aggregation, per-dictionary
-function evaluation, a primitive multi-key group table — see [Latency optimization](#latency-optimization-analytics-workload)).
+function evaluation, a primitive multi-key group table — see [Latency optimization](#latency-optimization-analytics-workload))
+and the **Track B build and start-up tuning** (JDK AOT cache trained on a
+synthetic workload, JIT and memory flags, boxing and dispatch removed from
+hot loops, a faster ORDER BY — see [Build and start-up tuning](#build-and-start-up-tuning-track-b)).
 
 Reported capabilities: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic
 test.functions phase2 sql.groupby sql.join sql.functions sql.subquery sql.cte
@@ -50,9 +53,11 @@ change.union_all change.decimal38`.
 * GNU make
 
 ```sh
-make build    # AOT-compiles src/ into target/classes, writes target/classpath
+make build    # AOT-compiles src/ into target/classes, packs target/polyquery.jar,
+              # writes target/classpath and trains the JDK AOT cache target/polyquery.aot
 make test     # clojure.test unit tests (test/)
-make lint     # compiles with *warn-on-reflection*; fails on reflection warnings
+make lint     # compiles with *warn-on-reflection* and *unchecked-math* :warn-on-boxed;
+              # fails on reflection, boxed-math or performance warnings
 make fmt      # whitespace normalisation (no third-party formatter is allowed)
 make clean
 bin/polyquery session --data-dir DIR    # JSON-lines protocol on stdin/stdout
@@ -61,7 +66,9 @@ bin/polyquery serve --port 0 --data-dir DIR [--workers N --queue-depth Q ...]
 
 `bin/polyquery` works from any directory; extra JVM flags can be passed via
 `POLYQUERY_JAVA_OPTS` (e.g. `-Xmx16g` for very large tables). `--threads N`
-sets the default worker threads per query.
+sets the default worker threads per query. The launcher uses the AOT cache
+when `make build` produced one and ignores a missing, stale or unusable
+cache silently (see [Build and start-up tuning](#build-and-start-up-tuning-track-b)).
 
 Native kernels are optional: build them with `make -C native-kernels`
 (C compiler + assembler; produces `native-kernels/build/x86_64/libpqkernels.so`)
@@ -75,6 +82,9 @@ combinations (`--verify` compares full results instead), `bench/fuzz.py`
 is a differential fuzzer of the option matrix (random expressions,
 predicates, aggregates, joins, sorts over the generator fixtures); both
 take `--native LIB` to add `native: true` configurations.
+`bench/tuning.py` measures start-up, first-run (cold) and warm latency and
+RSS of several engine variants side by side (see
+[Build and start-up tuning](#build-and-start-up-tuning-track-b)).
 
 ## Libraries
 
@@ -1181,6 +1191,276 @@ Decisions:
   failing outputs, indexes), were compared between the engine before and
   after the refactoring: identical.
 
+## Build and start-up tuning (Track B)
+
+Task: tune the build and runtime for start-up time (process spawn to first
+protocol response), first-query (cold) latency and warm latency on
+`benchmarks/workloads/analytics.json` at scale 1m, without changing results.
+Every kept technique is listed in `ENGINE.json` under `"tuning"`.
+
+(The workload file is in the workspace now; the 30-query
+`bench/workloads/analytics.json` of the earlier
+[latency optimization](#latency-optimization-analytics-workload) was a
+stand-in written when it was missing.)
+
+### Results
+
+Setup: 32-core x86-64, 249 GB RAM, OpenJDK 27, Clojure 1.12.3, data from
+`pqgen.py generate --scale 1m`. "Base" is the accepted engine (commit
+`4dd7eee`, built in a separate worktree), "final" is this commit, both with
+the launcher's default flags (no `POLYQUERY_JAVA_OPTS`). The machine was
+shared (load average 5–12 during the runs), hence the interleaving below.
+
+**Start-up** — `bench/tuning.py startup --runs 40`: a fresh
+`bin/polyquery session` per run, timed from spawn to the response of
+`{"op":"version"}`; base and final spawns alternate:
+
+| engine | start-up median | min | max | RSS at first response |
+|---|---:|---:|---:|---:|
+| base | 354 ms | 341 ms | 377 ms | 135 MB |
+| final | **117 ms** | 108 ms | 138 ms | 144 MB |
+
+**Workload** — `bench/tuning.py workload /tmp/pqdata/1m --sessions 5
+--runs 9 --warmup 3`: each session loads the workload's nine tables from CSV
+with their schemas and creates its two indexes; then every query runs once
+(**cold**: its first run in that session, after the queries before it),
+3 warm-ups and 9 timed runs (**warm**: median). Each engine has its own
+session and the runs of a query alternate between them. Cold = median of the
+5 sessions' first runs, warm = median of the 5 session medians; ms, measured
+by the client including the protocol round trip, `result` as the workload
+specifies:
+
+| query | base cold | final cold | base warm | final warm |
+|---|---:|---:|---:|---:|
+| q01_filter_selective | 10.4 | 3.2 | 1.2 | 1.0 |
+| q02_filter_low_selectivity | 297.2 | 44.5 | 3.0 | 3.7 |
+| q03_range_filter_time | 23.3 | 7.5 | 3.2 | 2.4 |
+| q04_arith_aggregate | 244.2 | 27.4 | 4.1 | 2.8 |
+| q05_groupby_low_card | 143.4 | 11.5 | 2.9 | 1.5 |
+| q06_groupby_high_card | 167.4 | 15.8 | 5.6 | 4.2 |
+| q07_groupby_skewed | 11.0 | 11.0 | 11.0 | 10.1 |
+| q08_groupby_uniform_multi | 223.8 | 41.5 | 6.1 | 4.7 |
+| q09_distinct_count | 130.4 | 19.0 | 8.2 | 7.7 |
+| q10_join_customers | 211.6 | 42.7 | 15.5 | 14.1 |
+| q11_join_star | 263.8 | 21.7 | 12.5 | 10.7 |
+| q12_left_join_anti | 108.3 | 16.4 | 15.2 | 12.6 |
+| q13_sort_topn | 33.9 | 5.0 | 5.5 | 4.6 |
+| q14_sort_full_string | 523.5 | 92.9 | 275.1 | 60.5 |
+| q15_sort_multi_key | 140.2 | 64.7 | 125.3 | 55.5 |
+| q16_timeseries_hourly | 146.5 | 7.9 | 2.9 | 2.7 |
+| q17_wide_projection | 20.8 | 4.1 | 0.8 | 0.6 |
+| q18_nulls | 208.8 | 27.9 | 5.7 | 4.6 |
+| q19_cte_subquery | 57.0 | 25.3 | 22.1 | 19.4 |
+| q20_string_functions | 220.9 | 7.4 | 3.9 | 2.8 |
+| **total** | **3186** | **497** | **530** | **226** |
+
+| engine | table loading | cold total | warm total | peak RSS |
+|---|---:|---:|---:|---:|
+| base | 11.2 s | 3186 ms | 530 ms | 5370 MB |
+| final | 7.8 s | **497 ms** (6.4×) | **226 ms** (2.3×) | 5140 MB |
+
+Start-up is 3.0× faster; cold latency improves on every query except q07,
+whose first run was already warm-fast; warm latency improves most on the
+sorts (q14 4.5×, q15 2.3×). The remaining warm differences of a few tenths
+of a millisecond are within noise (q02's 3.0 → 3.7 ms reversed in an earlier
+run: 3.3 → 3.5). Results are unchanged: `bench/tuning.py verify` compares a
+digest of the complete result of every workload query (FLOAT64 to 9
+significant digits, sorted unless the query orders) between base and final —
+all 20 identical. The raw numbers are in `bench/results/final-workload.json`.
+
+**Noise.** A/A runs (the same engine as two variants) differed by up to
+2.5% in warm total and 15% in cold total (3 sessions); a cold value is a
+single run per session. Changes were therefore judged on warm totals within
+±3% as "no effect", and cold effects only with ≥5 sessions or with
+focused probes (`bench/tuning.py cold`: a fresh session per run that loads
+one table and runs the queries once, 7–9 runs).
+Single-query timings below come from sessions running one query
+repeatedly.
+
+### Techniques
+
+Effects are before → after of that step, measured with `bench/tuning.py`
+(interleaved variants) unless stated otherwise. RSS: at first response for
+start-up, peak (VmHWM) of a workload session otherwise.
+
+| technique | status | start-up | cold | warm | RSS |
+|---|---|---|---|---|---|
+| **Run from a jar** (`target/polyquery.jar`) | kept (needed by the AOT cache) | 346 → 352 ms (no effect alone) | – | – | – |
+| **JDK AOT cache** trained by `make build` | kept | 343 → 119 ms | total 3416 → 1370 ms | total 623 → 561 ms | start-up 135 → 124 MB; peak within noise |
+| … share of the *training* in it (cache recorded from a `version`-only session instead) | – | 125 vs 127 ms (classes alone give the start-up gain) | 1597 vs 600 ms (the profiles give the cold gain) | 244 vs 251 ms | 133 vs 149 MB |
+| … training data with NULLs in every column type | kept | – | total 596 → 513 ms (q18 78 → 36, q04 66 → 29, q05 35 → 12) | 254 → 228 ms (q08 outlier in the old run; others equal) | equal |
+| `-XX:CompileThresholdScaling=0.3` | kept | 138 vs 138 ms | total 1367 → 847 ms (−38%) | 407 vs 414 ms (noise) | start-up +22 MB (132 → 154 MB), peak equal |
+| `-XX:+UseTransparentHugePages` (kernel THP mode `madvise`) | kept | 135 vs 129 ms (noise) | full workload 812 vs 819 ms; sort/group subset 544 → 483 ms | 368 → 337 ms; subset 266 → 251 ms (q14 139 → 124) | peak +120 MB (+2.5%); subset +230 MB (+9%) |
+| `-XX:+UseParallelGC` (already in the base launcher) | kept | – | see G1/Serial | – | – |
+| `-XX:+UseG1GC` instead | dropped | 135 → 138 ms | 1391 → 1438 ms | 375 → 388 ms | peak 4887 → 10474 MB |
+| `-XX:+UseSerialGC` instead | dropped | 135 → 140 ms | 1391 → 1298 ms (noise) | 375 → 358 ms (noise) | peak 4197 MB; loading 8.6 → 11.8 s |
+| ZGC | not measurable | – | – | – | the AOT cache cannot be used with ZGC (0 classes from the cache) |
+| `-XX:-UsePerfData` | dropped | 135 → 132, 141 → 138 ms (noise) | 1278 → 1273 ms | 341 → 348 ms | equal |
+| `-Xms8g` | dropped | 135 → 134 ms | 812 → 796 ms | 368 → 361 ms | peak 4907 → 9101 MB |
+| `-Xmn4g` | dropped | – | 812 → 790 ms | 368 → 342 ms; subset 266 → 256 ms (−4%) | peak −120 MB, subset +1550 MB |
+| `-Xms8g -XX:+AlwaysPreTouch` | dropped | 135 → 144 ms (pre-touch alone) | 812 → 745 ms (noise range) | 368 → 361 ms | peak 4907 → 15045 MB |
+| `-XX:ReservedCodeCacheSize=64m` (code cache) | dropped | 141 → 140 ms | – | – | equal; the code cache peaks at 14 MB of 240 MB, never full |
+| `-XX:+AOTCompileEagerly` | dropped | 135 → 139 ms | 3 queries 511 → 560 ms | – | +12 MB |
+| `-XX:CICompilerCount=24` (default 15) | dropped | – | 4 queries 188 → 181 ms (noise) | – | – |
+| `:elide-meta [:doc :file :line :column :added]` | dropped | 129 → 128, 133 → 135 ms | – | – | −6 MB; jar 3.05 → 2.97 MB |
+| Boxed math removed from every namespace; lint gate | kept (required by the lint gate) | – | – | see below | – |
+| Sort: one comparator type, no boxing, UTF-8 prefixes | kept | – | – | q14 ≈ 320 → 145 ms, q15 ≈ 130 → 100 ms | – |
+| Sort: merge-path parallel merges, parallel key extraction | kept | – | – | q14 ≈ 145 → 62 ms, q15 ≈ 100 → 62 ms | – |
+| Kernels: `positions-where` macro, no `not=` on primitives, MIN/MAX without `*` | kept | – | q18 alone 55 vs 60 ms (noise) | 6 filter/aggregate queries 24.1 → 21.4 ms (−11%) | equal |
+| CSV reader: `^:const` character constants | kept | – | – | – | loading 12.2 → 8.0 s |
+| Aggregate merges reading primitive sums/counts | dropped | – | 221 → 215 ms | 54.1 → 54.1 ms | – |
+| `Math/addExact`, `subtractExact`, `multiplyExact` in arithmetic kernels | dropped | – | 297 → 285 ms | 27.5 → 39.9 ms (q08 outlier; arithmetic queries 3.3 → 3.4, 3.2 → 3.2 ms) | – |
+| `-XX:TieredStopAtLevel=1` | not tried (excluded by the task: trades steady-state speed for start-up) | | | | |
+
+### Compilation
+
+* **Fully AOT-compiled.** `make build` compiles `polyquery.main` and
+  everything it requires into class files. Checked with
+  `POLYQUERY_JAVA_OPTS=-Xlog:class+load:file=…`: every `polyquery.*` and
+  `clojure.*` class comes from the jar (without the AOT cache) or from the
+  cache ("shared objects file", 5411 classes); the only dynamically defined
+  classes are 7 JDK `LambdaForm`s — no `fn__` class from a
+  `DynamicClassLoader`, i.e. nothing is compiled or loaded from source at
+  run time. (`clojure.core.server`, `clojure.main` and `clojure.spec.alpha`
+  are loaded by Clojure's own runtime initialization — `RT` starts the
+  socket-server machinery — from their AOT classes in the Clojure jars.)
+  The runtime classpath excludes `src/`, so a launcher started inside the
+  project cannot pick up sources either.
+* **Direct linking** (`:direct-linking true`) is in effect on every call
+  site where it applies. `javap -c` shows calls between namespaces as
+  `invokestatic …$fn.invokeStatic`, e.g. in `SortKeys.compareIdx`:
+  `invokestatic polyquery/exec/sort$compare_strings.invokeStatic:(Ljava/lang/Object;Ljava/lang/Object;JJ)J`
+  (about 10,100 such call sites). The remaining `Var.getRawRoot` uses are values,
+  not calls: data vars (`identity-sel`, operator tables), functions passed as
+  arguments, dynamic vars, and the code that macros run at compile time.
+* **`:elide-meta`** was measured and dropped (no start-up effect beyond
+  noise; the AOT cache already removes class loading cost, and the remaining
+  start-up time is Clojure namespace initialization, mostly `clojure.core`).
+* **Lint.** `make lint` (`script/lint.clj`) compiles every namespace with
+  `*warn-on-reflection*` and `*unchecked-math* :warn-on-boxed` into
+  `target/lint-classes` and fails on any reflection, boxed-math or
+  performance warning (e.g. a `case` on a non-primitive). The gate covers all
+  namespaces, a superset of the hot ones (`exec.*`, `storage.*`, `values`,
+  `result`, `native.*`, `util.*`); the 145 boxed-math sites found at the
+  start were all removed (primitive coercions of loop results and
+  destructured locals, `^:const` for numeric constants, a top-level
+  primitive function instead of a local one). Only the lint classes use
+  unchecked math; the release build (`script/compile.clj`) keeps Clojure's
+  checked arithmetic, and `*warn-on-reflection*` stays on in both.
+
+### Boxing and dispatch in hot loops
+
+The boxed-math lint only sees arithmetic on `Object`s. JFR execution and
+allocation samples of the warm workload (`-XX:StartFlightRecording`,
+recording started with `jcmd … JFR.start` after the tables were loaded) and
+`javap -c` of the hot classes found boxing the lint cannot see:
+
+* **Local primitive functions are not primitive.** A `(fn ^long [^long i]
+  …)` bound in a `let` is called through `IFn.invoke` with boxed arguments
+  and result (`javap` shows `Long.valueOf` and `RT.longCast`); only top-level
+  functions get `invokePrim`/`invokeStatic`. The sort comparator's NULL
+  check, the bitmap-to-selection word reader and the per-row predicate of
+  `positions-where` (now a macro that inlines its test) were such calls.
+* **`not=` is a plain function**: `(not= a b)` on two primitives boxes both
+  and calls `Util.equiv(Object, Object)`. In the sort comparator this was
+  44% of q14's samples. Primitive comparisons now use `(not (== a b))` /
+  `(not (= a b))`; `not` and `some?` (also not inlined) are avoided in the
+  comparator.
+* **`cond … :else x` has an implicit `nil` branch**, and `case`/`if`
+  branches mixing `int` (`Long/compare`) and `long` are typed `Object`: the
+  compiler boxes the result (`Integer.valueOf`, `Numbers.num`) and unboxes
+  it again. Hot code uses `if` chains with uniformly `long` branches.
+* **Megamorphic dispatch.** The sort compared rows through one `reify` per
+  key type, called from a loop over the keys: across queries that call site
+  saw every key class and could not be inlined. A single `SortKeys` type now
+  switches on the key kind over typed arrays (`long[]`, `double[]`, strings
+  with an order-preserving 8-byte UTF-8 prefix compared as an unsigned long,
+  `Comparator` only for BOOLEAN and wide DECIMAL), so `merge-ranges!` sees one
+  receiver class.
+* **Checked multiplication by ±1.** MIN/MAX states and comparators flipped
+  signs with `(* sign …)` — `Numbers.multiply(long, long)` with its overflow
+  check, per row. They branch on the sign now. These are comparisons of SQL
+  values, not SQL arithmetic.
+* **Constants held in vars.** `(def x 4096)` holds a boxed `Long`; every use
+  in arithmetic or `=` boxes the other operand. The CSV reader compared every
+  character with such constants (`Util.equiv` per character); `^:const`
+  inlines them as primitives (table loading 12.2 → 8.0 s).
+
+Overflow semantics are unchanged: none of these changes touches SQL
+arithmetic. The arithmetic kernels and aggregate states already detect
+overflow exactly — `unchecked-add`/`unchecked-subtract` followed by the
+sign test of the result (equivalent to `Math.addExact`), `Math/multiplyHigh`
+for products, `Math/addExact` in the scalar decimal functions — and raise
+`NUMERIC_OVERFLOW` (or switch SUM to `BigInteger`, which the spec allows for
+intermediate overflow); nothing wraps silently. Rewriting the kernels with
+`Math/*Exact` and a `try` was measured and dropped (no difference).
+
+The sort also stopped scaling at about 8 threads (1 thread 450 ms, 8 threads
+150 ms, 32 threads 150 ms for q14) because the upper levels of the pairwise
+merge were serial and the key arrays were extracted on the query thread.
+Every merge level is now split into equal output slices by binary search on
+the merge path, so each level keeps all workers busy, and the key arrays
+(values, NULL flags, string prefixes) are filled in parallel row chunks. The
+unit test `multi-key-sort-matches-reference-order` compares sorts of 100K
+random rows (strings with 1–3-byte UTF-8 characters, surrogate pairs, lone
+surrogates and U+0000; ±0.0; NULLs; booleans) under several key orders,
+directions, NULL placements and partition counts with a reference sort.
+
+### JVM start-up: the AOT cache
+
+* `make build` packs the classes into `target/polyquery.jar` (the JDK AOT
+  cache, like CDS, covers classes loaded from jar files only) and then
+  records `target/polyquery.aot` (JEP 483/514/515: classes pre-parsed and
+  pre-linked, the loaded-class set, method profiles): it generates a
+  synthetic training data set with `script/training.clj` (deterministic
+  pseudo-random tables: a 250K-row fact table with every column type and
+  NULLs in every type, a 20K-row dimension, a 64-row table, a 40-column wide
+  table; small inline JSON/JSONL/CSV loads) and replays a protocol session of
+  generic queries over it through `bin/polyquery session` with
+  `POLYQUERY_AOT_OUTPUT` set, which makes the launcher pass
+  `-XX:AOTCacheOutput` with its own JVM flags. The queries cover the usual
+  analytics shapes — filters, global and grouped aggregates over low/high
+  cardinality, DISTINCT, joins of 2–3 tables, LEFT/anti joins, top-N and full
+  sorts on integer/string/multiple keys, date/string functions, CTEs,
+  scalar/IN/EXISTS subqueries, derived tables, UNION ALL, index lookups,
+  PQCF save/open, EXPLAIN, errors — eight times under default options and
+  once each under `mode`/`threads`/`join`/`optimize`/`result` variations. None of them is a benchmark query, and the data is not the
+  benchmark data. Training takes about 15 s.
+* If generating the data, the session or the cache dump fails, `make build`
+  prints a warning, removes any partial cache and succeeds; the engine then
+  runs without a cache. Tested by making `script/training.clj` throw.
+* The launcher passes `-XX:AOTCache=target/polyquery.aot` only when the file
+  exists. The JVM validates the cache (JDK build, classpath with jar
+  modification times, GC and flags) and continues without it when it does
+  not match; `-Xlog:aot*=off -Xlog:cds*=off` keeps that silent (stdout carries
+  the protocol, and the warnings would otherwise go to stderr). Verified with
+  a stale cache (jar touched after training), a truncated cache, a file of
+  garbage and a missing file: correct responses, nothing on stdout but the
+  protocol, nothing on stderr.
+* What remains of start-up (≈ 115 ms) is JVM boot plus Clojure's namespace
+  initialization (`clojure.core` and the engine's 61 namespaces), which the
+  JDK 27 cache does not snapshot.
+
+### Measuring
+
+```sh
+python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pqdata --jobs 1
+B=/tmp/base/implementations/clojure/bin/polyquery     # e.g. a git worktree of the base commit
+python3 bench/tuning.py startup --runs 40 base=$B final=bin/polyquery
+python3 bench/tuning.py workload /tmp/pqdata/1m --sessions 5 --runs 9 --warmup 3 base=$B final=bin/polyquery
+python3 bench/tuning.py verify /tmp/pqdata/1m base=$B final=bin/polyquery
+python3 bench/tuning.py cold /tmp/pqdata/1m --tables nulls_heavy --runs 9 \
+  --sql "SELECT COUNT(*) FROM nulls_heavy WHERE b60 = true" cur=bin/polyquery "c1=bin/polyquery@-XX:CompileThresholdScaling=1"
+# a flag variant of the same build: NAME=LAUNCHER@JAVA_OPTS
+python3 bench/tuning.py workload /tmp/pqdata/1m cur=bin/polyquery "g1=bin/polyquery@-XX:-UseParallelGC -XX:+UseG1GC"
+```
+
+(`--jobs 1`: the generator's process pool needs a writable `/dev/shm`.)
+GC variants can be measured through `POLYQUERY_JAVA_OPTS` because the cache
+trained with ParallelGC is also used with G1 and Serial (checked with
+`-Xlog:class+load`); kept flags are in the launcher, so the training runs
+with them.
+
 ## Design decisions (where the spec is silent or open)
 
 * **Unsupported features.** `UNION` without `ALL`, `RIGHT`/`FULL` joins
@@ -1354,6 +1634,14 @@ Decisions:
 * Storage unit tests: column vectors and layouts, statistics, index lookups,
   PQCF round trips for every encoding/row-group size/mmap, corrupt and
   unsupported files; Phase 3 planning (pruning, index selection, build side).
+* Track B tuning: `make lint` is a gate (reflection, boxed math,
+  performance warnings in any namespace); `vectorized_test` compares the
+  multi-key sort with a reference sort on 100K random rows (see
+  [Build and start-up tuning](#build-and-start-up-tuning-track-b));
+  `bench/tuning.py verify` checks that every workload query returns the same
+  complete result as the base engine; the build's cache handling was tested
+  with a failing training run and stale, truncated, garbage and missing
+  caches.
 * Conformance: `python3 tests/conformance/runner.py --engine
   implementations/clojure/bin/polyquery` (add `--transport http` to run the
   same cases through `serve`, `--modes` for the Phase 5 option matrix,
@@ -1409,3 +1697,11 @@ Decisions:
 * Sorted results are materialized as rows before sorting, so emitting a
   large sorted result reads rows in random memory order (see
   [Latency optimization](#latency-optimization-analytics-workload)).
+* The AOT cache is valid only for the JDK build and the jar paths and
+  modification times it was trained with. After a JDK upgrade or moving the
+  directory the JVM ignores it (silently): start-up is back at ≈ 350 ms and
+  first queries are slower until `make clean build` retrains it. A plain
+  `make build` retrains only when the jar, the training script or the
+  launcher changed.
+* `-XX:+UseTransparentHugePages` only has an effect when the kernel's THP
+  mode is `madvise` or `always` (it is `madvise` on the measurement machine).
