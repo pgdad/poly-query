@@ -1,2 +1,6 @@
 2026-10-10T22:40:56+00:00 wave wave-a-phase4-a1-20261010T224055Z: order=['rust']
 2026-10-10T22:40:56+00:00 [a-phase4-rust-a1-20261010T224055Z] agent queued (usage gate, then launch)
+2026-10-11T00:44:19+00:00 [a-phase4-rust-a1-20261010T224055Z] agent finished; collecting telemetry
+2026-10-11T00:44:19+00:00 [a-phase4-rust-a1-20261010T224055Z] validating (clean clone, sandboxed)
+2026-10-11T00:44:35+00:00 [a-phase4-rust-a1-20261010T224055Z] outcome=success cost=$6.4989698 turns=88 wall=1283.3s
+2026-10-11T00:44:35+00:00 wave wave-a-phase4-a1-20261010T224055Z finished: rust=success

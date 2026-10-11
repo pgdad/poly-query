@@ -1,0 +1,25 @@
+{
+ "wave_id": "wave-a-phase5-a1-20261011T004241Z",
+ "task": "phase5",
+ "track": "A",
+ "attempt": 1,
+ "seed": 31952,
+ "order": [
+  "common-lisp"
+ ],
+ "run_ids": [
+  "a-phase5-common-lisp-a1-20261011T004241Z"
+ ],
+ "started": "2026-10-11T00:42:42+00:00",
+ "parallel": 1,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  0.70947265625,
+  0.86865234375,
+  0.98583984375
+ ]
+}
