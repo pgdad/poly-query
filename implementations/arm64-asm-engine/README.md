@@ -28,7 +28,8 @@ batch executor (selection vectors, dictionary-code predicates, an explicit
 NEON kernel, hash aggregation), intra-query parallelism (parallel scans,
 filters, projections, hash-join probes and partitioned aggregation with
 merged partial states), sort-merge joins with radix-sorted keys, top-N,
-and a logical optimizer (constant folding, predicate simplification). See
+and a logical optimizer (constant folding, predicate simplification, join
+reordering). See
 [Phase 5](#phase-5-execution-options-and-optimizations) for the design and
 the before/after measurements.
 
@@ -274,7 +275,7 @@ inherit them. Unsupported values (`"mode":"quantum"`) are `UNSUPPORTED`.
 | `mode: "vectorized"` (also `auto`) | batch execution: scans, filters, projections, join keys and aggregates evaluate expressions over batches of 1024 tuples as column vectors (`vexec.S`), grouping is hash-based (`vagg.S`). |
 | `threads: N` | in vectorized mode, scans, filters, projections, hash-join probes and aggregations run as up to N parallel tasks (default: `--threads`, else the online CPUs, at most 8; capped at 64; values < 1 are `UNSUPPORTED`). The row-mode baseline ignores it. |
 | `join: "hash"` / `"merge"` / `"nested_loop"` | forces the algorithm of every equi-join; joins without an equality between the two sides are always nested loops. `auto` = hash join for equi-joins. |
-| `optimize: false` | disables the logical rewrites (constant folding, predicate simplification), top-N and the cost-based hash-join build side. Predicate pushdown, column pruning and index selection stay on: they are the Phase 3 access-path rules (index use is controlled by `use_indexes`), and the Phase 3 suite checks them under every option combination. |
+| `optimize: false` | disables the logical rewrites (constant folding, predicate simplification, join reordering), top-N and the cost-based hash-join build side. Predicate pushdown, column pruning and index selection stay on: they are the Phase 3 access-path rules (index use is controlled by `use_indexes`), and the Phase 3 suite checks them under every option combination. |
 | `native: true` | accepted and ignored (`native.kernels` is not claimed; no kernel library is loaded). |
 
 Every combination produces the same rows (row order only differs where no
@@ -414,6 +415,17 @@ level before building the logical plan:
   `TRUE AND x` → `x`; `FALSE AND x` → `FALSE`; `x OR FALSE`, `FALSE OR x`
   → `x`; `TRUE OR x` → `TRUE`; `NOT NOT x` → `x`. A WHERE / HAVING / ON
   condition that becomes TRUE disappears from the plan;
+* **join reordering** (`opt_join_order`): a region of three or more inputs
+  connected by INNER / CROSS joins (a LEFT JOIN is one input of its region;
+  regions inside its inputs are reordered separately) is rebuilt as a
+  left-deep tree in greedy order — the input with the smallest estimated
+  cardinality (access-path estimate after predicate pushdown) first, then
+  always the smallest input connected to the joined set by a condition.
+  Every condition of the region (ON conditions and pushed-down WHERE
+  conjuncts) is attached to the lowest join covering its range variables.
+  Tuples keep one slot per range variable and joins merge them slot-wise,
+  so the order never changes results (two-input joins only choose the
+  hash-join build side);
 * **top-N**: `ORDER BY … LIMIT n [OFFSET m]` keeps a bounded max-heap of
   `n + m` rows (O(N log k)) instead of sorting all rows;
 * **build side** selection for hash joins (Phase 3).
@@ -523,9 +535,10 @@ tables and the final projection (single-threaded) dominant. The merge join
 ## Known limitations
 
 * Correlated subqueries are re-executed per outer row (no decorrelation).
-* No join reordering: joins run in FROM order (only the hash-join build
-  side is chosen by cost). Sorting, DISTINCT, sort-based (row mode /
-  DISTINCT-aggregate) grouping and the merge-join sort run on one thread.
+* Join reordering is greedy (no exhaustive / dynamic-programming search)
+  and uses simple cardinality estimates. Sorting, DISTINCT, sort-based
+  (row mode / DISTINCT-aggregate) grouping and the merge-join sort run on
+  one thread.
 * `native: true` is accepted but no native kernel library is supported.
 * Streamed projections (`/v1/query/stream`) are evaluated row at a time.
 * One thread per HTTP connection (no connection limit besides the OS).

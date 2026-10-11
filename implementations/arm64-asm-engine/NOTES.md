@@ -29,9 +29,13 @@
 - Fuzzing: /tmp/fz/fuzz.py (throw-away, outside the repo) compared 5
   option sets on ~4000 random queries over the fixture data: 0 mismatches.
 
+- Join reordering (optimize.S opt_join_order, called from plan.S
+  pp_rewrite after WHERE pushdown): PN_MASK (rv bitmask) on scans / joins
+  replaces PN_LO/PN_HI ranges; join.S combine() merges tuples slot-wise
+  (AND), so subtrees need not cover contiguous rv ranges.
+
 ## Possible next steps
-- join reordering for inner-join chains (needs non-contiguous rv ranges in
-  combine()); parallel sort; vectorized streaming projection.
+- parallel sort; vectorized streaming projection; better join estimates.
 
 ## Gotchas (phase 5)
 - Tuple width can be 0 (SELECT without FROM): copy loops must check it.

@@ -633,7 +633,9 @@
 #define PN_EST      112    // u64 estimated output rows (tuple operators)
 #define PN_SWAP     120    // u32 1 = hash join inputs swapped (build = left)
 #define PN_RGSKIP   124    // u32 scans: row groups skipped (EXPLAIN)
-#define PN_SIZE     128
+#define PN_MASK     128    // u64 scans / joins: bitmask of the range variables
+                           //   of the subtree
+#define PN_SIZE     144
 
 // Simple predicate "column op constant" extracted from a scan filter
 // (index selection, row-group skipping, estimates). 48 bytes.

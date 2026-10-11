@@ -17,6 +17,8 @@
 //   * join conditions are split again: single-side conjuncts move into the
 //     children (only the right child for LEFT JOIN), equality conjuncts
 //     between the two sides become hash keys, the rest stays as residual;
+//   * join order (optimize): inner-join regions of >= 3 inputs are
+//     reordered greedily (optimize.S opt_join_order);
 //   * join algorithm (option "join"): with equi keys HashJoin (auto, hash),
 //     MergeJoin (merge) or NestedLoopJoin (nested_loop: the keys are kept and
 //     compared per pair); without equi keys always NestedLoopJoin;
@@ -34,7 +36,7 @@
 // pn_new(w0 op, x1 BoundQuery*, x2 left child) -> x0 PlanNode*
 // The new node inherits the rv range of its child.
 // =============================================================================
-LFUNC pn_new
+FUNC pn_new
     ENTER 2
     mov  w19, w0
     stp  x1, x2, [sp, #-16]!
@@ -171,6 +173,9 @@ LFUNC lp_from
     bl   pn_new
     ldr  x9, [x20, #BF_RV]
     str  x9, [x0, #PN_RV]
+    mov  x10, #1
+    lsl  x10, x10, x9
+    str  x10, [x0, #PN_MASK]
     ldr  x9, [x20, #BF_LO]
     str  x9, [x0, #PN_LO]
     LEAVE 3
@@ -193,6 +198,11 @@ LFUNC lp_from
     ldr  x1, [x20, #BF_RIGHT]
     bl   lp_from
     str  x0, [x21, #PN_RIGHT]
+    ldr  x9, [x21, #PN_LEFT]
+    ldr  x9, [x9, #PN_MASK]
+    ldr  x10, [x0, #PN_MASK]
+    orr  x9, x9, x10
+    str  x9, [x21, #PN_MASK]
     mov  x0, x21
     LEAVE 3
 ENDF lp_from
@@ -264,7 +274,18 @@ LFUNC pp_rewrite
     bl   memcpy
     mov  x20, x19                       // the FROM root now lives in x19
 .Lpp_joins:
+    TLS_ADDR x9, g_x_optimize           // join order (optimize.S)
+    ldr  w9, [x9]
+    cbz  w9, 7f
     mov  x0, x20
+    bl   opt_join_order
+    cmp  x0, x20
+    b.eq 7f
+    mov  x1, x0                         // new root: into the old record
+    mov  x0, x20
+    mov  x2, #PN_SIZE
+    bl   memcpy
+7:  mov  x0, x20
     bl   pp_joins
     mov  x0, x20
     bl   pp_access
@@ -329,19 +350,10 @@ LFUNC push_conj
     LEAVE 4
 ENDF push_conj
 
-// range_mask(x0 PlanNode*) -> x0 bitmask of the rvs [PN_LO, PN_HI)   (leaf)
-LFUNC range_mask
-    ldr  w9, [x0, #PN_LO]
-    ldr  w10, [x0, #PN_HI]
-    mov  x0, #0
-    mov  x11, #1
-1:  cmp  w9, w10
-    b.hs 2f
-    lsl  x12, x11, x9
-    orr  x0, x0, x12
-    add  w9, w9, #1
-    b    1b
-2:  ret
+// range_mask(x0 PlanNode* scan / join) -> x0 bitmask of its rvs   (leaf)
+FUNC range_mask
+    ldr  x0, [x0, #PN_MASK]
+    ret
 ENDF range_mask
 
 // =============================================================================
@@ -626,7 +638,7 @@ ENDF split_conj
 
 // and_append(x0 Node* or 0, x1 Node*) -> x0 (x0 AND x1), or x1 if x0 is 0
 //   x19 a, x20 b
-LFUNC and_append
+FUNC and_append
     cbnz x0, 1f
     mov  x0, x1
     ret
