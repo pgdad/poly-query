@@ -56,7 +56,8 @@ caps_fields:
     .ascii ",\"protocol_version\":1,\"capabilities\":[\"phase1\",\"ingest.csv\",\"ingest.json\""
     .ascii ",\"ingest.jsonl\",\"sql.basic\",\"test.functions\""
     .ascii ",\"phase2\",\"sql.groupby\",\"sql.join\",\"sql.functions\",\"sql.subquery\""
-    .asciz ",\"sql.cte\",\"sql.correlated_subquery\"]"
+    .ascii ",\"sql.cte\",\"sql.correlated_subquery\""
+    .asciz ",\"phase3\",\"storage.pqcf\",\"storage.mmap\",\"index.hash\",\"index.btree\"]"
 
 /* operation table: name, handler */
 op_names:
@@ -78,7 +79,7 @@ op_names:
 op_handlers:
     .quad op_query, op_load, op_tables, op_schema, op_drop, op_reset
     .quad op_version, op_capabilities, op_sleep
-    .quad op_explain, op_unsupported, op_unsupported, op_unsupported
+    .quad op_explain, op_save, op_open, op_stats
 
     .text
 
@@ -286,6 +287,8 @@ FUNC handle_request_noreset
     movq $0, g_err_line(%rip)
     movq $0, g_out+BUF_LEN(%rip)
     movq $0, g_deadline_ns(%rip)
+    movq $1, g_opt_optimize(%rip)
+    movq $1, g_opt_indexes(%rip)
     lea jb_main(%rip), %rdi
     mov %rdi, g_jmpbuf(%rip)
     call _setjmp
@@ -343,7 +346,13 @@ hr_unknown_op:
     RAISE E_INVALID_REQUEST, "unknown op"
 hr_error:
     movq $0, g_deadline_ns(%rip)
-    mov g_pending_arena(%rip), %rdi
+    mov g_pending_map(%rip), %rdi   /* PQCF file mapped by a failed open */
+    test %rdi, %rdi
+    jz 0f
+    mov g_pending_map_len(%rip), %rsi
+    call munmap
+    movq $0, g_pending_map(%rip)
+0:  mov g_pending_arena(%rip), %rdi
     test %rdi, %rdi
     jz 1f
     movq $0, g_pending_arena(%rip)
@@ -508,9 +517,89 @@ FUNC op_schema
     call buf_putc
     mov %rbx, %rdi
     call put_columns
-    PUTS %r15, ",\"indexes\":[]"
+    PUTS %r15, ",\"indexes\":"
+    mov %r15, %rdi
+    mov %rbx, %rsi
+    call idx_put_list
+    cmpq $LAYOUT_ROW, TB_LAYOUT(%rbx)
+    je 1f
+    PUTS %r15, ",\"layout\":\"column\""
+    LEAVE
+1:  PUTS %r15, ",\"layout\":\"row\""
     LEAVE
 ENDF op_schema
+
+/* op_stats: {"op":"stats","table":t} */
+FUNC op_stats
+    ENTER 16
+    call find_table_field
+    mov %rax, %rbx
+    mov %rbx, %rdi
+    call table_stats
+    mov %rax, %r12
+    lea g_out(%rip), %r15
+    PUTS %r15, ",\"table\":"
+    mov %r15, %rdi
+    mov TB_NAME(%rbx), %rsi
+    call buf_put_json_pstr
+    PUTS %r15, ",\"row_count\":"
+    mov %r15, %rdi
+    mov TB_NROWS(%rbx), %rsi
+    call buf_put_u64
+    PUTS %r15, ",\"columns\":["
+    xor %r13d, %r13d
+1:  cmp TB_NCOLS(%rbx), %r13
+    jae 9f
+    test %r13, %r13
+    jz 2f
+    mov %r15, %rdi
+    mov $',', %esi
+    call buf_putc
+2:  mov %r13, %r14
+    shl $COL_SHIFT, %r14
+    add TB_COLS(%rbx), %r14         /* Column* */
+    PUTS %r15, "{\"name\":"
+    mov %r15, %rdi
+    mov COL_NAME(%r14), %rsi
+    call buf_put_json_pstr
+    PUTS %r15, ",\"type\":\""
+    mov %r15, %rdi
+    mov COL_TYPE(%r14), %rsi
+    call fmt_type
+    PUTS %r15, "\",\"null_count\":"
+    imul $CST_SIZE, %r13, %rax
+    lea (%r12, %rax), %rax
+    mov %rax, 0(%rsp)               /* ColStats* */
+    mov %r15, %rdi
+    mov CST_NULLS(%rax), %rsi
+    call buf_put_u64
+    PUTS %r15, ",\"distinct_count\":"
+    mov 0(%rsp), %rax
+    mov %r15, %rdi
+    mov CST_DISTINCT(%rax), %rsi
+    call buf_put_u64
+    PUTS %r15, ",\"min\":"
+    mov 0(%rsp), %rax
+    cmpq $0, CST_HAS(%rax)
+    je 3f
+    mov %r15, %rdi
+    mov COL_TYPE(%r14), %rsi
+    mov CST_MIN(%rax), %rdx
+    call fmt_value_json
+    PUTS %r15, ",\"max\":"
+    mov 0(%rsp), %rax
+    mov %r15, %rdi
+    mov COL_TYPE(%r14), %rsi
+    mov CST_MAX(%rax), %rdx
+    call fmt_value_json
+    jmp 4f
+3:  PUTS %r15, "null,\"max\":null"
+4:  PUTS %r15, "}"
+    inc %r13
+    jmp 1b
+9:  PUTS %r15, "]"
+    LEAVE
+ENDF op_stats
 
 FUNC op_drop
     sub $8, %rsp
@@ -623,7 +712,15 @@ FUNC op_query
     je 5f
     cmp $STMT_EXPLAIN, %rax
     je 6f
-    RAISE E_UNSUPPORTED, "indexes are not supported by this engine"
+    mov %r14, %rdi
+    cmp $STMT_CREATE_INDEX, %rax
+    jne 51f
+    call idx_create_stmt
+    jmp 52f
+51: call idx_drop_stmt
+52: lea g_out(%rip), %r15
+    PUTS %r15, ",\"columns\":[],\"rows\":[],\"row_count\":0"
+    jmp 9f
 5:  mov ST_QUERY(%r14), %rdi
     call bind_statement
     mov %rax, %r13
@@ -670,6 +767,15 @@ FUNC op_explain
     CSTR %rsi, "sql"
     call req_str
     mov %rax, %r12
+    mov %rbx, %rdi
+    CSTR %rsi, "options"
+    mov $J_OBJECT, %edx
+    call opt_field
+    test %rax, %rax
+    jz 2f
+    mov %rax, %rdi
+    call check_exec_options
+2:
     mov g_arena(%rip), %rax
     mov g_max_query_mem(%rip), %rcx
     mov %rcx, AR_LIMIT(%rax)
@@ -862,6 +968,46 @@ FUNC build_schema
     LEAVE
 ENDF build_schema
 
+/* layout_options(options rdi) -> rax LAYOUT_*, rdx DICT_*:
+ * {"layout":"row"|"column","dictionary":bool}; other values => INVALID_REQUEST */
+FUNC layout_options
+    ENTER 0
+    mov %rdi, %rbx
+    mov $LAYOUT_COLUMN, %r12d
+    mov $DICT_AUTO, %r13d
+    CSTR %rsi, "layout"
+    mov $J_STRING, %edx
+    call opt_field
+    test %rax, %rax
+    jz 2f
+    mov JN_PTR(%rax), %r14
+    mov %r14, %rdi
+    CSTR %rsi, "column"
+    call strcmp
+    test %eax, %eax
+    jz 2f
+    mov %r14, %rdi
+    CSTR %rsi, "row"
+    call strcmp
+    test %eax, %eax
+    jnz 8f
+    mov $LAYOUT_ROW, %r12d
+2:  mov %rbx, %rdi
+    CSTR %rsi, "dictionary"
+    mov $J_TRUE, %edx
+    call opt_field
+    test %rax, %rax
+    jz 9f
+    mov $DICT_ON, %r13d
+    cmpq $J_TRUE, JN_TYPE(%rax)
+    je 9f
+    mov $DICT_OFF, %r13d
+9:  mov %r12, %rax
+    mov %r13, %rdx
+    LEAVE
+8:  RAISE E_INVALID_REQUEST, "layout must be \"row\" or \"column\""
+ENDF layout_options
+
 /* op_load(node) */
 #define LD_NAME    0
 #define LD_FMT     8
@@ -871,8 +1017,10 @@ ENDF build_schema
 #define LD_REPLACE 40
 #define LD_DATA    48
 #define LD_LEN     56
+#define LD_LAYOUT  64
+#define LD_DICT    72
 FUNC op_load
-    ENTER 64
+    ENTER 80
     mov %rdi, %rbx
     CSTR %rsi, "table"
     call req_str
@@ -928,6 +1076,8 @@ FUNC op_load
     /* options */
     movq $1, LD_HEADER(%rsp)
     movq $',', LD_DELIM(%rsp)
+    movq $LAYOUT_COLUMN, LD_LAYOUT(%rsp)
+    movq $DICT_AUTO, LD_DICT(%rsp)
     mov %rbx, %rdi
     CSTR %rsi, "options"
     mov $J_OBJECT, %edx
@@ -940,6 +1090,10 @@ FUNC op_load
     mov $1, %edx
     call opt_bool
     mov %rax, LD_HEADER(%rsp)
+    mov %r12, %rdi
+    call layout_options
+    mov %rax, LD_LAYOUT(%rsp)
+    mov %rdx, LD_DICT(%rsp)
     mov %r12, %rdi
     CSTR %rsi, "delimiter"
     mov $J_STRING, %edx
@@ -1018,6 +1172,10 @@ FUNC op_load
     sete %r8b
     call ingest_json
 12: mov %rax, %r12
+    mov %r12, %rdi
+    mov LD_LAYOUT(%rsp), %rsi
+    mov LD_DICT(%rsp), %rdx
+    call table_finalize
     movq $0, g_pending_arena(%rip)
     mov %r12, %rdi
     call cat_put
@@ -1037,6 +1195,233 @@ FUNC op_load
     call put_columns
     LEAVE
 ENDF op_load
+
+/* ================================================================ save / open */
+
+    .section .rodata
+encodings_ok:
+    .asciz "auto"
+    .asciz "plain"
+    .asciz "dict"
+    .asciz "rle"
+    .byte 0
+    .text
+
+/* op_save: {"op":"save","table":t,"path":p,"options":{"encoding":..,"row_group_size":N}} */
+FUNC op_save
+    ENTER 32
+    mov %rdi, %rbx
+    call find_table_field
+    mov %rax, %r12                  /* table */
+    mov %rbx, %rdi
+    CSTR %rsi, "path"
+    call req_str
+    mov %rax, %r13                  /* path */
+    movq $ENC_AUTO, 0(%rsp)
+    movq $0, 8(%rsp)                /* row group size (0 = default) */
+    mov %rbx, %rdi
+    CSTR %rsi, "options"
+    mov $J_OBJECT, %edx
+    call opt_field
+    test %rax, %rax
+    jz 5f
+    mov %rax, %r14
+    mov %r14, %rdi
+    CSTR %rsi, "row_group_size"
+    xor %edx, %edx
+    call opt_uint
+    mov %rax, 8(%rsp)
+    mov %r14, %rdi
+    CSTR %rsi, "encoding"
+    mov $J_STRING, %edx
+    call opt_field
+    test %rax, %rax
+    jz 5f
+    mov JN_PTR(%rax), %rdi
+    lea encodings_ok(%rip), %rsi
+    xor %r15d, %r15d                /* ENC_AUTO, PLAIN, DICT, RLE in list order */
+1:  cmpb $0, (%rsi)
+    je 4f
+    mov %rdi, 16(%rsp)
+    mov %rsi, 24(%rsp)
+    call strcmp
+    test %eax, %eax
+    jz 3f
+    mov 24(%rsp), %rdi
+    call strlen
+    mov 24(%rsp), %rsi
+    lea 1(%rsi, %rax), %rsi
+    mov 16(%rsp), %rdi
+    inc %r15
+    jmp 1b
+3:  mov %r15, 0(%rsp)
+    jmp 5f
+4:  RAISE E_INVALID_REQUEST, "encoding must be auto, plain, dict or rle"
+5:  mov %r12, %rdi
+    mov %r13, %rsi
+    mov 0(%rsp), %rdx
+    mov 8(%rsp), %rcx
+    call pqcf_save
+    mov %rax, %r14
+    lea g_out(%rip), %r15
+    PUTS %r15, ",\"path\":"
+    mov %r15, %rdi
+    mov %r13, %rsi
+    call buf_put_json_pstr
+    PUTS %r15, ",\"bytes\":"
+    mov %r15, %rdi
+    mov %r14, %rsi
+    call buf_put_u64
+    LEAVE
+ENDF op_save
+
+/* op_open: {"op":"open","table":t,"path":p,"replace":b,"options":{"mmap":b,
+ * "layout":..,"dictionary":b}} - loads a PQCF file and recreates its indexes */
+#define OP_NAME    0
+#define OP_REPLACE 8
+#define OP_MMAP    16
+#define OP_LAYOUT  24
+#define OP_DICT    32
+#define OP_IX      40
+#define OP_OLD     48
+#define OP_TABLE   56
+FUNC op_open
+    ENTER 64
+    mov %rdi, %rbx
+    CSTR %rsi, "table"
+    call req_str
+    cmpq $0, (%rax)
+    je bad_request
+    mov %rax, OP_NAME(%rsp)
+    mov %rbx, %rdi
+    CSTR %rsi, "path"
+    call req_str
+    mov %rax, %r13                  /* path */
+    mov %rbx, %rdi
+    CSTR %rsi, "replace"
+    xor %edx, %edx
+    call opt_bool
+    mov %rax, OP_REPLACE(%rsp)
+    movq $0, OP_MMAP(%rsp)
+    movq $LAYOUT_COLUMN, OP_LAYOUT(%rsp)
+    movq $DICT_AUTO, OP_DICT(%rsp)
+    mov %rbx, %rdi
+    CSTR %rsi, "options"
+    mov $J_OBJECT, %edx
+    call opt_field
+    test %rax, %rax
+    jz 1f
+    mov %rax, %r14
+    mov %r14, %rdi
+    CSTR %rsi, "mmap"
+    xor %edx, %edx
+    call opt_bool
+    mov %rax, OP_MMAP(%rsp)
+    mov %r14, %rdi
+    call layout_options
+    mov %rax, OP_LAYOUT(%rsp)
+    mov %rdx, OP_DICT(%rsp)
+1:  /* existing table */
+    mov OP_NAME(%rsp), %rax
+    lea 8(%rax), %rdi
+    mov (%rax), %rsi
+    call cat_find
+    mov %rax, OP_OLD(%rsp)
+    test %rax, %rax
+    jz 2f
+    cmpq $0, OP_REPLACE(%rsp)
+    jne 2f
+    RAISE E_ALREADY_EXISTS, "table already exists"
+2:  mov g_arena(%rip), %rdi
+    call vec_new
+    mov %rax, OP_IX(%rsp)
+    call arena_new
+    mov %rax, g_pending_arena(%rip)
+    mov $PQ_READ, %edx              /* mmap: lazy decoding (column layout) */
+    cmpq $0, OP_MMAP(%rsp)
+    je 21f
+    mov $PQ_MMAP_EAGER, %edx
+    cmpq $LAYOUT_COLUMN, OP_LAYOUT(%rsp)
+    jne 21f
+    mov $PQ_MMAP_LAZY, %edx
+21: mov %r13, %rdi
+    mov OP_NAME(%rsp), %rsi
+    mov OP_IX(%rsp), %rcx
+    call pqcf_read
+    mov %rax, OP_TABLE(%rsp)
+    mov %rax, %rdi
+    mov OP_LAYOUT(%rsp), %rsi
+    mov OP_DICT(%rsp), %rdx
+    call table_finalize
+    /* index names: unique in the file, and free in the catalog (the replaced
+     * table's own indexes are dropped with it) */
+    mov OP_IX(%rsp), %r14
+    xor %r15d, %r15d
+3:  cmp VEC_LEN(%r14), %r15
+    jae 6f
+    mov VEC_DATA(%r14), %rax
+    mov (%rax, %r15, 8), %r12       /* name */
+    xor %ecx, %ecx
+4:  cmp %r15, %rcx
+    jae 5f
+    mov VEC_DATA(%r14), %rax
+    mov (%rax, %rcx, 8), %rdi
+    mov %rcx, 0(%rsp)
+    mov %r12, %rsi
+    call pstr_ieq
+    mov 0(%rsp), %rcx
+    test %eax, %eax
+    jnz 8f
+    add $3, %rcx
+    jmp 4b
+5:  lea 8(%r12), %rdi
+    mov (%r12), %rsi
+    call idx_find
+    test %rax, %rax
+    jz 51f
+    mov IX_TABLE(%rax), %rax
+    cmp OP_OLD(%rsp), %rax
+    jne 9f
+51: add $3, %r15
+    jmp 3b
+6:  /* build the indexes, publish the table */
+    xor %r15d, %r15d
+7:  cmp VEC_LEN(%r14), %r15
+    jae 71f
+    mov VEC_DATA(%r14), %rax
+    mov OP_TABLE(%rsp), %rdi
+    mov 8(%rax, %r15, 8), %rsi
+    mov 16(%rax, %r15, 8), %rdx
+    mov (%rax, %r15, 8), %rcx
+    call idx_build
+    mov OP_TABLE(%rsp), %rdi
+    mov %rax, %rsi
+    call idx_attach
+    add $3, %r15
+    jmp 7b
+71: movq $0, g_pending_arena(%rip)
+    movq $0, g_pending_map(%rip)    /* a lazy table now owns its mapping */
+    mov OP_TABLE(%rsp), %r12
+    mov %r12, %rdi
+    call cat_put
+    lea g_out(%rip), %r15
+    PUTS %r15, ",\"table\":"
+    mov %r15, %rdi
+    mov TB_NAME(%r12), %rsi
+    call buf_put_json_pstr
+    PUTS %r15, ",\"row_count\":"
+    mov %r15, %rdi
+    mov TB_NROWS(%r12), %rsi
+    call buf_put_u64
+    mov %r15, %rdi
+    mov $',', %esi
+    call buf_putc
+    mov %r12, %rdi
+    call put_columns
+    LEAVE
+8:  RAISE E_STORAGE_CORRUPT, "PQCF: duplicate index name"
+9:  RAISE E_ALREADY_EXISTS, "an index of the file already exists"
+ENDF op_open
 
 /* opt_enum(options rdi, key rsi, NUL-separated allowed list rdx):
  * UNSUPPORTED if the option is present and not one of the allowed strings */
@@ -1066,7 +1451,8 @@ FUNC opt_enum
 9:  LEAVE
 ENDF opt_enum
 
-/* opt_boolean(options rdi, key rsi): UNSUPPORTED unless absent/null/boolean */
+/* opt_boolean(options rdi, key rsi) -> eax 0 if false, else 1 (absent / null
+ * count as the default true); UNSUPPORTED unless absent/null/boolean */
 FUNC opt_boolean
     sub $8, %rsp
     call json_obj_get
@@ -1075,10 +1461,14 @@ FUNC opt_boolean
     mov JN_TYPE(%rax), %rcx
     cmp $J_TRUE, %ecx
     ja 8f
+    xor %eax, %eax
+    cmp $J_FALSE, %ecx
+    setne %al
     add $8, %rsp
     ret
 8:  RAISE E_UNSUPPORTED, "unsupported value for a query option"
-9:  add $8, %rsp
+9:  mov $1, %eax
+    add $8, %rsp
     ret
 ENDF opt_boolean
 
@@ -1108,9 +1498,11 @@ FUNC check_exec_options
     mov %rbx, %rdi
     CSTR %rsi, "optimize"
     call opt_boolean
+    mov %rax, g_opt_optimize(%rip)
     mov %rbx, %rdi
     CSTR %rsi, "use_indexes"
     call opt_boolean
+    mov %rax, g_opt_indexes(%rip)
     mov %rbx, %rdi
     CSTR %rsi, "native"
     call opt_boolean

@@ -1249,7 +1249,7 @@ FUNC rv_from_table
 1:  cmp TB_NCOLS(%rbx), %rcx
     jae 9f
     mov %rcx, %rdx
-    shl $5, %rdx
+    shl $COL_SHIFT, %rdx
     add TB_COLS(%rbx), %rdx         /* Column* */
     mov %rcx, %rsi
     shl $4, %rsi
@@ -2139,6 +2139,8 @@ FUNC bind_query
     mov %rax, QP_OFFSET(%r12)
 82: mov BS_CORR(%r13), %rax
     mov %rax, QP_CORR(%r12)
+    mov %r12, %rdi                  /* physical planning (planner.S) */
+    call plan_block
     mov %r12, %rax
     LEAVE
 bq_where_type:

@@ -145,18 +145,69 @@ ENDF check_join_rows
 
 /* ================================================================ FROM */
 
-/* exec_from(xs rdi, fp rsi) -> rax TupleSet* */
-FUNC exec_from
-    ENTER 80
+/* u64_cmp(pa, pb) -> eax  (qsort comparator on row ids) */
+FUNC u64_cmp
+    mov (%rdi), %rax
+    mov (%rsi), %rcx
+    xor %edx, %edx
+    cmp %rcx, %rax
+    seta %dl
+    mov $-1, %eax
+    cmovae %edx, %eax
+    ret
+ENDF u64_cmp
+
+/* scan_try(xs rdi, fp rsi, ts rdx, row rcx): appends the tuple of one row
+ * of the scanned range variable when it passes the pushed-down filter */
+FUNC scan_try
+    ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12
-    cmpq $FK_JOIN, FP_KIND(%r12)
-    je 10f
-    /* ---- scan of one range variable */
+    mov %rdx, %r13
+    mov %rcx, %r14
+    mov %r13, %rdi
+    call ts_slot
+    mov %rax, %r15
+    mov %rax, %rdi
+    mov $0xff, %esi
+    mov XS_W(%rbx), %rdx
+    shl $3, %rdx
+    call memset
+    mov FP_RV(%r12), %rax
+    mov %r14, (%r15, %rax, 8)
+    mov FP_FILTER(%r12), %rdi
+    test %rdi, %rdi
+    jz 9f
+    mov %r15, XS_CTX+EC_TUPLE(%rbx)
+    lea XS_CTX(%rbx), %rsi
+    call eval
+    test %edx, %edx
+    jnz 8f
+    test $1, %eax
+    jnz 9f
+8:  decq TS_N(%r13)
+9:  LEAVE
+ENDF scan_try
+
+/* exec_scan(xs rdi, fp rsi) -> rax TupleSet*: the rows of one range
+ * variable - from an index lookup, or a full scan minus the row groups the
+ * planner skipped - filtered by the pushed-down conjuncts */
+FUNC exec_scan
+    ENTER 48
+    mov %rdi, %rbx
+    mov %rsi, %r12
     mov FP_RV(%r12), %r13
     mov XS_TABLES(%rbx), %rax
     mov (%rax, %r13, 8), %rax
+    mov %rax, 0(%rsp)               /* table */
     mov TB_NROWS(%rax), %r14        /* n */
+    cmpq $0, FP_INDEX(%r12)
+    jne 20f
+    cmpq $0, FP_FILTER(%r12)
+    jne 20f
+    cmpq $0, FP_NSKIP(%r12)
+    jne 20f
+    /* ---- plain scan: every row */
     mov XS_W(%rbx), %rdi
     mov %r14, %rsi
     call ts_new
@@ -180,6 +231,118 @@ FUNC exec_from
     inc %rdx
     jmp 1b
 2:  mov %r15, %rax
+    LEAVE
+
+20: mov XS_W(%rbx), %rdi
+    mov $16, %esi
+    call ts_new
+    mov %rax, %r15
+    mov FP_INDEX(%r12), %rax
+    test %rax, %rax
+    jz 30f
+    /* ---- index scan: candidate row ids, ascending and unique */
+    mov g_arena(%rip), %rdi
+    call vec_new
+    mov %rax, 8(%rsp)
+    cmpq $IM_EQ, FP_IMODE(%r12)
+    jne 22f
+    movq $0, 16(%rsp)
+21: mov 16(%rsp), %rcx
+    cmp FP_INV(%r12), %rcx
+    jae 23f
+    mov FP_INDEX(%r12), %rdi
+    mov FP_IVALS(%r12), %rax
+    mov (%rax, %rcx, 8), %rsi
+    mov 8(%rsp), %rdx
+    call idx_eq
+    incq 16(%rsp)
+    jmp 21b
+22: mov FP_INDEX(%r12), %rdi
+    mov FP_IVALS(%r12), %rsi
+    mov FP_INV(%r12), %rdx
+    mov FP_IFLAGS(%r12), %rcx
+    mov 8(%rsp), %r8
+    call idx_range
+23: mov 8(%rsp), %rax
+    mov VEC_LEN(%rax), %rsi
+    cmp $1, %rsi
+    jbe 24f
+    mov VEC_DATA(%rax), %rdi
+    mov $8, %edx
+    lea u64_cmp(%rip), %rcx
+    call qsort
+24: xor %r14d, %r14d
+25: mov 8(%rsp), %rax
+    cmp VEC_LEN(%rax), %r14
+    jae 90f
+    mov VEC_DATA(%rax), %rax
+    mov (%rax, %r14, 8), %rcx
+    test %r14, %r14
+    jz 26f
+    cmp -8(%rax, %r14, 8), %rcx
+    je 27f
+26: test $1023, %r14
+    jnz 261f
+    mov %rcx, 16(%rsp)
+    call check_deadline
+    mov 16(%rsp), %rcx
+261: mov %rbx, %rdi
+    mov %r12, %rsi
+    mov %r15, %rdx
+    call scan_try
+27: inc %r14
+    jmp 25b
+
+30: /* ---- full scan, skipping row groups excluded by their statistics */
+    movq $0, 16(%rsp)               /* row group */
+    movq $0, 24(%rsp)               /* first row of the range */
+    mov %r14, 32(%rsp)              /* end of the range */
+31: cmpq $0, FP_RGSKIP(%r12)
+    je 33f
+    mov 0(%rsp), %rax
+    mov 16(%rsp), %rcx
+    cmp TB_NRG(%rax), %rcx
+    jae 90f
+    incq 16(%rsp)
+    mov FP_RGSKIP(%r12), %rdx
+    cmpb $0, (%rdx, %rcx)
+    jne 31b
+    imul $RG_SIZE, %rcx, %rcx
+    add TB_RGS(%rax), %rcx
+    mov RG_START(%rcx), %rax
+    mov %rax, 24(%rsp)
+    add RG_N(%rcx), %rax
+    mov %rax, 32(%rsp)
+33: mov 24(%rsp), %r14
+34: cmp 32(%rsp), %r14
+    jae 35f
+    test $1023, %r14
+    jnz 341f
+    call check_deadline
+341: mov %rbx, %rdi
+    mov %r12, %rsi
+    mov %r15, %rdx
+    mov %r14, %rcx
+    call scan_try
+    inc %r14
+    jmp 34b
+35: cmpq $0, FP_RGSKIP(%r12)
+    jne 31b
+90: mov %r15, %rax
+    LEAVE
+ENDF exec_scan
+
+/* exec_from(xs rdi, fp rsi) -> rax TupleSet* */
+FUNC exec_from
+    ENTER 112
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    cmpq $FK_JOIN, FP_KIND(%r12)
+    je 10f
+    /* ---- scan of one range variable */
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    call exec_scan
     LEAVE
 
 10: /* ---- join */
@@ -251,19 +414,38 @@ FUNC exec_from
     inc %r14
     jmp 11b
 
-30: /* ---- hash join: build on the right input */
+30: /* ---- hash join: build on the right input (LEFT JOIN, or the smaller
+     * input of an inner join), or on the left input (FP_BUILDL) */
+    mov 8(%rsp), %rax
+    mov %rax, 56(%rsp)              /* build input */
+    mov 0(%rsp), %rax
+    mov %rax, 64(%rsp)              /* probe input */
     mov FP_RKEY(%r12), %rax
+    mov %rax, 72(%rsp)              /* build key */
+    mov FP_LKEY(%r12), %rax
+    mov %rax, 80(%rsp)              /* probe key */
+    cmpq $0, FP_BUILDL(%r12)
+    je 301f
+    mov 0(%rsp), %rax
+    mov %rax, 56(%rsp)
+    mov 8(%rsp), %rax
+    mov %rax, 64(%rsp)
+    mov FP_LKEY(%r12), %rax
+    mov %rax, 72(%rsp)
+    mov FP_RKEY(%r12), %rax
+    mov %rax, 80(%rsp)
+301: mov 72(%rsp), %rax
     lea N_TYPE(%rax), %rsi
     mov $1, %edi
     call ht_new
     mov %rax, 32(%rsp)              /* ht */
-    mov 8(%rsp), %rax
+    mov 56(%rsp), %rax
     mov TS_N(%rax), %rdi
     lea 8(,%rdi,8), %rdi
     call tmp_alloc
     mov %rax, 40(%rsp)              /* next[] */
     xor %r15d, %r15d
-31: mov 8(%rsp), %rax
+31: mov 56(%rsp), %rax
     cmp TS_N(%rax), %r15
     jae 35f
     mov 40(%rsp), %rcx
@@ -273,7 +455,7 @@ FUNC exec_from
     shl $3, %rcx
     add TS_DATA(%rax), %rcx
     mov %rcx, XS_CTX+EC_TUPLE(%rbx)
-    mov FP_RKEY(%r12), %rdi
+    mov 72(%rsp), %rdi
     lea XS_CTX(%rbx), %rsi
     call eval
     test %edx, %edx
@@ -296,53 +478,56 @@ FUNC exec_from
     mov %r15, EN_D0(%rax)
 34: inc %r15
     jmp 31b
-35: /* probe with the left input */
+35: /* probe */
     xor %r14d, %r14d
-36: mov 0(%rsp), %rax
+36: mov 64(%rsp), %rax
     cmp TS_N(%rax), %r14
     jae 90f
     test $1023, %r14
     jnz 37f
     call check_deadline
 37: movq $0, 16(%rsp)               /* matched */
-    mov 0(%rsp), %rax
+    mov 64(%rsp), %rax
     mov XS_W(%rbx), %rcx
     imul %r14, %rcx
     shl $3, %rcx
     add TS_DATA(%rax), %rcx
     mov %rcx, XS_CTX+EC_TUPLE(%rbx)
-    mov FP_LKEY(%r12), %rdi
+    mov 80(%rsp), %rdi
     lea XS_CTX(%rbx), %rsi
     call eval
     test %edx, %edx
     jnz 46f
-    mov %rax, 48(%rsp)              /* probe cell at 48..63 */
-    movq $0, 56(%rsp)
+    mov %rax, 88(%rsp)              /* probe cell at 88..103 */
+    movq $0, 96(%rsp)
     mov 32(%rsp), %rdi
-    lea 48(%rsp), %rsi
+    lea 88(%rsp), %rsi
     xor %edx, %edx
     call ht_lookup
     test %rax, %rax
     jz 46f
-    mov EN_D0(%rax), %r15           /* chain of right tuples */
+    mov EN_D0(%rax), %r15           /* chain of build tuples */
 40: cmp $-1, %r15
     je 46f
     mov %r13, %rdi
     call ts_slot
     mov %rax, 24(%rsp)
     mov %rax, %rdi
-    mov 0(%rsp), %rax
     mov XS_W(%rbx), %r8
+    mov 64(%rsp), %rax              /* probe tuple */
     mov %r14, %rsi
     imul %r8, %rsi
     shl $3, %rsi
     add TS_DATA(%rax), %rsi
-    mov 8(%rsp), %rax
+    mov 56(%rsp), %rax              /* build tuple */
     mov %r15, %rdx
     imul %r8, %rdx
     shl $3, %rdx
     add TS_DATA(%rax), %rdx
-    mov %r12, %rcx
+    cmpq $0, FP_BUILDL(%r12)
+    je 401f
+    xchg %rsi, %rdx                 /* the build side is the left input */
+401: mov %r12, %rcx
     call tuple_combine
     mov 24(%rsp), %rax
     mov %rax, XS_CTX+EC_TUPLE(%rbx)
@@ -954,41 +1139,27 @@ FUNC result_to_table
     ENTER 16
     mov %rdi, %rbx
     mov %rsi, %r12
-    mov $TB_SIZE, %edi
-    call tmp_zalloc
+    mov g_arena(%rip), %rdi
+    mov RV_NAME(%r12), %rsi
+    mov RV_NCOLS(%r12), %rdx
+    mov RS_NROWS(%rbx), %rcx
+    call table_new
     mov %rax, %r13
-    mov RV_NAME(%r12), %rax
-    mov %rax, TB_NAME(%r13)
-    mov RV_NCOLS(%r12), %rax
-    mov %rax, TB_NCOLS(%r13)
-    mov RS_NROWS(%rbx), %rax
-    mov %rax, TB_NROWS(%r13)
-    mov RV_NCOLS(%r12), %rdi
-    shl $5, %rdi
-    add $8, %rdi
-    call tmp_zalloc
-    mov %rax, TB_COLS(%r13)
     xor %r14d, %r14d                /* column */
 1:  cmp RV_NCOLS(%r12), %r14
     jae 9f
     mov %r14, %r15
-    shl $5, %r15
+    shl $COL_SHIFT, %r15
     add TB_COLS(%r13), %r15         /* Column* */
     mov %r14, %rax
     shl $4, %rax
     add RV_COLS(%r12), %rax
-    mov RVC_NAME(%rax), %rcx
-    mov %rcx, COL_NAME(%r15)
+    mov g_arena(%rip), %rdi
+    mov %r15, %rsi
+    mov RVC_NAME(%rax), %rdx
     mov RVC_TYPE(%rax), %rcx
-    mov %rcx, COL_TYPE(%r15)
-    mov RS_NROWS(%rbx), %rdi
-    lea 8(,%rdi,8), %rdi
-    call tmp_alloc
-    mov %rax, COL_DATA(%r15)
-    mov RS_NROWS(%rbx), %rdi
-    add $8, %rdi
-    call tmp_alloc
-    mov %rax, COL_NULLS(%r15)
+    mov RS_NROWS(%rbx), %r8
+    call col_stage
     mov COL_DATA(%r15), %r8
     mov COL_NULLS(%r15), %r9
     mov RS_ROWS(%rbx), %r10
@@ -1006,7 +1177,11 @@ FUNC result_to_table
     jmp 2b
 3:  inc %r14
     jmp 1b
-9:  mov %r13, %rax
+9:  mov %r13, %rdi
+    mov $LAYOUT_COLUMN, %esi
+    mov $DICT_OFF, %edx
+    call table_finalize
+    mov %r13, %rax
     LEAVE
 ENDF result_to_table
 

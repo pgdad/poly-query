@@ -237,14 +237,11 @@ ev_col:
     je ev_ret_null
     mov EC_TABLES(%r12), %rcx
     mov (%rcx, %rax, 8), %rcx
-    mov TB_COLS(%rcx), %rcx
+    mov TB_COLS(%rcx), %rdi
     mov N_V1(%rbx), %rdx
-    shl $5, %rdx
-    add %rdx, %rcx                  /* Column* */
-    mov COL_DATA(%rcx), %rax
-    mov (%rax, %rsi, 8), %rax
-    mov COL_NULLS(%rcx), %rdx
-    movzbl (%rdx, %rsi), %edx
+    shl $COL_SHIFT, %rdx
+    add %rdx, %rdi                  /* Column* */
+    call col_get
     LEAVE
 
 ev_outer:                           /* correlated column: V3 contexts up */
