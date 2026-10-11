@@ -21,7 +21,9 @@ see [Phase 5: optimization](#phase-5-optimization); and (M9) the optional **nati
 library** `libpqkernels` bound through the Java FFM API and used for filtering, aggregation,
 bitmap and hashing work with `native: true` — see [Native kernels (M9)](#native-kernels-m9);
 and the requirement change **CR-1 `UNION ALL`** (`spec/changes/union-all.md`) — see
-[Change CR-1: UNION ALL](#change-cr-1-union-all).
+[Change CR-1: UNION ALL](#change-cr-1-union-all); and the refactoring **CR-3 logical/physical
+plan separation** (`spec/changes/refactor-plan-separation.md`) — see
+[Change CR-3](#change-cr-3-logicalphysical-plan-separation).
 
 Capabilities: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic test.functions phase2
 sql.groupby sql.join sql.functions sql.subquery sql.cte sql.correlated_subquery phase3
@@ -74,9 +76,10 @@ Source lives in `src/main/java/polyquery/`, one package per layer:
 | `sql.ast` | Immutable AST (sealed interfaces + records) for the full v1 grammar |
 | `sql.parser` | Recursive-descent parser (WITH, joins, subqueries, CASE, IN, LIKE, BETWEEN, EXPLAIN, CREATE/DROP INDEX); `PARSE_ERROR` carries `line`/`column` |
 | `sql.analyzer` | Semantic validation: `Scope` (range variables, correlation), `ExpressionBinder` + `TypeCoercion` + `ScalarFunctionBinder` (typing), `Analyzer` (per query level: FROM/joins/derived tables/CTEs, GROUP BY rewriting, ORDER BY resolution → `BoundQuery`), `LogicalPlanner` (`BoundQuery` → logical plan) |
-| `plan` | Bound (typed) expressions (`BoundExpr`, `BoundExprs` traversal), aggregate calls, subqueries, logical plan nodes, expression formatter |
-| `optimizer` | `LogicalOptimizer`: constant folding, predicate simplification, error-preserving predicate pushdown into joins and scans, CROSS→INNER join conversion; `ExprSafety` (can an expression fail / be NULL — with interval arithmetic over column statistics); `JoinReorder` (inner-join trees). All disabled by `optimize: false` |
-| `physical` | `PhysicalPlan` nodes, `PhysicalPlanner` (table vs index scans, hash / merge / nested-loop joins and build side, top-N, hash lookup for correlated filters), `ColumnPredicates` (sargable conjuncts → key predicates), `Cardinality` (estimates from statistics), `ColumnPruner`, `PlanExplainer` (EXPLAIN JSON) |
+| `plan` | Bound (typed) expressions (`BoundExpr`, `BoundExprs` traversal and input-slot analysis), aggregate calls, subqueries, the logical plan (`LogicalPlan`: `Scan`, `SingleRow`, `Filter`, `Project`, `Join`, `Aggregate`, `Distinct`, `Sort`, `Limit`, `UnionAll`), `LogicalPlanPrinter` (debug text), expression formatter |
+| `optimizer` | Rule-based logical optimizer on the logical plan only: `OptimizerRule`, `LogicalOptimizer` (`STANDARD` rule sequence, `DISABLED` for `optimize: false`), rules `ConstantFolding`, `PredicateSimplification`, `PredicatePushdown` (below projections, into join inputs, CROSS→INNER), `JoinReorder` (inner-join trees), `ProjectionPruning`; `ExprSafety` (can an expression fail / be NULL — with interval arithmetic over column statistics) |
+| `cost` | Estimates shared by both planning layers: `Cardinality` (rows and selectivities from statistics), `ColumnPredicates` (sargable conjuncts → key predicates) |
+| `physical` | `PhysicalPlan` nodes, `PhysicalPlanner` (table vs index scans, hash / merge / nested-loop joins and build side, top-N, hash lookup for correlated filters, execution model / threads / native kernels → `PhysicalQuery`), `ColumnPruner` (columns each scan reads), `PlanExplainer` (EXPLAIN JSON) |
 | `exec` | Row engine (`mode: row`): Volcano operators (table/index scans, filter, project, hash aggregate, distinct, hash/merge/nested-loop joins, sort, top-N, limit, hash-lookup filter), `OperatorBuilder` (physical plan → operators), `ExpressionCompiler` (bound expression → closures), `ScalarFunctions`, `SubqueryRunner`, `ExecContext` (timeout, memory budget, row/join limits, correlation frames) |
 | `exec.vector` | Vectorized engine (`mode: vectorized`): `Vec`/`Batch` (column vectors + selection vectors), `VecCompiler` + `Kernels` (batch expression kernels), `BatchExprs` (row-exact error semantics), scan/filter/project/limit, `AggregateBatches` + `GroupKeys` + `AggState` (hash aggregation, DISTINCT), `JoinBatches` (hash join), `SortBatches` (sort, top-N), `ColumnStore`, `Parallel` (morsel-driven workers), `BatchBuilder` (plan → batch operators), `VectorExecutor`; with `native: true`, `NativeFilter` (WHERE conjuncts) and `NativeAgg` (aggregate states) call the native kernels |
 | `ffi` | `NativeKernels`: FFM binding of `libpqkernels` (C ABI v1) — loading, ABI check, critical downcall handles over Java arrays, argument checks; the only class that touches `java.lang.foreign` |
@@ -84,7 +87,7 @@ Source lives in `src/main/java/polyquery/`, one package per layer:
 | `storage.pqcf` | PQCF v1: `PqcfWriter` (atomic save), `ChunkEncoder`, `PqcfReader` (header/footer/metadata validation), `ChunkDecoder` (CRC + value validation), `PqcfTableData` (row groups, lazy chunks over a memory-mapped file) |
 | `index` | `HashIndex`, `OrderedIndex` (sorted permutation), `KeyDomain`/`KeyPredicate` (typed lookup keys and predicates) |
 | `ingest` | CSV parser + type inference, JSON / JSON Lines ingestion |
-| `engine` | `Engine` façade used by every front-end; config; path safety |
+| `engine` | `Engine` façade used by every front-end; `QueryPlanner` (optimizer + physical planner per query); config; path safety |
 | `protocol` | JSON request handling/validation (`RequestHandler`, `QueryRequest`), the `QueryRunner` policy hook, result serialization, structured logger |
 | `server` | HTTP/1.1 server (Phase 4): `HttpServer` (accept loop, connection threads, graceful shutdown), `HttpConnection` (request parsing, fixed/chunked responses, disconnect detection), `ApiRouter` (endpoints → protocol ops), `QueryStream` (NDJSON streaming with backpressure), `QueryManager` (query registry, timeouts, metrics, logs), `Admission` (worker limit + FIFO queue), `Metrics` (Prometheus text) |
 | `Main` | CLI (`version`, `capabilities`, `session`, `exec`, `serve`) |
@@ -94,9 +97,10 @@ Query pipeline (each stage is a separate class and data structure):
 ```
 SQL text ─Lexer→ tokens ─Parser→ AST (Statement/Query/Expr)
    ─Analyzer/ExpressionBinder→ BoundQuery per query level (typed BoundExpr, resolved names)
-   ─LogicalPlanner→ LogicalPlan ─LogicalOptimizer→ LogicalPlan
-   ─PhysicalPlanner→ PhysicalPlan ─┬─ OperatorBuilder/ExpressionCompiler→ Operator tree ─Executor→ rows      (mode: row)
-                                   └─ BatchBuilder/VecCompiler→ BatchOperator tree ─VectorExecutor→ rows   (mode: vectorized)
+   ─LogicalPlanner→ LogicalPlan ─LogicalOptimizer (rules; none with optimize: false)→ LogicalPlan
+   ─PhysicalPlanner→ PhysicalQuery (PhysicalPlan + mode, threads, native)
+        ─┬─ OperatorBuilder/ExpressionCompiler→ Operator tree ─Executor→ rows      (mode: row)
+         └─ BatchBuilder/VecCompiler→ BatchOperator tree ─VectorExecutor→ rows   (mode: vectorized)
 ```
 
 `EXPLAIN` renders the physical plan (`TableScan`/`IndexScan` with `table`, `index`, `kind` and
@@ -363,12 +367,18 @@ pipeline over fewer than two morsels is not parallelized.
 
 ### Logical optimizer (`optimize`)
 
-* **Constant folding** of every constant subexpression (once, at planning) — unless its
-  evaluation fails; then it is left for the rows that evaluate it.
-* **Predicate simplification**: `TRUE AND x → x`, `FALSE AND x → FALSE`, `x OR FALSE → x`,
+`LogicalOptimizer.STANDARD` applies these rules (`OptimizerRule`s), in this order, each once;
+`optimize: false` applies none (`LogicalOptimizer.DISABLED`):
+
+* **Constant folding** (`ConstantFolding`, `constant_folding`) of every constant subexpression
+  (once, at planning) — unless its evaluation fails; then it is left for the rows that evaluate it.
+* **Predicate simplification** (`PredicateSimplification`, `predicate_simplification`):
+  `TRUE AND x → x`, `FALSE AND x → FALSE`, `x OR FALSE → x`,
   `NOT NOT x → x`, … (`x AND FALSE → FALSE` only when `x` cannot fail), always-TRUE filters vanish.
-* **Predicate pushdown** into join inputs and scans (also enabling index scans and row-group
-  skipping), CROSS→INNER join conversion. **Error-preserving**: moving a predicate changes the
+* **Predicate pushdown** (`PredicatePushdown`, `predicate_pushdown`) below projections (derived
+  tables, CTEs: column references are replaced by the projected expressions; only if no
+  projected expression can fail), into join inputs and scans (also enabling index scans and
+  row-group skipping), CROSS→INNER join conversion. **Error-preserving**: moving a predicate changes the
   rows the others are evaluated on, so a conjunct moves only if it precedes every conjunct that
   may raise an error — and, when such a conjunct exists, only if it can never be NULL (a NULL
   conjunct does not stop the evaluation of the following ones; a pushed-down filter would) —
@@ -377,13 +387,18 @@ pipeline over fewer than two morsels is not parallelized.
   overflow or that a divisor range excludes 0; null counts prove columns non-NULL. So
   `optimize: true` and `false` agree on errors too, while the usual shapes (comma joins with
   the join condition first, arithmetic on stored values) are still fully optimized.
-* **Join reordering** (`JoinReorder`) of inner-join trees with ≥ 3 inputs: start with the
+* **Join reordering** (`JoinReorder`, `join_reordering`) of inner-join trees with ≥ 3 inputs: start with the
   connected pair with the smallest estimated join result, then repeatedly add the connected
   input with the smallest estimated result (equi-join selectivity 1/max(distinct counts) from
   table statistics); conditions are placed at the lowest join where their inputs are available
   and a projection restores the original column order. Only when all conditions are free of
   subqueries and cannot fail.
-* **Projection pushdown**: the column pruner (Phase 3) reads only referenced columns.
+* **Projection pruning** (`ProjectionPruning`, `projection_pruning`): projected column
+  references and constants nobody reads (unused derived-table / CTE columns) become NULL
+  constants, so the columns they pass through are not read either; computed expressions are
+  kept (they may raise errors). Independently of the optimizer, the physical planner's column
+  pruner (Phase 3) makes every scan read only the columns its plan references, with the same
+  pass-through criterion — so scans read the same columns with `optimize: false`.
 * **Top-N** (physical planning, also disabled by `optimize: false`): `ORDER BY … LIMIT n`
   keeps only the best `offset + n` rows (row engine: bounded heap; vectorized: column store
   re-sorted and truncated whenever it doubles). Ties keep input order, exactly like the stable
@@ -707,7 +722,7 @@ layer special-cases it beyond its own responsibility:
 | `sql.parser.Parser` | `query = [WITH] select_core {UNION ALL select_core} [ORDER BY] [LIMIT]`. `UNION` without `ALL` (incl. `UNION DISTINCT`) stays `UNSUPPORTED`; `UNION ALL` after a branch's `ORDER BY`/`LIMIT` is a `PARSE_ERROR`; parenthesized branches are `PARSE_ERROR`s by the grammar (a statement / branch must start with `SELECT`) |
 | `sql.analyzer.Analyzer` | `planUnionAll`: each branch is bound as its own query level (`bindQuery` now takes a branch plus optional ORDER BY/LIMIT) in a `Scope` nested in the compound's scope, so CTEs of the `WITH` and outer (correlated) columns are visible but other branches' range variables are not; outer references from any branch are collected on the compound's scope, so a subquery whose body is a `UNION ALL` is correlated iff some branch is. Column counts must match (`SEMANTIC_ERROR`); column *i* gets `TypeCoercion.commonType` over the branches (the CASE rule: numeric promotion, untyped NULL adopts the other type, all-NULL stays the untyped NULL type, reported as STRING like `SELECT NULL`; else `TYPE_ERROR`); names are the first branch's. ORDER BY items must be output names or positions (`resolveCompoundOrderItem`, else `SEMANTIC_ERROR`); then `Sort` and `Limit` over the union |
 | `plan.LogicalPlan` | `UnionAll(inputs, columns)` |
-| `optimizer` | `LogicalOptimizer` (folding, pushdown) and `JoinReorder` recurse into every branch; a union is an opaque input of joins above it |
+| `optimizer` | The optimizer rules (folding, pushdown, join reordering, pruning) recurse into every branch; a union is an opaque input of joins above it |
 | `physical` | `PhysicalPlan.UnionAll`; `PhysicalPlanner` plans each branch independently (index scans, join algorithms, hash lookups per branch); `ColumnPruner` passes the consumer's required slots to every branch; `Cardinality` = sum of the branches; `PlanExplainer` renders `{"op":"UnionAll","columns":[…],"children":[branch plans in order]}` |
 | `exec` | `Operators.UnionAll` (row engine) |
 | `exec.vector` | `BatchOperators.UnionAll` (vectorized; passes the branches' batches through unchanged, incl. a pending row-exact error); `BatchBuilder` builds each branch with `build`, so a branch that is a scan pipeline still runs morsel-parallel and with native filters/aggregates |
@@ -746,6 +761,62 @@ violating the ingestion spec (breaking that next case and phase-1 inference test
 special-casing the test, so it was left failing. With an explicit DECIMAL schema the same query
 returns the expected `DECIMAL(18,2)` rows `["99.99"], ["101.00"]` in every mode (checked
 during development; the INT64 ∪ DECIMAL rule itself is covered by `EngineTest.testUnionAll`).
+
+## Change CR-3: logical/physical plan separation
+
+`spec/changes/refactor-plan-separation.md`: a behaviour-preserving refactoring. The engine
+already planned in two stages (logical plan → physical plan); the refactoring closed the gaps:
+the optimizer was one class with hard-wired passes, the logical layer depended on the physical
+package (cardinality estimates, slot analysis), there was no projection-pruning rule at the
+logical level, predicates were not pushed below projections, and the execution model, thread
+count and native kernels were chosen by `Engine` outside planning.
+
+### Module map (before → after)
+
+| Concern | Before | After |
+|---|---|---|
+| Logical plan | `plan/LogicalPlan.java` (records, no generic traversal, no printer) | `plan/LogicalPlan.java` — `Scan`, `SingleRow`, `Filter`, `Project`, `Join` (kind + condition), `Aggregate` (keys + calls), `Distinct`, `Sort`, `Limit`, `UnionAll`; subqueries are `plan/Subquery.java` inside expressions, derived tables / CTEs are inlined plans; `children` / `withChildren` / `transformUp`; `plan/LogicalPlanPrinter.java` (debug text, incl. subquery plans); `Engine.logicalPlan(sql)` (internal API) |
+| Optimizer driver | `optimizer/LogicalOptimizer.java`: static `optimize` = fold → pushdown → `JoinReorder.reorder` | `optimizer/OptimizerRule.java` (`name`, `apply`); `optimizer/LogicalOptimizer.java`: list of rules, `STANDARD`, `DISABLED` (`optimize: false` applies no rules), `forOption` |
+| Constant folding | inside `LogicalOptimizer.fold` (together with simplification) | `optimizer/ConstantFolding.java` (`constant_folding`) |
+| Predicate simplification | inside `LogicalOptimizer.fold` | `optimizer/PredicateSimplification.java` (`predicate_simplification`) |
+| Predicate pushdown | `LogicalOptimizer.pushdown` (joins and scans only) | `optimizer/PredicatePushdown.java` (`predicate_pushdown`): also **below projections** |
+| Join reordering | `optimizer/JoinReorder.java` (static, imported `physical.Cardinality`) | `optimizer/JoinReorder.java` (`join_reordering`), an `OptimizerRule` |
+| Projection / column pruning | only `physical/ColumnPruner.java` | `optimizer/ProjectionPruning.java` (`projection_pruning`, logical) + `physical/ColumnPruner.java` (columns each scan reads) |
+| Shared helpers | `LogicalOptimizer.canFail` (also used by `exec.vector.Parallel`); slot analysis `ColumnPruner.references` (used by `exec.vector`) | `ExprSafety.mayFail`; `BoundExprs.inputSlots` / `addInputSlots`; `optimizer/PlanExpressions.java`; `ExprFormatter.aggregate` / `sortKey` |
+| Estimates | `physical/Cardinality.java`, `physical/ColumnPredicates.java` | `cost/Cardinality.java`, `cost/ColumnPredicates.java` (used by both layers) |
+| Physical planner | `physical/PhysicalPlanner.java` (access paths, join algorithms, build side, top-N, hash lookups, column pruning) | the same, configured by `PhysicalPlanner.Options`, plus the **execution strategy**: `planQuery` → `physical/PhysicalQuery.java` (operator tree, `mode`, `threads`, `nativeKernels`) |
+| Execution strategy | `Engine.execute` / `Engine.newContext` (`mode`, `threads`, native only in vectorized mode) | `PhysicalPlanner.planQuery`; `Engine` only dispatches on the `PhysicalQuery` |
+| Planning pipeline | lambda in `Engine.planner` | `engine/QueryPlanner.java` (optimizer, then physical planner; also plans subqueries when the executor needs them) |
+| EXPLAIN | `physical/PlanExplainer.java` from the physical plan | unchanged |
+| Tests | — | `optimizer/OptimizerRulesTest` (every rule on its own, the rule sequence, `optimize: false`, the printer), `physical/PhysicalPlannerTest` (access path, join algorithm per option, build side, top-N, execution strategy); new derived-table queries in the `Phase5Test` option matrix |
+
+### Decisions
+
+* **Rules run once each, in a fixed order** (folding → simplification → pushdown → join
+  reordering → projection pruning), exactly the passes of the previous optimizer plus the new
+  steps; no fixpoint iteration, so plans stay predictable and planning cost is linear.
+  Folding and simplification are separate rules; a simplification that leaves a literal-only
+  expression folds it, so the pair is equivalent to the former combined pass.
+* **Physical decisions only in the physical planner.** The logical layer uses statistics for
+  estimates (join order, error analysis) but never chooses an access path, join algorithm,
+  build side, top-N, mode, thread count or kernel. Top-N stays a physical choice and is still
+  disabled by `optimize: false` (the unoptimized baseline). Subqueries are planned on first
+  execution through the same `QueryPlanner` and run in their enclosing query's strategy.
+* **Phase 3 planning works without the optimizer.** Index selection and row-group skipping
+  for a filter directly over a scan, and scan column pruning, are physical-planning tasks, so
+  `optimize: false` still uses indexes and reads only the needed columns (conformance
+  `--modes` checks this).
+* **Pushdown below projections** is error-preserving like the rest: only when no projected
+  expression can fail (it is then computed on fewer rows) and only for movable conjuncts.
+  This is the one place where plans change: a filter on a derived table or CTE column
+  (`WITH s AS (SELECT … GROUP BY …) SELECT … FROM s WHERE n > 1`) now appears in `EXPLAIN`
+  below the projection (on the aggregate, or on the scan, where it can now also use an index).
+  Results and errors are unchanged. Of the 1,884 EXPLAIN outputs of all public conformance
+  queries under four option sets (default, `optimize: false`, `join: merge`,
+  `join: nested_loop` + `use_indexes: false`), only the 6 plans of the two queries of this
+  shape changed; with `optimize: false` all are identical.
+* **Projection pruning** uses the physical pruner's pass-through criterion (column references
+  and constants), so scans read the same columns with and without `optimize`.
 
 ## Design decisions / interpretations
 
@@ -937,8 +1008,8 @@ and `use_indexes`/`optimize` off.
   `/v1/query/stream` for large results). Request bodies are buffered in memory.
 * Index builds (`CREATE INDEX`) and ingestion are not cancellable.
 * `UNION ALL`: filters above a union (e.g. `WHERE` over a derived table that is a union) are not
-  pushed into the branches (the optimizer does not push predicates through projections at
-  all); the branches of a union run sequentially (each branch's own pipeline may be parallel),
+  pushed into the branches (predicates move below projections and into joins, but not through
+  unions, aggregations, DISTINCT, sorts or limits); the branches of a union run sequentially (each branch's own pipeline may be parallel),
   and an aggregation over a union is not parallelized.
 * Indexes are used only for filters directly over a scan (no index nested-loop joins, no
   index-ordered output); OR-ed predicates are not used for index lookups or row-group

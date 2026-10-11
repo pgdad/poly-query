@@ -11,13 +11,15 @@ import polyquery.plan.SortKey;
 
 /**
  * Projection (column) pruning: determines, top-down, which output columns of every operator
- * are read above it, and replaces projected expressions nobody reads — typically columns of a
- * derived table or CTE the outer query ignores — by NULL constants, provided computing them
- * cannot fail. The columns they referenced are then no longer needed below, so the scans read
- * fewer columns. Row layouts are unchanged, so no expression needs to be rewritten.
+ * are read above it, and replaces projected column references and constants nobody reads —
+ * typically columns of a derived table or CTE the outer query ignores — by NULL constants, so
+ * the columns they pass through are no longer needed below. Row layouts are unchanged, so no
+ * expression needs to be rewritten. Computed expressions are always kept: evaluating them may
+ * raise an error the query has to report.
  *
- * <p>The physical planner still restricts every scan to the columns its plan reads (Phase 3
- * column pruning, also without this rule).
+ * <p>Physical planning restricts every scan to the columns its plan reads with the same
+ * pass-through criterion (Phase 3 column pruning), so scans read the same columns with and
+ * without the optimizer.
  */
 public final class ProjectionPruning implements OptimizerRule {
     @Override
@@ -40,12 +42,11 @@ public final class ProjectionPruning implements OptimizerRule {
             case LogicalPlan.Filter f -> new LogicalPlan.Filter(prune(f.input(), with(required, f.predicate())),
                     f.predicate());
             case LogicalPlan.Project p -> {
-                ExprSafety safety = new ExprSafety(ExprSafety.origins(p.input()));
                 BitSet need = new BitSet();
                 List<BoundExpr> exprs = new ArrayList<>(p.expressions());
                 for (int i = 0; i < exprs.size(); i++) {
                     BoundExpr e = exprs.get(i);
-                    if (!required.get(i) && !safety.canFail(e)) {
+                    if (!required.get(i) && (e instanceof BoundExpr.ColumnRef || e instanceof BoundExpr.Literal)) {
                         exprs.set(i, new BoundExpr.Literal(null, e.type()));
                     } else {
                         BoundExprs.addInputSlots(e, need);

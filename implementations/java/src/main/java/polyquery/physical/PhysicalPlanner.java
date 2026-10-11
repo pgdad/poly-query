@@ -80,7 +80,8 @@ public final class PhysicalPlanner {
             case LogicalPlan.UnionAll u -> new PhysicalPlan.UnionAll(u.inputs().stream().map(this::build).toList(),
                     u.columns());
             case LogicalPlan.Sort s -> new PhysicalPlan.Sort(build(s.input()), s.keys());
-            case LogicalPlan.Limit l when options.topN() && l.limit() != null && l.input() instanceof LogicalPlan.Sort s ->
+            case LogicalPlan.Limit l
+                    when options.topN() && l.limit() != null && l.input() instanceof LogicalPlan.Sort s ->
                     new PhysicalPlan.TopN(build(s.input()), s.keys(), l.offset(), l.limit());
             case LogicalPlan.Limit l -> new PhysicalPlan.Limit(build(l.input()), l.offset(), l.limit());
             case LogicalPlan.Join j -> join(j);

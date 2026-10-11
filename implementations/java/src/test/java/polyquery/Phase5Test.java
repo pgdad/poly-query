@@ -87,6 +87,14 @@ final class Phase5Test {
         "SELECT id FROM t WHERE EXISTS (SELECT 1 FROM d WHERE d.grp = t.grp UNION ALL SELECT 1 FROM d WHERE t.val > 45)",
         "SELECT id FROM t WHERE id < 5 UNION ALL SELECT 1000 / (grp - 3) FROM t",
         "SELECT id FROM t WHERE id < 5 UNION ALL SELECT 1000 / (grp - 3) FROM t LIMIT 3",
+        // predicate pushdown below derived-table projections and projection pruning
+        "SELECT k, v FROM (SELECT grp AS k, val * 2 AS v, name FROM t) s WHERE k > 3 AND v < 10",
+        "SELECT k FROM (SELECT grp AS k, 1000 / (grp - 3) AS q FROM t) s WHERE k > 5",
+        "SELECT g, n FROM (SELECT grp AS g, COUNT(*) AS n FROM t GROUP BY grp) s WHERE n > 40 AND g IS NOT NULL",
+        "SELECT s.k, d.label FROM (SELECT grp AS k, name FROM t WHERE id < 300) s JOIN d ON d.grp = s.k "
+                + "WHERE s.name LIKE 'n1%'",
+        "SELECT id FROM (SELECT id, grp + 1 AS g1, UPPER(name) AS u FROM t) s WHERE id % 7 = 0 AND 100 / (g1 - 4) > 0",
+        "SELECT id FROM (SELECT id, val FROM t) s WHERE 100 / (val + 50) > 0 AND id < 10",
     };
 
     /** A result: column list and rows (sorted unless the query orders them), or an error code. */

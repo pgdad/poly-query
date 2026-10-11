@@ -9,10 +9,12 @@ import polyquery.plan.BoundExprs;
 import polyquery.plan.SortKey;
 
 /**
- * Column pruning (indexes-and-planning.md §3): determines, top-down, which input slots every
- * operator actually reads and restricts each scan to the columns referenced anywhere above it.
- * Row layouts are unchanged (pruned slots are simply left null), so no expression needs to
- * be rewritten.
+ * Column pruning (indexes-and-planning.md §3), the last physical planning step: determines,
+ * top-down, which input slots every operator actually reads and restricts each scan to the
+ * columns referenced anywhere above it; projected column references and constants nobody reads
+ * are not computed (as the logical {@code ProjectionPruning} rule does, so that
+ * {@code optimize: false} reads the same columns). Row layouts are unchanged (pruned slots are
+ * simply left null), so no expression needs to be rewritten.
  */
 final class ColumnPruner {
     private ColumnPruner() {
