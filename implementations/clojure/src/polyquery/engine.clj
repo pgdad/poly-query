@@ -1,6 +1,7 @@
 (ns polyquery.engine
-  "Query pipeline: lex/parse → semantic analysis → logical plan →
-  optimization → physical plan → execution → serialization
+  "Query pipeline: lex/parse → semantic analysis → planning (logical plan →
+  optimization → physical plan, polyquery.plan.planner) → execution →
+  serialization
   (spec/sql/semantics.md: errors detected before execution are reported
   without executing anything)."
   (:require [polyquery.catalog :as catalog]
@@ -9,7 +10,7 @@
             [polyquery.exec.dispatch :as dispatch]
             [polyquery.native.ffi :as ffi]
             [polyquery.plan.explain :as explain]
-            [polyquery.plan.physical :as physical]
+            [polyquery.plan.planner :as planner]
             [polyquery.sql.analyzer :as analyzer]
             [polyquery.sql.parser :as parser]
             [polyquery.storage.index :as index]
@@ -39,29 +40,9 @@
                         out))))
      rows)))
 
-(def default-threads
-  "Worker threads per query when neither the query nor --threads says."
-  (min 8 (.availableProcessors (Runtime/getRuntime))))
-
-(defn- exec-mode
-  "Execution model of a query: `row` (baseline) or `vectorized` (also for
-  `auto`, the default)."
-  [opts]
-  (if (#{"row" :row} (:mode opts)) :row :vectorized))
-
-(defn- threads
-  "Worker threads of a query: its `threads` option, else --threads, else
-  default-threads (1 for the row-mode baseline)."
-  ^long [opts]
-  (long (or (:threads opts)
-            (when (= :row (exec-mode opts)) 1)
-            (when (pos? (long (or (:default-threads opts) 0))) (:default-threads opts))
-            default-threads)))
-
 (defn- plan-options
   [opts]
-  {:optimize (:optimize opts) :join (:join opts) :use-indexes (:use-indexes opts)
-   :threads (threads opts)})
+  (select-keys opts [:optimize :join :use-indexes :mode :threads :default-threads :native]))
 
 (defn- analyze
   [catalog ^String sql opts]
@@ -75,7 +56,7 @@
   (let [{:keys [kind query]} (analyze catalog sql opts)]
     (when-not (#{:query :explain} kind)
       (err/fail! "SEMANTIC_ERROR" "only queries can be planned"))
-    {:kind kind :query query :plan (physical/plan-query query (plan-options opts))}))
+    {:kind kind :query query :plan (planner/plan-query query (plan-options opts))}))
 
 (defn explain-plan
   "EXPLAIN tree (JSON-ready map) of a SQL query (an EXPLAIN prefix is
@@ -84,9 +65,11 @@
   (explain/plan->json (:plan (plan-statement catalog sql opts))))
 
 (defn- execute
-  [plan qctx mode opts]
-  (let [env (dispatch/environment qctx {:mode mode :max-join-rows (:max-join-rows opts)
-                                        :native (when (:native opts) (ffi/library))})]
+  "Rows of a physical plan, executed as its :execution says."
+  [plan qctx opts]
+  (let [{:keys [mode native?]} (:execution plan)
+        env (dispatch/environment qctx {:mode mode :max-join-rows (:max-join-rows opts)
+                                        :native (when native? (ffi/library))})]
     (dispatch/build plan env)))
 
 ;; ---------------------------------------------------------------------------
@@ -143,13 +126,14 @@
        :rows (serialized-rows [(object-array [(json/write-str (explain/plan->json plan))])]
                               [{:type :string}] (:max-rows opts) (:count-only? opts))
        :ctx qctx}
-      (let [mode (exec-mode opts)
-            rows (serialize (execute plan qctx mode opts))
-            fallback (when (or (= mode :vectorized) (> (threads opts) 1))
+      (let [{:keys [mode threads]} (:execution plan)
+            rows (serialize (execute plan qctx opts))
+            fallback (when (or (= mode :vectorized) (> (long threads) 1))
                        (delay
                          (let [fctx (ctx/derive-context qctx)
-                               serial (physical/plan-query query (assoc (plan-options opts) :threads 1))]
-                           {:rows (serialize (execute serial fctx :row opts)) :ctx fctx})))]
+                               serial (planner/plan-query query (assoc (plan-options opts)
+                                                                       :mode "row" :threads 1))]
+                           {:rows (serialize (execute serial fctx opts)) :ctx fctx})))]
         (cond-> {:columns (table/columns-json (:columns plan))
                  :rows (if fallback (with-fallback rows fallback) rows)
                  :ctx qctx}
@@ -234,7 +218,7 @@
       :drop-index (do (catalog/update! catalog-atom (drop-index analyzed)) (empty-result))
       (open-plan {:kind (:kind analyzed)
                   :query (:query analyzed)
-                  :plan (physical/plan-query (:query analyzed) (plan-options opts))}
+                  :plan (planner/plan-query (:query analyzed) (plan-options opts))}
                  opts))))
 
 (defn execute!

@@ -10,6 +10,12 @@
     polyquery.sql.analyzer-test
     polyquery.ingest.csv-test
     polyquery.ingest.json-test
+    polyquery.plan.logical-test
+    polyquery.plan.optimizer-test
+    polyquery.plan.rules.constant-folding-test
+    polyquery.plan.rules.predicate-pushdown-test
+    polyquery.plan.rules.join-reordering-test
+    polyquery.plan.rules.column-pruning-test
     polyquery.plan.planner-test
     polyquery.exec.functions-test
     polyquery.exec.vectorized-test

@@ -1,6 +1,6 @@
 (ns polyquery.plan.planner-test
   (:require [clojure.test :refer [deftest is testing]]
-            [polyquery.plan.physical :as physical]
+            [polyquery.plan.planner :as planner]
             [polyquery.sql.analyzer :as analyzer]
             [polyquery.sql.parser :as parser]
             [polyquery.test-util :refer [csv-catalog]]))
@@ -10,7 +10,7 @@
 (defn- plan
   ([sql] (plan sql {}))
   ([sql opts]
-   (physical/plan-query (:query (analyzer/analyze-statement cat0 (parser/parse-statement sql) {})) opts)))
+   (planner/plan-query (:query (analyzer/analyze-statement cat0 (parser/parse-statement sql) {})) opts)))
 
 (defn- nodes [p]
   (tree-seq map? (fn [n] (concat (keep n [:input :left :right]) (:inputs n))) p))
@@ -58,3 +58,19 @@
         (is (= [[2]] (map :columns (scans r)))))))
   (testing "branches are parallelized independently"
     (is (= [:gather :gather] (mapv :op (:inputs (plan "SELECT x FROM a UNION ALL SELECT y FROM b" {:threads 4})))))))
+
+(deftest execution-decisions
+  (testing "the physical plan records mode, threads and native kernels"
+    (is (= {:mode :vectorized :threads 4 :native? true}
+           (:execution (plan "SELECT * FROM a" {:threads 4 :native true}))))
+    (is (= {:mode :row :threads 1 :native? false}
+           (:execution (plan "SELECT * FROM a" {:mode "row" :native true}))))
+    (is (= 3 (:threads (:execution (plan "SELECT * FROM a" {:default-threads 3})))))))
+
+(deftest logical-plans-hold-no-physical-choices
+  (let [bq (:query (analyzer/analyze-statement cat0 (parser/parse-statement
+                                                    "SELECT * FROM a JOIN b ON b.a_id = a.id ORDER BY 1 LIMIT 2")
+                                               {}))]
+    (is (= #{:limit :sort :project :join :scan}
+           (ops (planner/logical-plan bq {:join "merge" :threads 4 :mode "row"}))))
+    (is (contains? (ops (planner/plan-query bq {:join "merge"})) :merge-join))))
