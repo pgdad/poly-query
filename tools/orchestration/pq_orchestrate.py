@@ -158,7 +158,8 @@ def tool_versions() -> dict:
 
 # ------------------------------------------------------------------ prepare
 
-def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None, wave: str | None) -> str:
+def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None, wave: str | None,
+            continues: str | None = None, continuation_note: str = "", session: int = 1) -> str:
     tasks = json.loads((PROMPTS / "tasks.json").read_text())
     langs = json.loads((PROMPTS / "languages.json").read_text())
     if lang not in langs:
@@ -169,11 +170,15 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
         raise SystemExit(f"unknown task {task}")
     t, L = tasks[task], langs[lang]
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_id = f"{track.lower()}-{task}-{lang}-a{attempt}-{stamp}"
+    run_id = f"{track.lower()}-{task}-{lang}-a{attempt}" + (f"-s{session}" if session > 1 or continues else "") + f"-{stamp}"
     rd = run_dir(run_id)
     ws = rd / "workspace"
     (rd / "config").mkdir(parents=True)
     (rd / "scratch").mkdir()
+    env = {**os.environ, "GIT_AUTHOR_NAME": "PolyQuery Orchestrator", "GIT_AUTHOR_EMAIL": "orchestrator@polyquery.invalid",
+           "GIT_COMMITTER_NAME": "PolyQuery Orchestrator", "GIT_COMMITTER_EMAIL": "orchestrator@polyquery.invalid"}
+    if continues:
+        return _prepare_continuation(run_id, lang, task, track, attempt, wave, continues, continuation_note, session, env)
     ws.mkdir()
 
     ref = base_ref or git(["rev-parse", "HEAD"], ROOT)
@@ -199,7 +204,8 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
         "STDLIB_NOTE": L["stdlib_note"],
         "BENCH_NOTE": L.get("bench_note", ""), "BENCH_DONE": L.get("bench_done", ""),
         "BENCH_TABLE_NOTE": L.get("bench_table_note", ""), "OPTIONAL_SIMD_OPT": L.get("optional_simd_opt", ""),
-        "TUNING_NOTE": L.get("tuning_note", ""),
+        "TUNING_NOTE": L.get("tuning_note", ""), "EXTRA_RULES": L.get("extra_rules", ""),
+        "CONTINUATION_NOTE": continuation_note,
     }
     task_md = render(template, values)
     (ws / "TASK.md").write_text(task_md)
@@ -217,8 +223,6 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
         subprocess.run(["patch", "-p1", "-s", "-d", str(ws)], input=patch.read_bytes(), check=True)
         shutil.copy(patch.parent / "DEFECT.md", ws / "DEFECT.md")
     (ws / ".gitignore").write_text("target/\nbuild/\nout/\n.cpcache/\n__pycache__/\n*.pyc\n*.fasl\n*.o\n*.so\n/datasets/generated/\n")
-    env = {**os.environ, "GIT_AUTHOR_NAME": "PolyQuery Orchestrator", "GIT_AUTHOR_EMAIL": "orchestrator@polyquery.invalid",
-           "GIT_COMMITTER_NAME": "PolyQuery Orchestrator", "GIT_COMMITTER_EMAIL": "orchestrator@polyquery.invalid"}
     sh(["git", "init", "-q", "-b", "main"], cwd=ws)
     sh(["git", "add", "-A"], cwd=ws)
     sh(["git", "commit", "-q", "-m", f"baseline: {task} for {lang} (from {ref[:12]})"], cwd=ws, env=env)
@@ -244,7 +248,54 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
         "defect_id": defect_id,
         "baseline_capabilities": ((load_json_file(ROOT / "results/correctness" / f"{lang}.json") or {})
                                   .get("engine") or {}).get("capability_set"),
+        "session": session, "continues": None,
     }
+    save_manifest(run_id, m)
+    print(run_id)
+    return run_id
+
+
+def _prepare_continuation(run_id: str, lang: str, task: str, track: str, attempt: int, wave: str | None,
+                          prev_id: str, note: str, session: int, env: dict) -> str:
+    """A further session of the same attempt: clones the previous session's workspace (history included),
+    so the agent continues from its own committed work; only TASK.md changes, committed by the orchestrator."""
+    pm = load_manifest(prev_id)
+    if (pm["language"], pm["task"], pm["track"], pm["attempt"]) != (lang, task, track, attempt):
+        raise SystemExit(f"{prev_id} is not a session of {track}/{lang}/{task}/a{attempt}")
+    rd = run_dir(run_id)
+    ws = rd / "workspace"
+    sh(["git", "clone", "-q", str(run_dir(prev_id) / "workspace"), str(ws)])
+    sh(["git", "remote", "remove", "origin"], cwd=ws)
+    tasks = json.loads((PROMPTS / "tasks.json").read_text())
+    langs = json.loads((PROMPTS / "languages.json").read_text())
+    t, L = tasks[task], langs[lang]
+    old = (ws / "TASK.md").read_text()
+    # Re-render from the same template so only the continuation note differs from session 1.
+    template = (PROMPTS / t.get("template", L["template"])).read_text()
+    values = {"WORK_DIR": L["work_dir"], "VARIANT_PREFIX": L["variant_prefix"], "ABI": L["abi"],
+              "TEST_NOTE": L["test_note"], "SIMD_NAME": L["simd_name"], "OPTIONAL_SIMD": L["optional_simd"],
+              "TEST_TARGET": L["test_target"], "TASK_TITLE": t["title"], "TASK_GOAL": t["goal"],
+              "PHASE_FILE": t["phase_file"], "RUNNER_ARGS": t["runner_args"], "DONE_CRITERIA": t["done"],
+              "LANGUAGE": L["language"], "LANG_DIR": L["lang_dir"], "TOOLCHAIN": L["toolchain"],
+              "STDLIB_NOTE": L["stdlib_note"], "BENCH_NOTE": L.get("bench_note", ""),
+              "BENCH_DONE": L.get("bench_done", ""), "BENCH_TABLE_NOTE": L.get("bench_table_note", ""),
+              "OPTIONAL_SIMD_OPT": L.get("optional_simd_opt", ""), "TUNING_NOTE": L.get("tuning_note", ""),
+              "EXTRA_RULES": L.get("extra_rules", ""), "CONTINUATION_NOTE": note}
+    task_md = render(template, values)
+    if task_md != old:
+        (ws / "TASK.md").write_text(task_md)
+        sh(["git", "add", "TASK.md"], cwd=ws)
+        sh(["git", "commit", "-q", "-m", f"orchestrator: session {session} of {task} for {lang}"], cwd=ws, env=env)
+    (rd / "config/settings.json").write_text(json.dumps({
+        "autoUpdates": False, "includeCoAuthoredBy": False, "cleanupPeriodDays": 3650}, indent=1))
+    m = {k: v for k, v in pm.items() if k in ("schema", "language", "task", "track", "attempt", "repo_ref", "spec_hash",
+                                              "prompt_template", "work_dir", "prompt_id", "model", "effort",
+                                              "defect_id", "baseline_capabilities", "record_only")}
+    m.update({"run_id": run_id, "wave": wave, "created": now(), "baseline_commit": git(["rev-parse", "HEAD"], ws),
+              "chain_baseline_commit": pm.get("chain_baseline_commit") or pm["baseline_commit"],
+              "prompt_sha256": hashlib.sha256(task_md.encode()).hexdigest(), "agent_harness": None, "limits": {},
+              "status": "prepared", "host": {"hostname": os.uname().nodename, "tools": tool_versions()},
+              "session": session, "continues": prev_id})
     save_manifest(run_id, m)
     print(run_id)
     return run_id
@@ -996,7 +1047,8 @@ def import_run(run_id: str, merge: bool) -> str:
         shutil.rmtree(patches)
     patches.mkdir()
     wd = m.get("work_dir") or f"implementations/{lang}"
-    sh(["git", "format-patch", "-q", "-o", str(patches), f"{m['baseline_commit']}..HEAD", "--", wd], cwd=ws)
+    base = m.get("chain_baseline_commit") or m["baseline_commit"]  # a continuation imports every session's work
+    sh(["git", "format-patch", "-q", "-o", str(patches), f"{base}..HEAD", "--", wd], cwd=ws)
     branch = f"track-{m['track'].lower()}/{lang}/{m['task']}/a{m['attempt']}"
     current = git(["rev-parse", "--abbrev-ref", "HEAD"], ROOT)
     if git(["status", "--porcelain"], ROOT):
@@ -1094,6 +1146,66 @@ def wave(task: str, langs: list[str], track: str, attempt: int, seed: int, timeo
     return wm
 
 
+def session_note(session: int, max_sessions: int, timeout_min: int, work_dir: str) -> str:
+    if session == 1:
+        return (f"\n\n**Sessions.** This task is larger than one working session. Each session lasts at most "
+                f"{timeout_min} minutes; if the task is not done when a session ends, a new session (up to "
+                f"{max_sessions} in total) continues from your committed work, with this same task text. Commit "
+                f"often, and keep `{work_dir}/NOTES.md` current: what works, what is missing, what to do next.")
+    return (f"\n\n**Sessions.** This is session {session} of at most {max_sessions} for this task (each at most "
+            f"{timeout_min} minutes). The previous session ended before the task was done. Its committed work is in "
+            f"`{work_dir}/` and in the git history: read `{work_dir}/NOTES.md` and the README first, measure where "
+            f"the conformance runner stands, and continue from there; do not start over. Commit often, and keep "
+            f"`{work_dir}/NOTES.md` current: what works, what is missing, what to do next.")
+
+
+def chain(task: str, lang: str, track: str, attempt: int, max_sessions: int, total_budget: float,
+          timeout_min: int, max_turns: int | None, continue_from: str | None = None) -> dict:
+    """Runs sessions of one attempt until it succeeds, max_sessions is reached or the total budget is spent
+    (assembly-engine plan §3: a phase may not fit one session). Each session is its own recorded run."""
+    L = json.loads((PROMPTS / "languages.json").read_text())[lang]
+    chain_id = f"chain-{track.lower()}-{task}-{lang}-a{attempt}-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    logf = RECORDS / f"{chain_id}.log"
+
+    def log(msg: str) -> None:
+        line = f"{now()} {msg}"
+        print(line, flush=True)
+        with open(logf, "a") as fh:
+            fh.write(line + "\n")
+
+    sessions: list[dict] = []
+    prev = continue_from
+    session = load_manifest(prev)["session"] + 1 if prev else 1
+    spent = 0.0
+    if prev:  # resumed chain: count what earlier sessions cost
+        r = prev
+        while r:
+            spent += (load_json_file(run_dir(r) / "telemetry.json") or {}).get("cost_usd") or 0.0
+            r = load_manifest(r).get("continues")
+    while session <= max_sessions:
+        remaining = total_budget - spent
+        if remaining < 5:
+            log(f"chain {chain_id}: budget exhausted (${spent:.2f} of ${total_budget:.2f})")
+            break
+        note = session_note(session, max_sessions, timeout_min, L["work_dir"])
+        rid = prepare(lang, task, track, attempt, None, chain_id, continues=prev, continuation_note=note, session=session)
+        log(f"chain {chain_id}: session {session} -> {rid} (budget ${remaining:.2f})")
+        res = full_cycle(rid, timeout_min, round(remaining, 2), max_turns, log)
+        cost = (res["telemetry"] or {}).get("cost_usd")
+        spent += cost or 0.0
+        sessions.append({"run_id": rid, "session": session, "outcome": res["outcome"], "cost_usd": cost})
+        if res["outcome"] in ("success", "isolation_violation"):
+            break
+        prev, session = rid, session + 1
+    out = {"chain_id": chain_id, "task": task, "language": lang, "track": track, "attempt": attempt,
+           "max_sessions": max_sessions, "total_budget_usd": total_budget, "timeout_min": timeout_min,
+           "sessions": sessions, "spent_usd": round(spent, 2),
+           "outcome": sessions[-1]["outcome"] if sessions else "not_started", "finished": now()}
+    (RECORDS / f"{chain_id}.json").write_text(json.dumps(out, indent=1) + "\n")
+    log(f"chain {chain_id} finished: outcome={out['outcome']} sessions={len(sessions)} spent=${spent:.2f}")
+    return out
+
+
 def status() -> None:
     rows = []
     for d in sorted(RECORDS.glob("*/manifest.json")):
@@ -1140,6 +1252,16 @@ def main() -> int:
     w.add_argument("--base-refs", default="", help="per-language base commits: lang=ref,lang=ref")
     w.add_argument("--attempts", default="", help="per-language attempt numbers: lang=n,lang=n")
     w.add_argument("--record-only", action="store_true", help="accept.sh records but never merges these runs")
+    c = sub.add_parser("chain", help="run continuation sessions of one attempt (assembly-engine plan)")
+    c.add_argument("--task", required=True)
+    c.add_argument("--lang", required=True)
+    c.add_argument("--track", default="A")
+    c.add_argument("--attempt", type=int, default=1)
+    c.add_argument("--max-sessions", type=int, default=3)
+    c.add_argument("--total-budget-usd", type=float, required=True)
+    c.add_argument("--timeout-min", type=int, default=120)
+    c.add_argument("--max-turns", type=int)
+    c.add_argument("--continue-from", help="resume a chain after this session's run")
     sub.add_parser("status")
     sub.add_parser("watchdog", help="stop running agents that approach the usage limit or use overage")
     a = ap.parse_args()
@@ -1161,6 +1283,9 @@ def main() -> int:
         kv = lambda t: dict(x.split("=", 1) for x in t.split(",") if x)  # noqa: E731
         wave(a.task, a.langs.split(","), a.track, a.attempt, a.seed, a.timeout_min, a.budget_usd, a.max_turns, a.parallel,
              kv(a.base_refs), {k: int(v) for k, v in kv(a.attempts).items()}, a.record_only)
+    elif a.cmd == "chain":
+        chain(a.task, a.lang, a.track, a.attempt, a.max_sessions, a.total_budget_usd, a.timeout_min, a.max_turns,
+              a.continue_from)
     elif a.cmd == "status":
         status()
     elif a.cmd == "watchdog":

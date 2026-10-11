@@ -1,6 +1,9 @@
 # Plan: complete database engines in x86-64 and AArch64 assembly (option B)
 
-Status: **proposal, not started.** Decision record: [ADR-0016](../decisions/ADR-0016.md) (proposed).
+Status: **approved 2026-10-11, pilot in preparation.** Decision record: [ADR-0016](../decisions/ADR-0016.md).
+Owner decisions (§8): pilot budget **$300** (double the proposed $150) for x86-64 Phase 1;
+**glibc allowed**; AArch64 development **on the ARM host (spark)**, with whatever it needs
+installed there.
 Today the assembly languages take part through the native kernels: the original
 kernel task plus the kernel experiment family (CR-4 change, CR-5 refactor,
 debugging, optimization, code review). This plan covers going further:
@@ -86,9 +89,11 @@ Engines under `implementations/{x86_64,arm64}-asm/`, run records in
 `experiments/runs/`, correctness/performance results, cohort sections in reports
 1–8, a results narrative section, and an updated `project-state.json`.
 
-## 8. Decisions for the project owner
+## 8. Decisions (taken 2026-10-11)
 
-1. Approve the pilot and its budget (proposed cap: $150 for Phase 1, x86-64).
-2. Library policy: glibc allowed (proposed) or raw syscalls only.
-3. ARM development loop: qemu on the x86 host (proposed) or agents on the ARM
-   host (requires a credential on that machine).
+1. Pilot approved with a **$300** cap for Phase 1, x86-64 (proposed was $150).
+2. Library policy: **glibc allowed** (dynamic `libc`, `libm`, `libpthread`), as proposed.
+3. ARM development loop: **agents run on the ARM host (spark)**. This needs the Claude
+   CLI, the sandbox and the usage guard on spark, and the OAuth credential copied
+   there (only the credential file, as on the x86 host). Agents run as an unprivileged
+   user in a locked-down unit; engine code still never runs outside the sandbox.

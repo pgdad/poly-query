@@ -120,5 +120,35 @@
     "bench_done": "",
     "bench_table_note": " (expected effects with your reasoning, since you cannot measure)",
     "optional_simd_opt": "You may also optimize the optional `a64_sve` variant. "
+  },
+  "x86_64-asm-engine": {
+    "language": "x86-64 assembly",
+    "lang_dir": "x86_64-asm-engine",
+    "work_dir": "implementations/x86_64-asm-engine",
+    "template": "track-a-implementation.md",
+    "variant_prefix": "",
+    "abi": "",
+    "test_note": "",
+    "simd_name": "",
+    "optional_simd": "",
+    "test_target": "",
+    "toolchain": "GNU assembler (binutils 2.42) with gcc 13.3 used only as the preprocessor/assembler and linker driver (`.S` files; AT&T syntax or `.intel_syntax noprefix`; NASM 2.16 is also installed). x86-64 Linux (AMD Zen 5; AVX2 and AVX-512 are available but SIMD is optional). gdb, strace and objdump are available for debugging.",
+    "stdlib_note": "For assembly the standard library is glibc, dynamically linked: libc, libm and libpthread (malloc, threads, sockets, file I/O, strtod/snprintf/strtoll for number text, qsort, memcpy and so on). No other libraries. No C, C++ or other high-level source files anywhere in the build, not even small helpers or test drivers, and no compiler-generated assembly (never write C and compile it with -S or similar): every instruction is written by you. Makefiles, shell scripts and test data are fine.",
+    "extra_rules": "\n9. **Assembly specifics.** Follow the System V AMD64 ABI at every call into glibc (16-byte stack alignment at each call, callee-saved registers preserved, `%al` set for variadic calls) and in your own functions; mark every object with a `.note.GNU-stack` section (no executable stack). `bin/polyquery` may be a small shell script that execs the assembled binary. Unit tests (`make test`) are assembly test programs or shell scripts that drive the binary. Structure the code into modules (separate `.S` files and include files with macros) so it stays maintainable."
+  },
+  "arm64-asm-engine": {
+    "language": "AArch64 assembly",
+    "lang_dir": "arm64-asm-engine",
+    "work_dir": "implementations/arm64-asm-engine",
+    "template": "track-a-implementation.md",
+    "variant_prefix": "",
+    "abi": "",
+    "test_note": "",
+    "simd_name": "",
+    "optional_simd": "",
+    "test_target": "",
+    "toolchain": "GNU assembler with gcc used only as the preprocessor/assembler and linker driver (`.S` files), native on an AArch64 Linux host (NVIDIA GB10, Arm Cortex-X925/A725 cores; NEON and SVE2 with 128-bit vectors are available but SIMD is optional). gdb, strace and objdump are available for debugging.",
+    "stdlib_note": "For assembly the standard library is glibc, dynamically linked: libc, libm and libpthread (malloc, threads, sockets, file I/O, strtod/snprintf/strtoll for number text, qsort, memcpy and so on). No other libraries. No C, C++ or other high-level source files anywhere in the build, not even small helpers or test drivers, and no compiler-generated assembly (never write C and compile it with -S or similar): every instruction is written by you. Makefiles, shell scripts and test data are fine.",
+    "extra_rules": "\n9. **Assembly specifics.** Follow the AAPCS64 at every call into glibc and in your own functions (16-byte stack alignment, x19-x28 and the low 64 bits of v8-v15 callee-saved, frame records with x29/x30); mark every object with a `.note.GNU-stack` section (no executable stack). `bin/polyquery` may be a small shell script that execs the assembled binary. Unit tests (`make test`) are assembly test programs or shell scripts that drive the binary. Structure the code into modules (separate `.S` files and include files with macros) so it stays maintainable."
   }
 }

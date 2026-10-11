@@ -7,7 +7,7 @@ document them in `implementations/{{LANG_DIR}}/README.md`.
 
 ## Your goal
 
-{{TASK_GOAL}}
+{{TASK_GOAL}}{{CONTINUATION_NOTE}}
 
 The task is complete only when the conformance runner reports **100% pass**
 for the required phases (see "Definition of done"). Keep working — building,
@@ -47,7 +47,7 @@ special-case tests.
 7. Commit your work to git regularly with meaningful messages (small, working
    increments). Your commits are the deliverable; uncommitted work is lost.
 8. Performance matters but correctness comes first. Avoid pathological
-   algorithms (e.g. quadratic scans where hashing is natural).
+   algorithms (e.g. quadratic scans where hashing is natural).{{EXTRA_RULES}}
 
 ## How to test
 
