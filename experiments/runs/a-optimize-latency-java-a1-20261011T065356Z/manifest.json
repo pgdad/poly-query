@@ -179,5 +179,6 @@
  "finished": "2026-10-11T08:05:57+00:00",
  "wall_seconds": 4320.3,
  "agent_exit_code": 124,
- "outcome": "success"
+ "outcome": "timeout",
+ "termination_reason": "timeout"
 }

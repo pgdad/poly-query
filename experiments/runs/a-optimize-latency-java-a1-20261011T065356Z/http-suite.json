@@ -10,37 +10,37 @@
   {
    "check": "health_version_capabilities",
    "status": "pass",
-   "seconds": 0.07
+   "seconds": 0.05
   },
   {
    "check": "table_lifecycle",
    "status": "pass",
-   "seconds": 0.07
+   "seconds": 0.05
   },
   {
    "check": "query_and_error_mapping",
    "status": "pass",
-   "seconds": 0.09
+   "seconds": 0.06
   },
   {
    "check": "keep_alive",
    "status": "pass",
-   "seconds": 0.06
+   "seconds": 0.04
   },
   {
    "check": "streaming",
    "status": "pass",
-   "seconds": 0.12
+   "seconds": 0.1
   },
   {
    "check": "metrics",
    "status": "pass",
-   "seconds": 0.08
+   "seconds": 0.05
   },
   {
    "check": "timeout",
    "status": "pass",
-   "seconds": 0.27
+   "seconds": 0.25
   },
   {
    "check": "server_default_timeout",
@@ -50,7 +50,7 @@
   {
    "check": "cancellation",
    "status": "pass",
-   "seconds": 0.11
+   "seconds": 0.1
   },
   {
    "check": "backpressure_overloaded",
@@ -60,7 +60,7 @@
   {
    "check": "queued_time_counts_toward_timeout",
    "status": "pass",
-   "seconds": 1.56
+   "seconds": 1.57
   },
   {
    "check": "snapshot_isolation",
@@ -70,7 +70,7 @@
   {
    "check": "concurrent_readers",
    "status": "pass",
-   "seconds": 0.1
+   "seconds": 0.11
   },
   {
    "check": "client_disconnect_cancels",
@@ -80,7 +80,7 @@
   {
    "check": "request_size_limit",
    "status": "pass",
-   "seconds": 0.05
+   "seconds": 0.06
   },
   {
    "check": "structured_logs",
@@ -95,26 +95,26 @@
   {
    "check": "grace_expiry",
    "status": "pass",
-   "seconds": 0.69
+   "seconds": 0.7
   }
  ],
  "startup_seconds": [
-  0.035627870995085686,
-  0.0390592539915815,
-  0.03928345098393038,
-  0.03734673297731206,
-  0.03922532999422401,
-  0.04100836499128491,
-  0.04345112998271361,
-  0.03214534104336053,
-  0.028062914963811636,
-  0.027788370964117348,
-  0.02731614001095295,
-  0.03381598100531846,
-  0.032576194033026695,
-  0.03633648494724184,
-  0.02822857297724113,
-  0.03385958500439301
+  0.030049683002289385,
+  0.02737084898399189,
+  0.02844389801612124,
+  0.027813033026177436,
+  0.02810735400998965,
+  0.027404111984651536,
+  0.02795231802156195,
+  0.030239626008551568,
+  0.027968520007561892,
+  0.0266129809897393,
+  0.03306806803448126,
+  0.03556784096872434,
+  0.03402776998700574,
+  0.03490242100087926,
+  0.0344046299578622,
+  0.03598960698582232
  ],
- "logs": "/tmp/pqhttp-logs-jthxo56s"
+ "logs": "/tmp/pqhttp-logs-76h0uq9p"
 }
