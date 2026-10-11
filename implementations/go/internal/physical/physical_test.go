@@ -17,15 +17,23 @@ import (
 
 func build(t *testing.T, sql string, opts physical.Options) *physical.Plan {
 	t.Helper()
+	return buildWith(t, sql, optimizer.Options{EvalConst: exec.EvalConstant}, opts)
+}
+
+// buildWith plans a query (test functions enabled) with the given optimizer
+// and physical planner options.
+func buildWith(t *testing.T, sql string, oopts optimizer.Options, opts physical.Options) *physical.Plan {
+	t.Helper()
 	stmt, err := parser.Parse(sql)
 	if err != nil {
 		t.Fatal(err)
 	}
-	logical, err := analyzer.AnalyzeQuery(stmt.(*ast.Query), testutil.Catalog(t), analyzer.Config{EvalConst: exec.EvalConstant})
+	logical, err := analyzer.AnalyzeQuery(stmt.(*ast.Query), testutil.Catalog(t),
+		analyzer.Config{EvalConst: exec.EvalConstant, TestFunctions: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := physical.Build(optimizer.Optimize(logical, optimizer.Options{EvalConst: exec.EvalConstant}), opts)
+	p, err := physical.Build(optimizer.Optimize(logical, oopts), opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,5 +151,43 @@ func TestUnionAllPlan(t *testing.T) {
 	}
 	if f := find(ns, "Filter"); len(f) != 2 {
 		t.Errorf("expected a filter in each branch, got %v", f)
+	}
+}
+
+func TestColumnSelectionWithoutOptimizer(t *testing.T) {
+	// With optimize: false no logical rule runs, but scans still read only
+	// the referenced columns (a physical access-path decision).
+	p := buildWith(t, "SELECT x.name FROM (SELECT name, salary * 2 AS s FROM emp) x WHERE x.s > 1",
+		optimizer.Options{Disabled: true}, physical.Options{})
+	ns := nodes(t, p)
+	scans := find(ns, "TableScan")
+	if len(scans) != 1 || scanColumns(scans[0]) != "name,salary" {
+		t.Fatalf("scans: %v", scans)
+	}
+	if f := find(ns, "Filter"); len(f) != 1 || ns[1]["op"] != "Filter" {
+		t.Fatalf("the filter must stay above the projection without the optimizer: %v", ns)
+	}
+}
+
+func TestExecutionDecisions(t *testing.T) {
+	const sql = "SELECT name FROM emp WHERE salary > 10"
+	for _, tc := range []struct {
+		name string
+		opts physical.Options
+		want physical.Execution
+	}{
+		{"defaults", physical.Options{DefaultThreads: 4}, physical.Execution{Vectorized: true, Threads: 4}},
+		{"auto", physical.Options{Mode: "auto", Threads: 2, DefaultThreads: 4}, physical.Execution{Vectorized: true, Threads: 2}},
+		{"row", physical.Options{Mode: "row", Threads: 1, DefaultThreads: 4}, physical.Execution{Threads: 1}},
+		{"native", physical.Options{Mode: "vectorized", Native: true, DefaultThreads: 1}, physical.Execution{Vectorized: true, Threads: 1, Native: true}},
+	} {
+		if got := build(t, sql, tc.opts).Exec; got != tc.want {
+			t.Errorf("%s: execution %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+	// PQ_SLEEP forces row-at-a-time execution without native kernels.
+	p := build(t, "SELECT name FROM emp WHERE PQ_SLEEP(0) IS NOT NULL", physical.Options{Mode: "vectorized", Native: true, Threads: 4})
+	if want := (physical.Execution{Threads: 4}); p.Exec != want {
+		t.Errorf("PQ_SLEEP: execution %+v, want %+v", p.Exec, want)
 	}
 }

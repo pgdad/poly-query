@@ -132,4 +132,3 @@ func idSet(cols []plan.Column) map[plan.ColumnID]bool {
 	}
 	return m
 }
-

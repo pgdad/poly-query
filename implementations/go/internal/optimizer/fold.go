@@ -16,7 +16,9 @@ import (
 // that cannot change results or errors: TRUE AND x ⇒ x, x AND TRUE ⇒ x,
 // FALSE AND x ⇒ FALSE (x is never evaluated), and dually for OR. x AND FALSE
 // is kept: x is evaluated first and may raise an error. Filters whose
-// predicate became TRUE are removed by PredicatePushdown.
+// predicate became TRUE are removed by PredicatePushdown. The plan of a
+// subquery is folded when the subquery forms a whole expression (e.g. an
+// EXISTS or IN filter).
 type ConstantFolding struct {
 	// Eval evaluates constant expressions (nil: the rule does nothing).
 	Eval EvalFunc
@@ -32,7 +34,10 @@ func (r ConstantFolding) Apply(n plan.Node) plan.Node {
 	}
 	return plan.MapExprs(n, func(e plan.Expr) plan.Expr {
 		if _, ok := e.(*plan.Subquery); ok {
-			return nil // MapExprs folds inside the subquery plan
+			// A subquery forming a whole expression: MapExprs folds
+			// inside its plan. (Subqueries nested in larger expressions
+			// are copied by foldExpr with their plans unchanged.)
+			return nil
 		}
 		return simplify(foldExpr(e, r.Eval))
 	})
