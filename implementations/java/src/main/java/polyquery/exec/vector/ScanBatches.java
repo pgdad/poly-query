@@ -1,6 +1,7 @@
 package polyquery.exec.vector;
 
 import java.util.Arrays;
+import java.math.BigInteger;
 import java.util.BitSet;
 import java.util.List;
 import polyquery.exec.ExecContext;
@@ -64,6 +65,22 @@ final class ScanBatches {
                     v.toObjects(cap);
                 }
                 String[] src = c.values();
+                System.arraycopy(src, from, v.objects, 0, n);
+                boolean any = false;
+                for (int i = 0; i < n && !any; i++) {
+                    any = src[from + i] == null;
+                }
+                if (any) {
+                    boolean[] m = v.nullMask(cap);
+                    for (int i = 0; i < n; i++) {
+                        m[i] = src[from + i] == null;
+                    }
+                } else {
+                    v.hasNulls = false;
+                }
+            }
+            case ColumnVector.WideDecimalVector c -> {
+                BigInteger[] src = c.values();
                 System.arraycopy(src, from, v.objects, 0, n);
                 boolean any = false;
                 for (int i = 0; i < n && !any; i++) {

@@ -9,7 +9,9 @@ public final class Values {
     public static int compare(Object a, Object b, DataType type) {
         return switch (type.kind()) {
             case BOOLEAN -> Boolean.compare((Boolean) a, (Boolean) b);
-            case INT64, DECIMAL, TIMESTAMP -> Long.compare((Long) a, (Long) b);
+            case INT64, TIMESTAMP -> Long.compare((Long) a, (Long) b);
+            case DECIMAL -> a instanceof Long x && b instanceof Long y ? Long.compare(x, y)
+                    : Decimals.toBig(a).compareTo(Decimals.toBig(b));
             case DATE -> Integer.compare((Integer) a, (Integer) b);
             case FLOAT64 -> compareDoubles((Double) a, (Double) b);
             case STRING -> compareStrings((String) a, (String) b);
@@ -47,7 +49,7 @@ public final class Values {
         return switch (type.kind()) {
             case BOOLEAN -> ((Boolean) v) ? "true" : "false";
             case INT64 -> Long.toString((Long) v);
-            case DECIMAL -> Decimals.toString((Long) v, type.scale());
+            case DECIMAL -> Decimals.toString(v, type.scale());
             case FLOAT64 -> formatDouble((Double) v);
             case STRING -> (String) v;
             case DATE -> DateTimes.formatDate((Integer) v);

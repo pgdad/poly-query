@@ -13,9 +13,10 @@ import polyquery.types.DataType;
  * for GROUP BY, DISTINCT and hash joins.
  *
  * <p>Cache-conscious layout: every key column value is encoded as a {@code long} (INT64 and
- * friends as is, FLOAT64 as the bits of the value with -0.0 normalized, STRING as an id of an
- * interning dictionary, with a per-dictionary code→id cache for dictionary-encoded input), plus
- * null bits. Hashes are computed from the values (strings by {@link String#hashCode}), so
+ * friends as is, FLOAT64 as the bits of the value with -0.0 normalized, STRING and wide DECIMAL
+ * as an id of an interning dictionary, with a per-dictionary code→id cache for
+ * dictionary-encoded input), plus null bits. Hashes are computed from the values (objects by
+ * their value-based {@code hashCode}), so
  * equal keys have equal hashes in all tables — partial tables of parallel workers can be
  * partitioned by hash and merged partition by partition. Tuples are stored flat in a {@code long[]} (struct of arrays), the open-addressing
  * index ({@code int[]}, linear probing) holds only group ids, and the full hash of each group is
@@ -45,14 +46,14 @@ final class GroupKeys {
     private int groups;
     private int[] index;
     private int mask;
-    // STRING key columns: interning
-    private final List<Map<String, Integer>> interned;
-    private final List<List<String>> strings;
+    // STRING and wide DECIMAL key columns (object representation): interning
+    private final List<Map<Object, Integer>> interned;
+    private final List<List<Object>> strings;
     private final String[][] seenDict;
     private final int[][] dictIds;
     // per-batch scratch
     private long[][] codes;
-    /** Per column, the values hashed: the codes, except for STRING columns (String.hashCode). */
+    /** Per column, the values hashed: the codes, except for object columns (Object.hashCode). */
     private long[][] hashIn;
     private int[][] dictHashes;
     private long[][] nulls;
@@ -145,8 +146,8 @@ final class GroupKeys {
         return (int) (h ^ (h >>> 32));
     }
 
-    private int internId(int j, String s) {
-        Map<String, Integer> map = interned.get(j);
+    private int internId(int j, Object s) {
+        Map<Object, Integer> map = interned.get(j);
         Integer id = map.get(s);
         if (id == null) {
             id = map.size();
@@ -157,7 +158,7 @@ final class GroupKeys {
     }
 
     /** Id of {@code s} in column j's interning dictionary, or -1 (lookup only). */
-    private int lookupId(int j, String s) {
+    private int lookupId(int j, Object s) {
         Integer id = interned.get(j).get(s);
         return id == null ? -1 : id;
     }
@@ -222,7 +223,7 @@ final class GroupKeys {
                     if (nullable && v.nulls[i]) {
                         continue;
                     }
-                    String s = (String) v.objects[i];
+                    Object s = v.objects[i];
                     if (s == null) {
                         continue;
                     }

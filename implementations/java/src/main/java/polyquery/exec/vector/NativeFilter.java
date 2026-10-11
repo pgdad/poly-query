@@ -10,9 +10,9 @@ import polyquery.plan.BoundExpr.CompareOp;
  * Native evaluation of conjuncts of a WHERE clause with the filter and bitmap kernels of
  * {@code libpqkernels}.
  *
- * <p>Eligible conjuncts compare LONG-represented values (INT64, DECIMAL, DATE, TIMESTAMP,
- * BOOLEAN): {@code column op constant} (either side; DECIMAL constants of another scale are
- * rescaled exactly to the column's scale), {@code column op column} of one scale,
+ * <p>Eligible conjuncts compare LONG-represented values (INT64, narrow DECIMAL, DATE, TIMESTAMP,
+ * BOOLEAN): {@code column op constant} (either side; INT64/DECIMAL constants of another scale
+ * are rescaled exactly to the column's scale), {@code column op column} of one scale,
  * {@code column BETWEEN constant AND constant}, and {@code column IS [NOT] NULL}.
  *
  * <p>Order of evaluation: the leading conjuncts that cannot raise an error (comparisons, IS NULL,
@@ -287,9 +287,13 @@ final class NativeFilter {
         }
     }
 
-    /** True if the kernels can read vector {@code v} as is: LONG values, NULLs known as a bitmap. */
+    /**
+     * True if the kernels can read vector {@code v} as is: LONG values, NULLs known as a bitmap.
+     * Wide DECIMAL columns are never passed to the kernels (their ABI covers 64-bit values only).
+     */
     private static boolean readable(Vec v, boolean needLongs) {
-        return v != null && (!needLongs || v.kind == Vec.Kind.LONG) && (!v.hasNulls || v.validityKnown);
+        return v != null && !v.type.isWideDecimal() && (!needLongs || v.kind == Vec.Kind.LONG)
+                && (!v.hasNulls || v.validityKnown);
     }
 
     private static boolean applicable(Pred p, Batch in) {

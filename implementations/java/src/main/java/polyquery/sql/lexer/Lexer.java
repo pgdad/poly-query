@@ -73,7 +73,7 @@ public final class Lexer {
                 String word = src.substring(start, pos);
                 String upper = word.toUpperCase(Locale.ROOT);
                 if (RESERVED.contains(upper)) {
-                    out.add(new Token(TokenType.KEYWORD, upper, l, c));
+                    out.add(new Token(TokenType.KEYWORD, upper, l, c, word));
                 } else {
                     out.add(new Token(TokenType.IDENT, word, l, c));
                 }

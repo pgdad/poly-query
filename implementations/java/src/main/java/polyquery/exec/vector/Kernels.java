@@ -1,5 +1,6 @@
 package polyquery.exec.vector;
 
+import java.math.BigInteger;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
@@ -320,6 +321,58 @@ final class Kernels {
         }
     }
 
+    /**
+     * Wide DECIMAL +, -, * (result precision 38): exact BigInteger arithmetic on operands of
+     * either representation, checked against the result precision.
+     */
+    static final class WideArith implements VecExpr {
+        private final ArithOp op;
+        private final VecExpr left;
+        private final VecExpr right;
+        private final int s1;
+        private final int s2;
+        private final DataType type;
+        private final Vec out;
+
+        WideArith(ArithOp op, VecExpr left, VecExpr right, int s1, int s2, DataType type) {
+            this.op = op;
+            this.left = left;
+            this.right = right;
+            this.s1 = s1;
+            this.s2 = s2;
+            this.type = type;
+            this.out = new Vec(type, 16);
+        }
+
+        @Override
+        public Vec eval(Batch b, int[] sel, int n) {
+            Vec a = left.eval(b, sel, n);
+            Vec c = right.eval(b, sel, n);
+            out.ensure(b.size);
+            boolean[] m = out.nullMask(b.size);
+            int rs = type.scale();
+            for (int k = 0; k < n; k++) {
+                int i = sel == null ? k : sel[k];
+                if (a.isNull(i) || c.isNull(i)) {
+                    m[i] = true;
+                    out.objects[i] = null;
+                    continue;
+                }
+                Object x = a.get(i);
+                Object y = c.get(i);
+                BigInteger r = switch (op) {
+                    case ADD -> Decimals.addExact(x, s1, y, s2, rs);
+                    case SUB -> Decimals.subtractExact(x, s1, y, s2, rs);
+                    case MUL -> Decimals.multiplyExact(x, y);
+                    default -> throw new IllegalStateException("DECIMAL " + op);
+                };
+                m[i] = false;
+                out.objects[i] = Decimals.value(r, type);
+            }
+            return out;
+        }
+    }
+
     /** FLOAT64 arithmetic; infinite/NaN results are NUMERIC_OVERFLOW. */
     static final class DoubleArith implements VecExpr {
         private final ArithOp op;
@@ -486,6 +539,42 @@ final class Kernels {
                 int i = sel == null ? k : sel[k];
                 if (!(nul && out.nulls[i])) {
                     out.longs[i] = test(op, Decimals.compare(a.longs[i], s1, c.longs[i], s2)) ? 1 : 0;
+                }
+            }
+            return out;
+        }
+    }
+
+    /**
+     * Comparison of exact numbers where at least one side is a wide DECIMAL (BigInteger values;
+     * the other side may be narrow or INT64), by exact value across scales.
+     */
+    static final class WideCompare implements VecExpr {
+        final CompareOp op;
+        final VecExpr left;
+        final VecExpr right;
+        final int s1;
+        final int s2;
+        private final Vec out = new Vec(DataType.BOOLEAN, 16);
+
+        WideCompare(CompareOp op, VecExpr left, VecExpr right, int s1, int s2) {
+            this.op = op;
+            this.left = left;
+            this.right = right;
+            this.s1 = s1;
+            this.s2 = s2;
+        }
+
+        @Override
+        public Vec eval(Batch b, int[] sel, int n) {
+            Vec a = left.eval(b, sel, n);
+            Vec c = right.eval(b, sel, n);
+            out.ensure(b.size);
+            boolean nul = unionNulls(out, a, c, sel, n, b.size);
+            for (int k = 0; k < n; k++) {
+                int i = sel == null ? k : sel[k];
+                if (!(nul && out.nulls[i])) {
+                    out.longs[i] = test(op, Decimals.compare(a.get(i), s1, c.get(i), s2)) ? 1 : 0;
                 }
             }
             return out;
@@ -1081,6 +1170,9 @@ final class Kernels {
         }
 
         static boolean supports(DataType from, DataType to) {
+            if (from.isWideDecimal() || to.isWideDecimal()) {
+                return false; // BigInteger values: the row engine's conversion
+            }
             TypeKind f = from.kind();
             TypeKind t = to.kind();
             return f == TypeKind.INT64 && (t == TypeKind.DECIMAL || t == TypeKind.FLOAT64)

@@ -129,7 +129,7 @@ public final class PqcfReader {
         if (version == 0) {
             throw corrupt("format version 0");
         }
-        if (version > 1) {
+        if (version > PqcfWriter.MAX_FORMAT_VERSION) {
             throw unsupported("PQCF format version " + version + " is not supported");
         }
         if (flags != 0) {
@@ -168,7 +168,7 @@ public final class PqcfReader {
         if (!(json instanceof Map<?, ?> root)) {
             throw corrupt("metadata is not a JSON object");
         }
-        FileMeta meta = parseMeta(root, metaStart);
+        FileMeta meta = parseMeta(root, metaStart, version);
         checkPadding(file, meta, metaStart);
         return meta;
     }
@@ -210,8 +210,8 @@ public final class PqcfReader {
         return true;
     }
 
-    private static FileMeta parseMeta(Map<?, ?> root, long metaStart) {
-        if (integer(root, "format_version", 0, Long.MAX_VALUE) != 1) {
+    private static FileMeta parseMeta(Map<?, ?> root, long metaStart, int version) {
+        if (integer(root, "format_version", 0, Long.MAX_VALUE) != version) {
             throw corrupt("metadata format_version does not match the header");
         }
         if (!(root.get("table") instanceof String table)) {
@@ -219,6 +219,13 @@ public final class PqcfReader {
         }
         long rowCount = integer(root, "row_count", 0, Integer.MAX_VALUE);
         List<ColumnSchema> columns = parseColumns(array(root, "columns"));
+        if (version < 2) {
+            for (ColumnSchema c : columns) {
+                if (c.type().isWideDecimal()) {
+                    throw corrupt("PQCF v1 file declares the wide DECIMAL column '" + c.name() + "'");
+                }
+            }
+        }
         List<FileMeta.IndexMeta> indexes = root.get("indexes") == null ? List.of()
                 : parseIndexes(array(root, "indexes"), columns);
         List<FileMeta.GroupMeta> groups = new ArrayList<>();

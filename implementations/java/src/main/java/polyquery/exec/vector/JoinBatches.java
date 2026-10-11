@@ -1,5 +1,6 @@
 package polyquery.exec.vector;
 
+import java.math.BigInteger;
 import java.util.Arrays;
 import java.util.List;
 import polyquery.common.ErrorCode;
@@ -9,7 +10,6 @@ import polyquery.plan.BoundExpr;
 import polyquery.storage.ColumnSchema;
 import polyquery.types.DataType;
 import polyquery.types.Decimals;
-import polyquery.types.TypeKind;
 
 /** Vectorized hash join: a columnar build table and a batch probe. */
 final class JoinBatches {
@@ -17,28 +17,29 @@ final class JoinBatches {
     }
 
     /**
-     * DECIMAL join keys of different scales on the two sides are compared at the larger scale:
-     * returns, per key, the power of ten the {@code mine} side's values are multiplied by (1 if none).
+     * Exact numeric join keys (INT64 / DECIMAL) of different scales on the two sides are compared
+     * at the larger scale: returns, per key, the number of decimal digits the {@code mine} side's
+     * values are shifted left by (0 if none).
      */
-    static long[] scaleFactors(List<BoundExpr> mine, List<BoundExpr> other) {
-        long[] out = new long[mine.size()];
+    static int[] scaleFactors(List<BoundExpr> mine, List<BoundExpr> other) {
+        int[] out = new int[mine.size()];
         for (int j = 0; j < out.length; j++) {
             DataType a = mine.get(j).type();
             DataType b = other.get(j).type();
-            out[j] = a.kind() == TypeKind.DECIMAL && b.kind() == TypeKind.DECIMAL && a.scale() < b.scale()
-                    ? Decimals.pow10(b.scale() - a.scale()) : 1;
+            out[j] = a.isExactNumeric() && b.isExactNumeric() ? Math.max(0, b.exactScale() - a.exactScale()) : 0;
         }
         return out;
     }
 
     /**
-     * Rescales DECIMAL key vectors (see {@link #scaleFactors}); a value whose rescaled form does
-     * not fit a long cannot equal any key of the other side and becomes NULL (never matches).
+     * Rescales exact numeric key vectors (see {@link #scaleFactors}). For LONG vectors, a value
+     * whose rescaled form does not fit a long cannot equal any key of the other side and becomes
+     * NULL (never matches); wide DECIMAL keys (BigInteger) are rescaled exactly.
      */
-    static Vec[] normalize(Vec[] keys, long[] factors, Vec[] scratch, Batch b) {
+    static Vec[] normalize(Vec[] keys, int[] shifts, Vec[] scratch, Batch b) {
         Vec[] out = keys;
-        for (int j = 0; j < factors.length; j++) {
-            if (factors[j] == 1) {
+        for (int j = 0; j < shifts.length; j++) {
+            if (shifts[j] == 0) {
                 continue;
             }
             if (out == keys) {
@@ -51,7 +52,17 @@ final class JoinBatches {
             Vec v = scratch[j];
             v.ensure(b.size);
             boolean[] m = v.nullMask(b.size);
-            long f = factors[j];
+            if (in.kind == Vec.Kind.OBJECT) {
+                BigInteger f = Decimals.bigPow10(shifts[j]);
+                for (int k = 0; k < b.count; k++) {
+                    int i = b.pos(k);
+                    m[i] = in.isNull(i);
+                    v.objects[i] = m[i] ? null : ((BigInteger) in.objects[i]).multiply(f);
+                }
+                out[j] = v;
+                continue;
+            }
+            long f = Decimals.pow10(shifts[j]);
             for (int k = 0; k < b.count; k++) {
                 int i = b.pos(k);
                 if (in.isNull(i)) {
@@ -198,7 +209,7 @@ final class JoinBatches {
         }
 
         /** Consumes the build input completely (raising its deferred error, if any, at the end). */
-        void build(BatchOperator input, BatchExprs keyExprs, long[] factors, DataType[] keyTypes, int expectedRows,
+        void build(BatchOperator input, BatchExprs keyExprs, int[] factors, DataType[] keyTypes, int expectedRows,
                    int threads) {
             boolean singleLong = keyTypes.length == 1 && Vec.kindOf(keyTypes[0]) == Vec.Kind.LONG;
             keys = singleLong ? null : new GroupKeys(keyTypes, ctx.nativeKernels());
@@ -404,12 +415,12 @@ final class JoinBatches {
         private final boolean ownsTable;
         private final BatchOperator buildInput;
         private final BatchExprs buildKeys;
-        private final long[] buildFactors;
+        private final int[] buildFactors;
         private final DataType[] keyTypes;
         private final int expectedBuildRows;
         private final int threads;
         private final BatchExprs probeKeys;
-        private final long[] probeFactors;
+        private final int[] probeFactors;
         private final BatchExprs residual;
         private final boolean leftOuter;
         private final boolean buildIsLeft;
@@ -439,8 +450,8 @@ final class JoinBatches {
          * @param table       a prebuilt shared table, or null to build one from {@code buildInput} at open
          * @param buildIsLeft the build input supplies the left columns (INNER joins only)
          */
-        Probe(BatchOperator input, JoinTable table, BatchOperator buildInput, BatchExprs buildKeys, long[] buildFactors,
-              DataType[] keyTypes, int expectedBuildRows, int threads, BatchExprs probeKeys, long[] probeFactors, BatchExprs residual, boolean leftOuter,
+        Probe(BatchOperator input, JoinTable table, BatchOperator buildInput, BatchExprs buildKeys, int[] buildFactors,
+              DataType[] keyTypes, int expectedBuildRows, int threads, BatchExprs probeKeys, int[] probeFactors, BatchExprs residual, boolean leftOuter,
               boolean buildIsLeft, List<ColumnSchema> outSchema, int probeWidth, ExecContext ctx, JoinCounter counter,
               int capacity) {
             this.input = input;

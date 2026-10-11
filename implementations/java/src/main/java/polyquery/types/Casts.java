@@ -1,5 +1,6 @@
 package polyquery.types;
 
+import java.math.BigInteger;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 
@@ -56,16 +57,19 @@ public final class Casts {
                     case INT64 -> v;
                     case BOOLEAN -> x != 0;
                     case DECIMAL -> {
-                        long u;
-                        try {
-                            u = to.scale() == 0 ? x : Math.multiplyExact(x, Decimals.pow10(to.scale()));
-                        } catch (ArithmeticException e) {
-                            throw overflow(to);
+                        if (!to.isWideDecimal()) {
+                            long u;
+                            try {
+                                u = to.scale() == 0 ? x : Math.multiplyExact(x, Decimals.pow10(to.scale()));
+                            } catch (ArithmeticException e) {
+                                throw overflow(to);
+                            }
+                            if (!Decimals.fitsPrecision(u, to.precision())) {
+                                throw overflow(to);
+                            }
+                            yield u;
                         }
-                        if (!Decimals.fitsPrecision(u, to.precision())) {
-                            throw overflow(to);
-                        }
-                        yield u;
+                        yield toDecimal(Decimals.upscale(BigInteger.valueOf(x), to.scale()), to);
                     }
                     case FLOAT64 -> (double) x;
                     case STRING -> Long.toString(x);
@@ -73,10 +77,29 @@ public final class Casts {
                 };
             }
             case DECIMAL -> {
-                long u = (Long) v;
                 int s = from.scale();
+                if (from.isWideDecimal()) {
+                    BigInteger u = (BigInteger) v;
+                    return switch (t) {
+                        case DECIMAL -> toDecimal(Decimals.rescale(u, s, to.scale()), to);
+                        case INT64 -> {
+                            BigInteger i = Decimals.truncateToInteger(u, s);
+                            if (i.bitLength() > 63) {
+                                throw overflow(to);
+                            }
+                            yield i.longValue();
+                        }
+                        case FLOAT64 -> Decimals.toDouble(u, s);
+                        case STRING -> Decimals.toString(u, s);
+                        default -> throw unsupported(from, to);
+                    };
+                }
+                long u = (Long) v;
                 return switch (t) {
                     case DECIMAL -> {
+                        if (to.isWideDecimal()) {
+                            yield toDecimal(Decimals.rescale(BigInteger.valueOf(u), s, to.scale()), to);
+                        }
                         long r;
                         try {
                             r = Decimals.rescale(u, s, to.scale());
@@ -104,13 +127,7 @@ public final class Casts {
                         }
                         yield (long) d;
                     }
-                    case DECIMAL -> {
-                        try {
-                            yield Decimals.fromDouble(d, to.precision(), to.scale());
-                        } catch (PolyQueryException e) {
-                            throw overflow(to);
-                        }
-                    }
+                    case DECIMAL -> toDecimal(Decimals.fromDouble(d, to.scale()), to);
                     case STRING -> Values.formatDouble(d);
                     default -> throw unsupported(from, to);
                 };
@@ -139,6 +156,14 @@ public final class Casts {
             }
             default -> throw unsupported(from, to);
         }
+    }
+
+    /** The runtime value of unscaled {@code u} of DECIMAL type {@code to}; NUMERIC_OVERFLOW if it does not fit. */
+    private static Object toDecimal(BigInteger u, DataType to) {
+        if (!Decimals.fitsPrecision(u, to.precision())) {
+            throw overflow(to);
+        }
+        return to.isWideDecimal() ? u : (Object) u.longValue();
     }
 
     private static String trimAll(String s) {

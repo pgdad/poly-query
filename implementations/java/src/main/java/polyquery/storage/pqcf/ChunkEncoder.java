@@ -1,5 +1,6 @@
 package polyquery.storage.pqcf;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -42,10 +43,17 @@ final class ChunkEncoder {
         if (nullCount > 0) {
             out.putBitmap(i -> values[i] != null, n);
         }
-        switch (encoding) {
-            case PLAIN -> writePlain(out, type, values);
-            case DICT -> writeDict(out, values);
-            case RLE -> writeRle(out, type, values);
+        if (type.isWideDecimal()) {
+            switch (encoding) {
+                case RLE -> writeWideRle(out, values);
+                default -> writeWidePlain(out, values);
+            }
+        } else {
+            switch (encoding) {
+                case PLAIN -> writePlain(out, type, values);
+                case DICT -> writeDict(out, values);
+                case RLE -> writeRle(out, type, values);
+            }
         }
         return new EncodedChunk(out.toByteArray(), encoding, nullCount, min, max);
     }
@@ -60,7 +68,9 @@ final class ChunkEncoder {
                 if (n == 0) {
                     yield Encoding.PLAIN;
                 }
-                if (Encoding.RLE.appliesTo(type) && countRuns(longValues(type, values)) < n / 4) {
+                int runs = type.isWideDecimal() ? countRuns(wideValues(values))
+                        : Encoding.RLE.appliesTo(type) ? countRuns(longValues(type, values)) : n;
+                if (runs < n / 4) {
                     yield Encoding.RLE;
                 }
                 if (Encoding.DICT.appliesTo(type) && countDistinct(values, n / 2) < n / 2) {
@@ -213,5 +223,64 @@ final class ChunkEncoder {
             out.putInt(j - i);
             i = j;
         }
+    }
+
+    // ---------------------------------------------------------------- wide DECIMAL (PQCF v2, i128)
+
+    /** PLAIN: n × i128 two's-complement little-endian (0 in NULL slots). */
+    private static void writeWidePlain(ByteSink out, Object[] values) {
+        for (Object v : values) {
+            putI128(out, v == null ? BigInteger.ZERO : (BigInteger) v);
+        }
+    }
+
+    /** RLE: {@code u32 R}, then R × {i128 value, u32 run_length}. */
+    private static void writeWideRle(ByteSink out, Object[] values) {
+        BigInteger[] slots = wideValues(values);
+        out.putInt(countRuns(slots));
+        int i = 0;
+        while (i < slots.length) {
+            int j = i + 1;
+            while (j < slots.length && slots[j].equals(slots[i])) {
+                j++;
+            }
+            putI128(out, slots[i]);
+            out.putInt(j - i);
+            i = j;
+        }
+    }
+
+    private static void putI128(ByteSink out, BigInteger v) {
+        out.putLong(v.longValue());
+        out.putLong(v.shiftRight(64).longValue());
+    }
+
+    /** Wide slot values; NULL slots repeat the preceding (or first) non-null value, as for i64 RLE. */
+    private static BigInteger[] wideValues(Object[] values) {
+        BigInteger[] out = new BigInteger[values.length];
+        BigInteger fill = BigInteger.ZERO;
+        for (Object v : values) {
+            if (v != null) {
+                fill = (BigInteger) v;
+                break;
+            }
+        }
+        for (int i = 0; i < values.length; i++) {
+            if (values[i] != null) {
+                fill = (BigInteger) values[i];
+            }
+            out[i] = fill;
+        }
+        return out;
+    }
+
+    private static int countRuns(BigInteger[] slots) {
+        int runs = 0;
+        for (int i = 0; i < slots.length; i++) {
+            if (i == 0 || !slots[i].equals(slots[i - 1])) {
+                runs++;
+            }
+        }
+        return runs;
     }
 }

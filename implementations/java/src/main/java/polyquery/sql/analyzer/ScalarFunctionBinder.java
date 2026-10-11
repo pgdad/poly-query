@@ -31,7 +31,8 @@ final class ScalarFunctionBinder {
             case "ROUND" -> round(args);
             case "FLOOR", "CEIL", "CEILING" -> {
                 DataType t = numeric(name, args.get(0));
-                DataType result = t.kind() == TypeKind.DECIMAL ? DataType.decimal(18, 0) : t;
+                DataType result = t.kind() == TypeKind.DECIMAL
+                        ? DataType.decimal(TypeCoercion.resultPrecision(t), 0) : t;
                 yield new BoundExpr.Function(name.equals("FLOOR") ? "FLOOR" : "CEIL", args, result);
             }
             case "SQRT" -> {
@@ -156,7 +157,7 @@ final class ScalarFunctionBinder {
 
     private static DataType roundType(DataType t, long n) {
         if (t.kind() == TypeKind.DECIMAL) {
-            return DataType.decimal(18, (int) Math.max(0, Math.min(n, t.scale())));
+            return DataType.decimal(TypeCoercion.resultPrecision(t), (int) Math.max(0, Math.min(n, t.scale())));
         }
         return t;
     }

@@ -7,12 +7,12 @@ import java.util.Set;
 import polyquery.common.PolyQueryException;
 import polyquery.exec.ExecContext;
 import polyquery.exec.ExpressionCompiler;
+import polyquery.exec.HashKeys;
 import polyquery.ffi.NativeKernels;
 import polyquery.plan.BoundExpr;
 import polyquery.plan.BoundExpr.CompareOp;
 import polyquery.plan.BoundExprs;
 import polyquery.types.DataType;
-import polyquery.types.TypeKind;
 
 /**
  * Compiles bound expressions into batch kernels ({@link Kernels}). Constant subexpressions are
@@ -61,8 +61,7 @@ final class VecCompiler {
             }
             case BoundExpr.Literal l -> new Kernels.Constant(l.type(), l.value());
             case BoundExpr.Cast c -> cast(c);
-            case BoundExpr.Negate n -> n.type().isNumeric() ? new Kernels.Negate(compile(n.input()), n.type())
-                    : new Kernels.Constant(n.type(), null);
+            case BoundExpr.Negate n -> negate(n);
             case BoundExpr.Not n -> new Kernels.Not(compile(n.input()));
             case BoundExpr.IsNull n -> new Kernels.IsNull(compile(n.input()), n.negated());
             case BoundExpr.And a -> new Kernels.AndOr(true, compile(a.left()), compile(a.right()));
@@ -139,9 +138,23 @@ final class VecCompiler {
         return boxedUnary(c.input(), new BoundExpr.Cast(new BoundExpr.Placeholder(from), to, c.implicit()), true, to);
     }
 
+    private VecExpr negate(BoundExpr.Negate n) {
+        if (!n.type().isNumeric()) {
+            return new Kernels.Constant(n.type(), null);
+        }
+        if (n.type().isWideDecimal()) {
+            return boxedUnary(n.input(), new BoundExpr.Negate(new BoundExpr.Placeholder(n.type()), n.type()), true,
+                    n.type());
+        }
+        return new Kernels.Negate(compile(n.input()), n.type());
+    }
+
     private VecExpr arithmetic(BoundExpr.Arithmetic a) {
         VecExpr l = compile(a.left());
         VecExpr r = compile(a.right());
+        if (a.type().isWideDecimal()) {
+            return new Kernels.WideArith(a.op(), l, r, a.left().type().scale(), a.right().type().scale(), a.type());
+        }
         return switch (a.type().kind()) {
             case INT64 -> new Kernels.LongArith(a.op(), l, r);
             case DECIMAL -> new Kernels.DecimalArith(a.op(), l, r, a.left().type().scale(), a.right().type().scale(),
@@ -167,6 +180,10 @@ final class VecCompiler {
         if (lt.isNull() || rt.isNull()) {
             return new Kernels.Constant(DataType.BOOLEAN, null);
         }
+        if (lt.isWideDecimal() || rt.isWideDecimal()) {
+            return new Kernels.WideCompare(c.op(), compile(c.left()), compile(c.right()), lt.exactScale(),
+                    rt.exactScale());
+        }
         Vec.Kind lk = Vec.kindOf(lt);
         if (lk != Vec.kindOf(rt)) {
             return rowEval(c);
@@ -185,8 +202,9 @@ final class VecCompiler {
         }
         VecExpr l = compile(left);
         VecExpr r = compile(right);
-        if (lt.kind() == TypeKind.DECIMAL && rt.kind() == TypeKind.DECIMAL && lt.scale() != rt.scale()) {
-            return new Kernels.DecimalCompare(op, l, r, lt.scale(), rt.scale());
+        if (HashKeys.mixedExact(lt, rt)) {
+            // INT64 / narrow DECIMAL of different scales: exact comparison by value
+            return new Kernels.DecimalCompare(op, l, r, lt.exactScale(), rt.exactScale());
         }
         return switch (lk) {
             case LONG -> new Kernels.LongCompare(op, l, r);
@@ -233,7 +251,8 @@ final class VecCompiler {
                 }
                 if (lit.value() == null) {
                     hasNull = true;
-                } else if (lit.type().kind() != t.kind() || lit.type().scale() != t.scale()) {
+                } else if (lit.type().kind() != t.kind() || lit.type().scale() != t.scale()
+                        || lit.type().isWideDecimal() != t.isWideDecimal()) {
                     constant = false;
                     break;
                 } else {

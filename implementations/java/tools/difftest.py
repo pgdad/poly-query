@@ -10,6 +10,11 @@ query orders all output columns; FLOAT64 with relative tolerance; errors by code
 
 With --native-kernels LIB the engines load the native kernel library and every vectorized
 combination also runs with `native: true`.
+
+Since CR-2 a generated table `wd` (written to the data directory) holds wide DECIMALs
+(precision 19-38) next to INT64 and narrow DECIMAL columns; it is also saved as PQCF v2 with
+small row groups (`wd_p`, memory-mapped, with an index) and queried with wide arithmetic,
+exact mixed comparisons, wide join/group/sort keys and aggregates.
 """
 import argparse
 import itertools
@@ -53,8 +58,56 @@ class Engine:
         self.p.wait()
 
 
+WIDE_SCHEMA = [("id", "INT64"), ("g", "STRING"), ("i", "INT64"), ("n1", "DECIMAL(10,2)"),
+               ("w1", "DECIMAL(38,10)"), ("w2", "DECIMAL(25,2)"), ("w3", "DECIMAL(30,0)")]
+
+
+def write_wide(data, rows=600, seed=7):
+    """wd.csv: wide DECIMAL columns with NULLs, duplicates, extreme and small values."""
+    rnd = random.Random(seed)
+
+    def dec(int_digits, scale):
+        r = rnd.random()
+        if r < 0.1:
+            return ""
+        if r < 0.25:  # small values, also equal to narrow / integer values
+            v = rnd.choice(["0", "1", "-1", "10", "100", "250"] + (["2.5", "-3.75", "1000.5"] if scale else []))
+        elif r < 0.35:  # extremes
+            v = ("-" if rnd.random() < 0.5 else "") + "9" * int_digits + ("." + "9" * scale if scale else "")
+        else:
+            n = rnd.randint(1, int_digits)
+            v = ("-" if rnd.random() < 0.3 else "") + str(rnd.randint(10 ** (n - 1), 10 ** n - 1))
+            if scale:
+                v += "." + str(rnd.randint(0, 10 ** scale - 1)).zfill(scale)
+        return v
+
+    with open(f"{data}/wd.csv", "w") as f:
+        f.write(",".join(n for n, _ in WIDE_SCHEMA) + "\n")
+        for k in range(rows):
+            i = rnd.choice(["", str(rnd.randint(-5, 300)), str(rnd.choice([9223372036854775807, -9223372036854775807,
+                                                                            10 ** 18, 123456789012345678]))])
+            n1 = "" if rnd.random() < 0.1 else rnd.choice(["0.00", "1.00", "2.50", "-3.75", "10.00", "100.00",
+                                                           str(rnd.randint(-99999999, 99999999)) + ".99"])
+            f.write(",".join([str(k), rnd.choice(["a", "b", "c", "d"]), i, n1, dec(28, 10), dec(23, 2),
+                              dec(30, 0)]) + "\n")
+
+
 def setup(engine, data):
     schemas = {}
+    write_wide(data)
+    r = engine.req({"op": "load", "table": "wd", "path": "wd.csv", "format": "csv",
+                    "schema": [{"name": n, "type": t} for n, t in WIDE_SCHEMA]})
+    assert r["ok"], r
+    schemas["wd"] = list(WIDE_SCHEMA)
+    r = engine.req({"op": "save", "table": "wd", "path": "dt_wd.pqcf", "options": {"row_group_size": 64}})
+    assert r["ok"], r
+    r = engine.req({"op": "open", "table": "wd_p", "path": "dt_wd.pqcf", "options": {"mmap": True}})
+    assert r["ok"], r
+    r = engine.req({"op": "query", "sql": "CREATE INDEX wd_p_w1 ON wd_p (w1)"})
+    assert r["ok"], r
+    r = engine.req({"op": "query", "sql": "CREATE INDEX wd_p_w3 ON wd_p (w3) USING HASH"})
+    assert r["ok"], r
+    schemas["wd_p"] = list(WIDE_SCHEMA)
     for name, (path, schemafile) in TABLES.items():
         schema = json.load(open(f"{data}/{schemafile}"))
         r = engine.req({"op": "load", "table": name, "path": path, "format": "csv", "schema": schema})
@@ -83,7 +136,9 @@ class Gen:
     def cols(self, alias, table, kind):
         out = []
         for name, t in self.s[table]:
-            k = "DEC" if t.startswith("DECIMAL") else t
+            k = t
+            if t.startswith("DECIMAL"):
+                k = "WIDE" if int(t[8:t.index(",")]) > 18 else "DEC"
             if k == kind:
                 out.append(f"{alias}.{name}")
         return out
@@ -110,6 +165,16 @@ class Gen:
             b = self.expr(scope, "DEC", depth + 1)
             return r.choice([f"({a} + {b})", f"({a} - {b})", f"({a} * 2)", f"ROUND({a}, 1)", f"-{a}",
                              f"CASE WHEN {self.pred(scope, depth + 1)} THEN {a} END", f"({a} + 1)"])
+        if kind == "WIDE":
+            a = self.expr(scope, "WIDE", depth + 1)
+            b = self.expr(scope, r.choice(["WIDE", "DEC", "INT64"]), depth + 1)
+            return r.choice([f"({a} + {b})", f"({a} - {b})", f"({a} * {r.choice(['2', '0.5', '-3', '1.25'])})",
+                             f"({a} * {b})", f"-({a})", f"ABS({a})", f"ROUND({a}, {r.randint(-2, 3)})",
+                             f"FLOOR({a})", f"CEIL({a})", f"COALESCE({a}, {b})", f"NULLIF({a}, {self.literal('WIDE')})",
+                             f"CASE WHEN {self.pred(scope, depth + 1)} THEN {a} ELSE {b} END",
+                             f"CAST({self.expr(scope, 'DEC', depth + 1)} AS DECIMAL(38,4))",
+                             f"CAST({self.expr(scope, 'INT64', depth + 1)} AS DECIMAL(30,2))",
+                             f"CAST({a} AS DECIMAL(38,1))", f"CAST(CAST({a} AS STRING) AS DECIMAL(38,10))"])
         if kind == "FLOAT64":
             a = self.expr(scope, "FLOAT64", depth + 1)
             return r.choice([f"({a} * 1.5e0)", f"({a} + {self.expr(scope, 'INT64', depth + 1)})",
@@ -129,6 +194,10 @@ class Gen:
             return str(r.choice([0, 1, 2, 5, 10, 100, 1000, -1, 250, 1500]))
         if kind == "DEC":
             return r.choice(["0.50", "10.25", "100.00", "1000.5", "-3.75"])
+        if kind == "WIDE":
+            return r.choice(["12345678901234567890.5", "-99999999999999999999.99", "0.0000000000000000001",
+                             "CAST(1 AS DECIMAL(20,0))", "CAST('-2.5' AS DECIMAL(30,10))", "100000000000000000000.",
+                             "CAST('99999999999999999999999999999999999999' AS DECIMAL(38,0))"])
         if kind == "FLOAT64":
             return r.choice(["0.5e0", "100.0e0", "-1.25e0"])
         if kind == "STRING":
@@ -147,10 +216,15 @@ class Gen:
             kind = r.choice(["INT64", "DEC", "STRING"])
             return f"{self.expr(scope, kind, 3)} {r.choice(['=', '<', '>=', '<>'])} {self.literal(kind)}"
         choice = r.randint(0, 11)
-        kind = r.choice(["INT64", "DEC", "FLOAT64", "STRING", "DATE", "TIMESTAMP", "BOOLEAN"])
+        wide = any(t.startswith("wd") for _, t in scope)
+        kind = r.choice(["INT64", "DEC", "FLOAT64", "STRING", "DATE", "TIMESTAMP", "BOOLEAN"]
+                        + (["WIDE", "WIDE", "WIDE"] if wide else []))
         if choice <= 3:
             a = self.expr(scope, kind, depth + 1)
-            b = self.expr(scope, kind, depth + 1) if r.random() < 0.4 else self.literal(kind)
+            other = kind
+            if kind in ("WIDE", "DEC", "INT64") and wide:
+                other = r.choice(["WIDE", "DEC", "INT64", "FLOAT64"])  # exact comparisons across types
+            b = self.expr(scope, other, depth + 1) if r.random() < 0.4 else self.literal(other)
             if kind == "BOOLEAN":
                 return f"({a} = {b})"
             return f"{a} {r.choice(['=', '<', '<=', '>', '>=', '<>'])} {b}"
@@ -163,15 +237,16 @@ class Gen:
         if choice == 7:
             return f"{self.expr(scope, kind, depth + 1)} IS {r.choice(['', 'NOT '])}NULL"
         if choice == 8:
-            k = r.choice(["INT64", "STRING", "DEC"])
+            k = r.choice(["INT64", "STRING", "DEC"] + (["WIDE"] if wide else []))
             items = ", ".join(self.literal(k) for _ in range(r.randint(1, 4)))
             if r.random() < 0.2:
                 items += ", NULL"
             return f"{self.expr(scope, k, depth + 1)} {r.choice(['', 'NOT '])}IN ({items})"
         if choice == 9:
-            k = r.choice(["INT64", "DEC", "DATE"])
-            return (f"{self.expr(scope, k, depth + 1)} {r.choice(['', 'NOT '])}BETWEEN {self.literal(k)} "
-                    f"AND {self.literal(k)}")
+            k = r.choice(["INT64", "DEC", "DATE"] + (["WIDE"] if wide else []))
+            lo, hi = (r.choice(["DEC", "INT64", "WIDE"]) for _ in range(2)) if k == "WIDE" else (k, k)
+            return (f"{self.expr(scope, k, depth + 1)} {r.choice(['', 'NOT '])}BETWEEN {self.literal(lo)} "
+                    f"AND {self.literal(hi)}")
         if choice == 10:
             s = self.expr(scope, "STRING", depth + 1)
             return f"{s} {r.choice(['', 'NOT '])}LIKE '{r.choice(['%a%', 'c%', '_o%', '%', '%s'])}'"
@@ -189,7 +264,9 @@ class Gen:
 
     def from_clause(self):
         r = self.r
-        c = r.randint(0, 14)
+        c = r.randint(0, 20)
+        if c >= 15:
+            return self.wide_from()
         if c == 12:
             extra = self.failing([("i", "items")])
             return (f"orders o JOIN items i ON o.order_id = i.order_id AND {extra}",
@@ -227,6 +304,23 @@ class Gen:
         return ("tx_p t JOIN cust c ON t.customer_id = c.customer_id AND c.segment <> 'enterprise'",
                 [("t", "tx_p"), ("c", "cust")], True, None)
 
+    def wide_from(self):
+        """FROM clauses over the wide table: scans (PQCF v2 / indexed) and joins on wide or mixed keys."""
+        r = self.r
+        c = r.randint(0, 6)
+        if c <= 2:
+            t = r.choice(["wd", "wd_p"])
+            return f"{t} a", [("a", t)], False, None
+        on = r.choice(["a.w2 = b.n1", "a.w3 = b.i", "a.w1 = b.w1", "a.w1 = b.w2", "a.i = b.n1", "a.w3 = b.w2",
+                       "a.w1 = b.w1 AND a.g = b.g", "a.n1 = b.w1"])
+        if c <= 4:
+            kind = r.choice(["JOIN", "LEFT JOIN"])
+            return (f"wd a {kind} wd_p b ON {on}", [("a", "wd"), ("b", "wd_p")], True, None)
+        if c == 5:
+            return ("wd a JOIN items i ON a.i = i.order_id", [("a", "wd"), ("i", "items")], True, None)
+        return ("wd_p a JOIN products p ON a.n1 = p.price OR a.w2 = p.price",
+                [("a", "wd_p"), ("p", "products")], True, None)
+
     def query(self):
         r = self.r
         frm, scope, join, required = self.from_clause()
@@ -238,7 +332,8 @@ class Gen:
             return self.union_all(frm, scope, join, where)
         if shape <= 3:
             n = r.randint(1, 3)
-            items = [f"{self.expr(scope, r.choice(['INT64', 'DEC', 'STRING', 'FLOAT64', 'DATE']))} AS c{i}"
+            wide = ["WIDE", "WIDE"] if any(t.startswith("wd") for _, t in scope) else []
+            items = [f"{self.expr(scope, r.choice(['INT64', 'DEC', 'STRING', 'FLOAT64', 'DATE'] + wide))} AS c{i}"
                      for i in range(n)]
             distinct = "DISTINCT " if r.random() < 0.2 else ""
             order = ""
@@ -254,9 +349,14 @@ class Gen:
             q = f"SELECT {distinct}{', '.join(items)} FROM {frm}{where}{order}{limit}"
             return q, ordered, bool(limit) and not order, join
         if shape <= 7:
-            keys = [self.expr(scope, r.choice(["INT64", "STRING", "DATE", "DEC", "BOOLEAN"]), 2)
+            wide = any(t.startswith("wd") for _, t in scope)
+            keys = [self.expr(scope, r.choice(["INT64", "STRING", "DATE", "DEC", "BOOLEAN"] + (["WIDE"] * 3 if wide else [])), 2)
                     for _ in range(r.randint(0, 2))]
-            aggs = r.sample([f"COUNT(*)", f"SUM({self.expr(scope, 'INT64', 2)})",
+            wide_aggs = [f"SUM({self.expr(scope, 'WIDE', 2)})", f"AVG({self.expr(scope, 'WIDE', 2)})",
+                         f"MIN({self.expr(scope, 'WIDE', 2)})", f"MAX({self.expr(scope, 'WIDE', 1)})",
+                         f"COUNT(DISTINCT {self.expr(scope, 'WIDE', 2)})", f"SUM(DISTINCT {self.expr(scope, 'WIDE', 1)})",
+                         f"SUM(CAST({self.expr(scope, 'DEC', 2)} AS DECIMAL(38,2)))"] if wide else []
+            aggs = r.sample(wide_aggs + [f"COUNT(*)", f"SUM({self.expr(scope, 'INT64', 2)})",
                              f"SUM({self.expr(scope, 'DEC', 2)})", f"MIN({self.expr(scope, 'STRING', 2)})",
                              f"MAX({self.expr(scope, 'DATE', 1)})", f"AVG({self.expr(scope, 'DEC', 2)})",
                              f"COUNT({self.expr(scope, 'INT64', 2)})", f"COUNT(DISTINCT {self.expr(scope, 'STRING', 2)})",
