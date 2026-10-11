@@ -118,7 +118,7 @@ def main() -> int:
             t0 = time.perf_counter()
             session.request(req)
             times.append((time.perf_counter() - t0) * 1000)
-        timings[query["name"]] = {"median_ms": statistics.median(times), "min_ms": min(times)}
+        timings[query["name"]] = {"median_ms": statistics.median(times), "min_ms": min(times), "times_ms": times}
         print(f"{query['name']} | {statistics.median(times):.0f} | {min(times):.0f} | {first['row_count']}", flush=True)
     session.close()
     if args.json:
