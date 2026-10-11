@@ -521,6 +521,9 @@ type aggTable struct {
 	nmap      *nativeIntMap          // replaces intMap with native kernels
 	floatMap  map[uint64]int32
 	strMap    map[string]int32 // single STRING key, or encoded multi-column keys
+	multi     *multiKeys       // multi-column keys without wide DECIMALs
+	strIDs    *keyIDs          // single plain STRING key: value IDs …
+	idGroups  []int32          // … and per ID its group + 1
 	nullGroup int32            // group of the NULL key (single key)
 	dict      []string         // dictionary of the code→group cache
 	dictGids  []int32
@@ -546,6 +549,9 @@ func newAggTable(ec *Context, keyTypes []types.Type, calls []*plan.AggCall) *agg
 			s.lib = ec.Native
 		}
 		t.states = append(t.states, st)
+	}
+	if multiKeysApply(t.keyClasses) {
+		t.multi = newMultiKeys(t.keyClasses)
 	}
 	if ec.Native != nil && len(keyTypes) == 1 && t.keyClasses[0] == vInt {
 		t.nmap = newNativeIntMap(ec.Native)
@@ -625,6 +631,9 @@ func (t *aggTable) resolve(keys []*Vec, n int, sel []int32, pos int64) error {
 		return nil
 	}
 	if len(keys) > 1 {
+		if t.multi != nil {
+			return t.resolveMulti(keys, n, sel, pos)
+		}
 		return t.resolveEncoded(keys, n, sel, pos)
 	}
 	v := keys[0]
@@ -729,21 +738,27 @@ func (t *aggTable) resolveIntNative(v *Vec, n int, sel []int32, pos int64) error
 }
 
 func (t *aggTable) resolveString(v *Vec, n int, sel []int32, pos int64) error {
-	gids, vals, nulls := t.gids, v.S, v.Nulls
+	if t.strIDs == nil {
+		t.strIDs = newKeyIDs(vStr)
+	}
+	ids, gids := t.strIDs.ids(v, n, sel), t.gids
 	one := func(i int) error {
-		if nulls != nil && nulls[i] {
+		id := ids[i]
+		if id == 0 {
 			g, err := t.nullKey(pos + int64(i))
 			gids[i] = g
 			return err
 		}
-		s := vals[i]
-		g, ok := t.strMap[s]
-		if !ok {
+		if int(id) >= len(t.idGroups) {
+			t.idGroups = growZero(t.idGroups, max(int(id)+1, 2*len(t.idGroups)))
+		}
+		g := t.idGroups[id] - 1
+		if g < 0 {
 			var err error
-			if g, err = t.newGroup(t.key1(types.StringValue(s)), pos+int64(i)); err != nil {
+			if g, err = t.newGroup(t.key1(types.StringValue(v.S[i])), pos+int64(i)); err != nil {
 				return err
 			}
-			t.strMap[s] = g
+			t.idGroups[id] = g + 1
 		}
 		gids[i] = g
 		return nil
