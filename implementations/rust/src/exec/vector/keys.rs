@@ -17,7 +17,9 @@ use std::sync::{Arc, OnceLock};
 use std::hash::{Hash, Hasher};
 
 use super::batch::{Data, NO_ROW, Vector};
+use super::hashtab::{HASH_SEED, I64Table, hash_keys};
 use crate::exec::hash::{FastHasher, FastMap};
+use crate::native::{Kernels, fmix64};
 use crate::types::Value;
 
 /// Representation class of `i64`-keyed values.
@@ -79,6 +81,8 @@ fn i64_at(data: &Data, i: usize) -> i64 {
 enum Map {
     Empty,
     I64(Class, FastMap<i64, u32>),
+    /// `i64` keys in a table hashed by the native `pqk_hash_i64` kernel.
+    NativeI64(Class, I64Table),
     Str(FastMap<Arc<str>, u32>),
     Generic(FastMap<Value, u32>),
 }
@@ -88,6 +92,9 @@ enum Map {
 pub struct DictCache {
     dict: Option<Arc<[Arc<str>]>>,
     ids: Vec<u32>,
+    /// Scratch buffers of native-hashed lookups.
+    hashes: Vec<u64>,
+    wide: Vec<i64>,
 }
 
 impl DictCache {
@@ -122,21 +129,55 @@ pub struct Interner {
     /// `Value`-keyed view for lookups whose representation differs from
     /// the specialized map (built on first need).
     generic: OnceLock<FastMap<Value, u32>>,
+    /// Native kernels for hashing fixed-width keys.
+    native: Option<&'static Kernels>,
+    hashes: Vec<u64>,
+    wide: Vec<i64>,
 }
 
 impl Default for Interner {
     fn default() -> Self {
+        Interner::with_native(None)
+    }
+}
+
+/// The values of a fixed-width vector as `i64` (borrowed for 64-bit
+/// representations, widened into `buf` otherwise).
+fn i64_keys<'a>(data: &'a Data, n: usize, buf: &'a mut Vec<i64>) -> &'a [i64] {
+    match data {
+        Data::Int(v) | Data::Timestamp(v) | Data::Decimal(v, _) => v,
+        d => {
+            buf.clear();
+            buf.extend((0..n).map(|i| i64_at(d, i)));
+            buf
+        }
+    }
+}
+
+impl Interner {
+    /// An interner hashing fixed-width keys with the native kernels when
+    /// `native` is given.
+    pub fn with_native(native: Option<&'static Kernels>) -> Interner {
         Interner {
             map: Map::Empty,
             values: Vec::new(),
             null_id: None,
             cache: DictCache::default(),
             generic: OnceLock::new(),
+            native,
+            hashes: Vec::new(),
+            wide: Vec::new(),
         }
     }
-}
 
-impl Interner {
+    /// The map for fixed-width keys of class `c`.
+    fn i64_map(&self, c: Class) -> Map {
+        match self.native {
+            Some(_) => Map::NativeI64(c, I64Table::default()),
+            None => Map::I64(c, FastMap::default()),
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.values.len()
     }
@@ -176,7 +217,7 @@ impl Interner {
         let next = self.values.len() as u32;
         if let Map::Empty = self.map {
             self.map = match Class::of_value(v) {
-                Some((c, _)) => Map::I64(c, FastMap::default()),
+                Some((c, _)) => self.i64_map(c),
                 None if matches!(v, Value::Str(_)) => Map::Str(FastMap::default()),
                 None => Map::Generic(FastMap::default()),
             };
@@ -184,6 +225,13 @@ impl Interner {
         let id = match (&mut self.map, v) {
             (Map::I64(class, map), _) => match Class::of_value(v) {
                 Some((c, x)) if c == *class => *map.entry(x).or_insert(next),
+                _ => {
+                    self.switch_to_generic();
+                    return self.intern_value(v);
+                }
+            },
+            (Map::NativeI64(class, table), _) => match Class::of_value(v) {
+                Some((c, x)) if c == *class => table.get_or_insert(x, fmix64(x, HASH_SEED), next),
                 _ => {
                     self.switch_to_generic();
                     return self.intern_value(v);
@@ -220,7 +268,7 @@ impl Interner {
         }
         if let Map::Empty = self.map {
             self.map = match Class::of(&v.data) {
-                Some(c) => Map::I64(c, FastMap::default()),
+                Some(c) => self.i64_map(c),
                 None if matches!(v.data, Data::Str(_) | Data::Dict(..)) => {
                     Map::Str(FastMap::default())
                 }
@@ -228,7 +276,7 @@ impl Interner {
             };
         }
         let fits = match (&self.map, &v.data) {
-            (Map::I64(c, _), d) => Class::of(d) == Some(*c),
+            (Map::I64(c, _) | Map::NativeI64(c, _), d) => Class::of(d) == Some(*c),
             (Map::Str(_), Data::Str(_) | Data::Dict(..)) => true,
             (Map::Generic(_), _) => true,
             _ => false,
@@ -248,6 +296,25 @@ impl Interner {
                     let x = i64_at(d, i);
                     let next = self.values.len() as u32;
                     let id = *map.entry(x).or_insert(next);
+                    if id == next {
+                        self.values.push(class.value(x));
+                    }
+                    out.push(id);
+                }
+            }
+            (Map::NativeI64(class, table), d) => {
+                let class = *class;
+                let keys = i64_keys(d, n, &mut self.wide);
+                if let Some(k) = self.native {
+                    hash_keys(k, keys, &mut self.hashes);
+                }
+                for (i, &x) in keys.iter().enumerate() {
+                    if valid.is_some_and(|ok| !ok[i]) {
+                        out.push(null_id(&mut self.values, &mut self.null_id));
+                        continue;
+                    }
+                    let next = self.values.len() as u32;
+                    let id = table.get_or_insert(x, self.hashes[i], next);
                     if id == next {
                         self.values.push(class.value(x));
                     }
@@ -337,6 +404,10 @@ impl Interner {
                 Some((c, x)) if c == *class => map.get(&x).copied(),
                 _ => self.generic_map().get(v).copied(),
             },
+            (Map::NativeI64(class, table), _) => match Class::of_value(v) {
+                Some((c, x)) if c == *class => table.get(x, fmix64(x, HASH_SEED)),
+                _ => self.generic_map().get(v).copied(),
+            },
             (Map::Str(map), Value::Str(s)) => map.get(&**s).copied(),
             (Map::Generic(map), _) => map.get(v).copied(),
             _ => self.generic_map().get(v).copied(),
@@ -360,6 +431,19 @@ impl Interner {
                         map.get(&i64_at(d, i)).copied().unwrap_or(NO_ROW)
                     };
                     out.push(id);
+                }
+            }
+            (Map::NativeI64(class, table), d) if Class::of(d) == Some(*class) => {
+                let keys = i64_keys(d, n, &mut cache.wide);
+                if let Some(k) = self.native {
+                    hash_keys(k, keys, &mut cache.hashes);
+                }
+                for (i, &x) in keys.iter().enumerate() {
+                    out.push(if valid.is_some_and(|ok| !ok[i]) {
+                        NO_ROW
+                    } else {
+                        table.get(x, cache.hashes[i]).unwrap_or(NO_ROW)
+                    });
                 }
             }
             (Map::Str(map), Data::Str(s)) => {
@@ -421,8 +505,14 @@ pub struct KeyTable {
 
 impl KeyTable {
     pub fn new(width: usize) -> KeyTable {
+        KeyTable::with_native(width, None)
+    }
+
+    /// A key table whose fixed-width key columns are hashed with the
+    /// native kernels when `native` is given.
+    pub fn with_native(width: usize, native: Option<&'static Kernels>) -> KeyTable {
         KeyTable {
-            interners: (0..width).map(|_| Interner::default()).collect(),
+            interners: (0..width).map(|_| Interner::with_native(native)).collect(),
             composite: match width {
                 0 => Composite::Zero,
                 1 => Composite::One,

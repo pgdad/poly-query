@@ -555,7 +555,7 @@ struct AggShared {
 impl AggShared {
     fn work(&self) -> Result<Aggregator> {
         let ctx = self.seed.context();
-        let mut agg = Aggregator::new(self.group_by.len(), &self.aggregates);
+        let mut agg = Aggregator::new(self.group_by.len(), &self.aggregates, ctx.exec.native);
         loop {
             if self.stop.load(Ordering::Relaxed) {
                 return Ok(agg);
@@ -636,7 +636,9 @@ impl BatchOperator for ParallelAggregateOp {
             let mut iter = partials.into_iter();
             let mut agg = iter
                 .next()
-                .unwrap_or_else(|| Aggregator::new(self.group_by.len(), &self.aggregates));
+                .unwrap_or_else(|| {
+                    Aggregator::new(self.group_by.len(), &self.aggregates, ctx.exec.native)
+                });
             for p in iter {
                 let retained = agg.merge(p)?;
                 if retained > 0 {
@@ -679,7 +681,7 @@ fn merge_partitioned(
                     .spawn_scoped(scope, move || {
                         catch_panic(|| {
                             let wctx = seed.context();
-                            let mut agg = Aggregator::new(key_count, calls);
+                            let mut agg = Aggregator::new(key_count, calls, wctx.exec.native);
                             for (w, partial) in partials.iter().enumerate() {
                                 if let Some(groups) = split[w].get(p) {
                                     let retained = agg.merge_groups(partial, groups)?;

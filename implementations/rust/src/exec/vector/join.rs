@@ -291,7 +291,7 @@ impl HashTable {
     pub fn build(rows: Batch, keys: &[(Expr, KeyDomain)], ctx: &ExecContext) -> Result<HashTable> {
         let kv = key_vectors(keys, &rows, ctx)?;
         let n = rows.len;
-        let mut table = KeyTable::new(keys.len());
+        let mut table = KeyTable::with_native(keys.len(), ctx.exec.native);
         let mut ids = Vec::new();
         table.assign(&kv, n, &mut ids);
         // Rows with a NULL key never match.
