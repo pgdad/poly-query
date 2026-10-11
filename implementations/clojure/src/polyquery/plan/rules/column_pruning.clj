@@ -1,6 +1,7 @@
-(ns polyquery.plan.pruning
-  "Column pruning (spec/storage/indexes-and-planning.md §3.2): restricts
-  every scan of a logical plan to the table columns the query references.
+(ns polyquery.plan.rules.column-pruning
+  "Optimizer rule `column-pruning` (projection pushdown,
+  spec/storage/indexes-and-planning.md §3.2): restricts every scan of a
+  logical plan to the table columns the query references.
 
   Rows keep their full width (expressions address FROM-row positions), but a
   scan only reads and fills the referenced columns; the others stay NULL and
@@ -48,11 +49,11 @@
 
 (declare prune)
 
-(defn prune-query
-  "Prunes the scans of a (logical) query plan of which the outputs
-  `required` (default: all) are needed."
-  ([plan] (prune plan (all-columns plan)))
-  ([plan required] (prune plan (or required (all-columns plan)))))
+(defn prune-columns
+  "The rule: prunes the scans of a query plan of which the outputs
+  :required-outputs of its root (default: all) are needed."
+  [plan]
+  (prune plan (or (:required-outputs plan) (all-columns plan))))
 
 (defn prune
   "Prunes the scans below node, of which the output columns `required` (a

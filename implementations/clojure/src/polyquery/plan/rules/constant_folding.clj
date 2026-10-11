@@ -1,6 +1,6 @@
-(ns polyquery.plan.rewrite
-  "Expression rewrites of the logical optimizer (spec/phases/phase-5.md;
-  disabled by `optimize: false`):
+(ns polyquery.plan.rules.constant-folding
+  "Optimizer rule `constant-folding` (spec/phases/phase-5.md): rewrites the
+  expressions of a logical plan —
 
   * constant folding — a row-independent subexpression (no columns,
     correlated references or subqueries, no PQ_SLEEP) is evaluated once at
@@ -11,7 +11,10 @@
     negation, duplicate conjuncts, filters whose predicate is TRUE. Only
     rewrites that never skip the evaluation of an operand the row engine
     evaluates are applied (`x AND FALSE` keeps x unless x cannot fail), so
-    the result — rows or error — never changes."
+    the result — rows or error — never changes.
+  Predicate simplification is folding with partially known operands; it
+  runs in the same bottom-up pass, so a predicate it reduces to a literal is
+  folded further up."
   (:require [polyquery.exec.expr :as expr]
             [polyquery.sql.bound :as b]))
 
@@ -78,11 +81,11 @@
         cs (remove #(literal? % true) cs)]
     (b/conjoin cs)))
 
-(defn simplify-plan
-  "Applies the rewrites to the expressions of a logical plan. Derived
-  tables are left alone (the optimizer handles their plans separately)."
+(defn fold-constants
+  "The rule: applies the rewrites to the expressions of a logical plan
+  (derived tables and UNION ALL branches included)."
   [node]
-  (let [rec simplify-plan]
+  (let [rec fold-constants]
     (case (:op node)
       :filter (let [input (rec (:input node))
                     p (simplify-conjunction (:predicate node))]
@@ -96,5 +99,6 @@
                      (update :group-keys #(mapv simplify %))
                      (update :aggregates #(mapv (fn [a] (if (:arg a) (update a :arg simplify) a)) %)))
       :project (-> node (update :input rec) (update :exprs #(mapv simplify %)))
-      (:distinct :sort :limit) (update node :input rec)
+      (:distinct :sort :limit :derived) (update node :input rec)
+      :union-all (update node :inputs #(mapv rec %))
       node)))

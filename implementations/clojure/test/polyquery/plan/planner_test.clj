@@ -1,6 +1,6 @@
 (ns polyquery.plan.planner-test
   (:require [clojure.test :refer [deftest is testing]]
-            [polyquery.plan.physical :as physical]
+            [polyquery.plan.planner :as planner]
             [polyquery.sql.analyzer :as analyzer]
             [polyquery.sql.parser :as parser]
             [polyquery.test-util :refer [csv-catalog]]))
@@ -10,7 +10,7 @@
 (defn- plan
   ([sql] (plan sql {}))
   ([sql opts]
-   (physical/plan-query (:query (analyzer/analyze-statement cat0 (parser/parse-statement sql) {})) opts)))
+   (planner/plan-query (:query (analyzer/analyze-statement cat0 (parser/parse-statement sql) {})) opts)))
 
 (defn- nodes [p]
   (tree-seq map? (fn [n] (concat (keep n [:input :left :right]) (:inputs n))) p))

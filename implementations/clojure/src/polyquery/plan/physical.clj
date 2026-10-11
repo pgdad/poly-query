@@ -1,12 +1,17 @@
 (ns polyquery.plan.physical
-  "Physical planning: chooses operator implementations for an (optimized)
-  logical plan — for joins with equality conjuncts between the two inputs a
-  hash join (default and `join: auto`/`hash`), a sort-merge join (`join:
-  merge`) or a nested-loop join (`join: nested_loop`); nested-loop joins
-  otherwise — replaces ORDER BY … LIMIT by a top-N operator (unless
-  `optimize: false`), marks parallelizable operators (`threads` > 1,
-  polyquery.plan.parallel) and plans the nested queries of subquery
-  expressions through the whole pipeline.
+  "Physical planning: maps an optimized logical plan (polyquery.plan.logical)
+  to physical operators. It alone takes the physical decisions:
+    * access paths — index scan (polyquery.plan.access) or table scan with
+      row-group skipping; hash lookups for correlated equality predicates;
+    * join algorithms — for joins with equality conjuncts between the two
+      inputs a hash join built on the smaller input (default and `join:
+      auto`/`hash`), a sort-merge join (`join: merge`) or a nested-loop join
+      (`join: nested_loop`); nested-loop joins otherwise;
+    * top-N for ORDER BY … LIMIT (unless `optimize: false`);
+    * the execution: `mode` (row / vectorized), `threads` (parallel
+      operators, polyquery.plan.parallel) and native kernels, recorded in
+      the root's :execution;
+  and plans the logical plans of subquery expressions the same way.
 
   Physical nodes ({:op …}):
     {:op :values :rows [[…]]}
@@ -47,34 +52,29 @@
         ; parallel execution of a partitionable pipeline (polyquery.plan.parallel)
   :hash-aggregate, :sort and :top-n may carry :partitions n (parallel
   partial aggregation / sorting of a partitionable input).
-  Subquery expressions carry :plan (a physical plan) instead of :query."
+  Subquery expressions carry :plan (a physical plan) instead of :query and
+  :logical. The root of a query plan carries :columns [{:name :type}] and
+  :execution {:mode :row|:vectorized :threads n :native? b}."
   (:require [polyquery.plan.access :as access]
             [polyquery.plan.cost :as cost]
-            [polyquery.plan.logical :as logical]
-            [polyquery.plan.optimizer :as optimizer]
             [polyquery.plan.parallel :as parallel]
-            [polyquery.plan.pruning :as pruning]
             [polyquery.sql.bound :as b]))
 
 (set! *warn-on-reflection* true)
 
-(declare plan-query)
+(declare plan-tree)
 
 (defn- plan-expr
-  "Plans the nested queries of the subquery expressions in e."
+  "Plans the logical plans of the subquery expressions in e."
   [options e]
   (when e
     (b/transform (fn [x]
-                   (if (and (= :subquery (:node x)) (:query x))
-                     ;; EXISTS only needs to know whether there are rows;
+                   (if (and (= :subquery (:node x)) (:logical x))
                      ;; correlated subqueries run once per outer row: serially
                      (-> x
-                         (assoc :plan (plan-query (:query x) (cond-> options
-                                                               (= :exists (:kind x))
-                                                               (assoc :required-outputs #{})
-                                                               (:correlated? x)
-                                                               (assoc :threads 1))))
-                         (dissoc :query))
+                         (assoc :plan (plan-tree (:logical x) (cond-> options
+                                                                (:correlated? x) (assoc :threads 1))))
+                         (dissoc :query :logical))
                      x))
                  e)))
 
@@ -206,16 +206,39 @@
       :limit (plan-limit node options phys px)
       :union-all {:op :union-all :inputs (mapv phys (:inputs node))})))
 
-(defn plan-query
-  "Plans a bound query: logical plan → optimization → physical plan.
-  options: {:optimize bool (default true), :join \"auto\"|\"hash\"|\"merge\"|
-  \"nested_loop\", :use-indexes bool (default true), :threads n (default 1),
-  :required-outputs #{i …} (default: all; outputs not in the set are never
-  read)}."
-  [bq options]
-  (let [required (:required-outputs options)
-        options (dissoc options :required-outputs)
-        logical (logical/plan-query bq)
-        optimized (if (false? (:optimize options)) logical (optimizer/optimize logical))
-        physical (to-physical (pruning/prune-query optimized required) options)]
-    (assoc (parallel/parallelize physical (or (:threads options) 1)) :columns (:columns bq))))
+(defn- plan-tree
+  "Physical plan of a logical (sub)query plan; options :threads resolved."
+  [logical options]
+  (assoc (parallel/parallelize (to-physical logical options) (:threads options))
+         :columns (:columns logical)))
+
+(def default-threads
+  "Worker threads per query when neither the query nor --threads says."
+  (min 8 (.availableProcessors (Runtime/getRuntime))))
+
+(defn- execution-mode
+  "Execution model of a query: `row` (baseline) or `vectorized` (also for
+  `auto`, the default)."
+  [options]
+  (if (#{"row" :row} (:mode options)) :row :vectorized))
+
+(defn- worker-threads
+  "Worker threads of a query: its `threads` option, else --threads
+  (:default-threads), else default-threads (1 for the row-mode baseline)."
+  ^long [options]
+  (long (or (:threads options)
+            (when (= :row (execution-mode options)) 1)
+            (when (pos? (long (or (:default-threads options) 0))) (:default-threads options))
+            default-threads)))
+
+(defn plan
+  "Physical plan of an optimized logical query plan. options (the query
+  options): :optimize bool (default true), :join \"auto\"|\"hash\"|\"merge\"|
+  \"nested_loop\", :use-indexes bool (default true), :mode \"auto\"|\"row\"|
+  \"vectorized\", :threads n, :default-threads n, :native bool."
+  [logical options]
+  (let [mode (execution-mode options)
+        threads (worker-threads options)]
+    (assoc (plan-tree logical (assoc options :threads threads))
+           :execution {:mode mode :threads threads
+                       :native? (boolean (and (:native options) (= :vectorized mode)))})))

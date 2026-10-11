@@ -1,6 +1,6 @@
-(ns polyquery.plan.reorder
-  "Join reordering for chains of inner/cross joins (spec/phases/phase-5.md;
-  part of the logical optimizer, disabled by `optimize: false`).
+(ns polyquery.plan.rules.join-reordering
+  "Optimizer rule `join-reordering`: reorders chains of inner/cross joins
+  (spec/phases/phase-5.md).
 
   A maximal tree of INNER/CROSS joins is flattened into its relations and
   the conjuncts of its join conditions (after predicate pushdown). The
@@ -15,6 +15,7 @@
   may read the row through correlation by position), as are LEFT joins
   (they are cluster boundaries) and clusters already in greedy order."
   (:require [polyquery.plan.cost :as cost]
+            [polyquery.plan.logical :as logical]
             [polyquery.sql.bound :as b]))
 
 (set! *warn-on-reflection* true)
@@ -134,12 +135,10 @@
           (rebuild rels conjs conj-rels order (column-types node)))))))
 
 (defn reorder-joins
-  "Reorders the inner-join clusters of a logical plan (not descending into
-  derived tables, whose plans the optimizer handles separately)."
+  "The rule: reorders the inner-join clusters of a logical plan (derived
+  tables and UNION ALL branches included, before the clusters containing
+  them are estimated)."
   [node]
-  (cond
-    (inner? node) (reorder-cluster node)
-    (= :join (:op node)) (-> node (update :left reorder-joins) (update :right reorder-joins))
-    (= :derived (:op node)) node
-    (:input node) (update node :input reorder-joins)
-    :else node))
+  (if (inner? node)
+    (reorder-cluster node)
+    (logical/map-inputs reorder-joins node)))
