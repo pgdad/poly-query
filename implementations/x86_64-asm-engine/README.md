@@ -322,7 +322,15 @@ zero, casts, functions) only on the rows the row engine evaluates - the
 right operand of AND / OR only where the left one did not decide, the right
 operand of other binary operators only where the left one is not NULL,
 CASE branches and other complex nodes tuple by tuple - and parallel parts
-re-raise the error of the lowest failing part. `tests/modes_test.sh` (part
+re-raise the error of the lowest failing part. Because column-at-a-time
+evaluation could still meet a *later* row's error first when different
+rows raise different errors, a batch / parallel execution that fails with a
+data error (overflow, division by zero, conversion, invalid argument,
+subquery cardinality) is replayed in the row baseline, which then reports
+exactly the baseline's error (successful queries never pay for this).
+ORDER BY is a stable sort everywhere (ties keep production order, which is
+the same in every mode; top-N heaps use the same tie-break), so even tied
+rows come out identically. `tests/modes_test.sh` (part
 of `make test`) checks byte-identical responses, including error cases,
 across modes, thread counts (forced onto tiny inputs with `PQ_PAR_MIN=1`),
 join algorithms and `optimize`; the conformance runner's `--modes` matrix
