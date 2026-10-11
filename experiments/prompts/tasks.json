@@ -59,8 +59,8 @@
     "title": "Refactoring — logical/physical plan separation",
     "phase_file": "phase-2.md",
     "runner_args": "",
-    "goal": "Behaviour-preserving refactoring (identical for every language): ensure the engine has an explicit, inspectable logical plan representation, a rule-based optimizer operating only on it, and a separate physical planning step, as described in `spec/changes/refactor-plan-separation.md`. No externally visible behaviour may change.",
-    "done": "Every conformance case that passed before still passes, no new capabilities are claimed, and README.md documents the new structure with a before/after module map. All public conformance phases the engine previously passed still pass (`python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery`), plus the task-specific criteria above; `make build test` succeed; all work is committed."
+    "goal": "Behaviour-preserving refactoring (identical for every language): your accepted engine (Phases 1–5 and native kernels) is in `implementations/{{LANG_DIR}}/`. Restructure it as specified in `spec/changes/refactor-plan-separation.md`: an explicit logical plan representation, a rule-based optimizer made of separately named and unit-tested rules that operates only on the logical plan (honouring `optimize: false`), and a separate physical planning step that alone decides access paths, join algorithms, execution mode and native kernels. No externally visible behaviour may change.",
+    "done": "Every conformance suite that passed before still passes: `python3 tests/conformance/runner.py --engine implementations/{{LANG_DIR}}/bin/polyquery`, the same with `--modes`, with `--transport http`, with `--native native-kernels/build/x86_64/libpqkernels.so` (build the library with `make -C native-kernels`), and `python3 tests/concurrency/http_suite.py --engine implementations/{{LANG_DIR}}/bin/polyquery`; the capability set is unchanged; each optimizer rule has unit tests; `make build test` succeed; README.md contains a before/after module map; all work is committed."
   },
   "debug-mutant": {
     "title": "Debugging — injected defect",

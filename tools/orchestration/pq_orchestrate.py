@@ -73,9 +73,18 @@ WORKSPACE_PATHS = [
 NATIVE_EXTRA_PATHS = ["native-kernels/Makefile", "native-kernels/reference-c", "native-kernels/x86_64",
                       "native-kernels/arm64", "native-kernels/tests"]
 
+PHASE_TASKS = {"phase1", "phase2", "phase3", "phase4", "phase5"}
+
 TRUSTED_PATHS = ["tests", "spec"]
 TRUSTED_KERNEL_PATHS = ["spec", "native-kernels/Makefile", "native-kernels/include", "native-kernels/reference-c",
                         "native-kernels/tests"]
+
+
+def load_json_file(p: Path) -> dict | None:
+    try:
+        return json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def git_head() -> str | None:
@@ -163,7 +172,7 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
     # Export the allowed paths at `ref` (committed state only) into the workspace.
     impl_path = L["work_dir"]
     export = (KERNEL_WORKSPACE_PATHS if task == "kernels" else WORKSPACE_PATHS) + [impl_path]
-    if task == "native":
+    if task not in PHASE_TASKS and task != "kernels":
         export += NATIVE_EXTRA_PATHS
     present = [p for p in export if sh(["git", "cat-file", "-e", f"{ref}:{p}"], cwd=ROOT, check=False).returncode == 0]
     archive = subprocess.run(["git", "archive", "--format=tar", ref, *present], cwd=ROOT, check=True, capture_output=True)
@@ -206,6 +215,9 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
         "model": DEFAULT_MODEL, "effort": DEFAULT_EFFORT,
         "agent_harness": None, "limits": {}, "status": "prepared",
         "host": {"hostname": os.uname().nodename, "tools": tool_versions()},
+        # Capability set of the accepted engine this run starts from (refactoring must keep it).
+        "baseline_capabilities": ((load_json_file(ROOT / "results/correctness" / f"{lang}.json") or {})
+                                  .get("engine") or {}).get("capability_set"),
     }
     save_manifest(run_id, m)
     print(run_id)
@@ -592,7 +604,7 @@ def validate(run_id: str, phases: list[int] | None = None) -> dict:
     # test scaffolding come from the trusted repository (incl. hidden tests), so edits an agent made
     # to them cannot influence its verdict.
     for rel in TRUSTED_KERNEL_PATHS if m["task"] == "kernels" else \
-            TRUSTED_PATHS + (NATIVE_EXTRA_PATHS if m["task"] == "native" else []):
+            TRUSTED_PATHS + (NATIVE_EXTRA_PATHS if m["task"] not in PHASE_TASKS else []):
         dst = vd / rel
         if dst.is_dir():
             shutil.rmtree(dst)
@@ -618,7 +630,7 @@ def validate(run_id: str, phases: list[int] | None = None) -> dict:
 cd {vd}
 : > validate-status
 """
-    if m["task"] == "native":
+    if m["task"] not in PHASE_TASKS:
         # The library is built from the trusted kernel sources inside the sandbox.
         script += """( make -C native-kernels all ) > validate-native-lib.log 2>&1; echo "native_lib_exit=$?" >> validate-status
 """
@@ -648,6 +660,14 @@ python3 tests/concurrency/http_suite.py --engine implementations/{lang}/bin/poly
 """
         extra = ["conformance-native.json", "conformance-native-modes.json", "conformance-modes.json",
                  "conformance-http.json", "http-suite.json"]
+    if full and m["task"] != "phase5":
+        lib = "native-kernels/build/x86_64/libpqkernels.so"
+        script += f"""if implementations/{lang}/bin/polyquery capabilities | grep -q native.kernels; then
+python3 tests/conformance/runner.py --engine implementations/{lang}/bin/polyquery {phase_args} --include-hidden \
+   --native {lib} --report conformance-native.json -q > validate-native.log 2>&1; echo "native_exit=$?" >> validate-status
+fi
+"""
+        extra.append("conformance-native.json")
     if full:
         script += f"""python3 tests/conformance/runner.py --engine implementations/{lang}/bin/polyquery --modes --include-hidden \
    --report conformance-modes.json -q > validate-modes.log 2>&1; echo "modes_exit=$?" >> validate-status
@@ -800,6 +820,7 @@ def run_native_arm(kernels_dir: Path, out_dir: Path) -> dict:
                                                          "sve_default_vector_length_bytes", "governor")}}
 
 
+CAPS_UNCHANGED_TASKS = {"refactor-plan-separation", "debug-mutant", "optimize-latency"}
 TASK_REQUIRED_CAPS = {"change-union-all": "change.union_all", "change-decimal38": "change.decimal38",
                       "native": "native.kernels"}
 
@@ -814,6 +835,9 @@ def classify(m: dict, v: dict) -> str:
     # A requirement-change task is only done if the engine claims the change (its suites are skipped otherwise).
     need = TASK_REQUIRED_CAPS.get(m["task"])
     if need and need not in (v.get("capabilities") or []):
+        return "tests_failed"
+    if m["task"] in CAPS_UNCHANGED_TASKS and m.get("baseline_capabilities") is not None and \
+            sorted(v.get("capabilities") or []) != sorted(m["baseline_capabilities"]):
         return "tests_failed"
     summ = (v.get("summary") or {}).get("by_phase") or {}
     ok = True
