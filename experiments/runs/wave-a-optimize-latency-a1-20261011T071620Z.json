@@ -1,0 +1,25 @@
+{
+ "wave_id": "wave-a-optimize-latency-a1-20261011T071620Z",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 1,
+ "seed": 21733,
+ "order": [
+  "common-lisp"
+ ],
+ "run_ids": [
+  "a-optimize-latency-common-lisp-a1-20261011T071620Z"
+ ],
+ "started": "2026-10-11T07:16:21+00:00",
+ "parallel": 1,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  3.22509765625,
+  5.3154296875,
+  7.185546875
+ ]
+}

@@ -1,2 +1,6 @@
 2026-10-11T06:51:23+00:00 wave wave-a-optimize-latency-a1-20261011T065122Z: order=['python']
 2026-10-11T06:51:23+00:00 [a-optimize-latency-python-a1-20261011T065122Z] agent queued (usage gate, then launch)
+2026-10-11T08:05:24+00:00 [a-optimize-latency-python-a1-20261011T065122Z] agent finished; collecting telemetry
+2026-10-11T08:05:24+00:00 [a-optimize-latency-python-a1-20261011T065122Z] validating (clean clone, sandboxed)
+2026-10-11T08:05:56+00:00 [a-optimize-latency-python-a1-20261011T065122Z] outcome=success cost=$None turns=None wall=4440.2s
+2026-10-11T08:05:56+00:00 wave wave-a-optimize-latency-a1-20261011T065122Z finished: latency=success

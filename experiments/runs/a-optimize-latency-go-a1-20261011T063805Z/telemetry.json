@@ -1,0 +1,174 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-optimize-latency-go-a1-20261011T063805Z",
+ "language": "go",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-optimize-latency",
+ "prompt_sha256": "8654578f82ddb24f8ff1229b4f846527430787963c1e7cc4c10ca85202a377ba",
+ "session_id": "7dcdb458-c4d4-40cf-b8c6-487dc365b8d4",
+ "tokens": {
+  "input": 950,
+  "output": 4396,
+  "cache_read": 104357071,
+  "cache_creation": 1241373,
+  "thinking": null,
+  "thinking_estimated": 141002,
+  "source": "summed per-message usage (no final result event; output tokens are a lower bound)",
+  "api_messages": 475
+ },
+ "rate_limit": {
+  "events": 30,
+  "max_utilization": {
+   "five_hour": 0.62,
+   "seven_day": 0.33
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": null,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": null,
+ "result_segments": 0,
+ "assistant_messages": 1073,
+ "tool_calls": {
+  "Bash": 458,
+  "Write": 11,
+  "Read": 14,
+  "Agent": 5,
+  "ToolSearch": 1,
+  "Monitor": 1
+ },
+ "tool_calls_total": 490,
+ "tool_failures": 2,
+ "build_invocations": 169,
+ "build_failures_heuristic": 16,
+ "conformance_runs": 23,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   659,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 19,
+ "time": {
+  "wall_seconds": 5280.4,
+  "model_api_seconds": null,
+  "tool_seconds": 2676.7,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 18,
+  "files_changed": 28,
+  "lines_added": 4192,
+  "lines_removed": 179,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 124,
+ "result_subtype": null,
+ "is_error": null,
+ "stop_reason": null,
+ "final_message": "",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
