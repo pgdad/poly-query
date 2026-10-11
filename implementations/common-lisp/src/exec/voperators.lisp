@@ -786,12 +786,15 @@ BATCH-B under the ORDER BY KEYS ((pos type descending nulls-first) lists)."
   (make-row-order-predicate batch batch keys))
 
 (defun sorted-permutation (batch keys &optional (threads 1))
-  "Row indexes of BATCH in ORDER BY KEYS order (stable)."
-  (let ((perm (identity-index-vector (batch-count batch)))
-        (before (make-index-sort-predicate batch keys)))
-    (if (> threads 1)
-        (parallel-stable-sort perm before threads)
-        (stable-sort perm before))))
+  "Row indexes of BATCH in ORDER BY KEYS order (stable): by radix sort of
+normalized keys for large inputs (vsort.lisp), else by comparison sort."
+  (let ((before (make-index-sort-predicate batch keys)))
+    (or (and (>= (batch-count batch) *radix-sort-min-rows*)
+             (radix-sorted-permutation batch keys before threads))
+        (let ((perm (identity-index-vector (batch-count batch))))
+          (if (> threads 1)
+              (parallel-stable-sort perm before threads)
+              (stable-sort perm before))))))
 
 (defun drain-batches (open kinds)
   "All rows of the batch opener OPEN as one batch (charging memory)."
