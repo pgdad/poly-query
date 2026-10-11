@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use super::context::ExecContext;
 use super::eval::{eval, normalize_key};
-use super::operators::build;
+use super::operators::{build, build_row};
 use crate::error::{Error, ErrorCode, Result};
 use crate::planner::expr::{Expr, KeyDomain, SubqueryPlan};
 use crate::planner::physical;
@@ -59,7 +59,13 @@ fn run(
         }
     };
     let result = ctx.with_params(key.1.clone().into(), || {
-        let mut op = build((*plan).clone(), ctx);
+        // Correlated subqueries run once per distinct parameter tuple on
+        // small inputs: the row engine's lower setup cost wins there.
+        let mut op = if params.is_empty() {
+            build((*plan).clone(), ctx)
+        } else {
+            build_row((*plan).clone())
+        };
         Ok(match want {
             Want::Scalar => match op.next(ctx)? {
                 None => SubqueryResult::Scalar(Value::Null),

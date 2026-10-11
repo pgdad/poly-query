@@ -441,6 +441,9 @@ are built once, before the workers start, and shared read-only (`Arc`).
 * **Parallel DISTINCT**: executed as a parallel aggregation grouping by
   every column (no aggregates).
 * **Parallel sort**: see above.
+* Correlated subqueries (one small execution per distinct outer value)
+  use the row engine, whose setup cost is lower; uncorrelated subqueries
+  run vectorized.
 * Tables smaller than two morsels, subqueries, and scan pipelines under a
   `LIMIT` of at most one morsel (which a serial scan answers from its
   first batches) run serially.
