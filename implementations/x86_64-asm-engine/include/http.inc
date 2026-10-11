@@ -55,7 +55,7 @@
 #define CN_QACCT   160   /* completion accounted (metrics / log) */
 #define CN_QREQID  168   /* /v1/request: JSON text of the request id (malloc'd) or 0 */
 #define CN_QKILL   176   /* error code to report when the parent killed the child */
-#define CN_QMETRIC 184   /* counts as a query in the metrics */
+/* 184: reserved */
 /* catalog job (executed by the catalog worker thread) */
 #define CN_JKIND   192   /* JK_* */
 #define CN_JOP     200   /* forced op (C string) or 0 = the request's "op" */

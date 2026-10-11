@@ -932,7 +932,24 @@ FUNC route
     mov %rsi, %r13
     mov net_arena(%rip), %rdi
     call arena_reset
-    /* ---- fixed paths */
+    mov $LV_DEBUG, %edi
+    CSTR %rsi, "http request"
+    call log_begin
+    test %eax, %eax
+    jz 0f
+    lea log_buf(%rip), %r15
+    PUTS %r15, ",\"method\":"
+    mov %r15, %rdi
+    mov RQ_METH(%r13), %rsi
+    mov RQ_METHLEN(%r13), %rdx
+    call buf_put_json_str
+    PUTS %r15, ",\"path\":"
+    mov %r15, %rdi
+    mov RQ_PATH(%r13), %rsi
+    mov RQ_PATHLEN(%r13), %rdx
+    call buf_put_json_str
+    call log_end
+0:  /* ---- fixed paths */
     mov %r13, %rdi
     CSTR %rsi, "/health"
     call path_eq
@@ -1714,7 +1731,6 @@ FUNC query_admit
     call query_id_of
     mov %rax, CN_QID(%rbx)
     mov %r14, CN_QKIND(%rbx)
-    movq $1, CN_QMETRIC(%rbx)
     /* request id (/v1/request) for parent-generated errors */
     cmp $QK_REQUEST, %r14d
     jne 4f
