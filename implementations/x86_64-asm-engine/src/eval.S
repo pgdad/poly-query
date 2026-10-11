@@ -195,7 +195,16 @@ FUNC eval
     je ev_agg
     cmp $EK_FUNC, %eax
     je ev_func
-    RAISE E_INTERNAL_ERROR, "cannot evaluate expression node"
+    /* functions.S hook: CASE / BETWEEN / IN list / LIKE */
+    cmp $EK_CASE, %eax
+    jb 1f
+    cmp $EK_LIKE, %eax
+    ja 1f
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    call eval_special
+    LEAVE
+1:  RAISE E_INTERNAL_ERROR, "cannot evaluate expression node"
 
 ev_ret_null:
     xor %eax, %eax
@@ -281,33 +290,11 @@ ev_unary:
 2:  btc $63, %rax
     jmp ev_ret
 
-ev_func:
-    /* PQ_SLEEP(ms) */
-    mov N_A(%rbx), %rax
-    mov (%rax), %rdi
+ev_func:                            /* functions.S hook: scalar functions */
+    mov %rbx, %rdi
     mov %r12, %rsi
-    call eval
-    test %edx, %edx
-    jnz ev_ret_null
-    mov %rax, %r13                  /* result */
-    mov %rax, %r14                  /* remaining ms */
-1:  test %r14, %r14
-    jle 3f
-    mov %r14, %rcx
-    cmp $10, %rcx
-    jbe 2f
-    mov $10, %ecx
-2:  sub %rcx, %r14
-    imul $1000000, %rcx, %rcx
-    movq $0, 0(%rsp)
-    mov %rcx, 8(%rsp)
-    lea 0(%rsp), %rdi
-    xor %esi, %esi
-    call nanosleep
-    call check_deadline
-    jmp 1b
-3:  mov %r13, %rax
-    jmp ev_ret
+    call eval_scalar_func
+    LEAVE
 
 /* ---------------------------------------------------------------- binary */
 ev_binary:

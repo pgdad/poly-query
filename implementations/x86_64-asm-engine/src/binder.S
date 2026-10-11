@@ -33,38 +33,6 @@ cast_matrix:
     .byte 0xE0      /* DATE  -> STR, DATE, TS */
     .byte 0xE0      /* TS    -> STR, DATE, TS */
 
-/* phase-2 scalar function names: recognised, reported as UNSUPPORTED */
-phase2_funcs:
-    .asciz "ABS"
-    .asciz "ROUND"
-    .asciz "FLOOR"
-    .asciz "CEIL"
-    .asciz "CEILING"
-    .asciz "SQRT"
-    .asciz "POWER"
-    .asciz "MOD"
-    .asciz "LENGTH"
-    .asciz "UPPER"
-    .asciz "LOWER"
-    .asciz "SUBSTR"
-    .asciz "SUBSTRING"
-    .asciz "TRIM"
-    .asciz "LTRIM"
-    .asciz "RTRIM"
-    .asciz "REPLACE"
-    .asciz "CONCAT"
-    .asciz "COALESCE"
-    .asciz "NULLIF"
-    .asciz "YEAR"
-    .asciz "MONTH"
-    .asciz "DAY"
-    .asciz "HOUR"
-    .asciz "MINUTE"
-    .asciz "SECOND"
-    .asciz "DATE_TRUNC"
-    .asciz "DATE_DIFF"
-    .byte 0
-
 agg_names:
     .asciz "COUNT"
     .asciz "SUM"
@@ -180,7 +148,22 @@ FUNC bind_expr_node
     je be_cast
     cmp $EK_FUNC, %eax
     je be_func
-    RAISE E_INTERNAL_ERROR, "unknown expression node"
+    /* functions.S hook: CASE / BETWEEN / IN list / LIKE */
+    cmp $EK_CASE, %eax
+    jb 1f
+    cmp $EK_LIKE, %eax
+    ja 1f
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    call bind_special
+    LEAVE
+1:  /* functions.S hook: subqueries are parsed but not bound by this binder */
+    cmp $EK_SUBQ, %eax
+    jb 2f
+    cmp $EK_EXISTS, %eax
+    ja 2f
+    RAISE E_UNSUPPORTED, "subqueries are not supported by this engine"
+2:  RAISE E_INTERNAL_ERROR, "unknown expression node"
 
 be_done:
     mov %r12, %rax
@@ -547,44 +530,11 @@ be_func:
     call name_index
     cmp $-1, %eax
     jne bf_agg
-    mov N_B(%r12), %rdi
-    add $8, %rdi
-    CSTR %rsi, "PQ_SLEEP"
-    call strcasecmp
-    test %eax, %eax
-    jnz bf_other
-    cmpq $0, g_test_functions(%rip)
-    je bf_unknown
-    testl $(NF_STAR | NF_DISTINCT), N_FLAGS(%r12)
-    jnz bf_arity
-    cmpq $1, N_V1(%r12)
-    jne bf_arity
-    movl $F_PQ_SLEEP, N_OP(%r12)
-    mov N_A(%r12), %r13
+    /* functions.S hook: every non-aggregate name is a scalar function */
     mov %rbx, %rdi
-    mov (%r13), %rsi
-    call bind_expr
-    mov %rax, (%r13)
-    movzbl N_TYPE(%rax), %ecx
-    cmp $T_INT, %ecx
-    je 1f
-    cmp $T_NULL, %ecx
-    jne bind_type_error
-1:  movl $T_INT, N_TYPE(%r12)
-    jmp be_done
-bf_other:
-    mov N_B(%r12), %rdi
-    lea phase2_funcs(%rip), %rsi
-    call name_index
-    cmp $-1, %eax
-    je bf_unknown
-    RAISE E_UNSUPPORTED, "function not supported by this engine"
-bf_unknown:
-    mov N_B(%r12), %rdx
-    add $8, %rdx
-    mov $E_SEMANTIC_ERROR, %edi
-    CSTR %rsi, "unknown function '%s'"
-    call pq_raisef
+    mov %r12, %rsi
+    call bind_scalar_func
+    LEAVE
 bf_arity:
     RAISE E_SEMANTIC_ERROR, "wrong number of arguments"
 
