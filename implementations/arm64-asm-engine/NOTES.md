@@ -1,30 +1,42 @@
 # Working notes (arm64-asm-engine)
 
-## Status (Phase 5, session 1) — in progress
+## Status (Phase 5, session 1) — complete
 - Conformance: all phases 569/569, `--modes` 3324/3324 (also with
   `PQ_PARALLEL_MIN_ROWS=1`, which forces parallel tasks on tiny inputs —
-  use it to test the parallel code paths). `make build test` pass.
-- Options (protocol.S parse_exec_opts -> TLS g_x_mode / g_x_join /
-  g_x_threads / g_x_optimize in exec.S; default threads = --threads or
-  min(nprocs, 8)). Capabilities phase5, exec.*, join.* claimed.
-- New modules: join.S (hash / merge / nested-loop joins), vexec.S (batch
-  expression evaluator veval, vfilter, vkey_cells), vagg.S (hash
-  aggregation, partial tables merged in task order), parallel.S (par_run:
-  worker threads with own arena/setjmp, arenas adopted by the caller).
-- mode row = old executor (per-tuple eval, sort-based grouping);
-  vectorized = batch scans/filters, hash aggregation, vectorized join keys.
-- optimize=false disables: top-N, hash-join build-side swap (and future
-  logical rewrites). Pushdown / pruning / index choice stay (Phase 3 suite
-  runs with optimize=false in --modes and expects them).
+  use it to test the parallel code paths), `--transport http` 569/569,
+  http_suite 19/19. `make build test lint` pass (new
+  tests/sh/run_mode_tests.sh: 8 option sets must agree).
+- Options: protocol.S parse_exec_opts -> TLS g_x_mode / g_x_join /
+  g_x_threads / g_x_optimize (exec.S); default threads = --threads or
+  min(nprocs, 8); g_par_min_rows (16384, env PQ_PARALLEL_MIN_ROWS).
+- Modules: join.S (hash / merge / nested-loop), vexec.S (veval, vfilter,
+  vkey_cells, dict truth tables, NEON compare), vagg.S (hash aggregation,
+  partial tables merged in task order), ops.S (filter / project tasks),
+  parallel.S (par_run: worker threads with own arena + setjmp, arenas
+  adopted by the caller), optimize.S (constant folding via try_eval,
+  predicate simplification). exec.S: scan tasks over candidate ranges,
+  top-N (topn_rows), agg_emit_row.
+- mode row = Phase 4 executor (per-tuple eval, sort-based grouping).
+- optimize=false disables folding/simplification, top-N, hash build-side
+  swap. Pushdown / pruning / index choice stay (Phase 3 suite runs with
+  optimize=false in --modes and expects them).
 - Benchmark: bench/bench.sh DATA_DIR (data: pqgen.py generate --scale 1m
-  --out /tmp/pqbench/1m --jobs 1); baseline before Phase 5 in
-  bench/baseline-before.txt.
+  --out /tmp/pqbench/1m --jobs 1 — multiprocessing fails in the sandbox);
+  before: bench/baseline-before.txt, after: bench/results-after.txt,
+  README table.
+- Fuzzing: /tmp/fz/fuzz.py (throw-away, outside the repo) compared 5
+  option sets on ~4000 random queries over the fixture data: 0 mismatches.
 
-## Next steps (Phase 5)
-- constant folding / predicate simplification (optimize=true only)
-- dictionary-code comparisons for STRING = constant, explicit NEON kernel
-- vectorized projection; faster merge join (vectorized keys)
-- README: Phase 5 section with before/after table
+## Possible next steps
+- join reordering for inner-join chains (needs non-contiguous rv ranges in
+  combine()); parallel sort; vectorized streaming projection.
+
+## Gotchas (phase 5)
+- Tuple width can be 0 (SELECT without FROM): copy loops must check it.
+- Worker threads must not evaluate subqueries (SubPlan caches are shared):
+  gate every parallel operator with expr_par_safe.
+- Unit tests run with default (vectorized) mode: unordered results come
+  in first-appearance order, not sorted.
 
 ## Status (Phase 4, session 1) — complete
 - Conformance: session and `--transport http` both 554/554 for phases 1-3
