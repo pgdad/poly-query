@@ -1,0 +1,164 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-optimize-latency-go-a3-20261011T124900Z",
+ "language": "go",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 3,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-optimize-latency",
+ "prompt_sha256": "8654578f82ddb24f8ff1229b4f846527430787963c1e7cc4c10ca85202a377ba",
+ "session_id": "0c6fc2a5-329f-4b54-a7ba-925691430b3b",
+ "tokens": {
+  "input": 644,
+  "output": 281870,
+  "cache_read": 100552579,
+  "cache_creation": 545612,
+  "thinking": null,
+  "thinking_estimated": 122904,
+  "source": "result events",
+  "api_messages": 354
+ },
+ "rate_limit": {
+  "events": 43,
+  "max_utilization": {
+   "five_hour": 0.57,
+   "seven_day": 0.45
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 31.194049000000007,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 328,
+ "result_segments": 1,
+ "assistant_messages": 720,
+ "tool_calls": {
+  "Bash": 347,
+  "Write": 10,
+  "Agent": 1,
+  "ToolSearch": 1
+ },
+ "tool_calls_total": 359,
+ "tool_failures": 9,
+ "build_invocations": 134,
+ "build_failures_heuristic": 8,
+ "conformance_runs": 21,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 5543.9,
+  "model_api_seconds": 3013.0,
+  "tool_seconds": 2685.9,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 21,
+  "files_changed": 31,
+  "lines_added": 3842,
+  "lines_removed": 295,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The analytics workload at 1m scale now runs about 7.7\u00d7 faster in total: 528.5 ms \u2192 68.7 ms, with identical results. Conformance still passes 100% and all work is committed (latest commit `ca6b583`).\n\n## Test results\n```\nphase 1: 225/225 pass   phase 2: 208/208 pass   phase 3: 212/212 pass   phase 5: 15/15 pass\nTOTAL: 660/660 pass\n```\n- The same 660/660 passes over HTTP, with the native kernel library, and with tiny work units that force parallel execution on small tests.\n- The run that tries every combination of execution options passes 3870/3870, also with the native kernel library.\n- `make build`, `make test` and `make lint` succeed, and a fresh clone builds offline.\n- The randomized cross-mode test found 0 mismatches in every run.\n- Full outputs of sorts, joins, large group-bys, DISTINCT and CTE queries match the original engine exactly, row order included. This held at several thread counts and in row mode.\n\n## Before \u2192 after (ms, median of 21 interleaved runs)\n\n| query | before | after | speedup |\n|---|---:|---:|---:|\n| q19 CTE + subquery | 141.5 | 8.2 | 17\u00d7 |\n| q09 COUNT(DISTINCT) | 52.1 | 2.9 | 18\u00d7 |\n| q15 multi-key sort | 144.4 | 12.4 | 12\u00d7 |\n| q14 string sort | 109.6 | 14.4 | 8\u00d7 |\n| q10 join + group-by | 15.1 | 3.5 | 4\u00d7 |\n| q20 string functions | 8.5 | 2.1 | 4\u00d7 |\n| **total** | 528.5 | 68.7 | 7.7\u00d7 |\n\nREADME.md has the table for all 20 queries, plus a second table with both engines on the same thread count. That second table separates the code improvements (906 \u2192 235 ms single-threaded) from the thread-default change.\n\nThe machine was shared with other jobs throughout, so individual timings vary by about \u00b110\u201320%. Old and new engine runs were interleaved, so the comparison stays fair.\n\n## What I changed\n- **Sorts:** a parallel radix sort instead of a comparison sort. Ties are resolved key by key, and the input and output steps also run in parallel.\n- **DISTINCT:** typed sets instead of per-group maps of boxed values, and a bitmap when the column's value range is small.\n- **Repeated work:** an aggregation that appears twice in one query (a CTE referenced twice) is computed once. Uncorrelated subqueries now run vectorized and in parallel instead of row by row.\n- **Group-by:**\n  - Faster integer maps, with direct array lookup when column statistics show a small key range.\n  - Leaner per-group state, and faster multi-column keys.\n  - Groups skip first-seen ordering when nothing downstream can observe the order.\n- **Joins:**\n  - The build side is built in parallel, keeps low-cardinality strings dictionary-encoded, and uses direct lookups for small integer key ranges.\n  - `LEFT JOIN \u2026 WHERE x IS NULL` becomes an anti-join when statistics show the column has no NULLs. The `--max-join-rows` limit still behaves exactly as before.\n- **CASE:** now evaluated a batch at a time instead of row by row. It is still lazy, so `CASE WHEN x = 0 THEN 0 ELSE 1/x END` cannot fail.\n- **Default threads per query:** raised from min(4, CPUs) to min(16, CPUs). 16 measured best here: 8 was about 10% slower, and 32 was no better and hurt large group-bys.\n\n## Decisions and limitations\n- Choices driven by statistics (table sizing, direct lookups, bitmaps, anti-joins) only affect speed. Values outside an expected range fall back to hashing, so results never depend on them.\n- Sorts are now limited by memory bandwidth.\n- q19 still converts its shared result from rows back to batches twice.\n- q07 gains nothing beyond 4 threads, because merging the per-thread partial results grows with the thread count.\n\nTo re-run the comparison, use `implementations/go/scripts/workload.py`. To profile a single workload query, use the new `BenchmarkWorkload` Go benchmark.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
