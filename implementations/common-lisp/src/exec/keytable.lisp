@@ -76,9 +76,27 @@
                               +null-key-hash+
                               (hash-key-value (aref data i))))))
             (simple-vector
-             (dotimes (i n)
-               (let ((v (svref data i)))
-                 (combine i (if (eq v +null+) +null-key-hash+ (hash-key-value v))))))))))))
+             (let ((codes (vec-codes vec)))
+               (if codes
+                   ;; Dictionary codes: hash each distinct value once.
+                   (let ((entry-hashes (dictionary-key-hashes (vec-dict vec))))
+                     (declare (type index-vector entry-hashes))
+                     (dotimes (i n)
+                       (combine i (if (eq (svref data i) +null+)
+                                      +null-key-hash+
+                                      (aref entry-hashes (aref codes i))))))
+                   (dotimes (i n)
+                     (let ((v (svref data i)))
+                       (combine i (if (eq v +null+) +null-key-hash+ (hash-key-value v))))))))))))))
+
+(defun dictionary-key-hashes (store)
+  "Key hashes of the entries of the DICT-COLUMN STORE (computed once)."
+  (or (dict-column-key-hashes store)
+      (setf (dict-column-key-hashes store)
+            (let* ((dict (dict-column-dictionary store))
+                   (hashes (make-index-vector (length dict))))
+              (dotimes (k (length dict) hashes)
+                (setf (aref hashes k) (hash-key-value (svref dict k))))))))
 
 (defstruct (key-table (:constructor %make-key-table))
   (width 0 :type fixnum)

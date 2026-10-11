@@ -38,7 +38,8 @@
 
 (defstruct (dict-column (:include column-store))
   (codes (make-array 0 :element-type '(unsigned-byte 32)) :type u32-vector)
-  (dictionary #() :type simple-vector))
+  (dictionary #() :type simple-vector)
+  (key-hashes nil))                      ; per entry hash, cached by the executor
 
 (defun column-null-count (store)
   (let ((v (column-store-validity store)))

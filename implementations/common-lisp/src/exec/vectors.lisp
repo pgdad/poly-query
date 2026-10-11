@@ -21,9 +21,14 @@ for a batch's vectors to stay in the CPU caches.")
 
 (deftype index-vector () '(simple-array fixnum (*)))
 
-(defstruct (vec (:constructor make-vec (data &optional validity)))
+(defstruct (vec (:constructor make-vec (data &optional validity codes dict)))
   data                                   ; I64-VECTOR, F64-VECTOR or SIMPLE-VECTOR
-  (validity nil :type (or null simple-bit-vector)))
+  (validity nil :type (or null simple-bit-vector))
+  ;; STRING values read from a dictionary-encoded column also keep their
+  ;; codes into the column's DICT-COLUMN store, so predicates can be
+  ;; evaluated (and keys hashed) once per distinct value.
+  (codes nil :type (or null u32-vector))
+  (dict nil))
 
 (defstruct (batch (:constructor make-batch (count columns)))
   (count 0 :type fixnum)
@@ -164,11 +169,18 @@ for a batch's vectors to stay in the CPU caches.")
         (i64-vector (gather (signed-byte 64) 0 aref))
         (f64-vector (gather double-float 0d0 aref))
         (simple-vector
-         (let ((out (make-array n)))
+         (let ((out (make-array n))
+               (codes (vec-codes vec))
+               (out-codes nil))
            (dotimes (k n)
              (let ((i (aref idx k)))
                (setf (svref out k) (if (< i 0) +null+ (svref data i)))))
-           (make-vec out)))))))
+           (when codes
+             (setf out-codes (make-array n :element-type '(unsigned-byte 32) :initial-element 0))
+             (dotimes (k n)
+               (let ((i (aref idx k)))
+                 (unless (< i 0) (setf (aref out-codes k) (aref codes i))))))
+           (make-vec out nil out-codes (and codes (vec-dict vec)))))))))
 
 (defun vec-scatter (vec idx m n kind)
   "VEC of N rows holding row K of VEC at position IDX[K] (K < M) and NULL
@@ -188,9 +200,12 @@ everywhere else."
     (simple-vector :any)))
 
 (defun vec-slice (vec start end)
-  (let ((validity (vec-validity vec)))
+  (let ((validity (vec-validity vec))
+        (codes (vec-codes vec)))
     (make-vec (subseq (vec-data vec) start end)
-              (and validity (subseq validity start end)))))
+              (and validity (subseq validity start end))
+              (and codes (subseq codes start end))
+              (vec-dict vec))))
 
 (defun vec-concatenate (vecs kind total)
   "One VEC of KIND holding the values of the VECS (TOTAL rows) in order."
@@ -324,16 +339,16 @@ all are; NIL when none is)."
            (dotimes (i n) (when (zerop (sbit vslice i)) (setf (svref values i) +null+))))
          (make-vec values)))
       ((and (eq kind :any) (dict-column-p store))
-       (let ((codes (dict-column-codes store))
-             (dict (dict-column-dictionary store))
-             (out (make-array n)))
+       (let* ((codes (subseq (dict-column-codes store) start end))
+              (dict (dict-column-dictionary store))
+              (out (make-array n)))
          (declare (type u32-vector codes) (type simple-vector dict))
          (dotimes (i n)
            (setf (svref out i)
                  (if (and vslice (zerop (sbit vslice i)))
                      +null+
-                     (svref dict (aref codes (+ start i))))))
-         (make-vec out)))
+                     (svref dict (aref codes i)))))
+         (make-vec out nil codes store)))
       (t
        (let ((read (column-reader store)))
          (declare (type function read))

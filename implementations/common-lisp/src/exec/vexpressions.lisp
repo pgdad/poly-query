@@ -164,7 +164,8 @@ are non-NULL (the other rows get NULL), as in the row evaluator."
       (:not (compile-vnot e))
       ((:is-null :is-not-null) (compile-vnull-test e))
       (:cast (or (compile-vcast e) (compile-lifted e :strict)))
-      ((:concat :like) (compile-lifted e :strict))
+      (:concat (compile-lifted e :strict))
+      (:like (or (compile-vlike e) (compile-lifted e :strict)))
       (:between (compile-lifted e :eager))
       (:in-list (if (every #'bexpr-constant-p (rest args))
                     (compile-lifted e :eager)
@@ -370,23 +371,79 @@ the error at the right time)."
       ((and (eq kind :f64) (typep c 'double-float))
        (let ((kernel (compile-vexpr column-expr)))
          (comparison-dispatch op typed-compare-vc kernel double-float c)))
-      ((and (eq kind :any) (stringp c) (member op '(:= :<>)))
-       (let ((kernel (compile-vexpr column-expr))
-             (want (eq op :=)))
-         (declare (type function kernel) (type string c))
-         (lambda (batch)
-           (let* ((n (batch-count batch))
-                  (x (vec-data (funcall kernel batch)))
-                  (out (make-array n)))
-             (declare (type simple-vector x))
-             (dotimes (i n)
-               (let ((v (svref x i)))
-                 (setf (svref out i)
-                       (if (eq v +null+)
-                           +null+
-                           (if (string= (the string v) c) want (not want))))))
-             (make-vec out)))))
+      ((and (eq kind :any) (stringp c))
+       (let ((cmp (make-comparator :string))
+             (test (comparison-test op)))
+         (declare (type function cmp test))
+         (compile-memoized-unary (compile-vexpr column-expr)
+                                 (lambda (v) (funcall test (funcall cmp v c))))))
       (t nil))))
+
+(defun comparison-test (op)
+  "Function of a comparator result (-1/0/1) implementing comparison OP."
+  (ecase op
+    (:= (lambda (c) (= c 0))) (:<> (lambda (c) (/= c 0)))
+    (:< (lambda (c) (< c 0))) (:<= (lambda (c) (<= c 0)))
+    (:> (lambda (c) (> c 0))) (:>= (lambda (c) (>= c 0)))))
+
+;;; ------------------------------------------------------------------
+;;; Dictionary-aware evaluation: a NULL-propagating function of one STRING
+;;; operand is computed once per distinct dictionary entry.
+
+(defun compile-memoized-unary (kernel fn &optional (kind :any))
+  "Kernel applying FN to the non-NULL values of KERNEL's :ANY vector (NULL
+stays NULL). Values carrying dictionary codes are looked up in a per-entry
+memo of FN's results, kept for the last dictionary seen."
+  (declare (type function kernel fn))
+  (let ((memo-dict nil)
+        (memo #())
+        (unknown '#:unknown))
+    (lambda (batch)
+      (let* ((n (batch-count batch))
+             (vec (funcall kernel batch))
+             (data (vec-data vec))
+             (codes (vec-codes vec))
+             (out (make-array n)))
+        (declare (type simple-vector data out) (type fixnum n))
+        (if codes
+            (let ((dict (vec-dict vec)))
+              (unless (eq dict memo-dict)
+                (setf memo-dict dict
+                      memo (make-array (length (dict-column-dictionary dict))
+                                       :initial-element unknown)))
+              (let ((memo memo))
+                (declare (type simple-vector memo))
+                (dotimes (i n)
+                  (setf (svref out i)
+                        (let ((v (svref data i)))
+                          (if (eq v +null+)
+                              +null+
+                              (let* ((code (aref codes i))
+                                     (r (svref memo code)))
+                                (if (eq r unknown)
+                                    (setf (svref memo code) (funcall fn v))
+                                    r))))))))
+            (dotimes (i n)
+              (setf (svref out i)
+                    (let ((v (svref data i)))
+                      (if (eq v +null+) +null+ (funcall fn v))))))
+        (if (eq kind :any)
+            (make-vec out)
+            (vec-from-values kind out n))))))
+
+(defun compile-vlike (e)
+  "LIKE with a constant pattern over a STRING operand, or NIL."
+  (destructuring-bind (s p) (b-op-args e)
+    (multiple-value-bind (pattern ok) (constant-operand-value p)
+      (when (and ok (eq (type-vec-kind (bexpr-type s)) :any))
+        (if (eq pattern +null+)
+            (let ((kernel (compile-vexpr s)))
+              (declare (type function kernel))
+              (lambda (batch)
+                (funcall kernel batch)
+                (constant-vec :any +null+ (batch-count batch))))
+            (compile-memoized-unary (compile-vexpr s)
+                                    (lambda (v) (like-match-p v pattern))))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Arithmetic
