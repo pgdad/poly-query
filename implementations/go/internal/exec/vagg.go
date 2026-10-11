@@ -155,22 +155,50 @@ func growZero[T any](s []T, g int) []T {
 // With native kernels, batches are first added to int64 partial sums
 // (fast) by pqk_group_sum_i64; a group's sum is sums[g] + fast[g].
 type exactSumState struct {
-	sums  []types.BigDecimalSum
+	small []int64               // per group: running sum while it fits int64
+	sums  []types.BigDecimalSum // per group: the remainder (nil until a sum leaves int64)
 	n     []int64
 	limit int64 // DECIMAL SUM: exclusive bound of the result
 	avg   bool
 	scale int
 
 	lib  *native.Lib
-	fast []int64
 	mask []byte
 }
 
 func (s *exactSumState) grow(g int) {
-	s.sums = growZero(s.sums, g)
+	s.small = growZero(s.small, g)
 	s.n = growZero(s.n, g)
-	if s.lib != nil {
-		s.fast = growZero(s.fast, g)
+	if s.sums != nil {
+		s.sums = growZero(s.sums, g)
+	}
+}
+
+// add adds x to the sum of group g (counts are maintained by callers).
+func (s *exactSumState) add(g int32, x int64) {
+	p := &s.small[g]
+	if c := *p + x; (c > *p) == (x > 0) {
+		*p = c
+		return
+	}
+	s.addSlow(g, x)
+}
+
+// addSlow adds x to the remainder of group g's sum (int64 overflow).
+func (s *exactSumState) addSlow(g int32, x int64) {
+	if s.sums == nil {
+		s.sums = make([]types.BigDecimalSum, len(s.small))
+	}
+	s.sums[g].Add(x)
+}
+
+// addMasked adds the values selected by an LSB-first bitmap (nil: all)
+// to group g.
+func (s *exactSumState) addMasked(g int32, vals []int64, mask []byte) {
+	for i, x := range vals {
+		if mask == nil || mask[i>>3]&(1<<(i&7)) != 0 {
+			s.add(g, x)
+		}
 	}
 }
 
@@ -178,39 +206,39 @@ func (s *exactSumState) update(gids []int32, n int, sel []int32, v *Vec) {
 	if s.lib != nil && n > 0 && s.nativeUpdate(gids, n, sel, v) {
 		return
 	}
-	sums, cnt, vals, nulls := s.sums, s.n, v.I, v.Nulls
-	add := func(g int32, x int64) {
-		if p := &sums[g]; !p.AddSmall(x) {
-			p.Add(x)
-		}
-		cnt[g]++
-	}
+	cnt, vals, nulls := s.n, v.I, v.Nulls
 	switch {
 	case sel == nil && nulls == nil:
 		for i, g := range gids[:n] {
-			add(g, vals[i])
+			s.add(g, vals[i])
+			cnt[g]++
 		}
 	case sel == nil:
 		for i, g := range gids[:n] {
 			if !nulls[i] {
-				add(g, vals[i])
+				s.add(g, vals[i])
+				cnt[g]++
 			}
 		}
 	case nulls == nil:
 		for _, i := range sel {
-			add(gids[i], vals[i])
+			g := gids[i]
+			s.add(g, vals[i])
+			cnt[g]++
 		}
 	default:
 		for _, i := range sel {
 			if !nulls[i] {
-				add(gids[i], vals[i])
+				g := gids[i]
+				s.add(g, vals[i])
+				cnt[g]++
 			}
 		}
 	}
 }
 
-// nativeUpdate adds a batch with pqk_group_sum_i64 into the fast sums and
-// the counts. If the kernel reports a possible overflow the batch is
+// nativeUpdate adds a batch with pqk_group_sum_i64 into the running sums
+// and the counts. If the kernel reports a possible overflow the batch is
 // subtracted again (wrapping arithmetic is exactly invertible) and false
 // is returned: the caller then adds the batch exactly.
 func (s *exactSumState) nativeUpdate(gids []int32, n int, sel []int32, v *Vec) bool {
@@ -219,13 +247,13 @@ func (s *exactSumState) nativeUpdate(gids []int32, n int, sel []int32, v *Vec) b
 		s.mask = activeMask(s.mask, n, sel, v.Nulls)
 		valid = s.mask
 	}
-	switch s.lib.GroupSumI64(asUint32(gids[:n]), v.I[:n], valid, s.fast, s.n) {
+	switch s.lib.GroupSumI64(asUint32(gids[:n]), v.I[:n], valid, s.small, s.n) {
 	case native.OK:
 		return true
 	case native.Overflow:
 		for i, g := range gids[:n] {
 			if valid == nil || valid[i>>3]&(1<<(i&7)) != 0 {
-				s.fast[g] -= v.I[i]
+				s.small[g] -= v.I[i]
 				s.n[g]--
 			}
 		}
@@ -233,32 +261,37 @@ func (s *exactSumState) nativeUpdate(gids []int32, n int, sel []int32, v *Vec) b
 	return false
 }
 
-// settle folds the fast partial sum of group g into its exact sum.
-func (s *exactSumState) settle(g int) {
-	if s.fast != nil && s.fast[g] != 0 {
-		s.sums[g].Add(s.fast[g])
-		s.fast[g] = 0
-	}
-}
-
 func (s *exactSumState) merge(g int32, src aggState, sg int32) {
 	o := src.(*exactSumState)
-	s.sums[g].Merge(&o.sums[sg])
-	if o.fast != nil {
-		s.sums[g].Add(o.fast[sg])
+	s.add(g, o.small[sg])
+	if o.sums != nil {
+		if s.sums == nil {
+			s.sums = make([]types.BigDecimalSum, len(s.small))
+		}
+		s.sums[g].Merge(&o.sums[sg])
 	}
 	s.n[g] += o.n[sg]
 }
 
+// total returns the exact sum of group g.
+func (s *exactSumState) total(g int) *types.BigDecimalSum {
+	t := &types.BigDecimalSum{}
+	t.Add(s.small[g])
+	if s.sums != nil {
+		t.Merge(&s.sums[g])
+	}
+	return t
+}
+
 func (s *exactSumState) result(g int) (types.Value, error) {
-	s.settle(g)
 	if s.n[g] == 0 {
 		return null, nil
 	}
+	t := s.total(g)
 	if s.avg {
-		return types.FloatValue(s.sums[g].RatioFloat(s.n[g], s.scale)), nil
+		return types.FloatValue(t.RatioFloat(s.n[g], s.scale)), nil
 	}
-	v, ok := s.sums[g].Int64()
+	v, ok := t.Int64()
 	if !ok || (s.limit > 0 && (v <= -s.limit || v >= s.limit)) {
 		return null, errs.New(errs.NumericOverflow, "SUM overflow")
 	}

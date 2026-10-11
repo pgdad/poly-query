@@ -258,9 +258,9 @@ func (w *naggWorker) window(g *storage.RowGroup, lo, hi int) error {
 		case *exactSumState:
 			vals := v.Ints[lo:hi]
 			if sum, ok := w.lib.SumI64(vals, mask); ok {
-				s.sums[0].Add(sum)
+				s.add(0, sum)
 			} else {
-				exactMaskedSum(&s.sums[0], vals, mask)
+				s.addMasked(0, vals, mask)
 			}
 			s.n[0] += count()
 		case *intMinMax:
@@ -276,17 +276,6 @@ func (w *naggWorker) window(g *storage.RowGroup, lo, hi int) error {
 		}
 	}
 	return nil
-}
-
-// exactMaskedSum adds the values selected by mask (nil: all) exactly.
-func exactMaskedSum(sum *types.BigDecimalSum, vals []int64, mask []byte) {
-	for i, x := range vals {
-		if mask == nil || mask[i>>3]&(1<<(i&7)) != 0 {
-			if !sum.AddSmall(x) {
-				sum.Add(x)
-			}
-		}
-	}
 }
 
 // fold merges the minimum and maximum of a window into group 0.
