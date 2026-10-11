@@ -34,6 +34,8 @@ GROUPED = [
     "SELECT g, s, COUNT(DISTINCT v), SUM(f) FROM t GROUP BY g, s",
     "SELECT v, COUNT(*) FROM t GROUP BY v",
     "SELECT u.tid, COUNT(*), SUM(t.v) FROM t JOIN u ON u.tid = t.id GROUP BY u.tid",
+    "SELECT COUNT(DISTINCT s), COUNT(DISTINCT v), SUM(DISTINCT v), COUNT(*), AVG(f), MIN(s) FROM t",
+    "SELECT COUNT(DISTINCT f), AVG(DISTINCT f), MAX(DISTINCT g) FROM t WHERE id > 5000",
 ]
 ANTI = [
     "SELECT COUNT(*) FROM t LEFT JOIN u ON u.tid = t.id WHERE u.uid IS NULL",

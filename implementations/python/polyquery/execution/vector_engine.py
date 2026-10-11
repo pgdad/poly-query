@@ -629,7 +629,7 @@ def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Batches:
 
 # grouped aggregations expected to produce at least this many groups merge
 # their partial states in the pool workers instead of the parent
-EXCHANGE_MIN_GROUPS = 16_384
+EXCHANGE_MIN_GROUPS = 4_096
 
 
 def _exchange_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> tuple[list[Any], Columns] | None:
@@ -648,9 +648,7 @@ def _exchange_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> tuple[
     gather = node.input
     pool = ctx.pool
     if (
-        not node.keys
-        or not isinstance(gather, pp.Gather)
-        or node.estimated_rows < EXCHANGE_MIN_GROUPS
+        not isinstance(gather, pp.Gather)
         or pool is None
         or ctx.native is not None
         or not parallel.use_processes(gather, ctx)
@@ -658,6 +656,8 @@ def _exchange_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> tuple[
         return None
     ranges = min(gather.partitions, pool.max_workers)
     if ranges < 2:
+        return None
+    if not node.keys or node.estimated_rows < EXCHANGE_MIN_GROUPS:
         return None
     split_task = partial(_consume_partition, partial(_aggregate_split, node, gather, ranges), gather.input)
     parts = pool.run(gather, ctx, split_task, prepare_pipeline)
