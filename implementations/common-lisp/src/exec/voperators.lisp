@@ -474,27 +474,28 @@ NULLs."
 ;;; row indexes is sorted (stably) with comparators reading the typed key
 ;;; columns directly.
 
-(defun make-key-index-comparator (batch pos type descending nulls-first)
-  "Function (i j) -> -1/0/1 ordering rows I and J of BATCH by column POS."
-  (let* ((vec (svref (batch-columns batch) pos))
-         (data (vec-data vec))
-         (validity (vec-validity vec))
-         (null-order (if nulls-first -1 1))
-         (sign (if descending -1 1)))
-    (declare (type fixnum null-order sign) (type (or null simple-bit-vector) validity))
+(defun make-key-comparator (vec-a vec-b type descending nulls-first)
+  "Function (i j) -> -1/0/1 ordering row I of VEC-A against row J of VEC-B
+(two vectors of the same kind) for one ORDER BY key."
+  (let ((data-a (vec-data vec-a)) (validity-a (vec-validity vec-a))
+        (data-b (vec-data vec-b)) (validity-b (vec-validity vec-b))
+        (null-order (if nulls-first -1 1))
+        (sign (if descending -1 1)))
+    (declare (type fixnum null-order sign)
+             (type (or null simple-bit-vector) validity-a validity-b))
     (macrolet ((typed (element-type)
-                 `(let ((data data))
-                    (declare (type (simple-array ,element-type (*)) data))
+                 `(let ((data-a data-a) (data-b data-b))
+                    (declare (type (simple-array ,element-type (*)) data-a data-b))
                     (lambda (i j)
                       (declare (type fixnum i j))
-                      (let ((an (and validity (zerop (sbit validity i))))
-                            (bn (and validity (zerop (sbit validity j)))))
+                      (let ((an (and validity-a (zerop (sbit validity-a i))))
+                            (bn (and validity-b (zerop (sbit validity-b j)))))
                         (cond ((and an bn) 0)
                               (an null-order)
                               (bn (- null-order))
-                              (t (let ((a (aref data i)) (b (aref data j)))
+                              (t (let ((a (aref data-a i)) (b (aref data-b j)))
                                    (cond ((< a b) (- sign)) ((> a b) sign) (t 0))))))))))
-      (etypecase data
+      (etypecase data-a
         (i64-vector (typed (signed-byte 64)))
         (f64-vector (typed double-float))
         (simple-vector
@@ -502,14 +503,17 @@ NULLs."
            (declare (type function cmp))
            (lambda (i j)
              (declare (type fixnum i j))
-             (funcall cmp (svref data i) (svref data j)))))))))
+             (funcall cmp (svref data-a i) (svref data-b j)))))))))
 
-(defun make-index-sort-predicate (batch keys)
-  "Predicate (i j) -> T when row I of BATCH sorts strictly before row J."
+(defun make-row-order-predicate (batch-a batch-b keys)
+  "Predicate (i j) -> T when row I of BATCH-A sorts strictly before row J of
+BATCH-B under the ORDER BY KEYS ((pos type descending nulls-first) lists)."
   (let ((comparators (map 'simple-vector
                           (lambda (key)
                             (destructuring-bind (pos type descending nulls-first) key
-                              (make-key-index-comparator batch pos type descending nulls-first)))
+                              (make-key-comparator (svref (batch-columns batch-a) pos)
+                                                   (svref (batch-columns batch-b) pos)
+                                                   type descending nulls-first)))
                           keys)))
     (if (= (length comparators) 1)
         (let ((cmp (svref comparators 0)))
@@ -521,6 +525,9 @@ NULLs."
                 do (cond ((< c 0) (return t))
                          ((> c 0) (return nil)))
                 finally (return nil))))))
+
+(defun make-index-sort-predicate (batch keys)
+  (make-row-order-predicate batch batch keys))
 
 (defun sorted-permutation (batch keys)
   (let ((perm (identity-index-vector (batch-count batch))))
@@ -594,11 +601,27 @@ NULLs."
                     (declare (type function child))
                     (loop for b = (funcall child)
                           while b
-                          do (push b buffer)
-                             (incf buffered (batch-count b))
-                             (when (>= buffered (max +batch-size+ (* 2 keep)))
-                               (check-interrupts)
-                               (compact))))
+                          do ;; Once KEEP rows are known, only rows sorting
+                             ;; strictly before the last of them can qualify.
+                             (when (and best (= (batch-count best) keep))
+                               (let ((before (make-row-order-predicate b best keys))
+                                     (last (1- keep))
+                                     (idx (make-index-vector (batch-count b)))
+                                     (m 0))
+                                 (declare (type function before) (type fixnum m))
+                                 (dotimes (i (batch-count b))
+                                   (when (funcall before i last)
+                                     (setf (aref idx m) i)
+                                     (incf m)))
+                                 (setf b (cond ((zerop m) nil)
+                                               ((= m (batch-count b)) b)
+                                               (t (batch-gather b idx m))))))
+                             (when b
+                               (push b buffer)
+                               (incf buffered (batch-count b))
+                               (when (>= buffered (max +batch-size+ (* 2 keep)))
+                                 (check-interrupts)
+                                 (compact)))))
                   (compact))
                 (setf output (if best
                                  (permutation-batches best (identity-index-vector (batch-count best))
