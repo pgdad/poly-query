@@ -38,6 +38,10 @@ k_join:     .asciz "join"
 k_optimize: .asciz "optimize"
 k_use_idx:  .asciz "use_indexes"
 k_native:   .asciz "native"
+k_layout:   .asciz "layout"
+k_dict:     .asciz "dictionary"
+v_row:      .asciz "row"
+v_column:   .asciz "column"
 v_csv:      .asciz "csv"
 v_json:     .asciz "json"
 v_jsonl:    .asciz "jsonl"
@@ -835,6 +839,49 @@ ENDF op_sleep
 
 // ------------------------------------------------------------------ load -----
 
+// layout_options(x0 options JNode* or 0) -> w0 layout (LAYOUT_*, -1 default),
+// w1 dictionary mode (0 auto, 1 forced). Bad values => INVALID_REQUEST.
+//   x19 options, x20 layout Str*
+FUNC layout_options
+    stp  x29, x30, [sp, #-32]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    mov  x19, x0
+    mov  w0, #-1
+    mov  w1, #0
+    cbz  x19, 9f
+    mov  x0, x19
+    ADR_L x1, k_layout
+    mov  w2, #0
+    bl   get_str
+    mov  x20, x0
+    mov  w0, #-1
+    cbz  x20, 3f
+    mov  x0, x20
+    ADR_L x1, v_row
+    bl   str_eq_c
+    cbz  w0, 1f
+    mov  w0, #LAYOUT_ROW
+    b    3f
+1:  mov  x0, x20
+    ADR_L x1, v_column
+    bl   str_eq_c
+    cbz  w0, 2f
+    mov  w0, #LAYOUT_COLUMN
+    b    3f
+2:  RAISE ERR_INVALID_REQUEST, "layout must be \"row\" or \"column\""
+3:  mov  w20, w0
+    mov  x0, x19
+    ADR_L x1, k_dict
+    mov  w2, #0
+    bl   get_bool
+    mov  w1, w0
+    mov  w0, w20
+9:  ldp  x19, x20, [sp, #16]
+    ldp  x29, x30, [sp], #32
+    ret
+ENDF layout_options
+
 // check_path(x0 Str*): ACCESS_DENIED for empty / absolute / NUL / '..' component
 LFUNC check_path
     ldr  x1, [x0, #STR_LEN]
@@ -1080,6 +1127,10 @@ LFUNC op_load
     stp  x23, x24, [sp, #48]
     stp  x25, x26, [sp, #64]
     stp  x27, x28, [sp, #80]
+    sub  sp, sp, #16                // [sp] u32 layout, [sp+4] u32 dictionary
+    mov  w9, #-1
+    str  w9, [sp]
+    str  wzr, [sp, #4]
     mov  x19, x0
     ADR_L x1, k_table
     mov  w2, #1
@@ -1146,6 +1197,10 @@ LFUNC op_load
     bl   get_field
     cbz  x0, 6f
     mov  x28, x0
+    bl   layout_options
+    str  w0, [sp]
+    str  w1, [sp, #4]
+    mov  x0, x28
     ADR_L x1, k_header
     mov  w2, #1
     bl   get_bool
@@ -1222,6 +1277,10 @@ LFUNC op_load
     mov  w5, w25
     mov  w6, w26
     bl   ingest
+    mov  x0, x28
+    ldr  w1, [sp]
+    ldr  w2, [sp, #4]
+    bl   table_finalize
     add  x0, x28, #TBL_ARENA
     add  x1, x20, #STR_DATA
     ldr  x2, [x20, #STR_LEN]
@@ -1242,6 +1301,7 @@ LFUNC op_load
     bl   write_table_header
     mov  x0, x28
     bl   write_table_columns
+    add  sp, sp, #16
     ldp  x19, x20, [sp, #16]
     ldp  x21, x22, [sp, #32]
     ldp  x23, x24, [sp, #48]

@@ -1296,7 +1296,7 @@ ENDF ex_nljoin
 // hash_cell(x0 payload, w1 type) -> x0 64-bit hash (non-NULL value)
 //   x19 payload
 // =============================================================================
-LFUNC hash_cell
+FUNC hash_cell
     and  w9, w1, #T_KIND_MASK
     cmp  w9, #T_STR
     b.eq 2f
@@ -1319,7 +1319,7 @@ LFUNC hash_cell
 ENDF hash_cell
 
 // mix64(x0) -> x0 (finaliser of MurmurHash3)   (leaf)
-LFUNC mix64
+FUNC mix64
     eor  x0, x0, x0, lsr #33
     ldr  x9, =0xff51afd7ed558ccd
     mul  x0, x0, x9
