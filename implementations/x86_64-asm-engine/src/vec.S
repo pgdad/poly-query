@@ -34,8 +34,6 @@
 
     .section .note.GNU-stack, "", @progbits
 
-#define VNULL    (VB * 8)           /* offset of the NULL bytes */
-#define VSIZE    (VB * 9)
 #define VS_BYTES (8 * 1024 * 1024)  /* scratch stack per thread */
 
 /* batch */
@@ -1322,3 +1320,66 @@ FUNC vk_agg_groups
     add $8, %rsp
     ret
 ENDF vk_agg_groups
+
+/* vk_eval1(ctx rdi, expr rsi, tuples rdx, n rcx, W r8, out vector r9) */
+FUNC vk_eval1
+    ENTER 64
+    mov %rdi, 0+BT_CTX(%rsp)
+    mov %rdx, 0+BT_TUP(%rsp)
+    mov %rcx, 0+BT_N(%rsp)
+    shl $3, %r8
+    mov %r8, 0+BT_TW(%rsp)
+    mov %rsi, %rbx
+    mov %r9, %r12
+    call vs_mark
+    mov %rax, 32(%rsp)
+    mov %rbx, %rdi
+    lea 0(%rsp), %rsi
+    xor %edx, %edx
+    call veval
+    mov %rax, %r13
+    mov %r12, %rdi
+    mov %r13, %rsi
+    mov 0+BT_N(%rsp), %rdx
+    shl $3, %rdx
+    call memcpy
+    lea VNULL(%r12), %rdi
+    lea VNULL(%r13), %rsi
+    mov 0+BT_N(%rsp), %rdx
+    call memcpy
+    mov 32(%rsp), %rdi
+    call vs_release
+    LEAVE
+ENDF vk_eval1
+
+/* vk_pred(ctx rdi, pred rsi, tuples rdx, n rcx, W r8, flags r9):
+ * flags[i] = 1 if pred is TRUE for tuple i */
+FUNC vk_pred
+    ENTER 64
+    mov %rdi, 0+BT_CTX(%rsp)
+    mov %rdx, 0+BT_TUP(%rsp)
+    mov %rcx, 0+BT_N(%rsp)
+    shl $3, %r8
+    mov %r8, 0+BT_TW(%rsp)
+    mov %rsi, %rbx
+    mov %r9, %r12
+    call vs_mark
+    mov %rax, 32(%rsp)
+    mov %rbx, %rdi
+    lea 0(%rsp), %rsi
+    xor %edx, %edx
+    call veval
+    xor %ecx, %ecx
+1:  cmp 0+BT_N(%rsp), %rcx
+    jae 9f
+    movzbl VNULL(%rax, %rcx), %edx
+    xor $1, %edx
+    and (%rax, %rcx, 8), %edx
+    and $1, %edx
+    mov %dl, (%r12, %rcx)
+    inc %rcx
+    jmp 1b
+9:  mov 32(%rsp), %rdi
+    call vs_release
+    LEAVE
+ENDF vk_pred

@@ -1369,3 +1369,367 @@ FUNC pexec_aggregate
     jmp 26b
 29: LEAVE
 ENDF pexec_aggregate
+
+/* ================================================================ hash join */
+
+/* k_eval1(ctx rdi, expr rsi, tuples rdx, n rcx, W r8, out vector r9) */
+FUNC k_eval1
+    cmpq $MODE_ROW, g_opt_mode(%rip)
+    jne vk_eval1
+    ENTER 16
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %rdx, %r13
+    lea (,%r8,8), %r15
+    mov %r9, 0(%rsp)
+    xor %r14d, %r14d
+1:  cmp %rcx, %r14
+    jae 9f
+    mov %rcx, 8(%rsp)
+    mov %r13, EC_TUPLE(%rbx)
+    mov %r12, %rdi
+    mov %rbx, %rsi
+    call eval
+    mov 0(%rsp), %rcx
+    mov %rax, (%rcx, %r14, 8)
+    mov %dl, VNULL(%rcx, %r14)
+    mov 8(%rsp), %rcx
+    add %r15, %r13
+    inc %r14
+    jmp 1b
+9:  LEAVE
+ENDF k_eval1
+
+/* k_pred(ctx rdi, pred rsi, tuples rdx, n rcx, W r8, flags r9) */
+FUNC k_pred
+    cmpq $MODE_ROW, g_opt_mode(%rip)
+    jne vk_pred
+    ENTER 16
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %rdx, %r13
+    lea (,%r8,8), %r15
+    mov %r9, 0(%rsp)
+    xor %r14d, %r14d
+1:  cmp %rcx, %r14
+    jae 9f
+    mov %rcx, 8(%rsp)
+    mov %r13, EC_TUPLE(%rbx)
+    mov %r12, %rdi
+    mov %rbx, %rsi
+    call eval
+    xor $1, %edx
+    and %edx, %eax
+    and $1, %eax
+    mov 0(%rsp), %rcx
+    mov %al, (%rcx, %r14)
+    mov 8(%rsp), %rcx
+    add %r15, %r13
+    inc %r14
+    jmp 1b
+9:  LEAVE
+ENDF k_pred
+
+/* probe task: PT_A probe TupleSet, PT_B build TupleSet, PT_C HashTable,
+ * PT_D next[] (build chains), PT_N 1 = ON is just the key equality */
+
+/* probe_part(task rdi, part rsi, lo rdx, hi rcx) */
+FUNC probe_part
+    ENTER 224
+    mov %rdi, %rbx
+    mov %rsi, 64(%rsp)
+    mov %rdx, 136(%rsp)             /* batch start */
+    mov %rcx, 72(%rsp)              /* hi */
+    mov PT_FP(%rbx), %r12
+    mov PT_XS(%rbx), %r13
+    lea 0(%rsp), %rdi
+    mov %r13, %rsi
+    call wctx_init
+    mov XS_W(%r13), %r15
+    shl $3, %r15                    /* tuple bytes */
+    mov XS_W(%r13), %rdi
+    mov $16, %esi
+    call ts_new
+    mov %rax, 80(%rsp)              /* out */
+    mov XS_W(%r13), %rdi
+    mov $VB, %esi
+    call ts_new
+    mov %rax, 88(%rsp)              /* candidates */
+    movq $VB, 104(%rsp)             /* owner / flags capacity */
+    mov $VB*8, %edi
+    call tmp_alloc
+    mov %rax, 96(%rsp)              /* owner[] */
+    mov $VB, %edi
+    call tmp_alloc
+    mov %rax, 120(%rsp)             /* flags[] */
+    mov $VSIZE, %edi
+    call tmp_alloc
+    mov %rax, 112(%rsp)             /* probe keys */
+1:  mov 136(%rsp), %rax
+    cmp 72(%rsp), %rax
+    jae 90f
+    call check_deadline
+    mov 72(%rsp), %rcx
+    sub 136(%rsp), %rcx
+    cmp $VB, %rcx
+    jbe 2f
+    mov $VB, %ecx
+2:  mov %rcx, 144(%rsp)             /* b */
+    mov PT_A(%rbx), %rax
+    mov 136(%rsp), %rdx
+    imul %r15, %rdx
+    add TS_DATA(%rax), %rdx
+    mov %rdx, 176(%rsp)             /* batch tuples */
+    lea 0(%rsp), %rdi
+    mov FP_BUILDL(%r12), %rsi       /* probe key */
+    test %rsi, %rsi
+    mov FP_LKEY(%r12), %rsi
+    jz 3f
+    mov FP_RKEY(%r12), %rsi
+3:  mov XS_W(%r13), %r8
+    mov 112(%rsp), %r9
+    call k_eval1
+    mov 88(%rsp), %rax
+    movq $0, TS_N(%rax)
+    movq $0, 152(%rsp)              /* k */
+10: /* ---- candidates of probe tuple k */
+    mov 152(%rsp), %rcx
+    cmp 144(%rsp), %rcx
+    jae 20f
+    mov 112(%rsp), %rax
+    cmpb $0, VNULL(%rax, %rcx)
+    jne 19f                         /* NULL keys never match */
+    mov (%rax, %rcx, 8), %rax
+    mov %rax, 184(%rsp)             /* key cell 184..199 */
+    movq $0, 192(%rsp)
+    lea 184(%rsp), %rdi
+    mov $1, %esi
+    mov PT_C(%rbx), %rdx
+    mov HT_TYPES(%rdx), %rdx
+    call hash_cells
+    mov PT_C(%rbx), %rdi
+    lea 184(%rsp), %rsi
+    xor %edx, %edx
+    mov %rax, %rcx
+    call ht_lookup_h
+    test %rax, %rax
+    jz 19f
+    mov EN_D0(%rax), %r14           /* chain of build tuples */
+11: cmp $-1, %r14
+    je 19f
+    mov 88(%rsp), %rax              /* room for one more owner */
+    mov TS_N(%rax), %rax
+    cmp 104(%rsp), %rax
+    jb 12f
+    call probe_grow
+12: mov 88(%rsp), %rdi
+    call ts_slot
+    mov %rax, %rdi
+    mov 152(%rsp), %rsi
+    imul %r15, %rsi
+    add 176(%rsp), %rsi             /* probe tuple */
+    mov PT_B(%rbx), %rdx
+    mov TS_DATA(%rdx), %rdx
+    mov %r14, %rcx
+    imul %r15, %rcx
+    add %rcx, %rdx                  /* build tuple */
+    cmpq $0, FP_BUILDL(%r12)
+    je 13f
+    xchg %rsi, %rdx                 /* the build side is the left input */
+13: mov %r12, %rcx
+    mov XS_W(%r13), %r8
+    call tuple_combine
+    mov 88(%rsp), %rax
+    mov TS_N(%rax), %rax
+    mov 96(%rsp), %rcx
+    mov 152(%rsp), %rdx
+    mov %rdx, -8(%rcx, %rax, 8)     /* owner */
+    mov PT_D(%rbx), %rax
+    mov (%rax, %r14, 8), %r14
+    jmp 11b
+19: incq 152(%rsp)
+    jmp 10b
+
+20: /* ---- ON condition on the candidates */
+    mov 88(%rsp), %rax
+    mov TS_N(%rax), %r14            /* candidates */
+    cmpq $0, PT_N(%rbx)
+    je 21f
+    cmpq $JT_LEFT, FP_JTYPE(%r12)
+    je 21f
+    mov 80(%rsp), %rdi              /* inner join on the key alone: all of them */
+    mov TS_DATA(%rax), %rsi
+    mov %r14, %rdx
+    call ts_append
+    jmp 40f
+21: cmpq $0, PT_N(%rbx)
+    je 22f
+    mov 120(%rsp), %rdi
+    mov $1, %esi
+    mov %r14, %rdx
+    call memset
+    jmp 30f
+22: movq $0, 160(%rsp)              /* chunk start */
+23: mov 160(%rsp), %rax
+    cmp %r14, %rax
+    jae 30f
+    mov %r14, %rcx
+    sub %rax, %rcx
+    cmp $VB, %rcx
+    jbe 24f
+    mov $VB, %ecx
+24: lea 0(%rsp), %rdi
+    mov FP_ON(%r12), %rsi
+    mov 88(%rsp), %rdx
+    mov TS_DATA(%rdx), %rdx
+    mov %rax, %r8
+    imul %r15, %r8
+    add %r8, %rdx
+    mov XS_W(%r13), %r8
+    mov 120(%rsp), %r9
+    add %rax, %r9
+    add %rcx, 160(%rsp)
+    call k_pred
+    jmp 23b
+
+30: /* ---- emit in probe order, NULL-padding unmatched LEFT JOIN tuples */
+    movq $0, 160(%rsp)              /* candidate */
+    movq $0, 152(%rsp)              /* k */
+31: mov 152(%rsp), %rax
+    cmp 144(%rsp), %rax
+    jae 40f
+    movq $0, 168(%rsp)              /* matched */
+32: mov 160(%rsp), %rcx
+    cmp %r14, %rcx
+    jae 34f
+    mov 96(%rsp), %rax
+    mov 152(%rsp), %rdx
+    cmp %rdx, (%rax, %rcx, 8)
+    jne 34f
+    mov 120(%rsp), %rax
+    cmpb $0, (%rax, %rcx)
+    je 33f
+    movq $1, 168(%rsp)
+    mov 88(%rsp), %rax
+    mov TS_DATA(%rax), %rsi
+    imul %r15, %rcx
+    add %rcx, %rsi
+    mov 80(%rsp), %rdi
+    mov $1, %edx
+    call ts_append
+33: incq 160(%rsp)
+    jmp 32b
+34: cmpq $JT_LEFT, FP_JTYPE(%r12)
+    jne 35f
+    cmpq $0, 168(%rsp)
+    jne 35f
+    mov 80(%rsp), %rdi
+    call ts_slot
+    mov %rax, %rdi
+    mov 152(%rsp), %rsi
+    imul %r15, %rsi
+    add 176(%rsp), %rsi
+    xor %edx, %edx
+    mov %r12, %rcx
+    mov XS_W(%r13), %r8
+    call tuple_combine
+35: incq 152(%rsp)
+    jmp 31b
+
+40: mov 80(%rsp), %rdi
+    call check_join_rows
+    mov 144(%rsp), %rax
+    add %rax, 136(%rsp)
+    jmp 1b
+90: mov 64(%rsp), %rcx
+    mov 80(%rsp), %rax
+    mov %rax, PT_OUT(%rbx, %rcx, 8)
+    LEAVE
+
+/* probe_grow: local helper on probe_part's frame - doubles owner[] and
+ * flags[] */
+probe_grow:
+    sub $8, %rsp
+    mov 16+104(%rsp), %rdi
+    shl $4, %rdi                    /* 2 * cap * 8 */
+    call tmp_alloc
+    mov %rax, (%rsp)
+    mov %rax, %rdi
+    mov 16+96(%rsp), %rsi
+    mov 16+104(%rsp), %rdx
+    shl $3, %rdx
+    call memcpy
+    mov (%rsp), %rax
+    mov %rax, 16+96(%rsp)
+    mov 16+104(%rsp), %rdi
+    add %rdi, %rdi
+    call tmp_alloc
+    mov %rax, 16+120(%rsp)
+    shlq $1, 16+104(%rsp)
+    add $8, %rsp
+    ret
+ENDF probe_part
+
+/* pexec_probe(xs rdi, fp rsi, probe TupleSet rdx, build TupleSet rcx,
+ * ht r8, next[] r9) -> rax joined TupleSet: the probe phase of a hash join,
+ * in parallel parts over the probe input */
+FUNC pexec_probe
+    ENTER 16
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %rdx, 0(%rsp)
+    mov %rcx, 8(%rsp)
+    mov %r8, %r14
+    mov %r9, %r15
+    call pexec_threads
+    mov $PT_SIZE, %edi
+    call tmp_zalloc
+    mov %rax, %r13
+    mov %rbx, PT_XS(%r13)
+    mov %r12, PT_FP(%r13)
+    mov 0(%rsp), %rax
+    mov %rax, PT_A(%r13)
+    mov 8(%rsp), %rax
+    mov %rax, PT_B(%r13)
+    mov %r14, PT_C(%r13)
+    mov %r15, PT_D(%r13)
+    mov FP_ON(%r12), %rax           /* ON = (left key = right key) only? */
+    cmpl $EK_BINARY, N_KIND(%rax)
+    jne 2f
+    cmpl $B_EQ, N_OP(%rax)
+    jne 2f
+    mov N_A(%rax), %rcx
+    mov N_B(%rax), %rdx
+    cmp FP_LKEY(%r12), %rcx
+    jne 1f
+    cmp FP_RKEY(%r12), %rdx
+    jne 2f
+    movq $1, PT_N(%r13)
+    jmp 2f
+1:  cmp FP_RKEY(%r12), %rcx
+    jne 2f
+    cmp FP_LKEY(%r12), %rdx
+    jne 2f
+    movq $1, PT_N(%r13)
+2:  mov 0(%rsp), %rax
+    mov TS_N(%rax), %rdi
+    lea probe_part(%rip), %rsi
+    mov %r13, %rdx
+    call par_for
+    mov %rax, %r14                  /* parts */
+    mov PT_OUT(%r13), %r15
+    mov $1, %ebx
+3:  cmp %r14, %rbx
+    jae 9f
+    mov PT_OUT(%r13, %rbx, 8), %rax
+    mov %r15, %rdi
+    mov TS_DATA(%rax), %rsi
+    mov TS_N(%rax), %rdx
+    call ts_append
+    mov %r15, %rdi
+    call check_join_rows
+    inc %rbx
+    jmp 3b
+9:  mov %r15, %rax
+    LEAVE
+ENDF pexec_probe

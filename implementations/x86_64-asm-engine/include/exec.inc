@@ -27,6 +27,9 @@
 
 /* batch size of the batch / vectorized operators (pexec.S, vec.S) */
 #define VB 1024
+/* a vector: VB u64 values, then VB NULL bytes (1 = NULL) */
+#define VNULL (VB * 8)
+#define VSIZE (VB * 9)
 
 /* tuple set */
 #define TS_N    0

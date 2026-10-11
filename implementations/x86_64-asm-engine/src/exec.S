@@ -468,6 +468,20 @@ FUNC exec_from
     mov %r15, EN_D0(%rax)
 34: jmp 31b
 35: /* probe */
+    mov %rbx, %rdi                  /* batch / parallel probe (pexec.S) */
+    call pexec_enabled
+    test %eax, %eax
+    jz 351f
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    mov 64(%rsp), %rdx
+    mov 56(%rsp), %rcx
+    mov 32(%rsp), %r8
+    mov 40(%rsp), %r9
+    call pexec_probe
+    mov %rax, %r13
+    jmp 90f
+351:
     xor %r14d, %r14d
 36: mov 64(%rsp), %rax
     cmp TS_N(%rax), %r14
