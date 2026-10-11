@@ -22,7 +22,11 @@
 #define XS_TS     88   /* TupleSet* (after FROM and WHERE) */
 #define XS_ROWS   96   /* Vec of rows: 96..127 */
 #define XS_STOP   128  /* stop producing rows after this many (LIMIT pushdown) */
-#define XS_SIZE   136
+#define XS_PAR    136  /* pexec.S: 0 unknown, 1 parallel ok, 2 serial only */
+#define XS_SIZE   144
+
+/* batch size of the batch / vectorized operators (pexec.S, vec.S) */
+#define VB 1024
 
 /* tuple set */
 #define TS_N    0

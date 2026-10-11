@@ -6,7 +6,8 @@
  *   - pushdown: single-table conjuncts leave the WHERE, mixed ones stay
  *   - LEFT JOIN: conjuncts on the NULL-padded side are not pushed
  *   - hash-join build side follows the estimated cardinalities
- *   - optimize = false disables pushdown, use_indexes = false index use
+ *   - optimize = false keeps index selection, use_indexes = false disables it
+ *   - the join option forces the join algorithm of equi-joins
  */
 #include "pq.inc"
 #include "sql.inc"
@@ -312,13 +313,50 @@ FUNC main
     mov %rax, %r12
     mov QP_FROM(%r12), %r13
     xor %edi, %edi
-    cmpq $0, FP_FILTER(%r13)
-    jne 1f
-    cmpq $0, QP_WHERE(%r12)
+    cmpq $0, FP_INDEX(%r13)
     setne %dil
-1:  CSTR %rsi, "optimize = false: no pushdown"
+    CSTR %rsi, "optimize = false: physical index selection unchanged"
     call check
     movq $1, g_opt_optimize(%rip)
+
+    /* ---- join algorithm: forced by the join option, nested loop otherwise */
+    mov $JOIN_MERGE, %eax
+    mov %rax, g_opt_join(%rip)
+    CSTR %rdi, "SELECT t.a FROM t JOIN u ON t.a = u.a"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    cmpq $JA_MERGE, FP_ALGO(%r13)
+    sete %dil
+    CSTR %rsi, "join = merge: MergeJoin for an equi-join"
+    call check
+    CSTR %rdi, "SELECT t.a FROM t JOIN u ON t.a < u.a"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    cmpq $JA_NL, FP_ALGO(%r13)
+    sete %dil
+    CSTR %rsi, "join = merge: non-equi join falls back to a nested loop"
+    call check
+    movq $JOIN_HASH, g_opt_join(%rip)
+    CSTR %rdi, "SELECT t.a FROM t JOIN u ON t.a = u.a"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    cmpq $JA_HASH, FP_ALGO(%r13)
+    sete %dil
+    CSTR %rsi, "join = hash: HashJoin"
+    call check
+    movq $JOIN_NL, g_opt_join(%rip)
+    CSTR %rdi, "SELECT t.a FROM t JOIN u ON t.a = u.a"
+    call plan_of
+    mov QP_FROM(%rax), %r13
+    xor %edi, %edi
+    cmpq $JA_NL, FP_ALGO(%r13)
+    sete %dil
+    CSTR %rsi, "join = nested_loop: NestedLoopJoin"
+    call check
+    movq $JOIN_AUTO, g_opt_join(%rip)
 
     lea fmt_done(%rip), %rdi
     mov passed(%rip), %rsi

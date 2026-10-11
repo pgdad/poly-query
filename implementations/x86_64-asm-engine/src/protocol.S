@@ -275,6 +275,7 @@ FUNC proto_handle_line
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12
+    call par_reset
     mov g_arena(%rip), %rdi
     call arena_reset
     mov %rbx, %rdi
@@ -290,6 +291,7 @@ ENDF proto_handle_line
 FUNC proto_handle_request
     push %rbx
     mov %rdi, %rbx
+    call par_reset
     mov g_arena(%rip), %rdi
     call arena_reset
     mov %rbx, %rdi
@@ -814,6 +816,10 @@ ENDF query_setup
 
 FUNC op_query
     ENTER 48
+    mov %rdi, %rbx
+    call now_ns
+    mov %rax, 40(%rsp)              /* start (stats.elapsed_us) */
+    mov %rbx, %rdi
     call query_setup
     mov g_q_max_rows(%rip), %rcx
     mov %rcx, 0(%rsp)
@@ -868,7 +874,18 @@ FUNC op_query
 7:  PUTS %r15, ",\"row_count\":1"
     lea 16(%rsp), %rdi
     call buf_free
-9:  mov g_arena(%rip), %rax
+9:  lea g_out(%rip), %r15
+    PUTS %r15, ",\"stats\":{\"elapsed_us\":"
+    call now_ns
+    sub 40(%rsp), %rax
+    xor %edx, %edx
+    mov $1000, %ecx
+    div %rcx
+    mov %r15, %rdi
+    mov %rax, %rsi
+    call buf_put_u64
+    PUTS %r15, "}"
+    mov g_arena(%rip), %rax
     movq $0, AR_LIMIT(%rax)
     LEAVE
 ENDF op_query

@@ -263,6 +263,15 @@ FUNC exec_scan
     jmp 25b
 
 30: /* ---- full scan, skipping row groups excluded by their statistics */
+    mov %rbx, %rdi                  /* batch / parallel execution */
+    call pexec_enabled
+    test %eax, %eax
+    jz 300f
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    call pexec_scan
+    LEAVE
+300:
     movq $0, 16(%rsp)               /* row group */
     movq $0, 24(%rsp)               /* first row of the range */
     mov %r14, 32(%rsp)              /* end of the range */
@@ -1239,6 +1248,14 @@ FUNC exec_plan
 6:  /* ---- WHERE: filter tuples in place */
     cmpq $0, QP_WHERE(%rbx)
     je 8f
+    mov %r12, %rdi
+    call pexec_enabled
+    test %eax, %eax
+    jz 60f
+    mov %r12, %rdi
+    call pexec_filter
+    jmp 8f
+60:
     mov XS_TS(%r12), %r15
     xor %r13d, %r13d                /* read */
     xor %r14d, %r14d                /* write */
@@ -1280,7 +1297,13 @@ FUNC exec_plan
     cmpq $0, QP_AGG(%rbx)
     je 81f
     mov %r12, %rdi
-    call exec_aggregate
+    call pexec_enabled
+    mov %r12, %rdi
+    test %eax, %eax
+    jz 80f
+    call pexec_aggregate
+    jmp 85f
+80: call exec_aggregate
     jmp 85f
 81: /* projection; stop early when unsorted, not DISTINCT and limited */
     mov $0x7fffffffffffffff, %rax
@@ -1295,7 +1318,19 @@ FUNC exec_plan
     add QP_OFFSET(%rbx), %rax
     jo 82f
     mov %rax, XS_STOP(%r12)
-82: xor %r13d, %r13d
+82: mov $0x7fffffffffffffff, %rax    /* batch / parallel: whole input */
+    cmp XS_STOP(%r12), %rax
+    jne 820f
+    cmp g_sink_plan(%rip), %rbx
+    je 820f
+    mov %r12, %rdi
+    call pexec_enabled
+    test %eax, %eax
+    jz 820f
+    mov %r12, %rdi
+    call pexec_project
+    jmp 85f
+820: xor %r13d, %r13d
     mov XS_TS(%r12), %r15
 83: cmp TS_N(%r15), %r13
     jae 85f

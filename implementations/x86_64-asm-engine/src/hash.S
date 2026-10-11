@@ -157,7 +157,9 @@ ENDF ht_grow
 
 /* ht_lookup(ht, cells, insert) -> rax Entry* or 0, rdx 1 when newly inserted */
 FUNC ht_lookup
-    ENTER 16
+    push %rbx
+    push %r12
+    push %r13
     mov %rdi, %rbx
     mov %rsi, %r12
     mov %edx, %r13d
@@ -165,10 +167,27 @@ FUNC ht_lookup
     mov HT_NK(%rbx), %rsi
     mov HT_TYPES(%rbx), %rdx
     call hash_cells
-    mov %rax, %r14                  /* hash */
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    mov %r13d, %edx
+    mov %rax, %rcx
+    pop %r13
+    pop %r12
+    pop %rbx
+    jmp ht_lookup_h
+ENDF ht_lookup
+
+/* ht_lookup_h(ht, cells, insert, hash rcx): ht_lookup with the key's
+ * hash_cells value already computed */
+FUNC ht_lookup_h
+    ENTER 16
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %edx, %r13d
+    mov %rcx, %r14                  /* hash */
     mov HT_NB(%rbx), %rcx
     dec %rcx
-    and %rax, %rcx
+    and %r14, %rcx
     mov HT_BKT(%rbx), %rax
     mov (%rax, %rcx, 8), %r15
 1:  test %r15, %r15
@@ -213,4 +232,4 @@ FUNC ht_lookup
 8:  mov %r15, %rax
     xor %edx, %edx
 9:  LEAVE
-ENDF ht_lookup
+ENDF ht_lookup_h

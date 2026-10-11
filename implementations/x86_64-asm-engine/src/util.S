@@ -33,9 +33,34 @@ g_cancel_flag:      .quad 0        /* set asynchronously when the running query 
     .globl g_err_msg
 g_err_msg:          .zero 512
 
+/* Thread-local overrides used by parallel workers (par.S): a worker
+ * allocates from its own arena and reports errors to its own handler.
+ * Both are 0 on every other thread, which then uses the globals. */
+    .section .tbss, "awT", @nobits
+    .p2align 4
+    .globl t_arena, t_jmpbuf, t_err_code, t_err_msg
+t_arena:    .zero 8
+t_jmpbuf:   .zero 8
+t_err_code: .zero 8
+    .zero 8
+t_err_msg:  .zero 512
+
     .text
 
 /* ======================================================== errors */
+
+/* err_slot() -> rax error code slot, rdx 512-byte message buffer: the
+ * worker's thread-local ones inside a parallel worker, else the globals */
+err_slot:
+    cmpq $0, %fs:t_jmpbuf@tpoff
+    jne 1f
+    lea g_err_code(%rip), %rax
+    lea g_err_msg(%rip), %rdx
+    ret
+1:  mov %fs:0, %rax
+    lea t_err_msg@tpoff(%rax), %rdx
+    lea t_err_code@tpoff(%rax), %rax
+    ret
 
 /* pq_raise(code edi, msg rsi) - noreturn */
 FUNC pq_raise
@@ -43,11 +68,16 @@ FUNC pq_raise
     mov %rsp, %rbp
     and $-16, %rsp
     mov %edi, %edi
-    mov %rdi, g_err_code(%rip)
-    lea g_err_msg(%rip), %rdi
+    call err_slot
+    mov %rdi, (%rax)
+    mov %rdx, %rdi
+    push %rdx
+    push %rdx
     mov $511, %edx
     call strncpy
-    movb $0, g_err_msg+511(%rip)
+    pop %rdx
+    pop %rdx
+    movb $0, 511(%rdx)
     jmp raise_jump
 ENDF pq_raise
 
@@ -57,12 +87,14 @@ FUNC pq_raisef
     mov %rsp, %rbp
     and $-16, %rsp
     mov %edi, %edi
-    mov %rdi, g_err_code(%rip)
     mov %r8, %r9
     mov %rcx, %r8
     mov %rdx, %rcx
-    mov %rsi, %rdx
-    lea g_err_msg(%rip), %rdi
+    mov %rsi, %r10
+    call err_slot                   /* clobbers only rax, rdx */
+    mov %rdi, (%rax)
+    mov %rdx, %rdi
+    mov %r10, %rdx
     mov $512, %esi
     xor %eax, %eax
     call snprintf
@@ -70,10 +102,15 @@ FUNC pq_raisef
 ENDF pq_raisef
 
 raise_jump:
+    mov %fs:t_jmpbuf@tpoff, %rdi
+    test %rdi, %rdi
+    jnz 2f
     mov g_jmpbuf(%rip), %rdi
     test %rdi, %rdi
     jz 1f
     mov $1, %esi
+    call longjmp
+2:  mov $1, %esi                    /* parallel worker */
     call longjmp
 1:  /* no handler: fatal */
     mov stderr(%rip), %rdi
@@ -231,15 +268,31 @@ FUNC arena_destroy
     ret
 ENDF arena_destroy
 
-/* tmp_alloc(size) -> ptr from the request arena g_arena */
+/* cur_arena() -> rax the arena for per-request allocations of this thread:
+ * a parallel worker's own arena, else the request arena g_arena */
+FUNC cur_arena
+    mov %fs:t_arena@tpoff, %rax
+    test %rax, %rax
+    jnz 1f
+    mov g_arena(%rip), %rax
+1:  ret
+ENDF cur_arena
+
+/* tmp_alloc(size) -> ptr from the current request arena (cur_arena) */
 FUNC tmp_alloc
     mov %rdi, %rsi
+    mov %fs:t_arena@tpoff, %rdi
+    test %rdi, %rdi
+    jnz arena_alloc
     mov g_arena(%rip), %rdi
     jmp arena_alloc
 ENDF tmp_alloc
 
 FUNC tmp_zalloc
     mov %rdi, %rsi
+    mov %fs:t_arena@tpoff, %rdi
+    test %rdi, %rdi
+    jnz arena_zalloc
     mov g_arena(%rip), %rdi
     jmp arena_zalloc
 ENDF tmp_zalloc
