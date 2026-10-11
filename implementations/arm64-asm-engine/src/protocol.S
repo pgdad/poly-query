@@ -62,7 +62,7 @@ op_names:
     .quad o_explain, op_explain
     .quad o_save, op_unsupported
     .quad o_open, op_unsupported
-    .quad o_stats, op_unsupported
+    .quad o_stats, op_stats
     .quad 0, 0
 o_load:     .asciz "load"
 o_query:    .asciz "query"
@@ -93,7 +93,16 @@ r_rowcount: .asciz ",\"row_count\":"
 r_table:    .asciz ",\"table\":"
 r_columns:  .asciz ",\"columns\":["
 r_type:     .asciz ",\"type\":\""
-r_indexes:  .asciz ",\"indexes\":[]"
+r_indexes:  .asciz ",\"indexes\":["
+r_column_k: .asciz ",\"column\":"
+r_kind_h:   .asciz ",\"kind\":\"HASH\"}"
+r_kind_b:   .asciz ",\"kind\":\"BTREE\"}"
+r_layout_c: .asciz ",\"layout\":\"column\""
+r_layout_r: .asciz ",\"layout\":\"row\""
+r_nullcnt:  .asciz ",\"null_count\":"
+r_distinct: .asciz ",\"distinct_count\":"
+r_min:      .asciz ",\"min\":"
+r_max:      .asciz ",\"max\":"
 r_rows:     .asciz ",\"rows\":["
 r_stats:    .asciz ",\"stats\":{\"elapsed_us\":"
 r_plan:     .asciz ",\"plan\":"
@@ -733,7 +742,7 @@ ENDF write_table_header
 LFUNC op_schema
     stp  x29, x30, [sp, #-32]!
     mov  x29, sp
-    str  x19, [sp, #16]
+    stp  x19, x20, [sp, #16]
     bl   lookup_table_field
     mov  x19, x0
     bl   out_begin_ok
@@ -741,12 +750,141 @@ LFUNC op_schema
     bl   write_table_header
     mov  x0, x19
     bl   write_table_columns
-    ADR_L x0, r_indexes
-    bl   out_puts
-    ldr  x19, [sp, #16]
+    mov  x0, x19
+    bl   write_table_indexes
+    ADR_L x0, r_layout_c
+    ldr  w9, [x19, #TBL_LAYOUT]
+    cbz  w9, 1f
+    ADR_L x0, r_layout_r
+1:  bl   out_puts
+    ldp  x19, x20, [sp, #16]
     ldp  x29, x30, [sp], #32
     ret
 ENDF op_schema
+
+// write_table_indexes(x0 Table*): ,"indexes":[{"name":..,"column":..,"kind":..}]
+//   x19 Index** list, x20 count, x21 index, x22 Index*, x23 table
+LFUNC write_table_indexes
+    stp  x29, x30, [sp, #-64]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    stp  x21, x22, [sp, #32]
+    str  x23, [sp, #48]
+    mov  x23, x0
+    bl   index_list
+    mov  x19, x0
+    mov  x20, x1
+    ADR_L x0, r_indexes
+    bl   out_puts
+    mov  x21, #0
+1:  cmp  x21, x20
+    b.hs 3f
+    cbz  x21, 2f
+    mov  w0, #','
+    bl   out_c
+2:  ldr  x22, [x19, x21, lsl #3]
+    ADR_L x0, r_name
+    bl   out_puts
+    ldr  x0, [x22, #IX_NAME]
+    bl   out_str
+    ADR_L x0, r_column_k
+    bl   out_puts
+    ldr  x9, [x23, #TBL_COLS]
+    ldr  x10, [x22, #IX_COL]
+    add  x9, x9, x10, lsl #5
+    ldr  x0, [x9, #COL_NAME]
+    bl   out_str
+    ldr  w9, [x22, #IX_KIND]
+    ADR_L x0, r_kind_h
+    cmp  w9, #IXK_HASH
+    b.eq 21f
+    ADR_L x0, r_kind_b
+21: bl   out_puts
+    add  x21, x21, #1
+    b    1b
+3:  mov  w0, #']'
+    bl   out_c
+    ldp  x19, x20, [sp, #16]
+    ldp  x21, x22, [sp, #32]
+    ldr  x23, [sp, #48]
+    ldp  x29, x30, [sp], #64
+    ret
+ENDF write_table_indexes
+
+// op_stats: {"op":"stats","table":"t"} => row count and per-column
+// null_count / distinct_count / min / max (protocol.md §5.8)
+//   x19 table, x20 ColStats*, x21 column index, x22 Column*, x23 ColStats,
+//   x24 1 if min/max are unknown
+LFUNC op_stats
+    stp  x29, x30, [sp, #-64]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    stp  x21, x22, [sp, #32]
+    stp  x23, x24, [sp, #48]
+    bl   lookup_table_field
+    mov  x19, x0
+    bl   table_stats
+    mov  x20, x0
+    bl   out_begin_ok
+    mov  x0, x19
+    bl   write_table_header
+    ADR_L x0, r_columns
+    bl   out_puts
+    mov  x21, #0
+1:  ldr  x9, [x19, #TBL_NCOLS]
+    cmp  x21, x9
+    b.hs 4f
+    cbz  x21, 2f
+    mov  w0, #','
+    bl   out_c
+2:  ldr  x22, [x19, #TBL_COLS]
+    add  x22, x22, x21, lsl #5
+    add  x23, x20, x21, lsl #5
+    ldr  x0, [x22, #COL_NAME]
+    ldr  w1, [x22, #COL_TYPE]
+    bl   write_column_desc
+    ADR_L x0, g_out                     // reopen the object written above
+    ldr  x9, [x0, #BUF_LEN]
+    sub  x9, x9, #1
+    str  x9, [x0, #BUF_LEN]
+    ADR_L x0, r_nullcnt
+    bl   out_puts
+    ldr  x0, [x23, #CST_NULLS]
+    bl   out_i64
+    ADR_L x0, r_distinct
+    bl   out_puts
+    ldr  x0, [x23, #CST_DISTINCT]
+    bl   out_i64
+    ldr  x9, [x23, #CST_NULLS]          // all NULL (or no rows): min/max null
+    ldr  x10, [x19, #TBL_NROWS]
+    cmp  x9, x10
+    cset x24, hs
+    ADR_L x0, r_min
+    bl   out_puts
+    ADR_L x0, g_out
+    ldr  x1, [x23, #CST_MIN]
+    mov  x2, x24
+    ldr  w3, [x22, #COL_TYPE]
+    bl   write_value_json
+    ADR_L x0, r_max
+    bl   out_puts
+    ADR_L x0, g_out
+    ldr  x1, [x23, #CST_MAX]
+    mov  x2, x24
+    ldr  w3, [x22, #COL_TYPE]
+    bl   write_value_json
+    mov  w0, #'}'
+    bl   out_c
+    add  x21, x21, #1
+    b    1b
+4:  mov  w0, #']'
+    bl   out_c
+    ldp  x19, x20, [sp, #16]
+    ldp  x21, x22, [sp, #32]
+    ldp  x23, x24, [sp, #48]
+    ldp  x29, x30, [sp], #64
+    ret
+ENDF op_stats
 
 // qsort comparator: two Table** by name, case-insensitive
 LFUNC cmp_table_names

@@ -10,6 +10,7 @@
 //   table_finalize(x0 Table*, w1 layout, w2 dict mode)
 //       converts a freshly built plain columnar table (ingest / PQCF reader)
 //       into its final representation, in place
+//   table_stats(x0 Table*) -> x0 ColStats* [ncols] (computed once, cached)
 // =============================================================================
 #include "pq.inc"
 #include "frame.inc"
@@ -309,5 +310,120 @@ LFUNC to_row_layout
     str  w9, [x19, #TBL_LAYOUT]
     LEAVE 5
 ENDF to_row_layout
+
+// =============================================================================
+// table_stats(x0 Table*) -> x0 ColStats* [ncols]
+// Per column: null count, min, max and the exact number of distinct non-NULL
+// values (hash set over row ids). Tables are immutable, so the result is
+// computed on first use and cached in the table arena (TBL_STATS).
+//   x19 table, x20 stats, x21 column, x22 ColStats*, x23 row, x24 nrows,
+//   x25 type, x26 slots (u32 row+1), x27 mask
+// =============================================================================
+FUNC table_stats
+    ENTER 5
+    mov  x19, x0
+    ldr  x0, [x19, #TBL_STATS]
+    cbz  x0, 1f
+    LEAVE 5
+1:  ldr  x24, [x19, #TBL_NROWS]
+    ldr  x9, [x19, #TBL_NCOLS]
+    add  x0, x19, #TBL_ARENA
+    lsl  x1, x9, #5                     // CST_SIZE = 32
+    add  x1, x1, #CST_SIZE
+    bl   arena_alloc_in
+    mov  x20, x0
+    lsl  x9, x24, #1                    // hash slots: power of two >= 2n
+    mov  x27, #16
+2:  cmp  x27, x9
+    b.hs 3f
+    lsl  x27, x27, #1
+    b    2b
+3:  lsl  x0, x27, #2
+    bl   arena_alloc
+    mov  x26, x0
+    sub  x27, x27, #1
+    mov  x21, #0
+.Lts_col:
+    ldr  x9, [x19, #TBL_NCOLS]
+    cmp  x21, x9
+    b.hs .Lts_done
+    add  x22, x20, x21, lsl #5
+    stp  xzr, xzr, [x22]
+    stp  xzr, xzr, [x22, #16]
+    ldr  x9, [x19, #TBL_COLS]
+    add  x9, x9, x21, lsl #5
+    ldr  w25, [x9, #COL_TYPE]
+    mov  x0, x26
+    mov  w1, #0
+    add  x2, x27, #1
+    lsl  x2, x2, #2
+    bl   memset
+    mov  x23, #0
+.Lts_row:
+    cmp  x23, x24
+    b.hs .Lts_next
+    mov  x0, x19
+    mov  x1, x21
+    mov  x2, x23
+    bl   tbl_get
+    cbz  x1, 4f
+    ldr  x9, [x22, #CST_NULLS]
+    add  x9, x9, #1
+    str  x9, [x22, #CST_NULLS]
+    b    .Lts_nextrow
+4:  mov  x28, x0                        // value
+    ldr  x9, [x22, #CST_DISTINCT]       // first value: min = max = value
+    cbnz x9, 5f
+    stp  x28, x28, [x22, #CST_MIN]
+    b    6f
+5:  mov  x0, x28
+    ldr  x1, [x22, #CST_MIN]
+    mov  w2, w25
+    bl   value_cmp
+    tbz  w0, #31, 51f
+    str  x28, [x22, #CST_MIN]
+51: mov  x0, x28
+    ldr  x1, [x22, #CST_MAX]
+    mov  w2, w25
+    bl   value_cmp
+    cmp  w0, #0
+    b.le 6f
+    str  x28, [x22, #CST_MAX]
+6:  mov  x0, x28                        // distinct: probe the hash set
+    mov  w1, w25
+    bl   hash_cell
+    and  x0, x0, x27
+7:  ldr  w9, [x26, x0, lsl #2]
+    cbz  w9, 8f
+    str  x0, [sp, #-16]!
+    sub  w2, w9, #1
+    mov  x0, x19
+    mov  x1, x21
+    bl   tbl_get
+    mov  x1, x28
+    mov  w2, w25
+    bl   value_cmp
+    mov  w9, w0
+    ldr  x0, [sp], #16
+    cbz  w9, .Lts_nextrow               // seen before
+    add  x0, x0, #1
+    and  x0, x0, x27
+    b    7b
+8:  add  w9, w23, #1
+    str  w9, [x26, x0, lsl #2]
+    ldr  x9, [x22, #CST_DISTINCT]
+    add  x9, x9, #1
+    str  x9, [x22, #CST_DISTINCT]
+.Lts_nextrow:
+    add  x23, x23, #1
+    b    .Lts_row
+.Lts_next:
+    add  x21, x21, #1
+    b    .Lts_col
+.Lts_done:
+    str  x20, [x19, #TBL_STATS]
+    mov  x0, x20
+    LEAVE 5
+ENDF table_stats
 
     NOTE_GNU_STACK
