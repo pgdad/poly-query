@@ -535,4 +535,169 @@ FUNC pqk_a64_scalar_gather_i64
 2:  ret
 ENDF pqk_a64_scalar_gather_i64
 
+/* ========================================================================
+ * 128-bit kernels (CR-4, kernels 17-20). Values are pqk_i128 {lo, hi}
+ * pairs, loaded with one LDP (any alignment). Helpers PRED128_SETUP,
+ * SPRED128, MIN128(V), MAX128(V) are in pq_a64_macros.h.
+ * ======================================================================== */
+
+/* ------------------------------------------------------------------------
+ * size_t filter_i128(x0 data, x1 validity, x2 n, w3 op, x4 &a, x5 &b,
+ *                    x6 out_idx)
+ * Registers: x8:x7 = lo, x10:x9 = span (128-bit range predicate), w11 inv
+ * (0/1), x12/x13 temps of the setup, then value lo/hi; x14 row i,
+ * x15 output count k, w16/x17 validity bit/temp.
+ * Algorithm: PRED128_SETUP validates op before touching *a / *b and builds
+ * the canonical range form pred(x) = ((x - lo) <=u span) ^ inv in 128 bits.
+ * Per row: LDP, SUBS/SBC (x - lo), CMP/SBCS (span - d; carry = no borrow
+ * <=> d <=u span), CSET, EOR inv, AND validity. The row index is stored
+ * unconditionally at out[k] (k <= i < n, inside the capacity) and k
+ * advances by the predicate bit (branch-free compaction).
+ */
+FUNC pqk_a64_scalar_filter_i128
+    PRED128_SETUP w3, x4, x5, x7, x8, x9, x10, x11, x12, x13, .Lsf8_inval
+    and     w11, w11, #1
+    mov     x14, #0
+    mov     x15, #0
+    cbz     x2, .Lsf8_done
+.Lsf8_loop:
+    ldp     x12, x13, [x0], #16
+    SPRED128 12, 13, 7, 8, 9, 10, 11
+    cbz     x1, 1f
+    VBIT    16, 1, 14, 17
+    and     w12, w12, w16
+1:  str     w14, [x6, x15, lsl #2]          // unconditional store, k <= i < n
+    add     x15, x15, x12
+    add     x14, x14, #1
+    cmp     x14, x2
+    b.lo    .Lsf8_loop
+.Lsf8_done:
+    mov     x0, x15
+    ret
+.Lsf8_inval:
+    mov     x0, #-1
+    ret
+ENDF pqk_a64_scalar_filter_i128
+
+/* ------------------------------------------------------------------------
+ * size_t count_i128(x0 data, x1 validity, x2 n, w3 op, x4 &a, x5 &b)
+ * Registers and predicate evaluation as filter_i128; x15 = count.
+ */
+FUNC pqk_a64_scalar_count_i128
+    PRED128_SETUP w3, x4, x5, x7, x8, x9, x10, x11, x12, x13, .Lsc8_inval
+    and     w11, w11, #1
+    mov     x14, #0
+    mov     x15, #0
+    cbz     x2, .Lsc8_done
+.Lsc8_loop:
+    ldp     x12, x13, [x0], #16
+    SPRED128 12, 13, 7, 8, 9, 10, 11
+    cbz     x1, 1f
+    VBIT    16, 1, 14, 17
+    and     w12, w12, w16
+1:  add     x15, x15, x12
+    add     x14, x14, #1
+    cmp     x14, x2
+    b.lo    .Lsc8_loop
+.Lsc8_done:
+    mov     x0, x15
+    ret
+.Lsc8_inval:
+    mov     x0, #-1
+    ret
+ENDF pqk_a64_scalar_count_i128
+
+/* ------------------------------------------------------------------------
+ * int sum_i128(x0 data, x1 validity, x2 n, x3 out_sum)
+ * Registers: x6:x5:x4 = 192-bit accumulator (lo, mid, top), x7 row i,
+ * x8/x9 value lo/hi, x10 sign extension of the value, x11/x12 validity
+ * mask/temp.
+ * Exact overflow detection: every value is sign-extended to 192 bits
+ * (third word = hi ASR 63) and added with ADDS/ADCS/ADC. With n < 2^32 the
+ * exact sum has |S| < 2^159, so the 192-bit accumulator never wraps and
+ * holds the exact mathematical sum; intermediate excursions outside the
+ * int128 range therefore cancel out naturally. The final sum fits in int128
+ * iff the top word equals the sign extension of the mid word
+ * (top == mid ASR 63); otherwise PQK_OVERFLOW and *out_sum is not written.
+ * Invalid rows are masked to 0 (SBFX of the validity bit -> 0 / -1, AND).
+ */
+FUNC pqk_a64_scalar_sum_i128
+    mov     x4, #0
+    mov     x5, #0
+    mov     x6, #0
+    mov     x7, #0
+    cbz     x2, .Lss8_fin
+.Lss8_loop:
+    ldp     x8, x9, [x0], #16
+    cbz     x1, 1f
+    VBIT    11, 1, 7, 12
+    sbfx    x11, x11, #0, #1                // 0 or -1
+    and     x8, x8, x11
+    and     x9, x9, x11
+1:  asr     x10, x9, #63
+    adds    x4, x4, x8
+    adcs    x5, x5, x9
+    adc     x6, x6, x10
+    add     x7, x7, #1
+    cmp     x7, x2
+    b.lo    .Lss8_loop
+.Lss8_fin:
+    cmp     x6, x5, asr #63                 // fits in int128 <=> top == sign(mid)
+    b.ne    .Lss8_ovf
+    stp     x4, x5, [x3]
+    mov     w0, #0
+    ret
+.Lss8_ovf:
+    mov     w0, #1
+    ret
+ENDF pqk_a64_scalar_sum_i128
+
+/* ------------------------------------------------------------------------
+ * size_t minmax_i128(x0 data, x1 validity, x2 n, x3 out_min, x4 out_max)
+ * Registers: x5 count, x7:x6 = min (starts at INT128_MAX), x9:x8 = max
+ * (starts at INT128_MIN), x10 row i, x12:x11 value, w13 validity bit,
+ * x14 temp.
+ * Algorithm: signed 128-bit ordering from the CMP/SBCS chain (lt), CSEL of
+ * both words. With validity the update condition is lt AND valid, folded
+ * with CCMP (MIN128V/MAX128V), so the loop is branch-free. Starting from the
+ * neutral extremes gives the same result as the reference's
+ * "first valid value" initialisation (integers: ties are indistinguishable).
+ * Outputs are written only when count > 0.
+ */
+FUNC pqk_a64_scalar_minmax_i128
+    mov     x5, #0
+    mov     x6, #-1                         // min = INT128_MAX
+    mov     x7, #0x7fffffffffffffff
+    mov     x8, #0                          // max = INT128_MIN
+    mov     x9, #0x8000000000000000
+    mov     x10, #0
+    cbz     x2, .Lsm8_fin
+    cbz     x1, .Lsm8_nv
+.Lsm8_v:
+    ldp     x11, x12, [x0], #16
+    VBIT    13, 1, 10, 14
+    and     w13, w13, #1
+    add     x5, x5, x13
+    MIN128V 6, 7, 11, 12, 13
+    MAX128V 8, 9, 11, 12, 13
+    add     x10, x10, #1
+    cmp     x10, x2
+    b.lo    .Lsm8_v
+    b       .Lsm8_fin
+.Lsm8_nv:
+    ldp     x11, x12, [x0], #16
+    MIN128  6, 7, 11, 12
+    MAX128  8, 9, 11, 12
+    add     x10, x10, #1
+    cmp     x10, x2
+    b.lo    .Lsm8_nv
+    mov     x5, x2
+.Lsm8_fin:
+    cbz     x5, 1f
+    stp     x6, x7, [x3]
+    stp     x8, x9, [x4]
+1:  mov     x0, x5
+    ret
+ENDF pqk_a64_scalar_minmax_i128
+
     .section .note.GNU-stack, "", %progbits
