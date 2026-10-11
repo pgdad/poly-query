@@ -456,6 +456,68 @@ func materializeChecked(ec *Context, op Operator, resid evalFn) (rows []types.Ro
 	}
 }
 
+// materializeCheckedBatches is materializeChecked over the batches of
+// node n, with the residual evaluated vectorized (row by row, recording
+// failures, for batches whose vectorized evaluation fails).
+func materializeCheckedBatches(ec *Context, n physical.Node, residual plan.Expr) (rows []types.Row, failed []bool, err error) {
+	in, err := BuildBatch(ec, n)
+	if err != nil {
+		return nil, nil, err
+	}
+	pred, err := newExprSet(ec, n.Schema(), []plan.Expr{residual})
+	if err != nil {
+		return nil, nil, err
+	}
+	classes := pred.classes
+	var arena rowArena
+	res := make([]*Vec, 1)
+	row := make(types.Row, len(classes))
+	val := make(types.Row, 1)
+	keep := func(b *Batch, i int, rowFailed bool) error {
+		batchRow(b, i, classes, row)
+		cp := arena.copy(row)
+		if err := ec.Mem.Reserve(RowSize(cp)); err != nil {
+			return err
+		}
+		rows = append(rows, cp)
+		failed = append(failed, rowFailed)
+		return nil
+	}
+	for {
+		b, err := in.NextBatch()
+		if err != nil {
+			return nil, nil, err
+		}
+		if b == nil {
+			return rows, failed, nil
+		}
+		if err := ec.Check(); err != nil {
+			return nil, nil, err
+		}
+		vectorOK := pred.eval(b, b.Sel, res) == nil
+		var ferr error
+		forActive(b.N, b.Sel, func(i int) {
+			if ferr != nil {
+				return
+			}
+			pass, rowFailed := false, false
+			if vectorOK {
+				pass = !res[0].isNull(i) && res[0].I[i] != 0
+			} else if err := pred.evalRow(b, i, val); err != nil {
+				rowFailed = true
+			} else {
+				pass = val[0].IsTrue()
+			}
+			if pass || rowFailed {
+				ferr = keep(b, i, rowFailed)
+			}
+		})
+		if ferr != nil {
+			return nil, nil, ferr
+		}
+	}
+}
+
 // buildDirect indexes rows by their single key (see lookupTable).
 func (t *lookupTable) buildDirect(rows []types.Row, failed []bool, key evalFn, cls vclass) error {
 	if cls == vInt {
@@ -557,10 +619,6 @@ func (ec *Context) lookupTable(n *physical.ParamLookup) (*lookupTable, error) {
 	if t, ok := ec.lookups[n]; ok {
 		return t, nil
 	}
-	in, err := input(ec, n.Input, ec.Vectorized)
-	if err != nil {
-		return nil, err
-	}
 	keys, err := compileAll(ec, layoutOf(n.Input.Schema()), n.InnerKeys)
 	if err != nil {
 		return nil, err
@@ -570,14 +628,30 @@ func (ec *Context) lookupTable(n *physical.ParamLookup) (*lookupTable, error) {
 		ts[i] = k.Type()
 	}
 	t := &lookupTable{}
-	var resid evalFn
-	if n.Residual != nil && !volatile(n.Residual) && refsWithin(n.Residual, n.Input.Schema()) {
+	var rows []types.Row
+	var failed []bool
+	switch {
+	case n.Residual == nil || volatile(n.Residual) || !refsWithin(n.Residual, n.Input.Schema()):
+		var in Operator
+		if in, err = input(ec, n.Input, ec.Vectorized); err != nil {
+			return nil, err
+		}
+		rows, err = materialize(ec, in)
+	case ec.Vectorized:
+		t.checked = true
+		rows, failed, err = materializeCheckedBatches(ec, n.Input, n.Residual)
+	default:
+		t.checked = true
+		var in Operator
+		if in, err = input(ec, n.Input, false); err != nil {
+			return nil, err
+		}
+		var resid evalFn
 		if resid, err = compile(ec, layoutOf(n.Input.Schema()), n.Residual); err != nil {
 			return nil, err
 		}
-		t.checked = true
+		rows, failed, err = materializeChecked(ec, in, resid)
 	}
-	rows, failed, err := materializeChecked(ec, in, resid)
 	if err != nil {
 		return nil, err
 	}
