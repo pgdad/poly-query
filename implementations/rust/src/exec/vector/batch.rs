@@ -370,6 +370,59 @@ impl Vector {
         }
     }
 
+    /// [`Vector::concat`] followed by [`Vector::into_dictionary`]; plain
+    /// string parts are moved straight into the shared dictionary (one
+    /// copy of the string references instead of two).
+    pub fn concat_dictionary(parts: Vec<Vector>) -> Vector {
+        let strings = parts.iter().any(|p| matches!(p.data, Data::Str(_)))
+            && parts
+                .iter()
+                .all(|p| matches!(p.data, Data::Str(_) | Data::Null));
+        if !strings {
+            return Vector::concat(parts).into_dictionary();
+        }
+        let len: usize = parts.iter().map(Vector::len).sum();
+        let any_null = parts.iter().any(|p| !p.no_nulls());
+        let valid = any_null.then(|| {
+            let mut v = Vec::with_capacity(len);
+            for p in &parts {
+                match p.validity() {
+                    Some(pv) => v.extend(pv),
+                    None => v.extend(std::iter::repeat_n(true, p.len)),
+                }
+            }
+            v
+        });
+        let empty: Arc<str> = Arc::from("");
+        let mut dict = Arc::<[Arc<str>]>::new_uninit_slice(len);
+        let slots = Arc::get_mut(&mut dict).expect("new allocation is unique");
+        let mut next = slots.iter_mut();
+        let mut written = 0;
+        for p in parts {
+            let n = p.len;
+            // The part's values drive the iteration, so no slot is skipped.
+            match p.data {
+                Data::Str(v) => {
+                    for (s, slot) in v.into_iter().zip(next.by_ref()) {
+                        slot.write(s);
+                        written += 1;
+                    }
+                }
+                _ => {
+                    for slot in next.by_ref().take(n) {
+                        slot.write(empty.clone());
+                        written += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(written, len, "every dictionary slot is written");
+        // SAFETY: `written == len`: every slot of the new slice was
+        // written above.
+        let dict = unsafe { dict.assume_init() };
+        Vector::new(Data::Dict((0..len as u32).collect(), dict), valid)
+    }
+
     /// Concatenates vectors, keeping a typed representation when possible.
     /// Takes the parts by value, so their data is moved, not cloned.
     pub fn concat(mut parts: Vec<Vector>) -> Vector {
@@ -622,6 +675,29 @@ mod tests {
         assert_eq!(g.value(0), Value::str("y"));
         assert!(g.is_null(1));
         assert_eq!(g.value(2), Value::str("x"));
+    }
+
+    #[test]
+    fn concat_dictionary_moves_strings() {
+        let a = Vector::from_values(vec![Value::str("x"), Value::Null, Value::str("y")]);
+        let b = Vector::from_values(vec![Value::str("z")]);
+        let c = Vector::concat_dictionary(vec![a, Vector::null(2), b]);
+        assert!(matches!(c.data, Data::Dict(..)));
+        assert_eq!(c.len(), 6);
+        let values: Vec<Value> = (0..6).map(|i| c.value(i)).collect();
+        assert_eq!(
+            values,
+            vec![
+                Value::str("x"),
+                Value::Null,
+                Value::str("y"),
+                Value::Null,
+                Value::Null,
+                Value::str("z")
+            ]
+        );
+        let ints = Vector::concat_dictionary(vec![Vector::from_values(vec![Value::Int(1)])]);
+        assert!(matches!(ints.data, Data::Int(_)));
     }
 
     #[test]

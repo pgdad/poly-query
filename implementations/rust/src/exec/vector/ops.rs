@@ -411,7 +411,15 @@ impl SortOp {
             let columns = pool::scoped(
                 Batch::column_parts(parts, self.width)
                     .into_iter()
-                    .map(|column| move || finish(Vector::concat(column)))
+                    .map(|column| {
+                        move || {
+                            if dictionary {
+                                Vector::concat_dictionary(column)
+                            } else {
+                                finish(Vector::concat(column))
+                            }
+                        }
+                    })
                     .collect(),
             );
             Batch::new(columns, len)
