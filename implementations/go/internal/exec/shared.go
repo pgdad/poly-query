@@ -18,7 +18,7 @@ type sharedResult struct {
 // sharedRows returns the rows of the shared aggregation x, computing them
 // with build on first use. Occurrences may run on different goroutines
 // (e.g. a hash join build side taken by a parallel worker).
-func (ec *Context) sharedRows(x *physical.HashAggregate, build func() (Operator, error)) ([]types.Row, error) {
+func (ec *Context) sharedRows(x *physical.HashAggregate, build func() ([]types.Row, error)) ([]types.Row, error) {
 	key := ec.Plan.Shared[x]
 	ec.sharedMu.Lock()
 	r := ec.shared[key]
@@ -30,15 +30,27 @@ func (ec *Context) sharedRows(x *physical.HashAggregate, build func() (Operator,
 		ec.shared[key] = r
 	}
 	ec.sharedMu.Unlock()
-	r.once.Do(func() {
-		op, err := build()
-		if err != nil {
-			r.err = err
-			return
-		}
-		r.rows, r.err = materialize(ec, op)
-	})
+	r.once.Do(func() { r.rows, r.err = build() })
 	return r.rows, r.err
+}
+
+// rowSource is implemented by operators that compute their whole output
+// as rows (aggregations): allRows returns them (not to be modified).
+type rowSource interface {
+	allRows() ([]types.Row, error)
+}
+
+func (l *lazyRows) allRows() ([]types.Row, error)     { return l.run() }
+func (l *lazyRowsOp) allRows() ([]types.Row, error)   { return l.run() }
+func (a *vaggregateOp) allRows() ([]types.Row, error) { return a.run() }
+
+// rowsOf returns all rows of a row operator, without copying for row
+// sources.
+func rowsOf(ec *Context, op Operator) ([]types.Row, error) {
+	if src, ok := op.(rowSource); ok {
+		return src.allRows()
+	}
+	return materialize(ec, op)
 }
 
 // isShared reports whether x is an aggregation shared by several

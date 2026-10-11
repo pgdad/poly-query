@@ -43,8 +43,15 @@ func sharedAggregates(p *Plan) map[*HashAggregate]string {
 		if shared == nil {
 			shared = map[*HashAggregate]string{}
 		}
+		// The rows are computed once: in first-appearance order unless no
+		// occurrence needs it.
+		anyOrder := true
 		for _, a := range nodes {
 			shared[a] = key
+			anyOrder = anyOrder && a.AnyOrder
+		}
+		for _, a := range nodes {
+			a.AnyOrder = anyOrder
 		}
 	}
 	return shared
@@ -102,7 +109,7 @@ func render(sb *strings.Builder, n Node, ids map[plan.ColumnID]plan.ColumnID) bo
 		}
 		cols(x.Cols)
 	case *HashAggregate:
-		fmt.Fprintf(sb, "(aggregate %v", x.AnyOrder)
+		sb.WriteString("(aggregate")
 		for _, e := range x.Keys {
 			if !expr(e) {
 				return false

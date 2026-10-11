@@ -547,12 +547,15 @@ func BuildBatch(ec *Context, n physical.Node) (BatchOperator, error) {
 	case *physical.HashAggregate:
 		if ec.isShared(x) {
 			run := func() ([]types.Row, error) {
-				return ec.sharedRows(x, func() (Operator, error) {
+				return ec.sharedRows(x, func() ([]types.Row, error) {
 					b, err := buildVAggregate(ec, x)
 					if err != nil {
 						return nil, err
 					}
-					return newRowReader(b, schemaTypes(x.Schema())), nil
+					if src, ok := b.(rowSource); ok {
+						return src.allRows()
+					}
+					return materialize(ec, newRowReader(b, schemaTypes(x.Schema())))
 				})
 			}
 			return &lazyRows{run: run, types: schemaTypes(x.Schema())}, nil

@@ -45,6 +45,10 @@ func TestAnyOrderAggregate(t *testing.T) {
 		{"SELECT dept, COUNT(*) AS n FROM emp GROUP BY dept ORDER BY n DESC LIMIT 3", false},
 		{"SELECT dept, boss, COUNT(*) FROM emp GROUP BY dept, boss ORDER BY boss", false},
 		{"SELECT dept, COUNT(*) FROM emp GROUP BY dept", false},
+		// Consumed by order-insensitive global aggregates.
+		{"SELECT COUNT(*), MAX(s) FROM (SELECT dept, SUM(salary) AS s FROM emp GROUP BY dept) x WHERE s > 10", true},
+		{"SELECT SUM(s * 1.5e0) FROM (SELECT dept, SUM(salary) AS s FROM emp GROUP BY dept) x", false},
+		{"SELECT COUNT(*) FROM (SELECT dept, SUM(salary) AS s FROM emp GROUP BY dept) x WHERE 100 / s > 1", false},
 	} {
 		p := build(t, c.sql, physical.Options{})
 		var found *physical.HashAggregate

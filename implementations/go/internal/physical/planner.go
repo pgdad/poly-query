@@ -149,6 +149,11 @@ func (p *planner) node(n plan.Node, req idset) (Node, error) {
 		if err != nil {
 			return nil, err
 		}
+		if len(x.Keys) == 0 && orderInsensitive(x.Aggs) {
+			if below := orderFreeInput(in); below != nil {
+				below.AnyOrder = true
+			}
+		}
 		agg := &HashAggregate{Input: in, Keys: x.Keys, KeyCols: x.KeyCols, Aggs: x.Aggs, AggCols: x.AggCols,
 			EstGroups: p.estimateGroups(x)}
 		agg.KeyRange, agg.KeyLo, agg.KeyHi = keyRange(x, agg.EstGroups)
@@ -578,6 +583,76 @@ func intColumnRange(input plan.Node, e plan.Expr) (bool, int64, int64) {
 		return false, 0, 0
 	}
 	return true, st.Min.I, st.Max.I
+}
+
+// orderInsensitive reports whether aggregates yield the same result for
+// any order of their input rows: no FLOAT64 sums (rounding depends on the
+// summation order).
+func orderInsensitive(aggs []*plan.AggCall) bool {
+	for _, a := range aggs {
+		if (a.Func == plan.AggSum || a.Func == plan.AggAvg) && a.Arg.Type().Kind == types.KindFloat64 {
+			return false
+		}
+	}
+	return true
+}
+
+// orderFreeInput returns the aggregation feeding an order-insensitive
+// global aggregation through filters and projections whose expressions
+// cannot fail (so no row order decides which error shows).
+func orderFreeInput(n Node) *HashAggregate {
+	for {
+		switch x := n.(type) {
+		case *Project:
+			for _, e := range x.Exprs {
+				if !cannotFail(e) {
+					return nil
+				}
+			}
+			n = x.Input
+		case *Filter:
+			if !cannotFail(x.Pred) {
+				return nil
+			}
+			n = x.Input
+		case *HashAggregate:
+			if len(x.KeyCols) == 0 {
+				return nil
+			}
+			return x
+		default:
+			return nil
+		}
+	}
+}
+
+// cannotFail reports whether evaluating e for a row can never raise an
+// error: column references, literals, comparisons, IS NULL, logical
+// operators and uncorrelated subqueries (evaluated once, independently of
+// rows).
+func cannotFail(e plan.Expr) bool {
+	switch x := e.(type) {
+	case *plan.ColumnRef, *plan.Literal:
+		return true
+	case *plan.IsNull:
+		return cannotFail(x.X)
+	case *plan.Unary:
+		return x.Op == plan.OpNot && cannotFail(x.X)
+	case *plan.Binary:
+		if !x.Op.IsComparison() && x.Op != plan.OpAnd && x.Op != plan.OpOr {
+			return false
+		}
+		return cannotFail(x.L) && cannotFail(x.R)
+	case *plan.Subquery:
+		return len(x.Correlated) == 0 && x.Kind != plan.SubIn
+	case *plan.Cast:
+		// Numeric conversions to FLOAT64 (comparison promotions).
+		switch x.X.Type().Kind {
+		case types.KindInt64, types.KindDecimal, types.KindFloat64:
+			return x.To.Kind == types.KindFloat64 && cannotFail(x.X)
+		}
+	}
+	return false
 }
 
 // maxDenseKeys bounds the key range of directly indexed group tables.
