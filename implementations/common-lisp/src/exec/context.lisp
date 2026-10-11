@@ -8,7 +8,8 @@
   (cancelled nil)                   ; set asynchronously to request cancellation
   (memory-budget (* 2048 1024 1024))
   (max-join-rows nil)               ; limit on rows produced by one join, or NIL
-  (memory-used 0))
+  (memory-used 0 :type sb-ext:word) ; updated atomically (parallel workers)
+  (cleanups '()))                   ; functions to run when the query ends
 
 (defvar *query-context* nil
   "The context of the query currently executing in this thread.")
@@ -32,10 +33,30 @@
   "Account BYTES of materialized state against the query memory budget."
   (let ((ctx *query-context*))
     (when ctx
-      (when (> (incf (query-context-memory-used ctx) bytes)
+      (when (> (+ (sb-ext:atomic-incf (query-context-memory-used ctx) bytes) bytes)
                (query-context-memory-budget ctx))
         (resource-limit-error "query exceeded its memory budget of ~D MB"
                               (floor (query-context-memory-budget ctx) (* 1024 1024)))))))
+
+(defun add-query-cleanup (fn)
+  "Arrange for FN to be called when the current query ends (normally or not)."
+  (let ((ctx *query-context*))
+    (when ctx
+      (sb-ext:atomic-push fn (query-context-cleanups ctx)))))
+
+(defun run-query-cleanups (ctx)
+  "Run (and forget) the cleanups registered for CTX, most recent first."
+  (when ctx
+    (loop for fn = (sb-ext:atomic-pop (query-context-cleanups ctx))
+          while fn
+          do (funcall (the function fn)))))
+
+(defmacro with-query-cleanups ((ctx) &body body)
+  "Run BODY, then the cleanups registered for the query context CTX."
+  (let ((c (gensym "CTX")))
+    `(let ((,c ,ctx))
+       (unwind-protect (progn ,@body)
+         (run-query-cleanups ,c)))))
 
 (defun row-footprint (width)
   "Approximate bytes held by one materialized row of WIDTH values."
@@ -54,6 +75,10 @@
 
 (defvar *exec-options* (make-exec-options)
   "Options of the statement being planned or compiled.")
+
+(defvar *parallel-disabled* nil
+  "True while compiling or running code that must not start parallel workers
+(inside a worker, or a subquery).")
 
 (defun vectorized-execution-p (&optional (options *exec-options*))
   "True when the statement runs on the batch (vectorized) executor."

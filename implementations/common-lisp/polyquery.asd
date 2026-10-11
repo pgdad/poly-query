@@ -56,7 +56,8 @@
                  (:file "vexpressions")
                  (:file "keytable")
                  (:file "vaggregates")
-                 (:file "voperators")))
+                 (:file "voperators")
+                 (:file "parallel")))
    (:file "engine")
    (:module "protocol" :serial t
     :components ((:file "requests")))

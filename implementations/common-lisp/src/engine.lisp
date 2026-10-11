@@ -84,8 +84,9 @@ next result row or NIL."
   "Run SQL against the session catalog and return a QUERY-RESULT. CONTEXT is
 the QUERY-CONTEXT to run in (by default a fresh one with TIMEOUT-MS)."
   (let ((*query-context* (or context (make-context-for session timeout-ms))))
-    (multiple-value-bind (columns next) (open-sql session sql :options options)
-      (collect-rows columns next max-rows collect-rows))))
+    (with-query-cleanups (*query-context*)
+      (multiple-value-bind (columns next) (open-sql session sql :options options)
+        (collect-rows columns next max-rows collect-rows)))))
 
 (defun collect-rows (columns next max-rows collect-rows)
   "Drain the row iterator NEXT into a QUERY-RESULT (only counting rows unless

@@ -345,7 +345,7 @@ every call, e.g. per execution of a correlated subquery)."
             (when invariant (setf cached build))
             build)))))
 
-(defun make-batch-hash-join (node open-probe build-provider)
+(defun make-batch-hash-join (node open-probe build-provider &optional row-cell)
   "Batch opener of a hash join probing the JOIN-BUILD returned by
 BUILD-PROVIDER with the batches of OPEN-PROBE. Output rows of one probe row
 follow each other; for LEFT joins a probe row without match is padded with
@@ -365,7 +365,7 @@ NULLs."
             (batch nil) (n 0) (gids nil) (i 0) (chain -2)
             (row-had-pair nil)
             (matched #())
-            (counter (join-row-counter)))
+            (counter (join-row-counter row-cell)))
         (declare (type function probe counter) (type fixnum n i chain)
                  (type simple-vector matched))
         (labels ((assemble (pidx bidx m)

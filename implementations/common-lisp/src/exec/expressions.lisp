@@ -426,7 +426,7 @@ NULL, else FALSE. Constant lists sharing one comparison type use a hash set."
 (defun compile-subquery (e fns)
   (let* ((sq (b-op-info e))
          (kind (subquery-kind sq))
-         (open (compile-plan (subquery-plan sq)))
+         (open (let ((*parallel-disabled* t)) (compile-plan (subquery-plan sq))))
          (env (subquery-param-env sq))
          (param-fns (coerce (if (eq kind :in) (rest fns) fns) 'simple-vector))
          (nparams (length param-fns))

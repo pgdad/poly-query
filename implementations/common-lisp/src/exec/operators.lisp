@@ -208,14 +208,21 @@ statement's `mode` option."
     (replace out right :start1 (length left))
     out))
 
-(defun join-row-counter ()
-  "Function to call per produced join row; enforces --max-join-rows."
+(defstruct (row-cell (:constructor make-row-cell ()))
+  "Row count shared by the parallel copies of one join operator."
+  (count 0 :type sb-ext:word))
+
+(defun join-row-counter (&optional cell)
+  "Function to call per produced join row; enforces --max-join-rows (counted
+in CELL when the operator runs in several parallel copies)."
   (let ((count 0)
         (limit (and *query-context* (query-context-max-join-rows *query-context*))))
     (declare (type fixnum count))
     (lambda ()
-      (when (and limit (> (incf count) limit))
-        (resource-limit-error "join produced more than ~D rows (--max-join-rows)" limit))
+      (incf count)
+      (when limit
+        (when (> (if cell (1+ (sb-ext:atomic-incf (row-cell-count cell))) count) limit)
+          (resource-limit-error "join produced more than ~D rows (--max-join-rows)" limit)))
       (when (zerop (logand count 4095))
         (check-interrupts)))))
 
