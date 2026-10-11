@@ -819,6 +819,39 @@ normalized keys for large inputs (vsort.lisp), else by comparison sort."
              (push b batches))
     (concatenate-batches (nreverse batches) kinds)))
 
+(defun whole-scan-batch (node threads)
+  "One batch of all rows of NODE, read straight from the column stores (one
+copy, a column per thread) when NODE is a TableScan or a Project of column
+references over one; NIL otherwise."
+  (typecase node
+    (pp-table-scan
+     (let* ((kinds (output-kinds node))
+            (indexes (coerce (pp-table-scan-column-indexes node) 'simple-vector))
+            (batches (mapcar (lambda (seg)
+                               (let* ((n (segment-count seg))
+                                      (columns (make-array (length indexes))))
+                                 (map-row-ranges (length indexes) threads
+                                                 (lambda (start end)
+                                                   (loop for k from start below end
+                                                         do (setf (svref columns k)
+                                                                  (segment-vec seg (svref indexes k) 0 n
+                                                                               (svref kinds k)))))
+                                                 1)
+                                 (make-batch n columns)))
+                             (scan-segments node)))
+            (batch (if (and batches (null (rest batches)))
+                       (first batches)
+                       (concatenate-batches batches kinds))))
+       (charge-memory (* (batch-count batch) (row-footprint (length kinds))))
+       batch))
+    (pp-project
+     (when (every #'b-column-p (pp-project-exprs node))
+       (let ((input (whole-scan-batch (pnode-child node) threads)))
+         (when input
+           (make-batch (batch-count input)
+                       (map 'simple-vector (lambda (e) (svref (batch-columns input) (b-column-index e)))
+                            (pp-project-exprs node)))))))))
+
 (defun permutation-batches (batch perm start end)
   "Iterator over the rows PERM[START..END) of BATCH, a batch at a time."
   (declare (type fixnum start end) (type index-vector perm))
@@ -863,7 +896,8 @@ gathered up front by up to THREADS threads (for large sorted outputs)."
       (let ((output nil))
         (lambda ()
           (unless output
-            (let ((batch (drain-batches open-child kinds)))
+            (let ((batch (or (whole-scan-batch (pnode-child node) threads)
+                             (drain-batches open-child kinds))))
               (check-interrupts)
               (let ((perm (sorted-permutation batch keys threads)))
                 (setf output (if (and (> threads 1) (> (batch-count batch) (* 4 (morsel-rows))))
@@ -933,6 +967,9 @@ gathered up front by up to THREADS threads (for large sorted outputs)."
 ;;; ------------------------------------------------------------------
 ;;; Entry point
 
-(defun compile-vectorized-plan (node)
-  "Row opener running the physical plan NODE on the batch executor."
-  (batches-to-rows-opener (compile-batch-operator node)))
+(defun compile-vectorized-plan (node &key count-only)
+  "Row opener running the physical plan NODE on the batch executor (yielding
+placeholder rows when COUNT-ONLY)."
+  (if count-only
+      (batches-to-count-opener (compile-batch-operator node))
+      (batches-to-rows-opener (compile-batch-operator node))))

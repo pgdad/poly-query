@@ -319,58 +319,109 @@ first); digits of the first word above TOP-DIGIT are known to be constant."
                             (rotatef local out-perm)))))
     (replace perm local :start1 start)))
 
-(defun top-varying-digit (words n)
-  "(values words digit): WORDS without its leading constant words, and the
-most significant digit of the first remaining word that varies over the N
-rows; NIL when all rows have equal words."
+(defun chunk-bounds (n chunks)
+  "List of CHUNKS + 1 boundaries cutting [0, N) into near-equal ranges."
+  (loop for k to chunks collect (floor (* k n) chunks)))
+
+(defun chunk-histograms (word bounds)
+  "Digit histograms of WORD over each range of BOUNDS (computed in parallel)
+and their sum: (values sum per-chunk-vector)."
+  (let* ((chunks (1- (length bounds)))
+         (per-chunk (make-array chunks)))
+    (run-in-threads
+     (loop for (a b) on bounds
+           for c from 0
+           while b
+           collect (let ((a a) (b b) (c c))
+                     (lambda () (setf (svref per-chunk c) (word-histograms word nil a b))))))
+    (let ((sum (make-array (* +radix-digits+ +radix-buckets+) :element-type 'fixnum
+                                                              :initial-element 0)))
+      (declare (type (simple-array fixnum (*)) sum))
+      (loop for h across per-chunk
+            do (let ((h h))
+                 (declare (type (simple-array fixnum (*)) h))
+                 (dotimes (i (length sum))
+                   (incf (aref sum i) (aref h i)))))
+      (values sum per-chunk))))
+
+(defun top-varying-digit (words n &optional bounds)
+  "(values words digit histograms per-chunk): WORDS without its leading
+constant words, the most significant digit of the first remaining word
+that varies over the N rows, and that word's digit histograms (in total,
+and per range of BOUNDS when given). NIL when all rows have equal words."
   (loop for rest on words
-        do (let ((hist (word-histograms (first rest) nil 0 n)))
+        do (multiple-value-bind (hist per-chunk)
+               (if bounds
+                   (chunk-histograms (first rest) bounds)
+                   (word-histograms (first rest) nil 0 n))
              (loop for d from (1- +radix-digits+) downto 0
                    unless (trivial-digit-p hist d n)
-                     do (return-from top-varying-digit (values rest d hist))))
+                     do (return-from top-varying-digit (values rest d hist per-chunk))))
         finally (return nil)))
+
+(defun partition-by-digit (word d per-chunk bounds out)
+  "Stably scatter the rows [0, N) into OUT by digit D of WORD, each range of
+BOUNDS in its own thread (PER-CHUNK: the ranges' digit histograms)."
+  (declare (type u64-vector word) (type index-vector out) (type radix-digit d))
+  (let* ((chunks (length per-chunk))
+         (base (* d +radix-buckets+))
+         (offsets (coerce (loop repeat chunks
+                                collect (make-array +radix-buckets+ :element-type 'fixnum))
+                          'simple-vector))
+         (sum 0))
+    (declare (type fixnum sum))
+    ;; Bucket b of chunk c starts after all rows of smaller buckets and the
+    ;; rows of bucket b in earlier chunks.
+    (dotimes (b +radix-buckets+)
+      (dotimes (c chunks)
+        (setf (aref (the (simple-array fixnum (*)) (svref offsets c)) b) sum)
+        (incf sum (aref (the (simple-array fixnum (*)) (svref per-chunk c)) (+ base b)))))
+    (run-in-threads
+     (loop for (a b) on bounds
+           for c from 0
+           while b
+           collect (let ((a a) (b b) (offs (svref offsets c)))
+                     (declare (type fixnum a b) (type (simple-array fixnum (*)) offs))
+                     (lambda ()
+                       (loop for i of-type fixnum from a below b
+                             do (let ((bucket (digit-of (aref word i) d)))
+                                  (setf (aref out (aref offs bucket)) i)
+                                  (incf (aref offs bucket))))))))
+    out))
 
 (defun radix-sort-rows (words n threads)
   "Permutation of the rows [0, N) stably sorted by WORDS."
-  (multiple-value-bind (words top hist) (top-varying-digit words n)
-    (let ((perm (identity-index-vector n)))
-      (cond
-        ((null words) perm)
-        ((or (<= threads 1) (< n (* 2 (morsel-rows))))
-         (radix-sort-range perm 0 n words top)
-         perm)
-        (t
-         ;; Partition by the top digit, then sort ranges of whole buckets
-         ;; in parallel (each range again by all digits up to the top one).
-         (let* ((word (first words))
-                (out (make-index-vector n))
-                (offsets (make-array +radix-buckets+ :element-type 'fixnum))
-                (base (* top +radix-buckets+))
-                (sum 0))
-           (declare (type u64-vector word) (type fixnum sum)
-                    (type (simple-array fixnum (*)) hist))
-           (dotimes (b +radix-buckets+)
-             (setf (aref offsets b) sum)
-             (incf sum (aref hist (+ base b))))
-           (dotimes (i n)
-             (let ((b (digit-of (aref word i) top)))
-               (setf (aref out (aref offsets b)) i)
-               (incf (aref offsets b))))
-           (let ((ranges '()) (start 0) (acc 0) (target (ceiling n threads)))
-             (declare (type fixnum start acc))
-             (dotimes (b +radix-buckets+)
-               (incf acc (aref hist (+ base b)))
-               (when (or (>= (- acc start) target) (= b (1- +radix-buckets+)))
-                 (when (> acc start) (push (cons start acc) ranges))
-                 (setf start acc)))
-             (run-in-threads
-              (mapcar (lambda (range)
-                        (lambda ()
-                          (let ((a (car range)) (b (cdr range)))
-                            (when (> (- b a) 1)
-                              (radix-sort-range out a b words top)))))
-                      ranges)))
-           out))))))
+  (if (or (<= threads 1) (< n (* 2 (morsel-rows))))
+      (multiple-value-bind (words top) (top-varying-digit words n)
+        (let ((perm (identity-index-vector n)))
+          (when words
+            (radix-sort-range perm 0 n words top))
+          perm))
+      ;; Partition by the top digit, then sort ranges of whole buckets in
+      ;; parallel (each range again by all digits up to the top one).
+      (let ((bounds (chunk-bounds n (min threads (floor n (morsel-rows))))))
+        (multiple-value-bind (words top hist per-chunk) (top-varying-digit words n bounds)
+          (if (null words)
+              (identity-index-vector n)
+              (let ((out (partition-by-digit (first words) top per-chunk bounds
+                                             (make-index-vector n)))
+                    (base (* top +radix-buckets+)))
+                (declare (type (simple-array fixnum (*)) hist))
+                (let ((ranges '()) (start 0) (acc 0) (target (ceiling n threads)))
+                  (declare (type fixnum start acc))
+                  (dotimes (b +radix-buckets+)
+                    (incf acc (aref hist (+ base b)))
+                    (when (or (>= (- acc start) target) (= b (1- +radix-buckets+)))
+                      (when (> acc start) (push (cons start acc) ranges))
+                      (setf start acc)))
+                  (run-in-threads
+                   (mapcar (lambda (range)
+                             (lambda ()
+                               (let ((a (car range)) (b (cdr range)))
+                                 (when (> (- b a) 1)
+                                   (radix-sort-range out a b words top)))))
+                           ranges)))
+                out))))))
 
 (defun resort-inexact-runs (perm words run-words inexact before)
   "Re-sort with the comparison predicate BEFORE every run of PERM whose first

@@ -67,11 +67,12 @@ bound-query)."
   (loop for c in (bound-query-columns bound)
         collect (make-column-def (column-def-name c) (output-type (column-def-type c)))))
 
-(defun open-sql (session sql &key (options (make-exec-options)))
+(defun open-sql (session sql &key (options (make-exec-options)) count-only)
   "Parse, analyse and plan SQL in the current *QUERY-CONTEXT* with the
 EXEC-OPTIONS OPTIONS. Index statements are executed immediately. Returns
 (values columns iterator): the result COLUMN-DEFs and a function returning the
-next result row or NIL."
+next result row or NIL (COUNT-ONLY: possibly placeholder rows, for callers
+that only count them)."
   (let ((ast (parse-sql sql)))
     (flet ((no-rows () nil))
       (typecase ast
@@ -86,7 +87,8 @@ next result row or NIL."
                (values (result-columns bound)
                        (let ((*execution-settings* (physical-query-settings plan))
                              (*shared-results* (make-shared-results-table (physical-query-root plan))))
-                         (funcall (the function (compile-plan (physical-query-root plan)))))))))))))
+                         (funcall (the function (compile-plan (physical-query-root plan)
+                                                              :count-only count-only))))))))))))
 
 (defun execute-sql (session sql &key max-rows timeout-ms (collect-rows t)
                                      (options (make-exec-options)) context)
@@ -96,7 +98,8 @@ the QUERY-CONTEXT to run in (by default a fresh one with TIMEOUT-MS)."
          (memory-before (query-context-memory-used *query-context*)))
     (flet ((run (options)
              (with-query-cleanups (*query-context*)
-               (multiple-value-bind (columns next) (open-sql session sql :options options)
+               (multiple-value-bind (columns next)
+                   (open-sql session sql :options options :count-only (not collect-rows))
                  (collect-rows columns next max-rows collect-rows)))))
       (if (eq (exec-options-mode options) :row)
           (run options)

@@ -306,6 +306,25 @@ all are; NIL when none is)."
           (unless batch (return nil))
           (setf i 0 n (batch-count batch)))))))
 
+(defun batches-to-count-opener (open-batches)
+  "Row opener yielding one placeholder row (an empty vector) per row of the
+batch opener OPEN-BATCHES: for consumers that only count rows (`result:
+count`), so that no row vectors are built."
+  (declare (type function open-batches))
+  (lambda ()
+    (let ((next-batch (funcall open-batches))
+          (row (vector))
+          (left 0))
+      (declare (type function next-batch) (type fixnum left))
+      (lambda ()
+        (loop
+          (when (plusp left)
+            (decf left)
+            (return row))
+          (let ((batch (funcall next-batch)))
+            (unless batch (return nil))
+            (setf left (batch-count batch))))))))
+
 (defun rows-to-batch (rows n kinds)
   "Batch of the first N row vectors of ROWS (column kinds KINDS)."
   (declare (type simple-vector rows kinds) (type fixnum n))
