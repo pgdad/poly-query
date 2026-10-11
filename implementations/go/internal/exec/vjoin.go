@@ -23,6 +23,10 @@ import (
 type joinTable struct {
 	classes []vclass
 	cols    []Vec // build rows, column-wise (Nulls allocated on first NULL)
+	// STRING columns whose input is dictionary-encoded stay encoded, with
+	// one dictionary for the whole table (dicts[k] non-nil; cols[k] holds
+	// Dict and Codes).
+	dicts   []*joinDict
 	n       int
 	intKeys []int64  // single int-class key with identical representation on both sides
 	strKeys []string // canonical encoded keys otherwise
@@ -31,6 +35,20 @@ type joinTable struct {
 	next    []int32
 	shift   uint
 	seed    maphash.Seed
+	// direct: integer keys within a small range (typically dense ids) index
+	// heads directly by key - lo instead of by hash.
+	direct bool
+	lo     int64
+}
+
+// bucketOfInt returns the bucket of an integer key; ok is false if a
+// directly addressed table cannot contain it.
+func (t *joinTable) bucketOfInt(k int64) (b uint64, ok bool) {
+	if t.direct {
+		d := uint64(k - t.lo)
+		return d, k >= t.lo && d < uint64(len(t.heads))
+	}
+	return hashInt(k, t.shift), true
 }
 
 func hashInt(k int64, shift uint) uint64 {
@@ -41,6 +59,91 @@ func (t *joinTable) bucketOfString(s []byte) uint64 {
 	return maphash.Bytes(t.seed, s) >> t.shift
 }
 
+// joinDict is the dictionary of a dictionary-encoded build column.
+type joinDict struct {
+	index map[string]uint32
+	src   []string // dictionary of the last input vector
+	remap []int32  // its codes → table codes (-1: not yet mapped)
+}
+
+// maxJoinDict bounds a build column's dictionary; beyond it (or when an
+// input vector is not dictionary-encoded) the column is stored plainly.
+const maxJoinDict = 1 << 16
+
+// prepareStrings decides per STRING column of batch b whether it is
+// appended dictionary-encoded (decoding the input otherwise).
+func (t *joinTable) prepareStrings(b *Batch) {
+	if t.dicts == nil {
+		t.dicts = make([]*joinDict, len(t.classes))
+		for k, v := range b.Cols {
+			if t.classes[k] == vStr && v.Dict != nil {
+				t.dicts[k] = &joinDict{index: map[string]uint32{}}
+				t.cols[k].Dict = []string{}
+			}
+		}
+	}
+	for k, v := range b.Cols {
+		if t.classes[k] != vStr {
+			continue
+		}
+		d := t.dicts[k]
+		if d != nil && (v.Dict == nil || len(t.cols[k].Dict) > maxJoinDict) {
+			t.decodeColumn(k)
+			d = nil
+		}
+		if d == nil {
+			v.strs(b.N)
+			continue
+		}
+		if !sameDict(d.src, v.Dict) {
+			d.src = v.Dict
+			d.remap = grow(d.remap, len(v.Dict))
+			for i := range d.remap {
+				d.remap[i] = -1
+			}
+		}
+	}
+}
+
+// decodeColumn switches build column k to plain strings.
+func (t *joinTable) decodeColumn(k int) {
+	c := &t.cols[k]
+	c.S = make([]string, len(c.Codes), max(2*len(c.Codes), 16))
+	for i, code := range c.Codes {
+		if c.Nulls == nil || !c.Nulls[i] {
+			c.S[i] = c.Dict[code]
+		}
+	}
+	c.Dict, c.Codes = nil, nil
+	t.dicts[k] = nil
+}
+
+// appendCode appends row i of the dictionary-encoded vector v to build
+// column k and returns the bytes of new dictionary entries.
+func (t *joinTable) appendCode(k int, v *Vec, i int, isNull bool) int64 {
+	c, d := &t.cols[k], t.dicts[k]
+	if isNull {
+		c.Codes = append(c.Codes, 0)
+		return 0
+	}
+	code := d.remap[v.Codes[i]]
+	var bytes int64
+	if code < 0 {
+		s := v.Dict[v.Codes[i]]
+		tc, ok := d.index[s]
+		if !ok {
+			tc = uint32(len(c.Dict))
+			c.Dict = append(c.Dict, s)
+			d.index[s] = tc
+			bytes = int64(len(s)) + 32
+		}
+		code = int32(tc)
+		d.remap[v.Codes[i]] = code
+	}
+	c.Codes = append(c.Codes, uint32(code))
+	return bytes
+}
+
 // appendRows appends the active rows of b with their keys to the table and
 // returns the bytes of string data added.
 func (t *joinTable) appendRows(b *Batch, keys []*Vec, keyTypes []types.Type, keyBuf *[]byte) int64 {
@@ -49,11 +152,7 @@ func (t *joinTable) appendRows(b *Batch, keys []*Vec, keyTypes []types.Type, key
 	for k, kt := range keyTypes {
 		keyClasses[k] = classOf(kt)
 	}
-	for k, v := range b.Cols {
-		if t.classes[k] == vStr {
-			v.strs(b.N)
-		}
-	}
+	t.prepareStrings(b)
 	forActive(b.N, b.Sel, func(i int) {
 		for _, kv := range keys {
 			if kv.isNull(i) {
@@ -88,8 +187,12 @@ func (t *joinTable) appendRows(b *Batch, keys []*Vec, keyTypes []types.Type, key
 			case vWide:
 				c.W = append(c.W, v.W[i])
 			default:
-				c.S = append(c.S, v.S[i])
-				bytes += int64(len(v.S[i]))
+				if t.dicts[k] != nil {
+					bytes += t.appendCode(k, v, i, isNull)
+				} else {
+					c.S = append(c.S, v.S[i])
+					bytes += int64(len(v.S[i]))
+				}
 			}
 		}
 		t.n++
@@ -97,13 +200,26 @@ func (t *joinTable) appendRows(b *Batch, keys []*Vec, keyTypes []types.Type, key
 	return bytes
 }
 
+// maxDirectSpread bounds the key range of a directly addressed table
+// relative to its rows.
+const maxDirectSpread = 4
+
 // index builds the bucket chains.
 func (t *joinTable) index() {
 	size := 16
 	for size < 2*t.n {
 		size <<= 1
 	}
-	t.shift = uint(64 - bits.TrailingZeros(uint(size)))
+	if t.intKey && t.n > 0 {
+		lo, hi := t.intKeys[0], t.intKeys[0]
+		for _, k := range t.intKeys {
+			lo, hi = min(lo, k), max(hi, k)
+		}
+		if span := uint64(hi) - uint64(lo); hi-lo >= 0 && span < uint64(maxDirectSpread*t.n+1024) {
+			t.direct, t.lo, size = true, lo, int(span)+1
+		}
+	}
+	t.shift = uint(64 - bits.TrailingZeros(uint(max(size, 16))))
 	t.heads = make([]int32, size)
 	for i := range t.heads {
 		t.heads[i] = -1
@@ -112,7 +228,7 @@ func (t *joinTable) index() {
 	for i := t.n - 1; i >= 0; i-- {
 		var h uint64
 		if t.intKey {
-			h = hashInt(t.intKeys[i], t.shift)
+			h, _ = t.bucketOfInt(t.intKeys[i])
 		} else {
 			h = maphash.String(t.seed, t.strKeys[i]) >> t.shift
 		}
@@ -333,7 +449,9 @@ func (j *vhashJoinOp) fillPairs() {
 			}
 			if !hasNull {
 				if t.intKey {
-					j.chain = t.heads[hashInt(j.pkeys[0].I[i], t.shift)]
+					if b, ok := t.bucketOfInt(j.pkeys[0].I[i]); ok {
+						j.chain = t.heads[b]
+					}
 				} else {
 					j.keyBuf = j.keyBuf[:0]
 					for k, kv := range j.pkeys {
@@ -444,6 +562,14 @@ func (j *vhashJoinOp) gatherBuild(k int, v *Vec, n int) *Vec {
 	cls := j.outCols[k]
 	buf := &j.bufs[k]
 	out := buf.reset(n, cls)
+	dict := len(v.Dict) > 0 // (an empty dictionary: all rows are NULL)
+	if dict {
+		// Dictionary-encoded column: gather codes (the table's dictionary
+		// is immutable once built).
+		out.S = out.S[:0]
+		out.Dict, out.Codes = v.Dict, grow(j.codes[k], n)
+		j.codes[k] = out.Codes
+	}
 	idx := j.pairB[:n]
 	var nulls []bool
 	if v.Nulls != nil || j.kind == plan.JoinLeft {
@@ -466,7 +592,11 @@ func (j *vhashJoinOp) gatherBuild(k int, v *Vec, n int) *Vec {
 		case vWide:
 			out.W[o] = v.W[b]
 		default:
-			out.S[o] = v.S[b]
+			if dict {
+				out.Codes[o] = v.Codes[b]
+			} else {
+				out.S[o] = v.S[b]
+			}
 		}
 	}
 	return out

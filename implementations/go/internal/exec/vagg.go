@@ -576,9 +576,10 @@ type aggTable struct {
 	nmap      *nativeIntMap          // replaces imap with native kernels
 	smap      *strGroupMap           // single STRING key
 	hashes    []uint64               // per group: hash of its single STRING key
-	strMap    map[string]int32       // encoded multi-column (and FLOAT64) keys
-	nullGroup int32                  // group of the NULL key (single key)
-	dict      []string               // dictionary of the code→group cache
+	tmap      *tupleGroupMap         // several keys, or a FLOAT64 key
+	hasher    tupleHasher
+	nullGroup int32    // group of the NULL key (single key)
+	dict      []string // dictionary of the code→group cache
 	dictGids  []int32
 	key       []byte
 
@@ -600,10 +601,11 @@ type aggTable struct {
 func newAggTable(ec *Context, keyTypes []types.Type, calls []*plan.AggCall) *aggTable {
 	t := &aggTable{ec: ec, keyTypes: keyTypes, calls: calls, nullGroup: -1,
 		imap: newIntGroupMap(), smap: newStrGroupMap(),
-		wideMap: map[types.Int128]int32{}, strMap: map[string]int32{}}
+		wideMap: map[types.Int128]int32{}, tmap: newTupleGroupMap()}
 	for _, kt := range keyTypes {
 		t.keyClasses = append(t.keyClasses, classOf(kt))
 	}
+	t.hasher.classes = t.keyClasses
 	for _, c := range calls {
 		st := newAggState(c)
 		if s, ok := st.(*exactSumState); ok {
@@ -882,41 +884,48 @@ func (t *aggTable) resolveDict(v *Vec, n int, sel []int32, pos int64) error {
 	return nil
 }
 
-// resolveEncoded resolves multi-column (and FLOAT64) keys by their
-// canonical encoding.
+// resolveEncoded resolves multi-column (and FLOAT64) keys through the
+// tuple map.
 func (t *aggTable) resolveEncoded(keys []*Vec, n int, sel []int32, pos int64) error {
 	gids := t.gids
-	one := func(i int) error {
-		t.key = t.key[:0]
+	var i int
+	eq := func(g int32) bool {
 		for k, v := range keys {
-			t.key = appendKey(t.key, v.value(i, t.keyClasses[k]), t.keyTypes[k])
+			if !sameKeyValue(t.keys[g][k], v.value(i, t.keyClasses[k]), t.keyClasses[k]) {
+				return false
+			}
 		}
-		if len(keys) == 1 && t.key[0] == 0 {
+		return true
+	}
+	one := func() error {
+		if len(keys) == 1 && keys[0].isNull(i) {
 			g, err := t.nullKey(t.posAt(pos, i))
 			gids[i] = g
 			return err
 		}
-		g, ok := t.strMap[string(t.key)]
+		h := t.hasher.rowHash(keys, i)
+		g, slot, ok := t.tmap.find(h, eq)
 		if !ok {
 			var err error
 			if g, err = t.newGroup(t.keyRow(keys, i), t.posAt(pos, i)); err != nil {
 				return err
 			}
-			t.strMap[string(t.key)] = g
+			t.tmap.insert(slot, h, g)
 		}
 		gids[i] = g
 		return nil
 	}
 	if sel == nil {
-		for i := 0; i < n; i++ {
-			if err := one(i); err != nil {
+		for i = 0; i < n; i++ {
+			if err := one(); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	for _, i := range sel {
-		if err := one(int(i)); err != nil {
+	for _, s := range sel {
+		i = int(s)
+		if err := one(); err != nil {
 			return err
 		}
 	}
@@ -984,17 +993,21 @@ func (t *aggTable) findOrAdd(key types.Row, pos int64) (int32, error) {
 		}
 		return t.findOrAddStr(v.S, strKeyHash(v.S), pos)
 	}
-	// Several keys, or a FLOAT64 key: canonical encoding (resolveEncoded).
-	t.key = t.key[:0]
-	for k, v := range key {
-		t.key = appendKey(t.key, v, t.keyTypes[k])
-	}
-	if g, ok := t.strMap[string(t.key)]; ok {
+	// Several keys, or a FLOAT64 key: the tuple map (resolveEncoded).
+	h := t.hasher.valuesHash(key)
+	g, slot, ok := t.tmap.find(h, func(g int32) bool {
+		for k, v := range key {
+			if !sameKeyValue(t.keys[g][k], v, t.keyClasses[k]) {
+				return false
+			}
+		}
+		return true
+	})
+	if ok {
 		return t.found(g, pos), nil
 	}
-	k := string(t.key)
 	g, err := t.newGroup(key, pos)
-	t.strMap[k] = g
+	t.tmap.insert(slot, h, g)
 	return g, err
 }
 

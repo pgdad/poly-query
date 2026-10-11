@@ -2,7 +2,10 @@ package exec
 
 import (
 	"hash/maphash"
+	"math"
 	"math/bits"
+
+	"polyquery/internal/types"
 )
 
 // Open-addressing (linear probing, load factor ≤ 1/2) hash tables from a
@@ -135,4 +138,163 @@ func (m *strGroupMap) rehash() {
 		}
 		m.slots[i] = s
 	}
+}
+
+// tupleGroupMap maps keys of several columns (or a single FLOAT64 key) to
+// groups. Slots hold the tuple's hash (see tupleHasher); keys are compared
+// by the caller on equal hashes.
+type tupleGroupMap struct {
+	slots []tupleGroupSlot
+	used  int
+}
+
+type tupleGroupSlot struct {
+	h  uint64
+	g1 int32 // group + 1; 0 = empty
+}
+
+func newTupleGroupMap() *tupleGroupMap {
+	return &tupleGroupMap{slots: make([]tupleGroupSlot, 64)}
+}
+
+// find returns the group with hash h for which eq holds, and whether there
+// is one; if not, slot is where it would be inserted (valid until the next
+// insert).
+func (m *tupleGroupMap) find(h uint64, eq func(g int32) bool) (g int32, slot int, ok bool) {
+	mask := len(m.slots) - 1
+	for i := int(h) & mask; ; i = (i + 1) & mask {
+		sl := &m.slots[i]
+		if sl.g1 == 0 {
+			return 0, i, false
+		}
+		if sl.h == h && eq(sl.g1-1) {
+			return sl.g1 - 1, i, true
+		}
+	}
+}
+
+// insert stores a new group in the slot returned by find.
+func (m *tupleGroupMap) insert(slot int, h uint64, g int32) {
+	m.slots[slot] = tupleGroupSlot{h: h, g1: g + 1}
+	m.used++
+	if 2*m.used > len(m.slots) {
+		old := m.slots
+		m.slots = make([]tupleGroupSlot, 2*len(old))
+		mask := len(m.slots) - 1
+		for _, s := range old {
+			if s.g1 == 0 {
+				continue
+			}
+			i := int(s.h) & mask
+			for m.slots[i].g1 != 0 {
+				i = (i + 1) & mask
+			}
+			m.slots[i] = s
+		}
+	}
+}
+
+// tupleHasher hashes key tuples, from values or from rows of key vectors
+// (with the hashes of dictionary entries cached per key column).
+type tupleHasher struct {
+	classes []vclass
+	dicts   [][]string // per key column: dictionary of the cached hashes
+	hashes  [][]uint64
+	known   [][]bool
+}
+
+const nullKeyHash = 0x51ed270b27a3b2f1
+
+// valueHash hashes one key value; equal values (as compared by
+// sameKeyValue) hash equally.
+func valueHash(v types.Value, c vclass) uint64 {
+	if v.Null {
+		return nullKeyHash
+	}
+	switch c {
+	case vInt:
+		return mix64(uint64(v.I))
+	case vFloat:
+		return mix64(floatKeyBits(v.F) ^ 0x2545F4914F6CDD1D)
+	case vWide:
+		w := v.Wide()
+		return mix64(w.Lo ^ mix64(uint64(w.Hi)))
+	}
+	return strKeyHash(v.S)
+}
+
+// floatKeyBits is the bit pattern identifying a FLOAT64 key (-0 = 0, as in
+// appendKey).
+func floatKeyBits(f float64) uint64 {
+	if f == 0 {
+		f = 0
+	}
+	return math.Float64bits(f)
+}
+
+func combineHash(h, c uint64) uint64 { return mix64(h*0x9E3779B97F4A7C15 + c) }
+
+// valuesHash hashes a key row.
+func (th *tupleHasher) valuesHash(key types.Row) uint64 {
+	h := uint64(len(key))
+	for k, v := range key {
+		h = combineHash(h, valueHash(v, th.classes[k]))
+	}
+	return h
+}
+
+// rowHash hashes the key of row i (equal to valuesHash of its values).
+func (th *tupleHasher) rowHash(keys []*Vec, i int) uint64 {
+	h := uint64(len(keys))
+	for k, v := range keys {
+		var c uint64
+		switch {
+		case v.isNull(i):
+			c = nullKeyHash
+		case v.Dict != nil && th.classes[k] == vStr:
+			c = th.dictHash(k, v, i)
+		default:
+			c = valueHash(v.value(i, th.classes[k]), th.classes[k])
+		}
+		h = combineHash(h, c)
+	}
+	return h
+}
+
+// dictHash returns the hash of row i's dictionary entry, cached per entry.
+func (th *tupleHasher) dictHash(k int, v *Vec, i int) uint64 {
+	if th.dicts == nil {
+		n := len(th.classes)
+		th.dicts, th.hashes, th.known = make([][]string, n), make([][]uint64, n), make([][]bool, n)
+	}
+	if !sameDict(th.dicts[k], v.Dict) {
+		th.dicts[k] = v.Dict
+		th.hashes[k] = grow(th.hashes[k], len(v.Dict))
+		th.known[k] = grow(th.known[k], len(v.Dict))
+		clear(th.known[k])
+	}
+	c := v.Codes[i]
+	if !th.known[k][c] {
+		th.hashes[k][c] = strKeyHash(v.Dict[c])
+		th.known[k][c] = true
+	}
+	return th.hashes[k][c]
+}
+
+// sameKeyValue reports whether two values of one key column are the same
+// key (as their canonical encodings, appendKey, would be: a column has one
+// type, so DECIMALs share their scale).
+func sameKeyValue(a, b types.Value, c vclass) bool {
+	if a.Null || b.Null {
+		return a.Null == b.Null
+	}
+	switch c {
+	case vInt:
+		return a.I == b.I
+	case vFloat:
+		return floatKeyBits(a.F) == floatKeyBits(b.F)
+	case vWide:
+		return a.Wide() == b.Wide()
+	}
+	return a.S == b.S
 }

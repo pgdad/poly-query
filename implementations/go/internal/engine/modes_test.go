@@ -141,6 +141,11 @@ func TestExecutionModesAgree(t *testing.T) {
 		"SELECT NULLIF(t.grp, 100 / (t.id % 7)) AS k, COUNT(*) FROM t JOIN d ON t.flag = (d.grp > 3) GROUP BY NULLIF(t.grp, 100 / (t.id % 7))",
 		"SELECT COUNT(*) FROM t JOIN d ON NULLIF(t.grp, 100 / (t.id % 7)) = d.grp",
 		"SELECT COUNT(*) FROM d JOIN t a ON d.grp = a.grp JOIN t b ON NULLIF(d.grp, 100 / (a.id % 7)) = b.id",
+		// Join tables addressed directly (dense keys incl. negative ones,
+		// duplicates) or by hash (sparse keys).
+		"SELECT COUNT(*), SUM(a.id) FROM t a JOIN t b ON a.id - 1500 = 1500 - b.id WHERE b.id % 3 = 0",
+		"SELECT COUNT(*), MIN(b.id) FROM t a JOIN t b ON a.id * 1000000 = b.id * 1000 + 999000",
+		"SELECT d.label, COUNT(*) FROM t JOIN d ON t.grp = d.grp GROUP BY d.label",
 		// Vector kernels: CASE, COALESCE, casts, calendar functions.
 		"SELECT CASE WHEN amount < 100 THEN 'low' WHEN grp IS NULL THEN NULL WHEN amount < 300 THEN cat ELSE 'high' END AS c, COUNT(*) FROM t GROUP BY 1",
 		"SELECT SUM(CASE WHEN flag THEN amount ELSE 0 END), SUM(CASE WHEN cat = 'red' THEN 1 END), MAX(CASE WHEN id > 10 THEN price END) FROM t",
