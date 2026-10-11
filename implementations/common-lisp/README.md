@@ -609,6 +609,28 @@ is collected once so later queries do not repeatedly promote it.
   `/v1/version`, `/v1/capabilities`, the table/schema/stats reads and the
   query list/cancel endpoints answers `SHUTTING_DOWN`.
 
+### Execution options (Phase 5)
+
+* `mode: "auto"` (the default) runs the vectorized executor; `row` is the
+  unchanged Volcano baseline. `threads` only affects the vectorized
+  executor (row mode is the serial baseline); its default is the
+  `--threads` command line option, else 1; values above 256 are capped.
+* `join: "auto"` chooses a hash join for every equi-join; forced `merge` /
+  `hash` on a join without equality conjuncts plan a nested-loop join
+  (phase-5.md: `nested_loop` "also for non-equi").
+* `optimize: false` disables constant folding, predicate simplification,
+  predicate pushdown and join reordering, but not column pruning (Phase 3's
+  scan-column contract) and not index selection for a filter directly over
+  a scan (`use_indexes` controls that).
+* `native: true` is accepted and validated (boolean) but has no effect: no
+  native kernel library exists in this workspace, and `native.kernels` is
+  not claimed.
+* Invalid option values: unknown `mode`/`join` strings and `threads` < 1 are
+  `UNSUPPORTED`; ill-typed values are `INVALID_REQUEST` (also for
+  `explain`).
+* When different rows would raise different errors, the vectorized
+  executor reports the row executor's error (see *Errors* above).
+
 ## Performance
 
 Measured with `bench/bench.py` (median of 5 runs, wall time seen by the
