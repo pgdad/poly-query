@@ -12,12 +12,13 @@
  *     alignment or red zone is involved. x18 is never used.
  *   - Loads/stores are LD1/LD1R/LD2/LD4/LDR/LDP/ST1/STR/STP, which accept any
  *     alignment on AArch64 Linux user space (no exclusive or
- *     alignment-checked forms).
+ *     alignment-checked forms); PRFM (gather_i64) never faults.
  *   - Vector loops only run while a whole block is in bounds; the remaining
  *     rows (< block size) are processed by scalar tail code. Validity bytes
- *     are read with byte/halfword loads covering exactly the rows processed,
- *     so nothing outside ceil(n/8) validity bytes or the n elements is read,
- *     and nothing outside the documented output size is written.
+ *     are read with byte/word/vector loads covering exactly the rows
+ *     processed, so nothing outside ceil(n/8) validity bytes or the n
+ *     elements is read, and nothing outside the documented output size is
+ *     written.
  *
  * Kernel skeleton (identical in all three variant files, see README.md):
  *   header comment: Args / Result / Clobbers / Registers / Algorithm / Tail
@@ -34,8 +35,8 @@
  * Shared building blocks: pq_a64_common.h (operator validation, scalar
  * predicates for the tails, validity bits, exact-sum folds and results,
  * min/max helpers, bitmap byte steps, fmix64, compare_fixed record result,
- * group_sum scatter-add, return helpers) and pq_a64_neon.h (constant
- * tables, CMTST validity masks, 16-row and 128-bit range predicates, table
+ * return helpers) and pq_a64_neon.h (constant tables, CMTST validity
+ * masks, 64- and 128-bit predicate lane forms, 32-row mask packing, table
  * compaction, bitmap-writer tails). Macros used by one kernel only are
  * defined next to that kernel.
  */

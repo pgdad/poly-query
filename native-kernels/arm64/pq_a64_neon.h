@@ -17,7 +17,7 @@
  *                     lane masks of 32 rows -> 32-bit row mask
  *   EMIT8_SETUP, EMIT8
  *                     table-driven compaction of 8 rows into indices
- *   PRED128_BCAST, PRED128_FORM, LD2X4, PRED128_2, RNG2, RNG8, PACK8
+ *   PRED128_BCAST, PRED128_FORM, LD2X4, PRED128_2, RNG2, PRED128_8
  *                     128-bit rows: broadcast, form choice, lo/hi split,
  *                     predicate, 8-row mask
  *   ADDV2X            horizontal sum of two 2x64-bit counters into a GPR
