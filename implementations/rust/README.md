@@ -529,7 +529,9 @@ Explicit SIMD (`std::arch`) was evaluated: building the whole engine with
 `-C target-cpu=native` (AVX2) gained only 0–15 % on the scan benchmarks,
 because the kernels are already auto-vectorized and execution is bound by
 memory traffic; the build therefore stays portable (no target-specific
-code, no runtime dispatch).
+code, no runtime dispatch). Hand-written SIMD with runtime CPU dispatch is
+available through the native kernels (`native: true`, see
+[Native kernels](#native-kernels-m9)).
 
 ### Measurements
 
