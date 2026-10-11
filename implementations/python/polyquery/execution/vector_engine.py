@@ -34,6 +34,7 @@ from functools import partial
 from itertools import compress, repeat
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
+from ..analysis import bound as b
 from ..planner import physical as pp
 from ..planner.access import group_may_match
 from . import native_ops, parallel
@@ -839,11 +840,13 @@ def _range_sort(node: pp.Sort | pp.TopN, gather: pp.Gather, ctx: ExecutionContex
     if ranges < 2:
         return None
     key = node.keys[0]
-    sample_task = partial(_consume_partition, partial(_sample_keys, key.position), gather.input)
-    samples = pool.run(gather, ctx, sample_task, prepare_pipeline)
-    if samples is None:
-        return None
-    values = sorted(itertools.chain.from_iterable(samples))
+    values = _table_sample(gather, key.position, ranges)
+    if values is None:  # a computed key: sample the pipeline's output
+        sample_task = partial(_consume_partition, partial(_sample_keys, key.position), gather.input)
+        samples = pool.run(gather, ctx, sample_task, prepare_pipeline)
+        if samples is None:
+            return None
+        values = sorted(itertools.chain.from_iterable(samples))
     splitters = [values[len(values) * i // ranges] for i in range(1, ranges)] if values else []
     split_task = partial(_consume_partition, partial(_range_runs, node, splitters, ranges), gather.input)
     runs = pool.run(gather, ctx, split_task, prepare_pipeline)
@@ -851,6 +854,39 @@ def _range_sort(node: pp.Sort | pp.TopN, gather: pp.Gather, ctx: ExecutionContex
         return None
     inputs = {r: [part[r] for part in runs] for r in range(ranges)}
     return pool.run(gather, ctx, partial(_sort_range, node, gather), None, count=ranges, inputs=inputs)
+
+
+def _table_sample(gather: pp.Gather, position: int, ranges: int) -> list[Any] | None:
+    """Sorted non-NULL values sampled evenly from the driver table's column
+    that column ``position`` of the pipeline output passes through
+    unchanged; None if it is computed (or comes from a join build side).
+    (Splitters only balance the ranges: any values give a correct sort.)"""
+    key = gather.layout[position]
+    node = gather.input
+    while not isinstance(node, (pp.TableScan, pp.IndexScan)):
+        if isinstance(node, pp.Project):
+            expr = node.exprs[key[1]]
+            if not isinstance(expr, b.ColumnRef):
+                return None
+            key = expr.key
+        elif isinstance(node, pp.SubqueryScan):
+            key = node.input.layout[key[1]]
+        elif isinstance(node, (pp.HashJoin, pp.MergeJoin, pp.NestedLoopJoin)):
+            path = pp.pipeline_path(node)
+            probe = path[1] if path is not None and len(path) > 1 else None
+            if probe is None or key not in probe.layout:
+                return None
+            node = probe
+            continue
+        elif not isinstance(node, pp.Filter):
+            return None
+        node = node.input
+    if key[0] != node.rel:
+        return None
+    table = node.table
+    step = max(1, table.row_count // (RANGE_SORT_SAMPLES * ranges))
+    values = [row[0] for row in table.fetch(range(0, table.row_count, step), [key[1]])]
+    return sorted(filter(_is_not_none, values))
 
 
 def _sample_keys(position: int, batches: Batches, ctx: ExecutionContext) -> list[Any]:
