@@ -11,3 +11,19 @@ AOT_CACHE="$HERE/build/polyquery.aot"
 # -Xlog:disable: the JVM's own log lines (e.g. about an unusable AOT cache) would go to stdout,
 # which carries only protocol responses.
 JVM_OPTS="-XX:+UseParallelGC -XX:-UsePerfData -Xlog:disable"
+# Heap: with at least 16 GiB of memory (the smaller of physical memory and a cgroup limit), a
+# 4 GiB initial heap with a fixed 2 GiB young generation: young collections stay rare and the
+# young generation's pages stay mapped (README "Memory settings"). Otherwise the JVM defaults.
+MEM_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null)
+for LIMIT_FILE in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+    if [ -r "$LIMIT_FILE" ]; then
+        LIMIT=$(cat "$LIMIT_FILE" 2>/dev/null)
+        case "$LIMIT" in
+            ''|max|*[!0-9]*) ;;
+            *) if [ -n "$MEM_KB" ] && [ $((LIMIT / 1024)) -lt "$MEM_KB" ]; then MEM_KB=$((LIMIT / 1024)); fi ;;
+        esac
+    fi
+done
+if [ -n "$MEM_KB" ] && [ "$MEM_KB" -ge 16777216 ]; then
+    JVM_OPTS="$JVM_OPTS -Xms4g -Xmn2g"
+fi

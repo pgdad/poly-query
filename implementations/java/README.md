@@ -346,14 +346,19 @@ pipeline over fewer than two morsels is not parallelized.
 * **Aggregation**: each worker aggregates whole morsels into a private partial table and
   records, per group, the position (morsel, row) of its first row. The partial tables are
   partitioned by key hash (hashes are computed from the values, so they agree across tables)
-  and the partitions are merged in parallel, each with a k-way merge in first-position order;
-  the output interleaves the partitions by first position — so groups come out in exactly the
-  order of sequential execution. INT64/DECIMAL sums merge exactly (BigInteger on overflow;
-  wide DECIMAL sums are BigInteger throughout).
+  and the partitions are merged in parallel, each group keeping its earliest first position;
+  the groups of all partitions are then radix-sorted by first position — so they come out in
+  exactly the order of sequential execution. INT64/DECIMAL sums merge exactly (BigInteger on
+  overflow; wide DECIMAL sums are BigInteger throughout). Aggregates over DISTINCT values are
+  parallel without GROUP BY: workers deduplicate their morsels' values, the merge unions the
+  workers' value sets in parallel by hash partition (each partition feeding a fresh plain
+  state) and merges the partition states (see [Latency optimization](#latency-optimization-analytics-workload)).
 * **DISTINCT** runs as a keys-only parallel aggregation when no pipeline expression can fail;
   otherwise workers drop duplicates within their morsels and the final DISTINCT streams over
-  the rest. **Top-N**: workers keep the best `offset + limit` rows of each morsel (stable), the
-  final top-N picks among them.
+  the rest. **Top-N**: workers keep the best `offset + limit` rows of each morsel (stable,
+  dropping rows that cannot make it — see Sorting), the final top-N picks among them.
+* **Full sorts** over a pipeline: workers materialize their morsels into column stores of
+  their own, concatenated in morsel order, then sorted in parallel (see Sorting).
 * **Everything else** is gathered **in morsel order** with a bounded number of morsels in
   flight, so row order (and therefore LIMIT without ORDER BY) is the same as sequential.
 * **Errors**: a data error of morsel *m* is raised only after the results of all earlier
@@ -414,11 +419,28 @@ pipeline over fewer than two morsels is not parallelized.
 
 ### Sorting
 
-The vectorized sort materializes its input in a `ColumnStore` and sorts row indices stably: an
-**LSD radix sort** (8-bit digits, constant digits skipped) on an order-preserving 64-bit key of
-the first sort key — the value for numbers (sign-flipped; doubles via their IEEE bits with
--0.0 = 0.0), a 4-UTF-16-unit prefix for strings (mapped to code-point order) — then a merge
-sort with full typed comparisons only within runs of equal radix keys.
+The vectorized sort materializes its input in a `ColumnStore` and sorts row indices stably.
+Every sort key is first **normalized** to an unsigned 64-bit key per row whose order is the
+value order: the value for numbers (sign-flipped; doubles via their IEEE bits with -0.0 = 0.0),
+the rank of the value for dictionary-encoded strings (the dictionary is sorted once), for other
+strings 7 Latin-1 characters plus min(length, 8) — or, if some string has a non-Latin-1
+character among its first 7, 3 UTF-16 units in code point order plus min(length, 4) — and the
+high 64 bits for wide DECIMALs. Equal keys imply equal values for numbers, ranks and strings
+of at most 7 (3) characters, so values are only compared for longer strings. Rows are sorted
+by an **LSD radix sort** (8-bit digits, digits constant over the range skipped) on the first
+key, then runs of equal first keys by a merge sort comparing the normalized keys (and the
+values only where needed).
+
+Inputs of 131,072 rows or more are sorted **in parallel** (when the query may use several
+threads): a regular sample of the first key gives up to 16 × threads splitters; rows go to the
+key-range buckets by a stable parallel counting scatter (per-chunk counts, prefix sums), and
+the workers radix-sort and refine the buckets independently, largest first. Sorted rows are
+moved into sort order by the workers too, so the output is read sequentially.
+
+**Top-N** keeps the best `offset + limit` rows seen so far; once it has that many, the first
+sort key of the last of them is a cutoff: later rows whose first key ranks strictly after it
+(INT64-like and FLOAT64 keys; NULLs by their NULLS FIRST/LAST position) are dropped before
+they are materialized — equal keys are kept, as later keys and input order decide.
 
 ### SIMD, memory and cache
 
@@ -1085,7 +1107,8 @@ expressions, `UNION ALL` with mixed branch types / under aggregation and joins /
 correlated EXISTS subqueries / with LIMIT before a failing branch) under every combination of mode × join × threads × optimize, also with tiny
 batches and morsels, and checks row-exact error semantics; `VectorTest` covers the kernels
 (branch-free comparisons), group-key tables, exact sums (single-group SIMD path, overflow
-widening, partial merges), stable radix/merge sorting, the join index and the k-way merge —
+widening, partial merges), stable radix/merge sorting (also the parallel bucket sort and the
+normalized string keys against a reference comparator), store concatenation, the join index —
 and the lexer, parser, types, ingestion,
 protocol, the HTTP layer (admission/queueing/timeouts, query control, metrics, endpoints
 over a real socket incl. streaming), and end-to-end SQL (grouping, joins with every join strategy and with optimization
