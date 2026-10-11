@@ -14,8 +14,10 @@
                    single dictionary-encoded STRING key is mapped through a
                    per-dictionary code → group id array
   Aggregate states: COUNT, and SUM/AVG/MIN/MAX over integer-like and
-  FLOAT64 values use typed arrays; everything else (DISTINCT, MIN/MAX of
-  strings, …) one Accumulator (polyquery.exec.aggregate) per group. All
+  FLOAT64 values use typed arrays; DISTINCT over integer-like values one
+  primitive hash set (LongSet) per group; everything else (other DISTINCT,
+  MIN/MAX of strings, …) one Accumulator (polyquery.exec.aggregate) per
+  group. All
   states can merge the states of another table (parallel aggregation) and
   produce exactly the results of the row engine's accumulators.
 
@@ -505,6 +507,90 @@
                       (aset has 0 true))
                     true))))))
 
+;; DISTINCT over integer-like values: one primitive hash set per group.
+
+(definterface LongSetOps
+  (^boolean add [^long k] "Adds k; true when it was not present.")
+  (^long size [])
+  (^longs toArray [] "The elements (in no particular order)."))
+
+(deftype LongSet [^:unsynchronized-mutable ^longs slots ; 0 = empty slot
+                  ^:unsynchronized-mutable ^long mask
+                  ^:unsynchronized-mutable ^long n
+                  ^:unsynchronized-mutable has-zero?]
+  LongSetOps
+  (add [this k]
+    (if (zero? k)
+      (if has-zero? false (do (set! has-zero? true) (set! n (inc n)) true))
+      (loop [i (bit-and (mix k) mask)]
+        (let [x (aget slots i)]
+          (cond
+            (== x k) false
+            (zero? x) (do (aset slots i k)
+                          (set! n (inc n))
+                          (when (> (* 2 n) mask)
+                            (let [old slots
+                                  cap (* 2 (alength old))]
+                              (set! slots (long-array cap))
+                              (set! mask (dec cap))
+                              (dotimes [j (alength old)]
+                                (let [y (aget old j)]
+                                  (when-not (zero? y)
+                                    (loop [p (bit-and (mix y) mask)]
+                                      (if (zero? (aget slots p))
+                                        (aset slots p y)
+                                        (recur (bit-and (inc p) mask)))))))))
+                          true)
+            :else (recur (bit-and (inc i) mask)))))))
+  (size [_] n)
+  (toArray [_]
+    (let [out (long-array n)
+          start (if has-zero? 1 0)]
+      (loop [j 0 o start]
+        (if (< j (alength slots))
+          (let [y (aget slots j)]
+            (if (zero? y) (recur (inc j) o) (do (aset out o y) (recur (inc j) (inc o)))))
+          out)))))
+
+(defn- long-set ^LongSet [] (LongSet. (long-array 8) 7 0 false))
+
+(definterface LongSets
+  (^polyquery.exec.grouping.LongSet setOf [^long g] "The set of group g (created on first use)."))
+
+(deftype DistinctLongState [count? make-inner ^:unsynchronized-mutable ^objects sets]
+  AggState
+  (grow [_ size] (set! sets (grow-objects sets size)))
+  (update [this gids arg sel n]
+    (if (instance? LongVec arg)
+      (let [^LongVec x arg
+            ^longs vals (.-v x)
+            ^booleans nulls (.-nulls x)]
+        (each-sel [i sel n]
+          (when-not (b/nulls-at? nulls i)
+            (.add (.setOf this (aget gids i)) (aget vals i)))))
+      (let [^Vec x arg]
+        (each-sel [i sel n]
+          (when-some [y (.getObj x i)]
+            (.add (.setOf this (aget gids i)) (long y)))))))
+  (mergeFrom [this other from to]
+    (let [^longs ys (.toArray (.setOf ^LongSets other from))
+          s (.setOf this to)]
+      (dotimes [j (alength ys)] (.add s (aget ys j)))))
+  (result [this gid]
+    (let [s (.setOf this gid)]
+      (if count?
+        (.size s)
+        ;; the values in ascending order (as for any order: exact arithmetic)
+        (let [^Accumulator inner (make-inner)
+              ys (.toArray s)]
+          (Arrays/sort ys)
+          (dotimes [j (alength ys)] (.add inner (aget ys j)))
+          (.result inner)))))
+  LongSets
+  (setOf [_ g]
+    (or (aget sets g)
+        (let [s (long-set)] (aset sets g s) s))))
+
 (definterface Accs
   (acc [^long g] "The accumulator of group g (created on first use)."))
 
@@ -533,6 +619,9 @@
          vbits (when lib (bits/bitmap))]
      (cond
        (= f :count-star) (CountState. true (long-array 16))
+       (and distinct? (= :long (b/vec-kind at)))
+       (DistinctLongState. (= f :count) (agg/accumulator-factory (assoc spec :distinct? false))
+                           (object-array 16))
        distinct? (AccState. (agg/accumulator-factory spec) (object-array 16))
        (= f :count) (CountState. false (long-array 16))
 

@@ -10,8 +10,9 @@
   the pipeline are built once by the coordinating thread and shared
   read-only by all partitions.
 
-    hash-aggregate  partial aggregation per partition, merged in partition
-                    order (so groups keep their serial order of first
+    hash-aggregate  partial aggregation per partition, merged pairwise in
+                    parallel, every merge appending the later partition's
+                    groups (so groups keep their serial order of first
                     appearance; INT64/DECIMAL sums stay exact)
     sort            partitions materialized in parallel, concatenated in
                     order, then sorted (polyquery.exec.sort: radix sort or
@@ -137,6 +138,16 @@
 ;; ---------------------------------------------------------------------------
 ;; Operators
 
+(defn- merge-tree
+  "Merges the partial results `parts` (in order) with (merge! a b) — an
+  associative merge into a — pairwise in parallel: log2(parts) rounds."
+  [parts merge!]
+  (loop [parts (vec parts)]
+    (if (<= (count parts) 1)
+      (first parts)
+      (recur (run-all (mapv (fn [[a b]] (if b #(merge! a b) (constantly a)))
+                            (partition-all 2 parts)))))))
+
 (defn- aggregate [plan env]
   (let [vectorized? (= :vectorized (:mode env))]
     (ops/reducible
@@ -148,7 +159,7 @@
                            (vec/aggregate-partial plan (vec/build-batches in env) env)
                            (ops/aggregate-partial plan (rows-of in env) env))))
              parts (run-all (mapv (fn [r] #(partial r)) (partitions input (:partitions plan))))
-             merged (reduce (if vectorized? vec/aggregate-merge! ops/aggregate-merge!) parts)]
+             merged (merge-tree parts (if vectorized? vec/aggregate-merge! ops/aggregate-merge!))]
          (ops/reduce-list (if vectorized? (vec/aggregate-rows merged) (ops/aggregate-rows merged))
                           f init))))))
 

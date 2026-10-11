@@ -175,6 +175,10 @@
    ["SELECT DISTINCT g FROM t UNION ALL SELECT DISTINCT k FROM s" false]
    ["SELECT k FROM s UNION ALL SELECT k FROM t LIMIT 100" false]
    ["SELECT id FROM t UNION ALL SELECT k / g FROM t" false]
+   ;; DISTINCT aggregates over integer-like values (primitive per-group sets)
+   ["SELECT g, COUNT(DISTINCT k), SUM(DISTINCT k), AVG(DISTINCT d), MIN(DISTINCT dt), MAX(DISTINCT ts) FROM t GROUP BY g" false]
+   ["SELECT COUNT(DISTINCT k), COUNT(DISTINCT g), SUM(DISTINCT d), COUNT(DISTINCT 0) FROM t" false]
+   ["SELECT u, COUNT(DISTINCT k) FROM t WHERE g = 1 GROUP BY u" false]
    ;; uncorrelated subqueries (precomputed in vectorized mode)
    ["SELECT id FROM t WHERE k IN (SELECT k FROM r WHERE w > 5)" false]
    ["SELECT id, k NOT IN (SELECT k FROM r WHERE w > 5) FROM t" false]
