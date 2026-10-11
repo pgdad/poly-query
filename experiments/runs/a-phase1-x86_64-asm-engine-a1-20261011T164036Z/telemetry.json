@@ -1,0 +1,101 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-phase1-x86_64-asm-engine-a1-20261011T164036Z",
+ "language": "x86_64-asm-engine",
+ "task": "phase1",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-phase1",
+ "prompt_sha256": "a7c8af1c7c4113323998c473613b86504d683473a91be19a329ca73bda3d43e7",
+ "session_id": "fa9dad4c-5516-4a48-b1fe-880474abdd8b",
+ "tokens": {
+  "input": 120,
+  "output": 207804,
+  "cache_read": 14012347,
+  "cache_creation": 327667,
+  "thinking": null,
+  "thinking_estimated": 69633,
+  "source": "result events (summed over 2 segments)",
+  "api_messages": 169
+ },
+ "rate_limit": {
+  "events": 11,
+  "max_utilization": {
+   "five_hour": 0.2,
+   "seven_day": 0.49
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 20.987464199999987,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 71,
+ "result_segments": 2,
+ "assistant_messages": 364,
+ "tool_calls": {
+  "Bash": 153,
+  "Write": 19,
+  "Agent": 4,
+  "Read": 1,
+  "Edit": 2
+ },
+ "tool_calls_total": 179,
+ "tool_failures": 1,
+ "build_invocations": 34,
+ "build_failures_heuristic": 5,
+ "conformance_runs": 6,
+ "conformance_progress": [
+  [
+   223,
+   225
+  ],
+  [
+   225,
+   225
+  ],
+  [
+   225,
+   225
+  ],
+  [
+   225,
+   225
+  ],
+  [
+   225,
+   225
+  ]
+ ],
+ "repair_iterations": 5,
+ "time": {
+  "wall_seconds": 2216.4,
+  "model_api_seconds": 4147.3,
+  "tool_seconds": 42.5,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 6,
+  "files_changed": 24,
+  "lines_added": 14544,
+  "lines_removed": 0,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Phase 1 is finished: the conformance runner reports 0 failures, 0 errors and 0 not-implemented cases, `make build test` passes, a build from a clean output directory works, and everything is committed.\n\n## Test results\n```\nphase 1: 225/225 pass, 0 fail, 0 error, 0 not implemented\nTOTAL: 225/225 pass\n```\n`make test` runs four assembly unit-test programs plus an end-to-end script, all passing:\n\n| Test | Covers | Passed |\n|---|---|---|\n| `test_text` | number, date and type parsing/formatting | 330 |\n| `test_json` | JSON parser and writer | 286 |\n| `test_ingest` | CSV/JSON/JSONL loading | 223 |\n| `test_sql` | lexer \u2192 parser \u2192 binder \u2192 executor | 45 |\n| `session_test.sh` | full engine over the protocol | 24 |\n\n`make lint` also passes. Valgrind reported no errors over the whole public suite.\n\n## What I implemented\n- **Protocol and CLI:** `version`, `capabilities`, `session`, and `exec --request FILE|-`; all common command-line options, with unknown options exiting with status 2.\n- **Operations:** load, query, tables, schema, drop, reset, version, capabilities, and the sleep test op. Path safety, `max_rows`, `result:\"count\"`, `timeout_ms`, and the ingest-size, row-count and query-memory limits are enforced.\n- **Ingestion:** CSV, JSON and JSONL, with type inference and explicit schemas, per the ingestion spec.\n- **SQL (`sql.basic`):** a separate lexer, parser producing an AST, and a binder that does name resolution and type checking. Execution runs scan \u2192 filter \u2192 aggregate \u2192 project \u2192 sort \u2192 offset/limit. It covers literals of every type, the full CAST table, exact DECIMAL arithmetic using 128-bit intermediates, three-valued logic, all ORDER BY forms, `_colN` column naming, the five whole-table aggregates and `PQ_SLEEP`.\n- **Capabilities claimed:** `phase1 ingest.csv ingest.json ingest.jsonl sql.basic test.functions`.\n\n## Main design decisions\n- **Errors:** any layer raises an error that jumps straight back to the request dispatcher (glibc `_setjmp`/`longjmp`). Per-request memory lives in an arena reset after each request, and each table has its own arena, so a failed load never changes the catalog.\n- **Storage:** tables are immutable and stored by column (one 8-byte slot per row plus a null map), which is what later phases need for statistics, the file format and vectorized execution.\n- **Typing:** the binder inserts explicit promotion casts, so the evaluator only ever sees operands of the same type. The evaluator walks the expression tree, and aggregates use numbered slots that GROUP BY can reuse.\n- **Crash safety:** a fault handler running on a separate stack turns any crash inside a request into an `INTERNAL_ERROR` response. Requests run on a 1 GiB lazily committed stack, and recursion depth is capped in both parser and binder.\n\nI wrote the lexer, parser, binder, evaluator, executor, catalog, protocol and CLI myself. Parallel subagents wrote the JSON, text-conversion and ingestion modules against interfaces I specified. A separate black-box QA pass ran about 23,000 randomized checks against the spec. It found three problems, now fixed:\n- `AVG` over a FLOAT64 column whose sum overflows printed a bare `inf`, which is invalid JSON; it now returns `NUMERIC_OVERFLOW`.\n- A very large `timeout_ms` overflowed and timed out immediately.\n- Unsupported values for known query options were silently ignored; they now return `UNSUPPORTED`.\n\n## Known limitations\n- **Phase 2 and later are not implemented.** GROUP BY, DISTINCT, joins, subqueries, CASE/IN/LIKE/BETWEEN, scalar functions, EXPLAIN and index statements are recognised and answered with `UNSUPPORTED`. `save`, `open` and `stats` also return `UNSUPPORTED`, and `serve` exits with status 1. Execution is single-threaded.\n- **Choices where the spec is unclear,** which a hidden test could read differently:\n  - An invalid type in a load schema, or `header:false` without a schema, returns `INVALID_REQUEST`.\n  - `LIMIT NULL` means no limit.\n  - TIMESTAMP literals and string-to-TIMESTAMP casts also",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
