@@ -28,28 +28,49 @@
 
 (defn- long-kind? [type] (t/long-repr? type))
 
-(defn- extract
-  "Typed column of sort key `index` over the rows: [values nulls]."
-  [^objects rows ^long n ^long index type]
-  (let [nulls (boolean-array n)]
-    (case (if (long-kind? type) :long (t/kind type))
-      :long
-      (let [vals (long-array n)]
-        (dotimes [r n]
-          (let [x (aget ^objects (aget rows r) index)]
-            (if (nil? x) (aset nulls r true) (aset vals r (long x)))))
-        [vals nulls])
-      :float64
-      (let [vals (double-array n)]
-        (dotimes [r n]
-          (let [x (aget ^objects (aget rows r) index)]
-            (if (nil? x) (aset nulls r true) (aset vals r (double x)))))
-        [vals nulls])
-      (let [vals (object-array n)]
-        (dotimes [r n]
-          (let [x (aget ^objects (aget rows r) index)]
-            (if (nil? x) (aset nulls r true) (aset vals r x))))
-        [vals nulls]))))
+(def ^:private ^:const kind-long 0)
+(def ^:private ^:const kind-double 1)
+(def ^:private ^:const kind-string 2)
+(def ^:private ^:const kind-other 3)
+
+(defn- key-kind ^long [type]
+  (cond (long-kind? type) kind-long
+        (= :float64 (t/kind type)) kind-double
+        (= :string (t/kind type)) kind-string
+        :else kind-other))
+
+(defn- new-key-array [^long kind ^long n]
+  (case kind 0 (long-array n) 1 (double-array n) (object-array n)))
+
+(declare utf8-prefix)
+
+(defn- extract!
+  "Fills the typed key arrays (values, NULL flags, string prefixes) of sort
+  key `index` for rows [lo, hi)."
+  [^objects rows index kind vals ^booleans nulls ^longs prefixes lo hi]
+  (let [index (long index) kind (long kind) lo (long lo) hi (long hi)]
+    (case kind
+      0 (let [^longs vals vals]
+          (loop [r lo]
+            (when (< r hi)
+              (let [x (aget ^objects (aget rows r) index)]
+                (if (nil? x) (aset nulls r true) (aset vals r (long x))))
+              (recur (inc r)))))
+      1 (let [^doubles vals vals]
+          (loop [r lo]
+            (when (< r hi)
+              (let [x (aget ^objects (aget rows r) index)]
+                (if (nil? x) (aset nulls r true) (aset vals r (double x))))
+              (recur (inc r)))))
+      (let [^objects vals vals]
+        (loop [r lo]
+          (when (< r hi)
+            (let [x (aget ^objects (aget rows r) index)]
+              (if (nil? x)
+                (aset nulls r true)
+                (do (aset vals r x)
+                    (when prefixes (aset prefixes r (long (utf8-prefix x)))))))
+            (recur (inc r))))))))
 
 (defn- utf8-prefix
   "Order-preserving 64-bit prefix of s: its first 8 UTF-8 bytes, big-endian
@@ -77,11 +98,6 @@
               (recur (inc i)
                      (bit-or (bit-shift-left acc (* 8 k)) (unsigned-bit-shift-right enc (* 8 (- len k))))
                      (+ nb k)))))))))
-
-(def ^:private ^:const kind-long 0)
-(def ^:private ^:const kind-double 1)
-(def ^:private ^:const kind-string 2)
-(def ^:private ^:const kind-other 3)
 
 (defn- compare-strings
   "Order of the strings of rows a and b: by their UTF-8 prefixes where these
@@ -130,36 +146,30 @@
   (loop [i 0] (cond (== i (alength a)) false (aget a i) true :else (recur (inc i)))))
 
 (defn- index-comparator
-  "Comparator of row indices by all keys, ties by index (stability)."
-  ^polyquery.exec.sort.IndexComparator [rows n keys]
-  (let [k (count keys)
-        kinds (int-array k)
-        vals (object-array k)
-        prefixes (object-array k)
-        nulls (object-array k)
-        signs (long-array k)
-        null-firsts (long-array k)
-        comparators (object-array k)]
-    (doseq [[i {:keys [index type desc? nulls-first?]}] (map-indexed vector keys)]
-      (let [[v ^booleans nl] (extract rows n index type)
-            kind (long (cond (long-kind? type) kind-long
-                             (= :float64 (t/kind type)) kind-double
-                             (= :string (t/kind type)) kind-string
-                             :else kind-other))]
-        (aset kinds i (int kind))
-        (aset vals i v)
-        (when (any-true? nl) (aset nulls i nl))
-        (aset signs i (if desc? -1 1))
-        (aset null-firsts i (if nulls-first? -1 1))
-        (case kind
-          2 (let [^objects v v
-                  p (long-array (alength v))]
-              (dotimes [r (alength v)]
-                (when-some [s (aget v r)] (aset p r (utf8-prefix s))))
-              (aset prefixes i p))
-          3 (aset comparators i (v/value-comparator type))
-          nil)))
-    (SortKeys. kinds vals prefixes nulls signs null-firsts comparators)))
+  "Comparator of row indices by all keys, ties by index (stability). The
+  key arrays are extracted from the rows in `parts` parallel chunks."
+  ^polyquery.exec.sort.IndexComparator [^objects rows n keys run-all parts]
+  (let [n (long n)
+        k (count keys)
+        keys (vec keys)
+        kinds (int-array (map #(key-kind (:type %)) keys))
+        vals (object-array (map-indexed (fn [i _] (new-key-array (aget kinds i) n)) keys))
+        prefixes (object-array (map-indexed (fn [i _] (when (== kind-string (aget kinds i)) (long-array n))) keys))
+        nulls (object-array (repeatedly k #(boolean-array n)))
+        parts (max 1 (min (long parts) (quot n 16384)))]
+    (run-all (for [p (range parts)]
+               #(let [lo (quot (* (long p) n) parts)
+                      hi (quot (* (inc (long p)) n) parts)]
+                  (dotimes [i k]
+                    (extract! rows (long (:index (keys i))) (aget kinds i) (aget vals i) (aget nulls i)
+                              (aget prefixes i) lo hi)))))
+    (dotimes [i k]
+      (when-not (any-true? (aget nulls i)) (aset nulls i nil)))
+    (SortKeys. kinds vals prefixes nulls
+               (long-array (map #(if (:desc? %) -1 1) keys))
+               (long-array (map #(if (:nulls-first? %) -1 1) keys))
+               (object-array (map #(when (== kind-other (key-kind (:type %))) (v/value-comparator (:type %)))
+                                  keys)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Merge sort of index arrays
@@ -174,15 +184,55 @@
             (aset a (inc j) x))))
       (recur (inc i)))))
 
+(defn- merge-ranges!
+  "Merges the sorted ranges src[a, a-end) and src[b, b-end) into dst from
+  position k on (ties, which the comparator never reports for distinct rows,
+  would go to the first range)."
+  [^ints src ^ints dst a a-end b b-end k ^IndexComparator c]
+  (let [a-end (long a-end) b-end (long b-end)]
+    (loop [i (long a) j (long b) k (long k)]
+      (cond
+        (< i a-end)
+        (if (or (>= j b-end) (<= (.compareIdx c (aget src i) (aget src j)) 0))
+          (do (aset dst k (aget src i)) (recur (inc i) j (inc k)))
+          (do (aset dst k (aget src j)) (recur i (inc j) (inc k))))
+        (< j b-end) (System/arraycopy src (int j) dst (int k) (int (- b-end j)))))))
+
 (defn- merge-runs!
   "Merges src[lo, mid) and src[mid, hi) into dst[lo, hi)."
   [^ints src ^ints dst lo mid hi ^IndexComparator c]
-  (let [lo (long lo) mid (long mid) hi (long hi)]
-    (loop [i lo j mid k lo]
-    (when (< k hi)
-      (if (and (< i mid) (or (>= j hi) (<= (.compareIdx c (aget src i) (aget src j)) 0)))
-        (do (aset dst k (aget src i)) (recur (inc i) j (inc k)))
-        (do (aset dst k (aget src j)) (recur i (inc j) (inc k))))))))
+  (merge-ranges! src dst lo mid mid hi lo c))
+
+(defn- merge-split
+  "Merge path: how many elements of the run src[lo, mid) are among the
+  first k elements of the merge of src[lo, mid) and src[mid, hi)."
+  [^ints src lo mid hi k ^IndexComparator c]
+  (let [lo (long lo) mid (long mid) hi (long hi) k (long k)]
+  (loop [l (max 0 (- k (- hi mid))) h (min k (- mid lo))]
+    (if (< l h)
+      (let [i (quot (+ l h) 2)
+            j (- k i)]
+        ;; i elements of the first run are too few when its next element
+        ;; precedes the last element taken from the second run
+        (if (neg? (.compareIdx c (aget src (+ lo i)) (aget src (+ mid (dec j)))))
+          (recur (inc i) h)
+          (recur l i)))
+      l))))
+
+(defn- merge-tasks
+  "Thunks merging src[lo, mid) and src[mid, hi) into dst[lo, hi) in `pieces`
+  independent output slices (split points found by binary search)."
+  [^ints src ^ints dst lo mid hi pieces ^IndexComparator c]
+  (let [lo (long lo) mid (long mid) hi (long hi) pieces (long pieces)
+        n (- hi lo)
+        ks (mapv (fn [^long p] (quot (* p n) pieces)) (range (inc pieces)))]
+    (for [p (range pieces)]
+      (fn []
+        (let [k0 (long (ks p))
+              k1 (long (ks (inc (long p))))
+              i0 (long (merge-split src lo mid hi k0 c))
+              i1 (long (merge-split src lo mid hi k1 c))]
+          (merge-ranges! src dst (+ lo i0) (+ lo i1) (+ mid (- k0 i0)) (+ mid (- k1 i1)) (+ lo k0) c))))))
 
 (defn- merge-sort!
   "Sorts a[lo, hi) (tmp: scratch of the same length) — bottom-up merge sort
@@ -227,11 +277,15 @@
         (ctx/check! qctx)
         (if (<= (count runs) 1)
           src
-          (let [pairs (partition-all 2 runs)]
-            (run-all (for [[[lo mid] [_ hi]] pairs]
-                       #(if hi
-                          (merge-runs! src dst lo mid hi c)
-                          (System/arraycopy src (int lo) dst (int lo) (int (- (long mid) (long lo)))))))
+          (let [pairs (partition-all 2 runs)
+                ;; every level keeps all `parts` workers busy: each pair's
+                ;; merge is split into equal output slices
+                pieces (max 1 (quot (+ parts (dec (count pairs))) (count pairs)))]
+            (run-all (mapcat (fn [[[lo mid] [_ hi]]]
+                               (if hi
+                                 (merge-tasks src dst lo mid hi pieces c)
+                                 [#(System/arraycopy src (int lo) dst (int lo) (int (- (long mid) (long lo))))]))
+                             pairs))
             (recur (mapv (fn [[[lo mid] [_ hi]]] [lo (or hi mid)]) pairs) dst src)))))))
 
 ;; ---------------------------------------------------------------------------
@@ -325,7 +379,7 @@
         n (alength arr)
         ^ints order (if (and (= 1 (count keys)) (long-kind? (:type (first keys))))
                       (radix-sort arr n (first keys) qctx)
-                      (parallel-merge-sort n (index-comparator arr n keys) run-all (long parts) qctx))
+                      (parallel-merge-sort n (index-comparator arr n keys run-all parts) run-all (long parts) qctx))
         out (object-array n)]
     (dotimes [i n] (aset out i (aget arr (aget order i))))
     (java.util.Arrays/asList out)))
