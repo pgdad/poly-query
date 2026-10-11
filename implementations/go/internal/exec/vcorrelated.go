@@ -85,6 +85,12 @@ func (c *vcompiler) correlatedKernel(x *plan.Subquery) (vexpr, error) {
 		return nil, err
 	}
 	k := &vlookupKernel{ec: c.ec, node: pl, key: key, cls: cls}
+	if ref, ok := pl.InnerKeys[0].(*plan.ColumnRef); ok {
+		k.groupKey = ref
+		if agg != nil {
+			k.aggs, k.aggCols = agg.Aggs, agg.AggCols
+		}
+	}
 	if agg == nil {
 		return &vexistsKernel{vlookupKernel: k}, nil
 	}
@@ -105,28 +111,109 @@ func (c *vcompiler) correlatedKernel(x *plan.Subquery) (vexpr, error) {
 	return v, nil
 }
 
-// vlookupKernel finds the lookup-table group of each row's outer key.
+// vlookupKernel finds the group of each row's outer key: in the result
+// of grouping the inner rows that satisfy the residual by the inner key
+// (grouped: computed once, vectorized, with the aggregates if any), or,
+// if that computation fails (an error of the residual or of an aggregate
+// in a group the outer rows may never ask for), in the lookup table whose
+// groups are evaluated on demand.
 type vlookupKernel struct {
 	ec   *Context
 	node *physical.ParamLookup
 	key  vexpr
 	cls  vclass
 	t    *lookupTable
+
+	groupKey *plan.ColumnRef // inner key, if a column (else no grouped)
+	aggs     []*plan.AggCall
+	aggCols  []plan.Column
+	grouped  *corrGroups
+	tried    bool
 }
 
-// groups evaluates the outer keys and returns, per needed row, the group
-// in the lookup table (-1: no rows).
+// corrGroups maps inner keys to the aggregate values of their rows.
+type corrGroups struct {
+	ints *intGroupMap
+	strs *strGroupMap
+	aggs []types.Row
+}
+
+// group computes the grouped inner rows (see vlookupKernel).
+func (k *vlookupKernel) group() (*corrGroups, error) {
+	pl := k.node
+	input := pl.Input
+	if pl.Residual != nil {
+		input = &physical.Filter{Input: input, Pred: pl.Residual}
+	}
+	var keyCol plan.Column
+	for _, c := range input.Schema() {
+		if c.ID == k.groupKey.ID {
+			keyCol = c
+		}
+	}
+	node := &physical.HashAggregate{Input: input, Keys: []plan.Expr{k.groupKey},
+		KeyCols: []plan.Column{keyCol}, Aggs: k.aggs, AggCols: k.aggCols}
+	op, err := BuildBatch(k.ec, node)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := materialize(k.ec, newRowReader(op, schemaTypes(node.Schema())))
+	if err != nil {
+		return nil, err
+	}
+	cg := &corrGroups{}
+	if k.cls == vInt {
+		cg.ints = newIntGroupMap()
+	} else {
+		cg.strs = newStrGroupMap()
+	}
+	for _, r := range rows {
+		key := r[0]
+		if key.Null {
+			continue // NULL keys never match
+		}
+		g := int32(len(cg.aggs))
+		if k.cls == vInt {
+			_, slot, _ := cg.ints.find(key.I)
+			cg.ints.insert(slot, key.I, g)
+		} else {
+			h := strKeyHash(key.S)
+			_, slot, _ := cg.strs.find(key.S, h)
+			cg.strs.insert(slot, key.S, h, g)
+		}
+		cg.aggs = append(cg.aggs, r[1:])
+	}
+	return cg, nil
+}
+
+// groups evaluates the outer keys and returns, per needed row, its group
+// (-1: no rows), in k.grouped if set, else in the lookup table.
 func (k *vlookupKernel) groups(b *Batch, sel []int32, out []int32) ([]int32, error) {
 	kv, err := k.key.eval(b, sel)
 	if err != nil {
 		return nil, err
 	}
-	if k.t == nil {
-		if k.t, err = k.ec.lookupTable(k.node); err != nil {
-			return nil, errVector
+	if !k.tried && k.groupKey != nil {
+		k.tried = true
+		mark := k.ec.Mem.Mark()
+		if k.grouped, err = k.group(); err != nil {
+			k.ec.Mem.Reset(mark)
+			if k.grouped = nil; k.ec.Check() != nil {
+				return nil, errVector
+			}
 		}
 	}
-	t := k.t
+	ints, strs := (*intGroupMap)(nil), (*strGroupMap)(nil)
+	if k.grouped != nil {
+		ints, strs = k.grouped.ints, k.grouped.strs
+	} else {
+		if k.t == nil {
+			if k.t, err = k.ec.lookupTable(k.node); err != nil {
+				return nil, errVector
+			}
+		}
+		ints, strs = k.t.ints, k.t.strs
+	}
 	out = grow(out, b.N)
 	forNeeded(b.N, sel, nil, func(i int) {
 		out[i] = -1
@@ -137,12 +224,12 @@ func (k *vlookupKernel) groups(b *Batch, sel []int32, out []int32) ([]int32, err
 		var ok bool
 		switch {
 		case k.cls == vInt:
-			g, _, ok = t.ints.find(kv.I[i])
+			g, _, ok = ints.find(kv.I[i])
 		case kv.Dict != nil:
 			s := kv.Dict[kv.Codes[i]]
-			g, _, ok = t.strs.find(s, strKeyHash(s))
+			g, _, ok = strs.find(s, strKeyHash(s))
 		default:
-			g, _, ok = t.strs.find(kv.S[i], strKeyHash(kv.S[i]))
+			g, _, ok = strs.find(kv.S[i], strKeyHash(kv.S[i]))
 		}
 		if ok {
 			out[i] = g
@@ -166,6 +253,10 @@ func (v *vexistsKernel) eval(b *Batch, sel []int32) (*Vec, error) {
 	v.gids = gids
 	t := v.t
 	out := v.out.reset(b.N, vInt)
+	if v.grouped != nil {
+		forNeeded(b.N, sel, nil, func(i int) { out.I[i] = b2i(gids[i] >= 0) })
+		return out, nil
+	}
 	failed := false
 	forNeeded(b.N, sel, nil, func(i int) {
 		out.I[i] = 0
@@ -199,6 +290,14 @@ type vcorrAggKernel struct {
 // value computes the subquery's value for the rows of group g (-1: none).
 func (v *vcorrAggKernel) value(g int32) (types.Value, bool) {
 	if r, ok := v.cache[g]; ok {
+		return r, true
+	}
+	if v.grouped != nil && g >= 0 {
+		r, err := v.project(v.grouped.aggs[g])
+		if err != nil {
+			return null, false
+		}
+		v.cache[g] = r
 		return r, true
 	}
 	accs := make([]accumulator, len(v.calls))

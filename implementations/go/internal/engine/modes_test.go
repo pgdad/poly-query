@@ -163,6 +163,11 @@ func TestExecutionModesAgree(t *testing.T) {
 		"SELECT id, (SELECT COUNT(*) FROM d WHERE d.grp = t.id % 13 AND d.label <> 'acht') FROM t WHERE id < 60",
 		"SELECT id FROM t WHERE NOT EXISTS (SELECT 1 FROM d WHERE d.grp = t.id % 13 AND d.label LIKE '%e%') AND id < 80",
 		"SELECT d.label FROM d WHERE d.grp < (SELECT COUNT(*) FROM t WHERE CAST(t.grp AS INT64) = d.grp) / 100",
+		// Correlated subqueries whose inner rows fail only in groups the
+		// outer rows never ask for (no d.grp = 12).
+		"SELECT d.label, (SELECT SUM(CASE WHEN t.grp = 12 THEN t.id * 3074457345618258602 ELSE t.id END) FROM t WHERE t.grp = d.grp) FROM d",
+		"SELECT d.label FROM d WHERE EXISTS (SELECT 1 FROM t WHERE t.grp = d.grp AND 100 / (t.grp - 12) < 0)",
+		"SELECT d.label, (SELECT MAX(t.id) FROM t WHERE t.grp = d.grp AND 100 / (t.grp - 12) < 0) FROM d",
 	}
 	for _, q := range queries {
 		want := canonical(e, q, modeConfig{"row", "hash", 1, true})
