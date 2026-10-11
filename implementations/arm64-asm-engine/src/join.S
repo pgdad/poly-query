@@ -5,7 +5,9 @@
 // --max-join-rows; NULL keys never match.
 //
 //   ex_hashjoin    build a chained hash table on the right input's key
-//                  cells, probe with every left tuple
+//                  cells, probe with every left tuple (key cells of both
+//                  inputs computed up front, vectorized in mode
+//                  "vectorized"; parallel probe tasks with threads > 1)
 //   ex_mergejoin   sort both inputs' key records, merge runs of equal keys
 //   ex_nljoin      every pair; equi keys (forced join: "nested_loop") are
 //                  compared from precomputed key cells before the residual
@@ -17,6 +19,27 @@
 #include "frame.inc"
 
 #define DEADLINE_MASK 4095
+
+// Hash join state shared by the probe tasks
+#define HS_L        0               // TupleSet* left (probe) input
+#define HS_R        8               // TupleSet* right (build) input
+#define HS_LCELLS   16              // key cells of the left tuples
+#define HS_LHASH    24              // u64* their hashes
+#define HS_LNULL    32              // u8* 1 = a key is NULL
+#define HS_RCELLS   40              // key cells of the right tuples
+#define HS_HEADS    48              // u32* bucket heads (ROW_NULL = empty)
+#define HS_NEXT     56              // u32* chain links per right tuple
+#define HS_MASK     64              // u64 bucket mask
+#define HS_KS       72              // u64 bytes of key cells per tuple
+#define HS_SIZE     80
+// Probe task (one per thread)
+#define HJ_NODE     0
+#define HJ_CTX      8               // EvalCtx* (own copy for worker tasks)
+#define HJ_TS       16              // TupleSet* output (ts_concat: offset 16)
+#define HJ_LO       24              // left tuples [lo, hi)
+#define HJ_HI       32
+#define HJ_SH       40              // shared state
+#define HJ_SIZE     48
 
     .text
 
@@ -650,191 +673,359 @@ ENDF keys_equal
 
 // =============================================================================
 // ex_hashjoin(x0 PlanNode*, x1 ctx) -> x0 TupleSet*
-// Build: hash the right input's key cells into a chained table (NULL keys are
-// skipped). Probe: for each left tuple walk the chain, compare keys, check
-// the residual condition; LEFT JOIN pads unmatched left tuples.
-//   x19 node, x20 ctx, x21 left ts, x22 right ts, x23 out, x24 index,
-//   x25 key cells of the right input, x26 heads, x27 next, x28 mask
-// Stack: [sp] combined tuple, [sp+8] left key cells, [sp+16] chain cursor,
-//        [sp+24] matched, [sp+32] probe counter, [sp+40] nkeys*16
+// Build: the key cells and hashes of every right tuple (join_keys), a
+// chained hash table over them (NULL keys are skipped). Probe: the key cells
+// of every left tuple are computed up front as well; the left tuples are
+// then cut into windows probed by hj_probe tasks (in parallel with option
+// threads > 1 when the residual condition is safe for worker threads), whose
+// outputs are concatenated in order.
+//   x19 node, x20 ctx, x21 shared state, x22 tasks, x23 task records,
+//   x24 index, x25 scratch
 // =============================================================================
 FUNC ex_hashjoin
     ENTER 5
-    sub  sp, sp, #48
+    sub  sp, sp, #16
     mov  x19, x0
     mov  x20, x1
-    ldr  x0, [x19, #PN_LEFT]
-    bl   ex_tuples
+    mov  x0, #HS_SIZE
+    bl   arena_zalloc
     mov  x21, x0
+    ldr  x0, [x19, #PN_LEFT]
+    mov  x1, x20
+    bl   ex_tuples
+    str  x0, [x21, #HS_L]
     ldr  x0, [x19, #PN_RIGHT]
     mov  x1, x20
     bl   ex_tuples
-    mov  x22, x0
+    str  x0, [x21, #HS_R]
     ldr  x9, [x19, #PN_NKEYS]
     lsl  x9, x9, #4
-    str  x9, [sp, #40]
+    str  x9, [x21, #HS_KS]
     // ---- build -------------------------------------------------------------
-    ldr  x9, [x22, #TS_N]
-    ldr  x10, [sp, #40]
+    ldr  x0, [x21, #HS_R]
+    ldr  x1, [x19, #PN_RKEYS]
+    ldr  x2, [x19, #PN_NKEYS]
+    mov  x3, x20
+    bl   join_keys
+    str  x0, [x21, #HS_RCELLS]
+    mov  x24, x1                        // right hashes
+    mov  x25, x2                        // right NULL flags
+    ldr  x9, [x21, #HS_R]               // table size: power of two >= 2n
+    ldr  x9, [x9, #TS_N]
+    lsl  x9, x9, #1
+    mov  x10, #16
+1:  cmp  x10, x9
+    b.hs 2f
+    lsl  x10, x10, #1
+    b    1b
+2:  sub  x9, x10, #1
+    str  x9, [x21, #HS_MASK]
+    lsl  x0, x10, #2
+    bl   arena_alloc
+    str  x0, [x21, #HS_HEADS]
+    mov  w1, #0xff
+    ldr  x2, [x21, #HS_MASK]
+    add  x2, x2, #1
+    lsl  x2, x2, #2
+    bl   memset
+    ldr  x9, [x21, #HS_R]
+    ldr  x9, [x9, #TS_N]
+    lsl  x0, x9, #2
+    add  x0, x0, #16
+    bl   arena_alloc
+    str  x0, [x21, #HS_NEXT]
+    ldr  x9, [x21, #HS_R]               // insert in tuple order
+    ldr  x9, [x9, #TS_N]
+    ldr  x10, [x21, #HS_HEADS]
+    ldr  x11, [x21, #HS_NEXT]
+    ldr  x12, [x21, #HS_MASK]
+    mov  x13, #0
+3:  cmp  x13, x9
+    b.hs 4f
+    ldrb w14, [x25, x13]
+    cbnz w14, 31f                       // NULL key: never matches
+    ldr  x14, [x24, x13, lsl #3]
+    and  x14, x14, x12
+    ldr  w15, [x10, x14, lsl #2]
+    str  w15, [x11, x13, lsl #2]
+    str  w13, [x10, x14, lsl #2]
+31: add  x13, x13, #1
+    b    3b
+4:  // ---- probe -------------------------------------------------------------
+    ldr  x0, [x21, #HS_L]
+    ldr  x1, [x19, #PN_LKEYS]
+    ldr  x2, [x19, #PN_NKEYS]
+    mov  x3, x20
+    bl   join_keys
+    str  x0, [x21, #HS_LCELLS]
+    str  x1, [x21, #HS_LHASH]
+    str  x2, [x21, #HS_LNULL]
+    mov  x22, #1                        // tasks
+    TLS_LDR x9, g_x_threads
+    cmp  x9, #1
+    b.ls 5f
+    LDR_G x10, g_par_min_rows
+    ldr  x11, [x21, #HS_L]
+    ldr  x11, [x11, #TS_N]
+    udiv x10, x11, x10
+    cmp  x10, x9
+    csel x10, x10, x9, lo
+    cmp  x10, #2
+    b.lo 5f
+    str  x10, [sp]
+    ldr  x0, [x19, #PN_EXPR]
+    bl   expr_par_safe
+    cbz  w0, 5f
+    ldr  x22, [sp]
+5:  mov  x9, #HJ_SIZE
+    mul  x0, x9, x22
+    bl   arena_zalloc
+    mov  x23, x0
+    ldr  x9, [x21, #HS_L]               // window: ceil(n / tasks)
+    ldr  x11, [x9, #TS_N]
+    add  x9, x11, x22
+    sub  x9, x9, #1
+    udiv x9, x9, x22
+    mov  x24, #0
+6:  cmp  x24, x22
+    b.hs 7f
+    mov  x10, #HJ_SIZE
+    madd x25, x24, x10, x23
+    str  x19, [x25, #HJ_NODE]
+    str  x21, [x25, #HJ_SH]
+    mul  x12, x24, x9
+    cmp  x12, x11
+    csel x12, x12, x11, lo
+    str  x12, [x25, #HJ_LO]
+    add  x12, x12, x9
+    cmp  x12, x11
+    csel x12, x12, x11, lo
+    str  x12, [x25, #HJ_HI]
+    str  x20, [x25, #HJ_CTX]
+    cmp  x22, #1
+    b.eq 61f
+    stp  x9, x11, [sp]                  // worker tasks: own contexts
+    mov  x0, #EC_SIZE
+    bl   arena_alloc
+    ldp  x9, x11, [sp]
+    ldp  x12, x13, [x20]
+    stp  x12, x13, [x0]
+    ldp  x12, x13, [x20, #16]
+    stp  x12, x13, [x0, #16]
+    ldp  x12, x13, [x20, #32]
+    stp  x12, x13, [x0, #32]
+    str  x0, [x25, #HJ_CTX]
+61: add  x24, x24, #1
+    b    6b
+7:  cmp  x22, #1
+    b.ne 8f
+    mov  x0, x23
+    bl   hj_probe
+    ldr  x0, [x23, #HJ_TS]
+    add  sp, sp, #16
+    LEAVE 5
+8:  ADR_L x0, hj_probe
+    mov  x1, x23
+    mov  x2, #HJ_SIZE
+    mov  x3, x22
+    bl   par_run
+    mov  x0, x23
+    mov  x1, x22
+    mov  x2, #HJ_SIZE
+    bl   ts_concat
+    ldr  x9, [x0, #TS_N]                // the limit applies to the total
+    LDR_G x10, g_max_join_rows
+    cmp  x9, x10
+    b.hi 9f
+    add  sp, sp, #16
+    LEAVE 5
+9:  RAISE ERR_RESOURCE_LIMIT, "join result exceeds --max-join-rows"
+ENDF ex_hashjoin
+
+// =============================================================================
+// join_keys(x0 TupleSet*, x1 Node** keys, x2 nkeys, x3 ctx)
+//   -> x0 key cells (nkeys cells per tuple), x1 u64* hashes, x2 u8* NULL
+//      flags (1 = some key is NULL)
+// Vectorized mode: vkey_cells; row mode: eval_keys per tuple. Both use the
+// same hash function.
+//   x19 ts, x20 keys, x21 nkeys, x22 ctx, x23 cells, x24 hashes, x25 flags,
+//   x26 index
+// =============================================================================
+FUNC join_keys
+    ENTER 5
+    mov  x19, x0
+    mov  x20, x1
+    mov  x21, x2
+    mov  x22, x3
+    ldr  x9, [x19, #TS_N]
+    lsl  x10, x21, #4
     mul  x0, x9, x10
     add  x0, x0, #16
     bl   arena_alloc
-    mov  x25, x0
-    ldr  x9, [x22, #TS_N]               // table size: power of two >= 2n
-    lsl  x9, x9, #1
-    mov  x28, #16
-1:  cmp  x28, x9
-    b.hs 2f
-    lsl  x28, x28, #1
-    b    1b
-2:  lsl  x0, x28, #2
+    mov  x23, x0
+    ldr  x9, [x19, #TS_N]
+    lsl  x0, x9, #3
+    add  x0, x0, #16
     bl   arena_alloc
-    mov  x26, x0
-    mov  w1, #0xff
-    lsl  x2, x28, #2
-    bl   memset
-    sub  x28, x28, #1                   // mask
-    ldr  x9, [x22, #TS_N]
+    mov  x24, x0
+    ldr  x0, [x19, #TS_N]
+    add  x0, x0, #16
+    bl   arena_alloc
+    mov  x25, x0
+    TLS_ADDR x9, g_x_mode
+    ldr  w9, [x9]
+    cmp  w9, #XM_ROW
+    b.eq 1f
+    cmp  x21, #VKEY_MAX
+    b.hi 1f
+    mov  x0, x19
+    mov  x1, x20
+    mov  x2, x21
+    mov  x3, x22
+    mov  x4, x23
+    mov  x5, x24
+    mov  x6, x25
+    bl   vkey_cells
+    b    3f
+1:  mov  x26, #0
+2:  ldr  x9, [x19, #TS_N]
+    cmp  x26, x9
+    b.hs 3f
+    tst  x26, #DEADLINE_MASK
+    b.ne 21f
+    bl   check_deadline
+21: mov  x0, x19
+    mov  x1, x26
+    bl   ts_tuple
+    str  x0, [x22, #EC_TUPLE]
+    mov  x0, x20
+    mov  x1, x21
+    mov  x2, x22
+    lsl  x9, x21, #4
+    mul  x9, x9, x26
+    add  x3, x23, x9
+    bl   eval_keys
+    str  x0, [x24, x26, lsl #3]
+    strb w1, [x25, x26]
+    add  x26, x26, #1
+    b    2b
+3:  mov  x0, x23
+    mov  x1, x24
+    mov  x2, x25
+    LEAVE 5
+ENDF join_keys
+
+// =============================================================================
+// hj_probe(x0 HashJoin task) — probes the left tuples [HJ_LO, HJ_HI)
+//   x19 task, x20 ctx, x21 shared, x22 node, x23 out, x24 left index,
+//   x25 chain entry, x26 matched, x27 combined tuple, x28 counter
+// =============================================================================
+FUNC hj_probe
+    ENTER 5
+    mov  x19, x0
+    ldr  x20, [x19, #HJ_CTX]
+    ldr  x21, [x19, #HJ_SH]
+    ldr  x22, [x19, #HJ_NODE]
+    ldr  x9, [x21, #HS_L]
+    ldr  x0, [x9, #TS_W]
+    ldp  x10, x11, [x19, #HJ_LO]
+    sub  x1, x11, x10
+    bl   ts_new
+    mov  x23, x0
+    str  x23, [x19, #HJ_TS]
+    ldr  x9, [x21, #HS_L]
+    ldr  x9, [x9, #TS_W]
     lsl  x0, x9, #2
     add  x0, x0, #16
     bl   arena_alloc
     mov  x27, x0
-    mov  x24, #0
-3:  ldr  x9, [x22, #TS_N]
+    mov  x28, #0
+    ldr  x24, [x19, #HJ_LO]
+.Lhp_left:
+    ldr  x9, [x19, #HJ_HI]
     cmp  x24, x9
-    b.hs .Lhj_probe
-    tst  x24, #DEADLINE_MASK
-    b.ne 31f
+    b.hs .Lhp_end
+    mov  x26, #0
+    ldr  x9, [x21, #HS_LNULL]
+    ldrb w9, [x9, x24]
+    cbnz w9, .Lhp_pad                   // NULL key: no partner
+    ldr  x9, [x21, #HS_LHASH]
+    ldr  x9, [x9, x24, lsl #3]
+    ldr  x10, [x21, #HS_MASK]
+    and  x9, x9, x10
+    ldr  x10, [x21, #HS_HEADS]
+    ldr  w25, [x10, x9, lsl #2]
+.Lhp_chain:
+    cmn  w25, #1
+    b.eq .Lhp_pad
+    add  x28, x28, #1
+    tst  x28, #DEADLINE_MASK
+    b.ne 1f
     bl   check_deadline
-31: mov  x0, x22
-    mov  x1, x24
-    bl   ts_tuple
-    str  x0, [x20, #EC_TUPLE]
-    ldr  x0, [x19, #PN_RKEYS]
-    ldr  x1, [x19, #PN_NKEYS]
-    mov  x2, x20
-    ldr  x9, [sp, #40]
-    madd x3, x24, x9, x25
-    bl   eval_keys
-    cbnz x1, 4f                         // NULL key: never matches
-    and  x0, x0, x28
-    ldr  w9, [x26, x0, lsl #2]
-    str  w9, [x27, x24, lsl #2]
-    str  w24, [x26, x0, lsl #2]
-4:  add  x24, x24, #1
-    b    3b
-    // ---- probe -------------------------------------------------------------
-.Lhj_probe:
-    ldr  x0, [x21, #TS_W]
-    ldr  x1, [x21, #TS_N]
-    bl   ts_new
-    mov  x23, x0
-    ldr  x9, [x21, #TS_W]
-    lsl  x0, x9, #2
-    add  x0, x0, #16
-    bl   arena_alloc
-    str  x0, [sp]
-    ldr  x0, [sp, #40]
-    add  x0, x0, #16
-    bl   arena_alloc
-    str  x0, [sp, #8]
-    str  xzr, [sp, #32]
-    mov  x24, #0
-.Lhj_left:
-    ldr  x9, [x21, #TS_N]
-    cmp  x24, x9
-    b.hs .Lhj_end
-    str  xzr, [sp, #24]                 // matched = 0
-    mov  x0, x21
-    mov  x1, x24
-    bl   ts_tuple
-    str  x0, [x20, #EC_TUPLE]
-    ldr  x0, [x19, #PN_LKEYS]
-    ldr  x1, [x19, #PN_NKEYS]
-    mov  x2, x20
-    ldr  x3, [sp, #8]
-    bl   eval_keys
-    cbnz x1, .Lhj_pad
-    and  x0, x0, x28
-    ldr  w9, [x26, x0, lsl #2]
-.Lhj_chain:
-    cmn  w9, #1
-    b.eq .Lhj_pad
-    str  x9, [sp, #16]
-    ldr  x10, [sp, #32]
-    add  x10, x10, #1
-    str  x10, [sp, #32]
-    tst  x10, #DEADLINE_MASK
-    b.ne 5f
-    bl   check_deadline
-5:  ldr  x9, [sp, #16]
-    ldr  x0, [sp, #8]
-    ldr  x10, [sp, #40]
-    madd x1, x9, x10, x25
-    ldr  x2, [x19, #PN_LKEYS]
-    ldr  x3, [x19, #PN_NKEYS]
+1:  ldr  x9, [x21, #HS_KS]
+    ldr  x0, [x21, #HS_LCELLS]
+    madd x0, x24, x9, x0
+    ldr  x1, [x21, #HS_RCELLS]
+    madd x1, x25, x9, x1
+    ldr  x2, [x22, #PN_LKEYS]
+    ldr  x3, [x22, #PN_NKEYS]
     bl   keys_equal
-    cbz  w0, .Lhj_next
-    ldr  x1, [sp, #16]                  // combine left + right tuple
-    mov  x0, x22
+    cbz  w0, .Lhp_next
+    ldr  x0, [x21, #HS_R]               // combine left + right tuple
+    mov  x1, x25
     bl   ts_tuple
-    mov  x2, x0
-    mov  x0, x21
+    str  x0, [sp, #-16]!
+    ldr  x0, [x21, #HS_L]
     mov  x1, x24
-    str  x2, [sp, #-16]!
     bl   ts_tuple
     mov  x1, x0
     ldr  x2, [sp], #16
-    ldr  x0, [sp]
-    ldr  x3, [x21, #TS_W]
-    ldr  x9, [x19, #PN_RIGHT]
+    mov  x0, x27
+    ldr  x9, [x21, #HS_L]
+    ldr  x3, [x9, #TS_W]
+    ldr  x9, [x22, #PN_RIGHT]
     ldr  w4, [x9, #PN_LO]
     ldr  w5, [x9, #PN_HI]
     bl   combine
-    ldr  x0, [x19, #PN_EXPR]
-    cbz  x0, 6f
-    ldr  x9, [sp]
-    str  x9, [x20, #EC_TUPLE]
+    ldr  x0, [x22, #PN_EXPR]
+    cbz  x0, 2f
+    str  x27, [x20, #EC_TUPLE]
     mov  x1, x20
     bl   eval_true
-    cbz  w0, .Lhj_next
-6:  mov  x0, x23
-    ldr  x1, [sp]
+    cbz  w0, .Lhp_next
+2:  mov  x0, x23
+    mov  x1, x27
     bl   join_emit
-    mov  x9, #1
-    str  x9, [sp, #24]
-.Lhj_next:
-    ldr  x9, [sp, #16]
-    ldr  w9, [x27, x9, lsl #2]
-    b    .Lhj_chain
-.Lhj_pad:
-    ldr  x9, [sp, #24]
-    cbnz x9, 7f
-    ldr  w9, [x19, #PN_JT]
+    mov  x26, #1
+.Lhp_next:
+    ldr  x9, [x21, #HS_NEXT]
+    ldr  w25, [x9, x25, lsl #2]
+    b    .Lhp_chain
+.Lhp_pad:
+    cbnz x26, 3f
+    ldr  w9, [x22, #PN_JT]
     cmp  w9, #JT_LEFT
-    b.ne 7f
-    mov  x0, x21
+    b.ne 3f
+    ldr  x0, [x21, #HS_L]
     mov  x1, x24
     bl   ts_tuple
     mov  x1, x0
-    ldr  x0, [sp]
+    mov  x0, x27
     mov  x2, #0
-    ldr  x3, [x21, #TS_W]
-    ldr  x9, [x19, #PN_RIGHT]
+    ldr  x9, [x21, #HS_L]
+    ldr  x3, [x9, #TS_W]
+    ldr  x9, [x22, #PN_RIGHT]
     ldr  w4, [x9, #PN_LO]
     ldr  w5, [x9, #PN_HI]
     bl   combine
     mov  x0, x23
-    ldr  x1, [sp]
+    mov  x1, x27
     bl   join_emit
-7:  add  x24, x24, #1
-    b    .Lhj_left
-.Lhj_end:
-    mov  x0, x23
-    add  sp, sp, #48
+3:  add  x24, x24, #1
+    b    .Lhp_left
+.Lhp_end:
     LEAVE 5
-ENDF ex_hashjoin
-
+ENDF hj_probe
 
     .ltorg
     NOTE_GNU_STACK

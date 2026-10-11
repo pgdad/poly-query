@@ -700,6 +700,7 @@
 #define VB_POOLN    40             // u64 vectors in use (stack discipline)
 #define VB_SIZE     48
 #define VPOOL_MAX   64
+#define VKEY_MAX    32             // most keys evaluated as vectors at once
 
 // Rows per batch handed to a streaming sink (exec_plan_stream)
 #define EXEC_STREAM_BATCH 1000

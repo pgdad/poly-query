@@ -324,10 +324,33 @@ LFUNC ex_rows
     mov  x4, #0
     bl   ex_project
     LEAVE 3
-1:  mov  x1, x20
+1:  cmp  w9, #PO_SORT                  // ORDER BY ... LIMIT: top-N
+    b.ne 11f
+    ldr  x9, [x21, #BQ_LIMIT]
+    tbnz x9, #63, 11f
+    TLS_ADDR x9, g_x_optimize
+    ldr  w9, [x9]
+    cbz  w9, 11f
+    ldr  x0, [x0, #PN_LEFT]
+    mov  x1, x20
     bl   ex_rows
     mov  x22, x0
-    ldr  x9, [x22, #RS_NROWS]
+    mov  x0, x21
+    bl   order_keys
+    mov  x2, x0
+    ldr  x9, [x21, #BQ_LIMIT]
+    ldr  x10, [x21, #BQ_OFFSET]
+    adds x3, x9, x10
+    csinv x3, x3, xzr, cc               // saturate
+    ldr  x0, [x22, #RS_ROWS]
+    ldr  x1, [x22, #RS_NROWS]
+    bl   topn_rows
+    str  x0, [x22, #RS_NROWS]
+    b    12f
+11: mov  x1, x20
+    bl   ex_rows
+    mov  x22, x0
+12: ldr  x9, [x22, #RS_NROWS]
     ldr  x10, [x21, #BQ_OFFSET]
     cmp  x10, x9
     csel x10, x10, x9, lo               // start = min(offset, n)
@@ -1055,6 +1078,91 @@ LFUNC sort_rows
     b    qsort_r                        // tail call
 1:  ret
 ENDF sort_rows
+
+// =============================================================================
+// topn_rows(x0 Row** rows, x1 n, x2 keys, x3 k) -> x0 min(n, k)
+// Moves the first k rows in ORDER BY order to the front, sorted: a bounded
+// max-heap of k rows replaces its largest row whenever a smaller one
+// arrives (O(n log k) instead of sorting all n rows).
+//   x19 rows, x20 n, x21 keys, x22 k, x23 index, x24 i (sift), x25 child
+// =============================================================================
+FUNC topn_rows
+    ENTER 5
+    mov  x19, x0
+    mov  x20, x1
+    mov  x21, x2
+    mov  x22, x3
+    cmp  x22, x20
+    b.lo 1f
+    mov  x0, x19                        // k >= n: plain sort
+    mov  x1, x20
+    mov  x2, x21
+    bl   sort_rows
+    mov  x0, x20
+    LEAVE 5
+1:  cbz  x22, 9f
+    lsr  x23, x22, #1                   // heapify rows[0, k)
+2:  cbz  x23, 3f
+    sub  x23, x23, #1
+    mov  x24, x23
+    bl   .Ltn_sift
+    b    2b
+3:  mov  x23, x22
+4:  cmp  x23, x20
+    b.hs 6f
+    tst  x23, #DEADLINE_MASK
+    b.ne 41f
+    bl   check_deadline
+41: add  x0, x19, x23, lsl #3           // rows[j] < rows[0]?
+    mov  x1, x19
+    mov  x2, x21
+    bl   cmp_rows
+    tbz  w0, #31, 5f
+    ldr  x9, [x19, x23, lsl #3]
+    str  x9, [x19]
+    mov  x24, #0
+    bl   .Ltn_sift
+5:  add  x23, x23, #1
+    b    4b
+6:  mov  x0, x19
+    mov  x1, x22
+    mov  x2, x21
+    bl   sort_rows
+9:  mov  x0, x22
+    LEAVE 5
+
+// local helper: sift rows[x24] down the max-heap rows[0, k)
+.Ltn_sift:
+    stp  x29, x30, [sp, #-16]!
+1:  lsl  x25, x24, #1
+    add  x25, x25, #1                   // left child
+    cmp  x25, x22
+    b.hs 3f
+    add  x9, x25, #1
+    cmp  x9, x22
+    b.hs 2f
+    add  x0, x19, x9, lsl #3            // right > left?
+    add  x1, x19, x25, lsl #3
+    mov  x2, x21
+    bl   cmp_rows
+    cmp  w0, #0
+    b.le 2f
+    add  x25, x25, #1
+2:  add  x0, x19, x25, lsl #3           // child > parent: swap
+    add  x1, x19, x24, lsl #3
+    mov  x2, x21
+    bl   cmp_rows
+    cmp  w0, #0
+    b.le 3f
+    ldr  x9, [x19, x25, lsl #3]
+    ldr  x10, [x19, x24, lsl #3]
+    str  x10, [x19, x25, lsl #3]
+    str  x9, [x19, x24, lsl #3]
+    mov  x24, x25
+    b    1b
+3:  ldp  x29, x30, [sp], #16
+    ret
+ENDF topn_rows
 
 // =============================================================================
 // distinct_rows(x0 BoundQuery*, x1 ResultSet*) -> x0 ResultSet*

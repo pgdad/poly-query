@@ -637,4 +637,124 @@ FUNC vfilter
     LEAVE 3
 ENDF vfilter
 
+// =============================================================================
+// vkey_cells(x0 TupleSet*, x1 Node** keys, x2 nkeys (<= VKEY_MAX), x3 ctx,
+//            x4 cells out, x5 u64* hashes out, x6 u8* NULL flags out)
+// The key cells of every tuple (nkeys cells each), evaluated in batches,
+// with the hash and NULL flag of join.S eval_keys (same hash function).
+//   x19 ts, x20 keys, x21 nkeys, x22 vb, x23 cells, x24 hashes, x25 flags,
+//   x26 batch start, x27 batch size, x28 key vectors
+// Stack: [sp] position, [sp+8] key, [sp+16] hash, [sp+24] any NULL
+// =============================================================================
+FUNC vkey_cells
+    ENTER 5
+    sub  sp, sp, #32
+    mov  x19, x0
+    mov  x20, x1
+    mov  x21, x2
+    mov  x23, x4
+    mov  x24, x5
+    mov  x25, x6
+    mov  x0, x3
+    ldr  x1, [x19, #TS_W]
+    bl   vb_new
+    mov  x22, x0
+    lsl  x0, x21, #3
+    add  x0, x0, #8
+    bl   arena_alloc
+    mov  x28, x0
+    str  xzr, [sp, #8]
+1:  ldr  x9, [sp, #8]
+    cmp  x9, x21
+    b.hs 2f
+    mov  x0, x22
+    bl   vpool_get
+    ldr  x9, [sp, #8]
+    str  x0, [x28, x9, lsl #3]
+    add  x9, x9, #1
+    str  x9, [sp, #8]
+    b    1b
+2:  mov  x26, #0
+.Lvk_batch:
+    ldr  x9, [x19, #TS_N]
+    cmp  x26, x9
+    b.hs .Lvk_end
+    bl   check_deadline
+    ldr  x9, [x19, #TS_N]
+    sub  x27, x9, x26
+    mov  x10, #VBATCH
+    cmp  x27, x10
+    csel x27, x27, x10, lo
+    ldr  x9, [x19, #TS_DATA]
+    ldr  x10, [x19, #TS_W]
+    mul  x10, x10, x26
+    add  x9, x9, x10, lsl #2
+    str  x9, [x22, #VB_TUP]
+    str  x27, [x22, #VB_N]
+    str  xzr, [sp, #8]
+3:  ldr  x9, [sp, #8]                   // key vectors
+    cmp  x9, x21
+    b.hs 4f
+    ldr  x0, [x20, x9, lsl #3]
+    mov  x1, x22
+    ADR_L x2, vsel_ident
+    mov  x3, x27
+    ldr  x4, [x28, x9, lsl #3]
+    bl   veval
+    ldr  x9, [sp, #8]
+    add  x9, x9, #1
+    str  x9, [sp, #8]
+    b    3b
+4:  str  xzr, [sp]
+5:  ldr  x9, [sp]                       // per tuple: cells, hash, flag
+    cmp  x9, x27
+    b.hs 8f
+    stp  xzr, xzr, [sp, #16]
+    str  xzr, [sp, #8]
+6:  ldr  x10, [sp, #8]
+    cmp  x10, x21
+    b.hs 7f
+    ldr  x9, [sp]
+    ldr  x11, [x28, x10, lsl #3]        // vector of key k
+    ldr  x0, [x11, x9, lsl #3]
+    add  x11, x11, #VEC_NULLS
+    ldrb w1, [x11, x9]
+    add  x12, x26, x9                   // tuple index
+    mul  x12, x12, x21
+    add  x12, x12, x10
+    add  x12, x23, x12, lsl #4
+    stp  x0, x1, [x12]
+    add  x10, x10, #1
+    str  x10, [sp, #8]
+    cbz  w1, 61f
+    mov  x9, #1
+    str  x9, [sp, #24]
+    b    6b
+61: sub  x10, x10, #1
+    ldr  x10, [x20, x10, lsl #3]
+    ldr  w1, [x10, #N_TYPE]
+    bl   hash_cell
+    ldr  x9, [sp, #16]
+    eor  x9, x9, x0
+    ldr  x10, =0x9e3779b97f4a7c15
+    mul  x9, x9, x10
+    add  x9, x9, #1
+    str  x9, [sp, #16]
+    b    6b
+7:  ldr  x9, [sp]
+    add  x10, x26, x9
+    ldp  x11, x12, [sp, #16]
+    str  x11, [x24, x10, lsl #3]
+    strb w12, [x25, x10]
+    add  x9, x9, #1
+    str  x9, [sp]
+    b    5b
+8:  add  x26, x26, x27
+    b    .Lvk_batch
+.Lvk_end:
+    add  sp, sp, #32
+    LEAVE 5
+ENDF vkey_cells
+
+    .ltorg
     NOTE_GNU_STACK
