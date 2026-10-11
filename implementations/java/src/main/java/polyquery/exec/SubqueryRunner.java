@@ -16,28 +16,27 @@ import polyquery.plan.Subquery;
 
 /**
  * Evaluates a subquery for the row of the enclosing query level that is currently being
- * evaluated. Uncorrelated subqueries run once; correlated ones run (logically) once per outer
- * row, with results memoized by the values of the outer references they depend on.
+ * evaluated. Uncorrelated subqueries run once per query (their results are shared through the
+ * {@link ExecContext}); correlated ones run (logically) once per outer row, with results memoized
+ * by the values of the outer references they depend on.
  */
 final class SubqueryRunner {
     private static final int MAX_MEMO_ENTRIES = 100_000;
     private static final Object NO_VALUE = new Object();
 
-    /** Distinct values of a subquery's first column, plus whether it contained NULL. */
-    record ValueSet(Set<Object> values, boolean hasNull, boolean isEmpty) {
-        boolean contains(Object v) {
-            return values.contains(v);
-        }
-    }
-
+    private final Object key;
     private final Subquery subquery;
     private final Function<LogicalPlan, Operator> builder;
     private final ExecContext ctx;
     private Operator operator;
-    private Object cached = NO_VALUE;
     private Map<List<Object>, Object> memo;
 
-    SubqueryRunner(Subquery subquery, Function<LogicalPlan, Operator> builder, ExecContext ctx) {
+    /**
+     * @param key the subquery expression node: results of uncorrelated subqueries are shared
+     *            through {@link ExecContext#subqueryResult} under this key
+     */
+    SubqueryRunner(Object key, Subquery subquery, Function<LogicalPlan, Operator> builder, ExecContext ctx) {
+        this.key = key;
         this.subquery = subquery;
         this.builder = builder;
         this.ctx = ctx;
@@ -83,27 +82,24 @@ final class SubqueryRunner {
 
     private Object evaluate(Object[] row, Function<Operator, Object> compute) {
         if (!subquery.correlated()) {
-            if (cached == NO_VALUE) {
-                cached = run(compute);
-            }
-            return cached;
+            return ctx.subqueryResult(key, () -> run(compute));
         }
         Object[] previous = ctx.setFrame(subquery.frame(), frameRow(row));
         try {
-            List<Object> key = new ArrayList<>(subquery.outerRefs().size());
+            List<Object> refs = new ArrayList<>(subquery.outerRefs().size());
             for (BoundExpr.OuterRef ref : subquery.outerRefs()) {
-                key.add(HashKeys.normalizeZero(ctx.frame(ref.frame())[ref.index()]));
+                refs.add(HashKeys.normalizeZero(ctx.frame(ref.frame())[ref.index()]));
             }
             if (memo == null) {
                 memo = new HashMap<>();
             }
-            Object v = memo.getOrDefault(key, NO_VALUE);
+            Object v = memo.getOrDefault(refs, NO_VALUE);
             if (v == NO_VALUE) {
                 v = run(compute);
                 if (memo.size() >= MAX_MEMO_ENTRIES) {
                     memo.clear();
                 }
-                memo.put(key, v);
+                memo.put(refs, v);
             }
             return v;
         } finally {

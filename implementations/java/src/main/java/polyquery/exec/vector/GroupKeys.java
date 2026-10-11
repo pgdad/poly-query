@@ -475,11 +475,15 @@ final class GroupKeys {
             return 0;
         }
         System.arraycopy(other.nullBits, g * nullWords, tupleNulls, 0, nullWords);
+        int[][] idMap = null;
         for (int j = 0; j < k; j++) {
             long c = other.keys[g * k + j];
             boolean isNull = (tupleNulls[j >>> 6] & (1L << (j & 63))) != 0;
             if (kinds[j] == Vec.Kind.OBJECT && !isNull) {
-                c = internId(j, other.strings.get(j).get((int) c));
+                if (idMap == null) {
+                    idMap = idMapFrom(other);
+                }
+                c = translateId(j, other, (int) c, idMap);
             }
             tupleCodes[j] = c;
         }
@@ -503,6 +507,41 @@ final class GroupKeys {
             rehash();
         }
         return ng;
+    }
+
+    /** Per source table and object column: the source's interned ids mapped to ids here (-1: not yet). */
+    private java.util.IdentityHashMap<GroupKeys, int[][]> idMaps;
+    private GroupKeys lastSource;
+    private int[][] lastIdMap;
+
+    private int[][] idMapFrom(GroupKeys other) {
+        if (other == lastSource) {
+            return lastIdMap;
+        }
+        if (idMaps == null) {
+            idMaps = new java.util.IdentityHashMap<>();
+        }
+        int[][] m = idMaps.computeIfAbsent(other, o -> new int[k][]);
+        lastSource = other;
+        lastIdMap = m;
+        return m;
+    }
+
+    private int translateId(int j, GroupKeys other, int id, int[][] idMap) {
+        int[] m = idMap[j];
+        if (m == null || m.length <= id) {
+            int old = m == null ? 0 : m.length;
+            m = m == null ? new int[Math.max(16, other.strings.get(j).size())] : Arrays.copyOf(m, Math.max(id + 1,
+                    Math.max(old * 2, other.strings.get(j).size())));
+            Arrays.fill(m, old, m.length, -1);
+            idMap[j] = m;
+        }
+        int mine = m[id];
+        if (mine < 0) {
+            mine = internId(j, other.strings.get(j).get(id));
+            m[id] = mine;
+        }
+        return mine;
     }
 
     private boolean tupleEquals(int g) {

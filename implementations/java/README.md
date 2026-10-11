@@ -20,7 +20,10 @@ join reordering), top-N sorting, SIMD-friendly kernels and cache-conscious data 
 see [Phase 5: optimization](#phase-5-optimization); and (M9) the optional **native kernel
 library** `libpqkernels` bound through the Java FFM API and used for filtering, aggregation,
 bitmap and hashing work with `native: true` — see [Native kernels (M9)](#native-kernels-m9);
-and the requirement change **CR-1 `UNION ALL`** (`spec/changes/union-all.md`) — see
+a **latency optimization** of the analytics workload (shared vectorized uncorrelated
+subqueries, parallel DISTINCT aggregates, contention-free join counting, cheaper parallel top-N,
+a build-time JVM AOT cache) — see
+[Latency optimization](#latency-optimization-analytics-workload); and the requirement change **CR-1 `UNION ALL`** (`spec/changes/union-all.md`) — see
 [Change CR-1: UNION ALL](#change-cr-1-union-all); the refactoring **CR-3 logical/physical
 plan separation** (`spec/changes/refactor-plan-separation.md`) — see
 [Change CR-3](#change-cr-3-logicalphysical-plan-separation); and the architectural change
@@ -37,7 +40,9 @@ change.union_all change.decimal38`.
 
 * OpenJDK 27 (`java`, `javac`, `jar` on `PATH`, or `JAVA_HOME` set). No other tools,
   no network, no third-party libraries (Track A: standard library only).
-* `make build` — compiles with `javac --release 27` into `build/polyquery.jar`.
+* `make build` — compiles with `javac --release 27` into `build/polyquery.jar`, then records
+  the JVM AOT cache `build/polyquery.aot` with a training run (~8 s; see
+  [Latency optimization](#latency-optimization-analytics-workload)).
 * `make test` — builds and runs the unit tests (`src/test/java`, plain Java with a small
   runner in `polyquery.TestMain`; JUnit is not used). The native-kernel tests use
   `NATIVE_LIB` (default `../../native-kernels/build/<arch>/libpqkernels.so`, built with
@@ -50,7 +55,8 @@ change.union_all change.decimal38`.
 * `make clean`.
 
 `bin/polyquery` is a POSIX shell launcher that works from any directory (it resolves its
-own location). Extra JVM flags can be passed with `POLYQUERY_JAVA_OPTS`.
+own location); it uses the AOT cache when it exists and is newer than the jar. Extra JVM flags
+can be passed with `POLYQUERY_JAVA_OPTS`.
 
 ```
 bin/polyquery version | capabilities
@@ -206,7 +212,9 @@ variables of the level that contains them) and bound as `OuterRef(frame, index)`
 reference is recorded in every level between the reference and its target, so each subquery
 knows exactly which outer values it depends on. At run time a subquery expression sets its
 frame to the row it is evaluated on, runs (or re-opens) its operator tree and restores the
-frame. Uncorrelated subqueries run once; correlated ones are memoized by the values of their
+frame. Uncorrelated subqueries run once per query — their result (or the data error they raise)
+is kept in the query's `ExecContext` under the subquery expression, shared by every compiled copy
+of the expression and by parallel workers; correlated ones are memoized by the values of their
 outer references. A filter inside a correlated subquery of the form `inner_expr = outer_ref`
 becomes a `HashLookupFilter`: the uncorrelated input is hashed once and each execution only
 probes it, which turns the usual O(outer × inner) evaluation into O(outer + inner).
@@ -319,8 +327,11 @@ the unspecified row order of a join (see Known limitations).
   OR / NOT with the row engine's short-circuit (the right side is evaluated only on undecided
   rows), IS NULL, IN lists (hash sets), BETWEEN, LIKE, CASE (each branch only on its rows),
   NULLIF, `||`, numeric/temporal casts. Scalar functions and CASTs without a kernel apply the row
-  engine's compiled code to one vectorized argument; subqueries and anything else fall back to
-  row-at-a-time evaluation of that subexpression — so every expression is supported.
+  engine's compiled code to one vectorized argument. Uncorrelated subqueries are kernels too
+  (`SubqueryValue` for scalar/EXISTS, `InSubquery` probing the value set — a primitive `LongSet`
+  for INT64 operands, a per-code cache for dictionary strings), evaluated when the first row needs
+  them; correlated subqueries and anything else fall back to row-at-a-time evaluation of that
+  subexpression — so every expression is supported.
 * **Operators**: table/index scans, filter, project, LIMIT/OFFSET, hash aggregation, DISTINCT,
   hash join, sort and top-N are batch operators; sort-merge and nested-loop joins and correlated
   hash lookups are the row engine's operators, connected through `BatchToRow`/`RowToBatch`
@@ -340,8 +351,10 @@ the unspecified row order of a join (see Known limitations).
 probes (with their hash tables built first and then shared read-only) — on a shared pool of
 daemon worker threads. Row groups are cut into **morsels** (65,536 rows) handed out in scan
 order; each worker compiles its own copy of the pipeline (expressions have per-instance
-buffers). Pipelines with subqueries or correlated references stay on the query thread, and a
-pipeline over fewer than two morsels is not parallelized.
+buffers). Pipelines with correlated references or correlated subqueries stay on the query
+thread; uncorrelated subqueries in a pipeline are evaluated on the opening thread before the
+workers start (a data error they raise is kept and raised only by rows that evaluate them, as
+sequentially). A pipeline over fewer than two morsels is not parallelized.
 
 * **Aggregation**: each worker aggregates whole morsels into a private partial table and
   records, per group, the position (morsel, row) of its first row. The partial tables are
@@ -349,10 +362,13 @@ pipeline over fewer than two morsels is not parallelized.
   and the partitions are merged in parallel, each with a k-way merge in first-position order;
   the output interleaves the partitions by first position — so groups come out in exactly the
   order of sequential execution. INT64/DECIMAL sums merge exactly (BigInteger on overflow;
-  wide DECIMAL sums are BigInteger throughout).
+  wide DECIMAL sums are BigInteger throughout). DISTINCT aggregates (`COUNT(DISTINCT x)`, …)
+  are mergeable too (see [Latency optimization](#latency-optimization-analytics-workload)).
 * **DISTINCT** runs as a keys-only parallel aggregation when no pipeline expression can fail;
   otherwise workers drop duplicates within their morsels and the final DISTINCT streams over
-  the rest. **Top-N**: workers keep the best `offset + limit` rows of each morsel (stable), the
+  the rest. **Top-N**: workers keep the best `offset + limit` rows of each morsel (stable;
+  collected rows are cut back to the best ones whenever twice as many have accumulated, and
+  later rows whose first sort key is worse than the last kept row's are dropped at once), the
   final top-N picks among them.
 * **Everything else** is gathered **in morsel order** with a bounded number of morsels in
   flight, so row order (and therefore LIMIT without ORDER BY) is the same as sequential.
@@ -533,6 +549,135 @@ e.g. Q1 single-threaded measured 2.7–5.0 ms across runs).
 indexes are built in parallel. Tiny values (e.g. 3 and 5) make every batch boundary, adapter, parallel
 worker and deferred-error path run on the small conformance fixtures; the conformance suite,
 the `--modes` matrix and the unit tests pass that way too.
+
+## Latency optimization (analytics workload)
+
+Task: lower the query latency of the analytics workload at scale `1m`, measured through
+`bin/polyquery session`, without changing any result.
+
+**Workload.** The task names `benchmarks/workloads/analytics.json`, but that file does not exist
+in this workspace (there is no `benchmarks/` directory). Decision: define an equivalent workload
+myself, [`bench/analytics.json`](bench/analytics.json) — 25 typical analytical queries over the
+pqgen `1m` tables (transactions 1,000,000 rows, customers 100,000, orders 250,000, order_items
+1,000,000, products 20,000, sensor_readings / nulls_heavy / sort_keys 1,000,000), loaded as
+in-memory column tables with the generator's schema files: filtered aggregates, low- and
+high-cardinality GROUP BY, joins (2- to 4-way, LEFT), top-N, `DATE_TRUNC`/`YEAR`/`HOUR` grouping,
+`COUNT(DISTINCT)`, HAVING, CASE aggregates, IN / scalar subqueries, a CTE, DISTINCT, LIKE/IN
+filters, NULL-heavy data, time ranges, string sort and plain reductions. All queries run with
+**default options** (vectorized, threads = available processors) and full `rows` results.
+
+**Method.** [`tools/workload.py`](tools/workload.py) starts a fresh engine process per round,
+loads the tables, then runs every query once *cold* (its first execution in the process: class
+loading and JIT compilation included), 3 times as warm-up and 9 times measured; the wall time is
+measured client-side from writing the request line to reading the response line (planning,
+execution and JSON serialization included). Reported: per query the best cold time and the best
+median over 3 rounds, in ms. *Before* = the engine this task started from (commit `7f124ce`, its
+launcher), *after* = this version (`make build`, AOT cache included). Both were run back to
+back; `--compare` verified that all 25 results are identical (FLOAT64 within 1e-9 relative).
+Machine: AMD Ryzen 9 9950X3D (16 cores / 32 threads), OpenJDK 27, shared with other jobs
+(load average ≈ 4 during the runs), so single numbers vary by about ±15 % between runs; raw
+numbers are in [`bench/results-1m.json`](bench/results-1m.json).
+
+| query | before cold | after cold | before median | after median | speed-up (median) |
+|---|---:|---:|---:|---:|---:|
+| A01 filter + aggregate | 124.5 | 67.9 | 1.6 | 1.0 | 1.50× |
+| A02 group by, low cardinality | 58.5 | 59.2 | 4.7 | 4.9 | 0.97× |
+| A03 group by, high cardinality + top-N | 193.6 | 33.0 | 20.3 | 22.5 | 0.90× |
+| A04 join + group by | 122.6 | 36.3 | 14.7 | 5.3 | 2.79× |
+| A05 3-way join | 165.1 | 114.3 | 6.1 | 4.0 | 1.52× |
+| A06 top-N | 26.1 | 21.7 | 2.1 | 0.8 | 2.62× |
+| A07 monthly revenue (DATE_TRUNC) | 73.1 | 26.4 | 3.8 | 3.3 | 1.16× |
+| A08 orders by year and status | 24.1 | 5.3 | 2.5 | 1.7 | 1.41× |
+| A09 COUNT(DISTINCT) | 133.1 | 190.2 | 104.3 | 18.3 | 5.70× |
+| A10 HAVING + top-N | 8.1 | 7.3 | 6.1 | 5.9 | 1.02× |
+| A11 conditional aggregates (CASE) | 85.5 | 57.3 | 2.4 | 2.2 | 1.09× |
+| A12 sensor hourly profile | 129.0 | 59.3 | 2.9 | 2.2 | 1.30× |
+| A13 per-sensor averages | 27.8 | 2.5 | 3.6 | 2.3 | 1.58× |
+| A14 IN subquery | 35.8 | 15.5 | 21.5 | 1.8 | 12.27× |
+| A15 CTE + join | 17.9 | 15.2 | 16.0 | 16.7 | 0.96× |
+| A16 scalar subquery | 95.3 | 120.8 | 5.5 | 0.5 | 11.62× |
+| A17 DISTINCT | 52.4 | 21.7 | 23.9 | 21.9 | 1.09× |
+| A18 string filter | 23.8 | 13.7 | 3.8 | 3.4 | 1.14× |
+| A19 NULL-heavy aggregation | 110.5 | 110.0 | 2.2 | 2.2 | 0.99× |
+| A20 LEFT JOIN | 103.4 | 22.8 | 17.3 | 14.7 | 1.17× |
+| A21 4-way join, selective filters | 21.1 | 15.0 | 5.1 | 4.6 | 1.11× |
+| A22 top brands (join + top-N) | 91.6 | 48.6 | 15.3 | 5.1 | 2.98× |
+| A23 time range filter | 62.7 | 1.6 | 0.6 | 0.5 | 1.14× |
+| A24 string sort top-N | 81.8 | 24.3 | 10.0 | 2.3 | 4.35× |
+| A25 full reductions | 40.5 | 10.6 | 0.3 | 0.3 | 1.02× |
+| **total** | **1908** | **1101** | **296.6** | **148.4** | **2.00×** |
+
+Warm latency of the whole workload halved (sum of medians 297 → 148 ms) and first executions
+are 1.7× faster in total. Queries whose time was already dominated by well-optimized scans,
+hashing and merging (A02, A03, A10, A15, A19) are unchanged within the noise. Two first
+executions got slower (A09 133 → 190 ms, A16 95 → 121 ms): they now run new parallel code paths
+(DISTINCT pair merging, subquery precomputation plus a parallel pipeline) whose JIT compilation
+falls on the first run; from the second run on they are 6–12× faster.
+
+### What changed, and why
+
+Hot spots were found by profiling each slow query with JFR
+(`-XX:StartFlightRecording -XX:+DebugNonSafepoints`, execution samples aggregated per frame):
+
+1. **Join-row counter contention** (A04 2.8×, A22 3.0×, A05, A20, A21). Every parallel probe
+   worker incremented one shared `AtomicLong` per output row to enforce `--max-join-rows`; with
+   16–32 workers the cache line bounced between cores and this was ~65 % of A04's CPU time.
+   `JoinCounter.add(n)` is now called once per output batch; when the limit is crossed the batch
+   is cut at exactly the allowed number of rows and the error follows, as before.
+2. **Uncorrelated subqueries** (A14 12×, A16 12×). They were evaluated row-at-a-time
+   (`RowEval`, boxing every row) and kept the whole pipeline on one thread. Now (a) their result
+   is computed once per query and shared (`ExecContext.subqueryResult`, keyed by the expression
+   node; data errors are memoized and re-raised, timeouts and resource limits are not), (b)
+   they are batch kernels (`Kernels.SubqueryValue`, `Kernels.InSubquery` with a primitive
+   `LongSet` for INT64 and a per-dictionary-code cache for strings), evaluated only once a row
+   needs them, so `WHERE false_for_all AND x IN (failing subquery)` still raises nothing, and
+   (c) pipelines containing them run in parallel: `Parallel.Shared.open` evaluates them on the
+   opening thread before the workers start (`ExpressionCompiler.precomputeSubqueries`); a data
+   error is kept and raised only by the rows that evaluate the subquery.
+3. **DISTINCT aggregates** (A09 5.7×). `COUNT(DISTINCT x)` etc. used the row engine's
+   accumulators (a boxed `HashSet` per group) and were not mergeable, so the whole aggregation
+   was sequential. `AggState.Distinct` encodes values as longs (INT64-like as is, FLOAT64 bits
+   with −0.0 = 0.0, strings as interned ids), keeps (group, value) pairs in a primitive
+   open-addressing `PairSet` and feeds each new pair to the plain state of the function
+   (COUNT/SUM/AVG/MIN/MAX) in first-appearance order — the row engine's semantics. It also keeps
+   the pairs in insertion order, so parallel partial states merge; with few groups (one merge
+   partition) the pairs are merged by value-hash partitioned parallel tasks whose plain states
+   are merged per group at the end. Wide DECIMAL arguments keep the generic accumulator.
+4. **Parallel top-N** (A24 4.4×, A06 2.6×). Each worker used to sort its whole morsel to keep
+   `offset + limit` rows. It now cuts its rows back to the best ones whenever twice as many
+   (at least two batches) have accumulated, and drops rows whose first sort key is strictly worse
+   than the last kept row's before materializing them. Kept rows precede later rows, so the final
+   stable sort — and the choice among ties — is unchanged.
+5. **Parallel aggregation merge**: memory for merged groups is reserved in 1 MiB chunks
+   (the shared reservation counter was contended per group), and merging STRING group keys
+   maps the source table's interned ids to the target's through a cache instead of re-interning
+   every string.
+6. **JVM start-up and warm-up** (cold column: A03 194 → 33 ms, A04 123 → 36 ms, A13 28 → 2.5 ms).
+   A fresh engine process interpreted and JIT-compiled the hot paths during the first queries.
+   `make build` now runs a training workload (`polyquery.training.AotTraining`: synthetic
+   tables written as CSV and loaded, and a generic mix of ~30 queries — none of the benchmark's —
+   run 12 times through the session protocol) with `-XX:AOTCacheOutput`, producing an AOT cache
+   (JEP 483/515: classes pre-loaded and linked, method profiles) that `bin/polyquery` passes with
+   `-XX:AOTCache`. The launcher uses the cache only if it is newer than the jar and runs the JVM
+   with its logging off (`-Xlog:disable -Xlog:all=off`), because the JVM reports an unusable
+   cache (moved jar, other JDK) on stdout, which carries the protocol; the engine then simply
+   starts without it. If the training run fails, the build still succeeds without a cache.
+
+Tried and dropped (no measurable gain within the noise): presizing workers' partial aggregation
+tables from column statistics (helped DISTINCT, hurt high-cardinality GROUP BY through
+allocation), and smaller morsels (16,384 rows) for better load balance.
+
+**Correctness checks** for these changes: the conformance suite (session, `--modes` matrix, the
+`--modes` matrix with tiny batches and morsels `-Dpolyquery.batchSize=3 -Dpolyquery.morselRows=5`,
+HTTP transport), the HTTP/concurrency suite, unit tests (new: `LongSet`, `PairSet`, distinct
+state merging; new option-matrix queries in `Phase5Test` for DISTINCT aggregates and
+uncorrelated subqueries incl. failing ones), and `tools/difftest.py` with new subquery and
+DISTINCT-aggregate shapes (`--shape 8`: uncorrelated IN/NOT IN/EXISTS/scalar subqueries,
+failing subqueries, subqueries behind AND/OR, in the select list) — all with 0 mismatches.
+
+Remaining limits: high-cardinality GROUP BY (A03, A15, A17) is bound by building and merging
+per-worker hash tables (each worker's table holds most keys); a radix-partitioned exchange
+would be the next step. Hash-join build sides are still materialized by one thread.
 
 ## Native kernels (M9)
 
@@ -1028,6 +1173,10 @@ POLYQUERY_JAVA_OPTS="-Dpolyquery.batchSize=3 -Dpolyquery.morselRows=5" \
 # randomized differential testing of all option combinations (data dir with a copy of fixtures/)
 python3 implementations/java/tools/difftest.py --engine implementations/java/bin/polyquery \
     --data /tmp/dtdata --queries 300 --seed 1 [--native-kernels native-kernels/build/x86_64/libpqkernels.so]
+# latency of the analytics workload (see Latency optimization); --compare checks results too
+python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pqdata --jobs 1
+python3 implementations/java/tools/workload.py --engine implementations/java/bin/polyquery --data /tmp/pqdata \
+    --workload implementations/java/bench/analytics.json --rounds 3 [--save after.json] [--compare before.json]
 # benchmarks (see Phase 5: Measurements); native before/after with result verification
 python3 implementations/java/tools/bench.py --engine implementations/java/bin/polyquery --data /tmp/pqdata
 python3 implementations/java/tools/bench.py --engine implementations/java/bin/polyquery --data /tmp/pqdata \
@@ -1114,8 +1263,8 @@ and `use_indexes`/`optimize` off.
 * In vectorized mode, sort-merge and nested-loop joins and correlated hash lookups are the row
   engine's operators behind adapters. Hash join build inputs are materialized by one thread
   (their input pipelines and, for single integer keys, the index may run in parallel).
-* Parallelism applies to pipelines that start with a table scan and contain no subqueries;
-  index scans and pipelines over fewer than two morsels (131,072 rows) run on one thread.
+* Parallelism applies to pipelines that start with a table scan and contain no correlated
+  subqueries; index scans and pipelines over fewer than two morsels (131,072 rows) run on one thread.
   High-cardinality GROUP BY / DISTINCT scale only moderately (partial aggregation reduces
   little when most keys are distinct; there is no radix-partitioned exchange).
 * Row order without ORDER BY depends on the join algorithm (hash vs merge vs build side), so

@@ -2,6 +2,7 @@ package polyquery.exec.vector;
 
 import java.math.BigInteger;
 import java.util.Arrays;
+import java.util.List;
 import polyquery.exec.Accumulator;
 import polyquery.ffi.NativeKernels;
 import polyquery.plan.AggregateCall;
@@ -34,9 +35,16 @@ abstract class AggState {
     /** Final value of group g (boxed runtime value; may raise NUMERIC_OVERFLOW). */
     abstract Object result(int g);
 
-    /** False if partial states cannot be merged (DISTINCT aggregates). */
+    /** False if partial states cannot be merged. */
     boolean mergeable() {
         return true;
+    }
+
+    /**
+     * Called on a parallel worker's partial state once it is complete, before it is merged
+     * (concurrently, for different groups) into the final tables.
+     */
+    void prepareMerge() {
     }
 
     /**
@@ -45,10 +53,14 @@ abstract class AggState {
      * they give the same result (see {@link NativeAgg}).
      */
     static AggState create(AggregateCall call, NativeKernels kernels) {
-        if (call.distinct()) {
-            return new Generic(call);
-        }
         DataType in = call.argument() == null ? null : call.argument().type();
+        if (call.distinct()) {
+            if (in == null || in.isNull() || in.isWideDecimal()) {
+                return new Generic(call);
+            }
+            AggregateCall plain = new AggregateCall(call.function(), call.argument(), false, call.type());
+            return new Distinct(() -> create(plain, kernels), in);
+        }
         // wide DECIMAL arguments never go to the kernels (their ABI covers 64-bit values only)
         NativeAgg nat = kernels == null || in != null && in.isWideDecimal() ? null : new NativeAgg(kernels);
         return switch (call.function()) {
@@ -643,6 +655,329 @@ abstract class AggState {
         @Override
         Object result(int g) {
             return best[g];
+        }
+    }
+
+    /**
+     * A DISTINCT aggregate over INT64-like, FLOAT64 or STRING values: every (group, value) pair
+     * is passed on to the plain state of the function once, in order of first appearance (as
+     * the row engine's distinct accumulator does). Values are encoded as longs (FLOAT64 by their
+     * bits with -0.0 = 0.0, strings by an interned id) and the pairs seen are kept in a primitive
+     * hash set, plus a list in insertion order so partial states of parallel workers can be merged.
+     */
+    static final class Distinct extends AggState {
+        private final java.util.function.Supplier<AggState> plain;
+        private final AggState inner;
+        private final DataType type;
+        private final Vec.Kind kind;
+        private final PairSet seen = new PairSet();
+        /** Pairs in insertion order: group and raw value (FLOAT64: raw bits; STRING: interned id). */
+        private int[] pairGroup = new int[16];
+        private long[] pairValue = new long[16];
+        private int pairs;
+        // STRING interning, with a code -> id cache per dictionary
+        private final java.util.Map<Object, Integer> ids;
+        private final java.util.List<Object> strings;
+        private String[] seenDict;
+        private int[] dictIds;
+        private int[] fresh = new int[0];
+        // merge support: pairs of each group (built by prepareMerge), scratch vectors
+        private int[] groupStart;
+        private int[] byGroup;
+        private Vec scratch;
+        private int[] scratchGids = new int[0];
+
+        /** @param plain creates the (non-DISTINCT) state of the aggregate function */
+        Distinct(java.util.function.Supplier<AggState> plain, DataType type) {
+            this.plain = plain;
+            this.inner = plain.get();
+            this.type = type;
+            this.kind = Vec.kindOf(type);
+            boolean str = kind == Vec.Kind.OBJECT;
+            this.ids = str ? new java.util.HashMap<>() : null;
+            this.strings = str ? new java.util.ArrayList<>() : null;
+        }
+
+        @Override
+        void grow(int groups) {
+            inner.grow(groups);
+        }
+
+        private int intern(Object v) {
+            Integer id = ids.get(v);
+            if (id == null) {
+                id = strings.size();
+                ids.put(v, id);
+                strings.add(v);
+            }
+            return id;
+        }
+
+        private long raw(Vec arg, int i) {
+            return switch (arg.kind) {
+                case LONG -> arg.longs[i];
+                case DOUBLE -> Double.doubleToRawLongBits(arg.doubles[i]);
+                case DICT -> {
+                    if (seenDict != arg.dict) {
+                        seenDict = arg.dict;
+                        dictIds = new int[arg.dict.length];
+                        Arrays.fill(dictIds, -1);
+                    }
+                    int c = arg.codes[i];
+                    int id = dictIds[c];
+                    if (id < 0) {
+                        id = intern(arg.dict[c]);
+                        dictIds[c] = id;
+                    }
+                    yield id;
+                }
+                case OBJECT -> intern(arg.objects[i]);
+            };
+        }
+
+        /** The set key of a raw value: FLOAT64 values compare by value (-0.0 = 0.0, NaN = NaN). */
+        private long key(long raw) {
+            if (kind == Vec.Kind.DOUBLE) {
+                double d = Double.longBitsToDouble(raw);
+                return Double.doubleToLongBits(d == 0.0 ? 0.0 : d);
+            }
+            return raw;
+        }
+
+        private boolean add(int g, long raw) {
+            if (!seen.add(g, key(raw))) {
+                return false;
+            }
+            if (pairs == pairGroup.length) {
+                pairGroup = Arrays.copyOf(pairGroup, pairs * 2);
+                pairValue = Arrays.copyOf(pairValue, pairs * 2);
+            }
+            pairGroup[pairs] = g;
+            pairValue[pairs] = raw;
+            pairs++;
+            return true;
+        }
+
+        @Override
+        void update(Vec arg, int[] sel, int n, int[] gids) {
+            if (fresh.length < n) {
+                fresh = new int[Math.max(n, 16)];
+            }
+            int m = 0;
+            for (int k = 0; k < n; k++) {
+                int i = sel == null ? k : sel[k];
+                if (!arg.isNull(i) && add(gids[i], raw(arg, i))) {
+                    fresh[m++] = i;
+                }
+            }
+            if (m > 0) {
+                inner.update(arg, fresh, m, gids);
+            }
+        }
+
+        @Override
+        void prepareMerge() {
+            int groups = 0;
+            for (int p = 0; p < pairs; p++) {
+                groups = Math.max(groups, pairGroup[p] + 1);
+            }
+            groupStart = new int[groups + 1];
+            for (int p = 0; p < pairs; p++) {
+                groupStart[pairGroup[p] + 1]++;
+            }
+            for (int g = 0; g < groups; g++) {
+                groupStart[g + 1] += groupStart[g];
+            }
+            int[] fill = Arrays.copyOf(groupStart, groups);
+            byGroup = new int[pairs];
+            for (int p = 0; p < pairs; p++) {
+                byGroup[fill[pairGroup[p]]++] = p;
+            }
+        }
+
+        @Override
+        void merge(AggState other, int from, int to) {
+            Distinct o = (Distinct) other;
+            if (o.groupStart == null || from + 1 >= o.groupStart.length) {
+                return; // no values in that group
+            }
+            int start = o.groupStart[from];
+            int end = o.groupStart[from + 1];
+            if (start == end) {
+                return;
+            }
+            int cap = end - start;
+            if (scratch == null || scratchGids.length < cap) {
+                scratch = new Vec(type, Math.max(cap, 16));
+                scratchGids = new int[Math.max(cap, 16)];
+            }
+            int m = 0;
+            for (int q = start; q < end; q++) {
+                long raw = o.pairValue[o.byGroup[q]];
+                Object str = null;
+                if (kind == Vec.Kind.OBJECT) {
+                    str = o.strings.get((int) raw);
+                    raw = intern(str);
+                }
+                if (add(to, raw)) {
+                    switch (kind) {
+                        case LONG -> scratch.longs[m] = raw;
+                        case DOUBLE -> scratch.doubles[m] = Double.longBitsToDouble(raw);
+                        default -> scratch.objects[m] = str;
+                    }
+                    scratchGids[m] = to;
+                    m++;
+                }
+            }
+            if (m > 0) {
+                scratch.hasNulls = false;
+                inner.update(scratch, null, m, scratchGids);
+            }
+        }
+
+        @Override
+        Object result(int g) {
+            return inner.result(g);
+        }
+
+        /**
+         * Merges the pairs of all {@code partials} into this (empty) state, in parallel: the value
+         * space is split into hash partitions, each deduplicated by its own task into its own
+         * plain state, and the plain states are merged per group at the end. Partial group g of
+         * partial w belongs to group {@code groupMap[w][g]} here ({@code groups} groups). Used
+         * when there are few groups, where merging group by group would run on one thread.
+         */
+        void mergeParallel(List<Distinct> partials, int[][] groupMap, int groups, int parts,
+                           java.util.function.Consumer<List<Runnable>> runAll) {
+            AggState[] states = new AggState[parts];
+            List<Runnable> tasks = new java.util.ArrayList<>();
+            for (int part = 0; part < parts; part++) {
+                int p = part;
+                tasks.add(() -> states[p] = mergePartition(partials, groupMap, groups, p, parts));
+            }
+            runAll.accept(tasks);
+            inner.grow(groups);
+            for (AggState st : states) {
+                for (int g = 0; g < groups; g++) {
+                    inner.merge(st, g, g);
+                }
+            }
+        }
+
+        private AggState mergePartition(List<Distinct> partials, int[][] groupMap, int groups, int part, int parts) {
+            AggState out = plain.get();
+            out.grow(groups);
+            PairSet set = new PairSet();
+            java.util.Map<Object, Integer> localIds = kind == Vec.Kind.OBJECT ? new java.util.HashMap<>() : null;
+            int cap = 1024;
+            Vec buf = new Vec(type, cap);
+            buf.hasNulls = false;
+            int[] gids = new int[cap];
+            int m = 0;
+            for (int w = 0; w < partials.size(); w++) {
+                Distinct o = partials.get(w);
+                int[] map = groupMap[w];
+                for (int q = 0; q < o.pairs; q++) {
+                    long raw = o.pairValue[q];
+                    long k;
+                    Object str = null;
+                    int h;
+                    if (kind == Vec.Kind.OBJECT) {
+                        str = o.strings.get((int) raw);
+                        h = str.hashCode();
+                    } else {
+                        k = key(raw);
+                        h = Long.hashCode(k * 0x9E3779B97F4A7C15L);
+                    }
+                    if (((h & 0x7fffffff) % parts) != part) {
+                        continue;
+                    }
+                    if (str != null) {
+                        Integer id = localIds.get(str);
+                        if (id == null) {
+                            id = localIds.size();
+                            localIds.put(str, id);
+                        }
+                        k = id;
+                    } else {
+                        k = key(raw);
+                    }
+                    int g = map[o.pairGroup[q]];
+                    if (set.add(g, k)) {
+                        switch (kind) {
+                            case LONG -> buf.longs[m] = raw;
+                            case DOUBLE -> buf.doubles[m] = Double.longBitsToDouble(raw);
+                            default -> buf.objects[m] = str;
+                        }
+                        gids[m++] = g;
+                        if (m == cap) {
+                            out.update(buf, null, m, gids);
+                            m = 0;
+                        }
+                    }
+                }
+            }
+            if (m > 0) {
+                out.update(buf, null, m, gids);
+            }
+            return out;
+        }
+    }
+
+    /** A hash set of (group id, long value) pairs: open addressing with linear probing. */
+    static final class PairSet {
+        private int[] groups = new int[64];
+        private long[] values = new long[64];
+        private int mask = 63;
+        private int size;
+
+        PairSet() {
+            Arrays.fill(groups, -1);
+        }
+
+        private static int slot(int g, long v, int mask) {
+            long h = (v ^ ((long) g << 32 | g)) * 0x9E3779B97F4A7C15L;
+            return (int) (h ^ (h >>> 29)) & mask;
+        }
+
+        /** Adds the pair; true if it was not present. */
+        boolean add(int g, long v) {
+            int s = slot(g, v, mask);
+            while (true) {
+                int x = groups[s];
+                if (x < 0) {
+                    groups[s] = g;
+                    values[s] = v;
+                    if (++size * 2 > groups.length) {
+                        rehash();
+                    }
+                    return true;
+                }
+                if (x == g && values[s] == v) {
+                    return false;
+                }
+                s = (s + 1) & mask;
+            }
+        }
+
+        private void rehash() {
+            int[] og = groups;
+            long[] ov = values;
+            int cap = og.length * 2;
+            groups = new int[cap];
+            values = new long[cap];
+            Arrays.fill(groups, -1);
+            mask = cap - 1;
+            for (int i = 0; i < og.length; i++) {
+                if (og[i] >= 0) {
+                    int s = slot(og[i], ov[i], mask);
+                    while (groups[s] >= 0) {
+                        s = (s + 1) & mask;
+                    }
+                    groups[s] = og[i];
+                    values[s] = ov[i];
+                }
+            }
         }
     }
 

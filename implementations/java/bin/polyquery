@@ -15,4 +15,12 @@ if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
 else
     JAVA=java
 fi
+# The AOT cache made by `make build` (loaded classes and method profiles of a training run) cuts
+# start-up and JIT warm-up; a stale or unusable cache is ignored silently (JVM logging is off, as
+# stdout carries the protocol).
+AOT="$HERE/build/polyquery.aot"
+if [ -f "$AOT" ] && [ "$AOT" -nt "$JAR" ]; then
+    exec "$JAVA" -XX:+UseParallelGC -XX:-UsePerfData -XX:AOTCache="$AOT" -Xlog:disable -Xlog:all=off \
+        $POLYQUERY_JAVA_OPTS -jar "$JAR" "$@"
+fi
 exec "$JAVA" -XX:+UseParallelGC -XX:-UsePerfData -Xshare:auto $POLYQUERY_JAVA_OPTS -jar "$JAR" "$@"

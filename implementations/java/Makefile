@@ -7,6 +7,8 @@ BUILD    := build
 CLASSES  := $(BUILD)/classes
 TCLASSES := $(BUILD)/test-classes
 ENGINE_JAR := $(BUILD)/polyquery.jar
+# AOT cache (classes + method profiles from a training run); used by bin/polyquery when present
+AOT_CACHE := $(BUILD)/polyquery.aot
 SRC      := $(shell find src/main/java -name '*.java')
 TEST_SRC := $(shell find src/test/java -name '*.java')
 
@@ -15,13 +17,21 @@ TEST_SRC := $(shell find src/test/java -name '*.java')
 # Native kernel library used by the unit tests and bench-kernels (tests are skipped without it).
 NATIVE_LIB ?= ../../native-kernels/build/$(shell uname -m)/libpqkernels.so
 
-build: $(ENGINE_JAR)
+build: $(ENGINE_JAR) $(AOT_CACHE)
 
 $(ENGINE_JAR): $(SRC) src/main/resources/MANIFEST.MF
 	rm -rf $(CLASSES)
 	mkdir -p $(CLASSES)
 	$(JAVAC) --release $(RELEASE) -encoding UTF-8 -Xlint:all,-serial -d $(CLASSES) $(SRC)
 	$(JAR) --create --file $(ENGINE_JAR) --main-class polyquery.Main --manifest src/main/resources/MANIFEST.MF -C $(CLASSES) .
+
+# Training run recording the AOT cache. The class path must be the absolute jar path the launcher
+# uses. The cache only speeds up start-up and JIT warm-up; if it cannot be created, the engine
+# runs without it.
+$(AOT_CACHE): $(ENGINE_JAR)
+	rm -f $(AOT_CACHE)
+	$(JAVA) -XX:+UseParallelGC -XX:-UsePerfData -Xlog:disable -Xlog:all=off -XX:AOTCacheOutput=$(CURDIR)/$(AOT_CACHE) \
+		-cp $(CURDIR)/$(ENGINE_JAR) polyquery.training.AotTraining || rm -f $(AOT_CACHE)
 
 test: build
 	rm -rf $(TCLASSES)

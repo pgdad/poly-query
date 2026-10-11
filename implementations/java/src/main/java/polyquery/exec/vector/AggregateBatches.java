@@ -43,6 +43,11 @@ final class AggregateBatches {
         private final ExecContext ctx;
         private int[] gids = new int[0];
         private long reserved;
+        /** {@link #merge} leaves DISTINCT states alone (they are merged by {@link #mergeDistinct}). */
+        boolean deferDistinct;
+        /** Bytes of merged groups not reserved yet (see {@link #merge}). */
+        private long pending;
+        private static final long RESERVE_CHUNK = 1 << 20;
 
         Table(List<BoundExpr> groupKeys, List<AggregateCall> calls, ExecContext ctx) {
             this.keys = new GroupKeys(keyTypes(groupKeys), ctx.nativeKernels());
@@ -126,25 +131,76 @@ final class AggregateBatches {
             }
         }
 
-        /** Merges group g of a partial table into this one; returns the group id here. */
+        /**
+         * Merges group g of a partial table into this one; returns the group id here. Memory for
+         * new groups is reserved in chunks (the context's counter is shared by all merging
+         * threads); {@link #flushReservation} reserves the rest.
+         */
         int merge(Table partial, int g) {
             int before = keys.groupCount();
             int to = keys.addFrom(partial.keys, g);
             if (keys.groupCount() > before) {
                 growStates();
-                long bytes = groupBytes();
-                ctx.reserve(bytes);
-                reserved += bytes;
+                pending += groupBytes();
+                if (pending >= RESERVE_CHUNK) {
+                    flushReservation();
+                }
             }
             for (int a = 0; a < states.length; a++) {
-                states[a].merge(partial.states[a], g, to);
+                if (!(deferDistinct && states[a] instanceof AggState.Distinct)) {
+                    states[a].merge(partial.states[a], g, to);
+                }
             }
             return to;
+        }
+
+        /** True if some aggregate is a DISTINCT one with a primitive state. */
+        boolean hasDistinct() {
+            for (AggState s : states) {
+                if (s instanceof AggState.Distinct) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /**
+         * Merges the DISTINCT states of {@code partials} after their groups were merged with
+         * {@link #deferDistinct} set ({@code groupMap[w][g]}: the group here of partial w's group g),
+         * value-hash partitioned over {@code parts} parallel tasks.
+         */
+        void mergeDistinct(List<Table> partials, int[][] groupMap, int parts,
+                           java.util.function.Consumer<List<Runnable>> runAll) {
+            for (int a = 0; a < states.length; a++) {
+                if (states[a] instanceof AggState.Distinct d) {
+                    List<AggState.Distinct> from = new ArrayList<>();
+                    for (Table t : partials) {
+                        from.add((AggState.Distinct) t.states[a]);
+                    }
+                    d.mergeParallel(from, groupMap, groupCount(), parts, runAll);
+                }
+            }
+        }
+
+        /** Prepares the states of a complete partial table for merging (see {@link AggState#prepareMerge}). */
+        void prepareMerge() {
+            for (AggState s : states) {
+                s.prepareMerge();
+            }
+        }
+
+        /** Reserves the memory of groups merged since the last reservation. */
+        void flushReservation() {
+            long bytes = pending;
+            pending = 0;
+            ctx.reserve(bytes);
+            reserved += bytes;
         }
 
         void release() {
             ctx.release(reserved);
             reserved = 0;
+            pending = 0;
         }
     }
 

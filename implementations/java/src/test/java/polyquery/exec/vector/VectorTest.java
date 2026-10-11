@@ -192,4 +192,77 @@ public final class VectorTest {
         Parallel.kWayMerge(keys, sizes, (s, i, p) -> out[p] = keys[s][i]);
         check(Arrays.equals(out, new long[] {0, 1, 2, 3, 4, 9, 10, 11}), Arrays.toString(out));
     }
+
+    /** LongSet agrees with a HashSet, including the slot sentinel value and growth. */
+    public static void testLongSet() {
+        LongSet set = new LongSet(4);
+        java.util.Set<Long> ref = new java.util.HashSet<>();
+        Random r = new Random(5);
+        for (int i = 0; i < 20_000; i++) {
+            long v = switch (i % 4) {
+                case 0 -> Long.MIN_VALUE;
+                case 1 -> r.nextInt(5000);
+                default -> r.nextLong();
+            };
+            check(set.add(v) == ref.add(v), "add " + v);
+        }
+        check(set.size() == ref.size(), "size");
+        for (int i = 0; i < 5000; i++) {
+            long v = r.nextInt(10_000);
+            check(set.contains(v) == ref.contains(v), "contains " + v);
+        }
+        check(set.contains(Long.MIN_VALUE), "sentinel value");
+    }
+
+    /** PairSet distinguishes the group and the value of a pair. */
+    public static void testPairSet() {
+        AggState.PairSet set = new AggState.PairSet();
+        java.util.Set<List<Long>> ref = new java.util.HashSet<>();
+        Random r = new Random(9);
+        for (int i = 0; i < 50_000; i++) {
+            int g = r.nextInt(50);
+            long v = r.nextInt(300) - 150;
+            check(set.add(g, v) == ref.add(List.of((long) g, v)), "pair " + g + "," + v);
+        }
+    }
+
+    /** A DISTINCT aggregate merged from partial states equals the one computed in one piece. */
+    public static void testDistinctStateMerge() {
+        BoundExpr arg = new BoundExpr.ColumnRef(0, DataType.STRING, "s");
+        AggregateCall count = new AggregateCall(AggregateCall.AggregateFunction.COUNT, arg, true, DataType.INT64);
+        AggregateCall min = new AggregateCall(AggregateCall.AggregateFunction.MIN, arg, true, DataType.STRING);
+        for (AggregateCall call : List.of(count, min)) {
+            AggState whole = AggState.create(call, null);
+            AggState a = AggState.create(call, null);
+            AggState b = AggState.create(call, null);
+            check(whole instanceof AggState.Distinct && whole.mergeable(), "primitive distinct state");
+            Vec v1 = strings("x", "y", null, "x", "z");
+            Vec v2 = strings("z", "w", "x", "w", "q");
+            int[] g1 = {0, 1, 0, 0, 1};
+            int[] g2 = {1, 0, 0, 1, 0};
+            for (AggState s : List.of(whole, a, b)) {
+                s.grow(2);
+            }
+            whole.update(v1, null, 5, g1);
+            whole.update(v2, null, 5, g2);
+            a.update(v1, null, 5, g1);
+            b.update(v2, null, 5, g2);
+            a.prepareMerge();
+            b.prepareMerge();
+            AggState merged = AggState.create(call, null);
+            merged.grow(2);
+            for (int g = 0; g < 2; g++) {
+                merged.merge(a, g, g);
+                merged.merge(b, g, g);
+            }
+            for (int g = 0; g < 2; g++) {
+                check(java.util.Objects.equals(whole.result(g), merged.result(g)),
+                        call.function() + " group " + g + ": " + whole.result(g) + " vs " + merged.result(g));
+            }
+            if (call == count) {
+                check(Long.valueOf(3).equals(whole.result(0)) && Long.valueOf(3).equals(whole.result(1)),
+                        "distinct counts " + whole.result(0) + "," + whole.result(1));
+            }
+        }
+    }
 }

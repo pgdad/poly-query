@@ -79,9 +79,13 @@ final class VecCompiler {
                 yield new Kernels.NullIf(value, holder, withOperand(holder, n.equality()), n.type());
             }
             case BoundExpr.Function f -> function(f);
-            case BoundExpr.ScalarSubquery s -> rowEval(e);
-            case BoundExpr.Exists x -> rowEval(e);
-            case BoundExpr.InSubquery i -> rowEval(e);
+            case BoundExpr.ScalarSubquery s -> s.subquery().correlated() ? rowEval(e)
+                    : new Kernels.SubqueryValue(e.type(), rows.uncorrelatedSubquery(e));
+            case BoundExpr.Exists x -> x.subquery().correlated() ? rowEval(e)
+                    : new Kernels.SubqueryValue(e.type(), rows.uncorrelatedSubquery(e));
+            case BoundExpr.InSubquery i -> i.subquery().correlated() ? rowEval(e)
+                    : new Kernels.InSubquery(compile(i.operand()), rows.uncorrelatedSubquery(e), i.operand().type(),
+                            i.negated());
         };
     }
 
