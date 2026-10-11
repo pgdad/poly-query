@@ -12,7 +12,11 @@ median is reported in ms.
 
 Every result is reduced to a digest of its rows (in result order when the query
 has ORDER BY, else as a multiset), so ``--compare`` checks that an optimized
-engine returns exactly what a saved baseline returned.
+engine returns exactly what a saved baseline returned. With ``--save-rows``
+the rows themselves are saved too; a result whose digest differs from such a
+baseline is then compared value by value, FLOAT64 values with a relative
+tolerance of 1e-9 (types.md §9: consumers compare floats with tolerance), and
+reported as ``~`` if it matches within that tolerance.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import statistics
 import subprocess
 import sys
@@ -62,15 +67,42 @@ class Session:
         self.proc.wait()
 
 
+def ordered(sql: str) -> bool:
+    return "ORDER BY" in sql.upper().split(")")[-1]
+
+
 def digest(sql: str, rows: list) -> str:
     encoded = [json.dumps(r, separators=(",", ":")) for r in rows]
-    if "ORDER BY" not in sql.upper().split(")")[-1]:
+    if not ordered(sql):
         encoded.sort()
     h = hashlib.sha256()
     for e in encoded:
         h.update(e.encode())
         h.update(b"\n")
     return h.hexdigest()[:16]
+
+
+def same_value(a: object, b: object) -> bool:
+    if isinstance(a, float) or isinstance(b, float):
+        if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+            return False
+        return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)
+    return a == b
+
+
+def same_rows(sql: str, got: list, expected: list) -> bool:
+    """Equal up to FLOAT64 tolerance (as multisets when the order is unspecified)."""
+    if len(got) != len(expected):
+        return False
+    if not ordered(sql):
+        # order by the non-float values (floats may differ in the last bits)
+        def key(row: list) -> str:
+            return json.dumps([v for v in row if not isinstance(v, float)])
+
+        got, expected = sorted(got, key=key), sorted(expected, key=key)
+    return all(
+        len(g) == len(e) and all(same_value(x, y) for x, y in zip(g, e)) for g, e in zip(got, expected)
+    )
 
 
 def main() -> int:
@@ -83,7 +115,8 @@ def main() -> int:
     ap.add_argument("--engine", default=str(LAUNCHER))
     ap.add_argument("--engine-arg", action="append", default=[], help="extra launcher argument")
     ap.add_argument("--save", help="write per-query medians and digests to this JSON file")
-    ap.add_argument("--compare", help="fail if a digest differs from this saved result file")
+    ap.add_argument("--save-rows", action="store_true", help="also save the result rows")
+    ap.add_argument("--compare", help="fail if a result differs from this saved result file")
     args = ap.parse_args()
 
     workload = json.loads(Path(args.workload).read_text())
@@ -109,10 +142,16 @@ def main() -> int:
         times = [session.request({"op": "query", "sql": q["sql"], "options": options})[1] for _ in range(args.repeat)]
         med = statistics.median(times)
         results[q["id"]] = {"median_ms": round(med, 1), "min_ms": round(min(times), 1), "rows": len(rows), "digest": dig}
+        if args.save_rows:
+            results[q["id"]]["result"] = rows
         flag = ""
-        if q["id"] in baseline and baseline[q["id"]]["digest"] != dig:
-            flag = "  MISMATCH"
-            mismatches.append(q["id"])
+        base = baseline.get(q["id"])
+        if base is not None and base["digest"] != dig:
+            if "result" in base and same_rows(q["sql"], rows, base["result"]):
+                flag = "  ~"
+            else:
+                flag = "  MISMATCH"
+                mismatches.append(q["id"])
         print(f"{q['id']} | {med:.0f} | {min(times):.0f} | {len(rows)} | {dig}{flag}", flush=True)
     session.close()
     total = sum(r["median_ms"] for r in results.values())

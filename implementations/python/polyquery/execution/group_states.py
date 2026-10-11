@@ -202,6 +202,14 @@ class FloatSumState(GroupState):
         self.parts.extend([] for _ in range(n))
         self.counts.extend([0] * n)
 
+    def __getstate__(self) -> dict[str, Any]:
+        """A partial state leaving a worker process carries one (correctly
+        rounded) sum per group instead of every value: much less to pickle
+        and merge, at the cost of one rounding per partition (FLOAT64 sums
+        are compared with tolerance, concurrency.md §6)."""
+        parts = [p if len(p) <= 1 else [_fsum(p)] for p in self.parts]
+        return {**self.__dict__, "parts": parts}
+
     def _compact(self, g: int) -> None:
         if len(self.parts[g]) > _FLOAT_COMPACT:
             self.parts[g] = [_fsum(self.parts[g])]
