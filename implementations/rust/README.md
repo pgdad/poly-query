@@ -3,13 +3,14 @@
 An analytical database engine implementing the PolyQuery specification
 (`spec/`) in Rust, using **only the standard library** (no crates).
 
-Status: **Phase 5** (optimization). Capabilities claimed:
+Status: **Phase 5** (optimization) plus **M9** (native kernel
+integration). Capabilities claimed:
 `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`, `sql.basic`,
 `test.functions`, `phase2`, `sql.groupby`, `sql.join`, `sql.functions`,
 `sql.subquery`, `sql.cte`, `sql.correlated_subquery`, `phase3`,
 `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`, `phase4`,
 `http.streaming`, `phase5`, `exec.row`, `exec.vectorized`, `exec.parallel`,
-`join.hash`, `join.merge`, `join.nested_loop`.
+`join.hash`, `join.merge`, `join.nested_loop`, `native.kernels`.
 
 ## Build and run
 
@@ -37,7 +38,10 @@ runs `target/release/polyquery`, so it works from any directory.
 
 ## Libraries
 
-None. `ENGINE.json` lists `"libraries": []`.
+None. `ENGINE.json` lists `"libraries": []`. The optional native kernel
+library `libpqkernels` (built from `native-kernels/`, not part of this
+crate) is loaded at run time with `--native-kernels PATH`; see
+[Native kernels](#native-kernels-m9).
 
 ## Architecture
 
@@ -63,6 +67,8 @@ Layers, bottom-up:
 | `exec::vector` | vectorized engine: column vectors and batches (`batch`), vectorized expression kernels (`eval`), key interning (`keys`), aggregation (`agg`), joins (`join`), sorting (`sort`), batch operators (`ops`) and the plan builder (`build`) |
 | `exec::parallel` | morsel-driven parallel scan pipelines: ordered gather and parallel (partitioned) aggregation |
 | `exec::hash` | fast non-cryptographic hasher for execution hash tables |
+| `exec::native_filter` | filters above column-table scans evaluated with the native kernels (vectorized and row operators) |
+| `native` | `libpqkernels` integration: `dlopen`/`dlsym` FFI (`native::ffi`), typed function-pointer table with safe slice wrappers (`Kernels`), bitmap helpers |
 | `engine` | transport-independent facade: load/drop/reset/query/explain, path safety, limits |
 | `protocol` | request validation, response building, `session` (JSON lines) and `exec` modes |
 | `server` | `serve`: HTTP/1.1 (`http`), routing (`conn`), admission control (`admission`), query registry (`registry`), query threads and NDJSON streaming (`query`), Prometheus metrics (`metrics`), SIGTERM/SIGINT (`signal`) |
@@ -355,7 +361,7 @@ connection.
 | `join: "nested_loop"` | nested-loop join for every join, including equi-joins |
 | `join: "auto"` (default) | cost-based: hash join for equi-joins, building on the input with the smaller estimated cardinality (statistics-based estimates); nested loop for non-equi joins |
 | `optimize: false` | disables the logical rewrites (see below) |
-| `native: true` | accepted; native kernels are optional (native-kernels.md) and none are loaded, so execution is the same as without it. `--native-kernels PATH` is accepted and ignored |
+| `native: true` | use the native kernels of the library loaded with `--native-kernels` (see [Native kernels](#native-kernels-m9)); without a loaded library the option has no effect |
 
 EXPLAIN shows `HashJoin`, `MergeJoin` or `NestedLoopJoin` accordingly
 (`MergeJoin` has `keys` and `residual` like `HashJoin`); the root node
@@ -595,6 +601,237 @@ python3 implementations/rust/bench/bench.py --engine implementations/rust/bin/po
 python3 implementations/rust/bench/difftest.py --engine implementations/rust/bin/polyquery --queries 500
 ```
 
+## Native kernels (M9)
+
+`--native-kernels PATH` loads `libpqkernels` (C ABI v1,
+`native-kernels/include/pq_kernels.h`); queries run with the option
+`native: true` then use its kernels for filtering, aggregation, bitmap and
+hashing work. The capability `native.kernels` is claimed. Without the
+option, or when no library is loaded, execution is exactly the engine's
+own code (the option is accepted and ignored).
+
+### FFI design (`src/native/`)
+
+* **Loading** (`native::ffi`): the dynamic loader is declared directly
+  against the system C library with `unsafe extern "C"` (`dlopen` with
+  `RTLD_NOW | RTLD_LOCAL`, `dlsym`, `dlerror`) — no crates. The library is
+  loaded once per process when the engine starts (`native::init`, a
+  `OnceLock`), `pqk_abi_version()` must return 1, `pqk_init()` runs the
+  CPU-feature dispatch (which honours `PQ_KERNELS_VARIANT`), and the handle
+  is never closed, so kernels are `&'static`. Startup logs the path, the
+  active variant and the available ones (`info`). A library that cannot be
+  loaded (missing file, wrong ABI, missing symbol) is logged as a warning
+  and the engine runs without it — native kernels are optional
+  (native-kernels.md); the conformance results do not depend on them.
+* **Function table** (`native::Kernels`): every exported kernel is resolved
+  once with `dlsym` into a typed `unsafe extern "C" fn` pointer mirroring
+  the header. All calls go through safe wrappers taking slices, which check
+  every length the C side relies on (validity bitmaps of `ceil(n/8)` bytes,
+  output capacities, group ids, in-bounds gather indices, `n < 2^32`) and
+  translate status codes: `pqk_sum_i64` → `Option<i64>` (`None` =
+  `PQK_OVERFLOW`), `pqk_group_sum_i64` → `GroupSum::{Exact, Wrapped}`;
+  `(size_t)-1`/`PQK_EINVAL` are impossible by construction and assert.
+  Outputs are written into spare `Vec` capacity and committed with
+  `set_len` only after the kernel returned its count.
+* **Per query**: the engine resolves `native: true` to
+  `ExecOptions::native: Option<&'static Kernels>`, which is `Copy`, travels
+  with the execution context into parallel workers, and is `None` for the
+  row-mode reference re-execution used by error replay.
+* **Bitmaps**: column chunks store validity as `u64` words, LSB-first,
+  which on little-endian is exactly the ABI's byte bitmap;
+  `Bitmap::copy_lsb_bytes` extracts the bits of any (unaligned) row window
+  word-at-a-time. Engine vectors keep validity as `bool` arrays, which are
+  packed (`native::pack_bools`) where a kernel needs a bitmap.
+
+### Which kernels are used where
+
+| Work | Where | Kernels |
+|---|---|---|
+| **Filters directly above a scan** of a column-oriented table (in-memory column layout or PQCF, lazily decoded chunks included) — vectorized, parallel (each morsel) and row mode | `exec::native_filter` (`NativeFilterScanOp`, `NativeFilterRowOp`) | `pqk_filter_i64` (single conjunct → selection vector), `pqk_filter_i64_bitmap` (several conjuncts), `pqk_compare_i64` (`col <op> col`), `pqk_bitmap_and` / `pqk_bitmap_or` / `pqk_bitmap_andnot` (combining conjuncts, NULL handling, `IS [NOT] NULL`), `pqk_bitmap_popcount` (selection size), `pqk_gather_i64` (copying the selected rows of 64-bit columns out of the chunks) |
+| Global `SUM` / `AVG` of INT64 and DECIMAL | `exec::vector::agg` | `pqk_sum_i64` (on `PQK_OVERFLOW` the batch is summed exactly in `i128` by the engine) |
+| Grouped `SUM` / `AVG` of INT64 and DECIMAL (and their counts) | `exec::vector::agg` | `pqk_group_sum_i64` into per-group `i64` sums kept beside the exact `i128` accumulators (see below) |
+| Global `MIN` / `MAX` of INT64, DECIMAL, TIMESTAMP | `exec::vector::agg` | `pqk_minmax_i64` |
+| Global `MIN` / `MAX` of FLOAT64 | `exec::vector::agg` | `pqk_minmax_f64` (a zero result is recomputed by the engine, see below) |
+| Global `COUNT(col)` over vectors with NULLs | `exec::vector::agg` | `pqk_bitmap_popcount` |
+| Hashing of fixed-width keys (INT64, DECIMAL, DATE, TIMESTAMP, BOOLEAN) for GROUP BY, DISTINCT, hash-join build and probe | `exec::vector::keys`, `exec::vector::hashtab` | `pqk_hash_i64` per batch (single keys: the identical `native::fmix64`), feeding std's SwissTable through a pass-through hasher |
+
+The filter path splits the predicate into conjuncts. *Native conjuncts*
+are `col <op> constant` (either side), `col BETWEEN c1 AND c2`, `col1 <op>
+col2` over INT64, DECIMAL, DATE (widened to `i64` per window) and
+TIMESTAMP columns of the same type, and `col IS [NOT] NULL` on any column;
+everything else is the *residual*, kept in its original order. Per window
+of 2,048 rows the native conjuncts run on the stored slices; only selected
+rows are copied into the output batch, so rejected rows are never
+materialized. EXPLAIN shows `"native": <number of kernel conjuncts>` on such
+`Filter` nodes and the active variant in the root's `execution` object.
+`pqk_compare_fixed` and `pqk_sum_f64` are not used (see below);
+`pqk_count_i64` is only exercised by the unit tests, because every scan
+below a filter also outputs the filtered column, so a count-only scan never
+occurs.
+
+### Identical results with and without kernels
+
+* **Exact constants**: a constant is converted into the column's stored
+  integer domain as an exact rational, and comparisons become integer
+  ranges: `int_col < 2.5` ⇒ `int_col <= 2`, `int_col = 2.5` ⇒ no row,
+  `int_col <> 2.5` ⇒ every non-NULL row, `dec(·,2)_col >= 3` ⇒ unscaled
+  `>= 300`, a DATE column against a TIMESTAMP constant compares days
+  (`date < TIMESTAMP '…00:00:01'` ⇒ `day <= …`), out-of-range constants
+  become constant predicates. A unit test checks the conversion against
+  the comparison semantics by brute force. FLOAT64 and string comparisons
+  stay in the residual; so do predicates whose column references do not
+  carry the stored column types.
+* **Three-valued logic and errors**: with a residual, the candidates are
+  the rows on which *no* native conjunct is FALSE (rows where one is NULL
+  included), the residual is evaluated on them, and a row qualifies if the
+  residual and every native conjunct are TRUE. A row with a FALSE native
+  conjunct cannot raise an error in the reference engine either (an error
+  in an `AND` operand is raised only if no other operand is FALSE). The row
+  operator evaluates the residual row by row with the row evaluator and
+  returns all qualifying rows before a failing row's error, exactly like
+  the row engine (also under `LIMIT`). Predicates with `PQ_SLEEP`,
+  subqueries or correlation parameters are not split (their evaluation
+  cost/timing must stay as in the reference engine). A window whose chunk
+  is not in the expected representation is filtered by the engine's own
+  code.
+* **Overflow flags**: `pqk_sum_i64` reporting `PQK_OVERFLOW` makes the engine
+  sum that batch exactly (`i128`), so a final `SUM` outside INT64 still
+  fails with `NUMERIC_OVERFLOW` exactly as before, and intermediate overflow
+  that cancels out is not an error. For grouped sums the exact value of a
+  group is `i128 sum + i64 kernel sum`; while the kernel answers `PQK_OK`
+  every kernel sum is exact. When it answers `PQK_OVERFLOW` ("may have
+  wrapped") the batch is undone on the kernel sums (two's-complement
+  addition is invertible) and on the counts, all kernel sums are folded into
+  the exact accumulators, the batch is added exactly, and the accumulator
+  stops using the kernel. Merging partial aggregators and finishing use the
+  exact sums.
+* **Floats**: `pqk_minmax_f64` is only used for global MIN/MAX; when the
+  extreme is zero the engine's loop recomputes it (it keeps the first
+  zero's sign; the kernel's lane order could pick `-0.0` instead). Inputs
+  are finite (types.md §1), as the kernel requires. `pqk_sum_f64`
+  reassociates additions, so FLOAT64 `SUM`/`AVG` keep the engine's
+  sequential summation (bit-identical results with and without `native`).
+* **Hashing** only changes where keys are stored, not group ids (assigned
+  in first-seen order) or any output order; partitioning of parallel
+  aggregation keeps its own key hash.
+
+Verification: the conformance suite passes with `--native` (also with
+`--modes`, and with each variant forced through `PQ_KERNELS_VARIANT`:
+`reference`, `x86_scalar`, `x86_avx2`, `x86_avx512`); unit tests check
+every wrapper against reference semantics (when the library is built) and
+the constant conversion; `bench/difftest.py --native LIB --simple 0.6`
+runs random queries — biased towards the predicate shapes the kernels
+evaluate, against PQCF copies with small row groups and row-layout copies,
+with default and 37-row morsels — under every option combination with and
+without `native: true` and compares them with the row-mode reference (no
+differences in 1,250 queries across seeds).
+
+### Measurements
+
+Machine: 32 hardware threads, x86-64 with AVX-512 (variant `x86_avx512`
+selected by the dispatcher), shared with other jobs (load ≈ 10; run-to-run
+noise ≈ ±15 %, more on the join queries). Data: `pqgen.py generate --scale
+1m` (1M rows in `tx`, `items`, `sensor`, `sortk`; 250k `orders`; 100k
+customers), CSV-loaded, column layout. Tool: `bench/bench.py --native LIB`
+(session protocol, `result: "count"`, client wall-clock, best of 11 runs
+taken round-robin over the variants, milliseconds). Q1–Q12 are the Phase 5
+queries; N1–N10 were added for the kernels (see `bench.py`).
+
+| Query | 1 thread | 1 thread, `native` | 8 threads | 8 threads, `native` | `mode: row` | row, `native` |
+|---|---:|---:|---:|---:|---:|---:|
+| Q1 filter + COUNT (decimal + string conjuncts) | 3.4 | 2.5 | 0.8 | 0.6 | 86 | 20 |
+| Q2 GROUP BY 20 groups, 5 aggregates | 11.2 | 8.3 | 2.3 | 1.7 | 147 | 142 |
+| Q3 GROUP BY 80k int groups | 10.8 | 9.6 | 9.7 | 9.3 | 211 | 194 |
+| Q4 1M ⋈ 100k + GROUP BY | 16.7 | 18.7 | 4.6 | 5.3 | 263 | 280 |
+| Q5 1M ⋈ 250k + GROUP BY | 26.5 | 29.0 | 9.4 | 10.4 | 333 | 339 |
+| Q6 filter + top-10 | 4.8 | 4.6 | 2.0 | 1.9 | 111 | 112 |
+| Q7 full sort | 22.8 | 22.0 | 21.4 | 21.3 | 557 | 592 |
+| Q8 FLOAT64 arithmetic + filter | 7.4 | 7.3 | 1.3 | 1.2 | 133 | 133 |
+| Q9 3-way join + GROUP BY | 12.1 | 12.4 | 3.5 | 3.8 | 171 | 165 |
+| Q10 DISTINCT int (10k values) | 2.8 | 3.0 | 1.5 | 1.4 | 62 | 62 |
+| Q11 4-way join | 9.4 | 9.3 | 2.9 | 2.9 | 139 | 137 |
+| Q12 GROUP BY 500k groups | 42.3 | 42.3 | 25.4 | 29.7 | 575 | 555 |
+| N1 `BETWEEN` on int, 0.1 % of 8 wide columns | 5.0 | 3.2 | 1.7 | 1.0 | 125 | 14 |
+| N2 int + decimal conjuncts, COUNT | 3.3 | 1.1 | 0.8 | 0.4 | 76 | 4.5 |
+| N3 filter + `IS NOT NULL` + global SUM/MIN/MAX | 3.6 | 2.0 | 0.9 | 0.5 | 90 | 9.9 |
+| N4 global SUM/MIN/MAX/COUNT, no filter | 6.9 | 2.5 | 1.3 | 0.6 | 96 | 96 |
+| N5 DATE + int conjuncts | 0.8 | 0.4 | 0.3 | 0.2 | 22 | 2.1 |
+| N6 `col < col` + int conjunct | 2.3 | 1.1 | 0.6 | 0.4 | 99 | 39 |
+| N7 GROUP BY int key, SUM | 4.6 | 4.1 | 2.2 | 1.9 | 83 | 84 |
+| N8 int-key join, filtered build side | 19.8 | 21.0 | 9.1 | 8.4 | 244 | 230 |
+| N9 FLOAT64 global MIN/MAX | 5.0 | 2.3 | 1.0 | 0.7 | 76 | 77 |
+| N10 int conjunct + arithmetic residual | 11.6 | 10.8 | 2.0 | 1.6 | 128 | 80 |
+
+* **Filters over scans** gain most: 1.5–3× vectorized (N1, N2, N5, N6),
+  because only selected rows are copied out of the column chunks
+  (previously every projected column of every row was copied, then
+  filtered), and 4–20× in row mode (Q1, N1–N5), where rejected rows are no
+  longer materialized as row tuples at all.
+* **Global aggregates** (N4, N9, the SUM/MIN/MAX part of N3, Q2): 2–2.8×
+  — the kernels replace `i128` accumulation and branchy MIN/MAX loops.
+* **Grouping, DISTINCT and joins** (Q3–Q5, Q10, Q12, N7, N8) are within
+  noise (±10 %): batch hashing is cheap (≈0.1 ms per 1M keys), but the hash
+  table dominates. A hand-written open-addressing table fed with the
+  kernel's hashes was 1.5–2× slower than std's SwissTable, so the kernel's
+  hashes are fed into std's table instead (keys carry their hash, so the
+  table is somewhat larger). Sorting (Q7), top-N and float arithmetic
+  (Q6, Q8) use no kernels.
+* Variant matters: with `PQ_KERNELS_VARIANT=reference` (portable C) the
+  filter queries become 10–50 % *slower* with `native` than without (the
+  engine's auto-vectorized Rust beats scalar C), `x86_avx2` and
+  `x86_avx512` give the gains above (N6/N9 are faster with AVX-512, the
+  others alike).
+
+Kernel micro-benchmarks (`native-kernels/build/x86_64/kernel_bench`,
+4M elements, median ns per element, same shared machine):
+
+| Kernel | reference | x86_scalar | x86_avx2 | x86_avx512 |
+|---|---:|---:|---:|---:|
+| filter_i64 (10 % selected) | 0.81 | 0.69 | 0.44 | 1.25 |
+| filter_i64_bitmap | 2.91 | 0.68 | 0.35 | 0.49 |
+| count_i64 (BETWEEN) | 0.66 | 0.52 | 0.33 | 0.44 |
+| sum_i64 (with validity) | 0.65 | 0.52 | 0.25 | 0.37 |
+| minmax_i64 | 0.72 | 0.69 | 0.25 | 0.31 |
+| bitmap_popcount | 0.115 | 0.014 | 0.002 | 0.001 |
+| hash_i64 | 1.92 | 1.07 | 0.74 | 2.14 |
+| compare_i64 | 3.16 | 0.92 | 0.50 | 1.18 |
+| group_sum_i64 (1,024 groups) | 1.52 | 0.97 | 0.66 | 0.98 |
+| gather_i64 (random) | 9.79 | 6.56 | 4.48 | 6.08 |
+
+At 4M elements these are mostly memory-bound; inside the engine the
+kernels run on 2,048-row windows that are in cache.
+
+Reproduce:
+
+```bash
+make -C native-kernels
+python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pqdata --jobs 1
+python3 implementations/rust/bench/bench.py --engine implementations/rust/bin/polyquery \
+    --data /tmp/pqdata/1m --native native-kernels/build/x86_64/libpqkernels.so --repeat 11 \
+    --variant '{"threads":1}' --variant '{"threads":1,"native":true}' \
+    --variant '{"threads":8}' --variant '{"threads":8,"native":true}' \
+    --variant '{"mode":"row"}' --variant '{"mode":"row","native":true}'
+python3 implementations/rust/bench/difftest.py --engine implementations/rust/bin/polyquery \
+    --queries 300 --simple 0.6 --native native-kernels/build/x86_64/libpqkernels.so
+```
+
+### Limitations of the native integration
+
+* Filters use the kernels only directly above a table scan of a
+  column-oriented table (the planner pushes WHERE/ON conjuncts there);
+  filters above joins, index scans and row-layout tables use the engine's
+  code. Conjuncts on FLOAT64, BOOLEAN and STRING columns, `NOT BETWEEN`,
+  `IN` lists and OR-trees are not native.
+* Aggregation kernels apply to global SUM/MIN/MAX/COUNT and grouped
+  SUM/AVG/COUNT of 64-bit integer representations; grouped MIN/MAX, DATE
+  MIN/MAX and DISTINCT aggregates use the engine's loops. FLOAT64 sums never
+  use `pqk_sum_f64` (results would not be bit-identical).
+* `pqk_compare_fixed` is unused: string comparisons stay on dictionary
+  codes / Rust slices, which the fixed-width byte comparison does not fit.
+* The library is located only through `--native-kernels` (no search path);
+  a library that fails to load is not fatal, so a typo leaves `native: true`
+  without effect (a warning is logged).
+
 ## Known limitations
 
 * The HTTP server uses a thread per connection and per running query
@@ -604,7 +841,7 @@ python3 implementations/rust/bench/difftest.py --engine implementations/rust/bin
   aggregation, DISTINCT and comparator sorts; merge joins, hash-table
   building and operators above pipeline breakers run serially. Subqueries
   run serially.
-* Native kernels are not loaded (`native` has no effect).
+* Native kernels: see [Native kernels → Limitations](#limitations-of-the-native-integration).
 * Join reordering only considers inner/cross joins; LEFT joins are fixed
   points of the order.
 * Indexes are not used for joins (index nested-loop join), for OR
