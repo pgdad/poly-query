@@ -221,34 +221,34 @@ op(DATA[OFFSET+i], A, B); returns their count."
   (with-data-pointers ((d data) (v validity))
     (%pqk-count-i64 d v n op a b)))
 
-(defun native-sum-i64 (data validity n)
-  "(values sum t) of the valid values among the first N of DATA, or
+(defun native-sum-i64 (data validity n &optional (offset 0))
+  "(values sum t) of the valid values among DATA[OFFSET+i], i < N, or
 (values nil nil) when the exact sum does not fit 64 bits."
-  (declare (type i64-vector data) (type validity-bits validity) (type fixnum n))
+  (declare (type i64-vector data) (type validity-bits validity) (type fixnum n offset))
   (let ((out (make-array 1 :element-type '(signed-byte 64) :initial-element 0)))
     (declare (dynamic-extent out))
     (let ((status (with-data-pointers ((d data) (v validity) (o out))
-                    (%pqk-sum-i64 d v n o))))
+                    (%pqk-sum-i64 (element-sap d offset) v n o))))
       (if (= status +pqk-ok+)
           (values (aref out 0) t)
           (values nil nil)))))
 
-(defun native-minmax-i64 (data validity n)
-  "(values count min max) of the valid values among the first N of DATA."
-  (declare (type i64-vector data) (type validity-bits validity) (type fixnum n))
+(defun native-minmax-i64 (data validity n &optional (offset 0))
+  "(values count min max) of the valid values among DATA[OFFSET+i], i < N."
+  (declare (type i64-vector data) (type validity-bits validity) (type fixnum n offset))
   (let ((out (make-array 2 :element-type '(signed-byte 64) :initial-element 0)))
     (declare (dynamic-extent out))
     (let ((count (with-data-pointers ((d data) (v validity) (o out))
-                   (%pqk-minmax-i64 d v n o (sb-sys:sap+ o 8)))))
+                   (%pqk-minmax-i64 (element-sap d offset) v n o (sb-sys:sap+ o 8)))))
       (values count (aref out 0) (aref out 1)))))
 
-(defun native-minmax-f64 (data validity n)
-  "(values count min max) of the valid (finite) values among the first N of DATA."
-  (declare (type f64-vector data) (type validity-bits validity) (type fixnum n))
+(defun native-minmax-f64 (data validity n &optional (offset 0))
+  "(values count min max) of the valid (finite) values among DATA[OFFSET+i], i < N."
+  (declare (type f64-vector data) (type validity-bits validity) (type fixnum n offset))
   (let ((out (make-array 2 :element-type 'double-float :initial-element 0d0)))
     (declare (dynamic-extent out))
     (let ((count (with-data-pointers ((d data) (v validity) (o out))
-                   (%pqk-minmax-f64 d v n o (sb-sys:sap+ o 8)))))
+                   (%pqk-minmax-f64 (element-sap d offset) v n o (sb-sys:sap+ o 8)))))
       (values count (aref out 0) (aref out 1)))))
 
 (declaim (inline bitmap-bytes))

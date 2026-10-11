@@ -82,16 +82,18 @@ is not a parallelizable pipeline."
   "One worker's compiled pipeline; CELL holds the morsel its scan reads next."
   opener cell)
 
-(defun compile-pipeline-copy (node builds cells)
+(defun compile-pipeline-copy (node builds cells &optional lazy)
   "Compile a private copy of the pipeline NODE. BUILDS and CELLS map the
-pipeline's hash joins to their shared build providers and row counters."
+pipeline's hash joins to their shared build providers and row counters.
+LAZY makes a TableScan pipeline yield lazy batches."
   (let* ((cell (list nil))
          (opener
            (let ((*parallel-disabled* t))
              (labels ((compile-node (n)
                         (etypecase n
                           (pp-table-scan
-                           (make-batch-scan n :ranges (lambda () (shiftf (car cell) nil))))
+                           (make-batch-scan n :ranges (lambda () (shiftf (car cell) nil))
+                                              :lazy lazy))
                           (pp-filter
                            (or (and (pp-table-scan-p (pnode-child n))
                                     (make-native-scan-filter
@@ -113,10 +115,10 @@ pipeline's hash joins to their shared build providers and row counters."
     (pp-hash-join (cons node (pipeline-joins (hash-join-probe-node node))))
     (t '())))
 
-(defun compile-pipeline-copies (node count)
+(defun compile-pipeline-copies (node count &optional lazy)
   "(values copies providers): COUNT private copies of the pipeline NODE and
 the shared build providers of its hash joins (to be forced before the
-workers start)."
+workers start). LAZY: see COMPILE-PIPELINE-COPY."
   (let* ((joins (pipeline-joins node))
          (builds (mapcar (lambda (j)
                            (let ((build-left (eq (pp-hash-join-build j) :left))
@@ -132,7 +134,7 @@ workers start)."
                            (let ((provider (cdr b)) (value nil))
                              (cons (car b) (lambda () (or value (setf value (funcall provider)))))))
                          builds)))
-    (values (coerce (loop repeat count collect (compile-pipeline-copy node shared cells))
+    (values (coerce (loop repeat count collect (compile-pipeline-copy node shared cells lazy))
                     'simple-vector)
             (mapcar #'cdr shared))))
 
@@ -297,7 +299,8 @@ THREADS workers, each aggregating into a partial group state."
                           collect (multiple-value-list
                                    (let ((*parallel-disabled* t))
                                      (make-aggregate-consumer node :track-positions t))))))
-    (multiple-value-bind (copies providers) (compile-pipeline-copies child workers)
+    (multiple-value-bind (copies providers)
+        (compile-pipeline-copies child workers (and (third (first consumers)) (pp-table-scan-p child)))
       (lambda ()
         (let ((output nil))
           (lambda ()
@@ -307,7 +310,8 @@ THREADS workers, each aggregating into a partial group state."
                     (states (make-array workers :initial-element nil)))
                 (prun-start run workers
                             (lambda (w)
-                              (destructuring-bind (new-state consume) (nth w consumers)
+                              (destructuring-bind (new-state consume &optional lazy) (nth w consumers)
+                                (declare (ignore lazy))
                                 (declare (type function new-state consume))
                                 (let ((gs (funcall new-state)))
                                   (setf (svref states w) gs)

@@ -45,6 +45,19 @@ NIL to have AGG-UPDATE consume them.")
     (declare (ignore state gids gids32 vec n))
     nil))
 
+(defgeneric agg-update-store (state store start end)
+  (:documentation "Without GROUP BY: accumulate the rows [START, END) of the
+column STORE (the aggregate's argument) with the native kernels, reading
+the store in place. Returns true if done, NIL if no kernel applies.")
+  (:method (state store start end)
+    (declare (ignore state store start end))
+    nil))
+
+(defun store-validity-slice (store start end)
+  "Validity bitmap of the rows [START, END) of STORE (NIL: no NULLs)."
+  (let ((validity (column-store-validity store)))
+    (and validity (subseq validity start end))))
+
 (defstruct (agg-state (:constructor nil))
   (capacity 0 :type fixnum))
 
@@ -89,6 +102,13 @@ NIL to have AGG-UPDATE consume them.")
   (declare (ignore gids32) (type fixnum n))
   (when (and (null gids) (not (count-state-star s)) (not (simple-vector-p (vec-data vec))))
     (let ((validity (vec-validity vec)))
+      (incf (aref (count-state-counts s) 0) (if validity (native-popcount validity n) n))
+      t)))
+
+(defmethod agg-update-store ((s count-state) store start end)
+  (unless (count-state-star s)
+    (let ((validity (store-validity-slice store start end))
+          (n (- end start)))
       (incf (aref (count-state-counts s) 0) (if validity (native-popcount validity n) n))
       t)))
 
@@ -144,27 +164,37 @@ NIL to have AGG-UPDATE consume them.")
   (let ((u (ldb (byte 64 0) v)))
     (if (logbitp 63 u) (- u (expt 2 64)) u)))
 
+(defun sum-state-add-slice (s data validity n offset)
+  "Without GROUP BY: add the valid values DATA[OFFSET+i], i < N, to group 0:
+their exact sum computed by the kernel or, if it reports an overflow,
+again with unbounded integers."
+  (declare (type i64-vector data) (type (or null simple-bit-vector) validity)
+           (type fixnum n offset))
+  (let ((sums (sum-state-sums s)))
+    (setf (svref sums 0)
+          (+ (svref sums 0)
+             (multiple-value-bind (sum ok) (native-sum-i64 data validity n offset)
+               (if ok
+                   sum
+                   (let ((exact 0))
+                     (declare (type integer exact))
+                     (do-valid-rows (i n validity) (incf exact (aref data (+ offset i))))
+                     exact)))))
+    (incf (aref (sum-state-counts s) 0) (if validity (native-popcount validity n) n))
+    t))
+
+(defmethod agg-update-store ((s sum-state) store start end)
+  (when (int-column-p store)
+    (sum-state-add-slice s (int-column-values store) (store-validity-slice store start end)
+                         (- end start) start)))
+
 (defmethod agg-update-native ((s sum-state) gids gids32 vec n)
   (declare (type fixnum n))
   (let ((data (vec-data vec))
         (validity (vec-validity vec)))
     (when (typep data 'i64-vector)
       (cond
-        ((null gids)
-         ;; One group: the exact sum of the batch, or (on overflow) the batch
-         ;; summed again with unbounded integers.
-         (let ((sums (sum-state-sums s)))
-           (setf (svref sums 0)
-                 (+ (svref sums 0)
-                    (multiple-value-bind (sum ok) (native-sum-i64 data validity n)
-                      (if ok
-                          sum
-                          (let ((exact 0))
-                            (declare (type integer exact))
-                            (do-valid-rows (i n validity) (incf exact (aref data i)))
-                            exact)))))
-           (incf (aref (sum-state-counts s) 0) (if validity (native-popcount validity n) n))
-           t))
+        ((null gids) (sum-state-add-slice s data validity n 0))
         (t
          (unless (sum-state-native-sums s)
            (let ((c (agg-state-capacity s)))
@@ -286,28 +316,39 @@ NIL to have AGG-UPDATE consume them.")
                    (when (or (eq b +null+) (= (the fixnum (funcall cmp v b)) sign))
                      (setf (svref best g) v))))))))))))
 
+(defun minmax-offer (s count lo hi)
+  "Without GROUP BY: merge the extremes LO, HI of COUNT values into group 0."
+  (when (plusp count)
+    (let* ((min-p (= (minmax-state-sign s) -1))
+           (best (minmax-state-best s))
+           (v (if min-p lo hi))
+           (b (svref best 0)))
+      (when (or (eq b +null+) (if min-p (< v b) (> v b)))
+        (setf (svref best 0) v))))
+  t)
+
+;;; Like the Lisp loop, the kernels return the first of equal extremes in
+;;; row order (FLOAT64 0.0 and -0.0 included).
+
 (defmethod agg-update-native ((s minmax-state) gids gids32 vec n)
   (declare (ignore gids32) (type fixnum n))
   (unless gids
     (let ((data (vec-data vec))
-          (validity (vec-validity vec))
-          (min-p (= (minmax-state-sign s) -1))
-          (best (minmax-state-best s)))
-      (flet ((offer (count lo hi)
-               (when (plusp count)
-                 (let ((v (if min-p lo hi))
-                       (b (svref best 0)))
-                   (when (or (eq b +null+) (if min-p (< v b) (> v b)))
-                     (setf (svref best 0) v))))
-               t))
-        (typecase data
-          (i64-vector
-           (multiple-value-call #'offer (native-minmax-i64 data validity n)))
-          (f64-vector
-           ;; Like the Lisp loop, the kernel returns the first of equal
-           ;; extremes in row order (0.0 and -0.0 included).
-           (multiple-value-call #'offer (native-minmax-f64 data validity n)))
-          (t nil))))))
+          (validity (vec-validity vec)))
+      (typecase data
+        (i64-vector (multiple-value-call #'minmax-offer s (native-minmax-i64 data validity n)))
+        (f64-vector (multiple-value-call #'minmax-offer s (native-minmax-f64 data validity n)))
+        (t nil)))))
+
+(defmethod agg-update-store ((s minmax-state) store start end)
+  (let ((validity (store-validity-slice store start end))
+        (n (- end start)))
+    (typecase store
+      (int-column (multiple-value-call #'minmax-offer s
+                    (native-minmax-i64 (int-column-values store) validity n start)))
+      (float-column (multiple-value-call #'minmax-offer s
+                      (native-minmax-f64 (float-column-values store) validity n start)))
+      (t nil))))
 
 (defmethod agg-merge ((s minmax-state) other mapping)
   (let ((best (minmax-state-best s))

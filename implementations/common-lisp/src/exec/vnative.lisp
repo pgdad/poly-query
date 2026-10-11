@@ -508,3 +508,44 @@ uses native kernels and some conjunct of PREDICATE has a native evaluation."
                   (unless batch (return nil))
                   (let ((out (funcall filter batch)))
                     (when out (return out))))))))))))
+
+;;; ------------------------------------------------------------------
+;;; Aggregation of lazy batches: without GROUP BY, aggregates whose argument
+;;; is a scanned column (or COUNT(*)) are computed on the column stores in
+;;; place (AGG-UPDATE-STORE); the batch is materialized only for an
+;;; aggregate no kernel applies to.
+
+(defun lazy-aggregation-columns (keys aggs)
+  "(values ok columns): whether an aggregation with GROUP BY KEYS and the
+aggregate calls AGGS can consume lazy batches, and per aggregate the batch
+column of its argument (NIL for COUNT(*))."
+  (if (and (null keys)
+           (every (lambda (a)
+                    (or (eq (b-agg-fn a) :count-star)
+                        (and (not (b-agg-distinct a))
+                             (member (b-agg-fn a) '(:count :sum :avg :min :max))
+                             (b-column-p (first (b-agg-args a))))))
+                  aggs))
+      (values t (mapcar (lambda (a) (and (b-agg-args a) (b-column-index (first (b-agg-args a)))))
+                        aggs))
+      (values nil nil)))
+
+(defun group-state-consume-lazy (gs batch columns)
+  "Aggregate the lazy BATCH into the group state GS (no GROUP BY); COLUMNS
+as returned by LAZY-AGGREGATION-COLUMNS."
+  (let* ((source (batch-source batch))
+         (start (scan-source-start source))
+         (end (scan-source-end source))
+         (n (batch-count batch))
+         (gids (group-state-gids gs)))
+    (when (> n (length gids))
+      (setf gids (make-index-vector n)
+            (group-state-gids gs) gids)
+      (fill gids 0))
+    (loop for s across (group-state-aggs gs)
+          for k in columns
+          do (unless (and k (batch-source batch)
+                          (agg-update-store s (source-store source k) start end))
+               (let ((vec (and k (svref (batch-columns (batch-materialize batch)) k))))
+                 (unless (and vec (agg-update-native s nil nil vec n))
+                   (agg-update s gids vec n)))))))

@@ -221,10 +221,11 @@ by the first error of evaluating EXPRS row by row over BATCH."
 ;;; Aggregation
 
 (defun make-aggregate-consumer (node &key track-positions)
-  "(values new-state consume) for vectorized aggregation of NODE: NEW-STATE
-creates an empty GROUP-STATE, (CONSUME state batch [base]) aggregates one
-input batch (whose first row has input position BASE) into it. Kernels are
-compiled once per call."
+  "(values new-state consume lazy) for vectorized aggregation of NODE:
+NEW-STATE creates an empty GROUP-STATE, (CONSUME state batch [base])
+aggregates one input batch (whose first row has input position BASE) into
+it; LAZY is true when CONSUME also accepts lazy scan batches (native
+kernels, see GROUP-STATE-CONSUME-LAZY). Kernels are compiled once per call."
   (let* ((keys (pp-hash-aggregate-group-by node))
          (aggs (pp-hash-aggregate-aggregates node))
          (key-kernels (mapcar #'compile-vexpr keys))
@@ -233,24 +234,32 @@ compiled once per call."
          (nkeys (length keys))
          (key-kinds (mapcar (lambda (k) (type-vec-kind (bexpr-type k))) keys))
          (native (native-kernels-enabled-p))
+         (lazy-columns nil)
+         (lazy (and native
+                    (multiple-value-bind (ok columns) (lazy-aggregation-columns keys aggs)
+                      (setf lazy-columns columns)
+                      ok)))
          (guard (make-row-order-guard (append keys (mapcan (lambda (a) (copy-list (b-agg-args a)))
                                                            aggs)))))
     (values
      (lambda () (make-group-state key-kinds aggs track-positions native))
      (lambda (gs batch &optional (base 0))
        (let ((n (batch-count batch)))
-         (multiple-value-bind (key-vecs arg-vecs)
-             (funcall (the function guard) batch
-                      (lambda ()
-                        (values (mapcar (lambda (k) (funcall (the function k) batch)) key-kernels)
-                                (mapcar (lambda (k) (and k (funcall (the function k) batch)))
-                                        arg-kernels))))
-           (group-state-consume gs key-vecs arg-vecs n base))
+         (if (batch-source batch)
+             (group-state-consume-lazy gs batch lazy-columns)
+             (multiple-value-bind (key-vecs arg-vecs)
+                 (funcall (the function guard) batch
+                          (lambda ()
+                            (values (mapcar (lambda (k) (funcall (the function k) batch)) key-kernels)
+                                    (mapcar (lambda (k) (and k (funcall (the function k) batch)))
+                                            arg-kernels))))
+               (group-state-consume gs key-vecs arg-vecs n base)))
          (let ((groups (group-state-count gs))
                (charged (group-state-charged gs)))
            (when (>= (- groups charged) 1024)
              (charge-memory (* (- groups charged) (row-footprint (* 4 (+ nkeys (length aggs))))))
-             (setf (group-state-charged gs) groups))))))))
+             (setf (group-state-charged gs) groups)))))
+     lazy)))
 
 (defun group-state-batches (gs node)
   "Iterator over the output batches of the finished group state GS."
@@ -267,25 +276,29 @@ compiled once per call."
           (prog1 (group-state-batch gs pos end key-kinds agg-kinds)
             (setf pos end)))))))
 
-(defun make-batch-aggregate (open-child node)
-  (declare (type function open-child))
-  (multiple-value-bind (new-state consume) (make-aggregate-consumer node)
+(defun make-batch-aggregate (child node)
+  "Batch opener of the HashAggregate NODE over its input CHILD (a plan node)."
+  (multiple-value-bind (new-state consume lazy) (make-aggregate-consumer node)
     (declare (type function new-state consume))
-    (lambda ()
-      (let ((output nil))
-        (lambda ()
-          (unless output
-            (let ((gs (funcall new-state))
-                  (child (funcall open-child)))
-              (declare (type function child))
-              (loop for batch = (funcall child)
-                    while batch
-                    do (funcall consume gs batch))
-              (setf output (group-state-batches gs node))))
-          (funcall (the function output)))))))
+    (let ((open-child (if (and lazy (pp-table-scan-p child))
+                          (make-batch-scan child :lazy t)
+                          (compile-batch-operator child))))
+      (declare (type function open-child))
+      (lambda ()
+        (let ((output nil))
+          (lambda ()
+            (unless output
+              (let ((gs (funcall new-state))
+                    (child (funcall open-child)))
+                (declare (type function child))
+                (loop for batch = (funcall child)
+                      while batch
+                      do (funcall consume gs batch))
+                (setf output (group-state-batches gs node))))
+            (funcall (the function output))))))))
 
 (defmethod compile-batch-operator ((node pp-hash-aggregate))
-  (make-batch-aggregate (compile-batch-operator (pnode-child node)) node))
+  (make-batch-aggregate (pnode-child node) node))
 
 ;;; DISTINCT streams: a row is emitted when its key tuple is seen first.
 (defmethod compile-batch-operator ((node pp-hash-distinct))
