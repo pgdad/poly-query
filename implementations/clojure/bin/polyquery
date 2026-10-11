@@ -22,6 +22,9 @@ elif [ -f "$ROOT/target/polyquery.aot" ]; then
 fi
 # -Xlog settings keep JVM warnings off stdout, which carries the protocol;
 # native access is enabled for the optional kernel library (--native-kernels).
-exec "$JAVA" --enable-native-access=ALL-UNNAMED -Xss16m -XX:+UseParallelGC \
+# CompileThresholdScaling=0.3 lets the JIT compile hot code after 30% of the
+# default invocation/loop counts (lower first-query latency; see README.md,
+# "Build and start-up tuning").
+exec "$JAVA" --enable-native-access=ALL-UNNAMED -Xss16m -XX:+UseParallelGC -XX:CompileThresholdScaling=0.3 \
   -XX:+DisplayVMOutputToStderr -Xlog:disable -Xlog:all=warning:stderr -Xlog:aot*=off:stderr -Xlog:cds*=off:stderr \
   $AOT ${POLYQUERY_JAVA_OPTS:-} -cp "$JAR:$(cat "$CP_FILE")" polyquery.main "$@"
