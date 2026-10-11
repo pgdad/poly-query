@@ -68,7 +68,8 @@ class WorkerPoolTests(unittest.TestCase):
         resp = self.query("SELECT SUM(id * 4611686018427387904) FROM t", threads=4)
         self.assertEqual(resp["error"]["code"], "NUMERIC_OVERFLOW")
         before = self.pids()
-        self.assertEqual(self.rows("SELECT COUNT(*) FROM t WHERE v > 0", threads=4), self.rows("SELECT COUNT(*) FROM t WHERE v > 0", self.serial))
+        sql = "SELECT COUNT(*) FROM t WHERE v > 0"
+        self.assertEqual(self.rows(sql, threads=4), self.rows(sql, self.serial))
         self.assertEqual(self.pids(), before)
 
     def test_timeout_stops_the_workers(self):
