@@ -4,11 +4,14 @@ import java.math.BigInteger;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.function.Supplier;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.exec.Evaluator;
 import polyquery.exec.ExecContext;
+import polyquery.exec.HashKeys;
 import polyquery.exec.LikeMatcher;
+import polyquery.exec.ValueSet;
 import polyquery.plan.BoundExpr.ArithOp;
 import polyquery.plan.BoundExpr.CompareOp;
 import polyquery.types.DataType;
@@ -797,6 +800,137 @@ final class Kernels {
                 }
             }
             out.hasNulls = anyNull;
+            return out;
+        }
+    }
+
+    /**
+     * An uncorrelated scalar subquery or EXISTS: one value for all rows, computed (once per
+     * query, see {@link ExecContext#subqueryResult}) when the first row needs it.
+     */
+    static final class SubqueryValue implements VecExpr {
+        private final DataType type;
+        private final Supplier<Object> value;
+        private final Vec empty;
+        private boolean known;
+        private Object result;
+        private Vec vec;
+        private int filled;
+
+        SubqueryValue(DataType type, Supplier<Object> value) {
+            this.type = type;
+            this.value = value;
+            this.empty = new Vec(type, 16);
+        }
+
+        @Override
+        public Vec eval(Batch b, int[] sel, int n) {
+            if (!known) {
+                if (n == 0) {
+                    empty.ensure(b.size);
+                    return empty; // no row reads it: not evaluated yet
+                }
+                result = value.get();
+                known = true;
+            }
+            if (vec == null || filled < b.size) {
+                filled = Math.max(b.size, Math.max(filled, 16));
+                vec = Vec.constant(type, result, filled);
+            }
+            return vec;
+        }
+    }
+
+    /**
+     * {@code x [NOT] IN (uncorrelated subquery)}: membership in the subquery's value set, computed
+     * (once per query) when the first row needs it; INT64 operands probe a primitive hash set,
+     * dictionary-encoded strings are looked up once per distinct code.
+     */
+    static final class InSubquery implements VecExpr {
+        private final VecExpr operand;
+        private final Supplier<Object> values;
+        private final DataType type;
+        private final boolean negated;
+        private final Vec out = new Vec(DataType.BOOLEAN, 16);
+        private ValueSet set;
+        private LongSet longs;
+        private String[] cachedDict;
+        private byte[] cache;
+
+        InSubquery(VecExpr operand, Supplier<Object> values, DataType type, boolean negated) {
+            this.operand = operand;
+            this.values = values;
+            this.type = type;
+            this.negated = negated;
+        }
+
+        private void load() {
+            set = (ValueSet) values.get();
+            if (type.kind() == TypeKind.INT64) {
+                longs = new LongSet(set.values().size());
+                for (Object v : set.values()) {
+                    if (v instanceof Long l) {
+                        longs.add(l); // other keys (fractional decimals) never equal an INT64
+                    }
+                }
+            }
+        }
+
+        @Override
+        public Vec eval(Batch b, int[] sel, int n) {
+            Vec a = operand.eval(b, sel, n);
+            out.ensure(b.size);
+            boolean[] nm = out.nullMask(b.size);
+            if (n == 0) {
+                return out;
+            }
+            if (set == null) {
+                load();
+            }
+            long hit = negated ? 0 : 1;
+            long miss = negated ? 1 : 0;
+            if (set.isEmpty()) {
+                for (int k = 0; k < n; k++) {
+                    int i = sel == null ? k : sel[k];
+                    nm[i] = false;
+                    out.longs[i] = miss;
+                }
+                return out;
+            }
+            boolean dict = a.kind == Vec.Kind.DICT;
+            if (dict && cachedDict != a.dict) {
+                cachedDict = a.dict;
+                cache = new byte[a.dict.length];
+            }
+            boolean hasNull = set.hasNull();
+            for (int k = 0; k < n; k++) {
+                int i = sel == null ? k : sel[k];
+                if (a.isNull(i)) {
+                    nm[i] = true;
+                    continue;
+                }
+                boolean member;
+                if (longs != null) {
+                    member = longs.contains(a.longs[i]);
+                } else if (dict) {
+                    int code = a.codes[i];
+                    if (cache[code] == 0) {
+                        cache[code] = set.contains(a.dict[code]) ? (byte) 2 : (byte) 1;
+                    }
+                    member = cache[code] == 2;
+                } else {
+                    member = set.contains(HashKeys.normalize(a.get(i), type));
+                }
+                if (member) {
+                    nm[i] = false;
+                    out.longs[i] = hit;
+                } else if (hasNull) {
+                    nm[i] = true;
+                } else {
+                    nm[i] = false;
+                    out.longs[i] = miss;
+                }
+            }
             return out;
         }
     }

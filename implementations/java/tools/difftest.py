@@ -328,6 +328,8 @@ class Gen:
         if required:
             where = f" WHERE {required}" + (f" AND {self.pred(scope)}" if where else "")
         shape = r.randint(0, 11)
+        if self.shape is not None:
+            shape = self.shape
         if shape >= 10:
             return self.union_all(frm, scope, join, where)
         if shape <= 3:
@@ -372,9 +374,25 @@ class Gen:
             sub_col = {"items": "order_id", "orders": "customer_id", "tx": "customer_id"}[sub_t]
             col = self.r.choice(self.cols(a, t, "INT64"))
             sub = f"SELECT x.{sub_col} FROM {sub_t} x WHERE {self.pred([('x', sub_t)], 2)}"
+            strs = self.cols(a, t, "STRING")
+            # uncorrelated subqueries (evaluated once per query, also by parallel workers), some failing
             p = r.choice([f"{col} IN ({sub})", f"{col} NOT IN ({sub})",
                           f"EXISTS (SELECT 1 FROM {sub_t} x WHERE x.{sub_col} = {col})",
-                          f"{col} > (SELECT AVG(x.{sub_col}) FROM {sub_t} x)"])
+                          f"{col} > (SELECT AVG(x.{sub_col}) FROM {sub_t} x)",
+                          f"{col} IN (SELECT x.{sub_col} FROM {sub_t} x WHERE {self.failing([('x', sub_t)])})",
+                          f"{col} NOT IN (SELECT x.{sub_col} / (x.{sub_col} - {r.randint(0, 3)}) FROM {sub_t} x)",
+                          f"{col} < (SELECT MAX(x.{sub_col}) / {r.randint(0, 1)} FROM {sub_t} x)",
+                          f"({self.pred(scope, 2)}) AND {col} IN ({sub})",
+                          f"({self.pred(scope, 2)}) OR {col} NOT IN ({sub})",
+                          f"{col} IN (SELECT CAST(x.{sub_col} AS DECIMAL(10,2)) / 2 FROM {sub_t} x)",
+                          f"NOT EXISTS (SELECT 1 FROM {sub_t} x WHERE {self.pred([('x', sub_t)], 2)})",
+                          (f"{strs[0]} IN (SELECT x.status FROM orders x WHERE {self.pred([('x', 'orders')], 2)})"
+                           if strs else f"{col} IN ({sub})")])
+            if r.random() < 0.3:
+                extra = r.choice([f"(SELECT COUNT(*) FROM {sub_t} x WHERE {self.pred([('x', sub_t)], 2)})",
+                                  f"{col} IN ({sub})", f"{col} + (SELECT MIN(x.{sub_col}) FROM {sub_t} x)"])
+                return (f"SELECT {col} AS v, {extra} AS e FROM {frm}" + (f" WHERE {p}" if r.random() < 0.5 else ""),
+                        False, False, join)
             return f"SELECT {col} AS v, {self.expr(scope, 'STRING')} AS s FROM {frm} WHERE {p}", False, False, join
         # derived table + aggregation on top
         inner = f"SELECT {self.expr(scope, 'INT64')} AS x, {self.expr(scope, 'STRING')} AS y FROM {frm}{where}"
@@ -438,6 +456,7 @@ def main():
     ap.add_argument("--queries", type=int, default=200)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--quick", action="store_true", help="only the runner's mode matrix")
+    ap.add_argument("--shape", type=int, help="generate only query shape N (e.g. 8: subqueries)")
     ap.add_argument("--native-kernels", metavar="LIB", help="also run vectorized combinations with native: true")
     args = ap.parse_args()
     variants = ["", "-Dpolyquery.batchSize=7 -Dpolyquery.morselRows=40 -Dpolyquery.parallelBuildRows=16"]
@@ -452,6 +471,7 @@ def main():
     if args.native_kernels:
         combos += [dict(c, native=True) for c in combos if c["mode"] == "vectorized"]
     gen = Gen(random.Random(args.seed), schemas)
+    gen.shape = args.shape
     failures = 0
     outcomes = {}
     for qi in range(args.queries):

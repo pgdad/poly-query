@@ -77,9 +77,13 @@ final class Parallel {
         }
     }
 
-    /** Expressions workers can evaluate concurrently: no subqueries and no correlation. */
+    /**
+     * Expressions workers can evaluate concurrently: no correlation and no correlated subqueries
+     * (uncorrelated ones are evaluated before the workers start, see {@link Shared#open}).
+     */
     private static boolean safe(BoundExpr e) {
-        return e == null || !BoundExprs.any(e, x -> x instanceof BoundExpr.OuterRef || BoundExprs.subqueryOf(x) != null);
+        return e == null || !BoundExprs.any(e, x -> x instanceof BoundExpr.OuterRef
+                || BoundExprs.subqueryOf(x) != null && BoundExprs.subqueryOf(x).correlated());
     }
 
     private static boolean safe(List<BoundExpr> exprs) {
@@ -383,10 +387,24 @@ final class Parallel {
             this.chain = chain;
         }
 
-        /** Builds the hash tables of the chain's joins (outermost first, like the row engine). */
-        void open() {
+        /**
+         * Evaluates the uncorrelated subqueries of the pipeline and of {@code extra} expressions
+         * on this thread (workers only read their shared results; a data error is raised by the
+         * rows that evaluate the subquery), then builds the hash tables of the chain's joins
+         * (outermost first, like the row engine).
+         */
+        void open(List<BoundExpr> extra) {
             release();
             ExecContext ctx = builder.context();
+            List<BoundExpr> exprs = new ArrayList<>(extra);
+            for (PhysicalPlan stage : chain.stages()) {
+                exprs.addAll(PhysicalPlan.expressions(stage));
+            }
+            for (BoundExpr e : exprs) {
+                if (e != null) {
+                    builder.rows().compiler().precomputeSubqueries(e);
+                }
+            }
             for (PhysicalPlan.HashJoin j : chain.joinsTopDown()) {
                 boolean left = j.buildLeft();
                 List<BoundExpr> buildKeys = left ? j.leftKeys() : j.rightKeys();
@@ -541,7 +559,7 @@ final class Parallel {
         @Override
         public void open() {
             close();
-            shared.open();
+            shared.open(AggregateBatches.inputs(plan.groupKeys(), plan.aggregates()));
             List<Morsel> morsels = Morsel.of(shared.chain.scan(), shared.builder.morselRows());
             AtomicInteger next = new AtomicInteger();
             Errors errors = new Errors();
@@ -870,7 +888,7 @@ final class Parallel {
         public void open() {
             close();
             cancelled = new AtomicBoolean();
-            shared.open();
+            shared.open(List.of());
             idle.clear();
             morsels = Morsel.of(shared.chain.scan(), shared.builder.morselRows());
             submitted = 0;
