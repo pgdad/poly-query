@@ -13,7 +13,8 @@
 //!   (identical row order to serial execution), keeping at most a bounded
 //!   window of morsels in flight, so `LIMIT` stops the workers early.
 //! * [`ParallelAggregateOp`] aggregates each worker's morsels into a
-//!   private partial [`Aggregator`] and merges the partials at the end.
+//!   private partial [`Aggregator`] and merges the partials at the end
+//!   (also used for DISTINCT: grouping by all columns).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -254,6 +255,28 @@ pub fn try_build(plan: &PhysicalPlan, ctx: &ExecContext) -> Option<BoxedBatchOp>
                 plan: Some((**input).clone()),
                 group_by: group_by.clone(),
                 aggregates: aggregates.clone(),
+                morsels,
+                threads,
+                seed: ctx.seed(),
+                morsel_rows: morsel,
+            }))
+        }
+        // DISTINCT = grouping by every column, without aggregates.
+        PhysicalPlan::Distinct { input } => {
+            let morsels = split(input)?;
+            let group_by = input
+                .schema()
+                .iter()
+                .enumerate()
+                .map(|(index, f)| Expr::Column {
+                    index,
+                    ty: f.data_type,
+                })
+                .collect();
+            Some(Box::new(ParallelAggregateOp {
+                plan: Some((**input).clone()),
+                group_by,
+                aggregates: Vec::new(),
                 morsels,
                 threads,
                 seed: ctx.seed(),

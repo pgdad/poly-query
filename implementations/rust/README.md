@@ -430,6 +430,8 @@ are built once, before the workers start, and shared read-only (`Arc`).
   many groups the groups of each partial are **partitioned by key hash**
   and partition *p* of all partials is merged and finished by thread *p*
   (cache-friendly, no shared hash table, no locks).
+* **Parallel DISTINCT**: executed as a parallel aggregation grouping by
+  every column (no aggregates).
 * **Parallel sort**: see above.
 * Tables smaller than two morsels, and subqueries, run serially.
   `POLYQUERY_MORSEL_ROWS` overrides the morsel size (used by the test
@@ -533,8 +535,8 @@ accepted engine before this phase (commit `978d364`).
 | Q12 GROUP BY 500k groups, MIN(string) | 513 | 555 | 47 | 29 | 28 |
 
 Vectorized execution alone is 9–30× faster than the row baseline; with 8
-threads scan/aggregation queries gain another 3–8× (sorting and the
-DISTINCT/merge steps stay serial, so Q7/Q10 do not scale). `mode: row`
+threads scan/aggregation queries gain another 3–8× (the radix sort of
+Q7 is a serial linear pass and does not scale). `mode: row`
 is the unchanged Phase 4 operator code; it benefits from the logical
 optimizer like every mode (Q11: join reordering).
 
@@ -579,8 +581,9 @@ python3 implementations/rust/bench/difftest.py --engine implementations/rust/bin
   (no event loop); idle keep-alive connections each hold a thread.
 * `mode: "row"` is single-threaded by design (it is the baseline).
 * Parallelism covers scan pipelines (filters, projections, join probes),
-  aggregation and sorting; DISTINCT, merge joins and the build sides of
-  joins over non-scan inputs run serially. Subqueries run serially.
+  aggregation, DISTINCT and comparator sorts; merge joins, hash-table
+  building and operators above pipeline breakers run serially. Subqueries
+  run serially.
 * Native kernels are not loaded (`native` has no effect).
 * Join reordering only considers inner/cross joins; LEFT joins are fixed
   points of the order.

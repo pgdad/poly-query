@@ -505,36 +505,20 @@ impl KeyTable {
 
     /// Group id of a key given as values (inserting it if new).
     pub fn assign_values(&mut self, key: &[Value]) -> u32 {
-        let ids: Vec<u32> = self
-            .interners
-            .iter_mut()
-            .zip(key)
-            .map(|(i, v)| i.intern_value(v))
-            .collect();
-        match &mut self.composite {
+        match self.composite {
             Composite::Zero => {
                 self.groups = 1;
                 0
             }
-            Composite::One => ids[0],
-            Composite::Two(map) => {
-                let k = ((ids[0] as u64) << 32) | ids[1] as u64;
-                let next = self.groups as u32;
-                let g = *map.entry(k).or_insert(next);
-                if g == next {
-                    self.groups += 1;
-                    self.group_ids.extend_from_slice(&ids);
-                }
-                g
-            }
-            Composite::Many(map) => {
-                let next = self.groups as u32;
-                let g = *map.entry(ids.clone().into_boxed_slice()).or_insert(next);
-                if g == next {
-                    self.groups += 1;
-                    self.group_ids.extend_from_slice(&ids);
-                }
-                g
+            Composite::One => self.interners[0].intern_value(&key[0]),
+            _ => {
+                let ids: Vec<u32> = self
+                    .interners
+                    .iter_mut()
+                    .zip(key)
+                    .map(|(i, v)| i.intern_value(v))
+                    .collect();
+                self.assign_ids(&ids)
             }
         }
     }
@@ -613,13 +597,41 @@ impl KeyTable {
                 0
             }
             Composite::One => self.interners[0].intern_value(other.key_value(g, 0)),
-            _ => {
-                let key: Vec<Value> = (0..self.width())
-                    .map(|c| other.key_value(g, c).clone())
+            Composite::Two(_) => {
+                let a = self.interners[0].intern_value(other.key_value(g, 0));
+                let b = self.interners[1].intern_value(other.key_value(g, 1));
+                self.assign_ids(&[a, b])
+            }
+            Composite::Many(_) => {
+                let ids: Vec<u32> = (0..self.width())
+                    .map(|c| self.interners[c].intern_value(other.key_value(g, c)))
                     .collect();
-                self.assign_values(&key)
+                self.assign_ids(&ids)
             }
         }
+    }
+
+    /// Group id of the per-column ids `ids` (2+ key columns), inserting it.
+    fn assign_ids(&mut self, ids: &[u32]) -> u32 {
+        let next = self.groups as u32;
+        let g = match &mut self.composite {
+            Composite::Two(map) => *map
+                .entry(((ids[0] as u64) << 32) | ids[1] as u64)
+                .or_insert(next),
+            Composite::Many(map) => match map.get(ids) {
+                Some(&g) => g,
+                None => {
+                    map.insert(ids.into(), next);
+                    next
+                }
+            },
+            Composite::Zero | Composite::One => unreachable!("single-column keys use the interner"),
+        };
+        if g == next {
+            self.groups += 1;
+            self.group_ids.extend_from_slice(ids);
+        }
+        g
     }
 
     /// The key values of group `g`.
