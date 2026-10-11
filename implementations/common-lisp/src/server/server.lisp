@@ -162,9 +162,10 @@ reading stalls the query after a bounded amount of output.")
         ms
         (server-options-query-timeout-ms (server-options server)))))
 
-(defun admit-query (server request id thunk-maker)
-  "Validate the query REQUEST, create its job and submit it. THUNK-MAKER is
-called with the query context and returns the job's thunk."
+(defun make-query-job (server request id thunk-maker)
+  "Validate the query REQUEST and create its job (not yet submitted), with
+its client-chosen or a fresh query id. THUNK-MAKER is called with the query
+context and returns the job's thunk."
   (let* ((session (server-session server))
          (options (or (request-field request "options" :type :object) (jobj)))
          (query-id (request-field options "query_id" :type :string))
@@ -172,39 +173,50 @@ called with the query context and returns the job's thunk."
     (request-field request "sql" :required t :type :string)
     (when (and query-id (zerop (length query-id)))
       (invalid-request-error "option query_id must not be empty"))
-    (let ((job (make-job :query-id query-id :request-id id :context context
-                         :thunk (funcall thunk-maker context)
-                         :on-complete (query-completion-hook server))))
-      (handler-case (submit-job (server-scheduler server) job)
-        (pq-error (e)
-          (when (string= (pq-error-code e) "OVERLOADED")
-            (record-rejection (server-metrics server))
-            (log-event :warn "query rejected" "query_id" (or query-id :omit)
-                       "error_code" "OVERLOADED"))
-          (error e)))
-      job)))
+    (make-job :query-id (or query-id (assign-query-id (server-scheduler server)))
+              :request-id id
+              :context context
+              :thunk (funcall thunk-maker context)
+              :on-complete (query-completion-hook server))))
 
-(defmacro with-admission-errors ((conn id) &body body)
-  "Run BODY; a PQ-ERROR raised before any response was sent (validation or
-admission) is answered as an error response carrying the request ID, and
-NIL is returned."
-  `(handler-case (progn ,@body)
-     (pq-error (e)
-       (send-response ,conn (error-response ,id (pq-error-code e) (pq-error-message e)
-                                            (pq-error-details e)))
-       nil)))
+(defun note-admission-failure (server job error)
+  "Count and log a query that failed validation or was not admitted."
+  (let ((code (pq-error-code error))
+        (metrics (server-metrics server)))
+    (cond ((string= code "OVERLOADED") (record-rejection metrics))
+          ((string= code "SHUTTING_DOWN"))
+          (t (record-query-failure metrics)))
+    (log-event (if (string= code "OVERLOADED") :warn :info) "query rejected"
+               "query_id" (if job (job-query-id job) :omit)
+               "status" "error"
+               "error_code" code)))
+
+(defun start-query (server conn request id thunk-maker)
+  "Validate the query REQUEST and submit its job (see MAKE-QUERY-JOB). On
+failure the error response is sent and NIL returned."
+  (let ((job nil))
+    (handler-case
+        (progn
+          (setf job (make-query-job server request id thunk-maker))
+          (submit-job (server-scheduler server) job))
+      (pq-error (e)
+        (note-admission-failure server job e)
+        (send-response conn (error-response id (pq-error-code e) (pq-error-message e)
+                                            (pq-error-details e))
+                       :headers (and job (query-id-header job)))
+        nil))))
 
 (defun run-query (server conn request id)
   "Execute a query request through the scheduler and send its response."
-  (let ((session (server-session server)))
-    (with-admission-errors (conn id)
-      (let* ((job (admit-query server request id
-                               (lambda (context)
-                                 (lambda ()
-                                   (with-error-response (id)
-                                     (op-query session id request context))))))
-             (result (wait-for-job (server-scheduler server) job
-                                   :on-poll (disconnect-watcher server conn job))))
+  (let* ((session (server-session server))
+         (job (start-query server conn request id
+                           (lambda (context)
+                             (lambda ()
+                               (with-error-response (id)
+                                 (op-query session id request context)))))))
+    (when job
+      (let ((result (wait-for-job (server-scheduler server) job
+                                  :on-poll (disconnect-watcher server conn job))))
         (unless (connection-gone conn)
           (send-response conn result :headers (query-id-header job)))))))
 
@@ -250,16 +262,15 @@ NIL is returned."
 (defun stream-query (server conn request id)
   (let* ((session (server-session server))
          (channel (make-channel +stream-channel-batches+))
-         (job (with-admission-errors (conn id)
-                (admit-query server request id
-                             (lambda (context)
-                               (lambda ()
-                                 (let ((result (with-error-response (id)
-                                                 (produce-stream session request id
-                                                                 context channel))))
-                                   (unless (response-ok-p result)
-                                     (channel-put channel (list :error result) :force t))
-                                   result)))))))
+         (job (start-query server conn request id
+                           (lambda (context)
+                             (lambda ()
+                               (let ((result (with-error-response (id)
+                                               (produce-stream session request id
+                                                               context channel))))
+                                 (unless (response-ok-p result)
+                                   (channel-put channel (list :error result) :force t))
+                                 result))))))
     (unless job
       (return-from stream-query))
     (ignore-errors
@@ -578,22 +589,30 @@ response is not destroyed by a TCP reset when the socket is closed."
     (if (and (integerp n) (plusp n)) n 4)))
 
 (defun resolve-host (host)
-  "The IPv4 address vector for HOST (dotted quad or resolvable name)."
-  (let ((parts (split-string host #\.)))
-    (if (and (= (length parts) 4)
-             (every (lambda (p) (and (plusp (length p)) (every #'digit-char-p p)
-                                     (<= (parse-integer p) 255)))
-                    parts))
-        (coerce (mapcar #'parse-integer parts) '(vector (unsigned-byte 8)))
-        (sb-bsd-sockets:host-ent-address (sb-bsd-sockets:get-host-by-name host)))))
+  "Returns (values address socket-class) for HOST: a dotted quad, an IPv6
+literal (optionally in brackets) or a resolvable name."
+  (let ((parts (split-string host #\.))
+        (bare (string-trim "[]" host)))
+    (cond ((and (= (length parts) 4)
+                (every (lambda (p) (and (plusp (length p)) (every #'digit-char-p p)
+                                        (<= (parse-integer p) 255)))
+                       parts))
+           (values (coerce (mapcar #'parse-integer parts) '(vector (unsigned-byte 8)))
+                   'sb-bsd-sockets:inet-socket))
+          ((find #\: bare)
+           (values (sb-bsd-sockets:make-inet6-address bare) 'sb-bsd-sockets:inet6-socket))
+          (t
+           (values (sb-bsd-sockets:host-ent-address (sb-bsd-sockets:get-host-by-name host))
+                   'sb-bsd-sockets:inet-socket)))))
 
 (defun open-listener (host port)
-  (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
-    (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
-    (sb-bsd-sockets:socket-bind socket (resolve-host host) port)
-    (sb-bsd-sockets:socket-listen socket 256)
-    (setf (sb-bsd-sockets:non-blocking-mode socket) t)
-    socket))
+  (multiple-value-bind (address class) (resolve-host host)
+    (let ((socket (make-instance class :type :stream :protocol :tcp)))
+      (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
+      (sb-bsd-sockets:socket-bind socket address port)
+      (sb-bsd-sockets:socket-listen socket 256)
+      (setf (sb-bsd-sockets:non-blocking-mode socket) t)
+      socket)))
 
 (defun install-shutdown-handlers ()
   (flet ((request-shutdown (signal info context)

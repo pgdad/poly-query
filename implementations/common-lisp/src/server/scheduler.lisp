@@ -67,6 +67,11 @@ waiter completes it on the worker's behalf.")
   (loop for id = (format nil "q~D" (incf (scheduler-next-id scheduler)))
         unless (gethash id (scheduler-registry scheduler)) return id))
 
+(defun assign-query-id (scheduler)
+  "A fresh server-assigned query id."
+  (sb-thread:with-mutex ((scheduler-lock scheduler))
+    (%fresh-query-id scheduler)))
+
 (defun submit-job (scheduler job)
   "Queue JOB for execution, assigning a query id if it has none. Signals a
 PQ-ERROR (SHUTTING_DOWN, ALREADY_EXISTS or OVERLOADED) if it is not admitted."

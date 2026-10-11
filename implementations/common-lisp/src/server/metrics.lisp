@@ -26,6 +26,11 @@
     (incf (metrics-duration-sum metrics) (coerce seconds 'double-float))
     (incf (metrics-duration-count metrics))))
 
+(defun record-query-failure (metrics)
+  "Count a query request that failed before it could be admitted."
+  (sb-thread:with-mutex ((metrics-lock metrics))
+    (incf (metrics-queries-error metrics))))
+
 (defun record-rejection (metrics)
   (sb-thread:with-mutex ((metrics-lock metrics))
     (incf (metrics-rejected metrics))))
