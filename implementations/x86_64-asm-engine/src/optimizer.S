@@ -13,9 +13,10 @@
  *     literals also let index selection and row-group skipping see plain
  *     constants (`a = 2 + 3` can use an index on a).
  *   - predicate simplification: TRUE AND x -> x, x AND TRUE -> x,
- *     FALSE AND x -> FALSE, FALSE OR x -> x, x OR FALSE -> x,
- *     TRUE OR x -> TRUE; x AND FALSE -> FALSE and x OR TRUE -> TRUE only
- *     when x cannot raise an error (the row engine would evaluate x first).
+ *     FALSE OR x -> x, x OR FALSE -> x, TRUE OR x -> TRUE; FALSE AND x,
+ *     x AND FALSE -> FALSE and x OR TRUE -> TRUE only when x cannot raise
+ *     an error (the row engine may evaluate x first: OR evaluates its left
+ *     operand first, and predicate pushdown reorders WHERE conjuncts).
  *     A WHERE / HAVING / pushed filter that folds to TRUE disappears.
  */
 #include "pq.inc"
@@ -209,7 +210,13 @@ FUNC fold_expr
     xor %esi, %esi
     call is_lit_bool
     test %eax, %eax
-    jnz 21f                         /* FALSE AND x -> FALSE */
+    jz 11f
+    mov N_B(%rbx), %rdi             /* FALSE AND x -> FALSE if x is safe */
+    call expr_safe                  /* (WHERE conjuncts are reordered by */
+    test %eax, %eax                 /* pushdown, so x may run first) */
+    jnz 21f
+    jmp 9f
+11:
     mov N_B(%rbx), %rdi
     mov $1, %esi
     call is_lit_bool

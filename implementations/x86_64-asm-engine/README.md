@@ -394,9 +394,11 @@ also passes with `PQ_PAR_MIN=1`.
   `d > CAST('2024-01-01' AS DATE)` become index / row-group-skipping
   candidates.
 * **Predicate simplification**: `TRUE AND x → x`, `x AND TRUE → x`,
-  `FALSE AND x → FALSE`, `FALSE OR x → x`, `x OR FALSE → x`,
-  `TRUE OR x → TRUE`; `x AND FALSE → FALSE` / `x OR TRUE → TRUE` only when
-  `x` cannot raise errors. WHERE / HAVING folding to TRUE disappear.
+  `FALSE OR x → x`, `x OR FALSE → x`, `TRUE OR x → TRUE`;
+  `FALSE AND x → FALSE`, `x AND FALSE → FALSE` and `x OR TRUE → TRUE` only
+  when `x` cannot raise errors (the baseline may evaluate `x` first:
+  predicate pushdown reorders WHERE conjuncts). WHERE / HAVING folding to
+  TRUE disappear.
 * Physical optimizations that are always on (all modes): predicate
   pushdown, index selection, row-group skipping, column pruning, hash-join
   build side by estimated cardinality; **top-N** for `ORDER BY … LIMIT`
