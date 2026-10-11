@@ -4,7 +4,7 @@
 use super::expr::{ArithKind, Expr};
 use crate::error::{Error, Result};
 use crate::sql::ast::BinaryOp;
-use crate::types::{DataType, MAX_DECIMAL_PRECISION};
+use crate::types::{DataType, result_precision};
 
 fn decimal_scale(t: DataType) -> u8 {
     match t {
@@ -13,7 +13,8 @@ fn decimal_scale(t: DataType) -> u8 {
     }
 }
 
-/// Result type and evaluation domain of an arithmetic operator (types.md §4).
+/// Result type and evaluation domain of an arithmetic operator (types.md §4,
+/// with the result precision W of CR-2 §2).
 pub fn arithmetic_type(op: BinaryOp, l: DataType, r: DataType) -> Result<(DataType, ArithKind)> {
     let (l, r) = match (l, r) {
         (DataType::Null, DataType::Null) => return Ok((DataType::Null, ArithKind::Int)),
@@ -39,19 +40,25 @@ pub fn arithmetic_type(op: BinaryOp, l: DataType, r: DataType) -> Result<(DataTy
         _ if both_int => (DataType::Int64, ArithKind::Int),
         _ if any_float => (DataType::Float64, ArithKind::Float),
         BinaryOp::Div => (DataType::Float64, ArithKind::Float),
-        BinaryOp::Mul => {
-            let s = decimal_scale(l) + decimal_scale(r);
-            if s > MAX_DECIMAL_PRECISION {
+        _ => {
+            let w = result_precision(&[l, r]);
+            let kind = if w > crate::types::decimal::NARROW_PRECISION {
+                ArithKind::WideDecimal
+            } else {
+                ArithKind::Decimal
+            };
+            let s = if op == BinaryOp::Mul {
+                decimal_scale(l) + decimal_scale(r)
+            } else {
+                decimal_scale(l).max(decimal_scale(r))
+            };
+            if s > w {
                 return Err(Error::type_error(format!(
-                    "DECIMAL product scale {s} exceeds 18"
+                    "DECIMAL product scale {s} exceeds {w}"
                 )));
             }
-            (DataType::decimal(18, s), ArithKind::Decimal)
+            (DataType::decimal(w, s), kind)
         }
-        _ => (
-            DataType::decimal(18, decimal_scale(l).max(decimal_scale(r))),
-            ArithKind::Decimal,
-        ),
     })
 }
 
@@ -100,7 +107,8 @@ pub fn common_type(types: &[DataType]) -> Result<DataType> {
                 if a == DataType::Float64 || b == DataType::Float64 {
                     DataType::Float64
                 } else {
-                    DataType::decimal(18, decimal_scale(a).max(decimal_scale(b)))
+                    let w = result_precision(&[a, b]);
+                    DataType::decimal(w, decimal_scale(a).max(decimal_scale(b)))
                 }
             }
             (a, b) => {
@@ -146,6 +154,17 @@ mod tests {
             DataType::Int64
         );
         assert!(arithmetic_type(BinaryOp::Add, DataType::Date, DataType::Int64).is_err());
+        // CR-2: one wide operand makes the result precision 38.
+        assert_eq!(t(BinaryOp::Add, d(19, 1), d(3, 2)), d(38, 2));
+        assert_eq!(t(BinaryOp::Mul, d(20, 10), d(10, 9)), d(38, 19));
+        assert!(arithmetic_type(BinaryOp::Mul, d(38, 20), d(38, 19)).is_err());
+        assert!(arithmetic_type(BinaryOp::Mul, d(18, 10), d(18, 9)).is_err());
+        assert_eq!(
+            arithmetic_type(BinaryOp::Add, d(30, 0), DataType::Int64)
+                .unwrap()
+                .1,
+            ArithKind::WideDecimal
+        );
     }
 
     #[test]
@@ -157,6 +176,8 @@ mod tests {
             DataType::Float64
         );
         assert_eq!(common_type(&[d(4, 2), d(4, 2)]).unwrap(), d(4, 2));
+        assert_eq!(common_type(&[d(20, 2), d(2, 1)]).unwrap(), d(38, 2));
+        assert_eq!(common_type(&[d(20, 2), d(20, 2)]).unwrap(), d(20, 2));
         assert_eq!(common_type(&[DataType::Null]).unwrap(), DataType::Null);
         assert!(common_type(&[DataType::Int64, DataType::String]).is_err());
         assert!(common_type(&[DataType::Date, DataType::Timestamp]).is_err());

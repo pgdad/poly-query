@@ -88,7 +88,7 @@ pub fn number_literal(text: &str, negate: bool) -> Result<(Value, DataType)> {
             return float();
         }
         let digits = format!("{int}{frac}");
-        let unscaled: i64 = if digits.is_empty() {
+        let unscaled: i128 = if digits.is_empty() {
             0
         } else {
             digits.parse().map_err(|_| overflow())?

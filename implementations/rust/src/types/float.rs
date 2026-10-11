@@ -1,6 +1,7 @@
 //! FLOAT64 text parsing/formatting and exact float→decimal rounding.
 
 use super::decimal;
+use super::i256::I256;
 
 /// True if `s` matches `[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?`.
 pub fn is_float_syntax(s: &str) -> bool {
@@ -77,44 +78,36 @@ pub fn format_f64(v: f64) -> String {
     }
 }
 
-/// Converts a finite float to an unscaled decimal at `scale`, rounding half
-/// away from zero based on the shortest round-trip decimal representation.
-/// Returns None if the result has more than `precision` digits.
-pub fn f64_to_decimal(v: f64, precision: u8, scale: u8) -> Option<i64> {
+/// Converts a finite float to an unscaled decimal at `scale`, using the
+/// exact binary value of the double and rounding half away from zero
+/// (CR-2 §5). Returns None if the result has more than `precision` digits.
+pub fn f64_to_decimal(v: f64, precision: u8, scale: u8) -> Option<i128> {
     let v = normalize(v);
     if v == 0.0 {
         return Some(0);
     }
-    // "{:e}" yields the shortest round-trip digits: d[.ddd]e[-]x
-    let text = format!("{:e}", v.abs());
-    let (mant, exp) = text.split_once('e')?;
-    let exp: i64 = exp.parse().ok()?;
-    let digits: String = mant.chars().filter(|c| *c != '.').collect();
-    // value = digits * 10^(exp - (len-1)); scaled = value * 10^scale
-    let shift = exp - (digits.len() as i64 - 1) + scale as i64;
-    let mut m: i128 = digits.parse().ok()?;
-    let unscaled = if shift >= 0 {
-        if shift > 20 {
-            return None;
-        }
-        m = m.checked_mul(decimal::pow10(shift as u32))?;
-        m
-    } else {
-        let down = (-shift) as u32;
-        if down > 38 {
-            0
-        } else {
-            decimal::div_pow10_round(m, down)
-        }
-    };
-    if !decimal::fits_precision(unscaled, precision) {
+    if !v.is_finite() {
         return None;
     }
-    Some(if v < 0.0 {
-        -(unscaled as i64)
+    // v = mantissa * 2^exp exactly.
+    let bits = v.to_bits();
+    let raw_exp = ((bits >> 52) & 0x7ff) as i32;
+    let frac = (bits & ((1u64 << 52) - 1)) as i128;
+    let (mantissa, exp) = if raw_exp == 0 {
+        (frac, -1074)
     } else {
-        unscaled as i64
-    })
+        (frac | 1 << 52, raw_exp - 1075)
+    };
+    let mantissa = if v < 0.0 { -mantissa } else { mantissa };
+    // unscaled = mantissa * 10^scale * 2^exp, rounded.
+    let scaled = I256::mul_i128(mantissa, decimal::pow10(scale as u32));
+    let unscaled = if exp >= 0 {
+        scaled.checked_shl(exp as u32)?
+    } else {
+        scaled.shr_round((-exp) as u32)
+    };
+    let unscaled = unscaled.to_i128()?;
+    decimal::fits_precision(unscaled, precision).then_some(unscaled)
 }
 
 #[cfg(test)]
@@ -149,7 +142,18 @@ mod tests {
     fn to_decimal() {
         assert_eq!(f64_to_decimal(2.5, 3, 0), Some(3));
         assert_eq!(f64_to_decimal(-2.5, 3, 0), Some(-3));
-        assert_eq!(f64_to_decimal(1.005, 4, 2), Some(101));
+        // 1.005 is 1.00499999999999989... in binary.
+        assert_eq!(f64_to_decimal(1.005, 4, 2), Some(100));
+        assert_eq!(f64_to_decimal(1.125, 4, 2), Some(113));
+        assert_eq!(f64_to_decimal(-1.125, 4, 2), Some(-113));
+        assert_eq!(
+            f64_to_decimal(0.1, 38, 30),
+            Some(100_000_000_000_000_005_551_115_123_126)
+        );
+        assert_eq!(
+            f64_to_decimal(1e30, 38, 0),
+            Some(1_000_000_000_000_000_019_884_624_838_656)
+        );
         assert_eq!(f64_to_decimal(1e19, 18, 0), None);
         assert_eq!(f64_to_decimal(0.0001, 5, 2), Some(0));
         assert_eq!(f64_to_decimal(123.456, 6, 3), Some(123456));

@@ -59,6 +59,8 @@ impl Domain {
     fn of(ty: DataType) -> Option<Domain> {
         Some(match ty {
             DataType::Int64 => Domain::Int,
+            // Wide decimals are 128-bit: never handed to the kernels.
+            DataType::Decimal { .. } if ty.is_wide_decimal() => return None,
             DataType::Decimal { scale, .. } => Domain::Dec(scale),
             DataType::Date => Domain::Date,
             DataType::Timestamp => Domain::Ts,
@@ -72,9 +74,9 @@ impl Domain {
         let scale = |s: u8| decimal::pow10(s as u32);
         Some(match (self, v) {
             (Domain::Int, Value::Int(c)) => (*c as i128, 1),
-            (Domain::Int, Value::Decimal(u, k)) => (*u as i128, scale(*k)),
+            (Domain::Int, Value::Decimal(u, k)) => (*u, scale(*k)),
             (Domain::Dec(s), Value::Int(c)) => (*c as i128 * scale(s), 1),
-            (Domain::Dec(s), Value::Decimal(u, k)) => (*u as i128 * scale(s), scale(*k)),
+            (Domain::Dec(s), Value::Decimal(u, k)) => (u.checked_mul(scale(s))?, scale(*k)),
             (Domain::Ts, Value::Timestamp(t)) => (*t as i128, 1),
             (Domain::Ts, Value::Date(d)) => (date_to_timestamp(*d) as i128, 1),
             (Domain::Date, Value::Date(d)) => (*d as i128, 1),
@@ -541,6 +543,9 @@ fn gather_column(k: &Kernels, c: &Column, from: usize, idx: &[u32]) -> Vector {
                 _ => 0,
             };
             Data::Decimal(pick(v), scale)
+        }
+        ColumnData::WideDecimal(_) => {
+            return Vector::from_values(idx.iter().map(|&i| c.value(from + i as usize)).collect());
         }
         ColumnData::Boolean(v) => Data::Bool(take(v, from, idx)),
         ColumnData::Float64(v) => Data::Float(take(v, from, idx)),

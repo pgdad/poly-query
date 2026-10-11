@@ -116,7 +116,9 @@ impl Kind {
             Value::Bool(_) => Kind::Bool,
             Value::Int(_) => Kind::Int,
             Value::Float(_) => Kind::Float,
-            Value::Decimal(_, s) => Kind::Dec(*s),
+            // Typed decimal kernels take values of at most 18 digits.
+            Value::Decimal(u, s) if decimal::fits18(*u) => Kind::Dec(*s),
+            Value::Decimal(..) => Kind::Generic,
             Value::Str(_) => Kind::Str,
             Value::Date(_) => Kind::Date,
             Value::Timestamp(_) => Kind::Ts,
@@ -388,9 +390,8 @@ fn cmp_kernel<T: Copy + PartialOrd>(op: BinaryOp, l: &Lane<T>, r: &Lane<T>, n: u
 
 fn i64_lane<'a>(o: &'a Operand) -> Option<Lane<'a, i64>> {
     Some(match o {
-        Operand::Scalar(Value::Int(i) | Value::Timestamp(i) | Value::Decimal(i, _)) => {
-            Lane::Scalar(*i)
-        }
+        Operand::Scalar(Value::Int(i) | Value::Timestamp(i)) => Lane::Scalar(*i),
+        Operand::Scalar(Value::Decimal(u, _)) => Lane::Scalar(i64::try_from(*u).ok()?),
         Operand::Scalar(Value::Date(d)) => Lane::Scalar(*d as i64),
         Operand::Scalar(Value::Bool(b)) => Lane::Scalar(*b as i64),
         Operand::Vector(v) => match &v.data {
@@ -421,15 +422,27 @@ fn ts_lane<'a>(o: &'a Operand) -> Option<Lane<'a, i64>> {
     })
 }
 
-/// Unscaled i128 view of an INT64/DECIMAL operand at `scale`.
+/// Unscaled i128 view of an INT64/DECIMAL operand at `scale` (≤ 18, so
+/// that 64-bit values rescaled to it fit i128; None otherwise).
 fn i128_lane<'a>(o: &'a Operand, scale: u8) -> Option<Lane<'a, i128>> {
-    let up = |v: i64, s: u8| v as i128 * decimal::pow10((scale - s) as u32);
+    if scale > decimal::NARROW_PRECISION {
+        return None;
+    }
+    let up = |v: i128, s: u8| v.checked_mul(decimal::pow10((scale - s) as u32));
     Some(match o {
-        Operand::Scalar(Value::Int(i)) => Lane::Scalar(up(*i, 0)),
-        Operand::Scalar(Value::Decimal(u, s)) => Lane::Scalar(up(*u, *s)),
+        Operand::Scalar(Value::Int(i)) => Lane::Scalar(up(*i as i128, 0)?),
+        Operand::Scalar(Value::Decimal(u, s)) => Lane::Scalar(up(*u, *s)?),
         Operand::Vector(v) => match &v.data {
-            Data::Int(x) => Lane::Slice(Cow::Owned(x.iter().map(|&i| up(i, 0)).collect())),
-            Data::Decimal(x, s) => Lane::Slice(Cow::Owned(x.iter().map(|&u| up(u, *s)).collect())),
+            Data::Int(x) => Lane::Slice(Cow::Owned(
+                x.iter()
+                    .map(|&i| i as i128 * decimal::pow10(scale as u32))
+                    .collect(),
+            )),
+            Data::Decimal(x, s) => Lane::Slice(Cow::Owned(
+                x.iter()
+                    .map(|&u| u as i128 * decimal::pow10((scale - s) as u32))
+                    .collect(),
+            )),
             _ => return None,
         },
         _ => return None,
@@ -445,7 +458,7 @@ fn f64_lane<'a>(o: &'a Operand) -> Option<Lane<'a, f64>> {
             Data::Float(x) => Lane::Slice(Cow::Borrowed(x)),
             Data::Int(x) => Lane::Slice(Cow::Owned(x.iter().map(|&i| i as f64).collect())),
             Data::Decimal(x, s) => Lane::Slice(Cow::Owned(
-                x.iter().map(|&u| decimal::to_f64(u, *s)).collect(),
+                x.iter().map(|&u| decimal::to_f64(u as i128, *s)).collect(),
             )),
             _ => return None,
         },
@@ -590,6 +603,8 @@ fn arith(op: BinaryOp, kind: ArithKind, l: &Operand, r: &Operand, n: usize) -> R
     let result = match kind {
         ArithKind::Int => arith_int(op, l, r, n, valid.as_deref())?,
         ArithKind::Decimal => arith_decimal(op, l, r, n, valid.as_deref())?,
+        // Wide decimals are evaluated value-at-a-time (exact 128/256-bit).
+        ArithKind::WideDecimal => None,
         ArithKind::Float => arith_float(op, l, r, n, valid.as_deref())?,
     };
     match result {
@@ -677,17 +692,19 @@ fn arith_decimal(
     let (Some(sa), Some(sb)) = (scale_of(l.kind()), scale_of(r.kind())) else {
         return Ok(None);
     };
-    // INT64 operands are promoted to DECIMAL(18,0), which may overflow.
+    // INT64 operands are promoted to DECIMAL(18,0), which may overflow
+    // (narrow arithmetic only; wide arithmetic never reaches this kernel).
     for (o, k) in [(l, l.kind()), (r, r.kind())] {
         if k == Kind::Int
             && let Some(lane) = i64_lane(o)
         {
             let bad = match lane.slice() {
                 Some(s) => {
-                    let flags: Vec<bool> = s.iter().map(|&v| promote_int(v, 0).is_err()).collect();
+                    let flags: Vec<bool> =
+                        s.iter().map(|&v| promote_int(v, 18, 0).is_err()).collect();
                     any_valid(&flags, o.valid())
                 }
-                None => promote_int(lane.scalar(), 0).is_err(),
+                None => promote_int(lane.scalar(), 18, 0).is_err(),
             };
             if bad {
                 return Err(Error::overflow("integer does not fit DECIMAL(18,0)"));
@@ -774,11 +791,15 @@ fn cast_vector(v: &Vector, to: DataType) -> Option<Result<Vector>> {
         | (Data::Timestamp(_), DataType::Timestamp) => return Some(Ok(v.clone())),
         (Data::Int(x), DataType::Float64) => Data::Float(x.iter().map(|&i| i as f64).collect()),
         (Data::Decimal(x, s), DataType::Float64) => {
-            Data::Float(x.iter().map(|&u| decimal::to_f64(u, *s)).collect())
+            Data::Float(x.iter().map(|&u| decimal::to_f64(u as i128, *s)).collect())
         }
-        (Data::Decimal(x, s), DataType::Int64) => {
+        (Data::Decimal(x, s), DataType::Int64) if *s <= decimal::NARROW_PRECISION => {
             let d = 10i64.pow(*s as u32);
             Data::Int(x.iter().map(|&u| u / d).collect())
+        }
+        // Wide targets produce 128-bit values: value-at-a-time.
+        (_, DataType::Decimal { precision, .. }) if precision > decimal::NARROW_PRECISION => {
+            return None;
         }
         (Data::Bool(x), DataType::Int64) => Data::Int(x.iter().map(|&b| b as i64).collect()),
         (Data::Int(x), DataType::Decimal { precision, scale }) => {

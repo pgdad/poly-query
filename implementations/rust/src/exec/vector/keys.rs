@@ -50,7 +50,8 @@ impl Class {
             Value::Bool(b) => (Class::Bool, *b as i64),
             Value::Date(d) => (Class::Date, *d as i64),
             Value::Timestamp(t) => (Class::Ts, *t),
-            Value::Decimal(u, s) => (Class::Dec(*s), *u),
+            // Wide values that do not fit 64 bits use `Value` keys.
+            Value::Decimal(u, s) => (Class::Dec(*s), i64::try_from(*u).ok()?),
             _ => return None,
         })
     }
@@ -61,7 +62,7 @@ impl Class {
             Class::Bool => Value::Bool(x != 0),
             Class::Date => Value::Date(x as i32),
             Class::Ts => Value::Timestamp(x),
-            Class::Dec(s) => Value::Decimal(x, s),
+            Class::Dec(s) => Value::Decimal(x as i128, s),
         }
     }
 }

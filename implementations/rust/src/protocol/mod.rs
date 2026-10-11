@@ -54,6 +54,7 @@ pub const CAPABILITIES: &[&str] = &[
     "join.nested_loop",
     "native.kernels",
     "change.union_all",
+    "change.decimal38",
 ];
 
 /// The `version` response body (without id).

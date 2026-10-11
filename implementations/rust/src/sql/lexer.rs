@@ -172,7 +172,20 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
                     break;
                 }
             }
+            let after_as = matches!(
+                out.last(),
+                Some(Token {
+                    kind: TokenKind::Keyword(Keyword::AS),
+                    ..
+                })
+            );
             match Keyword::lookup(&word) {
+                // FULL and RIGHT are reserved only for future syntax; directly
+                // after AS they can only be an alias (`... AS full`).
+                Some(Keyword::FULL | Keyword::RIGHT) if after_as => TokenKind::Ident {
+                    name: word,
+                    quoted: false,
+                },
                 Some(k) => TokenKind::Keyword(k),
                 None => TokenKind::Ident {
                     name: word,
@@ -420,5 +433,13 @@ mod tests {
     #[test]
     fn number_followed_by_dot() {
         assert_eq!(kinds("3.")[0], TokenKind::Number("3.".into()));
+        assert_eq!(
+            kinds("x AS full")[2],
+            TokenKind::Ident {
+                name: "full".into(),
+                quoted: false
+            }
+        );
+        assert_eq!(kinds("x full")[1], TokenKind::Keyword(Keyword::FULL));
     }
 }

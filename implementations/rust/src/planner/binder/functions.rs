@@ -7,7 +7,7 @@ use crate::exec::eval::eval_constant;
 use crate::planner::expr::{AggFunc, AggregateCall, Expr, ScalarFunc, TruncUnit};
 use crate::planner::typing::{check_comparable, coerce, common_type};
 use crate::sql::ast::{self, Ident};
-use crate::types::{DataType, Value};
+use crate::types::{DataType, Value, result_precision};
 
 pub(super) fn is_aggregate(name: &str) -> bool {
     AggFunc::lookup(name).is_some()
@@ -156,7 +156,9 @@ impl Binder<'_> {
             AggFunc::CountStar | AggFunc::Count => DataType::Int64,
             AggFunc::Sum => match arg_ty {
                 DataType::Int64 | DataType::Null => DataType::Int64,
-                DataType::Decimal { scale, .. } => DataType::decimal(18, scale),
+                DataType::Decimal { scale, .. } => {
+                    DataType::decimal(result_precision(&[arg_ty]), scale)
+                }
                 DataType::Float64 => DataType::Float64,
                 t => {
                     return Err(Error::type_error(format!(
@@ -211,7 +213,7 @@ fn scalar(name: &str, mut args: Vec<Expr>) -> Result<Expr> {
             let ty = match t[0] {
                 DataType::Decimal { scale, .. } => {
                     let n = digits.unwrap_or(0);
-                    DataType::decimal(18, n.clamp(0, scale as i64) as u8)
+                    DataType::decimal(result_precision(&t[..1]), n.clamp(0, scale as i64) as u8)
                 }
                 other => other,
             };
@@ -226,7 +228,7 @@ fn scalar(name: &str, mut args: Vec<Expr>) -> Result<Expr> {
         "FLOOR" | "CEIL" | "CEILING" => {
             expect(t[0], is_numeric, name, "a numeric argument")?;
             let ty = match t[0] {
-                DataType::Decimal { .. } => DataType::decimal(18, 0),
+                DataType::Decimal { .. } => DataType::decimal(result_precision(&t[..1]), 0),
                 other => other,
             };
             let func = if name == "FLOOR" {
