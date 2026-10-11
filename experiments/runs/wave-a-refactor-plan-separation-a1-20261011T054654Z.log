@@ -6,3 +6,6 @@
 2026-10-11T05:59:15+00:00 [a-refactor-plan-separation-go-a1-20261011T054655Z] agent finished; collecting telemetry
 2026-10-11T05:59:15+00:00 [a-refactor-plan-separation-go-a1-20261011T054655Z] validating (clean clone, sandboxed)
 2026-10-11T05:59:35+00:00 [a-refactor-plan-separation-go-a1-20261011T054655Z] outcome=success cost=$3.6674945999999995 turns=67 wall=731.4s
+2026-10-11T06:01:18+00:00 [a-refactor-plan-separation-clojure-a1-20261011T054654Z] agent finished; collecting telemetry
+2026-10-11T06:01:18+00:00 [a-refactor-plan-separation-clojure-a1-20261011T054654Z] validating (clean clone, sandboxed)
+2026-10-11T06:02:10+00:00 [a-refactor-plan-separation-clojure-a1-20261011T054654Z] outcome=success cost=$4.0508755999999995 turns=64 wall=859.2s
