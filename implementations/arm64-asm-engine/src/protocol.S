@@ -1623,8 +1623,10 @@ LFUNC parse_exec_opts
     mov  x0, x19
     ADR_L x1, k_threads
     TLS_LDR x2, g_x_threads
-    mov  x3, #1
+    mov  x3, #0x8000000000000000        // any integer; < 1 is unsupported
     bl   get_int
+    cmp  x0, #1
+    b.lt 8f
     cmp  x0, #MAX_THREADS
     mov  x9, #MAX_THREADS
     csel x0, x0, x9, ls
@@ -1649,6 +1651,11 @@ LFUNC parse_exec_opts
 9:  ldr  x19, [sp, #16]
     ldp  x29, x30, [sp], #32
     ret
+8:  mov  w0, #ERR_UNSUPPORTED
+    ADR_L x1, m_optval
+    ADR_L x2, k_threads
+    mov  x3, #7
+    bl   pq_raise_s
 ENDF parse_exec_opts
 
     .section .rodata

@@ -98,7 +98,7 @@ FUNC par_run
     add  x24, x24, #1
     b    1b
 2:  mov  x0, x25                        // no thread: run it here
-    bl   wk_main
+    bl   wk_inline
     add  x24, x24, #1
     b    1b
 3:  mov  x24, #0                        // wait, adopt the arenas
@@ -193,6 +193,44 @@ LFUNC wk_main
     mov  x0, #0
     LEAVE 2
 ENDF wk_main
+
+// =============================================================================
+// wk_inline(x0 worker record) — runs the task on the calling thread (when no
+// thread could be created) under a nested error handler: the request's jump
+// buffer is saved and restored, an error is recorded like a worker's. The
+// task allocates from the caller's arena directly (WK_ARENA stays empty).
+//   x19 record; stack: saved g_jmpbuf (512 bytes)
+// =============================================================================
+LFUNC wk_inline
+    ENTER 1
+    sub  sp, sp, #512
+    mov  x19, x0
+    mov  x0, sp
+    TLS_ADDR x1, g_jmpbuf
+    mov  x2, #512
+    bl   memcpy
+    TLS_ADDR x0, g_jmpbuf
+    bl   setjmp
+    cbnz w0, 1f
+    ldr  x0, [x19, #WK_ARG]
+    ldr  x9, [x19, #WK_FN]
+    blr  x9
+    b    2f
+1:  TLS_ADDR x9, g_err_code
+    ldr  w9, [x9]
+    str  w9, [x19, #WK_ERR]
+    add  x0, x19, #WK_MSG
+    TLS_ADDR x1, g_err_msg
+    mov  x2, #(WK_MSGMAX - 1)
+    bl   strncpy
+    strb wzr, [x19, #(WK_MSG + WK_MSGMAX - 1)]
+2:  TLS_ADDR x0, g_jmpbuf
+    mov  x1, sp
+    mov  x2, #512
+    bl   memcpy
+    add  sp, sp, #512
+    LEAVE 1
+ENDF wk_inline
 
 // =============================================================================
 // expr_par_safe(x0 Node* or 0) -> w0 1/0
