@@ -167,10 +167,11 @@ then runs its own code paths)."
 (defun native-loaded-p ()
   (not (null *native-library*)))
 
-(defun native-kernels-enabled-p (&optional (options *exec-options*))
-  "True when the statement being compiled uses the native kernels: the
-library is loaded and the query asked for them (option native: true)."
-  (and *native-library* (exec-options-native options) t))
+(defun native-kernels-enabled-p (&optional (settings *execution-settings*))
+  "True when the statement being compiled uses the native kernels (as the
+physical planner decided: the library is loaded and the query asked for them
+with option native: true)."
+  (and *native-library* (execution-settings-native settings) t))
 
 ;;; ------------------------------------------------------------------
 ;;; Array-level wrappers

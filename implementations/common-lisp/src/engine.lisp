@@ -52,10 +52,8 @@ bound-query)."
          (bound (bind-statement ast catalog
                                 :test-functions (engine-config-test-functions
                                                  (session-config session)))))
-    (let ((*planning-catalog* catalog)
-          (*exec-options* options)
-          (*use-indexes* (exec-options-use-indexes options)))
-      (values (plan-bound-query bound) bound))))
+    (let ((*planning-catalog* catalog))
+      (values (plan-bound-query bound options) bound))))
 
 (defun result-columns (bound)
   (loop for c in (bound-query-columns bound)
@@ -74,12 +72,12 @@ next result row or NIL."
         (t
          (multiple-value-bind (plan bound) (plan-statement session ast options)
            (if (ast-explain-p ast)
-               (let ((row (vector (json-to-string (explain-plan-json plan)))))
+               (let ((row (vector (json-to-string (explain-plan-json (physical-query-root plan))))))
                  (values (list (make-column-def "plan" :string))
                          (lambda () (shiftf row nil))))
                (values (result-columns bound)
-                       (let ((*exec-options* options))
-                         (funcall (the function (compile-plan plan))))))))))))
+                       (let ((*execution-settings* (physical-query-settings plan)))
+                         (funcall (the function (compile-plan (physical-query-root plan)))))))))))))
 
 (defun execute-sql (session sql &key max-rows timeout-ms (collect-rows t)
                                      (options (make-exec-options)) context)
@@ -169,7 +167,7 @@ COLLECT-ROWS), enforcing MAX-ROWS and the memory budget."
         (ast (parse-sql sql)))
     (when (typep ast '(or ast-create-index ast-drop-index))
       (signal-pq-error "INVALID_REQUEST" "only queries can be explained"))
-    (explain-plan-json (plan-statement session ast options))))
+    (explain-plan-json (physical-query-root (plan-statement session ast options)))))
 
 ;;; ------------------------------------------------------------------
 ;;; Index statements

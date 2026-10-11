@@ -16,7 +16,7 @@
 
 (defun compile-plan (node)
   "Row opener for the physical plan NODE, on the executor selected by the
-statement's `mode` option."
+statement's execution settings."
   (if (vectorized-execution-p)
       (compile-vectorized-plan node)
       (compile-operator node)))

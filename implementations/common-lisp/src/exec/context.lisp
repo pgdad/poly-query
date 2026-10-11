@@ -83,12 +83,22 @@ re-acquiring the mutex). Returns true if woken up."
   (native nil))                     ; use the native kernels (when loaded)
 
 (defvar *exec-options* (make-exec-options)
-  "Options of the statement being planned or compiled.")
+  "Options of the statement being planned.")
+
+(defstruct execution-settings
+  "How a planned statement executes; decided by the physical planner
+(CHOOSE-EXECUTION-SETTINGS) from the options."
+  (mode :vectorized)                ; :ROW or :VECTORIZED executor
+  (threads 1)                       ; worker threads for scans and aggregation
+  (native nil))                     ; use the native kernels
+
+(defvar *execution-settings* (make-execution-settings)
+  "Execution settings of the statement being compiled or run.")
 
 (defvar *parallel-disabled* nil
   "True while compiling or running code that must not start parallel workers
 (inside a worker, or a subquery).")
 
-(defun vectorized-execution-p (&optional (options *exec-options*))
+(defun vectorized-execution-p (&optional (settings *execution-settings*))
   "True when the statement runs on the batch (vectorized) executor."
-  (not (eq (exec-options-mode options) :row)))
+  (eq (execution-settings-mode settings) :vectorized))

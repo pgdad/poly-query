@@ -43,13 +43,21 @@
                  (:file "functions")
                  (:file "binder")
                  (:file "query")))
+   (:module "native" :serial t
+    :components ((:file "kernels")))
    (:module "plan" :serial t
     :components ((:file "logical")
+                 (:file "estimates")
+                 (:module "rules" :serial t
+                  :components ((:file "constant-folding")
+                               (:file "predicate-simplification")
+                               (:file "predicate-pushdown")
+                               (:file "join-reordering")
+                               (:file "column-pruning")))
+                 (:file "builder")
                  (:file "optimizer")
                  (:file "access")
                  (:file "physical")))
-   (:module "native" :serial t
-    :components ((:file "kernels")))
    (:module "exec" :serial t
     :components ((:file "expressions")
                  (:file "aggregates")
@@ -89,7 +97,8 @@
                (:file "test-server")
                (:file "test-phase5")
                (:file "test-native")
-               (:file "test-union"))
+               (:file "test-union")
+               (:file "test-plan"))
   :perform (test-op (o c)
              (unless (uiop:symbol-call '#:polyquery-tests '#:run-all-tests)
                (error "unit tests failed"))))
