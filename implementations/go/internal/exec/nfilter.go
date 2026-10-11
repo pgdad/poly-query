@@ -328,7 +328,7 @@ func (c *nativeCompiler) comparison(x *plan.Binary, neg bool) (*npred, bool) {
 	rord, rcol := c.column(x.R)
 	switch {
 	case lcol && rcol:
-		if !intClass(lt) || lt.Kind != rt.Kind || lt.Scale != rt.Scale {
+		if !intClass(lt) || !intClass(rt) || lt.Kind != rt.Kind || lt.Scale != rt.Scale {
 			return nil, false
 		}
 		return &npred{kind: nCols, ord: lord, ord2: rord, op: op}, true
