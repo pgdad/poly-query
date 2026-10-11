@@ -10,6 +10,7 @@ import (
 
 	"polyquery/internal/errs"
 	"polyquery/internal/ingest"
+	"polyquery/internal/storage"
 	"polyquery/internal/types"
 )
 
@@ -179,6 +180,87 @@ func TestUnionAllModesAgree(t *testing.T) {
 	}
 	if _, err := e.Query(context.Background(), "SELECT id FROM t UNION ALL SELECT id FROM t", QueryOptions{MaxRows: 5000}); !errs.Is(err, errs.ResourceLimit) {
 		t.Errorf("max_rows applies to the whole result: %v", err)
+	}
+}
+
+// TestWideDecimalModesAgree runs wide DECIMAL (CR-2) queries — arithmetic,
+// exact INT64/DECIMAL comparisons, grouping, joins on mixed key types,
+// sorting, overflow errors — in every execution configuration.
+func TestWideDecimalModesAgree(t *testing.T) {
+	e := newModesEngine(t)
+	var sb strings.Builder
+	sb.WriteString("id,g,w,big,n,i\n")
+	for k := 1; k <= 2500; k++ {
+		w := fmt.Sprintf("%d%019d.%010d", k%97-48, uint64(k)*7919%1e19, k*31%1e10)
+		if k%5 == 0 {
+			w = fmt.Sprintf("%d.%02d", k%300, k%100) // equal to n for some rows
+		}
+		big := fmt.Sprint(k % 61)
+		if k%3 == 0 {
+			big = fmt.Sprintf("%d%019d", k%13+1, k)
+		}
+		n := fmt.Sprintf("%d.%02d", k%300, k%100)
+		i := fmt.Sprint(k%61 - 30)
+		if k%11 == 0 {
+			i = "9223372036854775807"
+		}
+		if k%17 == 0 {
+			w, i = "", ""
+		}
+		fmt.Fprintf(&sb, "%d,%d,%s,%s,%s,%s\n", k, k%7, w, big, n, i)
+	}
+	data := sb.String()
+	opts := ingest.DefaultOptions(ingest.CSV)
+	opts.Schema = []storage.ColumnDef{
+		{Name: "id", Type: types.Int64}, {Name: "g", Type: types.Int64}, {Name: "w", Type: types.Decimal(38, 10)},
+		{Name: "big", Type: types.Decimal(30, 0)}, {Name: "n", Type: types.Decimal(10, 2)}, {Name: "i", Type: types.Int64},
+	}
+	if _, err := e.Load(LoadRequest{Table: "w", Data: &data, Options: opts}); err != nil {
+		t.Fatal(err)
+	}
+	queries := []string{
+		"SELECT id, w + n, w - big, big * n, -w, ABS(w), w * 2 FROM w WHERE id % 7 = 0",
+		"SELECT id FROM w WHERE w > n OR big >= i",
+		"SELECT id FROM w WHERE big > 9223372036854775807 AND w < 0.5",
+		"SELECT id FROM w WHERE i > 1.5 AND n <= 150 AND w BETWEEN -10 AND 12345678901234567890.5",
+		"SELECT id FROM w WHERE big IN (1, 2, 3, 40000000000000000003.) OR w = n",
+		"SELECT g, COUNT(w), SUM(w), MIN(w), MAX(big), AVG(w), SUM(big) FROM w GROUP BY g",
+		"SELECT big, COUNT(*) FROM w GROUP BY big",
+		"SELECT DISTINCT big FROM w WHERE big < 100",
+		"SELECT COUNT(DISTINCT w), COUNT(DISTINCT big) FROM w",
+		"SELECT id, w FROM w ORDER BY w DESC, id LIMIT 23",
+		"SELECT id, big FROM w ORDER BY big, id",
+		"SELECT a.id, b.id FROM w a JOIN w b ON a.big = b.i WHERE a.id < 400",
+		"SELECT a.id, b.id FROM w a JOIN w b ON a.w = b.n WHERE a.id < 300 AND b.id < 300",
+		"SELECT COUNT(*) FROM w a JOIN t b ON a.n = b.amount",
+		"SELECT ROUND(w, 2), ROUND(w, -3), FLOOR(w), CEIL(w), CAST(w AS INT64) FROM w WHERE ABS(w) < 1000000",
+		"SELECT CAST(w AS DECIMAL(20,2)), CAST(w AS FLOAT64), CAST(w AS STRING) FROM w WHERE id < 100",
+		"SELECT CAST(w AS INT64) FROM w",
+		"SELECT SUM(w * w) FROM w",
+		"SELECT SUM(big) FROM w",
+		"SELECT w * big FROM w",
+		"SELECT COALESCE(w, n), CASE WHEN g = 1 THEN w ELSE n END, NULLIF(big, i) FROM w WHERE id < 200",
+		"SELECT id FROM w WHERE w IN (SELECT n FROM w WHERE id < 500)",
+		"SELECT id FROM w o WHERE big = (SELECT MAX(big) FROM w x WHERE x.g = o.g)",
+		"SELECT v FROM (SELECT w AS v FROM w WHERE id < 50 UNION ALL SELECT n FROM w WHERE id < 50 UNION ALL SELECT i FROM w WHERE id < 20) u",
+	}
+	for _, q := range queries {
+		want := canonical(e, q, modeConfig{"row", "hash", 1, true})
+		for _, c := range modeMatrix {
+			if got := canonical(e, q, c); got != want {
+				t.Errorf("%s\n  %+v:\n  got  %.300s\n  want %.300s", q, c, got, want)
+			}
+		}
+	}
+	for q, want := range map[string]string{
+		"SELECT CAST(w AS INT64) FROM w":                              "error NUMERIC_OVERFLOW",
+		"SELECT w * big FROM w":                                       "error NUMERIC_OVERFLOW",
+		"SELECT SUM(w) AS s, MAX(w) AS m FROM w WHERE id = 5":         "s:DECIMAL(38,10),m:DECIMAL(38,10)|5.0500000000,5.0500000000",
+		"SELECT COUNT(*) AS c FROM w WHERE i > 9223372036854775806.5": "c:INT64|214",
+	} {
+		if got := canonical(e, q, modeConfig{"vectorized", "hash", 4, true}); got != want {
+			t.Errorf("%s: %s, want %s", q, got, want)
+		}
 	}
 }
 

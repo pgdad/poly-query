@@ -327,7 +327,9 @@ func needsPromotion(lt, rt types.Type) bool {
 	return !(isExactNumeric(lt) && isExactNumeric(rt))
 }
 
-func isExactNumeric(t types.Type) bool { return t.Kind == types.KindInt64 || t.Kind == types.KindDecimal }
+func isExactNumeric(t types.Type) bool {
+	return t.Kind == types.KindInt64 || t.Kind == types.KindDecimal
+}
 
 func arithmetic(pos ast.Pos, op plan.BinaryOp, l, r plan.Expr) (plan.Expr, error) {
 	lt, rt := l.Type(), r.Type()

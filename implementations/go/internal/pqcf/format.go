@@ -26,7 +26,7 @@ const (
 	FormatV2         = 2
 	maxFormatVersion = FormatV2
 	headerSize       = 8
-	footerSize    = 12
+	footerSize       = 12
 )
 
 // Encodings.
