@@ -8,3 +8,7 @@
 2026-10-11T09:15:26+00:00 [a-optimize-latency-python-a2-20261011T080848Z] agent finished; collecting telemetry
 2026-10-11T09:15:26+00:00 [a-optimize-latency-python-a2-20261011T080848Z] validating (clean clone, sandboxed)
 2026-10-11T09:15:58+00:00 [a-optimize-latency-python-a2-20261011T080848Z] outcome=success cost=$12.566013199999997 turns=163 wall=3390.8s
+2026-10-11T10:18:51+00:00 [a-optimize-latency-go-a2-20261011T080847Z] agent finished; collecting telemetry
+2026-10-11T10:18:51+00:00 [a-optimize-latency-go-a2-20261011T080847Z] validating (clean clone, sandboxed)
+2026-10-11T10:19:08+00:00 [a-optimize-latency-go-a2-20261011T080847Z] outcome=timeout cost=$None turns=None wall=7200.3s
+2026-10-11T10:19:08+00:00 wave wave-a-optimize-latency-a2-20261011T080847Z finished: latency=success, latency=success, latency=timeout

@@ -25,5 +25,25 @@
   3.27587890625,
   5.77099609375,
   5.43408203125
+ ],
+ "finished": "2026-10-11T10:19:08+00:00",
+ "loadavg_end": [
+  1.09765625,
+  1.380859375,
+  1.3603515625
+ ],
+ "results": [
+  {
+   "run_id": "a-optimize-latency-java-a2-20261011T080849Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-optimize-latency-python-a2-20261011T080848Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-optimize-latency-go-a2-20261011T080847Z",
+   "outcome": "timeout"
+  }
  ]
 }
