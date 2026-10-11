@@ -366,7 +366,8 @@ def main() -> int:
     t0 = time.monotonic()
     if mode_missing:
         for f, ov, label in jobs:
-            results.append({"file": str(f.path.name), "phase": f.phase, "variant": label, "status": "not_implemented",
+            results.append({"file": str(f.path.name), "phase": f.phase, "requires": f.requires, "variant": label,
+                            "status": "not_implemented",
                             "cases": [{"line": s.line, "kind": s.kind, "status": "not_implemented",
                                        "message": "missing capabilities: " + " ".join(mode_missing)}
                                       for s in f.steps if s.is_case]})

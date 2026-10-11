@@ -72,9 +72,15 @@ for l in "${LANGS[@]}"; do
   unit 3600 python3 tests/conformance/runner.py --engine "implementations/$l/bin/polyquery" --claimed \
     --include-hidden -q --report "$J/$l.json" > "$L/$l-conformance.log" 2>&1
   echo "${l}_conformance_exit=$?" >> "$L/status"
-  unit 3600 python3 tests/conformance/runner.py --engine "implementations/$l/bin/polyquery" --claimed \
-    --include-hidden --native "$LIB" -q --report "$J/$l-native.json" > "$L/$l-native.log" 2>&1
-  echo "${l}_native_exit=$?" >> "$L/status"
+  # Native-kernel mode only for engines that claim it (same gate as orchestrator validation);
+  # the assembly engines do not load the kernel library.
+  if unit 60 "implementations/$l/bin/polyquery" capabilities 2>/dev/null | grep -q native.kernels; then
+    unit 3600 python3 tests/conformance/runner.py --engine "implementations/$l/bin/polyquery" --claimed \
+      --include-hidden --native "$LIB" -q --report "$J/$l-native.json" > "$L/$l-native.log" 2>&1
+    echo "${l}_native_exit=$?" >> "$L/status"
+  else
+    echo "${l}_native_exit=na" >> "$L/status"; rm -f "$L/$l-native.log" "$L/$l-native.json"
+  fi
   sudo -n cp "$J/$l.json" "$J/$l-native.json" "$L/" 2>/dev/null
 done
 python3 - "$L/arm-host.json" <<'PY'
