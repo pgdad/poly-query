@@ -370,10 +370,10 @@ in every mode); Aggregate, Distinct and Sort consume their whole input.
   ORDER BY keys get exact order-preserving 64-bit codes (biased integers,
   sign-folded floats, inverted for DESC), and a permutation of the rows is
   radix sorted on them (stable LSD, last key first, constant bytes
-  skipped); only rows with equal codes go through the comparator. A STRING
-  first key is radix sorted on its 8-byte prefix; with threads, such sorts
-  (and sorts with a NULL in a radix key) are chunk-sorted in parallel and
-  merged pairwise in parallel rounds. The key list ends with every visible
+  skipped); only rows with equal codes go through the comparator (a NULL
+  in a radix key falls back to `qsort_r`). A STRING first key is radix
+  sorted on its 8-byte prefix; with threads such sorts are chunk-sorted in
+  parallel and merged pairwise in parallel rounds. The key list ends with every visible
   column as a tie-breaker, so rows that tie on the ORDER BY keys still come
   out in one well-defined order in every mode (row mode: `qsort_r` with the
   same comparator).
