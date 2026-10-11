@@ -1,0 +1,10 @@
+2026-10-11T11:40:59+00:00 wave wave-a-kernel-debug-mutant-a1-20261011T114057Z: order=['x86_64-asm', 'arm64-asm']
+2026-10-11T11:40:59+00:00 [a-kernel-debug-mutant-x86_64-asm-a1-20261011T114057Z] agent queued (usage gate, then launch)
+2026-10-11T11:41:04+00:00 [a-kernel-debug-mutant-arm64-asm-a1-20261011T114058Z] agent queued (usage gate, then launch)
+2026-10-11T11:41:58+00:00 [a-kernel-debug-mutant-x86_64-asm-a1-20261011T114057Z] agent finished; collecting telemetry
+2026-10-11T11:41:58+00:00 [a-kernel-debug-mutant-x86_64-asm-a1-20261011T114057Z] validating (clean clone, sandboxed)
+2026-10-11T11:42:06+00:00 [a-kernel-debug-mutant-x86_64-asm-a1-20261011T114057Z] outcome=success cost=$0.4134343999999999 turns=15 wall=58.5s
+2026-10-11T11:42:22+00:00 [a-kernel-debug-mutant-arm64-asm-a1-20261011T114058Z] agent finished; collecting telemetry
+2026-10-11T11:42:22+00:00 [a-kernel-debug-mutant-arm64-asm-a1-20261011T114058Z] validating (clean clone, sandboxed)
+2026-10-11T11:43:01+00:00 [a-kernel-debug-mutant-arm64-asm-a1-20261011T114058Z] outcome=success cost=$0.4827568000000001 turns=19 wall=78.0s
+2026-10-11T11:43:01+00:00 wave wave-a-kernel-debug-mutant-a1-20261011T114057Z finished: debug=success, debug=success

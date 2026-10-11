@@ -1,0 +1,76 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-kernel-debug-mutant-x86_64-asm-a1-20261011T114057Z",
+ "language": "x86_64-asm",
+ "task": "kernel-debug-mutant",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-kernel-debug-mutant",
+ "prompt_sha256": "dd715dade366744296f14ad0adbea53d5b22d3ce4de2d45c7701c9b1a68e9b4d",
+ "session_id": "1025cd00-a7ba-4976-9a7e-e4936a063a5f",
+ "tokens": {
+  "input": 30,
+  "output": 4886,
+  "cache_read": 427292,
+  "cache_creation": 28767,
+  "thinking": null,
+  "thinking_estimated": 794,
+  "source": "result events",
+  "api_messages": 15
+ },
+ "rate_limit": {
+  "events": 1,
+  "max_utilization": {
+   "seven_day": 0.37,
+   "five_hour": 0.08
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 0.4134343999999999,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 15,
+ "result_segments": 1,
+ "assistant_messages": 25,
+ "tool_calls": {
+  "Bash": 14
+ },
+ "tool_calls_total": 14,
+ "tool_failures": 1,
+ "build_invocations": 5,
+ "build_failures_heuristic": 0,
+ "conformance_runs": 0,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 58.5,
+  "model_api_seconds": 54.5,
+  "tool_seconds": 3.2,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 1,
+  "files_changed": 2,
+  "lines_added": 16,
+  "lines_removed": 1,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "I found and fixed the bug: it was one instruction in `native-kernels/x86_64/pqk_x86_avx2.S:389`, and all tests now pass. The fix and a README note are committed.\n\n**Root cause:** In the AVX2 `filter_i64` kernel, the fast path for full 64-row blocks that contain at least one match loaded the block's starting row number with `movzwl %bx, %ecx`. That instruction keeps only the low 16 bits of the row number. So for every such block past row 65,535, the kernel wrote out `row mod 65536` instead of the real row index. That explains the report exactly:\n- **Right count, wrong rows:** the number of matches is counted separately and was never affected.\n- **The wrong rows come from near the start of the table:** that is where the wrapped-around indices point.\n- **Tables of a few thousand rows are fine:** they never reach row 65,536.\n- **The scalar variant is correct:** only the AVX2 variant has this code. The AVX-512 version and the AVX2 path for partial or empty blocks both use the full 32-bit row number.\n\n**Fix:** I changed that line to `mov %ebx, %ecx`, so the full 32-bit row number is used, matching the `uint32_t` output. That is the only code change. I also added a short section to `native-kernels/x86_64/README.md` describing the defect.\n\n**How I reproduced it:** I wrote a throwaway program in `/tmp/repro` (not committed) that runs the AVX2 `filter_i64` on 200,000 rows and compares the output with the reference implementation. Before the fix, all seven operators returned the right counts, but the indices diverged from the reference in the region where row numbers pass 65,536. After the fix, a second check on 300,001 rows matched the reference exactly for all seven operators, with and without a validity bitmap, on the scalar, AVX2 and AVX-512 variants.\n\n**Test results:** `make -C native-kernels test` passes:\n- **Native and ASan/UBSan builds:** `x86_scalar`, `x86_avx2` and `x86_avx512` each pass with 16/20 kernels.\n- **AArch64 cross-build:** tests the reference only, as before.\n\n**Performance:** the replacement is a single register move, so I didn't re-run the benchmarks and have no new speedup numbers.\n\n**Limitation:** The public tests use only a few thousand rows, which is why they never caught this. I didn't add a large-table test because test files are outside the area I'm allowed to change.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

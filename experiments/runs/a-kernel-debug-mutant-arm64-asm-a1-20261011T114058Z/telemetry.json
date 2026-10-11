@@ -1,0 +1,76 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-kernel-debug-mutant-arm64-asm-a1-20261011T114058Z",
+ "language": "arm64-asm",
+ "task": "kernel-debug-mutant",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-kernel-debug-mutant",
+ "prompt_sha256": "1bbea0fe55e7f71484e2b2369b70fd8ac1051b493205decf69dc5dd9ef3a1dd0",
+ "session_id": "bd18e09b-5c75-4e5f-b29e-368b01589ba8",
+ "tokens": {
+  "input": 38,
+  "output": 6526,
+  "cache_read": 568264,
+  "cache_creation": 29804,
+  "thinking": null,
+  "thinking_estimated": 1026,
+  "source": "result events",
+  "api_messages": 19
+ },
+ "rate_limit": {
+  "events": 1,
+  "max_utilization": {
+   "seven_day": 0.37,
+   "five_hour": 0.08
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 0.4827568000000001,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 19,
+ "result_segments": 1,
+ "assistant_messages": 36,
+ "tool_calls": {
+  "Bash": 18
+ },
+ "tool_calls_total": 18,
+ "tool_failures": 0,
+ "build_invocations": 5,
+ "build_failures_heuristic": 0,
+ "conformance_runs": 0,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 78.0,
+  "model_api_seconds": 71.9,
+  "tool_seconds": 5.5,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 2,
+  "files_changed": 2,
+  "lines_added": 9,
+  "lines_removed": 1,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "I found and fixed the bug. It was in the NEON `filter_i64` kernel: rows at position 65,536 or later came back with their index wrapped back to the start of the table.\n\n**Root cause:** `native-kernels/arm64/pq_a64_neon.S:187`, in the `EMIT8` macro used by `pqk_a64_neon_filter_i64`. The register `v20` holds the starting row number for each group of 8 rows, as four 32-bit values. After each group it is meant to go up by 8, but the line did the addition in 16-bit pieces:\n\n```asm\nadd     v20.8h, v20.8h, v21.8h   // wrong: carry out of bit 15 is lost\nadd     v20.4s, v20.4s, v21.4s   // fix\n```\n\nSo once the row number passed 65,535 it wrapped instead of carrying, and every index from row 65,536 on was reported modulo 65,536. That matches the report exactly:\n- **Count right, rows wrong:** the match count is computed separately and was unaffected; only the reported row numbers were off.\n- **Wrong rows near the beginning:** the wrapped indices point at the first 65,536 rows.\n- **Small tables fine:** the bug needs at least 64 Ki rows.\n- **Only NEON:** `scalar` and `sve` are correct.\n\nThe public tests filter at most 5,000 rows, which is why they never caught it.\n\n**How I reproduced it:** a throwaway program in `/tmp/repro` (not committed), built with the cross toolchain and run under qemu. It compares the NEON variant against the C reference at sizes 1000, 4099, 65535, 65536, 65537, 70001 and 200003. It covers all 7 comparison operators, with and without a validity bitmap, using unaligned data.\n- **Before the fix:** NEON failed 28 cases, every one at a size of 65,536 or more. The first wrong value was, for example, index 0 where 65536 was expected. `scalar` and `sve` had no failures.\n- **After the fix:** no failures in any variant.\n\n**Tests:** `make -C native-kernels test-cross` passes for `a64_scalar`, `a64_neon` and `a64_sve`, with 16/20 kernels each and 0 failures. That is the same output as before the change.\n\n**Changes:** one instruction in `pq_a64_neon.S`, plus a short note in `native-kernels/arm64/README.md` (under \"filter_i64\") describing the defect and how it was reproduced. Both are committed (`f116abe`, plus a small README wording fix after it).\n\nThere are no performance numbers: there is no AArch64 hardware here, and qemu checks correctness only.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
