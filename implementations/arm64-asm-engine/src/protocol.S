@@ -56,8 +56,8 @@ op_names:
     .quad o_caps, op_capabilities
     .quad o_sleep, op_sleep
     .quad o_explain, op_explain
-    .quad o_save, op_unsupported
-    .quad o_open, op_unsupported
+    .quad o_save, op_save
+    .quad o_open, op_open
     .quad o_stats, op_unsupported
     .quad 0, 0
 o_load:     .asciz "load"
@@ -81,7 +81,7 @@ r_err:      .asciz ",\"ok\":false,\"error\":{\"code\":\""
 r_msg:      .asciz "\",\"message\":"
 r_details:  .asciz ",\"details\":{\"line\":"
 r_column:   .asciz ",\"column\":"
-r_caps:     .asciz ",\"protocol_version\":1,\"capabilities\":[\"phase1\",\"ingest.csv\",\"ingest.json\",\"ingest.jsonl\",\"sql.basic\",\"test.functions\",\"phase2\",\"sql.groupby\",\"sql.join\",\"sql.functions\",\"sql.subquery\",\"sql.cte\",\"sql.correlated_subquery\"]"
+r_caps:     .asciz ",\"protocol_version\":1,\"capabilities\":[\"phase1\",\"ingest.csv\",\"ingest.json\",\"ingest.jsonl\",\"sql.basic\",\"test.functions\",\"phase2\",\"sql.groupby\",\"sql.join\",\"sql.functions\",\"sql.subquery\",\"sql.cte\",\"sql.correlated_subquery\",\"phase3\",\"storage.pqcf\",\"storage.mmap\"]"
 r_version:  .asciz ",\"engine\":\"polyquery-arm64-asm\",\"engine_version\":\"0.1.0\",\"language\":\"arm64-asm-engine\",\"protocol_version\":1,\"spec_version\":\"1.0.0\",\"runtime\":\"GNU as (AArch64) + glibc\",\"build\":{\"profile\":\"release\",\"flags\":\"-g\"}"
 r_tables:   .asciz ",\"tables\":["
 r_name:     .asciz "{\"name\":"
@@ -1597,5 +1597,225 @@ LFUNC op_query
     ldp  x29, x30, [sp], #96
     ret
 ENDF op_query
+
+// ------------------------------------------------------------ save / open ----
+// PQCF files (protocol.md §5.7, storage/pqcf-v1.md; implementation in pqcf.S)
+
+    .section .rodata
+kp_rgsize:  .asciz "row_group_size"
+kp_encoding: .asciz "encoding"
+kp_mmap:    .asciz "mmap"
+kp_layout:  .asciz "layout"
+vp_plain:   .asciz "plain"
+vp_dict:    .asciz "dict"
+vp_rle:     .asciz "rle"
+vp_row:     .asciz "row"
+vp_column:  .asciz "column"
+rp_path:    .asciz ",\"path\":"
+rp_bytes:   .asciz ",\"bytes\":"
+    .text
+
+// op_save: {"op":"save","table":"t","path":"t.pqcf",
+//           "options":{"row_group_size":N,"encoding":"auto|plain|dict|rle"}}
+// => {"ok":true,"path":"t.pqcf","bytes":N}
+// Register use: x19 request, x20 Table*, x21 path Str*, x22 row group size,
+// w23 encoding PENC_*, x24 options / encoding Str* / file size
+LFUNC op_save
+    stp  x29, x30, [sp, #-64]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    stp  x21, x22, [sp, #32]
+    stp  x23, x24, [sp, #48]
+    mov  x19, x0
+    bl   lookup_table_field         // NOT_FOUND
+    mov  x20, x0
+    mov  x0, x19
+    ADR_L x1, k_path
+    mov  w2, #1
+    bl   get_str
+    mov  x21, x0
+    bl   check_path                 // ACCESS_DENIED
+    mov  x22, #0
+    mov  w23, #PENC_AUTO
+    mov  x0, x19
+    ADR_L x1, k_options
+    mov  w2, #J_OBJ
+    mov  w3, #0
+    bl   get_field
+    cbz  x0, 3f
+    mov  x24, x0
+    ADR_L x1, kp_rgsize
+    mov  x2, #0
+    mov  x3, #1
+    bl   get_int
+    mov  x22, x0
+    mov  x0, x24
+    ADR_L x1, kp_encoding
+    mov  w2, #0
+    bl   get_str
+    cbz  x0, 3f
+    mov  x24, x0
+    ADR_L x1, v_auto
+    bl   str_eq_c
+    cbnz w0, 3f
+    mov  w23, #PENC_PLAIN
+    mov  x0, x24
+    ADR_L x1, vp_plain
+    bl   str_eq_c
+    cbnz w0, 3f
+    mov  w23, #PENC_DICT
+    mov  x0, x24
+    ADR_L x1, vp_dict
+    bl   str_eq_c
+    cbnz w0, 3f
+    mov  w23, #PENC_RLE
+    mov  x0, x24
+    ADR_L x1, vp_rle
+    bl   str_eq_c
+    cbnz w0, 3f
+    RAISE ERR_INVALID_REQUEST, "encoding must be auto, plain, dict or rle"
+3:  mov  x0, x20
+    mov  x1, x21
+    mov  x2, x22
+    mov  w3, w23
+    bl   pqcf_save
+    mov  x24, x0
+    bl   out_begin_ok
+    ADR_L x0, rp_path
+    bl   out_puts
+    mov  x0, x21
+    bl   out_str
+    ADR_L x0, rp_bytes
+    bl   out_puts
+    mov  x0, x24
+    bl   out_i64
+    ldp  x19, x20, [sp, #16]
+    ldp  x21, x22, [sp, #32]
+    ldp  x23, x24, [sp, #48]
+    ldp  x29, x30, [sp], #64
+    ret
+ENDF op_save
+
+// op_open: {"op":"open","table":"t","path":"t.pqcf","replace":false,
+//           "options":{"mmap":true,"layout":"row|column"}}
+// => {"ok":true,"table":"t","row_count":N,"columns":[...]} (like load).
+// Nothing changes unless the whole open succeeds: an existing table without
+// replace is ALREADY_EXISTS before the file is read; the new table stays in
+// g_pending_table (freed on error) until it is added to the catalog; index
+// name conflicts are checked before the catalog is modified.
+// Register use: x19 request, x20 table name Str*, x21 path Str*, w22 mmap,
+// w23 layout (-1 = default), x24 options / table being replaced (or 0),
+// x25 new Table*, x26 index specs, x27 spec count
+LFUNC op_open
+    stp  x29, x30, [sp, #-96]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    stp  x21, x22, [sp, #32]
+    stp  x23, x24, [sp, #48]
+    stp  x25, x26, [sp, #64]
+    stp  x27, x28, [sp, #80]
+    mov  x19, x0
+    ADR_L x1, k_table
+    mov  w2, #1
+    bl   get_str
+    mov  x20, x0
+    ldr  x1, [x20, #STR_LEN]
+    cbnz x1, 1f
+    RAISE ERR_INVALID_REQUEST, "table name must not be empty"
+1:  mov  x0, x19
+    ADR_L x1, k_path
+    mov  w2, #1
+    bl   get_str
+    mov  x21, x0
+    bl   check_path                 // ACCESS_DENIED
+    mov  w22, #0
+    mov  w23, #-1
+    mov  x0, x19
+    ADR_L x1, k_options
+    mov  w2, #J_OBJ
+    mov  w3, #0
+    bl   get_field
+    cbz  x0, 3f
+    mov  x24, x0
+    ADR_L x1, kp_mmap
+    mov  w2, #0
+    bl   get_bool
+    mov  w22, w0
+    mov  x0, x24
+    ADR_L x1, kp_layout
+    mov  w2, #0
+    bl   get_str
+    cbz  x0, 3f
+    mov  x24, x0
+    mov  w23, #LAYOUT_ROW
+    ADR_L x1, vp_row
+    bl   str_eq_c
+    cbnz w0, 3f
+    mov  w23, #LAYOUT_COLUMN
+    mov  x0, x24
+    ADR_L x1, vp_column
+    bl   str_eq_c
+    cbnz w0, 3f
+    RAISE ERR_INVALID_REQUEST, "layout must be row or column"
+3:  mov  x0, x19
+    ADR_L x1, k_replace
+    mov  w2, #0
+    bl   get_bool
+    mov  w28, w0
+    add  x0, x20, #STR_DATA
+    ldr  x1, [x20, #STR_LEN]
+    bl   catalog_find
+    mov  x24, x0
+    cbz  x24, 4f
+    cbnz w28, 4f
+    mov  w0, #ERR_ALREADY_EXISTS
+    ADR_L x1, m_exists
+    add  x2, x20, #STR_DATA
+    ldr  x3, [x20, #STR_LEN]
+    bl   pq_raise_s
+4:  mov  x0, x21
+    mov  w1, w22
+    bl   pqcf_load                  // registers g_pending_table
+    mov  x25, x0
+    mov  x26, x1
+    mov  x27, x2
+    mov  x0, x26
+    mov  x1, x27
+    mov  x2, x24
+    bl   index_check_specs          // ALREADY_EXISTS (nothing changed yet)
+    mov  x0, x25
+    mov  w1, w23
+    mov  w2, #0
+    bl   table_finalize
+    add  x0, x25, #TBL_ARENA
+    add  x1, x20, #STR_DATA
+    ldr  x2, [x20, #STR_LEN]
+    bl   str_new_in
+    str  x0, [x25, #TBL_NAME]
+    // commit
+    cbz  x24, 5f
+    mov  x0, x24
+    bl   catalog_remove
+5:  mov  x0, x25
+    bl   catalog_add
+    ADR_L x1, g_pending_table
+    str  xzr, [x1]
+    mov  x0, x25
+    mov  x1, x26
+    mov  x2, x27
+    bl   index_create_specs
+    bl   out_begin_ok
+    mov  x0, x25
+    bl   write_table_header
+    mov  x0, x25
+    bl   write_table_columns
+    ldp  x19, x20, [sp, #16]
+    ldp  x21, x22, [sp, #32]
+    ldp  x23, x24, [sp, #48]
+    ldp  x25, x26, [sp, #64]
+    ldp  x27, x28, [sp, #80]
+    ldp  x29, x30, [sp], #96
+    ret
+ENDF op_open
 
     NOTE_GNU_STACK
