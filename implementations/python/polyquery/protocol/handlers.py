@@ -57,6 +57,7 @@ CAPABILITIES = [
     "join.hash",
     "join.merge",
     "join.nested_loop",
+    "native.kernels",
 ]
 
 
@@ -383,6 +384,7 @@ class RequestHandler:
         options.join = raw.get("join") or "auto"
         options.mode = raw.get("mode") or "auto"
         options.threads = raw.get("threads")
+        options.native = _optional_bool(raw, "native", False)
         return sql, options, count_only
 
     def op_explain(self, req: dict) -> dict[str, Any]:

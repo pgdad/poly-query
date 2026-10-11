@@ -17,6 +17,7 @@ from .execution.context import DEFAULT_PARALLEL_MIN_ROWS, ROW, VECTORIZED, Execu
 from .execution.executor import QueryResult, run_plan, stream_plan
 from .ingest.limits import DEFAULT_MAX_INGEST_BYTES, DEFAULT_MAX_TABLE_ROWS, IngestLimits
 from .ingest.loader import load_table
+from .native import NativeKernels, load_kernels
 from .planner.physical import PhysicalPlan, PlanOptions, plan_statement
 from .sql import ast
 from .sql.parser import parse
@@ -47,6 +48,7 @@ class EngineConfig:
     # parallel pipelines over fewer rows run their partitions in-process
     parallel_min_rows: int = DEFAULT_PARALLEL_MIN_ROWS
     log_level: str = "info"
+    native_kernels: str | None = None  # path of libpqkernels (--native-kernels)
 
 
 @dataclass
@@ -62,6 +64,7 @@ class QueryOptions:
     use_indexes: bool = True
     mode: str = "auto"  # auto (= vectorized), row, vectorized
     threads: int | None = None  # None: the engine's --threads
+    native: bool = False  # use the native kernels (when loaded)
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -78,6 +81,7 @@ class Engine:
         self.config = config
         self.catalog = Catalog()
         self.ingest_limits = IngestLimits(config.max_ingest_bytes, config.max_table_rows)
+        self.native: NativeKernels | None = load_kernels(config.native_kernels)
 
     # ------------------------------------------------------------ catalog
 
@@ -190,6 +194,7 @@ class Engine:
             mode=ROW if options.mode == ROW else VECTORIZED,
             threads=self._threads(options),
             parallel_min_rows=self.config.parallel_min_rows,
+            native=self.native if options.native else None,
         )
         return plan, ctx
 

@@ -244,7 +244,7 @@ class ColumnTable(Table):
         start: int = 0,
         stop: int | None = None,
     ) -> Iterator[tuple]:
-        for group, lo, hi in self._ranges(keep_group, start, stop):
+        for group, lo, hi in self.row_ranges(keep_group, start, stop):
             if not column_indexes:
                 yield from itertools.repeat((), hi - lo)
             else:
@@ -258,7 +258,7 @@ class ColumnTable(Table):
         start: int = 0,
         stop: int | None = None,
     ) -> Iterator[tuple[list[Sequence[Any]], int]]:
-        for group, lo, hi in self._ranges(keep_group, start, stop):
+        for group, lo, hi in self.row_ranges(keep_group, start, stop):
             # decode each chunk range once, then hand out slices of it
             data = [group.vector(i).to_list(lo, hi) for i in column_indexes]
             n = hi - lo
@@ -268,7 +268,7 @@ class ColumnTable(Table):
             for k in range(0, n, batch_size):
                 yield [values[k : k + batch_size] for values in data], min(batch_size, n - k)
 
-    def _ranges(
+    def row_ranges(
         self, keep_group: Callable[[RowGroup], bool] | None, start: int, stop: int | None
     ) -> Iterator[tuple[RowGroup, int, int]]:
         """(group, first, end) local row ranges of the groups overlapping

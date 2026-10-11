@@ -24,6 +24,7 @@ are only built at the very end (results) or where an algorithm needs them
 
 from __future__ import annotations
 
+import array
 import itertools
 import operator
 from collections import Counter
@@ -33,7 +34,7 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from ..planner import physical as pp
 from ..planner.access import group_may_match
-from . import parallel
+from . import native_ops, parallel
 from .common import (
     VECTOR_BATCH_ROWS,
     JoinCounter,
@@ -47,7 +48,7 @@ from .common import (
 )
 from .compiler import Layout
 from .context import ExecutionContext
-from .group_states import GroupState, make_state
+from .group_states import GroupState, make_state, merge_partials
 from .vcompiler import VecFn, compile_vector, take
 
 _is_not_none = partial(operator.is_not, None)
@@ -169,8 +170,21 @@ def _subquery_scan(node: pp.SubqueryScan, ctx: ExecutionContext) -> Batches:
 
 
 def _filter(node: pp.Filter, ctx: ExecutionContext) -> Batches:
+    native = native_ops.native_filter(node, ctx)
+    if native is not None:
+        # the kernels select rows of the scan below; the engine evaluates the rest
+        batches = native_ops.filtered_batches(native, ctx, VECTOR_BATCH_ROWS)
+        residual = native.residual
+        if residual is None:
+            return batches
+        fn = _compiled(node, "native:residual", ctx, lambda: compile_vector(residual, ctx, layout_of(node.input)))
+        return _apply_predicate(fn, batches)
     predicate = _compiled(node, "predicate", ctx, lambda: compile_vector(node.predicate, ctx, layout_of(node.input)))
-    for cols, n in execute(node.input, ctx):
+    return _apply_predicate(predicate, execute(node.input, ctx))
+
+
+def _apply_predicate(predicate: VecFn, batches: Batches) -> Batches:
+    for cols, n in batches:
         mask = predicate(cols, n)
         kept = mask.count(True)
         if kept == n:
@@ -464,6 +478,12 @@ def _aggregate_partition(
 
     index: dict[Any, int] = {}  # group key -> dense group id
     width = len(node.layout)
+    # native: SUM / AVG / COUNT states are folded by pqk_group_sum_i64
+    native = native_ops.NativeGroupSums(ctx.native, states) if ctx.native is not None else None
+    if native is not None and not native.buffers:
+        native = None
+    rest = [k for k in range(len(states)) if native is None or not native.handles(k)]
+    rest_states = [states[k] for k in rest]
     for cols, n in batches:
         keys = _key_vector(key_fns, cols, n)
         batch_keys = dict.fromkeys(keys)
@@ -476,17 +496,33 @@ def _aggregate_partition(
                 state.grow(len(index) - before)
             ctx.reserve_rows(len(index) - before, width)
         vectors = [None if fn is None else fn(cols, n) for fn in arg_fns]
+        ids: list[int] | None = None
+        if native is not None:
+            if len(batch_keys) == 1:
+                native_ids = array.array("I", [index[keys[0]]]) * n
+            else:
+                ids = list(map(index.__getitem__, keys))
+                native_ids = array.array("I", ids)
+            for k in native.buffers:
+                native.add(k, native_ids, vectors[k])
+            native.flush_if_full()
+            vectors = [vectors[k] for k in rest]
+            if not rest:
+                ctx.check()
+                continue
         if len(batch_keys) == 1:
             runs = [(index[keys[0]], 0, n)]
-            for state, vector in zip(states, vectors):
+            for state, vector in zip(rest_states, vectors):
                 state.update_runs(runs, vector)
         elif len(batch_keys) * 8 <= n:
-            _update_sorted(list(map(index.__getitem__, keys)), vectors, states)
+            _update_sorted(ids or list(map(index.__getitem__, keys)), vectors, rest_states)
         else:
-            ids = list(map(index.__getitem__, keys))
-            for state, vector in zip(states, vectors):
+            ids = ids or list(map(index.__getitem__, keys))
+            for state, vector in zip(rest_states, vectors):
                 state.update_rows(ids, vector)
         ctx.check()
+    if native is not None:
+        native.flush()
     return list(index), states
 
 
@@ -505,27 +541,13 @@ def _update_sorted(ids: list[int], vectors: list, states: list[GroupState]) -> N
         state.update_runs(runs, None if vector is None else take(vector, order))
 
 
-def _merge_partials(partials: list[tuple[list[Any], list[GroupState]]]) -> tuple[list[Any], list[GroupState]]:
-    """Merges partial aggregation states in partition order (groups keep the
-    order of their first appearance in a serial scan)."""
-    keys, states = partials[0]
-    if len(partials) == 1:
-        return keys, states
-    index = dict(zip(keys, range(len(keys))))
-    for part_keys, part_states in partials[1:]:
-        before = len(index)
-        mapping = [index.setdefault(key, len(index)) for key in part_keys]
-        if len(index) > before:
-            for state in states:
-                state.grow(len(index) - before)
-        for state, other in zip(states, part_states):
-            state.merge(other, mapping)
-    return list(index), states
-
-
 def _hash_aggregate(node: pp.HashAggregate, ctx: ExecutionContext) -> Batches:
-    partials = partition_batches(node.input, ctx, lambda batches: _aggregate_partition(node, ctx, batches))
-    keys, states = _merge_partials(partials)
+    native = native_ops.native_scan_aggregate(node, ctx)
+    if native is not None:  # aggregates computed by the kernels from the column storage
+        partials = partition_batches(node.input, ctx, lambda batches: native.partition(ctx))
+    else:
+        partials = partition_batches(node.input, ctx, lambda batches: _aggregate_partition(node, ctx, batches))
+    keys, states = merge_partials(partials)
     n = len(keys)
     if not n:
         return
