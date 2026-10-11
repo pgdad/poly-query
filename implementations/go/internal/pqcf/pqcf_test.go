@@ -169,10 +169,15 @@ func TestCorruptFixtures(t *testing.T) {
 // TestBitFlips flips every bit of a small file: the reader must report an
 // error, eagerly or (memory-mapped) when the data is read.
 func TestBitFlips(t *testing.T) {
+	t.Run("v1", func(t *testing.T) { checkBitFlips(t, sample(20), "auto") })
+	t.Run("v2-plain", func(t *testing.T) { checkBitFlips(t, wideSample(12), "plain") })
+	t.Run("v2-rle", func(t *testing.T) { checkBitFlips(t, wideSample(12), "rle") })
+}
+
+func checkBitFlips(t *testing.T, src *storage.Table, enc string) {
 	dir := t.TempDir()
-	src := sample(20)
 	path := filepath.Join(dir, "s.pqcf")
-	if _, err := Write(path, src, nil, WriteOptions{RowGroupSize: 8}); err != nil {
+	if _, err := Write(path, src, nil, WriteOptions{RowGroupSize: 8, Encoding: enc}); err != nil {
 		t.Fatal(err)
 	}
 	orig, _ := os.ReadFile(path)
