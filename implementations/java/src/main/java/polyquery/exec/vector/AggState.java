@@ -48,8 +48,9 @@ abstract class AggState {
         if (call.distinct()) {
             return new Generic(call);
         }
-        NativeAgg nat = kernels == null ? null : new NativeAgg(kernels);
         DataType in = call.argument() == null ? null : call.argument().type();
+        // wide DECIMAL arguments never go to the kernels (their ABI covers 64-bit values only)
+        NativeAgg nat = kernels == null || in != null && in.isWideDecimal() ? null : new NativeAgg(kernels);
         return switch (call.function()) {
             case COUNT_STAR -> new Count(false, null);
             case COUNT -> new Count(true, nat);
@@ -57,8 +58,9 @@ abstract class AggState {
                 boolean avg = call.function() == AggregateCall.AggregateFunction.AVG;
                 yield switch (in.kind()) {
                     case FLOAT64 -> new DoubleSum(avg); // native sums reassociate: not bit-identical
-                    case DECIMAL -> new LongSum(avg, in.scale(), true, nat);
-                    case INT64 -> new LongSum(avg, 0, false, nat);
+                    case DECIMAL -> in.isWideDecimal() ? new WideSum(avg, in.scale(), avg ? null : call.type())
+                            : new LongSum(avg, in.scale(), avg ? null : call.type(), nat);
+                    case INT64 -> new LongSum(avg, 0, null, nat);
                     default -> new Generic(call);
                 };
             }
@@ -67,7 +69,7 @@ abstract class AggState {
                 yield switch (Vec.kindOf(in)) {
                     case LONG -> in.isNull() ? new Generic(call) : new LongMinMax(in, min, nat);
                     case DOUBLE -> new DoubleMinMax(min, nat);
-                    default -> in.isNull() ? new Generic(call) : new StringMinMax(min);
+                    default -> in.isNull() ? new Generic(call) : new ObjectMinMax(in, min);
                 };
             }
         };
@@ -136,13 +138,14 @@ abstract class AggState {
     static final class LongSum extends AggState {
         private final boolean average;
         private final int scale;
-        private final boolean decimal;
+        private final DataType decimal;
         private final NativeAgg nat;
         private long[] sums = new long[16];
         private long[] counts = new long[16];
         private BigInteger[] big;
 
-        LongSum(boolean average, int scale, boolean decimal, NativeAgg nat) {
+        /** @param decimal the result type of a DECIMAL SUM, else null */
+        LongSum(boolean average, int scale, DataType decimal, NativeAgg nat) {
             this.average = average;
             this.scale = scale;
             this.decimal = decimal;
@@ -360,6 +363,63 @@ abstract class AggState {
         }
     }
 
+    /** Exact SUM/AVG of wide DECIMAL values (BigInteger unscaled values; never passed to native kernels). */
+    static final class WideSum extends AggState {
+        private final boolean average;
+        private final int scale;
+        private final DataType decimal;
+        private BigInteger[] sums = new BigInteger[16];
+        private long[] counts = new long[16];
+
+        /** @param decimal the result type of a SUM, null for AVG */
+        WideSum(boolean average, int scale, DataType decimal) {
+            this.average = average;
+            this.scale = scale;
+            this.decimal = decimal;
+        }
+
+        @Override
+        void grow(int groups) {
+            if (sums.length < groups) {
+                int n = Math.max(groups, sums.length * 2);
+                sums = Arrays.copyOf(sums, n);
+                counts = Arrays.copyOf(counts, n);
+            }
+        }
+
+        private void add(int g, BigInteger v) {
+            BigInteger s = sums[g];
+            sums[g] = s == null ? v : s.add(v);
+            counts[g]++;
+        }
+
+        @Override
+        void update(Vec arg, int[] sel, int n, int[] gids) {
+            Object[] x = arg.objects;
+            for (int k = 0; k < n; k++) {
+                int i = sel == null ? k : sel[k];
+                if (!arg.isNull(i)) {
+                    add(gids[i], (BigInteger) x[i]);
+                }
+            }
+        }
+
+        @Override
+        void merge(AggState other, int from, int to) {
+            WideSum o = (WideSum) other;
+            if (o.counts[from] > 0) {
+                BigInteger s = sums[to];
+                sums[to] = s == null ? o.sums[from] : s.add(o.sums[from]);
+                counts[to] += o.counts[from];
+            }
+        }
+
+        @Override
+        Object result(int g) {
+            return Accumulator.exactSumResult(average, scale, decimal, 0, sums[g], counts[g]);
+        }
+    }
+
     /** MIN/MAX of LONG-represented values (INT64, DECIMAL, DATE, TIMESTAMP, BOOLEAN). */
     static final class LongMinMax extends AggState {
         private final DataType type;
@@ -528,11 +588,14 @@ abstract class AggState {
         }
     }
 
-    static final class StringMinMax extends AggState {
+    /** MIN/MAX of STRING and wide DECIMAL values (object representation). */
+    static final class ObjectMinMax extends AggState {
+        private final DataType type;
         private final boolean min;
-        private String[] best = new String[16];
+        private Object[] best = new Object[16];
 
-        StringMinMax(boolean min) {
+        ObjectMinMax(DataType type, boolean min) {
+            this.type = type;
             this.min = min;
         }
 
@@ -543,12 +606,12 @@ abstract class AggState {
             }
         }
 
-        private void offer(int g, String v) {
-            String b = best[g];
+        private void offer(int g, Object v) {
+            Object b = best[g];
             if (b == null) {
                 best[g] = v;
             } else if (v != b) {
-                int c = Values.compareStrings(v, b);
+                int c = Values.compare(v, b, type);
                 if (min ? c < 0 : c > 0) {
                     best[g] = v;
                 }
@@ -557,12 +620,13 @@ abstract class AggState {
 
         @Override
         void update(Vec arg, int[] sel, int n, int[] gids) {
+            boolean dict = arg.kind == Vec.Kind.DICT;
             for (int k = 0; k < n; k++) {
                 int i = sel == null ? k : sel[k];
                 if (!arg.isNull(i)) {
-                    String s = arg.string(i);
-                    if (s != null) {
-                        offer(gids[i], s);
+                    Object v = dict ? arg.dict[arg.codes[i]] : arg.objects[i];
+                    if (v != null) {
+                        offer(gids[i], v);
                     }
                 }
             }
@@ -570,7 +634,7 @@ abstract class AggState {
 
         @Override
         void merge(AggState other, int from, int to) {
-            String v = ((StringMinMax) other).best[from];
+            Object v = ((ObjectMinMax) other).best[from];
             if (v != null) {
                 offer(to, v);
             }

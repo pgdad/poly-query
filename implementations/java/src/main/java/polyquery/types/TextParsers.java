@@ -122,9 +122,10 @@ public final class TextParsers {
      * Parses {@code ^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)$} into an unscaled value of the given
      * scale. With {@code round}, extra fractional digits are rounded half away from zero;
      * without it they make the value invalid (ArithmeticException). The value must fit
-     * {@code precision} digits.
+     * {@code precision} digits. Returns the runtime value: a {@code Long} for a narrow
+     * precision (≤ 18), a {@code BigInteger} for a wide one.
      */
-    public static Long parseDecimal(String s, int precision, int scale, boolean round) {
+    public static Object parseDecimal(String s, int precision, int scale, boolean round) {
         int n = s.length();
         int i = 0;
         boolean neg = false;
@@ -166,13 +167,12 @@ public final class TextParsers {
         if (roundUp) {
             v = v.add(BigInteger.ONE);
         }
-        if (v.bitLength() > 62) {
+        if (!Decimals.fitsPrecision(v, precision)) {
             throw new ArithmeticException("decimal out of range");
         }
-        long u = neg ? -v.longValue() : v.longValue();
-        if (!Decimals.fitsPrecision(u, precision)) {
-            throw new ArithmeticException("decimal out of range");
+        if (neg) {
+            v = v.negate();
         }
-        return u;
+        return precision > DataType.NARROW_DECIMAL_PRECISION ? v : (Object) v.longValue();
     }
 }

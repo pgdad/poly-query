@@ -138,7 +138,7 @@ final class ScalarFunctions {
                 }
                 yield Math.abs(x);
             }
-            case DECIMAL -> Math.abs((Long) v);
+            case DECIMAL -> v instanceof BigInteger b ? b.abs() : (Object) Math.abs((Long) v);
             case FLOAT64 -> Math.abs((Double) v);
             default -> v;
         };
@@ -160,9 +160,9 @@ final class ScalarFunctions {
                 if (n >= t.scale()) {
                     yield v;
                 }
-                BigDecimal r = BigDecimal.valueOf((Long) v, t.scale()).setScale(n, RoundingMode.HALF_UP)
+                BigDecimal r = new BigDecimal(Decimals.toBig(v), t.scale()).setScale(n, RoundingMode.HALF_UP)
                         .setScale(out.scale(), RoundingMode.UNNECESSARY);
-                yield Decimals.check18(r.unscaledValue());
+                yield Decimals.value(r.unscaledValue(), out);
             }
             case FLOAT64 -> {
                 double r = BigDecimal.valueOf((Double) v).setScale(n, RoundingMode.HALF_UP).doubleValue();
@@ -178,6 +178,10 @@ final class ScalarFunctions {
     private static Object floorCeil(Object v, DataType t, boolean floor) {
         return switch (t.kind()) {
             case DECIMAL -> {
+                if (v instanceof BigInteger b) {
+                    yield new BigDecimal(b, t.scale()).setScale(0, floor ? RoundingMode.FLOOR : RoundingMode.CEILING)
+                            .unscaledValue();
+                }
                 long p = Decimals.pow10(t.scale());
                 long x = (Long) v;
                 yield floor ? Math.floorDiv(x, p) : -Math.floorDiv(-x, p);

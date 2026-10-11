@@ -59,7 +59,7 @@ public final class ResultWriter {
             case BOOLEAN -> sb.append(((Boolean) v) ? "true" : "false");
             case INT64 -> sb.append((long) (Long) v);
             case FLOAT64 -> sb.append(Values.formatDouble((Double) v));
-            case DECIMAL -> sb.append('"').append(Decimals.toString((Long) v, type.scale())).append('"');
+            case DECIMAL -> sb.append('"').append(Decimals.toString(v, type.scale())).append('"');
             case STRING -> JsonWriter.writeString(sb, (String) v);
             case DATE -> sb.append('"').append(DateTimes.formatDate((Integer) v)).append('"');
             case TIMESTAMP -> sb.append('"').append(DateTimes.formatTimestamp((Long) v)).append('"');
@@ -73,7 +73,7 @@ public final class ResultWriter {
             return null;
         }
         return switch (type.kind()) {
-            case DECIMAL -> Decimals.toString((Long) v, type.scale());
+            case DECIMAL -> Decimals.toString(v, type.scale());
             case DATE -> DateTimes.formatDate((Integer) v);
             case TIMESTAMP -> DateTimes.formatTimestamp((Long) v);
             case NULL -> null;

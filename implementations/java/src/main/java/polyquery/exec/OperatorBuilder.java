@@ -15,7 +15,6 @@ import polyquery.plan.SortKey;
 import polyquery.storage.ColumnSchema;
 import polyquery.types.DataType;
 import polyquery.types.Decimals;
-import polyquery.types.TypeKind;
 import polyquery.types.Values;
 
 /**
@@ -111,7 +110,7 @@ public final class OperatorBuilder {
         for (int i = 0; i < n; i++) {
             DataType lt = j.leftKeys().get(i).type();
             DataType rt = j.rightKeys().get(i).type();
-            if (lt.kind() == TypeKind.DECIMAL && rt.kind() == TypeKind.DECIMAL && lt.scale() != rt.scale()) {
+            if (HashKeys.mixedExact(lt, rt)) {
                 leftNorm.add(v -> HashKeys.normalize(v, lt));
                 rightNorm.add(v -> HashKeys.normalize(v, rt));
             } else {
@@ -152,10 +151,10 @@ public final class OperatorBuilder {
         };
     }
 
-    /** Compares two non-null values of comparable types (DECIMALs of different scales allowed). */
+    /** Compares two non-null values of comparable types (exact numbers of different scales allowed). */
     static int compareKeys(Object x, DataType xt, Object y, DataType yt) {
-        if (xt.kind() == TypeKind.DECIMAL && yt.kind() == TypeKind.DECIMAL && xt.scale() != yt.scale()) {
-            return Decimals.compare((Long) x, xt.scale(), (Long) y, yt.scale());
+        if (HashKeys.mixedExact(xt, yt)) {
+            return Decimals.compare(x, xt.exactScale(), y, yt.exactScale());
         }
         return Values.compare(x, y, xt);
     }

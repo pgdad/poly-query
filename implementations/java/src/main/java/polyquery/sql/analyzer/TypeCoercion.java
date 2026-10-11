@@ -57,11 +57,12 @@ final class TypeCoercion {
             if (lk == TypeKind.FLOAT64 || rk == TypeKind.FLOAT64) {
                 return new BoundExpr[] {implicit(l, DataType.FLOAT64), implicit(r, DataType.FLOAT64)};
             }
-            // INT64 vs DECIMAL: promote the integer to DECIMAL(18, s) of the other side.
-            if (lk == TypeKind.INT64) {
-                return new BoundExpr[] {implicit(l, DataType.decimal(18, rt.scale())), r};
+            // INT64 / DECIMAL: compared by exact value (CR-2 §4). INT64 and narrow DECIMAL operands
+            // of any scales are compared as they are; with a wide operand both become wide.
+            if (lt.isWideDecimal() || rt.isWideDecimal()) {
+                return new BoundExpr[] {implicit(l, wide(lt)), implicit(r, wide(rt))};
             }
-            return new BoundExpr[] {l, implicit(r, DataType.decimal(18, lt.scale()))};
+            return new BoundExpr[] {l, r};
         }
         if (lk.isTemporal() && rk.isTemporal()) {
             if (lk == rk) {
@@ -107,8 +108,26 @@ final class TypeCoercion {
         if (a.kind() == TypeKind.INT64 && b.kind() == TypeKind.INT64) {
             return DataType.INT64;
         }
-        int scale = Math.max(a.kind() == TypeKind.DECIMAL ? a.scale() : 0, b.kind() == TypeKind.DECIMAL ? b.scale() : 0);
-        return DataType.decimal(18, scale);
+        int scale = Math.max(a.exactScale(), b.exactScale());
+        return DataType.decimal(resultPrecision(a, b), scale);
+    }
+
+    /**
+     * The result precision W of a rule involving DECIMAL operands (CR-2 §2): 38 if one of them is
+     * a wide DECIMAL, else 18 (INT64 operands do not count).
+     */
+    static int resultPrecision(DataType... operands) {
+        for (DataType t : operands) {
+            if (t.isWideDecimal()) {
+                return DataType.MAX_DECIMAL_PRECISION;
+            }
+        }
+        return DataType.NARROW_DECIMAL_PRECISION;
+    }
+
+    /** The wide DECIMAL type holding every value of the exact numeric type {@code t} exactly. */
+    private static DataType wide(DataType t) {
+        return t.isWideDecimal() ? t : DataType.decimal(DataType.MAX_DECIMAL_PRECISION, t.exactScale());
     }
 
     /** Casts every expression to the common type. */
@@ -150,19 +169,20 @@ final class TypeCoercion {
             return new BoundExpr.Arithmetic(op, implicit(l, DataType.FLOAT64), implicit(r, DataType.FLOAT64),
                     DataType.FLOAT64);
         }
-        // DECIMAL arithmetic; an INT64 operand becomes DECIMAL(18,0).
+        // DECIMAL arithmetic with result precision W; an INT64 operand becomes DECIMAL(W,0).
+        int w = resultPrecision(lt, rt);
         if (lk == TypeKind.INT64) {
-            l = implicit(l, DataType.decimal(18, 0));
+            l = implicit(l, DataType.decimal(w, 0));
         }
         if (rk == TypeKind.INT64) {
-            r = implicit(r, DataType.decimal(18, 0));
+            r = implicit(r, DataType.decimal(w, 0));
         }
         int s1 = l.type().scale();
         int s2 = r.type().scale();
         int scale = op == ArithOp.MUL ? s1 + s2 : Math.max(s1, s2);
-        if (scale > DataType.MAX_DECIMAL_PRECISION) {
-            throw typeError("result scale %d of DECIMAL multiplication exceeds 18", scale);
+        if (scale > w) {
+            throw typeError("result scale %d of DECIMAL multiplication exceeds %d", scale, w);
         }
-        return new BoundExpr.Arithmetic(op, l, r, DataType.decimal(18, scale));
+        return new BoundExpr.Arithmetic(op, l, r, DataType.decimal(w, scale));
     }
 }

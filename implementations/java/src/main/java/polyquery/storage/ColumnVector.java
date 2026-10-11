@@ -1,5 +1,6 @@
 package polyquery.storage;
 
+import java.math.BigInteger;
 import java.util.Arrays;
 import java.util.BitSet;
 import polyquery.types.DataType;
@@ -37,7 +38,7 @@ public abstract sealed class ColumnVector {
         return new Builder(type, capacity);
     }
 
-    /** INT64, DECIMAL (unscaled) and TIMESTAMP (micros). */
+    /** INT64, narrow DECIMAL (unscaled) and TIMESTAMP (micros). */
     public static final class LongVector extends ColumnVector {
         private final long[] values;
         private final BitSet nulls;
@@ -199,6 +200,42 @@ public abstract sealed class ColumnVector {
         }
     }
 
+    /** Wide DECIMAL (precision 19–38): unscaled values; null elements are NULL. */
+    public static final class WideDecimalVector extends ColumnVector {
+        private final BigInteger[] values;
+
+        WideDecimalVector(DataType type, BigInteger[] values, int size) {
+            super(type, size);
+            this.values = values;
+        }
+
+        /** The backing array, null elements are NULL (read-only for callers). */
+        public BigInteger[] values() {
+            return values;
+        }
+
+        @Override
+        public boolean isNull(int row) {
+            return values[row] == null;
+        }
+
+        @Override
+        public Object get(int row) {
+            return values[row];
+        }
+
+        @Override
+        public long estimatedBytes() {
+            long total = 8L * size;
+            for (int i = 0; i < size; i++) {
+                if (values[i] != null) {
+                    total += 56;
+                }
+            }
+            return total;
+        }
+    }
+
     public static final class StringVector extends ColumnVector {
         private final String[] values;
 
@@ -347,6 +384,11 @@ public abstract sealed class ColumnVector {
         return new StringVector(DataType.STRING, values, values.length);
     }
 
+    /** Wide DECIMAL vector; null array elements are NULL. */
+    public static ColumnVector ofWideDecimals(DataType type, BigInteger[] values) {
+        return new WideDecimalVector(type, values, values.length);
+    }
+
     public static ColumnVector ofDictionary(String[] dictionary, int[] codes, BitSet nulls) {
         return new DictStringVector(DataType.STRING, dictionary, codes, nulls, codes.length);
     }
@@ -363,12 +405,17 @@ public abstract sealed class ColumnVector {
         private double[] doubles;
         private int[] ints;
         private String[] strings;
+        private BigInteger[] wides;
         private final BitSet bits = new BitSet();
         private final BitSet nulls = new BitSet();
 
         Builder(DataType type, int capacity) {
             this.type = type;
             int cap = Math.max(capacity, 16);
+            if (type.isWideDecimal()) {
+                wides = new BigInteger[cap];
+                return;
+            }
             switch (type.kind()) {
                 case INT64, DECIMAL, TIMESTAMP -> longs = new long[cap];
                 case FLOAT64 -> doubles = new double[cap];
@@ -393,6 +440,8 @@ public abstract sealed class ColumnVector {
                 ints = Arrays.copyOf(ints, n);
             } else if (strings != null) {
                 strings = Arrays.copyOf(strings, n);
+            } else if (wides != null) {
+                wides = Arrays.copyOf(wides, n);
             }
         }
 
@@ -408,6 +457,9 @@ public abstract sealed class ColumnVector {
             }
             if (strings != null) {
                 return strings.length;
+            }
+            if (wides != null) {
+                return wides.length;
             }
             return Integer.MAX_VALUE;
         }
@@ -429,6 +481,10 @@ public abstract sealed class ColumnVector {
                 return;
             }
             grow();
+            if (wides != null) {
+                wides[size++] = (BigInteger) v;
+                return;
+            }
             switch (type.kind()) {
                 case INT64, DECIMAL, TIMESTAMP -> longs[size] = (Long) v;
                 case FLOAT64 -> {
@@ -443,6 +499,9 @@ public abstract sealed class ColumnVector {
         }
 
         public ColumnVector build() {
+            if (wides != null) {
+                return new WideDecimalVector(type, Arrays.copyOf(wides, size), size);
+            }
             return switch (type.kind()) {
                 case INT64, DECIMAL, TIMESTAMP -> new LongVector(type, Arrays.copyOf(longs, size), nulls, size);
                 case FLOAT64 -> new DoubleVector(type, Arrays.copyOf(doubles, size), nulls, size);

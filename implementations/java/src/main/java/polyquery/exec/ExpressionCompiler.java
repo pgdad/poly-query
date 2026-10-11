@@ -1,8 +1,10 @@
 package polyquery.exec;
 
+import java.math.BigInteger;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.BinaryOperator;
 import java.util.function.Function;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
@@ -161,7 +163,10 @@ public final class ExpressionCompiler {
             };
             case DECIMAL -> row -> {
                 Object v = in.eval(row);
-                return v == null ? null : -(Long) v;
+                if (v == null) {
+                    return null;
+                }
+                return v instanceof BigInteger b ? b.negate() : (Object) (-(Long) v);
             };
             case FLOAT64 -> row -> {
                 Object v = in.eval(row);
@@ -257,6 +262,14 @@ public final class ExpressionCompiler {
                 int s1 = a.left().type().scale();
                 int s2 = a.right().type().scale();
                 int rs = type.scale();
+                if (type.isWideDecimal()) {
+                    yield wideArith(l, r, type, switch (a.op()) {
+                        case ADD -> (x, y) -> Decimals.addExact(x, s1, y, s2, rs);
+                        case SUB -> (x, y) -> Decimals.subtractExact(x, s1, y, s2, rs);
+                        case MUL -> Decimals::multiplyExact;
+                        default -> throw new IllegalStateException("DECIMAL " + a.op());
+                    });
+                }
                 yield longArith(l, r, switch (a.op()) {
                     case ADD -> (x, y) -> Decimals.add(x, s1, y, s2, rs);
                     case SUB -> (x, y) -> Decimals.subtract(x, s1, y, s2, rs);
@@ -294,6 +307,21 @@ public final class ExpressionCompiler {
         };
     }
 
+    /** Wide DECIMAL arithmetic: exact BigInteger result, checked against the result precision. */
+    private static Evaluator wideArith(Evaluator l, Evaluator r, DataType type, BinaryOperator<Object> exact) {
+        return row -> {
+            Object a = l.eval(row);
+            if (a == null) {
+                return null;
+            }
+            Object b = r.eval(row);
+            if (b == null) {
+                return null;
+            }
+            return Decimals.value((BigInteger) exact.apply(a, b), type);
+        };
+    }
+
     private static Evaluator doubleArith(Evaluator l, Evaluator r, DoubleOp op) {
         return row -> {
             Object a = l.eval(row);
@@ -320,10 +348,10 @@ public final class ExpressionCompiler {
 
     /** Comparator for operands of the given (comparable) types. */
     private static Comparer comparer(DataType lt, DataType rt) {
-        if (lt.kind() == TypeKind.DECIMAL && rt.kind() == TypeKind.DECIMAL && lt.scale() != rt.scale()) {
-            int s1 = lt.scale();
-            int s2 = rt.scale();
-            return (a, b) -> Decimals.compare((Long) a, s1, (Long) b, s2);
+        if (HashKeys.mixedExact(lt, rt)) {
+            int s1 = lt.exactScale();
+            int s2 = rt.exactScale();
+            return (a, b) -> Decimals.compare(a, s1, b, s2);
         }
         return (a, b) -> Values.compare(a, b, lt);
     }

@@ -153,14 +153,21 @@ public final class ColumnPredicates {
         return !(e instanceof BoundExpr.Cast cast) || allowedCast(cast.input().type(), cast);
     }
 
-    /** Exact, order-preserving implicit casts: INT64 → DECIMAL(18,s) and DATE → TIMESTAMP. */
+    /**
+     * Exact, order-preserving implicit casts: INT64 / DECIMAL → a DECIMAL holding every value of
+     * the source type (e.g. to the wide type of a comparison with a wide DECIMAL) and DATE →
+     * TIMESTAMP.
+     */
     private static boolean allowedCast(DataType from, BoundExpr.Cast cast) {
         if (!cast.implicit()) {
             return false;
         }
-        TypeKind to = cast.type().kind();
-        return (from.kind() == TypeKind.INT64 && to == TypeKind.DECIMAL)
-                || (from.kind() == TypeKind.DATE && to == TypeKind.TIMESTAMP);
+        DataType to = cast.type();
+        if (from.isExactNumeric() && to.kind() == TypeKind.DECIMAL) {
+            int integerDigits = from.kind() == TypeKind.INT64 ? 19 : from.precision() - from.scale();
+            return to.scale() >= from.exactScale() && to.precision() - to.scale() >= integerDigits;
+        }
+        return from.kind() == TypeKind.DATE && to.kind() == TypeKind.TIMESTAMP;
     }
 
     private static boolean isPlaceholder(BoundExpr e) {
@@ -198,24 +205,20 @@ public final class ColumnPredicates {
         }
         TypeKind ck = columnType.kind();
         TypeKind vk = valueType.kind();
-        if (ck == vk && (ck != TypeKind.DECIMAL || columnType.scale() == valueType.scale())) {
+        if (ck == vk && (ck != TypeKind.DECIMAL || columnType.scale() == valueType.scale()
+                && columnType.isWideDecimal() == valueType.isWideDecimal())) {
             return simple(op, KeyDomain.key(value, columnType));
         }
-        if (ck == TypeKind.DECIMAL && vk == TypeKind.DECIMAL) {
-            return rational(op, BigInteger.valueOf((Long) value).multiply(pow10(columnType.scale())),
-                    pow10(valueType.scale()));
-        }
-        if (ck == TypeKind.INT64 && vk == TypeKind.DECIMAL) {
-            return rational(op, BigInteger.valueOf((Long) value), pow10(valueType.scale()));
+        if (columnType.isExactNumeric() && valueType.isExactNumeric()) {
+            // value = u / 10^vs, i.e. u · 10^cs / 10^vs in units of the column's unscaled keys
+            return rational(op, Decimals.upscale(Decimals.toBig(value), columnType.exactScale()),
+                    Decimals.bigPow10(valueType.exactScale()), columnType.isWideDecimal());
         }
         if (ck == TypeKind.DATE && vk == TypeKind.TIMESTAMP) {
-            return rational(op, BigInteger.valueOf((Long) value), BigInteger.valueOf(DateTimes.MICROS_PER_DAY));
+            return rational(op, BigInteger.valueOf((Long) value), BigInteger.valueOf(DateTimes.MICROS_PER_DAY),
+                    false);
         }
         return null;
-    }
-
-    private static BigInteger pow10(int n) {
-        return BigInteger.valueOf(Decimals.pow10(n));
     }
 
     private static KeyPredicate simple(CompareOp op, Object key) {
@@ -232,11 +235,24 @@ public final class ColumnPredicates {
     private static final BigInteger LONG_MIN = BigInteger.valueOf(Long.MIN_VALUE);
     private static final BigInteger LONG_MAX = BigInteger.valueOf(Long.MAX_VALUE);
 
-    /** {@code k <op> num/den} for integer keys {@code k} (den > 0), as inclusive integer bounds. */
-    private static KeyPredicate rational(CompareOp op, BigInteger num, BigInteger den) {
+    /**
+     * {@code k <op> num/den} for integer keys {@code k} (den > 0), as inclusive integer bounds:
+     * {@link Long} keys, or {@link BigInteger} keys of a wide DECIMAL column ({@code wide}).
+     */
+    private static KeyPredicate rational(CompareOp op, BigInteger num, BigInteger den, boolean wide) {
         BigInteger[] qr = num.divideAndRemainder(den);
         BigInteger floor = qr[1].signum() < 0 ? qr[0].subtract(BigInteger.ONE) : qr[0];
         BigInteger ceil = qr[1].signum() > 0 ? qr[0].add(BigInteger.ONE) : qr[0];
+        if (wide) {
+            return switch (op) {
+                case EQ -> qr[1].signum() != 0 ? new KeyPredicate.Empty() : new KeyPredicate.Points(List.of(floor));
+                case GT -> new KeyPredicate.Range(floor.add(BigInteger.ONE), true, null, false);
+                case GE -> new KeyPredicate.Range(ceil, true, null, false);
+                case LT -> new KeyPredicate.Range(null, false, ceil.subtract(BigInteger.ONE), true);
+                case LE -> new KeyPredicate.Range(null, false, floor, true);
+                case NEQ -> null;
+            };
+        }
         return switch (op) {
             case EQ -> qr[1].signum() != 0 || floor.compareTo(LONG_MIN) < 0 || floor.compareTo(LONG_MAX) > 0
                     ? new KeyPredicate.Empty() : new KeyPredicate.Points(List.of(floor.longValueExact()));

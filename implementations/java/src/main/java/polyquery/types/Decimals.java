@@ -7,18 +7,27 @@ import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 
 /**
- * Exact fixed-point arithmetic on unscaled {@code long} values (at most 18 digits).
- * Intermediates fall back to {@link BigInteger} whenever 64 bits are not enough.
+ * Exact fixed-point arithmetic. Narrow DECIMALs (precision ≤ 18) use unscaled {@code long}
+ * values with 64-bit fast paths, falling back to {@link BigInteger} intermediates whenever 64
+ * bits are not enough; wide DECIMALs (precision 19–38) use unscaled {@link BigInteger} values.
+ * The generic methods taking {@code Object} operands accept either representation (and INT64
+ * {@code Long}s, which are unscaled values of scale 0).
  */
 public final class Decimals {
     public static final long MAX_UNSCALED = 999_999_999_999_999_999L;
     private static final long[] POW10 = new long[19];
     private static final BigInteger BIG_MAX = BigInteger.valueOf(MAX_UNSCALED);
+    /** 10^0 … 10^77: enough to rescale any wide value and to bound products of two of them. */
+    private static final BigInteger[] BIG_POW10 = new BigInteger[78];
 
     static {
         POW10[0] = 1;
         for (int i = 1; i < POW10.length; i++) {
             POW10[i] = POW10[i - 1] * 10;
+        }
+        BIG_POW10[0] = BigInteger.ONE;
+        for (int i = 1; i < BIG_POW10.length; i++) {
+            BIG_POW10[i] = BIG_POW10[i - 1].multiply(BigInteger.TEN);
         }
     }
 
@@ -27,6 +36,11 @@ public final class Decimals {
 
     public static long pow10(int n) {
         return POW10[n];
+    }
+
+    /** 10^n as a BigInteger (0 ≤ n ≤ 77). */
+    public static BigInteger bigPow10(int n) {
+        return n < BIG_POW10.length ? BIG_POW10[n] : BigInteger.TEN.pow(n);
     }
 
     /** True if {@code |unscaled| < 10^precision}. */
@@ -151,18 +165,12 @@ public final class Decimals {
         return BigDecimal.valueOf(unscaled, scale).doubleValue();
     }
 
-    /** Converts a finite double, rounding half away from zero, to the given precision/scale. */
-    public static long fromDouble(double d, int precision, int scale) {
-        BigDecimal bd = new BigDecimal(Double.toString(d)).setScale(scale, RoundingMode.HALF_UP);
-        BigInteger u = bd.unscaledValue();
-        if (u.bitLength() > 63) {
-            throw overflow();
-        }
-        long v = u.longValue();
-        if (!fitsPrecision(v, precision)) {
-            throw overflow();
-        }
-        return v;
+    /**
+     * Unscaled value of a finite double at the given scale: the exact binary value of the double,
+     * rounded half away from zero (no precision check).
+     */
+    public static BigInteger fromDouble(double d, int scale) {
+        return new BigDecimal(d).setScale(scale, RoundingMode.HALF_UP).unscaledValue();
     }
 
     /** Canonical text: exactly {@code scale} fractional digits, leading '-' if negative. */
@@ -187,5 +195,117 @@ public final class Decimals {
             sb.append(digits, 0, point).append('.').append(digits, point, digits.length());
         }
         return sb.toString();
+    }
+
+    // ---------------------------------------------------------------- representation-generic (narrow and wide)
+
+    /** Unscaled value of a DECIMAL runtime value (or an INT64) as a BigInteger. */
+    public static BigInteger toBig(Object v) {
+        return v instanceof BigInteger b ? b : BigInteger.valueOf((Long) v);
+    }
+
+    /** True if {@code |unscaled| < 10^precision}. */
+    public static boolean fitsPrecision(BigInteger unscaled, int precision) {
+        return unscaled.abs().compareTo(bigPow10(precision)) < 0;
+    }
+
+    /**
+     * The runtime value of the exact unscaled result {@code u} of DECIMAL type {@code type}
+     * ({@code Long} if narrow, {@code BigInteger} if wide); NUMERIC_OVERFLOW unless
+     * {@code |u| < 10^precision}.
+     */
+    public static Object value(BigInteger u, DataType type) {
+        if (!fitsPrecision(u, type.precision())) {
+            throw overflow();
+        }
+        return type.isWideDecimal() ? u : (Object) u.longValue();
+    }
+
+    /** Exact sum {@code a + b} of two values at scales {@code sa}, {@code sb}, at scale {@code rs}. */
+    public static BigInteger addExact(Object a, int sa, Object b, int sb, int rs) {
+        return upscale(toBig(a), rs - sa).add(upscale(toBig(b), rs - sb));
+    }
+
+    /** Exact difference {@code a - b}, at scale {@code rs}. */
+    public static BigInteger subtractExact(Object a, int sa, Object b, int sb, int rs) {
+        return upscale(toBig(a), rs - sa).subtract(upscale(toBig(b), rs - sb));
+    }
+
+    /** Exact product of unscaled values (scale = sum of the operand scales). */
+    public static BigInteger multiplyExact(Object a, Object b) {
+        return toBig(a).multiply(toBig(b));
+    }
+
+    /** {@code v · 10^n} (n ≥ 0). */
+    public static BigInteger upscale(BigInteger v, int n) {
+        return n == 0 ? v : v.multiply(bigPow10(n));
+    }
+
+    /** Rescales between scales, rounding half away from zero when reducing scale (no precision check). */
+    public static BigInteger rescale(BigInteger v, int fromScale, int toScale) {
+        if (toScale >= fromScale) {
+            return upscale(v, toScale - fromScale);
+        }
+        return new BigDecimal(v, fromScale).setScale(toScale, RoundingMode.HALF_UP).unscaledValue();
+    }
+
+    /**
+     * Exact comparison of two exact numbers given as unscaled values and scales (any mix of
+     * narrow {@code Long}s, INT64 {@code Long}s of scale 0 and wide {@code BigInteger}s).
+     */
+    public static int compare(Object a, int sa, Object b, int sb) {
+        if (a instanceof Long x && b instanceof Long y) {
+            return compare((long) x, sa, (long) y, sb);
+        }
+        BigInteger x = toBig(a);
+        BigInteger y = toBig(b);
+        if (sa < sb) {
+            x = upscale(x, sb - sa);
+        } else if (sb < sa) {
+            y = upscale(y, sa - sb);
+        }
+        return x.compareTo(y);
+    }
+
+    /** Truncates toward zero to an integer (exact, any size). */
+    public static BigInteger truncateToInteger(BigInteger v, int scale) {
+        return scale == 0 ? v : v.divide(bigPow10(scale));
+    }
+
+    /** Nearest double of {@code unscaled / 10^scale}. */
+    public static double toDouble(BigInteger unscaled, int scale) {
+        if (unscaled.bitLength() < 63) {
+            return toDouble(unscaled.longValue(), scale);
+        }
+        return new BigDecimal(unscaled, scale).doubleValue();
+    }
+
+    /** Canonical text of a wide value: exactly {@code scale} fractional digits, leading '-' if negative. */
+    public static String toString(BigInteger unscaled, int scale) {
+        if (unscaled.bitLength() < 64) {
+            return toString(unscaled.longValue(), scale);
+        }
+        String digits = unscaled.abs().toString();
+        StringBuilder sb = new StringBuilder(digits.length() + 3);
+        if (unscaled.signum() < 0) {
+            sb.append('-');
+        }
+        if (scale == 0) {
+            return sb.append(digits).toString();
+        }
+        if (digits.length() <= scale) {
+            sb.append("0.");
+            sb.repeat('0', scale - digits.length());
+            sb.append(digits);
+        } else {
+            int point = digits.length() - scale;
+            sb.append(digits, 0, point).append('.').append(digits, point, digits.length());
+        }
+        return sb.toString();
+    }
+
+    /** Canonical text of a DECIMAL runtime value of either representation. */
+    public static String toString(Object unscaled, int scale) {
+        return unscaled instanceof BigInteger b ? toString(b, scale) : toString((long) (Long) unscaled, scale);
     }
 }

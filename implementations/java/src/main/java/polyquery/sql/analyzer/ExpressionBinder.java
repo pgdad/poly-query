@@ -119,8 +119,12 @@ final class ExpressionBinder {
             return floatLiteral(text);
         }
         String all = sigInt + fracPart;
-        long unscaled = all.isEmpty() ? 0 : Long.parseLong(all);
-        return new BoundExpr.Literal(negative ? -unscaled : unscaled, DataType.decimal(precision, scale));
+        DataType type = DataType.decimal(precision, scale);
+        BigInteger unscaled = all.isEmpty() ? BigInteger.ZERO : new BigInteger(all);
+        if (negative) {
+            unscaled = unscaled.negate();
+        }
+        return new BoundExpr.Literal(type.isWideDecimal() ? unscaled : (Object) unscaled.longValue(), type);
     }
 
     private static BoundExpr.Literal floatLiteral(String text) {
@@ -364,7 +368,7 @@ final class ExpressionBinder {
                     throw typeError("SUM requires a numeric argument, got %s", t);
                 }
                 yield switch (t.kind()) {
-                    case DECIMAL -> DataType.decimal(18, t.scale());
+                    case DECIMAL -> DataType.decimal(TypeCoercion.resultPrecision(t), t.scale());
                     case FLOAT64 -> DataType.FLOAT64;
                     default -> DataType.INT64;
                 };

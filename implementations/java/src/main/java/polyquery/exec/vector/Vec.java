@@ -9,10 +9,10 @@ import polyquery.types.DataType;
  * that produced the vector hold meaningful values. Vectors are owned by the operator or
  * expression that fills them and are reused from batch to batch (no per-batch allocation).
  *
- * <p>Physical representations ({@link Kind}): BOOLEAN (0/1), INT64, DECIMAL (unscaled), DATE
- * (days) and TIMESTAMP (micros) use {@code longs}; FLOAT64 uses {@code doubles}; STRING uses
- * {@code objects} or, when read from a dictionary-encoded column, {@code codes} into
- * {@code dict}. The kind of a STRING vector may change from batch to batch.
+ * <p>Physical representations ({@link Kind}): BOOLEAN (0/1), INT64, narrow DECIMAL (unscaled),
+ * DATE (days) and TIMESTAMP (micros) use {@code longs}; FLOAT64 uses {@code doubles}; wide
+ * DECIMAL uses {@code objects} (BigInteger unscaled values); STRING uses {@code objects} or,
+ * when read from a dictionary-encoded column, {@code codes} into {@code dict}. The kind of a STRING vector may change from batch to batch.
  */
 public final class Vec {
     /** Physical representation. */
@@ -45,6 +45,9 @@ public final class Vec {
 
     /** Representation used for values of {@code type} (STRING vectors may also be DICT). */
     public static Kind kindOf(DataType type) {
+        if (type.isWideDecimal()) {
+            return Kind.OBJECT; // BigInteger unscaled values
+        }
         return switch (type.kind()) {
             case BOOLEAN, INT64, DECIMAL, DATE, TIMESTAMP -> Kind.LONG;
             case FLOAT64 -> Kind.DOUBLE;

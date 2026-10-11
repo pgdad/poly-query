@@ -1,5 +1,6 @@
 package polyquery.exec.vector;
 
+import java.math.BigInteger;
 import java.util.List;
 import polyquery.exec.ExecContext;
 import polyquery.plan.SortKey;
@@ -59,7 +60,7 @@ final class SortBatches {
                 long[] p = new long[store.rows()];
                 for (int i = 0; i < p.length; i++) {
                     if (!cols[j].isNull(i)) {
-                        p[i] = prefix(cols[j].string(i));
+                        p[i] = sortKey(cols[j], i);
                     }
                 }
                 prefixes[j] = p;
@@ -81,7 +82,11 @@ final class SortBatches {
                     case DOUBLE -> Values.compareDoubles(v.doubles[a], v.doubles[b]);
                     default -> {
                         int pc = Long.compareUnsigned(prefixes[j][a], prefixes[j][b]);
-                        yield pc != 0 ? pc : Values.compareStrings(v.string(a), v.string(b));
+                        if (pc != 0) {
+                            yield pc;
+                        }
+                        yield v.type.isWideDecimal() ? ((BigInteger) v.objects[a]).compareTo((BigInteger) v.objects[b])
+                                : Values.compareStrings(v.string(a), v.string(b));
                     }
                 };
                 if (c != 0) {
@@ -126,7 +131,11 @@ final class SortBatches {
         return idx;
     }
 
-    /** An unsigned 64-bit key whose order is the value order (doubles: -0.0 equals 0.0). */
+    /**
+     * An unsigned 64-bit key whose order is the value order (doubles: -0.0 equals 0.0); for
+     * strings a prefix, for wide DECIMALs the high 64 bits of the 128-bit value (equal keys need
+     * a full comparison).
+     */
     private static long sortKey(Vec v, int i) {
         return switch (v.kind) {
             case LONG -> v.longs[i] ^ Long.MIN_VALUE;
@@ -135,7 +144,8 @@ final class SortBatches {
                 long bits = Double.doubleToLongBits(d == 0.0 ? 0.0 : d);
                 yield bits < 0 ? ~bits : bits ^ Long.MIN_VALUE;
             }
-            default -> prefix(v.string(i));
+            default -> v.type.isWideDecimal() ? ((BigInteger) v.objects[i]).shiftRight(64).longValue() ^ Long.MIN_VALUE
+                    : prefix(v.string(i));
         };
     }
 

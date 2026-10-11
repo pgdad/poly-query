@@ -105,6 +105,20 @@ public final class Parser {
         return t.text();
     }
 
+    /**
+     * The alias after an explicit {@code AS}: an identifier, or one of the keywords that are
+     * reserved only for future syntax ({@code FULL}, {@code RIGHT}), which cannot mean anything
+     * else in this position (e.g. {@code SELECT … AS full}).
+     */
+    private String aliasAfterAs(String what) {
+        Token t = peek();
+        if (t.isKeyword("FULL") || t.isKeyword("RIGHT")) {
+            next();
+            return t.raw();
+        }
+        return identifier(what);
+    }
+
     private PolyQueryException error(Token t, String msg) {
         return PolyQueryException.parse(msg, t.line(), t.column());
     }
@@ -306,7 +320,7 @@ public final class Parser {
         Expr e = expr();
         String alias = null;
         if (acceptKeyword("AS")) {
-            alias = identifier("alias");
+            alias = aliasAfterAs("alias");
         } else if (isIdent(peek())) {
             alias = next().text();
         }
@@ -372,7 +386,7 @@ public final class Parser {
         String name = identifier("table name");
         String alias = null;
         if (acceptKeyword("AS")) {
-            alias = identifier("alias");
+            alias = aliasAfterAs("alias");
         } else if (isIdent(peek())) {
             alias = next().text();
         }

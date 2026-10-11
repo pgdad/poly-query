@@ -9,14 +9,15 @@ import java.util.Arrays;
 public final class OrderedIndex implements IndexStructure {
     private final long[] longKeys;
     private final double[] doubleKeys;
-    private final String[] stringKeys;
+    /** STRING or wide DECIMAL keys. */
+    private final Object[] objectKeys;
     private final int[] rows;
     private final int distinct;
 
-    private OrderedIndex(long[] longKeys, double[] doubleKeys, String[] stringKeys, int[] rows) {
+    private OrderedIndex(long[] longKeys, double[] doubleKeys, Object[] objectKeys, int[] rows) {
         this.longKeys = longKeys;
         this.doubleKeys = doubleKeys;
-        this.stringKeys = stringKeys;
+        this.objectKeys = objectKeys;
         this.rows = rows;
         int d = 0;
         for (int i = 0; i < rows.length; i++) {
@@ -48,7 +49,7 @@ public final class OrderedIndex implements IndexStructure {
         IntSort.sort(perm, (a, b) -> KeyDomain.compare(keys[a], keys[b]));
         long[] longs = null;
         double[] doubles = null;
-        String[] strings = null;
+        Object[] objects = null;
         if (sample instanceof Long) {
             longs = new long[n];
             for (int i = 0; i < n; i++) {
@@ -60,12 +61,12 @@ public final class OrderedIndex implements IndexStructure {
                 doubles[i] = (Double) keys[perm[i]];
             }
         } else {
-            strings = new String[n];
+            objects = new Object[n];
             for (int i = 0; i < n; i++) {
-                strings[i] = (String) keys[perm[i]];
+                objects[i] = keys[perm[i]];
             }
         }
-        return new OrderedIndex(longs, doubles, strings, perm);
+        return new OrderedIndex(longs, doubles, objects, perm);
     }
 
     private Object keyAt(int i) {
@@ -75,7 +76,7 @@ public final class OrderedIndex implements IndexStructure {
         if (doubleKeys != null) {
             return doubleKeys[i];
         }
-        return stringKeys[i];
+        return objectKeys[i];
     }
 
     /** Compares the key at position {@code i} with {@code key}. */
@@ -86,7 +87,7 @@ public final class OrderedIndex implements IndexStructure {
         if (doubleKeys != null) {
             return Double.compare(doubleKeys[i], (Double) key);
         }
-        return KeyDomain.compare(stringKeys[i], key);
+        return KeyDomain.compare(objectKeys[i], key);
     }
 
     /** First position whose key is {@code >= key} (or {@code > key} if {@code strict}). */

@@ -57,6 +57,7 @@ public final class DistinctCounter {
             case Integer i -> i;
             case Double d -> Double.doubleToLongBits(d);
             case Boolean b -> b ? 1 : 0;
+            case java.math.BigInteger b -> b.longValue() * 31 + b.shiftRight(64).longValue();
             case String s -> {
                 long h = 0xcbf29ce484222325L;
                 for (int i = 0; i < s.length(); i++) {

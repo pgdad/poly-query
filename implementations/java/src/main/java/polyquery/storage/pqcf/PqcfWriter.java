@@ -36,6 +36,8 @@ import polyquery.types.Decimals;
  */
 public final class PqcfWriter {
     public static final int DEFAULT_ROW_GROUP_SIZE = 65_536;
+    /** Highest format version read and written (PQCF v2: wide DECIMAL columns, CR-2 §7). */
+    public static final int MAX_FORMAT_VERSION = 2;
     private static final AtomicLong COUNTER = new AtomicLong();
 
     private PqcfWriter() {
@@ -123,8 +125,9 @@ public final class PqcfWriter {
             throws IOException {
         List<ColumnSchema> columns = table.columns();
         int rows = table.rowCount();
+        int version = formatVersion(columns);
         out.write(PqcfReader.MAGIC);
-        out.write(new byte[] {1, 0, 0, 0});
+        out.write(new byte[] {(byte) version, 0, 0, 0});
         long pos = PqcfReader.HEADER_SIZE;
         ColumnCursor[] cursors = new ColumnCursor[columns.size()];
         for (int c = 0; c < cursors.length; c++) {
@@ -165,7 +168,7 @@ public final class PqcfWriter {
             group.put("chunks", chunks);
             groups.add(group);
         }
-        byte[] meta = JsonWriter.write(metadata(table, writer, groups)).getBytes(StandardCharsets.UTF_8);
+        byte[] meta = JsonWriter.write(metadata(table, writer, groups, version)).getBytes(StandardCharsets.UTF_8);
         out.write(meta);
         CRC32 crc = new CRC32();
         crc.update(meta);
@@ -175,9 +178,22 @@ public final class PqcfWriter {
         return pos + meta.length + PqcfReader.FOOTER_SIZE;
     }
 
-    private static Map<String, Object> metadata(Table table, String writer, List<Object> groups) {
+    /**
+     * Writer rule of CR-2 §7: a table with a wide DECIMAL column is written as v2, every other
+     * table as v1 (readable by v1-only engines).
+     */
+    static int formatVersion(List<ColumnSchema> columns) {
+        for (ColumnSchema c : columns) {
+            if (c.type().isWideDecimal()) {
+                return 2;
+            }
+        }
+        return 1;
+    }
+
+    private static Map<String, Object> metadata(Table table, String writer, List<Object> groups, int version) {
         Map<String, Object> m = new LinkedHashMap<>();
-        m.put("format_version", 1L);
+        m.put("format_version", (long) version);
         m.put("writer", writer);
         m.put("table", table.name());
         m.put("row_count", (long) table.rowCount());
@@ -205,7 +221,7 @@ public final class PqcfWriter {
     /** A chunk min/max value serialized as in types.md §9. */
     private static Object statistic(Object v, DataType type) {
         return switch (type.kind()) {
-            case DECIMAL -> Decimals.toString((Long) v, type.scale());
+            case DECIMAL -> Decimals.toString(v, type.scale());
             case DATE -> DateTimes.formatDate((Integer) v);
             case TIMESTAMP -> DateTimes.formatTimestamp((Long) v);
             default -> v;

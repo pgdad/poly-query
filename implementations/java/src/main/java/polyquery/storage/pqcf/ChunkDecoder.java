@@ -1,6 +1,7 @@
 package polyquery.storage.pqcf;
 
 import java.lang.foreign.MemorySegment;
+import java.math.BigInteger;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -51,11 +52,20 @@ final class ChunkDecoder {
         }
         ChunkDecoder d = new ChunkDecoder(chunk, type, n, meta.nullCount());
         d.readValidity();
-        ColumnVector v = switch (meta.encoding()) {
-            case PLAIN -> d.plain();
-            case DICT -> d.dict();
-            case RLE -> d.rle();
-        };
+        ColumnVector v;
+        if (type.isWideDecimal()) {
+            v = switch (meta.encoding()) {
+                case PLAIN -> d.widePlain();
+                case RLE -> d.wideRle();
+                case DICT -> throw PqcfReader.corrupt("DICT encoding on a DECIMAL column");
+            };
+        } else {
+            v = switch (meta.encoding()) {
+                case PLAIN -> d.plain();
+                case DICT -> d.dict();
+                case RLE -> d.rle();
+            };
+        }
         if (d.pos != chunk.byteSize()) {
             throw PqcfReader.corrupt("column chunk size does not match its contents");
         }
@@ -311,5 +321,65 @@ final class ChunkDecoder {
             }
             default -> ColumnVector.ofLongs(type, slots, nulls);
         };
+    }
+
+    // ---------------------------------------------------------------- wide DECIMAL (PQCF v2)
+
+    /** An i128 two's-complement little-endian value. */
+    private BigInteger i128() {
+        long lo = i64();
+        long hi = i64();
+        if (hi == lo >> 63) {
+            return BigInteger.valueOf(lo); // fits 64 bits
+        }
+        BigInteger low = BigInteger.valueOf(lo & Long.MAX_VALUE);
+        if (lo < 0) {
+            low = low.setBit(63);
+        }
+        return BigInteger.valueOf(hi).shiftLeft(64).or(low);
+    }
+
+    private BigInteger checkWide(BigInteger v) {
+        if (!Decimals.fitsPrecision(v, type.precision())) {
+            throw PqcfReader.corrupt("DECIMAL value exceeds the column precision");
+        }
+        return v;
+    }
+
+    private ColumnVector widePlain() {
+        need(16L * n);
+        BigInteger[] values = new BigInteger[n];
+        for (int i = 0; i < n; i++) {
+            BigInteger v = i128();
+            values[i] = nulls.get(i) ? null : checkWide(v);
+        }
+        return ColumnVector.ofWideDecimals(type, values);
+    }
+
+    private ColumnVector wideRle() {
+        long runs = u32();
+        need(20 * runs);
+        BigInteger[] values = new BigInteger[n];
+        long row = 0;
+        for (long r = 0; r < runs; r++) {
+            BigInteger value = i128();
+            long length = u32();
+            if (length < 1 || row + length > n) {
+                throw PqcfReader.corrupt("invalid RLE run length");
+            }
+            int from = (int) row;
+            int to = (int) (row + length);
+            if (nulls.nextClearBit(from) < to) {
+                checkWide(value);
+            }
+            for (int i = from; i < to; i++) {
+                values[i] = nulls.get(i) ? null : value;
+            }
+            row += length;
+        }
+        if (row != n) {
+            throw PqcfReader.corrupt("RLE runs do not cover the row group");
+        }
+        return ColumnVector.ofWideDecimals(type, values);
     }
 }

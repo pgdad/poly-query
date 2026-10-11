@@ -1,6 +1,7 @@
 package polyquery.optimizer;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.math.MathContext;
 import java.util.ArrayList;
 import java.util.List;
@@ -10,6 +11,7 @@ import polyquery.plan.LogicalPlan;
 import polyquery.storage.ColumnStats;
 import polyquery.storage.Table;
 import polyquery.types.DataType;
+import polyquery.types.Decimals;
 import polyquery.types.TypeKind;
 
 /**
@@ -22,7 +24,6 @@ import polyquery.types.TypeKind;
 public final class ExprSafety {
     private static final BigDecimal LONG_MIN = BigDecimal.valueOf(Long.MIN_VALUE);
     private static final BigDecimal LONG_MAX = BigDecimal.valueOf(Long.MAX_VALUE);
-    private static final BigDecimal DECIMAL_LIMIT = BigDecimal.valueOf(999_999_999_999_999_999L);
     private static final BigDecimal DOUBLE_LIMIT = new BigDecimal("1e300");
     /** Scalar functions that never raise an error for valid arguments. */
     private static final List<String> TOTAL_FUNCTIONS = List.of("UPPER", "LOWER", "TRIM", "LTRIM", "RTRIM",
@@ -179,8 +180,8 @@ public final class ExprSafety {
                 }
                 break;
             case DECIMAL:
-                if (t == TypeKind.FLOAT64 || t == TypeKind.INT64) {
-                    return false;
+                if (t == TypeKind.FLOAT64 || t == TypeKind.INT64 && !from.isWideDecimal()) {
+                    return false; // a narrow DECIMAL always fits INT64
                 }
                 if (t == TypeKind.DECIMAL && to.scale() >= from.scale()
                         && to.precision() - to.scale() >= from.precision() - from.scale()) {
@@ -231,7 +232,7 @@ public final class ExprSafety {
         }
         BigDecimal limit = switch (type.kind()) {
             case INT64 -> LONG_MAX.subtract(BigDecimal.ONE);
-            case DECIMAL -> DECIMAL_LIMIT.movePointLeft(type.scale());
+            case DECIMAL -> new BigDecimal(Decimals.bigPow10(type.precision()).subtract(BigInteger.ONE), type.scale());
             default -> DOUBLE_LIMIT;
         };
         return result.maxAbs().compareTo(limit) > 0;
@@ -318,7 +319,7 @@ public final class ExprSafety {
         }
         return switch (type.kind()) {
             case INT64 -> BigDecimal.valueOf((Long) v);
-            case DECIMAL -> BigDecimal.valueOf((Long) v, type.scale());
+            case DECIMAL -> new BigDecimal(Decimals.toBig(v), type.scale());
             case FLOAT64 -> {
                 double d = (Double) v;
                 yield Double.isFinite(d) ? new BigDecimal(d) : null;

@@ -16,7 +16,7 @@ public final class Version {
             "phase3", "storage.pqcf", "storage.mmap", "index.hash", "index.btree",
             "phase4", "http.streaming",
             "phase5", "exec.row", "exec.vectorized", "exec.parallel", "join.hash", "join.merge", "join.nested_loop",
-            "native.kernels", "change.union_all");
+            "native.kernels", "change.union_all", "change.decimal38");
 
     private Version() {
     }

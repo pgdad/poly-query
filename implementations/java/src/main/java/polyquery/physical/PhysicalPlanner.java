@@ -260,7 +260,7 @@ public final class PhysicalPlanner {
         return switch (type.kind()) {
             case BOOLEAN -> ((Long) key) != 0 ? "TRUE" : "FALSE";
             case INT64, FLOAT64 -> key.toString();
-            case DECIMAL -> Decimals.toString((Long) key, type.scale());
+            case DECIMAL -> Decimals.toString(key, type.scale());
             case DATE -> "DATE '" + DateTimes.formatDate((int) (long) (Long) key) + "'";
             case TIMESTAMP -> "TIMESTAMP '" + DateTimes.formatTimestamp((Long) key) + "'";
             default -> "'" + ((String) key).replace("'", "''") + "'";

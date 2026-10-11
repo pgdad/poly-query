@@ -8,12 +8,16 @@ import polyquery.common.PolyQueryException;
  * A PolyQuery data type. Precision and scale are only meaningful for DECIMAL.
  *
  * <p>Runtime value representation (used throughout storage and execution):
- * BOOLEAN → {@link Boolean}, INT64 → {@link Long}, DECIMAL → {@link Long} unscaled value,
- * FLOAT64 → {@link Double}, STRING → {@link String}, DATE → {@link Integer} days since epoch,
+ * BOOLEAN → {@link Boolean}, INT64 → {@link Long}, narrow DECIMAL (precision ≤ 18) →
+ * {@link Long} unscaled value, wide DECIMAL (precision 19–38) → {@link java.math.BigInteger}
+ * unscaled value, FLOAT64 → {@link Double}, STRING → {@link String}, DATE → {@link Integer} days since epoch,
  * TIMESTAMP → {@link Long} microseconds since epoch, NULL → {@code null}.
  */
 public record DataType(TypeKind kind, int precision, int scale) {
-    public static final int MAX_DECIMAL_PRECISION = 18;
+    /** Largest DECIMAL precision (CR-2). */
+    public static final int MAX_DECIMAL_PRECISION = 38;
+    /** Largest precision of a narrow DECIMAL; the result precision of narrow arithmetic. */
+    public static final int NARROW_DECIMAL_PRECISION = 18;
 
     public static final DataType BOOLEAN = new DataType(TypeKind.BOOLEAN, 0, 0);
     public static final DataType INT64 = new DataType(TypeKind.INT64, 0, 0);
@@ -29,6 +33,21 @@ public record DataType(TypeKind kind, int precision, int scale) {
                     "invalid DECIMAL parameters (%d,%d)", precision, scale);
         }
         return new DataType(TypeKind.DECIMAL, precision, scale);
+    }
+
+    /** A DECIMAL of precision 19–38, represented by a {@link java.math.BigInteger} unscaled value. */
+    public boolean isWideDecimal() {
+        return kind == TypeKind.DECIMAL && precision > NARROW_DECIMAL_PRECISION;
+    }
+
+    /** INT64 or DECIMAL: exact numbers, comparable with each other by value. */
+    public boolean isExactNumeric() {
+        return kind == TypeKind.INT64 || kind == TypeKind.DECIMAL;
+    }
+
+    /** The scale of an exact numeric type (0 for INT64). */
+    public int exactScale() {
+        return kind == TypeKind.DECIMAL ? scale : 0;
     }
 
     public boolean isNumeric() {
@@ -101,7 +120,7 @@ public record DataType(TypeKind kind, int precision, int scale) {
             return simple;
         }
         if (precision == null) {
-            return decimal(MAX_DECIMAL_PRECISION, 0);
+            return decimal(NARROW_DECIMAL_PRECISION, 0);
         }
         return decimal(precision, scale == null ? 0 : scale);
     }

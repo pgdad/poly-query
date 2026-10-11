@@ -30,13 +30,13 @@ public abstract class Accumulator {
             case COUNT_STAR, COUNT -> new Count();
             case SUM -> switch (in.kind()) {
                 case FLOAT64 -> new FloatSum(false);
-                case DECIMAL -> new ExactSum(false, in.scale(), true);
-                default -> new ExactSum(false, 0, false);
+                case DECIMAL -> new ExactSum(false, in.scale(), call.type());
+                default -> new ExactSum(false, 0, null);
             };
             case AVG -> switch (in.kind()) {
                 case FLOAT64 -> new FloatSum(true);
-                case DECIMAL -> new ExactSum(true, in.scale(), true);
-                default -> new ExactSum(true, 0, false);
+                case DECIMAL -> new ExactSum(true, in.scale(), null);
+                default -> new ExactSum(true, 0, null);
             };
             case MIN -> new MinMax(in, true);
             case MAX -> new MinMax(in, false);
@@ -86,16 +86,20 @@ public abstract class Accumulator {
         }
     }
 
-    /** Exact SUM/AVG over INT64 or unscaled DECIMAL values, widening to BigInteger on overflow. */
+    /**
+     * Exact SUM/AVG over INT64 or unscaled DECIMAL values (narrow or wide), widening to
+     * BigInteger on overflow.
+     */
     static final class ExactSum extends Accumulator {
         private final boolean average;
         private final int scale;
-        private final boolean decimal;
+        private final DataType decimal;
         private long sum;
         private BigInteger big;
         private long count;
 
-        ExactSum(boolean average, int scale, boolean decimal) {
+        /** @param decimal the DECIMAL result type of a DECIMAL SUM, else null */
+        ExactSum(boolean average, int scale, DataType decimal) {
             this.average = average;
             this.scale = scale;
             this.decimal = decimal;
@@ -104,6 +108,11 @@ public abstract class Accumulator {
         @Override
         public void add(Object v) {
             if (v == null) {
+                return;
+            }
+            if (v instanceof BigInteger w) {
+                count++;
+                big = (big != null ? big : BigInteger.valueOf(sum)).add(w);
                 return;
             }
             long x = (Long) v;
@@ -128,9 +137,10 @@ public abstract class Accumulator {
 
     /**
      * Final value of an exact SUM/AVG over INT64 or DECIMAL inputs: {@code big} (if non-null)
-     * or {@code sum} is the exact total of {@code count} non-null values.
+     * or {@code sum} is the exact total of {@code count} non-null values; {@code decimal} is the
+     * result type of a DECIMAL SUM (null for INT64 sums and averages).
      */
-    public static Object exactSumResult(boolean average, int scale, boolean decimal, long sum, BigInteger big,
+    public static Object exactSumResult(boolean average, int scale, DataType decimal, long sum, BigInteger big,
                                         long count) {
         if (count == 0) {
             return null;
@@ -139,9 +149,12 @@ public abstract class Accumulator {
             BigDecimal total = big != null ? new BigDecimal(big, scale) : BigDecimal.valueOf(sum, scale);
             return total.divide(BigDecimal.valueOf(count), MathContext.DECIMAL128).doubleValue();
         }
-        if (decimal) {
-            // DECIMAL: final result limited to 18 digits.
-            return big != null ? Decimals.check18(big) : Decimals.check18(sum);
+        if (decimal != null) {
+            // DECIMAL: final result limited to W digits (the precision of the result type).
+            if (big == null && !decimal.isWideDecimal()) {
+                return Decimals.check18(sum);
+            }
+            return Decimals.value(big != null ? big : BigInteger.valueOf(sum), decimal);
         }
         if (big != null) {
             if (big.bitLength() > 63) {

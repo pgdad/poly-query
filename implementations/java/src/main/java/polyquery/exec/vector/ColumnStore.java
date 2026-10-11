@@ -97,7 +97,7 @@ final class ColumnStore {
                     continue;
                 }
                 total += switch (v.kind) {
-                    case OBJECT -> 40 + ((String) v.objects[i]).length();
+                    case OBJECT -> v.objects[i] instanceof String str ? 40 + str.length() : 56;
                     case DICT -> 40 + v.dict[v.codes[i]].length();
                     default -> 16;
                 };
