@@ -78,6 +78,15 @@ type HashAggregate struct {
 	// EstGroups estimates the number of groups from column statistics
 	// (0: unknown); execution sizes its hash tables with it.
 	EstGroups int64
+	// KeyRange reports that the single int-class key lies within
+	// [KeyLo, KeyHi] (column statistics), a range small enough for
+	// directly indexed group tables.
+	KeyRange     bool
+	KeyLo, KeyHi int64
+	// AnyOrder reports that the order of the output groups does not
+	// matter: a sort above it orders by all grouping keys (otherwise
+	// groups come out in order of first appearance).
+	AnyOrder bool
 }
 
 // HashJoin is an equi-join: rows match when LeftKeys equal RightKeys (NULL
@@ -269,6 +278,10 @@ type Plan struct {
 	Root     Node
 	Subplans map[*plan.Subquery]Node
 	Exec     Execution
+	// Shared keys the aggregations that occur more than once in the
+	// statement (identical self-contained subtrees): execution computes
+	// each key's rows once.
+	Shared map[*HashAggregate]string
 }
 
 // Options influence physical planning.

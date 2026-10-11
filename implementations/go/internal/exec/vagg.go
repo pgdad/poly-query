@@ -564,6 +564,16 @@ func (t *aggTable) groups() int { return len(t.keys) }
 // maxReserve caps the groups a table is sized for up front.
 const maxReserve = 1 << 20
 
+// prepare sizes an empty table for about n groups of the aggregation x
+// (nil: unknown), with a directly indexed key range if x has one.
+func (t *aggTable) prepare(x *physical.HashAggregate, n int) {
+	if x != nil && x.KeyRange && len(t.keys) == 0 && len(t.keyClasses) == 1 && t.keyClasses[0] == vInt &&
+		t.nmap == nil && t.intMap.dense == nil {
+		t.intMap.setWindow(x.KeyLo, int(x.KeyHi-x.KeyLo+1))
+	}
+	t.reserve(n)
+}
+
 // reserve sizes an empty table for about n groups.
 func (t *aggTable) reserve(n int) {
 	n = min(n, maxReserve)
@@ -576,7 +586,7 @@ func (t *aggTable) reserve(n int) {
 		s.grow(n)
 	}
 	t.slab = make([]types.Value, n*max(len(t.keyTypes), 1))
-	if len(t.keyClasses) == 1 && t.keyClasses[0] == vInt && t.nmap == nil {
+	if len(t.keyClasses) == 1 && t.keyClasses[0] == vInt && t.nmap == nil && t.intMap.dense == nil {
 		t.intMap.init(n)
 	}
 }
@@ -1002,9 +1012,16 @@ func (t *aggTable) partition(seed maphash.Seed, parts int) [][]int32 {
 		out[p] = make([]int32, 0, len(t.keys)/parts+len(t.keys)/(4*parts)+16)
 	}
 	var buf []byte
+	m := &t.intMap
 	for g, key := range t.keys {
 		var h uint64
 		if len(key) == 1 && !key[0].Null && t.keyClasses[0] == vInt {
+			if i := uint64(key[0].I - m.lo); i < uint64(len(m.dense)) {
+				// Directly indexed keys: contiguous ranges per partition.
+				p := i * uint64(parts) / uint64(len(m.dense))
+				out[p] = append(out[p], int32(g))
+				continue
+			}
 			h = fibHash(uint64(key[0].I)) >> 32
 		} else {
 			buf = buf[:0]
@@ -1122,7 +1139,11 @@ const minPartitionedMerge = 1 << 13
 // the result rows in first-appearance order. Large merges are partitioned
 // by key hash: partition p of every partial table is merged into final
 // table p by its own goroutine.
-func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls []*plan.AggCall, estGroups int64) ([]types.Row, error) {
+func mergeTables(ec *Context, x *physical.HashAggregate, tables []*aggTable, keyTypes []types.Type, calls []*plan.AggCall) ([]types.Row, error) {
+	var estGroups int64
+	if x != nil {
+		estGroups = x.EstGroups
+	}
 	total, largest := 0, 0
 	for _, t := range tables {
 		total += t.groups()
@@ -1137,7 +1158,7 @@ func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls [
 	parts := min(ec.Threads, len(tables))
 	if parts <= 1 || total < minPartitionedMerge || len(keyTypes) == 0 {
 		final := newAggTable(ec, keyTypes, calls)
-		final.reserve(expect)
+		final.prepare(x, expect)
 		for _, t := range tables {
 			if err := final.mergeFrom(t); err != nil {
 				return nil, err
@@ -1168,7 +1189,7 @@ func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls [
 		go func() {
 			defer wg.Done()
 			final := newAggTable(ec, keyTypes, calls)
-			final.reserve(expect/parts + expect/(8*parts))
+			final.prepare(x, expect/parts+expect/(8*parts))
 			for i, t := range tables {
 				if err := final.mergeGroups(t, groups[i][p]); err != nil {
 					results[p] = partResult{errPos: math.MinInt64, err: err}
@@ -1177,7 +1198,7 @@ func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls [
 			}
 			r := &results[p]
 			r.rows, r.first, r.errPos, r.err = final.results()
-			if r.err == nil {
+			if r.err == nil && (x == nil || !x.AnyOrder) {
 				r.rows = orderByFirst(r.rows, r.first)
 			}
 		}()
@@ -1195,6 +1216,9 @@ func mergeTables(ec *Context, tables []*aggTable, keyTypes []types.Type, calls [
 	}
 	if err != nil {
 		return nil, err
+	}
+	if x != nil && x.AnyOrder {
+		return slices.Concat(rows...), nil
 	}
 	return mergeByFirst(rows, first), nil
 }
@@ -1291,7 +1315,7 @@ func (a *vaggregateOp) NextBatch() (*Batch, error) {
 
 func (a *vaggregateOp) run() ([]types.Row, error) {
 	t := newAggTable(a.ec, exprTypes(a.node.Keys), a.node.Aggs)
-	t.reserve(int(a.node.EstGroups))
+	t.prepare(a.node, int(a.node.EstGroups))
 	var pos int64
 	for {
 		b, err := a.input.NextBatch()

@@ -545,6 +545,18 @@ func BuildBatch(ec *Context, n physical.Node) (BatchOperator, error) {
 		}
 		return buildVProject(ec, x, nil)
 	case *physical.HashAggregate:
+		if ec.isShared(x) {
+			run := func() ([]types.Row, error) {
+				return ec.sharedRows(x, func() (Operator, error) {
+					b, err := buildVAggregate(ec, x)
+					if err != nil {
+						return nil, err
+					}
+					return newRowReader(b, schemaTypes(x.Schema())), nil
+				})
+			}
+			return &lazyRows{run: run, types: schemaTypes(x.Schema())}, nil
+		}
 		return buildVAggregate(ec, x)
 	case *physical.HashJoin:
 		if op, ok, err := parallelBatchPipeline(ec, x); ok || err != nil {

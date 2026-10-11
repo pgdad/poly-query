@@ -18,6 +18,7 @@ func Build(root plan.Node, opts Options) (*Plan, error) {
 	}
 	out := &Plan{Root: r, Subplans: p.subplans}
 	out.Exec = chooseExecution(out, opts)
+	out.Shared = sharedAggregates(out)
 	return out, nil
 }
 
@@ -145,14 +146,19 @@ func (p *planner) node(n plan.Node, req idset) (Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &HashAggregate{Input: in, Keys: x.Keys, KeyCols: x.KeyCols, Aggs: x.Aggs, AggCols: x.AggCols,
-			EstGroups: p.estimateGroups(x)}, nil
+		agg := &HashAggregate{Input: in, Keys: x.Keys, KeyCols: x.KeyCols, Aggs: x.Aggs, AggCols: x.AggCols,
+			EstGroups: p.estimateGroups(x)}
+		agg.KeyRange, agg.KeyLo, agg.KeyHi = keyRange(x, agg.EstGroups)
+		return agg, nil
 	case *plan.Join:
 		return p.join(x, req)
 	case *plan.Sort:
 		in, err := p.node(x.Input, with(req, plan.NodeExprs(x)...))
 		if err != nil {
 			return nil, err
+		}
+		if agg := orderFreeAggregate(in, x.Keys); agg != nil {
+			agg.AnyOrder = true
 		}
 		return &Sort{Input: in, Keys: x.Keys, Limit: -1}, nil
 	case *plan.Limit:
@@ -444,6 +450,82 @@ func (p *planner) estimateGroups(x *plan.Aggregate) int64 {
 		groups *= max(d, 1)
 	}
 	return int64(min(groups, p.estimate(x.Input), maxEstGroups))
+}
+
+// orderFreeAggregate returns the aggregation below a sort (through
+// projections of plain columns) if the sort keys include all its grouping
+// keys: distinct groups then sort by distinct keys, so the order in which
+// the aggregation emits them cannot show.
+func orderFreeAggregate(n Node, keys []plan.SortKey) *HashAggregate {
+	ids := map[plan.ColumnID]bool{}
+	for _, k := range keys {
+		if ref, ok := k.Expr.(*plan.ColumnRef); ok {
+			ids[ref.ID] = true
+		}
+	}
+	for {
+		switch x := n.(type) {
+		case *Project:
+			next := map[plan.ColumnID]bool{}
+			for i, e := range x.Exprs {
+				ref, ok := e.(*plan.ColumnRef)
+				if !ok {
+					return nil // evaluation order could decide which error shows
+				}
+				if ids[x.Cols[i].ID] {
+					next[ref.ID] = true
+				}
+			}
+			ids, n = next, x.Input
+		case *HashAggregate:
+			if len(x.KeyCols) == 0 {
+				return nil
+			}
+			for _, c := range x.KeyCols {
+				if !ids[c.ID] {
+					return nil
+				}
+			}
+			return x
+		default:
+			return nil
+		}
+	}
+}
+
+// maxDenseKeys bounds the key range of directly indexed group tables.
+const maxDenseKeys = 1 << 22
+
+// keyRange returns the value range of a single int-class grouping key
+// that is a base table column, if the range is small: at most
+// maxDenseKeys values and not much sparser than the estimated groups.
+func keyRange(x *plan.Aggregate, estGroups int64) (bool, int64, int64) {
+	if len(x.Keys) != 1 || estGroups <= 0 {
+		return false, 0, 0
+	}
+	ref, ok := x.Keys[0].(*plan.ColumnRef)
+	if !ok {
+		return false, 0, 0
+	}
+	switch t := ref.T; t.Kind {
+	case types.KindInt64, types.KindBoolean, types.KindDate, types.KindTimestamp:
+	case types.KindDecimal:
+		if t.IsWide() {
+			return false, 0, 0
+		}
+	default:
+		return false, 0, 0
+	}
+	st, ok := columnStats(x.Input, ref.ID)
+	if !ok || st.Min.Null || st.Max.Null {
+		return false, 0, 0
+	}
+	lo, hi := st.Min.I, st.Max.I
+	span := float64(hi) - float64(lo) + 1
+	if span > maxDenseKeys || span > 4*float64(estGroups)+4096 {
+		return false, 0, 0
+	}
+	return true, lo, hi
 }
 
 // columnStats finds the base table column producing id below n and

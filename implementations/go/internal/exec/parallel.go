@@ -583,7 +583,7 @@ func parallelAggregate(ec *Context, x *physical.HashAggregate) (BatchOperator, b
 		mark := ec.Mem.Mark()
 		err := runMorsels(ec, ranges, nw, func(w, i int) error {
 			srcs[w].set(ranges[i])
-			tables[w].reserve(expectedGroups(x.EstGroups, rows/int64(nw)))
+			tables[w].prepare(x, expectedGroups(x.EstGroups, rows/int64(nw)))
 			var k int64
 			for {
 				b, err := ops[w].NextBatch()
@@ -599,7 +599,7 @@ func parallelAggregate(ec *Context, x *physical.HashAggregate) (BatchOperator, b
 		if err != nil {
 			return nil, err
 		}
-		out, err := mergeTables(ec, tables, keyTypes, x.Aggs, x.EstGroups)
+		out, err := mergeTables(ec, x, tables, keyTypes, x.Aggs)
 		if err != nil {
 			return nil, err
 		}

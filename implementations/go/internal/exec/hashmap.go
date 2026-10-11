@@ -1,5 +1,7 @@
 package exec
 
+import "math"
+
 // Open-addressing hash tables specialized for integer keys, used where Go
 // maps dominated profiles (grouping by an int-class key, DISTINCT
 // aggregates). Slots hold key and value side by side, so a lookup usually
@@ -10,11 +12,26 @@ package exec
 // sequential keys, the common case, land in distinct slots.
 func fibHash(k uint64) uint64 { return k * 0x9E3779B97F4A7C15 }
 
-// i64Map maps int64 keys to non-negative int32 values (group IDs).
+// i64Map maps int64 keys to non-negative int32 values (group IDs). Keys
+// within an optional dense window [lo, lo+len(dense)) — set when the key
+// range is known to be small — are looked up by direct indexing; other
+// keys are hashed.
 type i64Map struct {
 	slots []i64Slot
 	shift uint8 // 64 - log2(len(slots))
-	n     int
+	n     int   // keys in slots
+
+	lo    int64
+	dense []int32 // value + 1 per key lo+i; 0 = absent
+}
+
+// setWindow directs keys lo..lo+size-1 to a directly indexed array (the
+// map must be empty).
+func (m *i64Map) setWindow(lo int64, size int) {
+	if lo > math.MaxInt64-int64(size) {
+		return
+	}
+	m.lo, m.dense = lo, make([]int32, size)
 }
 
 type i64Slot struct {
@@ -44,6 +61,12 @@ func log2(n int) int {
 }
 
 func (m *i64Map) get(k int64) (int32, bool) {
+	if i := uint64(k - m.lo); i < uint64(len(m.dense)) {
+		if v := m.dense[i]; v != 0 {
+			return v - 1, true
+		}
+		return 0, false
+	}
 	if m.slots == nil {
 		return 0, false
 	}
@@ -61,6 +84,10 @@ func (m *i64Map) get(k int64) (int32, bool) {
 
 // put adds a key that is not in the table.
 func (m *i64Map) put(k int64, v int32) {
+	if i := uint64(k - m.lo); i < uint64(len(m.dense)) {
+		m.dense[i] = v + 1
+		return
+	}
 	if 2*(m.n+1) > len(m.slots) {
 		m.rehash()
 	}

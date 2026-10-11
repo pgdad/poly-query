@@ -1,12 +1,20 @@
 package exec
 
 import (
+	"math"
 	"math/rand/v2"
 	"testing"
 )
 
 func TestI64Map(t *testing.T) {
+	testI64Map(t, func(m *i64Map) {})
+	testI64Map(t, func(m *i64Map) { m.setWindow(-100, 1000) })
+	testI64Map(t, func(m *i64Map) { m.setWindow(math.MaxInt64-10, 10) })
+}
+
+func testI64Map(t *testing.T, setup func(*i64Map)) {
 	var m i64Map
+	setup(&m)
 	ref := map[int64]int32{}
 	r := rand.New(rand.NewPCG(1, 2))
 	for i := 0; i < 100000; i++ {
