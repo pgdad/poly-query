@@ -26,7 +26,9 @@ measurements) and **M9 native kernel integration** (the C/assembly library
 and used by vectorized filters, aggregation, hashing and join gathers when
 a query runs with `native: true` — see [Native kernels](#native-kernels-m9))
 and the **architectural change CR-1 `UNION ALL`** (`spec/changes/union-all.md`
-— see [UNION ALL](#change-cr-1-union-all)).
+— see [UNION ALL](#change-cr-1-union-all)) and the **refactoring CR-3
+logical/physical plan separation** (`spec/changes/refactor-plan-separation.md`
+— see [Plan separation](#change-cr-3-logicalphysical-plan-separation)).
 
 Reported capabilities: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic
 test.functions phase2 sql.groupby sql.join sql.functions sql.subquery sql.cte
@@ -81,8 +83,8 @@ Every statement goes through distinct, inspectable stages:
 
 ```
 SQL text ─lexer→ tokens ─parser→ AST ─analyzer/binder→ bound query
-        ─logical planner→ logical plan ─optimizer→ logical plan
-        ─physical planner→ physical plan ─parallelizer→ physical plan
+        ─logical planner→ logical plan ─column pruning→ ─optimizer rules→ logical plan
+        ─physical planner→ physical plan (+ parallelizer, execution mode, native kernels)
         ─dispatcher→ row / vectorized / parallel operators → rows ─protocol→ JSON
 ```
 
@@ -90,13 +92,14 @@ SQL text ─lexer→ tokens ─parser→ AST ─analyzer/binder→ bound query
 |---|---|---|
 | CLI / protocol | `polyquery.main`, `polyquery.protocol` | argument parsing, session/exec loops, request validation, op dispatch (`handle-op` multimethod), response objects |
 | HTTP server (Phase 4) | `polyquery.server`, `polyquery.server.http`, `polyquery.server.admission`, `polyquery.server.metrics` | endpoints and routing, query lifecycle (registry, admission, timeouts, cancellation, streaming), graceful shutdown; HTTP/1.1 wire format; worker limit + FIFO queue; Prometheus exposition |
-| Engine pipeline | `polyquery.engine` | drives the stages per statement, EXPLAIN, result serialization |
+| Engine pipeline | `polyquery.engine` | drives the stages per statement, EXPLAIN, result serialization; executes a physical plan as its `:execution` says |
 | Lexer | `polyquery.sql.lexer` | tokens with line/column positions, comments, quoted identifiers, reserved words |
 | Parser / AST | `polyquery.sql.parser`, `polyquery.sql.ast` | recursive descent over the full v1 grammar producing a plain-map AST |
 | Semantic analysis | `polyquery.sql.analyzer` (queries: FROM/CTE/derived-table resolution, `*` expansion, GROUP BY/ORDER BY rules, output names), `polyquery.sql.binder` (expressions: name resolution incl. correlation, typing, coercions, aggregates), `polyquery.sql.functions` (scalar function signatures), `polyquery.sql.bound` (bound-expression shapes and helpers) | produces a *bound query*: typed expressions whose column references are row indices |
-| Logical planning | `polyquery.plan.logical` | relational operator tree: values/scan/derived/join → filter → aggregate → filter (HAVING) → project → distinct → sort → limit → project |
-| Optimization | `polyquery.plan.optimizer`, `polyquery.plan.rewrite`, `polyquery.plan.reorder`, `polyquery.plan.pruning` | constant folding and predicate simplification, predicate pushdown below joins (WHERE equalities of comma joins become join conditions), join reordering of inner-join chains (all disabled by `optimize: false`); column pruning |
-| Physical planning | `polyquery.plan.physical`, `polyquery.plan.parallel`, `polyquery.plan.access`, `polyquery.plan.cost`, `polyquery.plan.explain` | access paths (index selection, row-group skip predicates), join algorithm (`join` option) and hash-join build side (cardinality estimates), top-N for ORDER BY … LIMIT, hash lookup for correlated equality predicates, parallelization (partitioned aggregation/sort, Gather), planning of nested subquery plans; EXPLAIN JSON |
+| Planning pipeline | `polyquery.plan.planner` | bound query → logical plan → column pruning → optimizer → physical plan |
+| Logical planning | `polyquery.plan.logical` | the logical plan data structure: relational operator tree values/scan/derived/join → filter → aggregate → filter (HAVING) → project → distinct → sort → limit → project, union-all; subquery expressions carry their logical plans; generic traversal; debug rendering (`format-plan`) |
+| Optimization | `polyquery.plan.optimizer` (rule registry), `polyquery.plan.rules.{constant-folding,predicate-pushdown,join-reordering,column-pruning}`, `polyquery.plan.cost` | named logical rewrite rules: constant folding and predicate simplification, predicate pushdown into join inputs and below renaming projections (WHERE equalities of comma joins become join conditions), join reordering of inner-join chains, column pruning (`optimize: false` applies no rule; column pruning is also applied before the optimizer, see [CR-3](#change-cr-3-logicalphysical-plan-separation)); cardinality estimates |
+| Physical planning | `polyquery.plan.physical`, `polyquery.plan.parallel`, `polyquery.plan.access`, `polyquery.plan.explain` | access paths (index selection, row-group skip predicates), join algorithm (`join` option) and hash-join build side (cardinality estimates), top-N for ORDER BY … LIMIT, hash lookup for correlated equality predicates, execution mode / threads / native kernels, parallelization (partitioned aggregation/sort, Gather), physical plans of subqueries; EXPLAIN JSON |
 | Execution — dispatch | `polyquery.exec.dispatch` | picks per plan node the row, vectorized or parallel implementation from the query's `mode`/`threads` |
 | Execution — row engine | `polyquery.exec.operators`, `polyquery.exec.join`, `polyquery.exec.skipping`, `polyquery.exec.expr`, `polyquery.exec.functions`, `polyquery.exec.aggregate`, `polyquery.exec.context` | operators compiled once into re-reducible row sources (table/index scans over segments); hash, sort-merge and nested-loop joins; top-N; row-group skipping; expression compiler (bound expr → specialised closure); scalar functions and LIKE; mergeable aggregate accumulators; query context (timeout, cancellation, memory budget) |
 | Execution — vectorized engine | `polyquery.exec.batch`, `polyquery.exec.kernels`, `polyquery.exec.vectorized`, `polyquery.exec.vjoin`, `polyquery.exec.grouping`, `polyquery.exec.sort` | column batches with selection vectors; vectorized expression kernels; batch scan/filter/project; vectorized hash aggregation (primitive group tables, typed aggregate states); vectorized hash-join probe; primitive-column sorting |
@@ -331,7 +334,8 @@ timeout/cancellation checks.
   equi-join every algorithm evaluates the residual condition only on pairs
   with equal keys (nested loops test the key equalities first), so all
   three evaluate exactly the same predicates.
-* **Logical optimizer** (`optimize`, `polyquery.plan.optimizer`): constant
+* **Logical optimizer** (`optimize`, `polyquery.plan.optimizer`, rules in
+  `polyquery.plan.rules.*`): constant
   folding (constant subexpressions evaluated at planning time; failing ones
   left in place), predicate simplification (TRUE/FALSE operands, double
   negation, duplicate conjuncts — never dropping an operand whose
@@ -755,6 +759,93 @@ Decisions:
   exactly the expected `DECIMAL(18,2)` rows `["99.99"], ["101.00"]`. The
   case cannot pass without special-casing a table, which the rules forbid.
 
+## Change CR-3: logical/physical plan separation
+
+A behaviour-preserving refactoring: same responses, errors, EXPLAIN output
+and capabilities. The engine already planned in stages, but the stages
+were not cleanly separated: the physical planner drove the whole pipeline
+(it called the logical planner, the optimizer and column pruning, also for
+every subquery), the optimizer was one function whose pushdown pass
+re-ran the full optimizer on derived tables and UNION ALL branches, rules
+were not separately addressable, and execution mode, threads and native
+kernels were decided in `engine.clj` next to execution. Now:
+
+* **Logical plan** (`plan/logical.clj`) — a plain-data operator tree
+  (`:scan :values :derived :join :filter :aggregate :project :distinct
+  :sort :limit :union-all`, joins with `:kind` and `:condition`, aggregates
+  with `:group-keys`/`:aggregates`). Subquery expressions carry their own
+  logical plan (`:logical`), so the whole query is one logical structure;
+  CTE references are `:derived` nodes. Generic traversal helpers
+  (`inputs`, `map-inputs`, `exprs`, `map-exprs`, `walk`,
+  `map-subquery-plans`) and `format-plan`, an indented text rendering for
+  debugging and tests.
+* **Optimizer** (`plan/optimizer.clj`) — `rules`, a vector of named rules
+  `{:name :rewrite}` applied in order; each rewrite is a function from a
+  logical plan to a logical plan, lives in its own namespace and is unit
+  tested on its own. `apply-rule` applies a rule to a plan and the plans
+  of its subqueries; `optimize` with `optimize: false` returns the plan
+  untouched.
+* **Physical planner** (`plan/physical.clj`) — maps the optimized logical
+  plan to physical operators and takes every physical decision; nothing
+  physical remains in the logical layer. Its root `:execution {:mode
+  :threads :native?}` is what the engine executes.
+* **Pipeline** (`plan/planner.clj`) — `plan-query` = logical plan → column
+  pruning → optimizer → physical plan.
+
+Module map (namespaces under `src/polyquery/`):
+
+| concern | before | after |
+|---|---|---|
+| logical plan representation | `plan/logical.clj` (builder only; subqueries planned later by the physical planner) | `plan/logical.clj` (builder incl. subquery plans, traversal, `format-plan`) |
+| pipeline driver | `plan/physical.clj` `plan-query` (logical → optimizer → pruning → physical, recursively per subquery) | `plan/planner.clj` `plan-query` |
+| optimizer | `plan/optimizer.clj` (`optimize` = simplify → pushdown → reorder, pushdown re-optimizing derived tables) | `plan/optimizer.clj` (rule registry, `apply-rule`, `optimize`) |
+| rule: constant folding / predicate simplification | `plan/rewrite.clj` | `plan/rules/constant_folding.clj` — `constant-folding` |
+| rule: predicate pushdown | inside `plan/optimizer.clj` | `plan/rules/predicate_pushdown.clj` — `predicate-pushdown` (also below renaming projections) |
+| rule: join reordering | `plan/reorder.clj` | `plan/rules/join_reordering.clj` — `join-reordering` |
+| rule: projection / column pruning | `plan/pruning.clj` (called by the physical planner) | `plan/rules/column_pruning.clj` — `column-pruning` |
+| cardinality estimates | `plan/cost.clj` | `plan/cost.clj` (unchanged; used by join reordering and the hash-join build side) |
+| physical planner | `plan/physical.clj` (+ `plan/access.clj`, `plan/parallel.clj`) | `plan/physical.clj` — access paths, join algorithms, top-N, execution mode, threads, native kernels (+ `plan/access.clj`, `plan/parallel.clj`, unchanged) |
+| execution mode / threads / native decision | `engine.clj` (`exec-mode`, `threads`) | `plan/physical.clj` (`:execution` of the physical plan) |
+| EXPLAIN | `plan/explain.clj` over the physical plan | unchanged |
+| tests | `plan/planner_test.clj` | + `plan/logical_test.clj`, `plan/optimizer_test.clj`, `plan/rules/*_test.clj` (one per rule), execution decisions in `plan/planner_test.clj` |
+
+Decisions:
+
+* **Column pruning runs even with `optimize: false`.** The optimizer
+  honours `optimize: false` by applying no rule. Column pruning, however,
+  is mandatory (indexes-and-planning.md §3.2: scans only materialize
+  referenced columns, visible in EXPLAIN) and decides that outputs nobody
+  reads are never evaluated — so `optimize` cannot change results or
+  errors. The planner therefore establishes column requirements once
+  before the optimizer (as before, where pruning was outside the
+  switchable optimizer), and the optimizer's `column-pruning` rule
+  re-establishes them after the rules that restructure the plan. The rule
+  is idempotent.
+* **Top-N stays physical.** Replacing Sort + Limit by a bounded heap is an
+  operator choice, made by the physical planner; it still honours
+  `optimize: false` as before.
+* **Join reordering is logical.** It changes the join order (with a
+  projection restoring the column order), not an algorithm, using the
+  same cardinality estimates as the hash-join build side.
+* **Pushdown below projections** applies only to projections of column
+  references and literals (such as the one join reordering creates):
+  pushing below computed values would skip evaluating them for filtered
+  rows, which could turn an error into rows. The plans built from SQL never
+  have a filter directly above such a projection (WHERE filters sit on the
+  FROM clause, derived tables are scans of their own), so no EXPLAIN
+  output changes; filters are not moved into derived tables for the same
+  reason.
+* **Rules handle nested query blocks themselves.** Each rule recurses into
+  derived tables and UNION ALL branches (join reordering before
+  estimating the cluster that contains them), and `apply-rule` into
+  subquery plans, so a rule applied once rewrites the whole query.
+* **Equivalence check.** Besides the conformance suites, every query and
+  EXPLAIN of the public cases under nine option combinations, and an extra
+  set of queries aimed at the refactored paths (multi-way joins, derived
+  tables, nested/EXISTS/correlated subqueries, CTEs, UNION ALL, unread
+  failing outputs, indexes), were compared between the engine before and
+  after the refactoring: identical.
+
 ## Design decisions (where the spec is silent or open)
 
 * **Unsupported features.** `UNION` without `ALL`, `RIGHT`/`FULL` joins
@@ -900,6 +991,10 @@ Decisions:
   and parallelization) and 11 compound queries in the Phase 5 differential
   matrix (CTEs, derived tables, IN/EXISTS/correlated subqueries, GROUP BY,
   DISTINCT, LIMIT, runtime errors in a branch).
+* Plan separation (CR-3): the logical plan (operator tree, subquery plans,
+  `format-plan`), the optimizer (rule names and order, `optimize: false`
+  applies no rule, rules reach subquery plans), one test namespace per rule
+  (`plan/rules/*_test.clj`) and the physical planner's execution decisions.
 * Native kernels (`native_test`; uses
   `../../native-kernels/build/<arch>/libpqkernels.so` or
   `$PQ_NATIVE_KERNELS`, skipped when the library is not built): bitmap

@@ -20,8 +20,7 @@
 (defn logical-plan
   "The optimized logical plan of a bound query (options as for plan-query)."
   [bq options]
-  (-> (logical/plan-query bq)
-      (->> (optimizer/apply-rule column-pruning/prune-columns))
+  (-> (optimizer/apply-rule column-pruning/prune-columns (logical/plan-query bq))
       (optimizer/optimize options)))
 
 (defn plan-query
