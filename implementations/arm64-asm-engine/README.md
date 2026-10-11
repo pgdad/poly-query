@@ -384,8 +384,13 @@ windows, at most `threads`, each at least `g_par_min_rows` = 16384 rows
 * **hash-join probes** (the build side and all key cells are computed
   first, the probe of the left tuples is split);
 * **aggregation**: each task aggregates its window into its own group table
-  (partial aggregation); the tables are merged in task order
-  (`merge_states`: counts and 128-bit sums add, MIN / MAX compare).
+  (partial aggregation); the partial tables are then merged by parallel
+  merge tasks, one per hash partition (each takes its partition's groups
+  from every partial table in task order; `merge_states`: counts and
+  128-bit sums add, MIN / MAX compare), and the final groups are ordered by
+  their first input tuple (radix sort), which is exactly the serial group
+  order; finishing the groups, HAVING and the projection of the result
+  rows run as parallel tasks over windows of the groups.
 
 Expressions containing subqueries are never evaluated on workers (subquery
 results are cached in shared plan nodes on first use).

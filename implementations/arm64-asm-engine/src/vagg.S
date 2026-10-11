@@ -13,9 +13,12 @@
 // linear probing), then every aggregate argument is evaluated as a vector
 // and accumulated into the groups' states (the same state records and
 // accumulation rules as eval.S agg_accum / agg_finish). With several tasks
-// (threads > 1) the partial tables are merged in task order (gt_merge).
-// Groups are kept in order of first appearance in the input, so the result
-// does not depend on the number of threads. Parallel tasks are only used
+// (threads > 1) the partial tables are merged by parallel merge tasks, one
+// per hash partition (gt_pmerge), and the groups ordered by their first
+// tuple. Result rows (agg_finish, HAVING, projection) are emitted by
+// parallel tasks over windows of the groups (emit_groups). Groups are kept
+// in order of first appearance in the input, so the result does not depend
+// on the number of threads. Parallel tasks are only used
 // when every expression is safe for worker threads (no subqueries) and no
 // FLOAT64 SUM / AVG is involved (floating-point addition is not
 // associative; the serial order is kept for them).
@@ -54,6 +57,26 @@
 #define XT_LO       32             // tuple window [lo, hi)
 #define XT_HI       40
 #define XT_SIZE     48
+
+// Partition merge task (gt_pmerge)
+#define MT_TASKS    0              // agg task records (partial tables)
+#define MT_T        8              // number of partial tables = partitions
+#define MT_PART     16             // this task's partition
+#define MT_BQ       24
+#define MT_CTX      32
+#define MT_GT       40             // GroupTable* result
+#define MT_SIZE     48
+
+// Group emission task (emit_groups)
+#define ET_NODE     0
+#define ET_CTX      8              // EvalCtx* (own copy for worker tasks)
+#define ET_TS       16             // input TupleSet (representative tuples)
+#define ET_GROUPS   24             // group record pointers
+#define ET_LO       32             // groups [lo, hi)
+#define ET_HI       40
+#define ET_OUT      48             // u8** row slots of the window
+#define ET_COUNT    56             // rows written (HAVING)
+#define ET_SIZE     64
 
 #define NULL_HASH   0x5bd1e995
 
@@ -182,7 +205,8 @@ FUNC vagg_aggregate
     b.ne 4f
     mov  x0, x24
     bl   agg_task
-    ldr  x25, [x24, #XT_GT]
+    ldr  x0, [x24, #XT_GT]
+    bl   gt_list
     b    6f
 4:  mov  x27, #0                        // worker tasks: own contexts
 5:  cmp  x27, x23
@@ -205,19 +229,19 @@ FUNC vagg_aggregate
     mov  x2, #XT_SIZE
     mov  x3, x23
     bl   par_run
-    mov  x0, x24
+    mov  x0, x24                        // partitioned parallel merge
     mov  x1, x23
     mov  x2, x21
-    bl   gt_merge
+    mov  x3, x20
+    bl   gt_pmerge
+6:  // x0 group records in order of first appearance, x1 count
     mov  x25, x0
-6:  // result rows, one per group in order of first appearance
-    ldr  x1, [x25, #GT_N]
-    add  x1, x1, #1
+    mov  x27, x1
+    cbnz x27, 7f
     mov  x0, x21
+    mov  x1, #1
     bl   rs_new
     mov  x26, x0
-    ldr  x9, [x25, #GT_N]
-    cbnz x9, 7f
     ldr  x9, [x21, #BQ_NGROUP]
     cbnz x9, 9f                         // GROUP BY on empty input: no rows
     mov  x0, x21                        // one group without input
@@ -235,31 +259,13 @@ FUNC vagg_aggregate
     mov  x2, x26
     bl   agg_emit_row
     b    9f
-7:  mov  x27, #0
-8:  ldr  x9, [x25, #GT_N]
-    cmp  x27, x9
-    b.hs 9f
-    ldr  x10, [x25, #GT_RECS]
-    ldr  x11, [x25, #GT_RECSZ]
-    madd x28, x27, x11, x10             // record
-    ldr  x9, [x25, #GT_NKEYS]
-    add  x1, x28, #GR_KEYS
-    add  x1, x1, x9, lsl #4             // states
-    mov  x0, x21
-    bl   agg_finish
-    str  x0, [x20, #EC_AGGV]
-    add  x9, x28, #GR_KEYS
-    str  x9, [x20, #EC_GKEYS]
-    mov  x0, x22
-    ldr  x1, [x28, #GR_FIRST]
-    bl   ts_tuple
-    str  x0, [x20, #EC_TUPLE]
-    mov  x0, x19
+7:  mov  x0, x19                        // result rows, one per group
     mov  x1, x20
-    mov  x2, x26
-    bl   agg_emit_row
-    add  x27, x27, #1
-    b    8b
+    mov  x2, x22
+    mov  x3, x25
+    mov  x4, x27
+    bl   emit_groups
+    mov  x26, x0
 9:  mov  x0, x26
     add  sp, sp, #16
     LEAVE 5
@@ -735,54 +741,413 @@ FUNC agg_task
 ENDF agg_task
 
 // =============================================================================
-// gt_merge(x0 task records, x1 count, x2 BoundQuery*) -> x0 GroupTable*
-// Merges the tables of tasks 1.. into the table of task 0, in task order.
-//   x19 tasks, x20 count, x21 bq, x22 destination, x23 task index,
-//   x24 source table, x25 group index, x26 source record
+// gt_list(x0 GroupTable*) -> x0 record pointers (table order), x1 count
 // =============================================================================
-LFUNC gt_merge
+LFUNC gt_list
+    ENTER 2
+    mov  x19, x0
+    ldr  x9, [x19, #GT_N]
+    lsl  x0, x9, #3
+    add  x0, x0, #8
+    bl   arena_alloc
+    ldr  x9, [x19, #GT_N]
+    ldr  x10, [x19, #GT_RECS]
+    ldr  x11, [x19, #GT_RECSZ]
+    mov  x12, #0
+1:  cmp  x12, x9
+    b.hs 2f
+    madd x13, x12, x11, x10
+    str  x13, [x0, x12, lsl #3]
+    add  x12, x12, #1
+    b    1b
+2:  mov  x1, x9
+    LEAVE 2
+ENDF gt_list
+
+// =============================================================================
+// gt_pmerge(x0 agg task records, x1 count T, x2 BoundQuery*, x3 ctx)
+//   -> x0 group record pointers in order of first appearance, x1 count
+// Partitioned parallel merge of the partial tables: merge task p takes the
+// groups whose hash falls into partition p from every partial table, in
+// task order (so its first insertion of a key carries the key's earliest
+// tuple), into its own table. The final groups are then ordered by their
+// first tuple (sort_by_first).
+//   x19 tasks, x20 T, x21 merge records, x22 index, x23 total, x24 list
+// =============================================================================
+LFUNC gt_pmerge
     ENTER 5
     mov  x19, x0
     mov  x20, x1
-    mov  x21, x2
-    ldr  x22, [x19, #XT_GT]
-    mov  x23, #1
-1:  cmp  x23, x20
-    b.hs 5f
-    mov  x9, #XT_SIZE
-    madd x9, x23, x9, x19
-    ldr  x24, [x9, #XT_GT]
-    mov  x25, #0
-2:  ldr  x9, [x24, #GT_N]
-    cmp  x25, x9
-    b.hs 4f
-    ldr  x10, [x24, #GT_RECS]
-    ldr  x11, [x24, #GT_RECSZ]
-    madd x26, x25, x11, x10
-    mov  x0, x22
-    ldr  x1, [x26, #GR_HASH]
-    add  x2, x26, #GR_KEYS
-    ldr  x3, [x26, #GR_FIRST]
-    bl   gt_get
-    ldr  x10, [x22, #GT_RECS]           // destination states
-    ldr  x11, [x22, #GT_RECSZ]
-    madd x10, x0, x11, x10
-    ldr  x12, [x22, #GT_NKEYS]
-    add  x10, x10, #GR_KEYS
-    add  x10, x10, x12, lsl #4
-    add  x11, x26, #GR_KEYS             // source states
-    add  x11, x11, x12, lsl #4
-    mov  x0, x21
-    mov  x1, x10
-    mov  x2, x11
-    bl   merge_states
-    add  x25, x25, #1
-    b    2b
-4:  add  x23, x23, #1
+    stp  x2, x3, [sp, #-16]!
+    mov  x9, #MT_SIZE
+    mul  x0, x9, x20
+    bl   arena_zalloc
+    mov  x21, x0
+    ldp  x2, x3, [sp], #16
+    mov  x22, #0
+1:  cmp  x22, x20
+    b.hs 2f
+    mov  x9, #MT_SIZE
+    madd x9, x22, x9, x21
+    str  x19, [x9, #MT_TASKS]
+    str  x20, [x9, #MT_T]
+    str  x22, [x9, #MT_PART]
+    str  x2, [x9, #MT_BQ]
+    str  x3, [x9, #MT_CTX]
+    add  x22, x22, #1
     b    1b
-5:  mov  x0, x22
+2:  ADR_L x0, merge_task
+    mov  x1, x21
+    mov  x2, #MT_SIZE
+    mov  x3, x20
+    bl   par_run
+    mov  x23, #0                        // all final groups
+    mov  x22, #0
+3:  cmp  x22, x20
+    b.hs 4f
+    mov  x9, #MT_SIZE
+    madd x9, x22, x9, x21
+    ldr  x9, [x9, #MT_GT]
+    ldr  x9, [x9, #GT_N]
+    add  x23, x23, x9
+    add  x22, x22, #1
+    b    3b
+4:  lsl  x0, x23, #3
+    add  x0, x0, #8
+    bl   arena_alloc
+    mov  x24, x0
+    mov  x14, #0
+    mov  x22, #0
+5:  cmp  x22, x20
+    b.hs 7f
+    mov  x9, #MT_SIZE
+    madd x9, x22, x9, x21
+    ldr  x9, [x9, #MT_GT]
+    ldr  x10, [x9, #GT_N]
+    ldr  x11, [x9, #GT_RECS]
+    ldr  x12, [x9, #GT_RECSZ]
+    mov  x13, #0
+6:  cmp  x13, x10
+    b.hs 61f
+    madd x15, x13, x12, x11
+    str  x15, [x24, x14, lsl #3]
+    add  x14, x14, #1
+    add  x13, x13, #1
+    b    6b
+61: add  x22, x22, #1
+    b    5b
+7:  mov  x0, x24
+    mov  x1, x23
+    bl   sort_by_first
+    mov  x0, x24
+    mov  x1, x23
     LEAVE 5
-ENDF gt_merge
+ENDF gt_pmerge
+
+// merge_task(x0 merge record): partition MT_PART of every partial table
+//   x19 record, x20 table, x21 task index, x22 group, x23 source record,
+//   x24 partitions
+LFUNC merge_task
+    ENTER 5
+    mov  x19, x0
+    ldr  x24, [x19, #MT_T]
+    ldr  x0, [x19, #MT_BQ]
+    ldr  x1, [x19, #MT_CTX]
+    bl   gt_new
+    mov  x20, x0
+    str  x20, [x19, #MT_GT]
+    mov  x21, #0
+1:  cmp  x21, x24
+    b.hs 9f
+    bl   check_deadline
+    ldr  x9, [x19, #MT_TASKS]
+    mov  x10, #XT_SIZE
+    madd x9, x21, x10, x9
+    ldr  x25, [x9, #XT_GT]              // source table
+    mov  x22, #0
+2:  ldr  x9, [x25, #GT_N]
+    cmp  x22, x9
+    b.hs 4f
+    ldr  x10, [x25, #GT_RECS]
+    ldr  x11, [x25, #GT_RECSZ]
+    madd x23, x22, x11, x10
+    add  x22, x22, #1
+    ldr  x9, [x23, #GR_HASH]            // partition = (hash >> 32) mod T
+    lsr  x9, x9, #32
+    udiv x10, x9, x24
+    msub x9, x10, x24, x9
+    ldr  x10, [x19, #MT_PART]
+    cmp  x9, x10
+    b.ne 2b
+    mov  x0, x20
+    ldr  x1, [x23, #GR_HASH]
+    add  x2, x23, #GR_KEYS
+    ldr  x3, [x23, #GR_FIRST]
+    bl   gt_get
+    ldr  x10, [x20, #GT_RECS]           // destination states
+    ldr  x11, [x20, #GT_RECSZ]
+    madd x10, x0, x11, x10
+    ldr  x12, [x20, #GT_NKEYS]
+    add  x10, x10, #GR_KEYS
+    add  x1, x10, x12, lsl #4
+    add  x2, x23, #GR_KEYS              // source states
+    add  x2, x2, x12, lsl #4
+    ldr  x0, [x19, #MT_BQ]
+    bl   merge_states
+    b    2b
+4:  add  x21, x21, #1
+    b    1b
+9:  LEAVE 5
+ENDF merge_task
+
+// =============================================================================
+// sort_by_first(x0 record pointers, x1 n): ascending GR_FIRST (stable LSD
+// radix sort, 4 passes of 8 bits over the 32-bit tuple index)
+//   x19 array, x20 n, x21 tmp, x22 shift, x23 histogram, x24 the caller's
+//   array
+// =============================================================================
+LFUNC sort_by_first
+    ENTER 4
+    mov  x19, x0
+    mov  x24, x0
+    mov  x20, x1
+    cmp  x20, #2
+    b.lo 9f
+    lsl  x0, x20, #3
+    bl   arena_alloc
+    mov  x21, x0
+    mov  x0, #(257 * 8)
+    bl   arena_alloc
+    mov  x23, x0
+    mov  x22, #0
+1:  cmp  x22, #32
+    b.hs 8f
+    mov  x0, x23
+    mov  w1, #0
+    mov  x2, #(257 * 8)
+    bl   memset
+    mov  x9, #0
+2:  cmp  x9, x20
+    b.hs 3f
+    ldr  x10, [x19, x9, lsl #3]
+    ldr  x10, [x10, #GR_FIRST]
+    lsr  x10, x10, x22
+    and  x10, x10, #0xff
+    add  x10, x10, #1
+    ldr  x11, [x23, x10, lsl #3]
+    add  x11, x11, #1
+    str  x11, [x23, x10, lsl #3]
+    add  x9, x9, #1
+    b    2b
+3:  mov  x9, #1                         // prefix sums
+    mov  x11, #0
+4:  cmp  x9, #256
+    b.hi 5f
+    ldr  x10, [x23, x9, lsl #3]
+    str  x11, [x23, x9, lsl #3]
+    add  x11, x11, x10
+    add  x9, x9, #1
+    b    4b
+5:  mov  x9, #0                         // scatter
+6:  cmp  x9, x20
+    b.hs 7f
+    ldr  x12, [x19, x9, lsl #3]
+    ldr  x10, [x12, #GR_FIRST]
+    lsr  x10, x10, x22
+    and  x10, x10, #0xff
+    add  x10, x10, #1
+    ldr  x13, [x23, x10, lsl #3]
+    add  x14, x13, #1
+    str  x14, [x23, x10, lsl #3]
+    str  x12, [x21, x13, lsl #3]
+    add  x9, x9, #1
+    b    6b
+7:  mov  x9, x19                        // swap the buffers
+    mov  x19, x21
+    mov  x21, x9
+    add  x22, x22, #8
+    b    1b
+8:  cmp  x19, x24                       // 4 passes: back in the caller's
+    b.eq 9f                             // array (kept for clarity)
+    mov  x0, x24
+    mov  x1, x19
+    lsl  x2, x20, #3
+    bl   memcpy
+9:  LEAVE 4
+ENDF sort_by_first
+
+// =============================================================================
+// emit_groups(x0 Aggregate node, x1 ctx, x2 input ts, x3 group records,
+//             x4 count) -> x0 ResultSet*
+// Finishes every group (agg_finish), applies HAVING and projects its row, in
+// group order. Large results are emitted by parallel tasks writing disjoint
+// windows of the row array, compacted afterwards.
+//   x19 node, x20 ctx, x21 bq, x22 tasks, x23 records, x24 rs, x25 index,
+//   x26 window, x27 rows kept
+// =============================================================================
+LFUNC emit_groups
+    ENTER 5
+    sub  sp, sp, #32
+    mov  x19, x0
+    mov  x20, x1
+    ldr  x21, [x19, #PN_BQ]
+    stp  x2, x3, [sp]
+    str  x4, [sp, #16]
+    mov  x0, x21
+    add  x1, x4, #1
+    bl   rs_new
+    mov  x24, x0
+    mov  x22, #1                        // tasks: >= g_par_min_rows / 4 groups
+    TLS_LDR x9, g_x_threads
+    cmp  x9, #1
+    b.ls 1f
+    LDR_G x10, g_par_min_rows
+    lsr  x10, x10, #2
+    cmp  x10, #1
+    csinc x10, x10, xzr, hs
+    ldr  x11, [sp, #16]
+    udiv x10, x11, x10
+    cmp  x10, x9
+    csel x10, x10, x9, lo
+    cmp  x10, #2
+    b.lo 1f
+    str  x10, [sp, #24]
+    mov  x0, x21
+    bl   bq_out_par_safe
+    cbz  w0, 1f
+    ldr  x0, [x19, #PN_EXPR]
+    bl   expr_par_safe
+    cbz  w0, 1f
+    ldr  x22, [sp, #24]
+1:  mov  x9, #ET_SIZE
+    mul  x0, x9, x22
+    bl   arena_alloc
+    mov  x23, x0
+    ldr  x9, [sp, #16]                  // window: ceil(n / tasks)
+    add  x26, x9, x22
+    sub  x26, x26, #1
+    udiv x26, x26, x22
+    mov  x25, #0
+2:  cmp  x25, x22
+    b.hs 4f
+    mov  x9, #ET_SIZE
+    madd x27, x25, x9, x23
+    str  x19, [x27, #ET_NODE]
+    str  x20, [x27, #ET_CTX]
+    ldp  x9, x10, [sp]
+    str  x9, [x27, #ET_TS]
+    str  x10, [x27, #ET_GROUPS]
+    ldr  x11, [sp, #16]
+    mul  x12, x25, x26
+    cmp  x12, x11
+    csel x12, x12, x11, lo
+    str  x12, [x27, #ET_LO]
+    ldr  x13, [x24, #RS_ROWS]
+    add  x13, x13, x12, lsl #3
+    str  x13, [x27, #ET_OUT]
+    add  x12, x12, x26
+    cmp  x12, x11
+    csel x12, x12, x11, lo
+    str  x12, [x27, #ET_HI]
+    str  xzr, [x27, #ET_COUNT]
+    cmp  x22, #1
+    b.eq 3f
+    mov  x0, #EC_SIZE                   // worker tasks: own contexts
+    bl   arena_alloc
+    ldp  x12, x13, [x20]
+    stp  x12, x13, [x0]
+    ldp  x12, x13, [x20, #16]
+    stp  x12, x13, [x0, #16]
+    ldp  x12, x13, [x20, #32]
+    stp  x12, x13, [x0, #32]
+    str  x0, [x27, #ET_CTX]
+3:  add  x25, x25, #1
+    b    2b
+4:  cmp  x22, #1
+    b.ne 5f
+    mov  x0, x23
+    bl   emit_task
+    b    6f
+5:  ADR_L x0, emit_task
+    mov  x1, x23
+    mov  x2, #ET_SIZE
+    mov  x3, x22
+    bl   par_run
+6:  mov  x27, #0                        // compact the windows in order
+    mov  x25, #0
+7:  cmp  x25, x22
+    b.hs 8f
+    mov  x9, #ET_SIZE
+    madd x9, x25, x9, x23
+    ldr  x2, [x9, #ET_COUNT]
+    ldr  x1, [x9, #ET_OUT]
+    ldr  x0, [x24, #RS_ROWS]
+    add  x0, x0, x27, lsl #3
+    add  x27, x27, x2
+    lsl  x2, x2, #3
+    bl   memmove
+    add  x25, x25, #1
+    b    7b
+8:  str  x27, [x24, #RS_NROWS]
+    mov  x0, x24
+    add  sp, sp, #32
+    LEAVE 5
+ENDF emit_groups
+
+// emit_task(x0 emit record): groups [lo, hi) -> rows at ET_OUT, ET_COUNT
+//   x19 record, x20 ctx, x21 bq, x22 index, x23 group record, x24 rows kept,
+//   x25 node
+LFUNC emit_task
+    ENTER 5
+    mov  x19, x0
+    ldr  x20, [x19, #ET_CTX]
+    ldr  x25, [x19, #ET_NODE]
+    ldr  x21, [x25, #PN_BQ]
+    mov  x24, #0
+    ldr  x22, [x19, #ET_LO]
+1:  ldr  x9, [x19, #ET_HI]
+    cmp  x22, x9
+    b.hs 9f
+    tst  x22, #0xfff
+    b.ne 2f
+    bl   check_deadline
+2:  ldr  x9, [x19, #ET_GROUPS]
+    ldr  x23, [x9, x22, lsl #3]
+    add  x22, x22, #1
+    ldr  x9, [x21, #BQ_NGROUP]
+    add  x1, x23, #GR_KEYS
+    add  x1, x1, x9, lsl #4             // states
+    mov  x0, x21
+    bl   agg_finish
+    str  x0, [x20, #EC_AGGV]
+    add  x9, x23, #GR_KEYS
+    str  x9, [x20, #EC_GKEYS]
+    ldr  x0, [x19, #ET_TS]
+    ldr  x1, [x23, #GR_FIRST]
+    bl   ts_tuple
+    str  x0, [x20, #EC_TUPLE]
+    ldr  x0, [x25, #PN_EXPR]            // HAVING
+    cbz  x0, 3f
+    mov  x1, x20
+    bl   eval_true
+    cbz  w0, 1b
+3:  ldr  x9, [x21, #BQ_NOUT]
+    ldr  x10, [x21, #BQ_NEXTRA]
+    add  x9, x9, x10
+    lsl  x0, x9, #4
+    add  x0, x0, #16
+    bl   arena_alloc
+    ldr  x9, [x19, #ET_OUT]
+    str  x0, [x9, x24, lsl #3]
+    add  x24, x24, #1
+    mov  x2, x0
+    mov  x0, x21
+    mov  x1, x20
+    bl   project_row
+    b    1b
+9:  str  x24, [x19, #ET_COUNT]
+    LEAVE 5
+ENDF emit_task
 
 // merge_states(x0 BoundQuery*, x1 destination states, x2 source states)
 // Adds partial aggregate states (never DISTINCT, never FLOAT64 SUM / AVG).

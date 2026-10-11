@@ -286,7 +286,7 @@ ENDF project_rows
 // bq_out_par_safe(x0 BoundQuery*) -> w0 1 if every output / hidden
 // expression is safe for worker threads
 //   x19 bq, x20 index
-LFUNC bq_out_par_safe
+FUNC bq_out_par_safe
     ENTER 2
     mov  x19, x0
     mov  x20, #0
