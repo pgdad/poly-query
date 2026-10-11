@@ -39,9 +39,15 @@ func newAggState(call *plan.AggCall) aggState {
 	if call.Distinct && call.Func != plan.AggMin && call.Func != plan.AggMax {
 		return &genericState{call: call, cls: classOf(t)}
 	}
-	switch call.Func {
-	case plan.AggCount:
+	switch {
+	case call.Func == plan.AggCount:
 		return &countState{}
+	case t.IsWide():
+		// SUM/AVG/MIN/MAX of wide DECIMALs use the row accumulators
+		// (128-bit sums, exact comparisons).
+		return &genericState{call: call, cls: classOf(t)}
+	}
+	switch call.Func {
 	case plan.AggSum:
 		switch t.Kind {
 		case types.KindInt64:
@@ -617,7 +623,7 @@ func (t *aggTable) resolve(keys []*Vec, n int, sel []int32, pos int64) error {
 	switch {
 	case t.keyClasses[0] == vInt:
 		return t.resolveInt(v, n, sel, pos)
-	case t.keyClasses[0] == vFloat:
+	case t.keyClasses[0] == vFloat || t.keyClasses[0] == vWide:
 		return t.resolveEncoded(keys, n, sel, pos)
 	case v.Dict != nil:
 		return t.resolveDict(v, n, sel, pos)
@@ -858,7 +864,9 @@ func (t *aggTable) findOrAdd(key types.Row, pos int64) (int32, error) {
 	var g int32
 	var ok bool
 	var put func(int32)
-	if len(key) == 1 {
+	// Single wide keys are encoded like multi-column keys (the NULL key
+	// has its own group, as in resolveEncoded).
+	if len(key) == 1 && (t.keyClasses[0] != vWide || key[0].Null) {
 		v := key[0]
 		switch {
 		case v.Null:

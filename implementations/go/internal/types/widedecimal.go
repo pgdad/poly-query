@@ -141,6 +141,16 @@ func FloorWide(x Int128, k int) Int128 {
 	return q.signed(x.Hi < 0)
 }
 
+// FloorWideExact divides by 10^k rounding toward negative infinity and
+// reports whether the division was exact.
+func FloorWideExact(x Int128, k int) (Int128, bool) {
+	q, inexact, _ := divPow10(x.abs(), k)
+	if inexact && x.Hi < 0 {
+		q = q.inc()
+	}
+	return q.signed(x.Hi < 0), !inexact
+}
+
 // CeilWide divides by 10^k rounding toward positive infinity.
 func CeilWide(x Int128, k int) Int128 {
 	q, inexact, _ := divPow10(x.abs(), k)
@@ -148,6 +158,45 @@ func CeilWide(x Int128, k int) Int128 {
 		q = q.inc()
 	}
 	return q.signed(x.Hi < 0)
+}
+
+// RoundWide rounds an unscaled value of scale s to n fractional digits
+// (half away from zero) and returns it at scale max(0, min(n, s)) (the
+// ROUND function); results needing more than 38 digits overflow.
+func RoundWide(x Int128, s int, n int64) (Int128, error) {
+	switch {
+	case n >= int64(s):
+		return x, nil
+	case n >= 0:
+		return RescaleWide(x, s, int(n), MaxDecimalPrecision)
+	}
+	// Round to a multiple of 10^-n, then scale back up at scale 0.
+	k := int64(s) - n
+	if k > 2*MaxDecimalPrecision {
+		return Int128{}, nil
+	}
+	q, _ := RescaleWide(x, int(k), 0, MaxDecimalPrecision)
+	if q.Sign() == 0 {
+		return q, nil
+	}
+	return RescaleWide(q, 0, int(-n), MaxDecimalPrecision)
+}
+
+// NormalizeWide strips trailing fractional zeros: it returns the unscaled
+// value and scale of the same number with the smallest scale ≥ 0.
+func NormalizeWide(x Int128, s int) (Int128, int) {
+	if s == 0 || x.Lo%10 != 0 && x.Hi == 0 {
+		return x, s
+	}
+	neg, m := x.Hi < 0, x.abs()
+	for s > 0 {
+		q, r := divSmall(m, 10)
+		if r != 0 {
+			break
+		}
+		m, s = q, s-1
+	}
+	return m.signed(neg), s
 }
 
 // Pow10Wide returns 10^k (0 ≤ k ≤ 38).

@@ -134,14 +134,13 @@ func numberLiteral(x *ast.Literal, negate bool) (plan.Expr, error) {
 		if p > types.MaxDecimalPrecision {
 			return float()
 		}
-		var u int64
-		if digits := intPart + frac; digits != "" {
-			u, _ = strconv.ParseInt(digits, 10, 64) // at most 18 digits
-		}
+		t := types.Decimal(p, s)
+		lit := "0" + intPart + "." + frac
 		if negate {
-			u = -u
+			lit = "-" + lit
 		}
-		return &plan.Literal{Val: types.IntValue(u), T: types.Decimal(p, s)}, nil
+		v, _ := types.ParseDecimalValue(lit, t, false) // fits t by construction
+		return &plan.Literal{Val: v, T: t}, nil
 	}
 	if negate {
 		text = "-" + text
@@ -311,11 +310,24 @@ func comparison(pos ast.Pos, op plan.BinaryOp, l, r plan.Expr) (plan.Expr, error
 	if err != nil {
 		return nil, err
 	}
-	if lt.Kind != rt.Kind && lt.Kind != types.KindNull && rt.Kind != types.KindNull {
+	if needsPromotion(lt, rt) {
 		l, r = promote(l, common), promote(r, common)
 	}
 	return &plan.Binary{Op: op, L: l, R: r, T: types.Boolean}, nil
 }
+
+// needsPromotion reports whether comparing values of types lt and rt
+// requires converting them to their common type first. INT64 and DECIMAL
+// operands are compared by exact value without conversion (CR-2 §4), so a
+// conversion cannot overflow.
+func needsPromotion(lt, rt types.Type) bool {
+	if lt.Kind == rt.Kind || lt.Kind == types.KindNull || rt.Kind == types.KindNull {
+		return false
+	}
+	return !(isExactNumeric(lt) && isExactNumeric(rt))
+}
+
+func isExactNumeric(t types.Type) bool { return t.Kind == types.KindInt64 || t.Kind == types.KindDecimal }
 
 func arithmetic(pos ast.Pos, op plan.BinaryOp, l, r plan.Expr) (plan.Expr, error) {
 	lt, rt := l.Type(), r.Type()
@@ -343,17 +355,19 @@ func arithmetic(pos ast.Pos, op plan.BinaryOp, l, r plan.Expr) (plan.Expr, error
 		}
 		return &plan.Binary{Op: op, L: promote(l, types.Float64), R: promote(r, types.Float64), T: types.Float64}, nil
 	}
-	// DECIMAL: INT64 operands become DECIMAL(18,0); operand scales are kept.
+	// DECIMAL: INT64 operands become DECIMAL(W,0); operand scales are kept.
+	// W is 38 if an operand is a wide DECIMAL, else 18 (CR-2 §2).
 	sl, sr := lt.Scale, rt.Scale
-	l, r = promote(l, types.Decimal(18, sl)), promote(r, types.Decimal(18, sr))
+	w := types.ResultPrecision(lt, rt)
+	l, r = promote(l, types.Decimal(w, sl)), promote(r, types.Decimal(w, sr))
 	switch op {
 	case plan.OpAdd, plan.OpSub:
-		return &plan.Binary{Op: op, L: l, R: r, T: types.Decimal(18, max(sl, sr))}, nil
+		return &plan.Binary{Op: op, L: l, R: r, T: types.Decimal(w, max(sl, sr))}, nil
 	case plan.OpMul:
-		if sl+sr > types.MaxDecimalPrecision {
-			return nil, typeAt(pos, "DECIMAL multiplication result scale %d exceeds 18", sl+sr)
+		if sl+sr > w {
+			return nil, typeAt(pos, "DECIMAL multiplication result scale %d exceeds %d", sl+sr, w)
 		}
-		return &plan.Binary{Op: op, L: l, R: r, T: types.Decimal(18, sl+sr)}, nil
+		return &plan.Binary{Op: op, L: l, R: r, T: types.Decimal(w, sl+sr)}, nil
 	case plan.OpDiv:
 		return &plan.Binary{Op: op, L: promote(l, types.Float64), R: promote(r, types.Float64), T: types.Float64}, nil
 	}

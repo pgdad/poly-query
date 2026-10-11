@@ -85,6 +85,8 @@ func (t *joinTable) appendRows(b *Batch, keys []*Vec, keyTypes []types.Type, key
 				c.I = append(c.I, v.I[i])
 			case vFloat:
 				c.F = append(c.F, v.F[i])
+			case vWide:
+				c.W = append(c.W, v.W[i])
 			default:
 				c.S = append(c.S, v.S[i])
 				bytes += int64(len(v.S[i]))
@@ -157,7 +159,7 @@ func newJoinBuild(ec *Context, x *physical.HashJoin) (*joinBuild, error) {
 		s.classes = append(s.classes, classOf(c.Type))
 	}
 	kb, kp := s.keyTypes[0], probeKeys[0].Type()
-	s.intKey = len(buildKeys) == 1 && classOf(kb) == vInt && kb.Kind == kp.Kind && kb.Scale == kp.Scale
+	s.intKey = len(buildKeys) == 1 && classOf(kb) == vInt && classOf(kp) == vInt && kb.Kind == kp.Kind && kb.Scale == kp.Scale
 	return s, nil
 }
 
@@ -438,6 +440,10 @@ func (j *vhashJoinOp) gatherProbe(k int, v *Vec, n int) *Vec {
 		for o, i := range idx {
 			out.F[o] = v.F[i]
 		}
+	case cls == vWide:
+		for o, i := range idx {
+			out.W[o] = v.W[i]
+		}
 	case v.Dict != nil:
 		codes := grow(j.codes[k], n)
 		j.codes[k] = codes
@@ -483,6 +489,8 @@ func (j *vhashJoinOp) gatherBuild(k int, v *Vec, n int) *Vec {
 			out.I[o] = v.I[b]
 		case vFloat:
 			out.F[o] = v.F[b]
+		case vWide:
+			out.W[o] = v.W[b]
 		default:
 			out.S[o] = v.S[b]
 		}

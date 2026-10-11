@@ -161,7 +161,7 @@ func checkRound(b *binder, x *ast.FuncCall, f *plan.Func) error {
 		if !f.NullParam {
 			s = max(0, min(f.Digits, s))
 		}
-		f.T = types.Decimal(18, int(s))
+		f.T = types.Decimal(types.ResultPrecision(t), int(s))
 	}
 	return nil
 }
@@ -173,7 +173,7 @@ func checkFloorCeil(_ *binder, x *ast.FuncCall, f *plan.Func) error {
 	}
 	f.T = t
 	if t.Kind == types.KindDecimal {
-		f.T = types.Decimal(18, 0)
+		f.T = types.Decimal(types.ResultPrecision(t), 0)
 	}
 	return nil
 }
@@ -246,7 +246,7 @@ func checkNullif(_ *binder, x *ast.FuncCall, f *plan.Func) error {
 	if _, err := comparisonType(x.Pos, at, bt); err != nil {
 		return err
 	}
-	if at.Kind != bt.Kind && at.Kind != types.KindNull && bt.Kind != types.KindNull {
+	if needsPromotion(at, bt) {
 		common, _ := types.CommonType(at, bt)
 		f.Args = []plan.Expr{f.Args[0], promote(f.Args[1], common)}
 		if at.Kind != common.Kind {
@@ -344,7 +344,7 @@ func (b *binder) aggregate(x *ast.FuncCall, name string, fn plan.AggFunc) (plan.
 			case types.KindInt64, types.KindFloat64, types.KindNull:
 				call.T = t
 			case types.KindDecimal:
-				call.T = types.Decimal(18, t.Scale)
+				call.T = types.Decimal(types.ResultPrecision(t), t.Scale)
 			default:
 				return nil, typeAt(x.Pos, "SUM requires a numeric argument, not %s", t)
 			}

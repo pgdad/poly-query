@@ -33,7 +33,7 @@ func newAccumulator(call *plan.AggCall) accumulator {
 		case types.KindInt64:
 			acc = &exactSumAcc{limit: 0}
 		case types.KindDecimal:
-			acc = &exactSumAcc{limit: types.MaxDecimalUnscaled}
+			acc = &exactSumAcc{limit: types.MaxDecimalUnscaled, wide: argType.IsWide()}
 		case types.KindFloat64:
 			acc = &floatSumAcc{}
 		default:
@@ -42,7 +42,7 @@ func newAccumulator(call *plan.AggCall) accumulator {
 	case plan.AggAvg:
 		switch argType.Kind {
 		case types.KindInt64, types.KindDecimal:
-			acc = &exactAvgAcc{scale: argType.Scale}
+			acc = &exactAvgAcc{scale: argType.Scale, wide: argType.IsWide()}
 		case types.KindFloat64:
 			acc = &floatAvgAcc{}
 		default:
@@ -77,17 +77,22 @@ func (nullAcc) merge(accumulator)            {}
 func (nullAcc) result() (types.Value, error) { return types.NullValue, nil }
 
 // exactSumAcc sums INT64 values or unscaled DECIMALs without intermediate
-// overflow. limit > 0 bounds |result| (exclusive) for DECIMAL; 0 means the
-// INT64 range.
+// overflow. limit > 0 bounds |result| (exclusive) for narrow DECIMAL; 0
+// means the INT64 range. Wide DECIMALs (wide set) sum into DECIMAL(38,s).
 type exactSumAcc struct {
 	sum   types.BigDecimalSum
 	any   bool
 	limit int64
+	wide  bool
 }
 
 func (a *exactSumAcc) add(v types.Value) error {
 	if !v.Null {
-		a.sum.Add(v.I)
+		if a.wide {
+			a.sum.AddWide(v.Wide())
+		} else {
+			a.sum.Add(v.I)
+		}
 		a.any = true
 	}
 	return nil
@@ -105,11 +110,23 @@ func (a *exactSumAcc) result() (types.Value, error) {
 	if !a.any {
 		return types.NullValue, nil
 	}
+	if a.wide {
+		return wideSumResult(&a.sum)
+	}
 	s, ok := a.sum.Int64()
 	if !ok || (a.limit > 0 && (s <= -a.limit || s >= a.limit)) {
 		return types.NullValue, errs.New(errs.NumericOverflow, "SUM overflow")
 	}
 	return types.IntValue(s), nil
+}
+
+// wideSumResult returns an exact sum as a DECIMAL(38,s) value.
+func wideSumResult(sum *types.BigDecimalSum) (types.Value, error) {
+	x, ok := sum.Wide()
+	if !ok || !types.FitsWide(x, types.MaxDecimalPrecision) {
+		return types.NullValue, errs.New(errs.NumericOverflow, "SUM overflow")
+	}
+	return types.WideValue(x), nil
 }
 
 type floatSumAcc struct {
@@ -147,11 +164,16 @@ type exactAvgAcc struct {
 	sum   types.BigDecimalSum
 	n     int64
 	scale int
+	wide  bool
 }
 
 func (a *exactAvgAcc) add(v types.Value) error {
 	if !v.Null {
-		a.sum.Add(v.I)
+		if a.wide {
+			a.sum.AddWide(v.Wide())
+		} else {
+			a.sum.Add(v.I)
+		}
 		a.n++
 	}
 	return nil

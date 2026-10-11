@@ -52,6 +52,8 @@ func (t *Table) computeStats(ord int) (ColumnStats, error) {
 			distinct.add(mix64(math.Float64bits(f)))
 		case classString:
 			distinct.add(hashString(v.S))
+		case classWide:
+			distinct.add(mix64(uint64(v.I) ^ mix64(uint64(v.Hi))))
 		default:
 			distinct.add(mix64(uint64(v.I)))
 		}

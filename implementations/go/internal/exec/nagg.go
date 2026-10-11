@@ -134,7 +134,7 @@ func planNativeAggregate(ec *Context, x *physical.HashAggregate) (*naggPlan, boo
 					return nil, false
 				}
 			case plan.AggSum, plan.AggAvg:
-				if c.Distinct || (t.Kind != types.KindInt64 && t.Kind != types.KindDecimal) {
+				if c.Distinct || !intClass(t) || t.Kind != types.KindInt64 && t.Kind != types.KindDecimal {
 					return nil, false
 				}
 			case plan.AggMin, plan.AggMax:

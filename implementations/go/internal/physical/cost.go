@@ -29,7 +29,7 @@ func numeric(t types.Type, v types.Value) (float64, bool) {
 	case types.KindInt64, types.KindDate, types.KindTimestamp:
 		return float64(v.I), true
 	case types.KindDecimal:
-		return types.DecimalToFloat(v.I, t.Scale), true
+		return types.DecimalValueToFloat(v, t), true
 	case types.KindFloat64:
 		return v.F, true
 	}

@@ -489,6 +489,11 @@ func compactBatch(b *Batch, classes []vclass, lib *native.Lib) *Batch {
 			for k := range nv.F {
 				nv.F[k] = v.F[idx(k)]
 			}
+		case classes[c] == vWide:
+			nv.W = make([]types.Int128, n)
+			for k := range nv.W {
+				nv.W[k] = v.W[idx(k)]
+			}
 		case v.Dict != nil:
 			nv.Dict = v.Dict
 			nv.Codes = make([]uint32, n)

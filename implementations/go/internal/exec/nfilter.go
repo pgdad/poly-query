@@ -128,11 +128,14 @@ func (c *nativeCompiler) split(pred plan.Expr) (*npred, []plan.Expr) {
 }
 
 // intClass reports whether values of t are compared as their int64
-// representation (DECIMALs of equal scale).
+// representation (narrow DECIMALs of equal scale). Wide DECIMALs are not:
+// the kernel ABI covers 64-bit values only, so they never reach a kernel.
 func intClass(t types.Type) bool {
 	switch t.Kind {
-	case types.KindBoolean, types.KindInt64, types.KindDecimal, types.KindDate, types.KindTimestamp:
+	case types.KindBoolean, types.KindInt64, types.KindDate, types.KindTimestamp:
 		return true
+	case types.KindDecimal:
+		return !t.IsWide()
 	}
 	return false
 }
@@ -201,16 +204,27 @@ func abs64(v int64) int64 {
 }
 
 // constFor converts a constant of type kt to the representation of a
-// column of type ct (same kind); null reports a NULL constant.
+// column of type ct (same kind, or INT64/DECIMAL mixed: the constant must be
+// exactly representable at the column's scale); null reports a NULL
+// constant.
 func constFor(v types.Value, kt, ct types.Type) (x int64, null, ok bool) {
 	if v.Null || kt.Kind == types.KindNull {
 		return 0, true, true
 	}
-	if kt.Kind != ct.Kind {
+	exact := isExact(kt) && isExact(ct)
+	if kt.Kind != ct.Kind && !exact {
 		return 0, false, false
 	}
-	if ct.Kind == types.KindDecimal {
-		x, ok = rescale(v.I, kt.Scale, ct.Scale)
+	if exact {
+		u := v.I
+		if kt.IsWide() {
+			w := v.Wide()
+			if !w.IsInt64() {
+				return 0, false, false
+			}
+			u = w.Int64()
+		}
+		x, ok = rescale(u, kt.Scale, ct.Scale)
 		return x, false, ok
 	}
 	return v.I, false, true
@@ -227,7 +241,7 @@ func (c *nativeCompiler) bound(e plan.Expr, ct, xt types.Type) (x int64, null, o
 		return 0, false, false
 	}
 	kt := e.Type()
-	if !v.Null && kt.Kind != ct.Kind && kt.Kind != types.KindNull {
+	if !v.Null && kt.Kind != ct.Kind && kt.Kind != types.KindNull && !(isExact(kt) && isExact(ct)) {
 		var err error
 		if v, err = types.Cast(v, kt, ct); err != nil {
 			return 0, false, false

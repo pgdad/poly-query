@@ -1,8 +1,13 @@
-// Package pqcf reads and writes PQCF v1, the PolyQuery columnar file format
+// Package pqcf reads and writes PQCF, the PolyQuery columnar file format
 // (spec/storage/pqcf-v1.md): an 8-byte header, column chunks (PLAIN, DICT or
 // RLE encoded, each with an optional LSB-first validity bitmap and a CRC-32),
 // a JSON metadata block and a 12-byte footer. Readers validate everything
 // and report damage as STORAGE_CORRUPT; writers replace files atomically.
+//
+// Format version 2 (change request CR-2, spec/changes/decimal38.md §7) adds
+// wide DECIMAL columns (precision 19–38) whose values are 128-bit
+// two's-complement little-endian integers. Tables with a wide DECIMAL column
+// are written as v2, all others as v1; both versions are read.
 package pqcf
 
 import (
@@ -15,9 +20,12 @@ import (
 
 // Format constants.
 const (
-	Magic         = "PQCF"
-	FormatVersion = 1
-	headerSize    = 8
+	Magic = "PQCF"
+	// FormatV1 is the base format; FormatV2 adds 128-bit wide DECIMALs.
+	FormatV1         = 1
+	FormatV2         = 2
+	maxFormatVersion = FormatV2
+	headerSize       = 8
 	footerSize    = 12
 )
 
@@ -40,6 +48,17 @@ func corrupt(format string, args ...any) error {
 
 func unsupported(format string, args ...any) error {
 	return errs.New(errs.StorageVersion, format, args...)
+}
+
+// formatVersion is the version a table with the given columns is written
+// as: v2 iff some column is a wide DECIMAL.
+func formatVersion(cols []types.Type) int {
+	for _, t := range cols {
+		if t.IsWide() {
+			return FormatV2
+		}
+	}
+	return FormatV1
 }
 
 // rleCapable reports whether a type may be RLE-encoded.

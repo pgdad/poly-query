@@ -52,6 +52,8 @@ func (s *colStore) append(b *Batch) int64 {
 				c.I = append(c.I, v.I[i])
 			case vFloat:
 				c.F = append(c.F, v.F[i])
+			case vWide:
+				c.W = append(c.W, v.W[i])
 			default:
 				c.S = append(c.S, strs[i])
 				bytes += int64(len(strs[i]))
@@ -79,6 +81,10 @@ func (s *colStore) gather(idx []int32, bufs []vecBuf, out *Batch) {
 		case vFloat:
 			for o, i := range idx {
 				v.F[o] = c.F[i]
+			}
+		case vWide:
+			for o, i := range idx {
+				v.W[o] = c.W[i]
 			}
 		default:
 			for o, i := range idx {
@@ -227,6 +233,8 @@ func (c *colComparator) items(n int) []sortItem {
 		switch k.cls {
 		case vInt:
 			u = uint64(k.ints[i]) ^ 1<<63
+		case vWide:
+			u = uint64(clampInt64(k.wides[i])) ^ 1<<63
 		case vFloat:
 			f := k.floats[i]
 			if f == 0 {
@@ -268,6 +276,7 @@ type colComparator struct {
 type colKey struct {
 	cls        vclass
 	ints       []int64
+	wides      []types.Int128
 	floats     []float64
 	strs       []string
 	prefix     []uint64 // STRING keys: first 8 bytes, big-endian (byte order)
@@ -280,7 +289,7 @@ func newColComparator(s *colStore, keys []sortKey) *colComparator {
 	c := &colComparator{}
 	for _, k := range keys {
 		col := &s.cols[k.index]
-		ck := colKey{cls: s.classes[k.index], ints: col.I, floats: col.F, strs: col.S,
+		ck := colKey{cls: s.classes[k.index], ints: col.I, wides: col.W, floats: col.F, strs: col.S,
 			nulls: col.Nulls, desc: k.desc, nullsFirst: k.nullsFirst}
 		if ck.cls == vStr {
 			ck.prefix = make([]uint64, len(col.S))
@@ -291,6 +300,18 @@ func newColComparator(s *colStore, keys []sortKey) *colComparator {
 		c.keys = append(c.keys, ck)
 	}
 	return c
+}
+
+// clampInt64 saturates a 128-bit value to the int64 range: an
+// order-preserving (not strictly) sort prefix for wide DECIMAL keys.
+func clampInt64(x types.Int128) int64 {
+	switch {
+	case x.IsInt64():
+		return x.Int64()
+	case x.Hi < 0:
+		return math.MinInt64
+	}
+	return math.MaxInt64
 }
 
 // stringPrefix packs the first 8 bytes of s big-endian, zero-padded:
@@ -331,6 +352,8 @@ func (c *colComparator) compare(a, b int32) int {
 			} else if x > y {
 				r = 1
 			}
+		case vWide:
+			r = k.wides[a].Cmp(k.wides[b])
 		case vFloat:
 			x, y := k.floats[a], k.floats[b]
 			if x < y {

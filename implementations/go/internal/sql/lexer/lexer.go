@@ -42,6 +42,7 @@ func (k Kind) String() string {
 type Token struct {
 	Kind Kind
 	Text string
+	Raw  string // keywords: the word as written
 	Line int
 	Col  int
 }
@@ -169,7 +170,9 @@ func (lx *lexer) next() (Token, error) {
 		}
 		word := lx.src[start:lx.pos]
 		if upper := strings.ToUpper(word); reserved[upper] {
-			return tok(Keyword, upper), nil
+			t := tok(Keyword, upper)
+			t.Raw = word
+			return t, nil
 		}
 		return tok(Ident, word), nil
 	case isDigit(c) || (c == '.' && isDigit(lx.peek(1))):

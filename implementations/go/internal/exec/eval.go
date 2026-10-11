@@ -119,6 +119,15 @@ func compileUnary(ec *Context, lay layout, x *plan.Unary) (evalFn, error) {
 			return types.FloatValue(-v.F), nil
 		}, nil
 	case types.KindInt64, types.KindDecimal:
+		if x.T.IsWide() {
+			return func(row types.Row) (types.Value, error) {
+				v, err := f(row)
+				if err != nil || v.Null {
+					return v, err
+				}
+				return types.WideValue(v.Wide().Neg()), nil // |v| < 10^38
+			}, nil
+		}
 		return func(row types.Row) (types.Value, error) {
 			v, err := f(row)
 			if err != nil || v.Null {
@@ -273,9 +282,11 @@ func comparer(ta, tb, ct types.Type) func(a, b types.Value) (int, error) {
 }
 
 // caster returns a conversion from type from to the comparison type to and
-// the effective type of converted values. DECIMALs keep their own scale.
+// the effective type of converted values. INT64 and DECIMAL values compared
+// as DECIMALs are not converted: types.Compare and appendKey treat them by
+// exact value, so no conversion can overflow.
 func caster(from, to types.Type) (func(types.Value) (types.Value, error), types.Type) {
-	if from.Kind == to.Kind || from.Kind == types.KindNull {
+	if from.Kind == to.Kind || from.Kind == types.KindNull || from.Kind == types.KindInt64 && to.Kind == types.KindDecimal {
 		return func(v types.Value) (types.Value, error) { return v, nil }, from
 	}
 	return func(v types.Value) (types.Value, error) { return types.Cast(v, from, to) }, to
@@ -303,6 +314,9 @@ func compileArithmetic(x *plan.Binary, lf, rf evalFn) (evalFn, error) {
 			return types.FloatValue(v), err
 		}, nil
 	case types.KindDecimal:
+		if x.T.IsWide() {
+			return compileWideArithmetic(x, lf, rf), nil
+		}
 		sl, sr := x.L.Type().Scale, x.R.Type().Scale
 		return func(row types.Row) (types.Value, error) {
 			l, r, err := both(lf, rf, row)
@@ -327,6 +341,33 @@ func compileArithmetic(x *plan.Binary, lf, rf evalFn) (evalFn, error) {
 		_, _, err := both(lf, rf, row)
 		return null, err
 	}, nil
+}
+
+// compileWideArithmetic computes + - * with a wide DECIMAL result in 128
+// bits; operands may be INT64 (promoted), narrow or wide DECIMALs.
+func compileWideArithmetic(x *plan.Binary, lf, rf evalFn) evalFn {
+	op := x.Op
+	lt, rt := x.L.Type(), x.R.Type()
+	return func(row types.Row) (types.Value, error) {
+		l, r, err := both(lf, rf, row)
+		if err != nil || l.Null || r.Null {
+			return null, err
+		}
+		v, err := wideOp(op, types.DecimalOf(lt, l), lt.Scale, types.DecimalOf(rt, r), rt.Scale)
+		return types.WideValue(v), err
+	}
+}
+
+func wideOp(op plan.BinaryOp, a types.Int128, sa int, b types.Int128, sb int) (types.Int128, error) {
+	switch op {
+	case plan.OpAdd:
+		return types.AddWide(a, sa, b, sb)
+	case plan.OpSub:
+		return types.SubWide(a, sa, b, sb)
+	case plan.OpMul:
+		return types.MulDecimalWide(a, b)
+	}
+	return types.Int128{}, errs.New(errs.InternalError, "invalid DECIMAL operator %s", op)
 }
 
 func intOp(op plan.BinaryOp, a, b int64) (int64, error) {

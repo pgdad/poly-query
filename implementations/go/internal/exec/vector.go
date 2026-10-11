@@ -16,9 +16,10 @@ const BatchSize = 2048
 type vclass uint8
 
 const (
-	vInt   vclass = iota // BOOLEAN (0/1), INT64, DECIMAL (unscaled), DATE, TIMESTAMP
+	vInt   vclass = iota // BOOLEAN (0/1), INT64, narrow DECIMAL (unscaled), DATE, TIMESTAMP
 	vFloat               // FLOAT64
 	vStr                 // STRING and the null type
+	vWide                // wide DECIMAL (128-bit unscaled)
 )
 
 func classOf(t types.Type) vclass {
@@ -27,6 +28,9 @@ func classOf(t types.Type) vclass {
 		return vFloat
 	case types.KindString, types.KindNull:
 		return vStr
+	}
+	if t.IsWide() {
+		return vWide
 	}
 	return vInt
 }
@@ -37,6 +41,7 @@ func classOf(t types.Type) vclass {
 // and at positions outside the batch's selection are unspecified.
 type Vec struct {
 	I     []int64
+	W     []types.Int128
 	F     []float64
 	S     []string
 	Dict  []string
@@ -57,6 +62,8 @@ func (v *Vec) value(i int, c vclass) types.Value {
 		return types.Value{I: v.I[i]}
 	case vFloat:
 		return types.Value{F: v.F[i]}
+	case vWide:
+		return types.WideValue(v.W[i])
 	}
 	if v.Dict != nil {
 		return types.Value{S: v.Dict[v.Codes[i]]}
@@ -100,6 +107,8 @@ func (b *vecBuf) reset(n int, c vclass) *Vec {
 		b.v.I = grow(b.v.I, n)
 	case vFloat:
 		b.v.F = grow(b.v.F, n)
+	case vWide:
+		b.v.W = grow(b.v.W, n)
 	default:
 		b.v.S = grow(b.v.S, n)
 		b.v.Dict, b.v.Codes = nil, nil
@@ -128,6 +137,8 @@ func (v *Vec) set(i int, val types.Value, c vclass) {
 		v.I[i] = val.I
 	case vFloat:
 		v.F[i] = val.F
+	case vWide:
+		v.W[i] = val.Wide()
 	default:
 		v.S[i] = val.S
 	}

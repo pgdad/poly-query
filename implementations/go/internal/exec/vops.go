@@ -169,6 +169,8 @@ func (s *vscanOp) sliceColumn(k int, v *storage.Vector, lo, hi int) {
 		c.I = v.Ints[lo:hi]
 	case vFloat:
 		c.F = v.Floats[lo:hi]
+	case vWide:
+		c.W = v.Wides[lo:hi]
 	default:
 		if v.Dict != nil {
 			c.Dict, c.Codes, c.S = v.Dict, v.Codes[lo:hi], s.decoded[k][:0]
@@ -210,6 +212,8 @@ func (s *vscanOp) gatherTuples(lo, hi int) {
 				out.I[i] = v.I
 			case vFloat:
 				out.F[i] = v.F
+			case vWide:
+				out.W[i] = v.Wide()
 			default:
 				out.S[i] = v.S
 			}

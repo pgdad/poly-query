@@ -153,6 +153,11 @@ func newVConst(v types.Value, c vclass) *vconst {
 		for i := range k.vec.F {
 			k.vec.F[i] = v.F
 		}
+	case vWide:
+		k.vec.W = make([]types.Int128, BatchSize)
+		for i := range k.vec.W {
+			k.vec.W[i] = v.Wide()
+		}
 	default:
 		k.vec.S = make([]string, BatchSize)
 		for i := range k.vec.S {
@@ -457,7 +462,11 @@ type vcmp struct {
 
 func (c *vcompiler) comparison(x *plan.Binary) (vexpr, error) {
 	lt, rt := x.L.Type(), x.R.Type()
-	if lt.Kind != rt.Kind {
+	switch {
+	case lt.IsWide() || rt.IsWide():
+		// Exact 128-bit comparison per element.
+		return c.elementwise(x)
+	case lt.Kind != rt.Kind && !(isExact(lt) && isExact(rt)):
 		return c.fallback(x)
 	}
 	l, err := c.compile(x.L)
@@ -475,15 +484,17 @@ func (c *vcompiler) comparison(x *plan.Binary) (vexpr, error) {
 			lt, rt = rt, lt
 		}
 	}
-	v := &vcmp{op: op, l: l, r: r, cls: classOf(lt)}
-	if lt.Kind == types.KindDecimal {
-		v.scaleL, v.scaleR = lt.Scale, rt.Scale
-	}
+	// INT64 (scale 0) and narrow DECIMAL operands compare as int64
+	// unscaled values, exactly across scales.
+	v := &vcmp{op: op, l: l, r: r, cls: classOf(lt), scaleL: lt.Scale, scaleR: rt.Scale}
 	if rc, ok := r.(*vconst); ok {
 		v.rconst = rc
 	}
 	return v, nil
 }
+
+// isExact reports whether t is INT64 or DECIMAL.
+func isExact(t types.Type) bool { return t.Kind == types.KindInt64 || t.Kind == types.KindDecimal }
 
 func cmpResult(op plan.BinaryOp, c int) int64 {
 	var ok bool
@@ -658,7 +669,7 @@ func (c *vcompiler) arithmetic(x *plan.Binary) (vexpr, error) {
 	switch {
 	case kind == types.KindInt64:
 	case kind == types.KindFloat64 && x.Op != plan.OpMod:
-	case kind == types.KindDecimal && (x.Op == plan.OpAdd || x.Op == plan.OpSub || x.Op == plan.OpMul):
+	case kind == types.KindDecimal && !x.T.IsWide() && (x.Op == plan.OpAdd || x.Op == plan.OpSub || x.Op == plan.OpMul):
 	default:
 		return c.elementwise(x)
 	}
@@ -1019,6 +1030,8 @@ func (v *velementwise) evalDict(in *Vec, n int) (*Vec, bool) {
 			out.I[i] = r.I
 		case vFloat:
 			out.F[i] = r.F
+		case vWide:
+			out.W[i] = r.Wide()
 		}
 	}
 	if v.cls == vStr {

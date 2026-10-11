@@ -44,11 +44,13 @@ type Index struct {
 
 	// HASH
 	ints   map[int64][]uint32
+	wides  map[types.Int128][]uint32
 	floats map[float64][]uint32
 	strs   map[string][]uint32
 	// BTREE: row IDs ordered by value (ties by row ID) and their keys.
 	order     []uint32
 	intKeys   []int64
+	wideKeys  []types.Int128
 	floatKeys []float64
 	strKeys   []string
 }
@@ -79,6 +81,7 @@ const (
 	classInt class = iota
 	classFloat
 	classString
+	classWide // wide DECIMAL
 )
 
 func classOf(t types.Type) class {
@@ -87,6 +90,9 @@ func classOf(t types.Type) class {
 		return classFloat
 	case types.KindString, types.KindNull:
 		return classString
+	}
+	if t.IsWide() {
+		return classWide
 	}
 	return classInt
 }
@@ -103,6 +109,8 @@ func (ix *Index) buildHash() error {
 	switch classOf(ix.Type) {
 	case classInt:
 		ix.ints = map[int64][]uint32{}
+	case classWide:
+		ix.wides = map[types.Int128][]uint32{}
 	case classFloat:
 		ix.floats = map[float64][]uint32{}
 	default:
@@ -115,6 +123,8 @@ func (ix *Index) buildHash() error {
 		switch {
 		case ix.ints != nil:
 			ix.ints[v.I] = append(ix.ints[v.I], uint32(id))
+		case ix.wides != nil:
+			ix.wides[v.Wide()] = append(ix.wides[v.Wide()], uint32(id))
 		case ix.floats != nil:
 			f := normFloat(v.F)
 			ix.floats[f] = append(ix.floats[f], uint32(id))
@@ -130,6 +140,7 @@ func (ix *Index) buildBTree() error {
 		id  uint32
 	}
 	var ints []entry[int64]
+	var wides []entry[types.Int128]
 	var floats []entry[float64]
 	var strs []entry[string]
 	cls := classOf(ix.Type)
@@ -140,6 +151,8 @@ func (ix *Index) buildBTree() error {
 		switch cls {
 		case classInt:
 			ints = append(ints, entry[int64]{v.I, uint32(id)})
+		case classWide:
+			wides = append(wides, entry[types.Int128]{v.Wide(), uint32(id)})
 		case classFloat:
 			floats = append(floats, entry[float64]{normFloat(v.F), uint32(id)})
 		default:
@@ -157,6 +170,13 @@ func (ix *Index) buildBTree() error {
 		ix.order = make([]uint32, len(ints))
 		for i, e := range ints {
 			ix.intKeys[i], ix.order[i] = e.key, e.id
+		}
+	case classWide:
+		slices.SortFunc(wides, func(a, b entry[types.Int128]) int { return cmp.Or(a.key.Cmp(b.key), cmp.Compare(a.id, b.id)) })
+		ix.wideKeys = make([]types.Int128, len(wides))
+		ix.order = make([]uint32, len(wides))
+		for i, e := range wides {
+			ix.wideKeys[i], ix.order[i] = e.key, e.id
 		}
 	case classFloat:
 		slices.SortFunc(floats, func(a, b entry[float64]) int { return cmp.Or(cmp.Compare(a.key, b.key), cmp.Compare(a.id, b.id)) })
@@ -181,6 +201,8 @@ func (ix *Index) cmpKey(i int, v types.Value) int {
 	switch {
 	case ix.intKeys != nil:
 		return cmpInt(ix.intKeys[i], v.I)
+	case ix.wideKeys != nil:
+		return ix.wideKeys[i].Cmp(v.Wide())
 	case ix.floatKeys != nil:
 		return cmpFloat(ix.floatKeys[i], normFloat(v.F))
 	}
@@ -231,6 +253,8 @@ func (ix *Index) Equal(v types.Value) []uint32 {
 		switch {
 		case ix.ints != nil:
 			return ix.ints[v.I]
+		case ix.wides != nil:
+			return ix.wides[v.Wide()]
 		case ix.floats != nil:
 			return ix.floats[normFloat(v.F)]
 		}
@@ -286,6 +310,9 @@ func (ix *Index) Entries() int {
 	}
 	n := 0
 	for _, l := range ix.ints {
+		n += len(l)
+	}
+	for _, l := range ix.wides {
 		n += len(l)
 	}
 	for _, l := range ix.floats {

@@ -99,7 +99,7 @@ func (w *writer) value(v types.Value, t types.Type) {
 		w.b = types.AppendFloat(w.b, v.F)
 	case types.KindDecimal:
 		w.b = append(w.b, '"')
-		w.b = append(w.b, types.FormatDecimal(v.I, t.Scale)...)
+		w.b = types.AppendDecimalValue(w.b, v, t)
 		w.b = append(w.b, '"')
 	case types.KindDate:
 		w.b = append(w.b, '"')
