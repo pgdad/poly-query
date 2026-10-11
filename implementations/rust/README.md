@@ -1248,11 +1248,12 @@ The row-at-a-time engine (`mode: "row"`, the baseline) is unchanged.
 
 ### Verification
 
-* Conformance suite: 660/660 before and after.
+* Conformance suite: 660/660 before and after (session and HTTP
+  transport); `--modes` option matrix: 3870/3870.
 * `bench/difftest.py` (random queries, every mode × join × threads ×
   optimize combination, with tiny morsels so that the parallel operators —
   including parallel top-N and the sharded DISTINCT merge — run on small
-  tables): several runs of 250–300 queries, 0 mismatches.
+  tables): runs of 250–500 queries with different seeds, 0 mismatches.
 * Cross-mode checks on the 1m data (row vs vectorized 1/4/16 threads) of
   DISTINCT aggregates (grouped and global, ints/floats/dates/booleans/
   strings/NULL-heavy), IN/NOT IN with NULLs, empty subqueries and mixed
