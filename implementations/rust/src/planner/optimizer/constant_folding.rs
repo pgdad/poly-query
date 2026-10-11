@@ -176,7 +176,7 @@ fn foldable(e: &Expr) -> bool {
 }
 
 /// Folds constants and simplifies boolean structure, bottom-up.
-pub fn simplify(mut e: Expr) -> Expr {
+fn simplify(mut e: Expr) -> Expr {
     for c in e.children_mut() {
         *c = simplify(std::mem::replace(c, placeholder()));
     }

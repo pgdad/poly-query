@@ -5,7 +5,10 @@ An analytical database engine implementing the PolyQuery specification
 
 Status: **Phase 5** (optimization) plus **M9** (native kernel
 integration) plus change request **CR-1 `UNION ALL`**
-(`spec/changes/union-all.md`, see [Change CR-1](#change-cr-1-union-all)).
+(`spec/changes/union-all.md`, see [Change CR-1](#change-cr-1-union-all)),
+restructured by the refactoring **CR-3 logical/physical plan separation**
+(`spec/changes/refactor-plan-separation.md`, see
+[Change CR-3](#change-cr-3-logicalphysical-plan-separation)).
 Capabilities claimed:
 `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`, `sql.basic`,
 `test.functions`, `phase2`, `sql.groupby`, `sql.join`, `sql.functions`,
@@ -62,15 +65,16 @@ Layers, bottom-up:
 | `sql` | lexer (positions for `PARSE_ERROR` details), AST, recursive-descent parser for the **full** v1 grammar |
 | `planner::binder` | semantic analysis: name resolution (`scope`: range variables, CTE environments, correlation), expression typing (`exprs`), function signatures (`functions`), the grouping rule, ORDER BY/GROUP BY ordinal and alias resolution; produces a `LogicalPlan` of bound, typed `Expr`s |
 | `planner::typing` | numeric promotion, comparability, common types (CASE/COALESCE) |
-| `planner::logical` | logical algebra: Scan, Filter, Project, Aggregate, Join (INNER/LEFT/CROSS), Distinct, Sort, Limit, UnionAll |
-| `planner::optimizer` | logical optimization driver: `rewrite` (constant folding, predicate simplification), predicate pushdown (WHERE/ON conjuncts to the scans, also through pass-through projections of derived tables/CTEs; cross joins with equality predicates become inner joins), `reorder` (join reordering of inner-join chains) and column pruning |
-| `planner::access` | access paths: recognizes `col <op> const` / `BETWEEN` / `IN` / `IS NULL` conjuncts, estimates selectivity from statistics, chooses index scans, selects PQCF row groups by min/max |
-| `planner::physical` | physical plan: hash / merge / nested-loop join (equi-keys, build side by estimated cardinality; LEFT builds right), hash aggregate, top-N sort, `ParamLookup` for correlated subqueries; EXPLAIN JSON |
+| `planner::logical` | logical algebra: Scan, Filter, Project, Aggregate, Join (INNER/LEFT/CROSS), Distinct, Sort, Limit, UnionAll; subqueries are expressions owning a logical plan; `Display` prints the plan tree |
+| `planner::optimizer` | rule-based logical optimizer: the `Rule` trait and the `Optimizer` driver (applies the rules to the plan and to every subquery plan); one module per rule: `constant_folding` (constant folding, predicate simplification), `predicate_pushdown` (WHERE/ON conjuncts to the scans, also through pass-through projections of derived tables/CTEs and into `UNION ALL` branches; cross joins with equality predicates become inner joins), `join_reorder` (inner-join chains) and `column_pruning` |
+| `planner::cardinality` | row-count estimates of logical plans (join reordering, hash-join build side) |
+| `planner::access` | access-path analysis: recognizes `col <op> const` / `BETWEEN` / `IN` / `IS NULL` conjuncts, estimates selectivity from statistics, chooses index scans, selects PQCF row groups by min/max |
+| `planner::physical` | physical planning (`plan`): column selection, access paths, hash / merge / nested-loop join (equi-keys, build side by estimated cardinality; LEFT builds right), hash aggregate, top-N sort, `ParamLookup` for correlated subqueries, the execution model (mode, threads, native kernels, native filter scans) and the subquery plans, in a `PhysicalQuery`; EXPLAIN JSON |
 | `exec` | row-at-a-time (Volcano) operators (`operators`); row expression evaluator; scalar functions; aggregate accumulators; subquery evaluation with memoization; per-query context (timeout, cancellation flag, shared memory budget, join-row limit, execution options) |
 | `exec::vector` | vectorized engine: column vectors and batches (`batch`), vectorized expression kernels (`eval`), key interning (`keys`), aggregation (`agg`), joins (`join`), sorting (`sort`), batch operators (`ops`) and the plan builder (`build`) |
 | `exec::parallel` | morsel-driven parallel scan pipelines: ordered gather and parallel (partitioned) aggregation |
 | `exec::hash` | fast non-cryptographic hasher for execution hash tables |
-| `exec::native_filter` | filters above column-table scans evaluated with the native kernels (vectorized and row operators) |
+| `exec::native_filter` | analysis of filters above column-table scans for the native kernels (used by physical planning) and their vectorized and row operators |
 | `native` | `libpqkernels` integration: `dlopen`/`dlsym` FFI (`native::ffi`), typed function-pointer table with safe slice wrappers (`Kernels`), bitmap helpers |
 | `engine` | transport-independent facade: load/drop/reset/query/explain, path safety, limits |
 | `protocol` | request validation, response building, `session` (JSON lines) and `exec` modes |
@@ -78,7 +82,8 @@ Layers, bottom-up:
 | `cli` | argument parsing (unknown options ⇒ exit 2) |
 
 Processing of a statement: `lex → parse (AST) → bind/type (LogicalPlan) →
-optimize → lower (PhysicalPlan) → build operators → execute`. Errors found
+optimize (rules) → physical::plan (PhysicalQuery) → build operators →
+execute`. Errors found
 before execution (parse, semantic, type) are reported without executing
 anything; `EXPLAIN` / the `explain` op render the physical plan.
 
@@ -475,11 +480,12 @@ estimated intermediate result smallest (never a cross product while a
 connected input remains), estimating `|A ⋈ B| = |A|·|B| / max(ndv(a),
 ndv(b))` from the column statistics; each conjunct is attached to the first
 join where its columns are available and a projection restores the column
-order. With `optimize: false` none of these run. Always applied (they are
-part of physical planning or required by the scan contract): column
-pruning (projection pushdown), access-path selection for filters directly
-above a scan (index / row-group skipping) and top-N for `ORDER BY …
-LIMIT`.
+order. Finally **column pruning** removes unused columns. With
+`optimize: false` no rule runs. Always applied, because they are part of
+physical planning: column selection (scans read only the columns the plan
+uses — the `column_pruning` algorithm, so an unoptimized plan reads the
+same columns as before), access-path selection for filters directly above
+a scan (index / row-group skipping) and top-N for `ORDER BY … LIMIT`.
 
 ### Identical results in every mode
 
@@ -845,6 +851,9 @@ usable wherever a query is (top level, CTEs, derived tables, scalar / `IN` /
 
 ### Modules touched
 
+(Module names as of CR-1; CR-3 later moved `rewrite`, `reorder` and the
+optimizer's pushdown and pruning into `planner::optimizer::*` rules.)
+
 | Module | Change |
 |---|---|
 | `sql::ast` | `Query` keeps its first branch in `body` and the further branches in `union_all: Vec<SelectCore>` (`branches()`, `is_compound()`); ORDER BY / LIMIT / OFFSET stay on `Query` and apply to the whole compound |
@@ -893,6 +902,73 @@ and the engine answers `v FLOAT64: [99.99], [101.0]`. With
 `DECIMAL(18,2): ["99.99"], ["101.00"]` (checked by hand). Making the case
 pass would mean breaking CSV inference or special-casing the test, so it is
 left failing on purpose.
+
+## Change CR-3: logical/physical plan separation
+
+A behaviour-preserving refactoring (`spec/changes/refactor-plan-separation.md`):
+same responses, errors, EXPLAIN output and capabilities.
+
+### Module map: before / after
+
+| Concern | Before | After |
+|---|---|---|
+| Logical plan | `planner/logical.rs` (`LogicalPlan`; `Scan` carried the catalog's indexes) | `planner/logical.rs` — `LogicalPlan` describes only *what* is computed (`Scan` without indexes); `Display` prints the plan tree plus its subquery plans; `visit_exprs_mut` / `visit_subqueries` |
+| Subquery / CTE constructs | `Expr::{ScalarSubquery, Exists, InSubquery}` owning a `SubqueryPlan`, optimized by the binder while binding | the same expressions, *bound only* by the binder; CTEs are inlined at every reference |
+| Optimizer driver | `planner/optimizer.rs` — `optimize(plan, rewrites)`: a fixed sequence of function calls; column pruning ran even with `optimize: false` | `planner/optimizer/mod.rs` — `Rule` trait (`name`, `apply`), `DEFAULT_RULES`, `Optimizer` (applies its rules to the plan and, first, to every subquery plan, each once); `Optimizer::for_query(false)` has **no rules** |
+| Rule: constant folding | `planner/rewrite.rs` (`simplify_plan`) | `planner/optimizer/constant_folding.rs` — `ConstantFolding` (`constant_folding`) |
+| Rule: predicate pushdown | inside `planner/optimizer.rs` (`push_down`) | `planner/optimizer/predicate_pushdown.rs` — `PredicatePushdown` (`predicate_pushdown`) |
+| Rule: join reordering | `planner/reorder.rs` (`reorder_joins`) | `planner/optimizer/join_reorder.rs` — `JoinReorder` (`join_reorder`) |
+| Rule: projection / column pruning | inside `planner/optimizer.rs` (`prune`) | `planner/optimizer/column_pruning.rs` — `ColumnPruning` (`column_pruning`) |
+| Cardinality estimates | `planner/physical.rs` (`estimate_rows`, also called by the logical `reorder`) | `planner/cardinality.rs`, shared by `join_reorder` and the physical planner |
+| Physical planning | `planner/physical.rs` — `lower(plan, {join, use_indexes})`; execution mode, threads and native kernels were chosen in `engine.rs` (`ExecOptions`) and native filters were detected while building operators (`exec::operators`, `exec::vector::build`, `exec::parallel`) | `planner/physical.rs` — `plan(logical, catalog, PhysicalOptions)` → `PhysicalQuery { root, execution, subqueries }`; a `Planner` takes every physical decision (see below) |
+| Subquery plans | lowered lazily during execution (`exec::subquery`, with options copied into the `ExecContext`) | planned with the query (`PhysicalQuery::subqueries`, by subquery id); execution only looks them up |
+| EXPLAIN | `PhysicalPlan::to_json_with` plus annotations added in `engine.rs` (`execution`, native filter counts) | `PhysicalQuery::to_json` renders everything from the physical plan |
+| Execution | `ExecContext { physical: PhysicalOptions, exec: ExecOptions, plans cache }` | `ExecContext { execution (from the plan), morsel_rows, subqueries }`; operators follow the plan (`PhysicalPlan::NativeFilterScan`, `PhysicalSubquery::row_at_a_time`) |
+
+### The physical planner's decisions
+
+`physical::plan` is the only place that decides:
+
+* **column selection** — it first runs the column-pruning algorithm on the
+  plan it receives, so with `optimize: false` (no rules) scans still read
+  only the columns the query uses, exactly as before (on an optimized plan
+  this is a no-op; pruning is idempotent and unit-tested as such);
+* **access paths** — index scan (indexes looked up in the catalog snapshot
+  the query was bound to) or table scan with row-group skipping;
+* **join algorithms** — hash (build side by estimated cardinality), merge or
+  nested loop per the `join` option; top-N sorts; `ParamLookup`;
+* **execution model** — `Execution { vectorized, threads, native }` from
+  the `mode`, `threads` and `native` options (row mode is serial; native
+  only with a loaded library);
+* **native kernels** — a filter directly above a column-table scan whose
+  conjuncts the kernels can evaluate becomes a `NativeFilterScan` node
+  (EXPLAIN shows it exactly as before: a `Filter` with `"native": n` above a
+  `TableScan`);
+* **subqueries** — every subquery is planned once; correlated ones for the
+  row engine without native kernels (`row_at_a_time`), uncorrelated ones
+  with the query's execution model — the same choices execution made
+  before.
+
+The error replay of vectorized execution (see *Identical results in every
+mode*) now plans the same optimized logical plan again for the row baseline
+(`PhysicalOptions::row_baseline`) instead of reusing the vectorized plan
+with patched execution options.
+
+### Tests and verification
+
+* Each rule has unit tests in its module (`cargo test optimizer`); they
+  check the rewritten plan (via `Display`) and, by executing the plan
+  before and after the rule with the row engine, that the rule keeps the
+  output columns and the result (`optimizer::test_util::apply_checked`).
+  Driver tests cover the rule order, `optimize: false` (no rule applied),
+  single-rule optimizers and subquery plans; `physical` has tests for the
+  join option, the execution model, column selection of unoptimized plans
+  and subquery planning.
+* Behaviour: besides all conformance suites, a differential run compared
+  the old and new binaries on every query of the public suite with eleven
+  option combinations (`mode`, `join`, `threads`, `optimize`, `native`,
+  `use_indexes`), both `query` and `explain`: all 10,090 responses were
+  byte-identical.
 
 ## Known limitations
 
