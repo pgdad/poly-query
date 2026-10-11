@@ -135,6 +135,29 @@ def collect_performance() -> list[dict]:
     return out
 
 
+# Independent before/after benchmarks of the optimize-latency family; each file lists its runs.
+TASK_BEFORE_AFTER = {
+    "optimize-latency-before-after.json": "attempts 1-2: agents optimized self-written stand-in workloads "
+                                          "(HI-007); measured on the real workload",
+    "optimize-latency-before-after-a2.json": "re-runs (attempt 2/3, record-only, not merged) with the real "
+                                             "workload available to the agents",
+}
+
+
+def collect_task_before_after() -> list[dict]:
+    out = []
+    for name, note in TASK_BEFORE_AFTER.items():
+        d = load_json(ROOT / "results/performance" / name)
+        if d:
+            out.append({"source": f"results/performance/{name}", "note": note,
+                        "digests_identical": d.get("digests_identical"),
+                        "engines": {l: {k: e.get(k) for k in ("speedup", "geomean_before_s", "geomean_after_s",
+                                                               "worst_ratio", "significantly_slower",
+                                                               "peak_rss_before", "peak_rss_after")}
+                                    for l, e in d["engines"].items()}})
+    return out
+
+
 KARCH = {"x86": "x86_64-asm", "arm": "arm64-asm"}
 SIMD_VARIANT = {"x86_64-asm": "x86_avx2", "arm64-asm": "a64_neon"}
 
@@ -280,6 +303,10 @@ def build(weights: dict) -> dict:
     perf_rep = []
     for p in perf:
         meta = p["meta"]
+        # Before/after benchmarks of optimization runs measure task branches (some never merged):
+        # they belong to report 6 only, never to the main-line performance of reports 3, 4 and 8.
+        if meta["bench_id"].endswith(("-before-optimize", "-after-optimize")):
+            continue
         entry = {"bench_id": meta["bench_id"], "scale": meta["scale"], "track": meta.get("track"), "source": p["_path"],
                  "host_cpu": None, "engines": {}}
         env = load_json(ROOT / Path(p["_path"]).parent / "environment.json") or {}
@@ -359,6 +386,7 @@ def build(weights: dict) -> dict:
                 "5_code_quality": quality, "6_optimization_effectiveness": [
                     {"bench_id": p["bench_id"], "engines": {l: {k: e[k] for k in ("modes", "joins", "thread_scaling")}
                                                           for l, e in p["engines"].items()}} for p in perf_rep],
+                "6_optimization_task_before_after": collect_task_before_after(),
                 "6_optimization_effectiveness_kernel_cohort": {
                     l: {"simd_and_scalar_speedup_vs_reference": (kern[l]["performance"] or {}).get("speedup_vs_reference"),
                         "independent_before_after": kern[l]["before_after"]} for l in ASM},
@@ -459,6 +487,23 @@ def render_kernel_cohort(R: dict) -> str:
     return "\n".join(parts)
 
 
+def render_task_before_after(R: dict) -> str:
+    parts = ["<h2>Optimization effectiveness, measured independently (report 6)</h2>",
+             "<p class='muted'>Each engine benchmarked at the commit its optimization run started from and at the run's "
+             "result, back to back on a quiet host (1m rows, real workload). Speedup = ratio of the geometric means of "
+             "the 20 query medians.</p>"]
+    for ba in R.get("6_optimization_task_before_after") or []:
+        rows = "".join(
+            f"<tr><td>{html.escape(l)}</td><td>{e['geomean_before_s'] * 1e3:.1f} → {e['geomean_after_s'] * 1e3:.1f} ms</td>"
+            f"<td>{e['speedup']:.2f}×</td><td>{html.escape(', '.join(e.get('significantly_slower') or []) or '—')}</td>"
+            f"<td>{(e.get('peak_rss_before') or 0) / 2**30:.1f} → {(e.get('peak_rss_after') or 0) / 2**30:.1f} GiB</td></tr>"
+            for l, e in sorted(ba["engines"].items(), key=lambda kv: -kv[1]["speedup"]))
+        parts.append(f"<p><b>{html.escape(ba['note'])}</b> — <code>{html.escape(ba['source'])}</code>; result digests "
+                     f"identical: {ba['digests_identical']}</p><table><tr><th>engine</th><th>geomean latency</th>"
+                     f"<th>speedup</th><th>significantly slower queries</th><th>peak RSS</th></tr>{rows}</table>")
+    return "".join(parts)
+
+
 def render_html(rep: dict) -> str:
     R = rep["reports"]
     dev = R["2_development_effort"]
@@ -553,6 +598,7 @@ Missing bars mean the measurement has not been run — nothing is estimated.</p>
 before reporting it (timeouts). Lines and files count the agent's diff inside its language directory.</p>
 <table><tr><th>task</th><th>language</th><th>attempt</th><th>outcome</th><th>cost USD</th><th>turns</th><th>wall min</th>
 <th>lines +/−</th><th>files</th></tr>{adapt_rows}</table>
+{render_task_before_after(R)}
 <h2>Code-quality rubric (AI reviewers A / B)</h2>
 <p class="muted">Two independent read-only AI reviewers per language score rubric items 1–4 (1–5 scale). Subjective
 judgements, not measurements; evidence per score in <code>results/development/code-review/</code>.</p>
