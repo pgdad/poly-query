@@ -59,6 +59,10 @@ SELECT t.a, u.name FROM t JOIN u ON u.k = t.b + 4 WHERE t.a < 40
 SELECT t.a, u.name, u.w FROM t LEFT JOIN u ON u.k = t.a AND u.w > 3 WHERE t.a < 45
 SELECT u.k, COUNT(*), SUM(t.d) FROM u JOIN t ON t.n = u.k GROUP BY u.k ORDER BY u.k
 SELECT t.a, u.k FROM t JOIN u ON u.k < t.b WHERE t.a < 30
+SELECT t.a, u.name FROM t JOIN u ON u.name = 'u' || CAST(t.b + 4 AS STRING) WHERE t.a < 60
+SELECT u.name, COUNT(t.a) FROM u LEFT JOIN t ON t.s = 's' || CAST(u.k AS STRING) GROUP BY u.name ORDER BY u.name
+SELECT t.a, u.w FROM t JOIN u ON u.w = t.d ORDER BY t.a
+SELECT t.a, x.a FROM t JOIN t x ON x.f = t.f + 1 WHERE t.a < 20 ORDER BY t.a, x.a
 SELECT x.b, x.c FROM (SELECT b, COUNT(*) AS c FROM t GROUP BY b) x WHERE x.c > 300
 SELECT a FROM t WHERE 1 = 0
 SELECT COUNT(*), SUM(a), MIN(s) FROM t WHERE 1 = 0
