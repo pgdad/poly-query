@@ -882,7 +882,10 @@ rows (FLOAT64 with the spec's tolerance) or error codes; with `--native-kernels`
 combination also runs with `native: true` (800 random queries with two seeds × 48 option
 combinations × two engines: no mismatch). Several thousand queries were run
 during development; every mismatch found was fixed (a few early ones were deferred-error and
-empty-input edge cases).
+empty-input edge cases). Since CR-1 the generator also emits `UNION ALL` queries (2–3 branches
+over different FROM clauses with promoted numeric types, NULL columns, DISTINCT branches,
+ORDER BY/LIMIT over the compound, aggregation over a union): 550 queries with two seeds, no
+mismatch.
 
 Unit tests (`src/test/java`, run by `make test`) cover the Phase 5 engine — `Phase5Test` runs
 a set of queries (grouping, joins of every kind, DISTINCT, sorts, top-N, subqueries, failing
