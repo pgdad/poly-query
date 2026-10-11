@@ -48,7 +48,7 @@ pub fn handle(shared: &Arc<Shared>, stream: TcpStream) {
     let mut reader = BufReader::new(read_half);
     loop {
         let max_body = conn.shared.serve.max_request_bytes;
-        let req = match http::read_request(&mut reader, &mut conn.stream, max_body) {
+        let mut req = match http::read_request(&mut reader, &mut conn.stream, max_body) {
             Ok(Some(r)) => r,
             Ok(None) | Err(ReadError::Closed) => return,
             Err(ReadError::BadRequest(msg)) => {
@@ -66,7 +66,8 @@ pub fn handle(shared: &Arc<Shared>, stream: TcpStream) {
         let _active = shared.begin_request();
         shared.metrics.http_request();
         let started = Instant::now();
-        let outcome = conn.route(&req);
+        let body = std::mem::take(&mut req.body);
+        let outcome = conn.route(&req, body);
         let keep_alive = req.keep_alive && !conn.shared.is_shutting_down();
         let status = match outcome {
             Outcome::Respond(resp) => {
@@ -123,8 +124,8 @@ fn error_body(err: &Error) -> Response {
 }
 
 /// Parses a JSON request body that must be an object.
-fn json_body(req: &http::Request) -> Result<Json> {
-    let text = std::str::from_utf8(&req.body)
+fn json_body(body: &[u8]) -> Result<Json> {
+    let text = std::str::from_utf8(body)
         .map_err(|_| Error::invalid_request("request body is not valid UTF-8"))?;
     let value =
         json::parse(text).map_err(|e| Error::invalid_request(format!("invalid JSON: {e}")))?;
@@ -161,7 +162,7 @@ impl Conn {
         let _ = http::write_response(&mut self.stream, &error_body(err), false);
     }
 
-    fn route(&mut self, req: &http::Request) -> Outcome {
+    fn route(&mut self, req: &http::Request, body: Vec<u8>) -> Outcome {
         let segs: Vec<&str> = req.segments.iter().map(String::as_str).collect();
         let method = req.method.as_str();
         // Endpoints that stay available during shutdown.
@@ -219,13 +220,13 @@ impl Conn {
             }
             ["v1", "version"] => Outcome::Respond(json_response(200, &version_json())),
             ["v1", "capabilities"] => Outcome::Respond(json_response(200, &capabilities_json())),
-            ["v1", "query"] => self.query_endpoint(req, false),
-            ["v1", "query", "stream"] => self.query_endpoint(req, true),
-            ["v1", "explain"] => match json_body(req) {
+            ["v1", "query"] => self.query_endpoint(&body, false),
+            ["v1", "query", "stream"] => self.query_endpoint(&body, true),
+            ["v1", "explain"] => match json_body(&body) {
                 Ok(body) => self.protocol_request(with_op(body, "explain"), 200),
                 Err(e) => Outcome::Respond(error_body(&e)),
             },
-            ["v1", "request"] => match json_body(req) {
+            ["v1", "request"] => match json_body(&body) {
                 Ok(body) => self.protocol_request(body, 200),
                 Err(e) => Outcome::Respond(error_body(&e)),
             },
@@ -233,7 +234,7 @@ impl Conn {
                 self.protocol_request(Json::object(vec![("op", Json::str("tables"))]), 200)
             }
             ["v1", "tables", name] if method == "PUT" => {
-                Outcome::Respond(self.put_table(name, req))
+                Outcome::Respond(self.put_table(name, req, body))
             }
             ["v1", "tables", name] => self.protocol_request(table_op("drop", name), 200),
             ["v1", "tables", name, "schema"] => {
@@ -301,7 +302,7 @@ impl Conn {
     }
 
     /// `PUT /v1/tables/{name}?format=…`: loads the body as a table.
-    fn put_table(&self, name: &str, req: &http::Request) -> Response {
+    fn put_table(&self, name: &str, req: &http::Request, body: Vec<u8>) -> Response {
         let result = (|| {
             let mut options = vec![];
             if let Some(h) = bool_param(req, "header")? {
@@ -336,7 +337,7 @@ impl Conn {
             else {
                 unreachable!("a load request parses as a load");
             };
-            let data = String::from_utf8(req.body.clone())
+            let data = String::from_utf8(body)
                 .map_err(|_| Error::ingest("request body is not valid UTF-8"))?;
             load.source = crate::engine::Source::Data(data);
             execute(&self.shared.engine, Request::Load(load), Instant::now())
@@ -361,8 +362,8 @@ impl Conn {
     }
 
     /// `POST /v1/query` and `POST /v1/query/stream`.
-    fn query_endpoint(&mut self, req: &http::Request, stream: bool) -> Outcome {
-        let body = match json_body(req) {
+    fn query_endpoint(&mut self, body: &[u8], stream: bool) -> Outcome {
+        let body = match json_body(body) {
             Ok(b) => with_op(b, "query"),
             Err(e) => return Outcome::Respond(error_body(&e)),
         };

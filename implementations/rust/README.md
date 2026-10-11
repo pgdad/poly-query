@@ -3,11 +3,12 @@
 An analytical database engine implementing the PolyQuery specification
 (`spec/`) in Rust, using **only the standard library** (no crates).
 
-Status: **Phase 3** (storage and indexing). Capabilities claimed:
+Status: **Phase 4** (networking and concurrency). Capabilities claimed:
 `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`, `sql.basic`,
 `test.functions`, `phase2`, `sql.groupby`, `sql.join`, `sql.functions`,
 `sql.subquery`, `sql.cte`, `sql.correlated_subquery`, `phase3`,
-`storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`.
+`storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`, `phase4`,
+`http.streaming`.
 
 ## Build and run
 
@@ -25,6 +26,9 @@ bin/polyquery version
 bin/polyquery capabilities
 bin/polyquery session --data-dir DIR [--enable-test-functions] …
 bin/polyquery exec --data-dir DIR --request FILE|-
+bin/polyquery serve --port N [--host H] [--workers N] [--queue-depth Q]
+                    [--query-timeout-ms T] [--shutdown-grace-ms G]
+                    [--max-request-bytes B] [common options]
 ```
 
 `bin/polyquery` is a POSIX shell launcher that resolves its own location and
@@ -57,6 +61,7 @@ Layers, bottom-up:
 | `exec` | pull-based (Volcano) operators; expression evaluator; scalar functions; aggregate accumulators; subquery evaluation with memoization; per-query context (timeout, cancellation flag, memory budget, join-row limit) |
 | `engine` | transport-independent facade: load/drop/reset/query/explain, path safety, limits |
 | `protocol` | request validation, response building, `session` (JSON lines) and `exec` modes |
+| `server` | `serve`: HTTP/1.1 (`http`), routing (`conn`), admission control (`admission`), query registry (`registry`), query threads and NDJSON streaming (`query`), Prometheus metrics (`metrics`), SIGTERM/SIGINT (`signal`) |
 | `cli` | argument parsing (unknown options ⇒ exit 2) |
 
 Processing of a statement: `lex → parse (AST) → bind/type (LogicalPlan) →
@@ -119,7 +124,6 @@ in (no LATERAL).
   `result`/`join` values) are `UNSUPPORTED`. `use_indexes: false`
   disables index scans; `threads`, `optimize` and `native` are accepted and
   currently have no effect.
-* **`serve`** (Phase 4) exits with status 1.
 * **Common type** (CASE, COALESCE): if all non-NULL branch types are equal
   that type is kept (e.g. `DECIMAL(10,2)`); otherwise numeric promotion
   (`INT64`+`DECIMAL(p,s)` ⇒ `DECIMAL(18,s)`, decimals ⇒ `DECIMAL(18,max s)`,
@@ -245,10 +249,96 @@ to 65,536 distinct values, then a HyperLogLog estimate (2^14 registers,
   cardinality (filtered scans are estimated with the same selectivity model,
   other filters with 1/3); LEFT joins build on the right.
 
+## Phase 4: HTTP server and concurrency
+
+### Catalog snapshots
+
+The engine (`Engine`) is shared by all connections (`Sync`). The catalog is
+an immutable value behind an `RwLock<Arc<Catalog>>` whose lock is only held
+to clone or swap the `Arc`. Every statement plans against a snapshot taken
+when it starts executing, and the physical plan holds `Arc`s of the table
+versions and indexes it uses, so a query sees exactly those versions even
+if the tables are replaced or dropped meanwhile (concurrency.md §1).
+Mutations (`load`, `open`, `drop`, `reset`, `CREATE/DROP INDEX`) are
+serialized by a writer mutex, copy the catalog, change the copy and publish
+it atomically (a failed mutation publishes nothing). Expensive work — reading
+and parsing input, opening PQCF files — happens before the writer lock is
+taken; `CREATE INDEX` builds the index while holding only the writer lock.
+Readers never wait for writers.
+
+### Threads, admission and the query lifecycle
+
+* One thread per connection (keep-alive, `Expect: 100-continue`, chunked
+  request bodies). Non-query endpoints run on the connection thread, so
+  `/health`, `/metrics`, `/v1/queries` and cancellation stay responsive while
+  all workers are busy.
+* A query (`/v1/query`, `/v1/query/stream`, or `op: "query"` through
+  `/v1/request`) is registered by `query_id` (client-supplied or `q-<n>`;
+  a duplicate of a queued/running id is `409 ALREADY_EXISTS`), then admitted:
+  it takes a free worker slot if nobody is queued, else a FIFO queue slot,
+  else it is rejected immediately with `503 OVERLOADED`. It then runs on its
+  own thread; the connection thread waits for its result on a bounded
+  channel and polls the socket every 20 ms (non-consuming `peek`) to detect a
+  client disconnect, which cancels the query.
+* The effective deadline is `arrival + (options.timeout_ms || --query-timeout-ms)`,
+  so queue time counts. Queued queries re-check deadline and cancellation
+  every 5 ms; running operators check every 1,024 rows; `PQ_SLEEP` sleeps in
+  5 ms slices.
+* Before the response is sent the query is unregistered and metrics are
+  updated, so a client that has its response sees consistent
+  `/v1/queries` and `/metrics`.
+
+### Streaming
+
+`/v1/query/stream` sends NDJSON over chunked transfer encoding. The execution
+thread serializes rows and pushes lines into a channel of 8 lines; when it is
+full the producer waits (re-checking timeout/cancellation), so a client that
+stops reading stops the query (backpressure) and at most 8 batches are
+buffered ahead of the socket. The header line is sent together with the
+first row (or the end), so errors found before any row exists (parse,
+semantic, or during a blocking sort) get a normal error response with its
+HTTP status; later errors end the stream with an `error` line and no `end`
+line. The first row is flushed immediately; later `rows` lines hold up to
+4,096 rows, 1 MiB, or the rows produced within 100 ms.
+
+### HTTP details
+
+* `PUT /v1/tables/{name}` accepts `format`, `replace`, `header`, `delimiter`,
+  `layout` and (extension) `schema` — a URL-encoded JSON schema array as in
+  the `load` op. As in `load`, CSV with `header=false` requires a schema
+  (`400 INVALID_REQUEST` otherwise). The body must be UTF-8. Success is `201`.
+* Error responses are the protocol error objects (with `"id"`), status per
+  protocol.md §7.1; unknown paths `404 NOT_FOUND`; a wrong method
+  `405 INVALID_REQUEST` with an `Allow` header; malformed HTTP `400`.
+* A body over `--max-request-bytes` is `413 RESOURCE_LIMIT` (rejected from
+  `Content-Length` before reading; the body is drained briefly so the client
+  sees the response, then the connection is closed).
+* `polyquery_queries_total` counts every query request that ended (including
+  `OVERLOADED` rejections and duplicate ids, as `error`); the duration summary
+  covers admitted queries, measured from arrival. An extra counter
+  `polyquery_http_requests_total` is exported.
+* Logs are JSON lines on stderr. At `info`: startup, table loads, query
+  completion (`query_id`, `status`, `error_code`, `duration_ms`, `rows`),
+  cancellations, shutdown. SQL text and per-request lines only at `debug`.
+
+### Graceful shutdown
+
+SIGTERM/SIGINT set a flag (handler installed with libc `signal`, declared via
+`extern "C"`). The server then answers every new request — on existing and
+on new connections — with `503 SHUTTING_DOWN` (`/health`: `503
+{"status":"shutting_down"}`; `/metrics` and `/v1/queries` stay available)
+and closes connections after the response. It waits up to
+`--shutdown-grace-ms` for in-progress requests (running and queued queries,
+loads, streams); then cancels all queries (`409 CANCELLED`), gives them up to
+1 s to answer, and exits with status 0. New connections are still accepted
+during shutdown so that clients get a definite 503 instead of a refused
+connection.
+
 ## Known limitations
 
-* The HTTP server (Phase 4) and the Phase 5 execution options are not
-  implemented.
+* The Phase 5 execution options are not implemented.
+* The HTTP server uses a thread per connection and per running query
+  (no event loop); idle keep-alive connections each hold a thread.
 * Execution is single-threaded and row-at-a-time.
 * Indexes are not used for joins (index nested-loop join), for OR
   predicates, or to produce ordered output.
