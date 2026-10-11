@@ -1584,22 +1584,46 @@ ENDF pqk_a64_neon_sum_i128
  * Args:      x0 data, x1 validity (NULL = all valid), x2 n, x3 out_min,
  *            x4 out_max
  * Result:    x0 = number of valid rows (outputs written only if > 0)
- * Clobbers:  x0, x1, x5-x7, x9-x17, v0-v7, v16-v30, flags
- * Registers: x5 count, x7:x6 min, x12:x11 max (GPR results), x9 validity
- *            base, x10 row i, x15 main-loop row limit, x13/x14/x16/x17
- *            temps; v16-v19 (rows 0,1 / 4,5) and v20-v23 (rows 2,3 / 6,7)
- *            two independent sets of 2-lane min-lo, min-hi, max-lo, max-hi
- *            accumulators, v24-v26 compare temps, v27 validity byte,
- *            v28 = {1, 2}, v29 lane validity, v30 valid-row lane counter
- * Algorithm: 8 rows per iteration (LD2X4), signed 128-bit compares per lane
- *            (MM2: CMGT hi, CMEQ hi, CMHI lo, BIT; 12 ops per 2 rows), two
- *            accumulator sets to halve the loop-carried dependency chain.
- *            Accumulators start at INT128_MAX / INT128_MIN; invalid lanes
- *            never update (MMV ANDs the lane validity into the update
- *            masks). The 8 lane candidates are folded into GPRs with the
- *            scalar MIN128/MAX128 chain (REDMM).
+ * Clobbers:  x0, x1, x5-x17, v0-v7, v16-v31, flags
+ * Registers: x5 count, x7:x6 min, x12:x11 max (GPR results), x8 =
+ *            0x0101..01, x14 = 0x8040201008040201 (validity byte -> one
+ *            byte per row), x9 validity base, x10 row i, x13 validity byte,
+ *            x15 main-loop row limit, x16 plain-mode groups left, x17
+ *            "inside" byte mask; v16-v19 (rows 0,1 / 4,5) and v20-v23
+ *            (rows 2,3 / 6,7) two sets of 2-lane min-lo, min-hi, max-lo,
+ *            max-hi accumulators, v24/v25 and v26/v27 hi-word windows of
+ *            the two sets (MM2 temps v24-v26 and lane validity v27 in the
+ *            update paths), v28 validity byte, v29 = {1, 2}, v30 = 1,
+ *            v31 = -1 (u64 lanes)
+ * Algorithm: lane-wise signed 128-bit min/max in two accumulator sets
+ *            (MM2: CMGT hi, CMEQ hi, CMHI lo, BIT; 12 ops per 2 rows), from
+ *            INT128_MAX / INT128_MIN; invalid lanes never update (MMV ANDs
+ *            the lane validity into the update masks).
+ *            Skip test: a row x can change its lane's min only if
+ *            x_hi <=s min_hi and its max only if x_hi >=s max_hi. Each lane
+ *            keeps the open window (min_hi, max_hi) as wlo = min_hi + 1 and
+ *            span = max(max_hi - min_hi - 1, 0) (unsigned; span = 0 means
+ *            an empty window, e.g. before the first valid row), so "x_hi
+ *            strictly inside" is (x_hi - wlo) <u span: SUB + CMHI per 2
+ *            rows. The 8 inside masks are narrowed to one byte per row
+ *            (UZP1 x3, XTN, FMOV) and tested in a GPR against the validity
+ *            byte expanded to one byte per row (MUL + AND): 13 vector ops
+ *            per 8 rows instead of ~60. Only if some valid row is outside
+ *            its window are the 8 rows (re-loaded, the test is
+ *            destructive) run through the exact MM2/MMV update. Since that
+ *            happens in bursts (start of the data, sorted input, inputs
+ *            whose hi words are all equal), the update path then stays on
+ *            for MINMAX128_PLAIN groups without the test, after which the
+ *            windows are recomputed (6 ops) and the skip test resumes. The
+ *            exact result never depends on the test: a skipped row cannot
+ *            change any accumulator.
+ *            The valid-row count is the popcount of the validity bytes of
+ *            the main loop (separate CNT pass, 1/128 of the data bytes).
+ *            The 4 lanes are folded into GPRs with MIN128/MAX128 (REDMM).
  * Tail:      0-7 rows: scalar MIN128/MAX128, invalid rows skipped.
  * ======================================================================== */
+#define MINMAX128_PLAIN 16                  /* groups in the update path after a hit */
+
 /* MM2 xl, xh, nl, nh, ml, mh [, vm]: updates the 2-lane min (v<nl>/v<nh>)
  * and max (v<ml>/v<mh>) accumulators with the 2 rows in v<xl>/v<xh> (signed
  * 128-bit: CMGT on the hi words, CMEQ, CMHI on the lo words, BIT select);
@@ -1626,13 +1650,59 @@ ENDF pqk_a64_neon_sum_i128
     .endm
 
 /* MMV xl, xh, nl, nh, ml, mh: MM2 for the next 2 rows of the validity byte
- * replicated in v27 (CMTST with v28 = {1, 2}, then shift the byte by 2);
- * the valid-lane mask is also counted into v30. */
+ * replicated in v28 (CMTST with v29 = {1, 2} into v27, then shift the byte
+ * by 2). */
     .macro  MMV xl, xh, nl, nh, ml, mh
-    cmtst   v29.2d, v27.2d, v28.2d
-    ushr    v27.2d, v27.2d, #2
-    sub     v30.2d, v30.2d, v29.2d
-    MM2     \xl, \xh, \nl, \nh, \ml, \mh, 29
+    cmtst   v27.2d, v28.2d, v29.2d
+    ushr    v28.2d, v28.2d, #2
+    MM2     \xl, \xh, \nl, \nh, \ml, \mh, 27
+    .endm
+
+/* MM8 v: exact update of both accumulator sets with the 8 rows in v0-v7,
+ * with (v = v, needs v28/v29) or without (v = nv) validity. */
+    .macro  MM8 v
+    .ifc    \v, v
+    MMV     0, 1, 16, 17, 18, 19
+    MMV     2, 3, 20, 21, 22, 23
+    MMV     4, 5, 16, 17, 18, 19
+    MMV     6, 7, 20, 21, 22, 23
+    .else
+    MM2     0, 1, 16, 17, 18, 19
+    MM2     2, 3, 20, 21, 22, 23
+    MM2     4, 5, 16, 17, 18, 19
+    MM2     6, 7, 20, 21, 22, 23
+    .endif
+    .endm
+
+/* MM_WINDOWS: recomputes the hi-word windows of both sets from the
+ * accumulators: wlo = min_hi + 1, span = (max_hi - min_hi) -sat 1.
+ * Needs v30 = 1, v31 = -1. */
+    .macro  MM_WINDOWS
+    sub     v24.2d, v17.2d, v31.2d
+    sub     v25.2d, v19.2d, v17.2d
+    uqsub   v25.2d, v25.2d, v30.2d
+    sub     v26.2d, v21.2d, v31.2d
+    sub     v27.2d, v23.2d, v21.2d
+    uqsub   v27.2d, v27.2d, v30.2d
+    .endm
+
+/* MM_INSIDE xd: xd byte j = 0xff iff the hi word of row j (v1,v3,v5,v7 of
+ * LD2X4) lies strictly inside its lane's window, i.e. row j cannot change
+ * the accumulators. Clobbers v1, v3, v5, v7. */
+    .macro  MM_INSIDE xd
+    sub     v1.2d, v1.2d, v24.2d
+    sub     v3.2d, v3.2d, v26.2d
+    sub     v5.2d, v5.2d, v24.2d
+    sub     v7.2d, v7.2d, v26.2d
+    cmhi    v1.2d, v25.2d, v1.2d
+    cmhi    v3.2d, v27.2d, v3.2d
+    cmhi    v5.2d, v25.2d, v5.2d
+    cmhi    v7.2d, v27.2d, v7.2d
+    uzp1    v1.4s, v1.4s, v3.4s
+    uzp1    v5.4s, v5.4s, v7.4s
+    uzp1    v1.8h, v1.8h, v5.8h
+    xtn     v1.8b, v1.8h
+    fmov    \xd, d1
     .endm
 
 /* REDMM nl, nh, ml, mh, lane: folds lane `lane` of a vector min/max set into
@@ -1665,34 +1735,101 @@ FUNC pqk_a64_neon_minmax_i128
     mov     v21.16b, v17.16b
     mov     v22.16b, v18.16b
     mov     v23.16b, v19.16b
+    movi    v31.2d, #0xffffffffffffffff
+    ushr    v30.2d, v31.2d, #63
+    MM_WINDOWS
+    mov     x16, #0
     cbz     x1, .Lneon_minmax_i128_main_nv
     LOADADDR x13, .Lneon_bits2d
-    ld1     {v28.2d}, [x13]
-    movi    v30.2d, #0
-    // -- 2. main loop: 8 rows
+    ldr     q29, [x13]
+    mov     x8, #0x0101010101010101
+    mov     x14, #0x0201
+    movk    x14, #0x0804, lsl #16
+    movk    x14, #0x2010, lsl #32
+    movk    x14, #0x8040, lsl #48
+    // -- 2. main loop with validity: 8 rows, skip test
 .Lneon_minmax_i128_main_v:
     LD2X4   x0
-    ld1r    {v27.16b}, [x1], #1
-    MMV     0, 1, 16, 17, 18, 19
-    MMV     2, 3, 20, 21, 22, 23
-    MMV     4, 5, 16, 17, 18, 19
-    MMV     6, 7, 20, 21, 22, 23
+    ldrb    w13, [x1], #1
+    MM_INSIDE x17
+    mul     x13, x13, x8                    // validity byte -> byte per row
+    and     x13, x13, x14
+    bics    xzr, x13, x17                   // valid and outside its window?
+    b.ne    .Lneon_minmax_i128_hit_v
     add     x10, x10, #8
     cmp     x10, x15
     b.lo    .Lneon_minmax_i128_main_v
-    addp    d30, v30.2d
-    fmov    x5, d30
-    b       .Lneon_minmax_i128_reduce
+    b       .Lneon_minmax_i128_count
+.Lneon_minmax_i128_hit_v:                   // exact update of this group
+    sub     x0, x0, #128
+    LD2X4   x0
+    ldurb   w13, [x1, #-1]
+    dup     v28.16b, w13
+    MM8     v
+    mov     x16, #MINMAX128_PLAIN
+    b       .Lneon_minmax_i128_plain_v_next
+.Lneon_minmax_i128_plain_v:                 // update path, no skip test
+    LD2X4   x0
+    ld1r    {v28.16b}, [x1], #1
+    MM8     v
+.Lneon_minmax_i128_plain_v_next:
+    add     x10, x10, #8
+    cmp     x10, x15
+    b.hs    .Lneon_minmax_i128_count
+    subs    x16, x16, #1
+    b.ne    .Lneon_minmax_i128_plain_v
+    MM_WINDOWS
+    b       .Lneon_minmax_i128_main_v
+    // -- 2. main loop without validity: 8 rows, skip test
 .Lneon_minmax_i128_main_nv:
     LD2X4   x0
-    MM2     0, 1, 16, 17, 18, 19
-    MM2     2, 3, 20, 21, 22, 23
-    MM2     4, 5, 16, 17, 18, 19
-    MM2     6, 7, 20, 21, 22, 23
+    MM_INSIDE x17
+    cmn     x17, #1                         // every row inside its window?
+    b.ne    .Lneon_minmax_i128_hit_nv
     add     x10, x10, #8
     cmp     x10, x15
     b.lo    .Lneon_minmax_i128_main_nv
+    b       .Lneon_minmax_i128_count
+.Lneon_minmax_i128_hit_nv:
+    sub     x0, x0, #128
+    LD2X4   x0
+    MM8     nv
+    mov     x16, #MINMAX128_PLAIN
+    b       .Lneon_minmax_i128_plain_nv_next
+.Lneon_minmax_i128_plain_nv:
+    LD2X4   x0
+    MM8     nv
+.Lneon_minmax_i128_plain_nv_next:
+    add     x10, x10, #8
+    cmp     x10, x15
+    b.hs    .Lneon_minmax_i128_count
+    subs    x16, x16, #1
+    b.ne    .Lneon_minmax_i128_plain_nv
+    MM_WINDOWS
+    b       .Lneon_minmax_i128_main_nv
+    // valid rows of the main loop: popcount of x15/8 validity bytes
+.Lneon_minmax_i128_count:
     mov     x5, x15
+    cbz     x9, .Lneon_minmax_i128_reduce
+    mov     x5, #0
+    lsr     x13, x15, #3
+    mov     x14, x9
+.Lneon_minmax_i128_count16:
+    cmp     x13, #16
+    b.lo    .Lneon_minmax_i128_count1
+    ldr     q0, [x14], #16
+    cnt     v0.16b, v0.16b
+    uaddlv  h0, v0.16b
+    umov    w17, v0.h[0]
+    add     x5, x5, x17
+    sub     x13, x13, #16
+    b       .Lneon_minmax_i128_count16
+.Lneon_minmax_i128_count1:
+    cbz     x13, .Lneon_minmax_i128_reduce
+    ldrb    w17, [x14], #1
+    ADD_CNT8 17, 5
+    sub     x13, x13, #1
+    b       .Lneon_minmax_i128_count1
 .Lneon_minmax_i128_reduce:
     REDMM   16, 17, 18, 19, 0
     REDMM   16, 17, 18, 19, 1
