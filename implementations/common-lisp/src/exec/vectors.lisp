@@ -229,7 +229,17 @@ everywhere else."
         (when (vec-validity v)
           (replace validity (vec-validity v) :start1 pos))
         (incf pos n)))
-    (make-vec data validity)))
+    ;; Dictionary codes survive when all parts share one dictionary.
+    (let ((dict (and vecs (vec-dict (first vecs)))))
+      (if (and dict (every (lambda (v) (and (vec-codes v) (eq (vec-dict v) dict))) vecs))
+          (let ((codes (make-array total :element-type '(unsigned-byte 32)))
+                (pos 0))
+            (declare (type fixnum pos))
+            (dolist (v vecs)
+              (replace codes (vec-codes v) :start1 pos :end2 (vec-length v))
+              (incf pos (vec-length v)))
+            (make-vec data validity codes dict))
+          (make-vec data validity)))))
 
 (defun batch-gather (batch idx n)
   "Batch of the rows IDX[0..N) of BATCH (-1 yields a row of NULLs)."

@@ -580,34 +580,9 @@ OTHER's group ids) is given, just those groups."
             do (agg-reserve s groups)
                (agg-merge s o mapping)))))
 
-(defun radix-sort-by-keys (keys)
-  "Permutation of [0, n) ordering the non-negative fixnum KEYS ascending
-(LSD radix sort, stable)."
-  (declare (type index-vector keys))
-  (let* ((n (length keys))
-         (perm (identity-index-vector n))
-         (tmp (make-index-vector n))
-         (counts (make-array 2049 :element-type 'fixnum))
-         (max-key (if (zerop n) 0 (reduce #'max keys))))
-    (declare (type index-vector perm tmp) (type fixnum max-key))
-    (loop for shift of-type fixnum from 0 by 11
-          while (< shift (integer-length max-key))
-          do (fill counts 0)
-             (dotimes (i n)
-               (incf (aref counts (1+ (ldb (byte 11 shift) (aref keys (aref perm i)))))))
-             (loop for d from 1 to 2048
-                   do (incf (aref counts d) (aref counts (1- d))))
-             (dotimes (i n)
-               (let* ((e (aref perm i))
-                      (d (ldb (byte 11 shift) (aref keys e))))
-                 (setf (aref tmp (aref counts d)) e)
-                 (incf (aref counts d))))
-             (rotatef perm tmp))
-    perm))
-
-(defun groups-in-position-order (states)
+(defun groups-in-position-order (states &optional (threads 1))
   "Vectors (states gids) listing the groups of the merged group STATES in
-order of their first input position."
+order of their first input position (sorted with up to THREADS threads)."
   (let* ((n (reduce #'+ states :key #'group-state-count))
          (keys (make-index-vector n))
          (owners (make-array n))
@@ -621,7 +596,9 @@ order of their first input position."
                        (svref owners k) gs
                        (aref gids k) g)
                  (incf k))))
-    (let ((perm (radix-sort-by-keys keys))
+    (let ((perm (let ((words (make-array n :element-type '(unsigned-byte 64))))
+                  (dotimes (i n) (setf (aref words i) (aref keys i)))
+                  (radix-sort-rows (list words) n threads)))
           (sorted-owners (make-array n))
           (sorted-gids (make-index-vector n)))
       (dotimes (i n)

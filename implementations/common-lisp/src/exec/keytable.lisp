@@ -9,7 +9,8 @@
 ;;;;
 ;;;; Key values are runtime values (NULL is :NULL, a valid key: NULLs group
 ;;;; together); FLOAT64 -0.0 is normalized to 0.0. Lookups never modify the
-;;;; table, so a built table may be probed by several threads at once.
+;;;; table's groups (only its dictionary code cache, safely), so a built
+;;;; table may be probed by several threads at once.
 ;;;;
 ;;;; A table made for a query with native kernels hashes INT64-like key
 ;;;; columns with pqk_hash_i64, the same murmur3 finalizer as HASH-I64.
@@ -140,7 +141,12 @@ larger inputs (a hash join's whole build side) use the heap."
   (null-gid -1 :type fixnum)                           ; group of the NULL key (integer tables)
   (mask 0 :type fixnum)
   (count 0 :type fixnum)
-  (native nil))                                        ; hash with pqk_hash_i64
+  (native nil)                                         ; hash with pqk_hash_i64
+  ;; Dictionary fast path (KEY-TABLE-MAP-CODES): (dicts . map), the
+  ;; DICT-COLUMN stores of the key columns and a dense map from combined
+  ;; codes to group ids. Replaced as a whole, so that threads probing a
+  ;; shared table always read a consistent pair.
+  (code-cache nil :type list))
 
 (defun make-key-table (width &optional (expected 16) kinds native)
   "Empty table for keys of WIDTH columns (of vector KINDS, when known);
@@ -318,11 +324,81 @@ MISSING-FORM (with FREE-POS bound to the free slot)."
     (key-table-ensure-room table)
     g))
 
+(defparameter *max-code-map-size* 65536
+  "Largest product of dictionary sizes for which a key table maps combined
+dictionary codes to group ids directly.")
+
+(defun row-key-hash (vecs i)
+  "Hash of the key of row I of the key VECS (as computed by HASH-KEY-VECS)."
+  (let ((h 0))
+    (dolist (vec vecs h)
+      (let ((v (vec-ref vec i)))
+        (setf h (combine-hash h (if (eq v +null+) +null-key-hash+ (hash-key-value v))))))))
+
+(defun key-table-probe-row (table vecs i add)
+  "Group id of row I of the key VECS in the generic TABLE (added when ADD,
+else -1 if absent)."
+  (let ((h (row-key-hash vecs i))
+        (width (key-table-width table)))
+    (probe-key-table (table h g
+                            (let ((keys (key-table-keys table)))
+                              (loop for k below width
+                                    for vec in vecs
+                                    always (key-value-equal (svref (svref keys k) g)
+                                                            (normalize-key-value (vec-ref vec i))))))
+                     g
+                     (if add
+                         (key-table-insert-at table free-pos h
+                                              (lambda (k) (normalize-key-value (vec-ref (nth k vecs) i))))
+                         -1))))
+
+(defun key-table-map-codes (table vecs n gids add)
+  "Dictionary fast path of KEY-TABLE-MAP-BATCH for a generic TABLE: when
+every key vector carries dictionary codes, the group id of a combination of
+codes is looked up in a dense map (filled from the table on first sight).
+Returns true when done, NIL when the path does not apply."
+  (declare (type index-vector gids) (type fixnum n))
+  (unless (every #'vec-codes vecs)
+    (return-from key-table-map-codes nil))
+  (let ((dicts (mapcar #'vec-dict vecs))
+        (cache (key-table-code-cache table)))
+    (unless (and cache (every #'eq dicts (car cache)))
+      (let ((size (reduce #'* dicts :key (lambda (d) (length (dict-column-dictionary d))))))
+        (when (> size *max-code-map-size*)
+          (return-from key-table-map-codes nil))
+        (setf cache (cons dicts (make-array size :element-type 'fixnum :initial-element -1))
+              (key-table-code-cache table) cache)))
+    (let ((map (cdr cache))
+          (codes (coerce (mapcar #'vec-codes vecs) 'simple-vector))
+          (data (coerce (mapcar #'vec-data vecs) 'simple-vector))
+          (sizes (map 'index-vector (lambda (d) (length (dict-column-dictionary d))) dicts))
+          (width (length vecs)))
+      (declare (type index-vector map sizes) (type fixnum width))
+      (dotimes (i n)
+        (let ((c 0) (null-key nil))
+          (declare (type fixnum c))
+          (dotimes (k width)
+            (when (eq (svref (the simple-vector (svref data k)) i) +null+)
+              (setf null-key t))
+            (setf c (+ (* c (aref sizes k)) (aref (the u32-vector (svref codes k)) i))))
+          (setf (aref gids i)
+                (if null-key
+                    (key-table-probe-row table vecs i add)
+                    (let ((g (aref map c)))
+                      (if (>= g 0)
+                          g
+                          (let ((g (key-table-probe-row table vecs i add)))
+                            (when (>= g 0) (setf (aref map c) g))
+                            g)))))))
+      t)))
+
 (defun key-table-map-batch (table vecs n gids add)
   "Fill GIDS[0..N) with the group ids of the rows of the key VECS; new keys
 are added when ADD, else their id is -1. Returns GIDS."
   (declare (type index-vector gids) (type fixnum n))
-  (if (key-table-int-slots table)
+  (cond
+    ((and (null (key-table-int-slots table)) (key-table-map-codes table vecs n gids add)))
+    ((key-table-int-slots table)
       (let* ((vec (first vecs))
              (data (vec-data vec))
              (validity (vec-validity vec)))
@@ -345,7 +421,8 @@ are added when ADD, else their id is -1. Returns GIDS."
                  (setf (aref gids i) (int-key-probe table (aref data i) add)))))
           (t
            (dotimes (i n)
-             (setf (aref gids i) (int-key-group table (vec-ref vec i) add))))))
+             (setf (aref gids i) (int-key-group table (vec-ref vec i) add)))))))
+    (t
       (let ((hashes (hash-key-vecs vecs n (key-table-native table)))
             (vecs (coerce vecs 'simple-vector))
             (width (length vecs)))
@@ -364,7 +441,7 @@ are added when ADD, else their id is -1. Returns GIDS."
                                        (key-table-insert-at
                                         table free-pos h
                                         (lambda (k) (normalize-key-value (vec-ref (svref vecs k) i))))
-                                       -1)))))))
+                                       -1))))))))
   gids)
 
 (defun key-table-group-hash (table g)

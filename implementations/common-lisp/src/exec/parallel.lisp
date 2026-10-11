@@ -390,13 +390,15 @@ partitioning its rows, see above)."
                                                                   (partition-rows key-vecs arg-vecs
                                                                                   (batch-count b) base
                                                                                   partitioning))
-                                                                (funcall consume gs b base))
-                                                            (incf base (batch-count b))))
-                                                 (when (and partitionable (not partitioning)
-                                                            (> (group-state-count gs)
-                                                               *partition-groups-threshold*))
-                                                   (setf partitioning (make-array workers :initial-element '())
-                                                         (svref chunk-lists w) partitioning))))))))
+                                                                (progn
+                                                                  (funcall consume gs b base)
+                                                                  (when (and partitionable
+                                                                             (> (group-state-count gs)
+                                                                                *partition-groups-threshold*))
+                                                                    (setf partitioning
+                                                                          (make-array workers :initial-element '())
+                                                                          (svref chunk-lists w) partitioning))))
+                                                            (incf base (batch-count b))))))))))
                 ;; Wait for all workers, then merge their partial states in order.
                 (loop for th in (prun-threads run)
                       do (sb-thread:join-thread th :default nil))
@@ -487,8 +489,8 @@ Many groups are merged in parallel, one thread per hash partition."
 
 (defun ordered-group-batches (states node)
   "Iterator over the output batches of the groups of STATES in order of
-their first input position."
-  (multiple-value-bind (owners gids) (groups-in-position-order states)
+their first input position (many groups: built in parallel up front)."
+  (multiple-value-bind (owners gids) (groups-in-position-order states (length states))
     (let* ((nkeys (length (pp-hash-aggregate-group-by node)))
            (kinds (output-kinds node))
            (key-kinds (subseq kinds 0 nkeys))
@@ -496,11 +498,29 @@ their first input position."
            (count (length gids))
            (pos 0))
       (declare (type fixnum pos))
-      (lambda ()
-        (when (< pos count)
-          (let ((end (min count (+ pos +batch-size+))))
-            (prog1 (group-entries-batch owners gids pos end key-kinds agg-kinds)
-              (setf pos end))))))))
+      (if (and (> (length states) 1) (> count (* 4 +batch-size+)))
+          (let* ((nbatches (ceiling count +batch-size+))
+                 (batches (make-array nbatches))
+                 (k 0))
+            (declare (type fixnum k))
+            (map-row-ranges nbatches (length states)
+                            (lambda (start end)
+                              (loop for b from start below end
+                                    do (setf (svref batches b)
+                                             (group-entries-batch owners gids (* b +batch-size+)
+                                                                  (min count (* (1+ b) +batch-size+))
+                                                                  key-kinds agg-kinds))))
+                            2)
+            (lambda ()
+              (when (< k nbatches)
+                (prog1 (svref batches k)
+                  (setf (svref batches k) nil)
+                  (incf k)))))
+          (lambda ()
+            (when (< pos count)
+              (let ((end (min count (+ pos +batch-size+))))
+                (prog1 (group-entries-batch owners gids pos end key-kinds agg-kinds)
+                  (setf pos end)))))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Parallel sorting: contiguous chunks of the permutation are sorted
