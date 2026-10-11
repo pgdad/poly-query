@@ -299,7 +299,7 @@ LFUNC run_mode
     bl   index_drop_table
     mov  x0, x19
     bl   table_free
-    ADR_L x0, g_arena
+    TLS_ADDR x0, g_arena
     bl   arena_free
     add  sp, sp, #32
     LEAVE 5

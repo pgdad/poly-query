@@ -36,11 +36,13 @@
 // IX_VALS: BTREE sorted payloads (shares the record tail)
 #define IX_VALS    104
 
-    .bss
-    .p2align 3
-g_indexes:  .skip 8         // Index** (malloc)
-g_nindexes: .skip 8
-g_icap:     .skip 8
+// The registry of indexes is part of the catalog version of the request
+// (g_cat, catalog.S): CV_IDX / CV_NI / CV_ICAP.
+//   CAT_FIELD reg, off    reg = field `off` of this request's version
+.macro CAT_FIELD reg, off
+    TLS_LDR \reg, g_cat
+    ldr  \reg, [\reg, #\off]
+.endm
 
     .text
 
@@ -52,11 +54,12 @@ FUNC index_find
     ENTER 3
     mov  x19, x0
     mov  x20, x1
+    bl   cat_cur
     mov  x21, #0
-1:  LDR_G x9, g_nindexes
+1:  CAT_FIELD x9, CV_NI
     cmp  x21, x9
     b.hs 8f
-    LDR_G x9, g_indexes
+    CAT_FIELD x9, CV_IDX
     ldr  x22, [x9, x21, lsl #3]
     ldr  x2, [x22, #IX_NAME]
     ldr  x3, [x2, #STR_LEN]
@@ -89,6 +92,8 @@ FUNC index_create
     cbnz x0, 1f
     RAISE ERR_RESOURCE_LIMIT, "out of memory"
 1:  mov  x23, x0
+    mov  x9, #1                         // referenced by this version
+    str  x9, [x23, #IX_REFS]
     str  x19, [x23, #IX_TABLE]
     str  x21, [x23, #IX_COL]
     str  w22, [x23, #IX_KIND]
@@ -103,30 +108,31 @@ FUNC index_create
     bl   build_hash
     b    3f
 2:  bl   build_btree
-3:  // register
-    LDR_G x9, g_nindexes
-    LDR_G x10, g_icap
+3:  // register in this request's catalog version
+    bl   cat_cur
+    mov  x24, x0
+    ldr  x9, [x24, #CV_NI]
+    ldr  x10, [x24, #CV_ICAP]
     cmp  x9, x10
     b.lo 4f
     lsl  x10, x10, #1
     cmp  x10, #16
     mov  x11, #16
     csel x22, x10, x11, hs
-    LDR_G x0, g_indexes
+    ldr  x0, [x24, #CV_IDX]
     lsl  x1, x22, #3
     bl   realloc
     cbnz x0, 31f
+    mov  x0, x23                        // not registered: free it
+    bl   index_unref
     RAISE ERR_RESOURCE_LIMIT, "out of memory"
-31: ADR_L x9, g_indexes
-    str  x0, [x9]
-    ADR_L x9, g_icap
-    str  x22, [x9]
-4:  LDR_G x9, g_nindexes
-    LDR_G x10, g_indexes
+31: str  x0, [x24, #CV_IDX]
+    str  x22, [x24, #CV_ICAP]
+4:  ldr  x9, [x24, #CV_NI]
+    ldr  x10, [x24, #CV_IDX]
     str  x23, [x10, x9, lsl #3]
     add  x9, x9, #1
-    ADR_L x10, g_nindexes
-    str  x9, [x10]
+    str  x9, [x24, #CV_NI]
     mov  x0, x23
     LEAVE 4
 ENDF index_create
@@ -269,13 +275,15 @@ LFUNC cmp_pairs
 ENDF cmp_pairs
 
 // =============================================================================
-// index_drop(x0 Index*) — unregister and free.
+// index_drop(x0 Index*) — unregister from this request's catalog version.
 // =============================================================================
 FUNC index_drop
-    ENTER 1
+    ENTER 2
     mov  x19, x0
-    LDR_G x1, g_indexes
-    LDR_G x2, g_nindexes
+    bl   cat_cur
+    mov  x20, x0
+    ldr  x1, [x20, #CV_IDX]
+    ldr  x2, [x20, #CV_NI]
     mov  x3, #0
 1:  cmp  x3, x2
     b.hs 9f
@@ -292,25 +300,39 @@ FUNC index_drop
     str  x4, [x1, x3, lsl #3]
     mov  x3, x5
     b    3b
-4:  ADR_L x4, g_nindexes
-    str  x2, [x4]
+4:  str  x2, [x20, #CV_NI]
+    mov  x0, x19
+    bl   index_unref
+9:  LEAVE 2
+ENDF index_drop
+
+// index_unref(x0 Index*): drop a version's reference; the last one frees it.
+FUNC index_unref
+    ENTER 1
+    mov  x19, x0
+    add  x0, x0, #IX_REFS
+    mov  x1, #-1
+    bl   atomic_fetch_add
+    cmp  x0, #1
+    b.ne 9f
     add  x0, x19, #IX_ARENA
     bl   arena_free
     mov  x0, x19
     bl   free
 9:  LEAVE 1
-ENDF index_drop
+ENDF index_unref
 
 // index_drop_table(x0 Table*) — drops every index of the table.
 //   x19 table, x20 i
 FUNC index_drop_table
     ENTER 2
     mov  x19, x0
+    bl   cat_cur
     mov  x20, #0
-1:  LDR_G x9, g_nindexes
+1:  CAT_FIELD x9, CV_NI
     cmp  x20, x9
     b.hs 3f
-    LDR_G x9, g_indexes
+    CAT_FIELD x9, CV_IDX
     ldr  x0, [x9, x20, lsl #3]
     ldr  x10, [x0, #IX_TABLE]
     cmp  x10, x19
@@ -325,9 +347,10 @@ ENDF index_drop_table
 // index_reset() — drops every index.
 FUNC index_reset
     ENTER 0
-1:  LDR_G x9, g_nindexes
+    bl   cat_cur
+1:  CAT_FIELD x9, CV_NI
     cbz  x9, 2f
-    LDR_G x10, g_indexes
+    CAT_FIELD x10, CV_IDX
     sub  x9, x9, #1
     ldr  x0, [x10, x9, lsl #3]
     bl   index_drop
@@ -343,17 +366,18 @@ ENDF index_reset
 FUNC index_list
     ENTER 3
     mov  x19, x0
-    LDR_G x0, g_nindexes
+    bl   cat_cur
+    ldr  x0, [x0, #CV_NI]
     lsl  x0, x0, #3
     add  x0, x0, #8
     bl   arena_alloc
     mov  x20, x0
     mov  x21, #0
     mov  x22, #0
-1:  LDR_G x9, g_nindexes
+1:  CAT_FIELD x9, CV_NI
     cmp  x22, x9
     b.hs 3f
-    LDR_G x9, g_indexes
+    CAT_FIELD x9, CV_IDX
     ldr  x10, [x9, x22, lsl #3]
     ldr  x11, [x10, #IX_TABLE]
     cmp  x11, x19
@@ -374,9 +398,11 @@ ENDF index_list
 //   (leaf)
 // =============================================================================
 FUNC index_for_column
-    LDR_G x9, g_indexes
-    LDR_G x10, g_nindexes
     mov  x11, #0                        // best so far
+    TLS_LDR x9, g_cat
+    cbz  x9, 4f                         // no catalog version: no index
+    ldr  x10, [x9, #CV_NI]
+    ldr  x9, [x9, #CV_IDX]
 1:  cbz  x10, 4f
     ldr  x12, [x9], #8
     sub  x10, x10, #1

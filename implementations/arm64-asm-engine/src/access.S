@@ -23,7 +23,7 @@
 
 #define SMALL_LOOKUP 16
 
-    .data
+    TDATA
     .p2align 2
     .global g_use_indexes
 g_use_indexes:  .word 1             // query option use_indexes (protocol.S)
@@ -587,7 +587,7 @@ FUNC ap_scan
     str  d1, [sp, #56]
 54:
     // index candidate for this predicate
-    ADR_L x9, g_use_indexes
+    TLS_ADDR x9, g_use_indexes
     ldr  w9, [x9]
     cbz  w9, 59f
     ldr  w9, [x26, #PR_NULL]

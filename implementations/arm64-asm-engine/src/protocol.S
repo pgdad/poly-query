@@ -1,15 +1,20 @@
 // =============================================================================
 // protocol.S — JSON request handling (protocol.md §3-§6).
 //
-// handle_request_line parses one JSON request, dispatches on "op" and writes
-// exactly one response line to stdout. Errors raised anywhere below unwind
-// (longjmp) back here and become error responses. After every request the
-// request arena is released.
+// handle_request parses one JSON request, dispatches on "op" and leaves
+// exactly one response object in g_out (transport independent: session and
+// exec modes write it as a line to stdout, http.S as an HTTP body). Errors
+// raised anywhere below unwind (longjmp) back here and become error
+// responses. Every request works on one catalog version (catalog.S): the
+// op table says whether an op reads (snapshot) or mutates the catalog;
+// queries pin their snapshot after admission (server.S). After every
+// request the request arena is released.
 // =============================================================================
 #include "pq.inc"
 
-    .bss
+    TBSS
     .p2align 3
+    .global g_req_start
 g_cur_id:       .skip 8         // JNode* of the request "id" (or 0)
 g_req_start:    .skip 8         // µs timestamp of request start
 
@@ -38,6 +43,7 @@ k_join:     .asciz "join"
 k_optimize: .asciz "optimize"
 k_use_idx:  .asciz "use_indexes"
 k_native:   .asciz "native"
+k_query_id: .asciz "query_id"
 k_layout:   .asciz "layout"
 k_dict:     .asciz "dictionary"
 v_row:      .asciz "row"
@@ -49,21 +55,26 @@ v_rows:     .asciz "rows"
 v_count:    .asciz "count"
 v_auto:     .asciz "auto"
 
+// op table: name, handler, catalog access (CA_*)
+#define CA_NONE   0         // no catalog access, or the handler decides (query)
+#define CA_READ   1         // snapshot of the current version
+#define CA_WRITE  2         // mutation (private copy, published on success)
+#define OPE_SIZE  24
 op_names:
-    .quad o_load, op_load
-    .quad o_query, op_query
-    .quad o_tables, op_tables
-    .quad o_schema, op_schema
-    .quad o_drop, op_drop
-    .quad o_reset, op_reset
-    .quad o_version, op_version
-    .quad o_caps, op_capabilities
-    .quad o_sleep, op_sleep
-    .quad o_explain, op_explain
-    .quad o_save, op_save
-    .quad o_open, op_open
-    .quad o_stats, op_stats
-    .quad 0, 0
+    .quad o_load, op_load, CA_WRITE
+    .quad o_query, op_query, CA_NONE
+    .quad o_tables, op_tables, CA_READ
+    .quad o_schema, op_schema, CA_READ
+    .quad o_drop, op_drop, CA_WRITE
+    .quad o_reset, op_reset, CA_WRITE
+    .quad o_version, op_version, CA_NONE
+    .quad o_caps, op_capabilities, CA_NONE
+    .quad o_sleep, op_sleep, CA_NONE
+    .quad o_explain, op_explain, CA_READ
+    .quad o_save, op_save, CA_READ
+    .quad o_open, op_open, CA_WRITE
+    .quad o_stats, op_stats, CA_READ
+    .quad 0, 0, 0
 o_load:     .asciz "load"
 o_query:    .asciz "query"
 o_tables:   .asciz "tables"
@@ -81,11 +92,12 @@ o_stats:    .asciz "stats"
 r_id:       .asciz "{\"id\":"
 r_null:     .asciz "null"
 r_ok:       .asciz ",\"ok\":true"
-r_err:      .asciz ",\"ok\":false,\"error\":{\"code\":\""
+r_err_obj:  .asciz ",\"ok\":false,\"error\":"
+r_code:     .asciz "{\"code\":\""
 r_msg:      .asciz "\",\"message\":"
 r_details:  .asciz ",\"details\":{\"line\":"
 r_column:   .asciz ",\"column\":"
-r_caps:     .asciz ",\"protocol_version\":1,\"capabilities\":[\"phase1\",\"ingest.csv\",\"ingest.json\",\"ingest.jsonl\",\"sql.basic\",\"test.functions\",\"phase2\",\"sql.groupby\",\"sql.join\",\"sql.functions\",\"sql.subquery\",\"sql.cte\",\"sql.correlated_subquery\",\"phase3\",\"storage.pqcf\",\"storage.mmap\",\"index.hash\",\"index.btree\"]"
+r_caps:     .asciz ",\"protocol_version\":1,\"capabilities\":[\"phase1\",\"ingest.csv\",\"ingest.json\",\"ingest.jsonl\",\"sql.basic\",\"test.functions\",\"phase2\",\"sql.groupby\",\"sql.join\",\"sql.functions\",\"sql.subquery\",\"sql.cte\",\"sql.correlated_subquery\",\"phase3\",\"storage.pqcf\",\"storage.mmap\",\"index.hash\",\"index.btree\",\"phase4\",\"http.streaming\"]"
 r_version:  .asciz ",\"engine\":\"polyquery-arm64-asm\",\"engine_version\":\"0.1.0\",\"language\":\"arm64-asm-engine\",\"protocol_version\":1,\"spec_version\":\"1.0.0\",\"runtime\":\"GNU as (AArch64) + glibc\",\"build\":{\"profile\":\"release\",\"flags\":\"-g\"}"
 r_tables:   .asciz ",\"tables\":["
 r_name:     .asciz "{\"name\":"
@@ -139,7 +151,7 @@ m_emptytab: .asciz "table name must not be empty"
 // out_puts(x0 cstr)
 LFUNC out_puts
     mov  x1, x0
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     b    buf_puts
 ENDF out_puts
 
@@ -147,21 +159,21 @@ ENDF out_puts
 LFUNC out_str
     ldr  x2, [x0, #STR_LEN]
     add  x1, x0, #STR_DATA
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     b    buf_put_jstr
 ENDF out_str
 
 // out_i64(x0 value)
 LFUNC out_i64
     mov  x1, x0
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     b    buf_put_i64
 ENDF out_i64
 
 // out_c(w0 char)
 LFUNC out_c
     mov  w1, w0
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     b    buf_putc
 ENDF out_c
 
@@ -169,13 +181,13 @@ ENDF out_c
 LFUNC out_begin
     stp  x29, x30, [sp, #-16]!
     mov  x29, sp
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     str  xzr, [x0, #BUF_LEN]
     ADR_L x0, r_id
     bl   out_puts
-    LDR_G x1, g_cur_id
+    TLS_LDR x1, g_cur_id
     cbz  x1, 1f
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     bl   json_write
     b    2f
 1:  ADR_L x0, r_null
@@ -195,16 +207,14 @@ LFUNC out_begin_ok
     ret
 ENDF out_begin_ok
 
-// out_flush(): append "}\n" and write the whole response to stdout.
+// out_flush(): append "\n" and write the whole response to stdout.
 LFUNC out_flush
     stp  x29, x30, [sp, #-32]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
-    mov  w0, #'}'
-    bl   out_c
     mov  w0, #'\n'
     bl   out_c
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     ldr  x19, [x0, #BUF_PTR]
     ldr  x20, [x0, #BUF_LEN]
 1:  cbz  x20, 9f
@@ -347,36 +357,68 @@ ENDF str_eq_c
 
 // ----------------------------------------------------------- dispatcher ------
 
-// handle_request_line(x0 ptr, x1 len): process one request, write one response.
+// handle_request_line(x0 ptr, x1 len): session / exec mode — process one
+// request and write its response as one line to stdout.
 FUNC handle_request_line
-    stp  x29, x30, [sp, #-48]!
+    stp  x29, x30, [sp, #-16]!
+    mov  x29, sp
+    mov  x2, #0
+    mov  x3, #0
+    bl   handle_request
+    bl   out_flush
+    ldp  x29, x30, [sp], #16
+    ret
+ENDF handle_request_line
+
+// handle_request(x0 ptr, x1 len, x2 prebuilt request JNode* or 0,
+//                x3 forced op cstr or 0) -> w0 error code (0 = success)
+// Processes one request; the response object (without newline) is left in
+// g_out. With x2 the request object was built by the caller (in the request
+// arena; x0/x1 ignored). With x3 the op is fixed by the caller (HTTP
+// endpoints) and the request's "op" field is ignored.
+//   x19 ptr / op table entry, x20 len, x21 request, x22 op Str*, x23 forced op
+FUNC handle_request
+    stp  x29, x30, [sp, #-64]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
     stp  x21, x22, [sp, #32]
+    stp  x23, x24, [sp, #48]
     mov  x19, x0
     mov  x20, x1
-    ADR_L x0, g_cur_id
+    mov  x21, x2
+    mov  x23, x3
+    TLS_ADDR x0, g_cur_id
     str  xzr, [x0]
     bl   now_us
-    ADR_L x1, g_req_start
+    TLS_ADDR x1, g_req_start
     str  x0, [x1]
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, .Lhr_error
+    cbnz x21, 1f
     mov  x0, x19
     mov  x1, x20
     bl   json_parse
     cbz  x0, .Lhr_badjson
-    ldr  w1, [x0, #JN_TYPE]
+    mov  x21, x0
+1:  ldr  w1, [x21, #JN_TYPE]
     cmp  w1, #J_OBJ
     b.ne .Lhr_badjson
-    mov  x21, x0
+    mov  x0, x21
     ADR_L x1, k_id
     bl   json_get
-    ADR_L x1, g_cur_id
+    TLS_ADDR x1, g_cur_id
     str  x0, [x1]
-    // op
-    mov  x0, x21
+    // op (fixed by the transport, or the request's "op" field)
+    cbz  x23, 11f
+    mov  x0, x23
+    bl   strlen
+    mov  x1, x0
+    mov  x0, x23
+    bl   str_new
+    mov  x22, x0
+    b    12f
+11: mov  x0, x21
     ADR_L x1, k_op
     bl   json_get
     cbz  x0, .Lhr_noop
@@ -384,19 +426,29 @@ FUNC handle_request_line
     cmp  w1, #J_STR
     b.ne .Lhr_noop
     ldr  x22, [x0, #JN_PTR]         // op Str*
-    ADR_L x19, op_names
-1:  ldr  x1, [x19]
+12: ADR_L x19, op_names
+2:  ldr  x1, [x19]
     cbz  x1, .Lhr_unknownop
     mov  x0, x22
     bl   str_eq_c
-    cbnz w0, 2f
-    add  x19, x19, #16
-    b    1b
-2:  ldr  x2, [x19, #8]
+    cbnz w0, 3f
+    add  x19, x19, #OPE_SIZE
+    b    2b
+3:  ldr  x9, [x19, #16]             // catalog access
+    cmp  x9, #CA_READ
+    b.ne 31f
+    bl   cat_read_begin
+    b    32f
+31: cmp  x9, #CA_WRITE
+    b.ne 32f
+    bl   cat_write_begin
+32: ldr  x2, [x19, #8]
     mov  x0, x21
     mov  x1, x22
     blr  x2                         // handler(x0 request, x1 op Str*)
-    bl   out_flush
+    mov  w0, #1                     // success: publish a mutation
+    bl   cat_end
+    mov  w24, #ERR_NONE
     b    .Lhr_done
 .Lhr_badjson:
     RAISE ERR_INVALID_REQUEST, "request is not a valid JSON object"
@@ -409,46 +461,76 @@ FUNC handle_request_line
     ldr  x3, [x22, #STR_LEN]
     bl   pq_raise_s
 .Lhr_error:
-    // free a half-built table, then emit the error response
-    LDR_G x19, g_pending_table
-    cbz  x19, 3f
+    // free a half-built table, discard catalog changes, emit the error
+    TLS_LDR x19, g_pending_table
+    cbz  x19, 4f
     add  x0, x19, #TBL_ARENA
     bl   arena_free
     mov  x0, x19
     bl   free
-    ADR_L x0, g_pending_table
+    TLS_ADDR x0, g_pending_table
     str  xzr, [x0]
-3:  bl   write_error_response
-    bl   out_flush
+4:  mov  w0, #0
+    bl   cat_end
+    bl   write_error_response
+    TLS_ADDR x0, g_err_code
+    ldr  w24, [x0]
 .Lhr_done:
-    ADR_L x0, g_arena
+    mov  w0, #'}'
+    bl   out_c
+    mov  w0, w24
+    bl   srv_query_end              // admission slot, metrics, log (server)
+    TLS_ADDR x0, g_arena
     bl   arena_free
-    ADR_L x0, g_deadline
+    TLS_ADDR x0, g_deadline
     str  xzr, [x0]
-    ADR_L x0, g_arena_limit
+    TLS_ADDR x0, g_arena_limit
     str  xzr, [x0]
+    TLS_ADDR x0, g_cancel_flag
+    str  xzr, [x0]
+    mov  w0, w24
     ldp  x19, x20, [sp, #16]
     ldp  x21, x22, [sp, #32]
-    ldp  x29, x30, [sp], #48
+    ldp  x23, x24, [sp, #48]
+    ldp  x29, x30, [sp], #64
     ret
-ENDF handle_request_line
+ENDF handle_request
 
-// write_error_response(): {"id":..,"ok":false,"error":{...}}  (without final })
+// write_error_response(): {"id":..,"ok":false,"error":{...}  (without final })
 LFUNC write_error_response
-    stp  x29, x30, [sp, #-32]!
+    stp  x29, x30, [sp, #-16]!
+    mov  x29, sp
+    bl   out_begin
+    ADR_L x0, r_err_obj
+    bl   out_puts
+    TLS_ADDR x0, g_out
+    bl   put_error_object
+    ldp  x29, x30, [sp], #16
+    ret
+ENDF write_error_response
+
+// put_error_object(x0 Buf*): {"code":…,"message":…[,"details":{…}]} of the
+// error recorded by pq_raise* (g_err_code, g_err_msg, g_err_line/col).
+//   x19 message cursor start, x20 cursor, x21 buf
+FUNC put_error_object
+    stp  x29, x30, [sp, #-48]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
-    bl   out_begin
-    ADR_L x0, r_err
-    bl   out_puts
-    ADR_L x0, g_err_code
+    str  x21, [sp, #32]
+    mov  x21, x0
+    ADR_L x1, r_code
+    bl   buf_puts
+    TLS_ADDR x0, g_err_code
     ldr  w0, [x0]
     bl   err_code_name
-    bl   out_puts
-    ADR_L x0, r_msg
-    bl   out_puts
+    mov  x1, x0
+    mov  x0, x21
+    bl   buf_puts
+    mov  x0, x21
+    ADR_L x1, r_msg
+    bl   buf_puts
     // sanitise the message to ASCII so the response is always valid UTF-8
-    ADR_L x19, g_err_msg
+    TLS_ADDR x19, g_err_msg
     mov  x20, x19
 1:  ldrb w1, [x20]
     cbz  w1, 2f
@@ -458,30 +540,37 @@ LFUNC write_error_response
     strb w1, [x20]
 11: add  x20, x20, #1
     b    1b
-2:  ADR_L x0, g_out
+2:  mov  x0, x21
     mov  x1, x19
     sub  x2, x20, x19
     bl   buf_put_jstr
-    ADR_L x0, g_err_line
+    TLS_ADDR x0, g_err_line
     ldr  w19, [x0]
     cbz  w19, 3f
-    ADR_L x0, r_details
-    bl   out_puts
-    mov  x0, x19
-    bl   out_i64
-    ADR_L x0, r_column
-    bl   out_puts
-    ADR_L x0, g_err_col
-    ldr  w0, [x0]
-    bl   out_i64
-    mov  w0, #'}'
-    bl   out_c
-3:  mov  w0, #'}'
-    bl   out_c
+    mov  x0, x21
+    ADR_L x1, r_details
+    bl   buf_puts
+    mov  x0, x21
+    mov  x1, x19
+    bl   buf_put_i64
+    mov  x0, x21
+    ADR_L x1, r_column
+    bl   buf_puts
+    TLS_ADDR x0, g_err_col
+    ldr  w1, [x0]
+    mov  x0, x21
+    bl   buf_put_i64
+    mov  x0, x21
+    mov  w1, #'}'
+    bl   buf_putc
+3:  mov  x0, x21
+    mov  w1, #'}'
+    bl   buf_putc
     ldp  x19, x20, [sp, #16]
-    ldp  x29, x30, [sp], #32
+    ldr  x21, [sp, #32]
+    ldp  x29, x30, [sp], #48
     ret
-ENDF write_error_response
+ENDF put_error_object
 
 // handle_request_batch(x0 ptr, x1 len): exec mode — one request object or an
 // array of request objects. Each element is re-serialised to its own line
@@ -534,7 +623,7 @@ FUNC handle_request_batch
     bl   buf_putc
     add  x24, x24, #1
     b    3b
-4:  ADR_L x0, g_arena
+4:  TLS_ADDR x0, g_arena
     bl   arena_free
     ldr  x21, [sp, #BUF_PTR]
     ldr  x22, [sp, #BUF_LEN]
@@ -574,6 +663,8 @@ FUNC cli_version
     mov  x0, #0
     mov  x1, #0
     bl   op_version
+    mov  w0, #'}'
+    bl   out_c
     bl   out_flush
     ldp  x29, x30, [sp], #16
     ret
@@ -585,6 +676,8 @@ FUNC cli_capabilities
     mov  x0, #0
     mov  x1, #0
     bl   op_capabilities
+    mov  w0, #'}'
+    bl   out_c
     bl   out_flush
     ldp  x29, x30, [sp], #16
     ret
@@ -708,7 +801,7 @@ LFUNC write_column_desc
     bl   out_str
     ADR_L x0, r_type
     bl   out_puts
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     mov  w1, w20
     bl   type_write
     mov  w0, #'"'
@@ -843,7 +936,7 @@ LFUNC op_stats
     ldr  x0, [x22, #COL_NAME]
     ldr  w1, [x22, #COL_TYPE]
     bl   write_column_desc
-    ADR_L x0, g_out                     // reopen the object written above
+    TLS_ADDR x0, g_out                     // reopen the object written above
     ldr  x9, [x0, #BUF_LEN]
     sub  x9, x9, #1
     str  x9, [x0, #BUF_LEN]
@@ -861,14 +954,14 @@ LFUNC op_stats
     cset x24, hs
     ADR_L x0, r_min
     bl   out_puts
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     ldr  x1, [x23, #CST_MIN]
     mov  x2, x24
     ldr  w3, [x22, #COL_TYPE]
     bl   write_value_json
     ADR_L x0, r_max
     bl   out_puts
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     ldr  x1, [x23, #CST_MAX]
     mov  x2, x24
     ldr  w3, [x22, #COL_TYPE]
@@ -1405,7 +1498,7 @@ LFUNC op_load
     cbnz x0, 73f
     RAISE ERR_RESOURCE_LIMIT, "out of memory"
 73: mov  x28, x0
-    ADR_L x1, g_pending_table
+    TLS_ADDR x1, g_pending_table
     str  x28, [x1]
     mov  x0, x28
     mov  x1, x22
@@ -1432,7 +1525,7 @@ LFUNC op_load
     bl   catalog_remove
 8:  mov  x0, x28
     bl   catalog_add
-    ADR_L x1, g_pending_table
+    TLS_ADDR x1, g_pending_table
     str  xzr, [x1]
     bl   out_begin_ok
     mov  x0, x28
@@ -1577,7 +1670,7 @@ LFUNC op_explain
     mov  w2, #1
     bl   get_str
     mov  x20, x0
-    ADR_L x9, g_use_indexes         // option use_indexes (default true)
+    TLS_ADDR x9, g_use_indexes         // option use_indexes (default true)
     mov  w10, #1
     str  w10, [x9]
     mov  x0, x19
@@ -1589,10 +1682,10 @@ LFUNC op_explain
     ADR_L x1, k_use_idx
     mov  w2, #1
     bl   get_bool
-    ADR_L x9, g_use_indexes
+    TLS_ADDR x9, g_use_indexes
     str  w0, [x9]
 01: LDR_G x0, g_max_query_mem
-    ADR_L x1, g_arena_limit
+    TLS_ADDR x1, g_arena_limit
     str  x0, [x1]
     add  x0, x20, #STR_DATA
     ldr  x1, [x20, #STR_LEN]
@@ -1609,7 +1702,7 @@ LFUNC op_explain
     bl   out_begin_ok
     ADR_L x0, r_plan
     bl   out_puts
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     add  x1, x20, #STR_DATA
     ldr  x2, [x20, #STR_LEN]
     bl   buf_put
@@ -1621,6 +1714,10 @@ ENDF op_explain
 // op_query
 // x19 request, x20 options or 0, x21 max_rows (-1 none), w22 count-only,
 // x23 BoundQuery*, x24 ResultSet*
+// Locals: [sp] timeout_ms option, [sp+8] query_id Str* option (or 0)
+// Server mode: admission control (srv_query_begin) happens after the
+// options are validated and before the catalog snapshot is taken, so a
+// queued query sees the catalog as of the moment it starts executing.
 LFUNC op_query
     stp  x29, x30, [sp, #-96]!
     mov  x29, sp
@@ -1629,12 +1726,14 @@ LFUNC op_query
     stp  x23, x24, [sp, #48]
     stp  x25, x26, [sp, #64]
     stp  x27, x28, [sp, #80]
+    sub  sp, sp, #16
+    stp  xzr, xzr, [sp]
     mov  x19, x0
     ADR_L x1, k_sql
     mov  w2, #1
     bl   get_str
     mov  x25, x0                    // sql Str*
-    ADR_L x9, g_use_indexes
+    TLS_ADDR x9, g_use_indexes
     mov  w10, #1
     str  w10, [x9]
     mov  x21, #-1
@@ -1657,19 +1756,18 @@ LFUNC op_query
     bl   json_get                   // max_rows explicitly present?
     cbnz x0, 1f
     mov  x21, #-1
-1:  // timeout_ms
+1:  // timeout_ms, query_id
     mov  x0, x20
     ADR_L x1, k_timeout
     mov  x2, #0
     mov  x3, #0
     bl   get_int
-    cbz  x0, 2f
-    mov  x26, x0
-    bl   now_us
-    mov  x1, #1000
-    madd x0, x26, x1, x0
-    ADR_L x1, g_deadline
-    str  x0, [x1]
+    str  x0, [sp]
+    mov  x0, x20
+    ADR_L x1, k_query_id
+    mov  w2, #0
+    bl   get_str
+    str  x0, [sp, #8]
 2:  // result mode
     mov  x0, x20
     ADR_L x1, k_result
@@ -1713,26 +1811,49 @@ LFUNC op_query
     ADR_L x1, k_use_idx
     mov  w2, #1
     bl   get_bool
-    ADR_L x9, g_use_indexes
+    TLS_ADDR x9, g_use_indexes
     str  w0, [x9]
     mov  x0, x20
     ADR_L x1, k_native
     mov  w2, #0
     bl   get_bool
-3:  // memory budget for this query
+3:  // effective timeout: option, else the server default; it runs from
+    // the arrival of the request, so time spent queued counts
+    ldr  x0, [sp]
+    cbnz x0, 31f
+    LDR_G x0, g_srv_timeout_ms
+31: cbz  x0, 32f
+    mov  x1, #1000
+    TLS_LDR x2, g_req_start
+    madd x0, x0, x1, x2
+    TLS_ADDR x1, g_deadline
+    str  x0, [x1]
+32: ldr  x0, [sp, #8]
+    bl   srv_query_begin            // server: admission (may wait / raise)
+    // memory budget for this query
     LDR_G x0, g_max_query_mem
-    ADR_L x1, g_arena_limit
+    TLS_ADDR x1, g_arena_limit
     str  x0, [x1]
     // lex + parse
     add  x0, x25, #STR_DATA
     ldr  x1, [x25, #STR_LEN]
     bl   parse_sql
+    mov  x26, x0
+    ldr  w1, [x0, #ST_KIND]
+    cmp  w1, #SK_QUERY
+    b.eq 33f
+    cmp  w1, #SK_EXPLAIN
+    b.eq 33f
+    bl   cat_write_begin            // CREATE / DROP INDEX mutate the catalog
+    mov  x0, x26
+    b    34f
+33: bl   cat_read_begin             // the query's snapshot
+    mov  x0, x26
     ldr  w1, [x0, #ST_KIND]
     cmp  w1, #SK_QUERY
     b.eq 4f
-    cmp  w1, #SK_EXPLAIN
-    b.eq 41f
-    bl   index_stmt                 // CREATE / DROP INDEX
+    b    41f
+34: bl   index_stmt                 // CREATE / DROP INDEX
     bl   empty_result
     mov  x23, x0
     mov  x24, x1
@@ -1741,10 +1862,28 @@ LFUNC op_query
     bl   bind_query                 // semantic analysis
     mov  x23, x0
     bl   plan_statement             // logical + physical plan
+    TLS_LDR x9, g_stream
+    cbnz x9, 43f
     mov  x1, #0
     bl   exec_plan                  // execution
     mov  x24, x0
     b    42f
+43: // HTTP streaming: rows of a final projection go out batch by batch
+    mov  x26, x0
+    mov  x0, x23
+    mov  x1, x21
+    bl   http_stream_open
+    mov  x0, x26
+    ADR_L x1, http_stream_sink
+    bl   exec_plan_stream
+    mov  x24, x0
+    cbz  x1, 42f                    // not streamable: materialised result
+    ldr  x0, [x24, #RS_NROWS]
+    TLS_ADDR x1, g_result_rows
+    str  x0, [x1]
+    bl   http_stream_end
+    bl   out_begin_ok
+    b    .Lq_ret
 41: ldr  x0, [x0, #ST_QUERY]        // EXPLAIN: one STRING column "plan"
     bl   explain_query
     bl   explain_result
@@ -1757,63 +1896,36 @@ LFUNC op_query
     cmp  x0, x21
     b.ls 5f
     RAISE ERR_RESOURCE_LIMIT, "result exceeds max_rows"
-5:  bl   out_begin_ok
+5:  ldr  x0, [x24, #RS_NROWS]
+    TLS_ADDR x1, g_result_rows
+    str  x0, [x1]
+    TLS_LDR x9, g_stream
+    cbz  x9, 51f
+    mov  x0, x23                    // HTTP streaming: header, row batches,
+    mov  x1, x24                    // end line go straight to the client
+    bl   http_stream_result
+    bl   out_begin_ok
+    b    .Lq_ret
+51: bl   out_begin_ok
     // columns
     ADR_L x0, r_columns
     bl   out_puts
-    ldr  x25, [x23, #BQ_OUT]
-    ldr  x26, [x23, #BQ_NOUT]
-    mov  x27, #0
-6:  cmp  x27, x26
-    b.hs 7f
-    cbz  x27, 61f
-    mov  w0, #','
-    bl   out_c
-61: mov  x1, #OC_SIZE
-    madd x1, x27, x1, x25
-    ldr  x0, [x1, #OC_NAME]
-    ldr  w1, [x1, #OC_TYPE]
-    bl   write_column_desc
-    add  x27, x27, #1
-    b    6b
-7:  mov  w0, #']'
-    bl   out_c
+    TLS_ADDR x9, g_out              // out_columns writes the '['
+    ldr  x10, [x9, #BUF_LEN]
+    sub  x10, x10, #1
+    str  x10, [x9, #BUF_LEN]
+    mov  x0, x23
+    bl   out_columns
     cbnz w22, 9f
     // rows
     ADR_L x0, r_rows
     bl   out_puts
-    mov  x27, #0                    // row index
-71: ldr  x0, [x24, #RS_NROWS]
-    cmp  x27, x0
-    b.hs 8f
-    cbz  x27, 72f
-    mov  w0, #','
-    bl   out_c
-72: mov  w0, #'['
-    bl   out_c
-    ldr  x0, [x24, #RS_ROWS]
-    ldr  x28, [x0, x27, lsl #3]     // row cells
-    mov  x20, #0                    // column index
-73: cmp  x20, x26
-    b.hs 75f
-    cbz  x20, 74f
-    mov  w0, #','
-    bl   out_c
-74: mov  x1, #OC_SIZE
-    madd x1, x20, x1, x25
-    ldr  w3, [x1, #OC_TYPE]
-    add  x2, x28, x20, lsl #4
-    ldr  x1, [x2]
-    ldr  x2, [x2, #8]
-    ADR_L x0, g_out
-    bl   write_value_json
-    add  x20, x20, #1
-    b    73b
-75: mov  w0, #']'
-    bl   out_c
-    add  x27, x27, #1
-    b    71b
-8:  mov  w0, #']'
+    mov  x0, x23
+    mov  x1, x24
+    mov  x2, #0
+    ldr  x3, [x24, #RS_NROWS]
+    bl   out_rows
+    mov  w0, #']'
     bl   out_c
 9:  ADR_L x0, r_rowcount
     bl   out_puts
@@ -1822,11 +1934,13 @@ LFUNC op_query
     ADR_L x0, r_stats
     bl   out_puts
     bl   now_us
-    LDR_G x1, g_req_start
+    TLS_LDR x1, g_req_start
     sub  x0, x0, x1
     bl   out_i64
     mov  w0, #'}'
     bl   out_c
+.Lq_ret:
+    add  sp, sp, #16
     ldp  x19, x20, [sp, #16]
     ldp  x21, x22, [sp, #32]
     ldp  x23, x24, [sp, #48]
@@ -1835,6 +1949,93 @@ LFUNC op_query
     ldp  x29, x30, [sp], #96
     ret
 ENDF op_query
+
+// out_columns(x0 BoundQuery*): [{"name":…,"type":…},…] (result columns)
+//   x19 OutCol array, x20 count, x21 i
+FUNC out_columns
+    stp  x29, x30, [sp, #-48]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    str  x21, [sp, #32]
+    ldr  x19, [x0, #BQ_OUT]
+    ldr  x20, [x0, #BQ_NOUT]
+    mov  w0, #'['
+    bl   out_c
+    mov  x21, #0
+1:  cmp  x21, x20
+    b.hs 3f
+    cbz  x21, 2f
+    mov  w0, #','
+    bl   out_c
+2:  mov  x1, #OC_SIZE
+    madd x1, x21, x1, x19
+    ldr  x0, [x1, #OC_NAME]
+    ldr  w1, [x1, #OC_TYPE]
+    bl   write_column_desc
+    add  x21, x21, #1
+    b    1b
+3:  mov  w0, #']'
+    bl   out_c
+    ldp  x19, x20, [sp, #16]
+    ldr  x21, [sp, #32]
+    ldp  x29, x30, [sp], #48
+    ret
+ENDF out_columns
+
+// out_rows(x0 BoundQuery*, x1 ResultSet*, x2 first row, x3 end row):
+// rows [first, end) as JSON arrays separated by commas (no brackets)
+//   x19 OutCol array, x20 width, x21 rows, x22 row, x23 end, x24 cells,
+//   x25 column; [sp+72] first row
+FUNC out_rows
+    stp  x29, x30, [sp, #-80]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    stp  x21, x22, [sp, #32]
+    stp  x23, x24, [sp, #48]
+    str  x25, [sp, #64]
+    ldr  x19, [x0, #BQ_OUT]
+    ldr  x20, [x0, #BQ_NOUT]
+    ldr  x21, [x1, #RS_ROWS]
+    mov  x22, x2
+    mov  x23, x3
+    str  x2, [sp, #72]              // first row (no comma before it)
+1:  cmp  x22, x23
+    b.hs 9f
+    ldr  x9, [sp, #72]
+    cmp  x22, x9
+    b.eq 2f
+    mov  w0, #','
+    bl   out_c
+2:  mov  w0, #'['
+    bl   out_c
+    ldr  x24, [x21, x22, lsl #3]    // row cells
+    mov  x25, #0
+3:  cmp  x25, x20
+    b.hs 5f
+    cbz  x25, 4f
+    mov  w0, #','
+    bl   out_c
+4:  mov  x1, #OC_SIZE
+    madd x1, x25, x1, x19
+    ldr  w3, [x1, #OC_TYPE]
+    add  x2, x24, x25, lsl #4
+    ldr  x1, [x2]
+    ldr  x2, [x2, #8]
+    TLS_ADDR x0, g_out
+    bl   write_value_json
+    add  x25, x25, #1
+    b    3b
+5:  mov  w0, #']'
+    bl   out_c
+    add  x22, x22, #1
+    b    1b
+9:  ldp  x19, x20, [sp, #16]
+    ldp  x21, x22, [sp, #32]
+    ldp  x23, x24, [sp, #48]
+    ldr  x25, [sp, #64]
+    ldp  x29, x30, [sp], #80
+    ret
+ENDF out_rows
 
 // ------------------------------------------------------------ save / open ----
 // PQCF files (protocol.md §5.7, storage/pqcf-v1.md; implementation in pqcf.S)
@@ -2036,7 +2237,7 @@ LFUNC op_open
     bl   catalog_remove
 5:  mov  x0, x25
     bl   catalog_add
-    ADR_L x1, g_pending_table
+    TLS_ADDR x1, g_pending_table
     str  xzr, [x1]
     mov  x0, x25
     mov  x1, x26

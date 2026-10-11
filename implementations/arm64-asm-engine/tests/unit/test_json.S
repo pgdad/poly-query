@@ -491,7 +491,7 @@ FUNC main
     bl   test_syntax
     bl   test_dom
     bl   test_large
-    ADR_L x0, g_arena                // release request memory
+    TLS_ADDR x0, g_arena                // release request memory
     bl   arena_free
     ADR_L x0, fmt_summary
     LDR_G x1, n_pass

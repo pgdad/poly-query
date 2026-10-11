@@ -9,6 +9,11 @@ as "raises" call `pq_raise*` (longjmp to the request dispatcher, never return).
 Per-request memory: `arena_alloc` (request arena `g_arena`, reset after every
 request). Persistent memory: table arenas (`arena_alloc_in(tbl+TBL_ARENA, n)`).
 
+Threads: all per-request state (`g_arena`, `g_out`, `g_jmpbuf`, error record,
+`g_deadline`, `g_cancel_flag`, `g_cat`, PQCF scratch, …) is thread-local
+(`TLS_ADDR` / `TLS_LDR`, pq.inc). Library code may only write process-wide
+data under a lock (catalog.S, server.S) or atomically (`atomic_fetch_add`).
+
 ## rt.S — runtime (errors, memory, buffers, strings, misc)
 
 | function | in | out | notes |
@@ -36,7 +41,8 @@ request). Persistent memory: table arenas (`arena_alloc_in(tbl+TBL_ARENA, n)`).
 | `buf_put_jstr` | x0 Buf*, x1 ptr, x2 len | – | JSON string literal incl. quotes, escapes `"` `\` and < 0x20 |
 | `buf_put_f64` | x0 Buf*, d0 value | – | shortest round-trip JSON number (-0 ⇒ 0) |
 | `now_us` | – | x0 µs | CLOCK_MONOTONIC |
-| `check_deadline` | – | – | raises TIMEOUT if `g_deadline` (µs, 0 = none) passed |
+| `check_deadline` | – | – | raises CANCELLED if the query's flag (`*g_cancel_flag`) is set, TIMEOUT if `g_deadline` (µs, 0 = none) passed |
+| `atomic_fetch_add` | x0 u64*, x1 delta | x0 previous value | |
 
 Globals (rt.S): `g_arena` (Arena), `g_out` (Buf, response line), `g_deadline`,
 `g_test_functions` (u32), `g_max_query_mem` (bytes), `g_max_ingest_bytes`,
@@ -120,6 +126,7 @@ Globals (rt.S): `g_arena` (Arena), `g_out` (Buf, response line), `g_deadline`,
 | function | in | out |
 |---|---|---|
 | `exec_plan` | x0 PlanNode*, x1 outer EvalCtx* or 0 | x0 ResultSet* |
+| `exec_plan_stream` | x0 root PlanNode*, x1 sink | x0 ResultSet*, x1 1 if the rows went to the sink (`sink(0, total)` once, then `sink(ResultSet* batch)` per ≤ EXEC_STREAM_BATCH rows; the result then only holds RS_NROWS) |
 | `eval` | x0 Node*, x1 EvalCtx* | x0 payload, x1 isnull; raises runtime errors |
 | `ev_subq` / `ev_exists` / `ev_insub` | x0 Node*, x1 EvalCtx* | subquery expressions (exec.S) |
 | `ev_func` / `ev_case` / `ev_inlist` / `ev_like` | x0 Node*, x1 EvalCtx* | functions.S |
@@ -147,3 +154,25 @@ Global `g_crc_mode` (pqcf.S): 0 = not probed yet, 1 = CRC32 instructions, 2 = ta
 | function | in | out |
 |---|---|---|
 | `catalog_find` | x0 ptr, x1 len | x0 Table* or 0 (case-insensitive) |
+| `cat_init` | – | – | empty current version (main) |
+| `cat_read_begin` / `cat_write_begin` | – | – | pin the current version / writable private copy (writer mutex) for this request |
+| `cat_end` | w0 commit | – | release the pin, or publish (1) / discard (0) the copy |
+| `cat_cur` | – | x0 CatVer* | version of this request (begins a write if none: unit tests) |
+| `catalog_add` / `catalog_remove` / `catalog_reset` | x0 Table* / – | – | mutate this request's (writable) version; add computes the statistics |
+| `catalog_count` | – | x0 tables in the current version |
+| `table_unref` / `index_unref` | x0 Table* / Index* | – | drop a version reference (the last frees) |
+| `handle_request` | x0 ptr, x1 len, x2 prebuilt JNode* or 0, x3 forced op cstr or 0 | w0 error code; response object in `g_out` |
+| `out_columns` / `out_rows` | x0 BoundQuery* (, x1 ResultSet*, x2 first, x3 end) | – JSON into `g_out` |
+| `put_error_object` | x0 Buf* | – the recorded error as `{"code":…,"message":…}` |
+
+## server.S / http.S / log.S (serve mode)
+
+| function | in | out |
+|---|---|---|
+| `serve_main` | – | never returns (exit 0 after shutdown, 1 if it cannot listen) |
+| `srv_query_begin` | x0 query_id Str* or 0 | – admission; raises SHUTTING_DOWN / ALREADY_EXISTS / OVERLOADED / TIMEOUT / CANCELLED; no-op outside serve |
+| `srv_query_end` | w0 error code | – releases the slot, metrics, `query finished` log (called by `handle_request`) |
+| `srv_cancel` | x0 ptr, x1 len | w0 1 if the query exists (flag set) |
+| `srv_write_queries` / `srv_write_metrics` | x0 Buf* | – |
+| `http_stream_open` / `http_stream_sink` / `http_stream_end` / `http_stream_result` | see http.S | streaming from op_query |
+| `log_begin` | w0 LOG_*, x1 msg | w0 1 if enabled; then `log_str` / `log_int` …, `log_end` |

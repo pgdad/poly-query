@@ -144,12 +144,17 @@
 .Lisn\@:
 .endm
 
-    .bss
+    // writer / reader state and scratch buffers: one set per thread
+    TBSS
     .p2align 4
+    .global g_pq_out, g_pq_meta
 g_pw:           .skip PW_SIZE
 g_pr:           .skip RD_SZ
 g_pq_out:       .skip BUF_SIZE      // persistent: file bytes not yet written
 g_pq_meta:      .skip BUF_SIZE      // persistent: metadata JSON / scratch
+
+    .bss
+    .p2align 4
 g_pq_tmpseq:    .skip 8             // counter for temporary file names
     .global g_crc_mode
 g_crc_mode:     .skip 8             // 0 = not probed, 1 = CRC32 insns, 2 = table
@@ -370,26 +375,26 @@ ENDF utf8_valid
 // metadata output helpers (g_pq_meta)
 LFUNC mp_puts                       // x0 cstr
     mov  x1, x0
-    ADR_L x0, g_pq_meta
+    TLS_ADDR x0, g_pq_meta
     b    buf_puts
 ENDF mp_puts
 
 LFUNC mp_c                          // w0 byte
     mov  w1, w0
-    ADR_L x0, g_pq_meta
+    TLS_ADDR x0, g_pq_meta
     b    buf_putc
 ENDF mp_c
 
 LFUNC mp_u64                        // x0 value
     mov  x1, x0
-    ADR_L x0, g_pq_meta
+    TLS_ADDR x0, g_pq_meta
     b    buf_put_u64
 ENDF mp_u64
 
 LFUNC mp_jstr                       // x0 Str*: JSON string literal
     ldr  x2, [x0, #STR_LEN]
     add  x1, x0, #STR_DATA
-    ADR_L x0, g_pq_meta
+    TLS_ADDR x0, g_pq_meta
     b    buf_put_jstr
 ENDF mp_jstr
 
@@ -409,7 +414,7 @@ ENDF pw_io_error
 // =============================================================================
 FUNC pqcf_save
     ENTER 4
-    ADR_L x19, g_pw
+    TLS_ADDR x19, g_pw
     mov  x20, x1
     str  x0, [x19, #PW_TBL]
     str  w3, [x19, #PW_ENC]
@@ -449,21 +454,21 @@ FUNC pqcf_save
     str  x0, [x19, #PW_FD]
     // from here on errors must remove the temporary file: intercept them
     add  x0, x19, #PW_JMP
-    ADR_L x1, g_jmpbuf
+    TLS_ADDR x1, g_jmpbuf
     mov  x2, #JMPBUF_BYTES
     bl   memcpy
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, .Lsv_fail
-    ADR_L x0, g_pq_out
+    TLS_ADDR x0, g_pq_out
     str  xzr, [x0, #BUF_LEN]
-    ADR_L x0, g_pq_meta
+    TLS_ADDR x0, g_pq_meta
     str  xzr, [x0, #BUF_LEN]
     str  xzr, [x19, #PW_POS]
     bl   pw_alloc_scratch
     // header, metadata prefix
     ADR_L x1, s_header
-    ADR_L x0, g_pq_out
+    TLS_ADDR x0, g_pq_out
     mov  x2, #8
     bl   buf_put
     mov  x9, #8
@@ -508,7 +513,7 @@ FUNC pqcf_save
     bl   mp_puts
     bl   pw_finish
     // success: restore the caller's error handler
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     add  x1, x19, #PW_JMP
     mov  x2, #JMPBUF_BYTES
     bl   memcpy
@@ -516,7 +521,7 @@ FUNC pqcf_save
     LEAVE 4
 .Lsv_fail:
     // an error was raised: close and remove the temp file, re-raise
-    ADR_L x19, g_pw
+    TLS_ADDR x19, g_pw
     ldr  x0, [x19, #PW_FD]
     tbnz x0, #63, 8f
     bl   close
@@ -526,11 +531,11 @@ FUNC pqcf_save
     cbz  x0, 9f
     bl   unlink
     str  xzr, [x19, #PW_TMP]
-9:  ADR_L x0, g_jmpbuf
+9:  TLS_ADDR x0, g_jmpbuf
     add  x1, x19, #PW_JMP
     mov  x2, #JMPBUF_BYTES
     bl   memcpy
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     mov  w1, #1
     bl   longjmp
 ENDF pqcf_save
@@ -542,7 +547,7 @@ ENDF pqcf_save
 // -----------------------------------------------------------------------------
 LFUNC pw_tmp_name
     ENTER 3
-    ADR_L x9, g_pw
+    TLS_ADDR x9, g_pw
     ldr  x19, [x9, #PW_FULL]
     mov  x0, x19
     mov  w1, #'/'
@@ -556,10 +561,10 @@ LFUNC pw_tmp_name
     mov  x21, x0
     bl   getpid
     mov  w23, w0
-    ADR_L x9, g_pq_tmpseq
-    ldr  x24, [x9]
-    add  x10, x24, #1
-    str  x10, [x9]
+    ADR_L x0, g_pq_tmpseq           // unique per process (atomic)
+    mov  x1, #1
+    bl   atomic_fetch_add
+    mov  x24, x0
     mov  x0, x21
     mov  x1, x22
     ADR_L x2, f_tmpname
@@ -569,7 +574,7 @@ LFUNC pw_tmp_name
     mov  w6, w23
     mov  x7, x24
     bl   snprintf
-    ADR_L x9, g_pw
+    TLS_ADDR x9, g_pw
     str  x21, [x9, #PW_TMP]
     LEAVE 3
 ENDF pw_tmp_name
@@ -581,7 +586,7 @@ ENDF pw_tmp_name
 // -----------------------------------------------------------------------------
 LFUNC pw_alloc_scratch
     ENTER 2
-    ADR_L x19, g_pw
+    TLS_ADDR x19, g_pw
     ldr  x20, [x19, #PW_RGS]
     lsl  x0, x20, #3
     add  x0, x0, #16
@@ -617,7 +622,7 @@ ENDF pw_alloc_scratch
 // -----------------------------------------------------------------------------
 LFUNC pw_meta_head
     ENTER 3
-    ADR_L x9, g_pw
+    TLS_ADDR x9, g_pw
     ldr  x19, [x9, #PW_TBL]
     ADR_L x0, j_head
     bl   mp_puts
@@ -647,7 +652,7 @@ LFUNC pw_meta_head
     bl   mp_jstr
     ADR_L x0, j_type
     bl   mp_puts
-    ADR_L x0, g_pq_meta
+    TLS_ADDR x0, g_pq_meta
     ldr  w1, [x20, #COL_TYPE]
     bl   type_write
     mov  w0, #'"'
@@ -706,11 +711,11 @@ ENDF pw_meta_head
 // -----------------------------------------------------------------------------
 LFUNC pw_flush
     ENTER 2
-    ADR_L x9, g_pq_out
+    TLS_ADDR x9, g_pq_out
     ldr  x19, [x9, #BUF_PTR]
     ldr  x20, [x9, #BUF_LEN]
 1:  cbz  x20, 3f
-    ADR_L x9, g_pw
+    TLS_ADDR x9, g_pw
     ldr  x0, [x9, #PW_FD]
     mov  x1, x19
     mov  x2, x20
@@ -726,7 +731,7 @@ LFUNC pw_flush
 2:  add  x19, x19, x0
     sub  x20, x20, x0
     b    1b
-3:  ADR_L x9, g_pq_out
+3:  TLS_ADDR x9, g_pq_out
     str  xzr, [x9, #BUF_LEN]
     LEAVE 2
 ENDF pw_flush
@@ -740,9 +745,9 @@ ENDF pw_flush
 LFUNC pw_finish
     ENTER 2
     sub  sp, sp, #16
-    ADR_L x19, g_pw
+    TLS_ADDR x19, g_pw
     bl   pw_flush
-    ADR_L x9, g_pq_meta
+    TLS_ADDR x9, g_pq_meta
     ldr  x20, [x9, #BUF_LEN]
     lsr  x10, x20, #32
     cbz  x10, 1f
@@ -751,16 +756,16 @@ LFUNC pw_finish
     mov  x1, x20
     bl   crc32
     mov  w21, w0
-    ADR_L x9, g_pq_meta
+    TLS_ADDR x9, g_pq_meta
     ldr  x1, [x9, #BUF_PTR]
-    ADR_L x0, g_pq_out
+    TLS_ADDR x0, g_pq_out
     mov  x2, x20
     bl   buf_put
     str  w20, [sp]                  // footer: u32 M, u32 crc, "PQCF"
     str  w21, [sp, #4]
     ldr  w9, =PQ_MAGIC
     str  w9, [sp, #8]
-    ADR_L x0, g_pq_out
+    TLS_ADDR x0, g_pq_out
     mov  x1, sp
     mov  x2, #12
     bl   buf_put
@@ -817,7 +822,7 @@ ENDF pw_finish
 // -----------------------------------------------------------------------------
 LFUNC pw_gather
     ENTER 5
-    ADR_L x19, g_pw
+    TLS_ADDR x19, g_pw
     mov  x20, x0
     mov  x21, x1
     mov  x22, x2
@@ -897,7 +902,7 @@ ENDF pw_gather
 // -----------------------------------------------------------------------------
 LFUNC pw_dict
     ENTER 5
-    ADR_L x19, g_pw
+    TLS_ADDR x19, g_pw
     mov  x20, x0
     ldr  x22, [x19, #PW_VALS]
     ldr  x23, [x19, #PW_ISN]
@@ -979,7 +984,7 @@ ENDF pw_dict
 // -----------------------------------------------------------------------------
 LFUNC pw_chunk
     ENTER 5
-    ADR_L x19, g_pw
+    TLS_ADDR x19, g_pw
     mov  x20, x0
     mov  x21, x1
     mov  x22, x2
@@ -1064,7 +1069,7 @@ LFUNC pw_chunk
     add  x28, x22, #7
     lsr  x28, x28, #3
 7:  // --- reserve (plus 8 bytes for the alignment padding) and write
-    ADR_L x0, g_pq_out
+    TLS_ADDR x0, g_pq_out
     add  x1, x26, x28
     add  x1, x1, #8
     bl   buf_reserve
@@ -1109,7 +1114,7 @@ LFUNC pw_chunk
     add  x1, x26, x28
     bl   crc32
     str  w0, [x19, #PW_CRC]
-    ADR_L x9, g_pq_out
+    TLS_ADDR x9, g_pq_out
     ldr  x10, [x9, #BUF_LEN]
     add  x10, x10, x26
     add  x10, x10, x28
@@ -1145,14 +1150,14 @@ LFUNC pw_chunk
     cbz  w9, 86f
     ADR_L x0, j_min
     bl   mp_puts
-    ADR_L x0, g_pq_meta
+    TLS_ADDR x0, g_pq_meta
     ldr  x1, [x19, #PW_MIN]
     mov  x2, #0
     mov  w3, w23
     bl   write_value_json
     ADR_L x0, j_max
     bl   mp_puts
-    ADR_L x0, g_pq_meta
+    TLS_ADDR x0, g_pq_meta
     ldr  x1, [x19, #PW_MAX]
     mov  x2, #0
     mov  w3, w23
@@ -1167,7 +1172,7 @@ LFUNC pw_chunk
     and  x10, x10, #7
     add  x9, x9, x10
     str  x9, [x19, #PW_POS]
-    ADR_L x11, g_pq_out
+    TLS_ADDR x11, g_pq_out
     ldr  x12, [x11, #BUF_PTR]
     ldr  x13, [x11, #BUF_LEN]
     str  xzr, [x12, x13]
@@ -1192,7 +1197,7 @@ LFUNC pw_put_plain
     ENTER 4
     mov  x19, x0
     mov  x20, x1
-    ADR_L x9, g_pw
+    TLS_ADDR x9, g_pw
     ldr  x22, [x9, #PW_VALS]
     ldr  x23, [x9, #PW_ISN]
     cmp  w2, #T_BOOL
@@ -1274,7 +1279,7 @@ ENDF pw_put_plain
 LFUNC pw_put_dict
     ENTER 4
     mov  x20, x1
-    ADR_L x9, g_pw
+    TLS_ADDR x9, g_pw
     ldr  x22, [x9, #PW_ND]
     ldr  x25, [x9, #PW_DICT]
     str  w22, [x0]
@@ -1298,7 +1303,7 @@ LFUNC pw_put_dict
 2:  sub  x9, x24, x23
     str  w9, [x19, x22, lsl #2]
     mov  x0, x24
-    ADR_L x9, g_pw
+    TLS_ADDR x9, g_pw
     ldr  x1, [x9, #PW_CODES]
     lsl  x2, x20, #2
     bl   memcpy
@@ -1312,7 +1317,7 @@ ENDF pw_put_dict
 // Registers: x9 PW_VALS, x10 i, x11 run end, x12 value, x13 cursor, x14 R
 // -----------------------------------------------------------------------------
 LFUNC pw_put_rle
-    ADR_L x9, g_pw
+    TLS_ADDR x9, g_pw
     ldr  x9, [x9, #PW_VALS]
     add  x13, x0, #4
     mov  x14, #0
@@ -1379,7 +1384,7 @@ ENDF pr_bad_value
 FUNC pqcf_load
     ENTER 3
     sub  sp, sp, #STAT_BYTES
-    ADR_L x19, g_pr
+    TLS_ADDR x19, g_pr
     mov  x20, x0
     mov  w21, w1
     str  xzr, [x19, #RD_MAPPED]
@@ -1454,17 +1459,17 @@ FUNC pqcf_load
     bl   close
     // intercept errors to unmap the file
     add  x0, x19, #RD_JMP
-    ADR_L x1, g_jmpbuf
+    TLS_ADDR x1, g_jmpbuf
     mov  x2, #JMPBUF_BYTES
     bl   memcpy
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, .Lld_fail
     bl   pr_parse
     stp  x0, x1, [sp]
     str  x2, [sp, #16]
     bl   pr_unmap
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     add  x1, x19, #RD_JMP
     mov  x2, #JMPBUF_BYTES
     bl   memcpy
@@ -1473,13 +1478,13 @@ FUNC pqcf_load
     add  sp, sp, #STAT_BYTES
     LEAVE 3
 .Lld_fail:
-    ADR_L x19, g_pr
+    TLS_ADDR x19, g_pr
     bl   pr_unmap
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     add  x1, x19, #RD_JMP
     mov  x2, #JMPBUF_BYTES
     bl   memcpy
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     mov  w1, #1
     bl   longjmp
 .Lld_ioclose:
@@ -1496,7 +1501,7 @@ ENDF pqcf_load
 // pr_unmap(): release an mmap'ed file image
 LFUNC pr_unmap
     ENTER 0
-    ADR_L x9, g_pr
+    TLS_ADDR x9, g_pr
     ldr  x10, [x9, #RD_MAPPED]
     cbz  x10, 1f
     str  xzr, [x9, #RD_MAPPED]
@@ -1513,7 +1518,7 @@ ENDF pr_unmap
 // -----------------------------------------------------------------------------
 LFUNC pr_parse
     ENTER 1
-    ADR_L x19, g_pr
+    TLS_ADDR x19, g_pr
     bl   pr_frame
     mov  x20, x0
     bl   pr_top
@@ -1538,7 +1543,7 @@ ENDF pr_parse
 // -----------------------------------------------------------------------------
 LFUNC pr_frame
     ENTER 2
-    ADR_L x19, g_pr
+    TLS_ADDR x19, g_pr
     ldr  x20, [x19, #RD_BASE]
     ldr  x21, [x19, #RD_SIZE]
     cmp  x21, #8
@@ -1634,7 +1639,7 @@ LFUNC pr_top
     mov  w2, #J_NUM
     bl   pr_req
     bl   pr_uint
-    ADR_L x9, g_pr
+    TLS_ADDR x9, g_pr
     ldr  x9, [x9, #RD_BASE]
     ldrh w9, [x9, #4]
     cmp  x0, x9
@@ -1648,7 +1653,7 @@ LFUNC pr_top
     mov  w2, #J_NUM
     bl   pr_req
     bl   pr_uint
-    ADR_L x9, g_pr
+    TLS_ADDR x9, g_pr
     str  x0, [x9, #RD_NROWS]
     LEAVE 1
 ENDF pr_top
@@ -1661,7 +1666,7 @@ ENDF pr_top
 // -----------------------------------------------------------------------------
 LFUNC pr_columns
     ENTER 4
-    ADR_L x19, g_pr
+    TLS_ADDR x19, g_pr
     ADR_L x1, k_columns
     mov  w2, #J_ARR
     bl   pr_req
@@ -1726,11 +1731,11 @@ LFUNC pr_type
     and  w9, w0, #T_KIND_MASK
     cbz  w9, pr_bad_meta            // the null type is not a column type
     mov  w20, w0
-    ADR_L x0, g_pq_meta
+    TLS_ADDR x0, g_pq_meta
     str  xzr, [x0, #BUF_LEN]
     mov  w1, w20
     bl   type_write
-    ADR_L x9, g_pq_meta
+    TLS_ADDR x9, g_pq_meta
     ldr  x2, [x9, #BUF_LEN]
     ldr  x10, [x19, #STR_LEN]
     cmp  x2, x10
@@ -1835,7 +1840,7 @@ ENDF pr_min_bytes
 // -----------------------------------------------------------------------------
 LFUNC pr_groups
     ENTER 5
-    ADR_L x19, g_pr
+    TLS_ADDR x19, g_pr
     ADR_L x1, k_rgs
     mov  w2, #J_ARR
     bl   pr_req
@@ -1996,7 +2001,7 @@ ENDF pr_groups
 // -----------------------------------------------------------------------------
 LFUNC pr_indexes
     ENTER 4
-    ADR_L x19, g_pr
+    TLS_ADDR x19, g_pr
     str  xzr, [x19, #RD_NXS]
     str  xzr, [x19, #RD_XS]
     ADR_L x1, k_indexes
@@ -2090,7 +2095,7 @@ ENDF pr_indexes
 // -----------------------------------------------------------------------------
 LFUNC pr_build
     ENTER 4
-    ADR_L x19, g_pr
+    TLS_ADDR x19, g_pr
     ldr  x24, [x19, #RD_NROWS]
     LDR_G x9, g_max_table_rows
     cmp  x24, x9
@@ -2102,7 +2107,7 @@ LFUNC pr_build
     cbnz x0, 2f
     RAISE ERR_RESOURCE_LIMIT, "out of memory"
 2:  mov  x20, x0
-    ADR_L x9, g_pending_table
+    TLS_ADDR x9, g_pending_table
     str  x20, [x9]
     str  x20, [x19, #RD_TBL]
     add  x21, x20, #TBL_ARENA
@@ -2185,7 +2190,7 @@ ENDF pr_build
 // -----------------------------------------------------------------------------
 LFUNC pr_decode
     ENTER 4
-    ADR_L x19, g_pr
+    TLS_ADDR x19, g_pr
     ldr  x23, [x19, #RD_CKS]
     mov  x22, #0
     mov  x20, #0
@@ -2230,7 +2235,7 @@ ENDF pr_decode
 // -----------------------------------------------------------------------------
 LFUNC pr_chunk
     ENTER 5
-    ADR_L x19, g_pr
+    TLS_ADDR x19, g_pr
     mov  x20, x0
     mov  x22, x2
     mov  x23, x3
@@ -2389,7 +2394,7 @@ LFUNC pr_plain
     ldr  w9, [x19, x21, lsl #2]
     cmp  x9, x20
     b.ne pr_bad_chunk               // offsets[n] = byte count
-    ADR_L x9, g_pr
+    TLS_ADDR x9, g_pr
     ldr  x26, [x9, #RD_TBL]
     add  x26, x26, #TBL_ARENA
     mov  x25, #0
@@ -2402,7 +2407,7 @@ LFUNC pr_plain
     b.lo pr_bad_chunk               // decreasing
     cmp  x9, x20
     b.hi pr_bad_chunk               // out of range
-    ADR_L x10, g_pr
+    TLS_ADDR x10, g_pr
     ldr  x10, [x10, #RD_VBM]
     ISNULL_AT 11, 10, 23, 12
     cbz  w11, 7f
@@ -2460,7 +2465,7 @@ LFUNC pr_dict
     b.hi pr_bad_chunk
     cmp  x1, x21, lsl #2
     b.ne pr_bad_chunk
-    ADR_L x9, g_pr
+    TLS_ADDR x9, g_pr
     ldr  x28, [x9, #RD_TBL]
     add  x28, x28, #TBL_ARENA
     lsl  x0, x20, #3
@@ -2491,7 +2496,7 @@ LFUNC pr_dict
     str  x0, [x27, x23, lsl #3]
     add  x23, x23, #1
     b    1b
-3:  ADR_L x9, g_pr                  // codes
+3:  TLS_ADDR x9, g_pr                  // codes
     ldr  x10, [x9, #RD_VBM]
     mov  x23, #0
 4:  cmp  x23, x21
@@ -2553,7 +2558,7 @@ ENDF pr_rle
 //            x14/x15 bounds, w16 kind
 // -----------------------------------------------------------------------------
 LFUNC pr_check_values
-    ADR_L x10, g_pr
+    TLS_ADDR x10, g_pr
     ldr  x10, [x10, #RD_VBM]
     and  w16, w2, #T_KIND_MASK
     mov  x14, #0
@@ -2709,7 +2714,7 @@ LFUNC pr_statval
     b    9f
 61: mov  x2, x1                     // STRING
     mov  x1, x0
-    ADR_L x9, g_pr
+    TLS_ADDR x9, g_pr
     ldr  x0, [x9, #RD_TBL]
     add  x0, x0, #TBL_ARENA
     bl   str_new_in

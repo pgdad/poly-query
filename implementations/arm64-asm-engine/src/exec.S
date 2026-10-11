@@ -140,6 +140,19 @@ ENDF eval_true
 FUNC exec_plan
     ENTER 2
     mov  x19, x0
+    bl   new_root_ctx
+    mov  x20, x0
+    mov  x0, x19
+    mov  x1, x20
+    bl   ex_rows
+    LEAVE 2
+ENDF exec_plan
+
+// new_root_ctx(x0 PlanNode*, x1 outer EvalCtx* or 0) -> x0 EvalCtx*
+//   x19 node
+LFUNC new_root_ctx
+    ENTER 2
+    mov  x19, x0
     stp  x1, xzr, [sp, #-16]!
     mov  x0, #EC_SIZE
     bl   arena_zalloc
@@ -152,11 +165,58 @@ FUNC exec_plan
     add  x0, x0, #8
     bl   arena_zalloc
     str  x0, [x20, #EC_TABLES]
+    mov  x0, x20
+    LEAVE 2
+ENDF new_root_ctx
+
+// =============================================================================
+// exec_plan_stream(x0 root PlanNode*, x1 sink) -> x0 ResultSet*, x1 1 if
+// the rows went to the sink
+// Statement execution for streamed results. When the plan ends in a
+// projection (optionally under LIMIT/OFFSET) the rows are projected and
+// handed to the sink in batches of EXEC_STREAM_BATCH as they are produced:
+//     sink(x0 0, x1 total rows)        once, before any row
+//     sink(x0 ResultSet* batch)        for every batch (cells reused)
+// and the returned ResultSet only carries the total in RS_NROWS. Other plans
+// (sorting, grouping, DISTINCT need all rows first) are executed normally
+// (x1 = 0).
+//   x19 node, x20 ctx, x21 sink, x22 bq
+// =============================================================================
+FUNC exec_plan_stream
+    ENTER 3
+    mov  x19, x0
+    mov  x21, x1
+    mov  x1, #0
+    bl   new_root_ctx
+    mov  x20, x0
+    ldr  x22, [x19, #PN_BQ]
+    ldr  w9, [x19, #PN_OP]
+    cmp  w9, #PO_PROJECT
+    b.ne 1f
     mov  x0, x19
     mov  x1, x20
+    mov  x2, #0
+    mov  x3, #-1
+    b    3f
+1:  cmp  w9, #PO_LIMIT
+    b.ne 2f
+    ldr  x0, [x19, #PN_LEFT]
+    ldr  w9, [x0, #PN_OP]
+    cmp  w9, #PO_PROJECT
+    b.ne 2f
+    mov  x1, x20
+    ldr  x2, [x22, #BQ_OFFSET]
+    ldr  x3, [x22, #BQ_LIMIT]
+3:  mov  x4, x21
+    bl   ex_project
+    mov  x1, #1
+    LEAVE 3
+2:  mov  x0, x19
+    mov  x1, x20
     bl   ex_rows
-    LEAVE 2
-ENDF exec_plan
+    mov  x1, #0
+    LEAVE 3
+ENDF exec_plan_stream
 
 // =============================================================================
 // ex_rows(x0 PlanNode*, x1 ctx) -> x0 ResultSet*   (upper operators)
@@ -184,6 +244,7 @@ LFUNC ex_rows
     mov  x1, x20
     mov  x2, #0
     mov  x3, #-1
+    mov  x4, #0
     bl   ex_project
     LEAVE 3
 .Lxr_agg:
@@ -199,6 +260,7 @@ LFUNC ex_rows
     mov  x1, x20                        // slice before projecting
     ldr  x2, [x21, #BQ_OFFSET]
     ldr  x3, [x21, #BQ_LIMIT]
+    mov  x4, #0
     bl   ex_project
     LEAVE 3
 1:  mov  x1, x20
@@ -299,13 +361,18 @@ LFUNC project_row
 ENDF project_row
 
 // =============================================================================
-// ex_project(x0 PlanNode*, x1 ctx, x2 offset, x3 limit (-1 none))
-//   -> x0 ResultSet*  one row per input tuple of the slice
+// ex_project(x0 PlanNode*, x1 ctx, x2 offset, x3 limit (-1 none),
+//            x4 sink or 0) -> x0 ResultSet*  one row per input tuple of the
+// slice. With a sink (exec_plan_stream) the rows are produced in batches
+// and passed to the sink; the result then only holds the row count.
 //   x19 node, x20 ctx, x21 bq, x22 tuple set, x23 first tuple, x24 count,
-//   x25 rs, x26 row bytes, x27 index
+//   x25 rs, x26 row bytes, x27 index, x28 cells
+//   [sp] sink, [sp+8] batch cells, [sp+16] first row of the batch
 // =============================================================================
 LFUNC ex_project
     ENTER 5
+    sub  sp, sp, #32
+    str  x4, [sp]
     mov  x19, x0
     mov  x20, x1
     ldr  x21, [x19, #PN_BQ]
@@ -322,7 +389,9 @@ LFUNC ex_project
     tbnz x3, #63, 1f
     cmp  x3, x24
     csel x24, x3, x24, lo
-1:  mov  x0, x21
+1:  ldr  x9, [sp]
+    cbnz x9, .Lxp_stream
+    mov  x0, x21
     mov  x1, x24
     bl   rs_new
     mov  x25, x0
@@ -353,6 +422,64 @@ LFUNC ex_project
     add  x27, x27, #1
     b    2b
 4:  mov  x0, x25
+    add  sp, sp, #32
+    LEAVE 5
+.Lxp_stream:
+    // announce the row count (limits, stream header), then batches
+    mov  x0, #0
+    mov  x1, x24
+    ldr  x9, [sp]
+    blr  x9
+    mov  x0, x21
+    mov  x1, #EXEC_STREAM_BATCH
+    bl   rs_new
+    mov  x25, x0
+    ldr  x9, [x25, #RS_WIDTH]
+    lsl  x26, x9, #4
+    mov  x0, #EXEC_STREAM_BATCH
+    mul  x0, x26, x0
+    add  x0, x0, #16
+    bl   arena_alloc
+    str  x0, [sp, #8]
+    mov  x28, x0
+    mov  x27, #0
+    str  xzr, [sp, #16]
+5:  cmp  x27, x24
+    b.hs 7f
+    tst  x27, #DEADLINE_MASK
+    b.ne 51f
+    bl   check_deadline
+51: mov  x0, x22
+    add  x1, x23, x27
+    bl   ts_tuple
+    str  x0, [x20, #EC_TUPLE]
+    ldr  x9, [x25, #RS_ROWS]
+    ldr  x10, [sp, #16]
+    sub  x10, x27, x10
+    str  x28, [x9, x10, lsl #3]
+    mov  x0, x21
+    mov  x1, x20
+    mov  x2, x28
+    bl   project_row
+    add  x28, x28, x26
+    add  x27, x27, #1
+    ldr  x10, [sp, #16]
+    sub  x10, x27, x10
+    cmp  x10, #EXEC_STREAM_BATCH
+    b.lo 5b
+6:  str  x10, [x25, #RS_NROWS]          // hand the batch over, reuse cells
+    mov  x0, x25
+    ldr  x9, [sp]
+    blr  x9
+    str  x27, [sp, #16]
+    ldr  x28, [sp, #8]
+    b    5b
+7:  ldr  x10, [sp, #16]
+    subs x10, x27, x10
+    b.ne 6b                             // last partial batch
+    str  x24, [x25, #RS_NROWS]
+    mov  x0, x25
+    add  sp, sp, #32
     LEAVE 5
 ENDF ex_project
 

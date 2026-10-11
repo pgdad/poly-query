@@ -45,10 +45,12 @@ m_missing:      .asciz "polyquery: option %s requires a value\n"
 m_badnum:       .asciz "polyquery: invalid number for %s: %s\n"
 m_noreq:        .asciz "polyquery: exec requires --request FILE\n"
 m_readfail:     .asciz "polyquery: cannot read request file %s\n"
-m_serve:        .asciz "polyquery: serve mode is not implemented in this phase\n"
+m_noport:       .asciz "polyquery: serve requires --port N\n"
+m_badlevel:     .asciz "polyquery: invalid value for %s: %s\n"
 
 // Option table: name, kind (0 flag-test-functions, 1 string->dest, 2 number->dest,
-// 3 number*1MiB->dest, 4 ignored-with-value), destination address.
+// 3 number*1MiB->dest, 4 ignored-with-value, 5 validated number, ignored,
+// 6 log level -> u32 dest), destination address.
     .data
     .p2align 3
 opt_table:
@@ -59,16 +61,16 @@ opt_table:
     .quad o_trows,    2, g_max_table_rows
     .quad o_jrows,    2, g_max_join_rows
     .quad o_threads,  5, 0
-    .quad o_loglevel, 4, 0
+    .quad o_loglevel, 6, g_log_level
     .quad o_native,   4, 0
     .quad o_request,  1, g_request_file
-    .quad o_host,     4, 0
-    .quad o_port,     5, 0
-    .quad o_workers,  5, 0
-    .quad o_queue,    5, 0
-    .quad o_qtimeout, 5, 0
-    .quad o_grace,    5, 0
-    .quad o_maxreq,   5, 0
+    .quad o_host,     1, g_srv_host
+    .quad o_port,     2, g_srv_port
+    .quad o_workers,  2, g_srv_workers
+    .quad o_queue,    2, g_srv_queue_depth
+    .quad o_qtimeout, 2, g_srv_timeout_ms
+    .quad o_grace,    2, g_srv_grace_ms
+    .quad o_maxreq,   2, g_srv_max_request
     .quad 0, 0, 0
     .text
 
@@ -196,7 +198,19 @@ FUNC main
     b.ne 3f
     str  x0, [x3]                   // kind 1: string
     b    .Lopt_loop
-3:  cmp  x2, #4
+3:  cmp  x2, #6
+    b.ne 31f
+    stp  x0, x3, [sp, #-16]!        // kind 6: log level name
+    bl   log_level_parse
+    ldp  x1, x3, [sp], #16
+    tbz  w0, #31, 32f
+    mov  x2, x1
+    ADR_L x0, m_badlevel
+    mov  x1, x21
+    bl   usage_exit
+32: str  w0, [x3]
+    b    .Lopt_loop
+31: cmp  x2, #4
     b.eq .Lopt_loop                 // kind 4: ignored string value
     stp  x2, x3, [sp, #-16]!
     mov  x1, x21
@@ -210,6 +224,7 @@ FUNC main
 4:  str  x0, [x3]
     b    .Lopt_loop
 .Lopts_done:
+    bl   cat_init                   // the (empty) catalog
     LDR_G x22, g_mode
     cmp  x22, #1
     b.ne 1f
@@ -227,11 +242,13 @@ FUNC main
     b.ne 4f
     bl   exec_mode
     b    .Lexit0
-4:  GOT_LOAD x1, stderr            // serve: Phase 4
-    ADR_L x0, m_serve
-    bl   fputs
-    mov  w0, #1
-    b    .Lret
+4:  LDR_G x0, g_srv_port           // serve (http.S): never returns
+    tbz  x0, #63, 5f
+    ADR_L x0, m_noport
+    mov  x1, #0
+    mov  x2, #0
+    bl   usage_exit
+5:  bl   serve_main
 .Lexit0:
     mov  w0, #0
 .Lret:

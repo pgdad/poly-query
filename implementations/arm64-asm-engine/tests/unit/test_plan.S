@@ -186,7 +186,7 @@ LFUNC run_case
     stp  xzr, xzr, [sp, #16]
     mov  x9, #-1
     stp  xzr, x9, [sp, #32]
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, .Lrc_error
     ldr  x20, [x19, #TC_SQL]
@@ -235,7 +235,7 @@ LFUNC run_case
     cbz  x0, .Lrc_pass
     b    .Lrc_fail
 .Lrc_error:
-    ADR_L x9, g_err_code
+    TLS_ADDR x9, g_err_code
     ldr  w9, [x9]
     str  x9, [sp, #32]
     ldr  x10, [x19, #TC_MODE]
@@ -299,7 +299,7 @@ FUNC main
     cmp  w0, #0
     cinc x21, x21, eq
     add  x22, x22, #1
-    ADR_L x0, g_arena
+    TLS_ADDR x0, g_arena
     bl   arena_free
     add  x19, x19, #TC_SIZE
     b    1b

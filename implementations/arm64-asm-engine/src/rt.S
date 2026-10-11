@@ -12,7 +12,8 @@
 #define ERRMSG_MAX    1024
 
 // ------------------------------------------------------------------ data -----
-    .bss
+    // per-thread request state (thread-local)
+    TBSS
     .p2align 4
     .global g_arena, g_out, g_jmpbuf, g_err_msg
 g_arena:        .skip AR_SIZE
@@ -21,16 +22,22 @@ g_jmpbuf:       .skip 512
 g_err_msg:      .skip ERRMSG_MAX
 
     .p2align 3
-    .global g_deadline, g_test_functions, g_pending_table, g_err_code
-    .global g_err_line, g_err_col, g_arena_limit, g_data_dir
-g_data_dir:      .skip 8       // cstr data directory (set by main)
+    .global g_deadline, g_pending_table, g_err_code
+    .global g_err_line, g_err_col, g_arena_limit, g_cancel_flag
+g_cancel_flag:   .skip 8       // u32* cancellation flag of the running query, or 0
 g_deadline:      .skip 8       // µs (CLOCK_MONOTONIC); 0 = no deadline
 g_pending_table: .skip 8       // Table* under construction (freed on error)
 g_arena_limit:   .skip 8       // max bytes in g_arena chunks; 0 = unlimited
-g_test_functions: .skip 4
 g_err_code:      .skip 4
 g_err_line:      .skip 4
 g_err_col:       .skip 4
+
+    // process-wide settings (written once by main before any thread starts)
+    .bss
+    .p2align 3
+    .global g_data_dir, g_test_functions
+g_data_dir:      .skip 8       // cstr data directory (set by main)
+g_test_functions: .skip 4
 
     .data
     .p2align 3
@@ -46,7 +53,7 @@ err_names:
     .quad s_none, s_parse, s_semantic, s_type, s_overflow, s_div0, s_conv
     .quad s_invarg, s_invreq, s_ingest, s_unsup, s_access, s_notfound
     .quad s_exists, s_reslimit, s_io, s_internal, s_timeout, s_subq, s_cancel
-    .quad s_corrupt, s_version
+    .quad s_corrupt, s_version, s_overload, s_shutdown
 s_none:     .asciz "INTERNAL_ERROR"
 s_parse:    .asciz "PARSE_ERROR"
 s_semantic: .asciz "SEMANTIC_ERROR"
@@ -69,9 +76,12 @@ s_subq:     .asciz "SUBQUERY_CARDINALITY"
 s_cancel:   .asciz "CANCELLED"
 s_corrupt:  .asciz "STORAGE_CORRUPT"
 s_version:  .asciz "STORAGE_VERSION_UNSUPPORTED"
+s_overload: .asciz "OVERLOADED"
+s_shutdown: .asciz "SHUTTING_DOWN"
 s_oom:      .asciz "out of memory"
 s_qmem:     .asciz "query memory budget exceeded"
 s_timeoutm: .asciz "query timeout exceeded"
+s_cancelm:  .asciz "query cancelled"
 fmt_g:      .asciz "%.*g"
     .text
 
@@ -90,7 +100,7 @@ ENDF err_code_name
 // copy_errmsg(x0 dst offset, x1 src, x2 len) -> x0 new offset   (leaf)
 // Appends bytes to g_err_msg, truncating at ERRMSG_MAX-1, keeps NUL terminated.
 LFUNC copy_errmsg
-    ADR_L x3, g_err_msg
+    TLS_ADDR x3, g_err_msg
 1:  cbz  x2, 2f
     cmp  x0, #ERRMSG_MAX-1
     b.hs 2f
@@ -219,13 +229,13 @@ ENDF pq_raise_s
 
 // raise_common(w0 code, w2 line, w3 col): record and longjmp (never returns)
 LFUNC raise_common
-    ADR_L x4, g_err_code
+    TLS_ADDR x4, g_err_code
     str  w0, [x4]
-    ADR_L x4, g_err_line
+    TLS_ADDR x4, g_err_line
     str  w2, [x4]
-    ADR_L x4, g_err_col
+    TLS_ADDR x4, g_err_col
     str  w3, [x4]
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     mov  w1, #1
     bl   longjmp
     brk  #0
@@ -258,10 +268,10 @@ FUNC arena_alloc_in
     csel x21, x1, x21, hi
     add  x21, x21, #16                  // chunk bytes incl. header
     // memory budget for the request arena
-    ADR_L x2, g_arena
+    TLS_ADDR x2, g_arena
     cmp  x0, x2
     b.ne 2f
-    LDR_G x3, g_arena_limit
+    TLS_LDR x3, g_arena_limit
     cbz  x3, 2f
     ldr  x4, [x0, #AR_TOTAL]
     add  x4, x4, x21
@@ -298,7 +308,7 @@ ENDF arena_alloc_in
 // arena_alloc(x0 size) -> x0 ptr  (request arena)
 FUNC arena_alloc
     mov  x1, x0
-    ADR_L x0, g_arena
+    TLS_ADDR x0, g_arena
     b    arena_alloc_in
 ENDF arena_alloc
 
@@ -367,7 +377,7 @@ ENDF str_new_in
 FUNC str_new
     mov  x2, x1
     mov  x1, x0
-    ADR_L x0, g_arena
+    TLS_ADDR x0, g_arena
     b    str_new_in
 ENDF str_new
 
@@ -757,22 +767,42 @@ FUNC now_us
     ret
 ENDF now_us
 
-// check_deadline(): raise TIMEOUT if g_deadline has passed.
+// check_deadline(): interruption point of long-running operators.
+// Raises CANCELLED if the running query's cancellation flag (g_cancel_flag,
+// set by DELETE /v1/queries, a client disconnect or shutdown) is set, and
+// TIMEOUT if g_deadline has passed.
 FUNC check_deadline
-    LDR_G x0, g_deadline
-    cbnz x0, 1f
+    TLS_LDR x0, g_cancel_flag
+    cbz  x0, 1f
+    ldar w0, [x0]
+    cbz  w0, 1f
+    mov  w0, #ERR_CANCELLED
+    ADR_L x1, s_cancelm
+    b    pq_raise
+1:  TLS_LDR x0, g_deadline
+    cbnz x0, 2f
     ret
-1:  stp  x29, x30, [sp, #-16]!
+2:  stp  x29, x30, [sp, #-16]!
     mov  x29, sp
     bl   now_us
-    LDR_G x1, g_deadline
+    TLS_LDR x1, g_deadline
     cmp  x0, x1
-    b.lo 2f
+    b.lo 3f
     mov  w0, #ERR_TIMEOUT
     ADR_L x1, s_timeoutm
     bl   pq_raise
-2:  ldp  x29, x30, [sp], #16
+3:  ldp  x29, x30, [sp], #16
     ret
 ENDF check_deadline
+
+// atomic_fetch_add(x0 u64*, x1 delta) -> x0 previous value        (leaf)
+FUNC atomic_fetch_add
+1:  ldaxr x2, [x0]
+    add  x3, x2, x1
+    stlxr w4, x3, [x0]
+    cbnz w4, 1b
+    mov  x0, x2
+    ret
+ENDF atomic_fetch_add
 
     NOTE_GNU_STACK
