@@ -148,6 +148,11 @@
         .quad   -1, -1, -1, -1
         ENDOBJ  pairmask
 .endm
+.macro TAB_SIGN4                        /* 4 x 2^63 (32-byte memory operand) */
+        OBJ     c_sign4, 5
+        .quad   C_SIGN64, C_SIGN64, C_SIGN64, C_SIGN64
+        ENDOBJ  c_sign4
+.endm
 /* nibmask: lane masks of 4 rows, entry k (32 bytes) = 4 qwords, qword j =
  * all-ones iff bit j of the nibble k is set (validity -> lane mask by one
  * table load). */

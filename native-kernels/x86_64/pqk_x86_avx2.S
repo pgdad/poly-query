@@ -68,6 +68,7 @@
         TAB_NIBMASK
         TAB_IDX8
         TAB_PAIRMASK
+        TAB_SIGN4
 
         DEFINE_LVP
 
@@ -1817,7 +1818,7 @@ ENDF pqk_x86_avx2_sum_i128
         vmovdqu \off+32(%rdi), %ymm1
         vpunpckhqdq %ymm1, %ymm0, %ymm2         /* H */
         vpunpcklqdq %ymm1, %ymm0, %ymm0
-        vpxor   %ymm12, %ymm0, %ymm0            /* L' */
+        vpxor   c_sign4(%rip), %ymm0, %ymm0     /* L' */
         vpcmpgtq %ymm2, %ymm\mnh, %ymm1
         vpcmpeqq %ymm2, %ymm\mnh, %ymm3
         vpcmpgtq %ymm0, %ymm\mnl, %ymm15
@@ -1845,6 +1846,121 @@ ENDF pqk_x86_avx2_sum_i128
 .Lmmg_skip\@:
 .endm
 
+/* MM128_BLOCK valid, k: one full 64-row block (16 groups, sets A/B
+ * alternating) at (%rdi), with a quick reject first. G = the current
+ * overall min/max (over all lanes of A and B) is a value of a processed
+ * valid row; a row x with G.min < x < G.max can therefore not become the
+ * result, whichever lane it is in. On the high words alone: if every row
+ * of the block (valid or not) has gminH < hi < gmaxH, where gminH /
+ * gmaxH are the high words of G.min / G.max (= min of the lanes' minH /
+ * max of the lanes' maxH), the block is skipped: 2 compares per group
+ * instead of ~10. gminH / gmaxH are recomputed (GLOBAL_HI) before a quick
+ * reject when a full block ran since the last one (r13d = dirty flag);
+ * while no valid row has been seen they are INT64_MAX / INT64_MIN and the
+ * test fails. If the test fails, the block runs through MMG128 (exact,
+ * validity applied) and the quick reject is not tried for the next r14d
+ * blocks (r12d counts down); r14d starts at QR_BACKOFF, doubles after each
+ * failed attempt up to QR_BACKOFF_MAX and is reset by a successful one.
+ * This bounds its cost on data where it never succeeds (e.g. all high
+ * words equal) to < 1%.
+ * valid = 1: ymm13 = bcast(validity word). 0(%rsp) = bcast(gminH),
+ * ymm12 = bcast(gmaxH). clobbers ymm0-ymm3, ymm14, ymm15. */
+#define QR_BACKOFF 8
+#define QR_BACKOFF_MAX 1024
+/* GLOBAL_HI: 0(%rsp) = bcast(min of the 8 lanes of ymm5, ymm9), ymm12 =
+ * bcast(max of the 8 lanes of ymm7, ymm11). clobbers ymm0-ymm3. */
+.macro HMIN8 a, b, rmax
+.if \rmax
+        vpcmpgtq \a, \b, %ymm0                  /* b > a */
+.else
+        vpcmpgtq \b, \a, %ymm0                  /* a > b */
+.endif
+        vblendvpd %ymm0, \b, \a, %ymm1          /* -> ymm1 */
+        vextracti128 $1, %ymm1, %xmm2
+.if \rmax
+        vpcmpgtq %xmm1, %xmm2, %xmm0
+.else
+        vpcmpgtq %xmm2, %xmm1, %xmm0
+.endif
+        vblendvpd %xmm0, %xmm2, %xmm1, %xmm1
+        vpshufd $0x4e, %xmm1, %xmm2
+.if \rmax
+        vpcmpgtq %xmm1, %xmm2, %xmm0
+.else
+        vpcmpgtq %xmm2, %xmm1, %xmm0
+.endif
+        vblendvpd %xmm0, %xmm2, %xmm1, %xmm1
+        vpbroadcastq %xmm1, %ymm1
+.endm
+.macro GLOBAL_HI
+        HMIN8   %ymm5, %ymm9, 0
+        vmovdqu %ymm1, (%rsp)
+        HMIN8   %ymm7, %ymm11, 1
+        vmovdqa %ymm1, %ymm12
+.endm
+.macro MM128_BLOCK valid, k
+        test    %r12d, %r12d
+        jnz     .L\k\()_plain
+        test    %r13d, %r13d
+        jz      .L\k\()_qr
+        GLOBAL_HI
+        xor     %r13d, %r13d
+.L\k\()_qr:
+        .set g, 0
+        .rept 16
+        vmovdqu g*64(%rdi), %ymm0
+        vpunpckhqdq g*64+32(%rdi), %ymm0, %ymm2 /* H */
+        vpcmpgtq (%rsp), %ymm2, %ymm3           /* H > gminH */
+        vpcmpgtq %ymm2, %ymm12, %ymm14          /* gmaxH > H */
+        .if g == 0
+        vpand   %ymm14, %ymm3, %ymm15
+        .elseif g == 1
+        vpand   %ymm14, %ymm3, %ymm1
+        .elseif g % 2
+        vpand   %ymm14, %ymm3, %ymm3
+        vpand   %ymm3, %ymm1, %ymm1
+        .else
+        vpand   %ymm14, %ymm3, %ymm3
+        vpand   %ymm3, %ymm15, %ymm15
+        .endif
+        .set g, g + 1
+        .endr
+        vpand   %ymm1, %ymm15, %ymm15
+        vtestpd c_sign4(%rip), %ymm15           /* CF: all sign bits set */
+        jc      .L\k\()_skip                    /* all rows strictly inside */
+        mov     %r14d, %r12d                    /* failed: back off */
+        add     %r14d, %r14d
+        mov     $QR_BACKOFF_MAX, %eax
+        cmp     %eax, %r14d
+        cmova   %eax, %r14d
+        jmp     .L\k\()_full
+.L\k\()_plain:
+        dec     %r12d
+.L\k\()_full:
+        mov     $1, %r13d
+        .set g, 0
+        .rept 16
+        .if \valid
+        .if g % 2
+        MMG128  g*64, 8, 9, 10, 11, 1, shc128m+32*g(%rip)
+        .else
+        MMG128  g*64, 4, 5, 6, 7, 1, shc128m+32*g(%rip)
+        .endif
+        .else
+        .if g % 2
+        MMG128  g*64, 8, 9, 10, 11, 0
+        .else
+        MMG128  g*64, 4, 5, 6, 7, 0
+        .endif
+        .endif
+        .set g, g + 1
+        .endr
+        jmp     .L\k\()_done
+.L\k\()_skip:
+        mov     $QR_BACKOFF, %r14d
+.L\k\()_done:
+.endm
+
 #define SAVED %rbx, %rbp, %r12, %r13, %r14, %r15
 FUNC pqk_x86_avx2_minmax_i128
         PROLOGUE SAVED
@@ -1862,14 +1978,25 @@ FUNC pqk_x86_avx2_minmax_i128
         vmovdqa %ymm12, %ymm10
         vmovdqa %ymm12, %ymm11
         xor     %ebx, %ebx
+        xor     %r12d, %r12d            /* quick-reject back-off counter */
+        mov     $1, %r13d               /* G not computed yet */
+        mov     $QR_BACKOFF, %r14d
         mov     %rdx, %r11
         test    %rsi, %rsi
         jnz     .Lminmax_i128_vmain
         mov     %r11, %rbx              /* count = n */
         mov     $-1, %rbp               /* tail rows all valid */
+.Lminmax_i128_blk:                                      /* [main] 64 rows */
+        cmp     $64, %r11
+        jb      .Lminmax_i128_rest
+        MM128_BLOCK 0, minmax_i128_nb
+        add     $1024, %rdi
+        sub     $64, %r11
+        jmp     .Lminmax_i128_blk
+.Lminmax_i128_rest:
         cmp     $8, %r11
         jb      .Lminmax_i128_tail
-.Lminmax_i128_main:                                     /* [main] 8 rows */
+.Lminmax_i128_main:                                     /* 8 rows */
         MMG128  0, 4, 5, 6, 7, 0
         MMG128  64, 8, 9, 10, 11, 0
         sub     $-128, %rdi
@@ -1892,15 +2019,7 @@ FUNC pqk_x86_avx2_minmax_i128
         popcnt  %rbp, %rax
         add     %rax, %rbx
         vpbroadcastq (%rsi), %ymm13
-        .set g, 0
-        .rept 16
-        .if g % 2
-        MMG128  g*64, 8, 9, 10, 11, 1, shc128m+32*g(%rip)
-        .else
-        MMG128  g*64, 4, 5, 6, 7, 1, shc128m+32*g(%rip)
-        .endif
-        .set g, g + 1
-        .endr
+        MM128_BLOCK 1, minmax_i128_vb
         add     $1024, %rdi
         add     $8, %rsi
         sub     $64, %r11

@@ -76,6 +76,10 @@ static __int128 gen128(int mode, size_t i, size_t n) {
   case 6: return (__int128)(int64_t)below(7) - 3;
   case 7: { int64_t hi = (int64_t)below(3) - 1; uint64_t lo = (rnd() & 1) ? rnd() : (rnd() & 1) ? UINT64_MAX - below(3) : below(3);
             return (__int128)(((unsigned __int128)(uint64_t)hi << 64) | lo); }
+  case 8: { /* quick-reject edge: hi in [-1000, 1000]; late rows tie the extreme high words with smaller / larger low words */
+            int64_t hi = (int64_t)below(2001) - 1000; uint64_t lo = rnd();
+            if (i > n / 2 && below(500) == 0) { hi = (rnd() & 1) ? -1000 : 1000; lo = (rnd() & 1) ? below(3) : UINT64_MAX - below(3); }
+            return (__int128)(((unsigned __int128)(uint64_t)hi << 64) | lo); }
   default: return (__int128)(((unsigned __int128)rnd() << 64) | rnd()) >> below(127);
   }
 }
@@ -179,7 +183,7 @@ int main(int argc, char **argv) {
         int64_t *g1 = calloc(m + 1, 8), *g2 = gal(m * 8, gm); ref.gather_i64(d, ix, m, g1); v.gather_i64(d, ix, m, g2);
         CK(!memcmp(g1, g2, m * 8), "gather m=%zu", m); free(g1); }
       /* 128-bit */
-      { size_t m = n / (1 + below(3)); int m128 = (int)below(9);
+      { size_t m = n / (1 + below(3)); int m128 = (int)below(10);
         pqk_i128 *w = gal(m * 16, gm), *ca = gal(16, gm), *cb = gal(16, gm);
         for (size_t i = 0; i < m; i++) { __int128 q = gen128(m128, i, m); w[i].lo = (uint64_t)q; w[i].hi = (int64_t)(q >> 64); }
         for (int op = 0; op < 7; op++) {
