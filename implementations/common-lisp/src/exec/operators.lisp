@@ -15,7 +15,11 @@
   (:documentation "Return the opener implementing physical plan NODE."))
 
 (defun compile-plan (node)
-  (compile-operator node))
+  "Row opener for the physical plan NODE, on the executor selected by the
+statement's `mode` option."
+  (if (vectorized-execution-p)
+      (compile-vectorized-plan node)
+      (compile-operator node)))
 
 (defmacro counting-interrupts ((counter) &body body)
   "Run BODY, checking for timeout/cancellation every few thousand calls."

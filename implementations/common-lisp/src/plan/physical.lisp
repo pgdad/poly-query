@@ -83,6 +83,12 @@
 (defstruct (pp-top-n (:include pnode))
   keys limit offset)
 
+(defstruct (pp-batch-source (:include pnode))
+  "Executor-internal adapter (never planned): an input whose batches feed a
+row operator in the vectorized executor (voperators.lisp)."
+  opener
+  (invariant nil))
+
 (defun pnode-child (node) (first (pnode-children node)))
 
 ;;; ------------------------------------------------------------------
@@ -223,7 +229,9 @@ for a Filter directly over a Scan."
 (defun plan-invariant-p (node)
   "True if the rows NODE produces cannot change between executions of an
 enclosing correlated subquery (no correlation parameters anywhere)."
-  (and (every (lambda (e)
+  (if (pp-batch-source-p node)
+      (pp-batch-source-invariant node)
+      (and (every (lambda (e)
                 (or (null e)
                     (not (bexpr-some (lambda (x)
                                        (or (b-param-p x)
@@ -231,7 +239,7 @@ enclosing correlated subquery (no correlation parameters anywhere)."
                                                 (not (subquery-cacheable (b-op-info x))))))
                                      e))))
               (node-expressions node))
-       (every #'plan-invariant-p (pnode-children node))))
+       (every #'plan-invariant-p (pnode-children node)))))
 
 (defun choose-join-algorithm ()
   "The algorithm for an equi-join: the forced `join` option, else a hash join

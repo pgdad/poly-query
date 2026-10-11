@@ -51,7 +51,12 @@
    (:module "exec" :serial t
     :components ((:file "expressions")
                  (:file "aggregates")
-                 (:file "operators")))
+                 (:file "operators")
+                 (:file "vectors")
+                 (:file "vexpressions")
+                 (:file "keytable")
+                 (:file "vaggregates")
+                 (:file "voperators")))
    (:file "engine")
    (:module "protocol" :serial t
     :components ((:file "requests")))
