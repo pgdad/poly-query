@@ -373,8 +373,87 @@ FUNC table_stats
     LEAVE
 ENDF table_stats
 
+#define HLL_P     14
+#define HLL_M     (1 << HLL_P)
+#define EXACT_MAX 200000   /* distinct values counted exactly up to here */
+
+    .section .rodata
+    .p2align 3
+hll_alpha_m2: .double 193376882.84  /* 0.7213 / (1 + 1.079 / m) * m^2, m = 2^14 */
+hll_m:        .double 16384.0
+hll_lin:      .double 40960.0       /* 2.5 m: linear counting below */
+f_half:       .double 0.5
+    .text
+
+/* hll_add(registers rdi, hash rsi): HyperLogLog register update (leaf) */
+FUNC hll_add
+    mov %rsi, %rax                  /* fmix64 finalizer */
+    shr $33, %rax
+    xor %rax, %rsi
+    mov $0xff51afd7ed558ccd, %rax
+    imul %rax, %rsi
+    mov %rsi, %rax
+    shr $33, %rax
+    xor %rax, %rsi
+    mov $0xc4ceb9fe1a85ec53, %rax
+    imul %rax, %rsi
+    mov %rsi, %rax
+    shr $33, %rax
+    xor %rax, %rsi
+    mov %rsi, %rcx
+    shr $(64 - HLL_P), %rcx         /* register index */
+    shl $HLL_P, %rsi
+    or $(1 << (HLL_P - 1)), %rsi    /* bounds the rank */
+    bsr %rsi, %rax
+    mov $64, %edx
+    sub %eax, %edx                  /* rank = leading zeros + 1 */
+    cmp (%rdi, %rcx), %dl
+    jbe 1f
+    mov %dl, (%rdi, %rcx)
+1:  ret
+ENDF hll_add
+
+/* hll_estimate(registers rdi) -> rax estimated distinct count */
+FUNC hll_estimate
+    xorpd %xmm0, %xmm0              /* sum of 2^-register */
+    xor %ecx, %ecx
+    xor %r8d, %r8d                  /* zero registers */
+1:  movzbl (%rdi, %rcx), %eax
+    test %eax, %eax
+    jnz 2f
+    inc %r8
+2:  mov $1023, %edx                 /* 2^-r as a double: exponent 1023 - r */
+    sub %eax, %edx
+    shl $52, %rdx
+    movq %rdx, %xmm1
+    addsd %xmm1, %xmm0
+    inc %ecx
+    cmp $HLL_M, %ecx
+    jb 1b
+    movsd hll_alpha_m2(%rip), %xmm1
+    divsd %xmm0, %xmm1              /* raw estimate */
+    ucomisd hll_lin(%rip), %xmm1
+    ja 8f
+    test %r8, %r8
+    jz 8f
+    sub $24, %rsp                   /* linear counting: m ln(m / zeros) */
+    movsd %xmm1, 0(%rsp)
+    cvtsi2sd %r8, %xmm1
+    movsd hll_m(%rip), %xmm0
+    divsd %xmm1, %xmm0
+    call log
+    mulsd hll_m(%rip), %xmm0
+    add $24, %rsp
+    movapd %xmm0, %xmm1
+8:  addsd f_half(%rip), %xmm1
+    cvttsd2si %xmm1, %rax
+    ret
+ENDF hll_estimate
+
 /* table_col_stats(t rdi, c rsi) -> rax ColStats* of column c (computed on
- * first use and cached in the table: tables are immutable) */
+ * first use and cached in the table: tables are immutable).  Distinct values
+ * are counted exactly with a hash set up to EXACT_MAX, beyond that by a
+ * HyperLogLog sketch (bounded memory, ~1% error). */
 FUNC table_col_stats
     ENTER 64
     mov %rdi, %rbx
@@ -400,6 +479,10 @@ FUNC table_col_stats
     lea 8(%rsp), %rsi
     call ht_new
     mov %rax, 16(%rsp)
+    mov $HLL_M, %edi
+    call tmp_zalloc
+    mov %rax, 40(%rsp)              /* HyperLogLog registers */
+    movq $0, 48(%rsp)               /* 1 = exact set abandoned */
     movq $0, CST_NULLS(%r15)
     movq $0, CST_HAS(%r15)
     xor %r14d, %r14d                /* row */
@@ -436,8 +519,21 @@ FUNC table_col_stats
     jle 6f
     mov 24(%rsp), %rax
     mov %rax, CST_MAX(%r15)
-6:  mov 16(%rsp), %rdi              /* distinct values */
-    lea 24(%rsp), %rsi
+6:  lea 24(%rsp), %rdi              /* distinct values: sketch ... */
+    mov $1, %esi
+    lea 8(%rsp), %rdx
+    call hash_cells
+    mov 40(%rsp), %rdi
+    mov %rax, %rsi
+    call hll_add
+    cmpq $0, 48(%rsp)               /* ... and exact set while small */
+    jne 7f
+    mov 16(%rsp), %rdi
+    cmpq $EXACT_MAX, HT_N(%rdi)
+    jb 61f
+    movq $1, 48(%rsp)
+    jmp 7f
+61: lea 24(%rsp), %rsi
     xor %edx, %edx
     call ht_lookup
     test %rax, %rax
@@ -454,7 +550,11 @@ FUNC table_col_stats
     jmp 2b
 8:  mov 16(%rsp), %rax
     mov HT_N(%rax), %rax
-    mov %rax, CST_DISTINCT(%r15)
+    cmpq $0, 48(%rsp)
+    je 81f
+    mov 40(%rsp), %rdi
+    call hll_estimate
+81: mov %rax, CST_DISTINCT(%r15)
     movq $1, CST_DONE(%r15)
 99: mov %r15, %rax
     LEAVE
