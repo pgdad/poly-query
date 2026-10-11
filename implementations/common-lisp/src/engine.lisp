@@ -15,6 +15,14 @@
     "native.kernels"
     "change.union_all" "change.decimal38"))
 
+(defparameter *max-default-threads* 16
+  "Upper bound of the default worker threads per query (more rarely pays
+off for the per-query thread start-up and merge costs).")
+
+(defun default-query-threads ()
+  "Worker threads per query without --threads: one per usable CPU, capped."
+  (max 1 (min (cpu-count) *max-default-threads*)))
+
 (defstruct engine-config
   (data-dir nil)                         ; pathname of the data directory (with trailing /)
   (test-functions nil)
@@ -22,7 +30,7 @@
   (max-ingest-bytes (* 4 1024 1024 1024))
   (max-table-rows 200000000)
   (max-join-rows 100000000)
-  (threads 1)
+  (threads (default-query-threads))
   (log-level :info))
 
 (defstruct (session (:constructor make-session (config)))

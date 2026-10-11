@@ -198,6 +198,18 @@ code paths (native kernels are optional)."
        (run-server config (make-server-options-from options) out)))
     (t (usage-error "unknown mode ~A" mode))))
 
+(defparameter *nursery-mb* 512
+  "Bytes allocated between garbage collections, in MB. Queries over large
+tables allocate hundreds of MB of batches; with SBCL's default (about 53 MB)
+they spend much of their time in young-generation collections.")
+
+(defun configure-gc ()
+  "Set the GC nursery size: *NURSERY-MB*, or POLYQUERY_NURSERY_MB if set."
+  (let* ((env (sb-posix:getenv "POLYQUERY_NURSERY_MB"))
+         (mb (or (and env (ignore-errors (parse-integer env))) *nursery-mb*)))
+    (when (plusp mb)
+      (setf (sb-ext:bytes-consed-between-gcs) (* mb 1024 1024)))))
+
 (defun main ()
   "Process entry point."
   (let ((in (sb-sys:make-fd-stream 0 :input t :buffering :full
@@ -205,6 +217,7 @@ code paths (native kernels are optional)."
                                                             (code-char #xFFFD))))
         (out (sb-sys:make-fd-stream 1 :output t :buffering :full :external-format :utf-8))
         (code 1))
+    (configure-gc)
     (handler-case
         (sb-int:with-float-traps-masked (:overflow :invalid :divide-by-zero :inexact :underflow)
           (multiple-value-bind (mode options) (parse-command-line (rest sb-ext:*posix-argv*))
