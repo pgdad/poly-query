@@ -1,0 +1,8 @@
+2026-10-11T05:46:59+00:00 wave wave-a-refactor-plan-separation-a1-20261011T054654Z: order=['clojure', 'go', 'rust', 'python']
+2026-10-11T05:46:59+00:00 [a-refactor-plan-separation-clojure-a1-20261011T054654Z] agent queued (usage gate, then launch)
+2026-10-11T05:47:04+00:00 [a-refactor-plan-separation-go-a1-20261011T054655Z] agent queued (usage gate, then launch)
+2026-10-11T05:47:09+00:00 [a-refactor-plan-separation-rust-a1-20261011T054657Z] agent queued (usage gate, then launch)
+2026-10-11T05:47:14+00:00 [a-refactor-plan-separation-python-a1-20261011T054658Z] agent queued (usage gate, then launch)
+2026-10-11T05:59:15+00:00 [a-refactor-plan-separation-go-a1-20261011T054655Z] agent finished; collecting telemetry
+2026-10-11T05:59:15+00:00 [a-refactor-plan-separation-go-a1-20261011T054655Z] validating (clean clone, sandboxed)
+2026-10-11T05:59:35+00:00 [a-refactor-plan-separation-go-a1-20261011T054655Z] outcome=success cost=$3.6674945999999995 turns=67 wall=731.4s

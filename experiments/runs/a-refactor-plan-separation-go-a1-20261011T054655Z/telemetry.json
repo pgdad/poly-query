@@ -1,0 +1,82 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-refactor-plan-separation-go-a1-20261011T054655Z",
+ "language": "go",
+ "task": "refactor-plan-separation",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-refactor-plan-separation",
+ "prompt_sha256": "65642e5899a07c3aab332cb70d07daa7d1890b8d762fcd81624d9880b3b7d157",
+ "session_id": "d822a3c7-4195-4fa0-8dba-5a6168aa473a",
+ "tokens": {
+  "input": 118,
+  "output": 56272,
+  "cache_read": 6483593,
+  "cache_creation": 155608,
+  "thinking": null,
+  "thinking_estimated": 22729,
+  "source": "result events",
+  "api_messages": 59
+ },
+ "rate_limit": {
+  "events": 7,
+  "max_utilization": {
+   "seven_day": 0.26,
+   "five_hour": 0.2
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 3.6674945999999995,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 67,
+ "result_segments": 1,
+ "assistant_messages": 131,
+ "tool_calls": {
+  "Bash": 63,
+  "Write": 3
+ },
+ "tool_calls_total": 66,
+ "tool_failures": 1,
+ "build_invocations": 18,
+ "build_failures_heuristic": 0,
+ "conformance_runs": 1,
+ "conformance_progress": [
+  [
+   591,
+   591
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 731.4,
+  "model_api_seconds": 557.2,
+  "tool_seconds": 173.9,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 3,
+  "files_changed": 16,
+  "lines_added": 1071,
+  "lines_removed": 273,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The refactoring is finished and every suite that passed before still passes. Capabilities are unchanged, and the old and new binaries return identical responses on everything I compared. All work is committed in three commits on `main`, and the working tree is clean.\n\n## What I implemented\nThe engine already had separate `plan`, `optimizer` and `physical` packages, so the work was closing the gaps in the change request:\n\n- **Logical plan:** the existing nodes cover Scan, Values, Filter, Project, Aggregate, Join (with type and condition), Sort, Limit, Distinct, UnionAll, and subqueries that carry their own plan. `Scan` now records which table columns it lists (`Ords`). A new `plan.Format` prints a plan as an indented tree, with subquery plans under the operator that uses them.\n- **Rule-based optimizer:** the single hard-wired pipeline is now a list of `Rule`s (each has `Name()` and `Apply()`), one type per file:\n  - `constant_folding` in `fold.go`\n  - `predicate_pushdown` in `pushdown.go`\n  - `join_reorder` in `reorder.go`\n  - `column_pruning` in `prune.go` (new)\n\n  With `optimize: false`, `optimizer.New(Options{Disabled: true})` builds an optimizer with no rules, so none run.\n- **Physical planner:** it was already the only place choosing access paths and join algorithms. It now also decides execution mode, thread count and native-kernel use, including the rule that queries calling `PQ_SLEEP` run row-at-a-time. That logic was in the engine; it now lives in `internal/physical/execution.go` and the result is stored as `Plan.Exec`. The engine just hands it to the executor. EXPLAIN output is still produced from the physical plan.\n- **Tests:** every rule has its own unit tests (applied alone to analyzed plans). There are also tests for rule order, the disabled optimizer, the plan printer, column selection without the optimizer, and the execution decisions.\n- **README:** a new CR-3 section with before/after module maps naming the logical-plan files, each rule's file and the physical planner, plus the design decisions.\n\n## Test results (after)\n- Session: `TOTAL: 591/591 pass`\n- `--modes`: `TOTAL: 3456/3456 pass`\n- `--transport http`: `TOTAL: 591/591 pass`\n- `--native \u2026/libpqkernels.so`: `TOTAL: 591/591 pass`\n- HTTP concurrency suite: `http suite: 18/18 passed`\n- `make build test lint` succeed.\n\nTo check that behaviour didn't change, I recorded every conformance response plus EXPLAIN and results under several option sets, before and after. They are identical except one IO_ERROR message containing a random temp-file path. I also compared the old and new binaries on about 420 random and hand-written queries \u00d7 6 option sets, and again with native kernels loaded: 0 differences. The existing randomized mode test also reported 0 mismatches.\n\n## Design decisions and known limitations\n- **Column selection happens in both layers.** With `optimize: false` no rule runs, but EXPLAIN must still show scans reading only the columns they need, as it did before. So the physical planner keeps its own column selection, which it needs for index scans anyway. On a plan the rule has already pruned, it changes nothing.\n- **Pruning is conservative so plans don't change:**\n  - Inside a correlated subquery it keeps projection outputs that refer to the outer query, so the physical planner still makes the same compute-once vs per-row choices.\n  - It doesn't narrow UNION ALL outputs; the physical planner prunes the branches itself.\n- **Native kernels are decided per query, not per operator.** The physical plan decides whether a query may use the native library. Which individual operators then call a kernel still depends on what the library supports, and that stays in the executor.\n- **A constant-folding quirk is kept on purpose.** The optimizer only folds constants inside a subquery when the subquery is a whole expression (such as an `EXISTS` filter). Fixing that would change EXPLAIN output, which the change request forbids, so I kept it and documented it.\n- **CTE",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
