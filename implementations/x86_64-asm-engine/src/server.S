@@ -29,6 +29,8 @@
     .section .note.GNU-stack, "", @progbits
 
 #define MAX_CONN    1000
+#define JOBQ_SIZE   1024            /* power of two > MAX_CONN */
+#define WORKER_STACK (1024*1024*1024)
 #define READ_CHUNK  262144
 #define NS_PER_MS   1000000
 #define KILL_AFTER  1000000000      /* ns after a deadline / cancel before SIGKILL */
@@ -75,6 +77,16 @@ grace_dl:    .quad 0
 grace_fired: .quad 0
 start_ns:    .quad 0
 child_conn:  .quad 0                /* child: its Conn* */
+net_arena:   .quad 0                /* request arena of the network thread */
+jobq:        .quad 0                /* ring of Conn* waiting for the catalog worker */
+q_head:      .quad 0                /* (q_mutex) */
+q_tail:      .quad 0
+done_r:      .quad -1               /* pipe: Conn* of finished catalog jobs */
+done_w:      .quad -1
+n_inline:    .quad 0                /* catalog jobs queued or running */
+n_starting:  .quad 0                /* admitted queries waiting to fork */
+g_cat_threaded: .quad 0             /* catalog worker thread in use */
+g_cat_locked:   .quad 0             /* worker: holds cat_lock */
 stream_hdr:  .quad 0                /* child: stream header already sent */
 
 /* metrics */
@@ -92,6 +104,10 @@ g_req:      .zero RQ_SIZE           /* request being routed */
 srv_buf:    .zero BUF_SIZE          /* parent-built response bodies */
 log_buf:    .zero BUF_SIZE
 jb_stream:  .zero 512
+    .p2align 6
+cat_lock:   .zero 64                /* pthread_mutex_t: catalog consistency for fork() */
+q_mutex:    .zero 64
+q_cond:     .zero 64
 
     .section .rodata
 ctype_json:   .asciz "application/json"
@@ -316,7 +332,7 @@ FUNC respond_cstr
     LEAVE
 ENDF respond_cstr
 
-/* clear_query(c rdi): frees the pending query's fields */
+/* clear_query(c rdi): frees the pending query's / job's fields */
 FUNC clear_query
     push %rbx
     mov %rdi, %rbx
@@ -325,6 +341,10 @@ FUNC clear_query
     mov CN_QBODY(%rbx), %rdi
     call free
     mov CN_QREQID(%rbx), %rdi
+    call free
+    mov CN_RESP(%rbx), %rdi
+    call free
+    mov CN_JREQ(%rbx), %rdi
     call free
     lea CN_QSTATE(%rbx), %rdi
     xor %esi, %esi
@@ -697,7 +717,14 @@ FUNC conn_process
     mov %rbx, %rdi
     mov %r13, %rsi
     call route
-    mov 0(%rsp), %rax
+    cmpq $QS_INLINE, CN_QSTATE(%rbx)
+    jne 51f
+    mov 0(%rsp), %rax               /* catalog job reads the buffer: the */
+    mov %rax, CN_JNULPOS(%rbx)      /* request is consumed when it is done */
+    mov 8(%rsp), %rax
+    mov %rax, CN_JNULVAL(%rbx)
+    jmp 9f
+51: mov 0(%rsp), %rax
     mov 8(%rsp), %rcx
     mov %cl, (%rax)
     mov %rbx, %rdi
@@ -787,78 +814,16 @@ FUNC meth_eq
     ret
 ENDF meth_eq
 
-/* parse_body(req rdi) -> rax JSON node or 0 (in the request arena) */
+/* parse_body(req rdi, arena rsi) -> rax JSON node or 0 */
 FUNC parse_body
-    sub $8, %rsp
+    mov %rsi, %rdx
     mov RQ_BODYLEN(%rdi), %rsi
     mov RQ_BODY(%rdi), %rdi
-    test %rdi, %rdi
-    jnz 1f
-    CSTR %rdi, ""
-1:  mov g_arena(%rip), %rdx
-    call json_parse
-    add $8, %rsp
-    ret
+    jmp json_parse
 ENDF parse_body
 
-/* parse_cstr(text rdi) -> rax JSON node */
-FUNC parse_cstr
-    push %rbx
-    mov %rdi, %rbx
-    call strlen
-    mov %rbx, %rdi
-    mov %rax, %rsi
-    mov g_arena(%rip), %rdx
-    call json_parse
-    pop %rbx
-    ret
-ENDF parse_cstr
 
-/* inline_op(c rdi, node rsi, op rdx (0 = request's "op"), ok status ecx):
- * runs a protocol operation in the server process and responds */
-FUNC inline_op
-    ENTER 0
-    mov %rdi, %rbx
-    mov %ecx, %r12d
-    mov %rdx, g_force_op(%rip)
-    movq $1, g_http_capture(%rip)
-    movq $0, g_forced_deadline(%rip)
-    mov %rsi, %rdi
-    call handle_request_noreset
-    movq $0, g_force_op(%rip)
-    mov g_req_status(%rip), %rdi
-    test %rdi, %rdi
-    jz 1f
-    call http_status_for
-    mov %eax, %r12d
-1:  mov %rbx, %rdi
-    mov %r12d, %esi
-    lea g_out(%rip), %rdx
-    call respond_buf
-    LEAVE
-ENDF inline_op
 
-/* inline_query(c rdi, node rsi, op rdx): a catalog-changing SQL statement
- * (CREATE/DROP INDEX) executed inline, accounted as a query */
-FUNC inline_query
-    ENTER 0
-    mov %rdi, %rbx
-    mov %rsi, %r12
-    mov %rdx, %r13
-    call now_ns
-    mov %rax, %r14
-    mov %rbx, %rdi
-    mov %r12, %rsi
-    mov %r13, %rdx
-    mov $200, %ecx
-    call inline_op
-    CSTR %rdi, "inline"
-    mov %r14, %rsi
-    mov g_req_status(%rip), %rdx
-    xor %ecx, %ecx
-    call account_code
-    LEAVE
-ENDF inline_query
 
 /* sql_mutates(node rdi) -> eax 1 if the request's "sql" is a CREATE/DROP
  * statement (first keyword after blanks and comments) */
@@ -944,12 +909,15 @@ FUNC sql_mutates
     LEAVE
 ENDF sql_mutates
 
-/* route(c rdi, req rsi) */
+/* route(c rdi, req rsi): dispatches one complete request.  Health,
+ * metrics, version, capabilities and the query registry are answered here;
+ * queries go through admission control; catalog operations are handed to
+ * the catalog worker thread (job_submit). */
 FUNC route
     ENTER 32
     mov %rdi, %rbx
     mov %rsi, %r13
-    mov g_arena(%rip), %rdi
+    mov net_arena(%rip), %rdi
     call arena_reset
     /* ---- fixed paths */
     mov %r13, %rdi
@@ -991,22 +959,32 @@ FUNC route
     call path_eq
     test %eax, %eax
     jz 3f
-    CSTR %r14, "version"
-    jmp r_get_op
+    xor %r14d, %r14d
+    jmp r_static
 3:  mov %r13, %rdi
     CSTR %rsi, "/v1/capabilities"
     call path_eq
     test %eax, %eax
     jz 4f
-    CSTR %r14, "capabilities"
-    jmp r_get_op
+    mov $1, %r14d
+    jmp r_static
 4:  mov %r13, %rdi
     CSTR %rsi, "/v1/tables"
     call path_eq
     test %eax, %eax
     jz 5f
-    CSTR %r14, "tables"
-    jmp r_get_op
+    mov %r13, %rdi
+    CSTR %rsi, "GET"
+    call meth_eq
+    test %eax, %eax
+    jz r_405
+    mov %rbx, %rdi
+    mov $JK_EMPTY, %esi
+    CSTR %rdx, "tables"
+    mov $200, %ecx
+    xor %r8d, %r8d
+    call job_submit
+    LEAVE
 5:  mov %r13, %rdi
     CSTR %rsi, "/v1/query"
     call path_eq
@@ -1038,13 +1016,12 @@ FUNC route
     call meth_eq
     test %eax, %eax
     jz r_405
-    mov %r13, %rdi
-    call parse_body
     mov %rbx, %rdi
-    mov %rax, %rsi
+    mov $JK_BODY, %esi
     CSTR %rdx, "explain"
     mov $200, %ecx
-    call inline_op
+    xor %r8d, %r8d
+    call job_submit
     LEAVE
 9:  mov %r13, %rdi
     CSTR %rsi, "/v1/queries"
@@ -1072,8 +1049,9 @@ FUNC route
     call meth_eq
     test %eax, %eax
     jz r_405
-    lea 1(%r15), %rdi
-    call tmp_alloc
+    mov net_arena(%rip), %rdi
+    lea 1(%r15), %rsi
+    call arena_alloc
     mov %rax, %r12
     mov %r14, %rdi
     mov %r15, %rsi
@@ -1091,6 +1069,8 @@ FUNC route
     jz r_404
     mov %rax, %r14
     mov %rdx, %r15
+    mov %r14, CN_JNAME(%rbx)
+    mov %r15, CN_JNLEN(%rbx)
     mov %r14, %rdi
     mov $'/', %esi
     mov %r15, %rdx
@@ -1103,7 +1083,7 @@ FUNC route
     sub %rax, %rcx
     mov %rcx, 0(%rsp)
     sub %r14, %rax
-    mov %rax, %r15                  /* name length */
+    mov %rax, CN_JNLEN(%rbx)        /* name length */
     mov %r12, %rdi
     mov 0(%rsp), %rsi
     CSTR %rdx, "/schema"
@@ -1125,14 +1105,12 @@ FUNC route
     call meth_eq
     test %eax, %eax
     jz r_405
-    mov %r14, %rdi
-    mov %r15, %rsi
-    call table_node
     mov %rbx, %rdi
-    mov %rax, %rsi
+    mov $JK_TABLE, %esi
     mov 8(%rsp), %rdx
     mov $200, %ecx
-    call inline_op
+    xor %r8d, %r8d
+    call job_submit
     LEAVE
 r_table:
     mov %r13, %rdi
@@ -1147,37 +1125,38 @@ r_table:
     jz r_405
     cmpq $0, shutting(%rip)
     jne r_shutting
-    mov %r14, %rdi
-    mov %r15, %rsi
-    call table_node
     mov %rbx, %rdi
-    mov %rax, %rsi
+    mov $JK_TABLE, %esi
     CSTR %rdx, "drop"
     mov $200, %ecx
-    call inline_op
+    xor %r8d, %r8d
+    call job_submit
     LEAVE
 r_put:
     cmpq $0, shutting(%rip)
     jne r_shutting
     mov %rbx, %rdi
-    mov %r13, %rsi
-    mov %r14, %rdx
-    mov %r15, %rcx
-    call handle_put
+    mov $JK_PUT, %esi
+    CSTR %rdx, "load"
+    mov $201, %ecx
+    xor %r8d, %r8d
+    call job_submit
     LEAVE
-r_get_op:
+r_static:                           /* r14d: 0 version, 1 capabilities */
     mov %r13, %rdi
     CSTR %rsi, "GET"
     call meth_eq
     test %eax, %eax
     jz r_405
-    CSTR %rdi, "{}"
-    call parse_cstr
+    lea srv_buf(%rip), %r15
+    movq $0, BUF_LEN(%r15)
+    mov %r14d, %edi
+    mov %r15, %rsi
+    call proto_static_buf
     mov %rbx, %rdi
-    mov %rax, %rsi
-    mov %r14, %rdx
-    mov $200, %ecx
-    call inline_op
+    mov $200, %esi
+    mov %r15, %rdx
+    call respond_buf
     LEAVE
 r_post_query:
     mov %r13, %rdi
@@ -1188,6 +1167,7 @@ r_post_query:
     cmpq $0, shutting(%rip)
     jne r_shutting
     mov %r13, %rdi
+    mov net_arena(%rip), %rsi
     call parse_body
     mov %rax, %r12                  /* node */
     test %r12, %r12
@@ -1219,14 +1199,8 @@ r_post_query:
     call sql_mutates
     test %eax, %eax
     jz 21f
-    mov %rbx, %rdi                  /* CREATE / DROP INDEX: in the server */
-    mov %r12, %rsi
-    lea op_query_s(%rip), %rdx
-    cmp $QK_REQUEST, %r14d
-    jne 201f
-    xor %edx, %edx
-201: call inline_query
-    LEAVE
+    mov $1, %r8d                    /* CREATE / DROP INDEX: catalog job */
+    jmp r_post_job
 21: mov %rbx, %rdi
     mov %r13, %rsi
     mov %r12, %rdx
@@ -1234,14 +1208,16 @@ r_post_query:
     call query_admit
     LEAVE
 r_post_inline:                      /* invalid bodies and catalog operations */
+    xor %r8d, %r8d
+r_post_job:
     lea op_query_s(%rip), %rdx
     cmp $QK_REQUEST, %r14d
     jne 22f
     xor %edx, %edx
 22: mov %rbx, %rdi
-    mov %r12, %rsi
+    mov $JK_BODY, %esi
     mov $200, %ecx
-    call inline_op
+    call job_submit
     LEAVE
 r_shutting:
     mov %rbx, %rdi
@@ -1353,14 +1329,13 @@ FUNC qp_false
     ret
 ENDF qp_false
 
-/* handle_put(c rdi, req rsi, name rdx, len rcx): PUT /v1/tables/{name}
- * ?format=..&replace=..&header=.. with the raw data as body -> load */
-FUNC handle_put
+/* put_node(req rdi, name rsi, len rdx) -> rax load request for PUT
+ * /v1/tables/{name}?format=..&replace=..&header=.. (raw data as body) */
+FUNC put_node
     ENTER 32
-    mov %rdi, %rbx
-    mov %rsi, %r13
-    mov %rdx, %r14
-    mov %rcx, %r15
+    mov %rdi, %r13
+    mov %rsi, %r14
+    mov %rdx, %r15
     lea 0(%rsp), %rdi
     call buf_init
     lea 0(%rsp), %r12
@@ -1430,13 +1405,242 @@ FUNC handle_put
 4:  mov %rcx, JN_PTR(%rax)
     mov RQ_BODYLEN(%r13), %rcx
     mov %rcx, JN_LEN(%rax)
-    mov %rbx, %rdi
-    mov %r14, %rsi
-    CSTR %rdx, "load"
-    mov $201, %ecx
-    call inline_op
+    mov %r14, %rax
     LEAVE
-ENDF handle_put
+ENDF put_node
+
+/* ================================================================ catalog worker */
+
+/* job_submit(c rdi, kind esi, op rdx, ok status ecx, is_query r8d): hands
+ * the request in g_req to the catalog worker thread */
+FUNC job_submit
+    ENTER 0
+    mov %rdi, %rbx
+    mov %esi, %eax
+    mov %rax, CN_JKIND(%rbx)
+    mov %rdx, CN_JOP(%rbx)
+    mov %ecx, %eax
+    mov %rax, CN_JOK(%rbx)
+    mov %r8d, %eax
+    mov %rax, CN_JQUERY(%rbx)
+    mov $RQ_SIZE, %edi
+    call xmalloc
+    mov %rax, CN_JREQ(%rbx)
+    mov %rax, %rdi
+    lea g_req(%rip), %rsi
+    mov $RQ_SIZE, %edx
+    call memcpy
+    call now_ns
+    mov %rax, CN_QSTART(%rbx)
+    movq $CS_BUSY, CN_STATE(%rbx)
+    movq $QS_INLINE, CN_QSTATE(%rbx)
+    incq n_inline(%rip)
+    lea q_mutex(%rip), %rdi
+    call pthread_mutex_lock
+    mov q_tail(%rip), %rax
+    and $(JOBQ_SIZE - 1), %eax
+    mov jobq(%rip), %rcx
+    mov %rbx, (%rcx, %rax, 8)
+    incq q_tail(%rip)
+    lea q_cond(%rip), %rdi
+    call pthread_cond_signal
+    lea q_mutex(%rip), %rdi
+    call pthread_mutex_unlock
+    LEAVE
+ENDF job_submit
+
+/* finish_inline(c rdi): (network thread) a catalog job is done: respond,
+ * consume the request and continue with the connection */
+FUNC finish_inline
+    ENTER 0
+    mov %rdi, %rbx
+    decq n_inline(%rip)
+    mov %rbx, %rdi
+    mov CN_RSTATUS(%rbx), %esi
+    lea ctype_json(%rip), %rdx
+    mov CN_RESP(%rbx), %rcx
+    mov CN_RESPLEN(%rbx), %r8
+    call respond
+    cmpq $0, CN_JQUERY(%rbx)
+    je 1f
+    CSTR %rdi, "inline"
+    mov CN_QSTART(%rbx), %rsi
+    mov CN_ISTATUS(%rbx), %rdx
+    xor %ecx, %ecx
+    call account_code
+1:  mov CN_JNULPOS(%rbx), %rax
+    mov CN_JNULVAL(%rbx), %rcx
+    mov %cl, (%rax)
+    mov CN_JREQ(%rbx), %rax
+    mov RQ_TOTAL(%rax), %rsi
+    mov %rbx, %rdi
+    call conn_consume
+    mov %rbx, %rdi
+    call clear_query
+    mov %rbx, %rdi
+    call after_response
+    LEAVE
+ENDF finish_inline
+
+/* handle_done(): (network thread) reads finished jobs from the pipe */
+FUNC handle_done
+    ENTER 512
+    mov done_r(%rip), %edi
+    lea 0(%rsp), %rsi
+    mov $512, %edx
+    call read
+    test %rax, %rax
+    jle 9f
+    shr $3, %rax
+    mov %rax, %r12
+    xor %r13d, %r13d
+1:  cmp %r12, %r13
+    jae 9f
+    mov (%rsp, %r13, 8), %rdi
+    call finish_inline
+    inc %r13
+    jmp 1b
+9:  LEAVE
+ENDF handle_done
+
+/* cw_exec(c rdi): (worker thread) runs a catalog job; the response is left
+ * in CN_RESP / CN_RSTATUS */
+FUNC cw_exec
+    ENTER 16
+    mov %rdi, %rbx
+    mov CN_JREQ(%rbx), %r13
+    mov g_arena(%rip), %rdi
+    call arena_reset
+    mov CN_JKIND(%rbx), %rax
+    cmp $JK_BODY, %rax
+    jne 1f
+    mov %r13, %rdi
+    mov g_arena(%rip), %rsi
+    call parse_body
+    jmp 5f
+1:  cmp $JK_TABLE, %rax
+    jne 2f
+    mov CN_JNAME(%rbx), %rdi
+    mov CN_JNLEN(%rbx), %rsi
+    call table_node
+    jmp 5f
+2:  cmp $JK_PUT, %rax
+    jne 3f
+    mov %r13, %rdi
+    mov CN_JNAME(%rbx), %rsi
+    mov CN_JNLEN(%rbx), %rdx
+    call put_node
+    jmp 5f
+3:  CSTR %rdi, "{}"
+    mov $2, %esi
+    mov g_arena(%rip), %rdx
+    call json_parse
+5:  mov %rax, %r12                  /* request node */
+    mov CN_JOP(%rbx), %rax
+    mov %rax, g_force_op(%rip)
+    movq $0, g_forced_deadline(%rip)
+    mov %r12, %rdi
+    call handle_request_noreset
+    movq $0, g_force_op(%rip)
+    mov CN_JOK(%rbx), %rax
+    mov g_req_status(%rip), %rdi
+    mov %rdi, CN_ISTATUS(%rbx)
+    test %rdi, %rdi
+    jz 6f
+    call http_status_for
+6:  mov %rax, CN_RSTATUS(%rbx)
+    mov g_out+BUF_DATA(%rip), %rdi
+    mov g_out+BUF_LEN(%rip), %rsi
+    mov %rsi, CN_RESPLEN(%rbx)
+    test %rdi, %rdi
+    jnz 7f
+    CSTR %rdi, ""
+7:  call xstrdup_mem
+    mov %rax, CN_RESP(%rbx)
+    LEAVE
+ENDF cw_exec
+
+/* cw_main(arg): the catalog worker thread: executes catalog jobs one at a
+ * time holding cat_lock (released while a load parses its input) */
+FUNC cw_main
+    ENTER 48
+    /* alternate signal stack: report stack overflows as INTERNAL_ERROR */
+    mov $(256*1024), %edi
+    call xmalloc
+    mov %rax, 16(%rsp)
+    movl $0, 24(%rsp)
+    movq $(256*1024), 32(%rsp)
+    lea 16(%rsp), %rdi
+    xor %esi, %esi
+    call sigaltstack
+1:  lea q_mutex(%rip), %rdi
+    call pthread_mutex_lock
+2:  mov q_head(%rip), %rax
+    cmp q_tail(%rip), %rax
+    jne 3f
+    lea q_cond(%rip), %rdi
+    lea q_mutex(%rip), %rsi
+    call pthread_cond_wait
+    jmp 2b
+3:  and $(JOBQ_SIZE - 1), %eax
+    mov jobq(%rip), %rcx
+    mov (%rcx, %rax, 8), %rbx
+    incq q_head(%rip)
+    lea q_mutex(%rip), %rdi
+    call pthread_mutex_unlock
+    lea cat_lock(%rip), %rdi
+    call pthread_mutex_lock
+    movq $1, g_cat_locked(%rip)
+    mov %rbx, %rdi
+    call cw_exec
+    cmpq $0, g_cat_locked(%rip)
+    je 4f
+    movq $0, g_cat_locked(%rip)
+    lea cat_lock(%rip), %rdi
+    call pthread_mutex_unlock
+4:  mov %rbx, 0(%rsp)
+5:  mov done_w(%rip), %edi
+    lea 0(%rsp), %rsi
+    mov $8, %edx
+    call write
+    cmp $8, %rax
+    je 1b
+    call __errno_location
+    cmpl $4, (%rax)
+    je 5b
+    jmp 1b
+ENDF cw_main
+
+/* cat_parse_begin(): op_load is about to parse its input: let queries fork
+ * meanwhile (the catalog is not touched until cat_parse_end) */
+FUNC cat_parse_begin
+    cmpq $0, g_cat_threaded(%rip)
+    jne 1f
+    ret
+1:  sub $8, %rsp
+    cmpq $0, g_cat_locked(%rip)
+    je 2f
+    movq $0, g_cat_locked(%rip)
+    lea cat_lock(%rip), %rdi
+    call pthread_mutex_unlock
+2:  add $8, %rsp
+    ret
+ENDF cat_parse_begin
+
+/* cat_parse_end(): reacquires the catalog lock before publishing */
+FUNC cat_parse_end
+    cmpq $0, g_cat_threaded(%rip)
+    jne 1f
+    ret
+1:  sub $8, %rsp
+    cmpq $0, g_cat_locked(%rip)
+    jne 2f
+    lea cat_lock(%rip), %rdi
+    call pthread_mutex_lock
+    movq $1, g_cat_locked(%rip)
+2:  add $8, %rsp
+    ret
+ENDF cat_parse_end
 
 /* ================================================================ queries */
 
@@ -1555,6 +1759,9 @@ FUNC query_admit
     jae 8f
     cmpq $0, n_queued(%rip)
     jne 8f
+    movq $QS_STARTING, CN_QSTATE(%rbx)
+    incq n_running(%rip)
+    incq n_starting(%rip)
     mov %rbx, %rdi
     call start_child
     LEAVE
@@ -1613,46 +1820,77 @@ FUNC find_query
     LEAVE
 ENDF find_query
 
-/* start_child(c rdi): forks the query's process */
+/* start_child(c rdi) -> eax 0 if the catalog is busy (the query stays
+ * QS_STARTING and is retried by dispatch), else 1: forks the query's process
+ * (the catalog lock guarantees a consistent snapshot) */
 FUNC start_child
     ENTER 0
     mov %rdi, %rbx
+    lea cat_lock(%rip), %rdi
+    call pthread_mutex_trylock
+    test %eax, %eax
+    jnz 7f
+    decq n_starting(%rip)
+    mov %rbx, %rdi
     call conn_sh
     movq $0, SH_DONE(%rax)
     movq $0, SH_STATUS(%rax)
     movq $0, SH_ROWS(%rax)
     movq $0, SH_WRITING(%rax)
     movq $QS_RUNNING, CN_QSTATE(%rbx)
-    incq n_running(%rip)
     call fork
     test %eax, %eax
     jz 1f
     js 8f
     cltq
     mov %rax, CN_QPID(%rbx)
+    lea cat_lock(%rip), %rdi
+    call pthread_mutex_unlock
+    mov $1, %eax
     LEAVE
 1:  mov %rbx, %rdi
     call child_main                 /* does not return */
-8:  decq n_running(%rip)
+7:  xor %eax, %eax
+    LEAVE
+8:  lea cat_lock(%rip), %rdi
+    call pthread_mutex_unlock
+    decq n_running(%rip)
     movq $QS_NONE, CN_QSTATE(%rbx)
-    movq $CS_READ, CN_STATE(%rbx)
     mov %rbx, %rdi
     mov $E_INTERNAL_ERROR, %esi
     CSTR %rdx, "cannot start the query process"
     call respond_error
     mov %rbx, %rdi
     call clear_query
+    mov %rbx, %rdi
+    call after_response
+    mov $1, %eax
     LEAVE
 ENDF start_child
 
-/* queued_fail(c rdi, code esi, msg rdx): ends a queued query with an error */
+/* pending_remove(c rdi): takes a queued / starting query out of admission */
+FUNC pending_remove
+    mov CN_QSTATE(%rdi), %rax
+    cmp $QS_QUEUED, %rax
+    jne 1f
+    decq n_queued(%rip)
+    jmp 9f
+1:  cmp $QS_STARTING, %rax
+    jne 9f
+    decq n_running(%rip)
+    decq n_starting(%rip)
+9:  movq $QS_NONE, CN_QSTATE(%rdi)
+    ret
+ENDF pending_remove
+
+/* queued_fail(c rdi, code esi, msg rdx): ends a not yet started query with
+ * an error */
 FUNC queued_fail
     ENTER 0
     mov %rdi, %rbx
     mov %esi, %r12d
     mov %rdx, %r13
-    decq n_queued(%rip)
-    movq $QS_NONE, CN_QSTATE(%rbx)
+    call pending_remove
     mov CN_QID(%rbx), %rdi
     mov CN_QSTART(%rbx), %rsi
     mov %r12, %rdx
@@ -1753,9 +1991,25 @@ FUNC reap
 9:  LEAVE
 ENDF reap
 
-/* dispatch(): starts queued queries (FIFO) while workers are free */
+/* dispatch(): forks admitted queries waiting for the catalog lock, then
+ * starts queued queries (FIFO) while workers are free */
 FUNC dispatch
     ENTER 0
+    cmpq $0, n_starting(%rip)
+    je 1f
+    mov conns(%rip), %rbx
+    xor %r12d, %r12d
+81: cmp conn_hi(%rip), %r12
+    jae 1f
+    cmpq $QS_STARTING, CN_QSTATE(%rbx)
+    jne 82f
+    mov %rbx, %rdi
+    call start_child
+    test %eax, %eax
+    jz 9f                           /* catalog busy: retry later */
+82: add $CN_SIZE, %rbx
+    inc %r12
+    jmp 81b
 1:  cmpq $0, n_queued(%rip)
     je 9f
     mov n_running(%rip), %rax
@@ -1780,9 +2034,13 @@ FUNC dispatch
 4:  test %r13, %r13
     jz 9f
     decq n_queued(%rip)
+    incq n_running(%rip)
+    incq n_starting(%rip)
+    movq $QS_STARTING, CN_QSTATE(%r13)
     mov %r13, %rdi
     call start_child
-    jmp 1b
+    test %eax, %eax
+    jnz 1b
 9:  LEAVE
 ENDF dispatch
 
@@ -1818,9 +2076,11 @@ FUNC check_timers
 3:  cmp $CS_BUSY, %rax
     jne 8f
     mov CN_QSTATE(%rbx), %rax
+    cmp $QS_STARTING, %rax
+    je 31f
     cmp $QS_QUEUED, %rax
     jne 5f
-    cmpq $0, grace_fired(%rip)
+31: cmpq $0, grace_fired(%rip)
     je 4f
     mov %rbx, %rdi
     mov $E_CANCELLED, %esi
@@ -1890,8 +2150,11 @@ FUNC handle_cancel
     test %rax, %rax
     jz 8f
     mov %rax, %r13
+    cmpq $QS_STARTING, CN_QSTATE(%r13)
+    je 83f
     cmpq $QS_QUEUED, CN_QSTATE(%r13)
     jne 1f
+83:
     mov %r13, %rdi
     mov $E_CANCELLED, %esi
     CSTR %rdx, "query cancelled"
@@ -1947,6 +2210,8 @@ FUNC handle_queries
     jae 9f
     mov CN_QSTATE(%rbx), %rax
     cmp $QS_QUEUED, %rax
+    je 2f
+    cmp $QS_STARTING, %rax
     je 2f
     cmp $QS_RUNNING, %rax
     jne 8f
@@ -2039,13 +2304,15 @@ FUNC handle_metrics
     xor %r12d, %r12d
 1:  cmp conn_hi(%rip), %r12
     jae 2f
+    cmpq $QS_STARTING, CN_QSTATE(%rbx)
+    je 12f
     cmpq $QS_RUNNING, CN_QSTATE(%rbx)
     jne 11f
     mov %rbx, %rdi
     call conn_sh
     cmpq $0, SH_DONE(%rax)
     jne 11f
-    inc %r13
+12: inc %r13
 11: add $CN_SIZE, %rbx
     inc %r12
     jmp 1b
@@ -2188,9 +2455,15 @@ FUNC child_main
     lea 0(%rsp), %rsi
     xor %edx, %edx
     call sigaction
-    /* the request */
-    mov g_arena(%rip), %rdi
-    call arena_reset
+    /* fresh request state: the catalog worker may have been using the
+     * shared globals when this process was forked */
+    movq $0, g_cat_threaded(%rip)
+    movq $0, g_pending_arena(%rip)
+    movq $0, g_pending_map(%rip)
+    lea g_out(%rip), %rdi
+    call buf_init
+    call arena_new
+    mov %rax, g_arena(%rip)
     mov CN_QBODY(%rbx), %rdi
     mov CN_QBLEN(%rbx), %rsi
     mov g_arena(%rip), %rdx
@@ -2638,6 +2911,34 @@ FUNC serve_main
     test %eax, %eax
     js s_fatal
     mov %rax, sig_fd(%rip)
+    /* catalog worker thread */
+    call arena_new
+    mov %rax, net_arena(%rip)
+    mov $JOBQ_SIZE, %edi
+    mov $8, %esi
+    call calloc
+    mov %rax, jobq(%rip)
+    lea 32(%rsp), %rdi
+    call pipe
+    test %eax, %eax
+    jnz s_fatal
+    movslq 32(%rsp), %rax
+    mov %rax, done_r(%rip)
+    movslq 36(%rsp), %rax
+    mov %rax, done_w(%rip)
+    movq $1, g_cat_threaded(%rip)
+    lea 192(%rsp), %rdi             /* pthread_attr_t (56 bytes) */
+    call pthread_attr_init
+    lea 192(%rsp), %rdi
+    mov $WORKER_STACK, %esi
+    call pthread_attr_setstacksize
+    lea 40(%rsp), %rdi              /* pthread_t */
+    lea 192(%rsp), %rsi
+    lea cw_main(%rip), %rdx
+    xor %ecx, %ecx
+    call pthread_create
+    test %eax, %eax
+    jnz s_fatal
     /* {"event":"listening",...} on stdout */
     lea srv_buf(%rip), %r15
     movq $0, BUF_LEN(%r15)
@@ -2704,6 +3005,8 @@ s_top:
     jne 97f
     cmpq $0, n_queued(%rip)
     jne 97f
+    cmpq $0, n_inline(%rip)
+    jne 97f
     call serve_exit
 97: cmpq $0, grace_fired(%rip)      /* grace expired and cancels ignored */
     je 1f
@@ -2721,6 +3024,11 @@ s_top:
     mov %eax, (%r12)
     movl $1, 4(%r12)                /* POLLIN, revents 0 */
     movq $0, (%r13)
+    inc %r14
+    mov done_r(%rip), %eax
+    mov %eax, (%r12, %r14, 8)
+    movl $1, 4(%r12, %r14, 8)
+    movq $0, (%r13, %r14, 8)
     inc %r14
     mov listen_fd(%rip), %rax
     test %rax, %rax
@@ -2741,6 +3049,8 @@ s_top:
     jne 4f
     cmpq $0, CN_HUP(%rbx)
     jne 5f
+    cmpq $QS_INLINE, CN_QSTATE(%rbx)
+    je 5f                           /* the worker owns it */
     mov $0x2000, %ecx               /* POLLRDHUP: disconnect while busy */
 4:  mov CN_FD(%rbx), %eax
     mov %eax, (%r12, %r14, 8)
@@ -2760,7 +3070,10 @@ s_top:
 62: cmpq $0, n_queued(%rip)
     je 63f
     mov $10, %edx
-63: mov %r12, %rdi
+63: cmpq $0, n_starting(%rip)
+    je 64f
+    mov $2, %edx
+64: mov %r12, %rdi
     mov %r14, %rsi
     call poll
     test %eax, %eax
@@ -2780,7 +3093,11 @@ s_top:
     jne 71f
     call handle_signals
     jmp 9f
-71: cmpq $0, shutting(%rip)
+71: cmp done_r(%rip), %eax
+    jne 72f
+    call handle_done
+    jmp 9f
+72: cmpq $0, shutting(%rip)
     jne 9f
     call conn_accept
     jmp 9f
@@ -2819,10 +3136,12 @@ FUNC conn_hangup
     jne 9f
     movq $1, CN_HUP(%rbx)
     mov CN_QSTATE(%rbx), %rax
+    cmp $QS_STARTING, %rax
+    je 83f
     cmp $QS_QUEUED, %rax
     jne 1f
-    decq n_queued(%rip)
-    movq $QS_NONE, CN_QSTATE(%rbx)
+83: mov %rbx, %rdi
+    call pending_remove
     mov CN_QID(%rbx), %rdi
     mov CN_QSTART(%rbx), %rsi
     mov $E_CANCELLED, %edx

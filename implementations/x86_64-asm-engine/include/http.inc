@@ -55,7 +55,21 @@
 #define CN_QREQID  168   /* /v1/request: JSON text of the request id (malloc'd) or 0 */
 #define CN_QKILL   176   /* error code to report when the parent killed the child */
 #define CN_QMETRIC 184   /* counts as a query in the metrics */
-#define CN_SIZE    192
+/* catalog job (executed by the catalog worker thread) */
+#define CN_JKIND   192   /* JK_* */
+#define CN_JOP     200   /* forced op (C string) or 0 = the request's "op" */
+#define CN_JOK     208   /* HTTP status on success */
+#define CN_JQUERY  216   /* account as a query (CREATE / DROP INDEX) */
+#define CN_RESP    224   /* response body (malloc'd) */
+#define CN_RESPLEN 232
+#define CN_RSTATUS 240   /* HTTP status of the response */
+#define CN_ISTATUS 248   /* error code, 0 = ok */
+#define CN_JREQ    256   /* copy of the Req (malloc'd); points into CN_BUF */
+#define CN_JNAME   264   /* table name in the path (raw) */
+#define CN_JNLEN   272
+#define CN_JNULPOS 280   /* body terminator written in place, restored when done */
+#define CN_JNULVAL 288
+#define CN_SIZE    296
 
 #define CS_FREE    0
 #define CS_READ    1     /* reading / parsing requests */
@@ -65,6 +79,13 @@
 #define QS_NONE    0
 #define QS_QUEUED  1
 #define QS_RUNNING 2
+#define QS_STARTING 3    /* admitted, waiting for the catalog lock to fork */
+#define QS_INLINE  4     /* catalog job queued / running in the worker thread */
+
+#define JK_EMPTY   1     /* op on an empty object */
+#define JK_BODY    2     /* op on the JSON body (0 op = protocol request) */
+#define JK_TABLE   3     /* op on {"table": <path name>} */
+#define JK_PUT     4     /* PUT /v1/tables/{name}: load of the raw body */
 
 #define QK_QUERY   1     /* POST /v1/query */
 #define QK_STREAM  2     /* POST /v1/query/stream */

@@ -442,6 +442,32 @@ FUNC proto_err_name
     ret
 ENDF proto_err_name
 
+/* proto_static_buf(which edi: 0 version, 1 capabilities, buf rsi):
+ * {"ok":true,...} without an id (HTTP GET endpoints) */
+FUNC proto_static_buf
+    push %rbx
+    push %r12
+    sub $8, %rsp
+    mov %edi, %ebx
+    mov %rsi, %r12
+    mov %r12, %rdi
+    CSTR %rsi, "{\"ok\":true"
+    call buf_puts
+    mov %r12, %rdi
+    lea version_fields(%rip), %rsi
+    test %ebx, %ebx
+    jz 1f
+    lea caps_fields(%rip), %rsi
+1:  call buf_puts
+    mov %r12, %rdi
+    mov $'}', %esi
+    call buf_putc
+    add $8, %rsp
+    pop %r12
+    pop %rbx
+    ret
+ENDF proto_static_buf
+
 /* proto_write_static(which edi: 0 version, 1 capabilities) */
 FUNC proto_write_static
     push %rbx
@@ -758,7 +784,17 @@ FUNC query_setup
     call check_exec_options
 4:  mov g_forced_deadline(%rip), %rax   /* server: queue time counts */
     test %rax, %rax
+    jz 41f
+    mov %rax, g_deadline_ns(%rip)
+    jmp 5f
+41: cmpq $0, g_deadline_ns(%rip)        /* no timeout_ms: --query-timeout-ms */
+    jne 5f
+    mov g_srv_timeout_ms(%rip), %r14
+    test %r14, %r14
     jz 5f
+    imul $1000000, %r14, %r14
+    call now_ns
+    add %r14, %rax
     mov %rax, g_deadline_ns(%rip)
 5:  call check_deadline
     /* per-query memory budget */
@@ -1213,7 +1249,8 @@ FUNC op_load
     test %rax, %rax
     jz 8f
     RAISE E_ALREADY_EXISTS, "table already exists"
-8:  /* input bytes */
+8:  /* input bytes; parsing runs without the catalog lock (server) */
+    call cat_parse_begin
     test %r14, %r14
     jz 9f
     mov JN_PTR(%r14), %rdi
@@ -1248,6 +1285,7 @@ FUNC op_load
     mov LD_LAYOUT(%rsp), %rsi
     mov LD_DICT(%rsp), %rdx
     call table_finalize
+    call cat_parse_end
     movq $0, g_pending_arena(%rip)
     mov %r12, %rdi
     call cat_put
