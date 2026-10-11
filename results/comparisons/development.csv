@@ -2,6 +2,7 @@ language,task,attempt,outcome,cost_usd,tokens_output,tokens_input_total,turns,wa
 java,change-decimal38,1,success,13.923582400000006,137382,40721989,175,1385.4,174,0,4,7,3,1552,experiments/runs/a-change-decimal38-java-a1-20261011T063016Z/manifest.json
 java,change-union-all,1,success,4.9248474,49714,11898044,88,1876.3,86,1,1,5,3,475,experiments/runs/a-change-union-all-java-a1-20261011T053525Z/manifest.json
 java,debug-mutant,1,success,0.2830554,2869,326199,14,80.9,13,0,1,6,1,1,experiments/runs/a-debug-mutant-java-a1-20261011T054108Z/manifest.json
+java,jvm-tuning,1,timeout,,2093,61252617,,7200.6,245,3,3,0,4,2681,experiments/runs/b-jvm-tuning-java-a1-20261011T150109Z/manifest.json
 java,native,1,isolation_violation,13.248619,160813,35987166,164,2652.5,163,1,4,8,11,2237,experiments/runs/a-native-java-a1-20261011T034931Z/manifest.json
 java,native,2,success,12.755314400000005,170576,32935230,150,2465.4,149,3,6,8,7,2813,experiments/runs/a-native-java-a2-20261011T043500Z/manifest.json
 java,optimize-latency,1,timeout,,1861,52318596,,4320.3,203,5,2,0,9,2555,experiments/runs/a-optimize-latency-java-a1-20261011T065356Z/manifest.json
@@ -16,6 +17,7 @@ java,refactor-plan-separation,1,success,6.298771200000003,103810,11569088,80,134
 clojure,change-decimal38,1,success,8.530311999999997,90967,21966393,112,1353.6,110,2,10,7,3,825,experiments/runs/a-change-decimal38-clojure-a1-20261011T060221Z/manifest.json
 clojure,change-union-all,1,success,3.755507999999999,42345,8237394,73,545.6,72,1,1,7,1,312,experiments/runs/a-change-union-all-clojure-a1-20261011T053530Z/manifest.json
 clojure,debug-mutant,1,success,0.388602,2708,463848,14,87.1,13,0,2,4,1,1,experiments/runs/a-debug-mutant-clojure-a1-20261011T054110Z/manifest.json
+clojure,jvm-tuning,1,success,17.4543776,195273,51839435,222,6270.6,221,3,17,0,13,1310,experiments/runs/b-jvm-tuning-clojure-a1-20261011T150108Z/manifest.json
 clojure,native,1,success,10.135164,143192,23802048,115,2282.7,114,2,5,7,3,1570,experiments/runs/a-native-clojure-a1-20261011T034926Z/manifest.json
 clojure,optimize-latency,1,success,10.817963000000002,133864,27777596,152,2440.3,151,2,6,16,11,1409,experiments/runs/a-optimize-latency-clojure-a1-20261011T062604Z/manifest.json
 clojure,optimize-latency,2,success,10.477140000000002,133899,27433045,163,2734.3,162,2,8,0,10,1368,experiments/runs/a-optimize-latency-clojure-a2-20261011T124901Z/manifest.json
@@ -85,3 +87,5 @@ arm64-asm,kernel-debug-mutant,1,success,0.4827568000000001,6526,598106,19,78.0,1
 arm64-asm,kernel-optimize,1,success,10.765369399999992,221127,17286827,72,2120.2,71,0,0,0,6,1406,experiments/runs/a-kernel-optimize-arm64-asm-a1-20261011T125000Z/manifest.json
 arm64-asm,kernel-refactor,1,success,8.857044599999998,195075,12052855,55,1512.2,54,3,0,0,6,3637,experiments/runs/a-kernel-refactor-arm64-asm-a1-20261011T120845Z/manifest.json
 arm64-asm,kernels,1,success,4.7987362,137298,3339378,26,1698.6,25,0,0,0,4,2803,experiments/runs/a-kernels-arm64-asm-a1-20261010T184024Z/manifest.json
+x86_64-asm-engine,phase1,1,success,20.987464199999987,207804,14340134,71,2216.4,179,1,5,5,6,14544,experiments/runs/a-phase1-x86_64-asm-engine-a1-20261011T164036Z/manifest.json
+arm64-asm-engine,phase1,1,success,23.816887999999988,130761,8825558,62,1695.9,214,13,22,4,4,18237,experiments/runs/a-phase1-arm64-asm-engine-a1-20261011T171841Z/manifest.json

@@ -1,5 +1,5 @@
 {
- "generated": "2026-10-11T15:03:06.592046+00:00",
+ "generated": "2026-10-11T17:55:38.457239+00:00",
  "weights": {
   "correctness": 0.35,
   "development_effort": 0.2,
@@ -7,7 +7,7 @@
   "resources": 0.1,
   "maintainability": 0.15
  },
- "git_commit": "67689d1bd49a84cbe88b7e2b82dc1200176db24f",
+ "git_commit": "89bb3c50c1a318b5773f8f450e849b55d48771dd",
  "runs": [
   {
    "run_id": "a-change-decimal38-clojure-a1-20261011T060221Z",
@@ -460,6 +460,15 @@
    "manifest": "experiments/runs/a-optimize-latency-rust-a2-20261011T124903Z/manifest.json"
   },
   {
+   "run_id": "a-phase1-arm64-asm-engine-a1-20261011T171841Z",
+   "language": "arm64-asm-engine",
+   "task": "phase1",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-phase1-arm64-asm-engine-a1-20261011T171841Z/manifest.json"
+  },
+  {
    "run_id": "a-phase1-clojure-a1-20261010T182858Z",
    "language": "clojure",
    "task": "phase1",
@@ -512,6 +521,15 @@
    "attempt": 1,
    "outcome": "success",
    "manifest": "experiments/runs/a-phase1-rust-a1-20261010T182857Z/manifest.json"
+  },
+  {
+   "run_id": "a-phase1-x86_64-asm-engine-a1-20261011T164036Z",
+   "language": "x86_64-asm-engine",
+   "task": "phase1",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-phase1-x86_64-asm-engine-a1-20261011T164036Z/manifest.json"
   },
   {
    "run_id": "a-phase2-clojure-a1-20261010T190215Z",
@@ -782,6 +800,24 @@
    "attempt": 1,
    "outcome": "success",
    "manifest": "experiments/runs/a-refactor-plan-separation-rust-a1-20261011T054657Z/manifest.json"
+  },
+  {
+   "run_id": "b-jvm-tuning-clojure-a1-20261011T150108Z",
+   "language": "clojure",
+   "task": "jvm-tuning",
+   "track": "B",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/b-jvm-tuning-clojure-a1-20261011T150108Z/manifest.json"
+  },
+  {
+   "run_id": "b-jvm-tuning-java-a1-20261011T150109Z",
+   "language": "java",
+   "task": "jvm-tuning",
+   "track": "B",
+   "attempt": 1,
+   "outcome": "timeout",
+   "manifest": "experiments/runs/b-jvm-tuning-java-a1-20261011T150109Z/manifest.json"
   }
  ],
  "capability_matrix": {
@@ -1058,7 +1094,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T09:05:36.730514+00:00",
+    "started": "2026-10-11T16:37:29.702081+00:00",
     "source": "results/correctness/java.json"
    },
    "clojure": {
@@ -1139,7 +1175,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T07:07:53.339036+00:00",
+    "started": "2026-10-11T16:37:46.472671+00:00",
     "source": "results/correctness/clojure.json"
    },
    "rust": {
@@ -1220,7 +1256,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T07:06:43.932146+00:00",
+    "started": "2026-10-11T16:38:04.947376+00:00",
     "source": "results/correctness/rust.json"
    },
    "python": {
@@ -1301,7 +1337,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T09:16:08.752913+00:00",
+    "started": "2026-10-11T16:37:53.242675+00:00",
     "source": "results/correctness/python.json"
    },
    "go": {
@@ -1382,7 +1418,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T06:38:05.365342+00:00",
+    "started": "2026-10-11T16:37:51.912432+00:00",
     "source": "results/correctness/go.json"
    },
    "common-lisp": {
@@ -1463,7 +1499,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T09:16:02.124292+00:00",
+    "started": "2026-10-11T16:38:08.267756+00:00",
     "source": "results/correctness/common-lisp.json"
    },
    "kernel_cohort": {
@@ -1590,6 +1626,74 @@
      "commit": "8139e02e9621e311f45bc649bbd98608076993fb",
      "source": "results/correctness/arm64-asm.json"
     }
+   },
+   "asm_engine_cohort": {
+    "x86_64-asm-engine": {
+     "summary": {
+      "by_phase": {
+       "1": {
+        "total": 225,
+        "pass": 225,
+        "fail": 0,
+        "error": 0,
+        "not_implemented": 0
+       }
+      },
+      "total": {
+       "total": 225,
+       "pass": 225,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     },
+     "phase_passed": {
+      "1": true
+     },
+     "capabilities": [
+      "ingest.csv",
+      "ingest.json",
+      "ingest.jsonl",
+      "phase1",
+      "sql.basic",
+      "test.functions"
+     ],
+     "started": "2026-10-11T17:27:18.331712+00:00",
+     "source": "results/correctness/x86_64-asm-engine.json"
+    },
+    "arm64-asm-engine": {
+     "summary": {
+      "by_phase": {
+       "1": {
+        "total": 249,
+        "pass": 249,
+        "fail": 0,
+        "error": 0,
+        "not_implemented": 0
+       }
+      },
+      "total": {
+       "total": 249,
+       "pass": 249,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     },
+     "phase_passed": {
+      "1": true
+     },
+     "capabilities": [
+      "ingest.csv",
+      "ingest.json",
+      "ingest.jsonl",
+      "phase1",
+      "sql.basic",
+      "test.functions"
+     ],
+     "started": "2026-10-11T17:54:08.923614+00:00",
+     "source": "results/correctness/arm64-asm-engine.json"
+    }
    }
   },
   "2_development_effort": {
@@ -1672,6 +1776,34 @@
       "conformance": {
        "total": 623,
        "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "jvm-tuning": [
+     {
+      "run_id": "b-jvm-tuning-java-a1-20261011T150109Z",
+      "attempt": 1,
+      "outcome": "timeout",
+      "manifest": "experiments/runs/b-jvm-tuning-java-a1-20261011T150109Z/manifest.json",
+      "cost_usd": null,
+      "tokens_output": 2093,
+      "tokens_input_total": 61252617,
+      "turns": null,
+      "wall_seconds": 7200.6,
+      "tool_calls": 245,
+      "tool_failures": 3,
+      "build_failures": 3,
+      "repair_iterations": 0,
+      "commits": 4,
+      "lines_added": 2681,
+      "lines_removed": 332,
+      "files_changed": 21,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
@@ -2060,6 +2192,34 @@
       "conformance": {
        "total": 623,
        "pass": 623,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "jvm-tuning": [
+     {
+      "run_id": "b-jvm-tuning-clojure-a1-20261011T150108Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/b-jvm-tuning-clojure-a1-20261011T150108Z/manifest.json",
+      "cost_usd": 17.4543776,
+      "tokens_output": 195273,
+      "tokens_input_total": 51839435,
+      "turns": 222,
+      "wall_seconds": 6270.6,
+      "tool_calls": 221,
+      "tool_failures": 3,
+      "build_failures": 17,
+      "repair_iterations": 0,
+      "commits": 13,
+      "lines_added": 1310,
+      "lines_removed": 221,
+      "files_changed": 41,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
        "fail": 0,
        "error": 0,
        "not_implemented": 0
@@ -3934,6 +4094,66 @@
       "lines_removed": 0,
       "files_changed": 5,
       "conformance": null
+     }
+    ]
+   },
+   "x86_64-asm-engine": {
+    "phase1": [
+     {
+      "run_id": "a-phase1-x86_64-asm-engine-a1-20261011T164036Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-phase1-x86_64-asm-engine-a1-20261011T164036Z/manifest.json",
+      "cost_usd": 20.987464199999987,
+      "tokens_output": 207804,
+      "tokens_input_total": 14340134,
+      "turns": 71,
+      "wall_seconds": 2216.4,
+      "tool_calls": 179,
+      "tool_failures": 1,
+      "build_failures": 5,
+      "repair_iterations": 5,
+      "commits": 6,
+      "lines_added": 14544,
+      "lines_removed": 0,
+      "files_changed": 24,
+      "conformance": {
+       "total": 249,
+       "pass": 249,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ]
+   },
+   "arm64-asm-engine": {
+    "phase1": [
+     {
+      "run_id": "a-phase1-arm64-asm-engine-a1-20261011T171841Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-phase1-arm64-asm-engine-a1-20261011T171841Z/manifest.json",
+      "cost_usd": 23.816887999999988,
+      "tokens_output": 130761,
+      "tokens_input_total": 8825558,
+      "turns": 62,
+      "wall_seconds": 1695.9,
+      "tool_calls": 214,
+      "tool_failures": 13,
+      "build_failures": 22,
+      "repair_iterations": 4,
+      "commits": 4,
+      "lines_added": 18237,
+      "lines_removed": 0,
+      "files_changed": 30,
+      "conformance": {
+       "total": 249,
+       "pass": 249,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
      }
     ]
    }
@@ -17244,12 +17464,12 @@
   },
   "5_code_quality": {
    "java": {
-    "source_loc": 23381,
-    "test_loc": 2869,
+    "source_loc": 23767,
+    "test_loc": 2903,
     "files": 166,
-    "comment_lines": 2330,
+    "comment_lines": 2385,
     "comment_density": 0.1,
-    "largest_file_loc": 1298,
+    "largest_file_loc": 1180,
     "rubric_review": {
      "reviewers": {
       "A": {
@@ -17274,12 +17494,12 @@
     }
    },
    "clojure": {
-    "source_loc": 12441,
-    "test_loc": 2007,
+    "source_loc": 12344,
+    "test_loc": 2008,
     "files": 63,
-    "comment_lines": 389,
-    "comment_density": 0.031,
-    "largest_file_loc": 869,
+    "comment_lines": 391,
+    "comment_density": 0.032,
+    "largest_file_loc": 847,
     "rubric_review": {
      "reviewers": {
       "A": {
@@ -17304,12 +17524,12 @@
     }
    },
    "rust": {
-    "source_loc": 24488,
-    "test_loc": 4193,
-    "files": 84,
-    "comment_lines": 2233,
-    "comment_density": 0.091,
-    "largest_file_loc": 1083,
+    "source_loc": 24704,
+    "test_loc": 4370,
+    "files": 85,
+    "comment_lines": 2336,
+    "comment_density": 0.095,
+    "largest_file_loc": 1185,
     "rubric_review": {
      "reviewers": {
       "A": {
@@ -17334,10 +17554,10 @@
     }
    },
    "python": {
-    "source_loc": 13523,
-    "test_loc": 2108,
+    "source_loc": 13884,
+    "test_loc": 2184,
     "files": 79,
-    "comment_lines": 865,
+    "comment_lines": 895,
     "comment_density": 0.064,
     "largest_file_loc": 988,
     "rubric_review": {
@@ -17364,12 +17584,12 @@
     }
    },
    "go": {
-    "source_loc": 22902,
-    "test_loc": 3709,
-    "files": 86,
-    "comment_lines": 2176,
-    "comment_density": 0.095,
-    "largest_file_loc": 1084,
+    "source_loc": 25162,
+    "test_loc": 4111,
+    "files": 94,
+    "comment_lines": 2503,
+    "comment_density": 0.099,
+    "largest_file_loc": 1253,
     "rubric_review": {
      "reviewers": {
       "A": {
@@ -17394,12 +17614,12 @@
     }
    },
    "common-lisp": {
-    "source_loc": 14113,
-    "test_loc": 1626,
+    "source_loc": 14196,
+    "test_loc": 1670,
     "files": 64,
-    "comment_lines": 1274,
-    "comment_density": 0.09,
-    "largest_file_loc": 974,
+    "comment_lines": 1289,
+    "comment_density": 0.091,
+    "largest_file_loc": 856,
     "rubric_review": {
      "reviewers": {
       "A": {
@@ -17482,6 +17702,24 @@
       "testability": 3.0
      }
     }
+   },
+   "x86_64-asm-engine": {
+    "source_loc": 9919,
+    "test_loc": 3065,
+    "files": 14,
+    "comment_lines": 687,
+    "comment_density": 0.069,
+    "largest_file_loc": 1318,
+    "rubric_review": null
+   },
+   "arm64-asm-engine": {
+    "source_loc": 11018,
+    "test_loc": 4476,
+    "files": 17,
+    "comment_lines": 1681,
+    "comment_density": 0.153,
+    "largest_file_loc": 1528,
+    "rubric_review": null
    }
   },
   "6_optimization_effectiveness": [
@@ -28540,60 +28778,62 @@
     "digests_identical": true,
     "engines": {
      "java": {
-      "speedup": 1.38112856870797,
-      "geomean_before_s": 0.005321540541889496,
-      "geomean_after_s": 0.0038530377710365785,
-      "worst_ratio": 0.9363588842274511,
-      "significantly_slower": [],
-      "peak_rss_before": 8816095232,
-      "peak_rss_after": 9621774336
+      "speedup": 1.408698907624343,
+      "geomean_before_s": 0.005470142495955234,
+      "geomean_after_s": 0.003883116872135713,
+      "worst_ratio": 0.8771966202558469,
+      "significantly_slower": [
+       "q14_sort_full_string"
+      ],
+      "peak_rss_before": 8278028288,
+      "peak_rss_after": 9170538496
      },
      "python": {
-      "speedup": 2.854730218128826,
-      "geomean_before_s": 0.12347140671300263,
-      "geomean_after_s": 0.043251514951887025,
-      "worst_ratio": 0.8656210366952729,
+      "speedup": 3.0375577672041465,
+      "geomean_before_s": 0.12904576842307927,
+      "geomean_after_s": 0.04248339564644942,
+      "worst_ratio": 0.8809689742995497,
       "significantly_slower": [],
-      "peak_rss_before": 16519147520,
-      "peak_rss_after": 22748155904
+      "peak_rss_before": 16489209856,
+      "peak_rss_after": 22850551808
      },
      "go": {
-      "speedup": 1.7430034752749752,
-      "geomean_before_s": 0.005262995724937214,
-      "geomean_after_s": 0.0030194981246993366,
-      "worst_ratio": 0.6973325380504293,
+      "speedup": 1.7625515753650884,
+      "geomean_before_s": 0.005411294746366003,
+      "geomean_after_s": 0.0030701483133877246,
+      "worst_ratio": 0.88841083879022,
       "significantly_slower": [],
-      "peak_rss_before": 2579496960,
-      "peak_rss_after": 2627112960
+      "peak_rss_before": 2503376896,
+      "peak_rss_after": 2607054848
      },
      "rust": {
-      "speedup": 1.0663300609481838,
-      "geomean_before_s": 0.0030771828974372126,
-      "geomean_after_s": 0.0028857696224947205,
-      "worst_ratio": 0.6562949344463874,
+      "speedup": 1.1316545178938593,
+      "geomean_before_s": 0.003069132680149645,
+      "geomean_after_s": 0.0027120756658681115,
+      "worst_ratio": 0.8016321460227473,
       "significantly_slower": [
        "q15_sort_multi_key"
       ],
-      "peak_rss_before": 1049120768,
-      "peak_rss_after": 1053270016
+      "peak_rss_before": 1050701824,
+      "peak_rss_after": 1068986368
      },
      "common-lisp": {
-      "speedup": 2.478300306214009,
-      "geomean_before_s": 0.02192700244755482,
-      "geomean_after_s": 0.008847597037605076,
-      "worst_ratio": 0.8554311028013207,
+      "speedup": 2.560792388448901,
+      "geomean_before_s": 0.02210021032707591,
+      "geomean_after_s": 0.008630223374126101,
+      "worst_ratio": 0.8285958508477075,
       "significantly_slower": [],
-      "peak_rss_before": 1522978816,
-      "peak_rss_after": 1774403584
+      "peak_rss_before": 1523105792,
+      "peak_rss_after": 1774333952
      },
      "clojure": {
-      "speedup": 1.1266878306694394,
-      "geomean_before_s": 0.007980492679767174,
-      "geomean_after_s": 0.007083144472258511,
-      "worst_ratio": 0.877286254239853,
+      "speedup": 1.1270211481859278,
+      "geomean_before_s": 0.007780302204858055,
+      "geomean_after_s": 0.006903421659284176,
+      "worst_ratio": 0.9015943482884288,
       "significantly_slower": [],
-      "peak_rss_before": 5748002816,
-      "peak_rss_after": 5776904192
+      "peak_rss_before": 5771997184,
+      "peak_rss_after": 5832404992
      }
     }
    },
@@ -28603,60 +28843,58 @@
     "digests_identical": true,
     "engines": {
      "go": {
-      "speedup": 3.2430963936842963,
-      "geomean_before_s": 0.005335392648107181,
-      "geomean_after_s": 0.0016451538901210232,
-      "worst_ratio": 1.084371473487383,
+      "speedup": 2.6305985392314986,
+      "geomean_before_s": 0.005341121075133235,
+      "geomean_after_s": 0.0020303824378666256,
+      "worst_ratio": 0.8740040912270676,
       "significantly_slower": [],
-      "peak_rss_before": 2394873856,
-      "peak_rss_after": 2542518272
+      "peak_rss_before": 2589814784,
+      "peak_rss_after": 2589392896
      },
      "python": {
-      "speedup": 4.966148847720739,
-      "geomean_before_s": 0.12021443077148058,
-      "geomean_after_s": 0.02420677157646093,
-      "worst_ratio": 0.9559781704699979,
+      "speedup": 4.832628512686097,
+      "geomean_before_s": 0.12213631545724087,
+      "geomean_after_s": 0.025273267981725005,
+      "worst_ratio": 0.919725060618155,
       "significantly_slower": [],
-      "peak_rss_before": 16490487808,
-      "peak_rss_after": 16995700736
+      "peak_rss_before": 16489451520,
+      "peak_rss_after": 16931921920
      },
      "common-lisp": {
-      "speedup": 3.18074987773675,
-      "geomean_before_s": 0.021312859534996235,
-      "geomean_after_s": 0.00670057701932895,
-      "worst_ratio": 0.9651328629112454,
+      "speedup": 3.2129903418639563,
+      "geomean_before_s": 0.02177538851259033,
+      "geomean_after_s": 0.00677729659777245,
+      "worst_ratio": 0.8895038644740723,
       "significantly_slower": [],
-      "peak_rss_before": 1522966528,
-      "peak_rss_after": 1774231552
+      "peak_rss_before": 1523064832,
+      "peak_rss_after": 1774239744
      },
      "java": {
-      "speedup": 1.6064824562998175,
-      "geomean_before_s": 0.005312585983847713,
-      "geomean_after_s": 0.0033069679429205212,
-      "worst_ratio": 0.8466224223376622,
+      "speedup": 1.6407290547746223,
+      "geomean_before_s": 0.005102008198550097,
+      "geomean_after_s": 0.003109598250669689,
+      "worst_ratio": 0.9761405398124734,
       "significantly_slower": [],
-      "peak_rss_before": 8120176640,
-      "peak_rss_after": 3387871232
+      "peak_rss_before": 8660344832,
+      "peak_rss_after": 3133022208
      },
      "rust": {
-      "speedup": 1.957930110453974,
-      "geomean_before_s": 0.0030845329069737132,
-      "geomean_after_s": 0.001575405010885971,
-      "worst_ratio": 0.981308185552822,
+      "speedup": 1.7520082773145924,
+      "geomean_before_s": 0.0030462892818795507,
+      "geomean_after_s": 0.001738741375439607,
+      "worst_ratio": 0.9634672695236585,
       "significantly_slower": [],
-      "peak_rss_before": 1039040512,
-      "peak_rss_after": 1375928320
+      "peak_rss_before": 1064185856,
+      "peak_rss_after": 1310146560
      },
      "clojure": {
-      "speedup": 1.424742661380204,
-      "geomean_before_s": 0.007838921320926662,
-      "geomean_after_s": 0.005501991014526647,
-      "worst_ratio": 0.7661351962063447,
-      "significantly_slower": [
-       "q08_groupby_uniform_multi"
-      ],
-      "peak_rss_before": 5745102848,
-      "peak_rss_after": 9262256128
+      "speedup": 1.5752112141838697,
+      "geomean_before_s": 0.008223629246423255,
+      "geomean_after_s": 0.005220651790930772,
+      "worst_ratio": 0.9898990168440214,
+      "significantly_slower": [],
+      "peak_rss_before": 5781893120,
+      "peak_rss_after": 9274109952
      }
     }
    }
@@ -30105,7 +30343,9 @@
       "conformance": null
      }
     ]
-   }
+   },
+   "x86_64-asm-engine": {},
+   "arm64-asm-engine": {}
   },
   "8_overall": {
    "per_language": {
@@ -30117,7 +30357,7 @@
     },
     "clojure": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 104.6250396,
+     "dev_cost_usd": 122.0794172,
      "correctness_gate": true,
      "geomean_latency_s": 0.00807026526308777
     },

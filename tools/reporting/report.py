@@ -38,15 +38,18 @@ OUT = ROOT / "results/comparisons"
 DOCS = ROOT / "docs/results"
 LANGS = ["java", "clojure", "rust", "python", "go", "common-lisp"]
 ASM = ["x86_64-asm", "arm64-asm"]
+# Complete engines in assembly (ADR-0016, option B): their own cohort, never ranked with the six engines.
+ASM_ENGINES = ["x86_64-asm-engine", "arm64-asm-engine"]
 # Fixed categorical slots (reference palette order); identity is also always in axis labels.
 COLORS = {"java": "#2a78d6", "clojure": "#eb6834", "rust": "#1baf7a", "python": "#eda100", "go": "#e87ba4",
           "common-lisp": "#008300", "x86_64-asm": "#6250d6", "arm64-asm": "#e34948"}
 COLORS_DARK = {"java": "#3987e5", "clojure": "#d95926", "rust": "#199e70", "python": "#c98500", "go": "#d55181",
                "common-lisp": "#008300", "x86_64-asm": "#9085e9", "arm64-asm": "#e66767"}
 SRC_EXT = {"java": [".java"], "clojure": [".clj", ".cljc", ".edn"], "rust": [".rs"], "python": [".py"],
-           "go": [".go"], "common-lisp": [".lisp", ".asd", ".cl"], "x86_64-asm": [".S", ".s", ".h", ".inc"], "arm64-asm": [".S", ".s", ".h", ".inc"]}
+           "go": [".go"], "common-lisp": [".lisp", ".asd", ".cl"], "x86_64-asm": [".S", ".s", ".h", ".inc"], "arm64-asm": [".S", ".s", ".h", ".inc"],
+           "x86_64-asm-engine": [".S", ".s", ".inc"], "arm64-asm-engine": [".S", ".s", ".inc"]}
 COMMENT = {"java": "//", "clojure": ";", "rust": "//", "python": "#", "go": "//", "common-lisp": ";",
-           "x86_64-asm": "#", "arm64-asm": "//"}
+           "x86_64-asm": "#", "arm64-asm": "//", "x86_64-asm-engine": "//", "arm64-asm-engine": "//"}
 DEFAULT_WEIGHTS = {"correctness": 0.35, "development_effort": 0.2, "performance": 0.2, "resources": 0.1,
                    "maintainability": 0.15}
 CAPS_ORDER = ["phase1", "ingest.csv", "ingest.json", "ingest.jsonl", "sql.basic", "test.functions", "phase2",
@@ -114,7 +117,7 @@ def code_metrics(lang: str) -> dict | None:
 
 def collect_correctness() -> dict:
     out = {}
-    for lang in LANGS:
+    for lang in LANGS + ASM_ENGINES:
         rep = load_json(ROOT / "results/correctness" / f"{lang}.json")
         if rep:
             out[lang] = {"summary": rep.get("summary"), "phase_passed": rep.get("phase_passed"),
@@ -268,7 +271,7 @@ def build(weights: dict) -> dict:
     corr = collect_correctness()
     perf = collect_performance()
     tasks = sorted({r["task"] for r in runs})
-    langs_all = LANGS + ASM
+    langs_all = LANGS + ASM + ASM_ENGINES
     kern = collect_kernels()
     reviews = collect_reviews()
 
@@ -372,7 +375,8 @@ def build(weights: dict) -> dict:
             "git_commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip(),
             "runs": [{k: v for k, v in r.items() if k not in ("telemetry", "validation")} for r in runs],
             "capability_matrix": matrix, "reports": {
-                "1_functional_correctness": {**correctness, "kernel_cohort": {l: kern[l]["correctness"] for l in ASM}},
+                "1_functional_correctness": {**correctness, "kernel_cohort": {l: kern[l]["correctness"] for l in ASM},
+                                             "asm_engine_cohort": {l: corr.get(l) for l in ASM_ENGINES}},
                 "2_development_effort": dev,
                 "3_runtime_performance": perf_rep,
                 "3_runtime_performance_kernel_cohort": {l: kern[l]["performance"] for l in ASM},
@@ -419,6 +423,33 @@ def bar_chart(title: str, unit: str, data: dict[str, float | None], fmt=lambda v
             f'<svg viewBox="0 0 {w} {h}" role="img" aria-label="{html.escape(title)}">'
             f'<line x1="{left}" y1="0" x2="{left}" y2="{h}" class="axis"/>{"".join(rows)}</svg>'
             f'<details><summary>Table</summary><table><tr><th>Language</th><th>{html.escape(unit)}</th></tr>{table}</table></details></figure>')
+
+
+def render_asm_engine_cohort(R: dict) -> str:
+    """Option-B cohort: complete engines in assembly, reported next to (never ranked with) the six engines."""
+    corr = R["1_functional_correctness"].get("asm_engine_cohort") or {}
+    dev, q = R["2_development_effort"], R["5_code_quality"]
+    rows = []
+    for l in ASM_ENGINES:
+        c = corr.get(l) or {}
+        tot = (c.get("summary") or {}).get("total") or {}
+        for t in sorted(t for t in (dev.get(l) or {}) if t.startswith("phase")):
+            atts = dev[l][t]
+            cost = sum(a["cost_usd"] or 0 for a in atts)
+            wall = sum(a["wall_seconds"] or 0 for a in atts) / 60
+            rows.append(f"<tr><td>{html.escape(l)}</td><td>{t}</td><td>{len(atts)}</td>"
+                        f"<td class='o-{atts[-1]['outcome']}'>{atts[-1]['outcome']}</td><td>{cost:.2f}</td><td>{wall:.0f}</td>"
+                        f"<td>{sum(a['turns'] or 0 for a in atts)}</td></tr>")
+        m = q.get(l) or {}
+        rows.append(f"<tr><td colspan='7' class='muted'>{html.escape(l)}: conformance (claimed capabilities, with hidden on "
+                    f"AArch64) {tot.get('pass', '—')}/{tot.get('total', '—')}; source LOC {m.get('source_loc', '—')}, "
+                    f"test LOC {m.get('test_loc', '—')}, files {m.get('files', '—')}</td></tr>")
+    return ("<h2>Assembly engine cohort (option B, ADR-0016)</h2><p class='muted'>Complete engines written in x86-64 and "
+            "AArch64 assembly (glibc only, no C) through the same black-box spec and suites. A separate cohort: never "
+            "ranked with the six engines, and the two architectures are developed and validated on different machines. "
+            "A phase may take several sessions of at most 120 minutes; each session is one attempt row.</p>"
+            "<table><tr><th>engine</th><th>phase</th><th>sessions</th><th>outcome</th><th>cost USD</th><th>wall min</th>"
+            f"<th>turns</th></tr>{''.join(rows)}</table>")
 
 
 def render_kernel_cohort(R: dict) -> str:
@@ -557,7 +588,8 @@ def render_html(rep: dict) -> str:
                                 {l: (e["startup_median_s"] or 0) * 1000 or None for l, e in last["engines"].items()},
                                 lambda v: f"{v:,.0f}"))
     charts.append(bar_chart("Source lines of code (automated count)", "LOC",
-                            {l: (q or {}).get("source_loc") for l, q in R["5_code_quality"].items()}, lambda v: f"{v:,.0f}"))
+                            {l: (q or {}).get("source_loc") for l, q in R["5_code_quality"].items() if l in LANGS},
+                            lambda v: f"{v:,.0f}"))
 
     css_vars = "".join(f"--c-{k}:{v};" for k, v in COLORS.items())
     css_dark = "".join(f"--c-{k}:{v};" for k, v in COLORS_DARK.items())
@@ -569,7 +601,7 @@ def render_html(rep: dict) -> str:
     cap_rows = "".join("<tr><td><code>" + c + "</code></td>" + "".join(
         f"<td>{'✔' if c in (caps.get(l) or []) else '·'}</td>" for l in LANGS) + "</tr>" for c in CAPS_ORDER)
     ov = R["8_overall"]
-    kernel_html = render_kernel_cohort(R)
+    kernel_html = render_kernel_cohort(R) + render_asm_engine_cohort(R)
     rubric_rows = "".join(
         f"<tr><td>{html.escape(l)}</td>" + "".join(
             f"<td>{' / '.join(str(r[c]) for r in q['rubric_review']['reviewers'].values())}</td>"
