@@ -1092,6 +1092,34 @@ def record(run_id: str) -> Path:
     return dest
 
 
+def graft_history(ws: Path, base: str, repo_ref: str, wd: str, branch: str) -> None:
+    sh(["git", "fetch", "-q", str(ws), "HEAD"], cwd=ROOT)
+    tip = git(["rev-parse", "FETCH_HEAD"], ROOT)
+    idx = ROOT / ".git" / "pq-graft-index"
+    env = {**os.environ, "GIT_INDEX_FILE": str(idx)}
+    mapped = {git(["rev-parse", base], ROOT): git(["rev-parse", repo_ref], ROOT)}
+    try:
+        for c in git(["rev-list", "--topo-order", "--reverse", f"{base}..{tip}"], ROOT).split():
+            sh(["git", "read-tree", repo_ref], cwd=ROOT, env=env)
+            sh(["git", "rm", "-r", "-q", "--cached", "--ignore-unmatch", wd], cwd=ROOT, env=env)
+            if sh(["git", "cat-file", "-e", f"{c}:{wd}"], cwd=ROOT, check=False).returncode == 0:
+                sh(["git", "read-tree", f"--prefix={wd}/", f"{c}:{wd}"], cwd=ROOT, env=env)
+            tree = sh(["git", "write-tree"], cwd=ROOT, env=env).stdout.strip()
+            fmt = git(["show", "-s", "--format=%an%x00%ae%x00%aD%x00%P", c], ROOT).split("\0")
+            parents = [mapped[p] for p in fmt[3].split() if p in mapped]
+            msg = git(["show", "-s", "--format=%B", c], ROOT)
+            cenv = {**os.environ, "GIT_AUTHOR_NAME": fmt[0], "GIT_AUTHOR_EMAIL": fmt[1], "GIT_AUTHOR_DATE": fmt[2],
+                    "GIT_COMMITTER_DATE": fmt[2]}
+            args = ["git", "commit-tree", tree, *[x for p in parents for x in ("-p", p)]]
+            mapped[c] = subprocess.run(args, cwd=ROOT, env=cenv, input=msg, text=True, capture_output=True,
+                                       check=True).stdout.strip()
+    finally:
+        idx.unlink(missing_ok=True)
+    # import_run has `branch` checked out (at repo_ref, clean tree): move it to the grafted tip.
+    assert git(["rev-parse", "--abbrev-ref", "HEAD"], ROOT) == branch
+    git(["reset", "-q", "--hard", mapped[tip]], ROOT)
+
+
 def import_run(run_id: str, merge: bool) -> str:
     """Applies the agent's commits (language dir only) onto a branch in the main repo."""
     rd = run_dir(run_id)
@@ -1112,8 +1140,12 @@ def import_run(run_id: str, merge: bool) -> str:
     git(["branch", "-f", branch, m["repo_ref"]], ROOT)
     git(["checkout", "-q", branch], ROOT)
     try:
-        files = sorted(patches.glob("*.patch"))
-        if files:
+        if git(["rev-list", "--merges", f"{base}..HEAD"], ws):
+            # format-patch linearises merge commits (agents may merge their own side branches), so the patches
+            # need not apply in order. Graft the history instead: same parents, authors, dates and messages, and
+            # each commit's tree = repo_ref's tree with the work dir taken from the agent's commit.
+            graft_history(ws, base, m["repo_ref"], wd, branch)
+        elif files := sorted(patches.glob("*.patch")):
             sh(["git", "am", "-q", "--committer-date-is-author-date", *map(str, files)], cwd=ROOT)
         # Squash-safe check: the branch must differ from repo_ref only inside the language dir.
         changed = git(["diff", "--name-only", m["repo_ref"], "HEAD"], ROOT).splitlines()
