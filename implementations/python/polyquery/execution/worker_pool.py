@@ -212,6 +212,7 @@ class WorkerPool:
                 if pid == 0:  # pragma: no cover - runs in the child
                     for fd in (*parent_fds, task_write, result_read):
                         os.close(fd)
+                    _detach_stdio()
                     _serve(task_read, result_write, self._registry)
                 os.close(task_read)
                 os.close(result_write)
@@ -262,6 +263,15 @@ class WorkerPool:
 
 
 # ------------------------------------------------------------ worker side
+
+
+def _detach_stdio() -> None:  # pragma: no cover - child
+    """Workers outlive single queries: they must not hold the engine's
+    protocol streams (stdin/stdout) open or write to them."""
+    devnull = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull, 0)
+    os.dup2(devnull, 1)
+    os.close(devnull)
 
 
 def _serve(task_fd: int, result_fd: int, registry: dict[int, object]) -> None:  # pragma: no cover - child
