@@ -12,3 +12,7 @@
 2026-10-11T06:03:19+00:00 [a-refactor-plan-separation-rust-a1-20261011T054657Z] agent finished; collecting telemetry
 2026-10-11T06:03:19+00:00 [a-refactor-plan-separation-rust-a1-20261011T054657Z] validating (clean clone, sandboxed)
 2026-10-11T06:03:42+00:00 [a-refactor-plan-separation-rust-a1-20261011T054657Z] outcome=success cost=$5.855050400000002 turns=79 wall=970.2s
+2026-10-11T06:07:52+00:00 [a-refactor-plan-separation-python-a1-20261011T054658Z] agent finished; collecting telemetry
+2026-10-11T06:07:52+00:00 [a-refactor-plan-separation-python-a1-20261011T054658Z] validating (clean clone, sandboxed)
+2026-10-11T06:08:22+00:00 [a-refactor-plan-separation-python-a1-20261011T054658Z] outcome=success cost=$4.8918387999999995 turns=67 wall=1237.6s
+2026-10-11T06:08:22+00:00 wave wave-a-refactor-plan-separation-a1-20261011T054654Z finished: plan=success, plan=success, plan=success, plan=success

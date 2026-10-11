@@ -1,0 +1,25 @@
+{
+ "wave_id": "wave-a-refactor-plan-separation-a1-20261011T060719Z",
+ "task": "refactor-plan-separation",
+ "track": "A",
+ "attempt": 1,
+ "seed": 28436,
+ "order": [
+  "java"
+ ],
+ "run_ids": [
+  "a-refactor-plan-separation-java-a1-20261011T060719Z"
+ ],
+ "started": "2026-10-11T06:07:20+00:00",
+ "parallel": 1,
+ "limits": {
+  "timeout_min": 330,
+  "budget_usd": 200.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  3.75390625,
+  5.17333984375,
+  5.828125
+ ]
+}
