@@ -577,15 +577,24 @@ ENDF pqk_x86_avx2_sum_f64
  * size_t pqk_x86_avx2_minmax_i64(data, validity, n, out_min, out_max)
  * Args:     rdi = data, rsi = validity, rdx = n, rcx = out_min, r8 = out_max
  * Returns:  rax = number of valid rows; *out_min / *out_max written if > 0
- * Clobbers: rax, rdx, rsi, rdi, r9, r10, r11, ymm0-ymm7, ymm12, ymm13,
+ * Clobbers: rax, rdx, rsi, rdi, r9, r10, r11, ymm0-ymm13,
  *           flags (rbx, r12-r14 saved and restored; rcx is preserved)
- * Algorithm: min accs ymm0/ymm2, max accs ymm1/ymm3 (no 64-bit min/max in
- *           AVX2: vpcmpgtq + vblendvpd, MMI_STEP). With validity the compare
- *           result is ANDed with the vpsllvq sign mask (blendv only looks
+ * Algorithm: four accumulator sets, min ymm0/ymm2/ymm8/ymm10, max
+ *           ymm1/ymm3/ymm9/ymm11 (no 64-bit min/max in AVX2: vpcmpgtq +
+ *           vblendvpd, MMI_STEP). Four sets because one set's
+ *           compare -> blend chain is 4 cycles on Zen 5 (2-cycle latency
+ *           each); with the former two sets the loop was latency-bound
+ *           (0.10 -> 0.075 ns/row, L2 and L3). No validity: 32 rows per
+ *           iteration, then groups of 4 rows (set A). A tournament tree
+ *           (3.5 instead of 4 compare/blend ops per 4 rows) and a lazy
+ *           "any lane outside [min, max]?" test were measured: no faster
+ *           in L3, so the data-independent form was kept.
+ *           With validity the compare result is ANDed with the vpsllvq
+ *           sign mask (blendv only looks
  *           at sign bits); the count is popcnt of the validity words.
  *           Scalar parts: r12 = lo, r13 = hi; r14 = count;
  *           r9/r11 = INT64_MAX/MIN; r10 = remaining; rbx = validity bits.
- * Tail:     no validity: 0..7 rows in scalar code. Validity: the final
+ * Tail:     no validity: 0..3 rows in scalar code. Validity: the final
  *           partial block (lvp) in scalar code (cmovnc on VBIT_CF).
  * ====================================================================== */
 
@@ -617,23 +626,47 @@ FUNC pqk_x86_avx2_minmax_i64
         vmovq   %r11, %xmm1
         vpbroadcastq %xmm1, %ymm1
         vmovdqa %ymm1, %ymm3
+        vmovdqa %ymm0, %ymm8
+        vmovdqa %ymm0, %ymm10
+        vmovdqa %ymm1, %ymm9
+        vmovdqa %ymm1, %ymm11
         xor     %r14d, %r14d
         mov     %rdx, %r10
         test    %rsi, %rsi
         jnz     .Lminmax_i64_vmain
         mov     %r10, %r14
-        cmp     $8, %r10
-        jb      .Lminmax_i64_tail
-.Lminmax_i64_main:                                      /* [main] 8 rows */
+        cmp     $32, %r10
+        jb      .Lminmax_i64_quad
+.Lminmax_i64_main:                                      /* [main] 32 rows */
         vmovdqu (%rdi), %ymm4
         vmovdqu 32(%rdi), %ymm5
+        vmovdqu 64(%rdi), %ymm12
+        vmovdqu 96(%rdi), %ymm13
         MMI_STEP %ymm4, %ymm0, %ymm1, none
         MMI_STEP %ymm5, %ymm2, %ymm3, none
-        add     $64, %rdi
-        sub     $8, %r10
-        cmp     $8, %r10
+        MMI_STEP %ymm12, %ymm8, %ymm9, none
+        MMI_STEP %ymm13, %ymm10, %ymm11, none
+        vmovdqu 128(%rdi), %ymm4
+        vmovdqu 160(%rdi), %ymm5
+        vmovdqu 192(%rdi), %ymm12
+        vmovdqu 224(%rdi), %ymm13
+        MMI_STEP %ymm4, %ymm0, %ymm1, none
+        MMI_STEP %ymm5, %ymm2, %ymm3, none
+        MMI_STEP %ymm12, %ymm8, %ymm9, none
+        MMI_STEP %ymm13, %ymm10, %ymm11, none
+        add     $256, %rdi
+        sub     $32, %r10
+        cmp     $32, %r10
         jae     .Lminmax_i64_main
-.Lminmax_i64_tail:                                      /* [tail] 0..7 */
+.Lminmax_i64_quad:                                      /* 4 rows */
+        cmp     $4, %r10
+        jb      .Lminmax_i64_tail
+        vmovdqu (%rdi), %ymm4
+        MMI_STEP %ymm4, %ymm0, %ymm1, none
+        add     $32, %rdi
+        sub     $4, %r10
+        jmp     .Lminmax_i64_quad
+.Lminmax_i64_tail:                                      /* [tail] 0..3 */
         test    %r10, %r10
         jz      .Lminmax_i64_result
 .Lminmax_i64_row:
@@ -656,10 +689,14 @@ FUNC pqk_x86_avx2_minmax_i64
         .rept 16
         vpsllvq shc+g*32(%rip), %ymm12, %ymm13
         vmovdqu g*32(%rdi), %ymm4
-        .if g % 2
-        MMI_STEP %ymm4, %ymm2, %ymm3, %ymm13
-        .else
+        .if g % 4 == 0
         MMI_STEP %ymm4, %ymm0, %ymm1, %ymm13
+        .elseif g % 4 == 1
+        MMI_STEP %ymm4, %ymm2, %ymm3, %ymm13
+        .elseif g % 4 == 2
+        MMI_STEP %ymm4, %ymm8, %ymm9, %ymm13
+        .else
+        MMI_STEP %ymm4, %ymm10, %ymm11, %ymm13
         .endif
         .set g, g + 1
         .endr
@@ -690,6 +727,14 @@ FUNC pqk_x86_avx2_minmax_i64
         dec     %r10
         jnz     .Lminmax_i64_vrow
 .Lminmax_i64_result:                    /* [result] lanes -> r12 / r13 */
+        vpcmpgtq %ymm10, %ymm8, %ymm6           /* sets C, D -> A, B */
+        vblendvpd %ymm6, %ymm10, %ymm8, %ymm8
+        vpcmpgtq %ymm9, %ymm11, %ymm7
+        vblendvpd %ymm7, %ymm11, %ymm9, %ymm9
+        vpcmpgtq %ymm8, %ymm0, %ymm6
+        vblendvpd %ymm6, %ymm8, %ymm0, %ymm0
+        vpcmpgtq %ymm1, %ymm9, %ymm7
+        vblendvpd %ymm7, %ymm9, %ymm1, %ymm1
         vpcmpgtq %ymm2, %ymm0, %ymm6
         vblendvpd %ymm6, %ymm2, %ymm0, %ymm0
         vpcmpgtq %ymm1, %ymm3, %ymm7

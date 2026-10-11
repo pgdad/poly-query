@@ -3,16 +3,20 @@
 # $BASE (default: the pre-optimization baseline 424e5a4) and from the working
 # tree, then runs both alternately, pinned to CPU $CPU, $ROUNDS times, and
 # prints per-kernel medians. Usage: sh cmp.sh [kernel-substring]
-# Env: BASE CPU ROUNDS N REPS VARIANT
+# Env: BASE (git rev or directory with x86_64/) CPU ROUNDS N REPS VARIANT
 set -e
 D=$(cd "$(dirname "$0")/../.." && pwd)
 O=$D/build/verify/cmp
 BASE=${BASE:-424e5a4}; CPU=${CPU:-2}; ROUNDS=${ROUNDS:-5}; N=${N:-4194304}; REPS=${REPS:-15}
 VARIANT=${VARIANT:-x86_avx2}
-mkdir -p "$O/base/x86_64"
-for f in $(cd "$D" && git ls-tree --name-only "$BASE" x86_64/ | grep -E '\.(S|h)$'); do
-  (cd "$D" && git show "$BASE:native-kernels/$f" 2>/dev/null || git show "$BASE:$f") > "$O/base/$f"
-done
+rm -rf "$O/base"; mkdir -p "$O/base/x86_64"
+if [ -d "$BASE" ]; then              # a directory holding x86_64/*.S, *.h
+  cp "$BASE"/x86_64/*.S "$BASE"/x86_64/*.h "$O/base/x86_64/"
+else
+  for f in $(cd "$D" && git ls-tree --name-only "$BASE" x86_64/ | grep -E '\.(S|h)$'); do
+    (cd "$D" && git show "$BASE:native-kernels/$f" 2>/dev/null || git show "$BASE:$f") > "$O/base/$f"
+  done
+fi
 CF="-O3 -w -I$D/include -I$D/reference-c"
 REF="$D/reference-c/pq_kernels_ref.c $D/reference-c/pq_dispatch.c"
 gcc $CF -o "$O/vb_base" "$D/x86_64/verify/vbench.c" $REF $O/base/x86_64/*.S -lm
