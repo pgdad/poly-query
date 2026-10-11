@@ -110,6 +110,9 @@ func (c *vcompiler) compile(e plan.Expr) (vexpr, error) {
 			}
 			return &vintToDecimal{x: in, to: x.To}, nil
 		}
+		if k, err := c.mapKernel(e); k != nil || err != nil {
+			return k, err
+		}
 		return c.elementwise(e)
 	case *plan.Like, *plan.Between:
 		return c.elementwise(e)
@@ -122,10 +125,26 @@ func (c *vcompiler) compile(e plan.Expr) (vexpr, error) {
 		return c.elementwise(e)
 	case *plan.Func:
 		switch x.Name {
-		case "COALESCE", "PQ_SLEEP":
+		case "COALESCE":
+			if k, err := c.branchesKernel(e); k != nil || err != nil {
+				return k, err
+			}
+			return c.fallback(e)
+		case "PQ_SLEEP":
 			return c.fallback(e)
 		}
+		if k, err := c.mapKernel(e); k != nil || err != nil {
+			return k, err
+		}
 		return c.elementwise(e)
+	case *plan.Case:
+		if k, err := c.branchesKernel(e); k != nil || err != nil {
+			return k, err
+		}
+	case *plan.Subquery:
+		if k, err := c.subqueryKernel(x); k != nil || err != nil {
+			return k, err
+		}
 	}
 	return c.fallback(e)
 }

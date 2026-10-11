@@ -255,5 +255,5 @@ func buildLimit(ec *Context, x *physical.Limit, vec bool) (Operator, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &limitOp{input: in, offset: offset, count: count}, nil
+	return &limitOp{input: in, offset: offset, offset0: offset, count: count}, nil
 }

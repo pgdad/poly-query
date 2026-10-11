@@ -109,6 +109,10 @@ class Gen:
                 lambda: f"ABS({e('INT')})",
                 lambda: f"LENGTH({e('STR')})",
                 lambda: f"YEAR({e(r.choice(['DATE', 'TS']))})",
+                lambda: f"{r.choice(['MONTH', 'DAY'])}({e(r.choice(['DATE', 'TS']))})",
+                lambda: f"{r.choice(['HOUR', 'MINUTE', 'SECOND'])}({e('TS')})",
+                lambda: f"CASE WHEN {e('BOOL')} THEN {e('INT')} WHEN {e('BOOL')} THEN {e('INT')} END",
+                lambda: f"COALESCE({e('INT')}, {e('INT')}, {e('INT')})",
                 lambda: f"CASE WHEN {e('BOOL')} THEN {e('INT')} ELSE {e('INT')} END",
                 lambda: f"COALESCE({e('INT')}, {e('INT')})",
                 lambda: f"CAST({e('DEC')} AS INT64)",
@@ -128,6 +132,8 @@ class Gen:
             return r.choice([
                 lambda: f"({e('FLOAT')} {r.choice(['+', '-', '*', '/'])} {e(r.choice(['FLOAT', 'INT', 'DEC']))})",
                 lambda: f"CAST({e('DEC')} AS FLOAT64)",
+                lambda: f"CAST({e('INT')} AS FLOAT64)",
+                lambda: f"CASE WHEN {e('BOOL')} THEN {e('FLOAT')} ELSE {e('FLOAT')} END",
                 lambda: f"SQRT(ABS({e('FLOAT')}))",
                 lambda: f"({e('DEC')} / {e('INT')})",
             ])()
@@ -140,6 +146,8 @@ class Gen:
                 lambda: f"CONCAT({e('STR')}, {e('INT')})",
                 lambda: f"TRIM({e('STR')})",
                 lambda: f"CASE WHEN {e('BOOL')} THEN {e('STR')} END",
+                lambda: f"CASE WHEN {e('BOOL')} THEN {e('STR')} WHEN {e('BOOL')} THEN {e('STR')} ELSE {e('STR')} END",
+                lambda: f"COALESCE({e('STR')}, {e('STR')})",
                 lambda: f"CAST({e('INT')} AS STRING)",
                 lambda: f"REPLACE({e('STR')}, 'a', 'b')",
             ])()
@@ -162,7 +170,8 @@ class Gen:
         if k == "DATE":
             return r.choice(cols or [self.lit("DATE")])
         if k == "TS":
-            return r.choice([lambda: f"DATE_TRUNC('month', {e(r.choice(['TS', 'DATE']))})"] +
+            unit = r.choice(['year', 'month', 'day', 'hour', 'minute'])
+            return r.choice([lambda: f"DATE_TRUNC('{unit}', {e(r.choice(['TS', 'DATE']))})"] +
                             [lambda: c for c in cols])()
         return self.lit(k)
 
@@ -243,15 +252,46 @@ class Gen:
             return q
         # subqueries
         t = r.choice(list(TABLES))
-        inner = r.choice([
-            "SELECT customer_id FROM c WHERE segment = 'consumer'",
-            "SELECT order_id FROM o WHERE status = 'paid'",
-            "SELECT n50 FROM nh",
-        ])
         outer_col = {"tx": "customer_id", "c": "customer_id", "o": "order_id", "i": "order_id",
                      "p": "product_id", "nh": "n90"}[t]
-        return (f"SELECT COUNT(*), MIN({outer_col}) FROM {t} WHERE {outer_col} "
-                f"{r.choice(['IN', 'NOT IN'])} ({inner})")
+        sub = r.random()
+        if sub < 0.4:
+            inner = r.choice([
+                "SELECT customer_id FROM c WHERE segment = 'consumer'",
+                "SELECT order_id FROM o WHERE status = 'paid'",
+                "SELECT n50 FROM nh",
+            ])
+            return (f"SELECT COUNT(*), MIN({outer_col}) FROM {t} WHERE {outer_col} "
+                    f"{r.choice(['IN', 'NOT IN'])} ({inner})")
+        if sub < 0.55:
+            inner = r.choice(["SELECT s70 FROM nh", "SELECT segment FROM c WHERE customer_id < 50",
+                              "SELECT status FROM o WHERE order_id % 7 = 0"])
+            col = r.choice(self.cols([("t0", t)], "STR") or ["'paid'"])
+            return (f"SELECT COUNT(*) FROM {t} t0 WHERE {col} "
+                    f"{r.choice(['IN', 'NOT IN'])} ({inner})")
+        if sub < 0.7:
+            scalar = r.choice(["SELECT AVG(n90) FROM nh", "SELECT MAX(order_id) / 3 FROM o",
+                               "SELECT MIN(customer_id) FROM c WHERE segment = 'nope'",
+                               "SELECT n50 FROM nh WHERE id = 5"])
+            return f"SELECT COUNT(*), SUM({outer_col}) FROM {t} WHERE {outer_col} > ({scalar})"
+        if sub < 0.85:
+            exists = r.choice([
+                ("c", "o", "o.customer_id = x.customer_id", "o.status = 'paid'"),
+                ("o", "i", "i.order_id = x.order_id", "i.quantity > 3"),
+                ("c", "tx", "tx.customer_id = x.customer_id", "tx.amount > x.credit_limit / 100"),
+                ("nh", "c", "c.birth_year = x.n90", "c.is_active"),
+            ])
+            outer, inner_t, corr, extra = exists
+            return (f"SELECT COUNT(*) FROM {outer} x WHERE {r.choice(['', 'NOT '])}EXISTS "
+                    f"(SELECT 1 FROM {inner_t} WHERE {corr} AND {extra})")
+        corr = r.choice([
+            ("c", "SELECT COUNT(*) FROM o WHERE o.customer_id = x.customer_id", "customer_id"),
+            ("c", "SELECT SUM(o.item_count) FROM o WHERE o.customer_id = x.customer_id AND o.status <> 'paid'", "customer_id"),
+            ("o", "SELECT MAX(i.quantity) FROM i WHERE i.order_id = x.order_id", "order_id"),
+            ("p", "SELECT AVG(i.quantity) FROM i WHERE i.product_id = x.product_id", "product_id"),
+        ])
+        outer, q, col = corr
+        return f"SELECT x.{col}, ({q}) AS v FROM {outer} x ORDER BY x.{col} LIMIT {r.randint(1, 50)}"
 
 
 class Session:

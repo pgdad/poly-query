@@ -69,6 +69,10 @@ type subResult struct {
 	exists  bool                // EXISTS / IN: at least one row
 	set     map[string]struct{} // IN: keys of the non-NULL values
 	hasNull bool                // IN: some value is NULL
+	// IN over INT64/DATE/TIMESTAMP/BOOLEAN or STRING comparisons: the
+	// values themselves (vectorized probing, see vinSubquery).
+	ints map[int64]struct{}
+	strs map[string]struct{}
 }
 
 // maxMemo bounds the number of memoized results per correlated subquery.
@@ -84,20 +88,7 @@ func compileSubquery(ec *Context, lay layout, x *plan.Subquery) (evalFn, error) 
 	}
 	var get func(types.Row) (*subResult, error)
 	if len(x.Correlated) == 0 {
-		get = func(types.Row) (*subResult, error) {
-			if r, ok := ec.subCache[x]; ok {
-				return r, nil
-			}
-			r, err := runSubquery(ec, x, sub)
-			if err != nil {
-				return nil, err
-			}
-			if ec.subCache == nil {
-				ec.subCache = map[*plan.Subquery]*subResult{}
-			}
-			ec.subCache[x] = r
-			return r, nil
-		}
+		get = func(types.Row) (*subResult, error) { return ec.uncorrelated(x, sub) }
 	} else {
 		getters := make([]evalFn, len(x.Correlated))
 		for i, c := range x.Correlated {
@@ -109,6 +100,7 @@ func compileSubquery(ec *Context, lay layout, x *plan.Subquery) (evalFn, error) 
 		}
 		cells := make([]types.Value, len(x.Correlated))
 		memo := map[string]*subResult{}
+		var cached Operator // the plan, rewound for every evaluation
 		var key []byte
 		get = func(row types.Row) (*subResult, error) {
 			key = key[:0]
@@ -131,7 +123,7 @@ func compileSubquery(ec *Context, lay layout, x *plan.Subquery) (evalFn, error) 
 				saved[i] = ec.params[c.ID]
 				ec.params[c.ID] = &cells[i]
 			}
-			r, err := runSubquery(ec, x, sub)
+			r, err := runCorrelated(ec, x, sub, &cached)
 			for i, c := range x.Correlated {
 				if saved[i] == nil {
 					delete(ec.params, c.ID)
@@ -207,6 +199,36 @@ func compileSubquery(ec *Context, lay layout, x *plan.Subquery) (evalFn, error) 
 	}, nil
 }
 
+// uncorrelated returns the result of an uncorrelated subquery, computed on
+// first use and cached for the statement.
+func (ec *Context) uncorrelated(x *plan.Subquery, sub physical.Node) (*subResult, error) {
+	if r, ok := ec.subCache[x]; ok {
+		return r, nil
+	}
+	r, err := runSubquery(ec, x, sub)
+	if err != nil {
+		return nil, err
+	}
+	if ec.subCache == nil {
+		ec.subCache = map[*plan.Subquery]*subResult{}
+	}
+	ec.subCache[x] = r
+	return r, nil
+}
+
+// directInKind returns vInt or vStr if IN values of comparison type t are
+// equal exactly when their representations are (no normalization), else
+// vWide (no direct set).
+func directInKind(t types.Type) vclass {
+	switch t.Kind {
+	case types.KindInt64, types.KindDate, types.KindTimestamp, types.KindBoolean:
+		return vInt
+	case types.KindString:
+		return vStr
+	}
+	return vWide
+}
+
 // runSubquery executes a subquery plan and collects the result its kind
 // needs.
 func runSubquery(ec *Context, x *plan.Subquery, sub physical.Node) (*subResult, error) {
@@ -221,16 +243,37 @@ func runSubquery(ec *Context, x *plan.Subquery, sub physical.Node) (*subResult, 
 	return r, err
 }
 
-func collectSubquery(ec *Context, x *plan.Subquery, sub physical.Node) (*subResult, error) {
-	if len(x.Correlated) > 0 {
+// runCorrelated is runSubquery for a correlated subquery: the operator
+// tree built by the first evaluation is kept in *cached and rewound for
+// later ones (if all its operators support that).
+func runCorrelated(ec *Context, x *plan.Subquery, sub physical.Node, cached *Operator) (*subResult, error) {
+	mark := ec.Mem.Mark()
+	defer ec.Mem.Reset(mark)
+	op := *cached
+	if op == nil || !rewindOp(op) {
 		// Evaluated per outer row: never worth parallel workers.
 		ec.serial++
-		defer func() { ec.serial-- }()
+		var err error
+		op, err = Build(ec, sub)
+		ec.serial--
+		if err != nil {
+			return nil, err
+		}
+		*cached = op
 	}
-	op, err := Build(ec, sub)
+	return collectRows(ec, x, sub, op)
+}
+
+func collectSubquery(ec *Context, x *plan.Subquery, sub physical.Node) (*subResult, error) {
+	op, err := input(ec, sub, ec.Vectorized)
 	if err != nil {
 		return nil, err
 	}
+	return collectRows(ec, x, sub, op)
+}
+
+// collectRows reads the result of a subquery from its operator.
+func collectRows(ec *Context, x *plan.Subquery, sub physical.Node, op Operator) (*subResult, error) {
 	r := &subResult{value: null}
 	row, err := op.Next()
 	if err != nil {
@@ -252,6 +295,12 @@ func collectSubquery(ec *Context, x *plan.Subquery, sub physical.Node) (*subResu
 		r.set = map[string]struct{}{}
 		et := sub.Schema()[0].Type
 		cast, eff := caster(et, x.CmpType)
+		switch directInKind(eff) {
+		case vInt:
+			r.ints = map[int64]struct{}{}
+		case vStr:
+			r.strs = map[string]struct{}{}
+		}
 		var key []byte
 		for n := 0; row != nil; n++ {
 			r.exists = true
@@ -264,6 +313,11 @@ func collectSubquery(ec *Context, x *plan.Subquery, sub physical.Node) (*subResu
 				}
 				key = appendKey(key[:0], v, eff)
 				r.set[string(key)] = struct{}{}
+				if r.ints != nil {
+					r.ints[v.I] = struct{}{}
+				} else if r.strs != nil {
+					r.strs[v.S] = struct{}{}
+				}
 			}
 			if n%checkEvery == 0 {
 				if err := ec.Check(); err != nil {
@@ -281,9 +335,118 @@ func collectSubquery(ec *Context, x *plan.Subquery, sub physical.Node) (*subResu
 // ---------------------------------------------------------------- correlated subplans
 
 // lookupTable is the hashed input of a ParamLookup, built once per query.
+// A single INT-class or STRING key of the same type on both sides is
+// hashed directly (ints or strs map it to a group, whose rows are
+// order[offsets[g]:offsets[g+1]]); other keys use their canonical encoding
+// (index).
 type lookupTable struct {
-	rows  []types.Row
-	index map[string][]int32
+	rows    []types.Row
+	index   map[string][]int32
+	ints    *intGroupMap
+	strs    *strGroupMap
+	offsets []int32
+	order   []int32
+}
+
+// directLookupKey reports how a ParamLookup's key can be hashed directly:
+// vInt or vStr, or ok = false (canonical encoding).
+func directLookupKey(n *physical.ParamLookup) (cls vclass, ok bool) {
+	if len(n.InnerKeys) != 1 {
+		return 0, false
+	}
+	t := n.InnerKeys[0].Type()
+	if t != n.OuterKeys[0].Type() {
+		return 0, false
+	}
+	switch t.Kind {
+	case types.KindInt64, types.KindBoolean, types.KindDate, types.KindTimestamp:
+		return vInt, true
+	case types.KindDecimal:
+		return vInt, !t.IsWide()
+	case types.KindString:
+		return vStr, true
+	}
+	return 0, false
+}
+
+// matches returns the indexes of the rows whose key equals the outer key
+// values computed by outer.
+func (t *lookupTable) matches(outer []evalFn, outTypes []types.Type) ([]int32, error) {
+	if t.index != nil {
+		key, ok, err := joinKey(nil, outer, outTypes, nil)
+		if err != nil || !ok {
+			return nil, err
+		}
+		return t.index[string(key)], nil
+	}
+	v, err := outer[0](nil)
+	if err != nil || v.Null {
+		return nil, err
+	}
+	var g int32
+	var ok bool
+	if t.ints != nil {
+		g, _, ok = t.ints.find(v.I)
+	} else {
+		g, _, ok = t.strs.find(v.S, strKeyHash(v.S))
+	}
+	if !ok {
+		return nil, nil
+	}
+	return t.order[t.offsets[g]:t.offsets[g+1]], nil
+}
+
+// buildDirect indexes rows by their single key (see lookupTable).
+func (t *lookupTable) buildDirect(rows []types.Row, key evalFn, cls vclass) error {
+	if cls == vInt {
+		t.ints = newIntGroupMap()
+	} else {
+		t.strs = newStrGroupMap()
+	}
+	gids := make([]int32, 0, len(rows))
+	var groups int32
+	for _, row := range rows {
+		v, err := key(row)
+		if err != nil {
+			return err
+		}
+		if v.Null {
+			continue
+		}
+		t.rows = append(t.rows, row)
+		var g int32
+		var slot int
+		var ok bool
+		if cls == vInt {
+			if g, slot, ok = t.ints.find(v.I); !ok {
+				g = groups
+				groups++
+				t.ints.insert(slot, v.I, g)
+			}
+		} else {
+			h := strKeyHash(v.S)
+			if g, slot, ok = t.strs.find(v.S, h); !ok {
+				g = groups
+				groups++
+				t.strs.insert(slot, v.S, h, g)
+			}
+		}
+		gids = append(gids, g)
+	}
+	t.offsets = make([]int32, groups+1)
+	for _, g := range gids {
+		t.offsets[g+1]++
+	}
+	for g := int32(1); g <= groups; g++ {
+		t.offsets[g] += t.offsets[g-1]
+	}
+	next := append([]int32(nil), t.offsets[:groups]...)
+	t.order = make([]int32, len(gids))
+	for r, g := range gids {
+		t.order[next[g]] = int32(r)
+		next[g]++
+	}
+	return nil
 }
 
 // paramLookupOp returns the cached input rows matching the current outer
@@ -308,12 +471,8 @@ func (o *paramLookupOp) Next() (types.Row, error) {
 			return nil, err
 		}
 		o.table = t
-		key, ok, err := joinKey(nil, o.outer, o.outTypes, nil)
-		if err != nil {
+		if o.matches, err = t.matches(o.outer, o.outTypes); err != nil {
 			return nil, err
-		}
-		if ok {
-			o.matches = t.index[string(key)]
 		}
 	}
 	for o.pos < len(o.matches) {
@@ -337,7 +496,7 @@ func (ec *Context) lookupTable(n *physical.ParamLookup) (*lookupTable, error) {
 	if t, ok := ec.lookups[n]; ok {
 		return t, nil
 	}
-	in, err := Build(ec, n.Input)
+	in, err := input(ec, n.Input, ec.Vectorized)
 	if err != nil {
 		return nil, err
 	}
@@ -353,24 +512,38 @@ func (ec *Context) lookupTable(n *physical.ParamLookup) (*lookupTable, error) {
 	if err != nil {
 		return nil, err
 	}
-	t := &lookupTable{index: map[string][]int32{}}
-	var key []byte
-	for _, row := range rows {
-		k, ok, err := joinKey(key[:0], keys, ts, row)
-		key = k
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			t.rows = append(t.rows, row)
-			t.index[string(k)] = append(t.index[string(k)], int32(len(t.rows)-1))
-		}
+	t := &lookupTable{}
+	if cls, ok := directLookupKey(n); ok {
+		err = t.buildDirect(rows, keys[0], cls)
+	} else {
+		err = t.buildEncoded(rows, keys, ts)
+	}
+	if err != nil {
+		return nil, err
 	}
 	if ec.lookups == nil {
 		ec.lookups = map[*physical.ParamLookup]*lookupTable{}
 	}
 	ec.lookups[n] = t
 	return t, nil
+}
+
+// buildEncoded indexes rows by the canonical encoding of their keys.
+func (t *lookupTable) buildEncoded(rows []types.Row, keys []evalFn, ts []types.Type) error {
+	t.index = map[string][]int32{}
+	var key []byte
+	for _, row := range rows {
+		k, ok, err := joinKey(key[:0], keys, ts, row)
+		key = k
+		if err != nil {
+			return err
+		}
+		if ok {
+			t.rows = append(t.rows, row)
+			t.index[string(k)] = append(t.index[string(k)], int32(len(t.rows)-1))
+		}
+	}
+	return nil
 }
 
 // replayOp returns the cached rows of a Materialize node.
@@ -391,7 +564,7 @@ func (ec *Context) materialized(n *physical.Materialize) ([]types.Row, error) {
 	if rows, ok := ec.cached[n]; ok {
 		return rows, nil
 	}
-	in, err := Build(ec, n.Input)
+	in, err := input(ec, n.Input, ec.Vectorized)
 	if err != nil {
 		return nil, err
 	}

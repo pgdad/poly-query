@@ -236,10 +236,11 @@ func (p *projectOp) Next() (types.Row, error) {
 // ---------------------------------------------------------------- limit
 
 type limitOp struct {
-	input  Operator
-	offset int64
-	count  int64 // < 0 = unlimited
-	seen   int64
+	input   Operator
+	offset  int64 // rows still to skip
+	offset0 int64 // OFFSET (rewind)
+	count   int64 // < 0 = unlimited
+	seen    int64
 }
 
 func (l *limitOp) Next() (types.Row, error) {
