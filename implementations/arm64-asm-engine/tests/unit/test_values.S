@@ -980,7 +980,7 @@ LFUNC test_values
     LSTRO x19, " 2.5e1 "
     C_CAST T_STR, T_FLOAT, 0x4039000000000000, 0, "string 2.5e1 -> float"
     LSTRO x19, "2024-01-01"
-    C_CAST T_STR, T_TS, 1704067200000000, 0, "string date -> ts"
+    C_CAST T_STR, T_TS, 0, ERR_CONVERSION, "string date -> ts (timestamp syntax required)"
     LSTRO x19, " 2024-01-01 00:00:01 "
     C_CAST T_STR, T_TS, 1704067201000000, 0, "string ts -> ts"
     LSTRO x19, "2024-01-01 00:00:01"
