@@ -7,8 +7,9 @@ pub mod session;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
 
-use crate::engine::Engine;
+use crate::engine::{Engine, QueryResult};
 use crate::error::{Error, Result};
+use crate::exec::Row;
 use crate::json::{self, Json};
 use crate::storage::{ColumnStats, Field, Table};
 use request::Request;
@@ -17,6 +18,9 @@ pub const ENGINE_NAME: &str = "polyquery-rust";
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL_VERSION: i64 = 1;
 pub const SPEC_VERSION: &str = "1.0.0";
+
+/// Stack size of threads that process requests (deep expressions recurse).
+pub const WORKER_STACK_BYTES: usize = 256 * 1024 * 1024;
 
 /// Capability strings claimed by this engine (phases/README.md).
 pub const CAPABILITIES: &[&str] = &[
@@ -38,6 +42,8 @@ pub const CAPABILITIES: &[&str] = &[
     "storage.mmap",
     "index.hash",
     "index.btree",
+    "phase4",
+    "http.streaming",
 ];
 
 /// The `version` response body (without id).
@@ -72,7 +78,7 @@ pub fn capabilities_json() -> Json {
     ])
 }
 
-fn columns_json(fields: &[Field]) -> Json {
+pub fn columns_json(fields: &[Field]) -> Json {
     Json::Array(
         fields
             .iter()
@@ -134,7 +140,7 @@ pub fn error_response(id: Json, err: &Error) -> Json {
 }
 
 /// Handles one raw request line and returns the single-line response.
-pub fn handle_line(engine: &mut Engine, line: &str) -> String {
+pub fn handle_line(engine: &Engine, line: &str) -> String {
     let resp = match json::parse(line) {
         Ok(v) => handle_json(engine, &v),
         Err(e) => error_response(
@@ -146,8 +152,8 @@ pub fn handle_line(engine: &mut Engine, line: &str) -> String {
 }
 
 /// Handles one parsed request value, never panicking.
-pub fn handle_json(engine: &mut Engine, req: &Json) -> Json {
-    let id = req.get("id").cloned().unwrap_or(Json::Null);
+pub fn handle_json(engine: &Engine, req: &Json) -> Json {
+    let id = request_id(req);
     if !req.is_object() {
         return error_response(
             Json::Null,
@@ -155,10 +161,28 @@ pub fn handle_json(engine: &mut Engine, req: &Json) -> Json {
         );
     }
     let started = Instant::now();
-    let result = catch_unwind(AssertUnwindSafe(|| {
+    let result = catch_panic(|| {
         Request::parse(req, engine.config.test_functions).and_then(|r| execute(engine, r, started))
-    }));
-    let result = match result {
+    });
+    respond(id, result)
+}
+
+/// The `id` of a request object (`null` if absent).
+pub fn request_id(req: &Json) -> Json {
+    req.get("id").cloned().unwrap_or(Json::Null)
+}
+
+/// Builds the response object for a request result.
+pub fn respond(id: Json, result: Result<Json>) -> Json {
+    match result {
+        Ok(body) => with_id(id, body),
+        Err(err) => error_response(id, &err),
+    }
+}
+
+/// Runs `f`, turning a panic into an `INTERNAL_ERROR` (logged).
+pub fn catch_panic<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    match catch_unwind(AssertUnwindSafe(f)) {
         Ok(r) => r,
         Err(panic) => {
             let msg = panic
@@ -171,11 +195,47 @@ pub fn handle_json(engine: &mut Engine, req: &Json) -> Json {
                 "internal error while processing the request",
             ))
         }
-    };
-    match result {
-        Ok(body) => with_id(id, body),
-        Err(err) => error_response(id, &err),
     }
+}
+
+/// Serializes rows as a JSON array of arrays (types.md §9).
+pub fn rows_json(rows: &[Row], columns: &[Field]) -> String {
+    let mut out = String::with_capacity(rows.len() * 16 + 2);
+    out.push('[');
+    for (i, row) in rows.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        write_row(row, columns, &mut out);
+    }
+    out.push(']');
+    out
+}
+
+/// Serializes one row as a JSON array.
+pub fn write_row(row: &Row, columns: &[Field], out: &mut String) {
+    out.push('[');
+    for (j, v) in row.iter().enumerate() {
+        if j > 0 {
+            out.push(',');
+        }
+        v.write_json(columns[j].data_type, out);
+    }
+    out.push(']');
+}
+
+/// The success body of a `query` request (protocol.md §5.2).
+pub fn query_body(result: &QueryResult, count_only: bool, elapsed: Duration) -> Json {
+    let mut body = vec![ok(), ("columns", columns_json(&result.columns))];
+    if !count_only {
+        body.push(("rows", Json::Raw(rows_json(&result.rows, &result.columns))));
+    }
+    body.push(("row_count", Json::uint(result.row_count)));
+    body.push((
+        "stats",
+        Json::object(vec![("elapsed_us", Json::uint(elapsed.as_micros() as u64))]),
+    ));
+    Json::object(body)
 }
 
 fn ok() -> (&'static str, Json) {
@@ -183,7 +243,7 @@ fn ok() -> (&'static str, Json) {
 }
 
 /// Executes a validated request, returning the success body (without id).
-fn execute(engine: &mut Engine, req: Request, started: Instant) -> Result<Json> {
+pub fn execute(engine: &Engine, req: Request, started: Instant) -> Result<Json> {
     Ok(Json::object(match req {
         Request::Version => return Ok(version_json()),
         Request::Capabilities => return Ok(capabilities_json()),
@@ -285,35 +345,7 @@ fn execute(engine: &mut Engine, req: Request, started: Instant) -> Result<Json> 
         }
         Request::Query { sql, options } => {
             let result = engine.query(&sql, &options)?;
-            let mut body = vec![ok(), ("columns", columns_json(&result.columns))];
-            if !options.count_only {
-                let mut out = String::with_capacity(result.rows.len() * 16 + 2);
-                out.push('[');
-                for (i, row) in result.rows.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    out.push('[');
-                    for (j, v) in row.iter().enumerate() {
-                        if j > 0 {
-                            out.push(',');
-                        }
-                        v.write_json(result.columns[j].data_type, &mut out);
-                    }
-                    out.push(']');
-                }
-                out.push(']');
-                body.push(("rows", Json::Raw(out)));
-            }
-            body.push(("row_count", Json::uint(result.row_count)));
-            body.push((
-                "stats",
-                Json::object(vec![(
-                    "elapsed_us",
-                    Json::uint(started.elapsed().as_micros() as u64),
-                )]),
-            ));
-            body
+            return Ok(query_body(&result, options.count_only, started.elapsed()));
         }
         Request::Explain { sql, options } => {
             vec![ok(), ("plan", engine.explain(&sql, &options)?)]

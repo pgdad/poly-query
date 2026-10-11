@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::storage::pqcf::IndexMeta;
-use crate::storage::{Index, IndexKind, Table};
+use crate::storage::{Index, Table};
 
 #[derive(Debug, Default, Clone)]
 pub struct Catalog {
@@ -140,19 +140,12 @@ impl Catalog {
             .collect()
     }
 
-    /// Builds and registers an index (`CREATE INDEX`).
-    pub fn create_index(
-        &mut self,
-        name: &str,
-        table: &Arc<Table>,
-        column: usize,
-        kind: IndexKind,
-    ) -> Result<()> {
-        if self.index(name).is_some() {
-            return Err(index_exists(name));
+    /// Registers a built index (`CREATE INDEX`); its name must be unused.
+    pub fn add_index(&mut self, index: Arc<Index>) -> Result<()> {
+        if self.index(&index.name).is_some() {
+            return Err(index_exists(&index.name));
         }
-        let ix = Index::build(name, table.clone(), column, kind)?;
-        self.indexes.push(Arc::new(ix));
+        self.indexes.push(index);
         Ok(())
     }
 
