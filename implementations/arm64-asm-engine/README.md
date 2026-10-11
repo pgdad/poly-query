@@ -78,7 +78,7 @@ frame macros in `include/frame.inc`, the internal API contract in
 | semantic analysis | `binder.S`, `functions.S`, `strfuncs.S` | scopes (range variables, outer scopes, CTEs), name resolution, typing with implicit casts, aggregate / GROUP BY validation, subquery binding; scalar functions, CASE, LIKE, BETWEEN, IN lists |
 | planning | `plan.S`, `access.S` | logical plan, physical rewrite (predicate pushdown, hash-join keys, join algorithm, column pruning, build side), access paths (simple predicates, selectivity estimates, index selection, row-group skipping), EXPLAIN JSON |
 | optimizer | `optimize.S` | logical rewrites (Phase 5, option `optimize`): constant folding, predicate simplification |
-| execution | `exec.S`, `eval.S`, `ops.S`, `join.S` | plan operators (scan tasks, filter, project, hash / merge / nested-loop joins, sort-based aggregation, distinct, sort, top-N, limit), subquery evaluation, batched projection for streaming; expression evaluator and aggregate accumulators |
+| execution | `exec.S`, `eval.S`, `ops.S`, `join.S`, `volcano.S` | plan operators (scan tasks, filter, project, hash / merge / nested-loop joins, sort-based aggregation, distinct, sort, top-N, limit), subquery evaluation, batched projection for streaming; expression evaluator and aggregate accumulators |
 | vectorized execution | `vexec.S`, `vagg.S` | batch expression evaluation over column vectors with selection vectors (`veval`, `vfilter`, join key vectors), hash aggregation with partial tables |
 | parallelism | `parallel.S` | worker threads for query tasks (`par_run`), parallel-safety check |
 | server | `http.S`, `server.S`, `log.S` | HTTP/1.1 listener and connection threads, routing, request framing, streaming, shutdown; query registry, admission control, cancellation, disconnect watchdog, metrics; structured logs |
@@ -270,9 +270,9 @@ inherit them. Unsupported values (`"mode":"quantum"`) are `UNSUPPORTED`.
 
 | option | effect |
 |---|---|
-| `mode: "row"` | the unoptimized baseline, kept permanently: the Phase 1–4 executor. Every operator processes one tuple at a time through the tree-walking evaluator `eval`; grouping is sort-based (`qsort_r` on key records). |
+| `mode: "row"` | the unoptimized baseline, kept permanently: a Volcano iterator pipeline (`volcano.S`). Scans, filters and join probes return one tuple per `next()` call, expressions go through the tree-walking evaluator `eval` one row at a time; grouping is sort-based (`qsort_r` on key records). Single-threaded. |
 | `mode: "vectorized"` (also `auto`) | batch execution: scans, filters, projections, join keys and aggregates evaluate expressions over batches of 1024 tuples as column vectors (`vexec.S`), grouping is hash-based (`vagg.S`). |
-| `threads: N` | scans, filters, projections, hash-join probes and aggregations run as up to N parallel tasks (default: `--threads`, else the online CPUs, at most 8; capped at 64). |
+| `threads: N` | in vectorized mode, scans, filters, projections, hash-join probes and aggregations run as up to N parallel tasks (default: `--threads`, else the online CPUs, at most 8; capped at 64; values < 1 are `UNSUPPORTED`). The row-mode baseline ignores it. |
 | `join: "hash"` / `"merge"` / `"nested_loop"` | forces the algorithm of every equi-join; joins without an equality between the two sides are always nested loops. `auto` = hash join for equi-joins. |
 | `optimize: false` | disables the logical rewrites (constant folding, predicate simplification), top-N and the cost-based hash-join build side. Predicate pushdown, column pruning and index selection stay on: they are the Phase 3 access-path rules (index use is controlled by `use_indexes`), and the Phase 3 suite checks them under every option combination. |
 | `native: true` | accepted and ignored (`native.kernels` is not claimed; no kernel library is loaded). |
@@ -305,6 +305,20 @@ results agree. During development a throw-away random query generator
 (outside the repository) compared five option sets on ~4000 random
 queries (joins, LEFT joins, grouping, DISTINCT aggregates, NULL-heavy data,
 LIKE / IN / BETWEEN / CASE, top-N) without a mismatch.
+
+### Row mode: Volcano iterators (`volcano.S`)
+
+`it_open` turns the tuple operators of a plan into an iterator tree; `it_next`
+returns the next tuple (valid until the following call) or 0. A TableScan
+iterator walks the candidate rows of `scan_ranges` (whole table, row groups
+that are not skipped, index row runs) and returns the rows passing the
+pushed-down filter; Filter pulls until its predicate holds; NestedLoopJoin and
+HashJoin materialise their right input when opened (the build side: key
+records / chained hash table) and pull the left input one tuple at a time;
+MergeJoin is blocking (sorts both inputs when opened). Project pulls the rows
+one by one and projects only the rows inside OFFSET / LIMIT (it still pulls
+the rest of its input, so filters see — and raise errors on — the same rows
+in every mode); Aggregate, Distinct and Sort consume their whole input.
 
 ### Vectorized execution (`vexec.S`, `vagg.S`, `ops.S`)
 
@@ -435,8 +449,8 @@ engine (`bench/results-after.txt`). All times in ms.
 | Q6 arithmetic filter, 3 conjuncts | 19.8 | 18.0 | 19.7 | 7.1 | 3.6 | 1.9 | – |
 | Q7 GROUP BY customer_id + top-N | 108.4 | 103.4 | 107.9 | 17.4 | 14.5 | 11.3 | – |
 
-Observations: the row-mode baseline is unchanged (it is the Phase 4
-executor; only top-N helps it in Q4). Vectorization alone gives 2.5–7×
+Observations: the row-mode baseline performs like the Phase 4 executor
+(now a Volcano pipeline; only top-N helps it in Q4). Vectorization alone gives 2.5–7×
 (largest for grouping, where hash aggregation replaces sorting, and for the
 dictionary-string predicate of Q1); threads add up to another 3–5× on 8
 cores. Q7 scales less because its 100,000 groups make the merge of partial

@@ -454,7 +454,12 @@ ENDF project_row
 //   [sp] sink, [sp+8] batch cells, [sp+16] first row of the batch
 // =============================================================================
 LFUNC ex_project
-    ENTER 5
+    cbnz x4, 0f                         // mode "row": rows pulled from the
+    TLS_ADDR x9, g_x_mode               // iterator tree (volcano.S)
+    ldr  w9, [x9]
+    cmp  w9, #XM_ROW
+    b.eq it_project
+0:  ENTER 5
     sub  sp, sp, #32
     str  x4, [sp]
     mov  x19, x0
@@ -1217,6 +1222,10 @@ ENDF distinct_rows
 //   x19 node, x20 ctx, x21 bq
 // =============================================================================
 FUNC ex_tuples
+    TLS_ADDR x9, g_x_mode               // mode "row": Volcano iterators
+    ldr  w9, [x9]
+    cmp  w9, #XM_ROW
+    b.eq it_drain                       // (volcano.S, tail call)
     ENTER 2
     ldr  w9, [x0, #PN_OP]
     cmp  w9, #PO_SCAN

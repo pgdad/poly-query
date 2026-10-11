@@ -16,7 +16,9 @@
   adopted by the caller), optimize.S (constant folding via try_eval,
   predicate simplification). exec.S: scan tasks over candidate ranges,
   top-N (topn_rows), agg_emit_row.
-- mode row = Phase 4 executor (per-tuple eval, sort-based grouping).
+- mode row = Volcano iterators (volcano.S: it_open / it_next; ex_tuples
+  and ex_project dispatch to it_drain / it_project), sort-based grouping,
+  single-threaded.
 - optimize=false disables folding/simplification, top-N, hash build-side
   swap. Pushdown / pruning / index choice stay (Phase 3 suite runs with
   optimize=false in --modes and expects them).
