@@ -9,6 +9,7 @@
     "SELECT id % 500, COUNT(*), SUM(amount), MIN(label), MAX(ratio) FROM g GROUP BY id % 500"
     "SELECT label, grp, COUNT(*), AVG(amount) FROM g GROUP BY label, grp"
     "SELECT COUNT(DISTINCT id % 300), SUM(DISTINCT grp) FROM g"
+    "SELECT SUM(DISTINCT id), COUNT(DISTINCT label), COUNT(*) FROM g WHERE id < 0"
     "SELECT DISTINCT id % 700, flag FROM g"
     ;; dictionary-coded keys (strings), with NULLs, in grouping and joins
     "SELECT label, flag, COUNT(*) FROM g GROUP BY label, flag"

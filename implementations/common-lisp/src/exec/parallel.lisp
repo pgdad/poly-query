@@ -551,6 +551,8 @@ their first input position (many groups: built in parallel up front)."
 (defun run-in-threads (thunks)
   "Call every function of THUNKS in its own thread (the first in the caller)
 and wait for all; re-signal the first error."
+  (when (null thunks)
+    (return-from run-in-threads nil))
   (let* ((ctx *query-context*)
          (errors (list nil))
          (threads (mapcar (lambda (thunk)

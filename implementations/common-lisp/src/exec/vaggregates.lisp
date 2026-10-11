@@ -506,7 +506,9 @@ and the other partial states are emptied."
   (let ((threads (length states)))
     (dotimes (j (length (group-state-aggs total)))
       (let ((s (svref (group-state-aggs total) j)))
-        (when (distinct-state-p s)
+        (when (and (distinct-state-p s)
+                   (loop for gs across states
+                         thereis (svref (distinct-state-tables (svref (group-state-aggs gs) j)) 0)))
           (let* ((sources (coerce (loop for gs across states
                                         for table = (svref (distinct-state-tables
                                                             (svref (group-state-aggs gs) j))
