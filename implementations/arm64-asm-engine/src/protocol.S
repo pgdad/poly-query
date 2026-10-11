@@ -8,7 +8,7 @@
 // =============================================================================
 #include "pq.inc"
 
-    .bss
+    TBSS
     .p2align 3
 g_cur_id:       .skip 8         // JNode* of the request "id" (or 0)
 g_req_start:    .skip 8         // µs timestamp of request start
@@ -139,7 +139,7 @@ m_emptytab: .asciz "table name must not be empty"
 // out_puts(x0 cstr)
 LFUNC out_puts
     mov  x1, x0
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     b    buf_puts
 ENDF out_puts
 
@@ -147,21 +147,21 @@ ENDF out_puts
 LFUNC out_str
     ldr  x2, [x0, #STR_LEN]
     add  x1, x0, #STR_DATA
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     b    buf_put_jstr
 ENDF out_str
 
 // out_i64(x0 value)
 LFUNC out_i64
     mov  x1, x0
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     b    buf_put_i64
 ENDF out_i64
 
 // out_c(w0 char)
 LFUNC out_c
     mov  w1, w0
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     b    buf_putc
 ENDF out_c
 
@@ -169,13 +169,13 @@ ENDF out_c
 LFUNC out_begin
     stp  x29, x30, [sp, #-16]!
     mov  x29, sp
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     str  xzr, [x0, #BUF_LEN]
     ADR_L x0, r_id
     bl   out_puts
-    LDR_G x1, g_cur_id
+    TLS_LDR x1, g_cur_id
     cbz  x1, 1f
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     bl   json_write
     b    2f
 1:  ADR_L x0, r_null
@@ -204,7 +204,7 @@ LFUNC out_flush
     bl   out_c
     mov  w0, #'\n'
     bl   out_c
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     ldr  x19, [x0, #BUF_PTR]
     ldr  x20, [x0, #BUF_LEN]
 1:  cbz  x20, 9f
@@ -355,12 +355,12 @@ FUNC handle_request_line
     stp  x21, x22, [sp, #32]
     mov  x19, x0
     mov  x20, x1
-    ADR_L x0, g_cur_id
+    TLS_ADDR x0, g_cur_id
     str  xzr, [x0]
     bl   now_us
-    ADR_L x1, g_req_start
+    TLS_ADDR x1, g_req_start
     str  x0, [x1]
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, .Lhr_error
     mov  x0, x19
@@ -373,7 +373,7 @@ FUNC handle_request_line
     mov  x21, x0
     ADR_L x1, k_id
     bl   json_get
-    ADR_L x1, g_cur_id
+    TLS_ADDR x1, g_cur_id
     str  x0, [x1]
     // op
     mov  x0, x21
@@ -410,22 +410,22 @@ FUNC handle_request_line
     bl   pq_raise_s
 .Lhr_error:
     // free a half-built table, then emit the error response
-    LDR_G x19, g_pending_table
+    TLS_LDR x19, g_pending_table
     cbz  x19, 3f
     add  x0, x19, #TBL_ARENA
     bl   arena_free
     mov  x0, x19
     bl   free
-    ADR_L x0, g_pending_table
+    TLS_ADDR x0, g_pending_table
     str  xzr, [x0]
 3:  bl   write_error_response
     bl   out_flush
 .Lhr_done:
-    ADR_L x0, g_arena
+    TLS_ADDR x0, g_arena
     bl   arena_free
-    ADR_L x0, g_deadline
+    TLS_ADDR x0, g_deadline
     str  xzr, [x0]
-    ADR_L x0, g_arena_limit
+    TLS_ADDR x0, g_arena_limit
     str  xzr, [x0]
     ldp  x19, x20, [sp, #16]
     ldp  x21, x22, [sp, #32]
@@ -441,14 +441,14 @@ LFUNC write_error_response
     bl   out_begin
     ADR_L x0, r_err
     bl   out_puts
-    ADR_L x0, g_err_code
+    TLS_ADDR x0, g_err_code
     ldr  w0, [x0]
     bl   err_code_name
     bl   out_puts
     ADR_L x0, r_msg
     bl   out_puts
     // sanitise the message to ASCII so the response is always valid UTF-8
-    ADR_L x19, g_err_msg
+    TLS_ADDR x19, g_err_msg
     mov  x20, x19
 1:  ldrb w1, [x20]
     cbz  w1, 2f
@@ -458,11 +458,11 @@ LFUNC write_error_response
     strb w1, [x20]
 11: add  x20, x20, #1
     b    1b
-2:  ADR_L x0, g_out
+2:  TLS_ADDR x0, g_out
     mov  x1, x19
     sub  x2, x20, x19
     bl   buf_put_jstr
-    ADR_L x0, g_err_line
+    TLS_ADDR x0, g_err_line
     ldr  w19, [x0]
     cbz  w19, 3f
     ADR_L x0, r_details
@@ -471,7 +471,7 @@ LFUNC write_error_response
     bl   out_i64
     ADR_L x0, r_column
     bl   out_puts
-    ADR_L x0, g_err_col
+    TLS_ADDR x0, g_err_col
     ldr  w0, [x0]
     bl   out_i64
     mov  w0, #'}'
@@ -534,7 +534,7 @@ FUNC handle_request_batch
     bl   buf_putc
     add  x24, x24, #1
     b    3b
-4:  ADR_L x0, g_arena
+4:  TLS_ADDR x0, g_arena
     bl   arena_free
     ldr  x21, [sp, #BUF_PTR]
     ldr  x22, [sp, #BUF_LEN]
@@ -708,7 +708,7 @@ LFUNC write_column_desc
     bl   out_str
     ADR_L x0, r_type
     bl   out_puts
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     mov  w1, w20
     bl   type_write
     mov  w0, #'"'
@@ -843,7 +843,7 @@ LFUNC op_stats
     ldr  x0, [x22, #COL_NAME]
     ldr  w1, [x22, #COL_TYPE]
     bl   write_column_desc
-    ADR_L x0, g_out                     // reopen the object written above
+    TLS_ADDR x0, g_out                     // reopen the object written above
     ldr  x9, [x0, #BUF_LEN]
     sub  x9, x9, #1
     str  x9, [x0, #BUF_LEN]
@@ -861,14 +861,14 @@ LFUNC op_stats
     cset x24, hs
     ADR_L x0, r_min
     bl   out_puts
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     ldr  x1, [x23, #CST_MIN]
     mov  x2, x24
     ldr  w3, [x22, #COL_TYPE]
     bl   write_value_json
     ADR_L x0, r_max
     bl   out_puts
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     ldr  x1, [x23, #CST_MAX]
     mov  x2, x24
     ldr  w3, [x22, #COL_TYPE]
@@ -1405,7 +1405,7 @@ LFUNC op_load
     cbnz x0, 73f
     RAISE ERR_RESOURCE_LIMIT, "out of memory"
 73: mov  x28, x0
-    ADR_L x1, g_pending_table
+    TLS_ADDR x1, g_pending_table
     str  x28, [x1]
     mov  x0, x28
     mov  x1, x22
@@ -1432,7 +1432,7 @@ LFUNC op_load
     bl   catalog_remove
 8:  mov  x0, x28
     bl   catalog_add
-    ADR_L x1, g_pending_table
+    TLS_ADDR x1, g_pending_table
     str  xzr, [x1]
     bl   out_begin_ok
     mov  x0, x28
@@ -1577,7 +1577,7 @@ LFUNC op_explain
     mov  w2, #1
     bl   get_str
     mov  x20, x0
-    ADR_L x9, g_use_indexes         // option use_indexes (default true)
+    TLS_ADDR x9, g_use_indexes         // option use_indexes (default true)
     mov  w10, #1
     str  w10, [x9]
     mov  x0, x19
@@ -1589,10 +1589,10 @@ LFUNC op_explain
     ADR_L x1, k_use_idx
     mov  w2, #1
     bl   get_bool
-    ADR_L x9, g_use_indexes
+    TLS_ADDR x9, g_use_indexes
     str  w0, [x9]
 01: LDR_G x0, g_max_query_mem
-    ADR_L x1, g_arena_limit
+    TLS_ADDR x1, g_arena_limit
     str  x0, [x1]
     add  x0, x20, #STR_DATA
     ldr  x1, [x20, #STR_LEN]
@@ -1609,7 +1609,7 @@ LFUNC op_explain
     bl   out_begin_ok
     ADR_L x0, r_plan
     bl   out_puts
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     add  x1, x20, #STR_DATA
     ldr  x2, [x20, #STR_LEN]
     bl   buf_put
@@ -1634,7 +1634,7 @@ LFUNC op_query
     mov  w2, #1
     bl   get_str
     mov  x25, x0                    // sql Str*
-    ADR_L x9, g_use_indexes
+    TLS_ADDR x9, g_use_indexes
     mov  w10, #1
     str  w10, [x9]
     mov  x21, #-1
@@ -1668,7 +1668,7 @@ LFUNC op_query
     bl   now_us
     mov  x1, #1000
     madd x0, x26, x1, x0
-    ADR_L x1, g_deadline
+    TLS_ADDR x1, g_deadline
     str  x0, [x1]
 2:  // result mode
     mov  x0, x20
@@ -1713,7 +1713,7 @@ LFUNC op_query
     ADR_L x1, k_use_idx
     mov  w2, #1
     bl   get_bool
-    ADR_L x9, g_use_indexes
+    TLS_ADDR x9, g_use_indexes
     str  w0, [x9]
     mov  x0, x20
     ADR_L x1, k_native
@@ -1721,7 +1721,7 @@ LFUNC op_query
     bl   get_bool
 3:  // memory budget for this query
     LDR_G x0, g_max_query_mem
-    ADR_L x1, g_arena_limit
+    TLS_ADDR x1, g_arena_limit
     str  x0, [x1]
     // lex + parse
     add  x0, x25, #STR_DATA
@@ -1805,7 +1805,7 @@ LFUNC op_query
     add  x2, x28, x20, lsl #4
     ldr  x1, [x2]
     ldr  x2, [x2, #8]
-    ADR_L x0, g_out
+    TLS_ADDR x0, g_out
     bl   write_value_json
     add  x20, x20, #1
     b    73b
@@ -1822,7 +1822,7 @@ LFUNC op_query
     ADR_L x0, r_stats
     bl   out_puts
     bl   now_us
-    LDR_G x1, g_req_start
+    TLS_LDR x1, g_req_start
     sub  x0, x0, x1
     bl   out_i64
     mov  w0, #'}'
@@ -2036,7 +2036,7 @@ LFUNC op_open
     bl   catalog_remove
 5:  mov  x0, x25
     bl   catalog_add
-    ADR_L x1, g_pending_table
+    TLS_ADDR x1, g_pending_table
     str  xzr, [x1]
     mov  x0, x25
     mov  x1, x26

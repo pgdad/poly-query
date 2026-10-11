@@ -705,7 +705,7 @@ LFUNC reset_state
     mov  x29, sp
     ADR_L x0, tbl + TBL_ARENA
     bl   arena_free
-    ADR_L x0, g_arena
+    TLS_ADDR x0, g_arena
     bl   arena_free
     ADR_L x0, tbl
     mov  w1, #0
@@ -731,7 +731,7 @@ LFUNC run_case
     cbz  x0, 1f
     ADR_L x1, g_max_table_rows
     str  x0, [x1]
-1:  ADR_L x0, g_jmpbuf
+1:  TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, .Lrc_raised
     ADR_L x0, tbl
@@ -762,7 +762,7 @@ LFUNC run_case
     bl   printf
     b    .Lrc_fail
 .Lrc_raised:
-    ADR_L x9, g_err_code
+    TLS_ADDR x9, g_err_code
     ldr  w9, [x9]
     ldr  w10, [x20, #TC_ERR]
     cmp  w9, w10
@@ -779,9 +779,9 @@ LFUNC run_case
     mov  x1, sp
 3:  mov  x2, x1
     ldr  x1, [x20, #TC_NAME]
-    ADR_L x9, g_err_code
+    TLS_ADDR x9, g_err_code
     ldr  w3, [x9]
-    ADR_L x4, g_err_msg
+    TLS_ADDR x4, g_err_msg
     ADR_L x0, f_fail_err
     bl   printf
     add  sp, sp, #64
@@ -862,7 +862,7 @@ LFUNC perf_case
     b    3b
 4:  bl   now_us
     mov  x25, x0
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, .Lpf_err
     ADR_L x0, tbl
@@ -1011,7 +1011,7 @@ LFUNC dump_file
     cbnz w0, 2f
     mov  w24, #FMT_JSONL
 2:  bl   reset_state
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, .Ldf_raised
     mov  w6, #','
@@ -1039,9 +1039,9 @@ LFUNC dump_file
     mov  w0, #0
     b    .Ldf_out
 .Ldf_raised:
-    ADR_L x9, g_err_code
+    TLS_ADDR x9, g_err_code
     ldr  w1, [x9]
-    ADR_L x2, g_err_msg
+    TLS_ADDR x2, g_err_msg
     ADR_L x0, f_dferr
     bl   printf
     mov  w0, #1

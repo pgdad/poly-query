@@ -642,7 +642,7 @@ LFUNC csv_header_names
     ldr  w3, [x9, #FE_FLAGS]
     cbz  w2, .Lhn_empty
     tbz  w3, #1, 2f                 // FL_ESC?
-    ADR_L x0, g_arena
+    TLS_ADDR x0, g_arena
     bl   unescape_in
     b    3f
 2:  mov  x0, x1

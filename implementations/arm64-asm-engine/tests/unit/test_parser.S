@@ -366,9 +366,9 @@ FUNC main
     ldr  x0, [x19, #TE_SQL]
     cbz  x0, .Lm_deep
     add  w21, w21, #1
-    ADR_L x0, g_arena
+    TLS_ADDR x0, g_arena
     bl   arena_free
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, .Lm_raised
     ldr  x0, [x19, #TE_SQL]
@@ -418,32 +418,32 @@ FUNC main
     ADR_L x0, m_fail_raise          // an OK case raised
     ldr  x1, [x19, #TE_SQL]
     mov  x2, x10
-    ADR_L x9, g_err_code
+    TLS_ADDR x9, g_err_code
     ldr  w3, [x9]
-    ADR_L x4, g_err_msg
-    ADR_L x9, g_err_line
+    TLS_ADDR x4, g_err_msg
+    TLS_ADDR x9, g_err_line
     ldr  w5, [x9]
-    ADR_L x9, g_err_col
+    TLS_ADDR x9, g_err_col
     ldr  w6, [x9]
     bl   printf
     add  w20, w20, #1
     b    .Lm_next
-2:  ADR_L x9, g_err_code
+2:  TLS_ADDR x9, g_err_code
     ldr  w3, [x9]
     ldr  x2, [x19, #TE_CODE]
     cmp  x2, x3
     b.eq 3f
     ADR_L x0, m_fail_code
     ldr  x1, [x19, #TE_SQL]
-    ADR_L x4, g_err_msg
+    TLS_ADDR x4, g_err_msg
     bl   printf
     add  w20, w20, #1
     b    .Lm_next
 3:  ldr  x10, [x19, #TE_POS]        // optional position check
     cbz  x10, .Lm_next
-    ADR_L x9, g_err_line
+    TLS_ADDR x9, g_err_line
     ldr  w3, [x9]
-    ADR_L x9, g_err_col
+    TLS_ADDR x9, g_err_col
     ldr  w4, [x9]
     lsr  x11, x10, #32
     mov  w12, w10
@@ -456,7 +456,7 @@ FUNC main
     mov  w5, w4
     mov  w4, w3
     mov  w3, w12
-    ADR_L x6, g_err_msg
+    TLS_ADDR x6, g_err_msg
     bl   printf
     add  w20, w20, #1
 .Lm_next:
@@ -529,16 +529,16 @@ LFUNC check_depth
     b.ne 2b
 3:  strb wzr, [x21]
     // "S " is not SQL: patch in "SELECT" by parsing from a prefix buffer
-    ADR_L x0, g_arena
+    TLS_ADDR x0, g_arena
     bl   arena_free
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, 4f
     bl   build_select_prefixed      // x0 ptr, x1 len
     bl   parse_sql
     mov  w0, #0
     b    5f
-4:  ADR_L x9, g_err_code
+4:  TLS_ADDR x9, g_err_code
     ldr  w0, [x9]
 5:  cmp  w0, w20
     b.eq 6f
@@ -597,7 +597,7 @@ LFUNC check_abi
     stp  d10, d11, [sp, #112]
     stp  d12, d13, [sp, #128]
     stp  d14, d15, [sp, #144]
-    ADR_L x0, g_arena
+    TLS_ADDR x0, g_arena
     bl   arena_free
     ADR_L x0, abi_sql
     bl   strlen

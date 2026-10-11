@@ -164,15 +164,15 @@ ENDF fail_rt
 // request arena
 LFUNC free_pending
     ENTER 1
-    LDR_G x19, g_pending_table
+    TLS_LDR x19, g_pending_table
     cbz  x19, 1f
     add  x0, x19, #TBL_ARENA
     bl   arena_free
     mov  x0, x19
     bl   free
-    ADR_L x9, g_pending_table
+    TLS_ADDR x9, g_pending_table
     str  xzr, [x9]
-1:  ADR_L x0, g_arena
+1:  TLS_ADDR x0, g_arena
     bl   arena_free
     LEAVE 1
 ENDF free_pending
@@ -509,7 +509,7 @@ LFUNC roundtrip
     mov  w19, w0
     mov  x20, x1
     mov  w21, w2
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, .Lrt_raised
     ADR_L x0, tbl
@@ -521,7 +521,7 @@ LFUNC roundtrip
     mov  w1, w21
     bl   pqcf_load
     mov  x22, x0
-    ADR_L x9, g_pending_table       // the test owns the table now
+    TLS_ADDR x9, g_pending_table       // the test owns the table now
     str  xzr, [x9]
     ldr  x9, [x22, #TBL_NCOLS]
     ldr  x10, [x22, #TBL_NROWS]
@@ -574,9 +574,9 @@ LFUNC roundtrip
     mov  x0, sp
     mov  x1, #256
     ADR_L x2, f_raised
-    ADR_L x3, g_err_code
+    TLS_ADDR x3, g_err_code
     ldr  w3, [x3]
-    ADR_L x4, g_err_msg
+    TLS_ADDR x4, g_err_msg
     bl   snprintf
     ADR_L x0, m_none
     mov  w1, w19
@@ -598,7 +598,7 @@ LFUNC expect_load_error
     mov  x19, x0
     mov  x20, x1
     mov  w21, w2
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, 1f
     mov  x0, x20
@@ -610,7 +610,7 @@ LFUNC expect_load_error
     bl   expect_eq
     b    2f
 1:  mov  x0, x19
-    ADR_L x1, g_err_code
+    TLS_ADDR x1, g_err_code
     ldr  w1, [x1]
     mov  w2, w21
     bl   expect_eq
@@ -803,7 +803,7 @@ FUNC main
     mov  w2, #ERR_STORAGE_CORRUPT
     bl   expect_load_error
     ADR_L x0, t_pending
-    LDR_G x1, g_pending_table
+    TLS_LDR x1, g_pending_table
     mov  x2, #0
     bl   expect_eq                  // free_pending released it
 
@@ -842,7 +842,7 @@ FUNC main
     bl   expect_load_error
 
     // --- save into a missing directory
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, 7f
     ADR_L x0, tbl
@@ -853,7 +853,7 @@ FUNC main
     mov  w0, #0
 7:  mov  w1, w0
     cbz  w1, 71f
-    ADR_L x1, g_err_code
+    TLS_ADDR x1, g_err_code
     ldr  w1, [x1]
 71: ADR_L x0, t_nodir
     mov  x2, #ERR_IO
@@ -888,7 +888,7 @@ ENDF main
 // save_plain(): save the source table as t.pqcf (PLAIN, one row group)
 LFUNC save_plain
     ENTER 0
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, 1f
     ADR_L x0, tbl

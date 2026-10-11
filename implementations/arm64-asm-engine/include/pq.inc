@@ -56,6 +56,28 @@
     ldr  \reg, [\reg, :lo12:\sym]
 .endm
 
+// Thread-local variables (serve mode runs requests on several threads).
+// They live in .tbss/.tdata and are reached with the local-exec TLS model
+// (all objects are linked into the one executable).
+//   TLS_ADDR xN, sym    address of this thread's copy of sym
+//   TLS_LDR  xN, sym    64-bit load of sym
+.macro TLS_ADDR reg, sym
+    mrs  \reg, tpidr_el0
+    add  \reg, \reg, #:tprel_hi12:\sym, lsl #12
+    add  \reg, \reg, #:tprel_lo12_nc:\sym
+.endm
+.macro TLS_LDR reg, sym
+    TLS_ADDR \reg, \sym
+    ldr  \reg, [\reg]
+.endm
+// Section directives for thread-local data
+.macro TBSS
+    .section .tbss,"awT",@nobits
+.endm
+.macro TDATA
+    .section .tdata,"awT",@progbits
+.endm
+
 // Load the value of an external (glibc) data symbol through the GOT.
 .macro GOT_LOAD reg, sym
     adrp \reg, :got:\sym
@@ -101,7 +123,9 @@
 #define ERR_CANCELLED           19
 #define ERR_STORAGE_CORRUPT     20
 #define ERR_STORAGE_VERSION     21     // STORAGE_VERSION_UNSUPPORTED
-#define ERR_LAST                21
+#define ERR_OVERLOADED          22
+#define ERR_SHUTTING_DOWN       23
+#define ERR_LAST                23
 
 // ----------------------------------------------------------------- types -----
 // A type is a u32:  kind | (precision << 8) | (scale << 16)

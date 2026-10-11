@@ -417,9 +417,9 @@ LFUNC run_case
     bl   now_us
     mov  x9, #30000
     add  x0, x0, x9
-    ADR_L x9, g_deadline
+    TLS_ADDR x9, g_deadline
     str  x0, [x9]
-1:  ADR_L x0, g_jmpbuf
+1:  TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, .Lrc_error
 
@@ -474,7 +474,7 @@ LFUNC run_case
 
     // ---- error raised --------------------------------------------------------
 .Lrc_error:
-    ADR_L x9, g_err_code
+    TLS_ADDR x9, g_err_code
     ldr  w9, [x9]
     ADR_L x10, r_code
     str  x9, [x10]
@@ -611,9 +611,9 @@ FUNC main
     cmp  w0, #0
     cinc x21, x21, eq
     add  x22, x22, #1
-    ADR_L x9, g_deadline
+    TLS_ADDR x9, g_deadline
     str  xzr, [x9]
-    ADR_L x0, g_arena
+    TLS_ADDR x0, g_arena
     bl   arena_free
     add  x19, x19, #TC_SIZE
     b    1b

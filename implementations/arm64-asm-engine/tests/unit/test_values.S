@@ -390,7 +390,7 @@ LFUNC try_cast
     mov  x19, x0
     mov  w20, w1
     mov  w21, w2
-    ADR_L x0, g_jmpbuf
+    TLS_ADDR x0, g_jmpbuf
     bl   _setjmp
     cbnz w0, 1f
     mov  x0, x19
@@ -399,7 +399,7 @@ LFUNC try_cast
     bl   cast_value
     mov  x1, #0
     b    2f
-1:  ADR_L x9, g_err_code
+1:  TLS_ADDR x9, g_err_code
     ldr  w1, [x9]
     mov  x0, #0
 2:  ldp  x19, x20, [sp, #16]
