@@ -169,6 +169,11 @@ def _subquery_scan(node: pp.SubqueryScan, ctx: ExecutionContext) -> Batches:
     return execute(node.input, ctx)
 
 
+def _union_all(node: pp.UnionAll, ctx: ExecutionContext) -> Batches:
+    for branch in node.branches:
+        yield from execute(branch, ctx)
+
+
 def _filter(node: pp.Filter, ctx: ExecutionContext) -> Batches:
     native = native_ops.native_filter(node, ctx)
     if native is not None:
@@ -671,6 +676,7 @@ _HANDLERS: dict[type, Callable[[Any, ExecutionContext], Batches]] = {
     pp.Values: _values,
     pp.LookupScan: _lookup_scan,
     pp.SubqueryScan: _subquery_scan,
+    pp.UnionAll: _union_all,
     pp.Filter: _filter,
     pp.Project: _project,
     pp.Gather: _gather,

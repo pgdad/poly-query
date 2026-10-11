@@ -204,8 +204,15 @@ class Select(Node):
 
 
 @dataclass(eq=False)
+class Compound(Node):
+    """``select_core UNION ALL select_core …`` (spec/changes/union-all.md)."""
+
+    branches: list[Select]
+
+
+@dataclass(eq=False)
 class Query(Node):
-    body: Select
+    body: Select | Compound
     ctes: list[CommonTableExpr] = field(default_factory=list)
     order_by: list[OrderItem] = field(default_factory=list)
     limit: Expr | None = None

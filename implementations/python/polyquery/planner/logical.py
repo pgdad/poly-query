@@ -64,6 +64,23 @@ class SubqueryScan(LogicalNode):
 
 
 @dataclass(eq=False)
+class UnionAll(LogicalNode):
+    """The rows of every branch, in branch order, as relation ``rel``; the
+    branches have equal widths and already produce the output types."""
+
+    branches: list[LogicalNode]
+    rel: int
+    width: int
+
+    def inputs(self) -> list[LogicalNode]:
+        return list(self.branches)
+
+    @property
+    def layout(self) -> list[b.ColumnKey]:
+        return [(self.rel, i) for i in range(self.width)]
+
+
+@dataclass(eq=False)
 class Filter(LogicalNode):
     input: LogicalNode
     predicate: b.Expr

@@ -393,6 +393,17 @@ class DerivedRelation(Relation):
 
 
 @dataclass(eq=False)
+class UnionRelation(Relation):
+    """The rows of all ``branches`` (UNION ALL) as relation ``rel``. Column
+    ``i`` has type ``types[i]``, to which each branch's column ``i`` is
+    converted (spec/changes/union-all.md §2)."""
+
+    rel: int
+    branches: list[BoundQuery]
+    types: list[DataType]
+
+
+@dataclass(eq=False)
 class JoinRelation(Relation):
     kind: str  # INNER, LEFT, CROSS
     left: Relation

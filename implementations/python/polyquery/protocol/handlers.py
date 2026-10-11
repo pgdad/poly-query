@@ -58,6 +58,7 @@ CAPABILITIES = [
     "join.merge",
     "join.nested_loop",
     "native.kernels",
+    "change.union_all",
 ]
 
 

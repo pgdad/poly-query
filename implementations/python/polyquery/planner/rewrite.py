@@ -142,4 +142,6 @@ def _simplify(node: lp.LogicalNode, s: ExprSimplifier) -> lp.LogicalNode:
         return node
     if isinstance(node, (lp.Distinct, lp.Sort, lp.Limit, lp.SubqueryScan)):
         node.input = _simplify(node.input, s)
+    elif isinstance(node, lp.UnionAll):
+        node.branches = [_simplify(branch, s) for branch in node.branches]
     return node

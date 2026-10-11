@@ -93,6 +93,8 @@ class Binder:
         scope = Scope(parent, ctes, opaque_parent=opaque)
         if query.ctes:
             scope.ctes = self._bind_ctes(query.ctes, scope)
+        if isinstance(query.body, ast.Compound):
+            return self._bind_compound(query, query.body, scope), scope
         select = query.body
 
         from_ = self._bind_from(select.from_, scope) if select.from_ is not None else None
@@ -134,6 +136,58 @@ class Binder:
                 offset=self._bind_limit(query.offset, "OFFSET"),
             ),
             scope,
+        )
+
+    def _bind_compound(self, query: ast.Query, compound: ast.Compound, scope: Scope) -> b.BoundQuery:
+        """``b1 UNION ALL b2 …`` as a query over a :class:`b.UnionRelation`:
+        every branch is bound like a subquery of ``scope`` (which has no range
+        variables of its own, so correlated references pass through it), the
+        output columns take the first branch's names and the common types,
+        and ORDER BY may only name output columns (spec/changes/union-all.md)."""
+        branches = [self.bind_query(ast.Query(s.pos, s), scope, scope.ctes)[0] for s in compound.branches]
+        width = len(branches[0].outputs)
+        for select, branch in zip(compound.branches[1:], branches[1:]):
+            if len(branch.outputs) != width:
+                raise errors.semantic_error(
+                    f"each UNION ALL branch must have {width} columns, got {len(branch.outputs)}",
+                    **pos(select),
+                )
+        types = []
+        for i in range(width):
+            column_types = [branch.outputs[i].expr.type for branch in branches]
+            common = tr.union_type(column_types)
+            if common is None:
+                names = ", ".join(t.name for t in column_types)
+                raise errors.type_error(
+                    f"UNION ALL column {i + 1} has incompatible types ({names})", **pos(compound)
+                )
+            types.append(common)
+        relation = b.UnionRelation(self.ids.next(), branches, types)
+        outputs = [
+            b.OutputColumn(o.name, b.ColumnRef(t, relation.rel, i, o.name))
+            for i, (o, t) in enumerate(zip(branches[0].outputs, types))
+        ]
+        order = []
+        for item in query.order_by:
+            position = self._output_position(item.expr, outputs)
+            if position is None:
+                raise errors.semantic_error(
+                    "ORDER BY of a UNION ALL query must be an output column name or position",
+                    **pos(item.expr),
+                )
+            nulls_first = (not item.descending) if item.nulls_first is None else item.nulls_first
+            order.append(b.SortKey(position, item.descending, nulls_first))
+        return b.BoundQuery(
+            from_=relation,
+            where=None,
+            aggregation=None,
+            having=None,
+            outputs=outputs,
+            hidden=[],
+            order=order,
+            distinct=False,
+            limit=self._bind_limit(query.limit, "LIMIT"),
+            offset=self._bind_limit(query.offset, "OFFSET"),
         )
 
     def _bind_aggregated(
@@ -336,22 +390,7 @@ class Binder:
     ) -> b.SortKey:
         nulls_first = (not item.descending) if item.nulls_first is None else item.nulls_first
         expr = item.expr
-        position: int | None = None
-        if _is_ordinal(expr):
-            assert isinstance(expr, ast.NumberLit)
-            k = int(expr.text)
-            if not 1 <= k <= len(outputs):
-                raise errors.semantic_error(f"ORDER BY position {k} is out of range", **pos(expr))
-            position = k - 1
-        elif isinstance(expr, ast.ColumnRef) and expr.qualifier is None:
-            matches = [i for i, o in enumerate(outputs) if same_name(o.name, expr.name)]
-            if matches:
-                first = outputs[matches[0]].expr
-                if any(outputs[i].expr != first for i in matches[1:]):
-                    raise errors.semantic_error(
-                        f"ORDER BY name '{expr.name}' is ambiguous", **pos(expr)
-                    )
-                position = matches[0]
+        position = self._output_position(expr, outputs)
         if position is None:
             bound_expr = self.bind_expr(expr, ctx)
             if finish is not None:
@@ -374,6 +413,27 @@ class Binder:
                     hidden.append(bound_expr)
                     position = len(outputs) + len(hidden) - 1
         return b.SortKey(position, item.descending, nulls_first)
+
+    @staticmethod
+    def _output_position(expr: ast.Expr, outputs: list[b.OutputColumn]) -> int | None:
+        """The output column an ORDER BY item denotes by 1-based position or
+        by (unqualified) output name; None if it is neither."""
+        if _is_ordinal(expr):
+            assert isinstance(expr, ast.NumberLit)
+            k = int(expr.text)
+            if not 1 <= k <= len(outputs):
+                raise errors.semantic_error(f"ORDER BY position {k} is out of range", **pos(expr))
+            return k - 1
+        if isinstance(expr, ast.ColumnRef) and expr.qualifier is None:
+            matches = [i for i, o in enumerate(outputs) if same_name(o.name, expr.name)]
+            if matches:
+                first = outputs[matches[0]].expr
+                if any(outputs[i].expr != first for i in matches[1:]):
+                    raise errors.semantic_error(
+                        f"ORDER BY name '{expr.name}' is ambiguous", **pos(expr)
+                    )
+                return matches[0]
+        return None
 
     def _bind_limit(self, expr: ast.Expr | None, clause: str) -> b.Expr | None:
         if expr is None:
