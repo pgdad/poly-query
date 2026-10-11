@@ -138,6 +138,16 @@
         .endr
         ENDOBJ  idx8
 .endm
+/* pairmask: lane masks of 2 rows of 128 bits, entry k (32 bytes): qwords
+ * 0, 1 all-ones iff bit 0 of k is set, qwords 2, 3 iff bit 1 is set. */
+.macro TAB_PAIRMASK
+        OBJ     pairmask, 5
+        .quad    0,  0,  0,  0
+        .quad   -1, -1,  0,  0
+        .quad    0,  0, -1, -1
+        .quad   -1, -1, -1, -1
+        ENDOBJ  pairmask
+.endm
 /* nibmask: lane masks of 4 rows, entry k (32 bytes) = 4 qwords, qword j =
  * all-ones iff bit j of the nibble k is set (validity -> lane mask by one
  * table load). */

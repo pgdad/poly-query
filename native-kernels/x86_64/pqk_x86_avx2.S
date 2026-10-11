@@ -67,6 +67,7 @@
         TAB_0F
         TAB_NIBMASK
         TAB_IDX8
+        TAB_PAIRMASK
 
         DEFINE_LVP
 
@@ -1589,8 +1590,8 @@ ENDF pqk_x86_avx2_count_i128
  * Args:     rdi = data, rsi = validity, rdx = n, rcx = out_sum
  * Returns:  eax = PQK_OK (sum stored) or PQK_OVERFLOW (*out_sum untouched)
  * Clobbers: rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, ymm0, ymm1,
- *           ymm4-ymm10, flags (rbx, rbp, r12 saved and restored; 8 bytes of
- *           stack hold out_sum)
+ *           ymm4-ymm8, ymm11-ymm14, flags (rbx, rbp, r12, r13 saved and
+ *           restored; 8 bytes of stack hold out_sum)
  * Algorithm: exact sum with overflow detection beyond 128 bits. Each 32-byte
  *           load v = [lo_r, hi_r, lo_r+1, hi_r+1] is treated as four
  *           UNSIGNED 64-bit words after biasing the high words:
@@ -1604,21 +1605,33 @@ ENDF pqk_x86_avx2_count_i128
  *           vector path; invalid ones are zeroed BEFORE the bias, so they
  *           contribute exactly 2^127 each). Overflow iff T's top word is not
  *           the sign extension of its middle word (JNE_SEXT).
- *           Validity: per full block the word is broadcast (ymm9), vpsllvq
- *           (table shc128s) moves each row's bit into the sign bits of its
- *           two lanes, vpcmpgtq against zero (ymm10) widens it to a lane
- *           mask, which is ANDed with the load.
+ *           Four accumulator sets (vpaddq has 2-cycle latency on Zen 5;
+ *           with the former two sets the loop was latency-bound).
+ *           Validity: per full block the word is loaded into rcx; the lane
+ *           mask of each 2-row load comes from the table pairmask, indexed
+ *           with rorx + and on the integer side (r13 = table base), and is
+ *           ANDed with the load.
  *           rdi = row ptr, rsi = validity ptr, r11 = rows remaining, r12 =
  *           chunk counter, rbx = cnt, rbp = tail validity word, (%rsp) =
- *           out_sum; ymm4/ymm5 = S0/S1, ymm6/ymm7 = H0/H1, ymm8 = c_hibias.
+ *           out_sum; S0-S3 = ymm4, ymm5, ymm11, ymm12, H0-H3 = ymm6,
+ *           ymm7, ymm13, ymm14, ymm8 = c_hibias.
  * Tail:     < 8 rows without validity, or the final partial 64-row block
  *           with validity (lvp): added in scalar code, sign-extended to
  *           192 bits (add/adc/adc; invalid rows masked by VBIT_MASK).
  * ====================================================================== */
 
-/* fold128 (sum_i128 only): T += exact value of (S0+S1, H0+H1); zeroes
- * ymm4-ymm7. clobbers rax, rcx, rdx, xmm0, xmm1. */
+/* fold128 (sum_i128 only): T += exact value of (S0+S1+S2+S3,
+ * H0+H1+H2+H3); zeroes ymm4-ymm7, ymm11-ymm14. clobbers rax, rcx, rdx,
+ * xmm0, xmm1. */
 LFUNC fold128
+        vpaddq  %ymm11, %ymm4, %ymm4    /* sets C, D -> A, B */
+        vpaddq  %ymm12, %ymm5, %ymm5
+        vpaddq  %ymm13, %ymm6, %ymm6
+        vpaddq  %ymm14, %ymm7, %ymm7
+        vpxor   %xmm11, %xmm11, %xmm11
+        vpxor   %xmm12, %xmm12, %xmm12
+        vpxor   %xmm13, %xmm13, %xmm13
+        vpxor   %xmm14, %xmm14, %xmm14
         vpaddq  %ymm5, %ymm4, %ymm4
         vpaddq  %ymm7, %ymm6, %ymm6
         vextracti128 $1, %ymm4, %xmm0
@@ -1630,12 +1643,16 @@ LFUNC fold128
 ENDF fold128
 
 /* SV128 off, s, h, valid, k: one 32-byte load (2 rows) into S\s / H\h;
- * valid = 1: masked with validity pair k (shc128s). clobbers ymm0. */
+ * valid = 1: masked with validity pair k: the lane mask of the 2 rows
+ * comes from the table pairmask (4 x 32 bytes), indexed by bits 2k, 2k+1
+ * of the validity word rcx (rorx + and; r13 = table base), instead of
+ * vpsllvq + vpcmpgtq on the vector pipes. clobbers ymm0, rax. */
 .macro SV128 off, s, h, valid, k
 .if \valid
-        vpsllvq shc128s+32*\k(%rip), %ymm9, %ymm0
-        vpcmpgtq %ymm0, %ymm10, %ymm0   /* sign -> lane mask */
-        vpand   \off(%rdi), %ymm0, %ymm0
+        rorx    $((2*(\k) - 5) & 63), %rcx, %rax   /* bits 2k, 2k+1 -> 5, 6 */
+        and     $0x60, %eax
+        vmovdqu \off(%rdi), %ymm0
+        vpand   (%r13,%rax), %ymm0, %ymm0
         vpxor   %ymm8, %ymm0, %ymm0
 .else
         vpxor   \off(%rdi), %ymm8, %ymm0
@@ -1645,7 +1662,7 @@ ENDF fold128
         vpaddq  %ymm0, %ymm\h, %ymm\h
 .endm
 
-#define SAVED %rbx, %rbp, %r12
+#define SAVED %rbx, %rbp, %r12, %r13
 FUNC pqk_x86_avx2_sum_i128
         PROLOGUE SAVED
         push    %rcx                    /* (%rsp) = out_sum */
@@ -1659,7 +1676,10 @@ FUNC pqk_x86_avx2_sum_i128
         vpxor   %xmm5, %xmm5, %xmm5
         vpxor   %xmm6, %xmm6, %xmm6
         vpxor   %xmm7, %xmm7, %xmm7
-        vpxor   %xmm10, %xmm10, %xmm10
+        vpxor   %xmm11, %xmm11, %xmm11
+        vpxor   %xmm12, %xmm12, %xmm12
+        vpxor   %xmm13, %xmm13, %xmm13
+        vpxor   %xmm14, %xmm14, %xmm14
         test    %rsi, %rsi
         jnz     .Lsum_i128_vmain
         cmp     $8, %r11
@@ -1668,8 +1688,8 @@ FUNC pqk_x86_avx2_sum_i128
 .Lsum_i128_main:                                        /* [main] 8 rows */
         SV128   0, 4, 6, 0, 0
         SV128   32, 5, 7, 0, 0
-        SV128   64, 4, 6, 0, 0
-        SV128   96, 5, 7, 0, 0
+        SV128   64, 11, 13, 0, 0
+        SV128   96, 12, 14, 0, 0
         sub     $-128, %rdi
         add     $8, %rbx
         sub     $8, %r11
@@ -1684,16 +1704,21 @@ FUNC pqk_x86_avx2_sum_i128
         jmp     .Lsum_i128_tail
 .Lsum_i128_vmain:                       /* [main] validity, 64-row blocks */
         mov     $(SUM128_CHUNK_ROWS / 64), %r12d
+        lea     pairmask(%rip), %r13
 .Lsum_i128_vblk:
         cmp     $64, %r11
         jb      .Lsum_i128_vend
-        vpbroadcastq (%rsi), %ymm9
+        mov     (%rsi), %rcx
         .set k, 0
         .rept 32
-        .if k % 2
-        SV128   k*32, 5, 7, 1, k
-        .else
+        .if k % 4 == 0
         SV128   k*32, 4, 6, 1, k
+        .elseif k % 4 == 1
+        SV128   k*32, 5, 7, 1, k
+        .elseif k % 4 == 2
+        SV128   k*32, 11, 13, 1, k
+        .else
+        SV128   k*32, 12, 14, 1, k
         .endif
         .set k, k + 1
         .endr
