@@ -60,11 +60,13 @@ ENDF tbl_get
 //   * LAYOUT_COLUMN: STRING columns are dictionary-encoded when forced or
 //     when it pays off (distinct values <= rows / 2)
 //   * LAYOUT_ROW: the columns are transposed into the row store
-// New structures are allocated in the table arena.
-//   x19 table, w20 layout, w21 dict mode, x22 column index, x23 Column*
+// A converted table is rebuilt into a fresh arena (strings copied once per
+// dictionary entry), and the build arena is released.
+//   x19 table, w20 layout, w21 dict mode, x22 column index, x23 Column*,
+//   w24 1 = conversion needed
 // =============================================================================
 FUNC table_finalize
-    ENTER 3
+    ENTER 4
     mov  x19, x0
     mov  w20, w1
     mov  w21, w2
@@ -82,11 +84,9 @@ FUNC table_finalize
 11: add  x22, x22, #1
     b    1b
 2:  cmp  w20, #LAYOUT_ROW
-    b.ne 3f
-    mov  x0, x19
-    bl   to_row_layout
-    LEAVE 3
-3:  mov  x22, #0                        // column layout: dictionaries
+    cset w24, eq
+    b.eq 6f
+    mov  x22, #0                        // column layout: dictionaries
 4:  ldr  x9, [x19, #TBL_NCOLS]
     cmp  x22, x9
     b.hs 6f
@@ -102,9 +102,14 @@ FUNC table_finalize
     mov  x1, x23
     mov  w2, w21
     bl   dict_encode
+    orr  w24, w24, w0
 5:  add  x22, x22, #1
     b    4b
-6:  LEAVE 3
+6:  cbz  w24, 7f
+    mov  x0, x19
+    mov  w1, w20
+    bl   rebuild_table
+7:  LEAVE 4
 ENDF table_finalize
 
 // bitmap_any(x0 bitmap or 0, x1 nbits) -> w0 1 if any of the first nbits
@@ -134,9 +139,11 @@ LFUNC bitmap_any
 ENDF bitmap_any
 
 // =============================================================================
-// dict_encode(x0 Table*, x1 Column* (PLAIN STRING), w2 force)
-// Builds the dictionary with an open-addressing hash table (request arena).
-// Unless forced, the column is converted only if distinct <= rows / 2.
+// dict_encode(x0 Table*, x1 Column* (PLAIN STRING), w2 force) -> w0 1 if the
+// column was converted. Builds the dictionary with an open-addressing hash
+// table; codes and dictionary live in the request arena until rebuild_table
+// copies them. Unless forced, the column is converted only if
+// distinct <= rows / 2.
 //   x19 table, x20 column, w21 force, x22 nrows, x23 slots (u32 code+1),
 //   x24 mask, x25 dict (Str**), x26 ndict, x27 codes, x28 row
 // =============================================================================
@@ -146,7 +153,7 @@ LFUNC dict_encode
     mov  x20, x1
     mov  w21, w2
     ldr  x22, [x19, #TBL_NROWS]
-    cbz  x22, .Lde_ret
+    cbz  x22, .Lde_no
     lsl  x9, x22, #1                    // slots: power of two >= 2n
     mov  x24, #16
 1:  cmp  x24, x9
@@ -215,45 +222,192 @@ LFUNC dict_encode
     cbnz w21, 4f
     lsl  x9, x26, #1
     cmp  x9, x22
-    b.hi .Lde_ret                       // not worth it
-4:  add  x0, x19, #TBL_ARENA            // move codes + dictionary to the table
-    mov  x1, #DC_SIZE
-    bl   arena_alloc_in
-    mov  x21, x0
-    str  x26, [x21, #DC_NDICT]
-    add  x0, x19, #TBL_ARENA
-    lsl  x1, x22, #2
-    add  x1, x1, #8
-    bl   arena_alloc_in
-    str  x0, [x21, #DC_CODES]
-    mov  x1, x27
-    lsl  x2, x22, #2
-    bl   memcpy
-    add  x0, x19, #TBL_ARENA
-    lsl  x1, x26, #3
-    add  x1, x1, #8
-    bl   arena_alloc_in
-    str  x0, [x21, #DC_DICT]
-    mov  x1, x25
-    lsl  x2, x26, #3
-    bl   memcpy
-    str  x21, [x20, #COL_DATA]
+    b.hi .Lde_no                        // not worth it
+4:  mov  x0, #DC_SIZE
+    bl   arena_alloc
+    str  x27, [x0, #DC_CODES]
+    str  x25, [x0, #DC_DICT]
+    str  x26, [x0, #DC_NDICT]
+    str  x0, [x20, #COL_DATA]
     mov  w9, #CENC_DICT
     str  w9, [x20, #COL_ENC]
-.Lde_ret:
+    mov  w0, #1
+    LEAVE 5
+.Lde_no:
+    mov  w0, #0
     LEAVE 5
 ENDF dict_encode
 
 // =============================================================================
-// to_row_layout(x0 Table*) — builds the row store from the plain columns.
-// Row record: ncols u64 payloads, then a null bitmap of ceil(ncols/8) bytes,
-// padded to a multiple of 8 bytes.
-//   x19 table, x20 ncols, x21 nrows, x22 stride, x23 rows, x24 row,
-//   x25 col, x26 record
+// rebuild_table(x0 Table*, w1 layout) — copies the table into a fresh arena
+// in its final representation (columns as they are now — PLAIN or DICT — or
+// the row store for LAYOUT_ROW), then frees the old arena.
+//   x19 table, w20 layout, x21 new Column array, x22 column, x23 old Column*,
+//   x24 new Column*, x25 row / entry, x26 nrows, x27 vector / scratch,
+//   x28 DictCol; [sp] new Arena
 // =============================================================================
-LFUNC to_row_layout
+LFUNC rebuild_table
+    ENTER 5
+    sub  sp, sp, #32
+    mov  x19, x0
+    mov  w20, w1
+    stp  xzr, xzr, [sp]
+    stp  xzr, xzr, [sp, #16]
+    ldr  x26, [x19, #TBL_NROWS]
+    ldr  x9, [x19, #TBL_NCOLS]
+    mov  x0, sp
+    lsl  x1, x9, #5
+    add  x1, x1, #COL_SIZE
+    bl   arena_alloc_in
+    mov  x21, x0
+    mov  x22, #0
+.Lrb_col:
+    ldr  x9, [x19, #TBL_NCOLS]
+    cmp  x22, x9
+    b.hs .Lrb_cols_done
+    ldr  x23, [x19, #TBL_COLS]
+    add  x23, x23, x22, lsl #5
+    add  x24, x21, x22, lsl #5
+    stp  xzr, xzr, [x24, #COL_DATA]
+    ldr  x9, [x23, #COL_NAME]
+    mov  x0, sp
+    add  x1, x9, #STR_DATA
+    ldr  x2, [x9, #STR_LEN]
+    bl   str_new_in
+    str  x0, [x24, #COL_NAME]
+    ldr  w9, [x23, #COL_TYPE]
+    str  w9, [x24, #COL_TYPE]
+    str  wzr, [x24, #COL_ENC]
+    cmp  w20, #LAYOUT_ROW
+    b.eq .Lrb_next                      // values go to the row store
+    ldr  x9, [x23, #COL_NULLS]          // null bitmap
+    cbz  x9, 1f
+    mov  x0, sp
+    add  x1, x26, #7
+    lsr  x1, x1, #3
+    bl   arena_alloc_in
+    str  x0, [x24, #COL_NULLS]
+    ldr  x1, [x23, #COL_NULLS]
+    add  x2, x26, #7
+    lsr  x2, x2, #3
+    bl   memcpy
+1:  ldr  w9, [x23, #COL_ENC]
+    cbnz w9, .Lrb_dict
+    mov  x0, sp                         // PLAIN payload vector
+    lsl  x1, x26, #3
+    add  x1, x1, #8
+    bl   arena_alloc_in
+    mov  x27, x0
+    str  x27, [x24, #COL_DATA]
+    ldr  x1, [x23, #COL_DATA]
+    lsl  x2, x26, #3
+    bl   memcpy
+    ldr  w9, [x23, #COL_TYPE]
+    and  w9, w9, #T_KIND_MASK
+    cmp  w9, #T_STR
+    b.ne .Lrb_next
+    mov  x25, #0                        // STRING: copy every string
+2:  cmp  x25, x26
+    b.hs .Lrb_next
+    ldr  x9, [x27, x25, lsl #3]
+    cbz  x9, 3f
+    ldr  x10, [x23, #COL_NULLS]
+    cbz  x10, 21f
+    NULLBIT_TEST 11, 10, 25, 12
+    cbz  w11, 21f
+    str  xzr, [x27, x25, lsl #3]        // NULL slot
+    b    3f
+21: mov  x0, sp
+    add  x1, x9, #STR_DATA
+    ldr  x2, [x9, #STR_LEN]
+    bl   str_new_in
+    str  x0, [x27, x25, lsl #3]
+3:  add  x25, x25, #1
+    b    2b
+.Lrb_dict:
+    mov  x0, sp
+    mov  x1, #DC_SIZE
+    bl   arena_alloc_in
+    mov  x28, x0
+    str  x28, [x24, #COL_DATA]
+    mov  w9, #CENC_DICT
+    str  w9, [x24, #COL_ENC]
+    ldr  x27, [x23, #COL_DATA]          // old DictCol
+    ldr  x9, [x27, #DC_NDICT]
+    str  x9, [x28, #DC_NDICT]
+    mov  x0, sp
+    lsl  x1, x26, #2
+    add  x1, x1, #8
+    bl   arena_alloc_in
+    str  x0, [x28, #DC_CODES]
+    ldr  x1, [x27, #DC_CODES]
+    lsl  x2, x26, #2
+    bl   memcpy
+    ldr  x9, [x27, #DC_NDICT]
+    mov  x0, sp
+    lsl  x1, x9, #3
+    add  x1, x1, #8
+    bl   arena_alloc_in
+    str  x0, [x28, #DC_DICT]
+    mov  x25, #0
+4:  ldr  x9, [x27, #DC_NDICT]
+    cmp  x25, x9
+    b.hs .Lrb_next
+    ldr  x9, [x27, #DC_DICT]
+    ldr  x9, [x9, x25, lsl #3]
+    mov  x0, sp
+    add  x1, x9, #STR_DATA
+    ldr  x2, [x9, #STR_LEN]
+    bl   str_new_in
+    ldr  x9, [x28, #DC_DICT]
+    str  x0, [x9, x25, lsl #3]
+    add  x25, x25, #1
+    b    4b
+.Lrb_next:
+    add  x22, x22, #1
+    b    .Lrb_col
+.Lrb_cols_done:
+    cmp  w20, #LAYOUT_ROW
+    b.ne 5f
+    mov  x0, x19                        // row store (reads the old columns)
+    mov  x1, sp
+    bl   build_rows
+5:  ldr  x9, [x19, #TBL_NAME]
+    cbz  x9, 6f
+    mov  x0, sp
+    add  x1, x9, #STR_DATA
+    ldr  x2, [x9, #STR_LEN]
+    bl   str_new_in
+    str  x0, [x19, #TBL_NAME]
+6:  ldr  x9, [x19, #TBL_NRG]            // PQCF row groups and chunk stats
+    cbz  x9, 7f
+    mov  x0, x19
+    mov  x1, sp
+    bl   copy_row_groups
+7:  str  x21, [x19, #TBL_COLS]
+    str  xzr, [x19, #TBL_STATS]
+    add  x0, x19, #TBL_ARENA            // release the build arena
+    bl   arena_free
+    ldp  x9, x10, [sp]
+    stp  x9, x10, [x19, #TBL_ARENA]
+    ldp  x9, x10, [sp, #16]
+    stp  x9, x10, [x19, #(TBL_ARENA + 16)]
+    add  sp, sp, #32
+    LEAVE 5
+ENDF rebuild_table
+
+// =============================================================================
+// build_rows(x0 Table* (columns still readable), x1 Arena*) — builds the row
+// store in the arena and switches the table to LAYOUT_ROW. Row record: ncols
+// u64 payloads, then a null bitmap of ceil(ncols/8) bytes, padded to a
+// multiple of 8 bytes. Strings are copied into the arena.
+//   x19 table, x20 ncols, x21 nrows, x22 stride, x23 rows, x24 row,
+//   x25 col, x26 record, x27 arena
+// =============================================================================
+LFUNC build_rows
     ENTER 5
     mov  x19, x0
+    mov  x27, x1
     ldr  x20, [x19, #TBL_NCOLS]
     ldr  x21, [x19, #TBL_NROWS]
     add  x9, x20, #7
@@ -263,7 +417,7 @@ LFUNC to_row_layout
     and  x22, x22, #~7
     mul  x1, x22, x21
     add  x1, x1, #8
-    add  x0, x19, #TBL_ARENA
+    mov  x0, x27
     bl   arena_alloc_in
     mov  x23, x0
     mov  x24, #0
@@ -281,9 +435,8 @@ LFUNC to_row_layout
     mov  x1, x25
     mov  x2, x24
     bl   tbl_get
-    str  x0, [x26, x25, lsl #3]
-    cbz  x1, 3f
-    add  x9, x26, x20, lsl #3
+    cbz  x1, 21f
+    add  x9, x26, x20, lsl #3           // NULL: set the bit, payload 0
     lsr  x10, x25, #3
     ldrb w11, [x9, x10]
     and  w12, w25, #7
@@ -291,25 +444,101 @@ LFUNC to_row_layout
     lsl  w13, w13, w12
     orr  w11, w11, w13
     strb w11, [x9, x10]
-3:  add  x25, x25, #1
+    mov  x0, #0
+    b    3f
+21: ldr  x9, [x19, #TBL_COLS]           // strings are copied
+    add  x9, x9, x25, lsl #5
+    ldr  w9, [x9, #COL_TYPE]
+    and  w9, w9, #T_KIND_MASK
+    cmp  w9, #T_STR
+    b.ne 3f
+    mov  x9, x0
+    mov  x0, x27
+    add  x1, x9, #STR_DATA
+    ldr  x2, [x9, #STR_LEN]
+    bl   str_new_in
+3:  str  x0, [x26, x25, lsl #3]
+    add  x25, x25, #1
     b    2b
 4:  add  x24, x24, #1
     b    1b
 5:  str  x23, [x19, #TBL_ROWS]
     str  x22, [x19, #TBL_STRIDE]
-    mov  x25, #0                        // columns no longer hold data
-6:  cmp  x25, x20
-    b.hs 7f
-    ldr  x9, [x19, #TBL_COLS]
-    add  x9, x9, x25, lsl #5
-    stp  xzr, xzr, [x9, #COL_DATA]
-    str  wzr, [x9, #COL_ENC]
-    add  x25, x25, #1
-    b    6b
-7:  mov  w9, #LAYOUT_ROW
+    mov  w9, #LAYOUT_ROW
     str  w9, [x19, #TBL_LAYOUT]
     LEAVE 5
-ENDF to_row_layout
+ENDF build_rows
+
+// =============================================================================
+// copy_row_groups(x0 Table*, x1 Arena*) — copies TBL_RGS and the chunk
+// statistics (STRING min/max strings included) into the arena.
+//   x19 table, x20 arena, x21 new RowGroup array, x22 group, x23 column,
+//   x24 new ChunkStat array, x25 old ChunkStat array
+// =============================================================================
+LFUNC copy_row_groups
+    ENTER 5
+    mov  x19, x0
+    mov  x20, x1
+    ldr  x9, [x19, #TBL_NRG]
+    mov  x0, x20
+    lsl  x1, x9, #5                     // RG_SIZE = 32
+    bl   arena_alloc_in
+    mov  x21, x0
+    ldr  x1, [x19, #TBL_RGS]
+    ldr  x2, [x19, #TBL_NRG]
+    lsl  x2, x2, #5
+    bl   memcpy
+    mov  x22, #0
+1:  ldr  x9, [x19, #TBL_NRG]
+    cmp  x22, x9
+    b.hs 9f
+    add  x9, x21, x22, lsl #5
+    ldr  x25, [x9, #RG_CHUNKS]
+    cbz  x25, 8f
+    ldr  x9, [x19, #TBL_NCOLS]
+    mov  x0, x20
+    lsl  x1, x9, #5                     // CK_SIZE = 32
+    add  x1, x1, #CK_SIZE
+    bl   arena_alloc_in
+    mov  x24, x0
+    add  x9, x21, x22, lsl #5
+    str  x24, [x9, #RG_CHUNKS]
+    mov  x1, x25
+    ldr  x2, [x19, #TBL_NCOLS]
+    lsl  x2, x2, #5
+    bl   memcpy
+    mov  x23, #0
+2:  ldr  x9, [x19, #TBL_NCOLS]
+    cmp  x23, x9
+    b.hs 8f
+    add  x26, x24, x23, lsl #5
+    ldr  w9, [x26, #CK_HASMM]
+    cbz  w9, 3f
+    ldr  x9, [x19, #TBL_COLS]
+    add  x9, x9, x23, lsl #5
+    ldr  w9, [x9, #COL_TYPE]
+    and  w9, w9, #T_KIND_MASK
+    cmp  w9, #T_STR
+    b.ne 3f
+    ldr  x9, [x26, #CK_MIN]
+    mov  x0, x20
+    add  x1, x9, #STR_DATA
+    ldr  x2, [x9, #STR_LEN]
+    bl   str_new_in
+    str  x0, [x26, #CK_MIN]
+    ldr  x9, [x26, #CK_MAX]
+    mov  x0, x20
+    add  x1, x9, #STR_DATA
+    ldr  x2, [x9, #STR_LEN]
+    bl   str_new_in
+    str  x0, [x26, #CK_MAX]
+3:  add  x23, x23, #1
+    b    2b
+8:  add  x22, x22, #1
+    b    1b
+9:  str  x21, [x19, #TBL_RGS]
+    LEAVE 5
+ENDF copy_row_groups
 
 // =============================================================================
 // table_stats(x0 Table*) -> x0 ColStats* [ncols]

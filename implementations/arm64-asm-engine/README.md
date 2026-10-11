@@ -186,6 +186,6 @@ Key decisions:
 
 * Correlated subqueries are re-executed per outer row (no decorrelation).
 * Single-threaded execution; no HTTP server.
-* Converting a table to the row layout or dictionary-encoding its columns
-  keeps the intermediate column vectors in the table arena until the table
-  is dropped (memory, not correctness).
+* Ingestion builds a plain columnar table first; converting it (row layout,
+  dictionary encoding) rebuilds it into a fresh arena, so loading needs
+  transient memory for both representations.
