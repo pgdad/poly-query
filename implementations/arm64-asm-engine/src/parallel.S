@@ -47,7 +47,9 @@
 #define JB_N        16              // tasks
 #define JB_CLAIMED  24              // tasks handed out
 #define JB_DONE     32              // tasks finished
-#define JB_SIZE     48
+#define JB_MAXW     40              // pool threads allowed on the job
+#define JB_WORKERS  48              // pool threads running its tasks
+#define JB_SIZE     64
 
 #define POOL_MAX    64              // pool threads at most
 
@@ -74,8 +76,10 @@ g_pool_spin:    .quad 1000          // µs of polling before a thread sleeps
 // =============================================================================
 // par_run(x0 fn, x1 args, x2 stride, x3 n)
 // The tasks are queued as one job for the worker pool (persistent threads,
-// started on demand: at most n - 1 are needed); the calling thread claims
-// tasks of its own job too and then waits for the ones still running.
+// started on demand); the calling thread claims tasks of its own job too
+// and then waits for the ones still running. At most min(n, threads) - 1
+// pool threads work on a job at a time, so a job may have more tasks than
+// the query's threads (for load balance) without using more threads.
 // Because the caller works on its own job instead of waiting for a free
 // thread, nested and concurrent par_run calls cannot deadlock.
 //   x19 fn, x20 args, x21 stride, x22 n, x23 workers, x24 i, x25 record,
@@ -124,9 +128,12 @@ FUNC par_run
     mov  x26, x0
     str  x23, [x26, #JB_RECS]
     str  x22, [x26, #JB_N]
-    cmp  x22, #1
-    b.ls .Lpr_claim                     // one task: no queueing
-    sub  x0, x22, #1
+    TLS_LDR x9, g_x_threads             // pool threads: min(n, threads) - 1
+    cmp  x9, x22
+    csel x9, x9, x22, lo
+    subs x0, x9, #1
+    b.ls .Lpr_claim                     // none: the caller runs all
+    str  x0, [x26, #JB_MAXW]
     bl   pool_grow
     ADR_L x0, g_pool_lock
     bl   pthread_mutex_lock
@@ -390,8 +397,8 @@ LFUNC pool_main
     bl   thread_boost
     ADR_L x0, g_pool_lock
     bl   pthread_mutex_lock
-1:  ADR_L x9, g_pool_head
-    ldr  x19, [x9]
+1:  bl   job_find
+    mov  x19, x0
     cbnz x19, 2f
     ADR_L x0, g_pool_lock               // idle: poll the queue for a while
     bl   pthread_mutex_unlock           // before sleeping (queries run
@@ -399,25 +406,35 @@ LFUNC pool_main
     mov  x20, x0
 11: ADR_L x9, g_pool_head
     ldar x10, [x9]
-    cbnz x10, 12f
-    bl   sched_yield
+    cbz  x10, 13f
+    ADR_L x0, g_pool_lock               // a job: one for this thread?
+    bl   pthread_mutex_lock
+    bl   job_find
+    mov  x19, x0
+    cbnz x19, 2f
+    ADR_L x0, g_pool_lock
+    bl   pthread_mutex_unlock
+13: bl   sched_yield
     bl   now_us
     sub  x0, x0, x20
     LDR_G x9, g_pool_spin
     cmp  x0, x9
     b.lo 11b
-12: ADR_L x0, g_pool_lock
+    ADR_L x0, g_pool_lock
     bl   pthread_mutex_lock
-    ADR_L x9, g_pool_head
-    ldr  x19, [x9]
+    bl   job_find
+    mov  x19, x0
     cbnz x19, 2f
     ADR_L x0, g_pool_work
     ADR_L x1, g_pool_lock
     bl   pthread_cond_wait
     b    1b
-2:  ldr  x20, [x19, #JB_CLAIMED]
+2:  ldr  x20, [x19, #JB_CLAIMED]        // pool lock held
     mov  x0, x19
     bl   job_claim
+    ldr  x9, [x19, #JB_WORKERS]
+    add  x9, x9, #1
+    str  x9, [x19, #JB_WORKERS]
     ADR_L x0, g_pool_lock
     bl   pthread_mutex_unlock
     ldr  x9, [x19, #JB_RECS]
@@ -426,10 +443,28 @@ LFUNC pool_main
     bl   wk_run
     ADR_L x0, g_pool_lock
     bl   pthread_mutex_lock
+    ldr  x9, [x19, #JB_WORKERS]
+    sub  x9, x9, #1
+    str  x9, [x19, #JB_WORKERS]
     mov  x0, x19
     bl   job_finish
     b    1b
 ENDF pool_main
+
+// job_find() -> x0 the first queued job with room for one more pool thread,
+// or 0. Pool lock held.   (leaf)
+LFUNC job_find
+    ADR_L x9, g_pool_head
+    ldr  x0, [x9]
+1:  cbz  x0, 2f
+    ldr  x10, [x0, #JB_WORKERS]
+    ldr  x11, [x0, #JB_MAXW]
+    cmp  x10, x11
+    b.lo 2f
+    ldr  x0, [x0, #JB_NEXT]
+    b    1b
+2:  ret
+ENDF job_find
 
 // =============================================================================
 // wk_run(x0 worker record) — runs the task on a pool thread with a copy of

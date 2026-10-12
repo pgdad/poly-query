@@ -23,8 +23,10 @@
 //   * columns read by base-table scans: the set chosen by the optimizer rule
 //     prune_columns, else every column the query references (§3.2);
 //   * hash join build side (with "optimize"): an inner join builds on the
-//     input with the smaller estimate (inputs swapped); LEFT joins build on
-//     the right input;
+//     input with the smaller estimate (inputs swapped); a LEFT join builds
+//     on its left (preserved) input when that one is smaller (PN_SWAP =
+//     SWAP_LBUILD: probes stay balanced when a few left rows match most of
+//     the right ones), else on the right input;
 //   * top-N (with "optimize"): a Sort directly below a Limit keeps a bounded
 //     heap of LIMIT + OFFSET rows (PN_TOPN);
 //   * execution mode and threads (options "mode", "threads"): recorded in
@@ -429,7 +431,8 @@ ENDF pp_joins
 // Access paths and cardinality estimates of a FROM tree: scans choose their
 // access path (access.S: index selection, row-group skipping); an inner hash
 // join builds on the input with the smaller estimate (inputs swapped, the
-// tuple layout does not depend on the order); LEFT joins build on the right.
+// tuple layout does not depend on the order); LEFT joins build on the
+// smaller input too, without swapping (SWAP_LBUILD).
 //   x19 node, x20 left estimate, x21 right estimate
 // =============================================================================
 LFUNC pp_access
@@ -455,7 +458,14 @@ LFUNC pp_access
     ldr  w9, [x9]
     cbz  w9, 2f
     ldr  w9, [x19, #PN_JT]
-    cmp  w9, #JT_INNER
+    cmp  w9, #JT_LEFT
+    b.ne 11f
+    cmp  x20, x21                       // LEFT: build on a smaller left
+    b.hs 2f
+    mov  w9, #SWAP_LBUILD
+    str  w9, [x19, #PN_SWAP]
+    b    2f
+11: cmp  w9, #JT_INNER
     b.ne 2f
     cmp  x20, x21
     b.hs 2f

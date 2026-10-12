@@ -33,7 +33,9 @@
 #define HS_KS       72              // u64 bytes of key cells per tuple
 #define HS_RHASH    80              // u64* hashes of the right tuples
 #define HS_FAST     88              // u64 1: one key compared by payload
-#define HS_SIZE     96
+#define HS_LBUILD   96              // u64 1: LEFT join building on its left
+#define HS_MATCHED  104             // u8* build tuples matched (HS_LBUILD)
+#define HS_SIZE     112
 // Probe task (one per thread)
 #define HJ_NODE     0
 #define HJ_CTX      8               // EvalCtx* (own copy for worker tasks)
@@ -817,7 +819,10 @@ ENDF keys_equal
 // of every left tuple are computed up front as well; the left tuples are
 // then cut into windows probed by hj_probe tasks (in parallel with option
 // threads > 1 when the residual condition is safe for worker threads), whose
-// outputs are concatenated in order.
+// outputs are concatenated in order. A LEFT join with PN_SWAP = SWAP_LBUILD
+// builds on its left input instead and probes with the right one: matched
+// build tuples are flagged (HS_MATCHED), and the unmatched ones are appended
+// NULL-padded after the probes.
 //   x19 node, x20 ctx, x21 shared state, x22 tasks, x23 task records,
 //   x24 index, x25 scratch
 // =============================================================================
@@ -840,9 +845,28 @@ FUNC ex_hashjoin
     ldr  x9, [x19, #PN_NKEYS]
     lsl  x9, x9, #4
     str  x9, [x21, #HS_KS]
-    // ---- build -------------------------------------------------------------
+    ldr  w9, [x19, #PN_JT]              // LEFT join building on the left:
+    cmp  w9, #JT_LEFT                   // the inputs trade roles
+    b.ne 1f
+    ldr  w9, [x19, #PN_SWAP]
+    cmp  w9, #SWAP_LBUILD
+    b.ne 1f
+    mov  x9, #1
+    str  x9, [x21, #HS_LBUILD]
+    ldp  x9, x10, [x21, #HS_L]
+    stp  x10, x9, [x21, #HS_L]
+    ldr  x9, [x21, #HS_R]
+    ldr  x0, [x9, #TS_N]
+    add  x0, x0, #16
+    bl   arena_zalloc
+    str  x0, [x21, #HS_MATCHED]
+1:  // ---- build -------------------------------------------------------------
     ldr  x0, [x21, #HS_R]
     ldr  x1, [x19, #PN_RKEYS]
+    ldr  x9, [x21, #HS_LBUILD]
+    cbz  x9, 2f
+    ldr  x1, [x19, #PN_LKEYS]
+2:
     ldr  x2, [x19, #PN_NKEYS]
     mov  x3, x20
     bl   join_keys
@@ -871,17 +895,25 @@ FUNC ex_hashjoin
     // ---- probe -------------------------------------------------------------
     ldr  x0, [x21, #HS_L]
     ldr  x1, [x19, #PN_LKEYS]
+    ldr  x9, [x21, #HS_LBUILD]
+    cbz  x9, 2f
+    ldr  x1, [x19, #PN_RKEYS]
+2:
     ldr  x2, [x19, #PN_NKEYS]
     mov  x3, x20
     bl   join_keys
     str  x0, [x21, #HS_LCELLS]
     str  x1, [x21, #HS_LHASH]
     str  x2, [x21, #HS_LNULL]
-    mov  x22, #1                        // tasks
-    TLS_LDR x9, g_x_threads
-    cmp  x9, #1
-    b.ls 5f
+    mov  x22, #1                        // tasks: 4 per thread (skewed
+    TLS_LDR x9, g_x_threads             // keys make windows unequal; the
+    cmp  x9, #1                         // pool balances), at least
+    b.ls 5f                             // g_par_min_rows / 4 tuples each
+    lsl  x9, x9, #2
     LDR_G x10, g_par_min_rows
+    lsr  x10, x10, #2
+    cmp  x10, #1
+    csinc x10, x10, xzr, hs
     ldr  x11, [x21, #HS_L]
     ldr  x11, [x11, #TS_N]
     udiv x10, x11, x10
@@ -939,8 +971,7 @@ FUNC ex_hashjoin
     mov  x0, x23
     bl   hj_probe
     ldr  x0, [x23, #HJ_TS]
-    add  sp, sp, #16
-    LEAVE 5
+    b    10f
 8:  ADR_L x0, hj_probe
     mov  x1, x23
     mov  x2, #HJ_SIZE
@@ -954,7 +985,27 @@ FUNC ex_hashjoin
     LDR_G x10, g_max_join_rows
     cmp  x9, x10
     b.hi 9f
-    add  sp, sp, #16
+10: ldr  x9, [x21, #HS_LBUILD]
+    cbz  x9, 12f
+    mov  x22, x0                        // unmatched build (left) tuples,
+    mov  x24, #0                        // NULL-padded
+11: ldr  x9, [x21, #HS_R]
+    ldr  x10, [x9, #TS_N]
+    cmp  x24, x10
+    b.hs 111f
+    ldr  x10, [x21, #HS_MATCHED]
+    ldrb w10, [x10, x24]
+    cbnz w10, 110f
+    mov  x0, x9
+    mov  x1, x24
+    bl   ts_tuple
+    mov  x1, x0
+    mov  x0, x22
+    bl   join_emit
+110:add  x24, x24, #1
+    b    11b
+111:mov  x0, x22
+12: add  sp, sp, #16
     LEAVE 5
 9:  RAISE ERR_RESOURCE_LIMIT, "join result exceeds --max-join-rows"
 ENDF ex_hashjoin
@@ -1257,7 +1308,11 @@ FUNC hj_probe
     mov  x1, x20
     bl   eval_true
     cbz  w0, .Lhp_next
-4:  mov  x1, #1
+4:  ldr  x9, [x21, #HS_MATCHED]        // (LEFT join building on the left)
+    cbz  x9, 41f
+    mov  w10, #1
+    strb w10, [x9, x25]
+41: mov  x1, #1
     bl   .Lhp_put
     mov  x26, #1
 .Lhp_next:
@@ -1266,6 +1321,8 @@ FUNC hj_probe
     b    .Lhp_chain
 .Lhp_pad:
     cbnz x26, 5f
+    ldr  x9, [x21, #HS_LBUILD]          // probes are right tuples then
+    cbnz x9, 5f
     ldr  w9, [x22, #PN_JT]
     cmp  w9, #JT_LEFT
     b.ne 5f

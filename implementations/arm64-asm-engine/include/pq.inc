@@ -709,7 +709,10 @@
 #define PN_PREDS    96     // scans: Pred** simple predicates of PN_EXPR
 #define PN_NPREDS   104    // u64
 #define PN_EST      112    // u64 estimated output rows (tuple operators)
-#define PN_SWAP     120    // u32 1 = hash join inputs swapped (build = left)
+#define PN_SWAP     120    // u32 hash join: 1 = inner join inputs swapped
+                           //   (build = left); 2 = LEFT join building on its
+                           //   (preserved) left input
+#define SWAP_LBUILD 2
 #define PN_RGSKIP   124    // u32 scans: row groups skipped (EXPLAIN)
 #define PN_MASK     128    // u64 scans / joins: bitmask of the range variables
                            //   of the subtree
