@@ -1436,6 +1436,7 @@ FUNC pexec_aggregate
 
     /* ---- one group: partial states per part, merged in part order */
     xor %ecx, %ecx                  /* DISTINCT states cannot be merged */
+                                    /* (unless split: pexec_dsplit) */
 1:  cmp QP_NAGGS(%r12), %rcx
     jae 2f
     mov QP_AGGS(%r12), %rax
@@ -1443,6 +1444,12 @@ FUNC pexec_aggregate
     inc %rcx
     testl $NF_DISTINCT, N_FLAGS(%rax)
     jz 1b
+    mov %rbx, %rdi                  /* hash-partitioned DISTINCT */
+    mov PT_N(%r13), %rsi
+    call pexec_dsplit
+    mov %rax, PT_OUT(%r13)
+    test %rax, %rax
+    jnz 4f
     movq $1, g_par_threads(%rip)
 2:  mov PT_N(%r13), %rdi
     lea single_part(%rip), %rsi
@@ -1557,6 +1564,367 @@ FUNC pexec_aggregate
     jmp 26b
 29: LEAVE
 ENDF pexec_aggregate
+
+/* ================================================================ DISTINCT aggregates */
+
+/* Aggregation without GROUP BY with DISTINCT aggregates: the other
+ * aggregates run through single_part on a copy of the plan that omits the
+ * DISTINCT ones.  Each DISTINCT aggregate is hash-partitioned: phase 1
+ * evaluates its argument and hashes it for every tuple in parallel
+ * (dkey_part); in phase 2 partition p keeps the values whose hash falls
+ * into p in its own set and aggregates each new value once (dins_part).
+ * The partitions hold disjoint value sets, so merging their states is
+ * exact; FLOAT64 sums (order dependent) are not split. */
+
+#define PT_NPART PT_FP          /* dins_part: number of partitions */
+
+/* dsplit_ok(plan rdi) -> eax 1 if every DISTINCT aggregate is COUNT, or
+ * SUM / AVG / MIN / MAX of a non-FLOAT64 argument */
+FUNC dsplit_ok
+    xor %ecx, %ecx
+1:  cmp QP_NAGGS(%rdi), %rcx
+    jae 8f
+    mov QP_AGGS(%rdi), %rax
+    mov (%rax, %rcx, 8), %rax
+    inc %rcx
+    testl $NF_DISTINCT, N_FLAGS(%rax)
+    jz 1b
+    cmpl $AGG_COUNT, N_OP(%rax)
+    je 1b
+    mov N_A(%rax), %rax
+    movzbl N_TYPE(%rax), %eax
+    cmp $T_FLOAT, %eax
+    jne 1b
+    xor %eax, %eax
+    ret
+8:  mov $1, %eax
+    ret
+ENDF dsplit_ok
+
+/* dagg_add(agg node rdi, state rsi, value rdx): feeds a new distinct
+ * (non-NULL) value to the state, as agg_update does */
+FUNC dagg_add
+    ENTER 0
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %rdx, %r13
+    incq AS_COUNT(%r12)
+    mov N_OP(%rbx), %eax
+    cmp $AGG_COUNT, %eax
+    je 9f
+    cmp $AGG_MIN, %eax
+    jae 5f
+    mov N_A(%rbx), %rcx             /* SUM / AVG */
+    mov N_TYPE(%rcx), %ecx
+    cmp $T_DEC, %cl
+    jne 3f
+    shr $8, %ecx
+    cmp $18, %cl
+    ja 4f
+3:  mov %r13, %rax                  /* 128-bit integer sum */
+    cqo
+    add %rax, AS_LO(%r12)
+    adc %rdx, AS_HI(%r12)
+    jmp 9f
+4:  lea AS_LO(%r12), %rdi           /* wide DECIMAL: 192-bit sum */
+    mov (%r13), %rsi
+    mov 8(%r13), %rdx
+    call sum192_add
+    jmp 9f
+5:  cmpq $0, AS_HAS(%r12)           /* MIN / MAX */
+    je 7f
+    mov N_A(%rbx), %rax
+    mov N_TYPE(%rax), %edi
+    mov %r13, %rsi
+    mov AS_VAL(%r12), %rdx
+    call value_cmp
+    cmpl $AGG_MIN, N_OP(%rbx)
+    jne 6f
+    cmp $0, %eax
+    jge 9f
+    jmp 7f
+6:  cmp $0, %eax
+    jle 9f
+7:  mov %r13, AS_VAL(%r12)
+    movq $1, AS_HAS(%r12)
+9:  LEAVE
+ENDF dagg_add
+
+/* dkey_part(task rdi, part rsi, lo rdx, hi rcx): value cells (PT_A) and
+ * hashes (PT_B) of the argument of aggregate PT_C (types PT_D) for the
+ * tuples [lo, hi) */
+FUNC dkey_part
+    ENTER 112                       /* 0: EvalCtx, 72: hi, 80: vector, */
+    mov %rdi, %rbx                  /* 88: batch index, 96: tuple index */
+    mov %rdx, %r14
+    mov %rcx, 72(%rsp)
+    mov PT_XS(%rbx), %r13
+    lea 0(%rsp), %rdi
+    mov %r13, %rsi
+    call wctx_init
+    mov $VSIZE, %edi
+    call tmp_alloc
+    mov %rax, 80(%rsp)
+    mov XS_W(%r13), %r12
+    shl $3, %r12
+1:  cmp 72(%rsp), %r14
+    jae 9f
+    call check_deadline
+    mov 72(%rsp), %r15
+    sub %r14, %r15
+    cmp $VB, %r15
+    jbe 2f
+    mov $VB, %r15d
+2:  mov XS_TS(%r13), %rax
+    mov %r14, %rdx
+    imul %r12, %rdx
+    add TS_DATA(%rax), %rdx
+    lea 0(%rsp), %rdi
+    mov PT_C(%rbx), %rsi
+    mov N_A(%rsi), %rsi
+    mov %r15, %rcx
+    mov XS_W(%r13), %r8
+    mov 80(%rsp), %r9
+    call k_eval1
+    movq $0, 88(%rsp)
+3:  mov 88(%rsp), %rcx
+    cmp %r15, %rcx
+    jae 5f
+    mov 80(%rsp), %rax
+    mov (%rax, %rcx, 8), %rdx       /* value */
+    movzbl VNULL(%rax, %rcx), %esi  /* NULL flag */
+    lea (%r14, %rcx), %r8
+    mov %r8, 96(%rsp)
+    mov %r8, %rdi
+    shl $4, %rdi
+    add PT_A(%rbx), %rdi            /* cell */
+    mov %rdx, VAL_P(%rdi)
+    mov %rsi, VAL_NULL(%rdi)
+    xor %eax, %eax
+    test %esi, %esi
+    jnz 4f
+    mov $1, %esi
+    mov PT_D(%rbx), %rdx
+    call hash_cells
+4:  mov 96(%rsp), %r8
+    mov PT_B(%rbx), %rcx
+    mov %rax, (%rcx, %r8, 8)
+    incq 88(%rsp)
+    jmp 3b
+5:  add %r15, %r14
+    jmp 1b
+9:  LEAVE
+ENDF dkey_part
+
+/* dins_part(task rdi, partition rsi): the distinct values of partition p
+ * (hash >> 32 scaled to PT_NPART) in tuple order -> state PT_OUT[p] */
+FUNC dins_part
+    ENTER 16
+    mov %rdi, %rbx
+    mov %rsi, 0(%rsp)
+    mov $1, %edi
+    mov PT_D(%rbx), %rsi
+    call ht_new
+    mov %rax, %r12                  /* value set */
+    mov $AS_SIZE, %edi
+    call tmp_zalloc
+    mov %rax, %r13                  /* state */
+    mov 0(%rsp), %rcx
+    mov %r13, PT_OUT(%rbx, %rcx, 8)
+    xor %r14d, %r14d                /* tuple */
+1:  cmp PT_N(%rbx), %r14
+    jae 9f
+    test $0xffff, %r14d
+    jnz 2f
+    call check_deadline
+2:  mov %r14, %r15
+    shl $4, %r15
+    add PT_A(%rbx), %r15            /* cell */
+    cmpq $0, VAL_NULL(%r15)
+    jne 8f
+    mov PT_B(%rbx), %rcx
+    mov (%rcx, %r14, 8), %rcx       /* hash */
+    mov %rcx, %rax
+    shr $32, %rax
+    imul PT_NPART(%rbx), %rax
+    shr $32, %rax
+    cmp 0(%rsp), %rax
+    jne 8f
+    mov %r12, %rdi
+    mov %r15, %rsi
+    mov $1, %edx
+    call ht_lookup_h
+    test %edx, %edx
+    jz 8f
+    mov PT_C(%rbx), %rdi            /* a new value */
+    mov %r13, %rsi
+    mov VAL_P(%r15), %rdx
+    call dagg_add
+8:  inc %r14
+    jmp 1b
+9:  LEAVE
+ENDF dins_part
+
+/* pexec_dsplit(xs rdi, n rsi) -> rax the aggregate states of the single
+ * group, or 0 when the DISTINCT aggregates are not split (one part, or an
+ * aggregate dsplit_ok rejects) */
+FUNC pexec_dsplit
+    ENTER 48
+    mov %rdi, %rbx
+    mov XS_PLAN(%rbx), %r12
+    mov %rsi, 0(%rsp)               /* n */
+    mov %r12, %rdi
+    call dsplit_ok
+    test %eax, %eax
+    jz 90f
+    mov 0(%rsp), %rdi
+    call par_parts
+    cmp $1, %rax
+    jbe 90f
+    mov %rax, 8(%rsp)               /* partitions */
+    mov %r12, %rdi
+    call agg_states_new
+    mov %rax, 16(%rsp)              /* states of all aggregates */
+    /* plan copy with the other aggregates */
+    mov $QP_SIZE, %edi
+    call tmp_alloc
+    mov %rax, %r13
+    mov %r13, %rdi
+    mov %r12, %rsi
+    mov $QP_SIZE, %edx
+    call memcpy
+    mov QP_NAGGS(%r12), %rdi
+    lea 8(, %rdi, 8), %rdi
+    call tmp_alloc
+    mov %rax, QP_AGGS(%r13)
+    movq $0, QP_NAGGS(%r13)
+    xor %ecx, %ecx
+1:  cmp QP_NAGGS(%r12), %rcx
+    jae 2f
+    mov QP_AGGS(%r12), %rax
+    mov (%rax, %rcx, 8), %rax
+    inc %rcx
+    testl $NF_DISTINCT, N_FLAGS(%rax)
+    jnz 1b
+    mov QP_NAGGS(%r13), %rdx
+    mov QP_AGGS(%r13), %rsi
+    mov %rax, (%rsi, %rdx, 8)
+    incq QP_NAGGS(%r13)
+    jmp 1b
+2:  cmpq $0, QP_NAGGS(%r13)
+    je 5f
+    mov $XS_SIZE, %edi              /* single_part on an XS copy */
+    call tmp_alloc
+    mov %rax, %r14
+    mov %r14, %rdi
+    mov %rbx, %rsi
+    mov $XS_SIZE, %edx
+    call memcpy
+    mov %r13, XS_PLAN(%r14)
+    mov $PT_SIZE, %edi
+    call tmp_zalloc
+    mov %rax, %r15
+    mov %r14, PT_XS(%r15)
+    mov 0(%rsp), %rax
+    mov %rax, PT_N(%r15)
+    mov %rax, %rdi
+    lea single_part(%rip), %rsi
+    mov %r15, %rdx
+    call par_for
+    mov %rax, %r14
+    mov $1, %ecx
+3:  cmp %r14, %rcx
+    jae 4f
+    mov %rcx, 24(%rsp)
+    mov %r13, %rdi
+    mov PT_OUT(%r15), %rsi
+    mov PT_OUT(%r15, %rcx, 8), %rdx
+    call agg_merge
+    mov 24(%rsp), %rcx
+    inc %rcx
+    jmp 3b
+4:  mov PT_OUT(%r15), %r15          /* copy them to their positions */
+    xor %r14d, %r14d
+41: cmp QP_NAGGS(%r12), %r14
+    jae 5f
+    mov QP_AGGS(%r12), %rax
+    mov (%rax, %r14, 8), %rax
+    testl $NF_DISTINCT, N_FLAGS(%rax)
+    jnz 42f
+    imul $AS_SIZE, %r14, %rdi
+    add 16(%rsp), %rdi
+    mov %r15, %rsi
+    mov $AS_SIZE, %edx
+    call memcpy
+    add $AS_SIZE, %r15
+42: inc %r14
+    jmp 41b
+5:  /* the DISTINCT aggregates */
+    mov $PT_SIZE, %edi
+    call tmp_zalloc
+    mov %rax, %r15
+    mov %rbx, PT_XS(%r15)
+    mov 0(%rsp), %rdi
+    mov %rdi, PT_N(%r15)
+    shl $4, %rdi
+    call tmp_alloc
+    mov %rax, PT_A(%r15)
+    mov 0(%rsp), %rdi
+    shl $3, %rdi
+    call tmp_alloc
+    mov %rax, PT_B(%r15)
+    mov 8(%rsp), %rax
+    mov %rax, PT_NPART(%r15)
+    mov $16, %edi                   /* one-aggregate plan for agg_merge */
+    call tmp_alloc                  /* (only QP_NAGGS / QP_AGGS are read) */
+    mov %rax, 32(%rsp)
+    mov $QP_SIZE, %edi
+    call tmp_zalloc
+    mov %rax, %r13
+    movq $1, QP_NAGGS(%r13)
+    mov 32(%rsp), %rax
+    mov %rax, QP_AGGS(%r13)
+    xor %r14d, %r14d
+6:  cmp QP_NAGGS(%r12), %r14
+    jae 80f
+    mov QP_AGGS(%r12), %rax
+    mov (%rax, %r14, 8), %rax
+    testl $NF_DISTINCT, N_FLAGS(%rax)
+    jz 7f
+    mov %rax, PT_C(%r15)
+    mov 32(%rsp), %rcx
+    mov %rax, (%rcx)
+    mov N_A(%rax), %rax
+    lea N_TYPE(%rax), %rax
+    mov %rax, PT_D(%r15)
+    mov 0(%rsp), %rdi               /* phase 1: cells and hashes */
+    lea dkey_part(%rip), %rsi
+    mov %r15, %rdx
+    call par_for
+    mov 8(%rsp), %rdi               /* phase 2: one part per partition */
+    mov %rdi, %rsi
+    lea dins_part(%rip), %rdx
+    mov %r15, %rcx
+    call par_run
+    xor %ecx, %ecx
+61: cmp 8(%rsp), %rcx
+    jae 7f
+    mov %rcx, 24(%rsp)
+    mov %r13, %rdi
+    imul $AS_SIZE, %r14, %rsi
+    add 16(%rsp), %rsi
+    mov PT_OUT(%r15, %rcx, 8), %rdx
+    call agg_merge
+    mov 24(%rsp), %rcx
+    inc %rcx
+    jmp 61b
+7:  inc %r14
+    jmp 6b
+80: mov 16(%rsp), %rax
+    LEAVE
+90: xor %eax, %eax
+    LEAVE
+ENDF pexec_dsplit
 
 /* ================================================================ hash join */
 
