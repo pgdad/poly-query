@@ -753,10 +753,16 @@ FUNC sort_rows
     mov %rdi, %rbx
     mov %rsi, %r12
     mov %rdx, %r13
-    call pexec_enabled              /* parallel sort + merge (pexec.S) */
+    call pexec_enabled              /* batch modes: normalized keys */
     test %eax, %eax
     jz 0f
-    cmpq $1, g_exec_threads(%rip)
+    mov %rbx, %rdi                  /* (keysort.S) */
+    mov %r12, %rsi
+    mov %r13, %rdx
+    call keysort
+    test %eax, %eax
+    jnz 9f
+    cmpq $1, g_exec_threads(%rip)   /* parallel sort + merge (pexec.S) */
     jbe 0f
     mov %rbx, %rdi
     mov %r12, %rsi
