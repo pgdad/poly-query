@@ -51,7 +51,9 @@ FUNC sort_rows_par
     cbz  x9, 1f                         // the single-threaded radix sort
     ldr  x9, [x21]                      // beats chunk sorts + comparator
     cbz  x9, 1f                         // merges
-    ldrb w9, [x21, #(8 + 8)]
+    ldr  w9, [x21, #(8 + 8)]
+    BR_WIDE w9, w10, 1f                 // wide DECIMAL: like STRING
+    and  w9, w9, #T_KIND_MASK
     cbz  w9, 1f
     cmp  w9, #T_STR
     b.ne .Lsp_fast
@@ -202,7 +204,9 @@ LFUNC sk_encode
     add  x9, x0, x9
     ldp  x0, x10, [x9]
     cbnz x10, 9f
-    ldrb w11, [x1, #8]                  // SK_TYPE kind
+    ldr  w11, [x1, #8]                  // SK_TYPE
+    BR_WIDE w11, w12, 6f
+    and  w11, w11, #T_KIND_MASK
     cmp  w11, #T_STR
     b.eq 3f
     cmp  w11, #T_FLOAT
@@ -235,6 +239,9 @@ LFUNC sk_encode
     add  x14, x14, #1
     sub  x15, x15, #8
     b    5b
+    b    7f
+6:  ldr  x0, [x0, #8]                   // wide DECIMAL: high word (prefix
+    eor  x0, x0, #0x8000000000000000    // only, like a STRING)
 7:  ldr  w12, [x1, #12]                 // SK_DESC
     cbz  w12, 8f
     mvn  x0, x0
@@ -282,7 +289,9 @@ FUNC sort_rows_fast
     mov  x10, #24                       // SK_SIZE
     madd x10, x9, x10, x21
     add  x10, x10, #8                   // descriptor
-    ldrb w11, [x10, #8]
+    ldr  w11, [x10, #8]
+    BR_WIDE w11, w12, 2f
+    and  w11, w11, #T_KIND_MASK
     cbz  w11, 2f
     cmp  w11, #T_STR
     b.eq 2f
@@ -303,9 +312,12 @@ FUNC sort_rows_fast
 2:  cbnz x27, 3f
     ldr  x10, [sp, #8]
     cbz  x10, .Lsf_fallback1
-    ldrb w10, [x21, #(8 + 8)]           // first key a STRING: its prefix
+    ldr  w10, [x21, #(8 + 8)]           // first key a STRING (or a wide
+    BR_WIDE w10, w11, 31f               // DECIMAL): its prefix
+    and  w10, w10, #T_KIND_MASK
     cmp  w10, #T_STR
     b.ne .Lsf_fallback1
+31:
     add  x10, x21, #8
     str  x10, [x0]
     mov  x27, #1

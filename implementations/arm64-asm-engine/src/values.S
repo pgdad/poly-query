@@ -357,8 +357,14 @@ LFUNC val_write_text
     b    buf_put_f64
 2:  cmp  w9, #T_DEC
     b.ne 3f
-    ubfx w2, w2, #T_SCALE_SHIFT, #8
+    ubfx w3, w2, #T_PREC_SHIFT, #8
+    cmp  w3, #DEC_NARROW_MAX
+    ubfx w3, w2, #T_SCALE_SHIFT, #8
+    b.hi 21f
+    mov  w2, w3
     b    fmt_decimal
+21: ldp  x1, x2, [x1]                   // wide: boxed i128
+    b    fmt_dec128
 3:  cmp  w9, #T_DATE
     b.eq fmt_date
     cmp  w9, #T_TS
@@ -471,6 +477,7 @@ FUNC value_cmp
     and  w9, w2, #T_KIND_MASK
     cmp  w9, #T_FLOAT
     b.eq 1f
+    BR_WIDE w2, w10, 3f
     cmp  w9, #T_STR
     b.eq 2f
     cmp  x0, x1
@@ -488,6 +495,8 @@ FUNC value_cmp
     ldr  x1, [x0, #STR_LEN]
     add  x0, x0, #STR_DATA
     b    bytes_cmp
+3:  mov  w3, w2                         // wide DECIMAL
+    b    cmp_typed
 ENDF value_cmp
 
 // -----------------------------------------------------------------------------
@@ -596,6 +605,9 @@ FUNC cast_value
     b    99f
 22: cmp  w22, #T_DEC
     b.ne 98f
+    BR_WIDE w21, w9, 33f
+    tst  w21, #T_SATF
+    b.ne 33f
     mov  x0, x19                    // v * 10^s, must fit p
     mov  w1, #0
     ubfx w2, w21, #T_SCALE_SHIFT, #8
@@ -605,6 +617,7 @@ FUNC cast_value
 
     // ---------------------------------------------------------- DECIMAL ->
 30: ubfx w10, w20, #T_SCALE_SHIFT, #8    // source scale
+    BR_WIDE w20, w11, 34f
     cmp  w22, #T_INT
     b.ne 31f
     ADR_L x9, pow10_tab
@@ -620,12 +633,40 @@ FUNC cast_value
     b    99f
 32: cmp  w22, #T_DEC
     b.ne 98f
-    mov  x0, x19
+    BR_WIDE w21, w9, 33f
+    tst  w21, #T_SATF
+    b.ne 33f
+    mov  x0, x19                    // narrow -> narrow
     mov  w1, w10
     ubfx w2, w21, #T_SCALE_SHIFT, #8
     bl   dec_rescale
     cbnz w1, 96f
     b    80f
+33: mov  x0, x19                    // INT64 / DECIMAL -> DECIMAL (exact
+    mov  w1, w20                    // 256-bit rescale, any precision)
+    mov  w2, w21
+    mov  w3, #0
+    bl   dec_convert
+    cbnz w1, 96f
+    b    99f
+34: cmp  w22, #T_INT                // wide DECIMAL -> INT64 / FLOAT64
+    b.ne 35f
+    mov  x0, x19
+    mov  w1, w20
+    bl   dec_to_int
+    cbnz w1, 96f
+    b    99f
+35: cmp  w22, #T_FLOAT
+    b.eq 36f
+    cmp  w22, #T_DEC
+    b.ne 98f
+    b    33b
+36:
+    mov  x0, x19
+    mov  w1, w20
+    bl   dec_to_double
+    fmov x0, d0
+    b    99f
 
     // ---------------------------------------------------------- FLOAT64 ->
 40: fmov d0, x19
@@ -645,9 +686,14 @@ FUNC cast_value
     b    99f
 41: cmp  w22, #T_DEC
     b.ne 98f
+    BR_WIDE w21, w9, 42f
     ubfx w1, w21, #T_PREC_SHIFT, #8
     ubfx w2, w21, #T_SCALE_SHIFT, #8
     bl   f64_to_dec
+    cbnz w1, 96f
+    b    99f
+42: mov  w1, w21
+    bl   dec_from_f64
     cbnz w1, 96f
     b    99f
 
@@ -670,7 +716,15 @@ FUNC cast_value
     ubfx w2, w21, #T_PREC_SHIFT, #8
     ubfx w3, w21, #T_SCALE_SHIFT, #8
     mov  w4, #1                     // CAST: round half away from zero
+    BR_WIDE w21, w9, 521f
     bl   parse_decimal
+    b    58f
+521: bl  parse_dec128
+    cbz  w2, 522f
+    mov  w1, w2
+    b    58f
+522: bl  dec_box
+    mov  w1, #0
     b    58f
 53: cmp  w22, #T_FLOAT
     b.ne 54f

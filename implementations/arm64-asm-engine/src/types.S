@@ -69,7 +69,7 @@ n_timestamp: .asciz "TIMESTAMP"
 // type_from_name(x0 ptr, x1 len, w2 nparams, x3 p, x4 s) -> w0 type,
 //   -1 unknown name, -2 invalid parameters                             (leaf)
 // DECIMAL/NUMERIC: 0 params => (18,0), 1 => (p,0), 2 => (p,s) with
-// 1 <= p <= 18, 0 <= s <= p. Parameters on any other type => -2.
+// 1 <= p <= 38, 0 <= s <= p (decimal38.md §1). Parameters on any other type => -2.
 // Registers: x5 table cursor, w6 entry kind, x7 entry length, x8 index,
 //            w9/w10 bytes, w11 scratch.
 // -----------------------------------------------------------------------------
@@ -109,7 +109,7 @@ FUNC type_from_name
     csel x4, x4, xzr, eq            // one parameter: scale 0
     cmp  x3, #1
     b.lt 9f
-    cmp  x3, #18
+    cmp  x3, #DEC_MAX_PREC
     b.gt 9f
     cmp  x4, #0
     b.lt 9f

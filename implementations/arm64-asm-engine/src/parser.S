@@ -1565,7 +1565,8 @@ ENDF p_type_param
 //   digits only            -> T_INT (> INT64_MAX: NUMERIC_OVERFLOW)
 //   digits with '.'        -> DECIMAL(p,s): s = fraction digits,
 //                             p = max(significant integer digits + s, 1),
-//                             unscaled = all digits; p > 18 -> FLOAT64
+//                             unscaled = all digits; p > 18: wide
+//                             DECIMAL (boxed i128); p > 38 -> FLOAT64
 //   with exponent          -> T_FLOAT via strtod (non-finite: NUMERIC_OVERFLOW)
 // Registers: x19 token, x20 node, x21 text ptr, x22 text len,
 //            x23 significant integer digits, x24 fraction digits.
@@ -1617,8 +1618,8 @@ LFUNC lit_number
     add  x13, x23, x24              // p = max(int + frac, 1)
     cmp  x13, #1
     csinc x13, x13, xzr, hs
-    cmp  x13, #18
-    b.hi .Lln_float
+    cmp  x13, #DEC_NARROW_MAX
+    b.hi .Lln_wide
     // pass 2: unscaled value = all digits (fits: at most 18 significant)
     mov  x0, #0
     mov  x10, #0
@@ -1637,6 +1638,23 @@ LFUNC lit_number
     orr  w9, w9, w13, lsl #T_PREC_SHIFT
     orr  w9, w9, w24, lsl #T_SCALE_SHIFT
     str  w9, [x20, #N_TYPE]
+    b    .Lln_ret
+
+.Lln_wide:                          // 19..38 digits: wide DECIMAL
+    cmp  x13, #DEC_MAX_PREC
+    b.hi .Lln_float
+    mov  w9, #T_DEC
+    orr  w9, w9, w13, lsl #T_PREC_SHIFT
+    orr  w9, w9, w24, lsl #T_SCALE_SHIFT
+    str  w9, [x20, #N_TYPE]
+    mov  x0, x21
+    mov  x1, x22
+    mov  w2, w13
+    mov  w3, w24
+    mov  w4, #0
+    bl   parse_dec128               // fits by construction
+    bl   dec_box
+    str  x0, [x20, #N_VAL]
     b    .Lln_ret
 
 .Lln_float:

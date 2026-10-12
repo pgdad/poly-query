@@ -33,6 +33,7 @@
 #define AS_CNT      0
 #define AS_LO       8
 #define AS_HI       16
+#define AS_TOP      24      // wide DECIMAL sums: bits 128..191 (eval.S)
 
 // Group table
 #define GT_NKEYS    0              // u64
@@ -562,7 +563,8 @@ LFUNC gt_keys_eq
     and  x11, x9, x10                   // one NULL: different
     cbz  x11, 6f
     b    1b                             // both NULL
-2:  and  w11, w2, #T_KIND_MASK
+2:  BR_WIDE w2, w11, 3f
+    and  w11, w2, #T_KIND_MASK
     cmp  w11, #T_STR
     b.eq 3f
     cmp  w11, #T_FLOAT
@@ -880,7 +882,9 @@ FUNC agg_task
     ccmp w9, #F_AVG, #4, ne
     b.ne 12f
     ldr  x10, [x28, #N_A]
-    ldrb w10, [x10, #N_TYPE]
+    ldr  w10, [x10, #N_TYPE]
+    BR_WIDE w10, w11, 12f
+    and  w10, w10, #T_KIND_MASK
     cmp  w10, #T_FLOAT
     b.eq 12f
     ldr  x10, [x1, #AS_CNT]             // exact 128-bit sum
@@ -892,7 +896,7 @@ FUNC agg_task
     adc  x11, x11, x12
     stp  x10, x11, [x1, #AS_LO]
     b    10b
-12: mov  x0, x28                        // MIN / MAX / FLOAT64 SUM, AVG
+12: mov  x0, x28                        // MIN / MAX / FLOAT64 / wide SUM, AVG
     bl   agg_accum
     b    10b
 .Lat_countstar:
@@ -1373,11 +1377,15 @@ LFUNC merge_states
     b.eq 3f
     cmp  w9, #F_MAX
     b.eq 3f
-    ldp  x11, x12, [x20, #AS_LO]        // COUNT / SUM / AVG
-    ldp  x13, x14, [x21, #AS_LO]
+    ldp  x11, x12, [x20, #AS_LO]        // COUNT / SUM / AVG (192 bits; the
+    ldp  x13, x14, [x21, #AS_LO]        // top word matters for wide sums)
+    ldr  x15, [x20, #AS_TOP]
+    ldr  x16, [x21, #AS_TOP]
     adds x11, x11, x13
-    adc  x12, x12, x14
+    adcs x12, x12, x14
+    adc  x15, x15, x16
     stp  x11, x12, [x20, #AS_LO]
+    str  x15, [x20, #AS_TOP]
     b    7f
 3:  ldr  x11, [x20, #AS_CNT]
     cbz  x11, 6f                        // destination empty: take source

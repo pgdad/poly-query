@@ -519,8 +519,16 @@ LFUNC try_hash_key
     cbz  w13, .Lthk_no                  // NULL literal: never matches anyway
     cmp  w13, #T_DEC
     b.ne 1f
-    lsr  w11, w11, #T_SCALE_SHIFT
-    lsr  w12, w12, #T_SCALE_SHIFT
+    ubfx w15, w11, #T_PREC_SHIFT, #8    // narrow / wide: same encoding
+    ubfx w16, w12, #T_PREC_SHIFT, #8
+    cmp  w15, #DEC_NARROW_MAX
+    cset w15, hi
+    cmp  w16, #DEC_NARROW_MAX
+    cset w16, hi
+    cmp  w15, w16
+    b.ne .Lthk_no
+    ubfx w11, w11, #T_SCALE_SHIFT, #8
+    ubfx w12, w12, #T_SCALE_SHIFT, #8
     cmp  w11, w12
     b.ne .Lthk_no
 1:  ldr  x0, [x19, #N_A]

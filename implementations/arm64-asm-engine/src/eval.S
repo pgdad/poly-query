@@ -22,6 +22,8 @@
 #define AS_CNT      0       // u64 number of accumulated (non-NULL) inputs/rows
 #define AS_LO       8       // SUM/AVG: i128 low word or f64 bits; MIN/MAX: value
 #define AS_HI       16      // SUM/AVG: i128 high word
+#define AS_TOP      24      // SUM/AVG of wide DECIMALs: bits 128..191 (the
+                            //   sum is a 192-bit two's-complement integer)
 #define AS_SIZE     32
 
 // SCALE128 lo, hi, v, n: (hi:lo) = v * 10^n (signed 128-bit), n register (w)
@@ -207,6 +209,9 @@ LFUNC ev_cast
     b    .Lcast_done
 1:  cmp  w10, #T_DEC                    // INT64 -> DECIMAL(p,s): exact
     b.ne .Lcast_lib
+    BR_WIDE w2, w11, .Lcast_lib
+    tst  w2, #T_SATF
+    b.ne .Lcast_lib
     ubfx w11, w2, #T_SCALE_SHIFT, #8
     SCALE128 x12, x13, x0, w11
     cmp  x13, x12, asr #63
@@ -262,8 +267,12 @@ LFUNC ev_unary
     b.ne 2f
     eor  x0, x0, #0x8000000000000000    // flip the sign bit
     b    .Lun_done
-2:  negs x0, x0                         // INT64 / DECIMAL
+2:  ldr  w1, [x19, #N_TYPE]
+    BR_WIDE w1, w10, 3f
+    negs x0, x0                         // INT64 / DECIMAL
     b.vs raise_overflow                 // -INT64_MIN
+    b    .Lun_done
+3:  bl   dec_neg                        // wide DECIMAL
 .Lun_done:
     mov  x1, #0
     LEAVE 1
@@ -366,7 +375,7 @@ LFUNC ev_binary
     ldr  x9, [x19, #N_B]
     ldr  w4, [x9, #N_TYPE]
     ldr  w5, [x19, #N_TYPE]
-    bl   arith_dec
+    bl   arith_dec_any
     b    .Lbin_ok
 
     // ---- || ------------------------------------------------------------------
@@ -515,6 +524,12 @@ ENDF arith_float
 // + -: operands are aligned to the result scale max(s1,s2).
 // *  : product of the unscaled values, result scale s1+s2.
 // =============================================================================
+// arith_dec_any: arith_dec, or dec_arith (wdec.S) for a wide result type
+FUNC arith_dec_any
+    BR_WIDE w5, w9, dec_arith
+    b    arith_dec
+ENDF arith_dec_any
+
 FUNC arith_dec
     cmp  w2, #OP_MUL
     b.ne 1f
@@ -547,14 +562,19 @@ ENDF arith_dec
 // =============================================================================
 FUNC cmp_typed
     and  w9, w2, #T_KIND_MASK
+    and  w10, w3, #T_KIND_MASK
     cmp  w9, #T_FLOAT
     b.eq .Lct_float
     cmp  w9, #T_STR
     b.eq .Lct_str
     cmp  w9, #T_BOOL
     b.eq .Lct_bool
+    cmp  w9, w10                        // INT64 vs DECIMAL: exact, wdec.S
+    b.ne .Lct_wide
     cmp  w9, #T_DEC
     b.ne .Lct_signed
+    BR_WIDE w2, w11, .Lct_wide
+    BR_WIDE w3, w11, .Lct_wide
     ubfx w10, w2, #T_SCALE_SHIFT, #8
     ubfx w11, w3, #T_SCALE_SHIFT, #8
     cmp  w10, w11
@@ -596,6 +616,26 @@ FUNC cmp_typed
     ldr  x1, [x0, #STR_LEN]
     add  x0, x0, #STR_DATA
     b    bytes_cmp                      // code point order == byte order
+.Lct_wide:
+    BR_WIDE w2, w11, 1f                 // two wide values of one scale:
+    b    2f                             // compare the i128s directly
+1:  BR_WIDE w3, w11, 3f
+2:  mov  x9, x1                         // general case: dec_cmp(a, ta, b, tb)
+    mov  w1, w2
+    mov  x2, x9
+    b    dec_cmp
+3:  ubfx w10, w2, #T_SCALE_SHIFT, #8
+    ubfx w11, w3, #T_SCALE_SHIFT, #8
+    cmp  w10, w11
+    b.ne 2b
+    ldp  x4, x5, [x0]
+    ldp  x6, x7, [x1]
+    cmp  x5, x7
+    b.ne .Lct_signed_flags
+    cmp  x4, x6
+    cset w0, hi
+    csinv w0, w0, wzr, hs
+    ret
 ENDF cmp_typed
 
 // =============================================================================
@@ -683,11 +723,22 @@ FUNC agg_accum
     fadd d0, d0, d1
     str  d0, [x20, #AS_LO]
     b    .Lacc_end
-1:  ldp  x10, x11, [x20, #AS_LO]        // exact 128-bit sum
+1:  BR_WIDE w24, w10, 4f
+    ldp  x10, x11, [x20, #AS_LO]        // exact 128-bit sum
     asr  x12, x21, #63                  // sign extension of the input
     adds x10, x10, x21
     adc  x11, x11, x12
     stp  x10, x11, [x20, #AS_LO]
+    b    .Lacc_end
+4:  ldp  x12, x13, [x21]                // wide: 192-bit sum
+    asr  x14, x13, #63
+    ldp  x10, x11, [x20, #AS_LO]
+    ldr  x15, [x20, #AS_TOP]
+    adds x10, x10, x12
+    adcs x11, x11, x13
+    adc  x15, x15, x14
+    stp  x10, x11, [x20, #AS_LO]
+    str  x15, [x20, #AS_TOP]
     b    .Lacc_end
 .Lacc_minmax:
     cmp  x9, #1
@@ -745,6 +796,8 @@ FUNC agg_finish
 
 .Lafi_sum:
     ldr  x11, [x24, #N_A]
+    ldr  w12, [x11, #N_TYPE]
+    BR_WIDE w12, w13, .Lafi_wsum
     ldrb w11, [x11, #N_TYPE]
     ldp  x0, x1, [x20, #AS_LO]
     cmp  w11, #T_FLOAT
@@ -759,6 +812,7 @@ FUNC agg_finish
 .Lafi_avg:
     ldr  x11, [x24, #N_A]
     ldr  w11, [x11, #N_TYPE]
+    BR_WIDE w11, w12, .Lafi_wavg
     and  w12, w11, #T_KIND_MASK
     ucvtf d2, x10                       // count
     ldp  x0, x1, [x20, #AS_LO]
@@ -792,6 +846,37 @@ FUNC agg_finish
     ubfx x9, x0, #52, #11               // FLOAT64 results must be finite
     cmp  x9, #0x7ff
     b.eq raise_overflow
+    b    .Lafi_val
+.Lafi_wsum:                             // wide SUM: 192-bit -> DECIMAL(38,s)
+    bl   .Lafi_w256
+    mov  w1, #DEC_MAX_PREC
+    bl   i256_to128
+    cbz  w2, raise_overflow
+    bl   dec_box
+    add  sp, sp, #32
+    b    .Lafi_val
+.Lafi_wavg:                             // wide AVG: exact sum / count
+    bl   .Lafi_w256
+    ldr  x11, [x24, #N_A]
+    ldr  w11, [x11, #N_TYPE]
+    ubfx w1, w11, #T_SCALE_SHIFT, #8
+    bl   i256_to_f64
+    add  sp, sp, #32
+    ldr  x10, [x20, #AS_CNT]
+    ucvtf d2, x10
+    fdiv d0, d0, d2
+    fmov x0, d0
+    b    .Lafi_fcheck
+    // local helper: sp -= 32, I256 of the 192-bit sum at the new sp (x0)
+.Lafi_w256:
+    sub  sp, sp, #32
+    ldp  x9, x10, [x20, #AS_LO]
+    ldr  x11, [x20, #AS_TOP]
+    asr  x12, x11, #63
+    stp  x9, x10, [sp]
+    stp  x11, x12, [sp, #16]
+    mov  x0, sp
+    ret
 .Lafi_val:
     stp  x0, xzr, [x21]
     b    .Lafi_next

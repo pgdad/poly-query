@@ -539,7 +539,9 @@ FUNC mj_side
     ldr  x9, [x20]                      // one integer-like key: radix
     cmp  x9, #1
     b.ne 3f
-    ldrb w9, [x20, #8]
+    ldr  w9, [x20, #8]
+    BR_WIDE w9, w10, 3f
+    and  w9, w9, #T_KIND_MASK
     cmp  w9, #T_FLOAT
     b.eq 3f
     cmp  w9, #T_STR
@@ -704,6 +706,7 @@ ENDF radix_sort_idx
 //   x19 payload
 // =============================================================================
 FUNC hash_cell
+    BR_WIDE w1, w9, dec_hash
     and  w9, w1, #T_KIND_MASK
     cmp  w9, #T_STR
     b.eq 2f
@@ -784,6 +787,7 @@ FUNC keys_equal
     ldr  x1, [x20], #16
     ldr  x9, [x21], #8
     ldr  w2, [x9, #N_TYPE]
+    BR_WIDE w2, w10, 2f
     and  w10, w2, #T_KIND_MASK
     cmp  w10, #T_STR
     b.eq 2f

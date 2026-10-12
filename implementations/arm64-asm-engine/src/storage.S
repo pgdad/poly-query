@@ -239,6 +239,25 @@ LFUNC dict_encode
 ENDF dict_encode
 
 // =============================================================================
+// val_copy_in(x0 Arena*, x1 payload, w2 type) -> x0 payload: a copy in the
+// arena for the boxed representations (STRING, wide DECIMAL), else the
+// payload itself.
+// =============================================================================
+FUNC val_copy_in
+    BR_WIDE w2, w9, 2f
+    and  w9, w2, #T_KIND_MASK
+    cmp  w9, #T_STR
+    b.eq 1f
+    mov  x0, x1
+    ret
+1:  ldr  x2, [x1, #STR_LEN]
+    add  x1, x1, #STR_DATA
+    b    str_new_in
+2:  ldp  x1, x2, [x1]
+    b    dec_box_in
+ENDF val_copy_in
+
+// =============================================================================
 // rebuild_table(x0 Table*, w1 layout) — copies the table into a fresh arena
 // in its final representation (columns as they are now — PLAIN or DICT — or
 // the row store for LAYOUT_ROW), then frees the old arena.
@@ -303,11 +322,12 @@ LFUNC rebuild_table
     lsl  x2, x26, #3
     bl   memcpy
     ldr  w9, [x23, #COL_TYPE]
+    BR_WIDE w9, w10, 2f
     and  w9, w9, #T_KIND_MASK
     cmp  w9, #T_STR
     b.ne .Lrb_next
-    mov  x25, #0                        // STRING: copy every string
-2:  cmp  x25, x26
+2:  mov  x25, #0                        // STRING / wide DECIMAL: copy
+22: cmp  x25, x26
     b.hs .Lrb_next
     ldr  x9, [x27, x25, lsl #3]
     cbz  x9, 3f
@@ -318,12 +338,12 @@ LFUNC rebuild_table
     str  xzr, [x27, x25, lsl #3]        // NULL slot
     b    3f
 21: mov  x0, sp
-    add  x1, x9, #STR_DATA
-    ldr  x2, [x9, #STR_LEN]
-    bl   str_new_in
+    mov  x1, x9
+    ldr  w2, [x23, #COL_TYPE]
+    bl   val_copy_in
     str  x0, [x27, x25, lsl #3]
 3:  add  x25, x25, #1
-    b    2b
+    b    22b
 .Lrb_dict:
     mov  x0, sp
     mov  x1, #DC_SIZE
@@ -446,17 +466,12 @@ LFUNC build_rows
     strb w11, [x9, x10]
     mov  x0, #0
     b    3f
-21: ldr  x9, [x19, #TBL_COLS]           // strings are copied
-    add  x9, x9, x25, lsl #5
-    ldr  w9, [x9, #COL_TYPE]
-    and  w9, w9, #T_KIND_MASK
-    cmp  w9, #T_STR
-    b.ne 3f
-    mov  x9, x0
+21: ldr  x9, [x19, #TBL_COLS]           // strings / wide decimals are
+    add  x9, x9, x25, lsl #5            // copied
+    ldr  w2, [x9, #COL_TYPE]
+    mov  x1, x0
     mov  x0, x27
-    add  x1, x9, #STR_DATA
-    ldr  x2, [x9, #STR_LEN]
-    bl   str_new_in
+    bl   val_copy_in
 3:  str  x0, [x26, x25, lsl #3]
     add  x25, x25, #1
     b    2b
@@ -516,21 +531,17 @@ LFUNC copy_row_groups
     cbz  w9, 3f
     ldr  x9, [x19, #TBL_COLS]
     add  x9, x9, x23, lsl #5
-    ldr  w9, [x9, #COL_TYPE]
-    and  w9, w9, #T_KIND_MASK
-    cmp  w9, #T_STR
-    b.ne 3f
-    ldr  x9, [x26, #CK_MIN]
+    ldr  w2, [x9, #COL_TYPE]
     mov  x0, x20
-    add  x1, x9, #STR_DATA
-    ldr  x2, [x9, #STR_LEN]
-    bl   str_new_in
+    ldr  x1, [x26, #CK_MIN]
+    bl   val_copy_in
     str  x0, [x26, #CK_MIN]
-    ldr  x9, [x26, #CK_MAX]
+    ldr  x9, [x19, #TBL_COLS]
+    add  x9, x9, x23, lsl #5
+    ldr  w2, [x9, #COL_TYPE]
     mov  x0, x20
-    add  x1, x9, #STR_DATA
-    ldr  x2, [x9, #STR_LEN]
-    bl   str_new_in
+    ldr  x1, [x26, #CK_MAX]
+    bl   val_copy_in
     str  x0, [x26, #CK_MAX]
 3:  add  x23, x23, #1
     b    2b

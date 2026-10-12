@@ -202,8 +202,11 @@ FUNC common_type
     ubfx w12, w1, #T_SCALE_SHIFT, #8
 4:  cmp  w11, w12
     csel w11, w11, w12, hi
-    mov  w0, #DEC18
-    orr  w0, w0, w11, lsl #T_SCALE_SHIFT
+    mov  w12, #DEC_TYPE(DEC_MAX_PREC, 0) // W = 38 if a DECIMAL is wide
+    BR_WIDE w0, w10, 5f
+    BR_WIDE w1, w10, 5f
+    mov  w12, #DEC18
+5:  orr  w0, w12, w11, lsl #T_SCALE_SHIFT
     ret
 8:  mov  w0, #-1
 9:  ret
@@ -458,7 +461,11 @@ FUNC bind_scalar_func
     mov  w10, #T_FLOAT
 1:  cmp  w9, #T_DEC
     b.ne 2f
-    mov  w10, #DEC18
+    ldr  x9, [x25]                      // DECIMAL(p,s) -> DECIMAL(W,0)
+    ldr  w0, [x9, #N_TYPE]
+    mov  w1, w0
+    bl   dec_wtype
+    mov  w10, w0
 2:  str  w10, [x20, #N_TYPE]
     b    .Lbsf_done
 
@@ -494,8 +501,12 @@ FUNC bind_scalar_func
     csel x10, xzr, x28, lt              // max(n, 0)
     cmp  x10, x9
     csel x10, x10, x9, lt               // min(.., s)
-    mov  w11, #DEC18
-    orr  w11, w11, w10, lsl #T_SCALE_SHIFT
+    str  x10, [sp, #-16]!
+    mov  w0, w27                        // DECIMAL(W, ..)
+    mov  w1, w27
+    bl   dec_wtype
+    ldr  x10, [sp], #16
+    orr  w11, w0, w10, lsl #T_SCALE_SHIFT
     str  w11, [x20, #N_TYPE]
     b    .Lbsf_done
 
@@ -1144,11 +1155,17 @@ FUNC ev_func
     b.ne 1f
     and  x0, x21, #0x7fffffffffffffff   // clear the sign bit
     b    .Lev_ret
-1:  cmp  x21, #0                        // INT64 / DECIMAL
+1:  ldr  x9, [x25]
+    ldr  w1, [x9, #N_TYPE]
+    mov  x0, x21
+    BR_WIDE w1, w9, 3f
+    cmp  x21, #0                        // INT64 / DECIMAL
     cneg x0, x21, lt
     tbnz x0, #63, 2f                    // |INT64_MIN|
     b    .Lev_ret
 2:  b    raise_overflow
+3:  bl   dec_abs                        // wide DECIMAL
+    b    .Lev_ret
 
     // ---- ROUND(x [, n]) -----------------------------------------------------
 .Lev_round:
@@ -1170,9 +1187,17 @@ FUNC ev_func
     fmov x0, d0
     b    .Lev_ret
 2:  mov  x2, x1
+    BR_WIDE w10, w9, 3f
+    ldr  w9, [x19, #N_TYPE]
+    BR_WIDE w9, w11, 3f
     ubfx w1, w10, #T_SCALE_SHIFT, #8
     mov  x0, x21
     bl   round_dec
+    b    .Lev_ret
+3:  mov  x0, x21                        // wide argument or result
+    mov  w1, w10
+    ldr  w3, [x19, #N_TYPE]
+    bl   dec_round
     b    .Lev_ret
 
     // ---- FLOOR / CEIL (w28 = 1 for CEIL) -----------------------------------
@@ -1189,6 +1214,7 @@ FUNC ev_func
     mov  x0, x21
     cmp  w9, #T_DEC
     b.ne .Lev_ret                       // INT64: identity
+    BR_WIDE w10, w9, 6f
     ubfx w0, w10, #T_SCALE_SHIFT, #8    // DECIMAL(p,s) -> DECIMAL(18,0)
     bl   pow10_i64
     sdiv x9, x21, x0                    // truncated quotient
@@ -1207,6 +1233,12 @@ FUNC ev_func
     b    5f
 4:  frintp d0, d0
 5:  fmov x0, d0
+    b    .Lev_ret
+6:  mov  x0, x21                        // wide: DECIMAL(38,0)
+    mov  w1, w10
+    mov  w2, w28
+    ldr  w3, [x19, #N_TYPE]
+    bl   dec_floorceil
     b    .Lev_ret
 
     // ---- SQRT (argument cast to FLOAT64 by the binder) ---------------------
