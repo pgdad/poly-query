@@ -1891,7 +1891,8 @@ FUNC start_child
     call pthread_mutex_unlock
     mov $1, %eax
     LEAVE
-1:  mov %rbx, %rdi
+1:  call chunk_pool_forget
+    mov %rbx, %rdi
     call child_main                 /* does not return */
 7:  xor %eax, %eax
     LEAVE

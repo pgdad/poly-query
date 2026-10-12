@@ -150,6 +150,114 @@ ENDF xrealloc
 
 #define CHUNK_MIN (256*1024)
 
+/* ------------------------------------------------ arena chunk pool
+ * Chunks of released arenas are kept (up to POOL_MAX bytes) and reused by
+ * later arenas: large fresh allocations are mmap'd by malloc and every
+ * first touch of their pages faults, which costs more than many queries
+ * themselves.  A chunk starts with a 16-byte header: the next chunk of its
+ * arena (or of the pool) and its real size.  A reused chunk serves exactly
+ * the requested size, so arena accounting (AR_TOTAL, AR_LIMIT) does not
+ * depend on the pool.  The pool is shared by all threads (spin lock). */
+#define POOL_MAX (1024*1024*1024)
+
+    .data
+    .p2align 3
+pool_head:  .quad 0             /* free chunks */
+pool_bytes: .quad 0
+pool_lock:  .quad 0
+    .text
+
+/* pool_acquire / pool_release: the pool's spin lock (leaf helpers) */
+pool_acquire:
+    mov $1, %eax
+1:  xchg %rax, pool_lock(%rip)
+    test %rax, %rax
+    jz 2f
+    pause
+    mov $1, %eax
+    jmp 1b
+2:  ret
+pool_release:
+    movq $0, pool_lock(%rip)
+    ret
+
+/* chunk_get(size rdi) -> rax chunk of at least `size` bytes (header
+ * included): the smallest pooled chunk that fits, else a new one */
+FUNC chunk_get
+    push %rbx
+    push %r12
+    push %r13
+    mov %rdi, %rbx
+    call pool_acquire
+    lea pool_head(%rip), %rcx       /* link to the current chunk */
+    xor %r12d, %r12d                /* link to the best chunk */
+    mov $-1, %r13                   /* its size */
+1:  mov (%rcx), %rax
+    test %rax, %rax
+    jz 3f
+    mov 8(%rax), %rdx
+    cmp %rbx, %rdx
+    jb 2f
+    cmp %r13, %rdx
+    jae 2f
+    mov %rcx, %r12
+    mov %rdx, %r13
+2:  mov %rax, %rcx
+    jmp 1b
+3:  test %r12, %r12
+    jz 5f
+    mov (%r12), %rax                /* unlink the best chunk */
+    mov (%rax), %rdx
+    mov %rdx, (%r12)
+    sub %r13, pool_bytes(%rip)
+    call pool_release
+    jmp 9f
+5:  call pool_release
+    mov %rbx, %rdi
+    call malloc
+    test %rax, %rax
+    jnz 6f
+    RAISE E_RESOURCE_LIMIT, "out of memory"
+6:  mov %rbx, 8(%rax)
+9:  pop %r13
+    pop %r12
+    pop %rbx
+    ret
+ENDF chunk_get
+
+/* chunk_put(chunk rdi): keeps the chunk in the pool, or frees it when the
+ * pool is full */
+FUNC chunk_put
+    push %rbx
+    mov %rdi, %rbx
+    call pool_acquire
+    mov pool_bytes(%rip), %rax
+    add 8(%rbx), %rax
+    cmp $POOL_MAX, %rax
+    ja 1f
+    mov %rax, pool_bytes(%rip)
+    mov pool_head(%rip), %rax
+    mov %rax, (%rbx)
+    mov %rbx, pool_head(%rip)
+    call pool_release
+    pop %rbx
+    ret
+1:  call pool_release
+    mov %rbx, %rdi
+    call free
+    pop %rbx
+    ret
+ENDF chunk_put
+
+/* chunk_pool_forget(): drops the pool without freeing it (a fork()ed child:
+ * another thread of the parent may have held the lock) */
+FUNC chunk_pool_forget
+    movq $0, pool_head(%rip)
+    movq $0, pool_bytes(%rip)
+    movq $0, pool_lock(%rip)
+    ret
+ENDF chunk_pool_forget
+
 /* arena_new() -> Arena* (zeroed, unlimited) */
 FUNC arena_new
     sub $8, %rsp
@@ -204,11 +312,8 @@ arena_alloc_slow:
     RAISE E_RESOURCE_LIMIT, "query memory budget exceeded"
 1:  mov %rax, AR_TOTAL(%rbx)
     mov %r13, %rdi
-    call malloc
-    test %rax, %rax
-    jnz 2f
-    RAISE E_RESOURCE_LIMIT, "out of memory"
-2:  mov AR_CHUNKS(%rbx), %rcx
+    call chunk_get
+    mov AR_CHUNKS(%rbx), %rcx
     mov %rcx, (%rax)
     mov %rax, AR_CHUNKS(%rbx)
     lea (%rax, %r13), %rcx
@@ -232,7 +337,8 @@ FUNC arena_zalloc
     ret
 ENDF arena_zalloc
 
-/* arena_reset(arena): frees all chunks, keeps the Arena object and its limit */
+/* arena_reset(arena): releases all chunks (to the chunk pool), keeps the
+ * Arena object and its limit */
 FUNC arena_reset
     push %rbx
     push %r12
@@ -243,7 +349,7 @@ FUNC arena_reset
     jz 2f
     mov %r12, %rdi
     mov (%r12), %r12
-    call free
+    call chunk_put
     jmp 1b
 2:  movq $0, AR_CUR(%rbx)
     movq $0, AR_END(%rbx)
