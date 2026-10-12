@@ -2,7 +2,7 @@
 # Workload benchmark: runs benchmarks/workloads/analytics.json through one
 # `bin/polyquery session` and reports, per query, the median and best
 # client-side wall-clock latency (request written -> response line read,
-# includes result serialization) plus the engine's stats.elapsed_us.
+# includes result serialization) plus the engine's best stats.elapsed_us.
 #
 #   bench/workload.sh DATA_DIR [RUNS] [OPTIONS_JSON]
 # DATA_DIR holds the generated tables, e.g. /tmp/pq1m/1m from
@@ -30,8 +30,23 @@ print("#idx")
 for i in w["indexes"]: print(i["sql"])
 ' "$workload" "$extra")
 
-coproc PQ { "$engine" session --data-dir "$data" 2>/dev/null; }
-send() { printf '%s\n' "$1" >&"${PQ[1]}"; IFS= read -r resp <&"${PQ[0]}"; }
+# The engine reads requests from a FIFO and writes responses to a regular
+# file, which `read` consumes in blocks (on a pipe bash reads one byte per
+# system call, which would inflate the wall time of large responses).
+tmp=$(mktemp -d)
+mkfifo "$tmp/in"
+: > "$tmp/out"
+"$engine" session --data-dir "$data" < "$tmp/in" > "$tmp/out" 2>/dev/null &
+pid=$!
+exec 4> "$tmp/in" 3< "$tmp/out"
+trap 'exec 4>&-; wait $pid 2>/dev/null; rm -rf "$tmp"' EXIT
+send() {   # send REQUEST: writes it, polls the file for the response line
+  local part
+  printf '%s\n' "$1" >&4
+  resp=
+  until IFS= read -r part <&3; do resp+=$part; done
+  resp+=$part
+}
 
 for t in transactions customers orders order_items products sensor_readings \
          sort_keys wide nulls_heavy; do
@@ -66,5 +81,3 @@ for l in "${qlines[@]}"; do
   awk -v n="$name" -v m="$med" -v b="$best" -v e="$ebest" -v r="$rc" \
     'BEGIN { printf "%-28s %8.1fms %8.1fms %8.1fms %8s\n", n, m/1000, b/1000, e/1000, r }'
 done
-exec {PQ[1]}>&-
-wait
