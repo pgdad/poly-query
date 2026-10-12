@@ -1,0 +1,21 @@
+query                         median ms    best ms
+q01_filter_selective                0.0        0.0
+q02_filter_low_selectivity          1.6        1.5
+q03_range_filter_time               0.7        0.7
+q04_arith_aggregate                 1.5        1.4
+q05_groupby_low_card                1.2        1.2
+q06_groupby_high_card               4.5        4.4
+q07_groupby_skewed                  6.5        6.2
+q08_groupby_uniform_multi           3.1        3.1
+q09_distinct_count                  5.2        5.1
+q10_join_customers                  6.1        5.8
+q11_join_star                       4.7        4.6
+q12_left_join_anti                  5.7        5.5
+q13_sort_topn                       1.8        1.7
+q14_sort_full_string               14.9       14.5
+q15_sort_multi_key                 17.0       16.7
+q16_timeseries_hourly               0.3        0.3
+q17_wide_projection                 0.2        0.2
+q18_nulls                           1.9        1.8
+q19_cte_subquery                    6.8        6.7
+q20_string_functions                3.3        3.1

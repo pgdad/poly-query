@@ -834,31 +834,32 @@ engine-reported `stats.elapsed_us` (parse → bind → plan → execute →
 serialise; client wall-clock times measured separately with a driver
 outside the repository differ by less than 0.3 ms). Machine: AMD Zen 5,
 32 CPUs. "Before" is the engine at the start of this task (commit
-`e912c3e`, kept in `bench/workload-before.txt`), "after" is this version.
+`e912c3e`, kept in `bench/workload-before.txt`), "after" is this version
+(`bench/workload-after.txt`).
 
 | query | before (ms) | after (ms) | speed-up |
 |---|---:|---:|---:|
 | q01_filter_selective | 0.0 | 0.0 | - |
-| q02_filter_low_selectivity | 15.0 | 1.5 | 10.0x |
+| q02_filter_low_selectivity | 15.0 | 1.6 | 9.4x |
 | q03_range_filter_time | 0.6 | 0.7 | 0.9x |
 | q04_arith_aggregate | 13.1 | 1.5 | 8.7x |
 | q05_groupby_low_card | 10.7 | 1.2 | 8.9x |
 | q06_groupby_high_card | 16.1 | 4.5 | 3.6x |
-| q07_groupby_skewed | 33.5 | 6.6 | 5.1x |
-| q08_groupby_uniform_multi | 25.5 | 3.2 | 8.0x |
-| q09_distinct_count | 39.9 | 5.1 | 7.8x |
-| q10_join_customers | 49.7 | 6.7 | 7.4x |
-| q11_join_star | 25.6 | 5.1 | 5.0x |
-| q12_left_join_anti | 14.9 | 6.2 | 2.4x |
+| q07_groupby_skewed | 33.5 | 6.5 | 5.2x |
+| q08_groupby_uniform_multi | 25.5 | 3.1 | 8.2x |
+| q09_distinct_count | 39.9 | 5.2 | 7.7x |
+| q10_join_customers | 49.7 | 6.1 | 8.1x |
+| q11_join_star | 25.6 | 4.7 | 5.4x |
+| q12_left_join_anti | 14.9 | 5.7 | 2.6x |
 | q13_sort_topn | 10.7 | 1.8 | 5.9x |
-| q14_sort_full_string | 423.0 | 15.8 | 26.8x |
-| q15_sort_multi_key | 354.4 | 17.3 | 20.5x |
+| q14_sort_full_string | 423.0 | 14.9 | 28.4x |
+| q15_sort_multi_key | 354.4 | 17.0 | 20.8x |
 | q16_timeseries_hourly | 1.8 | 0.3 | 6.0x |
 | q17_wide_projection | 0.7 | 0.2 | 3.5x |
 | q18_nulls | 23.4 | 1.9 | 12.3x |
-| q19_cte_subquery | 23.3 | 7.6 | 3.1x |
-| q20_string_functions | 38.3 | 3.4 | 11.3x |
-| **total** | **1120.2** | **90.6** | **12.4x** |
+| q19_cte_subquery | 23.3 | 6.8 | 3.4x |
+| q20_string_functions | 38.3 | 3.3 | 11.6x |
+| **total** | **1120.2** | **87.0** | **12.9x** |
 
 The result rows of every query (warm-up runs, `PQ_BENCH_OUT=FILE`) are
 byte-identical before and after.
@@ -892,7 +893,7 @@ byte-identical before and after.
    stable order of `sort_rows`. Parts accumulate their flags / masks /
    bucket counters on their own stacks (sharing written cache lines between
    threads made the first version 7x slower). q14 / q15: 423 / 354 ms →
-   16 / 17 ms.
+   15 / 17 ms.
 3. **GROUP BY with few groups** (`pexec.S` `lagg_ok`, `lagg_merge`). The
    parallel GROUP BY partitioned groups by hash, so with a handful of groups
    one thread did nearly all the work. When every aggregate state merges
@@ -914,7 +915,7 @@ byte-identical before and after.
    partition's tuples (in tuple order) and a partition visits only its own
    tuples (radix partitioning, `aux_new` / `dscat_part`); integer-like
    values go into an open-addressing set instead of the generic chained
-   table. q09 39.9 → 5.1 ms.
+   table. q09 39.9 → 5.2 ms.
 5. **Arena chunk pool** (`util.S` `chunk_get` / `chunk_put`). Released
    arena chunks (request, worker and table arenas) are kept, up to 1 GiB,
    and reused best-fit instead of being returned to malloc, which unmaps
@@ -944,7 +945,7 @@ byte-identical before and after.
    projection) are then built in parallel parts and concatenated in order.
    Like the DISTINCT aggregates, the partitions get their tuples through
    radix partitioning instead of every partition scanning all hashes.
-   q07 / q19: 33.5 / 23.3 ms → 6.6 / 7.6 ms.
+   q07 / q19: 33.5 / 23.3 ms → 6.5 / 6.8 ms.
 8. **Persistent, pinned worker pool** (`par.S`). `par_run` used to create
    and join a pthread per part on every call (a sort makes seven calls).
    Workers now live as long as the process: a part is posted to its
