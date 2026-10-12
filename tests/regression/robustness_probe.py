@@ -356,6 +356,97 @@ def probe_parallel_memory_budget(engine: str, data: Path) -> dict:
     return {"verdict": verdict, **out, **info}
 
 
+def limit_cases() -> tuple[list, list]:
+    """CR-6 (spec/changes/expression-limits.md §5) on n(x) = 0..99: (name, sql, expected first cell)."""
+    def where(pred: str) -> str:
+        return f"SELECT count(*) FROM n WHERE {pred}"
+    lit = "a" * 524_000
+    minimum = [
+        ("parens_998", where("(" * 998 + "x >= 0" + ")" * 998), 100),
+        ("abs_998", where("ABS(" * 998 + "x" + ")" * 998 + " >= 0"), 100),
+        ("unary_minus_998", where("- " * 998 + "x >= 0"), 100),
+        ("not_998", where("NOT " * 998 + "x >= 0"), 100),
+        ("or_10000", where(" OR ".join(f"x = {i}" for i in range(10_000))), 100),
+        ("and_10000", where(" AND ".join(f"x <> {-i - 1}" for i in range(10_000))), 100),
+        ("sum_10000", "SELECT max(x" + " + 1" * 9_999 + ") FROM n", 99 + 9_999),
+        ("in_10000", where("x IN (" + ", ".join(str(i) for i in range(10_000)) + ")"), 100),
+        ("case_5000", "SELECT sum(CASE " + " ".join(f"WHEN x = {i} THEN {i}" for i in range(5_000))
+         + " ELSE 0 END) FROM n", 4950),
+        ("text_1mib", where(f"'{lit}' = '{lit}'"), 100),
+    ]
+    beyond = [
+        ("parens_100000", where("(" * 100_000 + "x >= 0" + ")" * 100_000), 100),
+        ("or_100000", where(" OR ".join(f"x = {i}" for i in range(100_000))), 100),
+        ("in_100000", where("x IN (" + ", ".join(str(i) for i in range(100_000)) + ")"), 100),
+    ]
+    return minimum, beyond
+
+
+def probe_expression_limits(engine: str, data: Path) -> dict:
+    """CR-6 (resolves SPEC-Q-002): minimum statement sizes must work in every execution mode;
+    beyond them the answer is the result, RESOURCE_LIMIT or TIMEOUT within timeout + 1 s
+    (+ 4 s scheduling slack), never a crash, a hang or a size-caused PARSE_ERROR."""
+    (data / "n.csv").write_text("x\n" + "\n".join(str(i) for i in range(100)) + "\n")
+    env = {"PQ_PAR_MIN": "1", "PQ_PARALLEL_MIN_ROWS": "1"}
+    modes = (("row", {"mode": "row", "threads": 1}), ("vectorized", {"mode": "vectorized", "threads": 1}),
+             ("parallel", {"mode": "vectorized", "threads": 8}), ("auto", {}))
+    minimum, beyond = limit_cases()
+    state: dict = {"s": None, "deaths": []}
+
+    def session() -> Session:
+        s = state["s"]
+        if s is not None and s.alive():
+            return s
+        if s is not None:
+            state["deaths"].append(s.close())
+        s = state["s"] = Session(engine, data, [], env)
+        s.req({"op": "load", "table": "n", "format": "csv", "path": "n.csv"})
+        return s
+
+    def run(sql: str, opts: dict, timeout_ms: int, wait: float) -> tuple[str, object, float, bool]:
+        s = session()
+        t0 = time.monotonic()
+        r = s.req({"op": "query", "sql": sql, "options": {**opts, "timeout_ms": timeout_ms}}, timeout=wait)
+        dt = time.monotonic() - t0
+        c, alive = code(r), s.alive()
+        if c == "NO_RESPONSE" and alive:   # hung: a late reply must not answer the next case
+            os.killpg(s.proc.pid, 9)
+            s.close()
+            state["s"] = None
+            return "HANG", None, dt, True
+        val = (r.get("rows") or [[None]])[0][0] if c == "ok" else None
+        return c, val, dt, alive
+
+    caps = (session().req({"op": "capabilities"}) or {}).get("capabilities") or []
+    out: dict = {"claims_capability": "change.expression_limits" in caps, "minimum": {}, "beyond": {}}
+    min_fail, beyond_fail = [], []
+    for name, sql, want in minimum:
+        for label, opts in modes:
+            c, val, dt, alive = run(sql, opts, 120_000, 180)
+            ok = c == "ok" and val == want
+            out["minimum"][f"{name}_{label}"] = {"result": c if alive else "CRASH", "value": val,
+                                                 "seconds": round(dt, 2), "pass": ok}
+            if not ok:
+                min_fail.append(f"{name}_{label}")
+    for name, sql, want in beyond:
+        for label, opts in modes:
+            c, val, dt, alive = run(sql, opts, 30_000, 35)
+            ok = alive and ((c == "ok" and val == want) or c in ("RESOURCE_LIMIT", "TIMEOUT"))
+            out["beyond"][f"{name}_{label}"] = {
+                "result": c if alive else "CRASH", "value": val, "seconds": round(dt, 2),
+                "late_by_s": round(dt - 30, 2) if c in ("TIMEOUT", "HANG") else None, "pass": ok}
+            if not ok:
+                beyond_fail.append(f"{name}_{label}")
+    if state["s"] is not None:
+        end = state["s"].close()
+        if end["exit_code"] not in (0, None):
+            state["deaths"].append(end)
+    return {"verdict": "fail" if min_fail or beyond_fail else "pass",
+            "informational": not out["claims_capability"],
+            "minimum_failures": min_fail, "beyond_failures": beyond_fail, **out,
+            "engine_exits": state["deaths"]}
+
+
 PROBES = {
     "fd_after_failed_loads": probe_fd_after_failed_loads,
     "limit_after_failed_query": probe_limit_after_failed_query,
@@ -363,6 +454,7 @@ PROBES = {
     "session_huge_line": probe_session_huge_line,
     "http_crlf_flood": probe_http_crlf_flood,
     "parallel_memory_budget": probe_parallel_memory_budget,
+    "expression_limits": probe_expression_limits,
 }
 
 

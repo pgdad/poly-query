@@ -1,5 +1,14 @@
 # Specification Changelog
 
+## 1.3.0-cr6 — 2026-10-12 (capability `change.expression_limits`; resolves SPEC-Q-002)
+CR-6 `spec/changes/expression-limits.md` (ADR-0017): minimum statement sizes
+(1 MiB of text, nesting depth 1,000 with an operator chain counting as one level,
+25,000 operands) that every mode must execute. Beyond an engine's own limits the
+answer is `RESOURCE_LIMIT`, which may take precedence over `PARSE_ERROR`. The
+query timeout covers parsing, binding and planning, with `TIMEOUT` within 1 s of
+expiry. Stack exhaustion must not end the process. No existing conformance case
+changes. Check: `tests/regression/robustness_probe.py --only expression_limits`.
+
 ## kernel ABI 1 revision 1 (CR-4) — 2026-10-11 (assembly experiment family)
 CR-4 `spec/changes/kernels-i128.md`: four additive 128-bit kernels
 (`filter_i128`, `count_i128`, `sum_i128`, `minmax_i128`), `pqk_i128` type,

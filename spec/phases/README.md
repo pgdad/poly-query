@@ -50,3 +50,4 @@ for other engines.
 |---|---|---|
 | `change.union_all` | CR-1 | `UNION ALL` per [`../changes/union-all.md`](../changes/union-all.md) |
 | `change.decimal38` | CR-2 | `DECIMAL` precision 38 and PQCF v2 per [`../changes/decimal38.md`](../changes/decimal38.md) |
+| `change.expression_limits` | CR-6 | minimum statement sizes, `RESOURCE_LIMIT` beyond an engine's limits, timeout in every query stage, per [`../changes/expression-limits.md`](../changes/expression-limits.md) |
