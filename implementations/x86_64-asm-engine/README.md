@@ -839,26 +839,26 @@ outside the repository differ by less than 0.3 ms). Machine: AMD Zen 5,
 | query | before (ms) | after (ms) | speed-up |
 |---|---:|---:|---:|
 | q01_filter_selective | 0.0 | 0.0 | - |
-| q02_filter_low_selectivity | 15.0 | 1.9 | 7.9x |
+| q02_filter_low_selectivity | 15.0 | 1.5 | 10.0x |
 | q03_range_filter_time | 0.6 | 0.7 | 0.9x |
 | q04_arith_aggregate | 13.1 | 1.5 | 8.7x |
-| q05_groupby_low_card | 10.7 | 1.3 | 8.2x |
-| q06_groupby_high_card | 16.1 | 6.2 | 2.6x |
-| q07_groupby_skewed | 33.5 | 13.2 | 2.5x |
-| q08_groupby_uniform_multi | 25.5 | 3.8 | 6.7x |
-| q09_distinct_count | 39.9 | 8.4 | 4.8x |
-| q10_join_customers | 49.7 | 12.0 | 4.1x |
-| q11_join_star | 25.6 | 8.7 | 2.9x |
-| q12_left_join_anti | 14.9 | 11.5 | 1.3x |
-| q13_sort_topn | 10.7 | 2.0 | 5.3x |
-| q14_sort_full_string | 423.0 | 20.1 | 21.0x |
-| q15_sort_multi_key | 354.4 | 22.2 | 16.0x |
-| q16_timeseries_hourly | 1.8 | 0.6 | 3.0x |
-| q17_wide_projection | 0.7 | 0.4 | 1.7x |
-| q18_nulls | 23.4 | 2.5 | 9.4x |
-| q19_cte_subquery | 23.3 | 14.3 | 1.6x |
-| q20_string_functions | 38.3 | 4.5 | 8.5x |
-| **total** | **1120.2** | **135.8** | **8.2x** |
+| q05_groupby_low_card | 10.7 | 1.2 | 8.9x |
+| q06_groupby_high_card | 16.1 | 4.5 | 3.6x |
+| q07_groupby_skewed | 33.5 | 6.6 | 5.1x |
+| q08_groupby_uniform_multi | 25.5 | 3.2 | 8.0x |
+| q09_distinct_count | 39.9 | 5.1 | 7.8x |
+| q10_join_customers | 49.7 | 6.7 | 7.4x |
+| q11_join_star | 25.6 | 5.1 | 5.0x |
+| q12_left_join_anti | 14.9 | 6.2 | 2.4x |
+| q13_sort_topn | 10.7 | 1.8 | 5.9x |
+| q14_sort_full_string | 423.0 | 15.8 | 26.8x |
+| q15_sort_multi_key | 354.4 | 17.3 | 20.5x |
+| q16_timeseries_hourly | 1.8 | 0.3 | 6.0x |
+| q17_wide_projection | 0.7 | 0.2 | 3.5x |
+| q18_nulls | 23.4 | 1.9 | 12.3x |
+| q19_cte_subquery | 23.3 | 7.6 | 3.1x |
+| q20_string_functions | 38.3 | 3.4 | 11.3x |
+| **total** | **1120.2** | **90.6** | **12.4x** |
 
 The result rows of every query (warm-up runs, `PQ_BENCH_OUT=FILE`) are
 byte-identical before and after.
@@ -884,13 +884,15 @@ byte-identical before and after.
    by a parallel *sample sort*: per-part encoding, splitters from a sorted
    sample, classification by binary search, a stable scatter into one bucket
    per thread, and an MSD radix sort per bucket (constant bytes skipped,
-   insertion sort for small buckets). Ties fall back to `row_cmp` only when
+   insertion sort with inlined word comparisons for small buckets; the
+   NULL / long-string pre-scan is skipped for keys that are plain columns
+   without NULLs). Ties fall back to `row_cmp` only when
    the words are incomplete (wide DECIMAL, long strings, more than 6
    words), then to the production sequence, so the order is exactly the
    stable order of `sort_rows`. Parts accumulate their flags / masks /
    bucket counters on their own stacks (sharing written cache lines between
    threads made the first version 7x slower). q14 / q15: 423 / 354 ms →
-   20 / 22 ms.
+   16 / 17 ms.
 3. **GROUP BY with few groups** (`pexec.S` `lagg_ok`, `lagg_merge`). The
    parallel GROUP BY partitioned groups by hash, so with a handful of groups
    one thread did nearly all the work. When every aggregate state merges
@@ -907,7 +909,12 @@ byte-identical before and after.
    per tuple in parallel, phase 2 lets partition p keep the values whose
    hash falls into p (disjoint value sets) and aggregate each new value
    once; the partition states are merged. COUNT always; SUM / AVG / MIN /
-   MAX unless the argument is FLOAT64 (summation order). q09 39.9 → 8.4 ms.
+   MAX unless the argument is FLOAT64 (summation order). The key phase also
+   counts the values per (part, partition), so a scatter phase can list each
+   partition's tuples (in tuple order) and a partition visits only its own
+   tuples (radix partitioning, `aux_new` / `dscat_part`); integer-like
+   values go into an open-addressing set instead of the generic chained
+   table. q09 39.9 → 5.1 ms.
 5. **Arena chunk pool** (`util.S` `chunk_get` / `chunk_put`). Released
    arena chunks (request, worker and table arenas) are kept, up to 1 GiB,
    and reused best-fit instead of being returned to malloc, which unmaps
@@ -929,7 +936,9 @@ byte-identical before and after.
    parallel by the key phase) and a parallel compaction yields that order
    directly. The output rows of the groups (`agg_finish`, HAVING,
    projection) are then built in parallel parts and concatenated in order.
-   q07 / q19: 33.5 / 23.3 ms → see table.
+   Like the DISTINCT aggregates, the partitions get their tuples through
+   radix partitioning instead of every partition scanning all hashes.
+   q07 / q19: 33.5 / 23.3 ms → 6.6 / 7.6 ms.
 8. **Persistent, pinned worker pool** (`par.S`). `par_run` used to create
    and join a pthread per part on every call (a sort makes seven calls).
    Workers now live as long as the process: a part is posted to its
