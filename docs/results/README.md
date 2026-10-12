@@ -135,6 +135,24 @@ The rubric-based review is summarized under "Code-quality review" below.
   some engines compute them, others return PARSE_ERROR or RESOURCE_LIMIT
   (spec question SPEC-Q-002).
 
+### Robustness probes (suspected review defects)
+
+`tests/regression/robustness_probe.py` checks, black-box, the defects the code
+reviewers suspected. It runs on all eight engines; records are in
+[`results/correctness/robustness/`](../../results/correctness/robustness/).
+"Hang" means no reply within 180 s although `options.timeout_ms` was 120,000 and
+the process was alive. Error responses to huge expressions pass, because the size
+limits are an open spec question (SPEC-Q-002).
+
+| probe | failures | passes / notes |
+|---|---|---|
+| `long_or_chain`: `AND`/`OR` chains of 10,000 and 100,000 terms, in row, vectorized, parallel and auto mode | **x86-64 asm**: SIGSEGV at 100k (parallel, auto). **AArch64 asm**: SIGSEGV at 100k (vectorized, parallel, auto). **Go**: hang at 100k (all modes). **Java**: hang at 100k (vectorized, auto; OR also parallel); the other 100k cases return `TIMEOUT`. **Clojure**: hang at 10k already (all modes) | Rust `PARSE_ERROR`, Python `RESOURCE_LIMIT`, Common Lisp results or `TIMEOUT` |
+| `limit_after_failed_query`: does a load succeed after a query failed on its memory budget? | **x86-64 asm**: the load fails with `RESOURCE_LIMIT` (the budget stays set) | the other engines pass or are not triggered |
+| `http_crlf_flood`: a header section that never ends, at 128 MiB, 512 MiB and 1 GiB | **x86-64 asm**: RSS grows 1:1 with the bytes sent, up to 1 GiB | AArch64 asm flat; Clojure and Common Lisp level off at about 610 MB and 520 MB (the first, single-stage probe flagged them wrongly); Go closes the connection |
+| `fd_after_failed_loads`: descriptor leak after 50 failed loads | none | suspected for both assembly engines, not reproduced |
+| `session_huge_line`: a 256 MB malformed session line (observation) | none | all eight answer `INVALID_REQUEST` and stay usable; peak RSS 258 MB (x86 asm) to 3.1 GB (Common Lisp) |
+| `parallel_memory_budget`: 1M-row `GROUP BY` with a 64 MB budget, 1 versus 8 threads (observation) | none (all return `RESOURCE_LIMIT`) | RSS growth with 8 threads: AArch64 asm 153 MB (1 thread: 0), which fits the reviewers' per-task-budget finding. Python 3,050 MB: process-tree RSS, which also counts the worker pool's start-up |
+
 ## Later experiment families (report 7, architectural adaptability)
 
 Per-attempt data (outcome, cost, turns, time, diff size) is in the report-7 table of

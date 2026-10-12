@@ -1,0 +1,218 @@
+{
+ "engine": "implementations/go/bin/polyquery",
+ "started": "2026-10-12T16:27:03Z",
+ "probes": {
+  "fd_after_failed_loads": {
+   "query_budget_4mb": {
+    "verdict": "not_triggered",
+    "initial_small_load": "ok",
+    "failed_query_first": null,
+    "big_load_codes": {
+     "ok": 100
+    },
+    "fds_before": 6,
+    "fds_after": 6,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": "able\":\"big\",\"rows\":200000,\"duration_ms\":41}\n{\"ts\":\"2026-10-12T16:27:08.430804597Z\",\"level\":\"INFO\",\"msg\":\"table loaded\",\"table\":\"big\",\"rows\":200000,\"duration_ms\":45}\n{\"ts\":\"2026-10-12T16:27:08.479474474Z\",\"level\":\"INFO\",\"msg\":\"table loaded\",\"table\":\"big\",\"rows\":200000,\"duration_ms\":44}\n{\"ts\":\"2026-10-12T16:27:08.479986122Z\",\"level\":\"INFO\",\"msg\":\"table loaded\",\"table\":\"s1\",\"rows\":2,\"duration_ms\":0}\n"
+   },
+   "ingest_limit_1mb": {
+    "verdict": "pass",
+    "initial_small_load": "ok",
+    "failed_query_first": null,
+    "big_load_codes": {
+     "RESOURCE_LIMIT": 100
+    },
+    "fds_before": 6,
+    "fds_after": 6,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": "{\"ts\":\"2026-10-12T16:27:08.48967011Z\",\"level\":\"INFO\",\"msg\":\"table loaded\",\"table\":\"s0\",\"rows\":2,\"duration_ms\":0}\n{\"ts\":\"2026-10-12T16:27:08.494224003Z\",\"level\":\"INFO\",\"msg\":\"table loaded\",\"table\":\"s1\",\"rows\":2,\"duration_ms\":0}\n"
+   },
+   "after_failed_query_16mb": {
+    "verdict": "not_triggered",
+    "initial_small_load": "ok",
+    "failed_query_first": "ok",
+    "big_load_codes": {
+     "ok": 100
+    },
+    "fds_before": 6,
+    "fds_after": 6,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": "able\":\"big\",\"rows\":200000,\"duration_ms\":47}\n{\"ts\":\"2026-10-12T16:27:13.248971012Z\",\"level\":\"INFO\",\"msg\":\"table loaded\",\"table\":\"big\",\"rows\":200000,\"duration_ms\":42}\n{\"ts\":\"2026-10-12T16:27:13.295518342Z\",\"level\":\"INFO\",\"msg\":\"table loaded\",\"table\":\"big\",\"rows\":200000,\"duration_ms\":40}\n{\"ts\":\"2026-10-12T16:27:13.296157063Z\",\"level\":\"INFO\",\"msg\":\"table loaded\",\"table\":\"s1\",\"rows\":2,\"duration_ms\":0}\n"
+   },
+   "seconds": 9.6
+  },
+  "limit_after_failed_query": {
+   "verdict": "not_triggered",
+   "load_before": "ok",
+   "query": "ok",
+   "load_after": "ok",
+   "exit_code": 0,
+   "stderr_tail": "{\"ts\":\"2026-10-12T16:27:13.359811226Z\",\"level\":\"INFO\",\"msg\":\"table loaded\",\"table\":\"m\",\"rows\":120000,\"duration_ms\":25}\n{\"ts\":\"2026-10-12T16:27:13.447653768Z\",\"level\":\"INFO\",\"msg\":\"table loaded\",\"table\":\"m\",\"rows\":120000,\"duration_ms\":25}\n",
+   "seconds": 0.1
+  },
+  "session_huge_line": {
+   "verdict": "observation",
+   "response": "INVALID_REQUEST",
+   "next_request": "ok",
+   "rss_base_mib": 0,
+   "rss_peak_mib": 499,
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 0.4
+  },
+  "http_crlf_flood": {
+   "verdict": "pass",
+   "bytes_sent": 3145728,
+   "rss_growth_mib": 0,
+   "rss_growth_by_mib_sent": {},
+   "server_closed_connection": true,
+   "rss_base_mib": 7,
+   "rss_peak_mib": 7,
+   "server_alive": true,
+   "server_healthy_after": true,
+   "seconds": 1.0
+  },
+  "parallel_memory_budget": {
+   "verdict": "observation",
+   "load": "ok",
+   "threads_1": {
+    "result": "RESOURCE_LIMIT",
+    "rss_before_mib": 157,
+    "rss_peak_mib": 224,
+    "growth_mib": 67
+   },
+   "threads_8": {
+    "result": "RESOURCE_LIMIT",
+    "rss_before_mib": 224,
+    "rss_peak_mib": 308,
+    "growth_mib": 84
+   },
+   "exit_code": 0,
+   "stderr_tail": "{\"ts\":\"2026-10-12T16:27:15.233738454Z\",\"level\":\"INFO\",\"msg\":\"table loaded\",\"table\":\"g\",\"rows\":1000000,\"duration_ms\":216}\n",
+   "seconds": 0.6
+  },
+  "long_or_chain": {
+   "verdict": "fail",
+   "crashed": [],
+   "hung": [
+    "OR_100000_row",
+    "OR_100000_vectorized",
+    "OR_100000_parallel",
+    "OR_100000_auto",
+    "AND_100000_row",
+    "AND_100000_vectorized",
+    "AND_100000_parallel",
+    "AND_100000_auto"
+   ],
+   "hang_rule": "no response within 180 s although options.timeout_ms = 120000",
+   "wrong_result": [],
+   "cases": {
+    "load": "ok",
+    "OR_10000_row": {
+     "result": "ok",
+     "count": 10000,
+     "alive": true
+    },
+    "OR_10000_vectorized": {
+     "result": "ok",
+     "count": 10000,
+     "alive": true
+    },
+    "OR_10000_parallel": {
+     "result": "ok",
+     "count": 10000,
+     "alive": true
+    },
+    "OR_10000_auto": {
+     "result": "ok",
+     "count": 10000,
+     "alive": true
+    },
+    "OR_100000_row": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_vectorized": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_parallel": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_auto": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "AND_10000_row": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_10000_vectorized": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_10000_parallel": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_10000_auto": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_100000_row": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_vectorized": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_parallel": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_auto": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    }
+   },
+   "engine_exits": [
+    {
+     "exit_code": -9,
+     "stderr_tail": "{\"ts\":\"2026-10-12T16:49:58.638335514Z\",\"level\":\"INFO\",\"msg\":\"table loaded\",\"table\":\"n\",\"rows\":20000,\"duration_ms\":2}\n"
+    }
+   ],
+   "seconds": 1517.6
+  }
+ },
+ "reruns": [
+  {
+   "probes": [
+    "long_or_chain"
+   ],
+   "started": "2026-10-12T16:28:11Z"
+  },
+  {
+   "probes": [
+    "http_crlf_flood"
+   ],
+   "started": "2026-10-12T18:15:00Z"
+  }
+ ]
+}

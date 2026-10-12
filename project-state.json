@@ -60,9 +60,9 @@
   "Resolve SPEC-Q-002 (expression size/nesting implementation limits) via change control",
   "Repeated attempts (n>1) per language/task for statistics (docs/methodology/statistics.md)",
   "10m-scale benchmark",
-  "Unverified code-review findings: Go worker goroutines without recover, session stdin lines without length cap (Rust/Java/Go/Common Lisp), symlink-following data paths",
-  "Unverified assembly-engine review findings: fd leak when an allocation raises during load (both), session lines without length cap (both), parallel-worker stack depth / unbounded AND/OR chain depth (both), per-task memory budget in parallel queries (AArch64), cross-thread longjmp via global jmp_buf (x86-64)",
-  "AArch64 assembly optimize-latency: 1.82x geomean but q01_filter_selective 8x slower (plus q16, q17 significantly slower)"
+  "AArch64 assembly optimize-latency: 1.82x geomean but q01_filter_selective 8x slower (plus q16, q17 significantly slower)",
+  "Robustness probe defects (results/correctness/robustness/): x86-64 asm engine SIGSEGV on 100k-term AND/OR chains (parallel/auto), query memory limit left set after a failed query, unbounded HTTP header buffering; AArch64 asm engine SIGSEGV on 100k-term chains (vectorized/parallel/auto); Go, Java (100k terms) and Clojure (10k terms) do not answer within 180 s despite timeout_ms 120000. Fixing them needs engine runs via the orchestrator (or a debug-family task), not hand edits",
+  "Remaining unverified review findings: cross-thread longjmp via global jmp_buf (x86-64 asm), Go worker goroutines without recover (both need an internal fault), symlink-following data paths"
  ],
  "known_defects": [
   "See experiments/telemetry/harness-incidents.jsonl (HI-001..008 fixed; SPEC-Q-001 resolved for CR-2 engines)",
@@ -94,8 +94,8 @@
   "interop": "6x6 + reference clean, incl. PQCF v2 wide-decimal files (results/correctness/interop.json)",
   "http_suite": "19/19 all engines except python 18/19 (malformed_chunked_body)"
  },
- "last_successful_commit": "89aa470af3ad22b031a451829867e95a0dca76fb",
- "next_recommended_action": "Assembly engine cohort complete. Next candidates: verify the assembly-engine review findings with black-box harness checks (as done for the Python chunked-body defect), repeated attempts (n>1) for statistics, 10m-scale benchmark, SPEC-Q-002.",
+ "last_successful_commit": "934ac03b881f3356e9b28a954c0ee58e62d5cb6f",
+ "next_recommended_action": "Suspected review defects checked with black-box robustness probes (docs/results/README.md). Next candidates: decide whether to give the confirmed robustness defects to the engines as a debug/change task via the orchestrator; resolve SPEC-Q-002 (expression size limits) first, since it defines the expected answer to huge expressions; repeated attempts (n>1); 10m-scale benchmark.",
  "findings": [
   "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) \u2014 report as engine quality finding; clojure p95 16 ms",
   "CR-2 DECIMAL(38) was the most expensive change (6.25-16.50 USD); Go and Java needed a new wide-decimal representation",

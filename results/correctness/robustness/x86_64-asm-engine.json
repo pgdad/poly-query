@@ -55,12 +55,14 @@
   },
   "long_or_chain": {
    "verdict": "fail",
-   "crashed_or_hung": [
+   "crashed": [
     "OR_100000_parallel",
     "OR_100000_auto",
     "AND_100000_parallel",
     "AND_100000_auto"
    ],
+   "hung": [],
+   "hang_rule": "no response within 180 s although options.timeout_ms = 120000",
    "wrong_result": [],
    "cases": {
     "load": "ok",
@@ -163,7 +165,7 @@
      "stderr_tail": ""
     }
    ],
-   "seconds": 581.9
+   "seconds": 582.9
   },
   "session_huge_line": {
    "verdict": "observation",
@@ -177,14 +179,19 @@
   },
   "http_crlf_flood": {
    "verdict": "fail",
-   "bytes_sent": 134217728,
-   "rss_growth_mib": 128,
+   "bytes_sent": 1073741824,
+   "rss_growth_mib": 1024,
+   "rss_growth_by_mib_sent": {
+    "128": 128,
+    "512": 512,
+    "1024": 1024
+   },
    "server_closed_connection": false,
    "rss_base_mib": 2,
-   "rss_peak_mib": 130,
+   "rss_peak_mib": 1026,
    "server_alive": true,
    "server_healthy_after": true,
-   "seconds": 1.0
+   "seconds": 4.2
   },
   "parallel_memory_budget": {
    "verdict": "observation",
@@ -205,5 +212,19 @@
    "stderr_tail": "",
    "seconds": 0.4
   }
- }
+ },
+ "reruns": [
+  {
+   "probes": [
+    "long_or_chain"
+   ],
+   "started": "2026-10-12T18:04:47Z"
+  },
+  {
+   "probes": [
+    "http_crlf_flood"
+   ],
+   "started": "2026-10-12T18:14:30Z"
+  }
+ ]
 }

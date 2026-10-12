@@ -37,11 +37,18 @@ difference 0.08, quadratic-weighted κ 0.84.
 |---|---|---|---|
 | A negative HTTP chunk size (`int("-5", 16)`) makes the server read the request body to end-of-stream, bypassing `--max-request-bytes` | Python (`polyquery/server/http.py` `_read_chunked`) | Python B | **verified**: new harness check `malformed_chunked_body` (HTTP suite) fails for Python and passes for the other five engines |
 | Panics in parallel worker goroutines are not recovered, so a panic would crash the process instead of returning `INTERNAL_ERROR` | Go | Go A and B | not verified (needs an internal fault) |
-| No explicit SQL nesting-depth limit (relies on stack overflow or a large stack being caught) | Go, Clojure, Python; Rust allows 10,000 levels on a 256 MiB stack | several | partly covered by the fuzz stress inputs (`results/correctness/*-fuzz.json`: no crashes) |
-| Session-mode stdin lines have no length cap | Rust, Java, Go, Common Lisp | several | not verified |
+| No explicit SQL nesting-depth limit (relies on stack overflow or a large stack being caught) | Go, Clojure, Python; Rust allows 10,000 levels on a 256 MiB stack | several | partly covered by the fuzz stress inputs (`results/correctness/*-fuzz.json`: no crashes). Robustness probe `long_or_chain` (10,000- and 100,000-term `AND`/`OR` chains, `timeout_ms` 120,000): no crash, but **Go (100,000 terms, all modes), Java (100,000 terms: vectorized and auto, OR also parallel; the other 100,000-term cases return `TIMEOUT`) and Clojure (10,000 terms already, all modes) give no response within 180 s**. Rust returns `PARSE_ERROR`, Python `RESOURCE_LIMIT`, Common Lisp results or `TIMEOUT` |
+| Session-mode stdin lines have no length cap | Rust, Java, Go, Common Lisp | several | **verified as an observation** (probe `session_huge_line`): a 256 MB malformed line is buffered whole (peak RSS 259 MB Rust to 3.1 GB Common Lisp; Clojure and Python, not flagged, behave alike), then answered with `INVALID_REQUEST`; every engine stays usable. The spec sets no session-line limit |
 | Data-path checks are lexical: a symlink inside the data directory is followed | Rust, Clojure, Python, Common Lisp | several | not verified (needs a pre-existing symlink in the data directory) |
 | Very large vectorized / parallel execution files and functions; thin unit tests for them (covered end to end by conformance and the mode matrix) | all | most | observation |
 | Row-mode re-execution after unexpected vectorized/parallel errors can hide defects | Clojure (default on), Rust/Common Lisp (data errors only) | Clojure A and B | documented engine behaviour |
+
+Robustness probes: `tests/regression/robustness_probe.py`, black-box through the protocol only (process
+liveness, `/proc` descriptor counts and RSS), records in `results/correctness/robustness/<engine>.json`
+(AArch64 run natively on the ARM host by `tools/remote/arm_probe.sh`, logs in `arm-logs/`). "No response" means
+no reply within 180 s although `options.timeout_ms` was 120,000. The engine was still alive, so this is a timeout
+that is not enforced (spec `errors.md`: an engine MUST NOT hang; `concurrency.md` §3). Expression size limits
+themselves are open (SPEC-Q-002), so an error response such as `PARSE_ERROR` or `RESOURCE_LIMIT` passes.
 
 ## Kernel cohort: assembly kernel libraries (ADR-0016)
 
@@ -95,12 +102,13 @@ difference 0.13.
 
 | finding | engines | raised by | status |
 |---|---|---|---|
-| A data file's descriptor leaks when an allocation raises while it is open (`read_data_file`; ARM also `pqcf_load`) | both | x86 A and B; ARM B | not verified |
-| Session-mode stdin lines have no length cap | both | x86 B; ARM B | not verified (same observation as for four of the six engines) |
-| Recursion depth safety relies on the large main-thread stack: parallel pool workers run on default stacks (x86, also without an alternate signal stack), and left-deep AND/OR chains are not depth-limited | both | x86 A and B; ARM B | not verified |
-| Each parallel task gets the full per-query memory budget, so a query can use about tasks × `--max-query-memory-mb` | AArch64 | ARM A and B | not verified |
+| A data file's descriptor leaks when an allocation raises while it is open (`read_data_file`; ARM also `pqcf_load`) | both | x86 A and B; ARM B | **not reproduced** (probe `fd_after_failed_loads`: no descriptor growth after 50 loads failing on the ingest limit or a query budget) |
+| Session-mode stdin lines have no length cap | both | x86 B; ARM B | **verified as an observation**: a 256 MB line peaks at 258 / 290 MB RSS, then `INVALID_REQUEST`, engine stays usable (as the six engines) |
+| Recursion depth safety relies on the large main-thread stack: parallel pool workers run on default stacks (x86, also without an alternate signal stack), and left-deep AND/OR chains are not depth-limited | both | x86 A and B; ARM B | **verified**: a 100,000-term `AND`/`OR` chain kills the x86-64 engine with SIGSEGV in parallel and auto mode (row mode answers correctly) and the AArch64 engine with SIGSEGV in vectorized, parallel and auto mode. 10,000 terms: correct results or `RESOURCE_LIMIT` |
+| Each parallel task gets the full per-query memory budget, so a query can use about tasks × `--max-query-memory-mb` | AArch64 | ARM A and B | **consistent** (probe `parallel_memory_budget`, 1M-row `GROUP BY`, 64 MB budget): 8 threads grow RSS by 153 MB before `RESOURCE_LIMIT`, 1 thread by 0 MB. RSS is an indirect measure, so recorded as an observation |
 | Error recovery can `longjmp` through the process-global `jmp_buf` into another thread's handler; recovery from SIGSEGV inside glibc is not async-signal-safe | x86-64 | x86 A and B | not verified (needs an internal fault) |
-| A failed query leaves the query memory limit set for later non-query requests | x86-64 | x86 B | not verified |
+| A failed query leaves the query memory limit set for later non-query requests | x86-64 | x86 B | **verified** (probe `limit_after_failed_query`): after a query fails with `RESOURCE_LIMIT`, a load that succeeded before fails with `RESOURCE_LIMIT`. AArch64 and the six engines pass |
+| (found by the probes, not by the reviewers) HTTP: a request whose header section never ends (`\r\n` flood) is buffered without limit | x86-64 | probe | **verified** (probe `http_crlf_flood`): RSS grows 1:1 with the bytes sent (128 → 512 → 1,024 MiB), and the server stays healthy. AArch64 stays flat and the six engines level off (Clojure ≈ 610 MB, Common Lisp ≈ 520 MB, the others close the connection or stay small) |
 | `abort()` on out-of-memory in catalog cloning, query registration and HTTP buffers | AArch64 | ARM A and B | design (one case commented as intentional) |
 | Very long routines (`veval` about 750–800 lines in both engines; binder, evaluator and lexer routines of 400–600 lines) | both | all | observation |
 

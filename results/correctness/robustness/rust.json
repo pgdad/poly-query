@@ -155,8 +155,9 @@
   },
   "http_crlf_flood": {
    "verdict": "pass",
-   "bytes_sent": 7340032,
+   "bytes_sent": 15728640,
    "rss_growth_mib": 0,
+   "rss_growth_by_mib_sent": {},
    "server_closed_connection": true,
    "rss_base_mib": 3,
    "rss_peak_mib": 3,
@@ -183,5 +184,13 @@
    "stderr_tail": "{\"ts\":\"2026-10-12T13:40:20.481Z\",\"level\":\"info\",\"msg\":\"table loaded\",\"table\":\"g\",\"rows\":1000000}\n",
    "seconds": 0.8
   }
- }
+ },
+ "reruns": [
+  {
+   "probes": [
+    "http_crlf_flood"
+   ],
+   "started": "2026-10-12T18:14:58Z"
+  }
+ ]
 }

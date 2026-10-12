@@ -1,0 +1,212 @@
+{
+ "engine": "implementations/java/bin/polyquery",
+ "started": "2026-10-12T14:40:20Z",
+ "probes": {
+  "fd_after_failed_loads": {
+   "query_budget_4mb": {
+    "verdict": "not_triggered",
+    "initial_small_load": "ok",
+    "failed_query_first": null,
+    "big_load_codes": {
+     "ok": 100
+    },
+    "fds_before": 5,
+    "fds_after": 5,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": ""
+   },
+   "ingest_limit_1mb": {
+    "verdict": "pass",
+    "initial_small_load": "ok",
+    "failed_query_first": null,
+    "big_load_codes": {
+     "RESOURCE_LIMIT": 100
+    },
+    "fds_before": 5,
+    "fds_after": 5,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": ""
+   },
+   "after_failed_query_16mb": {
+    "verdict": "not_triggered",
+    "initial_small_load": "ok",
+    "failed_query_first": "RESOURCE_LIMIT",
+    "big_load_codes": {
+     "ok": 100
+    },
+    "fds_before": 5,
+    "fds_after": 5,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": ""
+   },
+   "seconds": 7.4
+  },
+  "limit_after_failed_query": {
+   "verdict": "pass",
+   "load_before": "ok",
+   "query": "RESOURCE_LIMIT",
+   "load_after": "ok",
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 0.2
+  },
+  "long_or_chain": {
+   "verdict": "fail",
+   "crashed": [],
+   "hung": [
+    "OR_100000_vectorized",
+    "OR_100000_parallel",
+    "OR_100000_auto",
+    "AND_100000_vectorized",
+    "AND_100000_auto"
+   ],
+   "hang_rule": "no response within 180 s although options.timeout_ms = 120000",
+   "wrong_result": [],
+   "cases": {
+    "load": "ok",
+    "OR_10000_row": {
+     "result": "ok",
+     "count": 10000,
+     "alive": true
+    },
+    "OR_10000_vectorized": {
+     "result": "ok",
+     "count": 10000,
+     "alive": true
+    },
+    "OR_10000_parallel": {
+     "result": "ok",
+     "count": 10000,
+     "alive": true
+    },
+    "OR_10000_auto": {
+     "result": "ok",
+     "count": 10000,
+     "alive": true
+    },
+    "OR_100000_row": {
+     "result": "TIMEOUT",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_vectorized": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_parallel": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_auto": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "AND_10000_row": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_10000_vectorized": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_10000_parallel": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_10000_auto": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_100000_row": {
+     "result": "TIMEOUT",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_vectorized": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_parallel": {
+     "result": "TIMEOUT",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_auto": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    }
+   },
+   "engine_exits": [],
+   "seconds": 1361.0
+  },
+  "session_huge_line": {
+   "verdict": "observation",
+   "response": "INVALID_REQUEST",
+   "next_request": "ok",
+   "rss_base_mib": 0,
+   "rss_peak_mib": 823,
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 0.6
+  },
+  "http_crlf_flood": {
+   "verdict": "pass",
+   "bytes_sent": 135266304,
+   "rss_growth_mib": 24,
+   "rss_growth_by_mib_sent": {
+    "128": 24
+   },
+   "server_closed_connection": true,
+   "rss_base_mib": 56,
+   "rss_peak_mib": 80,
+   "server_alive": true,
+   "server_healthy_after": true,
+   "seconds": 2.1
+  },
+  "parallel_memory_budget": {
+   "verdict": "observation",
+   "load": "ok",
+   "threads_1": {
+    "result": "RESOURCE_LIMIT",
+    "rss_before_mib": 644,
+    "rss_peak_mib": 747,
+    "growth_mib": 103
+   },
+   "threads_8": {
+    "result": "RESOURCE_LIMIT",
+    "rss_before_mib": 747,
+    "rss_peak_mib": 857,
+    "growth_mib": 110
+   },
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 0.6
+  }
+ },
+ "reruns": [
+  {
+   "probes": [
+    "long_or_chain"
+   ],
+   "started": "2026-10-12T17:42:05Z"
+  },
+  {
+   "probes": [
+    "http_crlf_flood"
+   ],
+   "started": "2026-10-12T18:14:34Z"
+  }
+ ]
+}

@@ -1,0 +1,230 @@
+{
+ "engine": "implementations/clojure/bin/polyquery",
+ "started": "2026-10-12T16:27:15Z",
+ "probes": {
+  "fd_after_failed_loads": {
+   "query_budget_4mb": {
+    "verdict": "not_triggered",
+    "initial_small_load": "ok",
+    "failed_query_first": null,
+    "big_load_codes": {
+     "ok": 100
+    },
+    "fds_before": 8,
+    "fds_after": 8,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": ""
+   },
+   "ingest_limit_1mb": {
+    "verdict": "pass",
+    "initial_small_load": "ok",
+    "failed_query_first": null,
+    "big_load_codes": {
+     "RESOURCE_LIMIT": 100
+    },
+    "fds_before": 8,
+    "fds_after": 8,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": ""
+   },
+   "after_failed_query_16mb": {
+    "verdict": "not_triggered",
+    "initial_small_load": "ok",
+    "failed_query_first": "ok",
+    "big_load_codes": {
+     "ok": 100
+    },
+    "fds_before": 8,
+    "fds_after": 8,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": ""
+   },
+   "seconds": 48.5
+  },
+  "limit_after_failed_query": {
+   "verdict": "not_triggered",
+   "load_before": "ok",
+   "query": "ok",
+   "load_after": "ok",
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 0.8
+  },
+  "session_huge_line": {
+   "verdict": "observation",
+   "response": "INVALID_REQUEST",
+   "next_request": "ok",
+   "rss_base_mib": 1,
+   "rss_peak_mib": 1553,
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 0.8
+  },
+  "http_crlf_flood": {
+   "verdict": "pass",
+   "bytes_sent": 1073741824,
+   "rss_growth_mib": 613,
+   "rss_growth_by_mib_sent": {
+    "128": 603,
+    "512": 613,
+    "1024": 612
+   },
+   "server_closed_connection": false,
+   "rss_base_mib": 125,
+   "rss_peak_mib": 738,
+   "server_alive": true,
+   "server_healthy_after": true,
+   "seconds": 20.9
+  },
+  "parallel_memory_budget": {
+   "verdict": "observation",
+   "load": "ok",
+   "threads_1": {
+    "result": "RESOURCE_LIMIT",
+    "rss_before_mib": 647,
+    "rss_peak_mib": 840,
+    "growth_mib": 192
+   },
+   "threads_8": {
+    "result": "RESOURCE_LIMIT",
+    "rss_before_mib": 840,
+    "rss_peak_mib": 866,
+    "growth_mib": 26
+   },
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 1.8
+  },
+  "long_or_chain": {
+   "verdict": "fail",
+   "crashed": [],
+   "hung": [
+    "OR_10000_row",
+    "OR_10000_vectorized",
+    "OR_10000_parallel",
+    "OR_10000_auto",
+    "OR_100000_row",
+    "OR_100000_vectorized",
+    "OR_100000_parallel",
+    "OR_100000_auto",
+    "AND_10000_row",
+    "AND_10000_vectorized",
+    "AND_10000_parallel",
+    "AND_10000_auto",
+    "AND_100000_row",
+    "AND_100000_vectorized",
+    "AND_100000_parallel",
+    "AND_100000_auto"
+   ],
+   "hang_rule": "no response within 180 s although options.timeout_ms = 120000",
+   "wrong_result": [],
+   "cases": {
+    "load": "ok",
+    "OR_10000_row": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "OR_10000_vectorized": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "OR_10000_parallel": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "OR_10000_auto": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_row": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_vectorized": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_parallel": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_auto": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "AND_10000_row": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "AND_10000_vectorized": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "AND_10000_parallel": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "AND_10000_auto": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_row": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_vectorized": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_parallel": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_auto": {
+     "result": "HANG",
+     "count": null,
+     "alive": true
+    }
+   },
+   "engine_exits": [
+    {
+     "exit_code": -9,
+     "stderr_tail": ""
+    }
+   ],
+   "seconds": 2917.0
+  }
+ },
+ "reruns": [
+  {
+   "probes": [
+    "long_or_chain"
+   ],
+   "started": "2026-10-12T16:53:28Z"
+  },
+  {
+   "probes": [
+    "http_crlf_flood"
+   ],
+   "started": "2026-10-12T18:14:37Z"
+  }
+ ]
+}

@@ -187,14 +187,19 @@
   },
   "http_crlf_flood": {
    "verdict": "pass",
-   "bytes_sent": 134217728,
+   "bytes_sent": 1073741824,
    "rss_growth_mib": 0,
+   "rss_growth_by_mib_sent": {
+    "128": 0,
+    "512": 0,
+    "1024": 0
+   },
    "server_closed_connection": false,
    "rss_base_mib": 2,
    "rss_peak_mib": 2,
    "server_alive": true,
    "server_healthy_after": true,
-   "seconds": 1.1
+   "seconds": 5.0
   },
   "parallel_memory_budget": {
    "verdict": "observation",
@@ -215,5 +220,13 @@
    "stderr_tail": "",
    "seconds": 0.6
   }
- }
+ },
+ "reruns": [
+  {
+   "probes": [
+    "http_crlf_flood"
+   ],
+   "started": "2026-10-12T17:14:30Z"
+  }
+ ]
 }

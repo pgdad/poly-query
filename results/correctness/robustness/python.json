@@ -1,0 +1,196 @@
+{
+ "engine": "implementations/python/bin/polyquery",
+ "started": "2026-10-12T16:08:37Z",
+ "probes": {
+  "fd_after_failed_loads": {
+   "query_budget_4mb": {
+    "verdict": "not_triggered",
+    "initial_small_load": "ok",
+    "failed_query_first": null,
+    "big_load_codes": {
+     "ok": 100
+    },
+    "fds_before": 5,
+    "fds_after": 5,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": ""
+   },
+   "ingest_limit_1mb": {
+    "verdict": "pass",
+    "initial_small_load": "ok",
+    "failed_query_first": null,
+    "big_load_codes": {
+     "RESOURCE_LIMIT": 100
+    },
+    "fds_before": 5,
+    "fds_after": 5,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": ""
+   },
+   "after_failed_query_16mb": {
+    "verdict": "not_triggered",
+    "initial_small_load": "ok",
+    "failed_query_first": "ok",
+    "big_load_codes": {
+     "ok": 100
+    },
+    "fds_before": 5,
+    "fds_after": 5,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": ""
+   },
+   "seconds": 99.3
+  },
+  "limit_after_failed_query": {
+   "verdict": "not_triggered",
+   "load_before": "ok",
+   "query": "ok",
+   "load_after": "ok",
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 2.8
+  },
+  "long_or_chain": {
+   "verdict": "pass",
+   "crashed_or_hung": [],
+   "wrong_result": [],
+   "cases": {
+    "load": "ok",
+    "OR_10000_row": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "OR_10000_vectorized": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "OR_10000_parallel": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "OR_10000_auto": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_row": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_vectorized": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_parallel": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_auto": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "AND_10000_row": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "AND_10000_vectorized": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "AND_10000_parallel": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "AND_10000_auto": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_row": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_vectorized": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_parallel": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_auto": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    }
+   },
+   "engine_exits": [],
+   "seconds": 5.1
+  },
+  "session_huge_line": {
+   "verdict": "observation",
+   "response": "INVALID_REQUEST",
+   "next_request": "ok",
+   "rss_base_mib": 1,
+   "rss_peak_mib": 499,
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 0.6
+  },
+  "http_crlf_flood": {
+   "verdict": "pass",
+   "bytes_sent": 2097152,
+   "rss_growth_mib": 0,
+   "rss_growth_by_mib_sent": {},
+   "server_closed_connection": true,
+   "rss_base_mib": 29,
+   "rss_peak_mib": 30,
+   "server_alive": true,
+   "server_healthy_after": true,
+   "seconds": 1.4
+  },
+  "parallel_memory_budget": {
+   "verdict": "observation",
+   "load": "ok",
+   "threads_1": {
+    "result": "RESOURCE_LIMIT",
+    "rss_before_mib": 371,
+    "rss_peak_mib": 403,
+    "growth_mib": 32
+   },
+   "threads_8": {
+    "result": "RESOURCE_LIMIT",
+    "rss_before_mib": 384,
+    "rss_peak_mib": 3433,
+    "growth_mib": 3050
+   },
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 4.4
+  }
+ },
+ "reruns": [
+  {
+   "probes": [
+    "http_crlf_flood"
+   ],
+   "started": "2026-10-12T18:14:59Z"
+  }
+ ]
+}

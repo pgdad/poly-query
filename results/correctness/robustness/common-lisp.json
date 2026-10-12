@@ -1,0 +1,200 @@
+{
+ "engine": "implementations/common-lisp/bin/polyquery",
+ "started": "2026-10-12T16:10:30Z",
+ "probes": {
+  "fd_after_failed_loads": {
+   "query_budget_4mb": {
+    "verdict": "not_triggered",
+    "initial_small_load": "ok",
+    "failed_query_first": null,
+    "big_load_codes": {
+     "ok": 100
+    },
+    "fds_before": 3,
+    "fds_after": 3,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": ""
+   },
+   "ingest_limit_1mb": {
+    "verdict": "pass",
+    "initial_small_load": "ok",
+    "failed_query_first": null,
+    "big_load_codes": {
+     "RESOURCE_LIMIT": 100
+    },
+    "fds_before": 3,
+    "fds_after": 3,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": ""
+   },
+   "after_failed_query_16mb": {
+    "verdict": "not_triggered",
+    "initial_small_load": "ok",
+    "failed_query_first": "RESOURCE_LIMIT",
+    "big_load_codes": {
+     "ok": 100
+    },
+    "fds_before": 3,
+    "fds_after": 3,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": ""
+   },
+   "seconds": 26.1
+  },
+  "limit_after_failed_query": {
+   "verdict": "pass",
+   "load_before": "ok",
+   "query": "RESOURCE_LIMIT",
+   "load_after": "ok",
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 0.2
+  },
+  "long_or_chain": {
+   "verdict": "pass",
+   "crashed_or_hung": [],
+   "wrong_result": [],
+   "cases": {
+    "load": "ok",
+    "OR_10000_row": {
+     "result": "ok",
+     "count": 10000,
+     "alive": true
+    },
+    "OR_10000_vectorized": {
+     "result": "ok",
+     "count": 10000,
+     "alive": true
+    },
+    "OR_10000_parallel": {
+     "result": "ok",
+     "count": 10000,
+     "alive": true
+    },
+    "OR_10000_auto": {
+     "result": "ok",
+     "count": 10000,
+     "alive": true
+    },
+    "OR_100000_row": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "OR_100000_vectorized": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "OR_100000_parallel": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "OR_100000_auto": {
+     "result": "TIMEOUT",
+     "count": null,
+     "alive": true
+    },
+    "AND_10000_row": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_10000_vectorized": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_10000_parallel": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_10000_auto": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_100000_row": {
+     "result": "TIMEOUT",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_vectorized": {
+     "result": "TIMEOUT",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_parallel": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_100000_auto": {
+     "result": "TIMEOUT",
+     "count": null,
+     "alive": true
+    }
+   },
+   "engine_exits": [],
+   "seconds": 957.1
+  },
+  "session_huge_line": {
+   "verdict": "observation",
+   "response": "INVALID_REQUEST",
+   "next_request": "ok",
+   "rss_base_mib": 0,
+   "rss_peak_mib": 3093,
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 2.6
+  },
+  "http_crlf_flood": {
+   "verdict": "pass",
+   "bytes_sent": 1073741824,
+   "rss_growth_mib": 519,
+   "rss_growth_by_mib_sent": {
+    "128": 516,
+    "512": 517,
+    "1024": 518
+   },
+   "server_closed_connection": false,
+   "rss_base_mib": 30,
+   "rss_peak_mib": 549,
+   "server_alive": true,
+   "server_healthy_after": true,
+   "seconds": 4.2
+  },
+  "parallel_memory_budget": {
+   "verdict": "observation",
+   "load": "ok",
+   "threads_1": {
+    "result": "RESOURCE_LIMIT",
+    "rss_before_mib": 195,
+    "rss_peak_mib": 321,
+    "growth_mib": 126
+   },
+   "threads_8": {
+    "result": "RESOURCE_LIMIT",
+    "rss_before_mib": 321,
+    "rss_peak_mib": 321,
+    "growth_mib": 0
+   },
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 0.8
+  }
+ },
+ "reruns": [
+  {
+   "probes": [
+    "http_crlf_flood"
+   ],
+   "started": "2026-10-12T18:15:02Z"
+  }
+ ]
+}
