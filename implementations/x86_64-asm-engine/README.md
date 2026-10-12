@@ -928,7 +928,13 @@ byte-identical before and after.
    lies in its own bucket range (no locks, no shared chains), walking the
    build tuples backwards so that each key's tuple chain lists the tuples in
    input order, exactly like the serial build. Matters most for LEFT JOIN,
-   which must build on its (larger) right input (q12).
+   which must build on its (larger) right input (q12). When both join keys
+   have the same integer-like type (equality = bit equality), the build
+   instead radix-partitions the build tuples by a multiplicative hash and
+   every part fills an open-addressing sub-table (key → first tuple of the
+   key's chain, `FastTable` in `HT_FAST`); the probe then needs one
+   multiply and usually one slot instead of `hash_cells` / `cells_eq` /
+   `value_cmp` calls per probe tuple.
 7. **Hash-partitioned GROUP BY without sorting** (`pexec.S` `slot_order`,
    `pexec_emit`). The groups of all partitions used to be concatenated and
    sorted by their first tuple to restore the serial first-seen order; now
