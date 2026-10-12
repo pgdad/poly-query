@@ -132,8 +132,8 @@ The rubric-based review is summarized under "Code-quality review" below.
 * Clojure: on a failing vectorized/parallel execution the engine re-runs the
   query row-at-a-time (documented; results verified identical).
 * Valid but very large expressions (20,001-term sum, 2,000-deep parentheses):
-  some engines compute them, others return PARSE_ERROR or RESOURCE_LIMIT
-  (spec question SPEC-Q-002).
+  some engines compute them, others return PARSE_ERROR or RESOURCE_LIMIT.
+  Spec question SPEC-Q-002 is now settled by CR-6; see below.
 
 ### Robustness probes (suspected review defects)
 
@@ -152,6 +152,44 @@ limits are an open spec question (SPEC-Q-002).
 | `fd_after_failed_loads`: descriptor leak after 50 failed loads | none | suspected for both assembly engines, not reproduced |
 | `session_huge_line`: a 256 MB malformed session line (observation) | none | all eight answer `INVALID_REQUEST` and stay usable; peak RSS 258 MB (x86 asm) to 3.1 GB (Common Lisp) |
 | `parallel_memory_budget`: 1M-row `GROUP BY` with a 64 MB budget, 1 versus 8 threads (observation) | none (all return `RESOURCE_LIMIT`) | RSS growth with 8 threads: AArch64 asm 153 MB (1 thread: 0), which fits the reviewers' per-task-budget finding. Python 3,050 MB: process-tree RSS, which also counts the worker pool's start-up |
+
+### CR-6 expression size limits (resolves SPEC-Q-002)
+
+[`spec/changes/expression-limits.md`](../../spec/changes/expression-limits.md)
+([ADR-0017](../decisions/ADR-0017.md)) defines what an engine must do with very
+large statements:
+
+* It must execute 1 MiB of text, nesting depth 1,000 and 25,000 operands in
+  every mode. An operator chain counts as one level of nesting.
+* Beyond its own limits it must answer `RESOURCE_LIMIT`.
+* `TIMEOUT` must arrive within 1 s of expiry in every query stage.
+
+No engine claims the capability yet, because they were built against spec
+1.0.0. The results below are informational: probe `expression_limits`, 10
+minimum cases × 4 modes and 3 larger cases × 4 modes, with `timeout_ms` 30,000.
+
+| engine | minimums | larger statements (100k nesting / 100k-term `OR` / 100k `IN`) |
+|---|---|---|
+| Java | 40/40 | `PARSE_ERROR` / no answer within 35 s / ok |
+| Clojure | 28/40: no answer to 10,000-term `OR`, `AND` and sum | ok / no answer / ok |
+| Rust | 28/40: `PARSE_ERROR` on 10,000-term `OR`, `AND` and sum | `PARSE_ERROR` / `PARSE_ERROR` / ok |
+| Python | 28/40: `RESOURCE_LIMIT` on 10,000-term `OR`, `AND` and sum | `PARSE_ERROR` / ok / no answer |
+| Go | 40/40 | ok / no answer / ok |
+| Common Lisp | 24/40: `PARSE_ERROR` at nesting depth 999 | `PARSE_ERROR` / no answer (the result after 100 s) / ok |
+| x86-64 asm engine | 40/40 | `PARSE_ERROR` / no answer (`TIMEOUT` after 37 s) / ok |
+| AArch64 asm engine | 24/40: `RESOURCE_LIMIT` at nesting depth 999 | `RESOURCE_LIMIT` / row ok, vectorized no answer, parallel and auto crash / ok |
+
+* **No engine meets CR-6 in full.**
+* **Two common gaps:**
+  * Valid SQL rejected with `PARSE_ERROR` or a depth limit below 1,000.
+  * The timeout not enforced while a large statement is parsed or planned.
+    * The 100,000-term `OR` chain gets no answer within 35 s from Java, Clojure,
+      Go, Common Lisp and the x86-64 asm engine; the 100,000-item `IN` list gets
+      none from Python. The timeout was 30 s.
+    * Measured with a longer wait, the x86-64 asm engine answers `TIMEOUT` after
+      37 s, and Common Lisp returns the result after 100 s.
+* **One engine already behaves the way CR-6 requires beyond its limits:** the
+  AArch64 assembly engine answers `RESOURCE_LIMIT` to 100,000 nested parentheses.
 
 ## Later experiment families (report 7, architectural adaptability)
 

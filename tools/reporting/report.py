@@ -310,11 +310,23 @@ def collect_suites() -> dict:
 
             def verdicts(v: dict) -> list[str]:
                 return [v["verdict"]] if "verdict" in v else [x.get("verdict") for x in v.values() if isinstance(x, dict)]
+            lim = pr.get("expression_limits")
+            pr = {n: v for n, v in pr.items() if n != "expression_limits"}
             fails = sorted(n for n, v in pr.items() if "fail" in verdicts(v))
             e["robustness_probes"] = {"value": ("fail: " + ", ".join(fails)) if fails else f"no failures ({len(pr)} probes)",
                                       "ok": not fails}
+            if lim and "minimum" in lim:
+                mn, by = lim["minimum"], lim["beyond"]
+                tag = "" if lim.get("claims_capability") else " (informational)"
+                e["expression_limits"] = {
+                    "value": f"minimums {sum(x['pass'] for x in mn.values())}/{len(mn)}, "
+                             f"beyond {sum(x['pass'] for x in by.values())}/{len(by)}{tag}",
+                    "ok": lim["verdict"] == "pass"}
+            else:
+                e["expression_limits"] = {"missing": "probe not run"}
         else:
             e["robustness_probes"] = {"missing": "probe run in progress"}
+            e["expression_limits"] = {"missing": "probe not run"}
         out[l] = e
     return out
 
@@ -795,7 +807,7 @@ def render_html(rep: dict) -> str:
     suites = R.get("1b_additional_suites") or {}
     scols = [("http_suite", "HTTP suite"), ("execution_modes", "execution modes"), ("crash_safety", "crash safety"),
              ("fuzz", "fuzz"), ("pqcf_interop", "PQCF interop"), ("native_kernels", "native kernels"),
-             ("robustness_probes", "robustness probes")]
+             ("robustness_probes", "robustness probes"), ("expression_limits", "CR-6 expression limits")]
 
     def scell(x: dict) -> str:
         if "missing" in x:
@@ -848,7 +860,10 @@ judgements, not measurements; evidence per score in <code>results/development/co
 <h2>Additional suites (all engines)</h2><p class="muted">Black-box suites beyond conformance. Six engines: records in
 <code>results/correctness/</code>; assembly engines: the validation records of their latest merged run (HTTP suite,
 execution modes). Robustness probes (<code>tests/regression/robustness_probe.py</code>) check the defects suspected
-by the code reviewers; "fail" means a probe reproduced one.</p>
+by the code reviewers; "fail" means a probe reproduced one. CR-6 expression limits (<code>spec/changes/expression-limits.md</code>,
+resolves SPEC-Q-002) counts the passing cases: minimum statement sizes in four execution modes, and larger statements, which
+must give the result, <code>RESOURCE_LIMIT</code> or a timely <code>TIMEOUT</code>. No engine claims the capability yet,
+so the column is informational.</p>
 <table><tr><th>engine</th>{''.join(f'<th>{h}</th>' for _, h in scols)}</tr>{suite_rows}</table>
 <h2>Capability matrix (claimed and tested)</h2><p class="muted">The kernel libraries claim no engine capabilities
 (they are called through the C ABI, not the protocol).</p><table><tr><th>capability</th>{''.join(f'<th>{l}</th>' for l in cap_langs)}</tr>{cap_rows}</table>
