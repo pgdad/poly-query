@@ -520,7 +520,20 @@ LFUNC p_select_core
     mov  x21, x0
     ACCEPT KW_AS
     cbz  w0, 4f
-    PCALL p_expect_ident
+    CURTOK x10                      // AS FULL / AS RIGHT: the keywords
+    ldr  w11, [x10, #TK_KIND]       // reserved for future syntax are
+    cmp  w11, #KW_FULL              // accepted as an explicit alias
+    b.eq 40f
+    cmp  w11, #KW_RIGHT
+    b.ne 41f
+40:
+    ldr  x0, [x10, #TK_PTR]
+    ldr  x1, [x10, #TK_LEN]
+    bl   str_new
+    mov  x22, x0
+    ADVANCE
+    b    .Lsc_push
+41: PCALL p_expect_ident
     mov  x22, x0
     b    .Lsc_push
 4:  CURTOK x10

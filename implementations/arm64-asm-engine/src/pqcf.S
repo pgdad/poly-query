@@ -97,8 +97,13 @@
 #define PW_ND      144      // u64 DICT entries
 #define PW_DBYTES  152      // u64 bytes of the DICT entries
 #define PW_CRC     160      // u32 CRC of the current chunk
+#define PW_VER     164      // u32 format version written (1, or 2 if the
+                            //   table has a wide DECIMAL column)
 #define PW_JMP     176      // saved caller g_jmpbuf
 #define PW_SIZE    (PW_JMP + JMPBUF_BYTES)
+
+// Pseudo kind of wide DECIMAL columns inside the writer (16-byte values)
+#define KIND_WDEC  (0x80 | T_DEC)
 
 // Reader context (g_pr)
 #define RD_BASE    0        // u8* file bytes
@@ -164,6 +169,7 @@ g_crc_tab:      .skip 1024          // u32[256] (table mode)
 s_header:   .byte 'P', 'Q', 'C', 'F', 1, 0, 0, 0
 f_tmpname:  .asciz "%.*s/.%s.tmp-%d-%lu"
 j_head:     .asciz "{\"format_version\":1,\"writer\":\"polyquery-arm64-asm 0.1.0\",\"table\":"
+j_head2:    .asciz "{\"format_version\":2,\"writer\":\"polyquery-arm64-asm 0.1.0\",\"table\":"
 j_rowcount: .asciz ",\"row_count\":"
 j_columns:  .asciz ",\"columns\":["
 j_name:     .asciz "{\"name\":"
@@ -466,11 +472,28 @@ FUNC pqcf_save
     str  xzr, [x0, #BUF_LEN]
     str  xzr, [x19, #PW_POS]
     bl   pw_alloc_scratch
+    // format version: 2 iff a column is a wide DECIMAL (decimal38.md §7)
+    mov  w9, #1
+    ldr  x10, [x19, #PW_TBL]
+    ldr  x11, [x10, #TBL_COLS]
+    ldr  x12, [x10, #TBL_NCOLS]
+31: cbz  x12, 33f
+    ldr  w13, [x11, #COL_TYPE]
+    BR_WIDE w13, w14, 32f
+    add  x11, x11, #COL_SIZE
+    sub  x12, x12, #1
+    b    31b
+32: mov  w9, #2
+33: str  w9, [x19, #PW_VER]
     // header, metadata prefix
     ADR_L x1, s_header
     TLS_ADDR x0, g_pq_out
     mov  x2, #8
     bl   buf_put
+    TLS_ADDR x0, g_pq_out
+    ldr  x0, [x0, #BUF_PTR]
+    ldr  w9, [x19, #PW_VER]
+    strb w9, [x0, #4]
     mov  x9, #8
     str  x9, [x19, #PW_POS]
     bl   pw_meta_head
@@ -624,8 +647,12 @@ LFUNC pw_meta_head
     ENTER 3
     TLS_ADDR x9, g_pw
     ldr  x19, [x9, #PW_TBL]
+    ldr  w10, [x9, #PW_VER]
     ADR_L x0, j_head
-    bl   mp_puts
+    cmp  w10, #2
+    b.ne 0f
+    ADR_L x0, j_head2
+0:  bl   mp_puts
     ldr  x0, [x19, #TBL_NAME]
     cbnz x0, 1f
     ADR_L x0, j_empty
@@ -883,8 +910,12 @@ LFUNC pw_gather
     cbz  x24, 7f
     sub  x9, x24, #1
     ldr  x1, [x25, x9, lsl #3]
+    BR_WIDE w23, w9, 61f
     cmp  x0, x1
     b.eq 8f
+    b    7f
+61: bl   wv_eq                      // wide: equal i128 values
+    cbnz w0, 8f
 7:  ldr  x9, [x19, #PW_RUNS]
     add  x9, x9, #1
     str  x9, [x19, #PW_RUNS]
@@ -993,7 +1024,10 @@ LFUNC pw_chunk
     add  x9, x9, x20, lsl #5
     ldr  w23, [x9, #COL_TYPE]
     and  w24, w23, #T_KIND_MASK
-    mov  x0, x20
+    BR_WIDE w23, w9, 0f
+    b    1f
+0:  mov  w24, #KIND_WDEC            // 16-byte values (PQCF v2)
+1:  mov  x0, x20
     mov  x1, x21
     mov  x2, x22
     mov  w3, w23
@@ -1032,7 +1066,10 @@ LFUNC pw_chunk
     b.ne 51f
     ldr  x9, [x19, #PW_RUNS]
     mov  x10, #12
-    mul  x26, x9, x10
+    cmp  w24, #KIND_WDEC
+    b.ne 50f
+    mov  x10, #20                   // {i128, u32}
+50: mul  x26, x9, x10
     add  x26, x26, #4
     b    6f
 51: cmp  w25, #PENC_DICT
@@ -1063,6 +1100,9 @@ LFUNC pw_chunk
     add  x26, x26, #4
     b    6f
 55: lsl  x26, x22, #3
+    cmp  w24, #KIND_WDEC
+    b.ne 6f
+    lsl  x26, x22, #4               // i128 values
 6:  mov  x28, #0
     ldr  x9, [x19, #PW_NNULL]
     cbz  x9, 7f
@@ -1098,7 +1138,11 @@ LFUNC pw_chunk
     mov  w2, w24
     cmp  w25, #PENC_RLE
     b.ne 81f
-    bl   pw_put_rle
+    cmp  w24, #KIND_WDEC
+    b.ne 80f
+    bl   pw_put_rle_wide
+    b    82f
+80: bl   pw_put_rle
     b    82f
 81: cmp  w25, #PENC_DICT
     b.ne 811f
@@ -1206,6 +1250,8 @@ LFUNC pw_put_plain
     b.eq 3f
     cmp  w2, #T_STR
     b.eq 5f
+    cmp  w2, #KIND_WDEC
+    b.eq 10f
     mov  x1, x22                    // 8-byte values: copy
     lsl  x2, x20, #3
     bl   memcpy
@@ -1268,7 +1314,38 @@ LFUNC pw_put_plain
     str  w10, [x24, x20, lsl #2]
     mov  x0, x25
     LEAVE 4
+10: mov  x21, #0                    // wide DECIMAL: i128 (NULL: zero)
+11: cmp  x21, x20
+    b.hs 12f
+    ldr  x9, [x22, x21, lsl #3]
+    mov  x10, #0
+    mov  x11, #0
+    ldrb w12, [x23, x21]
+    cbnz w12, 13f
+    ldp  x10, x11, [x9]
+13: add  x12, x19, x21, lsl #4
+    stp  x10, x11, [x12]
+    add  x21, x21, #1
+    b    11b
+12: add  x0, x19, x20, lsl #4
+    LEAVE 4
 ENDF pw_put_plain
+
+// wv_eq(x0 i128* or 0, x1 i128* or 0) -> w0 1 if equal (0 = zero)  (leaf)
+LFUNC wv_eq
+    mov  x2, #0
+    mov  x3, #0
+    cbz  x0, 1f
+    ldp  x2, x3, [x0]
+1:  mov  x4, #0
+    mov  x5, #0
+    cbz  x1, 2f
+    ldp  x4, x5, [x1]
+2:  cmp  x2, x4
+    ccmp x3, x5, #0, eq
+    cset w0, eq
+    ret
+ENDF wv_eq
 
 // -----------------------------------------------------------------------------
 // pw_put_dict(x0 dst, x1 n) -> x0 end: u32 D, (D+1) u32 offsets, bytes,
@@ -1344,6 +1421,47 @@ LFUNC pw_put_rle
     mov  x0, x13
     ret
 ENDF pw_put_rle
+
+// pw_put_rle_wide(x0 dst, x1 n) -> x0 end: u32 R, R x {i128 value, u32
+// length} (20 bytes, packed; NULL slots hold zero and join the runs).
+//   x19 dst, x20 n, x21 i, x22 run end, x23 cursor, x24 R, x25 PW_VALS
+LFUNC pw_put_rle_wide
+    ENTER 4
+    mov  x19, x0
+    mov  x20, x1
+    TLS_ADDR x9, g_pw
+    ldr  x25, [x9, #PW_VALS]
+    add  x23, x19, #4
+    mov  x24, #0
+    mov  x21, #0
+1:  cmp  x21, x20
+    b.hs 4f
+    add  x22, x21, #1
+2:  cmp  x22, x20
+    b.hs 3f
+    ldr  x0, [x25, x21, lsl #3]
+    ldr  x1, [x25, x22, lsl #3]
+    bl   wv_eq
+    cbz  w0, 3f
+    add  x22, x22, #1
+    b    2b
+3:  ldr  x9, [x25, x21, lsl #3]
+    mov  x10, #0
+    mov  x11, #0
+    cbz  x9, 31f
+    ldp  x10, x11, [x9]
+31: str  x10, [x23]                 // unaligned 8-byte stores are fine
+    str  x11, [x23, #8]
+    sub  x9, x22, x21
+    str  w9, [x23, #16]
+    add  x23, x23, #20
+    add  x24, x24, #1
+    mov  x21, x22
+    b    1b
+4:  str  w24, [x19]
+    mov  x0, x23
+    LEAVE 4
+ENDF pw_put_rle_wide
 
 // =============================================================================
 //                                   READER
@@ -1552,9 +1670,9 @@ LFUNC pr_frame
     ldr  w10, =PQ_MAGIC
     cmp  w9, w10
     b.ne pr_bad_frame
-    ldrh w9, [x20, #4]              // format_version
-    cbz  w9, pr_bad_frame
-    cmp  w9, #1
+    ldrh w9, [x20, #4]              // format_version: 1 or 2 (v2: wide
+    cbz  w9, pr_bad_frame           // DECIMAL columns, decimal38.md §7)
+    cmp  w9, #2
     b.hi pr_bad_version
     ldrh w9, [x20, #6]              // flags
     cbnz w9, pr_bad_version
@@ -1731,6 +1849,14 @@ LFUNC pr_type
     and  w9, w0, #T_KIND_MASK
     cbz  w9, pr_bad_meta            // the null type is not a column type
     mov  w20, w0
+    BR_WIDE w20, w9, 1f             // wide DECIMAL: PQCF v2 only
+    b    2f
+1:  TLS_ADDR x9, g_pr
+    ldr  x9, [x9, #RD_BASE]
+    ldrh w9, [x9, #4]
+    cmp  w9, #2
+    b.lo pr_bad_meta
+2:
     TLS_ADDR x0, g_pq_meta
     str  xzr, [x0, #BUF_LEN]
     mov  w1, w20
@@ -2310,6 +2436,7 @@ LFUNC pr_chunk
     mov  x3, x28
     mov  w4, w27
     ldr  w9, [x20, #PCK_ENC]
+    BR_WIDE w27, w10, 9f
     cmp  w9, #PENC_RLE
     b.ne 6f
     bl   pr_rle
@@ -2324,7 +2451,106 @@ LFUNC pr_chunk
     mov  w2, w27
     bl   pr_check_values
     LEAVE 5
+9:  mov  w5, w9                     // wide DECIMAL (decoded and checked)
+    bl   pr_wide
+    LEAVE 5
 ENDF pr_chunk
+
+// -----------------------------------------------------------------------------
+// pr_wide(x0 src, x1 bytes, x2 n, x3 out u64*, w4 type, w5 enc): wide
+// DECIMAL values (PQCF v2): PLAIN n x i128, or RLE u32 R + R x {i128, u32}
+// (20 bytes, packed), exact size. Non-null values must satisfy |v| < 10^p;
+// they are boxed in the table arena (one box per RLE run), NULL slots get
+// payload 0.
+//   x19 src cursor, x20 bytes, x21 n, x22 out, w23 type, x24 row,
+//   x25 runs left / row end, x26 box of the current value or 0, x27 lo,
+//   x28 hi
+// -----------------------------------------------------------------------------
+LFUNC pr_wide
+    ENTER 5
+    mov  x19, x0
+    mov  x20, x1
+    mov  x21, x2
+    mov  x22, x3
+    mov  w23, w4
+    mov  x24, #0
+    cmp  w5, #PENC_RLE
+    b.eq 5f
+    lsr  x9, x20, #4                // PLAIN: exactly n * 16 bytes
+    cmp  x21, x9
+    b.hi pr_bad_chunk
+    cmp  x20, x21, lsl #4
+    b.ne pr_bad_chunk
+1:  cmp  x24, x21
+    b.hs 9f
+    ldp  x27, x28, [x19], #16
+    mov  x26, #0
+    bl   .Lpw_store
+    add  x24, x24, #1
+    b    1b
+5:  cmp  x20, #4                    // RLE
+    b.lo pr_bad_chunk
+    ldr  w25, [x19], #4
+    sub  x20, x20, #4
+    mov  x9, #20
+    mul  x9, x25, x9
+    cmp  x9, x20
+    b.ne pr_bad_chunk
+6:  cbz  x25, 8f
+    ldr  x27, [x19]
+    ldr  x28, [x19, #8]
+    ldr  w10, [x19, #16]
+    add  x19, x19, #20
+    cbz  w10, pr_bad_chunk
+    sub  x11, x21, x24
+    cmp  x10, x11
+    b.hi pr_bad_chunk               // runs exceed n
+    add  x10, x24, x10
+    str  x10, [sp, #-16]!           // end of the run
+    mov  x26, #0
+7:  bl   .Lpw_store
+    add  x24, x24, #1
+    ldr  x10, [sp]
+    cmp  x24, x10
+    b.lo 7b
+    add  sp, sp, #16
+    sub  x25, x25, #1
+    b    6b
+8:  cmp  x24, x21
+    b.ne pr_bad_chunk
+9:  LEAVE 5
+
+    // local helper: store (x27, x28) for row x24 (box x26 reused)
+.Lpw_store:
+    stp  x29, x30, [sp, #-16]!
+    TLS_ADDR x9, g_pr
+    ldr  x10, [x9, #RD_VBM]
+    ISNULL_AT 11, 10, 24, 12
+    cbz  w11, 1f
+    str  xzr, [x22, x24, lsl #3]
+    b    3f
+1:  cbnz x26, 2f
+    sub  sp, sp, #32                // validity: |v| < 10^p
+    mov  x0, sp
+    mov  x1, x27
+    mov  x2, x28
+    bl   i256_from128
+    mov  x0, sp
+    ubfx w1, w23, #T_PREC_SHIFT, #8
+    bl   i256_to128
+    add  sp, sp, #32
+    cbz  w2, pr_bad_value
+    TLS_ADDR x9, g_pr
+    ldr  x0, [x9, #RD_TBL]
+    add  x0, x0, #TBL_ARENA
+    mov  x1, x27
+    mov  x2, x28
+    bl   dec_box_in
+    mov  x26, x0
+2:  str  x26, [x22, x24, lsl #3]
+3:  ldp  x29, x30, [sp], #16
+    ret
+ENDF pr_wide
 
 // -----------------------------------------------------------------------------
 // pr_plain(x0 src, x1 bytes, x2 n, x3 out u64*, w4 type): PLAIN values;
@@ -2701,8 +2927,18 @@ LFUNC pr_statval
     ubfx w2, w20, #T_PREC_SHIFT, #8
     ubfx w3, w20, #T_SCALE_SHIFT, #8
     mov  w4, #0
+    BR_WIDE w20, w9, 41f
     bl   parse_decimal
     b    9f
+41: bl   parse_dec128
+    cbnz w2, 7f
+    mov  x2, x1
+    mov  x1, x0
+    TLS_ADDR x9, g_pr
+    ldr  x0, [x9, #RD_TBL]
+    add  x0, x0, #TBL_ARENA
+    bl   dec_box_in
+    b    8f
 5:  cmp  w9, #T_DATE
     b.ne 6f
     bl   parse_date
