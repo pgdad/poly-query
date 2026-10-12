@@ -313,7 +313,8 @@ FUNC handle_request_noreset
     movq $1, g_opt_indexes(%rip)
     movq $MODE_AUTO, g_opt_mode(%rip)
     movq $JOIN_AUTO, g_opt_join(%rip)
-    movq $1, g_opt_threads(%rip)
+    mov g_default_threads(%rip), %rax
+    mov %rax, g_opt_threads(%rip)
     lea jb_main(%rip), %rdi
     mov %rdi, g_jmpbuf(%rip)
     call _setjmp
@@ -1666,6 +1667,10 @@ FUNC check_exec_options
     cmp %rax, %rdx
     cmova %rax, %rdx
     mov %rdx, g_opt_threads(%rip)
-9:  LEAVE
+    LEAVE
+9:  cmpq $MODE_ROW, g_opt_mode(%rip)    /* no threads: mode "row" stays the */
+    jne 7f                              /* single-threaded baseline */
+    movq $1, g_opt_threads(%rip)
+7:  LEAVE
 8:  RAISE E_UNSUPPORTED, "unsupported value for threads"
 ENDF check_exec_options
