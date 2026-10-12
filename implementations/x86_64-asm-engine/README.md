@@ -379,7 +379,8 @@ also passes with `PQ_PAR_MIN=1`.
 * `par_for(n, fn, arg)` splits `[0, n)` into P = min(threads, ⌈n / 4096⌉)
   contiguous parts (environment variable `PQ_PAR_MIN` overrides the 4096 -
   used by the tests to force parallelism on tiny inputs); part 0 runs on
-  the calling thread, the others on fresh pthreads. Workers allocate from
+  the calling thread, the others on the persistent worker pool (see
+  "Latency optimization" below). Workers allocate from
   their own arenas (thread-local `t_arena`, kept until the request ends) and
   raise errors through a thread-local `jmp_buf`; `tmp_alloc`, `pq_raise`
   and the CAST formatting buffer are thread-aware, so the evaluator runs
@@ -388,7 +389,7 @@ also passes with `PQ_PAR_MIN=1`.
   thread (subquery results are cached in the shared AST).
 * Parallel operators: full scans with pushed-down filters (honouring
   row-group skipping), WHERE, projection (with per-part top-N), hash-join
-  probe (build is serial), nested-loop join, merge-join key evaluation,
+  probe and build, nested-loop join, merge-join key evaluation,
   aggregation, ORDER BY (each part sorts its range of (row, sequence)
   pairs, then the sorted runs are merged pairwise in parallel rounds). Aggregation without GROUP BY merges
   per-part partial states in part order (exact for INT64 / DECIMAL).
@@ -909,7 +910,35 @@ byte-identical before and after.
    queries. A reused chunk serves exactly the requested size, so memory
    accounting and `--max-query-memory-mb` behave as before. A forked
    `serve` child drops the inherited pool (`chunk_pool_forget`).
-6. Smaller: per-part results are appended with one copy (`vec_append`,
+6. **Parallel hash-join build** (`pexec.S` `pexec_build`). Phase 1
+   evaluates and hashes the build keys in parallel; phase 2 sizes the
+   bucket array up-front and every part inserts only the keys whose bucket
+   lies in its own bucket range (no locks, no shared chains), walking the
+   build tuples backwards so that each key's tuple chain lists the tuples in
+   input order, exactly like the serial build. Matters most for LEFT JOIN,
+   which must build on its (larger) right input (q12).
+7. **Hash-partitioned GROUP BY without sorting** (`pexec.S` `slot_order`,
+   `pexec_emit`). The groups of all partitions used to be concatenated and
+   sorted by their first tuple to restore the serial first-seen order; now
+   every new group is recorded in a per-tuple slot array (cleared in
+   parallel by the key phase) and a parallel compaction yields that order
+   directly. The output rows of the groups (`agg_finish`, HAVING,
+   projection) are then built in parallel parts and concatenated in order.
+   q07 / q19: 33.5 / 23.3 ms → see table.
+8. **Persistent, pinned worker pool** (`par.S`). `par_run` used to create
+   and join a pthread per part on every call (a sort makes seven calls).
+   Workers now live as long as the process: a part is posted to its
+   worker's slot under a mutex and both sides poll briefly (`POOL_SPIN`)
+   before sleeping on condition variables. The calling thread and worker i
+   are bound to the first and the i-th CPU of the process's affinity mask
+   (on Linux all cores are numbered before their SMT siblings), which keeps
+   every part on its own core; unbound, the long-lived threads were often
+   scheduled onto shared cores and simple scans got slower. A thread's
+   vector scratch stack top is restored after every part (an error inside a
+   part could otherwise leak scratch space in a long-lived thread). A
+   forked `serve` child starts without workers and does not pin (its
+   queries run concurrently with other children).
+9. Smaller: per-part results are appended with one copy (`vec_append`,
    `vec_reserve`) instead of element-wise pushes.
 
 Verification after each step: the conformance suite (660/660), `--modes`

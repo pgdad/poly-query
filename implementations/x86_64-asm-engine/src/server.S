@@ -1892,6 +1892,7 @@ FUNC start_child
     mov $1, %eax
     LEAVE
 1:  call chunk_pool_forget
+    call par_after_fork
     mov %rbx, %rdi
     call child_main                 /* does not return */
 7:  xor %eax, %eax

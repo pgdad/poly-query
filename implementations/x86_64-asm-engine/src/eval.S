@@ -625,23 +625,12 @@ ENDF eval
 /* ================================================================ CAST */
 
 /* scratch buffer for formatting values to text (one per thread: parallel
- * workers evaluate CASTs concurrently) */
+ * workers evaluate CASTs concurrently; pool workers keep theirs) */
     .section .tbss, "awT", @nobits
     .p2align 3
 cast_buf: .zero BUF_SIZE
     .text
 
-/* eval_thread_exit(): releases the calling thread's formatting buffer */
-FUNC eval_thread_exit
-    sub $8, %rsp
-    mov %fs:cast_buf@tpoff+BUF_DATA, %rdi
-    call free
-    movq $0, %fs:cast_buf@tpoff+BUF_DATA
-    movq $0, %fs:cast_buf@tpoff+BUF_LEN
-    movq $0, %fs:cast_buf@tpoff+BUF_CAP
-    add $8, %rsp
-    ret
-ENDF eval_thread_exit
 
 /* fmt_to_pstr(type rdi, payload rsi) -> rax pstr in request arena (text form) */
 FUNC fmt_to_pstr

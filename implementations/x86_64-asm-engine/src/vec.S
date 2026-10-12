@@ -45,6 +45,7 @@
 
     .section .tbss, "awT", @nobits
     .p2align 3
+    .globl t_vs_cur                 /* (par.S restores it after each part) */
 t_vs_raw: .zero 8
 t_vs_cur: .zero 8
 t_vs_end: .zero 8
@@ -161,17 +162,6 @@ FUNC vs_alloc
 3:  jmp tmp_alloc
 ENDF vs_alloc
 
-/* vs_thread_exit(): frees the calling worker thread's scratch stack */
-FUNC vs_thread_exit
-    sub $8, %rsp
-    mov %fs:t_vs_raw@tpoff, %rdi
-    call free
-    movq $0, %fs:t_vs_raw@tpoff
-    movq $0, %fs:t_vs_cur@tpoff
-    movq $0, %fs:t_vs_end@tpoff
-    add $8, %rsp
-    ret
-ENDF vs_thread_exit
 
 /* vnew() -> rax a vector */
 FUNC vnew
