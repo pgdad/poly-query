@@ -1,0 +1,98 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-union-all-arm64-asm-engine-a1-20261012T090423Z",
+ "language": "arm64-asm-engine",
+ "task": "change-union-all",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-union-all",
+ "prompt_sha256": "009ef14df7efcf152122fccad177224735da334b458619ce5d07a796a6ad8999",
+ "session_id": "7c456cbf-5d94-4a1e-8a94-e920e8c22546",
+ "tokens": {
+  "input": 148,
+  "output": 52307,
+  "cache_read": 9615523,
+  "cache_creation": 194043,
+  "thinking": null,
+  "thinking_estimated": 21748,
+  "source": "result events",
+  "api_messages": 74
+ },
+ "rate_limit": {
+  "events": 4,
+  "max_utilization": {
+   "five_hour": 0.03,
+   "seven_day": 0.57
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 4.522180599999998,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 76,
+ "result_segments": 1,
+ "assistant_messages": 131,
+ "tool_calls": {
+  "Bash": 74,
+  "Read": 1
+ },
+ "tool_calls_total": 75,
+ "tool_failures": 1,
+ "build_invocations": 13,
+ "build_failures_heuristic": 2,
+ "conformance_runs": 6,
+ "conformance_progress": [
+  [
+   569,
+   569
+  ],
+  [
+   22,
+   22
+  ],
+  [
+   3456,
+   3456
+  ],
+  [
+   591,
+   591
+  ],
+  [
+   591,
+   591
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 521.3,
+  "model_api_seconds": 469.1,
+  "tool_seconds": 50.2,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 2,
+  "files_changed": 11,
+  "lines_added": 565,
+  "lines_removed": 58,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "UNION ALL now works in the assembly engine, and every check in the definition of done passes. The engine claims `change.union_all`, and all work is committed (2 commits on `main`).\n\n**Test results**\n- Conformance runner: `TOTAL: 591/591 pass`. That includes the 22 `changes/union_all` cases and phases 1, 2, 3 and 5, with 0 failures, 0 errors and 0 not implemented.\n- `--modes`: `TOTAL: 3456/3456 pass`.\n- `--transport http`: `TOTAL: 591/591 pass`.\n- `http_suite.py`: `http suite: 19/19 passed`.\n- `make clean build test lint` succeeds.\n\n**What I implemented**\n- **Grammar:** a query can now be `select_core { UNION ALL select_core }` followed by ORDER BY / LIMIT for the whole result. It works at the top level, in CTE bodies, in derived tables, in scalar / IN / EXISTS subqueries and in EXPLAIN. Plain `UNION` or `UNION DISTINCT` still returns `UNSUPPORTED`. A `UNION ALL` in the wrong place (after a branch's ORDER BY or LIMIT, or with parenthesised branches) returns `PARSE_ERROR`.\n- **Typing:** all branches must have the same number of columns, otherwise `SEMANTIC_ERROR`. Each output column gets the common type of its branches, using the same rule as CASE; a mismatch is `TYPE_ERROR`. Values are converted to the common type, so an INT64 that doesn't fit the DECIMAL is `NUMERIC_OVERFLOW`. Column names come from the first branch.\n- **ORDER BY on the combined result:** only output column names or 1-based positions are accepted; anything else is `SEMANTIC_ERROR`.\n- **EXPLAIN:** shows a `UnionAll` node with the branch plans as children, in order.\n- **Tests:** I added UNION ALL cases to the parser and planner unit tests. I also added 7 UNION ALL queries to the test that runs every query under 8 combinations of execution options and checks they give the same results.\n\n**Main design decisions**\n- The combined query is treated as one more query level with no tables of its own, and each branch is an ordinary query underneath it. Because of that, the existing code for outer-column references, CTEs, caching and subqueries works unchanged.\n- Each branch is planned and optimised on its own. That is why `mode`, `threads`, `join` and `optimize` all apply inside every branch without extra work.\n- The new operator runs each branch in turn and joins the result lists together, which takes time proportional to the number of rows. On 100k-row generated data, combining 110k rows and sorting them takes about 22 ms.\n\n**Known limitations and choices** (documented in README.md, which also lists every module the change touched)\n- A sort plus LIMIT on top of a UNION ALL works on the full combined result. The LIMIT is not pushed down into the branches.\n- If two output columns share a name, using that name in ORDER BY is ambiguous and gives `SEMANTIC_ERROR`.\n- DATE and TIMESTAMP branches are not merged into one type (`TYPE_ERROR`), the same as for CASE.\n- The engine still reports `spec_version` `1.0.0` rather than `1.1.0-cr1`, because an existing Phase 1 conformance test expects `1.0.0`.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

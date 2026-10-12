@@ -1,2 +1,6 @@
 2026-10-12T09:04:23+00:00 chain chain-a-change-union-all-arm64-asm-engine-a1-20261012T090423Z: session 1 -> a-change-union-all-arm64-asm-engine-a1-20261012T090423Z (budget $35.00)
 2026-10-12T09:04:23+00:00 [a-change-union-all-arm64-asm-engine-a1-20261012T090423Z] agent queued (usage gate, then launch)
+2026-10-12T09:13:06+00:00 [a-change-union-all-arm64-asm-engine-a1-20261012T090423Z] agent finished; collecting telemetry
+2026-10-12T09:13:06+00:00 [a-change-union-all-arm64-asm-engine-a1-20261012T090423Z] validating (clean clone, sandboxed)
+2026-10-12T09:13:22+00:00 [a-change-union-all-arm64-asm-engine-a1-20261012T090423Z] outcome=success cost=$4.522180599999998 turns=76 wall=521.3s
+2026-10-12T09:13:22+00:00 chain chain-a-change-union-all-arm64-asm-engine-a1-20261012T090423Z finished: outcome=success sessions=1 spent=$4.52
