@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>One Weekend, Eight Databases</title>
+  <style>
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <link rel="stylesheet" href="story.css" />
+</head>
+<body>
+<h1 id="one-weekend-eight-databases">One weekend, eight databases</h1>
+<p><em>How Claude built the same analytical database eight times, in
+parallel, without going over the subscription. And what that means for
+building business software.</em></p>
+<hr />
+<h2 id="the-short-version">The short version</h2>
+<table>
+<tbody>
+<tr class="odd">
+<td><strong>What was built</strong></td>
+<td>A complete analytical SQL database (SQL, storage format, HTTP
+server, parallel execution), built independently <strong>six
+times</strong>: Java, Clojure, Rust, Python, Go and Common Lisp. Then
+<strong>twice more in assembly language</strong> (x86-64 and ARM), plus
+hand-tuned assembly "kernels" for both chips.</td>
+</tr>
+<tr class="even">
+<td><strong>How much code</strong></td>
+<td>About <strong>193,000 lines</strong>, written by AI agents.</td>
+</tr>
+<tr class="odd">
+<td><strong>Correctness</strong></td>
+<td>Every engine passes <strong>100 %</strong> of its conformance suite:
+746 test cases, a share of them hidden from the agents.</td>
+</tr>
+<tr class="even">
+<td><strong>Wall-clock time</strong></td>
+<td>Kick-off Saturday 13:46 → all six main engines through all five
+phases by <strong>Saturday 23:21 (under 10 hours)</strong> → everything,
+assembly included, done Monday morning.</td>
+</tr>
+<tr class="odd">
+<td><strong>Agent time</strong></td>
+<td><strong>75 hours</strong> of AI agent work in <strong>108 recorded
+sessions</strong>. Up to <strong>12 sessions ran at once</strong>.</td>
+</tr>
+<tr class="even">
+<td><strong>Cost</strong></td>
+<td><strong>$1,256 at API list prices.</strong> It actually ran on a
+Claude subscription: <strong>no overage, no rate-limit rejection,
+ever.</strong></td>
+</tr>
+<tr class="odd">
+<td><strong>People</strong></td>
+<td>One owner giving direction. <strong>Two</strong> hands-on
+interventions in the whole project, both logged.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="the-challenge">The challenge</h2>
+<p>Most "AI wrote my app" stories are one model building one thing once.
+We wanted something harder to fake. We wrote a specification for an
+analytical database, then asked Claude to build it <strong>from scratch,
+independently, in eight languages</strong>, and measured everything
+along the way:</p>
+<ul>
+<li>development time, tokens and cost;</li>
+<li>correctness against a shared, language-neutral test suite (some of
+it hidden);</li>
+<li>performance, memory and code quality.</li>
+</ul>
+<p>The database is not a toy. It has a SQL dialect with joins, grouping,
+subqueries and aggregation, a binary column storage format, an HTTP
+server with concurrency control, timeouts and cancellation, and parallel
+and vectorized execution. It was built in five phases.</p>
+<h2 id="the-cast">The cast</h2>
+<ul>
+<li><strong>The conductor.</strong> One Claude Code session (the
+"orchestrator") wrote the spec and the test harness. It ran the
+experiment: it started agent waves, reviewed results, merged accepted
+work and wrote the reports. It never wrote engine code itself; that rule
+was enforced and audited.</li>
+<li><strong>The orchestra.</strong> Fresh Claude agent sessions, one per
+language, phase and attempt. Each worked in its own
+<strong>sandbox</strong>:
+<ul>
+<li>its own copy of the spec and the public tests, and nothing
+else;</li>
+<li>no internet, no other language's code, no hidden tests;</li>
+<li>no access to the owner's home directory.</li>
+</ul></li>
+<li><strong>The ARM box.</strong> A machine called <em>spark</em> (an
+NVIDIA GB10) for native ARM work. The ARM assembly agents ran there, in
+the same kind of sandbox.</li>
+<li><strong>The referee.</strong> An automated validator. It rebuilt
+every submission from a clean copy and ran the public <strong>and
+hidden</strong> tests, so an agent could not grade its own
+homework.</li>
+</ul>
+<p><img src="charts/parallel-agents.svg"
+alt="Agent sessions active in each 10-minute slot" /></p>
+<p><em>Up to 16 sessions were active in one 10-minute slot (12 at any
+single instant). The quiet stretches are review-and-merge time between
+waves. The long one on Sunday night is the project waiting for its next
+go-ahead, not anything stuck.</em></p>
+<h2 id="the-timeline">The timeline</h2>
+<p><strong>Saturday: the big build.</strong></p>
+<table>
+<thead>
+<tr class="header">
+<th>time (US Eastern)</th>
+<th>milestone</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>13:46</td>
+<td>First commit: specification, test harness, orchestrator.</td>
+</tr>
+<tr class="even">
+<td>15:22</td>
+<td>Assembly kernels pass natively on both x86-64 and ARM.</td>
+</tr>
+<tr class="odd">
+<td>16:15</td>
+<td>All six engines pass Phase 1 (protocol, catalog, CSV/JSON loading),
+hidden tests included.</td>
+</tr>
+<tr class="even">
+<td>17:09</td>
+<td>Phase 2, the full SQL dialect.</td>
+</tr>
+<tr class="odd">
+<td>18:49</td>
+<td>Phase 3: storage format. Every engine reads every other engine's
+files (a 6 × 6 interoperability matrix).</td>
+</tr>
+<tr class="even">
+<td>20:45</td>
+<td>Phase 4: HTTP server and concurrency.</td>
+</tr>
+<tr class="odd">
+<td>23:21</td>
+<td>Phase 5: parallel and vectorized execution, plus the first
+benchmark. <strong>All twenty benchmark queries give identical answers
+in all six engines.</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Sunday: changing the engines after they were built.</strong>
+Real software changes after it ships, so the agents also got the tasks
+that come after version 1:</p>
+<ul>
+<li>add <code>UNION ALL</code>;</li>
+<li>widen decimals to 38 digits, including a new storage-format
+version;</li>
+<li>restructure the planner without changing behaviour;</li>
+<li>find a planted bug from a symptom-only bug report;</li>
+<li>make it faster;</li>
+<li>call native assembly kernels.</li>
+</ul>
+<p>Meanwhile the two assembly-language engines started, as a separate
+stretch goal with its own budget cap.</p>
+<p><strong>Monday: assembly finishes, then the grown-up
+checks.</strong></p>
+<ul>
+<li>The assembly engines completed every task the others did.</li>
+<li>Each engine got two independent AI code reviews.</li>
+<li>Benchmarks ran on both chips.</li>
+<li>Black-box robustness probes checked what the reviewers
+suspected.</li>
+</ul>
+<h2 id="what-it-cost">What it cost</h2>
+<p><img src="charts/cost.svg" alt="Model cost per engine" /></p>
+<table>
+<thead>
+<tr class="header">
+<th>group</th>
+<th>sessions</th>
+<th>agent hours</th>
+<th>list-price cost</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Six main engines (all phases and later tasks)</td>
+<td>78</td>
+<td>58.6</td>
+<td>$855</td>
+</tr>
+<tr class="even">
+<td>Assembly kernels (both chips)</td>
+<td>10</td>
+<td>5.0</td>
+<td>$90</td>
+</tr>
+<tr class="odd">
+<td>Assembly engines (both chips)</td>
+<td>20</td>
+<td>11.9</td>
+<td>$310 (cap: $600)</td>
+</tr>
+<tr class="even">
+<td><strong>Total</strong></td>
+<td><strong>108</strong></td>
+<td><strong>75.4</strong></td>
+<td><strong>$1,256</strong></td>
+</tr>
+</tbody>
+</table>
+<p><img src="charts/dev-time.svg"
+alt="Development time per engine" /></p>
+<p>A complete, tested database engine, including five rounds of later
+changes, came to about <strong>$120–180 per language</strong> at list
+price. Even the "let's write a database in assembly, why not" stretch
+goal came in at about half its cap.</p>
+<p>The costs above are for the agent sessions only. The orchestrating
+session's own usage is not included.</p>
+<h2 id="staying-inside-the-subscription">Staying inside the
+subscription</h2>
+<p>The $1,256 is what these sessions <em>would</em> have cost on the
+pay-per-token API. They actually ran on a <strong>Claude
+subscription</strong>, which has two rolling limits: a 5-hour window and
+a 7-day window. Twelve agents working at once can burn through a 5-hour
+window quickly. Our first wave of 8 agents used about 22 % of it in 35
+minutes. So the orchestrator had guard rails:</p>
+<ol type="1">
+<li><strong>A usage gate.</strong> No new agent starts while the 5-hour
+or 7-day window is above <strong>80 %</strong>. A queued run simply
+waits, re-checking every 5 minutes, until the window rolls forward. (The
+threshold started at 60 %; the owner raised it to 80 %.)</li>
+<li><strong>A watchdog.</strong> A running agent is stopped at
+<strong>95 %</strong> of the 5-hour window, or
+<strong>immediately</strong> if it ever starts using paid overage.</li>
+<li><strong>A fresh, short-lived credential per run.</strong> It is
+never shared, and it is deleted from the ARM box after each run.</li>
+</ol>
+<p>How it played out:</p>
+<ul>
+<li><strong>The gate did its job on Saturday afternoon</strong> (the
+shaded bands in the timeline). During the busiest stretch six runs
+queued at the gate and waited <strong>35–95 minutes</strong> for the
+5-hour window to roll forward, then started. Nobody had to babysit
+it.</li>
+<li><strong>The 5-hour window peaked at 89 %. The 7-day window peaked at
+62 %.</strong></li>
+<li><strong>All 108 sessions saw only "allowed" rate-limit status: no
+rejections, no overage, no surprise bill.</strong></li>
+</ul>
+<p>In short: we let the work slow down rather than let the bill go
+up.</p>
+<h2 id="what-came-out">What came out</h2>
+<p><img src="charts/conformance.svg" alt="Conformance pass rate" /></p>
+<p><strong>Correctness: 100 % everywhere.</strong> All eight engines
+pass their full conformance suite.</p>
+<p><img src="charts/latency.svg" alt="Query latency" /></p>
+<p><strong>Speed: a wide spread, and that's the point of the
+experiment.</strong> On a 1-million-row workload (geometric mean over 20
+queries):</p>
+<ul>
+<li>Go and Rust are fastest at about 2 ms. The assembly engines are
+right behind, and the ARM one runs on different hardware, so it isn't
+directly comparable.</li>
+<li>Java is at 3.4 ms. Clojure and Common Lisp are at 5–7 ms.</li>
+<li>Python, gamely interpreting its way through, is at 25 ms.</li>
+</ul>
+<p><img src="charts/http-throughput.svg" alt="HTTP throughput" /></p>
+<p><img src="charts/memory.svg" alt="Peak memory" /></p>
+<p><img src="charts/loc.svg" alt="Lines of code" /></p>
+<p><strong>Size.</strong></p>
+<ul>
+<li>Clojure says it in 12,000 lines. Go needs 25,000.</li>
+<li>The assembly engines need about 35,000 lines each. Nobody was
+surprised.</li>
+</ul>
+<h2 id="keeping-the-ai-honest">Keeping the AI honest</h2>
+<p>Fast is nice. Trustworthy matters more. The safeguards:</p>
+<ul>
+<li><p><strong>Hidden tests.</strong> Part of every acceptance suite was
+withheld, so passing meant actually implementing the spec, not
+memorising the tests.</p></li>
+<li><p><strong>Clean-room rebuilds.</strong> Every submission was
+rebuilt from scratch in a sandbox before it counted.</p></li>
+<li><p><strong>Two independent AI code reviewers per engine.</strong>
+They agreed on 88–92 % of scores exactly.</p></li>
+<li><p><strong>Black-box probes for what the reviewers
+suspected.</strong> These found real defects, which we report rather
+than hide:</p>
+<ul>
+<li>very long <code>OR</code> conditions crash both assembly
+engines;</li>
+<li>three engines (Go, Java, Clojure) don't honour a query timeout while
+chewing on a gigantic statement;</li>
+<li>one assembly engine has a memory-limit leak.</li>
+</ul>
+<p>The same probes <strong>cleared</strong> several suspected
+problems.</p></li>
+<li><p><strong>Everything recorded.</strong> Every session's transcript,
+cost and outcome is kept, including the 7 that failed or timed out. A
+dashboard of all of it is published at <a
+href="https://pgdad.github.io/poly-query/">https://pgdad.github.io/poly-query/</a>.</p></li>
+</ul>
+<h2 id="beyond-databases-the-same-recipe-for-business-services">Beyond
+databases: the same recipe for business services</h2>
+<p>Nothing here is specific to databases. The recipe carries over to
+business functionality such as a pricing engine, a billing service, a
+claims rule engine or a regulatory report:</p>
+<ol type="1">
+<li><strong>Write the specification first, in plain language.</strong>
+Inputs, outputs, errors, edge cases. This is where the people who know
+the business spend their time.</li>
+<li><strong>Turn it into a language-neutral test suite</strong>, and
+keep part of it hidden from the builders.</li>
+<li><strong>Let agents build in parallel</strong>, each in a sandbox,
+each one a fresh session with a clear task.</li>
+<li><strong>Validate automatically</strong> with a clean rebuild and the
+hidden tests. Nothing merges on an agent's word.</li>
+<li><strong>Put guard rails on spend</strong>: usage gates, budget caps
+per task, and a watchdog.</li>
+<li><strong>Keep going after version 1.</strong> Change requests,
+refactors and bug hunts are ordinary tasks too, and here they took
+minutes to a couple of hours each.</li>
+</ol>
+<p>The expensive part of software has always been knowing <em>what</em>
+to build. This approach puts people on that, and lets the agents grind
+through the <em>how</em>, around the clock.</p>
+<h2 id="two-implementations-that-check-each-other">Two implementations
+that check each other</h2>
+<p>Here's the idea we find most exciting for business use. When writing
+code is cheap, <strong>write critical logic twice</strong>, in two
+different languages, by two independent agents, from the same spec. Then
+run both on the same inputs and <strong>compare the
+answers.</strong></p>
+<ul>
+<li>If both agree, confidence goes up a lot, because independent builds
+rarely make the <em>same</em> mistake.</li>
+<li>If they disagree, one of them has a bug, or the <strong>spec is
+ambiguous</strong>. Either way you found it before a customer did.</li>
+</ul>
+<p>This isn't hypothetical; it happened here:</p>
+<ul>
+<li><strong>Agreement as evidence.</strong> Six independently written
+engines returned identical results on all 20 benchmark queries. Each
+also read the storage files written by every other engine.</li>
+<li><strong>Disagreement found spec gaps.</strong>
+<ul>
+<li>Two agents independently flagged that comparing very large integers
+with decimals overflowed under the spec's own rule. That became a spec
+fix (question SPEC-Q-001).</li>
+<li>When the engines disagreed on what to do with a gigantic SQL
+expression (some computed it, some refused, some hung), that divergence
+became a new rule, change request CR-6.</li>
+</ul></li>
+</ul>
+<p>Two practical notes:</p>
+<ul>
+<li><strong>Keep a third opinion for the reference answers.</strong> We
+never used one engine's output as the expected result for another.
+Expected results came from the spec, cross-checked against an
+independent database (SQLite). Two implementations that share a
+misunderstanding of the spec will agree wrongly; only a clear spec and
+some independent checks catch that.</li>
+<li><strong>Where to use it:</strong> anywhere a wrong number is
+expensive, such as pricing, billing, interest and fees, tax, risk limits
+or eligibility rules. For about twice the build cost, still small in
+agent dollars, you get a running cross-check on every input, in testing
+and even in production shadow mode.</li>
+</ul>
+<h2 id="what-didnt-go-perfectly-because-it-never-does">What didn't go
+perfectly (because it never does)</h2>
+<ul>
+<li>Go's "make it faster" task ran out of time twice. Its unmerged work
+is 1.74× faster but is parked for a decision.</li>
+<li>The ARM assembly engine's optimization made it 1.82× faster overall,
+but one query got 8× <em>slower</em>. Benchmarks keep everyone
+honest.</li>
+<li>One agent finished its work and then just… didn't exit. The
+orchestrator noticed, stopped it and logged the intervention.</li>
+<li>The robustness defects above are real and open. Fixing them is the
+next task: a new round of agent runs to meet CR-6.</li>
+</ul>
+<h2 id="where-to-look">Where to look</h2>
+<ul>
+<li>Live results dashboard: <a
+href="https://pgdad.github.io/poly-query/">https://pgdad.github.io/poly-query/</a></li>
+<li>Source code and all raw data: <a
+href="https://github.com/pgdad/poly-query">https://github.com/pgdad/poly-query</a></li>
+<li>Detailed results narrative: <code>docs/results/README.md</code></li>
+<li>Per-session records (manifest, telemetry, transcript):
+<code>experiments/runs/</code></li>
+</ul>
+<p><em>Charts are regenerated from the experiment data by
+<code>tools/reporting/story_assets.py</code>.</em></p>
+</body>
+</html>
