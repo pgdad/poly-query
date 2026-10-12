@@ -573,8 +573,11 @@ FUNC cmp_typed
     b.ne .Lct_wide
     cmp  w9, #T_DEC
     b.ne .Lct_signed
-    BR_WIDE w2, w11, .Lct_wide
-    BR_WIDE w3, w11, .Lct_wide
+    ubfx w11, w2, #T_PREC_SHIFT, #8     // either wide: wdec.S
+    ubfx w12, w3, #T_PREC_SHIFT, #8
+    cmp  w11, #DEC_NARROW_MAX
+    ccmp w12, #DEC_NARROW_MAX, #2, ls   // (nzcv 2: "hi" if a is wide)
+    b.hi .Lct_wide
     ubfx w10, w2, #T_SCALE_SHIFT, #8
     ubfx w11, w3, #T_SCALE_SHIFT, #8
     cmp  w10, w11

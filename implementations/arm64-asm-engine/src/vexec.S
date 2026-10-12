@@ -339,8 +339,9 @@ FUNC veval
     mov  w9, #3                         // class 3: DECIMALs of different
     cmp  w12, #T_DEC                    // scales or wide (exact, cmp_typed)
     b.ne 1f
-    cmp  w10, w11
-    b.ne 3f
+    eor  w13, w10, w11                  // (T_SATF does not change the
+    bic  w13, w13, #T_SATF              // encoding)
+    cbnz w13, 3f
     BR_WIDE w10, w13, 3f
 1:  mov  w9, #0                         // class: 0 signed, 1 float, 2 string
     cmp  w12, #T_FLOAT
