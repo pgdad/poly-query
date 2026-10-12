@@ -24,16 +24,17 @@
 //      The fields are packed most significant first into a composite key of
 //      at most RX_MAXW words; fields that do not fit are dropped (tail
 //      inexact).
-//   4. Pack (parallel): element = composite key words + row index (bit 63:
-//      the row is inexact), plus a histogram of the top D0 <= 11 key bits.
+//   4. Pack (parallel): element = composite key words + Row* (bit 63: the
+//      row is inexact), plus a histogram of the top D0 <= 11 key bits.
 //   5. Scatter (parallel, stable) by the top D0 bits; the buckets are dealt
 //      to tasks in contiguous groups of about n / tasks elements, and every
 //      bucket is sorted by MSD radix on the following bits (8 per level,
 //      insertion sort below RX_SMALL elements), mostly in cache.
-//   6. Gather (parallel): the rows in element order.
-//   7. Fix-up (serial): rows whose composite keys tie only because of an
-//      inexact STRING prefix (equal up to the end of that field) or of
-//      dropped keys (equal composite) are sorted by the full comparator.
+//   6. Gather (parallel): the rows in element order (sequential reads).
+//   7. Fix-up (parallel over windows of the output): rows whose composite
+//      keys tie only because of an inexact STRING prefix (equal up to the
+//      end of that field) or of dropped keys (equal composite) are sorted by
+//      the full comparator.
 // The result is the comparator's order (cmp_rows); only rows equal on every
 // key, i.e. identical in every visible column, may come out in any order.
 // =============================================================================
@@ -70,7 +71,7 @@
 #define FD_SIZE     48
 
 // Sort state (shared by the tasks)
-#define RX_ROWS     0               // Row** input order (a copy while gathering)
+#define RX_ROWS     0               // Row** input order
 #define RX_N        8
 #define RX_NF       16              // fields encoded / used
 #define RX_FIELDS   24              // FD [RX_MAXF]
@@ -86,7 +87,9 @@
 #define RX_TMP      104             // elements, scattered / sorted
 #define RX_BSTART   112             // u64 bucket starts [2^D0 + 1]
 #define RX_OUT      120             // Row** sorted rows (the caller's array)
-#define RX_SIZE     128
+#define RX_KEYS     128             // key descriptors (fix-up)
+#define RX_TAIL     136             // u64 1: keys were dropped (fix-up)
+#define RX_SIZE     144
 
 // Task record
 #define RT_RX       0
@@ -132,6 +135,7 @@ LFUNC rsort_rows
     mov  x22, x0
     stp  x19, x20, [x22, #RX_ROWS]
     str  x19, [x22, #RX_OUT]
+    str  x21, [x22, #RX_KEYS]
     mov  x0, #(FD_SIZE * RX_MAXF)
     bl   arena_zalloc
     mov  x28, x0
@@ -417,25 +421,18 @@ LFUNC rsort_rows
 6:  ADR_L x0, rx_bucket_task
     bl   .Lrs_run
     // ---- 6. gather ---------------------------------------------------------
-    lsl  x0, x20, #3
-    bl   arena_alloc
-    str  x0, [x22, #RX_ROWS]
-    mov  x1, x19
-    lsl  x2, x20, #3
-    bl   memcpy
     ADR_L x0, rx_gather_task
     bl   .Lrs_run
     // ---- 7. fix-up ---------------------------------------------------------
     ldp  x9, x10, [sp]                  // tail inexact, any inexact row
+    str  x9, [x22, #RX_TAIL]
     ldr  x11, [x22, #RX_INEXF]
     tbz  x11, #63, 1f
     mov  x10, #0                        // no inexact field left
 1:  orr  x9, x9, x10
     cbz  x9, .Lrs_ret
-    mov  x0, x22
-    mov  x1, x21
-    ldr  x2, [sp]
-    bl   rx_fixup
+    ADR_L x0, rx_fixup_task
+    bl   .Lrs_run
 .Lrs_ret:
     add  sp, sp, #16
     LEAVE 5
@@ -642,7 +639,8 @@ LFUNC rx_pack_task
 2:  add  x25, x25, #1
     b    .Lpk_field
 .Lpk_idx:
-    mov  x9, x21                        // row index, bit 63: inexact
+    ldr  x9, [x20, #RX_ROWS]            // Row*, bit 63: inexact
+    ldr  x9, [x9, x21, lsl #3]
     ldr  x10, [x20, #RX_INEXF]
     tbnz x10, #63, 1f
     ldr  x10, [x20, #RX_INEX]
@@ -782,8 +780,9 @@ ENDF rx_bucket_task
 // =============================================================================
 // rx_msd(x0 elements, x1 scratch, x2 n, x3 bit, x4 rx) — sorts n elements
 // that are equal on the key bits above `bit` by the remaining bits (MSD
-// radix, 8 bits per level; insertion sort for small n). The result is in
-// place.
+// radix with digits of up to 8 bits, sized for about 2-4 elements per
+// sub-bucket; insertion sort for small n and small sub-buckets). The result
+// is in place.
 //   x19 elements, x20 scratch, x21 n, x22 bit, x23 rx, x24 digit bits,
 //   x25 element bytes, x26 index, x27 words, x28 key bits
 // Stack: [sp] 256 u64 counters / bucket ends
@@ -806,13 +805,21 @@ LFUNC rx_msd
     b.hs .Lms_ret
     cmp  x21, #RX_SMALL
     b.ls .Lms_ins
-    sub  x24, x28, x22                  // digit: min(8, bits left)
+    clz  x9, x21                        // digit: floor(log2 n) - 1 bits,
+    mov  x24, #62                       // 1..8, at most the bits left
+    sub  x24, x24, x9
     cmp  x24, #8
     mov  x9, #8
     csel x24, x24, x9, lo
+    cmp  x24, #1
+    csinc x24, x24, xzr, hs
+    sub  x9, x28, x22
+    cmp  x24, x9
+    csel x24, x24, x9, lo
     mov  x0, sp
     mov  w1, #0
-    mov  x2, #2048
+    mov  x2, #8
+    lsl  x2, x2, x24
     bl   memset
     mov  x26, #0
 1:  cmp  x26, x21
@@ -881,54 +888,24 @@ LFUNC rx_msd
     cmp  x2, #2
     b.lo 9b
     madd x0, x10, x25, x19
-    madd x1, x10, x25, x20
+    cmp  x2, #RX_SMALL                  // small: insertion sort, no frame
+    b.hi 92f
+    mov  x1, x2
+    mov  x2, x25
+    mov  x3, x27
+    bl   rx_isort
+    b    9b
+92: madd x1, x10, x25, x20
     add  x3, x22, x24
     mov  x4, x23
     bl   rx_msd
     b    9b
-.Lms_ins:                               // insertion sort (stable); [sp] = key
-    mov  x26, #1
-1:  cmp  x26, x21
-    b.hs .Lms_ret
-    madd x13, x26, x25, x19             // element i -> [sp]
-    mov  x11, #0
-2:  ldr  x12, [x13, x11]
-    str  x12, [sp, x11]
-    add  x11, x11, #8
-    cmp  x11, x25
-    b.lo 2b
-    mov  x14, x26                       // j
-3:  cbz  x14, 6f
-    sub  x9, x14, #1
-    madd x15, x9, x25, x19              // element j - 1
-    mov  x11, #0                        // compare its key with [sp]
-4:  ldr  x12, [x15, x11, lsl #3]
-    ldr  x10, [sp, x11, lsl #3]
-    cmp  x12, x10
-    b.hi 5f                             // greater: shift it up
-    b.lo 6f
-    add  x11, x11, #1
-    cmp  x11, x27
-    b.lo 4b
-    b    6f                             // equal: keep the order
-5:  add  x10, x15, x25                  // element j - 1 -> j
-    mov  x11, #0
-51: ldr  x12, [x15, x11]
-    str  x12, [x10, x11]
-    add  x11, x11, #8
-    cmp  x11, x25
-    b.lo 51b
-    sub  x14, x14, #1
-    b    3b
-6:  madd x10, x14, x25, x19             // [sp] -> element j
-    mov  x11, #0
-7:  ldr  x12, [sp, x11]
-    str  x12, [x10, x11]
-    add  x11, x11, #8
-    cmp  x11, x25
-    b.lo 7b
-    add  x26, x26, #1
-    b    1b
+.Lms_ins:
+    mov  x0, x19
+    mov  x1, x21
+    mov  x2, x25
+    mov  x3, x27
+    bl   rx_isort
 .Lms_ret:
     add  sp, sp, #2048
     LEAVE 5
@@ -958,6 +935,59 @@ LFUNC rx_msd
 ENDF rx_msd
 
 // =============================================================================
+// rx_isort(x0 elements, x1 n, x2 element bytes, x3 key words) — stable
+// insertion sort on the key words (unsigned, most significant first)
+// (leaf; the element being inserted is held on the stack, <= 32 bytes)
+// =============================================================================
+LFUNC rx_isort
+    sub  sp, sp, #32
+    mov  x9, #1                         // i
+1:  cmp  x9, x1
+    b.hs 9f
+    madd x13, x9, x2, x0                // element i -> [sp]
+    mov  x11, #0
+2:  ldr  x12, [x13, x11]
+    str  x12, [sp, x11]
+    add  x11, x11, #8
+    cmp  x11, x2
+    b.lo 2b
+    mov  x14, x9                        // j
+3:  cbz  x14, 6f
+    sub  x10, x14, #1
+    madd x15, x10, x2, x0               // element j - 1
+    mov  x11, #0                        // compare its key with [sp]
+4:  ldr  x12, [x15, x11, lsl #3]
+    ldr  x10, [sp, x11, lsl #3]
+    cmp  x12, x10
+    b.hi 5f                             // greater: shift it up
+    b.lo 6f
+    add  x11, x11, #1
+    cmp  x11, x3
+    b.lo 4b
+    b    6f                             // equal: keep the order
+5:  add  x10, x15, x2                   // element j - 1 -> j
+    mov  x11, #0
+51: ldr  x12, [x15, x11]
+    str  x12, [x10, x11]
+    add  x11, x11, #8
+    cmp  x11, x2
+    b.lo 51b
+    sub  x14, x14, #1
+    b    3b
+6:  madd x10, x14, x2, x0               // [sp] -> element j
+    mov  x11, #0
+7:  ldr  x12, [sp, x11]
+    str  x12, [x10, x11]
+    add  x11, x11, #8
+    cmp  x11, x2
+    b.lo 7b
+    add  x9, x9, #1
+    b    1b
+9:  add  sp, sp, #32
+    ret
+ENDF rx_isort
+
+// =============================================================================
 // rx_gather_task(x0 task) — rows [lo, hi) of the output in element order
 // =============================================================================
 LFUNC rx_gather_task
@@ -969,14 +999,12 @@ LFUNC rx_gather_task
     ldr  x10, [x20, #RX_TMP]
     madd x11, x21, x9, x10              // element
     ldr  x12, [x20, #RX_W]
-    lsl  x12, x12, #3                   // its index word
-    ldr  x13, [x20, #RX_ROWS]           // input order (copy)
+    lsl  x12, x12, #3                   // its Row* word
     ldr  x14, [x20, #RX_OUT]
 1:  cmp  x21, x22
     b.hs 9f
     ldr  x10, [x11, x12]
     and  x10, x10, #0x7fffffffffffffff
-    ldr  x10, [x13, x10, lsl #3]
     str  x10, [x14, x21, lsl #3]
     add  x11, x11, x9
     add  x21, x21, #1
@@ -985,44 +1013,53 @@ LFUNC rx_gather_task
 ENDF rx_gather_task
 
 // =============================================================================
-// rx_fixup(x0 rx, x1 keys, x2 tail inexact) — sorts the runs of rows whose
-// keys tie only by encoding: an inexact row with the following rows equal
-// on the composite bits up to the end of the inexact field; with dropped
-// keys (tail inexact), any rows with equal composite keys.
-//   x19 rx, x20 keys, x21 tail, x22 i, x23 j, x24 elements, x25 element
+// rx_fixup_task(x0 task) — sorts the runs of rows whose keys tie only by
+// encoding that start in the window [lo, hi) of the output (a run may end
+// beyond hi; one that started before lo belongs to the previous window): an
+// inexact row with the following rows equal on the composite bits up to the
+// end of the inexact field; with dropped keys (RX_TAIL), any rows with equal
+// composite keys.
+//   x19 rx, x20 hi, x21 tail, x22 i, x23 j, x24 elements, x25 element
 //   bytes, x26 bits compared, x27 n, x28 element i
 // =============================================================================
-LFUNC rx_fixup
+LFUNC rx_fixup_task
     ENTER 5
-    mov  x19, x0
-    mov  x20, x1
-    mov  x21, x2
+    ldp  x22, x20, [x0, #RT_LO]
+    ldr  x19, [x0, #RT_RX]
+    ldr  x21, [x19, #RX_TAIL]
     ldr  x24, [x19, #RX_TMP]
     ldr  x25, [x19, #RX_E]
     ldr  x27, [x19, #RX_N]
-    mov  x22, #0
-1:  cmp  x22, x27
+    cbz  x22, 1f                        // skip the rest of a run that
+    sub  x9, x22, #1                    // started in the previous window
+    madd x28, x9, x25, x24
+    bl   .Lfx_bits
+    cbz  x26, 1f
+0:  cmp  x22, x27
     b.hs 9f
-    madd x28, x22, x25, x24
-    ldr  x9, [x19, #RX_W]
-    ldr  x9, [x28, x9, lsl #3]
-    tbz  x9, #63, 2f
-    ldr  x9, [x19, #RX_INEXF]           // inexact: up to the field's end
-    mov  x10, #FD_SIZE
-    ldr  x11, [x19, #RX_FIELDS]
-    madd x9, x9, x10, x11
-    ldr  x26, [x9, #FD_END]
-    b    3f
-2:  add  x22, x22, #1
-    cbz  x21, 1b
-    sub  x22, x22, #1
-    ldr  x26, [x19, #RX_TBITS]          // tail: the whole key
+    madd x0, x22, x25, x24
+    mov  x1, x28
+    sub  x2, x26, #1
+    bl   .Lfx_eq
+    cbz  w0, 1f
+    add  x22, x22, #1
+    b    0b
+1:  cmp  x22, x20
+    b.hs 9f
+    tst  x22, #0xffff
+    b.ne 2f
+    bl   check_deadline
+2:  madd x28, x22, x25, x24
+    bl   .Lfx_bits
+    cbnz x26, 3f
+    add  x22, x22, #1
+    b    1b
 3:  add  x23, x22, #1
 4:  cmp  x23, x27
     b.hs 6f
     madd x0, x23, x25, x24
     mov  x1, x28
-    mov  x2, x26
+    sub  x2, x26, #1
     bl   .Lfx_eq
     cbz  w0, 6f
     add  x23, x23, #1
@@ -1030,15 +1067,33 @@ LFUNC rx_fixup
 6:  sub  x1, x23, x22
     cmp  x1, #2
     b.lo 7f
-    bl   check_deadline
     ldr  x9, [x19, #RX_OUT]
     add  x0, x9, x22, lsl #3
-    sub  x1, x23, x22
-    mov  x2, x20
+    ldr  x2, [x19, #RX_KEYS]
     bl   sort_rows
 7:  mov  x22, x23
     b    1b
 9:  LEAVE 5
+
+// local helper: x26 = 1 + key bits a run starting at element x28 compares
+// (inexact: up to the end of the inexact field; else with dropped keys:
+// all), 0 = no run starts there (clobbers x9-x11)
+.Lfx_bits:
+    ldr  x9, [x19, #RX_W]
+    ldr  x9, [x28, x9, lsl #3]
+    tbz  x9, #63, 1f
+    ldr  x9, [x19, #RX_INEXF]
+    mov  x10, #FD_SIZE
+    ldr  x11, [x19, #RX_FIELDS]
+    madd x9, x9, x10, x11
+    ldr  x26, [x9, #FD_END]
+    add  x26, x26, #1
+    ret
+1:  mov  x26, #0
+    cbz  x21, 2f
+    ldr  x26, [x19, #RX_TBITS]
+    add  x26, x26, #1
+2:  ret
 
 // local helper: w0 1 if keys x0 and x1 are equal on their top x2 bits
 // (clobbers x3-x6)
@@ -1065,6 +1120,6 @@ LFUNC rx_fixup
     ret
 8:  mov  w0, #0
     ret
-ENDF rx_fixup
+ENDF rx_fixup_task
 
     NOTE_GNU_STACK
