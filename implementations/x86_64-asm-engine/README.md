@@ -317,7 +317,7 @@ later); the process exits 0 once nothing is left.
 |---|---|---|
 | `mode` | `"row"` | the unoptimized baseline: the original tuple-at-a-time interpreter of `exec.S` (every operator evaluates `eval()` once per tuple and materialises its output tuple set) |
 | | `"vectorized"`, `"auto"` (default) | batch execution: operators run over batches of 1024 tuples and evaluate expressions as column vectors (`vec.S`) |
-| `threads` | int ≥ 1 (default 1, capped at 64) | parallel parts for scans, filters, projections, hash-join probes and aggregation, in both modes |
+| `threads` | int ≥ 1 (default: `--threads N`, else the online CPUs up to 16; 1 with `mode: "row"`; capped at 64) | parallel parts for scans, filters, projections, hash-join probes and aggregation, in both modes |
 | `join` | `"auto"` (default), `"hash"`, `"merge"`, `"nested_loop"` | algorithm of every equi-join (see below); joins without an equi-key conjunct and CROSS joins are always nested loops |
 | `optimize` | `true` (default) / `false` | logical optimizer rules (`optimizer.S`, `rule_*.S`) on / off |
 | `native` | bool | accepted and ignored (`native.kernels` is not claimed) |
@@ -379,7 +379,8 @@ also passes with `PQ_PAR_MIN=1`.
 * `par_for(n, fn, arg)` splits `[0, n)` into P = min(threads, ⌈n / 4096⌉)
   contiguous parts (environment variable `PQ_PAR_MIN` overrides the 4096 -
   used by the tests to force parallelism on tiny inputs); part 0 runs on
-  the calling thread, the others on fresh pthreads. Workers allocate from
+  the calling thread, the others on the persistent worker pool (see
+  "Latency optimization" below). Workers allocate from
   their own arenas (thread-local `t_arena`, kept until the request ends) and
   raise errors through a thread-local `jmp_buf`; `tmp_alloc`, `pq_raise`
   and the CAST formatting buffer are thread-aware, so the evaluator runs
@@ -388,16 +389,21 @@ also passes with `PQ_PAR_MIN=1`.
   thread (subquery results are cached in the shared AST).
 * Parallel operators: full scans with pushed-down filters (honouring
   row-group skipping), WHERE, projection (with per-part top-N), hash-join
-  probe (build is serial), nested-loop join, merge-join key evaluation,
-  aggregation, ORDER BY (each part sorts its range of (row, sequence)
-  pairs, then the sorted runs are merged pairwise in parallel rounds). Aggregation without GROUP BY merges
+  probe and build, nested-loop join, merge-join key evaluation,
+  aggregation, ORDER BY (normalized-key sample sort, `keysort.S`; when
+  the first key cannot be normalized, each part sorts its range of (row,
+  sequence) pairs and the sorted runs are merged pairwise in parallel
+  rounds). Aggregation without GROUP BY merges
   per-part partial states in part order (exact for INT64 / DECIMAL).
   GROUP BY is **hash-partitioned**: phase 1 computes key cells and hashes in
   parallel; in phase 2 part p owns the groups whose hash falls into
   partition p and aggregates their tuples in input order, so every group
   sees exactly the serial sequence of updates (identical FLOAT64 sums,
   DISTINCT aggregates work unchanged) and each part's hash table stays
-  small and cache-resident. With one part, grouping is a single fused pass.
+  small and cache-resident. With one part, grouping is a single fused pass;
+  with few groups and exactly mergeable states every part runs that fused
+  pass on its own range and the local groups are merged in part order
+  (see "Latency optimization").
 * Timeouts and cancellation are checked by every part once per batch.
 
 ### Joins (`exec.S`, `join.S`, `pexec.S`)
@@ -808,6 +814,164 @@ is taken in the logical layer.
   UNION ALL, FROM-less queries, PQCF row-group skipping with and without
   `mmap`): identical.
 
+## Latency optimization: the `analytics` workload
+
+Goal: lower the latency of `benchmarks/workloads/analytics.json` at scale
+1m without changing any result. Measured with `bench/workload.sh` (part of
+the repository):
+
+```
+python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pqdata --jobs 1
+sh implementations/x86_64-asm-engine/bench/workload.sh /tmp/pqdata/1m 5
+```
+
+The script loads the nine workload tables (explicit schemas from the
+generator), creates the two workload indexes, and sends every query once as
+a warm-up and then 5 times through one `bin/polyquery session`, with the
+engine's default options (rows requested as the workload says: `count` for
+q14 / q15, full rows otherwise). The table shows the median of the
+engine-reported `stats.elapsed_us` (parse → bind → plan → execute →
+serialise; client wall-clock times measured separately with a driver
+outside the repository differ by less than 0.3 ms). Machine: AMD Zen 5,
+32 CPUs. "Before" is the engine at the start of this task (commit
+`e912c3e`, kept in `bench/workload-before.txt`), "after" is this version
+(`bench/workload-after.txt`).
+
+| query | before (ms) | after (ms) | speed-up |
+|---|---:|---:|---:|
+| q01_filter_selective | 0.0 | 0.0 | - |
+| q02_filter_low_selectivity | 15.0 | 1.6 | 9.4x |
+| q03_range_filter_time | 0.6 | 0.7 | 0.9x |
+| q04_arith_aggregate | 13.1 | 1.4 | 9.4x |
+| q05_groupby_low_card | 10.7 | 1.2 | 8.9x |
+| q06_groupby_high_card | 16.1 | 4.6 | 3.5x |
+| q07_groupby_skewed | 33.5 | 5.9 | 5.7x |
+| q08_groupby_uniform_multi | 25.5 | 3.1 | 8.2x |
+| q09_distinct_count | 39.9 | 5.2 | 7.7x |
+| q10_join_customers | 49.7 | 6.1 | 8.1x |
+| q11_join_star | 25.6 | 4.4 | 5.8x |
+| q12_left_join_anti | 14.9 | 5.6 | 2.7x |
+| q13_sort_topn | 10.7 | 1.7 | 6.3x |
+| q14_sort_full_string | 423.0 | 13.9 | 30.4x |
+| q15_sort_multi_key | 354.4 | 16.8 | 21.1x |
+| q16_timeseries_hourly | 1.8 | 0.3 | 6.0x |
+| q17_wide_projection | 0.7 | 0.2 | 3.5x |
+| q18_nulls | 23.4 | 1.9 | 12.3x |
+| q19_cte_subquery | 23.3 | 7.0 | 3.3x |
+| q20_string_functions | 38.3 | 3.5 | 10.9x |
+| **total** | **1120.2** | **85.1** | **13.2x** |
+
+The result rows of every query (warm-up runs, `PQ_BENCH_OUT=FILE`) are
+byte-identical before and after.
+
+### What changed
+
+1. **Default parallelism** (`main.S` `resolve_threads`, `protocol.S`).
+   A query without the `threads` option used one thread. The default
+   (`--threads N`, implementation-defined per protocol.md) is now the number
+   of online CPUs, capped at 16 (`DEFAULT_THREADS_MAX`); `--threads N` sets
+   it explicitly. `mode: "row"` without `threads` keeps one thread, so the
+   row baseline is still the unoptimized single-threaded interpreter. All
+   modes return identical results (Phase 5 invariant), so this changes only
+   speed. Largest effect on scans, filters and aggregations (q02, q04, q18,
+   q20).
+2. **ORDER BY with normalized keys** (new module `keysort.S`, used in the
+   batch / parallel modes; the row baseline keeps the comparison sort).
+   The leading ORDER BY keys of each row are encoded as up to 6 u64 words
+   whose unsigned order is the ORDER BY order (sign-flipped integers, IEEE
+   bits of FLOAT64 with -0.0 = 0.0, a NULL indicator word for keys that
+   contain NULLs, STRING as 15 bytes + length in two words - exact while all
+   strings are shorter than 16 bytes, DESC by complement). Rows are sorted
+   by a parallel *sample sort*: per-part encoding, splitters from a sorted
+   sample, classification by binary search, a stable scatter into one bucket
+   per thread, and an MSD radix sort per bucket (constant bytes skipped,
+   insertion sort with inlined word comparisons for small buckets; the
+   NULL / long-string pre-scan is skipped for keys that are plain columns
+   without NULLs; such STRING keys are assumed short and a long value seen
+   while encoding just limits the key words trusted by the comparisons).
+   Ties fall back to `row_cmp` only when
+   the words are incomplete (wide DECIMAL, long strings, more than 6
+   words), then to the production sequence, so the order is exactly the
+   stable order of `sort_rows`. Parts accumulate their flags / masks /
+   bucket counters on their own stacks (sharing written cache lines between
+   threads made the first version 7x slower). q14 / q15: 423 / 354 ms →
+   14 / 17 ms.
+3. **GROUP BY with few groups** (`pexec.S` `lagg_ok`, `lagg_merge`). The
+   parallel GROUP BY partitioned groups by hash, so with a handful of groups
+   one thread did nearly all the work. When every aggregate state merges
+   exactly (no DISTINCT, no FLOAT64 SUM / AVG), every part now aggregates its
+   own range into a local table (`gfused_part`) and the local groups are
+   merged in part order, which yields the serial first-seen group order and
+   exactly the serial states. A part that sees more than 2048 groups stops
+   all parts and the hash-partitioned aggregation runs instead. q05 10.7 →
+   1.3 ms, q08 25.5 → 3.8 ms, q10 / q11 profit in their aggregation.
+4. **Parallel DISTINCT aggregates without GROUP BY** (`pexec.S`
+   `pexec_dsplit`). They used to force a single thread. Now the other
+   aggregates run in parallel on a copy of the plan, and every DISTINCT
+   aggregate is hash-partitioned: phase 1 evaluates and hashes its argument
+   per tuple in parallel, phase 2 lets partition p keep the values whose
+   hash falls into p (disjoint value sets) and aggregate each new value
+   once; the partition states are merged. COUNT always; SUM / AVG / MIN /
+   MAX unless the argument is FLOAT64 (summation order). The key phase also
+   counts the values per (part, partition), so a scatter phase can list each
+   partition's tuples (in tuple order) and a partition visits only its own
+   tuples (radix partitioning, `aux_new` / `dscat_part`); integer-like
+   values go into an open-addressing set instead of the generic chained
+   table. q09 39.9 → 5.2 ms.
+5. **Arena chunk pool** (`util.S` `chunk_get` / `chunk_put`). Released
+   arena chunks (request, worker and table arenas) are kept, up to 1 GiB,
+   and reused best-fit instead of being returned to malloc, which unmaps
+   large blocks; first touches of fresh pages cost several ms on the larger
+   queries. A reused chunk serves exactly the requested size, so memory
+   accounting and `--max-query-memory-mb` behave as before. A forked
+   `serve` child drops the inherited pool (`chunk_pool_forget`).
+6. **Parallel hash-join build** (`pexec.S` `pexec_build`). Phase 1
+   evaluates and hashes the build keys in parallel; phase 2 sizes the
+   bucket array up-front and every part inserts only the keys whose bucket
+   lies in its own bucket range (no locks, no shared chains), walking the
+   build tuples backwards so that each key's tuple chain lists the tuples in
+   input order, exactly like the serial build. Matters most for LEFT JOIN,
+   which must build on its (larger) right input (q12). When both join keys
+   have the same integer-like type (equality = bit equality), the build
+   instead radix-partitions the build tuples by a multiplicative hash and
+   every part fills an open-addressing sub-table (key → first tuple of the
+   key's chain, `FastTable` in `HT_FAST`); the probe then needs one
+   multiply and usually one slot instead of `hash_cells` / `cells_eq` /
+   `value_cmp` calls per probe tuple.
+7. **Hash-partitioned GROUP BY without sorting** (`pexec.S` `slot_order`,
+   `pexec_emit`). The groups of all partitions used to be concatenated and
+   sorted by their first tuple to restore the serial first-seen order; now
+   every new group is recorded in a per-tuple slot array (cleared in
+   parallel by the key phase) and a parallel compaction yields that order
+   directly. The output rows of the groups (`agg_finish`, HAVING,
+   projection) are then built in parallel parts and concatenated in order.
+   Like the DISTINCT aggregates, the partitions get their tuples through
+   radix partitioning instead of every partition scanning all hashes.
+   q07 / q19: 33.5 / 23.3 ms → 5.9 / 7.0 ms.
+8. **Persistent, pinned worker pool** (`par.S`). `par_run` used to create
+   and join a pthread per part on every call (a sort makes seven calls).
+   Workers now live as long as the process: a part is posted to its
+   worker's slot under a mutex and both sides poll briefly (`POOL_SPIN`)
+   before sleeping on condition variables. The calling thread and worker i
+   are bound to the first and the i-th CPU of the process's affinity mask
+   (on Linux all cores are numbered before their SMT siblings), which keeps
+   every part on its own core; unbound, the long-lived threads were often
+   scheduled onto shared cores and simple scans got slower. A thread's
+   vector scratch stack top is restored after every part (an error inside a
+   part could otherwise leak scratch space in a long-lived thread). A
+   forked `serve` child starts without workers and does not pin (its
+   queries run concurrently with other children).
+9. Smaller: per-part results are appended with one copy (`vec_append`,
+   `vec_reserve`) instead of element-wise pushes.
+
+Verification after each step: the conformance suite (660/660), `--modes`
+with `PQ_PAR_MIN=1` (3870/3870, forces parallel parts onto the tiny test
+tables), `--transport http`, the concurrency suite, `make test` (whose
+`modes_test.sh` now also covers full sorts on every key type, long and
+short strings, NULL ordering, DISTINCT aggregates and the default thread
+count), and full-result comparisons against the old engine on the 1m data
+for many sort / group / DISTINCT queries beyond the workload.
+
 ## Implementation-defined choices
 
 * `UNION` (without `ALL`, also `UNION DISTINCT`), `RIGHT` and `FULL` joins
@@ -881,7 +1045,7 @@ is taken in the logical layer.
 * Join reordering is not implemented: joins run in the order written (the
   hash join picks its build side by estimated cardinality). Merge joins sort
   both inputs (index order is not reused); the merge join's sort and merge,
-  hash builds, DISTINCT aggregates without GROUP BY, DISTINCT and the
+  hash builds, DISTINCT aggregates over FLOAT64 without GROUP BY, DISTINCT and the
   materialisation of derived tables / CTEs run single-threaded.
 * Blocks whose expressions contain subqueries run their operators on one
   thread (subquery results are cached in the shared plan). The `native`

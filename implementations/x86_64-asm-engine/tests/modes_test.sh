@@ -7,7 +7,9 @@
 # short-circuit AND / OR / CASE and NULL operands guarding errors, overflow,
 # mixed-scale decimals, dictionary strings, NULL group keys, DISTINCT
 # aggregates, outer-join padding, subqueries and UNION ALL compounds, and
-# wide (boxed 128-bit) DECIMAL columns (table w, CR-2).
+# wide (boxed 128-bit) DECIMAL columns (table w, CR-2), full sorts on
+# every key type (normalized-key sort) and hash-partitioned DISTINCT
+# aggregates.  '{}' runs with the default (automatic) thread count.
 set -u
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BIN="$DIR/bin/polyquery"
@@ -36,6 +38,17 @@ awk 'BEGIN {
     z = (i % 13 == 0) ? "" : sprintf("%d.%02d", i % 1000 - 500, i % 100);
     printf "%d,%s,%s,%s\n", i, x, y, z
   } }' > "$TMP/w.csv"
+
+# v: 2000 rows, a STRING column without NULLs mixing short values and long
+# ones (> 15 bytes) that share their first 15 bytes (normalized sort keys)
+awk 'BEGIN {
+  print "id,k,s";
+  for (i = 0; i < 2000; i++) {
+    if (i % 3 == 0) s = sprintf("aaaaaaaaaaaaaaa%d", i % 13);
+    else if (i % 3 == 1) s = sprintf("aaaa%d", i % 17);
+    else s = sprintf("aaaaaaaaaaaaaa%d", i % 4);
+    printf "%d,%d,%s\n", i, i % 7, s
+  } }' > "$TMP/v.csv"
 
 QUERIES=$(cat <<'Q'
 SELECT a, b FROM t WHERE b <> 0 AND a / b > 100
@@ -130,6 +143,27 @@ SELECT a FROM w WHERE y IN (SELECT y FROM w WHERE a < 10) AND x NOT IN (SELECT x
 SELECT a FROM w WHERE x > (SELECT AVG(z) FROM w) AND a < 100
 SELECT a FROM w WHERE y IN (SELECT x FROM w) OR z IN (SELECT y FROM w WHERE a < 50) OR a IN (SELECT y FROM w)
 SELECT a FROM w WHERE x NOT IN (SELECT z FROM w WHERE z > 0) AND a < 400
+SELECT a, s, f FROM t ORDER BY s DESC, f, a
+SELECT a, n, flag FROM t ORDER BY flag NULLS FIRST, n DESC, dt, a
+SELECT d, f, a FROM t ORDER BY f DESC, d, a
+SELECT s, b FROM t ORDER BY s
+SELECT dt, a FROM t ORDER BY dt DESC, a DESC
+SELECT a FROM t ORDER BY f * 0, a DESC
+SELECT a, s FROM t ORDER BY s || 'xxxxxxxxxxxxxxx' || CAST(a % 3 AS STRING), a
+SELECT a, s FROM t ORDER BY s, a DESC
+SELECT id, s FROM v ORDER BY s, id DESC
+SELECT s, k, id FROM v ORDER BY s DESC, k, id
+SELECT k, s FROM v ORDER BY k DESC, s, id
+SELECT a, s FROM t ORDER BY s || 'xxxxxxxxxx' DESC, a
+SELECT a, x, y FROM w ORDER BY y DESC NULLS LAST, x, a
+SELECT a, z FROM w ORDER BY z NULLS FIRST, a DESC
+SELECT b, COUNT(*) AS c FROM t GROUP BY b ORDER BY c DESC, b
+SELECT b, COUNT(*) FROM t GROUP BY b HAVING SUM(a) / (b + 4) > 1
+SELECT a % 700, COUNT(*), MAX(s) FROM t GROUP BY a % 700 HAVING COUNT(n) > 3
+SELECT COUNT(DISTINCT s), MIN(DISTINCT s), MAX(DISTINCT dt), AVG(DISTINCT d), SUM(DISTINCT n), COUNT(*), SUM(f) FROM t
+SELECT COUNT(DISTINCT f), SUM(DISTINCT f), MAX(DISTINCT flag) FROM t
+SELECT COUNT(DISTINCT 100 / (b + 4)) FROM t
+SELECT SUM(DISTINCT x), AVG(DISTINCT y), MAX(DISTINCT x), COUNT(DISTINCT z) FROM w
 Q
 )
 
@@ -137,6 +171,7 @@ run() { # options -> responses (stats stripped)
   {
     printf '{"op":"load","table":"t","format":"csv","path":"t.csv","schema":[{"name":"a","type":"INT64"},{"name":"b","type":"INT64"},{"name":"n","type":"INT64"},{"name":"d","type":"DECIMAL(8,2)"},{"name":"f","type":"FLOAT64"},{"name":"s","type":"STRING"},{"name":"dt","type":"DATE"},{"name":"flag","type":"BOOLEAN"}]}\n'
     printf '{"op":"load","table":"u","format":"csv","path":"u.csv"}\n'
+    printf '{"op":"load","table":"v","format":"csv","path":"v.csv","schema":[{"name":"id","type":"INT64"},{"name":"k","type":"INT64"},{"name":"s","type":"STRING"}]}\n'
     printf '{"op":"load","table":"w","format":"csv","path":"w.csv","schema":[{"name":"a","type":"INT64"},{"name":"x","type":"DECIMAL(38,10)"},{"name":"y","type":"DECIMAL(25,0)"},{"name":"z","type":"DECIMAL(10,2)"}]}\n'
     echo "$QUERIES" | while IFS= read -r q; do
       printf '{"op":"query","sql":"%s","options":%s}\n' "$(printf '%s' "$q" | sed 's/"/\\"/g')" "$1"
@@ -148,6 +183,7 @@ run '{"mode":"row","threads":1,"join":"nested_loop","optimize":false}' > "$TMP/b
 pass=0
 fail=0
 for opts in '{"mode":"row","threads":1}' \
+            '{}' \
             '{"mode":"vectorized","threads":1,"join":"merge"}' \
             '{"mode":"vectorized","threads":4,"join":"hash"}' \
             '{"mode":"row","threads":3,"join":"merge","optimize":false}' \

@@ -1,5 +1,52 @@
 # Working notes — x86-64 assembly engine
 
+## Current task: optimize latency of benchmarks/workloads/analytics.json (1m)
+
+Measure: `python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pqdata --jobs 1`
+(`--jobs` > 1 fails in this sandbox: no POSIX semaphores), then
+`sh bench/workload.sh /tmp/pqdata/1m 5` (median / best stats.elapsed_us per
+query; `PQ_BENCH_OUT=FILE` saves the result rows to diff two builds).
+Baseline numbers: `bench/workload-before.txt` (engine at e912c3e).
+Done so far (each verified: conformance 660/660, `--modes` with
+PQ_PAR_MIN=1 3870/3870, http 660/660, http_suite 19/19, make test, and
+byte-identical full results vs the baseline engine on 1m data):
+1. default `threads` = `--threads N` or online CPUs capped at 16 (mode
+   "row" without `threads` stays 1 thread = baseline) — main.S
+   resolve_threads, protocol.S.
+2. keysort.S: ORDER BY in batch modes via normalized u64 key words + MSD
+   radix per run + parallel merges (fallback: old comparison sort).
+3. pexec.S pexec_dsplit: hash-partitioned parallel DISTINCT aggregates
+   (single group only; FLOAT64 SUM/AVG/MIN/MAX DISTINCT stay serial).
+4. util.S arena chunk pool (reuse released chunks up to 1 GiB; fork child
+   calls chunk_pool_forget).
+5. GROUP BY local aggregation per part (pexec.S lagg_ok / lagg_merge,
+   gfused_part with PT_LMAX / PT_LABORT) for few groups.
+6. Parallel hash-join build (pexec.S pexec_build: bkey_part, bins_part
+   with disjoint bucket ranges; hooked in exec.S exec_from).
+7. Hash-partitioned GROUP BY: first-seen order from per-tuple slots
+   (slot_order), parallel emission (pexec_emit / emit_part), radix
+   partitioning of the tuples (aux_new, gkey_part counts, dsplit_bounds,
+   dscat_part) shared with the DISTINCT aggregates (dkey_part / dins_part,
+   open-addressing oset_* for integer-like values).
+8. par.S persistent worker pool (par_worker, pool_worker, spin then
+   condvar; threads pinned to CPUs of the affinity mask via pool_pin;
+   forked serve children: par_after_fork, no pinning). Unpinned, the pool
+   was slower on simple scans (threads shared cores) - keep the pinning.
+9. Hash join FastTable (pexec.S fins_part, fast_key_ok; probe_part
+   label 15) for integer-like keys of one type.
+10. keysort: no pre-scan for plain non-NULL columns; STRING keys assumed
+   short, KS_TW (trusted words) lowered when encoding sees a long value.
+Workload total: 1120 ms -> ~85 ms (README table, bench/workload.sh 7 reps,
+bench/workload-before.txt / workload-after.txt).
+Results of all 20 queries byte-identical to the baseline engine.
+Measuring: the machine is noisy (+-20% between runs); compare builds with
+interleaved A/B rounds (per-query minimum), not single runs.
+Ideas next: q14 / q15 sorts (~16 ms: ~5 ms scan + projection of 1M rows,
+then encode 3, classify 1.3, scatter 1.4, bucket MSD 3.5 ms; entries could
+drop the row pointer - rows[seq] - to shrink them), q19 / q07 (high-card
+GROUP BY ~6 ms), q10 / q12 joins (~6 ms), q03 index range scan (0.7 ms,
+was 0.6 with one thread).
+
 ## Status (Phase 5 + CR-1 UNION ALL + CR-3 plan separation + CR-2 DECIMAL(38))
 
 * CR-2 `DECIMAL` precision 38 is complete (capability `change.decimal38`,

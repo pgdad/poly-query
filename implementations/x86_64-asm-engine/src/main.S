@@ -5,6 +5,7 @@
  * INTERNAL_ERROR responses.
  */
 #include "pq.inc"
+#include "sql.inc"
 
     .section .note.GNU-stack, "", @progbits
 
@@ -14,11 +15,15 @@
 #define MODE_EXEC    4
 #define MODE_SERVE   5
 #define BIG_STACK    (1024*1024*1024)
+#define DEFAULT_THREADS_MAX 16      /* default threads per query: the online
+                                       CPUs, at most this many */
+#define SC_NPROCESSORS_ONLN 84
 
     .data
     .p2align 3
 opt_request: .quad 0
 cur_mode:    .quad 0
+opt_threads: .quad 0                /* --threads N, 0 = automatic */
 
     .section .rodata
 /* options taking a value; the value is stored by index in option handling */
@@ -135,7 +140,7 @@ ENDF parse_size
     .p2align 3
 /* targets of the numeric options by valopts index, from 5 (--threads) */
 serve_opt_vars:
-    .quad 0                         /* 5 --threads (validated only) */
+    .quad opt_threads               /* 5 --threads (0 = automatic) */
     .quad 0, 0, 0, 0                /* 6..9 handled separately */
     .quad g_srv_port                /* 10 */
     .quad g_srv_workers             /* 11 */
@@ -339,7 +344,8 @@ FUNC main
     jz m_bad_value
     jmp 2b
 
-20: /* dispatch */
+20: call resolve_threads
+    /* dispatch */
     mov %r14, cur_mode(%rip)
     cmp $MODE_VERSION, %r14d
     jne 21f
@@ -408,6 +414,30 @@ m_no_request:
     CSTR %rsi, ""
     call usage_error
 ENDF main
+
+/* resolve_threads(): default threads per query (g_default_threads):
+ * --threads N when given (N >= 1), else the online CPUs capped at
+ * DEFAULT_THREADS_MAX; never more than MAX_THREADS */
+FUNC resolve_threads
+    sub $8, %rsp
+    mov opt_threads(%rip), %rax
+    test %rax, %rax
+    jnz 1f
+    mov $SC_NPROCESSORS_ONLN, %edi
+    call sysconf
+    mov $DEFAULT_THREADS_MAX, %ecx
+    cmp %rcx, %rax
+    cmovg %rcx, %rax
+1:  mov $1, %ecx
+    cmp %rcx, %rax
+    cmovl %rcx, %rax
+    mov $MAX_THREADS, %ecx
+    cmp %rcx, %rax
+    cmova %rcx, %rax
+    mov %rax, g_default_threads(%rip)
+    add $8, %rsp
+    ret
+ENDF resolve_threads
 
 /* run_mode(): session loop or exec requests (mode in r14d of main is
  * re-derived from opt_request) */

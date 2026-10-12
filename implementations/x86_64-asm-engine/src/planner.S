@@ -66,12 +66,15 @@
     .data
     .p2align 3
     .globl g_opt_optimize, g_opt_indexes, g_opt_mode, g_opt_join, g_opt_threads
-    .globl g_exec_mode, g_exec_threads
+    .globl g_exec_mode, g_exec_threads, g_default_threads
 g_opt_optimize: .quad 1
 g_opt_indexes:  .quad 1
 g_opt_mode:     .quad MODE_AUTO /* MODE_*: requested execution model */
 g_opt_join:     .quad JOIN_AUTO /* JOIN_*: forced join algorithm */
 g_opt_threads:  .quad 1         /* requested worker threads */
+/* threads of a query without the `threads` option (not in mode "row"):
+ * --threads N, else the online CPUs up to DEFAULT_THREADS_MAX (main.S) */
+g_default_threads: .quad 1
 /* physical execution settings (phys_exec_settings) */
 g_exec_mode:    .quad MODE_VEC  /* MODE_ROW or MODE_VEC */
 g_exec_threads: .quad 1         /* worker threads for scans / aggregation */
