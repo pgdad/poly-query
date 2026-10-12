@@ -359,7 +359,7 @@ LFUNC ex_rows
     csinv x3, x3, xzr, cc               // saturate
     ldr  x0, [x22, #RS_ROWS]
     ldr  x1, [x22, #RS_NROWS]
-    bl   topn_rows
+    bl   topn_rows_par
     str  x0, [x22, #RS_NROWS]
     b    12f
 11: mov  x1, x20

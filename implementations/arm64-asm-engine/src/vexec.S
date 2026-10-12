@@ -23,6 +23,11 @@
 // references, row-layout tables) falls back to the row evaluator for each
 // selected position, so every expression is supported and both modes
 // compute identical values and raise identical errors.
+// An expression whose only column is one dictionary-encoded STRING column
+// (no subqueries, aggregates or PQ_SLEEP) is a function of the dictionary
+// code: it is evaluated by the row evaluator once per code (and once for
+// NULL) and the value is reused for every other row with that code
+// (dict_memo, per batch context, i.e. per task).
 // =============================================================================
 #include "pq.inc"
 #include "frame.inc"
@@ -43,6 +48,8 @@ cmp_masks:
     .text
 
 #define DC_ENTRIES  8                   // dictionary truth tables per batch ctx
+#define MC_ENTRIES  8                   // dictionary memos per batch ctx
+#define FN_PQ_SLEEP 4                   // functions.S: side effect
 
 // =============================================================================
 // vb_new(x0 EvalCtx*, x1 width) -> x0 VBatch*
@@ -152,8 +159,10 @@ FUNC veval
     mov  x0, x19
     bl   is_pure_const
     cbnz w0, .Lve_const
+1:  bl   .Lve_memo                      // one dictionary column: memo
+    cbnz w0, .Lve_ret
     ldr  w9, [x19, #N_KIND]
-1:  cmp  w9, #NK_BINARY
+    cmp  w9, #NK_BINARY
     b.eq .Lve_binary
     cmp  w9, #NK_UNARY
     b.eq .Lve_unary
@@ -453,6 +462,79 @@ FUNC veval
     add  x10, x10, #16
     b    3b
 
+    // local helper: the expression depends on one dictionary-encoded
+    // column only (dict_single) -> its value per code from the memo,
+    // evaluated by the row evaluator at the first row with the code.
+    // -> w0 1 if done (out filled), 0 if not applicable (uses x24-x28)
+.Lve_memo:
+    cmp  x22, #16                       // tiny selections: not worth it
+    b.hs 0f
+    mov  w0, #0
+    ret
+0:  stp  x29, x30, [sp, #-16]!
+    mov  x0, x19
+    mov  x1, x20
+    bl   dict_single
+    cbz  x0, 9f
+    mov  x24, x0                        // Column*
+    mov  x25, x1                        // rv
+    ldr  x26, [x24, #COL_DATA]          // DictCol*
+    ldr  x9, [x26, #DC_NDICT]
+    ldr  x10, [x2, #TBL_NROWS]
+    cmp  x10, x9, lsl #2                // worth it: ndict <= nrows / 4
+    b.lo 9f
+    mov  x0, x19
+    mov  x1, x20
+    mov  x2, x26
+    bl   dict_memo
+    mov  x27, x0                        // slots: [value][state]
+    mov  x28, #0
+1:  cmp  x28, x22
+    b.hs 8f
+    ldrh w9, [x21, x28, lsl #1]         // position
+    add  x28, x28, #1
+    ldr  x10, [x20, #VB_TUP]
+    ldr  x11, [x20, #VB_W]
+    mul  x11, x11, x9
+    add  x10, x10, x11, lsl #2          // its tuple
+    ldr  w12, [x10, x25, lsl #2]        // row id
+    ldr  x13, [x26, #DC_NDICT]          // NULL: slot ndict
+    cmn  w12, #1
+    b.eq 3f                             // ROW_NULL (LEFT JOIN padding)
+    ldr  x14, [x24, #COL_NULLS]
+    cbz  x14, 2f
+    lsr  x15, x12, #3
+    ldrb w15, [x14, x15]
+    and  w16, w12, #7
+    lsr  w15, w15, w16
+    tbnz w15, #0, 3f
+2:  ldr  x14, [x26, #DC_CODES]
+    ldr  w13, [x14, x12, lsl #2]
+3:  add  x14, x27, x13, lsl #4         // slot
+    ldr  x15, [x14, #8]                 // state: 0 new, 1 value, 2 NULL
+    cbnz x15, 4f
+    stp  x9, x14, [sp, #-16]!
+    ldr  x15, [x20, #VB_EC]
+    str  x10, [x15, #EC_TUPLE]
+    mov  x0, x19
+    mov  x1, x15
+    bl   eval
+    ldp  x9, x14, [sp], #16
+    add  x15, x1, #1
+    stp  x0, x15, [x14]
+4:  ldr  x0, [x14]
+    str  x0, [x23, x9, lsl #3]
+    sub  x15, x15, #1
+    add  x16, x23, #VEC_NULLS
+    strb w15, [x16, x9]
+    b    1b
+8:  mov  w0, #1
+    ldp  x29, x30, [sp], #16
+    ret
+9:  mov  w0, #0
+    ldp  x29, x30, [sp], #16
+    ret
+
     // local helper: STRING column (DICT encoding, column layout) compared
     // with a non-NULL literal: the comparison is evaluated once per
     // dictionary entry (dict_truth) and looked up by code per row.
@@ -669,7 +751,51 @@ FUNC veval
     b    1b
 
 .Lve_isnull:
-    ldr  x0, [x19, #N_A]
+    ldr  x0, [x19, #N_A]                // a column of this level in column
+    ldr  w9, [x0, #N_KIND]              // layout: only its NULL bitmap
+    cmp  w9, #NK_COL
+    b.ne 2f
+    ldr  w9, [x0, #N_OP]
+    cbnz w9, 2f
+    ldr  x25, [x0, #N_B]                // rv
+    ldr  x9, [x20, #VB_EC]
+    ldr  x9, [x9, #EC_TABLES]
+    ldr  x10, [x9, x25, lsl #3]
+    cbz  x10, 2f
+    ldr  w11, [x10, #TBL_LAYOUT]
+    cbnz w11, 2f
+    ldr  x11, [x10, #TBL_COLS]
+    ldr  x12, [x0, #N_VAL]
+    add  x11, x11, x12, lsl #5
+    ldr  x15, [x11, #COL_NULLS]
+    ldr  w24, [x19, #N_OP]              // 1 = IS NOT NULL
+    ldr  x9, [x20, #VB_TUP]
+    ldr  x10, [x20, #VB_W]
+    add  x9, x9, x25, lsl #2            // &tuple[0][rv]
+    lsl  x10, x10, #2
+    add  x17, x23, #VEC_NULLS
+    mov  x16, #0
+1:  cmp  x16, x22
+    b.hs .Lve_ret
+    ldrh w1, [x21, x16, lsl #1]
+    add  x16, x16, #1
+    madd x2, x1, x10, x9
+    ldr  w2, [x2]                       // row id
+    mov  w3, #1
+    cmn  w2, #1
+    b.eq 11f                            // ROW_NULL (LEFT JOIN padding)
+    mov  w3, #0
+    cbz  x15, 11f
+    lsr  x4, x2, #3
+    ldrb w3, [x15, x4]
+    and  w4, w2, #7
+    lsr  w3, w3, w4
+    and  w3, w3, #1
+11: eor  w3, w3, w24
+    str  x3, [x23, x1, lsl #3]
+    strb wzr, [x17, x1]
+    b    1b
+2:  ldr  x0, [x19, #N_A]
     mov  x1, x20
     mov  x2, x21
     mov  x3, x22
@@ -760,6 +886,193 @@ FUNC veval
     bl   vpool_put
     b    .Lve_ret
 ENDF veval
+
+// =============================================================================
+// dict_single(x0 Node*, x1 VBatch*) -> x0 Column* (0 if not applicable),
+// x1 range variable, x2 Table*
+// The expression's only column is a dictionary-encoded column of a
+// column-layout table of this query level, and it contains no subquery,
+// aggregate, group key, outer reference or PQ_SLEEP.
+//   x19 vb, x20 node; stack: [sp] rv (-1: none yet), [sp+8] column index,
+//   [sp+16] bad
+// =============================================================================
+LFUNC dict_single
+    ENTER 2
+    sub  sp, sp, #32
+    mov  x19, x1
+    mov  x20, x0
+    ldr  w9, [x20, #N_FLAGS]            // analysed before (the tree part
+    tbz  w9, #5, 1f                     // is cached in the node flags)
+    mov  x0, #0
+    tbz  w9, #6, 9f                     // NF_DSINGLE: walk for the column
+1:  mov  x9, #-1
+    stp  x9, xzr, [sp]
+    stp  xzr, xzr, [sp, #16]
+    mov  x0, x20
+    mov  x1, sp
+    bl   ds_walk
+    ldr  x9, [sp, #16]                  // not memoized: something else than
+    ldr  x10, [sp, #24]                 // one column, or nothing the row
+    cmp  x10, #0                        // evaluator would compute
+    csinc x9, x9, xzr, ne
+    str  x9, [sp, #16]
+    ldr  x10, [sp]                      // cache: NF_DSCAN, NF_DSINGLE
+    ldr  w11, [x20, #N_FLAGS]
+    orr  w11, w11, #NF_DSCAN
+    cbnz x9, 2f
+    tbnz x10, #63, 2f
+    orr  w11, w11, #NF_DSINGLE
+2:  str  w11, [x20, #N_FLAGS]
+    mov  x0, #0
+    ldr  x9, [sp, #16]
+    cbnz x9, 9f
+    ldp  x1, x10, [sp]                  // rv, column index
+    tbnz x1, #63, 9f                    // no column at all
+    ldr  x11, [x19, #VB_EC]
+    ldr  x11, [x11, #EC_TABLES]
+    ldr  x2, [x11, x1, lsl #3]          // Table*
+    cbz  x2, 9f
+    ldr  w12, [x2, #TBL_LAYOUT]
+    cbnz w12, 9f
+    ldr  x12, [x2, #TBL_COLS]
+    add  x12, x12, x10, lsl #5          // Column*
+    ldr  w13, [x12, #COL_ENC]
+    cmp  w13, #CENC_DICT
+    b.ne 9f
+    mov  x0, x12
+9:  add  sp, sp, #32
+    LEAVE 2
+ENDF dict_single
+
+// ds_walk(x0 Node*, x1 state: rv, column, bad, complex) — dict_single's
+// tree walk; "complex": a node veval leaves to the row evaluator (function,
+// CASE, LIKE, IN, BETWEEN, CAST, ||) — without one the vector kernels are
+// faster than the memo
+//   x19 node, x20 state, x21 child index, x22 children
+LFUNC ds_walk
+    ENTER 2
+    mov  x19, x0
+    mov  x20, x1
+    ldr  w9, [x19, #N_KIND]
+    cmp  w9, #NK_COL
+    b.eq 5f
+    cmp  w9, #NK_SUBQ
+    b.eq 8f
+    cmp  w9, #NK_EXISTS
+    b.eq 8f
+    cmp  w9, #NK_INSUB
+    b.eq 8f
+    cmp  w9, #NK_AGG
+    b.eq 8f
+    cmp  w9, #NK_GKEY
+    b.eq 8f
+    cmp  w9, #NK_OUTREF
+    b.eq 8f
+    cmp  w9, #NK_FUNC
+    b.ne 0f
+    ldr  w10, [x19, #N_OP]
+    and  w10, w10, #0xff
+    cmp  w10, #FN_PQ_SLEEP
+    b.eq 8f
+    b    7f
+0:  cmp  w9, #NK_CASE
+    b.eq 7f
+    cmp  w9, #NK_LIKE
+    b.eq 7f
+    cmp  w9, #NK_IN
+    b.eq 7f
+    cmp  w9, #NK_BETWEEN
+    b.eq 7f
+    cmp  w9, #NK_CAST
+    b.eq 7f
+    cmp  w9, #NK_BINARY
+    b.ne 1f
+    ldr  w10, [x19, #N_OP]
+    cmp  w10, #OP_CONCAT
+    b.ne 1f
+7:  mov  x10, #1                        // complex
+    str  x10, [x20, #24]
+1:  mov  x0, x19
+    bl   expr_nchildren
+    mov  x22, x0
+    mov  x21, #0
+2:  cmp  x21, x22
+    b.hs 9f
+    ldr  x9, [x20, #16]
+    cbnz x9, 9f
+    mov  x0, x19
+    mov  x1, x21
+    bl   expr_child_slot
+    add  x21, x21, #1
+    ldr  x0, [x0]
+    cbz  x0, 2b
+    mov  x1, x20
+    bl   ds_walk
+    b    2b
+5:  ldr  w10, [x19, #N_OP]              // column: outer reference?
+    cbnz w10, 8f
+    ldr  x10, [x19, #N_B]               // rv
+    ldr  x11, [x19, #N_VAL]             // column
+    ldr  x12, [x20]
+    tbnz x12, #63, 6f                   // the first column
+    cmp  x12, x10
+    b.ne 8f
+    ldr  x12, [x20, #8]
+    cmp  x12, x11
+    b.ne 8f
+    b    9f
+6:  stp  x10, x11, [x20]
+    b    9f
+8:  mov  x9, #1
+    str  x9, [x20, #16]
+9:  LEAVE 2
+ENDF ds_walk
+
+// dict_memo(x0 Node*, x1 VBatch*, x2 DictCol*) -> x0 slots ((ndict + 1) x
+// 16 bytes: value, state 0 = not yet evaluated / 1 = value / 2 = NULL; the
+// last slot is for NULL), cached per (node, dictionary) in the batch
+// context (MC_ENTRIES entries, replaced round robin)
+//   x19 node, x20 dict, x21 cache, x22 index
+LFUNC dict_memo
+    ENTER 3
+    mov  x19, x0
+    mov  x20, x2
+    ldr  x21, [x1, #VB_MCACHE]          // allocated on first use
+    cbnz x21, 0f
+    mov  x21, x1
+    mov  x0, #(MC_ENTRIES * 24 + 16)
+    bl   arena_zalloc
+    str  x0, [x21, #VB_MCACHE]
+    mov  x21, x0
+0:  mov  x22, #0
+1:  cmp  x22, #MC_ENTRIES
+    b.hs 2f
+    mov  x9, #24
+    madd x9, x22, x9, x21
+    add  x9, x9, #16
+    ldp  x10, x11, [x9]
+    cmp  x10, x19
+    ccmp x11, x20, #0, eq
+    b.ne 11f
+    ldr  x0, [x9, #16]
+    LEAVE 3
+11: add  x22, x22, #1
+    b    1b
+2:  ldr  x0, [x20, #DC_NDICT]
+    add  x0, x0, #1
+    lsl  x0, x0, #4
+    bl   arena_zalloc
+    ldr  x9, [x21]                      // insert (round robin)
+    add  x10, x9, #1
+    str  x10, [x21]
+    and  x9, x9, #(MC_ENTRIES - 1)
+    mov  x10, #24
+    madd x9, x9, x10, x21
+    add  x9, x9, #16
+    stp  x19, x20, [x9]
+    str  x0, [x9, #16]
+    LEAVE 3
+ENDF dict_memo
 
 // =============================================================================
 // dict_truth(x0 comparison Node*, x1 VBatch*, x2 DictCol*, x3 literal Str*,

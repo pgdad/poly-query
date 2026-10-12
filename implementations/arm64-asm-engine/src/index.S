@@ -598,18 +598,89 @@ LFUNC cmp_u32
 ENDF cmp_u32
 
 // rowvec_sort_unique(x0 RowVec*) — ascending row ids without duplicates
-//   x19 vec
+// (LSD radix sort, 11 bits per pass over the bits of the largest id;
+// qsort for short vectors)
+//   x19 vec, x20 n, x21 source, x22 destination, x23 histogram, x24 shift,
+//   x25 bits
 FUNC rowvec_sort_unique
-    ENTER 1
+    ENTER 4
     mov  x19, x0
-    ldr  x1, [x19, #RVEC_N]
-    cmp  x1, #2
+    ldr  x20, [x19, #RVEC_N]
+    cmp  x20, #2
     b.lo 9f
+    cmp  x20, #256
+    b.hs 10f
     ldr  x0, [x19, #RVEC_DATA]
+    mov  x1, x20
     mov  x2, #4
     ADR_L x3, cmp_u32
     bl   qsort
-    ldr  x9, [x19, #RVEC_DATA]
+    b    11f
+10: ldr  x21, [x19, #RVEC_DATA]
+    mov  x9, #0                         // bits of the largest id
+    mov  x10, #0
+12: ldr  w11, [x21, x10, lsl #2]
+    orr  x9, x9, x11
+    add  x10, x10, #1
+    cmp  x10, x20
+    b.lo 12b
+    clz  x9, x9
+    mov  x25, #64
+    sub  x25, x25, x9
+    lsl  x0, x20, #2
+    bl   arena_alloc
+    mov  x22, x0
+    mov  x0, #(2048 * 8)
+    bl   arena_alloc
+    mov  x23, x0
+    mov  x24, #0
+13: cmp  x24, x25                       // a pass per 11 bits
+    b.hs 17f
+    mov  x0, x23
+    mov  w1, #0
+    mov  x2, #(2048 * 8)
+    bl   memset
+    mov  x10, #0
+14: ldr  w11, [x21, x10, lsl #2]
+    lsr  w11, w11, w24
+    and  x11, x11, #2047
+    ldr  x12, [x23, x11, lsl #3]
+    add  x12, x12, #1
+    str  x12, [x23, x11, lsl #3]
+    add  x10, x10, #1
+    cmp  x10, x20
+    b.lo 14b
+    mov  x10, #0                        // starts
+    mov  x13, #0
+15: ldr  x12, [x23, x10, lsl #3]
+    str  x13, [x23, x10, lsl #3]
+    add  x13, x13, x12
+    add  x10, x10, #1
+    cmp  x10, #2048
+    b.lo 15b
+    mov  x10, #0                        // scatter (stable)
+16: ldr  w11, [x21, x10, lsl #2]
+    lsr  w12, w11, w24
+    and  x12, x12, #2047
+    ldr  x13, [x23, x12, lsl #3]
+    add  x14, x13, #1
+    str  x14, [x23, x12, lsl #3]
+    str  w11, [x22, x13, lsl #2]
+    add  x10, x10, #1
+    cmp  x10, x20
+    b.lo 16b
+    mov  x9, x21
+    mov  x21, x22
+    mov  x22, x9
+    add  x24, x24, #11
+    b    13b
+17: ldr  x0, [x19, #RVEC_DATA]          // back in the vector
+    cmp  x21, x0
+    b.eq 11f
+    mov  x1, x21
+    lsl  x2, x20, #2
+    bl   memcpy
+11: ldr  x9, [x19, #RVEC_DATA]
     ldr  x10, [x19, #RVEC_N]
     mov  x11, #1                        // write position
     mov  x12, #1                        // read position
@@ -625,7 +696,7 @@ FUNC rowvec_sort_unique
 2:  add  x12, x12, #1
     b    1b
 3:  str  x11, [x19, #RVEC_N]
-9:  LEAVE 1
+9:  LEAVE 4
 ENDF rowvec_sort_unique
 
 // =============================================================================

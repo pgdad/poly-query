@@ -431,6 +431,8 @@
 #define NF_STAR      4     // f(*)
 #define NF_CONST     8     // binder: expression is constant (no column refs)
 #define NF_PAREN     16    // parser: expression was parenthesised
+#define NF_DSCAN     32    // vexec.S: dict_single analysed this tree (cache)
+#define NF_DSINGLE   64    // vexec.S: ... and it has exactly one local column
 
 // Function ids (N_OP of bound NK_FUNC / NK_AGG)
 #define F_COUNT       1
@@ -709,7 +711,10 @@
 #define PN_PREDS    96     // scans: Pred** simple predicates of PN_EXPR
 #define PN_NPREDS   104    // u64
 #define PN_EST      112    // u64 estimated output rows (tuple operators)
-#define PN_SWAP     120    // u32 1 = hash join inputs swapped (build = left)
+#define PN_SWAP     120    // u32 hash join: 1 = inner join inputs swapped
+                           //   (build = left); 2 = LEFT join building on its
+                           //   (preserved) left input
+#define SWAP_LBUILD 2
 #define PN_RGSKIP   124    // u32 scans: row groups skipped (EXPLAIN)
 #define PN_MASK     128    // u64 scans / joins: bitmask of the range variables
                            //   of the subtree
@@ -793,6 +798,7 @@
 #define VB_POOL     32             // Vec** scratch vectors [VPOOL_MAX]
 #define VB_POOLN    40             // u64 vectors in use (stack discipline)
 #define VB_DCACHE   48             // dictionary truth tables (vexec.S)
+#define VB_MCACHE   56             // per-dictionary-code memos (vexec.S)
 #define VB_SIZE     64
 #define VPOOL_MAX   64
 #define VKEY_MAX    32             // most keys evaluated as vectors at once

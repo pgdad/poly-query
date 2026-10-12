@@ -1,5 +1,47 @@
 # Working notes (arm64-asm-engine)
 
+## Status (task: optimize latency, analytics workload @1m, session 1)
+- Final check (session 1, clean build): conformance 660/660, --modes
+  3870/3870 (also PQ_PARALLEL_MIN_ROWS=1), --transport http 660/660 (also
+  with PQ_PARALLEL_MIN_ROWS=1), http_suite 19/19 (also with
+  PQ_PARALLEL_MIN_ROWS=1), make test / lint pass; 8 concurrent HTTP clients
+  x 15 heavy parallel queries on the 1m data: all correct.
+- Definition of done met so far: conformance unchanged (660/660, --modes
+  3870/3870 also with PQ_PARALLEL_MIN_ROWS=1, http 660, http_suite 19/19),
+  `make build test` pass, README "Latency optimization" has the
+  before/after table (sum ~520 -> ~58 ms). Keep it current if numbers move.
+- Benchmark: `bench/workload.sh DATA_DIR [RUNS] [OPTIONS_JSON]` (data:
+  `python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pq1m
+  --jobs 1`, DATA_DIR = /tmp/pq1m/1m; PQ_ENGINE=path overrides the binary;
+  before: bench/workload-before.txt = commit e38bcc1 measured with the same
+  script). The script reads responses from a regular file: bash `read` on a
+  pipe is one syscall per byte (inflated wall times before that fix).
+- Done (see README "Latency optimization" for the design): mallopt tuning;
+  vectorized DISTINCT aggregates; parallel normalized-key radix sort and
+  parallel top-N (sort.S); worker pool + thread_boost (uclamp) +
+  pool_wake; hash-join fast paths, LEFT join build on smaller preserved
+  side (SWAP_LBUILD); dictionary memo in veval; gt_ids / inline
+  accumulation / partition-indexed merge in vagg.S; merge-join radix sort.
+- Tools: PQ_TRACE_PAR=1 (per par_run: fn, tasks, wall, max task, sum),
+  PQ_POOL_SPIN=us. Sampling profiler: /tmp/pqb/prof.sh style (gdb runs the
+  engine, a loop sends SIGINT; `pkill -f` patterns can kill your own shell —
+  use `pkill -x polyquery`). Diff harness idea: run the same queries under
+  several option sets (row / vectorized / threads 1,3,16 / merge /
+  optimize=false), compare exact output for ORDER BY, multisets otherwise.
+- Measuring: big/little cores and EAS make numbers noisy; use >= 9 runs
+  and medians; compare binaries with a git worktree of an older commit.
+- Later in session 1: parallel merge join (radix index sort + chunked
+  merge balanced by left+right work), parallel k-way merge for group order,
+  radix sort of index row ids (q03), IS NULL bitmap path, memo only for
+  "complex" trees. Merge join q10/q11: 70/107 -> 8/12 ms.
+- Gotcha: GNU as numeric labels: `01:` IS label `1` (b.ne 1f jumps to it).
+  Also local `9:` labels in helpers placed after a loop can capture an
+  earlier `b 9b` (vagg agg_task hang). Use distinct numbers.
+- Next candidates: q19 CTE (aggregate ~1.9 ms + merge ~1.2 ms + CTE
+  materialization); sort encode phase (string prefix loads) and projection
+  (48 MB of cells for q15); q11 vkey_cells materialization; hash-join
+  build is serial; row mode is the spec's baseline (left alone).
+
 ## Status (change CR-2 decimal38, session 1)
 - Conformance incl. changes/decimal38 (69/69): all phases 660/660,
   `--modes` 3870/3870, `--transport http` 660/660, http_suite 19/19;

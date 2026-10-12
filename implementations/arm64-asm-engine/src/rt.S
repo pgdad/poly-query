@@ -364,6 +364,31 @@ FUNC arena_zalloc
     ret
 ENDF arena_zalloc
 
+// rt_tune_malloc() — called once by main before any thread starts. Request
+// arenas are freed after every request; with glibc's defaults their chunks
+// are returned to the kernel (heap trimming, mmap for large blocks) and the
+// next request page-faults all of it in again, which costs as much as the
+// work on large inputs. A fixed mmap threshold (the maximum, 32 MiB), a 1 GiB
+// trim threshold and a 64 MiB top pad keep freed memory in the process.
+#define M_TRIM_THRESHOLD  -1
+#define M_TOP_PAD         -2
+#define M_MMAP_THRESHOLD  -3
+FUNC rt_tune_malloc
+    stp  x29, x30, [sp, #-16]!
+    mov  x29, sp
+    mov  w0, #M_MMAP_THRESHOLD
+    mov  w1, #(32 * 1024 * 1024)
+    bl   mallopt
+    mov  w0, #M_TRIM_THRESHOLD
+    mov  w1, #(1024 * 1024 * 1024)
+    bl   mallopt
+    mov  w0, #M_TOP_PAD
+    mov  w1, #(64 * 1024 * 1024)
+    bl   mallopt
+    ldp  x29, x30, [sp], #16
+    ret
+ENDF rt_tune_malloc
+
 // arena_free(x0 Arena*): release every chunk; the arena is empty afterwards.
 FUNC arena_free
     stp  x29, x30, [sp, #-32]!
