@@ -11,7 +11,7 @@
 # unit is the sandbox, so bench.py runs with --no-sandbox (recorded in the results together
 # with this script's name).
 #
-# Usage: [PQ_BENCH_SCALE=1m] arm_bench.sh <label> <lang>[,<lang>...] [bench.py args...]
+# Usage: [PQ_BENCH_SCALE=1m] [PQ_BENCH_REF=<commit>] arm_bench.sh <label> <lang>[,<lang>...] [bench.py args...]
 # Output: results/performance/<bench-id>/ (summary.json, raw.jsonl.gz, environment.json, arm-host.json)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -24,12 +24,14 @@ SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST")
 [[ -z $(git status --porcelain -- implementations benchmarks datasets tests) ]] ||
   echo "arm_bench: note: uncommitted changes are NOT included (snapshot = HEAD)" >&2
 IFS=, read -ra LANGS <<<"$ENGINES"
-PATHS=(benchmarks datasets/generators datasets/manifests tests/conformance tools/environment)
-for l in "${LANGS[@]}"; do PATHS+=("implementations/$l"); done
+# The harness always comes from HEAD; PQ_BENCH_REF selects the engine version (before/after).
+REF=$(git rev-parse "${PQ_BENCH_REF:-HEAD}")
+IMPL=(); for l in "${LANGS[@]}"; do IMPL+=("implementations/$l"); done
 "${SSH[@]}" "mkdir -p ~/.pq-stage/$JOB/repo"
-git archive --format=tar HEAD "${PATHS[@]}" ':(exclude)tests/conformance/hidden' |
-  "${SSH[@]}" "tar -C ~/.pq-stage/$JOB/repo -xf -"
-git rev-parse HEAD | "${SSH[@]}" "cat > ~/.pq-stage/$JOB/snapshot-commit"
+git archive --format=tar HEAD benchmarks datasets/generators datasets/manifests tests/conformance tools/environment \
+  ':(exclude)tests/conformance/hidden' | "${SSH[@]}" "tar -C ~/.pq-stage/$JOB/repo -xf -"
+git archive --format=tar "$REF" "${IMPL[@]}" | "${SSH[@]}" "tar -C ~/.pq-stage/$JOB/repo -xf -"
+echo "harness=$(git rev-parse HEAD) engines=$REF" | "${SSH[@]}" "cat > ~/.pq-stage/$JOB/snapshot-commit"
 
 "${SSH[@]}" "bash -s" -- "$JOB" "$CPUS" "$ENGINES" "$LABEL" "$SCALE" "$@" <<'REMOTE'
 set -uo pipefail
