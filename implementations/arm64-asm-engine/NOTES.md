@@ -16,9 +16,12 @@
   (storage.S val_copy_in) — same rule as strings.
 - PQCF: version 2 iff a wide column exists (pqcf_save scans the columns);
   reader pr_wide decodes PLAIN / RLE wide chunks.
-- Next: keep fuzzing (differential harness in /tmp/d38fuzz, outside the
-  repo, if it still exists): wide values in joins / grouping / indexes /
-  parallel aggregation / PQCF round trips under every option set.
+- Fuzzed (throw-away harness /tmp/d38fuzz, outside the repo; Python
+  decimal oracle): ~30k random queries x 9 option sets over CSV / JSON /
+  row layout / indexes / PQCF round trips — 0 failures after the join fix.
+  Open spec question (pre-existing, narrow too): INT64 -> DECIMAL promotion
+  overflow is raised even if the other operand is NULL.
+- Next: nothing required; possible: vectorized wide kernels (no boxing).
 
 ## Gotchas (CR-2)
 - Never compare wide payloads with `cmp x0, x1` (pointers): use cmp_typed /
