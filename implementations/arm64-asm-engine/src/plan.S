@@ -9,6 +9,8 @@
 // Stage 1, logical plan (lp_*): a direct translation of the bound query:
 //     Limit? <- Sort? <- Distinct? <- (Aggregate | Project)
 //            <- Filter(WHERE)? <- FROM tree (Scan / Join) | Values
+// or, for a UNION ALL compound (plan_union):
+//     Limit? <- Sort? <- UnionAll <- branch plans (each planned as above)
 // Stage 2, physical plan (pp_*), rewrites the logical plan in place:
 //   * predicate pushdown: WHERE conjuncts move to the lowest scan or join
 //     that covers the range variables they reference (never below the
@@ -79,6 +81,8 @@ ENDF plan_statement
 
 // plan_query(x0 BoundQuery*) -> x0 physical PlanNode*
 LFUNC plan_query
+    ldr  x9, [x0, #BQ_NUNION]
+    cbnz x9, plan_union
     ENTER 1
     mov  x19, x0
     TLS_ADDR x9, g_x_optimize           // logical rewrites (optimize.S)
@@ -92,6 +96,42 @@ LFUNC plan_query
     mov  x0, x19
     LEAVE 1
 ENDF plan_query
+
+// =============================================================================
+// plan_union(x0 compound BoundQuery*) -> x0 PlanNode*
+//   Limit? <- Sort? <- UnionAll(branch plans, in order)
+// Every branch is planned (and optimised) as a query of its own.
+//   x19 bq, x20 node, x21 index, x22 children array
+// =============================================================================
+LFUNC plan_union
+    ENTER 3
+    mov  x19, x0
+    mov  w0, #PO_UNION
+    mov  x1, x19
+    mov  x2, #0
+    bl   pn_new
+    mov  x20, x0
+    ldr  x9, [x19, #BQ_NUNION]
+    str  x9, [x20, #PN_NKIDS]
+    lsl  x0, x9, #3
+    bl   arena_zalloc
+    mov  x22, x0
+    str  x22, [x20, #PN_KIDS]
+    mov  x21, #0
+1:  ldr  x9, [x19, #BQ_NUNION]
+    cmp  x21, x9
+    b.hs 2f
+    ldr  x9, [x19, #BQ_UNION]
+    ldr  x0, [x9, x21, lsl #3]
+    bl   plan_query
+    str  x0, [x22, x21, lsl #3]
+    add  x21, x21, #1
+    b    1b
+2:  mov  x0, x19
+    mov  x1, x20
+    bl   lp_upper
+    LEAVE 3
+ENDF plan_union
 
 // =============================================================================
 // Logical plan
@@ -137,7 +177,20 @@ LFUNC lp_build
     mov  x2, x20
     bl   pn_new
     mov  x20, x0
-5:  ldr  x9, [x19, #BQ_NORDER]
+5:  mov  x0, x19
+    mov  x1, x20
+    bl   lp_upper
+    LEAVE 2
+ENDF lp_build
+
+// lp_upper(x0 BoundQuery*, x1 PlanNode*) -> x0 PlanNode*
+// Adds the Sort (ORDER BY) and Limit (LIMIT / OFFSET) nodes on top.
+//   x19 bq, x20 current top node
+LFUNC lp_upper
+    ENTER 2
+    mov  x19, x0
+    mov  x20, x1
+    ldr  x9, [x19, #BQ_NORDER]
     cbz  x9, 6f
     mov  w0, #PO_SORT
     mov  x1, x19
@@ -156,7 +209,7 @@ LFUNC lp_build
     mov  x20, x0
 7:  mov  x0, x20
     LEAVE 2
-ENDF lp_build
+ENDF lp_upper
 
 // lp_from(x0 BoundQuery*, x1 BoundFrom*) -> x0 PlanNode* (Scan / Join tree)
 //   x19 bq, x20 BoundFrom*, x21 node
@@ -788,7 +841,28 @@ FUNC plan_explain
     b.eq .Lpe_project
     cmp  w9, #PO_AGGREGATE
     b.eq .Lpe_project
+    cmp  w9, #PO_UNION
+    b.eq .Lpe_union
     b    .Lpe_children
+
+.Lpe_union:                             // "children": the branch plans
+    mov  x0, x19
+    ADR_L x1, ex_children
+    bl   buf_puts
+    mov  x22, #0
+8:  ldr  x9, [x20, #PN_NKIDS]
+    cmp  x22, x9
+    b.hs .Lpe_subplans
+    cbz  x22, 81f
+    mov  x0, x19
+    mov  w1, #','
+    bl   buf_putc
+81: ldr  x9, [x20, #PN_KIDS]
+    mov  x0, x19
+    ldr  x1, [x9, x22, lsl #3]
+    bl   plan_explain
+    add  x22, x22, #1
+    b    8b
 
 .Lpe_scan:
     ldr  w10, [x23, #RV_KIND]
@@ -1148,7 +1222,7 @@ ENDF pe_expr
 op_names:
     .quad s_unknown, s_scan, s_values, s_filter, s_join, s_hashjoin
     .quad s_nljoin, s_aggregate, s_project, s_distinct, s_sort, s_limit
-    .quad s_mergejoin
+    .quad s_mergejoin, s_union
 jt_names:
     .quad s_unknown, s_inner, s_left, s_cross
 s_unknown:   .asciz "Unknown"
@@ -1161,6 +1235,7 @@ s_join:      .asciz "Join"
 s_hashjoin:  .asciz "HashJoin"
 s_nljoin:    .asciz "NestedLoopJoin"
 s_mergejoin: .asciz "MergeJoin"
+s_union:     .asciz "UnionAll"
 s_aggregate: .asciz "Aggregate"
 s_project:   .asciz "Project"
 s_distinct:  .asciz "Distinct"

@@ -22,6 +22,7 @@
 //   Sort       qsort_r on the ORDER BY key cells
 //   Limit      OFFSET then LIMIT (applied before projection when the Limit
 //              sits directly on a Project)
+//   UnionAll   concatenation of the branch results (ex_union)
 // Join operators live in join.S.
 // =============================================================================
 #include "pq.inc"
@@ -299,6 +300,8 @@ LFUNC ex_rows
     b.eq .Lxr_sort
     cmp  w9, #PO_DISTINCT
     b.eq .Lxr_distinct
+    cmp  w9, #PO_UNION
+    b.eq .Lxr_union
     RAISE ERR_INTERNAL, "executor: unexpected plan node"
 .Lxr_project:
     mov  x0, x19
@@ -393,7 +396,68 @@ LFUNC ex_rows
     LEAVE 3
 1:  bl   distinct_rows
     LEAVE 3
+.Lxr_union:
+    mov  x0, x19
+    mov  x1, x20
+    bl   ex_union
+    LEAVE 3
 ENDF ex_rows
+
+// =============================================================================
+// ex_union(x0 PlanNode* UnionAll, x1 ctx) -> x0 ResultSet*
+// Runs every branch plan as a nested query level (its outer context is the
+// compound's ctx, matching the binder's levels) and concatenates the row
+// pointers in branch order. The binder made the branch column types equal to
+// the compound's, so the rows are used as they are (extra cells beyond
+// BQ_NOUT are ignored).
+//   x19 node, x20 ctx, x21 branch results array, x22 index, x23 total rows,
+//   x24 result set, x25 destination cursor
+// =============================================================================
+LFUNC ex_union
+    ENTER 4
+    mov  x19, x0
+    mov  x20, x1
+    ldr  x9, [x19, #PN_NKIDS]
+    lsl  x0, x9, #3
+    bl   arena_alloc
+    mov  x21, x0
+    mov  x22, #0
+    mov  x23, #0
+1:  ldr  x9, [x19, #PN_NKIDS]
+    cmp  x22, x9
+    b.hs 2f
+    bl   check_deadline
+    ldr  x9, [x19, #PN_KIDS]
+    ldr  x0, [x9, x22, lsl #3]
+    mov  x1, x20
+    bl   exec_plan
+    str  x0, [x21, x22, lsl #3]
+    ldr  x9, [x0, #RS_NROWS]
+    add  x23, x23, x9
+    add  x22, x22, #1
+    b    1b
+2:  ldr  x0, [x19, #PN_BQ]
+    mov  x1, x23
+    bl   rs_new
+    mov  x24, x0
+    str  x23, [x24, #RS_NROWS]
+    ldr  x25, [x24, #RS_ROWS]
+    mov  x22, #0
+3:  ldr  x9, [x19, #PN_NKIDS]
+    cmp  x22, x9
+    b.hs 4f
+    ldr  x9, [x21, x22, lsl #3]
+    ldr  x2, [x9, #RS_NROWS]
+    ldr  x1, [x9, #RS_ROWS]
+    lsl  x2, x2, #3
+    mov  x0, x25
+    add  x25, x25, x2
+    bl   memcpy
+    add  x22, x22, #1
+    b    3b
+4:  mov  x0, x24
+    LEAVE 4
+ENDF ex_union
 
 // =============================================================================
 // rs_new(x0 BoundQuery*, x1 row capacity) -> x0 ResultSet* (0 rows, row

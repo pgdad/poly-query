@@ -100,6 +100,8 @@ ENDF bind_query
 //   x19 ctx, x20 Query*, x21 BoundQuery*, x22/x23 bound LIMIT/OFFSET exprs
 // =============================================================================
 LFUNC bq_bind
+    ldr  x9, [x0, #Q_NUNION]            // UNION ALL compound
+    cbnz x9, bq_bind_union
     ENTER 3
     mov  x20, x0
     stp  x1, x2, [sp, #-32]!
@@ -199,6 +201,168 @@ LFUNC bq_bind
     mov  x0, x21
     LEAVE 3
 ENDF bq_bind
+
+// =============================================================================
+// bq_bind_union(x0 Query*, x1 parent ctx or 0, w2 hide parent rvs,
+//               x3 SubPlan Vec*, x4 visible CTE list) -> x0 BoundQuery*
+// Binds a UNION ALL compound (spec/changes/union-all.md). The compound is a
+// query level of its own without range variables: it owns the WITH clause
+// (visible to every branch), the branches are bound as nested levels below
+// it, and ORDER BY / LIMIT / OFFSET apply to the concatenated result.
+// Output column i: name of the first branch, common type of column i of all
+// branches (CASE rule, common_type); branch expressions of another type are
+// wrapped in an implicit CAST, so every branch produces rows of the
+// compound's types. ORDER BY may only name output columns (bind_order).
+//   x19 ctx, x20 Query*, x21 BoundQuery*, x22 branch BoundQuery** array,
+//   x23 branches, x24 branch index, x25 column index, w26 type, x27 nout,
+//   x28 OutCol*
+// =============================================================================
+LFUNC bq_bind_union
+    ENTER 5
+    mov  x20, x0
+    stp  x1, x2, [sp, #-32]!
+    stp  x3, x4, [sp, #16]
+    mov  x0, #BC_SIZE
+    bl   arena_zalloc
+    mov  x19, x0
+    ldp  x1, x2, [sp]
+    ldp  x3, x4, [sp, #16]
+    add  sp, sp, #32
+    str  x20, [x19, #BC_Q]
+    str  x1, [x19, #BC_PARENT]
+    str  w2, [x19, #BC_HIDE]
+    str  x3, [x19, #BC_SPV]
+    str  x4, [x19, #BC_CTES]
+    mov  x0, #BQ_SIZE
+    bl   arena_zalloc
+    mov  x21, x0
+    str  x21, [x19, #BC_BQ]
+    mov  x9, #-1
+    str  x9, [x21, #BQ_LIMIT]
+    mov  x0, #RV_SIZE                   // no range variables
+    bl   arena_zalloc
+    str  x0, [x19, #BC_RVS]
+    str  x0, [x21, #BQ_RVS]
+
+    mov  x0, x19                        // WITH (shared by all branches)
+    bl   bind_with
+
+    // --- branches -----------------------------------------------------------
+    ldr  x23, [x20, #Q_NUNION]
+    lsl  x0, x23, #3
+    bl   arena_zalloc
+    mov  x22, x0
+    str  x22, [x21, #BQ_UNION]
+    str  x23, [x21, #BQ_NUNION]
+    mov  x24, #0
+1:  cmp  x24, x23
+    b.hs 2f
+    ldr  x9, [x20, #Q_UNION]
+    ldr  x0, [x9, x24, lsl #3]
+    mov  x1, x19
+    mov  w2, #0
+    ldr  x3, [x19, #BC_SPV]
+    ldr  x4, [x19, #BC_CTES]
+    bl   bq_bind
+    str  x0, [x22, x24, lsl #3]
+    ldr  x9, [x0, #BQ_NOUT]             // same number of columns
+    ldr  x10, [x22]
+    ldr  x10, [x10, #BQ_NOUT]
+    cmp  x9, x10
+    b.ne .Lbq_u_ncols
+    add  x24, x24, #1
+    b    1b
+
+    // --- output columns: names of branch 0, common types --------------------
+2:  ldr  x9, [x22]
+    ldr  x27, [x9, #BQ_NOUT]
+    lsl  x0, x27, #5                    // OC_SIZE = 32
+    add  x0, x0, #OC_SIZE
+    bl   arena_zalloc
+    mov  x28, x0
+    str  x27, [x21, #BQ_NOUT]
+    str  x28, [x21, #BQ_OUT]
+    mov  x25, #0
+3:  cmp  x25, x27
+    b.hs 7f
+    ldr  x9, [x22]
+    ldr  x9, [x9, #BQ_OUT]
+    add  x9, x9, x25, lsl #5
+    ldr  w26, [x9, #OC_TYPE]
+    add  x10, x28, x25, lsl #5
+    ldr  x11, [x9, #OC_NAME]
+    str  x11, [x10, #OC_NAME]
+    ldr  w11, [x9, #OC_ALIASED]
+    str  w11, [x10, #OC_ALIASED]
+    mov  x24, #1
+4:  cmp  x24, x23
+    b.hs 5f
+    ldr  x9, [x22, x24, lsl #3]
+    ldr  x9, [x9, #BQ_OUT]
+    add  x9, x9, x25, lsl #5
+    mov  w0, w26
+    ldr  w1, [x9, #OC_TYPE]
+    bl   common_type
+    cmn  w0, #1
+    b.eq .Lbq_u_type
+    mov  w26, w0
+    add  x24, x24, #1
+    b    4b
+5:  add  x10, x28, x25, lsl #5
+    str  w26, [x10, #OC_TYPE]
+    mov  x24, #0                        // convert the branch columns
+6:  cmp  x24, x23
+    b.hs 61f
+    ldr  x9, [x22, x24, lsl #3]
+    ldr  x9, [x9, #BQ_OUT]
+    add  x9, x9, x25, lsl #5
+    ldr  w10, [x9, #OC_TYPE]
+    cmp  w10, w26
+    b.eq 60f
+    str  x9, [sp, #-16]!
+    ldr  x0, [x9, #OC_EXPR]
+    mov  w1, w26
+    bl   mk_cast                        // (NULL-typed: unchanged)
+    ldr  x9, [sp], #16
+    str  x0, [x9, #OC_EXPR]
+    ldr  w10, [x0, #N_TYPE]
+    str  w10, [x9, #OC_TYPE]
+60: add  x24, x24, #1
+    b    6b
+61: add  x25, x25, #1
+    b    3b
+
+    // --- ORDER BY (output columns only), LIMIT / OFFSET ---------------------
+7:  mov  x0, x19
+    bl   bind_order
+    mov  x0, x19
+    ldr  x1, [x20, #Q_LIMIT]
+    bl   bind_limit_expr
+    mov  x22, x0
+    mov  x0, x19
+    ldr  x1, [x20, #Q_OFFSET]
+    bl   bind_limit_expr
+    mov  x23, x0
+    mov  x0, x22
+    mov  x1, #-1
+    bl   eval_limit
+    str  x0, [x21, #BQ_LIMIT]
+    mov  x0, x23
+    mov  x1, #0
+    bl   eval_limit
+    str  x0, [x21, #BQ_OFFSET]
+
+    ldr  x9, [x19, #BC_CORR]
+    str  x9, [x21, #BQ_CORR]
+    mov  x0, x21
+    LEAVE 5
+.Lbq_u_ncols:
+    RAISE ERR_SEMANTIC, "each UNION ALL branch must have the same number of columns"
+.Lbq_u_type:
+    add  x9, x28, x25, lsl #5
+    ldr  x9, [x9, #OC_NAME]
+    RAISE_S ERR_TYPE, "UNION ALL branches have incompatible types for column ", x9
+ENDF bq_bind_union
 
 // check_bool(x0 bound Node*): WHERE / HAVING / ON conditions must be BOOLEAN
 // (or of the null type).   (leaf)
@@ -1714,7 +1878,8 @@ LFUNC bind_select
 ENDF bind_select
 
 // =============================================================================
-// bind_order(x0 ctx) — ORDER BY keys (semantics.md §6)
+// bind_order(x0 ctx) — ORDER BY keys (semantics.md §6). For a UNION ALL
+// compound only output column names and positions are accepted.
 //   x19 ctx, x20 BoundQuery*, x21 OrderItem cursor, x22 index, x23 count,
 //   x24 OrderKey array, x25 expr, x26 cell, x27 first matching output column,
 //   x28 output column index (name matching)
@@ -1776,7 +1941,9 @@ LFUNC bind_order
     tbz  x27, #63, 4f
     mov  x27, x28                       // first match
     b    2f
-4:  ldr  x9, [x20, #BQ_OUT]             // further match: must be the same expr
+4:  ldr  x9, [x20, #BQ_NUNION]          // compound: names must be unique
+    cbnz x9, .Lbo_ambiguous
+    ldr  x9, [x20, #BQ_OUT]             // further match: must be the same expr
     add  x10, x9, x27, lsl #5
     ldr  x0, [x10, #OC_EXPR]
     add  x10, x9, x28, lsl #5
@@ -1790,6 +1957,8 @@ LFUNC bind_order
     b    .Lbo_key
 
 .Lbo_expr:                              // expression over input columns
+    ldr  x9, [x20, #BQ_NUNION]          // (not in a UNION ALL compound)
+    cbnz x9, .Lbo_union
     mov  w9, #BF_AGG_OK
     str  w9, [x19, #BC_FLAGS]
     mov  x0, x19
@@ -1844,6 +2013,8 @@ LFUNC bind_order
     RAISE ERR_SEMANTIC, "ORDER BY position is out of range"
 .Lbo_distinct:
     RAISE ERR_SEMANTIC, "ORDER BY expression must appear in the select list of SELECT DISTINCT"
+.Lbo_union:
+    RAISE ERR_SEMANTIC, "ORDER BY of UNION ALL must be an output column name or position"
 .Lbo_ambiguous:
     ldr  x9, [x25, #N_NAME]
     RAISE_S ERR_SEMANTIC, "ambiguous ORDER BY column ", x9

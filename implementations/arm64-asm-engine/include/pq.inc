@@ -477,7 +477,12 @@
 #define Q_NCTES     104    // u64
 #define Q_LINE      112    // u32 position of SELECT
 #define Q_COL       116    // u32
-#define Q_SIZE      128
+#define Q_UNION     120    // compound query (UNION ALL): Query** branches
+                           //   (plain select cores) or 0; the compound
+                           //   record itself keeps only WITH / ORDER BY /
+                           //   LIMIT / OFFSET
+#define Q_NUNION    128    // u64 number of branches (>= 2) or 0
+#define Q_SIZE      144
 
 // Statement (64 bytes)
 #define ST_KIND     0      // u32 SK_*
@@ -531,7 +536,13 @@
 #define BQ_CORR     152    // u64 1 = references an enclosing query (correlated)
 #define BQ_SPV      160    // root query only: Vec* of every SubPlan of the
                            //   statement ([0] n, [8] cap, [16] SubPlan**)
-#define BQ_SIZE     176
+#define BQ_UNION    168    // compound (UNION ALL): BoundQuery** branches or 0.
+                           //   The compound query level has no range
+                           //   variables; BQ_OUT holds the names (first
+                           //   branch) and common types, BQ_ORDER /
+                           //   BQ_LIMIT / BQ_OFFSET apply to the whole result
+#define BQ_NUNION   176    // u64 number of branches or 0
+#define BQ_SIZE     192
 
 #define ROW_NULL    0xffffffff
 
@@ -670,6 +681,12 @@
 #define PO_SORT       10
 #define PO_LIMIT      11
 #define PO_MERGEJOIN  12   // physical: sort-merge on the equi keys + residual
+#define PO_UNION      13   // UNION ALL: concatenates the result rows of the
+                           //   branch plans PN_KIDS[0..PN_NKIDS) (EXPLAIN
+                           //   "UnionAll")
+// PO_UNION reuses the join key fields for its children
+#define PN_NKIDS    PN_NKEYS
+#define PN_KIDS     PN_LKEYS
 
 // Execution options of the current request (Phase 5, protocol.md §5.2),
 // thread-local settings defined in exec.S:
