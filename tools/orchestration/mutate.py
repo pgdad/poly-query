@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import shutil
@@ -26,8 +27,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 EXT = {"java": [".java"], "clojure": [".clj"], "rust": [".rs"], "python": [".py"], "go": [".go"],
-       "common-lisp": [".lisp"]}
-COMMENT = {"java": "//", "clojure": ";", "rust": "//", "python": "#", "go": "//", "common-lisp": ";"}
+       "common-lisp": [".lisp"], "x86_64-asm-engine": [".S", ".inc"], "arm64-asm-engine": [".S", ".inc"]}
+# In preprocessed assembly (.S) lines starting with '#' are cpp directives or comments: never mutated.
+COMMENT = {"java": "//", "clojure": ";", "rust": "//", "python": "#", "go": "//", "common-lisp": ";",
+           "x86_64-asm-engine": ("#", "//"), "arm64-asm-engine": ("//", "#")}
 
 # (name, regex, replacement) — applied to one occurrence in one code line.
 OPS = [
@@ -45,6 +48,23 @@ OPS = [
     ("lisp_gt_ge", r"\(>\s", "(>= "),
     ("lisp_nil_t", r"\bnil\b", "t"),
 ]
+# The assembly equivalents of the same operator classes (relational flips on conditional branches,
+# equality flip, off-by-one in an integer immediate); the high-level patterns above would hit
+# operands and labels in assembly.
+ASM_OPS = {
+    "x86_64-asm-engine": [
+        ("rel_lt_le", r"\bj(l|b)\b", r"j\1e"), ("rel_le_lt", r"\bj(l|b)e\b", r"j\1"),
+        ("rel_gt_ge", r"\bj(g|a)\b", r"j\1e"), ("rel_ge_gt", r"\bj(g|a)e\b", r"j\1"),
+        ("eq_ne", r"\bje\b", "jne"), ("int_off_by_one", r"\$1\b", "$2"),
+    ],
+    "arm64-asm-engine": [
+        ("rel_lt_le", r"\bb\.lt\b", "b.le"), ("rel_lt_le_u", r"\bb\.lo\b", "b.ls"),
+        ("rel_le_lt", r"\bb\.le\b", "b.lt"), ("rel_le_lt_u", r"\bb\.ls\b", "b.lo"),
+        ("rel_gt_ge", r"\bb\.gt\b", "b.ge"), ("rel_gt_ge_u", r"\bb\.hi\b", "b.hs"),
+        ("rel_ge_gt", r"\bb\.ge\b", "b.gt"), ("rel_ge_gt_u", r"\bb\.hs\b", "b.hi"),
+        ("eq_ne", r"\bb\.eq\b", "b.ne"), ("int_off_by_one", r"#1\b", "#2"),
+    ],
+}
 
 
 def candidates(lang: str, base: Path, rng: random.Random, n: int) -> list[tuple[Path, int, str, re.Match]]:
@@ -57,14 +77,16 @@ def candidates(lang: str, base: Path, rng: random.Random, n: int) -> list[tuple[
             s = line.strip()
             if not s or s.startswith(COMMENT[lang]) or s.startswith(("*", "/*", '"', "'")):
                 continue
-            for name, rx, rep in OPS:
+            for name, rx, rep in ASM_OPS.get(lang, OPS):
                 for m in re.finditer(rx, line):
-                    pool.append((f, i, name, m, rep))
+                    pool.append((f, i, name, m, m.expand(rep) if lang in ASM_OPS else rep))
     rng.shuffle(pool)
     return pool[:n]
 
 
-SANDBOX = ROOT / "tools/orchestration/sandbox.sh"
+# On the ARM host the same procedure runs from a staged repository copy with that host's sandbox
+# (tools/remote/arm_mutate.sh sets both variables).
+SANDBOX = Path(os.environ.get("PQ_MUT_SANDBOX", ROOT / "tools/orchestration/sandbox.sh"))
 
 
 def run(cmd: list[str], cwd: Path, timeout: int = 1800) -> subprocess.CompletedProcess:
@@ -87,7 +109,7 @@ def main() -> int:
     a = ap.parse_args()
     rng = random.Random(a.seed)
     src = ROOT / "implementations" / a.lang
-    base = Path("/srv/polyquery/mutants")
+    base = Path(os.environ.get("PQ_MUT_BASE", "/srv/polyquery/mutants"))
     base.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix=f"pqmut-{a.lang}-", dir=base))
     shutil.copytree(ROOT / "tests", work / "tests")

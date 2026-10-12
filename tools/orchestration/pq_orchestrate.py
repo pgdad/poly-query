@@ -170,6 +170,8 @@ def prepare(lang: str, task: str, track: str, attempt: int, base_ref: str | None
     if task not in tasks:
         raise SystemExit(f"unknown task {task}")
     t, L = tasks[task], langs[lang]
+    # Language-specific wording for a shared task (e.g. assembly engines have no native-kernel option).
+    t = {**t, **L.get("task_overrides", {}).get(task, {})}
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_id = f"{track.lower()}-{task}-{lang}-a{attempt}" + (f"-s{session}" if session > 1 or continues else "") + f"-{stamp}"
     rd = run_dir(run_id)
@@ -270,6 +272,7 @@ def _prepare_continuation(run_id: str, lang: str, task: str, track: str, attempt
     tasks = json.loads((PROMPTS / "tasks.json").read_text())
     langs = json.loads((PROMPTS / "languages.json").read_text())
     t, L = tasks[task], langs[lang]
+    t = {**t, **L.get("task_overrides", {}).get(task, {})}
     old = (ws / "TASK.md").read_text()
     # Re-render from the same template so only the continuation note differs from session 1.
     template = (PROMPTS / t.get("template", L["template"])).read_text()
