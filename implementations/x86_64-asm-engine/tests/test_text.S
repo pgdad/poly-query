@@ -795,7 +795,9 @@ FUNC main
     TTYPE "decimal(5)", 0x504, 0
     TTYPE " DECIMAL (18,18) ", 0x121204, 0
     TTYPE "decimal(1,0)", 0x104, 0
-    TTYPE "decimal(19,2)", 0, 2
+    TTYPE "decimal(19,2)", 0x21304, 0
+    TTYPE "decimal(38,38)", 0x262604, 0
+    TTYPE "decimal(39,2)", 0, 2
     TTYPE "decimal(3,4)", 0, 2
     TTYPE "decimal(0)", 0, 2
     TTYPE "decimal(99999999999999999999,2)", 0, 2
