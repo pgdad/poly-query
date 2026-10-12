@@ -842,24 +842,24 @@ outside the repository differ by less than 0.3 ms). Machine: AMD Zen 5,
 | q01_filter_selective | 0.0 | 0.0 | - |
 | q02_filter_low_selectivity | 15.0 | 1.6 | 9.4x |
 | q03_range_filter_time | 0.6 | 0.7 | 0.9x |
-| q04_arith_aggregate | 13.1 | 1.5 | 8.7x |
+| q04_arith_aggregate | 13.1 | 1.4 | 9.4x |
 | q05_groupby_low_card | 10.7 | 1.2 | 8.9x |
-| q06_groupby_high_card | 16.1 | 4.5 | 3.6x |
-| q07_groupby_skewed | 33.5 | 6.5 | 5.2x |
+| q06_groupby_high_card | 16.1 | 4.6 | 3.5x |
+| q07_groupby_skewed | 33.5 | 5.9 | 5.7x |
 | q08_groupby_uniform_multi | 25.5 | 3.1 | 8.2x |
 | q09_distinct_count | 39.9 | 5.2 | 7.7x |
 | q10_join_customers | 49.7 | 6.1 | 8.1x |
-| q11_join_star | 25.6 | 4.7 | 5.4x |
-| q12_left_join_anti | 14.9 | 5.7 | 2.6x |
-| q13_sort_topn | 10.7 | 1.8 | 5.9x |
-| q14_sort_full_string | 423.0 | 14.9 | 28.4x |
-| q15_sort_multi_key | 354.4 | 17.0 | 20.8x |
+| q11_join_star | 25.6 | 4.4 | 5.8x |
+| q12_left_join_anti | 14.9 | 5.6 | 2.7x |
+| q13_sort_topn | 10.7 | 1.7 | 6.3x |
+| q14_sort_full_string | 423.0 | 13.9 | 30.4x |
+| q15_sort_multi_key | 354.4 | 16.8 | 21.1x |
 | q16_timeseries_hourly | 1.8 | 0.3 | 6.0x |
 | q17_wide_projection | 0.7 | 0.2 | 3.5x |
 | q18_nulls | 23.4 | 1.9 | 12.3x |
-| q19_cte_subquery | 23.3 | 6.8 | 3.4x |
-| q20_string_functions | 38.3 | 3.3 | 11.6x |
-| **total** | **1120.2** | **87.0** | **12.9x** |
+| q19_cte_subquery | 23.3 | 7.0 | 3.3x |
+| q20_string_functions | 38.3 | 3.5 | 10.9x |
+| **total** | **1120.2** | **85.1** | **13.2x** |
 
 The result rows of every query (warm-up runs, `PQ_BENCH_OUT=FILE`) are
 byte-identical before and after.
@@ -887,13 +887,15 @@ byte-identical before and after.
    per thread, and an MSD radix sort per bucket (constant bytes skipped,
    insertion sort with inlined word comparisons for small buckets; the
    NULL / long-string pre-scan is skipped for keys that are plain columns
-   without NULLs). Ties fall back to `row_cmp` only when
+   without NULLs; such STRING keys are assumed short and a long value seen
+   while encoding just limits the key words trusted by the comparisons).
+   Ties fall back to `row_cmp` only when
    the words are incomplete (wide DECIMAL, long strings, more than 6
    words), then to the production sequence, so the order is exactly the
    stable order of `sort_rows`. Parts accumulate their flags / masks /
    bucket counters on their own stacks (sharing written cache lines between
    threads made the first version 7x slower). q14 / q15: 423 / 354 ms →
-   15 / 17 ms.
+   14 / 17 ms.
 3. **GROUP BY with few groups** (`pexec.S` `lagg_ok`, `lagg_merge`). The
    parallel GROUP BY partitioned groups by hash, so with a handful of groups
    one thread did nearly all the work. When every aggregate state merges
@@ -945,7 +947,7 @@ byte-identical before and after.
    projection) are then built in parallel parts and concatenated in order.
    Like the DISTINCT aggregates, the partitions get their tuples through
    radix partitioning instead of every partition scanning all hashes.
-   q07 / q19: 33.5 / 23.3 ms → 6.5 / 6.8 ms.
+   q07 / q19: 33.5 / 23.3 ms → 5.9 / 7.0 ms.
 8. **Persistent, pinned worker pool** (`par.S`). `par_run` used to create
    and join a pthread per part on every call (a sort makes seven calls).
    Workers now live as long as the process: a part is posted to its

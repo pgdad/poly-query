@@ -32,7 +32,12 @@ byte-identical full results vs the baseline engine on 1m data):
    condvar; threads pinned to CPUs of the affinity mask via pool_pin;
    forked serve children: par_after_fork, no pinning). Unpinned, the pool
    was slower on simple scans (threads shared cores) - keep the pinning.
-Workload total: 1120 ms -> ~91 ms (README table, bench/workload.sh 7 reps).
+9. Hash join FastTable (pexec.S fins_part, fast_key_ok; probe_part
+   label 15) for integer-like keys of one type.
+10. keysort: no pre-scan for plain non-NULL columns; STRING keys assumed
+   short, KS_TW (trusted words) lowered when encoding sees a long value.
+Workload total: 1120 ms -> ~85 ms (README table, bench/workload.sh 7 reps,
+bench/workload-before.txt / workload-after.txt).
 Results of all 20 queries byte-identical to the baseline engine.
 Measuring: the machine is noisy (+-20% between runs); compare builds with
 interleaved A/B rounds (per-query minimum), not single runs.
