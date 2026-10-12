@@ -116,6 +116,10 @@ SELECT w.a, v.a FROM w JOIN w v ON v.y = w.y WHERE w.a < 100 ORDER BY w.a, v.a
 SELECT w.a, v.a FROM w LEFT JOIN w v ON v.x = w.x AND v.a > w.a WHERE w.a < 200
 SELECT w.a, t.a FROM w JOIN t ON t.d = w.z WHERE w.a < 300
 SELECT w.a, t.a FROM w JOIN t ON t.a = w.y WHERE w.a < 300
+SELECT w.a, t.a FROM w JOIN t ON w.y = t.a + 70000000000 WHERE t.a < 300
+SELECT t.a, u.name FROM t JOIN u ON t.d = u.k WHERE t.a < 2000
+SELECT t.a, u.name FROM u LEFT JOIN t ON u.k = t.d AND t.a < 2000
+SELECT w.a, t.a FROM w JOIN t ON t.d = w.x WHERE w.a < 300
 SELECT a, x FROM w WHERE x > 0 AND a < 30 UNION ALL SELECT a, d FROM t WHERE a < 20
 SELECT ROUND(x, 2), ROUND(x, -3), FLOOR(x), CEIL(x), CAST(x AS FLOAT64), CAST(y AS STRING), CAST(z AS DECIMAL(30,1)) FROM w WHERE a < 100
 SELECT CAST(x AS INT) FROM w

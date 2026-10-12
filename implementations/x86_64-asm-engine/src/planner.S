@@ -1032,6 +1032,58 @@ FUNC side_of
 9:  LEAVE
 ENDF side_of
 
+/* equi_key_type(a rdi, b rsi) -> eax 0 if `a = b` cannot be a hash / merge
+ * join key, 1 if both sides share one representation (same kind and scale,
+ * DECIMALs both narrow or both wide), 2 if both are compared as the type in
+ * edx: INT64 with DECIMAL(p,s) (19 + s <= 38), or a narrow and a wide
+ * DECIMAL of one scale, become DECIMAL(38,s) - an exact cast */
+FUNC equi_key_type
+    push %rbx
+    push %r12
+    push %r13
+    mov N_TYPE(%rdi), %ebx
+    mov N_TYPE(%rsi), %r12d
+    mov %ebx, %ecx
+    xor %r12d, %ecx
+    test $0xff00ff, %ecx
+    jnz 5f
+    mov %ebx, %edi                  /* same kind and scale */
+    call dec_is_wide
+    mov %eax, %r13d
+    mov %r12d, %edi
+    call dec_is_wide
+    cmp %eax, %r13d
+    mov $1, %eax
+    je 9f
+    jmp 6f                          /* narrow with wide */
+5:  movzbl %bl, %eax                /* INT64 with DECIMAL */
+    movzbl %r12b, %ecx
+    cmp $T_INT, %eax
+    jne 51f
+    cmp $T_DEC, %ecx
+    jne 8f
+    mov %r12d, %ebx
+    jmp 6f
+51: cmp $T_DEC, %eax
+    jne 8f
+    cmp $T_INT, %ecx
+    jne 8f
+6:  mov %ebx, %edx                  /* DECIMAL(38, s) of the decimal side */
+    and $0xff0000, %edx
+    mov %edx, %ecx
+    shr $16, %ecx
+    cmp $19, %ecx
+    ja 8f
+    or $MKDEC(38, 0), %edx
+    mov $2, %eax
+    jmp 9f
+8:  xor %eax, %eax
+9:  pop %r13
+    pop %r12
+    pop %rbx
+    ret
+ENDF equi_key_type
+
 /* find_equi(fp rdi, expr rsi): first conjunct `left = right` of the join
  * condition usable as a hash / merge join key; sets FP_LKEY/FP_RKEY */
 FUNC find_equi
@@ -1058,22 +1110,17 @@ FUNC find_equi
     jmp 9f
 1:  cmp $B_EQ, %eax
     jne 9f
-    /* same kind and scale on both sides */
+    mov N_A(%r12), %rdi
+    mov N_B(%r12), %rsi
+    call equi_key_type
+    test %eax, %eax
+    jz 9f
+    mov %eax, %r14d                 /* 1, or 2: compare as DECIMAL(38,s) */
+    mov %edx, %r15d
     mov N_A(%r12), %rax
-    mov N_TYPE(%rax), %ecx
+    mov %rax, 0(%rsp)               /* left key as written */
     mov N_B(%r12), %rax
-    xor N_TYPE(%rax), %ecx
-    test $0xff00ff, %ecx
-    jnz 9f
-    mov N_A(%r12), %rax             /* DECIMAL: one representation (narrow */
-    mov N_TYPE(%rax), %edi          /* i64 or wide box) on both sides */
-    call dec_is_wide
-    mov %eax, 0(%rsp)
-    mov N_B(%r12), %rax
-    mov N_TYPE(%rax), %edi
-    call dec_is_wide
-    cmp 0(%rsp), %eax
-    jne 9f
+    mov %rax, 8(%rsp)               /* right key */
     mov N_A(%r12), %rdi
     mov FP_RLO(%rbx), %rsi
     mov FP_RHI(%rbx), %rdx
@@ -1087,18 +1134,32 @@ FUNC find_equi
     jne 2f
     cmp $2, %eax
     jne 9f
-    mov N_A(%r12), %rax
-    mov %rax, FP_LKEY(%rbx)
-    mov N_B(%r12), %rax
-    mov %rax, FP_RKEY(%rbx)
-    jmp 9f
+    jmp 3f
 2:  cmp $2, %r13d
     jne 9f
     cmp $1, %eax
     jne 9f
-    mov N_B(%r12), %rax
+    mov 0(%rsp), %rax               /* written right = left */
+    mov 8(%rsp), %rcx
+    mov %rcx, 0(%rsp)
+    mov %rax, 8(%rsp)
+3:  cmp $2, %r14d
+    jne 4f
+    mov 0(%rsp), %rdi               /* exact common key type */
+    cmp N_TYPE(%rdi), %r15d
+    je 31f
+    mov %r15d, %esi
+    call wrap_cast
+    mov %rax, 0(%rsp)
+31: mov 8(%rsp), %rdi
+    cmp N_TYPE(%rdi), %r15d
+    je 4f
+    mov %r15d, %esi
+    call wrap_cast
+    mov %rax, 8(%rsp)
+4:  mov 0(%rsp), %rax
     mov %rax, FP_LKEY(%rbx)
-    mov N_A(%r12), %rax
+    mov 8(%rsp), %rax
     mov %rax, FP_RKEY(%rbx)
 9:  LEAVE
 ENDF find_equi
