@@ -1,0 +1,98 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-refactor-plan-separation-x86_64-asm-engine-a1-20261012T091221Z",
+ "language": "x86_64-asm-engine",
+ "task": "refactor-plan-separation",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-refactor-plan-separation",
+ "prompt_sha256": "1db8540e5437db873edd1c6f30ad37a98dc42c37a609e3d6e67f7a64eda7f4af",
+ "session_id": "b165080a-189a-4fdd-be63-9d3cda44c281",
+ "tokens": {
+  "input": 178,
+  "output": 161849,
+  "cache_read": 16428283,
+  "cache_creation": 304051,
+  "thinking": null,
+  "thinking_estimated": 88733,
+  "source": "result events",
+  "api_messages": 89
+ },
+ "rate_limit": {
+  "events": 6,
+  "max_utilization": {
+   "five_hour": 0.07,
+   "seven_day": 0.58
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 8.955756599999997,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 95,
+ "result_segments": 1,
+ "assistant_messages": 191,
+ "tool_calls": {
+  "Bash": 88,
+  "Write": 6
+ },
+ "tool_calls_total": 94,
+ "tool_failures": 2,
+ "build_invocations": 24,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 5,
+ "conformance_progress": [
+  [
+   3456,
+   3456
+  ],
+  [
+   591,
+   591
+  ],
+  [
+   591,
+   591
+  ],
+  [
+   3456,
+   3456
+  ],
+  [
+   591,
+   591
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 1510.1,
+  "model_api_seconds": 1463.0,
+  "tool_seconds": 47.1,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 4,
+  "files_changed": 19,
+  "lines_added": 2942,
+  "lines_removed": 826,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The refactoring is finished and committed in 4 commits on `main`. Every suite in the definition of done passes at 100%, and a byte-for-byte comparison against the pre-refactoring engine found no differences.\n\n## What I built\n- **Logical plan** (`src/lplan.S`, layouts in `include/sql.inc`): a tree of Scan, SubqueryScan, Join (type + condition), Filter, Project, Aggregate, Sort, Limit, Distinct, UnionAll and Values. It is built per query block from the binder's output, and `lp_print` prints it as indented text for debugging and tests. The binder now produces the FROM clause as logical Scan/Join nodes.\n- **Optimizer** (`src/optimizer.S`): applies a table of named rules in order, each in its own module: `pushdown` (`rule_pushdown.S`), `prune_columns` (`rule_prune.S`) and `fold_constants` (`rule_fold.S`). It works only on the logical plan, and with `optimize: false` it returns the plan untouched.\n- **Physical planner** (`src/planner.S`): turns the optimized logical plan into the executable plan. It alone decides where filters run, table vs index scan, row-group skipping, join keys, join algorithm, build side, and `mode`/`threads`. Join-key extraction moved here from the binder, and the executor now reads only these planner decisions, not the raw options.\n- **Pipeline** (`src/plan.S`): logical plan \u2192 optimizer \u2192 physical plan, for each query block.\n\n## Test results\n- `make build test lint`: all pass, including the new `test_optimizer: 30 passed, 0 failed` (tests for each rule, the plan builder, the rule order and `optimize: false`) and `test_planner: 23 passed, 0 failed`.\n- Default runner: `TOTAL: 591/591 pass`\n- `--modes`: `TOTAL: 3456/3456 pass` (same with `PQ_PAR_MIN=1`)\n- `--transport http`: `TOTAL: 591/591 pass`\n- `http_suite.py`: `http suite: 19/19 passed`\n- The capability set is identical (same `version` response as before).\n- **Comparison with the old engine:** I replayed every public test file, plus an EXPLAIN of every query, under 9 option sets: 10,800 requests, 0 differences. 1,107 extra edge-case requests (constant expressions next to indexed columns, `OR FALSE`, LEFT JOIN, subqueries, CTEs, UNION ALL, row-group skipping on saved files) also matched. That comparison script lived in `/tmp` and is not in the repo; NOTES.md says how to rebuild the old engine to repeat it.\n\n## Main design decisions\n- **Pushdown still happens with `optimize: false`.** The Phase 3 spec requires pushdown, index selection and column pruning in every mode, and the tests check index scans and exact column sets with `optimize: false`. So when no rule has run, the physical planner places the WHERE conditions itself, using the same check as the pushdown rule. Filters the rule produced are marked and used as-is. The columns a scan reads still come from the columns the query references, so EXPLAIN doesn't depend on the pruning rule.\n- **Optimizations can't change which rows are read.** The old engine folded constants *after* physical planning for exactly this reason; now the rules run first. Each expression the optimizer rewrites keeps a copy of its original form (expression nodes grew from 64 to 72 bytes), and the planner chooses index scans, skipping, estimates and join keys from that original form. Before I added this, the comparison found real differences: `id = 1234 OR FALSE` became an index scan and an `ON \u2026 OR FALSE` join switched to a hash join.\n- **Rule order is pushdown \u2192 pruning \u2192 folding.** That way pushdown sees the conditions as the query wrote them, the same as the planner does when the rules are off.\n\n## Known limitations\n- The pushdown rule never pushes into derived tables or below GROUP BY, because that would change EXPLAIN output and which rows can raise errors. Inside a block there is never a filter above a projection to push down.\n- The physical column read set doesn't use the pruning rule's result; it comes from the binder's record of referenced columns. With the rules on, the two describe the same columns.\n\nREADME.md now has a \"C",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

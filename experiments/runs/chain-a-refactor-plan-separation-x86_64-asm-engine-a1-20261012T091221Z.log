@@ -1,2 +1,6 @@
 2026-10-12T09:12:21+00:00 chain chain-a-refactor-plan-separation-x86_64-asm-engine-a1-20261012T091221Z: session 1 -> a-refactor-plan-separation-x86_64-asm-engine-a1-20261012T091221Z (budget $45.00)
 2026-10-12T09:12:21+00:00 [a-refactor-plan-separation-x86_64-asm-engine-a1-20261012T091221Z] agent queued (usage gate, then launch)
+2026-10-12T09:37:32+00:00 [a-refactor-plan-separation-x86_64-asm-engine-a1-20261012T091221Z] agent finished; collecting telemetry
+2026-10-12T09:37:32+00:00 [a-refactor-plan-separation-x86_64-asm-engine-a1-20261012T091221Z] validating (clean clone, sandboxed)
+2026-10-12T09:37:45+00:00 [a-refactor-plan-separation-x86_64-asm-engine-a1-20261012T091221Z] outcome=success cost=$8.955756599999997 turns=95 wall=1510.1s
+2026-10-12T09:37:45+00:00 chain chain-a-refactor-plan-separation-x86_64-asm-engine-a1-20261012T091221Z finished: outcome=success sessions=1 spent=$8.96
