@@ -45,6 +45,13 @@
 
 #define TOPN_MAX 65536                  /* larger LIMITs sort everything */
 
+/* GROUP BY with local aggregation per part (gfused_part on every part,
+ * then lagg_merge): PT_LMAX groups per part at most, else PT_LABORT is set
+ * and the hash-partitioned aggregation runs instead */
+#define PT_LMAX   PT_A
+#define PT_LABORT PT_B
+#define LAGG_MAX  2048
+
     .data
     .p2align 3
     .globl g_par_threads
@@ -1415,12 +1422,102 @@ FUNC gfused_part
     mov 104(%rsp), %r9
     call k_agg_groups
     add %r15, %r14
-    jmp 1b
+    mov PT_LMAX(%rbx), %rax         /* local aggregation: give up when */
+    test %rax, %rax                 /* this part has too many groups or */
+    jz 1b                           /* another part gave up */
+    mov 80(%rsp), %rcx
+    cmp HT_N(%rcx), %rax
+    jae 8f
+    movq $1, PT_LABORT(%rbx)
+8:  cmpq $0, PT_LABORT(%rbx)
+    je 1b
 9:  mov 64(%rsp), %rcx
     mov 88(%rsp), %rax
     mov %rax, PT_OUT(%rbx, %rcx, 8)
     LEAVE
 ENDF gfused_part
+
+/* lagg_ok(plan rdi) -> eax 1 if partial aggregate states merge exactly:
+ * no DISTINCT aggregates and no FLOAT64 SUM / AVG */
+FUNC lagg_ok
+    xor %ecx, %ecx
+1:  cmp QP_NAGGS(%rdi), %rcx
+    jae 8f
+    mov QP_AGGS(%rdi), %rax
+    mov (%rax, %rcx, 8), %rax
+    inc %rcx
+    testl $NF_DISTINCT, N_FLAGS(%rax)
+    jnz 7f
+    mov N_OP(%rax), %edx
+    cmp $AGG_SUM, %edx
+    je 2f
+    cmp $AGG_AVG, %edx
+    jne 1b
+2:  mov N_A(%rax), %rax
+    movzbl N_TYPE(%rax), %eax
+    cmp $T_FLOAT, %eax
+    jne 1b
+7:  xor %eax, %eax
+    ret
+8:  mov $1, %eax
+    ret
+ENDF lagg_ok
+
+/* lagg_merge(task rdi): merges the parts' local groups (PT_OUT[0..PT_D))
+ * in part order into one list in global first-seen order -> PT_OUT[0],
+ * PT_D = 1 */
+FUNC lagg_merge
+    ENTER 16
+    mov %rdi, %rbx
+    mov PT_XS(%rbx), %rax
+    mov XS_PLAN(%rax), %r12
+    mov QP_NGROUP(%r12), %rdi
+    mov PT_C(%rbx), %rsi
+    call ht_new
+    mov %rax, %r13                  /* all groups */
+    call cur_arena
+    mov %rax, %rdi
+    call vec_new
+    mov %rax, 0(%rsp)
+    xor %r14d, %r14d                /* part */
+1:  cmp PT_D(%rbx), %r14
+    jae 8f
+    xor %r15d, %r15d                /* its groups */
+2:  mov PT_OUT(%rbx, %r14, 8), %rax
+    cmp VEC_LEN(%rax), %r15
+    jae 7f
+    mov VEC_DATA(%rax), %rax
+    mov (%rax, %r15, 8), %rax
+    mov %rax, 8(%rsp)               /* local entry */
+    mov %r13, %rdi
+    mov EN_KEY(%rax), %rsi
+    mov $1, %edx
+    mov EN_HASH(%rax), %rcx
+    call ht_lookup_h
+    mov 8(%rsp), %rcx
+    test %edx, %edx
+    jz 3f
+    mov EN_D0(%rcx), %rdx           /* first seen in this part */
+    mov %rdx, EN_D0(%rax)
+    mov EN_D1(%rcx), %rdx
+    mov %rdx, EN_D1(%rax)
+    mov 0(%rsp), %rdi
+    mov %rax, %rsi
+    call vec_push
+    jmp 4f
+3:  mov %r12, %rdi
+    mov EN_D0(%rax), %rsi
+    mov EN_D0(%rcx), %rdx
+    call agg_merge
+4:  inc %r15
+    jmp 2b
+7:  inc %r14
+    jmp 1b
+8:  mov 0(%rsp), %rax
+    mov %rax, PT_OUT(%rbx)
+    movq $1, PT_D(%rbx)
+    LEAVE
+ENDF lagg_merge
 
 /* entry_cmp(a rdi, b rsi) -> eax: orders group entries by first tuple */
 FUNC entry_cmp
@@ -1522,7 +1619,30 @@ FUNC pexec_aggregate
 22: mov PT_N(%r13), %rdi            /* one part: single pass */
     call par_parts
     cmp $1, %rax
-    jne 220f
+    je 223f
+    mov %rax, 8(%rsp)               /* local aggregation per part when */
+    mov %r12, %rdi                  /* the states merge exactly and the */
+    call lagg_ok                    /* groups are few */
+    test %eax, %eax
+    jz 220f
+    mov 8(%rsp), %rax
+    mov %rax, PT_D(%r13)
+    movq $LAGG_MAX, PT_LMAX(%r13)
+    movq $0, PT_LABORT(%r13)
+    mov PT_N(%r13), %rdi
+    mov %rax, %rsi
+    lea gfused_part(%rip), %rdx
+    mov %r13, %rcx
+    call par_run
+    cmpq $0, PT_LABORT(%r13)
+    jne 222f
+    mov %r13, %rdi
+    call lagg_merge
+    jmp 221f
+222: movq $0, PT_LMAX(%r13)         /* too many groups: hash partitions */
+    movq $0, PT_LABORT(%r13)
+    jmp 220f
+223:
     movq $1, PT_D(%r13)
     mov PT_N(%r13), %rdi
     mov $1, %esi
