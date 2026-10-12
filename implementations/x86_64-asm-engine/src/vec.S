@@ -55,6 +55,45 @@ ones_b: .fill 32, 1, 1
 
     .text
 
+/* vscale_int(vec rdi, n rsi, scale edx, skip rcx) -> rax a new vector with
+ * the INT64 values times 10^scale, or 0 if one of them (on a row whose skip
+ * byte is 0) overflows 64 bits */
+FUNC vscale_int
+    push %rbx
+    push %r12
+    push %r13
+    push %r14
+    push %r15
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %edx, %r13d
+    mov %rcx, %r14
+    call vnew
+    mov %rax, %r15
+    lea pow10_u64(%rip), %rax
+    mov (%rax, %r13, 8), %r13       /* factor */
+    xor %ecx, %ecx
+1:  cmp %r12, %rcx
+    jae 8f
+    cmpb $0, (%r14, %rcx)
+    jne 2f
+    mov (%rbx, %rcx, 8), %rax
+    imul %r13, %rax
+    jo 9f
+    mov %rax, (%r15, %rcx, 8)
+2:  inc %rcx
+    jmp 1b
+8:  mov %r15, %rax
+    jmp 10f
+9:  xor %eax, %eax
+10: pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %rbx
+    ret
+ENDF vscale_int
+
 /* vbin_wide(node rdi) -> eax 1 if the binary node or an operand has a wide
  * DECIMAL type (evaluated tuple by tuple with eval) */
 FUNC vbin_wide
@@ -630,9 +669,9 @@ v_compare:
     cmp %ecx, %edx
     je 0f
     cmp $T_DEC, %ecx
-    je 40f
+    je 45f
     cmp $T_DEC, %edx
-    je 40f
+    je 46f
 0:  cmp $T_FLOAT, %ecx
     je 20f
     cmp $T_STR, %ecx
@@ -644,7 +683,8 @@ v_compare:
     xor %eax, %edx
     test $0xff0000, %edx
     jnz 40f
-1:  /* 64-bit signed integers: AVX2, 4 rows per step */
+1:
+vc_int:                             /* 64-bit signed integers: AVX2, 4 rows per step */
     mov N_OP(%rbx), %eax
     mov BT_N(%r12), %rdx
     xor %ecx, %ecx
@@ -715,6 +755,33 @@ v_compare:
     mov %rax, (%r15, %r13, 8)
 32: inc %r13
     jmp 31b
+
+45: /* narrow DECIMAL vs INT64: the INT64 side scaled to the decimal's
+     * scale compares as integers when no value overflows (else dec_cmp) */
+    mov %r14, %rdi
+    mov N_A(%rbx), %rdx
+    call vc_scale
+    test %rax, %rax
+    jz 40f
+    mov %rax, %r14                  /* scaled right operand */
+    jmp vc_int
+46: mov %r13, %rdi
+    mov N_B(%rbx), %rdx
+    call vc_scale
+    test %rax, %rax
+    jz 40f
+    mov %rax, %r13                  /* scaled left operand */
+    jmp vc_int
+
+/* vc_scale (local, v_compare frame): vscale_int of the INT64 vector rdi to
+ * the scale of the DECIMAL node rdx on the rows not yet NULL */
+vc_scale:
+    mov N_TYPE(%rdx), %edx
+    shr $16, %edx
+    movzbl %dl, %edx
+    mov BT_N(%r12), %rsi
+    lea VNULL(%r15), %rcx
+    jmp vscale_int
 
 40: /* DECIMAL with different scales */
     xor %r13d, %r13d
