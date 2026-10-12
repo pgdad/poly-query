@@ -20,7 +20,9 @@ vectorized batch execution with AVX2 kernels, intra-query parallelism for
 scans, filters, projections, hash-join probes and (hash-partitioned)
 aggregation, hash / sort-merge / nested-loop joins selectable per query, a
 switchable logical optimizer and top-N sorting - see
-[Phase 5](#phase-5-execution-modes-parallelism-and-optimizations)).
+[Phase 5](#phase-5-execution-modes-parallelism-and-optimizations)), plus the
+architectural change CR-1 `UNION ALL` (capability `change.union_all`, see
+[UNION ALL](#change-cr-1-union-all)).
 
 ## Build prerequisites
 
@@ -475,9 +477,56 @@ tables included): hash 9.4 ms, merge 9.5 ms, nested loop 49 ms (row) /
 21 ms (vectorized) / 6 ms (4 threads) / 2 ms (16 threads; parts sized by
 the number of pairs).
 
+## Change CR-1: `UNION ALL`
+
+Implements `spec/changes/union-all.md` (capability `change.union_all`):
+`select_core { UNION ALL select_core }` wherever a query is allowed (top
+level, CTE bodies, derived tables, scalar / `IN` / `EXISTS` subqueries,
+`EXPLAIN`), with `ORDER BY` / `LIMIT` / `OFFSET` after the last branch
+applying to the whole result.
+
+Modules touched:
+
+| Module | Change |
+|---|---|
+| `include/sql.inc` | `SS_UNION` (compound statement: Vec of branch statements); plan fields `QP_NUNION` / `QP_UNION` (compound plan: branch plans) |
+| `src/parser.S` | `parse_select` split into `parse_select_core` (SELECT … HAVING) and `parse_order_limit`; `parse_query` builds the compound; `p_error` reports a misplaced `UNION ALL` as `PARSE_ERROR`, `UNION` / `UNION DISTINCT` stay `UNSUPPORTED` |
+| `src/binder.S` | `bind_query` dispatches compounds to `bind_compound`: the WITH list is bound once in a scope of its own, each branch is bound by `bind_query` in the compound's position (same enclosing scope, so correlated branches work), column count check (`SEMANTIC_ERROR`), output names from the first branch, output types by `common_type` (the CASE rule, `TYPE_ERROR` otherwise); `bind_order_by` rejects anything but output names / positions in a compound (`SEMANTIC_ERROR`) |
+| `src/exec.S` | `exec_plan` runs compound plans through `exec_union`: branches execute in order (each as an ordinary block, so `mode` / `threads` / `join` / `optimize` apply inside every branch), rows are concatenated, converted to the output types with `cast_value` (`union_row`; `NUMERIC_OVERFLOW` when an INT64 does not fit the DECIMAL) and then sorted (stable `sort_rows`, parallel when enabled), offset and limited; uncorrelated compound results are cached like any plan |
+| `src/explain.S` | `Limit > Sort > UnionAll` with the branch plans as children, in order |
+| `src/server.S` | the streaming endpoint materializes compounds (no pipelining) |
+| `src/protocol.S` | capability `change.union_all` |
+| `tests/session_test.sh`, `tests/modes_test.sh` | end-to-end cases; compounds in the differential test across execution options |
+
+Design decisions:
+
+* The compound is a plan kind of its own (not a derived table wrapped in a
+  projection), so EXPLAIN shows exactly `UnionAll` over the branch plans and
+  the branches keep every per-block optimization (pushdown, index scans,
+  join algorithms, parallel operators). Output row order without ORDER BY is
+  branch order, then each branch's own order, which is identical in every
+  execution mode (`modes_test.sh` checks byte-identical responses).
+* Branch rows are shared with the branch results when no column needs a
+  conversion and there is no ORDER BY; otherwise a row of output cells plus
+  sort key cells is built (the same layout as an ordinary block's rows, so
+  `sort_rows` / `pexec_sort` are reused unchanged).
+* Values are converted after each branch has run, in row order, so a
+  conversion error is the same error in every execution mode.
+* An all-NULL column keeps the untyped NULL type, which the engine reports
+  as `STRING` exactly like `SELECT NULL`.
+* `ORDER BY x` where two output columns of the first branch are named `x`
+  with different expressions is an ambiguous reference (`SEMANTIC_ERROR`),
+  as for plain queries.
+* `version` still reports `spec_version` `1.0.0`: the phase-1 conformance
+  case `catalog.pqt` requires that value, and the engines must keep passing
+  every earlier phase.
+
 ## Implementation-defined choices
 
-* `UNION`, `RIGHT` and `FULL` joins are `UNSUPPORTED`.
+* `UNION` (without `ALL`, also `UNION DISTINCT`), `RIGHT` and `FULL` joins
+  are `UNSUPPORTED`; a `UNION ALL` in a place the grammar does not allow it
+  (after a branch's ORDER BY / LIMIT, after a parenthesised branch) is a
+  `PARSE_ERROR`.
 * EXPLAIN shows pushed-down conjuncts as a `Filter` node (`"predicate":"WHERE
   (pushed down)"`) directly above the scan; `IndexScan` nodes carry `index`,
   `kind` and `lookup` (`equality`/`range`); scans carry `estimated_rows` and,
@@ -496,7 +545,8 @@ the number of pairs).
   (`predicate` is `"WHERE"` or `"HAVING"`), `Aggregate`, `HashJoin` /
   `MergeJoin` / `NestedLoopJoin` (with `join_type`), `TableScan` (catalog `table`, `alias`,
   `columns` actually referenced), `SubqueryScan` (derived table / CTE, with
-  its plan as child) and `Values` (SELECT without FROM). Subqueries inside
+  its plan as child), `UnionAll` (the branch plans as children) and `Values`
+  (SELECT without FROM). Subqueries inside
   expressions are not shown.
 * Common type of CASE / COALESCE branches: identical types stay as they are;
   otherwise numeric promotion per types.md §2 (so two different DECIMAL types

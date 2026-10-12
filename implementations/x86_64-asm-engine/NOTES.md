@@ -1,6 +1,13 @@
 # Working notes — x86-64 assembly engine
 
-## Status (Phase 5)
+## Status (Phase 5 + change CR-1 UNION ALL)
+
+* CR-1 `UNION ALL` is complete (capability `change.union_all`, README
+  "Change CR-1"): `changes/union_all.pqt` 22/22 in every mode, the whole
+  suite with `--modes` and `--transport http` 0 failures, http_suite 19/19,
+  `make build test lint` pass. Compound plans: `QP_NUNION`/`QP_UNION`
+  (binder.S `bind_compound`, exec.S `exec_union`, explain.S `UnionAll`).
+  `spec_version` stays `1.0.0` because phase1/catalog.pqt requires it.
 
 * Public conformance suite:
   `python3 tests/conformance/runner.py --engine implementations/x86_64-asm-engine/bin/polyquery`
