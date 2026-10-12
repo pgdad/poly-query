@@ -1,5 +1,28 @@
 # Working notes — x86-64 assembly engine
 
+## Current task: optimize latency of benchmarks/workloads/analytics.json (1m)
+
+Measure: `python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pqdata --jobs 1`
+(`--jobs` > 1 fails in this sandbox: no POSIX semaphores), then
+`sh bench/workload.sh /tmp/pqdata/1m 5` (median / best stats.elapsed_us per
+query; `PQ_BENCH_OUT=FILE` saves the result rows to diff two builds).
+Baseline numbers: `bench/workload-before.txt` (engine at e912c3e).
+Done so far (each verified: conformance 660/660, `--modes` with
+PQ_PAR_MIN=1 3870/3870, http 660/660, http_suite 19/19, make test, and
+byte-identical full results vs the baseline engine on 1m data):
+1. default `threads` = `--threads N` or online CPUs capped at 16 (mode
+   "row" without `threads` stays 1 thread = baseline) — main.S
+   resolve_threads, protocol.S.
+2. keysort.S: ORDER BY in batch modes via normalized u64 key words + MSD
+   radix per run + parallel merges (fallback: old comparison sort).
+3. pexec.S pexec_dsplit: hash-partitioned parallel DISTINCT aggregates
+   (single group only; FLOAT64 SUM/AVG/MIN/MAX DISTINCT stay serial).
+4. util.S arena chunk pool (reuse released chunks up to 1 GiB; fork child
+   calls chunk_pool_forget).
+Ideas next: q14 string sort (prefix ties -> row_cmp; 2nd prefix word),
+q10/q11 join probe, q07/q05 group-by (skew / low cardinality merge),
+q12 left join anti, q19 CTE evaluated twice?
+
 ## Status (Phase 5 + CR-1 UNION ALL + CR-3 plan separation + CR-2 DECIMAL(38))
 
 * CR-2 `DECIMAL` precision 38 is complete (capability `change.decimal38`,
