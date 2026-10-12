@@ -1,6 +1,27 @@
 # Working notes — x86-64 assembly engine
 
-## Status (Phase 5 + CR-1 UNION ALL + CR-3 plan separation)
+## Status (Phase 5 + CR-1 UNION ALL + CR-3 plan separation + CR-2 DECIMAL(38))
+
+* CR-2 `DECIMAL` precision 38 is complete (capability `change.decimal38`,
+  README "Change CR-2"): `changes/decimal38.pqt` 69/69, the whole suite
+  660/660, `--modes` 3870/3870, `--transport http` 660/660, http_suite
+  19/19, `make build test lint` pass (new `tests/test_dec128.S`, wide-decimal
+  table `w` in `tests/modes_test.sh`).
+  Representation: narrow (p <= 18) inline i64 as before; wide (p > 18) slot
+  = pointer to an immutable 16-byte i128 box (like pstr*), dispatched on
+  `dec_is_wide(type)`; all wide math in `src/dec128.S` (256-bit
+  intermediates, 192-bit SUM accumulators in AS_LO/AS_HI/AS_VAL).
+  Things that are easy to break: (1) every consumer of DECIMAL payloads
+  must check wideness (value_cmp, hash_cells, conv_exact, to_num, radix
+  sort, PQCF, vec kernels); (2) INT64 vs DECIMAL comparisons are no longer
+  cast by the binder (exact compare at run time: eval cmp_values,
+  functions cmp_mixed, vec 45/46 paths, exec in_key for IN subqueries,
+  planner equi_key_type for join keys); (3) wide boxes for stored data must
+  be allocated in the table arena (dec_box_in), computed ones in the
+  request / worker arena (dec_box).
+  Verified the wide results against Python decimal with a script (kept
+  outside the repo, /tmp/wv/verify.py: loads the modes_test `w` table and
+  compares ~10 aggregate / arithmetic / rounding queries in 3 option sets).
 
 * CR-3 logical / physical plan separation is complete (README "Change
   CR-3" has the before / after module map). Pipeline per query block
