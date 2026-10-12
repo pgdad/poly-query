@@ -52,6 +52,10 @@
 #define PT_LABORT PT_B
 #define LAGG_MAX  2048
 
+/* hash-partitioned GROUP BY: u64[n], the group entry created at tuple i
+ * (0 if none), so the groups come out in first-seen order without sorting */
+#define PT_SLOT   PT_FP
+
     .data
     .p2align 3
     .globl g_par_threads
@@ -1147,6 +1151,12 @@ FUNC gkey_part
     mov %rdi, %rbx
     mov %rdx, %r14
     mov %rcx, 72(%rsp)
+    lea (, %r14, 8), %rdi           /* clear this range's group slots */
+    add PT_SLOT(%rbx), %rdi
+    xor %esi, %esi
+    sub %r14, %rcx
+    lea (, %rcx, 8), %rdx
+    call memset
     mov PT_XS(%rbx), %r13
     lea 0(%rsp), %rdi
     mov %r13, %rsi
@@ -1266,6 +1276,8 @@ FUNC gagg_part
     call agg_states_new
     mov 120(%rsp), %rcx
     mov %rax, EN_D0(%rcx)
+    mov PT_SLOT(%rbx), %rax         /* the group's first tuple */
+    mov %rcx, (%rax, %r14, 8)
     mov 80(%rsp), %rdi
     mov %rcx, %rsi
     call vec_push
@@ -1661,6 +1673,10 @@ FUNC pexec_aggregate
     call tmp_alloc
     mov %rax, PT_B(%r13)            /* hashes */
     mov PT_N(%r13), %rdi
+    shl $3, %rdi
+    call tmp_alloc
+    mov %rax, PT_SLOT(%r13)         /* group slots by first tuple */
+    mov PT_N(%r13), %rdi
     lea gkey_part(%rip), %rsi
     mov %r13, %rdx
     call par_for
@@ -1670,6 +1686,8 @@ FUNC pexec_aggregate
     lea gagg_part(%rip), %rdx
     mov %r13, %rcx
     call par_run
+    mov %r13, %rdi                  /* groups in first-seen order */
+    call slot_order
 221: /* all groups, ordered by their first tuple */
     call cur_arena
     mov %rax, %rdi
@@ -1690,19 +1708,193 @@ FUNC pexec_aggregate
     mov $8, %edx
     lea entry_cmp(%rip), %rcx
     call qsort
-25: xor %r15d, %r15d
-26: cmp VEC_LEN(%r14), %r15
-    jae 29f
+25: mov %rbx, %rdi
+    mov %r14, %rsi
+    call pexec_emit
+    LEAVE
+ENDF pexec_aggregate
+
+/* scount_part(task rdi, part rsi, lo rdx, hi rcx): PT_CNT[part] = groups
+ * whose first tuple lies in [lo, hi) */
+FUNC scount_part
+    mov PT_SLOT(%rdi), %r8
+    xor %eax, %eax
+1:  cmp %rcx, %rdx
+    jae 9f
+    cmpq $0, (%r8, %rdx, 8)
+    je 2f
+    inc %rax
+2:  inc %rdx
+    jmp 1b
+9:  mov %rax, PT_CNT(%rdi, %rsi, 8)
+    ret
+ENDF scount_part
+
+/* scopy_part(task rdi, part rsi, lo rdx, hi rcx): copies those groups to
+ * the entry array PT_A from position PT_CNT[part] on */
+FUNC scopy_part
+    mov PT_SLOT(%rdi), %r8
+    mov PT_CNT(%rdi, %rsi, 8), %r9
+    shl $3, %r9
+    add PT_A(%rdi), %r9
+1:  cmp %rcx, %rdx
+    jae 9f
+    mov (%r8, %rdx, 8), %rax
+    test %rax, %rax
+    jz 2f
+    mov %rax, (%r9)
+    add $8, %r9
+2:  inc %rdx
+    jmp 1b
+9:  ret
+ENDF scopy_part
+
+/* slot_order(task rdi): the groups of all partitions in first-seen order
+ * (from the slots gagg_part filled) -> PT_OUT[0], PT_D = 1 */
+FUNC slot_order
+    ENTER 16
+    mov %rdi, %rbx
+    mov PT_N(%rbx), %rdi
+    call par_parts
+    mov %rax, %r12                  /* parts */
+    mov PT_N(%rbx), %rdi
+    mov %r12, %rsi
+    lea scount_part(%rip), %rdx
+    mov %rbx, %rcx
+    call par_run
+    xor %eax, %eax                  /* counts -> start positions */
+    xor %ecx, %ecx
+1:  mov PT_CNT(%rbx, %rcx, 8), %rdx
+    mov %rax, PT_CNT(%rbx, %rcx, 8)
+    add %rdx, %rax
+    inc %rcx
+    cmp %r12, %rcx
+    jb 1b
+    mov %rax, %r13                  /* groups */
+    call cur_arena
+    mov %rax, %rdi
+    call vec_new
+    mov %rax, %r14
+    mov %r14, %rdi
+    mov %r13, %rsi
+    call vec_reserve
+    mov %r13, VEC_LEN(%r14)
     mov VEC_DATA(%r14), %rax
+    mov %rax, PT_A(%rbx)
+    mov PT_N(%rbx), %rdi
+    mov %r12, %rsi
+    lea scopy_part(%rip), %rdx
+    mov %rbx, %rcx
+    call par_run
+    mov %r14, PT_OUT(%rbx)
+    movq $1, PT_D(%rbx)
+    LEAVE
+ENDF slot_order
+
+/* emit_part(task rdi, part rsi, lo rdx, hi rcx): output rows of the groups
+ * [lo, hi) of the entry array PT_A (HAVING applied) -> PT_OUT[part] */
+FUNC emit_part
+    ENTER 96                        /* 0: EvalCtx, 64: part, 72: hi, 80: rows */
+    mov %rdi, %rbx
+    mov %rsi, 64(%rsp)
+    mov %rdx, %r14
+    mov %rcx, 72(%rsp)
+    mov PT_XS(%rbx), %r13
+    mov XS_PLAN(%r13), %r12
+    lea 0(%rsp), %rdi
+    mov %r13, %rsi
+    call wctx_init
+    call cur_arena
+    mov %rax, %rdi
+    call vec_new
+    mov %rax, 80(%rsp)
+1:  cmp 72(%rsp), %r14
+    jae 9f
+    test $0xfff, %r14d
+    jnz 2f
+    call check_deadline
+2:  mov PT_A(%rbx), %rax
+    mov (%rax, %r14, 8), %r15       /* group entry */
+    mov EN_D1(%r15), %rax
+    mov %rax, 0+EC_TUPLE(%rsp)
+    mov %r12, %rdi
+    mov EN_D0(%r15), %rsi
+    call agg_finish
+    mov %rax, 0+EC_AGGV(%rsp)
+    mov QP_HAVING(%r12), %rdi
+    test %rdi, %rdi
+    jz 3f
+    lea 0(%rsp), %rsi
+    call eval
+    test %edx, %edx
+    jnz 4f
+    test $1, %eax
+    jz 4f
+3:  mov %r12, %rdi
+    lea 0(%rsp), %rsi
+    call build_row
+    mov 80(%rsp), %rdi
+    mov %rax, %rsi
+    call vec_push
+4:  inc %r14
+    jmp 1b
+9:  mov 64(%rsp), %rcx
+    mov 80(%rsp), %rax
+    mov %rax, PT_OUT(%rbx, %rcx, 8)
+    LEAVE
+ENDF emit_part
+
+/* pexec_emit(xs rdi, entries Vec* rsi): emits the groups in order
+ * (emit_group), in parallel parts when there are many */
+FUNC pexec_emit
+    ENTER 16
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov VEC_LEN(%r12), %rdi
+    call par_parts
+    mov %rax, %r14
+    cmp $1, %r14
+    ja 5f
+    xor %r15d, %r15d                /* serial */
+1:  cmp VEC_LEN(%r12), %r15
+    jae 9f
+    mov VEC_DATA(%r12), %rax
     mov (%rax, %r15, 8), %rax
     mov EN_D1(%rax), %rsi
     mov EN_D0(%rax), %rdx
     mov %rbx, %rdi
     call emit_group
     inc %r15
-    jmp 26b
-29: LEAVE
-ENDF pexec_aggregate
+    jmp 1b
+5:  mov $PT_SIZE, %edi
+    call tmp_zalloc
+    mov %rax, %r13
+    mov %rbx, PT_XS(%r13)
+    mov VEC_DATA(%r12), %rax
+    mov %rax, PT_A(%r13)
+    mov VEC_LEN(%r12), %rdi
+    mov %r14, %rsi
+    lea emit_part(%rip), %rdx
+    mov %r13, %rcx
+    call par_run
+    mov VEC_LEN+XS_ROWS(%rbx), %rsi /* room for all rows, then in order */
+    xor %ecx, %ecx
+6:  mov PT_OUT(%r13, %rcx, 8), %rax
+    add VEC_LEN(%rax), %rsi
+    inc %rcx
+    cmp %r14, %rcx
+    jb 6b
+    lea XS_ROWS(%rbx), %rdi
+    call vec_reserve
+    xor %r15d, %r15d
+7:  lea XS_ROWS(%rbx), %rdi
+    mov PT_OUT(%r13, %r15, 8), %rsi
+    call vec_append
+    inc %r15
+    cmp %r14, %r15
+    jb 7b
+9:  LEAVE
+ENDF pexec_emit
 
 /* ================================================================ DISTINCT aggregates */
 
