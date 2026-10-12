@@ -1,6 +1,11 @@
 # Working notes (arm64-asm-engine)
 
 ## Status (task: optimize latency, analytics workload @1m, session 1)
+- Final check (session 1, clean build): conformance 660/660, --modes
+  3870/3870 (also PQ_PARALLEL_MIN_ROWS=1), --transport http 660/660 (also
+  with PQ_PARALLEL_MIN_ROWS=1), http_suite 19/19 (also with
+  PQ_PARALLEL_MIN_ROWS=1), make test / lint pass; 8 concurrent HTTP clients
+  x 15 heavy parallel queries on the 1m data: all correct.
 - Definition of done met so far: conformance unchanged (660/660, --modes
   3870/3870 also with PQ_PARALLEL_MIN_ROWS=1, http 660, http_suite 19/19),
   `make build test` pass, README "Latency optimization" has the
