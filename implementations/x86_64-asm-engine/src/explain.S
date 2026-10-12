@@ -1,6 +1,7 @@
 /*
- * explain.S - EXPLAIN: renders a bound plan as the JSON plan tree of
- * indexes-and-planning.md §4.  Every node has "op" and "children".
+ * explain.S - EXPLAIN: renders the physical plan (planner.S) as the JSON
+ * plan tree of indexes-and-planning.md §4.  Every node has "op" and
+ * "children".
  *
  *   explain_plan(plan rdi, buf rsi)
  *

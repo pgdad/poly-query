@@ -1,9 +1,9 @@
 /*
  * pexec.S - batch-at-a-time, parallel operator drivers (Phase 5).
  *
- * Used for every query block unless the options ask for the row baseline
- * (mode "row" with one thread, which runs the original tuple-at-a-time
- * operators of exec.S).  Each operator splits its input into contiguous
+ * Used for every query block unless the physical planner chose the row
+ * baseline (g_exec_mode = MODE_ROW with one thread, which runs the original
+ * tuple-at-a-time operators of exec.S).  Each operator splits its input into contiguous
  * parts (par.S; one part per thread) and every part runs batches of up to
  * VB tuples through a batch kernel.  The kernels (k_*) dispatch on the
  * execution mode: vectorized kernels (vec.S) evaluate whole column vectors,

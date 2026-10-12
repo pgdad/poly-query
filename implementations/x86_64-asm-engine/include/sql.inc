@@ -391,7 +391,9 @@
 #define JA_HASH  1     /* hash join on FP_LKEY = FP_RKEY */
 #define JA_MERGE 2     /* sort-merge join on FP_LKEY = FP_RKEY */
 
-/* Phase 5 execution options (protocol.S parses, planner.S / exec.S read) */
+/* Phase 5 execution options (protocol.S parses them into g_opt_*; the
+ * physical planner resolves g_exec_mode / g_exec_threads, which the
+ * executor follows) */
 #define MODE_AUTO 0
 #define MODE_ROW  1
 #define MODE_VEC  2
