@@ -1,0 +1,143 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-optimize-latency-x86_64-asm-engine-a1-20261012T100759Z",
+ "language": "x86_64-asm-engine",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-optimize-latency",
+ "prompt_sha256": "537d653d4ea6ea71ae4b513ed2dbd1f17e2c176df1eb315fcbfadac70845f186",
+ "session_id": "cb8d45eb-eedd-422b-9481-298537cb4d8c",
+ "tokens": {
+  "input": 384,
+  "output": 275959,
+  "cache_read": 48958845,
+  "cache_creation": 458656,
+  "thinking": null,
+  "thinking_estimated": 118208,
+  "source": "result events",
+  "api_messages": 192
+ },
+ "rate_limit": {
+  "events": 9,
+  "max_utilization": {
+   "seven_day": 0.6,
+   "five_hour": 0.22
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 18.981732999999995,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 195,
+ "result_segments": 1,
+ "assistant_messages": 431,
+ "tool_calls": {
+  "Bash": 191,
+  "Write": 2,
+  "Read": 1
+ },
+ "tool_calls_total": 194,
+ "tool_failures": 3,
+ "build_invocations": 48,
+ "build_failures_heuristic": 2,
+ "conformance_runs": 16,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 3087.7,
+  "model_api_seconds": 2497.9,
+  "tool_seconds": 591.2,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 22,
+  "files_changed": 18,
+  "lines_added": 3436,
+  "lines_removed": 170,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The task is done: the 20-query `analytics` workload at scale 1m now takes **85 ms in total, down from 1120 ms (13.2\u00d7)**. Every query returns byte-identical results to the engine before the changes, and all conformance phases still pass. Everything is committed.\n\n**Test results** (clean rebuild):\n- Conformance: phase 1 225/225, phase 2 208/208, phase 3 212/212, phase 5 15/15, **TOTAL: 660/660 pass**\n- `--modes`: 3870/3870 pass (also with `PQ_PAR_MIN=1`, which forces the parallel paths onto the tiny test tables); `--transport http`: 660/660; concurrency suite: 19/19\n- `make build test lint` all pass; `modes_test.sh` grew to 702 checks covering the new sort and DISTINCT paths\n\n**Before \u2192 after (median ms)** \u2014 the full table is in README.md:\n\n| query | before | after |\n|---|---:|---:|\n| q14 sort by string | 423 | 13.9 |\n| q15 sort by three keys | 354 | 16.8 |\n| q10 join + group by | 49.7 | 6.1 |\n| q09 COUNT DISTINCT | 39.9 | 5.2 |\n| q20 string functions | 38.3 | 3.5 |\n| q07 skewed group by | 33.5 | 5.9 |\n| q12 LEFT JOIN | 14.9 | 5.6 |\n\nAll 20 queries got faster except q03, which is unchanged at about 0.65 ms whatever the thread count (the table rounds it as 0.6 \u2192 0.7). Timings are the engine's own `elapsed_us` from `bench/workload.sh`; I cross-checked with client-side timing through `bin/polyquery session`, which was within 0.3 ms.\n\n**What I changed:**\n1. **Default threads:** a query without a `threads` option now uses the number of CPUs (capped at 16), or `--threads N`. `mode: \"row\"` without `threads` stays single-threaded, so the baseline is unchanged.\n2. **Sorting** (new `keysort.S`): ORDER BY keys are encoded as numbers whose order matches the SQL order, then sorted in parallel with a radix sort. It falls back to the old comparison only where that encoding can't decide (very wide decimals, strings of 16+ bytes), so ties come out in the same order as before.\n3. **GROUP BY:** with few groups, each thread aggregates its own share and the results are merged in order. With many groups, each thread gets only the rows of its groups, and groups come out in first-seen order without the old sort.\n4. **COUNT(DISTINCT \u2026) and other DISTINCT aggregates** without GROUP BY now run in parallel; they previously forced one thread.\n5. **Hash joins:** the hash table is built in parallel, and joins on matching integer-type keys use a faster lookup table.\n6. **Threads and memory:** worker threads are kept alive across queries instead of being created for every step, and freed memory blocks are reused instead of handed back to the system.\n\n**Decisions and limitations you should know about:**\n- **Worker threads are pinned to distinct CPU cores.** Without pinning, the long-lived threads often ended up sharing cores and simple scans got about 0.3 ms slower. Pinning uses whatever CPUs the process is allowed, and forked `serve` query processes don't pin, since they run concurrently.\n- **Up to 1 GiB of freed memory stays reserved** in the process for reuse.\n- **Some paths still fall back to the old behaviour:** DISTINCT sums over FLOAT64 stay single-threaded, and per-thread local aggregation is skipped for FLOAT64 SUM/AVG (both to keep float results bit-identical). Merge-join sorting remains single-threaded.\n- **Timing on this machine varies by about \u00b120% between runs**, so I compared versions with interleaved A/B rounds rather than single runs.\n- **Untested elsewhere:** the speed-ups are measured only on this 32-CPU machine; the gains depend on core count.\n- **Dataset generation:** the generator only works here with `--jobs 1` (the sandbox blocks the semaphores its parallel mode needs); the README command includes it.\n\nNOTES.md records the current state and the next ideas: about 5 ms of row building before each sort, and per-match costs in the join probe.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

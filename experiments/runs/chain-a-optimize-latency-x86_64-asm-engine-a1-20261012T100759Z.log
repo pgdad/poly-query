@@ -1,2 +1,6 @@
 2026-10-12T10:07:59+00:00 chain chain-a-optimize-latency-x86_64-asm-engine-a1-20261012T100759Z: session 1 -> a-optimize-latency-x86_64-asm-engine-a1-20261012T100759Z (budget $50.00)
 2026-10-12T10:07:59+00:00 [a-optimize-latency-x86_64-asm-engine-a1-20261012T100759Z] agent queued (usage gate, then launch)
+2026-10-12T10:59:27+00:00 [a-optimize-latency-x86_64-asm-engine-a1-20261012T100759Z] agent finished; collecting telemetry
+2026-10-12T10:59:27+00:00 [a-optimize-latency-x86_64-asm-engine-a1-20261012T100759Z] validating (clean clone, sandboxed)
+2026-10-12T10:59:40+00:00 [a-optimize-latency-x86_64-asm-engine-a1-20261012T100759Z] outcome=success cost=$18.981732999999995 turns=195 wall=3087.7s
+2026-10-12T10:59:40+00:00 chain chain-a-optimize-latency-x86_64-asm-engine-a1-20261012T100759Z finished: outcome=success sessions=1 spent=$18.98

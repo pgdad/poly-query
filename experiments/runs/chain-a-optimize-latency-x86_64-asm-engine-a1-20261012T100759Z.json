@@ -1,0 +1,21 @@
+{
+ "chain_id": "chain-a-optimize-latency-x86_64-asm-engine-a1-20261012T100759Z",
+ "task": "optimize-latency",
+ "language": "x86_64-asm-engine",
+ "track": "A",
+ "attempt": 1,
+ "max_sessions": 2,
+ "total_budget_usd": 50.0,
+ "timeout_min": 120,
+ "sessions": [
+  {
+   "run_id": "a-optimize-latency-x86_64-asm-engine-a1-20261012T100759Z",
+   "session": 1,
+   "outcome": "success",
+   "cost_usd": 18.981732999999995
+  }
+ ],
+ "spent_usd": 18.98,
+ "outcome": "success",
+ "finished": "2026-10-12T10:59:40+00:00"
+}
