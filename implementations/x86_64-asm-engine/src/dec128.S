@@ -1343,3 +1343,61 @@ FUNC floor_dec128
     pop %rbx
     ret
 ENDF floor_dec128
+
+/* dec_conv_exact(src type rdi, value rsi, dst type rdx) -> rax value, edx 1
+ * if the INT64 / DECIMAL value has an exact representation in the DECIMAL
+ * type dst (planner constants for index and row-group bounds) */
+FUNC dec_conv_exact
+    push %rbx
+    push %r12
+    push %r13
+    mov %rdx, %rbx                  /* dst type */
+    call num_load                   /* rdx:rax, scale ecx */
+    mov %rbx, %r12
+    shr $16, %r12
+    movzbl %r12b, %r12d             /* target scale */
+    mov %rbx, %r13
+    shr $8, %r13
+    movzbl %r13b, %r13d             /* target precision */
+    mov %rax, %rdi
+    mov %rdx, %rsi
+    cmp %ecx, %r12d
+    jb 2f
+    mov %ecx, %edx                  /* scale up: exact, checked against p */
+    mov %r12d, %ecx
+    mov %r13d, %r8d
+    call dec_rescale128
+    test %ecx, %ecx
+    jnz 8f
+    jmp 5f
+2:  mov %ecx, %edx                  /* scale down: only without remainder */
+    sub %r12d, %edx
+    call i128_div_pow10
+    test %ecx, %ecx
+    jnz 8f
+    mov %rax, %r12
+    mov %rdx, %rbx
+    mov %rax, %rdi
+    mov %rdx, %rsi
+    mov %r13d, %edx
+    call i128_fits
+    test %eax, %eax
+    jz 8f
+    mov %r12, %rax
+    mov %rbx, %rdx
+5:  cmp $18, %r13d
+    ja 6f
+    mov $1, %edx                    /* narrow target: the i64 */
+    jmp 9f
+6:  mov %rax, %rdi
+    mov %rdx, %rsi
+    call dec_box
+    mov $1, %edx
+    jmp 9f
+8:  xor %eax, %eax
+    xor %edx, %edx
+9:  pop %r13
+    pop %r12
+    pop %rbx
+    ret
+ENDF dec_conv_exact

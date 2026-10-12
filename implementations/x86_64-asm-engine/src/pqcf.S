@@ -251,7 +251,45 @@ ENDF wb_pad8
 #define WC_DICT   104   /* Vec of distinct pstr* */
 #define WC_CODES  112   /* u32[n] */
 #define WC_TMP    120   /* 120..151 scratch */
+#define WC_WIDE   152   /* 1 = wide DECIMAL column (i128 values, PQCF v2) */
 #define WC_SIZE   160
+
+/* box_eq(a rdi, b rsi) -> eax 1 if two wide DECIMAL boxes (0 = NULL slot)
+ * hold the same value; rdi is preserved */
+FUNC box_eq
+    xor %eax, %eax
+    test %rdi, %rdi
+    jz 9f
+    test %rsi, %rsi
+    jz 9f
+    mov (%rdi), %rcx
+    cmp (%rsi), %rcx
+    jne 9f
+    mov 8(%rdi), %rcx
+    cmp 8(%rsi), %rcx
+    jne 9f
+    mov $1, %eax
+9:  ret
+ENDF box_eq
+
+/* wb_i128(box rdi): appends a wide DECIMAL value (16 zero bytes for 0) */
+FUNC wb_i128
+    push %rbx
+    xor %eax, %eax
+    xor %ebx, %ebx
+    test %rdi, %rdi
+    jz 1f
+    mov (%rdi), %rax
+    mov 8(%rdi), %rbx
+1:  mov %rax, %rdi
+    mov $8, %esi
+    call wb_word
+    mov %rbx, %rdi
+    mov $8, %esi
+    call wb_word
+    pop %rbx
+    ret
+ENDF wb_i128
 
 /* write_chunk(col rdi, start rsi, n rdx, requested encoding rcx) */
 FUNC write_chunk
@@ -265,6 +303,9 @@ FUNC write_chunk
     movq $0, WC_NULLS(%rsp)
     movq $0, WC_HAS(%rsp)
     movq $0, WC_RUNS(%rsp)
+    mov %eax, %edi
+    call dec_is_wide
+    mov %rax, WC_WIDE(%rsp)
     call wb_pad8
     mov wbuf+BUF_LEN(%rip), %rax
     mov %rax, WC_OFF(%rsp)
@@ -308,6 +349,14 @@ FUNC write_chunk
     jz 41f
     cmp %r13, %rax
     je 42f
+    cmpq $0, WC_WIDE(%rsp)
+    je 41f
+    mov %rax, %rdi
+    mov %r13, %rsi
+    call box_eq
+    test %eax, %eax
+    mov %rdi, %rax
+    jnz 42f
 41: incq WC_RUNS(%rsp)
 42: mov %rax, %r13
     inc %r12
@@ -390,7 +439,13 @@ FUNC write_chunk
     mov WC_START(%rsp), %rsi
     add %r12, %rsi
     call col_get
-    mov %rax, %rdi
+    cmpq $0, WC_WIDE(%rsp)
+    je 80f
+    mov %rax, %rdi                  /* wide DECIMAL: i128 (NULL: 0) */
+    call wb_i128
+    inc %r12
+    jmp 8b
+80: mov %rax, %rdi
     mov $8, %esi
     cmp $T_DATE, %r15d
     jne 81f
@@ -512,10 +567,17 @@ FUNC write_chunk
     jz 43f
     cmp %r13, %rax
     je 43f
-    mov %rax, WC_TMP(%rsp)
+    cmpq $0, WC_WIDE(%rsp)
+    je 421f
+    mov %rax, %rdi
+    mov %r13, %rsi
+    call box_eq
+    test %eax, %eax
+    mov %rdi, %rax
+    jnz 43f
+421: mov %rax, WC_TMP(%rsp)
     mov %r13, %rdi
-    mov $8, %esi
-    call wb_word
+    call wb_value
     mov %r14, %rdi
     mov $4, %esi
     call wb_word
@@ -528,8 +590,7 @@ FUNC write_chunk
 44: test %r14, %r14
     jz 90f
     mov %r13, %rdi
-    mov $8, %esi
-    call wb_word
+    call wb_value
     mov %r14, %rdi
     mov $4, %esi
     call wb_word
@@ -580,6 +641,14 @@ FUNC write_chunk
     mov $'}', %esi
     call buf_putc
     LEAVE
+
+/* wb_value: local helper on write_chunk's frame (called, so the frame is
+ * at 8(%rsp)): an RLE run value from rdi - i64, or i128 for a wide column */
+wb_value:
+    cmpq $0, WC_WIDE+8(%rsp)
+    jne wb_i128
+    mov $8, %esi
+    jmp wb_word
 
 /* build_dict: local helper on write_chunk's frame (called, so the frame is
  * at 8(%rsp)): distinct values in first-seen order and the u32 codes */
@@ -756,11 +825,32 @@ FUNC pqcf_save
     mov $DEFAULT_RG, %r12d
 1:  movq $0, wbuf+BUF_LEN(%rip)
     movq $0, mbuf+BUF_LEN(%rip)
-    mov $0x0000000146435150, %rdi   /* "PQCF", version 1, flags 0 */
+    /* format version: 2 iff a column is a wide DECIMAL (decimal38.md 7) */
+    movq $1, 24(%rsp)
+    xor %r13d, %r13d
+11: cmp TB_NCOLS(%rbx), %r13
+    jae 12f
+    mov %r13, %rax
+    shl $COL_SHIFT, %rax
+    add TB_COLS(%rbx), %rax
+    mov COL_TYPE(%rax), %rdi
+    call dec_is_wide
+    inc %r13
+    test %eax, %eax
+    jz 11b
+    movq $2, 24(%rsp)
+12: mov 24(%rsp), %rdi              /* "PQCF", version, flags 0 */
+    shl $32, %rdi
+    mov $0x46435150, %eax
+    or %rax, %rdi
     mov $8, %esi
     call wb_word
     lea mbuf(%rip), %r15
-    PUTS %r15, "{\"format_version\":1,\"writer\":\"polyquery-x86_64-asm 0.1.0\",\"table\":"
+    PUTS %r15, "{\"format_version\":"
+    mov %r15, %rdi
+    mov 24(%rsp), %rsi
+    call buf_put_u64
+    PUTS %r15, ",\"writer\":\"polyquery-x86_64-asm 0.1.0\",\"table\":"
     mov %r15, %rdi
     mov TB_NAME(%rbx), %rsi
     call buf_put_json_pstr
@@ -1008,6 +1098,41 @@ FUNC dc_store
     ret
 ENDF dc_store
 
+/* dc_box(dc rdi, lo rsi, hi rdx) -> rax: validates a wide DECIMAL value
+ * (|v| < 10^p, else STORAGE_CORRUPT) and boxes it in the decode arena */
+FUNC dc_box
+    push %rbx
+    push %r12
+    push %r13
+    mov %rsi, %rbx
+    mov %rdx, %r12
+    mov DC_TYPE(%rdi), %rdx
+    shr $8, %edx
+    movzbl %dl, %edx
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    call i128_fits
+    test %eax, %eax
+    jz corrupt_value
+    mov g_decode_arena(%rip), %rdi
+    mov %rbx, %rsi
+    mov %r12, %rdx
+    call dec_box_in
+    pop %r13
+    pop %r12
+    pop %rbx
+    ret
+ENDF dc_box
+
+/* dc_store_ptr(dc rdi, i rsi, value rdx): stores a validated value of row i */
+FUNC dc_store_ptr
+    mov DC_COL(%rdi), %rax
+    add DC_ROW0(%rdi), %rsi
+    mov COL_DATA(%rax), %rax
+    mov %rdx, (%rax, %rsi, 8)
+    ret
+ENDF dc_store_ptr
+
 /* dc_strings(dc rdi, n rsi) -> rax pstr*[n]: a STRING offsets + bytes block
  * (PLAIN values or a DICT dictionary), validated, copied to the table arena;
  * `nullable` rows (dc rows when rdx = 1) that are NULL get 0 */
@@ -1107,7 +1232,11 @@ FUNC decode_chunk
     jmp 1b
 2:  cmp DC_NC(%rbx), %r14
     jne corrupt_chunk
-3:  mov DC_ENC(%rbx), %rax
+3:  mov DC_TYPE(%rbx), %rdi         /* wide DECIMAL: i128 values */
+    call dec_is_wide
+    test %eax, %eax
+    jnz 60f
+    mov DC_ENC(%rbx), %rax
     cmp $EN_DICT, %rax
     je 40f
     cmp $EN_RLE, %rax
@@ -1279,6 +1408,88 @@ FUNC decode_chunk
     jmp 51b
 55: cmp %r12, %r15
     jne corrupt_chunk
+    jmp 90f
+
+60: /* ---- wide DECIMAL (PQCF v2): PLAIN n x i128, RLE {i128, u32} runs */
+    cmpq $EN_RLE, DC_ENC(%rbx)
+    je 70f
+    cmpq $EN_PLAIN, DC_ENC(%rbx)
+    jne corrupt_chunk
+    mov %r12, %rsi
+    shl $4, %rsi
+    mov %rbx, %rdi
+    call dc_need
+    mov %rax, 8(%rsp)
+    xor %r15d, %r15d
+61: cmp %r12, %r15
+    jae 90f
+    mov %rbx, %rdi
+    mov %r15, %rsi
+    call dc_isnull
+    test %eax, %eax
+    jnz 62f
+    mov %r15, %rax
+    shl $4, %rax
+    add 8(%rsp), %rax
+    mov (%rax), %rsi
+    mov 8(%rax), %rdx
+    mov %rbx, %rdi
+    call dc_box
+    mov %rax, %rdx
+    mov %rbx, %rdi
+    mov %r15, %rsi
+    call dc_store_ptr
+62: inc %r15
+    jmp 61b
+70: mov %rbx, %rdi
+    mov $4, %esi
+    call dc_need
+    mov (%rax), %eax
+    mov %rax, 16(%rsp)              /* R */
+    imul $20, %rax, %rsi
+    mov %rbx, %rdi
+    call dc_need
+    mov %rax, 8(%rsp)               /* runs */
+    xor %r15d, %r15d                /* row */
+    xor %r14d, %r14d                /* run */
+71: cmp 16(%rsp), %r14
+    jae 55b
+    imul $20, %r14, %rax
+    add 8(%rsp), %rax
+    mov 16(%rax), %ecx              /* run length */
+    test %ecx, %ecx
+    jz corrupt_chunk
+    mov %r12, %rdx
+    sub %r15, %rdx
+    cmp %rdx, %rcx
+    ja corrupt_chunk
+    mov %rcx, 0(%rsp)
+    movq $0, 24(%rsp)               /* the run's box, made on first use */
+    mov %rax, %r13
+72: cmpq $0, 0(%rsp)
+    je 74f
+    mov %rbx, %rdi
+    mov %r15, %rsi
+    call dc_isnull
+    test %eax, %eax
+    jnz 73f
+    mov 24(%rsp), %rdx
+    test %rdx, %rdx
+    jnz 721f
+    mov (%r13), %rsi
+    mov 8(%r13), %rdx
+    mov %rbx, %rdi
+    call dc_box
+    mov %rax, 24(%rsp)
+    mov %rax, %rdx
+721: mov %rbx, %rdi
+    mov %r15, %rsi
+    call dc_store_ptr
+73: inc %r15
+    decq 0(%rsp)
+    jmp 72b
+74: inc %r14
+    jmp 71b
 
 90: mov DC_POS(%rbx), %rax           /* decoded size must equal length */
     cmp DC_L(%rbx), %rax
@@ -1337,9 +1548,21 @@ FUNC parse_bound
     shr $16, %ecx
     and $0xff, %ecx
     xor %r8d, %r8d                  /* exact */
+    cmp $18, %edx
+    ja 41f
     call text_parse_decimal
     test %edx, %edx
     jnz 8f
+    mov %rax, %rdx
+    jmp 7f
+41: mov %rsp, %r9                   /* wide: boxed in the table arena */
+    call dec_parse
+    test %eax, %eax
+    jnz 8f
+    mov g_decode_arena(%rip), %rdi
+    mov 0(%rsp), %rsi
+    mov 8(%rsp), %rdx
+    call dec_box_in
     mov %rax, %rdx
     jmp 7f
 4:  cmp $T_DATE, %ecx
@@ -1384,7 +1607,8 @@ ENDF parse_bound
 #define RD_MLEN   160
 #define RD_TMP    168   /* 168..199 */
 #define RD_STAT   200   /* struct stat 200..343 */
-#define RD_FRAME  344
+#define RD_VER    344   /* header format_version */
+#define RD_FRAME  352
 FUNC pqcf_read
     ENTER RD_FRAME
     mov g_pending_arena(%rip), %rax
@@ -1482,8 +1706,9 @@ FUNC pqcf_read
     movzwl 4(%rbx), %eax            /* format_version */
     test %eax, %eax
     jz corrupt_frame
-    cmp $1, %eax
-    jne 12f
+    cmp $2, %eax                    /* v1 and v2 (decimal38.md 7) */
+    ja 12f
+    mov %rax, RD_VER(%rsp)
     cmpw $0, 6(%rbx)                /* flags */
     jne 12f
     cmp $20, %r13
@@ -1520,7 +1745,7 @@ FUNC pqcf_read
     mov RD_META(%rsp), %rdi
     CSTR %rsi, "format_version"
     call m_int
-    cmp $1, %rax
+    cmp RD_VER(%rsp), %rax          /* must equal the header's */
     jne corrupt_meta
     mov RD_META(%rsp), %rdi
     CSTR %rsi, "table"
@@ -1601,7 +1826,14 @@ FUNC pqcf_read
     call type_parse
     test %edx, %edx
     jnz corrupt_meta
-    mov %rax, %rcx
+    mov %rax, RD_TMP+8(%rsp)
+    mov %eax, %edi                  /* wide DECIMAL columns need v2 */
+    call dec_is_wide
+    test %eax, %eax
+    jz 221f
+    cmpq $2, RD_VER(%rsp)
+    jb corrupt_meta
+221: mov RD_TMP+8(%rsp), %rcx
     mov %r12, %rsi
     shl $COL_SHIFT, %rsi
     mov RD_TABLE(%rsp), %rax

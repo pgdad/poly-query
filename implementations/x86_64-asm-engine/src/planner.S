@@ -183,7 +183,19 @@ ENDF try_eval_const
 /* conv_exact(src type rdi, value rsi, dst type rdx) -> rax value, edx 1 = ok
  * (exact representation of the value in the column's type, or failure) */
 FUNC conv_exact
-    movzbl %dil, %r8d               /* source kind */
+    cmp $T_DEC, %dl                 /* to / from a wide DECIMAL: dec128.S */
+    jne 0f
+    mov %edx, %eax
+    shr $8, %eax
+    cmp $18, %al
+    ja dec_conv_exact
+    cmp $T_DEC, %dil
+    jne 0f
+    mov %edi, %eax
+    shr $8, %eax
+    cmp $18, %al
+    ja dec_conv_exact
+0:  movzbl %dil, %r8d               /* source kind */
     movzbl %dl, %r9d                /* target kind */
     mov %rdi, %r10
     shr $16, %r10
@@ -521,8 +533,18 @@ FUNC to_num
     jne 1f
     movq %rsi, %xmm0
     ret
-1:  cvtsi2sd %rsi, %xmm0
+1:  cmp $T_DEC, %eax
+    jne 2f
+    mov %edi, %eax
+    shr $8, %eax
+    cmp $18, %al
+    ja 3f
+2:  cvtsi2sd %rsi, %xmm0
     ret
+3:  mov (%rsi), %rdi                /* wide DECIMAL: unscaled i128 */
+    mov 8(%rsi), %rsi
+    xor %edx, %edx
+    jmp dec128_to_double
 ENDF to_num
 
 /* range_sel(ci rdi, type rsi, stats rdx) -> xmm0 selectivity of the range */
@@ -1043,6 +1065,15 @@ FUNC find_equi
     xor N_TYPE(%rax), %ecx
     test $0xff00ff, %ecx
     jnz 9f
+    mov N_A(%r12), %rax             /* DECIMAL: one representation (narrow */
+    mov N_TYPE(%rax), %edi          /* i64 or wide box) on both sides */
+    call dec_is_wide
+    mov %eax, 0(%rsp)
+    mov N_B(%r12), %rax
+    mov N_TYPE(%rax), %edi
+    call dec_is_wide
+    cmp 0(%rsp), %eax
+    jne 9f
     mov N_A(%r12), %rdi
     mov FP_RLO(%rbx), %rsi
     mov FP_RHI(%rbx), %rdx
