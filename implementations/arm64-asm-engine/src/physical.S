@@ -229,7 +229,6 @@ LFUNC pp_rewrite
     b    4b
 6:  str  x24, [x19, #PN_EXPR]
     cbnz x24, .Lpp_joins
-    // filter became empty: unlink it (its parent is the Aggregate/Project)
     // the filter became empty: overwrite it with its child (the FROM root)
     mov  x0, x19
     ldr  x1, [x19, #PN_LEFT]
