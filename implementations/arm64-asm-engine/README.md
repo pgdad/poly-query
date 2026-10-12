@@ -34,7 +34,8 @@ reordering). See
 the before/after measurements.
 
 The latency of the analytics benchmark workload was then optimized
-(≈520 ms → ≈58 ms summed over its 20 queries at scale 1m); see
+(≈520 ms → ≈58 ms summed over its 20 queries at scale 1m, forced merge
+joins 70 / 107 ms → 8 / 12 ms); see
 [Latency optimization](#latency-optimization-analytics-workload).
 
 It also implements the architectural change **CR-1 `UNION ALL`**
@@ -574,7 +575,9 @@ task, sum of task times) to stderr.
 ### Results
 
 NVIDIA GB10 (10 Cortex-X925 + 10 Cortex-A725), default options (vectorized,
-8 threads), 9 runs, wall-clock median in ms:
+8 threads), wall-clock in ms: "before" is the median of 9 runs, "after" the
+median of three medians of 9 runs (run-to-run variation is about ±15% on
+this machine: big / little cores, energy-aware scheduling):
 
 | query | before | after | speed-up |
 |---|---:|---:|---:|
@@ -582,26 +585,26 @@ NVIDIA GB10 (10 Cortex-X925 + 10 Cortex-A725), default options (vectorized,
 | q02_filter_low_selectivity | 2.4 | 1.7 | 1.4× |
 | q03_range_filter_time | 0.8 | 1.2 | — |
 | q04_arith_aggregate | 5.3 | 3.0 | 1.8× |
-| q05_groupby_low_card | 3.6 | 2.0 | 1.8× |
-| q06_groupby_high_card | 7.4 | 2.7 | 2.7× |
-| q07_groupby_skewed | 8.9 | 3.7 | 2.4× |
-| q08_groupby_uniform_multi | 5.5 | 2.3 | 2.4× |
-| q09_distinct_count | 143.3 | 4.2 | 34× |
-| q10_join_customers | 13.6 | 4.6 | 3.0× |
-| q11_join_star | 11.9 | 5.2 | 2.3× |
-| q12_left_join_anti | 11.9 | 1.9 | 6.3× |
-| q13_sort_topn | 4.2 | 1.5 | 2.8× |
-| q14_sort_full_string | 174.4 | 6.7 | 26× |
-| q15_sort_multi_key | 87.2 | 5.5 | 16× |
-| q16_timeseries_hourly | 1.3 | 1.4 | — |
-| q17_wide_projection | 0.7 | 0.4 | 1.8× |
+| q05_groupby_low_card | 3.6 | 1.5 | 2.4× |
+| q06_groupby_high_card | 7.4 | 3.1 | 2.4× |
+| q07_groupby_skewed | 8.9 | 3.8 | 2.3× |
+| q08_groupby_uniform_multi | 5.5 | 2.4 | 2.3× |
+| q09_distinct_count | 143.3 | 4.1 | 35× |
+| q10_join_customers | 13.6 | 5.1 | 2.7× |
+| q11_join_star | 11.9 | 5.4 | 2.2× |
+| q12_left_join_anti | 11.9 | 2.0 | 6.0× |
+| q13_sort_topn | 4.2 | 1.6 | 2.6× |
+| q14_sort_full_string | 174.4 | 6.6 | 26× |
+| q15_sort_multi_key | 87.2 | 5.8 | 15× |
+| q16_timeseries_hourly | 1.3 | 0.9 | — |
+| q17_wide_projection | 0.7 | 0.3 | — |
 | q18_nulls | 4.3 | 2.4 | 1.8× |
-| q19_cte_subquery | 10.7 | 6.2 | 1.7× |
-| q20_string_functions | 13.4 | 1.0 | 13× |
-| **sum** | **520** | **58** | **9×** |
+| q19_cte_subquery | 10.7 | 5.8 | 1.8× |
+| q20_string_functions | 13.4 | 1.1 | 12× |
+| **sum** | **511** | **58** | **9×** |
 
 Sub-millisecond queries (q01, q03, q16) are within noise. Forced merge
-joins (the workload's `joins` section): q10 69.6 → 7.9 ms, q11 107 → 12.6
+joins (the workload's `joins` section): q10 69.6 → 7.8 ms, q11 107 → 11.9
 ms.
 Thread scaling (q02 / q05 / q06 / q10 at 1, 2, 4, 16 threads): 7.5 / 8.9 /
 10.5 / 26.6 ms → 3.8 / 4.6 / 5.5 / 14.0 → 2.1 / 2.8 / 3.7 / 8.2 → 1.0 /
