@@ -390,15 +390,20 @@ also passes with `PQ_PAR_MIN=1`.
 * Parallel operators: full scans with pushed-down filters (honouring
   row-group skipping), WHERE, projection (with per-part top-N), hash-join
   probe and build, nested-loop join, merge-join key evaluation,
-  aggregation, ORDER BY (each part sorts its range of (row, sequence)
-  pairs, then the sorted runs are merged pairwise in parallel rounds). Aggregation without GROUP BY merges
+  aggregation, ORDER BY (normalized-key sample sort, `keysort.S`; when
+  the first key cannot be normalized, each part sorts its range of (row,
+  sequence) pairs and the sorted runs are merged pairwise in parallel
+  rounds). Aggregation without GROUP BY merges
   per-part partial states in part order (exact for INT64 / DECIMAL).
   GROUP BY is **hash-partitioned**: phase 1 computes key cells and hashes in
   parallel; in phase 2 part p owns the groups whose hash falls into
   partition p and aggregates their tuples in input order, so every group
   sees exactly the serial sequence of updates (identical FLOAT64 sums,
   DISTINCT aggregates work unchanged) and each part's hash table stays
-  small and cache-resident. With one part, grouping is a single fused pass.
+  small and cache-resident. With one part, grouping is a single fused pass;
+  with few groups and exactly mergeable states every part runs that fused
+  pass on its own range and the local groups are merged in part order
+  (see "Latency optimization").
 * Timeouts and cancellation are checked by every part once per batch.
 
 ### Joins (`exec.S`, `join.S`, `pexec.S`)
