@@ -1,0 +1,95 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-refactor-plan-separation-arm64-asm-engine-a1-20261012T091327Z",
+ "language": "arm64-asm-engine",
+ "task": "refactor-plan-separation",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-refactor-plan-separation",
+ "prompt_sha256": "41ccb62e16c224663361f277c211b4dbbda3fa48693c17cf7e633a33df51e716",
+ "session_id": "23280d4d-3373-409e-af3e-5ca44482ad90",
+ "tokens": {
+  "input": 172,
+  "output": 166105,
+  "cache_read": 17763289,
+  "cache_creation": 319238,
+  "thinking": null,
+  "thinking_estimated": 85716,
+  "source": "result events",
+  "api_messages": 86
+ },
+ "rate_limit": {
+  "events": 7,
+  "max_utilization": {
+   "five_hour": 0.08,
+   "seven_day": 0.58
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 9.429349800000002,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 88,
+ "result_segments": 1,
+ "assistant_messages": 174,
+ "tool_calls": {
+  "Bash": 77,
+  "Read": 2,
+  "Write": 8
+ },
+ "tool_calls_total": 87,
+ "tool_failures": 0,
+ "build_invocations": 12,
+ "build_failures_heuristic": 0,
+ "conformance_runs": 4,
+ "conformance_progress": [
+  [
+   591,
+   591
+  ],
+  [
+   591,
+   591
+  ],
+  [
+   591,
+   591
+  ],
+  [
+   591,
+   591
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 1541.2,
+  "model_api_seconds": 1485.4,
+  "tool_seconds": 54.2,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 5,
+  "files_changed": 21,
+  "lines_added": 3337,
+  "lines_removed": 1308,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The refactoring is complete and committed, and every suite that passed before still passes. Planning is now three separate steps: build a logical plan, optimize it with named rules, then make the physical plan. The capability set is identical, and responses and EXPLAIN output are the same as before.\n\n**Test results**\n- Session runner: `TOTAL: 591/591 pass` (phase 1: 225, phase 2: 208, phase 3: 143, phase 5: 15)\n- `--modes`: `TOTAL: 3456/3456 pass`\n- `--transport http`: `TOTAL: 591/591 pass`\n- HTTP suite: `http suite: 19/19 passed`\n- `make build test lint` all pass, including the new optimizer tests (42/42).\n- I also compared the old binary with the new one on every conformance query plus extra planner-heavy queries. Each ran as both `explain` and `query` under 10 option sets (9,059 requests) with no differences. That script was a throw-away and is not in the repo.\n\n**What I implemented**\n- **Logical plan (`logical.S`):** an explicit data structure with Scan, SubqueryScan (derived tables and CTEs), Values, Filter, Join (type and condition), Aggregate (keys and aggregate calls), Project, Distinct, Sort, Limit and UnionAll. Expression subqueries keep their own logical plan. A debug printer shows any plan, and setting `PQ_TRACE_PLAN=1` prints it after every rule.\n- **Optimizer (`optimize.S` plus one file per rule):** a table of six named rules that only rewrite the logical plan. They are column pruning, constant folding, predicate simplification, pushing WHERE conditions down, join reordering, and pushing join conditions into the join inputs. With `optimize: false` no rule runs.\n- **Physical planner (`physical.S`):** the only place that decides the access path (index or table scan), join keys and algorithm (honouring the `join` option), build side, top-N, and execution mode and thread count. Mode and threads are now stored in the plan, and the executor runs with the plan's settings instead of reading the request options itself.\n- **Tests and docs:** `tests/unit/test_optimizer.S` checks the plan builder and each rule on its own, by comparing the printed plan with the expected text. `README.md` has the before/after module map and a section on the change; `include/API.md` and `NOTES.md` are updated.\n\n**Design decisions**\n- **Rule order:** the rules run in the order the old code made the same decisions, so every plan comes out identical. In particular, join reordering sees the WHERE conditions already pushed to the scans, but not yet the single-table conditions from ON clauses.\n- **Column pruning runs first.** If it ran last, a column referenced only inside a branch that simplification removes (for example `FALSE AND c010 > 5`) would drop out of the EXPLAIN column list. That would be a visible change, so I kept the old behaviour.\n\n**Known limitation**\n- **`optimize: false` still pushes predicates down and prunes columns.** The change spec says no rules may run with `optimize: false`, but it also forbids any visible change. The Phase 3 spec requires both behaviours, and the `--modes` suite checks index scans and pruned column lists with `optimize: false`. So with optimization on, the logical rules do this work; with it off, the physical planner does it itself, using the code that already did this before the refactoring. Both paths produce the same plan. The cost is that predicate placement exists in both the logical rules and the physical planner; the README explains why.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

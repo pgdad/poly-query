@@ -1,0 +1,21 @@
+{
+ "chain_id": "chain-a-refactor-plan-separation-arm64-asm-engine-a1-20261012T091327Z",
+ "task": "refactor-plan-separation",
+ "language": "arm64-asm-engine",
+ "track": "A",
+ "attempt": 1,
+ "max_sessions": 2,
+ "total_budget_usd": 45.0,
+ "timeout_min": 120,
+ "sessions": [
+  {
+   "run_id": "a-refactor-plan-separation-arm64-asm-engine-a1-20261012T091327Z",
+   "session": 1,
+   "outcome": "success",
+   "cost_usd": 9.429349800000002
+  }
+ ],
+ "spent_usd": 9.43,
+ "outcome": "success",
+ "finished": "2026-10-12T09:39:26+00:00"
+}
