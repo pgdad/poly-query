@@ -1,0 +1,4 @@
+2026-10-12T09:04:28+00:00 chain chain-a-debug-mutant-arm64-asm-engine-a1-20261012T090428Z: session 1 -> a-debug-mutant-arm64-asm-engine-a1-20261012T090428Z (budget $15.00)
+2026-10-12T09:04:28+00:00 [a-debug-mutant-arm64-asm-engine-a1-20261012T090428Z] agent queued (usage gate, then launch)
+2026-10-12T09:05:08+00:00 [a-debug-mutant-arm64-asm-engine-a1-20261012T090428Z] agent finished; collecting telemetry
+2026-10-12T09:05:08+00:00 [a-debug-mutant-arm64-asm-engine-a1-20261012T090428Z] validating (clean clone, sandboxed)

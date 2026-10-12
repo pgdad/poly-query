@@ -1,0 +1,6 @@
+2026-10-12T09:04:18+00:00 chain chain-a-debug-mutant-x86_64-asm-engine-a1-20261012T090418Z: session 1 -> a-debug-mutant-x86_64-asm-engine-a1-20261012T090418Z (budget $15.00)
+2026-10-12T09:04:18+00:00 [a-debug-mutant-x86_64-asm-engine-a1-20261012T090418Z] agent queued (usage gate, then launch)
+2026-10-12T09:05:05+00:00 [a-debug-mutant-x86_64-asm-engine-a1-20261012T090418Z] agent finished; collecting telemetry
+2026-10-12T09:05:05+00:00 [a-debug-mutant-x86_64-asm-engine-a1-20261012T090418Z] validating (clean clone, sandboxed)
+2026-10-12T09:05:18+00:00 [a-debug-mutant-x86_64-asm-engine-a1-20261012T090418Z] outcome=success cost=$0.3684982 turns=17 wall=47.5s
+2026-10-12T09:05:18+00:00 chain chain-a-debug-mutant-x86_64-asm-engine-a1-20261012T090418Z finished: outcome=success sessions=1 spent=$0.37
