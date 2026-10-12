@@ -6,7 +6,7 @@
 # where batch evaluation could diverge from tuple-at-a-time evaluation:
 # short-circuit AND / OR / CASE and NULL operands guarding errors, overflow,
 # mixed-scale decimals, dictionary strings, NULL group keys, DISTINCT
-# aggregates, outer-join padding and subqueries.
+# aggregates, outer-join padding, subqueries and UNION ALL compounds.
 set -u
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BIN="$DIR/bin/polyquery"
@@ -82,6 +82,13 @@ SELECT a FROM t WHERE (1 = 1 OR a / 0 > 1) AND (b > 3 OR 2 < 1)
 SELECT b, MAX(a / (b + 4) + a * 3074457345618258602) FROM t GROUP BY b
 SELECT a, s, n FROM t WHERE a < 300 ORDER BY s, n DESC LIMIT 25
 SELECT b, s FROM t ORDER BY b LIMIT 30 OFFSET 400
+SELECT a, d FROM t WHERE b > 2 UNION ALL SELECT k, w FROM u UNION ALL SELECT a, f FROM t WHERE a < 9
+SELECT b AS g, COUNT(*) AS c FROM t GROUP BY b UNION ALL SELECT k, SUM(k) FROM u GROUP BY k ORDER BY c DESC, g LIMIT 12
+SELECT s, n FROM t WHERE a < 500 UNION ALL SELECT name, NULL FROM u ORDER BY 2 NULLS FIRST, 1 LIMIT 40 OFFSET 3
+SELECT COUNT(*), SUM(v) FROM (SELECT a AS v FROM t UNION ALL SELECT k FROM u UNION ALL SELECT NULL) x
+SELECT t.a FROM t WHERE t.n IN (SELECT k FROM u WHERE w > 20 UNION ALL SELECT b FROM t WHERE b > 3) AND t.a < 300
+SELECT a / b FROM t WHERE a < 10 UNION ALL SELECT a * 4611686018427387904 FROM t
+SELECT a * 9223372036854 FROM t UNION ALL SELECT d FROM t
 Q
 )
 
