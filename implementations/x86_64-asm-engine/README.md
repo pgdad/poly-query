@@ -655,8 +655,17 @@ row table of wide values (`modes_test.sh`, table `w`) is queried under every
 execution option set (byte-identical responses), and its results (sums,
 group sums, MIN / MAX, DISTINCT counts, products, AVG, ROUND / FLOOR / CEIL,
 FLOAT64 conversions, filters) were checked against Python's `decimal`
-module at 120-digit precision. The Phase 5 benchmark (`bench/bench.sh`, 1m
-rows) shows the narrow paths unchanged.
+module at 120-digit precision. A random-expression fuzzer (20,000 queries:
+arithmetic with the W / scale / overflow rules, exact comparisons including
+INT64, ROUND / FLOOR / CEIL, every CAST from wide values) agreed with a
+Python `decimal` oracle, and PQCF v2 files written by the engine were decoded
+independently. The Phase 5 benchmark (`bench/bench.sh`, 1m rows) shows the
+narrow paths unchanged (a vectorized fast path keeps `decimal > integer`
+filters on AVX2 now that the binder no longer casts the integer side).
+
+Known limitations of CR-2: expressions with wide operands are evaluated tuple
+at a time inside vectorized batches (correct and parallel, but without SIMD);
+joins between DECIMALs of different scales stay nested-loop joins, as before.
 
 ## Change CR-3: logical / physical plan separation
 

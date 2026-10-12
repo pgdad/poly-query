@@ -19,9 +19,17 @@
   planner equi_key_type for join keys); (3) wide boxes for stored data must
   be allocated in the table arena (dec_box_in), computed ones in the
   request / worker arena (dec_box).
-  Verified the wide results against Python decimal with a script (kept
-  outside the repo, /tmp/wv/verify.py: loads the modes_test `w` table and
-  compares ~10 aggregate / arithmetic / rounding queries in 3 option sets).
+  Verified the wide results against Python decimal with scripts kept
+  outside the repo: (1) the modes_test `w` table, ~10 aggregate /
+  arithmetic / rounding queries in 3 option sets; (2) a random-expression
+  fuzzer (20,000 cases: + - * with W / TYPE_ERROR / overflow rules,
+  comparisons incl. INT64, ROUND / FLOOR / CEIL, CASTs to DECIMAL / INT64 /
+  FLOAT64, unary minus / ABS) - 0 differences; (3) PQCF v2 round trips
+  (PLAIN / RLE / auto, eager and mmap) of +-(10^38 - 1) values, plus an
+  independent Python decode of the written chunks.
+  Possible follow-ups: vectorized (batch) kernels for wide arithmetic and
+  comparisons (they run tuple at a time through eval today); a cheaper
+  key than boxed DECIMAL(38,s) for INT64 = narrow DECIMAL hash joins.
 
 * CR-3 logical / physical plan separation is complete (README "Change
   CR-3" has the before / after module map). Pipeline per query block
