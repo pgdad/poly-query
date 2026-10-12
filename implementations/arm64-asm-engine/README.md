@@ -582,29 +582,29 @@ this machine: big / little cores, energy-aware scheduling):
 | query | before | after | speed-up |
 |---|---:|---:|---:|
 | q01_filter_selective | 0.2 | 0.2 | — |
-| q02_filter_low_selectivity | 2.4 | 1.7 | 1.4× |
-| q03_range_filter_time | 0.8 | 1.2 | — |
-| q04_arith_aggregate | 5.3 | 3.0 | 1.8× |
-| q05_groupby_low_card | 3.6 | 1.5 | 2.4× |
-| q06_groupby_high_card | 7.4 | 3.1 | 2.4× |
-| q07_groupby_skewed | 8.9 | 3.8 | 2.3× |
-| q08_groupby_uniform_multi | 5.5 | 2.4 | 2.3× |
-| q09_distinct_count | 143.3 | 4.1 | 35× |
-| q10_join_customers | 13.6 | 5.1 | 2.7× |
-| q11_join_star | 11.9 | 5.4 | 2.2× |
-| q12_left_join_anti | 11.9 | 2.0 | 6.0× |
-| q13_sort_topn | 4.2 | 1.6 | 2.6× |
-| q14_sort_full_string | 174.4 | 6.6 | 26× |
-| q15_sort_multi_key | 87.2 | 5.8 | 15× |
-| q16_timeseries_hourly | 1.3 | 0.9 | — |
+| q02_filter_low_selectivity | 2.4 | 1.1 | 2.2× |
+| q03_range_filter_time | 0.8 | 0.7 | — |
+| q04_arith_aggregate | 5.3 | 2.4 | 2.2× |
+| q05_groupby_low_card | 3.6 | 1.7 | 2.1× |
+| q06_groupby_high_card | 7.4 | 2.7 | 2.7× |
+| q07_groupby_skewed | 8.9 | 4.4 | 2.0× |
+| q08_groupby_uniform_multi | 5.5 | 2.6 | 2.1× |
+| q09_distinct_count | 143.3 | 4.4 | 33× |
+| q10_join_customers | 13.6 | 5.0 | 2.7× |
+| q11_join_star | 11.9 | 5.3 | 2.2× |
+| q12_left_join_anti | 11.9 | 1.9 | 6.3× |
+| q13_sort_topn | 4.2 | 1.5 | 2.8× |
+| q14_sort_full_string | 174.4 | 7.4 | 24× |
+| q15_sort_multi_key | 87.2 | 6.2 | 14× |
+| q16_timeseries_hourly | 1.3 | 0.8 | 1.6× |
 | q17_wide_projection | 0.7 | 0.3 | — |
-| q18_nulls | 4.3 | 2.4 | 1.8× |
-| q19_cte_subquery | 10.7 | 5.8 | 1.8× |
-| q20_string_functions | 13.4 | 1.1 | 12× |
+| q18_nulls | 4.3 | 2.2 | 2.0× |
+| q19_cte_subquery | 10.7 | 6.1 | 1.8× |
+| q20_string_functions | 13.4 | 1.0 | 13× |
 | **sum** | **511** | **58** | **9×** |
 
-Sub-millisecond queries (q01, q03, q16) are within noise. Forced merge
-joins (the workload's `joins` section): q10 69.6 → 7.8 ms, q11 107 → 11.9
+Sub-millisecond queries (q01, q16, q17) are within noise. Forced merge
+joins (the workload's `joins` section): q10 69.6 → 7.8 ms, q11 107 → 12.5
 ms.
 Thread scaling (q02 / q05 / q06 / q10 at 1, 2, 4, 16 threads): 7.5 / 8.9 /
 10.5 / 26.6 ms → 3.8 / 4.6 / 5.5 / 14.0 → 2.1 / 2.8 / 3.7 / 8.2 → 1.0 /
@@ -668,6 +668,13 @@ Volcano baseline and was deliberately left as it was.
   left position + its right start) without splitting a run of equal keys,
   merged in parallel and concatenated in order; pairs are written directly
   into the output.
+* **Index scans** (`index.S`, q03): the row ids of an index lookup are
+  sorted by an 11-bit LSD radix sort instead of `qsort` (half of q03).
+* **IS [NOT] NULL** of a column reads only the NULL bitmap (q18).
+* **Group order** (`vagg.S`): without ORDER BY the merged groups must come
+  in order of first appearance; every merge table already creates its
+  groups in that order, so a parallel k-way merge (value-range slices,
+  binary search per table) replaced a 4-pass radix sort (q19's CTE).
 * **Memory** (`rt.S` `rt_tune_malloc`): glibc returned freed request arenas
   to the kernel (trim / mmap thresholds), so every large query page-faulted
   its memory in again (q15 spent ~35% in the kernel). A fixed 32 MiB mmap
