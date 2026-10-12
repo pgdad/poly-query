@@ -73,6 +73,12 @@ Globals (rt.S): `g_arena` (Arena), `g_out` (Buf, response line), `g_deadline`,
 | `dec_rescale` | x0 unscaled, w1 from_scale, w2 to_scale | x0, w1 status (2 overflow > 18 digits); rounds half away when reducing |
 | `dec_to_f64` | x0 unscaled, w1 scale | d0 (correctly rounded) |
 | `f64_to_dec` | d0 value, w1 prec, w2 scale | x0 unscaled, w1 status (2 overflow); round half away |
+| `dec_get128` / `dec_put128` | payload, type / lo, hi, type | i128 of an INT64 / DECIMAL payload; payload of a DECIMAL type (boxes wide values) — `wdec.S` |
+| `dec_cmp` | x0 a, w1 ta, x2 b, w3 tb | w0 -1/0/1, exact for any INT64 / DECIMAL mix |
+| `dec_arith` | x0 a, x1 b, w2 op, w3 ta, w4 tb, w5 result type | x0 (+ - * with a wide result; raises NUMERIC_OVERFLOW) |
+| `dec_convert` | x0 payload, w1 from, w2 to, w3 mode (0 round, 1 exact) | x0, w1 status (2 overflow, 3 inexact); `T_SATF` in `to` saturates |
+| `dec_to_int` / `dec_to_double` / `dec_from_f64` | payload, type / d0, type | INT64 + status / d0 / payload + status |
+| `parse_dec128` / `fmt_dec128` | as `parse_decimal` / `fmt_decimal` for p ≤ 38 | x0 lo, x1 hi, w2 status / – |
 | `cast_value` | x0 payload, w1 from_type, w2 to_type | x0 payload; raises CONVERSION_ERROR / NUMERIC_OVERFLOW; caller handles NULL; from==T_NULL never passed |
 | `cast_allowed` | w0 from_type, w1 to_type | w0 1/0 (types.md §8 matrix; T_NULL ⇒ 1) |
 | `type_from_name` | x0 ptr, x1 len, w2 nparams (0..2), x3 p, x4 s | w0 type, or -1 unknown name, -2 invalid parameters |

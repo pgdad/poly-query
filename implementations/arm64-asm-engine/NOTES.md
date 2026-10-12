@@ -1,5 +1,30 @@
 # Working notes (arm64-asm-engine)
 
+## Status (change CR-2 decimal38, session 1)
+- Conformance incl. changes/decimal38 (69/69): all phases 660/660,
+  `--modes` 3870/3870, `--transport http` 660/660, http_suite 19/19;
+  `make build test lint` pass. Capability `change.decimal38` claimed.
+- Design: README "Change CR-2". Wide DECIMAL (p > 18) payload = pointer to a
+  boxed i128; wdec.S has the 256-bit toolkit and all wide operations;
+  `BR_WIDE` (pq.inc) is the narrow/wide test. Comparison operands: narrow vs
+  wide -> narrow widened to DECIMAL(38,s); INT64 vs DECIMAL -> saturating
+  cast (T_SATF flag in the type word) so comparisons are exact and hash keys /
+  indexes keep one encoding.
+- Boxed values must be deep-copied whenever a table arena is rebuilt
+  (storage.S val_copy_in) — same rule as strings.
+- PQCF: version 2 iff a wide column exists (pqcf_save scans the columns);
+  reader pr_wide decodes PLAIN / RLE wide chunks.
+- Next: keep fuzzing (differential harness in /tmp/d38fuzz, outside the
+  repo, if it still exists): wide values in joins / grouping / indexes /
+  parallel aggregation / PQCF round trips under every option set.
+
+## Gotchas (CR-2)
+- Never compare wide payloads with `cmp x0, x1` (pointers): use cmp_typed /
+  value_cmp / wv_eq. Sites that special-case T_STR usually need BR_WIDE too.
+- Type words may carry T_SATF (bit 24): extract scale / precision with ubfx,
+  never `lsr #T_SCALE_SHIFT`.
+- i256_from128 clobbers x3; keep values in callee-saved registers around it.
+
 ## Status (change CR-3 plan separation, session 1) — complete
 - Conformance unchanged: all phases 591/591, `--modes` 3456/3456,
   `--transport http` 591/591, http_suite 19/19; capability set identical;

@@ -2519,7 +2519,9 @@ FUNC expr_equal
     cbnz w9, .Lee_true                  // both NULL
     ldr  x0, [x19, #N_VAL]
     ldr  x1, [x20, #N_VAL]
-    ldrb w9, [x19, #N_TYPE]
+    ldr  w9, [x19, #N_TYPE]
+    BR_WIDE w9, w10, 3f
+    and  w9, w9, #T_KIND_MASK
     cmp  w9, #T_STR
     b.ne .Lee_val
     ldr  x2, [x0, #STR_LEN]
@@ -2530,6 +2532,12 @@ FUNC expr_equal
     add  x1, x1, #STR_DATA
     bl   memcmp
     cbnz w0, .Lee_false
+    b    .Lee_true
+3:  ldp  x2, x3, [x0]                 // wide DECIMAL literals: the values
+    ldp  x4, x5, [x1]
+    cmp  x2, x4
+    ccmp x3, x5, #0, eq
+    b.ne .Lee_false
     b    .Lee_true
 .Lee_col:
     ldr  x0, [x19, #N_B]
