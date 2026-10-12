@@ -1972,7 +1972,7 @@ LFUNC merge_task
     mov  x3, #0
     mov  x10, #0
 0:  cmp  x10, x24
-    b.hs 01f
+    b.hs 6f
     ldr  x11, [x19, #MT_TASKS]
     mov  x12, #XT_SIZE
     madd x11, x10, x12, x11
@@ -1985,7 +1985,7 @@ LFUNC merge_task
     add  x3, x3, x14
     add  x10, x10, #1
     b    0b
-01: bl   gt_alloc
+6:  bl   gt_alloc
     mov  x20, x0
     str  x20, [x19, #MT_GT]
     mov  x21, #0

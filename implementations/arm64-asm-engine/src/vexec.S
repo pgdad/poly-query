@@ -751,7 +751,51 @@ FUNC veval
     b    1b
 
 .Lve_isnull:
-    ldr  x0, [x19, #N_A]
+    ldr  x0, [x19, #N_A]                // a column of this level in column
+    ldr  w9, [x0, #N_KIND]              // layout: only its NULL bitmap
+    cmp  w9, #NK_COL
+    b.ne 2f
+    ldr  w9, [x0, #N_OP]
+    cbnz w9, 2f
+    ldr  x25, [x0, #N_B]                // rv
+    ldr  x9, [x20, #VB_EC]
+    ldr  x9, [x9, #EC_TABLES]
+    ldr  x10, [x9, x25, lsl #3]
+    cbz  x10, 2f
+    ldr  w11, [x10, #TBL_LAYOUT]
+    cbnz w11, 2f
+    ldr  x11, [x10, #TBL_COLS]
+    ldr  x12, [x0, #N_VAL]
+    add  x11, x11, x12, lsl #5
+    ldr  x15, [x11, #COL_NULLS]
+    ldr  w24, [x19, #N_OP]              // 1 = IS NOT NULL
+    ldr  x9, [x20, #VB_TUP]
+    ldr  x10, [x20, #VB_W]
+    add  x9, x9, x25, lsl #2            // &tuple[0][rv]
+    lsl  x10, x10, #2
+    add  x17, x23, #VEC_NULLS
+    mov  x16, #0
+1:  cmp  x16, x22
+    b.hs .Lve_ret
+    ldrh w1, [x21, x16, lsl #1]
+    add  x16, x16, #1
+    madd x2, x1, x10, x9
+    ldr  w2, [x2]                       // row id
+    mov  w3, #1
+    cmn  w2, #1
+    b.eq 11f                            // ROW_NULL (LEFT JOIN padding)
+    mov  w3, #0
+    cbz  x15, 11f
+    lsr  x4, x2, #3
+    ldrb w3, [x15, x4]
+    and  w4, w2, #7
+    lsr  w3, w3, w4
+    and  w3, w3, #1
+11: eor  w3, w3, w24
+    str  x3, [x23, x1, lsl #3]
+    strb wzr, [x17, x1]
+    b    1b
+2:  ldr  x0, [x19, #N_A]
     mov  x1, x20
     mov  x2, x21
     mov  x3, x22
@@ -930,23 +974,23 @@ LFUNC ds_walk
     and  w10, w10, #0xff
     cmp  w10, #FN_PQ_SLEEP
     b.eq 8f
-    b    01f
+    b    7f
 0:  cmp  w9, #NK_CASE
-    b.eq 01f
+    b.eq 7f
     cmp  w9, #NK_LIKE
-    b.eq 01f
+    b.eq 7f
     cmp  w9, #NK_IN
-    b.eq 01f
+    b.eq 7f
     cmp  w9, #NK_BETWEEN
-    b.eq 01f
+    b.eq 7f
     cmp  w9, #NK_CAST
-    b.eq 01f
+    b.eq 7f
     cmp  w9, #NK_BINARY
     b.ne 1f
     ldr  w10, [x19, #N_OP]
     cmp  w10, #OP_CONCAT
     b.ne 1f
-01: mov  x10, #1                        // complex
+7:  mov  x10, #1                        // complex
     str  x10, [x20, #24]
 1:  mov  x0, x19
     bl   expr_nchildren
