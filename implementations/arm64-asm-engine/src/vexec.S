@@ -332,10 +332,18 @@ FUNC veval
     ldr  w11, [x9, #N_TYPE]
     and  w12, w10, #T_KIND_MASK
     and  w13, w11, #T_KIND_MASK
-    cmp  w12, w13
-    b.ne .Lve_fallback
-    cbz  w12, .Lve_fallback             // null type
     stp  w10, w11, [sp, #4]
+    mov  w9, #3                         // INT64 vs DECIMAL: class 3
+    cmp  w12, w13
+    b.eq 0f
+    cmp  w12, #T_INT
+    ccmp w12, #T_DEC, #4, ne
+    b.ne .Lve_fallback
+    cmp  w13, #T_INT
+    ccmp w13, #T_DEC, #4, ne
+    b.ne .Lve_fallback
+    b    3f
+0:  cbz  w12, .Lve_fallback             // null type
     mov  w9, #3                         // class 3: DECIMALs of different
     cmp  w12, #T_DEC                    // scales or wide (exact, cmp_typed)
     b.ne 1f

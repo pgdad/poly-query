@@ -839,15 +839,6 @@ FUNC dec_wtype
 1:  ret
 ENDF dec_wtype
 
-// dec_widen(x0 bound Node* of type DECIMAL(p,s), w1 its type) -> x0 Node*
-// implicit CAST to DECIMAL(38,s) (exact: a narrow value always fits)
-FUNC dec_widen
-    and  w1, w1, #(0xff << T_SCALE_SHIFT)
-    mov  w9, #DEC_TYPE(DEC_MAX_PREC, 0)
-    orr  w1, w1, w9
-    b    mk_cast
-ENDF dec_widen
-
 // =============================================================================
 // bind_expr(x0 ctx, x1 Node*) -> x0 bound Node*  (may differ from the input)
 // Dispatcher: tail-calls the binder of the node kind (no frame of its own).
@@ -1349,25 +1340,8 @@ FUNC bind_binary_typed
     mov  w28, #T_BOOL
     cbz  w26, .Lbb_done                 // NULL compares with anything
     cbz  w27, .Lbb_done
-    cmp  w26, w27
-    b.ne 0f
-    cmp  w26, #T_DEC                    // same kind (DECIMAL scales may differ;
-    b.ne .Lbb_done                      // a narrow operand of a wide one is
-    BR_WIDE w23, w9, 71f                // widened, which never overflows)
-    BR_WIDE w24, w9, 72f
-    b    .Lbb_done
-71: BR_WIDE w24, w9, .Lbb_done
-    mov  x0, x22
-    mov  w1, w24
-    bl   dec_widen
-    mov  x22, x0
-    b    .Lbb_done
-72: mov  x0, x21
-    mov  w1, w23
-    bl   dec_widen
-    mov  x21, x0
-    b    .Lbb_done
-0:
+    cmp  w26, w27                       // same kind (DECIMAL scales and
+    b.eq .Lbb_done                      // widths may differ: cmp_typed)
     sub  w9, w26, #T_INT
     cmp  w9, #(T_FLOAT - T_INT)
     b.hi .Lbb_cmp_nonnum
@@ -1388,9 +1362,10 @@ FUNC bind_binary_typed
     bl   mk_cast
     mov  x21, x0
     b    .Lbb_done
-2:  cmp  w26, #T_INT                    // INT vs DECIMAL(p,s): INT -> saturating
-    b.ne 3f                             // DECIMAL(W,s) (exact comparison)
-    mov  w0, w24
+2:  cmp  w26, #T_INT                    // INT vs narrow DECIMAL(p,s): INT ->
+    b.ne 3f                             // saturating DECIMAL(18,s) (exact
+    BR_WIDE w24, w9, .Lbb_done          // comparison); vs a wide DECIMAL:
+    mov  w0, w24                        // no cast (cmp_typed, no boxing)
     mov  w1, w24
     bl   dec_wtype
     and  w1, w24, #(0xff << T_SCALE_SHIFT)
@@ -1400,7 +1375,8 @@ FUNC bind_binary_typed
     bl   mk_cast
     mov  x21, x0
     b    .Lbb_done
-3:  mov  w0, w23
+3:  BR_WIDE w23, w9, .Lbb_done
+    mov  w0, w23
     mov  w1, w23
     bl   dec_wtype
     and  w1, w23, #(0xff << T_SCALE_SHIFT)

@@ -606,15 +606,19 @@ code paths; only expressions with a wide operand (p > 18) take the new ones.
 * **Comparisons are exact** (§4): `cmp_typed` compares narrow decimals of
   different scales in 128 bits as before and every other INT64 / DECIMAL
   combination (wide, mixed width, INT64 vs DECIMAL) with `dec_cmp`
-  (256-bit alignment). The binder keeps both comparison operands in one
-  payload encoding so hash keys, indexes and row-group statistics keep
-  working: a narrow operand compared with a wide one is widened to
-  DECIMAL(38, s) (never overflows); an INT64 operand compared with a
-  DECIMAL(p,s) is cast to DECIMAL(W,s) with the flag `T_SATF` — a
-  *saturating* cast: a value that does not fit becomes ±INT64_MAX (narrow)
-  or ±10^38 (wide), which lies beyond every value of the other operand, so
-  `9223372036854775807 > 1.5` is TRUE instead of NUMERIC_OVERFLOW. `x IN
-  (subquery)` compares INT64 / DECIMAL values without casts (`cmp_typed`).
+  (256-bit alignment, no allocation). The binder therefore inserts no cast
+  for DECIMAL vs DECIMAL (any scale / width) or INT64 vs wide DECIMAL; an
+  INT64 operand compared with a *narrow* DECIMAL(p,s) is cast to
+  DECIMAL(18,s) with the flag `T_SATF` — a *saturating* cast: a value that
+  does not fit becomes ±INT64_MAX, which lies beyond every narrow value, so
+  `9223372036854775807 > 1.5` is TRUE instead of NUMERIC_OVERFLOW while the
+  vectorized fast paths still see one encoding. `x IN (subquery)` compares
+  without casts. Hash / merge-join keys need one payload encoding:
+  `try_hash_key` (`physical.S`) casts an INT64 / DECIMAL key pair of
+  different scale or width to the saturating DECIMAL(W, max scale) — exact
+  for equality because only the side with the smaller scale can saturate and
+  the other side never reaches that magnitude — so such joins stay hash
+  joins (and no per-pair boxing happens in nested loops).
   DECIMAL vs FLOAT64 still converts the decimal to the nearest double.
 * **Hashing / sorting**: `hash_cell` hashes the 16 bytes of a wide value
   (`dec_hash`); `keys_equal`, `gt_keys_eq` compare wide keys by value; the
@@ -651,12 +655,12 @@ the values in the table arena (one box per RLE run, also with `mmap`).
 | `wdec.S` (new) | 256-bit integer toolkit and every wide-decimal operation (box, compare, + - *, convert/CAST, to INT64 / FLOAT64, from FLOAT64, ROUND, FLOOR/CEIL, ABS, negation, hash, parse, format) |
 | `types.S` | precision limit 38 |
 | `parser.S` | wide literals (19–38 digits); `AS FULL` / `AS RIGHT` accepted as an explicit alias (the public decimal38 case uses `AS full`) |
-| `binder.S` | `dec_wtype`, `dec_widen`; W for arithmetic / SUM; exact comparison casts (`T_SATF`); IN-subquery without INT64 → DECIMAL casts; `expr_equal` compares wide literals by value |
+| `binder.S` | `dec_wtype`; W for arithmetic / SUM; comparisons without boxing casts (saturating INT64 → narrow DECIMAL only); IN-subquery without INT64 → DECIMAL casts; `expr_equal` compares wide literals by value |
 | `functions.S` | `common_type` W; ABS / ROUND / FLOOR / CEIL typing and wide evaluation |
 | `values.S` | text output, `value_cmp`, CAST matrix for wide / saturating targets |
 | `eval.S` | `cmp_typed` exact for any INT64 / DECIMAL mix, `arith_dec_any`, unary minus, saturating / wide INT64 casts, 192-bit wide SUM / AVG |
 | `vexec.S`, `vagg.S` | wide arithmetic / comparison / negation per value; wide SUM via `agg_accum`; 192-bit partial-state merge |
-| `join.S`, `sort.S`, `physical.S` | hashing, key equality, radix exclusion, hash-key width check |
+| `join.S`, `sort.S`, `physical.S` | hashing, key equality, radix exclusion; join keys of different scale / width cast to a common saturating DECIMAL |
 | `index.S`, `access.S` | exact key conversion for lookups; constant folding of wide / saturating casts; selectivity of wide constants |
 | `storage.S` | `val_copy_in` (deep copy of boxed values when a table is rebuilt) |
 | `ingest.S` | wide values parsed exactly and boxed in the table arena (CSV, JSON, JSONL) |

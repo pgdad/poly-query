@@ -6,10 +6,12 @@
   `make build test lint` pass. Capability `change.decimal38` claimed.
 - Design: README "Change CR-2". Wide DECIMAL (p > 18) payload = pointer to a
   boxed i128; wdec.S has the 256-bit toolkit and all wide operations;
-  `BR_WIDE` (pq.inc) is the narrow/wide test. Comparison operands: narrow vs
-  wide -> narrow widened to DECIMAL(38,s); INT64 vs DECIMAL -> saturating
-  cast (T_SATF flag in the type word) so comparisons are exact and hash keys /
-  indexes keep one encoding.
+  `BR_WIDE` (pq.inc) is the narrow/wide test. Comparisons: no casts between
+  decimals / INT64 vs wide (cmp_typed is exact and allocation-free); INT64 vs
+  narrow DECIMAL -> saturating cast (T_SATF). Join keys of different
+  encodings: try_hash_key casts both to saturating DECIMAL(W, max s).
+- Avoid per-row/per-pair boxing in comparisons: nested-loop joins evaluate
+  conditions per pair and the request arena only grows (RESOURCE_LIMIT).
 - Boxed values must be deep-copied whenever a table arena is rebuilt
   (storage.S val_copy_in) — same rule as strings.
 - PQCF: version 2 iff a wide column exists (pqcf_save scans the columns);
