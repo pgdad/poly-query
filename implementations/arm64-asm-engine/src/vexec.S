@@ -321,7 +321,7 @@ FUNC veval
     ldr  x9, [x19, #N_B]
     ldr  w4, [x9, #N_TYPE]
     ldr  w5, [x19, #N_TYPE]
-    bl   arith_dec
+    bl   arith_dec_any
 5:  str  x0, [x23, x28, lsl #3]
     b    2b
 
@@ -332,15 +332,25 @@ FUNC veval
     ldr  w11, [x9, #N_TYPE]
     and  w12, w10, #T_KIND_MASK
     and  w13, w11, #T_KIND_MASK
-    cmp  w12, w13
-    b.ne .Lve_fallback
-    cbz  w12, .Lve_fallback             // null type
     stp  w10, w11, [sp, #4]
+    mov  w9, #3                         // INT64 vs DECIMAL: class 3
+    cmp  w12, w13
+    b.eq 0f
+    cmp  w12, #T_INT
+    ccmp w12, #T_DEC, #4, ne
+    b.ne .Lve_fallback
+    cmp  w13, #T_INT
+    ccmp w13, #T_DEC, #4, ne
+    b.ne .Lve_fallback
+    b    3f
+0:  cbz  w12, .Lve_fallback             // null type
     mov  w9, #3                         // class 3: DECIMALs of different
-    cmp  w12, #T_DEC                    // scales (exact, cmp_typed)
+    cmp  w12, #T_DEC                    // scales or wide (exact, cmp_typed)
     b.ne 1f
-    cmp  w10, w11
-    b.ne 3f
+    eor  w13, w10, w11                  // (T_SATF does not change the
+    bic  w13, w13, #T_SATF              // encoding)
+    cbnz w13, 3f
+    BR_WIDE w10, w13, 3f
 1:  mov  w9, #0                         // class: 0 signed, 1 float, 2 string
     cmp  w12, #T_FLOAT
     b.ne 2f
@@ -645,8 +655,16 @@ FUNC veval
     b.ne 3f
     eor  x0, x0, #0x8000000000000000
     b    4f
-3:  negs x0, x0
+3:  ldr  w12, [x19, #N_TYPE]
+    BR_WIDE w12, w13, 5f
+    negs x0, x0
     b.vs raise_overflow
+    b    4f
+5:  stp  x9, x10, [sp, #-16]!           // wide DECIMAL (boxed result)
+    str  x11, [sp, #-16]!
+    bl   dec_neg
+    ldr  x11, [sp], #16
+    ldp  x9, x10, [sp], #16
 4:  str  x0, [x23, x11, lsl #3]
     b    1b
 

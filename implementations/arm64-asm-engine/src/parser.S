@@ -520,7 +520,20 @@ LFUNC p_select_core
     mov  x21, x0
     ACCEPT KW_AS
     cbz  w0, 4f
-    PCALL p_expect_ident
+    CURTOK x10                      // AS FULL / AS RIGHT: the keywords
+    ldr  w11, [x10, #TK_KIND]       // reserved for future syntax are
+    cmp  w11, #KW_FULL              // accepted as an explicit alias
+    b.eq 40f
+    cmp  w11, #KW_RIGHT
+    b.ne 41f
+40:
+    ldr  x0, [x10, #TK_PTR]
+    ldr  x1, [x10, #TK_LEN]
+    bl   str_new
+    mov  x22, x0
+    ADVANCE
+    b    .Lsc_push
+41: PCALL p_expect_ident
     mov  x22, x0
     b    .Lsc_push
 4:  CURTOK x10
@@ -1565,7 +1578,8 @@ ENDF p_type_param
 //   digits only            -> T_INT (> INT64_MAX: NUMERIC_OVERFLOW)
 //   digits with '.'        -> DECIMAL(p,s): s = fraction digits,
 //                             p = max(significant integer digits + s, 1),
-//                             unscaled = all digits; p > 18 -> FLOAT64
+//                             unscaled = all digits; p > 18: wide
+//                             DECIMAL (boxed i128); p > 38 -> FLOAT64
 //   with exponent          -> T_FLOAT via strtod (non-finite: NUMERIC_OVERFLOW)
 // Registers: x19 token, x20 node, x21 text ptr, x22 text len,
 //            x23 significant integer digits, x24 fraction digits.
@@ -1617,8 +1631,8 @@ LFUNC lit_number
     add  x13, x23, x24              // p = max(int + frac, 1)
     cmp  x13, #1
     csinc x13, x13, xzr, hs
-    cmp  x13, #18
-    b.hi .Lln_float
+    cmp  x13, #DEC_NARROW_MAX
+    b.hi .Lln_wide
     // pass 2: unscaled value = all digits (fits: at most 18 significant)
     mov  x0, #0
     mov  x10, #0
@@ -1637,6 +1651,23 @@ LFUNC lit_number
     orr  w9, w9, w13, lsl #T_PREC_SHIFT
     orr  w9, w9, w24, lsl #T_SCALE_SHIFT
     str  w9, [x20, #N_TYPE]
+    b    .Lln_ret
+
+.Lln_wide:                          // 19..38 digits: wide DECIMAL
+    cmp  x13, #DEC_MAX_PREC
+    b.hi .Lln_float
+    mov  w9, #T_DEC
+    orr  w9, w9, w13, lsl #T_PREC_SHIFT
+    orr  w9, w9, w24, lsl #T_SCALE_SHIFT
+    str  w9, [x20, #N_TYPE]
+    mov  x0, x21
+    mov  x1, x22
+    mov  w2, w13
+    mov  w3, w24
+    mov  w4, #0
+    bl   parse_dec128               // fits by construction
+    bl   dec_box
+    str  x0, [x20, #N_VAL]
     b    .Lln_ret
 
 .Lln_float:

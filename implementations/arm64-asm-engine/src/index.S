@@ -637,6 +637,8 @@ LFUNC key_to_col
     and  w9, w1, #T_KIND_MASK
     cmp  w9, #T_DEC
     b.ne 8f
+    BR_WIDE w1, w10, 6f                 // wide key or column: exact
+    BR_WIDE w2, w10, 6f                 // conversion (wdec.S)
     ubfx w10, w1, #T_SCALE_SHIFT, #8    // key scale
     ubfx w11, w2, #T_SCALE_SHIFT, #8    // column scale
     cmp  w10, w11
@@ -663,6 +665,13 @@ LFUNC key_to_col
     LEAVE 2
 8:  mov  w1, #1
     ret
+6:  ENTER 0
+    bic  w2, w2, #T_SATF
+    mov  w3, #1                         // exact or no match
+    bl   dec_convert
+    cmp  w1, #0
+    cset w1, eq
+    LEAVE 0
 ENDF key_to_col
 
 // =============================================================================

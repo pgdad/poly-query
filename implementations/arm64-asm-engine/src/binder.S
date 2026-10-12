@@ -827,6 +827,18 @@ FUNC mk_cast
     LEAVE 1
 ENDF mk_cast
 
+// dec_wtype(w0 t1, w1 t2) -> w0 T_DEC | W << T_PREC_SHIFT (scale 0): the
+// result precision W of decimal38.md §2 — 38 if t1 or t2 is a wide
+// DECIMAL, else 18 (INT64 operands do not count).   (leaf)
+FUNC dec_wtype
+    mov  w9, w0
+    mov  w0, #DEC_TYPE(DEC_MAX_PREC, 0)
+    BR_WIDE w9, w10, 1f
+    BR_WIDE w1, w10, 1f
+    mov  w0, #DEC18
+1:  ret
+ENDF dec_wtype
+
 // =============================================================================
 // bind_expr(x0 ctx, x1 Node*) -> x0 bound Node*  (may differ from the input)
 // Dispatcher: tail-calls the binder of the node kind (no frame of its own).
@@ -1134,19 +1146,8 @@ LFUNC bind_subq
     bl   mk_cast
     mov  x21, x0
     b    .Lbsq_in_done
-2:  cmp  w10, #T_INT                    // INT64 x vs DECIMAL values
-    b.ne 3f
-    and  w1, w24, #(0xff << T_SCALE_SHIFT)
-    mov  w9, #DEC18
-    orr  w1, w1, w9
-    mov  x0, x21
-    bl   mk_cast
-    mov  x21, x0
-    b    .Lbsq_in_done
-3:  and  w25, w23, #(0xff << T_SCALE_SHIFT)  // DECIMAL x vs INT64 values
-    mov  w9, #DEC18
-    orr  w25, w25, w9
-    b    .Lbsq_in_done
+2:  b    .Lbsq_in_done                  // INT64 vs DECIMAL: no casts, the
+                                        // values compare exactly (cmp_typed)
 .Lbsq_in_temporal:
     cmp  w10, #T_DATE
     ccmp w11, #T_TS, #0, eq
@@ -1339,8 +1340,8 @@ FUNC bind_binary_typed
     mov  w28, #T_BOOL
     cbz  w26, .Lbb_done                 // NULL compares with anything
     cbz  w27, .Lbb_done
-    cmp  w26, w27
-    b.eq .Lbb_done                      // same kind (DECIMAL scales may differ)
+    cmp  w26, w27                       // same kind (DECIMAL scales and
+    b.eq .Lbb_done                      // widths may differ: cmp_typed)
     sub  w9, w26, #T_INT
     cmp  w9, #(T_FLOAT - T_INT)
     b.hi .Lbb_cmp_nonnum
@@ -1361,18 +1362,26 @@ FUNC bind_binary_typed
     bl   mk_cast
     mov  x21, x0
     b    .Lbb_done
-2:  cmp  w26, #T_INT                    // INT vs DECIMAL(p,s): INT -> DECIMAL(18,s)
-    b.ne 3f
+2:  cmp  w26, #T_INT                    // INT vs narrow DECIMAL(p,s): INT ->
+    b.ne 3f                             // saturating DECIMAL(18,s) (exact
+    BR_WIDE w24, w9, .Lbb_done          // comparison); vs a wide DECIMAL:
+    mov  w0, w24                        // no cast (cmp_typed, no boxing)
+    mov  w1, w24
+    bl   dec_wtype
     and  w1, w24, #(0xff << T_SCALE_SHIFT)
-    mov  w9, #DEC18
-    orr  w1, w1, w9
+    orr  w1, w1, w0
+    orr  w1, w1, #T_SATF
     mov  x0, x21
     bl   mk_cast
     mov  x21, x0
     b    .Lbb_done
-3:  and  w1, w23, #(0xff << T_SCALE_SHIFT)
-    mov  w9, #DEC18
-    orr  w1, w1, w9
+3:  BR_WIDE w23, w9, .Lbb_done
+    mov  w0, w23
+    mov  w1, w23
+    bl   dec_wtype
+    and  w1, w23, #(0xff << T_SCALE_SHIFT)
+    orr  w1, w1, w0
+    orr  w1, w1, #T_SATF
     mov  x0, x22
     bl   mk_cast
     mov  x22, x0
@@ -1455,21 +1464,25 @@ FUNC bind_binary_typed
     cmp  w27, #T_DEC
     b.ne 4f
     ubfx w13, w24, #T_SCALE_SHIFT, #8
-4:  cmp  w25, #OP_MUL
+4:  stp  w12, w13, [sp, #-16]!
+    mov  w0, w23                        // DECIMAL(W, ..): W = 38 if an
+    mov  w1, w24                        // operand is a wide DECIMAL
+    bl   dec_wtype
+    mov  w15, w0
+    ldp  w12, w13, [sp], #16
+    cmp  w25, #OP_MUL
     b.ne 5f
-    // DECIMAL *: result scale s1+s2 (> 18 => TYPE_ERROR); INT64 -> DECIMAL(18,0)
+    // DECIMAL *: result scale s1+s2 (> W => TYPE_ERROR); INT64 -> DECIMAL(W,0)
     add  w14, w12, w13
-    cmp  w14, #18
+    ubfx w9, w15, #T_PREC_SHIFT, #8
+    cmp  w14, w9
     b.hi .Lbb_scale_type
-    mov  w28, #DEC18
-    orr  w28, w28, w14, lsl #T_SCALE_SHIFT
-    mov  w15, #DEC18                    // cast target for INT64 operands
-    b    6f
-5:  // DECIMAL + -: result scale max(s1,s2); INT64 -> DECIMAL(18, other scale)
+    orr  w28, w15, w14, lsl #T_SCALE_SHIFT
+    b    6f                             // cast target for INT64: w15
+5:  // DECIMAL + -: result scale max(s1,s2); INT64 -> DECIMAL(W, other scale)
     cmp  w12, w13
     csel w14, w12, w13, hi
-    mov  w28, #DEC18
-    orr  w28, w28, w14, lsl #T_SCALE_SHIFT
+    orr  w28, w15, w14, lsl #T_SCALE_SHIFT
     mov  w15, w28
 6:  str  w15, [sp, #-16]!               // keep the cast target across calls
     cmp  w26, #T_INT
@@ -1526,7 +1539,7 @@ FUNC bind_binary_typed
 .Lbb_mod_type:
     RAISE ERR_TYPE, "% requires INT64 operands"
 .Lbb_scale_type:
-    RAISE ERR_TYPE, "DECIMAL product scale exceeds 18"
+    RAISE ERR_TYPE, "DECIMAL product scale exceeds the result precision"
 ENDF bind_binary_typed
 
 // =============================================================================
@@ -1639,9 +1652,12 @@ LFUNC bind_func
     mov  w24, #T_FLOAT                  // SUM FLOAT64 -> FLOAT64
     cmp  w11, #T_FLOAT
     b.eq .Lbfn_mkagg
-    and  w24, w10, #(0xff << T_SCALE_SHIFT)  // SUM DECIMAL(p,s) -> DECIMAL(18,s)
-    mov  w9, #DEC18
-    orr  w24, w24, w9
+    mov  w0, w10                        // SUM DECIMAL(p,s) -> DECIMAL(W,s)
+    mov  w1, w10
+    bl   dec_wtype
+    ldr  w10, [x22, #N_TYPE]
+    and  w24, w10, #(0xff << T_SCALE_SHIFT)
+    orr  w24, w24, w0
     b    .Lbfn_mkagg
 3:  mov  w24, w10                       // MIN / MAX keep the argument type
 .Lbfn_mkagg:
@@ -2479,7 +2495,9 @@ FUNC expr_equal
     cbnz w9, .Lee_true                  // both NULL
     ldr  x0, [x19, #N_VAL]
     ldr  x1, [x20, #N_VAL]
-    ldrb w9, [x19, #N_TYPE]
+    ldr  w9, [x19, #N_TYPE]
+    BR_WIDE w9, w10, 3f
+    and  w9, w9, #T_KIND_MASK
     cmp  w9, #T_STR
     b.ne .Lee_val
     ldr  x2, [x0, #STR_LEN]
@@ -2490,6 +2508,12 @@ FUNC expr_equal
     add  x1, x1, #STR_DATA
     bl   memcmp
     cbnz w0, .Lee_false
+    b    .Lee_true
+3:  ldp  x2, x3, [x0]                 // wide DECIMAL literals: the values
+    ldp  x4, x5, [x1]
+    cmp  x2, x4
+    ccmp x3, x5, #0, eq
+    b.ne .Lee_false
     b    .Lee_true
 .Lee_col:
     ldr  x0, [x19, #N_B]

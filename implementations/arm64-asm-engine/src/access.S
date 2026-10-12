@@ -82,7 +82,14 @@ LFUNC const_value
     b.eq 2f
     cmp  w9, #T_DEC
     b.ne .Lcv_no
+    BR_WIDE w3, w9, 3f
     neg  x0, x0
+    b    .Lcv_ret
+3:  mov  w19, w3                        // wide: boxed -v
+    mov  w1, w3
+    bl   dec_neg
+    mov  w3, w19
+    mov  x1, #0
     b    .Lcv_ret
 1:  eor  x0, x0, #0x8000000000000000
     b    .Lcv_ret
@@ -99,6 +106,16 @@ LFUNC const_value
     cbnz x1, .Lcv_retcast               // CAST(NULL AS t) is NULL
     and  w9, w3, #T_KIND_MASK           // from kind
     and  w10, w20, #T_KIND_MASK         // to kind
+    cmp  w10, #T_DEC                    // wide / saturating DECIMAL casts:
+    b.ne 6f                             // exact 256-bit conversion
+    cmp  w9, #T_INT
+    ccmp w9, #T_DEC, #4, ne
+    b.ne 6f
+    tst  w20, #T_SATF
+    b.ne 7f
+    BR_WIDE w3, w11, 7f
+    BR_WIDE w20, w11, 7f
+6:
     cmp  w9, w10
     b.ne 3f
     cmp  w9, #T_DEC
@@ -137,6 +154,14 @@ LFUNC const_value
     b.ne .Lcv_no
     cmp  w10, #T_TS
     b.ne .Lcv_no
+    b    8f
+7:  mov  w1, w3
+    mov  w2, w20
+    mov  w3, #0
+    bl   dec_convert
+    cbnz w1, .Lcv_no
+    b    .Lcv_retcast0
+8:
     ldr  x9, =86400000000
     mul  x0, x0, x9
 .Lcv_retcast0:
@@ -320,6 +345,7 @@ ENDF simple_pred
 
 // to_double(x0 payload, w1 type) -> d0   (leaf-like)
 LFUNC to_double
+    BR_WIDE w1, w9, dec_to_double
     and  w9, w1, #T_KIND_MASK
     cmp  w9, #T_FLOAT
     b.ne 1f

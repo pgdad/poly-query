@@ -80,8 +80,8 @@ frame macros in `include/frame.inc`, the internal API contract in
 | runtime | `rt.S` | error raising (setjmp/longjmp), arenas, strings, byte buffers, JSON string/number output, clock |
 | protocol | `main.S`, `protocol.S` | CLI options, session loop, exec mode, request dispatch, all ops (incl. `explain`) |
 | JSON | `json.S` | strict RFC 8259 parser into a DOM, serializer |
-| values | `values.S`, `decimal.S`, `datetime.S`, `types.S` | text parsing/formatting of every type, CAST matrix, comparisons, type names |
-| storage | `catalog.S`, `ingest.S`, `storage.S`, `pqcf.S`, `index.S` | catalog of immutable tables; CSV/JSON/JSONL ingestion; row / column layouts, dictionary encoding, statistics; PQCF v1 reader/writer; HASH / BTREE indexes |
+| values | `values.S`, `decimal.S`, `wdec.S`, `datetime.S`, `types.S` | text parsing/formatting of every type, CAST matrix, comparisons, type names; `wdec.S`: wide DECIMAL (p ≤ 38) arithmetic on 256-bit intermediates |
+| storage | `catalog.S`, `ingest.S`, `storage.S`, `pqcf.S`, `index.S` | catalog of immutable tables; CSV/JSON/JSONL ingestion; row / column layouts, dictionary encoding, statistics; PQCF v1 / v2 reader/writer; HASH / BTREE indexes |
 | lexer / parser | `lexer.S`, `parser.S` | tokenizer and recursive-descent parser for the full v1 grammar into an AST |
 | semantic analysis | `binder.S`, `functions.S`, `strfuncs.S` | scopes (range variables, outer scopes, CTEs), name resolution, typing with implicit casts, aggregate / GROUP BY validation, subquery binding; scalar functions, CASE, LIKE, BETWEEN, IN lists |
 | logical plan | `logical.S` | LogicalNode trees (Scan, SubqueryScan, Values, Filter, Join, Aggregate, Project, Distinct, Sort, Limit, UnionAll) built from a bound query level, expression visitor, debug printer |
@@ -177,8 +177,9 @@ Key decisions:
   unwinding never leaks. Half-built tables are registered and freed on error,
   which makes `load` atomic.
 * **Values.** A runtime value is a pair (64-bit payload, null flag) returned in
-  `x0`/`x1`; the type is static (from the AST). DECIMAL is a scaled `i64`
-  (precision ≤ 18) with exact 128-bit intermediates; DATE is days and
+  `x0`/`x1`; the type is static (from the AST). A narrow DECIMAL (precision
+  ≤ 18) is a scaled `i64` with exact 128-bit intermediates; a wide DECIMAL
+  (19–38) is a pointer to a boxed `i128` (see "Change CR-2"); DATE is days and
   TIMESTAMP microseconds since the epoch; strings are length-prefixed objects.
 * **Storage.** Every table lives in its own arena (freed on drop/replace).
   Two in-memory layouts (`load`/`open` option `layout`, default `column`):
@@ -557,9 +558,116 @@ across option sets (checked by `tests/sh/run_mode_tests.sh`).
 Choices: the compound output column has the branch-0 name; a duplicated
 output name used in the compound's ORDER BY is ambiguous (`SEMANTIC_ERROR`);
 a qualified name (`t.c`) is not an output column name (`SEMANTIC_ERROR`);
-two DECIMAL branches unify to DECIMAL(18, max scale) like CASE; DATE and
+two DECIMAL branches unify to DECIMAL(W, max scale) like CASE; DATE and
 TIMESTAMP branches do not unify (`TYPE_ERROR`), as for CASE. `spec_version`
 stays `1.0.0` (the Phase 1 conformance case requires it).
+
+## Change CR-2: DECIMAL precision 38 (PQCF v2)
+
+`DECIMAL(p,s)` accepts `1 ≤ p ≤ 38` (`spec/changes/decimal38.md`, capability
+`change.decimal38`). Narrow decimals (p ≤ 18) keep their representation and
+code paths; only expressions with a wide operand (p > 18) take the new ones.
+
+### Representation
+
+* **Narrow** (p ≤ 18): the payload is the unscaled `i64` (unchanged).
+* **Wide** (19 ≤ p ≤ 38): the payload is a pointer to a 16-byte box holding
+  the unscaled value as a two's-complement little-endian `i128`
+  (|v| < 10^p). Boxing keeps every value a 64-bit payload, so tuples, cells,
+  vectors, column vectors, the row store, sort / hash / join key cells and
+  aggregate states did not change shape — exactly like `Str*` for STRING.
+  Boxes live in the request arena (computed values, literals), in a worker's
+  arena (adopted by the request), or in the table arena (ingestion, PQCF,
+  `rebuild_table` / `build_rows` deep-copy them with `val_copy_in` like
+  strings).
+* Exact intermediates use a **256-bit** two's-complement integer in memory
+  (`wdec.S` "I256": add/sub/neg, ×10^k, ÷10^k with truncate / half-away /
+  floor / ceiling rounding, i128×i128, digits, compare, fit check against
+  10^p). 76-digit products, 38-digit values rescaled by 10^38 and sums of 2^64
+  values all fit. Wide `SUM`/`AVG` accumulate 192 bits (`AS_LO/AS_HI/AS_TOP`
+  of the aggregate state); AVG converts the exact sum to the nearest double
+  (decimal text → `strtod`) before dividing by the count.
+* The check "is this type wide" is the macro `BR_WIDE` (`pq.inc`): kind
+  DECIMAL and precision > 18. There is no separate type kind, so type names,
+  CAST targets, schemas and PQCF metadata are unchanged in form.
+
+### Dispatch narrow / wide
+
+* **Typing** (`binder.S`, `functions.S`): `dec_wtype` computes the result
+  precision W (38 if any DECIMAL operand is wide, INT64 does not count) for
+  `+ - *` (scale check `s1+s2 > W` ⇒ TYPE_ERROR), INT64 promotion, `SUM`,
+  `ROUND`, `FLOOR`/`CEIL`, and `common_type` (CASE, COALESCE, UNION ALL).
+* **Evaluation**: `eval.S` dispatches on the *result* type — narrow results
+  keep `arith_dec` (128-bit), wide results call `dec_arith` (256-bit);
+  `ev_unary` / ABS / ROUND / FLOOR / CEIL / CAST call the `wdec.S` routines
+  when a wide type is involved; the vectorized kernels (`vexec.S`, `vagg.S`)
+  use the same routines per value (`arith_dec_any`, `dec_neg`, comparison
+  class "exact via cmp_typed", wide SUM through `agg_accum`).
+* **Comparisons are exact** (§4): `cmp_typed` compares narrow decimals of
+  different scales in 128 bits as before and every other INT64 / DECIMAL
+  combination (wide, mixed width, INT64 vs DECIMAL) with `dec_cmp`
+  (256-bit alignment, no allocation). The binder therefore inserts no cast
+  for DECIMAL vs DECIMAL (any scale / width) or INT64 vs wide DECIMAL; an
+  INT64 operand compared with a *narrow* DECIMAL(p,s) is cast to
+  DECIMAL(18,s) with the flag `T_SATF` — a *saturating* cast: a value that
+  does not fit becomes ±INT64_MAX, which lies beyond every narrow value, so
+  `9223372036854775807 > 1.5` is TRUE instead of NUMERIC_OVERFLOW while the
+  vectorized fast paths still see one encoding. `x IN (subquery)` compares
+  without casts. Hash / merge-join keys need one payload encoding:
+  `try_hash_key` (`physical.S`) casts an INT64 / DECIMAL key pair of
+  different scale or width to the saturating DECIMAL(W, max scale) — exact
+  for equality because only the side with the smaller scale can saturate and
+  the other side never reaches that magnitude — so such joins stay hash
+  joins (and no per-pair boxing happens in nested loops).
+  DECIMAL vs FLOAT64 still converts the decimal to the nearest double.
+* **Hashing / sorting**: `hash_cell` hashes the 16 bytes of a wide value
+  (`dec_hash`); `keys_equal`, `gt_keys_eq` compare wide keys by value; the
+  radix paths (merge-join key sort, normalized sort keys) treat a wide key
+  like a STRING (prefix code = high word, comparator for ties); hash-join
+  keys require the same scale *and* width (`try_hash_key`); index lookups
+  convert the key exactly into the column's encoding (`dec_convert`, exact
+  mode).
+* **Text / CAST / ingestion**: `parse_dec128` (the `parse_decimal` rules for
+  p ≤ 38: exact for ingestion, half-away rounding for CAST), `fmt_dec128`
+  (canonical text), `dec_from_f64` (exact binary value of the double, printed
+  with s+40 digits and rounded), `dec_to_double` (exact text → `strtod`),
+  `dec_to_int` (truncation, INT64 range check). Literals with 19–38
+  significant digits are wide DECIMAL literals; with more than 38 they stay
+  FLOAT64. Schema / CAST types accept p ≤ 38 (`type_from_name`).
+
+### PQCF v2 (`pqcf.S`)
+
+A table with at least one wide column is written as format version 2 (header
+and metadata `format_version`), every other table as version 1. Wide chunks:
+PLAIN n × i128, RLE `u32 R` + R × `{i128, u32}` (20 bytes, packed; NULL rows
+hold 0 and join runs), min/max statistics as canonical decimal strings;
+narrow columns keep the v1 layout. The reader accepts versions 1 and 2
+(> 2 or flags ≠ 0 ⇒ STORAGE_VERSION_UNSUPPORTED), rejects a wide column type
+in a v1 file and a header / metadata version mismatch (STORAGE_CORRUPT),
+checks |v| < 10^p for every non-null wide value (STORAGE_CORRUPT), and boxes
+the values in the table arena (one box per RLE run, also with `mmap`).
+
+### Modules touched
+
+| module | change |
+|---|---|
+| `include/pq.inc` | wide-decimal representation notes, `DEC_NARROW_MAX`, `DEC_MAX_PREC`, `T_SATF`, `BR_WIDE` |
+| `wdec.S` (new) | 256-bit integer toolkit and every wide-decimal operation (box, compare, + - *, convert/CAST, to INT64 / FLOAT64, from FLOAT64, ROUND, FLOOR/CEIL, ABS, negation, hash, parse, format) |
+| `types.S` | precision limit 38 |
+| `parser.S` | wide literals (19–38 digits); `AS FULL` / `AS RIGHT` accepted as an explicit alias (the public decimal38 case uses `AS full`) |
+| `binder.S` | `dec_wtype`; W for arithmetic / SUM; comparisons without boxing casts (saturating INT64 → narrow DECIMAL only); IN-subquery without INT64 → DECIMAL casts; `expr_equal` compares wide literals by value |
+| `functions.S` | `common_type` W; ABS / ROUND / FLOOR / CEIL typing and wide evaluation |
+| `values.S` | text output, `value_cmp`, CAST matrix for wide / saturating targets |
+| `eval.S` | `cmp_typed` exact for any INT64 / DECIMAL mix, `arith_dec_any`, unary minus, saturating / wide INT64 casts, 192-bit wide SUM / AVG |
+| `vexec.S`, `vagg.S` | wide arithmetic / comparison / negation per value; wide SUM via `agg_accum`; 192-bit partial-state merge |
+| `join.S`, `sort.S`, `physical.S` | hashing, key equality, radix exclusion; join keys of different scale / width cast to a common saturating DECIMAL |
+| `index.S`, `access.S` | exact key conversion for lookups; constant folding of wide / saturating casts; selectivity of wide constants |
+| `storage.S` | `val_copy_in` (deep copy of boxed values when a table is rebuilt) |
+| `ingest.S` | wide values parsed exactly and boxed in the table arena (CSV, JSON, JSONL) |
+| `pqcf.S` | PQCF v2 writer / reader |
+| `protocol.S` | capability `change.decimal38` |
+
+`spec_version` stays `1.0.0` (the Phase 1 conformance case requires it).
 
 ## Change CR-3: logical / physical plan separation
 
@@ -656,9 +764,9 @@ and `query` under ten option sets: 9059 requests, no difference.
   is NULL in non-STRING columns.
 * CAST(FLOAT64 AS DECIMAL) rounds half away from zero on the exact binary
   value of the double (so `2.5e0` → `3`, but the double nearest 1.005 → `1.00`).
-* DECIMAL ± DECIMAL with different scales is aligned exactly in 128-bit
-  arithmetic (no spurious overflow); INT64 operands are promoted to
-  DECIMAL(18,s) as the spec requires.
+* DECIMAL ± DECIMAL with different scales is aligned exactly (128-bit for
+  narrow, 256-bit for wide operands: no spurious overflow); INT64 operands
+  of arithmetic are promoted to DECIMAL(W,s) as the spec requires.
 * SQL nesting deeper than 256 levels is `RESOURCE_LIMIT`.
 * `serve` without `--port` is a usage error (exit 2); `--workers 0` (or
   absent) means the number of online CPUs.
@@ -682,7 +790,8 @@ and `query` under ten option sets: 9059 requests, no difference.
   word that contains a non-ASCII character unchanged as a whole
   (`UPPER('abc Ünï')` = `'ABC Ünï'`, as the conformance suite requires).
 * `COALESCE`/`CASE` unify any two DECIMALs (or INT64 + DECIMAL) to
-  DECIMAL(18, max scale); a single DECIMAL branch keeps its type. DATE and
+  DECIMAL(W, max scale) (W = 38 if one of them is wide, else 18); a single
+  DECIMAL branch keeps its type. DATE and
   TIMESTAMP are not promoted to a common CASE/COALESCE type (TYPE_ERROR).
 * `-NULL`, `ABS/ROUND/FLOOR/CEIL(NULL)` keep the null type (reported as
   STRING); binary arithmetic on two untyped NULLs is INT64.
@@ -716,7 +825,10 @@ and `query` under ten option sets: 9059 requests, no difference.
   ends.
 * Temporary files left behind by a crash during `save` are not cleaned up by
   later saves (they are ignored by readers).
-* PQCF format_version 2 (the DECIMAL(38) change) is not supported.
+* Wide DECIMAL values are boxed (16 bytes + an 8-byte pointer per value) and
+  their arithmetic / comparisons go through 256-bit routines; the vectorized
+  evaluator handles wide arithmetic and comparisons per value (no SIMD), and
+  wide casts fall back to the row evaluator.
 * Ingestion builds a plain columnar table first; converting it (row layout,
   dictionary encoding) rebuilds it into a fresh arena, so loading needs
   transient memory for both representations.

@@ -93,7 +93,9 @@ cases:
     OK("SELECT 1, 1.50, 0.05, .5, 00012.5, 3., 0.0, 00.",
        "{select 1, dec(3,2):150, dec(2,2):5, dec(1,1):5, dec(3,1):125, dec(1,0):3, dec(1,1):0, dec(1,0):0}")
     OK("SELECT 12345678901234567.8, 1234567890.1234567890",
-       "{select dec(18,1):123456789012345678, f:1234567890.1234567}")
+       "{select dec(18,1):123456789012345678, dec(20,10):12345678901234567890}")
+    OK("SELECT 0.12345678901234567890123456789012345678, 1234567890.12345678901234567890123456789",
+       "{select dec(38,38):12345678901234567890123456789012345678, f:1234567890.1234567}")
     OK("SELECT 1e3, 1.e2, .5e1, 1E-2, 2.5e+3",
        "{select f:1000, f:100, f:5, f:0.01, f:2500}")
     OK("SELECT 'it''s', '', TRUE, FALSE, NULL", "{select 'it's', '', TRUE, FALSE, NULL}")
@@ -159,7 +161,8 @@ cases:
     ERR("SELECT TIMESTAMP '2023-01-01'", ERR_CONVERSION)
     ERR("SELECT DATE 5", ERR_PARSE)
     ERRAT("SELECT CAST(1 AS foo)", ERR_SEMANTIC, 1, 18)
-    ERR("SELECT CAST(1 AS DECIMAL(19, 2))", ERR_SEMANTIC)
+    ERR("SELECT CAST(1 AS DECIMAL(39, 2))", ERR_SEMANTIC)
+    ERR("SELECT CAST(1 AS DECIMAL(0, 0))", ERR_SEMANTIC)
     ERR("SELECT CAST(1 AS DECIMAL(5, 6))", ERR_SEMANTIC)
     ERR("SELECT CAST(1 AS INT(3))", ERR_SEMANTIC)
     ERR("SELECT CAST(1 AS DECIMAL(99999999999999999999))", ERR_SEMANTIC)
@@ -923,7 +926,12 @@ LFUNC dump_node
     ADR_L x0, s_paren_colon
     bl   out_s
     ldr  x0, [x19, #N_VAL]
+    BR_WIDE w21, w9, 1f
     bl   out_i
+    b    .Ldn_pos
+1:  and  w1, w21, #~(0xff << T_SCALE_SHIFT) // wide: unscaled digits
+    bl   value_to_str
+    bl   out_str
     b    .Ldn_pos
 .Ldn_float:
     fmov d0, x0

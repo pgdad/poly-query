@@ -363,8 +363,17 @@ LFUNC store_text
     ubfx w2, w24, #T_PREC_SHIFT, #8
     ubfx w3, w24, #T_SCALE_SHIFT, #8
     mov  w4, #0                     // exact: never round
+    BR_WIDE w24, w9, .Lst_wdec
     bl   parse_decimal
     b    .Lst_check
+.Lst_wdec:                          // wide: i128 boxed in the table arena
+    bl   parse_dec128
+    cbnz w2, .Lst_fail
+    mov  x2, x1
+    mov  x1, x0
+    ldr  x0, [x19, #C_ARENA]
+    bl   dec_box_in
+    b    .Lst_store
 .Lst_float:
     bl   parse_float
     fmov x0, d0

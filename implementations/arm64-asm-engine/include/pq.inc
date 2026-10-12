@@ -158,6 +158,29 @@
 
 #define MAX_DEC_UNSCALED 999999999999999999
 
+// Wide decimals (CR-2, change.decimal38): DECIMAL(p,s) with p > 18 ("wide")
+// keep the payload slot but store a pointer to a 16-byte two's-complement
+// i128 unscaled value (boxed like Str*; |v| < 10^p <= 10^38). Narrow
+// decimals (p <= 18) keep the i64 payload. wdec.S has the arithmetic.
+#define DEC_NARROW_MAX  18
+#define DEC_MAX_PREC    38
+// Type flag on implicit CASTs that only feed a comparison: a value that does
+// not fit the target saturates (narrow: +-INT64_MAX, wide: +-10^38) instead
+// of raising NUMERIC_OVERFLOW. The saturated value lies beyond every value of
+// the target precision, so comparisons with it stay exact (decimal38.md §4).
+#define T_SATF      0x01000000
+
+// BR_WIDE wtype, wtmp, label: branch to label if wtype is a wide DECIMAL.
+.macro BR_WIDE t, tmp, label
+    and  \tmp, \t, #T_KIND_MASK
+    cmp  \tmp, #T_DEC
+    b.ne .Lnotwide\@
+    ubfx \tmp, \t, #T_PREC_SHIFT, #8
+    cmp  \tmp, #DEC_NARROW_MAX
+    b.hi \label
+.Lnotwide\@:
+.endm
+
 // ------------------------------------------------------------ string obj -----
 // Str: immutable byte string, NUL terminated for convenience.
 //   [0] u64 len   [8] bytes[len]  [8+len] 0

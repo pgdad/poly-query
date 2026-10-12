@@ -514,15 +514,45 @@ LFUNC try_hash_key
     ldr  w12, [x10, #N_TYPE]
     and  w13, w11, #T_KIND_MASK
     and  w14, w12, #T_KIND_MASK
-    cmp  w13, w14
-    b.ne .Lthk_no
+    mov  w26, #0                        // common key type (0: keep)
     cbz  w13, .Lthk_no                  // NULL literal: never matches anyway
+    cbz  w14, .Lthk_no
+    cmp  w13, w14
+    b.ne 0f
     cmp  w13, #T_DEC
     b.ne 1f
-    lsr  w11, w11, #T_SCALE_SHIFT
-    lsr  w12, w12, #T_SCALE_SHIFT
-    cmp  w11, w12
+0:  cmp  w13, #T_INT                    // INT64 / DECIMAL of different
+    ccmp w13, #T_DEC, #4, ne            // encodings (scale, width): both
+    b.ne .Lthk_no                       // keys are cast to the saturating
+    cmp  w14, #T_INT                    // DECIMAL(W, max scale), which keeps
+    ccmp w14, #T_DEC, #4, ne            // equality exact (pq.inc T_SATF)
     b.ne .Lthk_no
+    ubfx w15, w11, #T_PREC_SHIFT, #8
+    ubfx w16, w12, #T_PREC_SHIFT, #8
+    cmp  w15, #DEC_NARROW_MAX
+    cset w15, hi
+    cmp  w16, #DEC_NARROW_MAX
+    cset w16, hi
+    ubfx w17, w11, #T_SCALE_SHIFT, #8
+    ubfx w9, w12, #T_SCALE_SHIFT, #8
+    cmp  w13, w14                       // both DECIMAL: same width and
+    b.ne 05f                            // scale need no conversion
+    cmp  w15, w16
+    ccmp w17, w9, #0, eq
+    b.eq 1f
+05: cmp  w13, #T_DEC
+    csel w17, w17, wzr, eq              // INT64 counts as scale 0
+    cmp  w14, #T_DEC
+    csel w9, w9, wzr, eq
+    cmp  w17, w9
+    csel w17, w17, w9, hs               // max scale
+    str  w17, [sp, #-16]!
+    mov  w0, w11
+    mov  w1, w12
+    bl   dec_wtype
+    ldr  w17, [sp], #16
+    orr  w26, w0, w17, lsl #T_SCALE_SHIFT
+    orr  w26, w26, #T_SATF
 1:  ldr  x0, [x19, #N_A]
     bl   expr_rvmask
     mov  x24, x0
@@ -545,7 +575,26 @@ LFUNC try_hash_key
     b.ne .Lthk_no
     ldr  x1, [x19, #N_B]
     ldr  x2, [x19, #N_A]
-3:  mov  x24, x2
+3:  cbz  w26, 4f                        // convert the keys to one encoding
+    mov  x27, x1
+    mov  x28, x2
+    ldr  w9, [x27, #N_TYPE]
+    cmp  w9, w26
+    b.eq 31f
+    mov  x0, x27
+    mov  w1, w26
+    bl   mk_cast
+    mov  x27, x0
+31: ldr  w9, [x28, #N_TYPE]
+    cmp  w9, w26
+    b.eq 32f
+    mov  x0, x28
+    mov  w1, w26
+    bl   mk_cast
+    mov  x28, x0
+32: mov  x1, x27
+    mov  x2, x28
+4:  mov  x24, x2
     mov  x0, x22
     bl   pvec_push
     mov  x0, x23
