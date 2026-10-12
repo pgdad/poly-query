@@ -1,0 +1,158 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-optimize-latency-arm64-asm-engine-a1-20261012T105229Z",
+ "language": "arm64-asm-engine",
+ "task": "optimize-latency",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-optimize-latency",
+ "prompt_sha256": "a8f5592e0af20bf2360d025b9bba44b8ca8d4c1753d76d0dc859a309392cceb2",
+ "session_id": "6317fa73-1ae6-4e80-a9c3-ee57ad44d8f0",
+ "tokens": {
+  "input": 600,
+  "output": 410376,
+  "cache_read": 123387141,
+  "cache_creation": 708774,
+  "thinking": null,
+  "thinking_estimated": 180202,
+  "source": "result events",
+  "api_messages": 300
+ },
+ "rate_limit": {
+  "events": 15,
+  "max_utilization": {
+   "five_hour": 0.33,
+   "seven_day": 0.62
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 38.557540200000005,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 304,
+ "result_segments": 1,
+ "assistant_messages": 722,
+ "tool_calls": {
+  "Bash": 300,
+  "Write": 3
+ },
+ "tool_calls_total": 303,
+ "tool_failures": 3,
+ "build_invocations": 56,
+ "build_failures_heuristic": 0,
+ "conformance_runs": 20,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   143,
+   143
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 6855.0,
+  "model_api_seconds": 3819.0,
+  "tool_seconds": 3036.1,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 24,
+  "files_changed": 18,
+  "lines_added": 4412,
+  "lines_removed": 1021,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The analytics workload at scale 1m now runs in about 58 ms in total across its 20 queries, down from about 511 ms (roughly 9\u00d7 faster). Conformance is unchanged and everything is committed.\n\n## Test results (clean build, at the end)\n```\nphase 1: 225/225 pass   phase 2: 208/208 pass   phase 3: 212/212 pass   phase 5: 15/15 pass\nTOTAL: 660/660 pass\n--modes: TOTAL 3870/3870 pass (also with PQ_PARALLEL_MIN_ROWS=1)\n--transport http: TOTAL 660/660 pass        http_suite: 19/19 passed\nmake build test lint: all pass\n```\n- **Differential checks:** I also compared results on the 1m data across row/vectorized mode, 1\u201316 threads, hash/merge join and `optimize: false`. Row order had to match exactly for ORDER BY queries and for grouping without ORDER BY; other results were compared as multisets.\n- **Concurrency check:** 8 HTTP clients ran 15 heavy queries each at the same time, and every result was correct.\n\n## Results\nI measured with `bench/workload.sh` (default options, wall-clock through `bin/polyquery session`). \"Before\" is the starting commit e38bcc1 measured with the same script. The README has the full table for all 20 queries. Run-to-run noise on this machine is about \u00b115%, so sub-millisecond queries are within noise.\n\n| query | before (ms) | after (ms) |\n|---|---:|---:|\n| q09 COUNT(DISTINCT) | 143 | 4.4 |\n| q14 string sort | 174 | 7.4 |\n| q15 multi-key sort | 87 | 6.2 |\n| q20 string functions | 13.4 | 1.0 |\n| q12 LEFT JOIN anti | 11.9 | 1.9 |\n| forced merge join q10 / q11 | 70 / 107 | 8 / 12 |\n\n## Main changes, by impact\n- **Sorting:** replaced the old sort, which got *slower* with more threads, with a parallel radix sort on encoded keys. Top-N (`ORDER BY \u2026 LIMIT`) is now parallel too.\n- **COUNT(DISTINCT):** now computed with hashing in the fast (vectorized) path instead of sorting every value.\n- **Worker pool:** threads are reused instead of being created for every parallel step. Pool and query threads also ask the scheduler for full-performance CPUs. Without that, the first ~15 queries of a session ran up to twice as slow, because threads were packed two per CPU.\n- **String functions:** an expression on a dictionary-encoded string column (`UPPER(currency) = 'EUR'`, `LENGTH(category)`) is computed once per distinct value instead of once per row.\n- **Aggregation:** faster group lookup and accumulation, cheaper merging of per-thread results, and no extra ordering step when the query has ORDER BY.\n- **Joins:**\n  - The hash-join probe is faster.\n  - A LEFT JOIN now builds its hash table on the smaller, preserved side. Skewed data (a few customers own most orders) had left one thread with 74% of the work.\n  - The merge join is now fully parallel.\n- **Memory:** freed memory is kept in the process instead of being returned to the system and faulted back in on every query.\n- **Index scans:** row ids from an index lookup are now radix-sorted instead of qsorted, which halves q03.\n\n## Known limitations\n- `mode: \"row\"` was left as is, because the spec defines it as the permanent unoptimized baseline. The workload's \"modes\" section therefore still shows slow row-mode numbers (e.g. about 390 ms for q10).\n- Building the hash-join table is still single-threaded, as are comparator-based sorts (row mode, small inputs, merge-join keys that aren't a single integer column).\n- Idle pool threads keep polling for 1 ms after their last task before sleeping. That trades a little CPU for latency; `PQ_POOL_SPIN` changes it.\n- Default threads stay at 8: I measured 10, 12 and 16 on this mixed big/little-core machine, and none was better.\n\nDesign notes are in the README section \"Latency optimization (analytics workload)\". NOTES.md has the status, the debugging aids (`PQ_TRACE_PAR`, `PQ_POOL_SPIN`) and next candidates.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

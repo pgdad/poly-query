@@ -1,0 +1,10 @@
+{
+ "run_id": "a-optimize-latency-arm64-asm-engine-a1-20261012T105229Z",
+ "high_level_sources": [],
+ "compiler_markers": [],
+ "c_compile_tool_calls": [],
+ "merge_commits": 0,
+ "asm_lines": 49945,
+ "transcript_checked": true,
+ "compliant": true
+}
