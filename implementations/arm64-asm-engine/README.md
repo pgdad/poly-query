@@ -448,10 +448,10 @@ results are cached in shared plan nodes on first use).
   appended NULL-padded at the end.
 * **MergeJoin**: both inputs' key cells, an index array of the tuples with
   non-NULL keys sorted by key — an 11-bit LSD radix sort over the
-  significant bits of one integer-like key (stable; it also returns the
-  keys in sorted order for the merge), `qsort_r` otherwise — then runs of
-  equal keys are joined pairwise; LEFT JOIN padding for unmatched and
-  NULL-key tuples.
+  significant bits of one integer-like key (stable, parallel; it also
+  returns the keys in sorted order for the merge), `qsort_r` otherwise —
+  then runs of equal keys are joined pairwise, in parallel chunks of the
+  sorted left side; LEFT JOIN padding for unmatched and NULL-key tuples.
 * **NestedLoopJoin**: every pair; forced for an equi-join it compares the
   precomputed key cells before the residual condition.
 
@@ -601,7 +601,8 @@ NVIDIA GB10 (10 Cortex-X925 + 10 Cortex-A725), default options (vectorized,
 | **sum** | **520** | **58** | **9×** |
 
 Sub-millisecond queries (q01, q03, q16) are within noise. Forced merge
-joins (the workload's `joins` section): q10 69.6 → 26 ms, q11 107 → 44 ms.
+joins (the workload's `joins` section): q10 69.6 → 7.9 ms, q11 107 → 12.6
+ms.
 Thread scaling (q02 / q05 / q06 / q10 at 1, 2, 4, 16 threads): 7.5 / 8.9 /
 10.5 / 26.6 ms → 3.8 / 4.6 / 5.5 / 14.0 → 2.1 / 2.8 / 3.7 / 8.2 → 1.0 /
 1.2 / 4.5 / 4.7 ms. Row mode (`mode: "row"`) is the spec's unoptimized
@@ -657,8 +658,13 @@ Volcano baseline and was deliberately left as it was.
   4 tasks per thread, and the LEFT join build-side choice above (q12: a
   few customers own most orders, so probing with customers left one task
   with 74% of the work).
-* **Merge join**: range-reduced 11-bit radix sort, sorted key payloads for
-  sequential comparisons, inline pair emission.
+* **Merge join** (`join: "merge"`): the index sort is a parallel
+  range-reduced 11-bit LSD radix sort that also returns the keys in sorted
+  order (sequential comparisons); the merge is cut into 4 chunks per
+  thread whose boundaries balance left + right tuples (binary search on
+  left position + its right start) without splitting a run of equal keys,
+  merged in parallel and concatenated in order; pairs are written directly
+  into the output.
 * **Memory** (`rt.S` `rt_tune_malloc`): glibc returned freed request arenas
   to the kernel (trim / mmap thresholds), so every large query page-faulted
   its memory in again (q15 spent ~35% in the kernel). A fixed 32 MiB mmap
@@ -950,8 +956,9 @@ and `query` under ten option sets: 9059 requests, no difference.
 * Correlated subqueries are re-executed per outer row (no decorrelation).
 * Join reordering is greedy (no exhaustive / dynamic-programming search)
   and uses simple cardinality estimates. The hash-join build, sort-based
-  grouping (row mode, FLOAT64 SUM / AVG DISTINCT) and the merge join (sort
-  and merge) run on one thread.
+  grouping (row mode, FLOAT64 SUM / AVG DISTINCT) and the merge-join sort
+  for keys that are not one integer-like column (`qsort_r`) run on one
+  thread.
 * Pool threads poll for up to 1 ms after their last task before sleeping
   (CPU time traded for latency; `PQ_POOL_SPIN` changes it).
 * `native: true` is accepted but no native kernel library is supported.
