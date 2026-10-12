@@ -1,35 +1,34 @@
 # Working notes (arm64-asm-engine)
 
 ## Status (task: optimize latency, analytics workload @1m, session 1)
+- Definition of done met so far: conformance unchanged (660/660, --modes
+  3870/3870 also with PQ_PARALLEL_MIN_ROWS=1, http 660, http_suite 19/19),
+  `make build test` pass, README "Latency optimization" has the
+  before/after table (sum ~520 -> ~58 ms). Keep it current if numbers move.
 - Benchmark: `bench/workload.sh DATA_DIR [RUNS] [OPTIONS_JSON]` (data:
   `python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pq1m
-  --jobs 1`, DATA_DIR = /tmp/pq1m/1m; PQ_ENGINE=path overrides the binary).
-  Before numbers: bench/workload-before.txt (commit e38bcc1).
-- Done so far (all suites green after each step):
-  1. rt_tune_malloc (mallopt: fixed 32 MiB mmap threshold, 1 GiB trim
-     threshold, 64 MiB top pad): request arenas no longer page-fault in.
-  2. vagg.S: DISTINCT aggregates in the vectorized hash aggregation
-     (vagg_distinct / dagg_task; FLOAT SUM/AVG DISTINCT keep the old sorted
-     path). q09 143 -> ~10 ms.
-  3. sort.S rewritten: normalized-key parallel MSD radix sort (see header);
-     tests/sh/run_sort_tests.sh checks exact order vs mode row. q14 165 ->
-     ~14 ms, q15 83 -> ~10 ms.
-  4. parallel.S: persistent pool (par_run queues a job, caller claims tasks
-     too); thread_boost (sched_setattr uclamp 1024) on pool, main and HTTP
-     connection threads — without it EAS packs pool threads onto shared /
-     slow CPUs for the first ~15 queries (tasks 2x slower). Hard CPU
-     pinning was tried and is worse (caller collides with pinned threads).
-     PQ_POOL_SPIN env: idle polls before a pool thread sleeps.
-  5. join.S hj_probe: 64-bit hash pre-check, inline single-key equality
-     (HS_FAST), tuples emitted directly.
-- Measuring: results are noisy (big/little cores); use many runs, compare
-  binaries alternately (git worktree of an older commit in /tmp).
-- Profiling: no perf/ptrace attach; /tmp/pqb/prof.sh style sampler: gdb runs
-  the engine, a loop sends SIGINT, `thread apply all bt` per stop.
-- Next candidates: agg_task inner loop (gt_get / hash per key calls), group
-  table merge (every merge task scans all partial tables), q20 dictionary
-  evaluation of UPPER(currency), q19 CTE, q11 multi-join, more tasks than
-  threads for balance across big/little cores.
+  --jobs 1`, DATA_DIR = /tmp/pq1m/1m; PQ_ENGINE=path overrides the binary;
+  before: bench/workload-before.txt = commit e38bcc1 measured with the same
+  script). The script reads responses from a regular file: bash `read` on a
+  pipe is one syscall per byte (inflated wall times before that fix).
+- Done (see README "Latency optimization" for the design): mallopt tuning;
+  vectorized DISTINCT aggregates; parallel normalized-key radix sort and
+  parallel top-N (sort.S); worker pool + thread_boost (uclamp) +
+  pool_wake; hash-join fast paths, LEFT join build on smaller preserved
+  side (SWAP_LBUILD); dictionary memo in veval; gt_ids / inline
+  accumulation / partition-indexed merge in vagg.S; merge-join radix sort.
+- Tools: PQ_TRACE_PAR=1 (per par_run: fn, tasks, wall, max task, sum),
+  PQ_POOL_SPIN=us. Sampling profiler: /tmp/pqb/prof.sh style (gdb runs the
+  engine, a loop sends SIGINT; `pkill -f` patterns can kill your own shell —
+  use `pkill -x polyquery`). Diff harness idea: run the same queries under
+  several option sets (row / vectorized / threads 1,3,16 / merge /
+  optimize=false), compare exact output for ORDER BY, multisets otherwise.
+- Measuring: big/little cores and EAS make numbers noisy; use >= 9 runs
+  and medians; compare binaries with a git worktree of an older commit.
+- Next candidates: parallel merge join (merge phase is serial, 26/44 ms for
+  q10/q11 with join=merge); q19 CTE (aggregate 3 ms + merge 2 ms);
+  sort encode phase (string prefix loads); q11 vkey_cells materialization;
+  hash-join build is serial.
 
 ## Status (change CR-2 decimal38, session 1)
 - Conformance incl. changes/decimal38 (69/69): all phases 660/660,
