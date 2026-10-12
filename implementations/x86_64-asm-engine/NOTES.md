@@ -23,12 +23,24 @@ byte-identical full results vs the baseline engine on 1m data):
    gfused_part with PT_LMAX / PT_LABORT) for few groups.
 6. Parallel hash-join build (pexec.S pexec_build: bkey_part, bins_part
    with disjoint bucket ranges; hooked in exec.S exec_from).
-README "Latency optimization" has the before/after table (regenerate the
-"after" column with bench/workload.sh when more changes land).
-Ideas next: q19 (CTE per_c executed twice: once per reference), q07
-(skewed high-cardinality GROUP BY, 13 ms), persistent worker threads in
-par.S instead of pthread_create per par_run, hash table with open
-addressing for joins / groups.
+7. Hash-partitioned GROUP BY: first-seen order from per-tuple slots
+   (slot_order), parallel emission (pexec_emit / emit_part), radix
+   partitioning of the tuples (aux_new, gkey_part counts, dsplit_bounds,
+   dscat_part) shared with the DISTINCT aggregates (dkey_part / dins_part,
+   open-addressing oset_* for integer-like values).
+8. par.S persistent worker pool (par_worker, pool_worker, spin then
+   condvar; threads pinned to CPUs of the affinity mask via pool_pin;
+   forked serve children: par_after_fork, no pinning). Unpinned, the pool
+   was slower on simple scans (threads shared cores) - keep the pinning.
+Workload total: 1120 ms -> ~91 ms (README table, bench/workload.sh 7 reps).
+Results of all 20 queries byte-identical to the baseline engine.
+Measuring: the machine is noisy (+-20% between runs); compare builds with
+interleaved A/B rounds (per-query minimum), not single runs.
+Ideas next: q14 / q15 sorts (~16 ms: ~5 ms scan + projection of 1M rows,
+then encode 3, classify 1.3, scatter 1.4, bucket MSD 3.5 ms; entries could
+drop the row pointer - rows[seq] - to shrink them), q19 / q07 (high-card
+GROUP BY ~6 ms), q10 / q12 joins (~6 ms), q03 index range scan (0.7 ms,
+was 0.6 with one thread).
 
 ## Status (Phase 5 + CR-1 UNION ALL + CR-3 plan separation + CR-2 DECIMAL(38))
 
