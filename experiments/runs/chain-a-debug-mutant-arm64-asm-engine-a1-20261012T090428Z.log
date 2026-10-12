@@ -2,3 +2,5 @@
 2026-10-12T09:04:28+00:00 [a-debug-mutant-arm64-asm-engine-a1-20261012T090428Z] agent queued (usage gate, then launch)
 2026-10-12T09:05:08+00:00 [a-debug-mutant-arm64-asm-engine-a1-20261012T090428Z] agent finished; collecting telemetry
 2026-10-12T09:05:08+00:00 [a-debug-mutant-arm64-asm-engine-a1-20261012T090428Z] validating (clean clone, sandboxed)
+2026-10-12T09:05:24+00:00 [a-debug-mutant-arm64-asm-engine-a1-20261012T090428Z] outcome=success cost=$0.27404 turns=11 wall=38.3s
+2026-10-12T09:05:24+00:00 chain chain-a-debug-mutant-arm64-asm-engine-a1-20261012T090428Z finished: outcome=success sessions=1 spent=$0.27

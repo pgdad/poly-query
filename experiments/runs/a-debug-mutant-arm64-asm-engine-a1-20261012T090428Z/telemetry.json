@@ -1,0 +1,89 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-debug-mutant-arm64-asm-engine-a1-20261012T090428Z",
+ "language": "arm64-asm-engine",
+ "task": "debug-mutant",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-debug-mutant",
+ "prompt_sha256": "9cf5f3b552f5347154a758dcd6cc40560815da0a79a8f616a691f4d6ac324e80",
+ "session_id": "cbe32197-875e-4afb-a5ac-8ac376f0fbbe",
+ "tokens": {
+  "input": 22,
+  "output": 2848,
+  "cache_read": 262320,
+  "cache_creation": 20566,
+  "thinking": null,
+  "thinking_estimated": 857,
+  "source": "result events",
+  "api_messages": 11
+ },
+ "rate_limit": {
+  "events": 2,
+  "max_utilization": {
+   "five_hour": 0.01,
+   "seven_day": 0.57
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 0.27404,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 11,
+ "result_segments": 1,
+ "assistant_messages": 19,
+ "tool_calls": {
+  "Bash": 10
+ },
+ "tool_calls_total": 10,
+ "tool_failures": 0,
+ "build_invocations": 4,
+ "build_failures_heuristic": 0,
+ "conformance_runs": 3,
+ "conformance_progress": [
+  [
+   564,
+   569
+  ],
+  [
+   51,
+   55
+  ],
+  [
+   569,
+   569
+  ]
+ ],
+ "repair_iterations": 2,
+ "time": {
+  "wall_seconds": 38.3,
+  "model_api_seconds": 29.2,
+  "tool_seconds": 6.8,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 2,
+  "files_changed": 2,
+  "lines_added": 6,
+  "lines_removed": 1,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "I found and fixed the injected defect with a one-instruction change, and all conformance suites pass again.\n\n**Root cause:** in `implementations/arm64-asm-engine/src/strfuncs.S:398`, inside `like_match` at the `.Llm_tail` label. Once the whole string has been used up, the matcher checks whether the whole pattern has been used up too (`cmp x5, x3`, pattern index against pattern length). That branch had been changed from `b.hs` (index \u2265 length) to `b.hi` (index > length). The index never goes past the length, so a fully matched pattern was never accepted. Instead the code read one byte past the end of the pattern, which isn't `%`, and returned false. As a result every `LIKE` was false and every `NOT LIKE` was true. That explains all five failing cases, including the `LIKE '%e%'` filter in `stats_layout_planning.pqt:100`.\n\n**Fix:** changed `b.hi .Llm_true` back to `b.hs .Llm_true`. That one instruction is the only code change; I also added a short entry about the fix to `NOTES.md`.\n\n**Test results:**\n- Default run: `TOTAL: 569/569 pass` (phase 1: 225/225, phase 2: 186/186, phase 3: 143/143, phase 5: 15/15), caps=27, so the capability set is unchanged\n- `--modes`: `TOTAL: 3324/3324 pass`\n- `--transport http`: `TOTAL: 569/569 pass`\n- `make build` and `make test` both succeed with no failures in any unit, CLI, HTTP, mode or storage test.\n\n**Commits:** `4880c50` has the fix and `a2d67f8` has the NOTES.md entry. The working tree is clean.\n\n**Known limitations and design decisions:** none are new, since nothing else changed. The LIKE matcher is still the existing iterative one, which falls back to the most recent `%` on a mismatch, so its worst case is O(len(string) \u00d7 len(pattern)).",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
