@@ -53,7 +53,6 @@
  },
  "outstanding_tasks": [
   "Option B: Phases 1-5 merged for both assembly engines (each phase one session; Phase 5 3738/3738 across modes, HTTP suite 19/19); spend $188.99 of the $600 cap; next: later families, code review, benchmarks",
-  "Native-kernel validation path for the AArch64 engine (Phase 5) is x86-only (native-kernels/build/x86_64)",
   "Main-line HTTP throughput not re-measured after INT-001 (bench.py run without the HTTP benchmark)",
   "Debugging family remains too easy for both engines and kernels (kernel variant with symptom-only report and hidden-only failures: fixed in ~1 min)",
   "AArch64 kernel review findings: verification harnesses not committed, no BTI/GNU property note, block-size test constants not overridable",
@@ -112,8 +111,8 @@
   "HI-009: before/after trees kept stray files; clean re-measurement within the ~20% between-session spread"
  ],
  "totals": {
-  "track_a_runs": 86,
-  "track_a_cost_usd_list": 927.7,
-  "note": "cost excludes 4 timed-out runs with no reported cost; includes kernel family and record-only re-runs; Track B runs in progress"
+  "track_a_runs": 98,
+  "track_a_cost_usd_list": 1134.13,
+  "note": "from results/comparisons/development.csv; excludes 5 runs with no reported cost (timeouts); includes kernel family, record-only re-runs and the assembly engines ($188.98); Track B jvm-tuning runs are separate"
  }
 }
