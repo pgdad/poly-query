@@ -82,7 +82,8 @@ NATIVE_EXTRA_PATHS = ["native-kernels/Makefile", "native-kernels/include", "nati
 
 PHASE_TASKS = {"phase1", "phase2", "phase3", "phase4", "phase5"}
 # Inputs a task's prompt names explicitly (HI-007: optimize-latency named a workload that was never exported).
-TASK_EXTRA_PATHS = {"optimize-latency": ["benchmarks/workloads"], "jvm-tuning": ["benchmarks/workloads"]}
+TASK_EXTRA_PATHS = {"optimize-latency": ["benchmarks/workloads"], "jvm-tuning": ["benchmarks/workloads"],
+                    "change-expression-limits": ["tests/regression/robustness_probe.py"]}
 
 TRUSTED_PATHS = ["tests", "spec"]
 TRUSTED_KERNEL_PATHS = ["spec", "native-kernels/Makefile", "native-kernels/include", "native-kernels/reference-c",
@@ -806,6 +807,13 @@ fi
    --report conformance-modes.json -q > validate-modes.log 2>&1; echo "modes_exit=$?" >> validate-status
 """
         extra.append("conformance-modes.json")
+        # CR-6 is checked by the black-box probe (public and withheld cases) when the engine claims it.
+        script += f"""if implementations/{lang}/bin/polyquery capabilities | grep -q change.expression_limits; then
+python3 tests/regression/robustness_probe.py --engine implementations/{lang}/bin/polyquery --only expression_limits \
+   --extra-cases tests/conformance/hidden/limits/expression_limits.py --require-pass \
+   --report expression-limits.json > validate-limits.log 2>&1; echo "limits_exit=$?" >> validate-status
+fi
+"""
     cfg = rd / "config"
     t0 = time.time()
     host = agent_host(lang)
@@ -838,7 +846,7 @@ fi
         if p.exists():
             d = json.loads(p.read_text())
             out["extra"][x] = d.get("summary") or d
-    for f in ["conformance.json", *extra, "validate-build.log", "validate-conformance.log"]:
+    for f in ["conformance.json", *extra, "validate-build.log", "validate-conformance.log", "expression-limits.json"]:
         if (vd / f).exists():
             shutil.copy(vd / f, rd / f)
     out["outcome"] = classify(m, out)
@@ -1003,6 +1011,7 @@ def run_native_arm(kernels_dir: Path, out_dir: Path) -> dict:
 
 CAPS_UNCHANGED_TASKS = {"refactor-plan-separation", "debug-mutant", "optimize-latency", "jvm-tuning"}
 TASK_REQUIRED_CAPS = {"change-union-all": "change.union_all", "change-decimal38": "change.decimal38",
+                      "change-expression-limits": "change.expression_limits",
                       "native": "native.kernels"}
 
 
@@ -1041,7 +1050,7 @@ def classify(m: dict, v: dict) -> str:
         elif isinstance(s, dict) and "failed" in s and s["failed"]:
             ok = False
     # Fail closed: a native check that ran without a library would otherwise pass on the fallback path (HI-008).
-    if any(v["status"].get(k, "0") != "0" for k in ("native_lib_exit", "native_exit")):
+    if any(v["status"].get(k, "0") != "0" for k in ("native_lib_exit", "native_exit", "limits_exit")):
         ok = False
     rc = m.get("agent_exit_code")
     # A killed agent did not finish its task, even if what it had committed passes.

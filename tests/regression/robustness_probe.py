@@ -356,6 +356,9 @@ def probe_parallel_memory_budget(engine: str, data: Path) -> dict:
     return {"verdict": verdict, **out, **info}
 
 
+EXTRA_CASES: str | None = None
+
+
 def limit_cases() -> tuple[list, list]:
     """CR-6 (spec/changes/expression-limits.md §5) on n(x) = 0..99: (name, sql, expected first cell)."""
     def where(pred: str) -> str:
@@ -391,6 +394,11 @@ def probe_expression_limits(engine: str, data: Path) -> dict:
     modes = (("row", {"mode": "row", "threads": 1}), ("vectorized", {"mode": "vectorized", "threads": 1}),
              ("parallel", {"mode": "vectorized", "threads": 8}), ("auto", {}))
     minimum, beyond = limit_cases()
+    if EXTRA_CASES:   # withheld acceptance cases (validation only)
+        ns: dict = {}
+        exec(compile(Path(EXTRA_CASES).read_text(), EXTRA_CASES, "exec"), ns)  # noqa: S102 - trusted harness file
+        hmin, hbeyond = ns["cases"]()
+        minimum, beyond = minimum + hmin, beyond + hbeyond
     state: dict = {"s": None, "deaths": []}
 
     def session() -> Session:
@@ -464,7 +472,11 @@ def main() -> int:
     ap.add_argument("--only", default="")
     ap.add_argument("--report")
     ap.add_argument("--merge", action="store_true", help="update the probes in an existing --report file")
+    ap.add_argument("--extra-cases", help="file defining cases() -> (minimum, beyond) for expression_limits")
+    ap.add_argument("--require-pass", action="store_true", help="exit 1 unless every probe that ran passed")
     a = ap.parse_args()
+    global EXTRA_CASES
+    EXTRA_CASES = a.extra_cases
     engine = str(Path(a.engine).resolve())
     names = [n for n in a.only.split(",") if n] or list(PROBES)
     res = {"engine": a.engine, "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "probes": {}}
@@ -484,6 +496,8 @@ def main() -> int:
         print(f"{n}: {v}", flush=True)
     if a.report:
         Path(a.report).write_text(json.dumps(res, indent=1) + "\n")
+    if a.require_pass and any(res["probes"][n].get("verdict") != "pass" for n in names):
+        return 1
     return 0
 
 

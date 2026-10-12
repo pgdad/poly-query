@@ -95,6 +95,9 @@ that work.
     `RESOURCE_LIMIT` or `TIMEOUT`, and it must arrive no more than 1 s after the
     timeout expires. The probe tolerates 4 s extra for scheduling, and reports
     the measured delay.
+* Validation of an engine that claims the capability also runs withheld cases
+  of the same measures with other constructs (the visible cases are not the
+  whole acceptance test).
 * The probe runs on every engine. Engines that do not claim the capability
   get the same report, marked informational. They were built against spec
   1.0.0, where these limits were implementation-defined.
