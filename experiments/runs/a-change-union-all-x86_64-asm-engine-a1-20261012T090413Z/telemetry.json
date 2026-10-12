@@ -1,0 +1,101 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-union-all-x86_64-asm-engine-a1-20261012T090413Z",
+ "language": "x86_64-asm-engine",
+ "task": "change-union-all",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-union-all",
+ "prompt_sha256": "93a966ef671b06fc789ab48d4cf535f65b0628e589ee85de4ecdb5b79aa9252d",
+ "session_id": "6ee3450a-82b4-43dc-a114-02b1b110dbf0",
+ "tokens": {
+  "input": 110,
+  "output": 46029,
+  "cache_read": 5595224,
+  "cache_creation": 152576,
+  "thinking": null,
+  "thinking_estimated": 20976,
+  "source": "result events",
+  "api_messages": 55
+ },
+ "rate_limit": {
+  "events": 3,
+  "max_utilization": {
+   "five_hour": 0.02,
+   "seven_day": 0.57
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 3.2606727999999996,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 56,
+ "result_segments": 1,
+ "assistant_messages": 113,
+ "tool_calls": {
+  "Bash": 55
+ },
+ "tool_calls_total": 55,
+ "tool_failures": 2,
+ "build_invocations": 7,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 7,
+ "conformance_progress": [
+  [
+   569,
+   569
+  ],
+  [
+   22,
+   22
+  ],
+  [
+   590,
+   591
+  ],
+  [
+   224,
+   225
+  ],
+  [
+   3456,
+   3456
+  ],
+  [
+   591,
+   591
+  ]
+ ],
+ "repair_iterations": 4,
+ "time": {
+  "wall_seconds": 474.5,
+  "model_api_seconds": 434.9,
+  "tool_seconds": 39.1,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 2,
+  "files_changed": 11,
+  "lines_added": 491,
+  "lines_removed": 23,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "`UNION ALL` is implemented and the engine now claims `change.union_all`. Every suite in the definition of done reports 0 failures, 0 errors and 0 not-implemented, and the work is committed in two commits (`da722eb`, `ad31811`).\n\n**Test results**\n- Default runner: `TOTAL: 591/591 pass` (phase 1 225/225, phase 2 208/208 including the 22 `changes/union_all` cases, phase 3 143/143, phase 5 15/15).\n- `--modes`: `TOTAL: 3456/3456 pass`. It also passes with `PQ_PAR_MIN=1`, which forces the parallel paths onto the small test tables.\n- `--transport http`: `TOTAL: 591/591 pass`.\n- `http_suite.py`: `19/19 passed`.\n- `make build test lint` succeeds from a clean build. The engine's own end-to-end tests now include UNION ALL cases: 78 session cases, and 330 checks where every option set must give the same response as the baseline.\n\n**What I built**\n- **Parser:** `UNION ALL` works wherever a query is allowed: top level, CTEs, derived tables, scalar/`IN`/`EXISTS` subqueries and `EXPLAIN`. `UNION` and `UNION DISTINCT` still return `UNSUPPORTED`. A `UNION ALL` after a branch's `ORDER BY`/`LIMIT`, or around parenthesised branches, returns `PARSE_ERROR`.\n- **Binder:** each branch is bound like an ordinary query in the same position, so branches that reference an enclosing query work. The checks:\n  - Branches with different column counts give `SEMANTIC_ERROR`.\n  - Output names come from the first branch.\n  - Output types follow the CASE rule from the spec; incompatible types give `TYPE_ERROR`.\n  - `ORDER BY` accepts only output names or positions; anything else gives `SEMANTIC_ERROR`.\n- **Executor:** branches run in order, and each one uses whatever `mode`, `threads`, `join` and `optimize` options are set. Rows are concatenated and converted to the output types; an INT64 that doesn't fit the DECIMAL gives `NUMERIC_OVERFLOW`. Then `ORDER BY`, `OFFSET` and `LIMIT` apply to the whole result. `max_rows` applies to the final result. The HTTP streaming endpoint sends union queries as complete results rather than row by row.\n- **EXPLAIN:** shows `Limit > Sort > UnionAll`, with the branch plans as children in order.\n\n**Main design decisions**\n- **Own plan type:** a union is its own kind of plan, not a projection over a derived table. That makes EXPLAIN show exactly what the spec asks for, and each branch keeps its own optimisations (pushdown, index scans, join choice, parallel operators).\n- **Row order:** without `ORDER BY`, rows come out in branch order, which is the same under every execution option.\n- **Conversion timing:** values are converted after each branch runs, so a conversion error is the same error in every mode.\n\n**Known limitations and one deviation**\n- **spec version:** the change spec says engines with this change report `spec_version` `1.1.0-cr1`, but the phase-1 test `catalog.pqt` requires `\"1.0.0\"`. I tried `1.1.0-cr1` and it broke that test (and its 6 `--modes` variants), so the engine still reports `1.0.0`. This is documented in the README.\n- **All-NULL columns:** a column that is NULL in every branch is reported as `STRING`, the same as the engine already does for `SELECT NULL`.\n- **Duplicate names:** if two output columns of the first branch share a name but hold different expressions, `ORDER BY` that name is an ambiguous reference (`SEMANTIC_ERROR`), as in plain queries.\n- **INT64 to FLOAT64 edge case:** within a `DISTINCT` branch, duplicates are removed before conversion. Very large INT64 values (beyond 2^53) that only become equal once converted to FLOAT64 are not merged.\n\nThe README has a \"Change CR-1: `UNION ALL`\" section listing every module touched (`sql.inc`, `parser.S`, `binder.S`, `exec.S`, `explain.S`, `server.S`, `protocol.S`, the two test scripts). NOTES.md is updated with the current status.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

@@ -1,0 +1,21 @@
+{
+ "chain_id": "chain-a-change-union-all-x86_64-asm-engine-a1-20261012T090413Z",
+ "task": "change-union-all",
+ "language": "x86_64-asm-engine",
+ "track": "A",
+ "attempt": 1,
+ "max_sessions": 2,
+ "total_budget_usd": 35.0,
+ "timeout_min": 120,
+ "sessions": [
+  {
+   "run_id": "a-change-union-all-x86_64-asm-engine-a1-20261012T090413Z",
+   "session": 1,
+   "outcome": "success",
+   "cost_usd": 3.2606727999999996
+  }
+ ],
+ "spent_usd": 3.26,
+ "outcome": "success",
+ "finished": "2026-10-12T09:12:21+00:00"
+}
