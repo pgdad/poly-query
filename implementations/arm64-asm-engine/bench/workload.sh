@@ -12,7 +12,7 @@
 # Requires python3 only to read the workload JSON (no engine code).
 set -euo pipefail
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-engine="$here/../bin/polyquery"
+engine=${PQ_ENGINE:-"$here/../bin/polyquery"}
 workload="$here/../../../benchmarks/workloads/analytics.json"
 data=${1:?usage: workload.sh DATA_DIR [RUNS] [OPTIONS_JSON]}
 runs=${2:-5}

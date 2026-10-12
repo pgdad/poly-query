@@ -2086,6 +2086,7 @@ ENDF send_continue
 LFUNC conn_main
     ENTER 2
     mov  x20, x0
+    bl   thread_boost                   // runs queries (parallel.S)
     mov  x0, #1
     mov  x1, #CN_SIZE
     bl   calloc

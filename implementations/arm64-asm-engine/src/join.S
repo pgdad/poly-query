@@ -31,7 +31,9 @@
 #define HS_NEXT     56              // u32* chain links per right tuple
 #define HS_MASK     64              // u64 bucket mask
 #define HS_KS       72              // u64 bytes of key cells per tuple
-#define HS_SIZE     80
+#define HS_RHASH    80              // u64* hashes of the right tuples
+#define HS_FAST     88              // u64 1: one key compared by payload
+#define HS_SIZE     96
 // Probe task (one per thread)
 #define HJ_NODE     0
 #define HJ_CTX      8               // EvalCtx* (own copy for worker tasks)
@@ -845,11 +847,27 @@ FUNC ex_hashjoin
     mov  x3, x20
     bl   join_keys
     str  x0, [x21, #HS_RCELLS]
+    str  x1, [x21, #HS_RHASH]
     ldr  x0, [x21, #HS_R]
     bl   hj_table
     str  x0, [x21, #HS_HEADS]
     str  x1, [x21, #HS_NEXT]
     str  x2, [x21, #HS_MASK]
+    ldr  x9, [x19, #PN_NKEYS]           // one key with payload equality
+    cmp  x9, #1                         // (keys_equal's rule)?
+    b.ne 1f
+    ldr  x9, [x19, #PN_LKEYS]
+    ldr  x9, [x9]
+    ldr  w9, [x9, #N_TYPE]
+    BR_WIDE w9, w10, 1f
+    and  w9, w9, #T_KIND_MASK
+    cmp  w9, #T_STR
+    b.eq 1f
+    cmp  w9, #T_FLOAT
+    b.eq 1f
+    mov  x9, #1
+    str  x9, [x21, #HS_FAST]
+1:
     // ---- probe -------------------------------------------------------------
     ldr  x0, [x21, #HS_L]
     ldr  x1, [x19, #PN_LKEYS]
@@ -1142,12 +1160,17 @@ FUNC join_keys
 ENDF join_keys
 
 // =============================================================================
-// hj_probe(x0 HashJoin task) — probes the left tuples [HJ_LO, HJ_HI)
+// hj_probe(x0 HashJoin task) — probes the left tuples [HJ_LO, HJ_HI). A chain
+// entry is a candidate only if its full 64-bit hash equals the probe's; with
+// HS_FAST the single key is then compared by payload, otherwise keys_equal.
+// Joined (or NULL-padded) tuples are written straight into the output set.
 //   x19 task, x20 ctx, x21 shared, x22 node, x23 out, x24 left index,
-//   x25 chain entry, x26 matched, x27 combined tuple, x28 counter
+//   x25 chain entry, x26 matched, x27 scratch tuple (residual), x28 counter
+// Stack: [sp] probe hash
 // =============================================================================
 FUNC hj_probe
     ENTER 5
+    sub  sp, sp, #16
     mov  x19, x0
     ldr  x20, [x19, #HJ_CTX]
     ldr  x21, [x19, #HJ_SH]
@@ -1177,6 +1200,7 @@ FUNC hj_probe
     cbnz w9, .Lhp_pad                   // NULL key: no partner
     ldr  x9, [x21, #HS_LHASH]
     ldr  x9, [x9, x24, lsl #3]
+    str  x9, [sp]
     ldr  x10, [x21, #HS_MASK]
     and  x9, x9, x10
     ldr  x10, [x21, #HS_HEADS]
@@ -1188,7 +1212,23 @@ FUNC hj_probe
     tst  x28, #DEADLINE_MASK
     b.ne 1f
     bl   check_deadline
-1:  ldr  x9, [x21, #HS_KS]
+1:  ldr  x9, [x21, #HS_RHASH]          // different hash: different keys
+    ldr  x9, [x9, x25, lsl #3]
+    ldr  x10, [sp]
+    cmp  x9, x10
+    b.ne .Lhp_next
+    ldr  x9, [x21, #HS_FAST]
+    cbz  x9, 2f
+    ldr  x9, [x21, #HS_LCELLS]          // (one key: 16-byte cells)
+    add  x9, x9, x24, lsl #4
+    ldr  x9, [x9]
+    ldr  x10, [x21, #HS_RCELLS]
+    add  x10, x10, x25, lsl #4
+    ldr  x10, [x10]
+    cmp  x9, x10
+    b.ne .Lhp_next
+    b    3f
+2:  ldr  x9, [x21, #HS_KS]
     ldr  x0, [x21, #HS_LCELLS]
     madd x0, x24, x9, x0
     ldr  x1, [x21, #HS_RCELLS]
@@ -1197,7 +1237,9 @@ FUNC hj_probe
     ldr  x3, [x22, #PN_NKEYS]
     bl   keys_equal
     cbz  w0, .Lhp_next
-    ldr  x0, [x21, #HS_R]               // combine left + right tuple
+3:  ldr  x0, [x22, #PN_EXPR]            // residual condition
+    cbz  x0, 4f
+    ldr  x0, [x21, #HS_R]               // on left + right in the scratch
     mov  x1, x25
     bl   ts_tuple
     str  x0, [sp, #-16]!
@@ -1211,40 +1253,78 @@ FUNC hj_probe
     ldr  x3, [x9, #TS_W]
     bl   combine
     ldr  x0, [x22, #PN_EXPR]
-    cbz  x0, 2f
     str  x27, [x20, #EC_TUPLE]
     mov  x1, x20
     bl   eval_true
     cbz  w0, .Lhp_next
-2:  mov  x0, x23
-    mov  x1, x27
-    bl   join_emit
+4:  mov  x1, #1
+    bl   .Lhp_put
     mov  x26, #1
 .Lhp_next:
     ldr  x9, [x21, #HS_NEXT]
     ldr  w25, [x9, x25, lsl #2]
     b    .Lhp_chain
 .Lhp_pad:
-    cbnz x26, 3f
+    cbnz x26, 5f
     ldr  w9, [x22, #PN_JT]
     cmp  w9, #JT_LEFT
-    b.ne 3f
-    ldr  x0, [x21, #HS_L]
-    mov  x1, x24
-    bl   ts_tuple
-    mov  x1, x0
-    mov  x0, x27
-    mov  x2, #0
-    ldr  x9, [x21, #HS_L]
-    ldr  x3, [x9, #TS_W]
-    bl   combine
-    mov  x0, x23
-    mov  x1, x27
-    bl   join_emit
-3:  add  x24, x24, #1
+    b.ne 5f
+    mov  x1, #0
+    bl   .Lhp_put
+5:  add  x24, x24, #1
     b    .Lhp_left
 .Lhp_end:
+    add  sp, sp, #16
     LEAVE 5
+
+// local helper: appends left tuple x24 joined with right tuple x25 (x1 = 1)
+// or padded with NULLs (x1 = 0) to the output (--max-join-rows checked;
+// clobbers x0-x15)
+.Lhp_put:
+    ldr  x9, [x23, #TS_N]
+    LDR_G x10, g_max_join_rows
+    cmp  x9, x10
+    b.hs 9f
+    ldr  x10, [x23, #TS_CAP]
+    cmp  x9, x10
+    b.lo 1f
+    stp  x29, x30, [sp, #-16]!          // full: grow
+    stp  x1, xzr, [sp, #-16]!
+    mov  x0, x23
+    mov  x1, #1
+    bl   ts_reserve
+    ldp  x1, x9, [sp], #16
+    ldp  x29, x30, [sp], #16
+    ldr  x9, [x23, #TS_N]
+1:  ldr  x10, [x23, #TS_W]
+    ldr  x11, [x23, #TS_DATA]
+    mul  x12, x9, x10
+    add  x11, x11, x12, lsl #2          // destination
+    add  x9, x9, #1
+    str  x9, [x23, #TS_N]
+    ldr  x12, [x21, #HS_L]              // left tuple (both inputs have the
+    ldr  x13, [x12, #TS_DATA]           // output's width)
+    mul  x14, x24, x10
+    add  x13, x13, x14, lsl #2
+    cbz  x1, 3f
+    ldr  x12, [x21, #HS_R]
+    ldr  x14, [x12, #TS_DATA]
+    mul  x15, x25, x10
+    add  x14, x14, x15, lsl #2
+2:  cbz  x10, 4f                        // slot-wise AND (see combine)
+    ldr  w12, [x13], #4
+    ldr  w15, [x14], #4
+    and  w12, w12, w15
+    str  w12, [x11], #4
+    sub  x10, x10, #1
+    b    2b
+3:  cbz  x10, 4f
+    ldr  w12, [x13], #4
+    str  w12, [x11], #4
+    sub  x10, x10, #1
+    b    3b
+4:  ret
+9:  RAISE ERR_RESOURCE_LIMIT, "join result exceeds --max-join-rows"
 ENDF hj_probe
 
     .ltorg

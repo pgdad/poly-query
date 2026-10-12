@@ -2,21 +2,23 @@
 // parallel.S — intra-query parallelism (Phase 5, option "threads").
 //
 //   par_run(x0 fn, x1 args, x2 arg stride, x3 n)
-//       runs fn(args + i * stride) for i < n, each on its own thread, and
-//       waits for all of them. Raises the first error (lowest i) a task
-//       raised, after every task has finished.
+//       runs fn(args + i * stride) for i < n on the worker pool and the
+//       calling thread, and waits for all of them. Raises the first error
+//       (lowest i) a task raised, after every task has finished.
 //   expr_par_safe(x0 Node* or 0) -> w0 1 if the expression may be evaluated
 //       on a worker thread (no subquery: their results are cached in shared
 //       SubPlans on first use).
 //
-// A worker thread runs with a copy of the caller's request state (deadline,
+// A pool thread runs a task with a copy of the caller's request state (deadline,
 // cancellation flag, memory budget, execution settings, catalog version) and
 // its own error handler (setjmp) and request arena. When it finishes, its
 // arena chunks are moved into the caller's arena (arena_adopt), so memory a
 // task allocated (tuple sets, strings) lives until the request ends exactly
-// like memory of the calling thread. Workers never touch the caller's
+// like memory of the calling thread. Pool threads never touch the caller's
 // arena, so tasks need no locking as long as they write only their own
-// argument records.
+// argument records. Tasks the caller runs itself (wk_inline) allocate from
+// its arena directly. Pool threads are created on demand (pool_grow) and
+// live until the process exits.
 // =============================================================================
 #include "pq.inc"
 #include "frame.inc"
@@ -30,8 +32,6 @@
 #define WK_THREADS  40
 #define WK_MODE     48              // u32
 #define WK_CAT      64
-#define WK_TID      72              // pthread_t
-#define WK_STARTED  80              // u64 1 = thread created
 #define WK_ERR      88              // u32 error code (0 = none)
 #define WK_ARENA    96              // Arena handed back (AR_SIZE)
 #define WK_MSG      128             // error message (WK_MSGMAX bytes, NUL)
@@ -40,9 +40,41 @@
 
     .text
 
+// Job: one par_run call, queued for the pool (caller's arena)
+#define JB_NEXT     0               // next job in the queue
+#define JB_RECS     8               // worker records
+#define JB_N        16              // tasks
+#define JB_CLAIMED  24              // tasks handed out
+#define JB_DONE     32              // tasks finished
+#define JB_SIZE     48
+
+#define POOL_MAX    64              // pool threads at most
+
+    .bss
+    .p2align 4
+g_pool_lock:    .skip 64            // pthread_mutex_t: guards the pool state
+g_pool_work:    .skip 64            // pthread_cond_t: a job was queued
+g_pool_done:    .skip 64            // pthread_cond_t: a job's last task ended
+g_pool_head:    .skip 8             // Job* queue (FIFO)
+g_pool_tail:    .skip 8
+g_pool_threads: .skip 8             // pool threads started
+
+    .data
+    .p2align 3
+    .global g_pool_spin
+g_pool_spin:    .quad 50000         // idle polls before a pool thread sleeps
+
+    .text
+
 // =============================================================================
 // par_run(x0 fn, x1 args, x2 stride, x3 n)
-//   x19 fn, x20 args, x21 stride, x22 n, x23 workers, x24 i, x25 record
+// The tasks are queued as one job for the worker pool (persistent threads,
+// started on demand: at most n - 1 are needed); the calling thread claims
+// tasks of its own job too and then waits for the ones still running.
+// Because the caller works on its own job instead of waiting for a free
+// thread, nested and concurrent par_run calls cannot deadlock.
+//   x19 fn, x20 args, x21 stride, x22 n, x23 workers, x24 i, x25 record,
+//   x26 job
 // =============================================================================
 FUNC par_run
     ENTER 5
@@ -55,8 +87,8 @@ FUNC par_run
     bl   arena_zalloc
     mov  x23, x0
     mov  x24, #0
-1:  cmp  x24, x22                       // start every task
-    b.hs 3f
+1:  cmp  x24, x22                       // worker records
+    b.hs 2f
     mov  x9, #WK_SIZE
     madd x25, x24, x9, x23
     str  x19, [x25, #WK_FN]
@@ -75,46 +107,80 @@ FUNC par_run
     str  w9, [x25, #WK_MODE]
     TLS_LDR x9, g_cat
     str  x9, [x25, #WK_CAT]
-    add  x0, x25, #WK_TID
-    mov  x1, #0
-    ADR_L x2, wk_main
-    mov  x3, x25
-    bl   pthread_create
-    cbnz w0, 2f
-    mov  x9, #1
-    str  x9, [x25, #WK_STARTED]
     add  x24, x24, #1
     b    1b
-2:  mov  x0, x25                        // no thread: run it here
+2:  mov  x0, #JB_SIZE
+    bl   arena_zalloc
+    mov  x26, x0
+    str  x23, [x26, #JB_RECS]
+    str  x22, [x26, #JB_N]
+    cmp  x22, #1
+    b.ls .Lpr_claim                     // one task: no queueing
+    sub  x0, x22, #1
+    bl   pool_grow
+    ADR_L x0, g_pool_lock
+    bl   pthread_mutex_lock
+    ADR_L x9, g_pool_tail               // append the job
+    ldr  x10, [x9]
+    ADR_L x11, g_pool_head
+    cbz  x10, 3f
+    str  x26, [x10, #JB_NEXT]
+    b    4f
+3:  str  x26, [x11]
+4:  str  x26, [x9]
+    ADR_L x0, g_pool_work
+    bl   pthread_cond_broadcast
+    b    .Lpr_claim_locked
+.Lpr_claim:
+    ADR_L x0, g_pool_lock
+    bl   pthread_mutex_lock
+.Lpr_claim_locked:                      // run tasks of this job here
+    ldr  x24, [x26, #JB_CLAIMED]
+    cmp  x24, x22
+    b.hs .Lpr_wait
+    mov  x0, x26
+    bl   job_claim
+    ADR_L x0, g_pool_lock
+    bl   pthread_mutex_unlock
+    mov  x9, #WK_SIZE
+    madd x0, x24, x9, x23
     bl   wk_inline
-    add  x24, x24, #1
-    b    1b
-3:  mov  x24, #0                        // wait, adopt the arenas
-4:  cmp  x24, x22
-    b.hs 6f
+    ADR_L x0, g_pool_lock
+    bl   pthread_mutex_lock
+    mov  x0, x26
+    bl   job_finish
+    b    .Lpr_claim_locked
+.Lpr_wait:                              // the rest runs on pool threads
+    ldr  x9, [x26, #JB_DONE]
+    cmp  x9, x22
+    b.hs 5f
+    ADR_L x0, g_pool_done
+    ADR_L x1, g_pool_lock
+    bl   pthread_cond_wait
+    b    .Lpr_wait
+5:  ADR_L x0, g_pool_lock
+    bl   pthread_mutex_unlock
+    mov  x24, #0                        // adopt the arenas
+6:  cmp  x24, x22
+    b.hs 7f
     mov  x9, #WK_SIZE
     madd x25, x24, x9, x23
-    ldr  x9, [x25, #WK_STARTED]
-    cbz  x9, 5f
-    ldr  x0, [x25, #WK_TID]
-    mov  x1, #0
-    bl   pthread_join
-5:  TLS_ADDR x0, g_arena
+    TLS_ADDR x0, g_arena
     add  x1, x25, #WK_ARENA
     bl   arena_adopt
     add  x24, x24, #1
-    b    4b
-6:  mov  x24, #0                        // first error, in task order
-7:  cmp  x24, x22
-    b.hs 8f
+    b    6b
+7:  mov  x24, #0                        // first error, in task order
+8:  cmp  x24, x22
+    b.hs 9f
     mov  x9, #WK_SIZE
     madd x25, x24, x9, x23
     ldr  w9, [x25, #WK_ERR]
-    cbnz w9, 9f
+    cbnz w9, 10f
     add  x24, x24, #1
-    b    7b
-8:  LEAVE 5
-9:  add  x0, x25, #WK_MSG
+    b    8b
+9:  LEAVE 5
+10: add  x0, x25, #WK_MSG
     bl   strlen
     mov  x2, x0
     add  x1, x25, #WK_MSG
@@ -122,11 +188,177 @@ FUNC par_run
     bl   pq_raise_n
 ENDF par_run
 
+// job_claim(x0 job) — takes the next task (JB_CLAIMED++); a job with every
+// task handed out leaves the queue. Pool lock held.   (leaf)
+LFUNC job_claim
+    ldr  x9, [x0, #JB_CLAIMED]
+    add  x9, x9, #1
+    str  x9, [x0, #JB_CLAIMED]
+    ldr  x10, [x0, #JB_N]
+    cmp  x9, x10
+    b.lo 3f
+    ADR_L x11, g_pool_head              // unlink it (it is queued unless
+    mov  x12, #0                        // it has a single task)
+1:  ldr  x13, [x11]
+    cbz  x13, 3f
+    cmp  x13, x0
+    b.eq 2f
+    add  x11, x13, #JB_NEXT
+    mov  x12, x13
+    b    1b
+2:  ldr  x14, [x0, #JB_NEXT]
+    str  x14, [x11]
+    str  xzr, [x0, #JB_NEXT]
+    cbnz x14, 3f
+    ADR_L x11, g_pool_tail              // it was the last one
+    str  x12, [x11]
+3:  ret
+ENDF job_claim
+
+// job_finish(x0 job) — JB_DONE++, wakes the waiting callers when it was the
+// job's last task. Pool lock held.
+LFUNC job_finish
+    ldr  x9, [x0, #JB_DONE]
+    add  x9, x9, #1
+    str  x9, [x0, #JB_DONE]
+    ldr  x10, [x0, #JB_N]
+    cmp  x9, x10
+    b.lo 1f
+    ADR_L x0, g_pool_done
+    b    pthread_cond_broadcast         // tail call
+1:  ret
+ENDF job_finish
+
+// pool_grow(x0 wanted) — starts pool threads until min(wanted, POOL_MAX)
+// exist (a thread that cannot be created is simply missing: callers run
+// the tasks themselves)
+//   x19 wanted; stack: pthread_t
+LFUNC pool_grow
+    ENTER 1
+    sub  sp, sp, #16
+    cmp  x0, #POOL_MAX
+    mov  x9, #POOL_MAX
+    csel x19, x0, x9, lo
+    ADR_L x9, g_pool_threads            // racy read: only a hint
+    ldr  x9, [x9]
+    cmp  x9, x19
+    b.hs 9f
+    ADR_L x0, g_pool_lock
+    bl   pthread_mutex_lock
+1:  ADR_L x9, g_pool_threads
+    ldr  x10, [x9]
+    cmp  x10, x19
+    b.hs 8f
+    mov  x0, sp
+    mov  x1, #0
+    ADR_L x2, pool_main
+    mov  x3, #0
+    bl   pthread_create
+    cbnz w0, 8f
+    ldr  x0, [sp]
+    bl   pthread_detach
+    ADR_L x9, g_pool_threads
+    ldr  x10, [x9]
+    add  x10, x10, #1
+    str  x10, [x9]
+    b    1b
+8:  ADR_L x0, g_pool_lock
+    bl   pthread_mutex_unlock
+9:  add  sp, sp, #16
+    LEAVE 1
+ENDF pool_grow
+
 // =============================================================================
-// wk_main(x0 worker record) -> x0 0   thread entry
+// thread_boost() — asks the scheduler to treat the calling thread as one
+// that needs a full-performance CPU (sched_setattr: utilization clamp min =
+// max = 1024; errors are ignored). Query threads and pool threads sleep
+// between short bursts of work, so their tracked utilization stays low and
+// energy-aware scheduling packs several of them onto one CPU (or onto slow
+// cores) for the first queries: parallel phases then take up to twice as
+// long until the history catches up. The clamp makes placement right from
+// the first burst.
+// =============================================================================
+#define SYS_SCHED_SETATTR       274
+#define SCHED_FLAG_KEEP_ALL     0x18    // keep policy and parameters
+#define SCHED_FLAG_UTIL_MIN     0x20
+#define SCHED_FLAG_UTIL_MAX     0x40
+FUNC thread_boost
+    ENTER 0
+    sub  sp, sp, #64                    // struct sched_attr (56 bytes)
+    stp  xzr, xzr, [sp]
+    stp  xzr, xzr, [sp, #16]
+    stp  xzr, xzr, [sp, #32]
+    stp  xzr, xzr, [sp, #48]
+    mov  w9, #56
+    str  w9, [sp]                       // size
+    mov  x9, #(SCHED_FLAG_KEEP_ALL | SCHED_FLAG_UTIL_MIN | SCHED_FLAG_UTIL_MAX)
+    str  x9, [sp, #8]                   // sched_flags
+    mov  w9, #1024
+    str  w9, [sp, #48]                  // sched_util_min
+    str  w9, [sp, #52]                  // sched_util_max
+    mov  x0, #SYS_SCHED_SETATTR
+    mov  x1, #0                         // this thread
+    mov  x2, sp
+    mov  x3, #0
+    bl   syscall
+    add  sp, sp, #64
+    LEAVE 0
+ENDF thread_boost
+
+// =============================================================================
+// pool_main(x0 unused) — pool thread: forever takes a task of the first
+// queued job and runs it (wk_run)
+//   x19 job, x20 task index
+// =============================================================================
+LFUNC pool_main
+    ENTER 2
+    bl   thread_boost
+    ADR_L x0, g_pool_lock
+    bl   pthread_mutex_lock
+1:  ADR_L x9, g_pool_head
+    ldr  x19, [x9]
+    cbnz x19, 2f
+    ADR_L x0, g_pool_lock               // idle: poll the queue for a while
+    bl   pthread_mutex_unlock           // before sleeping (queries run
+    LDR_G x20, g_pool_spin              // several parallel phases in a row)
+11: ADR_L x9, g_pool_head
+    ldar x10, [x9]
+    cbnz x10, 12f
+    yield
+    subs x20, x20, #1
+    b.ne 11b
+12: ADR_L x0, g_pool_lock
+    bl   pthread_mutex_lock
+    ADR_L x9, g_pool_head
+    ldr  x19, [x9]
+    cbnz x19, 2f
+    ADR_L x0, g_pool_work
+    ADR_L x1, g_pool_lock
+    bl   pthread_cond_wait
+    b    1b
+2:  ldr  x20, [x19, #JB_CLAIMED]
+    mov  x0, x19
+    bl   job_claim
+    ADR_L x0, g_pool_lock
+    bl   pthread_mutex_unlock
+    ldr  x9, [x19, #JB_RECS]
+    mov  x10, #WK_SIZE
+    madd x0, x20, x10, x9
+    bl   wk_run
+    ADR_L x0, g_pool_lock
+    bl   pthread_mutex_lock
+    mov  x0, x19
+    bl   job_finish
+    b    1b
+ENDF pool_main
+
+// =============================================================================
+// wk_run(x0 worker record) — runs the task on a pool thread with a copy of
+// the caller's request state and its own error handler; the arena it
+// allocated from is handed to the record (adopted by the caller)
 //   x19 record
 // =============================================================================
-LFUNC wk_main
+LFUNC wk_run
     ENTER 2
     mov  x19, x0
     ldr  x9, [x19, #WK_DEADLINE]
@@ -169,13 +401,12 @@ LFUNC wk_main
     stp  x10, x11, [x19, #(WK_ARENA + 16)]
     stp  xzr, xzr, [x9]
     stp  xzr, xzr, [x9, #16]
-    mov  x0, #0
     LEAVE 2
-ENDF wk_main
+ENDF wk_run
 
 // =============================================================================
-// wk_inline(x0 worker record) — runs the task on the calling thread (when no
-// thread could be created) under a nested error handler: the request's jump
+// wk_inline(x0 worker record) — runs a task the caller of par_run claimed
+// on the calling thread under a nested error handler: the request's jump
 // buffer is saved and restored, an error is recorded like a worker's. The
 // task allocates from the caller's arena directly (WK_ARENA stays empty).
 //   x19 record; stack: saved g_jmpbuf (512 bytes)

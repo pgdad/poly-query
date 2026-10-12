@@ -39,6 +39,7 @@ o_grace:        .asciz "--shutdown-grace-ms"
 o_maxreq:       .asciz "--max-request-bytes"
 s_dash:         .asciz "-"
 s_env_minrows:  .asciz "PQ_PARALLEL_MIN_ROWS"
+s_env_spin:     .asciz "PQ_POOL_SPIN"
 s_rb:           .asciz "rb"
 m_usage:        .asciz "usage: polyquery (version|capabilities|session|exec|serve) [options]\n"
 m_unknown:      .asciz "polyquery: unknown option: %s\n"
@@ -247,7 +248,17 @@ FUNC main
     cbz  x0, 7f
     ADR_L x1, g_par_min_rows
     str  x0, [x1]
-7:
+7:  ADR_L x0, s_env_spin            // tuning aid: idle polls of pool threads
+    bl   getenv
+    cbz  x0, 8f
+    mov  x1, #0
+    mov  w2, #10
+    bl   strtoull
+    cmp  x0, #1
+    csinc x0, x0, xzr, hs           // at least one poll
+    ADR_L x1, g_pool_spin
+    str  x0, [x1]
+8:  bl   thread_boost               // runs requests (session / exec)
     LDR_G x22, g_mode
     cmp  x22, #1
     b.ne 1f
