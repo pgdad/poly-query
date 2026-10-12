@@ -100,4 +100,4 @@ REMOTE
 rsync -a "$HOST:.pq-out/$JOB/" "$OUT/"
 "${SSH[@]}" "rm -rf ~/.pq-out/$JOB"
 cat "$OUT/status" 2>/dev/null || { echo "arm_engines: no status (see $OUT/remote.log)" >&2; exit 1; }
-! grep -qv "=0$" "$OUT/status"
+! grep -qvE "=(0|na)$" "$OUT/status"

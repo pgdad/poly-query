@@ -1,0 +1,3 @@
+[arm64-asm-engine] benchmarking (27 capabilities)
+[arm64-asm-engine] done: status=ok queries_ok=20 peak_rss=9MiB
+results: /srv/pqrunner/jobs/bench-20261012T090943Z-3050387/repo/results/performance/20261012T090945Z-10k-harness-validation-arm
