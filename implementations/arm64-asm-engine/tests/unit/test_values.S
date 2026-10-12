@@ -774,7 +774,9 @@ LFUNC test_types
     C_TYPE "String", T_STR
     C_TYPE "date", T_DATE
     C_TYPE "Timestamp", T_TS
-    C_TYPE "DECIMAL(19,2)", -2
+    C_TYPE "DECIMAL(39,2)", -2
+    C_TYPE "DECIMAL(38,2)", DEC_TYPE(38, 2)
+    C_TYPE "numeric(19)", DEC_TYPE(19, 0)
     C_TYPE "DECIMAL(5,6)", -2
     C_TYPE "decimal(0)", -2
     C_TYPE "decimal(99999999999999999999,1)", -2
