@@ -1,0 +1,40 @@
+{
+ "before": "results/performance/20261012T121233Z-1m-before-optimize",
+ "after": "results/performance/20261012T121259Z-1m-after-optimize",
+ "engines": {
+  "x86_64-asm-engine": {
+   "queries": 20,
+   "geomean_before_s": 0.015837988058427968,
+   "geomean_after_s": 0.0028867044931593653,
+   "speedup": 5.4865290492876255,
+   "best_ratio": 29.251695868469376,
+   "worst_ratio": 1.1100215251934291,
+   "significantly_slower": [],
+   "peak_rss_before": 1017970688,
+   "peak_rss_after": 1701416960,
+   "per_query_speedup": {
+    "q01_filter_selective": 1.6960021858294037,
+    "q02_filter_low_selectivity": 7.136230795471772,
+    "q03_range_filter_time": 1.1100215251934291,
+    "q04_arith_aggregate": 7.393606187212565,
+    "q05_groupby_low_card": 7.9562069681973355,
+    "q06_groupby_high_card": 3.3919700510304125,
+    "q07_groupby_skewed": 5.167108854409239,
+    "q08_groupby_uniform_multi": 7.960697616978556,
+    "q09_distinct_count": 7.050761114437883,
+    "q10_join_customers": 8.21057587212771,
+    "q11_join_star": 4.5335730956511995,
+    "q12_left_join_anti": 2.7915276846570682,
+    "q13_sort_topn": 4.3013291609563815,
+    "q14_sort_full_string": 29.251695868469376,
+    "q15_sort_multi_key": 20.428543091699126,
+    "q16_timeseries_hourly": 3.3803799371477394,
+    "q17_wide_projection": 2.4755681089810717,
+    "q18_nulls": 10.313518563621724,
+    "q19_cte_subquery": 3.051213470507016,
+    "q20_string_functions": 11.171479259641144
+   }
+  }
+ },
+ "digests_identical": true
+}

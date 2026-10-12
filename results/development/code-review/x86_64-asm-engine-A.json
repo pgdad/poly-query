@@ -1,0 +1,104 @@
+{
+ "language": "x86_64-asm-engine",
+ "reviewer": "A",
+ "scores": {
+  "architecture": 5,
+  "readability": 4,
+  "robustness": 4,
+  "testability": 4
+ },
+ "evidence": {
+  "architecture": [
+   "README.md:63-90: the layer/module map (runtime, text, JSON, storage, indexes, PQCF, dec128, lexer, parser/AST, binder, functions, plan pipeline, lplan, optimizer + one module per rule, planner/explain, row executor, batch/parallel executor, protocol, HTTP, server) matches the src/*.S files one to one. Every sampled module header restates its responsibility and entry points.",
+   "src/plan.S:19-32: plan_block is exactly lp_build -> optimize_logical -> phys_plan, as README.md:682-711 (CR-3 module map) documents",
+   "src/optimizer.S:60-91: the optimizer is a table-driven rule list (opt_rules / opt_rule_names) with one module per rule (rule_pushdown.S, rule_prune.S, rule_fold.S), and optimize:false applies no rule",
+   "src/planner.S:1-40: physical decisions (scan predicates, access path, row-group skipping, join algorithm and build side, execution mode) are confined to this module, and the header documents them",
+   "src/binder.S:1-16: semantic analysis is a separate stage that produces bound blocks plus a logical FROM tree and hands each block to plan_block",
+   "include/pq.inc and include/sql.inc: shared layouts are split by concern (storage/runtime vs. SQL pipeline). include/exec.inc holds the executor structures shared by exec/join/pexec/vec",
+   "src/protocol.S:1-8, src/http.S:1-15, src/server.S:1-23: the protocol, HTTP framing and server process model are separate layers. http.S is stateless and server.S owns the connections",
+   "src/util.S:50-120: one cross-cutting error mechanism (pq_raise -> longjmp, with thread-local overrides for parallel workers at util.S:36-63) keeps cleanup out of every layer",
+   "Minor drift: the src/server.S:6-9 header still says catalog operations 'execute inline in the single-threaded parent', but the code (server.S:81-88, cw_main ~1600, cw_exec ~1543) and README.md:89,232 use a catalog worker thread"
+  ],
+  "readability": [
+   "include/pq.inc:5-11: the register/ABI conventions (SysV everywhere, ENTER/LEAVE save all callee-saved registers and keep 16-byte alignment, errors never return) are documented centrally",
+   "include/pq.inc:223-286: idiomatic GAS macros FUNC/ENDF (type/size/alignment), ENTER/LEAVE (standard frame, correct alignment math), RAISE/CSTR/PUTS (inline .rodata.str1.1 strings) cut boilerplate in every module",
+   "include/pq.inc:101-220 and include/sql.inc:10-80: all structure offsets are named constants with per-field comments (e.g. the Column accessor scheme at pq.inc:138-150), so no magic offsets appear in the sampled code",
+   "src/util.S:65,84,124,184,274 and similar: nearly every routine carries a signature comment that gives its argument registers and return registers (e.g. 'eval(node rdi, ctx rsi) -> rax payload, rdx null flag' at eval.S:4)",
+   "Routine size is a weakness: veval spans ~796 lines (vec.S:264), eval_scalar_func ~634 (functions.S:1200), bind_expr_node ~565, pqcf_read ~514, parse_primary ~447, sql_lex ~401, eval ~405 and exec_from ~294 (exec.S:315)",
+   "src/exec.S:315-390: large routines rely on numeric local labels (10:, 101:, 102:, 11:..16:, 90:) and stack-slot locals that only short trailing comments (/* L */, /* R */) explain, so control flow is hard to follow",
+   "There are no assemble-time consistency checks (.if/.error) for hand-kept layout invariants such as COL_SIZE 128 vs COL_SHIFT 7 (pq.inc:162-163) or XS_TABLES=72 depending on EC_SIZE=64 (exec.inc:20-21, sql.inc:434)",
+   "src/util.S:842: a leftover no-op 'mov %rax, %rax' in vec_new (it only works because vec_init does not touch rax). Cosmetic",
+   "src/text.S:963-966: red-zone use in the leaf wr_upad is explicitly documented ('uses the red zone'), and its maximum use (~60 bytes) is within the 128-byte zone"
+  ],
+  "robustness": [
+   "src/util.S:66-120: pq_raise/pq_raisef realign the stack (and $-16) before calling glibc, so a raise is safe from any call depth or alignment, and the no-handler path falls back to fputs+exit",
+   "ABI spot checks found correct 16-byte alignment at every glibc call in the sampled routines: ENTER math (pq.inc:235-244), chunk_get 3 pushes (util.S:186-225), buf_put_u64 sub $40 (util.S:703), now_ns sub $24 (util.S:916), pool_pin 3 pushes + 128 (par.S ~208), par_worker 1 push. The big-stack switch keeps the old rsp in callee-saved r15 (main.S:382-385)",
+   "src/util.S:288-325: the arena budget (AR_LIMIT) is enforced in the allocation slow path with RESOURCE_LIMIT. xmalloc/xrealloc/arena_new raise instead of returning NULL (util.S:124-147,262-272)",
+   "Explicit resource limits: --max-join-rows via check_join_rows at every join site (exec.S:106-114, called from join.S:394,414, pexec.S:2895,2985,3613,3630,3684), --max-table-rows (ingest.S:291,795, pqcf.S:1783), --max-ingest-bytes (protocol.S:1011), parser depth 4000 (parser.S:17,239-246), JSON depth 512 (json.S:20,32), HTTP chunk-size digit cap and body max (http.S:63-115,158-200), 1000 connections",
+   "Cooperative deadline/cancellation: check_deadline (util.S:929-945) is called every 1024 rows in exec/join/pexec/keysort (30+ call sites)",
+   "src/pqcf.S:1020-1029: dc_need bounds-checks every chunk read against the chunk length (-> STORAGE_CORRUPT), and decode_chunk validates the NULL count (pqcf.S:1235-1236)",
+   "src/protocol.S:377-404: on error, the pending table arena and PQCF mapping are released before the error response, so failed operations do not modify the catalog",
+   "src/protocol.S:939-974: check_path rejects absolute paths, embedded NULs and '..' components",
+   "src/main.S:67-116: SIGSEGV/SIGBUS/SIGFPE turn into INTERNAL_ERROR on a 256 KiB alt stack, and SIGPIPE is ignored. Caveat: recovery longjmps out of an async signal, so a fault taken inside malloc or another lock-holding libc routine can leave that state inconsistent or deadlock later requests in session mode",
+   "src/server.S:1868-1898: fork is done while holding cat_lock for a consistent snapshot, and the child drops the spin-locked chunk pool and parallel-pool state it inherited (chunk_pool_forget, par_after_fork) — careful multithread+fork handling",
+   "src/par.S:150-175: parallel pool workers are created with default pthread attributes (no larger stack, no sigaltstack), unlike the main thread (1 GiB stack, main.S:371-385) and the catalog worker (1 GiB, server.S:3080-3087)"
+  ],
+  "testability": [
+   "Makefile:28-40: 'make test' builds 11 assembly unit-test programs, linked against all engine objects except main.o, then runs 3 shell end-to-end suites. Adding a test is just dropping tests/test_*.S in place (wildcard rule)",
+   "tests/test_optimizer.S:31-80: a table-driven RCASE macro (SQL, rule, expected lp_print text) tests each optimizer rule in isolation, made possible by individually callable rules and the lp_print debug printer (README.md:722-735)",
+   "tests/test_sql.S:12-40: a table-driven CASE macro with 105 cases covers lexer -> parser -> binder -> executor, with '!CODE' expectations for errors",
+   "tests/test_lib.inc:1-128: shared helpers (check, test_done, mk_int_table, plan_of) for planner and optimizer tests. Other suites (e.g. test_dec128.S:12-40) define their own EXPECT/LSTR helpers, which duplicates infrastructure",
+   "tests/modes_test.sh:1-12: a differential test requires byte-identical responses across the row, vectorized and parallel modes (PQ_PAR_MIN=1 forces parallelism on small inputs) and all join algorithms",
+   "tests/session_test.sh and tests/server_test.sh: end-to-end protocol and HTTP checks use substring expectations. README.md:803-815 also reports a 10,800-request differential replay for CR-3",
+   "Gaps: no direct unit-test programs for exec.S/eval.S/vec.S/pexec.S/keysort.S/server.S beyond test_sql (FROM-less queries) and test_par. These are exercised only end to end, and session_test.sh matches by substring, which is weak as an oracle",
+   "Makefile:44-49: 'lint' only checks for .note.GNU-stack; there is no ABI or alignment checker"
+  ]
+ },
+ "top_strengths": [
+  "Clean layered architecture whose documented module map matches the code. Since CR-3 it has an explicit logical plan, a table-driven rule optimizer with one module per rule, and a separate physical planner",
+  "Disciplined calling convention: ENTER/LEAVE/FUNC/RAISE macros, central ABI documentation, signature comments on every routine, and stack alignment correct at every sampled glibc call",
+  "A single longjmp-based error model with per-thread handlers and arenas, plus pervasive resource limits (memory budget, join rows, table rows, ingest bytes, parse/JSON depth, HTTP sizes, deadlines)",
+  "A validating PQCF reader with bounds-checked chunk decoding, CRCs and atomic saves",
+  "Real in-language unit tests (11 assembly test programs with table-driven cases) plus a multi-mode differential test"
+ ],
+ "top_weaknesses": [
+  "Very long routines (veval ~800 lines, eval_scalar_func ~630, bind_expr_node ~565, pqcf_read ~510) with numeric local labels and stack-slot locals are hard to read and review",
+  "Layout invariants are kept by hand with no assemble-time assertions (COL_SIZE/COL_SHIFT, XS_* offsets that depend on EC_SIZE)",
+  "Fault recovery longjmps out of signal handlers (not async-signal-safe), and parallel pool threads have neither a large stack nor an alternate signal stack",
+  "There are no direct unit tests for the row executor, the vectorized/parallel executors or the server. Their correctness rests on end-to-end and differential tests",
+  "Some comments drift from the code (the server.S header describes the pre-catalog-thread process model)"
+ ],
+ "suspected_defects": [
+  {
+   "location": "src/protocol.S:1014",
+   "description": "UNVERIFIED: read_data_file opens the file (fd in r14), then calls tmp_alloc(st_size+1). If that allocation exceeds the request memory budget, tmp_alloc raises RESOURCE_LIMIT via longjmp and the fd is never closed (only the explicit 5:/6: paths close it). Repeated large loads under a small --max-query-memory-mb would leak file descriptors in session/serve mode."
+  },
+  {
+   "location": "src/par.S:150-175 (pool_worker -> pthread_create with NULL attr)",
+   "description": "UNVERIFIED: parallel workers run on default-size pthread stacks without a sigaltstack, while the parser allows nesting up to 4000 (parser.S:17) and the recursive evaluator is sized for the 1 GiB main stack. A deeply nested expression evaluated inside a parallel part could overflow a worker stack. With SA_ONSTACK and no alt stack on that thread, the SIGSEGV handler cannot run and the whole process (or serve child) dies instead of returning INTERNAL_ERROR."
+  },
+  {
+   "location": "src/main.S:68-76 with src/util.S:104-114",
+   "description": "UNVERIFIED: fault_handler decides whether to recover by testing the process-global g_jmpbuf. In serve mode the catalog worker thread sets g_jmpbuf (protocol.S:318-320 via cw_exec). A fault or OOM raise on the network thread while a catalog job runs would longjmp into the catalog worker's jmp_buf from a different thread's stack (undefined behaviour) instead of exiting."
+  },
+  {
+   "location": "src/main.S:67-77",
+   "description": "UNVERIFIED: recovery from SIGSEGV/SIGBUS longjmps out of the handler even when the fault happened inside glibc (e.g. malloc holding its arena lock). The next request can then deadlock or corrupt the heap in session mode. Serve children are short-lived, so they are less affected."
+  },
+  {
+   "location": "src/main.S:287-292",
+   "description": "UNVERIFIED: --max-query-memory-mb is shifted left by 20 without an overflow check. Very large values wrap and can produce a tiny or zero budget (0 = unlimited)."
+  },
+  {
+   "location": "src/util.S:274-285",
+   "description": "UNVERIFIED: the arena_alloc fast path adds the rounded size to AR_CUR without an overflow check. A huge size, e.g. from an overflowed n*width product, could wrap past AR_END and return a pointer below the cursor. This depends on callers bounding sizes first (e.g. the pqcf.S decode_chunk imul at ~1259 relies on validated row-group counts)."
+  },
+  {
+   "location": "src/server.S:6-9",
+   "description": "Documentation defect: the header comment says catalog operations execute inline in a single-threaded parent, but the code uses a catalog worker thread (cw_main/cw_exec, job queue) as README.md:89,232 describes."
+  }
+ ],
+ "files_read": 31,
+ "scope": "implementations/x86_64-asm-engine (after optimize-latency merge)",
+ "code_commit": "fed2bd71b3b11a867505741074ee11cbb177b7fd"
+}

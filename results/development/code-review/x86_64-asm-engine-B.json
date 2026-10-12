@@ -1,0 +1,111 @@
+{
+ "language": "x86_64-asm-engine",
+ "reviewer": "B",
+ "scores": {
+  "architecture": 5,
+  "readability": 4,
+  "robustness": 4,
+  "testability": 4
+ },
+ "evidence": {
+  "architecture": [
+   "include/sql.inc:1-6 — the pipeline is written down as lexer -> parser -> binder -> logical plan (lplan.S) -> optimizer rules (optimizer.S, rule_*.S) -> physical planner (planner.S) -> executor, and each stage has its own source file",
+   "src/plan.S:19-31 — plan_block runs lp_build -> optimize_logical -> phys_plan as three separate module calls",
+   "src/optimizer.S:28-58 — the rule-based optimizer is a table of rule function pointers (rule_pushdown, rule_prune_columns, rule_fold_constants), one module per rule; optimize:false skips all rules",
+   "src/planner.S:1-47 — the header comment says this is the only module that makes physical decisions (access paths, row-group skipping, join algorithm, execution mode)",
+   "src/main.S:442-463 — the CLI only dispatches to serve_main, exec_requests or session_loop; JSON-lines protocol handling is in protocol.S:274-402 (proto_handle_line -> handle_request_noreset -> op table at protocol.S:78-97)",
+   "src/http.S:1-15 — the HTTP message layer is stateless and separate from server.S (connections, admission, fork-per-query snapshot model described at server.S:1-23)",
+   "src/pqcf.S:1-25 — storage (writer, validating reader, CRC, atomic replace, lazy mmap columns) is a separate module with a documented API",
+   "src/exec.S vs src/pexec.S/src/vec.S/src/par.S — the row executor, batch/vectorized operators and the thread pool are separate modules; include/exec.inc holds the shared executor structures"
+  ],
+  "readability": [
+   "include/pq.inc:5-11,223-286 — documented conventions (SysV everywhere, ENTER/LEAVE saves all callee-saved registers and keeps 16-byte alignment, errors never return), plus the FUNC/ENDF/ENTER/LEAVE/RAISE/CSTR/PUTS macros used consistently in every file",
+   "include/pq.inc:101-164, include/sql.inc:117-456 — every struct layout is a set of named offset #defines with per-field comments; no raw numeric field offsets in the code",
+   "src/json.S:1-26 — the module documents its strictness rules and its internal register-sharing convention (r12 cursor, r13 end, r14 arena, r15 depth, rbx scratch Vec)",
+   "src/main.S:233-345 — option parsing is one long chain of numeric local labels (121:, 122:, 123:, 124:), and serve_opt_vars is indexed with a -40 bias (main.S:333), which is hard to follow",
+   "src/vec.S:264-~1065 (veval ~800 lines), src/binder.S:144-715 (bind_expr_node ~570 lines), src/eval.S:218-636 (eval ~420 lines) — very large routines, though split into commented labelled sections",
+   "src/main.S:98,376 and src/server.S:2497 — magic flag constants (0x48000000 SA_ONSTACK|SA_NODEFER, 0x4022 mmap flags, 0x10000000 SA_RESTART) and raw signal numbers, explained only by trailing comments rather than named constants",
+   "Comment density is roughly 7-14% of lines (e.g. pexec.S 532/3889, server.S 274/3312, parser.S 138/1961); comments explain why (e.g. exec.S:1936-1990 replay rationale, planner.S:1-47)"
+  ],
+  "robustness": [
+   "src/util.S:66-120 — pq_raise/pq_raisef realign the stack and longjmp to a per-thread handler (t_jmpbuf) or the request handler; the message is strncpy-bounded to 511 bytes; with no handler they exit cleanly",
+   "src/main.S:67-116,371-390 — SIGSEGV/SIGBUS/SIGFPE handler on a 256 KiB sigaltstack turns faults into INTERNAL_ERROR; requests run on a 1 GiB lazily committed (MAP_NORESERVE) stack to absorb deep recursion",
+   "src/parser.S:17,239-246 (MAX_DEPTH 4000) and src/binder.S:128-141 (MAX_BIND_DEPTH 400000, reset per statement at binder.S:1921); src/json.S:20,277,311 — JSON nesting limit 512",
+   "src/util.S:275-311 — the arena enforces the per-query memory budget (AR_LIMIT -> RESOURCE_LIMIT); xmalloc/chunk_get raise RESOURCE_LIMIT on OOM (util.S:125-136,211-215)",
+   "src/eval.S:505-539, src/vec.S:860-885, src/functions.S:1444-1452 — integer overflow (jo), divide-by-zero and the INT64_MIN / -1 case are handled explicitly before idiv",
+   "src/protocol.S:938-973 — path safety (absolute, '..', embedded NUL -> ACCESS_DENIED); protocol.S:1011-1013 — --max-ingest-bytes is checked before reading",
+   "src/pqcf.S:1700-1760,2034-2072 — the PQCF reader validates magic, version and flags, the metadata length against file size, the metadata CRC, and per-chunk offset+length bounds and CRC; dc_need (pqcf.S:1020-1029) bounds-checks every decode read",
+   "src/pqcf.S:713-815 — atomic save: O_EXCL temp file, fsync, rename, directory fsync, unlink on failure",
+   "src/http.S:247-265,533-545 — Content-Length is capped at 18 digits, the header block at 64 KiB, and the body at --max-request-bytes (HP_TOOBIG -> 413)",
+   "ABI: the ENTER macro (pq.inc:235-244) gives 6 pushes + ((locals+15)&~15)+8, i.e. a 16-byte aligned rsp at calls. Hand-written leaf frames were checked: vec_push, pstr_new and chunk_get (3 pushes), p_ident (push/push/sub 8), child_finish (sub 8 + 2 pushes), and write_atomic's variadic snprintf with a stack arg (pqcf.S:752-756: sub 8 + push). All are correctly aligned, and eax is zeroed before variadic calls",
+   "src/server.S:1869-1915 — fork is done under trylock(cat_lock); the child drops the chunk-pool spinlock (util.S:254-259) and resets the pool (par_after_fork), so the hazards of forking a multithreaded process are handled",
+   "Weak spots: see suspected_defects (stale memory limit after a failed query, fd leaks on raise, unbounded session line, default-size worker stacks vs. unbounded AND/OR chain depth, OOM raise paths outside a handler)"
+  ],
+  "testability": [
+   "Makefile:28-40 — `make test` builds 12 assembly unit-test programs linked against all engine objects except main.o (LIBOBJS) and runs 3 black-box shell suites (session_test.sh, server_test.sh, modes_test.sh)",
+   "tests/test_lib.inc:1-129 — shared helpers: check(cond,name), test_done summary/exit status, mk_int_table fixture builder, plan_of(sql) for planner/optimizer tests",
+   "tests/test_sql.S:12-80 — table-driven CASE macro (SQL text, expected JSON fragment or \"!<error code>\"); adding a test is one line",
+   "Unit tests cover the core components separately: test_json, test_dec128, test_hash, test_text, test_http, test_ingest, test_storage, test_planner, test_optimizer, test_par, test_sql (~6.0k lines of tests vs ~37k engine lines)",
+   "Makefile:43-48 — the `lint` target only checks for .note.GNU-stack; there is no ABI/alignment checker or sanitizer-style verification aid, and only the CLI binary is a test seam for the server"
+  ]
+ },
+ "top_strengths": [
+  "Textbook layered architecture for a hand-written assembly engine: separate lexer, parser, binder, logical plan, rule-based optimizer (one module per rule), physical planner, row/vectorized/parallel executors, PQCF storage, protocol, HTTP layer and server, with the pipeline written down in sql.inc and plan.S",
+  "Strong conventions: the ENTER/LEAVE/RAISE/CSTR/PUTS macros and named struct-offset #defines make SysV ABI compliance and 16-byte alignment uniform; spot checks of hand-written frames found no alignment errors",
+  "Defensive design: longjmp error model with per-thread handlers, a fault handler on an alternate stack, a 1 GiB request stack, parser/binder/JSON depth limits, arena memory budgets, explicit overflow and INT64_MIN/-1 handling, fully validating PQCF reader with CRCs, crash-safe atomic save",
+  "fork-per-query snapshot server with admission control, deadlines, cancellation and a 1 GiB-stack catalog worker thread; fork-in-multithreaded-process hazards are handled explicitly",
+  "Table-driven assembly unit tests per component plus black-box session, server and mode tests, wired into `make test`"
+ ],
+ "top_weaknesses": [
+  "Very large routines (veval ~800 lines, bind_expr_node ~570, eval ~420, pexec.S 3.9k lines) navigated by numeric local labels; magic flag and signal constants instead of named #defines",
+  "Cleanup on the error path depends on globals (g_pending_arena/g_pending_map); per-request state such as AR_LIMIT and open fds is not always restored or closed when a raise unwinds",
+  "Recursion depth safety relies on the 1 GiB main stack; parallel pool threads use default stacks without an alternate signal stack",
+  "Session mode has no per-line size limit, and some OOM raise paths run outside any registered handler (fatal exit or a cross-thread longjmp)",
+  "The `lint` target is minimal; there is no automated ABI/alignment verification aid"
+ ],
+ "suspected_defects": [
+  {
+   "location": "src/protocol.S:810-812,890-891 (also 911-913,931-932)",
+   "description": "UNVERIFIED: op_query/op_explain set g_arena's AR_LIMIT to --max-query-memory and clear it only on the success path. hr_error (protocol.S:377-401) and arena_reset (util.S:342-361, which keeps the limit) never clear it, so after a failed query later non-query requests (e.g. load's read_data_file tmp_alloc of the whole file) still run under the query memory budget and can get RESOURCE_LIMIT spuriously."
+  },
+  {
+   "location": "src/protocol.S:998-1015; src/pqcf.S:1631-1669",
+   "description": "UNVERIFIED: the file is opened and then tmp_alloc(st_size+1) is called before close; if the allocation raises (memory budget / OOM), the longjmp skips close and the fd leaks (repeated failures could exhaust fds in a long-running session or server)."
+  },
+  {
+   "location": "src/main.S:543-603",
+   "description": "UNVERIFIED: session_loop grows its line buffer by 64 KiB per read until a newline arrives, with no maximum line or request size (unlike serve's --max-request-bytes), so a single huge or unterminated line can exhaust memory; xrealloc failure then raises outside any handler and exits."
+  },
+  {
+   "location": "src/protocol.S:275-287 and src/server.S:2526-2530",
+   "description": "UNVERIFIED: json_parse is called before handle_request_noreset installs jb_main. An arena/OOM raise there finds g_jmpbuf=0 and exits the process (util.S:115-120). In a forked serve child, g_jmpbuf may still hold the catalog worker thread's jmp_buf copied at fork, giving a longjmp into a stack that does not exist in the child."
+  },
+  {
+   "location": "src/server.S:933,1082 (network thread allocations from net_arena)",
+   "description": "UNVERIFIED: the network thread has no t_jmpbuf. If an allocation there raises (OOM in chunk_get), raise_jump uses the global g_jmpbuf, which may point at the catalog worker thread's jb_main while it is executing a job: a cross-thread longjmp (UB, likely crash)."
+  },
+  {
+   "location": "src/par.S:170-173 with src/parser.S:984-1034",
+   "description": "UNVERIFIED: parse_or/parse_and build left-deep chains iteratively without p_enter, so AND/OR chains have unbounded AST depth (binder allows up to 400000). Binder/eval/veval recursion over such a tree is safe on the 1 GiB main stack, but pool worker threads are created with default attributes (~8 MiB stack) and no sigaltstack, so a long OR chain evaluated in parallel mode could overflow a worker stack and kill the process instead of returning an error."
+  },
+  {
+   "location": "src/protocol.S:377-401",
+   "description": "UNVERIFIED: g_jmpbuf still points at jb_main while hr_error builds the error response; a raise inside it (e.g. xrealloc failure growing g_out) longjmps back to hr_error and can loop indefinitely under persistent OOM."
+  },
+  {
+   "location": "src/http.S:293-302 with src/server.S:597-623",
+   "description": "UNVERIFIED: leading CR/LF bytes before a request line are skipped but not consumed while no request line has arrived (HP_NEED with nothing consumed), and conn_read reserves another 256 KiB each time. A client sending only CRLFs grows the connection buffer without bound, bypassing the 64 KiB header limit."
+  },
+  {
+   "location": "src/util.S:275-281; src/exec.S:42-45,60-64",
+   "description": "UNVERIFIED: arena_alloc rounds size+15 and checks cur+size against end without overflow checks, and ts_new/ts_slot compute cap*w*8 with unchecked imul/shl. A huge computed size could wrap and pass the bounds check (low practical risk given the row limits)."
+  },
+  {
+   "location": "src/main.S:497-534",
+   "description": "UNVERIFIED, minor: exec_requests never closes the --request file descriptor."
+  }
+ ],
+ "files_read": 27,
+ "scope": "implementations/x86_64-asm-engine (after optimize-latency merge)",
+ "code_commit": "fed2bd71b3b11a867505741074ee11cbb177b7fd"
+}
