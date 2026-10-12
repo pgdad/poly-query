@@ -267,6 +267,70 @@ sub-agents (an available tool; its cost is included). Phase 1 cost more than for
 high-level languages ($21–24 vs. $8–17) but took no longer (28–37 min vs.
 24–106 min), far below the plan's estimate. Both implemented the optional correlated subqueries in Phase 2. The x86-64 agent developed part of Phase 2 on a side branch and merged it; the import was extended to keep such histories (grafted commits with the agent's authorship and dates). After Phase 3 the x86-64 assembly engine joined the PQCF interoperability matrix with the six engines: every file written by any engine is read correctly by every other, in both directions ([`interop-asm-engine.json`](../../results/correctness/interop-asm-engine.json); the assembly engine does not implement CR-2, so the four PQCF v2 files are excluded for it). After Phase 3 the owner raised the cap to $600; spend after Phase 5: $188.99. Both engines completed all five phases in one session per phase (no continuation session was needed) and claim row, vectorized and parallel execution and hash, merge and nested-loop joins. The native-kernel conformance mode does not apply to them (they do not load the kernel library); the ARM validation script now skips it for engines that do not claim `native.kernels`, as engine validation already did.
 
+### Later task families (assembly engines)
+
+Both engines then ran the same later families as the six engines, in the same
+order, each starting from the previous merge
+(`tools/orchestration/asm_family_pipeline.sh`; debug-mutant is record-only and
+starts from the Phase 5 engine). Every merged run passed the hidden tests and the
+assembly-policy check (`tools/validation/asm_engine_compliance.py`, stored as
+`compliance.json` in each run). The task texts were the six engines' texts with
+the native-kernel option removed (`task_overrides` in `experiments/prompts/languages.json`);
+the debugging defects were injected with the same mutation tool and seed
+(`experiments/controlled/defects/<engine>/`).
+
+| family | x86-64 cost | x86-64 time | AArch64 cost | AArch64 time |
+|---|---|---|---|---|
+| debug-mutant (injected defect, record-only) | $0.37 | 1 min | $0.27 | 1 min |
+| change-union-all (CR-1) | $3.26 | 8 min | $4.52 | 9 min |
+| refactor-plan-separation (CR-3) | $8.96 | 25 min | $9.43 | 26 min |
+| change-decimal38 (CR-2) | $16.39 | 30 min | $20.75 | 53 min¹ |
+| optimize-latency | $18.98 | 51 min | $38.56 | 114 min |
+| **total** | **$47.96** | | **$73.53** | |
+
+¹ The recorded wall time is 73 min; the agent's CLI hung for about 20 min after its
+final result event and was terminated (intervention INT-002 in
+`experiments/telemetry/interventions.jsonl`).
+
+Both debugging agents restored the injected instruction exactly (x86-64: `ja` back
+to `jae` in the CASE binder; AArch64: `b.hi` back to `b.hs` in `like_match`).
+Every family succeeded in one session. Engine size after the optimization: about
+44.1 k lines (x86-64) and 49.9 k lines (AArch64) of assembly. Total assembly-engine
+spend: $310.48 of the $600 cap.
+
+### Benchmarks (assembly engines)
+
+Same workload, scale (1 m rows), repetitions and HTTP clients as the six engines.
+x86-64 ran together with the six engines on the quiet x86 host
+([`20261012T115848Z-1m-main-and-asm-x86`](../../results/performance/20261012T115848Z-1m-main-and-asm-x86/));
+AArch64 ran on spark's Cortex-X925 cores (`tools/remote/arm_bench.sh`,
+[`20261012T124929Z-1m-asm-arm`](../../results/performance/20261012T124929Z-1m-asm-arm/)).
+Different machines: the two are not compared with each other, and neither is
+ranked with the six engines.
+
+| engine | queries ok | geomean of query medians | startup | peak RSS | HTTP qps (1 / 4 / 16 clients) |
+|---|---|---|---|---|---|
+| x86-64 assembly | 20 / 20 | 2.85 ms | 1.0 ms | 1,612 MiB | 58 / 159 / 232 |
+| AArch64 assembly | 20 / 20 | 2.68 ms | 1.7 ms | 749 MiB | 536 / 788 / 881 |
+
+For context only (same x86 run, not a ranking): the six engines' geomeans were
+1.88 ms (Go) to 24.67 ms (Python). The x86-64 engine's HTTP throughput is low
+because it forks a snapshot process per query; the AArch64 engine serves each
+connection from a thread. This run also re-measured the six engines' HTTP
+throughput after the optimize re-runs, which the earlier main-after-reruns bench
+did not include.
+
+Optimization before/after (independent back-to-back benchmark of the engine
+before and after the optimize-latency run, identical result digests on both sides):
+
+| engine | before | after | speedup | queries significantly slower |
+|---|---|---|---|---|
+| x86-64 assembly | 15.84 ms | 2.89 ms | 5.49× (best query 29×) | none |
+| AArch64 assembly | 4.85 ms | 2.67 ms | 1.82× (best query 31×) | 3: `q01_filter_selective` (8× slower), `q16_timeseries_hourly`, `q17_wide_projection` |
+
+Raw data: [`optimize-latency-before-after-x86_64-asm-engine.json`](../../results/performance/optimize-latency-before-after-x86_64-asm-engine.json),
+[`optimize-latency-before-after-arm64-asm-engine.json`](../../results/performance/optimize-latency-before-after-arm64-asm-engine.json).
+
 ## AArch64 end to end
 
 All six engines and the native kernel library were built natively on spark
@@ -289,6 +353,15 @@ The assembly kernel libraries were reviewed the same way after the optimize merg
 testability. Both AArch64 reviewers marked testability down because the agent kept
 its guard-page and mutation harnesses out of the repository; no reviewer found a
 functional defect.
+
+The two assembly engines were reviewed with the six engines' prompts after their
+optimize-latency merge (a separate cohort, never ranked with the six): x86-64
+5/5, 4/4, 4/4, 4/4 and AArch64 4/5, 4/4, 4/4, 4/4 for architecture, readability,
+robustness and testability (88 % exact agreement). Reviewers of both engines
+independently suspected a descriptor leak when an allocation fails during a load,
+no session-mode line-length cap and stack-depth risks in parallel workers; none of
+these is verified yet. No ABI violation was found
+([details](../../results/development/code-review/README.md#assembly-engine-cohort-complete-engines-in-assembly)).
 
 ## Harness incidents
 

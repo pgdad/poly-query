@@ -1,6 +1,6 @@
 {
  "schema": "polyquery-project-state/1",
- "updated": "2026-10-11T21:30:00Z",
+ "updated": "2026-10-12T12:54:34Z",
  "current_milestone": "M10",
  "milestones": {
   "M0": {
@@ -52,8 +52,7 @@
   }
  },
  "outstanding_tasks": [
-  "Option B: Phases 1-5 merged for both assembly engines (each phase one session; Phase 5 3738/3738 across modes, HTTP suite 19/19); spend $188.99 of the $600 cap; next: later families, code review, benchmarks",
-  "Main-line HTTP throughput not re-measured after INT-001 (bench.py run without the HTTP benchmark)",
+  "Option B complete: both assembly engines finished Phases 1-5 and all later families (one session each), reviewed and benchmarked; spend $310.48 of the $600 cap",
   "Debugging family remains too easy for both engines and kernels (kernel variant with symptom-only report and hidden-only failures: fixed in ~1 min)",
   "AArch64 kernel review findings: verification harnesses not committed, no BTI/GNU property note, block-size test constants not overridable",
   "Python HTTP defect: negative chunk size bypasses --max-request-bytes (HTTP suite malformed_chunked_body fails 18/19) \u2014 fix via a sandboxed agent run (e.g. a regression/robustness task), not by hand",
@@ -61,7 +60,9 @@
   "Resolve SPEC-Q-002 (expression size/nesting implementation limits) via change control",
   "Repeated attempts (n>1) per language/task for statistics (docs/methodology/statistics.md)",
   "10m-scale benchmark",
-  "Unverified code-review findings: Go worker goroutines without recover, session stdin lines without length cap (Rust/Java/Go/Common Lisp), symlink-following data paths"
+  "Unverified code-review findings: Go worker goroutines without recover, session stdin lines without length cap (Rust/Java/Go/Common Lisp), symlink-following data paths",
+  "Unverified assembly-engine review findings: fd leak when an allocation raises during load (both), session lines without length cap (both), parallel-worker stack depth / unbounded AND/OR chain depth (both), per-task memory budget in parallel queries (AArch64), cross-thread longjmp via global jmp_buf (x86-64)",
+  "AArch64 assembly optimize-latency: 1.82x geomean but q01_filter_selective 8x slower (plus q16, q17 significantly slower)"
  ],
  "known_defects": [
   "See experiments/telemetry/harness-incidents.jsonl (HI-001..008 fixed; SPEC-Q-001 resolved for CR-2 engines)",
@@ -93,8 +94,8 @@
   "interop": "6x6 + reference clean, incl. PQCF v2 wide-decimal files (results/correctness/interop.json)",
   "http_suite": "19/19 all engines except python 18/19 (malformed_chunked_body)"
  },
- "last_successful_commit": "4073bb4483a42b07640fa3cce552ec2707d79ced",
- "next_recommended_action": "Assembly engines: later families (CR-1 UNION ALL, CR-3 refactor, CR-2 decimal38, debugging, optimization), read-only code review (2 reviewers each) and quiet-host benchmarks (x86 here, ARM on spark; separate cohort), within the $600 cap ($188.99 spent after Phase 5).",
+ "last_successful_commit": "89aa470af3ad22b031a451829867e95a0dca76fb",
+ "next_recommended_action": "Assembly engine cohort complete. Next candidates: verify the assembly-engine review findings with black-box harness checks (as done for the Python chunked-body defect), repeated attempts (n>1) for statistics, 10m-scale benchmark, SPEC-Q-002.",
  "findings": [
   "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) \u2014 report as engine quality finding; clojure p95 16 ms",
   "CR-2 DECIMAL(38) was the most expensive change (6.25-16.50 USD); Go and Java needed a new wide-decimal representation",
@@ -111,8 +112,8 @@
   "HI-009: before/after trees kept stray files; clean re-measurement within the ~20% between-session spread"
  ],
  "totals": {
-  "track_a_runs": 98,
-  "track_a_cost_usd_list": 1134.13,
-  "note": "from results/comparisons/development.csv; excludes 5 runs with no reported cost (timeouts); includes kernel family, record-only re-runs and the assembly engines ($188.98); Track B jvm-tuning runs are separate"
+  "track_a_runs": 108,
+  "track_a_cost_usd_list": 1255.62,
+  "note": "from results/comparisons/development.csv; excludes 5 runs with no reported cost (timeouts); includes kernel family, record-only re-runs and the assembly engines ($310.48); Track B jvm-tuning runs are separate"
  }
 }

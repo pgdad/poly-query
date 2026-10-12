@@ -1,0 +1,113 @@
+{
+  "hardware": {
+    "arch": "aarch64",
+    "logical_cpus": 20,
+    "memory_gib": 121.7,
+    "model": null,
+    "simd": [
+      "asimd",
+      "sve",
+      "sve2"
+    ]
+  },
+  "missing_required": [
+    "java",
+    "javac",
+    "rustc",
+    "cargo",
+    "go",
+    "python",
+    "sbcl"
+  ],
+  "os": {
+    "pretty": "Ubuntu 24.04.5 LTS",
+    "release": "7.0.0-1019-nvidia",
+    "system": "Linux"
+  },
+  "tools": {
+    "aarch64-gcc": {
+      "required": false,
+      "version": "aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+    },
+    "as": {
+      "required": true,
+      "version": "GNU assembler (GNU Binutils for Ubuntu) 2.42"
+    },
+    "bwrap": {
+      "required": false,
+      "version": "bubblewrap 0.9.0"
+    },
+    "cargo": {
+      "required": true,
+      "version": null
+    },
+    "clang": {
+      "required": false,
+      "version": null
+    },
+    "claude": {
+      "required": false,
+      "version": null
+    },
+    "clojure": {
+      "required": true,
+      "version": "... 31 more"
+    },
+    "docker": {
+      "required": false,
+      "version": "Docker version 29.6.2, build dfc4efb"
+    },
+    "gcc": {
+      "required": true,
+      "version": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+    },
+    "git": {
+      "required": true,
+      "version": "git version 2.43.0"
+    },
+    "go": {
+      "required": true,
+      "version": null
+    },
+    "java": {
+      "required": true,
+      "version": null
+    },
+    "javac": {
+      "required": true,
+      "version": null
+    },
+    "just": {
+      "required": false,
+      "version": null
+    },
+    "make": {
+      "required": true,
+      "version": "GNU Make 4.3"
+    },
+    "nasm": {
+      "required": false,
+      "version": null
+    },
+    "python": {
+      "path": null,
+      "version": null
+    },
+    "qemu-aarch64": {
+      "required": false,
+      "version": null
+    },
+    "rustc": {
+      "required": true,
+      "version": null
+    },
+    "sbcl": {
+      "required": true,
+      "version": null
+    },
+    "sqlite3-python": {
+      "required": true,
+      "version": "3.45.1"
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+ "before": "results/performance/20261012T125121Z-1m-arm-before-optimize",
+ "after": "results/performance/20261012T125209Z-1m-arm-after-optimize",
+ "engines": {
+  "arm64-asm-engine": {
+   "queries": 20,
+   "geomean_before_s": 0.004854102217840999,
+   "geomean_after_s": 0.002665726724135423,
+   "speedup": 1.8209301703329448,
+   "best_ratio": 30.571425795125894,
+   "worst_ratio": 0.12101129346474468,
+   "significantly_slower": [
+    "q01_filter_selective",
+    "q16_timeseries_hourly",
+    "q17_wide_projection"
+   ],
+   "peak_rss_before": 727748608,
+   "peak_rss_after": 768348160,
+   "per_query_speedup": {
+    "q01_filter_selective": 0.12101129346474468,
+    "q02_filter_low_selectivity": 0.9874388928923036,
+    "q03_range_filter_time": 0.9772028227125057,
+    "q04_arith_aggregate": 1.1863851941881804,
+    "q05_groupby_low_card": 1.521697607429522,
+    "q06_groupby_high_card": 1.2579580996948525,
+    "q07_groupby_skewed": 1.301553503687234,
+    "q08_groupby_uniform_multi": 1.4146809413963906,
+    "q09_distinct_count": 30.571425795125894,
+    "q10_join_customers": 1.394837315268388,
+    "q11_join_star": 1.1218505951320392,
+    "q12_left_join_anti": 3.504317586920461,
+    "q13_sort_topn": 2.08259255367402,
+    "q14_sort_full_string": 17.36747601937398,
+    "q15_sort_multi_key": 12.369005412164688,
+    "q16_timeseries_hourly": 0.888894159443509,
+    "q17_wide_projection": 0.5949287630593092,
+    "q18_nulls": 1.0892163795112604,
+    "q19_cte_subquery": 1.234520638643509,
+    "q20_string_functions": 6.169118886085945
+   }
+  }
+ },
+ "digests_identical": true
+}

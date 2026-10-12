@@ -1,0 +1,9 @@
+  1m/customers.csv: 100000 rows, 10504285 bytes
+  1m/transactions.csv: 1000000 rows, 84983755 bytes
+  1m/sensor_readings.csv: 1000000 rows, 46869554 bytes
+  1m/products.csv: 20000 rows, 1260896 bytes
+  1m/orders.csv: 250000 rows, 7910010 bytes
+  1m/order_items.csv: 1000000 rows, 22508236 bytes
+  1m/nulls_heavy.csv: 1000000 rows, 18188184 bytes
+  1m/wide.csv: 100000 rows, 71327941 bytes
+  1m/sort_keys.csv: 1000000 rows, 49439169 bytes

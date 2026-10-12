@@ -1,0 +1,89 @@
+{
+ "language": "arm64-asm-engine",
+ "reviewer": "A",
+ "scores": {
+  "architecture": 4,
+  "readability": 4,
+  "robustness": 4,
+  "testability": 4
+ },
+ "evidence": {
+  "architecture": [
+   "README.md:77-104 — the layer table (runtime, protocol, JSON, values, storage, lexer/parser, semantic analysis, logical plan, optimizer, physical planning, planning driver, execution, vectorized execution, parallelism, server) matches the src/ tree: one .S file per concern, 41 modules",
+   "README.md:837-853 and optimize.S:1-28,39-60 — CR-3 module map is accurate. optimize() walks a rule table of LogicalNode*->LogicalNode* functions, with one rule_*.S module per rule",
+   "logical.S:56 lp_build, physical.S:62 phys_plan / :83 pp_lower, access.S:512 ap_scan / :724 scan_estimate, plan.S:38 plan_statement / :210 plan_explain — the entry points the README names exist in the modules it puts them in",
+   "lexer.S:1-21 and parser.S:20-36 — lexing (token array, lexer.inc) is a separate stage from recursive-descent parsing, which has its own error and limit contract",
+   "protocol.S:1-12,397-470 — handle_request is transport independent: one table-driven op dispatch, catalog read/write mode per op. http.S:14-17 routes every endpoint through it",
+   "catalog.S:1-31,174-257 — the versioned, ref-counted catalog (snapshot isolation) is isolated behind cat_read_begin/cat_write_begin/cat_end",
+   "include/API.md:1-80 — internal API contract per module (inputs, outputs, raises), with shared structures centralized in include/pq.inc",
+   "Weakness: physical.S:183 pp_rewrite, :255 push_conj, :318 pp_joins repeat the conjunct placement that rule_pushdown.S does (README.md:875-886 justifies this for optimize:false). Large multi-concern files: pqcf.S 2972 lines (writer, reader and CRC/UTF-8 helpers), binder.S 2591, http.S 2557"
+  ],
+  "readability": [
+   "include/frame.inc:1-57 — ENTER/LEAVE/LEAVE_NORET macros generate AAPCS64 frame records and callee-saved pairs with guaranteed 16-byte alignment. Used about 386 times across the modules",
+   "include/pq.inc:27-102 — FUNC/LFUNC/ENDF, ADR_L, LDR_G, TLS_ADDR/TLS_LDR (local-exec TLS), GOT_LOAD, RAISE and NOTE_GNU_STACK macros remove repeated boilerplate. pq.inc:14-21 documents conventions such as the value pair (x0 payload, x1 isnull)",
+   "lexer.S:171-179, vexec.S:136-142, optimize.S:36-38, server.S:225-227 — most routines have a header comment with signature and register allocation (e.g. 'x19 cursor x20 end of input ...')",
+   "json.S:16-24, ingest.S:11-12, index.S:857-861 — non-standard internal conventions (helpers that share the caller's x19..x26) are written down. My static scan found every such case documented",
+   "lexer.S:148-179 — small local macros (TRACK_TO_X27, IF_IDENT_CHAR) give names to recurring idioms. eval.S:453-485 is commented at the level of semantics ('INT64_MIN / -1 overflows')",
+   "Routine size: median about 34 lines over 705 routines, but some are very long: vexec.S:143 veval about 755 lines, functions.S ev_func about 426, lexer.S:180 lex_tokenize about 398, sort.S rsort_rows about 336",
+   "Inconsistent style: rt.S, protocol.S (45 occurrences) and parser.S write prologues by hand (stp x29,x30 ...) where most modules use ENTER. vexec.S:469-475 and pqcf.S:2524 use bl-called local subroutines that push x30 but do not set x29"
+  ],
+  "robustness": [
+   "ABI: a static scan of all 1410 FUNC/LFUNC bodies found no routine with ENTER n using a callee-saved register above x(18+2n). The one hit, http.S:2534-2536 wait_idle, only reads the caller's x21 and says so. No x18/w18 anywhere in src/. d8 is saved and restored in rt.S:782-808, and no other module touches d8-d15 or v8-v15. No odd-multiple-of-8 SP adjustments found",
+   "rt.S:1-8,267-277 and protocol.S:397-478 — setjmp/longjmp error model. All per-request memory is in g_arena, freed on every path. On error: the pending table is freed, catalog changes are discarded (cat_end 0), a structured error is emitted",
+   "rule_fold.S:127-169, parallel.S:556-598, pqcf.S:455-467 — nested error handlers save and restore the 512-byte g_jmpbuf, so constant folding, inline tasks and temp-file cleanup can intercept errors and recover",
+   "server.S:262-349 — every pq_raise in admission control comes after srv_unlock (no lock held across longjmp). The queue wait uses a bounded 10 ms cond_timedwait that re-checks cancellation and deadline (server.S:355-395)",
+   "rt.S:296-318 — per-request memory budget (RESOURCE_LIMIT) and malloc-failure handling in arena_alloc_in. pq.inc:105-122 has a complete error-code table. rt.S:42-48 sets default ingest, row and join limits",
+   "parser.S:33-36,102-118 — PARSE_MAX_DEPTH 256 recursion guard. json.S:29,561,590 — JSON_MAX_DEPTH 1000. http.S:2384-2391 — 16 MiB connection-thread stacks. http.S:49-62,1683-1685,1881 — limits on head size, target length and chunk-line length",
+   "pqcf.S:27-38,2082-2101,2476-2520 — the PQCF reader checks header, footer, CRCs, chunk offset/length (overflow-safe subtraction form), minimum sizes, RLE run counts and offsets before using any of it, and raises STORAGE_CORRUPT",
+   "eval.S:453-485 — INT64 + - * / % with overflow checks (adds/b.vs, smulh sign-extension test, INT64_MIN/-1, x % -1). vexec.S:322,743 reuses the same checks. vagg.S:1182-1183,2232-2234 accumulates SUM in 128 or 192 bits",
+   "Weaknesses: catalog.S:118-121 (cv_clone) and server.S:306-310 (calloc) call abort() on out-of-memory, a crash path. rt.S:284-291 does no overflow check on allocation sizes. Per-task memory budget under parallelism (see suspected defects)"
+  ],
+  "testability": [
+   "Makefile:12-36 — make test builds and runs every tests/unit/test_*.S, each linked against all engine objects except main.o, then runs tests/sh/*.sh. Adding a test file is picked up automatically by wildcard",
+   "tests/unit — 13 assembly unit-test programs (about 8.5k lines): rt, json, values, parser, binder, catalog, ingest, storage, pqcf, functions, plan, optimizer, exec5",
+   "tests/unit/test_optimizer.S:19-45 — table-driven case macros (TO/TOFF/PL/TEND) with hand-built in-memory tables (:48-77). A new case is a few lines of SQL plus the expected plan text. README.md:868-873 reports 42 cases, one per rule",
+   "tests/unit/test_exec5.S:1-19 — differential cases: each SQL runs under six execution settings with g_par_min_rows=1 to force parallel tasks, checking row count and an order-independent checksum",
+   "tests/sh/run_mode_tests.sh:1-30 — option-matrix (mode x join x threads x optimize) differential test, with HTTP, CLI, storage, sort and decimal38 shell suites alongside",
+   "Verification aids: PQ_TRACE_PLAN (optimize.S:26-27; logical.S:315 lp_print), PQ_TRACE_PAR (parallel.S:121-125,198-218), PQ_POOL_SPIN, and the lint target that checks .note.GNU-stack (Makefile:38-43)",
+   "Gaps: no direct unit tests for http.S, server.S, sort.S, index.S or the lexer as a separate unit (covered only indirectly or through shell tests). run_mode_tests.sh:8-12 quietly skips when the fixtures outside the engine directory are missing"
+  ]
+ },
+ "top_strengths": [
+  "Clean layered architecture that matches its README: separate lexer, parser, binder, logical plan, rule-per-module optimizer, physical planner, row/vectorized/parallel executors, storage, protocol and server, plus a written internal API contract (include/API.md)",
+  "Disciplined AAPCS64 practice: frame macros, documented per-routine register allocation, documented custom conventions for internal helpers, no x18 use, d8 saved where used. A static scan found no ENTER-depth/callee-saved mismatches",
+  "Thorough defensive handling: setjmp/longjmp errors with arena-based cleanup and nested handlers, depth/size/memory limits, a fully validating PQCF reader, overflow-checked integer arithmetic, unlock before every raise in server code",
+  "Table-driven assembly unit tests plus differential execution-mode tests and trace environment variables make the engine checkable despite being written in assembly"
+ ],
+ "top_weaknesses": [
+  "Some very long routines (veval about 755 lines, ev_func about 426, lex_tokenize about 398) that are hard to review",
+  "Two prologue styles (hand-written stp vs ENTER) and local bl-subroutines that do not maintain the x29 frame chain",
+  "Conjunct-placement logic repeated in the physical planner (physical.S) and the pushdown rule (rule_pushdown.S)",
+  "abort() on out-of-memory in catalog cloning and query registration, and no overflow guards on allocation sizes",
+  "No unit tests for the HTTP server, admission control, sort or index modules. The mode differential test depends on fixtures outside the engine directory"
+ ],
+ "suspected_defects": [
+  {
+   "location": "parallel.S:110-111,484-486 (with rt.S:308-318)",
+   "description": "UNVERIFIED. Each pool task gets a copy of the caller's full g_arena_limit and starts with a fresh, empty arena, so the per-query memory budget applies per task, not to the query. Before arena_adopt merges the arenas (parallel.S:221-230), peak memory can reach about (tasks+1) x max_query_mem."
+  },
+  {
+   "location": "rt.S:284-291,303-305",
+   "description": "UNVERIFIED. arena_alloc_in rounds (add #15) and bump-adds the size without overflow checks. A size near 2^64 (for example from an unchecked count*width multiply in a caller) would wrap to a small allocation and could overflow the heap. Likely unreachable given the row limits, but there is no guard."
+  },
+  {
+   "location": "catalog.S:118-121; server.S:306-310",
+   "description": "UNVERIFIED. Out-of-memory in cv_clone, or calloc failure while registering a query, calls abort(), which kills the whole server process instead of returning RESOURCE_LIMIT. The cv_clone case is intentional per its comment."
+  },
+  {
+   "location": "parallel.S:36-38,539-545,583-589",
+   "description": "UNVERIFIED, minor. Worker and inline-task error messages are copied into a 256-byte WK_MSG buffer, while g_err_msg holds 1024 bytes (rt.S:12), so a long error message raised in a parallel task may be truncated differently from the same error in row or single-thread mode."
+  },
+  {
+   "location": "vexec.S:474-475; pqcf.S:2524",
+   "description": "UNVERIFIED, low impact. Local subroutines reached by bl push x29/x30 but do not set x29 = sp, so the frame-record chain is incomplete inside them. This affects only debugger and unwinder backtraces, not correctness."
+  }
+ ],
+ "files_read": 30,
+ "scope": "implementations/arm64-asm-engine (after optimize-latency merge)",
+ "code_commit": "b270646fc640103b8a1278e5a8c0abb9d2a3ca16"
+}

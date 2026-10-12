@@ -1,0 +1,107 @@
+{
+ "language": "arm64-asm-engine",
+ "reviewer": "B",
+ "scores": {
+  "architecture": 5,
+  "readability": 4,
+  "robustness": 4,
+  "testability": 4
+ },
+ "evidence": {
+  "architecture": [
+   "src/main.S:54-77,266-290 — the CLI uses a table-driven option parser and dispatches to session_loop, exec_mode or serve_main. There is no protocol or SQL logic in main.",
+   "src/protocol.S:1-11,58-72,380-497 — one transport-independent handle_request has an op table of (name, handler, catalog access mode). It sets up the setjmp error boundary, takes the catalog snapshot or write copy, and frees the arena per request. Session, exec and HTTP all reuse it.",
+   "src/http.S:1-27 — the HTTP server (accept loop, one thread per connection, streaming) is a separate module. It maps endpoints onto handle_request (forced op, prebuilt JNode).",
+   "src/lexer.S:1-20 + include/lexer.inc:1-40 — the lexer produces a token array. The parser walks it with a cursor, and the token kinds coincide with the OP_* codes by design (documented).",
+   "src/parser.S:1-25 — a reentrant recursive-descent parser with one function per precedence level. All parser state is in a Parser record on the stack.",
+   "src/binder.S:1-28 — semantic analysis is a separate phase (binder contexts, scopes, correlation, aggregate rewrite) that produces a BoundQuery.",
+   "src/plan.S:1-18, src/logical.S:1-25, src/optimize.S:1-27, src/physical.S:1-30 — the planning pipeline is lp_build → rule-based optimize → phys_plan. Each optimizer rule has its own module (rule_prune/fold/simplify/pushdown/joinorder.S). The comments document the rule order and why it matters.",
+   "src/exec.S:1-28, src/volcano.S:1-20, src/vexec.S, src/vagg.S, src/join.S:1-17, src/sort.S, src/parallel.S:1-21 — execution is split into a materialising executor, a Volcano row mode, vectorised kernels and aggregation, join algorithms, sorting and a parallel task pool.",
+   "src/storage.S:1-14 (in-memory layouts) vs src/pqcf.S:1-40 (PQCF file format reader and writer, atomic save) — storage concerns are separated cleanly."
+  ],
+  "readability": [
+   "include/pq.inc:14-21 — the global conventions are written down: AAPCS64, frame records, the longjmp error model, the arena, and the value-as-(payload x0, isnull x1) pair.",
+   "include/pq.inc:28-100 and include/frame.inc:15-57 — consistent FUNC/LFUNC/ENDF, ADR_L/LDR_G, TLS_ADDR/TLS_LDR, GOT_LOAD, RAISE and ENTER/LEAVE macros. All struct layouts use named offset #defines (pq.inc:187-260).",
+   "src/protocol.S:373-379, src/parser.S:813-821, src/json.S:16-25 — nearly every routine starts with a comment giving its signature (args → results) and a register map (e.g. 'x19 ptr / op table entry, x20 len…').",
+   "src/main.S:54-77 — data-driven tables (option table, op table at protocol.S:58-72, parser operator tables used by p_binloop parser.S:822-864) instead of compare chains.",
+   "There are 705 functions and about 4,300 comment lines across src/*.S. Module headers state each module's API and design choices.",
+   "src/vexec.S:143 — veval is about 745 lines, and functions.S:983 ev_func about 420, lexer.S:191 lex_tokenize about 390, sort.S:248 rsort_rows about 330. These very long routines are hard to review.",
+   "src/vexec.S:469-474 — internal subroutines are reached with 'bl' to local labels (.Lve_memo) that push x29/x30 without setting x29. This is unconventional, and the frame-record chain is incomplete inside them.",
+   "src/protocol.S:1209-1215 — struct stat offsets are hard-coded ([sp,#64+16], [sp,#64+48]), while pqcf.S:65-67 defines the same offsets as STAT_MODE and STAT_SIZE. The constants are duplicated and inconsistently named."
+  ],
+  "robustness": [
+   "src/rt.S:1-8,152-282 — a uniform error model: pq_raise* records the code, message and position, then longjmps to the per-thread (TLS) g_jmpbuf. Messages are truncated at ERRMSG_MAX (copy_errmsg rt.S:102-117), and protocol.S:530-540 replaces non-ASCII bytes so responses stay valid UTF-8.",
+   "src/rt.S:284-340 — the arena slow path enforces the per-request memory budget (g_arena_limit → RESOURCE_LIMIT) and checks for malloc failure. buf_reserve (rt.S:553-587) checks realloc.",
+   "src/rt.S:836-858 — check_deadline is the cooperative cancellation and timeout point (ldar on the cancel flag).",
+   "src/parser.S:103-108 (PARSE_MAX_DEPTH 256) and src/json.S:29,561,590 (JSON_MAX_DEPTH 1000) — recursion depth is bounded for nested parentheses, NOT and unary operators, and JSON nesting.",
+   "src/http.S:54-58,1530-1582,1640-1822,1924-2062 — HTTP input is bounded: HEAD_MAX 64 KiB, TARGET_MAX, overflow-guarded Content-Length and chunk-size parsing (lsr #50 / #44 checks), --max-request-bytes with a bounded drain, and malformed framing → 400 and close. The 16 MiB connection-thread stacks are set at http.S:2389-2391.",
+   "src/protocol.S:1117-1164 — check_path rejects empty paths, absolute paths, embedded NUL and '..' components. read_data_file (protocol.S:1167-1259) checks for a regular file and --max-ingest-bytes, and handles short reads.",
+   "src/pqcf.S:1502-1617,1662-1710,2362-2467 — the PQCF reader validates magic, version and flags, footer bounds, metadata CRC, per-chunk CRC, bitmap size and null counts. It saves and replaces g_jmpbuf so that the mmap is unmapped on error. The writer uses tmp file + fsync + rename (pqcf.S:20-25).",
+   "src/eval.S:454-526 — INT64 + - * overflow is detected (adds/subs b.vs, smulh), x/0 raises DIVISION_BY_ZERO, INT64_MIN/-1 overflow is caught, and non-finite FLOAT64 results are rejected.",
+   "ABI: callee-saved x19–x28 are saved via ENTER/explicit stp. The only use of d8 (rt.S:782-808 buf_put_f64) saves and restores it, and no other v8–v15 use was found. x18 is never referenced. Temporary pushes are 16-byte multiples (e.g. main.S:207,219; http.S:2117). setjmp-protected locals live in callee-saved registers restored by longjmp.",
+   "Weaknesses: file descriptors leak when an error is raised while a descriptor is open (protocol.S:1228; pqcf.S:1553-1554). abort() on realloc failure in the HTTP path (http.S:1503,1913). The AST depth of left-associative operator chains is not bounded (see defects)."
+  ],
+  "testability": [
+   "tests/unit/ has 13 assembly unit-test programs (rt, json, values, parser, binder, catalog, storage, plan, optimizer, exec5, functions, ingest, pqcf). There are about 9.5k test LOC against about 50k total.",
+   "tests/unit/test_parser.S:32-49 — the cases are table-driven: OK/OKPOS/ERR/ERRAT macros pair each SQL string with an expected S-expression dump or an error code at a line and column. There are 161 cases, so adding a case is a one-line change.",
+   "tests/unit/test_parser.S:579-640 — check_abi loads sentinel values into x19–x28 and d8–d15, runs a grammar-wide parse_sql, and verifies they survive. This is a real ABI-conformance aid, though only for the parser.",
+   "tests/unit/test_optimizer.S:1-30 — each optimizer rule is tested in isolation: SQL → bind → lp_build → one or two rules → expected lp_print text, using a TO/TOFF case macro.",
+   "Makefile:33-35 — 'make test' runs every unit binary and the shell suites in tests/sh (cli, http, mode, sort, storage, decimal38). Unit tests link against every object except main.o (LIBOBJS), so each module is independently linkable.",
+   "Debug aids: PQ_TRACE_PLAN (optimize.S header), PQ_TRACE_PAR and PQ_PARALLEL_MIN_ROWS (main.S:243-265), and the lp_print and EXPLAIN printers.",
+   "Weaknesses: there is no shared test harness. expect_* helpers are re-implemented per file (test_rt.S:17-73), the ABI check exists only in test_parser.S, and some suites (test_catalog, test_storage) are hand-coded sequences rather than case tables."
+  ]
+ },
+ "top_strengths": [
+  "Textbook layering for a hand-written assembly engine: lexer → parser → binder → logical plan → optimizer rules (one module each) → physical planner → several executors (materialising, Volcano, vectorised, parallel), with storage and PQCF, the transport-independent protocol and HTTP as separate modules.",
+  "Disciplined, documented conventions: shared macro layer (FUNC/ENTER/LEAVE/RAISE/TLS_ADDR), named struct offsets, and a signature plus register-map comment on nearly every routine.",
+  "A consistent error and resource model: TLS setjmp/longjmp error boundary, per-request arena with a memory budget, deadline and cancellation checks, nested jmpbuf interception for mmap and temp-file cleanup, and bounded HTTP and JSON input.",
+  "Table-driven unit tests, including a callee-saved-register ABI check and per-rule optimizer tests."
+ ],
+ "top_weaknesses": [
+  "Several very long routines (veval about 745 lines, ev_func about 420, lex_tokenize about 390, rsort_rows about 330) and internal bl-to-local-label subroutines make review hard.",
+  "The longjmp unwinding releases only arena memory and the pending table. Non-arena resources held at raise time (open fds) leak.",
+  "The AST depth of left-associative binary chains is not bounded, while binder, eval and optimizer passes are recursive.",
+  "Test helpers are duplicated across test files, and the ABI check covers only the parser."
+ ],
+ "suspected_defects": [
+  {
+   "location": "src/protocol.S:1228",
+   "description": "UNVERIFIED: read_data_file calls arena_alloc(st_size+1) while fd w22 is open. If this raises RESOURCE_LIMIT (query memory budget or malloc failure), longjmp skips close() and the fd leaks. Only the size-limit branch (1220-1222) closes it first."
+  },
+  {
+   "location": "src/pqcf.S:1553-1554",
+   "description": "UNVERIFIED: same pattern in pqcf_load. The non-mmap path calls arena_alloc(size+8) with fd x22 open, before the jmpbuf interception is installed (1580), so a raise leaks the descriptor."
+  },
+  {
+   "location": "src/parser.S:822-864",
+   "description": "UNVERIFIED: p_binloop builds left-deep chains (a+b+c+…, a AND b AND …) iteratively without DEPTH_ENTER, so AST depth is unbounded. The later recursive passes (binder bind_expr, eval.S:72 ev_binary, expr_par_safe parallel.S:597-625, optimizer rules) could overflow the stack on a very long chain, especially in session mode on the default main-thread stack. This would crash instead of returning RESOURCE_LIMIT."
+  },
+  {
+   "location": "src/http.S:1503, src/http.S:1913",
+   "description": "UNVERIFIED: realloc failure in conn_fill and body_alloc calls abort(), so an OOM on one connection kills the whole server instead of returning an error."
+  },
+  {
+   "location": "src/main.S:380-401",
+   "description": "UNVERIFIED: exec_mode calls buf_reserve before any setjmp has been executed. On realloc failure pq_raise would longjmp through an uninitialised g_jmpbuf (OOM only)."
+  },
+  {
+   "location": "src/parallel.S:487-490",
+   "description": "UNVERIFIED: each pool worker copies g_arena_limit but counts only its own fresh arena, so a parallel query can allocate up to about threads × --max-query-memory-mb before RESOURCE_LIMIT is raised."
+  },
+  {
+   "location": "src/http.S:1586-1597",
+   "description": "UNVERIFIED: ci_name_eq lowercases by OR-ing 0x20 into every byte, including non-letters (e.g. '\\r' (0x0d) becomes '-' (0x2d)), so header-name matching is looser than ASCII case-insensitive comparison. This is low impact."
+  },
+  {
+   "location": "src/rt.S:776-813",
+   "description": "UNVERIFIED: buf_put_f64's comment says the output is 'always a valid JSON number', but %g prints nan/inf for non-finite values. Correctness depends on every producer (casts, functions, ingest) rejecting non-finite FLOAT64 values. arith_float does reject them (eval.S:518-521)."
+  },
+  {
+   "location": "src/main.S:307-349",
+   "description": "UNVERIFIED: session_loop uses getline with no maximum line length, so session mode has no request-size limit (unlike HTTP's --max-request-bytes). A huge line is bounded only by memory."
+  }
+ ],
+ "files_read": 34,
+ "scope": "implementations/arm64-asm-engine (after optimize-latency merge)",
+ "code_commit": "b270646fc640103b8a1278e5a8c0abb9d2a3ca16"
+}

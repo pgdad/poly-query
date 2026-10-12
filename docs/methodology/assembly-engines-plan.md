@@ -49,7 +49,7 @@ concurrency) and the cost of later changes (CR-1…CR-3)?
 | benchmarks | x86 engine on the quiet x86 host; ARM engine only on the ARM host, reported separately (no cross-architecture comparison) |
 | reports | cohort column in reports 1–8; code-quality rubric reviewers for assembly |
 
-### Implementation status (2026-10-11)
+### Implementation status (2026-10-12)
 
 | item | state |
 |---|---|
@@ -59,6 +59,9 @@ concurrency) and the cost of later changes (CR-1…CR-3)?
 | AArch64 loop | agents and their validation run natively on spark (`agent_host`), in the same bubblewrap sandbox (`tools/remote/spark_sandbox.sh`, installed by `tools/remote/spark_agent_setup.sh`); the credential copy exists on spark only during a run |
 | native-kernel library path | per host (`build/aarch64` for spark agents); the assembly engines do not claim `native.kernels`, so the native mode is skipped for them |
 | phases 1–5 | complete for both, one session each; $188.99 of the $600 cap |
+| later families | complete for both (debug-mutant, CR-1, CR-3, CR-2, optimize-latency), one session each, all merged runs compliant (`tools/orchestration/asm_family_pipeline.sh`, `tools/validation/asm_engine_compliance.py`); x86-64 $47.96, AArch64 $73.53; total spend $310.48 of the $600 cap |
+| code review | two read-only reviewers per engine, same prompts as the six engines (`results/development/code-review/<engine>-{A,B}.json`) |
+| benchmarks | x86-64 with the six engines on the quiet x86 host; AArch64 on spark (`tools/remote/arm_bench.sh`); optimize before/after for both; reports 3, 4, 6 and 8 have an assembly-engine cohort section |
 | pilot | started 2026-10-11 16:40 UTC: x86-64 Phase 1, attempt 1, ≤ 3 sessions × 120 min, $300 |
 
 ## 4. Phasing and stop rules

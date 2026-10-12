@@ -74,3 +74,37 @@ difference 0.5.
 | Heavy GAS macro metaprogramming and 2,000–2,500-line SIMD files after the optimization | both | all | observation |
 
 No reviewer found a functional defect in the traced kernels.
+
+## Assembly engine cohort: complete engines in assembly
+
+The same two reviewer slots and prompts as for the six engines read
+`implementations/x86_64-asm-engine/` (commit `fed2bd7`) and
+`implementations/arm64-asm-engine/` (commit `b270646`) after the optimize-latency
+merge, read-only, each reviewer seeing only its own architecture. Robustness
+includes ABI correctness (SysV for x86-64, AAPCS64 for AArch64). These engines are
+reported next to the six engines and **never ranked with them**; the two
+architectures are not ranked against each other either.
+
+| engine | architecture | readability | robustness | testability |
+|---|---|---|---|---|
+| x86-64 assembly engine | 5 / 5 | 4 / 4 | 4 / 4 | 4 / 4 |
+| AArch64 assembly engine | 4 / 5 | 4 / 4 | 4 / 4 | 4 / 4 |
+
+Agreement over 8 score pairs: exact 88 %, within one point 100 %, mean absolute
+difference 0.13.
+
+| finding | engines | raised by | status |
+|---|---|---|---|
+| A data file's descriptor leaks when an allocation raises while it is open (`read_data_file`; ARM also `pqcf_load`) | both | x86 A and B; ARM B | not verified |
+| Session-mode stdin lines have no length cap | both | x86 B; ARM B | not verified (same observation as for four of the six engines) |
+| Recursion depth safety relies on the large main-thread stack: parallel pool workers run on default stacks (x86, also without an alternate signal stack), and left-deep AND/OR chains are not depth-limited | both | x86 A and B; ARM B | not verified |
+| Each parallel task gets the full per-query memory budget, so a query can use about tasks × `--max-query-memory-mb` | AArch64 | ARM A and B | not verified |
+| Error recovery can `longjmp` through the process-global `jmp_buf` into another thread's handler; recovery from SIGSEGV inside glibc is not async-signal-safe | x86-64 | x86 A and B | not verified (needs an internal fault) |
+| A failed query leaves the query memory limit set for later non-query requests | x86-64 | x86 B | not verified |
+| `abort()` on out-of-memory in catalog cloning, query registration and HTTP buffers | AArch64 | ARM A and B | design (one case commented as intentional) |
+| Very long routines (`veval` about 750–800 lines in both engines; binder, evaluator and lexer routines of 400–600 lines) | both | all | observation |
+
+No reviewer found an ABI violation in the sampled routines (ARM reviewer A
+statically checked all 1,410 function bodies against their `ENTER` depth). Both
+engines have table-driven unit tests written in assembly. The AArch64 parser test
+also checks that callee-saved registers survive a parse.

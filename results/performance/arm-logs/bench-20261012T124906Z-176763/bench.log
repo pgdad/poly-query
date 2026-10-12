@@ -1,0 +1,3 @@
+[arm64-asm-engine] benchmarking (29 capabilities)
+[arm64-asm-engine] done: status=ok queries_ok=20 peak_rss=749MiB
+results: /srv/pqrunner/jobs/bench-20261012T124906Z-176763/repo/results/performance/20261012T124929Z-1m-asm-arm

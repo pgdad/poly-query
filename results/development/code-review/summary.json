@@ -208,5 +208,70 @@
    "Task texts for the two optimize runs differ only in the hardware notes; the AArch64 agent nevertheless kept its guard-page harness, mutation checks and clobber audit out of the repository ('only assembly belongs in the repo'), while the x86-64 agent committed them under verify/. Both ARM reviewers scored testability 3 for this reason.",
    "No functional defect found by any reviewer; suspected issues are design notes (index over-stores within the documented capacity, group_sum EINVAL undo pass assumes no aliasing, a 7th-argument stack read in count kernels), hardening gaps (no BTI/GNU property note on AArch64) and stale documentation (README module-map line counts, an SVE header claiming emulation-only validation)."
   ]
+ },
+ "asm_engine_cohort": {
+  "note": "complete assembly engines (assembly engine cohort, option B of docs/methodology/assembly-engines-plan.md); reviewed after the optimize-latency merge. Reported next to the six engines, never ranked with them; x86-64 and AArch64 are not ranked against each other. Same reviewer slots and prompts as the six engines (A README-first, B code-first from the entry point along the request path), each reviewer saw only its own architecture; ABI correctness (SysV / AAPCS64) counted under robustness.",
+  "code_commit": {
+   "x86_64-asm-engine": "fed2bd71b3b11a867505741074ee11cbb177b7fd",
+   "arm64-asm-engine": "b270646fc640103b8a1278e5a8c0abb9d2a3ca16"
+  },
+  "scores": {
+   "x86_64-asm-engine": {
+    "architecture": {
+     "A": 5,
+     "B": 5,
+     "mean": 5.0
+    },
+    "readability": {
+     "A": 4,
+     "B": 4,
+     "mean": 4.0
+    },
+    "robustness": {
+     "A": 4,
+     "B": 4,
+     "mean": 4.0
+    },
+    "testability": {
+     "A": 4,
+     "B": 4,
+     "mean": 4.0
+    }
+   },
+   "arm64-asm-engine": {
+    "architecture": {
+     "A": 4,
+     "B": 5,
+     "mean": 4.5
+    },
+    "readability": {
+     "A": 4,
+     "B": 4,
+     "mean": 4.0
+    },
+    "robustness": {
+     "A": 4,
+     "B": 4,
+     "mean": 4.0
+    },
+    "testability": {
+     "A": 4,
+     "B": 4,
+     "mean": 4.0
+    }
+   }
+  },
+  "agreement": {
+   "pairs": 8,
+   "exact": 0.875,
+   "within_1": 1.0,
+   "mean_abs_diff": 0.125
+  },
+  "observations": [
+   "Shared by reviewers of both engines (unverified): a file descriptor leaks when an allocation raises while a data file is open (x86 protocol.S read_data_file, A and B; ARM protocol.S:1228 and pqcf.S:1553, B); session mode reads lines without a length cap (x86 B, ARM B); parallel workers lack the large stack the recursive evaluator relies on (x86 A and B) or AND/OR chain depth is unbounded (x86 B, ARM B).",
+   "ARM: each parallel task gets the full per-query memory budget (A and B), so a query can use about tasks x --max-query-memory-mb; abort() on out-of-memory in a few server/catalog paths (A and B).",
+   "x86: error recovery can longjmp through the process-global jmp_buf into another thread's handler (A and B); a failed query leaves the query memory limit set for later requests (B).",
+   "Both engines: very long routines (veval about 750-800 lines in each) are the main readability cost; reviewers found no ABI violation in the sampled routines (ARM A ran a static scan over all 1410 function bodies)."
+  ]
  }
 }
