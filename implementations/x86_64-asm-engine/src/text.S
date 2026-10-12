@@ -1379,9 +1379,24 @@ FUNC dec_fits
     ret
 ENDF dec_fits
 
-/* dec_to_float(unscaled rdi, scale esi) -> xmm0 = (double)unscaled / 10^scale */
+/* dec_to_float(unscaled rdi, scale esi) -> xmm0 = (double)unscaled / 10^scale,
+ * the nearest FLOAT64: both operands are exact below 2^53, larger unscaled
+ * values go through the exact decimal text (dec128_to_double) */
 FUNC dec_to_float
-    cvtsi2sdq %rdi, %xmm0
+    mov %rdi, %rax
+    sar $63, %rax
+    mov %rdi, %rcx
+    xor %rax, %rcx
+    sub %rax, %rcx                  /* |unscaled| */
+    movabs $0x20000000000000, %rdx  /* 2^53 */
+    cmp %rdx, %rcx
+    jbe 0f
+    test %esi, %esi
+    jle 0f
+    mov %esi, %edx
+    mov %rax, %rsi
+    jmp dec128_to_double
+0:  cvtsi2sdq %rdi, %xmm0
     test %esi, %esi
     jle 1f
     cmp $18, %esi
@@ -1395,39 +1410,16 @@ FUNC dec_to_float
 ENDF dec_to_float
 
 /* float_to_dec(x xmm0, prec edi, scale esi) -> rax unscaled, edx status
- * round(x * 10^scale) half away from zero; doesn't fit prec / i64 -> 2 */
+ * the exact binary value of x rounded half away from zero to the scale
+ * (dec128.S double_to_dec128); doesn't fit prec -> 2 */
 FUNC float_to_dec
-    ENTER 16
-    mov %edi, %r12d
-    mov %esi, %r13d
-    test %r13d, %r13d
-    jns 1f
-    xor %r13d, %r13d
-1:  cmp $18, %r13d
-    jbe 2f
-    mov $18, %r13d
-2:  lea pow10_u64(%rip), %rax
-    cvtsi2sdq (%rax, %r13, 8), %xmm1
-    mulsd %xmm1, %xmm0
-    call round
-    movq %xmm0, %rax
-    btr $63, %rax
-    movq %rax, %xmm1
-    ucomisd d_two63(%rip), %xmm1
-    jp 9f
-    jae 9f
-    cvttsd2si %xmm0, %rbx
-    mov %rbx, %rdi
-    mov %r12d, %esi
-    call dec_fits
-    test %eax, %eax
-    jz 9f
-    mov %rbx, %rax
-    xor %edx, %edx
-    LEAVE
-9:  xor %eax, %eax
-    mov $2, %edx
-    LEAVE
+    sub $24, %rsp
+    mov %rsp, %rdx
+    call double_to_dec128
+    mov %eax, %edx
+    mov 0(%rsp), %rax
+    add $24, %rsp
+    ret
 ENDF float_to_dec
 
 /* float_to_int64(x xmm0) -> rax (truncated toward zero), edx status (2 = out of range) */
