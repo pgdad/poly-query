@@ -8,6 +8,7 @@
 //
 // Rules (each a function LogicalNode* -> LogicalNode* that rewrites only the
 // logical plan; one module each, unit-tested by tests/unit/test_optimizer.S):
+//   prune_columns          rule_prune.S     scans read only referenced columns
 //   fold_constants         rule_fold.S      literal-only expressions -> literals
 //   simplify_predicates    rule_simplify.S  TRUE/FALSE in AND / OR / NOT;
 //                                           conditions that became TRUE vanish
@@ -15,10 +16,13 @@
 //   reorder_joins          rule_joinorder.S greedy order of inner-join regions
 //   push_join_conditions   rule_pushdown.S  single-input join conjuncts into
 //                                           the join inputs
-//   prune_columns          rule_prune.S     scans read only referenced columns
 // The order matters: join reordering estimates its inputs with the WHERE
-// conjuncts already pushed onto the scans, and re-attaches every condition to
-// the lowest join covering it, which push_join_conditions then splits.
+// conjuncts already pushed onto the scans (but not yet the single-input ON
+// conjuncts), and re-attaches every condition to the lowest join covering
+// it, which push_join_conditions then splits. Column pruning runs on the
+// expressions as written, before simplification can drop a column
+// reference (FALSE AND c > 5): the scans' column lists stay those the
+// engine always reported.
 //
 // Debugging: with the environment variable PQ_TRACE_PLAN set, the plan is
 // printed to stderr before the first rule and after every rule.
@@ -92,12 +96,12 @@ ENDF optimize
     .p2align 3
 // Rule table: {name, function}, applied in this order; ends with {0, 0}.
 opt_rules:
+    .quad s_prune,    rule_prune_columns
     .quad s_fold,     rule_fold_constants
     .quad s_simplify, rule_simplify_predicates
     .quad s_pushf,    rule_push_filters
     .quad s_reorder,  rule_reorder_joins
     .quad s_pushj,    rule_push_join_conditions
-    .quad s_prune,    rule_prune_columns
     .quad 0, 0
 s_fold:     .asciz "fold_constants"
 s_simplify: .asciz "simplify_predicates"

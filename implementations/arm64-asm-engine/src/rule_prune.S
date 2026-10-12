@@ -6,8 +6,9 @@
 //       branches) gets the set of columns the level still needs (LN_COLS):
 //       the columns referenced by the expressions of the optimized plan,
 //       plus those referenced from subqueries (correlated references, which
-//       the binder flags with RVU_OUTER in RV_USED). Run last, so that
-//       references removed by the other rules are not read.
+//       the binder flags with RVU_OUTER in RV_USED). Columns referenced by
+//       the expressions as written are kept even if a later rewrite removes
+//       the reference (optimize.S runs this rule first).
 // =============================================================================
 #include "pq.inc"
 #include "frame.inc"
