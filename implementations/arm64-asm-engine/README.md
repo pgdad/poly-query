@@ -33,6 +33,10 @@ reordering). See
 [Phase 5](#phase-5-execution-options-and-optimizations) for the design and
 the before/after measurements.
 
+It also implements the architectural change **CR-1 `UNION ALL`**
+(`spec/changes/union-all.md`, capability `change.union_all`); see
+[Change CR-1: UNION ALL](#change-cr-1-union-all).
+
 ## Build prerequisites
 
 * AArch64 Linux host
@@ -513,6 +517,36 @@ last. Observations:
   work only for queries that contain constant expressions.
 * The merge join pays for sorting both inputs (Q5) and returns tuples in
   key order.
+
+## Change CR-1: UNION ALL
+
+`query = [with_clause] compound [order_by] [limit_clause]`,
+`compound = select_core { UNION ALL select_core }` — at the top level, in
+CTE bodies, derived tables, scalar / IN / EXISTS subqueries and EXPLAIN, in
+every execution mode. A compound is one more *query level* of the existing
+pipeline; nothing else had to learn about it:
+
+| layer | module | change |
+|---|---|---|
+| AST | `include/pq.inc` | `Q_UNION` / `Q_NUNION`: a compound Query keeps WITH / ORDER BY / LIMIT / OFFSET and points to its branch Queries (plain select cores) |
+| parser | `parser.S` | `p_union` after the first select core; `p_error`: `UNION` without `ALL` stays `UNSUPPORTED`, a misplaced `UNION ALL` (after ORDER BY / LIMIT, parenthesised branch) is `PARSE_ERROR` |
+| binder | `binder.S` | `bq_bind_union`: the compound is a binder level without range variables that owns the WITH clause; every branch is bound as a nested level below it (so correlation depths and CTE levels stay uniform); column count check (`SEMANTIC_ERROR`), common type per column with `common_type` (the CASE rule; `TYPE_ERROR`), branch expressions of another type wrapped in an implicit CAST (so INT64 → DECIMAL(18,s) overflow is `NUMERIC_OVERFLOW` at run time); names from the first branch; `bind_order` accepts only output column names / positions for a compound |
+| bound query | `include/pq.inc` | `BQ_UNION` / `BQ_NUNION` (branch BoundQueries) |
+| planner | `plan.S` | `plan_union`: `Limit? <- Sort? <- UnionAll(branch plans)`, each branch planned and optimised on its own (`lp_upper` shared with `lp_build`); EXPLAIN `{"op":"UnionAll","children":[branch plans in order]}` |
+| executor | `exec.S` | `ex_union` (`PO_UNION` in `ex_rows`): runs each branch plan as a nested level and concatenates the row pointers; Sort / top-N / Limit / caching of subqueries / materialisation of derived tables and CTEs work on the compound's result unchanged |
+| protocol | `protocol.S` | capability `change.union_all` |
+
+Execution options: the branches are ordinary query plans, so `mode`,
+`threads`, `join` and `optimize` apply inside every branch; the
+concatenation itself is O(rows) pointer copying. Results are identical
+across option sets (checked by `tests/sh/run_mode_tests.sh`).
+
+Choices: the compound output column has the branch-0 name; a duplicated
+output name used in the compound's ORDER BY is ambiguous (`SEMANTIC_ERROR`);
+a qualified name (`t.c`) is not an output column name (`SEMANTIC_ERROR`);
+two DECIMAL branches unify to DECIMAL(18, max scale) like CASE; DATE and
+TIMESTAMP branches do not unify (`TYPE_ERROR`), as for CASE. `spec_version`
+stays `1.0.0` (the Phase 1 conformance case requires it).
 
 ## Implementation-defined choices
 

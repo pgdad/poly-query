@@ -1,5 +1,20 @@
 # Working notes (arm64-asm-engine)
 
+## Status (change CR-1 UNION ALL, session 1) — complete
+- Conformance (incl. changes/union_all 22/22): all phases 591/591,
+  `--modes` 3456/3456, `--transport http` 591/591, http_suite 19/19;
+  `make build test lint` pass.
+- Design: README "Change CR-1". Compound = binder level without range
+  variables (bq_bind_union), branches nested below it; PO_UNION plan node
+  (children in PN_KIDS/PN_NKIDS = join key fields); ex_union concatenates
+  row pointers; branch columns are CAST to the common type at bind time.
+- Tests added: test_parser (grammar, errors), test_plan (EXPLAIN shape,
+  rows, errors), run_mode_tests.sh (7 UNION ALL queries x 8 option sets).
+- Ad-hoc differential checks (outside the repo, /tmp/ua): correlated
+  branches, CTE-in-compound / compound-in-CTE, nested compounds, DECIMAL /
+  FLOAT promotion, NULL branches — identical under row / vectorized /
+  threads / join / optimize=false with PQ_PARALLEL_MIN_ROWS=1.
+
 ## Status (Phase 5, session 1) — complete (definition of done met)
 - Conformance: all phases 569/569, `--modes` 3324/3324 (also with
   `PQ_PARALLEL_MIN_ROWS=1`, which forces parallel tasks on tiny inputs —
