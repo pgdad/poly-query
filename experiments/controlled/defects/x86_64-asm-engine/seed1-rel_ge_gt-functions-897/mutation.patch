@@ -1,0 +1,11 @@
+--- a/implementations/x86_64-asm-engine/src/functions.S
++++ b/implementations/x86_64-asm-engine/src/functions.S
+@@ -894,7 +894,7 @@
+ 6:  /* cast the branches to the result type */
+     xor %r15d, %r15d
+ 7:  cmp %r14, %r15
+-    jae 8f
++    ja 8f
+     mov N_B(%r12), %rax
+     mov %r15, %rcx
+     shl $4, %rcx

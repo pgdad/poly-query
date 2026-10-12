@@ -1,0 +1,11 @@
+--- a/implementations/arm64-asm-engine/src/strfuncs.S
++++ b/implementations/arm64-asm-engine/src/strfuncs.S
+@@ -395,7 +395,7 @@
+     b    .Llm_loop
+ .Llm_tail:                              // string consumed: only %s may remain
+     cmp  x5, x3
+-    b.hs .Llm_true
++    b.hi .Llm_true
+     ldrb w8, [x2, x5]
+     cmp  w8, #'%'
+     b.ne .Llm_false
