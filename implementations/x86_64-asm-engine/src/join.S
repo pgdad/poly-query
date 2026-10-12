@@ -201,6 +201,15 @@ FUNC join_entries
     je 41f
     cmp $T_STR, %eax
     je 41f
+    mov %rcx, 16(%rsp)
+    mov 8(%rsp), %rdi
+    call dec_is_wide
+    test %eax, %eax
+    mov %r14, %rdi
+    mov %r15, %rsi
+    mov $ME_SIZE, %edx
+    mov 16(%rsp), %rcx
+    jnz 41f                         /* wide DECIMAL keys: qsort_r */
     call radix_entries              /* integer-like keys: radix sort */
     mov %rax, %r14
     jmp 5f

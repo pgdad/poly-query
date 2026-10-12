@@ -874,7 +874,7 @@ FUNC parse_select_item
     mov $KW_AS, %esi
     call p_accept_kw
     test %eax, %eax
-    jnz 3f
+    jnz 4f
     mov %rbx, %rdi
     call p_is_ident
     test %eax, %eax
@@ -884,6 +884,24 @@ FUNC parse_select_item
     mov %rax, SI_ALIAS(%r12)
 9:  mov %r12, %rax
     LEAVE
+4:  /* after AS, the words reserved for future syntax FULL / RIGHT (never
+     * valid there) name the column, e.g. `... AS full` (decimal38.pqt) */
+    mov %rbx, %rdi
+    call p_cur
+    cmpl $TOK_KEYWORD, TK_KIND(%rax)
+    jne 3b
+    mov TK_ID(%rax), %ecx
+    cmp $KW_FULL, %ecx
+    je 5f
+    cmp $KW_RIGHT, %ecx
+    jne 3b
+5:  mov TK_PTR(%rax), %rdi
+    mov TK_LEN(%rax), %rsi
+    call pstr_tmp
+    mov %rax, SI_ALIAS(%r12)
+    mov %rbx, %rdi
+    call p_next
+    jmp 9b
 ENDF parse_select_item
 
 /* parse_order_item(P) -> OrderItem* */
@@ -1685,10 +1703,12 @@ pp_decimal:
     test %eax, %eax
     jnz 5f
     mov $1, %eax
-5:  cmp $18, %eax
+5:  cmp $38, %eax
     ja pp_float
     mov %eax, 0(%rsp)               /* p */
     mov %r9d, 4(%rsp)               /* s */
+    cmp $18, %eax
+    ja 6f
     mov $18, %edx
     mov %r9d, %ecx
     xor %r8d, %r8d
@@ -1696,7 +1716,19 @@ pp_decimal:
     test %edx, %edx
     jnz pp_float
     mov %rax, %r12
-    mov $EK_LIT, %edi
+    jmp 7f
+6:  mov $38, %edx                   /* wide literal: boxed i128 */
+    mov %r9d, %ecx
+    xor %r8d, %r8d
+    lea 16(%rsp), %r9
+    call dec_parse
+    test %eax, %eax
+    jnz pp_float
+    mov 16(%rsp), %rdi
+    mov 24(%rsp), %rsi
+    call dec_box
+    mov %rax, %r12
+7:  mov $EK_LIT, %edi
     mov %r14, %rsi
     call new_node
     mov 0(%rsp), %ecx
@@ -1883,7 +1915,7 @@ FUNC parse_type_name
     mov 8(%rsp), %rcx
     cmp $1, %rax
     jl pt_badparams
-    cmp $18, %rax
+    cmp $38, %rax
     jg pt_badparams
     cmp %rax, %rcx
     jg pt_badparams

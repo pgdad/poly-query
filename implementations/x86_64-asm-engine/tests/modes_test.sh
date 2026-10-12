@@ -6,7 +6,8 @@
 # where batch evaluation could diverge from tuple-at-a-time evaluation:
 # short-circuit AND / OR / CASE and NULL operands guarding errors, overflow,
 # mixed-scale decimals, dictionary strings, NULL group keys, DISTINCT
-# aggregates, outer-join padding, subqueries and UNION ALL compounds.
+# aggregates, outer-join padding, subqueries and UNION ALL compounds, and
+# wide (boxed 128-bit) DECIMAL columns (table w, CR-2).
 set -u
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BIN="$DIR/bin/polyquery"
@@ -23,6 +24,18 @@ awk 'BEGIN {
     printf "%d,%d,%s,%d.%02d,%d.5,%s,2024-%02d-%02d,%s\n", i, i % 9 - 4, n, i % 500, i % 100, i % 50 - 25, s, i % 12 + 1, i % 28 + 1, flag
   } }' > "$TMP/t.csv"
 awk 'BEGIN { print "k,name,w"; for (i = 0; i < 40; i++) printf "%d,u%d,%d.25\n", i % 30, i, i }' > "$TMP/u.csv"
+# w: 3000 rows with wide decimals x DECIMAL(38,10), y DECIMAL(25,0) and a
+# narrow z DECIMAL(10,2), NULLs in each
+awk 'BEGIN {
+  print "a,x,y,z";
+  for (i = 0; i < 3000; i++) {
+    if (i % 9 == 0) x = "";
+    else if (i % 5 == 0) x = "1.5";
+    else x = sprintf("%s%d%09d%09d.%05d%05d", (i % 4 == 0) ? "-" : "", i % 50, (i * 7919) % 1000000000, (i * 104729) % 1000000000, (i * 13) % 100000, (i * 17) % 100000);
+    y = (i % 11 == 0) ? "" : sprintf("%s%d%010d%010d", (i % 3 == 0) ? "-" : "", i % 10, i % 97, i % 13);
+    z = (i % 13 == 0) ? "" : sprintf("%d.%02d", i % 1000 - 500, i % 100);
+    printf "%d,%s,%s,%s\n", i, x, y, z
+  } }' > "$TMP/w.csv"
 
 QUERIES=$(cat <<'Q'
 SELECT a, b FROM t WHERE b <> 0 AND a / b > 100
@@ -89,6 +102,34 @@ SELECT COUNT(*), SUM(v) FROM (SELECT a AS v FROM t UNION ALL SELECT k FROM u UNI
 SELECT t.a FROM t WHERE t.n IN (SELECT k FROM u WHERE w > 20 UNION ALL SELECT b FROM t WHERE b > 3) AND t.a < 300
 SELECT a / b FROM t WHERE a < 10 UNION ALL SELECT a * 4611686018427387904 FROM t
 SELECT a * 9223372036854 FROM t UNION ALL SELECT d FROM t
+SELECT a, x + z, x * z, y - a, -x, ABS(x), x - y FROM w WHERE a < 60
+SELECT a FROM w WHERE x > z AND y < 9223372036854775807
+SELECT a FROM w WHERE x = 1.5 OR y IN (3, 70000000000, 100000000000000000000.) OR z = 7
+SELECT a FROM w WHERE x BETWEEN -100 AND 1000000000000000000.5 OR y NOT BETWEEN -5 AND 50000000000000000000.
+SELECT COUNT(*), SUM(x), AVG(x), MIN(x), MAX(x), SUM(y), AVG(y), COUNT(DISTINCT x), SUM(CAST(z AS DECIMAL(38,2))) FROM w
+SELECT a % 7, SUM(x), MIN(y), MAX(y), AVG(x), COUNT(DISTINCT y), SUM(DISTINCT y) FROM w GROUP BY a % 7
+SELECT x, COUNT(*) FROM w GROUP BY x ORDER BY x DESC LIMIT 20
+SELECT y, z, COUNT(*), SUM(x) FROM w GROUP BY y, z HAVING COUNT(*) > 1 ORDER BY y, z
+SELECT DISTINCT y FROM w ORDER BY y DESC NULLS FIRST LIMIT 30
+SELECT a, x FROM w ORDER BY x, a LIMIT 50 OFFSET 100
+SELECT w.a, v.a FROM w JOIN w v ON v.y = w.y WHERE w.a < 100 ORDER BY w.a, v.a
+SELECT w.a, v.a FROM w LEFT JOIN w v ON v.x = w.x AND v.a > w.a WHERE w.a < 200
+SELECT w.a, t.a FROM w JOIN t ON t.d = w.z WHERE w.a < 300
+SELECT w.a, t.a FROM w JOIN t ON t.a = w.y WHERE w.a < 300
+SELECT w.a, t.a FROM w JOIN t ON w.y = t.a + 70000000000 WHERE t.a < 300
+SELECT t.a, u.name FROM t JOIN u ON t.d = u.k WHERE t.a < 2000
+SELECT t.a, u.name FROM u LEFT JOIN t ON u.k = t.d AND t.a < 2000
+SELECT w.a, t.a FROM w JOIN t ON t.d = w.x WHERE w.a < 300
+SELECT a, x FROM w WHERE x > 0 AND a < 30 UNION ALL SELECT a, d FROM t WHERE a < 20
+SELECT ROUND(x, 2), ROUND(x, -3), FLOOR(x), CEIL(x), CAST(x AS FLOAT64), CAST(y AS STRING), CAST(z AS DECIMAL(30,1)) FROM w WHERE a < 100
+SELECT CAST(x AS INT) FROM w
+SELECT SUM(y * y) FROM w
+SELECT x * x FROM w
+SELECT COALESCE(x, z, 0), CASE WHEN a > 5 THEN x ELSE z END, NULLIF(y, 70000000000), CASE y WHEN 70000000000 THEN 1 ELSE 0 END FROM w WHERE a < 40
+SELECT a FROM w WHERE y IN (SELECT y FROM w WHERE a < 10) AND x NOT IN (SELECT x FROM w WHERE a < 20 AND x IS NOT NULL)
+SELECT a FROM w WHERE x > (SELECT AVG(z) FROM w) AND a < 100
+SELECT a FROM w WHERE y IN (SELECT x FROM w) OR z IN (SELECT y FROM w WHERE a < 50) OR a IN (SELECT y FROM w)
+SELECT a FROM w WHERE x NOT IN (SELECT z FROM w WHERE z > 0) AND a < 400
 Q
 )
 
@@ -96,6 +137,7 @@ run() { # options -> responses (stats stripped)
   {
     printf '{"op":"load","table":"t","format":"csv","path":"t.csv","schema":[{"name":"a","type":"INT64"},{"name":"b","type":"INT64"},{"name":"n","type":"INT64"},{"name":"d","type":"DECIMAL(8,2)"},{"name":"f","type":"FLOAT64"},{"name":"s","type":"STRING"},{"name":"dt","type":"DATE"},{"name":"flag","type":"BOOLEAN"}]}\n'
     printf '{"op":"load","table":"u","format":"csv","path":"u.csv"}\n'
+    printf '{"op":"load","table":"w","format":"csv","path":"w.csv","schema":[{"name":"a","type":"INT64"},{"name":"x","type":"DECIMAL(38,10)"},{"name":"y","type":"DECIMAL(25,0)"},{"name":"z","type":"DECIMAL(10,2)"}]}\n'
     echo "$QUERIES" | while IFS= read -r q; do
       printf '{"op":"query","sql":"%s","options":%s}\n' "$(printf '%s' "$q" | sed 's/"/\\"/g')" "$1"
     done

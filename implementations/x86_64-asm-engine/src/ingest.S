@@ -142,6 +142,8 @@ parse_typed:
     shr $8, %rdx
     and $0xff, %edx                 /* precision */
     xor %r8d, %r8d                  /* exact mode */
+    cmp $18, %edx
+    ja parse_wide
     call text_parse_decimal
     jmp 9f
 5:  call text_parse_date
@@ -149,6 +151,25 @@ parse_typed:
 6:  mov $1, %edx                    /* a DATE text is accepted */
     call text_parse_timestamp
 9:  add $8, %rsp
+    ret
+
+/* parse_wide: parse_typed of a wide DECIMAL (prec edx, scale ecx, mode r8d
+ * set; entered by a jump inside parse_typed's frame).  The value is boxed
+ * in the table arena. */
+parse_wide:
+    sub $32, %rsp                   /* i128 at 0(%rsp) */
+    mov %rsp, %r9
+    call dec_parse
+    mov %eax, %edx
+    xor %eax, %eax
+    test %edx, %edx
+    jnz 1f
+    mov g_pending_arena(%rip), %rdi
+    mov 0(%rsp), %rsi
+    mov 8(%rsp), %rdx
+    call dec_box_in
+    xor %edx, %edx
+1:  add $40, %rsp
     ret
 
 /* check_names(base rdi, n rsi, stride rdx): every *(pstr**)(base + i*stride)
