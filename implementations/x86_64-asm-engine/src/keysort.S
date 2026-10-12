@@ -78,7 +78,9 @@
 #define KS_BID    120   /* u8[n]: bucket of each entry */
 #define KS_SPL    128   /* splitter entries [P - 1] */
 #define KS_VARY   136   /* u64[KS_MAXW]: bits that differ between entries */
-#define KS_SPEC   (KS_VARY + 8 * KS_MAXW)
+#define KS_SCAN   184   /* u8[8]: key k must be checked by ks_null_part */
+#define KS_NSCAN  192   /* keys to check */
+#define KS_SPEC   200
 #define KS_SIZE   (KS_SPEC + SP_SIZE * KS_MAXW)
 
     .text
@@ -131,6 +133,8 @@ FUNC ks_null_part
     xor %ecx, %ecx
 4:  cmp %r12, %rcx
     jae 7f
+    cmpb $0, KS_SCAN(%rbx, %rcx)
+    je 6f
     cmpq $0, VAL_NULL(%rdi)
     jne 5f
     cmpb $0, NP_STR(%rsp, %rcx)
@@ -163,6 +167,61 @@ FUNC ks_null_part
     jmp 9b
 99: LEAVE
 ENDF ks_null_part
+
+/* ks_known(task rdi): KS_SCAN[k] = 0 for the keys (of the first 8) that
+ * are known never to be NULL - a plain column without NULLs of the only
+ * (base table) range variable - and are not STRINGs (whose lengths are
+ * checked); KS_NSCAN = keys left to check */
+FUNC ks_known
+    ENTER 0
+    mov %rdi, %rbx
+    mov KS_PLAN(%rbx), %r12
+    xor %r13d, %r13d                /* key */
+1:  cmp QP_NKEYS(%r12), %r13
+    jae 9f
+    cmp $8, %r13
+    jae 9f
+    movb $1, KS_SCAN(%rbx, %r13)
+    imul $SK_SIZE, %r13, %r14
+    add QP_KEYS(%r12), %r14
+    cmpb $T_STR, SK_TYPE(%r14)
+    je 8f
+    mov SK_EXPR(%r14), %rax
+    mov SK_OUT(%r14), %rcx
+    cmp $-1, %rcx
+    je 2f
+    imul $OC_SIZE, %rcx, %rcx
+    add QP_OUT(%r12), %rcx
+    mov OC_EXPR(%rcx), %rax
+2:  test %rax, %rax
+    jz 8f
+    cmpl $EK_COL, N_KIND(%rax)
+    jne 8f
+    cmpq $1, QP_NRV(%r12)
+    jne 8f
+    cmpq $0, N_V2(%rax)
+    jne 8f
+    mov QP_RVS(%r12), %rcx
+    mov (%rcx), %rcx
+    mov RV_TABLE(%rcx), %rcx
+    test %rcx, %rcx
+    jz 8f
+    mov N_V1(%rax), %rdx
+    cmp TB_NCOLS(%rcx), %rdx
+    jae 8f
+    shl $COL_SHIFT, %rdx
+    add TB_COLS(%rcx), %rdx         /* Column */
+    cmpb $0, COL_LAZY(%rdx)
+    jne 8f
+    cmpq $0, COL_NULLS(%rdx)
+    jne 8f
+    movb $0, KS_SCAN(%rbx, %r13)    /* never NULL */
+    jmp 81f
+8:  incq KS_NSCAN(%rbx)
+81: inc %r13
+    jmp 1b
+9:  LEAVE
+ENDF ks_known
 
 /* ks_enc(spec rdi, row rsi) -> rax the key word of the row (leaf) */
 FUNC ks_enc
@@ -305,11 +364,27 @@ FUNC ks_isort
     jbe 3f
     mov %r15, %rdi
     sub KS_STRIDE(%rbx), %rdi       /* A[j - 1] */
+    mov KS_W(%rbx), %rcx            /* (inline: the key words) */
+    xor %edx, %edx
+21: mov (%rdi, %rdx, 8), %rax
+    cmp 0(%rsp, %rdx, 8), %rax
+    jb 3f
+    ja 23f
+    inc %rdx
+    cmp %rcx, %rdx
+    jb 21b
+    cmpq $0, KS_INCOMP(%rbx)        /* equal words */
+    je 22f
     lea 0(%rsp), %rsi
     mov %rbx, %rdx
     call ks_cmp
     cmp $0, %eax
     jle 3f
+    jmp 23f
+22: mov 8(%rdi, %rcx, 8), %rax      /* sequence */
+    cmp 8(%rsp, %rcx, 8), %rax
+    jbe 3f
+23:
     mov %r15, %rdi                  /* A[j] = A[j - 1] */
     mov %r15, %rsi
     sub KS_STRIDE(%rbx), %rsi
@@ -828,11 +903,16 @@ FUNC keysort
     call par_parts
     mov %rax, %r14                  /* parts */
     mov %r14, KS_P(%r15)
-    mov %r12, %rdi                  /* NULLs and long strings per key */
+    mov %r15, %rdi                  /* NULLs and long strings per key */
+    call ks_known
+    cmpq $0, KS_NSCAN(%r15)
+    je 1f
+    mov %r12, %rdi
     mov %r14, %rsi
     lea ks_null_part(%rip), %rdx
     mov %r15, %rcx
     call par_run
+1:
     mov %r15, %rdi
     call ks_plan
     test %eax, %eax
