@@ -55,6 +55,19 @@ OUT=results/correctness/robustness
 mkdir -p "$OUT/arm-logs/$JOB"
 rsync -a "$HOST:.pq-out/$JOB/" "$OUT/arm-logs/$JOB/"
 "${SSH[@]}" "rm -rf ~/.pq-out/$JOB"
-if [[ -f $OUT/arm-logs/$JOB/probe.json ]]; then mv "$OUT/arm-logs/$JOB/probe.json" "$OUT/$LANG_.json"; fi
+# A partial run (--only) updates the probes it ran in an existing record.
+if [[ -f $OUT/arm-logs/$JOB/probe.json ]]; then
+  python3 - "$OUT/arm-logs/$JOB/probe.json" "$OUT/$LANG_.json" <<'PY'
+import json, pathlib, sys
+new, dest = json.loads(pathlib.Path(sys.argv[1]).read_text()), pathlib.Path(sys.argv[2])
+if dest.exists():
+    old = json.loads(dest.read_text())
+    old["probes"].update(new["probes"])
+    old.setdefault("reruns", []).append({"probes": list(new["probes"]), "started": new["started"]})
+    new = old
+dest.write_text(json.dumps(new, indent=1) + "\n")
+PY
+  rm "$OUT/arm-logs/$JOB/probe.json"
+fi
 cat "$OUT/arm-logs/$JOB/status" "$OUT/arm-logs/$JOB/probe.log"
 ! grep -qv "=0$" "$OUT/arm-logs/$JOB/status"

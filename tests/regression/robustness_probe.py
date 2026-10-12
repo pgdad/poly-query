@@ -213,7 +213,7 @@ def probe_long_or_chain(engine: str, data: Path) -> dict:
     nrows = 20_000
     rows = "\n".join(str(i) for i in range(nrows))
     (data / "n.csv").write_text("x\n" + rows + "\n")
-    out, deaths = {}, []
+    out, deaths, hung = {}, [], False
     env = {"PQ_PAR_MIN": "1", "PQ_PARALLEL_MIN_ROWS": "1"}
     s = Session(engine, data, [], env)
     out["load"] = code(s.req({"op": "load", "table": "n", "format": "csv", "path": "n.csv"}))
@@ -227,24 +227,32 @@ def probe_long_or_chain(engine: str, data: Path) -> dict:
                                 ("vectorized", {"mode": "vectorized", "threads": 1}),
                                 ("parallel", {"mode": "vectorized", "threads": 8}),
                                 ("auto", {})):
-                if not s.alive():
-                    deaths.append(s.close())
+                if not s.alive() or hung:
+                    if hung:   # a late response would otherwise be read as the next case's answer
+                        os.killpg(s.proc.pid, 9)
+                    end = s.close()
+                    if not hung:
+                        deaths.append(end)
                     s = Session(engine, data, [], env)
                     s.req({"op": "load", "table": "n", "format": "csv", "path": "n.csv"})
                 r = s.req({"op": "query", "sql": f"SELECT count(*) FROM n WHERE {pred}",
                            "options": {**opts, "timeout_ms": 120_000}}, timeout=180)
                 c = code(r)
+                hung = c == "NO_RESPONSE" and s.alive()
                 rc = None
                 if c == "ok":
                     rc = (r.get("rows") or [[None]])[0][0]
-                out[f"{op}_{terms}_{label}"] = {"result": c, "count": rc, "alive": s.alive()}
+                out[f"{op}_{terms}_{label}"] = {"result": "HANG" if hung else c, "count": rc, "alive": s.alive()}
     info = s.close()
     if info["exit_code"] not in (0, None):
         deaths.append(info)
-    bad = [k for k, v in out.items() if isinstance(v, dict) and (not v["alive"] or v["result"] == "NO_RESPONSE")]
+    crashed = [k for k, v in out.items() if isinstance(v, dict) and not v["alive"]]
+    hangs = [k for k, v in out.items() if isinstance(v, dict) and v["result"] == "HANG"]
     wrong = [k for k, v in out.items() if isinstance(v, dict) and v["result"] == "ok"
              and v["count"] != (min(int(k.split("_")[1]), nrows) if k.startswith("OR") else nrows)]
-    return {"verdict": "fail" if bad or wrong else "pass", "crashed_or_hung": bad, "wrong_result": wrong,
+    return {"verdict": "fail" if crashed or hangs or wrong else "pass", "crashed": crashed,
+            "hung": hangs, "hang_rule": "no response within 180 s although options.timeout_ms = 120000",
+            "wrong_result": wrong,
             "cases": out, "engine_exits": deaths}
 
 
@@ -266,7 +274,9 @@ def probe_session_huge_line(engine: str, data: Path) -> dict:
 
 def probe_http_crlf_flood(engine: str, data: Path) -> dict:
     """Reviewer suspicion: CR/LF bytes before a request line are skipped without being consumed,
-    so a client sending only CRLFs grows the connection buffer without bound."""
+    so a client sending only CRLFs grows the connection buffer without bound. Resident memory is
+    sampled after 128 MiB, 512 MiB and 1 GiB: a retained buffer keeps growing with the bytes sent,
+    while uncollected garbage in a managed runtime levels off."""
     err = tempfile.TemporaryFile()
     p = subprocess.Popen([engine, "serve", "--port", "0", "--data-dir", str(data)], stdout=subprocess.PIPE,
                          stderr=err, start_new_session=True)
@@ -275,13 +285,16 @@ def probe_http_crlf_flood(engine: str, data: Path) -> dict:
         host, port = ev.get("host", "127.0.0.1"), ev["port"]
         base = tree_rss_mib(p.pid)
         sampler = RssSampler(p.pid)
-        sent, closed = 0, False
+        sent, closed, stages = 0, False, {}
         sock = socket.create_connection((host, port), timeout=10)
         chunk = b"\r\n" * (512 << 10)
         try:
-            while sent < (128 << 20):
-                sock.sendall(chunk)
-                sent += len(chunk)
+            for mib in (128, 512, 1024):
+                while sent < (mib << 20):
+                    sock.sendall(chunk)
+                    sent += len(chunk)
+                time.sleep(1)
+                stages[mib] = round(tree_rss_mib(p.pid) - base)
         except OSError:
             closed = True
         time.sleep(1)
@@ -298,12 +311,12 @@ def probe_http_crlf_flood(engine: str, data: Path) -> dict:
                 while chunk_ := c.recv(65536):
                     resp += chunk_
                 healthy = resp.startswith(b"HTTP/1.1 200")
-        # The header block of one request is a few KiB (a 64 KiB cap is common): growth in proportion
-        # to the bytes sent means the connection buffers them without bound.
+        # The header block of one request is a few KiB (a 64 KiB cap is common): memory that keeps
+        # growing with the bytes sent (doubling from 512 MiB to 1 GiB) means they are buffered without bound.
         grew = peak - base
-        unbounded = grew > 64 and grew > 0.4 * (sent >> 20)
+        unbounded = len(stages) == 3 and stages[1024] > 256 and stages[1024] >= 1.6 * max(stages[512], 1)
         verdict = "fail" if not alive or not healthy or unbounded else "pass"
-        return {"verdict": verdict, "bytes_sent": sent, "rss_growth_mib": round(grew), "server_closed_connection": closed,
+        return {"verdict": verdict, "bytes_sent": sent, "rss_growth_mib": round(grew), "rss_growth_by_mib_sent": stages, "server_closed_connection": closed,
                 "rss_base_mib": round(base), "rss_peak_mib": round(peak), "server_alive": alive,
                 "server_healthy_after": healthy}
     finally:
@@ -358,10 +371,14 @@ def main() -> int:
     ap.add_argument("--engine", required=True)
     ap.add_argument("--only", default="")
     ap.add_argument("--report")
+    ap.add_argument("--merge", action="store_true", help="update the probes in an existing --report file")
     a = ap.parse_args()
     engine = str(Path(a.engine).resolve())
     names = [n for n in a.only.split(",") if n] or list(PROBES)
     res = {"engine": a.engine, "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "probes": {}}
+    if a.merge and a.report and Path(a.report).exists():
+        res = json.loads(Path(a.report).read_text())
+        res.setdefault("reruns", []).append({"probes": names, "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
     for n in names:
         with tempfile.TemporaryDirectory(prefix="pqprobe-") as d:
             t0 = time.monotonic()
