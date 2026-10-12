@@ -233,7 +233,18 @@ cases:
     ERR("SELECT [a]", ERR_PARSE)
     // --- errors: reserved-for-future syntax
     ERRAT("SELECT id FROM people UNION SELECT id FROM people", ERR_UNSUPPORTED, 1, 23)
-    ERR("SELECT 1 UNION ALL SELECT 2", ERR_UNSUPPORTED)
+    ERR("SELECT 1 UNION DISTINCT SELECT 2", ERR_UNSUPPORTED)
+    // --- UNION ALL (CR-1)
+    OK("SELECT 1 UNION ALL SELECT 2", "{select 1 union all select 2}")
+    OK("WITH q AS (SELECT a FROM t) SELECT a FROM q UNION ALL SELECT DISTINCT b FROM t WHERE c GROUP BY b UNION ALL SELECT 3 ORDER BY 1 DESC LIMIT 2", "{with q={select a from t} select a from q union all select distinct b from t where c group b union all select 3 order 1 desc limit 2}")
+    OK("SELECT * FROM (SELECT 1 UNION ALL SELECT 2) s WHERE x IN (SELECT y FROM t UNION ALL SELECT 1)", "{select * from {select 1 union all select 2} as s where (insub x {select y from t union all select 1})}")
+    ERRAT("SELECT a FROM t ORDER BY a UNION ALL SELECT 1", ERR_PARSE, 1, 28)
+    ERRAT("SELECT 1 LIMIT 1 UNION ALL SELECT 1", ERR_PARSE, 1, 18)
+    ERR("(SELECT 1) UNION ALL (SELECT 2)", ERR_PARSE)
+    ERR("SELECT 1 UNION ALL (SELECT 2)", ERR_PARSE)
+    ERR("SELECT 1 UNION ALL", ERR_PARSE)
+    ERR("SELECT 1 UNION ALL SELECT 2 UNION SELECT 3", ERR_UNSUPPORTED)
+    ERR("SELECT * FROM (SELECT 1 ORDER BY 1 UNION ALL SELECT 2) s", ERR_PARSE)
     ERR("SELECT * FROM (SELECT 1 UNION SELECT 2) s", ERR_UNSUPPORTED)
     ERRAT("SELECT * FROM a FULL JOIN b ON TRUE", ERR_UNSUPPORTED, 1, 17)
     ERR("SELECT * FROM a RIGHT JOIN b ON TRUE", ERR_UNSUPPORTED)
@@ -306,6 +317,7 @@ s_unknown:  .asciz "<?>"
 s_qopen:    .asciz "{"
 s_with:     .asciz "with "
 s_select:   .asciz "select "
+s_union_all: .asciz " union all "
 s_distinct: .asciz "distinct "
 s_as:       .asciz " as "
 s_qstar:    .asciz ".*"
@@ -1201,54 +1213,14 @@ LFUNC dump_from
     ret
 ENDF dump_from
 
-// dump_query(x0 Query*)
-// Registers: x19 query, x20 cursor, x21 remaining, x22 scratch.
-LFUNC dump_query
-    stp  x29, x30, [sp, #-48]!
+// dump_core(x0 Query*) — select_core part of a query (SELECT ... HAVING)
+// Registers: x19 query, x20 cursor, x21 remaining.
+LFUNC dump_core
+    stp  x29, x30, [sp, #-32]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
-    stp  x21, x22, [sp, #32]
+    str  x21, [sp, #-16]!
     mov  x19, x0
-    ADR_L x0, s_qopen
-    bl   out_s
-    // WITH
-    ldr  x21, [x19, #Q_NCTES]
-    cbz  x21, .Ldq_select
-    ADR_L x0, s_with
-    bl   out_s
-    ldr  x20, [x19, #Q_CTES]
-1:  ldr  x0, [x20, #CTE_NAME]
-    bl   out_str
-    ldr  x22, [x20, #CTE_NCOLS]
-    cbz  x22, 3f
-    mov  w0, #'('
-    bl   out_c
-    mov  x22, #0
-2:  cbz  x22, 21f
-    mov  w0, #','
-    bl   out_c
-21: ldr  x9, [x20, #CTE_COLS]
-    ldr  x0, [x9, x22, lsl #3]
-    bl   out_str
-    add  x22, x22, #1
-    ldr  x9, [x20, #CTE_NCOLS]
-    cmp  x22, x9
-    b.lo 2b
-    mov  w0, #')'
-    bl   out_c
-3:  mov  w0, #'='
-    bl   out_c
-    ldr  x0, [x20, #CTE_QUERY]
-    bl   dump_query
-    add  x20, x20, #CTE_SIZE
-    subs x21, x21, #1
-    b.eq 4f
-    ADR_L x0, s_comma_sp
-    bl   out_s
-    b    1b
-4:  mov  w0, #' '
-    bl   out_c
-.Ldq_select:
     ADR_L x0, s_select
     bl   out_s
     ldr  w9, [x19, #Q_DISTINCT]
@@ -1309,6 +1281,73 @@ LFUNC dump_query
     bl   out_s
     ldr  x0, [x19, #Q_HAVING]
     bl   dump_node
+14: ldr  x21, [sp], #16
+    ldp  x19, x20, [sp, #16]
+    ldp  x29, x30, [sp], #32
+    ret
+ENDF dump_core
+
+// dump_query(x0 Query*)
+// Registers: x19 query, x20 cursor, x21 remaining, x22 scratch.
+LFUNC dump_query
+    stp  x29, x30, [sp, #-48]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    stp  x21, x22, [sp, #32]
+    mov  x19, x0
+    ADR_L x0, s_qopen
+    bl   out_s
+    // WITH
+    ldr  x21, [x19, #Q_NCTES]
+    cbz  x21, .Ldq_select
+    ADR_L x0, s_with
+    bl   out_s
+    ldr  x20, [x19, #Q_CTES]
+1:  ldr  x0, [x20, #CTE_NAME]
+    bl   out_str
+    ldr  x22, [x20, #CTE_NCOLS]
+    cbz  x22, 3f
+    mov  w0, #'('
+    bl   out_c
+    mov  x22, #0
+2:  cbz  x22, 21f
+    mov  w0, #','
+    bl   out_c
+21: ldr  x9, [x20, #CTE_COLS]
+    ldr  x0, [x9, x22, lsl #3]
+    bl   out_str
+    add  x22, x22, #1
+    ldr  x9, [x20, #CTE_NCOLS]
+    cmp  x22, x9
+    b.lo 2b
+    mov  w0, #')'
+    bl   out_c
+3:  mov  w0, #'='
+    bl   out_c
+    ldr  x0, [x20, #CTE_QUERY]
+    bl   dump_query
+    add  x20, x20, #CTE_SIZE
+    subs x21, x21, #1
+    b.eq 4f
+    ADR_L x0, s_comma_sp
+    bl   out_s
+    b    1b
+4:  mov  w0, #' '
+    bl   out_c
+.Ldq_select:
+    ldr  x21, [x19, #Q_NUNION]      // UNION ALL compound: the branches
+    cbnz x21, 1f
+    mov  x0, x19
+    bl   dump_core
+    b    14f
+1:  ldr  x20, [x19, #Q_UNION]
+2:  ldr  x0, [x20], #8
+    bl   dump_core
+    subs x21, x21, #1
+    b.eq 14f
+    ADR_L x0, s_union_all
+    bl   out_s
+    b    2b
 14: ldr  x21, [x19, #Q_NORDER]
     cbz  x21, 18f
     ADR_L x0, s_order

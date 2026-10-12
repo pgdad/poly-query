@@ -13,7 +13,7 @@
 // strings are Str* created by the lexer. Every error raises via pq_raise_pos
 // (or lex_raise_text) with the line/column of the offending token:
 //   PARSE_ERROR            syntax errors
-//   UNSUPPORTED            FULL / RIGHT / UNION used as syntax
+//   UNSUPPORTED            FULL / RIGHT / UNION [DISTINCT] used as syntax
 //   NUMERIC_OVERFLOW       integer literal > INT64_MAX, non-finite float literal
 //   CONVERSION_ERROR       invalid DATE / TIMESTAMP literal
 //   SEMANTIC_ERROR         unknown CAST type name or invalid type parameters
@@ -255,7 +255,8 @@ ENDF parse_sql
 
 // -----------------------------------------------------------------------------
 // p_query(x0 P) -> x0 Query*
-//   query = [ with_clause ] select_core [ order_by ] [ limit_clause ]
+//   query = [ with_clause ] compound [ order_by ] [ limit_clause ]
+//   compound = select_core { UNION ALL select_core }   (CR-1)
 //   order_item = expr [ASC|DESC] [NULLS (FIRST|LAST)]
 //   limit_clause = LIMIT e [OFFSET e] | OFFSET e [LIMIT e]
 // Registers: x19 P, x20 Query*, x21 order expr, w22 desc, w23 nulls.
@@ -282,8 +283,14 @@ LFUNC p_query
 1:  mov  x0, x19
     mov  x1, x20
     bl   p_select_core
+    CURKIND w10                     // compound: { UNION ALL select_core }
+    cmp  w10, #KW_UNION
+    b.ne 11f
+    mov  x0, x19
+    mov  x1, x20
+    bl   p_union
 
-    CURKIND w10                     // ORDER BY
+11: CURKIND w10                     // ORDER BY
     cmp  w10, #KW_ORDER
     b.ne .Lq_limit
     ADVANCE
@@ -344,6 +351,64 @@ LFUNC p_query
     ldp  x29, x30, [sp], #96
     ret
 ENDF p_query
+
+// -----------------------------------------------------------------------------
+// p_union(x0 P, x1 Query*) — the current token is UNION and the first
+// select_core has been parsed into the Query. Moves that core into a new
+// branch record, parses the remaining `UNION ALL select_core` branches and
+// stores them in Q_UNION / Q_NUNION; the Query keeps its WITH clause and
+// gets the ORDER BY / LIMIT of the whole compound. UNION without ALL ends in
+// p_error (UNSUPPORTED).
+// Registers: x19 P, x20 Query*, x21 branch. Stack: branch vector at [sp,#48].
+// -----------------------------------------------------------------------------
+LFUNC p_union
+    stp  x29, x30, [sp, #-80]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
+    stp  x21, x22, [sp, #32]
+    mov  x19, x0
+    mov  x20, x1
+    VEC_INIT 48, 8
+    mov  x0, #Q_SIZE                // first branch = the core parsed so far
+    bl   arena_zalloc
+    mov  x21, x0
+    mov  x1, x20
+    mov  x2, #Q_CTES                // core fields precede Q_CTES
+    bl   memcpy
+    ldr  x9, [x20, #Q_LINE]         // line + column
+    str  x9, [x21, #Q_LINE]
+    mov  x0, x20
+    mov  w1, #0
+    mov  x2, #Q_CTES
+    bl   memset
+1:  VEC_PUSH 48
+    str  x21, [x0]
+    CURKIND w10
+    cmp  w10, #KW_UNION
+    b.ne 2f
+    ldr  x9, [x19, #PS_CUR]         // UNION must be followed by ALL
+    ldr  w10, [x9, #(TK_SIZE + TK_KIND)]
+    cmp  w10, #KW_ALL
+    b.ne 3f
+    ADVANCE
+    ADVANCE
+    mov  x0, #Q_SIZE
+    bl   arena_zalloc
+    mov  x21, x0
+    mov  x0, x19
+    mov  x1, x21
+    bl   p_select_core
+    b    1b
+2:  ldp  x9, x10, [sp, #48]
+    str  x9, [x20, #Q_UNION]
+    str  x10, [x20, #Q_NUNION]
+    ldp  x19, x20, [sp, #16]
+    ldp  x21, x22, [sp, #32]
+    ldp  x29, x30, [sp], #80
+    ret
+3:  mov  x0, x19                    // UNION [DISTINCT]: UNSUPPORTED
+    bl   p_error
+ENDF p_union
 
 // -----------------------------------------------------------------------------
 // p_with(x0 P, x1 Query*)   — WITH already consumed
@@ -1680,7 +1745,8 @@ ENDF p_expect_ident
 // -----------------------------------------------------------------------------
 // p_error(x0 P) — noreturn. Syntax error at the current token:
 //   end of input        -> PARSE_ERROR "unexpected end of input"
-//   FULL / RIGHT / UNION -> UNSUPPORTED (reserved for future use)
+//   FULL / RIGHT / UNION -> UNSUPPORTED (reserved for future use), except
+//                          a misplaced UNION ALL -> PARSE_ERROR
 //   otherwise           -> PARSE_ERROR "syntax error at or near '<token>'"
 // Registers: x19 token.
 // -----------------------------------------------------------------------------
@@ -1699,6 +1765,9 @@ LFUNC p_error
     b.eq 1f
     cmp  w10, #KW_UNION
     b.ne 3f
+    ldr  w9, [x19, #(TK_SIZE + TK_KIND)] // UNION ALL is valid syntax, only
+    cmp  w9, #KW_ALL                // misplaced here (after ORDER BY /
+    b.eq 3f                         // LIMIT, inside parentheses)
 1:  mov  w0, #ERR_UNSUPPORTED
     ADR_L x1, msg_unsupported
 3:  ldr  x2, [x19, #TK_PTR]

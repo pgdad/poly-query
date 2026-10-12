@@ -50,6 +50,13 @@ SELECT SUM(tx_id * 4611686018427387) FROM tx
 SELECT COUNT(*) FROM tx WHERE 1 = 0
 SELECT MAX(amount), MIN(amount), COUNT(*) FROM tx WHERE amount < 0
 SELECT category, COUNT(*) FROM tx WHERE amount < 0 GROUP BY category
+SELECT category, amount FROM tx WHERE amount > 900 UNION ALL SELECT segment, credit_limit FROM cust WHERE customer_id < 50 UNION ALL SELECT status, item_count FROM orders WHERE order_id < 40
+SELECT k, COUNT(*), SUM(v) FROM (SELECT status AS k, fee AS v FROM tx UNION ALL SELECT segment, loyalty_points FROM cust UNION ALL SELECT s70, n90 FROM nh) u GROUP BY k
+SELECT t.tx_id, u.x FROM tx t JOIN (SELECT customer_id AS c, 1 AS x FROM cust WHERE segment = 'consumer' UNION ALL SELECT customer_id, 2 FROM orders WHERE status = 'paid') u ON u.c = t.customer_id WHERE t.amount > 700
+WITH a AS (SELECT customer_id FROM tx WHERE is_fraud UNION ALL SELECT customer_id FROM orders) SELECT c.customer_id FROM cust c WHERE c.customer_id IN (SELECT customer_id FROM a) AND c.customer_id < 300
+SELECT c.customer_id, (SELECT COUNT(*) FROM (SELECT t.tx_id FROM tx t WHERE t.customer_id = c.customer_id UNION ALL SELECT o.order_id FROM orders o WHERE o.customer_id = c.customer_id) z) FROM cust c WHERE c.customer_id < 40
+SELECT tx_id AS id FROM tx WHERE bucket = 3 UNION ALL SELECT customer_id FROM cust ORDER BY id DESC LIMIT 25 OFFSET 5
+SELECT DISTINCT category FROM tx UNION ALL SELECT DISTINCT segment FROM cust UNION ALL SELECT NULL
 Q
 
 {

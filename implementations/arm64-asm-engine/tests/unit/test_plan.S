@@ -164,6 +164,22 @@ cases_start:
     TR  "SELECT v FROM u WHERE i < 1", 0
     TR  "SELECT v FROM u WHERE i <= -1 OR i IS NULL", 1
     TR  "SELECT * FROM t JOIN u ON t.i = u.i WHERE u.i = 1", 2
+    // UNION ALL (CR-1)
+    TP  "SELECT i FROM t UNION ALL SELECT i FROM u", "{\"op\":\"UnionAll\",\"children\":[{\"op\":\"Project\"", M_HAS
+    TP  "SELECT i FROM t UNION ALL SELECT i FROM u ORDER BY 1 LIMIT 2", "{\"op\":\"Limit\",\"children\":[{\"op\":\"Sort\",\"children\":[{\"op\":\"UnionAll\"", M_HAS
+    TP  "SELECT * FROM (SELECT i FROM t UNION ALL SELECT 5) x", "\"SubqueryScan\",\"alias\":\"x\",\"children\":[{\"op\":\"UnionAll\"", M_HAS
+    TR  "SELECT i FROM t UNION ALL SELECT i FROM u", 8
+    TR  "SELECT i FROM t UNION ALL SELECT i FROM u UNION ALL SELECT 1", 9
+    TR  "SELECT i FROM t UNION ALL SELECT i FROM u ORDER BY i LIMIT 3 OFFSET 4", 3
+    TR  "SELECT s FROM t WHERE i IN (SELECT i FROM u WHERE i > 1 UNION ALL SELECT 3)", 2
+    TR  "SELECT DISTINCT i FROM (SELECT i FROM t UNION ALL SELECT i FROM u) x", 4
+    TR  "SELECT 1 WHERE EXISTS (SELECT i FROM t WHERE i > 9 UNION ALL SELECT i FROM u WHERE i > 9)", 0
+    TR  "SELECT s FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.i = t.i UNION ALL SELECT 1 WHERE t.s = 'd')", 3
+    TE  "SELECT i, s FROM t UNION ALL SELECT i FROM u", ERR_SEMANTIC
+    TE  "SELECT s FROM t UNION ALL SELECT i FROM u", ERR_TYPE
+    TE  "SELECT i FROM t UNION ALL SELECT i FROM u ORDER BY i + 1", ERR_SEMANTIC
+    TE  "SELECT i FROM t UNION ALL SELECT i FROM u ORDER BY v", ERR_SEMANTIC
+    TE  "SELECT i FROM t UNION ALL SELECT 999999999999999999 UNION ALL SELECT 1.5", ERR_NUMERIC_OVERFLOW
 cases_end:
 
     .section .rodata
