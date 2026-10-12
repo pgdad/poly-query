@@ -69,9 +69,6 @@ FUNC vb_new
     mov  x0, #(DC_ENTRIES * 24 + 16)
     bl   arena_zalloc
     str  x0, [x19, #VB_DCACHE]
-    mov  x0, #(MC_ENTRIES * 24 + 16)
-    bl   arena_zalloc
-    str  x0, [x19, #VB_MCACHE]
     mov  x0, x19
     LEAVE 2
 ENDF vb_new
@@ -470,7 +467,11 @@ FUNC veval
     // evaluated by the row evaluator at the first row with the code.
     // -> w0 1 if done (out filled), 0 if not applicable (uses x24-x28)
 .Lve_memo:
-    stp  x29, x30, [sp, #-16]!
+    cmp  x22, #16                       // tiny selections: not worth it
+    b.hs 0f
+    mov  w0, #0
+    ret
+0:  stp  x29, x30, [sp, #-16]!
     mov  x0, x19
     mov  x1, x20
     bl   dict_single
@@ -848,17 +849,32 @@ ENDF veval
 // The expression's only column is a dictionary-encoded column of a
 // column-layout table of this query level, and it contains no subquery,
 // aggregate, group key, outer reference or PQ_SLEEP.
-//   x19 vb; stack: [sp] rv (-1: none yet), [sp+8] column index, [sp+16] bad
+//   x19 vb, x20 node; stack: [sp] rv (-1: none yet), [sp+8] column index,
+//   [sp+16] bad
 // =============================================================================
 LFUNC dict_single
-    ENTER 1
+    ENTER 2
     sub  sp, sp, #32
     mov  x19, x1
-    mov  x9, #-1
+    mov  x20, x0
+    ldr  w9, [x20, #N_FLAGS]            // analysed before (the tree part
+    tbz  w9, #5, 1f                     // is cached in the node flags)
+    mov  x0, #0
+    tbz  w9, #6, 9f                     // NF_DSINGLE: walk for the column
+1:  mov  x9, #-1
     stp  x9, xzr, [sp]
     str  xzr, [sp, #16]
+    mov  x0, x20
     mov  x1, sp
     bl   ds_walk
+    ldr  x9, [sp, #16]                  // cache: NF_DSCAN, NF_DSINGLE
+    ldr  x10, [sp]
+    ldr  w11, [x20, #N_FLAGS]
+    orr  w11, w11, #NF_DSCAN
+    cbnz x9, 2f
+    tbnz x10, #63, 2f
+    orr  w11, w11, #NF_DSINGLE
+2:  str  w11, [x20, #N_FLAGS]
     mov  x0, #0
     ldr  x9, [sp, #16]
     cbnz x9, 9f
@@ -877,7 +893,7 @@ LFUNC dict_single
     b.ne 9f
     mov  x0, x12
 9:  add  sp, sp, #32
-    LEAVE 1
+    LEAVE 2
 ENDF dict_single
 
 // ds_walk(x0 Node*, x1 state: rv, column, bad) — dict_single's tree walk
@@ -952,8 +968,14 @@ LFUNC dict_memo
     ENTER 3
     mov  x19, x0
     mov  x20, x2
-    ldr  x21, [x1, #VB_MCACHE]
-    mov  x22, #0
+    ldr  x21, [x1, #VB_MCACHE]          // allocated on first use
+    cbnz x21, 0f
+    mov  x21, x1
+    mov  x0, #(MC_ENTRIES * 24 + 16)
+    bl   arena_zalloc
+    str  x0, [x21, #VB_MCACHE]
+    mov  x21, x0
+0:  mov  x22, #0
 1:  cmp  x22, #MC_ENTRIES
     b.hs 2f
     mov  x9, #24

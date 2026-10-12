@@ -431,6 +431,8 @@
 #define NF_STAR      4     // f(*)
 #define NF_CONST     8     // binder: expression is constant (no column refs)
 #define NF_PAREN     16    // parser: expression was parenthesised
+#define NF_DSCAN     32    // vexec.S: dict_single analysed this tree (cache)
+#define NF_DSINGLE   64    // vexec.S: ... and it has exactly one local column
 
 // Function ids (N_OP of bound NK_FUNC / NK_AGG)
 #define F_COUNT       1
