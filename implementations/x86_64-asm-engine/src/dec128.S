@@ -486,10 +486,10 @@ ENDF i128_div_pow10
 /* i128_round_pow10(lo rdi, hi rsi, k edx) -> rax lo, rdx hi:
  * v / 10^k rounded half away from zero */
 FUNC i128_round_pow10
-    mov %rdi, %rax
-    mov %rsi, %rdx
     test %edx, %edx
     jnz 1f
+    mov %rdi, %rax
+    mov %rsi, %rdx
     ret
 1:  push %rbx
     mov %rsi, %rbx                  /* sign */

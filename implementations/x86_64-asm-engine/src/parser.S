@@ -874,7 +874,7 @@ FUNC parse_select_item
     mov $KW_AS, %esi
     call p_accept_kw
     test %eax, %eax
-    jnz 3f
+    jnz 4f
     mov %rbx, %rdi
     call p_is_ident
     test %eax, %eax
@@ -884,6 +884,24 @@ FUNC parse_select_item
     mov %rax, SI_ALIAS(%r12)
 9:  mov %r12, %rax
     LEAVE
+4:  /* after AS, the words reserved for future syntax FULL / RIGHT (never
+     * valid there) name the column, e.g. `... AS full` (decimal38.pqt) */
+    mov %rbx, %rdi
+    call p_cur
+    cmpl $TOK_KEYWORD, TK_KIND(%rax)
+    jne 3b
+    mov TK_ID(%rax), %ecx
+    cmp $KW_FULL, %ecx
+    je 5f
+    cmp $KW_RIGHT, %ecx
+    jne 3b
+5:  mov TK_PTR(%rax), %rdi
+    mov TK_LEN(%rax), %rsi
+    call pstr_tmp
+    mov %rax, SI_ALIAS(%r12)
+    mov %rbx, %rdi
+    call p_next
+    jmp 9b
 ENDF parse_select_item
 
 /* parse_order_item(P) -> OrderItem* */

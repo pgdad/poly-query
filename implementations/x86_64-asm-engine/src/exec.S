@@ -868,9 +868,19 @@ FUNC agg_update
     addsd AS_VAL(%rcx), %xmm0
     movsd %xmm0, AS_VAL(%rcx)
     jmp 8f
-3:  cqo                             /* 128-bit integer sum */
+3:  mov N_A(%r15), %rdx
+    mov N_TYPE(%rdx), %edx
+    shr $8, %edx
+    cmp $18, %dl
+    ja 4f
+    cqo                             /* 128-bit integer sum */
     add %rax, AS_LO(%rcx)
     adc %rdx, AS_HI(%rcx)
+    jmp 8f
+4:  lea AS_LO(%rcx), %rdi           /* wide DECIMAL: 192-bit sum */
+    mov (%rax), %rsi
+    mov 8(%rax), %rdx
+    call sum192_add
     jmp 8f
 5:  /* MIN / MAX */
     cmpq $0, AS_HAS(%rcx)
@@ -949,6 +959,10 @@ FUNC agg_finish
     mov AS_HI(%rcx), %rdx
     cmp $T_DEC, %r10d
     jne 41f
+    mov %r9d, %r11d
+    shr $8, %r11d
+    cmp $18, %r11b
+    ja 42f
     mov %r8, 0(%rsp)
     call chk_dec128
     mov 0(%rsp), %r8
@@ -960,6 +974,19 @@ FUNC agg_finish
     jne raise_overflow
     mov %rax, VAL_P(%r8)
     jmp 98f
+42: mov %r8, 0(%rsp)                /* wide DECIMAL: DECIMAL(38,s) */
+    lea AS_LO(%rcx), %rdi
+    call sum192_to_i128
+    test %ecx, %ecx
+    jnz 43f
+    call raise_overflow
+43: mov %rax, %rdi
+    mov %rdx, %rsi
+    mov N_TYPE(%r15), %edx
+    call dec_put
+    mov 0(%rsp), %r8
+    mov %rax, VAL_P(%r8)
+    jmp 98f
 5:  /* AVG */
     mov %r8, 0(%rsp)
     mov %rcx, 8(%rsp)
@@ -967,7 +994,22 @@ FUNC agg_finish
     jne 6f
     movsd AS_VAL(%rcx), %xmm0
     jmp 7f
-6:  mov AS_LO(%rcx), %rdi
+6:  cmp $T_DEC, %r10d
+    jne 61f
+    mov %r9d, %r11d
+    shr $8, %r11d
+    cmp $18, %r11b
+    jbe 61f
+    lea AS_LO(%rcx), %rdi           /* wide: from the exact quotient */
+    mov AS_COUNT(%rcx), %rsi
+    mov %r9d, %edx
+    shr $16, %edx
+    movzbl %dl, %edx
+    call avg192_to_double
+    mov 0(%rsp), %r8
+    movsd %xmm0, VAL_P(%r8)
+    jmp 98f
+61: mov AS_LO(%rcx), %rdi
     mov AS_HI(%rcx), %rsi
     call i128_to_double
     mov N_A(%r15), %rax

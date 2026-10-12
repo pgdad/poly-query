@@ -1026,7 +1026,19 @@ FUNC agg_merge
     addsd AS_VAL(%rsi), %xmm0
     movsd %xmm0, AS_VAL(%rdi)
     jmp 1b
-3:  mov AS_LO(%rsi), %rax
+3:  mov N_A(%r15), %rax
+    mov N_TYPE(%rax), %eax
+    mov %eax, %ecx
+    shr $8, %ecx
+    cmp $T_DEC, %al
+    jne 4f
+    cmp $18, %cl
+    jbe 4f
+    add $AS_LO, %rdi                /* wide DECIMAL: 192-bit sums */
+    add $AS_LO, %rsi
+    call sum192_merge
+    jmp 1b
+4:  mov AS_LO(%rsi), %rax           /* 128-bit sums */
     mov AS_HI(%rsi), %rdx
     add %rax, AS_LO(%rdi)
     adc %rdx, AS_HI(%rdi)

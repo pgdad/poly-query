@@ -55,6 +55,27 @@ ones_b: .fill 32, 1, 1
 
     .text
 
+/* vbin_wide(node rdi) -> eax 1 if the binary node or an operand has a wide
+ * DECIMAL type (evaluated tuple by tuple with eval) */
+FUNC vbin_wide
+    push %rbx
+    mov %rdi, %rbx
+    mov N_TYPE(%rbx), %edi
+    call dec_is_wide
+    test %eax, %eax
+    jnz 9f
+    mov N_A(%rbx), %rdi
+    mov N_TYPE(%rdi), %edi
+    call dec_is_wide
+    test %eax, %eax
+    jnz 9f
+    mov N_B(%rbx), %rdi
+    mov N_TYPE(%rdi), %edi
+    call dec_is_wide
+9:  pop %rbx
+    ret
+ENDF vbin_wide
+
 /* ================================================================ scratch */
 
 /* vs_mark() -> rax current top (initialises the stack on first use) */
@@ -443,6 +464,10 @@ v_isnull:
 
 /* ---------------------------------------------------------------- unary */
 v_unary:
+    mov N_TYPE(%rbx), %edi          /* -wide: tuple at a time */
+    call dec_is_wide
+    test %eax, %eax
+    jnz v_fallback
     mov N_A(%rbx), %rdi
     mov %r12, %rsi
     mov %r13, %rdx
@@ -534,6 +559,11 @@ v_binary:
     je v_logic
     cmp $B_CONCAT, %eax
     je v_fallback
+    mov %rbx, %rdi                  /* wide DECIMALs: tuple at a time */
+    call vbin_wide
+    test %eax, %eax
+    jnz v_fallback
+    mov N_OP(%rbx), %eax
     cmp $B_EQ, %eax
     jae 1f
     movzbl N_TYPE(%rbx), %ecx       /* arithmetic: INT, FLOAT, DECIMAL (+ - *) */
@@ -595,7 +625,15 @@ v_compare:
     mov N_A(%rbx), %rax
     mov N_TYPE(%rax), %eax
     movzbl %al, %ecx
-    cmp $T_FLOAT, %ecx
+    mov N_B(%rbx), %rdx             /* INT64 vs DECIMAL: dec_cmp (exact) */
+    movzbl N_TYPE(%rdx), %edx
+    cmp %ecx, %edx
+    je 0f
+    cmp $T_DEC, %ecx
+    je 40f
+    cmp $T_DEC, %edx
+    je 40f
+0:  cmp $T_FLOAT, %ecx
     je 20f
     cmp $T_STR, %ecx
     je 30f
@@ -1210,6 +1248,10 @@ FUNC vagg_update
     jae 40f
     cmp $T_FLOAT, %eax
     je 30f
+    mov 24(%rsp), %edi
+    call dec_is_wide
+    test %eax, %eax
+    jnz 28f
     /* ---- SUM / AVG of INT64 / DECIMAL: 128-bit sums */
     cmpq $0, 0(%rsp)
     jne 25f
@@ -1247,6 +1289,28 @@ FUNC vagg_update
     incq AS_COUNT(%rdi)
 27: inc %rcx
     jmp 26b
+
+28: /* ---- SUM / AVG of wide DECIMAL: 192-bit sums of the boxed values */
+    xor %ecx, %ecx
+281: cmp %r13, %rcx
+    jae 99f
+    cmpb $0, VNULL(%r12, %rcx)
+    jne 283f
+    mov %r14, %rdi
+    cmpq $0, 0(%rsp)
+    je 282f
+    mov (%r14, %rcx, 8), %rdi
+282: add %r15, %rdi                 /* state */
+    incq AS_COUNT(%rdi)
+    add $AS_LO, %rdi
+    mov (%r12, %rcx, 8), %rax
+    mov (%rax), %rsi
+    mov 8(%rax), %rdx
+    mov %rcx, 16(%rsp)
+    call sum192_add
+    mov 16(%rsp), %rcx
+283: inc %rcx
+    jmp 281b
 
 10: /* ---- COUNT(x) */
     xor %ecx, %ecx
@@ -1303,6 +1367,10 @@ FUNC vagg_update
     je 60f
     cmp $T_STR, %eax
     je 60f
+    mov 24(%rsp), %edi
+    call dec_is_wide
+    test %eax, %eax
+    jnz 60f                         /* wide DECIMAL: boxed, value_cmp */
     xor %ecx, %ecx                  /* integer-like: signed compare */
     mov N_OP(%rbx), %r11d
 41: cmp %r13, %rcx

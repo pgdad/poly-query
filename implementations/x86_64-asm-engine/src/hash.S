@@ -55,6 +55,8 @@ FUNC hash_cells
     movzbl %dl, %edx
     cmp $T_STR, %edx
     je 3f
+    cmp $T_DEC, %edx
+    je 6f
     cmp $T_FLOAT, %edx
     jne 5f
     mov %rcx, %rdx                  /* +0.0 and -0.0 hash alike */
@@ -97,6 +99,16 @@ FUNC hash_cells
     xor %rax, %r14
     inc %r15
     jmp 1b
+6:  mov (%r13, %r15, 8), %edx       /* DECIMAL: a wide one hashes its i128 */
+    shr $8, %edx
+    cmp $18, %dl
+    jbe 5b
+    mov 8(%rcx), %rax
+    mov $HASH_MUL, %rdx
+    imul %rdx, %rax
+    xor (%rcx), %rax
+    mov %rax, %rcx
+    jmp 5b
 9:  mov %r14, %rax
     LEAVE
 ENDF hash_cells
