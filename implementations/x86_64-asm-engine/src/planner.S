@@ -17,12 +17,13 @@
  *      ranges: linear interpolation between the column's min and max for
  *      numeric / temporal types, 1/3 otherwise).  Equality lookups whose
  *      estimate is at most SMALL_LOOKUP rows also use the index (tiny
- *      tables).  Constants are taken as written in the query (through
- *      folded literals, NF_FOLDED), so `optimize` never changes which rows
- *      are read;
+ *      tables).  Predicates are analysed as written in the query
+ *      (expr_written: through optimizer rewrites), so `optimize` never
+ *      changes which rows are read;
  *   3. row-group skipping: for PQCF-backed tables, row groups whose chunk
  *      min/max exclude such a conjunct are marked in FP_RGSKIP;
- *   4. joins: equi-join key extraction (FP_LKEY / FP_RKEY), the algorithm
+ *   4. joins: equi-join key extraction (FP_LKEY / FP_RKEY, from the join
+ *      condition as written), the algorithm
  *      (hash / merge / nested loop, option `join`), cardinality estimates
  *      (FP_EST) and the hash-join build side: inner joins build on the
  *      smaller input, LEFT joins on the right input;
@@ -127,20 +128,17 @@ ENDF push_conj
 
 /* simple_const(node rdi) -> eax 1 for a literal, possibly under casts and
  * unary operators, as written in the query (the only constants evaluated
- * at planning time; a folded literal stands for the expression it
- * replaced) */
+ * at planning time) */
 FUNC simple_const
     xor %eax, %eax
 1:  test %rdi, %rdi
     jz 9f
+    mov N_WRITTEN(%rdi), %rcx
+    test %rcx, %rcx
+    cmovnz %rcx, %rdi
     mov N_KIND(%rdi), %ecx
     cmp $EK_LIT, %ecx
-    jne 2f
-    testl $NF_FOLDED, N_FLAGS(%rdi)
-    jz 8f
-    mov N_V3(%rdi), %rdi
-    jmp 1b
-2:
+    je 8f
     cmp $EK_CAST, %ecx
     je 3f
     cmp $EK_UNARY, %ecx
@@ -343,7 +341,9 @@ ENDF ci_bound
 FUNC analyze_conj
     ENTER 32
     mov %rdi, %rbx
-    mov %rsi, %r12
+    mov %rsi, %rdi
+    call expr_written               /* the predicate as written */
+    mov %rax, %r12
     mov N_KIND(%r12), %eax
     cmp $EK_BINARY, %eax
     je 10f
@@ -1015,7 +1015,9 @@ ENDF side_of
 FUNC find_equi
     ENTER 16
     mov %rdi, %rbx
-    mov %rsi, %r12
+    mov %rsi, %rdi
+    call expr_written               /* the condition as written */
+    mov %rax, %r12
     test %r12, %r12
     jz 9f
     cmpq $0, FP_LKEY(%rbx)

@@ -108,7 +108,7 @@
 #define PS_DEPTH 24
 #define PS_SIZE  32
 
-/* ------------------------------------------------------------ AST / bound expression node (64 bytes) */
+/* ------------------------------------------------------------ AST / bound expression node (72 bytes) */
 #define N_KIND  0      /* u32 EK_* */
 #define N_OP    4      /* u32 operator / function id */
 #define N_TYPE  8      /* u32 packed type (set by the binder) */
@@ -120,7 +120,9 @@
 #define N_LINE  48     /* u32 */
 #define N_COL   52     /* u32 */
 #define N_V3    56
-#define N_SIZE  64
+#define N_WRITTEN 64   /* 0, or a copy of the node as written in the query when
+                          the optimizer rewrote it in place (rule_fold.S) */
+#define N_SIZE  72
 
 #define EK_LIT    1    /* V1 payload; NF_NULL for NULL */
 #define EK_COL    2    /* A qualifier pstr|0, B name pstr; bound: V1 column index */
@@ -147,8 +149,6 @@
 #define NF_PAREN    16 /* expression was parenthesised */
 #define NF_CACHED   32 /* subquery result cached in V3 */
 #define NF_CORR     64 /* subquery references an enclosing query */
-#define NF_FOLDED   128 /* literal computed by constant folding; V3 = copy of
-                           the expression it replaced (as written) */
 
 #define U_NEG 1
 #define U_POS 2

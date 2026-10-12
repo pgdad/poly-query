@@ -9,17 +9,18 @@
  * every reference to a node sees the new form:
  *   - constant folding: a subtree without column, aggregate or outer
  *     references, subqueries or PQ_SLEEP is evaluated once and replaced by a
- *     literal of the same type (NF_FOLDED; N_V3 keeps the expression as
- *     written, which the physical planner's access-path analysis uses so
- *     that `optimize` never changes which rows are scanned).  If the
- *     evaluation raises an error the subtree is left alone, so the error
- *     still happens exactly when (and only if) the row engine evaluates it.
+ *     literal of the same type.  If the evaluation raises an error the
+ *     subtree is left alone, so the error still happens exactly when (and
+ *     only if) the row engine evaluates it.
  *   - predicate simplification: TRUE AND x -> x, x AND TRUE -> x,
  *     FALSE OR x -> x, x OR FALSE -> x, TRUE OR x -> TRUE; FALSE AND x,
  *     x AND FALSE -> FALSE and x OR TRUE -> TRUE only when x cannot raise
  *     an error (the row engine may evaluate x first: OR evaluates its left
  *     operand first, and predicate pushdown reorders WHERE conjuncts).
  *   - a Filter whose predicate folds to TRUE disappears.
+ * A rewritten node keeps a copy of itself as written (N_WRITTEN): the
+ * physical planner analyses predicates as written (access paths, join keys),
+ * so `optimize` never changes which rows are read or how inputs are joined.
  * Nested query blocks are folded when they are planned themselves.
  */
 #include "pq.inc"
@@ -90,8 +91,7 @@ FUNC expr_safe
 ENDF expr_safe
 
 /* try_fold(node rdi): replaces a constant subtree by its value, unless
- * evaluating it raises an error.  The literal keeps a copy of the
- * expression as written (NF_FOLDED, N_V3) */
+ * evaluating it raises an error */
 FUNC try_fold
     ENTER 288
     mov %rdi, %rbx
@@ -113,20 +113,15 @@ FUNC try_fold
     mov %rcx, g_jmpbuf(%rip)
     mov %rax, %r12                  /* value */
     mov %rdx, %r13
-    mov $N_SIZE, %edi
-    call tmp_alloc
-    mov %rax, %r14                  /* the expression as written */
-    mov %rax, %rdi
-    mov %rbx, %rsi
-    call copy_node
+    mov %rbx, %rdi
+    call keep_written
     movl $EK_LIT, N_KIND(%rbx)
     movl $0, N_OP(%rbx)
     mov %r12, N_V1(%rbx)
-    mov %r14, N_V3(%rbx)
-    mov $NF_FOLDED, %eax
+    xor %eax, %eax
     test %r13d, %r13d
     jz 1f
-    or $NF_NULL, %eax
+    mov $NF_NULL, %eax
 1:  mov %eax, N_FLAGS(%rbx)
     movq $0, N_A(%rbx)
     movq $0, N_B(%rbx)
@@ -136,12 +131,51 @@ FUNC try_fold
     LEAVE
 ENDF try_fold
 
-/* copy_node(dst rdi, src rsi): dst becomes src (64 bytes) */
+/* copy_node(dst rdi, src rsi): dst becomes src (N_SIZE bytes) */
 FUNC copy_node
     mov $N_SIZE/8, %ecx
     rep movsq
     ret
 ENDF copy_node
+
+/* keep_written(node rdi): records a copy of the node as written before it
+ * is rewritten in place (the first rewrite of a node wins) */
+FUNC keep_written
+    ENTER 0
+    mov %rdi, %rbx
+    cmpq $0, N_WRITTEN(%rbx)
+    jne 9f
+    mov $N_SIZE, %edi
+    call tmp_alloc
+    mov %rax, %r12
+    mov %rax, %rdi
+    mov %rbx, %rsi
+    call copy_node
+    mov %r12, N_WRITTEN(%rbx)
+9:  LEAVE
+ENDF keep_written
+
+/* replace_node(node rdi, by rsi): node becomes a copy of `by` (one of its
+ * operands), keeping the node as written */
+FUNC replace_node
+    ENTER 0
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov N_WRITTEN(%rbx), %r13       /* already rewritten: keep that origin */
+    test %r13, %r13
+    jnz 1f
+    mov $N_SIZE, %edi
+    call tmp_alloc
+    mov %rax, %r13
+    mov %rax, %rdi
+    mov %rbx, %rsi
+    call copy_node
+1:  mov %rbx, %rdi
+    mov %r12, %rsi
+    call copy_node
+    mov %r13, N_WRITTEN(%rbx)
+    LEAVE
+ENDF replace_node
 
 /* fold_expr(node rdi): bottom-up folding and simplification */
 FUNC fold_expr
@@ -247,19 +281,19 @@ FUNC fold_expr
     jmp 23f
 20: mov %rbx, %rdi                  /* -> right operand */
     mov N_B(%rbx), %rsi
-    call copy_node
+    call replace_node
     jmp 9f
 21: mov %rbx, %rdi                  /* -> left operand (a literal) */
     mov N_A(%rbx), %rsi
-    call copy_node
+    call replace_node
     jmp 9f
 22: mov %rbx, %rdi                  /* -> left operand */
     mov N_A(%rbx), %rsi
-    call copy_node
+    call replace_node
     jmp 9f
 23: mov %rbx, %rdi                  /* -> right operand (a literal) */
     mov N_B(%rbx), %rsi
-    call copy_node
+    call replace_node
 9:  LEAVE
 ENDF fold_expr
 
