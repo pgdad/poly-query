@@ -863,12 +863,16 @@ LFUNC dict_single
     tbz  w9, #6, 9f                     // NF_DSINGLE: walk for the column
 1:  mov  x9, #-1
     stp  x9, xzr, [sp]
-    str  xzr, [sp, #16]
+    stp  xzr, xzr, [sp, #16]
     mov  x0, x20
     mov  x1, sp
     bl   ds_walk
-    ldr  x9, [sp, #16]                  // cache: NF_DSCAN, NF_DSINGLE
-    ldr  x10, [sp]
+    ldr  x9, [sp, #16]                  // not memoized: something else than
+    ldr  x10, [sp, #24]                 // one column, or nothing the row
+    cmp  x10, #0                        // evaluator would compute
+    csinc x9, x9, xzr, ne
+    str  x9, [sp, #16]
+    ldr  x10, [sp]                      // cache: NF_DSCAN, NF_DSINGLE
     ldr  w11, [x20, #N_FLAGS]
     orr  w11, w11, #NF_DSCAN
     cbnz x9, 2f
@@ -896,7 +900,10 @@ LFUNC dict_single
     LEAVE 2
 ENDF dict_single
 
-// ds_walk(x0 Node*, x1 state: rv, column, bad) — dict_single's tree walk
+// ds_walk(x0 Node*, x1 state: rv, column, bad, complex) — dict_single's
+// tree walk; "complex": a node veval leaves to the row evaluator (function,
+// CASE, LIKE, IN, BETWEEN, CAST, ||) — without one the vector kernels are
+// faster than the memo
 //   x19 node, x20 state, x21 child index, x22 children
 LFUNC ds_walk
     ENTER 2
@@ -918,11 +925,29 @@ LFUNC ds_walk
     cmp  w9, #NK_OUTREF
     b.eq 8f
     cmp  w9, #NK_FUNC
-    b.ne 1f
+    b.ne 0f
     ldr  w10, [x19, #N_OP]
     and  w10, w10, #0xff
     cmp  w10, #FN_PQ_SLEEP
     b.eq 8f
+    b    01f
+0:  cmp  w9, #NK_CASE
+    b.eq 01f
+    cmp  w9, #NK_LIKE
+    b.eq 01f
+    cmp  w9, #NK_IN
+    b.eq 01f
+    cmp  w9, #NK_BETWEEN
+    b.eq 01f
+    cmp  w9, #NK_CAST
+    b.eq 01f
+    cmp  w9, #NK_BINARY
+    b.ne 1f
+    ldr  w10, [x19, #N_OP]
+    cmp  w10, #OP_CONCAT
+    b.ne 1f
+01: mov  x10, #1                        // complex
+    str  x10, [x20, #24]
 1:  mov  x0, x19
     bl   expr_nchildren
     mov  x22, x0
