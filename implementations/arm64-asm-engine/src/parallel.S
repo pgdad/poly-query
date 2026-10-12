@@ -29,9 +29,6 @@
 #define WK_LIMIT    32
 #define WK_THREADS  40
 #define WK_MODE     48              // u32
-#define WK_JOIN     52              // u32
-#define WK_OPT      56              // u32
-#define WK_USEIDX   60              // u32
 #define WK_CAT      64
 #define WK_TID      72              // pthread_t
 #define WK_STARTED  80              // u64 1 = thread created
@@ -76,15 +73,6 @@ FUNC par_run
     TLS_ADDR x9, g_x_mode
     ldr  w9, [x9]
     str  w9, [x25, #WK_MODE]
-    TLS_ADDR x9, g_x_join
-    ldr  w9, [x9]
-    str  w9, [x25, #WK_JOIN]
-    TLS_ADDR x9, g_x_optimize
-    ldr  w9, [x9]
-    str  w9, [x25, #WK_OPT]
-    TLS_ADDR x9, g_use_indexes
-    ldr  w9, [x9]
-    str  w9, [x25, #WK_USEIDX]
     TLS_LDR x9, g_cat
     str  x9, [x25, #WK_CAT]
     add  x0, x25, #WK_TID
@@ -155,15 +143,6 @@ LFUNC wk_main
     str  x9, [x10]
     ldr  w9, [x19, #WK_MODE]
     TLS_ADDR x10, g_x_mode
-    str  w9, [x10]
-    ldr  w9, [x19, #WK_JOIN]
-    TLS_ADDR x10, g_x_join
-    str  w9, [x10]
-    ldr  w9, [x19, #WK_OPT]
-    TLS_ADDR x10, g_x_optimize
-    str  w9, [x10]
-    ldr  w9, [x19, #WK_USEIDX]
-    TLS_ADDR x10, g_use_indexes
     str  w9, [x10]
     ldr  x9, [x19, #WK_CAT]
     TLS_ADDR x10, g_cat

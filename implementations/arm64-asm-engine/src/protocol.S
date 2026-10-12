@@ -1584,9 +1584,9 @@ LFUNC option_enum
 ENDF option_enum
 
 // parse_exec_opts(x0 options obj or 0): the execution options of a query /
-// explain request into this thread's settings (exec.S g_x_mode, g_x_join,
-// g_x_threads, g_x_optimize; access.S g_use_indexes). Absent options take
-// their defaults (auto, auto, --threads, true, true).
+// explain request into this thread's planner inputs (plan.S g_opt_mode,
+// g_opt_join, g_opt_threads, g_opt_optimize; access.S g_use_indexes).
+// Absent options take their defaults (auto, auto, --threads, true, true).
 //   x19 options
 LFUNC parse_exec_opts
     stp  x29, x30, [sp, #-32]!
@@ -1596,33 +1596,33 @@ LFUNC parse_exec_opts
     TLS_ADDR x9, g_use_indexes
     mov  w10, #1
     str  w10, [x9]
-    TLS_ADDR x9, g_x_optimize
+    TLS_ADDR x9, g_opt_optimize
     str  w10, [x9]
-    TLS_ADDR x9, g_x_mode
+    TLS_ADDR x9, g_opt_mode
     str  wzr, [x9]
-    TLS_ADDR x9, g_x_join
+    TLS_ADDR x9, g_opt_join
     str  wzr, [x9]
     LDR_G x10, g_def_threads
     cmp  x10, #1
     csinc x10, x10, xzr, hs         // 0 (no CLI default) => 1
-    TLS_ADDR x9, g_x_threads
+    TLS_ADDR x9, g_opt_threads
     str  x10, [x9]
     cbz  x19, 9f
     mov  x0, x19
     ADR_L x1, k_mode
     ADR_L x2, tab_modes
     bl   option_enum
-    TLS_ADDR x9, g_x_mode
+    TLS_ADDR x9, g_opt_mode
     str  w0, [x9]
     mov  x0, x19
     ADR_L x1, k_join
     ADR_L x2, tab_joins
     bl   option_enum
-    TLS_ADDR x9, g_x_join
+    TLS_ADDR x9, g_opt_join
     str  w0, [x9]
     mov  x0, x19
     ADR_L x1, k_threads
-    TLS_LDR x2, g_x_threads
+    TLS_LDR x2, g_opt_threads
     mov  x3, #0x8000000000000000        // any integer; < 1 is unsupported
     bl   get_int
     cmp  x0, #1
@@ -1630,13 +1630,13 @@ LFUNC parse_exec_opts
     cmp  x0, #MAX_THREADS
     mov  x9, #MAX_THREADS
     csel x0, x0, x9, ls
-    TLS_ADDR x9, g_x_threads
+    TLS_ADDR x9, g_opt_threads
     str  x0, [x9]
     mov  x0, x19
     ADR_L x1, k_optimize
     mov  w2, #1
     bl   get_bool
-    TLS_ADDR x9, g_x_optimize
+    TLS_ADDR x9, g_opt_optimize
     str  w0, [x9]
     mov  x0, x19
     ADR_L x1, k_use_idx

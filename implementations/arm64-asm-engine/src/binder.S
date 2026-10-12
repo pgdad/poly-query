@@ -752,13 +752,14 @@ LFUNC rv_ncols
     ret
 ENDF rv_ncols
 
-// rv_mark_used(x0 ctx, x1 rv index, x2 column index)   (leaf)
+// rv_mark_used(x0 ctx, x1 rv index, x2 column index, w3 RVU_* flag)   (leaf)
 LFUNC rv_mark_used
     ldr  x9, [x0, #BC_RVS]
     mov  x10, #RV_SIZE
     madd x9, x1, x10, x9
     ldr  x9, [x9, #RV_USED]
-    mov  w10, #1
+    ldrb w10, [x9, x2]
+    orr  w10, w10, w3
     strb w10, [x9, x2]
     ret
 ENDF rv_mark_used
@@ -956,6 +957,10 @@ LFUNC bind_col
     mov  x0, x19
     mov  x1, x24
     mov  x2, x25
+    cmp  x27, #0
+    mov  w3, #RVU_LOCAL
+    mov  w9, #RVU_OUTER
+    csel w3, w3, w9, eq
     bl   rv_mark_used
     mov  x0, x19
     mov  x1, x24
@@ -1729,6 +1734,7 @@ LFUNC emit_rv_cols
     mov  x0, x19
     mov  x1, x20
     mov  x2, x22
+    mov  w3, #RVU_LOCAL
     bl   rv_mark_used
     mov  x0, #N_SIZE
     bl   arena_zalloc
