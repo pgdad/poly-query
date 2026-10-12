@@ -138,7 +138,9 @@ SELECT d, f, a FROM t ORDER BY f DESC, d, a
 SELECT s, b FROM t ORDER BY s
 SELECT dt, a FROM t ORDER BY dt DESC, a DESC
 SELECT a FROM t ORDER BY f * 0, a DESC
-SELECT a, s FROM t ORDER BY s || 'xxxxxxxxxx' || CAST(a % 3 AS STRING), a
+SELECT a, s FROM t ORDER BY s || 'xxxxxxxxxxxxxxx' || CAST(a % 3 AS STRING), a
+SELECT a, s FROM t ORDER BY s, a DESC
+SELECT a, s FROM t ORDER BY s || 'xxxxxxxxxx' DESC, a
 SELECT a, x, y FROM w ORDER BY y DESC NULLS LAST, x, a
 SELECT a, z FROM w ORDER BY z NULLS FIRST, a DESC
 SELECT b, COUNT(*) AS c FROM t GROUP BY b ORDER BY c DESC, b

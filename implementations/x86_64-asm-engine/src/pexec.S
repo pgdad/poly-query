@@ -955,6 +955,16 @@ FUNC pexec_project
     mov %r13, %rdx
     call par_for
     mov %rax, %r14
+    mov VEC_LEN+XS_ROWS(%rbx), %rsi /* room for all parts' rows */
+    xor %ecx, %ecx
+1:  cmp %r14, %rcx
+    jae 11f
+    mov PT_OUT(%r13, %rcx, 8), %rax
+    add VEC_LEN(%rax), %rsi
+    inc %rcx
+    jmp 1b
+11: lea XS_ROWS(%rbx), %rdi
+    call vec_reserve
     xor %r15d, %r15d
 2:  cmp %r14, %r15
     jae 9f
@@ -971,16 +981,25 @@ FUNC vec_append
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12
-    xor %r13d, %r13d
-1:  cmp VEC_LEN(%r12), %r13
-    jae 9f
-    mov VEC_DATA(%r12), %rax
-    mov (%rax, %r13, 8), %rsi
-    mov %rbx, %rdi
-    call vec_push
-    inc %r13
-    jmp 1b
-9:  LEAVE
+    mov VEC_LEN(%rbx), %rsi         /* room: at least double the capacity */
+    add VEC_LEN(%r12), %rsi
+    mov VEC_CAP(%rbx), %rax
+    add %rax, %rax
+    cmp %rax, %rsi
+    jae 1f
+    cmp VEC_CAP(%rbx), %rsi
+    jbe 1f
+    mov %rax, %rsi
+1:  call vec_reserve
+    mov VEC_LEN(%rbx), %rdi
+    shl $3, %rdi
+    add VEC_DATA(%rbx), %rdi
+    mov VEC_DATA(%r12), %rsi
+    mov VEC_LEN(%r12), %rdx
+    add %rdx, VEC_LEN(%rbx)
+    shl $3, %rdx
+    call memcpy
+    LEAVE
 ENDF vec_append
 
 /* ================================================================ aggregation */

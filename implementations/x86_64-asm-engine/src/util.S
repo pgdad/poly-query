@@ -884,6 +884,31 @@ FUNC vec_push
     ret
 ENDF vec_push
 
+/* vec_reserve(vec rdi, cap rsi): capacity for at least `cap` elements */
+FUNC vec_reserve
+    cmp VEC_CAP(%rdi), %rsi
+    jbe 9f
+    push %rbx
+    push %r12
+    push %r13
+    mov %rdi, %rbx
+    mov %rsi, %r13
+    mov VEC_ARENA(%rbx), %rdi
+    lea (, %r13, 8), %rsi
+    call arena_alloc
+    mov %rax, %rdi
+    mov VEC_DATA(%rbx), %rsi
+    mov VEC_LEN(%rbx), %rdx
+    shl $3, %rdx
+    mov %rax, VEC_DATA(%rbx)
+    call memcpy
+    mov %r13, VEC_CAP(%rbx)
+    pop %r13
+    pop %r12
+    pop %rbx
+9:  ret
+ENDF vec_reserve
+
 /* ======================================================== time */
 
 /* now_ns() -> rax monotonic nanoseconds */

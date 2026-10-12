@@ -14,29 +14,36 @@
  *     last), 1 otherwise;
  *   BOOLEAN, INT64, DATE, TIMESTAMP, DECIMAL(p <= 18): value ^ 2^63;
  *   FLOAT64: IEEE bits with the sign handled (-0.0 = 0.0, no NaN exists);
- *   STRING: the first 8 bytes, big-endian, zero padded (a prefix: only a
- *     difference is decisive);
+ *   STRING: two words, bytes 0..14 big-endian and zero padded, then
+ *     min(length, 16) as the last byte.  Exact for strings shorter than 16
+ *     bytes (padding and length order a proper prefix first); with longer
+ *     strings present only a difference is decisive;
  *   DESC keys are complemented.
- * Encoding stops at a STRING key, a wide DECIMAL, the word limit or the
- * last key; when it stopped early the key words are *incomplete*: entries
- * with equal words are ordered by row_cmp, then by sequence.
+ * Encoding stops at a wide DECIMAL, a STRING key with long values, the
+ * word limit or the last key; when it stopped early the key words are
+ * *incomplete*: entries with equal words are ordered by row_cmp, then by
+ * sequence.  Entries are thus totally ordered (ks_cmp).
  *
- * The rows are split into P runs (par.S).  Each run is encoded and sorted
- * on its own thread by an MSD radix sort over the bytes of the key words
- * (bytes that are equal in the whole run are skipped; buckets of up to
- * KS_SMALL entries are insertion sorted; buckets whose words are exhausted
- * are already in sequence order, or sorted with qsort_r when incomplete).
- * The sorted runs are then merged pairwise in parallel rounds, as in
- * pexec_sort.  Radix scatters are stable and the comparisons end with the
- * sequence number, so the result is deterministic and equals sort_rows.
+ * Sorting is a parallel sample sort over P parts (par.S): (1) every part
+ * encodes its rows; (2) P - 1 splitters are taken from a sorted sample;
+ * (3) every part assigns its entries to buckets by binary search over the
+ * splitters and (4) scatters them, so that bucket b holds the entries
+ * between splitters b - 1 and b; (5) every bucket is sorted on its own
+ * thread by an MSD radix sort over the bytes of the key words (bytes that
+ * are equal in all entries are skipped; buckets of up to KS_SMALL entries
+ * are insertion sorted; entries with equal words are already in sequence
+ * order - scatters are stable - or, when incomplete, sorted with qsort_r).
+ * The buckets are adjacent in the output, no merging is needed.
  */
 #include "pq.inc"
 #include "sql.inc"
 
     .section .note.GNU-stack, "", @progbits
 
-#define KS_MAXW  4      /* key words per entry */
-#define KS_SMALL 32     /* insertion sort below this bucket size */
+#define KS_MAXW   6     /* key words per entry */
+#define KS_SMALL  32    /* insertion sort below this bucket size */
+#define KS_SAMPLE 64    /* sample entries per part (splitter selection) */
+#define KS_LONG_STR 16  /* strings this long make STRING words inexact */
 
 /* word kinds */
 #define WK_NULL  0
@@ -48,7 +55,8 @@
 #define SP_KIND  0
 #define SP_OFF   8      /* byte offset of the key cell in the row */
 #define SP_XOR   16     /* -1 for DESC keys, else 0 */
-#define SP_NULLW 24     /* WK_NULL: word of a NULL (0 first, 2 last) */
+#define SP_ARG   24     /* WK_NULL: word of a NULL (0 first, 2 last);
+                           WK_STR: 0 = bytes 0..7, 1 = bytes 8..14 + length */
 #define SP_SIZE  32
 
 /* sort task */
@@ -58,46 +66,102 @@
 #define KS_W      24
 #define KS_STRIDE 32    /* entry bytes: 8 * (W + 2) */
 #define KS_INCOMP 40    /* key words incomplete: ties go to row_cmp */
-#define KS_A      48    /* entries (source of a merge round) */
-#define KS_B      56    /* scratch (destination of a merge round) */
-#define KS_BOUNDS 64    /* u64[runs + 1] */
+#define KS_A      48    /* entries */
+#define KS_B      56    /* scratch */
+#define KS_BOUNDS 64    /* u64[P + 1]: bucket bounds */
 #define KS_NULLS  72    /* u8[8]: key k has NULLs */
-#define KS_SPEC   80    /* spec[KS_MAXW] */
-#define KS_SIZE   (80 + SP_SIZE * KS_MAXW)
+#define KS_LONG   80    /* u8[8]: STRING key k has long values */
+#define KS_P      88    /* parts */
+#define KS_OR     96    /* u64[P][KS_MAXW]: OR of each part's words */
+#define KS_AND    104   /* u64[P][KS_MAXW]: AND of each part's words */
+#define KS_CNT    112   /* u64[P][P]: bucket counts per part, then offsets */
+#define KS_BID    120   /* u8[n]: bucket of each entry */
+#define KS_SPL    128   /* splitter entries [P - 1] */
+#define KS_VARY   136   /* u64[KS_MAXW]: bits that differ between entries */
+#define KS_SPEC   (KS_VARY + 8 * KS_MAXW)
+#define KS_SIZE   (KS_SPEC + SP_SIZE * KS_MAXW)
 
     .text
 
+/* ks_entry: local macro, reg = &A[idx] (idx register, clobbers reg) */
+.macro KS_ENTRY task, idx, reg, base=KS_A
+    mov \idx, \reg
+    imul KS_STRIDE(\task), \reg
+    add \base(\task), \reg
+.endm
+
 /* ks_null_part(task rdi, part rsi, lo rdx, hi rcx): flags the keys (up to
- * 8) that are NULL in some row of [lo, hi) */
+ * 8) that are NULL in some row of [lo, hi), and the STRING keys with a
+ * value of KS_LONG_STR or more bytes (one pass over the rows; the flags
+ * are collected on the stack and published at the end) */
+#define NP_NULLS 0      /* u8[8] */
+#define NP_LONG  8      /* u8[8] */
+#define NP_STR   16     /* u8[8]: key k is a STRING */
+#define NP_HI    24
 FUNC ks_null_part
-    ENTER 0
+    ENTER NP_HI + 8
     mov %rdi, %rbx
+    mov %rdx, %r14                  /* row */
+    mov %rcx, NP_HI(%rsp)
+    movq $0, NP_NULLS(%rsp)
+    movq $0, NP_LONG(%rsp)
+    movq $0, NP_STR(%rsp)
     mov KS_PLAN(%rbx), %r8
-    mov QP_NKEYS(%r8), %r9
+    mov QP_NKEYS(%r8), %r12
     mov $8, %eax
-    cmp %rax, %r9
-    cmova %rax, %r9                 /* keys checked */
-    mov QP_NOUT(%r8), %r10
-    shl $4, %r10                    /* offset of the first key cell */
-    mov KS_ROWS(%rbx), %r11
-    xor %r12d, %r12d                /* key */
-1:  cmp %r9, %r12
-    jae 9f
-    mov %r12, %rax
-    shl $4, %rax
-    add %r10, %rax                  /* cell offset */
-    mov %rdx, %rsi
-2:  cmp %rcx, %rsi
-    jae 4f
-    mov (%r11, %rsi, 8), %rdi
-    cmpq $0, VAL_NULL(%rdi, %rax)
-    jne 3f
-    inc %rsi
-    jmp 2b
-3:  movb $1, KS_NULLS(%rbx, %r12)
-4:  inc %r12
+    cmp %rax, %r12
+    cmova %rax, %r12                /* keys checked */
+    mov QP_NOUT(%r8), %r13
+    shl $4, %r13                    /* offset of the first key cell */
+    xor %ecx, %ecx
+1:  cmp %r12, %rcx
+    jae 2f
+    imul $SK_SIZE, %rcx, %rax
+    add QP_KEYS(%r8), %rax
+    movzbl SK_TYPE(%rax), %eax
+    cmp $T_STR, %eax
+    sete NP_STR(%rsp, %rcx)
+    inc %rcx
     jmp 1b
-9:  LEAVE
+2:  mov KS_ROWS(%rbx), %r15
+3:  cmp NP_HI(%rsp), %r14
+    jae 8f
+    mov (%r15, %r14, 8), %rdi
+    add %r13, %rdi                  /* first key cell */
+    xor %ecx, %ecx
+4:  cmp %r12, %rcx
+    jae 7f
+    cmpq $0, VAL_NULL(%rdi)
+    jne 5f
+    cmpb $0, NP_STR(%rsp, %rcx)
+    je 6f
+    mov VAL_P(%rdi), %rax
+    cmpq $KS_LONG_STR, PSTR_LEN(%rax)
+    jb 6f
+    movb $1, NP_LONG(%rsp, %rcx)
+    jmp 6f
+5:  movb $1, NP_NULLS(%rsp, %rcx)
+6:  add $VAL_SIZE, %rdi
+    inc %rcx
+    jmp 4b
+7:  inc %r14
+    jmp 3b
+8:  xor %ecx, %ecx                  /* publish (shared flags: written */
+9:  cmp %r12, %rcx                  /* only when newly set) */
+    jae 99f
+    cmpb $0, NP_NULLS(%rsp, %rcx)
+    je 91f
+    cmpb $0, KS_NULLS(%rbx, %rcx)
+    jne 91f
+    movb $1, KS_NULLS(%rbx, %rcx)
+91: cmpb $0, NP_LONG(%rsp, %rcx)
+    je 92f
+    cmpb $0, KS_LONG(%rbx, %rcx)
+    jne 92f
+    movb $1, KS_LONG(%rbx, %rcx)
+92: inc %rcx
+    jmp 9b
+99: LEAVE
 ENDF ks_null_part
 
 /* ks_enc(spec rdi, row rsi) -> rax the key word of the row (leaf) */
@@ -126,28 +190,39 @@ FUNC ks_enc
     jmp 6f
 22: not %rax                        /* negative: larger magnitude first */
     jmp 6f
-3:  mov PSTR_LEN(%rax), %rcx        /* STRING: 8-byte big-endian prefix */
+3:  mov PSTR_LEN(%rax), %r8         /* STRING: 8 bytes from offset 0 / 8 */
+    mov SP_ARG(%rdi), %r9
+    shl $3, %r9
+    lea PSTR_DATA(%rax, %r9), %rsi
+    mov %r8, %rcx
+    sub %r9, %rcx                   /* bytes available from the offset */
+    xor %edx, %edx
+    test %rcx, %rcx
+    jle 5f
     cmp $8, %rcx
     jb 4f
-    mov PSTR_DATA(%rax), %rax
-    bswap %rax
-    jmp 6f
-4:  lea PSTR_DATA(%rax), %rsi
-    mov %rcx, %r8
-    xor %edx, %edx
-41: test %rcx, %rcx
-    jz 42f
-    shl $8, %rdx
+    mov (%rsi), %rdx
+    bswap %rdx
+    jmp 5f
+4:  mov %rcx, %r10                  /* 1..7 bytes, zero padded */
+41: shl $8, %rdx
     movzbl (%rsi), %eax
     or %rax, %rdx
     inc %rsi
-    dec %rcx
-    jmp 41b
-42: mov $8, %ecx
-    sub %r8d, %ecx
-    shl $3, %ecx                    /* pad: shift by 8 * (8 - len) < 64 */
-    shl %cl, %rdx                   /* (empty string: 0) */
-    mov %rdx, %rax
+    dec %r10
+    jnz 41b
+    neg %ecx
+    add $8, %ecx
+    shl $3, %ecx
+    shl %cl, %rdx
+5:  test %r9, %r9
+    jz 51f
+    mov $KS_LONG_STR, %eax          /* second word: the length last */
+    cmp %rax, %r8
+    cmova %rax, %r8
+    xor %dl, %dl
+    or %r8, %rdx
+51: mov %rdx, %rax
 6:  xor SP_XOR(%rdi), %rax
     ret
 7:  mov $1, %eax                    /* NULL indicator of a value */
@@ -155,7 +230,7 @@ FUNC ks_enc
 8:  xor %eax, %eax                  /* NULL */
     cmp $WK_NULL, %ecx
     jne 9f
-    mov SP_NULLW(%rdi), %rax
+    mov SP_ARG(%rdi), %rax
 9:  ret
 ENDF ks_enc
 
@@ -212,24 +287,21 @@ ks_copy:
 
 /* ks_isort(task rdi, lo rsi, hi rdx): insertion sort of A[lo, hi) */
 FUNC ks_isort
-    ENTER 64                        /* 0..47: the entry being inserted */
+    ENTER 80                        /* 0..63: the entry being inserted */
     mov %rdi, %rbx
     mov %rsi, %r12                  /* lo */
     mov %rdx, %r13
     lea 1(%r12), %r14               /* i */
 1:  cmp %r13, %r14
     jae 9f
-    mov KS_STRIDE(%rbx), %rax
-    imul %r14, %rax
-    add KS_A(%rbx), %rax
-    mov %rax, %r15                  /* &A[j], j = i */
+    KS_ENTRY %rbx, %r14, %r15       /* &A[j], j = i */
     lea 0(%rsp), %rdi
-    mov %rax, %rsi
+    mov %r15, %rsi
     mov KS_W(%rbx), %rcx
     add $2, %rcx
     call ks_copy
-    mov %r14, 56(%rsp)              /* j */
-2:  cmp %r12, 56(%rsp)
+    mov %r14, 72(%rsp)              /* j */
+2:  cmp %r12, 72(%rsp)
     jbe 3f
     mov %r15, %rdi
     sub KS_STRIDE(%rbx), %rdi       /* A[j - 1] */
@@ -245,7 +317,7 @@ FUNC ks_isort
     add $2, %rcx
     call ks_copy
     sub KS_STRIDE(%rbx), %r15
-    decq 56(%rsp)
+    decq 72(%rsp)
     jmp 2b
 3:  mov %r15, %rdi
     lea 0(%rsp), %rsi
@@ -257,29 +329,24 @@ FUNC ks_isort
 9:  LEAVE
 ENDF ks_isort
 
-/* ks_msd(task rdi, vary rsi, lo rdx, hi rcx, digit r8): sorts A[lo, hi),
- * whose entries agree on every digit before `digit` (digit 0 = the most
- * significant byte of word 0).  vary: u64[W], the bits that differ
- * somewhere in the run. */
+/* ks_msd(task rdi, lo rsi, hi rdx, digit rcx): sorts A[lo, hi) (B[lo, hi)
+ * is scratch), whose entries agree on every digit before `digit` (digit 0
+ * = the most significant byte of word 0) */
 #define MS_CNT   0      /* u64[256] bucket counts, then bucket ends */
-#define MS_VARY  2048
-#define MS_LO    2056
-#define MS_HI    2064
-#define MS_D     2072
-#define MS_SHIFT 2080
-#define MS_WORD  2088
+#define MS_LO    2048
+#define MS_HI    2056
+#define MS_D     2064
+#define MS_SHIFT 2072
+#define MS_WORD  2080
 FUNC ks_msd
-    ENTER 2096
+    ENTER 2088
     mov %rdi, %rbx
-    mov %rsi, MS_VARY(%rsp)
-    mov %rdx, MS_LO(%rsp)
-    mov %rcx, MS_HI(%rsp)
-    mov %r8, MS_D(%rsp)
-    sub %rdx, %rcx                  /* n */
-    cmp $KS_SMALL, %rcx
+    mov %rsi, MS_LO(%rsp)
+    mov %rdx, MS_HI(%rsp)
+    mov %rcx, MS_D(%rsp)
+    sub %rsi, %rdx                  /* n */
+    cmp $KS_SMALL, %rdx
     ja 1f
-    mov %rbx, %rdi
-    mov MS_LO(%rsp), %rsi
     mov MS_HI(%rsp), %rdx
     call ks_isort
     LEAVE
@@ -297,24 +364,22 @@ FUNC ks_msd
     and $7, %ecx
     shl $3, %ecx                    /* shift = 8 * (7 - digit % 8) */
     mov %rcx, MS_SHIFT(%rsp)
-    mov MS_VARY(%rsp), %rsi
-    mov (%rsi, %rdx, 8), %rsi
+    mov KS_VARY(%rbx, %rdx, 8), %rsi
     shr %cl, %rsi
     test $0xff, %esi
     jnz 2f
-    incq MS_D(%rsp)                 /* constant in the run */
+    incq MS_D(%rsp)                 /* constant in every entry */
     jmp 1b
 2:  /* histogram */
     lea MS_CNT(%rsp), %rdi
     xor %eax, %eax
     mov $256, %ecx
     rep stosq
-    mov MS_LO(%rsp), %rax
     mov KS_STRIDE(%rbx), %r12
-    imul %r12, %rax
-    add KS_A(%rbx), %rax
+    mov MS_LO(%rsp), %rax
+    KS_ENTRY %rbx, %rax, %rsi
     mov MS_WORD(%rsp), %rdx
-    lea (%rax, %rdx, 8), %rsi       /* &A[lo].word */
+    lea (%rsi, %rdx, 8), %rsi       /* &A[lo].word */
     mov MS_HI(%rsp), %r13
     sub MS_LO(%rsp), %r13           /* n */
     mov MS_SHIFT(%rsp), %rcx
@@ -326,9 +391,8 @@ FUNC ks_msd
     add %r12, %rsi
     dec %r8
     jnz 3b
-    /* all in one bucket: the digit is constant here */
-    sub %r12, %rsi                  /* the last entry's word */
-    mov (%rsi), %rax
+    sub %r12, %rsi                  /* all in one bucket (the last */
+    mov (%rsi), %rax                /* entry's): constant here */
     shr %cl, %rax
     movzbl %al, %eax
     cmp %r13, MS_CNT(%rsp, %rax, 8)
@@ -348,9 +412,8 @@ FUNC ks_msd
     cmp $256, %ecx
     jb 5b
     /* scatter A[lo, hi) into B by the digit (stable) */
-    mov MS_LO(%rsp), %r14
-    imul %r12, %r14
-    add KS_A(%rbx), %r14            /* source entry */
+    mov MS_LO(%rsp), %rax
+    KS_ENTRY %rbx, %rax, %r14       /* source entry */
     mov KS_W(%rbx), %r15
     add $2, %r15                    /* qwords per entry */
     mov MS_WORD(%rsp), %rdx
@@ -388,11 +451,10 @@ FUNC ks_msd
     cmp $1, %rax
     jbe 71f
     mov %rbx, %rdi
-    mov MS_VARY(%rsp), %rsi
-    mov %r14, %rdx
-    mov %r13, %rcx
-    mov MS_D(%rsp), %r8
-    inc %r8
+    mov %r14, %rsi
+    mov %r13, %rdx
+    mov MS_D(%rsp), %rcx
+    inc %rcx
     call ks_msd
 71: mov %r13, %r14
     inc %r15
@@ -402,9 +464,8 @@ FUNC ks_msd
 80: /* equal key words: production order, or row_cmp when incomplete */
     cmpq $0, KS_INCOMP(%rbx)
     je 89f
-    mov MS_LO(%rsp), %rdi
-    imul KS_STRIDE(%rbx), %rdi
-    add KS_A(%rbx), %rdi
+    mov MS_LO(%rsp), %rax
+    KS_ENTRY %rbx, %rax, %rdi
     mov MS_HI(%rsp), %rsi
     sub MS_LO(%rsp), %rsi
     mov KS_STRIDE(%rbx), %rdx
@@ -414,24 +475,27 @@ FUNC ks_msd
 89: LEAVE
 ENDF ks_msd
 
-/* ks_sort_part(task rdi, part rsi, lo rdx, hi rcx): encodes rows [lo, hi)
- * into A[lo, hi) and sorts them */
-FUNC ks_sort_part
-    ENTER 80                        /* 0: OR[4], 32: AND[4], 64: hi */
+/* ks_enc_part(task rdi, part rsi, lo rdx, hi rcx): encodes rows [lo, hi)
+ * into A[lo, hi); the OR / AND of the part's words go to KS_OR / KS_AND
+ * (accumulated on the stack: parts must not share written cache lines) */
+#define EP_OR   0       /* u64[KS_MAXW] */
+#define EP_AND  (8 * KS_MAXW)
+#define EP_HI   (16 * KS_MAXW)
+#define EP_PART (EP_HI + 8)
+FUNC ks_enc_part
+    ENTER EP_PART + 8
     mov %rdi, %rbx
-    mov %rdx, %r12                  /* lo */
-    mov %rcx, 64(%rsp)
+    mov %rcx, EP_HI(%rsp)
+    mov %rsi, EP_PART(%rsp)
     xor %ecx, %ecx
-1:  movq $0, 0(%rsp, %rcx, 8)
-    movq $-1, 32(%rsp, %rcx, 8)
+1:  movq $0, EP_OR(%rsp, %rcx, 8)
+    movq $-1, EP_AND(%rsp, %rcx, 8)
     inc %ecx
     cmp $KS_MAXW, %ecx
     jb 1b
-    mov %r12, %r13                  /* i */
-    mov %r12, %r15
-    imul KS_STRIDE(%rbx), %r15
-    add KS_A(%rbx), %r15            /* &A[i] */
-2:  cmp 64(%rsp), %r13
+    mov %rdx, %r13                  /* i */
+    KS_ENTRY %rbx, %r13, %r15       /* &A[i] */
+2:  cmp EP_HI(%rsp), %r13
     jae 5f
     mov KS_ROWS(%rbx), %rax
     mov (%rax, %r13, 8), %rsi       /* row */
@@ -448,95 +512,156 @@ FUNC ks_sort_part
     mov (%r15, %rcx, 8), %rsi
     call ks_enc
     mov %rax, (%r15, %r14, 8)
-    or %rax, 0(%rsp, %r14, 8)
-    and %rax, 32(%rsp, %r14, 8)
+    or %rax, EP_OR(%rsp, %r14, 8)
+    and %rax, EP_AND(%rsp, %r14, 8)
     inc %r14
     jmp 3b
 4:  add KS_STRIDE(%rbx), %r15
     inc %r13
     jmp 2b
-5:  call check_deadline
-    xor %ecx, %ecx                  /* differing bits: OR ^ AND */
-6:  mov 32(%rsp, %rcx, 8), %rax
-    xor %rax, 0(%rsp, %rcx, 8)
+5:  imul $8 * KS_MAXW, EP_PART(%rsp), %rax
+    mov KS_OR(%rbx), %rdi
+    add %rax, %rdi
+    mov KS_AND(%rbx), %rsi
+    add %rax, %rsi
+    xor %ecx, %ecx
+6:  mov EP_OR(%rsp, %rcx, 8), %rax
+    mov %rax, (%rdi, %rcx, 8)
+    mov EP_AND(%rsp, %rcx, 8), %rax
+    mov %rax, (%rsi, %rcx, 8)
     inc %ecx
     cmp $KS_MAXW, %ecx
     jb 6b
-    mov %rbx, %rdi
-    lea 0(%rsp), %rsi
-    mov %r12, %rdx
-    mov 64(%rsp), %rcx
-    xor %r8d, %r8d
-    call ks_msd
+    call check_deadline
     LEAVE
-ENDF ks_sort_part
+ENDF ks_enc_part
 
-/* ks_merge_part(task rdi, part k rsi): merges the sorted runs 2k and 2k+1
- * of A into B */
-FUNC ks_merge_part
-    ENTER 16
+/* ks_class_part(task rdi, part rsi, lo rdx, hi rcx): the bucket of every
+ * entry of A[lo, hi) (the number of splitters below it) -> KS_BID, and
+ * the part's bucket counts -> KS_CNT[part] (counted on the stack) */
+#define CP_CNT  0       /* u64[MAX_THREADS] */
+#define CP_HI   (8 * MAX_THREADS)
+#define CP_H    (CP_HI + 8)
+#define CP_M    (CP_HI + 16)
+#define CP_PART (CP_HI + 24)
+FUNC ks_class_part
+    ENTER CP_PART + 8
     mov %rdi, %rbx
-    mov KS_BOUNDS(%rbx), %rax
-    lea (%rsi, %rsi), %rcx
-    mov (%rax, %rcx, 8), %r12       /* i: first run */
-    mov 8(%rax, %rcx, 8), %r13      /* j: second run (= end of the first) */
-    mov %r13, 0(%rsp)
-    mov 16(%rax, %rcx, 8), %rax
-    mov %rax, 8(%rsp)               /* end of the second run */
-    mov %r12, %r14                  /* output position */
-    mov KS_STRIDE(%rbx), %r15
-1:  cmp 0(%rsp), %r12
+    mov %rdx, %r12                  /* i */
+    mov %rcx, CP_HI(%rsp)
+    mov %rsi, CP_PART(%rsp)
+    lea CP_CNT(%rsp), %rdi
+    xor %eax, %eax
+    mov $MAX_THREADS, %ecx
+    rep stosq
+1:  cmp CP_HI(%rsp), %r12
+    jae 8f
+    test $0xffff, %r12d
+    jnz 2f
+    call check_deadline
+2:  KS_ENTRY %rbx, %r12, %r14
+    xor %r15d, %r15d                /* l */
+    mov KS_P(%rbx), %rax
+    dec %rax
+    mov %rax, CP_H(%rsp)            /* h */
+3:  cmp CP_H(%rsp), %r15
     jae 5f
-    cmp 8(%rsp), %r13
-    jae 5f
-    mov %r13, %rdi
-    imul %r15, %rdi
-    add KS_A(%rbx), %rdi
-    mov %r12, %rsi
-    imul %r15, %rsi
-    add KS_A(%rbx), %rsi
+    mov CP_H(%rsp), %rax
+    add %r15, %rax
+    shr $1, %rax
+    mov %rax, CP_M(%rsp)            /* m */
+    KS_ENTRY %rbx, %rax, %rdi, KS_SPL
+    mov %r14, %rsi
     mov %rbx, %rdx
     call ks_cmp
-    mov %r12, %rsi
+    mov CP_M(%rsp), %rcx
     cmp $0, %eax
-    jge 2f
-    mov %r13, %rsi                  /* the second run's entry first */
-    inc %r13
-    jmp 3f
-2:  inc %r12
-3:  imul %r15, %rsi
-    add KS_A(%rbx), %rsi
-    mov %r14, %rdi
-    imul %r15, %rdi
-    add KS_B(%rbx), %rdi
-    mov KS_W(%rbx), %rcx
-    add $2, %rcx
-    call ks_copy
-    inc %r14
+    jge 4f
+    lea 1(%rcx), %r15               /* splitter m below the entry */
+    jmp 3b
+4:  mov %rcx, CP_H(%rsp)
+    jmp 3b
+5:  mov KS_BID(%rbx), %rax
+    mov %r15b, (%rax, %r12)
+    incq CP_CNT(%rsp, %r15, 8)
+    inc %r12
     jmp 1b
-5:  mov %r14, %rdi                  /* the rest of either run */
-    imul %r15, %rdi
-    add KS_B(%rbx), %rdi
-    mov %r12, %rsi
-    imul %r15, %rsi
-    add KS_A(%rbx), %rsi
-    mov 0(%rsp), %rdx
-    sub %r12, %rdx
-    add %rdx, %r14
-    imul %r15, %rdx
-    call memcpy
-    mov %r14, %rdi
-    imul %r15, %rdi
-    add KS_B(%rbx), %rdi
-    mov %r13, %rsi
-    imul %r15, %rsi
-    add KS_A(%rbx), %rsi
-    mov 8(%rsp), %rdx
-    sub %r13, %rdx
-    imul %r15, %rdx
+8:  mov CP_PART(%rsp), %rdi         /* publish the counts */
+    imul KS_P(%rbx), %rdi
+    shl $3, %rdi
+    add KS_CNT(%rbx), %rdi
+    lea CP_CNT(%rsp), %rsi
+    mov KS_P(%rbx), %rdx
+    shl $3, %rdx
     call memcpy
     LEAVE
-ENDF ks_merge_part
+ENDF ks_class_part
+
+/* ks_scatter_part(task rdi, part rsi, lo rdx, hi rcx): moves the entries
+ * of A[lo, hi) to their bucket positions in B (KS_CNT[part]: offsets,
+ * advanced in a stack copy) */
+FUNC ks_scatter_part
+    ENTER CP_PART + 8
+    mov %rdi, %rbx
+    mov %rdx, %r12                  /* i */
+    mov %rcx, CP_HI(%rsp)
+    imul KS_P(%rbx), %rsi
+    shl $3, %rsi
+    add KS_CNT(%rbx), %rsi
+    lea CP_CNT(%rsp), %rdi
+    mov KS_P(%rbx), %rdx
+    shl $3, %rdx
+    call memcpy
+    mov KS_W(%rbx), %r15
+    add $2, %r15
+1:  cmp CP_HI(%rsp), %r12
+    jae 9f
+    mov KS_BID(%rbx), %rax
+    movzbl (%rax, %r12), %eax
+    mov CP_CNT(%rsp, %rax, 8), %rdi
+    incq CP_CNT(%rsp, %rax, 8)
+    KS_ENTRY %rbx, %rdi, %r14, KS_B
+    KS_ENTRY %rbx, %r12, %rsi
+    mov %r14, %rdi
+    mov %r15, %rcx
+    call ks_copy
+    inc %r12
+    jmp 1b
+9:  LEAVE
+ENDF ks_scatter_part
+
+/* ks_bucket_part(task rdi, part p rsi): sorts bucket p */
+FUNC ks_bucket_part
+    sub $8, %rsp
+    mov KS_BOUNDS(%rdi), %rax
+    mov 8(%rax, %rsi, 8), %rdx
+    mov (%rax, %rsi, 8), %rsi
+    mov %rdx, %rax
+    sub %rsi, %rax
+    cmp $1, %rax
+    jbe 1f
+    xor %ecx, %ecx
+    call ks_msd
+1:  add $8, %rsp
+    ret
+ENDF ks_bucket_part
+
+/* ks_out_part(task rdi, part rsi, lo rdx, hi rcx): rows[i] = A[i].row */
+FUNC ks_out_part
+    KS_ENTRY %rdi, %rdx, %rsi
+    mov KS_W(%rdi), %rax
+    lea (%rsi, %rax, 8), %rsi       /* &A[lo].row */
+    mov KS_STRIDE(%rdi), %r8
+    mov KS_ROWS(%rdi), %r9
+1:  cmp %rcx, %rdx
+    jae 9f
+    mov (%rsi), %rax
+    mov %rax, (%r9, %rdx, 8)
+    add %r8, %rsi
+    inc %rdx
+    jmp 1b
+9:  ret
+ENDF ks_out_part
 
 /* ks_plan(task rdi) -> eax 1 if at least one key word: the word specs */
 FUNC ks_plan
@@ -575,8 +700,11 @@ FUNC ks_plan
     ja 7f                           /* wide DECIMAL: not normalized */
     mov $WK_INT, %edx
 2:  movzbl KS_NULLS(%rbx, %r13), %ecx
-    lea 1(%r14, %rcx), %rax
-    cmp $KS_MAXW, %rax
+    lea 1(%r14, %rcx), %rax         /* words needed */
+    cmp $WK_STR, %edx
+    jne 21f
+    inc %rax
+21: cmp $KS_MAXW, %rax
     ja 7f                           /* no room */
     mov QP_NOUT(%r12), %rax
     add %r13, %rax
@@ -591,11 +719,11 @@ FUNC ks_plan
     movq $0, SP_XOR(%rdi)
     xor %ecx, %ecx
     cmpq $0, SK_NFIRST(%r15)
-    jne 21f
+    jne 22f
     mov $2, %ecx
-21: mov %rcx, SP_NULLW(%rdi)
+22: mov %rcx, SP_ARG(%rdi)
     inc %r14
-3:  mov %r14, %rdi                  /* value word */
+3:  mov %r14, %rdi                  /* value word(s) */
     shl $5, %rdi
     lea KS_SPEC(%rbx, %rdi), %rdi
     mov %rdx, SP_KIND(%rdi)
@@ -605,11 +733,18 @@ FUNC ks_plan
     je 31f
     mov $-1, %rcx
 31: mov %rcx, SP_XOR(%rdi)
-    movq $0, SP_NULLW(%rdi)
+    movq $0, SP_ARG(%rdi)
     inc %r14
     inc %r13
     cmp $WK_STR, %edx
-    jne 1b                          /* a STRING prefix ends the words */
+    jne 1b
+    movq $WK_STR, SP_SIZE+SP_KIND(%rdi)     /* second STRING word */
+    mov %rax, SP_SIZE+SP_OFF(%rdi)
+    mov %rcx, SP_SIZE+SP_XOR(%rdi)
+    movq $1, SP_SIZE+SP_ARG(%rdi)
+    inc %r14
+    cmpb $0, KS_LONG-1(%rbx, %r13)
+    je 1b                           /* exact: continue with the next key */
 7:  movq $1, KS_INCOMP(%rbx)
 8:  mov %r14, KS_W(%rbx)
     xor %eax, %eax
@@ -617,6 +752,63 @@ FUNC ks_plan
     setnz %al
     LEAVE
 ENDF ks_plan
+
+/* ks_split(task rdi): splitter selection - sorts a regular sample of A and
+ * copies every KS_SAMPLE-th entry to KS_SPL */
+FUNC ks_split
+    ENTER 16
+    mov %rdi, %rbx
+    mov KS_P(%rbx), %r12
+    imul $KS_SAMPLE, %r12           /* sample size S */
+    mov %r12, %rdi
+    imul KS_STRIDE(%rbx), %rdi
+    call tmp_alloc
+    mov %rax, %r13                  /* sample */
+    xor %r14d, %r14d
+1:  cmp %r12, %r14
+    jae 2f
+    lea (%r14, %r14), %rax          /* index (2s + 1) * n / 2S */
+    inc %rax
+    mulq KS_N(%rbx)
+    lea (%r12, %r12), %rcx
+    div %rcx
+    KS_ENTRY %rbx, %rax, %rsi
+    mov %r14, %rdi
+    imul KS_STRIDE(%rbx), %rdi
+    add %r13, %rdi
+    mov KS_W(%rbx), %rcx
+    add $2, %rcx
+    call ks_copy
+    inc %r14
+    jmp 1b
+2:  mov %r13, %rdi
+    mov %r12, %rsi
+    mov KS_STRIDE(%rbx), %rdx
+    lea ks_cmp(%rip), %rcx
+    mov %rbx, %r8
+    call qsort_r
+    mov KS_P(%rbx), %rdi
+    imul KS_STRIDE(%rbx), %rdi
+    call tmp_alloc
+    mov %rax, KS_SPL(%rbx)
+    xor %r14d, %r14d                /* splitter b = sample[(b + 1) * K - 1] */
+3:  mov KS_P(%rbx), %rax
+    dec %rax
+    cmp %rax, %r14
+    jae 9f
+    lea 1(%r14), %rsi
+    imul $KS_SAMPLE, %rsi
+    dec %rsi
+    imul KS_STRIDE(%rbx), %rsi
+    add %r13, %rsi
+    KS_ENTRY %rbx, %r14, %rdi, KS_SPL
+    mov KS_W(%rbx), %rcx
+    add $2, %rcx
+    call ks_copy
+    inc %r14
+    jmp 3b
+9:  LEAVE
+ENDF ks_split
 
 /* keysort(rows rdi, n rsi, plan rdx) -> eax 1 if sorted */
 FUNC keysort
@@ -634,8 +826,9 @@ FUNC keysort
     mov %r13, KS_PLAN(%r15)
     mov %r12, %rdi
     call par_parts
-    mov %rax, %r14                  /* runs */
-    mov %r12, %rdi                  /* which keys have NULLs */
+    mov %rax, %r14                  /* parts */
+    mov %r14, KS_P(%r15)
+    mov %r12, %rdi                  /* NULLs and long strings per key */
     mov %r14, %rsi
     lea ks_null_part(%rip), %rdx
     mov %r15, %rcx
@@ -655,73 +848,101 @@ FUNC keysort
     mov 0(%rsp), %rdi
     call tmp_alloc
     mov %rax, KS_B(%r15)
-    lea 8(, %r14, 8), %rdi
+    imul $8 * KS_MAXW, %r14, %rdi
     call tmp_alloc
-    mov %rax, KS_BOUNDS(%r15)       /* bounds of run p: n * p / P */
-    xor %ecx, %ecx
-1:  cmp %r14, %rcx
-    ja 2f
-    mov %r12, %rax
-    mul %rcx
-    div %r14
-    mov KS_BOUNDS(%r15), %rdx
-    mov %rax, (%rdx, %rcx, 8)
-    inc %rcx
-    jmp 1b
-2:  mov %r12, %rdi                  /* sorted runs */
+    mov %rax, KS_OR(%r15)
+    imul $8 * KS_MAXW, %r14, %rdi
+    call tmp_alloc
+    mov %rax, KS_AND(%r15)
+    mov %r12, %rdi                  /* (1) encode */
     mov %r14, %rsi
-    lea ks_sort_part(%rip), %rdx
+    lea ks_enc_part(%rip), %rdx
     mov %r15, %rcx
     call par_run
-3:  cmp $1, %r14                    /* merge rounds */
-    jbe 8f
-    mov %r14, %rdi
-    shr $1, %rdi
-    mov %rdi, %rsi
-    lea ks_merge_part(%rip), %rdx
-    mov %r15, %rcx
-    call par_run
-    test $1, %r14                   /* odd run count: the last run moves */
-    jz 4f
-    mov KS_BOUNDS(%r15), %rax
-    mov -8(%rax, %r14, 8), %rsi     /* start of the last run */
-    mov (%rax, %r14, 8), %rdx
-    sub %rsi, %rdx
-    imul KS_STRIDE(%r15), %rdx
-    imul KS_STRIDE(%r15), %rsi
-    mov KS_B(%r15), %rdi
-    add %rsi, %rdi
-    add KS_A(%r15), %rsi
-    call memcpy
-4:  mov KS_BOUNDS(%r15), %rax       /* bounds of the merged runs */
+    xor %ecx, %ecx                  /* differing bits: OR ^ AND over all */
+1:  xor %eax, %eax
+    mov $-1, %rdx
+    xor %esi, %esi
+2:  imul $KS_MAXW, %rsi, %rdi
+    add %rcx, %rdi
+    mov KS_OR(%r15), %r8
+    or (%r8, %rdi, 8), %rax
+    mov KS_AND(%r15), %r8
+    and (%r8, %rdi, 8), %rdx
+    inc %rsi
+    cmp %r14, %rsi
+    jb 2b
+    xor %rdx, %rax
+    mov %rax, KS_VARY(%r15, %rcx, 8)
+    inc %ecx
+    cmp $KS_MAXW, %ecx
+    jb 1b
+    cmp $1, %r14
+    ja 3f
+    mov %r15, %rdi                  /* one part: sort A directly */
+    xor %esi, %esi
+    mov %r12, %rdx
     xor %ecx, %ecx
-5:  lea (%rcx, %rcx), %rdx
-    cmp %r14, %rdx
-    jae 6f
-    mov (%rax, %rdx, 8), %rdx
+    call ks_msd
+    jmp 8f
+3:  mov %r15, %rdi                  /* (2) splitters */
+    call ks_split
+    mov %r14, %rdi
+    imul %r14, %rdi
+    shl $3, %rdi
+    call tmp_zalloc
+    mov %rax, KS_CNT(%r15)
+    mov %r12, %rdi
+    call tmp_alloc
+    mov %rax, KS_BID(%r15)
+    mov %r12, %rdi                  /* (3) bucket of every entry */
+    mov %r14, %rsi
+    lea ks_class_part(%rip), %rdx
+    mov %r15, %rcx
+    call par_run
+    lea 8(, %r14, 8), %rdi          /* bucket bounds; counts -> offsets */
+    call tmp_alloc
+    mov %rax, KS_BOUNDS(%r15)
+    xor %edx, %edx                  /* running position */
+    xor %ecx, %ecx                  /* bucket */
+4:  mov KS_BOUNDS(%r15), %rax
     mov %rdx, (%rax, %rcx, 8)
+    xor %esi, %esi                  /* part */
+5:  mov %rsi, %rdi
+    imul %r14, %rdi
+    add %rcx, %rdi
+    shl $3, %rdi
+    add KS_CNT(%r15), %rdi
+    mov (%rdi), %rax
+    mov %rdx, (%rdi)
+    add %rax, %rdx
+    inc %rsi
+    cmp %r14, %rsi
+    jb 5b
     inc %rcx
-    jmp 5b
-6:  mov (%rax, %r14, 8), %rdx       /* final bound */
-    mov %rdx, (%rax, %rcx, 8)
-    mov %rcx, %r14                  /* runs = ceil(runs / 2) */
-    mov KS_A(%r15), %rax            /* swap source and destination */
+    cmp %r14, %rcx
+    jb 4b
+    mov KS_BOUNDS(%r15), %rax
+    mov %rdx, (%rax, %r14, 8)
+    mov %r12, %rdi                  /* (4) scatter into B */
+    mov %r14, %rsi
+    lea ks_scatter_part(%rip), %rdx
+    mov %r15, %rcx
+    call par_run
+    mov KS_A(%r15), %rax            /* B holds the entries now */
     mov KS_B(%r15), %rcx
     mov %rcx, KS_A(%r15)
     mov %rax, KS_B(%r15)
-    jmp 3b
-8:  mov KS_A(%r15), %rsi            /* rows in sorted order */
-    mov KS_W(%r15), %rax
-    lea (%rsi, %rax, 8), %rsi       /* &A[0].row */
-    mov KS_STRIDE(%r15), %rcx
-    xor %edx, %edx
-81: cmp %r12, %rdx
-    jae 82f
-    mov (%rsi), %rax
-    mov %rax, (%rbx, %rdx, 8)
-    add %rcx, %rsi
-    inc %rdx
-    jmp 81b
-82: mov $1, %eax
+    mov %r14, %rdi                  /* (5) sort every bucket */
+    mov %r14, %rsi
+    lea ks_bucket_part(%rip), %rdx
+    mov %r15, %rcx
+    call par_run
+8:  mov %r12, %rdi                  /* rows in sorted order */
+    mov %r14, %rsi
+    lea ks_out_part(%rip), %rdx
+    mov %r15, %rcx
+    call par_run
+    mov $1, %eax
 99: LEAVE
 ENDF keysort
