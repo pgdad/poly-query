@@ -1,13 +1,14 @@
 /*
- * binder.S - semantic analysis (binding & typing) and logical planning.
+ * binder.S - semantic analysis (binding & typing).
  *
  * Name resolution over nested scopes (one per SELECT; subqueries see their
  * enclosing scopes, derived tables and CTE bodies do not see the query that
  * contains them), CTE visibility, type checking with implicit numeric
  * promotions, aggregate and GROUP BY validation (structural equality),
- * output naming, ORDER BY resolution, constant LIMIT/OFFSET, join key
- * extraction.  Produces the plan tree (QP_*, FP_*, RV_*) consumed by the
- * executor and by EXPLAIN.
+ * output naming, ORDER BY resolution, constant LIMIT/OFFSET.  Produces one
+ * bound query block (QP_*, RV_*) per SELECT, with the FROM clause as a
+ * logical Scan / Join tree (QP_LFROM), and hands every block to the
+ * planning pipeline (plan_block: logical plan, optimizer, physical plan).
  *
  *   bind_statement(SelectStmt*) -> rax plan*
  *   bind_expr(B, node) -> rax bound node      (used by functions.S)
@@ -959,143 +960,6 @@ FUNC check_grouped
 9:  LEAVE
 ENDF check_grouped
 
-/* rv_range(expr rdi, acc rsi): acc[0] = min range variable, acc[1] = max,
- * acc[2] = 1 if the expression is not a plain function of current columns */
-FUNC rv_range
-    ENTER 0
-    mov %rdi, %rbx
-    mov %rsi, %r12
-    test %rbx, %rbx
-    jz 9f
-    mov N_KIND(%rbx), %eax
-    cmp $EK_COL, %eax
-    je 5f
-    cmp $EK_OUTER, %eax
-    je 6f
-    cmp $EK_AGG, %eax
-    je 6f
-    cmp $EK_SUBQ, %eax
-    je 6f
-    cmp $EK_INSUBQ, %eax
-    je 6f
-    cmp $EK_EXISTS, %eax
-    je 6f
-    mov %rbx, %rdi
-    call expr_nchild
-    mov %rax, %r14
-    xor %r13d, %r13d
-1:  cmp %r14, %r13
-    jae 9f
-    mov %rbx, %rdi
-    mov %r13, %rsi
-    call expr_child_ptr
-    mov (%rax), %rdi
-    mov %r12, %rsi
-    call rv_range
-    inc %r13
-    jmp 1b
-5:  mov N_V2(%rbx), %rax
-    cmp 0(%r12), %rax
-    jge 51f
-    mov %rax, 0(%r12)
-51: cmp 8(%r12), %rax
-    jle 9f
-    mov %rax, 8(%r12)
-    jmp 9f
-6:  movq $1, 16(%r12)
-9:  LEAVE
-ENDF rv_range
-
-/* side_of(expr rdi, rlo rsi, rhi rdx) -> eax 1 = only left columns,
- * 2 = only right columns, 0 = neither (mixed, constant or unsafe) */
-FUNC side_of
-    ENTER 32
-    mov %rsi, %rbx
-    mov %rdx, %r12
-    mov $0x7fffffffffffffff, %rax
-    mov %rax, 0(%rsp)
-    movq $-1, 8(%rsp)
-    movq $0, 16(%rsp)
-    lea 0(%rsp), %rsi
-    call rv_range
-    xor %eax, %eax
-    cmpq $0, 16(%rsp)
-    jne 9f
-    mov 8(%rsp), %rcx               /* max */
-    cmp $-1, %rcx
-    je 9f
-    mov $1, %eax
-    cmp %rbx, %rcx
-    jl 9f                           /* all < rlo */
-    xor %eax, %eax
-    cmp %r12, %rcx
-    jge 9f
-    cmp %rbx, 0(%rsp)
-    jl 9f
-    mov $2, %eax
-9:  LEAVE
-ENDF side_of
-
-/* find_equi(fp rdi, expr rsi): first conjunct `left = right` usable as a
- * hash-join key; sets FP_LKEY/FP_RKEY */
-FUNC find_equi
-    ENTER 16
-    mov %rdi, %rbx
-    mov %rsi, %r12
-    test %r12, %r12
-    jz 9f
-    cmpq $0, FP_LKEY(%rbx)
-    jne 9f
-    cmpl $EK_BINARY, N_KIND(%r12)
-    jne 9f
-    mov N_OP(%r12), %eax
-    cmp $B_AND, %eax
-    jne 1f
-    mov %rbx, %rdi
-    mov N_A(%r12), %rsi
-    call find_equi
-    mov %rbx, %rdi
-    mov N_B(%r12), %rsi
-    call find_equi
-    jmp 9f
-1:  cmp $B_EQ, %eax
-    jne 9f
-    /* same kind and scale on both sides */
-    mov N_A(%r12), %rax
-    mov N_TYPE(%rax), %ecx
-    mov N_B(%r12), %rax
-    xor N_TYPE(%rax), %ecx
-    test $0xff00ff, %ecx
-    jnz 9f
-    mov N_A(%r12), %rdi
-    mov FP_RLO(%rbx), %rsi
-    mov FP_RHI(%rbx), %rdx
-    call side_of
-    mov %eax, %r13d
-    mov N_B(%r12), %rdi
-    mov FP_RLO(%rbx), %rsi
-    mov FP_RHI(%rbx), %rdx
-    call side_of
-    cmp $1, %r13d
-    jne 2f
-    cmp $2, %eax
-    jne 9f
-    mov N_A(%r12), %rax
-    mov %rax, FP_LKEY(%rbx)
-    mov N_B(%r12), %rax
-    mov %rax, FP_RKEY(%rbx)
-    jmp 9f
-2:  cmp $2, %r13d
-    jne 9f
-    cmp $1, %eax
-    jne 9f
-    mov N_B(%r12), %rax
-    mov %rax, FP_LKEY(%rbx)
-    mov N_A(%r12), %rax
-    mov %rax, FP_RKEY(%rbx)
-9:  LEAVE
-ENDF find_equi
-
 /* ================================================================ scopes and range variables */
 
 /* scope_rv(B rdi, i rsi) -> rax RangeVar* */
@@ -1399,14 +1263,12 @@ FUNC bind_with
     call pq_raisef
 ENDF bind_with
 
-/* bind_from(B rdi, FromItem* rsi) -> rax FromPlan* */
+/* bind_from(B rdi, FromItem* rsi) -> rax logical FROM tree (Scan /
+ * SubqueryScan / Join nodes, lplan.S) */
 FUNC bind_from
     ENTER 16
     mov %rdi, %rbx
     mov %rsi, %r12
-    mov $FP_SIZE, %edi
-    call tmp_zalloc
-    mov %rax, %r13                  /* fp */
     mov FI_KIND(%r12), %rax
     cmp $FK_JOIN, %rax
     je 5f
@@ -1452,46 +1314,45 @@ FUNC bind_from
 4:  mov %rbx, %rdi
     mov %r14, %rsi
     call add_rv
-    movq $FK_TABLE, FP_KIND(%r13)
-    mov %rax, FP_RV(%r13)
-    mov %r13, %rax
+    mov %rax, %rdi
+    mov %r14, %rsi
+    call lp_from_rv
     LEAVE
 5:  /* join */
-    movq $FK_JOIN, FP_KIND(%r13)
-    mov FI_JTYPE(%r12), %rax
-    mov %rax, FP_JTYPE(%r13)
     mov %rbx, %rdi
     mov FI_LEFT(%r12), %rsi
     call bind_from
-    mov %rax, FP_LEFT(%r13)
+    mov %rax, 0(%rsp)               /* left input */
     mov BS_RVS(%rbx), %rax
-    mov VEC_LEN(%rax), %rax
-    mov %rax, FP_RLO(%r13)
+    mov VEC_LEN(%rax), %r13         /* right input's first range variable */
     mov %rbx, %rdi
     mov FI_RIGHT(%r12), %rsi
     call bind_from
-    mov %rax, FP_RIGHT(%r13)
+    mov %rax, 8(%rsp)               /* right input */
     mov BS_RVS(%rbx), %rax
-    mov VEC_LEN(%rax), %rax
-    mov %rax, FP_RHI(%r13)
+    mov VEC_LEN(%rax), %r14         /* end of the right input's */
+    xor %r15d, %r15d                /* ON */
     mov FI_ON(%r12), %rsi
     test %rsi, %rsi
     jz 7f
-    mov %rax, BS_NVIS(%rbx)         /* ON sees the range variables so far */
+    mov %r14, BS_NVIS(%rbx)         /* ON sees the range variables so far */
     movq $0, BS_ALLOWAGG(%rbx)
     mov %rbx, %rdi
     call bind_expr
     movq $1, BS_ALLOWAGG(%rbx)
-    mov %rax, FP_ON(%r13)
+    mov %rax, %r15
     movzbl N_TYPE(%rax), %ecx
     cmp $T_BOOL, %ecx
-    je 6f
+    je 7f
     cmp $T_NULL, %ecx
     jne 9f
-6:  mov %r13, %rdi
-    mov %rax, %rsi
-    call find_equi
-7:  mov %r13, %rax
+7:  mov FI_JTYPE(%r12), %rdi
+    mov 0(%rsp), %rsi
+    mov 8(%rsp), %rdx
+    mov %r15, %rcx
+    mov %r13, %r8
+    mov %r14, %r9
+    call lp_join
     LEAVE
 8:  mov FI_NAME(%r12), %rdx
     add $8, %rdx
@@ -2037,7 +1898,7 @@ FUNC bind_query
     jz 2f
     mov %r13, %rdi
     call bind_from
-    mov %rax, QP_FROM(%r12)
+    mov %rax, QP_LFROM(%r12)
 2:  mov BS_RVS(%r13), %rax
     mov VEC_LEN(%rax), %rcx
     mov %rcx, BS_NVIS(%r13)
@@ -2145,8 +2006,8 @@ FUNC bind_query
     mov %rax, QP_OFFSET(%r12)
 82: mov BS_CORR(%r13), %rax
     mov %rax, QP_CORR(%r12)
-    mov %r12, %rdi                  /* physical planning (planner.S) */
-    call plan_block
+    mov %r12, %rdi                  /* logical plan, optimizer, physical */
+    call plan_block                 /* plan (plan.S) */
     mov %r12, %rax
     LEAVE
 bq_where_type:
@@ -2274,6 +2135,8 @@ FUNC bind_compound
     mov %rax, QP_OFFSET(%r12)
 72: mov BS_CORR(%r13), %rax
     or %rax, QP_CORR(%r12)
+    mov %r12, %rdi
+    call plan_block
     mov %r12, %rax
     LEAVE
 bc_ncols:

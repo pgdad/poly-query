@@ -1,7 +1,8 @@
 /*
  * sql.inc - layouts shared by the SQL pipeline:
- *   lexer (tokens) -> parser (AST) -> binder (typed AST + query plan)
- *   -> executor (eval + operators).
+ *   lexer (tokens) -> parser (AST) -> binder (typed AST, bound query block)
+ *   -> logical plan (lplan.S) -> optimizer rules (optimizer.S, rule_*.S)
+ *   -> physical planner (planner.S) -> executor (eval + operators).
  */
 #ifndef SQL_INC
 #define SQL_INC
@@ -146,6 +147,8 @@
 #define NF_PAREN    16 /* expression was parenthesised */
 #define NF_CACHED   32 /* subquery result cached in V3 */
 #define NF_CORR     64 /* subquery references an enclosing query */
+#define NF_FOLDED   128 /* literal computed by constant folding; V3 = copy of
+                           the expression it replaced (as written) */
 
 #define U_NEG 1
 #define U_POS 2
@@ -270,10 +273,16 @@
 #define OI_NULLS 16    /* 0 default, 1 NULLS FIRST, 2 NULLS LAST */
 #define OI_SIZE  24
 
-/* ------------------------------------------------------------ bound query plan (binder output)
- * One plan per SELECT (top level, subquery, derived table, CTE). */
-#define QP_FROM     0    /* FromPlan* or 0 (SELECT without FROM) */
-#define QP_WHERE    8    /* bound predicate or 0 */
+/* ------------------------------------------------------------ query block
+ * One per SELECT (top level, subquery, derived table, CTE).  The binder
+ * fills the semantic part (range variables, outputs with names and types,
+ * bound WHERE / GROUP BY / HAVING / ORDER BY / LIMIT, correlation and the
+ * logical FROM tree QP_LFROM); lp_build turns it into the logical plan
+ * QP_LOGICAL, the optimizer rewrites that, and the physical planner derives
+ * the executable fields (marked "physical") from the optimized logical plan:
+ * the physical FROM tree, residual WHERE, HAVING, outputs, keys, limits. */
+#define QP_FROM     0    /* physical: FromPlan* or 0 (SELECT without FROM) */
+#define QP_WHERE    8    /* bound predicate; physical: residual WHERE or 0 */
 #define QP_NOUT     16
 #define QP_OUT      24   /* OutCol[nout] */
 #define QP_NKEYS    32
@@ -297,7 +306,9 @@
  * QP_CACHE are meaningful; QP_NRV = 0, QP_FROM = 0. */
 #define QP_NUNION   152  /* number of branches, 0 = ordinary query block */
 #define QP_UNION    160  /* plan*[nunion] branch plans, in order */
-#define QP_SIZE     168
+#define QP_LFROM    168  /* bound FROM clause: logical Scan / Join tree or 0 */
+#define QP_LOGICAL  176  /* optimized logical plan (lplan.S) */
+#define QP_SIZE     184
 
 /* range variable */
 #define RV_NAME  0     /* pstr: alias or table/CTE name */
@@ -311,18 +322,17 @@
 #define RVC_TYPE 8
 #define RVC_SIZE 16
 
-/* FROM plan node */
+/* physical FROM plan node (planner.S builds it from the logical FROM tree) */
 #define FP_KIND  0     /* FK_TABLE (scan of range variable FP_RV) or FK_JOIN */
 #define FP_RV    8
 #define FP_LEFT  16
 #define FP_RIGHT 24
 #define FP_JTYPE 32    /* JT_* */
 #define FP_ON    40    /* bound join condition or 0 */
-#define FP_LKEY  48    /* equi-join key over the left input (hash join) or 0 */
+#define FP_LKEY  48    /* equi-join key over the left input (hash / merge join) or 0 */
 #define FP_RKEY  56    /* matching key over the right input */
 #define FP_RLO   64    /* range variables [RLO, RHI) come from the right input */
 #define FP_RHI   72
-/* physical planning (planner.S) */
 #define FP_FILTER 80   /* scan: pushed-down WHERE conjuncts (AND chain) or 0 */
 #define FP_INDEX  88   /* scan: Index* of an IndexScan or 0 */
 #define FP_IMODE  96   /* IM_EQ or IM_RANGE */
@@ -335,6 +345,47 @@
 #define FP_BUILDL 152  /* hash join: 1 = build on the left input */
 #define FP_ALGO   160  /* join: JA_* physical algorithm (planner.S) */
 #define FP_SIZE   168
+
+/* ------------------------------------------------------------ logical plan (lplan.S)
+ * A tree of relational operators, independent of execution strategy, one per
+ * query block.  Built by lp_build as
+ *   [Limit] > [Sort] > [Distinct] > Project > [Filter (HAVING)] > [Aggregate]
+ *   > [Filter (WHERE)] > FROM tree (Scan | SubqueryScan | Join) or Values,
+ * or for a UNION ALL compound [Limit] > [Sort] > UnionAll.
+ * Expressions are the binder's typed nodes (shared, rewritten in place by
+ * constant folding).  Nested query blocks (derived tables, CTEs, subqueries,
+ * UNION ALL branches) are referenced by their query block; rules never
+ * descend into them (each block is optimized when it is planned). */
+#define LP_KIND 0      /* LK_* */
+#define LP_IN   8      /* input (left input of a Join) or 0 */
+#define LP_IN2  16     /* right input of a Join */
+#define LP_A    24     /* kind-specific fields */
+#define LP_B    32
+#define LP_C    40
+#define LP_D    48
+#define LP_SIZE 56
+
+#define LK_SCAN      1 /* base table:  A range variable index, B RangeVar*,
+                          C u8[ncols] output columns (1 = produced) */
+#define LK_SUBQUERY  2 /* derived table / CTE reference: A, B, C as Scan,
+                          D query block of the derived table */
+#define LK_JOIN      3 /* A JT_*, B ON condition or 0, C/D range variables
+                          [C, D) come from the right input */
+#define LK_FILTER    4 /* A predicate, B LFF_* placement flags */
+#define LK_PROJECT   5 /* A number of outputs, B OutCol[] */
+#define LK_AGGREGATE 6 /* A number of GROUP BY keys, B node*[], C number of
+                          aggregate calls, D EK_AGG node*[] */
+#define LK_SORT      7 /* A number of keys, B SortKey[] */
+#define LK_LIMIT     8 /* A limit (-1 = none), B offset */
+#define LK_DISTINCT  9
+#define LK_UNION     10 /* A number of branches, B query block*[] */
+#define LK_VALUES    11 /* SELECT without FROM: one empty row */
+
+/* Filter placement, decided by the pushdown rule; a Filter without these
+ * flags has not been placed (optimize: false) and the physical planner
+ * places its conjuncts itself (indexes-and-planning.md section 3). */
+#define LFF_PUSHED   1 /* evaluated at the scan directly below */
+#define LFF_RESIDUAL 2 /* conjuncts that must stay above the FROM tree */
 
 #define JA_NL    0     /* nested loop (any condition, CROSS joins) */
 #define JA_HASH  1     /* hash join on FP_LKEY = FP_RKEY */

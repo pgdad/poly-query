@@ -193,7 +193,7 @@ FUNC pexec_threads
     ENTER 0
     mov %rdi, %rbx
     mov $1, %r12d
-    cmpq $1, g_opt_threads(%rip)
+    cmpq $1, g_exec_threads(%rip)
     jbe 9f
     mov XS_PAR(%rbx), %rax
     test %rax, %rax
@@ -210,7 +210,7 @@ FUNC pexec_threads
     mov XS_PAR(%rbx), %rax
 1:  cmp $1, %rax
     jne 9f
-    mov g_opt_threads(%rip), %r12
+    mov g_exec_threads(%rip), %r12
 9:  mov %r12, g_par_threads(%rip)
     mov %r12, %rax
     LEAVE
@@ -220,9 +220,9 @@ ENDF pexec_threads
  * mode except the row baseline with one thread) */
 FUNC pexec_enabled
     mov $1, %eax
-    cmpq $MODE_ROW, g_opt_mode(%rip)
+    cmpq $MODE_ROW, g_exec_mode(%rip)
     jne 1f
-    cmpq $1, g_opt_threads(%rip)
+    cmpq $1, g_exec_threads(%rip)
     ja 1f
     xor %eax, %eax
 1:  ret
@@ -281,7 +281,7 @@ FUNC k_filter
     jnz 0f
     mov %rcx, %rax                  /* no predicate */
     ret
-0:  cmpq $MODE_ROW, g_opt_mode(%rip)
+0:  cmpq $MODE_ROW, g_exec_mode(%rip)
     jne vk_filter
     jmp rk_filter
 ENDF k_filter
@@ -327,7 +327,7 @@ ENDF rk_filter
 
 /* k_project(ctx rdi, plan rsi, tuples rdx, n rcx, W r8, rows Vec* r9) */
 FUNC k_project
-    cmpq $MODE_ROW, g_opt_mode(%rip)
+    cmpq $MODE_ROW, g_exec_mode(%rip)
     jne vk_project
     jmp rk_project
 ENDF k_project
@@ -357,7 +357,7 @@ ENDF rk_project
 
 /* k_agg_single(ctx rdi, plan rsi, tuples rdx, n rcx, W r8, states r9) */
 FUNC k_agg_single
-    cmpq $MODE_ROW, g_opt_mode(%rip)
+    cmpq $MODE_ROW, g_exec_mode(%rip)
     jne vk_agg_single
     jmp rk_agg_single
 ENDF k_agg_single
@@ -386,7 +386,7 @@ ENDF rk_agg_single
 /* k_agg_groups(ctx rdi, plan rsi, tuples rdx, n rcx, W r8, states*[n] r9):
  * feeds tuple i to the group states states[i] */
 FUNC k_agg_groups
-    cmpq $MODE_ROW, g_opt_mode(%rip)
+    cmpq $MODE_ROW, g_exec_mode(%rip)
     jne vk_agg_groups
     jmp rk_agg_groups
 ENDF k_agg_groups
@@ -417,7 +417,7 @@ ENDF rk_agg_groups
 /* k_group_keys(ctx rdi, plan rsi, tuples rdx, n rcx, W r8, keys r9):
  * the GROUP BY key cells of each tuple, ngroup cells per tuple */
 FUNC k_group_keys
-    cmpq $MODE_ROW, g_opt_mode(%rip)
+    cmpq $MODE_ROW, g_exec_mode(%rip)
     jne vk_group_keys
     jmp rk_group_keys
 ENDF k_group_keys
@@ -1550,7 +1550,7 @@ ENDF pexec_aggregate
 
 /* k_eval1(ctx rdi, expr rsi, tuples rdx, n rcx, W r8, out vector r9) */
 FUNC k_eval1
-    cmpq $MODE_ROW, g_opt_mode(%rip)
+    cmpq $MODE_ROW, g_exec_mode(%rip)
     jne vk_eval1
     ENTER 16
     mov %rdi, %rbx
@@ -1578,7 +1578,7 @@ ENDF k_eval1
 
 /* k_pred(ctx rdi, pred rsi, tuples rdx, n rcx, W r8, flags r9) */
 FUNC k_pred
-    cmpq $MODE_ROW, g_opt_mode(%rip)
+    cmpq $MODE_ROW, g_exec_mode(%rip)
     jne vk_pred
     ENTER 16
     mov %rdi, %rbx
@@ -2311,7 +2311,7 @@ FUNC pexec_sort
     mov %rdi, %rbx
     mov %rsi, %r12
     mov %rdx, %r13
-    mov g_opt_threads(%rip), %rax   /* sorting evaluates no expressions */
+    mov g_exec_threads(%rip), %rax   /* sorting evaluates no expressions */
     mov %rax, g_par_threads(%rip)
     mov %r12, %rdi
     call par_parts
