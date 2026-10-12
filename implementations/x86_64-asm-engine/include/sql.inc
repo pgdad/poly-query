@@ -215,7 +215,10 @@
 #define SS_OFFSET   64
 #define SS_DISTINCT 72
 #define SS_WITH     80 /* Vec* of Cte* or 0 */
-#define SS_SIZE     88
+#define SS_UNION    88 /* compound (UNION ALL): Vec* of branch SelectStmt* (select
+                          cores), else 0.  A compound statement only carries
+                          SS_WITH, SS_ORDER, SS_LIMIT, SS_OFFSET itself. */
+#define SS_SIZE     96
 
 /* ------------------------------------------------------------ statement (sql_parse output) */
 #define STMT_QUERY        1
@@ -288,7 +291,13 @@
 #define QP_DISTINCT 128
 #define QP_CORR     136  /* references an enclosing query: never cached */
 #define QP_CACHE    144  /* cached Result* of an uncorrelated plan */
-#define QP_SIZE     152
+/* compound (UNION ALL) plan: QP_NUNION > 0.  Only QP_NOUT/QP_OUT (names of
+ * the first branch, common types; OC_EXPR = first branch's expression),
+ * QP_NKEYS/QP_KEYS (SK_OUT >= 0 only), QP_LIMIT/QP_OFFSET, QP_CORR and
+ * QP_CACHE are meaningful; QP_NRV = 0, QP_FROM = 0. */
+#define QP_NUNION   152  /* number of branches, 0 = ordinary query block */
+#define QP_UNION    160  /* plan*[nunion] branch plans, in order */
+#define QP_SIZE     168
 
 /* range variable */
 #define RV_NAME  0     /* pstr: alias or table/CTE name */

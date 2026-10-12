@@ -106,7 +106,8 @@ FUNC p_accept_op
 ENDF p_accept_op
 
 /* p_error(P): raise PARSE_ERROR at the current token; a syntax error at one
- * of the keywords reserved for future use (UNION, RIGHT, FULL) is UNSUPPORTED */
+ * of the keywords reserved for future use (UNION without ALL, RIGHT, FULL)
+ * is UNSUPPORTED */
 FUNC p_error
     sub $8, %rsp
     call p_cur
@@ -114,7 +115,7 @@ FUNC p_error
     jne 1f
     mov TK_ID(%rax), %ecx
     cmp $KW_UNION, %ecx
-    je 2f
+    je 3f
     cmp $KW_RIGHT, %ecx
     je 2f
     cmp $KW_FULL, %ecx
@@ -131,6 +132,13 @@ FUNC p_error
     mov $E_UNSUPPORTED, %edi
     CSTR %rsi, "unsupported SQL feature at line %d, column %d"
     call pq_raisef
+3:  /* UNION ALL is supported syntax: here it is misplaced (after ORDER BY /
+     * LIMIT, after a parenthesised branch) */
+    cmpl $TOK_KEYWORD, TK_KIND+TK_SIZE(%rax)
+    jne 2b
+    cmpl $KW_ALL, TK_ID+TK_SIZE(%rax)
+    jne 2b
+    jmp 1b
 ENDF p_error
 
 /* p_unsupported(P) */
@@ -399,7 +407,10 @@ FUNC parse_drop_index
     LEAVE
 ENDF parse_drop_index
 
-/* parse_query(P) -> SelectStmt*:  [WITH cte {, cte}] select_core [ORDER BY] [LIMIT] */
+/* parse_query(P) -> SelectStmt*:
+ *   [WITH cte {, cte}] select_core { UNION ALL select_core } [ORDER BY] [LIMIT]
+ * A single select_core is returned as is; several become a compound
+ * statement (SS_UNION = branches) carrying WITH / ORDER BY / LIMIT. */
 FUNC parse_query
     ENTER 16
     mov %rdi, %rbx
@@ -461,15 +472,55 @@ FUNC parse_query
     call p_accept_op
     test %eax, %eax
     jnz 1b
-5:  mov %rbx, %rdi
-    call parse_select
-    mov %r13, SS_WITH(%rax)
+5:  /* compound = select_core { UNION ALL select_core } (CR-1) */
+    mov %rbx, %rdi
+    call parse_select_core
+    mov %rax, %r12                  /* the query itself or its first branch */
+    mov %rbx, %rdi
+    mov $KW_UNION, %esi
+    call p_accept_kw
+    test %eax, %eax
+    jz 7f
+    mov $SS_SIZE, %edi              /* compound statement */
+    call tmp_zalloc
+    mov %rax, %r14
+    mov g_arena(%rip), %rdi
+    call vec_new
+    mov %rax, SS_UNION(%r14)
+    mov %rax, %rdi
+    mov %r12, %rsi
+    call vec_push
+6:  mov %rbx, %rdi                  /* UNION [DISTINCT] stays reserved */
+    mov $KW_ALL, %esi
+    call p_accept_kw
+    test %eax, %eax
+    jz 8f
+    mov %rbx, %rdi
+    call parse_select_core
+    mov SS_UNION(%r14), %rdi
+    mov %rax, %rsi
+    call vec_push
+    mov %rbx, %rdi
+    mov $KW_UNION, %esi
+    call p_accept_kw
+    test %eax, %eax
+    jnz 6b
+    mov %r14, %r12
+7:  /* ORDER BY / LIMIT apply to the whole (compound) query */
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    call parse_order_limit
+    mov %r13, SS_WITH(%r12)
     decq PS_DEPTH(%rbx)
+    mov %r12, %rax
     LEAVE
+8:  mov %rbx, %rdi
+    call p_unsupported
 ENDF parse_query
 
-/* parse_select(P) -> SelectStmt* (select_core, ORDER BY, LIMIT/OFFSET) */
-FUNC parse_select
+/* parse_select_core(P) -> SelectStmt*:
+ * SELECT [DISTINCT|ALL] items [FROM] [WHERE] [GROUP BY] [HAVING] */
+FUNC parse_select_core
     ENTER 16
     mov %rdi, %rbx
     mov $KW_SELECT, %esi
@@ -550,7 +601,16 @@ FUNC parse_select
     mov %rbx, %rdi
     call parse_expr
     mov %rax, SS_HAVING(%r12)
-8:  /* ORDER BY */
+8:  mov %r12, %rax
+    LEAVE
+ENDF parse_select_core
+
+/* parse_order_limit(P, stmt): [ORDER BY items] [LIMIT/OFFSET] into stmt */
+FUNC parse_order_limit
+    ENTER 16
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    /* ORDER BY */
     mov %rbx, %rdi
     mov $KW_ORDER, %esi
     call p_accept_kw
@@ -606,9 +666,8 @@ FUNC parse_select
     mov %rbx, %rdi
     call parse_expr
     mov %rax, SS_LIMIT(%r12)
-99: mov %r12, %rax
-    LEAVE
-ENDF parse_select
+99: LEAVE
+ENDF parse_order_limit
 
 /* new_from(kind edi) -> rax zeroed FromItem */
 FUNC new_from

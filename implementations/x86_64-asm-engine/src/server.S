@@ -2607,6 +2607,8 @@ FUNC child_stream
     movq $0, BUF_LEN(%r13)
     cmpq $0, QP_AGG(%r15)
     jne 20f
+    cmpq $0, QP_NUNION(%r15)        /* UNION ALL: materialized */
+    jne 20f
     cmpq $0, QP_NKEYS(%r15)
     jne 20f
     cmpq $0, QP_DISTINCT(%r15)

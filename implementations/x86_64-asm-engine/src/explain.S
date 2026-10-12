@@ -8,6 +8,8 @@
  *   Limit > Sort > Distinct > Project > Filter(HAVING) > Aggregate >
  *   Filter(WHERE) > FROM tree (TableScan | SubqueryScan | HashJoin |
  *   MergeJoin | NestedLoopJoin) or Values for a SELECT without FROM.
+ * A UNION ALL compound: Limit > Sort > UnionAll whose children are the
+ * branch plans in order.
  */
 #include "pq.inc"
 #include "sql.inc"
@@ -256,7 +258,10 @@ FUNC explain_plan
     call open_node
     PUTS %rbx, ",\"children\":["
     inc %r13
-4:  /* Project */
+4:  /* UnionAll compound: the branch plans */
+    cmpq $0, QP_NUNION(%r12)
+    jne 45f
+    /* Project */
     mov %rbx, %rdi
     CSTR %rsi, "Project"
     call open_node
@@ -319,6 +324,26 @@ FUNC explain_plan
     call explain_from
     jmp 9f
 8:  PUTS %rbx, "{\"op\":\"Values\",\"rows\":1,\"children\":[]}"
+    jmp 9f
+45: mov %rbx, %rdi
+    CSTR %rsi, "UnionAll"
+    call open_node
+    PUTS %rbx, ",\"children\":["
+    xor %r14d, %r14d
+46: cmp QP_NUNION(%r12), %r14
+    jae 47f
+    test %r14, %r14
+    jz 461f
+    mov %rbx, %rdi
+    mov $',', %esi
+    call buf_putc
+461: mov QP_UNION(%r12), %rax
+    mov (%rax, %r14, 8), %rdi
+    mov %rbx, %rsi
+    call explain_plan
+    inc %r14
+    jmp 46b
+47: PUTS %rbx, "]}"
 9:  test %r13, %r13
     jz 10f
     PUTS %rbx, "]}"

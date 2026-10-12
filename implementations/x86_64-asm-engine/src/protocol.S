@@ -71,7 +71,8 @@ caps_fields:
     .ascii ",\"phase3\",\"storage.pqcf\",\"storage.mmap\",\"index.hash\",\"index.btree\""
     .ascii ",\"phase4\",\"http.streaming\""
     .ascii ",\"phase5\",\"exec.row\",\"exec.vectorized\",\"exec.parallel\""
-    .asciz ",\"join.hash\",\"join.merge\",\"join.nested_loop\"]"
+    .ascii ",\"join.hash\",\"join.merge\",\"join.nested_loop\""
+    .asciz ",\"change.union_all\"]"
 
 /* operation table: name, handler */
 op_names:

@@ -1899,6 +1899,8 @@ FUNC bind_order_by
     jmp 19f
 171: mov 8(%rsp), %rsi
 18: /* expression over input columns */
+    cmpq $0, QP_NUNION(%r12)
+    jne bo_compound
     mov %rbx, %rdi
     call bind_expr
     mov %rax, SK_EXPR(%r14)
@@ -1926,6 +1928,8 @@ bo_bad_ordinal:
     RAISE E_SEMANTIC_ERROR, "ORDER BY position out of range"
 bo_ambiguous:
     RAISE E_SEMANTIC_ERROR, "ambiguous ORDER BY reference"
+bo_compound:
+    RAISE E_SEMANTIC_ERROR, "ORDER BY of a UNION ALL must name an output column or position"
 bo_distinct:
     RAISE E_SEMANTIC_ERROR, "ORDER BY expression must appear in the select list of a DISTINCT query"
 ENDF bind_order_by
@@ -2003,6 +2007,8 @@ ENDF bind_statement
 
 /* bind_query(stmt rdi, parent scope rsi, ctes rdx, hide rcx) -> rax plan */
 FUNC bind_query
+    cmpq $0, SS_UNION(%rdi)
+    jne bind_compound
     ENTER 32
     mov %rdi, %rbx                  /* stmt */
     mov %rsi, 0(%rsp)
@@ -2148,3 +2154,128 @@ bq_where_type:
 bq_having_type:
     RAISE E_TYPE_ERROR, "HAVING condition must be BOOLEAN"
 ENDF bind_query
+
+/* bind_compound(stmt rdi, parent scope rsi, ctes rdx, hide rcx) -> rax plan
+ * of a UNION ALL compound (CR-1, see QP_NUNION in sql.inc).  Every branch is
+ * bound like a query of its own in the compound's position (same enclosing
+ * scope, visibility of the compound's WITH list); output column i is named
+ * after the first branch and has the CASE result type (common_type) of
+ * column i of all branches.  ORDER BY may only name output columns or
+ * positions; LIMIT/OFFSET apply to the concatenation. */
+FUNC bind_compound
+    ENTER 48
+    mov %rdi, %rbx                  /* stmt */
+    mov %rsi, 0(%rsp)
+    mov %rdx, 8(%rsp)
+    mov %rcx, 16(%rsp)
+    mov $QP_SIZE, %edi
+    call tmp_zalloc
+    mov %rax, %r12                  /* plan */
+    movq $-1, QP_LIMIT(%r12)
+    mov 0(%rsp), %rdi
+    mov 8(%rsp), %rsi
+    mov 16(%rsp), %rdx
+    call new_scope
+    mov %rax, %r13                  /* B: WITH list, ORDER BY, LIMIT */
+    mov SS_WITH(%rbx), %rsi
+    test %rsi, %rsi
+    jz 1f
+    mov %r13, %rdi
+    call bind_with
+1:  /* ---- branches */
+    mov SS_UNION(%rbx), %rax
+    mov VEC_LEN(%rax), %rcx
+    mov %rcx, QP_NUNION(%r12)
+    lea (, %rcx, 8), %rdi
+    call tmp_zalloc
+    mov %rax, QP_UNION(%r12)
+    xor %r14d, %r14d
+2:  cmp QP_NUNION(%r12), %r14
+    jae 3f
+    mov SS_UNION(%rbx), %rax
+    mov VEC_DATA(%rax), %rax
+    mov (%rax, %r14, 8), %rdi
+    mov 0(%rsp), %rsi
+    mov BS_CTES(%r13), %rdx
+    mov 16(%rsp), %rcx
+    call bind_query
+    mov QP_UNION(%r12), %rcx
+    mov %rax, (%rcx, %r14, 8)
+    mov QP_CORR(%rax), %rdx
+    or %rdx, QP_CORR(%r12)
+    mov QP_NOUT(%rax), %rdx
+    mov (%rcx), %rcx                /* first branch */
+    cmp QP_NOUT(%rcx), %rdx
+    jne bc_ncols
+    inc %r14
+    jmp 2b
+3:  /* ---- output columns */
+    mov QP_UNION(%r12), %rax
+    mov (%rax), %r15                /* first branch */
+    mov QP_NOUT(%r15), %rcx
+    mov %rcx, QP_NOUT(%r12)
+    imul $OC_SIZE, %rcx, %rdi
+    call tmp_zalloc
+    mov %rax, QP_OUT(%r12)
+    xor %r14d, %r14d                /* column */
+4:  cmp QP_NOUT(%r12), %r14
+    jae 6f
+    imul $OC_SIZE, %r14, %rcx
+    mov QP_OUT(%r15), %rsi
+    add %rcx, %rsi                  /* the first branch's column */
+    mov QP_OUT(%r12), %rdi
+    add %rcx, %rdi
+    mov %rdi, 24(%rsp)              /* the compound's column */
+    mov OC_EXPR(%rsi), %rax
+    mov %rax, OC_EXPR(%rdi)
+    mov OC_NAME(%rsi), %rax
+    mov %rax, OC_NAME(%rdi)
+    mov OC_TYPE(%rsi), %rax
+    mov %rax, OC_TYPE(%rdi)
+    movq $1, 32(%rsp)               /* branch */
+5:  mov 32(%rsp), %rcx
+    cmp QP_NUNION(%r12), %rcx
+    jae 51f
+    mov QP_UNION(%r12), %rax
+    mov (%rax, %rcx, 8), %rax
+    mov QP_OUT(%rax), %rax
+    imul $OC_SIZE, %r14, %rcx
+    mov OC_TYPE(%rax, %rcx), %esi
+    mov 24(%rsp), %rax
+    mov OC_TYPE(%rax), %edi
+    call common_type                /* TYPE_ERROR if incompatible */
+    mov 24(%rsp), %rcx
+    mov %rax, OC_TYPE(%rcx)
+    incq 32(%rsp)
+    jmp 5b
+51: inc %r14
+    jmp 4b
+6:  /* ---- ORDER BY over the output columns */
+    cmpq $0, SS_ORDER(%rbx)
+    je 7f
+    mov %r13, %rdi
+    mov %rbx, %rsi
+    mov %r12, %rdx
+    call bind_order_by
+7:  /* ---- LIMIT / OFFSET */
+    mov SS_LIMIT(%rbx), %rsi
+    test %rsi, %rsi
+    jz 71f
+    mov %r13, %rdi
+    mov $-1, %rdx
+    call const_int
+    mov %rax, QP_LIMIT(%r12)
+71: mov SS_OFFSET(%rbx), %rsi
+    test %rsi, %rsi
+    jz 72f
+    mov %r13, %rdi
+    xor %edx, %edx
+    call const_int
+    mov %rax, QP_OFFSET(%r12)
+72: mov BS_CORR(%r13), %rax
+    or %rax, QP_CORR(%r12)
+    mov %r12, %rax
+    LEAVE
+bc_ncols:
+    RAISE E_SEMANTIC_ERROR, "UNION ALL branches must have the same number of columns"
+ENDF bind_compound

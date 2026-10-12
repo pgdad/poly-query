@@ -8,7 +8,8 @@
  * nested-loop join, filter, hash aggregation (with DISTINCT aggregates),
  * projection, DISTINCT, sort, offset/limit.
  *
- *   exec_plan(plan rdi, outer ctx rsi) -> rax Result* (RS_*)
+ *   exec_plan(plan rdi, outer ctx rsi) -> rax Result* (RS_*); a UNION ALL
+ *     compound plan (QP_NUNION > 0) runs its branches (exec_union)
  *   exec_query(plan, max_rows rsi (-1 = none), count_only rdx, out Buf* rcx)
  *     appends  "columns":[...],"rows":[...],"row_count":N  to the buffer.
  *   eval_subquery(node rdi, ctx rsi) -> rax, rdx   (EK_SUBQ / EK_EXISTS / EK_INSUBQ)
@@ -1294,7 +1295,16 @@ FUNC exec_plan
     test %rax, %rax
     jz 1f
     LEAVE
-1:  mov $XS_SIZE, %edi
+1:  cmpq $0, QP_NUNION(%rbx)
+    je 10f
+    mov %rbx, %rdi                  /* UNION ALL compound */
+    mov %r14, %rsi
+    call exec_union
+    cmpq $0, QP_CORR(%rbx)
+    jne 11f
+    mov %rax, QP_CACHE(%rbx)
+11: LEAVE
+10: mov $XS_SIZE, %edi
     call tmp_zalloc
     mov %rax, %r12                  /* xs */
     mov %rbx, XS_PLAN(%r12)
@@ -1500,6 +1510,158 @@ FUNC exec_plan
     mov %rax, QP_CACHE(%rbx)
 89: LEAVE
 ENDF exec_plan
+
+/* ================================================================ UNION ALL (CR-1) */
+
+/* union_row(plan rdi, branch plan rsi, branch row rdx) -> rax row of the
+ * compound: the branch's cells converted to the output column types (as by
+ * numeric promotion: NUMERIC_OVERFLOW when an INT64 does not fit the
+ * DECIMAL), followed by copies of the sort key cells */
+FUNC union_row
+    ENTER 0
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %rdx, %r13
+    mov QP_NOUT(%rbx), %rdi
+    add QP_NKEYS(%rbx), %rdi
+    shl $4, %rdi
+    call tmp_alloc
+    mov %rax, %r14
+    xor %r15d, %r15d
+1:  cmp QP_NOUT(%rbx), %r15
+    jae 4f
+    mov %r15, %rcx
+    shl $4, %rcx
+    mov VAL_P(%r13, %rcx), %rdx
+    mov VAL_NULL(%r13, %rcx), %rax
+    mov %rax, VAL_NULL(%r14, %rcx)
+    test %rax, %rax
+    jnz 3f
+    imul $OC_SIZE, %r15, %rax
+    mov QP_OUT(%r12), %rdi
+    mov OC_TYPE(%rdi, %rax), %rdi
+    mov QP_OUT(%rbx), %rsi
+    mov OC_TYPE(%rsi, %rax), %rsi
+    cmp %rdi, %rsi
+    je 3f
+    call cast_value
+    mov %rax, %rdx
+    mov %r15, %rcx
+    shl $4, %rcx
+3:  mov %rdx, VAL_P(%r14, %rcx)
+    inc %r15
+    jmp 1b
+4:  xor %r15d, %r15d                /* sort keys: copies of output cells */
+5:  cmp QP_NKEYS(%rbx), %r15
+    jae 9f
+    imul $SK_SIZE, %r15, %rax
+    add QP_KEYS(%rbx), %rax
+    mov SK_OUT(%rax), %rax
+    shl $4, %rax
+    mov VAL_P(%r14, %rax), %rdx
+    mov VAL_NULL(%r14, %rax), %rsi
+    mov QP_NOUT(%rbx), %rcx
+    add %r15, %rcx
+    shl $4, %rcx
+    mov %rdx, VAL_P(%r14, %rcx)
+    mov %rsi, VAL_NULL(%r14, %rcx)
+    inc %r15
+    jmp 5b
+9:  mov %r14, %rax
+    LEAVE
+ENDF union_row
+
+/* exec_union(plan rdi, outer ctx rsi) -> rax Result*: executes the branches
+ * in order (each with every execution option, like any query block) and
+ * concatenates their rows; then ORDER BY (stable), OFFSET and LIMIT over the
+ * whole.  Rows that need no conversion and no sort key cells are shared
+ * with the branch results. */
+FUNC exec_union
+    ENTER 64
+    mov %rdi, %rbx                  /* plan */
+    mov %rsi, 0(%rsp)               /* outer ctx */
+    lea 16(%rsp), %rdi              /* Vec of rows at 16..47 */
+    mov g_arena(%rip), %rsi
+    call vec_init
+    xor %r12d, %r12d                /* branch */
+1:  cmp QP_NUNION(%rbx), %r12
+    jae 5f
+    mov QP_UNION(%rbx), %rax
+    mov (%rax, %r12, 8), %r13       /* branch plan */
+    mov %r13, %rdi
+    mov 0(%rsp), %rsi
+    call exec_plan
+    mov %rax, %r14                  /* branch result */
+    mov QP_NKEYS(%rbx), %rax        /* 8(%rsp): rows must be rebuilt */
+    mov %rax, 8(%rsp)
+    xor %ecx, %ecx
+2:  cmp QP_NOUT(%rbx), %rcx
+    jae 3f
+    imul $OC_SIZE, %rcx, %rdx
+    mov QP_OUT(%r13), %rax
+    mov OC_TYPE(%rax, %rdx), %rax
+    mov QP_OUT(%rbx), %rsi
+    cmp OC_TYPE(%rsi, %rdx), %rax
+    je 21f
+    movq $1, 8(%rsp)
+21: inc %rcx
+    jmp 2b
+3:  xor %r15d, %r15d                /* row */
+31: cmp RS_NROWS(%r14), %r15
+    jae 4f
+    test $1023, %r15
+    jnz 32f
+    call check_deadline
+32: mov RS_ROWS(%r14), %rax
+    mov (%rax, %r15, 8), %rsi
+    cmpq $0, 8(%rsp)
+    je 33f
+    mov %rbx, %rdi
+    mov %rsi, %rdx
+    mov %r13, %rsi
+    call union_row
+    mov %rax, %rsi
+33: lea 16(%rsp), %rdi
+    call vec_push
+    inc %r15
+    jmp 31b
+4:  inc %r12
+    jmp 1b
+5:  /* ---- sort */
+    cmpq $0, QP_NKEYS(%rbx)
+    je 6f
+    mov 16+VEC_LEN(%rsp), %rsi
+    cmp $1, %rsi
+    jbe 6f
+    mov 16+VEC_DATA(%rsp), %rdi
+    mov %rbx, %rdx
+    call sort_rows
+6:  /* ---- offset / limit */
+    mov 16+VEC_LEN(%rsp), %rax      /* n */
+    mov QP_OFFSET(%rbx), %r13
+    cmp %rax, %r13
+    cmova %rax, %r13                /* start */
+    mov %rax, %r14                  /* end */
+    mov QP_LIMIT(%rbx), %rdx
+    test %rdx, %rdx
+    js 7f
+    add %r13, %rdx
+    jo 7f
+    cmp %rax, %rdx
+    jae 7f
+    mov %rdx, %r14
+7:  mov $RS_SIZE, %edi
+    call tmp_zalloc
+    mov QP_NOUT(%rbx), %rcx
+    mov %rcx, RS_NCOLS(%rax)
+    sub %r13, %r14
+    mov %r14, RS_NROWS(%rax)
+    mov 16+VEC_DATA(%rsp), %rcx
+    lea (%rcx, %r13, 8), %rcx
+    mov %rcx, RS_ROWS(%rax)
+    mov %rbx, RS_PLAN(%rax)
+    LEAVE
+ENDF exec_union
 
 /* ================================================================ subqueries in expressions */
 
