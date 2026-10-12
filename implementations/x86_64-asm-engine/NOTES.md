@@ -1,6 +1,28 @@
 # Working notes — x86-64 assembly engine
 
-## Status (Phase 5 + change CR-1 UNION ALL)
+## Status (Phase 5 + CR-1 UNION ALL + CR-3 plan separation)
+
+* CR-3 logical / physical plan separation is complete (README "Change
+  CR-3" has the before / after module map). Pipeline per query block
+  (`plan.S` `plan_block`, called by the binder): `lp_build` (lplan.S) →
+  `optimize_logical` (optimizer.S; rules rule_pushdown.S, rule_prune.S,
+  rule_fold.S; none with optimize:false) → `phys_plan` (planner.S).
+  Unit tests per rule: `tests/test_optimizer.S` (prints logical plans with
+  `lp_print` and compares text). Verified with a differential replay
+  against the pre-CR-3 engine (all conformance files + EXPLAIN of every
+  query, 9 option sets, 10,800 requests, plus 1,107 edge-case requests):
+  byte-identical. The differential script is not in the repo (it lived in
+  /tmp); rebuild the old engine with
+  `git archive 1d8f2a3 implementations/x86_64-asm-engine | tar -x -C DIR`.
+* Behaviour-preservation mechanisms to keep in mind: (1) the physical
+  planner places conjuncts of an *unplaced* WHERE Filter itself (Phase 3
+  pushdown must stay on with optimize:false); Filters the pushdown rule
+  made carry LFF_PUSHED / LFF_RESIDUAL and are mapped verbatim. (2)
+  Rewritten expression nodes keep their as-written copy in N_WRITTEN;
+  physical analysis (`simple_const`, `analyze_conj`, `find_equi`) goes
+  through it, so optimize never changes access paths / join keys. (3) The
+  executor reads `g_exec_mode` / `g_exec_threads` (set by
+  `phys_exec_settings`), never the raw options.
 
 * CR-1 `UNION ALL` is complete (capability `change.union_all`, README
   "Change CR-1"): `changes/union_all.pqt` 22/22 in every mode, the whole
@@ -34,10 +56,9 @@ kernels that dispatch to row (`rk_*`) or vector (`vk_*`, `vec.S`) versions.
 Workers: thread-local `t_arena` / `t_jmpbuf` / error slot (util.S), TLS cast
 buffer (eval.S), TLS vector scratch stack (vec.S). Join algorithm chosen in
 `planner.S choose_join` (`FP_ALGO`), merge join in `join.S`. Logical
-optimizer `optimizer.S` (constant folding that keeps failing subtrees,
-AND/OR simplification) runs from `plan_block` when `optimize` is true;
-pushdown / index selection stay on with `optimize:false` (the conformance
-`--modes` matrix expects IndexScans with optimize:false). README "Phase 5"
+optimizer rules (see CR-3 above) run when `optimize` is true; pushdown /
+index selection stay on with `optimize:false` (the conformance `--modes`
+matrix expects IndexScans with optimize:false). README "Phase 5"
 has the full description and the measurements (`bench/bench.sh`).
 
 Later additions: stable ORDER BY everywhere (`sort_rows`: (row, sequence)
@@ -47,8 +68,8 @@ nested-loop join (`pexec_nl`, parts sized by pair count), merge join with
 radix sort for integer-like keys and vectorized key evaluation, error replay
 in `exec_query_result` (a data error in a batch/parallel run re-runs the
 query in the row baseline so multi-error queries report the baseline's
-error), optimizer moved *after* physical planning (so `optimize` never
-changes which rows are scanned).
+error); `optimize` never changes which rows are scanned (since CR-3 via
+N_WRITTEN, before via running the optimizer after physical planning).
 
 Verification beyond the suites: a random-expression fuzzer (kept outside
 the repo: generated queries over a table with NULLs in every column type,
@@ -71,7 +92,9 @@ option set, also on row-layout and mmap'd PQCF tables, with no differences.
 
 ## Next steps / ideas
 
-* Join reordering for chains of inner joins (not implemented).
+* With the logical plan in place, join reordering for chains of inner
+  joins would be a natural next rule (it changes EXPLAIN and row order, so
+  it is out of scope for the behaviour-preserving CR-3).
 * Parallel hash build and merge-join sort; DISTINCT via partitioned
   hashing; canonical (left-major) output order for hash joins that build
   on the left input.

@@ -26,7 +26,7 @@ $(ENGINE): $(OBJS)
 $(BUILD)/%.o: src/%.S $(wildcard include/*.inc) | $(BUILD)
 	$(AS_DRIVER) $(ASFLAGS) -o $@ $<
 
-$(BUILD)/tests/%: tests/%.S $(LIBOBJS) $(wildcard include/*.inc) | $(BUILD)/tests
+$(BUILD)/tests/%: tests/%.S $(LIBOBJS) $(wildcard include/*.inc tests/*.inc) | $(BUILD)/tests
 	$(AS_DRIVER) $(ASFLAGS) -o $@.o $<
 	$(AS_DRIVER) $(LDFLAGS) -o $@ $@.o $(LIBOBJS) $(LDLIBS)
 
@@ -48,7 +48,7 @@ lint: build
 
 # fmt: normalise whitespace (strip trailing blanks, tabs to spaces).
 fmt:
-	@for f in src/*.S include/*.inc tests/*.S; do \
+	@for f in src/*.S include/*.inc tests/*.S tests/*.inc; do \
 	  [ -f "$$f" ] && sed -i -e 's/[ \t]*$$//' -e 's/\t/    /g' "$$f"; \
 	done; echo "fmt ok"
 

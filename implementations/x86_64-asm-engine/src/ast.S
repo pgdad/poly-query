@@ -6,6 +6,8 @@
  *   expr_nchild(node rdi) -> rax number of child slots
  *   expr_child_ptr(node rdi, i rsi) -> rax address of child slot i
  *                                      (the slot may hold 0 = absent child)
+ *   expr_written(node rdi) -> rax      the node as written in the query
+ *                                      (before optimizer rewrites)
  *
  * Slot layout per kind (see sql.inc):
  *   LIT, COL, OUTER, SUBQ, EXISTS: none
@@ -106,3 +108,15 @@ FUNC expr_child_ptr
 7:  lea N_V2(%rdi), %rax
     ret
 ENDF expr_child_ptr
+
+/* expr_written(node rdi) -> rax the node as written in the query: the copy
+ * kept when the optimizer rewrote it in place (N_WRITTEN), else the node */
+FUNC expr_written
+    mov %rdi, %rax
+    test %rax, %rax
+    jz 9f
+    mov N_WRITTEN(%rax), %rcx
+    test %rcx, %rcx
+    cmovnz %rcx, %rax
+9:  ret
+ENDF expr_written

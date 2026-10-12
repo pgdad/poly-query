@@ -8,8 +8,8 @@
  *   - hash-join build side follows the estimated cardinalities
  *   - optimize = false keeps index selection, use_indexes = false disables it
  *   - the join option forces the join algorithm of equi-joins
- *   - optimizer: constant folding (not of failing constants), AND/OR
- *     simplification, optimize = false
+ *   - the whole pipeline: folded predicates in the physical plan (the rules
+ *     themselves are unit-tested in test_optimizer.S), optimize = false
  */
 #include "pq.inc"
 #include "sql.inc"
@@ -18,20 +18,11 @@
 
     .data
     .p2align 3
-passed:  .quad 0
-failed:  .quad 0
-    .p2align 3
 s_t:     .quad 1
          .asciz "t"
     .p2align 3
 s_u:     .quad 1
          .asciz "u"
-    .p2align 3
-s_a:     .quad 1
-         .asciz "a"
-    .p2align 3
-s_b:     .quad 1
-         .asciz "b"
     .p2align 3
 s_ixa:   .quad 4
          .asciz "ix_a"
@@ -40,96 +31,9 @@ s_hxb:   .quad 4
          .asciz "hx_b"
 ix_a:    .quad 0
 hx_b:    .quad 0
-
-    .section .rodata
-fmt_fail: .asciz "FAIL: %s\n"
-fmt_done: .asciz "test_planner: %ld passed, %ld failed\n"
     .text
 
-/* check(cond edi, name rsi) */
-FUNC check
-    sub $8, %rsp
-    test %edi, %edi
-    jz 1f
-    incq passed(%rip)
-    add $8, %rsp
-    ret
-1:  incq failed(%rip)
-    lea fmt_fail(%rip), %rdi
-    xor %eax, %eax
-    call printf
-    add $8, %rsp
-    ret
-ENDF check
-
-/* mk_int_table(name pstr rdi, ncols rsi, nrows rdx): column 0 "a" = row,
- * column 1 "b" = row % 10 (when ncols = 2); finalized and in the catalog */
-FUNC mk_int_table
-    ENTER 16
-    mov %rdi, %r12
-    mov %rsi, %r13
-    mov %rdx, %r14
-    call arena_new
-    mov %rax, %r15
-    mov %r15, %rdi
-    mov %r12, %rsi
-    mov %r13, %rdx
-    mov %r14, %rcx
-    call table_new
-    mov %rax, %rbx
-    mov %r15, %rdi
-    mov TB_COLS(%rbx), %rsi
-    lea s_a(%rip), %rdx
-    mov $T_INT, %ecx
-    mov %r14, %r8
-    call col_stage
-    cmp $2, %r13
-    jb 1f
-    mov %r15, %rdi
-    mov TB_COLS(%rbx), %rsi
-    add $COL_SIZE, %rsi
-    lea s_b(%rip), %rdx
-    mov $T_INT, %ecx
-    mov %r14, %r8
-    call col_stage
-1:  xor %ecx, %ecx
-2:  cmp %r14, %rcx
-    jae 4f
-    mov TB_COLS(%rbx), %rsi
-    mov COL_DATA(%rsi), %rax
-    mov %rcx, (%rax, %rcx, 8)
-    cmp $2, %r13
-    jb 3f
-    mov %rcx, %rax
-    xor %edx, %edx
-    mov $10, %edi
-    div %rdi
-    mov COL_SIZE+COL_DATA(%rsi), %rax
-    mov %rdx, (%rax, %rcx, 8)
-3:  inc %rcx
-    jmp 2b
-4:  mov %rbx, %rdi
-    mov $LAYOUT_COLUMN, %esi
-    mov $DICT_OFF, %edx
-    call table_finalize
-    mov %rbx, %rdi
-    call cat_put
-    mov %rbx, %rax
-    LEAVE
-ENDF mk_int_table
-
-/* plan_of(sql cstr rdi) -> rax bound and planned query block */
-FUNC plan_of
-    ENTER 0
-    mov %rdi, %rbx
-    call strlen
-    mov %rbx, %rdi
-    mov %rax, %rsi
-    call sql_parse
-    mov ST_QUERY(%rax), %rdi
-    call bind_statement
-    LEAVE
-ENDF plan_of
+#include "test_lib.inc"
 
 FUNC main
     ENTER 32
@@ -360,7 +264,8 @@ FUNC main
     call check
     movq $JOIN_AUTO, g_opt_join(%rip)
 
-    /* ---- logical optimizer (runs after pushdown / index selection) */
+    /* ---- optimizer rules reach the physical plan; index selection is
+     * planned on the predicates as written */
     CSTR %rdi, "SELECT a FROM t WHERE b = 1 + 2"
     call plan_of
     mov QP_FROM(%rax), %r13
@@ -424,13 +329,7 @@ FUNC main
     call check
     movq $1, g_opt_optimize(%rip)
 
-    lea fmt_done(%rip), %rdi
-    mov passed(%rip), %rsi
-    mov failed(%rip), %rdx
-    xor %eax, %eax
-    call printf
-    xor %eax, %eax
-    cmpq $0, failed(%rip)
-    setne %al
+    CSTR %rdi, "test_planner"
+    call test_done
     LEAVE
 ENDF main

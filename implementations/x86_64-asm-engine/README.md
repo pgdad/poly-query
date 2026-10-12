@@ -22,7 +22,10 @@ aggregation, hash / sort-merge / nested-loop joins selectable per query, a
 switchable logical optimizer and top-N sorting - see
 [Phase 5](#phase-5-execution-modes-parallelism-and-optimizations)), plus the
 architectural change CR-1 `UNION ALL` (capability `change.union_all`, see
-[UNION ALL](#change-cr-1-union-all)).
+[UNION ALL](#change-cr-1-union-all)), and the refactoring CR-3: an
+explicit logical plan, a rule-based logical optimizer and a separate
+physical planner (see
+[plan separation](#change-cr-3-logical--physical-plan-separation)).
 
 ## Build prerequisites
 
@@ -69,10 +72,12 @@ structure layouts and macros in `include/`:
 | PQCF files | `pqcf.S` | PQCF v1 writer (PLAIN / DICT / RLE, chunk statistics), validating reader, CRC-32, UTF-8 validation, atomic replacement |
 | lexer | `lexer.S` | SQL text → tokens with line/column |
 | parser / AST | `parser.S`, `ast.S` | recursive descent over the full grammar → statement, query, FROM-item and expression nodes (`include/sql.inc`); `ast.S` gives generic child access to every expression kind |
-| semantic analysis + logical plan | `binder.S` | scopes and range variables, CTE visibility, name resolution (incl. correlation), typing with implicit promotions, aggregate / GROUP BY validation by structural equality, output naming, ORDER BY resolution, constant LIMIT/OFFSET → plan tree (`QP_*` per query block, `FP_*` FROM tree, `RV_*` range variables) |
+| semantic analysis | `binder.S` | scopes and range variables, CTE visibility, name resolution (incl. correlation), typing with implicit promotions, aggregate / GROUP BY validation by structural equality, output naming, ORDER BY resolution, constant LIMIT/OFFSET → bound query block (`QP_*`, `RV_*` range variables) with the FROM clause as a logical Scan / Join tree |
 | scalar functions | `functions.S` | binding (typing) and evaluation of all scalar functions, CASE, LIKE, BETWEEN, IN lists |
-| logical optimizer | `optimizer.S` | error-preserving constant folding, AND/OR simplification (option `optimize`) |
-| physical planning / EXPLAIN | `binder.S` (`find_equi`), `planner.S`, `explain.S` | join key extraction and algorithm choice (hash / merge / nested loop, option `join`); predicate pushdown, index selection, row-group skipping, cardinality estimates and hash-join build side; JSON plan rendering |
+| planning pipeline | `plan.S` | per query block: logical plan → optimizer → physical plan |
+| logical plan | `lplan.S` | relational operators independent of execution strategy (`LP_*` / `LK_*`): Scan, SubqueryScan, Join, Filter, Project, Aggregate, Sort, Limit, Distinct, UnionAll, Values; builder and text printer |
+| logical optimizer | `optimizer.S`, `rule_pushdown.S`, `rule_prune.S`, `rule_fold.S` | rule driver (option `optimize`) and one module per rule: predicate pushdown, column pruning, constant folding / predicate simplification |
+| physical planning / EXPLAIN | `planner.S`, `explain.S` | scan predicates, access paths (index selection), row-group skipping, cardinality estimates, join keys, join algorithm (option `join`) and hash-join build side, execution mode (`mode`, `threads`) → executable plan (`QP_*`, `FP_*` FROM tree); JSON plan rendering |
 | execution (row baseline) | `eval.S`, `exec.S`, `join.S`, `hash.S` | expression interpreter (exact DECIMAL with 128-bit intermediates, CAST matrix); materialising tuple-at-a-time operators: scan, hash / sort-merge / nested-loop join, filter, hash aggregation, projection, DISTINCT, sort, offset/limit; subquery evaluation; generic hash table on value cells |
 | execution (batch / parallel) | `pexec.S`, `vec.S`, `par.S` | batch operator drivers split into parallel parts; vectorized expression evaluator and kernels (filter, projection, group keys, aggregation, join keys / ON re-check); worker threads with thread-local arenas and error handlers |
 | protocol | `protocol.S`, `main.S` | CLI, JSON-lines session loop, `exec` mode, request validation, operations (`query`, `explain`, …), path safety, fault guard |
@@ -80,8 +85,9 @@ structure layouts and macros in `include/`:
 | server | `server.S` | `serve`: poll() event loop, connections and keep-alive, routing, admission control (workers, FIFO queue, `OVERLOADED`), fork-per-query execution, catalog worker thread, timeouts, cancellation, streaming, metrics, JSON logs, graceful shutdown |
 
 The SQL pipeline is lex → parse (AST) → bind (semantic validation, typed
-AST) → plan (logical plan tree with the physical join choice) → execute.
-Errors detected before execution are reported without executing anything.
+AST, bound query blocks) → logical plan → optimizer rules → physical plan →
+execute. Errors detected before execution are reported without executing
+anything.
 
 Key decisions:
 
@@ -120,7 +126,9 @@ Key decisions:
   equality and range lookups by binary search. NULLs are never indexed.
   `CREATE INDEX` defaults to `BTREE`; each index owns an arena freed by
   `DROP INDEX`.
-* **Planning** (`planner.S`, run for every query block after binding):
+* **Planning** (`plan.S` → `lplan.S`, `optimizer.S`, `planner.S`, run for
+  every query block after binding; see
+  [CR-3](#change-cr-3-logical--physical-plan-separation)):
   WHERE conjuncts referencing exactly one range variable (that is not on the
   NULL-padded side of a LEFT JOIN, and without correlated subqueries) are
   pushed into that variable's scan; `col = c`, `col IN (c, ...)` and range
@@ -133,10 +141,11 @@ Key decisions:
   PQCF-backed tables, row groups whose chunk min/max (or all-NULL chunk)
   exclude a constraint are skipped. Inner hash joins build on the input with
   the smaller estimated cardinality; LEFT joins build on the right input.
-  `use_indexes:false` disables index use. Pushdown, index selection and
-  row-group skipping are physical planning and stay on with
-  `optimize:false` (which only disables the logical rewrites of
-  `optimizer.S`, see Phase 5). Pushed conjuncts are
+  `use_indexes:false` disables index use. Pushdown is a logical rule; the
+  physical planner applies the same placement to a WHERE that no rule has
+  placed, so pushdown, index selection and row-group skipping stay on with
+  `optimize:false` (which applies no optimizer rule, see Phase 5) as
+  indexes-and-planning.md §3 requires. Pushed conjuncts are
   always re-evaluated on every candidate row, so index lookups and skipping
   only need to be conservative.
 * **Column pruning** is inherent: scans produce row ids, and only the columns
@@ -178,7 +187,7 @@ Key decisions:
   `-1` marks a NULL-padded LEFT JOIN side). Derived tables and CTEs are
   executed once (results of uncorrelated plans are cached in the plan) and
   converted into columnar tables, so every range variable is a table.
-* **Joins**: the binder extracts the first `left_expr = right_expr` conjunct
+* **Joins**: the physical planner extracts the first `left_expr = right_expr` conjunct
   of `ON` whose sides reference only the left resp. right input; such
   equi-joins run as hash joins (build on the right input, which is also the
   correct side for LEFT JOIN, or on the smaller input of an inner join),
@@ -304,7 +313,7 @@ later); the process exits 0 once nothing is left.
 | | `"vectorized"`, `"auto"` (default) | batch execution: operators run over batches of 1024 tuples and evaluate expressions as column vectors (`vec.S`) |
 | `threads` | int ≥ 1 (default 1, capped at 64) | parallel parts for scans, filters, projections, hash-join probes and aggregation, in both modes |
 | `join` | `"auto"` (default), `"hash"`, `"merge"`, `"nested_loop"` | algorithm of every equi-join (see below); joins without an equi-key conjunct and CROSS joins are always nested loops |
-| `optimize` | `true` (default) / `false` | logical rewrites (`optimizer.S`) on / off |
+| `optimize` | `true` (default) / `false` | logical optimizer rules (`optimizer.S`, `rule_*.S`) on / off |
 | `native` | bool | accepted and ignored (`native.kernels` is not claimed) |
 
 Unsupported values of known options are `UNSUPPORTED`. `explain` honours
@@ -403,29 +412,38 @@ also passes with `PQ_PAR_MIN=1`.
   left input is split into parallel parts and ON is evaluated as a vector
   over chunks of 1024 candidate pairs.
 
-### Logical optimizer (`optimizer.S`, `optimize: true`)
+### Logical optimizer (`optimizer.S`, `rule_*.S`, `optimize: true`)
 
-* **Constant folding** of subtrees without column / outer / aggregate
-  references, subqueries or `PQ_SLEEP`, evaluated once at planning and
-  replaced by a literal - unless the evaluation raises an error, in which
-  case the subtree stays and fails at run time exactly when the baseline
-  does. The rewrites run after the physical planning (on the residual WHERE,
-  the pushed-down scan filters, join conditions, HAVING, outputs, keys and
-  aggregate arguments), so `optimize` never changes which rows are scanned
-  (index selection and row-group skipping see the same predicates) - and
-  thereby never which rows could raise errors.
-* **Predicate simplification**: `TRUE AND x → x`, `x AND TRUE → x`,
+The rules (details in
+[CR-3](#change-cr-3-logical--physical-plan-separation)) rewrite the logical
+plan before physical planning; `optimize: false` applies none of them.
+
+* **Predicate pushdown** (`rule_pushdown.S`): WHERE conjuncts that reference
+  one range variable move into the join inputs, directly above that
+  variable's scan.
+* **Column pruning** (`rule_prune.S`): logical scans produce only the
+  columns referenced above them.
+* **Constant folding** (`rule_fold.S`) of subtrees without column / outer /
+  aggregate references, subqueries or `PQ_SLEEP`, evaluated once at
+  planning and replaced by a literal - unless the evaluation raises an
+  error, in which case the subtree stays and fails at run time exactly when
+  the baseline does - on filters, join conditions, outputs, keys and
+  aggregate arguments. Rewritten nodes remember their form as written,
+  which the physical planner analyses, so `optimize` never changes which
+  rows are scanned (index selection and row-group skipping see the same
+  predicates) - and thereby never which rows could raise errors.
+* **Predicate simplification** (same rule): `TRUE AND x → x`, `x AND TRUE → x`,
   `FALSE OR x → x`, `x OR FALSE → x`, `TRUE OR x → TRUE`;
   `FALSE AND x → FALSE`, `x AND FALSE → FALSE` and `x OR TRUE → TRUE` only
   when `x` cannot raise errors (the baseline may evaluate `x` first:
-  predicate pushdown reorders WHERE conjuncts). WHERE / HAVING folding to
-  TRUE disappear.
+  predicate pushdown reorders WHERE conjuncts). Filters folding to TRUE
+  disappear.
 * Physical optimizations that are always on (all modes): predicate
-  pushdown, index selection, row-group skipping, column pruning, hash-join
-  build side by estimated cardinality; **top-N** for `ORDER BY … LIMIT`
-  (without DISTINCT, LIMIT + OFFSET ≤ 65536) in the batch modes: each part
-  keeps a bounded max-heap of LIMIT + OFFSET rows instead of sorting all
-  rows. Not implemented: join reordering.
+  placement at the scans, index selection, row-group skipping, column
+  pruning, hash-join build side by estimated cardinality; **top-N** for
+  `ORDER BY … LIMIT` (without DISTINCT, LIMIT + OFFSET ≤ 65536) in the batch
+  modes: each part keeps a bounded max-heap of LIMIT + OFFSET rows instead
+  of sorting all rows. Not implemented: join reordering.
 
 ### Memory and cache-aware layout
 
@@ -520,6 +538,147 @@ Design decisions:
 * `version` still reports `spec_version` `1.0.0`: the phase-1 conformance
   case `catalog.pqt` requires that value, and the engines must keep passing
   every earlier phase.
+
+## Change CR-3: logical / physical plan separation
+
+Implements `spec/changes/refactor-plan-separation.md`, a behaviour-preserving
+refactoring: responses, errors, EXPLAIN output and the capability set are
+unchanged (verified differentially against the previous engine, see below).
+
+### Module map
+
+**Before** (Phase 5 + CR-1):
+
+| Concern | Module | Where it happened |
+|---|---|---|
+| semantic analysis | `binder.S` | bound query block `QP_*`; the FROM clause was built directly as the executor's `FP_*` nodes; equi-join keys (`find_equi`) extracted while binding |
+| "logical plan" | — | no separate representation: `QP_*` / `FP_*` served as both |
+| logical optimizer | `optimizer.S` | `optimize_block`: folding / simplification on `QP_*` / `FP_*`, called at the end of `plan_block` |
+| physical planning | `planner.S` | `plan_block` (called by the binder): pushdown, index selection, row-group skipping, estimates, build side, join algorithm |
+| execution mode | `exec.S`, `pexec.S` | read the request options `g_opt_mode` / `g_opt_threads` directly |
+| EXPLAIN | `explain.S` | renders `QP_*` / `FP_*` |
+
+**After**:
+
+| Concern | Module | Entry points |
+|---|---|---|
+| semantic analysis | `binder.S` | `bind_statement`; the FROM clause becomes logical Scan / SubqueryScan / Join nodes (`lp_from_rv`, `lp_join`) in `QP_LFROM`; every bound block goes to `plan_block` |
+| planning pipeline | `plan.S` | `plan_block`: `lp_build` → `optimize_logical` → `phys_plan` |
+| **logical plan** | `lplan.S` (layout `LP_*` / `LK_*` / `LFF_*` in `include/sql.inc`) | `lp_build`, `lp_print`, `lp_print_expr`; shared predicate helpers `conj_rv`, `mk_and`, `lp_mark_nullable` |
+| **optimizer** (rule driver) | `optimizer.S` | `optimize_logical`; rule table `opt_rules` / `opt_rule_names` |
+| rule `pushdown` | `rule_pushdown.S` | `rule_pushdown` |
+| rule `prune_columns` | `rule_prune.S` | `rule_prune_columns` |
+| rule `fold_constants` | `rule_fold.S` | `rule_fold_constants` |
+| **physical planner** | `planner.S` | `phys_plan` → `plan_from` / `build_fp` (scan predicates, physical FROM tree), `plan_scan` (access path: table / index scan, row-group skipping, estimate), `find_equi` (moved from the binder) / `choose_join` / build side, `phys_exec_settings` (execution mode, threads) |
+| EXPLAIN | `explain.S` | unchanged: renders the physical plan |
+| execution | `exec.S`, `pexec.S`, … | read only the physical plan and `g_exec_mode` / `g_exec_threads` |
+| expression provenance | `ast.S` | `expr_written` (see below) |
+| unit tests | `tests/test_optimizer.S` | logical plan builder and printer, each rule, the rule table, `optimize:false` |
+| | `tests/test_planner.S`, `tests/test_lib.inc` | physical planner; shared test helpers |
+
+### Logical plan
+
+One tree per query block, built from the bound block in a canonical shape:
+`[Limit] > [Sort] > [Distinct] > Project > [Filter (HAVING)] > [Aggregate] >
+[Filter (WHERE)] >` FROM tree (`Scan` | `SubqueryScan` | `Join` with join
+type and condition) or `Values`; a UNION ALL compound is
+`[Limit] > [Sort] > UnionAll`. Expressions are the binder's typed nodes.
+Nested blocks (derived tables, CTEs, UNION ALL branches, expression
+subqueries) are separate plans referenced from `SubqueryScan` / `UnionAll`
+/ the subquery node; rules never descend into them - each block is
+optimized when it is planned, nested blocks first. `lp_print` renders a
+plan for debugging and the unit tests, e.g. for
+`SELECT t.a FROM t JOIN u ON t.a = u.a WHERE t.b = 1 + 1 AND u.a > 0`
+after all rules:
+
+```
+Project t.a AS a
+  Join INNER ON (t.a = u.a)
+    Filter (t.b = 2)
+      Scan t AS t [a, b]
+    Filter (u.a > 0)
+      Scan u AS u [a]
+```
+
+### Rules
+
+`optimize_logical` applies the rules in order (each `rule(lp, block) → lp`,
+individually callable and tested); with `optimize: false` it returns the
+plan untouched.
+
+1. **`pushdown`** - a Filter above a FROM tree is split into conjuncts; a
+   conjunct that references exactly one range variable (not on the
+   NULL-padded side of a LEFT JOIN, without aggregates or correlated
+   subqueries) moves into the join inputs, into a Filter directly above that
+   variable's scan (`LFF_PUSHED`); the rest stays above the FROM tree
+   (`LFF_RESIDUAL`), and the Filter disappears when nothing remains.
+2. **`prune_columns`** - each Scan / SubqueryScan produces only the columns
+   referenced by the operators above it, including columns referenced by
+   correlated subqueries (`EK_OUTER` nodes whose level count leads back to
+   the block).
+3. **`fold_constants`** - constant folding and predicate simplification as
+   described in [Phase 5](#logical-optimizer-optimizers-rule_s-optimize-true);
+   Filters folding to TRUE disappear.
+
+### Physical planner
+
+`phys_plan` derives the executable plan from the optimized logical plan:
+LIMIT / ORDER BY / DISTINCT / outputs / HAVING / aggregation from the
+corresponding operators; the FROM tree becomes `FP_*` nodes; a pushed Filter
+becomes the predicate its scan evaluates; then, per scan, the access path
+(TableScan vs IndexScan), row-group skipping and the estimate, per join the
+equi-join key, the algorithm (`join` option or cost-based) and the build
+side, and the execution mode (`mode` / `threads` → `g_exec_mode` /
+`g_exec_threads`; `native` is accepted and ignored). No physical decision
+is taken in the logical layer.
+
+### Design decisions
+
+* **Pushdown with `optimize: false`.** indexes-and-planning.md §3 requires
+  scan-level pushdown, column pruning and index selection in every mode,
+  and the conformance `--modes` matrix asserts IndexScans and exact scan
+  column sets with `optimize: false`. A WHERE Filter that no rule has placed
+  (no `LFF_*` flag) is therefore placed by the physical planner with the
+  same criterion (the shared `conj_rv` / `lp_mark_nullable`); Filters the
+  rule produced are mapped verbatim. The physical scan reads the columns the
+  query references (`RV_USED`; scans produce row ids and columns are read
+  lazily), which is what the logical `prune_columns` result describes when
+  the rules run.
+* **Rewrites before physical planning, same physical plan.** The previous
+  engine folded constants *after* physical planning so that `optimize`
+  never changed which rows are read. Now the rules run first, so a node the
+  optimizer rewrites in place keeps a copy of itself as written
+  (`N_WRITTEN`, expression nodes grew from 64 to 72 bytes), and the physical
+  planner analyses predicates as written (`expr_written`): index selection,
+  row-group skipping, estimates and equi-join keys are exactly those of the
+  baseline, e.g. `WHERE id = 1234 OR FALSE` still does not use an index and
+  `ON a.id = b.id OR FALSE` stays a nested loop, while execution evaluates
+  the folded forms.
+* **Rule order** pushdown → prune → fold places conjuncts by what the query
+  says, exactly as the physical planner does when the rules are off, so
+  EXPLAIN shows the same pushed filters in both settings (as before).
+* Pushdown stops at SubqueryScans and Aggregates: pushing into a derived
+  table's block or below grouping would change EXPLAIN and which rows are
+  evaluated (errors). Within a block, WHERE is built below the Project, so
+  there is nothing to push below a projection.
+* The query block descriptor `QP_*` keeps the binder's semantic fields
+  (range variables, output names and types, correlation, caching) and the
+  physical planner (re)writes the executable ones from the logical plan,
+  which keeps the executor and EXPLAIN untouched (small diff).
+
+### Verification
+
+* All suites as before (`runner.py` session / `--modes` / `--transport
+  http`, `tests/concurrency/http_suite.py`, `make test`).
+* A differential run against the engine before the refactoring replayed
+  every public conformance file - each request plus an EXPLAIN of each
+  query - under nine option sets (default, the six `--modes` combinations,
+  `optimize:false`, `use_indexes:false`): 10,800 requests, identical
+  responses (except `elapsed_us`); plus 1,107 requests of extra edge cases
+  (foldable constants next to indexes, `OR FALSE` / `AND TRUE` in WHERE and
+  ON, LEFT JOIN placement, correlated and uncorrelated subqueries, CTEs,
+  UNION ALL, FROM-less queries, PQCF row-group skipping with and without
+  `mmap`): identical.
 
 ## Implementation-defined choices
 

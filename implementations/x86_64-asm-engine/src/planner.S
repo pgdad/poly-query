@@ -1,29 +1,43 @@
 /*
- * planner.S - physical planning of a bound query block
- * (indexes-and-planning.md §3):
+ * planner.S - physical planning: maps the optimized logical plan of a query
+ * block (lplan.S) to the executable plan (QP_* / FP_* in sql.inc) read by
+ * the executor and by EXPLAIN.  Only this module takes physical decisions:
  *
- *   1. predicate pushdown: WHERE conjuncts that reference a single range
- *      variable (not on the NULL-padded side of a LEFT JOIN) move to that
- *      variable's scan (FP_FILTER) and are evaluated before any join;
- *   2. index selection: `col = c`, `col IN (c, ..)`, and range conjuncts
+ *   1. scan predicates: a Filter the pushdown rule placed (LFF_PUSHED)
+ *      becomes the filter evaluated by the scan below it; an unplaced WHERE
+ *      Filter (optimize: false) is placed here by the same criterion -
+ *      conjuncts that reference a single range variable (not on the
+ *      NULL-padded side of a LEFT JOIN) are evaluated at its scan, before
+ *      any join (indexes-and-planning.md section 3 requires this in every
+ *      mode); the rest stays the residual WHERE;
+ *   2. access paths: `col = c`, `col IN (c, ..)`, and range conjuncts
  *      (<, <=, >, >=, BETWEEN; bounds on one column are intersected) on an
  *      indexed column of a base table become an IndexScan when the
  *      estimated selectivity is <= 10% (equality: 1/distinct per value;
  *      ranges: linear interpolation between the column's min and max for
  *      numeric / temporal types, 1/3 otherwise).  Equality lookups whose
- *      estimate is at most SMALL_LOOKUP rows also use the index (tiny tables);
+ *      estimate is at most SMALL_LOOKUP rows also use the index (tiny
+ *      tables).  Predicates are analysed as written in the query
+ *      (expr_written: through optimizer rewrites), so `optimize` never
+ *      changes which rows are read;
  *   3. row-group skipping: for PQCF-backed tables, row groups whose chunk
  *      min/max exclude such a conjunct are marked in FP_RGSKIP;
- *   4. cardinality estimates (FP_EST) and the hash-join build side: inner
- *      joins build on the smaller input, LEFT joins on the right input.
+ *   4. joins: equi-join key extraction (FP_LKEY / FP_RKEY, from the join
+ *      condition as written), the algorithm
+ *      (hash / merge / nested loop, option `join`), cardinality estimates
+ *      (FP_EST) and the hash-join build side: inner joins build on the
+ *      smaller input, LEFT joins on the right input;
+ *   5. execution mode: `mode` / `threads` resolve to g_exec_mode /
+ *      g_exec_threads, which the executor follows (`native` is accepted
+ *      and ignored: no native kernels).
  *
- * The pushed conjuncts are always re-evaluated on every candidate row, so an
+ * The scan predicates are always re-evaluated on every candidate row, so an
  * index or row-group skip only has to be conservative.  Column pruning is
- * inherent to the executor: scans produce row ids and only referenced
- * columns (RV_USED, shown by EXPLAIN) are ever read.
+ * inherent to the executor: scans produce row ids and only the columns the
+ * query references (RV_USED, shown by EXPLAIN) are ever read.
  *
- *   plan_block(plan rdi)          called by the binder for every query block
- *   g_opt_optimize, g_opt_indexes per-query options (protocol.S sets them)
+ *   phys_plan(plan rdi, lp rsi)   called by plan_block (plan.S)
+ *   g_opt_*                       per-query options (protocol.S sets them)
  */
 #include "pq.inc"
 #include "sql.inc"
@@ -33,7 +47,7 @@
 #define SMALL_LOOKUP 16
 #define NL_PAIRS     64     /* auto join: nested loop up to this many pairs */
 
-/* planner state */
+/* physical planner state of one block */
 #define PS_PLAN  0
 #define PS_NULL  8     /* u8[nrv]: 1 = NULL-padded side of a LEFT JOIN */
 #define PS_PUSH  16    /* node*[nrv]: pushed conjuncts per range variable */
@@ -52,11 +66,15 @@
     .data
     .p2align 3
     .globl g_opt_optimize, g_opt_indexes, g_opt_mode, g_opt_join, g_opt_threads
+    .globl g_exec_mode, g_exec_threads
 g_opt_optimize: .quad 1
 g_opt_indexes:  .quad 1
-g_opt_mode:     .quad MODE_AUTO /* MODE_*: execution model */
+g_opt_mode:     .quad MODE_AUTO /* MODE_*: requested execution model */
 g_opt_join:     .quad JOIN_AUTO /* JOIN_*: forced join algorithm */
-g_opt_threads:  .quad 1         /* worker threads for scans / aggregation */
+g_opt_threads:  .quad 1         /* requested worker threads */
+/* physical execution settings (phys_exec_settings) */
+g_exec_mode:    .quad MODE_VEC  /* MODE_ROW or MODE_VEC */
+g_exec_threads: .quad 1         /* worker threads for scans / aggregation */
 
     .section .rodata
     .p2align 3
@@ -68,113 +86,8 @@ f_huge:  .double 9.0e18
 
     .text
 
-/* mk_and(a rdi, b rsi) -> rax AND node (b appended after a) */
-FUNC mk_and
-    ENTER 0
-    mov %rdi, %rbx
-    mov %rsi, %r12
-    test %rbx, %rbx
-    jz 1f
-    mov $N_SIZE, %edi
-    call tmp_zalloc
-    movl $EK_BINARY, N_KIND(%rax)
-    movl $B_AND, N_OP(%rax)
-    movl $T_BOOL, N_TYPE(%rax)
-    mov %rbx, N_A(%rax)
-    mov %r12, N_B(%rax)
-    LEAVE
-1:  mov %r12, %rax
-    LEAVE
-ENDF mk_and
-
-/* conj_rv(expr rdi) -> rax: range variable index when the expression
- * references exactly one range variable of this block, -1 when it references
- * none (constant within the block), -2 when it references several or holds
- * an aggregate / correlated subquery */
-FUNC conj_rv
-    ENTER 0
-    mov %rdi, %rbx
-    mov $-1, %r12                   /* result */
-    test %rbx, %rbx
-    jz 9f
-    mov N_KIND(%rbx), %eax
-    cmp $EK_COL, %eax
-    jne 1f
-    mov N_V2(%rbx), %r12
-    jmp 9f
-1:  cmp $EK_OUTER, %eax
-    je 9f
-    cmp $EK_AGG, %eax
-    je 8f
-    cmp $EK_SUBQ, %eax
-    je 2f
-    cmp $EK_EXISTS, %eax
-    je 2f
-    cmp $EK_INSUBQ, %eax
-    jne 3f
-2:  testl $NF_CORR, N_FLAGS(%rbx)
-    jnz 8f
-    cmp $EK_INSUBQ, %eax
-    jne 9f
-    mov N_A(%rbx), %rdi             /* the tested value */
-    call conj_rv
-    mov %rax, %r12
-    jmp 9f
-3:  mov %rbx, %rdi
-    call expr_nchild
-    mov %rax, %r14
-    xor %r13d, %r13d
-4:  cmp %r14, %r13
-    jae 9f
-    mov %rbx, %rdi
-    mov %r13, %rsi
-    call expr_child_ptr
-    mov (%rax), %rdi
-    call conj_rv
-    cmp $-2, %rax
-    je 8f
-    cmp $-1, %rax
-    je 5f
-    cmp $-1, %r12
-    je 41f
-    cmp %rax, %r12
-    jne 8f
-41: mov %rax, %r12
-5:  inc %r13
-    jmp 4b
-8:  mov $-2, %r12
-9:  mov %r12, %rax
-    LEAVE
-ENDF conj_rv
-
-/* mark_nullable(fp rdi, flags rsi, inherited edx) */
-FUNC mark_nullable
-    ENTER 0
-    mov %rdi, %rbx
-    mov %rsi, %r12
-    mov %edx, %r13d
-    cmpq $FK_JOIN, FP_KIND(%rbx)
-    je 1f
-    test %r13d, %r13d
-    jz 9f
-    mov FP_RV(%rbx), %rax
-    movb $1, (%r12, %rax)
-    jmp 9f
-1:  mov FP_LEFT(%rbx), %rdi
-    mov %r12, %rsi
-    mov %r13d, %edx
-    call mark_nullable
-    cmpq $JT_LEFT, FP_JTYPE(%rbx)
-    jne 2f
-    mov $1, %r13d
-2:  mov FP_RIGHT(%rbx), %rdi
-    mov %r12, %rsi
-    mov %r13d, %edx
-    call mark_nullable
-9:  LEAVE
-ENDF mark_nullable
-
-/* push_conj(ps rdi, expr rsi): distributes the conjuncts of expr */
+/* push_conj(ps rdi, expr rsi): distributes the conjuncts of an unplaced
+ * WHERE: to the scans (PS_PUSH) or the residual WHERE (PS_RESID) */
 FUNC push_conj
     ENTER 0
     mov %rdi, %rbx
@@ -214,19 +127,23 @@ ENDF push_conj
 /* ================================================================ constants */
 
 /* simple_const(node rdi) -> eax 1 for a literal, possibly under casts and
- * unary operators (the only constants evaluated at planning time) */
+ * unary operators, as written in the query (the only constants evaluated
+ * at planning time) */
 FUNC simple_const
     xor %eax, %eax
 1:  test %rdi, %rdi
     jz 9f
+    mov N_WRITTEN(%rdi), %rcx
+    test %rcx, %rcx
+    cmovnz %rcx, %rdi
     mov N_KIND(%rdi), %ecx
     cmp $EK_LIT, %ecx
     je 8f
     cmp $EK_CAST, %ecx
-    je 2f
+    je 3f
     cmp $EK_UNARY, %ecx
     jne 9f
-2:  mov N_A(%rdi), %rdi
+3:  mov N_A(%rdi), %rdi
     jmp 1b
 8:  mov $1, %eax
 9:  ret
@@ -424,7 +341,9 @@ ENDF ci_bound
 FUNC analyze_conj
     ENTER 32
     mov %rdi, %rbx
-    mov %rsi, %r12
+    mov %rsi, %rdi
+    call expr_written               /* the predicate as written */
+    mov %rax, %r12
     mov N_KIND(%r12), %eax
     cmp $EK_BINARY, %eax
     je 10f
@@ -1014,41 +933,336 @@ FUNC plan_fp
     LEAVE
 ENDF plan_fp
 
-/* plan_block(plan rdi) */
-FUNC plan_block
+/* rv_range(expr rdi, acc rsi): acc[0] = min range variable, acc[1] = max,
+ * acc[2] = 1 if the expression is not a plain function of current columns */
+FUNC rv_range
+    ENTER 0
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    test %rbx, %rbx
+    jz 9f
+    mov N_KIND(%rbx), %eax
+    cmp $EK_COL, %eax
+    je 5f
+    cmp $EK_OUTER, %eax
+    je 6f
+    cmp $EK_AGG, %eax
+    je 6f
+    cmp $EK_SUBQ, %eax
+    je 6f
+    cmp $EK_INSUBQ, %eax
+    je 6f
+    cmp $EK_EXISTS, %eax
+    je 6f
+    mov %rbx, %rdi
+    call expr_nchild
+    mov %rax, %r14
+    xor %r13d, %r13d
+1:  cmp %r14, %r13
+    jae 9f
+    mov %rbx, %rdi
+    mov %r13, %rsi
+    call expr_child_ptr
+    mov (%rax), %rdi
+    mov %r12, %rsi
+    call rv_range
+    inc %r13
+    jmp 1b
+5:  mov N_V2(%rbx), %rax
+    cmp 0(%r12), %rax
+    jge 51f
+    mov %rax, 0(%r12)
+51: cmp 8(%r12), %rax
+    jle 9f
+    mov %rax, 8(%r12)
+    jmp 9f
+6:  movq $1, 16(%r12)
+9:  LEAVE
+ENDF rv_range
+
+/* side_of(expr rdi, rlo rsi, rhi rdx) -> eax 1 = only left columns,
+ * 2 = only right columns, 0 = neither (mixed, constant or unsafe) */
+FUNC side_of
+    ENTER 32
+    mov %rsi, %rbx
+    mov %rdx, %r12
+    mov $0x7fffffffffffffff, %rax
+    mov %rax, 0(%rsp)
+    movq $-1, 8(%rsp)
+    movq $0, 16(%rsp)
+    lea 0(%rsp), %rsi
+    call rv_range
+    xor %eax, %eax
+    cmpq $0, 16(%rsp)
+    jne 9f
+    mov 8(%rsp), %rcx               /* max */
+    cmp $-1, %rcx
+    je 9f
+    mov $1, %eax
+    cmp %rbx, %rcx
+    jl 9f                           /* all < rlo */
+    xor %eax, %eax
+    cmp %r12, %rcx
+    jge 9f
+    cmp %rbx, 0(%rsp)
+    jl 9f
+    mov $2, %eax
+9:  LEAVE
+ENDF side_of
+
+/* find_equi(fp rdi, expr rsi): first conjunct `left = right` of the join
+ * condition usable as a hash / merge join key; sets FP_LKEY/FP_RKEY */
+FUNC find_equi
     ENTER 16
     mov %rdi, %rbx
-    cmpq $0, QP_FROM(%rbx)
-    je 9f
-    mov $PS_SIZE, %edi
-    call tmp_zalloc
+    mov %rsi, %rdi
+    call expr_written               /* the condition as written */
     mov %rax, %r12
-    mov %rbx, PS_PLAN(%r12)
+    test %r12, %r12
+    jz 9f
+    cmpq $0, FP_LKEY(%rbx)
+    jne 9f
+    cmpl $EK_BINARY, N_KIND(%r12)
+    jne 9f
+    mov N_OP(%r12), %eax
+    cmp $B_AND, %eax
+    jne 1f
+    mov %rbx, %rdi
+    mov N_A(%r12), %rsi
+    call find_equi
+    mov %rbx, %rdi
+    mov N_B(%r12), %rsi
+    call find_equi
+    jmp 9f
+1:  cmp $B_EQ, %eax
+    jne 9f
+    /* same kind and scale on both sides */
+    mov N_A(%r12), %rax
+    mov N_TYPE(%rax), %ecx
+    mov N_B(%r12), %rax
+    xor N_TYPE(%rax), %ecx
+    test $0xff00ff, %ecx
+    jnz 9f
+    mov N_A(%r12), %rdi
+    mov FP_RLO(%rbx), %rsi
+    mov FP_RHI(%rbx), %rdx
+    call side_of
+    mov %eax, %r13d
+    mov N_B(%r12), %rdi
+    mov FP_RLO(%rbx), %rsi
+    mov FP_RHI(%rbx), %rdx
+    call side_of
+    cmp $1, %r13d
+    jne 2f
+    cmp $2, %eax
+    jne 9f
+    mov N_A(%r12), %rax
+    mov %rax, FP_LKEY(%rbx)
+    mov N_B(%r12), %rax
+    mov %rax, FP_RKEY(%rbx)
+    jmp 9f
+2:  cmp $2, %r13d
+    jne 9f
+    cmp $1, %eax
+    jne 9f
+    mov N_B(%r12), %rax
+    mov %rax, FP_LKEY(%rbx)
+    mov N_A(%r12), %rax
+    mov %rax, FP_RKEY(%rbx)
+9:  LEAVE
+ENDF find_equi
+
+/* ================================================================ mapping */
+
+/* build_fp(ps rdi, lp rsi) -> rax physical FROM tree of a logical one;
+ * a pushed Filter's conjuncts go to the scan below it */
+FUNC build_fp
+    ENTER 0
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov $FP_SIZE, %edi
+    call tmp_zalloc
+    mov %rax, %r13
+    mov LP_KIND(%r12), %rax
+    cmp $LK_JOIN, %rax
+    je 5f
+    cmp $LK_FILTER, %rax
+    jne 2f
+    mov LP_IN(%r12), %rcx           /* Filter above a scan */
+    mov LP_KIND(%rcx), %rax
+    cmp $LK_SCAN, %rax
+    je 1f
+    cmp $LK_SUBQUERY, %rax
+    jne 8f
+1:  mov LP_A(%rcx), %rax
+    mov PS_PUSH(%rbx), %rcx
+    lea (%rcx, %rax, 8), %r14
+    mov (%r14), %rdi
+    mov LP_A(%r12), %rsi
+    call mk_and
+    mov %rax, (%r14)
+    mov LP_IN(%r12), %r12
+2:  movq $FK_TABLE, FP_KIND(%r13)   /* Scan / SubqueryScan */
+    mov LP_A(%r12), %rax
+    mov %rax, FP_RV(%r13)
+    jmp 9f
+5:  movq $FK_JOIN, FP_KIND(%r13)
+    mov LP_A(%r12), %rax
+    mov %rax, FP_JTYPE(%r13)
+    mov LP_B(%r12), %rax
+    mov %rax, FP_ON(%r13)
+    mov LP_C(%r12), %rax
+    mov %rax, FP_RLO(%r13)
+    mov LP_D(%r12), %rax
+    mov %rax, FP_RHI(%r13)
+    mov %rbx, %rdi
+    mov LP_IN(%r12), %rsi
+    call build_fp
+    mov %rax, FP_LEFT(%r13)
+    mov %rbx, %rdi
+    mov LP_IN2(%r12), %rsi
+    call build_fp
+    mov %rax, FP_RIGHT(%r13)
+    mov %r13, %rdi
+    mov FP_ON(%r13), %rsi
+    call find_equi
+9:  mov %r13, %rax
+    LEAVE
+8:  RAISE E_INTERNAL_ERROR, "unsupported logical plan: filter inside a join tree"
+ENDF build_fp
+
+/* plan_from(plan rdi, lp rsi): the FROM region - an optional WHERE Filter
+ * above the FROM tree (or Values) - becomes QP_FROM and QP_WHERE */
+FUNC plan_from
+    ENTER 0
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    xor %r13d, %r13d                /* WHERE filter */
+    cmpq $LK_FILTER, LP_KIND(%r12)
+    jne 1f
+    testq $LFF_PUSHED, LP_B(%r12)
+    jnz 1f
+    mov %r12, %r13
+    mov LP_IN(%r12), %r12
+1:  cmpq $LK_VALUES, LP_KIND(%r12)
+    jne 2f
+    test %r13, %r13                 /* SELECT without FROM */
+    jz 9f
+    mov LP_A(%r13), %rax
+    mov %rax, QP_WHERE(%rbx)
+    jmp 9f
+2:  mov $PS_SIZE, %edi
+    call tmp_zalloc
+    mov %rax, %r14
+    mov %rbx, PS_PLAN(%r14)
     mov QP_NRV(%rbx), %rdi
     add $8, %rdi
     call tmp_zalloc
-    mov %rax, PS_NULL(%r12)
+    mov %rax, PS_NULL(%r14)
     mov QP_NRV(%rbx), %rdi
     lea 8(, %rdi, 8), %rdi
     call tmp_zalloc
-    mov %rax, PS_PUSH(%r12)
-    mov QP_FROM(%rbx), %rdi
-    mov PS_NULL(%r12), %rsi
-    xor %edx, %edx
-    call mark_nullable
-    mov QP_WHERE(%rbx), %rsi
-    test %rsi, %rsi
-    jz 5f
+    mov %rax, PS_PUSH(%r14)
     mov %r12, %rdi
+    mov PS_NULL(%r14), %rsi
+    xor %edx, %edx
+    call lp_mark_nullable
+    test %r13, %r13
+    jz 4f
+    mov LP_A(%r13), %rsi
+    testq $LFF_RESIDUAL, LP_B(%r13)
+    jz 3f
+    mov %rsi, PS_RESID(%r14)        /* placed by the optimizer */
+    jmp 4f
+3:  mov %r14, %rdi                  /* unplaced: place it here */
     call push_conj
-    mov PS_RESID(%r12), %rax
+4:  mov PS_RESID(%r14), %rax
     mov %rax, QP_WHERE(%rbx)
-5:  mov %r12, %rdi
-    mov QP_FROM(%rbx), %rsi
+    mov %r14, %rdi
+    mov %r12, %rsi
+    call build_fp
+    mov %rax, QP_FROM(%rbx)
+    mov %r14, %rdi
+    mov %rax, %rsi
     call plan_fp
-9:  cmpq $0, g_opt_optimize(%rip)   /* logical rewrites (optimizer.S), after */
-    je 10f                          /* the physical decisions so that both */
-    mov %rbx, %rdi                  /* settings scan the same rows */
-    call optimize_block
-10: LEAVE
-ENDF plan_block
+9:  LEAVE
+ENDF plan_from
+
+/* phys_exec_settings(): the execution model of the query - the row
+ * baseline for mode "row", batch (vectorized) execution otherwise */
+FUNC phys_exec_settings
+    mov $MODE_VEC, %eax
+    mov $MODE_ROW, %ecx
+    cmpq $MODE_ROW, g_opt_mode(%rip)
+    cmove %rcx, %rax
+    mov %rax, g_exec_mode(%rip)
+    mov g_opt_threads(%rip), %rax
+    mov %rax, g_exec_threads(%rip)
+    ret
+ENDF phys_exec_settings
+
+/* phys_plan(plan rdi, lp rsi): derives the executable plan of a block from
+ * its optimized logical plan */
+FUNC phys_plan
+    ENTER 0
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    call phys_exec_settings
+    movq $-1, QP_LIMIT(%rbx)
+    movq $0, QP_OFFSET(%rbx)
+    movq $0, QP_NKEYS(%rbx)
+    movq $0, QP_DISTINCT(%rbx)
+    movq $0, QP_HAVING(%rbx)
+    movq $0, QP_WHERE(%rbx)
+    movq $0, QP_FROM(%rbx)
+    cmpq $LK_LIMIT, LP_KIND(%r12)
+    jne 1f
+    mov LP_A(%r12), %rax
+    mov %rax, QP_LIMIT(%rbx)
+    mov LP_B(%r12), %rax
+    mov %rax, QP_OFFSET(%rbx)
+    mov LP_IN(%r12), %r12
+1:  cmpq $LK_SORT, LP_KIND(%r12)
+    jne 2f
+    mov LP_A(%r12), %rax
+    mov %rax, QP_NKEYS(%rbx)
+    mov LP_B(%r12), %rax
+    mov %rax, QP_KEYS(%rbx)
+    mov LP_IN(%r12), %r12
+2:  cmpq $LK_UNION, LP_KIND(%r12)   /* branches are planned on their own */
+    je 9f
+    cmpq $LK_DISTINCT, LP_KIND(%r12)
+    jne 3f
+    movq $1, QP_DISTINCT(%rbx)
+    mov LP_IN(%r12), %r12
+3:  mov LP_A(%r12), %rax            /* Project */
+    mov %rax, QP_NOUT(%rbx)
+    mov LP_B(%r12), %rax
+    mov %rax, QP_OUT(%rbx)
+    mov LP_IN(%r12), %r12
+    movq $0, QP_AGG(%rbx)
+    cmpq $LK_FILTER, LP_KIND(%r12)
+    jne 4f
+    mov LP_IN(%r12), %rax
+    cmpq $LK_AGGREGATE, LP_KIND(%rax)
+    jne 4f
+    mov LP_A(%r12), %rcx            /* HAVING */
+    mov %rcx, QP_HAVING(%rbx)
+    mov %rax, %r12
+4:  cmpq $LK_AGGREGATE, LP_KIND(%r12)
+    jne 5f
+    movq $1, QP_AGG(%rbx)
+    mov LP_A(%r12), %rax
+    mov %rax, QP_NGROUP(%rbx)
+    mov LP_B(%r12), %rax
+    mov %rax, QP_GROUP(%rbx)
+    mov LP_C(%r12), %rax
+    mov %rax, QP_NAGGS(%rbx)
+    mov LP_D(%r12), %rax
+    mov %rax, QP_AGGS(%rbx)
+    mov LP_IN(%r12), %r12
+5:  mov %rbx, %rdi
+    mov %r12, %rsi
+    call plan_from
+9:  LEAVE
+ENDF phys_plan

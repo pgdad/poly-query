@@ -756,7 +756,7 @@ FUNC sort_rows
     call pexec_enabled              /* parallel sort + merge (pexec.S) */
     test %eax, %eax
     jz 0f
-    cmpq $1, g_opt_threads(%rip)
+    cmpq $1, g_exec_threads(%rip)
     jbe 0f
     mov %rbx, %rdi
     mov %r12, %rsi
@@ -1867,8 +1867,8 @@ FUNC exec_query_result
     je 4f
     mov $1, %esi                    /* other errors: report as they are */
     call longjmp
-4:  movq $MODE_ROW, g_opt_mode(%rip)    /* replay in the row baseline */
-    movq $1, g_opt_threads(%rip)
+4:  movq $MODE_ROW, g_exec_mode(%rip)    /* replay in the row baseline */
+    movq $1, g_exec_threads(%rip)
 5:  mov 8(%rsp), %rdi
     xor %esi, %esi
     call exec_plan
