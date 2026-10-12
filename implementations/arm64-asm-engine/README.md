@@ -379,24 +379,24 @@ in every mode); Aggregate, Distinct and Sort consume their whole input.
   `agg_accum`. Keys that are columns of dictionary-encoded STRING columns
   are hashed and compared by dictionary entry instead of by bytes. Queries
   without GROUP BY use a single group without hashing. DISTINCT aggregates
-  use the sort-based path.
+  are hashed too (see [Latency optimization](#latency-optimization-analytics-workload));
+  FLOAT64 SUM / AVG DISTINCT use the sort-based path.
 * **Projection** evaluates each output column as a vector and scatters it
   into the result rows.
 * **DISTINCT** (`vdistinct`) hashes the visible cells of every result row
   into a key-only group table and keeps the first row of every value (O(n)
   instead of sorting); with threads, windows are deduplicated in parallel
   and merged like partial aggregates.
-* **ORDER BY** (`sort.S`) uses normalized keys: the leading non-STRING
-  ORDER BY keys get exact order-preserving 64-bit codes (biased integers,
-  sign-folded floats, inverted for DESC), and a permutation of the rows is
-  radix sorted on them (stable LSD, last key first, constant bytes
-  skipped); only rows with equal codes go through the comparator (a NULL
-  in a radix key falls back to `qsort_r`). A STRING first key is radix
-  sorted on its 8-byte prefix; with threads such sorts are chunk-sorted in
-  parallel and merged pairwise in parallel rounds. The key list ends with every visible
-  column as a tie-breaker, so rows that tie on the ORDER BY keys still come
-  out in one well-defined order in every mode (row mode: `qsort_r` with the
-  same comparator).
+* **ORDER BY** (`sort.S`) uses normalized keys: every key cell gets an
+  order-preserving 64-bit code (biased integers, sign-folded floats,
+  7-byte string prefixes with a length code, inverted for DESC), the codes
+  are range-compressed and packed with NULL bits into composite keys, which
+  are sorted by a parallel MSD radix sort; only rows that tie on an inexact
+  string prefix go through the comparator (details in
+  [Latency optimization](#latency-optimization-analytics-workload)). The key
+  list ends with every visible column as a tie-breaker, so rows that tie on
+  the ORDER BY keys still come out in one well-defined order in every mode
+  (row mode: `qsort_r` with the same comparator).
 
 ### Parallelism (`parallel.S`)
 
