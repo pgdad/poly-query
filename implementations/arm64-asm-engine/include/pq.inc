@@ -680,8 +680,7 @@
 #define PN_NKEYS    48     // u64 hash join keys
 #define PN_LKEYS    56     // Node** left key expressions
 #define PN_RKEYS    64     // Node** right key expressions
-#define PN_LO       72     // u32 first rv of the subtree
-#define PN_HI       76     // u32 one past the last rv
+                           // (72: unused)
 #define PN_IDX      80     // scans: Index* used by an index scan, or 0
 #define PN_IXA      88     // scans: IxAccess* (index access path)
 #define PN_PREDS    96     // scans: Pred** simple predicates of PN_EXPR

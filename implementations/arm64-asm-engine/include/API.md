@@ -113,13 +113,24 @@ Globals (rt.S): `g_arena` (Arena), `g_out` (Buf, response line), `g_deadline`,
 | `bind_scalar_func`, `bind_case`, `bind_between`, `bind_inlist`, `bind_like` | x0 BindCtx*, x1 Node* | x0 bound Node* (functions.S) |
 | `common_type` | w0 t1, w1 t2 | w0 common CASE/COALESCE type or -1 |
 
-## plan.S (planning)
+## plan.S / logical.S / optimize.S / rule_*.S / physical.S (planning)
 
 | function | in | out |
 |---|---|---|
-| `plan_statement` | x0 root BoundQuery* | x0 root PlanNode* (also plans every SubPlan: SP_PLAN) |
+| `plan_statement` | x0 root BoundQuery* | x0 root PlanNode* (also plans every SubPlan: SP_LPLAN, SP_PLAN) |
+| `plan_query` | x0 BoundQuery* | x0 PlanNode*, x1 LogicalNode* (one query level: lp_build → optimize → phys_plan) |
 | `plan_explain` | x0 Buf*, x1 PlanNode* | – plan JSON |
 | `expr_rvmask` | x0 Node* | x0 bitmask of this query's range variables referenced |
+| `split_conj` / `and_append` / `pvec_push` | Vec*, Node* / Node*, Node* / Vec*, item | conjunct lists |
+| `lp_build` | x0 BoundQuery* | x0 LogicalNode* (logical.S; no decisions taken) |
+| `ln_new` | w0 LO_*, x1 BoundQuery*, x2 input | x0 LogicalNode* |
+| `lp_exprs` | x0 LogicalNode*, x1 fn(x0 Node** slot, x1 arg), x2 arg | – visits every expression of the level |
+| `lp_print` / `lp_print_expr` | x0 Buf*, x1 LogicalNode* / Node* (, x2 BoundQuery*) | – debug text |
+| `optimize` | x0 LogicalNode* | x0 LogicalNode* (all rules in order; none if `g_opt_optimize` = 0; `PQ_TRACE_PLAN` prints every step to stderr) |
+| `rule_prune_columns`, `rule_fold_constants`, `rule_simplify_predicates`, `rule_push_filters`, `rule_reorder_joins`, `rule_push_join_conditions` | x0 LogicalNode* | x0 LogicalNode* (one rule each) |
+| `phys_plan` | x0 LogicalNode* | x0 PlanNode* (physical.S: placement, join algorithm, access paths, build side, top-N, execution mode) |
+| `ap_scan` | x0 PlanNode* scan | x0 estimated rows; chooses the access path (access.S) |
+| `scan_estimate` | x0 BoundQuery*, x1 rv, x2 predicate or 0 | x0 estimated rows (statistics only) |
 
 ## exec.S / eval.S (execution)
 

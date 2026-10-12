@@ -35,7 +35,10 @@ the before/after measurements.
 
 It also implements the architectural change **CR-1 `UNION ALL`**
 (`spec/changes/union-all.md`, capability `change.union_all`); see
-[Change CR-1: UNION ALL](#change-cr-1-union-all).
+[Change CR-1: UNION ALL](#change-cr-1-union-all), and the behaviour-preserving
+refactoring **CR-3 logical / physical plan separation**
+(`spec/changes/refactor-plan-separation.md`); see
+[Change CR-3](#change-cr-3-logical--physical-plan-separation).
 
 ## Build prerequisites
 
@@ -81,8 +84,10 @@ frame macros in `include/frame.inc`, the internal API contract in
 | storage | `catalog.S`, `ingest.S`, `storage.S`, `pqcf.S`, `index.S` | catalog of immutable tables; CSV/JSON/JSONL ingestion; row / column layouts, dictionary encoding, statistics; PQCF v1 reader/writer; HASH / BTREE indexes |
 | lexer / parser | `lexer.S`, `parser.S` | tokenizer and recursive-descent parser for the full v1 grammar into an AST |
 | semantic analysis | `binder.S`, `functions.S`, `strfuncs.S` | scopes (range variables, outer scopes, CTEs), name resolution, typing with implicit casts, aggregate / GROUP BY validation, subquery binding; scalar functions, CASE, LIKE, BETWEEN, IN lists |
-| planning | `plan.S`, `access.S` | logical plan, physical rewrite (predicate pushdown, hash-join keys, join algorithm, column pruning, build side), access paths (simple predicates, selectivity estimates, index selection, row-group skipping), EXPLAIN JSON |
-| optimizer | `optimize.S` | logical rewrites (Phase 5, option `optimize`): constant folding, predicate simplification |
+| logical plan | `logical.S` | LogicalNode trees (Scan, SubqueryScan, Values, Filter, Join, Aggregate, Project, Distinct, Sort, Limit, UnionAll) built from a bound query level, expression visitor, debug printer |
+| optimizer | `optimize.S`, `rule_prune.S`, `rule_fold.S`, `rule_simplify.S`, `rule_pushdown.S`, `rule_joinorder.S` | rule driver (option `optimize`) and one module per rule: column pruning, constant folding, predicate simplification, predicate pushdown (filters, join conditions), join reordering — all on the logical plan |
+| physical planning | `physical.S`, `access.S` | logical → physical plan: predicate placement, join keys and algorithm, access paths (simple predicates, selectivity estimates, index selection, row-group skipping), columns read, build side, top-N, execution mode / threads |
+| planning driver | `plan.S` | `plan_statement` / `plan_query` (build → optimize → physical), EXPLAIN JSON of the physical plan, conjunct / range-variable helpers |
 | execution | `exec.S`, `eval.S`, `ops.S`, `join.S`, `volcano.S`, `sort.S` | plan operators (scan tasks, filter, project, hash / merge / nested-loop joins, sort-based aggregation, distinct, sort, top-N, limit), subquery evaluation, batched projection for streaming; expression evaluator and aggregate accumulators |
 | vectorized execution | `vexec.S`, `vagg.S` | batch expression evaluation over column vectors with selection vectors (`veval`, `vfilter`, join key vectors), hash aggregation with partial tables |
 | parallelism | `parallel.S` | worker threads for query tasks (`par_run`), parallel-safety check |
@@ -90,7 +95,8 @@ frame macros in `include/frame.inc`, the internal API contract in
 
 Query processing: `parse_sql` → `bind_query` (BoundQuery per query level,
 SubPlans for every subquery / derived table / CTE) → `plan_statement`
-(PlanNode trees) → `exec_plan` (ResultSet).
+(per query level: `lp_build` LogicalNode tree → `optimize` → `phys_plan`
+PlanNode tree) → `exec_plan` (ResultSet).
 
 ### Concurrency and the server (Phase 4)
 
@@ -269,9 +275,13 @@ Key decisions:
 ### Options (protocol.md §5.2)
 
 `protocol.S parse_exec_opts` reads the options of every `query` / `explain`
-request into thread-local settings (`g_x_mode`, `g_x_join`, `g_x_threads`,
-`g_x_optimize` in `exec.S`, `g_use_indexes` in `access.S`); worker threads
-inherit them. Unsupported values (`"mode":"quantum"`) are `UNSUPPORTED`.
+request into thread-local planner inputs (`g_opt_mode`, `g_opt_join`,
+`g_opt_threads`, `g_opt_optimize` in `plan.S`, `g_use_indexes` in
+`access.S`). The physical planner turns them into plan properties (join
+operators, top-N, `PN_XMODE` / `PN_XTHREADS` on the plan root); the
+executor runs a plan with its mode and thread count (`g_x_mode`,
+`g_x_threads`, inherited by worker threads). Unsupported values
+(`"mode":"quantum"`) are `UNSUPPORTED`.
 
 | option | effect |
 |---|---|
@@ -279,7 +289,7 @@ inherit them. Unsupported values (`"mode":"quantum"`) are `UNSUPPORTED`.
 | `mode: "vectorized"` (also `auto`) | batch execution: scans, filters, projections, join keys and aggregates evaluate expressions over batches of 1024 tuples as column vectors (`vexec.S`), grouping is hash-based (`vagg.S`). |
 | `threads: N` | in vectorized mode, scans, filters, projections, hash-join probes and aggregations run as up to N parallel tasks (default: `--threads`, else the online CPUs, at most 8; capped at 64; values < 1 are `UNSUPPORTED`). The row-mode baseline ignores it. |
 | `join: "hash"` / `"merge"` / `"nested_loop"` | forces the algorithm of every equi-join; joins without an equality between the two sides are always nested loops. `auto` = hash join for equi-joins. |
-| `optimize: false` | disables the logical rewrites (constant folding, predicate simplification, join reordering), top-N and the cost-based hash-join build side. Predicate pushdown, column pruning and index selection stay on: they are the Phase 3 access-path rules (index use is controlled by `use_indexes`), and the Phase 3 suite checks them under every option combination. |
+| `optimize: false` | the optimizer applies no rule to the logical plan (column pruning, constant folding, predicate simplification, predicate pushdown, join reordering); the physical planner uses neither top-N nor the cost-based hash-join build side. The Phase 3 planner guarantees still hold (indexes-and-planning.md §3: single-table conjuncts evaluated at the scan, scans reading only referenced columns, index selection — controlled by `use_indexes`), because the physical planner provides them for any logical plan; the Phase 3 suite checks them under every option combination. |
 | `native: true` | accepted and ignored (`native.kernels` is not claimed; no kernel library is loaded). |
 
 Every combination produces the same rows (row order only differs where no
@@ -434,10 +444,11 @@ results are cached in shared plan nodes on first use).
 
 All three enforce `--max-join-rows` and return identical multisets.
 
-### Optimizer (`optimize.S`, `plan.S`, `exec.S`)
+### Optimizer (`optimize.S`, `rule_*.S`, `physical.S`)
 
-With `optimize` (default) the planner rewrites every expression of a query
-level before building the logical plan:
+With `optimize` (default) the optimizer rewrites the logical plan of every
+query level (see [Change CR-3](#change-cr-3-logical--physical-plan-separation)
+for the rule modules):
 
 * **constant folding**: constant subtrees (no columns, aggregates,
   subqueries, `PQ_SLEEP`) are evaluated at planning time under a nested
@@ -448,23 +459,25 @@ level before building the logical plan:
   `TRUE AND x` → `x`; `FALSE AND x` → `FALSE`; `x OR FALSE`, `FALSE OR x`
   → `x`; `TRUE OR x` → `TRUE`; `NOT NOT x` → `x`. A WHERE / HAVING / ON
   condition that becomes TRUE disappears from the plan;
-* **join reordering** (`opt_join_order`): a region of three or more inputs
+* **join reordering** (`rule_reorder_joins`): a region of three or more inputs
   connected by INNER / CROSS joins (a LEFT JOIN is one input of its region;
   regions inside its inputs are reordered separately) is rebuilt as a
   left-deep tree in greedy order — the input with the smallest estimated
-  cardinality (access-path estimate after predicate pushdown) first, then
+  cardinality (statistics estimate after predicate pushdown) first, then
   always the smallest input connected to the joined set by a condition.
   Every condition of the region (ON conditions and pushed-down WHERE
   conjuncts) is attached to the lowest join covering its range variables.
   Tuples keep one slot per range variable and joins merge them slot-wise,
   so the order never changes results (two-input joins only choose the
   hash-join build side);
-* **top-N**: `ORDER BY … LIMIT n [OFFSET m]` keeps a bounded max-heap of
-  `n + m` rows (O(N log k)) instead of sorting all rows;
-* **build side** selection for hash joins (Phase 3).
+* **predicate pushdown** and **column pruning** on the logical plan;
+* physical choices that also depend on `optimize`: **top-N** (`ORDER BY …
+  LIMIT n [OFFSET m]` keeps a bounded max-heap of `n + m` rows, O(N log k),
+  instead of sorting all rows) and **build side** selection for hash joins
+  (Phase 3).
 
-Also in place from earlier phases: predicate pushdown, projection pushdown
-(column pruning), index selection and PQCF row-group skipping.
+Index selection and PQCF row-group skipping are physical access-path
+decisions (`physical.S` → `access.S`).
 
 ### Memory
 
@@ -547,6 +560,78 @@ a qualified name (`t.c`) is not an output column name (`SEMANTIC_ERROR`);
 two DECIMAL branches unify to DECIMAL(18, max scale) like CASE; DATE and
 TIMESTAMP branches do not unify (`TYPE_ERROR`), as for CASE. `spec_version`
 stays `1.0.0` (the Phase 1 conformance case requires it).
+
+## Change CR-3: logical / physical plan separation
+
+A behaviour-preserving refactoring (`spec/changes/refactor-plan-separation.md`):
+same responses, errors, EXPLAIN output and capabilities. Planning of a query
+level is now three separate steps with their own data structures:
+
+```
+BoundQuery --lp_build--> LogicalNode tree --optimize (rules)--> LogicalNode tree
+           --phys_plan--> PlanNode tree --exec_plan / plan_explain
+```
+
+### Module map
+
+| concern | before | after |
+|---|---|---|
+| plan data structures | `PlanNode` (`pq.inc`) for both: the logical plan was rewritten in place into the physical one | **logical plan** `LogicalNode` (`pq.inc` `LN_*`, ops `LO_*`: Scan, SubqueryScan (derived table / CTE), Values, Filter, Join (type + condition), Aggregate (keys + aggregate calls + HAVING), Project, Distinct, Sort, Limit, UnionAll; expression subqueries keep their own logical plan in `SP_LPLAN`); **physical plan** `PlanNode` (`PN_*`, ops `PO_*`) |
+| building the logical plan | `plan.S` `lp_build` / `lp_from` / `lp_upper` / `plan_union` (PlanNodes) | `logical.S` `lp_build` (no decisions: WHERE is one Filter above the FROM tree, ON conditions stay on their joins, scans read every column) |
+| printing it | — (only EXPLAIN of the physical plan) | `logical.S` `lp_print` / `lp_print_expr` (debug text; `PQ_TRACE_PLAN=1` prints the plan before and after every rule to stderr) |
+| optimizer driver | `plan.S` `plan_query` calling `optimize.S` `opt_query` (rewrote the *bound query's* expressions before planning) and `pp_rewrite` calling `opt_join_order` | `optimize.S` `optimize`: rule table, applied in order to the logical plan only; nothing when `optimize` is false |
+| rule: projection / column pruning | binder flags (`RV_USED`) printed by EXPLAIN | `rule_prune.S` `rule_prune_columns` (columns referenced by the plan's expressions + correlated references flagged `RVU_OUTER` by the binder) |
+| rule: constant folding | `optimize.S` `opt_expr` (folding part), `opt_foldable`, `try_eval` | `rule_fold.S` `rule_fold_constants` |
+| rule: predicate simplification | `optimize.S` `opt_expr` (simplification part), `opt_cond_slot` | `rule_simplify.S` `rule_simplify_predicates` |
+| rule: predicate pushdown | `plan.S` `pp_rewrite` + `push_conj` (WHERE), `pp_joins` (ON conjuncts), physical | `rule_pushdown.S` `rule_push_filters` (Filter conjuncts into scans / onto joins), `rule_push_join_conditions` (single-input join conjuncts into the inputs) |
+| rule: join reordering | `optimize.S` `opt_join_order` / `jo_*` on PlanNodes, estimates via `ap_scan` | `rule_joinorder.S` `rule_reorder_joins` on LogicalNodes, estimates via `access.S` `scan_estimate` (statistics only) |
+| physical planner | `plan.S` `pp_rewrite`, `pp_joins`, `try_hash_key`, `pp_access` (mixed with the logical steps above); top-N decided in `exec.S` from `g_x_optimize` | `physical.S` `phys_plan`: lowering (`pp_lower`), predicate placement, join keys and algorithm (option `join`), access paths (`access.S` `ap_scan`: index / table scan, row groups), columns read, hash-join build side, top-N (`PN_TOPN`), execution mode and threads (`PN_XMODE` / `PN_XTHREADS`, installed by `exec_plan`) |
+| EXPLAIN | `plan.S` `plan_explain` (physical plan) | unchanged, from the physical plan; the scan column list now comes from the physical scan (`PN_COLS`) |
+| planner driver | `plan.S` `plan_statement` / `plan_query` | `plan.S` `plan_statement` / `plan_query`: `lp_build` → `optimize` → `phys_plan` per query level (SubPlans: `SP_LPLAN`, `SP_PLAN`) |
+| options | `exec.S` `g_x_mode` / `g_x_join` / `g_x_threads` / `g_x_optimize`, read by planner and executor alike | planner inputs `plan.S` `g_opt_*` (protocol.S); the executor only sees the plan's settings (`exec.S` `g_x_mode` / `g_x_threads`) |
+
+### Rules
+
+`optimize.S` applies, in this order: `prune_columns`, `fold_constants`,
+`simplify_predicates`, `push_filters`, `reorder_joins`,
+`push_join_conditions`. Each is a function `LogicalNode* → LogicalNode*`
+that only reads statistics and rewrites the logical plan. The order is the
+order the decisions were taken before the refactoring, which keeps every
+plan identical: join reordering estimates its inputs with the WHERE
+conjuncts already on the scans (not yet the single-input ON conjuncts) and
+attaches each condition to the lowest join covering it, which
+`push_join_conditions` then splits; column pruning runs on the expressions
+as written, so a column referenced only inside an operand that
+simplification removes (`FALSE AND c > 5`) stays in the column list, as it
+always did.
+
+`tests/unit/test_optimizer.S` (42 cases) checks the logical plan builder and
+every rule on its own: SQL → bind → `lp_build` → one or two rules →
+`lp_print` compared with the expected plan text, plus the whole optimizer
+with `optimize` on and off.
+
+### `optimize: false` and the Phase 3 planner guarantees
+
+With `optimize: false` no rule runs. The Phase 3 requirements
+(indexes-and-planning.md §3) — single-table WHERE conjuncts evaluated at the
+scan, scans reading only referenced columns, index selection — hold for
+every plan, and the conformance `--modes` suite checks them with
+`optimize: false`. The physical planner therefore guarantees them itself:
+it places every conjunct at the lowest operator that can evaluate it (the
+same placement the pushdown rules perform on the logical plan, so after the
+optimizer it finds nothing left to move), and a scan the optimizer did not
+prune reads the columns the query references (the binder's `RV_USED`). This
+is exactly what the engine did before with `optimize: false`.
+
+### Verification
+
+Besides the conformance suites (session, `--modes`, HTTP, HTTP suite) a
+throw-away differential script compared the responses of the engine before
+and after the refactoring for every SQL statement of the conformance cases
+plus extra planner-heavy queries (multi-way joins with ON / WHERE
+conjuncts, LEFT joins, correlated subqueries, derived tables, CTEs,
+UNION ALL, constant folding that raises, simplification), each as `explain`
+and `query` under ten option sets: 9059 requests, no difference.
 
 ## Implementation-defined choices
 
