@@ -4,7 +4,11 @@
  *   eval(node rdi, ctx rsi) -> rax payload, rdx null flag (0/1)
  *   cast_value(src_type rdi, dst_type rsi, payload rdx) -> rax payload
  *   value_cmp(type rdi, a rsi, b rdx) -> eax -1/0/1 (non-null values of one type)
- *   dec_cmp(a rdi, sa esi, b rdx, sb ecx) -> eax -1/0/1
+ *   dec_cmp(a rdi, sa esi, b rdx, sb ecx) -> eax -1/0/1 (INT64 / narrow DECIMAL)
+ *
+ * Wide decimals (p > 18, boxed i128, see dec128.S) are dispatched to
+ * dec128.S on the type: comparisons (num_cmp), + - * (dec_arith), unary
+ * minus and the CAST conversions.  Narrow decimals keep the i64 code.
  *
  * Runtime errors (overflow, division by zero, conversion) are raised.
  */
@@ -134,8 +138,45 @@ FUNC value_cmp
 4:  mov %rsi, %rdi
     mov %rdx, %rsi
     jmp pstr_cmp
-5:  jmp 1b
+5:  mov %edi, %eax                  /* DECIMAL: narrow ones are i64 */
+    shr $8, %eax
+    cmp $18, %al
+    jbe 1b
+    mov 8(%rsi), %rax               /* wide: i128 boxes, one scale */
+    cmp 8(%rdx), %rax
+    jl 6f
+    jg 7f
+    mov (%rsi), %rax
+    cmp (%rdx), %rax
+    jb 6f
+    ja 7f
+    xor %eax, %eax
+    ret
+6:  mov $-1, %eax
+    ret
+7:  mov $1, %eax
+    ret
 ENDF value_cmp
+
+/* cmp_values(ta edi, tb esi, a r13, b r14) -> eax -1/0/1: the comparison
+ * of a bound binary comparison node.  Operand kinds are equal except
+ * INT64 / DECIMAL mixes, which (like decimals of different precision or
+ * scale) compare their exact values (decimal38.md section 4).  Internal:
+ * takes the values in r13 / r14 (eval's registers). */
+cmp_values:
+    movzbl %dil, %eax
+    movzbl %sil, %ecx
+    cmp $T_DEC, %eax
+    je 1f
+    cmp $T_DEC, %ecx
+    je 1f
+    mov %r13, %rsi                  /* same kind */
+    mov %r14, %rdx
+    jmp value_cmp
+1:  mov %esi, %edx                  /* INT64 / DECIMAL: exact */
+    mov %r13, %rsi
+    mov %r14, %rcx
+    jmp dec_cmp_any
 
 /* i128_to_double(lo rdi, hi rsi) -> xmm0 */
 FUNC i128_to_double
@@ -287,6 +328,7 @@ ev_unary:
     call eval
     test %edx, %edx
     jnz ev_ret_null
+    mov %rax, %r13
     mov N_OP(%rbx), %ecx
     cmp $U_NOT, %ecx
     jne 1f
@@ -297,10 +339,22 @@ ev_unary:
     movzbl N_TYPE(%rbx), %ecx
     cmp $T_FLOAT, %ecx
     je 2f
+    mov N_TYPE(%rbx), %edi
+    call dec_is_wide
+    test %eax, %eax
+    jnz 3f
+    mov %r13, %rax
     neg %rax
     jo raise_overflow
     jmp ev_ret
 2:  btc $63, %rax
+    jmp ev_ret
+3:  mov (%r13), %rdi                /* wide: -v never overflows */
+    mov 8(%r13), %rsi
+    neg %rdi
+    adc $0, %rsi
+    neg %rsi
+    call dec_box
     jmp ev_ret
 
 ev_func:                            /* functions.S hook */
@@ -389,23 +443,9 @@ ev_or:
 ev_compare:
     mov N_A(%rbx), %rax
     mov N_TYPE(%rax), %edi          /* left type */
-    movzbl %dil, %eax
-    cmp $T_DEC, %eax
-    jne 1f
     mov N_B(%rbx), %rax
-    mov N_TYPE(%rax), %ecx
-    shr $16, %ecx
-    and $0xff, %ecx                 /* sb */
-    mov %edi, %esi
-    shr $16, %esi
-    and $0xff, %esi                 /* sa */
-    mov %r13, %rdi
-    mov %r14, %rdx
-    call dec_cmp
-    jmp 2f
-1:  mov %r13, %rsi
-    mov %r14, %rdx
-    call value_cmp
+    mov N_TYPE(%rax), %esi          /* right type */
+    call cmp_values
 2:  mov N_OP(%rbx), %ecx
     xor %edx, %edx
     cmp $B_EQ, %ecx
@@ -522,7 +562,21 @@ ev_float_arith:
     jmp ev_ret
 
 ev_dec_arith:
+    mov N_TYPE(%rbx), %edi
+    call dec_is_wide
+    test %eax, %eax
+    jz 0f
+    mov N_OP(%rbx), %edi            /* wide result: dec128.S */
     mov N_A(%rbx), %rax
+    mov N_TYPE(%rax), %esi
+    mov %r13, %rdx
+    mov N_B(%rbx), %rax
+    mov N_TYPE(%rax), %ecx
+    mov %r14, %r8
+    mov N_TYPE(%rbx), %r9d
+    call dec_arith
+    jmp ev_ret
+0:  mov N_A(%rbx), %rax
     mov N_TYPE(%rax), %eax
     shr $16, %eax
     and $0xff, %eax
@@ -675,7 +729,20 @@ cv_to_int:
     jnz raise_overflow
     LEAVE
 1:  /* DEC -> INT: truncate toward zero */
-    mov %rbx, %rcx
+    mov %ebx, %edi
+    call dec_is_wide
+    test %eax, %eax
+    jz 2f
+    mov (%r13), %rdi
+    mov 8(%r13), %rsi
+    mov %rbx, %rdx
+    shr $16, %rdx
+    movzbl %dl, %edx
+    call dec128_to_int
+    test %edx, %edx
+    jnz raise_overflow
+    LEAVE
+2:  mov %rbx, %rcx
     shr $16, %rcx
     and $0xff, %ecx
     lea pow10_u64(%rip), %rdx
@@ -691,11 +758,23 @@ cv_to_float:
     cvtsi2sd %r13, %xmm0
     movq %xmm0, %rax
     LEAVE
-1:  mov %r13, %rdi                  /* DEC -> FLOAT */
+1:  mov %ebx, %edi                  /* DEC -> FLOAT */
+    call dec_is_wide
+    test %eax, %eax
+    jnz 2f
+    mov %r13, %rdi
     mov %rbx, %rsi
     shr $16, %rsi
     and $0xff, %esi
     call dec_to_float
+    movq %xmm0, %rax
+    LEAVE
+2:  mov (%r13), %rdi                /* wide: nearest FLOAT64 */
+    mov 8(%r13), %rsi
+    mov %rbx, %rdx
+    shr $16, %rdx
+    movzbl %dl, %edx
+    call dec128_to_double
     movq %xmm0, %rax
     LEAVE
 
@@ -706,7 +785,16 @@ cv_to_dec:
     mov %r12, %r15
     shr $16, %r15
     and $0xff, %r15d                /* target scale */
-    cmp $T_STR, %eax
+    cmp $18, %r14d
+    ja cv_to_wide
+    cmp $T_DEC, %eax
+    jne 0f
+    mov %ebx, %edi                  /* wide -> narrow */
+    call dec_is_wide
+    test %eax, %eax
+    jnz cv_to_wide
+    movzbl %bl, %eax
+0:  cmp $T_STR, %eax
     je cv_str_to_dec
     cmp $T_FLOAT, %eax
     je 3f
@@ -755,6 +843,55 @@ cv_str_to_dec:
     test %edx, %edx
     jnz raise_overflow
     LEAVE
+
+/* conversions with a wide decimal source or target */
+cv_to_wide:
+    movzbl %bl, %eax
+    cmp $T_STR, %eax
+    je 3f
+    cmp $T_FLOAT, %eax
+    je 4f
+    mov %ebx, %edi                  /* INT64 / DECIMAL: exact rescale */
+    mov %r13, %rsi
+    call num_load
+    mov %rax, %rdi
+    mov %rdx, %rsi
+    mov %ecx, %edx
+    mov %r15d, %ecx
+    mov %r14d, %r8d
+    call dec_rescale128
+    test %ecx, %ecx
+    jnz raise_overflow
+1:  mov %rax, %rdi
+    mov %rdx, %rsi
+    mov %r12d, %edx
+    call dec_put
+    LEAVE
+3:  lea 8(%r13), %rdi               /* STRING: round half away from zero */
+    mov (%r13), %rsi
+    call text_trim
+    mov %rax, %rdi
+    mov %rdx, %rsi
+    mov %r14d, %edx
+    mov %r15d, %ecx
+    mov $1, %r8d
+    mov %rsp, %r9
+    call dec_parse
+    cmp $1, %eax
+    je cast_conv_error
+    test %eax, %eax
+    jnz raise_overflow
+2:  mov 0(%rsp), %rax
+    mov 8(%rsp), %rdx
+    jmp 1b
+4:  movq %r13, %xmm0                /* FLOAT64: exact binary value */
+    mov %r14d, %edi
+    mov %r15d, %esi
+    mov %rsp, %rdx
+    call double_to_dec128
+    test %eax, %eax
+    jnz raise_overflow
+    jmp 2b
 
 cv_to_ts:                           /* DATE -> TS */
     mov $86400000000, %rax

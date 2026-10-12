@@ -396,22 +396,8 @@ be_binary:
     je bc_cast_right_float
     cmp $T_FLOAT, %r9d
     je bc_cast_left_float
-    /* INT vs DEC */
-    cmp $T_INT, %r8d
-    jne 1f
-    mov %r14d, %esi                 /* left INT -> DEC(18, s_right) */
-    and $0xff0000, %esi
-    or $MKDEC(18, 0), %esi
-    mov N_A(%r12), %rdi
-    call wrap_cast
-    mov %rax, N_A(%r12)
-    jmp be_done
-1:  mov %r13d, %esi                 /* right INT -> DEC(18, s_left) */
-    and $0xff0000, %esi
-    or $MKDEC(18, 0), %esi
-    mov N_B(%r12), %rdi
-    call wrap_cast
-    mov %rax, N_B(%r12)
+    /* INT vs DEC: no promotion, the exact values are compared at run time
+     * (decimal38.md section 4; eval.S cmp_values) */
     jmp be_done
 bc_cast_right_float:
     mov N_B(%r12), %rdi
@@ -521,7 +507,26 @@ bb_arith:
     je bind_type_error
     cmp $B_DIV, %r10d
     je ba_float
-    /* scales: an INT64 operand takes part as DECIMAL(18,0) */
+    /* result precision W: 38 if a DECIMAL operand is wide, else 18 */
+    movl $18, 16(%rsp)
+    mov 0(%rsp), %edi
+    call dec_is_wide
+    test %eax, %eax
+    jnz 61f
+    mov 4(%rsp), %edi
+    call dec_is_wide
+    test %eax, %eax
+    jz 62f
+61: movl $38, 16(%rsp)
+62: movzbl 0(%rsp), %r8d
+    movzbl 4(%rsp), %r9d
+    /* scales: an INT64 operand takes part as DECIMAL(18,0), or as
+     * DECIMAL(19,0) (exact for every INT64) when W = 38 */
+    mov $MKDEC(18, 0), %eax
+    cmpl $38, 16(%rsp)
+    jne 63f
+    mov $MKDEC(19, 0), %eax
+63: mov %eax, 20(%rsp)
     mov 0(%rsp), %eax
     shr $16, %eax
     and $0xff, %eax
@@ -537,7 +542,7 @@ bb_arith:
     cmp $T_NULL, %ecx
     je 71f
     mov N_A(%r12), %rdi
-    mov $MKDEC(18, 0), %esi
+    mov 20(%rsp), %esi
     call wrap_cast
     mov %rax, N_A(%r12)
     jmp 7f
@@ -550,7 +555,7 @@ bb_arith:
     cmp $T_NULL, %ecx
     je 72f
     mov N_B(%r12), %rdi
-    mov $MKDEC(18, 0), %esi
+    mov 20(%rsp), %esi
     call wrap_cast
     mov %rax, N_B(%r12)
     jmp 8f
@@ -563,11 +568,14 @@ bb_arith:
     cmp %ecx, %eax                  /* + - : max scale */
     cmovb %ecx, %eax
     jmp 10f
-9:  add %ecx, %eax                  /* * : s1 + s2 */
-    cmp $18, %eax
+9:  add %ecx, %eax                  /* * : s1 + s2 <= W */
+    cmp 16(%rsp), %eax
     ja bind_type_error
 10: shl $16, %eax
-    or $MKDEC(18, 0), %eax
+    mov 16(%rsp), %ecx              /* DECIMAL(W, s) */
+    shl $8, %ecx
+    or %ecx, %eax
+    or $T_DEC, %eax
     mov %eax, N_TYPE(%r12)
     jmp be_done
 
@@ -655,10 +663,20 @@ bf_agg:
     jmp bf_agg_register
 6:  cmp $T_DEC, %r15d
     jne 7f
-    mov %r14d, %eax                 /* SUM(DEC(p,s)) -> DEC(18,s) */
+    mov %r14d, %eax                 /* SUM(DEC(p,s)) -> DEC(W,s) */
     and $0xff0000, %eax
     or $MKDEC(18, 0), %eax
-    mov %eax, N_TYPE(%r12)
+    mov %r14d, %edi
+    call dec_is_wide
+    test %eax, %eax
+    mov %r14d, %eax
+    jz 61f
+    and $0xff0000, %eax
+    or $MKDEC(38, 0), %eax
+    jmp 62f
+61: and $0xff0000, %eax
+    or $MKDEC(18, 0), %eax
+62: mov %eax, N_TYPE(%r12)
     jmp bf_agg_register
 7:  cmp $T_NULL, %r15d
     jne 8f
@@ -722,7 +740,24 @@ FUNC common_cmp_type
     mov $T_INT, %eax
     cmp %r8d, %r9d
     je 2f                           /* INT/INT or DEC/DEC */
-1:  /* INT with DEC, or DEC with DEC: DECIMAL(18, max scale) */
+1:  /* INT with DEC, or DEC with DEC: DECIMAL(W, max scale), W = 18 when
+     * that holds every value of both sides exactly, else 38 (the IN
+     * (subquery) key type: comparisons must not overflow) */
+    mov %ebx, %eax
+    shr $16, %eax
+    and $0xff, %eax
+    mov %r12d, %ecx
+    shr $16, %ecx
+    and $0xff, %ecx
+    cmp %ecx, %eax
+    cmovb %ecx, %eax                /* max scale */
+    mov %ebx, %edi
+    call int_digits
+    mov %eax, %r13d
+    mov %r12d, %edi
+    call int_digits
+    cmp %eax, %r13d
+    cmovb %eax, %r13d               /* max integer digits */
     mov %ebx, %eax
     shr $16, %eax
     and $0xff, %eax
@@ -731,8 +766,13 @@ FUNC common_cmp_type
     and $0xff, %ecx
     cmp %ecx, %eax
     cmovb %ecx, %eax
+    lea (%r13, %rax), %ecx
     shl $16, %eax
+    cmp $18, %ecx
+    ja 11f
     or $MKDEC(18, 0), %eax
+    jmp 9f
+11: or $MKDEC(38, 0), %eax
     jmp 9f
 2:  cmp $T_DEC, %r8d
     je 1b
@@ -755,6 +795,21 @@ FUNC common_cmp_type
     pop %rbx
     ret
 ENDF common_cmp_type
+
+/* int_digits(type edi) -> eax integer digits of an INT64 (19) or
+ * DECIMAL(p,s) (p - s) value */
+FUNC int_digits
+    mov $19, %eax
+    cmp $T_DEC, %dil
+    jne 1f
+    mov %edi, %eax
+    shr $8, %eax
+    movzbl %al, %eax
+    shr $16, %edi
+    movzbl %dil, %edi
+    sub %edi, %eax
+1:  ret
+ENDF int_digits
 
 /* ================================================================ tree utilities */
 

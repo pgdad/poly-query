@@ -238,16 +238,34 @@ FUNC common_type
     je 3f
     cmp $T_FLOAT, %ecx
     je 3f
-    mov %edi, %eax                  /* DECIMAL(18, max(s1, s2)); INT has s = 0 */
+    push %rbx                       /* DECIMAL(W, max(s1, s2)); INT has s = 0 */
+    push %r12
+    push %r13
+    mov %edi, %ebx
+    mov %esi, %r12d
+    call dec_is_wide
+    mov %eax, %r13d
+    mov %r12d, %edi
+    call dec_is_wide
+    or %eax, %r13d                  /* W = 38 if a decimal is wide */
+    mov %ebx, %eax
     shr $16, %eax
     movzbl %al, %eax
-    mov %esi, %ecx
+    mov %r12d, %ecx
     shr $16, %ecx
     movzbl %cl, %ecx
     cmp %ecx, %eax
     cmovb %ecx, %eax
     shl $16, %eax
     or $MKDEC(18, 0), %eax
+    test %r13d, %r13d
+    jz 4f
+    or $MKDEC(38, 0), %eax          /* 18 | 38 = 54: set p explicitly */
+    and $0xff00ff, %eax
+    or $MKDEC(38, 0), %eax
+4:  pop %r13
+    pop %r12
+    pop %rbx
     ret
 1:  mov %edi, %eax
     ret
@@ -291,11 +309,21 @@ FUNC to_double
     je 1f
     cvtsi2sd %rsi, %xmm0
     ret
-1:  shr $16, %edi
+1:  mov %edi, %eax
+    shr $8, %eax
+    cmp $18, %al
+    ja 3f
+    shr $16, %edi
     movzbl %dil, %eax
     mov %rsi, %rdi
     mov %eax, %esi
     jmp dec_to_float
+3:  shr $16, %edi                   /* wide */
+    movzbl %dil, %edx
+    mov 8(%rsi), %rax
+    mov (%rsi), %rdi
+    mov %rax, %rsi
+    jmp dec128_to_double
 2:  movq %rsi, %xmm0
     ret
 ENDF to_double
@@ -333,6 +361,12 @@ FUNC cmp_mixed
     call value_cmp
     LEAVE
 cm_dec:                             /* DECIMAL vs DECIMAL/INT (INT has scale 0) */
+    mov %ebx, %edi
+    mov %r12, %rsi
+    mov %r13d, %edx
+    mov %r14, %rcx
+    call dec_cmp_any
+    LEAVE
     xor %esi, %esi
     cmp $T_DEC, %r8d
     jne 1f
@@ -614,7 +648,15 @@ bt_round:                           /* ROUND(x [, n constant INT64]) */
     xor %eax, %eax
 3:  shl $16, %eax
     or $MKDEC(18, 0), %eax
-    mov %eax, N_TYPE(%r12)
+    mov %eax, 8(%rsp)
+    mov %r13d, %edi
+    call dec_is_wide
+    test %eax, %eax
+    mov 8(%rsp), %eax
+    jz 4f
+    and $0xff00ff, %eax             /* wide argument: DECIMAL(38, ...) */
+    or $MKDEC(38, 0), %eax
+4:  mov %eax, N_TYPE(%r12)
     jmp bsf_done
 
 bt_floor:                           /* FLOOR / CEIL: DECIMAL(p,s) -> DECIMAL(18,0) */
@@ -624,7 +666,12 @@ bt_floor:                           /* FLOOR / CEIL: DECIMAL(p,s) -> DECIMAL(18,
     jz bsf_set_int
     cmp $T_DEC, %ecx
     jne 1f
+    mov %eax, %edi
+    call dec_is_wide
+    test %eax, %eax
     mov $MKDEC(18, 0), %eax
+    jz 1f
+    mov $MKDEC(38, 0), %eax
 1:  mov %eax, N_TYPE(%r12)
     jmp bsf_done
 
@@ -1254,10 +1301,25 @@ ef_abs:
     jne 1f
     btr $63, %rax
     jmp ef_ret
-1:  test %rax, %rax                 /* INT64 / DECIMAL */
+1:  mov N_TYPE(%rbx), %edi
+    call dec_is_wide
+    test %eax, %eax
+    jnz 2f
+    mov %r13, %rax
+    test %rax, %rax                 /* INT64 / DECIMAL */
     jns ef_ret
     neg %rax
     jo raise_overflow
+    jmp ef_ret
+2:  mov %r13, %rax                  /* wide: |v| < 10^p cannot overflow */
+    mov 8(%r13), %rsi
+    test %rsi, %rsi
+    jns ef_ret
+    mov (%r13), %rdi
+    neg %rdi
+    adc $0, %rsi
+    neg %rsi
+    call dec_box
     jmp ef_ret
 
 ef_round:
@@ -1273,11 +1335,19 @@ ef_round:
     jmp ef_ret
 1:  cmp $T_DEC, %eax
     jne 2f
+    mov %ecx, %edi
+    call dec_is_wide
+    mov %eax, 0(%rsp)
+    ARGTYPE 0, %ecx
     mov %r13, %rdi
     shr $16, %ecx
     movzbl %cl, %esi
     mov N_V2(%rbx), %rdx
+    cmpl $0, 0(%rsp)
+    jnz 3f
     call round_dec
+    jmp ef_ret
+3:  call round_dec128
     jmp ef_ret
 2:  movq %r13, %xmm0
     mov N_V2(%rbx), %rdi
@@ -1297,6 +1367,19 @@ ef_ceil:
     cmp $T_DEC, %eax
     mov %r13, %rax
     jne ef_ret                      /* INT64: unchanged */
+    mov %ecx, 0(%rsp)
+    mov %ecx, %edi
+    call dec_is_wide
+    mov 0(%rsp), %ecx
+    test %eax, %eax
+    jz 6f
+    mov %r13, %rdi                  /* wide: DECIMAL(38,0) */
+    shr $16, %ecx
+    movzbl %cl, %esi
+    mov %r15d, %edx
+    call floor_dec128
+    jmp ef_ret
+6:  mov %r13, %rax
     /* DECIMAL(p,s) -> DECIMAL(18,0) */
     shr $16, %ecx
     movzbl %cl, %ecx

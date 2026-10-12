@@ -884,10 +884,10 @@ FUNC type_parse
     call tp_skipws
     cmp %r12, %r13
     jne .Ltp_syn
-    /* validate 1 <= p <= 18, s <= p */
+    /* validate 1 <= p <= 38, s <= p */
     test %r14, %r14
     jz .Ltp_bad
-    cmp $18, %r14
+    cmp $38, %r14
     ja .Ltp_bad
     cmp %r14, %r15
     ja .Ltp_bad
@@ -1226,11 +1226,20 @@ FUNC fmt_value_text
     LEAVE
 4:  cmp $T_DEC, %eax
     jne 5f
-    mov %r13, %rsi
     mov %r12, %rdx
     shr $16, %rdx
     movzbl %dl, %edx
+    mov %r12, %rcx
+    shr $8, %rcx
+    cmp $18, %cl
+    ja 41f
+    mov %r13, %rsi
     call fmt_decimal
+    LEAVE
+41: mov %edx, %ecx                  /* wide: boxed i128 */
+    mov (%r13), %rsi
+    mov 8(%r13), %rdx
+    call fmt_dec128
     LEAVE
 5:  cmp $T_STR, %eax
     jne 6f

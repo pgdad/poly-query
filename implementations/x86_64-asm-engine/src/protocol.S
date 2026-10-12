@@ -72,7 +72,7 @@ caps_fields:
     .ascii ",\"phase4\",\"http.streaming\""
     .ascii ",\"phase5\",\"exec.row\",\"exec.vectorized\",\"exec.parallel\""
     .ascii ",\"join.hash\",\"join.merge\",\"join.nested_loop\""
-    .asciz ",\"change.union_all\"]"
+    .asciz ",\"change.union_all\",\"change.decimal38\"]"
 
 /* operation table: name, handler */
 op_names:
