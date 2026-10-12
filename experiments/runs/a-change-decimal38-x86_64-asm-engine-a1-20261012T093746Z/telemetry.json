@@ -1,0 +1,130 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-decimal38-x86_64-asm-engine-a1-20261012T093746Z",
+ "language": "x86_64-asm-engine",
+ "task": "change-decimal38",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-decimal38",
+ "prompt_sha256": "5c4266feaf19ae99b4389cb9fc7eb7bfd80a75a9707b58063d2ef3c874b66708",
+ "session_id": "80ebea12-464f-4b62-9c88-33db7e1f8854",
+ "tokens": {
+  "input": 350,
+  "output": 191379,
+  "cache_read": 45786083,
+  "cache_creation": 425684,
+  "thinking": null,
+  "thinking_estimated": 81950,
+  "source": "result events",
+  "api_messages": 175
+ },
+ "rate_limit": {
+  "events": 10,
+  "max_utilization": {
+   "five_hour": 0.15,
+   "seven_day": 0.59
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 16.391668599999996,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 179,
+ "result_segments": 1,
+ "assistant_messages": 344,
+ "tool_calls": {
+  "Bash": 177,
+  "Write": 1
+ },
+ "tool_calls_total": 178,
+ "tool_failures": 6,
+ "build_invocations": 24,
+ "build_failures_heuristic": 3,
+ "conformance_runs": 13,
+ "conformance_progress": [
+  [
+   591,
+   591
+  ],
+  [
+   0,
+   0
+  ],
+  [
+   0,
+   69
+  ],
+  [
+   40,
+   69
+  ],
+  [
+   51,
+   69
+  ],
+  [
+   68,
+   69
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ]
+ ],
+ "repair_iterations": 10,
+ "time": {
+  "wall_seconds": 1799.4,
+  "model_api_seconds": 1681.6,
+  "tool_seconds": 118.6,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 11,
+  "files_changed": 20,
+  "lines_added": 3117,
+  "lines_removed": 144,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "CR-2 (DECIMAL precision 38) is implemented in the assembly engine and the definition of done is met. Everything is committed and the working tree is clean.\n\n**Test results**\n- Conformance runner: `TOTAL: 660/660 pass` (phase 1 225/225, phase 2 208/208, phase 3 212/212 including the 69 `changes/decimal38` cases, phase 5 15/15).\n- With `--modes`: `TOTAL: 3870/3870 pass`, also with `PQ_PAR_MIN=1`, which forces parallel execution on the tiny test tables.\n- With `--transport http`: `TOTAL: 660/660 pass`.\n- `http_suite.py`: `http suite: 19/19 passed`.\n- `make clean build test lint` all pass. That includes the new `tests/test_dec128.S` (62 cases) and the cross-mode differential test (475 checks, now with a 3,000-row table of wide decimals).\n- Extra checks outside the repo: wide aggregate and arithmetic results matched Python's `decimal` module. A random-query fuzzer found 0 differences in 20,000 cases. PQCF v2 files written by the engine decoded correctly with an independent Python decoder.\n- The engine claims `change.decimal38` and keeps `change.union_all`.\n\n**What I implemented and the main design decisions**\n- **Storage of values:** decimals with precision up to 18 are unchanged (stored inline as 64-bit integers). Wider decimals keep the same 8-byte value slot, but it holds a pointer to a fixed 16-byte (128-bit) number, the same way strings are stored. So rows, vectors, hash keys, indexes and statistics needed no layout change; code checks the type and branches.\n- **Exact math:** the new `src/dec128.S` module works in 256 bits internally and only checks the final result against the allowed number of digits. Wide SUM/AVG accumulate in 192 bits, and AVG divides the exact sum before converting to a float.\n- **Exact comparisons:** comparing an INT64 with a DECIMAL no longer converts the integer first. Comparisons, IN-subqueries and joins all compare the exact values and never raise an overflow error.\n- **Joins:** an INT64 = DECIMAL join used to run as a hash join and still does (cast to a common exact DECIMAL(38,s) type, wide-key sorts for merge joins).\n- **Files:** a table with a wide column is saved as PQCF v2 (128-bit values in PLAIN and RLE); every other table stays v1. The reader enforces the version and validity rules from the spec.\n- **Narrow decimals now match the spec more closely in two edge cases:** converting to FLOAT64 gives the nearest double, and converting from FLOAT64 rounds the double's exact binary value. All existing cases still pass.\n\n**Known limitations and deviations**\n- The FULL keyword is reserved in the grammar, but the test file uses `... AS full`. I accept `FULL` and `RIGHT` as column aliases only right after `AS`; everywhere else they still return `UNSUPPORTED`.\n- Expressions with wide operands run row by row inside vectorized batches. Results are correct and still parallel, but don't use SIMD.\n- Joins between decimals of different scales stay nested-loop joins, as before.\n- Benchmarks on 1m rows: most queries are unchanged. Two vectorized decimal-vs-integer filters are a bit slower: 4.3 \u2192 6.0 ms and 5.0 \u2192 5.6 ms single-threaded, against a doubling before I added a fast path.\n\nREADME.md has a \"Change CR-2\" section covering the wide-decimal representation, how narrow and wide operations are dispatched, and a table of every module touched. NOTES.md is up to date.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

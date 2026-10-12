@@ -1,2 +1,6 @@
 2026-10-12T09:37:46+00:00 chain chain-a-change-decimal38-x86_64-asm-engine-a1-20261012T093746Z: session 1 -> a-change-decimal38-x86_64-asm-engine-a1-20261012T093746Z (budget $50.00)
 2026-10-12T09:37:46+00:00 [a-change-decimal38-x86_64-asm-engine-a1-20261012T093746Z] agent queued (usage gate, then launch)
+2026-10-12T10:07:45+00:00 [a-change-decimal38-x86_64-asm-engine-a1-20261012T093746Z] agent finished; collecting telemetry
+2026-10-12T10:07:45+00:00 [a-change-decimal38-x86_64-asm-engine-a1-20261012T093746Z] validating (clean clone, sandboxed)
+2026-10-12T10:07:58+00:00 [a-change-decimal38-x86_64-asm-engine-a1-20261012T093746Z] outcome=success cost=$16.391668599999996 turns=179 wall=1799.4s
+2026-10-12T10:07:58+00:00 chain chain-a-change-decimal38-x86_64-asm-engine-a1-20261012T093746Z finished: outcome=success sessions=1 spent=$16.39
