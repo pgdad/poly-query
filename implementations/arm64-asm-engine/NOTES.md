@@ -1,5 +1,36 @@
 # Working notes (arm64-asm-engine)
 
+## Status (task: optimize latency, analytics workload @1m, session 1)
+- Benchmark: `bench/workload.sh DATA_DIR [RUNS] [OPTIONS_JSON]` (data:
+  `python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pq1m
+  --jobs 1`, DATA_DIR = /tmp/pq1m/1m; PQ_ENGINE=path overrides the binary).
+  Before numbers: bench/workload-before.txt (commit e38bcc1).
+- Done so far (all suites green after each step):
+  1. rt_tune_malloc (mallopt: fixed 32 MiB mmap threshold, 1 GiB trim
+     threshold, 64 MiB top pad): request arenas no longer page-fault in.
+  2. vagg.S: DISTINCT aggregates in the vectorized hash aggregation
+     (vagg_distinct / dagg_task; FLOAT SUM/AVG DISTINCT keep the old sorted
+     path). q09 143 -> ~10 ms.
+  3. sort.S rewritten: normalized-key parallel MSD radix sort (see header);
+     tests/sh/run_sort_tests.sh checks exact order vs mode row. q14 165 ->
+     ~14 ms, q15 83 -> ~10 ms.
+  4. parallel.S: persistent pool (par_run queues a job, caller claims tasks
+     too); thread_boost (sched_setattr uclamp 1024) on pool, main and HTTP
+     connection threads — without it EAS packs pool threads onto shared /
+     slow CPUs for the first ~15 queries (tasks 2x slower). Hard CPU
+     pinning was tried and is worse (caller collides with pinned threads).
+     PQ_POOL_SPIN env: idle polls before a pool thread sleeps.
+  5. join.S hj_probe: 64-bit hash pre-check, inline single-key equality
+     (HS_FAST), tuples emitted directly.
+- Measuring: results are noisy (big/little cores); use many runs, compare
+  binaries alternately (git worktree of an older commit in /tmp).
+- Profiling: no perf/ptrace attach; /tmp/pqb/prof.sh style sampler: gdb runs
+  the engine, a loop sends SIGINT, `thread apply all bt` per stop.
+- Next candidates: agg_task inner loop (gt_get / hash per key calls), group
+  table merge (every merge task scans all partial tables), q20 dictionary
+  evaluation of UPPER(currency), q19 CTE, q11 multi-join, more tasks than
+  threads for balance across big/little cores.
+
 ## Status (change CR-2 decimal38, session 1)
 - Conformance incl. changes/decimal38 (69/69): all phases 660/660,
   `--modes` 3870/3870, `--transport http` 660/660, http_suite 19/19;
