@@ -7,6 +7,9 @@
 //       the output cardinality from the table statistics, chooses an index
 //       (PN_IDX / PN_IXA) and counts the PQCF row groups that the predicates
 //       exclude (PN_RGSKIP, for EXPLAIN)
+//   scan_estimate(x0 BoundQuery*, x1 rv index, x2 predicate or 0) -> x0
+//       estimated output rows of a scan of the rv with that predicate, from
+//       the statistics alone (for the logical optimizer's join ordering)
 //   rg_skippable(x0 Pred** preds, x1 n, x2 Table*, x3 RowGroup*) -> w0 1 if
 //       the min/max statistics of the row group prove that no row passes
 //
@@ -685,6 +688,26 @@ FUNC ap_scan
     add  sp, sp, #96
     LEAVE 5
 ENDF ap_scan
+
+// =============================================================================
+// scan_estimate(x0 BoundQuery*, x1 rv index, x2 predicate or 0) -> x0 rows
+// Runs the estimation on a scratch scan node; the access path chosen on the
+// way is discarded with it.
+//   x19 predicate
+// =============================================================================
+FUNC scan_estimate
+    ENTER 1
+    stp  x0, x1, [sp, #-16]!
+    mov  x19, x2
+    mov  x0, #PN_SIZE
+    bl   arena_zalloc
+    ldp  x9, x10, [sp], #16
+    str  x9, [x0, #PN_BQ]
+    str  x10, [x0, #PN_RV]
+    str  x19, [x0, #PN_EXPR]
+    bl   ap_scan
+    LEAVE 1
+ENDF scan_estimate
 
 // find_bounds(x0 Pred*) -> x0 lower-bound Pred* (GT/GE) or 0, x1 upper-bound
 // Pred* (LT/LE) or 0, among the scan's predicates on the same column.

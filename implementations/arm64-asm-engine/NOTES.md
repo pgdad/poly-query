@@ -1,5 +1,28 @@
 # Working notes (arm64-asm-engine)
 
+## Status (change CR-3 plan separation, session 1) — complete
+- Conformance unchanged: all phases 591/591, `--modes` 3456/3456,
+  `--transport http` 591/591, http_suite 19/19; capability set identical;
+  `make build test lint` pass (new: tests/unit/test_optimizer.S, 42 cases:
+  builder + every rule alone + optimizer on/off).
+- Structure (README "Change CR-3", module map): logical.S (LogicalNode,
+  lp_build, lp_exprs visitor, lp_print) -> optimize.S (rule table) +
+  rule_prune / rule_fold / rule_simplify / rule_pushdown / rule_joinorder
+  -> physical.S (phys_plan: placement, keys, algorithm, access paths,
+  columns, build side, top-N PN_TOPN, PN_XMODE / PN_XTHREADS) -> exec.S
+  (exec_settings installs the plan's mode / threads).
+- Options: protocol writes planner inputs g_opt_* (plan.S); executor reads
+  only g_x_mode / g_x_threads (set from the plan root).
+- Rule order matters for identical plans: prune, fold, simplify,
+  push_filters, reorder_joins, push_join_conditions (see README).
+- optimize=false: no rule runs; physical.S still places conjuncts (same
+  code as before) and uses RV_USED for unpruned scans (Phase 3 §3 + the
+  --modes suite need pushdown / pruning / index scans with optimize=false).
+- Differential check (throw-away, /tmp/diff/difftest.py, outside the repo):
+  old vs new binary on every conformance SQL + /tmp/diff/cases/extra.pqt,
+  explain + query x 10 option sets: 0 differences.
+- Debug: PQ_TRACE_PLAN=1 prints the logical plan after every rule.
+
 ## Status (change CR-1 UNION ALL, session 1) — complete
 - Conformance (incl. changes/union_all 22/22): all phases 591/591,
   `--modes` 3456/3456, `--transport http` 591/591, http_suite 19/19;
@@ -139,9 +162,10 @@
 ## Pipeline / where things are
 lexer.S -> parser.S (AST) -> binder.S (bind_query: scopes, typing,
 grouping; functions.S/strfuncs.S for scalar functions, CASE, LIKE, BETWEEN,
-IN lists) -> plan.S (plan_statement: logical plan, physical rewrite,
-plan_explain JSON) -> exec.S (exec_plan; subquery evaluation ev_subq/
-ev_exists/ev_insub) with eval.S (expressions, aggregates).
+IN lists) -> plan.S (plan_statement / plan_query: logical.S lp_build ->
+optimize.S rules -> physical.S phys_plan; plan_explain JSON) -> exec.S
+(exec_plan; subquery evaluation ev_subq/ev_exists/ev_insub) with eval.S
+(expressions, aggregates).
 Shared structures: include/pq.inc (BoundQuery, RV, BoundFrom, SubPlan,
 CteDef, PlanNode, TupleSet, EvalCtx). Frame macros: include/frame.inc.
 

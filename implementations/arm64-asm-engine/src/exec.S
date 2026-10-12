@@ -54,15 +54,14 @@
 #define IS_TYPE    24               // u32 type of the values
 #define IS_SIZE    32
 
-// Execution settings (pq.inc XM_* / XJ_*): per request (protocol.S
-// parse_exec_opts) and process-wide defaults (main.S).
+// Execution settings of the running plan (pq.inc XM_*): taken from the plan
+// root (physical.S PN_XMODE / PN_XTHREADS) by exec_plan / exec_plan_stream;
+// worker threads inherit them (parallel.S). Process-wide defaults (main.S).
     TDATA
     .p2align 3
-    .global g_x_threads, g_x_mode, g_x_join, g_x_optimize
+    .global g_x_threads, g_x_mode
 g_x_threads:    .quad 1
-g_x_mode:       .word XM_AUTO
-g_x_join:       .word XJ_AUTO
-g_x_optimize:   .word 1
+g_x_mode:       .word XM_VEC
     .data
     .p2align 3
     .global g_def_threads, g_par_min_rows
@@ -202,6 +201,8 @@ ENDF eval_true
 FUNC exec_plan
     ENTER 2
     mov  x19, x0
+    bl   exec_settings
+    mov  x0, x19
     bl   new_root_ctx
     mov  x20, x0
     mov  x0, x19
@@ -209,6 +210,18 @@ FUNC exec_plan
     bl   ex_rows
     LEAVE 2
 ENDF exec_plan
+
+// exec_settings(x0 PlanNode* root): runs with the plan's execution mode and
+// threads   (leaf)
+LFUNC exec_settings
+    ldr  w9, [x0, #PN_XMODE]
+    TLS_ADDR x10, g_x_mode
+    str  w9, [x10]
+    ldr  x9, [x0, #PN_XTHREADS]
+    TLS_ADDR x10, g_x_threads
+    str  x9, [x10]
+    ret
+ENDF exec_settings
 
 // new_root_ctx(x0 PlanNode*, x1 outer EvalCtx* or 0) -> x0 EvalCtx*
 //   x19 node
@@ -248,6 +261,8 @@ FUNC exec_plan_stream
     ENTER 3
     mov  x19, x0
     mov  x21, x1
+    bl   exec_settings
+    mov  x0, x19
     mov  x1, #0
     bl   new_root_ctx
     mov  x20, x0
@@ -329,10 +344,7 @@ LFUNC ex_rows
     LEAVE 3
 1:  cmp  w9, #PO_SORT                  // ORDER BY ... LIMIT: top-N
     b.ne 11f
-    ldr  x9, [x21, #BQ_LIMIT]
-    tbnz x9, #63, 11f
-    TLS_ADDR x9, g_x_optimize
-    ldr  w9, [x9]
+    ldr  w9, [x0, #PN_TOPN]
     cbz  w9, 11f
     ldr  x0, [x0, #PN_LEFT]
     mov  x1, x20

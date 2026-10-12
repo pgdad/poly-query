@@ -1,62 +1,39 @@
 // =============================================================================
-// plan.S — query planning: logical plan, physical plan, EXPLAIN output.
+// plan.S — query planning driver, EXPLAIN output, planner helpers.
 //
 //   plan_statement(x0 root BoundQuery*) -> x0 PlanNode*   plans the statement
-//                                          and every SubPlan in BQ_SPV
-//   plan_explain(x0 Buf*, x1 PlanNode*)    writes the plan as JSON
+//       and every SubPlan in BQ_SPV (SP_LPLAN logical, SP_PLAN physical)
+//   plan_query(x0 BoundQuery*) -> x0 PlanNode*, x1 LogicalNode*
+//       one query level:  lp_build (logical.S)  ->  optimize (optimize.S,
+//       rule_*.S; no rule with "optimize": false)  ->  phys_plan (physical.S)
+//   plan_explain(x0 Buf*, x1 PlanNode*)    writes the physical plan as JSON
 //                                          (indexes-and-planning.md §4)
 //
-// Stage 1, logical plan (lp_*): a direct translation of the bound query:
-//     Limit? <- Sort? <- Distinct? <- (Aggregate | Project)
-//            <- Filter(WHERE)? <- FROM tree (Scan / Join) | Values
-// or, for a UNION ALL compound (plan_union):
-//     Limit? <- Sort? <- UnionAll <- branch plans (each planned as above)
-// Stage 2, physical plan (pp_*), rewrites the logical plan in place:
-//   * predicate pushdown: WHERE conjuncts move to the lowest scan or join
-//     that covers the range variables they reference (never below the
-//     NULL-padded side of a LEFT JOIN); a conjunct over two sides of an inner
-//     or cross join becomes part of that join's condition;
-//   * join conditions are split again: single-side conjuncts move into the
-//     children (only the right child for LEFT JOIN), equality conjuncts
-//     between the two sides become hash keys, the rest stays as residual;
-//   * join order (optimize): inner-join regions of >= 3 inputs are
-//     reordered greedily (optimize.S opt_join_order);
-//   * join algorithm (option "join"): with equi keys HashJoin (auto, hash),
-//     MergeJoin (merge) or NestedLoopJoin (nested_loop: the keys are kept and
-//     compared per pair); without equi keys always NestedLoopJoin;
-//   * column pruning: scans read only referenced columns (RV_USED, collected
-//     by the binder) — reported by EXPLAIN as the TableScan column list.
+// Helpers shared by the logical rules, the physical planner and access.S:
+//   split_conj, and_append, pvec_push, expr_rvmask.
+//
+// Planner inputs: the execution options of the request (thread-local,
+// written by protocol.S parse_exec_opts): g_opt_mode, g_opt_join,
+// g_opt_threads, g_opt_optimize (and access.S g_use_indexes).
 // =============================================================================
 #include "pq.inc"
 #include "frame.inc"
 
 #define MASK_ALL   -1              // conjunct must stay where it is
 
+    TDATA
+    .p2align 3
+    .global g_opt_threads, g_opt_mode, g_opt_join, g_opt_optimize
+g_opt_threads:  .quad 1
+g_opt_mode:     .word XM_AUTO
+g_opt_join:     .word XJ_AUTO
+g_opt_optimize: .word 1
+
     .text
 
 // =============================================================================
-// pn_new(w0 op, x1 BoundQuery*, x2 left child) -> x0 PlanNode*
-// The new node inherits the rv range of its child.
-// =============================================================================
-FUNC pn_new
-    ENTER 2
-    mov  w19, w0
-    stp  x1, x2, [sp, #-16]!
-    mov  x0, #PN_SIZE
-    bl   arena_zalloc
-    ldp  x1, x2, [sp], #16
-    str  w19, [x0, #PN_OP]
-    str  x1, [x0, #PN_BQ]
-    str  x2, [x0, #PN_LEFT]
-    cbz  x2, 1f
-    ldr  x9, [x2, #PN_LO]               // PN_LO / PN_HI
-    str  x9, [x0, #PN_LO]
-1:  LEAVE 2
-ENDF pn_new
-
-// =============================================================================
 // plan_statement(x0 root BoundQuery*) -> x0 root PlanNode*
-//   x19 root bq, x20 SubPlan vector, x21 index
+//   x19 root bq, x20 SubPlan vector, x21 index, x22 SubPlan*
 // =============================================================================
 FUNC plan_statement
     ENTER 2
@@ -68,10 +45,11 @@ FUNC plan_statement
     cmp  x21, x9
     b.hs 2f
     ldr  x9, [x20, #16]
-    ldr  x22, [x9, x21, lsl #3]         // SubPlan*  (x22 saved by ENTER 2)
+    ldr  x22, [x9, x21, lsl #3]
     ldr  x0, [x22, #SP_BQ]
     bl   plan_query
     str  x0, [x22, #SP_PLAN]
+    str  x1, [x22, #SP_LPLAN]
     add  x21, x21, #1
     b    1b
 2:  mov  x0, x19
@@ -79,586 +57,17 @@ FUNC plan_statement
     LEAVE 2
 ENDF plan_statement
 
-// plan_query(x0 BoundQuery*) -> x0 physical PlanNode*
-LFUNC plan_query
-    ldr  x9, [x0, #BQ_NUNION]
-    cbnz x9, plan_union
+// plan_query(x0 BoundQuery*) -> x0 physical PlanNode*, x1 LogicalNode*
+//   x19 logical plan
+FUNC plan_query
     ENTER 1
-    mov  x19, x0
-    TLS_ADDR x9, g_x_optimize           // logical rewrites (optimize.S)
-    ldr  w9, [x9]
-    cbz  w9, 1f
-    bl   opt_query
-1:  mov  x0, x19
     bl   lp_build
+    bl   optimize
     mov  x19, x0
-    bl   pp_rewrite
-    mov  x0, x19
+    bl   phys_plan
+    mov  x1, x19
     LEAVE 1
 ENDF plan_query
-
-// =============================================================================
-// plan_union(x0 compound BoundQuery*) -> x0 PlanNode*
-//   Limit? <- Sort? <- UnionAll(branch plans, in order)
-// Every branch is planned (and optimised) as a query of its own.
-//   x19 bq, x20 node, x21 index, x22 children array
-// =============================================================================
-LFUNC plan_union
-    ENTER 3
-    mov  x19, x0
-    mov  w0, #PO_UNION
-    mov  x1, x19
-    mov  x2, #0
-    bl   pn_new
-    mov  x20, x0
-    ldr  x9, [x19, #BQ_NUNION]
-    str  x9, [x20, #PN_NKIDS]
-    lsl  x0, x9, #3
-    bl   arena_zalloc
-    mov  x22, x0
-    str  x22, [x20, #PN_KIDS]
-    mov  x21, #0
-1:  ldr  x9, [x19, #BQ_NUNION]
-    cmp  x21, x9
-    b.hs 2f
-    ldr  x9, [x19, #BQ_UNION]
-    ldr  x0, [x9, x21, lsl #3]
-    bl   plan_query
-    str  x0, [x22, x21, lsl #3]
-    add  x21, x21, #1
-    b    1b
-2:  mov  x0, x19
-    mov  x1, x20
-    bl   lp_upper
-    LEAVE 3
-ENDF plan_union
-
-// =============================================================================
-// Logical plan
-// lp_build(x0 BoundQuery*) -> x0 PlanNode*
-//   x19 bq, x20 current top node
-// =============================================================================
-LFUNC lp_build
-    ENTER 2
-    mov  x19, x0
-    ldr  x1, [x19, #BQ_FROM]
-    cbz  x1, 1f
-    bl   lp_from
-    mov  x20, x0
-    b    2f
-1:  mov  w0, #PO_VALUES
-    mov  x1, x19
-    mov  x2, #0
-    bl   pn_new
-    mov  x20, x0
-2:  ldr  x9, [x19, #BQ_WHERE]
-    cbz  x9, 3f
-    mov  w0, #PO_FILTER
-    mov  x1, x19
-    mov  x2, x20
-    bl   pn_new
-    ldr  x9, [x19, #BQ_WHERE]
-    str  x9, [x0, #PN_EXPR]
-    mov  x20, x0
-3:  mov  w0, #PO_PROJECT
-    ldr  x9, [x19, #BQ_ISAGG]
-    cbz  x9, 4f
-    mov  w0, #PO_AGGREGATE
-4:  mov  x1, x19
-    mov  x2, x20
-    bl   pn_new
-    ldr  x9, [x19, #BQ_HAVING]
-    str  x9, [x0, #PN_EXPR]
-    mov  x20, x0
-    ldr  x9, [x19, #BQ_DISTINCT]
-    cbz  x9, 5f
-    mov  w0, #PO_DISTINCT
-    mov  x1, x19
-    mov  x2, x20
-    bl   pn_new
-    mov  x20, x0
-5:  mov  x0, x19
-    mov  x1, x20
-    bl   lp_upper
-    LEAVE 2
-ENDF lp_build
-
-// lp_upper(x0 BoundQuery*, x1 PlanNode*) -> x0 PlanNode*
-// Adds the Sort (ORDER BY) and Limit (LIMIT / OFFSET) nodes on top.
-//   x19 bq, x20 current top node
-LFUNC lp_upper
-    ENTER 2
-    mov  x19, x0
-    mov  x20, x1
-    ldr  x9, [x19, #BQ_NORDER]
-    cbz  x9, 6f
-    mov  w0, #PO_SORT
-    mov  x1, x19
-    mov  x2, x20
-    bl   pn_new
-    mov  x20, x0
-6:  ldr  x9, [x19, #BQ_LIMIT]
-    ldr  x10, [x19, #BQ_OFFSET]
-    cmn  x9, #1
-    ccmp x10, #0, #0, eq                // no LIMIT and OFFSET 0: no node
-    b.eq 7f
-    mov  w0, #PO_LIMIT
-    mov  x1, x19
-    mov  x2, x20
-    bl   pn_new
-    mov  x20, x0
-7:  mov  x0, x20
-    LEAVE 2
-ENDF lp_upper
-
-// lp_from(x0 BoundQuery*, x1 BoundFrom*) -> x0 PlanNode* (Scan / Join tree)
-//   x19 bq, x20 BoundFrom*, x21 node
-LFUNC lp_from
-    ENTER 3
-    mov  x19, x0
-    mov  x20, x1
-    ldr  w9, [x20, #BF_KIND]
-    cmp  w9, #BFK_JOIN
-    b.eq 1f
-    mov  w0, #PO_SCAN
-    mov  x1, x19
-    mov  x2, #0
-    bl   pn_new
-    ldr  x9, [x20, #BF_RV]
-    str  x9, [x0, #PN_RV]
-    mov  x10, #1
-    lsl  x10, x10, x9
-    str  x10, [x0, #PN_MASK]
-    ldr  x9, [x20, #BF_LO]
-    str  x9, [x0, #PN_LO]
-    LEAVE 3
-1:  mov  w0, #PO_JOIN
-    mov  x1, x19
-    mov  x2, #0
-    bl   pn_new
-    mov  x21, x0
-    ldr  w9, [x20, #BF_JT]
-    str  w9, [x21, #PN_JT]
-    ldr  x9, [x20, #BF_ON]
-    str  x9, [x21, #PN_EXPR]
-    ldr  x9, [x20, #BF_LO]
-    str  x9, [x21, #PN_LO]
-    mov  x0, x19
-    ldr  x1, [x20, #BF_LEFT]
-    bl   lp_from
-    str  x0, [x21, #PN_LEFT]
-    mov  x0, x19
-    ldr  x1, [x20, #BF_RIGHT]
-    bl   lp_from
-    str  x0, [x21, #PN_RIGHT]
-    ldr  x9, [x21, #PN_LEFT]
-    ldr  x9, [x9, #PN_MASK]
-    ldr  x10, [x0, #PN_MASK]
-    orr  x9, x9, x10
-    str  x9, [x21, #PN_MASK]
-    mov  x0, x21
-    LEAVE 3
-ENDF lp_from
-
-// =============================================================================
-// Physical plan
-// pp_rewrite(x0 PlanNode* root) — in place.
-// Finds the FROM tree (below an optional WHERE filter), pushes the WHERE
-// conjuncts down, then rewrites every join.
-//   x19 filter node or 0, x20 FROM root, x21 conjunct list (Vec), x22 index,
-//   x23 conjunct, x24 remaining predicate
-// =============================================================================
-LFUNC pp_rewrite
-    ENTER 4
-    sub  sp, sp, #32                    // Vec of conjuncts: n, cap, data
-    mov  x9, x0                         // descend to Aggregate / Project
-1:  ldr  w10, [x9, #PN_OP]
-    cmp  w10, #PO_AGGREGATE
-    b.eq 2f
-    cmp  w10, #PO_PROJECT
-    b.eq 2f
-    ldr  x9, [x9, #PN_LEFT]
-    b    1b
-2:  ldr  x20, [x9, #PN_LEFT]
-    mov  x19, #0
-    ldr  w10, [x20, #PN_OP]
-    cmp  w10, #PO_FILTER
-    b.ne 3f
-    mov  x19, x20
-    ldr  x20, [x19, #PN_LEFT]
-3:  ldr  w10, [x20, #PN_OP]
-    cmp  w10, #PO_VALUES
-    b.eq .Lpp_end
-    cbz  x19, .Lpp_joins
-    // ---- WHERE pushdown --------------------------------------------------
-    stp  xzr, xzr, [sp]
-    str  xzr, [sp, #16]
-    mov  x0, sp
-    ldr  x1, [x19, #PN_EXPR]
-    bl   split_conj
-    mov  x24, #0
-    mov  x22, #0
-4:  ldr  x9, [sp]
-    cmp  x22, x9
-    b.hs 6f
-    ldr  x9, [sp, #16]
-    ldr  x23, [x9, x22, lsl #3]
-    mov  x0, x23
-    bl   expr_rvmask
-    cbz  x0, 5f                         // constant / outer only: keep
-    mov  x2, x0
-    mov  x0, x20
-    mov  x1, x23
-    bl   push_conj
-    cbnz w0, 41f
-5:  mov  x0, x24                        // keep in the filter
-    mov  x1, x23
-    bl   and_append
-    mov  x24, x0
-41: add  x22, x22, #1
-    b    4b
-6:  str  x24, [x19, #PN_EXPR]
-    cbnz x24, .Lpp_joins
-    // filter became empty: unlink it (its parent is the Aggregate/Project)
-    // the filter became empty: overwrite it with its child (the FROM root)
-    mov  x0, x19
-    ldr  x1, [x19, #PN_LEFT]
-    mov  x2, #PN_SIZE
-    bl   memcpy
-    mov  x20, x19                       // the FROM root now lives in x19
-.Lpp_joins:
-    TLS_ADDR x9, g_x_optimize           // join order (optimize.S)
-    ldr  w9, [x9]
-    cbz  w9, 7f
-    mov  x0, x20
-    bl   opt_join_order
-    cmp  x0, x20
-    b.eq 7f
-    mov  x1, x0                         // new root: into the old record
-    mov  x0, x20
-    mov  x2, #PN_SIZE
-    bl   memcpy
-7:  mov  x0, x20
-    bl   pp_joins
-    mov  x0, x20
-    bl   pp_access
-.Lpp_end:
-    add  sp, sp, #32
-    LEAVE 4
-ENDF pp_rewrite
-
-// =============================================================================
-// push_conj(x0 PlanNode* (scan/join subtree), x1 conjunct, x2 rv mask)
-//   -> w0 1 if the conjunct was absorbed by the subtree
-//   x19 node, x20 conjunct, x21 mask, x22 left mask, x23 right mask
-// =============================================================================
-LFUNC push_conj
-    ENTER 4
-    mov  x19, x0
-    mov  x20, x1
-    mov  x21, x2
-    ldr  w9, [x19, #PN_OP]
-    cmp  w9, #PO_SCAN
-    b.ne 1f
-    ldr  x0, [x19, #PN_EXPR]
-    mov  x1, x20
-    bl   and_append
-    str  x0, [x19, #PN_EXPR]
-    b    .Lpc_yes
-1:  ldr  x0, [x19, #PN_LEFT]
-    bl   range_mask
-    mov  x22, x0
-    ldr  x0, [x19, #PN_RIGHT]
-    bl   range_mask
-    mov  x23, x0
-    bics xzr, x21, x22                  // mask within the left side?
-    b.ne 2f
-    ldr  x0, [x19, #PN_LEFT]
-    mov  x1, x20
-    mov  x2, x21
-    bl   push_conj
-    b    .Lpc_ret
-2:  ldr  w9, [x19, #PN_JT]
-    cmp  w9, #JT_LEFT
-    b.eq .Lpc_no                        // never into / onto a LEFT JOIN
-    bics xzr, x21, x23                  // within the right side?
-    b.ne 3f
-    ldr  x0, [x19, #PN_RIGHT]
-    mov  x1, x20
-    mov  x2, x21
-    bl   push_conj
-    b    .Lpc_ret
-3:  ldr  x0, [x19, #PN_EXPR]            // spans both: join condition
-    mov  x1, x20
-    bl   and_append
-    str  x0, [x19, #PN_EXPR]
-    mov  w9, #JT_INNER                  // CROSS + condition = INNER
-    str  w9, [x19, #PN_JT]
-.Lpc_yes:
-    mov  w0, #1
-.Lpc_ret:
-    LEAVE 4
-.Lpc_no:
-    mov  w0, #0
-    LEAVE 4
-ENDF push_conj
-
-// range_mask(x0 PlanNode* scan / join) -> x0 bitmask of its rvs   (leaf)
-FUNC range_mask
-    ldr  x0, [x0, #PN_MASK]
-    ret
-ENDF range_mask
-
-// =============================================================================
-// pp_joins(x0 PlanNode*) — rewrites every join of a FROM tree (pre-order, so
-// that conjuncts pushed down from a parent are seen by the children).
-//   x19 node, x20 conjunct Vec (stack), x21 index, x22 conjunct,
-//   x23 left mask, x24 right mask, x25 residual, x26 key vectors base
-// =============================================================================
-LFUNC pp_joins
-    ENTER 5
-    sub  sp, sp, #80                    // [0] conjuncts Vec, [32] lkeys Vec,
-                                        // [56] rkeys Vec (n, cap, data)
-    mov  x19, x0
-    ldr  w9, [x19, #PN_OP]
-    cmp  w9, #PO_SCAN
-    b.eq .Lpj_end
-    ldr  x0, [x19, #PN_LEFT]
-    bl   range_mask
-    mov  x23, x0
-    ldr  x0, [x19, #PN_RIGHT]
-    bl   range_mask
-    mov  x24, x0
-    stp  xzr, xzr, [sp]
-    str  xzr, [sp, #16]
-    stp  xzr, xzr, [sp, #32]
-    str  xzr, [sp, #48]
-    stp  xzr, xzr, [sp, #56]
-    str  xzr, [sp, #72]
-    mov  x0, sp
-    ldr  x1, [x19, #PN_EXPR]
-    bl   split_conj
-    mov  x25, #0
-    mov  x21, #0
-.Lpj_conj:
-    ldr  x9, [sp]
-    cmp  x21, x9
-    b.hs .Lpj_conj_done
-    ldr  x9, [sp, #16]
-    ldr  x22, [x9, x21, lsl #3]
-    mov  x0, x22
-    bl   expr_rvmask
-    mov  x26, x0
-    cbz  x26, .Lpj_residual
-    // single side?
-    bics xzr, x26, x24                  // within the right side
-    b.ne 1f
-    ldr  x0, [x19, #PN_RIGHT]           // (valid for INNER and LEFT joins)
-    mov  x1, x22
-    mov  x2, x26
-    bl   push_conj
-    cbnz w0, .Lpj_next
-    b    .Lpj_residual
-1:  ldr  w9, [x19, #PN_JT]
-    cmp  w9, #JT_LEFT
-    b.eq 2f
-    bics xzr, x26, x23                  // within the left side (inner only)
-    b.ne 2f
-    ldr  x0, [x19, #PN_LEFT]
-    mov  x1, x22
-    mov  x2, x26
-    bl   push_conj
-    cbnz w0, .Lpj_next
-    b    .Lpj_residual
-2:  // equi-join key: left_expr = right_expr across the two sides?
-    mov  x0, x22
-    mov  x1, x23
-    mov  x2, x24
-    add  x3, sp, #32
-    add  x4, sp, #56
-    bl   try_hash_key
-    cbnz w0, .Lpj_next
-.Lpj_residual:
-    mov  x0, x25
-    mov  x1, x22
-    bl   and_append
-    mov  x25, x0
-.Lpj_next:
-    add  x21, x21, #1
-    b    .Lpj_conj
-.Lpj_conj_done:
-    str  x25, [x19, #PN_EXPR]
-    ldr  x9, [sp, #32]
-    str  x9, [x19, #PN_NKEYS]
-    ldr  x9, [sp, #48]
-    str  x9, [x19, #PN_LKEYS]
-    ldr  x9, [sp, #72]
-    str  x9, [x19, #PN_RKEYS]
-    mov  w9, #PO_NLJOIN                 // algorithm: option "join"
-    ldr  x10, [x19, #PN_NKEYS]
-    cbz  x10, 3f                        // no equi keys: nested loop
-    TLS_ADDR x11, g_x_join
-    ldr  w11, [x11]
-    mov  w9, #PO_HASHJOIN               // auto / hash
-    cmp  w11, #XJ_MERGE
-    b.ne 31f
-    mov  w9, #PO_MERGEJOIN
-31: cmp  w11, #XJ_NL                    // keys stay: compared per pair
-    b.ne 3f
-    mov  w9, #PO_NLJOIN
-3:  str  w9, [x19, #PN_OP]
-    ldr  w9, [x19, #PN_JT]              // a cross join that got a condition
-    cmp  w9, #JT_CROSS
-    b.ne 4f
-    ldr  x10, [x19, #PN_EXPR]
-    ldr  x11, [x19, #PN_NKEYS]
-    orr  x10, x10, x11
-    cbz  x10, 4f
-    mov  w9, #JT_INNER
-    str  w9, [x19, #PN_JT]
-4:  ldr  x0, [x19, #PN_LEFT]
-    bl   pp_joins
-    ldr  x0, [x19, #PN_RIGHT]
-    bl   pp_joins
-.Lpj_end:
-    add  sp, sp, #80
-    LEAVE 5
-ENDF pp_joins
-
-
-// =============================================================================
-// pp_access(x0 PlanNode*) -> x0 estimated rows
-// Access paths and cardinality estimates of a FROM tree: scans choose their
-// access path (access.S: index selection, row-group skipping); an inner hash
-// join builds on the input with the smaller estimate (inputs swapped, the
-// tuple layout does not depend on the order); LEFT joins build on the right.
-//   x19 node, x20 left estimate, x21 right estimate
-// =============================================================================
-LFUNC pp_access
-    ENTER 3
-    mov  x19, x0
-    ldr  w9, [x19, #PN_OP]
-    cmp  w9, #PO_SCAN
-    b.ne 1f
-    bl   ap_scan
-    LEAVE 3
-1:  ldr  x0, [x19, #PN_LEFT]
-    bl   pp_access
-    mov  x20, x0
-    ldr  x0, [x19, #PN_RIGHT]
-    bl   pp_access
-    mov  x21, x0
-    ldr  x9, [x19, #PN_NKEYS]
-    cbz  x9, 3f
-    ldr  w9, [x19, #PN_OP]
-    cmp  w9, #PO_HASHJOIN
-    b.ne 2f
-    TLS_ADDR x9, g_x_optimize           // build-side choice is an optimization
-    ldr  w9, [x9]
-    cbz  w9, 2f
-    ldr  w9, [x19, #PN_JT]
-    cmp  w9, #JT_INNER
-    b.ne 2f
-    cmp  x20, x21
-    b.hs 2f
-    ldp  x9, x10, [x19, #PN_LEFT]       // swap: build on the smaller left
-    stp  x10, x9, [x19, #PN_LEFT]
-    ldr  x9, [x19, #PN_LKEYS]
-    ldr  x10, [x19, #PN_RKEYS]
-    str  x10, [x19, #PN_LKEYS]
-    str  x9, [x19, #PN_RKEYS]
-    mov  w9, #1
-    str  w9, [x19, #PN_SWAP]
-2:  cmp  x20, x21                       // equi-join: about the larger input
-    csel x0, x20, x21, hs
-    b    9f
-3:  umulh x9, x20, x21                  // nested loop: product (saturating)
-    mul  x0, x20, x21
-    cmp  x9, #0
-    csinv x0, x0, xzr, eq
-    ldr  x9, [x19, #PN_EXPR]
-    cbz  x9, 9f
-    mov  x9, #3                         // with a condition: a third
-    udiv x0, x0, x9
-9:  ldr  w9, [x19, #PN_JT]              // LEFT JOIN keeps every left row
-    cmp  w9, #JT_LEFT
-    b.ne 10f
-    cmp  x0, x20
-    csel x0, x0, x20, hs
-10: str  x0, [x19, #PN_EST]
-    LEAVE 3
-ENDF pp_access
-
-// =============================================================================
-// try_hash_key(x0 conjunct, x1 left mask, x2 right mask, x3 lkeys Vec*,
-//              x4 rkeys Vec*) -> w0 1 if the conjunct became a hash key pair
-// An equality whose operands reference disjoint sides, and whose operand
-// types have one payload encoding (same kind; DECIMAL with the same scale).
-//   x19 conjunct, x20 lmask, x21 rmask, x22 lkeys, x23 rkeys, x24 mask a,
-//   x25 mask b
-// =============================================================================
-LFUNC try_hash_key
-    ENTER 5
-    mov  x19, x0
-    mov  x20, x1
-    mov  x21, x2
-    mov  x22, x3
-    mov  x23, x4
-    ldr  w9, [x19, #N_KIND]
-    cmp  w9, #NK_BINARY
-    b.ne .Lthk_no
-    ldr  w9, [x19, #N_OP]
-    cmp  w9, #OP_EQ
-    b.ne .Lthk_no
-    ldr  x9, [x19, #N_A]
-    ldr  x10, [x19, #N_B]
-    ldr  w11, [x9, #N_TYPE]
-    ldr  w12, [x10, #N_TYPE]
-    and  w13, w11, #T_KIND_MASK
-    and  w14, w12, #T_KIND_MASK
-    cmp  w13, w14
-    b.ne .Lthk_no
-    cbz  w13, .Lthk_no                  // NULL literal: never matches anyway
-    cmp  w13, #T_DEC
-    b.ne 1f
-    lsr  w11, w11, #T_SCALE_SHIFT
-    lsr  w12, w12, #T_SCALE_SHIFT
-    cmp  w11, w12
-    b.ne .Lthk_no
-1:  ldr  x0, [x19, #N_A]
-    bl   expr_rvmask
-    mov  x24, x0
-    ldr  x0, [x19, #N_B]
-    bl   expr_rvmask
-    mov  x25, x0
-    cbz  x24, .Lthk_no
-    cbz  x25, .Lthk_no
-    // a within left and b within right, or swapped
-    bics xzr, x24, x20
-    b.ne 2f
-    bics xzr, x25, x21
-    b.ne 2f
-    ldr  x1, [x19, #N_A]
-    ldr  x2, [x19, #N_B]
-    b    3f
-2:  bics xzr, x24, x21
-    b.ne .Lthk_no
-    bics xzr, x25, x20
-    b.ne .Lthk_no
-    ldr  x1, [x19, #N_B]
-    ldr  x2, [x19, #N_A]
-3:  mov  x24, x2
-    mov  x0, x22
-    bl   pvec_push
-    mov  x0, x23
-    mov  x1, x24
-    bl   pvec_push
-    mov  w0, #1
-    LEAVE 5
-.Lthk_no:
-    mov  w0, #0
-    LEAVE 5
-ENDF try_hash_key
 
 // =============================================================================
 // Expression helpers
@@ -885,7 +294,7 @@ FUNC plan_explain
     add  x1, x9, #STR_DATA
     ldr  x2, [x9, #STR_LEN]
     bl   buf_put_jstr
-    mov  x0, x19                        // "columns":[used columns]
+    mov  x0, x19                        // "columns":[columns read]
     ADR_L x1, ex_columns
     bl   buf_puts
     mov  x22, #0
@@ -894,7 +303,7 @@ FUNC plan_explain
     ldr  x10, [x9, #TBL_NCOLS]
     cmp  x22, x10
     b.hs 4f
-    ldr  x10, [x23, #RV_USED]
+    ldr  x10, [x20, #PN_COLS]
     ldrb w10, [x10, x22]
     cbz  w10, 3f
     cbz  x24, 21f

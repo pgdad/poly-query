@@ -553,8 +553,11 @@
 #define RV_KIND     16     // u32 RVK_*
 #define RV_CTEUP    20     // u32 RVK_CTE: query levels up to the CTE's owner
 #define RV_SUB      24     // RVK_DERIVED: SubPlan*; RVK_CTE: CteDef*
-#define RV_USED     32     // u8* per-column "referenced" flags (pruning)
+#define RV_USED     32     // u8* per-column RVU_* flags: where the column is
+                           //   referenced (column pruning)
 #define RV_SIZE     48
+#define RVU_LOCAL   1      // by an expression of the rv's own query level
+#define RVU_OUTER   2      // from a subquery (correlated reference)
 #define RVK_BASE    0
 #define RVK_DERIVED 1
 #define RVK_CTE     2
@@ -573,13 +576,14 @@
 #define BFK_JOIN    2
 
 // Subquery / derived table plan holder (48 bytes). Created by the binder
-// (SP_BQ), planned by plan.S (SP_PLAN), executed lazily by exec.S; results of
-// uncorrelated subqueries are cached for the whole statement.
+// (SP_BQ), planned by plan.S (SP_LPLAN, SP_PLAN), executed lazily by exec.S;
+// results of uncorrelated subqueries are cached for the whole statement.
 #define SP_BQ       0      // BoundQuery*
 #define SP_PLAN     8      // PlanNode* (physical plan)
 #define SP_CACHE    16     // cached result: ResultSet* / Table* / InSet*
 #define SP_DONE     24     // u64 1 = SP_CACHE valid
 #define SP_INTYPE   32     // u32 NK_INSUB: comparison type of the values
+#define SP_LPLAN    40     // LogicalNode* (optimized logical plan)
 #define SP_SIZE     48
 
 // CTE definition (48 bytes): one per WITH entry, shared by all references.
@@ -619,12 +623,53 @@
 #define RS_ROWS    16      // u8** array of row pointers (each width*16 bytes)
 #define RS_SIZE    32
 
+// ---------------------------------------------------------- logical plan -----
+// Logical plan (logical.S): relational operators, independent of any
+// execution strategy. lp_build translates a bound query level; the optimizer
+// rules (optimize.S, rule_*.S) rewrite it; the physical planner (physical.S)
+// maps it to PlanNodes. Expressions are bound expressions (Node*). Project
+// and Aggregate compute the matrix rows of their query level LN_BQ: output
+// expressions BQ_OUT, hidden ORDER BY keys BQ_EXTRA, grouping keys BQ_GROUP,
+// aggregate calls BQ_AGGS; Sort orders by BQ_ORDER, Limit uses BQ_LIMIT /
+// BQ_OFFSET.
+#define LN_OP       0      // u32 LO_*
+#define LN_JT       4      // u32 JT_* (Join)
+#define LN_LEFT     8      // LogicalNode* input (Join: left input)
+#define LN_RIGHT    16     // LogicalNode* right input (Join)
+#define LN_PRED     24     // Node* or 0: Filter predicate, Join condition,
+                           //   Scan predicate (conjuncts evaluated on the
+                           //   scanned range variable), Aggregate HAVING
+#define LN_BQ       32     // BoundQuery* of the query level
+#define LN_RV       40     // u64 Scan / SubqueryScan: range variable index
+#define LN_MASK     48     // u64 Scan / SubqueryScan / Filter / Join: bitmask
+                           //   of the range variables the subtree produces
+#define LN_COLS     56     // Scan of a base table: u8* per-column "read" flags,
+                           //   0 = every column (set by rule prune_columns)
+#define LN_KIDS     64     // UnionAll: LogicalNode** branch plans
+#define LN_NKIDS    72     // u64
+#define LN_SIZE     80
+
+#define LO_SCAN       1    // scan of the base table of rv LN_RV
+#define LO_SUBQUERY   2    // SubqueryScan: derived table / CTE rv LN_RV (its
+                           //   plan: SP_LPLAN of the rv's SubPlan)
+#define LO_VALUES     3    // one empty tuple (SELECT without FROM)
+#define LO_FILTER     4
+#define LO_JOIN       5    // LN_JT INNER / LEFT / CROSS, condition LN_PRED
+#define LO_AGGREGATE  6    // keys + aggregate calls + HAVING + projection
+#define LO_PROJECT    7
+#define LO_DISTINCT   8
+#define LO_SORT       9
+#define LO_LIMIT      10
+#define LO_UNION      11   // UNION ALL of LN_KIDS (each a query level)
+// Expression subqueries (scalar, IN, EXISTS) are expressions (NK_SUBQ /
+// NK_INSUB / NK_EXISTS) whose SubPlan carries its own logical plan.
+
 // ------------------------------------------------------------- plan nodes -----
-// Logical and physical plans share one node record (plan.S). The logical plan
-// mirrors the bound query; the physical planner rewrites it (pushdown, join
-// algorithm, column pruning). Lower operators (scans, filters, joins) produce
-// tuple sets; Aggregate / Project produce result rows; Distinct / Sort / Limit
-// transform result rows.
+// Physical plan (physical.S): operators with their execution strategy
+// (access path, join algorithm and keys, build side, top-N, execution mode),
+// executed by exec.S and shown by EXPLAIN. Lower operators (scans, filters,
+// joins) produce tuple sets; Aggregate / Project produce result rows;
+// Distinct / Sort / Limit transform result rows.
 #define PN_OP       0      // u32 PO_*
 #define PN_JT       4      // u32 JT_* (joins)
 #define PN_LEFT     8      // PlanNode* (the only child of unary operators)
@@ -635,8 +680,7 @@
 #define PN_NKEYS    48     // u64 hash join keys
 #define PN_LKEYS    56     // Node** left key expressions
 #define PN_RKEYS    64     // Node** right key expressions
-#define PN_LO       72     // u32 first rv of the subtree
-#define PN_HI       76     // u32 one past the last rv
+                           // (72: unused)
 #define PN_IDX      80     // scans: Index* used by an index scan, or 0
 #define PN_IXA      88     // scans: IxAccess* (index access path)
 #define PN_PREDS    96     // scans: Pred** simple predicates of PN_EXPR
@@ -646,7 +690,12 @@
 #define PN_RGSKIP   124    // u32 scans: row groups skipped (EXPLAIN)
 #define PN_MASK     128    // u64 scans / joins: bitmask of the range variables
                            //   of the subtree
-#define PN_SIZE     144
+#define PN_COLS     136    // base-table scans: u8* per-column flags of the
+                           //   columns read (EXPLAIN "columns")
+#define PN_TOPN     144    // u32 Sort below a Limit: bounded top-N heap
+#define PN_XMODE    148    // u32 plan roots: execution mode XM_ROW / XM_VEC
+#define PN_XTHREADS 152    // u64 plan roots: worker threads (>= 1)
+#define PN_SIZE     160
 
 // Simple predicate "column op constant" extracted from a scan filter
 // (index selection, row-group skipping, estimates). 48 bytes.
@@ -672,7 +721,7 @@
                            //   optional pushed-down filter PN_EXPR
 #define PO_VALUES     2    // one empty tuple (SELECT without FROM)
 #define PO_FILTER     3    // tuple filter PN_EXPR
-#define PO_JOIN       4    // logical join (PN_EXPR = ON condition)
+#define PO_JOIN       4    // join before the algorithm is chosen (physical.S)
 #define PO_HASHJOIN   5    // physical: equi keys + residual PN_EXPR
 #define PO_NLJOIN     6    // physical: nested loop, condition PN_EXPR
 #define PO_AGGREGATE  7    // grouping + aggregates + HAVING (PN_EXPR) + projection
@@ -689,9 +738,12 @@
 #define PN_KIDS     PN_LKEYS
 
 // Execution options of the current request (Phase 5, protocol.md §5.2),
-// thread-local settings defined in exec.S:
-//   g_x_mode (u32 XM_*), g_x_join (u32 XJ_*), g_x_threads (u64 >= 1),
-//   g_x_optimize (u32 0/1). g_def_threads (process-wide, --threads).
+// thread-local planner inputs defined in plan.S (set by protocol.S):
+//   g_opt_mode (u32 XM_*), g_opt_join (u32 XJ_*), g_opt_threads (u64 >= 1),
+//   g_opt_optimize (u32 0/1); access.S g_use_indexes. g_def_threads
+//   (process-wide, --threads). The physical planner resolves them into the
+//   plan (PN_XMODE / PN_XTHREADS, join operators, PN_TOPN); the executor runs
+//   with the plan's settings (exec.S g_x_mode / g_x_threads).
 #define XM_AUTO     0
 #define XM_ROW      1
 #define XM_VEC      2

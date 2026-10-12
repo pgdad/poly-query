@@ -1,6 +1,8 @@
 // =============================================================================
-// test_plan.S — unit tests for plan.S (logical/physical planning, EXPLAIN)
-// and exec.S (joins, grouping, DISTINCT, subqueries).
+// test_plan.S — unit tests for planning as a whole (plan.S, physical.S:
+// physical plans, EXPLAIN) and exec.S (joins, grouping, DISTINCT,
+// subqueries). The logical plan and the optimizer rules are tested by
+// test_optimizer.S.
 //
 // Each case runs SQL through parse_sql -> bind_query -> plan_statement and
 // then, by mode, checks the EXPLAIN JSON (plan_explain) for a substring, the

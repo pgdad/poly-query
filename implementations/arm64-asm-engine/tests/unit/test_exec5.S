@@ -210,16 +210,16 @@ LFUNC run_once
     mov  x19, x0
     mov  x20, x1
     ldr  x9, [x20]
-    TLS_ADDR x10, g_x_mode
+    TLS_ADDR x10, g_opt_mode
     str  w9, [x10]
     ldr  x9, [x20, #8]
-    TLS_ADDR x10, g_x_join
+    TLS_ADDR x10, g_opt_join
     str  w9, [x10]
     ldr  x9, [x20, #16]
-    TLS_ADDR x10, g_x_threads
+    TLS_ADDR x10, g_opt_threads
     str  x9, [x10]
     ldr  x9, [x20, #24]
-    TLS_ADDR x10, g_x_optimize
+    TLS_ADDR x10, g_opt_optimize
     str  w9, [x10]
     TLS_ADDR x0, g_jmpbuf
     bl   setjmp
