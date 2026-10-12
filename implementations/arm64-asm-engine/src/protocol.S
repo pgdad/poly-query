@@ -389,6 +389,7 @@ FUNC handle_request
     mov  x23, x3
     TLS_ADDR x0, g_cur_id
     str  xzr, [x0]
+    bl   pool_wake                      // parallel.S: workers get ready
     bl   now_us
     TLS_ADDR x1, g_req_start
     str  x0, [x1]

@@ -358,6 +358,29 @@ FUNC thread_boost
 ENDF thread_boost
 
 // =============================================================================
+// pool_wake() — called when a request starts: idle pool threads wake up and
+// poll the queue (g_pool_spin) instead of sleeping, so the request's first
+// parallel phase does not pay for their wake-up (cheap when there is no
+// pool yet)
+// =============================================================================
+FUNC pool_wake
+    ADR_L x9, g_pool_threads
+    ldr  x9, [x9]
+    cbnz x9, 1f
+    ret
+1:  stp  x29, x30, [sp, #-16]!
+    mov  x29, sp
+    ADR_L x0, g_pool_lock
+    bl   pthread_mutex_lock
+    ADR_L x0, g_pool_work
+    bl   pthread_cond_broadcast
+    ADR_L x0, g_pool_lock
+    bl   pthread_mutex_unlock
+    ldp  x29, x30, [sp], #16
+    ret
+ENDF pool_wake
+
+// =============================================================================
 // pool_main(x0 unused) — pool thread: forever takes a task of the first
 // queued job and runs it (wk_run)
 //   x19 job, x20 task index

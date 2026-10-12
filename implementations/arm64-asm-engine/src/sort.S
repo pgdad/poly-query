@@ -5,6 +5,10 @@
 //   sort_rows_par(x0 Row** rows, x1 n, x2 key descriptors, x3 unused)
 //       sorts like exec.S sort_rows (qsort_r with cmp_rows; mode "row" and
 //       small inputs). In vectorized mode: rsort_rows.
+//   topn_rows_par(x0 Row** rows, x1 n, x2 keys, x3 k) -> x0 min(n, k)
+//       like exec.S topn_rows (the first k rows in order moved to the
+//       front); in vectorized mode with threads, windows of the rows are
+//       reduced to their own first k in parallel, then the candidates.
 //
 // rsort_rows — normalized-key radix sort:
 //   1. Field selection: the key list (ORDER BY keys, then every visible
@@ -119,6 +123,122 @@ FUNC sort_rows_par
     b    rsort_rows                     // tail call
 1:  b    sort_rows                      // row mode / small: qsort_r
 ENDF sort_rows_par
+
+// =============================================================================
+// topn_rows_par(x0 rows, x1 n, x2 keys, x3 k) -> x0 min(n, k)
+// The k first rows of the whole input are among the k first of every
+// window, and the key list orders rows totally (only identical rows tie),
+// so the result is topn_rows' result.
+//   x19 rows, x20 n, x21 keys, x22 k, x23 task records, x24 tasks,
+//   x25 index, x26 candidates, x27 count
+// =============================================================================
+#define TN_ROWS     0               // top-N task: window
+#define TN_N        8
+#define TN_KEYS     16
+#define TN_K        24
+#define TN_KEPT     32              // rows kept at the window's front
+#define TN_SIZE     48
+FUNC topn_rows_par
+    TLS_ADDR x9, g_x_mode
+    ldr  w9, [x9]
+    cmp  w9, #XM_ROW
+    b.eq 1f
+    TLS_LDR x9, g_x_threads
+    cmp  x9, #1
+    b.ls 1f
+    LDR_G x10, g_par_min_rows
+    udiv x10, x1, x10
+    cmp  x10, x9
+    csel x10, x10, x9, lo
+    cmp  x10, #2
+    b.lo 1f
+    lsl  x11, x3, #2                    // windows much larger than k
+    mul  x11, x11, x10
+    cmp  x11, x1
+    b.ls 2f
+1:  b    topn_rows                      // tail call
+2:  ENTER 5
+    mov  x19, x0
+    mov  x20, x1
+    mov  x21, x2
+    mov  x22, x3
+    mov  x24, x10
+    mov  x9, #TN_SIZE
+    mul  x0, x9, x24
+    bl   arena_alloc
+    mov  x23, x0
+    add  x9, x20, x24                   // window: ceil(n / tasks)
+    sub  x9, x9, #1
+    udiv x9, x9, x24
+    mov  x25, #0
+3:  cmp  x25, x24
+    b.hs 4f
+    mov  x10, #TN_SIZE
+    madd x10, x25, x10, x23
+    mul  x11, x25, x9
+    cmp  x11, x20
+    csel x11, x11, x20, lo
+    add  x12, x11, x9
+    cmp  x12, x20
+    csel x12, x12, x20, lo
+    add  x13, x19, x11, lsl #3
+    str  x13, [x10, #TN_ROWS]
+    sub  x12, x12, x11
+    str  x12, [x10, #TN_N]
+    str  x21, [x10, #TN_KEYS]
+    str  x22, [x10, #TN_K]
+    add  x25, x25, #1
+    b    3b
+4:  ADR_L x0, topn_task
+    mov  x1, x23
+    mov  x2, #TN_SIZE
+    mov  x3, x24
+    bl   par_run
+    mul  x0, x22, x24                   // candidates: every window's front
+    lsl  x0, x0, #3
+    add  x0, x0, #8
+    bl   arena_alloc
+    mov  x26, x0
+    mov  x27, #0
+    mov  x25, #0
+5:  cmp  x25, x24
+    b.hs 6f
+    mov  x10, #TN_SIZE
+    madd x10, x25, x10, x23
+    add  x0, x26, x27, lsl #3
+    ldr  x1, [x10, #TN_ROWS]
+    ldr  x2, [x10, #TN_KEPT]
+    add  x27, x27, x2
+    lsl  x2, x2, #3
+    bl   memcpy
+    add  x25, x25, #1
+    b    5b
+6:  mov  x0, x26
+    mov  x1, x27
+    mov  x2, x21
+    mov  x3, x22
+    bl   topn_rows
+    mov  x27, x0
+    mov  x0, x19
+    mov  x1, x26
+    lsl  x2, x27, #3
+    bl   memcpy
+    mov  x0, x27
+    LEAVE 5
+ENDF topn_rows_par
+
+// topn_task(x0 top-N task): the window's first k rows, at its front
+LFUNC topn_task
+    ENTER 1
+    mov  x19, x0
+    ldr  x0, [x19, #TN_ROWS]
+    ldr  x1, [x19, #TN_N]
+    ldr  x2, [x19, #TN_KEYS]
+    ldr  x3, [x19, #TN_K]
+    bl   topn_rows
+    str  x0, [x19, #TN_KEPT]
+    LEAVE 1
+ENDF topn_task
 
 // =============================================================================
 // rsort_rows(x0 Row** rows, x1 n, x2 keys)
