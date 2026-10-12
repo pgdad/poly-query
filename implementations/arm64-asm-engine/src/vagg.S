@@ -79,6 +79,14 @@
 #define MT_GT       40             // GroupTable* result
 #define MT_SIZE     48
 
+// First-appearance merge slice (gt_pmerge, km_task)
+#define KM_MT       0              // merge records (MT_GT per table)
+#define KM_T        8
+#define KM_FROM     16             // u64* first record per table
+#define KM_TO       24             // u64* end per table
+#define KM_OUT      32             // output cursor
+#define KM_SIZE     48
+
 // DISTINCT task (vdistinct): XT_SIZE records, the table at XT_GT
 #define DT_RS       0              // ResultSet* (rows to dedupe)
 #define DT_TYPES    8              // u32* visible column types
@@ -1620,8 +1628,9 @@ ENDF gt_list
 // task order (so its first insertion of a key carries the key's earliest
 // tuple), into its own table. Every partial table is first indexed by
 // partition (part_task, in parallel), so a merge task reads only its own
-// groups. On request the final groups are then ordered by their first tuple
-// (sort_by_first); otherwise they come partition by partition.
+// groups. On request the final groups are then put in order of their first
+// tuple (a k-way merge of the merge tables); otherwise they come partition
+// by partition.
 //   x19 tasks, x20 T, x21 merge records, x22 index, x23 total, x24 list
 // =============================================================================
 LFUNC gt_pmerge
@@ -1676,7 +1685,8 @@ LFUNC gt_pmerge
     add  x0, x0, #8
     bl   arena_alloc
     mov  x24, x0
-    mov  x14, #0
+    cbnz x25, .Lpm_kmerge
+    mov  x14, #0                        // partition by partition
     mov  x22, #0
 5:  cmp  x22, x20
     b.hs 7f
@@ -1696,15 +1706,187 @@ LFUNC gt_pmerge
     b    6b
 61: add  x22, x22, #1
     b    5b
-7:  cbz  x25, 8f
-    mov  x0, x24
+7:  mov  x0, x24
     mov  x1, x23
-    bl   sort_by_first
-8:
-    mov  x0, x24
+    LEAVE 5
+    // In order of first appearance: every merge table created its groups
+    // in increasing GR_FIRST order (it takes the partial tables in task
+    // order, the windows of the tasks ascend, and a partial table holds its
+    // groups in order of first appearance), so the order is a k-way merge
+    // of the merge tables' record sequences: the GR_FIRST range is cut into
+    // one slice per task, each table's records of a slice are found by
+    // binary search, and the slices are merged in parallel (km_task) into
+    // their places of the list.
+.Lpm_kmerge:
+    mov  x0, #KM_SIZE
+    mul  x0, x0, x20
+    bl   arena_zalloc
+    mov  x26, x0                        // slice records
+    add  x0, x20, #1                    // starts [T + 1][T]
+    mul  x0, x0, x20
+    lsl  x0, x0, #3
+    bl   arena_alloc
+    mov  x27, x0
+    mov  x28, #0                        // largest GR_FIRST + 1: the end
+    mov  x22, #0
+1:  cmp  x22, x20
+    b.hs 2f
+    mov  x9, #MT_SIZE
+    madd x9, x22, x9, x21
+    ldr  x9, [x9, #MT_GT]
+    ldr  x10, [x9, #GT_N]
+    cbz  x10, 11f
+    sub  x10, x10, #1
+    ldr  x11, [x9, #GT_RECS]
+    ldr  x12, [x9, #GT_RECSZ]
+    madd x11, x10, x12, x11
+    ldr  x11, [x11, #GR_FIRST]
+    add  x11, x11, #1
+    cmp  x11, x28
+    csel x28, x11, x28, hi
+11: add  x22, x22, #1
+    b    1b
+2:  mov  x22, #0                        // starts of slice k in every table
+3:  cmp  x22, x20
+    b.hi 6f
+    mul  x13, x22, x28                  // slice boundary: k * end / T
+    udiv x13, x13, x20
+    mov  x14, #0                        // table
+4:  cmp  x14, x20
+    b.hs 5f
+    mov  x9, #MT_SIZE
+    madd x9, x14, x9, x21
+    ldr  x9, [x9, #MT_GT]
+    ldr  x15, [x9, #GT_RECS]
+    ldr  x16, [x9, #GT_RECSZ]
+    mov  x10, #0                        // first record with GR_FIRST >= it
+    ldr  x11, [x9, #GT_N]
+41: cmp  x10, x11
+    b.hs 42f
+    add  x12, x10, x11
+    lsr  x12, x12, #1
+    madd x17, x12, x16, x15
+    ldr  x17, [x17, #GR_FIRST]
+    cmp  x17, x13
+    b.hs 43f
+    add  x10, x12, #1
+    b    41b
+43: mov  x11, x12
+    b    41b
+42: madd x12, x22, x20, x14
+    str  x10, [x27, x12, lsl #3]
+    add  x14, x14, #1
+    b    4b
+5:  add  x22, x22, #1
+    b    3b
+6:  mov  x22, #0                        // slice records; output offsets
+    mov  x15, #0
+7:  cmp  x22, x20
+    b.hs 8f
+    mov  x9, #KM_SIZE
+    madd x9, x22, x9, x26
+    str  x21, [x9, #KM_MT]
+    str  x20, [x9, #KM_T]
+    mul  x10, x22, x20
+    add  x10, x27, x10, lsl #3
+    str  x10, [x9, #KM_FROM]
+    add  x11, x10, x20, lsl #3
+    str  x11, [x9, #KM_TO]
+    add  x12, x24, x15, lsl #3
+    str  x12, [x9, #KM_OUT]
+    mov  x13, #0                        // slice size
+71: cmp  x13, x20
+    b.hs 72f
+    ldr  x14, [x11, x13, lsl #3]
+    ldr  x16, [x10, x13, lsl #3]
+    sub  x14, x14, x16
+    add  x15, x15, x14
+    add  x13, x13, #1
+    b    71b
+72: add  x22, x22, #1
+    b    7b
+8:  ADR_L x0, km_task
+    mov  x1, x26
+    mov  x2, #KM_SIZE
+    mov  x3, x20
+    bl   par_run
+    b    9f
+9:  mov  x0, x24
     mov  x1, x23
     LEAVE 5
 ENDF gt_pmerge
+
+// km_task(x0 slice record): k-way merge of the slice's records of every
+// merge table (each ascending by GR_FIRST) into KM_OUT
+//   x19 record, x20 tables, x21 heads (GR_FIRST, -1 = done) [T], x22
+//   cursors [T], x23 ends, x24 output, x25 table index, x26 T
+LFUNC km_task
+    ENTER 5
+    mov  x19, x0
+    ldr  x20, [x19, #KM_MT]
+    ldr  x26, [x19, #KM_T]
+    ldr  x23, [x19, #KM_TO]
+    ldr  x24, [x19, #KM_OUT]
+    lsl  x0, x26, #4
+    bl   arena_alloc
+    mov  x21, x0
+    add  x22, x21, x26, lsl #3
+    ldr  x9, [x19, #KM_FROM]
+    mov  x25, #0
+1:  cmp  x25, x26
+    b.hs 2f
+    ldr  x10, [x9, x25, lsl #3]
+    str  x10, [x22, x25, lsl #3]
+    mov  x0, x25
+    bl   .Lkm_head
+    ldr  x9, [x19, #KM_FROM]
+    add  x25, x25, #1
+    b    1b
+2:  mov  x12, #-1                       // the smallest head
+    mov  x13, #0
+    mov  x25, #0
+3:  ldr  x14, [x21, x25, lsl #3]
+    cmp  x14, x12
+    csel x12, x14, x12, lo
+    csel x13, x25, x13, lo
+    add  x25, x25, #1
+    cmp  x25, x26
+    b.lo 3b
+    cmn  x12, #1
+    b.eq 9f                             // every table done
+    mov  x9, #MT_SIZE                   // its record goes next
+    madd x9, x13, x9, x20
+    ldr  x9, [x9, #MT_GT]
+    ldr  x11, [x22, x13, lsl #3]
+    ldr  x14, [x9, #GT_RECS]
+    ldr  x15, [x9, #GT_RECSZ]
+    madd x14, x11, x15, x14
+    str  x14, [x24], #8
+    add  x11, x11, #1
+    str  x11, [x22, x13, lsl #3]
+    mov  x0, x13
+    bl   .Lkm_head
+    b    2b
+9:  LEAVE 5
+
+// local helper: heads[x0] = GR_FIRST of table x0's record at its cursor,
+// or -1 at the slice's end (clobbers x9-x15)
+.Lkm_head:
+    mov  x9, #MT_SIZE
+    madd x9, x0, x9, x20
+    ldr  x9, [x9, #MT_GT]
+    ldr  x11, [x22, x0, lsl #3]
+    ldr  x12, [x23, x0, lsl #3]
+    mov  x15, #-1
+    cmp  x11, x12
+    b.hs 1f
+    ldr  x13, [x9, #GT_RECS]
+    ldr  x14, [x9, #GT_RECSZ]
+    madd x13, x11, x14, x13
+    ldr  x15, [x13, #GR_FIRST]
+1:  str  x15, [x21, x0, lsl #3]
+    ret
+ENDF km_task
 
 // part_task(x0 merge record): indexes the partial table at MT_GT by merge
 // partition, (hash >> 32) mod MT_T: GT_PSTART / GT_PIDX (counting sort,
@@ -1851,82 +2033,6 @@ LFUNC merge_task
     b    1b
 9:  LEAVE 5
 ENDF merge_task
-
-// =============================================================================
-// sort_by_first(x0 record pointers, x1 n): ascending GR_FIRST (stable LSD
-// radix sort, 4 passes of 8 bits over the 32-bit tuple index)
-//   x19 array, x20 n, x21 tmp, x22 shift, x23 histogram, x24 the caller's
-//   array
-// =============================================================================
-LFUNC sort_by_first
-    ENTER 4
-    mov  x19, x0
-    mov  x24, x0
-    mov  x20, x1
-    cmp  x20, #2
-    b.lo 9f
-    lsl  x0, x20, #3
-    bl   arena_alloc
-    mov  x21, x0
-    mov  x0, #(257 * 8)
-    bl   arena_alloc
-    mov  x23, x0
-    mov  x22, #0
-1:  cmp  x22, #32
-    b.hs 8f
-    mov  x0, x23
-    mov  w1, #0
-    mov  x2, #(257 * 8)
-    bl   memset
-    mov  x9, #0
-2:  cmp  x9, x20
-    b.hs 3f
-    ldr  x10, [x19, x9, lsl #3]
-    ldr  x10, [x10, #GR_FIRST]
-    lsr  x10, x10, x22
-    and  x10, x10, #0xff
-    add  x10, x10, #1
-    ldr  x11, [x23, x10, lsl #3]
-    add  x11, x11, #1
-    str  x11, [x23, x10, lsl #3]
-    add  x9, x9, #1
-    b    2b
-3:  mov  x9, #1                         // prefix sums
-    mov  x11, #0
-4:  cmp  x9, #256
-    b.hi 5f
-    ldr  x10, [x23, x9, lsl #3]
-    str  x11, [x23, x9, lsl #3]
-    add  x11, x11, x10
-    add  x9, x9, #1
-    b    4b
-5:  mov  x9, #0                         // scatter
-6:  cmp  x9, x20
-    b.hs 7f
-    ldr  x12, [x19, x9, lsl #3]
-    ldr  x10, [x12, #GR_FIRST]
-    lsr  x10, x10, x22
-    and  x10, x10, #0xff
-    add  x10, x10, #1
-    ldr  x13, [x23, x10, lsl #3]
-    add  x14, x13, #1
-    str  x14, [x23, x10, lsl #3]
-    str  x12, [x21, x13, lsl #3]
-    add  x9, x9, #1
-    b    6b
-7:  mov  x9, x19                        // swap the buffers
-    mov  x19, x21
-    mov  x21, x9
-    add  x22, x22, #8
-    b    1b
-8:  cmp  x19, x24                       // 4 passes: back in the caller's
-    b.eq 9f                             // array (kept for clarity)
-    mov  x0, x24
-    mov  x1, x19
-    lsl  x2, x20, #3
-    bl   memcpy
-9:  LEAVE 4
-ENDF sort_by_first
 
 // =============================================================================
 // emit_groups(x0 Aggregate node, x1 ctx, x2 input ts, x3 group records,
