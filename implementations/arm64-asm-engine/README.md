@@ -33,6 +33,10 @@ reordering). See
 [Phase 5](#phase-5-execution-options-and-optimizations) for the design and
 the before/after measurements.
 
+The latency of the analytics benchmark workload was then optimized
+(≈520 ms → ≈58 ms summed over its 20 queries at scale 1m); see
+[Latency optimization](#latency-optimization-analytics-workload).
+
 It also implements the architectural change **CR-1 `UNION ALL`**
 (`spec/changes/union-all.md`, capability `change.union_all`); see
 [Change CR-1: UNION ALL](#change-cr-1-union-all), and the behaviour-preserving
@@ -395,12 +399,15 @@ in every mode); Aggregate, Distinct and Sort consume their whole input.
 
 ### Parallelism (`parallel.S`)
 
-`par_run` starts one thread per task (pthreads) and joins them. A worker
-copies the caller's request state (deadline, cancellation flag, memory
-budget, execution settings, catalog snapshot), runs its task under its own
-`setjmp` error handler and allocates from its own request arena; when it
-ends, its arena chunks are moved into the caller's arena (`arena_adopt`), so
-results stay valid until the request ends and nothing needs locks. The
+`par_run` queues its tasks as one job for a persistent worker pool (see
+[Latency optimization](#latency-optimization-analytics-workload)); the
+calling thread runs tasks of its own job too. A pool thread copies the
+caller's request state (deadline, cancellation flag, memory budget,
+execution settings, catalog snapshot) for each task, runs it under its own
+`setjmp` error handler and allocates from its own request arena; when the
+task ends, the arena chunks are moved into the caller's arena
+(`arena_adopt`), so results stay valid until the request ends and nothing
+needs locks. The
 first error of any task (in task order) is re-raised in the caller after
 all tasks finished. Timeouts and cancellation reach workers through the
 copied deadline and flag (`check_deadline` in every loop).
@@ -415,16 +422,18 @@ windows, at most `threads`, each at least `g_par_min_rows` = 16384 rows
 * **filters / projections** over tuple sets (`ops.S`);
 * **join keys**: the key cells and hashes of both join inputs are computed
   by tasks over windows of the input (`vkey_cells`);
-* **hash-join probes** (after the build of the chained table, the probe of
-  the left tuples is split);
+* **hash-join probes** (after the build of the chained table, the probe
+  input is split into 4 tasks per thread, balanced by the pool);
 * **aggregation**: each task aggregates its window into its own group table
   (partial aggregation); the partial tables are then merged by parallel
   merge tasks, one per hash partition (each takes its partition's groups
   from every partial table in task order; `merge_states`: counts and
-  128-bit sums add, MIN / MAX compare), and the final groups are ordered by
-  their first input tuple (radix sort), which is exactly the serial group
-  order; finishing the groups, HAVING and the projection of the result
-  rows run as parallel tasks over windows of the groups.
+  128-bit sums add, MIN / MAX compare), and — when the query level has no
+  ORDER BY — the final groups are ordered by their first input tuple (radix
+  sort), which is exactly the serial group order; finishing the groups,
+  HAVING and the projection of the result rows run as parallel tasks over
+  windows of the groups;
+* **sorting** and **top-N** (`sort.S`, see below).
 
 Expressions containing subqueries are never evaluated on workers (subquery
 results are cached in shared plan nodes on first use).
@@ -434,11 +443,14 @@ results are cached in shared plan nodes on first use).
 * **HashJoin**: chained hash table over the build input's key cells and
   hashes (computed as vectors in vectorized mode), parallel probe. With
   `optimize` the smaller input (estimate) is the build side of an inner
-  join.
+  join, and a LEFT join whose preserved (left) input is the smaller one
+  builds on it: probes flag matched build tuples and the unmatched ones are
+  appended NULL-padded at the end.
 * **MergeJoin**: both inputs' key cells, an index array of the tuples with
-  non-NULL keys sorted by key — an 8-bit LSD radix sort (stable, constant
-  bytes skipped) for one integer-like key, `qsort_r` otherwise — then runs
-  of equal keys are joined pairwise; LEFT JOIN padding for unmatched and
+  non-NULL keys sorted by key — an 11-bit LSD radix sort over the
+  significant bits of one integer-like key (stable; it also returns the
+  keys in sorted order for the merge), `qsort_r` otherwise — then runs of
+  equal keys are joined pairwise; LEFT JOIN padding for unmatched and
   NULL-key tuples.
 * **NestedLoopJoin**: every pair; forced for an equi-join it compares the
   precomputed key cells before the residual condition.
@@ -531,6 +543,132 @@ last. Observations:
   work only for queries that contain constant expressions.
 * The merge join pays for sorting both inputs (Q5) and returns tuples in
   key order.
+
+## Latency optimization (analytics workload)
+
+Task: lower the latency of `benchmarks/workloads/analytics.json` at scale
+1m without changing results. All changes keep the conformance suite
+(session, `--modes`, also with `PQ_PARALLEL_MIN_ROWS=1`, HTTP) and
+`make test` green; results were additionally compared across modes,
+thread counts and join algorithms on the 1m data (exact row order for
+ORDER BY queries, multisets otherwise).
+
+### Method
+
+`bench/workload.sh DATA_DIR [RUNS] [OPTIONS_JSON]` loads the nine tables
+(CSV with the generated schemas), creates the workload's two indexes and
+runs every query RUNS times through one `bin/polyquery session` with
+default options (`result: "count"` where the workload says so). It reports
+the client-side wall time per query (request written → response line read;
+median and best) and the best `stats.elapsed_us`. The engine reads the
+requests from a FIFO and writes responses to a regular file, which the
+script reads in blocks (on a pipe, bash's `read` makes one system call per
+byte, which inflated the wall time of large responses in a first version).
+`PQ_ENGINE=…` selects another binary; the "before" column was measured with
+the same script on the commit this work started from (`e38bcc1`,
+`bench/workload-before.txt`). Profiling used a sampling loop (gdb runs the
+engine, SIGINT every few ms, `thread apply all bt`) and `PQ_TRACE_PAR=1`,
+which prints every `par_run` (task function, tasks, wall time, longest
+task, sum of task times) to stderr.
+
+### Results
+
+NVIDIA GB10 (10 Cortex-X925 + 10 Cortex-A725), default options (vectorized,
+8 threads), 9 runs, wall-clock median in ms:
+
+| query | before | after | speed-up |
+|---|---:|---:|---:|
+| q01_filter_selective | 0.2 | 0.2 | — |
+| q02_filter_low_selectivity | 2.4 | 1.7 | 1.4× |
+| q03_range_filter_time | 0.8 | 1.2 | — |
+| q04_arith_aggregate | 5.3 | 3.0 | 1.8× |
+| q05_groupby_low_card | 3.6 | 2.0 | 1.8× |
+| q06_groupby_high_card | 7.4 | 2.7 | 2.7× |
+| q07_groupby_skewed | 8.9 | 3.7 | 2.4× |
+| q08_groupby_uniform_multi | 5.5 | 2.3 | 2.4× |
+| q09_distinct_count | 143.3 | 4.2 | 34× |
+| q10_join_customers | 13.6 | 4.6 | 3.0× |
+| q11_join_star | 11.9 | 5.2 | 2.3× |
+| q12_left_join_anti | 11.9 | 1.9 | 6.3× |
+| q13_sort_topn | 4.2 | 1.5 | 2.8× |
+| q14_sort_full_string | 174.4 | 6.7 | 26× |
+| q15_sort_multi_key | 87.2 | 5.5 | 16× |
+| q16_timeseries_hourly | 1.3 | 1.4 | — |
+| q17_wide_projection | 0.7 | 0.4 | 1.8× |
+| q18_nulls | 4.3 | 2.4 | 1.8× |
+| q19_cte_subquery | 10.7 | 6.2 | 1.7× |
+| q20_string_functions | 13.4 | 1.0 | 13× |
+| **sum** | **520** | **58** | **9×** |
+
+Sub-millisecond queries (q01, q03, q16) are within noise. Forced merge
+joins (the workload's `joins` section): q10 69.6 → 26 ms, q11 107 → 44 ms.
+Thread scaling (q02 / q05 / q06 / q10 at 1, 2, 4, 16 threads): 7.5 / 8.9 /
+10.5 / 26.6 ms → 3.8 / 4.6 / 5.5 / 14.0 → 2.1 / 2.8 / 3.7 / 8.2 → 1.0 /
+1.2 / 4.5 / 4.7 ms. Row mode (`mode: "row"`) is the spec's unoptimized
+Volcano baseline and was deliberately left as it was.
+
+### What changed (by impact)
+
+* **Sorting** (`sort.S`, q14 / q15 / q13): a parallel normalized-key sort
+  replaced chunk sorts + comparator merges (which got *slower* with more
+  threads). Keys are encoded once per row into order-preserving 64-bit
+  codes (strings: 7-byte prefix + length code, inexact when longer),
+  compressed to the bits their value range needs (plus a NULL bit only when
+  a field has NULLs), packed into ≤ 3-word composite keys with the Row*
+  pointer, scattered in parallel by their top 11 bits, and each bucket is
+  sorted by MSD radix / insertion sort in cache; rows tied only by an
+  inexact string prefix (or dropped keys) are sorted by the full comparator
+  in a parallel fix-up. `ORDER BY … LIMIT` runs top-N per window in
+  parallel and then over the candidates.
+* **COUNT(DISTINCT)** (`vagg.S`, q09): DISTINCT aggregates now stay in the
+  vectorized hash aggregation: per DISTINCT slot, tasks hash (GROUP BY
+  keys, argument) pairs into key-only tables merged like partial
+  aggregates, then each distinct pair is accumulated once into its group
+  (found through an index over the final groups). FLOAT64 SUM / AVG
+  DISTINCT keep the sorted serial path (summation order).
+* **Dictionary memo** (`vexec.S`, q20): an expression whose only column is
+  a dictionary-encoded STRING column (`UPPER(currency) = 'EUR'`,
+  `LENGTH(category)`, `CASE WHEN category LIKE …`) is evaluated by the row
+  evaluator once per dictionary code (and once for NULL) per task, and the
+  value is reused for every row with that code.
+* **Worker pool** (`parallel.S`, every parallel query): `par_run` used to
+  create and join one pthread per task (≈30–60 µs each, several times per
+  query). Now persistent pool threads take tasks from a job queue, the
+  caller works on its own job (no deadlock with nested or concurrent
+  calls), at most `min(tasks, threads) − 1` pool threads serve one job, idle
+  threads poll for 1 ms (`sched_yield`) before sleeping, and a request start
+  wakes them. **`thread_boost`**: pool, session and HTTP connection threads
+  set a utilization clamp of 1024 (`sched_setattr`, unprivileged): before,
+  the energy-aware scheduler packed the mostly-sleeping pool threads two per
+  CPU for the first ~15 queries of a session, and parallel phases took
+  twice as long. (Pinning threads to CPUs was tried and was worse.)
+* **Hash aggregation** (`vagg.S`, q05–q10, q19): `gt_ids` hashes a batch's
+  keys inline (mix64) and probes the group table with prefetching for keys
+  compared by payload; COUNT / exact SUM / AVG / MIN / MAX of integer-like
+  values are accumulated inline instead of calling `agg_accum`; partial
+  tables are indexed by merge partition so each merge task reads only its
+  groups; merge tables are presized; the first-appearance ordering of the
+  final groups is skipped when the query level has an ORDER BY (its key
+  list ends with every visible column, so the input order cannot matter).
+* **Hash joins** (`join.S`, q10–q12): 64-bit hash check before key
+  comparison, one 16-byte (hash, key) entry per build tuple for single
+  integer-like keys, prefetching of bucket heads / entries ahead of the
+  probe, joined tuples written directly into the output, probe split into
+  4 tasks per thread, and the LEFT join build-side choice above (q12: a
+  few customers own most orders, so probing with customers left one task
+  with 74% of the work).
+* **Merge join**: range-reduced 11-bit radix sort, sorted key payloads for
+  sequential comparisons, inline pair emission.
+* **Memory** (`rt.S` `rt_tune_malloc`): glibc returned freed request arenas
+  to the kernel (trim / mmap thresholds), so every large query page-faulted
+  its memory in again (q15 spent ~35% in the kernel). A fixed 32 MiB mmap
+  threshold, a 1 GiB trim threshold and a 64 MiB top pad keep it.
+
+### Tuning / debugging aids
+
+`PQ_TRACE_PAR=1` (trace `par_run`), `PQ_POOL_SPIN=µs` (idle polling of
+pool threads, default 1000), `PQ_PARALLEL_MIN_ROWS` (minimum rows per
+task, default 16384).
 
 ## Change CR-1: UNION ALL
 
@@ -812,8 +950,10 @@ and `query` under ten option sets: 9059 requests, no difference.
 * Correlated subqueries are re-executed per outer row (no decorrelation).
 * Join reordering is greedy (no exhaustive / dynamic-programming search)
   and uses simple cardinality estimates. The hash-join build, sort-based
-  grouping (row mode, DISTINCT aggregates) and the merge-join sort run on
-  one thread; the final merge round of a parallel sort is a single merge.
+  grouping (row mode, FLOAT64 SUM / AVG DISTINCT) and the merge join (sort
+  and merge) run on one thread.
+* Pool threads poll for up to 1 ms after their last task before sleeping
+  (CPU time traded for latency; `PQ_POOL_SPIN` changes it).
 * `native: true` is accepted but no native kernel library is supported.
 * Streamed projections (`/v1/query/stream`) are evaluated row at a time.
 * One thread per HTTP connection (no connection limit besides the OS).
