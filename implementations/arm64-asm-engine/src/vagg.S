@@ -52,7 +52,10 @@
 #define GT_HT       48             // u32* slots: group index + 1, 0 = empty
 #define GT_MASK     56             // u64 slot mask
 #define GT_TYPES    64             // u32* key types
-#define GT_SIZE     80
+#define GT_PIDX     72             // u32* record indexes by merge partition
+#define GT_PSTART   80             // u64* [partitions + 1] starts in GT_PIDX
+#define GT_SCRATCH  88             // gt_ids: hashes [VBATCH], cells [VBATCH]
+#define GT_SIZE     96
 // Group record: hash, first tuple index, key cells, aggregate states
 #define GR_HASH     0
 #define GR_FIRST    8
@@ -268,6 +271,9 @@ FUNC vagg_aggregate
     mov  x1, x23
     mov  x2, x21
     mov  x3, x20
+    ldr  x4, [x21, #BQ_NORDER]          // group order matters without
+    cmp  x4, #0                         // ORDER BY only (its key list ends
+    cset x4, eq                         // with every visible column)
     bl   gt_pmerge
 6:  // x0 group records in order of first appearance, x1 count
     mov  x25, x0
@@ -423,17 +429,18 @@ LFUNC cells_hash
     LEAVE 2
 ENDF cells_hash
 
-// gt_alloc(x0 nkeys, x1 nagg, x2 u32* key types) -> x0 empty GroupTable*
-// with the given layout (the types array is shared)
-//   x19 table
+// gt_alloc(x0 nkeys, x1 nagg, x2 u32* key types, x3 expected groups or 0)
+//   -> x0 empty GroupTable* with the given layout (the types array is
+//   shared), sized for the expected groups (at least 64) without rehashing
+//   x19 table, x20 capacity
 LFUNC gt_alloc
-    ENTER 1
+    ENTER 2
     stp  x0, x1, [sp, #-16]!
-    str  x2, [sp, #-16]!
+    stp  x2, x3, [sp, #-16]!
     mov  x0, #GT_SIZE
     bl   arena_zalloc
     mov  x19, x0
-    ldr  x2, [sp], #16
+    ldp  x2, x20, [sp], #16
     ldp  x0, x1, [sp], #16
     str  x0, [x19, #GT_NKEYS]
     str  x1, [x19, #GT_NAGG]
@@ -442,18 +449,25 @@ LFUNC gt_alloc
     add  x9, x9, #GR_KEYS
     add  x9, x9, x1, lsl #5             // AGG_STATE_SIZE = 32
     str  x9, [x19, #GT_RECSZ]
+    cmp  x20, #64
     mov  x10, #64
-    str  x10, [x19, #GT_CAP]
-    mul  x0, x9, x10
+    csel x20, x20, x10, hi
+    str  x20, [x19, #GT_CAP]
+    mul  x0, x9, x20
     bl   arena_alloc
     str  x0, [x19, #GT_RECS]
-    mov  x0, #(128 * 4)
+    mov  x10, #128                      // slots: power of two > 2 * capacity
+1:  cmp  x10, x20, lsl #1
+    b.hi 2f
+    lsl  x10, x10, #1
+    b    1b
+2:  sub  x9, x10, #1
+    str  x9, [x19, #GT_MASK]
+    lsl  x0, x10, #2
     bl   arena_zalloc
     str  x0, [x19, #GT_HT]
-    mov  x9, #127
-    str  x9, [x19, #GT_MASK]
     mov  x0, x19
-    LEAVE 1
+    LEAVE 2
 ENDF gt_alloc
 
 // =============================================================================
@@ -540,6 +554,9 @@ FUNC vdistinct
     mov  x1, x22
     mov  x2, x19
     mov  x3, #0
+    ldr  x4, [x19, #BQ_NORDER]          // row order matters without ORDER BY
+    cmp  x4, #0
+    cset x4, eq
     bl   gt_pmerge
 7:  mov  x24, x0                        // first row of every group, in order
     mov  x25, x1
@@ -571,6 +588,7 @@ LFUNC distinct_task
     ldr  x0, [x19, #DT_NKEYS]
     mov  x1, #0
     ldr  x2, [x19, #DT_TYPES]
+    mov  x3, #0
     bl   gt_alloc
     mov  x20, x0
     str  x20, [x19, #DT_GT]
@@ -614,6 +632,228 @@ LFUNC distinct_task
     b    1b
 9:  LEAVE 5
 ENDF distinct_task
+
+// =============================================================================
+// gt_ids(x0 GroupTable*, x1 Vec** key vectors (GT_NKEYS), x2 n, x3 u32* ids,
+//        x4 tuple index of position 0, x5 1 = skip positions whose last key
+//        is NULL)
+// The group of each batch position 0..n-1 (created when new: gt_get, first
+// tuple = x4 + position; skipped positions get no id). Keys whose types
+// compare by payload (no STRING, FLOAT64 or wide DECIMAL key; dictionary
+// entries count as payloads) take the inline path: the cells and hashes
+// (mix64, as hash_cell) of the whole batch first, then the probes, each
+// prefetching the slot 8 positions and the record 4 positions ahead (the
+// tables of high-cardinality groupings do not fit in cache). Other keys go
+// through hash_cell / gt_get per position.
+//   x19 table, x20 vectors, x21 n, x22 ids, x23 base, x24 position,
+//   x25 cells, x26 1 = inline path, x27 key, x28 hash
+// Stack: [sp] skip flag, [sp+8] hashes (inline path)
+// =============================================================================
+LFUNC gt_ids
+    ENTER 5
+    sub  sp, sp, #16
+    str  x5, [sp]
+    mov  x19, x0
+    mov  x20, x1
+    mov  x21, x2
+    mov  x22, x3
+    mov  x23, x4
+    ldr  x25, [x19, #GT_SCRATCH]        // scratch: hashes, then cells
+    cbnz x25, 0f
+    ldr  x9, [x19, #GT_NKEYS]
+    lsl  x0, x9, #4
+    add  x0, x0, #8
+    mov  x9, #VBATCH
+    mul  x0, x0, x9
+    add  x0, x0, #16
+    bl   arena_alloc
+    mov  x25, x0
+    str  x25, [x19, #GT_SCRATCH]
+0:  str  x25, [sp, #8]
+    add  x25, x25, #(VBATCH * 8)        // cells of position 0
+    mov  x26, #1                        // inline path?
+    mov  x27, #0
+1:  ldr  x9, [x19, #GT_NKEYS]
+    cmp  x27, x9
+    b.hs 2f
+    ldr  x9, [x19, #GT_TYPES]
+    ldr  w9, [x9, x27, lsl #2]
+    add  x27, x27, #1
+    BR_WIDE w9, w10, 11f
+    and  w9, w9, #T_KIND_MASK
+    cmp  w9, #T_STR
+    b.eq 11f
+    cmp  w9, #T_FLOAT
+    b.ne 1b
+11: mov  x26, #0
+2:  cbz  x26, .Lgi_slow
+    // ---- inline path, pass 1: cells and hashes of every position ------------
+    ldr  x2, [x19, #GT_NKEYS]
+    ldr  x3, [sp, #8]                   // hashes
+    lsl  x4, x2, #4                     // cell bytes per position
+    ldr  x5, =0xff51afd7ed558ccd
+    ldr  x6, =0xc4ceb9fe1a85ec53
+    ldr  x7, =0x9e3779b97f4a7c15
+    ldr  x8, =NULL_HASH
+    mov  x24, #0
+3:  cmp  x24, x21
+    b.hs .Lgi_probe
+    mul  x11, x24, x4
+    add  x11, x25, x11                  // cells of this position
+    mov  x28, #0
+    mov  x27, #0
+4:  cmp  x27, x2
+    b.hs 6f
+    ldr  x10, [x20, x27, lsl #3]        // key vector
+    ldr  x0, [x10, x24, lsl #3]
+    add  x10, x10, #VEC_NULLS
+    ldrb w1, [x10, x24]
+    stp  x0, x1, [x11], #16
+    mov  x9, x8
+    cbnz w1, 5f
+    eor  x0, x0, x0, lsr #33            // mix64 (inline)
+    mul  x0, x0, x5
+    eor  x0, x0, x0, lsr #33
+    mul  x0, x0, x6
+    eor  x9, x0, x0, lsr #33
+5:  eor  x28, x28, x9
+    mul  x28, x28, x7
+    add  x28, x28, #1
+    add  x27, x27, #1
+    b    4b
+6:  str  x28, [x3, x24, lsl #3]
+    add  x24, x24, #1
+    b    3b
+    // ---- pass 2: probes with prefetching ---------------------------------------
+.Lgi_probe:
+    mov  x24, #0
+.Lgi_ppos:
+    cmp  x24, x21
+    b.hs .Lgi_end
+    ldr  x9, [sp]                       // NULL last key: skipped?
+    cbz  x9, 1f
+    ldr  x9, [x19, #GT_NKEYS]
+    sub  x9, x9, #1
+    ldr  x9, [x20, x9, lsl #3]
+    add  x9, x9, #VEC_NULLS
+    ldrb w9, [x9, x24]
+    cbz  w9, 1f
+    add  x24, x24, #1
+    b    .Lgi_ppos
+1:  ldr  x9, [x19, #GT_MASK]
+    ldr  x11, [x19, #GT_HT]
+    ldr  x12, [x19, #GT_RECS]
+    ldr  x13, [x19, #GT_RECSZ]
+    ldr  x3, [sp, #8]
+    add  x10, x24, #8                   // prefetch the slot 8 ahead
+    cmp  x10, x21
+    b.hs 2f
+    ldr  x10, [x3, x10, lsl #3]
+    and  x10, x10, x9
+    add  x10, x11, x10, lsl #2
+    prfm pldl1keep, [x10]
+    add  x10, x24, #4                   // and the record 4 ahead
+    cmp  x10, x21
+    b.hs 2f
+    ldr  x10, [x3, x10, lsl #3]
+    and  x10, x10, x9
+    ldr  w10, [x11, x10, lsl #2]
+    cbz  w10, 2f
+    sub  w10, w10, #1
+    madd x10, x10, x13, x12
+    prfm pldl1keep, [x10]
+2:  ldr  x28, [x3, x24, lsl #3]         // hash
+    ldr  x2, [x19, #GT_NKEYS]
+    lsl  x4, x2, #4
+    mul  x4, x4, x24
+    add  x17, x25, x4                   // cells
+    and  x10, x28, x9
+3:  ldr  w14, [x11, x10, lsl #2]
+    cbz  w14, .Lgi_new                  // empty slot: new group
+    sub  w14, w14, #1
+    madd x15, x14, x13, x12             // record
+    ldr  x16, [x15, #GR_HASH]
+    cmp  x16, x28
+    b.ne 5f
+    add  x15, x15, #GR_KEYS             // keys: NULL flags equal and,
+    mov  x7, x17                        // where not NULL, payloads
+    mov  x8, x2
+4:  cbz  x8, .Lgi_found
+    ldp  x3, x4, [x15], #16
+    ldp  x5, x6, [x7], #16
+    sub  x8, x8, #1
+    cmp  x4, x6
+    b.ne 5f
+    cbnz x4, 4b
+    cmp  x3, x5
+    b.eq 4b
+5:  add  x10, x10, #1
+    and  x10, x10, x9
+    b    3b
+.Lgi_found:
+    str  w14, [x22, x24, lsl #2]
+    add  x24, x24, #1
+    b    .Lgi_ppos
+.Lgi_new:
+    mov  x0, x19
+    mov  x1, x28
+    mov  x2, x17
+    add  x3, x23, x24
+    bl   gt_get
+    str  w0, [x22, x24, lsl #2]
+    add  x24, x24, #1
+    b    .Lgi_ppos
+    // ---- other key types: hash_cell / gt_get per position ---------------------
+.Lgi_slow:
+    mov  x24, #0
+.Lgi_pos:
+    cmp  x24, x21
+    b.hs .Lgi_end
+    ldr  x9, [sp]                       // NULL last key: skipped?
+    cbz  x9, 21f
+    ldr  x9, [x19, #GT_NKEYS]
+    sub  x9, x9, #1
+    ldr  x9, [x20, x9, lsl #3]
+    add  x9, x9, #VEC_NULLS
+    ldrb w9, [x9, x24]
+    cbz  w9, 21f
+    add  x24, x24, #1
+    b    .Lgi_pos
+21: mov  x28, #0                        // gather the key cells, hash
+    mov  x27, #0
+3:  ldr  x9, [x19, #GT_NKEYS]
+    cmp  x27, x9
+    b.hs 6f
+    ldr  x10, [x20, x27, lsl #3]        // key vector
+    ldr  x0, [x10, x24, lsl #3]
+    add  x10, x10, #VEC_NULLS
+    ldrb w1, [x10, x24]
+    add  x11, x25, x27, lsl #4
+    stp  x0, x1, [x11]
+    ldr  x9, =NULL_HASH
+    cbnz w1, 5f
+    ldr  x9, [x19, #GT_TYPES]
+    ldr  w1, [x9, x27, lsl #2]
+    bl   hash_cell
+    mov  x9, x0
+5:  eor  x28, x28, x9
+    ldr  x9, =0x9e3779b97f4a7c15
+    mul  x28, x28, x9
+    add  x28, x28, #1
+    add  x27, x27, #1
+    b    3b
+6:  mov  x0, x19
+    mov  x1, x28
+    mov  x2, x25
+    add  x3, x23, x24
+    bl   gt_get
+    str  w0, [x22, x24, lsl #2]
+    add  x24, x24, #1
+    b    .Lgi_pos
+.Lgi_end:
+    add  sp, sp, #16
+    LEAVE 5
+ENDF gt_ids
 
 // gt_keys_eq(x0 cells a, x1 cells b, x2 GroupTable*) -> w0 1 if equal
 // (NULL equals NULL)
@@ -868,49 +1108,13 @@ FUNC agg_task
     lsl  x2, x26, #2
     bl   memset
     b    .Lat_aggs
-41: str  xzr, [sp, #24]
-5:  ldr  x9, [sp, #24]
-    cmp  x9, x26
-    b.hs .Lat_aggs
-    mov  x28, #0                        // gather the key cells, hash
-    str  xzr, [sp, #40]
-6:  ldr  x10, [x21, #BQ_NGROUP]
-    cmp  x28, x10
-    b.hs 8f
-    ldr  x10, [sp]
-    ldr  x10, [x10, x28, lsl #3]        // key vector
-    ldr  x9, [sp, #24]
-    ldr  x0, [x10, x9, lsl #3]
-    add  x10, x10, #VEC_NULLS
-    ldrb w1, [x10, x9]
-    ldr  x11, [sp, #16]
-    add  x11, x11, x28, lsl #4
-    stp  x0, x1, [x11]
-    ldr  x0, =NULL_HASH
-    cbnz w1, 7f
-    ldr  x0, [x11]
-    ldr  x9, [x23, #GT_TYPES]
-    ldr  w1, [x9, x28, lsl #2]
-    bl   hash_cell
-7:  ldr  x9, [sp, #40]
-    eor  x9, x9, x0
-    ldr  x10, =0x9e3779b97f4a7c15
-    mul  x9, x9, x10
-    add  x9, x9, #1
-    str  x9, [sp, #40]
-    add  x28, x28, #1
-    b    6b
-8:  mov  x0, x23
-    ldr  x1, [sp, #40]
-    ldr  x2, [sp, #16]
-    ldr  x3, [sp, #24]
-    add  x3, x3, x25
-    bl   gt_get
-    ldr  x9, [sp, #24]
-    str  w0, [x27, x9, lsl #2]
-    add  x9, x9, #1
-    str  x9, [sp, #24]
-    b    5b
+41: mov  x0, x23
+    ldr  x1, [sp]                       // key vectors
+    mov  x2, x26
+    mov  x3, x27
+    mov  x4, x25
+    mov  x5, #0
+    bl   gt_ids
 .Lat_aggs:
     // ---- every aggregate: argument vector, accumulate per tuple
     str  xzr, [sp, #32]
@@ -1075,6 +1279,7 @@ LFUNC vagg_distinct
 3:  ldr  x0, [x21, #BQ_NGROUP]          // index: group keys -> list position
     mov  x1, #0
     ldr  x2, [x28, #DSP_TYPES]
+    mov  x3, x24
     bl   gt_alloc
     str  x0, [sp, #8]
     mov  x27, #0
@@ -1164,6 +1369,7 @@ LFUNC vagg_distinct
     ldr  x1, [sp]
     mov  x2, x21
     mov  x3, x20
+    mov  x4, #0                         // pair order does not matter
     bl   gt_pmerge
 2:  stp  x0, x1, [sp, #32]
     mov  x27, #0
@@ -1211,8 +1417,7 @@ ENDF vagg_distinct
 // group table (XT_GT)
 //   x19 task, x20 ctx, x21 spec, x22 ts, x23 table, x24 vb, x25 batch start,
 //   x26 batch size, x27 keys, x28 key index
-// Stack: [sp] key vectors (Vec* [keys], the argument last), [sp+8] key
-//        cells, [sp+16] position
+// Stack: [sp] key vectors (Vec* [keys], the argument last), [sp+16] ids
 // =============================================================================
 LFUNC dagg_task
     ENTER 5
@@ -1225,6 +1430,7 @@ LFUNC dagg_task
     mov  x0, x27
     mov  x1, #0
     ldr  x2, [x21, #DSP_TYPES]
+    mov  x3, #0
     bl   gt_alloc
     mov  x23, x0
     str  x23, [x19, #XT_GT]
@@ -1244,9 +1450,9 @@ LFUNC dagg_task
     str  x0, [x9, x28, lsl #3]
     add  x28, x28, #1
     b    1b
-2:  lsl  x0, x27, #4
+2:  mov  x0, #(VBATCH * 4)             // group ids (unused)
     bl   arena_alloc
-    str  x0, [sp, #8]
+    str  x0, [sp, #16]
     ldr  x25, [x19, #XT_LO]
 .Ldt_batch:
     ldr  x9, [x19, #XT_HI]
@@ -1283,43 +1489,13 @@ LFUNC dagg_task
     bl   veval
     add  x28, x28, #1
     b    3b
-5:  str  xzr, [sp, #16]
-6:  ldr  x9, [sp, #16]
-    cmp  x9, x26
-    b.hs .Ldt_next
-    add  x10, x9, #1
-    str  x10, [sp, #16]
-    ldr  x10, [sp]
-    sub  x11, x27, #1
-    ldr  x10, [x10, x11, lsl #3]        // argument vector
-    add  x10, x10, #VEC_NULLS
-    ldrb w10, [x10, x9]
-    cbnz w10, 6b                        // NULL argument: ignored
-    mov  x28, #0                        // gather the key cells
-7:  cmp  x28, x27
-    b.hs 8f
-    ldr  x10, [sp]
-    ldr  x10, [x10, x28, lsl #3]
-    ldr  x0, [x10, x9, lsl #3]
-    add  x10, x10, #VEC_NULLS
-    ldrb w1, [x10, x9]
-    ldr  x11, [sp, #8]
-    add  x11, x11, x28, lsl #4
-    stp  x0, x1, [x11]
-    add  x28, x28, #1
-    b    7b
-8:  ldr  x0, [sp, #8]
-    mov  x1, x27
-    ldr  x2, [x21, #DSP_TYPES]
-    bl   cells_hash
-    mov  x1, x0
-    mov  x0, x23
-    ldr  x2, [sp, #8]
+5:  mov  x0, x23                        // pairs with a non-NULL argument
+    ldr  x1, [sp]
+    mov  x2, x26
     ldr  x3, [sp, #16]
-    sub  x3, x3, #1
-    add  x3, x3, x25
-    bl   gt_get
-    b    6b
+    mov  x4, x25
+    mov  x5, #1
+    bl   gt_ids
 .Ldt_next:
     add  x25, x25, x26
     b    .Ldt_batch
@@ -1353,19 +1529,24 @@ LFUNC gt_list
 ENDF gt_list
 
 // =============================================================================
-// gt_pmerge(x0 agg task records, x1 count T, x2 BoundQuery*, x3 ctx)
-//   -> x0 group record pointers in order of first appearance, x1 count
+// gt_pmerge(x0 agg task records, x1 count T, x2 BoundQuery*, x3 ctx, x4 1 =
+//           order by first appearance)
+//   -> x0 group record pointers (in order of first appearance if x4 = 1),
+//      x1 count
 // Partitioned parallel merge of the partial tables: merge task p takes the
 // groups whose hash falls into partition p from every partial table, in
 // task order (so its first insertion of a key carries the key's earliest
-// tuple), into its own table. The final groups are then ordered by their
-// first tuple (sort_by_first).
+// tuple), into its own table. Every partial table is first indexed by
+// partition (part_task, in parallel), so a merge task reads only its own
+// groups. On request the final groups are then ordered by their first tuple
+// (sort_by_first); otherwise they come partition by partition.
 //   x19 tasks, x20 T, x21 merge records, x22 index, x23 total, x24 list
 // =============================================================================
 LFUNC gt_pmerge
     ENTER 5
     mov  x19, x0
     mov  x20, x1
+    mov  x25, x4
     stp  x2, x3, [sp, #-16]!
     mov  x9, #MT_SIZE
     mul  x0, x9, x20
@@ -1377,6 +1558,10 @@ LFUNC gt_pmerge
     b.hs 2f
     mov  x9, #MT_SIZE
     madd x9, x22, x9, x21
+    mov  x10, #XT_SIZE                  // (MT_GT: partial table to index)
+    madd x10, x22, x10, x19
+    ldr  x10, [x10, #XT_GT]
+    str  x10, [x9, #MT_GT]
     str  x19, [x9, #MT_TASKS]
     str  x20, [x9, #MT_T]
     str  x22, [x9, #MT_PART]
@@ -1384,7 +1569,12 @@ LFUNC gt_pmerge
     str  x3, [x9, #MT_CTX]
     add  x22, x22, #1
     b    1b
-2:  ADR_L x0, merge_task
+2:  ADR_L x0, part_task
+    mov  x1, x21
+    mov  x2, #MT_SIZE
+    mov  x3, x20
+    bl   par_run
+    ADR_L x0, merge_task
     mov  x1, x21
     mov  x2, #MT_SIZE
     mov  x3, x20
@@ -1424,13 +1614,84 @@ LFUNC gt_pmerge
     b    6b
 61: add  x22, x22, #1
     b    5b
-7:  mov  x0, x24
+7:  cbz  x25, 8f
+    mov  x0, x24
     mov  x1, x23
     bl   sort_by_first
+8:
     mov  x0, x24
     mov  x1, x23
     LEAVE 5
 ENDF gt_pmerge
+
+// part_task(x0 merge record): indexes the partial table at MT_GT by merge
+// partition, (hash >> 32) mod MT_T: GT_PSTART / GT_PIDX (counting sort,
+// record order kept within a partition)
+//   x19 record, x20 table, x21 partitions, x22 counts / starts, x23 index,
+//   x24 cursors
+LFUNC part_task
+    ENTER 4
+    mov  x19, x0
+    ldr  x20, [x19, #MT_GT]
+    ldr  x21, [x19, #MT_T]
+    add  x0, x21, #2
+    lsl  x0, x0, #3
+    bl   arena_zalloc
+    mov  x22, x0
+    str  x22, [x20, #GT_PSTART]
+    lsl  x0, x21, #3
+    add  x0, x0, #8
+    bl   arena_alloc
+    mov  x24, x0
+    ldr  x9, [x20, #GT_N]
+    lsl  x0, x9, #2
+    add  x0, x0, #4
+    bl   arena_alloc
+    str  x0, [x20, #GT_PIDX]
+    ldr  x10, [x20, #GT_RECS]           // counts (at p + 1)
+    ldr  x11, [x20, #GT_RECSZ]
+    ldr  x12, [x20, #GT_N]
+    mov  x23, #0
+1:  cmp  x23, x12
+    b.hs 2f
+    madd x13, x23, x11, x10
+    ldr  x9, [x13, #GR_HASH]
+    lsr  x9, x9, #32
+    udiv x13, x9, x21
+    msub x9, x13, x21, x9
+    add  x9, x9, #1
+    ldr  x13, [x22, x9, lsl #3]
+    add  x13, x13, #1
+    str  x13, [x22, x9, lsl #3]
+    add  x23, x23, #1
+    b    1b
+2:  mov  x9, #0                         // starts; cursors
+3:  cmp  x9, x21
+    b.hs 4f
+    ldr  x13, [x22, x9, lsl #3]
+    add  x14, x9, #1
+    ldr  x15, [x22, x14, lsl #3]
+    add  x15, x15, x13
+    str  x15, [x22, x14, lsl #3]
+    str  x13, [x24, x9, lsl #3]
+    mov  x9, x14
+    b    3b
+4:  mov  x23, #0                        // record indexes by partition
+5:  cmp  x23, x12
+    b.hs 6f
+    madd x13, x23, x11, x10
+    ldr  x9, [x13, #GR_HASH]
+    lsr  x9, x9, #32
+    udiv x13, x9, x21
+    msub x9, x13, x21, x9
+    ldr  x13, [x24, x9, lsl #3]
+    add  x14, x13, #1
+    str  x14, [x24, x9, lsl #3]
+    str  w23, [x0, x13, lsl #2]
+    add  x23, x23, #1
+    b    5b
+6:  LEAVE 4
+ENDF part_task
 
 // merge_task(x0 merge record): partition MT_PART of every partial table
 //   x19 record, x20 table, x21 task index, x22 group, x23 source record,
@@ -1440,11 +1701,27 @@ LFUNC merge_task
     mov  x19, x0
     ldr  x24, [x19, #MT_T]
     ldr  x9, [x19, #MT_TASKS]           // same key layout as the partial
-    ldr  x9, [x9, #XT_GT]               // tables
-    ldr  x0, [x9, #GT_NKEYS]
+    ldr  x9, [x9, #XT_GT]               // tables, sized for the groups of
+    ldr  x0, [x9, #GT_NKEYS]            // this partition in all of them
     ldr  x1, [x9, #GT_NAGG]
     ldr  x2, [x9, #GT_TYPES]
-    bl   gt_alloc
+    mov  x3, #0
+    mov  x10, #0
+0:  cmp  x10, x24
+    b.hs 01f
+    ldr  x11, [x19, #MT_TASKS]
+    mov  x12, #XT_SIZE
+    madd x11, x10, x12, x11
+    ldr  x11, [x11, #XT_GT]
+    ldr  x11, [x11, #GT_PSTART]
+    ldr  x12, [x19, #MT_PART]
+    add  x12, x11, x12, lsl #3
+    ldp  x13, x14, [x12]
+    sub  x14, x14, x13
+    add  x3, x3, x14
+    add  x10, x10, #1
+    b    0b
+01: bl   gt_alloc
     mov  x20, x0
     str  x20, [x19, #MT_GT]
     mov  x21, #0
@@ -1455,21 +1732,21 @@ LFUNC merge_task
     mov  x10, #XT_SIZE
     madd x9, x21, x10, x9
     ldr  x25, [x9, #XT_GT]              // source table
-    mov  x22, #0
-2:  ldr  x9, [x25, #GT_N]
+    ldr  x9, [x25, #GT_PSTART]          // its groups of this partition
+    ldr  x10, [x19, #MT_PART]
+    ldr  x22, [x9, x10, lsl #3]
+2:  ldr  x9, [x25, #GT_PSTART]
+    ldr  x10, [x19, #MT_PART]
+    add  x10, x10, #1
+    ldr  x9, [x9, x10, lsl #3]
     cmp  x22, x9
     b.hs 4f
+    ldr  x9, [x25, #GT_PIDX]
+    ldr  w9, [x9, x22, lsl #2]
     ldr  x10, [x25, #GT_RECS]
     ldr  x11, [x25, #GT_RECSZ]
-    madd x23, x22, x11, x10
+    madd x23, x9, x11, x10
     add  x22, x22, #1
-    ldr  x9, [x23, #GR_HASH]            // partition = (hash >> 32) mod T
-    lsr  x9, x9, #32
-    udiv x10, x9, x24
-    msub x9, x10, x24, x9
-    ldr  x10, [x19, #MT_PART]
-    cmp  x9, x10
-    b.ne 2b
     mov  x0, x20
     ldr  x1, [x23, #GR_HASH]
     add  x2, x23, #GR_KEYS

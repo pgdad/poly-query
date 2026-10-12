@@ -32,6 +32,7 @@
 #define WK_THREADS  40
 #define WK_MODE     48              // u32
 #define WK_CAT      64
+#define WK_US       72              // task run time (PQ_TRACE_PAR)
 #define WK_ERR      88              // u32 error code (0 = none)
 #define WK_ARENA    96              // Arena handed back (AR_SIZE)
 #define WK_MSG      128             // error message (WK_MSGMAX bytes, NUL)
@@ -50,6 +51,9 @@
 
 #define POOL_MAX    64              // pool threads at most
 
+    .section .rodata
+s_trace:        .asciz "par %p tasks=%ld us=%ld max=%ld sum=%ld\n"
+
     .bss
     .p2align 4
 g_pool_lock:    .skip 64            // pthread_mutex_t: guards the pool state
@@ -61,8 +65,9 @@ g_pool_threads: .skip 8             // pool threads started
 
     .data
     .p2align 3
-    .global g_pool_spin
-g_pool_spin:    .quad 50000         // idle polls before a pool thread sleeps
+    .global g_pool_spin, g_par_trace
+g_par_trace:    .quad 0             // 1: trace par_run calls on stderr
+g_pool_spin:    .quad 1000          // µs of polling before a thread sleeps
 
     .text
 
@@ -109,7 +114,12 @@ FUNC par_run
     str  x9, [x25, #WK_CAT]
     add  x24, x24, #1
     b    1b
-2:  mov  x0, #JB_SIZE
+2:  mov  x27, #0                        // PQ_TRACE_PAR: start time
+    LDR_G x9, g_par_trace
+    cbz  x9, 21f
+    bl   now_us
+    mov  x27, x0
+21: mov  x0, #JB_SIZE
     bl   arena_zalloc
     mov  x26, x0
     str  x23, [x26, #JB_RECS]
@@ -137,6 +147,8 @@ FUNC par_run
 .Lpr_claim_locked:                      // run tasks of this job here
     ldr  x24, [x26, #JB_CLAIMED]
     cmp  x24, x22
+    mov  x9, #0
+    csel x24, x9, x24, hs               // (x24 = 0: not spun yet)
     b.hs .Lpr_wait
     mov  x0, x26
     bl   job_claim
@@ -154,13 +166,53 @@ FUNC par_run
     ldr  x9, [x26, #JB_DONE]
     cmp  x9, x22
     b.hs 5f
-    ADR_L x0, g_pool_done
+    cbnz x24, 52f                       // spun already: sleep
+    ADR_L x0, g_pool_lock               // poll for a while first (a
+    bl   pthread_mutex_unlock           // futex wake-up costs more than
+    bl   now_us                         // the tail of a short phase)
+    mov  x24, x0
+51: add  x9, x26, #JB_DONE
+    ldar x9, [x9]
+    cmp  x9, x22
+    b.hs 53f
+    bl   sched_yield
+    bl   now_us
+    sub  x0, x0, x24
+    LDR_G x9, g_pool_spin
+    cmp  x0, x9
+    b.lo 51b
+53: ADR_L x0, g_pool_lock
+    bl   pthread_mutex_lock
+    mov  x24, #1
+    b    .Lpr_wait
+52: ADR_L x0, g_pool_done
     ADR_L x1, g_pool_lock
     bl   pthread_cond_wait
     b    .Lpr_wait
 5:  ADR_L x0, g_pool_lock
     bl   pthread_mutex_unlock
-    mov  x24, #0                        // adopt the arenas
+    cbz  x27, 51f
+    bl   now_us                         // PQ_TRACE_PAR: "par <fn> <n> <us>
+    sub  x4, x0, x27                    // <longest task> <sum of tasks>"
+    mov  x5, #0
+    mov  x6, #0
+    mov  x9, #0
+52: cmp  x9, x22
+    b.hs 53f
+    mov  x10, #WK_SIZE
+    madd x10, x9, x10, x23
+    ldr  x10, [x10, #WK_US]
+    cmp  x10, x5
+    csel x5, x10, x5, hi
+    add  x6, x6, x10
+    add  x9, x9, #1
+    b    52b
+53: GOT_LOAD x0, stderr
+    ADR_L x1, s_trace
+    mov  x2, x19
+    mov  x3, x22
+    bl   fprintf
+51: mov  x24, #0                        // adopt the arenas
 6:  cmp  x24, x22
     b.hs 7f
     mov  x9, #WK_SIZE
@@ -320,13 +372,17 @@ LFUNC pool_main
     cbnz x19, 2f
     ADR_L x0, g_pool_lock               // idle: poll the queue for a while
     bl   pthread_mutex_unlock           // before sleeping (queries run
-    LDR_G x20, g_pool_spin              // several parallel phases in a row)
+    bl   now_us                         // several parallel phases in a row)
+    mov  x20, x0
 11: ADR_L x9, g_pool_head
     ldar x10, [x9]
     cbnz x10, 12f
-    yield
-    subs x20, x20, #1
-    b.ne 11b
+    bl   sched_yield
+    bl   now_us
+    sub  x0, x0, x20
+    LDR_G x9, g_pool_spin
+    cmp  x0, x9
+    b.lo 11b
 12: ADR_L x0, g_pool_lock
     bl   pthread_mutex_lock
     ADR_L x9, g_pool_head
@@ -379,12 +435,15 @@ LFUNC wk_run
     ldr  x9, [x19, #WK_CAT]
     TLS_ADDR x10, g_cat
     str  x9, [x10]
+    bl   trace_start
     TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, 1f
     ldr  x0, [x19, #WK_ARG]
     ldr  x9, [x19, #WK_FN]
     blr  x9
+    mov  x0, x19
+    bl   trace_end
     b    2f
 1:  TLS_ADDR x9, g_err_code             // the task raised: record the error
     ldr  w9, [x9]
@@ -404,6 +463,33 @@ LFUNC wk_run
     LEAVE 2
 ENDF wk_run
 
+// trace_start(x19 = worker record of the caller): with PQ_TRACE_PAR, the
+// task's start time in WK_US (x19 is the callers' record register)
+LFUNC trace_start
+    LDR_G x9, g_par_trace
+    cbz  x9, 1f
+    stp  x29, x30, [sp, #-16]!
+    bl   now_us
+    str  x0, [x19, #WK_US]
+    ldp  x29, x30, [sp], #16
+1:  ret
+ENDF trace_start
+
+// trace_end(x0 worker record): WK_US = run time of the task
+LFUNC trace_end
+    LDR_G x9, g_par_trace
+    cbz  x9, 1f
+    stp  x29, x30, [sp, #-16]!
+    str  x0, [sp, #-16]!
+    bl   now_us
+    ldr  x1, [sp], #16
+    ldr  x2, [x1, #WK_US]
+    sub  x0, x0, x2
+    str  x0, [x1, #WK_US]
+    ldp  x29, x30, [sp], #16
+1:  ret
+ENDF trace_end
+
 // =============================================================================
 // wk_inline(x0 worker record) — runs a task the caller of par_run claimed
 // on the calling thread under a nested error handler: the request's jump
@@ -419,12 +505,15 @@ LFUNC wk_inline
     TLS_ADDR x1, g_jmpbuf
     mov  x2, #512
     bl   memcpy
+    bl   trace_start
     TLS_ADDR x0, g_jmpbuf
     bl   setjmp
     cbnz w0, 1f
     ldr  x0, [x19, #WK_ARG]
     ldr  x9, [x19, #WK_FN]
     blr  x9
+    mov  x0, x19
+    bl   trace_end
     b    2f
 1:  TLS_ADDR x9, g_err_code
     ldr  w9, [x9]
