@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Assembly-engine policy check for a finished run (ADR-0016, languages.json stdlib_note).
+
+Checks the agent's committed work directory and transcript: no C or other high-level source
+files, no compiler-generated assembly markers (.LFB, .cfi_startproc, GCC ident), no C
+compilation in any tool call, and reports merge commits. Writes compliance.json into the run
+directory and exits 1 on a violation.
+
+  asm_engine_compliance.py <run-id>
+"""
+from __future__ import annotations
+
+import gzip
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+RUN_ROOT = Path("/srv/polyquery/runs")
+HIGH_LEVEL = re.compile(r"\.(c|h|cc|cpp|cxx|hpp|rs|go|java|clj|lisp|zig|f90|d)$")
+MARKERS = re.compile(r"\.LFB[0-9]|\.cfi_startproc|GCC: \(|^\s*\.ident\b", re.M)
+C_COMPILE = re.compile(r"\b(gcc|cc|clang|tcc)\b[^\"]{0,120}\.c\b|-S\b[^\"]{0,40}\.c\b|\bcc1\b")
+
+
+def git(ws: Path, *args: str) -> str:
+    return subprocess.run(["git", *args], cwd=ws, check=True, capture_output=True, text=True).stdout
+
+
+def tool_inputs(transcript: Path):
+    opener = gzip.open if transcript.suffix == ".gz" else open
+    with opener(transcript, "rt") as fh:
+        for line in fh:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            ev = ev.get("event") or ev
+            msg = ev.get("message") if isinstance(ev, dict) else None
+            for c in (msg or {}).get("content") or [] if isinstance(msg, dict) else []:
+                if isinstance(c, dict) and c.get("type") == "tool_use":
+                    yield json.dumps(c.get("input"))
+
+
+def main() -> int:
+    run = sys.argv[1]
+    rd = RUN_ROOT / run
+    m = json.loads((rd / "manifest.json").read_text())
+    ws, wd = rd / "workspace", m["work_dir"]
+    files = git(ws, "ls-files", wd).split()
+    asm = [f for f in files if f.endswith((".S", ".s", ".inc"))]
+    base = m.get("chain_baseline_commit") or m["baseline_commit"]
+    transcripts = [p for p in (rd / "transcript.jsonl", rd / "transcript.jsonl.gz") if p.exists()]
+    out = {
+        "run_id": run,
+        "high_level_sources": [f for f in files if HIGH_LEVEL.search(f)],
+        "compiler_markers": [f for f in asm if MARKERS.search((ws / f).read_text(errors="replace"))],
+        "c_compile_tool_calls": [s[:200] for t in transcripts[:1] for s in tool_inputs(t) if C_COMPILE.search(s)],
+        "merge_commits": int(git(ws, "rev-list", "--merges", "--count", f"{base}..HEAD").strip()),
+        "asm_lines": sum(len((ws / f).read_text(errors="replace").splitlines()) for f in asm),
+        "transcript_checked": bool(transcripts),
+    }
+    out["compliant"] = (not out["high_level_sources"] and not out["compiler_markers"]
+                        and not out["c_compile_tool_calls"] and out["transcript_checked"])
+    (rd / "compliance.json").write_text(json.dumps(out, indent=1) + "\n")
+    print(json.dumps({k: v for k, v in out.items() if k != "run_id"}))
+    return 0 if out["compliant"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
