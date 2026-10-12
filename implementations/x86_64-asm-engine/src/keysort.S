@@ -80,7 +80,11 @@
 #define KS_VARY   136   /* u64[KS_MAXW]: bits that differ between entries */
 #define KS_SCAN   184   /* u8[8]: key k must be checked by ks_null_part */
 #define KS_NSCAN  192   /* keys to check */
-#define KS_SPEC   200
+#define KS_TW     200   /* trusted words: the first KS_TW words decide (ties:
+                           row_cmp); < KS_W when a STRING key assumed short
+                           (not pre-scanned) had a long value */
+#define KS_TRUSTP 208   /* u64[P]: each part's trusted words */
+#define KS_SPEC   216
 #define KS_SIZE   (KS_SPEC + SP_SIZE * KS_MAXW)
 
     .text
@@ -170,8 +174,9 @@ ENDF ks_null_part
 
 /* ks_known(task rdi): KS_SCAN[k] = 0 for the keys (of the first 8) that
  * are known never to be NULL - a plain column without NULLs of the only
- * (base table) range variable - and are not STRINGs (whose lengths are
- * checked); KS_NSCAN = keys left to check */
+ * (base table) range variable; KS_NSCAN = keys left to check.  STRING
+ * keys not scanned are assumed short; ks_enc_part checks the lengths and
+ * lowers KS_TW when a long one appears */
 FUNC ks_known
     ENTER 0
     mov %rdi, %rbx
@@ -184,8 +189,6 @@ FUNC ks_known
     movb $1, KS_SCAN(%rbx, %r13)
     imul $SK_SIZE, %r13, %r14
     add QP_KEYS(%r12), %r14
-    cmpb $T_STR, SK_TYPE(%r14)
-    je 8f
     mov SK_EXPR(%r14), %rax
     mov SK_OUT(%r14), %rcx
     cmp $-1, %rcx
@@ -302,7 +305,7 @@ FUNC ks_cmp
     mov %rdi, %rbx
     mov %rsi, %r12
     mov %rdx, %r13
-    mov KS_W(%r13), %rcx
+    mov KS_TW(%r13), %rcx
     xor %r8d, %r8d
 1:  cmp %rcx, %r8
     jae 3f
@@ -312,7 +315,8 @@ FUNC ks_cmp
     ja 8f
     inc %r8
     jmp 1b
-3:  cmpq $0, KS_INCOMP(%r13)
+3:  mov KS_W(%r13), %rcx
+    cmpq $0, KS_INCOMP(%r13)
     je 4f
     lea (%rbx, %rcx, 8), %rdi       /* &row */
     lea (%r12, %rcx, 8), %rsi
@@ -364,15 +368,17 @@ FUNC ks_isort
     jbe 3f
     mov %r15, %rdi
     sub KS_STRIDE(%rbx), %rdi       /* A[j - 1] */
-    mov KS_W(%rbx), %rcx            /* (inline: the key words) */
+    mov KS_TW(%rbx), %rcx           /* (inline: the key words) */
     xor %edx, %edx
-21: mov (%rdi, %rdx, 8), %rax
+21: cmp %rcx, %rdx
+    jae 211f
+    mov (%rdi, %rdx, 8), %rax
     cmp 0(%rsp, %rdx, 8), %rax
     jb 3f
     ja 23f
     inc %rdx
-    cmp %rcx, %rdx
-    jb 21b
+    jmp 21b
+211: mov KS_W(%rbx), %rcx
     cmpq $0, KS_INCOMP(%rbx)        /* equal words */
     je 22f
     lea 0(%rsp), %rsi
@@ -427,7 +433,7 @@ FUNC ks_msd
     LEAVE
 1:  /* next digit that varies in this bucket */
     mov MS_D(%rsp), %rax
-    mov KS_W(%rbx), %rcx
+    mov KS_TW(%rbx), %rcx
     shl $3, %rcx
     cmp %rcx, %rax
     jae 80f                         /* words exhausted */
@@ -557,8 +563,9 @@ ENDF ks_msd
 #define EP_AND  (8 * KS_MAXW)
 #define EP_HI   (16 * KS_MAXW)
 #define EP_PART (EP_HI + 8)
+#define EP_TW   (EP_HI + 16)
 FUNC ks_enc_part
-    ENTER EP_PART + 8
+    ENTER EP_TW + 8
     mov %rdi, %rbx
     mov %rcx, EP_HI(%rsp)
     mov %rsi, EP_PART(%rsp)
@@ -568,6 +575,8 @@ FUNC ks_enc_part
     inc %ecx
     cmp $KS_MAXW, %ecx
     jb 1b
+    mov KS_W(%rbx), %rax
+    mov %rax, EP_TW(%rsp)           /* trusted words so far */
     mov %rdx, %r13                  /* i */
     KS_ENTRY %rbx, %r13, %r15       /* &A[i] */
 2:  cmp EP_HI(%rsp), %r13
@@ -589,7 +598,21 @@ FUNC ks_enc_part
     mov %rax, (%r15, %r14, 8)
     or %rax, EP_OR(%rsp, %r14, 8)
     and %rax, EP_AND(%rsp, %r14, 8)
-    inc %r14
+    mov %r14, %rdi                  /* second STRING word: length 16 */
+    shl $5, %rdi                    /* (= long value) ends the trusted */
+    lea KS_SPEC(%rbx, %rdi), %rdi   /* words after this one */
+    cmpq $WK_STR, SP_KIND(%rdi)
+    jne 31f
+    cmpq $1, SP_ARG(%rdi)
+    jne 31f
+    xor SP_XOR(%rdi), %rax
+    cmp $KS_LONG_STR, %al
+    jne 31f
+    lea 1(%r14), %rax
+    cmp EP_TW(%rsp), %rax
+    jae 31f
+    mov %rax, EP_TW(%rsp)
+31: inc %r14
     jmp 3b
 4:  add KS_STRIDE(%rbx), %r15
     inc %r13
@@ -607,6 +630,10 @@ FUNC ks_enc_part
     inc %ecx
     cmp $KS_MAXW, %ecx
     jb 6b
+    mov KS_TRUSTP(%rbx), %rax
+    mov EP_PART(%rsp), %rcx
+    mov EP_TW(%rsp), %rdx
+    mov %rdx, (%rax, %rcx, 8)
     call check_deadline
     LEAVE
 ENDF ks_enc_part
@@ -822,6 +849,7 @@ FUNC ks_plan
     je 1b                           /* exact: continue with the next key */
 7:  movq $1, KS_INCOMP(%rbx)
 8:  mov %r14, KS_W(%rbx)
+    mov %r14, KS_TW(%rbx)
     xor %eax, %eax
     test %r14, %r14
     setnz %al
@@ -934,11 +962,24 @@ FUNC keysort
     imul $8 * KS_MAXW, %r14, %rdi
     call tmp_alloc
     mov %rax, KS_AND(%r15)
+    lea (, %r14, 8), %rdi
+    call tmp_alloc
+    mov %rax, KS_TRUSTP(%r15)
     mov %r12, %rdi                  /* (1) encode */
     mov %r14, %rsi
     lea ks_enc_part(%rip), %rdx
     mov %r15, %rcx
     call par_run
+    xor %ecx, %ecx                  /* trusted words: the parts' minimum */
+0:  mov KS_TRUSTP(%r15), %rax
+    mov (%rax, %rcx, 8), %rax
+    cmp KS_TW(%r15), %rax
+    jae 01f
+    mov %rax, KS_TW(%r15)
+    movq $1, KS_INCOMP(%r15)
+01: inc %rcx
+    cmp %r14, %rcx
+    jb 0b
     xor %ecx, %ecx                  /* differing bits: OR ^ AND over all */
 1:  xor %eax, %eax
     mov $-1, %rdx

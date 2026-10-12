@@ -39,6 +39,17 @@ awk 'BEGIN {
     printf "%d,%s,%s,%s\n", i, x, y, z
   } }' > "$TMP/w.csv"
 
+# v: 2000 rows, a STRING column without NULLs mixing short values and long
+# ones (> 15 bytes) that share their first 15 bytes (normalized sort keys)
+awk 'BEGIN {
+  print "id,k,s";
+  for (i = 0; i < 2000; i++) {
+    if (i % 3 == 0) s = sprintf("aaaaaaaaaaaaaaa%d", i % 13);
+    else if (i % 3 == 1) s = sprintf("aaaa%d", i % 17);
+    else s = sprintf("aaaaaaaaaaaaaa%d", i % 4);
+    printf "%d,%d,%s\n", i, i % 7, s
+  } }' > "$TMP/v.csv"
+
 QUERIES=$(cat <<'Q'
 SELECT a, b FROM t WHERE b <> 0 AND a / b > 100
 SELECT a FROM t WHERE b = 0 OR a / b > 300
@@ -140,6 +151,9 @@ SELECT dt, a FROM t ORDER BY dt DESC, a DESC
 SELECT a FROM t ORDER BY f * 0, a DESC
 SELECT a, s FROM t ORDER BY s || 'xxxxxxxxxxxxxxx' || CAST(a % 3 AS STRING), a
 SELECT a, s FROM t ORDER BY s, a DESC
+SELECT id, s FROM v ORDER BY s, id DESC
+SELECT s, k, id FROM v ORDER BY s DESC, k, id
+SELECT k, s FROM v ORDER BY k DESC, s, id
 SELECT a, s FROM t ORDER BY s || 'xxxxxxxxxx' DESC, a
 SELECT a, x, y FROM w ORDER BY y DESC NULLS LAST, x, a
 SELECT a, z FROM w ORDER BY z NULLS FIRST, a DESC
@@ -157,6 +171,7 @@ run() { # options -> responses (stats stripped)
   {
     printf '{"op":"load","table":"t","format":"csv","path":"t.csv","schema":[{"name":"a","type":"INT64"},{"name":"b","type":"INT64"},{"name":"n","type":"INT64"},{"name":"d","type":"DECIMAL(8,2)"},{"name":"f","type":"FLOAT64"},{"name":"s","type":"STRING"},{"name":"dt","type":"DATE"},{"name":"flag","type":"BOOLEAN"}]}\n'
     printf '{"op":"load","table":"u","format":"csv","path":"u.csv"}\n'
+    printf '{"op":"load","table":"v","format":"csv","path":"v.csv","schema":[{"name":"id","type":"INT64"},{"name":"k","type":"INT64"},{"name":"s","type":"STRING"}]}\n'
     printf '{"op":"load","table":"w","format":"csv","path":"w.csv","schema":[{"name":"a","type":"INT64"},{"name":"x","type":"DECIMAL(38,10)"},{"name":"y","type":"DECIMAL(25,0)"},{"name":"z","type":"DECIMAL(10,2)"}]}\n'
     echo "$QUERIES" | while IFS= read -r q; do
       printf '{"op":"query","sql":"%s","options":%s}\n' "$(printf '%s' "$q" | sed 's/"/\\"/g')" "$1"
