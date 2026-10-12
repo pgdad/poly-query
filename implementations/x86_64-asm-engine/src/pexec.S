@@ -52,6 +52,20 @@
 #define PT_LABORT PT_B
 #define LAGG_MAX  2048
 
+#define PT_AUX   PT_CNT         /* DistinctAux* (PT_CNT[0] reused) of the
+                                   radix partitioning in DISTINCT and
+                                   GROUP BY aggregation */
+
+/* DistinctAux: the tuples grouped by hash partition (aux_new, the key
+ * phases dkey_part / gkey_part, dsplit_bounds, dscat_part) */
+#define AX_PID   0      /* u8[n]: partition of each tuple's value, 0xff NULL */
+#define AX_CNT   8      /* u64[P][P]: per part, values per partition; then
+                           each part's write position per partition */
+#define AX_IDX   16     /* u32[n]: tuple indices by partition, in tuple order */
+#define AX_BND   24     /* u64[P + 1]: partition bounds in AX_IDX */
+#define AX_NP    32     /* P: partitions (= parts of the key phase) */
+#define AX_SIZE  40
+
 /* hash-partitioned GROUP BY: u64[n], the group entry created at tuple i
  * (0 if none), so the groups come out in first-seen order without sorting */
 #define PT_SLOT   PT_FP
@@ -1147,10 +1161,16 @@ ENDF single_part
 /* gkey_part(task rdi, part rsi, lo rdx, hi rcx): key cells (PT_A) and
  * hashes (PT_B) of the tuples [lo, hi); PT_C = key types */
 FUNC gkey_part
-    ENTER 112
+    ENTER (112+8*MAX_THREADS)       /* 112: counts per partition */
     mov %rdi, %rbx
     mov %rdx, %r14
     mov %rcx, 72(%rsp)
+    mov %rsi, 96(%rsp)              /* part */
+    lea 112(%rsp), %rdi
+    xor %eax, %eax
+    mov $MAX_THREADS, %ecx
+    rep stosq
+    mov 72(%rsp), %rcx
     lea (, %r14, 8), %rdi           /* clear this range's group slots */
     add PT_SLOT(%rbx), %rdi
     xor %esi, %esi
@@ -1200,16 +1220,28 @@ FUNC gkey_part
     lea (%r14, %rcx), %rdx
     mov PT_B(%rbx), %rsi
     mov %rax, (%rsi, %rdx, 8)
+    shr $32, %rax                   /* partition = (hash >> 32) * P >> 32 */
+    mov PT_AUX(%rbx), %rsi
+    imul AX_NP(%rsi), %rax
+    shr $32, %rax
+    mov AX_PID(%rsi), %rsi
+    mov %al, (%rsi, %rdx)
+    incq 112(%rsp, %rax, 8)
     inc %rcx
     cmp %r15, %rcx
     jb 3b
     add %r15, %r14
     jmp 1b
-9:  LEAVE
+9:  mov PT_AUX(%rbx), %rdi
+    lea 112(%rsp), %rsi
+    mov 96(%rsp), %rdx
+    call aux_counts
+    LEAVE
 ENDF gkey_part
 
 /* gagg_part(task rdi, part rsi): aggregates the groups of hash partition
- * `part` (of PT_D partitions), visiting their tuples in input order;
+ * `part` (of PT_D partitions), visiting their tuples (listed by dscat_part)
+ * in input order;
  * PT_OUT[part] = Vec of group entries (EN_D0 states, EN_D1 first tuple) */
 FUNC gagg_part
     ENTER 160
@@ -1242,21 +1274,27 @@ FUNC gagg_part
     shl $4, %rax
     mov %rax, 104(%rsp)             /* key bytes per tuple */
     xor %r15d, %r15d                /* batch fill */
-    xor %r14d, %r14d                /* tuple */
-1:  cmp PT_N(%rbx), %r14
+    mov PT_AUX(%rbx), %rax          /* this partition's tuples */
+    mov AX_BND(%rax), %rax
+    mov 64(%rsp), %rcx
+    mov 8(%rax, %rcx, 8), %rdx
+    mov %rdx, 136(%rsp)
+    mov (%rax, %rcx, 8), %rax
+    mov %rax, 128(%rsp)             /* position in the list */
+1:  mov 128(%rsp), %rax
+    cmp 136(%rsp), %rax
     jae 8f
-    test $0xffff, %r14
+    test $0xffff, %eax
     jnz 2f
     call check_deadline
-2:  mov PT_B(%rbx), %rax
+2:  mov PT_AUX(%rbx), %rcx
+    mov AX_IDX(%rcx), %rcx
+    mov 128(%rsp), %rax
+    incq 128(%rsp)
+    mov (%rcx, %rax, 4), %r14d      /* tuple */
+    mov PT_B(%rbx), %rax
     mov (%rax, %r14, 8), %rcx       /* hash */
     mov %rcx, 112(%rsp)
-    mov %rcx, %rax                  /* partition = (hash >> 32) * P >> 32 */
-    shr $32, %rax
-    mulq PT_D(%rbx)
-    shr $32, %rax
-    cmp 64(%rsp), %rax
-    jne 7f
     mov 72(%rsp), %rdi
     mov %r14, %rsi
     imul 104(%rsp), %rsi
@@ -1300,8 +1338,7 @@ FUNC gagg_part
     cmp $VB, %r15
     jb 7f
     call gagg_flush
-7:  inc %r14
-    jmp 1b
+7:  jmp 1b
 8:  call gagg_flush
     mov 64(%rsp), %rcx
     mov 80(%rsp), %rax
@@ -1676,13 +1713,27 @@ FUNC pexec_aggregate
     shl $3, %rdi
     call tmp_alloc
     mov %rax, PT_SLOT(%r13)         /* group slots by first tuple */
+    mov PT_N(%r13), %rdi            /* partitions = parts of phase 1 */
+    call par_parts
+    mov %rax, PT_D(%r13)
     mov PT_N(%r13), %rdi
-    lea gkey_part(%rip), %rsi
-    mov %r13, %rdx
-    call par_for
-    mov %rax, PT_D(%r13)            /* partitions = parts of phase 1 */
-    mov %rax, %rdi
     mov %rax, %rsi
+    call aux_new
+    mov %rax, PT_AUX(%r13)
+    mov PT_N(%r13), %rdi            /* keys, hashes, partitions */
+    mov PT_D(%r13), %rsi
+    lea gkey_part(%rip), %rdx
+    mov %r13, %rcx
+    call par_run
+    mov %r13, %rdi                  /* tuples by partition */
+    call dsplit_bounds
+    mov PT_N(%r13), %rdi
+    mov PT_D(%r13), %rsi
+    lea dscat_part(%rip), %rdx
+    mov %r13, %rcx
+    call par_run
+    mov PT_D(%r13), %rdi            /* groups per partition */
+    mov %rdi, %rsi
     lea gagg_part(%rip), %rdx
     mov %r13, %rcx
     call par_run
@@ -1907,16 +1958,6 @@ ENDF pexec_emit
  * The partitions hold disjoint value sets, so merging their states is
  * exact; FLOAT64 sums (order dependent) are not split. */
 
-#define PT_NPART PT_FP          /* dins_part: number of partitions */
-#define PT_AUX   PT_CNT         /* DistinctAux* (PT_CNT[0] reused) */
-
-/* DistinctAux: the tuples grouped by partition (radix partitioning) */
-#define AX_PID   0      /* u8[n]: partition of each tuple's value, 0xff NULL */
-#define AX_CNT   8      /* u64[P][P]: per part, values per partition; then
-                           each part's write position per partition */
-#define AX_IDX   16     /* u32[n]: tuple indices by partition, in tuple order */
-#define AX_BND   24     /* u64[P + 1]: partition bounds in AX_IDX */
-#define AX_SIZE  32
 
 /* dsplit_ok(plan rdi) -> eax 1 if every DISTINCT aggregate is COUNT, or
  * SUM / AVG / MIN / MAX of a non-FLOAT64 argument */
@@ -2054,7 +2095,8 @@ FUNC dkey_part
     call hash_cells
     mov %rax, %rcx                  /* partition = (hash >> 32) * P >> 32 */
     shr $32, %rcx
-    imul PT_NPART(%rbx), %rcx
+    mov PT_AUX(%rbx), %rdx
+    imul AX_NP(%rdx), %rcx
     shr $32, %rcx
     incq 112(%rsp, %rcx, 8)
 4:  mov 96(%rsp), %r8
@@ -2067,17 +2109,53 @@ FUNC dkey_part
     jmp 3b
 5:  add %r15, %r14
     jmp 1b
-9:  mov PT_AUX(%rbx), %rdi          /* publish the counts */
-    mov AX_CNT(%rdi), %rdi
-    mov 104(%rsp), %rax
-    imul PT_NPART(%rbx), %rax
-    lea (%rdi, %rax, 8), %rdi
+9:  mov PT_AUX(%rbx), %rdi
     lea 112(%rsp), %rsi
-    mov PT_NPART(%rbx), %rdx
-    shl $3, %rdx
-    call memcpy
+    mov 104(%rsp), %rdx
+    call aux_counts
     LEAVE
 ENDF dkey_part
+
+/* aux_new(n rdi, P rsi) -> rax DistinctAux for n tuples, P partitions */
+FUNC aux_new
+    ENTER 16
+    mov %rdi, %r12
+    mov %rsi, %r13
+    mov $AX_SIZE, %edi
+    call tmp_alloc
+    mov %rax, %rbx
+    mov %r13, AX_NP(%rbx)
+    mov %r12, %rdi
+    call tmp_alloc
+    mov %rax, AX_PID(%rbx)
+    lea (, %r12, 4), %rdi
+    call tmp_alloc
+    mov %rax, AX_IDX(%rbx)
+    mov %r13, %rdi
+    imul %r13, %rdi
+    shl $3, %rdi
+    call tmp_alloc
+    mov %rax, AX_CNT(%rbx)
+    lea 8(, %r13, 8), %rdi
+    call tmp_alloc
+    mov %rax, AX_BND(%rbx)
+    mov %rbx, %rax
+    LEAVE
+ENDF aux_new
+
+/* aux_counts(aux rdi, counts rsi, part rdx): publishes a part's counts
+ * per partition (AX_CNT row `part`) */
+FUNC aux_counts
+    sub $8, %rsp
+    mov AX_NP(%rdi), %rcx
+    imul %rcx, %rdx
+    mov AX_CNT(%rdi), %rdi
+    lea (%rdi, %rdx, 8), %rdi
+    lea (, %rcx, 8), %rdx
+    call memcpy
+    add $8, %rsp
+    ret
+ENDF aux_counts
 
 /* dscat_part(task rdi, part rsi, lo rdx, hi rcx): appends the tuples
  * [lo, hi) to their partitions' index lists (AX_CNT[part]: positions) */
@@ -2087,11 +2165,11 @@ FUNC dscat_part
     mov %rdx, %r12                  /* tuple */
     mov %rcx, %r13                  /* end */
     mov PT_AUX(%rbx), %r14
-    imul PT_NPART(%rbx), %rsi       /* the part's positions, on the stack */
+    imul AX_NP(%r14), %rsi          /* the part's positions, on the stack */
     mov AX_CNT(%r14), %rax
     lea (%rax, %rsi, 8), %rsi
     lea 0(%rsp), %rdi
-    mov PT_NPART(%rbx), %rdx
+    mov AX_NP(%r14), %rdx
     shl $3, %rdx
     call memcpy
     mov AX_PID(%r14), %r8
@@ -2313,7 +2391,7 @@ ENDF dins_part
  * first position per partition (AX_CNT, from the counts) */
 FUNC dsplit_bounds
     mov PT_AUX(%rdi), %r8
-    mov PT_NPART(%rdi), %r9
+    mov AX_NP(%r8), %r9
     mov AX_CNT(%r8), %r10
     mov AX_BND(%r8), %r11
     xor %eax, %eax                  /* position */
@@ -2444,31 +2522,10 @@ FUNC pexec_dsplit
     shl $3, %rdi
     call tmp_alloc
     mov %rax, PT_B(%r15)
-    mov 8(%rsp), %rax
-    mov %rax, PT_NPART(%r15)
-    mov $AX_SIZE, %edi              /* radix partitioning of the tuples */
-    call tmp_alloc
+    mov 0(%rsp), %rdi               /* radix partitioning of the tuples */
+    mov 8(%rsp), %rsi
+    call aux_new
     mov %rax, PT_AUX(%r15)
-    mov 0(%rsp), %rdi
-    call tmp_alloc
-    mov PT_AUX(%r15), %rcx
-    mov %rax, AX_PID(%rcx)
-    mov 0(%rsp), %rdi
-    shl $2, %rdi
-    call tmp_alloc
-    mov PT_AUX(%r15), %rcx
-    mov %rax, AX_IDX(%rcx)
-    mov 8(%rsp), %rdi
-    imul %rdi, %rdi
-    shl $3, %rdi
-    call tmp_alloc
-    mov PT_AUX(%r15), %rcx
-    mov %rax, AX_CNT(%rcx)
-    mov 8(%rsp), %rdi
-    lea 8(, %rdi, 8), %rdi
-    call tmp_alloc
-    mov PT_AUX(%r15), %rcx
-    mov %rax, AX_BND(%rcx)
     mov $16, %edi                   /* one-aggregate plan for agg_merge */
     call tmp_alloc                  /* (only QP_NAGGS / QP_AGGS are read) */
     mov %rax, 32(%rsp)
