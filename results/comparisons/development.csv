@@ -87,11 +87,13 @@ arm64-asm,kernel-debug-mutant,1,success,0.4827568000000001,6526,598106,19,78.0,1
 arm64-asm,kernel-optimize,1,success,10.765369399999992,221127,17286827,72,2120.2,71,0,0,0,6,1406,experiments/runs/a-kernel-optimize-arm64-asm-a1-20261011T125000Z/manifest.json
 arm64-asm,kernel-refactor,1,success,8.857044599999998,195075,12052855,55,1512.2,54,3,0,0,6,3637,experiments/runs/a-kernel-refactor-arm64-asm-a1-20261011T120845Z/manifest.json
 arm64-asm,kernels,1,success,4.7987362,137298,3339378,26,1698.6,25,0,0,0,4,2803,experiments/runs/a-kernels-arm64-asm-a1-20261010T184024Z/manifest.json
+x86_64-asm-engine,debug-mutant,1,success,0.3684982,3187,474863,17,47.5,16,0,1,2,1,9,experiments/runs/a-debug-mutant-x86_64-asm-engine-a1-20261012T090418Z/manifest.json
 x86_64-asm-engine,phase1,1,success,20.987464199999987,207804,14340134,71,2216.4,179,1,5,5,6,14544,experiments/runs/a-phase1-x86_64-asm-engine-a1-20261011T164036Z/manifest.json
 x86_64-asm-engine,phase2,1,success,16.038120000000003,175552,19836679,85,1496.4,143,1,2,11,10,6331,experiments/runs/a-phase2-x86_64-asm-engine-a1-20261011T175416Z/manifest.json
 x86_64-asm-engine,phase3,1,success,14.795773600000002,237295,33239016,125,2143.7,124,2,1,13,10,5829,experiments/runs/a-phase3-x86_64-asm-engine-a1-20261011T183247Z/manifest.json
 x86_64-asm-engine,phase4,1,success,12.701766400000006,225676,27012255,109,2221.0,108,3,1,6,12,5266,experiments/runs/a-phase4-x86_64-asm-engine-a1-20261011T191535Z/manifest.json
 x86_64-asm-engine,phase5,1,success,20.200703200000003,297634,52644128,194,3043.3,193,0,7,11,24,6315,experiments/runs/a-phase5-x86_64-asm-engine-a1-20261011T195444Z/manifest.json
+arm64-asm-engine,debug-mutant,1,success,0.27404,2848,282908,11,38.3,10,0,0,2,2,6,experiments/runs/a-debug-mutant-arm64-asm-engine-a1-20261012T090428Z/manifest.json
 arm64-asm-engine,phase1,1,success,23.816887999999988,130761,8825558,62,1695.9,214,13,22,4,4,18237,experiments/runs/a-phase1-arm64-asm-engine-a1-20261011T171841Z/manifest.json
 arm64-asm-engine,phase2,1,success,23.1850926,203261,28883524,119,2147.6,253,4,6,16,12,7371,experiments/runs/a-phase2-arm64-asm-engine-a1-20261011T175419Z/manifest.json
 arm64-asm-engine,phase3,1,success,19.647368599999997,171429,33203412,142,1804.5,216,4,6,11,17,7445,experiments/runs/a-phase3-arm64-asm-engine-a1-20261011T183250Z/manifest.json

@@ -147,9 +147,16 @@ TASK_BEFORE_AFTER = {
 }
 
 
-def collect_task_before_after() -> list[dict]:
+# Assembly-engine cohort: x86-64 on the quiet x86 host, AArch64 on the ARM host (separate tables).
+ASM_TASK_BEFORE_AFTER = {
+    "optimize-latency-before-after-x86_64-asm-engine.json": "x86-64 assembly engine, quiet x86 host",
+    "optimize-latency-before-after-arm64-asm-engine.json": "AArch64 assembly engine, ARM host (spark)",
+}
+
+
+def collect_task_before_after(files: dict | None = None) -> list[dict]:
     out = []
-    for name, note in TASK_BEFORE_AFTER.items():
+    for name, note in (files or TASK_BEFORE_AFTER).items():
         d = load_json(ROOT / "results/performance" / name)
         if d:
             out.append({"source": f"results/performance/{name}", "note": note,
@@ -303,17 +310,24 @@ def build(weights: dict) -> dict:
                 "conformance": (r["validation"].get("summary") or {}).get("total"),
             } for r in rs]
     # 3/4/6. performance, resources, optimization (latest benchmark per scale)
-    perf_rep = []
+    perf_rep, asm_perf = [], {}
     for p in perf:
         meta = p["meta"]
         # Before/after benchmarks measure task branches (some never merged): they belong to report 6
         # only. Track B benchmarks never enter the Track A reports 3, 4 and 8.
-        if re.search(r"-(before|after)-[a-z-]+$", meta["bench_id"]) or meta.get("track", "A") != "A":
+        # Labels are "[arm-]before-<task>" / "[arm-]after-<task>" directly after the scale; a label that only
+        # contains the word (e.g. "main-after-reruns") is a regular benchmark.
+        if re.search(r"-\d+[km]-(arm-)?(before|after)-[a-z-]+$", meta["bench_id"]) or meta.get("track", "A") != "A":
             continue
         entry = {"bench_id": meta["bench_id"], "scale": meta["scale"], "track": meta.get("track"), "source": p["_path"],
                  "host_cpu": None, "engines": {}}
         env = load_json(ROOT / Path(p["_path"]).parent / "environment.json") or {}
         entry["host_cpu"] = (env.get("hardware") or {}).get("model")
+        entry["host_arch"] = (env.get("hardware") or {}).get("arch")
+        arm = load_json(ROOT / Path(p["_path"]).parent / "arm-host.json")
+        if arm and not entry["host_cpu"]:  # /proc/cpuinfo on AArch64 has no model name
+            models = sorted({ln.split()[1] for ln in arm.get("cpus", "").splitlines()[1:] if len(ln.split()) > 1})
+            entry["host_cpu"] = f"{arm.get('hostname')} ({'/'.join(models)})"
         for l, r in p["results"].items():
             q = {n: v["latency_seconds"]["median"] for n, v in (r.get("queries") or {}).items()
                  if v.get("status") == "ok" and v["latency_seconds"].get("n")}
@@ -325,7 +339,15 @@ def build(weights: dict) -> dict:
                 "query_cpu_s": r.get("query_phase_cpu_seconds"), "query_wall_s": r.get("query_phase_wall_seconds"),
                 "storage": r.get("storage"), "thread_scaling": r.get("thread_scaling"), "modes": r.get("modes"),
                 "joins": r.get("joins"), "http": r.get("http")}
-        perf_rep.append(entry)
+        # Assembly engines are a separate cohort: their figures never enter the six-engine tables,
+        # rankings or Pareto front (the latest benchmark per engine is kept for the cohort section).
+        for l in ASM_ENGINES:
+            if l in entry["engines"]:
+                asm_perf[l] = {**entry["engines"][l], "bench_id": entry["bench_id"], "scale": entry["scale"],
+                               "source": entry["source"], "host_cpu": entry["host_cpu"], "host_arch": entry["host_arch"]}
+        entry["engines"] = {l: e for l, e in entry["engines"].items() if l in LANGS}
+        if entry["engines"]:
+            perf_rep.append(entry)
     # 5. code quality: automated metrics + rubric review scores (AI reviewers, labelled as such)
     quality = {l: {**(code_metrics(l) or {}), "rubric_review": reviews.get(l)} for l in langs_all}
     # 7. architectural adaptability: change-task runs (engines and kernel cohort)
@@ -371,6 +393,15 @@ def build(weights: dict) -> dict:
             "simd_geomean_ns_per_elem": geomean(list(((k["performance"] or {}).get("ns_per_elem") or {}).get(simd, {}).values())),
             "simd_speedup_vs_reference": ((k["performance"] or {}).get("speedup_vs_reference") or {}).get(simd),
             "host": (k["performance"] or {}).get("host")}
+    asm_overall = {}
+    for l in ASM_ENGINES:
+        tot = ((corr.get(l) or {}).get("summary") or {}).get("total") or {}
+        e = asm_perf.get(l) or {}
+        asm_overall[l] = {
+            "correctness_gate": bool(tot.get("total") and tot.get("pass") == tot.get("total")),
+            "dev_cost_usd": sum((a["cost_usd"] or 0) for t in dev.get(l, {}).values() for a in t) or None,
+            "geomean_latency_s": geomean(list((e.get("median_latency_by_query") or {}).values())),
+            "bench_id": e.get("bench_id"), "host_cpu": e.get("host_cpu"), "host_arch": e.get("host_arch")}
     return {"generated": dt.datetime.now(dt.timezone.utc).isoformat(), "weights": weights,
             "git_commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip(),
             "runs": [{k: v for k, v in r.items() if k not in ("telemetry", "validation")} for r in runs],
@@ -380,6 +411,7 @@ def build(weights: dict) -> dict:
                 "2_development_effort": dev,
                 "3_runtime_performance": perf_rep,
                 "3_runtime_performance_kernel_cohort": {l: kern[l]["performance"] for l in ASM},
+                "3_runtime_performance_asm_engine_cohort": asm_perf,
                 "4_resource_efficiency": [
                     {"bench_id": p["bench_id"], "engines": {l: {k: e[k] for k in ("peak_rss_mib", "query_cpu_s", "query_wall_s", "startup_median_s", "ingest_mb_s")}
                                                           for l, e in p["engines"].items()}} for p in perf_rep],
@@ -391,12 +423,15 @@ def build(weights: dict) -> dict:
                     {"bench_id": p["bench_id"], "engines": {l: {k: e[k] for k in ("modes", "joins", "thread_scaling")}
                                                           for l, e in p["engines"].items()}} for p in perf_rep],
                 "6_optimization_task_before_after": collect_task_before_after(),
+                "6_optimization_task_before_after_asm_engine_cohort": collect_task_before_after(ASM_TASK_BEFORE_AFTER),
                 "6_optimization_effectiveness_kernel_cohort": {
                     l: {"simd_and_scalar_speedup_vs_reference": (kern[l]["performance"] or {}).get("speedup_vs_reference"),
                         "independent_before_after": kern[l]["before_after"]} for l in ASM},
                 "7_architectural_adaptability": adapt, "8_overall": {"per_language": overall, "pareto_front": front,
                                                                       "note": "Correctness-gated: a language without a 100% pass rate is never ranked above one with 100%. Track A and Track B are never combined.",
                                                                       "kernel_cohort": kernel_overall,
+                                                                      "asm_engine_cohort": asm_overall,
+                                                                      "asm_engine_cohort_note": "Complete engines in assembly (ADR-0016 option B): a separate cohort, never ranked with the six engines; x86-64 and AArch64 are benchmarked on different machines and are not ranked against each other.",
                                                                       "kernel_cohort_note": "Assembly kernels are a separate cohort (ADR-0016), never ranked with the engines; x86-64 and AArch64 are measured on different machines and are not ranked against each other."}}}
 
 
@@ -449,7 +484,56 @@ def render_asm_engine_cohort(R: dict) -> str:
             "ranked with the six engines, and the two architectures are developed and validated on different machines. "
             "A phase may take several sessions of at most 120 minutes; each session is one attempt row.</p>"
             "<table><tr><th>engine</th><th>phase</th><th>sessions</th><th>outcome</th><th>cost USD</th><th>wall min</th>"
-            f"<th>turns</th></tr>{''.join(rows)}</table>")
+            f"<th>turns</th></tr>{''.join(rows)}</table>" + render_asm_engine_reports(R))
+
+
+def render_asm_engine_reports(R: dict) -> str:
+    """Reports 2-8 for the assembly-engine cohort (later families, rubric, benchmarks, overall)."""
+    def f(v, fmt="{:,.2f}"):
+        return "—" if v is None else fmt.format(v)
+    dev, parts = R["2_development_effort"], []
+    rows = [f"<tr><td>{html.escape(l)}</td><td>{html.escape(t)}</td><td>{len(atts)}</td>"
+            f"<td class='o-{atts[-1]['outcome']}'>{atts[-1]['outcome']}</td><td>{sum(a['cost_usd'] or 0 for a in atts):.2f}</td>"
+            f"<td>{sum(a['wall_seconds'] or 0 for a in atts) / 60:.0f}</td>"
+            f"<td>{f(sum(a['lines_added'] or 0 for a in atts), '{:,}')} / {f(sum(a['lines_removed'] or 0 for a in atts), '{:,}')}</td></tr>"
+            for l in ASM_ENGINES for t, atts in sorted((dev.get(l) or {}).items()) if not t.startswith("phase")]
+    if rows:
+        parts.append("<h3>2/7. Later families (change, refactoring, debugging, optimization)</h3><p class='muted'>Same tasks "
+                     "and order as the six engines; the native-kernel option is left out of the task text because the "
+                     "assembly engines do not load the kernel library. Each family is one chain of at most two sessions.</p>"
+                     "<table><tr><th>engine</th><th>task</th><th>sessions</th><th>outcome</th><th>cost USD</th><th>wall min</th>"
+                     "<th>lines +/−</th></tr>" + "".join(rows) + "</table>")
+    perf = R.get("3_runtime_performance_asm_engine_cohort") or {}
+    if perf:
+        body = "".join(
+            f"<tr><td>{html.escape(l)}</td><td>{html.escape(str(e.get('host_cpu')))}</td>"
+            f"<td>{f(geomean(list(e['median_latency_by_query'].values())), '{:.4f}') if e['median_latency_by_query'] else '—'}</td>"
+            f"<td>{e['queries_ok']}</td><td>{f((e['startup_median_s'] or 0) * 1000 or None, '{:,.1f}')}</td>"
+            f"<td>{f(e['peak_rss_mib'], '{:,.0f}')}</td>"
+            f"<td>{' / '.join(f(((e.get('http') or {}).get(c) or {}).get('qps'), '{:,.0f}') for c in ('1', '4', '16'))}</td>"
+            f"<td><a href='../../{html.escape(e['source'])}'>{html.escape(e['bench_id'])}</a></td></tr>"
+            for l, e in perf.items())
+        parts.append("<h3>3/4. Runtime performance and resources</h3><p class='muted'>Same harness, workload (1m rows), "
+                     "repetitions and CPU pinning as the six engines. x86-64 on the quiet x86 host, AArch64 natively on the "
+                     "ARM host: the two rows are not comparable with each other.</p><table><tr><th>engine</th><th>host</th>"
+                     "<th>geomean latency s</th><th>queries ok</th><th>startup ms</th><th>peak RSS MiB</th>"
+                     "<th>HTTP q/s (1/4/16 clients)</th><th>benchmark</th></tr>" + body + "</table>")
+    for ba in R.get("6_optimization_task_before_after_asm_engine_cohort") or []:
+        rows = "".join(
+            f"<tr><td>{html.escape(l)}</td><td>{e['geomean_before_s'] * 1e3:.2f} → {e['geomean_after_s'] * 1e3:.2f} ms</td>"
+            f"<td>{e['speedup']:.2f}×</td><td>{html.escape(', '.join(e.get('significantly_slower') or []) or '—')}</td></tr>"
+            for l, e in ba["engines"].items())
+        parts.append(f"<h3>6. Optimization task, measured independently — {html.escape(ba['note'])}</h3><p class='muted'>"
+                     f"<code>{html.escape(ba['source'])}</code>; result digests identical: {ba['digests_identical']}</p>"
+                     f"<table><tr><th>engine</th><th>geomean latency</th><th>speedup</th><th>significantly slower</th></tr>{rows}</table>")
+    ov = R["8_overall"].get("asm_engine_cohort") or {}
+    parts.append("<h3>8. Overall (assembly-engine cohort, not ranked)</h3><p class='muted'>"
+                 + html.escape(R["8_overall"].get("asm_engine_cohort_note", "")) + "</p><table><tr><th>engine</th>"
+                 "<th>correctness gate</th><th>agent cost USD (all tasks)</th><th>geomean latency s</th><th>host</th></tr>" + "".join(
+                     f"<tr><td>{html.escape(l)}</td><td>{'pass' if o['correctness_gate'] else 'fail'}</td>"
+                     f"<td>{f(o['dev_cost_usd'])}</td><td>{f(o['geomean_latency_s'], '{:.4f}')}</td>"
+                     f"<td>{html.escape(str(o['host_cpu'] or '—'))}</td></tr>" for l, o in ov.items()) + "</table>")
+    return "".join(parts)
 
 
 def render_kernel_cohort(R: dict) -> str:
