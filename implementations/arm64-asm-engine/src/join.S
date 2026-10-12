@@ -35,7 +35,9 @@
 #define HS_FAST     88              // u64 1: one key compared by payload
 #define HS_LBUILD   96              // u64 1: LEFT join building on its left
 #define HS_MATCHED  104             // u8* build tuples matched (HS_LBUILD)
-#define HS_SIZE     112
+#define HS_EHK      112             // HS_FAST: (hash, key payload) per build
+                                    //   tuple, 16 bytes (one cache access)
+#define HS_SIZE     128
 // Probe task (one per thread)
 #define HJ_NODE     0
 #define HJ_CTX      8               // EvalCtx* (own copy for worker tasks)
@@ -891,6 +893,25 @@ FUNC ex_hashjoin
     b.eq 1f
     mov  x9, #1
     str  x9, [x21, #HS_FAST]
+    ldr  x9, [x21, #HS_R]               // (hash, key) pairs of the build side
+    ldr  x0, [x9, #TS_N]
+    lsl  x0, x0, #4
+    add  x0, x0, #16
+    bl   arena_alloc
+    str  x0, [x21, #HS_EHK]
+    ldr  x9, [x21, #HS_R]
+    ldr  x10, [x9, #TS_N]
+    ldr  x11, [x21, #HS_RHASH]
+    ldr  x12, [x21, #HS_RCELLS]
+    mov  x13, #0
+11: cmp  x13, x10
+    b.hs 1f
+    ldr  x14, [x11, x13, lsl #3]
+    lsl  x15, x13, #4
+    ldr  x15, [x12, x15]
+    stp  x14, x15, [x0], #16
+    add  x13, x13, #1
+    b    11b
 1:
     // ---- probe -------------------------------------------------------------
     ldr  x0, [x21, #HS_L]
@@ -1213,8 +1234,11 @@ ENDF join_keys
 // =============================================================================
 // hj_probe(x0 HashJoin task) — probes the left tuples [HJ_LO, HJ_HI). A chain
 // entry is a candidate only if its full 64-bit hash equals the probe's; with
-// HS_FAST the single key is then compared by payload, otherwise keys_equal.
-// Joined (or NULL-padded) tuples are written straight into the output set.
+// HS_FAST the single key is then compared by payload (hash and payload in
+// one 16-byte HS_EHK entry), otherwise keys_equal. The bucket head of the
+// left tuple 16 ahead and the first chain entry of the one 8 ahead are
+// prefetched (the table rarely fits in cache). Joined (or NULL-padded)
+// tuples are written straight into the output set.
 //   x19 task, x20 ctx, x21 shared, x22 node, x23 out, x24 left index,
 //   x25 chain entry, x26 matched, x27 scratch tuple (residual), x28 counter
 // Stack: [sp] probe hash
@@ -1245,7 +1269,27 @@ FUNC hj_probe
     ldr  x9, [x19, #HJ_HI]
     cmp  x24, x9
     b.hs .Lhp_end
-    mov  x26, #0
+    ldr  x10, [x21, #HS_LHASH]          // prefetch ahead
+    ldr  x11, [x21, #HS_MASK]
+    ldr  x12, [x21, #HS_HEADS]
+    add  x13, x24, #16
+    cmp  x13, x9
+    b.hs 1f
+    ldr  x14, [x10, x13, lsl #3]
+    and  x14, x14, x11
+    add  x14, x12, x14, lsl #2
+    prfm pldl1keep, [x14]
+    add  x13, x24, #8
+    ldr  x14, [x10, x13, lsl #3]
+    and  x14, x14, x11
+    ldr  w14, [x12, x14, lsl #2]
+    cmn  w14, #1
+    b.eq 1f
+    ldr  x15, [x21, #HS_EHK]
+    cbz  x15, 1f
+    add  x15, x15, x14, lsl #4
+    prfm pldl1keep, [x15]
+1:  mov  x26, #0
     ldr  x9, [x21, #HS_LNULL]
     ldrb w9, [x9, x24]
     cbnz w9, .Lhp_pad                   // NULL key: no partner
@@ -1263,23 +1307,25 @@ FUNC hj_probe
     tst  x28, #DEADLINE_MASK
     b.ne 1f
     bl   check_deadline
-1:  ldr  x9, [x21, #HS_RHASH]          // different hash: different keys
+1:  ldr  x9, [x21, #HS_EHK]            // one plain key: hash, payload
+    cbz  x9, 2f
+    add  x9, x9, x25, lsl #4
+    ldp  x9, x11, [x9]
+    ldr  x10, [sp]
+    cmp  x9, x10
+    b.ne .Lhp_next
+    ldr  x9, [x21, #HS_LCELLS]          // (one key: 16-byte cells)
+    add  x9, x9, x24, lsl #4
+    ldr  x9, [x9]
+    cmp  x9, x11
+    b.ne .Lhp_next
+    b    3f
+2:  ldr  x9, [x21, #HS_RHASH]          // different hash: different keys
     ldr  x9, [x9, x25, lsl #3]
     ldr  x10, [sp]
     cmp  x9, x10
     b.ne .Lhp_next
-    ldr  x9, [x21, #HS_FAST]
-    cbz  x9, 2f
-    ldr  x9, [x21, #HS_LCELLS]          // (one key: 16-byte cells)
-    add  x9, x9, x24, lsl #4
-    ldr  x9, [x9]
-    ldr  x10, [x21, #HS_RCELLS]
-    add  x10, x10, x25, lsl #4
-    ldr  x10, [x10]
-    cmp  x9, x10
-    b.ne .Lhp_next
-    b    3f
-2:  ldr  x9, [x21, #HS_KS]
+    ldr  x9, [x21, #HS_KS]
     ldr  x0, [x21, #HS_LCELLS]
     madd x0, x24, x9, x0
     ldr  x1, [x21, #HS_RCELLS]

@@ -1135,6 +1135,8 @@ FUNC agg_task
     mov  x3, x26
     ldr  x4, [sp, #8]
     bl   veval
+    bl   .Lat_mode                      // inline accumulation?
+    cbnz x15, .Lat_fast
     str  xzr, [sp, #24]
 10: ldr  x9, [sp, #24]
     cmp  x9, x26
@@ -1176,6 +1178,86 @@ FUNC agg_task
 12: mov  x0, x28                        // MIN / MAX / FLOAT64 / wide SUM, AVG
     bl   agg_accum
     b    10b
+    // ---- COUNT, exact SUM / AVG, MIN / MAX of integer-like values: inline
+.Lat_fast:
+    ldr  x10, [sp, #8]                  // argument vector
+    add  x11, x10, #VEC_NULLS
+    ldr  x12, [x23, #GT_RECS]
+    ldr  x13, [x23, #GT_RECSZ]
+    ldr  x14, [x23, #GT_NKEYS]          // state offset in a record
+    lsl  x14, x14, #4
+    add  x14, x14, #GR_KEYS
+    ldr  x9, [sp, #32]
+    add  x14, x14, x9, lsl #5
+    mov  x9, #0
+1:  cmp  x9, x26
+    b.hs .Lat_slot_done
+    ldrb w16, [x11, x9]
+    cbnz w16, 6f                        // NULL input: ignored
+    ldr  x2, [x10, x9, lsl #3]
+    ldr  w17, [x27, x9, lsl #2]
+    madd x1, x17, x13, x12
+    add  x1, x1, x14                    // state
+    ldr  x3, [x1, #AS_CNT]
+    add  x3, x3, #1
+    str  x3, [x1, #AS_CNT]
+    cmp  x15, #2
+    b.lo 6f                             // COUNT
+    b.hi 3f
+    ldp  x4, x5, [x1, #AS_LO]           // SUM / AVG: exact 128-bit sum
+    asr  x6, x2, #63
+    adds x4, x4, x2
+    adc  x5, x5, x6
+    stp  x4, x5, [x1, #AS_LO]
+    b    6f
+3:  cmp  x3, #1                         // MIN / MAX: first value
+    b.eq 5f
+    ldr  x4, [x1, #AS_LO]
+    cmp  x15, #3
+    b.ne 4f
+    cmp  x2, x4                         // MIN: replace if smaller
+    b.lt 5f
+    b    6f
+4:  cmp  x2, x4                         // MAX: replace if larger
+    b.le 6f
+5:  str  x2, [x1, #AS_LO]
+6:  add  x9, x9, #1
+    b    1b
+
+// local helper: x15 = inline accumulation mode of aggregate x28 (0 = call
+// agg_accum, 1 COUNT, 2 exact SUM / AVG, 3 MIN, 4 MAX of values compared
+// as signed payloads: BOOLEAN, INT64, narrow DECIMAL, DATE, TIMESTAMP)
+// (clobbers x9-x11; leaf)
+.Lat_mode:
+    mov  x15, #0
+    ldr  w9, [x28, #N_OP]
+    ldr  x10, [x28, #N_A]
+    ldr  w10, [x10, #N_TYPE]
+    BR_WIDE w10, w11, 91f
+    and  w10, w10, #T_KIND_MASK
+    cmp  w9, #F_COUNT
+    b.ne 1f
+    mov  x15, #1
+    ret
+1:  cmp  w10, #T_FLOAT                  // FLOAT64 and STRING: agg_accum
+    b.eq 91f
+    cmp  w10, #T_STR
+    b.eq 91f
+    cbz  w10, 91f                        // null type
+    cmp  w9, #F_SUM
+    ccmp w9, #F_AVG, #4, ne
+    b.ne 2f
+    mov  x15, #2
+    ret
+2:  cmp  w9, #F_MIN
+    b.ne 3f
+    mov  x15, #3
+    ret
+3:  cmp  w9, #F_MAX
+    b.ne 91f
+    mov  x15, #4
+91: ret
+
 .Lat_countstar:
     ldr  x9, [x21, #BQ_NGROUP]
     cbnz x9, 130f
