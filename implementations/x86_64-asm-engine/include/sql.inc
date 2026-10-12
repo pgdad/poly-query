@@ -439,7 +439,8 @@
 #define HT_N     16    /* entries */
 #define HT_NK    24    /* key cells per entry */
 #define HT_TYPES 32    /* u64 packed type per key cell (low 32 bits used) */
-#define HT_SIZE  40
+#define HT_FAST  40    /* hash join: FastTable* replacing the chains, or 0 (pexec.S) */
+#define HT_SIZE  48
 #define EN_NEXT  0
 #define EN_HASH  8
 #define EN_KEY   16    /* VAL cells[nk] (owned by the caller, must stay alive) */

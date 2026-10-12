@@ -454,6 +454,7 @@ FUNC exec_from
     mov 72(%rsp), %rdx
     mov 32(%rsp), %rcx
     mov 40(%rsp), %r8
+    mov 80(%rsp), %r9
     call pexec_build
     test %eax, %eax
     jnz 35f

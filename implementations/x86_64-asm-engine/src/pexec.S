@@ -66,6 +66,19 @@
 #define AX_NP    32     /* P: partitions (= parts of the key phase) */
 #define AX_SIZE  40
 
+/* FastTable (HT_FAST): hash join on integer-like keys of one type; one
+ * open-addressing sub-table per partition (FHASH >> 32 scaled to FT_NP),
+ * slot (FHASH ^ FHASH >> 32) & mask, linear probing; a slot holds a key
+ * and the first build tuple of its chain (-1 = empty) */
+#define FHASH_MUL 0x9E3779B97F4A7C15
+#define FT_NP    0
+#define FT_SUB   8      /* SubTable[FT_NP] */
+#define FT_SIZE  16
+#define SB_MASK  0
+#define SB_KEY   8      /* u64[mask + 1] */
+#define SB_HEAD  16     /* i64[mask + 1] */
+#define SB_SIZE  24
+
 /* hash-partitioned GROUP BY: u64[n], the group entry created at tuple i
  * (0 if none), so the groups come out in first-seen order without sorting */
 #define PT_SLOT   PT_FP
@@ -2715,6 +2728,10 @@ FUNC probe_part
     cmpb $0, VNULL(%rax, %rcx)
     jne 19f                         /* NULL keys never match */
     mov (%rax, %rcx, 8), %rax
+    mov PT_C(%rbx), %rdx
+    mov HT_FAST(%rdx), %rdx
+    test %rdx, %rdx
+    jnz 15f
     mov %rax, 184(%rsp)             /* key cell 184..199 */
     movq $0, 192(%rsp)
     lea 184(%rsp), %rdi
@@ -2762,6 +2779,29 @@ FUNC probe_part
     mov PT_D(%rbx), %rax
     mov (%rax, %r14, 8), %r14
     jmp 11b
+15: mov %rax, %rsi                  /* fast table: key rsi, FHASH rax */
+    mov $FHASH_MUL, %rcx
+    imul %rcx, %rax
+    mov %rax, %rcx                  /* sub-table of the partition */
+    shr $32, %rcx
+    imul FT_NP(%rdx), %rcx
+    shr $32, %rcx
+    imul $SB_SIZE, %rcx, %rcx
+    add FT_SUB(%rdx), %rcx
+    mov %rax, %rdx                  /* slot */
+    shr $32, %rdx
+    xor %rdx, %rax
+    and SB_MASK(%rcx), %rax
+    mov SB_KEY(%rcx), %r8
+    mov SB_HEAD(%rcx), %r9
+16: mov (%r9, %rax, 8), %r14
+    cmp $-1, %r14
+    je 19f                          /* no build tuple has the key */
+    cmp (%r8, %rax, 8), %rsi
+    je 11b
+    inc %rax
+    and SB_MASK(%rcx), %rax
+    jmp 16b
 19: incq 152(%rsp)
     jmp 10b
 
@@ -2963,10 +3003,16 @@ ENDF pexec_probe
  * hashes (PT_B) of key PT_D for the tuples [lo, hi) of TupleSet PT_FP
  * (key types: HT_TYPES of PT_C) */
 FUNC bkey_part
-    ENTER 112                       /* 0: EvalCtx, 72: hi, 80: vector, */
-    mov %rdi, %rbx                  /* 88: batch index, 96: tuple index */
-    mov %rdx, %r14
+    ENTER (112+8*MAX_THREADS)       /* 0: EvalCtx, 72: hi, 80: vector, */
+    mov %rdi, %rbx                  /* 88: batch index, 96: tuple index, */
+    mov %rdx, %r14                  /* 104: part, 112: counts (fast) */
     mov %rcx, 72(%rsp)
+    mov %rsi, 104(%rsp)
+    lea 112(%rsp), %rdi
+    xor %eax, %eax
+    mov $MAX_THREADS, %ecx
+    rep stosq
+    mov 72(%rsp), %rcx
     mov PT_XS(%rbx), %r13
     lea 0(%rsp), %rdi
     mov %r13, %rsi
@@ -3009,12 +3055,31 @@ FUNC bkey_part
     mov %rdx, VAL_P(%rdi)
     mov %rsi, VAL_NULL(%rdi)
     xor %eax, %eax
+    cmpq $0, PT_AUX(%rbx)
+    jne 41f
     test %esi, %esi
     jnz 4f
     mov $1, %esi
     mov PT_C(%rbx), %rdx
     mov HT_TYPES(%rdx), %rdx
     call hash_cells
+    jmp 4f
+41: mov PT_AUX(%rbx), %rcx          /* fast table: FHASH and partition */
+    mov AX_PID(%rcx), %rcx
+    movb $0xff, (%rcx, %r8)         /* (NULL: none) */
+    test %esi, %esi
+    jnz 4f
+    mov %rdx, %rax
+    mov $FHASH_MUL, %rcx
+    imul %rcx, %rax
+    mov %rax, %rcx
+    shr $32, %rcx
+    mov PT_AUX(%rbx), %rdx
+    imul AX_NP(%rdx), %rcx
+    shr $32, %rcx
+    mov AX_PID(%rdx), %rdx
+    mov %cl, (%rdx, %r8)
+    incq 112(%rsp, %rcx, 8)
 4:  mov 96(%rsp), %r8
     mov PT_B(%rbx), %rcx
     mov %rax, (%rcx, %r8, 8)
@@ -3022,8 +3087,115 @@ FUNC bkey_part
     jmp 3b
 5:  add %r15, %r14
     jmp 1b
-9:  LEAVE
+9:  mov PT_AUX(%rbx), %rdi
+    test %rdi, %rdi
+    jz 91f
+    lea 112(%rsp), %rsi
+    mov 104(%rsp), %rdx
+    call aux_counts
+91: LEAVE
 ENDF bkey_part
+
+/* fins_part(task rdi, partition rsi): builds the fast table's sub-table of
+ * the partition from its build tuples (listed by dscat_part), last tuple
+ * first, so that every key's chain (head, next[] = PT_D) lists its tuples
+ * in input order */
+FUNC fins_part
+    ENTER 32
+    mov %rdi, %rbx
+    mov PT_AUX(%rbx), %r12
+    mov AX_BND(%r12), %rax
+    mov 8(%rax, %rsi, 8), %r14      /* list position (counting down) */
+    mov (%rax, %rsi, 8), %rcx
+    mov %rcx, 0(%rsp)               /* list start */
+    mov PT_C(%rbx), %rax
+    mov HT_FAST(%rax), %rax
+    mov FT_SUB(%rax), %r13
+    imul $SB_SIZE, %rsi, %rax
+    add %rax, %r13                  /* sub-table */
+    mov %r14, %rax                  /* slots: a power of two >= 2 * tuples */
+    sub %rcx, %rax
+    add %rax, %rax
+    mov $16, %ecx
+1:  cmp %rax, %rcx
+    jae 2f
+    shl $1, %rcx
+    jmp 1b
+2:  lea -1(%rcx), %rax
+    mov %rax, SB_MASK(%r13)
+    mov %rcx, 8(%rsp)
+    lea (, %rcx, 8), %rdi
+    call tmp_alloc
+    mov %rax, SB_KEY(%r13)
+    mov 8(%rsp), %rdi
+    shl $3, %rdi
+    call tmp_alloc
+    mov %rax, SB_HEAD(%r13)
+    mov %rax, %rdi                  /* heads: -1 = empty */
+    mov $0xff, %esi
+    mov 8(%rsp), %rdx
+    shl $3, %rdx
+    call memset
+    mov SB_MASK(%r13), %r15
+3:  cmp 0(%rsp), %r14
+    jbe 9f
+    dec %r14
+    mov AX_IDX(%r12), %rax
+    mov (%rax, %r14, 4), %eax       /* tuple */
+    mov PT_B(%rbx), %rcx
+    mov (%rcx, %rax, 8), %rcx       /* FHASH */
+    mov %rcx, %rdx
+    shr $32, %rdx
+    xor %rdx, %rcx
+    and %r15, %rcx                  /* slot */
+    mov %rax, %rdx
+    shl $4, %rdx
+    add PT_A(%rbx), %rdx
+    mov VAL_P(%rdx), %rdx           /* key */
+    mov SB_KEY(%r13), %r8
+    mov SB_HEAD(%r13), %r9
+4:  mov (%r9, %rcx, 8), %r10
+    cmp $-1, %r10
+    je 5f
+    cmp (%r8, %rcx, 8), %rdx
+    je 6f
+    inc %rcx
+    and %r15, %rcx
+    jmp 4b
+5:  mov %rdx, (%r8, %rcx, 8)        /* new key */
+6:  mov PT_D(%rbx), %rdx            /* tuple heads the key's chain */
+    mov %r10, (%rdx, %rax, 8)
+    mov %rax, (%r9, %rcx, 8)
+    jmp 3b
+9:  LEAVE
+ENDF fins_part
+
+/* fast_key_ok(build key rdi, probe key rsi) -> eax 1 if both keys have the
+ * same integer-like type (BOOLEAN, INT64, DATE, TIMESTAMP, DECIMAL with
+ * p <= 18 - equal exactly when bit-equal) */
+FUNC fast_key_ok
+    xor %eax, %eax
+    test %rsi, %rsi
+    jz 9f
+    mov N_TYPE(%rdi), %ecx
+    cmp N_TYPE(%rsi), %ecx
+    jne 9f
+    cmp $T_BOOL, %cl
+    je 8f
+    cmp $T_INT, %cl
+    je 8f
+    cmp $T_DATE, %cl
+    je 8f
+    cmp $T_TS, %cl
+    je 8f
+    cmp $T_DEC, %cl
+    jne 9f
+    shr $8, %ecx
+    cmp $18, %cl
+    ja 9f
+8:  mov $1, %eax
+9:  ret
+ENDF fast_key_ok
 
 /* bins_part(task rdi, part rsi): inserts the build tuples (PT_N of them,
  * cells PT_A, hashes PT_B) whose bucket lies in this part's range of the
@@ -3119,8 +3291,10 @@ FUNC bins_part
     LEAVE
 ENDF bins_part
 
-/* pexec_build(xs rdi, build TupleSet rsi, key rdx, table rcx, next r8)
- * -> eax 1 if the table was built here (more than one part), else 0 */
+/* pexec_build(xs rdi, build TupleSet rsi, key rdx, table rcx, next r8,
+ * probe key r9) -> eax 1 if the table was built here (more than one part),
+ * else 0.  With integer-like keys of one type the table gets a FastTable
+ * (HT_FAST) instead of its chains. */
 FUNC pexec_build
     ENTER 32
     mov %rdi, %rbx
@@ -3128,6 +3302,7 @@ FUNC pexec_build
     mov %rdx, 0(%rsp)
     mov %rcx, %r13
     mov %r8, 8(%rsp)
+    mov %r9, 16(%rsp)
     call pexec_threads
     mov TS_N(%r12), %rdi
     call par_parts
@@ -3153,11 +3328,22 @@ FUNC pexec_build
     shl $3, %rdi
     call tmp_alloc
     mov %rax, PT_B(%r15)            /* hashes */
-    mov PT_N(%r15), %rdi            /* phase 1 */
+    mov 0(%rsp), %rdi
+    mov 16(%rsp), %rsi
+    call fast_key_ok
+    test %eax, %eax
+    jz 10f
+    mov PT_N(%r15), %rdi            /* fast: radix partitions */
+    mov %r14, %rsi
+    call aux_new
+    mov %rax, PT_AUX(%r15)
+10: mov PT_N(%r15), %rdi            /* phase 1 */
     mov %r14, %rsi
     lea bkey_part(%rip), %rdx
     mov %r15, %rcx
     call par_run
+    cmpq $0, PT_AUX(%r15)
+    jne 20f
     mov $64, %ecx                   /* buckets: a power of two >= n */
 1:  cmp PT_N(%r15), %rcx
     jae 2f
@@ -3184,6 +3370,31 @@ FUNC pexec_build
     mov %rax, HT_N(%r13)
     mov $1, %eax
 99: LEAVE
+20: /* fast table: build tuples by partition, one sub-table each */
+    mov %r15, %rdi
+    call dsplit_bounds
+    mov PT_N(%r15), %rdi
+    mov %r14, %rsi
+    lea dscat_part(%rip), %rdx
+    mov %r15, %rcx
+    call par_run
+    mov $FT_SIZE, %edi
+    call tmp_alloc
+    mov %rax, HT_FAST(%r13)
+    mov %r14, FT_NP(%rax)
+    imul $SB_SIZE, %r14, %rdi
+    call tmp_alloc
+    mov HT_FAST(%r13), %rcx
+    mov %rax, FT_SUB(%rcx)
+    mov 8(%rsp), %rax
+    mov %rax, PT_D(%r15)            /* next[] */
+    mov %r14, %rdi
+    mov %r14, %rsi
+    lea fins_part(%rip), %rdx
+    mov %r15, %rcx
+    call par_run
+    mov $1, %eax
+    LEAVE
 ENDF pexec_build
 
 /* ================================================================ merge join keys */
