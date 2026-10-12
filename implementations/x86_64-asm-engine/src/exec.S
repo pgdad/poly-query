@@ -445,7 +445,19 @@ FUNC exec_from
     lea 8(,%rdi,8), %rdi
     call tmp_alloc
     mov %rax, 40(%rsp)              /* next[] */
-    mov 56(%rsp), %rax              /* insert backwards: chains then list */
+    mov %rbx, %rdi                  /* parallel build (pexec.S) */
+    call pexec_enabled
+    test %eax, %eax
+    jz 302f
+    mov %rbx, %rdi
+    mov 56(%rsp), %rsi
+    mov 72(%rsp), %rdx
+    mov 32(%rsp), %rcx
+    mov 40(%rsp), %r8
+    call pexec_build
+    test %eax, %eax
+    jnz 35f
+302: mov 56(%rsp), %rax             /* insert backwards: chains then list */
     mov TS_N(%rax), %r15            /* the build tuples in input order */
 31: mov 56(%rsp), %rax
     sub $1, %r15

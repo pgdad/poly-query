@@ -2429,6 +2429,243 @@ FUNC pexec_probe
     LEAVE
 ENDF pexec_probe
 
+/* ================================================================ hash build */
+
+/* Parallel hash-join build (pexec_build): phase 1 evaluates and hashes the
+ * build key of every build tuple in parallel (bkey_part); phase 2 inserts
+ * them into a table whose bucket array is sized up-front, every part
+ * owning a contiguous range of buckets (bins_part), so no two parts touch
+ * the same chain.  Each part walks the build tuples backwards, so every
+ * key's tuple chain (EN_D0 / next[]) lists its tuples in input order,
+ * exactly as the serial build in exec_from does. */
+
+/* bkey_part(task rdi, part rsi, lo rdx, hi rcx): key cells (PT_A) and
+ * hashes (PT_B) of key PT_D for the tuples [lo, hi) of TupleSet PT_FP
+ * (key types: HT_TYPES of PT_C) */
+FUNC bkey_part
+    ENTER 112                       /* 0: EvalCtx, 72: hi, 80: vector, */
+    mov %rdi, %rbx                  /* 88: batch index, 96: tuple index */
+    mov %rdx, %r14
+    mov %rcx, 72(%rsp)
+    mov PT_XS(%rbx), %r13
+    lea 0(%rsp), %rdi
+    mov %r13, %rsi
+    call wctx_init
+    mov $VSIZE, %edi
+    call tmp_alloc
+    mov %rax, 80(%rsp)
+    mov XS_W(%r13), %r12
+    shl $3, %r12
+1:  cmp 72(%rsp), %r14
+    jae 9f
+    call check_deadline
+    mov 72(%rsp), %r15
+    sub %r14, %r15
+    cmp $VB, %r15
+    jbe 2f
+    mov $VB, %r15d
+2:  mov PT_FP(%rbx), %rax
+    mov %r14, %rdx
+    imul %r12, %rdx
+    add TS_DATA(%rax), %rdx
+    lea 0(%rsp), %rdi
+    mov PT_D(%rbx), %rsi
+    mov %r15, %rcx
+    mov XS_W(%r13), %r8
+    mov 80(%rsp), %r9
+    call k_eval1
+    movq $0, 88(%rsp)
+3:  mov 88(%rsp), %rcx
+    cmp %r15, %rcx
+    jae 5f
+    mov 80(%rsp), %rax
+    mov (%rax, %rcx, 8), %rdx       /* value */
+    movzbl VNULL(%rax, %rcx), %esi  /* NULL flag */
+    lea (%r14, %rcx), %r8
+    mov %r8, 96(%rsp)
+    mov %r8, %rdi
+    shl $4, %rdi
+    add PT_A(%rbx), %rdi            /* cell */
+    mov %rdx, VAL_P(%rdi)
+    mov %rsi, VAL_NULL(%rdi)
+    xor %eax, %eax
+    test %esi, %esi
+    jnz 4f
+    mov $1, %esi
+    mov PT_C(%rbx), %rdx
+    mov HT_TYPES(%rdx), %rdx
+    call hash_cells
+4:  mov 96(%rsp), %r8
+    mov PT_B(%rbx), %rcx
+    mov %rax, (%rcx, %r8, 8)
+    incq 88(%rsp)
+    jmp 3b
+5:  add %r15, %r14
+    jmp 1b
+9:  LEAVE
+ENDF bkey_part
+
+/* bins_part(task rdi, part rsi): inserts the build tuples (PT_N of them,
+ * cells PT_A, hashes PT_B) whose bucket lies in this part's range of the
+ * buckets of table PT_C, last tuple first; chains in next[] (PT_D);
+ * PT_OUT[part] = number of new entries */
+#define BI_LO   0
+#define BI_HI   8
+#define BI_NEW  16
+#define BI_PART 24
+#define BI_CELL 32
+FUNC bins_part
+    ENTER 48
+    mov %rdi, %rbx
+    mov %rsi, BI_PART(%rsp)
+    mov PT_C(%rbx), %r12            /* table */
+    mov HT_NB(%r12), %rax           /* buckets [nb * p / P, nb * (p+1) / P) */
+    mul %rsi
+    divq PT_FP(%rbx)
+    mov %rax, BI_LO(%rsp)
+    mov HT_NB(%r12), %rax
+    mov BI_PART(%rsp), %rcx
+    inc %rcx
+    mul %rcx
+    divq PT_FP(%rbx)
+    mov %rax, BI_HI(%rsp)
+    movq $0, BI_NEW(%rsp)
+    mov HT_NB(%r12), %r15
+    dec %r15                        /* bucket mask */
+    mov PT_N(%rbx), %r13            /* tuple (counting down) */
+1:  sub $1, %r13
+    jb 9f
+    test $0xffff, %r13d
+    jnz 2f
+    call check_deadline
+2:  mov %r13, %rax
+    shl $4, %rax
+    add PT_A(%rbx), %rax
+    cmpq $0, VAL_NULL(%rax)
+    jne 1b                          /* NULL keys never match */
+    mov %rax, BI_CELL(%rsp)
+    mov PT_B(%rbx), %rax
+    mov (%rax, %r13, 8), %rax       /* hash */
+    mov %rax, %rcx
+    and %r15, %rcx                  /* bucket */
+    cmp BI_LO(%rsp), %rcx
+    jb 1b
+    cmp BI_HI(%rsp), %rcx
+    jae 1b
+    mov HT_BKT(%r12), %rdx
+    lea (%rdx, %rcx, 8), %rdx
+    mov (%rdx), %r14                /* chain */
+3:  test %r14, %r14
+    jz 5f
+    cmp EN_HASH(%r14), %rax
+    jne 4f
+    push %rax
+    push %rdx
+    mov EN_KEY(%r14), %rdi
+    mov BI_CELL+16(%rsp), %rsi
+    mov $1, %edx
+    mov HT_TYPES(%r12), %rcx
+    call cells_eq
+    pop %rdx
+    mov %eax, %ecx
+    pop %rax
+    test %ecx, %ecx
+    jnz 6f
+4:  mov EN_NEXT(%r14), %r14
+    jmp 3b
+5:  push %rax                       /* new key */
+    push %rdx
+    mov $EN_SIZE, %edi
+    call tmp_zalloc
+    mov %rax, %r14
+    pop %rdx
+    pop %rax
+    mov %rax, EN_HASH(%r14)
+    mov BI_CELL(%rsp), %rax
+    mov %rax, EN_KEY(%r14)
+    movq $-1, EN_D0(%r14)
+    mov (%rdx), %rax
+    mov %rax, EN_NEXT(%r14)
+    mov %r14, (%rdx)
+    incq BI_NEW(%rsp)
+6:  mov EN_D0(%r14), %rax           /* tuple joins the key's chain */
+    mov PT_D(%rbx), %rcx
+    mov %rax, (%rcx, %r13, 8)
+    mov %r13, EN_D0(%r14)
+    jmp 1b
+9:  mov BI_PART(%rsp), %rcx
+    mov BI_NEW(%rsp), %rax
+    mov %rax, PT_OUT(%rbx, %rcx, 8)
+    LEAVE
+ENDF bins_part
+
+/* pexec_build(xs rdi, build TupleSet rsi, key rdx, table rcx, next r8)
+ * -> eax 1 if the table was built here (more than one part), else 0 */
+FUNC pexec_build
+    ENTER 32
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %rdx, 0(%rsp)
+    mov %rcx, %r13
+    mov %r8, 8(%rsp)
+    call pexec_threads
+    mov TS_N(%r12), %rdi
+    call par_parts
+    mov %rax, %r14                  /* parts */
+    xor %eax, %eax
+    cmp $1, %r14
+    jbe 99f
+    mov $PT_SIZE, %edi
+    call tmp_zalloc
+    mov %rax, %r15
+    mov %rbx, PT_XS(%r15)
+    mov %r12, PT_FP(%r15)
+    mov TS_N(%r12), %rax
+    mov %rax, PT_N(%r15)
+    mov %r13, PT_C(%r15)
+    mov 0(%rsp), %rax
+    mov %rax, PT_D(%r15)
+    mov PT_N(%r15), %rdi
+    shl $4, %rdi
+    call tmp_alloc
+    mov %rax, PT_A(%r15)            /* key cells */
+    mov PT_N(%r15), %rdi
+    shl $3, %rdi
+    call tmp_alloc
+    mov %rax, PT_B(%r15)            /* hashes */
+    mov PT_N(%r15), %rdi            /* phase 1 */
+    mov %r14, %rsi
+    lea bkey_part(%rip), %rdx
+    mov %r15, %rcx
+    call par_run
+    mov $64, %ecx                   /* buckets: a power of two >= n */
+1:  cmp PT_N(%r15), %rcx
+    jae 2f
+    shl $1, %rcx
+    jmp 1b
+2:  mov %rcx, HT_NB(%r13)
+    lea (, %rcx, 8), %rdi
+    call tmp_zalloc
+    mov %rax, HT_BKT(%r13)
+    mov %r14, PT_FP(%r15)           /* phase 2: P bucket ranges */
+    mov 8(%rsp), %rax
+    mov %rax, PT_D(%r15)
+    mov %r14, %rdi
+    mov %r14, %rsi
+    lea bins_part(%rip), %rdx
+    mov %r15, %rcx
+    call par_run
+    xor %eax, %eax                  /* entries */
+    xor %ecx, %ecx
+3:  add PT_OUT(%r15, %rcx, 8), %rax
+    inc %rcx
+    cmp %r14, %rcx
+    jb 3b
+    mov %rax, HT_N(%r13)
+    mov $1, %eax
+99: LEAVE
+ENDF pexec_build
+
 /* ================================================================ merge join keys */
 
 /* jkey_part(task rdi, part rsi, lo rdx, hi rcx): (key, index) entries of

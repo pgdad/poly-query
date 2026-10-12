@@ -19,9 +19,16 @@ byte-identical full results vs the baseline engine on 1m data):
    (single group only; FLOAT64 SUM/AVG/MIN/MAX DISTINCT stay serial).
 4. util.S arena chunk pool (reuse released chunks up to 1 GiB; fork child
    calls chunk_pool_forget).
-Ideas next: q14 string sort (prefix ties -> row_cmp; 2nd prefix word),
-q10/q11 join probe, q07/q05 group-by (skew / low cardinality merge),
-q12 left join anti, q19 CTE evaluated twice?
+5. GROUP BY local aggregation per part (pexec.S lagg_ok / lagg_merge,
+   gfused_part with PT_LMAX / PT_LABORT) for few groups.
+6. Parallel hash-join build (pexec.S pexec_build: bkey_part, bins_part
+   with disjoint bucket ranges; hooked in exec.S exec_from).
+README "Latency optimization" has the before/after table (regenerate the
+"after" column with bench/workload.sh when more changes land).
+Ideas next: q19 (CTE per_c executed twice: once per reference), q07
+(skewed high-cardinality GROUP BY, 13 ms), persistent worker threads in
+par.S instead of pthread_create per par_run, hash table with open
+addressing for joins / groups.
 
 ## Status (Phase 5 + CR-1 UNION ALL + CR-3 plan separation + CR-2 DECIMAL(38))
 
