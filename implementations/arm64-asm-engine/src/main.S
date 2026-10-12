@@ -123,6 +123,7 @@ FUNC main
     stp  x23, x24, [sp, #48]
     mov  w19, w0                    // argc
     mov  x20, x1                    // argv
+    bl   rt_tune_malloc
     ADR_L x0, s_dot
     ADR_L x1, g_data_dir
     str  x0, [x1]
