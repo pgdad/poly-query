@@ -1,5 +1,5 @@
 {
- "generated": "2026-10-12T12:53:34.230280+00:00",
+ "generated": "2026-10-12T14:47:54.473894+00:00",
  "weights": {
   "correctness": 0.35,
   "development_effort": 0.2,
@@ -7,7 +7,7 @@
   "resources": 0.1,
   "maintainability": 0.15
  },
- "git_commit": "89aa470af3ad22b031a451829867e95a0dca76fb",
+ "git_commit": "a35c053554346b61a70cd81f7368e05fee0600ec",
  "runs": [
   {
    "run_id": "a-change-decimal38-arm64-asm-engine-a1-20261012T093930Z",
@@ -1159,6 +1159,68 @@
    "join.merge",
    "join.nested_loop",
    "native.kernels",
+   "phase1",
+   "phase2",
+   "phase3",
+   "phase4",
+   "phase5",
+   "sql.basic",
+   "sql.correlated_subquery",
+   "sql.cte",
+   "sql.functions",
+   "sql.groupby",
+   "sql.join",
+   "sql.subquery",
+   "storage.mmap",
+   "storage.pqcf",
+   "test.functions"
+  ],
+  "x86_64-asm-engine": [
+   "change.decimal38",
+   "change.union_all",
+   "exec.parallel",
+   "exec.row",
+   "exec.vectorized",
+   "http.streaming",
+   "index.btree",
+   "index.hash",
+   "ingest.csv",
+   "ingest.json",
+   "ingest.jsonl",
+   "join.hash",
+   "join.merge",
+   "join.nested_loop",
+   "phase1",
+   "phase2",
+   "phase3",
+   "phase4",
+   "phase5",
+   "sql.basic",
+   "sql.correlated_subquery",
+   "sql.cte",
+   "sql.functions",
+   "sql.groupby",
+   "sql.join",
+   "sql.subquery",
+   "storage.mmap",
+   "storage.pqcf",
+   "test.functions"
+  ],
+  "arm64-asm-engine": [
+   "change.decimal38",
+   "change.union_all",
+   "exec.parallel",
+   "exec.row",
+   "exec.vectorized",
+   "http.streaming",
+   "index.btree",
+   "index.hash",
+   "ingest.csv",
+   "ingest.json",
+   "ingest.jsonl",
+   "join.hash",
+   "join.merge",
+   "join.nested_loop",
    "phase1",
    "phase2",
    "phase3",
@@ -30939,6 +31001,236 @@
      "pq_a64_sve.S": 4004
     },
     "note": "Kernels never allocate (ABI rule); resource figures are machine-code size and time per element."
+   }
+  },
+  "1b_additional_suites": {
+   "java": {
+    "http_suite": {
+     "value": "19/19",
+     "ok": true
+    },
+    "execution_modes": {
+     "value": "3324/3324",
+     "ok": true
+    },
+    "crash_safety": {
+     "value": "0 violations / 25 kills",
+     "ok": true
+    },
+    "fuzz": {
+     "value": "0 problems / 8,281,055 inputs",
+     "ok": true
+    },
+    "pqcf_interop": {
+     "value": "all files read by all engines",
+     "ok": true
+    },
+    "native_kernels": {
+     "value": "pass",
+     "ok": true
+    },
+    "robustness_probes": {
+     "missing": "probe run in progress"
+    }
+   },
+   "clojure": {
+    "http_suite": {
+     "value": "19/19",
+     "ok": true
+    },
+    "execution_modes": {
+     "value": "3324/3324",
+     "ok": true
+    },
+    "crash_safety": {
+     "value": "0 violations / 25 kills",
+     "ok": true
+    },
+    "fuzz": {
+     "value": "0 problems / 5,450,480 inputs",
+     "ok": true
+    },
+    "pqcf_interop": {
+     "value": "all files read by all engines",
+     "ok": true
+    },
+    "native_kernels": {
+     "value": "pass",
+     "ok": true
+    },
+    "robustness_probes": {
+     "missing": "probe run in progress"
+    }
+   },
+   "rust": {
+    "http_suite": {
+     "value": "19/19",
+     "ok": true
+    },
+    "execution_modes": {
+     "value": "3324/3324",
+     "ok": true
+    },
+    "crash_safety": {
+     "value": "0 violations / 25 kills",
+     "ok": true
+    },
+    "fuzz": {
+     "value": "0 problems / 8,080,142 inputs",
+     "ok": true
+    },
+    "pqcf_interop": {
+     "value": "all files read by all engines",
+     "ok": true
+    },
+    "native_kernels": {
+     "value": "pass",
+     "ok": true
+    },
+    "robustness_probes": {
+     "value": "no failures (6 probes)",
+     "ok": true
+    }
+   },
+   "python": {
+    "http_suite": {
+     "value": "18/19",
+     "ok": false
+    },
+    "execution_modes": {
+     "value": "3324/3324",
+     "ok": true
+    },
+    "crash_safety": {
+     "value": "0 violations / 25 kills",
+     "ok": true
+    },
+    "fuzz": {
+     "value": "0 problems / 3,349,698 inputs",
+     "ok": true
+    },
+    "pqcf_interop": {
+     "value": "all files read by all engines",
+     "ok": true
+    },
+    "native_kernels": {
+     "value": "pass",
+     "ok": true
+    },
+    "robustness_probes": {
+     "missing": "probe run in progress"
+    }
+   },
+   "go": {
+    "http_suite": {
+     "value": "19/19",
+     "ok": true
+    },
+    "execution_modes": {
+     "value": "3324/3324",
+     "ok": true
+    },
+    "crash_safety": {
+     "value": "0 violations / 25 kills",
+     "ok": true
+    },
+    "fuzz": {
+     "value": "0 problems / 7,296,113 inputs",
+     "ok": true
+    },
+    "pqcf_interop": {
+     "value": "all files read by all engines",
+     "ok": true
+    },
+    "native_kernels": {
+     "value": "pass",
+     "ok": true
+    },
+    "robustness_probes": {
+     "missing": "probe run in progress"
+    }
+   },
+   "common-lisp": {
+    "http_suite": {
+     "value": "19/19",
+     "ok": true
+    },
+    "execution_modes": {
+     "value": "3324/3324",
+     "ok": true
+    },
+    "crash_safety": {
+     "value": "0 violations / 25 kills",
+     "ok": true
+    },
+    "fuzz": {
+     "value": "0 problems / 5,356,347 inputs",
+     "ok": true
+    },
+    "pqcf_interop": {
+     "value": "all files read by all engines",
+     "ok": true
+    },
+    "native_kernels": {
+     "value": "pass",
+     "ok": true
+    },
+    "robustness_probes": {
+     "missing": "probe run in progress"
+    }
+   },
+   "x86_64-asm-engine": {
+    "http_suite": {
+     "value": "19/19",
+     "ok": true
+    },
+    "execution_modes": {
+     "value": "4386/4386",
+     "ok": true
+    },
+    "crash_safety": {
+     "missing": "not run yet for the assembly engines (the six engines ran it after Phase 3)"
+    },
+    "fuzz": {
+     "missing": "not run yet for the assembly engines"
+    },
+    "pqcf_interop": {
+     "value": "all files read by all engines",
+     "ok": true
+    },
+    "native_kernels": {
+     "missing": "not applicable: the assembly engines do not load the kernel library"
+    },
+    "robustness_probes": {
+     "value": "fail: http_crlf_flood, limit_after_failed_query, long_or_chain",
+     "ok": false
+    }
+   },
+   "arm64-asm-engine": {
+    "http_suite": {
+     "value": "19/19",
+     "ok": true
+    },
+    "execution_modes": {
+     "value": "4386/4386",
+     "ok": true
+    },
+    "crash_safety": {
+     "missing": "not run yet for the assembly engines (the six engines ran it after Phase 3)"
+    },
+    "fuzz": {
+     "missing": "not run yet for the assembly engines"
+    },
+    "pqcf_interop": {
+     "missing": "runs only on the ARM host; the interop matrix is built on the x86 host"
+    },
+    "native_kernels": {
+     "missing": "not applicable: the assembly engines do not load the kernel library"
+    },
+    "robustness_probes": {
+     "value": "fail: long_or_chain",
+     "ok": false
+    }
    }
   },
   "5_code_quality": {

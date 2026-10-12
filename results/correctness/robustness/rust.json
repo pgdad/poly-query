@@ -1,0 +1,187 @@
+{
+ "engine": "implementations/rust/bin/polyquery",
+ "started": "2026-10-12T13:40:09Z",
+ "probes": {
+  "fd_after_failed_loads": {
+   "query_budget_4mb": {
+    "verdict": "not_triggered",
+    "initial_small_load": "ok",
+    "failed_query_first": null,
+    "big_load_codes": {
+     "ok": 100
+    },
+    "fds_before": 3,
+    "fds_after": 3,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": "rows\":200000}\n{\"ts\":\"2026-10-12T13:40:13.987Z\",\"level\":\"info\",\"msg\":\"table loaded\",\"table\":\"big\",\"rows\":200000}\n{\"ts\":\"2026-10-12T13:40:14.030Z\",\"level\":\"info\",\"msg\":\"table loaded\",\"table\":\"big\",\"rows\":200000}\n{\"ts\":\"2026-10-12T13:40:14.074Z\",\"level\":\"info\",\"msg\":\"table loaded\",\"table\":\"big\",\"rows\":200000}\n{\"ts\":\"2026-10-12T13:40:14.075Z\",\"level\":\"info\",\"msg\":\"table loaded\",\"table\":\"s1\",\"rows\":2}\n"
+   },
+   "ingest_limit_1mb": {
+    "verdict": "pass",
+    "initial_small_load": "ok",
+    "failed_query_first": null,
+    "big_load_codes": {
+     "RESOURCE_LIMIT": 100
+    },
+    "fds_before": 3,
+    "fds_after": 3,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": "{\"ts\":\"2026-10-12T13:40:14.093Z\",\"level\":\"info\",\"msg\":\"table loaded\",\"table\":\"s0\",\"rows\":2}\n{\"ts\":\"2026-10-12T13:40:14.097Z\",\"level\":\"info\",\"msg\":\"table loaded\",\"table\":\"s1\",\"rows\":2}\n"
+   },
+   "after_failed_query_16mb": {
+    "verdict": "not_triggered",
+    "initial_small_load": "ok",
+    "failed_query_first": "RESOURCE_LIMIT",
+    "big_load_codes": {
+     "ok": 100
+    },
+    "fds_before": 3,
+    "fds_after": 3,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": "rows\":200000}\n{\"ts\":\"2026-10-12T13:40:18.276Z\",\"level\":\"info\",\"msg\":\"table loaded\",\"table\":\"big\",\"rows\":200000}\n{\"ts\":\"2026-10-12T13:40:18.317Z\",\"level\":\"info\",\"msg\":\"table loaded\",\"table\":\"big\",\"rows\":200000}\n{\"ts\":\"2026-10-12T13:40:18.358Z\",\"level\":\"info\",\"msg\":\"table loaded\",\"table\":\"big\",\"rows\":200000}\n{\"ts\":\"2026-10-12T13:40:18.359Z\",\"level\":\"info\",\"msg\":\"table loaded\",\"table\":\"s1\",\"rows\":2}\n"
+   },
+   "seconds": 8.7
+  },
+  "limit_after_failed_query": {
+   "verdict": "pass",
+   "load_before": "ok",
+   "query": "RESOURCE_LIMIT",
+   "load_after": "ok",
+   "exit_code": 0,
+   "stderr_tail": "{\"ts\":\"2026-10-12T13:40:18.438Z\",\"level\":\"info\",\"msg\":\"table loaded\",\"table\":\"m\",\"rows\":120000}\n{\"ts\":\"2026-10-12T13:40:18.472Z\",\"level\":\"info\",\"msg\":\"table loaded\",\"table\":\"m\",\"rows\":120000}\n",
+   "seconds": 0.1
+  },
+  "long_or_chain": {
+   "verdict": "pass",
+   "crashed_or_hung": [],
+   "wrong_result": [],
+   "cases": {
+    "load": "ok",
+    "OR_10000_row": {
+     "result": "PARSE_ERROR",
+     "count": null,
+     "alive": true
+    },
+    "OR_10000_vectorized": {
+     "result": "PARSE_ERROR",
+     "count": null,
+     "alive": true
+    },
+    "OR_10000_parallel": {
+     "result": "PARSE_ERROR",
+     "count": null,
+     "alive": true
+    },
+    "OR_10000_auto": {
+     "result": "PARSE_ERROR",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_row": {
+     "result": "PARSE_ERROR",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_vectorized": {
+     "result": "PARSE_ERROR",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_parallel": {
+     "result": "PARSE_ERROR",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_auto": {
+     "result": "PARSE_ERROR",
+     "count": null,
+     "alive": true
+    },
+    "AND_10000_row": {
+     "result": "PARSE_ERROR",
+     "count": null,
+     "alive": true
+    },
+    "AND_10000_vectorized": {
+     "result": "PARSE_ERROR",
+     "count": null,
+     "alive": true
+    },
+    "AND_10000_parallel": {
+     "result": "PARSE_ERROR",
+     "count": null,
+     "alive": true
+    },
+    "AND_10000_auto": {
+     "result": "PARSE_ERROR",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_row": {
+     "result": "PARSE_ERROR",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_vectorized": {
+     "result": "PARSE_ERROR",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_parallel": {
+     "result": "PARSE_ERROR",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_auto": {
+     "result": "PARSE_ERROR",
+     "count": null,
+     "alive": true
+    }
+   },
+   "engine_exits": [],
+   "seconds": 0.2
+  },
+  "session_huge_line": {
+   "verdict": "observation",
+   "response": "INVALID_REQUEST",
+   "next_request": "ok",
+   "rss_base_mib": 2,
+   "rss_peak_mib": 259,
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 0.3
+  },
+  "http_crlf_flood": {
+   "verdict": "pass",
+   "bytes_sent": 7340032,
+   "rss_growth_mib": 0,
+   "server_closed_connection": true,
+   "rss_base_mib": 3,
+   "rss_peak_mib": 3,
+   "server_alive": true,
+   "server_healthy_after": true,
+   "seconds": 1.0
+  },
+  "parallel_memory_budget": {
+   "verdict": "observation",
+   "load": "ok",
+   "threads_1": {
+    "result": "RESOURCE_LIMIT",
+    "rss_before_mib": 167,
+    "rss_peak_mib": 261,
+    "growth_mib": 94
+   },
+   "threads_8": {
+    "result": "RESOURCE_LIMIT",
+    "rss_before_mib": 190,
+    "rss_peak_mib": 313,
+    "growth_mib": 123
+   },
+   "exit_code": 0,
+   "stderr_tail": "{\"ts\":\"2026-10-12T13:40:20.481Z\",\"level\":\"info\",\"msg\":\"table loaded\",\"table\":\"g\",\"rows\":1000000}\n",
+   "seconds": 0.8
+  }
+ }
+}

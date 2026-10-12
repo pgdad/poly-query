@@ -1,0 +1,209 @@
+{
+ "engine": "implementations/x86_64-asm-engine/bin/polyquery",
+ "started": "2026-10-12T13:30:09Z",
+ "probes": {
+  "fd_after_failed_loads": {
+   "query_budget_4mb": {
+    "verdict": "not_triggered",
+    "initial_small_load": "ok",
+    "failed_query_first": null,
+    "big_load_codes": {
+     "ok": 100
+    },
+    "fds_before": 3,
+    "fds_after": 3,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": ""
+   },
+   "ingest_limit_1mb": {
+    "verdict": "pass",
+    "initial_small_load": "ok",
+    "failed_query_first": null,
+    "big_load_codes": {
+     "RESOURCE_LIMIT": 100
+    },
+    "fds_before": 3,
+    "fds_after": 3,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": ""
+   },
+   "after_failed_query_16mb": {
+    "verdict": "pass",
+    "initial_small_load": "ok",
+    "failed_query_first": "RESOURCE_LIMIT",
+    "big_load_codes": {
+     "RESOURCE_LIMIT": 100
+    },
+    "fds_before": 3,
+    "fds_after": 3,
+    "small_load_after": "ok",
+    "exit_code": 0,
+    "stderr_tail": ""
+   },
+   "seconds": 3.2
+  },
+  "limit_after_failed_query": {
+   "verdict": "fail",
+   "load_before": "ok",
+   "query": "RESOURCE_LIMIT",
+   "load_after": "RESOURCE_LIMIT",
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 0.1
+  },
+  "long_or_chain": {
+   "verdict": "fail",
+   "crashed_or_hung": [
+    "OR_100000_parallel",
+    "OR_100000_auto",
+    "AND_100000_parallel",
+    "AND_100000_auto"
+   ],
+   "wrong_result": [],
+   "cases": {
+    "load": "ok",
+    "OR_10000_row": {
+     "result": "ok",
+     "count": 10000,
+     "alive": true
+    },
+    "OR_10000_vectorized": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "OR_10000_parallel": {
+     "result": "ok",
+     "count": 10000,
+     "alive": true
+    },
+    "OR_10000_auto": {
+     "result": "ok",
+     "count": 10000,
+     "alive": true
+    },
+    "OR_100000_row": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "OR_100000_vectorized": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "OR_100000_parallel": {
+     "result": "NO_RESPONSE",
+     "count": null,
+     "alive": false
+    },
+    "OR_100000_auto": {
+     "result": "NO_RESPONSE",
+     "count": null,
+     "alive": false
+    },
+    "AND_10000_row": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_10000_vectorized": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "AND_10000_parallel": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_10000_auto": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_100000_row": {
+     "result": "ok",
+     "count": 20000,
+     "alive": true
+    },
+    "AND_100000_vectorized": {
+     "result": "RESOURCE_LIMIT",
+     "count": null,
+     "alive": true
+    },
+    "AND_100000_parallel": {
+     "result": "NO_RESPONSE",
+     "count": null,
+     "alive": false
+    },
+    "AND_100000_auto": {
+     "result": "NO_RESPONSE",
+     "count": null,
+     "alive": false
+    }
+   },
+   "engine_exits": [
+    {
+     "exit_code": -11,
+     "stderr_tail": ""
+    },
+    {
+     "exit_code": -11,
+     "stderr_tail": ""
+    },
+    {
+     "exit_code": -11,
+     "stderr_tail": ""
+    },
+    {
+     "exit_code": -11,
+     "stderr_tail": ""
+    }
+   ],
+   "seconds": 581.9
+  },
+  "session_huge_line": {
+   "verdict": "observation",
+   "response": "INVALID_REQUEST",
+   "next_request": "ok",
+   "rss_base_mib": 1,
+   "rss_peak_mib": 258,
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 13.2
+  },
+  "http_crlf_flood": {
+   "verdict": "fail",
+   "bytes_sent": 134217728,
+   "rss_growth_mib": 128,
+   "server_closed_connection": false,
+   "rss_base_mib": 2,
+   "rss_peak_mib": 130,
+   "server_alive": true,
+   "server_healthy_after": true,
+   "seconds": 1.0
+  },
+  "parallel_memory_budget": {
+   "verdict": "observation",
+   "load": "ok",
+   "threads_1": {
+    "result": "RESOURCE_LIMIT",
+    "rss_before_mib": 284,
+    "rss_peak_mib": 284,
+    "growth_mib": 0
+   },
+   "threads_8": {
+    "result": "RESOURCE_LIMIT",
+    "rss_before_mib": 284,
+    "rss_peak_mib": 284,
+    "growth_mib": 0
+   },
+   "exit_code": 0,
+   "stderr_tail": "",
+   "seconds": 0.4
+  }
+ }
+}

@@ -42,9 +42,11 @@ ASM = ["x86_64-asm", "arm64-asm"]
 ASM_ENGINES = ["x86_64-asm-engine", "arm64-asm-engine"]
 # Fixed categorical slots (reference palette order); identity is also always in axis labels.
 COLORS = {"java": "#2a78d6", "clojure": "#eb6834", "rust": "#1baf7a", "python": "#eda100", "go": "#e87ba4",
-          "common-lisp": "#008300", "x86_64-asm": "#6250d6", "arm64-asm": "#e34948"}
+          "common-lisp": "#008300", "x86_64-asm": "#6250d6", "arm64-asm": "#e34948",
+          "x86_64-asm-engine": "#6250d6", "arm64-asm-engine": "#e34948"}
 COLORS_DARK = {"java": "#3987e5", "clojure": "#d95926", "rust": "#199e70", "python": "#c98500", "go": "#d55181",
-               "common-lisp": "#008300", "x86_64-asm": "#9085e9", "arm64-asm": "#e66767"}
+               "common-lisp": "#008300", "x86_64-asm": "#9085e9", "arm64-asm": "#e66767",
+               "x86_64-asm-engine": "#9085e9", "arm64-asm-engine": "#e66767"}
 SRC_EXT = {"java": [".java"], "clojure": [".clj", ".cljc", ".edn"], "rust": [".rs"], "python": [".py"],
            "go": [".go"], "common-lisp": [".lisp", ".asd", ".cl"], "x86_64-asm": [".S", ".s", ".h", ".inc"], "arm64-asm": [".S", ".s", ".h", ".inc"],
            "x86_64-asm-engine": [".S", ".s", ".inc"], "arm64-asm-engine": [".S", ".s", ".inc"]}
@@ -256,6 +258,67 @@ def collect_reviews() -> dict:
             for l, r in out.items()}
 
 
+def latest_merged_run(lang: str) -> Path | None:
+    """Run directory of the engine's latest successful Track A run (its validation records)."""
+    best = None
+    for m in RUNS.glob(f"a-*-{lang}-a*/manifest.json"):
+        man = load_json(m) or {}
+        if man.get("language") == lang and man.get("outcome") == "success" and not man.get("task", "").startswith("debug"):
+            key = (load_json(m.parent / "validation.json") or {}).get("validated_at") or ""
+            if best is None or key > best[0]:
+                best = (key, m.parent)
+    return best[1] if best else None
+
+
+def collect_suites() -> dict:
+    """Additional suites per engine; a missing entry carries the reason instead of a value."""
+    out = {}
+    interop = load_json(ROOT / "results/correctness/interop-asm-engine.json") or load_json(ROOT / "results/correctness/interop.json") or {}
+    interop_engines = (interop.get("summary") or {}).get("engines") or []
+    for l in LANGS + ASM_ENGINES:
+        rc = ROOT / "results/correctness"
+        run = latest_merged_run(l) if l in ASM_ENGINES else None
+        http = load_json(rc / f"{l}-http.json") or (load_json(run / "http-suite.json") if run else None)
+        modes = load_json(rc / f"{l}-modes.json") or (load_json(run / "conformance-modes.json") if run else None)
+        crash = load_json(rc / f"{l}-crash.json")
+        fuzz = load_json(rc / f"{l}-fuzz.json")
+        native = load_json(rc / f"{l}-native.json")
+        probe = load_json(rc / "robustness" / f"{l}.json")
+        e: dict = {}
+        hs = (http or {}).get("summary") or {}
+        e["http_suite"] = {"value": f"{hs['passed']}/{hs['total']}", "ok": hs["passed"] == hs["total"]} if hs else \
+            {"missing": "not run"}
+        mt = ((modes or {}).get("summary") or {}).get("total") or {}
+        e["execution_modes"] = {"value": f"{mt['pass']}/{mt['total']}", "ok": mt["pass"] == mt["total"]} if mt else \
+            {"missing": "not run"}
+        cs = (crash or {}).get("summary")
+        e["crash_safety"] = ({"value": f"{cs['violations']} violations / {cs['iterations']} kills", "ok": cs["violations"] == 0}
+                             if cs else {"missing": "not run yet for the assembly engines (the six engines ran it after Phase 3)"
+                                         if l in ASM_ENGINES else "not run"})
+        e["fuzz"] = ({"value": f"{len(fuzz['problems'])} problems / {fuzz['inputs']:,} inputs", "ok": not fuzz["problems"]}
+                     if fuzz else {"missing": "not run yet for the assembly engines" if l in ASM_ENGINES else "not run"})
+        e["pqcf_interop"] = ({"value": "all files read by all engines" if interop.get("summary", {}).get("passed") else "failures",
+                              "ok": bool(interop.get("summary", {}).get("passed"))} if l in interop_engines else
+                             {"missing": "runs only on the ARM host; the interop matrix is built on the x86 host"
+                              if l == "arm64-asm-engine" else "not run"})
+        e["native_kernels"] = ({"value": "pass" if all((native.get("phase_passed") or {}).values()) else "fail",
+                                "ok": all((native.get("phase_passed") or {}).values())} if native else
+                               {"missing": "not applicable: the assembly engines do not load the kernel library"
+                                if l in ASM_ENGINES else "not run"})
+        if probe:
+            pr = probe["probes"]
+
+            def verdicts(v: dict) -> list[str]:
+                return [v["verdict"]] if "verdict" in v else [x.get("verdict") for x in v.values() if isinstance(x, dict)]
+            fails = sorted(n for n, v in pr.items() if "fail" in verdicts(v))
+            e["robustness_probes"] = {"value": ("fail: " + ", ".join(fails)) if fails else f"no failures ({len(pr)} probes)",
+                                      "ok": not fails}
+        else:
+            e["robustness_probes"] = {"missing": "probe run in progress"}
+        out[l] = e
+    return out
+
+
 # ------------------------------------------------------------------ analysis
 
 def latest_by(runs: list[dict], lang: str, task: str) -> list[dict]:
@@ -355,8 +418,8 @@ def build(weights: dict) -> dict:
                  if t.startswith(("change", "refactor", "debug", "regress", "optimize", "kernel-"))}
              for l, d in dev.items()}
 
-    # capability matrix
-    matrix = {l: (corr.get(l) or {}).get("capabilities") or [] for l in LANGS}
+    # capability matrix (the assembly engines get columns; the kernel libraries claim no engine capabilities)
+    matrix = {l: (corr.get(l) or {}).get("capabilities") or [] for l in LANGS + ASM_ENGINES}
 
     # 8. overall: correctness-gated weighted score per language (only where data exist)
     overall = {}
@@ -419,6 +482,7 @@ def build(weights: dict) -> dict:
                     l: {"text_bytes_per_source": kern[l]["codesize"],
                         "note": "Kernels never allocate (ABI rule); resource figures are machine-code size and time per element."}
                     for l in ASM},
+                "1b_additional_suites": collect_suites(),
                 "5_code_quality": quality, "6_optimization_effectiveness": [
                     {"bench_id": p["bench_id"], "engines": {l: {k: e[k] for k in ("modes", "joins", "thread_scaling")}
                                                           for l, e in p["engines"].items()}} for p in perf_rep],
@@ -437,24 +501,36 @@ def build(weights: dict) -> dict:
 
 # ------------------------------------------------------------------ rendering
 
-def bar_chart(title: str, unit: str, data: dict[str, float | None], fmt=lambda v: f"{v:,.1f}") -> str:
+def bar_chart(title: str, unit: str, data: dict[str, float | None], fmt=lambda v: f"{v:,.1f}",
+              missing: dict[str, str] | None = None, note: str = "", labels: dict[str, str] | None = None) -> str:
+    """Horizontal bars; `missing` lists entries without data and why (shown as rows, never as zero bars)."""
     items = [(k, v) for k, v in data.items() if v is not None]
-    if not items:
+    gaps = [(k, r) for k, r in (missing or {}).items() if data.get(k) is None]
+    gaps += [(k, "not recorded yet") for k, v in data.items() if v is None and k not in (missing or {})]
+    lab = labels or {}
+    note_html = f'<p class="muted note">{html.escape(note)}</p>' if note else ""
+    if not items and not gaps:
         return f'<figure class="chart"><figcaption>{html.escape(title)}</figcaption><p class="muted">No data recorded yet.</p></figure>'
-    w, bh, gap, left = 640, 22, 8, 120
-    h = len(items) * (bh + gap) + 10
-    mx = max(v for _, v in items) or 1
+    w, bh, gap, left = 640, 22, 8, 150
+    h = (len(items) + len(gaps)) * (bh + gap) + 10
+    mx = max((v for _, v in items), default=1) or 1
     rows = []
     for i, (k, v) in enumerate(items):
         y = i * (bh + gap) + 4
         bw = max(2, (w - left - 90) * v / mx)
         rows.append(
-            f'<g class="bar"><title>{html.escape(k)}: {fmt(v)} {html.escape(unit)}</title>'
-            f'<text x="{left - 8}" y="{y + bh * 0.7}" text-anchor="end" class="lbl">{html.escape(k)}</text>'
+            f'<g class="bar"><title>{html.escape(lab.get(k, k))}: {fmt(v)} {html.escape(unit)}</title>'
+            f'<text x="{left - 8}" y="{y + bh * 0.7}" text-anchor="end" class="lbl">{html.escape(lab.get(k, k))}</text>'
             f'<rect x="{left}" y="{y}" width="{bw:.1f}" height="{bh}" rx="4" style="fill:var(--c-{k})"/>'
             f'<text x="{left + bw + 6}" y="{y + bh * 0.7}" class="val">{fmt(v)}</text></g>')
-    table = "".join(f"<tr><td>{html.escape(k)}</td><td>{fmt(v)}</td></tr>" for k, v in items)
-    return (f'<figure class="chart"><figcaption>{html.escape(title)} <span class="muted">({html.escape(unit)})</span></figcaption>'
+    for j, (k, r) in enumerate(gaps):
+        y = (len(items) + j) * (bh + gap) + 4
+        rows.append(f'<g><title>{html.escape(k)}: {html.escape(r)}</title>'
+                    f'<text x="{left - 8}" y="{y + bh * 0.7}" text-anchor="end" class="lbl">{html.escape(lab.get(k, k))}</text>'
+                    f'<text x="{left + 6}" y="{y + bh * 0.7}" class="val">n/a — {html.escape(r[:62] + ("… (see table)" if len(r) > 62 else ""))}</text></g>')
+    table = "".join(f"<tr><td>{html.escape(lab.get(k, k))}</td><td>{fmt(v)}</td></tr>" for k, v in items)
+    table += "".join(f"<tr><td>{html.escape(lab.get(k, k))}</td><td class='muted'>n/a — {html.escape(r)}</td></tr>" for k, r in gaps)
+    return (f'<figure class="chart"><figcaption>{html.escape(title)} <span class="muted">({html.escape(unit)})</span></figcaption>{note_html}'
             f'<svg viewBox="0 0 {w} {h}" role="img" aria-label="{html.escape(title)}">'
             f'<line x1="{left}" y1="0" x2="{left}" y2="{h}" class="axis"/>{"".join(rows)}</svg>'
             f'<details><summary>Table</summary><table><tr><th>Language</th><th>{html.escape(unit)}</th></tr>{table}</table></details></figure>')
@@ -518,14 +594,9 @@ def render_asm_engine_reports(R: dict) -> str:
                      "ARM host: the two rows are not comparable with each other.</p><table><tr><th>engine</th><th>host</th>"
                      "<th>geomean latency s</th><th>queries ok</th><th>startup ms</th><th>peak RSS MiB</th>"
                      "<th>HTTP q/s (1/4/16 clients)</th><th>benchmark</th></tr>" + body + "</table>")
-    for ba in R.get("6_optimization_task_before_after_asm_engine_cohort") or []:
-        rows = "".join(
-            f"<tr><td>{html.escape(l)}</td><td>{e['geomean_before_s'] * 1e3:.2f} → {e['geomean_after_s'] * 1e3:.2f} ms</td>"
-            f"<td>{e['speedup']:.2f}×</td><td>{html.escape(', '.join(e.get('significantly_slower') or []) or '—')}</td></tr>"
-            for l, e in ba["engines"].items())
-        parts.append(f"<h3>6. Optimization task, measured independently — {html.escape(ba['note'])}</h3><p class='muted'>"
-                     f"<code>{html.escape(ba['source'])}</code>; result digests identical: {ba['digests_identical']}</p>"
-                     f"<table><tr><th>engine</th><th>geomean latency</th><th>speedup</th><th>significantly slower</th></tr>{rows}</table>")
+    if R.get("6_optimization_task_before_after_asm_engine_cohort"):
+        parts.append("<h3>6. Optimization task, measured independently</h3><p class='muted'>Shown with the six engines "
+                     "in the report-6 section above.</p>")
     ov = R["8_overall"].get("asm_engine_cohort") or {}
     parts.append("<h3>8. Overall (assembly-engine cohort, not ranked)</h3><p class='muted'>"
                  + html.escape(R["8_overall"].get("asm_engine_cohort_note", "")) + "</p><table><tr><th>engine</th>"
@@ -607,13 +678,15 @@ def render_task_before_after(R: dict) -> str:
              "<p class='muted'>Each engine benchmarked at the commit its optimization run started from and at the run's "
              "result, back to back on a quiet host (1m rows, real workload). Speedup = ratio of the geometric means of "
              "the 20 query medians.</p>"]
-    for ba in R.get("6_optimization_task_before_after") or []:
+    asm = R.get("6_optimization_task_before_after_asm_engine_cohort") or []
+    for ba in (R.get("6_optimization_task_before_after") or []) + asm:
         rows = "".join(
             f"<tr><td>{html.escape(l)}</td><td>{e['geomean_before_s'] * 1e3:.1f} → {e['geomean_after_s'] * 1e3:.1f} ms</td>"
             f"<td>{e['speedup']:.2f}×</td><td>{html.escape(', '.join(e.get('significantly_slower') or []) or '—')}</td>"
-            f"<td>{(e.get('peak_rss_before') or 0) / 2**30:.1f} → {(e.get('peak_rss_after') or 0) / 2**30:.1f} GiB</td></tr>"
+            f"<td>{(e.get('peak_rss_before') or 0) / 2**30:.2f} → {(e.get('peak_rss_after') or 0) / 2**30:.2f} GiB</td></tr>"
             for l, e in sorted(ba["engines"].items(), key=lambda kv: -kv[1]["speedup"]))
-        parts.append(f"<p><b>{html.escape(ba['note'])}</b> — <code>{html.escape(ba['source'])}</code>; result digests "
+        cohort = " (assembly-engine cohort, not ranked with the six engines)" if ba in asm else ""
+        parts.append(f"<p><b>{html.escape(ba['note'])}{cohort}</b> — <code>{html.escape(ba['source'])}</code>; result digests "
                      f"identical: {ba['digests_identical']}</p><table><tr><th>engine</th><th>geomean latency</th>"
                      f"<th>speedup</th><th>significantly slower queries</th><th>peak RSS</th></tr>{rows}</table>")
     return "".join(parts)
@@ -639,41 +712,75 @@ def render_html(rep: dict) -> str:
         vals = [a[key] for t in dev.get(lang, {}).values() for a in t if a.get(key) is not None]
         return sum(vals) if vals else None
 
+    ALL = LANGS + ASM + ASM_ENGINES
+    lbl = {"x86_64-asm": "x86-64 asm kernels", "arm64-asm": "AArch64 asm kernels",
+           "x86_64-asm-engine": "x86-64 asm engine", "arm64-asm-engine": "AArch64 asm engine"}
+    dev_note = ("Assembly: the kernel libraries (ADR-0016) and the complete assembly engines (option B) are separate "
+                "cohorts, shown next to the six engines but never ranked with them.")
     charts = []
     charts.append(bar_chart("Development time (all attempts, all tasks)", "hours",
-                            {l: (agg(l, "wall_seconds") or 0) / 3600 or None for l in LANGS + ASM}, lambda v: f"{v:.2f}"))
+                            {l: (agg(l, "wall_seconds") or 0) / 3600 or None for l in ALL}, lambda v: f"{v:.2f}",
+                            note=dev_note, labels=lbl))
     charts.append(bar_chart("Output tokens (all attempts)", "k tokens",
-                            {l: (agg(l, "tokens_output") or 0) / 1000 or None for l in LANGS + ASM}, lambda v: f"{v:,.0f}"))
-    charts.append(bar_chart("Model cost, list-price equivalent", "USD", {l: agg(l, "cost_usd") for l in LANGS + ASM},
-                            lambda v: f"{v:,.2f}"))
-    charts.append(bar_chart("Repair iterations", "runs", {l: agg(l, "repair_iterations") for l in LANGS + ASM},
-                            lambda v: f"{v:.0f}"))
+                            {l: (agg(l, "tokens_output") or 0) / 1000 or None for l in ALL}, lambda v: f"{v:,.0f}", labels=lbl))
+    charts.append(bar_chart("Model cost, list-price equivalent", "USD", {l: agg(l, "cost_usd") for l in ALL},
+                            lambda v: f"{v:,.2f}", labels=lbl))
+    charts.append(bar_chart("Repair iterations", "runs", {l: agg(l, "repair_iterations") for l in ALL},
+                            lambda v: f"{v:.0f}", labels=lbl,
+                            missing={l: "no repair iterations recorded" for l in ALL if not agg(l, "repair_iterations")}))
     corr = R["1_functional_correctness"]
-    charts.append(bar_chart("Conformance pass rate (public suite, latest report)", "%",
-                            {l: (100 * ((c.get("summary") or {}).get("total") or {}).get("pass", 0) /
-                                 ((c.get("summary") or {}).get("total") or {}).get("total", 1))
-                             if (c.get("summary") or {}).get("total", {}).get("total") else None
-                             for l, c in corr.items()}, lambda v: f"{v:.1f}"))
+    asm_corr = corr.get("asm_engine_cohort") or {}
+
+    def pass_rate(c: dict | None) -> float | None:
+        t = ((c or {}).get("summary") or {}).get("total") or {}
+        return 100 * t.get("pass", 0) / t["total"] if t.get("total") else None
+    kc = corr.get("kernel_cohort") or {}
+    charts.append(bar_chart(
+        "Conformance pass rate (latest report, claimed capabilities)", "%",
+        {**{l: pass_rate(corr.get(l)) for l in LANGS}, **{l: pass_rate(asm_corr.get(l)) for l in ASM_ENGINES},
+         **{l: None for l in ASM}}, lambda v: f"{v:.1f}", labels=lbl,
+        missing={l: "SQL conformance does not apply to a kernel library; kernel suites: "
+                    + ("all variants pass" if ((kc.get(l) or {}).get("summary") or {}).get("all_pass") else "see report 1")
+                 for l in ASM},
+        note="The AArch64 engine's report runs natively on the ARM host and includes the hidden tests (746 cases); "
+             "the others are the public suite."))
+    asm_perf = R.get("3_runtime_performance_asm_engine_cohort") or {}
+    no_sql = "a kernel library runs no SQL workload; kernel throughput (ns/element) is in the kernel cohort, report 3"
+    arm_note = ("x86-64 bars: same run on the quiet x86 host. The AArch64 engine is measured on the ARM host "
+                "(spark, Cortex-X925): different hardware, shown for completeness, not comparable with the x86 bars. "
+                "The six engines have not been benchmarked on the ARM host.")
     if R["3_runtime_performance"]:
         last = R["3_runtime_performance"][-1]
-        geo = {}
-        for l, e in last["engines"].items():
-            med = e["median_latency_by_query"]
-            if med:
-                g = 1.0
-                for v in med.values():
-                    g *= max(v, 1e-6)
-                geo[l] = 1000 * g ** (1 / len(med))
+        eng = {l: e for l in LANGS + ASM_ENGINES if (e := {**last["engines"], **asm_perf}.get(l))}
+        geo = {l: (1000 * geomean(list(e["median_latency_by_query"].values()))
+                   if e.get("median_latency_by_query") else None) for l, e in eng.items()}
+        miss = {l: no_sql for l in ASM}
+        miss.update({l: "not benchmarked yet" for l in ASM_ENGINES if l not in asm_perf})
         charts.append(bar_chart(f"Query latency, geometric mean of medians ({last['scale']}, {last['bench_id']})",
-                                "ms", geo, lambda v: f"{v:,.1f}"))
+                                "ms", {**geo, **{l: None for l in ASM}}, lambda v: f"{v:,.2f}", missing=miss,
+                                note=arm_note, labels=lbl))
         charts.append(bar_chart("Peak resident memory (engine process tree)", "MiB",
-                                {l: e["peak_rss_mib"] for l, e in last["engines"].items()}, lambda v: f"{v:,.0f}"))
+                                {**{l: e["peak_rss_mib"] for l, e in eng.items()}, **{l: None for l in ASM}},
+                                lambda v: f"{v:,.0f}", missing={l: "kernels never allocate (ABI rule); machine-code size "
+                                                                   "is in the kernel cohort, report 4" for l in ASM},
+                                labels=lbl))
         charts.append(bar_chart("Startup time (spawn → first response)", "ms",
-                                {l: (e["startup_median_s"] or 0) * 1000 or None for l, e in last["engines"].items()},
-                                lambda v: f"{v:,.0f}"))
+                                {**{l: (e["startup_median_s"] or 0) * 1000 or None for l, e in eng.items()},
+                                 **{l: None for l in ASM}}, lambda v: f"{v:,.1f}",
+                                missing={l: "a library has no process startup" for l in ASM}, labels=lbl))
+
+        def qps16(e: dict) -> float | None:
+            return (((e.get("http") or {}).get("16") or {}).get("qps")) or None
+        charts.append(bar_chart("HTTP throughput, 16 concurrent clients", "queries/s",
+                                {**{l: qps16(e) for l, e in eng.items()}, **{l: None for l in ASM}},
+                                lambda v: f"{v:,.0f}", missing={**{l: "no HTTP server in a kernel library" for l in ASM},
+                                                               **{l: "HTTP not measured in the latest benchmark"
+                                                                  for l, e in eng.items() if qps16(e) is None}},
+                                note="The x86-64 assembly engine forks a snapshot process per query; the AArch64 engine "
+                                     "serves each connection from a thread.", labels=lbl))
     charts.append(bar_chart("Source lines of code (automated count)", "LOC",
-                            {l: (q or {}).get("source_loc") for l, q in R["5_code_quality"].items() if l in LANGS},
-                            lambda v: f"{v:,.0f}"))
+                            {l: (R["5_code_quality"].get(l) or {}).get("source_loc") for l in ALL},
+                            lambda v: f"{v:,.0f}", labels=lbl))
 
     css_vars = "".join(f"--c-{k}:{v};" for k, v in COLORS.items())
     css_dark = "".join(f"--c-{k}:{v};" for k, v in COLORS_DARK.items())
@@ -682,8 +789,23 @@ def render_html(rep: dict) -> str:
         f"<td class='o-{html.escape(r['outcome'])}'>{html.escape(r['outcome'])}</td><td><code>{html.escape(r['manifest'])}</code></td></tr>"
         for r in rep["runs"])
     caps = rep["capability_matrix"]
+    cap_langs = LANGS + ASM_ENGINES
     cap_rows = "".join("<tr><td><code>" + c + "</code></td>" + "".join(
-        f"<td>{'✔' if c in (caps.get(l) or []) else '·'}</td>" for l in LANGS) + "</tr>" for c in CAPS_ORDER)
+        f"<td>{'✔' if c in (caps.get(l) or []) else '·'}</td>" for l in cap_langs) + "</tr>" for c in CAPS_ORDER)
+    suites = R.get("1b_additional_suites") or {}
+    scols = [("http_suite", "HTTP suite"), ("execution_modes", "execution modes"), ("crash_safety", "crash safety"),
+             ("fuzz", "fuzz"), ("pqcf_interop", "PQCF interop"), ("native_kernels", "native kernels"),
+             ("robustness_probes", "robustness probes")]
+
+    def scell(x: dict) -> str:
+        if "missing" in x:
+            return f"<td class='muted'>n/a — {html.escape(x['missing'])}</td>"
+        return f"<td class='{'o-success' if x['ok'] else 'o-tests_failed'}'>{html.escape(x['value'])}</td>"
+    suite_rows = "".join(f"<tr><td>{html.escape(l)}</td>" + "".join(scell(e[k]) for k, _ in scols) + "</tr>"
+                         for l, e in suites.items())
+    suite_rows += "".join(f"<tr><td>{html.escape(l)}</td><td colspan='{len(scols)}' class='muted'>n/a — a kernel library "
+                          "has no protocol, storage or HTTP; its differential, ASan/UBSan and hidden suites are in the "
+                          "kernel cohort, report 1</td></tr>" for l in ASM)
     ov = R["8_overall"]
     kernel_html = render_kernel_cohort(R) + render_asm_engine_cohort(R)
     rubric_rows = "".join(
@@ -708,6 +830,9 @@ Every figure is computed from raw records; each run links to its manifest. Track
 Missing bars mean the measurement has not been run — nothing is estimated.</p>
 <h2>Overall (correctness-gated)</h2><p>{html.escape(ov['note'])} Pareto front (dev cost × correctness × latency):
 <b>{html.escape(', '.join(ov['pareto_front']) or 'not yet computable')}</b></p>
+<p class="muted">The Pareto front covers the six engines only: the assembly kernels and the assembly engines are separate
+cohorts (ADR-0016) and appear in every chart below with their values or the reason a value is missing; their overall
+tables are in the cohort sections further down.</p>
 {''.join(charts)}
 <h2>Architectural adaptability (change, refactoring, debugging, optimization tasks)</h2>
 <p class="muted">One row per attempt; failed and timed-out attempts are kept. Cost is null when the agent was killed
@@ -720,7 +845,13 @@ before reporting it (timeouts). Lines and files count the agent's diff inside it
 judgements, not measurements; evidence per score in <code>results/development/code-review/</code>.</p>
 <table><tr><th>language</th><th>architecture</th><th>readability</th><th>robustness</th><th>testability</th></tr>{rubric_rows}</table>
 {kernel_html}
-<h2>Capability matrix (claimed and tested)</h2><table><tr><th>capability</th>{''.join(f'<th>{l}</th>' for l in LANGS)}</tr>{cap_rows}</table>
+<h2>Additional suites (all engines)</h2><p class="muted">Black-box suites beyond conformance. Six engines: records in
+<code>results/correctness/</code>; assembly engines: the validation records of their latest merged run (HTTP suite,
+execution modes). Robustness probes (<code>tests/regression/robustness_probe.py</code>) check the defects suspected
+by the code reviewers; "fail" means a probe reproduced one.</p>
+<table><tr><th>engine</th>{''.join(f'<th>{h}</th>' for _, h in scols)}</tr>{suite_rows}</table>
+<h2>Capability matrix (claimed and tested)</h2><p class="muted">The kernel libraries claim no engine capabilities
+(they are called through the C ABI, not the protocol).</p><table><tr><th>capability</th>{''.join(f'<th>{l}</th>' for l in cap_langs)}</tr>{cap_rows}</table>
 <h2>All agent attempts (failures included)</h2><table><tr><th>language</th><th>task</th><th>attempt</th><th>outcome</th><th>manifest</th></tr>{runs_rows}</table>
 </body></html>"""
 
