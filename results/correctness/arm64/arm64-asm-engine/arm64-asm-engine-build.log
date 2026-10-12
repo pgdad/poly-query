@@ -1,4 +1,4 @@
-make: Entering directory '/srv/pqrunner/jobs/engines-20261012T093926Z-3133758/repo/implementations/arm64-asm-engine'
+make: Entering directory '/srv/pqrunner/jobs/engines-20261012T105225Z-3616999/repo/implementations/arm64-asm-engine'
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/access.o src/access.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/binder.o src/binder.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/catalog.o src/catalog.S
@@ -39,5 +39,6 @@ cc -Iinclude -g -Wa,--fatal-warnings -c -o build/vagg.o src/vagg.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/values.o src/values.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/vexec.o src/vexec.S
 cc -Iinclude -g -Wa,--fatal-warnings -c -o build/volcano.o src/volcano.S
-cc -g -o build/polyquery build/access.o build/binder.o build/catalog.o build/datetime.o build/decimal.o build/eval.o build/exec.o build/functions.o build/http.o build/index.o build/ingest.o build/join.o build/json.o build/lexer.o build/log.o build/logical.o build/main.o build/ops.o build/optimize.o build/parallel.o build/parser.o build/physical.o build/plan.o build/pqcf.o build/protocol.o build/rt.o build/rule_fold.o build/rule_joinorder.o build/rule_prune.o build/rule_pushdown.o build/rule_simplify.o build/server.o build/sort.o build/storage.o build/strfuncs.o build/types.o build/vagg.o build/values.o build/vexec.o build/volcano.o -lm -lpthread
-make: Leaving directory '/srv/pqrunner/jobs/engines-20261012T093926Z-3133758/repo/implementations/arm64-asm-engine'
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/wdec.o src/wdec.S
+cc -g -o build/polyquery build/access.o build/binder.o build/catalog.o build/datetime.o build/decimal.o build/eval.o build/exec.o build/functions.o build/http.o build/index.o build/ingest.o build/join.o build/json.o build/lexer.o build/log.o build/logical.o build/main.o build/ops.o build/optimize.o build/parallel.o build/parser.o build/physical.o build/plan.o build/pqcf.o build/protocol.o build/rt.o build/rule_fold.o build/rule_joinorder.o build/rule_prune.o build/rule_pushdown.o build/rule_simplify.o build/server.o build/sort.o build/storage.o build/strfuncs.o build/types.o build/vagg.o build/values.o build/vexec.o build/volcano.o build/wdec.o -lm -lpthread
+make: Leaving directory '/srv/pqrunner/jobs/engines-20261012T105225Z-3616999/repo/implementations/arm64-asm-engine'
