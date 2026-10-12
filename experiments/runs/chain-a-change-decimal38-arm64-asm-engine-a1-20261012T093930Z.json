@@ -1,0 +1,21 @@
+{
+ "chain_id": "chain-a-change-decimal38-arm64-asm-engine-a1-20261012T093930Z",
+ "task": "change-decimal38",
+ "language": "arm64-asm-engine",
+ "track": "A",
+ "attempt": 1,
+ "max_sessions": 2,
+ "total_budget_usd": 50.0,
+ "timeout_min": 120,
+ "sessions": [
+  {
+   "run_id": "a-change-decimal38-arm64-asm-engine-a1-20261012T093930Z",
+   "session": 1,
+   "outcome": "success",
+   "cost_usd": 20.74825879999999
+  }
+ ],
+ "spent_usd": 20.75,
+ "outcome": "success",
+ "finished": "2026-10-12T10:52:24+00:00"
+}

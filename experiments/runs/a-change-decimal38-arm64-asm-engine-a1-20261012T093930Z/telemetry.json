@@ -1,0 +1,122 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-decimal38-arm64-asm-engine-a1-20261012T093930Z",
+ "language": "arm64-asm-engine",
+ "task": "change-decimal38",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-decimal38",
+ "prompt_sha256": "e9557b856dbe24670d906c0a8b245ae9c259a2013611f50a9dc755606bc46b75",
+ "session_id": "d8be981e-4279-421c-a0c5-991830cc82b1",
+ "tokens": {
+  "input": 308,
+  "output": 165615,
+  "cache_read": 47020321,
+  "cache_creation": 449552,
+  "thinking": null,
+  "thinking_estimated": 71618,
+  "source": "result events (summed over 3 segments)",
+  "api_messages": 197
+ },
+ "rate_limit": {
+  "events": 13,
+  "max_utilization": {
+   "five_hour": 0.18,
+   "seven_day": 0.6
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 20.74825879999999,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 159,
+ "result_segments": 3,
+ "assistant_messages": 394,
+ "tool_calls": {
+  "Bash": 188,
+  "Write": 6,
+  "Agent": 1,
+  "ScheduleWakeup": 2,
+  "ToolSearch": 1,
+  "SendMessage": 1
+ },
+ "tool_calls_total": 199,
+ "tool_failures": 3,
+ "build_invocations": 23,
+ "build_failures_heuristic": 5,
+ "conformance_runs": 10,
+ "conformance_progress": [
+  [
+   591,
+   591
+  ],
+  [
+   0,
+   69
+  ],
+  [
+   0,
+   69
+  ],
+  [
+   19,
+   69
+  ],
+  [
+   52,
+   69
+  ],
+  [
+   69,
+   69
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 8,
+ "time": {
+  "wall_seconds": 4355.8,
+  "model_api_seconds": 2304.2,
+  "tool_seconds": 535.3,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 8,
+  "files_changed": 25,
+  "lines_added": 2144,
+  "lines_removed": 127,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 143,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "DECIMAL precision 38 is done: every required suite reports 0 failures, 0 errors and 0 not-implemented, and all work is committed. The engine claims `change.decimal38` alongside `change.union_all`.\n\n**Test results** (runner summary lines):\n- Session: `TOTAL: 660/660 pass`, including `changes/decimal38` at 69/69.\n- `--modes`: `TOTAL: 3870/3870 pass`.\n- `--transport http`: `TOTAL: 660/660 pass`.\n- `http_suite.py`: `http suite: 19/19 passed`.\n- `make build test lint` all pass. That includes a new shell test for wide decimals (37/37) and updated parser/value unit tests.\n- A throwaway fuzz harness (Python `decimal` as the reference) ran about 30,000 random queries, each under 9 option sets. It found one bug, which is fixed; the final run had 0 failures.\n\n**What I implemented**\n- **Representation:** narrow decimals (p \u2264 18) are unchanged. A wide decimal (19\u201338 digits) is stored in the same 64-bit slot as a pointer to a 16-byte integer, the way strings are stored. Tuples, cells, columns, keys and aggregate state kept their layout.\n- **New module `wdec.S`:** 256-bit integer routines and every wide operation: compare, `+ - *`, all CASTs, ROUND/FLOOR/CEIL/ABS, negation, hashing, and parsing/formatting text.\n  - SUM and AVG on wide columns accumulate exactly in 192 bits, then AVG converts to a double before dividing by the count.\n- **Typing:** the result precision is 38 whenever a wide decimal is involved, else 18. This applies to arithmetic, SUM, ROUND/FLOOR/CEIL, and the common type of CASE/COALESCE/UNION ALL. Literals with 19\u201338 digits become wide decimals; types and schemas accept p \u2264 38.\n- **Exact comparisons:** all INT64/DECIMAL comparisons are exact without allocating memory, so `9223372036854775807 > 1.5` is TRUE. When an INT64 is compared with a narrow decimal, it gets a \"saturating\" cast: an out-of-range value becomes a bound beyond any narrow value instead of raising an error. That keeps the fast paths working.\n- **Joins:** join keys of different scale or width are converted to one common type, which keeps them hash joins.\n  - This fixed the one fuzzer bug: such joins had fallen back to a nested loop that allocated per row pair and hit `RESOURCE_LIMIT`.\n- **Storage (PQCF v2):** a table with any wide column is written as version 2; all other tables stay version 1. The reader accepts both, and rejects wide types in v1 files, version mismatches and values exceeding their precision.\n- **Elsewhere:** CSV/JSON ingestion parses wide values exactly. Hashing, sorting, grouping, indexes, statistics and both execution modes handle wide values. Rebuilt tables deep-copy the stored values.\n- **Parser:** `AS full` / `AS right` are accepted as an explicit column alias. The public test uses `AS full`, although the grammar lists FULL as reserved.\n\n**Known limitations**\n- Each wide value costs 24 bytes (16 for the value plus an 8-byte pointer).\n- Wide arithmetic runs one value at a time with no SIMD, and some wide casts fall back to the row evaluator.\n- Performance of normal (narrow) queries looked unchanged on the 1M-row benchmark: run-to-run variation was about as large as any difference between the old and new binaries.\n- Open spec question, not new behaviour (narrow decimals already do this): an INT64 that overflows when converted to DECIMAL raises an error even when the other operand is NULL.\n\nThe README has a \"Change CR-2\" section covering the representation, how narrow and wide operations are dispatched, PQCF v2, and the table of modules touched. NOTES.md is updated for the next session.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
