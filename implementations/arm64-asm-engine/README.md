@@ -974,8 +974,10 @@ and `query` under ten option sets: 9059 requests, no difference.
 * `native: true` is accepted but no native kernel library is supported.
 * Streamed projections (`/v1/query/stream`) are evaluated row at a time.
 * One thread per HTTP connection (no connection limit besides the OS).
-* Sorting (`qsort_r`) is not interruptible: a cancelled / timed-out query
-  stops at the next check after a large sort finishes.
+* Comparator sorts (`qsort_r`: row mode, small inputs, merge-join keys
+  that are not one integer-like column) are not interruptible: a cancelled /
+  timed-out query stops at the next check after such a sort finishes (the
+  radix sorts check between phases and buckets).
 * Streaming materialises sorted / grouped / DISTINCT results before the
   first row is sent; projections stream incrementally, but values computed
   for earlier batches (strings) stay in the request arena until the query

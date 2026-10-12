@@ -25,10 +25,17 @@
   optimize=false), compare exact output for ORDER BY, multisets otherwise.
 - Measuring: big/little cores and EAS make numbers noisy; use >= 9 runs
   and medians; compare binaries with a git worktree of an older commit.
-- Next candidates: parallel merge join (merge phase is serial, 26/44 ms for
-  q10/q11 with join=merge); q19 CTE (aggregate 3 ms + merge 2 ms);
-  sort encode phase (string prefix loads); q11 vkey_cells materialization;
-  hash-join build is serial.
+- Later in session 1: parallel merge join (radix index sort + chunked
+  merge balanced by left+right work), parallel k-way merge for group order,
+  radix sort of index row ids (q03), IS NULL bitmap path, memo only for
+  "complex" trees. Merge join q10/q11: 70/107 -> 8/12 ms.
+- Gotcha: GNU as numeric labels: `01:` IS label `1` (b.ne 1f jumps to it).
+  Also local `9:` labels in helpers placed after a loop can capture an
+  earlier `b 9b` (vagg agg_task hang). Use distinct numbers.
+- Next candidates: q19 CTE (aggregate ~1.9 ms + merge ~1.2 ms + CTE
+  materialization); sort encode phase (string prefix loads) and projection
+  (48 MB of cells for q15); q11 vkey_cells materialization; hash-join
+  build is serial; row mode is the spec's baseline (left alone).
 
 ## Status (change CR-2 decimal38, session 1)
 - Conformance incl. changes/decimal38 (69/69): all phases 660/660,
