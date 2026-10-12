@@ -1792,7 +1792,14 @@ FUNC eval_subquery
     mov N_A(%rbx), %rcx
     mov N_TYPE(%rcx), %ecx          /* comparison type: x's (already promoted) type */
     cmp $T_NULL, %cl
-    jne 22f
+    jne 221f
+    mov %eax, %ecx
+    jmp 22f
+221: cmp %eax, %ecx                 /* INT64 / DECIMAL mixes: the common */
+    je 22f                          /* type, keys converted by in_key */
+    mov %ecx, %edi
+    mov %eax, %esi
+    call common_cmp_type
     mov %eax, %ecx
 22: mov %rcx, IS_TYPE(%r13)
     lea IS_TYPE(%r13), %rsi
@@ -1808,12 +1815,12 @@ FUNC eval_subquery
     je 24f
     movq $1, IS_NULL(%r13)
     jmp 28f
-24: mov VAL_P(%rax), %rdx
+24: mov VAL_P(%rax), %rsi
     mov 0(%rsp), %rdi
-    mov IS_TYPE(%r13), %rsi
-    cmp %edi, %esi
-    je 25f
-    call cast_value
+    mov IS_TYPE(%r13), %rdx
+    call in_key
+    test %edx, %edx
+    jz 28f                          /* cannot equal any x */
     mov %rax, %rdx
 25: mov %rdx, 8(%rsp)
     mov $VAL_SIZE, %edi
@@ -1839,6 +1846,13 @@ FUNC eval_subquery
     call eval
     test %edx, %edx
     jnz 37f
+    mov N_A(%rbx), %rdi
+    mov N_TYPE(%rdi), %edi
+    mov %rax, %rsi
+    mov IS_TYPE(%r13), %rdx
+    call in_key
+    test %edx, %edx
+    jz 36f                          /* equals no set value */
     mov %rax, 16(%rsp)
     movq $0, 24(%rsp)
     mov IS_HT(%r13), %rdi
@@ -1848,7 +1862,7 @@ FUNC eval_subquery
     mov $1, %r14d
     test %rax, %rax
     jnz 38f
-    xor %r14d, %r14d
+36: xor %r14d, %r14d
     cmpq $0, IS_NULL(%r13)
     je 38f
 37: xor %eax, %eax                  /* NULL */
@@ -1860,6 +1874,33 @@ FUNC eval_subquery
     xor %edx, %edx
     LEAVE
 ENDF eval_subquery
+
+/* in_key(src type edi, value rsi, set type rdx) -> rax key, edx 1, or edx 0
+ * when the value cannot equal any value of the set type: an IN (subquery)
+ * key in the set's comparison type.  INT64 / DECIMAL values convert exactly
+ * (dec_conv_exact): a value that does not fit the common DECIMAL(W,s) has
+ * more integer digits than any value of the other side can have, so the
+ * comparison never overflows (decimal38.md section 4). */
+FUNC in_key
+    sub $8, %rsp
+    mov %rsi, %rax
+    cmp %edx, %edi
+    je 8f
+    cmp $T_DEC, %dl
+    jne 5f
+    cmp $T_INT, %dil
+    je 1f
+    cmp $T_DEC, %dil
+    jne 5f
+1:  call dec_conv_exact
+    add $8, %rsp
+    ret
+5:  xchg %rsi, %rdx                 /* cast_value(src, dst, payload) */
+    call cast_value
+8:  mov $1, %edx
+    add $8, %rsp
+    ret
+ENDF in_key
 
 /* ================================================================ top level */
 

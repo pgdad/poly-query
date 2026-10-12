@@ -286,7 +286,13 @@ be_insubq:
     je 1f
     cmpb $T_NULL, N_TYPE(%rdi)
     je 1f
-    mov %eax, %esi
+    cmpb $T_DEC, %al                /* INT64 / DECIMAL: exact keys at run */
+    jne 2f                          /* time (exec.S in_key), no cast */
+    cmpb $T_INT, N_TYPE(%rdi)
+    je 1f
+    cmpb $T_DEC, N_TYPE(%rdi)
+    je 1f
+2:  mov %eax, %esi
     call wrap_cast
     mov %rax, N_A(%r12)
 1:  movl $T_BOOL, N_TYPE(%r12)
