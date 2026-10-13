@@ -380,6 +380,10 @@ class RequestHandler:
         if control is not None:
             options.cancel_event = control.cancel_event
             options.deadline = control.deadline
+        elif options.timeout_ms:
+            # the timeout counts from receipt of the request and covers
+            # parsing, binding, planning and execution (CR-6 §4)
+            options.deadline = time.monotonic() + options.timeout_ms / 1000.0
         count_only = self._validate_query_options(raw)
         options.optimize = _optional_bool(raw, "optimize", True)
         options.use_indexes = _optional_bool(raw, "use_indexes", True)

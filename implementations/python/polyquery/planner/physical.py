@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
 
 from ..analysis import bound as b
+from ..limits import no_check
 from ..native import NativeKernels
 from ..storage.catalog import Column, Table
 from ..storage.indexes import Index
@@ -503,6 +504,8 @@ class PlanOptions:
     # (None where the kernels do not apply)
     kernels: NativeKernels | None = None
     kernel_plan: Callable[[PhysicalNode], object | None] | None = None
+    # the statement's deadline / cancellation check
+    check: Callable[[], None] = no_check
 
 
 @dataclass(eq=False)
@@ -963,15 +966,32 @@ def _parallelize_inputs(node: PhysicalNode, partitions: int, min_rows: float) ->
 
 
 def _walk(node: PhysicalNode, subplans: dict[int, PhysicalNode]) -> Iterator[PhysicalNode]:
-    """A plan tree's nodes, including the plans of the subqueries its
-    expressions use."""
-    yield node
-    for expr in node.expressions():
-        for sq in b.subqueries(expr):
-            if sq.id in subplans:
-                yield from _walk(subplans[sq.id], subplans)
-    for child in node.inputs():
-        yield from _walk(child, subplans)
+    """A plan tree's nodes in pre-order, including the plans of the
+    subqueries its expressions use (iteratively: plans of nested subqueries
+    are deep)."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        yield n
+        nested = [subplans[sq.id] for expr in n.expressions() for sq in b.subqueries(expr) if sq.id in subplans]
+        stack += reversed([*nested, *n.inputs()])
+
+
+def _subtree_sizes(trees: list[PhysicalNode]) -> dict[int, int]:
+    """The node count of every subtree (by id() of its root), computed in
+    one post-order pass."""
+    sizes: dict[int, int] = {}
+    for tree in trees:
+        stack = [tree]
+        while stack:
+            n = stack[-1]
+            pending = [c for c in n.inputs() if id(c) not in sizes]
+            if pending:
+                stack += pending
+                continue
+            stack.pop()
+            sizes[id(n)] = 1 + sum(sizes[id(c)] for c in n.inputs())
+    return sizes
 
 
 def _self_contained(node: PhysicalNode) -> bool:
@@ -1035,10 +1055,21 @@ def _share_common_subqueries(trees: list[PhysicalNode], subplans: dict[int, Phys
     """Marks the SubqueryScans of a statement that compute identical,
     self-contained inputs (e.g. the references to one CTE), so that their
     result is computed once."""
-    groups: dict[str, list[SubqueryScan]] = {}
+    # Only inputs of equal size can be identical: the (costly) signatures
+    # are computed for those alone. Nested scans never have equal sizes,
+    # so deeply nested derived tables cost linear time.
+    sizes = _subtree_sizes(trees)
+    by_size: dict[int, list[SubqueryScan]] = {}
     for tree in trees:
         for node in _walk(tree, {}):
-            if isinstance(node, SubqueryScan) and _self_contained(node.input):
+            if isinstance(node, SubqueryScan):
+                by_size.setdefault(sizes[id(node.input)], []).append(node)
+    groups: dict[str, list[SubqueryScan]] = {}
+    for candidates in by_size.values():
+        if len(candidates) < 2:
+            continue
+        for node in candidates:
+            if _self_contained(node.input):
                 groups.setdefault(_signature(node.input), []).append(node)
     for signature, scans in groups.items():
         if len(scans) > 1:

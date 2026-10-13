@@ -219,16 +219,32 @@ class Query(Node):
     offset: Expr | None = None
 
 
-def fingerprint(node: object) -> object:
-    """A hashable structural representation of an AST subtree (positions
-    ignored): two subtrees with equal fingerprints are textually equivalent."""
-    if isinstance(node, Node):
-        return (type(node).__name__,) + tuple(
-            (k, fingerprint(v)) for k, v in vars(node).items() if k != "pos"
-        )
-    if isinstance(node, (list, tuple)):
-        return tuple(fingerprint(v) for v in node)
-    return node
+class Fingerprints:
+    """Structural ids of AST subtrees (positions ignored): two subtrees get
+    the same id from one instance iff they are textually equivalent.
+
+    Each node is fingerprinted once (nested subqueries fingerprint their
+    inner subqueries again), and a node's key refers to its children by
+    their ids, so the work stays linear in the size of the statement."""
+
+    def __init__(self) -> None:
+        self._ids: dict[tuple, int] = {}
+        self._memo: dict[int, tuple[Node, int]] = {}  # id(node) -> (node, its id)
+
+    def of(self, node: object) -> object:
+        if isinstance(node, Node):
+            memo = self._memo.get(id(node))
+            if memo is not None and memo[0] is node:
+                return memo[1]
+            key = (type(node).__name__,) + tuple(
+                (k, self.of(v)) for k, v in vars(node).items() if k != "pos"
+            )
+            fp = self._ids.setdefault(key, len(self._ids))
+            self._memo[id(node)] = (node, fp)
+            return fp
+        if isinstance(node, (list, tuple)):
+            return tuple(self.of(v) for v in node)
+        return node
 
 
 # ------------------------------------------------------------------ statements

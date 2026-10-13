@@ -61,10 +61,12 @@ class RewriteExpressions(Rule):
     def predicate(self, expr: b.Expr) -> b.Expr | None:
         """A rewritten filter / join predicate (None: always TRUE)."""
         parts: list[b.Expr] = []
+        seen: set[b.Expr] = set()  # (hashing: long AND chains have many conjuncts)
         for p in b.conjuncts(self.rewrite(expr)):
             if isinstance(p, b.Literal) and p.value is True:
                 continue
-            if p not in parts:
+            if p not in seen:
+                seen.add(p)
                 parts.append(p)
         return b.conjunction(parts)
 

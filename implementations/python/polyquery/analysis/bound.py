@@ -280,9 +280,17 @@ class InSubquery(SubqueryExpr):
 
 
 def walk(expr: Expr) -> Iterator[Expr]:
-    yield expr
-    for child in expr.children():
-        yield from walk(child)
+    """``expr`` and all its descendants in pre-order (iteratively: a
+    recursive generator would cost time proportional to the depth per node,
+    and long operator chains are deep trees)."""
+    stack = [expr]
+    pop, extend = stack.pop, stack.extend
+    while stack:
+        e = pop()
+        yield e
+        children = e.children()
+        if children:
+            extend(reversed(children))
 
 
 def map_children(expr: Expr, fn: Callable[[Expr], Expr]) -> Expr:
@@ -294,33 +302,120 @@ def map_children(expr: Expr, fn: Callable[[Expr], Expr]) -> Expr:
         value = getattr(expr, f.name)
         if isinstance(value, Expr):
             new: Any = fn(value)
+            changed = new is not value
         elif isinstance(value, tuple) and value and isinstance(value[0], Expr):
-            new = tuple(fn(v) for v in value)
+            new = tuple([fn(v) for v in value])
+            changed = _replaced(new, value)
         elif isinstance(value, tuple) and value and isinstance(value[0], tuple):
-            new = tuple(tuple(fn(v) for v in pair) for pair in value)
+            new = tuple([tuple([fn(v) for v in pair]) for pair in value])
+            changed = any(_replaced(n, v) for n, v in zip(new, value))
         else:
             continue
-        if new != value:
+        # identity, not equality: comparing rebuilt subtrees at every level
+        # of a deep tree would take quadratic time
+        if changed:
             changes[f.name] = new
     return dataclasses.replace(expr, **changes) if changes else expr
 
 
-def column_keys(expr: Expr) -> set[ColumnKey]:
+def _replaced(new: tuple, old: tuple) -> bool:
+    return any(n is not o for n, o in zip(new, old))
+
+
+def _bottom_up(expr: Expr, attr: str, combine: Callable[[Expr, list[Any]], Any]) -> Any:
+    """A property of ``expr`` computed from its node and the properties of
+    its children, cached on every node of the subtree under ``attr``
+    (computed iteratively in post-order). Planning and compilation ask for
+    such properties at every node of deep trees; walking each subtree again
+    would take quadratic time."""
+    cached = expr.__dict__.get(attr)
+    if cached is not None:
+        return cached
+    stack = [expr]
+    while stack:
+        e = stack[-1]
+        if attr in e.__dict__:
+            stack.pop()
+            continue
+        children = e.children()
+        pending = [c for c in children if attr not in c.__dict__]
+        if pending:
+            stack += pending
+            continue
+        stack.pop()
+        value = combine(e, [c.__dict__[attr] for c in children])
+        object.__setattr__(e, attr, value)  # a cache, not a field
+    return expr.__dict__[attr]
+
+
+_NO_KEYS: frozenset[ColumnKey] = frozenset()
+
+
+def _combine_keys(e: Expr, children: list[frozenset[ColumnKey]]) -> frozenset[ColumnKey]:
+    # reuses a child's set where possible (a chain over one column shares it)
+    out = _NO_KEYS
+    for keys in children:
+        if keys and not keys <= out:
+            out = keys if out <= keys else out | keys
+    if isinstance(e, ColumnRef) and e.key not in out:
+        out = out | {e.key}
+    return out
+
+
+def column_keys(expr: Expr) -> frozenset[ColumnKey]:
     """All column keys referenced by an expression (including subquery args)."""
-    return {e.key for e in walk(expr) if isinstance(e, ColumnRef)}
+    return _bottom_up(expr, "_column_keys", _combine_keys)
+
+
+# what a subtree contains (``summary``)
+_HAS_COLUMN = 1
+_HAS_AGGREGATE = 2
+_HAS_SUBQUERY = 4
+_HAS_SLEEP = 8
+_MAY_FAIL = 16
+
+
+def _own_flags(e: Expr) -> int:
+    if isinstance(e, ColumnRef):
+        return _HAS_COLUMN
+    if isinstance(e, AggCall):
+        return _HAS_AGGREGATE
+    if isinstance(e, SubqueryExpr):
+        return _HAS_SUBQUERY | _MAY_FAIL
+    if isinstance(e, Function):
+        return _MAY_FAIL | (_HAS_SLEEP if e.name == "PQ_SLEEP" else 0)
+    if isinstance(e, (Arith, Unary, Cast)):
+        return _MAY_FAIL
+    return 0
+
+
+def _combine_flags(e: Expr, children: list[int]) -> int:
+    flags = _own_flags(e)
+    for f in children:
+        flags |= f
+    return flags
+
+
+def summary(expr: Expr) -> int:
+    """The ``_HAS_*`` / ``_MAY_FAIL`` flags of a subtree."""
+    return _bottom_up(expr, "_summary", _combine_flags)
 
 
 def is_constant(expr: Expr) -> bool:
-    return not any(isinstance(e, (ColumnRef, AggCall, SubqueryExpr)) for e in walk(expr))
+    return not summary(expr) & (_HAS_COLUMN | _HAS_AGGREGATE | _HAS_SUBQUERY)
 
 
 def conjuncts(expr: Expr | None) -> list[Expr]:
     """The operands of a chain of ANDs (``[]`` for None)."""
-    if expr is None:
-        return []
-    if isinstance(expr, Logical) and expr.op == "AND":
-        return conjuncts(expr.left) + conjuncts(expr.right)
-    return [expr]
+    out: list[Expr] = []
+    stack = [] if expr is None else [expr]
+    while stack:
+        e = stack.pop()
+        if isinstance(e, Logical) and e.op == "AND":
+            stack += (e.right, e.left)
+        else:
+            out.append(e)
+    return out
 
 
 def conjunction(exprs: list[Expr]) -> Expr | None:
@@ -333,18 +428,18 @@ def conjunction(exprs: list[Expr]) -> Expr | None:
 
 def has_side_effects(expr: Expr) -> bool:
     """``PQ_SLEEP`` must run once per evaluation (never folded or skipped)."""
-    return any(isinstance(e, Function) and e.name == "PQ_SLEEP" for e in walk(expr))
+    return bool(summary(expr) & _HAS_SLEEP)
 
 
 def may_fail(expr: Expr) -> bool:
     """Conservatively: can evaluating ``expr`` raise an error (overflow,
     division by zero, conversion, subquery cardinality, …) or have a side
     effect? Column references, literals, comparisons and boolean logic cannot."""
-    return any(isinstance(e, (Arith, Unary, Cast, Function, SubqueryExpr)) for e in walk(expr))
+    return bool(summary(expr) & _MAY_FAIL)
 
 
 def contains_subquery(expr: Expr) -> bool:
-    return any(isinstance(e, SubqueryExpr) for e in walk(expr))
+    return bool(summary(expr) & _HAS_SUBQUERY)
 
 
 def subqueries(expr: Expr) -> Iterator[Subquery]:

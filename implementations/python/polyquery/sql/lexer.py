@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import bisect
 import enum
+import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from .. import errors
+from ..limits import Check, no_check
 
 RESERVED_KEYWORDS = frozenset(
     """ALL AND AS ASC BETWEEN BY CASE CAST CREATE CROSS DATE DESC DISTINCT DROP ELSE
@@ -52,6 +55,11 @@ class Token:
 _TWO_CHAR_OPS = frozenset({"||", "<=", ">=", "<>", "!="})
 _ONE_CHAR_OPS = frozenset("+-*/%=<>(),.;")
 _WHITESPACE = frozenset(" \t\r\n")
+# runs of characters scanned in C (long statements must lex in linear time
+# with a small constant: the deadline is only checked between tokens)
+_WHITESPACE_RUN = re.compile(r"[ \t\r\n]+")
+_IDENT_CHARS = re.compile(r"[A-Za-z0-9_]*")
+_DIGITS = re.compile(r"[0-9]*")
 
 
 def _is_ident_start(c: str) -> bool:
@@ -66,10 +74,24 @@ def _is_digit(c: str) -> bool:
     return "0" <= c <= "9"
 
 
+# tokens between two deadline checks
+_CHECK_INTERVAL = 1024
+
+
+def _line_starts(text: str) -> list[int]:
+    starts = [0]
+    i = text.find("\n")
+    while i >= 0:
+        starts.append(i + 1)
+        i = text.find("\n", i + 1)
+    return starts
+
+
 class Lexer:
-    def __init__(self, text: str):
+    def __init__(self, text: str, check: Check = no_check):
         self.text = text
-        self._line_starts = [0] + [i + 1 for i, c in enumerate(text) if c == "\n"]
+        self.check = check
+        self._line_starts = _line_starts(text)
 
     def _error(self, message: str, pos: int) -> errors.PolyQueryError:
         line, column = self._location(pos)
@@ -80,16 +102,25 @@ class Lexer:
         return line, pos - self._line_starts[line - 1] + 1
 
     def tokenize(self) -> list[Token]:
+        return list(self.tokens())
+
+    def tokens(self) -> Iterator[Token]:
+        """Produces the tokens lazily (the parser stops early on errors and
+        on statements beyond the size limits), ending with EOF."""
         text = self.text
         n = len(text)
-        tokens: list[Token] = []
         i = 0
+        countdown = _CHECK_INTERVAL
         while True:
+            countdown -= 1
+            if not countdown:
+                countdown = _CHECK_INTERVAL
+                self.check()
             # skip whitespace and comments
             while i < n:
                 c = text[i]
                 if c in _WHITESPACE:
-                    i += 1
+                    i = _WHITESPACE_RUN.match(text, i).end()  # type: ignore[union-attr]
                 elif c == "-" and text.startswith("--", i):
                     end = text.find("\n", i)
                     i = n if end < 0 else end + 1
@@ -102,59 +133,52 @@ class Lexer:
                     break
             if i >= n:
                 line, col = self._location(n)
-                tokens.append(Token(TokenKind.EOF, "", line, col))
-                return tokens
+                yield Token(TokenKind.EOF, "", line, col)
+                return
             start = i
             c = text[i]
             line, col = self._location(start)
             if _is_ident_start(c):
-                i += 1
-                while i < n and _is_ident_char(text[i]):
-                    i += 1
+                i = _IDENT_CHARS.match(text, i + 1).end()  # type: ignore[union-attr]
                 word = text[start:i]
                 upper = word.upper()
                 if upper in RESERVED_KEYWORDS:
-                    tokens.append(Token(TokenKind.KEYWORD, upper, line, col, text=word))
+                    yield Token(TokenKind.KEYWORD, upper, line, col, text=word)
                 else:
-                    tokens.append(Token(TokenKind.IDENT, word, line, col))
+                    yield Token(TokenKind.IDENT, word, line, col)
             elif _is_digit(c) or (c == "." and i + 1 < n and _is_digit(text[i + 1])):
                 i = self._scan_number(i)
                 if i < n and _is_ident_char(text[i]):
                     raise self._error("invalid numeric literal", start)
-                tokens.append(Token(TokenKind.NUMBER, text[start:i], line, col))
+                yield Token(TokenKind.NUMBER, text[start:i], line, col)
             elif c == "'":
                 value, i = self._scan_quoted(i, "'", "string literal")
-                tokens.append(Token(TokenKind.STRING, value, line, col))
+                yield Token(TokenKind.STRING, value, line, col)
             elif c == '"':
                 value, i = self._scan_quoted(i, '"', "quoted identifier")
                 if value == "":
                     raise self._error("empty quoted identifier", start)
-                tokens.append(Token(TokenKind.IDENT, value, line, col, quoted=True))
+                yield Token(TokenKind.IDENT, value, line, col, quoted=True)
             elif text[i : i + 2] in _TWO_CHAR_OPS:
-                tokens.append(Token(TokenKind.OP, text[i : i + 2], line, col))
+                yield Token(TokenKind.OP, text[i : i + 2], line, col)
                 i += 2
             elif c in _ONE_CHAR_OPS:
-                tokens.append(Token(TokenKind.OP, c, line, col))
+                yield Token(TokenKind.OP, c, line, col)
                 i += 1
             else:
                 raise self._error(f"unexpected character {c!r}", i)
 
     def _scan_number(self, i: int) -> int:
         text, n = self.text, len(self.text)
-        while i < n and _is_digit(text[i]):
-            i += 1
+        i = _DIGITS.match(text, i).end()  # type: ignore[union-attr]
         if i < n and text[i] == ".":
-            i += 1
-            while i < n and _is_digit(text[i]):
-                i += 1
+            i = _DIGITS.match(text, i + 1).end()  # type: ignore[union-attr]
         if i < n and text[i] in "eE":
             j = i + 1
             if j < n and text[j] in "+-":
                 j += 1
             if j < n and _is_digit(text[j]):
-                while j < n and _is_digit(text[j]):
-                    j += 1
-                i = j
+                i = _DIGITS.match(text, j).end()  # type: ignore[union-attr]
             else:
                 raise self._error("invalid exponent in numeric literal", i)
         return i
@@ -175,5 +199,5 @@ class Lexer:
                 return "".join(parts), end + 1
 
 
-def tokenize(text: str) -> list[Token]:
-    return Lexer(text).tokenize()
+def tokenize(text: str, check: Check = no_check) -> list[Token]:
+    return Lexer(text, check).tokenize()

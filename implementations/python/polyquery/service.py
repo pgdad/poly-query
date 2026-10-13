@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -19,6 +20,7 @@ from .execution.native_ops import kernel_plan
 from .execution.workers import WorkerPool, available_cpus
 from .ingest.limits import DEFAULT_MAX_INGEST_BYTES, DEFAULT_MAX_TABLE_ROWS, IngestLimits
 from .ingest.loader import load_table
+from .limits import Check, deadline_check
 from .native import NativeKernels, load_kernels
 from .planner.physical import MAX_PARTITIONS, PhysicalPlan, PlanOptions
 from .planner.pipeline import plan_statement
@@ -170,7 +172,7 @@ class Engine:
 
     def query(self, sql: str, options: QueryOptions) -> QueryResult:
         """Runs a statement to completion."""
-        statement = parse(sql)
+        statement = parse(sql, _stage_check(options))
         if not isinstance(statement, ast.QueryStatement):
             return self._run_statement(statement, options)
         plan, ctx = self._prepare(statement.query, options)
@@ -179,7 +181,7 @@ class Engine:
     def count(self, sql: str, options: QueryOptions) -> tuple[list[Column], int]:
         """Runs a statement to completion; returns its columns and row count
         (``result: "count"``: the rows are not built)."""
-        statement = parse(sql)
+        statement = parse(sql, _stage_check(options))
         if not isinstance(statement, ast.QueryStatement):
             result = self._run_statement(statement, options)
             return result.columns, len(result.rows)
@@ -189,7 +191,7 @@ class Engine:
     def open_cursor(self, sql: str, options: QueryOptions) -> QueryCursor:
         """Parses, binds and plans a statement (raising errors found up to
         that point) and returns a cursor that executes it incrementally."""
-        statement = parse(sql)
+        statement = parse(sql, _stage_check(options))
         if not isinstance(statement, ast.QueryStatement):
             result = self._run_statement(statement, options)
             return QueryCursor(result.columns, iter([result.rows] if result.rows else []))
@@ -278,7 +280,7 @@ class Engine:
 
     def explain(self, sql: str, options: QueryOptions) -> dict[str, Any]:
         """The plan of a query (or of the query of an EXPLAIN statement) as JSON."""
-        statement = parse(sql)
+        statement = parse(sql, _stage_check(options))
         if isinstance(statement, (ast.CreateIndex, ast.DropIndex)):
             raise errors.unsupported("only queries can be explained", **_position(statement))
         assert isinstance(statement, (ast.QueryStatement, ast.Explain))
@@ -288,7 +290,8 @@ class Engine:
         """Semantic analysis, logical and physical planning of a query
         against a snapshot of the catalog."""
         snapshot = self.catalog.snapshot()
-        binder = Binder(snapshot, evaluate_constant, test_functions=self.config.test_functions)
+        check = _stage_check(options)
+        binder = Binder(snapshot, evaluate_constant, test_functions=self.config.test_functions, check=check)
         bound = binder.bind_statement(query)
         plan_options = PlanOptions(
             optimize=options.optimize,
@@ -301,6 +304,7 @@ class Engine:
             evaluate=evaluate_constant,
             kernels=self.native if options.native else None,
             kernel_plan=kernel_plan,
+            check=check,
         )
         return plan_statement(bound, plan_options)
 
@@ -310,6 +314,14 @@ AUTO_THREADS = 16
 # worker processes of the pool (queries with more partitions give each
 # worker several)
 MAX_POOL_WORKERS = min(16, MAX_PARTITIONS)
+
+
+def _stage_check(options: QueryOptions) -> Check:
+    """The deadline / cancellation check of the stages before execution."""
+    deadline = options.deadline
+    if deadline is None and options.timeout_ms:
+        deadline = options.deadline = time.monotonic() + options.timeout_ms / 1000.0
+    return deadline_check(deadline, options.cancel_event)
 
 
 def _position(node: ast.Node) -> dict[str, int]:

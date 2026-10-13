@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .. import errors, values
+from ..limits import Check, no_check
 from ..datatypes import (
     BOOLEAN,
     DATE,
@@ -70,11 +71,15 @@ class Binder:
         evaluate_constant: ConstEvaluator,
         *,
         test_functions: bool = False,
+        check: Check = no_check,
     ):
         self.catalog = catalog
         self.evaluate_constant = evaluate_constant
         self.test_functions = test_functions
+        # the statement's deadline check, made at every expression node
+        self.check = check
         self.ids = b.IdGenerator()
+        self.fingerprints = ast.Fingerprints()
 
     def bind_statement(self, query: ast.Query) -> b.BoundStatement:
         bound, _ = self.bind_query(query, None, None)
@@ -90,6 +95,7 @@ class Binder:
         *,
         opaque: bool = False,
     ) -> tuple[b.BoundQuery, Scope]:
+        self.check()
         scope = Scope(parent, ctes, opaque_parent=opaque)
         if query.ctes:
             scope.ctes = self._bind_ctes(query.ctes, scope)
@@ -451,6 +457,7 @@ class Binder:
     # ------------------------------------------------------------ expressions
 
     def bind_expr(self, node: ast.Expr, ctx: ExprContext) -> b.Expr:
+        self.check()
         method = getattr(self, "_bind_" + type(node).__name__)
         try:
             return method(node, ctx)
@@ -599,7 +606,7 @@ class Binder:
     def _bind_subquery(self, query: ast.Query, ctx: ExprContext) -> tuple[b.Subquery, tuple]:
         bound, scope = self.bind_query(query, ctx.scope, ctx.scope.ctes)
         subquery = b.Subquery(
-            self.ids.next(), bound, tuple(scope.outer_refs), ast.fingerprint(query)
+            self.ids.next(), bound, tuple(scope.outer_refs), self.fingerprints.of(query)
         )
         return subquery, tuple(scope.outer_refs.values())
 
