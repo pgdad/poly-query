@@ -1,0 +1,106 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-expression-limits-x86_64-asm-engine-a1-20261012T235412Z",
+ "language": "x86_64-asm-engine",
+ "task": "change-expression-limits",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-expression-limits",
+ "prompt_sha256": "ee7072471c3177b931e4421fc9535df790b05e9d1e290e59c62d1bca26ddf8f7",
+ "session_id": "3bccc72e-4896-4e82-8d71-9e21076f92c2",
+ "tokens": {
+  "input": 302,
+  "output": 135808,
+  "cache_read": 27729048,
+  "cache_creation": 309303,
+  "thinking": null,
+  "thinking_estimated": 62012,
+  "source": "result events (summed over 5 segments)",
+  "api_messages": 151
+ },
+ "rate_limit": {
+  "events": 13,
+  "max_utilization": {
+   "seven_day": 0.66,
+   "five_hour": 0.12
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 10.737601600000007,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 155,
+ "result_segments": 5,
+ "assistant_messages": 321,
+ "tool_calls": {
+  "Bash": 150,
+  "ToolSearch": 1
+ },
+ "tool_calls_total": 151,
+ "tool_failures": 4,
+ "build_invocations": 30,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 7,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 3492.3,
+  "model_api_seconds": 1328.9,
+  "tool_seconds": 2086.1,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 5,
+  "files_changed": 25,
+  "lines_added": 769,
+  "lines_removed": 63,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Two leftover background tasks just finished. They were only waiting for the probe comparison I already reported, so they bring no new results. Nothing is running now, and the work is complete and committed.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
