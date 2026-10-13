@@ -173,10 +173,11 @@ COLLECT-ROWS), enforcing MAX-ROWS and the memory budget."
                        :rows (nreverse rows)
                        :row-count count)))
 
-(defun explain-sql (session sql &key (options (make-exec-options)))
-  "The EXPLAIN plan JSON of the query SQL (an EXPLAIN prefix is accepted)."
-  (let ((*query-context* (make-context-for session nil))
-        (ast (parse-sql sql)))
+(defun explain-sql (session sql &key (options (make-exec-options)) timeout-ms)
+  "The EXPLAIN plan JSON of the query SQL (an EXPLAIN prefix is accepted),
+planned within TIMEOUT-MS (if given)."
+  (let* ((*query-context* (make-context-for session timeout-ms))
+         (ast (parse-sql sql)))
     (when (typep ast '(or ast-create-index ast-drop-index))
       (signal-pq-error "INVALID_REQUEST" "only queries can be explained"))
     (explain-plan-json (physical-query-root (plan-statement session ast options)))))

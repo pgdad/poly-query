@@ -165,13 +165,21 @@ by the first error of evaluating EXPRS row by row over BATCH."
 
 (defun make-batch-project (open-child exprs)
   (let ((kernels (map 'simple-vector #'compile-vexpr exprs))
-        (guard (make-row-order-guard exprs)))
+        (guard (make-row-order-guard exprs))
+        (slice-rows (wide-slice-rows (length exprs))))
     (declare (type function open-child guard))
     (lambda ()
-      (let ((child (funcall open-child)))
+      (let ((child (funcall open-child))
+            (pending '()))                ; remaining slices of a wide input batch
         (declare (type function child))
         (lambda ()
-          (let ((batch (funcall child)))
+          (let ((batch (or (when pending
+                             (check-interrupts) ; slices of a very wide projection
+                             (pop pending))
+                           (let ((next (funcall child)))
+                             (when next
+                               (setf pending (batch-slices next slice-rows))
+                               (pop pending))))))
             (when batch
               (make-batch (batch-count batch)
                           (funcall guard batch
@@ -257,22 +265,29 @@ compiled once per call."
                                   (mapcar (lambda (k) (and k (funcall (the function k) batch)))
                                           arg-kernels)))))
              (charge-groups (gs)
+               ;; Every 1024 new groups, or more often for very wide groups.
                (let ((groups (group-state-count gs))
-                     (charged (group-state-charged gs)))
-                 (when (>= (- groups charged) 1024)
-                   (charge-memory (* (- groups charged) (row-footprint (* 4 (+ nkeys (length aggs))))))
+                     (charged (group-state-charged gs))
+                     (footprint (row-footprint (* 4 (+ nkeys (length aggs))))))
+                 (when (>= (- groups charged) (max 1 (min 1024 (floor (* 16 1024 1024) footprint))))
+                   (charge-memory (* (- groups charged) footprint))
                    (setf (group-state-charged gs) groups))))
              (consume-vecs (gs key-vecs arg-vecs n positions)
                (group-state-consume gs key-vecs arg-vecs n positions)
                (charge-groups gs)))
       (values
        (lambda () (make-group-state key-kinds aggs track-positions native))
-       (lambda (gs batch &optional (base 0))
-         (if (batch-source batch)
-             (progn (group-state-consume-lazy gs batch lazy-columns)
-                    (charge-groups gs))
-             (multiple-value-bind (key-vecs arg-vecs) (evaluate batch)
-               (consume-vecs gs key-vecs arg-vecs (batch-count batch) base))))
+       (let ((slice-rows (wide-slice-rows (+ nkeys (length aggs)))))
+         (lambda (gs batch &optional (base 0))
+           (if (batch-source batch)
+               (progn (group-state-consume-lazy gs batch lazy-columns)
+                      (charge-groups gs))
+               ;; Very wide aggregations take the batch in slices.
+               (dolist (slice (batch-slices batch slice-rows))
+                 (unless (eq slice batch) (check-interrupts))
+                 (multiple-value-bind (key-vecs arg-vecs) (evaluate slice)
+                   (consume-vecs gs key-vecs arg-vecs (batch-count slice) base))
+                 (incf base (batch-count slice))))))
        lazy
        #'evaluate
        #'consume-vecs))))

@@ -79,17 +79,22 @@ are non-NULL (the other rows get NULL), as in the row evaluator."
                    (or (svref later-may-fail (1+ k))
                        (operand-may-fail (svref operands (1+ k))))))
     (lambda (batch)
-      (let ((vecs (make-array m))
+      ;; The result vector is allocated after the operands are evaluated: an
+      ;; array allocated before a deep evaluation (a long operator chain) is
+      ;; promoted by the collections during it and would then keep every
+      ;; operand vector stored into it alive until an old generation is
+      ;; collected.
+      (let ((collected '())
             (n (batch-count batch))
             (live nil) (live-count 0))
         (declare (type fixnum n live-count))
-        (dotimes (k m vecs)
+        (dotimes (k m (coerce (nreverse collected) 'simple-vector))
           (let* ((op (svref operands k))
                  (vec (if (and strict live (operand-may-fail op))
                           (eval-on-rows (operand-kernel op) (operand-refs op) (operand-kind op)
                                         batch live live-count)
                           (funcall (the function (operand-kernel op)) batch))))
-            (setf (svref vecs k) vec)
+            (push vec collected)
             (when (and strict (svref later-may-fail k)
                        (vec-has-nulls-p vec n))
               (multiple-value-setq (live live-count)
@@ -97,6 +102,10 @@ are non-NULL (the other rows get NULL), as in the row evaluator."
 
 ;;; ------------------------------------------------------------------
 ;;; Entry point
+
+(defconstant +batch-checkpoint-nodes+ 64
+  "Expression nodes evaluated per batch between two deadline checks (see
+INTERRUPT-CHECKPOINT-P).")
 
 (defun compile-vexpr (e)
   "Kernel computing the bound expression E for every row of a batch."
@@ -113,7 +122,12 @@ are non-NULL (the other rows get NULL), as in the row evaluator."
                (lambda (batch)
                  (constant-vec kind (svref (param-env-values env) i) (batch-count batch)))))
     (b-op (check-interrupts)            ; long statements: compiling takes time too
-          (compile-vop e))
+          (let ((kernel (compile-vop e)))
+            (declare (type function kernel))
+            (if (interrupt-checkpoint-p e +batch-checkpoint-nodes+)
+                ;; Checked after the subtree: its work happens on the way back up.
+                (lambda (batch) (prog1 (funcall kernel batch) (check-interrupts)))
+                kernel)))
     (b-agg (error "internal: aggregate call outside an aggregation context"))))
 
 (defun compile-vop (e)
@@ -145,10 +159,19 @@ are non-NULL (the other rows get NULL), as in the row evaluator."
 ;;; ------------------------------------------------------------------
 ;;; Generic paths
 
+(defconstant +max-vector-operands+ 64
+  "Operator arguments (CASE branches) evaluated as whole-batch vectors at
+most; wider operators are evaluated row by row (or branch by branch), so
+the vectors of one operator never hold more than a few MB (CR-6).")
+
 (defun compile-lifted (e mode)
   "Kernel for E evaluating its non-constant arguments as vectors (MODE
 :STRICT or :EAGER, see MAKE-ARGUMENTS-EVALUATOR) and applying E's row
-implementation to every row of argument values."
+implementation to every row of argument values. With more than
++MAX-VECTOR-OPERANDS+ such arguments (e.g. COALESCE of thousands of
+columns) the row implementation runs on each row instead."
+  (when (> (count-if-not #'bexpr-constant-p (b-op-args e)) +max-vector-operands+)
+    (return-from compile-lifted (compile-row-fallback e)))
   (let* ((args (b-op-args e))
          (lifted (remove-if #'bexpr-constant-p args))
          (operands (mapcar #'compile-operand lifted))
@@ -706,6 +729,7 @@ only where the left one is not FALSE, OR only where it is not TRUE."
       (flet ((eval-op (op batch idx m)
                (eval-subset (operand-kernel op) (operand-refs op) batch idx m)))
         (if (and (not simple-p)
+                 (<= n-when +max-vector-operands+)
                  (notany #'operand-may-fail (append whens thens (and else (list else)))))
             (compile-eager-case whens thens else kind)
         (lambda (batch)
@@ -725,8 +749,11 @@ only where the left one is not FALSE, OR only where it is not TRUE."
             (loop for w in whens
                   for th in thens
                   for tail = tests then (rest tail)
+                  for k of-type fixnum from 1
                   while (plusp rcount)
-                  do (let ((cond-vec (eval-op w batch remaining rcount))
+                  do (when (zerop (mod k 64))
+                       (check-interrupts))  ; CASE with thousands of branches
+                     (let ((cond-vec (eval-op w batch remaining rcount))
                            (hits (make-index-vector rcount)) (h 0)
                            (rest (make-index-vector rcount)) (r 0))
                        (declare (type fixnum h r))

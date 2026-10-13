@@ -19,7 +19,8 @@
   ;; the compilers linear in the size of an expression (CR-6).
   (properties-cache nil)
   (column-cache :unknown)
-  (hash-cache nil))
+  (hash-cache nil)
+  (size-cache nil))
 
 (defstruct (b-literal (:include bexpr) (:constructor make-b-literal (type value)))
   value)
@@ -146,6 +147,25 @@ aggregates or subqueries)."
               (eq (b-agg-distinct a) (b-agg-distinct b))
               (bexpr-list-equal (b-agg-args a) (b-agg-args b))))
         (t nil)))
+
+(defun bexpr-node-count (e)
+  "Number of nodes of E (memoized per node)."
+  (or (bexpr-size-cache e)
+      (setf (bexpr-size-cache e)
+            (let ((n 1))
+              (dolist (c (bexpr-children e) n)
+                (incf n (bexpr-node-count c)))))))
+
+(defun interrupt-checkpoint-p (e granularity)
+  "True if compiled code evaluating E should check the query deadline before
+evaluating it: E's subtree size crosses a multiple of GRANULARITY that none
+of its children's does. Evaluating any subtree then performs at most about
+GRANULARITY nodes of work between two checks, and small expressions get no
+checks at all (CR-6: long expressions keep the timeout prompt)."
+  (let ((level (floor (bexpr-node-count e) granularity)))
+    (and (plusp level)
+         (every (lambda (c) (< (floor (bexpr-node-count c) granularity) level))
+                (bexpr-children e)))))
 
 (defun bexpr-hash (e)
   "Structural hash of E, consistent with BEXPR-EQUAL (memoized per node)."

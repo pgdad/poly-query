@@ -6,6 +6,10 @@
 
 (in-package #:polyquery)
 
+(defconstant +row-checkpoint-nodes+ 4096
+  "Expression nodes evaluated per row between two deadline checks (see
+INTERRUPT-CHECKPOINT-P).")
+
 (defun compile-bexpr (e)
   (etypecase e
     (b-literal (let ((v (b-literal-value e))) (lambda (row) (declare (ignore row)) v)))
@@ -19,7 +23,12 @@
                  (declare (ignore row))
                  (svref (param-env-values env) i))))
     (b-op (check-interrupts)            ; long statements: compiling takes time too
-          (compile-op e))
+          (let ((fn (compile-op e)))
+            (declare (type function fn))
+            (if (interrupt-checkpoint-p e +row-checkpoint-nodes+)
+                ;; Checked after the subtree: its work happens on the way back up.
+                (lambda (row) (prog1 (funcall fn row) (check-interrupts)))
+                fn)))
     (b-agg (error "internal: aggregate call outside an aggregation context"))))
 
 (defmacro with-non-null-args ((&rest bindings) &body body)
@@ -63,12 +72,18 @@
       (:call (compile-call e fns))
       (:subquery (compile-subquery e fns)))))
 
+(sb-ext:defglobal **characters-since-check** 0)
+(declaim (type fixnum **characters-since-check**))
+
 (defun concatenate-strings (a b)
-  "A || B. A long chain of concatenations takes time quadratic in its length
-for a single row, so long results check the query deadline (CR-6)."
-  (when (> (+ (length a) (length b)) 65536)
-    (check-interrupts))
-  (concatenate 'string a b))
+  "A || B. A chain of concatenations takes time quadratic in its length, so
+the query deadline is checked after every few million characters produced
+(the count is shared by all threads, approximate and only a trigger; CR-6)."
+  (let ((n (+ (length a) (length b))))
+    (when (> (incf **characters-since-check** n) 4000000)
+      (setf **characters-since-check** 0)
+      (check-interrupts))
+    (concatenate 'string a b)))
 
 ;;; ------------------------------------------------------------------
 ;;; Arithmetic (types.md §4)
