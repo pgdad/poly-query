@@ -112,9 +112,19 @@ public sealed interface LogicalPlan {
     record Join(LogicalPlan left, LogicalPlan right, JoinKind kind, BoundExpr condition) implements LogicalPlan {
         @Override
         public List<ColumnSchema> schema() {
-            List<ColumnSchema> out = new ArrayList<>(left.schema());
-            out.addAll(right.schema());
+            List<ColumnSchema> out = new ArrayList<>(width());
+            appendSchema(this, out);
             return out;
+        }
+
+        /** Appends the schema of {@code plan}; joins append their inputs' (no copy per level of a join tree). */
+        private static void appendSchema(LogicalPlan plan, List<ColumnSchema> out) {
+            if (plan instanceof Join j) {
+                appendSchema(j.left(), out);
+                appendSchema(j.right(), out);
+            } else {
+                out.addAll(plan.schema());
+            }
         }
 
         @Override

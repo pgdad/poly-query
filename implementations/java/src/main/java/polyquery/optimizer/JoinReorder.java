@@ -3,6 +3,7 @@ package polyquery.optimizer;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.List;
+import polyquery.common.Checkpoint;
 import polyquery.cost.Cardinality;
 import polyquery.plan.BoundExpr;
 import polyquery.plan.BoundExprs;
@@ -130,13 +131,21 @@ public final class JoinReorder implements OptimizerRule {
         return out;
     }
 
+    /** The last input whose columns start at or before {@code column} (offsets ascend: binary search). */
     private static int leafOf(int column, List<Leaf> leaves) {
-        for (int i = leaves.size() - 1; i >= 0; i--) {
-            if (column >= leaves.get(i).offset()) {
-                return i;
+        int lo = 0;
+        int hi = leaves.size() - 1;
+        int found = 0;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            if (leaves.get(mid).offset() <= column) {
+                found = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
             }
         }
-        return 0;
+        return found;
     }
 
     /** Estimated rows of joining a result of {@code rows} rows over inputs {@code have} with input {@code next}. */
@@ -178,8 +187,17 @@ public final class JoinReorder implements OptimizerRule {
      * first, then repeatedly the connected input giving the smallest estimated result (cross
      * products only when nothing is connected; ties keep the original order).
      */
-    private static int[] greedyOrder(List<Leaf> leaves, List<Pred> preds) {
+    private static int[] greedyOrder(List<Leaf> leaves, List<Pred> allPreds) {
         int n = leaves.size();
+        // the conjuncts of each input, in their original order (the only ones that can matter
+        // for it): many-way joins stay quadratic instead of cubic
+        List<List<Pred>> byLeaf = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            byLeaf.add(new ArrayList<>());
+        }
+        for (Pred p : allPreds) {
+            p.leaves().stream().forEach(i -> byLeaf.get(i).add(p));
+        }
         int[] order = new int[n];
         BitSet chosen = new BitSet();
         int bestA = -1;
@@ -189,6 +207,8 @@ public final class JoinReorder implements OptimizerRule {
             BitSet have = new BitSet();
             have.set(a);
             for (int b = a + 1; b < n; b++) {
+                Checkpoint.poll();
+                List<Pred> preds = byLeaf.get(b);
                 if (!connected(have, b, preds)) {
                     continue;
                 }
@@ -219,6 +239,8 @@ public final class JoinReorder implements OptimizerRule {
                 if (chosen.get(i)) {
                     continue;
                 }
+                Checkpoint.poll();
+                List<Pred> preds = byLeaf.get(i);
                 boolean isConnected = connected(chosen, i, preds);
                 double estimate = joinRows(current, chosen, i, leaves, preds);
                 if (best < 0 || isConnected && !bestConnected

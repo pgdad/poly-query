@@ -256,17 +256,23 @@ public final class Engine {
         };
     }
 
-    /** The EXPLAIN plan tree of a query (or of the query of an EXPLAIN statement). */
+    /**
+     * The EXPLAIN plan tree of a query (or of the query of an EXPLAIN statement), computed
+     * within the timeout of {@code opts}.
+     */
     public Map<String, Object> explain(String sql, QueryOptions opts) {
-        Statement stmt = Parser.parse(sql);
-        return switch (stmt) {
-            case Statement.QueryStatement qs -> explainQuery(qs.query(), opts, catalog.snapshot());
-            case Statement.Explain e -> explainQuery(e.query(), opts, catalog.snapshot());
-            case Statement.CreateIndex c -> throw new PolyQueryException(ErrorCode.SEMANTIC_ERROR,
-                    "only queries can be explained");
-            case Statement.DropIndex d -> throw new PolyQueryException(ErrorCode.SEMANTIC_ERROR,
-                    "only queries can be explained");
-        };
+        QueryControl control = QueryControl.withTimeout(opts.timeoutMs());
+        return Checkpoint.with(control::check, () -> {
+            Statement stmt = Parser.parse(sql);
+            return switch (stmt) {
+                case Statement.QueryStatement qs -> explainQuery(qs.query(), opts, catalog.snapshot());
+                case Statement.Explain e -> explainQuery(e.query(), opts, catalog.snapshot());
+                case Statement.CreateIndex c -> throw new PolyQueryException(ErrorCode.SEMANTIC_ERROR,
+                        "only queries can be explained");
+                case Statement.DropIndex d -> throw new PolyQueryException(ErrorCode.SEMANTIC_ERROR,
+                        "only queries can be explained");
+            };
+        });
     }
 
     /**

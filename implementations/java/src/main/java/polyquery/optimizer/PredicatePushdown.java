@@ -121,7 +121,7 @@ public final class PredicatePushdown implements OptimizerRule {
             // above may move into or below the join.
             boolean[] predMovable = conditionCanFail ? new boolean[preds.size()] : movableConjuncts(preds, safety);
 
-            int leftWidth = j.left().width();
+            int leftWidth = origins.of(j.left()).length; // memoized: join trees can be deep
             boolean left = j.kind() == LogicalPlan.JoinKind.LEFT;
             List<BoundExpr> toLeft = new ArrayList<>();
             List<BoundExpr> toRight = new ArrayList<>();

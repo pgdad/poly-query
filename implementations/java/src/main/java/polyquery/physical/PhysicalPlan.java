@@ -334,9 +334,30 @@ public sealed interface PhysicalPlan {
         return out;
     }
 
+    /** The columns of {@code left} followed by those of {@code right} (the output of a join). */
     private static List<ColumnSchema> concat(PhysicalPlan left, PhysicalPlan right) {
-        List<ColumnSchema> out = new ArrayList<>(left.schema());
-        out.addAll(right.schema());
+        List<ColumnSchema> out = new ArrayList<>();
+        appendSchema(left, out);
+        appendSchema(right, out);
         return out;
+    }
+
+    /** Appends the schema of {@code plan}; joins append their inputs' (no copy per level of a join tree). */
+    private static void appendSchema(PhysicalPlan plan, List<ColumnSchema> out) {
+        switch (plan) {
+            case HashJoin j -> {
+                appendSchema(j.left(), out);
+                appendSchema(j.right(), out);
+            }
+            case MergeJoin j -> {
+                appendSchema(j.left(), out);
+                appendSchema(j.right(), out);
+            }
+            case NestedLoopJoin j -> {
+                appendSchema(j.left(), out);
+                appendSchema(j.right(), out);
+            }
+            default -> out.addAll(plan.schema());
+        }
     }
 }
