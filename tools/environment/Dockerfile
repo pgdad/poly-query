@@ -22,4 +22,9 @@ RUN curl -fsSL https://github.com/clojure/brew-install/releases/latest/download/
  && clojure -M -e '(println (clojure-version))'
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && /root/.local/bin/uv python install 3.14 \
  && ln -s "$(/root/.local/bin/uv python find 3.14)" /usr/local/bin/python3.14
+# As on the experiment host, python3 is 3.14 (the toolchain the engines target, e.g. csv.QUOTE_NOTNULL
+# reading empty fields as None needs >= 3.13), not Ubuntu's 3.12.
+RUN ln -s /usr/local/bin/python3.14 /usr/local/bin/python3
+# The repository is bind-mounted with the host runner's uid; Go embeds VCS info and needs git to accept it.
+RUN git config --system --add safe.directory '*'
 WORKDIR /work
