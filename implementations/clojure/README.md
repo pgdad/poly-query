@@ -30,14 +30,19 @@ and the **architectural change CR-1 `UNION ALL`** (`spec/changes/union-all.md`
 logical/physical plan separation** (`spec/changes/refactor-plan-separation.md`
 — see [Plan separation](#change-cr-3-logicalphysical-plan-separation)) and
 the **architectural change CR-2 `DECIMAL` precision 38 / PQCF v2**
-(`spec/changes/decimal38.md` — see [DECIMAL(38)](#change-cr-2-decimal-precision-38)).
+(`spec/changes/decimal38.md` — see [DECIMAL(38)](#change-cr-2-decimal-precision-38))
+and the **requirement change CR-6 expression size limits**
+(`spec/changes/expression-limits.md` — see
+[Expression size limits](#change-cr-6-expression-size-limits): 16 MiB of
+SQL text, nesting depth 4,096, 250,000 operands; the timeout covers every
+stage of a query).
 
 Reported capabilities: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic
 test.functions phase2 sql.groupby sql.join sql.functions sql.subquery sql.cte
 sql.correlated_subquery phase3 storage.pqcf storage.mmap index.hash
 index.btree phase4 http.streaming phase5 exec.row exec.vectorized
 exec.parallel join.hash join.merge join.nested_loop native.kernels
-change.union_all change.decimal38`.
+change.union_all change.decimal38 change.expression_limits`.
 
 ## Prerequisites and build
 
@@ -1132,6 +1137,113 @@ Decisions:
   failing outputs, indexes), were compared between the engine before and
   after the refactoring: identical.
 
+## Change CR-6: expression size limits
+
+`spec/changes/expression-limits.md` (capability `change.expression_limits`).
+Statements within the CR-6 minimums run in every execution mode exactly as
+small ones do; statements beyond the engine's own limits fail with
+`RESOURCE_LIMIT` naming the measure; the query timeout covers parsing,
+binding, planning and execution.
+
+### The engine's limits
+
+| measure (CR-6 §1) | limit | minimum required |
+|---|---|---|
+| SQL text length | 16 MiB (16,777,216 UTF-8 bytes) | 1 MiB |
+| expression nesting depth | 4,096 | 1,000 |
+| operand count (literals, column references, `*` arguments) | 250,000 | 25,000 |
+
+Beyond a limit the answer is `RESOURCE_LIMIT` with the message
+`SQL text length in bytes exceeds 16777216`, `expression nesting depth
+exceeds 4096` or `operand count exceeds 250000` (details `measure`,
+`limit`). The parser checks them while it parses and stops at the first
+violation, so a 100,000-level statement is rejected in milliseconds.
+Besides these, a statement is bounded by memory (`--max-query-memory-mb`,
+e.g. a 100,000-column select list exceeds the default budget) and time
+(the timeout); `--max-request-bytes` still bounds HTTP requests (413).
+
+**How depth is counted.** The parser keeps a counter of the constructs
+enclosing the current position: parentheses, unary `+`/`-`, `NOT`, calls,
+`CAST`, `CASE` and subqueries (scalar, `EXISTS`, `IN`, derived table, CTE)
+count for everything inside them. A comparison, `IN (…)`, `BETWEEN`,
+`LIKE` or a chain of binary operators of one precedence level is only
+recognized after its left operand, so it counts for its other operands.
+The counter therefore never exceeds the CR-6 depth of the statement (no
+valid statement within the minimum is rejected), and the parser's
+recursion stays within a constant factor of it.
+
+### Design
+
+* **No recursion per chain element in the parser.** Operator chains are
+  parsed by loops (`operator-chain`). Long `AND`/`OR` chains (≥ 32
+  operands) become *balanced* trees: both operators are associative, also
+  in three-valued logic, and a tree of any shape evaluates the operands
+  left to right and stops at the same one, so results and errors are
+  unchanged while the tree depth drops from n to log₂ n. Arithmetic and
+  `||` chains stay left-deep (their typing and overflow behaviour depend on
+  the association).
+* **Linear passes.** Every later pass visits each node a constant number
+  of times. Fixed super-linear spots: `tree-seq` (O(nodes × depth) on a
+  left-deep tree — replaced by the iterative `util.tree/pre-order`), constant
+  folding (re-walked each subtree at every node, O(n³) on a 10,000-term
+  chain — now computes each node's properties once, memoized by identity),
+  `GROUP BY` matching in the binder (bound every subexpression again —
+  memoized), aggregate de-duplication (linear search — hashed), EXPLAIN
+  rendering (nested `str` — one `StringBuilder`), column pruning (searched
+  every subquery's whole body for correlated references at each nesting
+  level — uncorrelated subqueries are skipped), and `||` chains (evaluated
+  pairwise, copying the growing string at every step — the row and vectorized
+  evaluators now append the operands of a chain to one `StringBuilder`,
+  stopping at the first NULL like the pairwise form).
+* **Stacks.** The remaining recursion (binding, planning, compiling and
+  evaluating trees) is bounded by the limits. Every thread that works on a
+  query — the session request thread, HTTP query threads and the parallel
+  workers (`util.threads`) — has a 256 MiB stack (reserved address space;
+  only the used part is committed), enough for the deepest statements the
+  limits admit (tested: 4,090 nested scalar subqueries / derived tables /
+  `CASE`s / `CAST`s, a 249,990-term sum, in every mode). Should a stack
+  still overflow, in any thread, the `StackOverflowError` reaches the
+  request handler (worker failures are rethrown by the coordinating
+  thread) and is answered `RESOURCE_LIMIT`; the process never dies of it.
+* **Timeout over every stage.** The query context (deadline, cancellation)
+  is created before parsing, from the request's arrival (session: when the
+  line was read; HTTP: on receipt, queueing included). The lexer and parser
+  (every 1,024 tokens), the binder (every node), planning rewrites
+  (`bound/transform`, column pruning) poll it through
+  `exec.context/*preparing*`; execution keeps its existing checks. Measured
+  delay after expiry: ≤ 30 ms in every stage. As a guarantee, session/exec
+  requests run on a query thread and the session thread answers `TIMEOUT`
+  itself if a query has not stopped 300 ms after its deadline (the HTTP
+  connection thread does the same); the late query is cancelled and its
+  outcome discarded.
+* **`spec_version`** stays `1.0.0` (the CR names `1.3.0-cr6`), as for
+  CR-1/CR-2: the Phase 1 case `catalog.pqt:10` requires `1.0.0`.
+
+### Modules touched
+
+| layer | module | change |
+|---|---|---|
+| limits | `sql/limits.clj` (new) | the limits, `RESOURCE_LIMIT` errors, UTF-8 length |
+| lexer / parser | `sql/lexer.clj`, `sql/parser.clj` | depth/operand counting, text check, loop-parsed chains, balanced AND/OR, deadline polls |
+| binder / analyzer | `sql/binder.clj`, `sql/analyzer.clj` | deadline poll per node; memoized GROUP BY matching (`post-agg-context`); hashed aggregate de-duplication |
+| bound expressions | `sql/bound.clj` | linear `nodes`, polling `transform`, `left-chain`, StringBuilder `->sql` |
+| planning | `plan/rules/constant_folding.clj`, `plan/rules/column_pruning.clj` | memoized node properties; correlated-only outer-reference search; polls |
+| execution | `exec/expr.clj`, `exec/kernels.clj`, `exec/dispatch.clj`, `exec/parallel.clj`, `exec/context.clj` | chain concatenation; linear plan walk; big-stack workers; `*preparing*`/`poll!` |
+| pipeline | `engine.clj` | context created before parsing and bound during preparation |
+| transports | `main.clj`, `server.clj`, `protocol.clj` | request thread + deadline watchdog; connection-thread deadline; capability |
+| utilities | `util/tree.clj`, `util/threads.clj` (new) | iterative pre-order walk; query thread factory |
+
+Tests: `sql/limits_test.clj` (each limit at and beyond its value, the
+error messages, chains as one level, balanced chains keep operand order,
+UTF-8 length). Black-box: `tests/regression/robustness_probe.py --only
+expression_limits` and, during development, ~60 further statements of the
+same measures with other constructs (nested `CAST`/`CASE`/`COALESCE`,
+scalar/`EXISTS`/`IN` subqueries, derived tables and CTEs nested 300–4,090
+deep, `||`/`*`/`-` chains, `BETWEEN`/`LIKE` chains, 25,000-operand sums and
+`IN` lists, `CASE` with operand, 10,000-argument calls, wide select lists,
+`HAVING`/`GROUP BY` expressions, joins, `UNION ALL`, EXPLAIN) in all four
+modes, and a per-stage timeout check.
+
 ## Design decisions (where the spec is silent or open)
 
 * **Unsupported features.** `UNION` without `ALL`, `RIGHT`/`FULL` joins
@@ -1298,6 +1410,10 @@ Decisions:
   `format-plan`), the optimizer (rule names and order, `optimize: false`
   applies no rule, rules reach subquery plans), one test namespace per rule
   (`plan/rules/*_test.clj`) and the physical planner's execution decisions.
+* Expression limits (CR-6): `sql/limits_test` (every limit at and beyond
+  its value, error messages, chains counting as one level, balanced
+  boolean chains); `tests/regression/robustness_probe.py --only
+  expression_limits` for the black-box check in all modes.
 * Native kernels (`native_test`; uses
   `../../native-kernels/build/<arch>/libpqkernels.so` or
   `$PQ_NATIVE_KERNELS`, skipped when the library is not built): bitmap
@@ -1359,6 +1475,13 @@ Decisions:
   decimals keep all primitive fast paths.
 * Correlated subqueries other than equality lookups over a single table scan
   are re-executed per outer row (correct, but O(outer × inner)).
+* Statement size (CR-6): beyond 4,096 levels of nesting, 250,000 operands
+  or 16 MiB of SQL text a statement is rejected with `RESOURCE_LIMIT`.
+  Deeply nested *correlated* subqueries cost time quadratic in their depth
+  (each level is re-evaluated per outer row and searched for correlated
+  references); they stop at the timeout. A query that does not stop by
+  itself within 300 ms of its deadline is answered `TIMEOUT` and abandoned
+  (cancelled); it may run on briefly in the background.
 * The JVM AOT cache (`target/polyquery.aot`) is only valid for the JDK build
   and the absolute class path it was recorded with: after moving the
   checkout, changing the JDK or the Maven cache location, run `make build`
