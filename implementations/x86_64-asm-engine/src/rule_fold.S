@@ -129,6 +129,7 @@ FUNC try_fold
     LEAVE
 8:  mov 264(%rsp), %rcx             /* error: keep the expression */
     mov %rcx, g_jmpbuf(%rip)
+    orl $NF_FOLDERR, N_FLAGS(%rbx)
     LEAVE
 ENDF try_fold
 
@@ -214,7 +215,22 @@ FUNC fold_expr
     call expr_batch_const
     test %eax, %eax
     jz 3f
-    mov %rbx, %rdi
+    /* eval computes the first operand of a binary / unary operator or CAST
+     * unconditionally: when folding it failed, folding this node fails too
+     * (skipping it keeps long chains above an error linear, CR-6) */
+    mov N_KIND(%rbx), %eax
+    cmp $EK_BINARY, %eax
+    je 21f
+    cmp $EK_UNARY, %eax
+    je 21f
+    cmp $EK_CAST, %eax
+    jne 22f
+21: mov N_A(%rbx), %rcx
+    testl $NF_FOLDERR, N_FLAGS(%rcx)
+    jz 22f
+    orl $NF_FOLDERR, N_FLAGS(%rbx)
+    jmp 9f
+22: mov %rbx, %rdi
     call try_fold
     jmp 9f
 3:  cmpl $EK_BINARY, N_KIND(%rbx)

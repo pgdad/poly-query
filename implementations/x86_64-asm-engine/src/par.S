@@ -73,8 +73,10 @@ g_par_min:  .quad 0             /* minimum items per part (env PQ_PAR_MIN) */
 FUNC par_body
     ENTER 16
     mov %rdi, %rbx
-    mov %fs:t_vs_cur@tpoff, %rax    /* scratch stack top (restored: an */
-    mov %rax, 0(%rsp)               /* error may leave marks behind) */
+    call vs_mark                    /* scratch stack top (restored: an */
+    mov %rax, 0(%rsp)               /* error may leave marks behind); */
+                                    /* initialised first, else restoring 0
+                                     * would drop (leak) the thread's stack */
     mov PW_ARENA(%rbx), %rax
     mov %rax, %fs:t_arena@tpoff
     lea PW_JB(%rbx), %rdi
@@ -386,6 +388,7 @@ FUNC par_run
     test %rax, %rax
     jnz 3f
     call arena_new
+    movq $1, AR_PAR(%rax)
     lea par_arenas(%rip), %rcx
     mov %rax, (%rcx, %r15, 8)
 3:  mov g_arena(%rip), %rcx         /* same memory budget as the request */
@@ -479,7 +482,8 @@ FUNC par_reset
     call arena_reset
 2:  inc %rbx
     jmp 1b
-9:  pop %rbx
+9:  movq $0, g_par_mem(%rip)
+    pop %rbx
     ret
 ENDF par_reset
 

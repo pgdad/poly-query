@@ -57,7 +57,9 @@
 #define AR_CHUNKS  16
 #define AR_TOTAL   24
 #define AR_LIMIT   32      /* 0 = unlimited; else RESOURCE_LIMIT when exceeded */
-#define ARENA_SIZE 40
+#define AR_PAR     40      /* 1 = a parallel worker's arena: its chunks count
+                              towards the request's budget (g_par_mem, util.S) */
+#define ARENA_SIZE 48
 
 /* ------------------------------------------------------------ Buf (malloc-backed byte buffer) */
 #define BUF_DATA 0

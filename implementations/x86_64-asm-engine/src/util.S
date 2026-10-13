@@ -27,6 +27,8 @@ g_deadline_ns:      .quad 0        /* CLOCK_MONOTONIC deadline of the running qu
 g_pending_arena:    .quad 0        /* arena of a table under construction; destroyed on error */
     .globl g_cancel_flag
 g_cancel_flag:      .quad 0        /* set asynchronously when the running query is cancelled */
+    .globl g_par_mem
+g_par_mem:          .quad 0        /* chunk bytes of the worker arenas (AR_PAR), reset by par_reset */
 
     .bss
     .p2align 4
@@ -214,10 +216,15 @@ FUNC chunk_get
     call pool_release
     jmp 9f
 5:  call pool_release
-    mov %rbx, %rdi
-    call malloc
-    test %rax, %rax
-    jnz 6f
+    xor %edi, %edi                  /* mapped directly (not malloc): a */
+    mov %rbx, %rsi                  /* released chunk returns its memory */
+    mov $3, %edx                    /* to the system instead of staying in */
+    mov $0x22, %ecx                 /* a fragmented malloc heap */
+    mov $-1, %r8d                   /* PROT_READ|PROT_WRITE, */
+    xor %r9d, %r9d                  /* MAP_PRIVATE|MAP_ANONYMOUS */
+    call mmap
+    cmp $-1, %rax
+    jne 6f
     RAISE E_RESOURCE_LIMIT, "out of memory"
 6:  mov %rbx, 8(%rax)
 9:  pop %r13
@@ -245,7 +252,8 @@ FUNC chunk_put
     ret
 1:  call pool_release
     mov %rbx, %rdi
-    call free
+    mov 8(%rbx), %rsi
+    call munmap
     pop %rbx
     ret
 ENDF chunk_put
@@ -302,15 +310,29 @@ arena_alloc_slow:
     cmova %rcx, %rax
     cmp %rax, %r13
     cmovb %rax, %r13
-    /* limit check */
+    /* limit check: a worker arena counts its chunks in g_par_mem and is
+     * checked against the request total (request arena + all workers) */
     mov AR_TOTAL(%rbx), %rax
     add %r13, %rax
     mov AR_LIMIT(%rbx), %rcx
     test %rcx, %rcx
     jz 1f
-    cmp %rcx, %rax
+    cmpq $0, AR_PAR(%rbx)
+    jne 2f
+    mov g_par_mem(%rip), %rdx       /* the request arena */
+    add %rax, %rdx
+    cmp %rcx, %rdx
     jbe 1f
-    RAISE E_RESOURCE_LIMIT, "query memory budget exceeded"
+    jmp 3f
+2:  mov %r13, %rdx                  /* a worker arena */
+    lock xadd %rdx, g_par_mem(%rip)
+    add %r13, %rdx
+    mov g_arena(%rip), %r8
+    add AR_TOTAL(%r8), %rdx
+    cmp %rcx, %rdx
+    jbe 1f
+    lock sub %r13, g_par_mem(%rip)
+3:  RAISE E_RESOURCE_LIMIT, "query memory budget exceeded"
 1:  mov %rax, AR_TOTAL(%rbx)
     mov %r13, %rdi
     call chunk_get
