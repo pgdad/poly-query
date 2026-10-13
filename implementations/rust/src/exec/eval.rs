@@ -276,7 +276,7 @@ pub enum Chain {
 const LONG_CHAIN: usize = 16;
 
 /// Links of a long chain evaluated between two checks of the timeout.
-pub const CHAIN_INTERRUPT_LINKS: usize = 4096;
+const CHAIN_INTERRUPT_LINKS: usize = 4096;
 
 impl Chain {
     /// The left operand of `e` if `e` is a link of this kind of chain.
