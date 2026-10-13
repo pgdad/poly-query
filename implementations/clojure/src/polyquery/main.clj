@@ -7,9 +7,13 @@
             [polyquery.protocol :as protocol]
             [polyquery.server :as server]
             [polyquery.util.json :as json]
-            [polyquery.util.log :as log])
+            [polyquery.util.log :as log]
+            [polyquery.util.threads :as threads])
   (:import (java.io BufferedReader BufferedWriter File InputStreamReader OutputStreamWriter Writer)
-           (java.nio.charset StandardCharsets))
+           (java.nio.charset StandardCharsets)
+           (java.util.concurrent Callable ExecutionException ExecutorService Executors Future TimeUnit
+                                 TimeoutException)
+           (java.util.concurrent.atomic AtomicBoolean))
   (:gen-class))
 
 (set! *warn-on-reflection* true)
@@ -95,10 +99,58 @@
     (catch clojure.lang.ExceptionInfo e
       (if (json/syntax-error? e) ::invalid (throw e)))))
 
-(defn- respond [state req]
-  (if (= req ::invalid)
-    (protocol/error-response nil (err/error "INVALID_REQUEST" "request is not valid JSON"))
-    (protocol/handle-request state req)))
+;; ---------------------------------------------------------------------------
+;; Request supervision (session and exec modes)
+;;
+;; The timeout of a query covers every stage, from receipt of the request
+;; (CR-6 §4). All stages poll the deadline, so a query normally stops with
+;; TIMEOUT by itself. As a guarantee, requests run on a query thread and the
+;; session thread answers TIMEOUT itself when a query has not finished
+;; shortly after its deadline; the query is then cancelled and its eventual
+;; outcome discarded.
+
+(def ^:private timeout-grace-ns
+  "How long after its deadline a query may take to stop by itself."
+  (* 300 1000000))
+
+(defonce ^:private ^ExecutorService request-pool
+  (Executors/newCachedThreadPool (threads/factory "pq-request")))
+
+(defn- request-deadline
+  "Absolute System/nanoTime deadline of a query/explain request received at
+  `received` (options.timeout_ms > 0), or 0 for none."
+  ^long [req ^long received]
+  (let [options (get req "options")
+        ms (when (map? options) (get options "timeout_ms"))]
+    (if (and (#{"query" "explain"} (get req "op")) (instance? Long ms) (pos? (long ms)))
+      (+ received (* 1000000 (long ms)))
+      0)))
+
+(defn- supervised
+  "The response to request req (handle-request), computed on a query
+  thread, or TIMEOUT once deadline + grace has passed."
+  [state req ^long deadline]
+  (let [cancel (AtomicBoolean. false)
+        state (cond-> state
+                (pos? deadline) (assoc :query-control {:cancel-flag cancel :deadline-ns deadline}))
+        ^Future fut (.submit request-pool ^Callable #(protocol/handle-request state req))]
+    (try
+      (if (pos? deadline)
+        (.get fut (max 0 (- (+ deadline (long timeout-grace-ns)) (System/nanoTime))) TimeUnit/NANOSECONDS)
+        (.get fut))
+      (catch TimeoutException _
+        (.set cancel true)
+        (log/warn "query did not stop at its deadline; answered TIMEOUT" {"id" (str (get req "id"))})
+        (protocol/error-response (get req "id") (err/error "TIMEOUT" "query exceeded its timeout")))
+      (catch ExecutionException e
+        (protocol/error-response (get req "id") (or (.getCause e) e))))))
+
+(defn- respond
+  ([state req] (respond state req (System/nanoTime)))
+  ([state req ^long received]
+   (if (= req ::invalid)
+     (protocol/error-response nil (err/error "INVALID_REQUEST" "request is not valid JSON"))
+     (supervised state req (if (map? req) (request-deadline req received) 0)))))
 
 (defn run-session [cfg]
   (let [state (protocol/make-state (engine-config cfg))
@@ -108,7 +160,8 @@
     (loop []
       (when-let [line (.readLine in)]
         (when-not (str/blank? line)
-          (json/write-line! out (respond state (parse-request-line line))))
+          (let [received (System/nanoTime)]
+            (json/write-line! out (respond state (parse-request-line line) received))))
         (recur)))
     0))
 
@@ -177,7 +230,7 @@
   ;; Run on a thread with a large stack so deeply nested SQL/JSON cannot
   ;; overflow it.
   (let [code (promise)
-        t (Thread. nil #(deliver code (run args)) "polyquery-main" (* 256 1024 1024))]
+        t (threads/thread "polyquery-main" #(deliver code (run args)))]
     (.start t)
     (.join t)
     (flush)

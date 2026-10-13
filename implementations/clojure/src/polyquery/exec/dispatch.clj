@@ -25,7 +25,8 @@
             [polyquery.exec.operators :as ops]
             [polyquery.exec.parallel :as parallel]
             [polyquery.exec.vectorized :as vectorized]
-            [polyquery.exec.vjoin]))
+            [polyquery.exec.vjoin]
+            [polyquery.util.tree :as tree]))
 
 (set! *warn-on-reflection* true)
 
@@ -33,7 +34,7 @@
   "Every map in a physical plan — plan nodes and expressions, including
   subquery plans — not descending into tables and indexes (records)."
   [plan]
-  (filter map? (tree-seq #(or (and (map? %) (not (record? %))) (vector? %) (seq? %))
+  (filter map? (tree/pre-order #(or (and (map? %) (not (record? %))) (vector? %) (seq? %))
                          #(if (map? %) (vals %) %)
                          plan)))
 

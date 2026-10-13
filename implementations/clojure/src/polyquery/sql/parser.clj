@@ -1,18 +1,26 @@
 (ns polyquery.sql.parser
   "Recursive-descent parser for PolyQuery SQL v1 (spec/sql/grammar.md).
   Produces a plain-map AST; see polyquery.sql.ast for the node shapes. The
-  parser covers the whole v1 grammar; later stages decide what is supported."
+  parser covers the whole v1 grammar; later stages decide what is supported.
+
+  The parser enforces the statement size limits (polyquery.sql.limits,
+  CR-6): it counts the operands and the enclosing constructs (nesting depth)
+  as it goes and stops with RESOURCE_LIMIT as soon as one is exceeded, and it
+  polls the query deadline. Chains of binary operators are parsed by loops,
+  so their length costs no recursion."
   (:require [polyquery.errors :as err]
-            [polyquery.sql.lexer :as lexer]))
+            [polyquery.exec.context :as ctx]
+            [polyquery.sql.lexer :as lexer]
+            [polyquery.sql.limits :as limits]))
 
 (set! *warn-on-reflection* true)
 
 ;; ---------------------------------------------------------------------------
 ;; Parser state: token vector + mutable cursor
 
-(defrecord State [tokens cursor])
+(defrecord State [tokens cursor depth operands])
 
-(defn- make-state [tokens] (->State tokens (volatile! 0)))
+(defn- make-state [tokens] (->State tokens (volatile! 0) (volatile! 0) (volatile! 0)))
 
 (defn- peek-tok
   ([st] (peek-tok st 0))
@@ -22,8 +30,41 @@
 
 (defn- advance! [st]
   (let [t (peek-tok st)]
-    (when-not (= :eof (:type t)) (vswap! (:cursor st) inc))
+    (when-not (= :eof (:type t))
+      (when (zero? (bit-and (long (vswap! (:cursor st) inc)) 1023))
+        (ctx/poll!)))
     t))
+
+;; ---------------------------------------------------------------------------
+;; Statement size measures (CR-6 §1)
+;;
+;; The depth counter holds the number of constructs enclosing the current
+;; position. Prefix constructs (parentheses, unary operators, NOT, calls,
+;; CAST, CASE, subqueries) count for everything inside them. A comparison,
+;; IN, BETWEEN, LIKE or an operator chain is recognized after its left
+;; operand, so it counts for its other operands only: the counter never
+;; exceeds the statement's nesting depth, and the parser's recursion stays
+;; within a constant factor of the counter.
+
+(defn- enter! [st]
+  (when (> (long (vswap! (:depth st) inc)) (long limits/max-nesting-depth))
+    (limits/exceeded! "expression nesting depth" limits/max-nesting-depth)))
+
+(defn- leave! [st] (vswap! (:depth st) dec))
+
+(defmacro ^:private nested
+  "Evaluates body as the contents of one more enclosing construct."
+  [st & body]
+  `(do (enter! ~st)
+       (let [r# (do ~@body)]
+         (leave! ~st)
+         r#)))
+
+(defn- operand!
+  "Counts one operand (literal, column reference or `*` argument)."
+  [st]
+  (when (> (long (vswap! (:operands st) inc)) (long limits/max-operands))
+    (limits/exceeded! "operand count" limits/max-operands)))
 
 (defn- pos [tok] {:line (:line tok) :col (:col tok)})
 
@@ -65,7 +106,7 @@
 ;; ---------------------------------------------------------------------------
 ;; Expressions
 
-(declare parse-expr parse-query)
+(declare parse-expr parse-query parse-case-body)
 
 (defn- query-start? [st]
   (let [t (peek-tok st)] (or (kw? t "SELECT") (kw? t "WITH"))))
@@ -98,20 +139,25 @@
     {:node :func :name (:text name-tok) :args [] :pos (pos name-tok)}
 
     (accept-op! st "*")
-    (do (expect-op! st ")")
+    (do (operand! st)
+        (expect-op! st ")")
         {:node :func :name (:text name-tok) :star? true :args [] :pos (pos name-tok)})
 
     :else
     (let [distinct? (boolean (accept-kw! st "DISTINCT"))
           _ (accept-kw! st "ALL")
-          args (loop [args [(parse-expr st)]]
-                 (if (accept-op! st ",")
-                   (recur (conj args (parse-expr st)))
-                   args))]
+          args (nested st
+                 (loop [args [(parse-expr st)]]
+                   (if (accept-op! st ",")
+                     (recur (conj args (parse-expr st)))
+                     args)))]
       (expect-op! st ")")
       {:node :func :name (:text name-tok) :distinct? distinct? :args args :pos (pos name-tok)})))
 
 (defn- parse-case [st tok]
+  (nested st (parse-case-body st tok)))
+
+(defn- parse-case-body [st tok]
   (let [operand (when-not (at-kw? st "WHEN") (parse-expr st))
         whens (loop [whens []]
                 (if (accept-kw! st "WHEN")
@@ -128,8 +174,10 @@
 (defn- parse-primary [st]
   (let [tok (peek-tok st)]
     (case (:type tok)
-      :number (do (advance! st) {:node :literal :kind :number :text (:text tok) :pos (pos tok)})
-      :string (do (advance! st) {:node :literal :kind :string :value (:text tok) :pos (pos tok)})
+      :number (do (advance! st) (operand! st)
+                  {:node :literal :kind :number :text (:text tok) :pos (pos tok)})
+      :string (do (advance! st) (operand! st)
+                  {:node :literal :kind :string :value (:text tok) :pos (pos tok)})
       (:ident :qident)
       (do (advance! st)
           (cond
@@ -138,24 +186,26 @@
 
             (at-op? st ".")
             (do (advance! st)
+                (operand! st)
                 {:node :column :table (:text tok) :name (expect-ident! st "column name") :pos (pos tok)})
 
-            :else {:node :column :name (:text tok) :pos (pos tok)}))
+            :else (do (operand! st) {:node :column :name (:text tok) :pos (pos tok)})))
       :keyword
       (case (:text tok)
-        "TRUE" (do (advance! st) {:node :literal :kind :bool :value true :pos (pos tok)})
-        "FALSE" (do (advance! st) {:node :literal :kind :bool :value false :pos (pos tok)})
-        "NULL" (do (advance! st) {:node :literal :kind :null :pos (pos tok)})
+        "TRUE" (do (advance! st) (operand! st) {:node :literal :kind :bool :value true :pos (pos tok)})
+        "FALSE" (do (advance! st) (operand! st) {:node :literal :kind :bool :value false :pos (pos tok)})
+        "NULL" (do (advance! st) (operand! st) {:node :literal :kind :null :pos (pos tok)})
         ("DATE" "TIMESTAMP")
         (do (advance! st)
             (let [s (peek-tok st)]
               (when-not (= :string (:type s)) (fail-at s (str "expected string after " (:text tok))))
               (advance! st)
+              (operand! st)
               {:node :literal :kind (if (= "DATE" (:text tok)) :date :timestamp)
                :value (:text s) :pos (pos tok)}))
         "CAST" (do (advance! st)
                    (expect-op! st "(")
-                   (let [arg (parse-expr st)
+                   (let [arg (nested st (parse-expr st))
                          _ (expect-kw! st "AS")
                          tn (parse-type-name st)]
                      (expect-op! st ")")
@@ -163,7 +213,7 @@
         "CASE" (do (advance! st) (parse-case st tok))
         "EXISTS" (do (advance! st)
                      (expect-op! st "(")
-                     (let [q (parse-query st)]
+                     (let [q (nested st (parse-query st))]
                        (expect-op! st ")")
                        {:node :exists :query q :pos (pos tok)}))
         (fail-at tok "expected expression"))
@@ -171,10 +221,10 @@
       (if (= "(" (:text tok))
         (do (advance! st)
             (if (query-start? st)
-              (let [q (parse-query st)]
+              (let [q (nested st (parse-query st))]
                 (expect-op! st ")")
                 {:node :subquery :query q :pos (pos tok)})
-              (let [e (parse-expr st)]
+              (let [e (nested st (parse-expr st))]
                 (expect-op! st ")")
                 (assoc e :parenthesized? true))))
         (fail-at tok "expected expression"))
@@ -189,19 +239,65 @@
             ;; that -9223372036854775808 is representable
             (if (and (op? tok "-") (= :number (:type nxt)))
               (do (advance! st)
+                  (operand! st)
                   {:node :literal :kind :number :text (str "-" (:text nxt)) :pos (pos tok)})
-              {:node :unary :op (:text tok) :arg (parse-unary st) :pos (pos tok)})))
+              {:node :unary :op (:text tok) :arg (nested st (parse-unary st)) :pos (pos tok)})))
       (parse-primary st))))
+
+(defn- operator-chain
+  "Parses `operand { op operand }` with (parse-operand st) and
+  (operator st) — the operator token when the next token is one of the
+  chain's operators. Returns [operands operator-tokens]. The chain is one
+  nesting level for the operands after the first."
+  [st parse-operand operator]
+  (let [first-operand (parse-operand st)]
+    (if-not (operator st)
+      [[first-operand] []]
+      (nested st
+        (loop [operands [first-operand] toks []]
+          (if-let [tok (operator st)]
+            (do (advance! st)
+                (recur (conj operands (parse-operand st)) (conj toks tok)))
+            [operands toks]))))))
+
+(defn- binary-node [tok op left right]
+  {:node :binary :op op :left left :right right :pos (pos tok)})
+
+(defn- left-deep
+  "Left-associative tree of a chain."
+  [[operands toks]]
+  (reduce (fn [left i]
+            (let [tok (nth toks i)]
+              (binary-node tok (:text tok) left (nth operands (inc i)))))
+          (first operands)
+          (range (count toks))))
+
+(def ^:private balance-threshold
+  "Operand count from which an AND/OR chain is built as a balanced tree."
+  32)
+
+(defn- associative-chain
+  "Tree of an AND/OR chain. AND and OR are associative (three-valued logic
+  included), and a tree of any shape evaluates the operands left to right,
+  stopping at the same operand; so long chains are balanced (depth log2 of
+  their length instead of their length), short ones stay left-deep as
+  written."
+  [op [operands toks :as chain]]
+  (if (< (count operands) (long balance-threshold))
+    (left-deep chain)
+    (letfn [(build [^long lo ^long hi]
+              (if (= lo hi)
+                (nth operands lo)
+                (let [mid (quot (+ lo hi 1) 2)]
+                  (binary-node (nth toks (dec mid)) op (build lo (dec mid)) (build mid hi)))))]
+      (build 0 (dec (count operands))))))
 
 (defn- parse-binary-level
   "Left-associative binary level with operators `ops` over `next-fn`."
   [st ops next-fn]
-  (loop [left (next-fn st)]
-    (let [tok (peek-tok st)]
-      (if (and (= :op (:type tok)) (ops (:text tok)))
-        (do (advance! st)
-            (recur {:node :binary :op (:text tok) :left left :right (next-fn st) :pos (pos tok)}))
-        left))))
+  (left-deep (operator-chain st next-fn
+                             (fn [st] (let [tok (peek-tok st)]
+                                        (when (and (= :op (:type tok)) (ops (:text tok))) tok))))))
 
 (defn- parse-multiplicative [st] (parse-binary-level st #{"*" "/" "%"} parse-unary))
 (defn- parse-additive [st] (parse-binary-level st #{"+" "-"} parse-multiplicative))
@@ -215,7 +311,8 @@
     (cond
       (and (= :op (:type tok)) (comparison-ops (:text tok)))
       (do (advance! st)
-          {:node :binary :op (comparison-ops (:text tok)) :left left :right (parse-concat st) :pos (pos tok)})
+          {:node :binary :op (comparison-ops (:text tok)) :left left :right (nested st (parse-concat st))
+           :pos (pos tok)})
 
       (kw? tok "IS")
       (do (advance! st)
@@ -228,26 +325,28 @@
             op-tok (peek-tok st)]
         (cond
           (accept-kw! st "BETWEEN")
-          (let [lo (parse-concat st)
-                _ (expect-kw! st "AND")
-                hi (parse-concat st)]
-            {:node :between :not? not? :arg left :low lo :high hi :pos (pos op-tok)})
+          (nested st
+            (let [lo (parse-concat st)
+                  _ (expect-kw! st "AND")
+                  hi (parse-concat st)]
+              {:node :between :not? not? :arg left :low lo :high hi :pos (pos op-tok)}))
 
           (accept-kw! st "IN")
           (do (expect-op! st "(")
               (if (query-start? st)
-                (let [q (parse-query st)]
+                (let [q (nested st (parse-query st))]
                   (expect-op! st ")")
                   {:node :in-query :not? not? :arg left :query q :pos (pos op-tok)})
-                (let [items (loop [items [(parse-expr st)]]
-                              (if (accept-op! st ",")
-                                (recur (conj items (parse-expr st)))
-                                items))]
+                (let [items (nested st
+                              (loop [items [(parse-expr st)]]
+                                (if (accept-op! st ",")
+                                  (recur (conj items (parse-expr st)))
+                                  items)))]
                   (expect-op! st ")")
                   {:node :in-list :not? not? :arg left :items items :pos (pos op-tok)})))
 
           (accept-kw! st "LIKE")
-          {:node :like :not? not? :arg left :pattern (parse-concat st) :pos (pos op-tok)}
+          {:node :like :not? not? :arg left :pattern (nested st (parse-concat st)) :pos (pos op-tok)}
 
           :else (fail-at op-tok "expected BETWEEN, IN or LIKE")))
 
@@ -256,24 +355,17 @@
 (defn- parse-not [st]
   (let [tok (peek-tok st)]
     (if (kw? tok "NOT")
-      (do (advance! st) {:node :not :arg (parse-not st) :pos (pos tok)})
+      (do (advance! st) {:node :not :arg (nested st (parse-not st)) :pos (pos tok)})
       (parse-predicate st))))
 
+(defn- keyword-operator [k]
+  (fn [st] (let [tok (peek-tok st)] (when (kw? tok k) tok))))
+
 (defn- parse-and [st]
-  (loop [left (parse-not st)]
-    (let [tok (peek-tok st)]
-      (if (kw? tok "AND")
-        (do (advance! st)
-            (recur {:node :binary :op "AND" :left left :right (parse-not st) :pos (pos tok)}))
-        left))))
+  (associative-chain "AND" (operator-chain st parse-not (keyword-operator "AND"))))
 
 (defn parse-expr [st]
-  (loop [left (parse-and st)]
-    (let [tok (peek-tok st)]
-      (if (kw? tok "OR")
-        (do (advance! st)
-            (recur {:node :binary :op "OR" :left left :right (parse-and st) :pos (pos tok)}))
-        left))))
+  (associative-chain "OR" (operator-chain st parse-and (keyword-operator "OR"))))
 
 ;; ---------------------------------------------------------------------------
 ;; Queries
@@ -321,7 +413,7 @@
       (op? tok "(")
       (do (advance! st)
           (if (query-start? st)
-            (let [q (parse-query st)
+            (let [q (nested st (parse-query st))
                   _ (expect-op! st ")")
                   alias (parse-alias st)]
               (when-not alias (fail-at (peek-tok st) "derived table requires an alias"))
@@ -408,7 +500,7 @@
                  cs))
         _ (expect-kw! st "AS")
         _ (expect-op! st "(")
-        q (parse-query st)]
+        q (nested st (parse-query st))]
     (expect-op! st ")")
     {:name nm :columns cols :query q :pos (pos tok)}))
 
@@ -476,6 +568,7 @@
 (defn parse-statement
   "Parses one SQL statement (with an optional trailing ';')."
   [^String sql]
+  (limits/check-text! sql)
   (let [st (make-state (lexer/tokenize sql))
         tok (peek-tok st)
         stmt (cond

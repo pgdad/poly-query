@@ -18,6 +18,8 @@
     :agg-error   message used when an aggregate appears in :plain mode
     :aggs        volatile vector of aggregate specs (post-agg mode)
     :group-keys  bound GROUP BY expressions (post-agg mode)
+    :memo        memo tables of GROUP BY matching (post-agg mode; see
+                 post-agg-context)
 
   Constant arguments (ROUND digits, DATE_TRUNC/DATE_DIFF units) are folded
   during validation with the expression compiler (polyquery.exec.expr)."
@@ -31,7 +33,8 @@
             [polyquery.types :as t]
             [polyquery.util.text :as text]
             [polyquery.values :as v])
-  (:import (java.math BigInteger)))
+  (:import (java.math BigInteger)
+           (java.util IdentityHashMap)))
 
 (set! *warn-on-reflection* true)
 
@@ -207,19 +210,45 @@
                   (do (vswap! aggs conj spec) (dec (count @aggs))))]
       (b/column-ref (+ (count (:group-keys cx)) idx) (:type spec) (str "agg" idx)))))
 
+(defn post-agg-context
+  "The binding context of the expressions over the aggregation output of a
+  query: base context `base` (its input scope), aggregate collector `aggs`
+  and the bound GROUP BY keys.
+
+  Every node of such an expression is matched against the GROUP BY keys,
+  which binds it as a plain expression. The memo tables (keyed by AST node
+  identity) keep each node's plain binding and AST properties, so matching
+  costs time linear in the size of the expression, not quadratic."
+  [base aggs group-keys]
+  (assoc base :mode :post-agg :aggs aggs :group-keys group-keys
+         :memo {:plain (IdentityHashMap.) :flags (IdentityHashMap.)}))
+
+(defn- ast-flags
+  "{:aggregate? :subquery?} of AST expression e (ast/contains-aggregate?,
+  ast/contains-subquery?), memoized."
+  [^IdentityHashMap memo e]
+  (or (.get memo e)
+      (let [cs (mapv #(ast-flags memo %) (ast/children e))
+            f {:aggregate? (or (ast/aggregate-call? e) (boolean (some :aggregate? cs)))
+               :subquery? (or (contains? #{:in-query :exists :subquery} (:node e))
+                              (boolean (some :subquery? cs)))}]
+        (.put memo e f)
+        f)))
+
 (defn- group-key-ref
   "In post-agg mode: a reference to the GROUP BY key structurally equal to
   aggregate-free expression e, or nil."
   [cx e]
   (when (and (seq (:group-keys cx))
              (not= :literal (:node e))
-             (not (ast/contains-aggregate? e))
-             (not (ast/contains-subquery? e)))
+             (let [{:keys [aggregate? subquery?]} (ast-flags (:flags (:memo cx)) e)]
+               (not (or aggregate? subquery?))))
     (let [bound (try (bind (assoc cx :mode :plain) e)
                      (catch clojure.lang.ExceptionInfo _ nil))]
       (when bound
         (first (keep-indexed (fn [i g]
-                               (when (= g bound)
+                               ;; hashes are cached: cheap pre-check
+                               (when (and (= (hash g) (hash bound)) (= g bound))
                                  (b/column-ref i (:type g) (if (= :column (:node g)) (:name g) (str "key" i)))))
                              (:group-keys cx)))))))
 
@@ -368,8 +397,22 @@
                        {:test-functions? (:test-functions? (:options cx))
                         :eval-constant eval-constant}))
 
+(declare bind*)
+
 (defn bind
   "Binds and type-checks an AST expression."
+  [cx e]
+  (ctx/poll!)
+  (if-let [^IdentityHashMap memo (when (= :plain (:mode cx)) (:plain (:memo cx)))]
+    ;; plain binding while matching GROUP BY keys (post-agg-context)
+    (let [r (or (.get memo e)
+                (let [r (try (bind* cx e) (catch clojure.lang.ExceptionInfo ex ex))]
+                  (.put memo e r)
+                  r))]
+      (if (instance? Throwable r) (throw r) r))
+    (bind* cx e)))
+
+(defn- bind*
   [cx e]
   (or
    (when (= :post-agg (:mode cx)) (group-key-ref cx e))
@@ -401,7 +444,7 @@
 (defn bind-constant-int
   "Binds a LIMIT/OFFSET expression: a constant INT64 expression."
   [cx e what]
-  (let [cx (assoc cx :scope [] :mode :plain :outer [] :free []
+  (let [cx (assoc (dissoc cx :memo) :scope [] :mode :plain :outer [] :free []
                   :agg-error (str "aggregates are not allowed in " what))
         not-constant #(semantic! (str what " must be a constant integer expression") (:pos e))
         bound (try (bind cx e)

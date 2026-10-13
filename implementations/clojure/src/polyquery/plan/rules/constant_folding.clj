@@ -16,19 +16,40 @@
   runs in the same bottom-up pass, so a predicate it reduces to a literal is
   folded further up."
   (:require [polyquery.exec.expr :as expr]
-            [polyquery.sql.bound :as b]))
+            [polyquery.sql.bound :as b])
+  (:import (java.util IdentityHashMap)))
 
 (set! *warn-on-reflection* true)
 
-(defn- foldable? [e]
+(defn- props
+  "{:constant? :sleep? :infallible?} of e, computed from its children's
+  properties and memoized by node identity, so that a bottom-up pass over an
+  expression costs linear time however deep it is (a long operator chain):
+    :constant?   row-independent (no columns, correlated references or
+                 subqueries)
+    :sleep?      contains PQ_SLEEP
+    :infallible? its evaluation can never raise an error"
+  [^IdentityHashMap memo e]
+  (or (.get memo e)
+      (let [cs (mapv #(props memo %) (b/children e))
+            node (:node e)
+            p {:constant? (and (not (#{:column :outer-column :subquery} node)) (every? :constant? cs))
+               :sleep? (or (= "PQ_SLEEP" (:fn e)) (boolean (some :sleep? cs)))
+               :infallible? (and (contains? #{:literal :column :outer-column :compare :and :or :not :is-null}
+                                            node)
+                                 (every? :infallible? cs))}]
+        (.put memo e p)
+        p)))
+
+(defn- foldable? [memo e]
   (and (not= :literal (:node e))
-       (b/constant? e)
-       (not-any? #(= "PQ_SLEEP" (:fn %)) (b/nodes e))))
+       (let [p (props memo e)]
+         (and (:constant? p) (not (:sleep? p))))))
 
 (defn- fold
   "e, or a literal holding its value when it is constant and evaluates."
-  [e]
-  (if (foldable? e)
+  [memo e]
+  (if (foldable? memo e)
     (try
       {:node :literal :type (:type e)
        :value (expr/eval-constant {:ctx nil :cells (atom {}) :build nil} e)}
@@ -37,42 +58,37 @@
 
 (defn- literal? [e v] (and (= :literal (:node e)) (= :boolean (:type e)) (= v (:value e))))
 
-(defn- infallible?
-  "True when evaluating e can never raise an error."
-  [e]
-  (every? #(case (:node %)
-             (:literal :column :outer-column :compare :and :or :not :is-null) true
-             false)
-          (b/nodes e)))
-
 (defn- simplify-node
   "One step of AND/OR/NOT simplification (children already simplified)."
-  [e]
-  (case (:node e)
-    :and (let [{l :left r :right} e]
-           (cond
-             (literal? l true) r
-             (literal? r true) l
-             (literal? l false) l
-             (and (literal? r false) (infallible? l)) r
-             (= l r) l
-             :else e))
-    :or (let [{l :left r :right} e]
-          (cond
-            (literal? l false) r
-            (literal? r false) l
-            (literal? l true) l
-            (and (literal? r true) (infallible? l)) r
-            (= l r) l
-            :else e))
-    :not (let [a (:arg e)]
-           (if (= :not (:node a)) (:arg a) e))
-    e))
+  [memo e]
+  (let [infallible? #(:infallible? (props memo %))]
+    (case (:node e)
+      :and (let [{l :left r :right} e]
+             (cond
+               (literal? l true) r
+               (literal? r true) l
+               (literal? l false) l
+               (and (literal? r false) (infallible? l)) r
+               (= l r) l
+               :else e))
+      :or (let [{l :left r :right} e]
+            (cond
+              (literal? l false) r
+              (literal? r false) l
+              (literal? l true) l
+              (and (literal? r true) (infallible? l)) r
+              (= l r) l
+              :else e))
+      :not (let [a (:arg e)]
+             (if (= :not (:node a)) (:arg a) e))
+      e)))
 
 (defn simplify
   "Folds constants and simplifies predicates in expression e (nil-safe)."
   [e]
-  (when e (b/transform (comp simplify-node fold) e)))
+  (when e
+    (let [memo (IdentityHashMap.)]
+      (b/transform #(simplify-node memo (fold memo %)) e))))
 
 (defn- simplify-conjunction
   "Simplified predicate with duplicate conjuncts removed; nil if TRUE."

@@ -28,7 +28,9 @@
   Aggregate specs: {:fn :count-star|:count|:sum|:avg|:min|:max :distinct? b
                     :arg e :type T}"
   (:require [clojure.string :as str]
+            [polyquery.exec.context :as ctx]
             [polyquery.types :as t]
+            [polyquery.util.tree :as tree]
             [polyquery.values :as v]))
 
 (set! *warn-on-reflection* true)
@@ -63,14 +65,16 @@
     e))
 
 (defn transform
-  "Post-order rewrite of every node of e with f."
+  "Post-order rewrite of every node of e with f. Polls the deadline of the
+  query being prepared (planning rewrites expressions with it)."
   [f e]
+  (ctx/poll!)
   (f (map-children #(transform f %) e)))
 
 (defn nodes
   "All nodes of e (pre-order), not descending into subquery bodies."
   [e]
-  (tree-seq (constantly true) children e))
+  (tree/pre-order (constantly true) children e))
 
 (defn column-indices
   "Set of input-row indices referenced by e."

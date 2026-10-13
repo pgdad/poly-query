@@ -12,7 +12,8 @@
   Expressions containing subqueries also require the columns of this row
   that correlated references inside the subqueries read (outer-column nodes
   of the subquery's correlation cell, at any nesting depth)."
-  (:require [polyquery.sql.bound :as b]))
+  (:require [polyquery.sql.bound :as b]
+            [polyquery.util.tree :as tree]))
 
 (set! *warn-on-reflection* true)
 
@@ -22,7 +23,7 @@
   [x cell]
   (into #{}
         (keep #(when (and (map? %) (= :outer-column (:node %)) (= cell (:cell %))) (:index %)))
-        (tree-seq #(and (coll? %) (not (record? %)))
+        (tree/pre-order #(and (coll? %) (not (record? %)))
                   #(if (map? %) (vals %) (seq %))
                   x)))
 
