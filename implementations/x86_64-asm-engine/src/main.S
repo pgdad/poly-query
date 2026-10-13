@@ -15,6 +15,8 @@
 #define MODE_EXEC    4
 #define MODE_SERVE   5
 #define BIG_STACK    (1024*1024*1024)
+#define STACK_GUARD  (64*1024)      /* PROT_NONE pages below the big stack */
+#define UC_RSP       160            /* ucontext_t: uc_mcontext.gregs[REG_RSP] */
 #define DEFAULT_THREADS_MAX 16      /* default threads per query: the online
                                        CPUs, at most this many */
 #define SC_NPROCESSORS_ONLN 84
@@ -64,15 +66,27 @@ ENDF usage_error
 usage_fmt: .asciz "polyquery: %s%s\nusage: polyquery (version|capabilities|session|exec|serve) [options]\n"
     .text
 
-/* fault handler: report INTERNAL_ERROR for the current request */
+/* fault_handler(sig, siginfo, ucontext) (SA_SIGINFO, on the alternate
+ * signal stack): a fault inside a request is reported as that request's
+ * error: RESOURCE_LIMIT when the interrupted thread's stack pointer is below
+ * its STACK_CHECK limit (stack exhaustion, CR-6 §3), else INTERNAL_ERROR.
+ * Outside a request the process exits. */
 FUNC fault_handler
     and $-16, %rsp
+    cmpq $0, %fs:t_jmpbuf@tpoff     /* parallel worker */
+    jne 1f
     cmpq $0, g_jmpbuf(%rip)
-    je 1f
-    mov $E_INTERNAL_ERROR, %edi
+    je 3f
+1:  mov %fs:t_stack_lo@tpoff, %rax
+    test %rax, %rax
+    jz 2f
+    cmp UC_RSP(%rdx), %rax
+    jbe 2f
+    call stack_exhausted
+2:  mov $E_INTERNAL_ERROR, %edi
     CSTR %rsi, "internal error (fault)"
     call pq_raise
-1:  mov $1, %edi
+3:  mov $1, %edi
     call _exit
 ENDF fault_handler
 
@@ -95,7 +109,7 @@ FUNC install_fault_handlers
     call memset
     lea fault_handler(%rip), %rax
     mov %rax, 0(%rsp)
-    movl $0x48000000, 136(%rsp)     /* SA_ONSTACK | SA_NODEFER */
+    movl $0x48000004, 136(%rsp)     /* SA_ONSTACK | SA_NODEFER | SA_SIGINFO */
     lea 0(%rsp), %rsi
     mov $11, %edi                   /* SIGSEGV */
     xor %edx, %edx
@@ -379,6 +393,14 @@ FUNC main
     call mmap
     cmp $-1, %rax
     je 25f
+    mov %rax, %rbx                  /* guard pages: an overflow faults */
+    mov %rax, %rdi
+    mov $STACK_GUARD, %esi
+    xor %edx, %edx                  /* PROT_NONE */
+    call mprotect
+    lea STACK_GUARD(%rbx), %rdi     /* STACK_CHECK limit (CR-6) */
+    call stack_set_bottom
+    mov %rbx, %rax
     mov %rsp, %r15                  /* old stack */
     lea BIG_STACK(%rax), %rsp
     call run_mode

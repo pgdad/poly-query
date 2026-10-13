@@ -313,6 +313,7 @@ ENDF exec_scan
 
 /* exec_from(xs rdi, fp rsi) -> rax TupleSet* */
 FUNC exec_from
+    STACK_CHECK
     ENTER 112
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -628,6 +629,7 @@ ENDF row_passes
 
 /* build_row(plan rdi, ctx rsi) -> rax row (cells: outputs then sort keys) */
 FUNC build_row
+    STACK_CHECK
     ENTER 16
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -817,6 +819,7 @@ ENDF sort_rows
 
 /* agg_update(plan rdi, ctx rsi, states rdx): feeds the current row to every aggregate */
 FUNC agg_update
+    STACK_CHECK
     ENTER 48
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -1347,6 +1350,7 @@ ENDF result_to_table
 
 /* exec_plan(plan rdi, outer ctx rsi) -> rax Result* */
 FUNC exec_plan
+    STACK_CHECK
     ENTER 16
     mov %rdi, %rbx
     mov %rsi, %r14

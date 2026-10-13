@@ -31,6 +31,8 @@ ENDF mark_col
 /* prune_expr(scans rdi, expr rsi, depth rdx): marks the columns of the
  * block (depth = number of query blocks between the expression and it) */
 FUNC prune_expr
+    STACK_CHECK
+    call deadline_tick
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -89,6 +91,7 @@ ENDF prune_expr
 
 /* prune_list(scans rdi, node*[] rsi, n rdx, depth rcx) */
 FUNC prune_list
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -109,6 +112,7 @@ ENDF prune_list
 /* prune_node(scans rdi, lp rsi, depth rdx): marks the columns referenced
  * by the operator, its inputs and the nested blocks below it */
 FUNC prune_node
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -206,6 +210,7 @@ ENDF prune_node
 /* collect_scans(lp rdi, scans rsi): scans[rv] = Scan / SubqueryScan node
  * of the block, with every column cleared */
 FUNC collect_scans
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12

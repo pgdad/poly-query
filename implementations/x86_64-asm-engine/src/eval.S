@@ -216,6 +216,7 @@ ENDF check_finite
 /* ================================================================ eval */
 
 FUNC eval
+    STACK_CHECK
     ENTER 16
     mov %rdi, %rbx
     mov %rsi, %r12

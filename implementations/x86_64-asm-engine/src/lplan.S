@@ -273,6 +273,8 @@ ENDF mk_and
  * none (constant within the block), -2 when it references several or holds
  * an aggregate / correlated subquery */
 FUNC conj_rv
+    STACK_CHECK
+    call deadline_tick
     ENTER 0
     mov %rdi, %rbx
     mov $-1, %r12                   /* result */
@@ -332,6 +334,7 @@ ENDF conj_rv
  * every range variable of the FROM tree on the NULL-padded side of a LEFT
  * JOIN (inherited = 1: the whole subtree is) */
 FUNC lp_mark_nullable
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -372,6 +375,7 @@ ENDF put_table
 
 /* put_list(buf rdi, node*[] rsi, n rdx, plan rcx): "e1, e2, ..." */
 FUNC put_list
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -396,6 +400,8 @@ ENDF put_list
  * expression; columns as range_variable.column, outer references as
  * ^column, subqueries as (subquery) */
 FUNC lp_print_expr
+    STACK_CHECK
+    call deadline_tick
     ENTER 16
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -713,6 +719,7 @@ ENDF lp_print
 
 /* lp_print_at(buf rdi, lp rsi, plan rdx, depth rcx) */
 FUNC lp_print_at
+    STACK_CHECK
     ENTER 16
     mov %rdi, %rbx
     mov %rsi, %r12

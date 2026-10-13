@@ -54,6 +54,7 @@ ENDF is_lit_bool
  * raise an error: literals, columns, IS NULL, comparisons and boolean
  * connectives of such expressions */
 FUNC expr_safe
+    STACK_CHECK
     ENTER 0
     mov $1, %eax
     test %rdi, %rdi
@@ -179,6 +180,8 @@ ENDF replace_node
 
 /* fold_expr(node rdi): bottom-up folding and simplification */
 FUNC fold_expr
+    STACK_CHECK
+    call deadline_tick
     ENTER 16
     test %rdi, %rdi
     jz 9f
@@ -315,6 +318,7 @@ ENDF fold_list
 /* fold_node(slot rdi): folds the expressions of the operator in *slot and
  * of its inputs; a Filter folding to TRUE is replaced by its input */
 FUNC fold_node
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
 0:  mov (%rbx), %r12

@@ -25,6 +25,7 @@
 
     .section .note.GNU-stack, "", @progbits
 
+#define WORKER_STACK_SIZE (256*1024*1024) /* reserved per pool thread (CR-6) */
 #define PW_FN    0
 #define PW_ARG   8
 #define PW_PART  16
@@ -115,6 +116,7 @@ ENDF par_body
 FUNC par_worker
     push %rbx
     mov %rdi, %rbx
+    call thread_stack_init          /* STACK_CHECK limit, signal stack */
 0:  mov $POOL_SPIN, %ecx            /* poll a while: operators of a query */
 1:  cmpq $1, PW_STATE(%rbx)         /* follow each other closely */
     je 2f
@@ -167,10 +169,24 @@ FUNC pool_worker
     lea par_slots(%rip), %rax
     add %rax, %rcx                  /* the worker's slot */
     movq $0, PW_STATE(%rcx)
+    sub $64, %rsp                   /* pthread_attr_t: a large stack, so */
+    lea 0(%rsp), %rdi               /* workers evaluate any expression */
+    call pthread_attr_init          /* the engine accepts (CR-6) */
     lea 0(%rsp), %rdi
-    xor %esi, %esi
+    mov $WORKER_STACK_SIZE, %esi
+    call pthread_attr_setstacksize
+    imul $PW_SIZE, %rbx, %rcx
+    lea par_slots(%rip), %rax
+    add %rax, %rcx
+    lea 64(%rsp), %rdi
+    lea 0(%rsp), %rsi
     lea par_worker(%rip), %rdx
     call pthread_create
+    mov %eax, 8(%rsp)               /* (attr no longer needed) */
+    lea 0(%rsp), %rdi
+    call pthread_attr_destroy
+    mov 8(%rsp), %eax
+    add $64, %rsp
     xor %ecx, %ecx
     test %eax, %eax
     jnz 9f

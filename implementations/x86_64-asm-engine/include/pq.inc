@@ -254,6 +254,15 @@
     ret
 .endm
 
+/* CR-6 stack guard: raise RESOURCE_LIMIT (stack_exhausted, util.S) when the
+ * stack pointer is below the calling thread's safe limit t_stack_lo.  Used at
+ * the entry of every recursive tree walker; a thread whose limit was never
+ * set (t_stack_lo = 0) always passes. */
+.macro STACK_CHECK
+    cmp %fs:t_stack_lo@tpoff, %rsp
+    jb stack_exhausted
+.endm
+
 /* raise error with a constant message: RAISE E_CODE, "text" */
 .macro RAISE code, msg
     .pushsection .rodata.str1.1, "aMS", @progbits, 1

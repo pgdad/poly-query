@@ -1600,15 +1600,9 @@ ENDF cw_exec
  * time holding cat_lock (released while a load parses its input) */
 FUNC cw_main
     ENTER 48
-    /* alternate signal stack: report stack overflows as INTERNAL_ERROR */
-    mov $(256*1024), %edi
-    call xmalloc
-    mov %rax, 16(%rsp)
-    movl $0, 24(%rsp)
-    movq $(256*1024), 32(%rsp)
-    lea 16(%rsp), %rdi
-    xor %esi, %esi
-    call sigaltstack
+    /* STACK_CHECK limit and alternate signal stack: stack overflows are
+     * reported as RESOURCE_LIMIT */
+    call thread_stack_init
 1:  lea q_mutex(%rip), %rdi
     call pthread_mutex_lock
 2:  mov q_head(%rip), %rax

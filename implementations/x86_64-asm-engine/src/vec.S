@@ -215,14 +215,25 @@ ENDF vnot
 
 /* expr_batch_const(node rdi) -> eax 1 if the value does not depend on the
  * tuple: no column / outer / aggregate references, no subqueries and no
- * PQ_SLEEP (which must run once per row) */
+ * PQ_SLEEP (which must run once per row).  The answer is cached in the
+ * node (NF_BCDONE / NF_BCONST), so asking it at every node of a tree stays
+ * linear (CR-6: long operator chains); parallel workers may set the bits
+ * concurrently, hence the locked update. */
 FUNC expr_batch_const
+    STACK_CHECK
     ENTER 0
     mov $1, %eax
     test %rdi, %rdi
     jz 9f
     mov %rdi, %rbx
-    mov N_KIND(%rbx), %ecx
+    mov N_FLAGS(%rbx), %ecx
+    test $NF_BCDONE, %ecx
+    jz 0f
+    xor %eax, %eax
+    test $NF_BCONST, %ecx
+    setnz %al
+    jmp 9f
+0:  mov N_KIND(%rbx), %ecx
     xor %eax, %eax
     cmp $EK_COL, %ecx
     je 9f
@@ -252,16 +263,20 @@ FUNC expr_batch_const
     mov (%rax), %rdi
     call expr_batch_const
     test %eax, %eax
-    jz 9f
+    jz 7f
     inc %r13
     jmp 2b
-8:  mov $1, %eax
+7:  lock orl $NF_BCDONE, N_FLAGS(%rbx)
+    jmp 9f
+8:  lock orl $(NF_BCDONE | NF_BCONST), N_FLAGS(%rbx)
+    mov $1, %eax
 9:  LEAVE
 ENDF expr_batch_const
 
 /* ================================================================ veval */
 
 FUNC veval
+    STACK_CHECK
     ENTER 96
     mov %rdi, %rbx                  /* node */
     mov %rsi, %r12                  /* batch */
