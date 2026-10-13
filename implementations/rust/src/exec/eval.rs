@@ -80,6 +80,18 @@ pub fn like_match(s: &str, pattern: &str) -> bool {
 
 /// Evaluates `e` against one input row.
 pub fn eval(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
+    match e {
+        Expr::Literal { value, .. } => return Ok(value.clone()),
+        Expr::Column { index, .. } => return Ok(row[*index].clone()),
+        Expr::And(l, _) | Expr::Or(l, _) if Chain::Logic.is_long(l) => {
+            return eval_logic_chain(e, row, ctx);
+        }
+        Expr::Arith { left, .. } if Chain::Arith.is_long(left) => {
+            return eval_arith_chain(e, row, ctx);
+        }
+        Expr::Concat(l, _) if Chain::Concat.is_long(l) => return eval_concat_chain(e, row, ctx),
+        _ => crate::stack::check()?,
+    }
     Ok(match e {
         Expr::Literal { value, .. } => value.clone(),
         Expr::Column { index, .. } => row[*index].clone(),
@@ -243,6 +255,133 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
             bool_value(if *negated { not3(r) } else { r })
         }
     })
+}
+
+/// Kinds of left-deep operator chains (`a + b + c …` is `(a + b) + c`)
+/// that are evaluated iteratively when long, so that the recursion depth of
+/// evaluation is bounded by the nesting depth of the statement and not by
+/// the length of its operator chains (CR-6).
+#[derive(Clone, Copy)]
+pub enum Chain {
+    /// `AND` / `OR` (both may occur in one chain).
+    Logic,
+    /// Arithmetic operators.
+    Arith,
+    /// `||`.
+    Concat,
+}
+
+/// Chains with at least this many links below the top operator are
+/// evaluated iteratively; shorter ones by plain recursion.
+const LONG_CHAIN: usize = 16;
+
+/// Links of a long chain evaluated between two checks of the timeout.
+const CHAIN_INTERRUPT_LINKS: usize = 4096;
+
+impl Chain {
+    /// The left operand of `e` if `e` is a link of this kind of chain.
+    pub fn left(self, e: &Expr) -> Option<&Expr> {
+        match (self, e) {
+            (Chain::Logic, Expr::And(l, _) | Expr::Or(l, _))
+            | (Chain::Arith, Expr::Arith { left: l, .. })
+            | (Chain::Concat, Expr::Concat(l, _)) => Some(l),
+            _ => None,
+        }
+    }
+
+    /// True if `e` starts a chain of at least [`LONG_CHAIN`] links.
+    pub fn is_long(self, mut e: &Expr) -> bool {
+        for _ in 0..LONG_CHAIN {
+            match self.left(e) {
+                Some(l) => e = l,
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// The chain's links from the bottom up and its leftmost operand.
+    pub fn links(self, mut e: &Expr) -> (Vec<&Expr>, &Expr) {
+        let mut links = Vec::new();
+        while let Some(l) = self.left(e) {
+            links.push(e);
+            e = l;
+        }
+        links.reverse();
+        (links, e)
+    }
+}
+
+/// `AND`/`OR` chain, link by link with exactly the semantics of the
+/// recursive evaluation (short circuit, [`decided_by`]).
+fn eval_logic_chain(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
+    let (links, first) = Chain::Logic.links(e);
+    let mut acc = eval(first, row, ctx);
+    for (k, link) in links.into_iter().enumerate() {
+        if k % CHAIN_INTERRUPT_LINKS == 0 {
+            ctx.check_interrupt()?;
+        }
+        let (Expr::And(_, r) | Expr::Or(_, r)) = link else {
+            unreachable!("logic chain link");
+        };
+        let decisive = matches!(link, Expr::Or(..));
+        acc = match acc {
+            Err(err) => decided_by(r, decisive, err, row, ctx),
+            Ok(Value::Bool(b)) if b == decisive => Ok(Value::Bool(b)),
+            Ok(lv) => eval(r, row, ctx).map(|rv| match (lv, rv) {
+                (_, Value::Bool(b)) if b == decisive => Value::Bool(b),
+                (Value::Bool(a), Value::Bool(b)) if a == b => Value::Bool(a),
+                _ => Value::Null,
+            }),
+        };
+    }
+    acc
+}
+
+/// Arithmetic chain: operands are evaluated left to right, every operator
+/// is applied to the running result.
+fn eval_arith_chain(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
+    let (links, first) = Chain::Arith.links(e);
+    let mut acc = eval(first, row, ctx)?;
+    for (k, link) in links.into_iter().enumerate() {
+        if k % CHAIN_INTERRUPT_LINKS == 0 {
+            ctx.check_interrupt()?;
+        }
+        let Expr::Arith {
+            op, kind, right, ..
+        } = link
+        else {
+            unreachable!("arithmetic chain link");
+        };
+        let r = eval(right, row, ctx)?;
+        acc = if acc.is_null() || r.is_null() {
+            Value::Null
+        } else {
+            arithmetic(*op, *kind, &acc, &r)?
+        };
+    }
+    Ok(acc)
+}
+
+/// `||` chain, appended into one buffer (linear in the result length).
+fn eval_concat_chain(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
+    let (links, first) = Chain::Concat.links(e);
+    let mut out = Some(String::new());
+    let mut append = |v: Value| match (v, &mut out) {
+        (Value::Str(s), Some(buf)) => buf.push_str(&s),
+        _ => out = None,
+    };
+    append(eval(first, row, ctx)?);
+    for (k, link) in links.into_iter().enumerate() {
+        if k % CHAIN_INTERRUPT_LINKS == 0 {
+            ctx.check_interrupt()?;
+        }
+        let Expr::Concat(_, r) = link else {
+            unreachable!("concat chain link");
+        };
+        append(eval(r, row, ctx)?);
+    }
+    Ok(out.map_or(Value::Null, |s| Value::str(&s)))
 }
 
 /// The left operand of `AND` (`decisive = false`) or `OR` (`decisive =

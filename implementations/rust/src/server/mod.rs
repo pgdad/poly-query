@@ -190,10 +190,11 @@ fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>) {
 
 fn spawn_connection(shared: &Arc<Shared>, stream: TcpStream) {
     let shared = shared.clone();
-    let spawned = std::thread::Builder::new()
-        .name("http-conn".into())
-        .stack_size(crate::protocol::WORKER_STACK_BYTES)
-        .spawn(move || conn::handle(&shared, stream));
+    let spawned = crate::stack::spawn(
+        "http-conn".into(),
+        crate::stack::QUERY_STACK_BYTES,
+        move || conn::handle(&shared, stream),
+    );
     if let Err(e) = spawned {
         log::error(
             "cannot start connection thread",

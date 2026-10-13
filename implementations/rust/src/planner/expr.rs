@@ -409,6 +409,140 @@ impl Expr {
         }
     }
 
+    /// A copy of this node whose immediate children (in [`Expr::children`]
+    /// order) are replaced by references to columns `0, 1, …`: evaluated on
+    /// a row of the children's values it computes this node alone. The
+    /// children are not copied, so building templates for every node of a
+    /// deep tree stays linear.
+    pub fn template(&self) -> Expr {
+        let next = std::cell::Cell::new(0);
+        let slot = |c: &Expr| {
+            let index = next.replace(next.get() + 1);
+            Expr::Column {
+                index,
+                ty: c.data_type(),
+            }
+        };
+        let boxed = |c: &Expr| Box::new(slot(c));
+        match self {
+            Expr::Literal { .. }
+            | Expr::Column { .. }
+            | Expr::Param { .. }
+            | Expr::AggRef { .. } => self.clone(),
+            Expr::Negate { expr, ty } => Expr::Negate {
+                expr: boxed(expr),
+                ty: *ty,
+            },
+            Expr::Not(e) => Expr::Not(boxed(e)),
+            Expr::And(l, r) => Expr::And(boxed(l), boxed(r)),
+            Expr::Or(l, r) => Expr::Or(boxed(l), boxed(r)),
+            Expr::Concat(l, r) => Expr::Concat(boxed(l), boxed(r)),
+            Expr::Arith {
+                op,
+                kind,
+                left,
+                right,
+                ty,
+            } => Expr::Arith {
+                op: *op,
+                kind: *kind,
+                left: boxed(left),
+                right: boxed(right),
+                ty: *ty,
+            },
+            Expr::Compare { op, left, right } => Expr::Compare {
+                op: *op,
+                left: boxed(left),
+                right: boxed(right),
+            },
+            Expr::IsNull { expr, negated } => Expr::IsNull {
+                expr: boxed(expr),
+                negated: *negated,
+            },
+            Expr::Cast { expr, to } => Expr::Cast {
+                expr: boxed(expr),
+                to: *to,
+            },
+            Expr::Function { func, args, ty } => Expr::Function {
+                func: *func,
+                args: args.iter().map(&slot).collect(),
+                ty: *ty,
+            },
+            Expr::Case {
+                operand,
+                whens,
+                else_expr,
+                ty,
+            } => {
+                let operand = operand.as_deref().map(&boxed);
+                let whens = whens.iter().map(|(w, t)| (slot(w), slot(t))).collect();
+                Expr::Case {
+                    operand,
+                    whens,
+                    else_expr: else_expr.as_deref().map(&boxed),
+                    ty: *ty,
+                }
+            }
+            Expr::Between {
+                expr,
+                low,
+                high,
+                negated,
+            } => Expr::Between {
+                expr: boxed(expr),
+                low: boxed(low),
+                high: boxed(high),
+                negated: *negated,
+            },
+            Expr::InList {
+                expr,
+                list,
+                negated,
+            } => {
+                let expr = boxed(expr);
+                Expr::InList {
+                    expr,
+                    list: list.iter().map(&slot).collect(),
+                    negated: *negated,
+                }
+            }
+            Expr::Like {
+                expr,
+                pattern,
+                negated,
+            } => Expr::Like {
+                expr: boxed(expr),
+                pattern: boxed(pattern),
+                negated: *negated,
+            },
+            Expr::ScalarSubquery { sub, params, ty } => Expr::ScalarSubquery {
+                sub: sub.clone(),
+                params: params.iter().map(&slot).collect(),
+                ty: *ty,
+            },
+            Expr::Exists { sub, params } => Expr::Exists {
+                sub: sub.clone(),
+                params: params.iter().map(&slot).collect(),
+            },
+            Expr::InSubquery {
+                expr,
+                sub,
+                params,
+                negated,
+                domain,
+            } => {
+                let expr = boxed(expr);
+                Expr::InSubquery {
+                    expr,
+                    sub: sub.clone(),
+                    params: params.iter().map(&slot).collect(),
+                    negated: *negated,
+                    domain: *domain,
+                }
+            }
+        }
+    }
+
     /// Calls `f` for every subquery in this expression tree (not descending
     /// into subquery plans); `correlated` tells whether the subquery
     /// receives outer values as parameters.

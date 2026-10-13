@@ -153,6 +153,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
     };
     let mut out = Vec::new();
     loop {
+        crate::interrupt::poll()?;
         lx.skip_trivia()?;
         let pos = lx.pos();
         let Some(c) = lx.peek(0) else {

@@ -2,18 +2,24 @@
 
 use super::ast::*;
 use super::lexer::{Keyword, Pos, Symbol, Token, TokenKind, tokenize};
+use super::limits;
 use crate::error::{Error, Result};
 
-/// Maximum expression/query nesting depth (protects the stack).
-const MAX_DEPTH: usize = 10_000;
-
 /// Parses one SQL statement (an optional single trailing `;` is allowed).
+///
+/// The statement must stay within the engine's size limits ([`limits`]):
+/// a statement beyond one fails with `RESOURCE_LIMIT` naming the measure,
+/// reported as soon as the limit is crossed (before any later syntax error).
 pub fn parse_statement(sql: &str) -> Result<Statement> {
+    limits::check_text_length(sql.len())?;
     let tokens = tokenize(sql)?;
     let mut p = Parser {
         tokens,
         i: 0,
         depth: 0,
+        peak: 0,
+        operands: 0,
+        tables: 0,
     };
     let stmt = p.statement()?;
     p.eat_symbol(Symbol::Semicolon);
@@ -26,7 +32,14 @@ pub fn parse_statement(sql: &str) -> Result<Statement> {
 struct Parser {
     tokens: Vec<Token>,
     i: usize,
+    /// Nesting depth (CR-6 §1) of the construct being parsed.
     depth: usize,
+    /// Largest nesting depth reached inside the current subtree.
+    peak: usize,
+    /// Operands (literals, column references, `*`) seen so far.
+    operands: usize,
+    /// FROM items (tables, CTE references, derived tables) seen so far.
+    tables: usize,
 }
 
 impl Parser {
@@ -125,18 +138,58 @@ impl Parser {
         }
     }
 
+    /// Enters a construct that adds one nesting level around what follows.
     fn enter(&mut self) -> Result<()> {
         self.depth += 1;
-        if self.depth > MAX_DEPTH {
-            return Err(self
-                .pos()
-                .error(Error::parse("statement is nested too deeply")));
-        }
-        Ok(())
+        self.reach(self.depth)?;
+        crate::stack::check()
     }
 
     fn leave(&mut self) {
         self.depth -= 1;
+    }
+
+    /// Records that nesting depth `depth` is reached.
+    fn reach(&mut self, depth: usize) -> Result<()> {
+        if depth > self.peak {
+            self.peak = depth;
+            limits::check_nesting_depth(depth)?;
+        }
+        Ok(())
+    }
+
+    /// Starts an operand that may turn out to be the first operand of an
+    /// infix construct (operator chain, comparison, …): returns the peak
+    /// of the enclosing subtree, to be passed to [`Parser::end_operand`].
+    fn begin_operand(&mut self) -> usize {
+        std::mem::replace(&mut self.peak, self.depth)
+    }
+
+    /// The first operand parsed after [`Parser::begin_operand`] turned out
+    /// to be enclosed by an infix construct: every level inside it moves
+    /// one down, and the construct's other operands are parsed one level
+    /// deeper (until [`Parser::leave`]).
+    fn wrap_operand(&mut self) -> Result<()> {
+        self.reach(self.peak + 1)?;
+        self.depth += 1;
+        Ok(())
+    }
+
+    /// Ends the subtree started by [`Parser::begin_operand`].
+    fn end_operand(&mut self, outer_peak: usize) {
+        self.peak = self.peak.max(outer_peak);
+    }
+
+    /// Counts one FROM item.
+    fn table(&mut self) -> Result<()> {
+        self.tables += 1;
+        limits::check_table_references(self.tables)
+    }
+
+    /// Counts one operand (literal, column reference or `*` argument).
+    fn operand(&mut self) -> Result<()> {
+        self.operands += 1;
+        limits::check_operand_count(self.operands)
     }
 
     // ---------------------------------------------------------------- statements
@@ -191,8 +244,15 @@ impl Parser {
         Ok(Statement::Query(Box::new(self.query()?)))
     }
 
-    fn query(&mut self) -> Result<Query> {
+    /// A nested query (subquery, CTE, derived table): one nesting level.
+    fn subquery(&mut self) -> Result<Query> {
         self.enter()?;
+        let q = self.query();
+        self.leave();
+        q
+    }
+
+    fn query(&mut self) -> Result<Query> {
         let pos = self.pos();
         let mut with = Vec::new();
         if self.eat_keyword(Keyword::WITH) {
@@ -210,7 +270,7 @@ impl Parser {
                 }
                 self.expect_keyword(Keyword::AS)?;
                 self.expect_symbol(Symbol::LParen)?;
-                let query = Box::new(self.query()?);
+                let query = Box::new(self.subquery()?);
                 self.expect_symbol(Symbol::RParen)?;
                 with.push(Cte {
                     name,
@@ -283,7 +343,6 @@ impl Parser {
             }
             return Err(self.unsupported("UNION without ALL"));
         }
-        self.leave();
         Ok(Query {
             with,
             body,
@@ -419,21 +478,22 @@ impl Parser {
 
     fn table_ref(&mut self) -> Result<FromItem> {
         if self.eat_symbol(Symbol::LParen) {
-            self.enter()?;
-            let item = if self.is_keyword(Keyword::SELECT) || self.is_keyword(Keyword::WITH) {
-                let query = Box::new(self.query()?);
+            if self.is_keyword(Keyword::SELECT) || self.is_keyword(Keyword::WITH) {
+                self.table()?;
+                let query = Box::new(self.subquery()?);
                 self.expect_symbol(Symbol::RParen)?;
                 self.eat_keyword(Keyword::AS);
                 let alias = self.ident()?;
-                FromItem::Derived { query, alias }
-            } else {
-                let inner = self.parse_from()?;
-                self.expect_symbol(Symbol::RParen)?;
-                inner
-            };
+                return Ok(FromItem::Derived { query, alias });
+            }
+            self.enter()?;
+            let inner = self.parse_from();
             self.leave();
-            return Ok(item);
+            let inner = inner?;
+            self.expect_symbol(Symbol::RParen)?;
+            return Ok(inner);
         }
+        self.table()?;
         let name = self.ident()?;
         let alias = self.optional_alias()?;
         Ok(FromItem::Table { name, alias })
@@ -442,54 +502,50 @@ impl Parser {
     // ---------------------------------------------------------------- expressions
 
     pub fn expr(&mut self) -> Result<Expr> {
-        self.enter()?;
-        let e = self.or_expr();
-        self.leave();
-        e
+        self.or_expr()
+    }
+
+    /// Parses a left-associative chain `operand { op operand }` of one
+    /// precedence level into a left-deep tree. The chain adds one nesting
+    /// level, whatever its length (CR-6 §1), and is parsed iteratively.
+    fn chain(
+        &mut self,
+        operand: fn(&mut Self) -> Result<Expr>,
+        operator: fn(&TokenKind) -> Option<BinaryOp>,
+    ) -> Result<Expr> {
+        let outer = self.begin_operand();
+        let mut left = operand(self)?;
+        if operator(self.peek()).is_some() {
+            self.wrap_operand()?;
+            while let Some(op) = operator(self.peek()) {
+                let pos = self.pos();
+                self.advance();
+                let right = operand(self)?;
+                left = Expr {
+                    kind: ExprKind::Binary {
+                        op,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    },
+                    pos,
+                };
+            }
+            self.leave();
+        }
+        self.end_operand(outer);
+        Ok(left)
     }
 
     fn or_expr(&mut self) -> Result<Expr> {
-        let mut left = self.and_expr()?;
-        // Each chained operator deepens the (left-leaning) tree.
-        let saved = self.depth;
-        while self.is_keyword(Keyword::OR) {
-            let pos = self.pos();
-            self.advance();
-            self.enter()?;
-            let right = self.and_expr()?;
-            left = Expr {
-                kind: ExprKind::Binary {
-                    op: BinaryOp::Or,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-                pos,
-            };
-        }
-        self.depth = saved;
-        Ok(left)
+        self.chain(Self::and_expr, |t| {
+            matches!(t, TokenKind::Keyword(Keyword::OR)).then_some(BinaryOp::Or)
+        })
     }
 
     fn and_expr(&mut self) -> Result<Expr> {
-        let mut left = self.not_expr()?;
-        // Each chained operator deepens the (left-leaning) tree.
-        let saved = self.depth;
-        while self.is_keyword(Keyword::AND) {
-            let pos = self.pos();
-            self.advance();
-            self.enter()?;
-            let right = self.not_expr()?;
-            left = Expr {
-                kind: ExprKind::Binary {
-                    op: BinaryOp::And,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-                pos,
-            };
-        }
-        self.depth = saved;
-        Ok(left)
+        self.chain(Self::not_expr, |t| {
+            matches!(t, TokenKind::Keyword(Keyword::AND)).then_some(BinaryOp::And)
+        })
     }
 
     fn not_expr(&mut self) -> Result<Expr> {
@@ -510,8 +566,40 @@ impl Parser {
         self.predicate()
     }
 
+    /// A comparison, `IS [NOT] NULL`, `BETWEEN`, `IN` or `LIKE` adds one
+    /// nesting level around all its operands.
     fn predicate(&mut self) -> Result<Expr> {
+        let outer = self.begin_operand();
         let left = self.concat_expr()?;
+        let e = if self.at_predicate() {
+            self.wrap_operand()?;
+            let e = self.predicate_rest(left);
+            self.leave();
+            e?
+        } else {
+            left
+        };
+        self.end_operand(outer);
+        Ok(e)
+    }
+
+    fn at_predicate(&self) -> bool {
+        match self.peek() {
+            TokenKind::Symbol(
+                Symbol::Eq | Symbol::NotEq | Symbol::Lt | Symbol::LtEq | Symbol::Gt | Symbol::GtEq,
+            ) => true,
+            TokenKind::Keyword(Keyword::IS | Keyword::BETWEEN | Keyword::IN | Keyword::LIKE) => {
+                true
+            }
+            TokenKind::Keyword(Keyword::NOT) => matches!(
+                self.peek_at(1),
+                TokenKind::Keyword(Keyword::BETWEEN | Keyword::IN | Keyword::LIKE)
+            ),
+            _ => false,
+        }
+    }
+
+    fn predicate_rest(&mut self, left: Expr) -> Result<Expr> {
         let pos = self.pos();
         let comp = match self.peek() {
             TokenKind::Symbol(Symbol::Eq) => Some(BinaryOp::Eq),
@@ -572,7 +660,7 @@ impl Parser {
         if self.eat_keyword(Keyword::IN) {
             self.expect_symbol(Symbol::LParen)?;
             if self.is_keyword(Keyword::SELECT) || self.is_keyword(Keyword::WITH) {
-                let query = Box::new(self.query()?);
+                let query = Box::new(self.subquery()?);
                 self.expect_symbol(Symbol::RParen)?;
                 return Ok(Expr {
                     kind: ExprKind::InSubquery {
@@ -615,82 +703,26 @@ impl Parser {
     }
 
     fn concat_expr(&mut self) -> Result<Expr> {
-        let mut left = self.additive()?;
-        // Each chained operator deepens the (left-leaning) tree.
-        let saved = self.depth;
-        while self.is_symbol(Symbol::Concat) {
-            let pos = self.pos();
-            self.advance();
-            self.enter()?;
-            let right = self.additive()?;
-            left = Expr {
-                kind: ExprKind::Binary {
-                    op: BinaryOp::Concat,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-                pos,
-            };
-        }
-        self.depth = saved;
-        Ok(left)
+        self.chain(Self::additive, |t| {
+            matches!(t, TokenKind::Symbol(Symbol::Concat)).then_some(BinaryOp::Concat)
+        })
     }
 
     fn additive(&mut self) -> Result<Expr> {
-        let mut left = self.multiplicative()?;
-        // Each chained operator deepens the (left-leaning) tree.
-        let saved = self.depth;
-        loop {
-            let op = match self.peek() {
-                TokenKind::Symbol(Symbol::Plus) => BinaryOp::Add,
-                TokenKind::Symbol(Symbol::Minus) => BinaryOp::Sub,
-                _ => {
-                    self.depth = saved;
-                    return Ok(left);
-                }
-            };
-            let pos = self.pos();
-            self.advance();
-            self.enter()?;
-            let right = self.multiplicative()?;
-            left = Expr {
-                kind: ExprKind::Binary {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-                pos,
-            };
-        }
+        self.chain(Self::multiplicative, |t| match t {
+            TokenKind::Symbol(Symbol::Plus) => Some(BinaryOp::Add),
+            TokenKind::Symbol(Symbol::Minus) => Some(BinaryOp::Sub),
+            _ => None,
+        })
     }
 
     fn multiplicative(&mut self) -> Result<Expr> {
-        let mut left = self.unary()?;
-        // Each chained operator deepens the (left-leaning) tree.
-        let saved = self.depth;
-        loop {
-            let op = match self.peek() {
-                TokenKind::Symbol(Symbol::Star) => BinaryOp::Mul,
-                TokenKind::Symbol(Symbol::Slash) => BinaryOp::Div,
-                TokenKind::Symbol(Symbol::Percent) => BinaryOp::Mod,
-                _ => {
-                    self.depth = saved;
-                    return Ok(left);
-                }
-            };
-            let pos = self.pos();
-            self.advance();
-            self.enter()?;
-            let right = self.unary()?;
-            left = Expr {
-                kind: ExprKind::Binary {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-                pos,
-            };
-        }
+        self.chain(Self::unary, |t| match t {
+            TokenKind::Symbol(Symbol::Star) => Some(BinaryOp::Mul),
+            TokenKind::Symbol(Symbol::Slash) => Some(BinaryOp::Div),
+            TokenKind::Symbol(Symbol::Percent) => Some(BinaryOp::Mod),
+            _ => None,
+        })
     }
 
     fn unary(&mut self) -> Result<Expr> {
@@ -714,6 +746,7 @@ impl Parser {
     }
 
     fn primary(&mut self) -> Result<Expr> {
+        crate::interrupt::poll()?;
         let pos = self.pos();
         let kind = match self.peek().clone() {
             TokenKind::Number(n) => {
@@ -753,7 +786,9 @@ impl Parser {
             TokenKind::Keyword(Keyword::CAST) => {
                 self.advance();
                 self.expect_symbol(Symbol::LParen)?;
+                self.enter()?;
                 let expr = self.expr()?;
+                self.leave();
                 self.expect_keyword(Keyword::AS)?;
                 let type_name = self.type_name()?;
                 self.expect_symbol(Symbol::RParen)?;
@@ -764,23 +799,28 @@ impl Parser {
             }
             TokenKind::Keyword(Keyword::CASE) => {
                 self.advance();
-                self.case_expr()?
+                self.enter()?;
+                let case = self.case_expr()?;
+                self.leave();
+                case
             }
             TokenKind::Keyword(Keyword::EXISTS) => {
                 self.advance();
                 self.expect_symbol(Symbol::LParen)?;
-                let q = self.query()?;
+                let q = self.subquery()?;
                 self.expect_symbol(Symbol::RParen)?;
                 ExprKind::Exists(Box::new(q))
             }
             TokenKind::Symbol(Symbol::LParen) => {
                 self.advance();
                 if self.is_keyword(Keyword::SELECT) || self.is_keyword(Keyword::WITH) {
-                    let q = self.query()?;
+                    let q = self.subquery()?;
                     self.expect_symbol(Symbol::RParen)?;
                     ExprKind::Subquery(Box::new(q))
                 } else {
+                    self.enter()?;
                     let e = self.expr()?;
+                    self.leave();
                     self.expect_symbol(Symbol::RParen)?;
                     return Ok(e);
                 }
@@ -788,7 +828,10 @@ impl Parser {
             TokenKind::Ident { .. } => {
                 let name = self.ident()?;
                 if self.eat_symbol(Symbol::LParen) {
-                    self.function_call(name)?
+                    self.enter()?;
+                    let call = self.function_call(name)?;
+                    self.leave();
+                    call
                 } else if self.is_symbol(Symbol::Dot) {
                     self.advance();
                     let col = self.ident()?;
@@ -805,11 +848,15 @@ impl Parser {
             }
             _ => return Err(self.unexpected("expression")),
         };
+        if matches!(kind, ExprKind::Literal(_) | ExprKind::Column { .. }) {
+            self.operand()?;
+        }
         Ok(Expr { kind, pos })
     }
 
     fn function_call(&mut self, name: Ident) -> Result<ExprKind> {
         if self.eat_symbol(Symbol::Star) {
+            self.operand()?;
             self.expect_symbol(Symbol::RParen)?;
             return Ok(ExprKind::Function {
                 name,
@@ -1030,23 +1077,63 @@ mod tests {
     }
 
     #[test]
-    fn deep_nesting_is_an_error_not_a_crash() {
+    fn size_limits_are_resource_limits() {
         // The engine parses on a thread with a large stack; mirror that here.
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
             .spawn(|| {
-                let sql = format!("SELECT {}1{}", "(".repeat(20_000), ")".repeat(20_000));
-                assert_eq!(code(&sql), ErrorCode::ParseError);
-                let sql = format!("SELECT {}1", "-".repeat(20_000));
-                assert_eq!(code(&sql), ErrorCode::ParseError);
-                let sql = format!("SELECT 1{}", " + 1".repeat(100_000));
-                assert_eq!(code(&sql), ErrorCode::ParseError);
-                let sql = format!("SELECT 1{}", " + 1".repeat(5_000));
+                let deep = limits::MAX_NESTING_DEPTH;
+                let sql = format!("SELECT {}1{}", "(".repeat(deep + 1), ")".repeat(deep + 1));
+                assert_eq!(code(&sql), ErrorCode::ResourceLimit);
+                let sql = format!("SELECT {}1{}", "(".repeat(deep), ")".repeat(deep));
                 assert!(parse_statement(&sql).is_ok());
+                let sql = format!("SELECT {}1", "- ".repeat(20_000));
+                assert_eq!(code(&sql), ErrorCode::ResourceLimit);
+                // The error is reported even if the statement is cut short.
+                let sql = format!("SELECT {}1", "NOT ".repeat(20_000));
+                assert_eq!(code(&sql), ErrorCode::ResourceLimit);
+                // A chain of one precedence level is one level, whatever its length.
+                let sql = format!("SELECT 1{}", " + 1".repeat(50_000));
+                assert!(parse_statement(&sql).is_ok());
+                let sql = format!("SELECT 1{}", " + 1".repeat(limits::MAX_OPERANDS));
+                assert_eq!(code(&sql), ErrorCode::ResourceLimit);
+                let sql = format!("SELECT '{}'", "a".repeat(limits::MAX_TEXT_BYTES));
+                assert_eq!(code(&sql), ErrorCode::ResourceLimit);
             })
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    fn depth(sql: &str) -> usize {
+        let mut p = Parser {
+            tokens: tokenize(sql).unwrap(),
+            i: 0,
+            depth: 0,
+            peak: 0,
+            operands: 0,
+            tables: 0,
+        };
+        p.statement().unwrap();
+        p.peak
+    }
+
+    #[test]
+    fn nesting_depth_follows_cr6() {
+        assert_eq!(depth("SELECT x FROM t"), 0);
+        assert_eq!(depth("SELECT x FROM t WHERE x >= 0"), 1);
+        assert_eq!(depth("SELECT x FROM t WHERE ((x >= 0))"), 3);
+        assert_eq!(depth("SELECT a OR b OR c OR d"), 1);
+        assert_eq!(depth("SELECT a + b - c * d"), 2);
+        assert_eq!(depth("SELECT ((x + 1) + 1) + 1"), 5);
+        assert_eq!(depth("SELECT x + 1 >= 0 AND NOT y"), 3);
+        assert_eq!(depth("SELECT ABS(ABS(x)) >= 0"), 3);
+        assert_eq!(depth("SELECT - - x"), 2);
+        assert_eq!(depth("SELECT CASE WHEN x = 1 THEN 1 END"), 2);
+        assert_eq!(depth("SELECT x IN (1, 2, 3)"), 1);
+        assert_eq!(depth("SELECT (SELECT (SELECT 1))"), 2);
+        assert_eq!(depth("SELECT * FROM (SELECT * FROM t) d"), 1);
+        assert_eq!(depth("WITH c AS (SELECT 1) SELECT * FROM c"), 1);
     }
 
     #[test]

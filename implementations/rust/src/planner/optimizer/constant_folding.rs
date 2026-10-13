@@ -29,6 +29,7 @@ impl Rule for ConstantFolding {
 /// Folds and simplifies every expression of `plan` (not descending into
 /// subquery plans).
 fn simplify_plan(plan: LogicalPlan) -> LogicalPlan {
+    crate::interrupt::checkpoint();
     let b = |p: Box<LogicalPlan>| Box::new(simplify_plan(*p));
     match plan {
         LogicalPlan::SingleRow | LogicalPlan::Scan { .. } => plan,

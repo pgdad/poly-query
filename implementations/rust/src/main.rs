@@ -4,7 +4,8 @@ use std::process::ExitCode;
 
 use polyquery::cli::{Mode, USAGE, parse_args};
 use polyquery::engine::Engine;
-use polyquery::protocol::{WORKER_STACK_BYTES, capabilities_json, session, version_json};
+use polyquery::protocol::{capabilities_json, session, version_json};
+use polyquery::stack::QUERY_STACK_BYTES;
 
 #[global_allocator]
 static GLOBAL: polyquery::alloc::ArenaLocalAlloc = polyquery::alloc::ArenaLocalAlloc;
@@ -60,16 +61,13 @@ fn main() -> ExitCode {
             }
             let mode = cli.mode.clone();
             let config = cli.config;
-            let worker = std::thread::Builder::new()
-                .name("session".into())
-                .stack_size(WORKER_STACK_BYTES)
-                .spawn(move || {
-                    let engine = Engine::new(config);
-                    match &mode {
-                        Mode::Exec { request } => session::run_exec(&engine, request),
-                        _ => session::run_session(&engine),
-                    }
-                });
+            let worker = polyquery::stack::spawn("session".into(), QUERY_STACK_BYTES, move || {
+                let engine = Engine::new(config);
+                match &mode {
+                    Mode::Exec { request } => session::run_exec(&engine, request),
+                    _ => session::run_session(&engine),
+                }
+            });
             match worker.map(|h| h.join()) {
                 Ok(Ok(Ok(()))) => ExitCode::SUCCESS,
                 Ok(Ok(Err(e))) => {

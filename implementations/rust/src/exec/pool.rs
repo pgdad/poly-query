@@ -13,7 +13,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
-use super::parallel::PARALLEL_STACK_BYTES;
+use crate::stack;
 
 /// Idle threads kept for reuse (more finish and exit).
 const MAX_IDLE: usize = 256;
@@ -41,16 +41,17 @@ fn dispatch(mut job: Job) -> Result<(), Job> {
     // taken back if the thread cannot be started.
     let slot = Arc::new(Mutex::new(Some(job)));
     let theirs = slot.clone();
-    let started = std::thread::Builder::new()
-        .name("pq-worker".to_string())
-        .stack_size(PARALLEL_STACK_BYTES)
-        .spawn(move || {
+    let started = stack::spawn(
+        "pq-worker".to_string(),
+        stack::WORKER_STACK_BYTES,
+        move || {
             let job = theirs.lock().unwrap_or_else(|e| e.into_inner()).take();
             if let Some(job) = job {
                 let (tx, rx) = channel::<Job>();
                 worker(job, tx, rx);
             }
-        });
+        },
+    );
     match started {
         Ok(_) => Ok(()),
         Err(_) => match slot.lock().unwrap_or_else(|e| e.into_inner()).take() {

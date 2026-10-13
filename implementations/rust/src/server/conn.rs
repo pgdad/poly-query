@@ -44,6 +44,7 @@ pub fn handle(shared: &Arc<Shared>, stream: TcpStream) {
     let mut conn = Conn {
         shared: shared.clone(),
         stream,
+        received: Instant::now(),
     };
     let mut reader = BufReader::new(read_half);
     loop {
@@ -66,6 +67,7 @@ pub fn handle(shared: &Arc<Shared>, stream: TcpStream) {
         let _active = shared.begin_request();
         shared.metrics.http_request();
         let started = Instant::now();
+        conn.received = started;
         let body = std::mem::take(&mut req.body);
         let outcome = conn.route(&req, body);
         let keep_alive = req.keep_alive && !conn.shared.is_shutting_down();
@@ -103,6 +105,8 @@ pub fn handle(shared: &Arc<Shared>, stream: TcpStream) {
 struct Conn {
     shared: Arc<Shared>,
     stream: TcpStream,
+    /// When the request being handled was received.
+    received: Instant,
 }
 
 fn json_response(status: u16, body: &Json) -> Response {
@@ -354,7 +358,8 @@ impl Conn {
         match parsed {
             Ok(Request::Query { sql, options }) => self.run_query(id, sql, options, false),
             Ok(other) => {
-                let result = catch_panic(|| execute(&shared.engine, other, Instant::now()));
+                let received = self.received;
+                let result = catch_panic(|| execute(&shared.engine, other, received));
                 Outcome::Respond(protocol_response(id, result, ok_status))
             }
             Err(e) => Outcome::Respond(protocol_response(id, Err(e), ok_status)),
@@ -378,7 +383,8 @@ impl Conn {
     /// Admits, registers and runs a query, relaying its result.
     fn run_query(&mut self, id: Json, sql: String, options: QueryOptions, stream: bool) -> Outcome {
         let shared = self.shared.clone();
-        let arrival = Instant::now();
+        // The timeout counts from receipt of the request (CR-6 §4).
+        let arrival = self.received;
         let handle = match shared.registry.register(options.query_id.as_deref()) {
             Ok(h) => h,
             Err(e) => {

@@ -28,6 +28,7 @@ fn conjuncts(e: Expr) -> Vec<Expr> {
 
 /// Pushes filters and join conditions as close to the scans as possible.
 fn push_down(plan: LogicalPlan) -> LogicalPlan {
+    crate::interrupt::checkpoint();
     match plan {
         LogicalPlan::Filter { input, predicate } => {
             let input = push_down(*input);
@@ -120,6 +121,7 @@ fn push_conjuncts(plan: LogicalPlan, preds: Vec<Expr>) -> LogicalPlan {
     if preds.is_empty() {
         return plan;
     }
+    crate::interrupt::checkpoint();
     match plan {
         LogicalPlan::Filter { input, predicate } => {
             let mut all = conjuncts(predicate);

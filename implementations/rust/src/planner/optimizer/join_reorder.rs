@@ -11,7 +11,7 @@
 //! Each conjunct is attached to the first join where all its columns are
 //! available; a projection restores the original column order.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::Rule;
 use crate::planner::cardinality::estimate_rows;
@@ -32,14 +32,49 @@ impl Rule for JoinReorder {
     }
 }
 
+/// Inner-join trees with more inputs than this keep their shape (the
+/// binder builds long ones balanced, see `binder::joins`); only their
+/// subtrees are reordered.
+const MAX_REORDERED_INPUTS: usize = 64;
+
+/// Number of inputs of the inner-join tree rooted at `plan`, counting at
+/// most up to `limit + 1`.
+fn inner_join_inputs(plan: &LogicalPlan, limit: usize) -> usize {
+    let mut count = 0;
+    let mut stack = vec![plan];
+    while let Some(p) = stack.pop() {
+        match p {
+            LogicalPlan::Join {
+                left,
+                right,
+                join_type: JoinType::Inner | JoinType::Cross,
+                ..
+            } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            _ => {
+                count += 1;
+                if count > limit {
+                    break;
+                }
+            }
+        }
+    }
+    count
+}
+
 /// Reorders every inner-join chain of `plan` (bottom-up).
 fn reorder_joins(plan: LogicalPlan) -> LogicalPlan {
+    crate::interrupt::checkpoint();
     let b = |p: Box<LogicalPlan>| Box::new(reorder_joins(*p));
     match plan {
         LogicalPlan::Join {
             join_type: JoinType::Inner | JoinType::Cross,
             ..
-        } => reorder_chain(plan),
+        } if inner_join_inputs(&plan, MAX_REORDERED_INPUTS) <= MAX_REORDERED_INPUTS => {
+            reorder_chain(plan)
+        }
         LogicalPlan::Join {
             left,
             right,
@@ -179,15 +214,17 @@ struct EquiEdge {
     ndv_b: f64,
 }
 
+/// The leaf holding flattened column `g` (leaves are ordered by offset).
+fn leaf_of(g: usize, leaves: &[Leaf]) -> Option<usize> {
+    let i = leaves.partition_point(|l| l.offset <= g).checked_sub(1)?;
+    (g < leaves[i].offset + leaves[i].width).then_some(i)
+}
+
 /// Leaves referenced by a conjunct.
 fn leaves_of(c: &Expr, leaves: &[Leaf]) -> HashSet<usize> {
     c.columns()
         .into_iter()
-        .filter_map(|g| {
-            leaves
-                .iter()
-                .position(|l| g >= l.offset && g < l.offset + l.width)
-        })
+        .filter_map(|g| leaf_of(g, leaves))
         .collect()
 }
 
@@ -219,16 +256,17 @@ fn equi_edge(c: &Expr, leaves: &[Leaf]) -> Option<EquiEdge> {
 }
 
 /// Estimated size of joining the leaves in `set` (estimated `rows`) with
-/// leaf `next`, and whether they are connected by an equality.
-fn join_estimate(
+/// leaf `next` through the equalities `incident` (edges incident to `next`;
+/// those whose other end is in `set` count), and whether they are connected.
+fn join_estimate<'e>(
     set: &[bool],
     rows: f64,
     next: usize,
     leaves: &[Leaf],
-    edges: &[EquiEdge],
+    incident: impl IntoIterator<Item = &'e EquiEdge>,
 ) -> (f64, bool) {
     let mut best: Option<f64> = None;
-    for e in edges {
+    for e in incident {
         let (inside, ndv_in, ndv_next) = if e.b == next && set[e.a] {
             (true, e.ndv_a, e.ndv_b)
         } else if e.a == next && set[e.b] {
@@ -247,15 +285,31 @@ fn join_estimate(
     }
 }
 
-/// Greedy join order (indices into `leaves`).
+/// Greedy join order (indices into `leaves`). Ties go to the first edge /
+/// the lowest leaf index. Only the frontier (leaves connected to the joined
+/// set) is re-estimated in each step, so long chains order in near-linear
+/// time.
 fn greedy_order(leaves: &[Leaf], edges: &[EquiEdge]) -> Vec<usize> {
     let n = leaves.len();
+    let mut adjacent: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut by_pair: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    for (k, e) in edges.iter().enumerate() {
+        adjacent[e.a].push(k);
+        adjacent[e.b].push(k);
+        by_pair
+            .entry((e.a.min(e.b), e.a.max(e.b)))
+            .or_default()
+            .push(k);
+    }
     // Starting pair: connected and smallest estimated result.
     let mut start: Option<(f64, usize, usize)> = None;
+    let mut set = vec![false; n];
     for e in edges {
-        let mut set = vec![false; n];
         set[e.a] = true;
-        let (est, _) = join_estimate(&set, leaves[e.a].rows, e.b, leaves, edges);
+        let pair = &by_pair[&(e.a.min(e.b), e.a.max(e.b))];
+        let incident = pair.iter().map(|&k| &edges[k]);
+        let (est, _) = join_estimate(&set, leaves[e.a].rows, e.b, leaves, incident);
+        set[e.a] = false;
         let (a, b) = if leaves[e.a].rows >= leaves[e.b].rows {
             (e.a, e.b)
         } else {
@@ -269,25 +323,48 @@ fn greedy_order(leaves: &[Leaf], edges: &[EquiEdge]) -> Vec<usize> {
         return (0..n).collect();
     };
     let mut order = vec![a, b];
-    let mut set = vec![false; n];
     set[a] = true;
     set[b] = true;
-    while order.len() < n {
-        let mut pick: Option<(bool, f64, usize)> = None;
-        for next in (0..n).filter(|&i| !set[i]) {
-            let (est, connected) = join_estimate(&set, rows, next, leaves, edges);
-            let better = match pick {
-                None => true,
-                Some((pc, pe, _)) => (connected && !pc) || (connected == pc && est < pe),
+    // Leaves outside the set that are connected to it.
+    let mut frontier: BTreeSet<usize> = BTreeSet::new();
+    let join_leaf = |leaf: usize, set: &[bool], frontier: &mut BTreeSet<usize>| {
+        frontier.remove(&leaf);
+        for &k in &adjacent[leaf] {
+            let other = if edges[k].a == leaf {
+                edges[k].b
+            } else {
+                edges[k].a
             };
-            if better {
-                pick = Some((connected, est, next));
+            if !set[other] {
+                frontier.insert(other);
             }
         }
-        let Some((_, est, next)) = pick else { break };
+    };
+    join_leaf(a, &set, &mut frontier);
+    join_leaf(b, &set, &mut frontier);
+    while order.len() < n {
+        let mut pick: Option<(f64, usize)> = None;
+        for &next in &frontier {
+            let incident = adjacent[next].iter().map(|&k| &edges[k]);
+            let (est, _) = join_estimate(&set, rows, next, leaves, incident);
+            if pick.is_none_or(|(pe, _)| est < pe) {
+                pick = Some((est, next));
+            }
+        }
+        if pick.is_none() {
+            // No connected leaf remains: the smallest cross product.
+            for next in (0..n).filter(|&i| !set[i]) {
+                let est = rows * leaves[next].rows;
+                if pick.is_none_or(|(pe, _)| est < pe) {
+                    pick = Some((est, next));
+                }
+            }
+        }
+        let Some((est, next)) = pick else { break };
         rows = est;
         set[next] = true;
         order.push(next);
+        join_leaf(next, &set, &mut frontier);
     }
     order
 }
@@ -317,26 +394,33 @@ fn reorder_chain(plan: LogicalPlan) -> LogicalPlan {
         }
         offset += l.width;
     }
-    let conj_leaves: Vec<HashSet<usize>> =
-        conjuncts.iter().map(|c| leaves_of(c, &leaves)).collect();
-    let mut pending: Vec<Option<Expr>> = conjuncts.into_iter().map(Some).collect();
+    // Each conjunct is attached to the first join at which all its leaves
+    // are available (step 1 at the earliest), in their original order.
+    let mut step_of = vec![0usize; n];
+    for (step, &i) in order.iter().enumerate() {
+        step_of[i] = step;
+    }
+    let mut ready: Vec<Vec<Expr>> = vec![Vec::new(); order.len().max(2)];
+    for c in conjuncts {
+        let step = leaves_of(&c, &leaves)
+            .into_iter()
+            .map(|l| step_of[l])
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        ready[step].push(c);
+    }
     let identity = order.iter().enumerate().all(|(k, &i)| k == i);
     let mut slots: Vec<Option<LogicalPlan>> = leaves.into_iter().map(|l| Some(l.plan)).collect();
-    let mut avail = vec![false; n];
     let mut cur: Option<LogicalPlan> = None;
-    for &i in &order {
-        avail[i] = true;
+    for (step, &i) in order.iter().enumerate() {
         let leaf = slots[i].take().unwrap_or(LogicalPlan::SingleRow);
         cur = Some(match cur {
             None => leaf,
             Some(acc) => {
-                let mut on = Vec::new();
-                for (k, slot) in pending.iter_mut().enumerate() {
-                    if slot.is_some() && conj_leaves[k].iter().all(|&l| avail[l]) {
-                        let mut c = slot.take().unwrap_or_else(|| unreachable!());
-                        c.remap_columns(&|g| new_pos[g]);
-                        on.push(c);
-                    }
+                let mut on = std::mem::take(&mut ready[step]);
+                for c in &mut on {
+                    c.remap_columns(&|g| new_pos[g]);
                 }
                 let on = Expr::conjunction(on);
                 let jt = if on.is_some() {

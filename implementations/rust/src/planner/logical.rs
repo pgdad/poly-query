@@ -148,6 +148,52 @@ impl LogicalPlan {
         }
     }
 
+    /// Size of the plan tree in units of plan nodes, stored output columns
+    /// and expression nodes (subquery plans are shared, not counted): a
+    /// measure of the memory a copy of the plan takes.
+    pub fn size(&self) -> usize {
+        let mut units = 0;
+        let mut stack = vec![self];
+        while let Some(p) = stack.pop() {
+            units += 1;
+            match p {
+                LogicalPlan::SingleRow => {}
+                LogicalPlan::Scan { schema, .. } => units += schema.len(),
+                LogicalPlan::Project { input, schema, .. }
+                | LogicalPlan::Aggregate { input, schema, .. } => {
+                    units += schema.len();
+                    stack.push(input);
+                }
+                LogicalPlan::Join {
+                    left,
+                    right,
+                    schema,
+                    ..
+                } => {
+                    units += schema.len();
+                    stack.push(left);
+                    stack.push(right);
+                }
+                LogicalPlan::Filter { input, .. }
+                | LogicalPlan::Distinct { input }
+                | LogicalPlan::Sort { input, .. }
+                | LogicalPlan::Limit { input, .. } => stack.push(input),
+                LogicalPlan::UnionAll { inputs, schema } => {
+                    units += schema.len();
+                    stack.extend(inputs);
+                }
+            }
+        }
+        let nodes = std::cell::Cell::new(0usize);
+        self.visit_exprs(&mut |e| {
+            e.any(&|_| {
+                nodes.set(nodes.get() + 1);
+                false
+            });
+        });
+        units + nodes.get()
+    }
+
     /// Calls `f` for every expression of this plan tree (not descending into
     /// subquery plans).
     pub fn visit_exprs(&self, f: &mut dyn FnMut(&Expr)) {

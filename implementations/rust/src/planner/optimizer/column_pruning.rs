@@ -71,6 +71,7 @@ fn union(required: &[usize], extra: impl IntoIterator<Item = usize>) -> Vec<usiz
 /// index to its new index (`DROPPED` if removed). Columns outside `required`
 /// may survive (e.g. those a filter needs).
 fn prune(plan: LogicalPlan, required: &[usize]) -> (LogicalPlan, Vec<usize>) {
+    crate::interrupt::checkpoint();
     match plan {
         LogicalPlan::SingleRow => (LogicalPlan::SingleRow, Vec::new()),
         LogicalPlan::Scan {

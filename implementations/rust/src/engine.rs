@@ -12,6 +12,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::exec::parallel::default_morsel_rows;
 use crate::exec::{ExecContext, Operator, Row, build};
 use crate::ingest::{self, Format, IngestOptions};
+use crate::interrupt::{self, Interrupt};
 use crate::json::Json;
 use crate::planner::physical::{self, JoinStrategy};
 use crate::planner::{
@@ -444,7 +445,19 @@ impl Engine {
             catalog,
             test_functions: self.config.test_functions,
         };
-        Ok(Optimizer::for_query(opts.optimize).optimize(plan_query(q, &ctx)?))
+        let t0 = Instant::now();
+        let bound = plan_query(q, &ctx)?;
+        interrupt::check()?;
+        let t1 = Instant::now();
+        let optimized = Optimizer::for_query(opts.optimize).optimize(bound);
+        crate::log::debug(
+            "statement bound",
+            vec![
+                ("bind_us", Json::uint((t1 - t0).as_micros() as u64)),
+                ("optimize_us", Json::uint(t1.elapsed().as_micros() as u64)),
+            ],
+        );
+        optimized
     }
 
     /// The query options that steer physical planning.
@@ -459,9 +472,14 @@ impl Engine {
     }
 
     /// The physical plan of a query (`explain` op; also accepts `EXPLAIN …`).
-    pub fn explain(&self, sql: &str, opts: &QueryOptions) -> Result<Json> {
+    pub fn explain(&self, sql: &str, opts: &QueryOptions, control: QueryControl) -> Result<Json> {
+        let interrupt = self.interrupt(opts, control);
+        let _installed = interrupt::install(interrupt.clone());
         match parse_statement(sql)? {
-            Statement::Query(q) | Statement::Explain(q) => self.explain_query(&q, opts),
+            Statement::Query(q) | Statement::Explain(q) => {
+                interrupt.check()?;
+                self.explain_query(&q, opts, &interrupt)
+            }
             Statement::CreateIndex { .. } | Statement::DropIndex { .. } => {
                 Err(Error::unsupported("only queries can be explained"))
             }
@@ -469,10 +487,39 @@ impl Engine {
     }
 
     /// The EXPLAIN plan JSON of a query.
-    fn explain_query(&self, q: &Query, opts: &QueryOptions) -> Result<Json> {
+    fn explain_query(&self, q: &Query, opts: &QueryOptions, interrupt: &Interrupt) -> Result<Json> {
         let catalog = self.catalog();
         let logical = self.logical_plan(&catalog, q, opts)?;
-        Ok(physical::plan(&logical, &catalog, self.physical_options(opts)).to_json())
+        interrupt.check()?;
+        let plan = interrupt::catching(|| {
+            physical::plan(&logical, &catalog, self.physical_options(opts))
+        })?;
+        interrupt.check()?;
+        let json = plan.to_json();
+        interrupt.check()?;
+        Ok(json)
+    }
+
+    /// The effective deadline of a statement received at `arrival`:
+    /// `options.timeout_ms`, else the configured default (concurrency.md §3).
+    pub fn deadline(&self, arrival: Instant, opts: &QueryOptions) -> Option<Instant> {
+        let timeout_ms = if opts.timeout_ms > 0 {
+            opts.timeout_ms
+        } else {
+            self.config.query_timeout_ms
+        };
+        (timeout_ms > 0).then(|| arrival + Duration::from_millis(timeout_ms))
+    }
+
+    /// How the statement is interrupted; without an explicit deadline the
+    /// timeout counts from now.
+    fn interrupt(&self, opts: &QueryOptions, control: QueryControl) -> Interrupt {
+        Interrupt {
+            deadline: control
+                .deadline
+                .or_else(|| self.deadline(Instant::now(), opts)),
+            cancel: control.cancel,
+        }
     }
 
     /// Executes a SQL statement and materializes its result.
@@ -500,26 +547,41 @@ impl Engine {
             row_count: 0,
             replay: None,
         };
-        match parse_statement(sql)? {
+        // The timeout covers parsing, binding, planning and execution
+        // (CR-6 §4): the stages before execution poll the installed interrupt.
+        let interrupt = self.interrupt(opts, control);
+        let _installed = interrupt::install(interrupt.clone());
+        let t0 = Instant::now();
+        let statement = parse_statement(sql)?;
+        interrupt.check()?;
+        match statement {
             Statement::Query(q) => {
+                let t1 = Instant::now();
                 let catalog = self.catalog();
                 let logical = self.logical_plan(&catalog, &q, opts)?;
+                interrupt.check()?;
+                let t2 = Instant::now();
                 let physical_opts = self.physical_options(opts);
-                let plan = physical::plan(&logical, &catalog, physical_opts);
+                let plan =
+                    interrupt::catching(|| physical::plan(&logical, &catalog, physical_opts))?;
+                interrupt.check()?;
+                if crate::log::enabled(crate::log::LogLevel::Debug) {
+                    let us = |d: Duration| Json::uint(d.as_micros() as u64);
+                    crate::log::debug(
+                        "statement planned",
+                        vec![
+                            ("parse_us", us(t1 - t0)),
+                            ("bind_optimize_us", us(t2 - t1)),
+                            ("physical_us", us(t2.elapsed())),
+                        ],
+                    );
+                }
                 let columns = plan
                     .schema()
                     .iter()
                     .map(|f| Field::new(f.name.clone(), f.data_type.result_type()))
                     .collect();
-                let timeout_ms = if opts.timeout_ms > 0 {
-                    opts.timeout_ms
-                } else {
-                    self.config.query_timeout_ms
-                };
-                let timeout = (timeout_ms > 0).then(|| Duration::from_millis(timeout_ms));
-                let deadline = control
-                    .deadline
-                    .or_else(|| timeout.map(|t| Instant::now() + t));
+                let deadline = interrupt.deadline;
                 let memory =
                     usize::try_from(self.config.max_query_memory_mb.saturating_mul(1024 * 1024))
                         .unwrap_or(usize::MAX);
@@ -530,7 +592,7 @@ impl Engine {
                         .with_max_join_rows(self.config.max_join_rows)
                         .with_plan(plan)
                         .with_morsel_rows(morsel_rows);
-                    match &control.cancel {
+                    match &interrupt.cancel {
                         Some(flag) => ctx.with_cancel_flag(flag.clone()),
                         None => ctx,
                     }
@@ -540,11 +602,15 @@ impl Engine {
                 // A vectorized/parallel execution that fails is re-run with
                 // the row-at-a-time reference engine (see `QueryCursor`),
                 // planned from the same logical plan.
-                let replay = plan.execution.vectorized.then(|| {
-                    let baseline = physical::plan(&logical, &catalog, physical_opts.row_baseline());
+                let replay = if plan.execution.vectorized {
+                    let baseline = interrupt::catching(|| {
+                        physical::plan(&logical, &catalog, physical_opts.row_baseline())
+                    })?;
                     let ctx = make_ctx(&baseline);
-                    (baseline.root, ctx)
-                });
+                    Some((baseline.root, ctx))
+                } else {
+                    None
+                };
                 Ok(QueryCursor {
                     columns,
                     source: CursorSource::Plan(build(plan.root, &ctx)),
@@ -555,7 +621,9 @@ impl Engine {
                 })
             }
             Statement::Explain(q) => {
-                let text = self.explain_query(&q, opts)?.to_string_compact();
+                let text = self
+                    .explain_query(&q, opts, &interrupt)?
+                    .to_string_compact();
                 Ok(ready(
                     vec![Field::new("plan", DataType::String)],
                     vec![vec![Value::str(&text)]],
@@ -708,6 +776,8 @@ impl QueryCursor {
                 }
             }
         }
+        // A result completed after the deadline is a TIMEOUT (CR-6 §4).
+        self.ctx.check_interrupt()?;
         Ok(QueryResult {
             columns: self.columns,
             rows: Vec::new(),
@@ -772,6 +842,7 @@ impl QueryCursor {
             }
         }
         out.push(']');
+        self.ctx.check_interrupt()?;
         Ok(QueryResult {
             columns: self.columns,
             rows: Vec::new(),
@@ -804,6 +875,7 @@ impl QueryCursor {
                 rows.push(row);
             }
         }
+        self.ctx.check_interrupt()?;
         Ok(QueryResult {
             columns: self.columns,
             rows,
@@ -910,6 +982,150 @@ mod tests {
             e.query("SELECT id FROM t", &max).unwrap_err().code,
             ErrorCode::ResourceLimit
         );
+    }
+
+    /// CR-6: statements within the minimums run in every mode; beyond the
+    /// limits they fail with RESOURCE_LIMIT (on a guarded engine thread).
+    #[test]
+    fn cr6_statement_sizes() {
+        crate::stack::spawn("cr6".into(), crate::stack::QUERY_STACK_BYTES, || {
+            let e = engine();
+            let csv: String = (0..100).map(|i| format!("{i}\n")).collect();
+            load(&e, "n", &format!("x\n{csv}"));
+            let first = |sql: &str, mode: ExecMode| {
+                let opts = QueryOptions {
+                    mode,
+                    ..Default::default()
+                };
+                e.query(sql, &opts)
+                    .map(|r| r.rows[0][0].clone())
+                    .map_err(|err| err.code)
+            };
+            let or: Vec<String> = (0..10_000).map(|i| format!("x = {i}")).collect();
+            let cases = [
+                (
+                    format!("SELECT count(*) FROM n WHERE {}", or.join(" OR ")),
+                    Value::Int(100),
+                ),
+                (
+                    format!("SELECT max(x{}) FROM n", " + 1".repeat(9_999)),
+                    Value::Int(99 + 9_999),
+                ),
+                (
+                    format!(
+                        "SELECT count(*) FROM n WHERE {}x >= 0{}",
+                        "(".repeat(998),
+                        ")".repeat(998)
+                    ),
+                    Value::Int(100),
+                ),
+                (
+                    format!(
+                        "SELECT count(*) FROM n WHERE {}x >= 0",
+                        "NOT NOT ".repeat(499)
+                    ),
+                    Value::Int(100),
+                ),
+                (
+                    format!(
+                        "SELECT max(length({})) FROM n",
+                        vec!["CAST(x AS STRING)"; 5_000].join(" || ")
+                    ),
+                    Value::Int(10_000),
+                ),
+            ];
+            for (sql, want) in &cases {
+                for mode in [ExecMode::Row, ExecMode::Vectorized] {
+                    assert_eq!(first(sql, mode), Ok(want.clone()), "{mode:?}");
+                }
+            }
+            let beyond = [
+                format!("SELECT {}1{}", "(".repeat(5_000), ")".repeat(5_000)),
+                format!("SELECT 1{}", " + 1".repeat(100_000)),
+                format!(
+                    "SELECT count(*) FROM {}",
+                    (0..300_000)
+                        .map(|i| format!("n t{i}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                format!(
+                    "SELECT count(*) FROM n t0 {}",
+                    (1..5_000)
+                        .map(|i| format!("LEFT JOIN n t{i} ON t{}.x = t{i}.x", i - 1))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            ];
+            for sql in &beyond {
+                assert_eq!(first(sql, ExecMode::Row), Err(ErrorCode::ResourceLimit));
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    }
+
+    /// Long inner-join runs are bound as balanced trees with the same result.
+    #[test]
+    fn long_join_chains() {
+        let e = engine();
+        let csv: String = (0..100).map(|i| format!("{i}\n")).collect();
+        load(&e, "n", &format!("x\n{csv}"));
+        let joins: Vec<String> = (1..80)
+            .map(|i| match i {
+                1 => "JOIN n t1 ON t0.x = t1.x AND t1.x < 50".to_string(),
+                2 => "JOIN n t2 ON t1.x = t2.x AND 1 = 1".to_string(),
+                3 => "CROSS JOIN (SELECT 7 AS x) t3".to_string(),
+                _ => format!(
+                    "JOIN n t{i} ON t{}.x = t{i}.x",
+                    if i == 4 { 2 } else { i - 1 }
+                ),
+            })
+            .collect();
+        let sql = format!(
+            "SELECT count(*), sum(t79.x), max(t3.x), count(z.x) FROM n t0 {} \
+             LEFT JOIN n z ON t79.x = z.x + 1",
+            joins.join(" ")
+        );
+        for mode in [ExecMode::Row, ExecMode::Vectorized] {
+            let opts = QueryOptions {
+                mode,
+                ..Default::default()
+            };
+            let r = e.query(&sql, &opts).unwrap().rows;
+            assert_eq!(
+                r,
+                vec![vec![
+                    Value::Int(50),
+                    Value::Int(1225),
+                    Value::Int(7),
+                    Value::Int(49)
+                ]],
+                "{mode:?}"
+            );
+        }
+        // Ambiguity and duplicate names are still detected.
+        let dup = format!("SELECT 1 FROM n t0 {} JOIN n t5 ON 1 = 1", joins.join(" "));
+        let err = e.query(&dup, &QueryOptions::default()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::SemanticError);
+    }
+
+    /// CR-6 §4: the timeout counts from receipt and covers every stage.
+    #[test]
+    fn expired_deadline_is_a_timeout_in_every_stage() {
+        let e = engine();
+        let expired = || QueryControl {
+            deadline: Some(Instant::now() - Duration::from_millis(1)),
+            cancel: None,
+        };
+        let opts = QueryOptions::default();
+        let sql = "SELECT name FROM t WHERE id > 1";
+        let err = e.start_query(sql, &opts, expired()).err().unwrap();
+        assert_eq!(err.code, ErrorCode::Timeout);
+        let err = e.explain(sql, &opts, expired()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Timeout);
+        assert!(e.start_query(sql, &opts, QueryControl::default()).is_ok());
     }
 
     fn load(e: &Engine, table: &str, csv: &str) {
@@ -1101,6 +1317,7 @@ mod tests {
             .explain(
                 "SELECT id FROM t UNION ALL SELECT id FROM u",
                 &QueryOptions::default(),
+                QueryControl::default(),
             )
             .unwrap()
             .to_string_compact();
@@ -1114,6 +1331,7 @@ mod tests {
             .explain(
                 "SELECT t.name FROM t JOIN u ON t.id = u.id WHERE u.tag = 'x'",
                 &QueryOptions::default(),
+                QueryControl::default(),
             )
             .unwrap()
             .to_string_compact();

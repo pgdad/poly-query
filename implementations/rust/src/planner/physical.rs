@@ -260,7 +260,8 @@ pub enum PhysicalPlan {
 }
 
 /// Plans an (optimized) logical query against the catalog snapshot it was
-/// bound to.
+/// bound to. Calls `interrupt::checkpoint` per plan node (run it inside
+/// `interrupt::catching`).
 pub fn plan(logical: &LogicalPlan, catalog: &Catalog, opts: PhysicalOptions) -> PhysicalQuery {
     let execution = Execution::choose(&opts);
     let planner = |execution: Execution| Planner {
@@ -321,6 +322,7 @@ impl Planner<'_> {
     }
 
     fn lower(&self, plan: &LogicalPlan) -> PhysicalPlan {
+        crate::interrupt::checkpoint();
         let boxed = |p: &LogicalPlan| Box::new(self.lower(p));
         match plan {
             LogicalPlan::SingleRow => PhysicalPlan::Values,

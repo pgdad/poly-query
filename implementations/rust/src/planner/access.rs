@@ -4,6 +4,7 @@
 //! selective enough, and row-group skipping from chunk min/max statistics.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
@@ -131,10 +132,14 @@ pub fn analyze(conjunct: &Expr) -> Option<(usize, ColumnPredicate)> {
             negated: false,
         } => {
             let col = column_of(expr)?;
+            // Distinct non-NULL values in list order. (Values of different
+            // numeric types that compare equal may both be kept; index
+            // lookups deduplicate their rows.)
             let mut values = Vec::with_capacity(list.len());
+            let mut seen = HashSet::with_capacity(list.len());
             for item in list {
                 let v = constant(item)?;
-                if !v.is_null() && !values.contains(&v) {
+                if !v.is_null() && seen.insert(v.clone()) {
                     values.push(v);
                 }
             }

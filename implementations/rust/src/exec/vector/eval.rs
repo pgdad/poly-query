@@ -17,7 +17,7 @@ use std::sync::Arc;
 use super::batch::{Batch, Data, Vector, selection};
 use crate::error::{Error, Result};
 use crate::exec::ExecContext;
-use crate::exec::eval::{arithmetic, compare3, eval as eval_row, like_match};
+use crate::exec::eval::{Chain, arithmetic, compare3, eval as eval_row, like_match};
 use crate::exec::functions;
 use crate::exec::hash::FastSet;
 use crate::exec::subquery;
@@ -159,6 +159,7 @@ fn bool_vector(values: Vec<bool>, valid: Option<Vec<bool>>) -> Vector {
 }
 
 fn eval_owned(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
+    crate::stack::check()?;
     let n = b.len;
     match e {
         Expr::Literal { value, .. } => Ok(Vector::broadcast(value, n)),
@@ -170,8 +171,13 @@ fn eval_owned(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
             let (t, f) = truth(&v);
             Ok(from_truth(f, t))
         }
-        Expr::And(l, r) => and_or(true, l, r, b, ctx),
-        Expr::Or(l, r) => and_or(false, l, r, b, ctx),
+        Expr::And(l, r) | Expr::Or(l, r) => {
+            if Chain::Logic.is_long(l) {
+                return logic_chain(e, b, ctx);
+            }
+            let lv = eval_cow(l, b, ctx)?;
+            and_or(matches!(e, Expr::And(..)), &lv, r, b, ctx)
+        }
         Expr::IsNull { expr, negated } => {
             let v = eval_cow(expr, b, ctx)?;
             let values = match v.validity() {
@@ -206,6 +212,7 @@ fn eval_owned(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
                 from_truth(t, f)
             })
         }
+        Expr::Arith { left, .. } if Chain::Arith.is_long(left) => arith_chain(e, b, ctx),
         Expr::Arith {
             op,
             kind,
@@ -257,6 +264,7 @@ fn eval_owned(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
                 None => elementwise_with(e, vec![Operand::Vector(v)], b, ctx),
             }
         }
+        Expr::Concat(l, _) if Chain::Concat.is_long(l) => concat_chain(e, b, ctx),
         Expr::Function { .. } | Expr::Concat(..) => elementwise(e, b, ctx),
         // Uncorrelated subqueries run once (memoized); their result is
         // broadcast, or probed per row for IN.
@@ -323,12 +331,12 @@ fn from_truth(t: Vec<bool>, f: Vec<bool>) -> Vector {
     bool_vector(t, valid)
 }
 
-/// Three-valued AND (`is_and`) / OR. The right operand is evaluated only on
-/// the rows the left operand does not decide (unless it cannot fail).
-fn and_or(is_and: bool, l: &Expr, r: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
+/// Three-valued AND (`is_and`) / OR of the evaluated left operand `lv` and
+/// `r`. The right operand is evaluated only on the rows the left operand
+/// does not decide (unless it cannot fail).
+fn and_or(is_and: bool, lv: &Vector, r: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
     let n = b.len;
-    let lv = eval_cow(l, b, ctx)?;
-    let (lt, lf) = truth(&lv);
+    let (lt, lf) = truth(lv);
     // Rows decided by the left operand alone.
     let decided = if is_and { &lf } else { &lt };
     let undecided: Vec<bool> = decided.iter().map(|&d| !d).collect();
@@ -360,6 +368,82 @@ fn and_or(is_and: bool, l: &Expr, r: &Expr, b: &Batch, ctx: &ExecContext) -> Res
         )
     };
     Ok(from_truth(t, f))
+}
+
+// ------------------------------------------------------------ long chains
+
+// Long left-deep operator chains are evaluated link by link (see
+// `exec::eval::Chain`), with the same semantics as the recursive evaluation.
+
+/// Links (each over a whole batch) between two checks of the timeout.
+const VECTOR_CHAIN_INTERRUPT_LINKS: usize = 64;
+
+fn logic_chain(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
+    let (links, first) = Chain::Logic.links(e);
+    let mut acc = eval(first, b, ctx)?;
+    for (k, link) in links.into_iter().enumerate() {
+        if k % VECTOR_CHAIN_INTERRUPT_LINKS == 0 {
+            ctx.check_interrupt()?;
+        }
+        let (Expr::And(_, r) | Expr::Or(_, r)) = link else {
+            unreachable!("logic chain link");
+        };
+        acc = and_or(matches!(link, Expr::And(..)), &acc, r, b, ctx)?;
+    }
+    Ok(acc)
+}
+
+fn arith_chain(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
+    let (links, first) = Chain::Arith.links(e);
+    let mut acc = operand(first, b, ctx)?;
+    for (k, link) in links.into_iter().enumerate() {
+        if k % VECTOR_CHAIN_INTERRUPT_LINKS == 0 {
+            ctx.check_interrupt()?;
+        }
+        let Expr::Arith {
+            op, kind, right, ..
+        } = link
+        else {
+            unreachable!("arithmetic chain link");
+        };
+        let r = operand(right, b, ctx)?;
+        acc = Operand::Vector(Cow::Owned(arith(*op, *kind, &acc, &r, b.len)?));
+    }
+    Ok(match acc {
+        Operand::Vector(v) => v.into_owned(),
+        Operand::Scalar(v) => Vector::broadcast(&v, b.len),
+    })
+}
+
+/// `||` chain: every row's result is appended into one buffer.
+fn concat_chain(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
+    let (links, first) = Chain::Concat.links(e);
+    let mut out: Vec<Option<String>> = vec![Some(String::new()); b.len];
+    let mut append = |o: Operand| {
+        for (i, slot) in out.iter_mut().enumerate() {
+            if let Some(buf) = slot {
+                match o.value(i) {
+                    Value::Str(s) => buf.push_str(&s),
+                    _ => *slot = None,
+                }
+            }
+        }
+    };
+    append(operand(first, b, ctx)?);
+    for (k, link) in links.into_iter().enumerate() {
+        if k % VECTOR_CHAIN_INTERRUPT_LINKS == 0 {
+            ctx.check_interrupt()?;
+        }
+        let Expr::Concat(_, r) = link else {
+            unreachable!("concat chain link");
+        };
+        append(operand(r, b, ctx)?);
+    }
+    Ok(Vector::from_values(
+        out.into_iter()
+            .map(|s| s.map_or(Value::Null, |s| Value::str(&s)))
+            .collect(),
+    ))
 }
 
 // ------------------------------------------------------------ comparison
@@ -1118,13 +1202,7 @@ fn elementwise(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
 /// [`elementwise`] with the children of `e` already evaluated (`ops`).
 fn elementwise_with(e: &Expr, ops: Vec<Operand>, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
     let n = b.len;
-    let mut template = e.clone();
-    for (k, c) in template.children_mut().into_iter().enumerate() {
-        *c = Expr::Column {
-            index: k,
-            ty: c.data_type(),
-        };
-    }
+    let template = e.template();
     let mut row = vec![Value::Null; ops.len()];
     let vectors: Vec<usize> = (0..ops.len())
         .filter(|&k| matches!(ops[k], Operand::Vector(_)))

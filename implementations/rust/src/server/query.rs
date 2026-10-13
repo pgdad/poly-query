@@ -21,6 +21,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::json::Json;
 use crate::log;
 use crate::protocol::{catch_panic, columns_json, error_response, query_body, respond, write_row};
+use crate::stack;
 use crate::types::DataType;
 
 /// Streamed rows per `rows` line (protocol limit: 10,000).
@@ -75,10 +76,11 @@ pub fn deadline(
 /// Starts the execution thread; events arrive on the returned receiver.
 pub fn spawn(job: Job, ticket: Ticket) -> std::io::Result<Receiver<Event>> {
     let (tx, rx) = mpsc::sync_channel(CHANNEL_LINES);
-    std::thread::Builder::new()
-        .name(format!("query-{}", job.handle.id))
-        .stack_size(crate::protocol::WORKER_STACK_BYTES)
-        .spawn(move || run(job, ticket, tx))?;
+    stack::spawn(
+        format!("query-{}", job.handle.id),
+        stack::QUERY_STACK_BYTES,
+        move || run(job, ticket, tx),
+    )?;
     Ok(rx)
 }
 
