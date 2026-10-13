@@ -1446,13 +1446,21 @@ The limits are constants in `src/sql/limits.rs`.
   (per expression and query), CTE reference counting and the optimizer
   (between rules and subquery plans) poll it, and it is checked between
   the stages. `poll` reads the clock every 256th call.
+* Optimizer rules and physical planning are plan rewrites without error
+  results; they call `interrupt::checkpoint()` per plan node, which on
+  expiry (or near stack exhaustion) unwinds with the error — via
+  `resume_unwind`, without the panic hook — to `interrupt::catching`
+  around each rule and around physical planning, where it becomes the
+  stage's `TIMEOUT` / `RESOURCE_LIMIT`. Predicate pushdown over a chain of
+  10,000 filtering CTEs (quadratic, 7 s) thus answers `TIMEOUT` 20 ms after
+  a 500 ms deadline.
 * Execution observes the deadline through the `ExecContext` as before;
   long operator chains additionally check it every 4,096 links (row
   mode) / 64 links (vectorized, per batch). A result completed after the
   deadline is reported as `TIMEOUT`.
-* Every stage is now (near) linear in the statement size, so even
-  statements at the engine's limits answer within a fraction of a second
-  of the deadline (measured: at most 0.5 s late with `timeout_ms` 200 and
+* Nearly every stage is now (near) linear in the statement size, and the
+  rest observes the deadline, so even statements at the engine's limits
+  answer within a fraction of a second of the deadline (measured: at most 0.5 s late with `timeout_ms` 200 and
   500, on 100 and 200,000 rows, for every case of `bench/limits.py`).
   The `explain` op observes `timeout_ms` too.
 
@@ -1508,7 +1516,9 @@ The limits are constants in `src/sql/limits.rs`.
   every pass iterative.
 * The interrupt is ambient (thread-local) during parsing and planning
   instead of a parameter of every planner function; it is installed and
-  removed by `start_query` / `explain` only.
+  removed by `start_query` / `explain` only. Rewrites that cannot fail
+  are interrupted by unwinding (`checkpoint` / `catching`) rather than by
+  changing every rule to return `Result`.
 
 ### Verification
 
@@ -1524,10 +1534,27 @@ The limits are constants in `src/sql/limits.rs`.
   every clause, `IN` lists, `CASE` branches, `COALESCE`/`CONCAT` arguments,
   wide select lists, `GROUP BY`/`ORDER BY` lists, aggregates, join chains,
   `UNION ALL`, 1–16 MiB texts, comments, whitespace) in every mode.
+* A differential test of the iterative chain evaluation (900 random
+  `AND`/`OR`, arithmetic and `||` chains of 17–100 links over NULLs and
+  division-by-zero errors, compared with the same expressions forced onto
+  the recursive path, in row, vectorized and parallel mode): identical
+  results and errors. `bench/difftest.py --queries 500`: 0 mismatches.
 * Conformance suite (default, `--modes`, `--transport http`), the HTTP
-  concurrency suite and `make test` (including new unit tests for the
-  depth rules, limits, the stack guard, the interrupt and balanced join
-  trees).
+  concurrency suite, the other robustness probes (unchanged results) and
+  `make test` (new unit tests for the depth rules, limits, the stack guard,
+  the interrupt, balanced join trees and engine-level CR-6 cases).
+* Performance (`bench/bench.py`, 1M rows): vectorized and parallel
+  timings unchanged; row mode executes about 2 % more instructions (the
+  stack guard in the row evaluator; measured with callgrind, the
+  wall-clock differences are within the host's noise).
+
+```bash
+python3 tests/regression/robustness_probe.py --engine implementations/rust/bin/polyquery \
+    --only expression_limits --require-pass
+python3 implementations/rust/bench/limits.py --engine implementations/rust/bin/polyquery \
+    [--groups min,beyond,edge,timeout] [--timeout-ms 200] [--rows 100] [--filter NAME]
+POLYQUERY_MORSEL_ROWS=1 python3 implementations/rust/bench/limits.py ...   # force parallel workers
+```
 
 ## Known limitations
 
@@ -1553,5 +1580,7 @@ The limits are constants in `src/sql/limits.rs`.
   the plan size limit, fail with `RESOURCE_LIMIT` even though such a
   statement can be within the CR-6 minimums (CTEs are bound by copying,
   not materialized). Binding repeated aggregates and matching ORDER BY
-  items against the select list compare expressions pairwise (about 2 s
-  for 25,000 distinct aggregates; the deadline is observed).
+  items against the select list compare expressions pairwise (0.5 s for
+  12,000 distinct aggregates, 2 s for 25,000), and predicate pushdown is
+  quadratic in the length of a chain of filtering CTEs / derived tables
+  (7 s for 10,000); the deadline is observed in all of them.

@@ -222,6 +222,10 @@ def edge_cases() -> list:
             f"c{i} AS (SELECT * FROM c{i - 1})" for i in range(1, 20000)) + " SELECT count(*) FROM c19999", 100),
         ("union_star_20000", "SELECT count(*) FROM (" + " UNION ALL ".join("SELECT * FROM n" for _ in range(20_000))
          + ") t", 2_000_000),
+        ("const_concat_99999", "SELECT length(" + " || ".join("'ab'" for _ in range(99_999)) + ")", 199_998),
+        ("const_sum_99999", "SELECT 0" + " + 1" * 99_998, 99_998),
+        ("const_or_49999", "SELECT count(*) FROM n WHERE " + " OR ".join(f"{i} = {i + 1}" for i in range(49_999)), 0),
+        ("const_and_cols_49999", where(" AND ".join(f"(x >= 0 OR {i} = 1)" for i in range(24_999))), 100),
         ("aggs_25000", "SELECT " + ", ".join(f"sum(x + {i})" for i in range(25_000)) + " FROM n", 4950),
         ("aggs_same_25000", "SELECT " + ", ".join("sum(x)" for _ in range(25_000)) + " FROM n", 4950),
         ("group_by_20000", "SELECT count(*) FROM (SELECT x FROM n GROUP BY x, "
