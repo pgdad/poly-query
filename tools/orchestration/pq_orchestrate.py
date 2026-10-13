@@ -85,7 +85,10 @@ PHASE_TASKS = {"phase1", "phase2", "phase3", "phase4", "phase5"}
 TASK_EXTRA_PATHS = {"optimize-latency": ["benchmarks/workloads"], "jvm-tuning": ["benchmarks/workloads"],
                     "change-expression-limits": ["tests/regression/robustness_probe.py"],
                     "fix-large-data": ["tests/regression/large_data_probe.py", "tests/regression/robustness_probe.py",
-                                       "benchmarks/workloads"]}
+                                       "benchmarks/workloads"],
+                    "optimize-scaling": ["benchmarks/workloads", "benchmarks/harness/bench.py",
+                                         "benchmarks/harness/startup_probe.py",
+                                         "tests/regression/robustness_probe.py"]}
 
 TRUSTED_PATHS = ["tests", "spec"]
 # Inputs a task's validation reads beyond tests/ and spec/: taken from the repository, never the workspace.
@@ -1021,7 +1024,7 @@ def run_native_arm(kernels_dir: Path, out_dir: Path) -> dict:
                                                          "sve_default_vector_length_bytes", "governor")}}
 
 
-CAPS_UNCHANGED_TASKS = {"refactor-plan-separation", "debug-mutant", "optimize-latency", "jvm-tuning"}
+CAPS_UNCHANGED_TASKS = {"refactor-plan-separation", "debug-mutant", "optimize-latency", "jvm-tuning", "optimize-scaling"}
 TASK_REQUIRED_CAPS = {"change-union-all": "change.union_all", "change-decimal38": "change.decimal38",
                       "change-expression-limits": "change.expression_limits",
                       "native": "native.kernels"}
