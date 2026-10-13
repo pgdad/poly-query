@@ -977,6 +977,150 @@ mod tests {
         );
     }
 
+    /// CR-6: statements within the minimums run in every mode; beyond the
+    /// limits they fail with RESOURCE_LIMIT (on a guarded engine thread).
+    #[test]
+    fn cr6_statement_sizes() {
+        crate::stack::spawn("cr6".into(), crate::stack::QUERY_STACK_BYTES, || {
+            let e = engine();
+            let csv: String = (0..100).map(|i| format!("{i}\n")).collect();
+            load(&e, "n", &format!("x\n{csv}"));
+            let first = |sql: &str, mode: ExecMode| {
+                let opts = QueryOptions {
+                    mode,
+                    ..Default::default()
+                };
+                e.query(sql, &opts)
+                    .map(|r| r.rows[0][0].clone())
+                    .map_err(|err| err.code)
+            };
+            let or: Vec<String> = (0..10_000).map(|i| format!("x = {i}")).collect();
+            let cases = [
+                (
+                    format!("SELECT count(*) FROM n WHERE {}", or.join(" OR ")),
+                    Value::Int(100),
+                ),
+                (
+                    format!("SELECT max(x{}) FROM n", " + 1".repeat(9_999)),
+                    Value::Int(99 + 9_999),
+                ),
+                (
+                    format!(
+                        "SELECT count(*) FROM n WHERE {}x >= 0{}",
+                        "(".repeat(998),
+                        ")".repeat(998)
+                    ),
+                    Value::Int(100),
+                ),
+                (
+                    format!(
+                        "SELECT count(*) FROM n WHERE {}x >= 0",
+                        "NOT NOT ".repeat(499)
+                    ),
+                    Value::Int(100),
+                ),
+                (
+                    format!(
+                        "SELECT max(length({})) FROM n",
+                        vec!["CAST(x AS STRING)"; 5_000].join(" || ")
+                    ),
+                    Value::Int(10_000),
+                ),
+            ];
+            for (sql, want) in &cases {
+                for mode in [ExecMode::Row, ExecMode::Vectorized] {
+                    assert_eq!(first(sql, mode), Ok(want.clone()), "{mode:?}");
+                }
+            }
+            let beyond = [
+                format!("SELECT {}1{}", "(".repeat(5_000), ")".repeat(5_000)),
+                format!("SELECT 1{}", " + 1".repeat(100_000)),
+                format!(
+                    "SELECT count(*) FROM {}",
+                    (0..300_000)
+                        .map(|i| format!("n t{i}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                format!(
+                    "SELECT count(*) FROM n t0 {}",
+                    (1..5_000)
+                        .map(|i| format!("LEFT JOIN n t{i} ON t{}.x = t{i}.x", i - 1))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            ];
+            for sql in &beyond {
+                assert_eq!(first(sql, ExecMode::Row), Err(ErrorCode::ResourceLimit));
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    }
+
+    /// Long inner-join runs are bound as balanced trees with the same result.
+    #[test]
+    fn long_join_chains() {
+        let e = engine();
+        let csv: String = (0..100).map(|i| format!("{i}\n")).collect();
+        load(&e, "n", &format!("x\n{csv}"));
+        let joins: Vec<String> = (1..80)
+            .map(|i| match i {
+                1 => "JOIN n t1 ON t0.x = t1.x AND t1.x < 50".to_string(),
+                2 => "JOIN n t2 ON t1.x = t2.x AND 1 = 1".to_string(),
+                3 => "CROSS JOIN (SELECT 7 AS x) t3".to_string(),
+                _ => format!(
+                    "JOIN n t{i} ON t{}.x = t{i}.x",
+                    if i == 4 { 2 } else { i - 1 }
+                ),
+            })
+            .collect();
+        let sql = format!(
+            "SELECT count(*), sum(t79.x), max(t3.x), count(z.x) FROM n t0 {} \
+             LEFT JOIN n z ON t79.x = z.x + 1",
+            joins.join(" ")
+        );
+        for mode in [ExecMode::Row, ExecMode::Vectorized] {
+            let opts = QueryOptions {
+                mode,
+                ..Default::default()
+            };
+            let r = e.query(&sql, &opts).unwrap().rows;
+            assert_eq!(
+                r,
+                vec![vec![
+                    Value::Int(50),
+                    Value::Int(1225),
+                    Value::Int(7),
+                    Value::Int(49)
+                ]],
+                "{mode:?}"
+            );
+        }
+        // Ambiguity and duplicate names are still detected.
+        let dup = format!("SELECT 1 FROM n t0 {} JOIN n t5 ON 1 = 1", joins.join(" "));
+        let err = e.query(&dup, &QueryOptions::default()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::SemanticError);
+    }
+
+    /// CR-6 §4: the timeout counts from receipt and covers every stage.
+    #[test]
+    fn expired_deadline_is_a_timeout_in_every_stage() {
+        let e = engine();
+        let expired = || QueryControl {
+            deadline: Some(Instant::now() - Duration::from_millis(1)),
+            cancel: None,
+        };
+        let opts = QueryOptions::default();
+        let sql = "SELECT name FROM t WHERE id > 1";
+        let err = e.start_query(sql, &opts, expired()).err().unwrap();
+        assert_eq!(err.code, ErrorCode::Timeout);
+        let err = e.explain(sql, &opts, expired()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Timeout);
+        assert!(e.start_query(sql, &opts, QueryControl::default()).is_ok());
+    }
+
     fn load(e: &Engine, table: &str, csv: &str) {
         e.load(LoadRequest {
             table: table.into(),

@@ -116,6 +116,13 @@ def minimum_cases() -> list:
         ("join_chain_60", "SELECT count(*) FROM n t0 " + " ".join(f"JOIN n t{i} ON t{i - 1}.x = t{i}.x"
                                                                  for i in range(1, 60)), 100),
         ("text_1mib", where(f"'{lit}' = '{lit}'"), 100),
+        ("aggs_12000", "SELECT " + ", ".join(f"sum(x + {i})" for i in range(12_000)) + " FROM n", 4950),
+        ("group_select_6000", "SELECT count(*) FROM (SELECT " + ", ".join(f"x + {i}" for i in range(6_000))
+         + " FROM n GROUP BY " + ", ".join(f"x + {i}" for i in range(6_000)) + ") t", 100),
+        ("order_select_6000", "SELECT " + ", ".join(f"x + {i}" for i in range(6_000)) + " FROM n ORDER BY "
+         + ", ".join(f"x + {i}" for i in range(6_000)) + " LIMIT 1", 0),
+        ("order_hidden_12000", "SELECT x FROM n ORDER BY " + ", ".join(f"x + {i}" for i in range(12_000))
+         + " LIMIT 1", 0),
         ("comment_1mib", "SELECT count(*) /* " + "c" * 1_040_000 + " */ FROM n", 100),
         ("ws_1mib", "SELECT count(*)" + " " * 1_040_000 + "FROM n", 100),
         ("explain_or_10000", "EXPLAIN SELECT count(*) FROM n WHERE " + " OR ".join(f"x = {i}" for i in range(10_000)),
