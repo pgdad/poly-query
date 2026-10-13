@@ -28,5 +28,6 @@ pub mod planner;
 pub mod protocol;
 pub mod server;
 pub mod sql;
+pub mod stack;
 pub mod storage;
 pub mod types;

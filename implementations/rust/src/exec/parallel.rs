@@ -49,10 +49,6 @@ use crate::protocol::catch_panic;
 use crate::storage::Table;
 use crate::types::DataType;
 
-/// Stack size of parallel worker threads (expression evaluation recurses
-/// over the expression tree, whose depth the parser bounds).
-pub const PARALLEL_STACK_BYTES: usize = 64 * 1024 * 1024;
-
 /// Default rows per morsel.
 const DEFAULT_MORSEL_ROWS: usize = 8 * BATCH_SIZE;
 
@@ -634,8 +630,10 @@ impl BatchOperator for ParallelAggregateOp {
         ctx.check_interrupt()?;
         let total: usize = partials.iter().map(Aggregator::groups).sum();
         // Merging is worth parallelizing once there are about as many
-        // groups as rows in a morsel.
-        let out = if partials.len() > 1 && total >= self.morsel_rows {
+        // groups as rows in a morsel. A global aggregation (no keys) has
+        // one group and is always merged serially: every partition would
+        // otherwise produce its own row.
+        let out = if partials.len() > 1 && !self.group_by.is_empty() && total >= self.morsel_rows {
             merge_partitioned(partials, &self.seed, ctx)?
         } else {
             let merged =

@@ -20,9 +20,6 @@ pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL_VERSION: i64 = 1;
 pub const SPEC_VERSION: &str = "1.0.0";
 
-/// Stack size of threads that process requests (deep expressions recurse).
-pub const WORKER_STACK_BYTES: usize = 256 * 1024 * 1024;
-
 /// Capability strings claimed by this engine (phases/README.md).
 pub const CAPABILITIES: &[&str] = &[
     "phase1",
